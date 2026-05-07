@@ -1,0 +1,2178 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent アーキテクチャ図書 v2.0</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+    --aws-orange: #FF9900;
+    --aws-blue: #232F3E;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc { list-style: none; }
+  .toc li { margin-bottom: 4px; }
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+  .toc a:hover { color: var(--accent); }
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main { padding: 64px 64px 96px; max-width: 920px; }
+
+  .doc-header { border-bottom: 2px solid var(--text); padding-bottom: 24px; margin-bottom: 48px; }
+  .doc-type { font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 12px; font-weight: 600; }
+  h1 { font-size: 32px; line-height: 1.3; font-weight: 700; margin-bottom: 16px; letter-spacing: -0.01em; }
+  .doc-meta-table { margin-top: 24px; font-size: 13px; }
+  .doc-meta-table td { padding: 4px 16px 4px 0; color: var(--text-muted); }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 { font-size: 14px; font-weight: 700; margin: 24px 0 8px; color: var(--text); }
+  p { margin-bottom: 14px; }
+  ul, ol { margin: 12px 0 16px 24px; }
+  li { margin-bottom: 6px; }
+  ul.unstyled { list-style: none; margin-left: 0; }
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+  table.kv td:first-child { font-weight: 600; width: 30%; color: var(--text-muted); }
+
+  dl.terms { margin: 16px 0 24px; }
+  dl.terms dt { font-weight: 700; margin-top: 12px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner { background: #f0fdf4; border-left-color: #16a34a; }
+  .note.beginner .label { color: #16a34a; }
+  .note.aws { background: #fff7ed; border-left-color: var(--aws-orange); }
+  .note.aws .label { color: #c2410c; }
+
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num { font-weight: 700; color: var(--text-muted); margin-right: 8px; }
+
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  .appendix { border-top: 2px solid var(--text); margin-top: 64px; padding-top: 32px; }
+
+  /* ヒーロー */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small { font-size: 16px; color: var(--text-muted); font-weight: 600; margin-left: 2px; }
+  .hero-stat-label { font-size: 11px; color: var(--text-muted); margin-top: 6px; line-height: 1.4; }
+
+  /* 3層スタック */
+  .layer-stack { margin: 20px 0 8px; }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer.l-aws { background: linear-gradient(135deg,#fff7ed,#fed7aa); border-color: var(--aws-orange); }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items { display: flex; flex-wrap: wrap; gap: 8px; }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* 機能カード */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon { font-size: 28px; margin-bottom: 6px; }
+  .feature-card-v2 .fc-num { font-size: 11px; color: var(--text-muted); font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 4px; }
+  .feature-card-v2 .fc-name { font-size: 16px; font-weight: 700; margin-bottom: 8px; line-height: 1.4; }
+  .feature-card-v2 .fc-desc { font-size: 13px; line-height: 1.6; color: var(--text-muted); margin-bottom: 8px; }
+  .feature-card-v2 .fc-meta { font-size: 11px; color: var(--text-subtle); border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
+
+  /* HTML/CSS Diagram */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; align-items: stretch; }
+  .dia-arrow { text-align: center; font-size: 22px; color: var(--text-subtle); padding: 4px; line-height: 1; }
+  .dia-arrow-label { text-align: center; font-size: 11px; color: var(--text-subtle); padding: 6px; font-weight: 600; letter-spacing: 0.05em; }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-box.dia-aws { background: #fff7ed; border-color: var(--aws-orange); }
+  .dia-box.dia-data { background: #f0f9ff; border-color: #0284c7; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    margin-bottom: 8px;
+  }
+  .dia-container.aws { border-color: var(--aws-orange); background: #fff7ed; }
+  .dia-container.gcp { border-color: #4285F4; background: #eff6ff; }
+  .dia-container.slack { border-color: var(--slack-purple); background: #faf5ff; }
+  .dia-container.private { border-color: #16a34a; background: #f0fdf4; }
+  .dia-container.public { border-color: #0284c7; background: #f0f9ff; }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+  .dot-aws { background: var(--aws-orange); }
+  .dot-data { background: #0284c7; }
+
+  /* データソース */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
+  /* シーケンステーブル */
+  .seq-table { width: 100%; border-collapse: collapse; margin: 12px 0 24px; font-size: 12.5px; }
+  .seq-table th, .seq-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .seq-table th {
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .seq-table .seq-step {
+    width: 40px;
+    text-align: center;
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-subtle);
+    font-weight: 700;
+  }
+  .seq-table .seq-actor { width: 130px; font-weight: 600; }
+  .seq-table .seq-arrow { width: 30px; text-align: center; color: var(--text-subtle); font-size: 14px; }
+  .seq-table .seq-target { width: 150px; font-weight: 600; color: var(--text-muted); }
+  .seq-table .seq-actor.a-user { color: var(--user-color); }
+  .seq-table .seq-actor.a-bot { color: var(--slack-bot); }
+  .seq-table .seq-actor.a-aws { color: #c2410c; }
+  .seq-table .seq-actor.a-ext { color: #ca8a04; }
+
+  /* C4 Context box */
+  .c4-context {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+    margin: 20px 0;
+  }
+  .c4-actor {
+    border: 2px solid var(--user-color);
+    background: #eef2ff;
+    border-radius: 50%;
+    padding: 16px;
+    text-align: center;
+    aspect-ratio: 1.5 / 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+  }
+  .c4-system {
+    border: 3px solid var(--accent);
+    background: #fff;
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+  }
+  .c4-external {
+    border: 2px dashed #ca8a04;
+    background: #fef9c3;
+    border-radius: 8px;
+    padding: 14px;
+    text-align: center;
+  }
+  .c4-actor .c4-icon, .c4-system .c4-icon, .c4-external .c4-icon { font-size: 26px; margin-bottom: 6px; line-height: 1; }
+  .c4-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .c4-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+  .c4-tag { font-size: 9px; color: var(--text-subtle); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 700; margin-bottom: 4px; }
+
+  /* AWS box small */
+  .aws-svc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin: 12px 0 8px;
+  }
+  .aws-svc {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--aws-orange);
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-size: 12px;
+  }
+  .aws-svc .svc-name { font-weight: 700; margin-bottom: 4px; font-size: 13px; }
+  .aws-svc .svc-role { color: var(--text-muted); line-height: 1.5; }
+  .aws-svc .svc-tag {
+    display: inline-block;
+    font-size: 9px;
+    background: var(--aws-orange);
+    color: white;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+  }
+
+  /* pgvector schema */
+  .schema-table {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin: 12px 0;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 12px;
+  }
+  .schema-table .tbl-name {
+    font-weight: 700;
+    color: #0284c7;
+    font-size: 14px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+  }
+  .schema-table .col-row {
+    display: grid;
+    grid-template-columns: 30px 180px 100px 1fr;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 11.5px;
+    line-height: 1.4;
+  }
+  .schema-table .col-row.header { color: var(--text-subtle); font-weight: 700; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  .schema-table .col-pk { color: var(--accent); }
+  .schema-table .col-fk { color: var(--user-color); }
+  .schema-table .col-vec { color: #16a34a; font-weight: 700; }
+  .schema-table .col-name { font-weight: 600; }
+  .schema-table .col-type { color: var(--text-muted); }
+  .schema-table .col-desc { color: var(--text-muted); font-family: "Noto Sans JP", sans-serif; }
+
+  /* SLO/SLI grid */
+  .slo-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 12px 0;
+  }
+  .slo-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-top: 3px solid #16a34a;
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .slo-card .slo-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+  .slo-card .slo-target {
+    font-size: 24px;
+    font-weight: 800;
+    color: #16a34a;
+    line-height: 1;
+    margin: 6px 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .slo-card .slo-target small { font-size: 14px; color: var(--text-muted); margin-left: 2px; font-weight: 600; }
+  .slo-card .slo-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+  .slo-card.slo-low { border-top-color: var(--accent); }
+  .slo-card.slo-low .slo-target { color: var(--accent); }
+  .slo-card.slo-mid { border-top-color: #ca8a04; }
+  .slo-card.slo-mid .slo-target { color: #ca8a04; }
+
+  /* Pill */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+  .pill.p-c1 { background: #ddd6fe; color: #5b21b6; }
+  .pill.p-c2 { background: #bfdbfe; color: #1e40af; }
+  .pill.p-c3 { background: #bbf7d0; color: #15803d; }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { position: relative; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+    main { padding: 32px 24px 64px; }
+    .c4-context { grid-template-columns: 1fr; }
+    .dia-flow { flex-wrap: wrap; }
+  }
+
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .diagram, .dia-container { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+  }
+
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>アーキテクチャ図書</div>
+  <div class="sidebar-doc-meta">
+    Version 2.0<br>
+    2026年5月7日（C4 model 準拠 / 5機能・5データ層・4基盤）
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>本書について</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>目的</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>対象読者</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>記述レベル（C4 model）</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-2"><span class="num">2.</span>アーキテクチャ全体像</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>コンテキスト図（C1）</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>コンテナ図（C2）</a></li>
+    <li class="level-2"><a href="#sec-2-3"><span class="num">2.3</span>3層俯瞰（機能/データ/基盤）</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>AWS デプロイメントトポロジー</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>VPC 設計</a></li>
+    <li class="level-2"><a href="#sec-3-2"><span class="num">3.2</span>主要 AWS サービス</a></li>
+    <li class="level-2"><a href="#sec-3-3"><span class="num">3.3</span>IAM 設計</a></li>
+    <li class="level-2"><a href="#sec-3-4"><span class="num">3.4</span>ネットワーク経路</a></li>
+
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>共通基盤コンポーネント詳細</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>Claude Agent SDK Orchestrator</a></li>
+    <li class="level-2"><a href="#sec-4-2"><span class="num">4.2</span>Gmail OAuth フロー</a></li>
+    <li class="level-2"><a href="#sec-4-3"><span class="num">4.3</span>Slack Bolt</a></li>
+    <li class="level-2"><a href="#sec-4-4"><span class="num">4.4</span>pgvector スキーマ</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-5"><span class="num">5.</span>機能別アーキテクチャ</a></li>
+    <li class="level-2"><a href="#sec-5-1"><span class="num">5.1</span>機能④ 動画 URL 分析</a></li>
+    <li class="level-2"><a href="#sec-5-2"><span class="num">5.2</span>機能② Mail ワークフロー</a></li>
+    <li class="level-2"><a href="#sec-5-3"><span class="num">5.3</span>機能③ 提案コンテンツ生成</a></li>
+    <li class="level-2"><a href="#sec-5-4"><span class="num">5.4</span>機能① Slack 自動サジェスト</a></li>
+    <li class="level-2"><a href="#sec-5-5"><span class="num">5.5</span>機能⑤ 営業進捗サマリー</a></li>
+
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>データフロー</a></li>
+    <li class="level-1"><a href="#sec-7"><span class="num">7.</span>外部システム連携</a></li>
+    <li class="level-2"><a href="#sec-7-1"><span class="num">7.1</span>Gemini Deep Research</a></li>
+    <li class="level-2"><a href="#sec-7-2"><span class="num">7.2</span>動画分析データ層</a></li>
+    <li class="level-2"><a href="#sec-7-3"><span class="num">7.3</span>Google Workspace</a></li>
+    <li class="level-2"><a href="#sec-7-4"><span class="num">7.4</span>Slack Web API</a></li>
+
+    <li class="level-1"><a href="#sec-8"><span class="num">8.</span>監視・運用アーキテクチャ</a></li>
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>セキュリティアーキテクチャ</a></li>
+    <li class="level-1"><a href="#sec-10"><span class="num">10.</span>技術スタック一覧</a></li>
+    <li class="level-1"><a href="#sec-11"><span class="num">11.</span>拡張性とロードマップ</a></li>
+    <li class="level-1"><a href="#sec-12"><span class="num">12.</span>用語集</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">アーキテクチャ図書 v2.0</div>
+  <h1>TeamAgent システムアーキテクチャ<br>5機能 × 5データ層 × 4基盤 × AWS 構成</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>システムアーキテクチャ図書（C4 model: C1〜C3 レベル）</td></tr>
+    <tr><td>バージョン</td><td>2.0（仕様書 v2.0 / 実装計画書 v2.0 と整合）</td></tr>
+    <tr><td>作成日</td><td>2026年5月7日</td></tr>
+    <tr><td>位置付け</td><td>v2.0 仕様書「第5章 システム構成」を C4 レベルで詳細化したもの。実装計画書のコスト見積（db.r7g.large, Lambda, Fargate）と整合。Phase 1〜4 を通じた構築プロセスにおける設計指針として機能する。</td></tr>
+    <tr><td>関連文書</td><td>仕様書 (teamagent_overview_v2.0.html) / 実装計画書 (teamagent_implementation_plan_v2.0.html)</td></tr>
+  </table>
+</header>
+
+<!-- ヒーロー -->
+<div class="hero">
+  <div class="hero-tagline">Architecture at a Glance</div>
+  <div class="hero-headline">AWS 上に構築する Slack-First の AI エージェント基盤<br>16名 × 5機能 × 6データ層を支える疎結合構成</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">3<small>層</small></div>
+      <div class="hero-stat-label">機能 × データ × 基盤の論理レイヤー</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">9<small>個</small></div>
+      <div class="hero-stat-label">主要 AWS サービス（Lambda/Fargate/RDS/EventBridge 他）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">4<small>経路</small></div>
+      <div class="hero-stat-label">Pattern Bravo+ Gemini DR 冗長化</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">db.r7g<small>.large</small></div>
+      <div class="hero-stat-label">RDS PostgreSQL + pgvector</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">99.5<small>%</small></div>
+      <div class="hero-stat-label">SLO 月次稼働率（営業時間帯）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 1. 本書について ========== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>本書について</h2>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>目的</h3>
+<p>
+本書は TeamAgent v2.0 のシステムアーキテクチャを <strong>C4 model（Context / Container / Component / Code）</strong> の C1〜C3 レベルで記述する設計図書である。仕様書 v2.0 が「何を作るか（What）」を、実装計画書 v2.0 が「いつ・いくらで作るか（When / How much）」を扱うのに対し、本書は <strong>「どう構築するか（How）」</strong> を担当する。AWS 上の物理配置・コンポーネント分割・データフロー・運用設計までを一貫して示す。
+</p>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>対象読者</h3>
+<table class="kv">
+  <tr><td>FDE / 実装担当</td><td>第3〜5章（AWS / 共通基盤 / 機能別）→ 第8〜9章（運用・セキュリティ）</td></tr>
+  <tr><td>SRE / インフラ担当</td><td>第3章（AWS） → 第8章（監視） → 第9章（セキュリティ）</td></tr>
+  <tr><td>セキュリティ・監査担当</td><td>第3.3章（IAM）→ 第9章（セキュリティ全般）</td></tr>
+  <tr><td>プロダクトオーナー</td><td>第2章（全体像）→ 第11章（拡張性・ロードマップ）</td></tr>
+</table>
+
+<h3 id="sec-1-3"><span class="num">1.3</span>記述レベル（C4 model）</h3>
+<p>
+本書では Simon Brown が提唱する <strong>C4 model</strong> に従い、抽象度の異なる複数のビューを段階的に提示する。実装の詳細（クラス図・コードレベル C4）は実装フェーズで別途記述する。
+</p>
+<table>
+  <tr><th>レベル</th><th>ビュー</th><th>本書での扱い</th></tr>
+  <tr><td><span class="pill p-c1">C1</span></td><td>System Context（システム境界とアクター）</td><td>第2.1章で記述</td></tr>
+  <tr><td><span class="pill p-c2">C2</span></td><td>Container（実行単位・データストア・外部連携）</td><td>第2.2章 + 第3章 で記述</td></tr>
+  <tr><td><span class="pill p-c3">C3</span></td><td>Component（コンテナ内のコンポーネント分割）</td><td>第4章 + 第5章 で記述</td></tr>
+  <tr><td>C4</td><td>Code（クラス・関数レベル）</td><td>本書ではスコープ外（実装フェーズで作成）</td></tr>
+</table>
+</section>
+
+
+<!-- ========== 2. アーキテクチャ全体像 ========== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>アーキテクチャ全体像</h2>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>コンテキスト図（C1：システム境界とアクター・外部システム）</h3>
+<p>
+TeamAgent システムを取り巻くアクター・外部システムを示す。<strong>営業16名 + マネージャー数名</strong> が Slack 経由でシステムと対話し、システムは Google Workspace（Gmail / Drive）・動画分析プラットフォーム（VSEO / dpro / Buzzmiru）・Gemini Deep Research・Slack Web API・X Search を <strong>読み取り専用</strong> で参照する。
+</p>
+
+<div class="diagram">
+  <div class="dia-row" style="margin-bottom:24px">
+    <div class="c4-actor">
+      <div class="c4-tag">Person</div>
+      <div class="c4-icon">👨‍💼</div>
+      <div class="c4-name">営業メンバー（16名）</div>
+      <div class="c4-sub">Slack で 5機能を利用</div>
+    </div>
+    <div class="c4-actor" style="border-color:var(--accent);background:#fef2f2">
+      <div class="c4-tag">Person</div>
+      <div class="c4-icon">👔</div>
+      <div class="c4-name">マネージャー（数名）</div>
+      <div class="c4-sub">機能⑤ 進捗サマリー受信</div>
+    </div>
+    <div class="c4-actor" style="border-color:#16a34a;background:#f0fdf4">
+      <div class="c4-tag">Person</div>
+      <div class="c4-icon">🛠</div>
+      <div class="c4-name">FDE / 運用担当</div>
+      <div class="c4-sub">CloudWatch で監視</div>
+    </div>
+  </div>
+
+  <div class="dia-row" style="margin-bottom:8px"><div class="dia-arrow-label">↓ Slack DM / メンション / @TeamAgent</div></div>
+
+  <div class="dia-row" style="margin-bottom:24px">
+    <div class="c4-system" style="min-width:340px">
+      <div class="c4-tag">Software System</div>
+      <div class="c4-icon">🤖</div>
+      <div class="c4-name" style="font-size:18px">TeamAgent</div>
+      <div class="c4-sub">Slack AI エージェント<br>5機能 × 5+1 データ層 × 4共通基盤<br>AWS Lambda + Fargate + RDS</div>
+    </div>
+  </div>
+
+  <div class="dia-row" style="margin-bottom:8px"><div class="dia-arrow-label">↓ 読み取り（一部書込：drafts.create）</div></div>
+
+  <div class="dia-row">
+    <div class="c4-external">
+      <div class="c4-tag">External System</div>
+      <div class="c4-icon">📧</div>
+      <div class="c4-name">Google Workspace</div>
+      <div class="c4-sub">Gmail / Drive</div>
+    </div>
+    <div class="c4-external">
+      <div class="c4-tag">External System</div>
+      <div class="c4-icon">💬</div>
+      <div class="c4-name">Slack Web API</div>
+      <div class="c4-sub">Bolt for Python</div>
+    </div>
+    <div class="c4-external">
+      <div class="c4-tag">External System</div>
+      <div class="c4-icon">🎬</div>
+      <div class="c4-name">動画分析データ層</div>
+      <div class="c4-sub">VSEO / dpro / Buzzmiru</div>
+    </div>
+    <div class="c4-external">
+      <div class="c4-tag">External System</div>
+      <div class="c4-icon">🔍</div>
+      <div class="c4-name">Gemini Deep Research</div>
+      <div class="c4-sub">Vertex AI + Bedrock + Tavily/Brave + A6X</div>
+    </div>
+    <div class="c4-external">
+      <div class="c4-tag">External System</div>
+      <div class="c4-icon">🐦</div>
+      <div class="c4-name">X Search</div>
+      <div class="c4-sub">オンデマンド検索</div>
+    </div>
+    <div class="c4-external">
+      <div class="c4-tag">LLM</div>
+      <div class="c4-icon">🧠</div>
+      <div class="c4-name">Anthropic Claude API</div>
+      <div class="c4-sub">Sonnet 4.6 / Haiku</div>
+    </div>
+  </div>
+
+  <div class="dia-legend">
+    <span><span class="dia-legend-dot dot-input"></span>Person（人）</span>
+    <span><span class="dia-legend-dot dot-output"></span>System（本システム）</span>
+    <span><span class="dia-legend-dot dot-external"></span>External System（外部）</span>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 2.1</span>C1 コンテキスト図。アクター3種・本システム1個・外部システム6種で構成。</p>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>コンテナ図（C2：アプリケーション・データストア・外部サービス）</h3>
+<p>
+TeamAgent システムの内部を <strong>コンテナレベル</strong> で分解する。Slack イベント受信用の <code>API Gateway + Lambda</code>、長時間動作する <code>Fargate</code>（機能③ Phase B〜D）、定期バッチ <code>EventBridge + Lambda</code>、データストア <code>RDS PostgreSQL + pgvector</code>、認証情報保管 <code>Secrets Manager</code> の5系統で構成する。
+</p>
+
+<div class="diagram">
+  <!-- Slack 入口 -->
+  <div class="dia-container slack" style="margin-bottom:6px">
+    <div class="dia-container-label">Slack Workspace（社内）</div>
+    <div class="dia-row">
+      <div class="dia-box" style="background:#faf5ff;border-color:var(--slack-purple)">
+        <div class="dia-icon">💬</div>
+        <div class="dia-name">Slack App: TeamAgent</div>
+        <div class="dia-sub">Bot Token / Event Sub / Block Kit</div>
+      </div>
+    </div>
+  </div>
+  <div class="dia-arrow">↓ HTTPS / Events API（POST）</div>
+
+  <!-- AWS -->
+  <div class="dia-container aws">
+    <div class="dia-container-label">☁ AWS（VPC: ap-northeast-1）</div>
+
+    <!-- パブリック層 -->
+    <div class="dia-container public" style="margin-bottom:6px">
+      <div class="dia-container-label">Public Subnet</div>
+      <div class="dia-row">
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">🌐</div>
+          <div class="dia-label-tiny">API GW</div>
+          <div class="dia-name">Slack Events Endpoint</div>
+          <div class="dia-sub">/events / /interactivity</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">🌐</div>
+          <div class="dia-label-tiny">API GW</div>
+          <div class="dia-name">OAuth Callback</div>
+          <div class="dia-sub">/oauth/google</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">🚪</div>
+          <div class="dia-label-tiny">NAT GW</div>
+          <div class="dia-name">外部 API 出口</div>
+          <div class="dia-sub">to Internet</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dia-arrow">↓</div>
+
+    <!-- プライベート層 -->
+    <div class="dia-container private" style="margin-bottom:6px">
+      <div class="dia-container-label">Private Subnet（コンピュート）</div>
+      <div class="dia-row">
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">⚡</div>
+          <div class="dia-label-tiny">Lambda</div>
+          <div class="dia-name">Slack Receiver</div>
+          <div class="dia-sub">Bolt for Python<br>3秒 ack</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">⚡</div>
+          <div class="dia-label-tiny">Lambda</div>
+          <div class="dia-name">Suggester（①）</div>
+          <div class="dia-sub">機能① 軽量ジョブ</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">⚡</div>
+          <div class="dia-label-tiny">Lambda</div>
+          <div class="dia-name">Mail Worker（②/⑤）</div>
+          <div class="dia-sub">機能② / ⑤ バッチ</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">⚡</div>
+          <div class="dia-label-tiny">Lambda</div>
+          <div class="dia-name">Video Analyzer（④）</div>
+          <div class="dia-sub">機能④ 動画解析</div>
+        </div>
+      </div>
+      <div class="dia-row" style="margin-top:8px">
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">📦</div>
+          <div class="dia-label-tiny">Fargate</div>
+          <div class="dia-name">Composer（③）</div>
+          <div class="dia-sub">機能③ 長時間ジョブ<br>Phase B〜D 5〜30分</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">⏰</div>
+          <div class="dia-label-tiny">EventBridge</div>
+          <div class="dia-name">Cron Scheduler</div>
+          <div class="dia-sub">JST 8:00 朝バッチ<br>月 9:00 週次サマリー</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">📜</div>
+          <div class="dia-label-tiny">SQS</div>
+          <div class="dia-name">Job Queue</div>
+          <div class="dia-sub">非同期 fan-out</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dia-arrow">↓</div>
+
+    <!-- データ層 -->
+    <div class="dia-container private">
+      <div class="dia-container-label">Private Subnet（データ・認証）</div>
+      <div class="dia-row">
+        <div class="dia-box dia-data">
+          <div class="dia-icon">🗄</div>
+          <div class="dia-label-tiny">RDS</div>
+          <div class="dia-name">PostgreSQL + pgvector</div>
+          <div class="dia-sub">db.r7g.large<br>Multi-AZ</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">🔐</div>
+          <div class="dia-label-tiny">Secrets Mgr</div>
+          <div class="dia-name">Credentials Store</div>
+          <div class="dia-sub">OAuth refresh × 16<br>API キー類</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">📦</div>
+          <div class="dia-label-tiny">S3</div>
+          <div class="dia-name">Artifact Bucket</div>
+          <div class="dia-sub">.md / .html 出力<br>Drive キャッシュ</div>
+        </div>
+        <div class="dia-box dia-aws">
+          <div class="dia-icon">📊</div>
+          <div class="dia-label-tiny">CloudWatch</div>
+          <div class="dia-name">Logs + Alarms</div>
+          <div class="dia-sub">監査・SLO 監視</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dia-arrow">↓ HTTPS / 各種 SDK</div>
+
+  <!-- 外部 -->
+  <div class="dia-row">
+    <div class="dia-box dia-external">
+      <div class="dia-icon">📧</div>
+      <div class="dia-name">Gmail API</div>
+      <div class="dia-sub">readonly + compose<br>16 × OAuth</div>
+    </div>
+    <div class="dia-box dia-external">
+      <div class="dia-icon">📁</div>
+      <div class="dia-name">Drive API</div>
+      <div class="dia-sub">PDF / pptx 抽出</div>
+    </div>
+    <div class="dia-box dia-external">
+      <div class="dia-icon">🎬</div>
+      <div class="dia-name">VSEO tRPC</div>
+      <div class="dia-sub">自社 / 動画内容分析</div>
+    </div>
+    <div class="dia-box dia-external">
+      <div class="dia-icon">📊</div>
+      <div class="dia-name">dpro REST</div>
+      <div class="dia-sub">Firebase auth</div>
+    </div>
+    <div class="dia-box dia-external">
+      <div class="dia-icon">⭐</div>
+      <div class="dia-name">Buzzmiru API</div>
+      <div class="dia-sub">save count / 死活監視</div>
+    </div>
+    <div class="dia-box dia-external">
+      <div class="dia-icon">🔍</div>
+      <div class="dia-name">Gemini DR</div>
+      <div class="dia-sub">Pattern Bravo+ × 4経路</div>
+    </div>
+    <div class="dia-box dia-external">
+      <div class="dia-icon">🧠</div>
+      <div class="dia-name">Claude API</div>
+      <div class="dia-sub">Sonnet 4.6 / Haiku</div>
+    </div>
+  </div>
+
+  <div class="dia-legend">
+    <span><span class="dia-legend-dot dot-aws"></span>AWS Service</span>
+    <span><span class="dia-legend-dot dot-data"></span>Data Store</span>
+    <span><span class="dia-legend-dot dot-external"></span>External</span>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 2.2</span>C2 コンテナ図。Slack 入口（API GW）→ コンピュート（Lambda × 4 + Fargate × 1）→ データ・認証層（RDS / Secrets / S3）→ 外部 API の4段構成。</p>
+
+<h3 id="sec-2-3"><span class="num">2.3</span>3層俯瞰（機能層 / データ層 / 共通基盤層）</h3>
+<p>
+仕様書 v2.0「図 4.1」と整合する論理3層構造をアーキテクチャ視点で再掲する。本書では各層がどの AWS リソースに対応するかを明示する。
+</p>
+
+<div class="layer-stack">
+  <div class="layer l-feature">
+    <div class="layer-title">🎯 機能層 — ユーザー体験 5機能</div>
+    <div class="layer-items">
+      <div class="item-pill">🎬 ④ 動画 URL 分析（Lambda）</div>
+      <div class="item-pill">📬 ② Mail ワークフロー（Lambda + EventBridge）</div>
+      <div class="item-pill">📊 ⑤ 進捗サマリー（Lambda + EventBridge）</div>
+      <div class="item-pill">📝 ③ 提案コンテンツ生成（Fargate Task）</div>
+      <div class="item-pill">💡 ① Slack 自動サジェスト（Lambda）</div>
+    </div>
+  </div>
+  <div class="l-arrow">↓ 共通基盤を介してデータ層を読む</div>
+  <div class="layer l-base">
+    <div class="layer-title">⚙️ 共通基盤層 — 4要素</div>
+    <div class="layer-items">
+      <div class="item-pill">Claude Agent SDK（Orchestrator）</div>
+      <div class="item-pill">Gmail OAuth（Secrets Manager × 16）</div>
+      <div class="item-pill">Slack Bolt（API GW + Lambda）</div>
+      <div class="item-pill">pgvector（RDS db.r7g.large）</div>
+    </div>
+  </div>
+  <div class="l-arrow">↓ 読み取り（データソース）</div>
+  <div class="layer l-data">
+    <div class="layer-title">📚 データ層 — 5+1 データソース</div>
+    <div class="layer-items">
+      <div class="item-pill">📧 Gmail（本人＋他人）</div>
+      <div class="item-pill">💬 Slack（チャンネル / DM）</div>
+      <div class="item-pill">📁 Google Drive（PDF/pptx）</div>
+      <div class="item-pill">🎬 動画分析（VSEO+dpro+Buzzmiru）</div>
+      <div class="item-pill">🔍 Gemini DR（Pattern Bravo+）</div>
+      <div class="item-pill">🐦 X（オンデマンド）</div>
+    </div>
+  </div>
+  <div class="l-arrow">↓ AWS 物理層で支える</div>
+  <div class="layer l-aws">
+    <div class="layer-title">☁ AWS インフラ層 — 9主要サービス</div>
+    <div class="layer-items">
+      <div class="item-pill">API Gateway</div>
+      <div class="item-pill">Lambda × 4種</div>
+      <div class="item-pill">Fargate（ECS）</div>
+      <div class="item-pill">EventBridge</div>
+      <div class="item-pill">RDS db.r7g.large</div>
+      <div class="item-pill">Secrets Manager</div>
+      <div class="item-pill">S3</div>
+      <div class="item-pill">SQS</div>
+      <div class="item-pill">CloudWatch</div>
+    </div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 2.3</span>3層俯瞰 + AWS 物理層。仕様書の論理レイヤーが具体的な AWS リソースとどう紐付くかを示す。</p>
+
+</section>
+
+
+<!-- ========== 3. AWS デプロイメントトポロジー ========== -->
+<section id="sec-3">
+<h2><span class="num">3.</span>AWS デプロイメントトポロジー</h2>
+
+<p>
+TeamAgent は AWS <code>ap-northeast-1</code>（東京）リージョンに単一 VPC で構築する。<strong>新規構築ではなく、既存の VSEO Analytics / dpro / Buzzmiru / Slack Pro</strong> を外部依存として活用し、本システムは認証・オーケストレーション・ナレッジ DB レイヤーを提供する。
+</p>
+
+<h3 id="sec-3-1"><span class="num">3.1</span>VPC 設計（パブリック/プライベートサブネット）</h3>
+
+<div class="diagram">
+  <div class="dia-container aws">
+    <div class="dia-container-label">VPC 10.0.0.0/16 — ap-northeast-1（Multi-AZ）</div>
+
+    <!-- AZ-a / AZ-c ペア -->
+    <div class="dia-row" style="margin-bottom:6px">
+      <div class="dia-container public" style="flex:1">
+        <div class="dia-container-label">Public Subnet — AZ-a（10.0.1.0/24）</div>
+        <div class="dia-row">
+          <div class="dia-box dia-aws"><div class="dia-icon">🌐</div><div class="dia-name">API Gateway</div><div class="dia-sub">Slack / OAuth callback</div></div>
+          <div class="dia-box dia-aws"><div class="dia-icon">🚪</div><div class="dia-name">NAT GW</div><div class="dia-sub">外部 API 出口</div></div>
+        </div>
+      </div>
+      <div class="dia-container public" style="flex:1">
+        <div class="dia-container-label">Public Subnet — AZ-c（10.0.2.0/24）</div>
+        <div class="dia-row">
+          <div class="dia-box dia-aws"><div class="dia-icon">🌐</div><div class="dia-name">ALB（将来）</div><div class="dia-sub">Fargate 公開時に追加</div></div>
+          <div class="dia-box dia-aws"><div class="dia-icon">🚪</div><div class="dia-name">NAT GW</div><div class="dia-sub">冗長化</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dia-row" style="margin-bottom:6px">
+      <div class="dia-container private" style="flex:1">
+        <div class="dia-container-label">Private Subnet — AZ-a（10.0.11.0/24）</div>
+        <div class="dia-row">
+          <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-name">Lambda × 4種</div><div class="dia-sub">Slack/Suggester<br>Mail/Video</div></div>
+          <div class="dia-box dia-aws"><div class="dia-icon">📦</div><div class="dia-name">Fargate Task</div><div class="dia-sub">Composer（③）</div></div>
+        </div>
+      </div>
+      <div class="dia-container private" style="flex:1">
+        <div class="dia-container-label">Private Subnet — AZ-c（10.0.12.0/24）</div>
+        <div class="dia-row">
+          <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-name">Lambda（待機）</div><div class="dia-sub">スケールアウト時</div></div>
+          <div class="dia-box dia-aws"><div class="dia-icon">📦</div><div class="dia-name">Fargate Task</div><div class="dia-sub">並列ジョブ用</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dia-row">
+      <div class="dia-container private" style="flex:1">
+        <div class="dia-container-label">Private Subnet (Isolated) — AZ-a（10.0.21.0/24）</div>
+        <div class="dia-row">
+          <div class="dia-box dia-data"><div class="dia-icon">🗄</div><div class="dia-name">RDS Primary</div><div class="dia-sub">db.r7g.large</div></div>
+        </div>
+      </div>
+      <div class="dia-container private" style="flex:1">
+        <div class="dia-container-label">Private Subnet (Isolated) — AZ-c（10.0.22.0/24）</div>
+        <div class="dia-row">
+          <div class="dia-box dia-data"><div class="dia-icon">🗄</div><div class="dia-name">RDS Standby</div><div class="dia-sub">Multi-AZ 同期レプリカ</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 3.1</span>VPC 設計。AZ-a / AZ-c の2 AZ で Public / Private / Isolated の3層構成。RDS は Multi-AZ で可用性を確保。</p>
+
+<h4>サブネット用途と CIDR</h4>
+<table>
+  <tr><th>サブネット</th><th>CIDR</th><th>用途</th><th>ルーティング</th></tr>
+  <tr><td>Public AZ-a</td><td>10.0.1.0/24</td><td>API Gateway / NAT GW / 将来の ALB</td><td>IGW 経由でインターネット双方向</td></tr>
+  <tr><td>Public AZ-c</td><td>10.0.2.0/24</td><td>NAT GW（冗長化） / 将来の ALB</td><td>IGW 経由でインターネット双方向</td></tr>
+  <tr><td>Private AZ-a</td><td>10.0.11.0/24</td><td>Lambda / Fargate Task（コンピュート）</td><td>NAT GW 経由でアウトバウンドのみ</td></tr>
+  <tr><td>Private AZ-c</td><td>10.0.12.0/24</td><td>Lambda / Fargate Task（冗長化）</td><td>NAT GW 経由でアウトバウンドのみ</td></tr>
+  <tr><td>Isolated AZ-a</td><td>10.0.21.0/24</td><td>RDS Primary（PostgreSQL + pgvector）</td><td>VPC 内のみ・インターネット遮断</td></tr>
+  <tr><td>Isolated AZ-c</td><td>10.0.22.0/24</td><td>RDS Standby（Multi-AZ）</td><td>VPC 内のみ・インターネット遮断</td></tr>
+</table>
+
+<h3 id="sec-3-2"><span class="num">3.2</span>主要 AWS サービスの役割</h3>
+
+<div class="aws-svc-grid">
+  <div class="aws-svc">
+    <div class="svc-tag">API GATEWAY</div>
+    <div class="svc-name">🌐 API Gateway (HTTP API)</div>
+    <div class="svc-role">Slack Events API のエンドポイント受信。OAuth コールバック受信。3秒以内に ack して非同期化。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">LAMBDA</div>
+    <div class="svc-name">⚡ Lambda（Slack Receiver）</div>
+    <div class="svc-role">Slack 受信専用。署名検証 → SQS / Lambda invoke で機能別ハンドラーへルーティング。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">LAMBDA</div>
+    <div class="svc-name">⚡ Lambda（Suggester）</div>
+    <div class="svc-role">機能①。message event を受け、正規表現 → Claude SDK 軽量判定 → pgvector → ephemeral 配信。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">LAMBDA</div>
+    <div class="svc-name">⚡ Lambda（Mail Worker）</div>
+    <div class="svc-role">機能② / ⑤。EventBridge 起動 → Gmail 16並列 → Claude SDK 判定 → Slack DM。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">LAMBDA</div>
+    <div class="svc-name">⚡ Lambda（Video Analyzer）</div>
+    <div class="svc-role">機能④。@TeamAgent + URL 受信 → VSEO/dpro/Buzzmiru 並列 → Sonnet 4.6 vision → 6観点構造化 → pgvector 保存。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">FARGATE</div>
+    <div class="svc-name">📦 ECS Fargate（Composer）</div>
+    <div class="svc-role">機能③。Lambda 15分上限を超える長時間ジョブ（Phase B〜D 5〜30分）。1 task = 1 提案案件。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">EVENTBRIDGE</div>
+    <div class="svc-name">⏰ EventBridge Scheduler</div>
+    <div class="svc-role">Cron スケジュール。朝 8:00 機能②、月 9:00 機能⑤、Buzzmiru 5分死活監視。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">RDS</div>
+    <div class="svc-name">🗄 RDS PostgreSQL（pgvector）</div>
+    <div class="svc-role">db.r7g.large / Multi-AZ。社内ナレッジ DB。事例埋め込み・動画メタ・対話履歴・監査ログ。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">SECRETS</div>
+    <div class="svc-name">🔐 Secrets Manager</div>
+    <div class="svc-role">Gmail OAuth refresh token × 16、Slack Bot Token、Anthropic / Gemini / VSEO / dpro / Buzzmiru API キー。KMS 暗号化。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">S3</div>
+    <div class="svc-name">📦 S3</div>
+    <div class="svc-role">機能③ の .md / .html 提案出力、Drive PDF/pptx の中間キャッシュ、CloudWatch Logs アーカイブ。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">SQS</div>
+    <div class="svc-name">📜 SQS</div>
+    <div class="svc-role">Slack Receiver → 機能別 Lambda の非同期キュー。失敗時 DLQ で再処理。</div>
+  </div>
+  <div class="aws-svc">
+    <div class="svc-tag">CLOUDWATCH</div>
+    <div class="svc-name">📊 CloudWatch Logs / Alarms</div>
+    <div class="svc-role">全 Lambda / Fargate の構造化ログ集約・アラーム。Sentry や Datadog は使用しない（実装計画書 §13）。</div>
+  </div>
+</div>
+
+<h3 id="sec-3-3"><span class="num">3.3</span>IAM 設計（Bot SA / OAuth client / Service Roles）</h3>
+<p>
+最小権限（Least Privilege）原則に基づき、各実行コンテキストに専用の IAM Role を付与する。<strong>16名分の Gmail OAuth は Google 側のクライアント1個 + 16名分の refresh token</strong> という構成（Google Cloud OAuth Client は社内 Workspace 内アプリのため <em>外部公開不要</em>、verification 不要）。
+</p>
+
+<table>
+  <tr><th>ID 種別</th><th>名称</th><th>権限スコープ</th></tr>
+  <tr><td>IAM Role</td><td>SlackReceiverLambdaRole</td><td>Secrets Manager: <code>slack/*</code> 読取 / SQS: SendMessage / CloudWatch Logs</td></tr>
+  <tr><td>IAM Role</td><td>SuggesterLambdaRole</td><td>Secrets: <code>slack/*</code> <code>anthropic/*</code> / RDS: pgvector 読取 / Bedrock invoke（fallback）</td></tr>
+  <tr><td>IAM Role</td><td>MailWorkerLambdaRole</td><td>Secrets: <code>gmail-oauth/*</code>（16名分）<code>slack/*</code> <code>anthropic/*</code> / RDS 読書</td></tr>
+  <tr><td>IAM Role</td><td>VideoAnalyzerLambdaRole</td><td>Secrets: <code>vseo/*</code> <code>dpro/*</code> <code>buzzmiru/*</code> / S3 PutObject / RDS 読書</td></tr>
+  <tr><td>IAM Role</td><td>ComposerFargateRole</td><td>上記すべて + Drive API 用 SA + Gemini DR 4経路（Vertex / Bedrock / Tavily / Brave / A6X）</td></tr>
+  <tr><td>OAuth Client</td><td>Google Workspace Internal App</td><td><code>gmail.readonly</code> / <code>gmail.compose</code> / <code>drive.readonly</code> — 内部アプリのため verification 不要</td></tr>
+  <tr><td>Slack App</td><td>TeamAgent Bot</td><td>Bot Token のみ。<code>chat:write</code> <code>chat:write.public</code> <code>commands</code> <code>im:history</code> <code>channels:history</code></td></tr>
+  <tr><td>Service Account</td><td>Drive Service Account</td><td>共有設定された社内 Drive フォルダのみ readonly（営業16名の OAuth とは独立）</td></tr>
+</table>
+
+<div class="note">
+  <div class="label">設計判断：Gmail OAuth は internal app</div>
+  Google Workspace 管理者により <strong>社内ドメイン限定の internal アプリ</strong>として登録するため、Google verification プロセス（通常 4〜6週間）が不要。Phase 1 完了前に管理者と連携して登録を進めることでリスク R1（OAuth 遅延）を回避する。
+</div>
+
+<h3 id="sec-3-4"><span class="num">3.4</span>ネットワーク経路（インターネット / VPC エンドポイント / PrivateLink）</h3>
+
+<table>
+  <tr><th>送信元</th><th>送信先</th><th>経路</th><th>備考</th></tr>
+  <tr><td>Slack</td><td>API Gateway</td><td>Internet → IGW → API GW</td><td>Slack 署名検証で偽装防止</td></tr>
+  <tr><td>Lambda（Private）</td><td>Anthropic / Gemini / Slack Web API</td><td>NAT GW → IGW → Internet</td><td>送信元 IP は NAT GW EIP で固定（許可リスト用）</td></tr>
+  <tr><td>Lambda（Private）</td><td>S3 / Secrets Mgr / SQS</td><td>VPC Endpoint（Gateway / Interface）</td><td>インターネット経由しない（コスト削減 & 安全性）</td></tr>
+  <tr><td>Lambda / Fargate</td><td>RDS</td><td>Private Subnet 内のみ（SG 制御）</td><td>PostgreSQL 5432 / Lambda SG → RDS SG のみ許可</td></tr>
+  <tr><td>Fargate（Composer）</td><td>VSEO tRPC（自社）</td><td>NAT GW → Internet → VSEO エンドポイント</td><td>将来 PrivateLink 化を検討</td></tr>
+  <tr><td>CloudWatch Logs</td><td>S3 アーカイブ</td><td>VPC Endpoint</td><td>90日保持・90日後 Glacier 移行</td></tr>
+</table>
+
+</section>
+
+
+<!-- ========== 4. 共通基盤コンポーネント詳細 ========== -->
+<section id="sec-4">
+<h2><span class="num">4.</span>共通基盤コンポーネント詳細</h2>
+
+<h3 id="sec-4-1"><span class="num">4.1</span>Claude Agent SDK Orchestrator（サブエージェント設計）</h3>
+<p>
+Claude Agent SDK を中央のオーケストレーターとして配置し、<strong>4種のサブエージェント</strong> がそれぞれの機能を担当する。各サブエージェントは独立した Lambda / Fargate にデプロイされるが、共通のツールセット（Gmail / Slack / pgvector / Drive / 動画分析）を介して相互参照可能。
+</p>
+
+<div class="diagram">
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-input" style="min-width:180px">
+      <div class="dia-icon">🎯</div>
+      <div class="dia-name">Claude Agent SDK<br>Orchestrator</div>
+      <div class="dia-sub">機能ごとに Lambda / Fargate に展開</div>
+    </div>
+  </div>
+  <div class="dia-arrow">↓ サブエージェントを呼び分け</div>
+  <div class="dia-row">
+    <div class="dia-box dia-existing">
+      <div class="dia-icon">💡</div>
+      <div class="dia-name">Suggester</div>
+      <div class="dia-sub">機能①<br>Lambda / 軽量</div>
+    </div>
+    <div class="dia-box dia-existing">
+      <div class="dia-icon">📬</div>
+      <div class="dia-name">Mail Worker</div>
+      <div class="dia-sub">機能② / ⑤<br>Lambda / 16並列</div>
+    </div>
+    <div class="dia-box dia-existing">
+      <div class="dia-icon">📝</div>
+      <div class="dia-name">Composer</div>
+      <div class="dia-sub">機能③<br>Fargate / 長時間</div>
+    </div>
+    <div class="dia-box dia-existing">
+      <div class="dia-icon">🎬</div>
+      <div class="dia-name">Video Analyzer</div>
+      <div class="dia-sub">機能④<br>Lambda / 並列取得</div>
+    </div>
+  </div>
+  <div class="dia-arrow">↓ 共通ツールセットを呼び出し</div>
+  <div class="dia-row">
+    <div class="dia-box dia-data"><div class="dia-icon">📧</div><div class="dia-name">gmail.search</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">📁</div><div class="dia-name">drive.fetch</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">💬</div><div class="dia-name">slack.search</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">🗄</div><div class="dia-name">pgvector.query</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">🎬</div><div class="dia-name">video.analyze</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">🔍</div><div class="dia-name">gemini_dr.query</div></div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 4.1</span>Claude Agent SDK Orchestrator のサブエージェント構成。各サブエージェントは独立デプロイだが共通ツールセットを再利用する。</p>
+
+<h4>サブエージェント別の役割</h4>
+<table>
+  <tr><th>サブエージェント</th><th>担当機能</th><th>主モデル</th><th>主要ツール</th></tr>
+  <tr><td>Suggester</td><td>① Slack 自動サジェスト</td><td>Haiku（軽量判定）→ Sonnet 4.6（精緻化）</td><td>slack.search / pgvector.query</td></tr>
+  <tr><td>Mail Worker</td><td>② Mail ワークフロー / ⑤ 進捗サマリー</td><td>Sonnet 4.6（返信生成・角度判定）</td><td>gmail.search / gmail.draft / pgvector.query</td></tr>
+  <tr><td>Composer</td><td>③ 提案コンテンツ生成</td><td>Sonnet 4.6（5フェーズ全体）</td><td>すべてのツール</td></tr>
+  <tr><td>Video Analyzer</td><td>④ 動画 URL 分析</td><td>Sonnet 4.6（vision + 構造化）</td><td>video.analyze / pgvector.upsert</td></tr>
+</table>
+
+<h3 id="sec-4-2"><span class="num">4.2</span>Gmail OAuth フロー（16名分の token 管理）</h3>
+
+<p>
+Google Workspace の <strong>internal app</strong> として OAuth クライアントを1個登録し、営業16名がそれぞれ初回ログイン時に同意する。各営業の <code>refresh_token</code> は Secrets Manager に <code>gmail-oauth/&lt;user_id&gt;</code> のキーで保管。Mail Worker は実行時にユーザー ID から refresh token を取得し、access token を都度発行する。
+</p>
+
+<table class="seq-table">
+  <tr><th class="seq-step">#</th><th class="seq-actor">Actor</th><th class="seq-arrow"></th><th class="seq-target">Target</th><th>動作 / 結果</th></tr>
+  <tr><td class="seq-step">1</td><td class="seq-actor a-user">営業（初回）</td><td class="seq-arrow">→</td><td class="seq-target">Slack: /teamagent connect</td><td>OAuth 開始コマンド</td></tr>
+  <tr><td class="seq-step">2</td><td class="seq-actor a-bot">Slack Receiver</td><td class="seq-arrow">→</td><td class="seq-target">API GW: /oauth/start</td><td>Google 同意 URL を生成して DM 送信</td></tr>
+  <tr><td class="seq-step">3</td><td class="seq-actor a-user">営業</td><td class="seq-arrow">→</td><td class="seq-target">Google 同意画面</td><td>internal app のため警告なしで同意</td></tr>
+  <tr><td class="seq-step">4</td><td class="seq-actor a-ext">Google</td><td class="seq-arrow">→</td><td class="seq-target">API GW: /oauth/callback</td><td>code を返す</td></tr>
+  <tr><td class="seq-step">5</td><td class="seq-actor a-aws">OAuth Lambda</td><td class="seq-arrow">→</td><td class="seq-target">Google: /token</td><td>code → refresh_token + access_token 取得</td></tr>
+  <tr><td class="seq-step">6</td><td class="seq-actor a-aws">OAuth Lambda</td><td class="seq-arrow">→</td><td class="seq-target">Secrets Manager</td><td><code>gmail-oauth/U12345</code> として KMS 暗号化保管</td></tr>
+  <tr><td class="seq-step">7</td><td class="seq-actor a-aws">OAuth Lambda</td><td class="seq-arrow">→</td><td class="seq-target">RDS: users</td><td>登録完了フラグを更新</td></tr>
+  <tr><td class="seq-step">8</td><td class="seq-actor a-aws">OAuth Lambda</td><td class="seq-arrow">→</td><td class="seq-target">Slack: 営業 DM</td><td>「接続完了 ✅」を通知</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 4.2</span>Gmail OAuth 初回接続フロー（営業1名分）。8 ステップ・所要 1〜2 分。</p>
+
+<h3 id="sec-4-3"><span class="num">4.3</span>Slack Bolt（イベント受信 / Block Kit / ephemeral）</h3>
+<p>
+Slack Bolt for Python を Lambda 上で動作させ、Slack Events API の検証・ルーティング・ボタン応答を処理する。<strong>3秒以内に ack を返す制約</strong> を満たすため、長時間処理は SQS / Step Functions に逃がす非同期パターンを採用する。
+</p>
+
+<table>
+  <tr><th>受信イベント</th><th>処理</th><th>応答形態</th></tr>
+  <tr><td>app_mention（@TeamAgent + URL）</td><td>Video Analyzer or Composer に SQS 経由で fan-out</td><td>進捗 thread 投稿 + 完了時 chat.update</td></tr>
+  <tr><td>message（チャンネル）</td><td>Suggester（機能①）の正規表現フィルタを発火</td><td>chat.postEphemeral で本人にだけ表示</td></tr>
+  <tr><td>message（DM, button_click）</td><td>機能② のボタン操作（深掘り / 編集 / 下書き保存）</td><td>blocks 更新 + Gmail drafts.create</td></tr>
+  <tr><td>view_submission（モーダル）</td><td>機能③ Phase A の検索条件確認モーダル送信</td><td>Phase B 起動 + thread 投稿</td></tr>
+  <tr><td>scheduled（EventBridge）</td><td>Cron 起動（朝バッチ / 週次バッチ / 死活監視）</td><td>各営業 DM / マネージャー DM</td></tr>
+</table>
+
+<h4>Block Kit パターン</h4>
+<ul>
+  <li><strong>機能②（朝サマリー）</strong>：1メールあたり <code>section + actions</code> ブロックで「案 A/B/C / ✏️ 編集 / 💬 深掘り」</li>
+  <li><strong>機能③（5割版完成）</strong>：<code>file</code> ブロックで .md / .html を添付 + Phase D 対話プロンプト</li>
+  <li><strong>機能④（分析結果）</strong>：6観点を <code>section</code> ブロック × 6 で構造化表示 + 過去事例3件のリンク</li>
+  <li><strong>機能⑤（角度別グルーピング）</strong>：🟢🟡🔴 ごとに <code>divider + section</code> で視覚的に分離</li>
+</ul>
+
+<h3 id="sec-4-4"><span class="num">4.4</span>pgvector スキーマと Embedding パイプライン</h3>
+<p>
+RDS PostgreSQL（db.r7g.large / Multi-AZ）に <code>pgvector</code> 拡張を有効化し、社内ナレッジ DB を構築する。<strong>事例埋め込み（1536次元 / OpenAI ada-002 互換）</strong> + <strong>動画メタ</strong> + <strong>監査ログ</strong> + <strong>対話履歴</strong> の4スキーマで構成。
+</p>
+
+<div class="schema-table">
+  <div class="tbl-name">📋 cases — 過去案件・提案事例</div>
+  <div class="col-row header"><div></div><div>Column</div><div>Type</div><div>Description</div></div>
+  <div class="col-row"><div class="col-pk">PK</div><div class="col-name">id</div><div class="col-type">uuid</div><div class="col-desc">案件 ID</div></div>
+  <div class="col-row"><div></div><div class="col-name">client_name</div><div class="col-type">text</div><div class="col-desc">クライアント名</div></div>
+  <div class="col-row"><div></div><div class="col-name">industry</div><div class="col-type">text</div><div class="col-desc">業界カテゴリ</div></div>
+  <div class="col-row"><div></div><div class="col-name">summary</div><div class="col-type">text</div><div class="col-desc">案件サマリー（最大2KB）</div></div>
+  <div class="col-row"><div class="col-vec">VEC</div><div class="col-name">embedding</div><div class="col-type">vector(1536)</div><div class="col-desc">サマリー埋め込み（cosine索引）</div></div>
+  <div class="col-row"><div></div><div class="col-name">drive_url</div><div class="col-type">text</div><div class="col-desc">元提案 PDF/pptx の Drive URL</div></div>
+  <div class="col-row"><div></div><div class="col-name">outcome</div><div class="col-type">enum</div><div class="col-desc">won / lost / pending</div></div>
+</div>
+
+<div class="schema-table">
+  <div class="tbl-name">📋 video_meta — 動画分析メタデータ</div>
+  <div class="col-row header"><div></div><div>Column</div><div>Type</div><div>Description</div></div>
+  <div class="col-row"><div class="col-pk">PK</div><div class="col-name">video_url_hash</div><div class="col-type">char(64)</div><div class="col-desc">URL の SHA256（重複排除）</div></div>
+  <div class="col-row"><div></div><div class="col-name">platform</div><div class="col-type">enum</div><div class="col-desc">tiktok / shorts / reels</div></div>
+  <div class="col-row"><div></div><div class="col-name">eg_data</div><div class="col-type">jsonb</div><div class="col-desc">再生/いいね/保存/コメント</div></div>
+  <div class="col-row"><div></div><div class="col-name">six_axis</div><div class="col-type">jsonb</div><div class="col-desc">6観点の構造化結果</div></div>
+  <div class="col-row"><div class="col-vec">VEC</div><div class="col-name">embedding</div><div class="col-type">vector(1536)</div><div class="col-desc">フック+表現の埋め込み</div></div>
+  <div class="col-row"><div></div><div class="col-name">analyzed_at</div><div class="col-type">timestamptz</div><div class="col-desc">分析実行時刻</div></div>
+</div>
+
+<div class="schema-table">
+  <div class="tbl-name">📋 mail_excerpts — メール文脈（他人参照含む）</div>
+  <div class="col-row header"><div></div><div>Column</div><div>Type</div><div>Description</div></div>
+  <div class="col-row"><div class="col-pk">PK</div><div class="col-name">id</div><div class="col-type">uuid</div><div class="col-desc">excerpt ID</div></div>
+  <div class="col-row"><div class="col-fk">FK</div><div class="col-name">user_id</div><div class="col-type">text</div><div class="col-desc">所有者の Slack ID</div></div>
+  <div class="col-row"><div></div><div class="col-name">gmail_msg_id</div><div class="col-type">text</div><div class="col-desc">Gmail message ID</div></div>
+  <div class="col-row"><div></div><div class="col-name">excerpt</div><div class="col-type">text</div><div class="col-desc">本文抜粋（PII フィルタ済）</div></div>
+  <div class="col-row"><div class="col-vec">VEC</div><div class="col-name">embedding</div><div class="col-type">vector(1536)</div><div class="col-desc">抜粋の埋め込み</div></div>
+  <div class="col-row"><div></div><div class="col-name">excluded</div><div class="col-type">bool</div><div class="col-desc">opt-out ラベル付きは true</div></div>
+</div>
+
+<div class="schema-table">
+  <div class="tbl-name">📋 audit_log — 監査ログ（90日保持）</div>
+  <div class="col-row header"><div></div><div>Column</div><div>Type</div><div>Description</div></div>
+  <div class="col-row"><div class="col-pk">PK</div><div class="col-name">id</div><div class="col-type">bigserial</div><div class="col-desc">ログ ID</div></div>
+  <div class="col-row"><div></div><div class="col-name">requested_by</div><div class="col-type">text</div><div class="col-desc">依頼者 Slack ID</div></div>
+  <div class="col-row"><div></div><div class="col-name">accessed_user</div><div class="col-type">text</div><div class="col-desc">参照対象（他人メール時）</div></div>
+  <div class="col-row"><div></div><div class="col-name">purpose</div><div class="col-type">text</div><div class="col-desc">機能①〜⑤ のどれか</div></div>
+  <div class="col-row"><div></div><div class="col-name">accessed_at</div><div class="col-type">timestamptz</div><div class="col-desc">アクセス時刻</div></div>
+</div>
+
+<h4>Embedding パイプライン</h4>
+<table class="seq-table">
+  <tr><th class="seq-step">#</th><th class="seq-actor">Actor</th><th class="seq-arrow"></th><th class="seq-target">Target</th><th>動作</th></tr>
+  <tr><td class="seq-step">1</td><td class="seq-actor a-aws">Lambda（バッチ）</td><td class="seq-arrow">→</td><td class="seq-target">Drive / Gmail</td><td>新規ドキュメント取得</td></tr>
+  <tr><td class="seq-step">2</td><td class="seq-actor a-aws">Lambda</td><td class="seq-arrow">→</td><td class="seq-target">PII フィルタ</td><td>個人情報・社外秘マーカーを除去</td></tr>
+  <tr><td class="seq-step">3</td><td class="seq-actor a-aws">Lambda</td><td class="seq-arrow">→</td><td class="seq-target">Anthropic API</td><td>サマリー生成（Sonnet 4.6）</td></tr>
+  <tr><td class="seq-step">4</td><td class="seq-actor a-aws">Lambda</td><td class="seq-arrow">→</td><td class="seq-target">Embedding API</td><td>vector(1536) 生成</td></tr>
+  <tr><td class="seq-step">5</td><td class="seq-actor a-aws">Lambda</td><td class="seq-arrow">→</td><td class="seq-target">RDS pgvector</td><td>UPSERT（ON CONFLICT id DO UPDATE）</td></tr>
+</table>
+
+</section>
+
+
+<!-- ========== 5. 機能別アーキテクチャ ========== -->
+<section id="sec-5">
+<h2><span class="num">5.</span>機能別アーキテクチャ</h2>
+
+<p>
+本章では C3（Component）レベルで5機能のコンポーネント分割と動作シーケンスを示す。Phase 順序（④ → ② → ⑤ → ③ → ①）に従って説明する。
+</p>
+
+<h3 id="sec-5-1"><span class="num">5.1</span>機能④ 動画 URL 分析（Phase 1）</h3>
+
+<h4>コンポーネント図</h4>
+<div class="diagram">
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-input"><div class="dia-icon">💬</div><div class="dia-name">Slack: @TeamAgent + URL</div></div>
+  </div>
+  <div class="dia-arrow">↓</div>
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-label-tiny">Lambda</div><div class="dia-name">Slack Receiver</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-box dia-aws"><div class="dia-icon">📜</div><div class="dia-label-tiny">SQS</div><div class="dia-name">video-jobs</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-label-tiny">Lambda</div><div class="dia-name">Video Analyzer</div></div>
+  </div>
+  <div class="dia-arrow">↓ 並列で 3 経路</div>
+  <div class="dia-row">
+    <div class="dia-box dia-external"><div class="dia-icon">🎬</div><div class="dia-name">VSEO tRPC</div><div class="dia-sub">動画内容分析</div></div>
+    <div class="dia-box dia-external"><div class="dia-icon">📊</div><div class="dia-name">dpro REST</div><div class="dia-sub">消化額・ランキング</div></div>
+    <div class="dia-box dia-external"><div class="dia-icon">⭐</div><div class="dia-name">Buzzmiru</div><div class="dia-sub">保存数（落ちる前提）</div></div>
+  </div>
+  <div class="dia-arrow">↓ 統合・6観点構造化</div>
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-input"><div class="dia-icon">🧠</div><div class="dia-name">Claude SDK + Sonnet 4.6 vision</div></div>
+  </div>
+  <div class="dia-arrow">↓</div>
+  <div class="dia-row">
+    <div class="dia-box dia-data"><div class="dia-icon">🗄</div><div class="dia-name">pgvector: video_meta UPSERT</div></div>
+    <div class="dia-flow-arrow">+</div>
+    <div class="dia-box dia-output"><div class="dia-icon">💬</div><div class="dia-name">Slack: 6観点結果 + 過去事例 Top3</div></div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 5.1.1</span>機能④ コンポーネント図。3並列取得 → Sonnet 4.6 vision で統合 → pgvector 保存 + Slack 返答。</p>
+
+<h4>シーケンス図</h4>
+<table class="seq-table">
+  <tr><th class="seq-step">#</th><th class="seq-actor">Actor</th><th class="seq-arrow"></th><th class="seq-target">Target</th><th>動作 / 所要</th></tr>
+  <tr><td class="seq-step">1</td><td class="seq-actor a-user">営業</td><td class="seq-arrow">→</td><td class="seq-target">Slack</td><td>@TeamAgent + URL（10:14）</td></tr>
+  <tr><td class="seq-step">2</td><td class="seq-actor a-bot">Slack Events</td><td class="seq-arrow">→</td><td class="seq-target">API GW + Lambda</td><td>3秒以内 ack / SQS push</td></tr>
+  <tr><td class="seq-step">3</td><td class="seq-actor a-aws">Video Analyzer</td><td class="seq-arrow">→</td><td class="seq-target">Slack thread</td><td>「了解、約2分で分析」進捗投稿</td></tr>
+  <tr><td class="seq-step">4</td><td class="seq-actor a-aws">Video Analyzer</td><td class="seq-arrow">⇉</td><td class="seq-target">VSEO / dpro / Buzzmiru</td><td>3並列 fetch（30〜60秒）</td></tr>
+  <tr><td class="seq-step">5</td><td class="seq-actor a-aws">Video Analyzer</td><td class="seq-arrow">→</td><td class="seq-target">Anthropic Sonnet 4.6</td><td>vision + 6観点構造化（30〜60秒）</td></tr>
+  <tr><td class="seq-step">6</td><td class="seq-actor a-aws">Video Analyzer</td><td class="seq-arrow">→</td><td class="seq-target">RDS pgvector</td><td>video_meta UPSERT（数秒）</td></tr>
+  <tr><td class="seq-step">7</td><td class="seq-actor a-aws">Video Analyzer</td><td class="seq-arrow">→</td><td class="seq-target">RDS pgvector</td><td>類似事例 Top3 検索（コサイン距離）</td></tr>
+  <tr><td class="seq-step">8</td><td class="seq-actor a-bot">Video Analyzer</td><td class="seq-arrow">→</td><td class="seq-target">Slack chat.update</td><td>結果投稿（10:16・所要 約2分）</td></tr>
+</table>
+
+<h3 id="sec-5-2"><span class="num">5.2</span>機能② Mail ワークフロー（Phase 2）</h3>
+
+<h4>コンポーネント図</h4>
+<div class="diagram">
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-aws"><div class="dia-icon">⏰</div><div class="dia-label-tiny">EventBridge</div><div class="dia-name">cron(0 23 ? * SUN-THU)</div><div class="dia-sub">JST 8:00 平日</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-label-tiny">Lambda</div><div class="dia-name">Mail Worker (fan-out)</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-box dia-aws"><div class="dia-icon">📜</div><div class="dia-label-tiny">SQS</div><div class="dia-name">mail-fanout × 16</div></div>
+  </div>
+  <div class="dia-arrow">↓ 営業1人 = 1 Lambda invoke</div>
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-label-tiny">Lambda</div><div class="dia-name">Mail Worker (per-user)</div></div>
+  </div>
+  <div class="dia-arrow">↓ 並列で 3 操作</div>
+  <div class="dia-row">
+    <div class="dia-box dia-aws"><div class="dia-icon">🔐</div><div class="dia-name">Secrets Manager</div><div class="dia-sub">refresh_token 取得</div></div>
+    <div class="dia-box dia-external"><div class="dia-icon">📧</div><div class="dia-name">Gmail API</div><div class="dia-sub">未返信スレッド一覧</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">🗄</div><div class="dia-name">pgvector</div><div class="dia-sub">類似事例参照</div></div>
+  </div>
+  <div class="dia-arrow">↓</div>
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-input"><div class="dia-icon">🧠</div><div class="dia-name">Claude SDK Sonnet 4.6</div><div class="dia-sub">返信要否判定 + 案A/B/C 生成</div></div>
+  </div>
+  <div class="dia-arrow">↓</div>
+  <div class="dia-row">
+    <div class="dia-box dia-output"><div class="dia-icon">💬</div><div class="dia-name">Slack DM (本人のみ)</div><div class="dia-sub">Block Kit + ボタン</div></div>
+    <div class="dia-flow-arrow">↩ ボタン押下時</div>
+    <div class="dia-box dia-external"><div class="dia-icon">📝</div><div class="dia-name">Gmail drafts.create</div><div class="dia-sub">下書き保存</div></div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 5.2.1</span>機能② コンポーネント図。EventBridge → fan-out × 16 → ユーザー個別 Lambda → Slack DM。深掘りモードはスレッド対話で挿入。</p>
+
+<h4>シーケンス図（深掘りモード含む）</h4>
+<table class="seq-table">
+  <tr><th class="seq-step">#</th><th class="seq-actor">Actor</th><th class="seq-arrow"></th><th class="seq-target">Target</th><th>動作 / 所要</th></tr>
+  <tr><td class="seq-step">1</td><td class="seq-actor a-aws">EventBridge</td><td class="seq-arrow">→</td><td class="seq-target">Mail Worker (root)</td><td>JST 8:00 平日 cron 起動</td></tr>
+  <tr><td class="seq-step">2</td><td class="seq-actor a-aws">Mail Worker (root)</td><td class="seq-arrow">⇉</td><td class="seq-target">SQS × 16</td><td>営業16名分 fan-out</td></tr>
+  <tr><td class="seq-step">3</td><td class="seq-actor a-aws">Mail Worker (per-user)</td><td class="seq-arrow">→</td><td class="seq-target">Secrets Manager</td><td>refresh_token 取得・access_token 発行</td></tr>
+  <tr><td class="seq-step">4</td><td class="seq-actor a-aws">Mail Worker</td><td class="seq-arrow">→</td><td class="seq-target">Gmail API</td><td>「is:unread newer_than:1d label:inbox」検索</td></tr>
+  <tr><td class="seq-step">5</td><td class="seq-actor a-aws">Mail Worker</td><td class="seq-arrow">→</td><td class="seq-target">Anthropic API</td><td>返信要否判定（除外：ニュースレター）</td></tr>
+  <tr><td class="seq-step">6</td><td class="seq-actor a-aws">Mail Worker</td><td class="seq-arrow">→</td><td class="seq-target">Anthropic API</td><td>案 A/B/C ドラフト生成（本人文体反映）</td></tr>
+  <tr><td class="seq-step">7</td><td class="seq-actor a-bot">Mail Worker</td><td class="seq-arrow">→</td><td class="seq-target">Slack DM (本人)</td><td>Block Kit メッセージ + ボタン群</td></tr>
+  <tr><td class="seq-step">8</td><td class="seq-actor a-user">営業</td><td class="seq-arrow">→</td><td class="seq-target">Slack</td><td>「💬 もっと深掘り」ボタン押下（任意）</td></tr>
+  <tr><td class="seq-step">9</td><td class="seq-actor a-aws">Mail Worker (deep)</td><td class="seq-arrow">→</td><td class="seq-target">pgvector + Drive</td><td>過去スレッド・関連提案を参照</td></tr>
+  <tr><td class="seq-step">10</td><td class="seq-actor a-aws">Mail Worker (deep)</td><td class="seq-arrow">⇄</td><td class="seq-target">Slack thread</td><td>1〜5往復で改訂版生成</td></tr>
+  <tr><td class="seq-step">11</td><td class="seq-actor a-aws">Mail Worker</td><td class="seq-arrow">→</td><td class="seq-target">Gmail drafts.create</td><td>本人 Gmail に下書き保存（送信は本人）</td></tr>
+</table>
+
+<h3 id="sec-5-3"><span class="num">5.3</span>機能③ 提案コンテンツ生成（Phase 3）— 5フェーズ詳細</h3>
+
+<h4>コンポーネント図（Composer on Fargate）</h4>
+<div class="diagram">
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-input"><div class="dia-icon">💬</div><div class="dia-name">@TeamAgent 提案書つくって クライアント=... 商材=... URL=...</div></div>
+  </div>
+  <div class="dia-arrow">↓</div>
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-name">Lambda（受信）</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-box dia-aws"><div class="dia-icon">📜</div><div class="dia-name">SQS: composer-jobs</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-box dia-aws"><div class="dia-icon">📦</div><div class="dia-label-tiny">Fargate Task</div><div class="dia-name">Composer</div><div class="dia-sub">所要 5〜30分</div></div>
+  </div>
+  <div class="dia-arrow">↓ 5フェーズ実行</div>
+  <div class="dia-flow">
+    <div class="dia-step"><span class="dia-step-num">A</span><div class="dia-step-name">検索条件設計</div><div class="dia-step-tech">30秒</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">B</span><div class="dia-step-name">並列リサーチ</div><div class="dia-step-tech">5〜10分</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">C</span><div class="dia-step-name">5割版生成</div><div class="dia-step-tech">2〜3分</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">D</span><div class="dia-step-name">対話仕上げ</div><div class="dia-step-tech">5〜15分</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">E</span><div class="dia-step-name">本人最終調整</div><div class="dia-step-tech">10〜30分</div></div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 5.3.1</span>機能③ Composer の5フェーズ実行。Lambda 15分上限を超えるため Fargate Task 採用。Phase D は Slack thread でユーザー対話。</p>
+
+<h4>Phase B 並列リサーチの内部分解</h4>
+<div class="diagram">
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-input"><div class="dia-icon">🎯</div><div class="dia-name">Phase B 起動</div><div class="dia-sub">Composer Fargate</div></div>
+  </div>
+  <div class="dia-arrow">↓ 6 経路 並列実行</div>
+  <div class="dia-row">
+    <div class="dia-box dia-data"><div class="dia-icon">📧</div><div class="dia-name">gmail.search</div><div class="dia-sub">本人 + 他人</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">💬</div><div class="dia-name">slack.search</div><div class="dia-sub">案件チャンネル</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">📁</div><div class="dia-name">drive.fetch</div><div class="dia-sub">過去提案 PDF/pptx</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">🎬</div><div class="dia-name">video.analyze</div><div class="dia-sub">競合動画 Top10</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">🔍</div><div class="dia-name">gemini_dr.query</div><div class="dia-sub">Pattern Bravo+ × 4経路</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">🐦</div><div class="dia-name">x.search</div><div class="dia-sub">ペイン補強</div></div>
+  </div>
+  <div class="dia-arrow">↓ 統合（map-reduce）</div>
+  <div class="dia-row">
+    <div class="dia-box dia-output"><div class="dia-icon">📄</div><div class="dia-name">Phase C: 5割版 .md / .html</div><div class="dia-sub">S3 アップロード</div></div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 5.3.2</span>Phase B の6経路並列リサーチ。各経路は Sonnet 4.6 が独立に要約 → Phase C で統合する map-reduce 構造。</p>
+
+<h4>5フェーズのリソース利用パターン</h4>
+<table>
+  <tr><th>Phase</th><th>動作</th><th>主リソース</th><th>所要</th><th>主要 API コール</th></tr>
+  <tr><td>A：検索条件設計</td><td>クライアント文脈推定 + 検索条件モーダル</td><td>Sonnet 4.6 短文</td><td>30秒</td><td>Anthropic × 1</td></tr>
+  <tr><td>B：並列リサーチ</td><td>6経路 fan-out + 各経路で要約</td><td>Sonnet 4.6 × 6 + Gemini DR + X</td><td>5〜10分</td><td>Anthropic × 12 / Gemini × 1</td></tr>
+  <tr><td>C：5割版生成</td><td>Phase B 結果統合 + .md/.html 生成</td><td>Sonnet 4.6 長文 + S3 PutObject</td><td>2〜3分</td><td>Anthropic × 2</td></tr>
+  <tr><td>D：対話仕上げ</td><td>営業指示反映 → vN+1 を S3 に保存</td><td>Sonnet 4.6 + S3</td><td>5〜15分（5往復）</td><td>Anthropic × 5〜10</td></tr>
+  <tr><td>E：本人最終調整</td><td>営業がローカルで .md/.html を編集</td><td>—</td><td>10〜30分</td><td>—</td></tr>
+</table>
+
+<h3 id="sec-5-4"><span class="num">5.4</span>機能① Slack 自動サジェスト（Phase 4）</h3>
+
+<h4>コンポーネント図（受動監視）</h4>
+<div class="diagram">
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-input"><div class="dia-icon">💬</div><div class="dia-name">Slack channel: 「@田中 BtoB SaaS の事例ある？」</div></div>
+  </div>
+  <div class="dia-arrow">↓ message event（全チャンネル監視）</div>
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-label-tiny">Lambda</div><div class="dia-name">Slack Receiver</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-label-tiny">Lambda</div><div class="dia-name">Suggester</div></div>
+  </div>
+  <div class="dia-arrow">↓ 4ステージ判定</div>
+  <div class="dia-flow">
+    <div class="dia-step"><span class="dia-step-num">1</span><div class="dia-step-name">正規表現フィルタ</div><div class="dia-step-tech">@ + ?</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">2</span><div class="dia-step-name">Haiku 軽量判定</div><div class="dia-step-tech">help-needed?</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">3</span><div class="dia-step-name">pgvector Top3</div><div class="dia-step-tech">cosine</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">4</span><div class="dia-step-name">ephemeral 配信</div><div class="dia-step-tech">本人のみ</div></div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 5.4.1</span>機能① コンポーネント図。受動監視 → 4ステージのカスケードフィルタで誤検知抑制。所要 3〜5秒。</p>
+
+<h3 id="sec-5-5"><span class="num">5.5</span>機能⑤ 営業進捗サマリー（Phase 2.5）</h3>
+
+<h4>コンポーネント図（②インフラ流用）</h4>
+<div class="diagram">
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-aws"><div class="dia-icon">⏰</div><div class="dia-label-tiny">EventBridge</div><div class="dia-name">cron(0 0 ? * MON)</div><div class="dia-sub">JST 月曜 9:00</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-box dia-aws"><div class="dia-icon">⚡</div><div class="dia-label-tiny">Lambda</div><div class="dia-name">Mail Worker（⑤モード）</div></div>
+  </div>
+  <div class="dia-arrow">↓ 16並列収集</div>
+  <div class="dia-row">
+    <div class="dia-box dia-external"><div class="dia-icon">📧</div><div class="dia-name">Gmail × 16名</div><div class="dia-sub">直近2週間スレッド</div></div>
+    <div class="dia-box dia-external"><div class="dia-icon">💬</div><div class="dia-name">Slack × 案件Ch</div><div class="dia-sub">議論履歴</div></div>
+    <div class="dia-box dia-data"><div class="dia-icon">🗄</div><div class="dia-name">pgvector cases</div><div class="dia-sub">過去類似比較</div></div>
+  </div>
+  <div class="dia-arrow">↓ 角度判定（Sonnet 4.6）</div>
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-input"><div class="dia-icon">🧠</div><div class="dia-name">受注角度分類: 🟢高 / 🟡中 / 🔴要フォロー</div></div>
+  </div>
+  <div class="dia-arrow">↓</div>
+  <div class="dia-row">
+    <div class="dia-box dia-output"><div class="dia-icon">💬</div><div class="dia-name">マネージャー DM (個別)</div><div class="dia-sub">Block Kit 角度別グルーピング</div></div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 5.5.1</span>機能⑤ コンポーネント図。機能② のインフラ（Mail Worker / EventBridge / Slack DM）を流用し、最小コストでマネージャー機能を追加。</p>
+
+</section>
+
+
+<!-- ========== 6. データフロー ========== -->
+<section id="sec-6">
+<h2><span class="num">6.</span>データフロー</h2>
+
+<p>
+TeamAgent における「データの流れ」を <strong>取得 → 加工 → 格納 → 参照</strong> の4段階で示す。各機能ごとに、どのデータが新たに pgvector に蓄積され、どのデータが他機能から参照されるかを明示する。
+</p>
+
+<h3>6.1 機能間のデータ流通マトリクス</h3>
+<table>
+  <tr><th>データ生成</th><th>蓄積先</th><th>参照する機能</th></tr>
+  <tr><td>機能④：動画 6観点メタ</td><td>pgvector <code>video_meta</code></td><td>① ③ ⑤</td></tr>
+  <tr><td>機能②：本人メール抜粋</td><td>pgvector <code>mail_excerpts</code></td><td>③ ⑤</td></tr>
+  <tr><td>機能②：他営業メール抜粋（合意済）</td><td>pgvector <code>mail_excerpts</code></td><td>① ③ ⑤</td></tr>
+  <tr><td>機能③：提案案件・成果</td><td>pgvector <code>cases</code></td><td>① ② ⑤</td></tr>
+  <tr><td>機能③：5割版・8割版アーティファクト</td><td>S3 <code>artifacts/</code></td><td>営業本人（再ダウンロード）</td></tr>
+  <tr><td>全機能：監査ログ</td><td>RDS <code>audit_log</code> + CloudWatch Logs</td><td>監査担当（90日保持）</td></tr>
+</table>
+
+<h3>6.2 取得 → 加工 → 格納 → 参照の流れ</h3>
+<div class="diagram">
+  <div class="dia-row">
+    <div class="dia-container" style="flex:1;border-color:#0284c7;background:#f0f9ff">
+      <div class="dia-container-label">① 取得（Source）</div>
+      <ul style="margin-left:20px;font-size:11.5px;line-height:1.6">
+        <li>Slack message event</li>
+        <li>EventBridge cron</li>
+        <li>Gmail API readonly</li>
+        <li>Drive API（新規ファイル）</li>
+        <li>VSEO/dpro/Buzzmiru</li>
+        <li>Gemini DR / X Search</li>
+      </ul>
+    </div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-container" style="flex:1;border-color:#6366f1;background:#eef2ff">
+      <div class="dia-container-label">② 加工（Transform）</div>
+      <ul style="margin-left:20px;font-size:11.5px;line-height:1.6">
+        <li>PII フィルタ</li>
+        <li>opt-out ラベル除外</li>
+        <li>Sonnet 4.6 でサマリー化</li>
+        <li>Embedding 化（vector 1536）</li>
+        <li>6観点 / 案A/B/C / 角度判定</li>
+      </ul>
+    </div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-container" style="flex:1;border-color:#16a34a;background:#f0fdf4">
+      <div class="dia-container-label">③ 格納（Store）</div>
+      <ul style="margin-left:20px;font-size:11.5px;line-height:1.6">
+        <li>pgvector cases / video_meta / mail_excerpts</li>
+        <li>S3 .md / .html / PDF キャッシュ</li>
+        <li>RDS audit_log（90日）</li>
+        <li>CloudWatch Logs（90日）</li>
+      </ul>
+    </div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-container" style="flex:1;border-color:var(--accent);background:#fef2f2">
+      <div class="dia-container-label">④ 参照（Use）</div>
+      <ul style="margin-left:20px;font-size:11.5px;line-height:1.6">
+        <li>機能① 類似事例 Top3</li>
+        <li>機能② 文体パターン</li>
+        <li>機能③ Phase B リサーチ</li>
+        <li>機能④ 過去動画比較</li>
+        <li>機能⑤ 受注角度判定</li>
+      </ul>
+    </div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 6.2</span>4段階データフロー。ペイロードは Embedding まで加工した時点で「会社の脳」として再利用可能になる。</p>
+
+</section>
+
+
+<!-- ========== 7. 外部システム連携 ========== -->
+<section id="sec-7">
+<h2><span class="num">7.</span>外部システム連携</h2>
+
+<h3 id="sec-7-1"><span class="num">7.1</span>Gemini Deep Research（Pattern Bravo+ の4経路冗長化）</h3>
+<p>
+仕様書 v1.5 第11章で確定した <strong>Pattern Bravo+</strong> 方針を継承する。Vertex AI 公式 API を主経路とし、3つの fallback 経路で可用性とクォータ枯渇耐性を確保する。
+</p>
+
+<div class="diagram">
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-input"><div class="dia-icon">📦</div><div class="dia-name">Composer Fargate（Phase B）</div></div>
+  </div>
+  <div class="dia-arrow">↓ Primary</div>
+  <div class="dia-row" style="margin-bottom:8px">
+    <div class="dia-box dia-external" style="border-width:3px"><div class="dia-icon">🔍</div><div class="dia-name">経路 1: Vertex AI Gemini DR</div><div class="dia-sub">公式 API / 主経路</div></div>
+  </div>
+  <div class="dia-arrow">↓ クォータ枯渇 / 障害時 fallback</div>
+  <div class="dia-row">
+    <div class="dia-box dia-external"><div class="dia-icon">🛡</div><div class="dia-name">経路 2: Bedrock Claude WebSearch</div><div class="dia-sub">Anthropic 経由</div></div>
+    <div class="dia-box dia-external"><div class="dia-icon">🌐</div><div class="dia-name">経路 3: Tavily + Brave</div><div class="dia-sub">独立検索 API</div></div>
+    <div class="dia-box dia-external"><div class="dia-icon">🤖</div><div class="dia-name">経路 4: A6X</div><div class="dia-sub">最終 fallback</div></div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 7.1</span>Gemini DR Pattern Bravo+。Vertex AI を主経路、3経路で冗長化。リスク R5（クォータ・料金変動）を緩和。</p>
+
+<h3 id="sec-7-2"><span class="num">7.2</span>動画分析データ層（VSEO + dpro + Buzzmiru、Buzzmiru 不安定への耐性設計）</h3>
+<p>
+3サービスを <strong>論理的に1つのデータ層</strong> として束ね、Video Analyzer Lambda がそのファサード（Adapter Pattern）として振る舞う。<strong>Buzzmiru は不安定（サーバー落ち頻発）</strong> のため、専用の耐性機構を持つ。
+</p>
+
+<div class="data-source-grid">
+  <div class="ds-card ds-video">
+    <div class="ds-icon">🎬</div>
+    <div class="ds-name">VSEO Analytics</div>
+    <div class="ds-desc"><strong>自社運用</strong>・◎ 安定<br>動画内容分析（Sonnet 4.6 vision）<br>tRPC エンドポイント</div>
+  </div>
+  <div class="ds-card ds-video" style="border-top-color:#ca8a04">
+    <div class="ds-icon">📊</div>
+    <div class="ds-name">dpro</div>
+    <div class="ds-desc"><strong>外部 SaaS</strong>・◯ 安定<br>広告消化額・ランキング・台本<br>Firebase REST + Lambda 認証</div>
+  </div>
+  <div class="ds-card ds-video" style="border-top-color:var(--accent)">
+    <div class="ds-icon">⭐</div>
+    <div class="ds-name">Buzzmiru</div>
+    <div class="ds-desc"><strong>外部・△ 不安定</strong><br>保存数（save count）— 代替不可<br>5分死活監視 + 指数バックオフ</div>
+  </div>
+</div>
+
+<h4>Buzzmiru 耐性設計（リスク R2 緩和）</h4>
+<table>
+  <tr><th>機構</th><th>動作</th></tr>
+  <tr><td>5分おき死活監視</td><td>EventBridge cron で <code>HEAD /health</code>。応答 200 = 正常、それ以外 = 障害扱い</td></tr>
+  <tr><td>サーキットブレーカー</td><td>連続3回失敗で OPEN → 後続リクエストは即時失敗（120秒間）</td></tr>
+  <tr><td>指数バックオフ</td><td>失敗時 30s → 1m → 2m → 4m → 8m（max 5回）</td></tr>
+  <tr><td>復旧時自動取得</td><td>HEAD 200 復活時、保留中の動画 URL を pgvector から再フェッチ</td></tr>
+  <tr><td>劣化動作</td><td>Buzzmiru が落ちている時は動画分析を VSEO + dpro のみで返却し、保存数欄は「⏳ 取得中」表示</td></tr>
+</table>
+
+<h3 id="sec-7-3"><span class="num">7.3</span>Google Workspace（Gmail / Drive）</h3>
+
+<table>
+  <tr><th>項目</th><th>Gmail</th><th>Drive</th></tr>
+  <tr><td>認証方式</td><td>OAuth 2.0（営業16名分の refresh token）</td><td>Service Account（社内共有 Drive 内のみ）</td></tr>
+  <tr><td>スコープ</td><td><code>gmail.readonly</code> + <code>gmail.compose</code></td><td><code>drive.readonly</code></td></tr>
+  <tr><td>verification</td><td>不要（internal app）</td><td>不要（SA 単独運用）</td></tr>
+  <tr><td>送信権限</td><td>付与しない（送信は本人のみ）</td><td>—</td></tr>
+  <tr><td>使用機能</td><td>② ③ ⑤</td><td>③</td></tr>
+  <tr><td>レート制限対策</td><td>per-user 250 quota/sec → 1秒1ユーザー fan-out で回避</td><td>Drive API 1,000 quota/100s → S3 キャッシュで再取得削減</td></tr>
+</table>
+
+<h3 id="sec-7-4"><span class="num">7.4</span>Slack Web API</h3>
+
+<table>
+  <tr><th>機能</th><th>主要 API</th><th>備考</th></tr>
+  <tr><td>イベント受信</td><td>Events API（POST → API GW）</td><td>署名検証で偽装防止</td></tr>
+  <tr><td>通常メッセージ</td><td><code>chat.postMessage</code></td><td>機能②③④⑤</td></tr>
+  <tr><td>本人限定メッセージ</td><td><code>chat.postEphemeral</code></td><td>機能①</td></tr>
+  <tr><td>進捗更新</td><td><code>chat.update</code></td><td>機能③④（長時間ジョブ）</td></tr>
+  <tr><td>ボタン応答</td><td>Interactivity（block_actions）</td><td>機能②（A/B/C 選択 / 深掘り）</td></tr>
+  <tr><td>モーダル表示</td><td><code>views.open</code></td><td>機能③ Phase A 検索条件確認</td></tr>
+  <tr><td>ファイル添付</td><td><code>files.upload</code></td><td>機能③ .md / .html 出力</td></tr>
+</table>
+
+</section>
+
+
+<!-- ========== 8. 監視・運用アーキテクチャ ========== -->
+<section id="sec-8">
+<h2><span class="num">8.</span>監視・運用アーキテクチャ</h2>
+
+<p>
+監視は <strong>CloudWatch のみ</strong>（実装計画書 §13）。Sentry / Datadog のような外部 SaaS は不採用とし、コストを抑制する。
+</p>
+
+<h3>8.1 CloudWatch Logs / Alarms 設計</h3>
+<table>
+  <tr><th>監視対象</th><th>メトリクス / ロググループ</th><th>アラーム閾値</th><th>通知先</th></tr>
+  <tr><td>Lambda Errors</td><td><code>AWS/Lambda</code> Errors</td><td>5分間 5件以上</td><td>Slack #teamagent-ops</td></tr>
+  <tr><td>Lambda Duration</td><td><code>AWS/Lambda</code> Duration p99</td><td>p99 &gt; タイムアウト 80%</td><td>Slack #teamagent-ops</td></tr>
+  <tr><td>Fargate Task</td><td><code>ECS</code> RunningTaskCount</td><td>15分以上 STOPPED 連続</td><td>Slack #teamagent-ops</td></tr>
+  <tr><td>RDS</td><td>CPU / Connection / Storage</td><td>CPU &gt; 80% 5分 / Storage &lt; 20%</td><td>Slack #teamagent-ops</td></tr>
+  <tr><td>API Gateway</td><td>5XXError</td><td>5分間 1% 超過</td><td>Slack #teamagent-ops</td></tr>
+  <tr><td>Buzzmiru 死活</td><td>Custom metric: <code>Buzzmiru/Up</code></td><td>連続3回 0</td><td>Slack #teamagent-ops（warn）</td></tr>
+  <tr><td>Anthropic コスト</td><td>Custom metric: <code>Anthropic/DailyCost</code></td><td>1日 ¥5,000 超過</td><td>Slack #teamagent-ops + メール</td></tr>
+  <tr><td>監査ログ容量</td><td>RDS <code>audit_log</code> 行数</td><td>—（日次レポート）</td><td>監査担当への日次サマリー</td></tr>
+</table>
+
+<h3>8.2 SLO / SLI（応答時間・成功率）</h3>
+<div class="slo-grid">
+  <div class="slo-card">
+    <div class="slo-label">月次稼働率</div>
+    <div class="slo-target">99.5<small>%</small></div>
+    <div class="slo-desc">営業時間帯（平日 8:00〜20:00 JST）。Slack 経由で機能が動作する割合</div>
+  </div>
+  <div class="slo-card slo-mid">
+    <div class="slo-label">機能① 応答時間</div>
+    <div class="slo-target">≤5<small>秒</small></div>
+    <div class="slo-desc">message event 受信から ephemeral 表示まで p95</div>
+  </div>
+  <div class="slo-card slo-mid">
+    <div class="slo-label">機能④ 応答時間</div>
+    <div class="slo-target">≤3<small>分</small></div>
+    <div class="slo-desc">URL 受信から 6観点結果投稿まで p95</div>
+  </div>
+  <div class="slo-card slo-low">
+    <div class="slo-label">機能③ Phase B 完走率</div>
+    <div class="slo-target">≥95<small>%</small></div>
+    <div class="slo-desc">5〜10分の並列リサーチが timeout なく完了する割合</div>
+  </div>
+  <div class="slo-card">
+    <div class="slo-label">機能② 朝バッチ完走</div>
+    <div class="slo-target">100<small>%</small></div>
+    <div class="slo-desc">8:30 までに16名全員へ DM 配信完了</div>
+  </div>
+  <div class="slo-card slo-mid">
+    <div class="slo-label">RDS p99 クエリ</div>
+    <div class="slo-target">≤200<small>ms</small></div>
+    <div class="slo-desc">pgvector 類似検索（cosine, 上位3件）</div>
+  </div>
+</div>
+
+<h3>8.3 エラーハンドリング・リトライ戦略</h3>
+<table>
+  <tr><th>失敗種別</th><th>戦略</th><th>最大試行</th></tr>
+  <tr><td>Slack API 5XX</td><td>指数バックオフ（1s → 2s → 4s → 8s）</td><td>4回</td></tr>
+  <tr><td>Anthropic 429（レート制限）</td><td>Retry-After 尊重 + 軽量モデルへフォールバック</td><td>3回</td></tr>
+  <tr><td>Gmail API 503</td><td>指数バックオフ</td><td>3回</td></tr>
+  <tr><td>Gemini DR タイムアウト</td><td>Pattern Bravo+ 次経路へ切替（Vertex → Bedrock → Tavily/Brave → A6X）</td><td>4経路</td></tr>
+  <tr><td>Buzzmiru 障害</td><td>サーキットブレーカー OPEN（120秒）+ 後で再取得（§7.2）</td><td>5回 / 8分</td></tr>
+  <tr><td>RDS 接続障害</td><td>RDS Proxy 経由で接続プール再利用 / Multi-AZ フェイルオーバー（60〜120秒）</td><td>—</td></tr>
+  <tr><td>SQS DLQ</td><td>3回失敗後 DLQ 移送 → 日次レビュー</td><td>3回</td></tr>
+  <tr><td>Fargate Task 異常終了</td><td>1回再起動 → 失敗時 Slack 通知 + 営業に「再試行してください」</td><td>1回</td></tr>
+</table>
+
+</section>
+
+
+<!-- ========== 9. セキュリティアーキテクチャ ========== -->
+<section id="sec-9">
+<h2><span class="num">9.</span>セキュリティアーキテクチャ</h2>
+
+<h3>9.1 認証・認可（OAuth / IAM / Bot Token）</h3>
+<table>
+  <tr><th>レイヤー</th><th>方式</th><th>運用</th></tr>
+  <tr><td>営業 → Slack</td><td>SSO（Workspace 標準）</td><td>会社が既に運用済み</td></tr>
+  <tr><td>Slack Bot → AWS</td><td>Slack 署名検証 + Bot Token</td><td>Bot Token は Secrets Manager で管理</td></tr>
+  <tr><td>AWS → Gmail</td><td>OAuth 2.0（営業16名分 refresh token）</td><td>Internal App / verification 不要</td></tr>
+  <tr><td>AWS → Drive</td><td>Service Account（domain-wide delegation 不使用）</td><td>共有 Drive のみアクセス</td></tr>
+  <tr><td>AWS 内部</td><td>IAM Role（最小権限）</td><td>各 Lambda / Fargate に専用 Role</td></tr>
+  <tr><td>営業 ⇄ TeamAgent</td><td>Slack User ID で本人確認</td><td>OAuth 接続済みフラグを RDS で管理</td></tr>
+</table>
+
+<h3>9.2 データ暗号化（at rest / in transit / KMS）</h3>
+<table>
+  <tr><th>データ</th><th>暗号化方式</th></tr>
+  <tr><td>RDS PostgreSQL（at rest）</td><td>AWS KMS CMK（aws/rds 経由のカスタマー管理キー）</td></tr>
+  <tr><td>Secrets Manager（at rest）</td><td>AWS KMS CMK（aws/secretsmanager 経由）</td></tr>
+  <tr><td>S3（at rest）</td><td>SSE-KMS（CMK）</td></tr>
+  <tr><td>CloudWatch Logs（at rest）</td><td>KMS 暗号化（CMK）</td></tr>
+  <tr><td>API Gateway → Lambda</td><td>HTTPS（TLS 1.2+）</td></tr>
+  <tr><td>Lambda → 外部 API</td><td>HTTPS（TLS 1.2+） / Slack 署名検証</td></tr>
+  <tr><td>Lambda → RDS</td><td>SSL 接続必須（rds.force_ssl=1）</td></tr>
+</table>
+
+<h3>9.3 監査ログ・プライバシー</h3>
+<table>
+  <tr><th>要件</th><th>実装</th></tr>
+  <tr><td>監査ログ（誰が・いつ・誰のデータを）</td><td>RDS <code>audit_log</code>（90日）+ CloudWatch Logs（90日 → S3 Glacier 1年）</td></tr>
+  <tr><td>opt-out 機構</td><td>Gmail ラベル <code>TeamAgent-Exclude</code> 付きスレッドは pgvector に取り込まない（excluded=true）</td></tr>
+  <tr><td>個人 vs 業務メール分離</td><td>送信元ドメイン + 件名キーワードで初期フィルタ。誤判定時の手動再分類 UI を整備</td></tr>
+  <tr><td>退職者対応</td><td>OAuth refresh token 即時失効 + pgvector レコードに退職者フラグ → 参照禁止</td></tr>
+  <tr><td>送信権限なし</td><td>Gmail OAuth スコープに send は含めず、必ず本人が Gmail 上で送信</td></tr>
+  <tr><td>Slack User Token 不使用</td><td>Bot Token のみ。User Token 経由のなりすまし不可</td></tr>
+  <tr><td>PII 検出</td><td>Embedding 生成前に正規表現 + Claude SDK 軽量判定で個人番号・電話番号等をマスク</td></tr>
+</table>
+
+<div class="note warn">
+  <div class="label">⚠️ 他人メール参照について</div>
+  仕様書 §11.1 の通り「会社の脳として AI を駆使する」方針が会社合意済み。実装上は <strong>監査ログ・opt-out・PII フィルタ</strong> の3点をハードな前提条件として組み込む。
+</div>
+
+</section>
+
+
+<!-- ========== 10. 技術スタック一覧 ========== -->
+<section id="sec-10">
+<h2><span class="num">10.</span>技術スタック一覧</h2>
+
+<table>
+  <tr><th>カテゴリ</th><th>採用技術</th><th>用途</th></tr>
+  <tr><td>言語 / ランタイム</td><td>Python 3.12</td><td>Lambda / Fargate / Slack Bolt</td></tr>
+  <tr><td>Slack 連携</td><td>Slack Bolt for Python</td><td>イベント受信・Block Kit・interactivity</td></tr>
+  <tr><td>Agent オーケストレーション</td><td>Claude Agent SDK</td><td>サブエージェント・ツール呼び出し・対話</td></tr>
+  <tr><td>LLM</td><td>Anthropic Claude Sonnet 4.6 / Haiku</td><td>本処理 / 軽量フィルタ・分類</td></tr>
+  <tr><td>LLM fallback</td><td>AWS Bedrock Claude</td><td>Anthropic 直接 API 障害時</td></tr>
+  <tr><td>Deep Research</td><td>Vertex AI Gemini DR + Bedrock + Tavily / Brave + A6X</td><td>Pattern Bravo+ 4経路冗長化</td></tr>
+  <tr><td>埋め込みベクトル</td><td>OpenAI text-embedding-3-small（互換 1536次元）</td><td>pgvector への保存</td></tr>
+  <tr><td>RDB</td><td>PostgreSQL 15 + pgvector 拡張</td><td>RDS db.r7g.large / Multi-AZ</td></tr>
+  <tr><td>コンピュート</td><td>AWS Lambda（Python 3.12）/ ECS Fargate</td><td>短時間ジョブ / 長時間ジョブ</td></tr>
+  <tr><td>キュー</td><td>AWS SQS</td><td>非同期 fan-out</td></tr>
+  <tr><td>スケジューラー</td><td>AWS EventBridge Scheduler</td><td>朝バッチ / 週次 / 死活監視</td></tr>
+  <tr><td>API ゲートウェイ</td><td>AWS API Gateway HTTP API</td><td>Slack Events / OAuth callback</td></tr>
+  <tr><td>シークレット管理</td><td>AWS Secrets Manager + KMS CMK</td><td>OAuth refresh / Bot Token / API キー</td></tr>
+  <tr><td>オブジェクトストレージ</td><td>AWS S3</td><td>提案 .md/.html / Drive キャッシュ</td></tr>
+  <tr><td>監視 / ログ</td><td>AWS CloudWatch Logs / Alarms</td><td>外部 SaaS は不採用</td></tr>
+  <tr><td>IaC</td><td>AWS CDK（TypeScript）</td><td>Phase 1 で雛形整備</td></tr>
+  <tr><td>CI/CD</td><td>GitHub Actions</td><td>Lambda zip / Fargate image push</td></tr>
+  <tr><td>外部 SaaS</td><td>VSEO Analytics（自社）/ dpro / Buzzmiru / Slack Pro</td><td>既存導入済（新規構築なし）</td></tr>
+</table>
+
+</section>
+
+
+<!-- ========== 11. 拡張性とロードマップ ========== -->
+<section id="sec-11">
+<h2><span class="num">11.</span>拡張性とロードマップ</h2>
+
+<p>
+v2.0 のアーキテクチャは <strong>疎結合・サブエージェント追加可能・データ層追加可能</strong> という設計原則で構築されており、v3.0 以降の拡張に対応する余地を残している。
+</p>
+
+<h3>11.1 v3.0 想定の拡張</h3>
+<table>
+  <tr><th>拡張項目</th><th>v2.0 における準備</th><th>追加で必要なもの</th></tr>
+  <tr><td>pptx 出力対応</td><td>S3 アーティファクトバケットがそのまま使える</td><td>python-pptx + テンプレ FMT.pptx + Composer に出力フォーマット選択を追加</td></tr>
+  <tr><td>Algrow（YouTube Shorts 補完）連携</td><td>Video Analyzer のファサード（Adapter）構造</td><td>Algrow API クライアント実装 + 動画分析データ層に4つ目のサブとして追加</td></tr>
+  <tr><td>Mail Agent 強化（自動送信モード）</td><td>OAuth スコープを <code>gmail.compose</code> に限定</td><td>営業ごとの送信ポリシー設定 UI + 全社方針の更新合意</td></tr>
+  <tr><td>マネージャー向け分析 BI</td><td>機能⑤ で角度判定済み</td><td>QuickSight or Streamlit ダッシュボード（pgvector を直接読む）</td></tr>
+  <tr><td>多言語対応（英語クライアント）</td><td>Sonnet 4.6 自体は多言語対応</td><td>プロンプトテンプレ多言語化 + Block Kit i18n</td></tr>
+</table>
+
+<h3>11.2 スケール戦略</h3>
+<table>
+  <tr><th>スケール軸</th><th>v2.0 の余裕</th><th>到達時の対処</th></tr>
+  <tr><td>営業人数</td><td>16名 → 50名まで Lambda 並列で対応可能</td><td>Mail Worker fan-out を Step Functions Map 化 / RDS db.r7g.xlarge 化</td></tr>
+  <tr><td>pgvector 件数</td><td>db.r7g.large で 〜10万件想定</td><td>db.r7g.2xlarge / Aurora PostgreSQL 移行</td></tr>
+  <tr><td>S3 アーティファクト</td><td>無制限</td><td>1年経過でライフサイクル → Glacier</td></tr>
+  <tr><td>Anthropic 月額</td><td>¥85K〜120K（仕様書 §14.2）</td><td>段階的に Haiku で前段フィルタ強化 / プロンプトキャッシュ活用</td></tr>
+  <tr><td>Slack イベント</td><td>標準ワークスペース上限内</td><td>Slack Enterprise Grid 移行</td></tr>
+</table>
+
+<h3>11.3 アーキテクチャ進化シナリオ</h3>
+<div class="diagram">
+  <div class="dia-flow">
+    <div class="dia-step"><span class="dia-step-num">1</span><div class="dia-step-name">v2.0（現在）</div><div class="dia-step-tech">5機能 / Lambda+Fargate</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">2</span><div class="dia-step-name">v2.5</div><div class="dia-step-tech">Algrow / pptx</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">3</span><div class="dia-step-name">v3.0</div><div class="dia-step-tech">Mail 自動送信 / BI</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">4</span><div class="dia-step-name">v3.5</div><div class="dia-step-tech">多言語 / 50名対応</div></div>
+    <div class="dia-flow-arrow">→</div>
+    <div class="dia-step"><span class="dia-step-num">5</span><div class="dia-step-name">v4.0</div><div class="dia-step-tech">Aurora / Step Functions</div></div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 11.3</span>v2.0 を起点としたアーキ進化シナリオ。各ステップで疎結合性を維持し、特定箇所だけを差し替え可能とする。</p>
+
+</section>
+
+
+<!-- ========== 12. 用語集 ========== -->
+<section id="sec-12" class="appendix">
+<h2><span class="num">12.</span>用語集</h2>
+
+<dl class="terms">
+  <dt>C4 model</dt>
+  <dd>Simon Brown が提唱するソフトウェアアーキテクチャ記述法。Context（C1）→ Container（C2）→ Component（C3）→ Code（C4）の4階層で抽象度を整理する。本書は C1〜C3 を扱う。</dd>
+
+  <dt>VPC / サブネット / NAT GW</dt>
+  <dd>AWS のネットワーク構成要素。VPC = 仮想ネットワーク、サブネット = VPC を分割した論理区画、NAT GW = プライベートサブネットからインターネットへ片方向通信を可能にするゲートウェイ。</dd>
+
+  <dt>Multi-AZ</dt>
+  <dd>RDS や Fargate を複数のアベイラビリティゾーンに分散配置する構成。AZ-a 障害時に AZ-c へ自動フェイルオーバーする。</dd>
+
+  <dt>pgvector</dt>
+  <dd>PostgreSQL の拡張機能。vector 型を持ち、コサイン距離・L2距離・内積による類似検索（HNSW / IVFFlat 索引）を提供する。本書では事例・動画・メールの埋め込みを格納する。</dd>
+
+  <dt>Embedding</dt>
+  <dd>テキストや画像を固定次元のベクトルに変換した表現。本書では 1536 次元（OpenAI text-embedding-3-small 互換）を採用。</dd>
+
+  <dt>Claude Agent SDK</dt>
+  <dd>Anthropic が提供する Agent 構築用の SDK。サブエージェント・ツール呼び出し・対話履歴管理を抽象化する。</dd>
+
+  <dt>サブエージェント</dt>
+  <dd>Orchestrator から呼び分けられる個別の Agent。本書では Suggester / Mail Worker / Composer / Video Analyzer の4種を定義する。</dd>
+
+  <dt>Pattern Bravo+</dt>
+  <dd>Gemini Deep Research の冗長化パターン。Vertex AI を主経路、Bedrock Claude WebSearch / Tavily+Brave / A6X を fallback とする4経路構成。</dd>
+
+  <dt>ephemeral</dt>
+  <dd>Slack <code>chat.postEphemeral</code> API で送信される「特定ユーザーにのみ表示」される一時メッセージ。機能① で活用。</dd>
+
+  <dt>Block Kit</dt>
+  <dd>Slack のリッチメッセージ記述形式。section / actions / divider / file / button などのブロックを組み合わせて UI を構築する。</dd>
+
+  <dt>サーキットブレーカー</dt>
+  <dd>連続失敗時に後続呼び出しを即時失敗にする耐障害パターン。Buzzmiru の不安定対策（§7.2）で採用。</dd>
+
+  <dt>5フェーズ生成ワークフロー</dt>
+  <dd>機能③ の動作を Phase A〜E の5段階で表現したもの。検索条件設計 → 並列リサーチ → 5割版生成 → 対話型仕上げ → 営業最終調整。</dd>
+
+  <dt>Internal App（Google Workspace）</dt>
+  <dd>Google Workspace の内部アプリ登録。組織ドメイン内ユーザーのみ利用可能で、Google 側の verification プロセスが不要。</dd>
+
+  <dt>Service Account（GCP）</dt>
+  <dd>人間ユーザーではないアプリケーション用の Google Cloud アカウント。本書では Drive 共有フォルダの読取に使用する。</dd>
+
+  <dt>SLO / SLI</dt>
+  <dd>Service Level Objective / Indicator。SLI = 計測可能なメトリクス（例：応答時間 p95）、SLO = SLI の目標値（例：≤ 5秒）。本書 §8.2 で定義。</dd>
+
+  <dt>map-reduce</dt>
+  <dd>分散処理パターン。Phase B の6並列リサーチ（map）→ Phase C で統合（reduce）の構造で採用。</dd>
+
+  <dt>動画分析データ層</dt>
+  <dd>VSEO Analytics（自社運用）+ dpro + Buzzmiru の3サービスを束ねた論理レイヤー。本書では1つの外部データソースとして扱う。</dd>
+
+  <dt>Adapter Pattern / Facade</dt>
+  <dd>3つの異種 API を1つの統一インターフェース（Video Analyzer Lambda）として扱う設計パターン。Buzzmiru の不安定さを呼び出し側から隠蔽する。</dd>
+</dl>
+
+<h3>12.1 改訂履歴</h3>
+<table>
+  <tr><th>版</th><th>日付</th><th>主な変更点</th></tr>
+  <tr><td>2.0</td><td>2026-05-07</td><td>初版作成。仕様書 v2.0 / 実装計画書 v2.0 と整合。C4 model C1〜C3 で記述。</td></tr>
+</table>
+
+<h3>12.2 関連文書</h3>
+<ul>
+  <li>仕様書：teamagent_overview_v2.0.html（What を扱う）</li>
+  <li>実装計画書：teamagent_implementation_plan_v2.0.html（When / How much を扱う）</li>
+  <li>本書：teamagent_architecture_v2.0.html（How を扱う）</li>
+</ul>
+
+<h3>12.3 一行サマリー</h3>
+<p style="background:var(--bg-soft);padding:16px 20px;border-left:4px solid var(--text);font-size:14px;line-height:1.8">
+TeamAgent v2.0 は AWS <code>ap-northeast-1</code> 上に <strong>Lambda × 4 + Fargate × 1 + RDS db.r7g.large（Multi-AZ）+ EventBridge + Secrets Manager + S3 + SQS + CloudWatch</strong> の9主要サービスで構築する。Slack を唯一の入口とし、Claude Agent SDK が4種のサブエージェント（Suggester / Mail Worker / Composer / Video Analyzer）をオーケストレートする。Gmail OAuth は Internal App として16名分管理し、pgvector が社内ナレッジ DB（cases / video_meta / mail_excerpts / audit_log）の中核を担う。Pattern Bravo+ により Gemini DR を4経路冗長化し、Buzzmiru の不安定性は5分死活監視 + サーキットブレーカーで耐性を確保する。
+</p>
+
+</section>
+
+</main>
+</div>
+
+</body>
+</html>

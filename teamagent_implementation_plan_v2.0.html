@@ -1,0 +1,1786 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 実装計画書 v2.0（コスト + スケジュール）</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+  .hero { background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%); border-radius: 12px; padding: 32px 36px; margin: 24px 0 40px; border: 1px solid var(--border); }
+  .hero-tagline { font-size: 13px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 700; margin-bottom: 8px; }
+  .hero-headline { font-size: 26px; font-weight: 700; line-height: 1.4; margin-bottom: 24px; color: var(--text); }
+  .hero-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; }
+  .hero-stat { background: rgba(255,255,255,0.85); border-radius: 10px; padding: 16px 18px; border: 1px solid var(--border); }
+  .hero-stat-num { font-size: 32px; font-weight: 800; color: var(--accent); line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .hero-stat-num small { font-size: 16px; color: var(--text-muted); font-weight: 600; margin-left: 2px; }
+  .hero-stat-label { font-size: 11px; color: var(--text-muted); margin-top: 6px; line-height: 1.4; }
+
+  .phase-track { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin: 20px 0 8px; }
+  .phase-block { border-radius: 8px; padding: 14px 12px; border: 2px solid; background: white; text-align: center; }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num { font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+  .phase-block .phase-name { font-size: 13px; font-weight: 700; line-height: 1.3; margin-bottom: 4px; }
+  .phase-block .phase-period { font-size: 11px; color: var(--text-muted); }
+
+  .cost-chart { margin: 16px 0 8px; }
+  .cost-row { display: grid; grid-template-columns: 200px 1fr 110px; gap: 12px; align-items: center; margin-bottom: 8px; font-size: 13px; }
+  .cost-label { font-weight: 600; }
+  .cost-bar-bg { background: var(--bg-soft); border-radius: 4px; height: 26px; overflow: hidden; }
+  .cost-bar-fill { height: 100%; border-radius: 4px; display:flex; align-items:center; padding-left:8px; color:white; font-size:11px; font-weight:700; }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); color:#5b3000; }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value { font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; }
+
+  .gantt { margin: 20px 0 8px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 12px; }
+  .gantt-header { display: grid; grid-template-columns: 200px repeat(6, 1fr); background: var(--bg-soft); border-bottom: 1px solid var(--border); font-weight: 700; }
+  .gantt-header > div { padding: 10px 8px; border-right: 1px solid var(--border); text-align: center; font-size: 11px; color: var(--text-muted); }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row { display: grid; grid-template-columns: 200px repeat(6, 1fr); border-bottom: 1px solid var(--border); height: 50px; align-items: center; }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name { padding: 8px 12px; border-right: 1px solid var(--border); font-weight: 600; font-size: 12px; background: white; height: 100%; display: flex; align-items: center; }
+  .gantt-cells { grid-column: 2 / -1; display: grid; grid-template-columns: repeat(6, 1fr); height: 100%; position: relative; }
+  .gantt-cells > .gc { border-right: 1px dashed var(--border); height: 100%; }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar { position: absolute; top: 10px; bottom: 10px; border-radius: 4px; color: white; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; padding: 0 8px; }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  .month-dash {
+    display: grid;
+    grid-template-columns: 130px repeat(6, 1fr);
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 16px 0;
+    font-size: 12px;
+  }
+  .month-dash .dash-cell {
+    padding: 12px 10px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: white;
+  }
+  .month-dash .dash-cell:nth-child(7n) { border-right: 0; }
+  .month-dash .dash-row-last { border-bottom: 0; }
+  .month-dash .dash-header {
+    background: var(--bg-soft);
+    font-weight: 700;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .month-dash .dash-row-label {
+    background: var(--bg-soft);
+    font-weight: 700;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 12px 10px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .month-dash .dash-month-num {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--text);
+    text-align: center;
+  }
+  .month-dash .dash-phase-tag {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .month-dash .dash-phase-tag.p1 { background: #eef2ff; color: #4338ca; }
+  .month-dash .dash-phase-tag.p2 { background: #dbeafe; color: #1d4ed8; }
+  .month-dash .dash-phase-tag.p25 { background: #fef3c7; color: #ca8a04; }
+  .month-dash .dash-phase-tag.p3 { background: #dcfce7; color: #16a34a; }
+  .month-dash .dash-phase-tag.p4 { background: #fee2e2; color: #B91C1C; }
+  .month-dash .dash-cost {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    color: var(--text);
+    text-align: right;
+  }
+  .month-dash .dash-cost.dev { color: #6366f1; }
+  .month-dash .dash-cost.run { color: #16a34a; }
+  .month-dash .dash-cost.total { color: var(--accent); font-size: 14px; }
+
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+
+  .total-callout {
+    background: linear-gradient(135deg, #1f2937 0%, #374151 100%);
+    color: white;
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0;
+    text-align: center;
+  }
+  .total-callout .tc-label {
+    font-size: 12px;
+    color: #9ca3af;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px;
+  }
+  .total-callout .tc-amount {
+    font-size: 56px;
+    font-weight: 800;
+    line-height: 1;
+    color: white;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .total-callout .tc-amount small {
+    font-size: 24px;
+    color: #9ca3af;
+    font-weight: 600;
+  }
+  .total-callout .tc-detail {
+    font-size: 13px;
+    color: #d1d5db;
+    margin-top: 12px;
+  }
+</style>
+</head>
+<body>
+
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>実装計画書 v2.0</div>
+  <div class="sidebar-doc-meta">
+    Version 2.0<br>
+    2026年5月7日<br>
+    コスト + スケジュール
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1 highlight-section"><a href="#sec-1"><span class="num">1.</span>エグゼクティブサマリー</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>総額・期間・前提</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>コスト構成（一目）</a></li>
+
+    <li class="level-1"><a href="#sec-2"><span class="num">2.</span>コスト構造</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>4種類のコスト</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>含まないもの（社内既契約等）</a></li>
+    <li class="level-2"><a href="#sec-2-3"><span class="num">2.3</span>一時費用</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>Phase 別計画</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>Phase 1（機能④ 動画 URL 分析）</a></li>
+    <li class="level-2"><a href="#sec-3-2"><span class="num">3.2</span>Phase 2（機能② Mail ワークフロー）</a></li>
+    <li class="level-2"><a href="#sec-3-3"><span class="num">3.3</span>Phase 2.5（機能⑤ 進捗サマリー）</a></li>
+    <li class="level-2"><a href="#sec-3-4"><span class="num">3.4</span>Phase 3（機能③ 提案コンテンツ生成）</a></li>
+    <li class="level-2"><a href="#sec-3-5"><span class="num">3.5</span>Phase 4（機能① Slack 自動サジェスト）</a></li>
+
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>スケジュール（ガント）</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-5"><span class="num">5.</span>総額見積</a></li>
+    <li class="level-2"><a href="#sec-5-1"><span class="num">5.1</span>開発期間トータル（6ヶ月）</a></li>
+    <li class="level-2"><a href="#sec-5-2"><span class="num">5.2</span>本番運用 月次（フル稼働後）</a></li>
+
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>前提条件と要相談項目</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-7"><span class="num">7.</span>🆕 月次ダッシュボード</a></li>
+    <li class="level-2"><a href="#sec-7-1"><span class="num">7.1</span>累積コスト推移</a></li>
+    <li class="level-2"><a href="#sec-7-2"><span class="num">7.2</span>本番運用への移行</a></li>
+    <li class="level-1"><a href="#sec-8"><span class="num">8.</span>付録</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">実装計画書 v2.0（コスト + スケジュール）</div>
+  <h1>TeamAgent 実装計画書 v2.0<br>Phase 別コストとスケジュール</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>実装計画書（仕様書 v2.0 と対をなす別冊）</td></tr>
+    <tr><td>バージョン</td><td>2.0</td></tr>
+    <tr><td>作成日</td><td>2026年5月7日</td></tr>
+    <tr><td>位置付け</td><td>仕様書 v2.0 で定義した5機能 / 5データ層 / 4共通基盤を Phase 1〜4（+ 2.5）で6ヶ月かけて実装する計画。Phase 別の期間・成果物・コスト試算と、合計額を提示する。</td></tr>
+    <tr><td>関連文書</td><td>仕様書 v2.0（teamagent_overview_v2.0.html）</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">Implementation Plan at a Glance</div>
+  <div class="hero-headline">FDE 1名 + Claude Code で<br>6ヶ月・月次¥100K前後のフル稼働を目指す</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">6<small>ヶ月</small></div>
+      <div class="hero-stat-label">開発期間（Phase 1 → 4 + 2.5）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">¥540K<small>〜625K</small></div>
+      <div class="hero-stat-label">開発期間中の総コスト（CC + AWS + API）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">¥95K<small>〜105K</small></div>
+      <div class="hero-stat-label">本番運用 月次（フル稼働後）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">5<small>機能</small></div>
+      <div class="hero-stat-label">動画分析・Mail・進捗・提案・サジェスト</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 1. エグゼクティブサマリー ========== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>エグゼクティブサマリー</h2>
+
+<div class="total-callout">
+  <div class="tc-label">Total Project Cost (Development 6 months)</div>
+  <div class="tc-amount">¥540K<small>〜¥625K</small></div>
+  <div class="tc-detail">本番運用 月次：<strong style="color:white">¥95K〜¥105K / 月</strong>（v1.5 上限 ¥250K の40〜42%）</div>
+</div>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>総額・期間・前提</h3>
+<table>
+  <tr><th>項目</th><th>値</th></tr>
+  <tr><td>開発期間</td><td><strong>6ヶ月</strong>（Phase 1: 1ヶ月 → 2: 1.5ヶ月 → 2.5: 0.5ヶ月 → 3: 2ヶ月 → 4: 1ヶ月）</td></tr>
+  <tr><td>開発期間中の総コスト</td><td><strong>¥540,000 〜 ¥625,000</strong>（Claude Code + AWS Large + Anthropic + Gemini + 段階的ランニング）</td></tr>
+  <tr><td>本番運用 月次（フル稼働後）</td><td><strong>¥95,000 〜 ¥105,000 / 月</strong>（v1.5 上限 ¥250K の約40%）</td></tr>
+  <tr><td>営業時間の削減（目安）</td><td>機能③ で 1案件 20h → 8〜12h 想定（月80件 × 営業16名 × 5件 想定の場合）。実測値は Phase 3 完了後に検証する。</td></tr>
+  <tr><td>主担当</td><td>FDE（個人 Claude Code 契約 $200/月）</td></tr>
+</table>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>コスト構成（バーチャート）</h3>
+<p>本番運用 月次（高位想定 ¥105K）の内訳：</p>
+
+<div class="cost-chart">
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-aws">AWS</span> インフラ</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill aws" style="width: 38%">¥40K（38%）</div></div>
+    <div class="cost-value">¥35K〜40K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-anthropic">Anthropic</span> Claude API</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill anthropic" style="width: 38%">¥40K（38%）</div></div>
+    <div class="cost-value">¥35K〜40K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-gemini">Gemini</span> DR API</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill gemini" style="width: 23%">¥25K（23%）</div></div>
+    <div class="cost-value">¥22K〜25K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill">Embedding</span> その他</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill other" style="width: 1%"></div></div>
+    <div class="cost-value">¥1.5K</div>
+  </div>
+</div>
+
+<table style="margin-top:24px">
+  <tr><th>カテゴリ</th><th>開発6ヶ月総額</th><th>本番月次</th><th>備考</th></tr>
+  <tr><td><span class="pill p-aws">AWS</span> インフラ（Large 級）</td><td>¥160,000〜175,000</td><td>¥35,000〜40,000</td><td>db.r7g.large + Lambda + S3 + CloudWatch 等</td></tr>
+  <tr><td><span class="pill p-anthropic">Anthropic</span> Claude API</td><td>¥130,000〜150,000</td><td>¥35,000〜40,000</td><td>SDK 経由の生成・対話</td></tr>
+  <tr><td><span class="pill p-gemini">Gemini</span> API（DR + Embedding）</td><td>¥60,000〜90,000</td><td>¥22,500〜26,500</td><td>Phase 3 から本格利用</td></tr>
+  <tr><td><span class="pill p-cc">Claude Code</span>（個人）</td><td>¥180,000</td><td>—</td><td>$200/月 × 6ヶ月、開発期間のみ</td></tr>
+  <tr><td>OAuth 検証一時費用</td><td>¥0〜30,000</td><td>—</td><td>社内 Workspace 内なら ¥0、外部公開なら有料</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>合計</td><td><strong>¥530,000〜625,000</strong></td><td><strong>¥92,500〜106,500</strong></td><td>—</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 1.1</span>カテゴリ別コスト総覧。AWS は db.r7g.large 級を想定して見積を引き上げ済み。</p>
+
+</section>
+
+<!-- ========== 2. コスト構造 ========== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>コスト構造</h2>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>4種類のコスト</h3>
+<table>
+  <tr><th>#</th><th>カテゴリ</th><th>支払先</th><th>性質</th></tr>
+  <tr><td>①</td><td>AWS インフラ</td><td>AWS（USD 月次請求）</td><td>従量課金。使用量で増減</td></tr>
+  <tr><td>②</td><td>Anthropic Claude API</td><td>Anthropic（USD 月次）</td><td>従量課金。token 使用量</td></tr>
+  <tr><td>③</td><td>Gemini API</td><td>Google Cloud（USD 月次）</td><td>従量課金。DR は1タスク $1〜$3</td></tr>
+  <tr><td>④</td><td>Claude Code</td><td>Anthropic（個人サブスク $200/月）</td><td>固定。FDE 個人契約。開発期間中のみ</td></tr>
+</table>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>含まないもの（社内既契約等）</h3>
+<table>
+  <tr><th>項目</th><th>状況</th><th>追加コスト</th></tr>
+  <tr><td>Slack Pro plan</td><td>会社で既契約済み</td><td>¥0</td></tr>
+  <tr><td>動画広告プロ（dpro）</td><td>既契約済み</td><td>¥0</td></tr>
+  <tr><td>Buzzmiru</td><td>既契約済み</td><td>¥0</td></tr>
+  <tr><td>Algrow</td><td>v2.0 では一旦スコープアウト</td><td>¥0</td></tr>
+  <tr><td>Bright Data 等プロキシ</td><td>不採用（Buzzmiru 落ちは死活監視で吸収）</td><td>¥0</td></tr>
+  <tr><td>独自ドメイン / SSL</td><td>不要（Slack 内完結）</td><td>¥0</td></tr>
+  <tr><td>監視ツール（Sentry / Datadog）</td><td>不採用（CloudWatch のみ）</td><td>¥0（AWS 内に含む）</td></tr>
+  <tr><td>音声合成 / TTS</td><td>不採用</td><td>¥0</td></tr>
+</table>
+
+<h3 id="sec-2-3"><span class="num">2.3</span>一時費用</h3>
+<table>
+  <tr><th>項目</th><th>金額</th><th>条件</th></tr>
+  <tr><td>Google OAuth verification</td><td>¥0〜30,000</td><td>社内 Workspace 内アプリなら不要。外部公開や CASA 監査要件の場合のみ発生</td></tr>
+  <tr><td>初回環境構築（IAM / VPC 等）</td><td>¥0</td><td>FDE 工数内（時間コストは Claude Code に内包）</td></tr>
+</table>
+</section>
+
+
+<!-- ========== 3. Phase 別計画 ========== -->
+<section id="sec-3">
+<h2><span class="num">3.</span>Phase 別計画</h2>
+
+<h3 id="sec-3-1"><span class="num">3.1</span>Phase 1：機能④ 動画 URL 分析（1ヶ月）</h3>
+
+<h4>成果物</h4>
+<ul>
+  <li>動画分析データ層の統合（VSEO + dpro + Buzzmiru の同一スキーマ化）</li>
+  <li>Slack Bolt 基本実装（メンション受信・リプライ送信）</li>
+  <li>Claude SDK の構造化出力（6観点 JSON）</li>
+  <li>pgvector 雛形（動画メタ + Embedding）</li>
+  <li>AWS 基本構築：Lambda / RDS / API Gateway / Secrets Manager / IAM</li>
+</ul>
+
+<h4>マイルストーン</h4>
+<table class="timeline-table">
+  <tr><th class="col-period">週</th><th>アクション</th></tr>
+  <tr><td class="col-period">Week 1</td><td>AWS アカウント設計 / RDS pgvector 立ち上げ / Slack App 作成</td></tr>
+  <tr><td class="col-period">Week 2</td><td>VSEO tRPC + dpro REST + Buzzmiru API のラッパー Lambda 実装</td></tr>
+  <tr><td class="col-period">Week 3</td><td>Claude SDK で6観点構造化 / pgvector 保存パイプライン</td></tr>
+  <tr><td class="col-period">Week 4</td><td>Slack 統合 / 営業2名で動作確認 / 微調整</td></tr>
+</table>
+
+<h4>コスト試算</h4>
+<table>
+  <tr><th>カテゴリ</th><th>金額</th><th>備考</th></tr>
+  <tr><td>Claude Code</td><td>¥30,000</td><td>$200 × 1ヶ月</td></tr>
+  <tr><td>AWS</td><td>¥10,000〜15,000</td><td>db.r7g.large 立ち上げ初月（軽稼働でも基本料金発生）</td></tr>
+  <tr><td>Anthropic API</td><td>¥3,000〜5,000</td><td>動作確認 + 構造化出力テスト</td></tr>
+  <tr><td>Gemini API</td><td>¥0</td><td>未使用</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>Phase 1 合計</td><td>¥43,000〜50,000</td><td>—</td></tr>
+</table>
+
+<h3 id="sec-3-2"><span class="num">3.2</span>Phase 2：機能② Mail ワークフロー（1.5ヶ月）</h3>
+
+<h4>成果物</h4>
+<ul>
+  <li>Gmail OAuth 16人分のオンボーディング完了</li>
+  <li>EventBridge Cron + Lambda で朝バッチ動作</li>
+  <li>Claude SDK で「返信が必要そう」判定 + 案A/B/C 生成</li>
+  <li>Slack DM + Block Kit ボタン UI</li>
+  <li>Gmail 下書き保存（drafts.create）</li>
+  <li>返信深掘りモード（Slack スレッド対話）</li>
+</ul>
+
+<h4>マイルストーン</h4>
+<table class="timeline-table">
+  <tr><th class="col-period">週</th><th>アクション</th></tr>
+  <tr><td class="col-period">Week 1</td><td>Google OAuth Consent Screen 設計・申請 / Gmail API ラッパー実装</td></tr>
+  <tr><td class="col-period">Week 2</td><td>営業16名のオンボーディングフロー（連携URL一発）構築 / Champion 2名で先行検証</td></tr>
+  <tr><td class="col-period">Week 3</td><td>朝バッチ Lambda + 返信判定 + 案A/B/C 生成プロンプト調整</td></tr>
+  <tr><td class="col-period">Week 4</td><td>Slack DM + ボタン UI / 下書き保存 / 文体学習</td></tr>
+  <tr><td class="col-period">Week 5</td><td>返信深掘りモード（対話型）/ 全16名展開</td></tr>
+  <tr><td class="col-period">Week 6（半月）</td><td>運用安定化 / バグ修正 / プライバシー監査ログ整備</td></tr>
+</table>
+
+<h4>コスト試算</h4>
+<table>
+  <tr><th>カテゴリ</th><th>金額</th><th>備考</th></tr>
+  <tr><td>Claude Code</td><td>¥45,000</td><td>$200 × 1.5ヶ月</td></tr>
+  <tr><td>AWS</td><td>¥30,000〜40,000</td><td>db.r7g.large 稼働 1.5ヶ月分 + Gmail watch / Lambda 増</td></tr>
+  <tr><td>Anthropic API</td><td>¥20,000〜30,000</td><td>朝バッチ × 30日 + 深掘り対話</td></tr>
+  <tr><td>Gemini API</td><td>¥0</td><td>未使用</td></tr>
+  <tr><td>OAuth verification</td><td>¥0〜30,000</td><td>社内 Workspace なら ¥0</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>Phase 2 合計</td><td>¥95,000〜145,000</td><td>—</td></tr>
+</table>
+
+<h3 id="sec-3-3"><span class="num">3.3</span>Phase 2.5：機能⑤ 営業進捗サマリー（0.5ヶ月）</h3>
+
+<h4>成果物</h4>
+<ul>
+  <li>マネージャー向け週次サマリー DM</li>
+  <li>Claude SDK による受注角度判定（高/中/要フォロー）</li>
+  <li>全営業 Mail スレッド + 案件 Slack チャンネルの集約読み込み</li>
+</ul>
+
+<h4>マイルストーン</h4>
+<table class="timeline-table">
+  <tr><th class="col-period">週</th><th>アクション</th></tr>
+  <tr><td class="col-period">Week 1</td><td>角度判定プロンプト設計 / 集約 Lambda 実装</td></tr>
+  <tr><td class="col-period">Week 2（半月）</td><td>マネージャー向け DM フォーマット / 試運用 / 微調整</td></tr>
+</table>
+
+<h4>コスト試算</h4>
+<table>
+  <tr><th>カテゴリ</th><th>金額</th><th>備考</th></tr>
+  <tr><td>Claude Code</td><td>¥15,000</td><td>$200 × 0.5ヶ月</td></tr>
+  <tr><td>AWS</td><td>¥15,000〜18,000</td><td>db.r7g.large 0.5ヶ月分（Phase 2 インフラ流用）</td></tr>
+  <tr><td>Anthropic API</td><td>¥5,000〜8,000</td><td>マネージャー向け週次集約</td></tr>
+  <tr><td>Gemini API</td><td>¥0</td><td>未使用</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>Phase 2.5 合計</td><td>¥35,000〜41,000</td><td>—</td></tr>
+</table>
+
+<h3 id="sec-3-4"><span class="num">3.4</span>Phase 3：機能③ 提案コンテンツ生成（2ヶ月）</h3>
+
+<h4>成果物</h4>
+<ul>
+  <li>Drive API 統合 + 過去提案 PDF/PPTX → pgvector RAG</li>
+  <li>Gemini DR 接続（Pattern Bravo+ の Vertex AI 経路）</li>
+  <li>X 検索ラッパー（オンデマンド）</li>
+  <li>5フェーズ生成ワークフロー（A〜E）</li>
+  <li>Slack スレッド対話型仕上げ（5割→8割）</li>
+  <li>Markdown + HTML 出力（pandoc 変換 + 自社テンプレ CSS）</li>
+</ul>
+
+<h4>マイルストーン</h4>
+<table class="timeline-table">
+  <tr><th class="col-period">週</th><th>アクション</th></tr>
+  <tr><td class="col-period">Week 1〜2</td><td>Drive API 統合 / 過去 PDF 1,500件の Embedding 化</td></tr>
+  <tr><td class="col-period">Week 3</td><td>Gemini DR 接続（Vertex AI Allowlist 申請） / Bedrock Claude WebSearch fallback</td></tr>
+  <tr><td class="col-period">Week 4</td><td>X 検索ラッパー / Phase A（検索条件設計）プロンプト</td></tr>
+  <tr><td class="col-period">Week 5</td><td>Phase B（並列リサーチ） / 結果統合パイプライン</td></tr>
+  <tr><td class="col-period">Week 6</td><td>Phase C（5割版 MD/HTML 生成） / テンプレ CSS 整備</td></tr>
+  <tr><td class="col-period">Week 7</td><td>Phase D（対話型仕上げ） / Slack スレッド管理</td></tr>
+  <tr><td class="col-period">Week 8</td><td>Champion 2名で実案件検証 / 全16名展開準備</td></tr>
+</table>
+
+<h4>コスト試算</h4>
+<table>
+  <tr><th>カテゴリ</th><th>金額</th><th>備考</th></tr>
+  <tr><td>Claude Code</td><td>¥60,000</td><td>$200 × 2ヶ月</td></tr>
+  <tr><td>AWS</td><td>¥70,000〜80,000</td><td>db.r7g.large 2ヶ月 + ストレージ（pgvector 1,500件）+ Drive 連携</td></tr>
+  <tr><td>Anthropic API</td><td>¥50,000〜80,000</td><td>提案生成 100件相当 + 対話 + Embedding</td></tr>
+  <tr><td>Gemini API</td><td>¥45,000〜90,000</td><td>DR 50〜100件 / 月 × $1.5 + Embedding</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>Phase 3 合計</td><td>¥225,000〜310,000</td><td>—</td></tr>
+</table>
+
+<h3 id="sec-3-5"><span class="num">3.5</span>Phase 4：機能① Slack 自動サジェスト（1ヶ月）</h3>
+
+<h4>成果物</h4>
+<ul>
+  <li>Slack 受動監視（チャンネル messages event）</li>
+  <li>2段階検出ロジック（正規表現 → Claude SDK 判定）</li>
+  <li>chat.postEphemeral によるサジェスト配信</li>
+  <li>営業フィードバックでチューニング</li>
+</ul>
+
+<h4>マイルストーン</h4>
+<table class="timeline-table">
+  <tr><th class="col-period">週</th><th>アクション</th></tr>
+  <tr><td class="col-period">Week 1</td><td>Slack messages event 受信 / 正規表現フィルタ実装</td></tr>
+  <tr><td class="col-period">Week 2</td><td>Claude SDK 判定（軽量プロンプト）/ pgvector 類似事例検索</td></tr>
+  <tr><td class="col-period">Week 3</td><td>chat.postEphemeral 配信 / サジェスト粒度調整</td></tr>
+  <tr><td class="col-period">Week 4</td><td>営業フィードバック収集 / 誤検知チューニング / 全機能統合確認</td></tr>
+</table>
+
+<h4>コスト試算</h4>
+<table>
+  <tr><th>カテゴリ</th><th>金額</th><th>備考</th></tr>
+  <tr><td>Claude Code</td><td>¥30,000</td><td>$200 × 1ヶ月</td></tr>
+  <tr><td>AWS</td><td>¥35,000〜40,000</td><td>db.r7g.large フル稼働月 + 監視 Lambda 追加</td></tr>
+  <tr><td>Anthropic API</td><td>¥10,000〜18,000</td><td>判定軽量 + 月数百件想定</td></tr>
+  <tr><td>Gemini API</td><td>¥0</td><td>未使用</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>Phase 4 合計</td><td>¥75,000〜88,000</td><td>—</td></tr>
+</table>
+</section>
+
+
+<!-- ========== 4. スケジュール ========== -->
+<section id="sec-4">
+<h2><span class="num">4.</span>スケジュール（ガント）</h2>
+
+<div class="gantt">
+  <div class="gantt-header">
+    <div>Phase</div>
+    <div>M1</div><div>M2</div><div>M3</div><div>M4</div><div>M5</div><div>M6</div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-name">🎬 P1：機能④ 動画分析</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p1" style="left:0%;width:16.66%">1ヶ月</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-name">📬 P2：機能② Mail</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p2" style="left:16.66%;width:25%">1.5ヶ月</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-name">📊 P2.5：機能⑤ 進捗</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p25" style="left:41.66%;width:8.33%">0.5</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-name">📝 P3：機能③ 提案生成</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p3" style="left:50%;width:33.33%">2ヶ月</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-name">💡 P4：機能① サジェスト</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p4" style="left:83.33%;width:16.66%">1ヶ月</div>
+    </div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 4.1</span>6ヶ月開発ガント。色は機能識別（紫=④, 青=②, 黄=⑤, 緑=③, 赤=①）。</p>
+
+<h4>主要マイルストーン</h4>
+<table class="timeline-table">
+  <tr><th class="col-period">日付</th><th>マイルストーン</th></tr>
+  <tr><td class="col-period">M1 末</td><td>機能④ Champion 2名で稼働開始（オンボーディング1on1）</td></tr>
+  <tr><td class="col-period">M2.5 末</td><td>機能② 全16名 Gmail OAuth 完了 / 朝メール DM 配信開始</td></tr>
+  <tr><td class="col-period">M3 末</td><td>機能⑤ マネージャー向け進捗サマリー稼働</td></tr>
+  <tr class="milestone"><td class="col-period">M5 末</td><td>機能③ Champion 2名で提案書生成検証 / 全16名展開準備</td></tr>
+  <tr><td class="col-period">M6 末</td><td>機能① 全機能稼働 / 本番運用フェーズへ</td></tr>
+</table>
+</section>
+
+<!-- ========== 5. 総額見積 ========== -->
+<section id="sec-5">
+<h2><span class="num">5.</span>総額見積</h2>
+
+<h3 id="sec-5-1"><span class="num">5.1</span>開発期間トータル（6ヶ月）</h3>
+<table>
+  <tr><th>Phase</th><th>期間</th><th>低位</th><th>高位</th></tr>
+  <tr><td>Phase 1（機能④）</td><td>1ヶ月</td><td>¥43,000</td><td>¥50,000</td></tr>
+  <tr><td>Phase 2（機能②）</td><td>1.5ヶ月</td><td>¥95,000</td><td>¥145,000</td></tr>
+  <tr><td>Phase 2.5（機能⑤）</td><td>0.5ヶ月</td><td>¥35,000</td><td>¥41,000</td></tr>
+  <tr><td>Phase 3（機能③）</td><td>2ヶ月</td><td>¥225,000</td><td>¥310,000</td></tr>
+  <tr><td>Phase 4（機能①）</td><td>1ヶ月</td><td>¥75,000</td><td>¥88,000</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>合計</td><td>6ヶ月</td><td><strong>¥473,000</strong></td><td><strong>¥634,000</strong></td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 5.1</span>開発期間6ヶ月の総額。AWS は db.r7g.large 級を想定して引き上げ済み。低位はランニング使用量を控えめに、高位は OAuth verification を含めた最大想定。</p>
+
+<h3 id="sec-5-2"><span class="num">5.2</span>本番運用 月次（フル稼働後）</h3>
+<table>
+  <tr><th>カテゴリ</th><th>低位</th><th>高位</th><th>内訳</th></tr>
+  <tr><td><span class="pill p-aws">AWS</span></td><td>¥35,000</td><td>¥40,000</td><td>RDS <strong>db.r7g.large</strong> / Lambda / S3 / CloudWatch / Secrets Mgr / 転送量</td></tr>
+  <tr><td><span class="pill p-anthropic">Anthropic</span> Claude API</td><td>¥35,000</td><td>¥40,000</td><td>朝メール 16名 × 30日 + 提案 100件/月 + サジェスト + 動画分析</td></tr>
+  <tr><td><span class="pill p-gemini">Gemini</span> DR API</td><td>¥22,500</td><td>¥25,000</td><td>提案書あたり1リサーチ × 100件 × 平均 $1.5</td></tr>
+  <tr><td>Gemini Embedding</td><td>¥0</td><td>¥1,500</td><td>軽微（voyage / OpenAI 代替も可）</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>合計</td><td><strong>¥92,500</strong></td><td><strong>¥106,500</strong></td><td>Claude Code は本番では不要</td></tr>
+</table>
+<p>
+v1.5 で設定した <strong>月次ランニング上限 ¥250K</strong> に対して <strong>40%</strong> 程度に収まる試算。AWS を Large 級に引き上げた現実的な値で、Algrow / Bright Data / 監視ツール等を加えても上限内に十分収まる。
+</p>
+
+</section>
+
+<!-- ========== 6. 前提条件と要相談項目 ========== -->
+<section id="sec-6">
+<h2><span class="num">6.</span>前提条件と要相談項目</h2>
+
+<table>
+  <tr><th>#</th><th>項目</th><th>仮定値</th><th>要相談</th></tr>
+  <tr><td>A1</td><td>営業16名 / マネージャー数名</td><td>仕様書通り</td><td>—</td></tr>
+  <tr><td>A2</td><td>月案件数 / 営業</td><td>5件</td><td>実績次第で見直し</td></tr>
+  <tr><td>A3</td><td>提案書生成 月件数</td><td>80〜100件（16名 × 5件）</td><td>Anthropic API コスト直結</td></tr>
+  <tr><td>A4</td><td>Gemini DR 単価</td><td>平均 $1.5/件（DR と DR Max の混在）</td><td>Public Preview 価格</td></tr>
+  <tr><td>A5</td><td>Anthropic Claude 単価</td><td>Sonnet 4.6 を主軸（一部 Haiku で軽量タスク）</td><td>token 想定の精緻化</td></tr>
+  <tr><td>A6</td><td>Gmail OAuth verification</td><td>社内 Workspace アプリ = ¥0 想定</td><td>外部公開要件があれば +¥30K 想定</td></tr>
+  <tr><td>A7</td><td>RDS インスタンスサイズ</td><td>db.t4g.medium（pgvector 1,500件 + 動画メタ）</td><td>負荷次第で db.r7g.large に上げる可能性</td></tr>
+  <tr><td>A8</td><td>Champion User 人数</td><td>2名（仕様書通り）</td><td>—</td></tr>
+  <tr><td>A9</td><td>Slack Pro plan</td><td>会社で既契約済み（追加コストなし）</td><td>—</td></tr>
+  <tr><td>A10</td><td>dpro / Buzzmiru</td><td>既契約済み（追加コストなし）</td><td>—</td></tr>
+</table>
+
+<div class="note warn">
+  <div class="label">⚠️ 月次ランニング上振れ要因</div>
+  <ul style="margin:0 0 0 20px">
+    <li>提案書件数が想定より多い（月150件など）→ Anthropic + Gemini が比例増加</li>
+    <li>Buzzmiru 障害が長期化し、リトライ回数が増える → AWS 微増</li>
+    <li>Drive 過去提案数が増える（5,000件など）→ RDS スケールアップが必要</li>
+    <li>Phase 4 のサジェスト誤検知率が高い → 削減 / Claude 判定強化で API 増加</li>
+  </ul>
+</div>
+</section>
+
+<!-- ========== 7. 月次ダッシュボード（NEW） ========== -->
+<section id="sec-7">
+<h2><span class="num">7.</span>月次ダッシュボード（開発費 × スケジュール × 維持費 一覧）</h2>
+<p>
+6ヶ月の開発期間を <strong>1ヶ月単位で「何をやって」「いくらかかるか」を一目で把握</strong> できるダッシュボード。各月の Phase・開発費（Claude Code）・維持費（AWS + Anthropic + Gemini）・月計・主要マイルストーンを並列表示する。
+</p>
+
+<div class="month-dash">
+  <div class="dash-cell dash-header"></div>
+  <div class="dash-cell dash-header">M1</div>
+  <div class="dash-cell dash-header">M2</div>
+  <div class="dash-cell dash-header">M3</div>
+  <div class="dash-cell dash-header">M4</div>
+  <div class="dash-cell dash-header">M5</div>
+  <div class="dash-cell dash-header">M6</div>
+
+  <div class="dash-row-label">Phase / 機能</div>
+  <div class="dash-cell"><span class="dash-phase-tag p1">P1</span><br>🎬 ④<br>動画分析</div>
+  <div class="dash-cell"><span class="dash-phase-tag p2">P2前半</span><br>📬 ②<br>Mail OAuth</div>
+  <div class="dash-cell"><span class="dash-phase-tag p2">P2後半</span> + <span class="dash-phase-tag p25">P2.5</span><br>📬②全展開<br>📊⑤進捗</div>
+  <div class="dash-cell"><span class="dash-phase-tag p3">P3前半</span><br>📝 ③<br>Drive+DR</div>
+  <div class="dash-cell"><span class="dash-phase-tag p3">P3後半</span><br>📝 ③<br>対話型仕上げ</div>
+  <div class="dash-cell"><span class="dash-phase-tag p4">P4</span><br>💡 ①<br>サジェスト</div>
+
+  <div class="dash-row-label">開発費<br>（Claude Code）</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+
+  <div class="dash-row-label">AWS<br>（Large）</div>
+  <div class="dash-cell dash-cost run">¥10〜15K</div>
+  <div class="dash-cell dash-cost run">¥18〜25K</div>
+  <div class="dash-cell dash-cost run">¥27〜33K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+
+  <div class="dash-row-label">Anthropic<br>API</div>
+  <div class="dash-cell dash-cost run">¥3〜5K</div>
+  <div class="dash-cell dash-cost run">¥10〜15K</div>
+  <div class="dash-cell dash-cost run">¥15〜25K</div>
+  <div class="dash-cell dash-cost run">¥30〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+
+  <div class="dash-row-label">Gemini<br>API</div>
+  <div class="dash-cell dash-cost run">—</div>
+  <div class="dash-cell dash-cost run">—</div>
+  <div class="dash-cell dash-cost run">—</div>
+  <div class="dash-cell dash-cost run">¥15〜20K</div>
+  <div class="dash-cell dash-cost run">¥22〜25K</div>
+  <div class="dash-cell dash-cost run">¥22〜25K</div>
+
+  <div class="dash-row-label">月次合計</div>
+  <div class="dash-cell dash-cost total">¥43〜50K</div>
+  <div class="dash-cell dash-cost total">¥58〜70K</div>
+  <div class="dash-cell dash-cost total">¥72〜88K</div>
+  <div class="dash-cell dash-cost total">¥110〜130K</div>
+  <div class="dash-cell dash-cost total">¥122〜135K</div>
+  <div class="dash-cell dash-cost total">¥122〜135K</div>
+
+  <div class="dash-row-label dash-row-last">主要MS<br>(マイルストーン)</div>
+  <div class="dash-cell dash-row-last" style="font-size:11px;line-height:1.4">Champion 2名<br>動画分析<br>開始</div>
+  <div class="dash-cell dash-row-last" style="font-size:11px;line-height:1.4">Gmail<br>OAuth<br>16名完了</div>
+  <div class="dash-cell dash-row-last" style="font-size:11px;line-height:1.4">朝メール<br>全16名<br>稼働</div>
+  <div class="dash-cell dash-row-last" style="font-size:11px;line-height:1.4">Drive RAG<br>+ Gemini DR<br>接続完了</div>
+  <div class="dash-cell dash-row-last" style="font-size:11px;line-height:1.4">Champion<br>提案書<br>検証</div>
+  <div class="dash-cell dash-row-last" style="font-size:11px;line-height:1.4">全機能<br>フル稼働</div>
+</div>
+<p class="caption"><span class="fig-num">表 7.1</span>6ヶ月の月次ダッシュボード。開発費（紫）+ 維持費（緑：AWS / Anthropic / Gemini）= 月次合計（赤）の3層構造。</p>
+
+<h3 id="sec-7-1"><span class="num">7.1</span>累積コスト推移</h3>
+<p>各月末時点での累積コスト（低位想定）：</p>
+<table>
+  <tr><th>月末</th><th>その月のコスト</th><th>累積コスト</th><th>累積比率</th></tr>
+  <tr><td>M1 終</td><td>¥43,000</td><td>¥43,000</td><td>9%</td></tr>
+  <tr><td>M2 終</td><td>¥58,000</td><td>¥101,000</td><td>21%</td></tr>
+  <tr><td>M3 終</td><td>¥72,000</td><td>¥173,000</td><td>37%</td></tr>
+  <tr><td>M4 終</td><td>¥110,000</td><td>¥283,000</td><td>60%</td></tr>
+  <tr><td>M5 終</td><td>¥122,000</td><td>¥405,000</td><td>86%</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>M6 終</td><td>¥68,000</td><td><strong>¥473,000</strong></td><td>100%</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 7.2</span>累積コスト推移（低位）。Phase 3（M4-M5）が最大支出期間。M6 は Claude Code 月額 + ランニングのみで実質 P4 開発費分のみ。</p>
+
+<h3 id="sec-7-2"><span class="num">7.2</span>本番運用への移行（M7 以降）</h3>
+<p>M6 終了後、Claude Code（個人開発費）は不要となり、月次は維持費のみに：</p>
+<div class="cost-chart">
+  <div class="cost-row">
+    <div class="cost-label">M1〜M6 平均月次（開発期間）</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill anthropic" style="width: 100%">¥79K平均（高位）</div></div>
+    <div class="cost-value">¥79K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label">M7 以降（本番運用）</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill aws" style="width: 75%">¥95〜105K（フル稼働）</div></div>
+    <div class="cost-value">¥95〜105K</div>
+  </div>
+</div>
+<p>
+※ 本番運用は全機能フル稼働するため、月次は開発期間平均よりも上振れる。維持費の安定額として年¥1,200K（¥100K × 12ヶ月）を見込む。
+</p>
+</section>
+
+<!-- ========== 8. 付録 ========== -->
+<section id="sec-8" class="appendix">
+<h2><span class="num">8.</span>付録</h2>
+
+<h3>8.1 月次運用コスト構造（目安）</h3>
+<p>¥105K/月（高位・本番運用想定）の内訳：</p>
+<div class="cost-chart">
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-aws">AWS</span></div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill aws" style="width: 38%">¥40K（38%）</div></div>
+    <div class="cost-value">¥40K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-anthropic">Anthropic</span></div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill anthropic" style="width: 38%">¥40K（38%）</div></div>
+    <div class="cost-value">¥40K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-gemini">Gemini DR</span></div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill gemini" style="width: 23%">¥25K（23%）</div></div>
+    <div class="cost-value">¥25K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label">Embedding</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill other" style="width: 1%"></div></div>
+    <div class="cost-value">¥1.5K</div>
+  </div>
+</div>
+
+<h3>8.2 v1.5 vs v2.0 の主要差分</h3>
+<table>
+  <tr><th>項目</th><th>v1.5（旧）</th><th>v2.0（新）</th></tr>
+  <tr><td>月次運用想定</td><td>¥250K 上限</td><td>¥95〜105K 想定（AWS Large + Algrow/プロキシ等を外す構成）</td></tr>
+  <tr><td>開発期間</td><td>不明確</td><td>6ヶ月明記</td></tr>
+  <tr><td>機能数</td><td>提案書 + Mail Agent</td><td>5機能明記（4+進捗サマリー）</td></tr>
+  <tr><td>AWS 想定</td><td>—</td><td>db.r7g.large（pgvector + 全機能対応）</td></tr>
+  <tr><td>主担当</td><td>SES + 社内</td><td>FDE 主担当（Claude Code 活用）</td></tr>
+  <tr><td>月次ダッシュボード</td><td>なし</td><td>第7章で月次×項目の一覧化</td></tr>
+</table>
+
+<h3>8.3 一行サマリー</h3>
+<p style="background:var(--bg-soft);padding:16px 20px;border-left:4px solid var(--text);font-size:14px;line-height:1.8">
+TeamAgent v2.0 は <strong>6ヶ月で開発完了、開発総額 ¥473K〜634K、本番月次 ¥95K〜105K</strong> で構築可能。Phase ④→②→③→① の順でインフラを段階的に積み上げ、Phase 2.5 で マネージャー向け進捗サマリー（機能⑤）を②に内包する形で追加。FDE 1名 + Claude Code（個人 $200/月）+ AWS（db.r7g.large）+ Anthropic + Gemini API のシンプルなスタックで、Slack Pro / dpro / Buzzmiru の社内既契約を活用することで追加サブスク不要。
+</p>
+
+</section>
+
+</main>
+</div>
+
+</body>
+</html>
+
