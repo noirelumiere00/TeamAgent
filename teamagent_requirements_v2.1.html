@@ -1,0 +1,2426 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 要件定義書 v2.1</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+    --pri-must: #B91C1C;
+    --pri-should: #ca8a04;
+    --pri-may: #16a34a;
+    --deleted-bg: #f3f4f6;
+    --deleted-text: #9ca3af;
+    --new-bg: #ecfeff;
+    --new-accent: #0e7490;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .toc { list-style: none; }
+  .toc li { margin-bottom: 4px; }
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+  .toc a:hover { color: var(--accent); }
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+  .doc-meta-table { margin-top: 24px; font-size: 13px; }
+  .doc-meta-table td { padding: 4px 16px 4px 0; color: var(--text-muted); }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* 見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+  p { margin-bottom: 14px; }
+  ul, ol { margin: 12px 0 16px 24px; }
+  li { margin-bottom: 6px; }
+  ul.unstyled { list-style: none; margin-left: 0; }
+
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 要件テーブル専用 */
+  table.req {
+    font-size: 12.5px;
+  }
+  table.req th { font-size: 11px; }
+  table.req .col-id { width: 78px; font-family: "JetBrains Mono", monospace; font-size: 11.5px; color: var(--text); font-weight: 700; }
+  table.req .col-title { width: 22%; font-weight: 600; }
+  table.req .col-pri { width: 60px; text-align: center; }
+  table.req .col-accept { width: 32%; }
+  table.req td { padding: 12px 10px; }
+
+  /* 削除済み行 */
+  table.req tr.deleted td {
+    background: var(--deleted-bg);
+    color: var(--deleted-text);
+  }
+  table.req tr.deleted td.col-id {
+    color: var(--deleted-text);
+  }
+  table.req tr.deleted del {
+    text-decoration: line-through;
+    color: var(--deleted-text);
+  }
+  .delete-tag {
+    display: inline-block;
+    background: #e5e7eb;
+    color: #6b7280;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    margin-right: 4px;
+  }
+  .new-tag {
+    display: inline-block;
+    background: var(--new-bg);
+    color: var(--new-accent);
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    margin-right: 4px;
+  }
+  .changed-tag {
+    display: inline-block;
+    background: #fef3c7;
+    color: #ca8a04;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    margin-right: 4px;
+  }
+
+  /* 用語定義 */
+  dl.terms { margin: 16px 0 24px; }
+  dl.terms dt { font-weight: 700; margin-top: 12px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner { background: #f0fdf4; border-left-color: #16a34a; }
+  .note.beginner .label { color: #16a34a; }
+  .note.update { background: #ecfeff; border-left-color: #0e7490; }
+  .note.update .label { color: #0e7490; }
+
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num { font-weight: 700; color: var(--text-muted); margin-right: 8px; }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* ===== ヒーロー（v2.1 流用） ===== */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* Phase track */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period { font-size: 11px; color: var(--text-muted); }
+
+  /* Sprint track（v2.1 新規） */
+  .sprint-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin: 16px 0 24px;
+  }
+  .sprint-card {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--text);
+    border-radius: 6px;
+    padding: 12px 14px;
+    background: white;
+    font-size: 12px;
+  }
+  .sprint-card.s4 { border-left-color: #6366f1; }
+  .sprint-card.s2 { border-left-color: #2563eb; }
+  .sprint-card.s25 { border-left-color: #ca8a04; }
+  .sprint-card.s3 { border-left-color: #16a34a; }
+  .sprint-card.s1 { border-left-color: #B91C1C; }
+  .sprint-card.sf { border-left-color: var(--text); background: var(--bg-soft); }
+  .sprint-card .sp-id {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-muted);
+  }
+  .sprint-card .sp-name {
+    font-size: 13px;
+    font-weight: 700;
+    margin: 2px 0 4px;
+    line-height: 1.3;
+  }
+  .sprint-card .sp-desc {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  /* 機能アイコンカード */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon { font-size: 28px; margin-bottom: 6px; }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* dia-flow */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 優先度バッジ */
+  .pri {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  .pri.must { background: #fee2e2; color: var(--pri-must); }
+  .pri.should { background: #fef3c7; color: var(--pri-should); }
+  .pri.may { background: #dcfce7; color: var(--pri-may); }
+  .pri.deleted { background: var(--deleted-bg); color: var(--deleted-text); }
+
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.f1 { background: #fee2e2; color: #B91C1C; }
+  .pill.f2 { background: #dbeafe; color: #2563eb; }
+  .pill.f3 { background: #dcfce7; color: #16a34a; }
+  .pill.f4 { background: #eef2ff; color: #6366f1; }
+  .pill.f5 { background: #fef3c7; color: #ca8a04; }
+
+  /* 凡例ボックス */
+  .legend-box {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 12px 0 24px;
+    font-size: 12px;
+  }
+  .legend-box .item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* ストーリーカード */
+  .story-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+    margin: 16px 0 24px;
+  }
+  .story-card {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    border-top: 4px solid var(--accent);
+  }
+  .story-card.s-mgr { border-top-color: #2563eb; }
+  .story-card.s-fde { border-top-color: #16a34a; }
+  .story-card .story-role {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .story-card .story-text {
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text);
+  }
+  .story-card .story-text strong { color: var(--accent); }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+  }
+
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>要件定義書</div>
+  <div class="sidebar-doc-meta">
+    Version 2.1<br>
+    2026年5月8日<br>
+    （IBM レビュー反映）
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>本書について</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>目的</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>対象読者</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>関連文書</a></li>
+    <li class="level-2"><a href="#sec-1-4"><span class="num">1.4</span>要件記法と凡例</a></li>
+
+    <li class="level-1"><a href="#sec-2"><span class="num">2.</span>プロジェクトスコープ</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>含むもの（In Scope）</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>含まないもの（Out of Scope）</a></li>
+
+    <li class="level-1"><a href="#sec-3"><span class="num">3.</span>ユーザー要件</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>ペルソナ</a></li>
+    <li class="level-2"><a href="#sec-3-2"><span class="num">3.2</span>営業のユーザーストーリー</a></li>
+    <li class="level-2"><a href="#sec-3-3"><span class="num">3.3</span>マネージャーのユーザーストーリー</a></li>
+    <li class="level-2"><a href="#sec-3-4"><span class="num">3.4</span>FDE / 運用のユーザーストーリー</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-4"><span class="num">4.</span>機能要件（FR）</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>機能① Slack メンション起動</a></li>
+    <li class="level-2"><a href="#sec-4-2"><span class="num">4.2</span>機能② Mail ワークフロー</a></li>
+    <li class="level-2"><a href="#sec-4-3"><span class="num">4.3</span>機能③ 提案コンテンツ生成</a></li>
+    <li class="level-2"><a href="#sec-4-4"><span class="num">4.4</span>機能④ 動画 URL 分析</a></li>
+    <li class="level-2"><a href="#sec-4-5"><span class="num">4.5</span>機能⑤ 営業進捗サマリー</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-5"><span class="num">5.</span>非機能要件（NFR）</a></li>
+    <li class="level-2"><a href="#sec-5-1"><span class="num">5.1</span>性能</a></li>
+    <li class="level-2"><a href="#sec-5-2"><span class="num">5.2</span>可用性 SLO/SLA</a></li>
+    <li class="level-2"><a href="#sec-5-3"><span class="num">5.3</span>セキュリティ</a></li>
+    <li class="level-2"><a href="#sec-5-4"><span class="num">5.4</span>拡張性</a></li>
+    <li class="level-2"><a href="#sec-5-5"><span class="num">5.5</span>運用性</a></li>
+    <li class="level-2"><a href="#sec-5-6"><span class="num">5.6</span>ユーザビリティ</a></li>
+
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>データ要件</a></li>
+    <li class="level-2"><a href="#sec-6-1"><span class="num">6.1</span>pgvector 概念スキーマ</a></li>
+    <li class="level-2"><a href="#sec-6-2"><span class="num">6.2</span>各データ層の格納形式</a></li>
+
+    <li class="level-1"><a href="#sec-7"><span class="num">7.</span>外部連携要件</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-8"><span class="num">8.</span>セキュリティ・プライバシー要件</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-9"><span class="num">9.</span>テスト要件</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-10"><span class="num">10.</span>受入基準（Sprint 別 DoD）</a></li>
+
+    <li class="level-1"><a href="#sec-11"><span class="num">11.</span>制約条件・前提条件</a></li>
+
+    <li class="level-1"><a href="#sec-12"><span class="num">12.</span>用語集</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">要件定義書 v2.1（IBM レビュー反映）</div>
+  <h1>TeamAgent 要件定義書<br><small style="font-size:18px;font-weight:600;color:var(--text-muted)">営業16名 + マネージャー向け Slack AI エージェント</small></h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>要件定義書（Requirements Specification）</td></tr>
+    <tr><td>バージョン</td><td>2.1（IBM シニアエンジニアレビュー反映 / v2.0 仕様書 と整合）</td></tr>
+    <tr><td>作成日</td><td>2026年5月8日</td></tr>
+    <tr><td>位置付け</td><td>v2.0 構想・システム概要仕様書を上位文書とし、機能要件（FR）／非機能要件（NFR）／受入基準を体系化したもの。実装フェーズの DoD（Definition of Done）として参照される。v2.1 では IBM レビューを受け、機能① を「@TeamAgent メンション起動」に転換し、DoD を Sprint 別に細分化した。</td></tr>
+    <tr><td>関連文書</td><td>teamagent_overview_v2.0.html（仕様書）／ teamagent_implementation_plan_v2.0.html（実装計画書）</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">Requirements at a Glance — v2.1</div>
+  <div class="hero-headline">5 機能を支える要件 102 件を、<br>Sprint 別 DoD と優先度付きで体系化</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">40<small>件</small></div>
+      <div class="hero-stat-label">機能要件 FR-1〜FR-5（5機能合計）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">25<small>件</small></div>
+      <div class="hero-stat-label">非機能要件 NFR-01〜NFR-25</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">12<small>件</small></div>
+      <div class="hero-stat-label">セキュリティ要件 SEC-01〜SEC-12</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">10<small>件</small></div>
+      <div class="hero-stat-label">外部連携要件 INT-01〜INT-10</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">17<small>個</small></div>
+      <div class="hero-stat-label">Sprint 別 DoD（DoD-S1〜S17 + Final）</div>
+    </div>
+  </div>
+</div>
+
+<div class="note update">
+  <div class="label">v2.1 改訂サマリー（IBM レビュー反映）</div>
+  <ul style="margin: 4px 0 0 18px;">
+    <li><strong>機能①の根本見直し</strong>：「プロアクティブ受動監視」→「@TeamAgent メンション起動（リアクティブ）」へ転換。FR-1-02/06/07/09 を削除、FR-1-11（意図ルーター）/FR-1-12（slash command）を新規追加。</li>
+    <li><strong>DoD の細分化</strong>：Phase 単位（DoD-P1〜P4）から Sprint 単位（DoD-S1〜S17）へ展開し、各 Sprint の完了条件を次 Sprint 開始の前提条件として明記。</li>
+    <li><strong>テスト要件の Phase 別実施タイミング明示</strong>：TST-01〜10 がどの Sprint で何を検証するかを表に追加。</li>
+  </ul>
+</div>
+
+<!-- ========== 1. 本書について ========== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>本書について</h2>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>目的</h3>
+<p>
+本書は、TeamAgent v2.1 の <strong>機能要件・非機能要件・受入基準</strong> を体系的に定義する。v2.0 仕様書（構想・システム概要）が「何を実現するか」「なぜ必要か」を語るのに対し、本書は <strong>「どのレベルで満たされていれば完了とみなすか」</strong> を測定可能な形で定める。FDE および開発担当者が実装の Definition of Done（DoD）として参照する。v2.1 では IBM シニアエンジニアレビューを反映し、機能①を「@TeamAgent メンション起動」に再定義し、DoD を Sprint 単位に細分化した。
+</p>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>対象読者</h3>
+<table class="kv">
+  <tr><td>FDE / 実装担当</td><td>第4〜10章（要件本体）を主に参照。各 Sprint 終了時に DoD を満たしているかを照合</td></tr>
+  <tr><td>QA / テスト担当</td><td>第4〜5章の受入基準と第9章のテスト要件（Phase 別実施タイミング）を参照</td></tr>
+  <tr><td>マネージャー / プロダクトオーナー</td><td>第2章スコープ、第3章ユーザーストーリー、第10章 Sprint 別 DoD を参照</td></tr>
+  <tr><td>セキュリティ / 法務担当</td><td>第8章セキュリティ・プライバシー要件を参照</td></tr>
+</table>
+
+<h3 id="sec-1-3"><span class="num">1.3</span>関連文書</h3>
+<table>
+  <tr><th>文書名</th><th>役割</th></tr>
+  <tr><td>teamagent_overview_v2.0.html</td><td>構想・システム概要仕様書（上位文書）。本書のすべての要件はこの仕様書の記述と矛盾しない。</td></tr>
+  <tr><td>teamagent_implementation_plan_v2.0.html</td><td>実装計画書（コスト + スケジュール）。本書の Sprint 構成と整合する。</td></tr>
+  <tr><td>v1.5 SDD 04 運用・セキュリティ Runbook</td><td>SLO/SLI 指標の参考元（NFR-09〜NFR-15 の根拠）</td></tr>
+  <tr><td>teamagent_requirements_v2.0.html</td><td>本書の前版。差分は改訂履歴を参照。</td></tr>
+</table>
+
+<h3 id="sec-1-4"><span class="num">1.4</span>要件記法と凡例</h3>
+<p>本書の各要件は、ID・タイトル・詳細・優先度・受入基準の5列表で記述する。</p>
+<table class="kv">
+  <tr><td>FR-X-YY</td><td>機能要件。X は機能番号（1〜5）、YY は連番</td></tr>
+  <tr><td>NFR-YY</td><td>非機能要件（性能・可用性・拡張性・運用性・ユーザビリティ）</td></tr>
+  <tr><td>SEC-YY</td><td>セキュリティ・プライバシー要件</td></tr>
+  <tr><td>DR-YY</td><td>データ要件（pgvector・各データ層の格納形式）</td></tr>
+  <tr><td>INT-YY</td><td>外部連携要件（API 認証・レート制限・フォールバック）</td></tr>
+  <tr><td>TST-YY</td><td>テスト要件（単体・結合・受入・性能・セキュリティ）</td></tr>
+  <tr><td>DoD-SX</td><td>Sprint X の Definition of Done（v2.1 で Phase 単位から Sprint 単位に細分化）</td></tr>
+</table>
+
+<div class="legend-box">
+  <div class="item"><span class="pri must">必須</span> Must — リリース判定の必達条件</div>
+  <div class="item"><span class="pri should">推奨</span> Should — 強く推奨。リリース時に 80% 以上満たすこと</div>
+  <div class="item"><span class="pri may">任意</span> May — 望ましい / 将来対応可</div>
+  <div class="item"><span class="delete-tag">削除</span> v2.1 で削除された要件</div>
+  <div class="item"><span class="new-tag">新規</span> v2.1 で追加された要件</div>
+  <div class="item"><span class="changed-tag">変更</span> v2.1 で内容変更された要件</div>
+</div>
+</section>
+
+
+<!-- ========== 2. プロジェクトスコープ ========== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>プロジェクトスコープ</h2>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>含むもの（In Scope）</h3>
+
+<div class="feature-cards">
+  <div class="feature-card-v2 f4">
+    <div class="fc-icon">🎬</div>
+    <div class="fc-num">機能 ④ ／ Phase 1</div>
+    <div class="fc-name">動画 URL 分析</div>
+    <div class="fc-desc">TikTok / YouTube Shorts URL の 6観点構造化分析（VSEO + dpro + Buzzmiru 統合）</div>
+  </div>
+  <div class="feature-card-v2 f2">
+    <div class="fc-icon">📬</div>
+    <div class="fc-num">機能 ② ／ Phase 2</div>
+    <div class="fc-name">Mail ワークフロー</div>
+    <div class="fc-desc">朝サマリー自動配信 + 案 A/B/C 提示 + 深掘り対話 + Gmail 下書き保存</div>
+  </div>
+  <div class="feature-card-v2 f5">
+    <div class="fc-icon">📊</div>
+    <div class="fc-num">機能 ⑤ ／ Phase 2.5</div>
+    <div class="fc-name">営業進捗サマリー</div>
+    <div class="fc-desc">マネージャー向け週次レポート（受注角度判定・リスク要因抽出）</div>
+  </div>
+  <div class="feature-card-v2 f3">
+    <div class="fc-icon">📝</div>
+    <div class="fc-num">機能 ③ ／ Phase 3</div>
+    <div class="fc-name">提案コンテンツ生成</div>
+    <div class="fc-desc">5フェーズ対話型生成（Markdown / HTML 出力、5割→8割対話仕上げ）</div>
+  </div>
+  <div class="feature-card-v2 f1">
+    <div class="fc-icon">💡</div>
+    <div class="fc-num">機能 ① ／ Phase 4</div>
+    <div class="fc-name">Slack メンション起動 <span class="changed-tag">v2.1 変更</span></div>
+    <div class="fc-desc">@TeamAgent メンションをトリガに、過去事例 Top3 を ephemeral 配信。意図ルーターで機能③へ動線提示。</div>
+  </div>
+</div>
+
+<table>
+  <tr><th>区分</th><th>含むもの</th></tr>
+  <tr><td>ユーザー</td><td>営業16名 + マネージャー数名（Workspace 内 Slack 利用者）</td></tr>
+  <tr><td>プラットフォーム</td><td>Slack（DM / メンション / チャンネル）+ Gmail（OAuth）+ Drive（読み取り）</td></tr>
+  <tr><td>データ層</td><td>Gmail / Slack / Google Drive / 動画分析（VSEO + dpro + Buzzmiru）/ Gemini DR / X</td></tr>
+  <tr><td>共通基盤</td><td>Claude Agent SDK / Gmail OAuth / Slack Bolt / pgvector（RDS PostgreSQL）</td></tr>
+  <tr><td>運用環境</td><td>AWS（Lambda / Fargate / EventBridge / RDS / Secrets Manager / CloudWatch）</td></tr>
+  <tr><td>出力形式（提案）</td><td>Markdown (.md) + HTML (.html) の2形式</td></tr>
+</table>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>含まないもの（Out of Scope）</h3>
+<table>
+  <tr><th>項目</th><th>除外理由 / 将来扱い</th></tr>
+  <tr><td>pptx 形式での提案出力</td><td>初期スコープ外。v3.0 以降で python-pptx + 自社 FMT.pptx で対応予定</td></tr>
+  <tr><td>Algrow との連携</td><td>v2.1 では一旦スコープアウト。Phase 4 完了後に営業ヒアリングで再評価</td></tr>
+  <tr><td>顧客側ユーザー（営業先）への直接対応</td><td>本システムは社内利用専用。顧客対面チャットボットは含まない</td></tr>
+  <tr><td>営業の自動メール送信</td><td>送信は必ず本人実施（OAuth は <code>gmail.compose</code> までで <code>gmail.send</code> は付与しない）</td></tr>
+  <tr><td>顧客 CRM（Salesforce 等）連携</td><td>Phase 1〜4 では連携しない（v3.0 以降で検討）</td></tr>
+  <tr><td>多言語対応</td><td>初期は日本語のみ。英語対応は v3.0 以降</td></tr>
+  <tr><td>モバイル専用 UI</td><td>Slack モバイルアプリ経由のみ。専用ネイティブアプリは作成しない</td></tr>
+  <tr><td>音声・通話の解析</td><td>Phase 1〜4 ではテキストデータのみ扱う</td></tr>
+  <tr><td>機能① の受動監視 <span class="delete-tag">v2.1 削除</span></td><td>v2.0 の <code>message</code> イベント全件監視は IBM レビューで「ノイズ過多・コスト増・誤発火リスク」と判断され、@TeamAgent メンション起動に転換した。</td></tr>
+</table>
+</section>
+
+
+<!-- ========== 3. ユーザー要件 ========== -->
+<section id="sec-3">
+<h2><span class="num">3.</span>ユーザー要件</h2>
+
+<h3 id="sec-3-1"><span class="num">3.1</span>ペルソナ</h3>
+<table>
+  <tr><th>ペルソナ</th><th>役割</th><th>主に使う機能</th><th>1日あたり利用想定</th></tr>
+  <tr><td>営業メンバー（16名）</td><td>クライアント案件のリサーチ・提案・対応</td><td>① ② ③ ④</td><td>機能②（朝1回）+ 機能④（週数回）+ 機能③（月5件）+ 機能①（メンション時のみ）</td></tr>
+  <tr><td>マネージャー（数名）</td><td>営業進捗管理・リスク判断・1on1 準備</td><td>⑤ + ②（自身分）</td><td>機能⑤（週次1回）+ 機能②（毎朝）</td></tr>
+  <tr><td>FDE / 運用担当</td><td>システム運用・監視・トラブル対応</td><td>運用ダッシュボード</td><td>CloudWatch Logs / Alarms 監視</td></tr>
+  <tr><td>セキュリティ / 法務担当</td><td>監査・プライバシー確認</td><td>監査ログ参照</td><td>四半期レビュー時</td></tr>
+</table>
+
+<h3 id="sec-3-2"><span class="num">3.2</span>営業のユーザーストーリー</h3>
+<div class="story-grid">
+  <div class="story-card">
+    <div class="story-role">US-S-01 ／ 営業</div>
+    <div class="story-text">朝出社したら、<strong>その日返信が必要なメールが Slack DM に整理</strong>されているので、5件すべてに対して案 A/B/C を見ながら判断したい。</div>
+  </div>
+  <div class="story-card">
+    <div class="story-role">US-S-02 ／ 営業</div>
+    <div class="story-text">競合動画を Slack に貼って <code>@TeamAgent</code> で <strong>2分以内に 6観点の構造化分析</strong>を受け取り、自分の案件に活かしたい。</div>
+  </div>
+  <div class="story-card">
+    <div class="story-role">US-S-03 ／ 営業</div>
+    <div class="story-text">クライアント名・商材・URL を投げるだけで、<strong>10〜30分で提案書 5割版（MD/HTML）</strong>が出来上がり、対話で 8割まで仕上げたい。</div>
+  </div>
+  <div class="story-card">
+    <div class="story-role">US-S-04 ／ 営業 <span class="changed-tag">v2.1 変更</span></div>
+    <div class="story-text"><code>@TeamAgent 過去のフィットネス事例ある？</code> と呼びかけた瞬間、<strong>過去事例 Top3 が ephemeral で自分にだけ表示</strong>され、必要なら同じ流れで <code>@TeamAgent 提案作って</code> で機能③へ進みたい。</div>
+  </div>
+  <div class="story-card">
+    <div class="story-role">US-S-05 ／ 営業</div>
+    <div class="story-text">朝サマリーで気になるメールに「💬 もっと深掘り」を押し、<strong>「価格根拠を入れて」と指示</strong>するだけで、改訂版の本文が即時に提示されてほしい。</div>
+  </div>
+  <div class="story-card">
+    <div class="story-role">US-S-06 ／ 営業</div>
+    <div class="story-text">プライベートな（家族・私信）メールは、<strong>AI には絶対に読まれたくない</strong>。Gmail ラベルでオプトアウトできるようにしてほしい。</div>
+  </div>
+  <div class="story-card">
+    <div class="story-role">US-S-07 ／ 営業</div>
+    <div class="story-text">提案書の改訂対話は、<strong>5往復程度で完了</strong>し、最終調整は自分の手で行いたい。AI が勝手に完成版を出してこないでほしい。</div>
+  </div>
+  <div class="story-card">
+    <div class="story-role">US-S-08 ／ 営業</div>
+    <div class="story-text">作成された返信ドラフトは <strong>Gmail 下書きフォルダに保存</strong>され、自分で内容確認の上、Gmail から送信したい（自動送信はされたくない）。</div>
+  </div>
+</div>
+
+<h3 id="sec-3-3"><span class="num">3.3</span>マネージャーのユーザーストーリー</h3>
+<div class="story-grid">
+  <div class="story-card s-mgr">
+    <div class="story-role">US-M-01 ／ マネージャー</div>
+    <div class="story-text">月曜朝に <strong>営業16名の案件状況が🟢🟡🔴で集約</strong>された DM が届き、1on1 の準備時間を 1 時間 → 10 分に短縮したい。</div>
+  </div>
+  <div class="story-card s-mgr">
+    <div class="story-role">US-M-02 ／ マネージャー</div>
+    <div class="story-text"><strong>2週間返信なし</strong>などのリスク案件が🔴で自動的に浮上し、見逃しを防ぎたい。</div>
+  </div>
+  <div class="story-card s-mgr">
+    <div class="story-role">US-M-03 ／ マネージャー</div>
+    <div class="story-text">気になる案件は <code>🔍 個別案件を深掘り</code> ボタンで <strong>その営業のメール履歴・Slack 文脈</strong>を一画面で確認したい。</div>
+  </div>
+  <div class="story-card s-mgr">
+    <div class="story-role">US-M-04 ／ マネージャー</div>
+    <div class="story-text">受注角度判定の根拠（どのメール・どの発言を見て判定したか）を <strong>説明可能な形で提示</strong>してほしい。</div>
+  </div>
+  <div class="story-card s-mgr">
+    <div class="story-role">US-M-05 ／ マネージャー</div>
+    <div class="story-text">サマリー配信頻度を <strong>週次 / 日次で切り替え</strong>られ、繁忙期は日次に切り替えたい。</div>
+  </div>
+</div>
+
+<h3 id="sec-3-4"><span class="num">3.4</span>FDE / 運用のユーザーストーリー</h3>
+<div class="story-grid">
+  <div class="story-card s-fde">
+    <div class="story-role">US-F-01 ／ FDE</div>
+    <div class="story-text">月次 API コストを <strong>機能別・営業別に把握</strong>でき、上限超過の予兆をアラートで受け取れるようにしたい。</div>
+  </div>
+  <div class="story-card s-fde">
+    <div class="story-role">US-F-02 ／ FDE</div>
+    <div class="story-text">営業から「変な提案書が出た」と報告された時、<strong>該当の対話履歴とプロンプト</strong>を辿って原因を特定できるようにしたい。</div>
+  </div>
+  <div class="story-card s-fde">
+    <div class="story-role">US-F-03 ／ 運用</div>
+    <div class="story-text">Buzzmiru などの外部 API がダウンしても、<strong>機能全体は縮退運用で稼働</strong>し、自動で復旧時に取得を再開してほしい。</div>
+  </div>
+  <div class="story-card s-fde">
+    <div class="story-role">US-F-04 ／ 運用</div>
+    <div class="story-text">退職者が出た場合、<strong>OAuth refresh token の即時失効と関連レコードのマーキング</strong>を 1 コマンドで実行したい。</div>
+  </div>
+  <div class="story-card s-fde">
+    <div class="story-role">US-F-05 ／ セキュリティ</div>
+    <div class="story-text">「誰のメールが、いつ、誰の依頼で、何のために読まれたか」を <strong>監査ログから 90日間遡って</strong>確認したい。</div>
+  </div>
+</div>
+</section>
+
+
+<!-- ========== 4. 機能要件 ========== -->
+<section id="sec-4">
+<h2><span class="num">4.</span>機能要件（FR）</h2>
+
+<p>各機能の要件を ID 体系（FR-X-YY）で列挙する。各要件には <strong>優先度</strong>（必須 / 推奨 / 任意）と <strong>受入基準</strong>（測定可能な完了条件）を付与する。Phase 順序は ④ → ② → ③ → ①（+ Phase 2.5 で⑤）。</p>
+
+<!-- ========== 4.1 機能① Slack メンション起動 ========== -->
+<h3 id="sec-4-1"><span class="num">4.1</span>機能① Slack メンション起動（FR-1-XX） <span class="changed-tag">v2.1 大幅改定</span></h3>
+<p><span class="pill f1">Phase 4</span><span class="pill">リアクティブ</span><span class="pill">@メンション起動</span><span class="pill">所要 2〜3 秒</span></p>
+<p>v2.0 で「プロアクティブ（受動監視）」だった機能①は、v2.1 で <strong>「リアクティブ（@TeamAgent メンション起動）」</strong> に転換した。営業が <code>@TeamAgent &lt;クエリ&gt;</code> と明示的に呼びかけたときのみ Lambda が起動し、メンション本文から検索クエリを抽出して pgvector で過去事例 Top3 を ephemeral で配信する。さらに「提案を作って」のような意図を検出した場合は機能③（提案生成）にルーティングする。</p>
+
+<div class="note update">
+  <div class="label">v2.1 改訂の根拠（IBM レビュー）</div>
+  <p>v2.0 の <code>message</code> 全件監視は (a) Lambda 起動コストが営業16名 × 数百メッセージ/日で月¥30K規模に膨張、(b) 正規表現フィルタの誤検知（プライベート発言・独り言）への対処が複雑化、(c) 質問者が「呼んでないのに出た」と感じる UX リスク、の3点で問題視された。v2.1 では呼ばれたときのみ動く設計に切り替え、コスト・誤発火・UX を同時に改善する。</p>
+</div>
+
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">FR-1-01 <span class="changed-tag">変更</span></td>
+    <td class="col-title">Slack app_mention イベント受信</td>
+    <td>対象チャンネル（明示的に Bot を追加されたチャンネル）の <code>app_mention</code> イベントを Slack Bolt で受信する。<code>message</code> イベント全件監視は廃止。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">登録済み15チャンネルで @TeamAgent メンション時に 100% Lambda が起動。CloudWatch Logs に受信ログが残る。メンションなしのメッセージでは Lambda は起動しないこと。</td>
+  </tr>
+  <tr class="deleted">
+    <td class="col-id">FR-1-02 <span class="delete-tag">削除</span></td>
+    <td class="col-title"><del>トリガー条件の正規表現フィルタ</del></td>
+    <td><del>(a) @メンション含む、(b) 質問キーワード含む、(c) 業界・案件・商材キーワード含む の3条件を AND 判定する Stage 1 軽量フィルタ。</del><br><strong>v2.1 削除理由：</strong>メンション起動に変更したため、正規表現プリフィルタは不要。意図はクエリ抽出（FR-1-03）と意図ルーター（FR-1-11）で扱う。</td>
+    <td class="col-pri"><span class="pri deleted">削除</span></td>
+    <td class="col-accept">—</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-1-03 <span class="changed-tag">変更</span></td>
+    <td class="col-title">メンション本文からの検索クエリ抽出</td>
+    <td>メンション本文（<code>&lt;@U_TEAMAGENT&gt;</code> を除いた発話部分）から、Claude SDK 軽量モデルで検索クエリを抽出する。例：「過去のフィットネス事例ある？」→ クエリ「フィットネス 事例」。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">クエリ抽出 1.5秒以内・トークン使用量 1リクエスト 200 token 以下。テストケース30件で抽出キーワード一致率 85% 以上。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-1-04</td>
+    <td class="col-title">pgvector 類似事例検索 Top3</td>
+    <td>抽出したクエリを embedding 化し、pgvector で過去事例（提案書・成功事例）を Top3 取得。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">検索レイテンシ 500ms 以下。コサイン類似度 0.7 以上の結果のみ返却（該当なしの場合はサジェスト送信を抑止）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-1-05</td>
+    <td class="col-title">ephemeral 配信</td>
+    <td>Slack <code>chat.postEphemeral</code> API で、メンションした本人にだけ表示されるメッセージを送信する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">他のチャンネルメンバーには 100% 表示されない（Slack UI 検証で確認）。送信遅延 2秒以内（メンション起動の SLO）。</td>
+  </tr>
+  <tr class="deleted">
+    <td class="col-id">FR-1-06 <span class="delete-tag">削除</span></td>
+    <td class="col-title"><del>独り言・挨拶の除外</del></td>
+    <td><del>メンションなしの独り言、挨拶、お礼、クロージング、TeamAgent 自体への質問はサジェストしない。</del><br><strong>v2.1 削除理由：</strong>メンション起動に変更したため、メンションされない発話はそもそも対象外。除外ロジックは不要。</td>
+    <td class="col-pri"><span class="pri deleted">削除</span></td>
+    <td class="col-accept">—</td>
+  </tr>
+  <tr class="deleted">
+    <td class="col-id">FR-1-07 <span class="delete-tag">削除</span></td>
+    <td class="col-title"><del>サジェスト件数上限（5分以内再サジェスト抑制）</del></td>
+    <td><del>同一スレッドで連続発火しないよう、5分以内の再サジェストは抑制する。</del><br><strong>v2.1 削除理由：</strong>メンションのたびに営業が能動的に呼んでいるため、抑制の必要はない。意図的に複数回呼ぶケースがある。</td>
+    <td class="col-pri"><span class="pri deleted">削除</span></td>
+    <td class="col-accept">—</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-1-08</td>
+    <td class="col-title">フィードバック収集</td>
+    <td>サジェストカードに「役に立った / 邪魔だった」のリアクションボタンを添付する。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">クリックされた値が pgvector の <code>suggestion_feedback</code> テーブルに記録される。</td>
+  </tr>
+  <tr class="deleted">
+    <td class="col-id">FR-1-09 <span class="delete-tag">削除</span></td>
+    <td class="col-title"><del>機能オプトアウト</del></td>
+    <td><del>個別ユーザー単位で「サジェスト機能を無効化」できる設定。</del><br><strong>v2.1 削除理由：</strong>メンション起動に変更したため、呼ばなければ動かない。オプトアウト設定は不要。</td>
+    <td class="col-pri"><span class="pri deleted">削除</span></td>
+    <td class="col-accept">—</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-1-10 <span class="changed-tag">変更</span></td>
+    <td class="col-title">機能③への深掘り動線</td>
+    <td>サジェスト末尾に「<strong>提案書を作るなら <code>@TeamAgent 提案作って</code> と呼んでください</strong>」と機能③（提案生成）への明示的な動線を提示する。</td>
+    <td class="col-pri"><span class="pri may">任意</span></td>
+    <td class="col-accept">ephemeral カードの末尾に該当文字列が含まれていること。文言テストで「次のアクションが分かる」と回答する営業 80% 以上。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-1-11 <span class="new-tag">新規</span></td>
+    <td class="col-title">機能①/③ の意図ルーター</td>
+    <td>メンション本文から「事例検索（機能①）」か「提案書作成（機能③）」かを Claude SDK 軽量モデルで判定し、適切な機能にルーティングする。例：<code>@TeamAgent 提案作って</code> → 機能③／<code>@TeamAgent 過去の事例ある？</code> → 機能①。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">テストケース60件（機能①意図30 / 機能③意図30）で意図判定精度 90% 以上、誤ルーティング率 5% 以下。判定 1秒以内。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-1-12 <span class="new-tag">新規</span></td>
+    <td class="col-title">slash command <code>/teamagent recall</code></td>
+    <td>キーワードベースの直接検索コマンド <code>/teamagent recall &lt;kw&gt;</code> をサポートし、メンションが面倒な場合の代替動線を提供する。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">Slack App の slash command 設定が完了。<code>/teamagent recall フィットネス</code> で過去事例 Top3 が ephemeral で 2秒以内に返却される。</td>
+  </tr>
+</table>
+
+<!-- ========== 4.2 機能② Mail ワークフロー ========== -->
+<h3 id="sec-4-2"><span class="num">4.2</span>機能② Mail ワークフロー（FR-2-XX）</h3>
+<p><span class="pill f2">Phase 2</span><span class="pill">毎朝バッチ</span><span class="pill">対話型深掘り</span></p>
+<p>毎朝の Cron で全営業の Gmail を並列スキャンし、返信が必要なメールに対して案 A/B/C を生成、Slack DM で配信。深掘り対話を経て Gmail 下書きに保存する。</p>
+
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-01</td>
+    <td class="col-title">EventBridge Cron 朝バッチ</td>
+    <td>営業日（月〜金）の 8:00 JST に EventBridge から Lambda を起動する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">cron 式 <code>cron(0 23 ? * SUN-THU *)</code>（UTC）で起動。営業日のみ実行。土日祝日は停止可能。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-02</td>
+    <td class="col-title">Gmail スキャン（営業16名並列）</td>
+    <td>各営業の本人 OAuth で「昨日0時以降の新着・自分宛・返信未済」メールを取得。Lambda 並列実行で 16名同時。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">16名のスキャンを 5分以内で完了。Gmail API rate limit に抵触しない（1ユーザー 250 quota units/sec 以下）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-03</td>
+    <td class="col-title">返信要否判定</td>
+    <td>Claude SDK で「返信が必要そうか」を判定。ニュースレター・社内連絡・自動配信は除外。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">テストデータ100件（要返信50・除外50）で精度 85% 以上、誤除外率 10% 以下。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-04</td>
+    <td class="col-title">案 A/B/C ドラフト生成</td>
+    <td>各メールに対して「丁寧お礼系 / 早期ピッチ系 / 日程調整系」など3案を生成する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">3案ともに件名・本文・差出人署名が揃っている。各案の文体が異なり、ボタン UI で選択可能。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-05</td>
+    <td class="col-title">本人文体学習</td>
+    <td>本人の過去送信メール（直近30件）から文体パターン（敬称・改行・締めの言葉）を学習し、ドラフトに反映する。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">同一営業の過去メール5件と AI 生成ドラフト5件を並べ、文体一致度を主観評価で 70% 以上。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-06</td>
+    <td class="col-title">Slack DM 配信</td>
+    <td>各営業の Slack DM に「メール件数 + 案 A/B/C カード + ボタン」を集約配信する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">他営業の DM には絶対に配信されない。Slack Block Kit でカード表現。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-07</td>
+    <td class="col-title">深掘り対話モード</td>
+    <td>「💬 もっと深掘り」ボタン押下時、Slack スレッド内で TeamAgent との対話モードに入る。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">スレッド内で営業が自然言語指示を投げると、30秒以内に改訂版本文が返却される。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-08</td>
+    <td class="col-title">文脈拡張（過去スレッド・他営業同クライアント）</td>
+    <td>深掘り時、過去のメールスレッド・他営業の同クライアント対応・Drive 関連提案を参照する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">参照したソース（メール ID / Drive ファイル ID）を出力末尾に明記する。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-09</td>
+    <td class="col-title">Gmail 下書き保存</td>
+    <td>「📝 Gmail 下書きに保存」ボタンで Gmail API <code>drafts.create</code> を呼び、本人 Gmail の下書きフォルダに保存。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">Gmail Web UI の下書きフォルダに 5秒以内に出現。差出人・宛先・件名・本文が揃っている。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-10</td>
+    <td class="col-title">送信権限の不付与</td>
+    <td>OAuth スコープに <code>gmail.send</code> を含めない。送信は必ず本人 Gmail で実施。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">Google Cloud Console の OAuth 同意画面で <code>gmail.send</code> が要求されないこと。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-11</td>
+    <td class="col-title">Gmail ラベル opt-out</td>
+    <td>Gmail ラベル <code>TeamAgent-Exclude</code> が付いたスレッドは AI スキャン対象外。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">ラベル付きスレッドが Gmail 検索結果から除外される。CloudWatch Logs に「除外件数」が記録される。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-2-12</td>
+    <td class="col-title">配信時刻のカスタマイズ</td>
+    <td>営業個人ごとに配信時刻を 7:00〜10:00 で 30分刻みで設定可能。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept"><code>/teamagent mail time 8:30</code> 等のコマンドで設定可能。設定値は <code>users.mail_dispatch_time</code> に保持。</td>
+  </tr>
+</table>
+
+<!-- ========== 4.3 機能③ 提案コンテンツ生成 ========== -->
+<h3 id="sec-4-3"><span class="num">4.3</span>機能③ 提案コンテンツ生成（FR-3-XX）</h3>
+<p><span class="pill f3">Phase 3</span><span class="pill">5フェーズ対話型</span><span class="pill">所要 10〜30 分</span></p>
+<p>5フェーズ生成ワークフロー（A: 検索条件設計 → B: 並列リサーチ → C: 5割版生成 → D: 対話型仕上げ → E: 営業最終調整）で、Markdown / HTML 提案コンテンツを対話的に生成する。</p>
+
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-01</td>
+    <td class="col-title">Phase A 検索条件設計（30秒）</td>
+    <td>クライアント名・商材・URL から、ターゲット・競合分析範囲・DR テーマ・過去事例検索条件を文脈推定し、営業に確認する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">推定結果が4要素（ターゲット / 競合 / DR / 過去事例）すべて埋まる。OK ボタンで Phase B に進む。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-02</td>
+    <td class="col-title">Phase B 並列リサーチ（5〜10分）</td>
+    <td>Gmail（本人/他人）/ Slack / Drive / 動画分析 / Gemini DR / X を並列でリサーチし、進捗を Slack に逐次表示。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">6データソースすべてで成否が表示される。1ソースが失敗しても他は継続(縮退運用)。最大10分でタイムアウト。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-03</td>
+    <td class="col-title">Phase C 5割版生成（2〜3分）</td>
+    <td>Phase B の収集データを元に、Markdown と HTML の5割版を生成し Slack に添付。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">.md と .html が両方生成される。HTML は社内テンプレ CSS が適用済み。営業が「指摘して」次フェーズへ進める。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-04</td>
+    <td class="col-title">Phase D 対話型仕上げ（5往復）</td>
+    <td>営業の自然言語指示（「②の数字を最新に」「フックを左脳に」「過去 Gamma 案件のテンプレに寄せて」）を反映して 8割版へ。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">5往復以内で 8割版に到達。各往復で版数が更新（v0.5 → v0.6 → ... → v0.8）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-05</td>
+    <td class="col-title">Markdown 出力</td>
+    <td>Claude SDK が中間表現として MD を直接生成。Notion / Confluence に貼り付け可能な構造。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">見出し階層（# / ## / ###）が正しい。表が GFM 形式。Notion 貼り付けでレイアウト崩れがない。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-06</td>
+    <td class="col-title">HTML 出力</td>
+    <td>MD → marked.js または pandoc で変換し、自社テンプレ CSS を適用してリッチプレビュー可能な HTML を生成。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">Slack で「プレビュー」可能。スタイル崩れがない。HTML 単体ファイルとして開ける。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-07</td>
+    <td class="col-title">Drive RAG（過去提案書参照）</td>
+    <td>Google Drive の過去提案 PDF / PPTX を抽出 → embedding → pgvector 保存し、リサーチ時に検索する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">Drive の指定フォルダ（過去提案）の 80% 以上が pgvector に取り込まれる。検索 Top5 の関連性が主観評価で 70%以上。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-08</td>
+    <td class="col-title">Gemini Deep Research 接続</td>
+    <td>Vertex AI Gemini DR API で市場調査・競合分析を実行。Pattern Bravo+（4経路冗長化）で API 障害時もフォールバック。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">Vertex AI / Bedrock / Tavily / Brave のどれかで結果取得成功率 99%以上。失敗時はソースを明示。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-09</td>
+    <td class="col-title">X 検索（ペイン補強）</td>
+    <td>X（旧 Twitter）の検索 API またはラッパーで「世の中のペイン」を補強リサーチ。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">クエリ × 過去30日 × 上位50ツイートを取得。引用元 URL を提案書末尾に明記。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-10</td>
+    <td class="col-title">バージョン管理</td>
+    <td>各往復で版数（v0.5 → v0.6 → ...）を管理し、過去版にロールバック可能。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">Slack スレッドで <code>v0.6 に戻して</code> の指示で前版に戻る。pgvector に全版保持。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-3-11</td>
+    <td class="col-title">pptx 将来対応の拡張点</td>
+    <td>v3.0 で pptx 出力を追加できるよう、内部表現は中立フォーマット（章立て / セクション構造）で保持。</td>
+    <td class="col-pri"><span class="pri may">任意</span></td>
+    <td class="col-accept">中間 JSON スキーマがドキュメント化されており、python-pptx 出力が後付け可能。</td>
+  </tr>
+</table>
+
+<!-- ========== 4.4 機能④ 動画 URL 分析 ========== -->
+<h3 id="sec-4-4"><span class="num">4.4</span>機能④ 動画 URL 分析（FR-4-XX）</h3>
+<p><span class="pill f4">Phase 1</span><span class="pill">リアクティブ</span><span class="pill">所要 1〜3 分</span></p>
+<p>TikTok / YouTube Shorts URL を Slack に投げると、6観点（EG情報・メディア・界隈・フック・訴求軸・CTA・表現）で構造化分析を返す。動画分析データ層（VSEO + dpro + Buzzmiru）を統合。</p>
+
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-01</td>
+    <td class="col-title">URL パターン認識</td>
+    <td>TikTok（<code>tiktok.com/@*/video/*</code>）と YouTube Shorts（<code>youtube.com/shorts/*</code>）の URL を Slack メッセージから抽出する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">テスト URL 50件で抽出精度 100%。不正 URL は静かに無視（エラーは出さない）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-02</td>
+    <td class="col-title">VSEO Analytics 接続</td>
+    <td>VSEO の tRPC 経由で動画内容分析（Sonnet 4.6 ビジョン）・3シークレット重複度を取得する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">VSEO 応答 30秒以内（タイムアウト時は明示エラー）。取得 JSON が想定スキーマに合致。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-03</td>
+    <td class="col-title">dpro データ取得</td>
+    <td>Firebase REST 認証で dpro 内部 API から広告消化額・配信期間・カテゴリ別ランキングを取得する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">指定動画 ID で消化額・期間・カテゴリの3項目が必ず取得できる。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-04</td>
+    <td class="col-title">Buzzmiru 保存数取得（耐性付き）</td>
+    <td>Buzzmiru API で保存数（save count）を取得。サーバー落ち時は 5分おき死活監視 + 復旧時自動取得 + 指数バックオフ。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">Buzzmiru 落ち時、機能④ 全体は縮退運用で完了（保存数欄は <code>取得保留</code> 表記）。復旧後 30 分以内に自動補完される。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-05</td>
+    <td class="col-title">並列データ取得</td>
+    <td>VSEO / dpro / Buzzmiru の3 API を並列実行し、レイテンシを最小化する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">3 API 全体の取得時間が直列実行の 50% 以下。Promise.allSettled 等で並列化。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-06</td>
+    <td class="col-title">6観点構造化出力</td>
+    <td>取得データを Claude SDK で統合し、(1) EG情報 (2) メディア・界隈 (3) フック (4) 訴求軸 (5) CTA (6) 表現 の6観点に整形する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">6観点すべてが返却される。空欄項目は <code>取得不可</code> ではなく、補完または明示。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-07</td>
+    <td class="col-title">pgvector メタ保存</td>
+    <td>分析結果を pgvector の <code>video_meta</code> テーブルに保存し、機能 ① ③ ⑤ から参照可能にする。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">分析完了後 5秒以内に pgvector に保存される。embedding が生成され、類似動画検索が可能。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-08</td>
+    <td class="col-title">類似事例 Top3 の同時提示</td>
+    <td>分析結果末尾に pgvector から類似パターンの過去事例3件を提示する。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">3件のリンクボタンが Slack カードに表示される。コサイン類似度 0.6 以上のみ。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-09</td>
+    <td class="col-title">「これで提案書つくる」連携</td>
+    <td>分析結果末尾に「📝 これで提案書つくる」ボタンを設置し、機能③ にスムーズに連携する。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">ボタン押下で動画分析データが提案生成 Phase A の入力にプリセットされる。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-4-10</td>
+    <td class="col-title">処理進捗表示</td>
+    <td>分析中、Slack 上で各 API 取得・解析の進捗をプログレス表示する。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">10秒ごとに進捗が更新される（Slack <code>chat.update</code>）。完了時に進捗ブロックは結果に置換される。</td>
+  </tr>
+</table>
+
+<!-- ========== 4.5 機能⑤ 営業進捗サマリー ========== -->
+<h3 id="sec-4-5"><span class="num">4.5</span>機能⑤ 営業進捗サマリー（FR-5-XX）</h3>
+<p><span class="pill f5">Phase 2.5</span><span class="pill">マネージャー専用</span><span class="pill">②に内包</span></p>
+<p>機能②のインフラ（Gmail OAuth + Slack DM + pgvector）を流用し、マネージャー向けに全営業の案件進捗・受注角度・リスク要因を集約レポートする。</p>
+
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-01</td>
+    <td class="col-title">週次 Cron 配信</td>
+    <td>月曜 9:00 JST に EventBridge Cron で発火し、マネージャー DM に配信する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">月曜 9:00±10秒 の精度で配信される。マネージャーロール（<code>users.role = manager</code>）にのみ配信。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-02</td>
+    <td class="col-title">全営業 Mail 集約</td>
+    <td>営業16名分の直近2週間メールスレッドを並列集約する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">16名分の集約を 10分以内で完了。Gmail API rate limit に抵触しない。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-03</td>
+    <td class="col-title">案件 Slack チャンネル参照</td>
+    <td>案件ごとの Slack チャンネル（命名規則: <code>case-*</code>）からも文脈を取得する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">案件チャンネル一覧から命名規則一致のものをすべてスキャン。チャンネル数 50 まで対応。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-04</td>
+    <td class="col-title">受注角度判定</td>
+    <td>Claude SDK で「クライアントの温度」「進捗ステージ」を分類し、受注角度（高 80%以上 / 中 40〜79% / 低 40%未満）を判定する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">マネージャーが手動判定したテストケース30件と AI 判定の一致率 75% 以上。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-05</td>
+    <td class="col-title">🟢🟡🔴 グルーピング配信</td>
+    <td>受注角度別に Slack カードでグループ化（🟢高 / 🟡中 / 🔴要フォロー）して配信する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">3グループに案件が正しく分類される。各案件に営業名・クライアント名・キーステータスを表示。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-06</td>
+    <td class="col-title">リスク要因の自動抽出</td>
+    <td>「2週間返信なし」「価格部分で難色」「競合提案中」など、定型のリスクパターンを自動抽出する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">リスクパターン10種が定義され、該当案件に自動タグ付けされる。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-07</td>
+    <td class="col-title">配信頻度の切替</td>
+    <td>マネージャーが週次 / 日次でサマリー頻度を切替可能。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">DM コマンド <code>/teamagent summary daily</code> で切替。設定値は <code>users.summary_frequency</code> に保持。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-08</td>
+    <td class="col-title">個別案件深掘り</td>
+    <td>「🔍 個別案件を深掘り」ボタンで該当案件のメール履歴 / Slack 文脈を一画面表示する。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">ボタン押下後 5秒以内にスレッド形式で詳細が展開される。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-09</td>
+    <td class="col-title">判定根拠の説明</td>
+    <td>受注角度判定の根拠となったメール ID / Slack メッセージ ID を出力に明示する。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">各案件カードの折りたたみ部分に「判定根拠」リンクが付き、クリックで根拠 3〜5件を表示。</td>
+  </tr>
+  <tr>
+    <td class="col-id">FR-5-10</td>
+    <td class="col-title">PDF ダウンロード</td>
+    <td>サマリーを PDF 形式でダウンロード可能（1on1 印刷用）。</td>
+    <td class="col-pri"><span class="pri may">任意</span></td>
+    <td class="col-accept">「📋 ダウンロード（PDF）」ボタンで A4 1〜2ページの PDF が生成される。</td>
+  </tr>
+</table>
+</section>
+
+
+<!-- ========== 5. 非機能要件 ========== -->
+<section id="sec-5">
+<h2><span class="num">5.</span>非機能要件（NFR）</h2>
+
+<p>性能・可用性・セキュリティ・拡張性・運用性・ユーザビリティの6カテゴリで非機能要件を定義する。SLO/SLI 指標は v1.5 SDD 04（運用・セキュリティ Runbook）から継承。<strong>v2.1 では NFR-01 を機能①メンション起動の SLO に合わせて p95 ≤ 2秒へ厳格化した。</strong></p>
+
+<h3 id="sec-5-1"><span class="num">5.1</span>性能（NFR-01〜05）</h3>
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-01 <span class="changed-tag">変更</span></td>
+    <td class="col-title">機能① 応答時間（メンション起動）</td>
+    <td>@TeamAgent メンション受信から ephemeral 配信までの p95 レイテンシ。<strong>v2.1 で受動監視時の p95 ≤ 5秒 → メンション起動の p95 ≤ 2秒に厳格化</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">p95 ≤ 2秒、p99 ≤ 4秒（CloudWatch メトリクスで継続測定）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-02</td>
+    <td class="col-title">機能② 朝バッチ完了時間</td>
+    <td>16名並列スキャン → 案 A/B/C 生成 → DM 配信完了までの全体時間。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">p95 ≤ 10分、p99 ≤ 15分。配信は 8:00 開始で 8:15 までに完了。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-03</td>
+    <td class="col-title">機能③ 5割版生成時間</td>
+    <td>Phase A 確認後 → Phase C 5割版完成までの時間。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">p95 ≤ 12分、p99 ≤ 18分。Gemini DR が遅延する場合はフォールバック発動。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-04</td>
+    <td class="col-title">機能④ 分析完了時間</td>
+    <td>URL 投稿から 6観点出力までの時間。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">p95 ≤ 3分、p99 ≤ 5分（Buzzmiru 不調時は除く）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-05</td>
+    <td class="col-title">同時実行スループット</td>
+    <td>機能②③④ が同時に発火しても性能劣化しないこと。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">機能② 16並列 + 機能③ 5並列 + 機能④ 10並列 を同時実行しても各 NFR 値の 120% 以内に収まる。</td>
+  </tr>
+</table>
+
+<h3 id="sec-5-2"><span class="num">5.2</span>可用性 SLO/SLA（NFR-06〜10）</h3>
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-06</td>
+    <td class="col-title">コア機能（②③④）月次稼働率</td>
+    <td>SLO: 月次稼働率 99.5% 以上。年間ダウンタイム 約 43.8 時間以内。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">CloudWatch メトリクスで毎月レポート。3ヶ月連続で SLO 未達なら設計見直しのトリガー。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-07 <span class="changed-tag">変更</span></td>
+    <td class="col-title">機能① 月次稼働率</td>
+    <td>SLO: 99.5% 以上。<strong>v2.1 でメンション起動に変更したため、コア機能と同等水準に引き上げ</strong>（呼ばれた時に確実に応答する必要があるため）。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">月次レポートで 99.5% を維持。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-08</td>
+    <td class="col-title">外部 API 障害時の縮退運用</td>
+    <td>外部 API（VSEO / dpro / Buzzmiru / Gemini DR / X）の1つが停止しても、機能全体は縮退運用で稼働。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">障害シナリオテスト（カオステスト）で5 API 個別停止時、機能完了率 80% 以上。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-09</td>
+    <td class="col-title">RTO（Recovery Time Objective）</td>
+    <td>主要障害発生から復旧までの目標時間。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">RTO 4時間以内（pgvector / Lambda / Slack Bolt）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-10</td>
+    <td class="col-title">RPO（Recovery Point Objective）</td>
+    <td>データ損失許容時間。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">RPO 1時間以内（pgvector スナップショット 1時間ごと）。</td>
+  </tr>
+</table>
+
+<h3 id="sec-5-3"><span class="num">5.3</span>セキュリティ（NFR-11〜15）</h3>
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-11</td>
+    <td class="col-title">通信の暗号化</td>
+    <td>クライアント ⇔ AWS、AWS ⇔ 外部 API のすべての通信を TLS 1.2 以上で暗号化。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">SSL Labs スコア A 以上。HTTP（暗号化なし）通信は 0件。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-12</td>
+    <td class="col-title">保存時の暗号化</td>
+    <td>pgvector（RDS）と S3 の保存データを KMS で暗号化。Secrets Manager で OAuth token を保管。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">RDS / S3 の暗号化が AWS Config で「有効」と判定される。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-13</td>
+    <td class="col-title">認証・認可</td>
+    <td>Slack OAuth + Workspace 内ユーザーのみ。退職者は即時失効。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">退職者 Workspace 削除後 5分以内に該当ユーザーの Bot 操作が拒否される。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-14</td>
+    <td class="col-title">監査ログ</td>
+    <td>誰のメールが、いつ、誰の依頼で、何のために読まれたかを CloudWatch Logs に記録（90日保持）。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">SOC2 Type 1 相当の監査要件を満たす。任意のメール ID から「いつ・誰に・なぜ」読まれたかをクエリ 1分以内で取得。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-15</td>
+    <td class="col-title">脆弱性スキャン</td>
+    <td>四半期ごとに ECR コンテナ・Lambda コードに対し脆弱性スキャンを実施。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">Critical 脆弱性は 7日以内、High は 30日以内に修正。</td>
+  </tr>
+</table>
+
+<h3 id="sec-5-4"><span class="num">5.4</span>拡張性（NFR-16〜18）</h3>
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-16</td>
+    <td class="col-title">営業数の拡張</td>
+    <td>営業 16名 → 50名 への拡張時、性能 NFR を維持できること。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">負荷テストで 50名想定（500メール / 日）でも NFR-02 を満たす。Lambda 同時実行数の上限調整のみで対応可能。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-17</td>
+    <td class="col-title">データソース追加の容易性</td>
+    <td>新データソース（CRM・カレンダー等）の追加時、既存機能への影響を最小化。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">プラグイン型 SDK インターフェース定義あり。新ソース追加コードが 500 LOC 以内で完結。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-18</td>
+    <td class="col-title">機能追加の容易性</td>
+    <td>新サブエージェント（機能⑥以降）追加時、共通基盤を流用できること。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">Claude Agent SDK の subagent 定義のみで 1機能追加可能。共通基盤の改修不要。</td>
+  </tr>
+</table>
+
+<h3 id="sec-5-5"><span class="num">5.5</span>運用性（NFR-19〜22）</h3>
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-19</td>
+    <td class="col-title">監視・アラート</td>
+    <td>主要メトリクス（レイテンシ・エラー率・トークン使用量）を CloudWatch ダッシュボードで可視化、閾値超過時 Slack 通知。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">エラー率 5% 超過、p95 レイテンシ 2倍超過で 5分以内に運用 Slack に通知。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-20</td>
+    <td class="col-title">バックアップ</td>
+    <td>pgvector の自動スナップショット（毎日 + 保持7日）と週次 S3 アーカイブ（保持30日）。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">RDS 自動スナップショット有効。週次 S3 アーカイブ ジョブが成功している（CloudWatch Events）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-21</td>
+    <td class="col-title">障害復旧手順（Runbook）</td>
+    <td>主要障害（pgvector 障害 / Slack Bolt 障害 / Gemini DR 障害）の Runbook を整備。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">3種以上の Runbook が Notion / Confluence に格納され、四半期ごとに机上訓練を実施。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-22</td>
+    <td class="col-title">コスト監視</td>
+    <td>月次 Anthropic / Gemini API コストを機能別・営業別に集計し、上限超過の予兆をアラート。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">月次予算 ¥250K 上限。¥200K 到達時に運用 Slack に予兆アラート。</td>
+  </tr>
+</table>
+
+<h3 id="sec-5-6"><span class="num">5.6</span>ユーザビリティ（NFR-23〜25）</h3>
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-23</td>
+    <td class="col-title">Slack 完結</td>
+    <td>営業は Slack 以外のツールを開かずに 5機能を利用できる。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">営業ヒアリングで「Slack 以外を開く必要があった」回答が 5%以内。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-24</td>
+    <td class="col-title">日本語応答品質</td>
+    <td>すべての出力が自然な日本語で、敬語・句読点・段落構成が適切。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">提案書 100件のサンプリング検証で「不自然な日本語」と判定されるものが 5% 以内。</td>
+  </tr>
+  <tr>
+    <td class="col-id">NFR-25</td>
+    <td class="col-title">オンボーディング</td>
+    <td>新規営業が 30分以内に 5機能を一通り利用できるようになる。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">オンボーディング動画（10分）+ チートシート（A4 1枚）で 30 分以内に習熟可能。</td>
+  </tr>
+</table>
+</section>
+
+
+<!-- ========== 6. データ要件 ========== -->
+<section id="sec-6">
+<h2><span class="num">6.</span>データ要件</h2>
+
+<h3 id="sec-6-1"><span class="num">6.1</span>pgvector 概念スキーマ</h3>
+<p>pgvector（RDS PostgreSQL）は社内ナレッジ DB として、5機能すべてが参照する。主要テーブルの概念設計：</p>
+
+<div class="arch-diagram">┌── pgvector（RDS PostgreSQL）─────────────────┐
+│                                              │
+│ users                                        │
+│  user_id (PK), slack_id, gmail, role,        │
+│  oauth_status, mail_dispatch_time,           │
+│  summary_frequency                           │
+│  ※ v2.1: suggest_enabled は廃止              │
+│                                              │
+│ mail_corpus      [機能 ② ③ ⑤ で参照]            │
+│  msg_id (PK), user_id (FK), thread_id,       │
+│  subject, body_excerpt, sender, recipient,   │
+│  embedding (vector(1536)),                   │
+│  is_excluded (TeamAgent-Exclude ラベル),       │
+│  ingested_at                                 │
+│                                              │
+│ slack_corpus     [機能 ① ③ ⑤ で参照]            │
+│  msg_ts (PK), channel_id, user_id, text,     │
+│  thread_ts, embedding (vector(1536)),        │
+│  ingested_at                                 │
+│                                              │
+│ drive_docs       [機能 ③ で参照]                │
+│  doc_id (PK), file_name, mime_type,          │
+│  excerpt, embedding (vector(1536)),          │
+│  page_no, source_path, ingested_at           │
+│                                              │
+│ video_meta       [機能 ④ 主, ① ③ ⑤ で参照]      │
+│  video_id (PK), platform (tiktok/yt-shorts), │
+│  url, title, hook, persuasion_axis, cta,     │
+│  views, likes, saves, comments,              │
+│  category, embedding (vector(1536)),         │
+│  analyzed_at                                 │
+│                                              │
+│ proposals        [機能 ③ で生成・履歴]            │
+│  proposal_id (PK), user_id, client_name,     │
+│  product, version (v0.5/v0.6...),            │
+│  md_content, html_content,                   │
+│  embedding (vector(1536)), created_at        │
+│                                              │
+│ mention_log      [機能 ① の動作・FB 履歴 v2.1]   │
+│  log_id (PK), user_id, slack_msg_ts,         │
+│  query_extracted, intent (recall/proposal),  │
+│  matched_cases (jsonb), feedback (★/×),      │
+│  ephemeral_sent_at                           │
+│                                              │
+│ audit_log        [SEC-04, NFR-14 監査ログ]      │
+│  audit_id (PK), accessor_user_id,            │
+│  accessed_user_id, resource_type,            │
+│  resource_id, purpose, accessed_at           │
+│                                              │
+└──────────────────────────────────────────────┘</div>
+
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">DR-01</td>
+    <td class="col-title">embedding 次元数</td>
+    <td>すべての embedding は <code>vector(1536)</code>（OpenAI ada-002 互換次元）を採用。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">全テーブルで 1536次元固定。HNSW インデックス構築済み。</td>
+  </tr>
+  <tr>
+    <td class="col-id">DR-02</td>
+    <td class="col-title">audit_log の保持期間</td>
+    <td>監査ログは 90日間オンライン保持。それ以降は S3 Glacier に自動アーカイブ。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">90日経過レコードの S3 Glacier 移行ジョブが日次で成功。</td>
+  </tr>
+  <tr>
+    <td class="col-id">DR-03</td>
+    <td class="col-title">退職者マーキング</td>
+    <td>退職者の <code>users.oauth_status = revoked</code> セット時、関連 mail_corpus / slack_corpus の <code>is_excluded = true</code> を一括更新。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">退職処理 SQL スクリプト 1コマンドで完了。検索結果から該当ユーザーのデータが除外される。</td>
+  </tr>
+  <tr>
+    <td class="col-id">DR-04</td>
+    <td class="col-title">バージョン管理（提案書）</td>
+    <td>proposals テーブルで版数（v0.5 → v0.8）を保持し、ロールバック可能。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">同一 (user_id, client_name, product) で複数版が保存され、前版を呼び出し可能。</td>
+  </tr>
+  <tr>
+    <td class="col-id">DR-05</td>
+    <td class="col-title">embedding 再計算ジョブ</td>
+    <td>embedding モデル更新時に既存データを再計算するバッチを用意。</td>
+    <td class="col-pri"><span class="pri may">任意</span></td>
+    <td class="col-accept">手動トリガーで全レコード再計算が可能。所要時間 16時間以内（営業時間外バッチ想定）。</td>
+  </tr>
+</table>
+
+<h3 id="sec-6-2"><span class="num">6.2</span>各データ層の格納形式</h3>
+<table>
+  <tr><th>データ層</th><th>取得方式</th><th>格納先</th><th>更新頻度</th></tr>
+  <tr><td>📧 Gmail</td><td>Gmail API（本人 OAuth refresh token）</td><td>mail_corpus（要約 + embedding）</td><td>朝バッチ + on-demand</td></tr>
+  <tr><td>💬 Slack</td><td>Slack Web API（Bot Token）</td><td>slack_corpus（rolling 60日）</td><td>リアルタイム（events.subscribe）</td></tr>
+  <tr><td>📁 Google Drive</td><td>Drive API + 抽出（PDF / PPTX / MD）</td><td>drive_docs（チャンク embedding）</td><td>週次バッチ + 新規ファイル webhook</td></tr>
+  <tr><td>🎬 動画分析データ</td><td>VSEO tRPC + dpro REST + Buzzmiru API</td><td>video_meta（6観点構造化）</td><td>機能④ 実行時に on-demand</td></tr>
+  <tr><td>🔍 Gemini DR</td><td>Vertex AI Gemini DR API（Pattern Bravo+）</td><td>proposals 生成時の入力（永続化なし、要約のみログ）</td><td>機能③ 実行時に on-demand</td></tr>
+  <tr><td>🐦 X</td><td>X 検索 API or 検索ラッパー</td><td>proposals 生成時の入力（永続化なし）</td><td>機能③ 実行時に on-demand</td></tr>
+</table>
+</section>
+
+
+<!-- ========== 7. 外部連携要件 ========== -->
+<section id="sec-7">
+<h2><span class="num">7.</span>外部連携要件（INT-01〜10）</h2>
+
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細（認証 / レート制限 / フォールバック）</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">INT-01</td>
+    <td class="col-title">Slack Web API</td>
+    <td>Bot Token 認証。Tier 3 レート制限（50+ requests/min）。User Token は不使用。<strong>v2.1: app_mention イベントと slash command を購読</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">Bot Token のみで全機能動作。429 エラー時は指数バックオフ。app_mention / slash command の両方が動作。</td>
+  </tr>
+  <tr>
+    <td class="col-id">INT-02</td>
+    <td class="col-title">Gmail API</td>
+    <td>OAuth 2.0 + refresh token（Secrets Manager 保管）。スコープ: <code>gmail.readonly</code> + <code>gmail.compose</code>。Quota: 1ユーザー 250 units/sec。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">16ユーザー × 1日 1万メール処理が quota 内に収まる。</td>
+  </tr>
+  <tr>
+    <td class="col-id">INT-03</td>
+    <td class="col-title">Google Drive API</td>
+    <td>OAuth 2.0（Workspace 管理者承認 + サービスアカウント）。スコープ: <code>drive.readonly</code>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">指定共有ドライブの全 PDF / PPTX を取得可能。プライベートフォルダは対象外。</td>
+  </tr>
+  <tr>
+    <td class="col-id">INT-04</td>
+    <td class="col-title">Anthropic Claude API</td>
+    <td>API Key（Secrets Manager）。Sonnet 4.6 + Haiku 軽量モデルの併用。月次予算上限 ¥150K。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">月次予算超過時にハードカット（Lambda 環境変数で停止）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">INT-05</td>
+    <td class="col-title">Vertex AI Gemini DR</td>
+    <td>サービスアカウント認証。Pattern Bravo+（Vertex AI / Bedrock Claude WebSearch / Tavily / Brave）の4経路冗長化。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">1経路停止時、自動的に次の経路にフォールバック。完了率 99% 以上。</td>
+  </tr>
+  <tr>
+    <td class="col-id">INT-06</td>
+    <td class="col-title">VSEO Analytics（自社運用）</td>
+    <td>tRPC エンドポイント。社内ネットワーク経由（VPN / VPC Peering）。レート制限なし。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">自社運用のため 99.9% 稼働。タイムアウト 30秒で打ち切り。</td>
+  </tr>
+  <tr>
+    <td class="col-id">INT-07</td>
+    <td class="col-title">動画広告プロ（dpro）</td>
+    <td>Firebase REST 認証（Lambda 内で token 取得）。社内アカウント。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">日次 1000 リクエスト以内で安定動作。</td>
+  </tr>
+  <tr>
+    <td class="col-id">INT-08</td>
+    <td class="col-title">Buzzmiru API</td>
+    <td>API Key 認証。サーバー落ち頻発（△ 安定性）。5分おき死活監視 + 復旧時自動取得 + 指数バックオフ。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">サーバーダウン中の機能④ は縮退完了率 90% 以上。復旧後 30分以内に欠損補完。</td>
+  </tr>
+  <tr>
+    <td class="col-id">INT-09</td>
+    <td class="col-title">X Search API</td>
+    <td>API Key（X Developer Account）または検索ラッパー。Tier 制限（月次 quota）あり。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">月次 quota の 80% で警告アラート。quota 超過時はラッパーにフォールバック。</td>
+  </tr>
+  <tr>
+    <td class="col-id">INT-10</td>
+    <td class="col-title">外部 API 認証情報の管理</td>
+    <td>すべての API key / OAuth token を AWS Secrets Manager に保管。コードに直書き禁止。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">git secret scan で API key 検出 0件。Secrets Manager から動的取得。</td>
+  </tr>
+</table>
+</section>
+
+
+<!-- ========== 8. セキュリティ・プライバシー要件 ========== -->
+<section id="sec-8">
+<h2><span class="num">8.</span>セキュリティ・プライバシー要件（SEC-01〜12）</h2>
+
+<p>v2.0 仕様書 第11章「プライバシー & セキュリティ」を要件レベルに展開する。<strong>「会社の脳として AI を活用する」会社方針</strong>を前提とし、他人メール参照を許容する代わりに監査・フィルタ・opt-out の3層で保護する。</p>
+
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-01</td>
+    <td class="col-title">Gmail OAuth スコープ最小化</td>
+    <td>スコープは <code>gmail.readonly</code> + <code>gmail.compose</code> のみ。<code>gmail.send</code> は付与しない（送信は必ず本人）。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">OAuth 同意画面に <code>gmail.send</code> が表示されないこと。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-02</td>
+    <td class="col-title">Slack 権限最小化</td>
+    <td>Bot Token のみ。User Token 不使用。チャンネルは明示的に Bot を追加されたものに限定。<strong>v2.1: app_mentions:read と commands スコープを追加</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">Slack App の OAuth スコープが最小権限（Tier 1 のみ + app_mentions:read + commands）に設定されている。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-03</td>
+    <td class="col-title">他人メール参照の社内合意</td>
+    <td>「会社の脳として AI を活用する」方針について、書面または社内通達で全従業員に周知済み。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">社内ガイドライン文書 + OAuth 同意時の同意文 + 営業オンボーディング資料の3点が揃っている。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-04</td>
+    <td class="col-title">監査ログの完全性</td>
+    <td>誰のメールが、いつ、誰の依頼で、何のために読まれたかを CloudWatch Logs に記録（90日保持）。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">audit_log テーブルで accessor / accessed / purpose / timestamp の4必須項目が 100%埋まる。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-05</td>
+    <td class="col-title">個人 vs 業務メールの分離</td>
+    <td>件名・送信元ドメインで「家族・私信・社内雑談」を初期フィルタ。誤判定時に Gmail ラベルでカスタマイズ可能。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">プライベートメール100件のサンプリングで検出率 80% 以上、誤検知率 10% 以下。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-06</td>
+    <td class="col-title">Gmail ラベル opt-out</td>
+    <td>営業が Gmail ラベル <code>TeamAgent-Exclude</code> を付けたスレッドは AI 参照対象外。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">ラベル付きスレッドが mail_corpus に取り込まれない。既存レコードは <code>is_excluded = true</code> に即時更新。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-07</td>
+    <td class="col-title">退職者対応</td>
+    <td>OAuth refresh token を即時失効・関連 pgvector レコードに退職者マーク（参照禁止）。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">退職処理 1コマンドで完了。退職者のメールが検索結果に出現しない。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-08</td>
+    <td class="col-title">機密情報のマスキング</td>
+    <td>クレジットカード番号・マイナンバー・SSN など PII を自動検出して LLM 入力前にマスキング。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">PII 検出ライブラリ（Presidio 等）で 95% 検出率。マスキング後 LLM に送信。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-09</td>
+    <td class="col-title">マネージャー権限の制限</td>
+    <td>機能⑤ はマネージャーロールのみ実行可能。一般営業からは参照不可。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">非マネージャーが機能⑤ コマンド実行時に「権限がありません」エラー。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-10</td>
+    <td class="col-title">監査ログ閲覧権限</td>
+    <td>audit_log の閲覧は FDE / セキュリティ担当のみ。営業・マネージャーは自身関連分のみ閲覧可能。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">RDS IAM ロール分離。営業ロールから audit_log への SELECT が拒否される。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-11</td>
+    <td class="col-title">外部送信防止</td>
+    <td>顧客メールの内容を外部 LLM API（Anthropic / Vertex AI）に送る前に、PII マスキング + 件名/本文の要約を行う。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">外部 API への送信トークン量がメール原文の 30% 以下（要約効果）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">SEC-12</td>
+    <td class="col-title">セキュリティ訓練</td>
+    <td>四半期ごとにペネトレーションテスト + Runbook 机上訓練を実施。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">四半期報告書に訓練結果が記載される。Critical 指摘は 30日以内に修正。</td>
+  </tr>
+</table>
+</section>
+
+
+<!-- ========== 9. テスト要件 ========== -->
+<section id="sec-9">
+<h2><span class="num">9.</span>テスト要件（TST-01〜10）</h2>
+
+<p>v2.1 では、各テスト要件にどの Sprint で何を検証するかの <strong>Phase 別実施タイミング</strong>を明示した。Sprint S1〜S17 の DoD を満たすために必要なテスト活動をマッピングする。</p>
+
+<table class="req">
+  <tr>
+    <th class="col-id">ID</th>
+    <th class="col-title">タイトル</th>
+    <th>詳細</th>
+    <th class="col-pri">優先度</th>
+    <th class="col-accept">受入基準</th>
+  </tr>
+  <tr>
+    <td class="col-id">TST-01</td>
+    <td class="col-title">単体テスト カバレッジ</td>
+    <td>各サブエージェント（Mention Router / Mail Worker / Composer / Video Analyzer）の単体テストを実施。<strong>実施タイミング: CI 毎回（PR ごと）</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">コードカバレッジ 70% 以上。CI（GitHub Actions）で PR ごとに実行。</td>
+  </tr>
+  <tr>
+    <td class="col-id">TST-02</td>
+    <td class="col-title">結合テスト（Slack ⇔ AWS ⇔ 外部 API）</td>
+    <td>Slack イベント → Lambda → 外部 API → pgvector → Slack 配信の E2E 経路を結合テスト。<strong>実施タイミング: 各 Sprint 末（S1〜S17）</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">5機能すべての主要シナリオ E2E テストが Pass。各 Sprint で当該機能の E2E が緑。</td>
+  </tr>
+  <tr>
+    <td class="col-id">TST-03</td>
+    <td class="col-title">受入テスト（営業・マネージャー）</td>
+    <td>各 Phase 終了時、営業 3名 + マネージャー 1名による受入テストを実施。<strong>実施タイミング: S3（機能④）/ S6（機能②）/ S8（機能⑤）/ S13（機能③）/ S17（機能①）</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">受入テストチェックリストの全項目 Pass。フィードバックは次 Sprint に反映。</td>
+  </tr>
+  <tr>
+    <td class="col-id">TST-04</td>
+    <td class="col-title">性能テスト</td>
+    <td>NFR-01〜05 の性能要件を負荷テストで検証。<strong>実施タイミング: S3（NFR-04 機能④）/ S6（NFR-02 機能②）/ S13（NFR-03 機能③）/ S17（NFR-01 機能①）</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">想定負荷（営業16名 × 通常利用 + 50%バースト）で全 NFR を満たす。</td>
+  </tr>
+  <tr>
+    <td class="col-id">TST-05</td>
+    <td class="col-title">カオステスト（外部 API 障害）</td>
+    <td>5外部 API を個別に停止させ、機能の縮退運用を検証。<strong>実施タイミング: S3（機能④ 安定化時）/ S7（機能② 観察期間）/ S14（機能③ 観察期間）</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">5シナリオで NFR-08 の縮退完了率 80% 以上。</td>
+  </tr>
+  <tr>
+    <td class="col-id">TST-06</td>
+    <td class="col-title">セキュリティテスト</td>
+    <td>OWASP Top 10 + LLM 特有の prompt injection / data leak テストを実施。<strong>実施タイミング: S3 / S6 / S13 / S17 + Final（M9）</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">Critical 脆弱性 0件。High は 30日以内に対応計画策定。</td>
+  </tr>
+  <tr>
+    <td class="col-id">TST-07</td>
+    <td class="col-title">プロンプトインジェクション耐性</td>
+    <td>外部メール本文に「無視して以下を実行せよ」型の攻撃文を含めて、機能②③の挙動を検証。<strong>実施タイミング: S6（機能②）/ S13（機能③）/ Final</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">攻撃テスト 30件で 100% 拒否（指示に従わない、またはユーザーに確認）。</td>
+  </tr>
+  <tr>
+    <td class="col-id">TST-08</td>
+    <td class="col-title">回帰テスト自動化</td>
+    <td>Sprint 進行時に既存機能の回帰テストを自動実行。<strong>実施タイミング: S4 以降の各 Sprint で前 Sprint 完了機能を回帰</strong>。</td>
+    <td class="col-pri"><span class="pri should">推奨</span></td>
+    <td class="col-accept">CI で完了済み Sprint の機能テストが後続 Sprint 開発中も毎回 Pass する。</td>
+  </tr>
+  <tr>
+    <td class="col-id">TST-09</td>
+    <td class="col-title">A/B テスト基盤</td>
+    <td>プロンプト改善時に A/B テストでパフォーマンス比較できる基盤。<strong>実施タイミング: S11 以降（機能③ 5割版確立後）</strong>。</td>
+    <td class="col-pri"><span class="pri may">任意</span></td>
+    <td class="col-accept">同一入力に対する旧プロンプト vs 新プロンプトの出力比較が可能。</td>
+  </tr>
+  <tr>
+    <td class="col-id">TST-10</td>
+    <td class="col-title">監査ログテスト</td>
+    <td>SEC-04 の監査ログが「いつ・誰に・何のために」を 100% 記録しているかを検証。<strong>実施タイミング: S3 から継続的に毎 Sprint 末でサンプリング</strong>。</td>
+    <td class="col-pri"><span class="pri must">必須</span></td>
+    <td class="col-accept">サンプリングテストで監査ログ 100件のうち欠損 0件。</td>
+  </tr>
+</table>
+
+<h3>9.1 Phase 別テスト実施タイミング サマリー</h3>
+<table class="compact">
+  <tr><th>Sprint</th><th>主要対象機能</th><th>必須テスト</th></tr>
+  <tr><td>S1〜S2</td><td>機能④ MVP / 統合</td><td>TST-01（CI）, TST-02（結合）</td></tr>
+  <tr><td>S3</td><td>機能④ 安定化（DoD-P1 相当）</td><td>TST-02, TST-03, TST-04, TST-05, TST-06, TST-10</td></tr>
+  <tr><td>S4〜S5</td><td>機能② OAuth / 朝メール</td><td>TST-01, TST-02, TST-08</td></tr>
+  <tr><td>S6</td><td>機能② 全展開（DoD-P2 相当）</td><td>TST-02, TST-03, TST-04, TST-06, TST-07, TST-10</td></tr>
+  <tr><td>S7</td><td>機能② 観察期間</td><td>TST-05（カオス）, TST-10</td></tr>
+  <tr><td>S8</td><td>機能⑤（DoD-P2.5 相当）</td><td>TST-02, TST-03, TST-10</td></tr>
+  <tr><td>S9〜S12</td><td>機能③ RAG基盤 / DR / 5割版 / 対話</td><td>TST-01, TST-02, TST-08, TST-09</td></tr>
+  <tr><td>S13</td><td>機能③ 全展開（DoD-P3 相当）</td><td>TST-02, TST-03, TST-04, TST-06, TST-07, TST-10</td></tr>
+  <tr><td>S14</td><td>機能③ 観察期間</td><td>TST-05（カオス）, TST-10</td></tr>
+  <tr><td>S15〜S16</td><td>機能① MVP / ルーター</td><td>TST-01, TST-02, TST-08</td></tr>
+  <tr><td>S17</td><td>機能① 全展開（DoD-P4 相当）</td><td>TST-02, TST-03, TST-04, TST-06, TST-10</td></tr>
+  <tr><td>Final（M9）</td><td>全機能リリース判定</td><td>TST-06, TST-07, TST-10（最終確認）</td></tr>
+</table>
+</section>
+
+
+<!-- ========== 10. 受入基準（DoD） ========== -->
+<section id="sec-10">
+<h2><span class="num">10.</span>受入基準（Sprint 別 Definition of Done）</h2>
+
+<p>v2.1 では、各 Phase の DoD（v2.0 の DoD-P1〜P4）を <strong>Sprint 単位（DoD-S1〜S17）</strong>に細分化した。各 DoD は次 Sprint 開始の前提条件として明記する。すべての DoD 項目を満たした時点でその Sprint を完了とみなし、次 Sprint に進む。</p>
+
+<div class="phase-track">
+  <div class="phase-block p1">
+    <div class="phase-num">Phase 1</div>
+    <div class="phase-name">🎬 機能④<br>動画 URL 分析</div>
+    <div class="phase-period">S1〜S3 / 1ヶ月</div>
+  </div>
+  <div class="phase-block p2">
+    <div class="phase-num">Phase 2</div>
+    <div class="phase-name">📬 機能②<br>Mail ワークフロー</div>
+    <div class="phase-period">S4〜S7 / 1.5ヶ月</div>
+  </div>
+  <div class="phase-block p25">
+    <div class="phase-num">Phase 2.5</div>
+    <div class="phase-name">📊 機能⑤<br>進捗サマリー</div>
+    <div class="phase-period">S8 / 0.5ヶ月</div>
+  </div>
+  <div class="phase-block p3">
+    <div class="phase-num">Phase 3</div>
+    <div class="phase-name">📝 機能③<br>提案生成</div>
+    <div class="phase-period">S9〜S14 / 2ヶ月</div>
+  </div>
+  <div class="phase-block p4">
+    <div class="phase-num">Phase 4</div>
+    <div class="phase-name">💡 機能①<br>メンション起動</div>
+    <div class="phase-period">S15〜S17 / 1ヶ月</div>
+  </div>
+</div>
+
+<h3>10.1 Sprint 別 DoD 一覧（Phase 1 — 機能④）</h3>
+<table>
+  <tr><th>Sprint</th><th>DoD ID</th><th>受入条件（次 Sprint の前提）</th></tr>
+  <tr>
+    <td>S1</td>
+    <td>DoD-S1（機能④ MVP）</td>
+    <td>VSEO のみ接続して TikTok / YouTube Shorts URL → 構造化結果（JSON）が返ること。VSEO 単体での E2E が動く。</td>
+  </tr>
+  <tr>
+    <td>S2</td>
+    <td>DoD-S2（機能④ 統合）</td>
+    <td>dpro + Buzzmiru を追加接続し、6観点構造化が動く。3 API 並列化（FR-4-05）と縮退運用（FR-4-04）が確認済み。</td>
+  </tr>
+  <tr>
+    <td>S3</td>
+    <td>DoD-S3（機能④ 安定化）<br><em>= 旧 DoD-P1 相当</em></td>
+    <td>全16名展開・SLO 監視が稼働。NFR-04（p95 ≤ 3分）達成。営業 3名による受入テスト 100% Pass（TST-03）。監査ログ・コスト監視ダッシュボード稼働。</td>
+  </tr>
+</table>
+
+<h3>10.2 Sprint 別 DoD 一覧（Phase 2 — 機能②）</h3>
+<table>
+  <tr><th>Sprint</th><th>DoD ID</th><th>受入条件（次 Sprint の前提）</th></tr>
+  <tr>
+    <td>S4</td>
+    <td>DoD-S4（機能② OAuth）</td>
+    <td>Champion 営業 2名で Gmail OAuth 認証完了 + 朝バッチ稼働。EventBridge Cron が営業日 8:00 に安定起動（FR-2-01）。</td>
+  </tr>
+  <tr>
+    <td>S5</td>
+    <td>DoD-S5（機能② 朝メール）</td>
+    <td>5名α運用で「使い続けたい」回答 80% 以上。案 A/B/C 生成（FR-2-04）+ Gmail 下書き保存（FR-2-09）が動作。</td>
+  </tr>
+  <tr>
+    <td>S6</td>
+    <td>DoD-S6（機能② 全展開）<br><em>= 旧 DoD-P2 相当</em></td>
+    <td>営業16名全員に展開。NFR-02（朝バッチ p95 ≤ 10分）達成。個人/業務メールフィルタ（SEC-05）と opt-out（SEC-06）動作確認。</td>
+  </tr>
+  <tr>
+    <td>S7</td>
+    <td>DoD-S7（機能② 観察）</td>
+    <td>NFR-06（コア機能稼働率 99.5%）を 2週間維持。カオステスト（TST-05）でフォールバックが動く。</td>
+  </tr>
+</table>
+
+<h3>10.3 Sprint 別 DoD 一覧（Phase 2.5 — 機能⑤）</h3>
+<table>
+  <tr><th>Sprint</th><th>DoD ID</th><th>受入条件（次 Sprint の前提）</th></tr>
+  <tr>
+    <td>S8</td>
+    <td>DoD-S8（機能⑤）<br><em>= 旧 DoD-P2.5 相当</em></td>
+    <td>マネージャー DM 配信 + 受注角度判定の手動 vs AI 一致率 75% 以上（FR-5-04）。マネージャー権限制御（SEC-09）と判定根拠説明（FR-5-09）が動作。</td>
+  </tr>
+</table>
+
+<h3>10.4 Sprint 別 DoD 一覧（Phase 3 — 機能③）</h3>
+<table>
+  <tr><th>Sprint</th><th>DoD ID</th><th>受入条件（次 Sprint の前提）</th></tr>
+  <tr>
+    <td>S9</td>
+    <td>DoD-S9（機能③ RAG 基盤）</td>
+    <td>Drive 過去 1,500件の Embedding 完了。drive_docs テーブルに pgvector 投入済み（FR-3-07 の 80% 取り込み達成）。</td>
+  </tr>
+  <tr>
+    <td>S10</td>
+    <td>DoD-S10（機能③ DR 接続）</td>
+    <td>Vertex AI Gemini DR + Bedrock fallback の動作確認。Pattern Bravo+ の最低2経路で取得成功（INT-05）。</td>
+  </tr>
+  <tr>
+    <td>S11</td>
+    <td>DoD-S11（機能③ 5割版）</td>
+    <td>Champion 1案件で 5割版 p95 ≤ 12分（NFR-03）達成。MD/HTML 出力（FR-3-05/06）が動作。</td>
+  </tr>
+  <tr>
+    <td>S12</td>
+    <td>DoD-S12（機能③ 対話完成）</td>
+    <td>Champion 3案件で「1案件 20h → 10h 以下」を実測。対話型仕上げ（FR-3-04 / 5往復）が動作。</td>
+  </tr>
+  <tr>
+    <td>S13</td>
+    <td>DoD-S13（機能③ 全展開）<br><em>= 旧 DoD-P3 相当</em></td>
+    <td>営業16名全員に展開。NFR-03（5割版 p95 ≤ 12分）達成。受入テスト 100% Pass。</td>
+  </tr>
+  <tr>
+    <td>S14</td>
+    <td>DoD-S14（機能③ 観察）</td>
+    <td>100件サンプリングで NFR-24（不自然な日本語 5% 以内）達成。カオステスト（TST-05）で Pattern Bravo+ フォールバック動作確認。</td>
+  </tr>
+</table>
+
+<h3>10.5 Sprint 別 DoD 一覧（Phase 4 — 機能①）</h3>
+<table>
+  <tr><th>Sprint</th><th>DoD ID</th><th>受入条件（次 Sprint の前提）</th></tr>
+  <tr>
+    <td>S15</td>
+    <td>DoD-S15（機能① MVP）</td>
+    <td>app_mention 起動（FR-1-01）+ クエリ抽出（FR-1-03）+ pgvector Top3（FR-1-04）が動く。ephemeral 配信（FR-1-05）が他者に表示されないことを Slack UI で確認。</td>
+  </tr>
+  <tr>
+    <td>S16</td>
+    <td>DoD-S16（機能① ルーター）</td>
+    <td>機能①/③ 意図判定精度 90% 以上（FR-1-11）。slash command <code>/teamagent recall</code>（FR-1-12）が動作。</td>
+  </tr>
+  <tr>
+    <td>S17</td>
+    <td>DoD-S17（機能① 全展開）<br><em>= 旧 DoD-P4 相当</em></td>
+    <td>全16名 × 2週間で「邪魔ではない」回答 90% 以上。NFR-01（p95 ≤ 2秒）達成。誤ルーティング率 5% 以下（FR-1-11）。</td>
+  </tr>
+</table>
+
+<h3>10.6 DoD-Final（M9 — 全機能リリース判定）</h3>
+<table>
+  <tr><th>#</th><th>受入条件</th></tr>
+  <tr><td>1</td><td>DoD-S1〜S17 をすべて満たしている</td></tr>
+  <tr><td>2</td><td>NFR-06（コア機能稼働率 99.5%）を 1ヶ月の運用で達成</td></tr>
+  <tr><td>3</td><td>NFR-07（機能① 99.5%）を 1ヶ月の運用で達成</td></tr>
+  <tr><td>4</td><td>月次運用コスト ¥250K 以内</td></tr>
+  <tr><td>5</td><td>監査ログが 90日継続記録（SEC-04, NFR-14）</td></tr>
+  <tr><td>6</td><td>Runbook 整備完了（NFR-21）</td></tr>
+  <tr><td>7</td><td>セキュリティテスト Critical 0件（TST-06）</td></tr>
+  <tr><td>8</td><td>営業満足度調査（NPS）+30 以上</td></tr>
+</table>
+
+<div class="note">
+  <div class="label">DoD と Sprint 開始の前提条件</div>
+  <p>各 Sprint の DoD は <strong>次 Sprint 開始の前提条件</strong>として扱う。例えば S2 を開始する前に DoD-S1 を満たしている必要がある。DoD 未達のまま次 Sprint に進むことは原則禁止。例外時は FDE と PO の合意を Slack に明示記録する。</p>
+</div>
+</section>
+
+
+<!-- ========== 11. 制約条件・前提条件 ========== -->
+<section id="sec-11">
+<h2><span class="num">11.</span>制約条件・前提条件</h2>
+
+<h3>11.1 技術的制約</h3>
+<table>
+  <tr><th>#</th><th>制約</th><th>影響</th></tr>
+  <tr><td>C1</td><td>Slack Workspace は単一ワークスペース利用</td><td>マルチテナント対応はスコープ外</td></tr>
+  <tr><td>C2</td><td>Gmail Workspace は会社統一アカウント体系</td><td>個人 Gmail（gmail.com）は対象外</td></tr>
+  <tr><td>C3</td><td>Buzzmiru API のサーバー安定性が△</td><td>機能④ は縮退運用設計が必須</td></tr>
+  <tr><td>C4</td><td>Google verification 取得が必要（Gmail OAuth 公開アプリ）</td><td>本番リリース前に Google 申請承認必須（最大 4〜6 週間）</td></tr>
+  <tr><td>C5</td><td>pgvector の HNSW index は PostgreSQL 14 以上が必要</td><td>RDS PostgreSQL 16 以上を採用</td></tr>
+  <tr><td>C6</td><td>Slack の chat.postEphemeral は完全に永続しない</td><td>機能① のサジェストは履歴として残らない（フィードバックは別途 mention_log に記録）</td></tr>
+  <tr><td>C7 <span class="new-tag">v2.1</span></td><td>Slack app_mention イベントは Bot がチャンネルメンバーである必要がある</td><td>機能① 利用前に各営業の作業チャンネルに Bot を招待する運用フローが必要</td></tr>
+</table>
+
+<h3>11.2 組織的・運用上の前提</h3>
+<table>
+  <tr><th>#</th><th>前提</th></tr>
+  <tr><td>P1</td><td>「会社の脳として AI を活用する」方針が会社として合意済み（SEC-03）</td></tr>
+  <tr><td>P2</td><td>営業16名全員が OAuth 同意を実施できる</td></tr>
+  <tr><td>P3</td><td>マネージャーが定期的に判定根拠をレビューしフィードバックを返す</td></tr>
+  <tr><td>P4</td><td>FDE は 6ヶ月間継続的にアサイン可能</td></tr>
+  <tr><td>P5</td><td>月次予算 ¥250K（インフラ + API 合算）の承認が得られている</td></tr>
+  <tr><td>P6</td><td>Drive の過去提案フォルダが指定済み（共有ドライブとして整備）</td></tr>
+  <tr><td>P7</td><td>VSEO Analytics（自社運用）の VPC 接続が可能</td></tr>
+  <tr><td>P8 <span class="new-tag">v2.1</span></td><td>営業に「機能① は @TeamAgent と呼んだ時のみ動く」運用ルールを周知できる</td></tr>
+</table>
+
+<h3>11.3 法的・コンプライアンス前提</h3>
+<table>
+  <tr><th>#</th><th>前提</th></tr>
+  <tr><td>L1</td><td>個人情報保護法に基づく社内データ取扱規程を遵守する</td></tr>
+  <tr><td>L2</td><td>営業の OAuth 同意時に AI 利用目的を明示する</td></tr>
+  <tr><td>L3</td><td>顧客（営業先）の個人情報は要件定義での利用に限定し、外部送信時は要約・マスキング</td></tr>
+  <tr><td>L4</td><td>監査ログは SOC2 Type 1 相当の保持要件（90日）を満たす</td></tr>
+</table>
+</section>
+
+
+<!-- ========== 12. 用語集 ========== -->
+<section id="sec-12" class="appendix">
+<h2><span class="num">12.</span>用語集</h2>
+
+<dl class="terms">
+  <dt>TeamAgent</dt>
+  <dd>本要件定義の対象となる Slack AI エージェントの総称。営業16名 + マネージャー数名が利用する社内専用エージェント。</dd>
+
+  <dt>5機能（機能① 〜 ⑤）</dt>
+  <dd>① Slack メンション起動（v2.1 改定）／ ② Mail ワークフロー ／ ③ 提案コンテンツ生成 ／ ④ 動画 URL 分析 ／ ⑤ 営業進捗サマリー（②に内包）</dd>
+
+  <dt>5+1 データ層</dt>
+  <dd>📧 Gmail / 💬 Slack / 📁 Google Drive / 🎬 動画分析データ（VSEO + dpro + Buzzmiru）/ 🔍 Gemini DR / 🐦 X — 6つの読み取り対象。</dd>
+
+  <dt>4共通基盤</dt>
+  <dd>Claude Agent SDK / Gmail OAuth / Slack Bolt / pgvector — 5機能すべてが再利用するインフラ。</dd>
+
+  <dt>FR（Functional Requirement）</dt>
+  <dd>機能要件。FR-X-YY 形式（X = 機能番号、YY = 連番）。</dd>
+
+  <dt>NFR（Non-Functional Requirement）</dt>
+  <dd>非機能要件。性能・可用性・セキュリティ・拡張性・運用性・ユーザビリティの 6カテゴリ。</dd>
+
+  <dt>SEC / DR / INT / TST</dt>
+  <dd>セキュリティ要件 / データ要件 / 外部連携要件 / テスト要件。</dd>
+
+  <dt>DoD（Definition of Done）</dt>
+  <dd>各 Sprint の受入基準（v2.1 で Phase 単位から Sprint 単位に細分化）。すべて満たした時点で次 Sprint に進める。</dd>
+
+  <dt>SLO / SLA</dt>
+  <dd>SLO = Service Level Objective（社内目標）／ SLA = Service Level Agreement（外部約束）。本書ではコア機能 + 機能① ともに SLO 99.5% を採用。</dd>
+
+  <dt>RTO / RPO</dt>
+  <dd>RTO = Recovery Time Objective（復旧目標時間）4時間 ／ RPO = Recovery Point Objective（データ損失許容時間）1時間。</dd>
+
+  <dt>ephemeral</dt>
+  <dd>Slack の <code>chat.postEphemeral</code> API で送信される「特定ユーザーにのみ表示」される一時メッセージ。機能① で活用。</dd>
+
+  <dt>app_mention <span class="new-tag">v2.1</span></dt>
+  <dd>Slack Events API のイベントタイプ。Bot が <code>@</code> 付きで言及された時のみ発火する。v2.1 で機能①のトリガに採用。</dd>
+
+  <dt>意図ルーター（Intent Router） <span class="new-tag">v2.1</span></dt>
+  <dd>FR-1-11 で導入した、メンション本文から「機能①（事例検索）」か「機能③（提案作成）」かを判定する軽量分類モデル。誤ルーティング率 5% 以下が目標。</dd>
+
+  <dt>opt-out</dt>
+  <dd>営業が「これは AI に見せたくない」スレッドを Gmail ラベル <code>TeamAgent-Exclude</code> で除外する機構。</dd>
+
+  <dt>Pattern Bravo+</dt>
+  <dd>Gemini Deep Research の 4経路冗長化方針（Vertex AI 公式 / Bedrock Claude WebSearch / Tavily / Brave）。</dd>
+
+  <dt>5フェーズ生成ワークフロー</dt>
+  <dd>機能③ の動作。Phase A: 検索条件設計 → B: 並列リサーチ → C: 5割版生成 → D: 対話型仕上げ → E: 営業最終調整。</dd>
+
+  <dt>本人メール / 他人メール</dt>
+  <dd>本人メール = 当該営業自身の Gmail（要件定義・条件設定に利用）。他人メール = 同社他営業の Gmail（社内ナレッジ DB として利用）。</dd>
+
+  <dt>動画分析データ層</dt>
+  <dd>VSEO Analytics + 動画広告プロ（dpro）+ Buzzmiru の3サービスを束ねた論理レイヤー。</dd>
+
+  <dt>受注角度</dt>
+  <dd>機能⑤ で使う指標。クライアントの温度・進捗ステージから受注確度を「高（80%以上）/ 中（40〜79%）/ 低（40%未満）」で分類。</dd>
+
+  <dt>Sprint <span class="new-tag">v2.1</span></dt>
+  <dd>2週間〜1ヶ月単位の開発反復。v2.1 では DoD-S1〜S17 を Sprint 単位の完了条件として定義する。</dd>
+</dl>
+
+<h3>改訂履歴</h3>
+<table>
+  <tr><th>版</th><th>日付</th><th>主な変更点</th></tr>
+  <tr><td>2.0</td><td>2026-05-07</td><td>初版作成（v2.0 仕様書 / 実装計画書 v2.0 と整合）。FR 42件 / NFR 25件 / SEC 12件 / INT 10件 / TST 10件 / DR 5件 / DoD 各 Phase 別の体系化。</td></tr>
+  <tr><td>2.1</td><td>2026-05-08</td><td>IBM シニアエンジニアレビュー反映：(1) FR-1-XX を「@TeamAgent メンション起動」に変更、FR-1-02/06/07/09 削除、FR-1-11/12 新規追加。(2) DoD を Sprint 別（DoD-S1〜S17）に細分化。(3) TST-01〜10 に Phase 別実施タイミング追加。NFR-01 を p95 ≤ 2秒に厳格化、NFR-07 を 99.5% へ引き上げ。要件総数 104件 → 102件（FR 2件追加・4件削除）。</td></tr>
+</table>
+
+<h3>一行サマリー</h3>
+<p style="background:var(--bg-soft);padding:16px 20px;border-left:4px solid var(--text);font-size:14px;line-height:1.8">
+TeamAgent v2.1 要件定義書は、5機能（① <strong>メンション起動</strong> / ② Mail ワークフロー / ③ 提案生成 / ④ 動画分析 / ⑤ 進捗サマリー）に対し <strong>FR 40件 + NFR 25件 + SEC 12件 + INT 10件 + TST 10件 + DR 5件</strong>（合計 102 件）の要件を、優先度（必須 / 推奨 / 任意）と受入基準付きで定義する。Phase 順序 ④→②→③→① +2.5 を <strong>17 Sprint（DoD-S1〜S17）+ Final</strong> に細分化し、各 DoD を次 Sprint 開始の前提条件として明記。コア機能 + 機能① 稼働率 SLO 99.5%、月次予算 ¥250K 上限、6ヶ月で全機能リリース。
+</p>
+
+</section>
+
+</main>
+</div>
+
+</body>
+</html>

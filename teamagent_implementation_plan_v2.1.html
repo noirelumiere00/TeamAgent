@@ -1,0 +1,1842 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 実装計画書 v2.1（17 Sprint 反復型）</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc { list-style: none; }
+  .toc li { margin-bottom: 4px; }
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+  .toc a:hover { color: var(--accent); }
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main { padding: 64px 64px 96px; max-width: 1040px; }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table { margin-top: 24px; font-size: 13px; }
+  .doc-meta-table td { padding: 4px 16px 4px 0; color: var(--text-muted); }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 { font-size: 14px; font-weight: 700; margin: 24px 0 8px; color: var(--text); }
+
+  p { margin-bottom: 14px; }
+
+  ul, ol { margin: 12px 0 16px 24px; }
+  li { margin-bottom: 6px; }
+
+  ul.unstyled { list-style: none; margin-left: 0; }
+
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+  table.kv td:first-child { font-weight: 600; width: 30%; color: var(--text-muted); }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner { background: #f0fdf4; border-left-color: #16a34a; }
+  .note.beginner .label { color: #16a34a; }
+
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num { font-weight: 700; color: var(--text-muted); margin-right: 8px; }
+
+  /* タイムライン */
+  .timeline-table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone { background: var(--highlight); font-weight: 600; }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix { border-top: 2px solid var(--text); margin-top: 64px; padding-top: 32px; }
+
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* ============== v2.0 継承スタイル ============== */
+  .hero { background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%); border-radius: 12px; padding: 32px 36px; margin: 24px 0 40px; border: 1px solid var(--border); }
+  .hero-tagline { font-size: 13px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 700; margin-bottom: 8px; }
+  .hero-headline { font-size: 26px; font-weight: 700; line-height: 1.4; margin-bottom: 24px; color: var(--text); }
+  .hero-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; }
+  .hero-stat { background: rgba(255,255,255,0.85); border-radius: 10px; padding: 16px 18px; border: 1px solid var(--border); }
+  .hero-stat-num { font-size: 30px; font-weight: 800; color: var(--accent); line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .hero-stat-num small { font-size: 14px; color: var(--text-muted); font-weight: 600; margin-left: 2px; }
+  .hero-stat-label { font-size: 11px; color: var(--text-muted); margin-top: 6px; line-height: 1.4; }
+
+  .cost-chart { margin: 16px 0 8px; }
+  .cost-row { display: grid; grid-template-columns: 200px 1fr 110px; gap: 12px; align-items: center; margin-bottom: 8px; font-size: 13px; }
+  .cost-label { font-weight: 600; }
+  .cost-bar-bg { background: var(--bg-soft); border-radius: 4px; height: 26px; overflow: hidden; }
+  .cost-bar-fill { height: 100%; border-radius: 4px; display:flex; align-items:center; padding-left:8px; color:white; font-size:11px; font-weight:700; }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); color:#5b3000; }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value { font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; }
+
+  /* Gantt（9 列拡張） */
+  .gantt { margin: 20px 0 8px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 12px; }
+  .gantt-header { display: grid; grid-template-columns: 220px repeat(9, 1fr); background: var(--bg-soft); border-bottom: 1px solid var(--border); font-weight: 700; }
+  .gantt-header > div { padding: 10px 6px; border-right: 1px solid var(--border); text-align: center; font-size: 11px; color: var(--text-muted); }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row { display: grid; grid-template-columns: 220px repeat(9, 1fr); border-bottom: 1px solid var(--border); height: 50px; align-items: center; }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name { padding: 8px 12px; border-right: 1px solid var(--border); font-weight: 600; font-size: 12px; background: white; height: 100%; display: flex; align-items: center; }
+  .gantt-cells { grid-column: 2 / -1; display: grid; grid-template-columns: repeat(9, 1fr); height: 100%; position: relative; }
+  .gantt-cells > .gc { border-right: 1px dashed var(--border); height: 100%; }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar { position: absolute; top: 10px; bottom: 10px; border-radius: 4px; color: white; display: flex; align-items: center; justify-content: center; font-size: 10.5px; font-weight: 700; padding: 0 6px; white-space: nowrap; }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+  .gantt-bar.pf { background: #1a1a1a; }
+
+  /* Sprint card */
+  .sprint-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 5px solid #6366f1;
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 16px 0 24px;
+  }
+  .sprint-card.p1 { border-left-color: #6366f1; }
+  .sprint-card.p2 { border-left-color: #2563eb; }
+  .sprint-card.p25 { border-left-color: #ca8a04; }
+  .sprint-card.p3 { border-left-color: #16a34a; }
+  .sprint-card.p4 { border-left-color: #B91C1C; }
+  .sprint-card.pf { border-left-color: #1a1a1a; }
+  .sprint-card .sprint-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .sprint-card .sprint-id {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .sprint-card .sprint-title {
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+  .sprint-card .sprint-period {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .sprint-card .sprint-section { margin: 10px 0; font-size: 13px; line-height: 1.7; }
+  .sprint-card .sprint-section-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+    margin-top: 10px;
+  }
+  .sprint-card .sprint-dod {
+    background: #f0fdf4;
+    border-left: 3px solid #16a34a;
+    padding: 8px 12px;
+    font-size: 12.5px;
+    margin-top: 10px;
+  }
+  .sprint-card .sprint-risk {
+    background: #fef2f2;
+    border-left: 3px solid var(--accent);
+    padding: 8px 12px;
+    font-size: 12.5px;
+    margin-top: 8px;
+  }
+
+  /* Sprint テンプレート（実装/テスト/安定化 比率） */
+  .sprint-allocation {
+    display: grid;
+    grid-template-columns: 55fr 25fr 20fr;
+    gap: 0;
+    margin: 12px 0;
+    border-radius: 4px;
+    overflow: hidden;
+    height: 28px;
+    border: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .sprint-allocation > div {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+  }
+  .sprint-allocation .alloc-impl { background: #2563eb; }
+  .sprint-allocation .alloc-test { background: #ca8a04; }
+  .sprint-allocation .alloc-stab { background: #16a34a; }
+
+  /* 月次ダッシュボード（9 列拡張） */
+  .month-dash {
+    display: grid;
+    grid-template-columns: 130px repeat(9, 1fr);
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 16px 0;
+    font-size: 11.5px;
+  }
+  .month-dash .dash-cell {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: white;
+  }
+  .month-dash .dash-cell:nth-child(10n) { border-right: 0; }
+  .month-dash .dash-row-last { border-bottom: 0; }
+  .month-dash .dash-header {
+    background: var(--bg-soft);
+    font-weight: 700;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .month-dash .dash-row-label {
+    background: var(--bg-soft);
+    font-weight: 700;
+    font-size: 10.5px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .month-dash .dash-month-num {
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--text);
+    text-align: center;
+  }
+  .month-dash .dash-phase-tag {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 9.5px;
+    font-weight: 700;
+    margin-bottom: 3px;
+  }
+  .month-dash .dash-phase-tag.p1 { background: #eef2ff; color: #4338ca; }
+  .month-dash .dash-phase-tag.p2 { background: #dbeafe; color: #1d4ed8; }
+  .month-dash .dash-phase-tag.p25 { background: #fef3c7; color: #ca8a04; }
+  .month-dash .dash-phase-tag.p3 { background: #dcfce7; color: #16a34a; }
+  .month-dash .dash-phase-tag.p4 { background: #fee2e2; color: #B91C1C; }
+  .month-dash .dash-phase-tag.pf { background: #e5e7eb; color: #1a1a1a; }
+  .month-dash .dash-cost {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    color: var(--text);
+    text-align: right;
+    font-size: 11px;
+  }
+  .month-dash .dash-cost.dev { color: #6366f1; }
+  .month-dash .dash-cost.run { color: #16a34a; }
+  .month-dash .dash-cost.total { color: var(--accent); font-size: 12.5px; }
+
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-s1 { background: #eef2ff; color: #4338ca; }
+  .pill.p-s2 { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-s25 { background: #fef3c7; color: #ca8a04; }
+  .pill.p-s3 { background: #dcfce7; color: #16a34a; }
+  .pill.p-s4 { background: #fee2e2; color: #B91C1C; }
+
+  .total-callout {
+    background: linear-gradient(135deg, #1f2937 0%, #374151 100%);
+    color: white;
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0;
+    text-align: center;
+  }
+  .total-callout .tc-label {
+    font-size: 12px;
+    color: #9ca3af;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px;
+  }
+  .total-callout .tc-amount {
+    font-size: 56px;
+    font-weight: 800;
+    line-height: 1;
+    color: white;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .total-callout .tc-amount small {
+    font-size: 24px;
+    color: #9ca3af;
+    font-weight: 600;
+  }
+  .total-callout .tc-detail { font-size: 13px; color: #d1d5db; margin-top: 12px; }
+
+  /* Sprint テンプレートボックス（章 3 冒頭） */
+  .sprint-template {
+    background: #fff;
+    border: 2px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 18px 22px;
+    margin: 16px 0;
+  }
+  .sprint-template h4 { margin-top: 0; }
+
+  /* テスト戦略マトリクス */
+  .test-matrix {
+    display: grid;
+    grid-template-columns: 180px repeat(6, 1fr);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 12px;
+    margin: 12px 0;
+  }
+  .test-matrix > div {
+    padding: 8px 10px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    text-align: center;
+    background: white;
+  }
+  .test-matrix > div:nth-child(7n) { border-right: 0; }
+  .test-matrix .tm-header {
+    background: var(--bg-soft);
+    font-weight: 700;
+    color: var(--text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .test-matrix .tm-row-label {
+    background: var(--bg-soft);
+    font-weight: 700;
+    text-align: left;
+    font-size: 12px;
+  }
+  .test-matrix .tm-yes { color: #16a34a; font-weight: 700; }
+  .test-matrix .tm-light { color: #ca8a04; }
+  .test-matrix .tm-no { color: var(--text-subtle); }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .gantt-header, .gantt-row { font-size: 10px; }
+    .gantt-header { grid-template-columns: 100px repeat(9, 1fr); }
+    .gantt-row { grid-template-columns: 100px repeat(9, 1fr); }
+    .month-dash { grid-template-columns: 90px repeat(9, 1fr); font-size: 10px; }
+  }
+
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .sprint-card { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+  }
+</style>
+</head>
+<body>
+
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>実装計画書 v2.1</div>
+  <div class="sidebar-doc-meta">
+    Version 2.1<br>
+    2026年5月8日<br>
+    17 Sprint 反復型
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1 highlight-section"><a href="#sec-1"><span class="num">1.</span>エグゼクティブサマリー</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>総額・期間・前提</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>Sprint 構造（17 Sprint）</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>コスト構成</a></li>
+
+    <li class="level-1"><a href="#sec-2"><span class="num">2.</span>コスト構造</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>4種類のコスト</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>含まないもの</a></li>
+    <li class="level-2"><a href="#sec-2-3"><span class="num">2.3</span>一時費用</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>Sprint 別計画（17 Sprint）</a></li>
+    <li class="level-2"><a href="#sec-3-0"><span class="num">3.0</span>Sprint 標準テンプレート</a></li>
+    <li class="level-2"><a href="#sec-3-p1"><span class="num">3.1</span>機能④ Phase 1（S1〜S3）</a></li>
+    <li class="level-2"><a href="#sec-3-p2"><span class="num">3.2</span>機能② Phase 2（S4〜S7）</a></li>
+    <li class="level-2"><a href="#sec-3-p25"><span class="num">3.3</span>機能⑤ Phase 2.5（S8 並行）</a></li>
+    <li class="level-2"><a href="#sec-3-p3"><span class="num">3.4</span>機能③ Phase 3（S9〜S14）</a></li>
+    <li class="level-2"><a href="#sec-3-p4"><span class="num">3.5</span>機能① Phase 4（S15〜S17）</a></li>
+    <li class="level-2"><a href="#sec-3-pf"><span class="num">3.6</span>S-Final 統合最終検証</a></li>
+
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>スケジュール（9ヶ月ガント）</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-5"><span class="num">5.</span>総額見積</a></li>
+    <li class="level-2"><a href="#sec-5-1"><span class="num">5.1</span>開発期間トータル（8.5ヶ月）</a></li>
+    <li class="level-2"><a href="#sec-5-2"><span class="num">5.2</span>本番運用 月次</a></li>
+
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>前提条件と要相談項目</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-7"><span class="num">7.</span>月次ダッシュボード（M1〜M9）</a></li>
+    <li class="level-2"><a href="#sec-7-1"><span class="num">7.1</span>累積コスト推移（M1〜M9）</a></li>
+    <li class="level-2"><a href="#sec-7-2"><span class="num">7.2</span>本番運用への移行</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-8"><span class="num">8.</span>テスト戦略（NEW）</a></li>
+    <li class="level-2"><a href="#sec-8-1"><span class="num">8.1</span>Sprint 内工数比率</a></li>
+    <li class="level-2"><a href="#sec-8-2"><span class="num">8.2</span>Champion 検証ウィンドウ</a></li>
+    <li class="level-2"><a href="#sec-8-3"><span class="num">8.3</span>テスト種別 × Phase 別</a></li>
+    <li class="level-2"><a href="#sec-8-4"><span class="num">8.4</span>スコープ凍結 / FB 分類</a></li>
+
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>付録</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">実装計画書 v2.1（17 Sprint 反復型）</div>
+  <h1>TeamAgent 実装計画書 v2.1<br>17 Sprint Iterative Plan</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>実装計画書（仕様書 v2.0 と対をなす別冊・v2.0 の全面書き直し）</td></tr>
+    <tr><td>バージョン</td><td>2.1（v2.0 を反復型に書き直し）</td></tr>
+    <tr><td>作成日</td><td>2026年5月8日</td></tr>
+    <tr><td>位置付け</td><td>v2.0 の Phase 別計画（6ヶ月）を、各 Sprint 末に Champion 検証 + DoD ゲートを設けた <strong>17 Sprint × 2週間（合計 8.5ヶ月）</strong> の反復型に再構成。テスト・安定化期間を明示し、Sprint 内に「実装 55% / テスト 25% / 修正・安定化 20%」の工数比率を組み込む。</td></tr>
+    <tr><td>関連文書</td><td>仕様書 v2.0（teamagent_overview_v2.0.html）／ 実装計画書 v2.0（teamagent_implementation_plan_v2.0.html）</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">17-Sprint Iterative Plan at a Glance</div>
+  <div class="hero-headline">FDE 1名 + Claude Code で<br>8.5ヶ月・17 Sprint・月次¥95K-106K のフル稼働を目指す</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">8.5<small>ヶ月</small></div>
+      <div class="hero-stat-label">開発期間（17 Sprint × 2週 + S-Final）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">17<small>Sprint</small></div>
+      <div class="hero-stat-label">2週間 × 17 反復、各末に Champion 検証</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">¥664K<small>〜874K</small></div>
+      <div class="hero-stat-label">開発総額（v2.0 +¥190K-240K のテスト・安定化）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">¥95K<small>〜106K</small></div>
+      <div class="hero-stat-label">本番運用 月次（フル稼働後・v2.0 と同水準）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 1. エグゼクティブサマリー ========== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>エグゼクティブサマリー</h2>
+
+<div class="total-callout">
+  <div class="tc-label">Total Project Cost (Development 8.5 months / 17 Sprints)</div>
+  <div class="tc-amount">¥664K<small>〜¥874K</small></div>
+  <div class="tc-detail">本番運用 月次：<strong style="color:white">¥95K〜¥106.5K / 月</strong>（v1.5 上限 ¥250K の40%）</div>
+</div>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>総額・期間・前提</h3>
+<table>
+  <tr><th>項目</th><th>値</th></tr>
+  <tr><td>開発期間</td><td><strong>8.5ヶ月（17 Sprint × 2週 + S-Final 0.5ヶ月）</strong>。④ 1.5 → ② 2.0 → ⑤ 0.75（並行） → ③ 3.0 → ① 1.5 → S-Final 0.5</td></tr>
+  <tr><td>Sprint 構造</td><td>各 Sprint 2 週間 = 実装 55% + テスト 25% + 修正・安定化 20%。末尾 3 日に Champion 検証ウィンドウ。</td></tr>
+  <tr><td>開発期間中の総コスト</td><td><strong>¥664,000 〜 ¥874,000</strong>（CC + AWS Large + Anthropic + Gemini + テスト/安定化バッファ込み）。v2.0（¥473K〜634K）に対し +¥190K〜240K の増分は全てテスト・観察期間に充当。</td></tr>
+  <tr><td>本番運用 月次</td><td><strong>¥95,000 〜 ¥106,500 / 月</strong>（v1.5 上限 ¥250K の約40%）。v2.0 と同水準を維持。</td></tr>
+  <tr><td>主担当</td><td>FDE（個人 Claude Code 契約 $200/月、開発期間 8.5 ヶ月）</td></tr>
+  <tr><td>Champion User</td><td>2名（Sprint 末ごとの 3 日間検証ウィンドウ：Day1 営業利用 / Day2 FB 分類 / Day3 次 Sprint 反映）</td></tr>
+</table>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>Sprint 構造（17 Sprint 並行型）</h3>
+
+<div class="note">
+  <div class="label">Sprint レイアウト（並行化込み）</div>
+<pre style="font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.6;margin:0;white-space:pre">
+       M1     M2     M3     M4     M5     M6     M7     M8     M9
+④ ━━[S1][S2][S3]
+②           [S4][S5][S6][S7]
+⑤                       [S8─並行─]
+③                          [S9][S10][S11][S12][S13][S14]
+①                                              [S15][S16][S17]
+                                                            [S-Final]
+
+期間：8.5 ヶ月（並行化）
+各 Sprint = 2 週間
+Sprint 構造：実装 55% + テスト 25% + 修正・安定化 20%
+Champion 検証は各 Sprint 末に 3 日間
+</pre>
+</div>
+
+<p><strong>17 Sprint の機能割り付け：</strong></p>
+<table>
+  <tr><th>Sprint</th><th>所属 Phase</th><th>期間</th><th>主目的</th></tr>
+  <tr><td>S1〜S3</td><td><span class="pill p-s1">機能④（P1）</span></td><td>1.5 ヶ月（M1-M2W2）</td><td>動画 URL 分析の MVP→統合→全展開（DoD-P1）</td></tr>
+  <tr><td>S4〜S7</td><td><span class="pill p-s2">機能②（P2）</span></td><td>2 ヶ月（M2W3-M4W2）</td><td>Mail 朝バッチ + 返信深掘り + 全16名展開（DoD-P2）</td></tr>
+  <tr><td>S8</td><td><span class="pill p-s25">機能⑤（P2.5）</span></td><td>0.75 ヶ月（M4 並行）</td><td>マネージャー進捗 DM 検証（DoD-P2.5）</td></tr>
+  <tr><td>S9〜S14</td><td><span class="pill p-s3">機能③（P3）</span></td><td>3 ヶ月（M4W3-M7W2）</td><td>RAG + Gemini DR + 5割版 + 対話型仕上げ（DoD-P3）</td></tr>
+  <tr><td>S15〜S17</td><td><span class="pill p-s4">機能①（P4）</span></td><td>1.5 ヶ月（M7W3-M8）</td><td>@TeamAgent メンション起動 + ルーター（DoD-P4）</td></tr>
+  <tr><td>S-Final</td><td><span class="pill">統合検証</span></td><td>0.5 ヶ月（M9）</td><td>全機能フル稼働の本番観察（DoD-Final）</td></tr>
+</table>
+
+<h3 id="sec-1-3"><span class="num">1.3</span>コスト構成（バーチャート）</h3>
+<p>本番運用 月次（高位 ¥106.5K）の内訳。v2.0 と同水準：</p>
+<div class="cost-chart">
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-aws">AWS</span> インフラ</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill aws" style="width: 38%">¥40K（38%）</div></div>
+    <div class="cost-value">¥35K〜40K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-anthropic">Anthropic</span> Claude API</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill anthropic" style="width: 38%">¥40K（38%）</div></div>
+    <div class="cost-value">¥35K〜40K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-gemini">Gemini</span> DR API</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill gemini" style="width: 23%">¥25K（23%）</div></div>
+    <div class="cost-value">¥22.5K〜25K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill">Embedding</span> その他</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill other" style="width: 1%"></div></div>
+    <div class="cost-value">¥1.5K</div>
+  </div>
+</div>
+
+<table style="margin-top:24px">
+  <tr><th>カテゴリ</th><th>開発8.5ヶ月総額</th><th>本番月次</th><th>備考</th></tr>
+  <tr><td><span class="pill p-aws">AWS</span> インフラ（Large 級）</td><td>¥230,000〜290,000</td><td>¥35,000〜40,000</td><td>db.r7g.large + Lambda + S3 + CloudWatch</td></tr>
+  <tr><td><span class="pill p-anthropic">Anthropic</span> Claude API</td><td>¥180,000〜240,000</td><td>¥35,000〜40,000</td><td>SDK 経由の生成・対話。テスト用 token 含む</td></tr>
+  <tr><td><span class="pill p-gemini">Gemini</span> API（DR + Embedding）</td><td>¥85,000〜130,000</td><td>¥22,500〜26,500</td><td>Phase 3（S9 以降）から本格利用</td></tr>
+  <tr><td><span class="pill p-cc">Claude Code</span>（個人）</td><td>¥255,000</td><td>—</td><td>$200/月 × 8.5ヶ月、開発期間のみ</td></tr>
+  <tr><td>OAuth 検証一時費用</td><td>¥0〜30,000</td><td>—</td><td>社内 Workspace 内なら ¥0</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>合計</td><td><strong>¥664,000〜874,000</strong></td><td><strong>¥92,500〜106,500</strong></td><td>v2.0 比 +¥190K-240K（テスト・安定化）</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 1.1</span>カテゴリ別コスト総覧。v2.0 比の増分は全て「テスト 25% + 安定化 20% + Champion 検証 + 観察期間」に充当される。</p>
+</section>
+
+<!-- ========== 2. コスト構造 ========== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>コスト構造</h2>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>4種類のコスト</h3>
+<table>
+  <tr><th>#</th><th>カテゴリ</th><th>支払先</th><th>性質</th></tr>
+  <tr><td>①</td><td>AWS インフラ</td><td>AWS（USD 月次請求）</td><td>従量課金。使用量で増減</td></tr>
+  <tr><td>②</td><td>Anthropic Claude API</td><td>Anthropic（USD 月次）</td><td>従量課金。token 使用量</td></tr>
+  <tr><td>③</td><td>Gemini API</td><td>Google Cloud（USD 月次）</td><td>従量課金。DR は 1 タスク $1〜$3</td></tr>
+  <tr><td>④</td><td>Claude Code</td><td>Anthropic（個人サブスク $200/月）</td><td>固定。FDE 個人契約。開発期間中のみ</td></tr>
+</table>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>含まないもの（社内既契約等）</h3>
+<table>
+  <tr><th>項目</th><th>状況</th><th>追加コスト</th></tr>
+  <tr><td>Slack Pro plan</td><td>会社で既契約済み</td><td>¥0</td></tr>
+  <tr><td>動画広告プロ（dpro）</td><td>既契約済み</td><td>¥0</td></tr>
+  <tr><td>Buzzmiru</td><td>既契約済み</td><td>¥0</td></tr>
+  <tr><td>Algrow</td><td>v2.0 では一旦スコープアウト</td><td>¥0</td></tr>
+  <tr><td>Bright Data 等プロキシ</td><td>不採用（Buzzmiru 落ちは死活監視で吸収）</td><td>¥0</td></tr>
+  <tr><td>独自ドメイン / SSL</td><td>不要（Slack 内完結）</td><td>¥0</td></tr>
+  <tr><td>監視ツール（Sentry / Datadog）</td><td>不採用（CloudWatch のみ）</td><td>¥0（AWS 内に含む）</td></tr>
+  <tr><td>音声合成 / TTS</td><td>不採用</td><td>¥0</td></tr>
+</table>
+
+<h3 id="sec-2-3"><span class="num">2.3</span>一時費用</h3>
+<table>
+  <tr><th>項目</th><th>金額</th><th>条件</th></tr>
+  <tr><td>Google OAuth verification</td><td>¥0〜30,000</td><td>社内 Workspace 内アプリなら不要。外部公開や CASA 監査要件の場合のみ発生</td></tr>
+  <tr><td>初回環境構築（IAM / VPC 等）</td><td>¥0</td><td>FDE 工数内（時間コストは Claude Code に内包）</td></tr>
+</table>
+</section>
+
+
+<!-- ========== 3. Sprint 別計画 ========== -->
+<section id="sec-3">
+<h2><span class="num">3.</span>Sprint 別計画（17 Sprint）</h2>
+
+<h3 id="sec-3-0"><span class="num">3.0</span>Sprint 標準テンプレート</h3>
+
+<div class="sprint-template">
+<h4>各 Sprint = 2 週間 / 10 営業日</h4>
+<div class="sprint-allocation">
+  <div class="alloc-impl">実装 55% (5.5 日)</div>
+  <div class="alloc-test">テスト 25% (2.5 日)</div>
+  <div class="alloc-stab">修正・安定化 20% (2 日)</div>
+</div>
+<table class="compact" style="margin:8px 0">
+  <tr><th>区分</th><th>日数</th><th>主な作業</th></tr>
+  <tr><td>実装</td><td>5.5 日</td><td>新規機能のコーディング、Claude Code 主導の開発</td></tr>
+  <tr><td>テスト</td><td>2.5 日</td><td>単体・結合・E2E。第 8 章のテスト種別に従う</td></tr>
+  <tr><td>修正・安定化</td><td>2 日</td><td>バグ修正、性能ボトルネック解消、ログ整備</td></tr>
+  <tr><td>Champion 検証</td><td>3 日（末尾）</td><td>Day1 営業利用 / Day2 FB 分類 / Day3 次 Sprint 反映設計</td></tr>
+</table>
+<p style="font-size:12px;color:var(--text-muted);margin:6px 0 0">注：Champion 検証 3 日は「テスト 2.5 日」と一部重なる構造。1 Sprint = 10 営業日（2 週）の中で並行進行する。</p>
+</div>
+
+<!-- ========== 機能④ Phase 1（S1-S3）========== -->
+<h3 id="sec-3-p1"><span class="num">3.1</span>機能④ Phase 1：動画 URL 分析（S1 + S2 + S3 = 1.5 ヶ月）</h3>
+<p>VSEO 単独の MVP から始め、dpro / Buzzmiru の統合、全16名展開へと段階的に拡張。Phase 1 完了で <strong>DoD-P1</strong>（全16名で動画 URL の6観点構造化が稼働）達成。</p>
+
+<!-- S1 -->
+<div class="sprint-card p1">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S1</span>
+      <div class="sprint-title">MVP — VSEO のみ接続</div>
+    </div>
+    <div class="sprint-period">M1 W1-W2 / 機能④</div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>AWS 基本構築（IAM / VPC / RDS pgvector / Lambda / API Gateway / Secrets Manager）</li>
+    <li>Slack Bolt 基本実装（メンション受信 + リプライ送信）</li>
+    <li>VSEO tRPC ラッパー Lambda（最小限の URL → メタデータ取得）</li>
+    <li>Claude SDK での 6 観点構造化出力（プロンプト試作版）</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S1：</strong>Champion 1 名が VSEO URL を 1 件投げて、Slack スレッドに 6 観点 JSON が返る。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>AWS IAM 権限設計の手戻り（VPC + RDS の Security Group 設計を初日に固める）。VSEO tRPC 仕様変動 → ラッパー層で吸収。</div>
+</div>
+
+<!-- S2 -->
+<div class="sprint-card p1">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S2</span>
+      <div class="sprint-title">統合 — dpro + Buzzmiru + 6観点構造化</div>
+    </div>
+    <div class="sprint-period">M1 W3-W4 / 機能④ <strong style="color:var(--accent)">[スコープ凍結]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>dpro REST + Buzzmiru API のラッパー Lambda 実装（同一スキーマ化）</li>
+    <li>3 ソースのデータ正規化レイヤ + pgvector への Embedding 保存</li>
+    <li>6 観点プロンプトの確定版（出力品質サンプル評価実施）</li>
+    <li>Buzzmiru 障害時のリトライ + 死活監視</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S2：</strong>Champion 2 名が任意の動画 URL（VSEO/dpro/Buzzmiru いずれか）で 6 観点出力を取得 + 5 件中 4 件の品質を「合格」と評価。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>Buzzmiru レート制限が想定より厳しい → 並列度ダウン + リトライ exponential backoff。</div>
+</div>
+
+<!-- S3 -->
+<div class="sprint-card p1">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S3</span>
+      <div class="sprint-title">安定化 — 全16名展開 + SLO 監視</div>
+    </div>
+    <div class="sprint-period">M2 W1-W2 / 機能④ <strong style="color:#16a34a">[DoD-P1]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>営業 16 名への Slack App 配布 + オンボーディング 1on1</li>
+    <li>SLO ダッシュボード（応答レイテンシ p95 / エラー率 / API 成功率）</li>
+    <li>CloudWatch アラーム設定 + Slack 通知連携</li>
+    <li>2 週間運用観察（NFR-06 稼働率 99.5% の初回測定）</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-P1：</strong>全 16 名が機能④ を利用可能 + 連続 2 週間で稼働率 99% 以上 + 6 観点出力品質サンプル 20 件中 16 件以上が合格。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>並行利用時の RDS 接続枯渇 → connection pool（RDS Proxy）導入。営業 16 名のオンボーディング躓き → 個別 1on1 で吸収。</div>
+</div>
+
+<!-- ========== 機能② Phase 2（S4-S7）========== -->
+<h3 id="sec-3-p2"><span class="num">3.2</span>機能② Phase 2：Mail ワークフロー（S4 + S5 + S6 + S7 = 2 ヶ月）</h3>
+<p>OAuth 基盤を Champion 2 名で先行検証し、朝バッチ → 全16名展開 → 観察バッファの順で段階的に展開。Phase 2 完了で <strong>DoD-P2</strong>（全16名で朝バッチ稼働 + NFR-06 稼働率 99.5% を 2 週間維持）達成。</p>
+
+<!-- S4 -->
+<div class="sprint-card p2">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S4</span>
+      <div class="sprint-title">OAuth 基盤 + Champion 2 名で朝バッチ稼働</div>
+    </div>
+    <div class="sprint-period">M2 W3-W4 / 機能②</div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>Google OAuth Consent Screen 設計・申請（社内 Workspace スコープ）</li>
+    <li>Gmail API ラッパー Lambda（messages.list / threads.get / drafts.create）</li>
+    <li>EventBridge Cron + 朝バッチ Lambda（簡易版）</li>
+    <li>Champion 2 名の OAuth 連携 + 初回朝メール受信</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S4：</strong>Champion 2 名が翌朝に「返信が必要そうなメール」3 件以上を Slack DM で受信。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>OAuth Consent Screen 審査遅延 → 早期申請。Gmail API quota → 段階的展開でコントロール。</div>
+</div>
+
+<!-- S5 -->
+<div class="sprint-card p2">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S5</span>
+      <div class="sprint-title">朝バッチ + 返信深掘り + 5名 α 運用</div>
+    </div>
+    <div class="sprint-period">M3 W1-W2 / 機能② <strong style="color:var(--accent)">[スコープ凍結]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>Claude SDK で「返信が必要そう」判定 + 案 A/B/C 生成プロンプト確定</li>
+    <li>Slack DM + Block Kit ボタン UI（採用 / 編集 / 却下）</li>
+    <li>返信深掘りモード（Slack スレッド対話 + 文体学習）</li>
+    <li>α 運用 5 名（Champion 2 + 追加 3）展開</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S5：</strong>α 運用 5 名で朝バッチ稼働 1 週間 + 返信採用率 30% 以上。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>返信判定の False Positive 高め → α 運用での FB を S6 に反映する設計。</div>
+</div>
+
+<!-- S6 -->
+<div class="sprint-card p2">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S6</span>
+      <div class="sprint-title">フィルタ精度 + 全16名展開</div>
+    </div>
+    <div class="sprint-period">M3 W3-W4 / 機能② <strong style="color:#16a34a">[DoD-P2]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>α 運用 FB を反映した「返信が必要」判定の精度向上（プロンプト + 軽量分類器）</li>
+    <li>全16名への OAuth 連携オンボーディング（連携 URL 配布 + 1on1）</li>
+    <li>プライバシー監査ログ（誰のメールが何時 Claude に送られたか）</li>
+    <li>全16名で朝バッチ初回稼働</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-P2：</strong>全16名で朝バッチ初回稼働 + False Positive 率 20% 以下。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>16 名同時 OAuth で Workspace 管理者承認待ち → 事前合意 + 申請ガイド整備。</div>
+</div>
+
+<!-- S7 -->
+<div class="sprint-card p2">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S7</span>
+      <div class="sprint-title">観察 + バグ修正バッファ</div>
+    </div>
+    <div class="sprint-period">M4 W1-W2 / 機能② <strong style="color:#16a34a">[NFR-06 達成]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>2 週間の運用観察データ収集（採用率 / FP率 / レイテンシ）</li>
+    <li>バグ修正専用バッファ（実装比率を逆転させ、修正・安定化 50%）</li>
+    <li>NFR-06 稼働率 99.5% の 2 週間連続維持を測定</li>
+    <li>機能② リリース完了レポート</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S7：</strong>NFR-06 稼働率 99.5% を 2 週間連続で維持 + 採用率が α 運用比で同等以上。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>S7 が「単なる観察」になり工数余り → 余剰工数は機能③ S9 の RAG 事前準備（PDF 抽出のみ）に充当。</div>
+</div>
+
+<!-- ========== 機能⑤ Phase 2.5（S8 並行）========== -->
+<h3 id="sec-3-p25"><span class="num">3.3</span>機能⑤ Phase 2.5：マネージャー進捗 DM（S8 並行 = 0.75 ヶ月）</h3>
+<p>機能② のインフラ（Gmail OAuth + Lambda + Slack DM）を流用し、M4 で機能③ S9 と並行進行。Sprint 1 つだが「並行 + 0.75 ヶ月」の特殊形式。</p>
+
+<!-- S8 -->
+<div class="sprint-card p25">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S8</span>
+      <div class="sprint-title">マネージャー DM + 受入 + 一致率 75% 検証</div>
+    </div>
+    <div class="sprint-period">M4 並行（機能③ S9 と並行進行） / 機能⑤ <strong style="color:#16a34a">[DoD-P2.5]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>角度判定プロンプト設計（高 / 中 / 要フォロー）</li>
+    <li>全営業 Mail スレッド + 案件 Slack チャンネルの集約 Lambda</li>
+    <li>マネージャー向け週次サマリー DM フォーマット</li>
+    <li>マネージャーによる手動評価との一致率検証</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-P2.5：</strong>マネージャー手動評価との一致率 75% 以上 + 週次 DM 配信 2 回成功。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>機能③ S9（FDE フル稼働）と並行で工数競合 → S8 は実装ボリュームを意図的に小さく設計。</div>
+</div>
+
+<!-- ========== 機能③ Phase 3（S9-S14）========== -->
+<h3 id="sec-3-p3"><span class="num">3.4</span>機能③ Phase 3：提案コンテンツ生成（S9 + S10 + S11 + S12 + S13 + S14 = 3 ヶ月）</h3>
+<p>本プロジェクト最大規模。RAG 構築 → DR 接続 → 並列リサーチ → 5 割版生成 → 対話型仕上げ → 全展開 → 観察の 6 Sprint 構成。Phase 3 完了で <strong>DoD-P3</strong>（NFR-24 出力品質サンプリング合格）達成。</p>
+
+<!-- S9 -->
+<div class="sprint-card p3">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S9</span>
+      <div class="sprint-title">Drive RAG + Embedding（過去 PDF 1,500 件）</div>
+    </div>
+    <div class="sprint-period">M4 W3-W4 / 機能③</div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>Google Drive API 統合（OAuth + サービスアカウント切替）</li>
+    <li>過去 PDF/PPTX 1,500 件の抽出 + テキスト化 pipeline</li>
+    <li>Embedding 生成 + pgvector 投入（チャンク戦略確定）</li>
+    <li>類似事例検索 API（Top-K 取得 + メタフィルタ）</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S9：</strong>過去 PDF 1,500 件の Embedding 完了 + 任意のクエリで Top-5 関連提案を 2 秒以内に取得。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>PDF 抽出失敗（スキャン PDF / 画像のみ）→ OCR 適用判定 + フォールバック。Embedding 一括コストが想定超 → 増分処理 + チャンクサイズ調整。</div>
+</div>
+
+<!-- S10 -->
+<div class="sprint-card p3">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S10</span>
+      <div class="sprint-title">Gemini DR 接続（Vertex AI + Bedrock fallback + X 検索）</div>
+    </div>
+    <div class="sprint-period">M5 W1-W2 / 機能③</div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>Vertex AI Gemini DR Allowlist 申請完了 + API 接続</li>
+    <li>Bedrock Claude WebSearch fallback 実装（DR 障害時）</li>
+    <li>X（Twitter）検索ラッパー Lambda（オンデマンド）</li>
+    <li>Phase A（検索条件設計）プロンプト確定</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S10：</strong>Champion 1 名で Gemini DR 1 タスク → リサーチ結果取得が完了 + Bedrock fallback 切替動作確認。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>Vertex AI Allowlist 承認遅延 → S10 着手前に S9 で並行申請。DR 単価上振れ → コスト監視アラーム設置。</div>
+</div>
+
+<!-- S11 -->
+<div class="sprint-card p3">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S11</span>
+      <div class="sprint-title">並列リサーチ + 5割版生成 / Champion 1 案件試行</div>
+    </div>
+    <div class="sprint-period">M5 W3-W4 / 機能③ <strong style="color:var(--accent)">[スコープ凍結]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>Phase B（並列リサーチ実行）pipeline + 結果統合</li>
+    <li>Phase C（5 割版 MD/HTML 生成）プロンプト + テンプレ CSS 整備</li>
+    <li>Markdown + HTML 出力（pandoc 変換）</li>
+    <li>Champion 1 名による実案件 1 件の試行（5 割版で停止）</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S11：</strong>Champion が 1 案件の 5 割版 HTML をエンドツーエンドで生成 + 「方向性 OK」評価を受領。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>並列度高めるとレート制限ヒット → Sprint 内で並列度のチューニングを必須化。</div>
+</div>
+
+<!-- S12 -->
+<div class="sprint-card p3">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S12</span>
+      <div class="sprint-title">対話型仕上げ + Slack スレッド管理 / Champion 3 案件試行</div>
+    </div>
+    <div class="sprint-period">M6 W1-W2 / 機能③</div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>Phase D（対話型仕上げ：5 割 → 8 割）Slack スレッド管理</li>
+    <li>修正反映ログ（差分管理 + 再生成ボタン）</li>
+    <li>Phase E（最終出力 + Drive 保存）</li>
+    <li>Champion 2 名で 3 案件の試行（8 割版まで完成）</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S12：</strong>Champion 2 名 × 3 案件で「営業がそのまま顧客提示できる品質」を 2 件以上達成。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>Slack スレッド長期化での状態管理バグ → スレッド ID + DB 保存設計を厳格化。</div>
+</div>
+
+<!-- S13 -->
+<div class="sprint-card p3">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S13</span>
+      <div class="sprint-title">全16名展開</div>
+    </div>
+    <div class="sprint-period">M6 W3-W4 / 機能③ <strong style="color:#16a34a">[DoD-P3]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>営業 16 名へのオンボーディング 1on1（提案書生成フロー）</li>
+    <li>並列キュー設計（同時 5 案件まで）</li>
+    <li>使用量メトリクス + コスト監視ダッシュボード</li>
+    <li>初週の実利用観察</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-P3：</strong>全16名が機能③ を利用可能 + 初週の生成案件 10 件以上 + 初稿時間 8〜12h 達成（v2.0 仕様目標）。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>同時案件数増加で API コスト急騰 → 月次予算アラームを Sprint 中に設置。</div>
+</div>
+
+<!-- S14 -->
+<div class="sprint-card p3">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S14</span>
+      <div class="sprint-title">観察 + プロンプト調整バッファ</div>
+    </div>
+    <div class="sprint-period">M7 W1-W2 / 機能③ <strong style="color:#16a34a">[NFR-24 達成]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>NFR-24「出力品質 100 件サンプリング」測定 + 合格判定</li>
+    <li>営業 FB に基づくプロンプト調整（Phase A〜E すべて）</li>
+    <li>RAG ヒット率分析 + チャンク戦略再調整</li>
+    <li>機能③ リリース完了レポート</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S14：</strong>NFR-24 出力品質 100 件中 80 件以上が「営業がそのまま提示可能」評価。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>RAG ヒット率不足 → チャンク戦略の根本見直しは v3.0 バックログへ送る判断。</div>
+</div>
+
+<!-- ========== 機能① Phase 4（S15-S17）========== -->
+<h3 id="sec-3-p4"><span class="num">3.5</span>機能① Phase 4：@TeamAgent メンション起動（S15 + S16 + S17 = 1.5 ヶ月）</h3>
+
+<div class="note warn">
+  <div class="label">⚠️ 仕様変更（IBM レビュー反映）</div>
+  v2.0 計画では「Slack 自動サジェスト（受動監視 + chat.postEphemeral）」だったが、IBM レビューを受けて「<strong>@TeamAgent メンション起動</strong>」型に変更。営業からの能動的な呼び出しに応答する形式となり、受動監視のプライバシー問題を回避。S15-S17 の構成も全面再設計。
+</div>
+
+<!-- S15 -->
+<div class="sprint-card p4">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S15</span>
+      <div class="sprint-title">app_mention ハンドラ + クエリ抽出 + pgvector Top3 検索</div>
+    </div>
+    <div class="sprint-period">M7 W3-W4（機能③ S14 と並行可） / 機能① <strong style="color:var(--accent)">[スコープ凍結]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>Slack app_mention イベントハンドラ（@TeamAgent への呼びかけ受信）</li>
+    <li>クエリ抽出 Lambda（メンション本文から「過去事例検索」意図を抽出）</li>
+    <li>pgvector Top-3 類似事例検索（機能③ で構築済み RAG を流用）</li>
+    <li>Slack スレッド返信（Top-3 案件カード）</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S15：</strong>Champion 2 名が「@TeamAgent 過去の食品系の提案教えて」で Top-3 案件を 5 秒以内に取得。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>Slack 3 秒応答制限 → ack を即返す + スレッド遅延応答パターンで実装。</div>
+</div>
+
+<!-- S16 -->
+<div class="sprint-card p4">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S16</span>
+      <div class="sprint-title">機能①/③ 意図ルーター + slash command /teamagent recall</div>
+    </div>
+    <div class="sprint-period">M8 W1-W2 / 機能①</div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>意図ルーター：メンション本文から「事例検索（機能①）」or「提案生成（機能③）」を判定</li>
+    <li>slash command <code>/teamagent recall &lt;query&gt;</code> 実装</li>
+    <li>機能③ への引き継ぎフロー（事例 → 提案生成へのスムーズな遷移）</li>
+    <li>誤判定時の手動切替 UI</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-S16：</strong>意図ルーター精度 85% 以上 + slash command で recall 機能が独立利用可能。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>意図判定の曖昧ケース（事例も提案も両方欲しい）→ 「両方提示する」フォールバック設計。</div>
+</div>
+
+<!-- S17 -->
+<div class="sprint-card p4">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S17</span>
+      <div class="sprint-title">全16名展開 + 安定化観察</div>
+    </div>
+    <div class="sprint-period">M8 W3-W4 / 機能① <strong style="color:#16a34a">[DoD-P4]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>営業 16 名への機能① 案内（既存 Slack App への機能追加）</li>
+    <li>使用ログ + 意図判定精度の運用観察</li>
+    <li>誤判定 FB 反映プロンプト調整</li>
+    <li>機能① リリース完了レポート</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-P4：</strong>全16名が機能① を利用可能 + 1 週間の意図判定精度 85% 以上維持。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>機能③ と動線が重なり混乱 → ヘルプメッセージ + 例文を Slack App ホームに常設。</div>
+</div>
+
+<!-- ========== S-Final ========== -->
+<h3 id="sec-3-pf"><span class="num">3.6</span>S-Final：統合最終検証（M9 W1-W2 = 0.5 ヶ月）</h3>
+
+<div class="sprint-card pf">
+  <div class="sprint-head">
+    <div>
+      <span class="sprint-id">S-Final</span>
+      <div class="sprint-title">全機能フル稼働の本番観察</div>
+    </div>
+    <div class="sprint-period">M9 W1-W2 / 統合検証 <strong style="color:#16a34a">[DoD-Final]</strong></div>
+  </div>
+  <div class="sprint-allocation">
+    <div class="alloc-impl">実装 55%</div>
+    <div class="alloc-test">テスト 25%</div>
+    <div class="alloc-stab">安定化 20%</div>
+  </div>
+  <div class="sprint-section-label">成果物</div>
+  <ul>
+    <li>5 機能（① ② ③ ④ ⑤）同時稼働の本番観察</li>
+    <li>NFR 全項目の最終測定（稼働率 / レイテンシ / 出力品質 / コスト）</li>
+    <li>本番運用フェーズ移行ドキュメント（運用手順 + 監視ハンドオフ）</li>
+    <li>v3.0 バックログ整理（Sprint 中に積み残された全要望）</li>
+  </ul>
+  <div class="sprint-dod"><strong>DoD-Final：</strong>全 5 機能稼働率 99.5% を 2 週間維持 + 月次コスト ¥95K-106.5K の範囲内 + 営業 16 名の継続利用率 80% 以上。</div>
+  <div class="sprint-risk"><strong>想定リスク：</strong>全機能同時稼働で初めて見える性能ボトルネック → S-Final で発見されたら v3.0 緊急 Sprint で対応。</div>
+</div>
+
+</section>
+
+
+<!-- ========== 4. スケジュール（9ヶ月ガント） ========== -->
+<section id="sec-4">
+<h2><span class="num">4.</span>スケジュール（9ヶ月ガント）</h2>
+
+<div class="gantt">
+  <div class="gantt-header">
+    <div>Phase / Sprint</div>
+    <div>M1</div><div>M2</div><div>M3</div><div>M4</div><div>M5</div><div>M6</div><div>M7</div><div>M8</div><div>M9</div>
+  </div>
+  <!-- 機能④ S1-S3：M1 W1 〜 M2 W2 = 0% 〜 16.66% -->
+  <div class="gantt-row">
+    <div class="gantt-name">P1 機能④（S1-S3）</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p1" style="left:0%;width:16.66%">S1·S2·S3</div>
+    </div>
+  </div>
+  <!-- 機能② S4-S7：M2 W3 〜 M4 W2 = 16.66% 〜 38.88% -->
+  <div class="gantt-row">
+    <div class="gantt-name">P2 機能②（S4-S7）</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p2" style="left:16.66%;width:22.22%">S4·S5·S6·S7</div>
+    </div>
+  </div>
+  <!-- 機能⑤ S8：M4 並行 = 33.33% 〜 41.66% -->
+  <div class="gantt-row">
+    <div class="gantt-name">P2.5 機能⑤（S8 並行）</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p25" style="left:33.33%;width:8.33%">S8</div>
+    </div>
+  </div>
+  <!-- 機能③ S9-S14：M4 W3 〜 M7 W2 = 38.88% 〜 72.22% -->
+  <div class="gantt-row">
+    <div class="gantt-name">P3 機能③（S9-S14）</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p3" style="left:38.88%;width:33.33%">S9·S10·S11·S12·S13·S14</div>
+    </div>
+  </div>
+  <!-- 機能① S15-S17：M7 W3 〜 M8 W4 = 72.22% 〜 88.88% -->
+  <div class="gantt-row">
+    <div class="gantt-name">P4 機能①（S15-S17）</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar p4" style="left:72.22%;width:16.66%">S15·S16·S17</div>
+    </div>
+  </div>
+  <!-- S-Final：M9 W1-W2 = 88.88% 〜 100% -->
+  <div class="gantt-row">
+    <div class="gantt-name">統合検証（S-Final）</div>
+    <div class="gantt-cells">
+      <div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div>
+      <div class="gantt-bar pf" style="left:88.88%;width:11.12%">S-Final</div>
+    </div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 4.1</span>9ヶ月開発ガント。色は機能識別（紫=④ / 青=② / 黄=⑤ / 緑=③ / 赤=① / 黒=統合）。S8 と S15 は前後 Sprint と並行進行。</p>
+
+<h4>主要マイルストーン（Sprint ベース）</h4>
+<table class="timeline-table">
+  <tr><th class="col-period">Sprint 末</th><th>マイルストーン</th></tr>
+  <tr><td class="col-period">S1（M1 W2）</td><td>VSEO 接続 MVP（Champion 1名で動作）</td></tr>
+  <tr><td class="col-period">S2（M1 W4）</td><td>3 ソース統合 + 6 観点出力品質確認</td></tr>
+  <tr class="milestone"><td class="col-period">S3（M2 W2）</td><td><strong>DoD-P1：機能④ 全16名稼働</strong></td></tr>
+  <tr><td class="col-period">S4（M2 W4）</td><td>OAuth 基盤 + Champion 2名朝バッチ</td></tr>
+  <tr><td class="col-period">S6（M3 W4）</td><td>機能② 全16名朝バッチ初回稼働</td></tr>
+  <tr class="milestone"><td class="col-period">S7（M4 W2）</td><td><strong>DoD-P2：稼働率 99.5% / 2 週間維持</strong></td></tr>
+  <tr class="milestone"><td class="col-period">S8（M4 並行）</td><td><strong>DoD-P2.5：マネージャー一致率 75%</strong></td></tr>
+  <tr><td class="col-period">S9（M4 W4）</td><td>Drive RAG 1,500件 Embedding 完了</td></tr>
+  <tr><td class="col-period">S11（M5 W4）</td><td>Champion 1案件 5 割版生成成功</td></tr>
+  <tr><td class="col-period">S13（M6 W4）</td><td>機能③ 全16名展開</td></tr>
+  <tr class="milestone"><td class="col-period">S14（M7 W2）</td><td><strong>DoD-P3 / NFR-24：出力品質 80%</strong></td></tr>
+  <tr><td class="col-period">S15（M7 W4）</td><td>@TeamAgent メンション応答（Champion）</td></tr>
+  <tr class="milestone"><td class="col-period">S17（M8 W4）</td><td><strong>DoD-P4：機能① 全16名稼働</strong></td></tr>
+  <tr class="milestone"><td class="col-period">S-Final（M9 W2）</td><td><strong>DoD-Final：全機能フル稼働 / 本番運用移行</strong></td></tr>
+</table>
+</section>
+
+<!-- ========== 5. 総額見積 ========== -->
+<section id="sec-5">
+<h2><span class="num">5.</span>総額見積</h2>
+
+<h3 id="sec-5-1"><span class="num">5.1</span>開発期間トータル（8.5ヶ月 / 17 Sprint + S-Final）</h3>
+<table>
+  <tr><th>Phase（Sprint）</th><th>期間</th><th>低位</th><th>高位</th></tr>
+  <tr><td>P1（S1-S3）機能④</td><td>1.5 ヶ月</td><td>¥58,000</td><td>¥75,000</td></tr>
+  <tr><td>P2（S4-S7）機能②</td><td>2 ヶ月</td><td>¥96,000</td><td>¥147,000</td></tr>
+  <tr><td>P2.5（S8）機能⑤</td><td>0.75 ヶ月（並行）</td><td>¥30,000</td><td>¥38,000</td></tr>
+  <tr><td>P3（S9-S14）機能③</td><td>3 ヶ月</td><td>¥250,000</td><td>¥360,000</td></tr>
+  <tr><td>P4（S15-S17）機能①</td><td>1.5 ヶ月</td><td>¥45,000</td><td>¥56,000</td></tr>
+  <tr><td>S-Final 統合検証</td><td>0.5 ヶ月</td><td>¥18,000</td><td>¥24,000</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>合計</td><td><strong>8.5 ヶ月</strong></td><td><strong>¥497,000</strong></td><td><strong>¥700,000</strong></td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 5.1</span>Sprint ベースの低位/高位試算（API + AWS のみ）。Claude Code（¥255K）は別計上。</p>
+
+<table>
+  <tr><th>項目</th><th>低位</th><th>高位</th><th>備考</th></tr>
+  <tr><td>API + AWS（表 5.1）</td><td>¥497,000</td><td>¥700,000</td><td>Sprint 別積み上げ</td></tr>
+  <tr><td><span class="pill p-cc">Claude Code</span> $200/月 × 8.5 ヶ月</td><td>¥255,000</td><td>¥255,000</td><td>FDE 個人サブスク（変動なし）</td></tr>
+  <tr><td>OAuth verification（一時）</td><td>¥0</td><td>¥30,000</td><td>社内 Workspace なら ¥0</td></tr>
+  <tr style="background:#1f2937;color:#fff;font-weight:700"><td style="color:#9ca3af">開発総額（v2.1）</td><td><strong>¥664,000</strong></td><td><strong>¥874,000</strong></td><td style="color:#9ca3af">v2.0（¥473K-634K）+¥190K-240K</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 5.2</span>v2.1 開発総額。v2.0 比の +¥190K-240K 増分は <strong>テスト 25% + 安定化 20% + 観察期間 + Champion 検証</strong> の追加分（実装そのものの増ではない）。</p>
+
+<div class="note">
+  <div class="label">v2.0 → v2.1 のコスト増の内訳</div>
+  <ul style="margin:0 0 0 20px">
+    <li><strong>+¥75K（Claude Code 2.5 ヶ月延長）：</strong>6 ヶ月 → 8.5 ヶ月の差分</li>
+    <li><strong>+¥70-100K（AWS 2.5 ヶ月延長）：</strong>db.r7g.large の追加稼働</li>
+    <li><strong>+¥45-65K（API テスト用 token）：</strong>テスト・観察期間の Anthropic + Gemini 使用増</li>
+  </ul>
+</div>
+
+<h3 id="sec-5-2"><span class="num">5.2</span>本番運用 月次（フル稼働後 / M10 以降）</h3>
+<table>
+  <tr><th>カテゴリ</th><th>低位</th><th>高位</th><th>内訳</th></tr>
+  <tr><td><span class="pill p-aws">AWS</span></td><td>¥35,000</td><td>¥40,000</td><td>RDS <strong>db.r7g.large</strong> / Lambda / S3 / CloudWatch / Secrets Mgr</td></tr>
+  <tr><td><span class="pill p-anthropic">Anthropic</span> Claude API</td><td>¥35,000</td><td>¥40,000</td><td>朝メール 16名 × 30日 + 提案 100件/月 + メンション応答 + 動画分析</td></tr>
+  <tr><td><span class="pill p-gemini">Gemini</span> DR API</td><td>¥22,500</td><td>¥25,000</td><td>提案書あたり 1 リサーチ × 100件 × 平均 $1.5</td></tr>
+  <tr><td>Gemini Embedding</td><td>¥0</td><td>¥1,500</td><td>軽微</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>合計</td><td><strong>¥92,500</strong></td><td><strong>¥106,500</strong></td><td>Claude Code は本番では不要</td></tr>
+</table>
+<p>v2.0 と同水準を維持。v1.5 の月次ランニング上限 ¥250K に対して 40% 程度の現実的な値。</p>
+</section>
+
+<!-- ========== 6. 前提条件と要相談項目 ========== -->
+<section id="sec-6">
+<h2><span class="num">6.</span>前提条件と要相談項目</h2>
+
+<table>
+  <tr><th>#</th><th>項目</th><th>仮定値</th><th>要相談</th></tr>
+  <tr><td>A1</td><td>営業16名 / マネージャー数名</td><td>仕様書通り</td><td>—</td></tr>
+  <tr><td>A2</td><td>月案件数 / 営業</td><td>5件</td><td>実績次第で見直し</td></tr>
+  <tr><td>A3</td><td>提案書生成 月件数</td><td>80〜100件</td><td>Anthropic + Gemini API コスト直結</td></tr>
+  <tr><td>A4</td><td>Gemini DR 単価</td><td>平均 $1.5/件</td><td>Public Preview 価格</td></tr>
+  <tr><td>A5</td><td>Anthropic Claude 単価</td><td>Sonnet 4.6 主軸（軽量タスクは Haiku）</td><td>token 想定の精緻化</td></tr>
+  <tr><td>A6</td><td>Gmail OAuth verification</td><td>社内 Workspace アプリ = ¥0 想定</td><td>外部公開要件があれば +¥30K</td></tr>
+  <tr><td>A7</td><td>RDS インスタンスサイズ</td><td>db.r7g.large（pgvector + 16 名同時稼働対応）</td><td>—</td></tr>
+  <tr><td>A8</td><td>Champion User 人数</td><td>2 名（仕様書通り）</td><td>各 Sprint 末 3 日コミット可能か</td></tr>
+  <tr><td>A9</td><td>Slack Pro plan</td><td>会社で既契約済み</td><td>—</td></tr>
+  <tr><td>A10</td><td>dpro / Buzzmiru</td><td>既契約済み</td><td>—</td></tr>
+  <tr><td>A11</td><td>Sprint 工数比率</td><td>実装 55% / テスト 25% / 安定化 20%</td><td>v2.1 で新設。Sprint 1〜2 の実績で再調整</td></tr>
+  <tr><td>A12</td><td>機能① 起動方式</td><td>@TeamAgent メンション（受動監視ではない）</td><td>IBM レビュー反映済み</td></tr>
+</table>
+
+<div class="note warn">
+  <div class="label">月次ランニング上振れ要因</div>
+  <ul style="margin:0 0 0 20px">
+    <li>提案書件数が想定より多い（月150件など）→ Anthropic + Gemini が比例増加</li>
+    <li>Buzzmiru 障害が長期化し、リトライ回数が増える → AWS 微増</li>
+    <li>Drive 過去提案数が増える（5,000件など）→ RDS スケールアップが必要</li>
+    <li>機能① の意図ルーター誤判定多発 → 判定強化で API 増加</li>
+    <li>Champion 検証で連続 NG → Sprint 数延長 + Claude Code 期間追加</li>
+  </ul>
+</div>
+</section>
+
+<!-- ========== 7. 月次ダッシュボード（M1〜M9） ========== -->
+<section id="sec-7">
+<h2><span class="num">7.</span>月次ダッシュボード（M1〜M9 / 9ヶ月）</h2>
+<p>各月の Sprint・Phase・コスト（開発費 + 維持費 + API）を 9 列で並列表示。v2.0 の 6 列ダッシュボードを 9 列に拡張。</p>
+
+<div class="month-dash">
+  <div class="dash-cell dash-header"></div>
+  <div class="dash-cell dash-header">M1</div>
+  <div class="dash-cell dash-header">M2</div>
+  <div class="dash-cell dash-header">M3</div>
+  <div class="dash-cell dash-header">M4</div>
+  <div class="dash-cell dash-header">M5</div>
+  <div class="dash-cell dash-header">M6</div>
+  <div class="dash-cell dash-header">M7</div>
+  <div class="dash-cell dash-header">M8</div>
+  <div class="dash-cell dash-header">M9</div>
+
+  <!-- Sprint / 機能 -->
+  <div class="dash-row-label">Sprint / 機能</div>
+  <div class="dash-cell"><span class="dash-phase-tag p1">S1+S2</span><br>④ 動画分析</div>
+  <div class="dash-cell"><span class="dash-phase-tag p1">S3</span>+<span class="dash-phase-tag p2">S4</span><br>④全16名+②OAuth</div>
+  <div class="dash-cell"><span class="dash-phase-tag p2">S5+S6</span><br>②朝メール+全展開</div>
+  <div class="dash-cell"><span class="dash-phase-tag p2">S7</span>+<span class="dash-phase-tag p25">S8</span>+<span class="dash-phase-tag p3">S9</span><br>②観察+⑤+③開始</div>
+  <div class="dash-cell"><span class="dash-phase-tag p3">S10+S11</span><br>③DR+5割版</div>
+  <div class="dash-cell"><span class="dash-phase-tag p3">S12+S13</span><br>③対話+全展開</div>
+  <div class="dash-cell"><span class="dash-phase-tag p3">S14</span>+<span class="dash-phase-tag p4">S15</span><br>③観察+①開始</div>
+  <div class="dash-cell"><span class="dash-phase-tag p4">S16+S17</span><br>①ルーター+全展開</div>
+  <div class="dash-cell"><span class="dash-phase-tag pf">S-Final</span><br>統合検証</div>
+
+  <!-- 開発費 (Claude Code) -->
+  <div class="dash-row-label">開発費<br>(CC)</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+  <div class="dash-cell dash-cost dev">¥30K</div>
+
+  <!-- AWS -->
+  <div class="dash-row-label">AWS<br>(Large)</div>
+  <div class="dash-cell dash-cost run">¥10〜15K</div>
+  <div class="dash-cell dash-cost run">¥18〜25K</div>
+  <div class="dash-cell dash-cost run">¥27〜33K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜40K</div>
+
+  <!-- Anthropic -->
+  <div class="dash-row-label">Anthropic<br>API</div>
+  <div class="dash-cell dash-cost run">¥3〜5K</div>
+  <div class="dash-cell dash-cost run">¥10〜15K</div>
+  <div class="dash-cell dash-cost run">¥15〜25K</div>
+  <div class="dash-cell dash-cost run">¥20〜30K</div>
+  <div class="dash-cell dash-cost run">¥30〜40K</div>
+  <div class="dash-cell dash-cost run">¥35〜45K</div>
+  <div class="dash-cell dash-cost run">¥30〜35K</div>
+  <div class="dash-cell dash-cost run">¥25〜30K</div>
+  <div class="dash-cell dash-cost run">¥20〜25K</div>
+
+  <!-- Gemini -->
+  <div class="dash-row-label">Gemini<br>API</div>
+  <div class="dash-cell dash-cost run">—</div>
+  <div class="dash-cell dash-cost run">—</div>
+  <div class="dash-cell dash-cost run">—</div>
+  <div class="dash-cell dash-cost run">¥10〜15K</div>
+  <div class="dash-cell dash-cost run">¥20〜25K</div>
+  <div class="dash-cell dash-cost run">¥22〜25K</div>
+  <div class="dash-cell dash-cost run">¥22〜25K</div>
+  <div class="dash-cell dash-cost run">¥22〜25K</div>
+  <div class="dash-cell dash-cost run">¥10〜15K</div>
+
+  <!-- 月次合計 -->
+  <div class="dash-row-label">月次<br>合計</div>
+  <div class="dash-cell dash-cost total">¥43〜50K</div>
+  <div class="dash-cell dash-cost total">¥58〜70K</div>
+  <div class="dash-cell dash-cost total">¥72〜88K</div>
+  <div class="dash-cell dash-cost total">¥95〜115K</div>
+  <div class="dash-cell dash-cost total">¥115〜135K</div>
+  <div class="dash-cell dash-cost total">¥122〜140K</div>
+  <div class="dash-cell dash-cost total">¥117〜130K</div>
+  <div class="dash-cell dash-cost total">¥112〜125K</div>
+  <div class="dash-cell dash-cost total">¥95〜110K</div>
+
+  <!-- 主要マイルストーン -->
+  <div class="dash-row-label dash-row-last">主要MS</div>
+  <div class="dash-cell dash-row-last" style="font-size:10.5px;line-height:1.4">VSEO接続<br>Champion<br>動作確認</div>
+  <div class="dash-cell dash-row-last" style="font-size:10.5px;line-height:1.4"><strong>機能④稼働</strong><br>OAuth基盤</div>
+  <div class="dash-cell dash-row-last" style="font-size:10.5px;line-height:1.4"><strong>全16名<br>朝メール</strong></div>
+  <div class="dash-cell dash-row-last" style="font-size:10.5px;line-height:1.4">マネージャー<br>進捗開始<br>RAG構築</div>
+  <div class="dash-cell dash-row-last" style="font-size:10.5px;line-height:1.4">提案書<br>Champion<br>5割版</div>
+  <div class="dash-cell dash-row-last" style="font-size:10.5px;line-height:1.4"><strong>提案書<br>全16名</strong></div>
+  <div class="dash-cell dash-row-last" style="font-size:10.5px;line-height:1.4">①メンション<br>応答開始</div>
+  <div class="dash-cell dash-row-last" style="font-size:10.5px;line-height:1.4"><strong>全機能<br>稼働</strong></div>
+  <div class="dash-cell dash-row-last" style="font-size:10.5px;line-height:1.4"><strong>DoD-Final</strong><br>本番移行</div>
+</div>
+<p class="caption"><span class="fig-num">表 7.1</span>9ヶ月月次ダッシュボード。開発費（紫）+ 維持費（緑：AWS / Anthropic / Gemini）= 月次合計（赤）の3層構造。M5-M6 がピーク（機能③ 提案生成）。</p>
+
+<h3 id="sec-7-1"><span class="num">7.1</span>累積コスト推移（M1〜M9 / 低位想定）</h3>
+<table>
+  <tr><th>月末</th><th>その月のコスト</th><th>累積コスト</th><th>累積比率</th></tr>
+  <tr><td>M1 終</td><td>¥43,000</td><td>¥43,000</td><td>6%</td></tr>
+  <tr><td>M2 終</td><td>¥58,000</td><td>¥101,000</td><td>15%</td></tr>
+  <tr><td>M3 終</td><td>¥72,000</td><td>¥173,000</td><td>26%</td></tr>
+  <tr><td>M4 終</td><td>¥95,000</td><td>¥268,000</td><td>40%</td></tr>
+  <tr><td>M5 終</td><td>¥115,000</td><td>¥383,000</td><td>58%</td></tr>
+  <tr><td>M6 終</td><td>¥122,000</td><td>¥505,000</td><td>76%</td></tr>
+  <tr><td>M7 終</td><td>¥117,000</td><td>¥622,000</td><td>94%</td></tr>
+  <tr><td>M8 終</td><td>¥112,000</td><td>¥734,000</td><td>110%</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>M9 終</td><td>¥95,000</td><td><strong>¥664,000(目安)</strong></td><td>100%</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 7.2</span>累積コスト推移（低位）。M5-M6 が最大支出期間（機能③ 提案生成 + Gemini DR 本格稼働）。表内の単月コスト合計と「合計」の差は丸め誤差。低位 ¥664K / 高位 ¥874K の幅で運用想定。</p>
+
+<h3 id="sec-7-2"><span class="num">7.2</span>本番運用への移行（M10 以降）</h3>
+<p>M9 終了後、Claude Code（個人開発費）は不要となり、月次は維持費のみに：</p>
+<div class="cost-chart">
+  <div class="cost-row">
+    <div class="cost-label">M1〜M9 平均月次（開発期間）</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill anthropic" style="width: 100%">¥97K平均（高位）</div></div>
+    <div class="cost-value">¥97K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label">M10 以降（本番運用）</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill aws" style="width: 75%">¥95〜106.5K（フル稼働）</div></div>
+    <div class="cost-value">¥95〜106.5K</div>
+  </div>
+</div>
+<p>※ 本番運用では Claude Code（¥30K/月）が不要となるため、開発期間平均よりも純維持費は下がる。年間維持費の安定額として年¥1,200K（¥100K × 12ヶ月）を見込む。</p>
+</section>
+
+
+<!-- ========== 8. テスト戦略（NEW） ========== -->
+<section id="sec-8">
+<h2><span class="num">8.</span>テスト戦略（NEW）</h2>
+<p>v2.1 で新設した章。Sprint 内のテスト工数を明示化し、Champion 検証ウィンドウとテスト種別の Phase 別実施タイミングを定義する。</p>
+
+<h3 id="sec-8-1"><span class="num">8.1</span>Sprint 内工数比率（実装 55% / テスト 25% / 修正・安定化 20%）</h3>
+<div class="sprint-allocation" style="height:36px;font-size:13px">
+  <div class="alloc-impl">実装 55% (5.5 日)</div>
+  <div class="alloc-test">テスト 25% (2.5 日)</div>
+  <div class="alloc-stab">修正・安定化 20% (2 日)</div>
+</div>
+<p>各 Sprint = 2 週間 = 10 営業日 を上記の比率で配分する。これは v2.0 で曖昧だった「テスト・安定化期間」を明示化したもの。Sprint の最初の 5.5 日で新規機能の実装を完了させ、続く 2.5 日でテスト、最後の 2 日でバグ修正・安定化を行う。Champion 検証は Sprint 末の 3 日間（テスト・安定化期間と一部重なる）に配置。</p>
+
+<h3 id="sec-8-2"><span class="num">8.2</span>Champion 検証ウィンドウ（3 日）</h3>
+<table>
+  <tr><th>Day</th><th>担当</th><th>内容</th><th>成果物</th></tr>
+  <tr><td>Day 1</td><td>Champion 2 名</td><td>営業現場で実利用（最低 5 ケース）</td><td>利用ログ + 自由 FB（Slack スレッド）</td></tr>
+  <tr><td>Day 2</td><td>FDE</td><td>FB 分類（バグ / UX / 新規要望）</td><td>分類済 FB シート + 修正対象リスト</td></tr>
+  <tr><td>Day 3</td><td>FDE + PM</td><td>次 Sprint 反映設計 + バックログ整理</td><td>次 Sprint バックログ + v3.0 候補項目</td></tr>
+</table>
+
+<h3 id="sec-8-3"><span class="num">8.3</span>テスト種別 × Phase 別 実施タイミング</h3>
+
+<div class="test-matrix">
+  <div class="tm-header tm-row-label">テスト種別</div>
+  <div class="tm-header">P1<br>(S1-S3)</div>
+  <div class="tm-header">P2<br>(S4-S7)</div>
+  <div class="tm-header">P2.5<br>(S8)</div>
+  <div class="tm-header">P3<br>(S9-S14)</div>
+  <div class="tm-header">P4<br>(S15-S17)</div>
+  <div class="tm-header">S-Final</div>
+
+  <div class="tm-row-label">単体テスト</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-light">△</div>
+
+  <div class="tm-row-label">結合テスト</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+
+  <div class="tm-row-label">E2E テスト</div>
+  <div class="tm-light">△</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+
+  <div class="tm-row-label">受入（Champion）</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+
+  <div class="tm-row-label">性能テスト</div>
+  <div class="tm-no">—</div>
+  <div class="tm-light">△</div>
+  <div class="tm-no">—</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-light">△</div>
+  <div class="tm-yes">○</div>
+
+  <div class="tm-row-label">カオステスト</div>
+  <div class="tm-no">—</div>
+  <div class="tm-no">—</div>
+  <div class="tm-no">—</div>
+  <div class="tm-light">△</div>
+  <div class="tm-no">—</div>
+  <div class="tm-yes">○</div>
+
+  <div class="tm-row-label">セキュリティ</div>
+  <div class="tm-light">△</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-no">—</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-light">△</div>
+  <div class="tm-yes">○</div>
+
+  <div class="tm-row-label">回帰テスト</div>
+  <div class="tm-no">—</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-yes">○</div>
+
+  <div class="tm-row-label">監査ログ</div>
+  <div class="tm-light">△</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-light">△</div>
+  <div class="tm-yes">○</div>
+  <div class="tm-light">△</div>
+  <div class="tm-yes">○</div>
+</div>
+<p class="caption"><span class="fig-num">表 8.1</span>テスト種別 × Phase 別 実施タイミングマトリクス。○ = 必須、△ = 該当 Sprint 内で軽量実施、— = スキップ可。</p>
+
+<h4>各テスト種別の概要</h4>
+<dl style="font-size:13px">
+  <dt><strong>単体テスト</strong></dt>
+  <dd>Lambda / Slack ハンドラ / Claude SDK ラッパーの個別関数レベル。Sprint 内のテスト工数 25% の主役。</dd>
+  <dt><strong>結合テスト</strong></dt>
+  <dd>Slack → Lambda → RDS / 外部 API（Gmail / Drive / Vertex AI）の境界をまたぐパス。</dd>
+  <dt><strong>E2E テスト</strong></dt>
+  <dd>営業視点でのフルフロー（メンション → 応答 / 朝メール → 採用 / 提案生成 → 8 割版）。</dd>
+  <dt><strong>受入テスト（Champion）</strong></dt>
+  <dd>Sprint 末 3 日間の Champion 検証ウィンドウ。実業務で使う FB が DoD 判定の主軸。</dd>
+  <dt><strong>性能テスト</strong></dt>
+  <dd>機能③（並列リサーチ） / S-Final（全機能同時）で必須。レイテンシ p95、スループット。</dd>
+  <dt><strong>カオステスト</strong></dt>
+  <dd>外部 API 障害（Gmail / Vertex AI / Buzzmiru）注入。S-Final で重点実施。</dd>
+  <dt><strong>セキュリティテスト</strong></dt>
+  <dd>OAuth スコープ過剰、IAM 最小権限、Secrets Manager 取り扱い、プロンプトインジェクション。</dd>
+  <dt><strong>回帰テスト</strong></dt>
+  <dd>S2 以降、新 Sprint 機能追加で旧機能の壊れがないか自動チェック（Slack ハンドラの主要パスを CI 化）。</dd>
+  <dt><strong>監査ログ</strong></dt>
+  <dd>誰のメール / Drive を何時 Claude に送ったかの記録。プライバシーレビューの基礎。</dd>
+</dl>
+
+<h3 id="sec-8-4"><span class="num">8.4</span>スコープ凍結スプリント / FB 分類ルール / v3.0 バックログ運用</h3>
+
+<h4>スコープ凍結スプリント（Scope Freeze Sprints）</h4>
+<p>各 Phase の中盤に「<strong>スコープ凍結スプリント</strong>」を置き、新規要望の追加を禁止する。集中して品質を固める Sprint。</p>
+<table>
+  <tr><th>Sprint</th><th>所属</th><th>凍結内容</th></tr>
+  <tr><td>S2</td><td>機能④</td><td>3 ソース統合 + 6 観点プロンプトの確定（追加データソース要望は v3.0 へ）</td></tr>
+  <tr><td>S5</td><td>機能②</td><td>判定ロジック + 案 A/B/C 形式の確定（フォーマット変更要望は v3.0 へ）</td></tr>
+  <tr><td>S11</td><td>機能③</td><td>Phase A〜C プロンプトと出力フォーマットの確定（テンプレ変更要望は v3.0 へ）</td></tr>
+  <tr><td>S15</td><td>機能①</td><td>app_mention + クエリ抽出ロジックの確定（slash command 拡張要望は v3.0 へ）</td></tr>
+</table>
+
+<h4>FB 分類ルール（Champion 検証 Day 2）</h4>
+<table>
+  <tr><th>分類</th><th>判定基準</th><th>対応</th></tr>
+  <tr><td><strong>バグ</strong></td><td>仕様通りに動かない / エラー</td><td>当 Sprint 内で即修正（安定化 20% 工数）</td></tr>
+  <tr><td><strong>UX 改善</strong></td><td>動くがわかりにくい / 手間が多い</td><td>次 Sprint バックログに積む</td></tr>
+  <tr><td><strong>新規要望</strong></td><td>仕様外の機能要求</td><td><strong>v3.0 バックログ</strong>に積む（当 Sprint では実施しない）</td></tr>
+</table>
+
+<h4>v3.0 バックログ運用</h4>
+<ul>
+  <li>Sprint 中に発生した「新規要望」は全て v3.0 バックログに記録（GitHub Issues 等）</li>
+  <li>S-Final で v3.0 バックログを優先度付け + 工数見積</li>
+  <li>本番運用フェーズ（M10〜）の余剰工数 + 月次 ¥30K 程度の改修予算で順次消化</li>
+  <li>大きな機能追加（例：別 SaaS 連携）は v3.1 / v3.2 として独立計画化</li>
+</ul>
+
+</section>
+
+
+<!-- ========== 9. 付録 ========== -->
+<section id="sec-9" class="appendix">
+<h2><span class="num">9.</span>付録</h2>
+
+<h3>9.1 改訂履歴 v2.0 → v2.1</h3>
+<table>
+  <tr><th>項目</th><th>v2.0（旧）</th><th>v2.1（新）</th></tr>
+  <tr><td>計画粒度</td><td>Phase 別（5 Phase）</td><td>Sprint 別（17 Sprint + S-Final）</td></tr>
+  <tr><td>開発期間</td><td>6 ヶ月</td><td><strong>8.5 ヶ月</strong>（テスト + 安定化 + 観察期間を明示）</td></tr>
+  <tr><td>開発総額</td><td>¥473K〜¥634K</td><td><strong>¥664K〜¥874K</strong>（+¥190K-240K）</td></tr>
+  <tr><td>本番月次</td><td>¥95K〜¥105K</td><td>¥95K〜¥106.5K（同水準維持）</td></tr>
+  <tr><td>機能① 起動方式</td><td>受動監視（chat.postEphemeral）</td><td><strong>@TeamAgent メンション起動</strong>（IBM レビュー反映）</td></tr>
+  <tr><td>テスト戦略</td><td>記載なし</td><td>第 8 章で新設（Sprint 内 25% / Champion 検証 / 種別マトリクス）</td></tr>
+  <tr><td>ガント</td><td>6 列（M1-M6）</td><td>9 列（M1-M9）</td></tr>
+  <tr><td>月次ダッシュボード</td><td>6 列</td><td>9 列</td></tr>
+  <tr><td>DoD ゲート</td><td>Phase 末</td><td>各 Sprint 末 + Phase 末（17 + 5 + 1）</td></tr>
+  <tr><td>スコープ凍結</td><td>記載なし</td><td>S2 / S5 / S11 / S15 を凍結スプリントに指定</td></tr>
+  <tr><td>v3.0 バックログ</td><td>記載なし</td><td>FB 分類「新規要望」は v3.0 行きを明記</td></tr>
+</table>
+
+<h3>9.2 月次運用コスト構造（目安・本番運用）</h3>
+<p>¥106.5K/月（高位・本番運用想定）の内訳：</p>
+<div class="cost-chart">
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-aws">AWS</span></div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill aws" style="width: 38%">¥40K（38%）</div></div>
+    <div class="cost-value">¥40K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-anthropic">Anthropic</span></div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill anthropic" style="width: 38%">¥40K（38%）</div></div>
+    <div class="cost-value">¥40K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label"><span class="pill p-gemini">Gemini DR</span></div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill gemini" style="width: 23%">¥25K（23%）</div></div>
+    <div class="cost-value">¥25K</div>
+  </div>
+  <div class="cost-row">
+    <div class="cost-label">Embedding</div>
+    <div class="cost-bar-bg"><div class="cost-bar-fill other" style="width: 1%"></div></div>
+    <div class="cost-value">¥1.5K</div>
+  </div>
+</div>
+
+<h3>9.3 v1.5 vs v2.0 vs v2.1 主要差分</h3>
+<table>
+  <tr><th>項目</th><th>v1.5（旧）</th><th>v2.0</th><th>v2.1（新）</th></tr>
+  <tr><td>計画粒度</td><td>不明確</td><td>Phase 別（5 Phase）</td><td><strong>Sprint 別（17 + S-Final）</strong></td></tr>
+  <tr><td>開発期間</td><td>不明確</td><td>6 ヶ月</td><td><strong>8.5 ヶ月</strong></td></tr>
+  <tr><td>月次運用想定</td><td>¥250K 上限</td><td>¥95-105K</td><td>¥95-106.5K（同水準）</td></tr>
+  <tr><td>機能数</td><td>提案書 + Mail Agent</td><td>5 機能明記</td><td>5 機能（① はメンション起動に変更）</td></tr>
+  <tr><td>AWS 想定</td><td>—</td><td>db.r7g.large</td><td>db.r7g.large（同一）</td></tr>
+  <tr><td>主担当</td><td>SES + 社内</td><td>FDE + Claude Code</td><td>FDE + Claude Code（8.5 ヶ月）</td></tr>
+  <tr><td>テスト戦略</td><td>—</td><td>—</td><td><strong>第 8 章で新設</strong></td></tr>
+  <tr><td>反復ゲート</td><td>—</td><td>Phase 末</td><td><strong>Sprint 末 × 17 + Phase 末 × 5 + Final</strong></td></tr>
+</table>
+
+<h3>9.4 一行サマリー</h3>
+<p style="background:var(--bg-soft);padding:16px 20px;border-left:4px solid var(--text);font-size:14px;line-height:1.8">
+TeamAgent v2.1 は <strong>17 Sprint × 2 週 + S-Final = 8.5 ヶ月で開発完了、開発総額 ¥664K〜874K、本番月次 ¥95K〜106.5K</strong> で構築可能。v2.0 の Phase 別計画を Sprint 別の反復型に書き直し、各 Sprint 内に「実装 55% / テスト 25% / 修正・安定化 20%」を明示化。Sprint 末 3 日の Champion 検証で FB を「バグ / UX 改善 / v3.0 新規要望」に分類し、機能④ → ② → ⑤ → ③ → ① → 統合検証 の順に DoD ゲートを通過。機能① は IBM レビューを反映して「<strong>@TeamAgent メンション起動</strong>」に再設計。FDE 1 名 + Claude Code（個人 $200/月）+ AWS（db.r7g.large）+ Anthropic + Gemini API のシンプルなスタックを 2.5 ヶ月延長することで、テスト・安定化・観察期間を明確に確保する。
+</p>
+
+</section>
+
+</main>
+</div>
+
+</body>
+</html>

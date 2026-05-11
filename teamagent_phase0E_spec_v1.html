@@ -1,0 +1,2684 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 機能③ Phase 0〜E 全工程詳細仕様書 v1.0（営業確認用）</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+
+    /* Phase 別カラー（営業に直感的に伝わる色分け） */
+    --p0: #7c3aed;       /* 紫 */
+    --p0-bg: #f3e8ff;
+    --pa: #2563eb;       /* 青 */
+    --pa-bg: #dbeafe;
+    --pb: #16a34a;       /* 緑 */
+    --pb-bg: #dcfce7;
+    --pc: #ca8a04;       /* 黄 */
+    --pc-bg: #fef3c7;
+    --pd: #ea580c;       /* オレンジ */
+    --pd-bg: #ffedd5;
+    --pe: #B91C1C;       /* 赤 */
+    --pe-bg: #fee2e2;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .toc { list-style: none; }
+  .toc li { margin-bottom: 4px; }
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+  .toc a:hover { color: var(--accent); }
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .toc-p0 a { color: var(--p0); font-weight: 600; }
+  .toc .toc-pa a { color: var(--pa); font-weight: 600; }
+  .toc .toc-pb a { color: var(--pb); font-weight: 600; }
+  .toc .toc-pc a { color: var(--pc); font-weight: 600; }
+  .toc .toc-pd a { color: var(--pd); font-weight: 600; }
+  .toc .toc-pe a { color: var(--pe); font-weight: 600; }
+
+  main {
+    padding: 64px 64px 96px;
+    max-width: 980px;
+  }
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 24px;
+  }
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+  .doc-meta-table { margin-top: 24px; font-size: 13px; }
+  .doc-meta-table td { padding: 4px 16px 4px 0; color: var(--text-muted); }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 48px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 28px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 20px 0 8px;
+    color: var(--text);
+  }
+  p { margin-bottom: 12px; }
+  ul, ol { margin: 10px 0 14px 24px; }
+  li { margin-bottom: 4px; }
+
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0 20px;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #f3e8ff 0%, #dbeafe 25%, #dcfce7 50%, #fef3c7 75%, #fee2e2 100%);
+    border-radius: 12px;
+    padding: 36px 40px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 28px;
+    font-weight: 800;
+    line-height: 1.4;
+    margin-bottom: 16px;
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  .hero-sub {
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--text-muted);
+    margin-bottom: 24px;
+    max-width: 720px;
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.9);
+    border-radius: 10px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 28px;
+    font-weight: 800;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num.c-p0 { color: var(--p0); }
+  .hero-stat-num.c-pa { color: var(--pa); }
+  .hero-stat-num.c-pb { color: var(--pb); }
+  .hero-stat-num.c-pc { color: var(--pc); }
+  .hero-stat-num.c-pd { color: var(--pd); }
+  .hero-stat-num.c-pe { color: var(--pe); }
+  .hero-stat-num small {
+    font-size: 14px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    line-height: 1.4;
+  }
+
+  /* Phase 全体トラック */
+  .phase-track-6 {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 6px;
+    margin: 16px 0 8px;
+  }
+  .ph-block {
+    border-radius: 8px;
+    padding: 14px 10px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .ph-block.p0 { border-color: var(--p0); background: var(--p0-bg); }
+  .ph-block.pa { border-color: var(--pa); background: var(--pa-bg); }
+  .ph-block.pb { border-color: var(--pb); background: var(--pb-bg); }
+  .ph-block.pc { border-color: var(--pc); background: var(--pc-bg); }
+  .ph-block.pd { border-color: var(--pd); background: var(--pd-bg); }
+  .ph-block.pe { border-color: var(--pe); background: var(--pe-bg); }
+  .ph-block .ph-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .ph-block .ph-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .ph-block .ph-time {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: "JetBrains Mono", monospace;
+  }
+
+  /* Phase セクションのヘッダー（色付き帯） */
+  .phase-banner {
+    margin: 48px 0 16px;
+    padding: 20px 24px;
+    border-radius: 10px;
+    border-left: 6px solid;
+    background: white;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  .phase-banner.p0 { background: var(--p0-bg); border-color: var(--p0); }
+  .phase-banner.pa { background: var(--pa-bg); border-color: var(--pa); }
+  .phase-banner.pb { background: var(--pb-bg); border-color: var(--pb); }
+  .phase-banner.pc { background: var(--pc-bg); border-color: var(--pc); }
+  .phase-banner.pd { background: var(--pd-bg); border-color: var(--pd); }
+  .phase-banner.pe { background: var(--pe-bg); border-color: var(--pe); }
+  .phase-banner .pb-tag {
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  .phase-banner .pb-title {
+    font-size: 22px;
+    font-weight: 800;
+    line-height: 1.3;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .phase-banner .pb-meta {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.5;
+  }
+  .phase-banner .pb-time {
+    background: rgba(255,255,255,0.9);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .phase-banner .pb-time-num {
+    font-size: 22px;
+    font-weight: 800;
+    font-family: "JetBrains Mono", monospace;
+    line-height: 1;
+  }
+  .phase-banner.p0 .pb-time-num { color: var(--p0); }
+  .phase-banner.pa .pb-time-num { color: var(--pa); }
+  .phase-banner.pb .pb-time-num { color: var(--pb); }
+  .phase-banner.pc .pb-time-num { color: var(--pc); }
+  .phase-banner.pd .pb-time-num { color: var(--pd); }
+  .phase-banner.pe .pb-time-num { color: var(--pe); }
+  .phase-banner .pb-time-label {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-top: 4px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  /* 確認ボックス（営業さんに確認したいこと） */
+  .ask-box {
+    background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+    border: 2px solid #f59e0b;
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 24px 0 16px;
+    position: relative;
+  }
+  .ask-box-title {
+    font-size: 15px;
+    font-weight: 800;
+    color: #92400e;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ask-box-title .ask-icon {
+    background: #f59e0b;
+    color: white;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .ask-list { list-style: none; margin: 0; padding: 0; }
+  .ask-list li {
+    margin-bottom: 12px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    padding-left: 0;
+  }
+  .ask-list li:last-child { margin-bottom: 0; }
+  .ask-list .ask-q {
+    font-weight: 700;
+    margin-bottom: 4px;
+    color: #78350f;
+  }
+  .ask-list .ask-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .ask-opt {
+    background: white;
+    border: 1px solid #fbbf24;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: #92400e;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ask-opt .ck {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 1.5px solid #d97706;
+    border-radius: 3px;
+    background: white;
+  }
+
+  /* ノート */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 14px 18px;
+    margin: 14px 0;
+    font-size: 13px;
+    line-height: 1.7;
+    border-radius: 0 4px 4px 0;
+  }
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+  .note.beginner { background: #f0fdf4; border-left-color: #16a34a; }
+  .note.beginner .label { color: #16a34a; }
+  .note.warn { background: #fef2f2; border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.info { background: #eff6ff; border-left-color: var(--link); }
+  .note.info .label { color: var(--link); }
+
+  /* Slack chat mockup（v2.1 仕様書から継承） */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 20px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name { display: flex; align-items: center; gap: 8px; }
+  .chat-mockup-header .ch-icon { opacity: 0.7; font-size: 14px; }
+  .chat-mockup-header .ch-meta { opacity: 0.6; font-weight: normal; font-size: 11px; }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body { font-size: 13px; line-height: 1.6; color: var(--text); }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-card.green { border-left-color: #16a34a; }
+  .chat-card.blue { border-left-color: var(--pa); }
+  .chat-card.yellow { border-left-color: var(--pc); }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+    white-space: pre-wrap;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* Tier カード */
+  .tier-grid {
+    display: grid;
+    gap: 14px;
+    margin: 18px 0 24px;
+  }
+  .tier-card {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 6px solid;
+    border-radius: 8px;
+    padding: 18px 22px;
+  }
+  .tier-card.t0 { border-left-color: var(--accent); background: linear-gradient(90deg, #fef2f2 0%, white 30%); }
+  .tier-card.t1 { border-left-color: var(--pa); }
+  .tier-card.t2 { border-left-color: var(--p0); }
+  .tier-card.t3 { border-left-color: var(--pc); }
+  .tier-card .tier-tag {
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  .tier-card.t0 .tier-tag { color: var(--accent); }
+  .tier-card.t1 .tier-tag { color: var(--pa); }
+  .tier-card.t2 .tier-tag { color: var(--p0); }
+  .tier-card.t3 .tier-tag { color: var(--pc); }
+  .tier-card .tier-title {
+    font-size: 16px;
+    font-weight: 800;
+    line-height: 1.3;
+    margin-bottom: 8px;
+  }
+  .tier-card .tier-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 12px;
+  }
+  .tier-card .tier-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .tier-pill {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.4;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* 入力フィールドカード */
+  .field-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin: 14px 0 18px;
+  }
+  .field-card {
+    background: white;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .field-card .field-label {
+    font-size: 10px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .field-card .field-name {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .field-card .field-input {
+    background: var(--bg-soft);
+    border: 1px dashed var(--border-strong);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: "JetBrains Mono", monospace;
+    min-height: 26px;
+  }
+  .field-card .field-hint {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+
+  /* DR 8 セクション */
+  .dr-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 16px 0 24px;
+  }
+  .dr-card {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    border-top: 4px solid #4285F4;
+  }
+  .dr-card .dr-key {
+    display: inline-block;
+    background: #4285F4;
+    color: white;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 28px;
+    font-weight: 800;
+    font-size: 14px;
+    margin-bottom: 8px;
+  }
+  .dr-card .dr-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    line-height: 1.3;
+  }
+  .dr-card .dr-spec {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  /* Bravo+ 4 経路図 */
+  .bravo-stack {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 16px 0 24px;
+  }
+  .bravo-step {
+    background: var(--bg-soft);
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .bravo-step .bs-num {
+    background: #4285F4;
+    color: white;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 32px;
+    font-weight: 800;
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+  .bravo-step.r2 .bs-num { background: var(--accent); }
+  .bravo-step.r3 .bs-num { background: var(--p0); }
+  .bravo-step.r4 .bs-num { background: #525252; }
+  .bravo-step .bs-body { flex: 1; }
+  .bravo-step .bs-name {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+  .bravo-step .bs-desc {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .bravo-step .bs-fallback {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 4px 0;
+  }
+  .bravo-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 16px;
+    margin: 2px 0;
+  }
+  .bravo-primary {
+    background: #dbeafe;
+    border-color: #4285F4;
+    border-width: 2px;
+  }
+
+  /* Before/After 対比 */
+  .ba-grid {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 24px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 18px;
+    font-weight: 800;
+    margin-bottom: 12px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 28px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul { list-style: none; margin: 0; padding: 0; }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  /* 出力例（データドリブン比較） */
+  .compare-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin: 14px 0 20px;
+  }
+  .compare-side {
+    border-radius: 8px;
+    padding: 16px 18px;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .compare-side.bad {
+    background: #f3f4f6;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+  .compare-side.good {
+    background: #f0fdf4;
+    border: 2px solid #16a34a;
+  }
+  .compare-side .compare-tag {
+    font-size: 11px;
+    font-weight: 800;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .compare-side.bad .compare-tag { color: #6b7280; }
+  .compare-side.good .compare-tag { color: #16a34a; }
+  .compare-side .compare-text {
+    font-size: 12.5px;
+    line-height: 1.7;
+  }
+  .compare-side em {
+    background: #fef9c3;
+    padding: 0 4px;
+    font-style: normal;
+  }
+  .compare-side.good em {
+    background: #bbf7d0;
+  }
+
+  /* 提案書8章マッピング */
+  .map-grid {
+    margin: 16px 0 24px;
+    display: grid;
+    grid-template-columns: 1fr 80px 1fr;
+    gap: 6px;
+    align-items: center;
+  }
+  .map-grid .map-cell {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .map-grid .map-cell.left {
+    border-left: 4px solid #4285F4;
+  }
+  .map-grid .map-cell.right {
+    border-left: 4px solid var(--accent);
+  }
+  .map-grid .map-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 14px;
+  }
+  .map-grid .map-key {
+    font-weight: 800;
+    font-size: 13px;
+    margin-right: 6px;
+    color: #4285F4;
+  }
+  .map-grid .map-cell.right .map-key { color: var(--accent); }
+
+  /* 所要時間チャート */
+  .timing-chart {
+    margin: 16px 0 24px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .timing-row {
+    display: grid;
+    grid-template-columns: 140px 1fr 100px;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    gap: 12px;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  .timing-row:last-child { border-bottom: 0; }
+  .timing-row.total {
+    background: var(--bg-soft);
+    font-weight: 800;
+    border-top: 2px solid var(--text);
+  }
+  .timing-row .timing-label { font-weight: 600; }
+  .timing-row .timing-bar {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 22px;
+    overflow: hidden;
+    position: relative;
+  }
+  .timing-row .timing-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .timing-row.r-p0 .timing-fill { background: var(--p0); width: 1%; }
+  .timing-row.r-pa .timing-fill { background: var(--pa); width: 1%; }
+  .timing-row.r-pb .timing-fill { background: var(--pb); width: 24%; }
+  .timing-row.r-pc .timing-fill { background: var(--pc); width: 8%; }
+  .timing-row.r-pd .timing-fill { background: var(--pd); width: 30%; }
+  .timing-row.r-pe .timing-fill { background: var(--pe); width: 60%; }
+  .timing-row.total .timing-fill { background: linear-gradient(90deg, var(--p0), var(--pa), var(--pb), var(--pc), var(--pd), var(--pe)); width: 100%; }
+  .timing-row .timing-val {
+    font-family: "JetBrains Mono", monospace;
+    text-align: right;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* FAQ */
+  details {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > div {
+    padding: 0 16px 16px;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 6px 0 20px;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* 派生情報の例 */
+  .derive-table {
+    margin: 14px 0 22px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .derive-row {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .derive-row:last-child { border-bottom: 0; }
+  .derive-row .derive-key {
+    background: var(--bg-soft);
+    padding: 10px 14px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-muted);
+    border-right: 1px solid var(--border);
+  }
+  .derive-row .derive-val {
+    padding: 10px 14px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { position: relative; height: auto; }
+    main { padding: 32px 24px 64px; }
+    .phase-track-6 { grid-template-columns: repeat(3, 1fr); }
+    .compare-grid { grid-template-columns: 1fr; }
+    .ba-grid { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .map-grid { grid-template-columns: 1fr; }
+    .map-grid .map-arrow { transform: rotate(90deg); }
+  }
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .chat-mockup, .phase-banner, .ask-box, .tier-card { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    details > div { display: block !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent 機能③<br>Phase 0〜E 詳細仕様書</div>
+  <div class="sidebar-doc-meta">
+    Version 1.0（営業確認用）<br>
+    2026年5月11日 作成<br>
+    統合派（DR を Phase B 内包）反映
+  </div>
+
+  <div class="sidebar-header">目次</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>本書について</a></li>
+    <li class="level-1"><a href="#sec-2"><span class="num">2.</span>全体フロー俯瞰</a></li>
+    <li class="level-1 toc-p0"><a href="#sec-3"><span class="num">3.</span>Phase 0：起動トリガー</a></li>
+    <li class="level-2 toc-p0"><a href="#sec-3-1"><span class="num">3.1</span>入力5フィールド</a></li>
+    <li class="level-2 toc-p0"><a href="#sec-3-2"><span class="num">3.2</span>Slack モック</a></li>
+    <li class="level-2 toc-p0"><a href="#sec-3-3"><span class="num">3.3</span>営業に確認</a></li>
+    <li class="level-1 toc-pa"><a href="#sec-4"><span class="num">4.</span>Phase A：検索条件設計</a></li>
+    <li class="level-2 toc-pa"><a href="#sec-4-1"><span class="num">4.1</span>TeamAgent の解釈</a></li>
+    <li class="level-2 toc-pa"><a href="#sec-4-2"><span class="num">4.2</span>派生情報の抽出</a></li>
+    <li class="level-2 toc-pa"><a href="#sec-4-3"><span class="num">4.3</span>Slack モック</a></li>
+    <li class="level-2 toc-pa"><a href="#sec-4-4"><span class="num">4.4</span>営業に確認</a></li>
+    <li class="level-1 toc-pb"><a href="#sec-5"><span class="num">5.</span>Phase B：並列リサーチ</a></li>
+    <li class="level-2 toc-pb"><a href="#sec-5-1"><span class="num">5.1</span>Tier 0 差別化データ</a></li>
+    <li class="level-2 toc-pb"><a href="#sec-5-2"><span class="num">5.2</span>Tier 1 案件文脈</a></li>
+    <li class="level-2 toc-pb"><a href="#sec-5-3"><span class="num">5.3</span>Tier 2 横展開</a></li>
+    <li class="level-2 toc-pb"><a href="#sec-5-4"><span class="num">5.4</span>Tier 3 外部文脈（DR）</a></li>
+    <li class="level-2 toc-pb"><a href="#sec-5-5"><span class="num">5.5</span>Slack 進捗通知</a></li>
+    <li class="level-2 toc-pb"><a href="#sec-5-6"><span class="num">5.6</span>営業に確認</a></li>
+    <li class="level-1 toc-pc"><a href="#sec-6"><span class="num">6.</span>Phase C：5割版生成</a></li>
+    <li class="level-2 toc-pc"><a href="#sec-6-1"><span class="num">6.1</span>8章マッピング</a></li>
+    <li class="level-2 toc-pc"><a href="#sec-6-2"><span class="num">6.2</span>自社データ上乗せ</a></li>
+    <li class="level-2 toc-pc"><a href="#sec-6-3"><span class="num">6.3</span>出力フォーマット</a></li>
+    <li class="level-2 toc-pc"><a href="#sec-6-4"><span class="num">6.4</span>Slack モック</a></li>
+    <li class="level-2 toc-pc"><a href="#sec-6-5"><span class="num">6.5</span>営業に確認</a></li>
+    <li class="level-1 toc-pd"><a href="#sec-7"><span class="num">7.</span>Phase D：対話型仕上げ</a></li>
+    <li class="level-2 toc-pd"><a href="#sec-7-1"><span class="num">7.1</span>対話で改訂</a></li>
+    <li class="level-2 toc-pd"><a href="#sec-7-2"><span class="num">7.2</span>5往復で8割</a></li>
+    <li class="level-2 toc-pd"><a href="#sec-7-3"><span class="num">7.3</span>Slack モック</a></li>
+    <li class="level-2 toc-pd"><a href="#sec-7-4"><span class="num">7.4</span>営業に確認</a></li>
+    <li class="level-1 toc-pe"><a href="#sec-8"><span class="num">8.</span>Phase E：営業最終調整</a></li>
+    <li class="level-2 toc-pe"><a href="#sec-8-1"><span class="num">8.1</span>顧客固有表現</a></li>
+    <li class="level-2 toc-pe"><a href="#sec-8-2"><span class="num">8.2</span>固有名詞の修正</a></li>
+    <li class="level-2 toc-pe"><a href="#sec-8-3"><span class="num">8.3</span>最後の磨き</a></li>
+    <li class="level-2 toc-pe"><a href="#sec-8-4"><span class="num">8.4</span>営業に確認</a></li>
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>所要時間と工数削減</a></li>
+    <li class="level-1"><a href="#sec-10"><span class="num">10.</span>データドリブン度</a></li>
+    <li class="level-1"><a href="#sec-11"><span class="num">11.</span>FAQ</a></li>
+    <li class="level-1"><a href="#sec-12"><span class="num">12.</span>営業に確認（総括）</a></li>
+  </ul>
+</aside>
+
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">For Sales Review · v1.0</div>
+  <h1>機能③ 提案コンテンツ生成<br>Phase 0〜E 全工程詳細仕様書</h1>
+  <table class="doc-meta-table">
+    <tr><td>Version</td><td>v1.0（営業確認用ドラフト）</td></tr>
+    <tr><td>作成日</td><td>2026年5月11日</td></tr>
+    <tr><td>前提</td><td>v2.1 仕様書 / アーキ図書 v2.1 / 「統合派」決定（DR を Phase B サブエージェントに内包）</td></tr>
+    <tr><td>用途</td><td>営業16名に Phase 0〜E の全動作を確認してもらい、入力フォーマット・所要時間・出力形式に同意を得る</td></tr>
+    <tr><td>関連文書</td><td>teamagent_overview_v2.1.html / teamagent_architecture_v2.1.html</td></tr>
+  </table>
+</header>
+
+<!-- ============== Hero ============== -->
+<div class="hero">
+  <div class="hero-tagline">For Sales Review</div>
+  <div class="hero-headline">営業のみなさん、Phase 0 → E の全工程を<br>一緒に確認してください</div>
+  <p class="hero-sub">
+    1案件の提案書づくりに <strong>20時間</strong>かかっていたものを、TeamAgent で <strong>25〜60分</strong> に短縮します。本書では、営業のみなさんが実際に Slack で操作する <strong>Phase 0（起動）から Phase E（最終調整）</strong>まで、各工程で「何が起こるか」「営業がどう動くか」「何を確認してほしいか」を 1 つずつ示します。技術的な詳細は最小限。<em>営業さんの操作と意思決定</em> にフォーカスします。
+  </p>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num c-p0">0</div>
+      <div class="hero-stat-label">Phase 0：起動<br>営業の打鍵 30秒</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num c-pa">A</div>
+      <div class="hero-stat-label">Phase A：解釈<br>30秒</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num c-pb">B</div>
+      <div class="hero-stat-label">Phase B：リサーチ<br>5〜10分</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num c-pc">C</div>
+      <div class="hero-stat-label">Phase C：5割版<br>2〜3分</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num c-pd">D</div>
+      <div class="hero-stat-label">Phase D：対話<br>5〜15分</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num c-pe">E</div>
+      <div class="hero-stat-label">Phase E：磨き<br>10〜30分</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============== 1. 本書について ============== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>本書について</h2>
+
+<p>
+本書は、TeamAgent <strong>機能③ 提案コンテンツ生成</strong>（営業ヒアリングで「20時間/案件」の最大ペインとして特定された業務）の <strong>Phase 0 から Phase E まで</strong> の全工程について、営業のみなさんに <em>確認・合意</em> をいただくための資料です。
+</p>
+
+<div class="note info">
+  <div class="label">確認してほしい 6 つの大項目</div>
+  <ol style="margin:6px 0 0 24px">
+    <li>入力 5 フィールド（商品名・CL名・URL・目的・その他）でカバーできるか？</li>
+    <li>Phase A の確認ステップ（「この条件で進めます」）は必要か？（精度 vs 営業の手間）</li>
+    <li>Phase B の所要時間（5〜10分）は許容範囲か？</li>
+    <li>Phase D の対話往復数（5往復で8割）は妥当か？</li>
+    <li>出力フォーマット（MD + HTML）で OK か？（pptx は v3.0 で対応予定）</li>
+    <li>Phase E（最後の2割）として残す範囲は妥当か？</li>
+  </ol>
+</div>
+
+<div class="note warn">
+  <div class="label">本書で「変更不可」の前提</div>
+  以下の 2 点はすでに技術側で決定済みです（営業判断の対象外）：
+  <ul style="margin:6px 0 0 24px">
+    <li><strong>「統合派」採用</strong>：Gemini Deep Research（DR）は外部サービスを買うのではなく、TeamAgent 内部の Phase B サブエージェントとして組み込みます。これにより営業さんは <code>@TeamAgent</code> ひとつで完結します。</li>
+    <li><strong>Pattern Bravo+ 4経路冗長化</strong>：DR が Vertex AI のクォータ切れや障害で失敗しても、自動で 3 つの予備経路に切り替わります。営業さんから見ると「DR が落ちる」状況はほぼ発生しません。</li>
+  </ul>
+</div>
+
+<h3>本書の読み方</h3>
+<ul>
+  <li>各 Phase の <strong>色分け</strong>（Phase 0 紫 / A 青 / B 緑 / C 黄 / D オレンジ / E 赤）を目印にしてください</li>
+  <li>各 Phase の末尾に「<strong>✋ 営業さんに確認したいこと</strong>」ボックスがあります（オレンジの帯）。そこで Yes/No や選択肢を記入してください</li>
+  <li>Slack モックは「実際の Slack でこう見えます」のイメージです。文言・ボタン配置は調整可能</li>
+  <li>所要時間は仮の目標値。社内ベータでの計測後に確定します</li>
+</ul>
+
+</section>
+
+
+<!-- ============== 2. 全体フロー俯瞰 ============== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>全体フロー俯瞰</h2>
+
+<p>
+機能③ は <strong>6 つの Phase</strong>（0〜E）で構成されます。Phase 0 は営業が <code>@TeamAgent</code> を呼ぶ段階、Phase A〜D は TeamAgent が動く時間、Phase E は再び営業が仕上げる時間です。
+</p>
+
+<div class="phase-track-6">
+  <div class="ph-block p0">
+    <div class="ph-tag">Phase 0</div>
+    <div class="ph-name">起動<br>(営業)</div>
+    <div class="ph-time">30秒</div>
+  </div>
+  <div class="ph-block pa">
+    <div class="ph-tag">Phase A</div>
+    <div class="ph-name">検索条件<br>設計</div>
+    <div class="ph-time">30秒</div>
+  </div>
+  <div class="ph-block pb">
+    <div class="ph-tag">Phase B</div>
+    <div class="ph-name">並列<br>リサーチ</div>
+    <div class="ph-time">5〜10分</div>
+  </div>
+  <div class="ph-block pc">
+    <div class="ph-tag">Phase C</div>
+    <div class="ph-name">5割版<br>生成</div>
+    <div class="ph-time">2〜3分</div>
+  </div>
+  <div class="ph-block pd">
+    <div class="ph-tag">Phase D</div>
+    <div class="ph-name">対話型<br>仕上げ</div>
+    <div class="ph-time">5〜15分</div>
+  </div>
+  <div class="ph-block pe">
+    <div class="ph-tag">Phase E</div>
+    <div class="ph-name">最終調整<br>(営業)</div>
+    <div class="ph-time">10〜30分</div>
+  </div>
+</div>
+<p class="caption"><span class="fig-num">図 2.1</span>機能③ 全体フロー。<strong>営業が動く時間</strong>＝ Phase 0（30秒）＋ Phase D（対話）＋ Phase E（10〜30分）。Phase A〜C は TeamAgent が裏で動くため、営業さんは Slack を見ながら他の仕事ができます。</p>
+
+<h3>営業から見た「動く時間」と「待つ時間」</h3>
+<table>
+  <tr><th>区分</th><th>営業の状態</th><th>所要</th><th>営業がやること</th></tr>
+  <tr><td>Phase 0</td><td>動く</td><td>30秒</td><td>Slack で <code>@TeamAgent</code> + 5フィールド入力</td></tr>
+  <tr><td>Phase A</td><td>確認</td><td>30秒</td><td>「この条件で進めます」を見て [OK] か [編集する] を押す</td></tr>
+  <tr><td>Phase B</td><td>待つ（他の作業可）</td><td>5〜10分</td><td>Slack の進捗通知を眺める程度。リサーチは裏で並列実行</td></tr>
+  <tr><td>Phase C</td><td>待つ</td><td>2〜3分</td><td>5割版が出来上がるのを待つ</td></tr>
+  <tr><td>Phase D</td><td>対話</td><td>5〜15分</td><td>「②に保存数も入れて」など 5 往復程度で 8 割版に仕上げる</td></tr>
+  <tr><td>Phase E</td><td>動く</td><td>10〜30分</td><td>顧客特有の表現・関係者名・最終調整を本人が手で行う</td></tr>
+</table>
+
+</section>
+
+
+<!-- ============== 3. Phase 0 ============== -->
+<div class="phase-banner p0" id="sec-3">
+  <div style="flex:1">
+    <div class="pb-tag">Phase 0</div>
+    <h2 class="pb-title">起動トリガー（営業がメンション）</h2>
+    <div class="pb-meta">営業が <code>@TeamAgent</code> + 5 フィールドを Slack に投稿して機能③ を起動する</div>
+  </div>
+  <div class="pb-time">
+    <div class="pb-time-num">30秒</div>
+    <div class="pb-time-label">営業の打鍵</div>
+  </div>
+</div>
+
+<section>
+
+<h3 id="sec-3-1"><span class="num">3.1</span>入力 5 フィールドの仕様</h3>
+<p>
+営業のみなさんは Slack で <strong>5つの自由記述フィールド</strong> を入れて起動します。「自由記述」とは「決まった選択肢から選ぶのではなく、自分の言葉でそのまま書いてOK」という意味です。
+</p>
+
+<div class="field-grid">
+  <div class="field-card">
+    <div class="field-label">Field 1（必須）</div>
+    <div class="field-name">商品名</div>
+    <div class="field-input">例：ACME 美容液 X<br>例：Gamma サブスク健食</div>
+    <div class="field-hint">自由記述・商標名そのままOK</div>
+  </div>
+  <div class="field-card">
+    <div class="field-label">Field 2（必須）</div>
+    <div class="field-name">CL名（クライアント名）</div>
+    <div class="field-input">例：ACME株式会社<br>例：(株)Gamma フーズ</div>
+    <div class="field-hint">自由記述・既知の社名でOK</div>
+  </div>
+  <div class="field-card">
+    <div class="field-label">Field 3（任意）</div>
+    <div class="field-name">URL</div>
+    <div class="field-input">例：https://acme.com/x<br>例：（空欄でも可）</div>
+    <div class="field-hint">商品 LP / プレスリリース など</div>
+  </div>
+  <div class="field-card">
+    <div class="field-label">Field 4（必須）</div>
+    <div class="field-name">目的</div>
+    <div class="field-input">例：販売促進<br>例：認知拡大<br>例：採用ブランディング</div>
+    <div class="field-hint">自由記述・営業の言葉でそのまま</div>
+  </div>
+  <div class="field-card">
+    <div class="field-label">Field 5（任意）</div>
+    <div class="field-name">その他</div>
+    <div class="field-input">例：ターゲット 30代女性<br>例：予算 ¥3M / 納期 6月末<br>例：競合は Beta 化粧品</div>
+    <div class="field-hint">ターゲット・予算・納期・<br>競合・特記事項など</div>
+  </div>
+</div>
+
+<h4>入力フォーマット（2 通り選択可能）</h4>
+<table>
+  <tr><th>方法</th><th>例</th><th>こんな営業向け</th></tr>
+  <tr>
+    <td><strong>① パラメータ形式</strong><br>（速い）</td>
+    <td><code>@TeamAgent 提案書つくって 商品=ACME美容液X CL=ACME株式会社 URL=https://acme.com/x 目的=販売促進 その他=30代女性ターゲット</code></td>
+    <td>覚えてしまえば打鍵2秒。<br>慣れた営業向け</td>
+  </tr>
+  <tr>
+    <td><strong>② モーダル形式</strong><br>（楽）</td>
+    <td><code>@TeamAgent 提案書つくって</code> → Slack モーダル（フォーム画面）が開き、5フィールドを順番に埋める</td>
+    <td>入力ミスが心配な営業向け。<br>新人さんおすすめ</td>
+  </tr>
+</table>
+
+<h3 id="sec-3-2"><span class="num">3.2</span>Slack モック（営業の操作）</h3>
+
+<h4>① パラメータ形式（慣れた営業）</h4>
+<div class="chat-mockup">
+  <div class="chat-mockup-header">
+    <span class="ch-name"><span class="ch-icon">#</span>sales-team</span>
+    <span class="ch-meta">営業チャンネル</span>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-user">山</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">山田 啓太</span><span class="chat-msg-time">13:42</span></div>
+      <div class="chat-msg-body">
+        <code>@TeamAgent</code> 提案書つくって 商品=ACME美容液X CL=ACME株式会社 URL=https://acme.com/x 目的=販売促進 その他=30代女性、予算¥3M、6月末納期
+      </div>
+    </div>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-bot">TA</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">TeamAgent</span><span class="chat-msg-bot-tag">APP</span><span class="chat-msg-time">13:42</span></div>
+      <div class="chat-msg-body">
+        受け付けました ✅ Phase A（検索条件設計）に進みます。30 秒お待ちください…
+      </div>
+    </div>
+  </div>
+</div>
+
+<h4>② モーダル形式（フォーム入力）</h4>
+<div class="chat-mockup">
+  <div class="chat-mockup-header">
+    <span class="ch-name"><span class="ch-icon">#</span>sales-team</span>
+    <span class="ch-meta">営業チャンネル</span>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-user-2">佐</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">佐藤 美咲</span><span class="chat-msg-time">10:15</span></div>
+      <div class="chat-msg-body"><code>@TeamAgent</code> 提案書つくって</div>
+    </div>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-bot">TA</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">TeamAgent</span><span class="chat-msg-bot-tag">APP</span><span class="chat-msg-time">10:15</span></div>
+      <div class="chat-msg-body">
+        パラメータが見つからないので、フォームでお願いします 📝
+        <div class="chat-buttons">
+          <span class="chat-btn primary">📝 フォームを開く</span>
+        </div>
+        <div style="margin-top:10px;padding:14px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px">
+          <div style="font-size:11px;color:#737373;margin-bottom:8px;font-weight:700">[ Slack モーダル ]</div>
+          <div style="font-size:12px;line-height:2">
+            商品名 <code>[ ACME 美容液 X__________ ]</code><br>
+            CL名 <code>[ ACME 株式会社__________ ]</code><br>
+            URL <code>[ https://acme.com/x_____ ]</code><br>
+            目的 <code>[ 販売促進_____________ ]</code><br>
+            その他 <code>[ 30代女性、予算¥3M、6月末 ]</code>
+          </div>
+          <div class="chat-buttons" style="margin-top:10px">
+            <span class="chat-btn primary">送信</span>
+            <span class="chat-btn">キャンセル</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h4>slash command でも起動できる（おまけ）</h4>
+<p>
+慣れた営業さん向けに <code>/teamagent compose</code> も使えます（v2.1 仕様書 9.4 参照）。意図ルーターをスキップして高速・確定的に起動します。
+</p>
+
+<h3 id="sec-3-3"><span class="num">3.3</span>営業に確認したいこと（Phase 0）</h3>
+<div class="ask-box">
+  <div class="ask-box-title"><span class="ask-icon">✋</span>営業さんに確認したいこと（Phase 0）</div>
+  <ul class="ask-list">
+    <li>
+      <div class="ask-q">Q1. 入力 5 フィールド（商品名・CL名・URL・目的・その他）でカバーできますか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>そのままで OK</span>
+        <span class="ask-opt"><span class="ck"></span>フィールドを追加したい：_____________________</span>
+        <span class="ask-opt"><span class="ck"></span>フィールドを減らしたい：_____________________</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q2. 「目的」は自由記述で良いですか？ それとも選択肢（販売促進／認知拡大／採用ブランディング…）から選ぶ方が楽ですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>自由記述で OK</span>
+        <span class="ask-opt"><span class="ck"></span>選択肢から選びたい</span>
+        <span class="ask-opt"><span class="ck"></span>どちらも使えるようにしたい</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q3. パラメータ形式 と モーダル形式、どちらをデフォルトにしますか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>パラメータ形式（速い）</span>
+        <span class="ask-opt"><span class="ck"></span>モーダル形式（楽）</span>
+        <span class="ask-opt"><span class="ck"></span>両方使えれば営業の好み</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q4. メンションのテンプレを Slack に固定（ピン留め）したいですか？（毎回コピペできる）</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>欲しい</span>
+        <span class="ask-opt"><span class="ck"></span>不要</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q5. 「商品名」「CL名」が表記揺れする場合（例：「ACME」と「アクメ」と「Acme」）、TeamAgent 側で寄せて検索すべき？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>寄せて検索してほしい（広く拾う）</span>
+        <span class="ask-opt"><span class="ck"></span>厳密に一致だけ（誤検知を避ける）</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+</section>
+
+
+<!-- ============== 4. Phase A ============== -->
+<div class="phase-banner pa" id="sec-4">
+  <div style="flex:1">
+    <div class="pb-tag">Phase A</div>
+    <h2 class="pb-title">検索条件設計（TeamAgent が解釈）</h2>
+    <div class="pb-meta">入力 5 フィールドから派生情報を抽出し、Phase B の検索条件を提案。営業に「この条件で進めます」と確認をとる</div>
+  </div>
+  <div class="pb-time">
+    <div class="pb-time-num">30秒</div>
+    <div class="pb-time-label">解釈・確認</div>
+  </div>
+</div>
+
+<section>
+
+<h3 id="sec-4-1"><span class="num">4.1</span>TeamAgent が解釈する内容</h3>
+
+<p>
+営業が入れた 5 フィールドは「ざっくりした自由記述」ですが、Phase B の並列リサーチを精度高く動かすには「もう一段、構造化された検索条件」が必要です。Phase A では TeamAgent（Sonnet 4.6）が以下を <strong>30 秒で推定</strong> します。
+</p>
+
+<table>
+  <tr><th>解釈項目</th><th>例（ACME 美容液 X / 30代女性ターゲットの場合）</th><th>使い道</th></tr>
+  <tr><td><strong>業界カテゴリ</strong></td><td>BtoC 美容 / スキンケア / 美容液セグメント</td><td>過去案件メタの絞り込み</td></tr>
+  <tr><td><strong>商材特性</strong></td><td>消費財・継続購入型・客単価 ¥5,000〜¥15,000 帯</td><td>競合動画の選定</td></tr>
+  <tr><td><strong>ターゲット像</strong></td><td>30 代女性／美容意識高め／SNS リテラシー中〜高</td><td>界隈分析・タグ調査</td></tr>
+  <tr><td><strong>想定 KPI</strong></td><td>販売促進（販売件数 / 売上 / コンバージョン）</td><td>提案書のゴール設定</td></tr>
+  <tr><td><strong>想定ペイン</strong></td><td>「シミ・くすみへの即効性が見えない」「価格に対する効果実感」</td><td>DR と X 検索の方向性</td></tr>
+  <tr><td><strong>類似過去案件</strong></td><td>Gamma 健食 PR（類似度 0.82）／ Delta 化粧水 PR（0.71）</td><td>pgvector Top5 を Phase B に injection</td></tr>
+</table>
+
+<h3 id="sec-4-2"><span class="num">4.2</span>派生情報の抽出例</h3>
+<p>
+5 フィールドの「ざっくり入力」から、TeamAgent はこのくらい派生情報を引き出します（実例）。
+</p>
+
+<div class="derive-table">
+  <div class="derive-row">
+    <div class="derive-key">入力</div>
+    <div class="derive-val"><code>商品=ACME美容液X / CL=ACME株式会社 / URL=https://acme.com/x / 目的=販売促進 / その他=30代女性、予算¥3M、6月末納期</code></div>
+  </div>
+  <div class="derive-row">
+    <div class="derive-key">URL 解析</div>
+    <div class="derive-val">LP から商品スペック（ビタミンC誘導体 / ナイアシンアミド配合 / 30ml ¥7,800）と訴求軸（「夜美容」「翌朝の透明感」）を抽出</div>
+  </div>
+  <div class="derive-row">
+    <div class="derive-key">CL コンテクスト</div>
+    <div class="derive-val">過去 6 ヶ月の社内 Mail / Slack から、ACME 社が「インフルエンサー PR」を選好する傾向を抽出 / 担当者の温度感（前向き）も検出</div>
+  </div>
+  <div class="derive-row">
+    <div class="derive-key">予算→規模感</div>
+    <div class="derive-val">「予算¥3M」から、Top インフルエンサー 1名（¥2.5M）＋ ミドル 5名（¥500K）構成、または ミドル 8名構成 を想定</div>
+  </div>
+  <div class="derive-row">
+    <div class="derive-key">納期→納品スケジュール</div>
+    <div class="derive-val">「6月末納期」→ 5/末 までに台本確定／6/中旬 撮影／6/末 配信、と逆算</div>
+  </div>
+  <div class="derive-row">
+    <div class="derive-key">類似案件 Top5</div>
+    <div class="derive-val">pgvector 検索：(1) Gamma 健食 2025/12 類似度 0.82 / (2) Delta 化粧水 2026/02 0.71 / (3) Epsilon 美容液 2025/09 0.68 / 他 2 件</div>
+  </div>
+</div>
+
+<h3 id="sec-4-3"><span class="num">4.3</span>Slack モック（TeamAgent からの確認）</h3>
+<div class="chat-mockup">
+  <div class="chat-mockup-header">
+    <span class="ch-name"><span class="ch-icon">#</span>sales-team</span>
+    <span class="ch-meta">スレッド内</span>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-bot">TA</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">TeamAgent</span><span class="chat-msg-bot-tag">APP</span><span class="chat-msg-time">13:42</span></div>
+      <div class="chat-msg-body">
+        <strong>Phase A：検索条件設計</strong> 🔍 文脈を読み取りました。次の条件で Phase B を実行します。OK ですか？
+        <div class="chat-card blue">
+          <strong>業界 / 商材</strong><br>
+          BtoC 美容 / スキンケア / 美容液（¥5k〜¥15k 帯）
+        </div>
+        <div class="chat-card blue">
+          <strong>ターゲット</strong><br>
+          30 代女性 / 美容意識高め / SNS リテラシー中〜高
+        </div>
+        <div class="chat-card blue">
+          <strong>想定ペイン（DR 検索の方向性）</strong><br>
+          シミ・くすみ即効性 / コスパ感 / 夜美容ルーティン
+        </div>
+        <div class="chat-card green">
+          <strong>類似過去案件 Top5（pgvector）</strong><br>
+          ① Gamma 健食 PR（2025/12・類似度 0.82）<br>
+          ② Delta 化粧水 PR（2026/02・0.71）<br>
+          ③ Epsilon 美容液 PR（2025/09・0.68）<br>
+          ④〜⑤ 略
+        </div>
+        <div class="chat-card yellow">
+          <strong>DR 検索テーマ（8 セクション）</strong><br>
+          A:市場 / B:ソーシャル / C:TikTok タグ / D:パブリシティ / E:界隈 / F:競合 3社 / G:インサイト / H:イベント
+        </div>
+        <div class="chat-buttons">
+          <span class="chat-btn primary">OK 進めて</span>
+          <span class="chat-btn">編集する</span>
+          <span class="chat-btn">条件を追加する</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="note beginner">
+  <div class="label">設計のポイント</div>
+  Phase A は「ボタン 1 つで進める」設計です。営業さんが <strong>毎回確認するのが面倒</strong> なら、「設定で常に自動 OK にする」オプションも用意できます（Q3 で確認）。
+</div>
+
+<h3 id="sec-4-4"><span class="num">4.4</span>営業に確認したいこと（Phase A）</h3>
+<div class="ask-box">
+  <div class="ask-box-title"><span class="ask-icon">✋</span>営業さんに確認したいこと（Phase A）</div>
+  <ul class="ask-list">
+    <li>
+      <div class="ask-q">Q1. Phase A の「この条件で進めます」確認は必要ですか？（毎回ボタンを押す手間 vs 誤った方向に走るリスク）</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>毎回確認したい（精度重視）</span>
+        <span class="ask-opt"><span class="ck"></span>確認はスキップして即 Phase B（時短重視）</span>
+        <span class="ask-opt"><span class="ck"></span>個人設定で切り替え可能にしたい</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q2. 派生情報（業界 / ターゲット / 想定ペイン / 類似案件 Top5）の項目は妥当ですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>このままで OK</span>
+        <span class="ask-opt"><span class="ck"></span>追加してほしい項目：_____________________</span>
+        <span class="ask-opt"><span class="ck"></span>削ってほしい項目：_____________________</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q3. 類似案件 Top5 の数（5件）は適切ですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>5件で OK</span>
+        <span class="ask-opt"><span class="ck"></span>Top3 で十分</span>
+        <span class="ask-opt"><span class="ck"></span>Top10 まで広げたい</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q4. 派生情報が「営業の想定と違う」場合の修正方法は？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>[編集する] ボタンで自由文修正</span>
+        <span class="ask-opt"><span class="ck"></span>フィールド単位で個別編集</span>
+        <span class="ask-opt"><span class="ck"></span>そもそも Phase 0 に戻ってやり直す</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+</section>
+
+
+<!-- ============== 5. Phase B ============== -->
+<div class="phase-banner pb" id="sec-5">
+  <div style="flex:1">
+    <div class="pb-tag">Phase B</div>
+    <h2 class="pb-title">並列リサーチ（4 つの Tier）</h2>
+    <div class="pb-meta">Tier 0 → Tier 1〜3 並列でリサーチ。動画分析データ＋過去案件メタが差別化の本丸、Gemini DR は外部文脈の中核</div>
+  </div>
+  <div class="pb-time">
+    <div class="pb-time-num">5〜10分</div>
+    <div class="pb-time-label">並列リサーチ</div>
+  </div>
+</div>
+
+<section>
+
+<p>
+Phase B は機能③ の <strong>最大の差別化ポイント</strong> です。「業界一般論を吐く ChatGPT」と違い、TeamAgent は <strong>自社の動画分析データ層</strong>（VSEO + dpro + Buzzmiru）と <strong>過去案件メタ</strong>（pgvector）を最優先で読みに行きます。そのうえで Gmail / Slack / Drive / DR / X を並列で読み込み、データドリブンな提案の土台を作ります。
+</p>
+
+<h3>4 つの Tier 構造</h3>
+
+<div class="tier-grid">
+  <div class="tier-card t0">
+    <div class="tier-tag">Tier 0 ｜ 差別化の本丸（最優先）</div>
+    <div class="tier-title">動画分析データ層 + 過去案件メタ</div>
+    <div class="tier-desc">
+      ここが <strong>競合 AI ツールにはない</strong> 差別化要素。VSEO + dpro + Buzzmiru の 3 社統合データに、pgvector に蓄積された自社過去案件のメタ（消化額 / 保存率 / フック / 訴求軸 / CTA / 表現）を組み合わせて「うちで実施した案件パターンに基づく具体的な数値根拠」を Phase C に渡す。
+    </div>
+    <div class="tier-items">
+      <span class="tier-pill">🎬 VSEO Analytics（自社）</span>
+      <span class="tier-pill">📊 dpro（広告消化額）</span>
+      <span class="tier-pill">⭐ Buzzmiru（保存数）</span>
+      <span class="tier-pill">🗄 pgvector cases（過去案件 200+ 件）</span>
+    </div>
+  </div>
+  <div class="tier-card t1">
+    <div class="tier-tag">Tier 1 ｜ 案件文脈データ</div>
+    <div class="tier-title">この案件の本人視点・社内合意の引き継ぎ</div>
+    <div class="tier-desc">
+      営業本人の Gmail と案件 Slack チャンネルから「すでに決まっていること」「クライアントが言ったこと」「過去のキャッチボール」を拾う。営業が自分でやると 1 案件 30〜60 分かかる作業。
+    </div>
+    <div class="tier-items">
+      <span class="tier-pill">📧 Gmail（本人スレッド）</span>
+      <span class="tier-pill">💬 Slack（案件チャンネル）</span>
+    </div>
+  </div>
+  <div class="tier-card t2">
+    <div class="tier-tag">Tier 2 ｜ 横展開データ</div>
+    <div class="tier-title">社内のナレッジから類似事例を引く</div>
+    <div class="tier-desc">
+      他の営業が過去に同種クライアントを扱ったメール / Slack 議論 / Drive の過去提案 PDF を引く。「会社の脳」としての TeamAgent の本領発揮ゾーン。
+    </div>
+    <div class="tier-items">
+      <span class="tier-pill">📧 Gmail（他人横断）</span>
+      <span class="tier-pill">💬 Slack（横断）</span>
+      <span class="tier-pill">📁 Google Drive（過去提案 PDF/pptx）</span>
+    </div>
+  </div>
+  <div class="tier-card t3">
+    <div class="tier-tag">Tier 3 ｜ 外部文脈データ（DR 中核）</div>
+    <div class="tier-title">Gemini Deep Research の 8 セクション JSON</div>
+    <div class="tier-desc">
+      市場・ソーシャル・ハッシュタグ・パブリシティ・界隈・競合・インサイト・イベントの <strong>8 セクション構造化 JSON</strong> を生成。「業界一般論」ではなく「URL 実在確認 + 件数厳格化」のルールで動く。X はオンデマンドで補強検索。
+    </div>
+    <div class="tier-items">
+      <span class="tier-pill">🔍 Gemini DR（8 セクション JSON）</span>
+      <span class="tier-pill">🐦 X（補助検索）</span>
+    </div>
+  </div>
+</div>
+
+<p class="caption"><span class="fig-num">図 5.1</span>Tier 構造。Tier 0 から先に実行し、その出力を Tier 1〜3 のクエリに inject して並列実行する。これにより「Tier 0 で見つかった類似案件パターン」が Tier 3 の DR テーマ設定にも反映される。</p>
+
+<h3 id="sec-5-1"><span class="num">5.1</span>Tier 0：差別化データ取得（最優先）</h3>
+
+<h4>動画分析データ層（VSEO + dpro + Buzzmiru）</h4>
+<table>
+  <tr><th>サービス</th><th>取得する情報</th><th>差別化価値</th></tr>
+  <tr><td>VSEO Analytics</td><td>動画内容分析（Sonnet 4.6 ビジョン）・3シークレット重複度</td><td>自社運用 / ◎ 安定</td></tr>
+  <tr><td>dpro</td><td>広告消化額・配信期間・カテゴリ別ランキング・台本/ナレーション</td><td>外部にも提供されているが統合層で参照</td></tr>
+  <tr><td>Buzzmiru</td><td>保存数（save count）— <strong>他で代替不可</strong> の質的指標</td><td>「効率（保存率）」を測れる唯一のソース</td></tr>
+</table>
+
+<h4>過去案件メタ（pgvector cases テーブル）</h4>
+<p>
+これまで TeamAgent が記録した <strong>200+ 件の過去案件</strong> をベクトル検索で類似度照合します。各案件には以下のメタが紐付いています：
+</p>
+<ul>
+  <li>クライアント業種 / 商材 / KPI / 予算規模</li>
+  <li>採用したインフルエンサー構成（Top / ミドル / マイクロの内訳）</li>
+  <li>動画 6 観点（EG情報 / メディア界隈 / フック / 訴求軸 / CTA / 表現）</li>
+  <li>消化額・保存率・受注角度（成功 / 微妙 / 失敗）</li>
+  <li>類似案件として参照可能な「成功パターンと失敗パターン」</li>
+</ul>
+
+<h3 id="sec-5-2"><span class="num">5.2</span>Tier 1：案件文脈データ</h3>
+<table>
+  <tr><th>ソース</th><th>取得範囲</th><th>用途</th></tr>
+  <tr><td>Gmail（本人）</td><td>このクライアントとの過去 12 ヶ月のスレッド</td><td>クライアントの温度・既出合意・トーン</td></tr>
+  <tr><td>Slack（案件チャンネル）</td><td>このクライアント案件の Slack チャンネル全履歴</td><td>社内議論・営業同士の引き継ぎ・指示文</td></tr>
+</table>
+
+<h3 id="sec-5-3"><span class="num">5.3</span>Tier 2：横展開データ</h3>
+<table>
+  <tr><th>ソース</th><th>取得範囲</th><th>用途</th></tr>
+  <tr><td>Gmail（他人横断）</td><td>同種クライアント（業種・商材）の他営業のメール</td><td>同種ペインの言語化・断り文句・落としどころ</td></tr>
+  <tr><td>Slack（横断）</td><td>過去案件チャンネルの議論</td><td>「うちで効いたフック」の再利用</td></tr>
+  <tr><td>Google Drive</td><td>過去提案 PDF / pptx の本文抽出</td><td>テンプレ・章立て・トーンの参照</td></tr>
+</table>
+
+<h3 id="sec-5-4"><span class="num">5.4</span>Tier 3：外部文脈データ（Gemini DR 中核）</h3>
+
+<div class="note info">
+  <div class="label">統合派の決定（重要）</div>
+  <strong>Gemini Deep Research は外部サービスを買うのではなく、TeamAgent 内部の Phase B サブエージェント（Composer Fargate）から直接呼びます。</strong>
+  <ul style="margin:6px 0 0 24px">
+    <li>DR プロンプトテンプレは Secrets Manager に外部化 → Slack slash command で更新可能</li>
+    <li>Pattern Bravo+ 4 経路冗長化（Vertex AI / Bedrock Claude WebSearch / Tavily+Brave / A6X）は TeamAgent 内部で完結</li>
+    <li>Phase A の解釈結果（業界 / ターゲット / ペイン）を DR プロンプトに自動 inject</li>
+    <li>DR の 8 セクション JSON を Phase C に直接渡せる</li>
+  </ul>
+</div>
+
+<h4>Gemini DR が返す 8 セクション JSON</h4>
+<div class="dr-grid">
+  <div class="dr-card">
+    <div class="dr-key">A</div>
+    <div class="dr-title">市場・インサイトデータ</div>
+    <div class="dr-spec">3 テーマ × 代替 3 件付き。市場規模・成長率・トレンド変化点。URL 実在確認</div>
+  </div>
+  <div class="dr-card">
+    <div class="dr-key">B</div>
+    <div class="dr-title">ソーシャル分析データ</div>
+    <div class="dr-spec">3 テーマ × 代替 3 件付き。発言量推移・感情極性・話題の変遷</div>
+  </div>
+  <div class="dr-card">
+    <div class="dr-key">C</div>
+    <div class="dr-title">TikTok ハッシュタグ調査</div>
+    <div class="dr-spec">9 タグ・実件数・URL 必須。「#夜美容」#〇〇 ごとに実数（投稿数・再生数）を厳格化</div>
+  </div>
+  <div class="dr-card">
+    <div class="dr-key">D</div>
+    <div class="dr-title">パブリシティ文脈データ</div>
+    <div class="dr-spec">6〜8 ワード。商品周辺の報道トーン・媒体・記事密度</div>
+  </div>
+  <div class="dr-card">
+    <div class="dr-key">E</div>
+    <div class="dr-title">界隈分析データ</div>
+    <div class="dr-spec">3 界隈・人口・タグ件数。「美容垢界隈」「ナイトケア界隈」など</div>
+  </div>
+  <div class="dr-card">
+    <div class="dr-key">F</div>
+    <div class="dr-title">競合分析</div>
+    <div class="dr-spec">3 社。商品ライン・価格帯・訴求軸・動画戦略</div>
+  </div>
+  <div class="dr-card">
+    <div class="dr-key">G</div>
+    <div class="dr-title">インサイト</div>
+    <div class="dr-spec">不満系投稿パターン・欲求系投稿パターン。実投稿引用付き</div>
+  </div>
+  <div class="dr-card">
+    <div class="dr-key">H</div>
+    <div class="dr-title">イベント・タイミング情報</div>
+    <div class="dr-spec">季節要因・キャンペーンウィンドウ・他社リリース時期</div>
+  </div>
+</div>
+
+<div class="note warn">
+  <div class="label">DR の絶対遵守ルール</div>
+  <ul style="margin:6px 0 0 24px">
+    <li><strong>URL 実在確認</strong>：DR が返す URL は HTTP 200 を確認したものだけ。404 は除外</li>
+    <li><strong>件数の厳格化</strong>：「9 タグ」「3 社」「6〜8 ワード」など各セクションに数値要件を明示</li>
+    <li><strong>空欄禁止</strong>：取得失敗した項目は <em>「要確認」</em>と明示（捏造しない）</li>
+  </ul>
+</div>
+
+<h4>Pattern Bravo+ 4 経路冗長化</h4>
+<p>
+DR は外部 API の都合（クォータ枯渇・障害・料金変動）でたまに失敗します。TeamAgent は <strong>4 経路で自動切り替え</strong> するため、営業さんから見ると「DR が落ちる」状況はほぼ発生しません。
+</p>
+
+<div class="bravo-stack">
+  <div class="bravo-step bravo-primary">
+    <div class="bs-num">1</div>
+    <div class="bs-body">
+      <div class="bs-name">経路 1: Vertex AI Gemini DR（主経路）</div>
+      <div class="bs-desc">Google Vertex AI 公式 API。最高品質・最も体系的な 8 セクション JSON。通常時はここだけで完結。</div>
+    </div>
+  </div>
+  <div class="bravo-arrow">↓ 失敗 / クォータ枯渇時 fallback</div>
+  <div class="bravo-step r2">
+    <div class="bs-num">2</div>
+    <div class="bs-body">
+      <div class="bs-name">経路 2: Bedrock Claude WebSearch</div>
+      <div class="bs-desc">Anthropic 経由の WebSearch ツール。DR と同等のプロンプトで 8 セクションを再構築。</div>
+    </div>
+  </div>
+  <div class="bravo-arrow">↓ 失敗時 fallback</div>
+  <div class="bravo-step r3">
+    <div class="bs-num">3</div>
+    <div class="bs-body">
+      <div class="bs-name">経路 3: Tavily + Brave 独立検索</div>
+      <div class="bs-desc">独立検索 API 2 種を併用。検索結果を Sonnet 4.6 で 8 セクションに再構成。</div>
+    </div>
+  </div>
+  <div class="bravo-arrow">↓ 最終 fallback</div>
+  <div class="bravo-step r4">
+    <div class="bs-num">4</div>
+    <div class="bs-body">
+      <div class="bs-name">経路 4: A6X（自前構築）</div>
+      <div class="bs-desc">最終 fallback。社内構築の検索パイプラインで最低限の DR 出力を保証。</div>
+    </div>
+  </div>
+</div>
+
+<h4>Secrets Manager で DR プロンプトを管理</h4>
+<p>
+DR の精度は「プロンプトテンプレ」次第。営業さんが「もっとこういう情報も欲しい」と言ったら、エンジニアは Slack slash command（<code>/teamagent dr-prompt edit</code>）で <strong>Secrets Manager のプロンプトを書き換える</strong> だけで反映されます（コードの再デプロイ不要）。
+</p>
+
+<h4>X（任意・補助）</h4>
+<p>
+DR で取れなかった「世の中のリアルな声」を X で補強検索。<strong>必須ではなく、DR の補助</strong> として扱います（Q5 で営業の意見を聞きます）。
+</p>
+
+<h3 id="sec-5-5"><span class="num">5.5</span>進捗の Slack 通知（営業から何が見えるか）</h3>
+
+<p>Phase B は 5〜10 分かかるので、営業さんが「何が動いているか」分からないと不安になります。<strong>Tier 単位でリアルタイム進捗を Slack に流します</strong>。</p>
+
+<div class="chat-mockup">
+  <div class="chat-mockup-header">
+    <span class="ch-name"><span class="ch-icon">#</span>sales-team</span>
+    <span class="ch-meta">スレッド内</span>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-bot">TA</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">TeamAgent</span><span class="chat-msg-bot-tag">APP</span><span class="chat-msg-time">13:43</span></div>
+      <div class="chat-msg-body">
+        <strong>Phase B：並列リサーチ実行中</strong>（残り 約 7 分）
+        <div class="chat-progress">▼ Tier 0：差別化データ層（最優先）
+✅ VSEO 動画分析 完了（競合 Top10 動画・保存率 Top5%）
+✅ dpro 広告消化額 完了（同カテゴリ Top20）
+✅ Buzzmiru 保存数 完了（質的指標 12 件）
+✅ pgvector 過去案件 Top5 完了（類似度 0.68〜0.82）
+
+▼ Tier 1：案件文脈
+✅ Gmail 本人 完了（過去スレッド 14 件）
+✅ Slack 案件 ch 完了（議論 28 件）
+
+▼ Tier 2：横展開
+✅ Gmail 他人横断 完了（同種クライアント 8 件）
+✅ Slack 横断 完了（議論 22 件）
+✅ Drive 完了（過去提案 12 件参照）
+
+▼ Tier 3：外部文脈
+⏳ Gemini DR 8 セクション生成中…（残り 約 5 分 / 経路1: Vertex AI）
+⏳ X ペイン補強中…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3 id="sec-5-6"><span class="num">5.6</span>営業に確認したいこと（Phase B）</h3>
+<div class="ask-box">
+  <div class="ask-box-title"><span class="ask-icon">✋</span>営業さんに確認したいこと（Phase B）</div>
+  <ul class="ask-list">
+    <li>
+      <div class="ask-q">Q1. Phase B の所要時間（5〜10分）は許容範囲ですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>OK（裏で他の仕事できるなら問題なし）</span>
+        <span class="ask-opt"><span class="ck"></span>もっと短くしたい（外部 DR を浅くする等）</span>
+        <span class="ask-opt"><span class="ck"></span>もっと深くしてほしい（10〜15分でも質を優先）</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q2. Tier 0（動画分析データ層 + 過去案件メタ）が「差別化の本丸」という方針に同意しますか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>同意（これが TeamAgent の強み）</span>
+        <span class="ask-opt"><span class="ck"></span>別のソースも本丸に入れたい：_____________________</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q3. Tier 2（他営業の Gmail / Slack 横断）に抵抗感はありますか？（プライバシー）</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>会社方針合意済みなので問題なし</span>
+        <span class="ask-opt"><span class="ck"></span>件名/送信元フィルタは強めにかけてほしい</span>
+        <span class="ask-opt"><span class="ck"></span>opt-out ラベル（<code>TeamAgent-Exclude</code>）の周知を徹底したい</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q4. DR の 8 セクション（A〜H）の項目立てに過不足はありますか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>このままで OK</span>
+        <span class="ask-opt"><span class="ck"></span>追加したいセクション：_____________________</span>
+        <span class="ask-opt"><span class="ck"></span>削ってよいセクション：_____________________</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q5. X（旧 Twitter）検索は必要ですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>必要（リアルな声を拾うため）</span>
+        <span class="ask-opt"><span class="ck"></span>DR のみで十分</span>
+        <span class="ask-opt"><span class="ck"></span>案件によって on/off できるとよい</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q6. Slack 進捗通知の頻度は？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>Tier 単位で都度通知（今の案）</span>
+        <span class="ask-opt"><span class="ck"></span>開始時と完了時の 2 回だけ</span>
+        <span class="ask-opt"><span class="ck"></span>1 メッセージを更新し続ける（chat.update）</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+</section>
+
+
+<!-- ============== 6. Phase C ============== -->
+<div class="phase-banner pc" id="sec-6">
+  <div style="flex:1">
+    <div class="pb-tag">Phase C</div>
+    <h2 class="pb-title">5割版生成（DR 8 セクション → 提案書 8 章）</h2>
+    <div class="pb-meta">DR 8 セクション JSON ＋ 自社データ（Tier 0〜2）を統合して提案書 8 章 を MD + HTML で生成</div>
+  </div>
+  <div class="pb-time">
+    <div class="pb-time-num">2〜3分</div>
+    <div class="pb-time-label">統合・生成</div>
+  </div>
+</div>
+
+<section>
+
+<h3 id="sec-6-1"><span class="num">6.1</span>DR の 8 セクション → 提案書 8 章マッピング</h3>
+
+<p>
+DR が返す 8 セクション（A〜H）は <strong>提案書の 8 章にほぼ 1:1 で対応</strong> します。ここに Tier 0〜2 の自社データを上乗せします。
+</p>
+
+<div class="map-grid">
+  <div class="map-cell left"><span class="map-key">A</span> DR：市場・インサイト</div>
+  <div class="map-arrow">→</div>
+  <div class="map-cell right"><span class="map-key">第1章</span> 市場機会（自社過去案件の市場規模実績を追加）</div>
+
+  <div class="map-cell left"><span class="map-key">B</span> DR：ソーシャル分析</div>
+  <div class="map-arrow">→</div>
+  <div class="map-cell right"><span class="map-key">第2章</span> SNS 戦略（Tier 0 の保存率データを追加）</div>
+
+  <div class="map-cell left"><span class="map-key">C</span> DR：TikTok タグ調査</div>
+  <div class="map-arrow">→</div>
+  <div class="map-cell right"><span class="map-key">第3章</span> ハッシュタグ設計（過去案件の効いたタグを追加）</div>
+
+  <div class="map-cell left"><span class="map-key">D</span> DR：パブリシティ文脈</div>
+  <div class="map-arrow">→</div>
+  <div class="map-cell right"><span class="map-key">第4章</span> 媒体戦略（Drive 過去提案から媒体実績を追加）</div>
+
+  <div class="map-cell left"><span class="map-key">E</span> DR：界隈分析</div>
+  <div class="map-arrow">→</div>
+  <div class="map-cell right"><span class="map-key">第5章</span> ターゲット設定（自社過去 KPI を追加）</div>
+
+  <div class="map-cell left"><span class="map-key">F</span> DR：競合分析 3 社</div>
+  <div class="map-arrow">→</div>
+  <div class="map-cell right"><span class="map-key">第6章</span> 競合との差別化（Tier 0 動画分析データを追加）</div>
+
+  <div class="map-cell left"><span class="map-key">G</span> DR：インサイト</div>
+  <div class="map-arrow">→</div>
+  <div class="map-cell right"><span class="map-key">第7章</span> クリエイティブ方針（過去案件の効いたフック・訴求軸を追加）</div>
+
+  <div class="map-cell left"><span class="map-key">H</span> DR：イベント・タイミング</div>
+  <div class="map-arrow">→</div>
+  <div class="map-cell right"><span class="map-key">第8章</span> 実行スケジュール（自社の納品実績で逆算）</div>
+</div>
+
+<h3 id="sec-6-2"><span class="num">6.2</span>自社データを各章に上乗せ（データドリブン度の核）</h3>
+
+<p>
+この上乗せが <strong>業界一般論との決定的な違い</strong> を生みます。同じ「30 代女性ターゲット」の話でも、TeamAgent は必ず <em>「自社の過去案件 N 件中、保存率 Top5% に入った動画は…」</em> という形で <strong>具体的な数値根拠</strong> を引きます。
+</p>
+
+<div class="compare-grid">
+  <div class="compare-side bad">
+    <div class="compare-tag">業界一般論（ChatGPT）</div>
+    <div class="compare-text">
+      「30 代女性は美容意識が高く、<em>SNS 上の口コミに反応しやすい傾向がある</em>。インフルエンサーを起用したマーケティングが有効と考えられる。」
+    </div>
+  </div>
+  <div class="compare-side good">
+    <div class="compare-tag">データドリブン（TeamAgent）</div>
+    <div class="compare-text">
+      「弊社が過去 6 ヶ月で実施した美容液 PR 案件 12 件のうち、<em>保存率 Top5%</em> に入った動画は<em>『顔出し＋数字提示＋テロップ多め』</em>の組合せ（消化額平均 ¥3.2M / 保存率 4.5%）。ACME 美容液 X は商材特性が <em>Gamma 健食 PR（2025/12 実施）</em> と類似度 <em>0.82</em>。同案件で効いたフック『実は90%が知らない…』を本案件にも転用可能。」
+    </div>
+  </div>
+</div>
+
+<p>このような「主張＋データソース引用」を <strong>提案書のすべての主要文に紐付ける</strong> ことが Phase C の核心です（詳細は第10章）。</p>
+
+<h3 id="sec-6-3"><span class="num">6.3</span>出力フォーマット（MD + HTML）</h3>
+
+<table>
+  <tr><th>形式</th><th>用途</th><th>サイズ目安</th><th>営業の使い方</th></tr>
+  <tr><td>Markdown (.md)</td><td>自分で再構成する派・Notion / Confluence に貼る派</td><td>10〜15 KB</td><td>テキストエディタで章単位に編集</td></tr>
+  <tr><td>HTML (.html)</td><td>リッチなプレビュー・クライアントへの共有</td><td>30〜50 KB</td><td>Slack 添付からそのまま開ける</td></tr>
+  <tr><td>pptx（将来対応）</td><td>顧客提案にそのまま使う派</td><td>—</td><td><strong>v3.0 で対応予定</strong>。v1.0 ではスコープ外</td></tr>
+</table>
+
+<div class="note beginner">
+  <div class="label">設計判断（MD/HTML 先行）</div>
+  pptx の placeholder 制御は工数の大部分を占めます。まず MD/HTML で「中身の精度」を社内検証し、営業さんの反応を見てから v3.0 で pptx 対応する段階的アプローチです。HTML はクライアント向けにそのまま使える品質を目指します。
+</div>
+
+<h3 id="sec-6-4"><span class="num">6.4</span>Slack モック（受け取り画面）</h3>
+<div class="chat-mockup">
+  <div class="chat-mockup-header">
+    <span class="ch-name"><span class="ch-icon">#</span>sales-team</span>
+    <span class="ch-meta">スレッド内</span>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-bot">TA</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">TeamAgent</span><span class="chat-msg-bot-tag">APP</span><span class="chat-msg-time">13:51</span></div>
+      <div class="chat-msg-body">
+        <strong>Phase C：5割版が完成しました</strong> 📄 提案書 8 章構造で生成しています。
+        <div class="chat-file"><div class="chat-file-icon">MD</div><div><strong>ACME美容液X_提案_v0.5.md</strong><br><span style="color:#737373;font-size:11px">12 KB · Markdown · 8章構造</span></div></div>
+        <div class="chat-file"><div class="chat-file-icon" style="background:#1d4ed8">HTML</div><div><strong>ACME美容液X_提案_v0.5.html</strong><br><span style="color:#737373;font-size:11px">38 KB · リッチプレビュー</span></div></div>
+        <div class="chat-card green" style="margin-top:10px">
+          <strong>このバージョンに含まれるデータソース</strong><br>
+          ✅ DR 8 セクション（経路1: Vertex AI 成功）<br>
+          ✅ 自社過去案件 5 件（類似度 0.68〜0.82）<br>
+          ✅ Tier 0 動画分析データ（VSEO + dpro + Buzzmiru）<br>
+          ✅ Gmail 14 件 / Slack 50 件 / Drive 12 件参照<br>
+          ⚠️ X 検索：3 件のみ（DR で十分な情報あり）
+        </div>
+        Phase D（対話型仕上げ）に進みます。気になる点があれば指摘してください ✨
+        <div class="chat-buttons">
+          <span class="chat-btn">📄 MD を開く</span>
+          <span class="chat-btn">🌐 HTML を開く</span>
+          <span class="chat-btn primary">💬 Phase D を始める</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3 id="sec-6-5"><span class="num">6.5</span>営業に確認したいこと（Phase C）</h3>
+<div class="ask-box">
+  <div class="ask-box-title"><span class="ask-icon">✋</span>営業さんに確認したいこと（Phase C）</div>
+  <ul class="ask-list">
+    <li>
+      <div class="ask-q">Q1. 提案書 8 章構造（市場機会 / SNS 戦略 / タグ設計 / 媒体戦略 / ターゲット / 競合差別化 / クリエイティブ方針 / スケジュール）は妥当ですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>このままで OK</span>
+        <span class="ask-opt"><span class="ck"></span>章を追加 / 削除したい：_____________________</span>
+        <span class="ask-opt"><span class="ck"></span>章の順序を変えたい：_____________________</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q2. 出力フォーマット MD + HTML で v1.0 はスタートして OK ですか？（pptx は v3.0）</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>OK（HTML で十分使える）</span>
+        <span class="ask-opt"><span class="ck"></span>v1.0 から pptx 必須（営業現場の必須要件）</span>
+        <span class="ask-opt"><span class="ck"></span>HTML を pptx に変換するツールも併用したい</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q3. Slack 受け取り画面で「どのデータソースが使われたか」を表示する設計は欲しいですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>欲しい（透明性）</span>
+        <span class="ask-opt"><span class="ck"></span>不要（鬱陶しい）</span>
+        <span class="ask-opt"><span class="ck"></span>クリックして開ける詳細欄で十分</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q4. HTML のテンプレデザインは「自社ブランドカラー」「シンプル」どちらが良いですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>自社ブランドカラー</span>
+        <span class="ask-opt"><span class="ck"></span>シンプル（クライアント色に染めやすい）</span>
+        <span class="ask-opt"><span class="ck"></span>営業ごとに選べる</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+</section>
+
+
+<!-- ============== 7. Phase D ============== -->
+<div class="phase-banner pd" id="sec-7">
+  <div style="flex:1">
+    <div class="pb-tag">Phase D</div>
+    <h2 class="pb-title">対話型仕上げ（5割 → 8割）</h2>
+    <div class="pb-meta">営業との 5 往復程度のキャッチボールで提案書を 8 割版に仕上げる Co-Authoring モード</div>
+  </div>
+  <div class="pb-time">
+    <div class="pb-time-num">5〜15分</div>
+    <div class="pb-time-label">5 往復前後</div>
+  </div>
+</div>
+
+<section>
+
+<h3 id="sec-7-1"><span class="num">7.1</span>営業の指示で改訂</h3>
+
+<p>
+Phase D は <strong>Slack スレッド上の対話</strong> で進みます。営業から見ると「TeamAgent との 5 回くらいのキャッチボールで提案書が育つ」体験。各往復は <strong>30〜60 秒</strong> で反映され、毎回 <strong>新しい .md / .html がスレッドに添付</strong> されます。
+</p>
+
+<h4>対話パターンの分類</h4>
+<table>
+  <tr><th>パターン</th><th>営業の指示例</th><th>TeamAgent の動き</th></tr>
+  <tr><td>① 数値追加</td><td>「②の EG 情報、Buzzmiru の保存数も入れて」</td><td>Tier 0 から再フェッチ → 該当章に上乗せ</td></tr>
+  <tr><td>② フック差し替え</td><td>「フックを左脳訴求の例 3 つ提示にして」</td><td>Tier 0 過去案件から左脳訴求パターン Top3 を引いて差し替え</td></tr>
+  <tr><td>③ テンプレ寄せ</td><td>「過去の Gamma 案件のテンプレに寄せて」</td><td>Drive から Gamma 提案 PDF を参照 → 章立て・トーンを合わせる</td></tr>
+  <tr><td>④ ターゲット調整</td><td>「30代後半に寄せて」</td><td>Phase A の解釈を更新 → DR の界隈分析を再評価 → 該当章を書き換え</td></tr>
+  <tr><td>⑤ 章削除 / 入れ替え</td><td>「第4章（媒体戦略）はカットして」</td><td>章を削除し、他章を繰り上げ・参照を整合させる</td></tr>
+  <tr><td>⑥ 文体変更</td><td>「もっとカジュアルに」「クライアント向けに丁寧に」</td><td>Sonnet 4.6 で全章のトーン書き換え</td></tr>
+</table>
+
+<h3 id="sec-7-2"><span class="num">7.2</span>典型的な対話パターン例（5往復で8割）</h3>
+
+<p>「5往復で 8 割」というのは、社内ベータ想定の経験則です。営業 16 名で実際に計測して確定します。</p>
+
+<table>
+  <tr><th>往復</th><th>営業の指示</th><th>TeamAgent の応答</th><th>バージョン</th></tr>
+  <tr><td>1</td><td>「②の EG 情報、Buzzmiru の保存数も入れて」</td><td>反映 → 第2章 SNS 戦略を更新</td><td>v0.6</td></tr>
+  <tr><td>2</td><td>「フックを左脳訴求の例 3 つ提示にして」</td><td>過去案件から左脳訴求 Top3 を抽出して第7章に</td><td>v0.7</td></tr>
+  <tr><td>3</td><td>「過去の Gamma 案件のテンプレに寄せて」</td><td>Drive Gamma 提案 PDF を参照 → 章立て調整</td><td>v0.8</td></tr>
+  <tr><td>4</td><td>「予算根拠が弱い。同規模案件の実消化額を 3 件添えて」</td><td>pgvector から同規模 3 件を抽出して第8章に</td><td>v0.85</td></tr>
+  <tr><td>5</td><td>「OK 仕上げる」</td><td>Phase E（営業最終調整）に引き継ぎ</td><td>v0.9（8割版完成）</td></tr>
+</table>
+
+<h3 id="sec-7-3"><span class="num">7.3</span>Slack モック（対話の様子）</h3>
+<div class="chat-mockup">
+  <div class="chat-mockup-header">
+    <span class="ch-name"><span class="ch-icon">#</span>sales-team</span>
+    <span class="ch-meta">スレッド内（Phase D）</span>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-user">山</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">山田 啓太</span><span class="chat-msg-time">13:53</span></div>
+      <div class="chat-msg-body">②の EG 情報、Buzzmiru の保存数も入れて。フックを左脳訴求の例 3 つ提示にして。</div>
+    </div>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-bot">TA</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">TeamAgent</span><span class="chat-msg-bot-tag">APP</span><span class="chat-msg-time">13:53</span></div>
+      <div class="chat-msg-body">
+        反映しました ✨ → <strong>v0.7</strong>
+        <div class="chat-card">
+          <strong>変更点</strong><br>
+          ・第2章：Buzzmiru 保存数を追加（Top動画 ¥3.5M / 保存率 4.5%）<br>
+          ・第7章：左脳訴求フック 3 例「実は90%が知らない」「数値で見る」「3ステップ」
+        </div>
+        <div class="chat-file"><div class="chat-file-icon">MD</div><div><strong>ACME美容液X_提案_v0.7.md</strong></div></div>
+        他に修正は？　<span class="chat-btn">これで仕上げる（Phase E）</span>
+      </div>
+    </div>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-user">山</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">山田 啓太</span><span class="chat-msg-time">14:01</span></div>
+      <div class="chat-msg-body">過去の Gamma 案件のテンプレに寄せて</div>
+    </div>
+  </div>
+  <div class="chat-msg">
+    <div class="chat-msg-avatar avatar-bot">TA</div>
+    <div class="chat-msg-content">
+      <div class="chat-msg-meta"><span class="chat-msg-name">TeamAgent</span><span class="chat-msg-bot-tag">APP</span><span class="chat-msg-time">14:01</span></div>
+      <div class="chat-msg-body">
+        Drive から Gamma 健食 PR 提案（2025/12 受注）を参照しました → <strong>v0.8</strong>
+        <div class="chat-card blue">
+          <strong>合わせた点</strong><br>
+          ・第1章タイトル：「市場機会」→「なぜ今、この商材か」<br>
+          ・第6章：競合表 → 競合 3 軸グラフ表現に変更<br>
+          ・全体トーン：「ですます調」→「だ・である調」
+        </div>
+        <div class="chat-file"><div class="chat-file-icon">MD</div><div><strong>ACME美容液X_提案_v0.8.md</strong></div></div>
+        <div class="chat-buttons">
+          <span class="chat-btn">続けて編集</span>
+          <span class="chat-btn primary">✅ これで仕上げる（Phase E へ）</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3 id="sec-7-4"><span class="num">7.4</span>営業に確認したいこと（Phase D）</h3>
+<div class="ask-box">
+  <div class="ask-box-title"><span class="ask-icon">✋</span>営業さんに確認したいこと（Phase D）</div>
+  <ul class="ask-list">
+    <li>
+      <div class="ask-q">Q1. 「5 往復で 8 割」という想定は妥当ですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>妥当</span>
+        <span class="ask-opt"><span class="ck"></span>もっと少なく（3 往復で 8 割）したい</span>
+        <span class="ask-opt"><span class="ck"></span>もっと多くてよい（10 往復で 9 割）</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q2. 対話パターン①〜⑥（数値追加 / フック差し替え / テンプレ寄せ / ターゲット調整 / 章削除 / 文体変更）に過不足はありますか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>このままで OK</span>
+        <span class="ask-opt"><span class="ck"></span>追加したいパターン：_____________________</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q3. 各往復で「変更点サマリー」を見せる設計（v0.7 で何が変わったか）は欲しいですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>欲しい（diff を見ながら確認したい）</span>
+        <span class="ask-opt"><span class="ck"></span>不要（最終ファイルだけで OK）</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q4. バージョン管理（v0.5, v0.6, v0.7…）は欲しいですか？それとも上書きでよい？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>バージョン残してほしい（戻れる）</span>
+        <span class="ask-opt"><span class="ck"></span>上書きで OK</span>
+        <span class="ask-opt"><span class="ck"></span>最新と 1 つ前だけ残してほしい</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q5. 対話を別のクライアントの話に脱線したくなる時があります（「Gamma 案件のテンプレ見せて」など）。これに応答できる必要は？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>応答できてほしい（Co-Authoring の自然な動き）</span>
+        <span class="ask-opt"><span class="ck"></span>提案書改訂だけに集中してほしい</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+</section>
+
+
+<!-- ============== 8. Phase E ============== -->
+<div class="phase-banner pe" id="sec-8">
+  <div style="flex:1">
+    <div class="pb-tag">Phase E</div>
+    <h2 class="pb-title">営業最終調整（営業本人の最後の 2 割）</h2>
+    <div class="pb-meta">顧客固有表現・関係者名・最後の磨きを営業本人が実施。AI ではなく人がやる方が早く・確実な領域</div>
+  </div>
+  <div class="pb-time">
+    <div class="pb-time-num">10〜30分</div>
+    <div class="pb-time-label">人がやる仕上げ</div>
+  </div>
+</div>
+
+<section>
+
+<p>
+ここからは <strong>営業本人の作業</strong> です。AI に任せるとむしろ精度が落ちる「顧客固有の表現」「過去のキャッチボールから染み出した言い回し」「関係者の細かいニュアンス」を人が仕上げます。MD / HTML をローカルにダウンロードして、慣れたエディタ（VSCode / Notion / Word）で編集する想定です。
+</p>
+
+<h3 id="sec-8-1"><span class="num">8.1</span>顧客固有表現の追加</h3>
+<table>
+  <tr><th>例</th><th>営業本人が知っている情報（AI には引き出せない）</th></tr>
+  <tr><td>担当者の口癖</td><td>「ACME 社の田中さんは『費用対効果』より『再現性』という言葉を好む」</td></tr>
+  <tr><td>過去の NG ワード</td><td>「以前『若見え』という表現でクレームをもらった経緯あり」</td></tr>
+  <tr><td>社内政治</td><td>「決裁者は宣伝部長より広報部長の方が強い」</td></tr>
+  <tr><td>個人的な関係性</td><td>「先方の鈴木さんは元 Beta 化粧品出身。比較の出し方に注意」</td></tr>
+</table>
+
+<h3 id="sec-8-2"><span class="num">8.2</span>関係者名・固有名詞の修正</h3>
+<ul>
+  <li>担当者のフルネーム・役職・敬称を正確に</li>
+  <li>商品の正式名称（記号・スペース・大文字小文字）</li>
+  <li>過去の打ち合わせ記録から「使ってはいけない表現」を除外</li>
+  <li>競合他社名のスペル・正式名称</li>
+</ul>
+
+<h3 id="sec-8-3"><span class="num">8.3</span>最後の磨き</h3>
+<ul>
+  <li>表紙・目次・連絡先の整え</li>
+  <li>画像・ロゴの差し込み（v1.0 では手動。v3.0 で pptx 対応時に自動化検討）</li>
+  <li>提出用の PDF 化（HTML から印刷で PDF 化、または別ツール）</li>
+  <li>顧客の決裁ワークフローに合わせたフォーマット調整</li>
+</ul>
+
+<div class="note info">
+  <div class="label">なぜ最後の 2 割は人がやるのか</div>
+  「あえて AI に任せない」のではなく、<strong>営業本人が知っている情報量の方が、この領域では圧倒的に多い</strong> から。Mail/Slack/Drive にも残らない「先方の田中さんと飲んだ時の話」「社内政治のニュアンス」は AI から見るとブラックボックス。10〜30 分で済むため、ここを無理に AI 化するよりも、ここまでの 25〜45 分の自動化が圧倒的に価値があります。
+</div>
+
+<h3 id="sec-8-4"><span class="num">8.4</span>営業に確認したいこと（Phase E）</h3>
+<div class="ask-box">
+  <div class="ask-box-title"><span class="ask-icon">✋</span>営業さんに確認したいこと（Phase E）</div>
+  <ul class="ask-list">
+    <li>
+      <div class="ask-q">Q1. Phase E（営業本人の最終調整）の所要時間 10〜30 分は妥当ですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>妥当</span>
+        <span class="ask-opt"><span class="ck"></span>もっと短くなりそう（5〜10 分）</span>
+        <span class="ask-opt"><span class="ck"></span>もっとかかる（30〜60 分）</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q2. 顧客固有表現（口癖 / NG ワード / 政治）は TeamAgent が学習・蓄積していくべきですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>はい、蓄積して次回から自動反映してほしい</span>
+        <span class="ask-opt"><span class="ck"></span>営業ごとの個人メモとして管理したい</span>
+        <span class="ask-opt"><span class="ck"></span>不要（毎回 Phase E で手で入れる）</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q3. Phase E で MD/HTML を使うのは現実的ですか？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>HTML をブラウザで開いてコピペで OK</span>
+        <span class="ask-opt"><span class="ck"></span>MD をエディタで編集</span>
+        <span class="ask-opt"><span class="ck"></span>pptx じゃないと作業できない（v3.0 まで待つ）</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q4. 最終提出形式は？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>PDF</span>
+        <span class="ask-opt"><span class="ck"></span>pptx</span>
+        <span class="ask-opt"><span class="ck"></span>HTML をそのまま共有</span>
+        <span class="ask-opt"><span class="ck"></span>クライアントによる</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+</section>
+
+
+<!-- ============== 9. 所要時間と工数削減 ============== -->
+<section id="sec-9">
+<h2><span class="num">9.</span>全体所要時間と工数削減効果</h2>
+
+<h3>9.1 Phase 別所要時間</h3>
+<div class="timing-chart">
+  <div class="timing-row r-p0"><div class="timing-label">Phase 0：起動</div><div class="timing-bar"><div class="timing-fill"></div></div><div class="timing-val">30 秒</div></div>
+  <div class="timing-row r-pa"><div class="timing-label">Phase A：解釈</div><div class="timing-bar"><div class="timing-fill"></div></div><div class="timing-val">30 秒</div></div>
+  <div class="timing-row r-pb"><div class="timing-label">Phase B：リサーチ</div><div class="timing-bar"><div class="timing-fill"></div></div><div class="timing-val">5〜10 分</div></div>
+  <div class="timing-row r-pc"><div class="timing-label">Phase C：5割版</div><div class="timing-bar"><div class="timing-fill"></div></div><div class="timing-val">2〜3 分</div></div>
+  <div class="timing-row r-pd"><div class="timing-label">Phase D：対話</div><div class="timing-bar"><div class="timing-fill"></div></div><div class="timing-val">5〜15 分</div></div>
+  <div class="timing-row r-pe"><div class="timing-label">Phase E：最終調整</div><div class="timing-bar"><div class="timing-fill"></div></div><div class="timing-val">10〜30 分</div></div>
+  <div class="timing-row total"><div class="timing-label">合計</div><div class="timing-bar"><div class="timing-fill"></div></div><div class="timing-val"><strong>25〜60 分</strong></div></div>
+</div>
+
+<h3>9.2 Before / After 比較</h3>
+
+<div class="ba-grid">
+  <div class="ba-side ba-side-before">
+    <div class="ba-side-tag">Before（現状）</div>
+    <div class="ba-side-headline"><span class="num">20</span>時間 / 件</div>
+    <ul>
+      <li>過去事例引き：1〜2 時間（Drive / 同僚に聞く）</li>
+      <li>市場リサーチ：2〜3 時間（Google / SNS / レポート）</li>
+      <li>競合動画分析：1〜2 時間（YouTube / TikTok を手で見る）</li>
+      <li>提案書構成：1 時間（白紙から悩む）</li>
+      <li>本文執筆：6〜8 時間（章ごとに書く）</li>
+      <li>数値根拠補強：1〜2 時間（毎回再調査）</li>
+      <li>レビュー反映：2〜3 時間（上司・営業同士）</li>
+      <li>最終仕上げ：1 時間（PDF / pptx 変換）</li>
+    </ul>
+  </div>
+  <div class="ba-divider">→</div>
+  <div class="ba-side ba-side-after">
+    <div class="ba-side-tag">After（TeamAgent）</div>
+    <div class="ba-side-headline"><span class="num">25〜60</span>分 / 件</div>
+    <ul>
+      <li>Phase 0：起動 30 秒</li>
+      <li>Phase A：確認 30 秒</li>
+      <li>Phase B：リサーチ 5〜10 分（裏で並列）</li>
+      <li>Phase C：5割版 2〜3 分</li>
+      <li>Phase D：対話 5〜15 分（5 往復で 8 割）</li>
+      <li>Phase E：最終調整 10〜30 分</li>
+      <li><strong>削減：15〜18 時間 / 件</strong></li>
+      <li><strong>営業 16 名 × 月 5 件 = 月 80 件 × 17 時間 ≒ 月 1,360 時間削減</strong></li>
+    </ul>
+  </div>
+</div>
+
+<div class="note beginner">
+  <div class="label">この時間で「精度はどうなる？」</div>
+  Phase B で <strong>Tier 0（自社過去案件＋動画分析データ）</strong> を引いているため、ChatGPT 一般論より精度は <em>高くなる</em> 見込み。詳細は次章。
+</div>
+
+</section>
+
+
+<!-- ============== 10. データドリブン度 ============== -->
+<section id="sec-10">
+<h2><span class="num">10.</span>データドリブン度を担保する仕組み</h2>
+
+<h3 id="sec-10-1">10.1 すべての主張に「データソース引用」を明示</h3>
+<p>
+提案書のすべての主要文に <strong>引用元（データソース）</strong> を付ける運用にします。クライアントへの提出時は引用を非表示にする <em>営業向け表示</em> と <em>顧客向け表示</em> の 2 モードを持たせる予定。
+</p>
+
+<table>
+  <tr><th>主張の種類</th><th>引用元の表記例</th></tr>
+  <tr><td>市場規模</td><td>「DR セクション A・出典 a / 経路1 Vertex AI」</td></tr>
+  <tr><td>ターゲット行動</td><td>「DR セクション G・X 補強 + 弊社過去案件 12 件平均」</td></tr>
+  <tr><td>動画戦略</td><td>「Tier 0 動画分析 / VSEO + Buzzmiru 保存数 Top5%」</td></tr>
+  <tr><td>過去類似案件</td><td>「pgvector 類似 0.82 / Gamma 健食 PR 2025/12」</td></tr>
+  <tr><td>媒体戦略</td><td>「Drive 提案 ID:1247 / 2025-09 Delta 化粧水」</td></tr>
+</table>
+
+<h3 id="sec-10-2">10.2 業界一般論 vs データドリブンの違い（実例）</h3>
+
+<h4>例 1：ターゲット行動</h4>
+<div class="compare-grid">
+  <div class="compare-side bad">
+    <div class="compare-tag">ChatGPT 一般論</div>
+    <div class="compare-text">
+      「30 代女性は美容意識が高く、SNS 上の口コミに反応しやすい傾向がある。」
+    </div>
+  </div>
+  <div class="compare-side good">
+    <div class="compare-tag">TeamAgent</div>
+    <div class="compare-text">
+      「弊社が過去 6 ヶ月で実施した美容液 PR 案件 <em>12 件</em> のうち、保存率 <em>Top5%</em> に入った動画は『顔出し＋数字提示＋テロップ多め』の組合せ。消化額平均 <em>¥3.2M</em> / 保存率 <em>4.5%</em>。」
+    </div>
+  </div>
+</div>
+
+<h4>例 2：競合差別化</h4>
+<div class="compare-grid">
+  <div class="compare-side bad">
+    <div class="compare-tag">ChatGPT 一般論</div>
+    <div class="compare-text">
+      「競合の Beta 化粧品は『若見え』訴求が強く、ACME は『科学的根拠』で差別化することが望ましい。」
+    </div>
+  </div>
+  <div class="compare-side good">
+    <div class="compare-tag">TeamAgent</div>
+    <div class="compare-text">
+      「Beta 化粧品の直近 6 ヶ月の Top10 動画は『若見え』訴求が <em>7 件</em>、平均保存率 <em>2.1%</em>。一方、弊社 Epsilon 美容液 PR（2025/09）で『成分の科学的根拠＋数字提示』フックを使った 3 動画は保存率 <em>4.5%〜5.8%</em>。ACME 美容液 X は商材特性が Epsilon と類似（0.71）。」
+    </div>
+  </div>
+</div>
+
+<h4>例 3：予算根拠</h4>
+<div class="compare-grid">
+  <div class="compare-side bad">
+    <div class="compare-tag">ChatGPT 一般論</div>
+    <div class="compare-text">
+      「¥3M の予算であれば、トップインフルエンサー 1 名＋ミドル数名の構成が一般的。」
+    </div>
+  </div>
+  <div class="compare-side good">
+    <div class="compare-tag">TeamAgent</div>
+    <div class="compare-text">
+      「弊社の <em>同規模予算（¥2.5M〜¥3.5M）</em> の過去案件 <em>8 件</em> の構成は：(a) Top 1 名 + ミドル 5 名（<em>5 件</em>・平均消化 <em>¥3.0M</em>）／(b) ミドル 8 名構成（<em>3 件</em>・平均消化 <em>¥2.8M</em>）。(a) の方が保存率平均 <em>1.5pt 高い</em>。」
+    </div>
+  </div>
+</div>
+
+<h3>10.3 「要確認」表示の運用</h3>
+<p>
+データが取れなかった項目は <strong><em>「要確認」</em></strong> と明示します。<em>絶対に捏造しない</em> ことが営業の信頼を担保します（DR の絶対遵守ルール）。
+</p>
+
+</section>
+
+
+<!-- ============== 11. FAQ ============== -->
+<section id="sec-11">
+<h2><span class="num">11.</span>よくある質問（FAQ）</h2>
+
+<details>
+  <summary>Q1. DR で取れないクライアントの場合は？（マイナー商材・BtoB ニッチ・新カテゴリ）</summary>
+  <div>
+    Pattern Bravo+ の経路 1（Vertex AI）が「該当データなし」を返した場合、自動で経路 2〜4 にフォールバックします。それでも取れない項目は <em>「要確認」</em> 表示で残し、Tier 0（自社過去類似案件）と Tier 1（営業の Gmail / Slack）の比重を上げて提案を組みます。「外部 DR で取れないことが分かっているクライアント」は事前に営業がフラグ立てできる設計も検討中。
+  </div>
+</details>
+
+<details>
+  <summary>Q2. 自社データ（過去案件）が少ない案件の場合は？（新カテゴリ進出など）</summary>
+  <div>
+    Tier 0（自社過去）が手薄になるので、Tier 3（DR）の比重を上げて補います。pgvector 類似度が <strong>0.5 未満</strong> しか出ない場合、提案書冒頭に <em>「本案件は弊社未経験カテゴリのため、DR 中心の構成」</em> と明示します。これも捏造防止の一環。
+  </div>
+</details>
+
+<details>
+  <summary>Q3. 誤情報が混ざっていたら？</summary>
+  <div>
+    すべての主張に「データソース引用」が付くため（10.1）、誤情報は引用を辿って即時に確認できます。Phase D で営業さんから「これ違うよ」と指摘されたら、Sonnet 4.6 が該当章を書き直します。さらに、誤情報の元になったソース（特定の Gmail スレッドや過去案件）に「不正確タグ」を打って次回以降の参照から除外する機構（v2.0）も検討。
+  </div>
+</details>
+
+<details>
+  <summary>Q4. 出力フォーマットを pptx にできる？</summary>
+  <div>
+    <strong>v1.0 では MD + HTML のみ</strong>。pptx は <strong>v3.0 で対応予定</strong>。理由：python-pptx の placeholder 制御は実装工数の大部分を占めるため、まず MD/HTML で「中身の精度」を社内検証する段階的アプローチを採用しています。営業から強い要望があれば優先度を上げます。
+  </div>
+</details>
+
+<details>
+  <summary>Q5. Phase D の対話を途中で切って Phase E に行ける？</summary>
+  <div>
+    はい。<strong>いつでも [これで仕上げる] ボタン</strong> を押せます。3 往復で「もう十分」と感じたら Phase E に行って OK。
+  </div>
+</details>
+
+<details>
+  <summary>Q6. 同じ案件で 2 回目以降の編集（提出後の改訂版作成）は？</summary>
+  <div>
+    過去のアーティファクト（v0.5〜v0.9）は S3 に保管されており、<code>@TeamAgent 続きから ACME美容液X</code> で再開できる設計（v1.1 で対応予定）。Phase 0〜B はスキップしていきなり Phase D に入る流れになります。
+  </div>
+</details>
+
+<details>
+  <summary>Q7. 16 名の営業が同時に Phase B を走らせたら？</summary>
+  <div>
+    Phase B は <strong>Composer Fargate Task</strong>（1 task = 1 案件）で動くため、並列実行可能。同時 16 案件 = 16 Task。コスト面では各 Task のリサーチ時間 5〜10 分 × Sonnet 4.6 ＋ DR API の従量課金。詳細は実装計画書 v2.1 のコスト試算参照。
+  </div>
+</details>
+
+<details>
+  <summary>Q8. クライアントが秘密保持を強く要求する案件で、外部 DR を使いたくない場合は？</summary>
+  <div>
+    DR を OFF にして Tier 0〜2（自社データのみ）で組むモードを用意する予定。Phase A のモーダルに <code>[ ] 外部 DR を使わない</code> チェックボックスを追加（営業から要望が多ければ即時対応）。
+  </div>
+</details>
+
+<details>
+  <summary>Q9. 過去のキャッチボール（メール / Slack）の参照範囲はどこまで？</summary>
+  <div>
+    本人 Gmail は OAuth で全期間。他人 Gmail（横展開）は会社方針合意の範囲内（直近 24 ヶ月）。Slack は Bot Token で参加チャンネルのみ（チャンネル外は不可）。すべて監査ログ（CloudWatch Logs / 90 日保持）に記録されます。
+  </div>
+</details>
+
+<details>
+  <summary>Q10. Phase A の「条件確認」をスキップしたい営業と、必要な営業が分かれそう。</summary>
+  <div>
+    個人設定で切り替え可能にする予定（Q1 で確認）。デフォルトは「確認あり」、慣れた営業は <code>/teamagent settings auto-confirm on</code> でスキップ可能。
+  </div>
+</details>
+
+</section>
+
+
+<!-- ============== 12. 営業に確認（総括） ============== -->
+<section id="sec-12">
+<h2><span class="num">12.</span>営業に確認したいこと（総括）</h2>
+
+<p>各 Phase の末尾にある詳細質問とは別に、<strong>全体方針として確認したい 6 項目</strong> を以下にまとめました。</p>
+
+<div class="ask-box">
+  <div class="ask-box-title"><span class="ask-icon">✋</span>全体方針：営業さんに最終確認したい 6 項目</div>
+  <ul class="ask-list">
+    <li>
+      <div class="ask-q">Q1. 入力 5 フィールド（商品名・CL名・URL・目的・その他）は妥当？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>OK</span>
+        <span class="ask-opt"><span class="ck"></span>追加・変更：_____________________</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q2. Phase A の「条件確認ステップ」は必要？（営業の手間 vs 精度）</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>毎回確認したい</span>
+        <span class="ask-opt"><span class="ck"></span>スキップで OK</span>
+        <span class="ask-opt"><span class="ck"></span>個人設定で切り替え</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q3. Phase B の所要時間（5〜10 分）は許容範囲？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>OK</span>
+        <span class="ask-opt"><span class="ck"></span>もっと短く</span>
+        <span class="ask-opt"><span class="ck"></span>もっと深く</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q4. Phase D の対話往復数（5 往復で 8 割）は妥当？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>妥当</span>
+        <span class="ask-opt"><span class="ck"></span>3 往復で 8 割が理想</span>
+        <span class="ask-opt"><span class="ck"></span>10 往復で 9 割が理想</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q5. 出力フォーマット MD + HTML で v1.0 はスタートして OK？（pptx は v3.0）</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>OK</span>
+        <span class="ask-opt"><span class="ck"></span>v1.0 から pptx 必須</span>
+      </div>
+    </li>
+    <li>
+      <div class="ask-q">Q6. その他、Phase 0〜E 全体を通じての要望・懸念は？</div>
+      <div class="ask-options">
+        <span class="ask-opt"><span class="ck"></span>要望：_____________________</span>
+        <span class="ask-opt"><span class="ck"></span>懸念：_____________________</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="note beginner" style="margin-top:24px">
+  <div class="label">確認のお願い</div>
+  本書を 30 分以内に読み終え、各「✋ 営業さんに確認したいこと」ボックスに記入してください。記入後は FDE（推進担当）にお返しください。<strong>営業 16 名のフィードバックを統合して v1.1 を作成し、Phase 3（機能③ 実装）の Sprint S9 開始前に確定させます。</strong>
+</div>
+
+<p style="text-align:center;margin-top:32px;font-size:13px;color:var(--text-subtle)">
+TeamAgent 機能③ Phase 0〜E 詳細仕様書 v1.0（営業確認用） / 2026-05-11 / FDE 推進担当<br>
+関連文書: teamagent_overview_v2.1.html · teamagent_architecture_v2.1.html · teamagent_implementation_plan_v2.1.html
+</p>
+
+</section>
+
+</main>
+</div>
+
+</body>
+</html>
