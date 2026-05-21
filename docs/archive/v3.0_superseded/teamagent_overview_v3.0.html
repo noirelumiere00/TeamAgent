@@ -1,0 +1,2628 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 構想・システム概要仕様書 v3.0</title>
+<style>
+  /* v3.0 追加スタイル */
+  .v3-banner {
+    background: #fef9c3;
+    border-left: 4px solid #ca8a04;
+    padding: 12px 18px;
+    margin: 14px 0;
+    border-radius: 6px;
+    font-size: 13.5px;
+  }
+  .v3-banner::before {
+    content: "📌 v2.2 → v3.0 変更点：";
+    font-weight: 700;
+    color: #854d0e;
+  }
+  .metaphor-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .metaphor-card {
+    background: #fff7ed;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid #fed7aa;
+    border-top: 3px solid #ea580c;
+  }
+  .metaphor-card .m-icon { font-size: 22px; margin-bottom: 6px; }
+  .metaphor-card .m-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; color: #9a3412; }
+  .metaphor-card .m-desc { font-size: 12.5px; color: #525252; line-height: 1.55; }
+  .skill-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--accent);
+    margin: 12px 0;
+  }
+  .skill-card .s-title { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+  .skill-card .s-tag { display: inline-block; background: #fee2e2; color: #991b1b; font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-left: 6px; }
+  .skill-card .s-desc { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+  .mva-phase-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 14px;
+    margin: 16px 0;
+  }
+  .mva-phase-card {
+    background: #eff6ff;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid #bfdbfe;
+    border-top: 3px solid #2563eb;
+  }
+  .mva-phase-card .p-num { font-size: 11px; font-weight: 700; color: #1d4ed8; letter-spacing: 0.05em; }
+  .mva-phase-card .p-title { font-size: 14.5px; font-weight: 700; margin: 2px 0 6px; }
+  .mva-phase-card .p-desc { font-size: 12.5px; color: #525252; line-height: 1.55; }
+</style>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>構想・システム概要仕様書</div>
+  <div class="sidebar-doc-meta">
+    Version 3.0<br>
+    2026年5月19日（社内 AI Agent 基盤への再構成）
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>本書について</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>目的</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>対象読者</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>v2.2 からの主要変更点</a></li>
+    <li class="level-2"><a href="#sec-1-4"><span class="num">1.4</span>用語定義</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-2"><span class="num">2.</span>AI Agent としての TeamAgent</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>アーキテクチャ概念図</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>主要コンポーネントの対応関係</a></li>
+    <li class="level-2"><a href="#sec-2-3"><span class="num">2.3</span>Skill レジストリへの再フレーム（初期 Skill セット = 5 個）</a></li>
+    <li class="level-2"><a href="#sec-2-4"><span class="num">2.4</span>Skill レジストリの拡張ポイント</a></li>
+
+    <li class="level-1"><a href="#sec-3"><span class="num">3.</span>営業向け使い方ガイド（初期 Skill セットと検索 Skill）</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>検索 Skill</a></li>
+    <li class="level-2"><a href="#sec-3-2"><span class="num">3.2</span>初期 Skill セット（5 個）の体験例</a></li>
+
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>目指す姿</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>4 レイヤー × 4 要素</a></li>
+    <li class="level-2"><a href="#sec-4-2"><span class="num">4.2</span>Before / After</a></li>
+
+    <li class="level-1"><a href="#sec-5"><span class="num">5.</span>システム構成</a></li>
+    <li class="level-2"><a href="#sec-5-1"><span class="num">5.1</span>全体アーキテクチャ（Claude Agent SDK 単独構成）</a></li>
+    <li class="level-2"><a href="#sec-5-2"><span class="num">5.2</span>4 共通基盤</a></li>
+    <li class="level-2"><a href="#sec-5-3"><span class="num">5.3</span>Slack 入口の設計</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-6"><span class="num">6.</span>MVA 戦略</a></li>
+    <li class="level-2"><a href="#sec-6-1"><span class="num">6.1</span>MVA の哲学：データ層先行</a></li>
+    <li class="level-2"><a href="#sec-6-2"><span class="num">6.2</span>MVA Phase 1〜3</a></li>
+    <li class="level-2"><a href="#sec-6-3"><span class="num">6.3</span>MVA 後の積み増し戦略</a></li>
+    <li class="level-2"><a href="#sec-6-4"><span class="num">6.4</span>別冊『MVA 仕様書 v1』参照</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-7"><span class="num">7.</span>5 つの主要 Skill</a></li>
+    <li class="level-2"><a href="#sec-7-1"><span class="num">7.1</span>動画ナレッジ分析 Skill</a></li>
+    <li class="level-2"><a href="#sec-7-2"><span class="num">7.2</span>Mail ワークフロー Skill</a></li>
+    <li class="level-2"><a href="#sec-7-3"><span class="num">7.3</span>提案コンテンツ生成 Skill</a></li>
+    <li class="level-2"><a href="#sec-7-4"><span class="num">7.4</span>Slack 自動サジェスト Skill</a></li>
+    <li class="level-2"><a href="#sec-7-5"><span class="num">7.5</span>営業進捗サマリー Skill</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-8"><span class="num">8.</span>HTML 出力と PDF/PPTX 変換</a></li>
+    <li class="level-2"><a href="#sec-8-1"><span class="num">8.1</span>出力形式の標準：HTML</a></li>
+    <li class="level-2"><a href="#sec-8-2"><span class="num">8.2</span>HTML → PDF（Puppeteer/Playwright）</a></li>
+    <li class="level-2"><a href="#sec-8-3"><span class="num">8.3</span>HTML → PPTX（2層テンプレ + python-pptx）</a></li>
+    <li class="level-2"><a href="#sec-8-4"><span class="num">8.4</span>営業向け WYSIWYG エディタ</a></li>
+
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>UX 階段：メンション → Slash → Workflow</a></li>
+    <li class="level-2"><a href="#sec-9-1"><span class="num">9.1</span>MVA：@TeamAgent メンション</a></li>
+    <li class="level-2"><a href="#sec-9-2"><span class="num">9.2</span>Phase 4：Slash Command</a></li>
+    <li class="level-2"><a href="#sec-9-3"><span class="num">9.3</span>最終形：Workflow Builder + Block Kit</a></li>
+
+    <li class="level-1"><a href="#sec-10"><span class="num">10.</span>データソース戦略</a></li>
+    <li class="level-2"><a href="#sec-10-1"><span class="num">10.1</span>6 データ層の役割と Tier 0-3 構造</a></li>
+    <li class="level-2"><a href="#sec-10-2"><span class="num">10.2</span>Mail（本人 / 他人の二重利用）</a></li>
+    <li class="level-2"><a href="#sec-10-3"><span class="num">10.3</span>動画分析データ層</a></li>
+    <li class="level-2"><a href="#sec-10-4"><span class="num">10.4</span>Gemini Deep Research</a></li>
+
+    <li class="level-1"><a href="#sec-11"><span class="num">11.</span>プライバシー & セキュリティ</a></li>
+    <li class="level-2"><a href="#sec-11-1"><span class="num">11.1</span>会社方針</a></li>
+    <li class="level-2"><a href="#sec-11-2"><span class="num">11.2</span>監査・フィルタ・opt-out</a></li>
+    <li class="level-2"><a href="#sec-11-3"><span class="num">11.3</span>薬機法／景表法／ステマ規制チェッカー</a></li>
+    <li class="level-2"><a href="#sec-11-4"><span class="num">11.4</span>KOL 二次利用権・肖像権の期限管理</a></li>
+
+    <li class="level-1"><a href="#sec-12"><span class="num">12.</span>実装ロードマップ</a></li>
+    <li class="level-2"><a href="#sec-12-1"><span class="num">12.1</span>MVA → Phase 4 → Phase 5</a></li>
+    <li class="level-2"><a href="#sec-12-2"><span class="num">12.2</span>別冊『実装計画書 v3.0』参照</a></li>
+
+    <li class="level-1"><a href="#sec-13"><span class="num">13.</span>リスク管理</a></li>
+    <li class="level-1"><a href="#sec-14"><span class="num">14.</span>付録</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">構想・システム概要仕様書 v3.0</div>
+  <h1>TeamAgent 構想・システム概要仕様書 v3.0<br>社内 AI Agent 基盤への再構成</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>構想資料 兼 システム概要仕様書（v3.0 — 設計思想の再構成）</td></tr>
+    <tr><td>バージョン</td><td>3.0（「資料自動化」から「社内 AI Agent 基盤」への再定義 / OpenClaw 不採用 / Skill レジストリ型 Agent プラットフォーム / MVA 戦略採用）</td></tr>
+    <tr><td>作成日</td><td>2026年5月19日（v2.2：2026年5月13日 / v2.1：2026年5月8日 / v2.0：2026年5月7日 / v1.0：2026年4月27日）</td></tr>
+    <tr><td>位置付け</td><td>v2.2 までの「5 機能を順番に作る」設計を抜本的に見直し、Claude Agent SDK を Planner と Executor 兼務とする社内 AI Agent 基盤を先に立ち上げ、その上に <strong>拡張可能な Skill レジストリ</strong>を載せる構成へ再構成。MVA（Minimum Viable Agent）戦略を採用し、データ層連携を先に固めた上で、初期 Skill セット（5 個）を段階展開する。Skill は core 改修なしに無限に追加可能。</td></tr>
+    <tr><td>関連文書</td><td>要件定義書 v3.0（teamagent_requirements_v3.0.html）／ アーキテクチャ図書 v3.0（teamagent_architecture_v3.0.html）／ 実装計画書 v3.0（teamagent_implementation_plan_v3.0.html）／ MVA 仕様書 v1（teamagent_mva_spec_v1.html）／ 機能④ 確定仕様書 v1（teamagent_kinou4_spec_v1.html）／ 機能⑥ Personal AI Coach 要件 v3.0（teamagent_personal_ai_coach_requirements_v3.0.html）／ 監査役懸念精査レポート v1（teamagent_監査役懸念精査レポート_v1.html）</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">TeamAgent v3.0 — Reframed as a Corporate AI Agent Platform</div>
+  <div class="hero-headline">「資料を自動化する 5 機能」から<br>「Slack で動く Skill レジストリ型 AI Agent 基盤」へ</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">1<small>Stack</small></div>
+      <div class="hero-stat-label">Claude Agent SDK 単独構成（OpenClaw 不採用）<br>Planner + Executor 兼務</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">3<small>MVA Phase</small></div>
+      <div class="hero-stat-label">P1 データ層連携 → P2 Agent 基本ループ → P3 超軽量検索 Skill</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">∞<small>Skills</small></div>
+      <div class="hero-stat-label">Skill レジストリ + 初期 Skill セット 5 個<br>（動画分析 / Mail / 提案生成 / Slack サジェスト / 進捗サマリー）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">6<small>Data Layers</small></div>
+      <div class="hero-stat-label">Mail / Slack / Drive / 動画分析 / Gemini DR / X</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">3<small>UX 階段</small></div>
+      <div class="hero-stat-label">@メンション → Slash Command → Workflow Builder</div>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================
+     1. 本書について
+     ========================================================= -->
+<section id="sec-1">
+  <h2><span class="sec-num">1.</span>本書について</h2>
+
+  <h3 id="sec-1-1"><span class="sec-num">1.1</span>目的</h3>
+  <p>
+    本書は TeamAgent の構想とシステム概要を <strong>v3.0</strong> として再定義するものである。
+    v2.2 までは「営業向け 5 機能を順番に開発する」資料自動化プロダクトとして設計されていたが、
+    v3.0 では <strong>Skill レジストリ型の社内 AI Agent プラットフォーム</strong> として再構成する。すなわち、
+    Claude Agent SDK を中核に据えた汎用 Agent 基盤と Skill レジストリを先に構築し、その上に初期 Skill セット（5 個）を段階展開する構成へ転換する。
+    Skill は core を改修することなく無限に追加可能とする。
+  </p>
+  <p>
+    本書が再定義するのは以下の 4 点である：
+  </p>
+  <ul>
+    <li>① <strong>設計思想</strong>：プロダクト（5 機能固定）→ プラットフォーム + Skill レジストリへの再構成</li>
+    <li>② <strong>アーキ</strong>：Claude Agent SDK 単独（OpenClaw 不採用）+ レイヤード構成（Skill レジストリ / データ層 / Guardrails / Memory）による役割分離</li>
+    <li>③ <strong>開発戦略</strong>：MVA（Minimum Viable Agent）— データ層連携を先に固め、Skill は段階展開</li>
+    <li>④ <strong>営業 UX</strong>：メンション → Slash Command → Workflow Builder の 3 段階で習熟に合わせて進化</li>
+  </ul>
+  <p class="caption">
+    本書は技術仕様書として、Skill レジストリ / Tools (MCP) / データ層 / Memory・Session / Permissions・Guardrails の標準的なレイヤー名で統一して記述する。
+  </p>
+
+  <h3 id="sec-1-2"><span class="sec-num">1.2</span>対象読者</h3>
+  <ul>
+    <li>経営層・監査役：プロダクト構想の再構成意図を理解する</li>
+    <li>営業部門マネージャー・営業 16 名：初期 Skill セット（5 個）の使い方と段階展開計画を理解する</li>
+    <li>開発・インフラ担当：Claude Agent SDK 中心の単独構成と MVA 戦略を理解する</li>
+    <li>情報セキュリティ・コンプライアンス：Guardrails と Permissions の役割を理解する</li>
+  </ul>
+
+  <h3 id="sec-1-3"><span class="sec-num">1.3</span>v2.2 からの主要変更点</h3>
+  <div class="v3-banner">v3.0 は単なるバージョンアップではなく <strong>設計思想の再構成</strong> である。以下 5 点を改訂履歴として明示する。</div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 18%;">変更カテゴリ</th>
+        <th style="width: 36%;">v2.2 までの設計</th>
+        <th style="width: 46%;">v3.0 の再定義</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>① プロダクト定義</td>
+        <td>営業向け資料自動化 5 機能の集合体（機能③ 提案コンテンツ生成を中心）</td>
+        <td><strong>Skill レジストリ型の社内 AI Agent プラットフォーム</strong>。Agent 基盤 + Skill レジストリを先に構築し、初期 Skill セット（5 個）を順次登録。Skill は core 改修なしに無限拡張可能</td>
+      </tr>
+      <tr>
+        <td>② Agent 構成</td>
+        <td>Claude Agent SDK (Planner) + OpenClaw (Executor) の 2 スタック想定</td>
+        <td><strong>Claude Agent SDK 単独</strong>。Planner + Executor を兼ねるシングルスタック（OpenClaw 不採用）</td>
+      </tr>
+      <tr>
+        <td>③ アーキ表現</td>
+        <td>システム機能ベース（機能①〜⑤、データ層、共通基盤の機械的記述）</td>
+        <td><strong>レイヤード Agent アーキ</strong>。User / Frontend / Orchestrator（Agent）/ Skill レジストリ / Tools (MCP) / データ層 / Memory / Guardrails の役割分離で記述</td>
+      </tr>
+      <tr>
+        <td>④ 開発戦略</td>
+        <td>Phase ④ → ② → ③ → ① の機能直列開発（17 Sprint / 8.5 ヶ月）</td>
+        <td><strong>MVA 戦略</strong>。データ層連携を P1〜P3（〜3 ヶ月）で固め、Skill は Phase 4 以降に段階展開</td>
+      </tr>
+      <tr>
+        <td>⑤ 高林プロンプト</td>
+        <td>機能③ 提案コンテンツ生成の Skill 化を Phase A〜E で進める前提</td>
+        <td><strong>現運用と並走</strong>。MVA には含めず、Phase 4 以降の Skill 化候補として温存</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="sec-1-4"><span class="sec-num">1.4</span>用語定義</h3>
+  <table>
+    <thead>
+      <tr><th style="width: 18%;">用語</th><th>定義</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Agent</td><td>LLM を中核とし、自律的に Tool を選択して目標達成するソフトウェア。本書では Claude Agent SDK 上で動作する個体を指す。</td></tr>
+      <tr><td>Skill</td><td>Agent が特定のタスクに特化して持つ処理パイプライン。プロンプト + Tool 呼び出しシーケンス + 出力フォーマットの組。本書の初期 Skill セット（5 個）はそれぞれ 1 Skill として実装される。</td></tr>
+      <tr><td>Skill レジストリ</td><td>Agent が呼び出し可能な Skill を登録・管理する仕組み。新規 Skill は core を改修することなくレジストリに登録できる。Skill カタログ（利用可能機能リスト）として Planner が参照する。</td></tr>
+      <tr><td>Tool</td><td>Agent が呼び出す具体的な機能（Gmail API、Slack API、pgvector 検索、HTML 生成など）。Tool は MCP として実装される場合が多い。</td></tr>
+      <tr><td>MCP</td><td>Model Context Protocol。Agent と外部システムの接続を標準化するプロトコル（MCP 接続層）。Anthropic が主導。</td></tr>
+      <tr><td>Memory</td><td>Agent が過去の会話・タスク履歴（Session 履歴）を保持する仕組み。</td></tr>
+      <tr><td>Session</td><td>Memory のうち、現在進行中の会話文脈。短期記憶。</td></tr>
+      <tr><td>Guardrails</td><td>Agent の出力・行動に対する制約（Permissions、出力フィルタ、コンプラチェッカーなど）。</td></tr>
+      <tr><td>pgvector</td><td>PostgreSQL の拡張で、ベクトル検索を可能にする。embedding ベースの意味検索基盤として採用。</td></tr>
+      <tr><td>Tier 0-3</td><td>引用ラベル。Tier 0=社内一次情報、Tier 1=社内分析、Tier 2=外部公式、Tier 3=外部リサーチ。データドリブン度の担保に用いる。</td></tr>
+      <tr><td>MVA</td><td>Minimum Viable Agent。最小実装で動く Agent。v3.0 で採用する開発戦略の核心概念。MVP の Agent 版。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+
+<!-- =========================================================
+     2. AI Agent としての TeamAgent — Skill レジストリ型アーキ
+     ========================================================= -->
+<section id="sec-2" class="highlight-section">
+  <h2><span class="sec-num">2.</span>AI Agent としての TeamAgent — Skill レジストリ型アーキテクチャ</h2>
+  <p>
+    v3.0 のアーキは <strong>Skill レジストリ型 Agent プラットフォーム</strong>として記述する。
+    Orchestrator（Agent）が中核で、Planner / Executor の両方を兼ね、Skill レジストリ・Tools (MCP 接続層)・Memory / Session・Permissions / Guardrails を統括する。
+    データ層（入力データ）は分離独立し、出力はレンダリングレイヤを経て Slack に返る。
+  </p>
+  <p class="caption">
+    Skill は <strong>Skill Registry（プラグイン基盤）</strong> 上で管理され、初期 Skill セット（5 本）以外にも、業務固有 Skill や利用者定義 Skill など、無限に拡張可能なアーキテクチャを採用する。
+  </p>
+
+  <h3 id="sec-2-1"><span class="sec-num">2.1</span>アーキテクチャ概念図</h3>
+  <div class="arch-diagram">
+    <pre>
+                            ┌────────────────────────────────┐
+                            │  User = 営業 16 名               │
+                            │  リクエスト = プロンプト          │
+                            └──────────────┬─────────────────┘
+                                           │ @TeamAgent / Slash / Workflow
+                                           ▼
+                            ┌────────────────────────────────┐
+                            │  Frontend = Slack               │
+                            │  Slack Bolt + Block Kit         │
+                            └──────────────┬─────────────────┘
+                                           │ Intent + Context
+                                           ▼
+            ┌──────────────────────────────────────────────────────────┐
+            │  Orchestrator (Agent) = Claude Agent SDK 単独構成          │
+            │  Planner ＋ Executor を兼務                                │
+            │                                                          │
+            │   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+            │   │ Skill         │  │ Tools         │  │ Memory /      │  │
+            │   │ レジストリ      │  │ (MCP 接続層)  │  │ Session       │  │
+            │   │ + 初期 5 Skill │  │ Gmail/Slack/  │  │ 履歴 + 長期    │  │
+            │   │ + ∞ 拡張可能  │  │ pgvector/HTML │  │ 記憶          │  │
+            │   └──────────────┘  └──────────────┘  └──────────────┘  │
+            │                                                          │
+            │   ┌──────────────────────────────────────────────────┐  │
+            │   │ Permissions / Guardrails (監査 / 出力フィルタ)    │  │
+            │   └──────────────────────────────────────────────────┘  │
+            └──────────────────────────────┬───────────────────────────┘
+                                           │ Tool calls
+                                           ▼
+            ┌──────────────────────────────────────────────────────────┐
+            │  データソース層 = 6 データ層                               │
+            │  Mail / Slack / Drive / 動画分析 / Gemini DR / X            │
+            │  Tier 0（社内一次）〜 Tier 3（外部リサーチ）                 │
+            └──────────────────────────────────────────────────────────┘
+    </pre>
+  </div>
+  <p class="caption">図 2.1：v3.0 のアーキテクチャ概念図。User → Frontend → Orchestrator（Skill レジストリ / Tools / Memory / Guardrails を内包）→ データソース層 のフロー。</p>
+
+  <h3 id="sec-2-2"><span class="sec-num">2.2</span>主要コンポーネントの対応関係</h3>
+  <div class="metaphor-grid">
+    <div class="metaphor-card">
+      <div class="m-icon">🧑‍💼</div>
+      <div class="m-name">User（利用者）</div>
+      <div class="m-desc">営業 16 名 + マネージャー。@TeamAgent でリクエストを送信。プロンプトは Skill カタログから Agent が選択する起点となる。</div>
+    </div>
+    <div class="metaphor-card">
+      <div class="m-icon">🏪</div>
+      <div class="m-name">Frontend（Slack）</div>
+      <div class="m-desc">Slack。Bolt + Block Kit + Workflow Builder。営業の習熟度に応じて UI 形態を進化させる（UX 階段）。</div>
+    </div>
+    <div class="metaphor-card">
+      <div class="m-icon">🤖</div>
+      <div class="m-name">Orchestrator（Agent）</div>
+      <div class="m-desc">Claude Agent SDK 単独構成。Planner（計画立案）と Executor（実行）を兼務。OpenClaw は採用しない。</div>
+    </div>
+    <div class="metaphor-card">
+      <div class="m-icon">📦</div>
+      <div class="m-name">データソース層（入力データ）</div>
+      <div class="m-desc">6 データ層（Mail / Slack / Drive / 動画分析 / Gemini DR / X）。Tier 0-3 で鮮度と信頼性を明示。</div>
+    </div>
+    <div class="metaphor-card">
+      <div class="m-icon">🧩</div>
+      <div class="m-name">Skill レジストリ（処理パイプライン群）</div>
+      <div class="m-desc">登録された Skill のカタログ。初期 Skill セット（動画分析 / Mail / 提案生成 / Slack サジェスト / 進捗サマリー）を含む。core 改修なしに無限拡張可能。</div>
+    </div>
+    <div class="metaphor-card">
+      <div class="m-icon">🔧</div>
+      <div class="m-name">Tools（MCP 接続層）</div>
+      <div class="m-desc">Gmail API / Slack API / pgvector / HTML 生成 / PDF/PPTX 変換 / Gemini DR API。MCP で標準化。</div>
+    </div>
+    <div class="metaphor-card">
+      <div class="m-icon">🗂️</div>
+      <div class="m-name">Memory / Session（履歴）</div>
+      <div class="m-desc">Session = 現在の会話文脈、Memory = 長期記憶（過去の提案案件、顧客特性、営業の好み）。</div>
+    </div>
+    <div class="metaphor-card">
+      <div class="m-icon">🛡️</div>
+      <div class="m-name">Permissions / Guardrails</div>
+      <div class="m-desc">アクセス権限制御、出力フィルタ、薬機法・景表法チェッカー、ログ監査、PII マスキング。</div>
+    </div>
+  </div>
+
+  <h3 id="sec-2-3"><span class="sec-num">2.3</span>「5 機能固定」から「Skill レジストリ + 初期 Skill セット」への再フレーム</h3>
+  <div class="v3-banner">v2.2 では「5 機能 = 5 つのプロダクトモジュール（固定）」だったが、v3.0 では <strong>「Skill レジストリ型 Agent プラットフォーム + 初期 Skill セット 5 個」</strong>として、Skill を無限に拡張可能な構造に再定義する。初期 Skill セットは Phase 4 で展開する 5 個（動画分析 / Mail / 提案生成 / Slack サジェスト / 進捗サマリー）。</div>
+  <p>
+    再フレームすることで以下のメリットが生まれる：
+  </p>
+  <ul>
+    <li>基盤側（Agent SDK・データ層・Memory・Guardrails・Skill レジストリ）を <strong>1 度だけ作れば良い</strong>。機能ごとに重複実装しない。</li>
+    <li>Skill の追加・削除・更新が <strong>独立して行える</strong>。Skill 同士が干渉せず、core を改修する必要がない。</li>
+    <li>初期 Skill セット（5 個）の枠を超えた追加 Skill（議事録要約、商談ロープレ、業務固有 Skill、ユーザー定義 Skill、高林プロンプト Skill、外部連携 Skill 等）を組織のニーズに応じて段階的に追加可能。</li>
+    <li>営業の利用パターンが固まる前にプロダクトを乱造せず、<strong>MVA で検索 Skill を先に出して観察</strong> → ニーズに合った Skill から順次実装。</li>
+  </ul>
+
+  <h3 id="sec-2-4"><span class="sec-num">2.4</span>Skill レジストリの拡張ポイント（プラグイン構造）</h3>
+  <p>
+    Skill レジストリは <strong>プラグイン構造</strong>として設計する。新規 Skill は次の 3 ファイルをレジストリ配下に追加するだけで Agent から呼び出し可能となり、core（Agent SDK、データ層、Guardrails）を改修する必要はない：
+  </p>
+  <ul>
+    <li><code>skill.yaml</code> — Skill 名、説明、必要 Tool、必要 Permissions、入出力スキーマ</li>
+    <li><code>prompt.md</code> — Skill 固有のシステムプロンプト / 処理パイプラインの記述</li>
+    <li><code>handler.py</code> — Tool 呼び出しシーケンスと出力整形ロジック</li>
+  </ul>
+  <p>
+    将来の拡張パスとしては、(a) <strong>業務固有 Skill</strong>（部門特化）、(b) <strong>ユーザー定義 Skill</strong>（個人テンプレート）、(c) <strong>高林プロンプト Skill</strong>（並走運用フェーズの後に Skill 化）、(d) <strong>外部連携 Skill</strong>（CRM / SFA / BI 等）を想定する。
+    レジストリは内部 Skill カタログとして Planner に提示され、Agent は User のリクエストに応じて適切な Skill を選択する。
+  </p>
+</section>
+
+<!-- =========================================================
+     3. 営業向け使い方ガイド（初期 Skill セットと検索 Skill）
+     ========================================================= -->
+<section id="sec-3">
+  <h2><span class="sec-num">3.</span>営業向け使い方ガイド（初期 Skill セットと検索 Skill）</h2>
+  <p>
+    v3.0 では MVA で <strong>検索 Skill</strong>（超軽量・全データ層横断検索）が最初に登場し、その後 Phase 4 で初期 Skill セット（5 個）が段階展開される。
+    営業から見ると、Slack で同じ TeamAgent に話しかける窓口は 1 つで、内部的に Agent がレジストリからどの Skill を使うかを判断する。
+  </p>
+
+  <h3 id="sec-3-1"><span class="sec-num">3.1</span>🔍 検索 Skill（MVA で最初にレジストリに登録される Skill）</h3>
+  <div class="skill-card">
+    <div class="s-title">🔍 検索 Skill <span class="s-tag">MVA Phase 3 でリリース</span></div>
+    <div class="s-desc">
+      <strong>使い方：</strong> <code>@TeamAgent A 社の前回提案、何だっけ？</code><br>
+      <strong>動作：</strong> Mail / Drive / Slack / 過去提案 HTML を横断検索し、関連情報を Tier ラベル付きで返す。<br>
+      <strong>意義：</strong> 「資料を作る」前段の <strong>「思い出す・調べる」</strong> をカバー。MVA 期間中の見える成果物を担保。
+    </div>
+  </div>
+
+  <h3 id="sec-3-2"><span class="sec-num">3.2</span>初期 Skill セット（5 個）の体験例</h3>
+  <div class="skill-card">
+    <div class="s-title">🎬 動画ナレッジ分析 Skill <span class="s-tag">Phase 4 で実装、別冊あり</span></div>
+    <div class="s-desc">
+      <strong>使い方：</strong> <code>@TeamAgent このインフルエンサーの動画から訴求軸を抽出して</code><br>
+      <strong>動作：</strong> YouTube / TikTok / Instagram の動画を分析し、訴求軸・ベネフィット・NG ワードを整理。<br>
+      <strong>別冊：</strong> 『機能④ 確定仕様書 v1』（teamagent_kinou4_spec_v1.html）参照。
+    </div>
+  </div>
+  <div class="skill-card">
+    <div class="s-title">📧 Mail ワークフロー Skill</div>
+    <div class="s-desc">
+      <strong>使い方：</strong> 朝出社して Slack を開くと、自動で前日 Mail の要約と返信案が届く。<br>
+      <strong>動作：</strong> Gmail の未読を Tier ラベル付きで分類、重要案件は深掘りモードで返信ドラフトを生成。
+    </div>
+  </div>
+  <div class="skill-card">
+    <div class="s-title">📝 提案コンテンツ生成 Skill</div>
+    <div class="s-desc">
+      <strong>使い方：</strong> <code>@TeamAgent B 社向けに化粧品 PR の提案書を、過去 A 社案件を踏まえて</code><br>
+      <strong>動作：</strong> 5 フェーズ（要件把握 → リサーチ → 骨子 → 本文 → 仕上げ）で HTML 提案書を生成。対話型で 5 割→8 割完成度に。
+    </div>
+  </div>
+  <div class="skill-card">
+    <div class="s-title">💬 Slack 自動サジェスト Skill</div>
+    <div class="s-desc">
+      <strong>使い方：</strong> Slack の DM やチャンネルで「提案書作って」と書くと、TeamAgent が ephemeral でサジェストを出す。<br>
+      <strong>動作：</strong> 意図検出 → 提案生成 Skill / 動画分析 Skill / Mail Skill のいずれかにルーティング。
+    </div>
+  </div>
+  <div class="skill-card">
+    <div class="s-title">📊 営業進捗サマリー Skill</div>
+    <div class="s-desc">
+      <strong>使い方：</strong> <code>@TeamAgent 今週の自分の案件進捗まとめて</code><br>
+      <strong>動作：</strong> Mail + Slack + Drive を横断し、進行中案件 / 停滞案件 / 次アクションを HTML サマリーで出力整形。
+    </div>
+  </div>
+</section>
+
+<!-- =========================================================
+     4. 目指す姿
+     ========================================================= -->
+<section id="sec-4">
+  <h2><span class="sec-num">4.</span>目指す姿</h2>
+
+  <h3 id="sec-4-1"><span class="sec-num">4.1</span>俯瞰：4 レイヤー × 4 要素</h3>
+  <p>
+    v3.0 ではプロダクト全体を <strong>4 レイヤー</strong> で捉える。各レイヤーは Agent 基盤の中で異なる責務を持つ。
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 20%;">レイヤー</th>
+        <th style="width: 30%;">役割</th>
+        <th style="width: 50%;">v3.0 の主要構成要素</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>① データ層</strong></td>
+        <td>入力データの供給（Tier 0-3）</td>
+        <td>Gmail OAuth / Slack Bolt / Drive API / 動画分析パイプ / Gemini DR / X / pgvector index</td>
+      </tr>
+      <tr>
+        <td><strong>② Agent SDK</strong></td>
+        <td>Orchestrator（思考・実行）</td>
+        <td>Claude Agent SDK（Planner + Executor 兼務）/ Tool 呼び出し / Memory / Session</td>
+      </tr>
+      <tr>
+        <td><strong>③ Skill レジストリ層</strong></td>
+        <td>処理パイプライン（Skill）のカタログと拡張ポイント</td>
+        <td>初期 Skill セット 5 個（動画分析 / Mail / 提案生成 / Slack サジェスト / 進捗サマリー）+ 検索 Skill + 将来追加 Skill（業務固有 / ユーザー定義 / 外部連携 等）</td>
+      </tr>
+      <tr>
+        <td><strong>④ Guardrails 層</strong></td>
+        <td>Permissions / 横断制約</td>
+        <td>Permissions / 出力フィルタ / 薬機法・景表法チェッカー / 監査ログ / PII マスキング</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    各レイヤーは <strong>独立して進化</strong> させられる。データ層の拡張（例：CRM 連携）は Skill に影響を与えず、
+    新 Skill の追加（例：商談ロープレ）はデータ層・Guardrails の改修を伴わない。
+  </p>
+
+  <h3 id="sec-4-2"><span class="sec-num">4.2</span>Before / After</h3>
+  <table>
+    <thead>
+      <tr><th style="width: 22%;">観点</th><th style="width: 39%;">Before（v2.2 まで）</th><th style="width: 39%;">After（v3.0）</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>プロダクト性格</td>
+        <td>営業向け資料自動化ツール群（5 機能固定）</td>
+        <td>Skill レジストリ型 AI Agent プラットフォーム（汎用） + 営業向け初期 Skill セット 5 個（拡張可能）</td>
+      </tr>
+      <tr>
+        <td>開発の優先順</td>
+        <td>機能④ → ② → ③ → ① → ⑤</td>
+        <td>データ層 → Agent 基本ループ → 検索 Skill → 初期 Skill セット 5 個 段階展開</td>
+      </tr>
+      <tr>
+        <td>営業の最初の体験</td>
+        <td>機能④（動画分析）から</td>
+        <td>検索 Skill から（「思い出す」体験を先に届ける）</td>
+      </tr>
+      <tr>
+        <td>第 6・第 7 Skill 追加</td>
+        <td>大規模改修が必要</td>
+        <td>Skill レジストリへの登録のみで対応可能（core 改修不要、無限拡張可能）</td>
+      </tr>
+      <tr>
+        <td>OpenClaw との関係</td>
+        <td>Executor として組み込み予定</td>
+        <td>不採用。Claude Agent SDK で完結</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+
+<!-- =========================================================
+     5. システム構成
+     ========================================================= -->
+<section id="sec-5">
+  <h2><span class="sec-num">5.</span>システム構成</h2>
+
+  <h3 id="sec-5-1"><span class="sec-num">5.1</span>全体アーキテクチャ（Claude Agent SDK 単独構成）</h3>
+  <div class="v3-banner">v2.2 で想定していた OpenClaw（Executor）は採用しない。<strong>Claude Agent SDK が単独で Planner + Executor を兼ねる</strong>シングルスタック構成に統一する。</div>
+  <p>
+    OpenClaw 不採用の理由は以下：
+  </p>
+  <ul>
+    <li>① <strong>運用複雑度</strong>：2 スタック構成は障害切り分け・バージョン管理が複雑化。</li>
+    <li>② <strong>Claude Agent SDK の機能拡充</strong>：2026 年現在、SDK 側がサブエージェント呼び出し・並列実行をネイティブサポート。</li>
+    <li>③ <strong>コスト</strong>：Executor を別スタックで持つ意義が薄れた（料金体系が一本化された方が見通しが良い）。</li>
+    <li>④ <strong>子会社依存リスク</strong>：戦略 / 価格 / 機能優先順位が子会社判断で変動する不確実性を排除。</li>
+  </ul>
+  <div class="arch-diagram">
+    <pre>
+       Slack (Bolt + Block Kit + Workflow Builder)
+                       │
+                       ▼
+       ┌────────────────────────────────────┐
+       │   Claude Agent SDK（単独構成）       │
+       │   ├─ Planner                       │
+       │   ├─ Executor（兼務）                │
+       │   ├─ Skill レジストリ               │
+       │   ├─ Memory / Session              │
+       │   └─ Guardrails                    │
+       └─────────────┬──────────────────────┘
+                     │ MCP
+        ┌────────────┼────────────┐
+        ▼            ▼            ▼
+    Gmail OAuth   Drive API   pgvector
+        │            │            │
+        └────────────┴────────────┘
+                     │
+        ┌────────────┼────────────┐
+        ▼            ▼            ▼
+   動画分析パイプ   Gemini DR    X API
+    </pre>
+  </div>
+
+  <h3 id="sec-5-2"><span class="sec-num">5.2</span>4 共通基盤</h3>
+  <table>
+    <thead>
+      <tr><th style="width: 22%;">基盤</th><th>役割</th><th style="width: 20%;">v3.0 採用形態</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>① Claude Agent SDK</td><td>Agent 中核。Plan / Execute / Tool 呼び出し / Memory / Session を統括</td><td>単独構成（Executor 兼務）</td></tr>
+      <tr><td>② Gmail OAuth</td><td>営業 16 名の Gmail への安全なアクセス。Mail データ層の入口</td><td>個別 OAuth + 監査ログ</td></tr>
+      <tr><td>③ Slack Bolt</td><td>Slack イベント受信・送信。ユーザー UI の中核</td><td>Socket Mode + Block Kit</td></tr>
+      <tr><td>④ pgvector</td><td>意味検索の基盤。Mail / Slack / Drive / 過去提案を統一 index に格納</td><td>PostgreSQL + pgvector 拡張</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="sec-5-3"><span class="sec-num">5.3</span>Slack 入口の設計</h3>
+  <p>
+    Slack 入口は <strong>3 形態</strong> を時期によって使い分ける（詳細は第 9 章 UX 階段）。
+  </p>
+  <ul>
+    <li>① <code>@TeamAgent &lt;自由文&gt;</code> — MVA から提供。自然言語で意図を Agent が解釈。</li>
+    <li>② <code>/teamagent-create-proposal クライアント=B 社</code> — Phase 4 から。Slash Command で構造化入力。</li>
+    <li>③ Workflow Builder + Block Kit ボタン UI — 最終形。営業がフォームに入力する感覚で操作。</li>
+  </ul>
+</section>
+
+<!-- =========================================================
+     6. MVA 戦略（v3.0 の核心）
+     ========================================================= -->
+<section id="sec-6" class="highlight-section">
+  <h2><span class="sec-num">6.</span>MVA 戦略</h2>
+  <div class="v3-banner">v3.0 で新規導入。<strong>MVA（Minimum Viable Agent）</strong>は、機能を絞った最小実装で Agent を「とにかく動かす」開発戦略。MVP の Agent 版。</div>
+
+  <h3 id="sec-6-1"><span class="sec-num">6.1</span>MVA の哲学：データ層先行</h3>
+  <p>
+    Agent の品質は <strong>入力データ（データ層）の質と取り回しやすさ</strong> でほぼ決まる。
+    どれほど Orchestrator（Agent）が優秀でも、データ層が劣化していたり取り出しにくければ、Skill がどれだけ揃っていても期待する出力は得られない。
+    そこで v3.0 では、Skill を先に作らず、まず <strong>データ層を整備する</strong>。これが MVA の哲学である。
+  </p>
+  <p>
+    v2.2 までは「機能④（動画分析）が一番派手なので先に作る」という機能優先の論理だったが、
+    v3.0 では「データ層が整っていれば後から Skill はいくらでも乗せられる」という基盤優先の論理に転換する。
+  </p>
+
+  <h3 id="sec-6-2"><span class="sec-num">6.2</span>MVA Phase 1〜3</h3>
+  <div class="mva-phase-grid">
+    <div class="mva-phase-card">
+      <div class="p-num">MVA PHASE 1（〜2 ヶ月）</div>
+      <div class="p-title">データ層連携 + pgvector 投入</div>
+      <div class="p-desc">
+        Gmail OAuth、Drive API、Slack Bolt の 3 系統を pgvector 統一 index に投入。営業 2〜3 名でパイロット。
+        Embedding モデルの選定（OpenAI / Voyage / Cohere）を MVA-5 で深掘り。
+      </div>
+    </div>
+    <div class="mva-phase-card">
+      <div class="p-num">MVA PHASE 2（〜2.5 ヶ月）</div>
+      <div class="p-title">Claude Agent SDK 基本ループ</div>
+      <div class="p-desc">
+        Slack Bolt + Agent SDK を接続し、Plan / Execute / Tool / Memory の基本ループを動作させる。
+        Permissions / 監査ログ / PII マスキングを最小実装。
+      </div>
+    </div>
+    <div class="mva-phase-card">
+      <div class="p-num">MVA PHASE 3（〜3 ヶ月）</div>
+      <div class="p-title">超軽量・検索 Skill</div>
+      <div class="p-desc">
+        Skill レジストリに最初の Skill として <strong>検索 Skill</strong> を登録。Mail / Drive / Slack / 過去提案を横断検索。
+        営業 16 名全員にロールアウト。MVA 期間中の見える成果物として機能。
+      </div>
+    </div>
+  </div>
+
+  <h3 id="sec-6-3"><span class="sec-num">6.3</span>MVA 後の積み増し戦略（Phase 4 以降）</h3>
+  <p>
+    MVA で「Slack で動く検索可能な Agent」が完成した後、<strong>初期 Skill セット（5 個）</strong>を以下の順でレジストリに登録していく。
+    各 Skill は <strong>独立した PR / リリース</strong> として展開され、データ層・Agent 基盤・レジストリ core は触らない（プラグイン追加のみ）。
+  </p>
+  <table>
+    <thead>
+      <tr><th style="width: 14%;">時期</th><th style="width: 25%;">追加 Skill</th><th>狙い</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Phase 4-a</td><td>📧 Mail ワークフロー Skill</td><td>朝サマリーで毎日の利用を定着させる</td></tr>
+      <tr><td>Phase 4-b</td><td>🎬 動画ナレッジ分析 Skill</td><td>機能④ 確定仕様書 v1 に基づき実装</td></tr>
+      <tr><td>Phase 4-c</td><td>📝 提案コンテンツ生成 Skill</td><td>高林プロンプトは現運用と並走しつつ、本フェーズ以降の Skill 化候補として温存</td></tr>
+      <tr><td>Phase 4-d</td><td>💬 Slack 自動サジェスト Skill</td><td>営業の習熟が進んでから ephemeral 提案を解放</td></tr>
+      <tr><td>Phase 4-e</td><td>📊 営業進捗サマリー Skill</td><td>マネージャー向け週次レポートを自動化</td></tr>
+      <tr><td>Phase 5 以降</td><td>議事録 / 商談ロープレ / Personal AI Coach / 業務固有 Skill / ユーザー定義 Skill / 外部連携 Skill 等</td><td>初期セット 5 個の枠を超えた拡張。Skill レジストリへの登録のみで対応。機能⑥ 要件 v3.0 参照</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="sec-6-4"><span class="sec-num">6.4</span>別冊『MVA 仕様書 v1』参照</h3>
+  <p>
+    MVA Phase 1〜3 の <strong>詳細仕様（Sprint 単位の作業計画、Embedding モデル選定、pgvector スキーマ、検索 Skill のプロンプト設計など）</strong> は別冊『MVA 仕様書 v1』（<code>teamagent_mva_spec_v1.html</code>）に記載する。
+    本書では戦略上の位置づけのみ扱う。
+  </p>
+</section>
+
+<!-- =========================================================
+     7. 初期 Skill セット（5 個）
+     ========================================================= -->
+<section id="sec-7" class="highlight-section">
+  <h2><span class="sec-num">7.</span>初期 Skill セット（5 個）</h2>
+  <p>
+    v2.2 までの 5 機能を、Skill レジストリ配下の <strong>初期 Skill セット（5 個）</strong>として再定義する。各 Skill は Claude Agent SDK 上の独立プラグイン（<code>skill.yaml</code> + <code>prompt.md</code> + <code>handler.py</code>）として実装され、
+    Agent が Plan 段階でレジストリから必要な Skill を選択・呼び出す。各 Skill の詳細仕様は別冊に切り出す方針。
+    なお、初期セット 5 個はあくまで Phase 4 で展開する起点であり、Skill レジストリそのものは Phase 5 以降も継続的に拡張される。
+  </p>
+
+  <h3 id="sec-7-1"><span class="sec-num">7.1</span>🎬 動画ナレッジ分析 Skill（旧 機能④）</h3>
+  <div class="skill-card">
+    <div class="s-title">動画ナレッジ分析 Skill</div>
+    <div class="s-desc">
+      <strong>用途：</strong> YouTube / TikTok / Instagram の動画から訴求軸・ベネフィット・NG ワードを抽出。<br>
+      <strong>主要 Tool：</strong> 自前パイプライン（yt-dlp + 文字起こし + Vision API）/ dpro / Buzzmiru / Gemini DR<br>
+      <strong>別冊：</strong> 『機能④ 確定仕様書 v1』参照（VSEO 吸収・Gemini 採用版）。
+    </div>
+  </div>
+
+  <h3 id="sec-7-2"><span class="sec-num">7.2</span>📧 Mail ワークフロー Skill（旧 機能②）</h3>
+  <div class="skill-card">
+    <div class="s-title">Mail ワークフロー Skill</div>
+    <div class="s-desc">
+      <strong>用途：</strong> 朝サマリー / 返信深掘り / 営業進捗サマリーの 3 モード。<br>
+      <strong>主要 Tool：</strong> Gmail OAuth / pgvector / HTML 生成<br>
+      <strong>備考：</strong> 朝 8:30 にトリガー、Slack DM で配信。Tier 0-3 ラベル必須。
+    </div>
+  </div>
+
+  <h3 id="sec-7-3"><span class="sec-num">7.3</span>📝 提案コンテンツ生成 Skill（旧 機能③）</h3>
+  <div class="skill-card">
+    <div class="s-title">提案コンテンツ生成 Skill</div>
+    <div class="s-desc">
+      <strong>用途：</strong> 5 フェーズ（要件把握 → リサーチ → 骨子 → 本文 → 仕上げ）で HTML 提案書を生成。<br>
+      <strong>主要 Tool：</strong> Gemini DR / Drive API / HTML 生成 / PDF/PPTX 変換<br>
+      <strong>備考：</strong> 高林プロンプトは現運用と並走運用し、本 Skill の安定後に Skill 化候補として段階的に取り込む。データドリブン度 KPI を担保。
+    </div>
+  </div>
+
+  <h3 id="sec-7-4"><span class="sec-num">7.4</span>💬 Slack 自動サジェスト Skill（旧 機能①）</h3>
+  <div class="skill-card">
+    <div class="s-title">Slack 自動サジェスト Skill</div>
+    <div class="s-desc">
+      <strong>用途：</strong> Slack の DM / チャンネル発言から意図を検出し、ephemeral でサジェストを出す。<br>
+      <strong>主要 Tool：</strong> Slack Events API / 意図ルーター / 提案生成 Skill or 動画分析 Skill or Mail Skill 呼び出し<br>
+      <strong>備考：</strong> 応答 SLO 3 秒（v2.2 で緩和）。意図ルーター精度が肝。
+    </div>
+  </div>
+
+  <h3 id="sec-7-5"><span class="sec-num">7.5</span>📊 営業進捗サマリー Skill（旧 機能⑤）</h3>
+  <div class="skill-card">
+    <div class="s-title">営業進捗サマリー Skill</div>
+    <div class="s-desc">
+      <strong>用途：</strong> 進行中案件 / 停滞案件 / 次アクションを HTML サマリーで出力整形。<br>
+      <strong>主要 Tool：</strong> Mail + Slack + Drive 横断検索 / pgvector / HTML 生成<br>
+      <strong>備考：</strong> 個人版（営業向け）とマネージャー版（チーム俯瞰）の 2 モード。
+    </div>
+  </div>
+</section>
+
+
+<!-- =========================================================
+     8. HTML 出力と編集・PDF/PPTX 変換
+     ========================================================= -->
+<section id="sec-8" class="highlight-section">
+  <h2><span class="sec-num">8.</span>HTML 出力と編集・PDF/PPTX 変換</h2>
+  <div class="v3-banner">v3.0 で新規追加。Skill の出力形式を <strong>HTML を標準</strong> とし、PDF / PPTX への変換を二系統で持つ運用を明文化する。</div>
+
+  <h3 id="sec-8-1"><span class="sec-num">8.1</span>出力形式の標準：HTML</h3>
+  <p>
+    TeamAgent の Skill が生成する成果物（提案書・進捗サマリー・動画分析レポート）は、すべて <strong>HTML を一次フォーマット</strong> として出力する。
+    これは v2.0 以降の方針を継承するもので、以下の理由による：
+  </p>
+  <ul>
+    <li>① <strong>LLM との親和性</strong>：Claude は HTML をそのまま生成可能で、Markdown 経由の劣化を避けられる。</li>
+    <li>② <strong>Tailwind / CSS 変数</strong>でテーマ統一が容易。社内ブランドの一貫性を担保。</li>
+    <li>③ <strong>contenteditable</strong> 属性で営業が直接編集できる WYSIWYG エディタ化が可能（§ 8.4）。</li>
+    <li>④ PDF / PPTX への変換ルートが両方確立されている。</li>
+  </ul>
+
+  <h3 id="sec-8-2"><span class="sec-num">8.2</span>HTML → PDF：Puppeteer / Playwright 経由</h3>
+  <p>
+    HTML を PDF に変換するには <strong>Puppeteer</strong>（Chrome ヘッドレス）または <strong>Playwright</strong> を使用する。
+    印刷用 CSS（<code>@media print</code>）を HTML 側に書いておけば、ページ区切り・ヘッダー / フッターも制御可能。
+  </p>
+  <table>
+    <thead><tr><th style="width: 22%;">項目</th><th>仕様</th></tr></thead>
+    <tbody>
+      <tr><td>変換エンジン</td><td>Puppeteer（軽量 / 既定）/ Playwright（マルチブラウザ検証用）</td></tr>
+      <tr><td>呼び出し方</td><td>Skill から MCP 経由で <code>html-to-pdf</code> Tool を呼び出す</td></tr>
+      <tr><td>用紙</td><td>A4 / Letter 切替可能。デフォルトは A4 縦</td></tr>
+      <tr><td>埋め込みフォント</td><td>Noto Sans JP / Noto Serif JP を base64 埋め込み</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="sec-8-3"><span class="sec-num">8.3</span>HTML → PPTX：2 層テンプレ + python-pptx</h3>
+  <p>
+    PowerPoint 出力は <strong>HTML テンプレ</strong> と <strong>PPTX テンプレ</strong> を 2 層で持って同期する設計を採る。
+    HTML 側で構造・テキストを生成し、PPTX 側のプレースホルダに <code>python-pptx</code> で値を流し込む。
+  </p>
+  <div class="arch-diagram">
+    <pre>
+      Agent が生成した構造化データ（JSON）
+              │
+      ┌───────┴───────┐
+      ▼               ▼
+  HTML テンプレ    PPTX テンプレ
+  （表示・編集用） （Excel 入稿対応・社内配布用）
+      │               │
+      ▼               ▼
+   Slack 表示      python-pptx で
+                  プレースホルダ流し込み
+                       │
+                       ▼
+                  営業 / 顧客送付用 .pptx
+    </pre>
+  </div>
+  <p>
+    2 層を <strong>同じ JSON データ</strong> から生成することで、HTML 側を編集しても PPTX を再生成すれば同期される。
+    PPTX の単独編集は推奨しない（差分管理が困難になる）。
+  </p>
+
+  <h3 id="sec-8-4"><span class="sec-num">8.4</span>営業向け WYSIWYG エディタ（Claude Artifacts 型）</h3>
+  <p>
+    営業が Agent の出力をそのまま渡すのではなく、<strong>「ちょっと直したい」</strong> 要求に応えるため、
+    Claude Artifacts 型の <strong>contenteditable HTML + Tailwind</strong> エディタを Slack 内 or Web で提供する。
+  </p>
+  <ul>
+    <li>編集 UI：HTML の各要素を contenteditable で直接編集（テキスト変更・段落追加・順序変更）。</li>
+    <li>変更検知：DOM の差分を JSON 化して保存。再変換時に PPTX 側にも反映。</li>
+    <li>エクスポート：「PDF でダウンロード」「PPTX でダウンロード」「Slack に再投稿」の 3 ボタン。</li>
+    <li>導入時期：Phase 4-c（蒸す Skill リリース）と同時。</li>
+  </ul>
+</section>
+
+<!-- =========================================================
+     9. UX 階段：メンション → Slash → Workflow Builder
+     ========================================================= -->
+<section id="sec-9">
+  <h2><span class="sec-num">9.</span>UX 階段：メンション → Slash Command → Workflow Builder</h2>
+  <p>
+    営業の習熟度に合わせて、Slack 入口の UI 形態を <strong>3 段階で進化</strong> させる。
+    最初は柔軟な自然言語、慣れたら構造化入力、最終的にフォーム UI と、利用者の負荷と精度をバランスさせる。
+  </p>
+
+  <h3 id="sec-9-1"><span class="sec-num">9.1</span>MVA 期間：<code>@TeamAgent</code> メンション</h3>
+  <p>
+    最初の UX は <strong>自由な自然言語</strong>。営業が <code>@TeamAgent A 社の前回提案、何だっけ？</code> と書けば、
+    Agent が意図を解釈して検索 Skill を呼び出す。
+  </p>
+  <ul>
+    <li>長所：学習コストゼロ、何でも聞ける。</li>
+    <li>短所：意図検出が不安定な場合、Agent が何度も聞き返す。</li>
+    <li>導入時期：MVA Phase 3 から。検索 Agent と同時。</li>
+  </ul>
+
+  <h3 id="sec-9-2"><span class="sec-num">9.2</span>Phase 4：Slash Command</h3>
+  <p>
+    Skill が増えてくると、自然言語だけでは Agent が誤解する確率が上がる。そこで <strong>Slash Command</strong> で意図を明示する形を追加する。
+  </p>
+  <ul>
+    <li><code>/teamagent-create-proposal クライアント=B 社 商材=化粧品 PR</code></li>
+    <li><code>/teamagent-summarize-mail 範囲=昨日 重要度=高のみ</code></li>
+    <li><code>/teamagent-analyze-video url=https://...</code></li>
+  </ul>
+  <p>
+    長所：意図が明確になるので Agent の往復が減る。Skill を直接指定できる。<br>
+    短所：コマンド名を覚える必要がある。導入時期：Phase 4 開始時。
+  </p>
+
+  <h3 id="sec-9-3"><span class="sec-num">9.3</span>最終形：Slack Workflow Builder + Block Kit ボタン UI</h3>
+  <p>
+    最終的に、よく使うパターンは <strong>Workflow Builder</strong> でフォーム化する。
+    営業はチャンネルの「ショートカット」から起動し、Block Kit のフォームに入力するだけで、Agent が裏で Skill を呼び出す。
+  </p>
+  <ul>
+    <li>例：「提案書作成 Workflow」— クライアント名 / 商材 / 過去案件参照を select で選択 → Agent が蒸す Skill を実行</li>
+    <li>例：「動画分析 Workflow」— URL 貼り付け / 分析観点をチェックボックス → Agent が焼く Skill を実行</li>
+    <li>長所：誰でも迷わず使える。誤入力が減る。</li>
+    <li>導入時期：Phase 5（全社展開）と同時。</li>
+  </ul>
+</section>
+
+<!-- =========================================================
+     10. データソース戦略（v2.2 継承 + 一部更新）
+     ========================================================= -->
+<section id="sec-10">
+  <h2><span class="sec-num">10.</span>データソース戦略</h2>
+  <p>
+    v2.2 で確立した「6 データ層 + Tier 0-3」構造を継承し、v3.0 でも Agent の <strong>入力データ層</strong> として位置づける。
+    本章は v2.2 からの差分は小さいが、Agent からの参照方法が <strong>すべて pgvector 経由</strong> に統一される点が変更点。
+  </p>
+
+  <h3 id="sec-10-1"><span class="sec-num">10.1</span>6 データ層の役割と Tier 0-3 構造</h3>
+  <div class="data-source-grid">
+    <div class="ds-card ds-mail">
+      <div class="ds-icon">📧</div>
+      <div class="ds-name">Mail</div>
+      <div class="ds-desc">Gmail OAuth。営業 16 名の本人 Mail + 他人 Mail（明示同意者のみ）。Tier 0。</div>
+    </div>
+    <div class="ds-card ds-slack">
+      <div class="ds-icon">💬</div>
+      <div class="ds-name">Slack</div>
+      <div class="ds-desc">公開チャンネル + 営業 DM（opt-in）。Tier 0。</div>
+    </div>
+    <div class="ds-card ds-drive">
+      <div class="ds-icon">📁</div>
+      <div class="ds-name">Drive</div>
+      <div class="ds-desc">過去提案 PDF/PPTX、契約書、見積。OCR 済テキスト。Tier 0-1。</div>
+    </div>
+    <div class="ds-card ds-video">
+      <div class="ds-icon">🎬</div>
+      <div class="ds-name">動画分析</div>
+      <div class="ds-desc">自前パイプライン + dpro + Buzzmiru。Tier 1-2。機能④ 吸収版。</div>
+    </div>
+    <div class="ds-card ds-gemini">
+      <div class="ds-icon">🔍</div>
+      <div class="ds-name">Gemini DR</div>
+      <div class="ds-desc">外部公式情報の Deep Research。Tier 2-3。提案書の根拠資料に。</div>
+    </div>
+    <div class="ds-card ds-x">
+      <div class="ds-icon">🐦</div>
+      <div class="ds-name">X（補助）</div>
+      <div class="ds-desc">SNS シグナル。+1 データ層。Tier 3。重みを最小に保つ。</div>
+    </div>
+  </div>
+  <table>
+    <thead><tr><th style="width: 14%;">Tier</th><th>定義</th><th style="width: 28%;">代表データ</th></tr></thead>
+    <tbody>
+      <tr><td>Tier 0</td><td>社内一次情報（本人 Mail / Slack / Drive オリジナル）</td><td>Gmail / Slack DM / 過去提案 PPTX</td></tr>
+      <tr><td>Tier 1</td><td>社内分析・要約（Agent 生成の中間成果物）</td><td>動画分析レポート / 案件サマリー</td></tr>
+      <tr><td>Tier 2</td><td>外部公式（企業 IR、官公庁、業界団体）</td><td>クライアント IR / 業界統計</td></tr>
+      <tr><td>Tier 3</td><td>外部リサーチ（Gemini DR、Web 検索、SNS）</td><td>Gemini DR レポート / X 投稿</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="sec-10-2"><span class="sec-num">10.2</span>Mail（本人 / 他人の二重利用）</h3>
+  <p>
+    本人 Mail は OAuth で全文取り込み、他人 Mail は <strong>明示同意した営業のみ</strong> 共有プール化する。
+    Agent は Mail を Tier 0 として扱うが、他人 Mail からの引用時は <strong>引用元営業名を必ず表示</strong>。
+  </p>
+
+  <h3 id="sec-10-3"><span class="sec-num">10.3</span>動画分析データ層</h3>
+  <p>
+    機能④ 確定仕様書 v1 に従い、3 系統（自前パイプライン + dpro + Buzzmiru）のハイブリッド構成を採用。
+    Instagram は API 制限が厳しいため <strong>2 段階対応</strong>（パブリック投稿のみ）。
+  </p>
+
+  <h3 id="sec-10-4"><span class="sec-num">10.4</span>Gemini Deep Research</h3>
+  <p>
+    外部公式情報の Deep Research に Gemini DR を採用。Phase B 統合派と外部サービス派の検討を経て、
+    <strong>外部 API として疎結合に統合</strong>する方針（コスト・速度・更新性のバランス）。
+  </p>
+</section>
+
+
+<!-- =========================================================
+     11. プライバシー & セキュリティ
+     ========================================================= -->
+<section id="sec-11">
+  <h2><span class="sec-num">11.</span>プライバシー & セキュリティ</h2>
+  <p>
+    アーキテクチャ上の <strong>Guardrails 層</strong>。v2.2 の方針を継承しつつ、
+    v3.0 では薬機法／景表法／ステマ規制チェッカーと KOL 二次利用権の期限管理を Phase 4 以降の Skill 関連で明文化する。
+  </p>
+
+  <h3 id="sec-11-1"><span class="sec-num">11.1</span>会社方針</h3>
+  <ul>
+    <li>営業活動由来の社内データは <strong>社内利用に限定</strong>。Anthropic / Google 等への学習提供は行わない。</li>
+    <li>外部 LLM API 利用時は <strong>No Train</strong> 契約（Enterprise tier）。</li>
+    <li>個人特定情報（PII）は出力前に Guardrails でマスキング。</li>
+    <li>監査ログは 1 年保存、四半期ごとに監査役レビュー。</li>
+  </ul>
+
+  <h3 id="sec-11-2"><span class="sec-num">11.2</span>監査・フィルタ・opt-out</h3>
+  <ul>
+    <li>全 Tool 呼び出しと Agent 出力をログ化（pgvector とは別 DB）。</li>
+    <li>営業個人で「Mail 共有プールから外す」「Slack DM を Agent に渡さない」の opt-out が可能。</li>
+    <li>出力に Tier 0-3 ラベル必須。Tier 3（外部リサーチ）の比率が一定以上の場合は WARNING。</li>
+  </ul>
+
+  <h3 id="sec-11-3"><span class="sec-num">11.3</span>薬機法／景表法／ステマ規制対応のチェッカー（Phase 4 以降）</h3>
+  <div class="v3-banner">v3.0 で新規追加。提案コンテンツ生成（蒸す Skill）・動画ナレッジ分析（焼く Skill）の出力に対し、コンプライアンスチェッカーを Guardrails 層に組み込む。</div>
+  <table>
+    <thead><tr><th style="width: 18%;">対象法令</th><th>チェック観点</th><th style="width: 22%;">実装</th></tr></thead>
+    <tbody>
+      <tr><td>薬機法</td><td>化粧品・健康食品の効果効能の過剰表現</td><td>NG ワード辞書 + LLM ダブルチェック</td></tr>
+      <tr><td>景表法</td><td>「No.1」「最大級」など優良誤認・有利誤認の表現</td><td>NG パターン正規表現 + 根拠提示要求</td></tr>
+      <tr><td>ステマ規制</td><td>PR 表記の欠如、KOL 投稿の関係性開示</td><td>「#PR」「広告」明記の自動挿入</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="sec-11-4"><span class="sec-num">11.4</span>KOL 二次利用権・肖像権の期限管理</h3>
+  <p>
+    動画ナレッジ分析（焼く Skill）で使用する KOL（インフルエンサー）動画には、
+    二次利用権・肖像権の <strong>契約期限</strong> がある。期限切れデータが提案書に混入しないよう、
+    pgvector のメタデータに <code>license_expires_at</code> を持たせ、Agent 検索時に自動フィルタする。
+  </p>
+</section>
+
+<!-- =========================================================
+     12. 実装ロードマップ
+     ========================================================= -->
+<section id="sec-12" class="highlight-section">
+  <h2><span class="sec-num">12.</span>実装ロードマップ</h2>
+
+  <h3 id="sec-12-1"><span class="sec-num">12.1</span>MVA → Phase 4 → Phase 5 の三段階</h3>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 16%;">フェーズ</th>
+        <th style="width: 14%;">期間</th>
+        <th style="width: 35%;">スコープ</th>
+        <th style="width: 35%;">ゴール</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>MVA</strong><br>（P1-P3）</td>
+        <td>〜3 ヶ月</td>
+        <td>データ層連携 + Agent 基本ループ + 検索 Skill</td>
+        <td>営業 16 名全員が Slack で TeamAgent に話しかけて「思い出す」ができる</td>
+      </tr>
+      <tr>
+        <td><strong>Phase 4</strong><br>（4-a〜4-e）</td>
+        <td>3〜9 ヶ月</td>
+        <td>初期 Skill セット 5 本の段階展開（Mail → 動画 → 提案 → サジェスト → 進捗）</td>
+        <td>5 機能フル稼働。営業の日常業務の AI 化が完成</td>
+      </tr>
+      <tr>
+        <td><strong>Phase 5</strong></td>
+        <td>9 ヶ月〜</td>
+        <td>全社展開。議事録 / 商談ロープレ / Personal AI Coach 追加</td>
+        <td>営業部門外への横展開、全社 AI Agent 基盤化</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="sec-12-2"><span class="sec-num">12.2</span>別冊『実装計画書 v3.0』参照</h3>
+  <p>
+    Sprint 単位の詳細計画、コスト見積、人員アサイン、KPI 設定は別冊『実装計画書 v3.0』（<code>teamagent_implementation_plan_v3.0.html</code>）に記載する。
+  </p>
+</section>
+
+<!-- =========================================================
+     13. リスク管理
+     ========================================================= -->
+<section id="sec-13">
+  <h2><span class="sec-num">13.</span>リスク管理</h2>
+  <p>
+    v2.2 のリスク表（R1〜R10）を継承しつつ、v3.0 で 3 件追加（R11〜R13）する。
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 8%;">ID</th>
+        <th style="width: 26%;">リスク</th>
+        <th style="width: 33%;">影響</th>
+        <th style="width: 33%;">対策</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>R1〜R10</td><td colspan="3">v2.2 から継承（応答 SLO、Mail 解釈精度、コスト超過、Tier 0-3 比率未達 など）。詳細は v2.2 仕様書参照。</td></tr>
+      <tr>
+        <td><strong>R11</strong></td>
+        <td>MVA 期間中の見える成果物の薄さ</td>
+        <td>営業 / 経営から「3 ヶ月かけて何ができたの？」という不満</td>
+        <td>P3 で超軽量検索 Skill をリリース。早期に「使える」体験を被せる</td>
+      </tr>
+      <tr>
+        <td><strong>R12</strong></td>
+        <td>Embedding モデル選定の不確実性</td>
+        <td>pgvector 投入後に精度不足が判明、再 index に時間とコスト</td>
+        <td>MVA-5 で 3 モデル（OpenAI / Voyage / Cohere）を社内データで比較評価</td>
+      </tr>
+      <tr>
+        <td><strong>R13</strong></td>
+        <td>既存 v2.2 ドキュメントとの整合性ロス</td>
+        <td>営業・開発が v2.2 と v3.0 のどちらを参照すべきか混乱</td>
+        <td>v2.2 ドキュメント群を <code>archive/</code> に隔離 + v3.0 への移行注記を冒頭に追加</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- =========================================================
+     14. 付録
+     ========================================================= -->
+<section id="sec-14">
+  <h2><span class="sec-num">14.</span>付録</h2>
+
+  <h3 id="sec-14-1"><span class="sec-num">14.1</span>改訂履歴</h3>
+  <table>
+    <thead><tr><th style="width: 12%;">Version</th><th style="width: 16%;">日付</th><th>主要変更</th></tr></thead>
+    <tbody>
+      <tr><td>v1.0</td><td>2026-04-27</td><td>初版。Slack AI エージェントの構想を整理。4 機能想定。</td></tr>
+      <tr><td>v1.5</td><td>2026-04-30</td><td>機能⑤（営業進捗サマリー）を追加し 5 機能に。</td></tr>
+      <tr><td>v2.0</td><td>2026-05-07</td><td>HTML 出力標準化、コスト見直し、AWS Large 級採用。</td></tr>
+      <tr><td>v2.1</td><td>2026-05-08</td><td>自動サジェスト ephemeral 化、Phase 順序の再整理。</td></tr>
+      <tr><td>v2.2</td><td>2026-05-13</td><td>整合性 QA 反映。応答 SLO 緩和、6 データ層統一、データドリブン度節新設、Tier 0-3 明記。</td></tr>
+      <tr><td><strong>v3.0</strong></td><td><strong>2026-05-19</strong></td><td><strong>設計思想の再構成</strong>。社内 AI Agent 基盤への再定義、OpenClaw 不採用、Skill Registry / Plugin パターンを正式アーキとして採用（Skill は無限拡張可能、初期 Skill セット 5 本を MVP として段階展開）、MVA 戦略採用。</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="sec-14-2"><span class="sec-num">14.2</span>主要数値仮定</h3>
+  <ul>
+    <li>営業人数：16 名 + マネージャー数名</li>
+    <li>月案件数：1 営業あたり 5 件、全体で 80 件 / 月</li>
+    <li>Mail 量：1 営業あたり 1 日 50 通受信</li>
+    <li>過去提案ストック：Drive に 2,000 件超</li>
+    <li>動画分析対象：月 50〜100 本</li>
+    <li>MVA 期間：〜3 ヶ月（P1: 2 ヶ月 / P2: 0.5 ヶ月 / P3: 0.5 ヶ月）</li>
+  </ul>
+
+  <h3 id="sec-14-3"><span class="sec-num">14.3</span>v3.0 で確定したい主要事項</h3>
+  <ul>
+    <li>① Claude Agent SDK 単独構成の合意（OpenClaw 不採用）</li>
+    <li>② MVA 戦略（データ層先行 + 検索 Skill 先行）の合意</li>
+    <li>③ <strong>Skill Registry / Plugin パターン</strong>を正式アーキとして採用（Skill は無限拡張可能）</li>
+    <li>④ 5 機能を「初期 Skill セット」として再定義（動画ナレッジ分析 / Mail ワークフロー / 提案コンテンツ生成 / Slack 自動サジェスト / 営業進捗サマリー）</li>
+    <li>⑤ HTML 一次出力 + PDF / PPTX 二系統変換の標準化</li>
+    <li>⑥ Embedding モデルの最終選定（MVA-5 で深掘り）</li>
+    <li>⑦ v2.2 ドキュメントの archive 化と移行注記の追加</li>
+  </ul>
+
+  <h3 id="sec-14-4"><span class="sec-num">14.4</span>一行サマリー</h3>
+  <p style="font-size: 16px; font-weight: 600; background: #fef9c3; padding: 14px 18px; border-left: 4px solid #ca8a04; border-radius: 6px;">
+    TeamAgent v3.0 — Slack で動く社内 AI Agent 基盤。Claude Agent SDK 単独 + MVA 戦略 + Skill Registry / Plugin アーキで、初期 Skill セット 5 本から無限拡張可能な構成。
+  </p>
+
+  <h3 id="sec-14-5"><span class="sec-num">14.5</span>関連文書一覧</h3>
+  <table>
+    <thead><tr><th style="width: 32%;">文書名</th><th>ファイル</th><th style="width: 22%;">状態</th></tr></thead>
+    <tbody>
+      <tr><td>要件定義書 v3.0</td><td><code>teamagent_requirements_v3.0.html</code></td><td>同時生成中</td></tr>
+      <tr><td>アーキテクチャ図書 v3.0</td><td><code>teamagent_architecture_v3.0.html</code></td><td>同時生成中</td></tr>
+      <tr><td>実装計画書 v3.0</td><td><code>teamagent_implementation_plan_v3.0.html</code></td><td>同時生成中</td></tr>
+      <tr><td>MVA 仕様書 v1</td><td><code>teamagent_mva_spec_v1.html</code></td><td>同時生成中（最重要）</td></tr>
+      <tr><td>機能④ 確定仕様書 v1</td><td><code>teamagent_kinou4_spec_v1.html</code></td><td>既存</td></tr>
+      <tr><td>機能⑥ Personal AI Coach 要件 v3.0</td><td><code>teamagent_personal_ai_coach_requirements_v3.0.html</code></td><td>既存</td></tr>
+      <tr><td>監査役懸念精査レポート v1</td><td><code>teamagent_監査役懸念精査レポート_v1.html</code></td><td>既存</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer class="footer">
+  <p>TeamAgent 構想・システム概要仕様書 v3.0 — 社内 AI Agent 基盤への再構成</p>
+  <p>2026 年 5 月 19 日 / 関連文書：要件定義書 v3.0 / アーキテクチャ図書 v3.0 / 実装計画書 v3.0 / MVA 仕様書 v1</p>
+</footer>
+
+</main>
+</div>
+
+</body>
+</html>

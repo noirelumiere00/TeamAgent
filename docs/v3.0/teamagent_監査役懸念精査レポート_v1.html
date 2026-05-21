@@ -1,0 +1,1841 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 監査役懸念 精査レポート v1</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+<div class="layout">
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>監査役懸念 精査レポート</div>
+  <div class="sidebar-doc-meta">Version 1.0<br>2026年5月15日<br>4 Agent 並列精査の統合</div>
+  <div class="sidebar-header">目次</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-0"><span class="num">0.</span>エグゼクティブサマリー</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-1"><span class="num">1.</span>懸念① 営業活動スコープ</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-2"><span class="num">2.</span>懸念② データ収集の実現性</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>懸念③ BU1/BU2 の意向差リスク</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-4"><span class="num">4.</span>懸念④ AWS無料枠プロトタイプ</a></li>
+    <li class="level-1"><a href="#sec-5"><span class="num">5.</span>統合：監査役への回答</a></li>
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>推奨アクション</a></li>
+  </ul>
+</aside>
+<main>
+<header class="doc-header">
+  <div class="doc-type">監査役懸念 精査レポート v1</div>
+  <h1>TeamAgent 監査役懸念 4項目の精査結果<br>「予算は OK、実行リスクを精査せよ」への回答</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>監査対応資料（金額承認後の具体懸念の精査）</td></tr>
+    <tr><td>バージョン</td><td>1.0</td></tr>
+    <tr><td>作成日</td><td>2026年5月15日</td></tr>
+    <tr><td>精査方法</td><td>4観点を並列 Agent で精査 + BU 構造分析</td></tr>
+    <tr><td>対象</td><td>v2.2 仕様書群（overview / implementation_plan / requirements / architecture / phase0E）</td></tr>
+  </table>
+</header>
+
+<div class="hero">
+  <div class="hero-tagline">Audit Concern Review</div>
+  <div class="hero-headline">監査役の4懸念に正直に答える<br>「作れるか・データは集まるか・BU差は・無料で試せるか」</div>
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="hero-stat-num">①</div><div class="hero-stat-label">スコープ：営業の準備作業のみ。顧客接点は全て人</div></div>
+    <div class="hero-stat"><div class="hero-stat-num">②</div><div class="hero-stat-label">データ：自社系は確実、抽出系3点は未検証</div></div>
+    <div class="hero-stat"><div class="hero-stat-num">③</div><div class="hero-stat-label">BU差：直クラ vs 代理店で意向差あり・要設計分岐</div></div>
+    <div class="hero-stat"><div class="hero-stat-num">④</div><div class="hero-stat-label">無料枠：機能④のPoCは実質無料・本番は有料確定</div></div>
+  </div>
+</div>
+
+<section id="sec-0">
+<h2><span class="num">0.</span>エグゼクティブサマリー</h2>
+<p>監査役より「予算は承認するが、具体的な実行リスクを精査せよ」との指示を受け、4つの懸念を並列で精査した。<strong>結論：4懸念とも妥当な指摘であり、特に②データ実現性と③BU意向差は、本格実装前に対処すべき実リスク。</strong>共通する答えは「<strong>無料枠 PoC で未検証部分を実証してから本格投資する</strong>」である。</p>
+
+<table>
+  <tr><th>懸念</th><th>監査役の問い</th><th>精査結論</th><th>リスク度</th></tr>
+  <tr><td>① スコープ</td><td>営業活動の何をどこまでやる？</td><td>「提案準備〜下書き作成」のみ。顧客接点（訪問・商談・交渉・送信）は全て人。「全部 AI」ではない。v2.3 でスコープ境界線の明文化を推奨</td><td>低</td></tr>
+  <tr><td>② データ実現性</td><td>データは綺麗に・欲しい形で集まる？</td><td>自社系（VSEO・本人Gmail）は確実。<strong>Drive PDF抽出 / Gemini DR の品質 / 6ソース共通キー の3点は「仕様にあるが未検証」</strong>。数値はすべて設計目標で実測なし</td><td>高</td></tr>
+  <tr><td>③ BU意向差</td><td>BU1/BU2で意向が違わないか？</td><td><strong>違う。直クラ営業と代理店向き合いは提案先・サイクル・KPI が根本的に異なる</strong>。v2.2 は「営業16名」と一括りにしており BU 分岐がない。要設計対応</td><td>中〜高</td></tr>
+  <tr><td>④ AWS無料枠</td><td>無料枠で試せる？有料化は不可避？</td><td>新規アカウントの $200 クレジットで機能④単機能 PoC は実質無料。ただし完全 $0 は不可能（API 実費は別）。本番（機能③・16名・Multi-AZ）は有料確定</td><td>低</td></tr>
+</table>
+
+<div class="note warn">
+  <div class="label">⚠️ 監査役への最重要メッセージ</div>
+  現状の v2.2 ドキュメント群は「設計」としては十分に詳細だが、<strong>「設計したことを実際に試した形跡（PoC・実測）がない」</strong>。取り込み率80%・引用率90%・データ品質などの数値はすべて<strong>設計目標であり実測値ではない</strong>。監査観点では「PoC で未検証箇所を実証 → 実測値で本予算の根拠を固める」という段階を踏むことを強く推奨する。
+</div>
+</section>
+
+<section id="sec-1">
+<h2><span class="num">1.</span>懸念① 営業活動スコープの明確化</h2>
+<p><strong>監査役の問い：「TeamAgent が営業活動の何をどこまでやろうとしているのか全体像が見えない」</strong></p>
+
+<h3>1.1 結論</h3>
+<p>TeamAgent は<strong>「営業を AI に置き換えるシステム」ではない</strong>。営業が使う Slack の中に「補助ツール」を5つ置くもので、<strong>顧客接点（訪問・商談・送信・交渉・クロージング）は一切やらない</strong>。あくまで「机上の準備作業」の時短が狙い。</p>
+
+<h3>1.2 営業活動 × TeamAgent カバレッジマップ</h3>
+<table>
+  <tr><th>営業工程</th><th>カバー度</th><th>対応機能</th><th>内容</th></tr>
+  <tr><td>リード獲得・新規開拓</td><td>✗ スコープ外</td><td>なし</td><td>リスト作成・アプローチ先探索はしない</td></tr>
+  <tr><td>アポ取り</td><td>✗ スコープ外</td><td>なし</td><td>テレアポ・打診メール送信は対象外</td></tr>
+  <tr><td>初回訪問・商談</td><td>✗ スコープ外</td><td>なし</td><td>対面・オンライン商談には関与しない</td></tr>
+  <tr><td>ヒアリング</td><td>△ 支援のみ</td><td>④</td><td>市場傾向の材料は出すが、顧客ヒアリング自体はしない</td></tr>
+  <tr><td>提案準備（リサーチ）</td><td>◎ ほぼ完全カバー</td><td>③④①</td><td>市場調査・競合分析・過去事例検索を AI が代行</td></tr>
+  <tr><td>提案資料の作成</td><td>○ 半分カバー</td><td>③</td><td>提案書を「5割→8割」まで生成。残り2割は人</td></tr>
+  <tr><td>提案プレゼン</td><td>✗ スコープ外</td><td>なし</td><td>顧客の前で話すのは営業</td></tr>
+  <tr><td>見積・交渉・クロージング</td><td>✗ スコープ外</td><td>なし</td><td>価格決定・条件調整・受注意思決定は対象外</td></tr>
+  <tr><td>受注・納品</td><td>✗ スコープ外</td><td>なし</td><td>受注処理・CRM 登録・納品業務なし</td></tr>
+  <tr><td>アフターフォロー（メール）</td><td>○ 半分カバー</td><td>②</td><td>返信が必要なメールを整理し下書きを作る。<strong>送信は人</strong></td></tr>
+  <tr><td>追加提案</td><td>○ 半分カバー</td><td>③</td><td>提案書生成機能を再利用</td></tr>
+  <tr><td>（横断）案件進捗管理</td><td>△ 支援のみ</td><td>⑤</td><td>マネージャー向けに進捗・リスクを集約。判断は人</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 1.1</span>TeamAgent が手厚いのは「提案準備〜資料作成」と「メール対応」の2エリアのみ。顧客と直接対峙する工程は全て人間が担う。</p>
+
+<h3>1.3 全機能共通の「越えない一線」</h3>
+<div class="note">
+  <div class="label">TeamAgent が構造的にやらないこと</div>
+  ・顧客への送信・提出は全て人が手動（メール・提案書とも）<br>
+  ・AI の出力は社内（Slack / Gmail 下書き / MD・HTML ファイル）で必ず止まる<br>
+  ・AI は「下書き」「調査結果」「判定の参考」までしか作らず、最終成果物・最終判断は人<br>
+  ・<code>gmail.send</code> 権限を技術的に付与しないため「うっかり送信」が構造的に起きない
+</div>
+
+<h3>1.4 スコープ曖昧箇所（v2.3 で明確化を推奨）</h3>
+<table>
+  <tr><th>曖昧な点</th><th>監査役への説明</th><th>推奨する明確化</th></tr>
+  <tr><td>「5割版」「8割版」の定義</td><td>完成度の目安。確定基準ではなく営業が使って調整する前提</td><td>「5割版＝8章＋データ引用済みドラフト」など状態で定義</td></tr>
+  <tr><td>機能②と機能③の境界</td><td>機能②はメール1通、機能③は提案書1式。成果物が違う</td><td>成果物（Gmail下書き vs MD/HTMLファイル）で線引き明記</td></tr>
+  <tr><td>機能③のデータ引用の精度</td><td>9割に根拠を付ける目標。100%ではなく人の最終確認が前提</td><td>「正確性の最終責任は営業本人」と免責的に明記</td></tr>
+  <tr><td>機能⑤の受注角度判定</td><td>マネージャーの気づき補助。評価には使わない</td><td>「人事評価・予算管理には使用しない」と用途限定を明記</td></tr>
+</table>
+
+<h3>1.5 監査役向け 一言サマリー</h3>
+<div class="note beginner">
+  <div class="label">スコープ 一言サマリー</div>
+  TeamAgent は営業活動のうち<strong>「提案準備（調査・リサーチ）」と「資料・メールの下書き作成」を支援</strong>するツール。AI は情報収集を完全に肩代わりし、文章は「下書き」までを作る。一方、<strong>顧客接点を持つ全工程（訪問・商談・提案・交渉・クロージング・受注・納品）と、あらゆる顧客への送信・提出は、すべて営業本人が担う</strong>。「全部 AI」システムではなく「営業の机上準備を時短する」システム、というのが正確な理解。
+</div>
+</section>
+
+<section id="sec-2">
+<h2><span class="num">2.</span>懸念② データ収集の実現性</h2>
+<p><strong>監査役の問い：「データが綺麗に・欲しい形で集まるのか確認できているのか」</strong></p>
+
+<h3>2.1 結論</h3>
+<p>v2.2 仕様書は「どのデータソースを・どの API で取るか」は十分書けている。しかし<strong>「実際に綺麗に取れたか」を試した形跡（PoC・サンプル検証・精度実測）が一切ない</strong>。取り込み率80%・引用率90%などはすべて<strong>設計目標であり実測値ではない</strong>。</p>
+
+<h3>2.2 データソース別 実現性評価</h3>
+<table>
+  <tr><th>データソース</th><th>取得確実性</th><th>データの綺麗さ</th><th>欲しい形式で取れるか</th><th>検証状況</th><th>総合リスク</th></tr>
+  <tr><td>📧 Gmail（本人）</td><td>◎</td><td>○</td><td>○</td><td>△ 未検証</td><td>低〜中</td></tr>
+  <tr><td>📧 Gmail（他人16名）</td><td>○</td><td>△</td><td>△</td><td>✗ 未検証</td><td>中〜高</td></tr>
+  <tr><td>💬 Slack</td><td>○</td><td>△</td><td>△</td><td>✗ 未検証</td><td>中〜高</td></tr>
+  <tr style="background:#fef2f2"><td>📁 Google Drive PDF/PPTX</td><td>○</td><td>✗</td><td>✗</td><td>✗ 未検証</td><td><strong>高</strong></td></tr>
+  <tr><td>🎬 VSEO（自社）</td><td>◎</td><td>◎</td><td>○</td><td>△ 未検証</td><td>低</td></tr>
+  <tr><td>🎬 dpro</td><td>○</td><td>○</td><td>○</td><td>△ 未検証</td><td>中</td></tr>
+  <tr style="background:#fef2f2"><td>🎬 Buzzmiru</td><td>△</td><td>△</td><td>△</td><td>✗ 未検証</td><td><strong>高</strong></td></tr>
+  <tr style="background:#fef2f2"><td>🔍 Gemini Deep Research</td><td>○</td><td>△</td><td>✗</td><td>✗ 未検証</td><td><strong>高</strong></td></tr>
+  <tr><td>🐦 X</td><td>△</td><td>△</td><td>△</td><td>✗ 未検証</td><td>中</td></tr>
+  <tr style="background:#fef2f2"><td>🔗 pgvector 統合（共通キー）</td><td>—</td><td>—</td><td>✗</td><td>✗ 未検証</td><td><strong>高</strong></td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 2.1</span>赤いセルが「綺麗に集まる保証がない」高リスク箇所。自社運用の VSEO と本人 Gmail 以外は実地検証されていない。</p>
+
+<h3>2.3 「綺麗に集まらない」リスク TOP5</h3>
+<table>
+  <tr><th>順位</th><th>リスク箇所</th><th>なぜ危険か</th><th>緩和策</th></tr>
+  <tr><td>1位</td><td>Drive 提案書 PDF/PPTX の構造化抽出</td><td>抽出エンジンが未定。複雑レイアウト・グラフ内数値・スキャンPDF の抽出可否が不明。機能③の「過去提案を参照」という看板が成立しない恐れ</td><td>PoC で実提案書 20〜30 件を抽出させ、抽出率・数値正確性を実測</td></tr>
+  <tr><td>2位</td><td>6ソースを束ねる共通キー（案件ID）の不在</td><td>Gmail/Slack/Drive に「案件ID」フィールドが存在しない。JOIN の鍵が設計されていない＝「データは集まるが繋がらない」</td><td>案件マスタテーブルを新設し、案件ID ⇔ Slack ch ⇔ Gmail ラベル ⇔ Drive フォルダ を明示紐付け</td></tr>
+  <tr><td>3位</td><td>Gemini DR の JSON 遵守 & 捏造</td><td>8セクションJSON・実在URL・件数厳格化を LLM が毎回守る保証なし。「もっともらしい嘘」が混入し提案書の信頼性が崩壊</td><td>JSON スキーマ検証 + 自動リトライ + URL の HTTP 実在確認を必須化。PoC で遵守率を実測（最低50回）</td></tr>
+  <tr><td>4位</td><td>Gmail 他人16名の OAuth 網羅性 + 私信分離</td><td>16名全員が同意操作を完了しないとデータ欠損。私信フィルタ精度（目標80%）が他人メールで未検証</td><td>オンボーディングで接続を必須タスク化。私信フィルタを本人/他人各100件で精度実測</td></tr>
+  <tr><td>5位</td><td>Buzzmiru の構造的欠損 + Slack 案件チャンネル特定不能</td><td>Buzzmiru は仕様書自身が「落ちる前提」。Slack は命名規則がなく案件チャンネルを機械的に同定できない</td><td>Buzzmiru 欠損許容をステークホルダー合意。Slack 案件チャンネル命名規則を全社規約化</td></tr>
+</table>
+
+<h3>2.4 監査役向け 一言サマリー</h3>
+<div class="note beginner">
+  <div class="label">データ実現性 一言サマリー</div>
+  データ収集は<strong>自社運用の VSEO と本人 Gmail については確実に集まる見込み</strong>。一方、<strong>Drive 提案書からの数値抽出・Gemini DR の品質と捏造防止・6データソースを束ねる共通キー の3点は、仕様書に「できる」と書いてあるが一度も実地検証されていない</strong>。現状の数値はすべて設計目標で実測値ではない。本格実装の前に小規模 PoC でこれら未検証箇所を実データで叩いて確かめる必要がある。
+</div>
+</section>
+
+<section id="sec-3">
+<h2><span class="num">3.</span>懸念③ BU1/BU2 の意向差リスク</h2>
+<p><strong>監査役の問い：「BU1/BU2 で意向が違うとかにならないか」</strong><br>
+BU1/BU2 = 営業部署。一方は<strong>直クラ営業（事業会社に直接）</strong>、もう一方は<strong>代理店向き合い（電通・博報堂 等の広告代理店）</strong>。</p>
+
+<h3>3.1 結論</h3>
+<p><strong>意向は明確に違う。そして現状の v2.2 はこの差を一切考慮していない（「営業16名」と一括り）。</strong>これは監査役の懸念として的確であり、本格設計前に BU 分岐を組み込む必要がある。</p>
+
+<h3>3.2 直クラ営業 vs 代理店向き合い：構造的な違い</h3>
+<table>
+  <tr><th>観点</th><th>直クラ営業（BU-直）</th><th>代理店向き合い（BU-代理店）</th><th>TeamAgent への影響</th></tr>
+  <tr><td>提案先</td><td>事業会社の宣伝部・経営層</td><td>代理店のプランナー・担当者</td><td>提案書のトーン・粒度が変わる</td></tr>
+  <tr><td>提案書の役割</td><td>最終提案物（顧客がそのまま見る）</td><td>代理店が再加工する素材</td><td>機能③の出力フォーマットが2系統必要な可能性</td></tr>
+  <tr><td>営業サイクル</td><td>比較的長い（関係構築重視）</td><td>速い・競合多い・コンペ形式</td><td>機能②③のスピード要件が違う</td></tr>
+  <tr><td>メール・Slack の相手</td><td>事業会社の人</td><td>代理店の人</td><td>機能②の「文体学習」「文脈解釈」が BU で異なる</td></tr>
+  <tr><td>KPI</td><td>受注額・継続率</td><td>代理店との取引額・案件数・関係性</td><td>機能⑤の「受注角度判定」のロジックが BU で違う</td></tr>
+  <tr><td>過去事例の流用性</td><td>直クラ事例が中心</td><td>代理店経由事例が中心</td><td>pgvector の事例検索に BU フィルタが必要</td></tr>
+  <tr><td>「目的」の意味</td><td>商材の認知拡大・販促</td><td>代理店の提案を勝たせる・代理店内での評価</td><td>機能③ Phase A の「目的」解釈が BU で分岐</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 3.1</span>直クラと代理店向き合いは、提案先・サイクル・KPI・事例の流用性がすべて異なる。同じ TeamAgent でも BU によって最適な動作が変わる。</p>
+
+<h3>3.3 v2.2 に潜む BU 非対応リスク</h3>
+<table>
+  <tr><th>#</th><th>リスク</th><th>影響</th><th>緩和策</th></tr>
+  <tr><td>R-BU1</td><td>提案書 FMT の共通化が困難</td><td>直クラ向け FMT と代理店向け FMT が違うと、機能③の出力テンプレが分岐。1つの FMT に統一すると両 BU から不満</td><td>FMT を「共通骨格 + BU 別差分」の2層構造で設計。または BU タグで FMT を切替</td></tr>
+  <tr><td>R-BU2</td><td>過去事例のクロス参照が的外れ</td><td>BU-直 の事例を BU-代理店 の提案に引用すると文脈がズレる（逆も同様）</td><td>pgvector の事例検索に <code>bu_type</code> フィルタを追加。デフォルトは同一 BU 内検索、明示時のみクロス</td></tr>
+  <tr><td>R-BU3</td><td>Phase A の「目的」解釈がブレる</td><td>同じ「認知拡大」でも、直クラは「商材の認知」、代理店は「代理店内での提案通過」を意味しうる</td><td>Phase A の解釈プロンプトに BU コンテキストを注入。営業の所属 BU を入力情報に含める</td></tr>
+  <tr><td>R-BU4</td><td>要件定義が BU 分岐を持たない</td><td>v2.2 要件定義書は全 FR が「営業16名」前提。BU 別の受入基準がない</td><td>v2.3 で主要 FR（特に FR-3-XX）に「BU 別の受入基準」を追加</td></tr>
+  <tr><td>R-BU5</td><td>機能⑤の進捗サマリーが BU 混在</td><td>マネージャーが BU をまたいで管理している場合、受注角度の基準が混ざる</td><td>機能⑤を BU 別にグルーピング表示。角度判定ロジックを BU 別にチューニング</td></tr>
+</table>
+
+<h3>3.4 推奨：BU 意向差の「実測」アプローチ</h3>
+<p>意向差は机上で議論しても結論が出ない。PoC で<strong>両 BU から1案件ずつ実データで試す</strong>のが最も確実：</p>
+<div class="note">
+  <div class="label">BU 意向差 検証 PoC</div>
+  ・BU-直クラ から1案件、BU-代理店 から1案件を選定<br>
+  ・同じ機能③で提案書を生成させ、両 BU の営業に「これは使えるか」をレビューさせる<br>
+  ・「直クラ営業が代理店向けの出力を見て違和感を持つか」「その逆は」を実測<br>
+  ・結果次第で「共通設計でいける」or「BU 分岐が必須」を判断
+</div>
+
+<h3>3.5 監査役向け 一言サマリー</h3>
+<div class="note beginner">
+  <div class="label">BU 意向差 一言サマリー</div>
+  直クラ営業と代理店向き合いは<strong>提案先・サイクル・KPI・事例の流用性がすべて異なり、意向は明確に違う</strong>。現状の v2.2 は「営業16名」と一括りにしており、<strong>BU 分岐の設計が存在しない</strong>。これは監査役の懸念どおりのリスク。緩和策は (1) 提案書 FMT を「共通骨格＋BU 差分」で設計、(2) 事例検索に BU フィルタ追加、(3) Phase A に BU コンテキスト注入、(4) PoC で両 BU 1案件ずつ実測。本格実装前に BU 分岐方針を確定すべき。
+</div>
+</section>
+
+<section id="sec-4">
+<h2><span class="num">4.</span>懸念④ AWS無料枠プロトタイプの実現性</h2>
+<p><strong>監査役の問い：「AWS の無料枠でプロトタイプを動かせないか。有料化しないと実現できないのかも、を確認したい」</strong></p>
+
+<h3>4.1 結論</h3>
+<p><strong>完全な「$0」は不可能。</strong>ただし新規 AWS アカウントの <strong>$200 クレジット（6ヶ月有効）</strong>を使えば、機能④単機能・利用者1〜2名の最小プロトタイプを<strong>実質ほぼ無料</strong>で動かせる。問題は AWS ではなく Anthropic / Gemini の <strong>API 実費</strong>（クレジット対象外）。</p>
+
+<div class="note warn">
+  <div class="label">⚠️ 重要：2025年7月の AWS Free Tier 制度変更</div>
+  2025年7月15日に AWS Free Tier の仕組みが変わった。<strong>2025/7/15 以降に作成する新規アカウントは「12ヶ月無料の RDS」が廃止</strong>され、代わりに「$200 分のクレジット（6ヶ月有効）」＋「常時無料枠（Lambda 等）」のみ。本精査は最も保守的な「新規アカウント前提」で記述。
+</div>
+
+<h3>4.2 AWS サービス別 Free Tier 適合表</h3>
+<table>
+  <tr><th>サービス</th><th>Free Tier（2026）</th><th>TeamAgent の要件</th><th>適合</th></tr>
+  <tr style="background:#fef2f2"><td>RDS PostgreSQL</td><td>新アカウント：無料枠なし、$200クレジットのみ</td><td>db.r7g.large + Multi-AZ + RDS Proxy</td><td>✗ 有料確定（PoC は micro へ）</td></tr>
+  <tr style="background:#f0fdf4"><td>Lambda</td><td>常時無料：100万req/月＋40万GB秒/月</td><td>Lambda × 5種・低頻度</td><td>✅ 適合（数少ない優等生）</td></tr>
+  <tr style="background:#fef2f2"><td>ECS Fargate</td><td>Free Tier なし</td><td>機能③の長時間ジョブ</td><td>✗ 不適合（PoC で機能③を外せば $0）</td></tr>
+  <tr><td>API Gateway</td><td>新：無料枠なし、$200クレジットのみ</td><td>Slack イベント受信</td><td>△ 低頻度なら月$1未満・クレジット吸収</td></tr>
+  <tr style="background:#f0fdf4"><td>EventBridge</td><td>Cron は常時無料</td><td>定期起動</td><td>✅ 適合</td></tr>
+  <tr><td>Secrets Manager</td><td>$0.40/個/月</td><td>OAuth × 16名 = 約$6.4/月</td><td>△ PoC で1〜2名なら$0.4〜0.8</td></tr>
+  <tr style="background:#f0fdf4"><td>CloudWatch</td><td>常時無料：メトリクス10・ログ5GB・アラーム10</td><td>PoC 規模の監視</td><td>✅ 適合</td></tr>
+  <tr><td>S3</td><td>新：無料枠なし、$200クレジットのみ</td><td>ファイル保管</td><td>△ PoC の数GB なら月数十円</td></tr>
+  <tr style="background:#fef2f2"><td>NAT Gateway</td><td>Free Tier なし（約$32/月＋転送料）</td><td>Private Subnet からの外部通信</td><td>✗ 見落としやすい固定費（PoC では回避構成）</td></tr>
+  <tr style="background:#fef2f2"><td>Anthropic Claude API</td><td>AWS外・Free Tier 対象外</td><td>全機能の中核</td><td>✗ 実費（無料になり得ない）</td></tr>
+  <tr style="background:#fef2f2"><td>Gemini API（DR）</td><td>Google Cloud・AWS Free Tier 対象外</td><td>機能③のディープリサーチ</td><td>✗ 実費（1タスク $1〜3）</td></tr>
+</table>
+
+<h3>4.3 「無料枠で動く最小プロトタイプ」設計案</h3>
+<table>
+  <tr><th>項目</th><th>PoC 構成</th><th>v2.2 本番構成</th></tr>
+  <tr><td>機能スコープ</td><td><strong>機能④のみ</strong>（@TeamAgent + URL → 分析 → Slack 返信）</td><td>5機能フル</td></tr>
+  <tr><td>利用者</td><td>1〜2名（FDE 自身 + 営業1名）</td><td>営業16名</td></tr>
+  <tr><td>RDS</td><td>db.t4g.micro / Single-AZ / 20GB</td><td>db.r7g.large / Multi-AZ / RDS Proxy</td></tr>
+  <tr><td>Fargate</td><td>使わない</td><td>Composer 用</td></tr>
+  <tr><td>NAT Gateway</td><td>使わない（Lambda を VPC 外配置）</td><td>あり</td></tr>
+  <tr><td>概算費用</td><td>AWS 月$5〜15（$200クレジットで実質$0）+ API 実費 月$10〜30</td><td>月 ¥95K〜107K</td></tr>
+</table>
+
+<h3>4.4 無料 PoC で検証できること / できないこと</h3>
+<table>
+  <tr><th>検証できる</th><th>検証できない</th></tr>
+  <tr><td>機能④のエンドツーエンド基本動作</td><td>5機能の統合動作（特に Fargate 依存の機能③）</td></tr>
+  <tr><td>Slack ⇄ API Gateway ⇄ Lambda の連携</td><td>16名規模の同時実行・スループット</td></tr>
+  <tr><td>Anthropic Claude API の応答品質</td><td>RDS Proxy が解決する同時接続枯渇問題</td></tr>
+  <tr><td>pgvector 拡張のインストール・基本検索</td><td>pgvector の大規模データでの検索精度・レイテンシ</td></tr>
+  <tr><td>営業1〜2名による初期 UX フィードバック</td><td>Multi-AZ フェイルオーバー・可用性（NFR 99.5%）</td></tr>
+  <tr><td>「技術的に作れるか」の実現可能性</td><td><strong>本番の月次コスト実測</strong></td></tr>
+</table>
+
+<h3>4.5 有料化が避けられないライン</h3>
+<table>
+  <tr><th>トリガー</th><th>追加コスト目安</th></tr>
+  <tr><td>機能③（提案コンテンツ生成）を入れる → Fargate 必須</td><td>起動分だけ従量課金</td></tr>
+  <tr><td>RDS を micro 以外にする → r7g.large は Free Tier 対象外</td><td>月 ¥数万</td></tr>
+  <tr><td>Multi-AZ にする（NFR 99.5% 達成）</td><td>+¥20〜30K/月</td></tr>
+  <tr><td>利用者を3名以上に増やす</td><td>クレジット消費が加速</td></tr>
+  <tr><td>$200 クレジット使い切り or 6ヶ月経過</td><td>全 AWS 費用が実費化</td></tr>
+</table>
+
+<h3>4.6 コスト3段階表</h3>
+<table>
+  <tr><th>段階</th><th>機能</th><th>利用者</th><th>AWS 費用</th><th>API 実費</th><th>月額合計目安</th></tr>
+  <tr><td>① 無料 PoC</td><td>機能④のみ</td><td>1〜2名</td><td>$5〜15（クレジットで実質$0）</td><td>$10〜30</td><td><strong>実質 月 ¥1,500〜4,500</strong></td></tr>
+  <tr><td>② 小規模有料 PoC</td><td>機能④②⑤ + ③限定</td><td>3〜5名</td><td>$50〜150</td><td>$50〜150</td><td><strong>月 ¥1.5万〜4.5万</strong></td></tr>
+  <tr><td>③ 本番</td><td>5機能フル</td><td>16名</td><td>¥40K（Single-AZ）</td><td>¥67K（Anthropic+Gemini）</td><td><strong>月 ¥95K〜107K</strong></td></tr>
+</table>
+
+<h3>4.7 監査役向け 一言サマリー</h3>
+<div class="note beginner">
+  <div class="label">AWS 無料枠 一言サマリー</div>
+  AWS 部分は、新規アカウントの $200 クレジット（6ヶ月）で<strong>機能④単機能・利用者1〜2名の最小プロトタイプを「実質ほぼ無料」で動かせる</strong>。これで「技術的に作れるか」「Slack 上の UX はどうか」は有料コミット前に検証可能。<strong>ただし完全な $0 は不可能</strong>（Anthropic/Gemini の API 実費は無料枠対象外で月数千円〜）。本番の中核要件（機能③・16名・Multi-AZ・本番コストの実測）は無料枠 PoC では検証できず、有料化が確定的に必要。<strong>「無料枠で実現可能性と UX は検証できる、本番スケールには有料化が必須」</strong>──監査役の「安く検証してから本予算」という方針自体は妥当で実行可能。
+</div>
+</section>
+
+<section id="sec-5">
+<h2><span class="num">5.</span>統合：監査役への回答</h2>
+
+<h3>5.1 4懸念に共通する答え</h3>
+<p>4つの懸念を精査した結果、<strong>共通する答えは1つ</strong>：</p>
+<div class="note warn">
+  <div class="label">統合結論</div>
+  v2.2 ドキュメント群は<strong>「設計」としては十分に詳細</strong>だが、<strong>「設計を実際に試した形跡（PoC・実測）がない」</strong>。<br>
+  → だからこそ、監査役の「無料枠で試したら」という直感は<strong>4懸念すべてに対する正しい処方箋</strong>。<br>
+  <strong>「無料枠 PoC で未検証部分を実証 → 実測値で本予算の根拠を固める → 本格投資」</strong>という段階を踏むことを強く推奨する。
+</div>
+
+<h3>5.2 各懸念のリスク度と対応</h3>
+<table>
+  <tr><th>懸念</th><th>リスク度</th><th>本格実装前に必須の対応</th></tr>
+  <tr><td>① スコープ</td><td>低</td><td>v2.3 で「営業工程カバレッジマップ」と「越えない一線」を明文化（文書修正のみ）</td></tr>
+  <tr><td>② データ実現性</td><td><strong>高</strong></td><td>データ収集 PoC（Drive 抽出・Gemini DR 品質・共通キー疎通を実データで検証）</td></tr>
+  <tr><td>③ BU 意向差</td><td>中〜高</td><td>両 BU 1案件ずつの PoC で意向差を実測 → BU 分岐方針を確定 → v2.3 に反映</td></tr>
+  <tr><td>④ AWS 無料枠</td><td>低</td><td>機能④単機能の無料枠 PoC を実施。API 実費の予算枠（月¥7,500程度）と課金アラームを設定</td></tr>
+</table>
+
+<h3>5.3 「PoC で検証すべきこと」の統合リスト</h3>
+<p>4懸念を踏まえると、本格実装前の PoC で確認すべき項目は以下に集約される：</p>
+<table>
+  <tr><th>#</th><th>検証項目</th><th>由来する懸念</th><th>合否基準</th></tr>
+  <tr><td>P1</td><td>機能④のエンドツーエンド動作（Slack→分析→返信）</td><td>④</td><td>営業1名が「使える」と評価</td></tr>
+  <tr><td>P2</td><td>Drive 提案書 PDF/PPTX 20〜30件の抽出精度</td><td>②</td><td>テキスト抽出成功率・主要数値の正確性を人手照合</td></tr>
+  <tr><td>P3</td><td>Gemini DR の JSON 遵守率・URL 実在率（50回試行）</td><td>②</td><td>スキーマ適合率・実在URL率を計測</td></tr>
+  <tr><td>P4</td><td>6ソース共通キー（案件ID）の疎通（実案件3件）</td><td>②</td><td>案件マスタ経由で4ソースが JOIN できる</td></tr>
+  <tr><td>P5</td><td>両 BU 1案件ずつの提案書生成 → BU 別レビュー</td><td>③</td><td>各 BU の営業が違和感の有無を評価</td></tr>
+  <tr><td>P6</td><td>AWS $200 クレジット内での PoC 完遂</td><td>④</td><td>AWS 費用がクレジット枠内・API 実費が予算内</td></tr>
+  <tr><td>P7</td><td>Anthropic API トークン単価の実測</td><td>④</td><td>本番コスト試算（月¥95-107K）の裏付けデータを取得</td></tr>
+</table>
+
+<h3>5.4 PoC の位置づけ</h3>
+<div class="note">
+  <div class="label">PoC は「本予算判断のゲート」</div>
+  この PoC は単なる技術検証ではなく、<strong>監査役が本予算を合理的に判断するための材料づくり</strong>。<br>
+  ・PoC 成功 = 「動くものを見た」（feasibility 確認）<br>
+  ・トークン実測 = 「コスト試算に実測の裏付けがある」<br>
+  この2点が揃って初めて、監査役は本予算（v2.2 の ¥770-868K + 月次 ¥95-107K）を防御可能な根拠で承認できる。
+</div>
+</section>
+
+<section id="sec-6">
+<h2><span class="num">6.</span>推奨アクション</h2>
+
+<h3>6.1 即実施（文書修正のみ・コストゼロ）</h3>
+<table>
+  <tr><th>#</th><th>アクション</th><th>担当</th></tr>
+  <tr><td>A1</td><td>v2.3 で「営業工程カバレッジマップ」「越えない一線」「5割版/8割版の状態定義」を明文化</td><td>FDE</td></tr>
+  <tr><td>A2</td><td>v2.3 要件定義書に BU 分岐の論点（R-BU1〜R-BU5）をリスクとして追記</td><td>FDE</td></tr>
+  <tr><td>A3</td><td>機能③・⑤の出力に「免責・用途限定」（最終責任は営業本人 / 人事評価に使わない）を明記</td><td>FDE</td></tr>
+</table>
+
+<h3>6.2 PoC フェーズ（2〜4週間・実質 月¥数千円）</h3>
+<table>
+  <tr><th>#</th><th>アクション</th><th>期間</th></tr>
+  <tr><td>B1</td><td>新規 AWS アカウント作成（$200 クレジット起点）+ 課金アラーム設定</td><td>1日</td></tr>
+  <tr><td>B2</td><td>機能④単機能 PoC 構築（RDS micro / Lambda / Slack 連携）</td><td>1〜2週間</td></tr>
+  <tr><td>B3</td><td>データ収集 PoC（P2〜P4：Drive 抽出・Gemini DR 品質・共通キー疎通）</td><td>1〜2週間（B2 と並行）</td></tr>
+  <tr><td>B4</td><td>両 BU 1案件ずつのレビュー（P5：BU 意向差の実測）</td><td>3〜5日</td></tr>
+  <tr><td>B5</td><td>Anthropic トークン単価の実測（P7：本番コスト試算の裏付け）</td><td>PoC 期間中ずっと</td></tr>
+</table>
+
+<h3>6.3 PoC 後の判断（監査役への再報告）</h3>
+<table>
+  <tr><th>PoC 結果</th><th>次のアクション</th></tr>
+  <tr><td>未検証3点（Drive抽出・DR品質・共通キー）が想定どおり</td><td>v2.3 を確定し、本格実装フェーズへ進む</td></tr>
+  <tr><td>一部が想定を下回る</td><td>該当箇所の仕様を現実的に修正 or スコープ縮小 → 監査役に再提示</td></tr>
+  <tr><td>BU 意向差が大きい</td><td>v2.3 で BU 分岐を本格設計（FMT 2系統・事例検索フィルタ等）</td></tr>
+  <tr><td>本番コスト試算が実測と乖離</td><td>実装計画書のコスト試算を実測ベースに補正 → 本予算の再確認</td></tr>
+</table>
+
+<h3>6.4 監査役への最終回答（要約）</h3>
+<div class="note beginner">
+  <div class="label">監査役への回答</div>
+  ご指摘の4懸念は<strong>すべて妥当</strong>です。特に「データが綺麗に集まるか」と「BU 意向差」は、現状の設計書では<strong>「設計はあるが検証がない」</strong>状態であり、本格投資の前に実証が必要です。<br><br>
+  ご提案いただいた<strong>「AWS 無料枠で試してみる」は、4懸念すべてに対する正しい処方箋</strong>です。新規 AWS アカウントの $200 クレジットを使えば、機能④単機能の PoC を実質月数千円で実施でき、その中で「データは綺麗に取れるか」「BU で意向は違うか」「技術的に作れるか」「本番コストの実測値はいくらか」をまとめて検証できます。<br><br>
+  <strong>本予算（開発 ¥770-868K / 月次 ¥95-107K）の執行は、この PoC の結果を見てから最終判断する</strong>──という段階的アプローチを推奨します。PoC は2〜4週間・実質月数千円で実施可能です。
+</div>
+</section>
+
+</main>
+</div>
+</body>
+</html>

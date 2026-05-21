@@ -1,0 +1,2263 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 要件定義書 v3.0</title>
+<style>
+  /* v3.0 要件定義書 専用スタイル */
+  .req-banner {
+    background: #fef9c3;
+    border-left: 4px solid #ca8a04;
+    padding: 12px 18px;
+    margin: 14px 0;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .req-banner::before {
+    content: "v2.2 → v3.0 変更点：";
+    font-weight: 700;
+    color: #854d0e;
+  }
+  table.req-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+    margin: 10px 0 16px;
+  }
+  table.req-table th {
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    padding: 6px 8px;
+    text-align: left;
+    font-weight: 700;
+    font-size: 11.5px;
+  }
+  table.req-table td {
+    border: 1px solid #e2e8f0;
+    padding: 6px 8px;
+    vertical-align: top;
+    line-height: 1.55;
+  }
+  table.req-table td.req-id {
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: #1e3a8a;
+    background: #f8fafc;
+    white-space: nowrap;
+    width: 90px;
+  }
+  table.req-table td.req-prio {
+    text-align: center;
+    width: 50px;
+    font-weight: 700;
+    font-size: 11px;
+  }
+  td.prio-must { color: #b91c1c; }
+  td.prio-should { color: #c2410c; }
+  td.prio-may { color: #475569; }
+  table.req-table tr:nth-child(even) td:not(.req-id):not(.req-prio) { background: #fbfbfd; }
+  .req-section-tag {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .tag-mva { background: #fee2e2; color: #991b1b; }
+  .tag-fr { background: #dbeafe; color: #1e40af; }
+  .tag-or { background: #fef3c7; color: #92400e; }
+  .tag-ur { background: #e0e7ff; color: #3730a3; }
+  .tag-dr { background: #dcfce7; color: #166534; }
+  .tag-tr { background: #ede9fe; color: #5b21b6; }
+  .tag-sr { background: #ffe4e6; color: #9f1239; }
+  .tag-gr { background: #fef2f2; color: #7f1d1d; }
+  .tag-nfr { background: #f1f5f9; color: #334155; }
+  .tag-or-tag { background: #fff7ed; color: #9a3412; }
+  .axis-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin: 14px 0;
+  }
+  .axis-card {
+    background: white;
+    border-radius: 8px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--accent);
+  }
+  .axis-card .ax-title { font-size: 13.5px; font-weight: 700; margin-bottom: 4px; }
+  .axis-card .ax-desc { font-size: 11.5px; color: var(--text-muted); line-height: 1.55; }
+  .req-count {
+    display: inline-block;
+    background: #1e3a8a;
+    color: white;
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 10.5px;
+    font-weight: 700;
+    margin-left: 6px;
+  }
+</style>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>要件定義書</div>
+  <div class="sidebar-doc-meta">
+    Version 3.0<br>
+    2026年5月19日
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>本書について</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>目的</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>対象読者</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>v2.2 → v3.0 主要変更</a></li>
+    <li class="level-2"><a href="#sec-1-4"><span class="num">1.4</span>要件 ID 体系</a></li>
+
+    <li class="level-1"><a href="#sec-2"><span class="num">2.</span>システム概要</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>アーキテクチャ俯瞰（6層）</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>関連文書</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>MVA 要件（最重要章）</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>MVA P1：データ層連携</a></li>
+    <li class="level-2"><a href="#sec-3-2"><span class="num">3.2</span>MVA P2：Agent SDK 基本ループ</a></li>
+    <li class="level-2"><a href="#sec-3-3"><span class="num">3.3</span>MVA P3：超軽量・検索 Skill</a></li>
+
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>機能要件（FR）— Skill レジストリと初期 Skill セット</a></li>
+    <li class="level-2"><a href="#sec-4-0"><span class="num">4.0</span>Skill レジストリ要件（FR-Skill-Reg）</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>FR-VideoKB（初期 Skill 4：動画ナレッジ分析）</a></li>
+    <li class="level-2"><a href="#sec-4-2"><span class="num">4.2</span>FR-MailWF（初期 Skill 2：Mail ワークフロー）</a></li>
+    <li class="level-2"><a href="#sec-4-3"><span class="num">4.3</span>FR-Proposal（初期 Skill 3：提案コンテンツ生成）</a></li>
+    <li class="level-2"><a href="#sec-4-4"><span class="num">4.4</span>FR-SlackSuggest（初期 Skill 1：Slack 自動サジェスト）</a></li>
+    <li class="level-2"><a href="#sec-4-5"><span class="num">4.5</span>FR-Summary（初期 Skill 5：進捗サマリー）</a></li>
+
+    <li class="level-1"><a href="#sec-5"><span class="num">5.</span>出力編集・変換要件（OR）</a></li>
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>UX / 呼び出し要件（UR）</a></li>
+    <li class="level-1"><a href="#sec-7"><span class="num">7.</span>データ要件（DR）</a></li>
+    <li class="level-1"><a href="#sec-8"><span class="num">8.</span>Tools / MCP 要件（TR）</a></li>
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>Memory / Session 要件（SR）</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-10"><span class="num">10.</span>Guardrails 要件（GR）</a></li>
+    <li class="level-1"><a href="#sec-11"><span class="num">11.</span>非機能要件（NFR）</a></li>
+    <li class="level-1"><a href="#sec-12"><span class="num">12.</span>Sprint 別 DoD</a></li>
+    <li class="level-1"><a href="#sec-13"><span class="num">13.</span>改訂履歴と用語集</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">要件定義書 v3.0</div>
+  <h1>TeamAgent 要件定義書 v3.0<br>AI Agent 基盤の要件</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>要件定義書（v3.0 / Agent SDK 単独構成）</td></tr>
+    <tr><td>バージョン</td><td>3.0（v2.2 → v3.0：OpenClaw 削除、MVA P1〜P3 を要件化、Skill / Tool / Memory / Guardrails の4軸再分類、出力編集要件・UR 新設）</td></tr>
+    <tr><td>作成日</td><td>2026年5月19日</td></tr>
+    <tr><td>位置付け</td><td>v2.2 までの「機能要件中心」から、Claude Agent SDK を前提とした「Agent 基盤要件」へ全面改訂。MVA（Minimum Viable Agent）P1〜P3 を要件として明示し、Skill / Tool / Memory / Guardrails の4軸で要件を再分類。HTML→PDF/PPTX 変換、ボタン UI、Workflow Builder などの UX 要件を新設。</td></tr>
+    <tr><td>関連文書</td><td>概要書 v3.0（teamagent_overview_v3.0.html）／ アーキテクチャ v3.0（teamagent_architecture_v3.0.html）／ 実装計画書 v3.0（teamagent_implementation_plan_v3.0.html）／ MVA 仕様書 v1（teamagent_mva_spec_v1.html）／ 機能④ 確定仕様書 v1（teamagent_kinou4_spec_v1.html）／ 機能⑥ 要件 v3.0（teamagent_personal_ai_coach_requirements_v3.0.html）</td></tr>
+  </table>
+</header>
+
+<!-- ========== Hero ========== -->
+<div class="hero">
+  <div class="hero-tagline">Requirements Definition v3.0</div>
+  <div class="hero-headline">Claude Agent SDK 単独構成で<br>MVA P1〜P3 + Skill レジストリ（初期5 Skill）を要件化</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">9<small>要件カテゴリ</small></div>
+      <div class="hero-stat-label">FR / MR / OR / UR / DR / TR / SR / GR / NFR</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">3<small>MVA Phase</small></div>
+      <div class="hero-stat-label">P1: データ層 / P2: Agent ループ / P3: 検索 Skill</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">4<small>軸再分類</small></div>
+      <div class="hero-stat-label">Skill / Tool / Memory / Guardrails</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">17<small>Sprint</small></div>
+      <div class="hero-stat-label">MVA(S1-S6) / Phase 4(S7-S14) / 全社展開(S15-S17)</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">210+<small>要件</small></div>
+      <div class="hero-stat-label">Skill レジストリ FR / 機能・データ・Guardrails・NFR 全体</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ========== 1. 本書について ========== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>本書について</h2>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>目的</h3>
+<p>
+本書は TeamAgent v3.0 の要件を、<strong>Claude Agent SDK を前提とした AI Agent 基盤要件</strong>として定義する。v2.2 までは「5機能の機能要件」を中心に組み立てていたが、v3.0 では TeamAgent を <strong>拡張可能な Skill レジストリを持つ Agent プラットフォーム</strong>として再定義する。<strong>MVA（Minimum Viable Agent）P1〜P3</strong> を最重要要件として頂上に据え、その下に Skill / Tool / Memory / Guardrails の4軸で要件を分類する。MVA で最初に動く Skill は <strong>検索 Skill（1個）</strong>、Phase 4 で追加する初期 Skill セットは 5 個（Slack 自動サジェスト / Mail ワークフロー / 提案コンテンツ生成 / 動画ナレッジ分析 / 進捗サマリー）。<strong>Skill レジストリへの追加は無限</strong>であり、core 改修なしでプラグインとして拡張できることを要件化する。
+</p>
+<div class="req-banner">
+v3.0 は v2.2 から大幅再構成。OpenClaw 関連要件を削除し、Claude Agent SDK 単独構成に統一。MVA P1〜P3 を要件番号付きで明示し、Phase 4 以降の Skill 要件は v2.2 の FR を継承。さらに HTML→PDF/PPTX 変換、ボタン UI、Workflow Builder などの UX 要件を新規追加。
+</div>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>対象読者</h3>
+<table class="kv">
+  <tr><td>推進オーナー（FDE）</td><td>第3章（MVA 要件）→ 第10章（Guardrails）→ 第12章（Sprint DoD）</td></tr>
+  <tr><td>営業 / マネージャー</td><td>第2章（俯瞰）→ 第6章（UR）→ 第4章（Skill 要件）</td></tr>
+  <tr><td>セキュリティレビュー担当</td><td>第8章（TR）→ 第10章（GR）→ 第11章（NFR）</td></tr>
+  <tr><td>外部委託・実装パートナー</td><td>全章。特に第3章 MVA / 第7章 DR / 第8章 TR を契約スコープの根拠とする</td></tr>
+  <tr><td>監査・コンプラ</td><td>第10章（GR）→ 第11章（NFR）→ 第13章（用語集）</td></tr>
+</table>
+
+<h3 id="sec-1-3"><span class="num">1.3</span>v2.2 → v3.0 主要変更</h3>
+<table class="req-table">
+  <thead><tr><th style="width:160px">変更点</th><th>v2.2</th><th>v3.0</th></tr></thead>
+  <tbody>
+  <tr><td>Agent 基盤</td><td>OpenClaw + Claude SDK の二段構成（一部）</td><td><strong>Claude Agent SDK 単独構成</strong>。OpenClaw 削除</td></tr>
+  <tr><td>MVA 概念</td><td>存在せず（Phase ④/②/③/① の順に着手）</td><td><strong>MVA P1〜P3 を最重要要件として新設</strong>（S1〜S6 で先行構築）</td></tr>
+  <tr><td>要件分類</td><td>FR / NFR / DR / SEC / INT / TST</td><td><strong>FR / MR / OR / UR / DR / TR / SR / GR / NFR の9カテゴリ</strong>（Skill / Tool / Memory / Guardrails の4軸再分類）</td></tr>
+  <tr><td>出力フォーマット</td><td>Markdown + HTML</td><td><strong>HTML を標準フォーマット化</strong>。HTML→PDF/PPTX 変換要件（OR）を新設</td></tr>
+  <tr><td>UI/呼び出し</td><td>@TeamAgent メンション + 一部 slash command</td><td><strong>Workflow Builder + Block Kit ボタン UI</strong> を最終形として追加（UR）</td></tr>
+  <tr><td>Guardrails</td><td>SEC として薄く記述</td><td><strong>GR-1〜9 で大幅強化</strong>（薬機法・景表法・ステマ規制・KOL 二次利用権・引用必須化）</td></tr>
+  <tr><td>FR の扱い</td><td>5機能を Phase 順に並列記述</td><td><strong>Skill レジストリ要件（FR-Skill-Reg）+ 初期 Skill セット5個の FR として継承</strong>（FR-VideoKB / MailWF / Proposal / SlackSuggest / Summary）。Skill は今後無限に追加可能</td></tr>
+  <tr><td>Memory</td><td>session 単位の言及のみ</td><td><strong>SR-1〜4 で短期 / 中期 / 長期メモリを明示</strong></td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-1-4"><span class="num">1.4</span>要件 ID 体系</h3>
+<table class="req-table">
+  <thead><tr><th style="width:90px">プレフィクス</th><th style="width:160px">カテゴリ</th><th>意味</th><th style="width:80px">章</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">MR-Px-n</td><td>MVA 要件</td><td>MVA Phase 1〜3 で実装する基盤要件。MR-P1-1, MR-P2-1, MR-P3-1 形式</td><td>第3章</td></tr>
+  <tr><td class="req-id">FR-Skill-Reg-n</td><td>Skill レジストリ要件</td><td>Skill の登録／削除／更新、入出力 schema、依存解決、バージョン管理、権限管理、Audit、プラグイン構造</td><td>第4.0節</td></tr>
+  <tr><td class="req-id">FR-XXX-n</td><td>機能要件（初期 Skill）</td><td>Skill レジストリに最初に登録する初期 Skill セット5個。FR-VideoKB（動画ナレッジ分析）/ MailWF（Mail ワークフロー）/ Proposal（提案生成）/ SlackSuggest（Slack 自動サジェスト）/ Summary（進捗サマリー）。これ以降の Skill は無限拡張可能</td><td>第4.1〜4.5節</td></tr>
+  <tr><td class="req-id">OR-n</td><td>出力編集・変換要件</td><td>HTML 標準化と PDF/PPTX 変換、WYSIWYG エディタ要件</td><td>第5章</td></tr>
+  <tr><td class="req-id">UR-n</td><td>UX / 呼び出し要件</td><td>@TeamAgent メンション、Slash Command、Workflow Builder、Block Kit ボタン UI</td><td>第6章</td></tr>
+  <tr><td class="req-id">DR-n</td><td>データ要件</td><td>6 データ層（5+1）の取り込み・更新・Tier 構造・Embedding</td><td>第7章</td></tr>
+  <tr><td class="req-id">TR-n</td><td>Tools / MCP 要件</td><td>Agent から呼び出す Tool 群と外部 MCP 統合</td><td>第8章</td></tr>
+  <tr><td class="req-id">SR-n</td><td>Memory / Session 要件</td><td>短期 / 中期 / 長期メモリと Session 管理</td><td>第9章</td></tr>
+  <tr><td class="req-id">GR-n</td><td>Guardrails 要件</td><td>アクセス制御、PII、薬機法、景表法、ステマ、KOL 二次利用権、引用必須</td><td>第10章</td></tr>
+  <tr><td class="req-id">NFR-n</td><td>非機能要件</td><td>応答 SLO、可用性、スケーラビリティ、セキュリティ、パフォーマンス、監査ログ、バックアップ</td><td>第11章</td></tr>
+  </tbody>
+</table>
+<p style="font-size:12px; color:var(--text-muted)">優先度ラベル：<strong>MUST</strong>（必須）／<strong>SHOULD</strong>（推奨）／<strong>MAY</strong>（任意）。MVA 要件はすべて MUST。</p>
+</section>
+
+
+<!-- ========== 2. システム概要 ========== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>システム概要</h2>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>アーキテクチャ俯瞰（6層）</h3>
+<p>
+v3.0 では TeamAgent を <strong>6 層構成</strong>として整理する。最上位に Claude Agent SDK を据え、データ層 / Skills / Tools / Memory / Guardrails の5層がこれを支える。
+</p>
+<div class="axis-grid">
+  <div class="axis-card"><div class="ax-title">① Claude Agent SDK</div><div class="ax-desc">Agent ループ本体。Tool 呼び出し、Memory 参照、Skill 起動を司る</div></div>
+  <div class="axis-card"><div class="ax-title">② データ層</div><div class="ax-desc">Mail / Slack / Drive / 動画 / Gemini DR / X。pgvector に Embedding 投入</div></div>
+  <div class="axis-card"><div class="ax-title">③ Skills（レジストリ）</div><div class="ax-desc">プラグイン構造の Skill レジストリ。初期 Skill セット5個（SlackSuggest / MailWF / Proposal / VideoKB / Summary）を Phase 4 で登録。以降は無限に追加可能</div></div>
+  <div class="axis-card"><div class="ax-title">④ Tools</div><div class="ax-desc">pgvector 検索 / Gmail / Drive / Web 検索 / 動画分析 / 外部 MCP</div></div>
+  <div class="axis-card"><div class="ax-title">⑤ Memory / Session</div><div class="ax-desc">スレッド単位の短期、案件単位の中期、ユーザー単位の長期メモリ</div></div>
+  <div class="axis-card"><div class="ax-title">⑥ Guardrails</div><div class="ax-desc">アクセス制御、PII、薬機法・景表法・ステマ、引用必須化</div></div>
+</div>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>関連文書</h3>
+<table class="req-table">
+  <thead><tr><th style="width:200px">文書</th><th>位置付け</th></tr></thead>
+  <tbody>
+  <tr><td>概要書 v3.0</td><td>TeamAgent 全体構想（Skill レジストリ思想、初期 Skill セット5個＋機能⑥、Phase 戦略）</td></tr>
+  <tr><td>アーキテクチャ図 v3.0</td><td>6 層構成の詳細図、コンポーネント間通信、AWS 構成図</td></tr>
+  <tr><td>実装計画書 v3.0</td><td>17 Sprint 計画、コスト見積、リスク管理</td></tr>
+  <tr><td>MVA 仕様書 v1</td><td>MVA P1〜P3 の詳細仕様（本書 第3章の参照元）</td></tr>
+  <tr><td>機能④ 確定仕様書 v1</td><td>動画ナレッジ分析（FR-VideoKB）の詳細仕様</td></tr>
+  <tr><td>Phase 0-E 仕様書 v1</td><td>機能③ 提案コンテンツ生成（FR-Proposal）の詳細仕様</td></tr>
+  <tr><td>機能⑥ Personal AI Coach 要件 v3.0</td><td>全社展開フェーズの Phase 5 要件</td></tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ========== 3. MVA 要件（最重要） ========== -->
+<section id="sec-3">
+<h2><span class="num">3.</span>MVA 要件（最重要章）<span class="req-section-tag tag-mva">MR-Px-n</span></h2>
+<p>
+MVA（Minimum Viable Agent）とは、TeamAgent の最小実用形態。<strong>Claude Agent SDK + pgvector + Slack Bolt + Gmail/Drive OAuth</strong> で構成され、営業16名が <code>@TeamAgent [自然言語クエリ]</code> 一行で過去ナレッジを横断検索できる状態。Sprint S1〜S6 の6スプリント（12週間）で構築する。<strong>MVA 要件はすべて MUST</strong>。
+</p>
+
+<h3 id="sec-3-1"><span class="num">3.1</span>MVA P1：データ層連携 <span class="req-section-tag tag-mva">MR-P1</span></h3>
+<p>S1〜S3 で実装。Gmail / Slack / Drive を pgvector に取り込むパイプライン。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">MR-P1-1</td><td class="req-prio prio-must">MUST</td><td>Gmail OAuth 2.0 でドメインワイド委任を取得し、営業16名分の Gmail を取り込めること。スコープは <code>gmail.readonly</code> + <code>gmail.metadata</code>。</td></tr>
+  <tr><td class="req-id">MR-P1-2</td><td class="req-prio prio-must">MUST</td><td>Drive OAuth 2.0 で指定フォルダ配下の全ファイルを取り込めること。対応形式は PDF / Word（.docx）/ PowerPoint（.pptx）/ Excel（.xlsx）/ Markdown / Google Docs / Google Slides。</td></tr>
+  <tr><td class="req-id">MR-P1-3</td><td class="req-prio prio-must">MUST</td><td>Slack Bolt + OAuth で指定チャンネルのメッセージとスレッドを取り込めること。チャンネルは事前設定（営業共有 / 案件別 / DM は除外）。</td></tr>
+  <tr><td class="req-id">MR-P1-4</td><td class="req-prio prio-must">MUST</td><td>pgvector への Embedding 投入パイプラインを実装すること。Embedding モデルは Bedrock Titan v2（1024 次元）を初期採用、Voyage AI も A/B 比較できること。</td></tr>
+  <tr><td class="req-id">MR-P1-5</td><td class="req-prio prio-must">MUST</td><td>増分同期：新着メール / Slack 投稿 / Drive ファイル変更を <strong>5 分以内</strong>に検知し、追加 Embedding を投入すること。</td></tr>
+  <tr><td class="req-id">MR-P1-6</td><td class="req-prio prio-must">MUST</td><td>メタデータ層：取り込んだ各レコードに「誰の / いつの / どの案件 / どのチャンネル / Tier ラベル」のタグを付与すること。タグスキーマは DR-Tag-1 で定義。</td></tr>
+  <tr><td class="req-id">MR-P1-7</td><td class="req-prio prio-must">MUST</td><td>取り込み監視：CloudWatch ダッシュボードで取り込み件数 / 失敗件数 / Embedding 投入レイテンシをリアルタイム表示すること。</td></tr>
+  <tr><td class="req-id">MR-P1-8</td><td class="req-prio prio-must">MUST</td><td>取り込み失敗時アラート：OAuth トークン失効、API レート制限、Embedding 失敗を Slack #ops チャンネルにアラート通知すること。</td></tr>
+  <tr><td class="req-id">MR-P1-9</td><td class="req-prio prio-must">MUST</td><td>全件初期同期：5万〜10万件相当の Mail / Slack / Drive を、2〜3日かけてバッチで初期取り込みできること。途中失敗時の再開機能を持つこと。</td></tr>
+  <tr><td class="req-id">MR-P1-10</td><td class="req-prio prio-must">MUST</td><td>シークレット管理：OAuth トークン、API キー、DB 接続情報はすべて AWS Secrets Manager に格納し、コード / 環境変数に平文で含まないこと。</td></tr>
+  <tr><td class="req-id">MR-P1-11</td><td class="req-prio prio-should">SHOULD</td><td>添付ファイル（PDF / Word / PPT）も本文と同列に Embedding 化し、検索可能にすること（OCR 含む）。</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-3-2"><span class="num">3.2</span>MVA P2：Agent SDK 基本ループ <span class="req-section-tag tag-mva">MR-P2</span></h3>
+<p>S3〜S4 で実装。Claude Agent SDK を組み込み、Slack から自然言語クエリを受けて Tool 呼び出しまでを動かす。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">MR-P2-1</td><td class="req-prio prio-must">MUST</td><td>Claude Agent SDK（Python or TypeScript）を組み込み、Anthropic Bedrock 経由で claude-3.5-sonnet 以上を呼び出せること。</td></tr>
+  <tr><td class="req-id">MR-P2-2</td><td class="req-prio prio-must">MUST</td><td>pgvector 検索 Tool を SDK の Tool として定義し、自然言語クエリ → Embedding → top-k 検索 → 構造化結果返却までを動かすこと。</td></tr>
+  <tr><td class="req-id">MR-P2-3</td><td class="req-prio prio-must">MUST</td><td>Slack Bolt の受け口：<code>@TeamAgent</code> メンションを受信し、Agent ループに渡せること。メンション以外のメッセージは応答しないこと。</td></tr>
+  <tr><td class="req-id">MR-P2-4</td><td class="req-prio prio-must">MUST</td><td>Agent ループ：ユーザークエリ → 思考 → Tool 呼び出し → 結果評価 → 最終応答までを SDK 標準の Tool Use ループで実行すること。</td></tr>
+  <tr><td class="req-id">MR-P2-5</td><td class="req-prio prio-must">MUST</td><td>Memory / Session 最小実装：スレッド ID 単位で会話履歴を保持し、同一スレッド内では文脈を引き継ぐこと。</td></tr>
+  <tr><td class="req-id">MR-P2-6</td><td class="req-prio prio-must">MUST</td><td>監査ログ：すべての Agent 呼び出しを「ユーザー / クエリ / 使用 Tool / 応答 / トークン数」の形で CloudWatch Logs + S3 にアーカイブすること。</td></tr>
+  <tr><td class="req-id">MR-P2-7</td><td class="req-prio prio-must">MUST</td><td>最小 Permissions：Agent は読み取り専用 Tool のみ呼び出せること（書き込みは P3 以降で段階的に解禁）。</td></tr>
+  <tr><td class="req-id">MR-P2-8</td><td class="req-prio prio-must">MUST</td><td>応答 SLO：シンプルな検索クエリに対して <strong>3 秒以内</strong>に最初のトークンを返すこと（NFR-1 と整合）。</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-3-3"><span class="num">3.3</span>MVA P3：超軽量・検索 Skill <span class="req-section-tag tag-mva">MR-P3</span></h3>
+<p>S5〜S6 で実装。営業16名が実際に「検索エージェント」として日常使用できる状態。MVA 完成 = この Skill が動くこと。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">MR-P3-1</td><td class="req-prio prio-must">MUST</td><td><code>@TeamAgent [自然言語クエリ]</code> で pgvector を横断検索できること。例：「サントリー案件で過去に出した提案ある？」</td></tr>
+  <tr><td class="req-id">MR-P3-2</td><td class="req-prio prio-must">MUST</td><td>引用付きサマリー返却：検索結果上位 5 件の要約と、引用元（Mail / Slack / Drive のリンクとタイムスタンプ）を併記すること。</td></tr>
+  <tr><td class="req-id">MR-P3-3</td><td class="req-prio prio-must">MUST</td><td>関連ファイル / メールリンク提示：Drive ファイルは <code>https://drive.google.com/...</code>、Mail は <code>https://mail.google.com/.../{messageId}</code>、Slack は permalink を返却すること。</td></tr>
+  <tr><td class="req-id">MR-P3-4</td><td class="req-prio prio-must">MUST</td><td>スレッド内文脈保持：同一 Slack スレッド内で「もう少し詳しく」「別の案件で」などの追問に対し、前回検索条件を継承すること。</td></tr>
+  <tr><td class="req-id">MR-P3-5</td><td class="req-prio prio-must">MUST</td><td>引用率 90% 以上 / 捏造率 0%：Skill が返す事実主張は全て引用ラベル（DR-Tier-x）付きであること。検証用 KPI ダッシュボードを設置。</td></tr>
+  <tr><td class="req-id">MR-P3-6</td><td class="req-prio prio-should">SHOULD</td><td>検索結果のフィードバック：「役立った/役立たなかった」ボタンで品質ログを蓄積すること。</td></tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ========== 4. 機能要件（FR）— Skill レジストリと初期 Skill セット ========== -->
+<section id="sec-4">
+<h2><span class="num">4.</span>機能要件（FR）— Skill レジストリと初期 Skill セット<span class="req-section-tag tag-fr">FR-XXX-n</span></h2>
+<p>
+TeamAgent は <strong>拡張可能な Skill レジストリを持つ Agent プラットフォーム</strong>である。Skill は <code>入出力 schema + 必要 Tools + Guardrails 仕様</code>を持つ再利用可能な処理単位として定義され、<strong>core 改修なしでプラグインとして無限に追加</strong>できる。本章 4.0 で Skill レジストリ自体の機能要件を定義し、4.1〜4.5 で <strong>Phase 4 で登録する初期 Skill セット5個</strong>（v2.2 の FR-1〜5 を継承して Skill 化したもの）を定義する。
+</p>
+
+<h3 id="sec-4-0"><span class="num">4.0</span>Skill レジストリ要件<span class="req-section-tag tag-fr">FR-Skill-Reg</span></h3>
+<p>Skill レジストリは Skill の登録／検索／実行を司る基盤コンポーネント。MVA P2（S4）で最低限の登録／実行 API を実装し、Phase 4 開始時点（S7 直前）にバージョン管理・依存解決・権限管理を含む完全形を満たすこと。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">FR-Skill-Reg-01</td><td class="req-prio prio-must">MUST</td><td>Skill の登録／削除／更新 API：Skill メタデータ（name / version / description / owner）と実装エントリポイントを登録できること。CLI または管理 UI から実行可能</td></tr>
+  <tr><td class="req-id">FR-Skill-Reg-02</td><td class="req-prio prio-must">MUST</td><td>入出力契約の schema-based 定義：各 Skill は JSON Schema で入力／出力／エラーを宣言し、レジストリ側で実行時バリデーションを行うこと</td></tr>
+  <tr><td class="req-id">FR-Skill-Reg-03</td><td class="req-prio prio-must">MUST</td><td>Skill 間の依存解決：Skill が他 Skill または Tool を必要とする場合、レジストリが依存を解決し、未充足時は起動を拒否すること</td></tr>
+  <tr><td class="req-id">FR-Skill-Reg-04</td><td class="req-prio prio-must">MUST</td><td>Skill のバージョン管理：semver（major.minor.patch）で複数バージョンを並列に登録できること。デフォルトバージョンの切替・ロールバックが可能</td></tr>
+  <tr><td class="req-id">FR-Skill-Reg-05</td><td class="req-prio prio-must">MUST</td><td>Skill のアクセス権限管理：Skill 単位で実行可能なユーザー／ロール／案件を RBAC で制御できること（GR-1 と整合）</td></tr>
+  <tr><td class="req-id">FR-Skill-Reg-06</td><td class="req-prio prio-must">MUST</td><td>Skill 利用ログの Audit：全 Skill 呼び出し（入力／出力／所要時間／呼び出し元）を CloudWatch Logs + S3 に記録し、Audit 検索可能とすること（GR-3 / NFR-6 と整合）</td></tr>
+  <tr><td class="req-id">FR-Skill-Reg-07</td><td class="req-prio prio-must">MUST</td><td>プラグイン構造：新規 Skill は core 改修なしで追加可能であること。Skill コードは独立リポジトリ／ディレクトリで管理し、registry.register(skill) のみでホットロード／再起動なしで反映できること</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-1"><span class="num">4.1</span>FR-VideoKB（初期 Skill 4：動画ナレッジ分析）<span class="req-section-tag tag-fr">FR-VideoKB</span></h3>
+<p>Phase 4 / Sprint S7〜S8。詳細仕様は別冊『機能④ 確定仕様書 v1』参照。本書では要件番号体系のみ。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">FR-VideoKB-1</td><td class="req-prio prio-must">MUST</td><td>YouTube / TikTok / Instagram の URL を Slack に投げると、動画分析を返すこと（リアクティブ）</td></tr>
+  <tr><td class="req-id">FR-VideoKB-2</td><td class="req-prio prio-must">MUST</td><td>分析アウトプット：トランスクリプト、登場人物、商材、訴求軸、再生数 / engagement の構造化</td></tr>
+  <tr><td class="req-id">FR-VideoKB-3</td><td class="req-prio prio-must">MUST</td><td>Gemini Video Understanding API を使った動画コンテンツの直接解析</td></tr>
+  <tr><td class="req-id">FR-VideoKB-4</td><td class="req-prio prio-must">MUST</td><td>3 プラットフォーム × 2 段階（メタ + 中身）の分析パターンを提供</td></tr>
+  <tr><td class="req-id">FR-VideoKB-5</td><td class="req-prio prio-should">SHOULD</td><td>類似動画のクラスタリング（VSEO Analytics 連携）</td></tr>
+  <tr><td class="req-id">FR-VideoKB-6</td><td class="req-prio prio-should">SHOULD</td><td>競合分析モード：指定アカウントの直近10件の傾向分析</td></tr>
+  <tr><td class="req-id">FR-VideoKB-7</td><td class="req-prio prio-may">MAY</td><td>dpro / Buzzmiru / SHORTBOOSTER 等の外部 SaaS の MCP 統合（API 確認後）</td></tr>
+  <tr><td class="req-id">FR-VideoKB-8</td><td class="req-prio prio-must">MUST</td><td>分析結果は pgvector に保存し、後続 Skill（FR-Proposal）からも参照可能であること</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-2"><span class="num">4.2</span>FR-MailWF（初期 Skill 2：Mail ワークフロー）<span class="req-section-tag tag-fr">FR-MailWF</span></h3>
+<p>Phase 4 / Sprint S9〜S10。朝サマリー / 返信深掘り / 進捗サマリー（初期 Skill 5 を内包）。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">FR-MailWF-1</td><td class="req-prio prio-must">MUST</td><td>朝サマリー：毎朝 8:30 に当日対応すべきメールを優先度別に Slack DM 配信</td></tr>
+  <tr><td class="req-id">FR-MailWF-2</td><td class="req-prio prio-must">MUST</td><td>優先度判定：差出人 / 件名 / 本文 + 過去文脈から「即返信 / 今日中 / 数日OK / 様子見」の4段階分類</td></tr>
+  <tr><td class="req-id">FR-MailWF-3</td><td class="req-prio prio-must">MUST</td><td>返信深掘り：個別メール選択でスレッド全体・関連 Drive / Slack を統合分析</td></tr>
+  <tr><td class="req-id">FR-MailWF-4</td><td class="req-prio prio-must">MUST</td><td>返信ドラフト生成：相手の文体・過去やり取りに沿った返信案を Gmail 下書き保存</td></tr>
+  <tr><td class="req-id">FR-MailWF-5</td><td class="req-prio prio-must">MUST</td><td>下書き保存スコープ：<code>gmail.compose</code>。送信は人間が必ず確認</td></tr>
+  <tr><td class="req-id">FR-MailWF-6</td><td class="req-prio prio-must">MUST</td><td>進捗サマリー（初期 Skill 5 / FR-Summary を内包）：マネージャー向け週次ダイジェスト（各営業の動き / 案件進捗 / リスク）</td></tr>
+  <tr><td class="req-id">FR-MailWF-7</td><td class="req-prio prio-must">MUST</td><td>本人 / 他人メールの区別：本人 Mail = 要件定義用、他人 Mail = 過去事例ナレッジ DB</td></tr>
+  <tr><td class="req-id">FR-MailWF-8</td><td class="req-prio prio-must">MUST</td><td>opt-out：個別営業がメール共有を opt-out できる機能</td></tr>
+  <tr><td class="req-id">FR-MailWF-9</td><td class="req-prio prio-should">SHOULD</td><td>会議招待 / カレンダー連携で「次のミーティング前にこれ見ろ」リマインダ</td></tr>
+  <tr><td class="req-id">FR-MailWF-10</td><td class="req-prio prio-should">SHOULD</td><td>添付ファイルの自動要約（PDF / Word / Excel）</td></tr>
+  <tr><td class="req-id">FR-MailWF-11</td><td class="req-prio prio-may">MAY</td><td>メール文面の語気・トーン分析（怒り / 不安 / 期待）</td></tr>
+  <tr><td class="req-id">FR-MailWF-12</td><td class="req-prio prio-may">MAY</td><td>受信フォルダのラベル自動分類</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-3"><span class="num">4.3</span>FR-Proposal（初期 Skill 3：提案コンテンツ生成）<span class="req-section-tag tag-fr">FR-Proposal</span></h3>
+<p>Phase 4 / Sprint S11〜S13。5フェーズ生成ワークフロー（Phase 0〜E）。詳細仕様は『Phase 0-E 仕様書 v1』参照。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">FR-Proposal-1</td><td class="req-prio prio-must">MUST</td><td>Phase 0：要件ヒアリング。Slack 対話で案件情報（クライアント / 商材 / 目標）を取得</td></tr>
+  <tr><td class="req-id">FR-Proposal-2</td><td class="req-prio prio-must">MUST</td><td>Phase A：検索条件設計。pgvector / Gemini DR / X 各層への検索クエリを Agent が設計</td></tr>
+  <tr><td class="req-id">FR-Proposal-3</td><td class="req-prio prio-must">MUST</td><td>Phase B：並列リサーチ。6 データ層を Tool 並列呼び出し</td></tr>
+  <tr><td class="req-id">FR-Proposal-4</td><td class="req-prio prio-must">MUST</td><td>Phase C：5割版生成。引用ラベル付きで提案ドラフトを HTML で生成</td></tr>
+  <tr><td class="req-id">FR-Proposal-5</td><td class="req-prio prio-must">MUST</td><td>Phase D：対話型仕上げ。営業との対話で 5割→8割へ精緻化</td></tr>
+  <tr><td class="req-id">FR-Proposal-6</td><td class="req-prio prio-must">MUST</td><td>Phase E：営業最終調整。WYSIWYG エディタで微修正、最終 HTML / PDF / PPTX 出力</td></tr>
+  <tr><td class="req-id">FR-Proposal-7</td><td class="req-prio prio-must">MUST</td><td>データドリブン度の担保：生成文の主張に Tier 0-3 引用ラベル必須</td></tr>
+  <tr><td class="req-id">FR-Proposal-8</td><td class="req-prio prio-must">MUST</td><td>引用率 90% / 捏造率 0% を KPI 化（GR-9 と整合）</td></tr>
+  <tr><td class="req-id">FR-Proposal-9</td><td class="req-prio prio-must">MUST</td><td>出力フォーマット：HTML 標準、PDF / PPTX 変換可能（OR-2 / OR-3）</td></tr>
+  <tr><td class="req-id">FR-Proposal-10</td><td class="req-prio prio-must">MUST</td><td>テンプレ：会社既定の提案書テンプレ（HTML + PPTX）を初期スタイルとして適用</td></tr>
+  <tr><td class="req-id">FR-Proposal-11</td><td class="req-prio prio-must">MUST</td><td>意図ルーター：FR-SlackSuggest（軽い検索 Skill）と FR-Proposal（重い生成 Skill）を confidence で振り分け</td></tr>
+  <tr><td class="req-id">FR-Proposal-12</td><td class="req-prio prio-must">MUST</td><td>長時間処理（5フェーズ全体で数分）の進捗を Slack に逐次表示</td></tr>
+  <tr><td class="req-id">FR-Proposal-13</td><td class="req-prio prio-should">SHOULD</td><td>Phase B の Gemini DR は別 API 呼び出しで実装（コスト管理のため）</td></tr>
+  <tr><td class="req-id">FR-Proposal-14</td><td class="req-prio prio-should">SHOULD</td><td>過去提案の参照：類似案件の過去提案を自動レコメンド</td></tr>
+  <tr><td class="req-id">FR-Proposal-15</td><td class="req-prio prio-should">SHOULD</td><td>提案書の章構成テンプレ（背景/課題/打ち手/KPI/予算/スケジュール）</td></tr>
+  <tr><td class="req-id">FR-Proposal-16</td><td class="req-prio prio-should">SHOULD</td><td>提案書全体の版管理（OR-5）</td></tr>
+  <tr><td class="req-id">FR-Proposal-17</td><td class="req-prio prio-may">MAY</td><td>音声入力からの要件取得（Phase 0）</td></tr>
+  <tr><td class="req-id">FR-Proposal-18</td><td class="req-prio prio-may">MAY</td><td>競合社の過去事例分析（外部公開情報）</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-4"><span class="num">4.4</span>FR-SlackSuggest（初期 Skill 1：Slack 自動サジェスト）<span class="req-section-tag tag-fr">FR-SlackSuggest</span></h3>
+<p>Phase 4 / Sprint S14。@TeamAgent メンション起動の軽量検索（MR-P3 の検索 Skill を初期 Skill セットへ正式登録）。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">FR-SlackSuggest-1</td><td class="req-prio prio-must">MUST</td><td>@TeamAgent メンションでのみ起動（v2.1 で受動監視から変更）</td></tr>
+  <tr><td class="req-id">FR-SlackSuggest-2</td><td class="req-prio prio-must">MUST</td><td>応答 SLO：3 秒以内（NFR-1 と整合）</td></tr>
+  <tr><td class="req-id">FR-SlackSuggest-3</td><td class="req-prio prio-must">MUST</td><td>検出ロジック：意図ルーター（confidence ≥ 0.7）で軽い検索か重い生成かを判定</td></tr>
+  <tr><td class="req-id">FR-SlackSuggest-4</td><td class="req-prio prio-must">MUST</td><td>ephemeral 配信：confidence &lt; 0.7 で確認 ephemeral を返却</td></tr>
+  <tr><td class="req-id">FR-SlackSuggest-5</td><td class="req-prio prio-must">MUST</td><td>slash command：<code>/teamagent-search [query]</code> オプション</td></tr>
+  <tr><td class="req-id">FR-SlackSuggest-6</td><td class="req-prio prio-must">MUST</td><td>引用付き結果：DR-Tier ラベル付きで上位 5 件を返却</td></tr>
+  <tr><td class="req-id">FR-SlackSuggest-7</td><td class="req-prio prio-must">MUST</td><td>スレッド内文脈保持（MR-P3-4 と同等）</td></tr>
+  <tr><td class="req-id">FR-SlackSuggest-8</td><td class="req-prio prio-should">SHOULD</td><td>フィードバックボタン：役立った/役立たなかったの収集</td></tr>
+  <tr><td class="req-id">FR-SlackSuggest-9</td><td class="req-prio prio-should">SHOULD</td><td>頻出クエリのキャッシュ</td></tr>
+  <tr><td class="req-id">FR-SlackSuggest-10</td><td class="req-prio prio-may">MAY</td><td>音声入力からのクエリ起動</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-5"><span class="num">4.5</span>FR-Summary（初期 Skill 5：進捗サマリー）<span class="req-section-tag tag-fr">FR-Summary</span></h3>
+<p>Phase 4 / FR-MailWF（初期 Skill 2）に内包（Sprint S10 末）。マネージャー向け週次サマリー。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">FR-Summary-1</td><td class="req-prio prio-must">MUST</td><td>週次ダイジェスト：毎週月曜 9:00 にマネージャー DM 配信</td></tr>
+  <tr><td class="req-id">FR-Summary-2</td><td class="req-prio prio-must">MUST</td><td>集約軸：各営業の動き / 案件進捗 / 想定リスクの3軸</td></tr>
+  <tr><td class="req-id">FR-Summary-3</td><td class="req-prio prio-must">MUST</td><td>データソース：Mail（本人/他人）+ Slack（共有CH）+ Drive 更新履歴</td></tr>
+  <tr><td class="req-id">FR-Summary-4</td><td class="req-prio prio-must">MUST</td><td>リスク検知：返信遅延 / 失注予兆 / コミュニケーション量低下を自動検知</td></tr>
+  <tr><td class="req-id">FR-Summary-5</td><td class="req-prio prio-must">MUST</td><td>マネージャー権限：DM 受け取り対象を Slack グループで制御</td></tr>
+  <tr><td class="req-id">FR-Summary-6</td><td class="req-prio prio-should">SHOULD</td><td>ドリルダウン：サマリーから個別案件の詳細を追問できる</td></tr>
+  <tr><td class="req-id">FR-Summary-7</td><td class="req-prio prio-should">SHOULD</td><td>月次レポート出力（HTML / PDF）</td></tr>
+  <tr><td class="req-id">FR-Summary-8</td><td class="req-prio prio-may">MAY</td><td>営業個人向けセルフレポート（自分の活動振り返り）</td></tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ========== 5. 出力編集・変換要件（OR） ========== -->
+<section id="sec-5">
+<h2><span class="num">5.</span>出力編集・変換要件（OR）<span class="req-section-tag tag-or">OR-n</span></h2>
+<p>
+v3.0 で新規。提案書・サマリー等のすべての成果物を <strong>HTML 標準</strong>とし、PDF / PPTX に変換可能とする。営業がブラウザ上で微修正できる WYSIWYG エディタも要件化。
+</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">OR-1</td><td class="req-prio prio-must">MUST</td><td>HTML 出力を全 Skill の標準フォーマットとすること。Markdown は内部表現として使うが、ユーザーへの最終提示は HTML（Tailwind / 既定 CSS で整形）</td></tr>
+  <tr><td class="req-id">OR-2</td><td class="req-prio prio-must">MUST</td><td>HTML → PDF 変換：Puppeteer または Playwright（ヘッドレス Chromium）経由で印刷可能 PDF を生成すること。A4 / レター対応</td></tr>
+  <tr><td class="req-id">OR-3</td><td class="req-prio prio-must">MUST</td><td>HTML → PPTX 変換：HTML テンプレと PPTX テンプレを2層で持って同期させること。HTML 章 ↔ PPTX スライドの 1:1 マッピング</td></tr>
+  <tr><td class="req-id">OR-4</td><td class="req-prio prio-must">MUST</td><td>営業向け WYSIWYG エディタ：contenteditable な HTML エディタ（Tailwind スタイル適用済み）。ブラウザだけで動くこと（追加インストール不要）</td></tr>
+  <tr><td class="req-id">OR-5</td><td class="req-prio prio-must">MUST</td><td>編集中データの版管理：DB（PostgreSQL）に編集履歴を保存。10 版分まで遡れること</td></tr>
+  <tr><td class="req-id">OR-6</td><td class="req-prio prio-must">MUST</td><td>エクスポートしたファイルの Drive 保存 + Slack リンク返却：エクスポート完了後、Drive に保存し permalink を Slack スレッドに返すこと</td></tr>
+  <tr><td class="req-id">OR-7</td><td class="req-prio prio-should">SHOULD</td><td>PPTX テンプレは会社既定のマスタースライドを使用</td></tr>
+  <tr><td class="req-id">OR-8</td><td class="req-prio prio-should">SHOULD</td><td>HTML プレビュー画面に「差分表示」機能（編集前/後）</td></tr>
+  <tr><td class="req-id">OR-9</td><td class="req-prio prio-should">SHOULD</td><td>埋め込み画像 / グラフは SVG または Base64 PNG で HTML に直接埋め込み（外部依存ゼロ）</td></tr>
+  <tr><td class="req-id">OR-10</td><td class="req-prio prio-may">MAY</td><td>Word（.docx）形式へのエクスポート</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ========== 6. UX / 呼び出し要件（UR） ========== -->
+<section id="sec-6">
+<h2><span class="num">6.</span>UX / 呼び出し要件（UR）<span class="req-section-tag tag-ur">UR-n</span></h2>
+<p>
+v3.0 で新規。MVA は @TeamAgent メンションで起動、Phase 4 で Slash Command、最終形は Workflow Builder + Block Kit ボタン UI へ段階的に拡張。
+</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">UR-1</td><td class="req-prio prio-must">MUST</td><td>MVA は <code>@TeamAgent</code> メンションで起動すること。誤検知ゼロ、打鍵 2 秒、応答 3 秒以内</td></tr>
+  <tr><td class="req-id">UR-2</td><td class="req-prio prio-must">MUST</td><td>Phase 4 で Slash Command 対応：<code>/create-proposal</code>、<code>/analyze-video</code>、<code>/morning-summary</code> 等</td></tr>
+  <tr><td class="req-id">UR-3</td><td class="req-prio prio-must">MUST</td><td>最終形（Phase 5）は Slack Workflow Builder + Block Kit ボタン UI で起動できること。営業はメンションも Slash も打たずに「ボタンを押すだけ」</td></tr>
+  <tr><td class="req-id">UR-4</td><td class="req-prio prio-must">MUST</td><td>スレッド内会話の文脈保持：同一スレッド内では Skill 跨ぎでも履歴を継承すること</td></tr>
+  <tr><td class="req-id">UR-5</td><td class="req-prio prio-must">MUST</td><td>ボタン UI から Skill のパラメータ入力フォーム（Block Kit Modal）を呼び出せること</td></tr>
+  <tr><td class="req-id">UR-6</td><td class="req-prio prio-should">SHOULD</td><td>ホームタブ：TeamAgent App Home に「最近の活動 / 案件一覧 / Skill ショートカット」を表示</td></tr>
+  <tr><td class="req-id">UR-7</td><td class="req-prio prio-should">SHOULD</td><td>長時間 Skill の進捗バー：Slack メッセージ更新で進捗を可視化</td></tr>
+  <tr><td class="req-id">UR-8</td><td class="req-prio prio-should">SHOULD</td><td>エラー時の UX：Tool 失敗時に「もう一度試す」ボタンを返却</td></tr>
+  <tr><td class="req-id">UR-9</td><td class="req-prio prio-may">MAY</td><td>Slack 外（Web ブラウザ）からの呼び出し UI</td></tr>
+  <tr><td class="req-id">UR-10</td><td class="req-prio prio-may">MAY</td><td>音声起動（Slack Huddle 連携）</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ========== 7. データ要件（DR） ========== -->
+<section id="sec-7">
+<h2><span class="num">7.</span>データ要件（DR）<span class="req-section-tag tag-dr">DR-n</span></h2>
+<p>v2.2 から継承し、6 データ層（5+1） × Tier 構造 × Embedding 方針を統合。</p>
+
+<h3><span class="num">7.1</span>6 データ層の取り込み・更新</h3>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">DR-1</td><td class="req-prio prio-must">MUST</td><td>Gmail：本人 Mail / 他人 Mail の二重利用。OAuth 2.0、本人スコープ + ドメインワイド委任</td></tr>
+  <tr><td class="req-id">DR-2</td><td class="req-prio prio-must">MUST</td><td>Slack：指定チャンネル全件取り込み、DM 除外、スレッド構造保持</td></tr>
+  <tr><td class="req-id">DR-3</td><td class="req-prio prio-must">MUST</td><td>Drive：指定フォルダ配下の PDF / Word / PPT / Excel / Markdown を取り込み、増分同期</td></tr>
+  <tr><td class="req-id">DR-4</td><td class="req-prio prio-must">MUST</td><td>動画分析データ層：VSEO Analytics + Gemini Video Understanding API 経由の構造化結果</td></tr>
+  <tr><td class="req-id">DR-5</td><td class="req-prio prio-must">MUST</td><td>Gemini DR：オンデマンド Web リサーチ結果（提案生成時のみ呼び出し）</td></tr>
+  <tr><td class="req-id">DR-6</td><td class="req-prio prio-should">SHOULD</td><td>X（旧 Twitter）：オンデマンド検索の補強用。スクレイピングは公式 API 経由を必須</td></tr>
+  <tr><td class="req-id">DR-7</td><td class="req-prio prio-must">MUST</td><td>取り込み増分：すべてのデータ層で 5 分以内の増分同期（MR-P1-5）</td></tr>
+  <tr><td class="req-id">DR-8</td><td class="req-prio prio-must">MUST</td><td>削除伝播：元データ削除時に pgvector 上の Embedding も削除すること（GDPR / opt-out 対応）</td></tr>
+  <tr><td class="req-id">DR-9</td><td class="req-prio prio-must">MUST</td><td>保持期間：Mail / Slack / Drive は7年（営業文書保管規程準拠）、Gemini DR は90日</td></tr>
+  <tr><td class="req-id">DR-10</td><td class="req-prio prio-must">MUST</td><td>取り込みスループット：初期同期 5万〜10万件 / 48時間以内（MR-P1-9）</td></tr>
+  </tbody>
+</table>
+
+<h3><span class="num">7.2</span>Tier 構造（信頼度ラベル）</h3>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>Tier</th><th>定義</th><th>引用ラベル例</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">DR-Tier-0</td><td>Tier 0</td><td>一次データ：動画分析結果 / 案件メタ（自社で作成・確定）</td><td>[一次/動画分析]</td></tr>
+  <tr><td class="req-id">DR-Tier-1</td><td>Tier 1</td><td>本人由来：本人 Gmail / 担当案件 Slack</td><td>[一次/本人]</td></tr>
+  <tr><td class="req-id">DR-Tier-2</td><td>Tier 2</td><td>社内二次：他人 Gmail / 横断 Slack / Drive ナレッジ</td><td>[二次/社内]</td></tr>
+  <tr><td class="req-id">DR-Tier-3</td><td>Tier 3</td><td>外部リサーチ：Gemini DR / X 検索（要検証）</td><td>[三次/外部]</td></tr>
+  <tr><td class="req-id">DR-Tier-Req</td><td>—</td><td>生成文の主張に Tier ラベル必須化（GR-8 と整合）</td><td>—</td></tr>
+  </tbody>
+</table>
+
+<h3><span class="num">7.3</span>Embedding</h3>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">DR-Emb-1</td><td class="req-prio prio-must">MUST</td><td>初期 Embedding モデル：Bedrock Titan Text Embeddings v2（1024 次元）。日本語対応・コスト効率</td></tr>
+  <tr><td class="req-id">DR-Emb-2</td><td class="req-prio prio-should">SHOULD</td><td>代替候補：Voyage AI voyage-3、OpenAI text-embedding-3-large を A/B 比較</td></tr>
+  <tr><td class="req-id">DR-Emb-3</td><td class="req-prio prio-must">MUST</td><td>選定基準：日本語精度 / コスト / レイテンシ / pgvector 親和性</td></tr>
+  <tr><td class="req-id">DR-Emb-4</td><td class="req-prio prio-must">MUST</td><td>再 Embedding：モデル変更時に既存全件を再 Embedding できるバッチを実装</td></tr>
+  <tr><td class="req-id">DR-Emb-5</td><td class="req-prio prio-must">MUST</td><td>チャンク戦略：日本語 500〜800 文字単位、文脈オーバーラップ 100 文字</td></tr>
+  </tbody>
+</table>
+
+<h3><span class="num">7.4</span>メタデータタグスキーマ</h3>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">DR-Tag-1</td><td class="req-prio prio-must">MUST</td><td>各レコードに <code>{source, owner, project, channel, timestamp, tier}</code> のタグを必須付与</td></tr>
+  <tr><td class="req-id">DR-Tag-2</td><td class="req-prio prio-must">MUST</td><td>project タグの自動推定：本文 / スレッド名 / Drive フォルダ名から LLM で抽出</td></tr>
+  <tr><td class="req-id">DR-Tag-3</td><td class="req-prio prio-should">SHOULD</td><td>タグの後続修正：誤推定の場合は手動修正可能</td></tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ========== 8. Tools / MCP 要件（TR） ========== -->
+<section id="sec-8">
+<h2><span class="num">8.</span>Tools / MCP 要件（TR）<span class="req-section-tag tag-tr">TR-n</span></h2>
+<p>v3.0 で新規。Agent SDK の Tool として定義し、Claude が動的に呼び出す。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">TR-1</td><td class="req-prio prio-must">MUST</td><td>pgvector 検索 Tool：自然言語クエリ + フィルタ（source/owner/project/tier）で top-k 検索を返却（MR-P2-2）</td></tr>
+  <tr><td class="req-id">TR-2</td><td class="req-prio prio-must">MUST</td><td>Web 検索 Tool：Gemini Deep Research 経由。FR-Proposal の Phase B で使用</td></tr>
+  <tr><td class="req-id">TR-3</td><td class="req-prio prio-must">MUST</td><td>Gmail 操作 Tool：読み取り（リスト / 本文 / 添付）+ 下書き保存（<code>gmail.compose</code>）。送信権限なし</td></tr>
+  <tr><td class="req-id">TR-4</td><td class="req-prio prio-must">MUST</td><td>Drive 操作 Tool：読み取り（フォルダ一覧 / ファイル本文）+ 書き込み（PDF/PPTX エクスポート結果の保存）</td></tr>
+  <tr><td class="req-id">TR-5</td><td class="req-prio prio-must">MUST</td><td>動画分析 Tool：FR-VideoKB（初期 Skill 4）パイプライン呼び出し。URL → 分析結果を返却</td></tr>
+  <tr><td class="req-id">TR-6</td><td class="req-prio prio-may">MAY</td><td>外部 SaaS MCP：dpro / Buzzmiru / SHORTBOOSTER 等は API 仕様を確認後、Phase 4 で MCP 化検討</td></tr>
+  <tr><td class="req-id">TR-7</td><td class="req-prio prio-must">MUST</td><td>HTML→PDF Tool：OR-2 を Tool として Agent から呼び出せる</td></tr>
+  <tr><td class="req-id">TR-8</td><td class="req-prio prio-must">MUST</td><td>HTML→PPTX Tool：OR-3 を Tool として Agent から呼び出せる</td></tr>
+  <tr><td class="req-id">TR-9</td><td class="req-prio prio-must">MUST</td><td>Slack 操作 Tool：Block Kit メッセージ送信 / ephemeral / Modal 表示</td></tr>
+  <tr><td class="req-id">TR-10</td><td class="req-prio prio-must">MUST</td><td>すべての Tool に Permission チェック（GR-1）を必須実装すること</td></tr>
+  <tr><td class="req-id">TR-11</td><td class="req-prio prio-should">SHOULD</td><td>カレンダー Tool：Google Calendar 読み取り（次のミーティング情報）</td></tr>
+  <tr><td class="req-id">TR-12</td><td class="req-prio prio-should">SHOULD</td><td>Tool 呼び出しの結果をキャッシュ（同一クエリ 5 分以内）</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ========== 9. Memory / Session 要件（SR） ========== -->
+<section id="sec-9">
+<h2><span class="num">9.</span>Memory / Session 要件（SR）<span class="req-section-tag tag-sr">SR-n</span></h2>
+<p>v3.0 で新規。短期 / 中期 / 長期の3層メモリを設計。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">SR-1</td><td class="req-prio prio-must">MUST</td><td>スレッド単位の短期メモリ：Slack スレッド ID をキーに、直近 20 ターンの会話履歴を Redis に保持。TTL 24h</td></tr>
+  <tr><td class="req-id">SR-2</td><td class="req-prio prio-must">MUST</td><td>案件単位の中期メモリ：project タグごとに pgvector に蓄積。要件・経緯・意思決定を保存</td></tr>
+  <tr><td class="req-id">SR-3</td><td class="req-prio prio-must">MUST</td><td>ユーザー単位の長期メモリ：ユーザー ID キーで PostgreSQL に保存。プロフィール / 好み / 過去関与案件</td></tr>
+  <tr><td class="req-id">SR-4</td><td class="req-prio prio-must">MUST</td><td>Session のリセット条件：(a) ユーザー明示の「リセット」コマンド、(b) スレッド未活動 7 日、(c) 案件クローズ宣言</td></tr>
+  <tr><td class="req-id">SR-5</td><td class="req-prio prio-must">MUST</td><td>長期メモリの個人情報は暗号化保存（NFR-4 と整合）</td></tr>
+  <tr><td class="req-id">SR-6</td><td class="req-prio prio-should">SHOULD</td><td>中期メモリの圧縮：案件クローズ後は要点だけ残して圧縮アーカイブ</td></tr>
+  <tr><td class="req-id">SR-7</td><td class="req-prio prio-should">SHOULD</td><td>長期メモリのユーザー開示：自分のメモリを参照 / 削除できる UI</td></tr>
+  <tr><td class="req-id">SR-8</td><td class="req-prio prio-may">MAY</td><td>チーム単位のメモリ（営業チームの暗黙知）</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ========== 10. Guardrails 要件（GR） ========== -->
+<section id="sec-10">
+<h2><span class="num">10.</span>Guardrails 要件（GR）<span class="req-section-tag tag-gr">GR-n</span></h2>
+<p>v3.0 で大幅強化。広告 PR 業界特有の規制（薬機法・景表法・ステマ規制）と肖像権・引用必須化を明示。</p>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">GR-1</td><td class="req-prio prio-must">MUST</td><td>アクセス制御：Tier 0-3 ラベルに基づき、ユーザー / 案件単位で参照可能データを制限。Slack ユーザー ID をキーに RBAC</td></tr>
+  <tr><td class="req-id">GR-2</td><td class="req-prio prio-must">MUST</td><td>PII 保護：個人情報（電話番号 / メアド / 住所）を生成文に出す前にマスク。ユーザー本人の情報は除く</td></tr>
+  <tr><td class="req-id">GR-3</td><td class="req-prio prio-must">MUST</td><td>監査ログ：全 Agent 呼び出し / Tool 実行 / データアクセスを CloudWatch Logs + S3 にアーカイブ（NFR-6 と整合）</td></tr>
+  <tr><td class="req-id">GR-4</td><td class="req-prio prio-must">MUST</td><td>薬機法 NG 表現チェック（Phase 4 以降）：化粧品 / 健康食品案件の生成文を NG 辞書 + LLM ダブルチェックで検知</td></tr>
+  <tr><td class="req-id">GR-5</td><td class="req-prio prio-must">MUST</td><td>景表法（優良誤認・有利誤認）チェック：「最高」「No.1」等の表現を根拠付き / なしで分類</td></tr>
+  <tr><td class="req-id">GR-6</td><td class="req-prio prio-must">MUST</td><td>ステマ規制対応：景品表示法の不当表示告示に基づき、PR 表記の有無を生成文に明示</td></tr>
+  <tr><td class="req-id">GR-7</td><td class="req-prio prio-must">MUST</td><td>KOL 二次利用権・肖像権の期限管理：契約終了日を超えた KOL 動画 / 画像を引用禁止リストに自動登録</td></tr>
+  <tr><td class="req-id">GR-8</td><td class="req-prio prio-must">MUST</td><td>引用必須化：生成文の主張すべてに Tier 0-3 引用ラベルを付与（FR-Proposal-7 / DR-Tier-Req と整合）</td></tr>
+  <tr><td class="req-id">GR-9</td><td class="req-prio prio-must">MUST</td><td>KPI：引用率 90% 以上 / 捏造率 0%。週次ダッシュボードで監視（MR-P3-5 / FR-Proposal-8 と整合）</td></tr>
+  <tr><td class="req-id">GR-10</td><td class="req-prio prio-should">SHOULD</td><td>Prompt Injection 防御：取り込んだ外部データから Agent の挙動を改変する攻撃を検知・遮断</td></tr>
+  <tr><td class="req-id">GR-11</td><td class="req-prio prio-should">SHOULD</td><td>意図不明クエリの拒否：confidence &lt; 0.3 のクエリは「明確化してください」と返却</td></tr>
+  <tr><td class="req-id">GR-12</td><td class="req-prio prio-may">MAY</td><td>機密情報マーキング：Drive ファイルに [機密] タグがあれば Tier 0 扱いで参照制限強化</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ========== 11. 非機能要件（NFR） ========== -->
+<section id="sec-11">
+<h2><span class="num">11.</span>非機能要件（NFR）<span class="req-section-tag tag-nfr">NFR-n</span></h2>
+<table class="req-table">
+  <thead><tr><th>ID</th><th>優先度</th><th>要件</th></tr></thead>
+  <tbody>
+  <tr><td class="req-id">NFR-1</td><td class="req-prio prio-must">MUST</td><td>応答 SLO：軽量 Skill（検索）3 秒以内、中量（Mail 朝サマリー）30 秒以内、重量（提案生成）3〜5 分以内</td></tr>
+  <tr><td class="req-id">NFR-2</td><td class="req-prio prio-must">MUST</td><td>可用性：99.5%（営業時間 8:00-22:00 / 月次）。計画停止は週末深夜のみ</td></tr>
+  <tr><td class="req-id">NFR-3</td><td class="req-prio prio-must">MUST</td><td>スケーラビリティ：16人 → 100人 → 全社（数百人）拡張時にアーキ変更なしで対応</td></tr>
+  <tr><td class="req-id">NFR-4</td><td class="req-prio prio-must">MUST</td><td>セキュリティ：OAuth トークンは KMS 暗号化、Secrets Manager 必須。通信は TLS 1.2 以上</td></tr>
+  <tr><td class="req-id">NFR-5</td><td class="req-prio prio-must">MUST</td><td>パフォーマンス：pgvector 検索（top-20）1 秒以内、Embedding 投入 100 ms 以内 / 件</td></tr>
+  <tr><td class="req-id">NFR-6</td><td class="req-prio prio-must">MUST</td><td>監査ログ保持期間：1 年。S3 Glacier に長期アーカイブ</td></tr>
+  <tr><td class="req-id">NFR-7</td><td class="req-prio prio-must">MUST</td><td>バックアップ：PostgreSQL / pgvector / Redis を日次スナップショット、7 日分保持</td></tr>
+  <tr><td class="req-id">NFR-8</td><td class="req-prio prio-must">MUST</td><td>災害復旧：RPO 24h / RTO 4h。マルチ AZ 構成必須</td></tr>
+  <tr><td class="req-id">NFR-9</td><td class="req-prio prio-must">MUST</td><td>監視：CloudWatch メトリクス（CPU / メモリ / レイテンシ / エラー率）+ アラート</td></tr>
+  <tr><td class="req-id">NFR-10</td><td class="req-prio prio-must">MUST</td><td>コスト：月次運用 ¥95K〜¥105K（v1.5 上限 ¥250K の約 40%）以内</td></tr>
+  <tr><td class="req-id">NFR-11</td><td class="req-prio prio-should">SHOULD</td><td>ログ検索：CloudWatch Logs Insights で全 Agent 履歴を任意条件検索</td></tr>
+  <tr><td class="req-id">NFR-12</td><td class="req-prio prio-should">SHOULD</td><td>i18n：UI は日本語標準、英語は将来対応</td></tr>
+  <tr><td class="req-id">NFR-13</td><td class="req-prio prio-must">MUST</td><td>環境分離：dev / staging / prod の3環境。データは prod のみ実データ</td></tr>
+  <tr><td class="req-id">NFR-14</td><td class="req-prio prio-must">MUST</td><td>テスト：実装 55% / テスト 25% / 修正・安定化 20% の工数配分</td></tr>
+  <tr><td class="req-id">NFR-Extensibility-1</td><td class="req-prio prio-must">MUST</td><td>Skill の無限拡張：Skill レジストリ（FR-Skill-Reg-01〜07）により、新規 Skill は core 改修なしでプラグインとして無限に追加可能であること。初期 Skill セット5個は到達目標ではなく出発点</td></tr>
+  <tr><td class="req-id">NFR-Extensibility-2</td><td class="req-prio prio-must">MUST</td><td>後方互換：既存 Skill の入出力 schema 変更時は semver の major bump とし、旧バージョンを並列実行可能とすること</td></tr>
+  <tr><td class="req-id">NFR-Extensibility-3</td><td class="req-prio prio-should">SHOULD</td><td>Skill 追加コストの上限：標準的な単一 Skill（Tools + Guardrails 既存活用）はレジストリ登録から本番稼働まで 2 営業日以内で追加できること</td></tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ========== 12. Sprint 別 DoD ========== -->
+<section id="sec-12">
+<h2><span class="num">12.</span>Sprint 別 DoD（Definition of Done）</h2>
+<p>17 Sprint を <strong>MVA（S1-S6）/ Phase 4 拡張（S7-S14）/ Phase 5 全社展開（S15-S17）</strong>に再構成。</p>
+
+<h3><span class="num">12.1</span>MVA フェーズ（S1〜S6）</h3>
+<table class="req-table">
+  <thead><tr><th style="width:60px">Sprint</th><th style="width:140px">主題</th><th>Definition of Done</th></tr></thead>
+  <tbody>
+  <tr><td><strong>S1</strong></td><td>基盤構築 + Gmail 取り込み</td><td>MR-P1-1, 7, 8, 10 完了。Gmail OAuth 動作、CloudWatch 監視、Secrets Manager 設定済</td></tr>
+  <tr><td><strong>S2</strong></td><td>Drive / Slack 取り込み</td><td>MR-P1-2, 3, 4 完了。Drive / Slack の Embedding が pgvector に投入される</td></tr>
+  <tr><td><strong>S3</strong></td><td>増分同期 + メタデータ層</td><td>MR-P1-5, 6, 9, 11 完了。全件初期同期 5万件、増分 5 分以内、タグ自動付与</td></tr>
+  <tr><td><strong>S4</strong></td><td>Agent SDK 組み込み</td><td>MR-P2-1, 2, 3, 4, 6, 7 完了。Slack から @TeamAgent で Tool 呼び出しまで動作</td></tr>
+  <tr><td><strong>S5</strong></td><td>Memory + 監査</td><td>MR-P2-5, 8 + SR-1, 4 + GR-1, 3 完了。SLO 3 秒達成、監査ログ完備</td></tr>
+  <tr><td><strong>S6</strong></td><td>検索 Skill リリース</td><td>MR-P3-1〜5 完了。営業16名にロールアウト、引用率 90% / 捏造率 0% を達成。<strong>MVA 完成</strong></td></tr>
+  </tbody>
+</table>
+
+<h3><span class="num">12.2</span>Phase 4 拡張（S7〜S14）</h3>
+<table class="req-table">
+  <thead><tr><th style="width:60px">Sprint</th><th style="width:140px">主題</th><th>Definition of Done</th></tr></thead>
+  <tbody>
+  <tr><td><strong>S7</strong></td><td>FR-VideoKB Phase 1</td><td>FR-VideoKB-1〜4 完了。YouTube / TikTok / Instagram の URL 分析が動作</td></tr>
+  <tr><td><strong>S8</strong></td><td>FR-VideoKB Phase 2</td><td>FR-VideoKB-5〜8 完了。クラスタリング + 競合分析 + pgvector 保存</td></tr>
+  <tr><td><strong>S9</strong></td><td>FR-MailWF 朝サマリー</td><td>FR-MailWF-1〜5 完了。優先度判定 + 返信ドラフト保存が動作</td></tr>
+  <tr><td><strong>S10</strong></td><td>FR-MailWF + FR-Summary</td><td>FR-MailWF-6〜12 + FR-Summary-1〜8 完了。進捗サマリーがマネージャーに配信</td></tr>
+  <tr><td><strong>S11</strong></td><td>FR-Proposal Phase 0〜B</td><td>FR-Proposal-1〜4 + TR-2 完了。検索条件設計 + 並列リサーチが動作</td></tr>
+  <tr><td><strong>S12</strong></td><td>FR-Proposal Phase C〜E</td><td>FR-Proposal-5〜10 + OR-1〜6 完了。提案 HTML/PDF/PPTX 出力</td></tr>
+  <tr><td><strong>S13</strong></td><td>Guardrails 強化</td><td>GR-4〜9 完了。薬機法 / 景表法 / ステマ / KOL 二次利用権チェック動作</td></tr>
+  <tr><td><strong>S14</strong></td><td>FR-SlackSuggest + UR</td><td>FR-SlackSuggest-1〜10 + UR-1〜5 完了。意図ルーター + slash command + Block Kit ボタン UI</td></tr>
+  </tbody>
+</table>
+
+<h3><span class="num">12.3</span>Phase 5 全社展開（S15〜S17）</h3>
+<table class="req-table">
+  <thead><tr><th style="width:60px">Sprint</th><th style="width:140px">主題</th><th>Definition of Done</th></tr></thead>
+  <tbody>
+  <tr><td><strong>S15</strong></td><td>Workflow Builder UI</td><td>UR-3, 6, 7 完了。ボタン UI 化で営業はメンション不要に</td></tr>
+  <tr><td><strong>S16</strong></td><td>機能⑥ Personal AI Coach Phase 1</td><td>機能⑥ 要件 v3.0 の Phase 1 完了。営業 100 人規模に拡張可能</td></tr>
+  <tr><td><strong>S17</strong></td><td>全社展開リリース</td><td>NFR-3, 8 完了。全社規模での運用安定確認。Phase 5 完了</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ========== 13. 改訂履歴と用語集 ========== -->
+<section id="sec-13" class="appendix">
+<h2><span class="num">13.</span>改訂履歴と用語集</h2>
+
+<h3 id="sec-13-1"><span class="num">13.1</span>改訂履歴</h3>
+<table class="req-table">
+  <thead><tr><th style="width:80px">Version</th><th style="width:120px">日付</th><th>主要変更</th></tr></thead>
+  <tbody>
+  <tr><td><strong>v1.0</strong></td><td>2026/04/27</td><td>初版。提案書生成 + Mail Agent の単独機能要件</td></tr>
+  <tr><td><strong>v2.0</strong></td><td>2026/05/07</td><td>5機能体系化。動画分析データ層追加</td></tr>
+  <tr><td><strong>v2.1</strong></td><td>2026/05/08</td><td>機能① 受動監視 → メンション起動に変更。17 Sprint 化</td></tr>
+  <tr><td><strong>v2.2</strong></td><td>2026/05/13</td><td>整合性 QA 反映。Tier 構造明示、データドリブン度 KPI 化</td></tr>
+  <tr><td><strong>v3.0</strong></td><td>2026/05/19</td><td>OpenClaw 削除、Claude Agent SDK 単独化。MVA P1〜P3 を要件化、4軸（Skill/Tool/Memory/Guardrails）再分類、OR / UR / TR / SR / GR 新設</td></tr>
+  <tr><td><strong>v3.0 改訂</strong></td><td>2026/05/19</td><td>料理メタファを技術書表現に統一。Skill を無限拡張可能なレジストリとして再定義し、Skill レジストリ FR を新規追加（FR-Skill-Reg-01〜07）。「5機能固定」を「初期 Skill セット5個」と位置付け直し。</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-13-2"><span class="num">13.2</span>用語集</h3>
+<dl class="terms">
+  <dt>Agent</dt>
+  <dd>LLM が Tool を動的に選び、目的達成まで自律的に動作するシステム。Claude Agent SDK は Anthropic 公式の Agent 実行フレームワーク。</dd>
+
+  <dt>Skill</dt>
+  <dd>Agent SDK 上で実行可能な再利用可能な処理単位。<code>入出力 schema + 必要 Tools + Guardrails 仕様</code>を持ち、Skill レジストリにプラグインとして登録される。core 改修なしで無限に追加可能。本書 v3.0 改訂以降では、Phase 4 で登録する初期 Skill セット5個（FR-SlackSuggest / FR-MailWF / FR-Proposal / FR-VideoKB / FR-Summary）を出発点として位置付ける。</dd>
+
+  <dt>Skill レジストリ</dt>
+  <dd>Skill の登録／検索／実行を司る基盤コンポーネント。バージョン管理（semver）、依存解決、RBAC、Audit ログ、プラグイン構造のホットロードを備える（FR-Skill-Reg-01〜07）。</dd>
+
+  <dt>初期 Skill セット</dt>
+  <dd>Phase 4 で Skill レジストリに最初に登録する5個の Skill（FR-SlackSuggest / FR-MailWF / FR-Proposal / FR-VideoKB / FR-Summary）。v2.2 までの「5機能」を Skill 化したもので、これ以降の Skill は無限に追加可能。</dd>
+
+  <dt>Tool</dt>
+  <dd>Agent が呼び出す関数の単位。pgvector 検索、Gmail 操作、Drive 書き込み、HTML→PDF 変換などが Tool。</dd>
+
+  <dt>MCP（Model Context Protocol）</dt>
+  <dd>Anthropic が定義した「Tool / リソース / プロンプトを外部サーバから LLM に提供する」標準プロトコル。外部 SaaS との接続に使用。</dd>
+
+  <dt>Memory</dt>
+  <dd>Agent が会話 / 案件 / ユーザー単位で保持する文脈情報。短期（Redis）/ 中期（pgvector）/ 長期（PostgreSQL）の3層。</dd>
+
+  <dt>Guardrails</dt>
+  <dd>Agent の挙動を制約するセキュリティ・コンプラ層。アクセス制御、PII 保護、薬機法・景表法・ステマ規制、引用必須化。</dd>
+
+  <dt>pgvector</dt>
+  <dd>PostgreSQL に Embedding ベクトル検索機能を追加する拡張。本システムの中心ストレージ。</dd>
+
+  <dt>Tier 0-3</dt>
+  <dd>データ信頼度ラベル。Tier 0 = 一次データ（動画/案件メタ）、Tier 1 = 本人由来、Tier 2 = 社内二次、Tier 3 = 外部リサーチ。</dd>
+
+  <dt>MVA（Minimum Viable Agent）</dt>
+  <dd>TeamAgent の最小実用形態。Claude SDK + pgvector + Slack + Gmail/Drive で「@TeamAgent で過去ナレッジ横断検索ができる」最小構成。S1〜S6 で構築。</dd>
+
+  <dt>DoD（Definition of Done）</dt>
+  <dd>各 Sprint の完了基準。本書 第12章で Sprint 毎に列挙。</dd>
+
+  <dt>引用率 / 捏造率</dt>
+  <dd>生成文の主張のうち Tier 引用ラベル付きの比率を引用率、出典のない事実主張を捏造として捏造率とする。KPI = 引用率 90% 以上 / 捏造率 0%。</dd>
+
+  <dt>意図ルーター</dt>
+  <dd>FR-SlackSuggest（軽い検索 Skill）と FR-Proposal（重い生成 Skill）を confidence ≥ 0.7 で振り分けるロジック。</dd>
+
+  <dt>ephemeral</dt>
+  <dd>Slack <code>chat.postEphemeral</code> による特定ユーザー向け一時メッセージ。FR-SlackSuggest の確認応答に使用。</dd>
+
+  <dt>Workflow Builder</dt>
+  <dd>Slack 標準のノーコードワークフロー構築機能。ボタン押下で Skill を起動する UI に使用。</dd>
+
+  <dt>Block Kit</dt>
+  <dd>Slack のリッチ UI 構築フレームワーク。ボタン、Modal、フォームを Skill から呼び出せる。</dd>
+
+  <dt>Bedrock Titan v2</dt>
+  <dd>AWS Bedrock の Embedding モデル（1024 次元、日本語対応）。本システムの初期採用モデル。</dd>
+</dl>
+</section>
+
+</main>
+</div>
+
+</body>
+</html>

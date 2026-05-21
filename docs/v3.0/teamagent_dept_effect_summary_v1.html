@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>TeamAgent 部門別効果まとめ</title>
+<style>
+:root {
+  --text: #1a1a1a;
+  --muted: #525252;
+  --soft: #fafafa;
+  --border: #e5e7eb;
+  --sales: #B91C1C;
+  --prod: #1d4ed8;
+  --acct: #16a34a;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  background: #e5e5e5;
+  color: var(--text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.doc { display: flex; flex-direction: column; align-items: center; padding: 32px 0; gap: 32px; }
+.page {
+  width: 210mm;
+  height: 297mm;
+  background: #fff;
+  position: relative;
+  padding: 18mm 16mm;
+  box-shadow: 0 8px 32px rgba(0,0,0,.12);
+  overflow: hidden;
+}
+.page-num {
+  position: absolute;
+  bottom: 10mm;
+  right: 16mm;
+  color: var(--muted);
+  font-size: 9pt;
+  letter-spacing: 0.05em;
+}
+.page-brand {
+  position: absolute;
+  bottom: 10mm;
+  left: 16mm;
+  color: var(--muted);
+  font-size: 9pt;
+  letter-spacing: 0.05em;
+}
+
+/* ===== Common ===== */
+.dept-tag {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 10pt;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.dept-tag.sales { background: #fecaca; color: var(--sales); }
+.dept-tag.prod  { background: #dbeafe; color: var(--prod); }
+.dept-tag.acct  { background: #dcfce7; color: var(--acct); }
+
+.dot {
+  display: inline-block;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+.dot.sales { background: var(--sales); }
+.dot.prod  { background: var(--prod); }
+.dot.acct  { background: var(--acct); }
+
+/* ===== Page 1 ===== */
+.title-block { margin-bottom: 10mm; }
+.title {
+  font-size: 22pt;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: var(--text);
+  line-height: 1.3;
+}
+.title .accent { color: var(--sales); }
+.subtitle {
+  font-size: 10.5pt;
+  color: var(--muted);
+  margin-top: 6px;
+  letter-spacing: 0.04em;
+}
+.lead {
+  font-size: 11pt;
+  color: var(--text);
+  margin-top: 10px;
+  line-height: 1.7;
+  padding: 10px 14px;
+  background: var(--soft);
+  border-left: 3px solid #d4d4d4;
+}
+
+.effect-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9mm 9mm 8mm;
+  margin-bottom: 6mm;
+  background: #fff;
+  position: relative;
+}
+.effect-card.sales { border-left: 5px solid var(--sales); }
+.effect-card.prod  { border-left: 5px solid var(--prod); }
+.effect-card.acct  { border-left: 5px solid var(--acct); }
+
+.effect-card .card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.effect-card h3 {
+  font-size: 14pt;
+  font-weight: 700;
+  color: var(--text);
+}
+.effect-card .points {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+  margin-top: 6px;
+  margin-bottom: 8px;
+}
+.effect-card .points li {
+  list-style: none;
+  font-size: 10.5pt;
+  color: var(--text);
+  padding-left: 14px;
+  position: relative;
+  line-height: 1.55;
+}
+.effect-card .points li::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 8px;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.effect-card.sales .points li::before { background: var(--sales); }
+.effect-card.prod  .points li::before { background: var(--prod); }
+.effect-card.acct  .points li::before { background: var(--acct); }
+
+.effect-card .meta {
+  display: flex;
+  gap: 14px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 10pt;
+}
+.effect-card .meta .label {
+  color: var(--muted);
+  font-weight: 700;
+  margin-right: 6px;
+}
+.effect-card .meta .impact { color: var(--text); font-weight: 700; }
+.effect-card.sales .meta .impact { color: var(--sales); }
+.effect-card.prod  .meta .impact { color: var(--prod); }
+.effect-card.acct  .meta .impact { color: var(--acct); }
+
+.total-impact {
+  margin-top: 4mm;
+  padding: 10px 14px;
+  background: #1a1a1a;
+  color: #fff;
+  font-size: 10.5pt;
+  border-radius: 4px;
+  text-align: center;
+  letter-spacing: 0.03em;
+}
+.total-impact b { color: #fbbf24; font-size: 11.5pt; }
+
+/* ===== Page 2 ===== */
+.page-head h2 {
+  font-size: 20pt;
+  font-weight: 800;
+  margin-bottom: 4px;
+}
+.page-head .sub {
+  font-size: 10.5pt;
+  color: var(--muted);
+  margin-bottom: 8mm;
+  letter-spacing: 0.03em;
+}
+
+table.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10pt;
+  table-layout: fixed;
+}
+table.matrix th,
+table.matrix td {
+  border: 1px solid var(--border);
+  padding: 7px 8px;
+  vertical-align: top;
+  line-height: 1.45;
+}
+table.matrix th {
+  background: var(--soft);
+  font-weight: 700;
+  font-size: 10pt;
+  color: var(--text);
+}
+table.matrix col.col-task   { width: 24%; }
+table.matrix col.col-dept   { width: 11%; }
+table.matrix col.col-before { width: 26%; }
+table.matrix col.col-after  { width: 27%; }
+table.matrix col.col-func   { width: 12%; }
+
+table.matrix td.task {
+  font-weight: 700;
+  color: var(--text);
+}
+table.matrix td.task .num {
+  display: inline-block;
+  background: #1a1a1a;
+  color: #fff;
+  font-size: 8.5pt;
+  width: 18px; height: 18px;
+  text-align: center;
+  border-radius: 50%;
+  line-height: 18px;
+  margin-right: 6px;
+}
+table.matrix td.dept {
+  text-align: center;
+  font-weight: 700;
+  font-size: 9.5pt;
+}
+table.matrix td.dept .dept-mini {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 9pt;
+  margin-top: 2px;
+}
+table.matrix td.dept .dept-mini.sales { background: #fecaca; color: var(--sales); }
+table.matrix td.dept .dept-mini.prod  { background: #dbeafe; color: var(--prod); }
+table.matrix td.dept .dept-mini.acct  { background: #dcfce7; color: var(--acct); }
+table.matrix td.before { color: #6b7280; }
+table.matrix td.after  { color: var(--text); }
+table.matrix td.after b { font-weight: 700; }
+table.matrix td.func {
+  text-align: center;
+  font-weight: 700;
+  font-size: 10pt;
+  color: var(--muted);
+}
+
+.matrix-legend {
+  margin-top: 6mm;
+  padding: 8px 12px;
+  background: var(--soft);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 9pt;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+}
+.matrix-legend .group { display: inline-flex; align-items: center; gap: 4px; }
+
+/* ===== Page 3 ===== */
+.timeline-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 5mm;
+  margin-top: 4mm;
+}
+.tl-col {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6mm 5mm;
+  background: #fff;
+}
+.tl-col.sales { border-top: 4px solid var(--sales); }
+.tl-col.prod  { border-top: 4px solid var(--prod); }
+.tl-col.acct  { border-top: 4px solid var(--acct); }
+.tl-col h3 {
+  font-size: 13pt;
+  font-weight: 800;
+  margin-bottom: 2px;
+}
+.tl-col.sales h3 { color: var(--sales); }
+.tl-col.prod  h3 { color: var(--prod); }
+.tl-col.acct  h3 { color: var(--acct); }
+.tl-col .role {
+  font-size: 9pt;
+  color: var(--muted);
+  margin-bottom: 5mm;
+  letter-spacing: 0.03em;
+}
+
+.tl-slot { margin-bottom: 4.5mm; }
+.tl-slot .time {
+  font-size: 11pt;
+  font-weight: 800;
+  color: var(--text);
+  margin-bottom: 4px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tl-slot .time .clock {
+  font-family: "SF Mono", Menlo, monospace;
+}
+.tl-slot .ba {
+  display: flex;
+  gap: 6px;
+  font-size: 9.5pt;
+  line-height: 1.5;
+  margin-top: 3px;
+}
+.tl-slot .ba .label {
+  flex-shrink: 0;
+  font-weight: 700;
+  font-size: 8.5pt;
+  padding: 1px 5px;
+  border-radius: 3px;
+  height: 17px;
+  line-height: 15px;
+}
+.tl-slot .ba.before .label { background: #f3f4f6; color: #6b7280; }
+.tl-slot .ba.after  .label { background: #1a1a1a; color: #fff; }
+.tl-slot .ba.before { color: #6b7280; }
+.tl-slot .ba.before .text { text-decoration: line-through; text-decoration-color: #d1d5db; }
+.tl-slot .ba.after  { color: var(--text); margin-top: 4px; }
+
+.closing {
+  margin-top: 6mm;
+  padding: 14px 18px;
+  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+  color: #fff;
+  border-radius: 6px;
+  font-size: 11.5pt;
+  line-height: 1.6;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+.closing b { color: #fbbf24; }
+.closing .small {
+  display: block;
+  margin-top: 6px;
+  font-size: 9.5pt;
+  color: #d4d4d4;
+  font-weight: 400;
+}
+
+/* ===== Print ===== */
+@page { size: A4; margin: 0; }
+@media print {
+  body { background: #fff; }
+  .doc { padding: 0; gap: 0; }
+  .page {
+    box-shadow: none;
+    page-break-after: always;
+    margin: 0;
+  }
+  .page:last-child { page-break-after: auto; }
+}
+</style>
+</head>
+<body>
+<div class="doc">
+
+<!-- ============ PAGE 1 : 部門別効果サマリー ============ -->
+<section class="page">
+  <div class="title-block">
+    <div class="title">TeamAgent が業務をどう変えるか<br>― 営業 / 制作 / アカウントの<span class="accent">部門別効果まとめ</span></div>
+    <div class="subtitle">広告・PR・動画マーケ業界の実務ベース ／ ペラ3 配布資料</div>
+    <p class="lead">
+      資料自動化だけじゃない。営業の提案準備、制作の競合分析、アカウントの進行・レポーティングに、TeamAgent は何が効くのか。3部門の実務に即して整理しました。
+    </p>
+  </div>
+
+  <!-- 営業 -->
+  <div class="effect-card sales">
+    <div class="card-head">
+      <span class="dept-tag sales">営業</span>
+      <h3>提案準備〜受注までの時間を圧縮、ベテラン依存を解消</h3>
+    </div>
+    <ul class="points">
+      <li>提案書たたきが 1案件 <b>20h → 8〜12h</b> に圧縮</li>
+      <li>クライアント事前リサーチ <b>60分 → 7分</b></li>
+      <li>過去類似案件・ベテランの暗黙知を Slack で即引き出し</li>
+      <li>媒体ミックスの雛形も過去ベンチから AI が提示</li>
+    </ul>
+    <div class="meta">
+      <div><span class="label">主に効く機能</span>①Slackサジェスト ／ ③提案生成 ／ ⑤進捗サマリー</div>
+      <div><span class="label">量的インパクト</span><span class="impact">営業1人 週 5〜8h ／ 年 250〜400h</span></div>
+    </div>
+  </div>
+
+  <!-- 制作 -->
+  <div class="effect-card prod">
+    <div class="card-head">
+      <span class="dept-tag prod">制作</span>
+      <h3>企画立ち上げ・競合分析・ナレッジ参照が圧倒的に早くなる</h3>
+    </div>
+    <ul class="points">
+      <li>競合動画のタイムライン分解＋シーン分析が <b>URL投入で3分</b></li>
+      <li>バズり動画の構造（フック2秒・テロップ・CTA）が抽出済み</li>
+      <li>過去自社実績クリエイティブの検索性向上（pgvector ＋テロップ文字起こし）</li>
+      <li>"あの企画どこにあったっけ" が自然言語検索で即引ける</li>
+    </ul>
+    <div class="meta">
+      <div><span class="label">主に効く機能</span>④動画分析 ／ ①Slackサジェスト</div>
+      <div><span class="label">量的インパクト</span><span class="impact">制作1人 週 4〜6h ／ 年 200〜300h</span></div>
+    </div>
+  </div>
+
+  <!-- アカウント -->
+  <div class="effect-card acct">
+    <div class="card-head">
+      <span class="dept-tag acct">アカウント</span>
+      <h3>クライアント対応・進行管理・レポートが自動化される</h3>
+    </div>
+    <ul class="points">
+      <li>朝8時に「返信要メール／入稿〆切／炎上監視／許諾切れKOL」を Slack push</li>
+      <li>媒体実績データの週次・月次レポートを自動ドラフト</li>
+      <li>クライアント別 AI 担当が全接点履歴を継続追跡</li>
+      <li>定期報告・追加施策提案の下書きまで AI が準備</li>
+    </ul>
+    <div class="meta">
+      <div><span class="label">主に効く機能</span>②Mail ／ ⑤進捗サマリー ／ ①Slackサジェスト</div>
+      <div><span class="label">量的インパクト</span><span class="impact">アカウント1人 週 6〜10h ／ 年 300〜500h</span></div>
+    </div>
+  </div>
+
+  <div class="total-impact">
+    全社合計の目安 ： <b>年 6,000〜10,000時間</b> の作業時間が AI に置き換わる試算（社内人数16名前提）
+  </div>
+
+  <div class="page-brand">TeamAgent ／ 社内 AI 基盤</div>
+  <div class="page-num">1 / 3</div>
+</section>
+
+<!-- ============ PAGE 2 : 業務×部門 マトリックス ============ -->
+<section class="page">
+  <div class="page-head">
+    <h2>業務別 Before / After ― どの業務がどの部門で楽になるか</h2>
+    <div class="sub">主要 12 業務 × 3 部門の効率化マッピング</div>
+  </div>
+
+  <table class="matrix">
+    <colgroup>
+      <col class="col-task">
+      <col class="col-dept">
+      <col class="col-before">
+      <col class="col-after">
+      <col class="col-func">
+    </colgroup>
+    <thead>
+      <tr>
+        <th>業務</th>
+        <th>主担当</th>
+        <th>Before（現状）</th>
+        <th>After（TeamAgent）</th>
+        <th>効く機能</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="task"><span class="dot sales"></span><span class="num">1</span>クライアント事前リサーチ</td>
+        <td class="dept"><span class="dept-mini sales">営業</span></td>
+        <td class="before">手作業で約60分。検索→PDF読み→メモ整形</td>
+        <td class="after"><b>7分の AI レポート</b>。商談トークアングルまで返ってくる</td>
+        <td class="func">①</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot sales"></span><span class="num">2</span>提案書たたき台作成</td>
+        <td class="dept"><span class="dept-mini sales">営業</span></td>
+        <td class="before">白紙から4時間。構成・参考事例集めで疲弊</td>
+        <td class="after"><b>30分でドラフト</b>。ブラッシュアップに集中できる</td>
+        <td class="func">③</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot sales"></span><span class="num">3</span>オリエン議事録の構造化</td>
+        <td class="dept"><span class="dept-mini sales">営業</span></td>
+        <td class="before">30分の手起こし。次アクション洗い出し別途</td>
+        <td class="after"><b>3分で自動要約＋次アクション抽出</b></td>
+        <td class="func">②</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot sales"></span><span class="num">4</span>過去類似案件の引き出し</td>
+        <td class="dept"><span class="dept-mini sales">営業</span></td>
+        <td class="before">ベテランに聞きにいく、Driveを漁る</td>
+        <td class="after"><b>@TeamAgent で即引き出し</b>。属人化を解消</td>
+        <td class="func">①</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot prod"></span><span class="num">5</span>競合動画のクリエイティブ分析</td>
+        <td class="dept"><span class="dept-mini prod">制作</span></td>
+        <td class="before">1本30分の目視。タイムライン書き出し</td>
+        <td class="after">URLを投げて <b>3分でシーン分解＋スコア</b></td>
+        <td class="func">④</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot prod"></span><span class="num">6</span>バズり動画の構造化ナレッジ</td>
+        <td class="dept"><span class="dept-mini prod">制作</span></td>
+        <td class="before">個人の感覚知に留まる、共有されない</td>
+        <td class="after"><b>フック2秒・テロップ・CTAを抽出して全社共有</b></td>
+        <td class="func">④</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot prod"></span><span class="num">7</span>自社実績クリエイティブの検索</td>
+        <td class="dept"><span class="dept-mini prod">制作</span></td>
+        <td class="before">Drive 漁り。ファイル名命名規則頼み</td>
+        <td class="after"><b>自然言語検索で即取り出し</b>（pgvector）</td>
+        <td class="func">①</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot sales"></span><span class="num">8</span>媒体プラン作成</td>
+        <td class="dept"><span class="dept-mini sales">営業</span>／<span class="dept-mini acct">アカ</span></td>
+        <td class="before">手作業＆ベンチ調べ。経験頼みの媒体ミックス</td>
+        <td class="after"><b>過去ベンチ＋媒体ミックス雛形を AI 提示</b></td>
+        <td class="func">①③</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot acct"></span><span class="num">9</span>クライアント宛メールの下書き</td>
+        <td class="dept"><span class="dept-mini acct">アカウント</span></td>
+        <td class="before">個別に1通ずつ作成、文面の毎回ゼロ起こし</td>
+        <td class="after"><b>朝8時に返信下書きが Slack/Mailに自動生成</b></td>
+        <td class="func">②</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot acct"></span><span class="num">10</span>案件進行のモニタリング</td>
+        <td class="dept"><span class="dept-mini acct">アカウント</span></td>
+        <td class="before">個人が頭/Excelで管理。漏れの恐怖と常時隣り合わせ</td>
+        <td class="after"><b>入稿〆切・許諾期限・滞留案件を AI が能動通知</b></td>
+        <td class="func">②⑤</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot acct"></span><span class="num">11</span>月次効果レポート作成</td>
+        <td class="dept"><span class="dept-mini acct">アカウント</span></td>
+        <td class="before">媒体実績を手で集計、コピペで体裁を整える</td>
+        <td class="after"><b>自動構造化＋ドラフト</b>。コメント部分だけ手当て</td>
+        <td class="func">⑤</td>
+      </tr>
+      <tr>
+        <td class="task"><span class="dot sales"></span><span class="dot prod"></span><span class="dot acct"></span><span class="num">12</span>ナレッジ／引き継ぎ</td>
+        <td class="dept"><span class="dept-mini sales">営業</span><span class="dept-mini prod">制作</span><span class="dept-mini acct">アカ</span></td>
+        <td class="before">ベテラン依存・属人化。退職で消える知</td>
+        <td class="after"><b>pgvector で全社知化</b>。AIコーチが新人育成も支援</td>
+        <td class="func">①⑥</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="matrix-legend">
+    <span class="group"><span class="dot sales"></span>営業</span>
+    <span class="group"><span class="dot prod"></span>制作</span>
+    <span class="group"><span class="dot acct"></span>アカウント</span>
+    <span style="color:#9ca3af;">／</span>
+    <span>機能 ①Slackサジェスト ②Mail ③提案生成 ④動画分析 ⑤進捗サマリー ⑥AIコーチ</span>
+  </div>
+
+  <div class="page-brand">TeamAgent ／ 社内 AI 基盤</div>
+  <div class="page-num">2 / 3</div>
+</section>
+
+<!-- ============ PAGE 3 : 部門別1日のタイムライン ============ -->
+<section class="page">
+  <div class="page-head">
+    <h2>1日がこう変わる ― 部門別ビフォーアフター・タイムライン</h2>
+    <div class="sub">Before の1日 → After の1日 を、3部門それぞれ具体的に</div>
+  </div>
+
+  <div class="timeline-grid">
+    <!-- 営業 -->
+    <div class="tl-col sales">
+      <h3>営業</h3>
+      <div class="role">提案準備〜受注フェーズ</div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">09:00</span> 朝の立ち上がり</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">メール棚卸し→返信作成→過去案件を思い出す</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">Slack で本日ToDo通知＋返信下書き済み。過去類似案件は @TeamAgent で5秒</span></div>
+      </div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">11:00</span> 新規リサーチ</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">新規クライアント調査に60分。広報・IR・SNSを行ったり来たり</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">プロンプト1本で7分、商談トークアングルまで返ってくる</span></div>
+      </div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">14:00</span> 提案書作成</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">提案書たたきを白紙から4時間</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">ヒアリングメモを渡して30分でドラフト。中身の精度に集中</span></div>
+      </div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">17:00</span> 日報・進捗</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">日報＋進捗報告に1時間</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">進捗サマリーが自動でBUマネージャーに上がる</span></div>
+      </div>
+    </div>
+
+    <!-- 制作 -->
+    <div class="tl-col prod">
+      <h3>制作</h3>
+      <div class="role">企画立案〜クリエイティブ制作</div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">09:00</span> トレンド把握</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">今週バズった競合動画をSNSで目視チェック</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">朝にバズり動画の構造分析が自動フィード</span></div>
+      </div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">11:00</span> 競合分析</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">参考動画を一本ずつ視聴・分解・メモ</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">URL を @TeamAgent に投げて3分でタイムライン分解＋テロップ抽出</span></div>
+      </div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">14:00</span> 企画構成</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">企画構成を白紙から組み立てる</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">過去自社実績のフック・CTAパターンを類似度検索、構造ベースで組み立て</span></div>
+      </div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">17:00</span> ナレッジ蓄積</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">制作ナレッジは個人のメモに留まる</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">作った企画はそのまま pgvector に蓄積、全社財産化</span></div>
+      </div>
+    </div>
+
+    <!-- アカウント -->
+    <div class="tl-col acct">
+      <h3>アカウント</h3>
+      <div class="role">運用・進行管理・レポーティング</div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">09:00</span> 棚卸し</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">メール棚卸し、媒体社からの連絡確認に着手</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">朝8時に「返信要／入稿〆切／許諾期限／炎上監視」が Slack に届く</span></div>
+      </div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">11:00</span> レポート集計</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">クライアント向けレポート集計を手作業で</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">媒体実績データから自動レポート生成、コメント部分だけ手当て</span></div>
+      </div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">14:00</span> 進行管理</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">案件進行を Excel／Notion で個人管理</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">滞留案件・〆切リスクが AI から能動通知、優先順位提示</span></div>
+      </div>
+
+      <div class="tl-slot">
+        <div class="time"><span class="clock">17:00</span> 定期報告</div>
+        <div class="ba before"><span class="label">Before</span><span class="text">定期報告メールを1件ずつ手で書く</span></div>
+        <div class="ba after"><span class="label">After</span><span class="text">クライアント別 AI 担当が定期報告の下書きを準備、確認して送るだけ</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="closing">
+    部門ごとに <b>"何時間浮くか"</b> ではなく、<b>"何の仕事に時間が使えるようになるか"</b> が本質的な価値です。
+    <span class="small">浮いた時間は、提案の質・クリエイティブの深さ・クライアントとの関係構築へ。</span>
+  </div>
+
+  <div class="page-brand">TeamAgent ／ 社内 AI 基盤</div>
+  <div class="page-num">3 / 3</div>
+</section>
+
+</div>
+</body>
+</html>

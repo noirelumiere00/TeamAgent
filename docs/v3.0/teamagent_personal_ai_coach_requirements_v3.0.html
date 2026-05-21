@@ -1,0 +1,1852 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 機能⑥ Personal AI Coach 要件定義書 v3.0</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --accent-coach: #7c3aed;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --user-color: #4f46e5;
+    --pri-must: #B91C1C;
+    --pri-should: #ca8a04;
+    --pri-may: #16a34a;
+    --deleted-bg: #f3f4f6;
+    --deleted-text: #9ca3af;
+    --new-bg: #ecfeff;
+    --new-accent: #0e7490;
+    --v3-bg: #f5f3ff;
+    --v3-accent: #7c3aed;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .toc { list-style: none; }
+  .toc li { margin-bottom: 4px; }
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+  .toc a:hover { color: var(--accent-coach); }
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent-coach); font-weight: 700; }
+
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent-coach);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+  .doc-meta-table { margin-top: 24px; font-size: 13px; }
+  .doc-meta-table td { padding: 4px 16px 4px 0; color: var(--text-muted); }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+  p { margin-bottom: 14px; }
+  ul, ol { margin: 12px 0 16px 24px; }
+  li { margin-bottom: 6px; }
+  ul.unstyled { list-style: none; margin-left: 0; }
+
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  table.req {
+    font-size: 12.5px;
+  }
+  table.req th { font-size: 11px; }
+  table.req .col-id { width: 78px; font-family: "JetBrains Mono", monospace; font-size: 11.5px; color: var(--text); font-weight: 700; }
+  table.req .col-title { width: 22%; font-weight: 600; }
+  table.req .col-pri { width: 60px; text-align: center; }
+  table.req .col-accept { width: 32%; }
+  table.req td { padding: 12px 10px; }
+
+  .v3-tag {
+    display: inline-block;
+    background: var(--v3-bg);
+    color: var(--v3-accent);
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    margin-right: 4px;
+  }
+  .new-tag {
+    display: inline-block;
+    background: var(--new-bg);
+    color: var(--new-accent);
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    margin-right: 4px;
+  }
+
+  dl.terms { margin: 16px 0 24px; }
+  dl.terms dt { font-weight: 700; margin-top: 12px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.coach { background: var(--v3-bg); border-left-color: var(--v3-accent); }
+  .note.coach .label { color: var(--v3-accent); }
+  .note.update { background: #ecfeff; border-left-color: #0e7490; }
+  .note.update .label { color: #0e7490; }
+
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  .hero {
+    background: linear-gradient(135deg, #f5f3ff 0%, #fdf4ff 50%, #ecfeff 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--v3-accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--v3-accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  .sprint-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin: 16px 0 24px;
+  }
+  .sprint-card {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--v3-accent);
+    border-radius: 6px;
+    padding: 12px 14px;
+    background: white;
+    font-size: 12px;
+  }
+  .sprint-card.s18 { border-left-color: #6366f1; }
+  .sprint-card.s19 { border-left-color: #2563eb; }
+  .sprint-card.s20 { border-left-color: #0891b2; }
+  .sprint-card.s21 { border-left-color: #16a34a; }
+  .sprint-card.s22 { border-left-color: #ca8a04; }
+  .sprint-card.s23 { border-left-color: #ea580c; }
+  .sprint-card.s24 { border-left-color: #B91C1C; }
+  .sprint-card.s25 { border-left-color: #7c3aed; }
+  .sprint-card .sp-id {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-muted);
+  }
+  .sprint-card .sp-name {
+    font-size: 13px;
+    font-weight: 700;
+    margin: 2px 0 4px;
+    line-height: 1.3;
+  }
+  .sprint-card .sp-desc {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  /* ペルソナカード */
+  .persona-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+    margin: 20px 0 24px;
+  }
+  .persona-card {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+  }
+  .persona-card.p1 { border-top-color: #16a34a; }
+  .persona-card.p2 { border-top-color: #2563eb; }
+  .persona-card.p3 { border-top-color: #6366f1; }
+  .persona-card.p4 { border-top-color: #B91C1C; }
+  .persona-card.p5 { border-top-color: #ca8a04; }
+  .persona-card .pc-icon { font-size: 32px; margin-bottom: 4px; }
+  .persona-card .pc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .persona-card .pc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    line-height: 1.4;
+  }
+  .persona-card .pc-role {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--v3-accent);
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+  .persona-card .pc-tone {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    font-style: italic;
+  }
+  .persona-card .pc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  .story-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+    margin: 16px 0 24px;
+  }
+  .story-card {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    border-top: 4px solid var(--v3-accent);
+  }
+  .story-card.p1 { border-top-color: #16a34a; }
+  .story-card.p2 { border-top-color: #2563eb; }
+  .story-card.p3 { border-top-color: #6366f1; }
+  .story-card.p4 { border-top-color: #B91C1C; }
+  .story-card.p5 { border-top-color: #ca8a04; }
+  .story-card .story-role {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .story-card .story-text {
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text);
+  }
+  .story-card .story-text strong { color: var(--v3-accent); }
+
+  .pri {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  .pri.must { background: #fee2e2; color: var(--pri-must); }
+  .pri.should { background: #fef3c7; color: var(--pri-should); }
+  .pri.may { background: #dcfce7; color: var(--pri-may); }
+
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+
+  .legend-box {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 12px 0 24px;
+    font-size: 12px;
+  }
+  .legend-box .item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+  }
+
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>機能⑥ Personal AI Coach<br>要件定義書</div>
+  <div class="sidebar-doc-meta">
+    Version 3.0（v0.1 初版）<br>
+    2026年5月14日<br>
+    （全社展開・先行設計）
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>本書について</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>目的</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>対象読者</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>関連文書</a></li>
+    <li class="level-2"><a href="#sec-1-4"><span class="num">1.4</span>要件記法と凡例</a></li>
+
+    <li class="level-1"><a href="#sec-2"><span class="num">2.</span>プロジェクトスコープ</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>含むもの</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>含まないもの</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>ユーザー要件（ペルソナ別）</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>5ペルソナ定義</a></li>
+    <li class="level-2"><a href="#sec-3-2"><span class="num">3.2</span>新卒・若手のストーリー</a></li>
+    <li class="level-2"><a href="#sec-3-3"><span class="num">3.3</span>中堅のストーリー</a></li>
+    <li class="level-2"><a href="#sec-3-4"><span class="num">3.4</span>ベテランのストーリー</a></li>
+    <li class="level-2"><a href="#sec-3-5"><span class="num">3.5</span>管理職のストーリー</a></li>
+    <li class="level-2"><a href="#sec-3-6"><span class="num">3.6</span>部署別ペルソナのストーリー</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-4"><span class="num">4.</span>機能要件（FR-6）</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>個人プロファイル管理</a></li>
+    <li class="level-2"><a href="#sec-4-2"><span class="num">4.2</span>質問応答機能</a></li>
+    <li class="level-2"><a href="#sec-4-3"><span class="num">4.3</span>成長支援機能</a></li>
+    <li class="level-2"><a href="#sec-4-4"><span class="num">4.4</span>秘書機能</a></li>
+    <li class="level-2"><a href="#sec-4-5"><span class="num">4.5</span>部署別アドバイザー</a></li>
+    <li class="level-2"><a href="#sec-4-6"><span class="num">4.6</span>AI ペルソナ管理</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-5"><span class="num">5.</span>非機能要件（NFR）</a></li>
+
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>データ要件（DR-07〜DR-12）</a></li>
+
+    <li class="level-1"><a href="#sec-7"><span class="num">7.</span>外部連携要件（INT-11〜13）</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-8"><span class="num">8.</span>セキュリティ要件（SEC-13〜18）</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-9"><span class="num">9.</span>テスト要件（TST-11〜14）</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-10"><span class="num">10.</span>受入基準（DoD-S18〜S25）</a></li>
+
+    <li class="level-1"><a href="#sec-11"><span class="num">11.</span>制約条件・前提条件</a></li>
+
+    <li class="level-1"><a href="#sec-12"><span class="num">12.</span>用語集</a></li>
+
+    <li class="level-1"><a href="#sec-13"><span class="num">13.</span>リスクと留意事項</a></li>
+
+    <li class="level-1"><a href="#sec-14"><span class="num">14.</span>改訂履歴・推奨実装順</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">要件定義書 v3.0 構想 — 機能⑥ Personal AI Coach（先行設計 / v0.1 初版）</div>
+  <h1>TeamAgent 機能⑥ Personal AI Coach 要件定義書<br><small style="font-size:18px;font-weight:600;color:var(--text-muted)">全社員 100-200名 向け 個人付き AI メンター・先輩・秘書</small></h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>要件定義書（Requirements Specification） / v3.0 構想・先行設計</td></tr>
+    <tr><td>バージョン</td><td>v3.0 構想 v0.1（初版）</td></tr>
+    <tr><td>作成日</td><td>2026年5月14日</td></tr>
+    <tr><td>位置付け</td><td>TeamAgent v2.2（営業16名向け Slack AI エージェント）完了後の「機能⑥」として、<strong>全社員（推定 100-200名）一人ひとりに専属の AI メンター・先輩・秘書を提供する</strong>構想を要件化したもの。v2.2 までの 5機能（Slack メンション起動／Mail ワークフロー／提案コンテンツ生成／動画 URL 分析／営業進捗サマリー）の共通基盤（Claude Agent SDK / Slack Bolt / Gmail OAuth / pgvector）を流用しつつ、個人 context・ペルソナ・全社ナレッジの3層を新規追加する。本書は経営判断（v3.0 着手 or v2.2 完了後の段階展開）の材料となる。</td></tr>
+    <tr><td>関連文書</td><td>teamagent_overview_v2.2.html／teamagent_requirements_v2.2.html（要件記法・CSS 継承元）／teamagent_architecture_v2.2.html／teamagent_implementation_plan_v2.2.html</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">Personal AI Coach — v3.0 Vision</div>
+  <div class="hero-headline">全社員 一人ひとりに、<br>AI の先輩・メンター・秘書を。</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">23<small>件</small></div>
+      <div class="hero-stat-label">機能要件 FR-6-01〜23</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">5<small>種</small></div>
+      <div class="hero-stat-label">ペルソナ × 25 ストーリー</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">6<small>件</small></div>
+      <div class="hero-stat-label">新規データテーブル DR-07〜12</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">8<small>個</small></div>
+      <div class="hero-stat-label">Sprint 別 DoD（S18〜S25）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">200<small>名</small></div>
+      <div class="hero-stat-label">同時利用想定（全社展開時）</div>
+    </div>
+  </div>
+</div>
+
+<div class="note coach">
+  <div class="label">v3.0 構想サマリー</div>
+  <ul style="margin: 4px 0 0 18px;">
+    <li><strong>対象：</strong>営業16名から全社員 100-200名へ拡張。新卒・中堅・ベテラン・管理職・部署別（営業／開発／人事／経理）の 5ペルソナで応答トーンを切り替え。</li>
+    <li><strong>役割：</strong>(1) 学習支援（新卒・若手）／(2) 業務補助（中堅）／(3) 戦略支援（管理職）の 3層を、個人 context に紐づけて提供。</li>
+    <li><strong>新規データ：</strong>個人プロファイル／個人 context（活動履歴・目標）／成長日記／先輩パターン／全社ナレッジ／対話メモリの 6テーブル。</li>
+    <li><strong>v2.2 との関係：</strong>共通基盤4要素（Claude Agent SDK / Slack Bolt / Gmail OAuth / pgvector）を流用、共通インフラに「個人 context 層」と「全社ナレッジ層」を上乗せ。</li>
+    <li><strong>開発期間・コスト：</strong>v2.2 完了後 4ヶ月（8 Sprint：S18〜S25）。月次追加 ¥80K〜¥150K（営業16名 MVP）／¥200K〜¥350K（全社200名展開）。</li>
+    <li><strong>原則：</strong>(1) 人事評価へ直接利用しない、(2) 個人 AI 同士のデータ分離、(3) 機密情報は自動除外、(4) 同意なしに先輩データを学習しない、(5) 退職時は個人 context を削除。</li>
+  </ul>
+</div>
+
+<!-- ========== 1. 本書について ========== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>本書について</h2>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>目的</h3>
+<p>
+本書は、TeamAgent <strong>機能⑥ "Personal AI Coach"（仮称）</strong>の機能要件・非機能要件・受入基準を体系的に定義する。v2.2 までで完成する「営業16名向け Slack AI エージェント（5機能）」の上に、<strong>全社員一人ひとりに専属の AI メンター・先輩・秘書を提供する</strong>新機能を追加することを目的とする。
+</p>
+<p>
+v2.2 仕様書（5機能）と異なり、本書は v3.0 構想の <strong>先行設計</strong> として位置付ける。v2.2 完了後に経営判断を行う材料となるよう、FR / NFR / SEC / INT / TST / DR / DoD を v2.2 と同じ記法で記述する。
+</p>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>対象読者</h3>
+<table class="kv">
+  <tr><td>FDE / 実装担当</td><td>第4〜10章（要件本体）を主に参照。v2.2 共通基盤との整合性、Sprint 別 DoD の達成可否を判定</td></tr>
+  <tr><td>人事担当</td><td>第3章ペルソナ、第8章プライバシー（特に SEC-17 人事評価への流用禁止）、第13章リスクを参照</td></tr>
+  <tr><td>経営層</td><td>ヒーローセクション、第2章スコープ、第11章コスト、第14章推奨実装順を参照</td></tr>
+  <tr><td>セキュリティ / 法務担当</td><td>第8章セキュリティ・プライバシー要件、第13章リスクを参照</td></tr>
+  <tr><td>各部署マネージャー</td><td>第4.5節 部署別アドバイザー、第10章 DoD-S23 を参照</td></tr>
+</table>
+
+<h3 id="sec-1-3"><span class="num">1.3</span>関連文書</h3>
+<table>
+  <tr><th>文書名</th><th>役割</th></tr>
+  <tr><td>teamagent_overview_v2.2.html</td><td>v2.2 構想・システム概要仕様書（上位文書）。本書の v2.2 基盤参照元。</td></tr>
+  <tr><td>teamagent_requirements_v2.2.html</td><td>v2.2 要件定義書。<strong>本書の要件記法・CSS スタイル・章立てを継承</strong>。NFR-01〜25 / SEC-01〜12 / INT-01〜10 / DR-01〜06 / TST-01〜10 は本書で参照。</td></tr>
+  <tr><td>teamagent_architecture_v2.2.html</td><td>v2.2 アーキテクチャ図書。本書の DR-07〜12 / INT-11〜13 はこれを拡張する。</td></tr>
+  <tr><td>teamagent_implementation_plan_v2.2.html</td><td>v2.2 実装計画書。本書 Sprint S18〜S25 は v2.2 Sprint S17 完了後を前提とする。</td></tr>
+  <tr><td>本書（v3.0 構想 v0.1）</td><td>機能⑥ Personal AI Coach の先行設計。v2.2 完了時点で再評価・正式着手判定の材料。</td></tr>
+</table>
+
+<h3 id="sec-1-4"><span class="num">1.4</span>要件記法と凡例</h3>
+<p>本書の各要件は v2.2 と同様、ID・タイトル・詳細・優先度・受入基準の5列表で記述する。</p>
+<table class="kv">
+  <tr><td>FR-6-XX</td><td>機能要件（機能⑥）。v2.2 までの FR-1〜FR-5 とは独立した連番</td></tr>
+  <tr><td>NFR-26〜31</td><td>非機能要件。v2.2 NFR-25 の続番</td></tr>
+  <tr><td>SEC-13〜18</td><td>セキュリティ・プライバシー要件。v2.2 SEC-12 の続番</td></tr>
+  <tr><td>DR-07〜12</td><td>データ要件（新規テーブル）。v2.2 DR-06 の続番</td></tr>
+  <tr><td>INT-11〜13</td><td>外部連携要件。v2.2 INT-10 の続番</td></tr>
+  <tr><td>TST-11〜14</td><td>テスト要件。v2.2 TST-10 の続番</td></tr>
+  <tr><td>DoD-S18〜S25</td><td>Sprint 別 Definition of Done。v2.2 Sprint S17 / DoD-Final 完了後</td></tr>
+</table>
+
+<div class="legend-box">
+  <div class="item"><span class="pri must">必須</span> Must — リリース判定の必達条件</div>
+  <div class="item"><span class="pri should">推奨</span> Should — 強く推奨。リリース時に 80% 以上満たすこと</div>
+  <div class="item"><span class="pri may">任意</span> May — 望ましい / 将来対応可</div>
+  <div class="item"><span class="v3-tag">🆕 v3.0 新規</span> 機能⑥ で新規追加された要件</div>
+  <div class="item"><span class="new-tag">継承</span> v2.2 から継承・延長された要件</div>
+</div>
+</section>
+
+
+<!-- ========== 2. プロジェクトスコープ ========== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>プロジェクトスコープ</h2>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>含むもの（In Scope）</h3>
+<table>
+  <tr><th>区分</th><th>含むもの</th></tr>
+  <tr><td>対象ユーザー</td><td>全社員 100-200名（営業16名 + 開発 + 人事 + 経理 + 管理職 + その他間接部門）</td></tr>
+  <tr><td>提供する役割</td><td>(1) 学習支援（新卒・若手）／(2) 業務補助（中堅）／(3) 戦略支援（管理職）／(4) 部署別アドバイザー</td></tr>
+  <tr><td>機能要件カテゴリ</td><td>① 個人プロファイル管理 ／ ② 質問応答（社内ナレッジ + 先輩パターン）／ ③ 成長支援（週次・月次レポート）／ ④ 秘書機能（タスク・会議・リマインダー）／ ⑤ 部署別アドバイザー ／ ⑥ AI ペルソナ管理</td></tr>
+  <tr><td>データソース</td><td>全社ナレッジ（規程・FAQ・マニュアル・過去提案）／個人活動（メール・Slack・カレンダー）／先輩のパターン抽出（同意ベース）</td></tr>
+  <tr><td>共通基盤</td><td>v2.2 共通基盤を流用：Claude Agent SDK / Slack Bolt / Gmail OAuth（Domain-wide Delegation 化）/ pgvector（RDS PostgreSQL）</td></tr>
+  <tr><td>新規基盤</td><td>個人 context 層（personal_profile / personal_context / conversation_memory）／全社ナレッジ層（company_knowledge）／先輩パターン層（senior_patterns）／成長日記層（growth_journal）</td></tr>
+  <tr><td>UI</td><td>Slack DM（個人 AI との対話の主導線）+ Slack ホームタブ（成長日記・目標進捗の可視化）</td></tr>
+</table>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>含まないもの（Out of Scope）</h3>
+<table>
+  <tr><th>項目</th><th>除外理由 / 将来扱い</th></tr>
+  <tr><td><strong>人事評価への直接利用</strong></td><td>個人 AI が記録する成長日記・対話履歴を、人事評価・査定・昇進判断に <strong>直接</strong> 流用することは禁止（SEC-17）。本人が自発的に提示する場合のみ可。</td></tr>
+  <tr><td><strong>AI 単独でのキャリア判断</strong></td><td>「異動すべき」「退職すべき」などのキャリア判断を AI が下すことは禁止。人間（上司・人事）の判断補助に留める。</td></tr>
+  <tr><td><strong>機密級情報の取り扱い</strong></td><td>M&A・経営機密・人事評価・給与・賞与情報は SEC-16 の自動検出ルールで個人 AI から除外。誤って学習した場合は即時削除。</td></tr>
+  <tr><td>顧客側ユーザーへの提供</td><td>本機能は社内利用専用。顧客向け AI チャットボットは含まない。</td></tr>
+  <tr><td>AI による自動メール送信</td><td>v2.2 同様、送信は必ず本人実施（<code>gmail.compose</code> までで <code>gmail.send</code> は付与しない）。</td></tr>
+  <tr><td>採用候補者の評価</td><td>FR-6-18（人事向け）では採用支援（候補者リストアップ、面接質問例の提示）は含むが、合否判定は人間が実施。</td></tr>
+  <tr><td>外部社員（業務委託）への展開</td><td>v3.0 初期は正社員のみ。業務委託・派遣は SEC-13 のデータ分離要件確認後に検討。</td></tr>
+  <tr><td>多言語対応</td><td>初期は日本語のみ。英語対応は v3.1 以降。</td></tr>
+  <tr><td>音声入出力</td><td>テキストのみ。音声入出力（Slack Huddle 連携等）は v3.1 以降。</td></tr>
+  <tr><td>退職者の個人 context 引き継ぎ</td><td>退職時は個人 context を削除（SEC-15）。後任者には引き継がない（プライバシー保護）。先輩パターンのみ匿名化して保持。</td></tr>
+</table>
+</section>
+
+<!-- ========== 3. ユーザー要件（ペルソナ別） ========== -->
+<section id="sec-3">
+<h2><span class="num">3.</span>ユーザー要件（ペルソナ別）</h2>
+
+<h3 id="sec-3-1"><span class="num">3.1</span>5ペルソナ定義</h3>
+<p>機能⑥ では、応答トーン・距離感・前提知識を「ペルソナ」として5種類に分類する。役職・年次・部署から FR-6-21（ペルソナ自動選択）が初期値を決定し、FR-6-22（手動上書き）で本人が嗜好に合わせ調整できる。</p>
+
+<div class="persona-grid">
+  <div class="persona-card p1">
+    <div class="pc-icon">🌱</div>
+    <div class="pc-num">Persona 1 / P-1</div>
+    <div class="pc-name">新卒・若手</div>
+    <div class="pc-role">入社 1年目以内</div>
+    <div class="pc-tone">「先輩」「メンター」として AI を頼る。優しく励ます。基本用語の説明から始める。否定しない。</div>
+    <div class="pc-meta">想定人数：年 10〜20名（新卒採用ベース） / トーン：丁寧語 + 励まし / 想定利用：1日 5〜10回</div>
+  </div>
+  <div class="persona-card p2">
+    <div class="pc-icon">💼</div>
+    <div class="pc-num">Persona 2 / P-2</div>
+    <div class="pc-name">中堅</div>
+    <div class="pc-role">2〜5年目</div>
+    <div class="pc-tone">「秘書」「壁打ち相手」として使う。対等な口調。要点だけ伝える。判断材料の提示にとどめ、結論は本人に委ねる。</div>
+    <div class="pc-meta">想定人数：60〜80名 / トーン：丁寧語、簡潔 / 想定利用：1日 3〜5回</div>
+  </div>
+  <div class="persona-card p3">
+    <div class="pc-icon">🎓</div>
+    <div class="pc-num">Persona 3 / P-3</div>
+    <div class="pc-name">ベテラン</div>
+    <div class="pc-role">5年目以上</div>
+    <div class="pc-tone">「専門アドバイザー」として深い相談相手。専門用語を省略せず使う。本人の知見を尊重し、補足情報・最新動向を提供。</div>
+    <div class="pc-meta">想定人数：30〜50名 / トーン：簡潔、専門的 / 想定利用：1日 2〜4回</div>
+  </div>
+  <div class="persona-card p4">
+    <div class="pc-icon">📊</div>
+    <div class="pc-num">Persona 4 / P-4</div>
+    <div class="pc-name">管理職</div>
+    <div class="pc-role">課長・部長クラス</div>
+    <div class="pc-tone">「戦略補助・チーム把握」AI。組織視点での提案。1on1 議題サジェスト、メンバーの活動傾向（匿名集計）を提示。</div>
+    <div class="pc-meta">想定人数：10〜20名 / トーン：簡潔、戦略的 / 想定利用：1日 2〜5回</div>
+  </div>
+  <div class="persona-card p5">
+    <div class="pc-icon">🛠️</div>
+    <div class="pc-num">Persona 5 / P-5</div>
+    <div class="pc-name">部署別</div>
+    <div class="pc-role">営業／開発／人事／経理</div>
+    <div class="pc-tone">各専門ドメインに特化。営業：提案・顧客対応。開発：コード・技術。人事：採用・評価。経理：経費・予算。</div>
+    <div class="pc-meta">P-1〜P-4 と並列で適用。トーンは P-1〜4 の上書き。1日 2〜10回（部署差）</div>
+  </div>
+</div>
+
+<div class="note coach">
+  <div class="label">ペルソナ適用ルール</div>
+  <ul style="margin: 4px 0 0 18px;">
+    <li><strong>初期判定：</strong>FR-6-21 が人事システム（INT-12）から取得した役職・年次・部署で自動判定。例：入社 6ヶ月で営業 → P-1 + P-5（営業）。</li>
+    <li><strong>本人上書き：</strong>FR-6-22 で本人が「もっと対等に話してほしい」「敬語不要」など嗜好を上書き可能。</li>
+    <li><strong>トーン継続：</strong>NFR-31 により、同じ人には同じトーンを継続（突然口調が変わらない）。</li>
+    <li><strong>変更履歴：</strong>ペルソナ変更は <code>personal_profile.persona_history</code>（DR-07）に記録し、監査可能とする。</li>
+  </ul>
+</div>
+
+<h3 id="sec-3-2"><span class="num">3.2</span>新卒・若手のユーザーストーリー（P-1）</h3>
+<div class="story-grid">
+  <div class="story-card p1">
+    <div class="story-role">US-P1-01 ／ 新卒（入社 2ヶ月）</div>
+    <div class="story-text">先輩に聞きづらい <strong>「経費精算の手順」</strong>を AI に聞いたら、図解付きでステップ 1-5 まで丁寧に教えてくれた。「分からなければまた聞いてね」と言ってくれて安心。</div>
+  </div>
+  <div class="story-card p1">
+    <div class="story-role">US-P1-02 ／ 新卒（入社 4ヶ月）</div>
+    <div class="story-text">初めての商談前に <strong>「先輩の佐藤さんはどう商談を進めてた？」</strong>と聞いたら、AI が佐藤さんの過去ログから「冒頭 5分のアイスブレイク → 課題深掘り 3問」というパターンを教えてくれた。</div>
+  </div>
+  <div class="story-card p1">
+    <div class="story-role">US-P1-03 ／ 若手（入社 8ヶ月）</div>
+    <div class="story-text">上司から指摘を受けて落ち込んだとき、AI に <strong>「今日の指摘の意図を整理したい」</strong>と話したら、感情を否定せず一緒に振り返ってくれた。</div>
+  </div>
+  <div class="story-card p1">
+    <div class="story-role">US-P1-04 ／ 新卒（入社 6ヶ月）</div>
+    <div class="story-text">月末、AI から <strong>「今月の成長記録です」</strong>と週次レポートが届いた。「Slack 投稿の語彙が広がった」「30分の商談を 5本完了」と具体的な進歩が見える化されて、自信になった。</div>
+  </div>
+  <div class="story-card p1">
+    <div class="story-role">US-P1-05 ／ 新卒（入社 1ヶ月）</div>
+    <div class="story-text">「AI に何でも聞いていい」と分かっていても、<strong>つまらない質問</strong>をして人間メンターを煩わせたくなかった。AI なら気兼ねなく 1日 10回でも質問できる。</div>
+  </div>
+</div>
+
+<h3 id="sec-3-3"><span class="num">3.3</span>中堅のユーザーストーリー（P-2）</h3>
+<div class="story-grid">
+  <div class="story-card p2">
+    <div class="story-role">US-P2-01 ／ 中堅（3年目営業）</div>
+    <div class="story-text">朝、Slack を開くと AI が <strong>「今日返信が必要なメール 3件、会議 2本の準備ポイント」</strong>を箇条書きで提示。判断は自分でする。AI は秘書として、まとめてくれるだけ。</div>
+  </div>
+  <div class="story-card p2">
+    <div class="story-role">US-P2-02 ／ 中堅（4年目）</div>
+    <div class="story-text">提案書の構成で迷ったとき、AI に <strong>「壁打ち相手になって」</strong>と頼む。AI が「価格訴求型」「価値訴求型」の2案を提示してくれ、自分は決めるだけ。</div>
+  </div>
+  <div class="story-card p2">
+    <div class="story-role">US-P2-03 ／ 中堅（3年目）</div>
+    <div class="story-text">大きな商談前、AI から <strong>「想定質問 5問、ネガ反応 3パターン」</strong>が事前資料の要約と一緒に届く。会議準備の時間が 1時間 → 15分に短縮。</div>
+  </div>
+  <div class="story-card p2">
+    <div class="story-role">US-P2-04 ／ 中堅（5年目）</div>
+    <div class="story-text">月次の成長レポートで、<strong>同期の匿名化ベンチマーク</strong>（提案件数・受注率の分布上での自分の位置）が見える。誰と比較されているかは特定できない。</div>
+  </div>
+  <div class="story-card p2">
+    <div class="story-role">US-P2-05 ／ 中堅（4年目）</div>
+    <div class="story-text">プライベートな悩み（家族事情で残業できない等）を AI に話したとき、<strong>個人 AI 同士でデータが漏れない</strong>仕組みが保証されているので、安心して相談できる。</div>
+  </div>
+</div>
+
+<h3 id="sec-3-4"><span class="num">3.4</span>ベテランのユーザーストーリー（P-3）</h3>
+<div class="story-grid">
+  <div class="story-card p3">
+    <div class="story-role">US-P3-01 ／ ベテラン（10年目）</div>
+    <div class="story-text">業界の最新動向について AI に聞いたとき、<strong>「ご存じだと思いますが」</strong>と前置きしつつ、自分が知らない最新事例を 3件提示してくれる。レベル感が合っていてストレスがない。</div>
+  </div>
+  <div class="story-card p3">
+    <div class="story-role">US-P3-02 ／ ベテラン（12年目）</div>
+    <div class="story-text">自分のノウハウ（佐藤メソッド）を AI が学習し、若手の質問に答える際に <strong>「佐藤さんはこう進めていました」</strong>と引用してくれる。引用前に「あなたのパターンを共有してよいか」の同意確認があった。</div>
+  </div>
+  <div class="story-card p3">
+    <div class="story-role">US-P3-03 ／ ベテラン（8年目）</div>
+    <div class="story-text">後輩から <strong>同じ質問を 3回も聞かれたとき</strong>、AI が「彼の AI に過去 3回同じ質問が来ています。マニュアル化を提案しますか？」と教えてくれる（匿名化された傾向情報）。</div>
+  </div>
+  <div class="story-card p3">
+    <div class="story-role">US-P3-04 ／ ベテラン（15年目）</div>
+    <div class="story-text">提案書の表現で迷ったとき、AI が <strong>過去 5年分の自分の提案</strong>から「あなたは A 業界では『価値訴求』、B 業界では『価格訴求』を使っています」と傾向を提示してくれる。</div>
+  </div>
+  <div class="story-card p3">
+    <div class="story-role">US-P3-05 ／ ベテラン（11年目）</div>
+    <div class="story-text">AI に <strong>「自分の弱点を 3つ挙げて」</strong>と頼んだら、活動データから「①長文メールが多い ②返信が深夜帯 ③Slack スレッドを途中で切る」と冷静に指摘。耳が痛いが本人だけが受け取る情報なので受け入れられる。</div>
+  </div>
+</div>
+
+<h3 id="sec-3-5"><span class="num">3.5</span>管理職のユーザーストーリー（P-4）</h3>
+<div class="story-grid">
+  <div class="story-card p4">
+    <div class="story-role">US-P4-01 ／ 課長（営業課）</div>
+    <div class="story-text">月曜朝、AI から <strong>「チーム10名の今週の動き（匿名集計）」</strong>が届く。「メール返信が遅い人 2名」「会議準備が不十分な兆候 1名」など、個人特定できない形での傾向情報。</div>
+  </div>
+  <div class="story-card p4">
+    <div class="story-role">US-P4-02 ／ 部長（開発部）</div>
+    <div class="story-text">1on1 の前に AI が <strong>「田中さんと話すべき議題 3つ」</strong>をサジェスト。「最近のコードレビューでの指摘傾向」「先月の目標達成状況」「次のスキル開発提案」。</div>
+  </div>
+  <div class="story-card p4">
+    <div class="story-role">US-P4-03 ／ 課長（人事課）</div>
+    <div class="story-text">採用面接の前、AI が候補者の応募書類を <strong>「強み 3 / 懸念 2」</strong>に整理。質問例も 5問提示。合否判断は自分が下す。</div>
+  </div>
+  <div class="story-card p4">
+    <div class="story-role">US-P4-04 ／ 取締役</div>
+    <div class="story-text">経営会議の前、AI が <strong>「過去 3ヶ月の社内動向サマリー」</strong>を匿名集計で提示。AI が個別社員の評価をすることはない（SEC-17）。</div>
+  </div>
+  <div class="story-card p4">
+    <div class="story-role">US-P4-05 ／ 課長（営業課）</div>
+    <div class="story-text">部下の AI が記録した個別データに <strong>自分が直接アクセスできない</strong>（データ分離 SEC-13）。本人が共有した内容のみ 1on1 で共有される。</div>
+  </div>
+</div>
+
+<h3 id="sec-3-6"><span class="num">3.6</span>部署別ペルソナのユーザーストーリー（P-5）</h3>
+<div class="story-grid">
+  <div class="story-card p5">
+    <div class="story-role">US-P5-01 ／ 開発エンジニア</div>
+    <div class="story-text">コードレビュー前に AI が <strong>「PR 内容の要約 + 過去類似 PR の指摘 3件」</strong>を提示。技術ドキュメント検索も同じ AI から可能。</div>
+  </div>
+  <div class="story-card p5">
+    <div class="story-role">US-P5-02 ／ 経理担当</div>
+    <div class="story-text">経費申請の差し戻し対応中、AI に <strong>「この経費は規程的に OK か」</strong>と聞くと、規程の該当条項と過去の判例（社内）を引用付きで提示。判断は本人。</div>
+  </div>
+  <div class="story-card p5">
+    <div class="story-role">US-P5-03 ／ 人事担当</div>
+    <div class="story-text">採用候補者からの問い合わせメールに対する返信案を AI が下書き。<strong>過去の人事担当者の返信パターン</strong>を踏襲しつつ、本人がチェックして送信。</div>
+  </div>
+  <div class="story-card p5">
+    <div class="story-role">US-P5-04 ／ 営業 + 中堅（P-2 + P-5）</div>
+    <div class="story-text">機能⑥ の AI が、v2.2 の機能①〜⑤ と <strong>同じ Slack DM 上で連携</strong>。「@TeamAgent 過去事例ある？」（機能①）と「最近の私の傾向は？」（機能⑥）が一画面で完結。</div>
+  </div>
+  <div class="story-card p5">
+    <div class="story-role">US-P5-05 ／ 部長（管理職 + 営業 = P-4 + P-5）</div>
+    <div class="story-text">管理職としての視点（チーム把握）と営業としての視点（個別案件）を、AI が <strong>同じ会話の中で文脈に応じて切り替え</strong>。質問内容で自動判別。</div>
+  </div>
+</div>
+</section>
+
+<!-- ========== 4. 機能要件 ========== -->
+<section id="sec-4">
+<h2><span class="num">4.</span>機能要件（FR-6-XX）</h2>
+<p>機能⑥ Personal AI Coach の機能要件は 23 件。すべて <span class="v3-tag">🆕 v3.0 新規</span>。優先度は MVP リリース（営業16名先行）を必達基準（Must）、全社展開時に必要なものを推奨（Should）、将来拡張を任意（May）とする。</p>
+
+<h3 id="sec-4-1"><span class="num">4.1</span>個人プロファイル管理</h3>
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">FR-6-01</td>
+      <td class="col-title">個人 AI コンテキスト初期化（オンボーディング1on1）</td>
+      <td>新規利用開始時、AI が本人と 10〜15分の対話で初期 context を構築する。質問例：①現在の役割／②強み・苦手意識／③3ヶ月後の目標／④活動データ取得への同意範囲（メール・Slack・カレンダー）。回答は <code>personal_profile</code> テーブルに保存。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">100% のユーザーが初回利用前にオンボーディング完了。完了率 ≥ 95%、平均所要時間 ≤ 15分、本人合意ログを取得。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-02</td>
+      <td class="col-title">個人プロファイル更新（自己申告 + 自動推定）</td>
+      <td>本人が Slack コマンド <code>/teamagent profile</code> で目標・嗜好・公開範囲を更新可能。同時に AI が活動データから「実は別ドメインの仕事が増えている」など変化を検知し、本人に確認の上で <code>personal_profile</code> を更新。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">本人による更新は即時反映（≤ 1分）。自動推定は月次で 1回提示、本人承認後に反映。反映ログを <code>personal_profile.update_log</code> に記録。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-03</td>
+      <td class="col-title">目標設定・追跡（3ヶ月・6ヶ月・1年単位）</td>
+      <td>本人が 3ヶ月・6ヶ月・1年の目標を設定。AI が活動データから進捗を自動計算し、月次レポート（FR-6-09）で可視化。期限が近づくと AI からリマインド。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">目標設定 UI で 3層（短期/中期/長期）の入力可能。月次進捗計算誤差 ≤ 10%（活動データから算出可能な指標のみ）。期限 1ヶ月前リマインド到達率 100%。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-04</td>
+      <td class="col-title">強み・弱みの自動評価（活動データから）</td>
+      <td>過去 3ヶ月の活動データ（メール・Slack 投稿・提案書）から、AI が強み 3つ・弱み 2つを自動抽出し、本人にだけ提示。本人合意の上でプロファイルへ反映。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">サンプル 30名で本人評価との一致率 ≥ 70%（強み）/ ≥ 60%（弱み）。誤検知時のフィードバック機能あり。本人非公開（他者からアクセス不可）。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-2"><span class="num">4.2</span>質問応答機能</h3>
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">FR-6-05</td>
+      <td class="col-title">社内ナレッジ検索（規程・FAQ・マニュアル）</td>
+      <td>Slack DM での質問に対し、<code>company_knowledge</code>（DR-11）から pgvector で関連ドキュメントを 5件以内に絞り、引用付きで回答。引用元（ファイル名 + 該当ページ）を必ず明示。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">サンプル 100質問で正答率 ≥ 85%、引用率 100%、捏造率 0%（v2.2 FR-3-12 と同じ基準）。応答時間 p95 ≤ 5秒（NFR-26）。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-06</td>
+      <td class="col-title">先輩パターン引用（過去事例・成功手法）</td>
+      <td>「佐藤さんの提案進め方」「田中さんの会議運営」を <code>senior_patterns</code>（DR-10）から検索し、本人に提示。先輩本人の同意があるパターンのみ引用可（SEC-14）。匿名化引用も選択可。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">先輩パターン登録時の同意率 100%（同意なきは登録不可）。引用時は必ず「佐藤さんから共有許可済み」を明示。サンプル 50質問で関連度 ≥ 4.0/5.0。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-07</td>
+      <td class="col-title">業務手順ガイダンス（タスク分解・チェックリスト）</td>
+      <td>「経費精算したい」「初回商談に行く」など業務トリガで、AI がタスクを 3〜7ステップに分解、チェックリスト化して提示。各ステップに関連ドキュメントへのリンク付き。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">頻出 30業務（経費精算・有給申請・初回商談など）でテンプレ実装、ステップ達成率 ≥ 80%（本人完了申告ベース）。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-08</td>
+      <td class="col-title">曖昧質問の文脈解釈・確認</td>
+      <td>「あの件どうなった？」のような曖昧質問に対し、AI が <code>personal_context</code>（DR-08）の最近活動から候補を 3つ提示し、本人に確認。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">曖昧質問判定の F1 ≥ 0.75。候補提示の的中率（本人がどれか選ぶ率）≥ 70%。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-3"><span class="num">4.3</span>成長支援機能</h3>
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">FR-6-09</td>
+      <td class="col-title">週次・月次成長レポート自動生成</td>
+      <td>毎週月曜朝（週次）・毎月初日（月次）、AI が活動データから成長レポートを自動生成、Slack DM で配信。指標：活動量／成果指標（部署別カスタム）／目標進捗／前週比。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">週次レポート配信時刻 月曜 08:00（個別調整可）/ 月次レポート配信時刻 月初日 08:00。配信成功率 ≥ 99%。本人満足度（5段階）≥ 4.0。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-10</td>
+      <td class="col-title">次の目標サジェスト</td>
+      <td>現在目標の達成見込みが ≥ 80% の時点で、AI が次の 3ヶ月目標を 3案提示。本人が選択 or 編集 or 自分で設定するかを選べる。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">サンプル 50名で「3案のうち 1案が選ばれた率」≥ 50%。本人による編集後採用率 ≥ 70%。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-11</td>
+      <td class="col-title">弱点克服のための学習計画</td>
+      <td>FR-6-04 で抽出した弱点に対し、AI が学習計画（社内研修・推薦書籍・先輩への弟子入り提案など）を 1週間〜1ヶ月単位で提示。本人合意でカレンダー反映。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">学習計画の本人合意率 ≥ 50%（合意しないことも自然）。合意後の継続率（4週間後も実行中）≥ 30%。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-12</td>
+      <td class="col-title">先輩・同期との匿名化ベンチマーク</td>
+      <td>「同じ部署・同じ年次の人達の中での自分の位置」を箱ひげ図風に提示。<strong>個人特定不可</strong>（最小 5名以上の集計のみ）。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">集計母数 < 5 の場合は表示しない（プライバシー保護）。本人以外には他人の指標は見えない（SEC-13）。サンプル 30名で「参考になる」≥ 4.0/5.0。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-4"><span class="num">4.4</span>秘書機能</h3>
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">FR-6-13</td>
+      <td class="col-title">日次タスク整理（メール・Slack・カレンダー横断）</td>
+      <td>朝 08:00、AI が前夜〜当朝のメール・Slack 未読・カレンダーを横断スキャンし、当日の TODO リストを優先度付きで Slack DM に配信。v2.2 機能②（朝サマリー）の発展形。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">配信時刻誤差 ≤ 5分。TODO 抽出精度（本人評価）≥ 80%。優先度判定の納得度 ≥ 70%。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-14</td>
+      <td class="col-title">会議準備支援（事前資料の要約・想定質問）</td>
+      <td>会議開始 30分前、AI が招待状・添付資料・関連メールから要約 + 想定質問 3〜5問を Slack DM に配信。本人が会議前にざっと確認できる。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">配信時刻誤差 ≤ 5分。要約の本人評価 ≥ 4.0/5.0。想定質問の的中率（実際に出た）≥ 30%。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-15</td>
+      <td class="col-title">リマインダー・期限管理</td>
+      <td>本人が依頼したリマインダー（「金曜までに資料」など）を AI が記憶し、期限前にリマインド。締切過ぎは再提示。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">リマインダー登録成功率 100%。期限通知到達率 ≥ 99%（通知失敗時は再送）。本人によるスヌーズ操作可。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-5"><span class="num">4.5</span>部署別アドバイザー</h3>
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">FR-6-16</td>
+      <td class="col-title">営業向け（既存5機能との統合）</td>
+      <td>v2.2 機能①〜⑤ と同じ Slack DM 上で、機能⑥ と連携。「@TeamAgent 提案書作って」（機能③）と「私の今月の傾向は？」（機能⑥）が同じ AI として応答。意図ルーターを 3-way → 4-way に拡張。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">意図ルーター 4-way（recall / compose / analyze / coach）の精度 ≥ 90%。営業16名で「使い分けが自然」≥ 4.0/5.0。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-17</td>
+      <td class="col-title">開発向け（コードレビュー・技術ドキュメント検索）</td>
+      <td>GitHub PR 連携で、PR 内容の要約・過去類似 PR の指摘・関連技術ドキュメントを提示。コード自動生成は範囲外（人間が書く）。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">PR 要約精度（本人評価）≥ 80%。技術ドキュメント引用率 ≥ 90%。コード自動生成は実装しない（明示的に禁止）。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-18</td>
+      <td class="col-title">人事向け（採用・評価支援）</td>
+      <td>採用：候補者書類の強み・懸念抽出、面接質問例 5問提示。評価：本人合意の上で過去 6ヶ月の活動データから「公開可能な実績」整理。合否・評価判断は人間。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">候補者抽出は人事担当の本人合意必須。AI は判断せず候補提示のみ。評価支援は本人合意必須（SEC-17 と整合）。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-19</td>
+      <td class="col-title">経理向け（経費・予算・会計ルール）</td>
+      <td>経費規程・予算ルール・会計基準（自社・税法）を <code>company_knowledge</code> から引用付きで回答。「この経費は OK？」に対し規程引用 + 過去判例（社内）を提示。判断は人間。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">規程引用率 100%、捏造率 0%。サンプル 50質問で正答率 ≥ 90%。「AI が OK と言った」を理由とする差戻し不可（責任は人間）。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-20</td>
+      <td class="col-title">管理職向け（チーム可視化・1on1支援）</td>
+      <td>チーム 5〜20名の活動傾向を <strong>匿名化集計</strong> で提示（個人特定不可、最小 5名集計）。1on1 議題サジェスト機能。部下個別データへの直接アクセスは不可（SEC-13）。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">最小集計母数 5名未満は表示禁止。「部下が共有した内容のみ」管理職に見える。1on1 議題サジェストの採用率 ≥ 40%。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-6"><span class="num">4.6</span>AI ペルソナ管理</h3>
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">FR-6-21</td>
+      <td class="col-title">ペルソナ自動選択（役職・年次・部署）</td>
+      <td>初回オンボーディング時、人事システム（INT-12）から取得した役職・年次・部署で P-1〜P-5 を自動判定し、ペルソナ初期値とする。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">人事システム未連携時はデフォルト P-2（中堅）+ 本人選択ダイアログ。自動判定後、本人による上書き率 ≤ 30%（≥ 70% は自動判定が適切）。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-22</td>
+      <td class="col-title">ペルソナ手動上書き（個人嗜好）</td>
+      <td>本人が <code>/teamagent persona</code> で「もっと対等に」「敬語不要」「絵文字なし」など嗜好を上書き可能。変更履歴は <code>personal_profile.persona_history</code>（DR-07）に記録。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">上書き反映時間 ≤ 1分（NFR-27）。変更履歴 100% 記録。本人が「自分のトーンが選べた」≥ 4.0/5.0。</td>
+    </tr>
+    <tr>
+      <td class="col-id">FR-6-23</td>
+      <td class="col-title">トーン・敬語の調整</td>
+      <td>FR-6-22 の細粒度版。①敬語レベル（〜です／〜だ）／②絵文字使用／③長さ（簡潔／詳細）／④励まし度の 4軸を本人が設定可。設定なき場合はペルソナ既定。</td>
+      <td class="col-pri"><span class="pri should">推奨</span></td>
+      <td class="col-accept">4軸すべての UI 提供、設定反映時間 ≤ 1分、本人による調整完了率 ≥ 30%（残り 70% はデフォルトで満足）。</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note coach">
+  <div class="label">機能要件サマリー</div>
+  <p>合計 23 件（必須 12 / 推奨 11 / 任意 0）。MVP（営業16名先行）では必須 12 件すべて、推奨 11 件のうち 50% 以上を満たす。全社展開時は必須 100%・推奨 80% 以上。</p>
+</div>
+</section>
+
+<!-- ========== 5. 非機能要件 ========== -->
+<section id="sec-5">
+<h2><span class="num">5.</span>非機能要件（NFR）追加・修正</h2>
+<p>v2.2 NFR-01〜25 を継承し、機能⑥ 固有の NFR-26〜31 を追加する。</p>
+
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">NFR-26</td>
+      <td class="col-title">応答時間 p95 ≤ 5秒（質問応答）</td>
+      <td>FR-6-05（社内ナレッジ検索）・FR-6-06（先輩パターン引用）・FR-6-07（業務手順）に対する応答の p95 が 5秒以内。v2.2 NFR-01（機能① 3秒）よりやや緩いのは、検索対象範囲が広い（全社ナレッジ）ためコールド検索コスト増を許容。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">本番環境で 100質問サンプリングし、p95 ≤ 5秒、p99 ≤ 10秒。p99 超過時は CloudWatch アラート。</td>
+    </tr>
+    <tr>
+      <td class="col-id">NFR-27</td>
+      <td class="col-title">個人 context 更新反映 ≤ 1分</td>
+      <td>本人による FR-6-02（プロファイル更新）・FR-6-22（ペルソナ上書き）・FR-6-23（トーン調整）の反映時間が 1分以内。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">更新→次の応答にトーン・嗜好が反映されるまで p95 ≤ 1分。キャッシュ無効化が確実に動作。</td>
+    </tr>
+    <tr>
+      <td class="col-id">NFR-28</td>
+      <td class="col-title">全社員 200名同時利用時のスループット</td>
+      <td>ピーク時（月曜朝 08:00 のレポート配信）に 200名同時アクセスでも応答時間が NFR-26 を満たす。Lambda 同時実行数調整 + RDS 読み取り Replica。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">負荷試験で 200名同時、p95 ≤ 5秒（NFR-26）。エラー率 ≤ 0.5%。Lambda concurrent execution の制限を解除済み。</td>
+    </tr>
+    <tr>
+      <td class="col-id">NFR-29</td>
+      <td class="col-title">個人 context 永続化・バックアップ</td>
+      <td>personal_profile / personal_context / growth_journal / conversation_memory は RDS PostgreSQL に永続化。日次自動バックアップ（7日間保持）+ 月次スナップショット（12ヶ月保持）。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">RDS 自動バックアップ有効、PITR（Point-in-Time Recovery）可能。月次スナップショット S3 Glacier 保存。リストア訓練を四半期 1回実施。</td>
+    </tr>
+    <tr>
+      <td class="col-id">NFR-30</td>
+      <td class="col-title">プライバシー保護（個人 AI 同士のデータ漏洩防止）</td>
+      <td>A さんの AI に対する質問・応答が B さんの AI に共有されない。Slack DM のチャネル分離 + DB 行レベルセキュリティ（RLS）+ プロンプト中の他人データ混入の自動検出。SEC-13 とペア。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">RLS ポリシー有効、ペネトレーションテストで他人データ取得試行 100件すべてブロック。SEC-13 と整合。</td>
+    </tr>
+    <tr>
+      <td class="col-id">NFR-31</td>
+      <td class="col-title">AI ペルソナの一貫性（同じ人には同じトーン）</td>
+      <td>同じ本人に対して、AI のトーン・敬語レベル・呼び方が突然変わらない。FR-6-22 で本人が上書きしない限り、人事システム再同期時にも維持。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">100名サンプル、1ヶ月間のトーン分散（自動検査）が閾値以下。本人による「急に口調が変わった」報告 0件。</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ========== 6. データ要件 ========== -->
+<section id="sec-6">
+<h2><span class="num">6.</span>データ要件（DR-07〜DR-12）</h2>
+<p>v2.2 DR-01〜06（pgvector 概念スキーマ）を継承し、機能⑥ 固有の 6 テーブルを新規追加。すべて RDS PostgreSQL + pgvector に格納する。</p>
+
+<h3 id="sec-6-1"><span class="num">6.1</span>新規テーブル一覧</h3>
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">テーブル名</th>
+      <th>概念スキーマ（主要カラム / 関係 / retention）</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">DR-07</td>
+      <td class="col-title">personal_profile</td>
+      <td>個人プロファイル（1ユーザー = 1行）。<br><code>user_id PK / slack_user_id / role / tenure_months / department / persona_code (P-1〜P-5) / persona_history JSONB / goals_3m / goals_6m / goals_1y / consent_flags JSONB / updated_at</code><br>retention：在籍中保持、退職時は SEC-15 により本人 context を全削除。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">FR-6-01〜04 / 21〜23 の永続化を担保。RLS で本人のみアクセス可。</td>
+    </tr>
+    <tr>
+      <td class="col-id">DR-08</td>
+      <td class="col-title">personal_context</td>
+      <td>個人活動の context 集約。<br><code>id PK / user_id FK / context_type (email/slack/calendar/meeting) / source_id / summary text / embedding vector(1536) / occurred_at / sensitivity_tier (0-3) / created_at</code><br>retention：90日（活動 raw）+ 永続（要約 summary）。Tier 3 機密は格納禁止。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">FR-6-04 / 08 / 09 のソース。Tier 0〜3 判定は v2.2 DR-06 を継承し、Tier 3 は自動除外（SEC-16）。</td>
+    </tr>
+    <tr>
+      <td class="col-id">DR-09</td>
+      <td class="col-title">growth_journal</td>
+      <td>成長日記。<br><code>id PK / user_id FK / period (weekly/monthly) / period_start / period_end / metrics JSONB / achievements text / next_actions text / generated_at</code><br>retention：本人が削除しない限り永続。退職時は SEC-15 により削除。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">FR-6-09 / 10 の永続化先。週次・月次の両方の period を扱う。本人のみアクセス可。</td>
+    </tr>
+    <tr>
+      <td class="col-id">DR-10</td>
+      <td class="col-title">senior_patterns</td>
+      <td>先輩の業務パターン抽出。<br><code>id PK / senior_user_id FK / pattern_type / pattern_summary text / pattern_examples JSONB / embedding vector(1536) / consent_given_at / consent_scope (named/anonymized/withdrawn) / updated_at</code><br>retention：先輩の同意がある限り保持。同意撤回時は即削除。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">SEC-14 の同意必須。consent_given_at が NULL の行は引用禁止。同意撤回 API で 24h 以内に削除。</td>
+    </tr>
+    <tr>
+      <td class="col-id">DR-11</td>
+      <td class="col-title">company_knowledge</td>
+      <td>全社ナレッジ DB（規程・FAQ・マニュアル・過去提案）。<br><code>id PK / doc_type / title / content text / source_url / embedding vector(1536) / sensitivity_tier (0-3) / department_scope (all/specific) / updated_at</code><br>retention：永続。<strong>SEC-16</strong> により Tier 3（M&A・人事評価・給与）は格納禁止。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">FR-6-05 / 06 / 19 のソース。引用率 100%（v2.2 FR-3-12 と同じ基準）。Tier 3 自動検出ルール ≥ 95% 精度。</td>
+    </tr>
+    <tr>
+      <td class="col-id">DR-12</td>
+      <td class="col-title">conversation_memory</td>
+      <td>個人ごとの対話履歴（短期 + 中期）。<br><code>id PK / user_id FK / session_id / turn_idx / role (user/assistant) / content text / embedding vector(1536) / created_at</code><br>retention：直近 30日 + 重要会話の要約 1年。本人による削除可。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">FR-6-08 / 09 の context として参照。本人のみアクセス可（NFR-30）。本人による「過去会話を消去」操作で 24h 以内に削除。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-6-2"><span class="num">6.2</span>データ層関係図</h3>
+<div class="arch-diagram">
+                    ┌─────────────────────────────┐
+                    │  人事システム (INT-12)        │
+                    │  Google Workspace (INT-11)    │
+                    └──────────────┬──────────────┘
+                                   │ (役職・年次・部署)
+                                   ▼
+       ┌──────────────────────────────────────────────────┐
+       │  DR-07 personal_profile  (1 user = 1 row)        │
+       │  ├─ persona (P-1〜P-5) / goals / consent_flags   │
+       └─────────┬─────────────────────────┬──────────────┘
+                 │ user_id                 │ user_id
+                 ▼                         ▼
+   ┌──────────────────────────┐   ┌──────────────────────────┐
+   │ DR-08 personal_context   │   │ DR-12 conversation_memory │
+   │ (90 日 raw + ∞ summary)  │   │ (30 日 + 重要要約)        │
+   └──────────────────────────┘   └──────────────────────────┘
+                 │                              │
+                 │ 要約フィード                  │ 直近会話
+                 ▼                              ▼
+                 ┌──────────────────────────────────┐
+                 │  DR-09 growth_journal            │
+                 │  (週次・月次レポート)             │
+                 └──────────────────────────────────┘
+
+   ┌──────────────────────────┐   ┌──────────────────────────┐
+   │ DR-10 senior_patterns    │   │ DR-11 company_knowledge   │
+   │ (先輩の同意ある場合のみ)  │   │ (規程・FAQ・マニュアル)    │
+   │ embedding + consent_scope │  │ embedding + tier 0-2 のみ │
+   └──────────────────────────┘   └──────────────────────────┘
+                 ▲                              ▲
+                 └────────┐         ┌───────────┘
+                          │  RAG    │
+                  ┌──────────────────┐
+                  │  Personal AI      │
+                  │  (Claude + pgvec) │
+                  └──────────────────┘
+</div>
+<div class="caption"><span class="mono">図 6.2-1</span> 機能⑥ Personal AI Coach のデータ層関係図。</div>
+</section>
+
+
+<!-- ========== 7. 外部連携要件 ========== -->
+<section id="sec-7">
+<h2><span class="num">7.</span>外部連携要件（INT-11〜INT-13）</h2>
+<p>v2.2 INT-01〜10 を継承し、機能⑥ で新規に必要となる外部連携を追加する。</p>
+
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細（API 認証 / レート制限 / フォールバック）</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">INT-11</td>
+      <td class="col-title">Google Workspace Domain-wide Delegation（全社 Drive 参照）</td>
+      <td>v2.2 までは個別ユーザーの OAuth。v3.0 では全社 Drive（規程・マニュアル）を <code>company_knowledge</code>（DR-11）に取り込むため、サービスアカウント + DWD で全社 Drive にアクセス。アクセス対象は事前指定フォルダのみ。レート：Drive API は 1,000 QPS。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">DWD 設定完了、Workspace 管理者承認取得済。アクセススコープは <code>drive.readonly</code> のみ。指定フォルダ外のアクセスログ 0件。</td>
+    </tr>
+    <tr>
+      <td class="col-id">INT-12</td>
+      <td class="col-title">人事システム連携（役職・年次・部署情報）</td>
+      <td>FR-6-21（ペルソナ自動選択）のため、人事システムから役職・入社年月・部署を取得。API がない場合は CSV 月次連携も可。個人特定情報（住所・電話）は連携範囲外。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">月次同期成功率 ≥ 99%。連携範囲を「役職・入社年月・部署」のみに限定（住所・給与等は除外）。連携ログを監査可能。</td>
+    </tr>
+    <tr>
+      <td class="col-id">INT-13</td>
+      <td class="col-title">カレンダー連携（スケジュール把握）</td>
+      <td>FR-6-13（日次タスク整理）・FR-6-14（会議準備）のため、Google Calendar 個別 OAuth で本人カレンダーにアクセス。「非公開」マーク付き予定はタイトルを「予定あり」のみ取得。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">OAuth スコープ <code>calendar.readonly</code> のみ。非公開予定の詳細取得 0件。本人による連携解除で即座に取り込み停止。</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ========== 8. セキュリティ・プライバシー要件 ========== -->
+<section id="sec-8">
+<h2><span class="num">8.</span>セキュリティ・プライバシー要件（SEC-13〜SEC-18）</h2>
+<p>v2.2 SEC-01〜12 を継承し、機能⑥ で必須となるセキュリティ・プライバシー要件 6 件を追加する。<strong>本章はすべて Must（必須）</strong>。</p>
+
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">SEC-13</td>
+      <td class="col-title">個人 AI のデータ分離</td>
+      <td>A さんの context が B さんに漏れない。実装：(1) RDS RLS で <code>user_id</code> 単位の行レベルセキュリティ、(2) Slack DM の channel 分離、(3) LLM プロンプトに他人データ混入の自動検出・ブロック、(4) 監査ログでクロスアクセス試行を全件記録。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">ペネトレーションテストで他人データ取得試行 100件すべてブロック。RLS ポリシー有効化済。月次レビューでクロスアクセス 0件。</td>
+    </tr>
+    <tr>
+      <td class="col-id">SEC-14</td>
+      <td class="col-title">先輩データの収集同意（佐藤さんのメールパターン抽出への同意）</td>
+      <td>FR-6-06（先輩パターン引用）のため、ベテラン社員のメール・Slack・提案書から業務パターンを抽出する際、本人の <strong>明示的同意</strong>（オプトイン）を必須とする。同意範囲：(a) 名前付きで引用 / (b) 匿名化のみ / (c) 同意しない の 3択。撤回はいつでも可。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">同意 UI 実装、同意ログを <code>senior_patterns.consent_given_at</code> に記録。同意未取得のパターンは引用不可（FR-6-06 と整合）。撤回後 24h 以内にデータ削除。</td>
+    </tr>
+    <tr>
+      <td class="col-id">SEC-15</td>
+      <td class="col-title">退職者対応（個人 context 削除・先輩パターン保持判断）</td>
+      <td>退職時の処理：(1) personal_profile / personal_context / growth_journal / conversation_memory は <strong>退職日から 30日以内に全削除</strong>、(2) senior_patterns は本人退職前に「退職後も匿名化で残してよいか」を確認し、合意あれば匿名化、合意なければ削除。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">退職処理 SOP 文書化、人事との連携 API 実装、退職後 30日時点での残存 0件を月次監査で確認。senior_patterns の退職前確認実施率 100%。</td>
+    </tr>
+    <tr>
+      <td class="col-id">SEC-16</td>
+      <td class="col-title">機密データの除外（経営機密・M&A 情報の自動検出と除外）</td>
+      <td>Tier 3 機密（M&A・経営機密・人事評価・給与・賞与）を自動検出して personal_context・company_knowledge から除外。検出ルール：(a) 専用 Slack channel（経営層限定）、(b) 専用 Drive フォルダ、(c) キーワード辞書（M&A・査定・賞与算定 等）、(d) LLM 判定（曖昧ケース）。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">検出精度 ≥ 95%（テストセット 200件）。誤って学習した場合の通報窓口 + 24h 以内削除 SLO。月次自動監査で Tier 3 混入 0件を確認。</td>
+    </tr>
+    <tr>
+      <td class="col-id">SEC-17</td>
+      <td class="col-title">人事評価への流用禁止（AI の評価が人事評価に直接使われない）</td>
+      <td>本機能の出力（成長日記・弱点評価・活動量データ）を、人事評価・査定・昇進判断に <strong>直接</strong> 流用することを禁止。本人が自発的に「これを評価に出したい」と提示した場合のみ可。人事担当・管理職が AI から本人情報を取得することは技術的に不可（NFR-30 / SEC-13）。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">利用規約・社内規程に明記、全社員のオンボーディング時に説明。違反通報窓口設置。半期に 1回、人事 + 法務でレビュー。</td>
+    </tr>
+    <tr>
+      <td class="col-id">SEC-18</td>
+      <td class="col-title">監査ログ（誰が誰の AI を使ったか・何を聞いたか）</td>
+      <td>全アクセスを監査ログに記録：(a) ユーザー ID、(b) 質問内容（暗号化）、(c) アクセスしたデータソース、(d) 応答内容ハッシュ、(e) timestamp。保持期間 1年。本人は自分のログを参照可、人事 + 法務は監査目的でのみ集計参照可。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">CloudWatch Logs + S3 アーカイブで 1年保持。本人ログ参照 UI 実装。監査参照は事前承認制（人事 + 法務 + セキュリティ責任者の 2名同意）。</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note warn">
+  <div class="label">SEC-17 補足：心理的安全性の担保</div>
+  <p>「AI に監視されている」という不安は機能⑥ 最大のリスク（第13章）。SEC-17 を技術的に担保するだけでなく、利用規約・オンボーディング・経営層メッセージで <strong>「AI が評価には使われない」</strong>を繰り返し伝えることが運用要件。</p>
+</div>
+</section>
+
+
+<!-- ========== 9. テスト要件 ========== -->
+<section id="sec-9">
+<h2><span class="num">9.</span>テスト要件（TST-11〜TST-14）</h2>
+<p>v2.2 TST-01〜10 を継承し、機能⑥ 固有のテスト要件 4 件を追加する。</p>
+
+<table class="req">
+  <thead>
+    <tr>
+      <th class="col-id">ID</th>
+      <th class="col-title">タイトル</th>
+      <th>詳細</th>
+      <th class="col-pri">優先度</th>
+      <th class="col-accept">受入基準</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="col-id">TST-11</td>
+      <td class="col-title">ペルソナ別の応答品質テスト</td>
+      <td>5ペルソナ × 各 20質問 = 100ケース。応答のトーン・敬語・専門用語使用が想定通りかを自動 + 人手で評価。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">100ケース実施、ペルソナ整合率 ≥ 90%（人手評価 3名平均）。逸脱ケースは原因究明 + プロンプト調整。</td>
+    </tr>
+    <tr>
+      <td class="col-id">TST-12</td>
+      <td class="col-title">個人 context の精度テスト</td>
+      <td>サンプル 30名で AI が抽出した強み・弱み・目標進捗が本人評価と一致するか測定。FR-6-04 / 09 の受入基準と連動。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">本人評価との一致率：強み ≥ 70%、弱み ≥ 60%、目標進捗誤差 ≤ 10%。</td>
+    </tr>
+    <tr>
+      <td class="col-id">TST-13</td>
+      <td class="col-title">データ分離（プライバシー）テスト</td>
+      <td>SEC-13 / NFR-30 の検証。A さんとして B さんのデータ取得を試みる攻撃シナリオ 100件をペネトレーションテスト。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">100件すべてブロック。1件でも漏洩あればリリース停止。リリース前 + 四半期 1回実施。</td>
+    </tr>
+    <tr>
+      <td class="col-id">TST-14</td>
+      <td class="col-title">スケーラビリティテスト（200名同時）</td>
+      <td>NFR-28 の検証。200名同時アクセス（月曜朝のレポート配信 + DM 質問）をシミュレートし、応答時間 + エラー率を測定。</td>
+      <td class="col-pri"><span class="pri must">必須</span></td>
+      <td class="col-accept">p95 ≤ 5秒（NFR-26）、エラー率 ≤ 0.5%。リリース前 + 利用人数 +50名ごとに再実施。</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ========== 10. DoD ========== -->
+<section id="sec-10">
+<h2><span class="num">10.</span>受入基準（Sprint 別 DoD：S18〜S25）</h2>
+<p>v2.2 Sprint S17 / DoD-Final 完了後、機能⑥ は 8 Sprint（約 4ヶ月）で構築する。各 DoD は次 Sprint 開始の <strong>前提条件</strong>。</p>
+
+<div class="sprint-grid">
+  <div class="sprint-card s18">
+    <div class="sp-id">SPRINT S18</div>
+    <div class="sp-name">個人プロファイル基盤</div>
+    <div class="sp-desc">DR-07 / 08 / 12 構築、FR-6-01 / 02 / 21 / 22 実装、SEC-13 / 18 基盤</div>
+  </div>
+  <div class="sprint-card s19">
+    <div class="sp-id">SPRINT S19</div>
+    <div class="sp-name">質問応答 MVP（規程・FAQ）</div>
+    <div class="sp-desc">DR-11 構築、FR-6-05 / 07 / 08、INT-11 / 13、TST-11 初版</div>
+  </div>
+  <div class="sprint-card s20">
+    <div class="sp-id">SPRINT S20</div>
+    <div class="sp-name">先輩パターン学習</div>
+    <div class="sp-desc">DR-10 構築、FR-6-06、SEC-14 同意フロー、ベテラン 10名 オプトイン</div>
+  </div>
+  <div class="sprint-card s21">
+    <div class="sp-id">SPRINT S21</div>
+    <div class="sp-name">成長トラッキング</div>
+    <div class="sp-desc">DR-09 構築、FR-6-03 / 04 / 09 / 12、TST-12 実施</div>
+  </div>
+  <div class="sprint-card s22">
+    <div class="sp-id">SPRINT S22</div>
+    <div class="sp-name">秘書機能</div>
+    <div class="sp-desc">FR-6-13 / 14 / 15、v2.2 機能②（朝サマリー）の発展統合、カレンダー横断</div>
+  </div>
+  <div class="sprint-card s23">
+    <div class="sp-id">SPRINT S23</div>
+    <div class="sp-name">部署別アドバイザー</div>
+    <div class="sp-desc">FR-6-16 / 17 / 18 / 19 / 20、INT-12 人事連携、各部署 3名パイロット</div>
+  </div>
+  <div class="sprint-card s24">
+    <div class="sp-id">SPRINT S24</div>
+    <div class="sp-name">AI ペルソナ管理</div>
+    <div class="sp-desc">FR-6-10 / 11 / 23、NFR-31 一貫性、SEC-15 / 16 / 17 整備、TST-13 ペンテスト</div>
+  </div>
+  <div class="sprint-card s25">
+    <div class="sp-id">SPRINT S25</div>
+    <div class="sp-name">全社展開・観察</div>
+    <div class="sp-desc">TST-14 200名負荷、全社員ロールアウト、観察期間（4週間）、KPI ダッシュボード</div>
+  </div>
+</div>
+
+<h3><span class="num">10.1</span>Sprint 別 DoD 詳細</h3>
+<table>
+  <thead>
+    <tr><th>DoD ID</th><th>Sprint テーマ</th><th>必達条件</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="mono">DoD-S18</td>
+      <td>個人プロファイル基盤</td>
+      <td>(1) DR-07 / 08 / 12 デプロイ完了、(2) FR-6-01 オンボーディング 5名でβテスト完了、(3) FR-6-21 自動判定精度 ≥ 80%、(4) SEC-13 RLS 有効化、(5) SEC-18 監査ログ稼働。</td>
+    </tr>
+    <tr>
+      <td class="mono">DoD-S19</td>
+      <td>質問応答 MVP</td>
+      <td>(1) DR-11 に規程・FAQ 100件投入、(2) FR-6-05 サンプル 100質問で正答率 ≥ 85%、(3) NFR-26 p95 ≤ 5秒達成、(4) INT-11 DWD 設定完了、(5) TST-11 ペルソナ整合率 ≥ 85%（初版）。</td>
+    </tr>
+    <tr>
+      <td class="mono">DoD-S20</td>
+      <td>先輩パターン学習</td>
+      <td>(1) DR-10 にベテラン 10名分パターン格納、(2) SEC-14 同意ログ 100%、(3) FR-6-06 関連度 ≥ 4.0/5.0、(4) 撤回 API 24h 削除 SLO 達成。</td>
+    </tr>
+    <tr>
+      <td class="mono">DoD-S21</td>
+      <td>成長トラッキング</td>
+      <td>(1) DR-09 構築、(2) FR-6-09 週次レポート配信開始（パイロット 20名）、(3) TST-12 強み一致率 ≥ 70%、(4) FR-6-12 集計母数 5名未満非表示ルール実装。</td>
+    </tr>
+    <tr>
+      <td class="mono">DoD-S22</td>
+      <td>秘書機能</td>
+      <td>(1) FR-6-13 / 14 / 15 すべて稼働、(2) v2.2 機能② からの移行が破壊的でない、(3) リマインダー到達率 ≥ 99%、(4) INT-13 カレンダー連携完了。</td>
+    </tr>
+    <tr>
+      <td class="mono">DoD-S23</td>
+      <td>部署別アドバイザー</td>
+      <td>(1) 営業・開発・人事・経理 各 3名パイロット完了、(2) 意図ルーター 4-way 精度 ≥ 90%、(3) INT-12 人事連携稼働、(4) FR-6-20 管理職向け 5名以上集計ルール実装。</td>
+    </tr>
+    <tr>
+      <td class="mono">DoD-S24</td>
+      <td>AI ペルソナ管理</td>
+      <td>(1) FR-6-23 4軸 UI 実装、(2) NFR-31 トーン分散テスト通過、(3) SEC-15 退職処理 SOP 文書化、(4) SEC-16 Tier 3 検出 ≥ 95% 精度、(5) TST-13 ペンテスト 100件ブロック。</td>
+    </tr>
+    <tr>
+      <td class="mono">DoD-S25</td>
+      <td>全社展開・観察</td>
+      <td>(1) TST-14 200名負荷 p95 ≤ 5秒、(2) 全社員（100-200名）ロールアウト完了、(3) 4週間観察期間で重大インシデント 0件、(4) 本人満足度 ≥ 4.0/5.0、(5) 全 FR / NFR / SEC / TST の必須項目 100% 達成。</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ========== 11. 制約条件・前提条件 ========== -->
+<section id="sec-11">
+<h2><span class="num">11.</span>制約条件・前提条件</h2>
+
+<h3><span class="num">11.1</span>制約条件</h3>
+<table>
+  <tr><th>分類</th><th>制約内容</th></tr>
+  <tr><td>対象人数</td><td>全社員 100-200名想定（営業16名 → 段階拡大）</td></tr>
+  <tr><td>共通基盤</td><td>v2.2 共通基盤4要素（Claude Agent SDK / Slack Bolt / Gmail OAuth / pgvector）を <strong>必ず</strong> 流用。新基盤の独自実装は禁止。</td></tr>
+  <tr><td>OAuth スコープ</td><td>Google Workspace Domain-wide Delegation（INT-11）を Workspace 管理者承認のもと取得。スコープは <code>drive.readonly</code> / <code>calendar.readonly</code> のみ。</td></tr>
+  <tr><td>開発期間</td><td>v2.2 完了後の 4ヶ月（8 Sprint：S18〜S25）</td></tr>
+  <tr><td>月次追加コスト（営業16名 MVP）</td><td>+¥80K 〜 +¥150K（Claude API + RDS Replica + S3 Glacier）</td></tr>
+  <tr><td>月次追加コスト（全社200名展開）</td><td>+¥200K 〜 +¥350K（Lambda concurrent + RDS upsize + Knowledge embed 再計算）</td></tr>
+  <tr><td>機密情報</td><td>Tier 3（M&A / 経営機密 / 人事評価 / 給与）の格納禁止（SEC-16）。検出時即削除。</td></tr>
+  <tr><td>送信権限</td><td>v2.2 同様、<code>gmail.send</code> は付与しない。送信は必ず本人が Gmail UI から実施。</td></tr>
+</table>
+
+<h3><span class="num">11.2</span>前提条件</h3>
+<table>
+  <tr><th>分類</th><th>前提</th></tr>
+  <tr><td>v2.2 完了</td><td>v2.2 5機能すべての DoD-Final 達成済。共通基盤がプロダクション稼働中。</td></tr>
+  <tr><td>経営層合意</td><td>SEC-17（人事評価への流用禁止）を含む利用規約改訂が経営会議で承認済。</td></tr>
+  <tr><td>人事システム</td><td>役職・年次・部署を月次同期できる API or CSV エクスポート機能あり（INT-12）。</td></tr>
+  <tr><td>ベテラン社員の同意</td><td>FR-6-06 / SEC-14 のため、ベテラン社員 5〜10名から先輩パターン抽出への同意を取得済。</td></tr>
+  <tr><td>Workspace 管理</td><td>Domain-wide Delegation 設定を Workspace 管理者が承認可能。</td></tr>
+  <tr><td>セキュリティレビュー</td><td>SEC-13〜18 を情報セキュリティ部門が事前レビュー済。</td></tr>
+  <tr><td>FDE アサイン</td><td>v2.2 と同じ FDE が 4ヶ月（8 Sprint）継続アサイン可能。</td></tr>
+  <tr><td>パイロット協力</td><td>各部署（営業・開発・人事・経理）から各 3名のパイロット協力者を確保済。</td></tr>
+</table>
+</section>
+
+
+<!-- ========== 12. 用語集 ========== -->
+<section id="sec-12">
+<h2><span class="num">12.</span>用語集</h2>
+<dl class="terms">
+  <dt>AI コンテキスト（Personal Context）</dt>
+  <dd>個人ごとに保持される、AI の「その人についての理解」。役割・目標・嗜好・最近の活動・過去会話を含む。DR-07 / 08 / 09 / 12 が物理的な格納先。</dd>
+
+  <dt>ペルソナ（Persona）</dt>
+  <dd>応答トーン・敬語レベル・専門用語使用度・距離感を調整する 5種類のプロファイル（P-1 新卒〜P-5 部署別）。役職・年次・部署で自動判定し、本人嗜好で上書き可。</dd>
+
+  <dt>先輩パターン（Senior Pattern）</dt>
+  <dd>ベテラン社員のメール返信・提案進行・会議運営などの業務手法を AI が学習したもの。<strong>本人の明示的同意（オプトイン）が必須</strong>。同意撤回でいつでも削除可。</dd>
+
+  <dt>成長日記（Growth Journal）</dt>
+  <dd>AI が自動生成する個人の成長記録。週次・月次の活動量・成果・前期比・目標進捗を含む。<strong>本人のみアクセス可</strong>（管理職・人事はアクセス不可）。SEC-17 により人事評価への直接流用禁止。</dd>
+
+  <dt>データ分離（Data Isolation）</dt>
+  <dd>A さんの個人 AI と B さんの個人 AI で情報が漏れない技術設計。RDS RLS + Slack DM チャネル分離 + プロンプト混入検出の 3層で実現（SEC-13 / NFR-30）。</dd>
+
+  <dt>意図ルーター 4-way（4-way Intent Router）</dt>
+  <dd>v2.2 の 3-way（recall / compose / analyze）に「coach（個人 AI への質問）」を加えた 4-way 判定。Slack DM で受けた発話を 4分類し、適切な処理に振り分ける。FR-6-16 / DoD-S23 で実装。</dd>
+
+  <dt>Tier 0〜3（データ階層）</dt>
+  <dd>v2.2 DR-06 を継承。Tier 0：公開可、Tier 1：社内全体、Tier 2：部署内、Tier 3：機密（M&A・経営・人事評価・給与）。Tier 3 は personal_context / company_knowledge への格納禁止（SEC-16）。</dd>
+
+  <dt>匿名化ベンチマーク（Anonymized Benchmark）</dt>
+  <dd>同年次・同部署の集計から見た本人の位置を、個人特定不可な箱ひげ図風で提示するもの。<strong>集計母数 5名未満は表示禁止</strong>（FR-6-12）。</dd>
+
+  <dt>Domain-wide Delegation（DWD）</dt>
+  <dd>Google Workspace サービスアカウントが全社員のデータに代理アクセスできる仕組み。v3.0 では <code>company_knowledge</code>（DR-11）構築のため、<code>drive.readonly</code> スコープのみで取得（INT-11）。</dd>
+
+  <dt>オプトイン同意（Opt-in Consent）</dt>
+  <dd>「同意した人のみ対象」とする原則。デフォルトは「同意していない」。SEC-14 の先輩パターン抽出に適用。</dd>
+</dl>
+</section>
+
+
+<!-- ========== 13. リスクと留意事項 ========== -->
+<section id="sec-13">
+<h2><span class="num">13.</span>リスクと留意事項</h2>
+<table>
+  <thead>
+    <tr><th>リスク</th><th>影響</th><th>緩和策</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>心理的安全性（AI に監視されてる感）</strong></td>
+      <td>大：社員が「自分の AI が人事に筒抜け」と誤解すれば利用率が激減し、機能⑥ が空虚に。</td>
+      <td>SEC-17（人事評価への流用禁止）を技術 + 規約 + 経営層メッセージで三重に担保。SEC-18 監査ログを本人が自由に閲覧可能とする透明性。導入時の全社員説明会で丁寧に説明。</td>
+    </tr>
+    <tr>
+      <td><strong>人間メンターとの役割分担</strong></td>
+      <td>中：AI に頼りすぎて人間メンター（先輩・上司）との関係が希薄化。逆に AI 軽視で活用されない。</td>
+      <td>新卒研修で「AI は気兼ねない 1次相談、人間メンターは深い相談」という棲み分けを明示。AI が人間メンターへの相談を能動的にサジェスト（FR-6-11 学習計画に「先輩への弟子入り提案」を含める）。</td>
+    </tr>
+    <tr>
+      <td><strong>先輩データの同意取得</strong></td>
+      <td>大：ベテラン社員の同意（SEC-14）が取れないと FR-6-06 が機能しない。「自分のノウハウを AI に取られる」という抵抗感。</td>
+      <td>(1) 同意 UI で「名前付き引用 / 匿名化 / 同意しない」の 3択を明確化、(2) 撤回いつでも可、(3) パイロット 10名でメリット（後輩教育の負担減）を実感後に拡大。</td>
+    </tr>
+    <tr>
+      <td><strong>機密情報の自動検出（HR・経営情報）</strong></td>
+      <td>大：Tier 3 機密（M&A・査定・賞与）が誤って personal_context / company_knowledge に混入すれば情報漏洩リスク。</td>
+      <td>SEC-16 で 4 層検出（専用 channel / 専用 folder / キーワード辞書 / LLM 判定）。誤混入時の通報窓口 + 24h 以内削除 SLO。月次自動監査。</td>
+    </tr>
+    <tr>
+      <td><strong>退職者の個人 context 取り扱い</strong></td>
+      <td>中：退職時に context の取り扱いが不明確だと、本人にも会社にも遺恨を残す。</td>
+      <td>SEC-15 で退職処理 SOP を明文化：personal_* は 30日以内に全削除、senior_patterns は本人合意で匿名化保持 or 削除。退職前面談に組み込む。</td>
+    </tr>
+    <tr>
+      <td><strong>スケール時のコスト超過</strong></td>
+      <td>大：200名展開で月次 +¥350K を超過した場合、ROI が破綻。</td>
+      <td>Phase 制ロールアウト（営業16名 → 50名 → 100名 → 200名）。各 Phase でコスト実績を経営報告。利用量に応じた Claude モデル最適化（Sonnet → Haiku）も検討。</td>
+    </tr>
+    <tr>
+      <td><strong>v2.2 既存機能との衝突</strong></td>
+      <td>中：意図ルーター 4-way 化で v2.2 の 3-way が劣化。Slack DM の UX が複雑化。</td>
+      <td>FR-6-16 で v2.2 5機能との統合を必須化。回帰テスト（v2.2 DoD-Final のテストセット）を S23 で実施し、劣化 0 を確認後にリリース。</td>
+    </tr>
+    <tr>
+      <td><strong>ペルソナ判定ミス</strong></td>
+      <td>小：自動判定（FR-6-21）が外れると初期トーンが不適切。</td>
+      <td>本人による上書き（FR-6-22）を初日から提示。3日経過後の上書き率を観測し、≥ 30% の場合は判定ロジック見直し。</td>
+    </tr>
+    <tr>
+      <td><strong>労務・法務観点（モニタリング規制）</strong></td>
+      <td>大：従業員のメール・Slack を AI が読むことが、労働法上の「モニタリング」に該当する可能性。</td>
+      <td>法務 + 労務に事前レビューを依頼。利用規約改訂 + 全社員同意取得 + 労使協議（必要に応じて）。SEC-17 / SEC-18 を労務観点でも整合。</td>
+    </tr>
+    <tr>
+      <td><strong>過剰依存（AI なしで判断できない社員の発生）</strong></td>
+      <td>中：新卒・若手が AI 頼みになり、自分で考える力が育たない。</td>
+      <td>P-1 ペルソナの応答に「あなたはどう思いますか？」を意図的に挟む。月次レポートで「AI に聞いた回数」が突出して多い社員は人間メンターに連絡する仕組み（本人合意ベース）。</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ========== 14. 改訂履歴・推奨実装順 ========== -->
+<section id="sec-14" class="appendix">
+<h2><span class="num">14.</span>改訂履歴・推奨実装順</h2>
+
+<h3><span class="num">14.1</span>改訂履歴</h3>
+<table>
+  <thead><tr><th>版</th><th>日付</th><th>変更点</th></tr></thead>
+  <tbody>
+    <tr>
+      <td class="mono">v0.1</td>
+      <td>2026-05-14</td>
+      <td>初版作成。機能⑥ Personal AI Coach の要件 50+ 件（FR-6-01〜23 / NFR-26〜31 / DR-07〜12 / INT-11〜13 / SEC-13〜18 / TST-11〜14 / DoD-S18〜S25）を v2.2 と同じ記法で体系化。経営判断材料としての先行設計。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3><span class="num">14.2</span>推奨実装順</h3>
+<p>v2.2 完了後の 4ヶ月（8 Sprint）で、段階的にロールアウトする。各段階で <strong>本人満足度・コスト・インシデント</strong> を観察し、次段階へ進むかを判断。</p>
+
+<table>
+  <thead><tr><th>Phase</th><th>対象</th><th>期間</th><th>Sprint</th><th>判定 Go/No-Go 基準</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>Phase α</strong>（MVP）</td>
+      <td>営業16名（v2.2 と同じユーザー）</td>
+      <td>v2.2 完了 + 0〜2ヶ月</td>
+      <td>S18 / S19 / S20</td>
+      <td>営業16名で利用率 ≥ 60%、本人満足度 ≥ 4.0/5.0、重大インシデント 0件</td>
+    </tr>
+    <tr>
+      <td><strong>Phase β</strong>（部署パイロット）</td>
+      <td>営業16名 + 開発/人事/経理 各3名 = 25名</td>
+      <td>+ 2〜3ヶ月</td>
+      <td>S21 / S22 / S23</td>
+      <td>部署別意図ルーター精度 ≥ 90%、INT-12 人事連携稼働、TST-13 ペンテスト通過</td>
+    </tr>
+    <tr>
+      <td><strong>Phase γ</strong>（管理職拡大）</td>
+      <td>+ 管理職 10〜20名 = 計 45名</td>
+      <td>+ 3〜3.5ヶ月</td>
+      <td>S24</td>
+      <td>SEC-15 / 16 / 17 整備完了、管理職向け 1on1 サジェスト採用率 ≥ 40%、NFR-31 トーン一貫性確認</td>
+    </tr>
+    <tr>
+      <td><strong>Phase δ</strong>（全社展開）</td>
+      <td>全社員 100-200名</td>
+      <td>+ 3.5〜4ヶ月</td>
+      <td>S25</td>
+      <td>TST-14 200名負荷 p95 ≤ 5秒、4週間観察で重大インシデント 0件、本人満足度 ≥ 4.0/5.0</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3><span class="num">14.3</span>v2.2 との関係</h3>
+<table class="kv">
+  <tr><td>共通基盤</td><td>Claude Agent SDK / Slack Bolt / Gmail OAuth / pgvector（RDS PostgreSQL）を 100% 流用。</td></tr>
+  <tr><td>新基盤の追加</td><td>個人 context 層（DR-07 / 08 / 09 / 12）／全社ナレッジ層（DR-11）／先輩パターン層（DR-10）の 3層を上乗せ。</td></tr>
+  <tr><td>意図ルーター</td><td>v2.2 の 3-way（recall / compose / analyze）→ 4-way（+ coach）に拡張（FR-6-16 / DoD-S23）。</td></tr>
+  <tr><td>OAuth スコープ拡張</td><td>個別ユーザー OAuth → Domain-wide Delegation（INT-11）追加。既存 Gmail OAuth は維持。</td></tr>
+  <tr><td>セキュリティ追加</td><td>SEC-01〜12 を継承しつつ、SEC-13〜18（データ分離・人事評価流用禁止 等）を追加。</td></tr>
+  <tr><td>運用</td><td>v2.2 と同じ FDE が継続担当を前提。新規習得すべきは「個人 context 設計」「ペルソナ調整」「ペンテスト運用」の 3領域。</td></tr>
+</table>
+
+<h3><span class="num">14.4</span>並行開発の判断材料</h3>
+<p>v2.2 完了を待たずに機能⑥ と並行開発する選択肢もあり得るが、本書は <strong>「v2.2 完了後の段階展開」を推奨</strong> する。理由：</p>
+<ol>
+  <li>v2.2 の共通基盤がプロダクション稼働してから機能⑥ を載せる方が、基盤側の不具合と機能⑥ 固有の問題を切り分けやすい。</li>
+  <li>SEC-13〜18 は v2.2 完了時点の運用実績（特に SEC-01〜12 の実装結果）を踏まえて設計したほうが現実的。</li>
+  <li>FDE 人員を 2系統（v2.2 と機能⑥）に分けると、v2.2 完了の見込みが後ろ倒しになるリスクが大きい。</li>
+</ol>
+<p>ただし、人員に余力がある場合は <strong>FR-6-01 / 02 / 05 / 21 の MVP（質問応答 + プロファイル）のみ</strong>を v2.2 後半（S15〜S17）で並行着手する選択肢はあり得る。経営判断と FDE 工数の余力に応じて判断する。</p>
+
+<div class="note coach">
+  <div class="label">本書のスコープ外（次版以降の検討事項）</div>
+  <ul style="margin: 4px 0 0 18px;">
+    <li>音声入出力（Slack Huddle 連携） — v3.1</li>
+    <li>多言語対応（英語） — v3.1</li>
+    <li>外部社員（業務委託・派遣）への展開 — v3.2</li>
+    <li>機能⑥ と顧客向け AI の連携 — v4.0</li>
+    <li>本人合意ベースでの個人 context 引き継ぎ（異動・退職） — v3.2</li>
+  </ul>
+</div>
+</section>
+
+</main>
+</div>
+</body>
+</html>

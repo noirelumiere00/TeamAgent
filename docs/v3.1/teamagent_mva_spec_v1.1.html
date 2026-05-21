@@ -1,0 +1,3307 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent MVA 仕様書 v1.1 — OpenClaw 採用版 / セキュリティ運用ルール強化</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>MVA 仕様書</div>
+  <div class="sidebar-doc-meta">
+    Version 1.1<br>
+    2026年5月20日（OpenClaw 採用 / セキュリティ運用ルール強化）
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>本書について</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>目的：3ヶ月で動く Agent を立ち上げる最短ルート</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>構想・概要書 v3.0 第6章との関係</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>v3.0 ドキュメント群との位置づけ図</a></li>
+    <li class="level-2"><a href="#sec-1-4"><span class="num">1.4</span>想定読者</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-2"><span class="num">2.</span>MVA の哲学</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>「資料自動化先行」から「データ層先行」への転換</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>ファウンデーション・ファーストの利点</a></li>
+    <li class="level-2"><a href="#sec-2-3"><span class="num">2.3</span>3ヶ月で営業に見える成果を担保する戦略</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>MVA 全体スケジュール（7 ヶ月版）</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>14 Sprint × 2 週間 = 7 ヶ月（12 月本格運用）</a></li>
+    <li class="level-2"><a href="#sec-3-2"><span class="num">3.2</span>各 Sprint の目的と DoD（一覧表）</a></li>
+    <li class="level-2"><a href="#sec-3-3"><span class="num">3.3</span>マイルストーン M0 → M3 → M6 → M7</a></li>
+    <li class="level-2"><a href="#sec-3-4"><span class="num">3.4</span>コスト構造（開発 / 運用 / 個人ツール）</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-4"><span class="num">4.</span>M0：サーバー到着直後（Day 0〜3）</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>サーバー候補と判定基準</a></li>
+    <li class="level-2"><a href="#sec-4-2"><span class="num">4.2</span>Day 0 チェックリスト（OpenClaw インストール含む）</a></li>
+    <li class="level-2"><a href="#sec-4-3"><span class="num">4.3</span>Day 1 チェックリスト</a></li>
+    <li class="level-2"><a href="#sec-4-4"><span class="num">4.4</span>Day 2-3 チェックリスト</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-5"><span class="num">5.</span>MVA Phase 1：データ層連携（S1〜S4）</a></li>
+    <li class="level-2"><a href="#sec-5-1"><span class="num">5.1</span>S1：OpenClaw + Bedrock 接続セットアップ</a></li>
+    <li class="level-2"><a href="#sec-5-2"><span class="num">5.2</span>S2：Slack Channel + Gmail / Drive コネクタ接続 / Go/No-Go ①</a></li>
+    <li class="level-2"><a href="#sec-5-3"><span class="num">5.3</span>S3：pgvector 構築 + ClawHub Skill ホワイトリスト確定</a></li>
+    <li class="level-2"><a href="#sec-5-4"><span class="num">5.4</span>S4：検索 Skill MVP 実装</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-6"><span class="num">6.</span>MVA Phase 2：OpenClaw 上の Agent ループ（S5〜S6）</a></li>
+    <li class="level-2"><a href="#sec-6-1"><span class="num">6.1</span>実装タスク（OpenClaw Skill 経由 Claude Agent SDK）</a></li>
+    <li class="level-2"><a href="#sec-6-2"><span class="num">6.2</span>Skill / Agent ループのコード構造（疑似コード）</a></li>
+    <li class="level-2"><a href="#sec-6-3"><span class="num">6.3</span>Tool スキーマ例</a></li>
+    <li class="level-2"><a href="#sec-6-4"><span class="num">6.4</span>DoD</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-7"><span class="num">7.</span>MVA Phase 3：ホワイトリスト検索 Skill（S5-S6 検証 / M3 完成）</a></li>
+    <li class="level-2"><a href="#sec-7-1"><span class="num">7.1</span>実装タスク（ClawHub 流用 or 自前実装）</a></li>
+    <li class="level-2"><a href="#sec-7-1b"><span class="num">7.1b</span>検索 Skill の I/F（OpenClaw Skill Registry 登録）</a></li>
+    <li class="level-2"><a href="#sec-7-2"><span class="num">7.2</span>出力フォーマット</a></li>
+    <li class="level-2"><a href="#sec-7-3"><span class="num">7.3</span>DoD</a></li>
+
+    <li class="level-1"><a href="#sec-8"><span class="num">8.</span>技術選定の確定事項と未決事項</a></li>
+    <li class="level-2"><a href="#sec-8-1"><span class="num">8.1</span>確定事項（OpenClaw / セキュリティ運用ルール 追加）</a></li>
+    <li class="level-2"><a href="#sec-8-2"><span class="num">8.2</span>未決事項（壁打ちで詰める 12 論点）</a></li>
+
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>ローカル開発環境セットアップ</a></li>
+    <li class="level-2"><a href="#sec-9-1"><span class="num">9.1</span>docker-compose.yml</a></li>
+    <li class="level-2"><a href="#sec-9-2"><span class="num">9.2</span>.env.example</a></li>
+    <li class="level-2"><a href="#sec-9-3"><span class="num">9.3</span>setup_local.sh</a></li>
+    <li class="level-2"><a href="#sec-9-4"><span class="num">9.4</span>スモークテスト手順</a></li>
+    <li class="level-2"><a href="#sec-9-5"><span class="num">9.5</span>必要 Python ライブラリ</a></li>
+
+    <li class="level-1"><a href="#sec-10"><span class="num">10.</span>Phase 4 への接続点（Sprint S7-S14）</a></li>
+    <li class="level-2"><a href="#sec-10-1"><span class="num">10.1</span>MVA 完了時点で揃うもの</a></li>
+    <li class="level-2"><a href="#sec-10-2"><span class="num">10.2</span>Phase 4（S7-S10）への踏切板</a></li>
+    <li class="level-2"><a href="#sec-10-3"><span class="num">10.3</span>機能④仕様書 v1 / 機能⑥要件 v3.0 との連携点</a></li>
+    <li class="level-2"><a href="#sec-10-4"><span class="num">10.4</span>S11-S14：負荷試験・安定化（12 月本格運用前）</a></li>
+
+    <li class="level-1"><a href="#sec-11"><span class="num">11.</span>改訂履歴</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-12"><span class="num">12.</span>セキュリティ運用ルール（v1.1 新設）</a></li>
+    <li class="level-2"><a href="#sec-12-1"><span class="num">12.1</span>ClawHub Skill ホワイトリスト運用</a></li>
+    <li class="level-2"><a href="#sec-12-2"><span class="num">12.2</span>OpenClaw 本体の CVE 監視</a></li>
+    <li class="level-2"><a href="#sec-12-3"><span class="num">12.3</span>マルウェア Skill 検出運用</a></li>
+    <li class="level-2"><a href="#sec-12-4"><span class="num">12.4</span>Anthropic 政策変動への耐性</a></li>
+    <li class="level-2"><a href="#sec-12-5"><span class="num">12.5</span>アクセス制御（IAM Role + Tier 0-3）</a></li>
+    <li class="level-2"><a href="#sec-12-6"><span class="num">12.6</span>リスク台帳 R16-R19</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">MVA（Minimum Viable Agent）仕様書 v1.1 — OpenClaw 採用版 / セキュリティ運用ルール強化</div>
+  <h1>TeamAgent MVA 仕様書 v1.1<br>OpenClaw 上に構築する Agent / 12 月本格運用までの 7 ヶ月ロードマップ</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>実装直前ブレークダウン文書（構想・要件・アーキ・実装計画書 v3.0 を実装担当が「翌日コードを書ける」レベルまで詳細化した別冊）</td></tr>
+    <tr><td>バージョン</td><td>1.1（2026年5月20日改訂・OpenClaw フル採用 + 第12章セキュリティ運用ルール新設）</td></tr>
+    <tr><td>作成日</td><td>2026年5月19日（v1.0 初版）／ 2026年5月20日（v1.1 改訂）</td></tr>
+    <tr><td>位置付け</td><td>構想・概要書 v3.0 / 要件定義書 v3.0 / アーキテクチャ図書 v3.0 / 実装計画書 v3.0 の <strong>実装直前のブレークダウン</strong>。v1.1 では <strong>OpenClaw を Agent Runtime として全面採用</strong>し、Claude Agent SDK を「Skill 内部の Agent ループ実装」として位置付け直す。<strong>12 月本格運用</strong>に向けた 7 ヶ月 / 14 Sprint へスケジュール再構成。</td></tr>
+    <tr><td>主要改訂点</td><td>① OpenClaw 採用に伴うアーキ刷新／② Sprint 構成を S1-S14（7 ヶ月）へ拡張／③ コスト構造を「開発 ¥80K（総額）／運用 月 ¥100K-1M レンジ」に更新／④ <strong>第12章「セキュリティ運用ルール」新設</strong>（ClawHub ホワイトリスト・CVE 監視・マルウェア検出・Anthropic 政策耐性・アクセス制御）／⑤ リスク R16-R19 追加</td></tr>
+    <tr><td>関連文書</td><td>構想・概要書 v3.0（teamagent_overview_v3.0.html）／ 要件定義書 v3.0（teamagent_requirements_v3.0.html）／ アーキテクチャ図書 v3.0（teamagent_architecture_v3.0.html）／ 実装計画書 v3.0（teamagent_implementation_plan_v3.0.html）／ 機能④ 確定仕様書 v1（teamagent_kinou4_spec_v1.html）／ 機能⑥ Personal AI Coach 要件 v3.0（teamagent_personal_ai_coach_requirements_v3.0.html）</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">MVA v1.1 = OpenClaw Runtime + Claude Agent SDK Skills. 7 Months to Production. Security-First Operations.</div>
+  <div class="hero-headline">OpenClaw 上に MVA を構築し、<br>12 月本格運用へ — 7 ヶ月 / 14 Sprint</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">14<small>Sprint</small></div>
+      <div class="hero-stat-label">2 週間 × 14 = 7 ヶ月<br>S1-S6 MVA / S7-S10 Phase 4 / S11-S14 安定化</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">OC<small>Runtime</small></div>
+      <div class="hero-stat-label">OpenClaw が Skill Registry / Channel 抽象 / セッション管理<br>Claude Agent SDK は Skill 内部の Agent ループ実装</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">¥80K<small>Dev / 総額</small></div>
+      <div class="hero-stat-label">開発予算：総額 ¥80,000<br>運用費：月 ¥100K - ¥1M レンジ（規模次第）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">12<small>Month Start</small></div>
+      <div class="hero-stat-label">12 月本格運用開始<br>5 → 16 → 全社展開の段階運用</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- =================================================================== -->
+<!-- 1. 本書について -->
+<!-- =================================================================== -->
+<h2 id="sec-1"><span class="num">1.</span>本書について</h2>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>目的：3 ヶ月で「動く Agent」を立ち上げる最短ルート</h3>
+
+<p>本書は、TeamAgent v3.0 ドキュメント群（構想・概要書／要件定義書／アーキテクチャ図書／実装計画書）の <strong>最も実装に近い別冊</strong> として、MVA（Minimum Viable Agent）の構築を <strong>サーバー到着 Day 0 から 3 ヶ月で営業 5 名がベータ利用できる検索 Agent</strong> へ着地させるための実装手順書である。</p>
+
+<p>本書のゴールは抽象論ではなく以下の 1 点に集約される。</p>
+
+<div class="note warn">
+  <div class="label">本書の存在意義</div>
+  <strong>「サーバーが届いた日に <span class="mono">terraform apply</span> を叩いて、翌日からコードを書き始められる」</strong>状態を、実装担当本人（FDE）と関係者の間で揃えるための作業計画。Day 0 のチェックリスト・OAuth 登録手順・docker-compose・SQL DDL・疑似コードまで網羅する。
+</div>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>構想・概要書 v3.0 第 6 章との関係</h3>
+
+<p>構想・概要書 v3.0 の第 6 章「MVA 戦略」は、MVA の <strong>哲学・全体像・3 Phase の位置づけ</strong> を語る章である。本書はその第 6 章の <strong>詳細実装版</strong> にあたる。</p>
+
+<table>
+  <thead>
+    <tr><th>観点</th><th>構想・概要書 v3.0 第 6 章</th><th>本書（MVA 仕様書 v1）</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>抽象度</td><td>経営層・営業向けの構想説明</td><td>実装担当向けの作業指示書</td></tr>
+    <tr><td>記述粒度</td><td>Phase 1〜3 の目的と成果物</td><td>Sprint 単位のタスク・DoD・コード断片</td></tr>
+    <tr><td>記載内容</td><td>WHY（なぜデータ層先行か）</td><td>HOW（terraform / docker-compose / SQL / 疑似コード）</td></tr>
+    <tr><td>読み終わり</td><td>「方針が腑に落ちる」</td><td>「翌日コードを書き始められる」</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-1-3"><span class="num">1.3</span>v3.0 ドキュメント群との位置づけ図</h3>
+
+<div class="arch-diagram">
+                                ┌─────────────────────────────────────┐
+                                │   構想・概要書 v3.0（WHY / WHAT）   │
+                                │   設計思想・Skill Registry・MVA 戦略│
+                                └──────────────┬──────────────────────┘
+                                               │
+                ┌──────────────────────────────┼──────────────────────────────┐
+                │                              │                              │
+   ┌────────────▼────────────┐  ┌──────────────▼─────────────┐  ┌─────────────▼────────────┐
+   │   要件定義書 v3.0       │  │   アーキテクチャ図書 v3.0  │  │   実装計画書 v3.0        │
+   │   機能要件・非機能要件  │  │   システム構成・コンポ図   │  │   ロードマップ・コスト   │
+   └────────────┬────────────┘  └──────────────┬─────────────┘  └─────────────┬────────────┘
+                │                              │                              │
+                └──────────────────────────────┼──────────────────────────────┘
+                                               │
+                                ┌──────────────▼──────────────────────┐
+                                │ ★ MVA 仕様書 v1 （本書 = 実装直前） │
+                                │   Sprint 詳細・Day 0 手順・SQL/コマ │
+                                │   ンド・OAuth 設定・docker-compose  │
+                                └──────────────┬──────────────────────┘
+                                               │
+                                               ▼
+                                ┌─────────────────────────────────────┐
+                                │   実装（FDE が翌日からコードを書く）│
+                                └─────────────────────────────────────┘
+</div>
+<div class="caption"><span class="fig-num">図 1-1</span>v3.0 ドキュメント群における本書の位置づけ。本書は 4 文書を「実装担当が読める粒度」までブレークダウンする橋渡し。</div>
+
+<h3 id="sec-1-4"><span class="num">1.4</span>想定読者</h3>
+
+<dl class="terms">
+  <dt>第一読者：FDE（Forward Deployed Engineer / 実装担当本人）</dt>
+  <dd>本書を Day 0 から手元に置き、チェックリストを潰しながらコードを書く。各 Sprint の DoD が達成できれば次へ進む。</dd>
+
+  <dt>第二読者：レビュー担当者（CTO / アーキテクト相当）</dt>
+  <dd>Sprint レビュー時に本書の DoD と照らし合わせて受け入れ判定を行う。未決事項（8.2 節）の論点詰めにも責任を持つ。</dd>
+
+  <dt>第三読者：PM・営業企画</dt>
+  <dd>各マイルストーン（M0〜M3）で何が動くかを把握し、ベータ募集や社内告知のタイミングを調整する。</dd>
+
+  <dt>第四読者：監査・情報セキュリティ部門</dt>
+  <dd>OAuth スコープ・データ取り込み範囲・ログ保管方針が監査要件を満たすかを Sprint 開始前にレビューする。</dd>
+</dl>
+
+<!-- =================================================================== -->
+<!-- 2. MVA の哲学 -->
+<!-- =================================================================== -->
+<h2 id="sec-2"><span class="num">2.</span>MVA の哲学</h2>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>「資料自動化先行」から「データ層先行」への転換理由</h3>
+
+<p>v2.2 までの TeamAgent は「5 機能（動画分析／メール／提案資料／Slack 自動投稿／進捗まとめ）を順番に作る」設計だった。これを v3.0 で根本から見直し、<strong>「データ層（Mail / Drive / Slack）を先に固める」+「Skill Registry に初期 Skill セットを順次登録する」</strong>方針へ転換した。理由は以下のとおり。</p>
+
+<table>
+  <thead>
+    <tr><th>論点</th><th>資料自動化先行（旧 v2.2）</th><th>データ層先行（MVA / 新 v3.0）</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>初動 3 ヶ月の成果物</td>
+      <td>提案資料 1 機能の β 版。データソース未連携のため出力品質が低い</td>
+      <td>Mail/Drive/Slack 横断検索が動く Agent。全 Skill の基盤になる</td>
+    </tr>
+    <tr>
+      <td>2 度手間リスク</td>
+      <td>各機能ごとに個別にデータ取り込みを書き、後で共通化し直し</td>
+      <td>共通データ層 1 つに集約。各 Skill は SQL or Tool 呼び出しのみ</td>
+    </tr>
+    <tr>
+      <td>営業へのデモ素材</td>
+      <td>「ちょっとした自動生成」止まり。差別化が弱い</td>
+      <td>「過去類似案件・KOL・関連メール」を即提示。本質的価値が伝わる</td>
+    </tr>
+    <tr>
+      <td>Skill 拡張の伸び</td>
+      <td>5 機能 = 5 個の独立アプリ。横展開が線形</td>
+      <td>1 つ基盤 + Skill Registry に N 個 Skill を登録。Skill 追加が指数関数的に容易</td>
+    </tr>
+    <tr>
+      <td>監査・統制</td>
+      <td>各機能でログ・権限を個別実装</td>
+      <td>共通 Permissions / 監査ログを 1 箇所で完結</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>ファウンデーション・ファーストの利点</h3>
+
+<p>個別 Skill から入ると「動くデモは早いが、後で必ず作り直し」になる根拠は以下の 4 点。</p>
+
+<ol>
+  <li><strong>データ重複の罠</strong>：機能 A が Mail を取り込み、機能 B も別形式で Mail を取り込み、機能 C が両方を参照しようとした瞬間に整合性破綻。pgvector に最初から集約しておけば全 Skill が同じビューを共有できる。</li>
+  <li><strong>Embedding コストの罠</strong>：各機能で別々の Embedding モデルを使うと、再 Embedding コストが Skill 数 × データ量で膨らむ。共通 Embedding なら 1 回投入で N Skill が使える。</li>
+  <li><strong>権限・監査の罠</strong>：「誰が誰のデータを参照できるか」を Skill ごとに実装すると、4 つ目以降は確実に穴が空く。共通 Permissions 層を最初に置くことで一元統制できる。</li>
+  <li><strong>Agent の本質に合致</strong>：Claude Agent SDK は「自律的に Tool を呼び出す」モデル。Tool が呼ぶ先（データ層）が薄っぺらいと、Skill いくつ並べても賢くならない。</li>
+</ol>
+
+<h3 id="sec-2-3"><span class="num">2.3</span>3 ヶ月で営業に見える成果物を担保する戦略（P3 で超軽量検索 Skill）</h3>
+
+<p>「データ層だけ作ってる 3 ヶ月」では営業に説明できない。そこで <strong>P3（Sprint 6 / M3）で超軽量の検索 Skill を必ず載せる</strong> ことで、3 ヶ月目には「Slack で <span class="mono">@TeamAgent ACME 案件は？</span> と聞くと過去類似案件・KOL・メール・Drive リンクが返る」状態を作る。</p>
+
+<div class="note beginner">
+  <div class="label">営業に見せる時のデモシナリオ</div>
+  営業 A：「<span class="mono">@TeamAgent</span> ◯◯食品の前回提案、誰が KOL だった？」<br>
+  TeamAgent：「2024 年 11 月の提案では @yamada-san がリードしていました。当時 KOL は田中さん（インフルエンサー A）、起用結果は CV 1.4% 達成。関連資料：[Drive リンク] / [Slack スレッド] / [メール 3 通]」<br>
+  → これが M3（3 ヶ月目）の完成状態。Skill としては検索 1 個のみだが、データ層が揃っているため営業価値は十分。
+</div>
+
+
+<!-- =================================================================== -->
+<!-- 3. MVA 全体スケジュール -->
+<!-- =================================================================== -->
+<h2 id="sec-3"><span class="num">3.</span>MVA 全体スケジュール（7 ヶ月版）</h2>
+
+<h3 id="sec-3-1"><span class="num">3.1</span>14 Sprint × 2 週間 = 7 ヶ月（12 月本格運用）</h3>
+
+<p>v1.0 では「3 ヶ月で MVA を完成 → Phase 4 は後続」という構成だったが、v1.1 では <strong>12 月本格運用</strong> という外部スケジュールに合わせ、<strong>14 Sprint × 2 週間 = 7 ヶ月</strong> の地続きロードマップへ拡張する。MVA 完成までは S1-S6（3 ヶ月強）で v1.0 と変わらないが、その後の Phase 4 展開・安定化までを同じドキュメントで管理する。</p>
+
+<div class="arch-diagram">
+  Month 0.5    Month 1      Month 1.5    Month 2      Month 2.5    Month 3      Month 4-6           Month 7
+  │           │            │            │            │            │            │                  │
+  ├─ S1 ──────┼─ S2 ───────┼─ S3 ───────┼─ S4 ───────┼─ S5 ───────┼─ S6 ───────┼─ S7 ─ S8 ─ S9 ─ S10 ┼─ S11-S14 ┤
+  │ OpenClaw  │ Slack Ch+  │ pgvector + │ 検索 Skill │ 営業 5 名  │ MVA 完成 + │ Phase 4-a/b/c/d/e   │ 負荷試験 │
+  │ + Bedrock │ Gmail/Drive│ ホワイト   │ MVP 実装   │ ドッグ     │ 16 名展開  │ Skill 順次追加      │ 安定化   │
+  │ 接続      │ コネクタ   │ リスト確定 │            │ フード     │ 準備       │                     │          │
+  │           │ G/NG ①    │            │            │            │            │                     │          │
+  M0          M1           M1.5         M2           M2.5         M3           M4 - M6              M7
+ サーバー    Slack/Mail/  pgvector +   検索 Skill   営業 5 名    MVA 完成,    Phase 4 各 Skill    本格運用前
+ 到着 +      Drive 接続,  Skill        MVP 動作    ドッグ       16 名 → 展開 順次 register()     負荷試験 +
+ OpenClaw    Go/No-Go ①  ホワイト     確認        フード開始   準備完了                          安定化
+ 初期化                   リスト確定
+                ←━━━━━━━ Phase 1+2+3：MVA（OpenClaw 上）━━━━━━━→  ←Phase 4 順次→  ←本格運用前→
+                                                                                          12 月本格運用
+</div>
+<div class="caption"><span class="fig-num">図 3-1</span>v1.1 MVA タイムライン。M0 = サーバー到着 + OpenClaw 初期化、M3 = MVA 完成 + 16 名展開準備、M7 = 12 月本格運用直前の安定化完了。</div>
+
+<h3 id="sec-3-2"><span class="num">3.2</span>各 Sprint の目的と DoD（一覧表）</h3>
+
+<table class="compact">
+  <thead>
+    <tr><th>Sprint</th><th>期間</th><th>Phase</th><th>目的</th><th>主要成果物</th><th>DoD（Definition of Done）</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>S1</strong></td><td>M0-M0.5</td><td>MVA P1</td>
+      <td>OpenClaw + Bedrock 接続セットアップ</td>
+      <td>Terraform、OpenClaw インストール、Bedrock 経由 Claude 呼び出し疎通、Secrets Manager、CloudWatch</td>
+      <td>OpenClaw が起動し、Bedrock 経由で Claude Sonnet 4.6 への ping が 200 を返す</td>
+    </tr>
+    <tr>
+      <td><strong>S2</strong></td><td>M0.5-M1</td><td>MVA P1</td>
+      <td>Slack Channel + Gmail / Drive コネクタ接続 ＋ <strong>Go/No-Go ゲート ①</strong></td>
+      <td>OpenClaw Slack Channel、Gmail / Drive コネクタ、OAuth トークン管理、初期同期 Worker</td>
+      <td>営業 1 名分の Mail/Drive データが OpenClaw 経由で取り出せる。Go/No-Go ① で「セキュリティ運用ルール（第 12 章）」レビュー合格</td>
+    </tr>
+    <tr>
+      <td><strong>S3</strong></td><td>M1-M1.5</td><td>MVA P1</td>
+      <td>pgvector 構築 + ClawHub Skill ホワイトリスト確定</td>
+      <td>pgvector スキーマ、Embedding パイプライン、ClawHub Skill 監査結果、ホワイトリスト v1</td>
+      <td>3 ソースが pgvector に入り SQL 検索成功。ClawHub Skill ホワイトリスト v1 が文書化・承認済み</td>
+    </tr>
+    <tr>
+      <td><strong>S4</strong></td><td>M1.5-M2</td><td>MVA P1</td>
+      <td>検索 Skill MVP 実装</td>
+      <td>OpenClaw Skill としての <span class="mono">search</span>（Claude Agent SDK 経由）、引用整形、Slack 返信</td>
+      <td><span class="mono">@TeamAgent</span> に質問すると検索結果＋引用が返る（精度未調整可）</td>
+    </tr>
+    <tr>
+      <td><strong>S5</strong></td><td>M2-M2.5</td><td>MVA P2</td>
+      <td>営業 5 名ドッグフード + フィードバック反映</td>
+      <td>営業 5 名アカウント、FB 収集導線、Skill チューニング</td>
+      <td>5 名が 1 日 1 回以上利用、FB ≥ 20 件、満足度の平均 ≥ 3.5/5</td>
+    </tr>
+    <tr>
+      <td><strong>S6</strong></td><td>M2.5-M3</td><td>MVA P3</td>
+      <td>MVA 完成 + 営業 16 名展開準備</td>
+      <td>MVA 安定版、運用ダッシュ、16 名向けオンボーディング資料</td>
+      <td>MVA リリースタグ。16 名展開のキックオフ会 = 開催可能状態</td>
+    </tr>
+    <tr>
+      <td><strong>S7</strong></td><td>M3-M4</td><td>Phase 4-a</td>
+      <td>Mail 起案 Skill 追加</td>
+      <td>OpenClaw Skill <span class="mono">draft_mail</span>、Gmail 下書き API、人間レビュー導線</td>
+      <td>営業の起案メール 50% を AI が下書き、修正回数 ≤ 2 回</td>
+    </tr>
+    <tr>
+      <td><strong>S8</strong></td><td>M4-M5</td><td>Phase 4-b</td>
+      <td>営業進捗まとめ Skill 追加</td>
+      <td>OpenClaw Skill <span class="mono">summarize_progress</span>、Slack 週次サマリ自動投稿</td>
+      <td>5 営業の週次サマリが毎週月曜に自動投稿、Manager 評価 ≥ 4/5</td>
+    </tr>
+    <tr>
+      <td><strong>S9</strong></td><td>M5-M5.5</td><td>Phase 4-c</td>
+      <td>提案資料起案 Skill 追加</td>
+      <td>OpenClaw Skill <span class="mono">draft_proposal</span>、PPTX 生成（Anthropic pptx skill）</td>
+      <td>初稿 PPTX が 5 分以内で生成、最終提出版への流用率 ≥ 40%</td>
+    </tr>
+    <tr>
+      <td><strong>S10</strong></td><td>M5.5-M6</td><td>Phase 4-d/e</td>
+      <td>動画分析 Skill（Gemini 2.5 Flash）+ Slack 自動サジェスト Skill</td>
+      <td>OpenClaw Skill <span class="mono">analyze_video</span>（内部で Gemini 呼び出し）/ <span class="mono">slack_suggest</span></td>
+      <td>動画 1 本 ≤ 3 分で構造化、サジェスト誤検知率 ≤ 10%</td>
+    </tr>
+    <tr>
+      <td><strong>S11</strong></td><td>M6-M6.25</td><td>本番化</td>
+      <td>負荷試験（営業 16 名 → 全社想定 100 名）</td>
+      <td>k6 シナリオ、Bedrock 同時実行スロットリング検証、コスト試算更新</td>
+      <td>P95 応答 ≤ 8s、エラー率 ≤ 1%、月次コスト試算 ¥1M 以下を確認</td>
+    </tr>
+    <tr>
+      <td><strong>S12</strong></td><td>M6.25-M6.5</td><td>本番化</td>
+      <td>セキュリティ運用ルール（第 12 章）の運用回し</td>
+      <td>ClawHub Skill 四半期レビュー初回、CVE 監視ダッシュ、IAM Tier 0-3 切替</td>
+      <td>第 12 章の全節が「実際に運用されている」状態を監査ログで確認</td>
+    </tr>
+    <tr>
+      <td><strong>S13</strong></td><td>M6.5-M6.75</td><td>本番化</td>
+      <td>障害対応訓練 + バックアップ復旧訓練</td>
+      <td>Runbook、RDS スナップショット復旧手順、Slack 緊急停止スイッチ</td>
+      <td>復旧時間（RTO）≤ 1 時間、データ損失（RPO）≤ 15 分を訓練で確認</td>
+    </tr>
+    <tr>
+      <td><strong>S14</strong></td><td>M6.75-M7</td><td>本番化</td>
+      <td>12 月本格運用前の最終仕上げ</td>
+      <td>運用 SLO 設定、月次レビュー会の枠取り、全社展開アナウンス案</td>
+      <td>SLO 文書化、12 月 1 日リリースの Go 判定が出せる状態</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-3-3"><span class="num">3.3</span>マイルストーン M0 → M3 → M6 → M7</h3>
+
+<table>
+  <thead>
+    <tr><th>マイルストーン</th><th>時期</th><th>到達状態</th><th>関係者への報告内容</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>M0</strong></td><td>Day 0</td><td>サーバー到着、OpenClaw インストール、Day 0〜3 のチェックリスト完了</td><td>「開発着手しました。OpenClaw 上で Bedrock-Claude が動いています」</td></tr>
+    <tr><td><strong>M1</strong></td><td>S2 末</td><td>Slack/Gmail/Drive コネクタ接続済み。<strong>Go/No-Go ① クリア</strong>（セキュリティ運用ルール承認）</td><td>「データ層接続完了。セキュリティレビュー合格。pgvector 構築へ進みます」</td></tr>
+    <tr><td><strong>M2</strong></td><td>S4 末</td><td>検索 Skill MVP が動く。Slack で <span class="mono">@TeamAgent</span> 応答</td><td>「Agent が動いた、検索回答が返る（精度はまだ低）」</td></tr>
+    <tr><td><strong>M2.5</strong></td><td>S5 末</td><td>営業 5 名ドッグフード進行中、FB ≥ 20 件</td><td>「ドッグフードで学習中、品質が上がってきた」</td></tr>
+    <tr><td class="milestone"><strong>M3</strong></td><td>S6 末（≒ Month 3）</td><td>MVA 完成、営業 16 名展開準備完了。Phase 4 着手</td><td>「MVA 完成、16 名展開キックオフ可能」</td></tr>
+    <tr><td><strong>M4-M6</strong></td><td>S7-S10</td><td>Phase 4 Skill を 1 Skill / 1 Sprint で順次追加</td><td>「Skill が増えるたびに営業の使用範囲が広がる」</td></tr>
+    <tr><td class="milestone"><strong>M7</strong></td><td>S14 末（≒ Month 7）</td><td>負荷試験・安定化完了、SLO 文書化、12 月本格運用 Go 判定</td><td>「12 月本格運用 GO。全社展開アナウンス準備完了」</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-3-4"><span class="num">3.4</span>コスト構造（開発 / 運用 / 個人ツール）</h3>
+
+<p>v1.1 ではコスト構造を <strong>「開発予算は総額制」「運用予算はレンジ制」「個人開発ツールは別承認済み」</strong> の 3 層に整理する。AI 予算が制約ではないため、Sonnet 4.6 を主軸に prompt caching を有効活用して品質を取りに行く方針。</p>
+
+<table>
+  <thead><tr><th>区分</th><th>金額レンジ</th><th>備考</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>開発予算</strong>（総額・S1-S14）</td>
+      <td><strong>¥80,000</strong> / 開発期間総額</td>
+      <td>月次ではなく総額。OpenClaw / 検証用 AWS 利用料 / 開発期間中の Bedrock 試行費を含む。社内で承認済み</td>
+    </tr>
+    <tr>
+      <td><strong>運用費</strong>（本番・月次）</td>
+      <td><strong>月 ¥100,000 〜 ¥1,000,000</strong></td>
+      <td>規模次第。5 名ベータ時は ¥100K 水準、16 名 → 全社（100 名想定）でも ¥1M レンジに収まる試算。スケール時の ¥1M までは事前承認 OK</td>
+    </tr>
+    <tr>
+      <td><strong>個人開発ツール</strong></td>
+      <td>別承認済み（個別管理）</td>
+      <td>Claude Code / Codex 等の FDE 個人ライセンス。本プロジェクトの予算とは分離して管理</td>
+    </tr>
+    <tr>
+      <td><strong>LLM 推論コスト</strong></td>
+      <td>運用費のうち最大 ¥600K/月（試算上限）</td>
+      <td>Bedrock Sonnet 4.6 を主軸。prompt caching を活用し入力トークン費を 80% 削減。安価なクエリは Haiku 系へ自動ルート</td>
+    </tr>
+    <tr>
+      <td><strong>外部 API</strong></td>
+      <td>運用費のうち最大 ¥100K/月</td>
+      <td>Gemini 2.5 Flash（動画分析 Skill 内部）、Google Workspace API クォータ等</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <div class="label">v1.0 との差分（コスト構造）</div>
+  v1.0 では「月額 10〜15 万円」を緩く想定していたが、v1.1 では <strong>開発予算が総額 ¥80K に固定された一方、運用予算は ¥100K-1M のレンジで実態に応じて確保</strong>される構造に明確化。これにより、Sonnet 4.6 を主軸に置く判断が許容される。
+</div>
+
+<!-- =================================================================== -->
+<!-- 4. M0：サーバー到着直後 -->
+<!-- =================================================================== -->
+<h2 id="sec-4"><span class="num">4.</span>M0：サーバー到着直後（Day 0〜3）</h2>
+
+<p>本章は「<strong>サーバーが届いた日に何をすればよいか</strong>」を Day 0 / Day 1 / Day 2-3 の 3 区分でチェックリスト化する。事前に本章のとおり準備が済んでいれば、Day 0 の午後から terraform 適用、Day 1 から実装に入れる。</p>
+
+<h3 id="sec-4-1"><span class="num">4.1</span>サーバー候補と判定基準（AWS / Mac mini）</h3>
+
+<table>
+  <thead>
+    <tr><th>候補</th><th>用途</th><th>長所</th><th>短所</th><th>採否</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>AWS（第一候補）</strong></td>
+      <td>本番・ベータ運用</td>
+      <td>terraform で再現可能、Bedrock 同居、RDS マネージド、CloudWatch 監査</td>
+      <td>月額コスト、社内承認</td>
+      <td><strong>採用</strong>：MVA 本番</td>
+    </tr>
+    <tr>
+      <td>Mac mini M2/M4</td>
+      <td>Phase 0 PoC・FDE 個人検証</td>
+      <td>固定費ゼロ、ローカル動作、社内ネット完結</td>
+      <td>運用継続性なし、ベータ運用は無理</td>
+      <td>限定採用：S0〜S1 の事前検証のみ</td>
+    </tr>
+    <tr>
+      <td>オンプレ社内サーバー</td>
+      <td>長期運用</td>
+      <td>固定費小、社内データセンタ統制</td>
+      <td>調達遅、GPU 不在、運用工数大</td>
+      <td>不採用</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <div class="label">判定基準</div>
+  ① Bedrock のリージョン利用申請が通っているか／② RDS PostgreSQL 16 + pgvector が AWS で構築できるか／③ Secrets Manager で OAuth トークンを管理できるか／④ 月額予算 10〜15 万円が確保されているか — 4 点満たせば AWS、欠ければ Mac mini PoC を継続。
+</div>
+
+<h3 id="sec-4-2"><span class="num">4.2</span>Day 0 チェックリスト：サーバー受領当日（OpenClaw インストール含む）</h3>
+
+<table class="compact">
+  <thead>
+    <tr><th>区分</th><th>項目</th><th>確認方法</th><th>担当</th></tr>
+  </thead>
+  <tbody>
+    <tr><td rowspan="3">インフラアクセス</td>
+      <td>AWS アカウント／IAM ユーザー受領</td><td>AWS Console ログイン、MFA 設定</td><td>FDE</td></tr>
+    <tr><td>該当リージョン（ap-northeast-1）の Bedrock 利用許可（Claude Sonnet 4.6 含む）</td><td>Bedrock コンソール → Model access → Claude 系が available</td><td>FDE</td></tr>
+    <tr><td>VPC / Subnet / Security Group の払出済確認</td><td>VPC コンソール、CIDR メモ</td><td>FDE</td></tr>
+    <tr><td rowspan="2">リポジトリ</td>
+      <td>GitHub Organization 招待受諾</td><td><span class="mono">git clone</span> 成功</td><td>FDE</td></tr>
+    <tr><td><span class="mono">teamagent-mva</span> リポジトリ clone</td><td>main ブランチで <span class="mono">README.md</span> が読める</td><td>FDE</td></tr>
+    <tr><td rowspan="2">.env 設定</td>
+      <td>ローカルに <span class="mono">.env</span> ファイル生成（<span class="mono">.env.example</span> をコピー）</td><td><span class="mono">cp .env.example .env</span></td><td>FDE</td></tr>
+    <tr><td>AWS 認証情報をローカルに設定</td><td><span class="mono">aws configure --profile teamagent</span></td><td>FDE</td></tr>
+    <tr><td rowspan="2">Docker Compose</td>
+      <td>Docker Desktop / OrbStack 起動確認</td><td><span class="mono">docker --version</span></td><td>FDE</td></tr>
+    <tr><td>ローカル docker-compose 起動</td><td><span class="mono">docker compose up -d</span> 成功</td><td>FDE</td></tr>
+    <tr><td rowspan="5"><strong>OpenClaw（v1.1 追加）</strong></td>
+      <td>OpenClaw GitHub リポジトリの最新リリース確認（コミッター活動度 / star 数 / 最終更新日をメモ）</td><td>GitHub Releases ページのスクリーンショットを <span class="mono">docs/openclaw-baseline.md</span> に保存</td><td>FDE + セキュリティ</td></tr>
+    <tr><td>OpenClaw 本体のインストール（pinned バージョン）</td><td><span class="mono">pip install openclaw==&lt;pinned&gt;</span> or リポジトリ clone + <span class="mono">make install</span></td><td>FDE</td></tr>
+    <tr><td>OpenClaw Channel Adapter（Slack）動作確認</td><td><span class="mono">openclaw channels list</span> で slack adapter が登録されている</td><td>FDE</td></tr>
+    <tr><td>OpenClaw Skill Registry 初期化（空状態でも起動できる）</td><td><span class="mono">openclaw skills list</span> でリスト空で返る、エラー無し</td><td>FDE</td></tr>
+    <tr><td>OpenClaw GitHub Security Advisory 購読（CVE 監視）</td><td>GitHub の Watch → Custom → Security alerts チェック</td><td>セキュリティ</td></tr>
+    <tr><td rowspan="2"><strong>Bedrock → Claude 疎通（v1.1）</strong></td>
+      <td>OpenClaw 経由で Bedrock-Claude Sonnet 4.6 へ ping</td><td>OpenClaw の LLM provider 設定で <span class="mono">bedrock://anthropic.claude-sonnet-4-6-...</span> を指定、ping コマンドが 200</td><td>FDE</td></tr>
+    <tr><td>prompt caching が有効化されている</td><td>OpenClaw の Claude provider 設定で <span class="mono">prompt_caching: true</span>、初回 vs 2 回目で入力トークン費が削減されることを確認</td><td>FDE</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <div class="label">OpenClaw 採用に伴う Day 0 の追加作業</div>
+  v1.0 では「Claude Agent SDK を直接組み込む」前提だったが、v1.1 では <strong>OpenClaw を Agent Runtime として先にインストール</strong>し、その上に Claude Agent SDK を Skill として載せる構成。Day 0 のチェックリストに OpenClaw 関連の 7 項目（インストール / 動作確認 / セキュリティ購読 / Bedrock 接続）を追加。所要時間目安：従来 + 2-3 時間。
+</div>
+
+<h3 id="sec-4-3"><span class="num">4.3</span>Day 1 チェックリスト：terraform apply とデータ層初期化</h3>
+
+<div class="arch-diagram">
+# Day 1 朝：Terraform でクラウド側を一括構築
+$ cd infra/terraform
+$ terraform init
+$ terraform plan -var-file=env/dev.tfvars     # ← レビュー
+$ terraform apply -var-file=env/dev.tfvars    # ← 適用
+
+# 期待される構築物
+- VPC (10.0.0.0/16)
+- RDS PostgreSQL 16.x (db.t4g.medium, pgvector extension preinstalled)
+- ECR Repository (teamagent-mva)
+- ECS Cluster (Fargate) + Service (Slack listener)
+- Lambda Functions (gmail-sync, drive-sync, slack-sync)
+- EventBridge Schedule (15 min cron)
+- Secrets Manager (oauth-tokens, db-credentials, anthropic-api-key)
+- CloudWatch Log Groups (/aws/lambda/*, /ecs/teamagent-mva)
+
+# Day 1 昼：RDS に pgvector 拡張をインストール
+$ psql -h $RDS_HOST -U teamagent -d teamagent_mva
+=> CREATE EXTENSION IF NOT EXISTS vector;
+=> CREATE EXTENSION IF NOT EXISTS pg_trgm;
+=> \dx                                        # ← vector / pg_trgm が見える
+
+# Day 1 夕方：初期スキーマ流し込み
+$ psql -h $RDS_HOST -U teamagent -d teamagent_mva -f db/schema/001_init.sql
+$ psql -h $RDS_HOST -U teamagent -d teamagent_mva -f db/schema/002_indexes.sql
+</div>
+
+<table class="compact">
+  <thead><tr><th>確認項目</th><th>確認 SQL / コマンド</th></tr></thead>
+  <tbody>
+    <tr><td>pgvector 拡張</td><td><span class="mono">SELECT extname FROM pg_extension WHERE extname = 'vector';</span></td></tr>
+    <tr><td>テーブル作成</td><td><span class="mono">\dt</span> で <span class="mono">documents / embeddings / connector_state / audit_log</span> が見える</td></tr>
+    <tr><td>Secrets Manager</td><td><span class="mono">aws secretsmanager list-secrets --profile teamagent</span> で 3 件以上</td></tr>
+    <tr><td>CloudWatch ロググループ</td><td><span class="mono">aws logs describe-log-groups</span> で <span class="mono">/teamagent-mva</span> 系が存在</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-4-4"><span class="num">4.4</span>Day 2-3 チェックリスト：OAuth クライアント登録とスモークテスト</h3>
+
+<h4>Gmail / Google Drive OAuth クライアント登録</h4>
+<ol>
+  <li>Google Cloud Console → 新規プロジェクト <span class="mono">teamagent-mva-dev</span> 作成</li>
+  <li>APIs & Services → Library → Gmail API / Google Drive API を有効化</li>
+  <li>OAuth consent screen → Internal（社内 Workspace のみ）に設定、スコープ：<span class="mono">gmail.readonly</span> / <span class="mono">drive.readonly</span> / <span class="mono">drive.metadata.readonly</span></li>
+  <li>Credentials → OAuth 2.0 Client ID → Type: Web application、Redirect URI に Lambda の Callback URL を登録</li>
+  <li>Client ID / Client Secret を Secrets Manager <span class="mono">teamagent/oauth/google</span> に格納</li>
+</ol>
+
+<h4>Slack OAuth クライアント登録</h4>
+<ol>
+  <li>api.slack.com → Create New App → From scratch → <span class="mono">TeamAgent MVA</span></li>
+  <li>OAuth & Permissions → Bot Token Scopes：<span class="mono">app_mentions:read</span> / <span class="mono">channels:history</span> / <span class="mono">channels:read</span> / <span class="mono">chat:write</span> / <span class="mono">groups:history</span> / <span class="mono">im:history</span> / <span class="mono">users:read</span></li>
+  <li>Event Subscriptions → Request URL を ECS ALB エンドポイントに設定、<span class="mono">app_mention</span> / <span class="mono">message.channels</span> を購読</li>
+  <li>Install to Workspace → Bot Token / Signing Secret を Secrets Manager <span class="mono">teamagent/oauth/slack</span> に格納</li>
+</ol>
+
+<h4>Bedrock 利用申請の最終確認</h4>
+<ul>
+  <li>Bedrock Console → Model access → <strong>Claude 3.5 Sonnet / Claude 3.7 Sonnet / Titan Text Embeddings V2</strong> の 3 つが <span class="mono">Access granted</span> 表示</li>
+  <li>サンプル呼び出し：<span class="mono">aws bedrock-runtime invoke-model --model-id anthropic.claude-3-5-sonnet-20241022-v2:0 ...</span> が 200 を返す</li>
+</ul>
+
+<h4>開発環境スモークテスト（Day 3 終了時の Go/No-Go 判定）</h4>
+<table class="compact">
+  <thead><tr><th>項目</th><th>判定基準</th><th>Go / No-Go</th></tr></thead>
+  <tbody>
+    <tr><td>RDS への psql 接続</td><td>VPN 経由で接続成功、SELECT 1 が返る</td><td></td></tr>
+    <tr><td>pgvector の動作</td><td><span class="mono">SELECT '[1,2,3]'::vector;</span> が返る</td><td></td></tr>
+    <tr><td>Bedrock 呼び出し</td><td>Claude 3.5 から「ping」へ応答が返る</td><td></td></tr>
+    <tr><td>Secrets Manager 取得</td><td>3 つのシークレット全部が <span class="mono">aws secretsmanager get-secret-value</span> で取れる</td><td></td></tr>
+    <tr><td>Slack App から ECS への疎通</td><td><span class="mono">/slack/events</span> 宛て POST に ECS が 200 を返す</td><td></td></tr>
+  </tbody>
+</table>
+
+<div class="note warn">
+  <div class="label">No-Go の場合</div>
+  Day 3 終了時に上記 5 項目のうち 1 つでも No なら、Sprint 1 開始を 3 日延期して原因を潰す。「とりあえず進める」は禁止 — S1 以降が全部スタックする。
+</div>
+
+
+<!-- =================================================================== -->
+<!-- 5. MVA Phase 1：データ層連携（S1〜S4） -->
+<!-- =================================================================== -->
+<h2 id="sec-5"><span class="num">5.</span>MVA Phase 1：OpenClaw 上にデータ層を構築（S1〜S4）</h2>
+
+<p>本章は MVA で<strong>最も時間がかかる</strong>工程である。S1-S4（〜M2）でデータ層を OpenClaw 上に構築する。v1.1 では <strong>OpenClaw が Channel 抽象（Slack）／コネクタ抽象（Gmail/Drive）／Skill Registry を提供</strong>する前提で、TeamAgent 側は「OpenClaw が用意した枠の中にデータを流し込むパイプライン」と「pgvector への保存・検索ロジック」を実装する。</p>
+
+<div class="note">
+  <div class="label">v1.0 との差分（Phase 1）</div>
+  v1.0 では Slack Bolt / Gmail OAuth / Drive OAuth を自前実装する想定だったが、v1.1 では <strong>OpenClaw の Channel/Connector が既にこれらを抽象化</strong>している。OAuth フローや増分同期の基本骨格は OpenClaw 側に委譲し、TeamAgent 側は「OpenClaw のコネクタイベントを受けて pgvector に書き込む」薄いハンドラだけを書く。S1-01 〜 S2-08 などのチケットは「OpenClaw コネクタイベント → 自前ハンドラ → pgvector」の繋ぎ込みと読み替える。
+</div>
+
+<h3 id="sec-5-1"><span class="num">5.1</span>S1（M0-M0.5）：OpenClaw + Bedrock 接続セットアップ + pgvector</h3>
+
+<h4>実装タスク（チケット粒度）</h4>
+<table class="compact">
+  <thead><tr><th>#</th><th>タスク</th><th>見積</th><th>成果物</th></tr></thead>
+  <tbody>
+    <tr><td>S1-01</td><td>Terraform 雛形整備（VPC / RDS / ECS / Lambda / Secrets / CloudWatch）</td><td>3d</td><td><span class="mono">infra/terraform/*.tf</span></td></tr>
+    <tr><td>S1-02</td><td>RDS PostgreSQL 16 + pgvector セットアップ</td><td>1d</td><td>RDS インスタンス + 拡張</td></tr>
+    <tr><td>S1-03</td><td>初期スキーマ DDL（documents / embeddings / connector_state / audit_log）</td><td>2d</td><td><span class="mono">db/schema/001_init.sql</span></td></tr>
+    <tr><td>S1-04</td><td>IVFFlat / HNSW インデックス設計</td><td>1d</td><td><span class="mono">db/schema/002_indexes.sql</span></td></tr>
+    <tr><td>S1-05</td><td>Secrets Manager 連携ラッパー（Python）</td><td>1d</td><td><span class="mono">app/lib/secrets.py</span></td></tr>
+    <tr><td>S1-06</td><td>CloudWatch ログ収集設定・構造化ログ</td><td>1d</td><td><span class="mono">app/lib/logger.py</span></td></tr>
+    <tr><td>S1-07</td><td>動作確認 SQL とテストデータ投入</td><td>1d</td><td><span class="mono">scripts/smoke_test_pgvector.py</span></td></tr>
+  </tbody>
+</table>
+
+<h4>SQL スキーマ抜粋（<span class="mono">db/schema/001_init.sql</span>）</h4>
+<div class="arch-diagram">
+-- 共通ドキュメントテーブル（Mail / Drive / Slack を 1 つに集約）
+CREATE TABLE documents (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source          TEXT NOT NULL,          -- 'gmail' | 'drive' | 'slack'
+  source_id       TEXT NOT NULL,          -- Gmail message-id / Drive file-id / Slack ts
+  owner_email     TEXT NOT NULL,          -- 持ち主の社内メールアドレス
+  title           TEXT,
+  body            TEXT NOT NULL,          -- 抽出済み本文（PDF/PPT はテキスト化）
+  metadata        JSONB NOT NULL,         -- 自由形式（チャンネル、ファイル拡張子、案件タグ等）
+  created_at      TIMESTAMPTZ NOT NULL,
+  ingested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (source, source_id)
+);
+
+-- Embedding テーブル（1 ドキュメントに複数チャンクを想定）
+CREATE TABLE embeddings (
+  id              BIGSERIAL PRIMARY KEY,
+  document_id     UUID REFERENCES documents(id) ON DELETE CASCADE,
+  chunk_index     INT NOT NULL,
+  chunk_text      TEXT NOT NULL,
+  embedding       VECTOR(1024) NOT NULL,  -- Titan V2 = 1024 次元
+  embedding_model TEXT NOT NULL,          -- 'amazon.titan-embed-text-v2:0' etc.
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- コネクタ同期状態（増分同期のためのカーソル管理）
+CREATE TABLE connector_state (
+  source          TEXT NOT NULL,
+  owner_email     TEXT NOT NULL,
+  cursor          TEXT NOT NULL,          -- Gmail historyId / Drive pageToken / Slack ts
+  last_synced_at  TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (source, owner_email)
+);
+
+-- 監査ログ
+CREATE TABLE audit_log (
+  id              BIGSERIAL PRIMARY KEY,
+  ts              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actor           TEXT NOT NULL,          -- 'system' | user_email | agent_session_id
+  action          TEXT NOT NULL,          -- 'ingest' | 'search' | 'tool_call' | 'auth'
+  target          TEXT,
+  payload         JSONB
+);
+
+-- インデックス（002_indexes.sql）
+CREATE INDEX idx_embeddings_hnsw
+  ON embeddings USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX idx_documents_source_owner ON documents (source, owner_email);
+CREATE INDEX idx_documents_metadata_gin ON documents USING gin (metadata);
+CREATE INDEX idx_documents_body_trgm ON documents USING gin (body gin_trgm_ops);
+</div>
+
+<h4>DoD（Sprint 1 の受け入れ条件）</h4>
+<ul>
+  <li>terraform apply が冪等に成功する（2 回叩いても差分なし）</li>
+  <li><span class="mono">scripts/smoke_test_pgvector.py</span> がテスト embedding を 100 件投入し、コサイン類似で top-5 を返す</li>
+  <li>監査ログに「ingest」「search」が記録される</li>
+  <li>VPN 経由で psql 接続が動く（FDE 以外のレビュアーも接続できる）</li>
+</ul>
+
+<h3 id="sec-5-2"><span class="num">5.2</span>S2（M0.5-M1）：Slack Channel + Gmail / Drive コネクタ接続 + Go/No-Go ①</h3>
+
+<div class="note warn">
+  <div class="label">Go/No-Go ゲート ① — S2 末（M1）</div>
+  S2 終了時に <strong>セキュリティ運用ルール（第 12 章）が全節レビュー済み・承認済み</strong> である必要がある。具体的には：① ClawHub Skill ホワイトリスト方針 v0 → v1 化／② OpenClaw GitHub Security Advisory 購読完了／③ Bedrock 直接接続が Anthropic 政策変動の影響外であることの社内確認／④ IAM Tier 0-3 草案レビュー。これらが揃わなければ S3 へ進ませず、S2 を 2 週間延長する。
+</div>
+
+<p>v1.1 では Gmail だけでなく <strong>Slack Channel / Gmail / Drive の 3 コネクタを S2 で同時接続</strong>する。OpenClaw が抽象化済みのコネクタを利用するため、自前 OAuth 実装の負荷が下がり 1 Sprint で 3 ソース接続が可能になった。以下のチケットは v1.0 の Gmail 専用タスクを「OpenClaw コネクタ × 3 ソース」に拡張した内容として読む。</p>
+
+<h4>実装タスク</h4>
+<table class="compact">
+  <thead><tr><th>#</th><th>タスク</th><th>見積</th><th>成果物</th></tr></thead>
+  <tbody>
+    <tr><td>S2-01</td><td>Gmail API + OAuth 2.0 認可フロー実装</td><td>2d</td><td><span class="mono">app/connectors/gmail_oauth.py</span></td></tr>
+    <tr><td>S2-02</td><td>OAuth トークン Refresh ハンドリング</td><td>1d</td><td>同上</td></tr>
+    <tr><td>S2-03</td><td>メール取り込み Worker（Lambda）</td><td>2d</td><td><span class="mono">app/workers/gmail_sync.py</span></td></tr>
+    <tr><td>S2-04</td><td>本文抽出（HTML→text、添付の取り扱い）</td><td>1d</td><td><span class="mono">app/lib/email_parser.py</span></td></tr>
+    <tr><td>S2-05</td><td>Bedrock Titan Embedding 生成</td><td>1d</td><td><span class="mono">app/lib/embedder.py</span></td></tr>
+    <tr><td>S2-06</td><td>pgvector 投入（バッチ INSERT）</td><td>1d</td><td><span class="mono">app/lib/vector_store.py</span></td></tr>
+    <tr><td>S2-07</td><td>増分同期スケジューラ（EventBridge 15 分 cron）</td><td>1d</td><td><span class="mono">infra/terraform/eventbridge.tf</span></td></tr>
+    <tr><td>S2-08</td><td>レート制限ハンドリング・指数バックオフ</td><td>1d</td><td><span class="mono">app/lib/rate_limit.py</span></td></tr>
+  </tbody>
+</table>
+
+<h4>実装上の注意点</h4>
+<table>
+  <thead><tr><th>論点</th><th>対応方針</th></tr></thead>
+  <tbody>
+    <tr><td>レート制限（250 quota/sec/user）</td><td>1 ユーザー単位で取り込み Worker を直列化。バッチサイズ 50 通、間隔 200ms</td></tr>
+    <tr><td>大量メール時のページネーション</td><td>Gmail History API（<span class="mono">users.history.list</span>）を <span class="mono">historyId</span> カーソルで増分取得</td></tr>
+    <tr><td>添付ファイル処理</td><td>S2 ではメタデータのみ記録（ファイル名・MIME・サイズ）。本文抽出は S3 の Drive Parser に統合</td></tr>
+    <tr><td>HTML メールの本文化</td><td><span class="mono">beautifulsoup4</span> で text 化、署名・引用は <span class="mono">talon</span> ライブラリで除去</td></tr>
+    <tr><td>初回フル同期 vs 増分</td><td>初回は <span class="mono">users.messages.list</span> で過去 6 ヶ月分、以降は <span class="mono">history.list</span> で差分</td></tr>
+  </tbody>
+</table>
+
+<h4>DoD</h4>
+<ul>
+  <li>営業 1 名分のメール（直近 6 ヶ月、通常 2,000〜5,000 通想定）が全件 pgvector に投入されている</li>
+  <li>SQL で <span class="mono">SELECT title FROM documents WHERE source='gmail' AND body ILIKE '%ACME%'</span> が結果を返す</li>
+  <li>EventBridge cron が 15 分おきに増分同期している（CloudWatch にログ）</li>
+  <li>OAuth トークンが Refresh で自動更新されている</li>
+</ul>
+
+<h3 id="sec-5-3"><span class="num">5.3</span>S3（M1-M1.5）：pgvector スキーマ確定 + ClawHub Skill ホワイトリスト v1 確定</h3>
+
+<p>S2 で 3 ソース接続済みなので、S3 では <strong>pgvector への投入パイプライン安定化</strong>と <strong>ClawHub Skill ホワイトリスト v1 の確定</strong>を並行で進める。ホワイトリストの運用ルールは第 12.1 節を参照。</p>
+
+<div class="note">
+  <div class="label">ClawHub Skill ホワイトリスト v1 のスコープ</div>
+  S3 末時点でホワイトリスト v1 に登録する候補は以下：①検索 Skill（自前実装 or ClawHub 流用）／②Slack 出力フォーマッタ Skill（軽量・読み取り専用）の最大 2 個。実装難易度・セキュリティ評価・ライセンス確認の 3 軸でレビューし、第 12.1 節の表に従って記録する。なお Phase 4 で追加する Mail 起案 / 進捗まとめ / 提案資料 / 動画分析 / 自動サジェスト は、本ホワイトリストには <strong>S6 以降に追加レビューしてから登録</strong>する。
+</div>
+
+<p>以下のチケットは v1.0 の Drive 専用タスクを、pgvector パイプライン全体 + ホワイトリスト確定 に再配分した内容として読む。</p>
+
+<h4>実装タスク</h4>
+<table class="compact">
+  <thead><tr><th>#</th><th>タスク</th><th>見積</th><th>成果物</th></tr></thead>
+  <tbody>
+    <tr><td>S3-01</td><td>Drive API + OAuth（S2 と共通フロー）</td><td>1d</td><td><span class="mono">app/connectors/drive_oauth.py</span></td></tr>
+    <tr><td>S3-02</td><td>対象フォルダ取り込み Worker</td><td>2d</td><td><span class="mono">app/workers/drive_sync.py</span></td></tr>
+    <tr><td>S3-03</td><td>PDF パーサ（<span class="mono">pdfplumber</span>）</td><td>1d</td><td><span class="mono">app/lib/parsers/pdf.py</span></td></tr>
+    <tr><td>S3-04</td><td>Word パーサ（<span class="mono">python-docx</span>）</td><td>1d</td><td><span class="mono">app/lib/parsers/docx.py</span></td></tr>
+    <tr><td>S3-05</td><td>PowerPoint パーサ（<span class="mono">python-pptx</span>）</td><td>1d</td><td><span class="mono">app/lib/parsers/pptx.py</span></td></tr>
+    <tr><td>S3-06</td><td>Excel パーサ（<span class="mono">openpyxl</span>）</td><td>1d</td><td><span class="mono">app/lib/parsers/xlsx.py</span></td></tr>
+    <tr><td>S3-07</td><td>Markdown / プレーンテキスト</td><td>0.5d</td><td><span class="mono">app/lib/parsers/text.py</span></td></tr>
+    <tr><td>S3-08</td><td>チャンク分割（800 token / overlap 100）</td><td>1d</td><td><span class="mono">app/lib/chunker.py</span></td></tr>
+    <tr><td>S3-09</td><td>Embedding 生成・pgvector 投入</td><td>0.5d</td><td>S2 流用</td></tr>
+  </tbody>
+</table>
+
+<h4>実装上の注意点</h4>
+<table>
+  <thead><tr><th>論点</th><th>対応方針</th></tr></thead>
+  <tbody>
+    <tr><td>大容量ファイル（&gt;50MB）</td><td>S3 一時保存 → ローカル展開 → 解析後削除。Lambda メモリ 3GB 上限内で処理</td></tr>
+    <tr><td>画像 OCR</td><td>MVA 範囲外。S3 では「画像のみのファイル」はスキップ＋メタデータ記録のみ</td></tr>
+    <tr><td>PowerPoint 解析</td><td>各スライドのテキスト＋スピーカーノート抽出。図形内テキストも回収</td></tr>
+    <tr><td>Excel 解析</td><td>シート単位でテキスト化。セル数 &gt;10万 のものは先頭 5,000 行のみ</td></tr>
+    <tr><td>特殊フォーマット（Google Docs 形式）</td><td>Drive API の <span class="mono">files.export</span> で text/plain に変換して取得</td></tr>
+    <tr><td>更新検知</td><td><span class="mono">modifiedTime</span> を <span class="mono">connector_state.cursor</span> に保存、以降は差分のみ</td></tr>
+  </tbody>
+</table>
+
+<h4>DoD</h4>
+<ul>
+  <li>指定フォルダ（営業共有ドライブ）配下のファイル（500〜2,000 件想定）が pgvector に投入されている</li>
+  <li>SQL でファイル内容を文字列検索すると結果が返る（PDF 内のテキストもヒット）</li>
+  <li>Excel / PowerPoint の本文も抽出されている</li>
+</ul>
+
+<h3 id="sec-5-4"><span class="num">5.4</span>S4（M1.5-M2）：検索 Skill MVP 実装（最初のホワイトリスト Skill）</h3>
+
+<p>v1.1 では Slack 連携は S2 で完了しているため、S4 では <strong>検索 Skill MVP を OpenClaw Skill として実装</strong>する。これがホワイトリスト v1 に登録される最初の Skill となる。実装方針は次の 2 択：</p>
+
+<ul>
+  <li><strong>(a) ClawHub の既存検索 Skill を流用</strong>：ホワイトリスト v1 の評価で問題なければ最短ルート。OpenClaw が用意した pgvector アダプタを呼ぶだけ</li>
+  <li><strong>(b) 自前実装</strong>：プロンプト・引用整形・Slack Block Kit 出力を TeamAgent 要件に最適化。S5 以降のドッグフードで品質を取りに行く場合に推奨</li>
+</ul>
+
+<p>S4 着手時に (a)/(b) どちらにするかを Go/No-Go ① のレビューと合わせて決定する。以下のチケットは v1.0 の「Slack 連携 + メタデータ統合」を「検索 Skill 実装 + 最終メタデータ統合」に再配分したものとして読む。</p>
+
+<h4>実装タスク</h4>
+<table class="compact">
+  <thead><tr><th>#</th><th>タスク</th><th>見積</th><th>成果物</th></tr></thead>
+  <tbody>
+    <tr><td>S4-01</td><td>Slack Bolt + OAuth インストール</td><td>1d</td><td><span class="mono">app/connectors/slack_oauth.py</span></td></tr>
+    <tr><td>S4-02</td><td>対象チャンネル取り込み Worker</td><td>2d</td><td><span class="mono">app/workers/slack_sync.py</span></td></tr>
+    <tr><td>S4-03</td><td>スレッド単位の整理・親子関係保持</td><td>1d</td><td><span class="mono">app/lib/slack_thread.py</span></td></tr>
+    <tr><td>S4-04</td><td>メタデータ層実装（誰の／いつの／どの案件）</td><td>2d</td><td><span class="mono">app/lib/metadata.py</span></td></tr>
+    <tr><td>S4-05</td><td>3 ソース統合検索 SQL ヘルパー</td><td>1d</td><td><span class="mono">app/lib/search.py</span></td></tr>
+    <tr><td>S4-06</td><td>案件タグの自動抽出（LLM 利用 1-shot）</td><td>2d</td><td><span class="mono">app/lib/tagger.py</span></td></tr>
+    <tr><td>S4-07</td><td>横断検索の精度評価（小規模 eval set）</td><td>1d</td><td><span class="mono">eval/cross_source.jsonl</span></td></tr>
+  </tbody>
+</table>
+
+<h4>メタデータ層の設計</h4>
+<div class="arch-diagram">
+documents.metadata の JSONB 例
+
+# Gmail の場合
+{
+  "from": "yamada@acme.co.jp",
+  "to": ["sales-lead@yourco.jp"],
+  "cc": [],
+  "subject": "ACME 様 11月提案資料",
+  "labels": ["INBOX", "営業/ACME"],
+  "thread_id": "18d4a3...",
+  "attachments": [{"name": "proposal.pdf", "mime": "application/pdf"}],
+  "project_tags": ["ACME", "美容案件"]      # ← S4-06 で自動付与
+}
+
+# Drive の場合
+{
+  "mime_type": "application/vnd.openxmlformats-...presentationml.presentation",
+  "owner": "tanaka@yourco.jp",
+  "shared_with": ["sales-team@yourco.jp"],
+  "folder_path": "/営業共有/ACME/2024_11月提案",
+  "size_bytes": 4_521_344,
+  "project_tags": ["ACME", "美容案件"]
+}
+
+# Slack の場合
+{
+  "channel": "#sales-acme",
+  "channel_id": "C04AB...",
+  "user": "U02CD...",
+  "thread_ts": "1731234567.000200",
+  "reactions": ["thumbsup:3", "eyes:1"],
+  "project_tags": ["ACME", "美容案件"]
+}
+</div>
+
+<h4>DoD</h4>
+<ul>
+  <li>Mail / Drive / Slack 横断で「ACME 案件」と検索すると、3 ソースから関連結果が揃って返る</li>
+  <li>SQL で <span class="mono">SELECT source, title FROM documents WHERE metadata @&gt; '{"project_tags":["ACME"]}'</span> が複数ソースを返す</li>
+  <li>小規模 eval（20 クエリ）で recall@10 が 70% 以上</li>
+  <li>監査ログに 3 ソースの ingest / search が記録</li>
+</ul>
+
+
+<!-- =================================================================== -->
+<!-- 6. MVA Phase 2：Agent SDK 基本ループ -->
+<!-- =================================================================== -->
+<h2 id="sec-6"><span class="num">6.</span>MVA Phase 2：OpenClaw 上の Agent ループ（S5、〜M2.5）</h2>
+
+<div class="note">
+  <div class="label">v1.0 との差分（Phase 2）</div>
+  v1.0 では <strong>Claude Agent SDK を直接 Slack Bolt と接続</strong>する構成だった。v1.1 では <strong>OpenClaw の Skill 抽象が間に入る</strong>：
+  <ul>
+    <li><strong>OpenClaw</strong>：Slack イベント受信 → Skill ディスパッチ → セッション / Memory / 監査ログ管理</li>
+    <li><strong>Claude Agent SDK</strong>：Skill <span class="mono">handler()</span> の <em>内部</em> で Agent ループを回す（Tool 連鎖、思考プロセス、応答生成）</li>
+    <li><strong>Skill Registry</strong>：OpenClaw に既存実装あり。TeamAgent は自前 Registry を持たない</li>
+  </ul>
+  これにより、v1.0 で S5-09（Skill Registry 最小実装）として書いていたタスクは <strong>不要</strong>になる代わりに、OpenClaw 既存 Registry への <span class="mono">SkillSpec</span> 登録（YAML or デコレータ）を学習・運用するタスクが追加される。
+</div>
+
+<h3 id="sec-6-1"><span class="num">6.1</span>実装タスク（OpenClaw Skill 経由 Claude Agent SDK）</h3>
+
+<table class="compact">
+  <thead><tr><th>#</th><th>タスク</th><th>見積</th><th>成果物</th></tr></thead>
+  <tbody>
+    <tr><td>S5-01</td><td>Claude Agent SDK 組み込み（Python）</td><td>1d</td><td><span class="mono">app/agent/main.py</span></td></tr>
+    <tr><td>S5-02</td><td>pgvector 検索 Tool 定義（<span class="mono">search_pgvector</span>）</td><td>2d</td><td><span class="mono">app/agent/tools/search.py</span></td></tr>
+    <tr><td>S5-03</td><td>関連ドキュメント取得 Tool（<span class="mono">get_document</span>）</td><td>1d</td><td><span class="mono">app/agent/tools/document.py</span></td></tr>
+    <tr><td>S5-04</td><td>Slack Bolt 受け口（ECS 上 long-running）</td><td>2d</td><td><span class="mono">app/slack/listener.py</span></td></tr>
+    <tr><td>S5-05</td><td>Agent ループ（ユーザー入力→Tool 呼び→応答生成）</td><td>2d</td><td>同 main.py</td></tr>
+    <tr><td>S5-06</td><td>最小 Memory（Slack スレッド単位の文脈保持）</td><td>1d</td><td><span class="mono">app/agent/memory.py</span></td></tr>
+    <tr><td>S5-07</td><td>監査ログ（Tool 呼び出し全件記録）</td><td>1d</td><td><span class="mono">app/agent/audit.py</span></td></tr>
+    <tr><td>S5-08</td><td>最小 Permissions（誰のデータを誰が参照可能か）</td><td>1d</td><td><span class="mono">app/agent/permissions.py</span></td></tr>
+    <tr><td>S5-09</td><td><strong>Skill Registry 最小実装</strong>（Skill 登録／検索／呼び出しの I/F のみ。Phase 3 の検索 Skill が最初の登録テストケースになる）</td><td>1d</td><td><span class="mono">app/agent/skill_registry.py</span></td></tr>
+  </tbody>
+</table>
+
+<div class="note beginner">
+  <div class="label">Skill Registry を MVA に含める理由</div>
+  MVA の Phase 3 では検索 Skill 1 個しか実装しないが、それを「ハードコードされた 1 機能」として書くと、Phase 4 で 4 個追加する際に Agent ループまで書き換えることになる。S5-09 で <span class="mono">SkillRegistry</span> という抽象だけ先に用意し、検索 Skill を <strong>「Skill Registry に登録される最初の Skill」</strong> として扱うことで、Phase 4 は「Skill Registry に新規 Skill を <span class="mono">register()</span> する」のみで済むようになる。Skill 間の入出力 schema・Permissions スコープ・監査ログタグの3点を Registry が一元管理する。
+</div>
+
+<h3 id="sec-6-2"><span class="num">6.2</span>Agent ループのコード構造（疑似コード）</h3>
+
+<div class="arch-diagram">
+# app/agent/main.py（疑似コード）
+
+from claude_agent_sdk import Agent, Tool
+from app.agent.tools.search import search_pgvector
+from app.agent.tools.document import get_document
+from app.agent.memory import ThreadMemory
+from app.agent.audit import audit_log
+
+SYSTEM_PROMPT = """
+あなたは TeamAgent — 社内の Mail / Drive / Slack を横断検索する AI Agent。
+ユーザーから質問が来たら、必ず search_pgvector Tool を使って関連データを集めてから、
+引用付きで簡潔に回答する。不明な点は推測せず「データが見つかりません」と返す。
+"""
+
+def handle_slack_event(event):
+    user      = event["user"]
+    text      = event["text"]
+    thread_ts = event.get("thread_ts") or event["ts"]
+    channel   = event["channel"]
+
+    # 1. 監査ログ：受信を記録
+    audit_log(actor=user, action="agent_invoke", payload={"text": text, "thread": thread_ts})
+
+    # 2. Memory：このスレッドの過去文脈を読み込む
+    memory = ThreadMemory(channel=channel, thread_ts=thread_ts)
+    history = memory.load()
+
+    # 3. Permissions：このユーザーが何にアクセスできるか
+    allowed_scope = permissions.resolve(user)   # 例：{"owner_emails": [user_email]}
+
+    # 4. Agent インスタンス化
+    agent = Agent(
+        model="claude-3-5-sonnet-20241022",
+        system=SYSTEM_PROMPT,
+        tools=[
+            Tool.from_function(search_pgvector, scope=allowed_scope),
+            Tool.from_function(get_document,   scope=allowed_scope),
+        ],
+        memory=history,
+    )
+
+    # 5. ループ実行（SDK が内部で Tool 呼び出し→結果→生成 を回す）
+    response = agent.run(text)
+
+    # 6. Memory 更新
+    memory.append(user_msg=text, assistant_msg=response.text, tool_calls=response.tool_calls)
+
+    # 7. 監査ログ：Tool 呼び出しを記録
+    for call in response.tool_calls:
+        audit_log(actor=f"agent:{user}", action="tool_call",
+                  target=call.name, payload=call.arguments)
+
+    # 8. Slack へ返信
+    slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=response.text)
+</div>
+
+<p>S5-09 で実装する Skill Registry の最小 I/F は以下のとおり。検索 Skill（Phase 3）が <span class="mono">register()</span> される最初のテストケースになる。</p>
+
+<div class="arch-diagram">
+# app/agent/skill_registry.py（疑似コード・MVA 最小実装）
+
+from typing import Callable, Type
+from pydantic import BaseModel
+
+class SkillSpec:
+    """Skill Registry に登録される 1 個の Skill のメタデータ + 実体"""
+    name:         str                 # 例 "search", "draft_mail"
+    description:  str                 # Orchestrator が選択判断に使う説明
+    input_model:  Type[BaseModel]     # 入力 schema（Pydantic）
+    output_model: Type[BaseModel]     # 出力 schema（Pydantic）
+    handler:      Callable            # 実行関数
+    required_scope: str               # "mine" | "team" | "all" 等の最低必要権限
+    audit_tag:    str                 # 監査ログに刻む識別子
+
+class SkillRegistry:
+    def __init__(self):
+        self._skills: dict[str, SkillSpec] = {}
+
+    def register(self, spec: SkillSpec) -> None:
+        """Skill を登録。MVA では Phase 3 の search Skill 1 個のみ。"""
+        assert spec.name not in self._skills, f"duplicate skill: {spec.name}"
+        self._skills[spec.name] = spec
+
+    def list(self) -> list[SkillSpec]:
+        return list(self._skills.values())
+
+    def get(self, name: str) -> SkillSpec:
+        return self._skills[name]
+
+    def invoke(self, name: str, payload: dict, scope_filter: dict) -> BaseModel:
+        spec  = self.get(name)
+        inp   = spec.input_model(**payload)
+        out   = spec.handler(inp, scope_filter=scope_filter)
+        return out  # spec.output_model 型
+</div>
+
+<h3 id="sec-6-3"><span class="num">6.3</span>Tool スキーマ例（<span class="mono">search_pgvector</span>）</h3>
+
+<div class="arch-diagram">
+# app/agent/tools/search.py
+
+from pydantic import BaseModel, Field
+from typing import Literal, Optional
+
+class SearchInput(BaseModel):
+    query:  str               = Field(description="自然言語の検索クエリ")
+    scope:  Literal["mine", "team", "all"] = Field(default="mine",
+                  description="検索範囲。mine=本人のデータのみ、team=同チーム、all=全社")
+    source: Optional[Literal["gmail","drive","slack"]] = Field(default=None,
+                  description="特定ソースに絞る場合に指定。未指定なら横断")
+    limit:  int               = Field(default=10, ge=1, le=50,
+                  description="返却件数の上限")
+
+class SearchResultItem(BaseModel):
+    source:     str
+    title:      str
+    snippet:    str           # ヒット箇所周辺の本文 200 字
+    score:      float         # コサイン類似度
+    document_id: str
+    link:       str           # Slack permalink / Drive URL / Gmail URL
+
+class SearchOutput(BaseModel):
+    items:      list[SearchResultItem]
+    total_found: int
+
+def search_pgvector(inp: SearchInput, scope_filter: dict) -> SearchOutput:
+    """
+    自然言語クエリを Embedding 化し、pgvector で類似検索する。
+    scope_filter は呼び出し時に Permissions 層が注入する制約条件。
+    """
+    embedding = embedder.embed(inp.query)
+    sql = """
+      SELECT d.id, d.source, d.title, d.metadata,
+             e.chunk_text, 1 - (e.embedding <=> %s::vector) AS score
+        FROM embeddings e
+        JOIN documents d ON d.id = e.document_id
+       WHERE (%s::text IS NULL OR d.source = %s)
+         AND d.owner_email = ANY(%s::text[])     -- ← Permissions 注入
+       ORDER BY e.embedding <=> %s::vector
+       LIMIT %s
+    """
+    rows = db.fetch_all(sql, [embedding, inp.source, inp.source,
+                              scope_filter["owner_emails"], embedding, inp.limit])
+    return SearchOutput(
+        items=[SearchResultItem(...) for r in rows],
+        total_found=len(rows),
+    )
+</div>
+
+<h3 id="sec-6-4"><span class="num">6.4</span>DoD</h3>
+
+<ul>
+  <li>Slack で <span class="mono">@TeamAgent ACME 案件は？</span> と投げると pgvector 検索が走り、何らかの回答が返る（精度はまだ低くて可）</li>
+  <li>監査ログに「agent_invoke」「tool_call」「assistant_response」の 3 種が記録</li>
+  <li>同じスレッド内で続けて質問すると、前の文脈を踏まえた応答になる（Memory が機能）</li>
+  <li>他人のメールを検索しても、Permissions により返却されない（<span class="mono">scope=mine</span> がデフォルト）</li>
+  <li>Tool 呼び出しが 1 リクエスト中に 5 回を超えたら停止する Guard 実装済み</li>
+  <li>Skill Registry が初期化されており、Phase 3 で <span class="mono">registry.register(search_skill_spec)</span> を呼び出せば検索 Skill が動く状態になっている（S5 時点では Registry は空でよい）</li>
+</ul>
+
+<!-- =================================================================== -->
+<!-- 7. MVA Phase 3：超軽量・検索 Skill -->
+<!-- =================================================================== -->
+<h2 id="sec-7"><span class="num">7.</span>MVA Phase 3：ホワイトリスト検索 Skill（S5-S6 検証 / M3 完成）</h2>
+
+<div class="note beginner">
+  <div class="label">Phase 3 の位置づけ（v1.1）</div>
+  Phase 3 で実装する検索 Skill は、<strong>OpenClaw の既存 Skill Registry に register される最初のホワイトリスト Skill</strong> である。MVP は S4 で実装済み（5.4 節）なので、Phase 3 では <strong>営業 5 名ドッグフード（S5）でのチューニング</strong>と <strong>16 名展開準備（S6）</strong>に集中する。Skill 実装は v1.0 と同じ抽象 I/F を踏襲するが、Registry は OpenClaw のものを使う。
+</div>
+
+<h3 id="sec-7-1"><span class="num">7.1</span>実装タスク</h3>
+
+<table class="compact">
+  <thead><tr><th>#</th><th>タスク</th><th>見積</th><th>成果物</th></tr></thead>
+  <tbody>
+    <tr><td>S6-00</td><td><strong>Skill Registry への検索 Skill 登録</strong>（<span class="mono">SearchSkillSpec</span> 定義 + <span class="mono">registry.register()</span>）</td><td>0.5d</td><td><span class="mono">app/skills/search_spec.py</span></td></tr>
+    <tr><td>S6-01</td><td>検索 Skill 実装（システムプロンプト + Tool 連鎖）</td><td>2d</td><td><span class="mono">app/skills/search.py</span></td></tr>
+    <tr><td>S6-02</td><td>引用付きサマリー生成（出典を明示する応答整形）</td><td>1d</td><td><span class="mono">app/skills/citation.py</span></td></tr>
+    <tr><td>S6-03</td><td>関連ファイル/メールリンク提示（Slack Block Kit 活用）</td><td>1d</td><td><span class="mono">app/skills/block_format.py</span></td></tr>
+    <tr><td>S6-04</td><td>スレッド内文脈保持の改善（過去 5 ターン参照）</td><td>1d</td><td>Memory 拡張</td></tr>
+    <tr><td>S6-05</td><td>営業 5 名ベータユーザー選定・オンボーディング</td><td>1d</td><td>運用ドキュメント</td></tr>
+    <tr><td>S6-06</td><td>フィードバック収集フォーム＋計測（GA / Slack reaction）</td><td>1d</td><td><span class="mono">app/feedback/</span></td></tr>
+    <tr><td>S6-07</td><td>運用ダッシュボード（CloudWatch メトリクス）</td><td>1d</td><td>監視ダッシュ</td></tr>
+    <tr><td>S6-08</td><td>Phase 4 移行のための振り返り会</td><td>0.5d</td><td>レトロスペクティブ議事録</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-7-1b"><span class="num">7.1b</span>検索 Skill の I/F（OpenClaw Skill Registry 登録）</h3>
+
+<p>検索 Skill は <strong>OpenClaw が提供する Skill Registry に登録される最初のホワイトリスト Skill</strong> である。下の疑似コードは「TeamAgent 自前の Registry」を例示しているように見えるが、v1.1 では同等の I/F を <strong>OpenClaw の SkillSpec / register デコレータ</strong>で実現する読み替えで運用する。Phase 4 で追加する Skill も同じ I/F に準拠する。</p>
+
+<div class="arch-diagram">
+# app/skills/search_spec.py（疑似コード）
+
+from pydantic import BaseModel, Field
+from typing import Literal, Optional
+from app.agent.skill_registry import SkillSpec, SkillRegistry
+from app.skills.search import handle_search   # 実体は search.py に定義
+
+# ---- 入力 schema ----
+class SearchSkillInput(BaseModel):
+    query:  str  = Field(description="自然言語の検索質問")
+    scope:  Literal["mine", "team"] = Field(default="mine")
+    source: Optional[Literal["gmail","drive","slack"]] = Field(default=None)
+    limit:  int  = Field(default=10, ge=1, le=50)
+
+# ---- 出力 schema ----
+class SearchSkillOutputItem(BaseModel):
+    source:      str
+    title:       str
+    snippet:     str
+    score:       float
+    document_id: str
+    link:        str
+
+class SearchSkillOutput(BaseModel):
+    summary:    str                          # 引用付きの自然言語サマリー
+    items:      list[SearchSkillOutputItem]  # 関連リンク一覧
+    citations:  list[str]                    # documents.id のリスト
+
+# ---- Skill 仕様 ----
+SEARCH_SKILL_SPEC = SkillSpec(
+    name           = "search",
+    description    = "Mail / Drive / Slack を横断検索し、引用付きサマリーと関連リンクを返す",
+    input_model    = SearchSkillInput,
+    output_model   = SearchSkillOutput,
+    handler        = handle_search,
+    required_scope = "mine",
+    audit_tag      = "skill.search",
+)
+
+# ---- Registry への登録（アプリ起動時に呼ぶ） ----
+def register_into(registry: SkillRegistry) -> None:
+    registry.register(SEARCH_SKILL_SPEC)
+</div>
+
+<p>Phase 4 では <span class="mono">app/skills/draft_mail_spec.py</span>、<span class="mono">app/skills/proposal_spec.py</span> ... と同じパターンで <span class="mono">SkillSpec</span> を追加し、<span class="mono">register()</span> を呼ぶだけで新規 Skill が組み込まれる。Agent ループ本体（<span class="mono">main.py</span>）は変更不要。</p>
+
+<h3 id="sec-7-2"><span class="num">7.2</span>出力フォーマット</h3>
+
+<p>検索 Skill の応答は、以下のフォーマットで Slack スレッドに投稿される。</p>
+
+<div class="arch-diagram">
+[User]   @TeamAgent ACME 様の過去類似案件は？
+
+[TeamAgent]
+ACME 様の過去類似案件は 2024 年 11 月の「秋シーズン美容案件」が最も近いです。
+当時の KOL は田中さん（フォロワー 12 万）で、CV 1.4% を達成しました。
+
+▸ 関連メール（3 通）
+  • 2024-11-12 山田 → 田中事務所「11月提案打診」  [Gmail を開く]
+  • 2024-11-18 田中事務所 → 山田「条件 OK」      [Gmail を開く]
+  • 2024-11-25 山田 → 社内「結果報告」           [Gmail を開く]
+
+▸ 関連 Drive ファイル（2 件）
+  • ACME_2024-11_提案資料_v3.pptx                [Drive を開く]
+  • ACME_2024-11_実施結果報告.pdf                [Drive を開く]
+
+▸ 関連 Slack スレッド（1 件）
+  • #sales-acme 2024-11-20 田中起用 OK スレッド   [スレッドへ]
+
+出典：documents.id = a3f2..., b1c8..., e4d0...（合計 6 件）
+</div>
+
+<h3 id="sec-7-3"><span class="num">7.3</span>DoD</h3>
+
+<ul>
+  <li>営業 5 名（指名）が <strong>2 週間で 1 人あたり 10 回以上利用</strong>している（合計 100 回以上の利用ログ）</li>
+  <li>引用付きで関連リンクが返るフォーマットが安定している（5 名 × 5 クエリの抜取検査で全件フォーマット崩れなし）</li>
+  <li>フィードバック 20 件以上収集、Phase 4 で優先実装すべき Skill のヒントが得られている</li>
+  <li>運用ダッシュボードで「クエリ数 / 平均応答時間 / Tool 呼び回数 / エラー率」が見える</li>
+</ul>
+
+<div class="note beginner">
+  <div class="label">M3 達成 = MVA 完了</div>
+  ここまでくれば「動く社内 AI Agent 基盤」が稼働中。Phase 4 では同じ基盤の Skill Registry に <strong>初期 Skill セット（残り 4 個）を <span class="mono">register()</span> していくフェーズ</strong> に入る。データ層・Agent ループ・Permissions・監査ログ・Skill Registry の最小実装は MVA で完成済み。
+</div>
+
+
+<!-- =================================================================== -->
+<!-- 8. 技術選定の確定事項と未決事項 -->
+<!-- =================================================================== -->
+<h2 id="sec-8"><span class="num">8.</span>技術選定の確定事項と未決事項</h2>
+
+<p>本章は MVA を <strong>「決めたから動かせる」状態</strong>と <strong>「壁打ちで決めないと S2 以降に詰まる」</strong>状態に分けて明示する。未決事項は <strong>S1 開始前のキックオフ会で必ず決定</strong>すること。</p>
+
+<h3 id="sec-8-1"><span class="num">8.1</span>確定事項（v1.1）</h3>
+
+<table>
+  <thead><tr><th>#</th><th>領域</th><th>確定内容（v1.1 更新後）</th><th>根拠文書</th></tr></thead>
+  <tbody>
+    <tr><td>F-1</td><td>Agent Runtime</td><td><strong>OpenClaw を全面採用</strong>。Skill Registry / Channel 抽象 / セッション・Memory・監査ログを OpenClaw に委譲</td><td>本書 v1.1 § 6 / overview v3.1</td></tr>
+    <tr><td>F-1b</td><td>Skill 内部実装</td><td><strong>Claude Agent SDK を Skill ハンドラ内部で使用</strong>。Tool 連鎖・思考プロセスは Claude Agent SDK 側</td><td>本書 v1.1 § 6.2</td></tr>
+    <tr><td>F-2</td><td>フロントエンド</td><td>Slack（OpenClaw Slack Channel adapter 経由）。メンション → Slash → Workflow と段階展開</td><td>構想・概要書 v3.0 § 9</td></tr>
+    <tr><td>F-3</td><td>データ層</td><td>PostgreSQL 16 + pgvector（HNSW インデックス）</td><td>アーキ図書 v3.0 § 4</td></tr>
+    <tr><td>F-4</td><td>インフラ第一候補</td><td>AWS（ap-northeast-1）。Mac mini は Phase 0 PoC 限定</td><td>実装計画 v3.0 § 6</td></tr>
+    <tr><td>F-5</td><td>LLM 推論</td><td><strong>Bedrock 経由 Claude Sonnet 4.6 を主軸</strong>（prompt caching 有効化、安価クエリは Haiku 系へ自動ルート）</td><td>本書 v1.1 § 3.4 / overview v3.1</td></tr>
+    <tr><td>F-5b</td><td>動画分析モデル</td><td>動画分析 Skill 内部で Gemini 2.5 Flash を呼ぶ（Phase 4-d / S10）</td><td>本書 v1.1 § 3.2 / kinou4_spec v1</td></tr>
+    <tr><td>F-6</td><td>Embedding</td><td>第一候補：Bedrock Titan Text Embeddings V2（1024 次元）※ 8.2 MVA-5 で再評価</td><td>本書のみ</td></tr>
+    <tr><td>F-7</td><td>MVA Phase</td><td>3 Phase 構成（データ層 → Agent ループ → 検索 Skill）は維持。S1-S6 で MVA、S7-S14 で Phase 4 + 本番化</td><td>本書 v1.1 § 3</td></tr>
+    <tr><td>F-8</td><td>Sprint 構成</td><td><strong>2 週間 × 14 Sprint = 7 ヶ月</strong>（12 月本格運用）</td><td>本書 v1.1 § 3.1</td></tr>
+    <tr><td>F-9</td><td>コスト構造</td><td><strong>開発 ¥80K（総額）／ 運用 月 ¥100K-¥1M レンジ</strong>。個人開発ツール（Claude Code / Codex）は別承認</td><td>本書 v1.1 § 3.4</td></tr>
+    <tr><td>F-10</td><td>セキュリティ運用</td><td><strong>第 12 章「セキュリティ運用ルール」を確定</strong>：ClawHub ホワイトリスト・CVE 監視・マルウェア検出・Anthropic 政策耐性・IAM Tier 0-3</td><td>本書 v1.1 § 12</td></tr>
+    <tr><td>F-11</td><td>Go/No-Go ゲート</td><td>S2 末（M1）に Go/No-Go ① を設置。セキュリティ運用ルール全節がレビュー済み・承認済みでなければ S3 へ進ませない</td><td>本書 v1.1 § 5.2 / § 12</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-8-2"><span class="num">8.2</span>未決事項（壁打ちで詰める 12 論点）</h3>
+
+<table>
+  <thead>
+    <tr><th>#</th><th>論点</th><th>選択肢</th><th>判定タイミング</th><th>影響範囲</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>MVA-1</strong></td><td>連携優先順位</td>
+      <td>(a) Gmail→Drive→Slack（現案）<br>(b) Slack→Gmail→Drive（Slack 入口優先）<br>(c) Drive→Gmail→Slack（資産活用優先）</td>
+      <td>S1 開始前</td><td>S2〜S4 の順序、デモ素材</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-2</strong></td><td>OAuth スコープ</td>
+      <td>(a) Read-only のみ<br>(b) 一部 Write（メール下書き作成等）含む</td>
+      <td>S2 開始前</td><td>監査要件、ユーザー同意フロー</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-3</strong></td><td>取り込み方式</td>
+      <td>(a) 全件初期同期 → 以降増分<br>(b) 直近 6 ヶ月のみ → 以降増分<br>(c) 検索時オンデマンド</td>
+      <td>S2 開始前</td><td>初回コスト、ストレージ、ユーザー体感</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-4</strong></td><td>他人データ参照</td>
+      <td>(a) 自分のみ厳格<br>(b) 同チームは可（チーム ID で制御）<br>(c) opt-in 制で範囲拡張</td>
+      <td>S4 開始前</td><td>Permissions 設計、監査</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-5</strong></td><td>Embedding モデル</td>
+      <td>(a) Bedrock Titan V2（1024 dim、AWS 内完結）<br>(b) Voyage AI voyage-large-2（高精度、外部 API）<br>(c) OpenAI text-embedding-3-large（実績、外部 API）</td>
+      <td>S1 開始前</td><td>精度、コスト、データ境界</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-6</strong></td><td>検索 Skill 出力形式</td>
+      <td>(a) 引用サマリーのみ<br>(b) リンクリストのみ<br>(c) 両方（現案）</td>
+      <td>S6 開始前</td><td>営業の使い勝手、応答時間</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-7</strong></td><td>外部スクレイピング対象優先順</td>
+      <td>(a) Instagram（KOL 検索）優先<br>(b) X（旧 Twitter）優先<br>(c) MVA 範囲外、Phase 4 へ</td>
+      <td>S5 終了時</td><td>Phase 4 設計、法規制</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-8</strong></td><td>dpro / Buzzmiru の API 実在性</td>
+      <td>(a) API ある → 公式連携<br>(b) ない → スクレイピング<br>(c) 採用見送り</td>
+      <td>S5 終了時</td><td>機能④仕様、Phase 4 タスク</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-9</strong></td><td>インフラ場所</td>
+      <td>(a) AWS のみ<br>(b) AWS + Mac mini PoC 並行<br>(c) Mac mini 先行 → AWS は M2 以降</td>
+      <td>Day 0</td><td>Day 0 のキックオフ、月額コスト</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-10</strong></td><td>Permissions 最低ライン</td>
+      <td>(a) owner_email 単一フィルタのみ<br>(b) 役職・部署フィルタ追加<br>(c) フィールドレベル制御まで</td>
+      <td>S5 開始前</td><td>監査要件、Skill 拡張性</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-11</strong></td><td>ClawHub Skill 流用方針</td>
+      <td>(a) 検索 Skill は ClawHub 既存を流用<br>(b) 自前実装で要件最適化<br>(c) ハイブリッド（コア部分は流用 + 出力整形は自前）</td>
+      <td>S3 開始前（ホワイトリスト v1 確定と同時）</td><td>S4 工数、Skill 品質、運用責任</td>
+    </tr>
+    <tr>
+      <td><strong>MVA-12</strong></td><td>Anthropic 政策変動時の代替経路の運用化レベル</td>
+      <td>(a) Bedrock 一本（手順書のみ用意）<br>(b) Bedrock + Anthropic 直接 API の dual provider 設定<br>(c) Bedrock + Vertex AI（Google Cloud 経由）</td>
+      <td>S12 開始前</td><td>運用負荷、追加コスト、契約整備</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note warn">
+  <div class="label">未決事項を放置するとどうなるか</div>
+  MVA-3（取り込み方式）が決まらないと S2 が開始できない。MVA-5（Embedding）が決まらないと S1 のスキーマで vector の次元数を確定できない。MVA-9 が決まらないと Day 0 のチェックリストが回らない。<strong>Sprint 0（Day 0〜3）で全 10 論点に「いったんこれで進める」決定を出す</strong>こと（後で覆して良いが、進行を止めない）。
+</div>
+
+<!-- =================================================================== -->
+<!-- 9. ローカル開発環境セットアップ -->
+<!-- =================================================================== -->
+<h2 id="sec-9"><span class="num">9.</span>ローカル開発環境セットアップ</h2>
+
+<p>サーバー到着前から FDE が個人 Mac で「とりあえず動かす」ための一式。Day 0 までに完成させておくと、Day 1 以降の本番接続がスムーズ。</p>
+
+<h3 id="sec-9-1"><span class="num">9.1</span>docker-compose.yml</h3>
+
+<div class="arch-diagram">
+# docker-compose.yml（プロジェクトルート）
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER:     teamagent
+      POSTGRES_PASSWORD: teamagent_local
+      POSTGRES_DB:       teamagent_mva
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema:/docker-entrypoint-initdb.d:ro
+
+  bedrock-proxy:
+    image: ghcr.io/aws-samples/bedrock-access-gateway:latest
+    environment:
+      AWS_REGION:        ap-northeast-1
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      API_KEY:           local-dev-key
+    ports:
+      - "8000:80"
+
+  app:
+    build: .
+    env_file: .env
+    depends_on: [postgres, bedrock-proxy]
+    volumes:
+      - ./app:/app
+    command: ["python", "-m", "app.dev_server"]
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+</div>
+
+<h3 id="sec-9-2"><span class="num">9.2</span>.env.example</h3>
+
+<div class="arch-diagram">
+# .env.example（FDE はこれをコピーして .env を作る）
+
+# --- AWS ---
+AWS_REGION=ap-northeast-1
+AWS_PROFILE=teamagent
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+
+# --- LLM / Embedding ---
+ANTHROPIC_MODEL=anthropic.claude-3-5-sonnet-20241022-v2:0
+EMBEDDING_MODEL=amazon.titan-embed-text-v2:0
+EMBEDDING_DIM=1024
+
+# --- Database ---
+DATABASE_URL=postgresql://teamagent:teamagent_local@localhost:5432/teamagent_mva
+
+# --- Google OAuth ---
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URI=http://localhost:3000/oauth/google/callback
+
+# --- Slack ---
+SLACK_BOT_TOKEN=
+SLACK_SIGNING_SECRET=
+SLACK_APP_TOKEN=
+
+# --- App ---
+APP_ENV=local
+LOG_LEVEL=DEBUG
+SCOPE_DEFAULT=mine
+</div>
+
+<h3 id="sec-9-3"><span class="num">9.3</span><span class="mono">scripts/setup_local.sh</span>：1 コマンド立ち上げ</h3>
+
+<div class="arch-diagram">
+#!/usr/bin/env bash
+# scripts/setup_local.sh — Day 0 までに動かせるローカル開発環境
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+
+echo "[1/6] .env を確認"
+[ -f .env ] || { cp .env.example .env; echo "  .env を生成しました。値を埋めてください"; exit 1; }
+
+echo "[2/6] Python 仮想環境を構築"
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+
+echo "[3/6] docker compose 起動"
+docker compose up -d postgres bedrock-proxy
+echo "  postgres が起動するまで待機..."
+until docker compose exec -T postgres pg_isready -U teamagent &>/dev/null; do sleep 1; done
+
+echo "[4/6] スキーマを適用"
+psql "$DATABASE_URL" -f db/schema/001_init.sql
+psql "$DATABASE_URL" -f db/schema/002_indexes.sql
+
+echo "[5/6] スモークテスト：test embedding を 10 件投入"
+python -m scripts.smoke_test_pgvector
+
+echo "[6/6] 完了。次のコマンド例："
+echo "  python -m app.dev_server         # ローカル Agent サーバー"
+echo "  python -m scripts.sync_gmail_one # 単発で Gmail を 1 通取り込み"
+</div>
+
+<h3 id="sec-9-4"><span class="num">9.4</span>サンプル PDF / メール数件でスモークテスト</h3>
+
+<div class="arch-diagram">
+# scripts/smoke_test_pgvector.py
+"""
+ローカル pgvector にサンプル文書を 10 件投入し、検索が動くかを確認する。
+"""
+import psycopg
+from app.lib.embedder import embed_local   # Bedrock proxy or sentence-transformers fallback
+from app.lib.vector_store import VectorStore
+
+SAMPLES = [
+  ("gmail",  "ACME 様 11月提案について",     "山田です。ACME 様への 11月提案資料をまとめました..."),
+  ("gmail",  "田中さん起用 OK",              "田中事務所より起用条件 OK の連絡がありました..."),
+  ("drive",  "ACME_2024-11_提案資料.pptx",   "提案目的：秋シーズン美容案件。KOL 田中..."),
+  ("slack",  "#sales-acme スレッド",         "ACME 田中起用について最終確認です..."),
+  # ... 計 10 件
+]
+
+vs = VectorStore()
+for source, title, body in SAMPLES:
+    vs.upsert(source=source, source_id=f"local-{title}",
+              owner_email="local-test@example.com",
+              title=title, body=body, metadata={"project_tags": ["ACME"]})
+
+# 検索確認
+hits = vs.search("ACME の KOL は誰", scope={"owner_emails": ["local-test@example.com"]}, limit=5)
+for h in hits:
+    print(f"[{h.score:.3f}] {h.source} / {h.title}")
+</div>
+
+<h3 id="sec-9-5"><span class="num">9.5</span>必要 Python ライブラリ（<span class="mono">requirements.txt</span>）</h3>
+
+<table class="compact">
+  <thead><tr><th>カテゴリ</th><th>ライブラリ</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr><td>Agent SDK</td><td><span class="mono">claude-agent-sdk &gt;= 0.5</span></td><td>Agent ループ・Tool 定義</td></tr>
+    <tr><td>DB</td><td><span class="mono">psycopg[binary] &gt;= 3.1</span> / <span class="mono">pgvector &gt;= 0.3</span></td><td>PostgreSQL クライアント・ベクトル型</td></tr>
+    <tr><td>Google API</td><td><span class="mono">google-api-python-client</span> / <span class="mono">google-auth-oauthlib</span></td><td>Gmail / Drive 連携</td></tr>
+    <tr><td>Slack</td><td><span class="mono">slack-bolt</span> / <span class="mono">slack-sdk</span></td><td>Slack 受け口・送信</td></tr>
+    <tr><td>AWS</td><td><span class="mono">boto3</span></td><td>Bedrock / Secrets Manager / S3</td></tr>
+    <tr><td>パーサ</td><td><span class="mono">pdfplumber</span> / <span class="mono">python-docx</span> / <span class="mono">python-pptx</span> / <span class="mono">openpyxl</span></td><td>PDF / Word / PPT / Excel</td></tr>
+    <tr><td>テキスト処理</td><td><span class="mono">beautifulsoup4</span> / <span class="mono">talon</span> / <span class="mono">tiktoken</span></td><td>HTML→text、署名除去、トークン分割</td></tr>
+    <tr><td>その他</td><td><span class="mono">pydantic &gt;= 2</span> / <span class="mono">httpx</span> / <span class="mono">tenacity</span></td><td>バリデーション、HTTP、リトライ</td></tr>
+    <tr><td>開発・テスト</td><td><span class="mono">pytest</span> / <span class="mono">ruff</span> / <span class="mono">mypy</span></td><td>テスト・lint・型チェック</td></tr>
+  </tbody>
+</table>
+
+<!-- =================================================================== -->
+<!-- 10. Phase 4 への接続点 -->
+<!-- =================================================================== -->
+<h2 id="sec-10"><span class="num">10.</span>Phase 4 への接続点（Sprint S7-S14）</h2>
+
+<p>v1.1 では、Phase 4 移行は <strong>「MVA 完成 → 別途キックオフ → 数ヶ月後に着手」</strong> という後ろ倒し設計を廃止し、<strong>S7 から地続きで Skill を 1 Sprint / 1 Skill 追加</strong>していく構成に変更した。S7-S10 で Phase 4 の Skill を 5 個追加、S11-S14 で本番化（負荷試験・セキュリティ運用・障害対応訓練・最終仕上げ）。</p>
+
+<h3 id="sec-10-1"><span class="num">10.1</span>MVA 完了時点で何が揃っているか</h3>
+
+<table>
+  <thead><tr><th>レイヤー</th><th>MVA 完了時点（M3）</th><th>未着手</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>データ層</td>
+      <td>Mail / Drive / Slack の 3 ソースが pgvector 統合済み</td>
+      <td>動画分析データ層、外部スクレイピング（Instagram / X）、Gemini Deep Research</td>
+    </tr>
+    <tr>
+      <td>Agent SDK</td>
+      <td>Claude Agent SDK 基本ループ・Memory・Permissions・監査ログ稼働</td>
+      <td>長期 Memory、複数ステップの Plan&amp;Execute、Subagent 分割</td>
+    </tr>
+    <tr>
+      <td>Skill</td>
+      <td>検索 Skill 1 個のみ（引用付きサマリー + リンク）</td>
+      <td>Skill Registry に登録される残り 4 Skill（Slack 自動サジェスト / Mail 起案 / 提案資料 / 動画分析 / 営業進捗）</td>
+    </tr>
+    <tr>
+      <td>UX</td>
+      <td><span class="mono">@TeamAgent</span> メンション 1 ルート</td>
+      <td>Slash Command / Workflow Builder / Block Kit UI</td>
+    </tr>
+    <tr>
+      <td>出力</td>
+      <td>テキスト + Slack Block Kit のリンク</td>
+      <td>HTML 出力、PDF/PPTX 変換、WYSIWYG エディタ</td>
+    </tr>
+    <tr>
+      <td>運用</td>
+      <td>営業 5 名ベータ、運用ダッシュボード、CloudWatch 監視</td>
+      <td>SLO 設定、月次レビュー、コスト最適化</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-10-2"><span class="num">10.2</span>Phase 4（S7-S10）への踏切板</h3>
+
+<p>Phase 4 は OpenClaw Skill Registry に <strong>追加 Skill 5 個（Mail 起案 / 営業進捗 / 提案資料 / 動画分析 / Slack 自動サジェスト）</strong>を <span class="mono">register()</span> していく地続きフェーズと再定義する。基盤コードの書き換えはなく、各 Skill ごとに <span class="mono">SkillSpec</span> + handler を追加するのみ。<strong>1 Sprint / 1 Skill ペース</strong>で S7-S10 の 4 Sprint に割り当てる（S10 は 2 Skill 同時着手）。</p>
+
+<div class="arch-diagram">
+MVA 完了 (M3, S6 末)
+       │
+       ▼
+[S7 (M3-M4)：Mail 起案 Skill]
+  • OpenClaw Skill draft_mail を登録
+  • 営業ドッグフード FB を反映、Skill 内部の Claude Agent SDK プロンプトを調整
+       │
+       ▼
+[S8 (M4-M5)：営業進捗まとめ Skill]
+  • OpenClaw Skill summarize_progress を登録、毎週月曜の Slack 自動投稿
+       │
+       ▼
+[S9 (M5-M5.5)：提案資料起案 Skill]
+  • OpenClaw Skill draft_proposal を登録、Anthropic pptx skill で PPTX 生成
+       │
+       ▼
+[S10 (M5.5-M6)：動画分析 Skill + Slack 自動サジェスト Skill]
+  • OpenClaw Skill analyze_video（内部で Gemini 2.5 Flash 呼び出し）
+  • OpenClaw Skill slack_suggest（条件ベース受動サジェスト）
+       │
+       ▼
+[S11-S14 (M6-M7)：本番化 / 12 月本格運用準備]
+</div>
+
+<h3 id="sec-10-3"><span class="num">10.3</span>機能④仕様書 v1 / 機能⑥要件 v3.0 との連携点</h3>
+
+<table>
+  <thead><tr><th>関連文書</th><th>MVA との接続</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>機能④ 確定仕様書 v1（動画ナレッジ分析）</td>
+      <td>動画データ層は MVA 範囲外。Phase 4 で機能④を実装する際、本書の「documents / embeddings」テーブルに <span class="mono">source='video'</span> として同居させる設計。スキーマ変更なし</td>
+    </tr>
+    <tr>
+      <td>機能⑥ Personal AI Coach 要件 v3.0</td>
+      <td>MVA で構築した「個人 Mail / Slack 横断検索」は、機能⑥のコーチングで参照する「本人の活動履歴」と同じデータ。MVA がそのまま機能⑥のデータ基盤になる</td>
+    </tr>
+    <tr>
+      <td>監査役懸念精査レポート v1</td>
+      <td>本書の Permissions（§ 6・§ 8.2 MVA-4 / MVA-10）と監査ログ設計が、監査役の主要懸念（他人データ参照・個人情報取扱）への直接の答え</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="sec-10-4"><span class="num">10.4</span>S11-S14：負荷試験・安定化（12 月本格運用前）</h3>
+
+<p>v1.1 では、Phase 4 完了後すぐに本格運用に入らず、<strong>S11-S14 の 4 Sprint（M6-M7）を本番化に充てる</strong>。これにより 12 月本格運用直前に「実は性能が出ない」「セキュリティ運用が回らない」といった事故を防ぐ。</p>
+
+<table class="compact">
+  <thead><tr><th>Sprint</th><th>テーマ</th><th>主要タスク</th><th>合格基準</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>S11</strong></td>
+      <td>負荷試験</td>
+      <td>k6 シナリオ作成（営業 16 名 → 想定 100 名）、Bedrock 同時実行スロットリング検証、コスト試算更新</td>
+      <td>P95 応答 ≤ 8s、エラー率 ≤ 1%、月次コスト試算 ¥1M 以下</td>
+    </tr>
+    <tr>
+      <td><strong>S12</strong></td>
+      <td>セキュリティ運用ルールの運用回し</td>
+      <td>第 12 章 全節の運用開始：ClawHub 四半期レビュー初回 / CVE 監視ダッシュ / IAM Tier 0-3 切替</td>
+      <td>監査ログで全節の運用実施が確認できる</td>
+    </tr>
+    <tr>
+      <td><strong>S13</strong></td>
+      <td>障害対応・復旧訓練</td>
+      <td>Runbook 整備、RDS スナップショット復旧訓練、Slack 緊急停止スイッチ、Skill 単位の機能切り離し演習</td>
+      <td>RTO ≤ 1 時間、RPO ≤ 15 分</td>
+    </tr>
+    <tr>
+      <td><strong>S14</strong></td>
+      <td>最終仕上げ（12/1 リリース判定）</td>
+      <td>SLO 文書化、月次レビュー会の枠取り、全社展開アナウンス案、Go/No-Go ② 判定会</td>
+      <td>12 月 1 日本格運用の Go 判定が出る</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note warn">
+  <div class="label">Go/No-Go ゲート ② — S14 末（M7）</div>
+  12 月 1 日本格運用の Go 判定は <strong>① 負荷試験合格 ② セキュリティ運用が監査ログで回っていること ③ 障害対応訓練合格 ④ SLO 文書化</strong> の 4 条件全クリアで行う。1 つでも No なら、運用開始を 2 週間延期して S14 を 1 Sprint 追加する（最終フォールバック：1月リリース）。
+</div>
+
+<!-- =================================================================== -->
+<!-- 11. 改訂履歴 -->
+<!-- =================================================================== -->
+<h2 id="sec-11"><span class="num">11.</span>改訂履歴</h2>
+
+<table>
+  <thead><tr><th>版</th><th>日付</th><th>変更内容</th><th>担当</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>1.0</td>
+      <td>2026-05-19</td>
+      <td>初版作成。構想・概要書 v3.0 / 要件定義書 v3.0 / アーキテクチャ図書 v3.0 / 実装計画書 v3.0 の実装直前ブレークダウンとして 11 章構成で発行</td>
+      <td>FDE</td>
+    </tr>
+    <tr>
+      <td>v3.0 改訂</td>
+      <td>2026-05-19</td>
+      <td>料理メタファを技術書表現に統一。MVA Phase 2 に Skill Registry の最小実装を明示、Phase 3 検索 Skill を「最初の登録 Skill」と位置付け。Phase 4 以降を「Skill Registry への新規 Skill 追加フェーズ」として再定義。</td>
+      <td>FDE</td>
+    </tr>
+    <tr>
+      <td><strong>1.1</strong></td>
+      <td><strong>2026-05-20</strong></td>
+      <td>
+        <strong>OpenClaw フル採用に転換</strong>。Skill Registry を OpenClaw に委譲、Skill ロジックは Claude Agent SDK 経由。<strong>第12章「セキュリティ運用ルール」新設</strong>（ClawHub ホワイトリスト・CVE 監視・マルウェア検出・Anthropic 政策耐性・IAM Tier 0-3 / リスク R16-R19）。スケジュールを 7 ヶ月（12 月本格運用）に拡張、Sprint 構成を S1-S14 に再構成。コスト構造を「開発 ¥80K（総額）／ 運用 月 ¥100K-1M レンジ」に修正。Day 0 チェックリストに OpenClaw インストール 7 項目追加。S2 末に Go/No-Go ①、S14 末に Go/No-Go ② を設置。未決事項を 10 → 12 論点に拡張（MVA-11 ClawHub 流用方針 / MVA-12 政策変動代替経路）。
+      </td>
+      <td>FDE</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- =================================================================== -->
+<!-- 12. セキュリティ運用ルール（v1.1 新設） -->
+<!-- =================================================================== -->
+<h2 id="sec-12"><span class="num">12.</span>セキュリティ運用ルール（v1.1 新設）</h2>
+
+<p>本章は v1.1 で新設した「<strong>OpenClaw 採用に伴うセキュリティ運用ルール</strong>」を規定する。OpenClaw および ClawHub Skill は<strong>外部コミュニティ由来</strong>のため、自社実装と同等の信頼性を担保するには、運用ルールでカバーする必要がある。本章は <strong>S2 末（M1）の Go/No-Go ① でレビュー対象</strong>となる規範文書である。</p>
+
+<div class="note warn">
+  <div class="label">本章の位置づけ</div>
+  本章は「努力目標」ではなく「<strong>運用必須ルール</strong>」である。第 12.1〜12.5 の各節は「責任者・実施頻度・記録場所」を含む実運用手順として書かれており、S12（M6.25-M6.5）から正式運用、それ以前の Sprint でも段階的に実施する。逸脱した場合の影響度を 12.6 のリスク台帳（R16-R19）で示す。
+</div>
+
+<h3 id="sec-12-1"><span class="num">12.1</span>ClawHub Skill ホワイトリスト運用</h3>
+
+<p>ClawHub から取得する Skill は <strong>ホワイトリスト方式</strong>で管理する。ホワイトリスト未登録の Skill は、たとえ ClawHub で人気でも実行環境にロードしない。</p>
+
+<h4>12.1.1 レビュー基準（5 軸スコア）</h4>
+<table>
+  <thead><tr><th>軸</th><th>合格基準</th><th>確認方法</th></tr></thead>
+  <tbody>
+    <tr><td>star 数</td><td>50 以上 or 公式 ClawHub 推奨タグ付き</td><td>ClawHub 表示</td></tr>
+    <tr><td>最終更新</td><td>過去 6 ヶ月以内に commit がある</td><td>GitHub commit history</td></tr>
+    <tr><td>コミッター信頼性</td><td>主要 commiter（過半数）が GitHub Verified or 既知の OSS 貢献者</td><td>GitHub profile 確認・所属組織確認</td></tr>
+    <tr><td>ライセンス</td><td>MIT / Apache-2.0 / BSD 系（コピーレフトは要法務確認）</td><td>LICENSE ファイル</td></tr>
+    <tr><td>挙動・依存</td><td>外部通信先・利用ライブラリの一覧化。明確に必要な範囲を超えない</td><td>静的解析、依存ツリー（pipdeptree）、12.3 節の手順</td></tr>
+  </tbody>
+</table>
+
+<h4>12.1.2 レビュー責任者</h4>
+<ul>
+  <li><strong>一次レビュアー</strong>：FDE（実装担当本人）— 5 軸スコアと挙動確認</li>
+  <li><strong>二次レビュアー</strong>：セキュリティ担当（または CTO 相当）— ライセンス・コミッター信頼性の最終承認</li>
+  <li><strong>承認権限</strong>：二次レビュアー署名でホワイトリスト v1 → v2 → ... に追加</li>
+</ul>
+
+<h4>12.1.3 レビュー記録</h4>
+<p>記録場所：<span class="mono">docs/security/clawhub-whitelist.md</span>。1 Skill 1 エントリで以下を記録：</p>
+<ul>
+  <li>Skill 名・ClawHub URL・採用バージョン（コミットハッシュ）</li>
+  <li>5 軸スコア（点数 + コメント）</li>
+  <li>レビュー日付・一次／二次レビュアー署名</li>
+  <li>更新監視先（GitHub Release / Tag）</li>
+</ul>
+
+<h4>12.1.4 定期再レビュー（四半期）</h4>
+<p>承認済み Skill は <strong>四半期ごとに再レビュー</strong>。最新コミットを取得し、初回と同じ 5 軸で再スコア。新たに失格項目があれば <strong>ホワイトリストから除外</strong>し、本番から該当 Skill をアンロードする手順を Runbook に含める。S12（M6.25-M6.5）で初回再レビュー、以降 Q1/Q2/... と定例化。</p>
+
+<h3 id="sec-12-2"><span class="num">12.2</span>OpenClaw 本体の CVE 監視</h3>
+
+<p>OpenClaw 本体および主要依存ライブラリの脆弱性（CVE）を <strong>常時監視・速やかにパッチ適用</strong>する体制を整える。</p>
+
+<h4>12.2.1 監視ソース</h4>
+<ul>
+  <li><strong>GitHub Security Advisory 購読</strong>：OpenClaw リポジトリの Watch → Custom → Security alerts を全レビュアーが ON（Day 0 チェックリスト 4.2 で実施済み）</li>
+  <li><strong>依存ライブラリ scan</strong>：CI で <span class="mono">trivy fs .</span> と <span class="mono">snyk test</span> を毎 PR 実行。週次でフルスキャンも実施し結果を Slack <span class="mono">#sec-alerts</span> に流す</li>
+  <li><strong>NVD / OSS Index</strong>：依存ライブラリの CVE を補完的に確認</li>
+</ul>
+
+<h4>12.2.2 パッチ適用 SLA</h4>
+<table>
+  <thead><tr><th>深刻度</th><th>対応期限</th><th>運用</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Critical</strong>（RCE / 認証バイパス等）</td><td>24 時間以内</td><td>緊急パッチ適用。FDE + セキュリティ召集</td></tr>
+    <tr><td>High</td><td>72 時間以内</td><td>次回 Sprint の最優先タスクとして扱う</td></tr>
+    <tr><td>Medium</td><td>2 週間以内</td><td>通常 Sprint 内で対応</td></tr>
+    <tr><td>Low</td><td>1 ヶ月以内</td><td>四半期パッチで対応可</td></tr>
+  </tbody>
+</table>
+
+<h4>12.2.3 緊急時の Skill 切り離し手順</h4>
+<p>CVE が OpenClaw 本体 or ホワイトリスト Skill にあり、即時パッチが不可能な場合：<strong>該当 Skill のアンロード</strong> → <strong>OpenClaw 本体停止（必要なら）</strong> → <strong>Slack 通知（ユーザーへ機能制限のアナウンス）</strong> の 3 手順を Runbook に明記する（S13 障害対応訓練で確認）。</p>
+
+<h3 id="sec-12-3"><span class="num">12.3</span>マルウェア Skill 検出運用</h3>
+
+<div class="note warn">
+  <div class="label">2026/2 のマルウェア事件を踏まえた運用</div>
+  2026 年 2 月、ClawHub に <strong>マルウェア混入 Skill が 341 件</strong>登録されていた事件があった。本節はこの教訓を踏まえ、ホワイトリスト登録前および登録後の継続監視で <strong>挙動レベルの異常</strong>を検知する運用を定める。
+</div>
+
+<h4>12.3.1 ホワイトリスト登録前の挙動監査</h4>
+<ul>
+  <li><strong>静的解析</strong>：<span class="mono">bandit -r ./skill_dir</span> でセキュリティ脆弱パターン検出</li>
+  <li><strong>依存ライブラリ scan</strong>：依存ツリー化 + <span class="mono">trivy</span> 実行、不審な低 star のライブラリは要確認</li>
+  <li><strong>サンドボックス実行</strong>：ネット隔離コンテナで Skill を 30 分間試運転、<span class="mono">strace</span> でシステムコールを記録、想定外のファイル / ネットワーク操作がないか確認</li>
+  <li><strong>外部通信先のホワイトリスト化</strong>：Skill が呼ぶドメインを <span class="mono">docs/security/skill-egress.md</span> に列挙、未列挙のドメインへの通信は Firewall で遮断</li>
+</ul>
+
+<h4>12.3.2 本番のネットワーク監視</h4>
+<ul>
+  <li>VPC Flow Logs を CloudWatch に流し、Skill が <strong>egress ホワイトリスト外</strong>のドメインへ通信したら自動アラート</li>
+  <li>異常なバースト egress（短時間で大量データ送信）も検知ルールに含める</li>
+  <li>アラート発火時の対応：該当 Skill を即時アンロード → 12.2.3 と同じ Runbook へ合流</li>
+</ul>
+
+<h4>12.3.3 Skill インストールの監査ログ</h4>
+<p>Skill の register / unregister / version change は <strong>必ず</strong> <span class="mono">audit_log</span> テーブルに記録（actor / target / version / approver）。四半期再レビューで差分を確認。</p>
+
+<h3 id="sec-12-4"><span class="num">12.4</span>Anthropic 政策変動への耐性</h3>
+
+<p>2026 年に Anthropic が <strong>third-party 経由の利用に関する規約変更</strong>を発表する可能性があるが、TeamAgent は以下の理由で<strong>直接の影響を受けない</strong>。</p>
+
+<div class="note">
+  <div class="label">影響外である根拠</div>
+  TeamAgent は <strong>Bedrock 経由で Claude を呼び出す</strong>。これは AWS との契約に基づくサービス提供であり、Anthropic の third-party 利用規約の対象外。Anthropic 側で規約変更があっても、Bedrock 側の SLA・規約に従う構造であるため、当面の運用には影響しない。
+</div>
+
+<h4>12.4.1 念のための代替経路（dual provider 設定）</h4>
+<p>万一 Bedrock 側で何らかの障害・契約変動があった場合に備え、以下の代替経路を <strong>手順書として整備</strong>する（MVA-12 で運用化レベルを決定）：</p>
+<ul>
+  <li><strong>主経路</strong>：Bedrock 経由 Claude Sonnet 4.6（現行）</li>
+  <li><strong>副経路 A</strong>：Anthropic 直接 API（API キー発行手順 + OpenClaw 設定切替手順を Runbook 化）</li>
+  <li><strong>副経路 B</strong>：Vertex AI 経由 Claude（Google Cloud 側で別契約・要事前申請）</li>
+</ul>
+
+<h4>12.4.2 切替訓練</h4>
+<p>S13 の障害対応訓練で、主経路停止 → 副経路 A への切替を <strong>1 時間以内に完了</strong>できることを実演で確認する。年 2 回（半期ごと）の定期訓練でメンテナンス。</p>
+
+<h3 id="sec-12-5"><span class="num">12.5</span>アクセス制御（IAM Role + Tier 0-3）</h3>
+
+<p>v3.0 で定義した Tier 0-3 構造を本書で再掲し、<strong>IAM Role による Skill ごとの権限分離</strong>を運用ルールとして明文化する。</p>
+
+<h4>12.5.1 Tier 構造</h4>
+<table>
+  <thead><tr><th>Tier</th><th>名称</th><th>権限範囲</th><th>該当 Skill</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>Tier 0</strong></td><td>読み取り限定（本人データ）</td>
+      <td>pgvector 検索 + 本人の Mail/Drive/Slack 読み取り</td>
+      <td>検索 Skill（MVA）</td>
+    </tr>
+    <tr>
+      <td><strong>Tier 1</strong></td><td>書き込み（本人ドラフト）</td>
+      <td>Tier 0 + Gmail 下書き作成 / Slack ドラフト送信</td>
+      <td>Mail 起案 Skill（S7）</td>
+    </tr>
+    <tr>
+      <td><strong>Tier 2</strong></td><td>他人参照（同チーム）</td>
+      <td>Tier 1 + 同チームの集計データ参照（チーム ID で制御）</td>
+      <td>営業進捗まとめ Skill（S8）</td>
+    </tr>
+    <tr>
+      <td><strong>Tier 3</strong></td><td>外部出力 / 公開系</td>
+      <td>Tier 2 + PPTX 生成 / 顧客向けメール送信（要承認）</td>
+      <td>提案資料 Skill（S9）</td>
+    </tr>
+  </tbody>
+</table>
+
+<h4>12.5.2 IAM Role ごとの実装</h4>
+<ul>
+  <li>各 Skill は OpenClaw 設定で <span class="mono">required_tier: 0|1|2|3</span> を宣言</li>
+  <li>OpenClaw が Skill 起動時に AWS STS で対応 IAM Role を AssumeRole し、その権限で実行</li>
+  <li>Tier 0 の IAM Role は S3 への書き込み・SES 送信を持たない（最小権限の徹底）</li>
+  <li>Tier ごとの IAM Policy は Terraform で管理し、レビュー必須化</li>
+</ul>
+
+<h4>12.5.3 ユーザー権限のマッピング</h4>
+<p>ユーザー単位の許可 Tier は <span class="mono">permissions</span> テーブルに保持。デフォルトは Tier 0、Tier 1 以上は申請ベースで承認制。S12（M6.25-M6.5）でこの切替を本番化する。</p>
+
+<h3 id="sec-12-6"><span class="num">12.6</span>リスク台帳 R16-R19（v1.1 追加）</h3>
+
+<table>
+  <thead><tr><th>#</th><th>リスク</th><th>影響</th><th>対応策</th><th>関連節</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>R16</strong></td>
+      <td>OpenClaw 本体の脆弱性（CVE）</td>
+      <td>RCE・認証バイパス等により全社利用停止 / データ漏洩</td>
+      <td>GitHub Security Advisory 購読、Trivy / Snyk による依存スキャン、Critical は 24h 以内パッチ適用 SLA、緊急時 Skill 切り離し Runbook（12.2 節）</td>
+      <td>§ 12.2</td>
+    </tr>
+    <tr>
+      <td><strong>R17</strong></td>
+      <td>ClawHub Skill のマルウェア混入</td>
+      <td>外部への情報送信・ランサム化・Skill から横展開した侵入</td>
+      <td>ホワイトリスト運用、登録前サンドボックス挙動監査、egress ホワイトリスト + VPC Flow Logs 監視（12.1 / 12.3 節）</td>
+      <td>§ 12.1, § 12.3</td>
+    </tr>
+    <tr>
+      <td><strong>R18</strong></td>
+      <td>OpenClaw 創業者 OpenAI 移籍後のプロジェクト健全性低下</td>
+      <td>更新停止・コミュニティ縮小・移行コスト発生</td>
+      <td>四半期再レビューでコミッター活動度・財団運営をウォッチ、活動度低下時は migration plan（Anthropic 純正 SDK 単独構成への逆移行）を準備</td>
+      <td>§ 12.1.4</td>
+    </tr>
+    <tr>
+      <td><strong>R19</strong></td>
+      <td>Anthropic 政策変動による third-party 制限</td>
+      <td>規約変更により Anthropic 直接 API 経由の利用が制限される</td>
+      <td><strong>Bedrock 直接接続のため影響外</strong>（12.4 節）。念のため副経路 A（Anthropic 直接 API）/ B（Vertex AI）の手順書を整備、S13 訓練で切替時間 ≤ 1h を確認</td>
+      <td>§ 12.4</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <div class="label">既存リスク R1-R15 との関係</div>
+  R1-R15 は構想・概要書 v3.0 / 実装計画書 v3.0 に記載のリスク（データ漏洩 / 精度不足 / 過剰サジェスト等）を継承する。R16-R19 は v1.1 で <strong>OpenClaw 採用に固有のリスク</strong>として新規追加した 4 項目である。すべてのリスクは Sprint レトロでステータス更新する。
+</div>
+
+</main>
+</div>
+
+</body>
+</html>

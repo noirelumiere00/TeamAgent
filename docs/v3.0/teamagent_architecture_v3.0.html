@@ -1,0 +1,2609 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent アーキテクチャ図書 v3.0</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>アーキテクチャ図書</div>
+  <div class="sidebar-doc-meta">
+    Version 3.0<br>
+    2026年5月19日
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>本書について</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>目的・対象読者</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>v2.2 からの主要変更</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>用語</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-2"><span class="num">2.</span>概念アーキテクチャ</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>概念図：User からデータまで</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>5 要素の技術定義</a></li>
+    <li class="level-2"><a href="#sec-2-3"><span class="num">2.3</span>Agent SDK 4 構成要素</a></li>
+
+    <li class="level-1"><a href="#sec-3"><span class="num">3.</span>C4 — 文脈</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>システムコンテキスト図</a></li>
+
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>C4 — コンテナ</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>コンテナ図</a></li>
+
+    <li class="level-1"><a href="#sec-5"><span class="num">5.</span>C4 — コンポーネント</a></li>
+    <li class="level-2"><a href="#sec-5-1"><span class="num">5.1</span>Agent SDK コンポーネント</a></li>
+    <li class="level-2"><a href="#sec-5-2"><span class="num">5.2</span>Connector コンポーネント</a></li>
+    <li class="level-2"><a href="#sec-5-3"><span class="num">5.3</span>Skill コンポーネント</a></li>
+
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>データアーキテクチャ</a></li>
+    <li class="level-2"><a href="#sec-6-1"><span class="num">6.1</span>6 データ層</a></li>
+    <li class="level-2"><a href="#sec-6-2"><span class="num">6.2</span>pgvector スキーマ</a></li>
+    <li class="level-2"><a href="#sec-6-3"><span class="num">6.3</span>取り込みパイプライン</a></li>
+    <li class="level-2"><a href="#sec-6-4"><span class="num">6.4</span>増分同期</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-7"><span class="num">7.</span>Agent SDK アーキ</a></li>
+    <li class="level-2"><a href="#sec-7-1"><span class="num">7.1</span>SDK のループ構造</a></li>
+    <li class="level-2"><a href="#sec-7-2"><span class="num">7.2</span>Tool 呼び出しの流れ</a></li>
+    <li class="level-2"><a href="#sec-7-3"><span class="num">7.3</span>Memory/Session の保持</a></li>
+    <li class="level-2"><a href="#sec-7-4"><span class="num">7.4</span>Multi-step reasoning</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-8"><span class="num">8.</span>Skill Registry アーキ</a></li>
+    <li class="level-2"><a href="#sec-8-1"><span class="num">8.1</span>Skill インターフェース</a></li>
+    <li class="level-2"><a href="#sec-8-2"><span class="num">8.2</span>Skill Registry の動作</a></li>
+    <li class="level-2"><a href="#sec-8-3"><span class="num">8.3</span>Initial Skill Set（5 個）詳細</a></li>
+    <li class="level-2"><a href="#sec-8-4"><span class="num">8.4</span>拡張ポイント：新規 Skill 追加フロー</a></li>
+    <li class="level-2"><a href="#sec-8-5"><span class="num">8.5</span>Skill interface 疑似コード例</a></li>
+
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>Tools / MCP 接続</a></li>
+    <li class="level-2"><a href="#sec-9-1"><span class="num">9.1</span>内部 Tool</a></li>
+    <li class="level-2"><a href="#sec-9-2"><span class="num">9.2</span>外部 MCP</a></li>
+    <li class="level-2"><a href="#sec-9-3"><span class="num">9.3</span>MCP 認証フロー</a></li>
+    <li class="level-2"><a href="#sec-9-4"><span class="num">9.4</span>エラーハンドリング</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-10"><span class="num">10.</span>HTML 出力 & WYSIWYG</a></li>
+    <li class="level-2"><a href="#sec-10-1"><span class="num">10.1</span>HTML テンプレ仕様</a></li>
+    <li class="level-2"><a href="#sec-10-2"><span class="num">10.2</span>HTML → PDF</a></li>
+    <li class="level-2"><a href="#sec-10-3"><span class="num">10.3</span>HTML → PPTX</a></li>
+    <li class="level-2"><a href="#sec-10-4"><span class="num">10.4</span>WYSIWYG エディタ</a></li>
+    <li class="level-2"><a href="#sec-10-5"><span class="num">10.5</span>Drive 保存と Slack 返却</a></li>
+
+    <li class="level-1"><a href="#sec-11"><span class="num">11.</span>Permissions / Guardrails</a></li>
+    <li class="level-2"><a href="#sec-11-1"><span class="num">11.1</span>OAuth トークン管理</a></li>
+    <li class="level-2"><a href="#sec-11-2"><span class="num">11.2</span>Tier 0-3 アクセス制御</a></li>
+    <li class="level-2"><a href="#sec-11-3"><span class="num">11.3</span>PII マスク</a></li>
+    <li class="level-2"><a href="#sec-11-4"><span class="num">11.4</span>監査ログ</a></li>
+    <li class="level-2"><a href="#sec-11-5"><span class="num">11.5</span>薬機法/景表法/ステマ規制</a></li>
+
+    <li class="level-1"><a href="#sec-12"><span class="num">12.</span>インフラ</a></li>
+    <li class="level-2"><a href="#sec-12-1"><span class="num">12.1</span>AWS 構成</a></li>
+    <li class="level-2"><a href="#sec-12-2"><span class="num">12.2</span>Mac mini 構成</a></li>
+    <li class="level-2"><a href="#sec-12-3"><span class="num">12.3</span>Terraform 構成方針</a></li>
+    <li class="level-2"><a href="#sec-12-4"><span class="num">12.4</span>ローカル開発環境</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">アーキテクチャ図書 v3.0</div>
+  <h1>TeamAgent アーキテクチャ図書 v3.0<br>Claude Agent SDK 単独構成 / Skill Registry アーキテクチャ</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>アーキテクチャ設計文書（C4 model 準拠）</td></tr>
+    <tr><td>バージョン</td><td>3.0（OpenClaw 除去 / Claude Agent SDK 単独構成 / Skill Registry + Plugin パターン化 / Skills・Tools・Memory・Guardrails 4 層化 / HTML→PDF・PPTX 変換層追加 / WYSIWYG エディタ追加）</td></tr>
+    <tr><td>作成日</td><td>2026年5月19日（v2.2：2026年5月13日 / v2.1：2026年5月8日 / v2.0：2026年5月7日）</td></tr>
+    <tr><td>位置付け</td><td>v2.2 を全面改訂。OpenClaw を完全に削除し Claude Agent SDK 単独で再構成。User → Frontend → Agent SDK → Data Layer の 4 層を技術アーキとして固定。Skills / Tools / Memory / Guardrails の 4 層を独立コンポーネントとして詳細化し、Skill は <strong>Skill Registry に登録される Plugin</strong> として疎結合化。HTML→PDF/PPTX 変換層・WYSIWYG エディタを新規追加。</td></tr>
+    <tr><td>関連文書</td><td>構想・概要書（teamagent_overview_v3.0.html）／ 要件定義書（teamagent_requirements_v3.0.html）／ 実装計画書（teamagent_implementation_plan_v3.0.html）／ MVA 仕様書（teamagent_mva_spec_v1.html）／ 機能④ 確定仕様書（teamagent_kinou4_spec_v1.html）</td></tr>
+    <tr><td>改訂履歴</td><td>v3.0 改訂 / 2026-05-19 / 料理メタファを技術書表現に置換（Head Chef→Orchestrator 等）。Skill Registry / Plugin パターンを正式アーキとして明示、Skill interface 仕様を追加。「5機能固定」を「Initial Skill Set」と再定義。</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">TeamAgent Architecture v3.0</div>
+  <div class="hero-headline">Skill Registry / Plugin パターンで構成する AI Agent 基盤<br>Claude Agent SDK 単独構成のアーキテクチャ図書</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">12<small>章</small></div>
+      <div class="hero-stat-label">C4 model + Skill Registry + Skills / Tools / Memory / Guardrails 4 層</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">5<small>Initial Skill</small></div>
+      <div class="hero-stat-label">Skill Registry に最初に登録される Initial Skill Set（拡張可能）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">4<small>層</small></div>
+      <div class="hero-stat-label">Skills / Tools・MCP / Memory・Session / Permissions・Guardrails</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">6<small>データ層</small></div>
+      <div class="hero-stat-label">Mail / Slack / Drive / 動画 / Gemini DR / X</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">14<small>図解</small></div>
+      <div class="hero-stat-label">arch-diagram によるフロー・コンテナ・データ図</div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================== -->
+<!-- 第1章 -->
+<!-- ====================================================== -->
+<section id="sec-1">
+<h2><span class="sec-num">1</span>本書について</h2>
+
+<h3 id="sec-1-1"><span class="sec-num">1.1</span>目的・対象読者</h3>
+<p>本書は TeamAgent v3.0 のシステムアーキテクチャを <strong>C4 model（Context / Container / Component）</strong> と <strong>Skill Registry / Plugin パターン</strong> の両軸で定義する技術設計文書である。実装計画書・要件定義書・MVA 仕様書の前提となる「どのコンポーネントがどう繋がるか」を一意に固定することを目的とする。</p>
+<table>
+  <thead><tr><th style="width: 18%;">読者</th><th>主たる利用箇所</th></tr></thead>
+  <tbody>
+    <tr><td>開発リード</td><td>第 4〜9 章（コンテナ／コンポーネント／Agent SDK／Skills／Tools）</td></tr>
+    <tr><td>インフラ担当</td><td>第 12 章（AWS / Terraform / Docker Compose）</td></tr>
+    <tr><td>セキュリティ／監査役</td><td>第 11 章（Permissions / Guardrails）</td></tr>
+    <tr><td>営業現場・上長</td><td>第 2 章のみ（概念アーキテクチャ。技術詳細は省略可）</td></tr>
+    <tr><td>外部ベンダー</td><td>第 9 章（MCP 接続層・認証）</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-1-2"><span class="sec-num">1.2</span>v2.2 からの主要変更</h3>
+<table>
+  <thead><tr><th style="width: 25%;">領域</th><th>v2.2 まで</th><th>v3.0</th></tr></thead>
+  <tbody>
+    <tr><td>Agent ランタイム</td><td>OpenClaw を中核に据えた構成案を併記</td><td><strong>OpenClaw 関連設計を全面削除。Claude Agent SDK 単独構成</strong></td></tr>
+    <tr><td>概念モデル</td><td>「Slack + 4 共通基盤 + 6 データ層」の素朴3層</td><td><strong>User / Frontend / Agent SDK (Orchestrator) / Data Layer</strong> の 4 層を概念層として導入</td></tr>
+    <tr><td>Skills</td><td>機能 ①〜⑤ という呼称のみ、コードレベルの抽象化なし</td><td><strong>Skill Registry + Plugin パターン化</strong>。Initial Skill Set（5 個）が独立 Python パッケージとして疎結合。新規 Skill は core 改修なしで追加可能</td></tr>
+    <tr><td>Tools</td><td>暗黙的に Claude SDK に内包</td><td><strong>内部 Tool と外部 MCP を明確分離</strong>。MCP サーバー認証フローを独立設計</td></tr>
+    <tr><td>Memory</td><td>RDS にスレッド ID で保存（言及のみ）</td><td><strong>スレッド単位 / 案件単位 / ユーザー単位の 3 階層</strong>を技術設計化</td></tr>
+    <tr><td>Guardrails</td><td>OAuth + 監査ログ程度</td><td><strong>Permissions / Guardrails を 1 章割り当て</strong>。薬機法・景表法・ステマ規制チェッカーを含む</td></tr>
+    <tr><td>出力</td><td>MD / HTML 生成のみ言及</td><td><strong>HTML → PDF（Playwright）／PPTX（python-pptx）変換層を新章</strong>。WYSIWYG エディタ設計も追加</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-1-3"><span class="sec-num">1.3</span>用語</h3>
+<table>
+  <thead><tr><th style="width: 22%;">用語</th><th>本書での意味</th></tr></thead>
+  <tbody>
+    <tr><td>Claude Agent SDK</td><td>Anthropic 公式の Python SDK。ループ制御・Tool 呼び出し・Memory を提供する Agent ランタイム。本書では「Agent SDK」と略。</td></tr>
+    <tr><td>Skill Registry</td><td>Skill を Plugin として登録・検索・起動するレジストリ。Orchestrator（Reasoning Loop）から動的選択される。新規 Skill 追加は Registry への登録だけで完結し、core 改修は不要。</td></tr>
+    <tr><td>Skill</td><td>独立した Python パッケージ（Plugin）として実装される処理単位。共通の Skill interface（name / description / input_schema / output_schema / required_tier / run）を実装する。本書では Initial Skill Set として 5 個（Slack サジェスト / Mail / 提案生成 / 動画分析 / 進捗サマリー）を初期登録。</td></tr>
+    <tr><td>Initial Skill Set</td><td>Skill Registry に最初に登録される 5 個の Skill。製品仕様上の固定数ではなく、Phase に応じて追加・差し替え可能。</td></tr>
+    <tr><td>Tool / MCP</td><td>Agent SDK が呼び出す外部機能。内部 Tool（pgvector・Gmail）と外部 MCP（Gemini DR・dpro 等）に分かれる。</td></tr>
+    <tr><td>Memory / Session</td><td>会話履歴・案件情報・ユーザー嗜好を保持する 3 階層のストア。</td></tr>
+    <tr><td>Guardrails</td><td>OAuth・PII マスク・Tier 制御・法令チェッカーの総称。</td></tr>
+    <tr><td>Tier 0-3</td><td>データ参照権限の 4 段階。0=本人のみ／1=案件担当／2=チーム／3=全社。</td></tr>
+    <tr><td>MVA</td><td>Minimum Viable Architecture。社内検証用の最小実用構成。詳細は別冊。</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第2章 -->
+<!-- ====================================================== -->
+<section id="sec-2">
+<h2><span class="sec-num">2</span>概念アーキテクチャ — User からデータまでの 4 層</h2>
+<p>v3.0 で最も重要な章。「AI Agent とは何か」を営業現場・上長・監査役が同じ言葉で語れるよう、User / Frontend / Agent SDK (Orchestrator) / Data Layer の 4 層モデルで定義する。</p>
+
+<h3 id="sec-2-1"><span class="sec-num">2.1</span>概念図 — User から Data Layer まで</h3>
+<div class="arch-diagram">
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  概念アーキテクチャ：4 層モデル                                                 │
+│                                                                                 │
+│   [User]                [Frontend]                  [Agent SDK / Orchestrator]  │
+│   ┌─────────┐  request   ┌──────────────┐  invoke   ┌────────────────────┐     │
+│   │ 営業16名 │ ────────▶ │ Slack Bolt   │ ────────▶ │  Reasoning Loop    │     │
+│   │ + Mgr   │            │ (Frontend)   │           │  + Skill Registry  │     │
+│   └─────────┘            │              │           │  + Tools / MCP     │     │
+│        ▲                 └──────────────┘           │  + Memory          │     │
+│        │ response                                   │  + Guardrails      │     │
+│        │                                            └────────┬───────────┘     │
+│        │                                                     │ query / fetch   │
+│        │                                                     ▼                 │
+│        │              [Data Layer]                                             │
+│        │              ┌──────────────────────────────────────────┐             │
+│        └──────────────┤ pgvector + Mail/Slack/Drive/動画/DR/X    │             │
+│                       └──────────────────────────────────────────┘             │
+└─────────────────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 2.1</span>4 層概念図。User（営業）が Slack（Frontend）にリクエスト → Agent SDK（Orchestrator）が Skill Registry から最適 Skill を選択し、Tools / Memory を呼び出して処理 → 結果を Slack で返す。Guardrails は Agent SDK 全体に常時適用。</p>
+
+<h3 id="sec-2-2"><span class="sec-num">2.2</span>5 要素の技術定義</h3>
+<table>
+  <thead><tr><th>層 / 要素</th><th>役割</th><th>技術コンポーネント</th><th>実装</th></tr></thead>
+  <tbody>
+    <tr><td><strong>User / Client</strong></td><td>リクエスト発行</td><td>営業16名 + マネージャー</td><td>Slack ユーザー（16+1 アカウント）</td></tr>
+    <tr><td><strong>Frontend</strong></td><td>イベント受信・応答配信</td><td>フロントエンド</td><td>Slack Bolt（Python）＋ slash command / @mention / event_subscriptions</td></tr>
+    <tr><td><strong>Orchestrator + Runtime</strong></td><td>Reasoning Loop・Skill 実行・Tool 呼び出し</td><td>Agent ランタイム</td><td>Claude Agent SDK（ECS Fargate 上）</td></tr>
+    <tr><td><strong>Data Layer</strong></td><td>データソース統合</td><td>データ層</td><td>pgvector（RDS PostgreSQL）+ Gmail / Drive / Slack / 動画 / Gemini DR / X コネクタ群</td></tr>
+    <tr><td><strong>Output Channels</strong></td><td>成果物配信</td><td>出力チャネル</td><td>Slack DM / 案件チャンネル + Google Drive（PDF/PPTX）</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-2-3"><span class="sec-num">2.3</span>Agent SDK の 4 構成要素 — 技術コンポーネントとしての独立化</h3>
+<div class="arch-diagram">
+┌──── Claude Agent SDK 内部の 4 層 ────────────────────────────────────────────┐
+│                                                                              │
+│   ① Skills        │ Skill Registry  │ Python パッケージ群（Plugin として登録）│
+│   ─────────────────┼─────────────────┼──────────────────────────────────────  │
+│   ② Tools / MCP   │ Tools Layer     │ 内部 Tool + 外部 MCP サーバー           │
+│   ─────────────────┼─────────────────┼──────────────────────────────────────  │
+│   ③ Memory/Session│ Session Storage │ スレッド / 案件 / ユーザー の 3 階層    │
+│   ─────────────────┼─────────────────┼──────────────────────────────────────  │
+│   ④ Guardrails    │ Permissions Layer│ OAuth + Tier + PII + 法令チェッカー    │
+└──────────────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 2.3</span>v3.0 で独立した 4 層。v2.2 までは Agent SDK の中で混在していたが、v3.0 では各層を独立コンポーネントとして章割り当て（第 8 / 9 / 7 / 11 章）。Skills 層は Skill Registry によって Plugin パターンで拡張可能。</p>
+<p>この 4 層分離は「営業現場が変更要求を出したときに、どの層に影響するか」を即答できる設計上のメリットを生む。たとえば「Slack のサジェスト条件を変える」は <strong>Skills 層</strong>（該当 Skill Plugin のみ）、「Buzzmiru の認証方式が変わる」は <strong>Tools 層</strong>、「過去スレッドを跨いだ要約が欲しい」は <strong>Memory 層</strong>、「個人情報を伏せたい」は <strong>Guardrails 層</strong>。新規 Skill 追加は core を触らず Registry 登録のみで完結する。</p>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第3章 -->
+<!-- ====================================================== -->
+<section id="sec-3">
+<h2><span class="sec-num">3</span>C4 Model — 文脈（Context）</h2>
+
+<h3 id="sec-3-1"><span class="sec-num">3.1</span>システムコンテキスト図</h3>
+<div class="arch-diagram">
+                          ┌──────────────────────┐
+                          │  Anthropic Bedrock   │
+                          │  Claude Sonnet/Opus  │
+                          └─────────▲────────────┘
+                                    │ HTTPS
+                                    │
+   ┌──────────────┐            ┌────┴───────────┐              ┌──────────────────┐
+   │ 営業 16名     │  Slack    │                │   OAuth      │ Google Workspace │
+   │ + マネージャー│ ────────▶ │   TeamAgent    │ ───────────▶ │ Gmail / Drive    │
+   └──────────────┘            │   システム     │              └──────────────────┘
+          ▲                    │                │                       
+          │ 完成物              │  (本書範囲)    │              ┌──────────────────┐
+          │ DM / チャンネル     │                │ ◀──────────  │ Slack Workspace  │
+          │                    │                │   イベント   │ events / oauth   │
+   ┌──────┴──────┐            │                │              └──────────────────┘
+   │ Slack       │            │                │              
+   │ Workspace   │ ◀────────  │                │ ──────────▶  ┌──────────────────┐
+   └─────────────┘   応答      │                │   HTTPS      │ 外部 SaaS         │
+                              │                │              │ Gemini DR / dpro │
+                              │                │              │ Buzzmiru / X     │
+                              └────────────────┘              └──────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 3.1</span>システムコンテキスト図。中央の TeamAgent システムが本書範囲。Anthropic Bedrock（LLM）／Google Workspace（Mail/Drive）／Slack Workspace（イベント受信・応答）／外部 SaaS 群（Gemini DR・dpro・Buzzmiru・X）の 4 外部依存。</p>
+
+<table>
+  <thead><tr><th>外部システム</th><th>方向</th><th>用途</th><th>接続方式</th></tr></thead>
+  <tbody>
+    <tr><td>Anthropic Bedrock</td><td>→（送信）</td><td>LLM 推論（Sonnet / Opus）</td><td>AWS Bedrock SDK（同一リージョン内）</td></tr>
+    <tr><td>Google Workspace</td><td>↔（双方向）</td><td>Gmail 検索／Drive 保存</td><td>OAuth 2.0 + REST API</td></tr>
+    <tr><td>Slack Workspace</td><td>↔（双方向）</td><td>イベント受信／応答送信／slash command</td><td>Slack Bolt（events_api + interactivity）</td></tr>
+    <tr><td>Gemini Deep Research</td><td>→</td><td>テーマ別深掘りリサーチ</td><td>MCP サーバー（Phase 4 以降）</td></tr>
+    <tr><td>dpro</td><td>→</td><td>動画分析データ取得</td><td>MCP サーバー</td></tr>
+    <tr><td>Buzzmiru</td><td>→</td><td>動画パフォーマンス分析</td><td>MCP サーバー</td></tr>
+    <tr><td>X (Twitter)</td><td>→</td><td>SNS シグナル収集</td><td>X API（補助層）</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第4章 -->
+<!-- ====================================================== -->
+<section id="sec-4">
+<h2><span class="sec-num">4</span>C4 Model — コンテナ（Container）</h2>
+
+<h3 id="sec-4-1"><span class="sec-num">4.1</span>コンテナ図</h3>
+<div class="arch-diagram">
+┌────────────────────────── TeamAgent システム境界 (AWS Tokyo) ──────────────────────────┐
+│                                                                                        │
+│  ┌─────────────────────┐          ┌─────────────────────────────┐                      │
+│  │ Slack Bolt          │  内部 RPC │ Claude Agent SDK Host       │   AWS SDK            │
+│  │ (Frontend)          │ ───────▶ │ (ECS Fargate, Python 3.12)  │ ─────▶ Bedrock        │
+│  │ ECS Fargate         │          │ - Reasoning Loop            │                      │
+│  │ events / slash / int│ ◀─────── │ - Tool 呼び出し             │                      │
+│  └─────────────────────┘          │ - Skill Registry (Plugin)   │                      │
+│           │                       └──┬──────────┬─────────────┬─┘                      │
+│           │ 監査ログ                  │ SQL     │ HTTPS       │ HTTPS                  │
+│           ▼                          ▼          ▼             ▼                        │
+│  ┌─────────────────────┐  ┌──────────────────┐  ┌──────────────────┐                  │
+│  │ CloudWatch Logs     │  │ pgvector (RDS    │  │ Connector        │                  │
+│  │ + Metrics + Alarms  │  │ PostgreSQL 16)   │  │ Workers (Lambda) │ ──▶ Gmail/Drive/  │
+│  └─────────────────────┘  │ + メタデータ      │  │ ・取り込み        │     Slack/dpro等  │
+│                           └──────────────────┘  │ ・増分同期        │                  │
+│  ┌─────────────────────┐                       └──────────────────┘                  │
+│  │ HTML→PDF/PPTX       │ ◀── 生成依頼                                                │
+│  │ Renderer (Lambda)   │                       ┌──────────────────┐                  │
+│  │ Playwright/         │ ── PDF/PPTX 完成 ──▶  │ Google Drive     │                  │
+│  │ python-pptx         │                       │ (出力保存先)      │                  │
+│  └─────────────────────┘                       └──────────────────┘                  │
+│           │                                                                            │
+│           ▼                                                                            │
+│  ┌─────────────────────┐                       ┌──────────────────┐                  │
+│  │ 編集 UI Web         │ ◀── WYSIWYG ──▶       │ Secrets Manager  │ ◀── 全コンテナ    │
+│  │ (Next.js / Vercel)  │                       │ OAuth/API token  │                  │
+│  └─────────────────────┘                       └──────────────────┘                  │
+│                                                                                        │
+│  ┌─────────────────────┐                                                              │
+│  │ Web 検索ゲートウェイ │ ──▶ Tavily / Brave / Bing (外部 LLM 検索 API)               │
+│  │ (Lambda)            │                                                              │
+│  └─────────────────────┘                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 4.1</span>コンテナ図。9 コンテナ構成：Slack Bolt / Agent SDK Host / pgvector / Connector Workers / HTML→PDF・PPTX Renderer / 編集 UI Web / Secrets Manager / CloudWatch / Web 検索ゲートウェイ。</p>
+
+<table>
+  <thead><tr><th>コンテナ</th><th>役割</th><th>技術 / サービス</th><th>スケール</th></tr></thead>
+  <tbody>
+    <tr><td>Slack Bolt</td><td>イベント受信・応答送信</td><td>Python Bolt + ECS Fargate（最小 1 / 通常 2 タスク）</td><td>水平</td></tr>
+    <tr><td>Agent SDK Host</td><td>LLM ループ・Tool 呼び出し・Skill 実行</td><td>Claude Agent SDK + ECS Fargate（2 〜 4 タスク）</td><td>水平</td></tr>
+    <tr><td>pgvector</td><td>埋め込み・メタデータ保存</td><td>RDS PostgreSQL 16 + pgvector 拡張（db.t4g.medium）</td><td>垂直 + RR</td></tr>
+    <tr><td>Connector Workers</td><td>外部 API 取り込み・増分同期</td><td>Lambda（メモリ 1024MB）× 6 関数（Mail/Slack/Drive/動画/DR/X）</td><td>並列起動</td></tr>
+    <tr><td>HTML→PDF/PPTX Renderer</td><td>HTML を PDF・PPTX に変換</td><td>Lambda コンテナイメージ + Playwright + python-pptx</td><td>同時実行 5</td></tr>
+    <tr><td>編集 UI Web</td><td>WYSIWYG 編集画面</td><td>Next.js + Vercel（Phase 4 以降）</td><td>Vercel 自動</td></tr>
+    <tr><td>Secrets Manager</td><td>OAuth トークン・API キー保管</td><td>AWS Secrets Manager（KMS 暗号化）</td><td>管理サービス</td></tr>
+    <tr><td>CloudWatch</td><td>ログ・メトリクス・アラーム</td><td>CloudWatch Logs / Metrics / Alarms</td><td>管理サービス</td></tr>
+    <tr><td>Web 検索ゲートウェイ</td><td>LLM 用 Web 検索 API のラッパ</td><td>Lambda（Tavily / Brave / Bing いずれか）</td><td>同時実行 10</td></tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ====================================================== -->
+<!-- 第5章 -->
+<!-- ====================================================== -->
+<section id="sec-5">
+<h2><span class="sec-num">5</span>C4 Model — コンポーネント（Component）</h2>
+
+<h3 id="sec-5-1"><span class="sec-num">5.1</span>Agent SDK コンポーネント図</h3>
+<div class="arch-diagram">
+┌─── Claude Agent SDK Host (ECS Fargate コンテナ) ─────────────────────────────┐
+│                                                                              │
+│   ┌──────────────┐    ┌──────────────────┐    ┌──────────────────────┐       │
+│   │ Slack入口    │──▶│ Reasoning Loop    │──▶│ Skill Registry        │       │
+│   │ ハンドラ     │   │ (Orchestrator)    │   │ (Plugin 動的選択)     │       │
+│   └──────────────┘   └────────┬─────────┘   └──────┬───────────────┘       │
+│                               │                    │                         │
+│                       ┌───────▼─────────┐  ┌──────▼───────────┐             │
+│                       │ 推論モジュール   │  │ Tool 呼び出し    │             │
+│                       │ (Bedrock Claude)│  │ ディスパッチャ    │             │
+│                       └───────┬─────────┘  └──────┬───────────┘             │
+│                               │                    │                         │
+│                       ┌───────▼─────────────────────▼───────┐                │
+│                       │  結果統合 + Memory 更新              │                │
+│                       │  (会話履歴 / 案件 / ユーザー)        │                │
+│                       └─────────────┬─────────────────────────┘              │
+│                                     │                                        │
+│                       ┌─────────────▼───────┐                                │
+│                       │ Guardrails ゲート    │── 違反時は中断                │
+│                       │ (Tier / PII / 法令) │                                │
+│                       └─────────────┬───────┘                                │
+└─────────────────────────────────────┼────────────────────────────────────────┘
+                                      ▼ Slack へ応答
+</div>
+<p class="caption"><span class="fig-num">図 5.1</span>Agent SDK 内部コンポーネント図。Slack 入口 → Reasoning Loop（Orchestrator）→ Skill Registry による動的 Skill 選択 → 推論 + Tool 呼び出し → 結果統合 → Guardrails ゲート の 6 段。Guardrails ゲートは応答送信直前に必ず通る。</p>
+
+<h3 id="sec-5-2"><span class="sec-num">5.2</span>Connector コンポーネント図</h3>
+<div class="arch-diagram">
+┌─── Connector Workers (Lambda × 6) ──────────────────────────────────────┐
+│                                                                          │
+│   ┌─────────────┐ ┌─────────────┐ ┌─────────────┐                      │
+│   │ Gmail       │ │ Slack       │ │ Drive       │                      │
+│   │ Connector   │ │ Connector   │ │ Connector   │                      │
+│   │ ・OAuth更新 │ │ ・events    │ │ ・watch API │                      │
+│   │ ・history   │ │ ・past msg  │ │ ・file change│                      │
+│   │ ・PII マスク│ │ ・channel   │ │ ・PDF抽出   │                      │
+│   └──────┬──────┘ └──────┬──────┘ └──────┬──────┘                      │
+│          │               │                │                              │
+│          └───────────────┴────────────────┘                              │
+│                          │                                               │
+│                          ▼ 共通インターフェース                          │
+│                ┌──────────────────────┐                                  │
+│                │ Embedding 生成        │ ──▶ Bedrock Titan / Cohere     │
+│                │ (Titan Embed v2)      │                                 │
+│                └──────────┬───────────┘                                  │
+│                           │                                              │
+│                           ▼                                              │
+│                ┌──────────────────────┐                                  │
+│                │ pgvector 投入         │                                 │
+│                │ + Tier タグ付与       │                                 │
+│                └──────────────────────┘                                  │
+│                                                                          │
+│   ┌─────────────┐ ┌─────────────┐ ┌─────────────┐                      │
+│   │ dpro        │ │ Buzzmiru    │ │ Gemini DR   │ ── (MCP 経由でも可)  │
+│   │ Connector   │ │ Connector   │ │ Connector   │                      │
+│   └─────────────┘ └─────────────┘ └─────────────┘                      │
+└──────────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 5.2</span>Connector コンポーネント図。6 Connector が共通インターフェースを持ち、すべての出力は Embedding 生成 → pgvector 投入の同一パイプを通る。dpro / Buzzmiru / Gemini DR は MCP 経由でも代替可能（第 9 章）。</p>
+
+<h3 id="sec-5-3"><span class="sec-num">5.3</span>Skill コンポーネント図 — Plugin パターンによる疎結合</h3>
+<div class="arch-diagram">
+                    ┌──────────────────────────────────┐
+                    │   Skill 共通インターフェース      │
+                    │   (Plugin Contract)              │
+                    │                                  │
+                    │   class Skill(Protocol):         │
+                    │       name: str                  │
+                    │       description: str           │
+                    │       input_schema: dict         │
+                    │       output_schema: dict        │
+                    │       required_tier: int         │
+                    │       async def run(ctx, args)   │
+                    └────────────┬─────────────────────┘
+                                 │ 実装（Plugin として登録）
+       ┌─────────────┬───────────┼───────────┬─────────────┐  ┌── 拡張 ──┐
+       ▼             ▼           ▼           ▼             ▼  ▼          │
+  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────┴────┐
+  │ video_   │ │ mail_    │ │ proposal_│ │ slack_   │ │ progress_│ │ 新規     │
+  │ analysis │ │ workflow │ │ generator│ │ suggest  │ │ summary  │ │ Skill    │
+  │ (初期①)  │ │ (初期②)  │ │ (初期③)  │ │ (初期④)  │ │ (初期⑤)  │ │ (Phase+) │
+  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ └─────────┘
+       ▲                                                                ▲
+       └──────────── Initial Skill Set（5 個） ─────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 5.3</span>Skill コンポーネント図。各 Skill は Skill interface（Plugin Contract）を実装し、Skill Registry から動的選択される（第 8 章）。各 Skill は独立 Python パッケージで他 Skill に依存しない。Initial Skill Set（5 個）に加え、Phase 5+ で新規 Skill を core 改修なしに追加可能。</p>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第6章 -->
+<!-- ====================================================== -->
+<section id="sec-6">
+<h2><span class="sec-num">6</span>データアーキテクチャ</h2>
+
+<h3 id="sec-6-1"><span class="sec-num">6.1</span>6 データ層</h3>
+<div class="data-source-grid">
+  <div class="ds-card ds-mail"><div class="ds-icon">📧</div><div class="ds-name">Mail</div><div class="ds-desc">Gmail OAuth（本人）／案件メールスレッド／顧客やり取り履歴</div></div>
+  <div class="ds-card ds-slack"><div class="ds-icon">💬</div><div class="ds-name">Slack</div><div class="ds-desc">案件チャンネル発言／DM／スレッド／リアクション</div></div>
+  <div class="ds-card ds-drive"><div class="ds-icon">📁</div><div class="ds-name">Drive</div><div class="ds-desc">提案 PDF/PPTX/DOCX／契約／成功事例ライブラリ</div></div>
+  <div class="ds-card ds-video"><div class="ds-icon">🎬</div><div class="ds-name">動画分析</div><div class="ds-desc">dpro / Buzzmiru 取得の動画パフォーマンス・台本</div></div>
+  <div class="ds-card ds-gemini"><div class="ds-icon">🔎</div><div class="ds-name">Gemini DR</div><div class="ds-desc">テーマ別深掘りリサーチ／競合・市場分析</div></div>
+  <div class="ds-card ds-x"><div class="ds-icon">𝕏</div><div class="ds-name">X（補助）</div><div class="ds-desc">SNS シグナル／業界話題／補助シグナル</div></div>
+</div>
+
+<h3 id="sec-6-2"><span class="sec-num">6.2</span>pgvector スキーマ設計</h3>
+<div class="arch-diagram">
+┌── PostgreSQL 16 + pgvector 拡張 ─────────────────────────────────────────┐
+│                                                                          │
+│  documents (主表)                                                        │
+│  ┌──────────────────┬──────────────┬──────────────┬─────────────────┐   │
+│  │ id (uuid PK)     │ source (enum)│ tier (0-3)   │ owner_user_id   │   │
+│  │ doc_title        │ doc_url      │ created_at   │ updated_at      │   │
+│  │ content_text     │ summary      │ pii_masked   │ meta (jsonb)    │   │
+│  └──────────────────┴──────────────┴──────────────┴─────────────────┘   │
+│                                                                          │
+│  embeddings                                                              │
+│  ┌──────────────────┬──────────────────┬─────────────────────────────┐   │
+│  │ id (uuid PK)     │ document_id (FK) │ chunk_index (int)            │   │
+│  │ embedding        │ chunk_text       │ token_count                  │   │
+│  │ vector(1024)     │                  │                              │   │
+│  └──────────────────┴──────────────────┴─────────────────────────────┘   │
+│  INDEX ivfflat (embedding vector_cosine_ops) WITH (lists = 200)          │
+│                                                                          │
+│  sessions (Memory 階層)                                                  │
+│  ┌──────────────────┬──────────────┬──────────────┬──────────────────┐  │
+│  │ thread_id (PK)   │ project_id   │ user_id      │ context_jsonb    │  │
+│  │ created_at       │ updated_at   │ ttl_at       │ scope (thread/   │  │
+│  │                  │              │              │  project/user)   │  │
+│  └──────────────────┴──────────────┴──────────────┴──────────────────┘  │
+│                                                                          │
+│  audit_logs                                                              │
+│  ┌──────────────────┬──────────────┬──────────────┬──────────────────┐  │
+│  │ id (uuid)        │ user_id      │ skill_name   │ tier_accessed    │  │
+│  │ at (timestamp)   │ input_summary│ output_summary│ pii_redacted    │  │
+│  └──────────────────┴──────────────┴──────────────┴──────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 6.2</span>pgvector スキーマ。4 主表（documents / embeddings / sessions / audit_logs）。documents.tier で Tier 0-3 を表現、embeddings は 1024 次元（Titan Embed v2）。sessions.scope で 3 階層 Memory を表現。</p>
+
+<h3 id="sec-6-3"><span class="sec-num">6.3</span>取り込みパイプライン</h3>
+<div class="arch-diagram">
+[外部 SaaS]            [Connector Worker]            [共通パイプ]               [pgvector]
+
+  Gmail   ──watch──▶  ① 差分検出 (history API)
+                     │
+                     ▼
+                    ② 本文抽出
+                     │
+                     ▼
+                    ③ PII マスク (氏名/電話/メアド)
+                     │                                ④ Embedding 生成 (Titan)
+                     └───────────────▶ ──────────────▶│
+                                                       ▼
+                                                      ⑤ Tier タグ付与 (0-3)
+                                                       │
+                                                       ▼
+                                                      ⑥ INSERT documents + embeddings
+                                                       │
+                                                       ▼
+                                                      ⑦ audit_logs に取り込み記録
+</div>
+<p class="caption"><span class="fig-num">図 6.3</span>取り込みパイプラインの 7 段（Gmail 例）。Slack / Drive / 動画 / DR / X も同一パイプ。PII マスクと Tier タグは Embedding 前に必須実行。</p>
+
+<h3 id="sec-6-4"><span class="sec-num">6.4</span>増分同期の仕組み</h3>
+<table>
+  <thead><tr><th>データ層</th><th>トリガ</th><th>差分検出</th><th>頻度</th></tr></thead>
+  <tbody>
+    <tr><td>Mail</td><td>Gmail watch (Push)</td><td>history API（last historyId）</td><td>準リアルタイム（5 分 SLO）</td></tr>
+    <tr><td>Slack</td><td>events_api (message)</td><td>イベント受信直後</td><td>リアルタイム</td></tr>
+    <tr><td>Drive</td><td>changes.watch (Push)</td><td>page token</td><td>準リアルタイム</td></tr>
+    <tr><td>動画分析（dpro/Buzzmiru）</td><td>EventBridge cron</td><td>updated_at &gt; last_sync</td><td>1 時間ごと</td></tr>
+    <tr><td>Gemini DR</td><td>明示的トリガ（Skill 内）</td><td>都度実行</td><td>必要時のみ</td></tr>
+    <tr><td>X</td><td>EventBridge cron</td><td>since_id</td><td>1 時間ごと</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第7章 -->
+<!-- ====================================================== -->
+<section id="sec-7">
+<h2><span class="sec-num">7</span>Agent SDK アーキテクチャ</h2>
+
+<h3 id="sec-7-1"><span class="sec-num">7.1</span>Claude Agent SDK のループ構造</h3>
+<div class="arch-diagram">
+┌── Agent Loop（1 ターン = 1 ユーザー入力に対する完結処理）──────────────────┐
+│                                                                            │
+│  入力 (Slack message)                                                      │
+│        │                                                                   │
+│        ▼                                                                   │
+│  [Step 1] システムプロンプト + ユーザー入力を構築                          │
+│        │                                                                   │
+│        ▼                                                                   │
+│  [Step 2] LLM 推論 (Claude Sonnet)                                         │
+│        │                                                                   │
+│        ▼                                                                   │
+│   ┌─── 出力に tool_use ブロックが含まれるか？───┐                           │
+│   │                                                │                       │
+│   ▼ Yes                                            ▼ No                   │
+│  [Step 3a] Tool 呼び出し              [Step 3b] テキスト応答完成          │
+│        │                                                                   │
+│        ▼                                                                   │
+│  [Step 4] tool_result を会話に追加                                         │
+│        │                                                                   │
+│        └─── Step 2 へ戻る（最大 N 回 / 既定 N=10）                        │
+│                                                                            │
+│  終了条件：tool_use なし or 最大ループ数到達 or Guardrails 違反            │
+└────────────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 7.1</span>Claude Agent SDK の標準ループ（Reasoning Loop）。tool_use ブロックがある限り Step 2-4 を繰り返す。最大ループ数は Skill ごとに <code>max_loop_iterations</code> で上限を持つ（video_analysis=15・proposal_generator=30・他=10）。</p>
+
+<h3 id="sec-7-2"><span class="sec-num">7.2</span>Tool 呼び出しの流れ</h3>
+<table>
+  <thead><tr><th>ステップ</th><th>処理</th><th>失敗時</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>LLM が tool_use を出力（tool_name + input）</td><td>—</td></tr>
+    <tr><td>2</td><td>SDK が Tool 定義を引いて入力 schema を検証</td><td>schema エラー → 自動リトライ（LLM に修正依頼）</td></tr>
+    <tr><td>3</td><td>Guardrails ゲート：Tier 制御 / PII / 法令</td><td>違反 → tool_error 返却 + 監査ログ</td></tr>
+    <tr><td>4</td><td>Tool 実行（内部 Tool or MCP コール）</td><td>例外 → 指数バックオフで最大 3 回</td></tr>
+    <tr><td>5</td><td>結果を tool_result として会話に追加</td><td>—</td></tr>
+    <tr><td>6</td><td>監査ログに記録（user_id / tool / tier）</td><td>失敗してもループは継続</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-7-3"><span class="sec-num">7.3</span>Memory/Session の保持方式 — 3 階層</h3>
+<div class="arch-diagram">
+┌── Memory 3 階層 ──────────────────────────────────────────────────────────┐
+│                                                                           │
+│   階層 1: スレッド (thread)                                               │
+│   ┌──────────────────────────────────────────────┐                        │
+│   │ scope=thread, ttl=24h                         │                        │
+│   │ 直前 20 turn の会話履歴／一時メモ              │                        │
+│   │ Slack thread_ts をキー                        │                        │
+│   └──────────────────────────────────────────────┘                        │
+│                                                                           │
+│   階層 2: 案件 (project)                                                  │
+│   ┌──────────────────────────────────────────────┐                        │
+│   │ scope=project, ttl=永続                       │                        │
+│   │ 案件キー（Slack channel or Drive folder）     │                        │
+│   │ 顧客プロファイル / 進捗 / 過去の決定          │                        │
+│   └──────────────────────────────────────────────┘                        │
+│                                                                           │
+│   階層 3: ユーザー (user)                                                 │
+│   ┌──────────────────────────────────────────────┐                        │
+│   │ scope=user, ttl=永続                          │                        │
+│   │ 嗜好（口調・出力形式）／よく使う Skill        │                        │
+│   │ Slack user_id をキー                          │                        │
+│   └──────────────────────────────────────────────┘                        │
+└───────────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 7.3</span>Memory 3 階層。Agent Loop の Step 1 でこの 3 階層から context を組み立て、Step 4 で更新を書き戻す。階層 1 は短期、2 / 3 は長期。</p>
+
+<h3 id="sec-7-4"><span class="sec-num">7.4</span>Multi-step reasoning のパターン</h3>
+<table>
+  <thead><tr><th>パターン</th><th>典型例</th><th>該当 Skill</th></tr></thead>
+  <tbody>
+    <tr><td>単発検索 → 応答</td><td>Slack で過去案件の参照</td><td>slack_suggest（初期 Skill ④）</td></tr>
+    <tr><td>取得 → 抽出 → 要約</td><td>朝のメール 30 件サマリー</td><td>mail_workflow（初期 Skill ②）</td></tr>
+    <tr><td>分岐探索（複数 Tool 並列）</td><td>提案生成（Phase B 並列検索）</td><td>proposal_generator（初期 Skill ③）</td></tr>
+    <tr><td>反復改善（Self-critique）</td><td>提案 Phase D の対話型仕上げ</td><td>proposal_generator（初期 Skill ③）</td></tr>
+    <tr><td>長時間バッチ</td><td>動画 30 本の構造抽出</td><td>video_analysis（初期 Skill ①）</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第8章 -->
+<!-- ====================================================== -->
+<section id="sec-8">
+<h2><span class="sec-num">8</span>Skill Registry アーキテクチャ（Plugin パターン）</h2>
+<p>v3.0 の中核章。Skill は <strong>Plugin パターン</strong>で構成され、<strong>Skill Registry</strong> が core レイヤーで Skill のライフサイクル（登録／検索／起動／終了）を管理する。Skill は schema-based の入出力契約（Plugin Contract）を持ち、新規 Skill は core 改修なしに追加可能。Initial Skill Set として 5 個（Slack 自動サジェスト / Mail / 提案生成 / 動画分析 / 進捗サマリー）が最初に登録されているが、これは Registry への初期登録分であって製品仕様上の固定数ではない。</p>
+
+<h3 id="sec-8-1"><span class="sec-num">8.1</span>Skill インターフェース（Plugin Contract）</h3>
+<table>
+  <thead><tr><th style="width: 24%;">項目</th><th>定義</th></tr></thead>
+  <tbody>
+    <tr><td>name</td><td>一意識別子（snake_case）。例：<code>video_analysis</code> / <code>mail_workflow</code></td></tr>
+    <tr><td>description</td><td>LLM が選択に使う自然言語の説明（日本語、80〜200 文字）</td></tr>
+    <tr><td>input_schema</td><td>JSON Schema / Pydantic モデル（user_id, project_id, params など）</td></tr>
+    <tr><td>output_schema</td><td>JSON Schema / Pydantic モデル（content_md, attachments[], next_actions[]）</td></tr>
+    <tr><td>required_tier</td><td>Skill 実行に必要な最小 Tier（0-3）</td></tr>
+    <tr><td>max_loop_iterations</td><td>Agent Loop 上限（既定 10、video_analysis 15、proposal_generator 30）</td></tr>
+    <tr><td>depends_on</td><td>依存する他 Skill / Tool / MCP の宣言（依存解決に使用）</td></tr>
+    <tr><td>run(ctx, args)</td><td>非同期実行メソッド。<code>ctx</code> は Memory / Tools / Guardrails への参照</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-8-2"><span class="sec-num">8.2</span>Skill Registry の動作（登録 / 検索 / 起動 / ライフサイクル）</h3>
+<div class="arch-diagram">
+┌── Skill Registry：起動時の Plugin 登録 ─────────────────────────────┐
+│                                                                     │
+│   [起動時]                                                          │
+│   ① Skill パッケージを importlib.metadata で発見（entry_points）    │
+│   ② 各 Skill の interface（name / schema / required_tier）を検証    │
+│   ③ depends_on を解析 → 依存 Skill / Tool / MCP の存在確認          │
+│   ④ Registry に登録：registry[name] = SkillInstance                 │
+│   ⑤ name の重複は起動失敗（ConflictError）                          │
+│                                                                     │
+│   [実行時]                                                          │
+│   ⑥ list_skills(tier) → 現在ユーザーが起動可能な Skill のみ列挙     │
+│   ⑦ get_skill(name) → Skill インスタンス取得                        │
+│   ⑧ ライフサイクル：start → run(ctx, args) → emit_event → finalize  │
+└─────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 8.2a</span>Skill Registry の起動・実行時ライフサイクル。Plugin 発見は Python <code>entry_points</code> 機構を利用、依存解決はトポロジカルソート。<code>required_tier</code> 不足の Skill は実行時に列挙対象から外れる。</p>
+
+<div class="arch-diagram">
+┌── Skill 動的選択フロー（Orchestrator → Registry → Skill）──────────────┐
+│                                                                        │
+│   ユーザー入力 (Slack)                                                 │
+│        │                                                               │
+│        ▼                                                               │
+│   [1] Registry 列挙：list_skills(user.tier) で利用可能 Skill を取得   │
+│        │                                                               │
+│        ▼                                                               │
+│   [2] LLM (Orchestrator) に「どの Skill が最適か」を tool_use で判定  │
+│        │                                                               │
+│        ▼                                                               │
+│   [3] 選択された Skill の input_schema に基づき引数を生成              │
+│        │                                                               │
+│        ▼                                                               │
+│   [4] required_tier をチェック → 不足なら拒否                         │
+│        │                                                               │
+│        ▼                                                               │
+│   [5] skill.run(ctx, args) を呼び出し                                  │
+│        │                                                               │
+│        ▼                                                               │
+│   [6] output_schema 検証 → Slack 返却                                 │
+└────────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 8.2b</span>Skill 動的選択フロー。LLM 自身に「どの Skill か」を判定させる（意図ルーターの汎用化）。新 Skill 追加時は Registry に登録するだけで配線が完成し、core への影響は無い。</p>
+
+<h3 id="sec-8-3"><span class="sec-num">8.3</span>Initial Skill Set（5 個）詳細</h3>
+<p>以下の 5 Skill が Skill Registry に最初に登録される。各 Skill は独立 Python パッケージで、他 Skill に依存しない（疎結合）。これは「最初に提供する Skill セット」であり、Phase に応じて Skill を追加・差し替え可能。</p>
+<table>
+  <thead><tr><th>Skill 名（name）</th><th>機能</th><th>主な Tool 利用</th><th>Memory</th><th>備考</th></tr></thead>
+  <tbody>
+    <tr><td><code>video_analysis</code></td><td>動画分析（初期 Skill ①）</td><td>dpro MCP / Buzzmiru MCP / Gemini DR / pgvector 検索</td><td>案件＋ユーザー</td><td>別冊『機能④仕様書 v1』参照。長時間バッチ系。</td></tr>
+    <tr><td><code>mail_workflow</code></td><td>Mail ワークフロー（初期 Skill ②）</td><td>Gmail API / pgvector 検索 / Slack DM 送信</td><td>スレッド＋案件</td><td>朝のサマリー Cron + 深掘り対話。</td></tr>
+    <tr><td><code>proposal_generator</code></td><td>提案生成（初期 Skill ③）</td><td>pgvector / Gemini DR / Drive 検索 / HTML 出力</td><td>案件＋スレッド</td><td>5 フェーズ Co-Authoring。最も複雑な reasoning。</td></tr>
+    <tr><td><code>slack_suggest</code></td><td>Slack 自動サジェスト（初期 Skill ④）</td><td>pgvector / Slack history</td><td>スレッドのみ</td><td>応答 3 秒以内 SLO。軽量・高速。</td></tr>
+    <tr><td><code>progress_summary</code></td><td>進捗サマリー（初期 Skill ⑤）</td><td>pgvector / Gmail / Slack 集計</td><td>案件＋ユーザー</td><td>mail_workflow のインフラを流用（Phase 2.5）。</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-8-4"><span class="sec-num">8.4</span>拡張ポイント — 新規 Skill 追加フロー</h3>
+<p>Skill Registry は Plugin パターンで構成されており、新規 Skill は <strong>core レイヤーへの改修なし</strong>に追加可能。追加時の影響範囲は新パッケージのみで、既存 5 Skill / Reasoning Loop / Tools 層には変更が発生しない。</p>
+<div class="arch-diagram">
+┌── 新規 Skill 追加フロー ───────────────────────────────────────────┐
+│                                                                    │
+│   [1] 新規パッケージ作成： skills/<new_skill>/                     │
+│        └─ skill.py（Skill interface を実装）                       │
+│        └─ schemas.py（input / output Pydantic モデル）             │
+│        └─ pyproject.toml（entry_points = teamagent.skills）        │
+│                                                                    │
+│   [2] required_tier / depends_on を宣言                            │
+│                                                                    │
+│   [3] pip install -e ./skills/<new_skill>                          │
+│        → 次回起動時に Registry が自動発見                          │
+│                                                                    │
+│   [4] Registry が依存解決 → 起動 → Orchestrator から動的選択可能   │
+│                                                                    │
+│   ※ core / Reasoning Loop / 既存 Skill には一切変更不要            │
+└────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 8.4</span>新規 Skill 追加フロー。Python の entry_points 機構を通じて Skill Registry が自動発見する。Skill 間に強い依存がある場合は <code>depends_on</code> に明示することで Registry が起動時にトポロジカルソートで初期化順序を解決。</p>
+
+<table>
+  <thead><tr><th>変更内容</th><th>影響範囲</th><th>必要作業</th></tr></thead>
+  <tbody>
+    <tr><td>新規 Skill 追加</td><td>新パッケージのみ</td><td>Plugin Contract 実装 + Registry 登録（自動）</td></tr>
+    <tr><td>既存 Skill の input/output 変更</td><td>該当 Skill + 呼び出し側 LLM プロンプト</td><td>schema バージョニングで後方互換維持</td></tr>
+    <tr><td>Skill 削除</td><td>該当パッケージのみ</td><td>entry_points から除外 + 依存 Skill のチェック</td></tr>
+    <tr><td>Skill 間依存追加</td><td>該当 Skill のみ</td><td><code>depends_on</code> 宣言。循環依存は Registry が起動時に検出</td></tr>
+    <tr><td>core 改修</td><td>—</td><td><strong>不要</strong>（Skill 追加で core を触ることは無い）</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-8-5"><span class="sec-num">8.5</span>Skill interface 疑似コード例</h3>
+<p>Skill interface（Plugin Contract）の Python 実装例。Pydantic でスキーマを定義し、<code>Skill</code> Protocol を実装するだけで Registry に登録される。下記は検索系 Skill（slack_suggest）の最小実装例。</p>
+<div class="arch-diagram">
+# skills/slack_suggest/schemas.py
+from pydantic import BaseModel
+from typing import Literal
+
+class SlackSuggestInput(BaseModel):
+    user_id: str
+    channel_id: str
+    thread_ts: str | None = None
+    recent_message: str            # トリガとなった直近メッセージ
+    top_k: int = 5
+
+class SlackSuggestOutput(BaseModel):
+    suggestions: list[str]         # 候補発言（最大 top_k 件）
+    sources: list[dict]            # 根拠：過去 Slack メッセージ ID 等
+    confidence: float              # 0.0 - 1.0
+
+
+# skills/slack_suggest/skill.py
+from teamagent.core.skill import Skill, SkillContext
+from .schemas import SlackSuggestInput, SlackSuggestOutput
+
+class SlackSuggestSkill(Skill):
+    name = "slack_suggest"
+    description = (
+        "Slack スレッドで進行中の会話を検知し、過去類似ケースから "
+        "次の発言候補を 3 秒以内に提示する。Tier 1 以上で利用可能。"
+    )
+    input_schema  = SlackSuggestInput.model_json_schema()
+    output_schema = SlackSuggestOutput.model_json_schema()
+    required_tier = 1
+    max_loop_iterations = 3
+    depends_on = ["pgvector_search", "slack_history"]
+
+    async def run(
+        self, ctx: SkillContext, args: SlackSuggestInput
+    ) -> SlackSuggestOutput:
+        # ① 直近メッセージのベクトル化
+        embedding = await ctx.tools.embed(args.recent_message)
+
+        # ② pgvector で類似過去ケース検索（Tier 制約を ctx が自動付与）
+        hits = await ctx.tools.pgvector_search(
+            embedding=embedding,
+            top_k=args.top_k,
+            filters={"source": "slack", "channel_id": args.channel_id},
+        )
+
+        # ③ Memory（スレッドスコープ）から会話履歴を取得
+        history = await ctx.memory.get(scope="thread", key=args.thread_ts)
+
+        # ④ LLM に suggestion 生成を依頼（Guardrails を通る）
+        suggestions = await ctx.llm.complete(
+            system="過去類似ケースから次の発言候補を生成…",
+            context={"hits": hits, "history": history},
+        )
+
+        return SlackSuggestOutput(
+            suggestions=suggestions,
+            sources=[{"id": h["id"], "score": h["score"]} for h in hits],
+            confidence=min(1.0, sum(h["score"] for h in hits) / args.top_k),
+        )
+
+
+# skills/slack_suggest/pyproject.toml（抜粋）
+[project.entry-points."teamagent.skills"]
+slack_suggest = "skills.slack_suggest.skill:SlackSuggestSkill"
+</div>
+<p class="caption"><span class="fig-num">図 8.5</span>Skill interface 疑似コード例（slack_suggest）。Pydantic でスキーマを定義し <code>Skill</code> Protocol を実装。<code>ctx</code> 経由で Memory / Tools / Guardrails / LLM にアクセスする。<code>entry_points</code> に登録された Skill は起動時に Registry が自動発見・登録する。</p>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第9章 -->
+<!-- ====================================================== -->
+<section id="sec-9">
+<h2><span class="sec-num">9</span>Tools / MCP 接続層</h2>
+
+<h3 id="sec-9-1"><span class="sec-num">9.1</span>内部 Tool</h3>
+<table>
+  <thead><tr><th>Tool 名</th><th>役割</th><th>呼び出し方式</th><th>SLO</th></tr></thead>
+  <tbody>
+    <tr><td><code>pgvector_search</code></td><td>ベクトル検索 + メタフィルタ（Tier / source / 日付）</td><td>直接 SQL</td><td>p95 &lt; 300ms</td></tr>
+    <tr><td><code>gmail_fetch</code></td><td>Gmail 検索・本文取得</td><td>Gmail REST API</td><td>p95 &lt; 1.5s</td></tr>
+    <tr><td><code>drive_read</code></td><td>Drive ファイル取得・テキスト抽出</td><td>Drive REST API</td><td>p95 &lt; 2s</td></tr>
+    <tr><td><code>slack_history</code></td><td>Slack チャンネル / スレッド履歴</td><td>Slack Web API</td><td>p95 &lt; 800ms</td></tr>
+    <tr><td><code>html_render</code></td><td>HTML を PDF / PPTX に変換</td><td>内部 Lambda 呼び出し</td><td>p95 &lt; 15s</td></tr>
+    <tr><td><code>web_search</code></td><td>Tavily / Brave / Bing のいずれか</td><td>Web 検索ゲートウェイ経由</td><td>p95 &lt; 3s</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-9-2"><span class="sec-num">9.2</span>外部 MCP 接続</h3>
+<table>
+  <thead><tr><th>MCP サーバー</th><th>提供機能</th><th>導入 Phase</th><th>Tier 制約</th></tr></thead>
+  <tbody>
+    <tr><td>Gemini Deep Research</td><td>深掘りリサーチ（数分〜数十分）</td><td>Phase 4 以降</td><td>Tier 2 以上</td></tr>
+    <tr><td>dpro</td><td>動画パフォーマンス取得</td><td>Phase 2（機能④）</td><td>Tier 2 以上</td></tr>
+    <tr><td>Buzzmiru</td><td>SNS 動画分析</td><td>Phase 2</td><td>Tier 2 以上</td></tr>
+    <tr><td>SHORTBOOSTER（候補）</td><td>Shorts 分析（評価中）</td><td>Phase 5 候補</td><td>Tier 2 以上</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-9-3"><span class="sec-num">9.3</span>MCP サーバー認証フロー</h3>
+<div class="arch-diagram">
+[Agent SDK Host]                [Secrets Manager]              [外部 MCP サーバー]
+
+     │                                  │                              │
+     │ 1. tool_use(mcp_xxx)             │                              │
+     │                                  │                              │
+     │ 2. credentials_get(mcp_xxx) ────▶│                              │
+     │ ◀── access_token (KMS 復号) ─────│                              │
+     │                                  │                              │
+     │ 3. HTTPS + Bearer token ─────────┼────────────────────────────▶│
+     │                                  │                              │
+     │ ◀── 結果 JSON ───────────────────┼─────────────────────────────│
+     │                                  │                              │
+     │ 4. tool_result を会話に追加      │                              │
+     │ 5. 401/403 なら refresh_token 経由で再取得 → リトライ          │
+</div>
+<p class="caption"><span class="fig-num">図 9.3</span>MCP 認証フロー。Secrets Manager から KMS 復号して取得 → Bearer token で MCP コール。401/403 は自動 refresh → 再試行。token は Agent SDK Host 内に永続化しない（リクエスト毎取得）。</p>
+
+<h3 id="sec-9-4"><span class="sec-num">9.4</span>Tool 呼び出し時のエラーハンドリング・リトライ</h3>
+<table>
+  <thead><tr><th>エラー種別</th><th>処理</th><th>最終 Fallback</th></tr></thead>
+  <tbody>
+    <tr><td>schema 違反 (4xx)</td><td>LLM に修正を依頼（loop 内で再 tool_use）</td><td>3 回失敗で skill_error</td></tr>
+    <tr><td>認証失敗 (401/403)</td><td>refresh_token → 再試行 1 回</td><td>失敗ならユーザーに再認可依頼</td></tr>
+    <tr><td>レート制限 (429)</td><td>指数バックオフ（1s, 2s, 4s）最大 3 回</td><td>失敗で graceful degradation</td></tr>
+    <tr><td>外部 5xx</td><td>指数バックオフ 3 回</td><td>当該 Tool 抜きで応答続行</td></tr>
+    <tr><td>タイムアウト (&gt;30s)</td><td>キャンセル + 部分結果で続行</td><td>ユーザーに「部分回答」と注記</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第10章 -->
+<!-- ====================================================== -->
+<section id="sec-10">
+<h2><span class="sec-num">10</span>HTML 出力 & WYSIWYG エディタ</h2>
+<p>v3.0 で新規追加。提案コンテンツ生成 Skill・営業進捗サマリー Skill・動画ナレッジ分析 Skill 等の出力 Skill が生成する成果物を HTML 一次出力とし、必要に応じて PDF / PPTX に変換、さらに WYSIWYG エディタで人手仕上げできる経路を整備する。</p>
+
+<h3 id="sec-10-1"><span class="sec-num">10.1</span>HTML テンプレ仕様（Tailwind ベース）</h3>
+<table>
+  <thead><tr><th>項目</th><th>仕様</th></tr></thead>
+  <tbody>
+    <tr><td>基本構造</td><td>シングル HTML（外部 CSS / JS は CDN）</td></tr>
+    <tr><td>CSS フレームワーク</td><td>Tailwind CSS via CDN（プリセット 3 テーマ：corporate / sales-pitch / casual）</td></tr>
+    <tr><td>セクション</td><td><code>&lt;section data-block=&quot;hero|kpi|content|cta&quot;&gt;</code> の data 属性で構造化</td></tr>
+    <tr><td>埋め込みメタ</td><td><code>&lt;script type=&quot;application/json&quot; id=&quot;teamagent-meta&quot;&gt;</code> に skill / 案件 / 生成日時を JSON で埋め込み</td></tr>
+    <tr><td>画像</td><td>Drive 上のオリジナル URL を参照、ローカル base64 は使用しない</td></tr>
+    <tr><td>編集マーカー</td><td><code>contenteditable</code> 付与候補要素に <code>data-editable=&quot;true&quot;</code></td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-10-2"><span class="sec-num">10.2</span>HTML → PDF（Playwright）</h3>
+<div class="arch-diagram">
+[Agent SDK]                  [HTML→PDF Renderer (Lambda)]
+     │                                  │
+     │ render_pdf(html, options) ──────▶│
+     │                                  │
+     │                                ① Playwright 起動 (chromium headless)
+     │                                ② page.setContent(html)
+     │                                ③ media emulation: print
+     │                                ④ page.pdf({ format: 'A4', margin })
+     │                                ⑤ S3 一時保存 (presigned URL)
+     │                                ⑥ Drive にコピー (drive_write)
+     │                                  │
+     │ ◀── drive_file_id + url ─────────│
+</div>
+<p class="caption"><span class="fig-num">図 10.2</span>HTML→PDF パイプライン。Lambda コンテナイメージに Playwright を同梱、chromium headless で印刷モード PDF を生成。SLO: A4 5 枚で p95 &lt; 8 秒。</p>
+
+<h3 id="sec-10-3"><span class="sec-num">10.3</span>HTML → PPTX（python-pptx + 2 層テンプレ）</h3>
+<div class="arch-diagram">
+[HTML 入力]                        [変換ロジック]                          [PPTX 出力]
+
+  &lt;section data-block&gt; ─┐                                                         
+                          │                                                       
+                          ▼                                                       
+                  ① HTML → AST (BeautifulSoup)                                    
+                          │                                                       
+                          ▼                                                       
+                  ② 2 層テンプレ適用                                              
+                     ├ レイアウト層: 1枚に何が乗るか                              
+                     └ スタイル層 : フォント/色/サイズ                            
+                          │                                                       
+                          ▼                                                       
+                  ③ python-pptx で書き出し ──▶ corporate.pptx (テンプレ)         
+                          │                                                       
+                          ▼                                                       
+                  ④ Drive 保存 + Slack リンク返却                                 
+</div>
+<p class="caption"><span class="fig-num">図 10.3</span>HTML→PPTX 2 層テンプレ。レイアウト層とスタイル層を分離することで、ブランド更新時にスタイル層のみ差し替え可能。SLO: 20 ページで p95 &lt; 12 秒。</p>
+
+<h3 id="sec-10-4"><span class="sec-num">10.4</span>WYSIWYG エディタ設計</h3>
+<table>
+  <thead><tr><th>要素</th><th>設計</th></tr></thead>
+  <tbody>
+    <tr><td>ベース技術</td><td>Next.js + ProseMirror（または TipTap）。<code>contenteditable</code> 直接操作は避ける</td></tr>
+    <tr><td>編集対象</td><td><code>data-editable=&quot;true&quot;</code> のブロックのみ。レイアウト要素は固定</td></tr>
+    <tr><td>編集状態管理</td><td>各ブロックを Yjs CRDT ドキュメント化、サーバー側で WebSocket 同期</td></tr>
+    <tr><td>版管理</td><td>保存ごとに <code>versions</code> テーブルへ snapshot。差分は JSON Patch で保持</td></tr>
+    <tr><td>AI 補助</td><td>右ペインに「再生成」「短く」「丁寧に」など Skill 呼び出しボタン</td></tr>
+    <tr><td>権限</td><td>案件メンバーのみ編集可、他は閲覧（Tier 1+）</td></tr>
+    <tr><td>エクスポート</td><td>「PDF 化」「PPTX 化」「Slack に共有」のボタン</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-10-5"><span class="sec-num">10.5</span>出力ファイルの Drive 保存と Slack リンク返却フロー</h3>
+<div class="arch-diagram">
+[ユーザー] ─── Slack 注文 ──▶ [Agent SDK] ─── Skill 実行 ──▶ HTML 生成
+                                                              │
+                                ┌─────────────────────────────┘
+                                ▼
+                          [Drive 保存] ── HTML 原本 (編集可)
+                                │
+                                ├──▶ PDF 派生 (任意、ボタンで生成)
+                                └──▶ PPTX 派生 (任意、ボタンで生成)
+                                │
+                                ▼
+                         [Slack に DM]
+                          • HTML 編集 URL（WYSIWYG）
+                          • PDF / PPTX ダウンロード URL
+                          • 「再生成」「短く」ボタン
+</div>
+<p class="caption"><span class="fig-num">図 10.5</span>出力経路。HTML 原本を Drive に保存、PDF / PPTX は派生としてオンデマンド生成。Slack には 3 種のリンクと再実行ボタンが届く。</p>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第11章 -->
+<!-- ====================================================== -->
+<section id="sec-11">
+<h2><span class="sec-num">11</span>Permissions / Guardrails 層</h2>
+
+<h3 id="sec-11-1"><span class="sec-num">11.1</span>OAuth トークン管理</h3>
+<table>
+  <thead><tr><th>対象</th><th>保管</th><th>更新</th><th>有効期限</th></tr></thead>
+  <tbody>
+    <tr><td>Gmail OAuth (16 名)</td><td>Secrets Manager（KMS 暗号化）</td><td>refresh_token で自動更新</td><td>access 1h / refresh 無期限（取消まで）</td></tr>
+    <tr><td>Slack OAuth (Workspace)</td><td>Secrets Manager</td><td>—（無期限）</td><td>取消まで</td></tr>
+    <tr><td>Drive OAuth (16 名)</td><td>Secrets Manager</td><td>refresh_token で自動更新</td><td>access 1h</td></tr>
+    <tr><td>MCP API Token</td><td>Secrets Manager</td><td>サービス側の方式に従う</td><td>サービス依存</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-11-2"><span class="sec-num">11.2</span>Tier 0-3 アクセス制御</h3>
+<table>
+  <thead><tr><th>Tier</th><th>定義</th><th>参照可能データ</th><th>典型 Skill</th></tr></thead>
+  <tbody>
+    <tr><td>Tier 0</td><td>本人のみ</td><td>自分の Mail / DM / 個人 Drive</td><td>Mail ワークフロー</td></tr>
+    <tr><td>Tier 1</td><td>案件担当</td><td>当該案件チャンネル / 共有 Drive</td><td>提案コンテンツ生成・進捗サマリー</td></tr>
+    <tr><td>Tier 2</td><td>チーム</td><td>営業16名共有データ / 動画ライブラリ</td><td>動画ナレッジ分析・提案コンテンツ生成</td></tr>
+    <tr><td>Tier 3</td><td>全社</td><td>公開データ / 一般市場リサーチ</td><td>提案コンテンツ生成（市場分析時）</td></tr>
+  </tbody>
+</table>
+<p>Skill 実行時、<code>required_tier</code> と「現在のユーザー × データソース」を突き合わせ、不足する場合は <code>tool_error</code> を返す。pgvector 検索でも <code>WHERE tier &lt;= :user_max_tier</code> の制約を必ず付与。</p>
+
+<h3 id="sec-11-3"><span class="sec-num">11.3</span>PII マスク</h3>
+<div class="arch-diagram">
+[Connector Worker]                                 [pgvector]
+
+   生 Mail / Slack 本文                              
+        │                                            
+        ▼                                            
+   ┌────────────────────────────────────────────┐    
+   │ PII マスクパイプ（取り込み時に必ず通る）    │    
+   │                                            │    
+   │ ・氏名 (NER)        → 田中 → [PERSON_1]    │    
+   │ ・電話番号          → 090-… → [PHONE]      │    
+   │ ・メアド            → x@y → [EMAIL]        │    
+   │ ・クレカ番号        → ****                 │    
+   │ ・マイナンバー      → [REDACTED]           │    
+   │                                            │    
+   │ 元値は別表 (pii_lookup) に user_id ロック  │    
+   │ 復元は Tier 0 のみ可能                     │    
+   └────────────────────────────────────────────┘    
+        │                                            
+        ▼                                            
+   embeddings + documents (マスク後本文)            
+</div>
+<p class="caption"><span class="fig-num">図 11.3</span>PII マスク。取り込みパイプの必須段。Embedding は必ずマスク後本文から生成。復元が必要な場合（本人向け Mail 返信生成など）のみ Tier 0 で pii_lookup を解除参照。</p>
+
+<h3 id="sec-11-4"><span class="sec-num">11.4</span>監査ログ</h3>
+<table>
+  <thead><tr><th>記録項目</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr><td>user_id / skill_name / args 要約</td><td>誰が何をしたか</td></tr>
+    <tr><td>accessed_tier / accessed_sources</td><td>権限内アクセスか</td></tr>
+    <tr><td>tool_calls[]（name / latency / error）</td><td>性能・障害解析</td></tr>
+    <tr><td>output_summary / pii_redacted</td><td>出力品質・PII 漏洩確認</td></tr>
+    <tr><td>guardrails_violations[]</td><td>違反検知時のレビュー</td></tr>
+    <tr><td>at (UTC timestamp)</td><td>—</td></tr>
+  </tbody>
+</table>
+<p>監査ログは <code>audit_logs</code> テーブル + CloudWatch Logs に二重書き。13 ヶ月保持（監査年次対応）。</p>
+
+<h3 id="sec-11-5"><span class="sec-num">11.5</span>薬機法 / 景表法 / ステマ規制チェッカー（Phase 4 以降）</h3>
+<table>
+  <thead><tr><th>規制</th><th>チェック内容</th><th>実装</th></tr></thead>
+  <tbody>
+    <tr><td>薬機法</td><td>「効果」「効能」「治る」等の禁止表現／医薬品的標榜</td><td>禁止語リスト + LLM 二次判定（プロンプト分離）</td></tr>
+    <tr><td>景表法</td><td>「最大」「最高」「業界 No.1」等の不当表示／優良誤認</td><td>禁止語リスト + 根拠データ有無の確認</td></tr>
+    <tr><td>ステマ規制</td><td>広告表記欠落 / 「個人の感想」抜けの宣伝</td><td>テンプレに [PR] [広告] 明記の埋め込み + 検査</td></tr>
+  </tbody>
+</table>
+<p>提案コンテンツ生成 Skill・進捗サマリー Skill 等、外部送付物を生成する Skill の出力直前、Guardrails ゲートで実行。違反検知時は LLM に修正版を再生成させ、3 回失敗で人間レビュー依頼（Slack DM）。</p>
+</section>
+
+<!-- ====================================================== -->
+<!-- 第12章 -->
+<!-- ====================================================== -->
+<section id="sec-12">
+<h2><span class="sec-num">12</span>インフラ</h2>
+
+<h3 id="sec-12-1"><span class="sec-num">12.1</span>AWS 構成</h3>
+<div class="arch-diagram">
+┌── AWS Tokyo (ap-northeast-1) ──────────────────────────────────────────────┐
+│                                                                            │
+│  VPC (10.0.0.0/16)                                                         │
+│   ├─ Public Subnet × 2 AZ                                                  │
+│   │   └─ ALB（Slack Bolt 入口 + 編集 UI Web 入口）                          │
+│   │                                                                        │
+│   ├─ Private Subnet × 2 AZ                                                 │
+│   │   ├─ ECS Fargate Cluster                                               │
+│   │   │   ├─ Service: slack-bolt        （タスク 1〜2）                    │
+│   │   │   └─ Service: agent-sdk-host    （タスク 2〜4）                    │
+│   │   ├─ Lambda（Connector × 6 / Renderer / Web 検索ゲートウェイ）         │
+│   │   └─ EventBridge（Cron : 動画 / X / 朝サマリー）                       │
+│   │                                                                        │
+│   └─ Isolated Subnet × 2 AZ                                                │
+│       └─ RDS PostgreSQL 16 (Multi-AZ, db.t4g.medium + pgvector)            │
+│                                                                            │
+│  グローバル                                                                │
+│   ├─ Secrets Manager（OAuth / API token / DB password）                   │
+│   ├─ KMS（CMK で Secrets / RDS / S3 暗号化）                              │
+│   ├─ S3 (一時 PDF/PPTX, 13 ヶ月 lifecycle)                                │
+│   ├─ API Gateway（編集 UI Web → バックエンド REST）                       │
+│   ├─ CloudWatch（Logs / Metrics / Alarms）                                │
+│   └─ Bedrock（Claude Sonnet / Opus / Titan Embed v2）                     │
+└────────────────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 12.1</span>AWS 構成。3 層 VPC（Public / Private / Isolated）。RDS は Isolated に隔離、ECS / Lambda は Private、ALB のみ Public。Bedrock は同一リージョン Private Link 経由が望ましい。</p>
+
+<h3 id="sec-12-2"><span class="sec-num">12.2</span>Mac mini 構成（MVA 期間中の PoC オプション）</h3>
+<table>
+  <thead><tr><th>用途</th><th>構成</th><th>限界</th></tr></thead>
+  <tbody>
+    <tr><td>MVA PoC（社内 1〜3 名）</td><td>Mac mini M2 + Docker Compose（pgvector / Slack Bolt / Agent SDK Host）</td><td>常時稼働だが冗長化なし、外部公開は Ngrok か Cloudflare Tunnel</td></tr>
+    <tr><td>Connector のバッチ</td><td>launchd で定期実行</td><td>Lambda 同等の並列性は出せない</td></tr>
+    <tr><td>LLM 呼び出し</td><td>Bedrock 直叩き（ローカルから AWS リージョン）</td><td>レイテンシ +50ms 程度</td></tr>
+  </tbody>
+</table>
+<p>本番運用前の <strong>MVA 期間中のみ</strong> の選択肢。社内ユーザー数が増えた時点で AWS へ移行。詳細は別冊『MVA 仕様書 v1』参照。</p>
+
+<h3 id="sec-12-3"><span class="sec-num">12.3</span>Terraform 構成方針</h3>
+<table>
+  <thead><tr><th>層</th><th>モジュール</th><th>状態管理</th></tr></thead>
+  <tbody>
+    <tr><td>ネットワーク</td><td><code>modules/network</code>（VPC / Subnet / NAT / SG）</td><td>S3 + DynamoDB Lock</td></tr>
+    <tr><td>データ</td><td><code>modules/data</code>（RDS / S3 / Secrets / KMS）</td><td>同上</td></tr>
+    <tr><td>計算</td><td><code>modules/compute</code>（ECS Cluster / Lambda / EventBridge）</td><td>同上</td></tr>
+    <tr><td>API</td><td><code>modules/api</code>（ALB / API Gateway / 証明書）</td><td>同上</td></tr>
+    <tr><td>環境</td><td><code>environments/dev|stg|prod</code></td><td>環境別 backend</td></tr>
+  </tbody>
+</table>
+
+<h3 id="sec-12-4"><span class="sec-num">12.4</span>ローカル開発環境（Docker Compose）</h3>
+<div class="arch-diagram">
+┌── docker-compose.yml（開発者ローカル） ─────────────────────────┐
+│                                                                 │
+│   service: postgres                                             │
+│     image: pgvector/pgvector:pg16                               │
+│     volumes: ./data/postgres                                    │
+│                                                                 │
+│   service: bedrock-proxy                                        │
+│     image: aws-bedrock-runtime-proxy (sigv4 経由)              │
+│     env_file: .env.aws                                          │
+│                                                                 │
+│   service: slack-bolt                                           │
+│     build: ./services/slack-bolt                                │
+│     env: SOCKET_MODE=true（Ngrok 不要）                         │
+│                                                                 │
+│   service: agent-sdk-host                                       │
+│     build: ./services/agent-sdk-host                            │
+│     depends_on: [postgres, bedrock-proxy]                       │
+│                                                                 │
+│   service: renderer                                             │
+│     image: mcr.microsoft.com/playwright/python                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+</div>
+<p class="caption"><span class="fig-num">図 12.4</span>ローカル開発環境。Slack Bolt は Socket Mode で Ngrok 不要、Bedrock のみ AWS 接続。pgvector はローカル PostgreSQL に拡張をロードした image を使用。</p>
+</section>
+
+</main>
+</div>
+
+</body>
+</html>

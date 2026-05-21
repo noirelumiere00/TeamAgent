@@ -1,0 +1,2104 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 実装計画書 v3.1 — OpenClaw 採用版 / 7ヶ月12月運用ターゲット</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>実装計画書</div>
+  <div class="sidebar-doc-meta">
+    Version 3.1<br>
+    2026年5月20日（OpenClaw フル採用 / 7ヶ月12月運用）
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>本書について</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>目的・関連文書（v3.1 群）</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>v3.0 からの主要変更</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-2"><span class="num">2.</span>全体スケジュール</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>7ヶ月・14 Sprint × 2週間（OpenClaw 採用版）</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>Sprint S1〜S14 詳細表</a></li>
+    <li class="level-2"><a href="#sec-2-3"><span class="num">2.3</span>月次マイルストーン M0.5〜M7.5 ガント＋Go/No-Go ゲート</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>Phase 別計画</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>MVA Phase 1（S1〜S4）データ層連携</a></li>
+    <li class="level-2"><a href="#sec-3-2"><span class="num">3.2</span>MVA Phase 2（S5）Agent SDK 基本ループ</a></li>
+    <li class="level-2"><a href="#sec-3-3"><span class="num">3.3</span>MVA Phase 3（S6）超軽量・検索 Skill</a></li>
+    <li class="level-2"><a href="#sec-3-4"><span class="num">3.4</span>Phase 4（S7〜S12）初期 Skill セット5個を Skill Registry に登録</a></li>
+    <li class="level-2"><a href="#sec-3-5"><span class="num">3.5</span>Phase 5（S13〜S17）UX / Guardrails / 本番化</a></li>
+    <li class="level-2"><a href="#sec-3-6"><span class="num">3.6</span>Phase 5+（拡張 Skill 開発フェーズ）</a></li>
+
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>Sprint 内工数配分</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>実装 55% / テスト 25% / 安定化 20%</a></li>
+    <li class="level-2"><a href="#sec-4-2"><span class="num">4.2</span>Champion 検証サイクル</a></li>
+
+    <li class="level-1"><a href="#sec-5"><span class="num">5.</span>テスト工程</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-6"><span class="num">6.</span>コスト試算</a></li>
+    <li class="level-2"><a href="#sec-6-1"><span class="num">6.1</span>9ヶ月累積コスト</a></li>
+    <li class="level-2"><a href="#sec-6-2"><span class="num">6.2</span>月次運用コスト</a></li>
+    <li class="level-2"><a href="#sec-6-3"><span class="num">6.3</span>外部 SaaS 連携時の追加</a></li>
+    <li class="level-2"><a href="#sec-6-4"><span class="num">6.4</span>試算の前提と免責</a></li>
+
+    <li class="level-1"><a href="#sec-7"><span class="num">7.</span>月次ダッシュボード</a></li>
+
+    <li class="level-1"><a href="#sec-8"><span class="num">8.</span>リスク管理</a></li>
+
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>体制</a></li>
+    <li class="level-2"><a href="#sec-9-1"><span class="num">9.1</span>FDE 1名の場合</a></li>
+    <li class="level-2"><a href="#sec-9-2"><span class="num">9.2</span>追加リソース投入シナリオ</a></li>
+
+    <li class="level-1"><a href="#sec-10"><span class="num">10.</span>改訂履歴</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">実装計画書 v3.1（OpenClaw フル採用 / 14 Sprint 7ヶ月）</div>
+  <h1>TeamAgent 実装計画書 v3.1<br>OpenClaw 採用版 / 14 Sprint × 2週間 = 7ヶ月で 12月本格運用へ</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>実装計画書（v3.1 構想群）</td></tr>
+    <tr><td>バージョン</td><td>3.1（v3.0 から OpenClaw フル採用に転換、14 Sprint × 2週間 = 7ヶ月へ再構成）</td></tr>
+    <tr><td>作成日</td><td>2026年5月20日（v3.0：2026年5月19日 / v2.2：2026年5月13日）</td></tr>
+    <tr><td>位置付け</td><td>v3.0 の Phase 構造を踏襲しつつ、Agent ホストを <strong>OpenClaw（オープンソース、Anthropic Agent SDK 互換）</strong>にフル採用。Skill Registry は ClawHub ホワイトリスト運用。S2 末に Go/No-Go ゲート①、S10 末に Go/No-Go ゲート② を新設。スケジュールは 14 Sprint × 2週間 = 7ヶ月（M0.5〜M7.5、12月本格運用ターゲット）に圧縮。コスト構造を「開発¥80K 上限 / 運用月¥100K-1M レンジ」に修正。リスク R16-R19 を追加。</td></tr>
+    <tr><td>関連文書（v3.1 群）</td><td>構想・概要書（teamagent_overview_v3.1.html）／要件定義書（teamagent_requirements_v3.0.html）／アーキテクチャ図（teamagent_architecture_v3.0.html）／MVA 仕様書 v1.1（teamagent_mva_spec_v1.html、第12章 OpenClaw 採用節を含む）／Personal AI Coach 要件（teamagent_personal_ai_coach_requirements_v3.0.html）</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">Implementation Plan v3.1 at a Glance</div>
+  <div class="hero-headline">OpenClaw 採用版・14 Sprint × 2週間 = 7ヶ月で 12月本格運用<br>S2 末 Go/No-Go ゲート① + S10 末 Go/No-Go ゲート② + ClawHub Skill ホワイトリスト</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">7<small>ヶ月</small></div>
+      <div class="hero-stat-label">開発期間（M0.5〜M7.5 / 6月前半着手→12月本格運用）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">14<small>Sprint</small></div>
+      <div class="hero-stat-label">各 2 週間 / 実装 55% + テスト 25% + 安定化 20%</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">¥80K<small>上限</small></div>
+      <div class="hero-stat-label">開発予算総額（FDE 1人 + Claude Code Max 別承認）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">¥100K<small>〜¥1M/月</small></div>
+      <div class="hero-stat-label">運用費レンジ（MVA → 16名展開 → 全社展開で段階増）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">M3<small>末</small></div>
+      <div class="hero-stat-label">MVA 営業 5名ベータ → S6 末 16 名展開準備完了</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 1. 本書について ========== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>本書について</h2>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>目的・関連文書（v3.1 群）</h3>
+<p>
+本書は <strong>TeamAgent v3.1</strong> の実装計画を、<strong>7ヶ月・14 Sprint × 2週間</strong>で具体化するものである。v3.1 は v3.0 の Phase 構造を踏襲しつつ、Agent ホストを <strong>OpenClaw（オープンソース、Anthropic Agent SDK 互換）</strong>にフル採用、Skill は <strong>ClawHub のホワイトリスト</strong> を活用することで、<strong>2026年12月本格運用開始</strong>を実現する。S2 末（6月後半）に Go/No-Go ゲート①（OpenClaw 採用継続判断）、S10 末（10月後半）に Go/No-Go ゲート②（提案書 20h→8-12h 実証）を新設。コスト構造は「<strong>開発予算 ¥80K 総額上限 / 運用予算 月¥100K-1M レンジ</strong>」に分離。
+</p>
+<table class="kv">
+  <tr><td>構想・概要書 v3.1</td><td>teamagent_overview_v3.1.html — OpenClaw 採用に切り替えた v3.1 の全体構想</td></tr>
+  <tr><td>MVA 仕様書 v1.1</td><td>teamagent_mva_spec_v1.html — 第12章「OpenClaw 採用」節含む。Skill ホワイトリスト運用（12.1）/ CVE 監視運用（12.2）も参照</td></tr>
+  <tr><td>要件定義書</td><td>teamagent_requirements_v3.0.html — FR / NFR / DR / SR は v3.0 を継承</td></tr>
+  <tr><td>アーキテクチャ図</td><td>teamagent_architecture_v3.0.html — システム構成と Slack 入口の設計（OpenClaw 対応は v3.1 で更新予定）</td></tr>
+  <tr><td>Personal AI Coach 要件</td><td>teamagent_personal_ai_coach_requirements_v3.0.html — 機能⑥ 全社展開構想（v4 / Phase 5 のスコープ）</td></tr>
+  <tr><td>初期 Skill B（動画分析）確定仕様書</td><td>teamagent_kinou4_spec_v1.html — Phase 4-d（S11）で参照</td></tr>
+  <tr><td>初期 Skill D（提案生成）Phase 0-E 仕様書</td><td>teamagent_phase0E_spec_v1.html — Phase 4-c（S9-S10）で参照</td></tr>
+</table>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>v3.0 からの主要変更</h3>
+<table>
+  <tr><th>変更</th><th>v3.0</th><th>v3.1</th></tr>
+  <tr><td>Agent ホスト</td><td>Claude Agent SDK を自社でラップして実装（Skill Registry も自前構築）</td><td><strong>OpenClaw（オープンソース、Agent SDK 互換）をフル採用</strong>。Skill は <strong>ClawHub のホワイトリスト Skill</strong> をレビューの上で登録。Bedrock 直接接続で Anthropic 政策変動の影響を抑制</td></tr>
+  <tr><td>Phase 構成</td><td>MVA P1（データ層）→ P2（Agent SDK）→ P3（検索 Skill）→ P4（5 Skill）→ P5（UX/本番化）の <strong>9ヶ月・17 Sprint</strong></td><td>同 Phase 構造を踏襲しつつ、Sprint を <strong>14 Sprint × 2週間 = 7ヶ月（M0.5〜M7.5）</strong> に圧縮。OpenClaw 採用によりランタイム工数が短縮されたぶん、Skill 5 個を S7-S12 に並列展開</td></tr>
+  <tr><td>Go/No-Go ゲート</td><td>M3 末（MVA リリースゲート）のみ</td><td><strong>2 段階に強化</strong>：S2 末ゲート①（OpenClaw 採用継続判断）+ S10 末ゲート②（提案書 20h→8-12h 短縮の実証）</td></tr>
+  <tr><td>開発期間</td><td>9 ヶ月（17 Sprint）/ 6月着手→2027年2月本番</td><td><strong>7 ヶ月（14 Sprint）</strong> / 6月前半着手→<strong>12月本格運用</strong></td></tr>
+  <tr><td>コスト体系</td><td>累積 ¥700K-900K / 月次 ¥95K-110K（一律試算）</td><td><strong>開発予算 ¥80K 上限（総額、月次ではない）</strong>+ <strong>運用費 月¥100K〜¥1M レンジ</strong>。MVA期間¥10-15K/月 → 16名展開¥30-50K/月 → 全社展開¥500K-1M/月 と段階的にスケール</td></tr>
+  <tr><td>個人開発ツール</td><td>FDE 込み試算</td><td>Claude Code / Codex 利用分は <strong>別承認済みの個人開発ツール枠</strong>として計上</td></tr>
+  <tr><td>リスク</td><td>R11-R15</td><td><strong>R16-R19 追加</strong>：OpenClaw CVE / ClawHub マルウェア / 創業者 OpenAI 移籍 / Anthropic 政策（影響度小に下方修正）</td></tr>
+</table>
+<div class="note warn">
+  <div class="label">v3.1 の意図</div>
+  v3.0 までは Claude Agent SDK をベースに <strong>Skill Registry も含めて自前構築</strong>する方針だったが、(a) <strong>OpenClaw が Agent SDK 互換のオープンソース実装</strong>として既に存在し、Skill Hub（ClawHub）も整っていること、(b) <strong>創業者の OpenAI 移籍</strong>でプロジェクト健全性のリスクは残るが Apache-2.0 で fork 可能なため致命的でないこと、(c) <strong>Bedrock 直接接続</strong>で Anthropic 政策変動からも遮断できること、を踏まえてフル採用に転換した。これにより MVA を <strong>S6（M3 末）</strong>で出して 5 名ベータ、<strong>S14（M7.5）= 2026年12月後半に本格運用開始</strong>を実現する。S2 末ゲート①で「OpenClaw 採用継続 or 自前ラップに戻すか」を再判断する撤退路を確保。
+</div>
+
+</section>
+
+
+<!-- ========== 2. 全体スケジュール ========== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>全体スケジュール</h2>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>7ヶ月スケジュール — 14 Sprint × 2週間（OpenClaw 採用版 / 12月本格運用ターゲット）</h3>
+<table>
+  <tr><th>期間</th><th>Phase</th><th>Sprint</th><th>主目的</th><th>マイルストーン</th></tr>
+  <tr><td>M0.5〜M1（1ヶ月）</td><td><strong>MVA Phase 1</strong>（基盤接続）</td><td>S1〜S2</td><td>OpenClaw + Bedrock セットアップ、Slack/Gmail/Drive コネクタ着手、pgvector 構築開始</td><td><strong>S2 末：Go/No-Go ゲート①</strong>（OpenClaw 採用継続判断 / Hello World 動作確認）</td></tr>
+  <tr><td>M1.5〜M2（1ヶ月）</td><td><strong>MVA Phase 1-2</strong>（データ層 + Agent ループ）</td><td>S3〜S4</td><td>pgvector 完成、Gmail/Drive 取り込み、ClawHub Skill レビュー、検索 Skill MVP 実装</td><td>M2 末：@TeamAgent で過去データ検索が動く</td></tr>
+  <tr><td>M2.5〜M3（1ヶ月）</td><td><strong>MVA Phase 3</strong>（ベータ）</td><td>S5〜S6</td><td>営業 5 名ベータ、FB 反映、16 名展開準備、運用ドキュメント整備</td><td><strong>M3 末：MVA 完成 / Phase 4 着手</strong></td></tr>
+  <tr><td>M4〜M5.5（1.5ヶ月）</td><td><strong>Phase 4-a/b/c</strong>（Skill 拡張）</td><td>S7〜S10</td><td>自動サジェスト Skill / Mail ワークフロー Skill / 提案コンテンツ生成 Skill（Phase A-E）</td><td><strong>S10 末：Go/No-Go ゲート②</strong>（提案書 1 案件 20h→8-12h 実証）</td></tr>
+  <tr><td>M6〜M6.5（1ヶ月）</td><td><strong>Phase 4-d/e</strong>（Skill 完成）</td><td>S11〜S12</td><td>動画ナレッジ分析 Skill（Gemini 2.5 Flash）/ 営業進捗サマリー Skill</td><td>M6.5 末：初期 5 Skill すべて ClawHub 経由で登録済み</td></tr>
+  <tr><td>M7〜M7.5（1ヶ月）</td><td><strong>Phase 5</strong>（QA + 本番化）</td><td>S13〜S14</td><td>統合テスト、負荷試験、セキュリティ監査、本格運用開始</td><td><strong>M7.5 = 2026年12月後半：本格運用開始 / Phase 5（NoimosAI 構想）の準備着手</strong></td></tr>
+</table>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>Sprint S1〜S14 詳細表（各 2 週間 / OpenClaw 採用版）</h3>
+<p>14 Sprint × 2週間 = 7ヶ月。OpenClaw のフル採用により Agent ホスト自前構築が不要になったぶん、S1-S6 で MVA、S7-S12 で Phase 4 の 5 Skill 並列展開、S13-S14 で本番化 QA を実施する。</p>
+<table>
+  <tr><th>Sprint</th><th>月</th><th>期間</th><th>所属 Phase</th><th>内容</th><th>成果 / ゲート</th></tr>
+  <tr><td>S1</td><td>M0.5</td><td>6月前半</td><td><span class="pill p-s1">MVA P1</span></td><td>OpenClaw + Bedrock セットアップ、Slack Channel 接続</td><td>OpenClaw が Slack 受け、Claude 呼べる Hello World</td></tr>
+  <tr><td>S2</td><td>M1</td><td>6月後半</td><td><span class="pill p-s1">MVA P1</span></td><td>Gmail / Drive コネクタ設置、pgvector 構築開始</td><td><strong>Go/No-Go ゲート①：OpenClaw 採用継続判断</strong></td></tr>
+  <tr><td>S3</td><td>M1.5</td><td>7月前半</td><td><span class="pill p-s1">MVA P1</span></td><td>pgvector 完成、Gmail / Drive データ取り込み開始、ClawHub Skill レビュー完了</td><td>データが pgvector に流れる</td></tr>
+  <tr><td>S4</td><td>M2</td><td>7月後半</td><td><span class="pill p-s2">MVA P2</span></td><td>検索 Skill MVP 実装（OpenClaw 上に登録）</td><td>@TeamAgent で過去データ検索が動く</td></tr>
+  <tr><td>S5</td><td>M2.5</td><td>8月前半</td><td><span class="pill p-s25">MVA P3</span></td><td>営業 5 名ベータ、フィードバック</td><td>MVA 検証完了</td></tr>
+  <tr><td>S6</td><td>M3</td><td>8月後半</td><td><span class="pill p-s25">MVA P3</span></td><td>FB 反映、営業 16 名展開準備、運用ドキュメント整備</td><td><strong>MVA 完成、Phase 4 着手</strong></td></tr>
+  <tr><td>S7</td><td>M4</td><td>9月前半</td><td><span class="pill p-s3">P4-a</span></td><td>Phase 4-a：Slack 自動サジェスト Skill</td><td>過去類似案件即提示</td></tr>
+  <tr><td>S8</td><td>M4.5</td><td>9月後半</td><td><span class="pill p-s3">P4-b</span></td><td>Phase 4-b：Mail ワークフロー Skill</td><td>朝 push + 下書き</td></tr>
+  <tr><td>S9</td><td>M5</td><td>10月前半</td><td><span class="pill p-s3">P4-c</span></td><td>Phase 4-c：提案コンテンツ生成 Skill（Phase A-B）</td><td>ヒアリングメモ → 提案書たたき</td></tr>
+  <tr><td>S10</td><td>M5.5</td><td>10月後半</td><td><span class="pill p-s3">P4-c</span></td><td>Phase 4-c 続：提案コンテンツ生成 Skill（Phase C-E）</td><td><strong>Go/No-Go ゲート②：提案書 1 案件 20h→8-12h 確認</strong></td></tr>
+  <tr><td>S11</td><td>M6</td><td>11月前半</td><td><span class="pill p-s3">P4-d</span></td><td>Phase 4-d：動画ナレッジ分析 Skill（Gemini 2.5 Flash）</td><td>競合動画 URL → 構造分析</td></tr>
+  <tr><td>S12</td><td>M6.5</td><td>11月後半</td><td><span class="pill p-s3">P4-e</span></td><td>Phase 4-e：営業進捗サマリー Skill</td><td>マネージャー横串集約</td></tr>
+  <tr><td>S13</td><td>M7</td><td>12月前半</td><td><span class="pill p-s4">P5</span></td><td>統合テスト、負荷試験、セキュリティ監査</td><td>本番運用前の最終 QA</td></tr>
+  <tr><td>S14</td><td>M7.5</td><td>12月後半</td><td><span class="pill p-s4">P5</span></td><td><strong>本格運用開始</strong>、Phase 5（NoimosAI 構想）の準備着手</td><td><strong>12月本格運用 ✅</strong></td></tr>
+</table>
+
+<div class="note warn">
+  <div class="label">2 段階 Go/No-Go ゲート（v3.1 新設）</div>
+  <strong>ゲート①（S2 末 / 6月後半）</strong>：OpenClaw が AWS Bedrock 経由で安定して動き、Slack/Gmail/Drive コネクタが想定通り設置できるか。失敗時は <strong>Claude Agent SDK 自前ラップ</strong>に戻し、スケジュールを +1ヶ月延伸（M8.5 本番）。<br>
+  <strong>ゲート②（S10 末 / 10月後半）</strong>：Skill D（提案コンテンツ生成）の Phase A-E が実装完了し、営業 1 案件で <strong>20h → 8-12h 短縮</strong>が定量実証されるか。未達なら S11-S12 を「動画 Skill 着手より Skill D の改善」に切替。
+</div>
+
+<h3 id="sec-2-3"><span class="num">2.3</span>月次マイルストーン M0.5〜M7.5 ガントチャート＋Go/No-Go ゲート</h3>
+<div class="note">
+  <div class="label">7 ヶ月 14 Sprint ガント（ASCII）</div>
+  <pre style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.6;background:transparent">
+              6月    7月    8月    9月    10月   11月   12月
+              M0.5/1 M1.5/2 M2.5/3 M4/4.5 M5/5.5 M6/6.5 M7/7.5
+              ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┐
+MVA P1 ────── │S1 S2◇│ S3   │      │      │      │      │      │
+MVA P2 ────── │      │   S4 │      │      │      │      │      │
+MVA P3 (β) ── │      │      │S5 S6◆│      │      │      │      │
+P4-a/b 自動・Mail │      │      │      │S7 S8 │      │      │      │
+P4-c 提案生成 │      │      │      │      │S9 S10◇      │      │
+P4-d/e 動画・進捗 │      │      │      │      │      │S11 S12      │
+P5 QA + 本番化 │      │      │      │      │      │      │S13 S14★│
+              └─────┴─────┴─────┴─────┴─────┴─────┴─────┘
+                 ↑G①    ↑MVA動  ↑β完了 ↑Skill順次  ↑G②    ↑Skill完  ↑本格運用
+
+◇ = Go/No-Go ゲート①（S2 末：OpenClaw 採用継続判断）
+◇ = Go/No-Go ゲート②（S10 末：提案書 20h→8-12h 短縮実証）
+◆ = MVA リリース（営業 5 名ベータ）
+★ = 12月本格運用開始
+  </pre>
+</div>
+
+</section>
+
+
+<!-- ========== 3. Phase 別計画 ========== -->
+<section id="sec-3">
+<h2><span class="num">3.</span>Phase 別計画</h2>
+
+<p>各 Sprint は <strong>目的・成果物・DoD・テスト工程・リスク</strong> の 5 観点で記述する。</p>
+<div class="note warn">
+  <div class="label">v3.1 の Sprint 再マッピング</div>
+  v3.1 では <strong>14 Sprint × 2週間 = 7ヶ月</strong> に圧縮しているため、以下の Sprint 詳細表は v3.0 の 17 Sprint ベースの記述を含む。v3.1 の正式 Sprint 配置は <strong>第 2.2 節の S1〜S14 詳細表</strong>を参照し、第 3 章の Sprint 詳細は <strong>各 Skill の DoD / テスト工程の参考資料</strong>として扱うこと（OpenClaw 採用により S1-S2 の Agent ホスト構築工数は削減され、データ層着手が前倒し）。
+</div>
+
+<!-- ===== 3.1 MVA Phase 1 ===== -->
+<h3 id="sec-3-1"><span class="num">3.1</span>MVA Phase 1（M0.5〜M1.5 / S1〜S3）OpenClaw + データ層連携</h3>
+<p>目的：初期 Skill セット5個すべてが依存する <strong>共通基盤と 3 データ層</strong>（Gmail / Drive / Slack）を pgvector に流し込む。MVA で「検索 Skill」を成立させる最小データを揃える。</p>
+
+<h4>Sprint S1（M1 W1-W2）— インフラセットアップ + pgvector 構築</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>AWS インフラ（Single-AZ）+ RDS PostgreSQL with pgvector + IaC（Terraform / CDK）一式</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) VPC / ECS / RDS pgvector / S3 / Secrets Manager。(2) IaC リポジトリ。(3) CI/CD（GitHub Actions）。(4) CloudWatch ベースライン</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・terraform apply で全リソース作成可能<br>・pgvector 拡張が RDS で有効化されている<br>・GitHub Actions の CI が green<br>・CloudWatch メトリクスが収集されている<br>・脅威モデリング初版（DREAD）が完了</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>単体（IaC 構文 lint）／結合（apply→destroy）／セキュリティ（IAM 最小権限チェック）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S1a: AWS IAM 権限不足で apply 失敗 → 事前に運用部門と権限確認</td></tr>
+</table>
+
+<h4>Sprint S2（M1 W3-W4）— Gmail OAuth + 取り込み</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>Gmail Pub/Sub watch + 差分取り込み + Embedding 化 + pgvector 格納</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) Gmail OAuth 同意フロー（社内 GWS 管理者経由）。(2) Pub/Sub watch + Cloud Functions or Lambda。(3) Embedding pipeline（text-embedding-3-large 候補）。(4) opt-out スイッチ</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・営業 1 名の Gmail がリアルタイムで pgvector に格納される<br>・本人 / 他人ラベル付き<br>・opt-out で取り込み停止可能<br>・監査ログが CloudWatch に出力される</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>単体（パーサ）／結合（OAuth → Pub/Sub → Embedding → pgvector）／受入（営業 1 名 1 週間運用）／セキュリティ（OAuth scope 監査）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R14: OAuth スコープの選定（Domain-wide vs 個別） — 子会社ヒアリングを並行</td></tr>
+</table>
+
+<h4>Sprint S3（M2 W1-W2）— Drive OAuth + 取り込み</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>Google Drive の社内資料を差分同期し、PDF/PPTX/DOCX を抽出して pgvector へ</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) Drive watch（changes.list）。(2) PDF/PPTX 抽出 pipeline（Tika / pdfplumber / python-pptx）。(3) チャンク化 + Embedding</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・社内 Drive 共有ドライブの全資料がインデックス化される<br>・PPTX のスライド単位でチャンク化される<br>・抽出失敗率 &lt; 3%<br>・更新差分が 1 時間以内に反映される</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>単体（抽出ロジック）／結合（Drive→抽出→pgvector）／回帰（PPTX バリエーション 20 件）／性能（5,000 ファイル取り込み時間）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S3a: 暗号化 PDF が抽出失敗 → 「要確認」化、エラーログで運用検知</td></tr>
+</table>
+
+<h4>Sprint S4（M2 W3-W4）— Slack OAuth + 取り込み + メタデータ層</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>Slack Events API + 案件メタデータ統合スキーマの確立</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) Slack Bolt App + Event subscription。(2) public/private チャンネルの取り込み。(3) メタデータ層スキーマ（案件 ID / 顧客 / フェーズ）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・営業の主要チャンネルがインデックス化される<br>・案件メタデータが Gmail / Slack / Drive を横断結合できる<br>・DM は opt-in 設定で取り込み</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>単体（Event parser）／結合（3 データ層横断検索）／受入（営業 2 名で「自分の過去案件」検索が動く）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S4a: Slack rate limit → backoff + キュー化</td></tr>
+</table>
+
+<!-- ===== 3.2 MVA Phase 2 ===== -->
+<h3 id="sec-3-2"><span class="num">3.2</span>MVA Phase 2（M2.5 / S5）Agent SDK 基本ループ + Skill Registry 雛形</h3>
+<p>目的：Claude Agent SDK を組み込み、「Slack で呼ばれる → Skill Registry から Skill を選択 → pgvector を検索する → 回答する」のループを成立させる。<strong>Skill Registry の構築は本 Phase に含む</strong>（拡張 Skill 受け入れの基盤）。</p>
+
+<h4>Sprint S5（M2.5）— Agent SDK 組み込み + Skill Registry 雛形 + pgvector 検索 Tool + Slack 受け口</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>Claude Agent SDK の基本ループを完成させ、Skill Registry 雛形を組み込み、Slack から呼べる状態に</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) Agent SDK ベースの Agent ランタイム（Orchestrator）。(2) <strong>Skill Registry 雛形</strong>（Skill 登録 / 発見 / 実行インターフェース）。(3) pgvector 検索 Tool（hybrid search：BM25 + embedding）。(4) Slack Bolt の app_mention handler。(5) 引用付き回答テンプレート</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・@TeamAgent にメンション → 3 秒以内に応答開始<br>・Skill Registry に Skill を登録／発見できる<br>・回答に Tier ラベル付き引用が含まれる<br>・hybrid search の recall@10 ≥ 0.85（手動評価 30 件）<br>・捏造率（引用に無い数値）= 0%</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>単体（Tool 呼び出し）／結合（Slack→Agent→検索→Slack 応答）／性能（応答 SLO 3 秒）／受入（営業 2 名で 30 問評価）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R12: Embedding モデル選定の不確実性 → S5 中に 3 モデル A/B 比較</td></tr>
+</table>
+
+<!-- ===== 3.3 MVA Phase 3 ===== -->
+<h3 id="sec-3-3"><span class="num">3.3</span>MVA Phase 3（M3 / S6）超軽量・検索 Skill（Skill Registry に登録）</h3>
+<p>目的：「過去事例を検索して引用付きで返す」 1 Skill だけを完成させ、Skill Registry に登録し、営業 5 名にベータ提供する。<strong>MVA の中核 Sprint</strong>。</p>
+
+<h4>Sprint S6（M3）— 検索 Skill 実装（Skill Registry 登録）+ 営業 5 名ベータ + FB 収集</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>Agent SDK 上に「検索 Skill」を最小実装して Skill Registry に登録し、営業 5 名でベータ運用</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) 検索 Skill（Tier 0-3 引用ラベル必須、Skill Registry 登録済み）。(2) Slack ephemeral 応答 UI（カード形式）。(3) FB 収集フォーム（thumbs up/down + 自由記述）。(4) ベータ運用ドキュメント</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・営業 5 名が 2 週間日常運用<br>・1 日平均 5 回以上の利用<br>・回答満足度 ≥ 70%<br>・捏造率 = 0%、引用率 ≥ 90%<br>・FB 30 件以上を分類して次 Phase 4 にインプット</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>受入（5 名 2 週間）／監査ログ（全クエリの記録）／カオス（pgvector 障害時のフォールバック）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R11: MVA 期間中の見える成果物の薄さ → 検索 Skill で価値を可視化（本 Sprint で対応）</td></tr>
+</table>
+
+<div class="note">
+  <div class="label">MVA リリースゲート（M3 末）</div>
+  S6 完了時点で <strong>Go/No-Go ゲート</strong>を設置。満足度 ≥ 70% + 捏造率 0% + 1 日 5 回以上利用 の 3 条件を満たせば Phase 4 へ進む。未達なら S6 を 2 週間延長してプロンプト / 検索チューニング。
+</div>
+
+
+<!-- ===== 3.4 Phase 4 ===== -->
+<h3 id="sec-3-4"><span class="num">3.4</span>Phase 4（M4〜M6 / S7〜S12）初期 Skill セット5個を Skill Registry に登録</h3>
+<p>目的：MVA で検証した Agent 基盤・Skill Registry の上に、<strong>初期 Skill セット5個（Skill A 検索＝MVA で登録済み、Skill B 動画分析・Skill C Mail・Skill D 提案・Skill E 自動サジェスト・出力整形 Skill）</strong>を順次実装し Skill Registry に登録。営業 10 名展開まで進める。</p>
+
+<h4>Sprint S7（M4 W1-W2）— 初期 Skill B ①：動画ナレッジ分析 MVP（Skill Registry 登録）</h4>
+<p>Skill B（動画分析）仕様書 v1 を参照。Gemini 2.5 Flash の動画ネイティブ機能を主軸に。</p>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>Slack に貼られた動画 URL を Gemini で分析 → 構造化レポート</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) URL リゾルバ（YouTube Shorts / IG / TikTok）。(2) Gemini 動画 prompt + パーサ。(3) Slack カード出力</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・3 プラットフォーム対応<br>・1 動画 90 秒以内に分析完了<br>・テスト動画 20 件で構造化失敗率 &lt; 10%</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>結合（URL→Gemini→Slack）／回帰（20 動画スイート）／性能（同時 3 動画）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S7a: 非公開 IG 動画で失敗 → 「要確認」化</td></tr>
+</table>
+
+<h4>Sprint S8（M4 W3-W4）— 初期 Skill B ②：露出度分析</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>Buzzmiru / dpro と接続し、動画の露出度・視聴データを取得・統合</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) Buzzmiru / dpro API クライアント。(2) 露出度メトリクス層。(3) Slack レポート拡張</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・3 プラットフォームのメトリクスが統一スキーマで返る<br>・PoC ゲート評価で営業 3 名が「使える」と判断</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>結合（外部 API モック）／受入（営業 3 名 1 週間）／監査（API 利用ログ）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R15: 外部 SaaS API 実在性不明 → BOOSTTECH / dpro へ問い合わせ並行</td></tr>
+</table>
+
+<h4>Sprint S9（M5 W1-W2）— 初期 Skill C ①：Mail 朝サマリー（Skill Registry 登録）</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>朝バッチで前日 Mail を要約し、案件抽出して Slack DM</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) 朝バッチ EventBridge スケジュール。(2) Mail 案件抽出 prompt。(3) Slack DM カード</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・営業 5 名の朝 8:00 に DM 到達<br>・案件抽出精度 ≥ 80%（手動評価 50 件）<br>・1 通あたり要約 8 秒以内</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>結合（Gmail→要約→Slack）／受入（5 名 1 週間）／性能（一斉バッチ 200 通）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S9a: スレッド境界の誤判定 → スレッド ID 強制利用</td></tr>
+</table>
+
+<h4>Sprint S10（M5 W3-W4）— 初期 Skill C ②：返信深掘り + 進捗サマリー</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>朝サマリーから返信深掘りモード → 返信ドラフト → Gmail 下書き保存。+ マネージャー向け進捗 DM</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) 返信ドラフト Skill。(2) Gmail Draft API 連携。(3) マネージャー進捗 DM（営業⑤を内包）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・返信ドラフトが Gmail に保存される<br>・営業 5 名で受入 OK<br>・マネージャー 2 名が「使える」と判断</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>結合（Slack→ドラフト→Gmail）／受入（5 名 1 週間）／セキュリティ（Draft scope）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S10a: 誤送信防止 — Draft 保存のみで送信機能は提供しない</td></tr>
+</table>
+
+<h4>Sprint S11（M6 W1-W2）— 初期 Skill D：提案 Phase A（RAG + Gemini DR / Skill Registry 登録）</h4>
+<p>Skill D（提案生成）Phase 0-E 仕様書を参照。Phase A は「5割版生成」まで。</p>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>過去事例 RAG + Gemini Deep Research で 5 割版提案コンテンツを生成</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) RAG パイプライン。(2) Gemini DR Tool（Pattern Bravo+）。(3) 5 割版 HTML 出力</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・案件 1 件で 5 割版 HTML が 10 分以内に出る<br>・Tier 0-3 引用ラベル必須<br>・引用率 ≥ 90% / 捏造率 0%</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>結合（案件→RAG→DR→HTML）／品質（30 件サンプリング QA）／性能（10 分 SLO）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R10: データドリブン度 KPI 未達 → プロンプトチューニング + 引用率モニタリング</td></tr>
+</table>
+
+<h4>Sprint S12（M6 W3-W4）— Skill D Phase B〜E + 初期 Skill E + 出力整形 Skill</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>対話型仕上げ（5 割 → 8 割）、自動サジェスト、出力整形（Skill Registry に残り Skill 登録）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) 対話型仕上げフロー（Skill D Phase B-E）。(2) 初期 Skill E：自動サジェスト Skill（@TeamAgent サジェスト + 意図ルーター）。(3) 出力整形 Skill（MD / HTML 統合出力）。すべて Skill Registry に登録済み</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・5 割 → 8 割版が対話 5 ターン以内で完成<br>・意図ルーター confidence &lt; 0.7 で確認 ephemeral<br>・営業 10 名展開で 30 案件達成</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>受入（営業 10 名 2 週間）／回帰（事例検索 vs 提案生成 100 件）／監査ログ</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R8: 意図ルーター誤判定 → slash command で確定起動</td></tr>
+</table>
+
+<!-- ===== 3.5 Phase 5 ===== -->
+<h3 id="sec-3-5"><span class="num">3.5</span>Phase 5（M7〜M9 / S13〜S17）UX / Guardrails / 本番化</h3>
+<p>目的：初期 Skill セット5個を <strong>営業 16 名が日常運用できる本番品質</strong>に磨き上げ、出力レイヤー（PDF/PPTX）と UI（ボタン / Workflow Builder）と Guardrails を整える。</p>
+
+<h4>Sprint S13（M7 W1-W2）— HTML→PDF/PPTX 変換層実装</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>提案コンテンツの HTML を PDF / PPTX に変換する pipeline 構築</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) Playwright ベースの HTML→PDF コンバータ。(2) python-pptx ベースの HTML→PPTX 変換（テンプレ駆動）。(3) S3 配信 + Slack ファイル添付</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・HTML 提案物が PDF / PPTX に 30 秒以内で変換される<br>・PPTX は社内テンプレート（FMT.pptx 互換）を適用<br>・営業 5 名で受入 OK</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>単体（コンバータ）／回帰（20 HTML 変換）／受入（営業 5 名）／性能（同時 5 変換）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S13a: PPTX テンプレ複雑度高 → 段階的に複雑レイアウト対応</td></tr>
+</table>
+
+<h4>Sprint S14（M7 W3-W4）— WYSIWYG エディタ実装</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>提案物の対話編集 UI（Web ベース WYSIWYG）+ 差分保存</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) Web エディタ（TipTap / ProseMirror ベース）。(2) 差分保存 + 監査ログ。(3) Slack → エディタ deep link</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・提案物がブラウザで編集可能<br>・編集差分が S3 に保存される<br>・営業 5 名で受入 OK</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>単体（エディタ）／結合（Slack→ブラウザ）／受入（5 名）／セキュリティ（認証）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S14a: ブラウザ互換性 → Chrome / Edge / Safari の主要 3 ブラウザに限定</td></tr>
+</table>
+
+<h4>Sprint S15（M8 W1-W2）— Block Kit / Slash Command / Workflow Builder UI</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>営業が <strong>「Slack のボタン」</strong>で各 Skill を呼べる UI を整備</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) Block Kit ホームタブ（初期 Skill セット5個のボタン）。(2) Slash command（/teamagent recall / compose / brief / analyze）。(3) Workflow Builder テンプレート 3 種（朝サマリー / 提案開始 / 動画分析）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・ホームタブで初期 Skill セット5個が起動可能<br>・slash command 4 種が動く<br>・Workflow Builder テンプレを営業がカスタマイズ可能</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>単体（Block Kit JSON）／結合（ボタン→Skill）／受入（営業 10 名 1 週間）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S15a: ホームタブの情報過多 → 営業 FB で段階的に絞り込み</td></tr>
+</table>
+
+<h4>Sprint S16（M8 W3-W4）— Guardrails 強化（薬機法・景表法・ステマ・KOL 権利）</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>広告・PR 業界特有の法規制を Guardrails として組み込み、監査可能に</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) 禁則辞書（薬機法・景表法・ステマ表記）。(2) KOL 権利チェック（肖像 / 楽曲 / 引用）。(3) 出力前 LLM レビュア（Sonnet 4.6）。(4) 監査ログ + 引用率 90% 強制</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・禁則辞書ヒット 100% 検知（30 件評価）<br>・KOL 権利チェック手順がドキュメント化<br>・引用率 ≥ 90% / 捏造率 = 0% を本番 KPI として固定</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>単体（禁則辞書）／回帰（NG 例 50 件）／受入（法務レビュー）／セキュリティ（PII 監査）</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R-S16a: 法規制改定 → 禁則辞書を運用で月次更新</td></tr>
+</table>
+
+<h4>Sprint S17（M9）— 本番化 + 営業 16 名オンボーディング + 運用監視</h4>
+<table>
+  <tr><td style="width:120px;background:var(--bg-soft)"><strong>目的</strong></td><td>本番環境の最終調整、16 名展開、運用ドキュメント完成</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>成果物</strong></td><td>(1) 本番環境（IaC 確定）。(2) CloudWatch + Sentry + データ品質ダッシュボード。(3) Runbook（インシデント対応）。(4) 営業オンボーディング資料 + ハンズオン</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>DoD</strong></td><td>・営業 16 名全員ログイン完了<br>・SLO 99% で 2 週間稼働<br>・運用引継ぎドキュメント完成<br>・月次レビュー会議が定例化</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>テスト</strong></td><td>E2E（初期 Skill セット5個すべて）／カオス（RDS / Gemini 障害）／受入（16 名）／監査ログ全件確認</td></tr>
+  <tr><td style="background:var(--bg-soft)"><strong>リスク</strong></td><td>R6: 営業のオンボーディング遅れ → MVA で既に 5 名が経験済み、Phase 5 で残り 11 名</td></tr>
+</table>
+
+<!-- ===== 3.6 Phase 5+ ===== -->
+<h3 id="sec-3-6"><span class="num">3.6</span>Phase 5+（M10〜 / 拡張 Skill 開発フェーズ）</h3>
+<p>目的：Skill Registry 上に <strong>拡張 Skill</strong>（業務固有 / ユーザー定義 / 高林プロンプト Skill 等）を継続的に追加し、TeamAgent の適用範囲を全社・全業務へ拡張する。本書 9 ヶ月計画の<strong>外</strong>に位置付け、運用フェーズで Skill 単位の Sprint を組み立てる。</p>
+
+<div class="note">
+  <div class="label">拡張 Skill のカテゴリ（例）</div>
+  <ul style="margin:8px 0 0 24px;line-height:1.85">
+    <li><strong>業務固有 Skill</strong>：請求書整理、契約レビュー、KPI ダッシュボード生成 など、特定業務に閉じる Skill。営業部・PR 部・経営企画など部門ごとに追加可能。</li>
+    <li><strong>ユーザー定義 Skill</strong>：営業個人が自分のワークフローを Skill 化（例：自分の「朝の準備ルーチン」を Skill 化）。Skill Registry のセルフサービス登録 UI を Phase 5+ 後半で検討。</li>
+    <li><strong>高林プロンプト Skill</strong>：社内ベテラン営業（高林氏）のプロンプト集を Skill としてパッケージ化し、新人営業に展開する Skill。ノウハウ継承の手段。</li>
+    <li><strong>外部連携 Skill</strong>：Salesforce / kintone / Notion など外部システム連携を Skill 化（既存 OAuth 基盤を再利用）。</li>
+  </ul>
+</div>
+
+<table>
+  <tr><th>項目</th><th>方針</th></tr>
+  <tr><td>開始時期</td><td>M9 末（本書 17 Sprint 完了後）以降、運用フェーズで継続的に</td></tr>
+  <tr><td>Sprint 粒度</td><td>1 Skill = 2〜4 週間（複雑度に応じて）</td></tr>
+  <tr><td>登録経路</td><td>Skill Registry へ FDE / マネージャー承認のうえ登録（セルフサービス化は段階的に）</td></tr>
+  <tr><td>Guardrails</td><td>Phase 5（S16）で確立した禁則辞書・引用率 90% を全 Skill に適用</td></tr>
+  <tr><td>コスト</td><td>本書 6 章の運用コストレンジ（¥100K〜¥1M/月、スケール段階に応じて）の枠内。Skill 追加に伴う Embedding / API 増分は別途追加見積</td></tr>
+  <tr><td>スコープ管理</td><td>Skill カタログを四半期レビュー、利用率の低い Skill は Deprecate</td></tr>
+</table>
+
+<p style="font-size:12px;color:var(--text-subtle)">※ Phase 5+ は本書 7 ヶ月 / 開発予算 ¥80K の<strong>外</strong>に位置付け、運用予算（月¥100K-1M レンジ）の中で Skill 単位に改めて見積もる。</p>
+
+</section>
+
+
+<!-- ========== 4. Sprint 内工数配分 ========== -->
+<section id="sec-4">
+<h2><span class="num">4.</span>Sprint 内工数配分</h2>
+
+<h3 id="sec-4-1"><span class="num">4.1</span>実装 55% / テスト 25% / 修正・安定化 20%</h3>
+<p>v2.2 から継承。各 Sprint は 2 週間 = 10 営業日。</p>
+<table>
+  <tr><th>区分</th><th>比率</th><th>日数（2 週間中）</th><th>主活動</th></tr>
+  <tr><td><strong>実装</strong></td><td>55%</td><td>5.5 日</td><td>コーディング、CI/CD 整備、ドキュメント執筆</td></tr>
+  <tr><td><strong>テスト</strong></td><td>25%</td><td>2.5 日</td><td>単体・結合・E2E・性能・セキュリティ・受入</td></tr>
+  <tr><td><strong>修正・安定化</strong></td><td>20%</td><td>2.0 日</td><td>不具合修正、リファクタ、運用準備</td></tr>
+</table>
+
+<h3 id="sec-4-2"><span class="num">4.2</span>Champion 検証サイクル</h3>
+<p>各 Sprint 末（金曜含む 3 日間）に Champion 検証ウィンドウを設置。</p>
+<table>
+  <tr><th>Day</th><th>活動</th><th>成果物</th></tr>
+  <tr><td>Day 1（Sprint 末木曜）</td><td>営業 Champion による実利用</td><td>使用ログ + 一次 FB</td></tr>
+  <tr><td>Day 2（Sprint 末金曜）</td><td>FB 分類 + 優先度付け</td><td>FB ボード（Linear / GitHub Issues）</td></tr>
+  <tr><td>Day 3（次 Sprint 月曜）</td><td>次 Sprint への反映決定</td><td>Sprint バックログ更新</td></tr>
+</table>
+
+</section>
+
+<!-- ========== 5. テスト工程 ========== -->
+<section id="sec-5">
+<h2><span class="num">5.</span>テスト工程</h2>
+<p>v2.2 から継承し、Phase 別に再配置。</p>
+<table>
+  <tr><th>テスト種別</th><th>MVA Phase 1-3（S1-S6）</th><th>Phase 4（S7-S12）</th><th>Phase 5（S13-S14）</th></tr>
+  <tr><td>単体テスト</td><td>S1-S6 全 Sprint</td><td>S7-S12 全 Sprint</td><td>S13-S14 全 Sprint</td></tr>
+  <tr><td>結合テスト</td><td>S2-S6</td><td>S7-S12 全 Sprint</td><td>S13</td></tr>
+  <tr><td>E2E テスト</td><td>S4-S5</td><td>S8, S10, S12</td><td>S13, S14</td></tr>
+  <tr><td>受入テスト</td><td>S5-S6（営業 5 名ベータ）</td><td>S8, S10, S12（営業 10 名）</td><td>S14（営業 16 名）</td></tr>
+  <tr><td>性能テスト</td><td>S4（応答 SLO 3秒）</td><td>S7, S9, S11</td><td>S13（負荷試験）</td></tr>
+  <tr><td>カオステスト</td><td>S5（pgvector fallback）</td><td>S12</td><td>S13（RDS / Bedrock / Gemini 障害）</td></tr>
+  <tr><td>セキュリティテスト</td><td>S1（脅威モデリング初版）, S2, S3</td><td>S8（Gmail Draft scope）</td><td>S13（監査）</td></tr>
+  <tr><td>回帰テスト</td><td>S3（PPTX バリエ）</td><td>S11（動画 20 件）, S12</td><td>S13</td></tr>
+  <tr><td>監査ログテスト</td><td>S2, S3, S5（全クエリ記録）</td><td>S7, S8</td><td>S13, S14</td></tr>
+</table>
+
+</section>
+
+<!-- ========== 6. コスト試算 ========== -->
+<section id="sec-6">
+<h2><span class="num">6.</span>コスト試算</h2>
+
+<div class="note warn">
+  <div class="label">本コスト試算の前提（v3.1）</div>
+  v3.1 では <strong>「開発予算」と「運用予算」を完全に分離</strong>する。開発予算は <strong>¥80K の総額上限</strong>（月次ではない / 7ヶ月の全期間で消化）で、Bedrock 経由の Claude API + AWS + 外部 API + 開発検証用 OAuth を含む。運用予算は <strong>月¥100K〜¥1M レンジ</strong>で、利用者数のスケールに応じて段階的に増える。<strong>Shogo さん使用分の Claude Code / Codex は別承認済みの個人開発ツール枠</strong>として、本予算の外で計上する。
+</div>
+
+<h3 id="sec-6-1"><span class="num">6.1</span>開発予算（¥80K 総額上限・7 ヶ月分の合計）</h3>
+<table>
+  <tr><th>区分</th><th>7ヶ月累計（最大）</th><th>備考</th></tr>
+  <tr><td>AWS インフラ（Single-AZ・小〜中規模）</td><td>¥35,000 程度</td><td>MVA 期 ¥3-5K/月、Phase 4 拡張時 ¥8-10K/月で段階的に立ち上げ</td></tr>
+  <tr><td>Anthropic API（Bedrock 経由 / 開発検証用）</td><td>¥25,000 程度</td><td>主に Sonnet 4.6。プロンプト試行・回帰テスト用</td></tr>
+  <tr><td>Gemini API（開発検証用）</td><td>¥10,000 程度</td><td>S11 動画分析 Skill の検証用、PoC ベース</td></tr>
+  <tr><td>OAuth / 開発者アカウント</td><td>¥10,000 程度</td><td>Slack / Google Workspace 開発者枠</td></tr>
+  <tr><td><strong>合計</strong></td><td><strong>¥80,000（上限）</strong></td><td>本予算は <strong>7ヶ月の総額</strong>であり、月次ではない</td></tr>
+</table>
+<table style="margin-top:8px">
+  <tr><th>個人開発ツール（別枠・承認済み）</th><th>備考</th></tr>
+  <tr><td>Claude Code Max $200 プラン</td><td>Shogo さん使用分。本予算の外で計上</td></tr>
+  <tr><td>Codex（必要時）</td><td>同上</td></tr>
+</table>
+
+<h3 id="sec-6-2"><span class="num">6.2</span>運用予算（月¥100K〜¥1M レンジ・スケール段階別）</h3>
+<p>運用費は利用者数と Skill 数に応じて段階的に増える。MVA 期は軽量、本格運用後は中規模、全社展開時には大規模に拡張する。</p>
+<table>
+  <tr><th>段階</th><th>期間</th><th>月次レンジ</th><th>主要内訳</th></tr>
+  <tr><td><strong>MVA 期間</strong></td><td>〜M3（S6 末まで）</td><td><strong>¥10,000 〜 ¥15,000 / 月</strong></td><td>営業 5 名ベータ、軽負荷。Bedrock 軽量 + 小規模 RDS + S3</td></tr>
+  <tr><td><strong>Phase 4 期間</strong></td><td>M3〜M7（S7〜S13）</td><td><strong>¥30,000 〜 ¥50,000 / 月</strong></td><td>営業 16 名展開、Skill 5 個稼働。Bedrock 中量 + AWS スケール</td></tr>
+  <tr><td><strong>本格運用後</strong></td><td>M7.5〜</td><td><strong>¥100,000〜 / 月</strong></td><td>営業 16 名 + マネージャー稼働。Skill 全 5 個 + 監査ログ + 監視</td></tr>
+  <tr><td><strong>全社展開時（v4 / Phase 5）</strong></td><td>2027年以降</td><td><strong>¥500,000 〜 ¥1,000,000 / 月</strong></td><td>社員全体 + Personal AI Coach。Bedrock 大量 + Multi-AZ + 専用運用枠</td></tr>
+</table>
+<div class="note">
+  <div class="label">本格運用後（M7.5〜）の月次内訳イメージ</div>
+  AWS インフラ ¥30-40K / Anthropic API（Bedrock）¥40-50K / Gemini API ¥20-25K / 監査・運用バッファ ¥10K = 合計 <strong>¥100-125K / 月</strong>。Skill 数が増えるごとに概ね +¥10-20K/月で線形に伸びる想定。
+</div>
+
+<h3 id="sec-6-3"><span class="num">6.3</span>外部 SaaS 連携時の追加</h3>
+<table>
+  <tr><th>外部 SaaS</th><th>用途</th><th>月次追加（参考）</th><th>備考</th></tr>
+  <tr><td>SHORTBOOSTER（仮）</td><td>YouTube Shorts 分析</td><td>¥10,000 〜 ¥30,000</td><td>API 実在性は要問合せ（R15）</td></tr>
+  <tr><td>dpro</td><td>動画広告データ</td><td>¥30,000 〜 ¥50,000</td><td>既存契約継続 / 新規契約で変動</td></tr>
+  <tr><td>Buzzmiru</td><td>SNS 動画分析</td><td>¥20,000 〜 ¥40,000</td><td>既存契約継続を想定</td></tr>
+  <tr><td>Apify / Bright Data 等</td><td>Instagram スクレイピング</td><td>¥10,000 〜 ¥50,000</td><td>Skill B 範囲外、別途検討</td></tr>
+</table>
+<p style="font-size:12px;color:var(--text-subtle)">※ 6.2 の月次運用には上記 6.3 の外部 SaaS は <strong>含まない</strong>。連携する場合は別途加算。</p>
+
+<h3 id="sec-6-4"><span class="num">6.4</span>試算の前提と免責</h3>
+<div class="note warn">
+  <div class="label">免責事項</div>
+  本書のコスト試算は <strong>AI（Claude）による参考値</strong>であり、実測値ではない。前提：(1) 為替 1 USD = 155 円、(2) FDE 1 人 + 個人開発ツール枠（Claude Code / Codex は別承認）、(3) AWS Single-AZ（本格運用後は Multi-AZ に拡張余地）、(4) Anthropic（Bedrock 経由）/ Gemini の 2026 年初の価格を採用、(5) 営業 16 名 × 月 5 件案件の利用量を本格運用ベースに想定。<strong>開発予算 ¥80K と運用予算 月¥100K-1M レンジは別軸であり、混同しないこと</strong>。利用量・価格改定により増減する可能性が高いため、<strong>調達前に実勢見積を取得すること</strong>。
+</div>
+
+</section>
+
+<!-- ========== 7. 月次ダッシュボード ========== -->
+<section id="sec-7">
+<h2><span class="num">7.</span>月次ダッシュボード</h2>
+<p>M0.5〜M7.5 のマイルストーン進捗・コスト消化率・主要 KPI・リスク状況。</p>
+<table>
+  <tr><th>月</th><th>Sprint</th><th>マイルストーン</th><th>取り込み件数</th><th>Skill 数</th><th>検索 QPS</th><th>コスト消化率<br>（開発 / 運用）</th><th>営業利用率</th></tr>
+  <tr><td>M0.5（6月前半）</td><td>S1</td><td>OpenClaw + Bedrock + Slack Hello World</td><td>0</td><td>0</td><td>0</td><td>5% / —</td><td>—</td></tr>
+  <tr><td>M1（6月後半）</td><td>S2</td><td><strong>ゲート①：採用継続判断</strong>、Gmail/Drive コネクタ着手</td><td>0</td><td>0</td><td>0</td><td>15% / —</td><td>—</td></tr>
+  <tr><td>M1.5（7月前半）</td><td>S3</td><td>pgvector 完成、データ取り込み開始、ClawHub Skill レビュー</td><td>1万件</td><td>0</td><td>0</td><td>30% / 1万円</td><td>—</td></tr>
+  <tr><td>M2（7月後半）</td><td>S4</td><td>検索 Skill MVP 実装、@TeamAgent で検索動作</td><td>5万件</td><td>1</td><td>10/日</td><td>50% / 1.5万円</td><td>FDE 1 名のみ</td></tr>
+  <tr><td>M2.5（8月前半）</td><td>S5</td><td><strong>営業 5 名ベータ開始</strong>、FB 収集</td><td>10万件</td><td>1</td><td>50/日</td><td>65% / 1.5万円</td><td>5 名 × 1 日 5 回</td></tr>
+  <tr><td>M3（8月後半）</td><td>S6</td><td><strong>MVA 完成、Phase 4 着手</strong>、16 名展開準備</td><td>15万件</td><td>1</td><td>80/日</td><td>75% / 1.5万円</td><td>5 名 → 拡大準備</td></tr>
+  <tr><td>M4（9月前半）</td><td>S7</td><td>自動サジェスト Skill（Phase 4-a）</td><td>20万件</td><td>2</td><td>150/日</td><td>80% / 3万円</td><td>10 名展開</td></tr>
+  <tr><td>M4.5（9月後半）</td><td>S8</td><td>Mail ワークフロー Skill（Phase 4-b）</td><td>25万件</td><td>3</td><td>200/日</td><td>85% / 4万円</td><td>10 名展開</td></tr>
+  <tr><td>M5（10月前半）</td><td>S9</td><td>提案コンテンツ生成 Skill Phase A-B</td><td>30万件</td><td>3</td><td>250/日</td><td>90% / 4.5万円</td><td>13 名展開</td></tr>
+  <tr><td>M5.5（10月後半）</td><td>S10</td><td><strong>ゲート②：提案書 20h→8-12h 実証</strong></td><td>35万件</td><td>4</td><td>300/日</td><td>92% / 5万円</td><td>13 名展開</td></tr>
+  <tr><td>M6（11月前半）</td><td>S11</td><td>動画ナレッジ分析 Skill（Phase 4-d）</td><td>40万件</td><td>4</td><td>350/日</td><td>95% / 5万円</td><td>16 名展開準備</td></tr>
+  <tr><td>M6.5（11月後半）</td><td>S12</td><td>営業進捗サマリー Skill（Phase 4-e）、Skill 5 個完成</td><td>45万件</td><td>5</td><td>400/日</td><td>98% / 5万円</td><td>16 名展開準備</td></tr>
+  <tr><td>M7（12月前半）</td><td>S13</td><td>統合テスト・負荷試験・セキュリティ監査</td><td>50万件</td><td>5</td><td>450/日</td><td>100% / 7万円</td><td>16 名 QA 参加</td></tr>
+  <tr><td>M7.5（12月後半）</td><td>S14</td><td><strong>本格運用開始 ✅ / Phase 5（NoimosAI）準備</strong></td><td>55万件</td><td>5</td><td>500/日</td><td>100% / 10万円</td><td><strong>16 名フル稼働</strong></td></tr>
+</table>
+
+</section>
+
+
+<!-- ========== 8. リスク管理 ========== -->
+<section id="sec-8">
+<h2><span class="num">8.</span>リスク管理</h2>
+<p>v2.2 のリスク R1〜R10、v3.0 で追加した R11〜R15 を継承し、v3.1 では OpenClaw フル採用に伴うリスク R16〜R19 を追加。R4（Anthropic 関連）の影響度は Bedrock 直接接続により <strong>下方修正</strong>。</p>
+<table>
+  <tr><th>ID</th><th>リスク</th><th>影響</th><th>緩和策</th></tr>
+  <tr><td>R1</td><td>Slack Workspace 管理者の OAuth 承認遅延</td><td>中</td><td>S1 着手前に承認取得済みであることを前提</td></tr>
+  <tr><td>R2</td><td>Gmail API クォータ超過</td><td>低</td><td>朝バッチを分散、Domain-wide delegation で安定化</td></tr>
+  <tr><td>R3</td><td>他人メール参照のプライバシー懸念</td><td>中</td><td>監査ログ + opt-out + フィルタ（v3.0 構想書 11.2）</td></tr>
+  <tr><td>R4</td><td>Claude API コスト超過 / Anthropic 政策変動</td><td><s>中</s> 小 <span style="background:#dcfce7;color:#15803d;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.1 下方修正</span></td><td>Bedrock 直接接続で Anthropic 政策変動から遮断、運用予算月¥100K-1M レンジで上限管理</td></tr>
+  <tr><td>R5</td><td>Gemini DR API のクォータ・料金変動</td><td>中</td><td>Pattern Bravo+ の 4 経路冗長化</td></tr>
+  <tr><td>R6</td><td>営業のオンボーディング遅れ</td><td>中</td><td>v3.0/v3.1 では MVA で 5 名先行（M3 末）→ 16 名へ段階展開</td></tr>
+  <tr><td>R8</td><td>意図ルーター誤判定</td><td>低</td><td>confidence &lt; 0.7 で確認 ephemeral + slash command 確定起動</td></tr>
+  <tr><td>R9</td><td>期間延長による期待値ズレ</td><td>中</td><td>MVA で M3 末から価値を見せ、週次進捗を可視化</td></tr>
+  <tr><td>R10</td><td>データドリブン度 KPI 未達（引用率 90% 未満、捏造率 5% 超）</td><td>高</td><td>S4 から Tier ラベル必須、引用率モニタ、30 件サンプリング QA</td></tr>
+  <tr><td>R11 <span style="background:#fef3c7;color:#ca8a04;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.0</span></td><td>MVA 期間中の見える成果物の薄さ</td><td>中</td><td>P3（S5-S6）で <strong>超軽量検索 Skill</strong> を 1 機能だけ出し、5 名で 2 週間運用</td></tr>
+  <tr><td>R12 <span style="background:#fef3c7;color:#ca8a04;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.0</span></td><td>Embedding モデル選定の不確実性</td><td>中</td><td>MVA Phase 2（S4）中に 3 モデル A/B 比較で固定</td></tr>
+  <tr><td>R13 <span style="background:#fef3c7;color:#ca8a04;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.0</span></td><td>既存ドキュメント（v2.2 / v3.0）との整合性ロス</td><td>低</td><td>v2.2/v3.0 文書を archive 化、v3.1 群への参照に統一</td></tr>
+  <tr><td>R14 <span style="background:#fef3c7;color:#ca8a04;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.0</span></td><td>OAuth スコープ選定（Domain-wide vs 個別）</td><td>中</td><td>S1-S2 並行で子会社ヒアリング、運用部門と協議</td></tr>
+  <tr><td>R15 <span style="background:#fef3c7;color:#ca8a04;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.0</span></td><td>外部 SaaS API（SHORTBOOSTER 等）の実在性不明</td><td>中</td><td>BOOSTTECH / dpro 等への問い合わせを S11 前に完了</td></tr>
+  <tr><td><strong>R16</strong> <span style="background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.1</span></td><td>OpenClaw 本体の脆弱性（CVE 発生）</td><td>中</td><td><strong>CVE 監視運用</strong>（mva_spec v1.1 第 12.2 節参照）。GitHub Security Advisory + Snyk / Dependabot で日次スキャン、緊急パッチは 1 営業日以内に適用</td></tr>
+  <tr><td><strong>R17</strong> <span style="background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.1</span></td><td>ClawHub Skill のマルウェア混入</td><td>高</td><td><strong>ホワイトリスト運用</strong>（mva_spec v1.1 第 12.1 節）。Skill 登録前にコードレビュー + 静的解析 + サンドボックス実行検証を必須化、署名済み Skill のみ採用</td></tr>
+  <tr><td><strong>R18</strong> <span style="background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.1</span></td><td>創業者 OpenAI 移籍後のプロジェクト健全性低下</td><td>中</td><td><strong>コミッター活動度ウォッチ</strong>（月次で commit 頻度・PR マージ速度・issue 応答時間を計測）。1Q 連続で活動度低下 → Apache-2.0 ベースで fork する撤退計画を S2 ゲート①で確認</td></tr>
+  <tr><td><strong>R19</strong> <span style="background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">v3.1</span></td><td>Anthropic 政策変動（rate limit / 価格改定 / Claude モデル提供範囲変更）</td><td>小</td><td><strong>Bedrock 直接接続で影響を最小化</strong>。AWS リージョン経由で API 安定性は AWS SLA に準拠、価格は AWS 契約で固定。Anthropic 直 API への依存はゼロ</td></tr>
+</table>
+
+</section>
+
+<!-- ========== 9. 体制 ========== -->
+<section id="sec-9">
+<h2><span class="num">9.</span>体制</h2>
+
+<h3 id="sec-9-1"><span class="num">9.1</span>FDE 1 人（現状）の場合の所要時間</h3>
+<table>
+  <tr><th>区分</th><th>所要</th><th>備考</th></tr>
+  <tr><td>FDE 1 人（Full-Stack Developer / Engineer）</td><td>7 ヶ月 × 1 名</td><td>本書の基準ケース。Claude Code / Codex（別承認の個人開発ツール枠）を活用</td></tr>
+  <tr><td>営業 Champion</td><td>2 名 × 各 Sprint 末 3 日</td><td>FB ループの起点</td></tr>
+  <tr><td>マネージャー</td><td>1 名 × 月次レビュー + 2 段階ゲート（S2 / S10）参加</td><td>進捗確認・優先度調整・Go/No-Go 判断</td></tr>
+  <tr><td>運用部門連携</td><td>S1（IAM/OAuth）, S13-S14（運用引継）</td><td>スポット協議</td></tr>
+  <tr><td>法務レビュー</td><td>S12-S13（Guardrails / 監査）</td><td>薬機法・景表法・ステマ・KOL 権利の最終確認</td></tr>
+</table>
+
+<h3 id="sec-9-2"><span class="num">9.2</span>追加リソース投入時のシナリオ</h3>
+<table>
+  <tr><th>追加ロール</th><th>投入時期</th><th>期間短縮効果</th><th>追加コスト目安</th></tr>
+  <tr><td><strong>+ 実装エンジニア 1 名</strong></td><td>Phase 4 開始時（M3）</td><td>7 ヶ月 → <strong>5.5 ヶ月</strong>（Skill 並行化）</td><td>+¥150K 〜 ¥250K（運用予算外）</td></tr>
+  <tr><td><strong>+ フロントエンドエンジニア 1 名</strong></td><td>Phase 5 開始時（M7）</td><td>S13-S14 を 0.5 ヶ月短縮</td><td>+¥50K 〜 ¥100K（運用予算外）</td></tr>
+  <tr><td><strong>+ データエンジニア 1 名</strong></td><td>MVA Phase 1（M0.5）</td><td>S2-S3 を 0.5 ヶ月短縮 + 品質向上</td><td>+¥60K 〜 ¥120K（運用予算外）</td></tr>
+  <tr><td>3 名フル投入</td><td>M0.5 〜 M7.5</td><td>7 ヶ月 → <strong>4 ヶ月</strong>を理論値</td><td>+¥260K 〜 ¥470K（運用予算外）</td></tr>
+</table>
+<p style="font-size:12px;color:var(--text-subtle)">※ 追加投入時はオンボーディング期間（約 0.5 ヶ月）と並行開発のコミュニケーション overhead を考慮し、上記効果は理論値の 80% 程度を見込むこと。</p>
+
+</section>
+
+<!-- ========== 10. 改訂履歴 ========== -->
+<section id="sec-10" class="appendix">
+<h2><span class="num">10.</span>改訂履歴</h2>
+<table>
+  <tr><th>版</th><th>日付</th><th>主な変更点</th></tr>
+  <tr><td>1.0</td><td>2026-05-01</td><td>初版作成（v1.5 系・Phase 1-2 ベース）</td></tr>
+  <tr><td>2.0</td><td>2026-05-07</td><td>5 機能 + Phase 順序 ④→②→③→① に再構成。8.5 ヶ月計画化。</td></tr>
+  <tr><td>2.1</td><td>2026-05-08</td><td>IBM レビュー反映。17 Sprint 反復型に再構成（実装 55%/テスト 25%/安定化 20%）。累積コスト ¥664K-874K。</td></tr>
+  <tr><td>2.2</td><td>2026-05-13</td><td>整合性 QA 反映。コスト累積を Phase 別積み上げ ¥770K-840K に統一。AWS Single-AZ 明示。Phase 2.5 を 0.5 ヶ月に統一。月次 ¥95K-107K。</td></tr>
+  <tr><td>3.0</td><td>2026-05-19</td><td>MVA 先行構成に再編。Phase 1-3（MVA 3ヶ月）→ Phase 4（5 Skill 3ヶ月）→ Phase 5（UX/Guardrails/本番化 3ヶ月）の 9 ヶ月構成へ。17 Sprint 配置を組み直し、S1-S4 にデータ層、S5 に Agent SDK、S6 に検索 Skill ベータを集約。OpenClaw を削除。S13 に HTML→PDF/PPTX 変換層、S14 に WYSIWYG、S15 に Block Kit/Workflow Builder、S16 に Guardrails 強化（薬機法・景表法・ステマ・KOL 権利）を新設。累積 ¥700K-900K、月次 ¥95K-110K。リスク R11-R15 を追加。</td></tr>
+  <tr><td><strong>3.1</strong></td><td><strong>2026-05-20</strong></td><td><strong>OpenClaw フル採用に転換、14 Sprint × 2週間 = 7ヶ月スケジュールへ拡張（12月本格運用ターゲット）、S2 末 Go/No-Go ゲート①と S10 末 Go/No-Go ゲート② を新設。コスト構造を「開発¥80K / 運用月¥100K-1M」に修正。リスク R16-R19 追加。</strong></td></tr>
+</table>
+
+</section>
+
+</main>
+</div>
+
+</body>
+</html>
