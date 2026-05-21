@@ -1,0 +1,1878 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 機能④ 確定仕様書 v1 — 動画ナレッジ分析（VSEO吸収・Gemini採用版）</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">TeamAgent<br>機能④ 確定仕様書</div>
+  <div class="sidebar-doc-meta">
+    Version 1.0<br>
+    2026年5月15日
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>背景と経緯</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>当初設計（v2.2まで）</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>VSEO 継続不能の判断</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>VSEO リポジトリ精査の知見</a></li>
+    <li class="level-2"><a href="#sec-1-4"><span class="num">1.4</span>再設計の核心：Gemini 採用</a></li>
+
+    <li class="level-1"><a href="#sec-2"><span class="num">2.</span>スコープ</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>対象プラットフォームと移行方針</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>2段階構成（④-A / ④-B）</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>分析アウトプット仕様（MVP ライン）</a></li>
+    <li class="level-2"><a href="#sec-3-1"><span class="num">3.1</span>Gemini 構造化アウトプット</a></li>
+    <li class="level-2"><a href="#sec-3-2"><span class="num">3.2</span>pgvector 化の方針</a></li>
+    <li class="level-2"><a href="#sec-3-3"><span class="num">3.3</span>「良いクリエイティブ」の判定基準</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-4"><span class="num">4.</span>アーキテクチャ（ハイブリッド構成）</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>ベンダー線引き</a></li>
+    <li class="level-2"><a href="#sec-4-2"><span class="num">4.2</span>処理コンポーネント</a></li>
+    <li class="level-2"><a href="#sec-4-3"><span class="num">4.3</span>マルチベンダーのコストと管理</a></li>
+    <li class="level-2"><a href="#sec-4-4"><span class="num">4.4</span>モデル名注記</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-5"><span class="num">5.</span>動作フロー（機能④-A）</a></li>
+
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>データソース層の再定義</a></li>
+
+    <li class="level-1"><a href="#sec-7"><span class="num">7.</span>v2.2 からの変更点まとめ</a></li>
+
+    <li class="level-1"><a href="#sec-8"><span class="num">8.</span>リスクと留意点</a></li>
+
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>改訂履歴</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">機能④ 確定仕様書 v1</div>
+  <h1>TeamAgent 機能④ 動画ナレッジ分析<br>VSEO Creative Analyzer 吸収・Gemini 採用版</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>確定詳細仕様書（overview_v2.2.html 第6章の確定詳細仕様）</td></tr>
+    <tr><td>バージョン</td><td>1.0</td></tr>
+    <tr><td>作成日</td><td>2026年5月15日</td></tr>
+    <tr><td>作成者</td><td>Shogo Komata + TeamAgent 推進チーム</td></tr>
+    <tr><td>位置付け</td><td>overview_v2.2.html 第6章「機能④ 動画 URL 分析」の確定詳細仕様。機能③の Phase 0〜E スペック（teamagent_phase0E_spec_v1.html）と同じ「別冊」の位置づけ。v2.2 までの外部サービス連携設計を、VSEO Analytics 吸収・Gemini 2.5 Flash 採用へと確定再設計したもの。</td></tr>
+    <tr><td>関連文書</td><td>構想・システム概要仕様書（teamagent_overview_v2.2.html）／ 機能③ Phase 0〜E 仕様書（teamagent_phase0E_spec_v1.html）</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">機能④ 動画ナレッジ分析 — 確定仕様</div>
+  <div class="hero-headline">VSEO を「連携」から「吸収」へ<br>動画分析エンジンを Gemini 2.5 Flash に確定</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">3<small>媒体</small></div>
+      <div class="hero-stat-label">YouTube Shorts / Instagram / TikTok</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">2<small>段階</small></div>
+      <div class="hero-stat-label">④-A（MVP・URL分析）／ ④-B（露出度分析・Phase 2）</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">Gemini<small>2.5 Flash</small></div>
+      <div class="hero-stat-label">動画ネイティブ入力。ffmpeg + Whisper 前処理を撤廃</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">1〜3<small>分</small></div>
+      <div class="hero-stat-label">URL 投稿 → Slack に構造化結果が返るまでの所要</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">1<small>箇所のみ</small></div>
+      <div class="hero-stat-label">Gemini 利用は機能④の動画コンテンツ分析に閉じる。他は全て Claude</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 1. 背景と経緯 ========== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>背景と経緯</h2>
+<p>
+本章は、機能④が <strong>v2.2 までの「外部サービス連携」設計から「TeamAgent への吸収・自前構築」へ</strong> 確定再設計されるに至った経緯を記録する。設計判断の理由を残すことで、実装担当（FDE）が背景を理解したうえで構築に入れるようにする。
+</p>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>当初設計（v2.2まで）</h3>
+<p>
+機能④は当初、<strong>VSEO Analytics（外部サービス・自社運用）＋ 動画広告プロ（dpro）＋ Buzzmiru</strong> の3サービスを横断参照し、動画を6観点（EG情報／メディア・界隈／フック／訴求軸／CTA／表現）で構造化する設計だった。VSEO Analytics は tRPC 連携で動画内容分析を担う中核コンポーネントとして位置づけられていた。
+</p>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>VSEO 継続不能の判断</h3>
+<p>
+VSEO Analytics は EC2 上の Web アプリケーションとして運用されていたが、<strong>サーバーが貧弱で運用・拡張が困難になり、利用継続ができなくなった</strong>。これは <em>法的な理由ではなく、技術・運用上の理由</em> である。
+</p>
+<p>
+ここで判断したのは、VSEO の中核機能である <strong>ショート動画 Creative Analyzer は機能④とほぼ同義</strong> であるという点である。であれば、これを「外部サービス連携」として外に置くのではなく、<strong>TeamAgent に吸収して自前構築する</strong> ほうが構成として素直になる。これは新規機能の追加ではなく、既存資産の統合（吸収）である。
+</p>
+<div class="note">
+  <div class="label">判断の要点</div>
+  VSEO の停止は機能④の縮小ではない。VSEO Creative Analyzer ＝ 機能④ であり、外部依存を1つ減らして TeamAgent 本体に取り込む統合判断である。
+</div>
+
+<h3 id="sec-1-3"><span class="num">1.3</span>VSEO リポジトリ精査の知見</h3>
+<p>
+吸収にあたり、VSEO リポジトリ（<code>github.com/noirelumiere00/vseo-analytics-web</code>）を精査した。判明した構成は以下のとおり。
+</p>
+<table>
+  <tr><th>項目</th><th>VSEO の実装</th></tr>
+  <tr><td>分析エンジン</td><td>Amazon Bedrock 経由の Claude Haiku 4.5</td></tr>
+  <tr><td>LLM への入力</td><td>動画 mp4 を直接 LLM に渡してはいない。<strong>フレーム抽出 ＋ 音声文字起こし ＋ サムネイル ＋ スクレイピングしたメタデータ</strong>（再生数・いいね・コメント・シェア・保存）を Claude に渡す構成</td></tr>
+  <tr><td>スクレイピング</td><td>Puppeteer（stealth プラグイン）＋ Apify ＋ YouTube Data API v3 を併用</td></tr>
+</table>
+<p>
+つまり VSEO は、Claude が動画ファイルをネイティブに扱えないことを <strong>「ffmpeg でフレーム抽出 → Whisper 等で文字起こし → 静止画とテキストにして Claude に渡す」という前処理パイプラインで回避</strong> していた。この前処理が運用負荷の一因でもあった。
+</p>
+
+<h3 id="sec-1-4"><span class="num">1.4</span>再設計の核心：Gemini 採用</h3>
+<p>
+再設計の核心は、<strong>動画コンテンツ分析エンジンを Gemini 2.5 Flash に変更する</strong> ことである。
+</p>
+<table>
+  <tr><th>理由</th><th>内容</th></tr>
+  <tr><td>Claude の制約</td><td>Claude は動画ファイル（mp4）をネイティブに受け取れない（静止画と PDF のみ）。VSEO の前処理パイプラインはこの制約の回避策だった。</td></tr>
+  <tr><td>Gemini の能力</td><td>Gemini 2.5 系は <strong>動画をネイティブ入力でき</strong>、内部でフレームサンプリング＋音声処理を行う。</td></tr>
+  <tr><td>得られる効果</td><td>「ffmpeg でフレーム抽出 → Whisper で文字起こし」という前処理ステップが <strong>丸ごと不要</strong> になる。VSEO がやっていた面倒な前処理を Gemini が肩代わりする。</td></tr>
+</table>
+<div class="note warn">
+  <div class="label">再設計の一行サマリー</div>
+  VSEO を「連携」から「吸収」へ。そして動画コンテンツ分析エンジンを Claude（前処理必須）から <strong>Gemini 2.5 Flash（動画ネイティブ・前処理不要）</strong> へ。これにより構成がシンプルになり、運用負荷が下がる。
+</div>
+</section>
+
+<!-- ========== 2. スコープ ========== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>スコープ</h2>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>対象プラットフォームと移行方針</h3>
+<table>
+  <tr><th>項目</th><th>確定内容</th></tr>
+  <tr><td>対象プラットフォーム</td><td>YouTube Shorts（YTS）／ Instagram（IG）／ TikTok（TT）の <strong>3プラットフォーム</strong></td></tr>
+  <tr><td>VSEO 過去蓄積データ</td><td><strong>移行しない。</strong> ゼロから TeamAgent 側で貯め直す。</td></tr>
+</table>
+<div class="note warn">
+  <div class="label">コールドスタートの留意</div>
+  過去データを移行しないため、立ち上げ初期はナレッジ蓄積が薄い（コールドスタート）。運用を重ねるごとに pgvector が充実していく前提でロードマップを組む。
+</div>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>2段階構成（④-A / ④-B）</h3>
+<p>
+機能④は、リスク・工数の性質が異なる2つの機能を分離し、<strong>2段階構成</strong> で実装する。
+</p>
+<table>
+  <tr><th>段階</th><th>名称</th><th>内容</th><th>着手条件</th></tr>
+  <tr>
+    <td><strong>機能④-A</strong></td>
+    <td>Phase 1 / MVP</td>
+    <td>URL → 動画取得 → Gemini で分析 → Slack 返却 ＋ pgvector 格納。<strong>確実に作れる範囲。</strong></td>
+    <td>Phase 1 で着手</td>
+  </tr>
+  <tr>
+    <td><strong>機能④-B</strong></td>
+    <td>Phase 2 / 露出度分析</td>
+    <td>該当ハッシュタグをスクレイピングし、<strong>実際のスマホ UI を模したモック画面</strong>で自社動画の立ち位置を可視化する機能。</td>
+    <td>データ収集 PoC（Sprint 0）でハッシュタグスクレイピングの実現性が確認できてから着手</td>
+  </tr>
+</table>
+<p>
+④-B は ④-A とリスク・工数の性質が異なるため分離する。フォールバック方針は <strong>Apify 経由 → それも不可なら手動補完</strong>。継続的なハッシュタグスクレイピングは、<strong>監査役懸念②で 🔴 高リスクと判定された Instagram スクレイピングそのもの</strong> である点を明記しておく。
+</p>
+<div class="note warn">
+  <div class="label">🔴 ④-B の PoC ゲート</div>
+  ④-B は「データ収集 PoC（Sprint 0）」でハッシュタグスクレイピングの実現性が確認できるまで着手しない。PoC ゲートを通過できない場合、④-B はスコープから外す、または手動補完運用に切り替える判断を行う。
+</div>
+</section>
+
+<!-- ========== 3. 分析アウトプット仕様 ========== -->
+<section id="sec-3">
+<h2><span class="num">3.</span>分析アウトプット仕様（MVP ライン）</h2>
+
+<h3 id="sec-3-1"><span class="num">3.1</span>Gemini 構造化アウトプット</h3>
+<p>
+機能④-A（MVP ライン）では、<strong>Gemini 2.5 Flash が動画から以下の構造化アウトプットを生成</strong> する。
+</p>
+<table>
+  <tr><th>#</th><th>アウトプット</th><th>内容</th></tr>
+  <tr><td>①</td><td>タイムライン分解</td><td><strong>フック / 展開 / 本編 / CTA</strong> の4区分で時間軸を分解する</td></tr>
+  <tr><td>②</td><td>シーンスコア</td><td>各シーンの評価</td></tr>
+  <tr><td>③</td><td>構成サマリー</td><td>動画全体の要約</td></tr>
+  <tr><td>④</td><td>テロップ文字起こし</td><td>画面内に焼き込まれた文字を Gemini のビジョンで抽出する</td></tr>
+  <tr><td>⑤</td><td>セリフ・ナレーション文字起こし</td><td>音声をテキスト化する</td></tr>
+  <tr><td>⑥</td><td>総合スコア</td><td>全体評価</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 3.1</span>Gemini 2.5 Flash が動画から生成する6つの構造化アウトプット（MVP ライン）。</p>
+
+<h3 id="sec-3-2"><span class="num">3.2</span>pgvector 化の方針</h3>
+<p>
+上記アウトプットは <strong>すべて pgvector 化する</strong>。理由は検索性にある。
+</p>
+<table>
+  <tr><th>アウトプットの性質</th><th>検索性</th></tr>
+  <tr><td>ビジョン分析結果（構造・スコア）</td><td>検索しづらい</td></tr>
+  <tr><td>テキスト化されたテロップ・セリフ・構成サマリー</td><td><strong>検索性が高い。</strong> 機能⑥（社内 AI コーチ）からの自然言語検索の主役になる</td></tr>
+</table>
+<p>
+テキスト化された要素が検索の主役となるため、構造・スコアも含めて全アウトプットを pgvector に格納し、機能①③⑤⑥から横断参照できるようにする。
+</p>
+
+<h3 id="sec-3-3"><span class="num">3.3</span>「良いクリエイティブ」の判定基準</h3>
+<div class="note warn">
+  <div class="label">確定した判定基準</div>
+  「良いクリエイティブ」の判定は <strong>スコアではなく、媒体エンゲージメント（実際に伸びた動画）</strong> で行う。スコアは構造分析の補助であり、良し悪しの最終判断は媒体パフォーマンスに置く。
+</div>
+<p>
+Gemini が出す総合スコア・シーンスコアは、動画の構造を理解・分類するための補助指標である。「この動画は良いのか」という最終判断は、再生数・いいね・コメント・シェア・保存数といった <strong>実際の媒体パフォーマンス</strong> に基づいて下す。スコアが高くても伸びていない動画は「良いクリエイティブ」とは扱わない。
+</p>
+</section>
+
+<!-- ========== 4. アーキテクチャ ========== -->
+<section id="sec-4">
+<h2><span class="num">4.</span>アーキテクチャ（ハイブリッド構成）</h2>
+<p>
+機能④は <strong>マルチベンダーのハイブリッド構成</strong> になる。Gemini と Claude が混在するため、その線引きを明示する。
+</p>
+
+<h3 id="sec-4-1"><span class="num">4.1</span>ベンダー線引き</h3>
+<div class="note warn">
+  <div class="label">ベンダー線引き（最重要）</div>
+  <strong>機能④の動画コンテンツ分析だけ Gemini、TeamAgent の他のすべては Claude（Claude Agent SDK + Bedrock Claude）。</strong>
+</div>
+<p>
+Gemini の利用範囲を「機能④の動画コンテンツ分析」という1点に閉じ込めることで、マルチベンダー化の影響範囲を管理する。サブエージェントのオーケストレーション、Slack 対話、統合・最終評価のロジックはすべて Claude 側が担う。
+</p>
+
+<h3 id="sec-4-2"><span class="num">4.2</span>処理コンポーネント</h3>
+<table>
+  <tr><th>工程</th><th>担当</th><th>内容</th></tr>
+  <tr><td>動画本体の取得</td><td>yt-dlp</td><td>URL から mp4 をダウンロードする</td></tr>
+  <tr><td>動画コンテンツ分析</td><td><strong>Gemini 2.5 Flash</strong></td><td>ダウンロードした mp4 を <strong>Gemini File API</strong> にアップロード → Gemini 2.5 Flash で分析（タイムライン分解・シーンスコア・構成サマリー・テロップ＆セリフ文字起こし・総合スコア）</td></tr>
+  <tr><td>媒体パフォーマンス取得</td><td>Apify / スクレイピング</td><td>ハッシュタグ・エンゲージメント指標（再生数・いいね・コメント・シェア・保存数）を取得する。Apify は他 PJ に相乗りで利用可能</td></tr>
+  <tr><td>統合</td><td>Claude SDK</td><td>Gemini の構造化出力 ＋ 媒体エンゲージメント → 最終評価（エンゲージメント基準）</td></tr>
+  <tr><td>格納</td><td>pgvector（RDS）</td><td>機能①③⑤⑥から参照可能</td></tr>
+  <tr><td>出力</td><td>Slack / pgvector</td><td>(1) Slack に分析結果を返す、(2) pgvector に格納 → 機能⑥（社内 AI コーチ）に聞いたとき答えが返ってくる</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 4.2</span>機能④の処理コンポーネントとベンダー分担。動画コンテンツ分析のみ Gemini、それ以外は Claude / 既存基盤。</p>
+
+<h3 id="sec-4-3"><span class="num">4.3</span>マルチベンダーのコストと管理</h3>
+<p>
+ベンダー混在のコストとして、<strong>API キー・課金・SDK が2系統になる</strong>。ただし、これは完全な異物の追加ではない。
+</p>
+<ul>
+  <li>Pattern Bravo+ で既に <strong>Vertex AI 経路を想定済み</strong>のため、Gemini / GCP は完全な異物ではない。</li>
+  <li>影響範囲を <strong>「機能④の動画コンテンツ分析」に閉じ込める</strong> ことで管理する（4.1 のベンダー線引き）。</li>
+</ul>
+
+<h3 id="sec-4-4"><span class="num">4.4</span>モデル名注記</h3>
+<div class="note">
+  <div class="label">モデル名注記</div>
+  <strong>Gemini 2.5 Flash を採用する。</strong> 動画ネイティブ対応は Gemini 2.5 系の確実な能力である。正式なモデル名・後継バージョンは実装時に FDE が最新を確認すること。分解精度が不足する場合は <strong>Gemini 2.5 Pro へのフォールバック</strong>を用意する。
+</div>
+</section>
+
+<!-- ========== 5. 動作フロー ========== -->
+<section id="sec-5">
+<h2><span class="num">5.</span>動作フロー（機能④-A）</h2>
+<p>
+機能④-A（MVP）の動作フローを示す。営業が Slack に動画 URL を投げると、プラットフォーム判定 → 動画取得とエンゲージメント取得の並行処理 → Gemini 分析 → Claude 統合 → pgvector 格納 → Slack 返却、という流れで進む。
+</p>
+<div class="arch-diagram">営業：@TeamAgent これ分析して https://...   （YTS / IG / TT のいずれか）
+
+  ↓ Slack Bolt
+[Lambda: Video Analyzer サブエージェント起動]
+  ↓ URL からプラットフォーム判定（YTS / IG / TT）
+  ├─ yt-dlp で動画本体をダウンロード → Gemini File API へアップロード
+  └─ （並行）Apify / スクレイピングでハッシュタグ・エンゲージメント取得
+  ↓
+Gemini 2.5 Flash で動画コンテンツ分析
+  （タイムライン分解 ＋ シーンスコア ＋ 構成サマリー
+   ＋ テロップ&セリフ文字起こし ＋ 総合スコア）
+  ↓
+Claude SDK が Gemini 出力 ＋ 媒体エンゲージメントを統合 → 最終評価（EG基準）
+  ↓
+pgvector に動画ナレッジを格納（機能①③⑤⑥で参照可）
+  ↓
+Slack に構造化結果を投稿（所要 1〜3 分）</div>
+<p class="caption"><span class="fig-num">図 5.1</span>機能④-A の動作フロー。動画取得（yt-dlp → Gemini File API）と媒体エンゲージメント取得（Apify / スクレイピング）を並行実行し、Claude が統合する。所要 1〜3 分。</p>
+</section>
+
+<!-- ========== 6. データソース層の再定義 ========== -->
+<section id="sec-6">
+<h2><span class="num">6.</span>データソース層の再定義</h2>
+<p>
+VSEO の吸収にともない、overview_v2.2.html が定義していた「動画分析データ層」の構成を再定義する。
+</p>
+<table>
+  <tr><th>版</th><th>動画分析データ層の構成</th></tr>
+  <tr>
+    <td>旧（v2.2まで）</td>
+    <td>VSEO Analytics（外部サービス）＋ dpro ＋ Buzzmiru</td>
+  </tr>
+  <tr>
+    <td><strong>新（確定）</strong></td>
+    <td><strong>自前パイプライン（yt-dlp ＋ Gemini 2.5 Flash ＋ Apify/スクレイピング）</strong> ＋ dpro ＋ Buzzmiru（契約済みの補助データソース）</td>
+  </tr>
+</table>
+<p>
+VSEO は外部サービスではなくなったため、その役割は <strong>自前パイプライン</strong> に置き換わる。dpro と Buzzmiru は契約済みの補助データソースとして引き続き利用する。
+</p>
+<table>
+  <tr><th>補助データソース</th><th>引き続き提供する情報</th></tr>
+  <tr><td>動画広告プロ（dpro）</td><td>広告消化額・配信期間・カテゴリ別ランキング・台本/ナレーション情報</td></tr>
+  <tr><td>Buzzmiru</td><td>保存数（save count）</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 6.1</span>動画分析データ層の再定義。VSEO（外部サービス）→ 自前パイプラインへ置換。dpro / Buzzmiru は補助データソースとして継続。</p>
+</section>
+
+<!-- ========== 7. v2.2 からの変更点まとめ ========== -->
+<section id="sec-7">
+<h2><span class="num">7.</span>v2.2 からの変更点まとめ</h2>
+<p>
+overview_v2.2.html 第6章の設計から、本確定仕様（v1）で何が変わったかを一覧にする。
+</p>
+<table>
+  <tr><th>項目</th><th>v2.2 まで</th><th>確定仕様（v1）</th></tr>
+  <tr><td>VSEO Analytics</td><td>外部サービス（自社運用・tRPC連携）</td><td><strong>TeamAgent に吸収・自前構築</strong></td></tr>
+  <tr><td>動画コンテンツ分析エンジン</td><td>Sonnet 4.6 ビジョン（VSEO 内）</td><td><strong>Gemini 2.5 Flash（動画ネイティブ）</strong></td></tr>
+  <tr><td>動画の取り込み</td><td>VSEO に委譲</td><td>yt-dlp でダウンロード → Gemini File API</td></tr>
+  <tr><td>分析の主軸</td><td>6観点構造化（EG情報 / メディア界隈 / フック / 訴求軸 / CTA / 表現）</td><td>タイムライン分解 ＋ シーンスコア ＋ 構成サマリー ＋ 文字起こし ＋ 総合スコア</td></tr>
+  <tr><td>対象プラットフォーム</td><td>明示なし</td><td><strong>YouTube Shorts / Instagram / TikTok の3つ</strong></td></tr>
+  <tr><td>良し悪しの判定</td><td>明示なし</td><td><strong>媒体エンゲージメント基準（スコアは補助）</strong></td></tr>
+  <tr><td>露出度分析</td><td>なし</td><td><strong>機能④-B として新設（Phase 2、PoC ゲートあり）</strong></td></tr>
+  <tr><td>新規依存</td><td>—</td><td>Gemini API（GCP/Vertex）、yt-dlp、Apify</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 7.1</span>overview_v2.2.html 第6章からの変更点一覧。</p>
+</section>
+
+<!-- ========== 8. リスクと留意点 ========== -->
+<section id="sec-8">
+<h2><span class="num">8.</span>リスクと留意点</h2>
+<table>
+  <tr><th>#</th><th>リスク・留意点</th><th>対応方針</th></tr>
+  <tr>
+    <td>R1</td>
+    <td><strong>マルチベンダー運用</strong>。課金・SDK・監視が2系統になる</td>
+    <td>ベンダー線引きの徹底（4.1）。Gemini を「機能④の動画コンテンツ分析」1点に閉じ込めて管理する</td>
+  </tr>
+  <tr>
+    <td>R2</td>
+    <td><strong>スクレイピング全般のリスク</strong>。特に機能④-B のハッシュタグ継続スクレイピングは <strong>監査役懸念②で 🔴 高リスク判定</strong></td>
+    <td>PoC ゲート（Sprint 0）必須。実現性が確認できるまで ④-B に着手しない。フォールバックは Apify 経由 → 手動補完</td>
+  </tr>
+  <tr>
+    <td>R3</td>
+    <td>Gemini の <strong>モデル名・バージョンは実装時に最新を要確認</strong></td>
+    <td>FDE が実装時に最新モデルを確認。分解精度が不足する場合は Gemini 2.5 Pro へフォールバック</td>
+  </tr>
+  <tr>
+    <td>R4</td>
+    <td><strong>コールドスタート</strong>。VSEO 過去データを移行しないため、立ち上げ初期はナレッジ蓄積が薄い</td>
+    <td>運用を重ねて pgvector を充実させる前提でロードマップを組む。初期は蓄積優先の運用</td>
+  </tr>
+</table>
+<p class="caption"><span class="fig-num">表 8.1</span>機能④のリスクと留意点。</p>
+</section>
+
+<!-- ========== 9. 改訂履歴 ========== -->
+<section id="sec-9">
+<h2><span class="num">9.</span>改訂履歴</h2>
+<table>
+  <tr><th>バージョン</th><th>日付</th><th>変更内容</th></tr>
+  <tr>
+    <td>v1.0</td>
+    <td>2026-05-15</td>
+    <td>初版。VSEO Analytics 吸収と Gemini 2.5 Flash 採用を確定。機能④を ④-A（MVP）/ ④-B（露出度分析・Phase 2）の2段階に再構成。</td>
+  </tr>
+</table>
+</section>
+
+</main>
+</div>
+
+</body>
+</html>

@@ -1,31 +1,144 @@
-# 作業中の一時ファイル
-_*.html
-*.tmp
-*.bak
+# ============================================================
+# TeamAgent v3.0 .gitignore
+# ============================================================
 
-# OS / Editor
-.DS_Store
+# --- Secrets / Environment ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.crt
+credentials.json
+client_secret*.json
+service-account*.json
+oauth_tokens/
+secrets/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Test / coverage ---
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+htmlcov/
+
+# --- Jupyter / IPython ---
+.ipynb_checkpoints
+*.ipynb
+
+# --- Type checkers / linters ---
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pyre/
+.pytype/
+
+# --- Node (if used for HTML editor) ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json
+yarn.lock
+
+# --- IDE / Editor ---
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.iml
 
-# Python（将来 pipeline コード追加用）
-__pycache__/
+# --- Terraform ---
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!terraform.tfvars.example
+.terragrunt-cache/
+crash.log
+crash.*.log
+
+# --- Docker ---
+.docker/
+
+# --- Data / runtime artifacts ---
+data/
+*.sqlite
+*.sqlite3
+*.db
+logs/
+*.log
+tmp/
+temp/
+
+# --- pgvector dumps ---
+*.dump
+*.sql.gz
+
+# --- Local development ---
+local/
+sandbox/
+playground/
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# --- OS ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Other ---
 *.pyc
-.venv/
-venv/
-.env
-.env.*
-
-# Node（将来追加用）
-node_modules/
-npm-debug.log*
-
-# AWS CLI
-.aws-sam/
-
-# Secrets（万が一含めない）
-*.pem
-*.key
-secrets.json
-credentials.json
+*.bak
+*.tmp
+.fuse_hidden*

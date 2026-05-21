@@ -1,0 +1,1810 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>懸念② データ収集 実現性 深掘りリサーチ</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+<div class="layout">
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">懸念② データ収集<br>実現性 深掘りリサーチ</div>
+  <div class="sidebar-doc-meta">Version 1.0<br>2026年5月15日<br>3 Agent 並列リサーチ + 類似事例調査</div>
+  <div class="sidebar-header">目次</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-0"><span class="num">0.</span>エグゼクティブサマリー</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-1"><span class="num">1.</span>文書抽出（PDF/PPTX）の実現性</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-2"><span class="num">2.</span>Gemini DR 品質・捏造対策の実現性</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>マルチソース統合の実現性</a></li>
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>統合：3つの本当の難所と現実解</a></li>
+    <li class="level-1"><a href="#sec-5"><span class="num">5.</span>PoC 検証項目（統合版）</a></li>
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>仕様書 v2.3 への反映事項</a></li>
+  </ul>
+</aside>
+<main>
+<header class="doc-header">
+  <div class="doc-type">懸念② データ収集 実現性 深掘りリサーチ v1</div>
+  <h1>「データが綺麗に・欲しい形で集まるのか」<br>3観点 × 類似事例による精査</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>監査役懸念② の深掘りリサーチ（類似事例調査込み）</td></tr>
+    <tr><td>バージョン</td><td>1.0</td></tr>
+    <tr><td>作成日</td><td>2026年5月15日</td></tr>
+    <tr><td>リサーチ方法</td><td>3観点を並列 Agent で Web リサーチ + 実例 14件の調査</td></tr>
+  </table>
+</header>
+
+<div class="hero">
+  <div class="hero-tagline">Data Feasibility Deep-Dive</div>
+  <div class="hero-headline">結論：監査役の懸念は妥当。<br>だが致命的ではなく、確立された手法で到達可能</div>
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="hero-stat-num">~74<small>%</small></div><div class="hero-stat-label">文書抽出：実用レベルで抽出可能（残26%は割り切り/人手）</div></div>
+    <div class="hero-stat"><div class="hero-stat-num">39-77<small>%</small></div><div class="hero-stat-label">Gemini DR の事実的正確性（捏造率0%は達成不可能）</div></div>
+    <div class="hero-stat"><div class="hero-stat-num">70-85<small>%</small></div><div class="hero-stat-label">案件ID 自動マッチの歩留まり（残りは人手補完UI必須）</div></div>
+    <div class="hero-stat"><div class="hero-stat-num">14<small>件</small></div><div class="hero-stat-label">調査した類似事例（Snyk / Glean / Salesforce 等）</div></div>
+  </div>
+</div>
+
+<section id="sec-0">
+<h2><span class="num">0.</span>エグゼクティブサマリー</h2>
+<p>監査役懸念②「データが綺麗に集まるか」を、3観点（文書抽出 / LLM リサーチ品質 / マルチソース統合）に分けて Web リサーチ + 類似事例調査を実施した。<strong>結論：3観点とも「楽観論は危険だが、致命的でもない」。確立された手法・他社事例があり、現実的な割り切りと PoC を前提にすれば到達可能。</strong></p>
+
+<table>
+  <tr><th>観点</th><th>監査役の懸念</th><th>リサーチ結論</th><th>現実的な数値</th></tr>
+  <tr><td>① 文書抽出（PDF/PPTX）</td><td>提案書から綺麗に抽出できるか</td><td>「全件綺麗に」は不可能。ハイブリッド3層構成（PyMuPDF振り分け→LlamaParse/Azure DI/python-pptx）で実用化可能。PPTXネイティブグラフは数値が抜ける朗報あり</td><td><strong>約74%が実用レベル抽出</strong>、残26%は割り切り or 人手補完</td></tr>
+  <tr><td>② Gemini DR 品質・捏造</td><td>AIがもっともらしい嘘を書くのでは</td><td>懸念は技術的に正しい。「捏造率0%」は達成不可能。response_schema で構造は100%守れるが中身は守れない。URL機械検証＋件数API直取得＋事実照合の実装レイヤーが必須</td><td>素朴実装で<strong>中身信頼は40-60%</strong>、フル実装で<strong>85-90%</strong>（残りは「要確認」とフラグ化）</td></tr>
+  <tr><td>③ マルチソース統合</td><td>データは集まるが繋がらないのでは</td><td>「集める」は枯れた技術。「案件IDで束ねる」が最大の難所だが、エンティティ解決（案件マスタをハブ）という確立分野。SAPですら専業Reltioを買収するほど＝難所は本物</td><td>案件ID自動マッチ<strong>70-85%</strong>、残りは人手補完UI必須</td></tr>
+</table>
+
+<div class="note warn">
+  <div class="label">⚠️ 3観点に共通する最重要メッセージ</div>
+  3つの Agent が独立にリサーチした結果、<strong>同じ結論に収束した</strong>：<br>
+  ・「設計すればできる」「プロンプトでお願いすればできる」という楽観論は、いずれの観点でも他社事例によって否定される<br>
+  ・しかし「現実的な割り切り（74%・85%・80%という歩留まり）」＋「人手補完の仕組み」＋「機械検証レイヤー」を計画に織り込めば、いずれも到達可能<br>
+  ・<strong>監査役の「無料枠で試したら」は、3観点すべてに対する正しい処方箋</strong>。PoC で歩留まりを実測し、設計目標を現実値に補正することが本格投資の前提
+</div>
+</section>
+
+<section id="sec-1">
+<h2><span class="num">1.</span>文書抽出（PDF/PPTX）の実現性</h2>
+<p><strong>対象：</strong>Google Drive の過去提案書（PDF/PPTX 約1,500件）→ pgvector 取り込み。<strong>監査役懸念リスト上の「高リスク」筆頭。</strong></p>
+
+<h3>1.1 リサーチ結論</h3>
+<p>「全件を綺麗に」は不可能。だが現実的な切り分けをすれば実用レベルの取り込みは十分可能。<strong>約74%が実用レベル・残り26%は部分抽出または人手補完が必要</strong>、というのが正直な見積もり。</p>
+
+<h3>1.2 抽出ツール比較（2026年時点）</h3>
+<table>
+  <tr><th>ツール</th><th>複雑レイアウト</th><th>図表・グラフ内数値</th><th>日本語</th><th>推奨用途</th></tr>
+  <tr><td>PyMuPDF</td><td>△</td><td>グラフ内数値✗</td><td>◯</td><td>一次振り分け（テキスト/画像PDF判別）</td></tr>
+  <tr><td>LlamaParse V2</td><td>◎ 最強</td><td>表◎ / グラフ△</td><td>◯</td><td><strong>テキストPDF・複雑レイアウト本命</strong></td></tr>
+  <tr><td>Azure AI Document Intelligence</td><td>◯</td><td>表◎ / グラフ✗</td><td>◎ 日本語OCR最高精度</td><td><strong>スキャンPDF・日本語の最有力</strong></td></tr>
+  <tr><td>Unstructured.io</td><td>◯</td><td>単純表100% / 複雑表75%</td><td>◯</td><td>多形式対応の対抗馬</td></tr>
+  <tr><td>python-pptx</td><td>—</td><td><strong>ネイティブグラフの数値◎</strong></td><td>◯</td><td><strong>PPTX 本命（埋め込みExcel経由で数値取得可）</strong></td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 1.1</span>どのツールも「画像PDF内のグラフ数値ラベル」は原理的に抽出困難。唯一の例外は PPTX のネイティブチャート（埋め込みExcelからデータを完全取得可能）。</p>
+
+<h3>1.3 推奨：ハイブリッド3層構成</h3>
+<div class="arch-diagram">[1] 一次振り分け（PyMuPDF）
+    page.get_text() の文字量で「テキストPDF / 画像PDF / 混在」を自動判別
+       ↓
+[2-a] テキストPDF・複雑レイアウト → LlamaParse（基本モード 1〜3クレジット/ページ）
+[2-b] スキャンPDF（画像PDF）     → Azure AI Document Intelligence（日本語OCR最高精度）
+[2-c] PPTX                      → python-pptx（テキスト・表・ノート・ネイティブグラフ数値）
+       ↓
+[3] S3 中間キャッシュ（.md）に保存 → 信頼度スコア低い文書は人手レビュー → pgvector に UPSERT</div>
+
+<h3>1.4 「抜けるもの」と「抜けないもの」の現実的な切り分け</h3>
+<table>
+  <tr><th>抜ける（実用レベル）</th><th>部分的にしか抜けない</th><th>ほぼ抜けない（諦める判断）</th></tr>
+  <tr><td>テキストPDF の本文・見出し</td><td>多段組みの読み順（崩れる）</td><td>画像PDF内のグラフの数値ラベル</td></tr>
+  <tr><td>PPTX のテキストボックス・表・ノート</td><td>複雑/ネストした比較表（構造が壊れる）</td><td>スクリーンショットとして貼られた表</td></tr>
+  <tr><td><strong>PPTX ネイティブチャートの数値</strong></td><td>スキャンPDF（OCR誤りが残る）</td><td>手書きの赤入れ・注釈</td></tr>
+  <tr><td>罫線のある単純な表</td><td>図解（ポンチ絵）内のテキスト断片</td><td>グラフから「傾向」を読む</td></tr>
+</table>
+
+<h3>1.5 類似事例（Web 調査）</h3>
+<table>
+  <tr><th>事例</th><th>内容</th><th>TeamAgent への示唆</th></tr>
+  <tr><td>欧州大手銀行（監査文書 RAG）</td><td>3年で EUR 2,000万超のコスト削減、導入2ヶ月で ROI</td><td><strong>データソースを絞り、文書クレンジングを継続することが成功条件</strong></td></tr>
+  <tr><td>Henkel（製造業・技術ナレッジ）</td><td>45+データソースから30万件超を統合。重複・冗長が課題</td><td>「同じ提案書の版違い」が大量に眠っている前提 → <strong>dedup 設計が必要</strong></td></tr>
+  <tr><td>IBM RAG Cookbook（表抽出の知見）</td><td>ネストした表は手動アノテーション20ページでも検出困難</td><td>提案書の「複雑な比較表」は要注意。表は JSON 抽出 → HTML 変換が最良</td></tr>
+  <tr><td>RAG 本番化の業界統計</td><td><strong>RAG 実装の40〜60%が本番に到達しない</strong></td><td>「取り込めた」と「検索で使える」は別物。監査役の懸念は正しい</td></tr>
+</table>
+
+<h3>1.6 現実的な精度見積もり</h3>
+<table>
+  <tr><th>文書タイプ</th><th>想定割合</th><th>実用レベル抽出率</th><th>寄与</th></tr>
+  <tr><td>テキストPDF（標準レイアウト）</td><td>約35%</td><td>90%</td><td>31.5%</td></tr>
+  <tr><td>PPTX（ネイティブ作成）</td><td>約30%</td><td>80%</td><td>24%</td></tr>
+  <tr><td>複雑レイアウトPDF（多段組み・図表多用）</td><td>約20%</td><td>50%</td><td>10%</td></tr>
+  <tr><td>スキャンPDF・画像PDF</td><td>約15%</td><td>55%</td><td>8.25%</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>合計</td><td>100%</td><td>—</td><td><strong>約74%が実用レベル</strong></td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 1.2</span>「実用レベル」＝検索でヒットし文脈として使える水準。「原本と完全一致」ではない。残り26%は部分抽出または人手補完。これはこの種のプロジェクトとして標準的な数字。</p>
+</section>
+
+<section id="sec-2">
+<h2><span class="num">2.</span>Gemini DR 品質・捏造対策の実現性</h2>
+<p><strong>対象：</strong>Gemini Deep Research に「8セクション構造化 JSON」を生成させる。<strong>監査役の本質的懸念「AIがもっともらしい嘘を書くのでは」。</strong></p>
+
+<h3>2.1 リサーチ結論</h3>
+<p>「JSON の構造（スキーマ）」は技術で 100% 守れる。しかし「中身の正しさ（URL 実在・件数の正確さ）」はプロンプトでは守れない。<strong>監査役の懸念は技術的に正しく、「捏造率 0%」は現行アーキテクチャでは達成不可能。</strong>機械検証レイヤーを実装に組み込むことが必須。</p>
+
+<h3>2.2 構造保証と中身の正しさは「別レイヤー」</h3>
+<table>
+  <tr><th>手法</th><th>何を解決するか</th><th>効果（2026年実測）</th></tr>
+  <tr><td>response_schema（Constrained Decoding）</td><td>JSON の<strong>構造</strong>崩れ</td><td>スキーマ準拠を<strong>100%保証</strong>（無効トークンをマスク）</td></tr>
+  <tr><td>プロンプトで「JSON だけ出せ」</td><td>（旧世代の手法）</td><td>失敗率 5〜20%。<strong>非推奨</strong></td></tr>
+  <tr><td>「不明」と言わせるプロンプト</td><td>自信のない捏造回答</td><td>有効だが<strong>LLM がこの指示を無視する頻度は一定数ある</strong></td></tr>
+  <tr><td>URL 機械検証（HTTP チェック）</td><td>存在しない URL の引用</td><td>「存在しない URL を引用しようとしたケースの100%を阻止」した実例あり</td></tr>
+  <tr><td>Span-level 事実照合（LLM-as-judge）</td><td>「URLは実在するが内容が主張を裏付けない」捏造</td><td>ハイブリッド検証で<strong>引用精度92%</strong></td></tr>
+  <tr><td>件数の API 直取得</td><td>LLM のカウント能力の脆弱性</td><td>LLM は約5%が数値すら返さない → API 直取得で捏造の余地を排除</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 2.1</span>Constrained Decoding が保証するのは「構文的に正しい JSON」だけ。「スキーマに合致した有効な JSON が、意味的にナンセンスな値（でっち上げ URL・件数）を含むこと」は防げない。</p>
+
+<h3>2.3 類似事例（Web 調査）</h3>
+<table>
+  <tr><th>事例</th><th>内容</th><th>TeamAgent への示唆</th></tr>
+  <tr><td>「Cited but Not Verified」研究（arXiv 2026）</td><td>主要 Deep Research のリンク有効率94%以上だが、<strong>事実的正確性は39〜77%</strong>。ツール呼び出しを増やすと精度がむしろ低下</td><td>「検索を増やせば正確になる」は誤り。リンクは生きてても内容が主張を裏付けない</td></tr>
+  <tr><td>DeepResearch Bench（100タスク・22分野）</td><td>「検索品質が改善しても、どのモデルも正確な出典帰属を保証できない」</td><td>出典の正確さは構造的に未解決問題</td></tr>
+  <tr><td>Gemini 自己説明の検証（2026年2月）</td><td>Gemini Deep Research に自分の仕組みを説明させたら<strong>約半分が不正確</strong></td><td>自社製品についてさえもっともらしい誤りを生成する</td></tr>
+  <tr><td>Citation-Grounded 機械検証（arXiv 2026）</td><td>機械検証で<strong>引用精度92%</strong>。「存在しないファイル・無効行を引用しようとしたケースの100%を阻止」</td><td>LLM に検証させず<strong>決定論的な機械チェックで弾く</strong>のが低コストで効果的</td></tr>
+  <tr><td>LLM のカウント能力研究（arXiv 2026）</td><td>「件数を数える」タスクは LLM が構造的に苦手。<strong>約5%の出力が有効な数値を返さない</strong></td><td>TikTok ハッシュタグ件数は LLM 生成を禁止し API 直取得すべき</td></tr>
+</table>
+
+<h3>2.4 推奨アプローチ</h3>
+<table>
+  <tr><th>対策</th><th>具体策</th></tr>
+  <tr><td>JSON Schema 遵守</td><td>Gemini API の <code>response_schema</code> に Pydantic スキーマを渡す。「Deep Research に調査」と「結果を JSON 整形」を<strong>2段階に分ける</strong></td></tr>
+  <tr><td>URL 実在確認</td><td>LLM 出力後、全 URL に HTTP リクエスト実行。リンク切れは「要確認」に自動置換 or 再生成</td></tr>
+  <tr><td>件数厳格化</td><td><strong>件数は LLM に生成させない</strong>。TikTok 件数は専用スクレイパー API から機械取得し JSON にプログラム挿入</td></tr>
+  <tr><td>空欄禁止ルール</td><td>スキーマ側で各フィールドを「値 or 『要確認』文字列」の union 型にして、空・null を構造的に弾く</td></tr>
+</table>
+
+<h3>2.5 「捏造率0%」KPI の修正提案</h3>
+<div class="note warn">
+  <div class="label">⚠️ KPI を「達成不可能な0%」から「機械検出率」へ</div>
+  「捏造率0%」は現行アーキテクチャ（LLM に事実・URL・件数を生成させる）では<strong>達成不可能</strong>。フロンティアモデルでさえ事実的正確性39〜77%。<br>
+  → 現実的な KPI への置き換え：<br>
+  ・「<strong>構造崩れ0%</strong>」（Constrained Decoding で達成可能 — これは約束してよい）<br>
+  ・「<strong>リンク切れ URL 0%</strong>」（HTTP 機械検証で達成可能）<br>
+  ・「<strong>件数フィールドは LLM 生成を禁止し API 取得に限定</strong>」（捏造の余地をアーキから排除）<br>
+  ・「<strong>事実的正確性 ≥ 90%、未検証項目は100%フラグ化</strong>」（検証パイプライン込みで現実的）
+</div>
+
+<h3>2.6 現実的な品質見積もり</h3>
+<table>
+  <tr><th>実装レベル</th><th>構造</th><th>中身（事実的正確性）</th></tr>
+  <tr><td>プロンプトのお願いのみ（素朴な実装）</td><td>80〜95%</td><td><strong>40〜60%</strong></td></tr>
+  <tr><td>+ response_schema 導入</td><td><strong>ほぼ100%</strong></td><td>40〜60%（変わらず）</td></tr>
+  <tr><td>+ URL HTTP 検証 + 件数 API 取得</td><td>ほぼ100%</td><td>65〜80%</td></tr>
+  <tr><td>+ Span-level 事実照合（フル実装）</td><td>ほぼ100%</td><td><strong>85〜92%</strong>（残りは「要確認」と正しくフラグ化）</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 2.2</span>何もしなければ「8セクション中、中身まで信頼できるのは3〜5セクション程度」。フル実装で初めて「8セクション中7セクション相当が信頼でき、残りは『要確認』と正直にフラグされる」水準に届く。「8セクション全部が無修正でそのまま使える」はどんな実装でも約束できない。</p>
+</section>
+
+<section id="sec-3">
+<h2><span class="num">3.</span>マルチソース統合の実現性</h2>
+<p><strong>対象：</strong>6データソースを束ねる共通キー設計・pgvector 組織ナレッジ DB・Gmail/Slack/Drive 横断・スクレイピング系（dpro/Buzzmiru）。<strong>監査役の懸念「データは集まるが繋がらないのでは」。</strong></p>
+
+<h3>3.1 リサーチ結論</h3>
+<p>監査役の懸念は<strong>正しい</strong>。「6ソースを集める」ことは技術的に枯れているが、「案件IDで束ねる」部分は他社事例でも<strong>最大の難所</strong>。ただし解決不能ではなく、<strong>「エンティティ解決（Entity Resolution）」という確立された分野</strong>の手法を適用すれば現実的に到達可能。</p>
+
+<h3>3.2 3つの要点</h3>
+<table>
+  <tr><th>要点</th><th>内容</th></tr>
+  <tr><td>① 共通キーは「推定して付与する」もの</td><td>「最初から存在する」ものではない。Salesforce Data Cloud / Glean / Snyk 等、全成功事例が「マッチルール＋人手補完」で golden record を後付け生成</td></tr>
+  <tr><td>② pgvector は想定規模なら実績十分</td><td>6レイヤー・数万〜数十万件なら pgvector の得意領域。ただし「案件IDフィルタ後にベクトル検索」は post-filtering の弱点に直撃 → 設計注意</td></tr>
+  <tr><td>③ スクレイピング系は「落ちる前提」で隔離設計必須</td><td>業界実測で「クローラの10〜15%が毎週修正を要する」。コア機能の依存先にしてはいけない</td></tr>
+</table>
+
+<h3>3.3 類似事例（Web 調査）</h3>
+<table>
+  <tr><th>事例</th><th>共通キー設計</th><th>TeamAgent への示唆</th></tr>
+  <tr><td>Snyk（Slack RAG）</td><td>キーで JOIN せず、Gemini API で各スレッドを「質問＋回答」構造に変換</td><td>Snyk 総括「本当の工学的成果は API 統合や embedding ではなく<strong>データを丹念に構造化したこと</strong>」</td></tr>
+  <tr><td>Luna（会議メモ+Slack RAG）</td><td>メッセージに「アンカー（どの案件か）」と「ラベル（種別）」を付与。equivalence check で曖昧参照を解決</td><td>「動画ID/案件IDで JOIN」は equivalence check 層がないと成立しない</td></tr>
+  <tr><td>Salesforce Data Cloud</td><td>「マッチルール＋リコンサイルルール」。高信頼ID優先、なければ exact match、最後に fuzzy match</td><td>公式が「<strong>fuzzy match は慎重に使え</strong>」と警告。乱用すると別案件を誤結合</td></tr>
+  <tr><td>Glean（Gmail/Slack/Drive 横断検索）</td><td>「アイデンティティグラフ」でエイリアスを連結。コンテンツと<strong>権限マップを両方取得</strong></td><td>Gmail 私信・Slack 閲覧権限を権限マップで弾く設計が必須</td></tr>
+  <tr><td>SAP × Reltio 買収（2026年3月）</td><td>SAP が MDM 専業 Reltio を買収。「異種ソースの ID 統合」を内製しきれず</td><td><strong>業界の巨人ですら難所と認める＝難所が本物である最強の傍証</strong>。スコープを絞ることが現実的</td></tr>
+  <tr><td>スクレイピング型データ取得の破綻パターン</td><td>ScraperAPI「10分キャッシュで100%成功率」、Bright Data「99.99% uptime SLA」</td><td>「スキーマドリフト」（ジョブ成功なのに中身が劣化）はエラーログに出ず静かに汚染</td></tr>
+</table>
+
+<h3>3.4 推奨：案件マスタをハブにした統合設計</h3>
+<div class="arch-diagram">project_master（案件マスタ = golden record）
+  project_id（TeamAgent 内部発番 or 既存CRM IDを正とする）
+  project_name / client_name / status / aliases（別名・略称配列）
+
+project_source_link（紐付けテーブル = エンティティ解決の成果物）
+  project_id → project_master
+  source_type（gmail/slack/drive/video/dr/x）
+  source_object_id（Gmail threadId, Slack channel+ts, Drive fileId 等）
+  match_method（deterministic / auto_llm / convention / manual）
+  confidence（0.0〜1.0）
+  verified_by（人手確定者・NULL = 未確定）
+
+★ポイント：「案件ID」を Gmail/Slack/Drive 側に書き込まない（書けない）。
+  代わりに TeamAgent 側に「紐付け表」を持ち、そこに蓄積する。</div>
+
+<h3>3.5 共通キーの自動マッチ歩留まり</h3>
+<table>
+  <tr><th>ソース</th><th>付与方法</th><th>信頼度</th></tr>
+  <tr><td>動画分析データ層</td><td>既存の動画IDをそのまま使用。決定論的に解決</td><td>高</td></tr>
+  <tr><td>Gemini DR</td><td>DR 実行時に「どの案件のリサーチか」を入力 → 発番時に確定</td><td>高</td></tr>
+  <tr><td>Google Drive</td><td>フォルダ命名規則（新規のみ）+ 既存は LLM がファイル名・本文から案件名抽出</td><td>中</td></tr>
+  <tr><td>Slack</td><td>チャンネル単位で初回マッピング。DM・横断は LLM でメッセージ単位に推定</td><td>中〜低</td></tr>
+  <tr><td>Gmail</td><td>スレッド単位で LLM が件名・本文から推定（私信判定を先に通す）</td><td>低〜中</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 3.1</span>命名規則＋LLM 推定で <strong>70〜85%が自動で紐付き、残り15〜30%は人手補完が必要</strong>。この人手補完用の簡易 UI（未確定リンク一覧→案件選択→確定）を機能③の一部として必ず作ること。「自動100%」を前提にした計画は破綻する。</p>
+
+<h3>3.6 本当の難所（工数とリスクが集中する5箇所）</h3>
+<table>
+  <tr><th>難所</th><th>なぜ難しいか</th></tr>
+  <tr><td>① Gmail/Slack/Drive → 案件ID の紐付け</td><td>共通キーが存在せず「推定」が必要。自動マッチ70〜85%止まり、誤マッチは「データ汚染」を生む</td></tr>
+  <tr><td>② データの「構造化」（集めた後）</td><td>Slack/Gmail は非構造テキスト。「集める」より「Q&A化・サマリ化・案件タグ付け」が本体の工数（Snyk が明言）</td></tr>
+  <tr><td>③ pgvector の post-filtering 問題</td><td>「案件IDで絞り込んでからベクトル検索」は pgvector の弱点。母集合が小さいと HNSW の精度が大幅劣化</td></tr>
+  <tr><td>④ スクレイピング系の継続運用</td><td>dpro/Buzzmiru は「常に一部壊れている前提」。スキーマドリフトはエラーに出ず静かに汚染</td></tr>
+  <tr><td>⑤ Gmail 私信の混入</td><td>業務メールと私信を完全自動分離はできない（Glean も権限マップ＋人手前提）</td></tr>
+</table>
+</section>
+
+<section id="sec-4">
+<h2><span class="num">4.</span>統合：3つの本当の難所と現実解</h2>
+<p>3観点のリサーチを統合すると、懸念②の「本当の難所」は以下の3つに集約される。いずれも<strong>「楽観論は他社事例で否定されるが、現実解は存在する」</strong>。</p>
+
+<table>
+  <tr><th>#</th><th>本当の難所</th><th>楽観論（危険）</th><th>現実解</th><th>歩留まり目標</th></tr>
+  <tr><td>難所1</td><td>提案書 PDF/PPTX からの構造化抽出</td><td>「抽出ツールに通せば綺麗に取れる」</td><td>ハイブリッド3層構成 + グラフ内数値は割り切り + S3 中間キャッシュで人手レビュー</td><td>実用レベル抽出 <strong>74%</strong></td></tr>
+  <tr><td>難所2</td><td>Gemini DR の中身の正確さ（捏造防止）</td><td>「プロンプトで遵守ルールを書けば守られる」</td><td>response_schema + URL機械検証 + 件数API直取得 + 事実照合の4層実装。KPI を「捏造率0%」から「機械検出率」へ修正</td><td>事実的正確性 <strong>85-90%</strong>（残りは要確認フラグ）</td></tr>
+  <tr><td>難所3</td><td>6ソースを案件IDで束ねる（共通キー）</td><td>「設計図で JOIN すれば繋がる」</td><td>案件マスタをハブに、自動マッチ70-85% + 人手補完UI を最初から作る + pgvector の post-filtering 劣化対策</td><td>案件ID自動マッチ <strong>70-85%</strong></td></tr>
+</table>
+
+<h3>4.1 3観点に共通する「成功の条件」</h3>
+<div class="note beginner">
+  <div class="label">3 Agent が独立に到達した同一結論</div>
+  ① <strong>「集める」より「構造化する」が本体</strong> — Snyk「本当の工学的成果はデータを丹念に構造化したこと」<br>
+  ② <strong>「自動100%」を前提にしない</strong> — 文書抽出74%、案件マッチ70-85%、DR品質85-90%。残りは必ず人手補完 or 割り切り<br>
+  ③ <strong>機械検証レイヤーを実装に組み込む</strong> — プロンプトのお願いでは守られない。URL の HTTP チェック、スキーマバリデータ、スキーマドリフト検知<br>
+  ④ <strong>スコープを絞る</strong> — 欧州銀行「データソースを絞ることが成功条件」、SAP ですら ID 統合を内製せず買収<br>
+  ⑤ <strong>「取り込めた」と「検索で使える」は別物</strong> — RAG 実装の40-60%が本番未到達。end-to-end の検索精度まで見る
+</div>
+
+<h3>4.2 監査役への回答（懸念②について）</h3>
+<div class="note warn">
+  <div class="label">監査役への回答</div>
+  ご懸念の通り、現状の v2.2 仕様書は「設計はあるが検証がない」状態です。3観点を Web リサーチ + 類似事例調査した結果、<strong>3つの本当の難所（文書抽出・DR の捏造防止・共通キー統合）</strong>が特定されました。<br><br>
+  ただし、これらは<strong>いずれも他社で解決事例があり、致命的ではありません</strong>。Snyk・Glean・Salesforce・欧州大手銀行など、同種の統合を実現した企業の手法（エンティティ解決・ハイブリッド抽出・機械検証レイヤー）を適用すれば到達可能です。<br><br>
+  重要なのは<strong>「設計目標（取り込み率80%・引用率90%・捏造率0%）を、PoC で実測した現実値に補正する」</strong>こと。特に「捏造率0%」は技術的に達成不可能なため、「機械検出率」という測定可能な KPI に修正すべきです。<br><br>
+  <strong>PoC で3つの難所の歩留まりを実測 → 設計目標を現実値に補正 → 本格投資の最終判断</strong>、という段階を踏むことを推奨します。
+</div>
+</section>
+
+<section id="sec-5">
+<h2><span class="num">5.</span>PoC 検証項目（統合版）</h2>
+<p>3観点のリサーチから導かれる、本格実装前に必ず実測すべき項目を統合した。</p>
+
+<table>
+  <tr><th>#</th><th>検証項目</th><th>方法・規模</th><th>合否基準</th><th>由来</th></tr>
+  <tr><td>D1</td><td>文書タイプ分布の実測</td><td>Drive 実フォルダで「テキスト/画像/PPTX/混在」の比率を測定</td><td>74%見積もりの前提が崩れないか</td><td>難所1</td></tr>
+  <tr><td>D2</td><td>抽出ツール比較（実文書）</td><td>代表的な提案書 10〜20件を LlamaParse / Azure DI で抽出 → 人手で読み順・表構造をスコア付け</td><td>実用レベル抽出率が想定どおりか</td><td>難所1</td></tr>
+  <tr><td>D3</td><td>PPTX チャート抽出の実証</td><td>python-pptx で実スライドのネイティブグラフから数値が抜けるか</td><td>「画像貼付けグラフ」の割合を把握</td><td>難所1</td></tr>
+  <tr><td>D4</td><td>response_schema の構造遵守率</td><td>同一プロンプトを30〜50回実行、8セクションスキーマで</td><td>スキーマパース成功率 ≥ 99%</td><td>難所2</td></tr>
+  <tr><td>D5</td><td>Gemini DR の URL 実在率</td><td>出力された全 URL に HTTP リクエスト（最低200 URL）</td><td>リンク有効率を計測（参考値94%）</td><td>難所2</td></tr>
+  <tr><td>D6</td><td>URL 内容の主張裏付け率</td><td>有効 URL のサンプル50件を人手 or LLM-judge で照合</td><td>事実的正確性（参考値39〜77%）</td><td>難所2</td></tr>
+  <tr><td>D7</td><td>TikTok 件数の正確性</td><td>LLM の件数 vs スクレイパー API 実数を20ハッシュタグで突合</td><td>誤差率・「数値を返さない率」</td><td>難所2</td></tr>
+  <tr><td>D8</td><td>案件ID 自動マッチの歩留まり</td><td>実 Gmail/Slack/Drive 各50〜100件で命名規則＋LLM 推定の正解率を実測</td><td>正マッチ70%超・誤マッチ5%未満</td><td>難所3</td></tr>
+  <tr><td>D9</td><td>pgvector の post-filtering 精度</td><td>「特定案件IDで絞り込んでからベクトル検索」を実データで実行</td><td>recall 劣化が許容範囲か（劣化大ならハイブリッド検索へ）</td><td>難所3</td></tr>
+  <tr><td>D10</td><td>Gmail 私信分離の精度</td><td>本人・他人の実メール各100件で「業務/私信」分類の正解率</td><td>私信の業務側混入率（目標誤検知10%以下）</td><td>難所3</td></tr>
+  <tr><td>D11</td><td>dpro/Buzzmiru の安定性ベースライン</td><td>2〜4週間スクレイピングを回し失敗率・スキーマドリフト頻度を実測</td><td>「週次で何%壊れるか」を数値化</td><td>難所3</td></tr>
+  <tr><td>D12</td><td>end-to-end 検索テスト</td><td>抽出→チャンク→embedding→pgvector まで通し、営業の実クエリ10本で Top3 が妥当か</td><td>「取り込めた」でなく「検索で使える」まで確認</td><td>全難所</td></tr>
+</table>
+
+<div class="note">
+  <div class="label">PoC の計測原則</div>
+  1〜2回の試行で「動いた」と判断しない。特に LLM 系（D4〜D7）はプロンプトの言い回しだけで精度が大きくブレるため、<strong>各項目20〜50回の反復</strong>で「率」として評価する。
+</div>
+</section>
+
+<section id="sec-6">
+<h2><span class="num">6.</span>仕様書 v2.3 への反映事項</h2>
+<p>このリサーチ結果を踏まえ、v2.3 で修正・追記すべき事項。</p>
+
+<table>
+  <tr><th>#</th><th>対象</th><th>現状（v2.2）</th><th>v2.3 での修正</th></tr>
+  <tr><td>1</td><td>要件定義書 FR-3-07（Drive 取り込み）</td><td>「80%以上が取り込まれる」</td><td>「テキストPDF 90% / PPTX 80% / 複雑PDF 50% / スキャンPDF 55%、加重平均 約74%」と文書タイプ別に現実化。抽出ツール（PyMuPDF振り分け→LlamaParse/Azure DI/python-pptx）を明記</td></tr>
+  <tr><td>2</td><td>要件定義書 FR-3-13（捏造禁止）</td><td>「捏造率0%」</td><td><strong>「捏造率0%」を削除</strong>。「構造崩れ0%」「リンク切れURL 0%」「件数はAPI直取得」「事実的正確性≥90%・未検証は100%フラグ化」に置き換え</td></tr>
+  <tr><td>3</td><td>アーキ図書（データ統合）</td><td>「動画ID/案件IDで JOIN」</td><td><strong>案件マスタ（project_master）+ 紐付けテーブル（project_source_link）</strong>のスキーマを新規追加。エンティティ解決の手法を明記</td></tr>
+  <tr><td>4</td><td>アーキ図書（pgvector）</td><td>記述なし</td><td>post-filtering 劣化対策（案件パーティション分割 or ハイブリッド検索＋リランカー）を追記</td></tr>
+  <tr><td>5</td><td>要件定義書（人手補完）</td><td>記述なし</td><td><strong>新規 FR：「案件ID 紐付けの人手補完 UI」</strong>を機能③の一部として追加（未確定リンク一覧→案件選択→確定）</td></tr>
+  <tr><td>6</td><td>アーキ図書（Gemini DR）</td><td>「8セクション JSON 生成」</td><td>「Deep Research で調査 → 別呼び出しで response_schema 整形」の2段階に分離。URL 機械検証・件数 API 直取得の検証レイヤーを追加</td></tr>
+  <tr><td>7</td><td>アーキ図書（スクレイピング系）</td><td>サーキットブレーカー等は記述あり</td><td><strong>スキーマドリフト検知</strong>（取得件数のベースライン比較・null率・値分布のドリフト）を追記。「ジョブ成功＝データ正常ではない」</td></tr>
+  <tr><td>8</td><td>実装計画書（PoC）</td><td>記述なし</td><td><strong>本格実装前の「データ収集 PoC」を Sprint 0 として正式に組み込む</strong>（D1〜D12 の12項目・2〜4週間）</td></tr>
+</table>
+
+<h3>6.1 次のアクション</h3>
+<ol>
+  <li>このリサーチレポートを監査役に提示し、懸念②に対する「現実解は存在する」ことを示す</li>
+  <li>v2.3 で上記8項目を修正・追記（特に「捏造率0%」KPI の修正は急務）</li>
+  <li>データ収集 PoC（D1〜D12）を実装計画書の Sprint 0 として正式化</li>
+  <li>PoC の実測値で設計目標を補正 → 本格投資の最終判断</li>
+</ol>
+</section>
+
+</main>
+</div>
+</body>
+</html>

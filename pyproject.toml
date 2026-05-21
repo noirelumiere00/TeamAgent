@@ -1,0 +1,121 @@
+[project]
+name = "teamagent"
+version = "3.0.0a1"
+description = "TeamAgent - Slack で動く社内 AI Agent 基盤（Claude Agent SDK + Skill Registry / Plugin アーキ）"
+authors = [
+    { name = "Shogo Komata" },
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+
+dependencies = [
+    # --- Claude Agent SDK ---
+    "claude-agent-sdk>=0.3.0",
+    "anthropic>=0.40.0",
+    "boto3>=1.34.0",  # Bedrock 経由でも使える
+
+    # --- データ層 / pgvector ---
+    "psycopg[binary]>=3.2.0",
+    "pgvector>=0.3.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",  # マイグレーション
+
+    # --- 外部連携: Google ---
+    "google-api-python-client>=2.150.0",
+    "google-auth>=2.35.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+
+    # --- 外部連携: Slack ---
+    "slack-bolt>=1.21.0",
+    "slack-sdk>=3.33.0",
+
+    # --- ドキュメント解析 ---
+    "pypdf>=5.0.0",
+    "python-docx>=1.1.0",
+    "python-pptx>=1.0.0",
+    "openpyxl>=3.1.0",
+    "markdown>=3.7",
+    "beautifulsoup4>=4.12.0",
+
+    # --- 動画分析（機能④） ---
+    "yt-dlp>=2025.1.0",
+    "google-genai>=0.5.0",  # Gemini 2.5 Flash 用
+
+    # --- HTML → PDF/PPTX 変換 ---
+    "playwright>=1.50.0",
+    "weasyprint>=63.0",
+
+    # --- ユーティリティ ---
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "httpx>=0.27.0",
+    "tenacity>=9.0.0",  # リトライ
+    "structlog>=24.4.0",
+    "rich>=13.9.0",
+
+    # --- Scheduler / Workflow ---
+    "apscheduler>=3.10.0",  # ローカル開発用、本番は EventBridge
+
+    # --- Web フレームワーク（Skill 管理 API 用） ---
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+    "ipython>=8.28.0",
+    "pre-commit>=4.0.0",
+]
+mcp = [
+    # MCP SDK（外部 SaaS の MCP 化を実装するとき用）
+    "mcp>=0.9.0",
+]
+
+[project.scripts]
+teamagent = "teamagent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/teamagent"]
+
+# ============================================================
+# Tooling
+# ============================================================
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",  # pycodestyle / pyflakes
+    "I",            # isort
+    "B",            # bugbear
+    "UP",           # pyupgrade
+    "N",            # pep8-naming
+    "RUF",          # ruff-specific
+]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-ra --strict-markers --strict-config"

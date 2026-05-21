@@ -1,0 +1,2176 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Code 営業向け入門セミナー v1 — 個人PCで始める AI 活用</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+
+<div class="layout">
+
+<!-- ============== Sidebar ============== -->
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">Claude Code<br>営業向け入門セミナー</div>
+  <div class="sidebar-doc-meta">
+    Version 1.0<br>
+    2026年5月15日
+  </div>
+
+  <div class="sidebar-header">目次 / Table of Contents</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-1"><span class="num">1.</span>はじめに — なぜ今、個人PCでAIを始めるのか</a></li>
+    <li class="level-2"><a href="#sec-1-1"><span class="num">1.1</span>セミナーの狙い</a></li>
+    <li class="level-2"><a href="#sec-1-2"><span class="num">1.2</span>重要な前提：資料自動化を待たずに価値が出る</a></li>
+    <li class="level-2"><a href="#sec-1-3"><span class="num">1.3</span>個人 Claude Code と TeamAgent の対比</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-2"><span class="num">2.</span>資料自動化以前 — AI 活用の3つの本質的価値</a></li>
+    <li class="level-2"><a href="#sec-2-1"><span class="num">2.1</span>ナレッジが個人に蓄積する</a></li>
+    <li class="level-2"><a href="#sec-2-2"><span class="num">2.2</span>リサーチの劇的効率化</a></li>
+    <li class="level-2"><a href="#sec-2-3"><span class="num">2.3</span>思考の壁打ち相手が常に手元にいる</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>営業ユースケース10選</a></li>
+
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>セミナーで実演するハンズオン</a></li>
+    <li class="level-2"><a href="#sec-4-1"><span class="num">4.1</span>セットアップの全体像</a></li>
+    <li class="level-2"><a href="#sec-4-2"><span class="num">4.2</span>デモプロンプト5本</a></li>
+    <li class="level-2"><a href="#sec-4-3"><span class="num">4.3</span>演習3本</a></li>
+
+    <li class="level-1"><a href="#sec-5"><span class="num">5.</span>個人PCでできることの境界線</a></li>
+
+    <li class="level-1"><a href="#sec-6"><span class="num">6.</span>セキュリティとガバナンス</a></li>
+    <li class="level-2"><a href="#sec-6-1"><span class="num">6.1</span>渡していい情報・渡してはいけない情報</a></li>
+    <li class="level-2"><a href="#sec-6-2"><span class="num">6.2</span>Anthropic / Claude のデータ利用方針</a></li>
+    <li class="level-2"><a href="#sec-6-3"><span class="num">6.3</span>社内のクレデンシャル管理</a></li>
+
+    <li class="level-1 highlight-section"><a href="#sec-7"><span class="num">7.</span>今日から始める3ステップ</a></li>
+
+    <li class="level-1"><a href="#sec-8"><span class="num">8.</span>FAQ — よくある不安に答える</a></li>
+
+    <li class="level-1"><a href="#sec-9"><span class="num">9.</span>改訂履歴</a></li>
+  </ul>
+</aside>
+
+<!-- ============== Main ============== -->
+<main>
+
+<header class="doc-header">
+  <div class="doc-type">営業向けセミナー教材 v1.0</div>
+  <h1>Claude Code 営業向け入門セミナー<br>個人PCで始める AI 活用</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>セミナー教材 兼 配布資料（営業向け実用ガイド）</td></tr>
+    <tr><td>バージョン</td><td>1.0（初版・営業16名向けに作成）</td></tr>
+    <tr><td>作成日</td><td>2026年5月15日</td></tr>
+    <tr><td>対象読者</td><td>営業16名（AI ・プログラミング未経験〜初級）+ マネージャー</td></tr>
+    <tr><td>位置付け</td><td>TeamAgent 本体（中央サーバー型）と<strong>並走する、営業個人の AI 活用ガイド</strong>。TeamAgent が完成するまでの「先行価値」かつ、完成後も独立して使い続ける個人スキル教材。</td></tr>
+    <tr><td>関連文書</td><td>TeamAgent 本体仕様書（teamagent_overview_v2.2.html）／ 経営層向けサマリー（teamagent_summary_v2.2.html）</td></tr>
+  </table>
+</header>
+
+<!-- ========== ヒーロー ========== -->
+<div class="hero">
+  <div class="hero-tagline">Personal AI, Day One</div>
+  <div class="hero-headline">資料自動化を待たなくても<br>AI は今日から営業を変える</div>
+  <div class="hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-num">3<small>本質価値</small></div>
+      <div class="hero-stat-label">ナレッジ蓄積 / リサーチ効率化 / 思考の壁打ち</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">10<small>ユースケース</small></div>
+      <div class="hero-stat-label">個人PCで明日から使える営業活用例</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-num">5<small>分</small></div>
+      <div class="hero-stat-label">インストールしてから初回プロンプトまでの目安時間</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ========== 1. はじめに ========== -->
+<section id="sec-1">
+<h2><span class="num">1.</span>はじめに — なぜ今、個人PCでAIを始めるのか</h2>
+
+<h3 id="sec-1-1"><span class="num">1.1</span>セミナーの狙い</h3>
+<p>
+この社内では、いま <strong>「TeamAgent」</strong> という Slack で動く中央サーバー型の AI エージェントを設計・開発中です。営業16名 + マネージャーが共通して使う、いわば <strong>「会社の脳」</strong> です。フル稼働まで 8.5ヶ月かかります。
+</p>
+<p>
+一方、本セミナーで扱う <strong>「個人 Claude Code」</strong> は、<strong>あなた自身の PC の中で動く、あなた専属の AI</strong> です。会社のサーバーは関係なく、今日インストールすれば今日から使えます。守備範囲は「自分の仕事を加速する」こと。
+</p>
+<p>
+両方とも必要です。会社の脳（TeamAgent）と、個人の右腕（Claude Code）。<strong>本セミナーはその「個人の右腕」の入口</strong>として、営業のみなさんが明日から使えるレベルまで持ち上げることを目的にしています。
+</p>
+<div class="note beginner">
+  <div class="label">このセミナーで持ち帰ってほしいもの</div>
+  (1) AI で何が変わるかの感覚 / (2) 個人PCで動く Claude Code のセットアップ手順 / (3) 営業の現場で明日から使える 10 のユースケース / (4) 渡していい情報・渡してはいけない情報の線引き。<strong>プログラミング知識は一切不要</strong>です。日本語で命令文を書けば動きます。
+</div>
+
+<h3 id="sec-1-2"><span class="num">1.2</span>重要な前提：資料自動化を待たずに価値が出る</h3>
+<p>
+TeamAgent の <strong>機能③（提案コンテンツ生成 ＝ 資料自動化）</strong> は、本プロジェクトで最も期待されている機能です。ただし、これは Phase 3 で実装されるため、稼働までに 6ヶ月以上かかります。場合によっては、社内事情で計画どおりに進まない可能性もあります。
+</p>
+<p>
+ここで強調したいのは、<strong>「資料自動化が仮に間に合わなくても、個人 Claude Code を使うだけで営業の仕事は本質的に変わる」</strong> ということです。資料が自動で出てくるのは確かに気持ちいい。でも、それより手前にある <strong>「リサーチ・要約・壁打ち・ナレッジ蓄積」</strong> の部分だけでも、個人で十分強力な AI 活用ができます。
+</p>
+<p>
+本セミナーは、その <strong>「先に手に入る価値」</strong> を示すものです。TeamAgent が完成したら、その上で個人 Claude Code を併用してさらに加速する。今日始めて損はありません。
+</p>
+
+<h3 id="sec-1-3"><span class="num">1.3</span>個人 Claude Code と TeamAgent の対比</h3>
+<p>
+混乱しがちなので、最初に住み分けをはっきりさせます。<strong>対立ではなく並走</strong>です。
+</p>
+<table>
+  <tr><th>観点</th><th>個人 Claude Code（本セミナーの対象）</th><th>TeamAgent（中央サーバー型）</th></tr>
+  <tr><td>守備範囲</td><td>自分の仕事を加速</td><td>会社の脳・組織知</td></tr>
+  <tr><td>対象データ</td><td>自分のファイル / 自分の Gmail / 自分の Drive</td><td>16人横断・他人のメール・案件DB・共有ナレッジ</td></tr>
+  <tr><td>配信形式</td><td>自分から話しかける（受動応答）</td><td>朝8時 push 通知などの能動配信</td></tr>
+  <tr><td>インフラ</td><td>ローカル PC のみ</td><td>AWS / 専用サーバー</td></tr>
+  <tr><td>立ち上げ</td><td>数分でセットアップ</td><td>8.5ヶ月かけて構築</td></tr>
+  <tr><td>誰のもの</td><td>あなた個人のスキル・道具</td><td>会社の共通インフラ</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 1.3</span>個人 Claude Code と TeamAgent の対比。両方使うのが正解。</p>
+<div class="note">
+  <div class="label">合言葉</div>
+  <strong>「対立じゃなく並走」</strong>。個人 Claude Code で磨いたプロンプトや使い方は、TeamAgent が完成したときにそのまま流し込めます。今日の投資は、半年後にも生きます。
+</div>
+</section>
+
+
+<!-- ========== 2. AI活用の3つの本質的価値 ========== -->
+<section id="sec-2">
+<h2><span class="num">2.</span>資料自動化以前 — AI 活用の3つの本質的価値</h2>
+<p>
+TeamAgent の機能③（資料自動化）を待たなくても、個人 Claude Code を使うだけで <strong>3つの本質的価値</strong> が手に入ります。むしろ、資料自動化はこの3つの先にある「最終形」であって、土台はこの3つです。順番に深掘りします。
+</p>
+
+<h3 id="sec-2-1"><span class="num">2.1</span>ナレッジが個人に蓄積する（→ いずれ会社の脳へ）</h3>
+<p>
+AI と対話していくと、不思議なことが起きます。<strong>「自分が当たり前にやっている判断ロジック」「自分の営業の勝ちパターン」が、自然と言語化されていく</strong>のです。
+</p>
+<p>
+たとえば「ACME 社の提案、どう組み立てる？」と Claude に聞くと、Claude は「業界・規模・担当者の役職、過去取引……どんな情報があれば答えられる？」と返してきます。それに答えていくうちに、自分の頭の中にあった暗黙のチェックリストが、文字として外に出てきます。
+</p>
+<p>
+さらに、自分のフォルダ・メール・過去の提案資料を Claude に読ませる経験そのものが、<strong>「何が会社の財産になっているか」を可視化する第一歩</strong>になります。
+</p>
+<div class="note">
+  <div class="label">💡 TeamAgent への接続</div>
+  個人 Claude Code で磨いたプロンプト・使い方・ナレッジ整理法は、半年後に TeamAgent が稼働したとき、そのまま <strong>「会社の脳」への入力</strong> として活用できます。個人のスキルが、いずれ組織のインフラに昇格する設計です。
+</div>
+
+<h3 id="sec-2-2"><span class="num">2.2</span>リサーチの劇的効率化</h3>
+<p>
+これが営業現場で一番効くやつです。<strong>競合動向・業界トレンド・顧客背景の事前リサーチが、従来 1〜2 時間 → 5〜10 分に短縮できます</strong>。Web 検索 + 要約 + 論点抽出を、AI が一度にこなすからです。
+</p>
+
+<table>
+  <tr><th>観点</th><th>Before（従来の手作業）</th><th>After（個人 Claude Code）</th></tr>
+  <tr><td>所要時間</td><td>60 分</td><td><strong>7 分</strong></td></tr>
+  <tr><td>手順</td><td>Google で 10 個キーワード検索 → 上位記事 5 本を読む → メモする → ChatGPT で要約 → 自分の言葉で再整理</td><td>Claude Code に「美容業界の最新クチコミ動向を調べて、3つの論点にまとめて」と1行投げる</td></tr>
+  <tr><td>アウトプット</td><td>Word に貼り付けたメモ（構造化されてない）</td><td>3 論点 + 根拠 URL + 営業アングル提案までセット</td></tr>
+  <tr><td>使える化</td><td>1回限り</td><td>そのまま提案書のアウトラインに転用できる</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 2.2</span>事前リサーチの Before / After（例：美容業界の最新クチコミ動向）</p>
+
+<p>
+重要なのは、<strong>「リサーチに費やしていた時間が、本質的な顧客対応・関係構築に回せる」</strong> という点です。AI に頼ることで楽になるのではなく、<em>営業として本当にやりたかった仕事に時間を戻せる</em> のです。
+</p>
+
+<h3 id="sec-2-3"><span class="num">2.3</span>思考の壁打ち相手が常に手元にいる</h3>
+<p>
+これは地味ですが、効きます。<strong>提案企画の整理・想定問答・トーン調整・社内説明の準備</strong>。これまで上司や先輩を巻き込まないとできなかった壁打ちが、AI 相手に何度でもできます。
+</p>
+<p>
+具体例：
+</p>
+<ul>
+  <li><strong>メール壁打ち</strong>：一度書いた返信案を Claude に「これ受け取った相手はどう感じる？役員視点でも見て」と聞ける。</li>
+  <li><strong>提案ロジック検証</strong>：「この提案の弱点は？」「クライアントから来そうな反論は？」を 3 分で返してくれる。</li>
+  <li><strong>表現の調整</strong>：「もう少しフォーマルに」「業界用語を使った版で」「3行に圧縮して」が即座にできる。</li>
+  <li><strong>社内説明</strong>：「これを上司にどう説明する？1分バージョンと3分バージョンで」とお願いできる。</li>
+</ul>
+<div class="note beginner">
+  <div class="label">💡 メンタルモデル</div>
+  Claude Code は <strong>「24時間そばにいる、忍耐力無限の先輩」</strong> だと思ってください。「こんなこと聞いていいのかな」と遠慮する必要はありません。むしろ、最初の3案を AI に出させてから、人間の先輩に「3案のどれが一番マシ？」と聞くほうが、先輩の時間も節約できます。
+</div>
+</section>
+
+
+<!-- ========== 3. 営業ユースケース10選 ========== -->
+<section id="sec-3">
+<h2><span class="num">3.</span>営業ユースケース10選 — 個人PCで今日からできること</h2>
+<p>
+ここがセミナーの肝です。<strong>「個人 Claude Code を使うと、営業のどんな場面で、何分短縮できるのか」</strong> を 10 個並べました。明日の自分の予定表を見ながら、どれが自分の今週に当てはまるか考えてみてください。
+</p>
+
+<table>
+  <tr>
+    <th style="width:36px">#</th>
+    <th>ユースケース</th>
+    <th>やること</th>
+    <th>Before</th>
+    <th>After</th>
+    <th>時間短縮</th>
+  </tr>
+  <tr>
+    <td><strong>1</strong></td>
+    <td><strong>クライアント事前リサーチ</strong></td>
+    <td>業界・競合・最新動向を商談前に把握</td>
+    <td>Google で記事漁り 60分</td>
+    <td>「ACME 社の業界動向と当社提案アングルを3つ」を投げて 7分</td>
+    <td>約 <strong>50分</strong></td>
+  </tr>
+  <tr>
+    <td><strong>2</strong></td>
+    <td><strong>提案書のたたき台ドラフト</strong></td>
+    <td>提案書の骨子を作る</td>
+    <td>白紙から 90分かけて構成考案</td>
+    <td>論点 3 つを与えて骨子＋章立てを 10分で生成</td>
+    <td>約 <strong>80分</strong></td>
+  </tr>
+  <tr>
+    <td><strong>3</strong></td>
+    <td><strong>商談議事録の要約 + 次アクション抽出</strong></td>
+    <td>長い議事録から ToDo を取り出す</td>
+    <td>議事録読み返し + 整理 30分</td>
+    <td>議事録貼り付け → 「次アクションをチェックリストで」5分</td>
+    <td>約 <strong>25分</strong></td>
+  </tr>
+  <tr>
+    <td><strong>4</strong></td>
+    <td><strong>個別メール返信ドラフト3案</strong></td>
+    <td>難しい返信メールの選択肢を作る</td>
+    <td>1案を 20分悩んで書く</td>
+    <td>3案を 3分で出して、人間が選ぶだけ</td>
+    <td>約 <strong>17分</strong></td>
+  </tr>
+  <tr>
+    <td><strong>5</strong></td>
+    <td><strong>競合動画の構造分析（自分用）</strong></td>
+    <td>YouTube/TikTok 動画 1 本を分解</td>
+    <td>動画を見て手でメモ 25分</td>
+    <td>yt-dlp で文字起こし → Claude に構造分析依頼 5分<br><span style="font-size:11px;color:var(--text-subtle)">※会社全体の動画ナレッジ蓄積は TeamAgent 機能④の領域</span></td>
+    <td>約 <strong>20分</strong></td>
+  </tr>
+  <tr>
+    <td><strong>6</strong></td>
+    <td><strong>Excel/CSV 数値分析・グラフ化提案</strong></td>
+    <td>売上データから傾向を読む</td>
+    <td>ピボット作って眺める 40分</td>
+    <td>CSV を読ませて「来月の見込み傾向と打ち手3つ」5分</td>
+    <td>約 <strong>35分</strong></td>
+  </tr>
+  <tr>
+    <td><strong>7</strong></td>
+    <td><strong>ロングメール / 長文資料の3行サマリー</strong></td>
+    <td>受信箱の長文を一瞬で把握</td>
+    <td>全文読む 10分</td>
+    <td>「3行で」と頼んで 30秒</td>
+    <td>約 <strong>9分</strong></td>
+  </tr>
+  <tr>
+    <td><strong>8</strong></td>
+    <td><strong>想定問答（Q&A）作成</strong></td>
+    <td>商談前の準備</td>
+    <td>頭の中でシミュレーション 30分</td>
+    <td>「先方の役員役で、想定質問10個」5分</td>
+    <td>約 <strong>25分</strong></td>
+  </tr>
+  <tr>
+    <td><strong>9</strong></td>
+    <td><strong>トーン調整</strong></td>
+    <td>クライアント宛文書を相手に合わせて変える</td>
+    <td>2〜3回書き直し 20分</td>
+    <td>「これをフォーマルに / カジュアルに / 業界用語マッチで」即座に3版</td>
+    <td>約 <strong>17分</strong></td>
+  </tr>
+  <tr>
+    <td><strong>10</strong></td>
+    <td><strong>過去資料 検索アシスタント</strong></td>
+    <td>自分の PC のフォルダから探す</td>
+    <td>ファイル名で grep して当たり付け 15分</td>
+    <td>「○○系の提案で、勝った案件の構成は？」3分</td>
+    <td>約 <strong>12分</strong></td>
+  </tr>
+</table>
+<p class="caption"><span class="fig-num">表 3</span>営業ユースケース10選。10件全部を1日でやれば、計算上 <strong>4〜5時間</strong> が浮く。</p>
+
+<div class="note beginner">
+  <div class="label">🎯 今週からの推奨</div>
+  10 個全部やる必要はありません。<strong>「自分が今いちばん時間を取られているもの」を1つ選んで、まずそれだけ試す</strong>。1週間続ければ、その1つだけで効果体感できます。慣れたら2つ目に広げる。
+</div>
+</section>
+
+
+<!-- ========== 4. ハンズオン ========== -->
+<section id="sec-4">
+<h2><span class="num">4.</span>セミナーで実演するハンズオン</h2>
+<p>
+ここからは、セミナー当日に <strong>その場で見せる / その場でやってもらう</strong> パートです。座学だけだと「ふーん」で終わるので、手を動かす設計にしてあります。
+</p>
+
+<h3 id="sec-4-1"><span class="num">4.1</span>セットアップの全体像</h3>
+<p>
+Claude Code を個人 PC で動かすには、4 ステップ・約 5 分で完了します。詳細手順書は別途配布する <em>「Claude Code セットアップ手順書 v1」</em>（PDF）を参照してください。ここでは全体像だけ示します。
+</p>
+<table class="kv">
+  <tr><td>Step 1（1分）</td><td>Claude Pro（個人）または Max（プロ向け）プランを契約する。会社契約か個人立替かは社内ルール次第。</td></tr>
+  <tr><td>Step 2（2分）</td><td>Claude Code をインストール。CLI 版（ターミナル）かデスクトップアプリ版を選ぶ。営業の方はデスクトップアプリ推奨。</td></tr>
+  <tr><td>Step 3（1分）</td><td>初回起動 → ブラウザで Anthropic アカウント認証 → 完了。</td></tr>
+  <tr><td>Step 4（1分）</td><td>最初のプロンプト「<code>このフォルダの中身を要約して</code>」を打ってみる。動いたら成功。</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 4.1</span>Claude Code セットアップの全体像（合計 約 5 分）</p>
+
+<h3 id="sec-4-2"><span class="num">4.2</span>デモプロンプト5本（実演用）</h3>
+<p>
+講師が実演します。それぞれ <strong>「プロンプト例」「期待される出力」「ポイント」</strong> の3点セットで示します。
+</p>
+
+<h4>Prompt 1 — 過去資料からの強みパターン抽出</h4>
+<pre style="background:var(--bg-code);border:1px solid var(--border);border-radius:4px;padding:14px;font-size:12px;line-height:1.6;overflow-x:auto;margin:8px 0 4px"><code class="mono">プロンプト例：
+このフォルダの過去提案資料を読んで、共通している強みパターンを3つ挙げて。
+それぞれに「どの資料で言っていたか」も添えて。</code></pre>
+<table class="kv">
+  <tr><td>期待出力</td><td>3つの強みパターン + 根拠ファイル名 + 推奨される強調ポイント</td></tr>
+  <tr><td>ポイント</td><td>自分の暗黙知が文字に出てくる。新人教育にも転用可能。</td></tr>
+</table>
+
+<h4>Prompt 2 — Web リサーチ + 提案アングル</h4>
+<pre style="background:var(--bg-code);border:1px solid var(--border);border-radius:4px;padding:14px;font-size:12px;line-height:1.6;overflow-x:auto;margin:8px 0 4px"><code class="mono">プロンプト例：
+ACME 社（仮）の最新動向を Web で調べて、当社の提案アングルを3つ提案して。
+各アングルは「根拠 → 切り口 → 想定リアクション」の順で。</code></pre>
+<table class="kv">
+  <tr><td>期待出力</td><td>3アングル + 各アングルの根拠 URL + 商談での切り出し方</td></tr>
+  <tr><td>ポイント</td><td>事前リサーチが 60分 → 7分に。商談前日の夜にこれを 1回投げる習慣を。</td></tr>
+</table>
+
+<h4>Prompt 3 — 議事録から ToDo 抽出</h4>
+<pre style="background:var(--bg-code);border:1px solid var(--border);border-radius:4px;padding:14px;font-size:12px;line-height:1.6;overflow-x:auto;margin:8px 0 4px"><code class="mono">プロンプト例：
+この議事録（添付）から、次アクションと担当者を Markdown のチェックリストにして。
+期限が議事録内に書かれていなければ「期限要確認」とマークして。</code></pre>
+<table class="kv">
+  <tr><td>期待出力</td><td>- [ ] アクション内容 @担当者（期限）のチェックリスト</td></tr>
+  <tr><td>ポイント</td><td>そのまま Slack に貼れる。捏造防止のため「書かれていない情報は要確認」と明示するのがコツ。</td></tr>
+</table>
+
+<h4>Prompt 4 — メール返信案の客観レビュー</h4>
+<pre style="background:var(--bg-code);border:1px solid var(--border);border-radius:4px;padding:14px;font-size:12px;line-height:1.6;overflow-x:auto;margin:8px 0 4px"><code class="mono">プロンプト例：
+このメール返信案、相手の役員視点で読んだときに違和感があるか指摘して。
+「言い回しが強すぎる」「責任の所在が曖昧」など具体的に。</code></pre>
+<table class="kv">
+  <tr><td>期待出力</td><td>違和感ポイントのリスト + 修正案 + 強さレベル評価</td></tr>
+  <tr><td>ポイント</td><td>"24時間いる先輩"の真骨頂。送信前 30秒の保険として使う。</td></tr>
+</table>
+
+<h4>Prompt 5 — Excel 数値から優先順位提案</h4>
+<pre style="background:var(--bg-code);border:1px solid var(--border);border-radius:4px;padding:14px;font-size:12px;line-height:1.6;overflow-x:auto;margin:8px 0 4px"><code class="mono">プロンプト例：
+この Excel（添付）の数値から、来月の見込み案件の優先順位を提案して。
+判断基準も明示して。私が同意できるかチェックできるように。</code></pre>
+<table class="kv">
+  <tr><td>期待出力</td><td>優先順位ランキング + 判断基準（金額・確度・タイミング等）+ 各案件への一言コメント</td></tr>
+  <tr><td>ポイント</td><td>判断基準を明示させることで、AI 任せにせず人間が最終判断できる。</td></tr>
+</table>
+
+<h3 id="sec-4-3"><span class="num">4.3</span>演習3本（受講者がその場でやってみる）</h3>
+<p>
+講師の実演が終わったら、受講者が自分の PC で <strong>「自分の案件」</strong> を使って試します。各演習 10分。
+</p>
+<table>
+  <tr><th style="width:90px">演習</th><th>内容</th><th>持参するもの</th></tr>
+  <tr><td><strong>演習 A</strong></td><td>自分が今週担当している案件1つで「事前リサーチ」を Claude Code に投げる</td><td>クライアント名 + 業界キーワード</td></tr>
+  <tr><td><strong>演習 B</strong></td><td>直近の議事録1本を Claude Code に要約させ、次アクションを抽出</td><td>議事録テキスト（または PDF）</td></tr>
+  <tr><td><strong>演習 C</strong></td><td>受信箱で返信に困っているメール1本を Claude Code に壁打ち</td><td>メール本文（個人情報マスキング推奨）</td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 4.3</span>演習3本。1本でも持ち帰れば、明日から個人 Claude Code が回り始める。</p>
+</section>
+
+
+<!-- ========== 5. 個人PCでできることの境界線 ========== -->
+<section id="sec-5">
+<h2><span class="num">5.</span>個人PCでできることの境界線</h2>
+<p>
+「Claude Code は万能なの？」という質問への答えは <strong>「個人の範囲では万能に近い、組織の範囲では無理」</strong> です。3色で分けます。
+</p>
+
+<h3>🟢 / 🟡 / 🔴 の境界線一覧</h3>
+<table>
+  <tr>
+    <th style="width:60px">難度</th>
+    <th>項目</th>
+    <th>理由</th>
+    <th>担当</th>
+  </tr>
+  <tr>
+    <td><strong>🟢 余裕</strong></td>
+    <td>自分のローカルファイル分析（過去資料・Excel・PDF）</td>
+    <td>自分の PC に元々あるデータ。権限不要。</td>
+    <td>個人 Claude Code</td>
+  </tr>
+  <tr>
+    <td><strong>🟢 余裕</strong></td>
+    <td>自分の Gmail / Drive 連携</td>
+    <td>自分のアカウント範囲で OAuth 認可するだけ。</td>
+    <td>個人 Claude Code</td>
+  </tr>
+  <tr>
+    <td><strong>🟢 余裕</strong></td>
+    <td>Web リサーチ（公開情報）</td>
+    <td>誰でもアクセスできる情報を AI が要約・抽出。</td>
+    <td>個人 Claude Code</td>
+  </tr>
+  <tr>
+    <td><strong>🟢 余裕</strong></td>
+    <td>文書ドラフト作成（メール・提案書骨子・社内連絡）</td>
+    <td>テキスト生成は AI の最も得意とする領域。</td>
+    <td>個人 Claude Code</td>
+  </tr>
+  <tr>
+    <td><strong>🟢 余裕</strong></td>
+    <td>議事録要約・チェックリスト化</td>
+    <td>長文 → 構造化の典型タスク。</td>
+    <td>個人 Claude Code</td>
+  </tr>
+  <tr>
+    <td><strong>🟢 余裕</strong></td>
+    <td>個人レベルの自動化スクリプト</td>
+    <td>Claude にコードを書かせて自分の PC で回す範囲なら自由。</td>
+    <td>個人 Claude Code</td>
+  </tr>
+  <tr>
+    <td><strong>🟡 工夫</strong></td>
+    <td>個人での動画分析（yt-dlp + Claude Code）</td>
+    <td>1本ずつ手動で取得して投入。重い。会社全体の蓄積には不向き。</td>
+    <td>個人 Claude Code（自分用）</td>
+  </tr>
+  <tr>
+    <td><strong>🟡 工夫</strong></td>
+    <td>個人用 MCP 接続（Slack / Notion / カレンダー）</td>
+    <td>自分のアカウント範囲のみ。設定にやや慣れが要る。</td>
+    <td>個人 Claude Code</td>
+  </tr>
+  <tr>
+    <td><strong>🟡 工夫</strong></td>
+    <td>自分専用のナレッジベース構築</td>
+    <td>自分のフォルダを整理して Claude に検索させる。基盤づくりに時間がかかる。</td>
+    <td>個人 Claude Code</td>
+  </tr>
+  <tr>
+    <td><strong>🔴 不可</strong></td>
+    <td>他人のメール / Slack を横断検索</td>
+    <td>個人 PC には他人のアクセス権限がない。会社側のサーバーで一括認可する必要。</td>
+    <td>→ <strong>TeamAgent</strong></td>
+  </tr>
+  <tr>
+    <td><strong>🔴 不可</strong></td>
+    <td>朝8時の自動 push 配信</td>
+    <td>24時間稼働するサーバーが必要。個人 PC は閉じる/寝るので無理。</td>
+    <td>→ <strong>TeamAgent</strong></td>
+  </tr>
+  <tr>
+    <td><strong>🔴 不可</strong></td>
+    <td>マネージャー横串の進捗集約</td>
+    <td>16人分のデータを統合する権限・基盤が必要。</td>
+    <td>→ <strong>TeamAgent</strong></td>
+  </tr>
+  <tr>
+    <td><strong>🔴 不可</strong></td>
+    <td>会社全員が共有するナレッジDB</td>
+    <td>個人 PC は共有先になれない。中央サーバー + pgvector が必要。</td>
+    <td>→ <strong>TeamAgent</strong></td>
+  </tr>
+  <tr>
+    <td><strong>🔴 不可</strong></td>
+    <td>24時間稼働の自動応答</td>
+    <td>常時起動するインフラが必要。</td>
+    <td>→ <strong>TeamAgent</strong></td>
+  </tr>
+</table>
+<p class="caption"><span class="fig-num">表 5</span>個人 Claude Code でできること・できないことの境界線。🟢🟡 が個人の領域、🔴 は TeamAgent が補う領域。</p>
+
+<div class="note">
+  <div class="label">結論</div>
+  <strong>🟢🟡 まではあなたの仕事を確実に変える。🔴 は TeamAgent ができたら補う。</strong> 個人 Claude Code を今日始めても、半年後に TeamAgent と衝突しません。むしろ、その時に両方使えるあなたが組織で一番強くなります。
+</div>
+</section>
+
+
+<!-- ========== 6. セキュリティとガバナンス ========== -->
+<section id="sec-6">
+<h2><span class="num">6.</span>セキュリティとガバナンス</h2>
+<p>
+営業のみなさんが一番不安なのはここだと思います。<strong>「クライアント情報を AI に渡していいの？」</strong>。3つの観点から答えます。
+</p>
+
+<h3 id="sec-6-1"><span class="num">6.1</span>渡していい情報・渡してはいけない情報</h3>
+<table>
+  <tr><th style="width:140px">分類</th><th>具体例</th><th>渡してよいか</th></tr>
+  <tr>
+    <td><strong>🟢 渡していい</strong></td>
+    <td>公開情報（プレスリリース・公式サイト・業界ニュース）</td>
+    <td>自由に渡してよい</td>
+  </tr>
+  <tr>
+    <td><strong>🟢 渡していい</strong></td>
+    <td>自分の業務メモ・自分が書いた提案ドラフト</td>
+    <td>自由に渡してよい</td>
+  </tr>
+  <tr>
+    <td><strong>🟢 渡していい</strong></td>
+    <td>自分が普段アクセスできる範囲のクライアント情報（議事録・自分宛メール）</td>
+    <td>原則 OK。ただし機密度の高い案件は社内ルール確認</td>
+  </tr>
+  <tr>
+    <td><strong>🔴 渡してはいけない</strong></td>
+    <td>個人情報（マイナンバー・口座番号・パスポート番号・健康情報）</td>
+    <td>絶対に渡さない</td>
+  </tr>
+  <tr>
+    <td><strong>🔴 渡してはいけない</strong></td>
+    <td>NDA で「外部 AI 利用禁止」と明記されているクライアント資料</td>
+    <td>NDA 違反になるので渡さない</td>
+  </tr>
+  <tr>
+    <td><strong>🔴 渡してはいけない</strong></td>
+    <td>契約上明確に AI 使用が禁じられている情報</td>
+    <td>渡さない。契約文面を確認</td>
+  </tr>
+  <tr>
+    <td><strong>🟡 迷ったら</strong></td>
+    <td>機密度高めの社内戦略・財務情報・人事情報</td>
+    <td>情シス / コンプラに確認してから</td>
+  </tr>
+</table>
+<p class="caption"><span class="fig-num">表 6.1</span>AI に渡してよい情報・ダメな情報の早見表</p>
+
+<div class="note warn">
+  <div class="label">⚠ 判断に迷ったら</div>
+  「これ渡していいかな？」と一瞬でも思ったら、<strong>渡さずに情シス / コンプライアンス担当に確認</strong>してください。社内で確認した実績が積み上がれば、AI 活用のルールも整備されていきます。最初の数件の確認は、後続の人を助けます。
+</div>
+
+<h3 id="sec-6-2"><span class="num">6.2</span>Anthropic / Claude のデータ利用方針</h3>
+<p>
+Anthropic（Claude を作っている会社）の公式方針として、<strong>API 経由・Claude Code 経由のチャットは原則として学習に使われません</strong>（オプトイン式：明示的に許可した場合のみ）。これは個人ユーザーにとって安心材料です。
+</p>
+<p>
+ただし、規約は変わる可能性があります。本セミナー資料の記述だけを根拠にせず、<strong>最新の Anthropic 公式ポリシー（Usage Policies / Data Policy）を必ず確認してください</strong>。営業時に「弊社はこの規約のもとで AI を使っている」と説明できることが重要です。
+</p>
+<table class="kv">
+  <tr><td>確認先</td><td>Anthropic 公式サイト → Privacy / Usage Policies のページ</td></tr>
+  <tr><td>確認のタイミング</td><td>導入時 + 半年ごとの定期チェック推奨</td></tr>
+  <tr><td>営業時の説明</td><td>「AI ベンダー側で学習に使われない設定で運用しています」と一言添える</td></tr>
+</table>
+
+<h3 id="sec-6-3"><span class="num">6.3</span>社内のクレデンシャル管理</h3>
+<p>
+業務利用のレベルになると、<strong>API キーやアカウント情報の管理</strong>を個人で抱え込まない方がよいです。
+</p>
+<ul>
+  <li><strong>サブスク（Pro / Max プラン）</strong>：会社払いか個人立替か、社内ルールに従う。経費精算で立て替える場合は、情シスと会計担当に事前確認。</li>
+  <li><strong>API キー</strong>：業務利用なら必ず <strong>IT 部門経由で発行・管理</strong>。個人の Gmail に届くキーをそのまま使い続けるのは避ける。</li>
+  <li><strong>退職時の引き継ぎ</strong>：個人アカウントで業務データを抱えると、退職時にトラブルになる。最初から「会社の管理下」を意識する。</li>
+</ul>
+<div class="note">
+  <div class="label">💡 推奨フロー</div>
+  Step 1 で Pro / Max プランを契約する際、<strong>「これが業務利用になりそう」と感じたら最初から IT 部門と会話する</strong>。後から法人契約に切り替えるのは手間が増えます。
+</div>
+</section>
+
+
+<!-- ========== 7. 今日から始める3ステップ ========== -->
+<section id="sec-7">
+<h2><span class="num">7.</span>今日から始める3ステップ</h2>
+<p>
+全部覚える必要はありません。<strong>この3ステップだけ持ち帰ってください</strong>。残りはやりながら覚えればいい話です。
+</p>
+
+<div style="background:var(--bg-soft);border:1px solid var(--border);border-radius:6px;padding:24px;margin:16px 0">
+  <h3 style="margin-top:0;border:none;padding:0"><span style="background:var(--accent);color:#fff;display:inline-block;width:28px;height:28px;border-radius:50%;text-align:center;line-height:28px;font-size:14px;margin-right:10px;font-weight:700">1</span>Claude Pro / Max プランを契約する</h3>
+  <ul style="margin-top:8px">
+    <li>個人用なら <strong>Pro 月 ¥3,000 程度</strong>、本格利用なら <strong>Max 月 ¥30,000 程度</strong>。</li>
+    <li>会社払いか個人立替かは社内ルール確認。経費申請の際は「営業力強化のための AI 活用」と申請目的を明記。</li>
+    <li>最初の月は Pro で十分。使い倒してから Max に上げるかどうか判断する。</li>
+  </ul>
+</div>
+
+<div style="background:var(--bg-soft);border:1px solid var(--border);border-radius:6px;padding:24px;margin:16px 0">
+  <h3 style="margin-top:0;border:none;padding:0"><span style="background:var(--accent);color:#fff;display:inline-block;width:28px;height:28px;border-radius:50%;text-align:center;line-height:28px;font-size:14px;margin-right:10px;font-weight:700">2</span>Claude Code をインストールする</h3>
+  <ul style="margin-top:8px">
+    <li>Anthropic 公式ドキュメント（<code>docs.anthropic.com/claude-code</code>）の手順に沿ってインストール。</li>
+    <li>営業の方はまず <strong>デスクトップアプリ版</strong>を推奨。GUI で動くので CLI に抵抗があっても問題なし。</li>
+    <li>CLI 版を試したい方は、<code class="mono">npm install -g @anthropic-ai/claude-code</code> でインストールできます。</li>
+    <li>つまずいたら、本セミナーの後に配布する <em>「Claude Code セットアップ手順書」</em> PDF を参照。</li>
+  </ul>
+</div>
+
+<div style="background:var(--bg-soft);border:1px solid var(--border);border-radius:6px;padding:24px;margin:16px 0">
+  <h3 style="margin-top:0;border:none;padding:0"><span style="background:var(--accent);color:#fff;display:inline-block;width:28px;height:28px;border-radius:50%;text-align:center;line-height:28px;font-size:14px;margin-right:10px;font-weight:700">3</span>今週の案件1つで「事前リサーチ」を投げる</h3>
+  <ul style="margin-top:8px">
+    <li>今週商談予定のクライアント名 + 業界キーワードを Claude Code に渡し、<strong>「最新動向と提案アングルを3つ」</strong> と頼んでみる。所要 5 分。</li>
+    <li>翌日、別のユースケース（議事録要約 or メール壁打ち）を1回試す。</li>
+    <li>1週間続けたら、自分にとってどのユースケースが一番効くかが分かる。そこを軸に習慣化。</li>
+  </ul>
+</div>
+
+<div class="note beginner">
+  <div class="label">🎯 ゴール設定</div>
+  <strong>「2週間後の自分が、Claude Code なしの仕事に戻れなくなっている」</strong>状態を目指してください。そうなれば、半年後に TeamAgent が出てきたとき、すんなり接続できます。
+</div>
+</section>
+
+
+<!-- ========== 8. FAQ ========== -->
+<section id="sec-8">
+<h2><span class="num">8.</span>FAQ — よくある不安に答える</h2>
+<p>
+営業の方からよく聞かれる質問を 6 つに絞って先回りで答えます。それでも残る疑問はセミナーの最後の Q&A 時間で。
+</p>
+
+<dl class="terms">
+  <dt>Q1. AI に頼り切ると、自分の力が落ちないか？</dt>
+  <dd>
+  <strong>道具は道具、判断は人間です。</strong>むしろリサーチ・要約・トーン調整を AI に任せた時間で、本質的な顧客対応に集中できます。AI が出した3案から1つを選ぶ・修正するという作業は、白紙から書くより<em>判断力が鍛えられる</em>側面もあります。「自分で書く力」より「自分で選ぶ力」が今後の営業の差別化です。
+  </dd>
+
+  <dt>Q2. クライアント情報を AI に渡すのは怖い</dt>
+  <dd>
+  正しい不安です。<strong>第6章の表に沿って、公開情報 + 自分の業務メモから始めましょう</strong>。慣れてきたら、自分宛のメールや議事録に範囲を広げる。マイナンバー・口座番号・NDA 明記の機密情報は <strong>絶対に渡さない</strong>。迷ったら情シス。これだけ守っていれば事故は起きません。
+  </dd>
+
+  <dt>Q3. プロンプトのコツが分からない</dt>
+  <dd>
+  最初は <strong>自然な日本語の命令文</strong>でまったく問題ありません。「○○について調べて、3つにまとめて」「このメール、相手の立場で違和感あるか見て」程度で十分動きます。セミナー後に <em>「営業向け 使い回せるプロンプト集 v1」</em> を配布予定です。「丁寧に頼む」「箇条書きで欲しいと指示する」「具体例を1つ添える」、この3つを意識すればまずは OK。
+  </dd>
+
+  <dt>Q4. TeamAgent ができたら、Claude Code はいらなくなる？</dt>
+  <dd>
+  <strong>なりません。両方使います。</strong>住み分けは第1章の表のとおりです。TeamAgent は「会社の脳」、Claude Code は「個人の右腕」。例えば、TeamAgent が朝8時に届けた営業進捗サマリーを見て、その後の個別案件深掘りは Claude Code、というのが理想的なフロー。<strong>両方使える人が組織で一番強くなる</strong>設計です。
+  </dd>
+
+  <dt>Q5. コストは？</dt>
+  <dd>
+  個人 Pro プランは <strong>月 ¥3,000 程度</strong>、本格利用の Max プランは <strong>月 ¥30,000 程度</strong>です（2026年5月時点・為替変動あり）。会社が払うか個人が払うかは社内ルール次第。営業1人が月に 10時間でも工数削減できれば、Pro プランは確実に元が取れます。最初は Pro から始めて、必要なら Max に上げる流れが安全です。
+  </dd>
+
+  <dt>Q6. マネージャーに見えるところで使っていいか？</dt>
+  <dd>
+  <strong>むしろ推奨します。</strong>こっそり使うものではありません。「AI 活用で営業力を強化している取り組み」として、マネージャー・経営層に見せていく方が、組織全体の AI 投資判断にも貢献します。商談前に「Claude Code でリサーチしました」と言える状態がカッコいい時代です。
+  </dd>
+</dl>
+
+<div class="note">
+  <div class="label">セミナー後のサポート</div>
+  Slack の <code>#ai-help</code> チャンネル（仮）で質問を受け付けます。プロンプトに困ったら気軽に投げてください。本セミナーの講師 + 早期に使い始めた営業メンバーがフォローします。
+</div>
+</section>
+
+
+<!-- ========== 9. 改訂履歴 ========== -->
+<section id="sec-9" class="appendix">
+<h2><span class="num">9.</span>改訂履歴</h2>
+<table>
+  <tr><th>版</th><th>日付</th><th>主な内容</th></tr>
+  <tr>
+    <td><strong>1.0</strong></td>
+    <td>2026-05-15</td>
+    <td>初版。営業16名向けセミナー教材として作成。TeamAgent v2.2（中央サーバー型）と並走する <strong>個人 AI 活用の入口</strong>として位置付け。AI 活用の3つの本質的価値（ナレッジ蓄積 / リサーチ効率化 / 思考の壁打ち）、営業ユースケース10選、ハンズオン（デモ5本 + 演習3本）、セキュリティ指針、3ステップ実行ガイド、FAQ6問を収録。</td>
+  </tr>
+</table>
+
+<h3>関連文書</h3>
+<table class="kv">
+  <tr><td>TeamAgent 本体仕様書</td><td>teamagent_overview_v2.2.html（5機能 × 6 データ層 × 4共通基盤）</td></tr>
+  <tr><td>経営層向けサマリー</td><td>teamagent_summary_v2.2.html（投資判断・ロードマップ要旨）</td></tr>
+  <tr><td>機能④ 確定仕様書</td><td>teamagent_kinou4_spec_v1.html（動画ナレッジ分析・参考）</td></tr>
+</table>
+
+<h3>一行サマリー</h3>
+<p style="background:var(--bg-soft);padding:16px 20px;border-left:4px solid var(--text);font-size:14px;line-height:1.8">
+本セミナー資料は、TeamAgent（中央サーバー型・8.5ヶ月開発）の完成を待たずに、営業16名が <strong>個人 PC の Claude Code を今日から使い始める</strong>ための実用ガイドである。資料自動化（機能③）が間に合わなくても、個人 Claude Code を使うだけで <strong>(1) ナレッジが個人に蓄積する、(2) リサーチが 60分 → 7分に短縮、(3) 思考の壁打ち相手が24時間手元にいる</strong> という3つの本質価値が今すぐ手に入る。10 ユースケースと 3 ステップ実行ガイドを提示。TeamAgent とは <strong>対立ではなく並走</strong>、両方使える営業が組織で一番強くなる設計。
+</p>
+
+</section>
+
+</main>
+</div>
+
+</body>
+</html>

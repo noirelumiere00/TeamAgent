@@ -1,0 +1,1754 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>懸念2.2/2.3 複合リサーチ + IGスクレイピング調査</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --text-muted: #525252;
+    --text-subtle: #737373;
+    --bg: #ffffff;
+    --bg-soft: #fafafa;
+    --bg-code: #f5f5f4;
+    --border: #e5e7eb;
+    --border-strong: #d4d4d4;
+    --accent: #B91C1C;
+    --link: #1d4ed8;
+    --highlight: #fef9c3;
+    --slack-purple: #4A154B;
+    --slack-bot: #1264a3;
+    --user-color: #4f46e5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.85;
+    font-size: 15px;
+    font-feature-settings: "palt", "cv02", "cv03";
+  }
+
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-size: 0.92em;
+  }
+
+  /* レイアウト */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+
+  /* サイドバー TOC */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg-soft);
+    padding: 32px 24px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+
+  .sidebar-header {
+    font-size: 11px;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  .sidebar-doc-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .sidebar-doc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc {
+    list-style: none;
+  }
+
+  .toc li {
+    margin-bottom: 4px;
+  }
+
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    line-height: 1.4;
+    transition: color 0.15s;
+  }
+
+  .toc a:hover { color: var(--accent); }
+
+  .toc .num {
+    color: var(--text-subtle);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+  }
+
+  .toc .level-1 { font-weight: 600; color: var(--text); margin-top: 12px; }
+  .toc .level-2 { padding-left: 20px; font-size: 12px; }
+  .toc .highlight-section a { color: var(--accent); font-weight: 700; }
+
+  /* メインコンテンツ */
+  main {
+    padding: 64px 64px 96px;
+    max-width: 920px;
+  }
+
+  .doc-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 24px;
+    margin-bottom: 48px;
+  }
+
+  .doc-type {
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: 32px;
+    line-height: 1.3;
+    font-weight: 700;
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .doc-meta-table {
+    margin-top: 24px;
+    font-size: 13px;
+  }
+  .doc-meta-table td {
+    padding: 4px 16px 4px 0;
+    color: var(--text-muted);
+  }
+  .doc-meta-table td:first-child {
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    width: 120px;
+    vertical-align: top;
+    padding-top: 6px;
+  }
+
+  /* セクション見出し */
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.3;
+    scroll-margin-top: 24px;
+  }
+
+  h2 .num { color: var(--text-subtle); margin-right: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 32px 0 12px;
+    line-height: 1.4;
+    scroll-margin-top: 24px;
+  }
+
+  h3 .num { color: var(--text-subtle); margin-right: 8px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  h4 {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 24px 0 8px;
+    color: var(--text);
+  }
+
+  /* 段落 */
+  p {
+    margin-bottom: 14px;
+  }
+
+  /* リスト */
+  ul, ol {
+    margin: 12px 0 16px 24px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  ul.unstyled {
+    list-style: none;
+    margin-left: 0;
+  }
+
+  /* 強調 */
+  strong { font-weight: 700; }
+  em { font-style: normal; background: var(--highlight); padding: 0 4px; }
+  code, .mono {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-size: 0.88em;
+  }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 13px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  th {
+    font-weight: 700;
+    background: var(--bg-soft);
+    border-bottom: 2px solid var(--text);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  table.compact { font-size: 12px; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+
+  table.kv td:first-child {
+    font-weight: 600;
+    width: 30%;
+    color: var(--text-muted);
+  }
+
+  /* 用語定義 */
+  dl.terms {
+    margin: 16px 0 24px;
+  }
+  dl.terms dt {
+    font-weight: 700;
+    margin-top: 12px;
+  }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd {
+    margin-left: 0;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.7;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ノート・コラム */
+  .note {
+    background: var(--bg-soft);
+    border-left: 4px solid var(--text);
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .note .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+
+  .note.warn { border-left-color: var(--accent); }
+  .note.warn .label { color: var(--accent); }
+  .note.beginner {
+    background: #f0fdf4;
+    border-left-color: #16a34a;
+  }
+  .note.beginner .label { color: #16a34a; }
+
+  /* 図表キャプション */
+  .caption {
+    font-size: 12px;
+    color: var(--text-subtle);
+    margin: 8px 0 24px;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .caption .fig-num {
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 8px;
+  }
+
+  /* ASCII 風アーキ図 */
+  .arch-diagram {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    margin: 16px 0 8px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  /* タイムライン */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .timeline-table th, .timeline-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .timeline-table th {
+    background: var(--bg-soft);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid var(--text);
+  }
+  .timeline-table tr.milestone {
+    background: var(--highlight);
+    font-weight: 600;
+  }
+  .timeline-table .col-period {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-muted);
+    width: 140px;
+    font-size: 12px;
+  }
+
+  /* ============ Slack chat mockup ============ */
+  .chat-mockup {
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 16px 0 24px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  .chat-mockup-header {
+    background: var(--slack-purple);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-mockup-header .ch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-mockup-header .ch-icon {
+    opacity: 0.7;
+    font-size: 14px;
+  }
+  .chat-mockup-header .ch-meta {
+    opacity: 0.6;
+    font-weight: normal;
+    font-size: 11px;
+  }
+  .chat-msg {
+    padding: 12px 16px;
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .chat-msg:last-child { border-bottom: none; }
+  .chat-msg-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: #fff;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .avatar-user { background: var(--user-color); }
+  .avatar-user-2 { background: #db2777; }
+  .avatar-user-3 { background: #ea580c; }
+  .avatar-bot { background: #1a1a1a; }
+  .chat-msg-content { flex: 1; min-width: 0; }
+  .chat-msg-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .chat-msg-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .chat-msg-time { font-size: 11px; color: var(--text-subtle); }
+  .chat-msg-bot-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chat-msg-body {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chat-msg-body code {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-card {
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .chat-card + .chat-card { margin-top: 6px; }
+  .chat-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .chat-btn {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .chat-btn.primary {
+    background: #007a5a;
+    color: #fff;
+    border-color: #007a5a;
+  }
+  .chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .chat-file-icon {
+    width: 32px;
+    height: 32px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .chat-progress {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-soft);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-ephemeral {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: #92400e;
+    border-radius: 0 3px 3px 0;
+  }
+  .chat-step-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 11px;
+    padding: 6px;
+    background: var(--bg-soft);
+  }
+
+  /* FAQ accordion */
+  .faq-list { margin: 16px 0; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 48px 14px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    list-style: none;
+    position: relative;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after {
+    content: "+";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 22px;
+    color: var(--text-subtle);
+    line-height: 1;
+    font-weight: 400;
+  }
+  details[open] summary::after { content: "−"; }
+  details summary:hover { background: var(--bg-soft); }
+  details > p, details > ul {
+    padding: 0 16px 16px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.8;
+  }
+  details > ul { padding-left: 36px; }
+
+  /* インデックス番号 */
+  .idx {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-right: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 改訂履歴・付録 */
+  .appendix {
+    border-top: 2px solid var(--text);
+    margin-top: 64px;
+    padding-top: 32px;
+  }
+
+  /* リンク */
+  a {
+    color: var(--link);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s;
+  }
+  a:hover { border-bottom-color: currentColor; }
+
+  /* User guide intro callout */
+  .guide-intro {
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .guide-intro-title {
+    font-size: 13px;
+    color: #16a34a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .guide-intro p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin-bottom: 0;
+    color: var(--text);
+  }
+
+  /* Function card grid */
+  .func-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 16px 0 32px;
+  }
+  .func-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .func-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  .func-card h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+  }
+  .func-card p {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    margin-bottom: 0;
+  }
+  .func-card .func-time {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  /* レスポンシブ */
+  @media (max-width: 1024px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar {
+      position: relative;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    main { padding: 32px 24px 64px; }
+    .func-grid { grid-template-columns: 1fr; }
+  }
+
+  /* 印刷 */
+  @media print {
+    .sidebar { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .note, .arch-diagram, .chat-mockup { page-break-inside: avoid; }
+    body { font-size: 11pt; }
+    a { color: var(--text); border: none; }
+    details { page-break-inside: avoid; }
+    details summary::after { display: none; }
+    details > p, details > ul { padding-bottom: 8px; display: block !important; }
+    details:not([open]) > p, details:not([open]) > ul { display: block; }
+    /* 印刷時は全 details を開いた状態で */
+  }
+
+  /* リファレンス */
+  .ref-list {
+    list-style: none;
+    margin-left: 0;
+    font-size: 13px;
+  }
+  .ref-list li {
+    padding-left: 32px;
+    text-indent: -32px;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .ref-list .ref-num {
+    display: inline-block;
+    width: 28px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ 図解（HTML/CSS Diagram） ============ */
+  .diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .dia-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+  .dia-arrow {
+    text-align: center;
+    font-size: 22px;
+    color: var(--text-subtle);
+    padding: 4px;
+    line-height: 1;
+  }
+  .dia-arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-subtle);
+    padding: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .dia-box {
+    background: #fff;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    min-width: 130px;
+    font-size: 12px;
+  }
+  .dia-box.dia-input { border-color: var(--user-color); border-width: 2px; background: #eef2ff; }
+  .dia-box.dia-output { border-color: var(--accent); border-width: 2px; background: #fef2f2; }
+  .dia-box.dia-existing { background: #f0fdf4; border-color: #16a34a; }
+  .dia-box.dia-external { background: #fef9c3; border-color: #ca8a04; }
+  .dia-icon { font-size: 20px; margin-bottom: 4px; line-height: 1; }
+  .dia-label-tiny {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    font-weight: 700;
+  }
+  .dia-name { font-weight: 700; font-size: 13px; line-height: 1.3; }
+  .dia-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  .dia-container {
+    background: #fafafa;
+    border: 2px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    width: 100%;
+    max-width: 880px;
+  }
+  .dia-container-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    margin-bottom: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dia-flow {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  .dia-step {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 6px;
+    text-align: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .dia-step-num {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .dia-step-name { font-size: 12px; font-weight: 700; margin: 2px 0; line-height: 1.2; }
+  .dia-step-tech { font-size: 9.5px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .dia-flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text-subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 横タイムライン図 */
+  .timeline-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px 24px;
+    margin: 16px 0 8px;
+    overflow-x: auto;
+  }
+  .tl-axis {
+    position: relative;
+    height: 4px;
+    background: var(--border);
+    margin: 16px 8px 48px;
+  }
+  .tl-axis-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 100%;
+    background: linear-gradient(90deg, var(--user-color) 0%, #1a1a1a 50%, var(--accent) 100%);
+    border-radius: 2px;
+  }
+  .tl-stages {
+    display: flex;
+    justify-content: space-between;
+    margin: -8px 0 0;
+  }
+  .tl-stage {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 24px;
+  }
+  .tl-stage::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 50%;
+    width: 14px; height: 14px;
+    background: #fff;
+    border: 3px solid #1a1a1a;
+    border-radius: 50%;
+    transform: translateX(-50%);
+  }
+  .tl-stage.tl-start::before { border-color: var(--user-color); }
+  .tl-stage.tl-end::before { border-color: var(--accent); background: var(--accent); }
+  .tl-time {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .tl-stage-name { font-size: 12.5px; font-weight: 700; line-height: 1.3; }
+  .tl-stage-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+  /* 波状展開図 */
+  .wave-diagram {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 32px 24px;
+    margin: 16px 0 8px;
+    display: flex;
+    align-items: end;
+    justify-content: space-around;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .wave-stage {
+    text-align: center;
+    flex: 1;
+    min-width: 100px;
+  }
+  .wave-bar {
+    background: linear-gradient(180deg, var(--user-color) 0%, #1a1a1a 100%);
+    margin: 0 auto 12px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .wave-stage:nth-child(1) .wave-bar { width: 24px; height: 30px; }
+  .wave-stage:nth-child(2) .wave-bar { width: 36px; height: 60px; }
+  .wave-stage:nth-child(3) .wave-bar { width: 60px; height: 100px; }
+  .wave-stage:nth-child(4) .wave-bar { width: 90px; height: 160px; background: linear-gradient(180deg, var(--accent) 0%, #1a1a1a 100%); }
+  .wave-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .wave-stage:nth-child(4) .wave-count { color: var(--accent); }
+  .wave-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .wave-date {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--text-subtle);
+  }
+
+  /* 凡例 */
+  .dia-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .dia-legend span { display: flex; align-items: center; gap: 6px; }
+  .dia-legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .dot-input { background: var(--user-color); }
+  .dot-orch { background: #1a1a1a; }
+  .dot-existing { background: #16a34a; }
+  .dot-external { background: #ca8a04; }
+  .dot-output { background: var(--accent); }
+
+  /* Before/After 対比図 */
+  .ba-diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 12px;
+    align-items: stretch;
+    margin: 16px 0 8px;
+  }
+  .ba-side {
+    padding: 20px;
+    border-radius: 8px;
+  }
+  .ba-side-before { background: #f3f4f6; border: 1px solid var(--border); }
+  .ba-side-after { background: #1a1a1a; color: #fff; }
+  .ba-side-tag {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-subtle);
+    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .ba-side-after .ba-side-tag { color: rgba(255,255,255,0.5); }
+  .ba-side-headline {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    line-height: 1.3;
+  }
+  .ba-side-headline .num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .ba-side-after .ba-side-headline .num { color: #fff; }
+  .ba-side ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ba-side li {
+    font-size: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    line-height: 1.5;
+  }
+  .ba-side-after li { border-bottom-color: rgba(255,255,255,0.1); }
+  .ba-side li:last-child { border-bottom: none; }
+  .ba-side li::before {
+    content: "—";
+    margin-right: 8px;
+    color: var(--text-subtle);
+  }
+  .ba-side-after li::before { color: var(--accent); }
+  .ba-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 768px) {
+    .ba-diagram { grid-template-columns: 1fr; }
+    .ba-divider { transform: rotate(90deg); margin: 8px auto; }
+    .dia-flow { flex-wrap: wrap; }
+    .wave-diagram { flex-direction: column; align-items: stretch; }
+    .wave-bar { width: 100% !important; height: 8px !important; }
+  }
+
+  /* ============== v2.0 ビジュアル強化 ============== */
+
+  /* ヒーローセクション */
+  .hero {
+    background: linear-gradient(135deg, #fef2f2 0%, #fff7ed 50%, #f0fdf4 100%);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 24px 0 40px;
+    border: 1px solid var(--border);
+  }
+  .hero-tagline {
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .hero-headline {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 24px;
+    color: var(--text);
+  }
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .hero-stat {
+    background: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .hero-stat-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hero-stat-num small {
+    font-size: 16px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+  .hero-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 3層アーキ（box on box） */
+  .layer-stack {
+    margin: 20px 0 8px;
+  }
+  .layer-stack .layer {
+    background: white;
+    border: 2px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .layer-stack .layer.l-feature { background: linear-gradient(135deg,#eef2ff,#e0e7ff); border-color: #6366f1; }
+  .layer-stack .layer.l-data { background: linear-gradient(135deg,#fef3c7,#fde68a); border-color: #ca8a04; }
+  .layer-stack .layer.l-base { background: linear-gradient(135deg,#dcfce7,#bbf7d0); border-color: #16a34a; }
+  .layer-stack .layer-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .layer-stack .layer-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .layer-stack .item-pill {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .layer-stack .l-arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 18px;
+    margin: 4px 0;
+  }
+
+  /* Phase track（横並び） */
+  .phase-track {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin: 20px 0 8px;
+  }
+  .phase-block {
+    border-radius: 8px;
+    padding: 14px 12px;
+    border: 2px solid;
+    background: white;
+    text-align: center;
+  }
+  .phase-block.p1 { border-color: #6366f1; background: #eef2ff; }
+  .phase-block.p2 { border-color: #2563eb; background: #dbeafe; }
+  .phase-block.p25 { border-color: #ca8a04; background: #fef3c7; }
+  .phase-block.p3 { border-color: #16a34a; background: #dcfce7; }
+  .phase-block.p4 { border-color: #B91C1C; background: #fee2e2; }
+  .phase-block .phase-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-name {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+  .phase-block .phase-period {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* 機能アイコンカード（2.1の置換） */
+  .feature-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 5px solid;
+    border-radius: 8px;
+    padding: 18px 18px 16px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .feature-card-v2:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  }
+  .feature-card-v2.f1 { border-left-color: #B91C1C; }
+  .feature-card-v2.f2 { border-left-color: #2563eb; }
+  .feature-card-v2.f3 { border-left-color: #16a34a; }
+  .feature-card-v2.f4 { border-left-color: #6366f1; }
+  .feature-card-v2.f5 { border-left-color: #ca8a04; }
+  .feature-card-v2 .fc-icon {
+    font-size: 28px;
+    margin-bottom: 6px;
+  }
+  .feature-card-v2 .fc-num {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .feature-card-v2 .fc-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .feature-card-v2 .fc-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .feature-card-v2 .fc-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+
+  /* チャットモック（営業の体験） */
+  .chat-mock {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .chat-mock .chat-line {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-mock .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: var(--user-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .chat-mock .chat-avatar.bot { background: var(--slack-bot); }
+  .chat-mock .chat-avatar.mgr { background: var(--accent); }
+  .chat-mock .chat-content { flex: 1; }
+  .chat-mock .chat-name { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+  .chat-mock .chat-time { color: var(--text-subtle); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .chat-mock .chat-text { color: var(--text); }
+  .chat-mock .chat-ephemeral {
+    background: white;
+    border: 1px dashed var(--text-muted);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .chat-mock .chat-ephemeral-tag {
+    font-size: 10px;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .chat-mock .button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .chat-mock .btn-mock {
+    background: white;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .chat-mock .btn-mock.primary { background: var(--user-color); color: white; border-color: var(--user-color); }
+
+  /* コスト bar chart */
+  .cost-chart {
+    margin: 16px 0 8px;
+  }
+  .cost-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .cost-label {
+    font-weight: 600;
+  }
+  .cost-bar-bg {
+    background: var(--bg-soft);
+    border-radius: 4px;
+    height: 24px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .cost-bar-fill.aws { background: linear-gradient(90deg, #FF9900, #FFB84D); }
+  .cost-bar-fill.anthropic { background: linear-gradient(90deg, #B91C1C, #ef4444); }
+  .cost-bar-fill.gemini { background: linear-gradient(90deg, #4285F4, #6FA8FF); }
+  .cost-bar-fill.cc { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .cost-bar-fill.other { background: linear-gradient(90deg, #525252, #888); }
+  .cost-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+  }
+
+  /* ガントチャート */
+  .gantt {
+    margin: 20px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .gantt-header {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .gantt-header > div {
+    padding: 10px 8px;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .gantt-header > div:last-child { border-right: 0; }
+  .gantt-row {
+    display: grid;
+    grid-template-columns: 160px repeat(6, 1fr);
+    border-bottom: 1px solid var(--border);
+    height: 44px;
+    align-items: center;
+  }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-name {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 12px;
+    background: white;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .gantt-cells {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    height: 100%;
+    position: relative;
+  }
+  .gantt-cells > .gc {
+    border-right: 1px dashed var(--border);
+    height: 100%;
+  }
+  .gantt-cells > .gc:last-child { border-right: 0; }
+  .gantt-bar {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    border-radius: 4px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .gantt-bar.p1 { background: #6366f1; }
+  .gantt-bar.p2 { background: #2563eb; }
+  .gantt-bar.p25 { background: #ca8a04; }
+  .gantt-bar.p3 { background: #16a34a; }
+  .gantt-bar.p4 { background: #B91C1C; }
+
+  /* 月次ダッシュボード */
+  .month-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .month-card-v2 {
+    background: white;
+    border: 1px solid var(--border);
+    border-top: 4px solid;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .month-card-v2.m1 { border-top-color: #6366f1; }
+  .month-card-v2.m2 { border-top-color: #2563eb; }
+  .month-card-v2.m3 { border-top-color: #ca8a04; }
+  .month-card-v2.m4 { border-top-color: #16a34a; }
+  .month-card-v2.m5 { border-top-color: #16a34a; }
+  .month-card-v2.m6 { border-top-color: #B91C1C; }
+  .month-card-v2 .month-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .month-card-v2 .month-phase {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    min-height: 40px;
+  }
+  .month-card-v2 .month-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .month-card-v2 .month-stat:first-of-type { border-top: 0; }
+  .month-card-v2 .ms-label { color: var(--text-muted); }
+  .month-card-v2 .ms-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* ピル（バッジ） */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--bg-soft);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .pill.p-aws { background: #FFE4C4; color: #C76A00; }
+  .pill.p-anthropic { background: #fee2e2; color: #B91C1C; }
+  .pill.p-gemini { background: #dbeafe; color: #1d4ed8; }
+  .pill.p-cc { background: #e0e7ff; color: #4338ca; }
+  .pill.p-running { background: #dcfce7; color: #16a34a; }
+  .pill.p-dev { background: #fef3c7; color: #ca8a04; }
+
+  /* インフォブロック */
+  .info-block {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 16px;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    border-left: 4px solid var(--text);
+    align-items: center;
+  }
+  .info-block-icon {
+    font-size: 36px;
+    text-align: center;
+  }
+  .info-block-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* データソース層図 */
+  .data-source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .ds-card {
+    background: white;
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-top: 3px solid;
+  }
+  .ds-card.ds-mail { border-top-color: #ea4335; }
+  .ds-card.ds-slack { border-top-color: var(--slack-purple); }
+  .ds-card.ds-drive { border-top-color: #1a73e8; }
+  .ds-card.ds-video { border-top-color: #ff0050; }
+  .ds-card.ds-gemini { border-top-color: #4285F4; }
+  .ds-card.ds-x { border-top-color: #000; }
+  .ds-card .ds-icon { font-size: 24px; margin-bottom: 6px; }
+  .ds-card .ds-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .ds-card .ds-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+
+<div class="layout">
+<aside class="sidebar">
+  <div class="sidebar-header">Document</div>
+  <div class="sidebar-doc-title">懸念2.2/2.3 複合リサーチ<br>+ IGスクレイピング調査</div>
+  <div class="sidebar-doc-meta">Version 2.0<br>2026年5月15日<br>新前提（PDF統一・案件番号）+ IG事例</div>
+  <div class="sidebar-header">目次</div>
+  <ul class="toc">
+    <li class="level-1"><a href="#sec-0"><span class="num">0.</span>エグゼクティブサマリー</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-1"><span class="num">1.</span>あなたの3つの認識への回答</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-2"><span class="num">2.</span>IGスクレイピングの実態（海外事例・AIブーム）</a></li>
+    <li class="level-1 highlight-section"><a href="#sec-3"><span class="num">3.</span>PDF統一・案件番号での 2.2/2.3 再評価</a></li>
+    <li class="level-1"><a href="#sec-4"><span class="num">4.</span>更新版 データソース実現性評価</a></li>
+    <li class="level-1"><a href="#sec-5"><span class="num">5.</span>統合結論と推奨アクション</a></li>
+  </ul>
+</aside>
+<main>
+<header class="doc-header">
+  <div class="doc-type">懸念2.2/2.3 複合リサーチ v2</div>
+  <h1>PDF統一・案件番号管理の前提で再評価<br>＋ Instagram スクレイピングの実態調査</h1>
+  <table class="doc-meta-table">
+    <tr><td>文書種別</td><td>監査役懸念② の複合リサーチ（新前提反映 + IG事例調査）</td></tr>
+    <tr><td>バージョン</td><td>2.0</td></tr>
+    <tr><td>作成日</td><td>2026年5月15日</td></tr>
+    <tr><td>リサーチ方法</td><td>2観点を並列 Agent で Web リサーチ（IG事例 + 2.2/2.3複合再評価）</td></tr>
+  </table>
+</header>
+
+<div class="hero">
+  <div class="hero-tagline">Combined Research v2</div>
+  <div class="hero-headline">案件番号管理 = 正解。PDF統一 = 半分正解。<br>IGスクレイピング = 高リスク（要見直し）</div>
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="hero-stat-num">✅</div><div class="hero-stat-label">案件番号でのデータ管理は確立された正解パターン</div></div>
+    <div class="hero-stat"><div class="hero-stat-num">74→80<small>%</small></div><div class="hero-stat-label">PDF統一で文書抽出率は約6pt改善（90%超は無理）</div></div>
+    <div class="hero-stat"><div class="hero-stat-num">🔴</div><div class="hero-stat-label">子会社 OpenClaw の IG スクレイピングは三重リスク</div></div>
+    <div class="hero-stat"><div class="hero-stat-num">⚠️</div><div class="hero-stat-label">PDF統一の副作用：PPTXグラフ数値の抽出ルートを失う</div></div>
+  </div>
+</div>
+
+<section id="sec-0">
+<h2><span class="num">0.</span>エグゼクティブサマリー</h2>
+<p>ユーザーから提示された3つの認識（① 案件番号で施策内容を管理 ② 全PDF化でリスク減 ③ 子会社 OpenClaw が IG スクレイピング）について、2つの Agent で Web リサーチ + 複合再評価を実施した。</p>
+
+<table>
+  <tr><th>ユーザーの認識</th><th>検証結果</th><th>判定</th></tr>
+  <tr><td>① 案件番号で施策内容を管理するのが良い</td><td><strong>正解。</strong>Salesforce / Glean / Snyk など成功事例すべてが「案件マスタをハブ」にした設計。案件番号があると「どの案件のどのデータが欠けているか」を機械検知できる</td><td>✅ OK</td></tr>
+  <tr><td>② 全PDF化でリスクは少ない</td><td><strong>半分正解。</strong>「テキスト埋め込みPDF」に統一すれば抽出率 74%→約80% に改善。ただし (a) DR の捏造リスクには無効 (b) PPTXグラフ数値の抽出ルートを失う (c) 既存1,500件の遡及付与という新難所が生まれる</td><td>⚠️ 条件付き</td></tr>
+  <tr><td>③ 子会社 OpenClaw が IG スクレイピング</td><td><strong>高リスク。</strong>IG 規約違反（グレー〜アウト）+ OpenClaw が Google から無警告大量BANされた実績 + OSS エージェント自体の脆弱性（RCE・ボットネット化）の三重苦。業界は「無断スクレイピング → 公式API・ライセンス」へ移行中</td><td>🔴 要見直し</td></tr>
+</table>
+
+<div class="note warn">
+  <div class="label">⚠️ 最重要メッセージ</div>
+  ① 案件番号管理は<strong>そのまま進めてよい正解</strong>。② PDF統一は<strong>「テキスト埋め込みPDFであることを運用で保証し続けられれば」という条件付きで有効</strong>、「PDF化すれば全部解決」は楽観バイアス。③ 子会社の IG スクレイピングは<strong>TeamAgent とは別問題だが、同じ系譜のリスクとして最優先で見直すべき</strong>。
+</div>
+</section>
+
+<section id="sec-1">
+<h2><span class="num">1.</span>あなたの3つの認識への回答</h2>
+
+<h3>1.1 「案件番号で施策内容を管理」→ ✅ 正解</h3>
+<p>これは前回リサーチ（Agent C）が出した「案件マスタをハブにした設計」そのもの。Salesforce Data Cloud・Glean・Snyk など成功事例が全てこの形。</p>
+<div class="arch-diagram">project_master（案件マスタ = 案件番号ハブ）
+  project_id        例：2026-BU1-0042（BUコードを内包させると懸念③のBU分岐にそのまま使える）
+  project_name / client_name / bu / status
+  aliases           略称・社内通称の配列（LLM推定マッチの精度を左右）
+
+project_source_link（紐付け表 = TeamAgent 側に持つ）
+  project_id → Gmail スレッド / Slack チャンネル / Drive提案書 / 動画分析 / Gemini DR
+  match_method（deterministic / auto_llm / convention / manual）
+  confidence / verified_by</div>
+<p><strong>重要な原則：</strong>案件番号を Gmail/Slack/Drive 側に書き込むのではなく、<strong>TeamAgent 側に「案件番号 ⇔ 各データ」の対応表を持つ</strong>。案件番号は紐付けの「正解ラベル」を与えるもの。</p>
+
+<h3>1.2 「全PDF化でリスク減」→ ⚠️ 半分正解（条件付き）</h3>
+<table>
+  <tr><th>観点</th><th>評価</th></tr>
+  <tr><td>✅ リスクが減る点</td><td>フォーマットばらばら問題（PDF/PPTX/複雑PDF/スキャンPDF の4分岐）の入口を1本化できる。新規分のスキャンPDF混在をゼロにできる。文書抽出率 加重平均 74% → <strong>約80%</strong>（+6pt）</td></tr>
+  <tr><td>⚠️ 条件</td><td><strong>「テキスト埋め込みPDF」であることが保証されて初めて成立</strong>。印刷スキャンPDFや画面スクショ貼付PDFが混ざると元の74%問題に逆戻り。運用徹底に依存する</td></tr>
+  <tr><td>❌ 失うもの</td><td><strong>PPTXネイティブグラフの数値抽出ルートを自ら捨てる。</strong>前回リサーチ唯一の朗報（python-pptx で埋め込みExcelから数値を完全取得）が、PDF化でグラフが画像化して消える</td></tr>
+  <tr><td>❌ 残るリスク</td><td>複雑レイアウトの読み順崩れ・図表内数値・ネスト表の構造崩れは<strong>フォーマットを変えても直らない</strong>。DR の捏造リスクとは完全に無関係</td></tr>
+  <tr><td>🆕 新難所</td><td>既存1,500件への案件番号<strong>遡及付与</strong>。新規案件より歩留まりが低く（50-70%）、誤マッチがデータ汚染を生む</td></tr>
+</table>
+<p><strong>推奨：</strong>グラフ数値が業務上重要なら「PDF＋元PPTXのデュアル保管」。PPTX からは python-pptx で数値だけ別途抽出。</p>
+
+<h3>1.3 「子会社 OpenClaw が IG スクレイピング」→ 🔴 高リスク</h3>
+<p>詳細は第2章。要約すると<strong>三重リスク</strong>：(1) IG 規約違反（グレー〜アウト）、(2) OpenClaw が2026年2月に Google から無警告大量 BAN された実績、(3) OSS エージェント自体の脆弱性（CVE-2026-25253 ワンクリック RCE・脅威アクターによるボットネット化）。</p>
+</section>
+
+<section id="sec-2">
+<h2><span class="num">2.</span>IGスクレイピングの実態（海外事例・AIブーム）</h2>
+
+<h3>2.1 法的状況（2026年時点）</h3>
+<table>
+  <tr><th>地域</th><th>整理</th></tr>
+  <tr><td>米国</td><td>hiQ・Bright Data 判決により「<strong>未ログイン公開データのスクレイピングは CFAA 違反ではない</strong>」。ただし規約違反・著作権・動産侵害のリスクは残る「グレー」。Meta はログイン型・転売型には連勝、未ログイン型には連敗（Bright Data 訴訟は Meta が2024年に取下げ）</td></tr>
+  <tr><td>日本</td><td>「グレー」。スクレイピング自体を直接禁止する法律はない（著作権法30条の4＝情報解析目的の例外あり）。ただし規約違反・不正競争防止法・著作物の大量複製蓄積・再配信は違法化しうる</td></tr>
+</table>
+<table>
+  <tr><th>状態</th><th>該当行為</th></tr>
+  <tr><td>✅ 比較的セーフ寄り</td><td>未ログイン・公開データのみ・サーバ過負荷を与えない・転売しない</td></tr>
+  <tr><td>⚠️ グレー</td><td>規約違反（契約違反責任は残りうる）・著作権・動産侵害</td></tr>
+  <tr><td>❌ アウト寄り</td><td>ログイン状態でのスクレイピング、偽アカウント使用、技術的保護回避、収集データの大規模転売</td></tr>
+</table>
+
+<h3>2.2 スクレイピング vs 公式 API</h3>
+<table>
+  <tr><th>項目</th><th>スクレイピング</th><th>公式 Instagram Graph API</th></tr>
+  <tr><td>取得できるデータ</td><td>任意の公開アカウント（第三者・競合含む）</td><td><strong>自社/連携済みアカウントのみ</strong>。第三者クリエイターのオーディエンス分析は不可</td></tr>
+  <tr><td>合法性</td><td>グレー</td><td>クリーン（一次データ・本人同意ベース）</td></tr>
+  <tr><td>BANリスク</td><td>ログイン型はアカウント停止ほぼ確実、未ログイン型はIPブロック中心。違反2回で恒久BAN</td><td>なし</td></tr>
+  <tr><td>安定性</td><td>IG の画面・コード変更で一夜にして壊れる</td><td>安定（ただしポリシー変更リスクは残る）</td></tr>
+  <tr><td>商用サービス成功率</td><td>Bright Data 約98.4%（技術的には高い）</td><td>—</td></tr>
+  <tr><td>持続可能性</td><td><strong>低〜中</strong>（法務・BAN・規約変更の三重リスク）</td><td><strong>高</strong>（ただし取得範囲が狭い）</td></tr>
+</table>
+
+<h3>2.3 直近の AI ブームでの動向（2025-2026）</h3>
+<table>
+  <tr><th>トレンド</th><th>内容</th></tr>
+  <tr><td>AIクローラー急増</td><td>AI学習クローラー流量が2025年で +136%（別調査 +300%）。OpenAI が AIボットトラフィックの約69%</td></tr>
+  <tr><td>プラットフォームの反撃</td><td>Cloudflare が AI クローラーをデフォルトブロック。Pay Per Crawl など robots.txt を超える governance が登場</td></tr>
+  <tr><td>「AI vs プラットフォーム」訴訟本格化</td><td>Reddit が Anthropic・Perplexity・スクレイピング業者3社を提訴。一方 OpenAI・Google は<strong>ライセンス契約済みで提訴対象外</strong> → 「無断スクレイピングは訴訟、ライセンスは安泰」の二極化</td></tr>
+  <tr><td>API有料化の流れ</td><td>Reddit・X・Meta が無償の大量データアクセスを絞り、有料ライセンス or 厳格な公式 API に集約</td></tr>
+</table>
+<p><strong>潮流の結論：</strong>「公開データだから自由」の時代は終わりつつある。2026年時点で SNS データを AI で使う持続可能なパスは「<strong>公式 API ＋ ライセンス契約</strong>」に収束。無断スクレイピング依存はプラットフォームの対策強化・訴訟・規約変更で継続的に侵食される前提で考えるべき。</p>
+
+<h3>2.4 海外事例（実例）</h3>
+<table>
+  <tr><th>組織</th><th>何をした</th><th>結果</th></tr>
+  <tr><td>Bright Data</td><td>IG データ6.15億件を収集・販売</td><td>Meta が提訴も「未ログイン公開データは規約違反でない」と判断され、Meta が2024年に訴訟取下げ（グレーのまま）</td></tr>
+  <tr><td>BrandTotal / Unimania</td><td>ブラウザ拡張経由で FB/IG データ収集</td><td><strong>恒久的差止に同意</strong>、コード削除・収集データの配布販売禁止</td></tr>
+  <tr><td>Social Data Trading（香港）</td><td>9,100万 IG アカウントを「インフルエンサー分析」名目で収集販売</td><td>Meta が2021年提訴</td></tr>
+  <tr><td>成長 SaaS（リード獲得用途）</td><td>IG をリード獲得目的でスクレイピング</td><td>繰り返し BAN ＋ 法務懸念 → <strong>公式 API へ移行</strong>。サポートチケット95%減、コンバージョン40%向上</td></tr>
+  <tr><td>Reddit のケース</td><td>—</td><td>OpenAI・Google はライセンス契約で訴訟回避。Anthropic・Perplexity・スクレイピング業者は提訴された</td></tr>
+</table>
+
+<h3>2.5 子会社 OpenClaw の IG スクレイピングへの評価</h3>
+<div class="note warn">
+  <div class="label">🔴 子会社 OpenClaw による IG スクレイピング = 高リスク（三重苦）</div>
+  <strong>① IG 規約違反</strong>（グレー〜アウト）<br>
+  <strong>② OpenClaw が Google から無警告大量 BAN された実績</strong>（2026年2月・OAuth トークン悪用で Antigravity/Gemini を不正廉価利用、Gmail/Workspace ごと凍結）<br>
+  <strong>③ OpenClaw 自体の脆弱性</strong>（CVE-2026-25253 ワンクリック RCE、脅威アクターによるスクレイピングボットネット化の実態 — DataDome 調査）<br><br>
+  プラットフォームは OSS エージェント経由のアクセスを無警告で一括遮断する姿勢。<strong>業務利用としては推奨できない。最優先で運用停止または代替手段への切替を検討すべき。</strong>
+</div>
+
+<h3>2.6 TeamAgent の動画分析データ層への教訓</h3>
+<ul>
+  <li>dpro・Buzzmiru がスクレイピング系なら、IG 事例がそのまま当てはまる：<strong>いつ壊れてもおかしくない前提</strong>でアーキを組む</li>
+  <li>VSEO（自社）+ dpro + Buzzmiru の3本立ては、<strong>3本ともスクレイピング系なら「同じリスクの3重化」</strong>にすぎず冗長性として機能しない</li>
+  <li>データ層は「サービスが入れ替え可能」な抽象化レイヤーにし、特定スクレイパーにロックインしない設計が必須</li>
+  <li>推奨：公式 API・公式データパートナーシップを基本線に据える。スクレイピングは「いつ止まってもおかしくない繋ぎ」と位置づける</li>
+</ul>
+</section>
+
+<section id="sec-3">
+<h2><span class="num">3.</span>PDF統一・案件番号での 2.2/2.3 再評価</h2>
+
+<h3>3.1 PDF統一による文書抽出率の改善見積もり</h3>
+<table>
+  <tr><th>文書タイプ</th><th>想定割合</th><th>抽出率</th><th>寄与</th></tr>
+  <tr><td>標準レイアウトのテキスト埋め込みPDF</td><td>約65%</td><td>90%</td><td>58.5%</td></tr>
+  <tr><td>複雑レイアウトPDF（テキスト埋め込み）</td><td>約30%</td><td>60-65%（OCR誤り消失で旧50%から改善）</td><td>18-19.5%</td></tr>
+  <tr><td>残存スキャンPDF（過去資産の遡及分）</td><td>約5%</td><td>55%</td><td>2.75%</td></tr>
+  <tr style="background:#f0fdf4;font-weight:700"><td>合計</td><td>100%</td><td>—</td><td><strong>約79-81%（旧74%から +6pt）</strong></td></tr>
+</table>
+<p class="caption"><span class="fig-num">表 3.1</span>PDF統一で「90%超」には届かない。複雑レイアウトの読み順崩れ・図表内数値はフォーマット非依存で残る。</p>
+
+<h3>3.2 案件番号によるリスク低減効果</h3>
+<table>
+  <tr><th>効果</th><th>内容</th></tr>
+  <tr><td>共通キー難所の性質変化</td><td>「鍵が存在しない」→「鍵を運用で付与する」。技術問題から運用徹底問題へ</td></tr>
+  <tr><td><strong>欠損検知が可能になる</strong></td><td>案件番号をキーに「この案件はGmailはあるがDrive提案書が無い」を機械検知できる。番号がないと「何が欠けているか分からない」</td></tr>
+  <tr><td>BU分岐との接続</td><td>採番フォーマットにBUコードを内包（2026-BU1-0042）させれば、懸念③のBU別フィルタがそのまま実現</td></tr>
+</table>
+<p><strong>ただし</strong>：案件番号は Drive・DR・動画では強力に効くが、Gmail件名タグ・Slackチャンネル番号は<strong>人の運用次第</strong>。徹底されないと Gmail/Slack は従来のLLM推定（低〜中信頼度）のまま。</p>
+
+<h3>3.3 既存1,500件への遡及付与（新難所）</h3>
+<div class="note warn">
+  <div class="label">⚠️ 前提②の最大の難所：1,500件への案件番号 遡及付与</div>
+  過去の提案書には案件番号が存在しない。LLM がファイル名・本文から抽出 → CRM 案件リストと fuzzy match → 人手確定、というフローが必要。<br>
+  ・遡及自動マッチ歩留まり：<strong>50-70%</strong>（新規案件の70-85%より低い）<br>
+  ・誤マッチは別案件のデータ汚染を生む（Salesforce 公式も「fuzzy match は慎重に」と警告）<br>
+  ・<strong>割り切り推奨</strong>：直近2-3年・受注済み・高価値案件を優先。古い低価値案件は「案件未特定」プールで全文検索だけ効かせる
+</div>
+
+<h3>3.4 リスク連鎖マップ</h3>
+<div class="arch-diagram">          project_master（案件番号ハブ）← 欠けると全連鎖が成立しない
+                    │
+   ┌────────┬───────┼────────┬─────────┬──────────┐
+   ▼        ▼       ▼        ▼         ▼          ▼
+Drive提案書  動画分析  Gemini DR  Gmail     Slack    Buzzmiru/X
+(PDF統一)  (VSEO/dpro)         (16名)   (案件ch)  (落ちる前提)
+   │        │       │         └─私信混入─┘
+   └────────┴───────┴── 機能③「過去提案を参照」が成立する条件
+                    └── 機能⑤「受注角度判定」の根拠データ
+
+★案件番号は「リスクを消す」のではなく「リスクを可視化・追跡可能にする」
+</div>
+<p class="caption"><span class="fig-num">図 3.1</span>案件番号があると、欠損や汚染が起きること自体は防げないが「どこで起きているか分からない」状態は解消する。監査の観点では大きな価値。</p>
+</section>
+
+<section id="sec-4">
+<h2><span class="num">4.</span>更新版 データソース実現性評価</h2>
+<table>
+  <tr><th>データソース</th><th>総合リスク（旧→新）</th><th>変化要因</th></tr>
+  <tr><td>📧 Gmail（本人）</td><td>低〜中 → <strong>低</strong></td><td>案件番号タグ運用が効けば改善</td></tr>
+  <tr><td>📧 Gmail（他人16名）</td><td>中〜高 → <strong>中</strong></td><td>件名タグ徹底時は改善、未徹底ならLLM推定のまま</td></tr>
+  <tr><td>💬 Slack</td><td>中〜高 → <strong>中</strong></td><td>チャンネル案件番号運用時は改善</td></tr>
+  <tr style="background:#f0fdf4"><td>📁 Google Drive 提案書</td><td><strong>高 → 中</strong>（最大の改善）</td><td>PDF統一・テキスト埋め込み保証時。入口1本化＋スキャンPDF混在ゼロ</td></tr>
+  <tr><td>🎬 VSEO（自社）</td><td>低 → 低</td><td>変化なし</td></tr>
+  <tr><td>🎬 dpro</td><td>中 → 中</td><td>変化なし（スクレイピング系リスクは残る）</td></tr>
+  <tr style="background:#fef2f2"><td>🎬 Buzzmiru</td><td>高 → <strong>高</strong></td><td>変化なし。IGスクレイピング事例が示す通り「落ちる前提」</td></tr>
+  <tr style="background:#fef2f2"><td>🔍 Gemini Deep Research</td><td>高 → <strong>高</strong></td><td><strong>PDF統一・案件番号と完全に無関係。最大の残存リスク</strong></td></tr>
+  <tr><td>🐦 X</td><td>中 → 中</td><td>変化なし</td></tr>
+  <tr><td>🔗 pgvector統合（案件番号＝共通キー）</td><td>高 → <strong>中〜高</strong></td><td>新規案件は改善、遡及1,500件が足を引っ張る</td></tr>
+  <tr style="background:#fffbeb"><td>📊 PPTXチャート数値抽出</td><td>—  → <strong>🆕中（新規リスク）</strong></td><td>PDF統一で抽出不可に転落</td></tr>
+</table>
+
+<h3>4.1 更新版 リスク TOP5</h3>
+<table>
+  <tr><th>順位</th><th>リスク</th><th>状態</th><th>緩和策</th></tr>
+  <tr><td>1位</td><td>Gemini DR の捏造（事実的正確性）</td><td><strong>残存（最大）</strong></td><td>PDF統一・案件番号と完全無関係。response_schema＋URL機械検証＋件数API直取得＋事実照合の4層実装。KPI「捏造率0%」を「機械検出率」へ修正</td></tr>
+  <tr><td>2位</td><td>既存1,500件への案件番号 遡及付与</td><td><strong>🆕新難所</strong></td><td>遡及自動マッチ50-70%。直近・受注済み・高価値案件を優先。人手補完UI必須</td></tr>
+  <tr><td>3位</td><td>複雑レイアウトPDFの抽出限界</td><td>残存（一部改善）</td><td>PDF統一でOCR誤りは消えるが読み順崩れ・図表内数値は残る。約30%が抽出率60-65%止まり</td></tr>
+  <tr><td>4位</td><td>Gmail他人16名のOAuth網羅性＋私信分離</td><td>残存</td><td>オンボーディングで接続必須タスク化。私信フィルタを実測</td></tr>
+  <tr><td>5位</td><td>スクレイピング系（Buzzmiru/X/dpro）の構造的欠損</td><td>残存</td><td>IGスクレイピング事例の教訓：抽象化レイヤー化、公式API移行ロードマップ、スキーマドリフト検知</td></tr>
+</table>
+
+<h3>4.2 🆕 新規に浮上したリスク</h3>
+<table>
+  <tr><th>リスク</th><th>緩和策</th></tr>
+  <tr><td>PPTXチャート数値の抽出ルート喪失</td><td>重要案件はPDF＋元PPTXのデュアル保管。PPTXから数値だけ別抽出</td></tr>
+  <tr><td>PDF統一の運用徹底依存</td><td>PyMuPDFでテキストレイヤー有無を検収ゲート化。月次で遵守監査</td></tr>
+  <tr><td>案件番号運用のGmail/Slack徹底</td><td>番号付与を業務規約化。徹底できない前提でLLM推定のフォールバックも併設</td></tr>
+</table>
+</section>
+
+<section id="sec-5">
+<h2><span class="num">5.</span>統合結論と推奨アクション</h2>
+
+<h3>5.1 監査役向け 統合サマリー</h3>
+<div class="note beginner">
+  <div class="label">統合結論</div>
+  <strong>① 案件番号管理は正解</strong> — そのまま進めてよい。Salesforce/Glean/Snyk の成功パターン。BUコードを採番に内包させると懸念③のBU分岐にもそのまま使える。<br><br>
+  <strong>② PDF統一は条件付きで有効</strong> — 「テキスト埋め込みPDF」を運用で保証し続けられれば、文書抽出率は 74%→約80% に改善。ただし「PDF化すれば全部解決」は楽観バイアス。(a) DR の捏造には無効 (b) PPTXグラフ数値の抽出ルートを失う (c) 既存1,500件の遡及付与という新難所が生まれる。<br><br>
+  <strong>③ 子会社 OpenClaw の IG スクレイピングは高リスク</strong> — IG規約違反 + OpenClaw の Google BAN実績 + OSS脆弱性の三重苦。業界は「無断スクレイピング→公式API・ライセンス」へ移行中。TeamAgent の dpro/Buzzmiru 依存にも同じ教訓が当てはまる。<br><br>
+  <strong>2つの新前提（PDF統一・案件番号）はリスクを「消す」のではなく「可視化・追跡可能にする」性質のもの。</strong>PoC の必要性は変わらない。
+</div>
+
+<h3>5.2 推奨アクション</h3>
+<table>
+  <tr><th>#</th><th>アクション</th><th>優先度</th></tr>
+  <tr><td>A1</td><td>案件番号の採番ルール確定（YYYY-BU-連番 形式、BUコード内包）。新規案件から運用開始</td><td>高（即実施可）</td></tr>
+  <tr><td>A2</td><td>PDF統一の検収ゲート設計（PyMuPDF でテキストレイヤー有無チェック）。「テキスト埋め込みPDF」を保証する仕組み</td><td>高</td></tr>
+  <tr><td>A3</td><td>重要案件は PDF＋元PPTX のデュアル保管方針を決定（グラフ数値の抽出ルート確保）</td><td>中</td></tr>
+  <tr><td>A4</td><td>子会社 OpenClaw の IG スクレイピングを情シス・法務と協議。公式 API or 正規データプロバイダへの移行を検討</td><td><strong>高（最優先）</strong></td></tr>
+  <tr><td>A5</td><td>TeamAgent のデータ層を「スクレイパー入れ替え可能」な抽象化レイヤーで設計（dpro/Buzzmiru ロックイン回避）</td><td>中</td></tr>
+  <tr><td>A6</td><td>PoC で実測：DR捏造率 / 遡及マッチ歩留まり / 複雑PDF抽出率 / PDF統一の効果</td><td>高（本格投資の前提）</td></tr>
+  <tr><td>A7</td><td>v2.3 で「捏造率0%」KPI を削除し「機械検出率」へ修正。案件マスタ・人手補完UI を要件追加</td><td>高</td></tr>
+</table>
+
+<h3>5.3 次のステップ</h3>
+<ol>
+  <li>このリサーチを監査役に提示（懸念②に「現実解は存在する、ただし条件付き」を示す）</li>
+  <li>子会社 OpenClaw の IG スクレイピング問題を別途エスカレーション（TeamAgent とは別問題だが緊急度高）</li>
+  <li>v2.3 で 案件番号管理・PDF統一前提・DR捏造KPI修正 を反映</li>
+  <li>データ収集 PoC を実装計画書の Sprint 0 として正式化</li>
+</ol>
+</section>
+
+</main>
+</div>
+</body>
+</html>

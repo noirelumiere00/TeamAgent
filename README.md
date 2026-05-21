@@ -1,74 +1,124 @@
-# TeamAgent v2.1 — 構想・要件・アーキテクチャ ドキュメント集
+# TeamAgent v3.0
 
-営業16名 + マネージャー向け Slack AI エージェント「TeamAgent」のドキュメント一式。
-
-## 最新版（v2.1）ドキュメント一覧
-
-| 文書 | ファイル | 役割 | 主な読者 |
-|---|---|---|---|
-| 🎯 **上司共有用サマリー** | [`teamagent_summary_v2.1.html`](teamagent_summary_v2.1.html) | 1〜2ページの経営層向けサマリー（機能 + Slack具体例 + 削減効果） | 経営層・上司 |
-| ✋ **Phase 0〜E 全工程仕様書** | [`teamagent_phase0E_spec_v1.html`](teamagent_phase0E_spec_v1.html) | 機能③ の Phase 0〜E 詳細仕様（営業確認用・26質問項目つき） | 営業・推進担当 |
-| 構想・概要書 | [`teamagent_overview_v2.1.html`](teamagent_overview_v2.1.html) | 5機能 / 6データ層 / 4共通基盤の俯瞰 | 営業・推進担当 |
-| 実装計画書 | [`teamagent_implementation_plan_v2.1.html`](teamagent_implementation_plan_v2.1.html) | 8.5ヶ月 17 Sprint 反復型計画 + コスト + 月次ダッシュボード | FDE |
-| 要件定義書 | [`teamagent_requirements_v2.1.html`](teamagent_requirements_v2.1.html) | FR 40件 + NFR 25件 + その他37件 = 計102件、Sprint 別 DoD | FDE・QA |
-| アーキテクチャ図書 | [`teamagent_architecture_v2.1.html`](teamagent_architecture_v2.1.html) | C4 model 12章 + 14図解、機能① 再構成版 | FDE・実装担当 |
-
-## 履歴版（参考）
-
-| 版 | ファイル | 備考 |
-|---|---|---|
-| v2.0 | [`teamagent_overview_v2.0.html`](teamagent_overview_v2.0.html) など | IBM レビュー前の初版。v2.1 と並列して参照可能 |
-| v1.5 | [`teamagent_overview_v1.5.html`](teamagent_overview_v1.5.html) | 5機能整理前の旧構想 |
-
-## 5機能（Phase 順）
-
-```
-Phase 1（M1〜M2）：機能④ 動画 URL 分析（S1+S2+S3 = 1.5ヶ月）
-Phase 2（M2〜M4）：機能② Mail ワークフロー（S4+S5+S6+S7 = 2ヶ月）
-Phase 2.5（M4 並行）：機能⑤ 営業進捗サマリー（S8 = 0.75ヶ月）
-Phase 3（M4〜M7）：機能③ 提案コンテンツ生成（S9〜S14 = 3ヶ月）
-Phase 4（M7〜M9）：機能① Slack 自動サジェスト（S15+S16+S17 = 1.5ヶ月）
-M9：S-Final（統合検証）
-合計：約 8.5ヶ月（17 Sprint × 2週間）
-```
-
-## 主要数値（v2.1・参考見積もり）
-
-- **開発期間**：8.5ヶ月想定（17 Sprint 反復型）
-- **Sprint 内工数**：実装 55% / テスト 25% / 修正・安定化 20%
-- **コスト試算**：開発期間 ¥664K〜¥874K / 本番月次 ¥95K〜¥106K
-- **AWS 構成**：db.r7g.large + Lambda + EventBridge + Fargate + CloudWatch
-
-## 技術スタック
-
-- **共通基盤**：Claude Agent SDK / Gmail OAuth / Slack Bolt / pgvector
-- **データ層**：Gmail / Slack / Google Drive / 動画分析（VSEO + dpro + Buzzmiru）/ Gemini Deep Research / X
-- **インフラ**：AWS（Lambda / Fargate / RDS PostgreSQL pgvector / EventBridge / Secrets Manager / CloudWatch）
-
-## v2.0 → v2.1 の主要変更点
-
-IBM シニアエンジニアからのレビューを反映：
-
-1. **機能① の起動方式を変更**：Slack 受動監視 → `@TeamAgent` 直接メンション。プライバシー懸念を軽減し、API コスト 70%削減、開発工数 62.5%削減
-2. **機能①/③ の意図ルーター追加**：`@TeamAgent` で軽い事例検索 / 重い提案書生成 のどちらかを判定
-3. **17 Sprint 反復型に再構成**：各機能を 2〜3 Sprint に分解、各 Sprint 末に Champion 検証 + FB 反映サイクル
-4. **テスト工程を明示**：単体・結合・E2E・受入・性能・カオス・セキュリティ・回帰・監査ログテストを Phase 別に配置
-5. **期間延長**：6ヶ月 → 8.5ヶ月（テスト+安定化期間を正規化、+¥190〜240Kの追加投資）
-
-## 履歴
-
-- v1.0（2026-04-27）：初版
-- v1.1〜1.4（2026-04-28）：図解強化、Mail Agent 章、Gemini DR 移行方針
-- v1.5（2026-05-01）：ナレッジソース統合
-- v2.0（2026-05-07）：5機能 / 5データ層 / 4共通基盤 に再構成。Slack UI モック・フロー図・月次ダッシュボード追加。要件定義書・アーキテクチャ図書を別冊化
-- v2.1（2026-05-08）：IBM レビュー反映。機能① 再構成 + 17 Sprint 化 + テスト工程明示 + 上司共有用サマリー新設
-- **Phase 0〜E 全工程仕様書 v1（2026-05-11）：機能③ の Phase 0〜E 詳細仕様を別冊化。営業確認用に26質問項目つき。DR は統合派採用（Phase B サブエージェント、Pattern Bravo+ 4経路、Secrets Manager プロンプト管理）**
-
-## 注意事項
-
-- 本書のコスト試算・効果試算は Claude による参考見積もりであり、実測値ではない
-- 顧客名・案件名は ACME / Beta社 / Gamma健食 等のダミー名
+**Slack で動く社内 AI Agent 基盤**
+営業16名 + マネージャー向けに、Claude Agent SDK と Skill Registry / Plugin アーキで構築する AI Agent プラットフォーム。
 
 ---
 
-最終更新：2026年5月8日
+## 何ができるのか
+
+`@TeamAgent` に話しかけると、メール・Slack・Drive・動画分析データを横断して、過去事例を引き出したり、提案書のたたきを生成したり、競合動画を分析したり、進捗をまとめたりします。Skill は **Skill Registry に無限に追加可能** な設計で、初期 Skill セット 5 本（動画ナレッジ分析 / Mail ワークフロー / 提案コンテンツ生成 / Slack 自動サジェスト / 営業進捗サマリー）から段階展開していきます。
+
+## 戦略：MVA（Minimum Viable Agent）
+
+「個別 Skill から作る」のではなく「**データ層を先に固めて、Skill を後から無限に乗せる**」ファウンデーション・ファーストで進めます。
+
+| Phase | 期間 | 中身 |
+|---|---|---|
+| **MVA P1** | 〜2 ヶ月 | Gmail / Drive / Slack OAuth + pgvector への取り込み |
+| **MVA P2** | 〜2.5 ヶ月 | Claude Agent SDK の基本ループ |
+| **MVA P3** | 〜3 ヶ月 | 超軽量・検索 Skill（最初の登録 Skill） |
+| **Phase 4** | 〜9 ヶ月 | 初期 Skill セット 5 本のフル展開 |
+| **Phase 5** | 9 ヶ月〜 | 全社 AI 基盤「社内版 NoimosAI」へ |
+
+## ドキュメント
+
+実装に入る前に読んでおく順序：
+
+1. **[MVA 仕様書 v1](docs/v3.0/mva_spec_v1.html)** ← 実装担当はまずこれ
+2. **[構想・概要書 v3.0](docs/v3.0/overview_v3.0.html)** — 全体像
+3. **[要件定義書 v3.0](docs/v3.0/requirements_v3.0.html)** — FR / NFR / DR
+4. **[アーキテクチャ図書 v3.0](docs/v3.0/architecture_v3.0.html)** — C4 model / Skill Registry 設計
+5. **[実装計画書 v3.0](docs/v3.0/implementation_plan_v3.0.html)** — 17 Sprint ロードマップ
+
+完全な目次は [docs/README.md](docs/README.md) を参照。
+
+## クイックスタート
+
+### 1. ローカル開発環境
+
+```bash
+# 1) リポジトリを clone
+git clone git@github.com:noirelumiere00/TeamAgent.git
+cd TeamAgent
+
+# 2) セットアップスクリプトを実行
+bash scripts/setup_local.sh
+
+# 3) .env を編集（API キー等）
+vi .env
+
+# 4) 動作確認
+source .venv/bin/activate
+pytest tests/
+```
+
+### 2. 必要なもの
+
+- **Python 3.11+**
+- **Docker Desktop**
+- **API キー / 認証情報**：
+  - Anthropic API or AWS Bedrock アクセス
+  - Google OAuth Client（Gmail / Drive）
+  - Slack App（Bot Token + App Token）
+  - Gemini API（機能④ 動画分析用）
+  - 詳細は `.env.example` 参照
+
+### 3. 本番デプロイ
+
+[infra/terraform/](infra/terraform/) に AWS Terraform 雛形あり。
+
+```bash
+cd infra/terraform
+terraform init
+terraform plan
+terraform apply
+```
+
+## アーキテクチャ概要
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ User（営業 16 名）                                          │
+│   ↕                                                          │
+│ Slack Bolt (Frontend)                                       │
+│   ↕                                                          │
+│ ┌─────────────────────────────────────────────────────────┐ │
+│ │ Claude Agent SDK (Orchestrator / Planner / Executor)    │ │
+│ │   ├─ Skill Registry  ─→  検索 Skill / 動画 / Mail / ... │ │
+│ │   ├─ Tools / MCP     ─→  pgvector / Web / Gemini / API  │ │
+│ │   ├─ Memory / Session                                    │ │
+│ │   └─ Permissions / Guardrails                            │ │
+│ └─────────────────────────────────────────────────────────┘ │
+│   ↕                                                          │
+│ Data Layer (pgvector + S3)                                   │
+│   ├─ Gmail / Drive / Slack ingest                            │
+│   ├─ 動画分析データ                                          │
+│   └─ Gemini DR / X                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+詳しくは [アーキテクチャ図書 v3.0](docs/v3.0/architecture_v3.0.html) を参照。
+
+## 改訂履歴
+
+- **v3.0** (2026-05-19)：設計思想の再構成。Skill Registry / Plugin パターン採用。OpenClaw 不採用。MVA 戦略採用。料理メタファ表現を技術書表現に統一。
+- **v2.2** (2026-05-13)：整合性 QA 反映、応答 SLO 緩和、Tier 0-3 明記、データドリブン度 KPI 化
+- **v2.1** (2026-05-08)：IBM レビュー反映、機能① をメンション起動に、17 Sprint 化
+- **v2.0** (2026-05-07)：5 機能 / 6 データ層 / 4 共通基盤に再構成
+- **v1.5** (2026-05-01)：ナレッジソース統合
+- v1.0 〜 v1.4（2026-04-27 〜 04-30）：初版〜図解強化
+
+過去版は [docs/archive/](docs/archive/) を参照。
+
+## ライセンス
+
+社内利用専用 / Proprietary
+
+## 連絡先
+
+Shogo Komata（TeamAgent 推進担当 / FDE）
+
+---
+
+最終更新：2026 年 5 月 19 日
