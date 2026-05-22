@@ -367,3 +367,119 @@ Bedrock 呼び出しは Python 側に一本化（既存 `adapters/bedrock_client
 
 **現在の実装はどちらのシナリオでも無駄にならない。**
 
+---
+
+# 📌 v0.3 追加内容（2026-05-22 夜）
+
+## 5. AWS 公式テンプレート発見（B 案実装の最短パス）
+
+ユーザー指摘で発覚 → 自分で WebSearch / GitHub で検証済み。
+
+### 5.1 AWS Lightsail OpenClaw Blueprint（公式）
+- 出典: [Get started with OpenClaw on Lightsail](https://docs.aws.amazon.com/lightsail/latest/userguide/amazon-lightsail-quick-start-guide-openclaw.html)
+- 発表: [AWS What's New 2026/3](https://aws.amazon.com/about-aws/whats-new/2026/03/amazon-lightsail-openclaw/)
+- 1-click HTTPS / Device pairing authentication / Auto snapshots
+- **デフォルトモデル: Claude Sonnet 4.6（Bedrock 経由）**
+- 推奨インスタンス: 4 GB memory
+
+### 5.2 aws-samples 公式 CloudFormation
+- 出典: https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock
+- CloudFormation テンプレート: `clawdbot-bedrock.yaml`（旧名 Clawdbot 由来）
+- macOS variant: `clawdbot-bedrock-mac.yaml`（Mac Dedicated Host）
+
+**対応リージョン**:
+- us-east-1
+- us-west-2
+- eu-west-1
+- **ap-northeast-1（東京）← TeamAgent と一致 ✅**
+
+**構築されるもの**:
+- VPC + 公開サブネット
+- EC2 インスタンス + UserData による OpenClaw bootstrap
+- **IAM Role → Bedrock（API キー不要）**
+- セキュリティグループ
+- オプションで VPC エンドポイント
+
+**接続できるチャネル**:
+- WhatsApp / Telegram / Discord / **Slack**（TeamAgent のターゲット）
+
+### 5.3 APIキー不要の認証フロー
+```
+EC2 ─ (IAM Role) ─ IMDS ─ temporary credentials ─▶ Bedrock
+              ↑
+              AWS_PROFILE=default で SDK が IMDS を見にいく
+```
+
+セキュリティ強化：
+- API キーがどこにも保存されない
+- プロンプトインジェクションで OpenClaw が攻撃されても credentials は漏洩しない（IMDSv2 で取得、TTL あり）
+- ローテーション自動
+
+### 5.4 AWS_PROFILE の罠（必須対策）
+- 発生条件: **OpenClaw 2026.4.5+ にアップグレード後** (pi-coding-agent エンジン採用)
+- エラー: `No API key found for amazon-bedrock`
+- 原因: gateway systemd service が shell env を継承しないため `AWS_PROFILE` 不在
+- **対策**:
+```bash
+echo "AWS_PROFILE=default" >> ~/.openclaw/.env
+systemctl --user restart openclaw-gateway.service
+```
+- **2026/4 以降の新規デプロイは自動で書き込まれる**
+- 既存環境のアップグレード時のみ手動対応必要
+
+出典: [aws-samples/sample-OpenClaw-on-AWS-with-Bedrock TROUBLESHOOTING.md](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/blob/main/TROUBLESHOOTING.md), [Issue #32290](https://github.com/openclaw/openclaw/issues/32290)
+
+---
+
+## 6. B 案実装の最短パス（v3.2 ドラフト準備）
+
+AWS 公式テンプレートを活用する場合の実装フロー：
+
+### Sprint 2 W1（5/30〜6/5）— PoC 段階
+1. `aws-samples/sample-OpenClaw-on-AWS-with-Bedrock` を fork
+2. CloudFormation を **ap-northeast-1** で apply（EC2 + IAM + Bedrock 接続）
+3. Slack トークンを EC2 の `~/.openclaw/.env` に投入
+4. **PoC 確認**: Slack `@TeamAgent_v3 hello` → OpenClaw → Bedrock Claude → 応答
+
+### Sprint 2 W2（6/6〜6/12）— ゲート①
+1. PoC を子会社運用 + 社内セキュリティ部にレビュー依頼
+2. B 案（OpenClaw 採用）vs D 案（不採用）の最終判断
+3. 採用なら現在の `src/teamagent/` を FastAPI ラップして HTTP 接続
+
+### Sprint 3（6/13〜6/26）— 既存実装統合
+1. `services/teamagent_skills_api/` を新設、FastAPI で `POST /skills/{name}/invoke`
+2. OpenClaw 上に `teamagent-search` SKILL を作成、HTTP で FastAPI を呼ぶ
+3. pytest 24 件を維持 + Pact 契約テスト追加
+
+### Sprint 4 以降
+- Slack 機能を OpenClaw に完全移管（既存 runtime/slack_bot.py は引退）
+- 追加 Skill（メタデータ抽出、Contextual Retrieval、Skill ④ 動画分析）は同様に Python 側に追加
+
+---
+
+## 7. AWS 公式テンプレート利用時の TeamAgent 環境差分
+
+| | 現在（boto3 + slack-bolt） | AWS Lightsail/EC2 + OpenClaw |
+|---|---|---|
+| 認証 | aws configure（個人 access key） | **EC2 IAM Role**（API キー不要） |
+| ホスト | ローカル Mac | **EC2 t3.medium（4 GB）** |
+| Slack | slack-bolt（Python） | **OpenClaw Socket Mode（Node.js）** |
+| Bedrock 呼び出し | Python boto3 | OpenClaw provider 経由 |
+| 既存 Skill 実装 | 直接実行 | **FastAPI で HTTP 公開** |
+| 月次インフラコスト | $0（ローカル） | EC2 約 $30 + Bedrock 従量 |
+
+### 残り注意点（v3.2 設計時に再検討）
+1. **モデル切替**: Claude Sonnet 4.6 メイン + Amazon Nova Lite 等での 90% コスト削減はオプション化
+2. **既存 RDS 接続**: EC2 から 踏み台経由ではなく、直接 VPC 内接続に変更可能
+3. **ClawHub Skill 無効化**: `openclaw.json` で `clawhub.disabled: true` 推奨（サプライチェーン対策）
+
+---
+
+## 更新履歴（v0.3）
+
+| 日付 | バージョン | 更新内容 |
+|---|---|---|
+| 2026-05-22 朝 | v0.1 | 初版（3 訂正項目、OpenClaw 再評価中に） |
+| 2026-05-22 夕 | v0.2 | 5/13 発表 + OpenClaw 実証データ + 移行 4 案 |
+| 2026-05-22 夜 | v0.3 | **AWS 公式テンプレート発見**、AWS_PROFILE 罠、B 案実装最短パス |
+
