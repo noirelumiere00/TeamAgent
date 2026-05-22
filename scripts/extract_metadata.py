@@ -51,6 +51,8 @@ EXTRACTION_INSTRUCTION = """以下は社内提案書 PDF の全文です。提�
 </document>
 
 抽出する項目（記載がない場合は null）:
+
+## 基本メタデータ
 - industry: 業界カテゴリ（飲食 / 化粧品 / エネルギー / 不動産 / 自治体 / 製造業 / 教育 / 医療 / IT / 小売 / 金融 / 旅行 / メディア / その他）
 - client_company: 提案先企業名（例: 株式会社INPEX、森ビル株式会社）
 - vendor_company: 提案元企業名（基本「株式会社ベクトル」または「ベクトル」）
@@ -60,11 +62,21 @@ EXTRACTION_INSTRUCTION = """以下は社内提案書 PDF の全文です。提�
 - key_keywords: この提案を象徴するキーワード上位 5 件（リスト）
 - proposed_at: 提案日付（YYYY-MM-DD or YYYY-MM、不明なら null）
 
+## 文脈設計フレーム（高林構想ベース）
+- media: 提案で言及している主要メディア（例: TikTok / Instagram Reels / YouTube Shorts / X / LINE / Threads / 自社サイト）。最大 5 個のリスト
+- communities: 提案で言及している界隈・コミュニティ（例: Z世代女子 / 美容クラスタ / B2B 投資家 / 動画クリエイター）。最大 5 個のリスト
+- frequent_words: 提案内で頻出する象徴的なワード（例: アルゴリズム / バズ / トレンド / UGC）。最大 5 個のリスト
+- right_brain_appeal: 右脳訴求のキーワード（感情・共感・印象。例: 親しみ / 安心 / ワクワク / 圧倒される映像美）。最大 3 個のリスト or null
+- left_brain_appeal: 左脳訴求のキーワード（論理・データ・コスト。例: ROI / リーチ数 / 視聴単価 / CTR）。最大 3 個のリスト or null
+- pitch_axis: 訴求軸（提案の核となるメッセージ。例: 「視聴単価が最も安いプラットフォーム」「美術館来訪を 30 代女性に拡げる」）。1 文の文字列 or null
+- expression: 表現手法（例: ストーリー仕立て / マルチコンテキスト / VVS / ワンメッセージ / 切り抜き量産）。最大 3 個のリスト or null
+
 回答ルール:
 1. 必ず JSON だけを返す（説明文や前置きなし）
 2. JSON は ```json ブロックに入れない、生の JSON だけ
 3. 日本語のまま、文字列フィールドは double-quote
 4. industry は上記リストから選ぶ、リストに無ければ「その他」
+5. 各リスト系フィールドは [] や null（記載なし）でも OK
 """
 
 
@@ -162,6 +174,14 @@ def main() -> int:
             print(f"    service_type     = {metadata.get('service_type')!r}")
             print(f"    proposed_at      = {metadata.get('proposed_at')!r}")
             print(f"    key_keywords     = {metadata.get('key_keywords')!r}")
+            print(f"    -- 文脈設計フレーム --")
+            print(f"    media            = {metadata.get('media')!r}")
+            print(f"    communities      = {metadata.get('communities')!r}")
+            print(f"    frequent_words   = {metadata.get('frequent_words')!r}")
+            print(f"    right_brain      = {metadata.get('right_brain_appeal')!r}")
+            print(f"    left_brain       = {metadata.get('left_brain_appeal')!r}")
+            print(f"    pitch_axis       = {metadata.get('pitch_axis')!r}")
+            print(f"    expression       = {metadata.get('expression')!r}")
             print(f"    cost             = ${cost:.4f}")
 
             updated = update_metadata(conn, file_name, metadata)
