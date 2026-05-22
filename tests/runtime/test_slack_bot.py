@@ -6,7 +6,11 @@ Bolt App 自体の起動テストはネットワーク必須なので含めな�
 
 from __future__ import annotations
 
-from teamagent.runtime.slack_bot import format_search_response, strip_mention
+from teamagent.runtime.slack_bot import (
+    build_search_blocks,
+    format_search_response,
+    strip_mention,
+)
 from teamagent.skills.search.schema import SearchHitOut, SearchOutput
 
 
@@ -86,3 +90,72 @@ def test_format_search_response_source_fallback_to_chunk_id() -> None:
     )
     formatted = format_search_response(output)
     assert "chunk #42" in formatted
+
+
+def test_format_search_response_includes_drive_link() -> None:
+    """drive_url がある場合、text の参考資料行に Slack リンク記法が含まれる。"""
+    output = SearchOutput(
+        answer="x",
+        hits=[
+            SearchHitOut(
+                chunk_id=1,
+                content="...",
+                score=0.9,
+                source="a.pdf",
+                drive_url="https://drive.google.com/file/d/abc/view",
+            )
+        ],
+        total_cost_usd=0.0,
+    )
+    formatted = format_search_response(output)
+    assert "<https://drive.google.com/file/d/abc/view|Drive で開く>" in formatted
+
+
+def test_build_search_blocks_with_drive_url() -> None:
+    """drive_url 付き hit から Block Kit のボタン accessory が生成される。"""
+    output = SearchOutput(
+        answer="検索結果サマリ",
+        hits=[
+            SearchHitOut(
+                chunk_id=1,
+                content="...",
+                score=0.91,
+                source="proposal_a.pdf",
+                drive_url="https://drive.google.com/file/d/abc/view",
+            ),
+            SearchHitOut(
+                chunk_id=2,
+                content="...",
+                score=0.80,
+                source="proposal_b.pdf",
+                drive_url=None,
+            ),
+        ],
+        total_cost_usd=0.01,
+    )
+    blocks = build_search_blocks(output)
+
+    # 1 つ目のセクションは answer
+    assert blocks[0]["type"] == "section"
+    assert "検索結果サマリ" in blocks[0]["text"]["text"]
+
+    # drive_url がある hit にはボタン accessory
+    button_sections = [
+        b
+        for b in blocks
+        if b.get("type") == "section" and "accessory" in b
+    ]
+    assert len(button_sections) == 1
+    btn = button_sections[0]["accessory"]
+    assert btn["type"] == "button"
+    assert btn["url"] == "https://drive.google.com/file/d/abc/view"
+    assert btn["text"]["text"] == "📎 Drive で開く"
+
+
+def test_build_search_blocks_without_hits() -> None:
+    """hits 0 件でも壊れない（answer + cost のみ）。"""
+    output = SearchOutput(answer="該当なし", hits=[], total_cost_usd=0.0)
+    blocks = build_search_blocks(output)
+    assert blocks[0]["text"]["text"] == "該当なし"
+    # divider や参考資料セクションは出ない
+    assert not any(b.get("type") == "divider" for b in blocks)

@@ -24,6 +24,10 @@ class SearchHitOut(BaseModel):
     content: str
     score: float = Field(ge=0.0, le=1.0)
     source: str | None = None
+    drive_url: str | None = Field(
+        default=None,
+        description="Google Drive 等の正本 URL。営業がクリックして元 PDF を開く",
+    )
 
 
 class SearchOutput(BaseModel):

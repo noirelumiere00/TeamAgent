@@ -75,7 +75,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             self._target_table = target_table
             self._content_col = content_col
         self._metadata_col = metadata_col
-        self._extra_cols = list(extra_cols or ["file_name", "page_num"])
+        self._extra_cols = list(extra_cols or ["file_name", "page_num", "drive_url"])
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
@@ -105,6 +105,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     content=h.content,
                     score=h.score,
                     source=self._build_source(h),
+                    drive_url=(
+                        str(h.metadata.get("drive_url"))
+                        if h.metadata.get("drive_url")
+                        else None
+                    ),
                 )
                 for h in hits
             ],
