@@ -23,6 +23,7 @@ TeamAgent — 実資料 (PDF) をベクトル化＆検索するデモ
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -40,7 +41,11 @@ except ImportError:
 
 # ---------- 設定 ----------
 DATA_DIR = Path("data/proposals")
-DB_DSN = "host=localhost port=5432 user=teamagent password=teamagent dbname=teamagent"
+# .env の DATABASE_URL を優先（ハードコード禁止 — CLAUDE.md 6-bis）
+DB_DSN = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://teamagent:teamagent@localhost:5432/teamagent",
+)
 MODEL_NAME = "intfloat/multilingual-e5-large"
 TABLE_NAME = "proposals_chunks"
 EMBED_DIM = 1024
