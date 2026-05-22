@@ -1,0 +1,67 @@
+# pre-commit hooks: CLAUDE.md 6-bis の品質ガードレール
+# 適用方法:
+#   pip install pre-commit
+#   pre-commit install
+#
+# 手動実行:
+#   pre-commit run --all-files
+repos:
+  # 基本のファイル衛生
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+        exclude: "^data/.*\\.example\\.json$"
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # ruff（リンタ＋フォーマッタ、CLAUDE.md 6-bis ルール準拠）
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  # mypy --strict（型ヒント検証）
+  - repo: local
+    hooks:
+      - id: mypy-strict
+        name: mypy --strict src/teamagent
+        entry: mypy src/teamagent
+        language: system
+        pass_filenames: false
+        types: [python]
+        files: ^src/teamagent/.*\.py$
+
+  # pytest（PR 前の自動テスト）
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest tests/ -q
+        entry: pytest tests/ -q
+        language: system
+        pass_filenames: false
+        types: [python]
+        stages: [pre-push]  # commit ごとは重いので push 時のみ
+
+  # 機密情報の検出（簡易、本番は trufflehog 推奨）
+  - repo: local
+    hooks:
+      - id: no-aws-keys
+        name: AWS Access Key の検出
+        entry: bash -c 'grep -rE "AKIA[0-9A-Z]{16}" "$@" && exit 1 || exit 0'
+        language: system
+        files: \.(py|md|json|yaml|yml|toml|env|tf)$
+        exclude: ^\.pre-commit-config\.yaml$
+      - id: no-slack-tokens
+        name: Slack Token の検出
+        entry: bash -c 'grep -rE "xoxb-[0-9]+-[0-9]+-[a-zA-Z0-9]+" "$@" && exit 1 || exit 0'
+        language: system
+        files: \.(py|md|json|yaml|yml|toml|env|tf)$
+        exclude: ^\.pre-commit-config\.yaml$

@@ -27,6 +27,7 @@ from slack_bolt.async_app import AsyncApp
 
 from teamagent.adapters.slack_client import SlackClient
 from teamagent.skills.base import SkillContext
+from teamagent.skills.router import QueryType, SkillRouter
 from teamagent.skills.search.schema import SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
@@ -119,8 +120,9 @@ class SkillDispatcher:
     Sprint 2+ でルールベース or Claude Haiku ベースのルーターを実装。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, router: SkillRouter | None = None) -> None:
         self._skill_cache: dict[str, Any] = {}
+        self._router = router or SkillRouter()
 
     def get_search_skill(self) -> Any:
         """SearchSkill インスタンスをキャッシュして返す（embedder ロードが重い）。
@@ -151,10 +153,32 @@ class SkillDispatcher:
         return instance
 
     async def run_search(self, query: str, request_id: str, user_id: str | None) -> SearchOutput:
-        """SearchSkill を別スレッドで実行（同期 I/O が含まれるため）。"""
+        """SearchSkill を別スレッドで実行（同期 I/O が含まれるため）。
+
+        SkillRouter で クエリを判定し、industry キーワードが含まれていれば
+        SearchInput.filter_industry に自動付与する。
+        """
+        decision = self._router.route(query)
+        logger.info(
+            "skill_router_decision",
+            request_id=request_id,
+            query_type=decision.query_type.value,
+            confidence=decision.confidence,
+            filter=decision.extracted_filter,
+            reason=decision.reason,
+        )
+
+        filter_industry = decision.extracted_filter.get("industry")
+        # 注：meta / compare は今は通常検索で代用（Sprint 2 で本格実装）
+        # query_type=COMPARE/META はログ出すだけで content と同じ動作にする
+
         skill = self.get_search_skill()
         ctx = SkillContext(request_id=request_id, user_id=user_id)
-        input_obj = SearchInput(query=query, top_k=5)
+        input_obj = SearchInput(
+            query=query,
+            top_k=5,
+            filter_industry=filter_industry,
+        )
         loop = asyncio.get_running_loop()
         output: SearchOutput = await loop.run_in_executor(
             None,
