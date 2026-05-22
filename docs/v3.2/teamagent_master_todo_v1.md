@@ -412,3 +412,73 @@
 | 日付 | バージョン | 更新内容 |
 |---|---|---|
 | 2026-05-22 | v1.0 | 初版（Day 2 完了時点で 3 Agent 並列調査の結果を統合） |
+| 2026-05-22 夜 | v1.1 | PR #15〜#28 マージ後の追記。Sprint 1 残タスクから完了分を削除。 |
+
+---
+
+# 📌 v1.1 追加分（2026-05-22 夜、PR #15〜#28）
+
+## 追加で完了したもの
+
+### 検索 Skill / 機能拡張
+- ✅ **PR #16** Contextual Retrieval 実装（INPEX クエリ +3.69 改善）
+- ✅ **PR #17** USE_CONTEXTUAL 環境変数で切替対応
+- ✅ **PR #18** Drive リンク Phase 1（Block Kit ボタン、proposal_drive_map.json）
+- ✅ **PR #19** メタデータ抽出 + filter_industry 実動作
+- ✅ **PR #21** 5 機能一括（PDF パイプライン自動化 / pre-commit / Router 雛形 / Gemini 雛形 / 文脈設計）
+- ✅ **PR #22** 本番 RDS（東京）migration 完了（98 chunks）
+- ✅ **PR #26** Prompt Caching 適用（コスト 27% 削減見込み）
+- ✅ **PR #27** SkillRouter Haiku 4.5 ハイブリッド対応（USE_LLM_ROUTER）
+
+### CI / セキュリティ
+- ✅ **PR #24** GitHub Actions CI（ruff + format + mypy + pytest + bandit）+ gitleaks
+- ✅ **PR #25** CI mypy type-stub overrides 修正で緑化
+- ✅ **PR #28** Dependabot（pip / github-actions、週次月曜 09:00 JST）
+
+### ドキュメント / 運用基盤
+- ✅ **PR #15** v3.2 設計ドラフト 3 ファイル（overview / migration / implementation）
+- ✅ **PR #20** Day 2 総括追記
+- ✅ **PR #23** マスター ToDo v1.0（138 タスク統合）
+- ✅ **PR #24** Secrets ローテーションポリシー文書化（Sprint 14 で Lambda 自動化予定）
+- ✅ **PR #28** CloudWatch Logs Insights クエリ集（10 個、Sprint 4 で運用開始）
+
+## 数値の更新
+
+| 指標 | v1.0（朝） | v1.1（夜） |
+|---|---|---|
+| マージ済 PR | #1〜#22 | **#1〜#28** |
+| pytest | 24 → 27 | **40** |
+| mypy strict source files | 16 → 17 | **18** |
+| 静的解析 | mypy + pytest のみ | **+ ruff + ruff format + bandit + gitleaks** |
+| 検索精度（INPEX） | top-1 0.85 | **0.89（Contextual）** |
+| 想定月額コスト | $159 | **$116（caching 込）** |
+| AWS リソース | 23 | **23 + 本番 RDS 98 chunks** |
+
+## v1.1 時点でブロック中
+
+| ブロッカー | 状態 |
+|---|---|
+| 子会社からの返信 | メール送信済（5/22）、Sprint 2 末まで待ち |
+| 3 PDF の実 Drive URL | **未取得**（プレースホルダのまま、5 分作業） |
+| GCP プロジェクト作成 | Sprint 3 開始時 |
+| IT 申請 4 件 | Sprint 2 末まで投げる必要 |
+| Salesforce 連携可否 | Sprint 12 開始時 |
+
+## v1.1 時点で「今すぐ動く」
+
+| クエリ例 | 動作 |
+|---|---|
+| `@TeamAgent INPEX案件の提案内容を教えて` | Contextual + industry=エネルギー auto-filter + 引用 + Drive ボタン |
+| `@TeamAgent 飲食事例を3つ` | 業界キーワード検出 + filter_industry='飲食' |
+| `@TeamAgent ベクトル社のサービスについて` | LLM Router fallback（USE_LLM_ROUTER=true 時） |
+
+## 次に踏み出す具体的な一歩（v1.1 更新版）
+
+優先度順：
+
+1. **🟢 今すぐ（5 分）**：3 PDF の Drive URL を取得 → `data/proposal_drive_map.json` 更新
+2. **🟢 今日中（10 分）**：Slack xoxb- 完全ローテーション
+3. **🟡 明日**：本番 RDS 接続切替テスト（DATABASE_URL を SSM tunnel 経由に向ける）
+4. **🟡 5/29 までに**：IT 申請 4 件
+5. **🟡 5/30 〜**：OpenClaw PoC（aws-samples/sample-OpenClaw-on-AWS-with-Bedrock）
+6. **🔵 子会社返信待ち** → 受領後 docs/v3.2/ に反映 + Sprint 2 末ゲート①判定
