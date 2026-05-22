@@ -1,0 +1,68 @@
+# Dependabot 設定 — TeamAgent v3.2
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # GitHub Actions の workflow 依存を週次で更新
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(deps-actions)"
+    groups:
+      actions-minor:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Python パッケージ（pyproject.toml）を週次で更新
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 10
+    labels:
+      - "deps"
+      - "python"
+    commit-message:
+      prefix: "chore(deps)"
+    # メジャー更新は手動レビューを強制（テスト/型/動作影響大）
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+    groups:
+      pydantic-stack:
+        applies-to: version-updates
+        patterns:
+          - "pydantic*"
+      aws-stack:
+        applies-to: version-updates
+        patterns:
+          - "boto3"
+          - "botocore"
+      slack-stack:
+        applies-to: version-updates
+        patterns:
+          - "slack-sdk"
+          - "slack-bolt"
+          - "aiohttp"
+      dev-tools:
+        applies-to: version-updates
+        patterns:
+          - "mypy"
+          - "ruff"
+          - "pytest*"
+          - "bandit"
