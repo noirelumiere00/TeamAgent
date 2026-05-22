@@ -58,12 +58,28 @@ class ConverseResponse:
     stop_reason: str
 
 
-def _estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
-    """ざっくりコスト推算（cache 読み込みは input の 10% 想定で簡略化）。"""
+def _estimate_cost(
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float:
+    """コスト推算（prompt caching 込み）。
+
+    Anthropic caching の料金（Bedrock 経由）:
+    - cache_read:  input price × 0.1
+    - cache_write: input price × 1.25
+    - input_tokens は cache 系を含む合計値で来るので、cache 分を差し引いて新規分だけ計算
+    """
     for prefix, (price_in, price_out) in _PRICE_TABLE.items():
         if model_id.startswith(prefix):
+            fresh_input = max(0, input_tokens - cache_read_tokens - cache_write_tokens)
             return round(
-                input_tokens / 1_000_000 * price_in + output_tokens / 1_000_000 * price_out,
+                fresh_input / 1_000_000 * price_in
+                + cache_read_tokens / 1_000_000 * (price_in * 0.1)
+                + cache_write_tokens / 1_000_000 * (price_in * 1.25)
+                + output_tokens / 1_000_000 * price_out,
                 6,
             )
     return 0.0
@@ -103,6 +119,7 @@ class BedrockClient:
         system: str | None = None,
         temperature: float = 0.1,
         max_tokens: int = 4096,
+        cache_system: bool = False,
     ) -> ConverseResponse:
         """Bedrock Converse API を呼ぶ。
 
@@ -112,6 +129,9 @@ class BedrockClient:
             system: System プロンプト
             temperature: 0.1 推奨（CLAUDE.md 6 ハルシネーション抑制）
             max_tokens: 上限トークン
+            cache_system: True で system プロンプト末尾に cachePoint を入れる。
+                同じ system prompt を頻繁に呼ぶ場合（検索 Skill 等）に
+                input cost を 1/10 に削減する。Anthropic prompt caching を活用。
 
         Returns:
             ConverseResponse(text, usage, model_id, latency_ms, stop_reason)
@@ -125,7 +145,12 @@ class BedrockClient:
             },
         }
         if system is not None:
-            kwargs["system"] = [{"text": system}]
+            system_blocks: list[dict[str, Any]] = [{"text": system}]
+            if cache_system:
+                # cachePoint は同じ system 文字列を 2 回目以降の呼び出しで
+                # cache_read として再利用させる（コスト 1/10）
+                system_blocks.append({"cachePoint": {"type": "default"}})
+            kwargs["system"] = system_blocks
 
         start = time.perf_counter()
         resp = self._client.converse(**kwargs)
@@ -137,7 +162,13 @@ class BedrockClient:
         cache_read = int(usage_raw.get("cacheReadInputTokens", 0))
         cache_create = int(usage_raw.get("cacheWriteInputTokens", 0))
 
-        cost_usd = _estimate_cost(self.model_id, input_tokens, output_tokens)
+        cost_usd = _estimate_cost(
+            self.model_id,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_create,
+        )
         usage = TokenUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
