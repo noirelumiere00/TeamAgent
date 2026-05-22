@@ -205,6 +205,36 @@ python scripts/demo_pdf_vectorize.py
 
 ---
 
+## 6-bis. AI エージェント実装ルール（メンテ性最優先）
+
+新しい Skill / Lambda / バッチを書くときは以下を必ず守る。
+
+### Do（守ること）
+1. **3層分離**：`skills/`（ビジネスロジック）/ `adapters/`（Bedrock・pgvector・S3クライアント）/ `runtime/`（Lambda・ECS・local エントリポイント）— Skill から Lambda を見せない
+2. **Pydantic v2 で I/O 固定**：Skill の input / output は必ず `pydantic.BaseModel`。dict をそのまま返さない
+3. **型ヒント + `mypy --strict`**：CI で型エラーは fail にする
+4. **構造化ログ（JSON）+ request_id 伝播**：`{"request_id": "...", "skill": "...", "event": "...", "token_usage": {...}, "latency_ms": ..., "cost_usd": ...}` を全層で同じ request_id で出す
+5. **prompt はファイル化 + Git 管理**：`src/prompts/<skill>/v1/system.md` のように versioned。コード内文字列リテラル禁止
+6. **Bedrock 呼び出しごとに usage / cost を必ずログ**：`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `model_id`, `latency_ms`, `cost_usd`
+7. **テスト**：Skill 単位で pytest（adapter は moto / fake でモック）。最低でも happy path + 1エッジケース
+8. **Slack 投稿 / DB 書き込みは Idempotency-Key 付き**：リトライで二重投稿しない
+
+### Don't（やってはいけないこと）
+- ❌ **エラーログに生入力（提案PDF全文・顧客名・会話履歴）を入れる** — PII / 機密漏洩。代わりに `request_id` だけログし、本体は `s3://teamagent-dev-debug-snapshots/<request_id>.json`（KMS 暗号化、TTL 30日）に置く
+- ❌ **「AI の推論スコア」を曖昧にログ** — Claude に confidence score はない。代わりに retrieval_similarity / token_usage / latency をログ
+- ❌ **Skill ファイル内で boto3 を直叩き** — 必ず `adapters/bedrock_client.py` 経由（テストでモック差し替え可能にするため）
+- ❌ **prompt をコードに hard-code** — `src/prompts/` 配下の `.md` を読み込む形に統一
+
+### コードレビューの定型チェック
+- [ ] Pydantic スキーマで入出力が定義されているか
+- [ ] `mypy --strict` が通るか
+- [ ] 構造化ログに request_id / token_usage / cost_usd が出るか
+- [ ] 機密データが CloudWatch に出ていないか（grep で確認）
+- [ ] prompt が `src/prompts/` 配下に分離されているか
+- [ ] pytest で happy path が通るか
+
+---
+
 ## 7. 設計の参照優先順
 
 1. **`docs/v3.1/teamagent_search_skill_design_v1.md`** ← 検索 Skill 実装はこれを読む（最重要）
