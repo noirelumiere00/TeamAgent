@@ -84,6 +84,24 @@ TeamAgent/
 ✅ **PDF 実資料ベクトル検索デモ**：data/proposals/ の 3 提案 PDF を検索 → 類似度 0.80〜0.83 の関連 chunk 返却
 ✅ **営業 8 軸ヒアリング統合**：要件として明文化
 ✅ **3 Agent 並列調査**：query routing / pgvector ハイブリッド / RAG → docs/v3.1/teamagent_search_skill_design_v1.md に統合
+✅ **Claude Code ハンドオフ**：CLAUDE.md + 検索 Skill 設計書 v1 → PR #2 マージ完了
+
+---
+
+## 2-bis. Day 0 夕方追加作業（2026/5/21 19:00〜）
+
+✅ **AWS CLI セットアップ**：`~/.aws/credentials` 設定済み（us-east-1）
+✅ **Bedrock 接続 hello world 成功**：
+  - 正しいモデル ID は **`us.anthropic.claude-sonnet-4-6`**（推論プロファイル形式、`us.` プレフィックス必須）
+  - Claude Haiku 4.5 は `us.anthropic.claude-haiku-4-5-20251001-v1:0`
+  - ❌ NG 例：`anthropic.claude-sonnet-4-6-20251022-v1:0`（こちらは存在しない）
+  - ❌ NG 例：`anthropic.claude-sonnet-4-6`（on-demand 非対応）
+✅ **Bedrock モデルアクセスページ廃止確認**：2026/5 時点で事前有効化は不要、初回呼び出し時に自動有効化
+✅ **AWS Budgets 設定**：
+  - `TeamAgent-Bedrock-Monthly` $50/月（Bedrock のみ）
+  - `TeamAgent-Server-Monthly` $267/月（≒¥40,000、RDS / EC2 / S3 / Lambda など）
+  - 通知閾値：50% / 80% / 100%
+  - 送信先：`s-komata@vectorinc.co.jp`, `NewsTV_AWS_AIagentAdmin@vectorinc.co.jp`
 
 ---
 
@@ -141,14 +159,12 @@ python scripts/demo_pdf_vectorize.py
 
 優先度高い順：
 
-### 🔴 P0: AWS Bedrock 接続（必須）
-- [ ] AWS コンソールで Bedrock モデル有効化
-  - Claude Sonnet 4.6 (`anthropic.claude-sonnet-4-6-20251022-v1:0`)
-  - Claude Haiku 4.5 (`anthropic.claude-haiku-4-5-20251022-v1:0`)
-  - Titan Embed v2（または既存の multilingual-e5-large 継続）
-- [ ] IAM ユーザに bedrock:InvokeModel 権限付与
-- [ ] `pip install boto3 anthropic`
-- [ ] hello world 呼び出し確認（python から claude-sonnet-4.6 で「こんにちは」）
+### ✅ P0: AWS Bedrock 接続（完了 2026/5/21）
+- [x] ~~AWS コンソールで Bedrock モデル有効化~~ → 仕様変更で不要（初回呼び出し時に自動有効化）
+- [x] IAM 認証情報設定（aws configure / us-east-1）
+- [x] `pip install boto3` 完了
+- [x] hello world 成功（`us.anthropic.claude-sonnet-4-6` で「こんにちは！」返答確認）
+- [x] AWS Budgets 設定（Bedrock $50/月 + Server $267/月、50/80/100% アラート）
 
 ### 🔴 P0: Terraform apply（AWS インフラ provisioning）
 - [ ] `cd infra/terraform`
