@@ -137,7 +137,11 @@ class PgVectorClient:
             if metadata_col is not None:
                 meta: dict[str, Any] = dict(r.get("metadata") or {})
             else:
-                meta = {col: r.get(col) for col in extras}
+                meta = {}
+            # extra_cols があれば値を metadata に merge（metadata 列の存在に依らず）
+            for col in extras:
+                if col in r and col not in meta:
+                    meta[col] = r.get(col)
             hits.append(
                 SearchHit(
                     chunk_id=int(r["chunk_id"]),
