@@ -20,13 +20,13 @@ variable "project_name" {
 variable "db_instance_class" {
   description = "RDS インスタンスクラス"
   type        = string
-  default     = "db.t4g.medium"  # PoC 用。本番は db.r7g.large を想定
+  default     = "db.t4g.micro"  # Dev/PoC 用（≒$15/月）。本番は db.r7g.large を想定
 }
 
 variable "db_allocated_storage" {
   description = "RDS ストレージ (GB)"
   type        = number
-  default     = 50
+  default     = 20
 }
 
 variable "db_engine_version" {
@@ -55,9 +55,9 @@ variable "db_multi_az" {
 
 # ---------- Lambda / Bedrock ----------
 variable "bedrock_model_id" {
-  description = "Bedrock で利用する Claude モデル ID"
+  description = "Bedrock で利用する Claude モデル ID（東京リージョン推論プロファイル）"
   type        = string
-  default     = "anthropic.claude-sonnet-4-6-20250719-v1:0"
+  default     = "jp.anthropic.claude-sonnet-4-6"
 }
 
 variable "lambda_memory_size" {

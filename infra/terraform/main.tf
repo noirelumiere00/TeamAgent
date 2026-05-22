@@ -28,14 +28,14 @@ terraform {
     }
   }
 
-  # 本番運用時は S3 + DynamoDB ロックバックエンド推奨
-  # backend "s3" {
-  #   bucket         = "teamagent-tfstate"
-  #   key            = "teamagent/terraform.tfstate"
-  #   region         = "ap-northeast-1"
-  #   dynamodb_table = "teamagent-tflock"
-  #   encrypt        = true
-  # }
+  # tfstate を S3 + DynamoDB ロックで管理（2026/5/22 有効化）
+  backend "s3" {
+    bucket         = "teamagent-tfstate-718959508629"
+    key            = "teamagent/terraform.tfstate"
+    region         = "ap-northeast-1"
+    dynamodb_table = "teamagent-tflock"
+    encrypt        = true
+  }
 }
 
 provider "aws" {
