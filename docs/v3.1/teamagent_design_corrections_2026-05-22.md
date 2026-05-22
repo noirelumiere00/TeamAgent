@@ -181,3 +181,189 @@ Sprint 1 Day 2 の Web 調査と E2E 疎通検証の結果、v3.1 ドキュメ�
 | 日付 | バージョン | 更新内容 |
 |---|---|---|
 | 2026-05-22 | v0.1 | 初版（3 訂正項目を記録、OpenClaw 採用を「再評価中」に変更） |
+| 2026-05-22 | v0.2 | Anthropic 5/13 「Agent SDK Credits」発表反映、OpenClaw + Bedrock 連携の実装可能性を実証データで更新、移行プラン 4 案を追加 |
+
+---
+
+# 📌 v0.2 追加内容（2026-05-22 夕方）
+
+## 1. Anthropic 「Agent SDK Credits」発表（2026-05-13）
+
+**前提が変わったので訂正ノート v0.1 を補完**。
+
+### 発表内容
+- 発表日：**2026年5月13日 20:10 PT**
+- 適用開始：**2026年6月15日**
+- 内容：第三者 Agent（OpenClaw 等）の利用が **Agent SDK Credits** として正式に有料サブスクリプションから分離・許諾される
+
+### クレジット枠
+| プラン | 月次 Agent SDK Credit |
+|---|---|
+| Pro | $20 |
+| Max 5x | $100 |
+| Max 20x | $200 |
+
+クレジットは月次失効、繰越なし。Interactive Claude Code / Cowork / chat はサブスク枠のまま。
+
+### 経緯
+- 2026/4：Anthropic が第三者 Agent の Claude サブスク利用を制限（GPU インフラ逼迫）
+- 2026/5/13：「Agent SDK Credits」として復活
+- 6/15 から正式適用
+
+### TeamAgent への影響
+**TeamAgent は Bedrock 経由で Claude を呼ぶ設計**のため、**Agent SDK Credits は使わない**。
+Anthropic サブスクリプション課金体系の変動から AWS Bedrock 経由で遮断される。
+
+### 出典
+- [VentureBeat: Anthropic reinstates OpenClaw and third-party agent usage on Claude subscriptions](https://venturebeat.com/technology/anthropic-reinstates-openclaw-and-third-party-agent-usage-on-claude-subscriptions-with-a-catch)
+- [The New Stack: Anthropic Agent SDK credits](https://thenewstack.io/anthropic-agent-sdk-credits/)
+- [Gigazine: Anthropic Claude Agent SDK credits](https://gigazine.net/gsc_news/en/20260514-anthropic-claude-agent-sdk-credits/)
+
+---
+
+## 2. OpenClaw 実証データ（gh / docs 直接確認）
+
+私自身で `gh api` および公式 docs で確認した事実：
+
+### 2.1 リポジトリ事実
+| 項目 | 値 | 出典 |
+|---|---|---|
+| URL | https://github.com/openclaw/openclaw | gh api |
+| Description | "Your own personal AI assistant. Any OS. Any Platform. The lobster way. 🦞" | gh api |
+| Stars | **373,824** | gh api（2026-05-22 時点）|
+| Forks | 77,665 | gh api |
+| Open Issues | 7,425 | gh api |
+| Language | TypeScript（114MB / Python 0.08MB） | gh api |
+| License | **MIT** | gh api |
+| 最新リリース | **v2026.5.20**（2026-05-21） | gh release list |
+| Homepage | https://openclaw.ai | gh api |
+
+### 2.2 Issue #10149（Agent SDK 採用）の正確な状態
+- Title: "[Feature]: Adopt @anthropic-ai/claude-agent-sdk for enhanced agent capabilities"
+- State: **CLOSED**
+- stateReason: **NOT_PLANNED**
+- Created: 2026-02-06
+- Closed: 2026-04-24
+- Author: Emanuel Ciuca (eciuca)
+
+**意義**：OpenClaw が **内部実装として** Claude Agent SDK を採用するのは却下。  
+ただし **ユーザーが外部から Agent SDK Credits 経由で連携する**運用は、5/13 発表により可能（TeamAgent は Bedrock 経由なので無関係）。
+
+### 2.3 Bedrock provider が公式サポート
+出典: https://raw.githubusercontent.com/openclaw/openclaw/main/docs/providers/bedrock.md
+
+```json5
+{
+  models: {
+    providers: {
+      "amazon-bedrock": {
+        baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+        api: "bedrock-converse-stream",
+        auth: "aws-sdk",
+        models: [
+          { id: "us.anthropic.claude-opus-4-6-v1:0", ... }
+        ],
+      },
+    },
+  },
+}
+```
+
+- 必要 env: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`
+- IAM: `bedrock:InvokeModel` + `InvokeModelWithResponseStream` + `ListFoundationModels` + `ListInferenceProfiles`
+- 推論プロファイル prefix（`us.` / `eu.` / `ap.`）対応
+- ⚠️ Opus 4.7 は `temperature` パラメータ拒否
+
+### 2.4 Slack チャネル設定（公式）
+出典: https://raw.githubusercontent.com/openclaw/openclaw/main/docs/channels/slack.md
+
+```json5
+{
+  channels: {
+    slack: {
+      enabled: true,
+      mode: "socket",  // 私たちが既に使ってる方式と一致
+      appToken: { source: "env", id: "SLACK_APP_TOKEN" },
+      botToken: { source: "env", id: "SLACK_BOT_TOKEN" },
+    },
+  },
+}
+```
+
+必要スコープ：**TeamAgent で取得済みの 17 個と完全一致**。
+
+### 2.5 SKILL.md 形式（公式）
+- YAML frontmatter + Markdown 本文
+- 本文は LLM への自然言語指示
+- **同ディレクトリの `scripts/` から Python script を呼べる**
+- 実例: 公式 `skill-creator` Skill が Python スクリプトを使用
+- HTTP リクエストも可（Skill 本文に `curl` 指示を書く）
+
+### 2.6 インストール方法（公式）
+出典: https://docs.openclaw.ai/install
+
+```bash
+# 個人 / 開発（macOS, Linux, WSL2）
+npm install -g openclaw@latest
+openclaw onboard --install-daemon
+openclaw gateway --port 18789 --verbose
+
+# 本番（Linux サーバ）
+docker compose up -d openclaw-gateway
+# image: ghcr.io/openclaw/openclaw:latest
+```
+
+- 必須: Node 24 推奨 / Node 22.19+ LTS
+- デフォルトポート: 18789
+- 設定: `~/.openclaw/openclaw.json`（JSON5）
+
+---
+
+## 3. 統合方針 4 案の比較
+
+OpenClaw を採用するか否か、採用するならどう統合するかの 4 案：
+
+| 案 | 説明 | 工数 | 既存コード流用 | デプロイ複雑度 | 推奨度 |
+|---|---|---|---|---|---|
+| **A. 完全 TS 移行** | Python Skill を TypeScript で書き直し | 6 Sprint | 0% | 低（1 コンテナ） | ❌ |
+| **B. HTTP 橋渡し** | Python Skill を FastAPI ラップ、OpenClaw が HTTP で呼ぶ | 1.5 Sprint | **85%** | 中（2 コンテナ） | ⭐⭐⭐ |
+| **C. subprocess 橋渡し** | OpenClaw Skill が Python CLI を毎回起動 | 1 Sprint | 80% | 低 | ❌（embedder ロード毎回 3-5 秒の致命傷） |
+| **D. OpenClaw 不採用** | 現在の boto3 + slack-bolt 構成を継続 | 0 Sprint | 100% | 低（1 コンテナ） | ⭐⭐⭐ |
+
+### B 案（HTTP 橋渡し）の構成図
+
+```
+Slack ─ socketmode ─▶ OpenClaw Gateway (TS, Node) ─▶ HTTP ─▶ teamagent-skills (FastAPI, Python)
+                          │                                     │
+                          └─ Bedrock (TS SDK)                    ├─ Bedrock (boto3)  ← 現行
+                                                                 ├─ pgvector
+                                                                 └─ LocalE5Embedder
+```
+
+Bedrock 呼び出しは Python 側に一本化（既存 `adapters/bedrock_client.py` を使う、TS 再実装しない）。
+
+### D 案（不採用）の根拠
+- Day 2 で既に End-to-End 疎通成功（mention → 検索 → 引用付き回答、$0.01-0.02/クエリ）
+- pytest 24 件 + mypy --strict 通過済み
+- OpenClaw 採用の主要メリット（23 チャネル対応・ClawHub Skill エコシステム）が **TeamAgent の MVP に必須ではない**
+- ClawHavoc サプライチェーンリスクを 100% 回避できる
+
+### 最終判断は Sprint 2 末ゲート①（2026-06-07）
+判断材料は：
+- 子会社運用ヒアリング結果（質問リスト送付済み）
+- B 案 PoC（OpenClaw + FastAPI 往復テスト）
+- ClawHub セキュリティ運用ルールの社内ポリシー整合
+
+---
+
+## 4. v0.2 時点の TeamAgent 採用方針
+
+| 項目 | 方針 |
+|---|---|
+| Bedrock 経由で Claude を呼ぶ | ✅ 継続（5/13 Agent SDK Credits は使わない） |
+| Slack 連携 | ✅ Socket Mode + 17 スコープで継続 |
+| OpenClaw 採否 | 🟡 Sprint 2 末ゲート①で確定（B 案 or D 案） |
+| 既存 src/teamagent/ | ✅ そのまま継続（採否に関わらず 85〜100% 流用） |
+
+**現在の実装はどちらのシナリオでも無駄にならない。**
+
