@@ -153,7 +153,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 where=where,
                 content_col=self._content_col,
                 metadata_col=self._metadata_col,
-                extra_cols=self._extra_cols if self._metadata_col is None else None,
+                extra_cols=self._extra_cols,
             )
 
     def _summarize(
