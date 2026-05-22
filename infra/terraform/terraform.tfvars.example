@@ -12,7 +12,7 @@ project_name = "teamagent"
 # RDS（dev デフォルト：db.t4g.micro + 20GB ≒ $15/月）
 db_instance_class    = "db.t4g.micro"
 db_allocated_storage = 20
-db_engine_version    = "16.4"
+db_engine_version    = "16.14"
 db_username          = "teamagent"
 db_name              = "teamagent"
 db_multi_az          = false             # 本番 = true 推奨
