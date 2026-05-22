@@ -56,14 +56,6 @@ resource "aws_security_group" "db" {
   description = "TeamAgent DB SG"
   vpc_id      = data.aws_vpc.default.id
 
-  # Lambda からのアクセス想定。実運用では Lambda SG からのみ許可に絞る
-  ingress {
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = [data.aws_vpc.default.cidr_block]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -71,6 +63,28 @@ resource "aws_security_group" "db" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
+
+# 踏み台 SG からの 5432 を許可
+resource "aws_security_group_rule" "db_from_bastion" {
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.bastion.id
+  security_group_id        = aws_security_group.db.id
+  description              = "Allow PostgreSQL from bastion"
+}
+
+# Lambda SG からの 5432 を許可（Lambda 実装後に有効化）
+# resource "aws_security_group_rule" "db_from_lambda" {
+#   type                     = "ingress"
+#   from_port                = 5432
+#   to_port                  = 5432
+#   protocol                 = "tcp"
+#   source_security_group_id = aws_security_group.lambda.id
+#   security_group_id        = aws_security_group.db.id
+#   description              = "Allow PostgreSQL from Lambda"
+# }
 
 resource "aws_db_instance" "main" {
   identifier             = "${var.project_name}-${var.environment}"

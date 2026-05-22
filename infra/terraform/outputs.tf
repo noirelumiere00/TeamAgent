@@ -28,3 +28,13 @@ output "cloudwatch_log_group" {
   description = "アプリケーションログの CloudWatch ロググループ"
   value       = aws_cloudwatch_log_group.app.name
 }
+
+output "bastion_instance_id" {
+  description = "踏み台 EC2 のインスタンス ID（aws ssm start-session で接続）"
+  value       = aws_instance.bastion.id
+}
+
+output "bastion_connect_command" {
+  description = "踏み台への SSM 接続コマンド"
+  value       = "aws ssm start-session --target ${aws_instance.bastion.id} --region ${var.aws_region}"
+}

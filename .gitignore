@@ -99,6 +99,8 @@ Thumbs.db
 *.tfstate.*
 *.tfvars
 !terraform.tfvars.example
+tfplan
+*.tfplan
 .terragrunt-cache/
 crash.log
 crash.*.log

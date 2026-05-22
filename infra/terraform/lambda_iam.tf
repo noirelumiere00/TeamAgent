@@ -23,6 +23,15 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "raw_files" {
   }
 }
 
+# パブリックアクセスを完全ブロック（提案PDF等は社内のみ）
+resource "aws_s3_bucket_public_access_block" "raw_files" {
+  bucket                  = aws_s3_bucket.raw_files.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
 # ---------- IAM Role for Lambda ----------
 data "aws_iam_policy_document" "lambda_assume" {
   statement {
