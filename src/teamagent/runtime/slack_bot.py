@@ -71,6 +71,9 @@ class SkillDispatcher:
     def get_search_skill(self) -> Any:
         """SearchSkill インスタンスをキャッシュして返す（embedder ロードが重い）。
 
+        環境変数 USE_CONTEXTUAL=true で Contextual Retrieval 版に切替。
+        proposals_chunks_contextual テーブルを参照、contextualized_text 列を検索。
+
         Skill ごとに __init__ 引数が異なるため、ここでは search 専用の生成ロジックを持つ。
         Sprint 2 で Router を導入したら抽象化する。
         """
@@ -80,7 +83,16 @@ class SkillDispatcher:
         from teamagent.adapters.embeddings_client import LocalE5Embedder
         from teamagent.skills.search.skill import SearchSkill
 
-        instance = SearchSkill(embedder=LocalE5Embedder())
+        use_contextual = os.environ.get("USE_CONTEXTUAL", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        instance = SearchSkill(
+            embedder=LocalE5Embedder(),
+            use_contextual=use_contextual,
+        )
+        logger.info("search_skill_initialized", use_contextual=use_contextual)
         self._skill_cache["search"] = instance
         return instance
 
