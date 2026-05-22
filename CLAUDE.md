@@ -351,10 +351,17 @@ python scripts/demo_pdf_vectorize.py
 
 ## 7. 設計の参照優先順
 
-1. **`docs/v3.1/teamagent_search_skill_design_v1.md`** ← 検索 Skill 実装はこれを読む（最重要）
-2. `docs/v3.1/teamagent_mva_spec_v1.1.html` ← MVA 全体仕様
-3. `docs/v3.1/teamagent_overview_v3.1.html` ← プロジェクト概要
-4. `docs/v3.1/teamagent_implementation_plan_v3.1.html` ← 14 Sprint スケジュール
+1. **`docs/v3.2/teamagent_master_todo_v1.md`** ← Sprint 14 までの全タスク（最重要）
+2. **`docs/v3.1/teamagent_design_corrections_2026-05-22.md`** ← v3.1 訂正ノート v0.3
+3. **`docs/v3.1/teamagent_search_skill_design_v1.md`** ← 検索 Skill 実装の詳細
+4. `docs/v3.2/teamagent_overview_v3.2_draft.md` ← v3.2 設計ドラフト
+5. `docs/v3.2/teamagent_migration_runbook_v3.2_draft.md` ← v3.1→v3.2 移行手順
+6. `docs/v3.2/teamagent_implementation_plan_v3.2_draft.md` ← Sprint タイムライン
+
+## 7-bis. 運用ドキュメント
+
+- **`docs/v3.2/ops/cloudwatch_queries.md`** — CloudWatch Logs Insights クエリ集（10 個）
+- **`docs/v3.2/ops/secrets_rotation_policy.md`** — Secrets Manager ローテーションポリシー
 
 ---
 
