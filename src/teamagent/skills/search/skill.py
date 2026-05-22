@@ -47,17 +47,33 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         content_col: str = "text",
         metadata_col: str | None = None,
         extra_cols: list[str] | None = None,
+        use_contextual: bool = False,
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
 
         デフォルトはローカル demo のスキーマ（proposals_chunks: text, no metadata）。
         本番 RDS で proposal_chunks(content, metadata JSONB) を使う際は引数で上書き。
+
+        use_contextual=True を指定すると proposals_chunks_contextual テーブルを使い、
+        Anthropic Contextual Retrieval（前置詞付き chunk + 再 embedding）で検索する。
+        scripts/contextual_retrieval.py で事前にテーブルを作成しておく必要がある。
         """
         self._bedrock = bedrock or BedrockClient.from_env()
         self._pgvector = pgvector or PgVectorClient.from_env()
         self._embedder = embedder
-        self._target_table = target_table
-        self._content_col = content_col
+        if use_contextual:
+            # Contextual Retrieval テーブルを優先（明示指定がなければ）
+            self._target_table = (
+                target_table
+                if target_table != "proposals_chunks"
+                else "proposals_chunks_contextual"
+            )
+            self._content_col = (
+                content_col if content_col != "text" else "contextualized_text"
+            )
+        else:
+            self._target_table = target_table
+            self._content_col = content_col
         self._metadata_col = metadata_col
         self._extra_cols = list(extra_cols or ["file_name", "page_num"])
 
