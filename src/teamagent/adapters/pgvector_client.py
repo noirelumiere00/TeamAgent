@@ -86,6 +86,12 @@ class PgVectorClient:
         limit: int = 5,
         where: str | None = None,
         request_id: str | None = None,
+        *,
+        id_col: str = "id",
+        content_col: str = "content",
+        embedding_col: str = "embedding",
+        metadata_col: str | None = "metadata",
+        extra_cols: list[str] | None = None,
     ) -> list[SearchHit]:
         """cosine 類似度上位 limit 件を返す。
 
@@ -94,36 +100,52 @@ class PgVectorClient:
             embedding: クエリベクトル（1024 次元想定）
             table: 検索対象テーブル名（外部入力禁止、コード内固定で渡すこと）
             limit: 上位件数
-            where: 追加の WHERE 句（パラメータバインド前提のため外部入力禁止）
+            where: 追加の WHERE 句（外部入力禁止、コード内固定の文字列）
             request_id: トレース ID
+            id_col: 主キー列名（デフォルト "id"）
+            content_col: 本文列名（デフォルト "content"、proposals_chunks では "text"）
+            embedding_col: ベクトル列名（デフォルト "embedding"）
+            metadata_col: JSONB メタデータ列名。None なら読まない（無いテーブル向け）
+            extra_cols: metadata 列が無い場合に metadata dict として格納したい追加列名
         """
-        # SQL インジェクション対策: table と where はコード内固定値のみ受け付ける
-        # 動的に組み立てたい場合は明示的なホワイトリストで弾く
+        # SQL インジェクション対策: 列名・テーブル名はコード内固定値のみ受け付ける
         where_clause = f"WHERE {where}" if where else ""
+        select_cols: list[str] = [
+            f"{id_col} AS chunk_id",
+            f"{content_col} AS content",
+            f"1 - ({embedding_col} <=> %s::vector) AS score",
+        ]
+        if metadata_col is not None:
+            select_cols.append(f"{metadata_col} AS metadata")
+        extras = list(extra_cols or [])
+        for col in extras:
+            select_cols.append(col)
+
         sql = f"""
-            SELECT
-                id AS chunk_id,
-                content,
-                1 - (embedding <=> %s::vector) AS score,
-                metadata
+            SELECT {", ".join(select_cols)}
             FROM {table}
             {where_clause}
-            ORDER BY embedding <=> %s::vector
+            ORDER BY {embedding_col} <=> %s::vector
             LIMIT %s
         """
         with conn.cursor() as cur:
             cur.execute(sql, (embedding, embedding, limit))
             rows = cur.fetchall()
 
-        hits = [
-            SearchHit(
-                chunk_id=int(r["chunk_id"]),
-                content=str(r["content"]),
-                score=float(r["score"]),
-                metadata=dict(r.get("metadata") or {}),
+        hits: list[SearchHit] = []
+        for r in rows:
+            if metadata_col is not None:
+                meta: dict[str, Any] = dict(r.get("metadata") or {})
+            else:
+                meta = {col: r.get(col) for col in extras}
+            hits.append(
+                SearchHit(
+                    chunk_id=int(r["chunk_id"]),
+                    content=str(r["content"]),
+                    score=float(r["score"]),
+                    metadata=meta,
+                )
             )
-            for r in rows
-        ]
 
         logger.info(
             "pgvector_search",

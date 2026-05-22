@@ -1,22 +1,23 @@
 """Slack Bot ランタイム（Socket Mode）。
 
-Sprint 1 時点では mention に対して同じテキストを返す echo Bot。
-今後 Skill Registry と接続して Skill 実行のディスパッチを行う。
+Sprint 1 末：mention テキストを SearchSkill にディスパッチして結果を返す。
+DM では Sprint 1 時点では echo（次の Sprint で SearchSkill 接続）。
 
 Usage:
     SLACK_BOT_TOKEN=xoxb-... SLACK_APP_TOKEN=xapp-... \\
     python -m teamagent.runtime.slack_bot
 
 CLAUDE.md 6-bis：
-- 3層分離：本ファイルは Runtime 層。Slack API は adapters/slack_client 経由
+- 3層分離：本ファイルは Runtime 層。Slack API / Bedrock / pgvector は adapters 経由
 - 構造化ログ：request_id を毎イベント生成して伝播
-- prompt のファイル化：今はまだ Skill を呼ばないので不要、後続で追加
+- prompt のファイル化：SearchSkill 経由で prompts/search/v1/system.md を読む
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
 from typing import Any
 
@@ -25,11 +26,80 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
 from teamagent.adapters.slack_client import SlackClient
+from teamagent.skills.base import SkillContext
+from teamagent.skills.search.schema import SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
 
 
-def build_app() -> AsyncApp:
+# Slack の @mention は <@U12345> 形式で来るので、テキストから剥がすための正規表現
+_MENTION_PATTERN = re.compile(r"<@[A-Z0-9]+>\s*")
+
+
+def strip_mention(text: str) -> str:
+    """app_mention イベントのテキストから先頭の `<@BOT_ID>` を取り除く。
+
+    例:
+        "<@U082ABC> A社の前回提案は？" → "A社の前回提案は？"
+    """
+    return _MENTION_PATTERN.sub("", text, count=1).strip()
+
+
+def format_search_response(output: SearchOutput) -> str:
+    """SearchOutput を Slack に表示する文字列に整形する。"""
+    lines = [output.answer, ""]
+    if output.hits:
+        lines.append("*参考資料:*")
+        for hit in output.hits[:5]:
+            source = hit.source or f"chunk #{hit.chunk_id}"
+            lines.append(f"• {source}  (score={hit.score:.2f})")
+    lines.append("")
+    lines.append(f"_推算コスト: ${output.total_cost_usd:.4f}_")
+    return "\n".join(lines)
+
+
+class SkillDispatcher:
+    """mention テキストを Skill に振り分けて結果を返す。
+
+    Sprint 1 末：常に "search" Skill にディスパッチ。
+    Sprint 2+ でルールベース or Claude Haiku ベースのルーターを実装。
+    """
+
+    def __init__(self) -> None:
+        self._skill_cache: dict[str, Any] = {}
+
+    def get_search_skill(self) -> Any:
+        """SearchSkill インスタンスをキャッシュして返す（embedder ロードが重い）。
+
+        Skill ごとに __init__ 引数が異なるため、ここでは search 専用の生成ロジックを持つ。
+        Sprint 2 で Router を導入したら抽象化する。
+        """
+        if "search" in self._skill_cache:
+            return self._skill_cache["search"]
+        # 動的 instance 生成。Skill 固有の init 引数を扱うため Any 経由
+        from teamagent.adapters.embeddings_client import LocalE5Embedder
+        from teamagent.skills.search.skill import SearchSkill
+
+        instance = SearchSkill(embedder=LocalE5Embedder())
+        self._skill_cache["search"] = instance
+        return instance
+
+    async def run_search(self, query: str, request_id: str, user_id: str | None) -> SearchOutput:
+        """SearchSkill を別スレッドで実行（同期 I/O が含まれるため）。"""
+        skill = self.get_search_skill()
+        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        input_obj = SearchInput(query=query, top_k=5)
+        loop = asyncio.get_running_loop()
+        output: SearchOutput = await loop.run_in_executor(
+            None,
+            skill.run,
+            input_obj,
+            ctx,
+        )
+        return output
+
+
+def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
     """Bolt AsyncApp を構築する。
 
     SLACK_BOT_TOKEN は必須。
@@ -41,27 +111,52 @@ def build_app() -> AsyncApp:
 
     app = AsyncApp(token=bot_token)
     slack = SlackClient(bot_token=bot_token)
+    disp = dispatcher or SkillDispatcher()
 
     @app.event("app_mention")
-    async def handle_app_mention(event: dict[str, Any], say: Any) -> None:
+    async def handle_app_mention(event: dict[str, Any]) -> None:
         request_id = f"req-{uuid.uuid4().hex[:12]}"
         user_id = event.get("user", "unknown")
-        text = event.get("text", "")
+        raw_text = event.get("text", "")
+        query = strip_mention(raw_text)
         channel = event.get("channel", "")
         thread_ts = event.get("thread_ts") or event.get("ts")
 
         logger.info(
-            "slack_app_mention",
+            "slack_app_mention_dispatch",
             request_id=request_id,
             user_id=user_id,
             channel=channel,
-            text_len=len(text),
+            raw_len=len(raw_text),
+            query_len=len(query),
         )
 
-        # Sprint 1 時点は echo。次の Sprint で SkillRegistry にルーティング。
+        if not query:
+            await slack.post_message(
+                channel=channel,
+                text="何か質問してください。例: `@TeamAgent A社の前回提案は？`",
+                request_id=request_id,
+                thread_ts=thread_ts,
+            )
+            return
+
+        try:
+            output = await disp.run_search(query, request_id, user_id)
+        except Exception as e:
+            logger.exception("search_skill_failed", request_id=request_id)
+            await slack.post_message(
+                channel=channel,
+                text=f"検索中にエラーが発生しました。`request_id={request_id}`",
+                request_id=request_id,
+                thread_ts=thread_ts,
+            )
+            # 機密が混ざらないよう例外メッセージはログのみ
+            _ = str(e)
+            return
+
         await slack.post_message(
             channel=channel,
-            text=f"<@{user_id}> こんにちは。受け取った文字数 = {len(text)}。",
+            text=format_search_response(output),
             request_id=request_id,
             thread_ts=thread_ts,
         )
@@ -72,7 +167,7 @@ def build_app() -> AsyncApp:
         if event.get("bot_id"):
             return
         if event.get("channel_type") != "im":
-            return  # DM のみ反応（チャンネルメッセージは app_mention でハンドル）
+            return  # DM のみ反応
 
         request_id = f"req-{uuid.uuid4().hex[:12]}"
         user_id = event.get("user", "unknown")
@@ -87,9 +182,23 @@ def build_app() -> AsyncApp:
             text_len=len(text),
         )
 
+        if not text:
+            return
+
+        try:
+            output = await disp.run_search(text, request_id, user_id)
+        except Exception:
+            logger.exception("search_skill_failed", request_id=request_id)
+            await slack.post_message(
+                channel=channel,
+                text=f"検索中にエラーが発生しました。`request_id={request_id}`",
+                request_id=request_id,
+            )
+            return
+
         await slack.post_message(
             channel=channel,
-            text=f"DM 受け取りました（{len(text)} 文字）。",
+            text=format_search_response(output),
             request_id=request_id,
         )
 
