@@ -30,7 +30,6 @@ from pathlib import Path
 import psycopg
 from sentence_transformers import SentenceTransformer
 
-
 # ---------- 設定 ----------
 DOC_PATH = Path("docs/v3.1/teamagent_subsidiary_questions_v2.md")
 # .env の DATABASE_URL を優先（ハードコード禁止 — CLAUDE.md 6-bis）
@@ -48,7 +47,7 @@ def load_chunks(path: Path) -> list[dict]:
     """### Q1. xxx \n - body... の単位で1チャンク"""
     if not path.exists():
         print(f"❌ ファイルが見つかりません: {path}")
-        print(f"  TeamAgent リポジトリのルートから実行してください")
+        print("  TeamAgent リポジトリのルートから実行してください")
         sys.exit(1)
 
     text = path.read_text(encoding="utf-8")
@@ -62,10 +61,12 @@ def load_chunks(path: Path) -> list[dict]:
         if line.startswith("### "):
             # 直前のチャンクを保存
             if current_title:
-                chunks.append({
-                    "title": current_title,
-                    "body": "\n".join(current_body).strip(),
-                })
+                chunks.append(
+                    {
+                        "title": current_title,
+                        "body": "\n".join(current_body).strip(),
+                    }
+                )
             current_title = line[4:].strip()
             current_body = []
         elif current_title:
@@ -73,10 +74,12 @@ def load_chunks(path: Path) -> list[dict]:
 
     # 最後のチャンク
     if current_title:
-        chunks.append({
-            "title": current_title,
-            "body": "\n".join(current_body).strip(),
-        })
+        chunks.append(
+            {
+                "title": current_title,
+                "body": "\n".join(current_body).strip(),
+            }
+        )
 
     print(f"📄 {path.name} から {len(chunks)} チャンク抽出")
     return chunks
@@ -85,7 +88,7 @@ def load_chunks(path: Path) -> list[dict]:
 # ---------- 2. embedding モデルをロード ----------
 def load_model(name: str) -> SentenceTransformer:
     print(f"🤖 モデルをロード中: {name}")
-    print(f"  (初回は ~560MB ダウンロード、2回目以降はキャッシュから瞬時)")
+    print("  (初回は ~560MB ダウンロード、2回目以降はキャッシュから瞬時)")
     model = SentenceTransformer(name)
     dim = model.get_sentence_embedding_dimension()
     print(f"  次元数: {dim}")
@@ -128,8 +131,7 @@ def insert_chunks(
             embed_text = f"passage: {c['title']}\n{c['body']}"
             vec = model.encode(embed_text, normalize_embeddings=True).tolist()
             cur.execute(
-                f"INSERT INTO {TABLE_NAME} (title, body, embedding) "
-                f"VALUES (%s, %s, %s)",
+                f"INSERT INTO {TABLE_NAME} (title, body, embedding) VALUES (%s, %s, %s)",
                 (c["title"], c["body"], str(vec)),
             )
             print(f"  ✓ {c['title'][:50]}")
@@ -146,14 +148,17 @@ def search(
     print(f"\n🔍 検索: 「{query}」")
     qvec = model.encode(f"query: {query}", normalize_embeddings=True).tolist()
     with conn.cursor() as cur:
-        cur.execute(f"""
+        cur.execute(
+            f"""
             SELECT
               id, title, body,
               1 - (embedding <=> %s::vector) AS similarity
             FROM {TABLE_NAME}
             ORDER BY embedding <=> %s::vector
             LIMIT %s
-        """, (str(qvec), str(qvec), top_k))
+        """,
+            (str(qvec), str(qvec), top_k),
+        )
 
         for i, (rid, title, body, sim) in enumerate(cur.fetchall(), 1):
             print(f"\n  [{i}] 類似度 {sim:.3f}  (id={rid})")

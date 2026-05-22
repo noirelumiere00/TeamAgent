@@ -31,9 +31,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     """過去資料を pgvector で検索 → Claude で要約する Skill。"""
 
     name: ClassVar[str] = "search"
-    description: ClassVar[str] = (
-        "営業16名が過去の提案書・議事録・メールを自然文クエリで検索する"
-    )
+    description: ClassVar[str] = "営業16名が過去の提案書・議事録・メールを自然文クエリで検索する"
     input_schema: ClassVar[type[BaseModel]] = SearchInput
     output_schema: ClassVar[type[BaseModel]] = SearchOutput
 
@@ -68,9 +66,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 if target_table != "proposals_chunks"
                 else "proposals_chunks_contextual"
             )
-            self._content_col = (
-                content_col if content_col != "text" else "contextualized_text"
-            )
+            self._content_col = content_col if content_col != "text" else "contextualized_text"
         else:
             self._target_table = target_table
             self._content_col = content_col
@@ -106,9 +102,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     score=h.score,
                     source=self._build_source(h),
                     drive_url=(
-                        str(h.metadata.get("drive_url"))
-                        if h.metadata.get("drive_url")
-                        else None
+                        str(h.metadata.get("drive_url")) if h.metadata.get("drive_url") else None
                     ),
                 )
                 for h in hits
@@ -140,9 +134,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         where: str | None = None
         if input.filter_industry and self._metadata_col is not None:
             # メタデータ JSONB のフィルタ。metadata 列を持つテーブルでのみ有効
-            where = (
-                f"{self._metadata_col}->>'industry' = '{input.filter_industry}'"
-            )
+            where = f"{self._metadata_col}->>'industry' = '{input.filter_industry}'"
 
         with self._pgvector.connection() as conn:
             return self._pgvector.search_similar(
@@ -168,8 +160,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         system = load_prompt("search", "v1", "system")
         context_block = "\n\n".join(
-            f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}]\n{h.content}"
-            for h in hits
+            f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}]\n{h.content}" for h in hits
         )
         user_message = (
             f"以下の社内資料から質問に答えてください。\n\n"

@@ -26,10 +26,7 @@ def test_strip_mention_handles_multiple_spaces() -> None:
 
 def test_strip_mention_only_strips_first() -> None:
     """テキスト中の別ユーザー mention は残ること。"""
-    assert (
-        strip_mention("<@U082ABC> ping <@U999XYZ>")
-        == "ping <@U999XYZ>"
-    )
+    assert strip_mention("<@U082ABC> ping <@U999XYZ>") == "ping <@U999XYZ>"
 
 
 def test_strip_mention_no_mention_returns_trimmed() -> None:
@@ -140,11 +137,7 @@ def test_build_search_blocks_with_drive_url() -> None:
     assert "検索結果サマリ" in blocks[0]["text"]["text"]
 
     # drive_url がある hit にはボタン accessory
-    button_sections = [
-        b
-        for b in blocks
-        if b.get("type") == "section" and "accessory" in b
-    ]
+    button_sections = [b for b in blocks if b.get("type") == "section" and "accessory" in b]
     assert len(button_sections) == 1
     btn = button_sections[0]["accessory"]
     assert btn["type"] == "button"

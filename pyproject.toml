@@ -105,7 +105,20 @@ select = [
     "N",            # pep8-naming
     "RUF",          # ruff-specific
 ]
-ignore = []
+ignore = [
+    # 日本語コード混在を許容するため曖昧 unicode チェックは無効化
+    "RUF001",  # 文字列内の曖昧 unicode（？ ！ など）
+    "RUF002",  # docstring 内の曖昧 unicode
+    "RUF003",  # コメント内の曖昧 unicode
+    # input が組み込み関数名と衝突するが、Skill.run(input=...) の意味的可読性を優先
+    "A002",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# テストは shadow されてもOK、長い行も許容
+"tests/**/*.py" = ["E501"]
+# scripts は実験的なため、未使用 import や print も許容
+"scripts/**/*.py" = ["E501", "T201"]
 
 [tool.mypy]
 python_version = "3.11"

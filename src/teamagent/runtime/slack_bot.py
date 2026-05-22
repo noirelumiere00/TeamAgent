@@ -27,7 +27,7 @@ from slack_bolt.async_app import AsyncApp
 
 from teamagent.adapters.slack_client import SlackClient
 from teamagent.skills.base import SkillContext
-from teamagent.skills.router import QueryType, SkillRouter
+from teamagent.skills.router import SkillRouter
 from teamagent.skills.search.schema import SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
@@ -300,9 +300,7 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
 async def _run() -> None:
     app_token = os.environ.get("SLACK_APP_TOKEN")
     if not app_token:
-        raise RuntimeError(
-            "SLACK_APP_TOKEN が未設定です（xapp- で始まる Socket Mode 用トークン）"
-        )
+        raise RuntimeError("SLACK_APP_TOKEN が未設定です（xapp- で始まる Socket Mode 用トークン）")
 
     app = build_app()
     handler = AsyncSocketModeHandler(app, app_token)

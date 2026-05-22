@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("skill", help="実行する Skill 名（例: search）")
     parser.add_argument(
         "input_json",
-        help="JSON 文字列の入力（例: '{\"query\": \"...\"}'）",
+        help='JSON 文字列の入力（例: \'{"query": "..."}\'）',
     )
     parser.add_argument(
         "--user-id",

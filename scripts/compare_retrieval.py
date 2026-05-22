@@ -77,12 +77,12 @@ def main() -> int:
                 "contextualized_text",
             )
 
-            print(f"\n--- 通常検索（proposals_chunks.text）---")
-            for j, (cid, score, fname, head) in enumerate(normal, 1):
+            print("\n--- 通常検索（proposals_chunks.text）---")
+            for j, (_cid, score, fname, head) in enumerate(normal, 1):
                 print(f"  #{j} score={score:.4f} | {fname[:25]:<25} | {head}")
 
-            print(f"\n--- Contextual（proposals_chunks_contextual.contextualized_text）---")
-            for j, (cid, score, fname, head) in enumerate(ctx, 1):
+            print("\n--- Contextual（proposals_chunks_contextual.contextualized_text）---")
+            for j, (_cid, score, fname, head) in enumerate(ctx, 1):
                 print(f"  #{j} score={score:.4f} | {fname[:25]:<25} | {head}")
 
             top_normal = normal[0][1] if normal else 0

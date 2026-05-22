@@ -209,7 +209,7 @@ def contextualize_chunk(
 
 
 def main() -> int:
-    print(f"🚀 Contextual Retrieval バッチ開始")
+    print("🚀 Contextual Retrieval バッチ開始")
     print(f"  source: {SOURCE_TABLE}")
     print(f"  target: {TARGET_TABLE}")
     print(f"  model: {HAIKU_MODEL_ID}")

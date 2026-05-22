@@ -31,12 +31,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
-from typing import Any
 
 import psycopg
 from pgvector.psycopg import register_vector  # type: ignore[import-untyped]
-
 
 PROD_HOST = "localhost"
 PROD_PORT = 15432  # SSM port-forward 経由
@@ -54,9 +51,16 @@ def dump_local() -> None:
     with open(SCHEMA_DUMP, "w") as f:
         subprocess.run(
             [
-                "docker", "exec", LOCAL_CONTAINER,
-                "pg_dump", "-U", "teamagent", "-d", "teamagent",
-                *tables, "--schema-only",
+                "docker",
+                "exec",
+                LOCAL_CONTAINER,
+                "pg_dump",
+                "-U",
+                "teamagent",
+                "-d",
+                "teamagent",
+                *tables,
+                "--schema-only",
             ],
             stdout=f,
             check=True,
@@ -65,9 +69,17 @@ def dump_local() -> None:
     with open(DATA_DUMP, "w") as f:
         subprocess.run(
             [
-                "docker", "exec", LOCAL_CONTAINER,
-                "pg_dump", "-U", "teamagent", "-d", "teamagent",
-                *tables, "--data-only", "--column-inserts",
+                "docker",
+                "exec",
+                LOCAL_CONTAINER,
+                "pg_dump",
+                "-U",
+                "teamagent",
+                "-d",
+                "teamagent",
+                *tables,
+                "--data-only",
+                "--column-inserts",
             ],
             stdout=f,
             check=True,
@@ -132,7 +144,7 @@ def main() -> int:
 
     dsn = f"postgresql://teamagent:{db_pw}@{PROD_HOST}:{PROD_PORT}/teamagent?sslmode=require"
 
-    print(f"🚀 ローカル pgvector → 本番 RDS（東京）migration 開始\n")
+    print("🚀 ローカル pgvector → 本番 RDS（東京）migration 開始\n")
 
     # Step 0: トンネル接続確認
     try:

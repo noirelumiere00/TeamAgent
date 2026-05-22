@@ -17,14 +17,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 import structlog
 
 logger = structlog.get_logger(__name__)
 
 
-class QueryType(str, Enum):
+class QueryType(StrEnum):
     META = "meta"
     CONDITIONAL = "conditional"
     COMPARE = "compare"
