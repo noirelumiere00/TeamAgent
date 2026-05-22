@@ -1,0 +1,10 @@
+{
+  "_comment": "PDF ファイル名から Google Drive URL へのマッピング。 同階層に proposal_drive_map.json (gitignore 配下) を作成して実 URL を入れる。",
+  "_format": {
+    "key": "data/proposals/ 内の PDF ファイル名そのまま（拡張子込み）",
+    "value": "https://drive.google.com/file/d/<FILE_ID>/view または共有可能な webViewLink"
+  },
+  "0508【ご提案】.pdf": "https://drive.google.com/file/d/REPLACE_WITH_REAL_FILE_ID/view",
+  "提案 2026年4月28日.pdf": "https://drive.google.com/file/d/REPLACE_WITH_REAL_FILE_ID/view",
+  "提案 Vector.pdf": "https://drive.google.com/file/d/REPLACE_WITH_REAL_FILE_ID/view"
+}

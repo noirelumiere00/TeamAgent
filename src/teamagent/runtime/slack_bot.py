@@ -46,16 +46,70 @@ def strip_mention(text: str) -> str:
 
 
 def format_search_response(output: SearchOutput) -> str:
-    """SearchOutput を Slack に表示する文字列に整形する。"""
+    """SearchOutput を Slack に表示する文字列（フォールバック / 通知用）に整形する。
+
+    Block Kit を使う場合も text フィールドにこれを入れて、通知やインデックス用に保持する。
+    """
     lines = [output.answer, ""]
     if output.hits:
         lines.append("*参考資料:*")
         for hit in output.hits[:5]:
             source = hit.source or f"chunk #{hit.chunk_id}"
-            lines.append(f"• {source}  (score={hit.score:.2f})")
+            link = f" → <{hit.drive_url}|Drive で開く>" if hit.drive_url else ""
+            lines.append(f"• {source}  (score={hit.score:.2f}){link}")
     lines.append("")
     lines.append(f"_推算コスト: ${output.total_cost_usd:.4f}_")
     return "\n".join(lines)
+
+
+def build_search_blocks(output: SearchOutput) -> list[dict[str, Any]]:
+    """SearchOutput を Slack Block Kit に整形する。
+
+    Drive URL があれば各 hit を「Drive で開く」ボタン付きで表示する。
+    Block Kit が無効な環境（通知中心）でも text フィールドで読める形を保つ。
+    """
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": output.answer},
+        }
+    ]
+    if output.hits:
+        blocks.append({"type": "divider"})
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "*参考資料*"}],
+            }
+        )
+        for hit in output.hits[:5]:
+            source = hit.source or f"chunk #{hit.chunk_id}"
+            line = f"• {source}  _(score={hit.score:.2f})_"
+            section: dict[str, Any] = {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": line},
+            }
+            if hit.drive_url:
+                section["accessory"] = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📎 Drive で開く"},
+                    "url": hit.drive_url,
+                    "action_id": f"open_drive_{hit.chunk_id}",
+                }
+            blocks.append(section)
+
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"_推算コスト: ${output.total_cost_usd:.4f}_",
+                }
+            ],
+        }
+    )
+    return blocks
 
 
 class SkillDispatcher:
@@ -171,6 +225,7 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             text=format_search_response(output),
             request_id=request_id,
             thread_ts=thread_ts,
+            blocks=build_search_blocks(output),
         )
 
     @app.event("message")
@@ -212,6 +267,7 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             channel=channel,
             text=format_search_response(output),
             request_id=request_id,
+            blocks=build_search_blocks(output),
         )
 
     return app

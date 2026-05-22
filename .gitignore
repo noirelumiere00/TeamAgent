@@ -109,7 +109,8 @@ crash.*.log
 .docker/
 
 # --- Data / runtime artifacts ---
-data/
+data/proposals/
+data/proposal_drive_map.json
 *.sqlite
 *.sqlite3
 *.db
