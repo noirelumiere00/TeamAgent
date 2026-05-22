@@ -105,6 +105,62 @@ TeamAgent/
 
 ---
 
+## 2-ter. Day 1（2026/5/22）作業実績
+
+### インフラ（午前〜午後）
+✅ **Terraform 1.12.2 インストール**（tfenv 経由、sudo 不要）
+✅ **tfstate バックエンド構築**：S3 `teamagent-tfstate-718959508629` + DynamoDB `teamagent-tflock`
+✅ **AWS Terraform apply 完了**：東京リージョン 23 リソース稼働
+  - RDS PostgreSQL **16.14** (`db.t4g.micro`, 20GB)
+  - EC2 踏み台（SSM Session Manager のみ、SSH 22 ポート閉鎖）
+  - S3 raw files バケット
+  - IAM Role / Secrets Manager
+✅ **session-manager-plugin インストール**（pkg 展開で sudo 不要回避、`~/.local/bin/`）
+✅ **踏み台に psql 16.12 導入**
+✅ **本番 RDS に `CREATE EXTENSION vector` 実行**：pgvector **0.8.2** 導入確認
+✅ **踏み台 IAM に Secrets 読み取り権限追加**（最小権限）
+✅ **PostgreSQL バージョン整合**：terraform.tfvars.example / variables.tf を 16.14 に統一
+
+### コード基盤（午後〜夕方）
+✅ **src/teamagent/ 3層分離パッケージ構築**（CLAUDE.md 6-bis 準拠）：
+  - `adapters/bedrock_client.py`（Converse + usage/cost/latency ロギング）
+  - `adapters/pgvector_client.py`（psycopg + ベクトル検索ヘルパー）
+  - `adapters/slack_client.py`（slack_sdk AsyncWebClient ラッパー）
+  - `skills/base.py`（BaseSkill / Registry / SkillContext）
+  - `skills/search/` 雛形（schema.py + skill.py）
+  - `runtime/local.py`（CLI エントリポイント）
+  - `runtime/slack_bot.py`（Bolt Socket Mode）
+  - `prompts/search/v1/system.md`（コード外 prompt）
+✅ **テスト整備**：16 件 all PASS（adapter モック化、SkillRegistry、SearchSkill happy path）
+✅ **mypy --strict 通過**：15 source files、no issues
+✅ **demo スクリプトのハードコード除去**：DATABASE_URL 環境変数化
+
+### Slack 連携
+✅ **Slack App 作成**：`TeamAgent Ver.2` / `TeamAgent_Dev_Ver.2`（App ID `A0B51FGQ8JK`）
+✅ **OAuth スコープ 17 個付与**：app_mentions:read / chat:write / chat:write.public /
+   channels:* / groups:* / im:history / im:write / commands / reactions:read /
+   users:read / users.profile:read / files:read / files:write / dnd:read / usergroups:read
+✅ **Event Subscriptions**：`app_mention` + `message.im` 購読
+✅ **Socket Mode 有効化** + Messages Tab 有効化（DM 受信可能）
+✅ **Secrets Manager にトークン保管**：
+  - `teamagent/dev/slack/bot_token`（xoxb-）
+  - `teamagent/dev/slack/app_token`（xapp-）
+✅ **実機疎通成功**：
+  - チャンネル `#bot_test_server` でメンション → echo 返信 ✅
+  - DM → echo 返信 ✅
+
+### 統合状況
+✅ **Sprint 1 P0「AWS Bedrock 接続」完了**
+✅ **Sprint 1 P0「Terraform apply」完了**
+✅ **Sprint 1 P1「Slack コネクタ着手」echo Bot まで完成**
+⏳ **Sprint 2-3 で OpenClaw + 検索 Skill 本実装に進む**
+
+### ⚠️ 次回開発時の TODO（セキュリティ）
+- [ ] **Slack Bot Token / App Token をローテーション**（チャットに露出済み）
+  - Reinstall App → 新トークン取得 → Secrets Manager 更新
+
+---
+
 ## 3. ローカル開発環境の使い方
 
 ### コンテナ起動
@@ -166,12 +222,23 @@ python scripts/demo_pdf_vectorize.py
 - [x] hello world 成功（`us.anthropic.claude-sonnet-4-6` で「こんにちは！」返答確認）
 - [x] AWS Budgets 設定（Bedrock $50/月 + Server $267/月、50/80/100% アラート）
 
-### 🔴 P0: Terraform apply（AWS インフラ provisioning）
-- [ ] `cd infra/terraform`
-- [ ] `cp terraform.tfvars.example terraform.tfvars` → 編集
-- [ ] `terraform init && terraform plan && terraform apply`
-- [ ] RDS PG 16 + pgvector + Secrets Manager + S3 + IAM Role が立つ
-- [ ] RDS 接続確認
+### ✅ P0: Terraform apply（完了 2026/5/22）
+- [x] ~~tfvars 作成~~（東京リージョン / db.t4g.micro / pg 16.14）
+- [x] terraform init + S3 backend
+- [x] terraform apply 完了（23 リソース）
+- [x] RDS 接続確認（踏み台 + SSM + psql 16.12）
+- [x] **pgvector 0.8.2 を本番 RDS に CREATE EXTENSION**
+
+### ✅ P1: Slack コネクタ着手（完了 2026/5/22 — echo Bot まで）
+- [x] Slack App 作成（`TeamAgent_Dev_Ver.2`）
+- [x] OAuth スコープ 17 個付与
+- [x] Event Subscriptions（app_mention + message.im）
+- [x] Socket Mode + Messages Tab 有効化
+- [x] Bot/App Token を Secrets Manager に保管
+- [x] `src/teamagent/adapters/slack_client.py` 実装
+- [x] `src/teamagent/runtime/slack_bot.py` 実装（Socket Mode）
+- [x] 実機 echo 疎通成功（チャンネル + DM）
+- [ ] **次：mention テキストを SearchSkill にディスパッチ（Sprint 2）**
 
 ### 🟡 P1: Contextual Retrieval（既存チャンクに前置詞付与）
 - [ ] 既存の demo_pdf_vectorize.py で生成された chunk に Claude Haiku で「この章は...」前置詞を生成
