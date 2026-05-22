@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any, ClassVar
 
 import structlog
 
@@ -72,14 +73,57 @@ _COMPARE_PATTERNS = [
 ]
 
 
-class SkillRouter:
-    """ルールベース Skill Router（Sprint 1 末版）。
+_LLM_ROUTER_INSTRUCTION = (
+    "あなたは社内営業向け検索 Bot のクエリ判定器です。\n"
+    "以下のクエリを 4 種類のいずれかに分類し、業界フィルタを抽出してください。\n\n"
+    "分類:\n"
+    "- meta: 集計・カウント系（「業界は？」「何件ある？」「全部教えて」）\n"
+    "- conditional: 特定の業界・顧客・予算で絞り込みたい（「飲食業の事例」）\n"
+    "- compare: 比較系（「A と B の違い」「どっちが良い」）\n"
+    "- content: 通常の意味検索（上記に当てはまらないもの。デフォルト）\n\n"
+    "業界カテゴリ（リストにあるものから選ぶ、無ければ null）:\n"
+    "飲食 / 化粧品 / エネルギー / 不動産 / 自治体 / 製造業 /\n"
+    "教育 / 医療 / IT / 小売 / 金融 / 旅行 / メディア\n\n"
+    "クエリ:\n"
+    "{query}\n\n"
+    "JSON だけを返してください（説明やコードブロック禁止）:\n"
+    '{{"query_type": "meta|conditional|compare|content", '
+    '"industry": "飲食" or null, "reason": "短い説明"}}\n'
+)
 
-    Sprint 2 で Haiku 4.5 ベースの自然言語判定に置き換え予定。
+
+class SkillRouter:
+    """ハイブリッド Skill Router。
+
+    rule-based 判定を試し、confidence が低い（< 0.6）場合のみ
+    Haiku 4.5 で LLM 判定を呼ぶハイブリッド設計。
+
+    - rule-based のみ：bedrock=None で初期化、現状の挙動を維持
+    - LLM フォールバック：bedrock を注入すると低 confidence 時のみ Haiku 呼び出し
+
+    Sprint 2 で完全 LLM に切り替えるかは PoC で判断。
     """
 
-    def route(self, query: str) -> RoutingDecision:
+    LLM_FALLBACK_THRESHOLD: ClassVar[float] = 0.6
+
+    def __init__(self, bedrock: Any | None = None) -> None:
+        """bedrock client を渡すと低 confidence 時に LLM 判定を行う。"""
+        self._bedrock = bedrock
+
+    def route(self, query: str, request_id: str | None = None) -> RoutingDecision:
         """クエリを判定して RoutingDecision を返す。"""
+        rule_decision = self._route_rule_based(query)
+        if rule_decision.confidence >= self.LLM_FALLBACK_THRESHOLD or self._bedrock is None:
+            return rule_decision
+
+        # rule-based が低 confidence + LLM 利用可
+        llm_decision = self._route_llm(query, request_id=request_id or "rt-fallback")
+        if llm_decision is None:
+            return rule_decision  # LLM 失敗時は rule-based を採用
+        return llm_decision
+
+    def _route_rule_based(self, query: str) -> RoutingDecision:
+        """rule-based の判定（外部依存なし）。"""
         # 1. compare 判定（最優先、誤検出が一番痛い）
         for pat in _COMPARE_PATTERNS:
             if pat.search(query):
@@ -111,10 +155,55 @@ class SkillRouter:
                         reason=f"industry keyword matched: {kw} → {industry}",
                     )
 
-        # 4. デフォルト：content
+        # 4. デフォルト：content（confidence 低）
         return RoutingDecision(
             query_type=QueryType.CONTENT,
             confidence=0.5,
             extracted_filter={},
-            reason="no specific pattern matched",
+            reason="no specific pattern matched (rule-based)",
+        )
+
+    def _route_llm(self, query: str, request_id: str) -> RoutingDecision | None:
+        """Haiku 4.5 で JSON 判定。失敗時 None。"""
+        if self._bedrock is None:
+            return None
+        prompt = _LLM_ROUTER_INSTRUCTION.format(query=query)
+        try:
+            resp = self._bedrock.converse(
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                request_id=request_id,
+                temperature=0.0,
+                max_tokens=200,
+            )
+            raw = resp.text.strip()
+            if raw.startswith("```"):
+                raw = raw.lstrip("`").lstrip("json").strip()
+                if raw.endswith("```"):
+                    raw = raw[:-3].strip()
+            import json
+
+            data = json.loads(raw)
+        except Exception as e:
+            logger.warning(
+                "llm_router_failed",
+                request_id=request_id,
+                error=str(e),
+            )
+            return None
+
+        try:
+            qt = QueryType(data.get("query_type", "content"))
+        except ValueError:
+            qt = QueryType.CONTENT
+
+        industry = data.get("industry")
+        extracted: dict[str, str] = {}
+        if industry and industry != "null":
+            extracted["industry"] = str(industry)
+        reason = f"LLM router: {data.get('reason', '')[:120]}"
+        return RoutingDecision(
+            query_type=qt,
+            confidence=0.85,
+            extracted_filter=extracted,
+            reason=reason,
         )
