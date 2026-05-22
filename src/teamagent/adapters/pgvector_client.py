@@ -19,7 +19,7 @@ from typing import Any
 
 import psycopg
 import structlog
-from pgvector.psycopg import register_vector  # type: ignore[import-untyped]
+from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 
 logger = structlog.get_logger(__name__)
