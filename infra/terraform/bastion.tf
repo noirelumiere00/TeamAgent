@@ -49,6 +49,23 @@ resource "aws_iam_role_policy_attachment" "bastion_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+# DB パスワードを Secrets Manager から取得する権限
+data "aws_iam_policy_document" "bastion_secrets" {
+  statement {
+    sid     = "ReadDBPassword"
+    actions = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = [
+      aws_secretsmanager_secret.db_password.arn,
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "bastion_secrets" {
+  name   = "${var.project_name}-${var.environment}-bastion-secrets"
+  role   = aws_iam_role.bastion.id
+  policy = data.aws_iam_policy_document.bastion_secrets.json
+}
+
 resource "aws_iam_instance_profile" "bastion" {
   name = "${var.project_name}-${var.environment}-bastion"
   role = aws_iam_role.bastion.name
