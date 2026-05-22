@@ -23,11 +23,14 @@ resource "aws_db_parameter_group" "main" {
   name   = "${var.project_name}-${var.environment}-pg16"
   family = "postgres16"
 
+  # static パラメータ（変更には DB 再起動が必要）
   parameter {
-    name  = "shared_preload_libraries"
-    value = "pg_stat_statements"
+    name         = "shared_preload_libraries"
+    value        = "pg_stat_statements"
+    apply_method = "pending-reboot"
   }
 
+  # dynamic パラメータ（即時反映可）
   parameter {
     name  = "log_min_duration_statement"
     value = "1000"  # 1秒以上のクエリをログ
