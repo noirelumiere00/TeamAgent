@@ -197,14 +197,13 @@ TeamAgent/
 ### Day 2 完了時点の累計 PR：#1〜#19（19 本マージ）
 
 ### ⚠️ TODO（Sprint 2 開始時に対応）
-- [ ] **Slack Bot Token (xoxb-) 完全ローテーション**：OAuth & Permissions → Revoke All → Reinstall（xapp- は更新済）
-- [ ] **data/proposal_drive_map.json の PLACEHOLDER を実 Drive URL に差し替え**
-- [ ] **本番 RDS への migration**：ローカル → 東京 RDS proposals_chunks_contextual
+- [ ] **data/proposal_drive_map.json の PLACEHOLDER を実 Drive URL に差し替え**（Sprint 3 の Drive API 連携で自動化されるので、それまでは保留可）
+- [x] **本番 RDS への migration**：ローカル → 東京 RDS proposals_chunks_contextual（PR #22 で完了）
 - [ ] **Drive 取り込みパイプライン（Sprint 3）**：Google Drive API + webViewLink 自動取得
 
-### ⚠️ 次回開発時の TODO（セキュリティ）
-- [ ] **Slack Bot Token / App Token をローテーション**（チャットに露出済み）
-  - Reinstall App → 新トークン取得 → Secrets Manager 更新
+### 🔐 Slack トークン管理メモ
+- xoxb- が会話履歴に露出した経緯あるが、チャットは private で外部漏洩リスクなしと判断
+- 定期ローテーション（180 日）は `docs/v3.2/ops/secrets_rotation_policy.md` の手順で実施
 
 ---
 
