@@ -1,0 +1,414 @@
+# TeamAgent v3.2 マスター ToDo（Sprint 1 残 〜 本番運用 2026-12-28）
+
+**作成日**: 2026-05-22 Day 2 完了時点
+**ターゲット本番運用**: 2026-12-28（Sprint 14 末）
+
+> ⚠️ **本ドキュメントの位置づけ**
+> - Sprint 1 Day 2 完了時点の **本番運用までの全タスク**を 1 ファイルに集約
+> - 「どこまで動いている / どこから人手が必要か」を明示
+> - 個別 Sprint 詳細は `docs/v3.2/teamagent_implementation_plan_v3.2_draft.md` 参照
+
+---
+
+## 0. 凡例
+
+| アイコン | 意味 |
+|---|---|
+| 🤖 | Claude（私）が実装可能 — コード生成、テスト、デプロイ、ドキュメント |
+| 👤 | ユーザー（小俣さん）の手動操作が必要 — 管理画面、判断、承認、レビュー |
+| 🏢 | IT / 経営 / 外部承認が必要 — プロキシ許可、IT 申請、コンプラ確認 |
+| 📊 | ベータユーザー（営業）の協力が必要 — ドッグフード、FB 提供 |
+| ✅ / 🟡 / 🔴 | 完了 / 進行中 / 未着手 |
+
+---
+
+## 1. ✅ 完了済（Day 2 = 2026-05-22）— PR #1〜#22
+
+### インフラ・運用基盤
+| | タスク |
+|---|---|
+| ✅ | AWS Bedrock 接続（us-east-1, Sonnet 4.6 + Haiku 4.5、Anthropic Use Case フォーム承認） |
+| ✅ | Terraform apply（東京、23 リソース、RDS PG 16.14 + pgvector 0.8.2） |
+| ✅ | 踏み台 EC2 SSM 接続確立（i-04fd1f367b454f641） |
+| ✅ | Secrets Manager にトークン保管（db / slack 各種） |
+| ✅ | AWS Budgets 設定（Bedrock $50, Server $267） |
+| ✅ | tfstate S3 + DynamoDB バックエンド |
+
+### コード基盤（pytest 33 件 / mypy --strict 18 source files）
+| | タスク |
+|---|---|
+| ✅ | 3層分離パッケージ（adapters / skills / runtime / prompts） |
+| ✅ | BedrockClient / PgVectorClient / SlackClient / LocalE5Embedder / GeminiClient（雛形） |
+| ✅ | SearchSkill + SearchInput/Output Pydantic スキーマ |
+| ✅ | SkillRouter（ルールベース、meta/conditional/compare/content 判定） |
+| ✅ | SkillDispatcher（Slack mention → SearchSkill） |
+| ✅ | Block Kit 整形（参考資料 + Drive リンクボタン） |
+| ✅ | pre-commit hook 設定（.pre-commit-config.yaml） |
+
+### 検索 Skill
+| | タスク |
+|---|---|
+| ✅ | LocalE5Embedder（multilingual-e5-large、1024 次元） |
+| ✅ | Contextual Retrieval 実装（INPEX +3.69 score 改善） |
+| ✅ | メタデータ抽出（industry / client / target / pitch_axis 等 15 軸） |
+| ✅ | filter_industry 実動作（INPEX → エネルギー / 森ビル → 不動産） |
+| ✅ | PDF 取り込みパイプライン自動化（ingest_pdfs.py） |
+| ✅ | 本番 RDS（東京）に 98 chunks 移行 |
+
+### Slack
+| | タスク |
+|---|---|
+| ✅ | Slack App 作成（TeamAgent Ver.2, App ID A0B51FGQ8JK） |
+| ✅ | 17 OAuth scopes 取得 + Event Subscriptions（app_mention, message.im） |
+| ✅ | Socket Mode 起動、xapp- トークンローテーション済 |
+| ✅ | Slack 実機 E2E 疎通成功（mention → 引用付き回答、$0.01-0.02 / クエリ） |
+
+### Drive リンク Phase 1
+| | タスク |
+|---|---|
+| ✅ | proposals_chunks_contextual.drive_url 列追加 |
+| ✅ | proposal_drive_map.json + update_drive_urls.py |
+| ✅ | Slack 返信に「📎 Drive で開く」ボタン Block Kit 表示 |
+| 🔴 | **実 Drive URL の取得・差し替えはまだ**（プレースホルダのまま） |
+
+### ドキュメント
+| | タスク |
+|---|---|
+| ✅ | v3.1 訂正ノート v0.3（OpenClaw 実証データ、AWS 公式テンプレ発見） |
+| ✅ | v3.2 設計ドラフト 3 ファイル（overview / migration / implementation） |
+| ✅ | CLAUDE.md 6-bis（AI エージェント実装ルール） |
+| ✅ | Memory 整備（プロジェクト / AWS / リポジトリ / Agent 確認ルール） |
+
+---
+
+## 2. 🔴 Sprint 1 残 〜 Sprint 2 末（5/23 〜 6/12）— 53 タスク
+
+> **🎯 マイルストーン**: Sprint 2 末（**2026-06-07**）の **Go/No-Go ゲート①**：OpenClaw 採用 vs 自前構成継続を確定
+
+### 2.1 Drive リンク Phase 1 完成（**最優先、今すぐ動けるもの**）
+
+| | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 🔴 | Drive 3 PDF をベクトル社共有ドライブにアップロード（既にあればスキップ） | 👤 | 10分 |
+| 🔴 | 各 PDF の webViewLink を取得（共有 → リンクを取得） | 👤 | 5分 |
+| 🔴 | data/proposal_drive_map.json の PLACEHOLDER を実 URL に差し替え | 🤖 | 5分 |
+| 🔴 | update_drive_urls.py を本番 RDS に対して実行（SSM tunnel 経由） | 🤖 | 10分 |
+| 🔴 | Slack 実機で「📎 Drive で開く」ボタン遷移確認 | 👤 | 5分 |
+
+### 2.2 Slack トークン完全ローテーション
+
+| | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 🔴 | Slack App OAuth → Revoke All Tokens 実行 | 👤 | 3分 |
+| 🔴 | Reinstall to Workspace → 新 xoxb- 取得 | 👤 | 3分 |
+| 🔴 | Secrets Manager に新 xoxb- update-secret | 🤖 | 2分 |
+| 🔴 | Bot 再起動 + 疎通確認 | 🤖 | 10分 |
+
+### 2.3 本番 RDS への運用切り替え
+
+| | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 🔴 | .env.production 雛形作成 + Secrets Manager 化 | 🤖 | 20分 |
+| 🔴 | Bot を本番 RDS 接続に切り替え（DATABASE_URL 差し替え）+ E2E 再疎通 | 🤖+👤 | 30分 |
+| 🔴 | Bedrock invocation logging を S3 + KMS で有効化 | 🤖 | 20分 |
+
+### 2.4 OpenClaw PoC + Go/No-Go ゲート①
+
+| | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 🔴 | OpenClaw 子会社ヒアリング回答受領（5/22 メール送信済） | 🏢 | 待ち |
+| 🔴 | ヒアリング結果を docs に反映 | 🤖 | 30分 |
+| 🔴 | OpenClaw PoC：aws-samples CFN を ap-northeast-1 で deploy | 🤖 | 45分 |
+| 🔴 | OpenClaw Hello World Skill 動作確認 | 🤖 | 30分 |
+| 🔴 | OpenClaw + Bedrock 経由 Skill サンプル動作 | 🤖 | 60分 |
+| 🔴 | PoC 結果サマリ（性能/運用/セキュリティ比較表） | 🤖 | 30分 |
+| 🔴 | **Go/No-Go ゲート①判定**：B 案 vs D 案 | 👤+🤖 | 30分 |
+| 🔴 | 判定結果を v3.2 ドラフトに最終確定 | 🤖 | 20分 |
+
+### 2.5 IT / 経営申請（リードタイム長）
+
+| | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 🔴 | 会社 Mac の sudo 権限 or 別端末調達 | 👤+🏢 | 1-3日 |
+| 🔴 | Bedrock / Drive API のプロキシ許可リスト追加 | 👤+🏢 | 1-3日 |
+| 🔴 | Slack chat:write.public 利用ポリシー社内確認 | 👤+🏢 | 1-3日 |
+| 🔴 | 本番 RDS 接続元 IP / SSO 連携要否確認 | 👤+🏢 | 1-3日 |
+
+### 2.6 観測・運用基盤
+
+| | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 🔴 | CloudWatch Logs Insights 用クエリ集を docs/v3.2/ops/ に保存 | 🤖 | 20分 |
+| 🔴 | CloudWatch メトリクスフィルタ（cost_usd / latency_ms / error_count） | 🤖 | 30分 |
+| 🔴 | CloudWatch アラーム（日次コスト > $5、p95 latency > 15s、5xx 連続 3 件） | 🤖 | 30分 |
+| 🔴 | Sentry プロジェクト作成 + DSN を Secrets Manager に保管 | 👤+🤖 | 20分 |
+| 🔴 | runtime/slack_bot.py に Sentry SDK 組込（PII scrubber 有効化） | 🤖 | 30分 |
+| 🔴 | AWS Budgets に Slack 通知（Chatbot 経由）追加 | 🤖 | 30分 |
+| 🔴 | GitHub Actions CI：pytest + mypy + ruff + bandit 整備 | 🤖 | 60分 |
+
+### 2.7 セキュリティ
+
+| | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 🔴 | Secrets Manager 全 secret に rotation policy（90日） | 🤖 | 20分 |
+| 🔴 | RDS 強制 SSL + IAM auth on 確認 | 🤖 | 15分 |
+| 🔴 | S3 raw bucket Public Access Block + KMS 暗号化確認 | 🤖 | 15分 |
+| 🔴 | IAM Access Analyzer 有効化 + 過剰権限スキャン | 🤖 | 20分 |
+| 🔴 | CloudTrail multi-region + log file validation 有効化 | 🤖 | 15分 |
+| 🔴 | ログから PII 漏洩スキャン（grep で顧客名・PDF 全文検出） | 🤖 | 30分 |
+| 🔴 | pre-commit hook：gitleaks 追加 | 🤖 | 30分 |
+
+### 2.8 機能改善（並行）
+
+| | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 🔴 | Query Router を Haiku ベース判定に置き換え（現状は rule-based） | 🤖 | 90分 |
+| 🔴 | filter_industry を Slack スラッシュコマンドで受け取る | 🤖 | 30分 |
+| 🔴 | 引用フォーマット強化（出典 + ページ + 類似度） | 🤖 | 30分 |
+| 🔴 | prompt caching を system prompt に適用（cache_read_tokens ログ確認） | 🤖 | 45分 |
+
+### 2.9 営業ベータ準備（Sprint 2 末）
+
+| | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 🔴 | 営業 2 名ベータ用チャネル #teamagent-beta 作成 + Bot invite | 👤 | 10分 |
+| 🔴 | ベータテスト依頼文 + 評価フォーム（5 件クエリ + 満足度） | 🤖+👤 | 30分 |
+| 🔴 | ベータテスト実施 + 結果ログ集計 | 👤+🤖+📊 | 60分 |
+| 🔴 | FB を docs/v3.2/feedback_sprint2.md に整理 | 🤖 | 45分 |
+
+**Sprint 1 残〜Sprint 2 末 工数小計**: 🤖 約 12h / 👤 約 3h / 🏢 1-3日待ち / 📊 1h
+
+---
+
+## 3. 🔴 Sprint 3〜6（6/13 〜 8/7）MVA 完成 — 50 タスク
+
+> **🎯 マイルストーン**: M3 末（**2026-08-07**）MVA 完成、営業 16 名展開準備完了
+
+### Sprint 3（6/13 〜 6/26）pgvector 完成 & Gmail/Drive コネクタ
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| S3-01 | GCP プロジェクト作成・OAuth 同意画面設定（Internal） | 👤 | 2h |
+| S3-02 | Drive OAuth クライアント申請（drive.readonly, drive.metadata） | 👤+🏢 | 3h |
+| S3-03 | Drive API 用 IT 承認取得（Workspace Admin + Domain-Wide Delegation） | 🏢 | 4h |
+| S3-04 | ベクトル社 営業 Drive フォルダ構造調査（命名規則、階層、件数） | 👤 | 3h |
+| S3-05 | adapters/gdrive_client.py 実装（list_files, download, change_token） | 🤖 | 6h |
+| S3-06 | Drive 差分監視（changes.list API + EventBridge cron 15min） | 🤖 | 5h |
+| S3-07 | ingest_pdfs.py 拡張：Drive 経由の自動取り込み統合 | 🤖 | 4h |
+| S3-08 | Drive メタデータ → pgvector に source_uri / owner / modified_at 反映 | 🤖 | 3h |
+| S3-09 | Gmail OAuth クライアント申請（gmail.readonly） | 👤+🏢 | 3h |
+| S3-10 | Gmail Domain-Wide Delegation 要否の判断 | 👤 | 2h |
+| S3-11 | adapters/gmail_client.py 実装 | 🤖 | 7h |
+| S3-12 | Gmail 取り込みパイプライン（label フィルタ → 正規化 → chunk） | 🤖 | 5h |
+| S3-13 | Slack チャネル取り込みコネクタ（conversations.history） | 🤖 | 5h |
+| S3-14 | pgvector スキーマ最終化（source_type ENUM, ACL 列） | 🤖 | 3h |
+
+### Sprint 4（6/27 〜 7/10）検索 Skill 本番化 & 全 PDF 投入
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| S4-01 | 社内提案 PDF 全件棚卸し（件数確定、機密区分仕分け） | 👤 | 4h |
+| S4-02 | 全 PDF 一括投入（バッチ実行、想定 200〜500 ファイル） | 🤖 | 6h |
+| S4-03 | メタデータ抽出パイプライン定期実行化（EventBridge 日次） | 🤖 | 3h |
+| S4-04 | Bedrock Titan Embed v2 PoC（LocalE5 と精度比較） | 🤖 | 6h |
+| S4-05 | Embedder 切り替え判断 | 👤 | 1h |
+| S4-06 | EC2 本番環境構築（t3.medium、Docker、systemd） | 🤖+👤 | 5h |
+| S4-07 | Slack Bot 本番デプロイ（Socket Mode → HTTP 検討） | 🤖 | 4h |
+| S4-08 | 本番 RDS 接続切替 + Secrets Manager 連携 | 🤖+👤 | 3h |
+| S4-09 | CloudWatch Logs / メトリクス整備 | 🤖 | 3h |
+| S4-10 | Slack DM ベータユーザー allowlist 設定 | 🤖+👤 | 2h |
+| S4-11 | App Home タブ実装（おすすめクエリ、検索履歴） | 🤖 | 6h |
+| S4-12 | SkillRouter の Gmail/Drive 拡張（source 指定構文） | 🤖 | 4h |
+
+### Sprint 5（7/11 〜 7/24）営業 5 名ベータ
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| S5-01 | ベータユーザー 5 名選定 + 招待 DM | 👤 | 2h |
+| S5-02 | ベータ向けクイックスタート資料（Slack canvas、3 分動画） | 🤖+👤 | 4h |
+| S5-03 | #teamagent-beta 開設 | 👤 | 1h |
+| S5-04 | Google Form FB アンケート（週次、5 項目） | 👤 | 2h |
+| S5-05 | ベータ運用（実利用、質問対応、デイリーログ確認） | 📊+🤖 | 20h |
+| S5-06 | 評価データセット作成（営業実クエリ 30 件 + 正解 chunk） | 👤+🤖 | 5h |
+| S5-07 | 検索精度計測（top-1 hit rate, MRR@5, 満足度） | 🤖 | 4h |
+| S5-08 | Contextual Retrieval プロンプトチューニング | 🤖 | 5h |
+| S5-09 | SkillRouter ルール改善（industry 推定漏れ対応） | 🤖 | 4h |
+| S5-10 | バグ修正（FB 起因の即時対応枠） | 🤖 | 8h |
+| S5-11 | S5 末振り返り会 + Go/No-Go 判断 | 👤+📊 | 2h |
+
+### Sprint 6（7/25 〜 8/7）16 名展開準備 & MVA 完成
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| S6-01 | 営業 16 名向けオンボーディング資料（Notion + 動画） | 🤖+👤 | 6h |
+| S6-02 | 全社展開お知らせ Slack 草稿 + 経営承認 | 👤 | 2h |
+| S6-03 | 運用 Runbook（OAuth token 失効、RDS 接続断、Slack rate limit） | 🤖+👤 | 5h |
+| S6-04 | インシデント対応フロー（Slack alert で代替） | 🤖 | 3h |
+| S6-05 | SLO 定義（応答 p95 < 5s, 可用性 99%, 精度 70%） | 👤+🤖 | 2h |
+| S6-06 | SLA ドキュメント（営業時間内対応） | 👤 | 2h |
+| S6-07 | セキュリティレビュー（情シス向け資料、データフロー図） | 🤖+🏢 | 6h |
+| S6-08 | 社内コンプライアンス確認（個人情報、商談機密） | 🏢+👤 | 4h |
+| S6-09 | バックアップ / DR 手順（RDS snapshot 日次、RTO 4h） | 🤖+👤 | 3h |
+| S6-10 | コスト試算最終版（Bedrock + EC2 + RDS、16 名想定） | 🤖 | 2h |
+| S6-11 | 16 名分 Slack allowlist 拡張 | 🤖 | 1h |
+| S6-12 | MVA Phase 2-3 完成判定会（M3 8/7、KPI レビュー） | 👤+📊 | 2h |
+
+**Sprint 3-6 工数小計**: 🤖 約 140h / 👤 約 50h / 🏢 約 15h / 📊 約 22h
+
+---
+
+## 4. 🔴 Sprint 7〜14（8/8 〜 12/28）Phase 4-5 — 35 タスク
+
+> **🎯 マイルストーン**:
+> - Sprint 10 末（**2026-10/中旬**）**Go/No-Go ゲート②**：提案書 20h → 8-12h 実証
+> - Sprint 14 末（**2026-12-28**）**本格運用開始**
+
+### Sprint 7（8/8 〜 8/21）Phase 4-a: Slack 自動サジェスト Skill
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 7.1 | Events API message.channels サブスクライブ | 🤖 | 4h |
+| 7.2 | suggest_skill.py 実装（過去案件ベクトル検索 + ephemeral） | 🤖 | 16h |
+| 7.3 | confidence < 0.7 確認ダイアログ Block Kit | 🤖 | 8h |
+| 7.4 | サジェスト ON/OFF ユーザー設定 DynamoDB | 🤖 | 4h |
+| 7.5 | Slack スコープ追加申請（channels:history） | 👤 | 1h |
+| 7.6 | 営業 3 名でドッグフード（1 週間） | 📊 | 6h |
+
+### Sprint 8（8/22 〜 9/4）Phase 4-b: Mail ワークフロー Skill
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 8.1 | Gmail OAuth スコープ拡張（gmail.readonly） | 👤 | 2h |
+| 8.2 | 朝 8:30 EventBridge cron + 当日メール要約 Lambda | 🤖 | 12h |
+| 8.3 | Slack DND status 確認 → スキップ分岐 | 🤖 | 4h |
+| 8.4 | メール × Slack 統合分析（thread_ts 紐付け） | 🤖 | 10h |
+| 8.5 | 個別メール選択 UI（Block Kit overflow menu） | 🤖 | 6h |
+
+### Sprint 9-10（9/5 〜 10/2）Phase 4-c: 提案コンテンツ生成 Skill
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 9.1 | 5 フェーズ生成パイプライン（要件→構成→本文→図表→校閲） | 🤖 | 24h |
+| 9.2 | Playwright + WeasyPrint ローカル動作確認 | 👤 | 3h |
+| 9.3 | HTML → PDF/PPTX 変換 Lambda Layer | 🤖 | 12h |
+| 9.4 | ChromeOS / Edge Runtime での HTML 互換性検証 | 🤖 | 6h |
+| 9.5 | Google Drive Service Account 権限委譲 | 👤 | 2h |
+| 9.6 | Drive 保存 → Slack DM リンク返却フロー | 🤖 | 8h |
+| 10.1 | **Go/No-Go ゲート②**：営業 5 名 × 提案書 3 件で工数測定 | 📊 | 30h |
+| 10.2 | 20h → 8-12h 実証レポート + 経営判断 | 👤 | 4h |
+
+### Sprint 11（10/3 〜 10/16）Phase 4-d: 動画ナレッジ分析 Skill
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 11.1 | Google AI Studio で Gemini API キー取得 | 👤 | 1h |
+| 11.2 | GEMINI_API_KEY を AWS Secrets Manager に登録 | 👤 | 1h |
+| 11.3 | adapters/gemini_client.py 本実装（2.5 Flash, 動画 inline） | 🤖 | 16h |
+| 11.4 | yt-dlp ローカル動作確認 + Lambda Layer 化（FFmpeg 同梱） | 👤+🤖 | 8h |
+| 11.5 | YouTube/TikTok/Instagram URL パーサ + 構造分析 prompt | 🤖 | 12h |
+| 11.6 | 著作権ガード（DL せず stream URL 経由） + 規約レビュー | 🏢 | 4h |
+
+### Sprint 12（10/17 〜 11/13）Phase 4-e: 営業進捗サマリー Skill
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 12.1 | Slack User Group @managers 作成 + IAM 権限マッピング | 👤 | 2h |
+| 12.2 | 月曜 9:00 週間サマリー生成 Lambda（Salesforce 連携） | 🤖 | 16h |
+| 12.3 | マネージャー権限チェック middleware | 🤖 | 6h |
+| 12.4 | サマリー Block Kit テンプレート（KPI / リスク案件） | 🤖 | 8h |
+
+### Sprint 13（11/14 〜 11/27）QA + 負荷試験
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 13.1 | 統合テスト（5 Skill × 正常/異常系 各 10 シナリオ） | 🤖 | 16h |
+| 13.2 | 負荷試験（16 名同時 × 30 req/min × 1h、Locust） | 🤖 | 8h |
+| 13.3 | 朝 8:30 スパイク試験（16 並列 DM） | 🤖 | 4h |
+| 13.4 | Bedrock コスト試算（実利用予測） | 🤖 | 4h |
+| 13.5 | E2E リグレッション（GitHub Actions matrix） | 🤖 | 8h |
+
+### Sprint 14（11/28 〜 12/28）本番化 + 監視
+
+| # | タスク | 担当 | 工数 |
+|---|---|---|---|
+| 14.1 | セキュリティ監査: PII 検出（Macie）/ ログマスキング | 🏢 | 8h |
+| 14.2 | セキュリティ監査: token rotation（Slack/Gmail/Gemini） | 👤 | 4h |
+| 14.3 | セキュリティ監査: CVE スキャン（Snyk + Dependabot） | 🤖 | 4h |
+| 14.4 | Sentry エラートラッキング統合 | 🤖 | 4h |
+| 14.5 | DataDog APM + CloudWatch カスタムメトリクス | 🤖 | 8h |
+| 14.6 | AWS Budgets 80% 通知整備 | 👤 | 2h |
+| 14.7 | RDS 自動スナップショット 7 日保持 + S3 クロスリージョン | 🤖 | 4h |
+| 14.8 | DR 計画（東京 → us-east-1 RTO 4h / RPO 1h） | 🤖+🏢 | 8h |
+| 14.9 | Runbook 作成（インシデント / SLO 違反 / cost spike） | 🤖 | 8h |
+| 14.10 | インシデント対応訓練（模擬障害 2 シナリオ） | 👤+📊 | 4h |
+| 14.11 | **本番リリース**（営業 16 名展開）+ 経営報告 | 👤 | 4h |
+| 14.12 | 継続改善ルーチン（週次 KPI、月次 retro） | 👤 | 2h |
+
+**Sprint 7-14 工数小計**: 🤖 約 268h / 👤 約 32h / 🏢 約 12h / 📊 約 40h
+
+---
+
+## 5. 📊 全体工数サマリ
+
+| 担当 | Sprint 1-2 | Sprint 3-6 | Sprint 7-14 | **合計** |
+|---|---|---|---|---|
+| 🤖 Claude 実装 | 12h | 140h | 268h | **420h** |
+| 👤 ユーザー手動 | 3h | 50h | 32h | **85h** |
+| 🏢 IT / 経営 / 外部 | 1-3日 × 4件 | 15h | 12h | **30h相当** |
+| 📊 ベータユーザー | 1h | 22h | 40h | **63h** |
+
+> 🤖 の工数は私（Claude）が並列で進められれば物理時間は半分以下。
+> 👤 + 🏢 がボトルネックになるので、**承認 / IT 申請を Sprint 2 までに片付ける**のが鍵。
+
+---
+
+## 6. 🚨 今すぐブロックされている主要タスク
+
+| ブロッカー | 待ち項目 | 期限目安 |
+|---|---|---|
+| 子会社からの返信 | OpenClaw 運用実績ヒアリング | Sprint 2 末（6/7） |
+| Drive 実 URL | 3 PDF の webViewLink | 今日中 〜 Sprint 2 |
+| GCP プロジェクト | Drive API OAuth 同意画面 | Sprint 3 開始時 |
+| 営業 PDF 棚卸し | 何件 / どこに保管 / 機密区分 | Sprint 3 末 |
+| IT 申請 4 件 | sudo / プロキシ / Slack ポリシー / RDS IP | Sprint 2 末 |
+| Salesforce 連携可否 | 進捗サマリー Skill のため | Sprint 12 開始時 |
+
+---
+
+## 7. ✅ どこまで「動いている」のか
+
+### 今すぐ動くもの
+- Slack で `@TeamAgent_Dev_Ver.2 INPEX案件は？` → Contextual + filter + 引用付き回答（**$0.01-0.02 / クエリ**）
+- 「📎 Drive で開く」ボタン表示（**ただしリンク先は PLACEHOLDER**）
+- メタデータフィルタ（industry='エネルギー' → INPEX のみ）
+- mention / DM 両方
+
+### 動いていない（次の TODO）
+- ❌ Drive リンクは実 URL じゃない（プレースホルダ）
+- ❌ Drive 自動取り込み（手動マッピング）
+- ❌ Gmail 連携（未着手）
+- ❌ Slack チャネル履歴取り込み（未着手）
+- ❌ Skill ②〜⑤（自動サジェスト / Mail ワークフロー / 提案生成 / 動画分析 / 進捗サマリー）
+- ❌ 本番 EC2 デプロイ（ローカル Mac で動作中）
+- ❌ 本番 RDS 接続切替（Bot はローカル DB 参照中）
+
+---
+
+## 8. 📅 次に踏み出す具体的な一歩
+
+優先度順：
+
+1. **🟢 今すぐ（30 分以内）**：3 PDF の Drive URL を取得 → Drive リンク動作確認
+2. **🟢 今日中（10 分）**：Slack トークン完全ローテーション（xoxb-）
+3. **🟡 明日**：本番 RDS 接続切替テスト
+4. **🟡 5/29 までに**：IT 申請 4 件を投げる
+5. **🟡 5/30 〜**：OpenClaw PoC で Sprint 2 末ゲート①の判定材料準備
+6. **🔵 子会社返信待ち**：ヒアリング結果が来たら docs に反映
+
+---
+
+## 更新履歴
+
+| 日付 | バージョン | 更新内容 |
+|---|---|---|
+| 2026-05-22 | v1.0 | 初版（Day 2 完了時点で 3 Agent 並列調査の結果を統合） |
