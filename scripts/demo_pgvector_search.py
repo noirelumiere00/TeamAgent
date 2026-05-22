@@ -22,6 +22,7 @@ TeamAgent — ローカル無料モデルで pgvector ベクトル検索を体�
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -32,7 +33,11 @@ from sentence_transformers import SentenceTransformer
 
 # ---------- 設定 ----------
 DOC_PATH = Path("docs/v3.1/teamagent_subsidiary_questions_v2.md")
-DB_DSN = "host=localhost port=5432 user=teamagent password=teamagent dbname=teamagent"
+# .env の DATABASE_URL を優先（ハードコード禁止 — CLAUDE.md 6-bis）
+DB_DSN = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://teamagent:teamagent@localhost:5432/teamagent",
+)
 MODEL_NAME = "intfloat/multilingual-e5-large"  # 1024次元・日本語対応
 TABLE_NAME = "demo_qa"
 EMBED_DIM = 1024
