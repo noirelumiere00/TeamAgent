@@ -30,9 +30,9 @@ variable "db_allocated_storage" {
 }
 
 variable "db_engine_version" {
-  description = "PostgreSQL バージョン"
+  description = "PostgreSQL バージョン（2026/5/22 時点 AWS RDS 利用可能の最新マイナー）"
   type        = string
-  default     = "16.4"
+  default     = "16.14"
 }
 
 variable "db_username" {
