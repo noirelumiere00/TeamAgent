@@ -177,6 +177,31 @@ TeamAgent/
 → 現在の `boto3 + slack-bolt + 自前 Skill Registry + claude-agent-sdk` 構成は**そのまま継続可能**。
 → OpenClaw 採否の最終判断は **Sprint 2 末ゲート①（2026-06-07）** で確定する。
 
+### Day 2 夜 — Contextual Retrieval + Drive リンク + メタデータ抽出（2026/5/22 17:30）
+✅ **Contextual Retrieval 実装（PR #16）**：Haiku 4.5 で各 chunk に前置詞生成 + 再 embedding
+  - 98 chunks 処理コスト $0.21、平均 $0.002 / chunk
+  - INPEX クエリで top-1 score **+3.69 ポイント改善**
+  - SearchSkill に use_contextual オプション追加
+✅ **Drive リンク Phase 1（PR #18）**：検索結果に「📎 Drive で開く」ボタンを Block Kit で表示
+  - proposals_chunks に drive_url 列追加
+  - data/proposal_drive_map.json で file_name → URL 手動マッピング
+  - Slack 返信を Block Kit 化、SearchHitOut.drive_url 追加
+✅ **メタデータ抽出パイプライン（PR #19）**：Sonnet 4.6 で各 PDF から JSON 抽出
+  - industry / client_company / target_audience / service_type / proposed_at / key_keywords
+  - 3 PDF を $0.07 / 14.8 秒で処理
+  - filter_industry='エネルギー' → INPEX 提案のみ、'不動産' → 森ビル提案のみ が動作確認
+✅ **AWS リソース・Memory 整備**：Memory に AWS / リポジトリ / Agent 一次ソース確認ルールを追加
+✅ **OpenClaw + Bedrock 検証**：AWS Lightsail Blueprint / aws-samples 公式 CFN（ap-northeast-1 対応）/ AWS_PROFILE 罠を実証データで確認
+✅ **v3.2 設計ドラフト 3 ファイル（PR #15）**：overview + migration runbook + implementation plan
+
+### Day 2 完了時点の累計 PR：#1〜#19（19 本マージ）
+
+### ⚠️ TODO（Sprint 2 開始時に対応）
+- [ ] **Slack Bot Token (xoxb-) 完全ローテーション**：OAuth & Permissions → Revoke All → Reinstall（xapp- は更新済）
+- [ ] **data/proposal_drive_map.json の PLACEHOLDER を実 Drive URL に差し替え**
+- [ ] **本番 RDS への migration**：ローカル → 東京 RDS proposals_chunks_contextual
+- [ ] **Drive 取り込みパイプライン（Sprint 3）**：Google Drive API + webViewLink 自動取得
+
 ### ⚠️ 次回開発時の TODO（セキュリティ）
 - [ ] **Slack Bot Token / App Token をローテーション**（チャットに露出済み）
   - Reinstall App → 新トークン取得 → Secrets Manager 更新
