@@ -116,11 +116,14 @@ def test_search_zero_hits_skips_bedrock(fake_bedrock: MagicMock, fake_pgvector: 
 def test_search_filter_industry_added_to_where(
     fake_bedrock: MagicMock, fake_pgvector: MagicMock
 ) -> None:
-    """filter_industry を指定したとき WHERE 句が pgvector に渡ること。"""
+    """filter_industry を指定したとき、metadata 列がある場合のみ WHERE 句が pgvector に渡る。"""
     skill = SearchSkill(
         bedrock=fake_bedrock,
         pgvector=fake_pgvector,
         embedder=FakeEmbedder(),
+        target_table="proposal_chunks",
+        content_col="content",
+        metadata_col="metadata",
     )
     skill.run(
         input=SearchInput(query="飲食事例", top_k=3, filter_industry="飲食"),
@@ -130,3 +133,27 @@ def test_search_filter_industry_added_to_where(
     call_kwargs: dict[str, Any] = fake_pgvector.search_similar.call_args.kwargs
     assert call_kwargs["where"] == "metadata->>'industry' = '飲食'"
     assert call_kwargs["limit"] == 3
+    assert call_kwargs["metadata_col"] == "metadata"
+    assert call_kwargs["content_col"] == "content"
+
+
+def test_search_filter_industry_ignored_without_metadata_col(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """metadata 列を持たないテーブルでは filter_industry が無視されること。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+        target_table="proposals_chunks",
+        content_col="text",
+        metadata_col=None,
+    )
+    skill.run(
+        input=SearchInput(query="飲食事例", top_k=3, filter_industry="飲食"),
+        ctx=SkillContext(),
+    )
+    call_kwargs: dict[str, Any] = fake_pgvector.search_similar.call_args.kwargs
+    assert call_kwargs["where"] is None
+    assert call_kwargs["content_col"] == "text"
+    assert call_kwargs["metadata_col"] is None

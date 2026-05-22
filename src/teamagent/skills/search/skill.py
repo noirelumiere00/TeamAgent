@@ -14,11 +14,12 @@ CLAUDE.md 6-bis ルール準拠：
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, cast
+from typing import ClassVar
 
 from pydantic import BaseModel
 
 from teamagent.adapters.bedrock_client import BedrockClient
+from teamagent.adapters.embeddings_client import Embedder
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -40,15 +41,25 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self,
         bedrock: BedrockClient | None = None,
         pgvector: PgVectorClient | None = None,
-        embedder: Any | None = None,
-        target_table: str = "proposal_chunks",
+        embedder: Embedder | None = None,
+        target_table: str = "proposals_chunks",
+        *,
+        content_col: str = "text",
+        metadata_col: str | None = None,
+        extra_cols: list[str] | None = None,
     ) -> None:
-        """Adapter は外から注入する（テストでモック差し替え可能にするため）。"""
+        """Adapter は外から注入する（テストでモック差し替え可能にするため）。
+
+        デフォルトはローカル demo のスキーマ（proposals_chunks: text, no metadata）。
+        本番 RDS で proposal_chunks(content, metadata JSONB) を使う際は引数で上書き。
+        """
         self._bedrock = bedrock or BedrockClient.from_env()
         self._pgvector = pgvector or PgVectorClient.from_env()
-        # embedder は実装を後の Sprint で差し替えるためここでは型未定義のまま受ける
         self._embedder = embedder
         self._target_table = target_table
+        self._content_col = content_col
+        self._metadata_col = metadata_col
+        self._extra_cols = list(extra_cols or ["file_name", "page_num"])
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
@@ -77,7 +88,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     chunk_id=h.chunk_id,
                     content=h.content,
                     score=h.score,
-                    source=str(h.metadata.get("source")) if h.metadata.get("source") else None,
+                    source=self._build_source(h),
                 )
                 for h in hits
             ],
@@ -94,22 +105,23 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     def _embed(self, text: str) -> list[float]:
         """クエリを埋め込みベクトルに変換する。
 
-        Sprint 1 時点では embedder の実装を差し替え可能にしておく。
-        後の Sprint で multilingual-e5-large（ローカル）か Titan Embed v2（Bedrock）に統一する。
+        Embedder は外から注入（LocalE5Embedder / BedrockTitanEmbedder など）。
         """
         if self._embedder is None:
             raise NotImplementedError(
-                "embedder が注入されていません。Sprint 1 末で Titan Embed v2 を実装します"
+                "embedder が注入されていません。"
+                "LocalE5Embedder または BedrockTitanEmbedder を __init__ で渡してください"
             )
-        return cast(list[float], self._embedder.embed(text))
+        return self._embedder.embed(text)
 
     def _retrieve(self, embedding: list[float], input: SearchInput) -> list[SearchHit]:
         """pgvector で類似検索する。"""
-        where = None
-        if input.filter_industry:
-            # メタデータ JSONB のフィルタ。実テーブル設計が固まったら厳密化する
-            # 動的 SQL はホワイトリスト固定なので注入リスクなし
-            where = f"metadata->>'industry' = '{input.filter_industry}'"
+        where: str | None = None
+        if input.filter_industry and self._metadata_col is not None:
+            # メタデータ JSONB のフィルタ。metadata 列を持つテーブルでのみ有効
+            where = (
+                f"{self._metadata_col}->>'industry' = '{input.filter_industry}'"
+            )
 
         with self._pgvector.connection() as conn:
             return self._pgvector.search_similar(
@@ -118,6 +130,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 table=self._target_table,
                 limit=input.top_k,
                 where=where,
+                content_col=self._content_col,
+                metadata_col=self._metadata_col,
+                extra_cols=self._extra_cols if self._metadata_col is None else None,
             )
 
     def _summarize(
@@ -147,3 +162,23 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             system=system,
         )
         return resp.text, resp.usage.cost_usd
+
+    @staticmethod
+    def _build_source(hit: SearchHit) -> str | None:
+        """SearchHit から表示用の source 文字列を組み立てる。
+
+        - metadata に "source" があればそれを使う（本番 RDS 想定）
+        - 無ければ file_name + page_num から組み立てる（ローカル proposals_chunks）
+        - どちらも無ければ None
+        """
+        meta = hit.metadata or {}
+        src = meta.get("source")
+        if src:
+            return str(src)
+        file_name = meta.get("file_name")
+        page_num = meta.get("page_num")
+        if file_name:
+            if page_num is not None:
+                return f"{file_name} (p.{page_num})"
+            return str(file_name)
+        return None
