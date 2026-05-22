@@ -56,9 +56,7 @@ class PgVectorClient:
         """
         dsn = os.environ.get("DATABASE_URL")
         if not dsn:
-            raise RuntimeError(
-                "DATABASE_URL が未設定です。.env を読み込んでから起動してください"
-            )
+            raise RuntimeError("DATABASE_URL が未設定です。.env を読み込んでから起動してください")
         return cls(dsn=dsn)
 
     @contextmanager
@@ -121,13 +119,15 @@ class PgVectorClient:
         for col in extras:
             select_cols.append(col)
 
+        # bandit B608: 列名・テーブル名・where_clause はコード内固定値のみで構築
+        # SQL インジェクションのリスクなし（external input ではない）
         sql = f"""
             SELECT {", ".join(select_cols)}
             FROM {table}
             {where_clause}
             ORDER BY {embedding_col} <=> %s::vector
             LIMIT %s
-        """
+        """  # nosec B608
         with conn.cursor() as cur:
             cur.execute(sql, (embedding, embedding, limit))
             rows = cur.fetchall()

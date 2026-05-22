@@ -74,7 +74,8 @@ class GeminiClient:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key or api_key.startswith("AIzaSyxxxxx"):
             raise RuntimeError(
-                "GEMINI_API_KEY が未設定です。Google AI Studio でキーを発行して .env に設定してください"
+                "GEMINI_API_KEY が未設定です。"
+                "Google AI Studio でキーを発行して .env に設定してください"
             )
         model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash")
         return cls(api_key=api_key, model_id=model_id)
@@ -110,7 +111,7 @@ class GeminiClient:
             を含める。
         """
         client = self._ensure_client()
-        start = time.perf_counter()
+        time.perf_counter()
 
         # 実装はここから（Sprint 11）。雛形では NotImplementedError を返す。
         # response = client.models.generate_content(

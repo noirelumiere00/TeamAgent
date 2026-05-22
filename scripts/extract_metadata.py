@@ -120,18 +120,14 @@ def extract_metadata(
     return metadata, resp.usage.cost_usd
 
 
-def update_metadata(
-    conn: psycopg.Connection[Any], file_name: str, metadata: dict[str, Any]
-) -> int:
+def update_metadata(conn: psycopg.Connection[Any], file_name: str, metadata: dict[str, Any]) -> int:
     """両テーブルに metadata JSONB を UPDATE する。"""
     total = 0
     metadata_json = json.dumps(metadata, ensure_ascii=False)
     with conn.cursor() as cur:
         for table in TABLES:
             # metadata JSONB 列を ADD（IF NOT EXISTS）
-            cur.execute(
-                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS metadata JSONB;"
-            )
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS metadata JSONB;")
             cur.execute(
                 f"UPDATE {table} SET metadata = %s::jsonb WHERE file_name = %s;",
                 (metadata_json, file_name),
@@ -143,7 +139,7 @@ def update_metadata(
 
 def main() -> int:
     print("🚀 メタデータ抽出パイプライン開始")
-    print(f"  source: proposals_chunks")
+    print("  source: proposals_chunks")
     print(f"  model: {SONNET_MODEL_ID}")
 
     bedrock = BedrockClient(
@@ -167,14 +163,14 @@ def main() -> int:
                 print(f"  ❌ Bedrock 呼び出し失敗: {e}")
                 continue
 
-            print(f"  抽出結果:")
+            print("  抽出結果:")
             print(f"    industry         = {metadata.get('industry')!r}")
             print(f"    client_company   = {metadata.get('client_company')!r}")
             print(f"    target_audience  = {metadata.get('target_audience')!r}")
             print(f"    service_type     = {metadata.get('service_type')!r}")
             print(f"    proposed_at      = {metadata.get('proposed_at')!r}")
             print(f"    key_keywords     = {metadata.get('key_keywords')!r}")
-            print(f"    -- 文脈設計フレーム --")
+            print("    -- 文脈設計フレーム --")
             print(f"    media            = {metadata.get('media')!r}")
             print(f"    communities      = {metadata.get('communities')!r}")
             print(f"    frequent_words   = {metadata.get('frequent_words')!r}")

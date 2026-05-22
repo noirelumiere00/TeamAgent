@@ -1,0 +1,59 @@
+# gitleaks 設定 — TeamAgent v3.2
+# https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+
+title = "TeamAgent gitleaks config"
+
+# 基本ルール（デフォルトの全パターンを継承）
+[extend]
+useDefault = true
+
+# 追加ルール（TeamAgent 固有）
+
+[[rules]]
+id = "slack-bot-token"
+description = "Slack Bot User OAuth Token"
+regex = '''xoxb-[0-9]+-[0-9]+-[a-zA-Z0-9]+'''
+tags = ["slack", "secret"]
+
+[[rules]]
+id = "slack-app-token"
+description = "Slack App-Level Token"
+regex = '''xapp-1-[A-Z0-9]+-[0-9]+-[a-zA-Z0-9]+'''
+tags = ["slack", "secret"]
+
+[[rules]]
+id = "bedrock-model-id-with-key"
+description = "Anthropic API key (rare in this repo but defensive)"
+regex = '''sk-ant-[a-zA-Z0-9-_]{40,}'''
+tags = ["anthropic", "secret"]
+
+[[rules]]
+id = "gemini-api-key"
+description = "Google AI Studio API Key"
+regex = '''AIzaSy[a-zA-Z0-9_-]{33}'''
+tags = ["google", "secret"]
+
+# 除外パス
+[allowlist]
+description = "TeamAgent allowlist"
+paths = [
+    '''\.env\.example$''',
+    '''.*example\.json$''',
+    '''docs/.*\.md$''',          # docs 内のサンプルは許容
+    '''docs/.*\.html$''',
+    '''\.gitleaks\.toml$''',     # この設定ファイル自身
+    '''\.pre-commit-config\.yaml$''',
+    '''README.*\.md$''',
+]
+
+# 既知の偽陽性を許可（commit message に明記された teardown 等）
+regexes = [
+    # プレースホルダ
+    '''PLACEHOLDER_REPLACE_ME''',
+    '''AIzaSyxxxxx.*''',
+    '''sk-ant-xxxxx.*''',
+    # AWS Bedrock モデル ID（誤検知される）
+    '''anthropic\.claude-.*''',
+    '''us\.anthropic\.claude-.*''',
+    '''jp\.anthropic\.claude-.*''',
+]

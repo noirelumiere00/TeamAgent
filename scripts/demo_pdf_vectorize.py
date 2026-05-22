@@ -118,12 +118,14 @@ def collect_chunks(data_dir: Path) -> list[dict]:
         for page_num, page_text in pages:
             chunks = chunk_text(page_text)
             for idx, chunk in enumerate(chunks):
-                all_chunks.append({
-                    "file_name": pdf_path.name,
-                    "page_num": page_num,
-                    "chunk_idx": idx,
-                    "text": chunk,
-                })
+                all_chunks.append(
+                    {
+                        "file_name": pdf_path.name,
+                        "page_num": page_num,
+                        "chunk_idx": idx,
+                        "text": chunk,
+                    }
+                )
     print(f"\n  → 合計 {len(all_chunks)} chunk 抽出完了")
     return all_chunks
 
@@ -170,7 +172,7 @@ def insert_chunks(
 ) -> None:
     print(f"\n=== INSERT {len(chunks)} chunk ===")
     texts = [f"passage: {c['text']}" for c in chunks]
-    print(f"  ベクトル化中... (バッチ8)")
+    print("  ベクトル化中... (バッチ8)")
     vecs = model.encode(
         texts,
         normalize_embeddings=True,
@@ -179,7 +181,7 @@ def insert_chunks(
     )
 
     with conn.cursor() as cur:
-        for c, v in zip(chunks, vecs):
+        for c, v in zip(chunks, vecs, strict=False):
             cur.execute(
                 f"INSERT INTO {TABLE_NAME} "
                 f"(file_name, page_num, chunk_idx, text, embedding) "
@@ -187,7 +189,7 @@ def insert_chunks(
                 (c["file_name"], c["page_num"], c["chunk_idx"], c["text"], str(v.tolist())),
             )
     conn.commit()
-    print(f"  ✓ INSERT 完了")
+    print("  ✓ INSERT 完了")
 
 
 # ---------- 7. 検索 ----------
@@ -200,14 +202,17 @@ def search(
     print(f"\n🔍 「{query}」")
     qvec = model.encode(f"query: {query}", normalize_embeddings=True).tolist()
     with conn.cursor() as cur:
-        cur.execute(f"""
+        cur.execute(
+            f"""
             SELECT
               file_name, page_num, chunk_idx, text,
               1 - (embedding <=> %s::vector) AS similarity
             FROM {TABLE_NAME}
             ORDER BY embedding <=> %s::vector
             LIMIT %s
-        """, (str(qvec), str(qvec), top_k))
+        """,
+            (str(qvec), str(qvec), top_k),
+        )
 
         rows = cur.fetchall()
         if not rows:

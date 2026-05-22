@@ -63,8 +63,7 @@ def _estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> floa
     for prefix, (price_in, price_out) in _PRICE_TABLE.items():
         if model_id.startswith(prefix):
             return round(
-                input_tokens / 1_000_000 * price_in
-                + output_tokens / 1_000_000 * price_out,
+                input_tokens / 1_000_000 * price_in + output_tokens / 1_000_000 * price_out,
                 6,
             )
     return 0.0

@@ -22,10 +22,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -85,7 +83,7 @@ def main() -> int:
     try:
         if args.force:
             new_pdfs = pdfs
-            print(f"⚠️ --force 指定: 全 PDF を再処理")
+            print("⚠️ --force 指定: 全 PDF を再処理")
         else:
             new_pdfs = [p for p in pdfs if not already_ingested(conn, p.name)]
             if not new_pdfs:
@@ -154,7 +152,7 @@ def main() -> int:
                 "SELECT count(*) FROM proposals_chunks_contextual WHERE drive_url IS NOT NULL"
             )
             n_drive = cur.fetchone()[0]
-        print(f"\n🎉 取り込みパイプライン完了")
+        print("\n🎉 取り込みパイプライン完了")
         print(f"  proposals_chunks            : {n_normal}")
         print(f"  proposals_chunks_contextual : {n_ctx}")
         print(f"  ↑ metadata 付き             : {n_meta}")

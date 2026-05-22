@@ -50,18 +50,25 @@ repos:
         types: [python]
         stages: [pre-push]  # commit ごとは重いので push 時のみ
 
-  # 機密情報の検出（簡易、本番は trufflehog 推奨）
+  # 機密情報の検出（gitleaks、CI と同じ設定）
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secrets scan)
+
+  # 念のためのフォールバック（gitleaks 未配信環境向け）
   - repo: local
     hooks:
-      - id: no-aws-keys
-        name: AWS Access Key の検出
+      - id: no-aws-keys-fallback
+        name: AWS Access Key の検出（簡易、gitleaks の補助）
         entry: bash -c 'grep -rE "AKIA[0-9A-Z]{16}" "$@" && exit 1 || exit 0'
         language: system
         files: \.(py|md|json|yaml|yml|toml|env|tf)$
-        exclude: ^\.pre-commit-config\.yaml$
-      - id: no-slack-tokens
-        name: Slack Token の検出
+        exclude: ^(\.pre-commit-config\.yaml|\.gitleaks\.toml)$
+      - id: no-slack-tokens-fallback
+        name: Slack Token の検出（簡易、gitleaks の補助）
         entry: bash -c 'grep -rE "xoxb-[0-9]+-[0-9]+-[a-zA-Z0-9]+" "$@" && exit 1 || exit 0'
         language: system
         files: \.(py|md|json|yaml|yml|toml|env|tf)$
-        exclude: ^\.pre-commit-config\.yaml$
+        exclude: ^(\.pre-commit-config\.yaml|\.gitleaks\.toml|docs/.*)$

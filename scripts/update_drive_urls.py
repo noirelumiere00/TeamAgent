@@ -52,9 +52,7 @@ def main() -> int:
     try:
         with conn.cursor() as cur:
             for table in TABLES:
-                cur.execute(
-                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS drive_url TEXT;"
-                )
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS drive_url TEXT;")
                 print(f"✅ {table}.drive_url 列を確認")
 
             updated_total = 0
@@ -64,9 +62,7 @@ def main() -> int:
                         f"UPDATE {table} SET drive_url = %s WHERE file_name = %s;",
                         (url, file_name),
                     )
-                    print(
-                        f"  {table}: {file_name} → updated rows={cur.rowcount}"
-                    )
+                    print(f"  {table}: {file_name} → updated rows={cur.rowcount}")
                     updated_total += cur.rowcount
         conn.commit()
         print(f"\n🎉 完了：合計 {updated_total} 行を更新")

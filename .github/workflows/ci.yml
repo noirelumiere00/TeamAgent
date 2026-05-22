@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同じブランチで複数 push されたら古いランをキャンセル
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: lint + mypy + pytest
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: "pyproject.toml"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 重い依存は CI では skip して、テスト/lint に必要なものだけ
+          pip install --no-deps -e .
+          pip install \
+            pydantic structlog psycopg pgvector \
+            boto3 slack-sdk slack-bolt aiohttp \
+            pytest pytest-asyncio mypy ruff bandit
+
+      - name: Ruff (lint)
+        run: ruff check src/ tests/ scripts/
+
+      - name: Ruff (format check)
+        run: ruff format --check src/ tests/ scripts/
+
+      - name: Mypy (strict)
+        run: mypy src/teamagent
+
+      - name: Pytest
+        run: pytest tests/ -q
+
+      - name: Bandit (security scan)
+        run: bandit -r src/teamagent -ll  # low+ severity 以上
+
+  gitleaks:
+    name: gitleaks (secrets scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 本番デプロイ前提のテスト（main マージ後のみ）
+  smoke-test:
+    name: smoke test (post-merge)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint-and-test, gitleaks]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 報告
+        run: |
+          echo "✅ main マージ後の smoke test 枠"
+          echo "Sprint 6 で本番 EC2 にデプロイするときに有効化"
