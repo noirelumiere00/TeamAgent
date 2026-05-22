@@ -172,6 +172,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             messages=[{"role": "user", "content": [{"text": user_message}]}],
             request_id=request_id,
             system=system,
+            cache_system=True,  # 同じ system prompt を頻繁に呼ぶのでキャッシュで input cost 1/10
         )
         return resp.text, resp.usage.cost_usd
 
