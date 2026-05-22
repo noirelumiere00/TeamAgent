@@ -153,7 +153,29 @@ TeamAgent/
 ✅ **Sprint 1 P0「AWS Bedrock 接続」完了**
 ✅ **Sprint 1 P0「Terraform apply」完了**
 ✅ **Sprint 1 P1「Slack コネクタ着手」echo Bot まで完成**
-⏳ **Sprint 2-3 で OpenClaw + 検索 Skill 本実装に進む**
+
+### Day 2 夕方 — End-to-End 疎通成功（2026/5/22 15:05）
+✅ **Anthropic Use Case フォーム承認**：us-east-1 で Claude Sonnet 4.6 / Haiku 4.5 利用可能
+✅ **LocalE5Embedder 実装**：multilingual-e5-large（1024次元、ローカル sentence-transformers）
+✅ **PgVectorClient 柔軟化**：content_col / metadata_col / extra_cols を引数化、本番 RDS でも proposals_chunks でも対応
+✅ **SkillDispatcher 実装**：runtime/slack_bot.py の mention → SearchSkill.run() → Bedrock 要約
+✅ **Slack 実機 E2E 疎通成功**（3 連投すべて成功）：
+  - クエリ「飲食業の提案実績を教えて」「PR代行の業界別実績は？」「競合動画の分析事例は？」
+  - 1 クエリあたり **コスト約 $0.01-0.02 / レイテンシ 7-11 秒**
+  - top similarity score 0.80〜0.84
+✅ **テスト 24 件 all PASS、mypy --strict 16 source files クリア**
+
+### ⚠️ OpenClaw 採用ステータス変更（2026/5/22）
+🟡 **「フル採用」→「再評価中」に変更**
+詳細は [docs/v3.1/teamagent_design_corrections_2026-05-22.md](docs/v3.1/teamagent_design_corrections_2026-05-22.md) 参照
+
+理由（v3.1 ドキュメントの記述ズレ）：
+1. **Agent SDK 互換は誤認** — OpenClaw 公式が `claude-agent-sdk` 採用を [Issue #10149](https://github.com/openclaw/openclaw/issues/10149) で却下
+2. **TypeScript/Node.js 製** — TeamAgent (Python) との言語境界課題
+3. **ClawHub にサプライチェーン事例** — ClawHavoc インシデント（341 件悪意 Skill、9,000+ 被害）
+
+→ 現在の `boto3 + slack-bolt + 自前 Skill Registry + claude-agent-sdk` 構成は**そのまま継続可能**。
+→ OpenClaw 採否の最終判断は **Sprint 2 末ゲート①（2026-06-07）** で確定する。
 
 ### ⚠️ 次回開発時の TODO（セキュリティ）
 - [ ] **Slack Bot Token / App Token をローテーション**（チャットに露出済み）
