@@ -122,7 +122,31 @@ class SkillDispatcher:
 
     def __init__(self, router: SkillRouter | None = None) -> None:
         self._skill_cache: dict[str, Any] = {}
-        self._router = router or SkillRouter()
+        if router is not None:
+            self._router = router
+        else:
+            # USE_LLM_ROUTER=true で Haiku 4.5 ベースの自然文判定を有効化
+            use_llm_router = os.environ.get("USE_LLM_ROUTER", "false").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            if use_llm_router:
+                from teamagent.adapters.bedrock_client import BedrockClient
+
+                haiku_model_id = os.environ.get(
+                    "BEDROCK_HAIKU_MODEL_ID",
+                    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                )
+                haiku = BedrockClient(
+                    region=os.environ.get("AWS_REGION", "us-east-1"),
+                    model_id=haiku_model_id,
+                )
+                self._router = SkillRouter(bedrock=haiku)
+                logger.info("router_initialized", llm_fallback=True)
+            else:
+                self._router = SkillRouter()
+                logger.info("router_initialized", llm_fallback=False)
 
     def get_search_skill(self) -> Any:
         """SearchSkill インスタンスをキャッシュして返す（embedder ロードが重い）。
@@ -158,7 +182,7 @@ class SkillDispatcher:
         SkillRouter で クエリを判定し、industry キーワードが含まれていれば
         SearchInput.filter_industry に自動付与する。
         """
-        decision = self._router.route(query)
+        decision = self._router.route(query, request_id=request_id)
         logger.info(
             "skill_router_decision",
             request_id=request_id,
