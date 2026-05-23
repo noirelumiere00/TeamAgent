@@ -6,7 +6,10 @@ Bolt App 自体の起動テストはネットワーク必須なので含めな�
 
 from __future__ import annotations
 
+from typing import Any
+
 from teamagent.runtime.slack_bot import (
+    _asyncio_exception_handler,
     build_search_blocks,
     format_search_response,
     strip_mention,
@@ -210,3 +213,29 @@ def test_build_blocks_uses_file_name_page() -> None:
         if b.get("type") == "section" and isinstance(b.get("text"), dict)
     ]
     assert any("📄 *b.pdf*" in t and "(p.3)" in t for t in section_texts)
+
+
+# -----------------------------------------------------------
+# asyncio exception handler — Sentry no-op 経路
+# -----------------------------------------------------------
+def test_asyncio_exception_handler_no_init_no_raise() -> None:
+    """Sentry 未 init 状態でも _asyncio_exception_handler が例外を投げない。
+
+    context.exception が BaseException でも None でも安全であることを確認。
+    """
+
+    class _DummyLoop:
+        """asyncio loop の最低限スタブ（context.message ログにしか触らない）。"""
+
+    loop: Any = _DummyLoop()
+
+    # 1) exception を伴うケース
+    _asyncio_exception_handler(
+        loop, {"message": "task fail", "exception": RuntimeError("fake-token-leak-test")}
+    )
+
+    # 2) exception 無しのケース（message だけ）
+    _asyncio_exception_handler(loop, {"message": "no exc"})
+
+    # 3) 空 context
+    _asyncio_exception_handler(loop, {})

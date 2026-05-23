@@ -65,6 +65,32 @@ SearchSkill / BedrockClient は CLAUDE.md 6-bis に従ってこれを満たす�
 2. **Lambda + slack_sdk**: SNS → Lambda → `chat.postMessage`
    - 既存の `SlackClient` を流用可能
 
+### 1.5 Sentry 連携（Day 3 追加）
+
+`src/teamagent/observability/sentry.py` で Sentry SDK を統合済。
+
+**運用フロー**:
+1. Sentry プロジェクト作成（Project 名: `teamagent-dev` / Platform: Python）
+2. DSN を Secrets Manager に保管:
+   ```bash
+   aws secretsmanager create-secret \
+       --name teamagent/dev/sentry_dsn \
+       --secret-string 'https://xxx@yyy.ingest.sentry.io/zzz' \
+       --region ap-northeast-1
+   ```
+3. Bot 起動時に `SENTRY_DSN` を環境変数に展開（`scripts/load_secrets.sh` が自動取得）
+4. Bot 起動ログに `slack_bot_start sentry_enabled=true` が出れば成功
+
+**設計のポイント**:
+- DSN 未設定なら `init_sentry()` は no-op で False を返す（dev / テスト安全）
+- `before_send` で xoxb- / sk-ant- / AKIA* / メール / 電話 / 2000 文字超を再帰スクラブ
+- `LoggingIntegration(event_level=None)` で例外二重送信を防止
+- `AsyncioIntegration()` は async 文脈内で init（Socket Mode loop 取りこぼし対策）
+- `@app.error` + `loop.set_exception_handler` で Bolt 内外の例外を二重キャッチ
+- `traces_sample_rate=0.05` / `profiles_sample_rate=0.0`（Sentry 無料枠想定）
+
+**ローテーション**: DSN は Sprint 14 の Secrets ローテーション Lambda の対象に含める。
+
 ---
 
 ## 2. セキュリティ基盤（security.tf）

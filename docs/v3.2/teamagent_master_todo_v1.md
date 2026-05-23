@@ -138,8 +138,8 @@
 | ✅ | CloudWatch Logs Insights 用クエリ集を docs/v3.2/ops/ に保存（PR #28） | 🤖 | 20分 |
 | ✅ | CloudWatch メトリクスフィルタ（cost_usd / latency_ms / error_count）（Day 3: `cloudwatch.tf`） | 🤖 | 30分 |
 | ✅ | CloudWatch アラーム（日次コスト > $5、p95 latency > 15s、5xx 連続 3 件）（Day 3: `cloudwatch.tf`） | 🤖 | 30分 |
-| 🔴 | Sentry プロジェクト作成 + DSN を Secrets Manager に保管 | 👤+🤖 | 20分 |
-| 🔴 | runtime/slack_bot.py に Sentry SDK 組込（PII scrubber 有効化） | 🤖 | 30分 |
+| 🔴 | Sentry プロジェクト作成 + DSN を Secrets Manager に保管（Bot 側受け入れ実装は Day 3 完了、👤 はプロジェクト作成 + DSN 投入のみ） | 👤 | 20分 |
+| ✅ | runtime/slack_bot.py に Sentry SDK 組込（PII scrubber 有効化）（Day 3: `observability/sentry.py` + `@app.error` + `loop.set_exception_handler`） | 🤖 | 30分 |
 | 🔴 | AWS Budgets に Slack 通知（Chatbot 経由）追加（SNS Topic は Day 3 で作成済、Chatbot 連携待ち） | 🤖 | 30分 |
 | ✅ | GitHub Actions CI：pytest + mypy + ruff + bandit 整備（PR #24） | 🤖 | 60分 |
 
@@ -411,6 +411,7 @@
 | 2026-05-22 夜 | v1.1 | PR #15〜#28 マージ後の追記。Sprint 1 残タスクから完了分を削除。 |
 | 2026-05-22 深夜 | v1.2 | Slack xoxb- ローテ TODO を削除（外部漏洩リスクなしと判断、Sprint 14 の定期サイクルで実施）。Drive URL 手動取得タスクも Sprint 3 自動連携に統合。 |
 | 2026-05-23 | v1.3 | Day 3 着手分を反映。2.3（.env.production 雛形 + load_secrets.sh）/ 2.6（CloudWatch メトリクスフィルタ + アラーム）/ 2.7（CloudTrail + IAM Access Analyzer + Bedrock invocation logging + RDS force_ssl + PII スキャン）/ 2.8（引用フォーマット強化）を完了。Terraform 8 リソース追加、テスト 40 → 43、運用ドキュメント 1 本追加。 |
+| 2026-05-23 夕方 | v1.4 | Sentry SDK 組込完了。`src/teamagent/observability/sentry.py`（DSN 空で no-op / before_send で xoxb-/sk-ant-/AKIA/メール/長文を再帰スクラブ / request_id を tag 昇格）+ `@app.error` ハンドラ + `loop.set_exception_handler` で Bolt AsyncApp の例外を二重キャッチ。Sentry Python SDK 2.60.0 採用、テスト 43 → 69（observability 25 件 + slack_bot 1 件追加）。残るは👤による Sentry プロジェクト作成 + DSN 投入のみ。 |
 
 ---
 
