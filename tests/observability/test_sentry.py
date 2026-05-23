@@ -265,9 +265,7 @@ def test_init_with_dummy_dsn_actually_initializes(monkeypatch: pytest.MonkeyPatc
     import sentry_sdk
 
     # before_send を「常に None を返す」に差し替えて Sentry サーバへの送信を完全ブロック
-    monkeypatch.setattr(
-        "teamagent.observability.sentry.before_send", lambda event, hint: None
-    )
+    monkeypatch.setattr("teamagent.observability.sentry.before_send", lambda event, hint: None)
     monkeypatch.setenv("SENTRY_DSN", _FAKE_SENTRY_DSN)
     monkeypatch.setenv("APP_ENV", "test")
 
