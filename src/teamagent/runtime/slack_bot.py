@@ -46,18 +46,38 @@ def strip_mention(text: str) -> str:
     return _MENTION_PATTERN.sub("", text, count=1).strip()
 
 
+def _format_hit_source_label(hit: Any) -> str:
+    """SearchHitOut から「出典 + ページ」の表示ラベルを組み立てる。
+
+    優先順位：
+      1. file_name + page_num（構造化、Sprint 2 で追加）
+      2. source 文字列（後方互換）
+      3. chunk #N（最終フォールバック）
+    """
+    file_name = getattr(hit, "file_name", None)
+    page_num = getattr(hit, "page_num", None)
+    if file_name:
+        if page_num is not None:
+            return f"📄 *{file_name}* (p.{page_num})"
+        return f"📄 *{file_name}*"
+    if hit.source:
+        return f"📄 {hit.source}"
+    return f"chunk #{hit.chunk_id}"
+
+
 def format_search_response(output: SearchOutput) -> str:
     """SearchOutput を Slack に表示する文字列（フォールバック / 通知用）に整形する。
 
     Block Kit を使う場合も text フィールドにこれを入れて、通知やインデックス用に保持する。
+    引用フォーマット：📄 file_name (p.N) — score=0.91 → Drive で開く
     """
     lines = [output.answer, ""]
     if output.hits:
         lines.append("*参考資料:*")
         for hit in output.hits[:5]:
-            source = hit.source or f"chunk #{hit.chunk_id}"
+            label = _format_hit_source_label(hit)
             link = f" → <{hit.drive_url}|Drive で開く>" if hit.drive_url else ""
-            lines.append(f"• {source}  (score={hit.score:.2f}){link}")
+            lines.append(f"• {label}  _score={hit.score:.2f}_{link}")
     lines.append("")
     lines.append(f"_推算コスト: ${output.total_cost_usd:.4f}_")
     return "\n".join(lines)
@@ -84,8 +104,9 @@ def build_search_blocks(output: SearchOutput) -> list[dict[str, Any]]:
             }
         )
         for hit in output.hits[:5]:
-            source = hit.source or f"chunk #{hit.chunk_id}"
-            line = f"• {source}  _(score={hit.score:.2f})_"
+            label = _format_hit_source_label(hit)
+            # 出典 + score を1行で見やすく（score は item context として末尾に）
+            line = f"• {label}  _score={hit.score:.2f}_"
             section: dict[str, Any] = {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": line},

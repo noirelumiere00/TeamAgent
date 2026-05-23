@@ -68,7 +68,7 @@ data "aws_iam_policy_document" "lambda_app" {
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
     ]
-    resources = ["*"]  # 実運用ではモデル ARN を限定
+    resources = ["*"] # 実運用ではモデル ARN を限定
   }
 
   statement {

@@ -105,9 +105,9 @@
 
 | | タスク | 担当 | 工数 |
 |---|---|---|---|
-| 🔴 | .env.production 雛形作成 + Secrets Manager 化 | 🤖 | 20分 |
+| ✅ | .env.production 雛形作成 + Secrets Manager 化（Day 3: `.env.production.template` + `scripts/load_secrets.sh`） | 🤖 | 20分 |
 | 🔴 | Bot を本番 RDS 接続に切り替え（DATABASE_URL 差し替え）+ E2E 再疎通 | 🤖+👤 | 30分 |
-| 🔴 | Bedrock invocation logging を S3 + KMS で有効化 | 🤖 | 20分 |
+| ✅ | Bedrock invocation logging を S3 + KMS で有効化（Day 3: `security.tf`、apply 待ち） | 🤖 | 20分 |
 
 ### 2.4 OpenClaw PoC + Go/No-Go ゲート①
 
@@ -135,34 +135,34 @@
 
 | | タスク | 担当 | 工数 |
 |---|---|---|---|
-| 🔴 | CloudWatch Logs Insights 用クエリ集を docs/v3.2/ops/ に保存 | 🤖 | 20分 |
-| 🔴 | CloudWatch メトリクスフィルタ（cost_usd / latency_ms / error_count） | 🤖 | 30分 |
-| 🔴 | CloudWatch アラーム（日次コスト > $5、p95 latency > 15s、5xx 連続 3 件） | 🤖 | 30分 |
+| ✅ | CloudWatch Logs Insights 用クエリ集を docs/v3.2/ops/ に保存（PR #28） | 🤖 | 20分 |
+| ✅ | CloudWatch メトリクスフィルタ（cost_usd / latency_ms / error_count）（Day 3: `cloudwatch.tf`） | 🤖 | 30分 |
+| ✅ | CloudWatch アラーム（日次コスト > $5、p95 latency > 15s、5xx 連続 3 件）（Day 3: `cloudwatch.tf`） | 🤖 | 30分 |
 | 🔴 | Sentry プロジェクト作成 + DSN を Secrets Manager に保管 | 👤+🤖 | 20分 |
 | 🔴 | runtime/slack_bot.py に Sentry SDK 組込（PII scrubber 有効化） | 🤖 | 30分 |
-| 🔴 | AWS Budgets に Slack 通知（Chatbot 経由）追加 | 🤖 | 30分 |
-| 🔴 | GitHub Actions CI：pytest + mypy + ruff + bandit 整備 | 🤖 | 60分 |
+| 🔴 | AWS Budgets に Slack 通知（Chatbot 経由）追加（SNS Topic は Day 3 で作成済、Chatbot 連携待ち） | 🤖 | 30分 |
+| ✅ | GitHub Actions CI：pytest + mypy + ruff + bandit 整備（PR #24） | 🤖 | 60分 |
 
 ### 2.7 セキュリティ
 
 | | タスク | 担当 | 工数 |
 |---|---|---|---|
-| 🔴 | Secrets Manager 全 secret に rotation policy（90日） | 🤖 | 20分 |
-| 🔴 | RDS 強制 SSL + IAM auth on 確認 | 🤖 | 15分 |
-| 🔴 | S3 raw bucket Public Access Block + KMS 暗号化確認 | 🤖 | 15分 |
-| 🔴 | IAM Access Analyzer 有効化 + 過剰権限スキャン | 🤖 | 20分 |
-| 🔴 | CloudTrail multi-region + log file validation 有効化 | 🤖 | 15分 |
-| 🔴 | ログから PII 漏洩スキャン（grep で顧客名・PDF 全文検出） | 🤖 | 30分 |
-| 🔴 | pre-commit hook：gitleaks 追加 | 🤖 | 30分 |
+| ✅ | Secrets Manager rotation marker secret + 期日タグ（Day 3: `security.tf`、自動化 Lambda は Sprint 14） | 🤖 | 20分 |
+| ✅ | RDS 強制 SSL + IAM auth on 確認（Day 3: `rds.tf` parameter group に `rds.force_ssl=1` + `iam_database_authentication_enabled=true`） | 🤖 | 15分 |
+| ✅ | S3 raw bucket Public Access Block + 暗号化確認（既存 `lambda_iam.tf` で AES256 + PAB 済、CloudTrail/Bedrock logs は KMS） | 🤖 | 15分 |
+| ✅ | IAM Access Analyzer 有効化（Day 3: `security.tf` `aws_accessanalyzer_analyzer.account`） | 🤖 | 20分 |
+| ✅ | CloudTrail multi-region + log file validation 有効化（Day 3: `security.tf` `aws_cloudtrail.main`） | 🤖 | 15分 |
+| ✅ | ログから PII 漏洩スキャン（Day 3: `scripts/pii_log_scan.py`、xoxb-/sk-ant-/AKIA/メール/長文/顧客名検出） | 🤖 | 30分 |
+| ✅ | pre-commit hook：gitleaks 追加（PR #24） | 🤖 | 30分 |
 
 ### 2.8 機能改善（並行）
 
 | | タスク | 担当 | 工数 |
 |---|---|---|---|
-| 🔴 | Query Router を Haiku ベース判定に置き換え（現状は rule-based） | 🤖 | 90分 |
+| ✅ | Query Router を Haiku ベース判定に置き換え（PR #27 / USE_LLM_ROUTER） | 🤖 | 90分 |
 | 🔴 | filter_industry を Slack スラッシュコマンドで受け取る | 🤖 | 30分 |
-| 🔴 | 引用フォーマット強化（出典 + ページ + 類似度） | 🤖 | 30分 |
-| 🔴 | prompt caching を system prompt に適用（cache_read_tokens ログ確認） | 🤖 | 45分 |
+| ✅ | 引用フォーマット強化（出典 + ページ + 類似度）（Day 3: `SearchHitOut` + Block Kit `📄 *file* (p.N)`） | 🤖 | 30分 |
+| ✅ | prompt caching を system prompt に適用（PR #26） | 🤖 | 45分 |
 
 ### 2.9 営業ベータ準備（Sprint 2 末）
 
@@ -410,6 +410,7 @@
 | 2026-05-22 | v1.0 | 初版（Day 2 完了時点で 3 Agent 並列調査の結果を統合） |
 | 2026-05-22 夜 | v1.1 | PR #15〜#28 マージ後の追記。Sprint 1 残タスクから完了分を削除。 |
 | 2026-05-22 深夜 | v1.2 | Slack xoxb- ローテ TODO を削除（外部漏洩リスクなしと判断、Sprint 14 の定期サイクルで実施）。Drive URL 手動取得タスクも Sprint 3 自動連携に統合。 |
+| 2026-05-23 | v1.3 | Day 3 着手分を反映。2.3（.env.production 雛形 + load_secrets.sh）/ 2.6（CloudWatch メトリクスフィルタ + アラーム）/ 2.7（CloudTrail + IAM Access Analyzer + Bedrock invocation logging + RDS force_ssl + PII スキャン）/ 2.8（引用フォーマット強化）を完了。Terraform 8 リソース追加、テスト 40 → 43、運用ドキュメント 1 本追加。 |
 
 ---
 
