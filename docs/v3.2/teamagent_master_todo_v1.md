@@ -636,3 +636,84 @@
 
 Day 5 から変更なし（Sonnet 4.6 / Haiku 4.5 / LocalE5 / Postgres 16 + pgvector 0.8.2）。
 **新規追加**: Google OAuth credentials を Secrets Manager 経由で配線済 (`teamagent/dev/google_oauth`)。
+
+---
+
+# 📌 v1.8 追加分（2026-05-27 = Day 7 着手予定）
+
+## Day 6 夜の追加（PR #57）
+
+- ✅ **PR #57** fix(search): industry filter を soft mode（NULL 許容）に既定変更
+  - Day 6 実稼働中に発覚: `@TeamAgent INPEX案件` → Router が industry=エネルギー 自動付与 → Slack docs (industry メタ無し) が全件除外 → ヒットゼロ
+  - 修正: Router 自動付与は soft（IS NULL も許容）、スラッシュコマンド明示は strict
+  - pytest 261 → 269 件、mypy strict 28 → 29 source files
+
+## Day 7 着手予定タスク（🤖 単独、精度改善ロードマップ）
+
+### A. 🔥 即効性大（Sprint 4 で着手予定、Day 7-8 で着手可能）
+
+| # | タスク | 想定インパクト | 工数 | 担当 | ブロッカー |
+|---|---|---|---|---|---|
+| A1 | **営業 Drive PDF 全件取り込み**（200〜500件）| ★★★★★ | 6h | 🤖+👤 | 👤 PDF 棚卸し |
+| A2 | **Slack docs に Contextual Retrieval 適用**（Anthropic 公式手法、-49% 失敗率）| ★★★★☆ | 4h | 🤖 | なし |
+| A3 | **長 Slack thread を sub-chunk 化**（現状 1 thread=1 chunk）| ★★★☆☆ | 2h | 🤖 | なし |
+| A4 | **Slack docs にメタデータ自動抽出**（industry / client / 案件名）| ★★★☆☆ | 4h | 🤖 | なし |
+
+### B. 🟡 中期的（Sprint 5-6）
+
+| # | タスク | インパクト | 工数 |
+|---|---|---|---|
+| B1 | BM25 ハイブリッド検索（キーワード + ベクトル、+35%）| ★★★☆☆ | 6h |
+| B2 | Cohere Rerank で top-50 → top-5 再ランク（+18%）| ★★★☆☆ | 4h |
+| B3 | SearchSkill に source_type filter 追加（PDF / Slack 切替）| ★★★☆☆ | 3h |
+| B4 | SkillRouter の source 自動検出（`in:slack` / `from:drive` 構文）| ★★☆☆☆ | 4h |
+
+### C. 🔵 将来的（Sprint 7+ / Sprint 4 設計書 PR #55 参照）
+
+| # | タスク | インパクト | 工数 |
+|---|---|---|---|
+| C1 | Bedrock Titan Embed v2 切替 + A/B PoC | ★★☆☆☆ | 4h |
+| C2 | `tenacity` リトライ装飾（gdrive_client）| ★★☆☆☆ | 1h |
+| C3 | `scripts/ingest_drive_bulk.py` 雛形（asyncio + state machine, migration 0005 活用）| ★★★☆☆ | 3h |
+| C4 | EventBridge → SSM RunCommand → bastion cron Terraform | ★★☆☆☆ | 2h |
+| C5 | CloudWatch EMF 出力注入（精度モニタ用）| ★★☆☆☆ | 2h |
+| C6 | Query expansion（LLM で多言い換え）| ★★☆☆☆ | 4h |
+| C7 | Recency weighting（新しい Slack 優先）| ★☆☆☆☆ | 2h |
+
+## Day 7 推奨着手順
+
+```
+1. A1 営業 Drive PDF 全件取り込み  ← 最大インパクト（営業 PDF 100+ 件追加で体感劇変）
+   ↓ user 棚卸し待ちなら並行で
+2. A2 Slack Contextual Retrieval   ← Anthropic 公式手法、-49% 失敗率
+3. A3 長 Slack thread sub-chunk     ← 検索粒度改善
+4. A4 メタデータ自動抽出            ← industry strict filter が活きるようにする
+5. B3 source_type filter            ← PDF / Slack 切替で営業の業務フロー対応
+```
+
+## Day 6 → Day 7 引き継ぎ事項
+
+| カテゴリ | 状態 | アクション |
+|---|---|---|
+| Bot 稼働状態 | ✅ Slack で `@TeamAgent ナレッジ共有...` 等で Slack 197 docs hit 確認済 | — |
+| RLS 検証 | ✅ s-komata@vectorinc.co.jp で ACL 通過確認 | — |
+| 旧 PDF 98 chunks | ✅ proposals_chunks_contextual に保管、新スキーマからは見えない | Sprint 4 で documents/chunks に migrate 検討 |
+| 検索精度（体感）| 🟡 「期待ほど精度高くない」フィードバック | A1〜A4 で改善着手 |
+| Slack permalink ボタン | ⏸ 未確認（user に UI 確認依頼中）| Day 7 朝に UI 確認 |
+| `/teamagent_search` slash command | ⏸ Slack App 設定 + Reinstall 未実施 | user 作業（5 分） |
+| migration 0004 + 0005 | ✅ 本番 RDS 適用済 | — |
+
+## 数値の更新 (Day 6 末 + PR #57)
+
+| 指標 | v1.6 (Day 5) | v1.7 (Day 6 朝)| v1.8 (Day 6 末) |
+|---|---|---|---|
+| マージ済 PR | #1〜#47 | + #48-#56 | **+ #57** |
+| pytest | 169 | 184 | **269** |
+| mypy strict source files | 28 | 29 | **29** |
+| migration | 0001-0003 | + 0004 | + 0005 |
+| 本番 RDS 動作確認 | Slack ingest 投入 | OAuth 配線 | **Slack 検索動作確認 + industry soft filter** |
+| OPEN PR | 0 | 9 (merge 待ち)| **0 (全 merge 済)** |
+
+| 日付 | バージョン | 更新内容 |
+|---|---|---|
+| 2026-05-26 夜 | v1.8 | PR #57 industry soft filter 即修正 + Day 7 着手予定タスクを A/B/C で整理。精度改善ロードマップ追加。Slack 動作確認済 (mention → Slack 197 docs hit、ただし industry strict filter 問題発覚 → soft filter で解決)。 |
