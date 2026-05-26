@@ -352,6 +352,9 @@ class SkillDispatcher:
 
         # 明示指定が最優先、無ければ router の自動検出
         filter_industry = filter_industry_override or decision.extracted_filter.get("industry")
+        # strict_industry: スラッシュコマンドで明示指定された場合のみ True。
+        # Router 自動付与は soft (industry IS NULL も許容) で Slack docs を巻き込み除外しない。
+        strict_industry = filter_industry_override is not None
         # 注：meta / compare は今は通常検索で代用（Sprint 2 で本格実装）
         # query_type=COMPARE/META はログ出すだけで content と同じ動作にする
 
@@ -376,6 +379,7 @@ class SkillDispatcher:
             query=query,
             top_k=top_k_safe,
             filter_industry=filter_industry,
+            strict_industry=strict_industry,
         )
         loop = asyncio.get_running_loop()
         output: SearchOutput = await loop.run_in_executor(

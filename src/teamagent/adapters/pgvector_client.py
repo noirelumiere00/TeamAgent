@@ -204,6 +204,8 @@ class PgVectorClient:
         limit: int = 5,
         filter_industry: str | None = None,
         request_id: str | None = None,
+        *,
+        strict_industry: bool = False,
     ) -> list[SearchHit]:
         """documents + chunks JOIN で cosine 類似度上位 limit 件を返す。
 
@@ -213,13 +215,27 @@ class PgVectorClient:
         contextualized 列があれば優先して返す（Contextual Retrieval との互換性維持）。
         chunk_id は UUID から hashtext で安定した整数に変換する（int 型の後方互換性維持）。
         source_uri / source_type / title / channel_name は metadata に詰めて返す。
+
+        filter_industry のセマンティクス:
+        - strict_industry=False（既定）: soft filter。industry=指定値 OR industry IS NULL を許容。
+          Router の自動付与で Slack docs (industry メタ無し) が全件除外されるのを防ぐ。
+        - strict_industry=True: 厳密一致。明示的に user が「飲食だけ」と指定したい場合用。
         """
         where_parts: list[str] = []
         params: list[Any] = [embedding]  # score 算出の 1st %s
 
         if filter_industry is not None:
-            where_parts.append("d.metadata->>'industry' = %s")
-            params.append(filter_industry)
+            if strict_industry:
+                # 厳密: industry=指定値 のみ
+                where_parts.append("d.metadata->>'industry' = %s")
+                params.append(filter_industry)
+            else:
+                # soft: industry=指定値 OR NULL (industry メタを持たない docs も含める)
+                # Slack docs などは industry メタが無いので、auto-filter で全件除外を防ぐ
+                where_parts.append(
+                    "(d.metadata->>'industry' = %s OR d.metadata->>'industry' IS NULL)"
+                )
+                params.append(filter_industry)
 
         where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
