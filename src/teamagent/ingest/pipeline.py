@@ -71,6 +71,50 @@ class _EmbedderProto(Protocol):
 # -----------------------------------------------------------
 # 個別 source 取り込み handler（adapter は遅延 import）
 # -----------------------------------------------------------
+def _collect_all_member_ids(
+    client: Any,  # SlackChannelIngestClient だが循環 import 回避で Any
+    channel_id: str,
+    request_id: str,
+    *,
+    max_pages: int = 20,
+) -> list[str]:
+    """conversations.members を全 page 集めて user_id list を返す。"""
+    all_ids: list[str] = []
+    cursor: str | None = None
+    for _ in range(max_pages):
+        ids, cursor = client.list_channel_members(
+            channel_id=channel_id, request_id=request_id, cursor=cursor
+        )
+        all_ids.extend(ids)
+        if not cursor:
+            break
+    return all_ids
+
+
+# プロセス内 users.info キャッシュ（同 user の複数 channel 出現に効く）
+_USER_EMAIL_CACHE: dict[str, str | None] = {}
+
+
+def _resolve_member_emails(
+    client: Any,
+    user_ids: list[str],
+    request_id: str,
+) -> list[str]:
+    """user_ids を email にバルク解決（キャッシュあり、Bot/deleted は除外）。"""
+    # キャッシュにない id だけ users.info を叩く
+    uncached = [uid for uid in user_ids if uid not in _USER_EMAIL_CACHE]
+    if uncached:
+        members = client.get_user_emails(uncached, request_id=request_id)
+        for m in members:
+            if m.is_bot or m.deleted:
+                _USER_EMAIL_CACHE[m.user_id] = None
+            else:
+                _USER_EMAIL_CACHE[m.user_id] = m.email
+    # 解決済 email だけ取り出して dedup
+    emails = {_USER_EMAIL_CACHE.get(uid) for uid in user_ids}
+    return sorted(e for e in emails if e)
+
+
 def _ingest_slack_channel(
     spec: SlackChannelSpec,
     *,
@@ -84,10 +128,14 @@ def _ingest_slack_channel(
 
     各 thread を 1 document、その本文を 1 chunk として保存する最小実装。
     複数 chunk への分割は Sprint 4 で（PDF 添付の本文取り込み等）。
+
+    ACL 設計（2026-05-27 更新）:
+    「Slack channel に居る人 = そのナレッジを見ていい人」原則。
+    channel メンバー全員を一度 users.info で email 解決して acl_emails に投入する。
+    yaml の extra_acl_emails があれば union（追加で見せたい人を足せる）。
     """
     from teamagent.adapters.slack_channel_ingest_client import (
         SlackChannelIngestClient,
-        collect_thread_participants,
         format_thread_as_document,
     )
 
@@ -95,7 +143,38 @@ def _ingest_slack_channel(
     docs_n = 0
     chunks_n = 0
 
-    # 1 ページのみ（増分取り込みは Sprint 4 で cursor / oldest 永続化）
+    # 1) channel メンバー全員を email 解決（ACL ベースライン）
+    member_ids = _collect_all_member_ids(client, spec.channel_id, request_id)
+    member_emails = _resolve_member_emails(client, member_ids, request_id)
+    # yaml の extra_acl_emails を union
+    channel_acl_emails = sorted(set(member_emails) | set(spec.extra_acl_emails))
+    logger.info(
+        "ingest_slack_channel_acl_resolved",
+        request_id=request_id,
+        channel_id=spec.channel_id,
+        members=len(member_ids),
+        resolved_emails=len(member_emails),
+        total_acl=len(channel_acl_emails),
+    )
+
+    # ACL fail-safe: email 解決ゼロかつ extra_acl_emails も無い → channel ごと skip
+    # （Slack OAuth に users:read.email が未付与 / Bot が channel に居ない等を想定）
+    if not channel_acl_emails:
+        logger.warning(
+            "ingest_slack_channel_skipped_no_acl",
+            request_id=request_id,
+            channel_id=spec.channel_id,
+            channel_name=spec.channel_name,
+            hint=(
+                "channel メンバーの email 解決ゼロかつ yaml の extra_acl_emails も空。"
+                "Slack App に users:read.email スコープを追加するか、"
+                "yaml の extra_acl_emails で明示的に許可ユーザーを指定してください。"
+                "fail-safe で本チャネルの取り込みを skip します。"
+            ),
+        )
+        return 0, 0
+
+    # 2) 1 ページのみ取得（増分取り込みは Sprint 4 で cursor / oldest 永続化）
     batch = client.list_channel_history(
         channel_id=spec.channel_id,
         request_id=request_id,
@@ -118,11 +197,8 @@ def _ingest_slack_channel(
         text = format_thread_as_document(parent, replies)
         if not text.strip():
             continue
-        participant_ids = collect_thread_participants(parent, replies)
-        # email 解決は Sprint 4 で users.info キャッシュ経由（ここでは empty）
-        # → acl_emails が空 = RLS 経由で fail-safe（誰も見えない）
-        # 暫定: extra_acl_emails があれば使用、なければ owner だけ
-        acl_emails = list(spec.extra_acl_emails) or [owner_email]
+        # ACL: channel メンバー全員（resolved） + yaml extra（少なくとも owner は確実に入る）
+        acl_emails = channel_acl_emails or [owner_email]
 
         external_id = f"{spec.channel_id}:{parent.thread_ts or parent.ts}"
         doc = DocumentUpsert(
@@ -135,7 +211,7 @@ def _ingest_slack_channel(
             metadata={
                 **spec.extra_metadata,
                 "channel_name": spec.channel_name,
-                "participant_count": len(participant_ids),
+                "channel_member_count": len(channel_acl_emails),
             },
             modified_at=None,
         )
