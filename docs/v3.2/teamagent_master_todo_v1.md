@@ -277,6 +277,7 @@
 
 | # | タスク | 担当 | 工数 |
 |---|---|---|---|
+| 8.0 | ✅ Gmail adapter deny 実装済 (PR #49) — `gmail.modify` スコープを持ちつつ delete/trash/watch 等 18 method を物理封鎖 | 🤖 | -- |
 | 8.1 | Gmail OAuth スコープ拡張（gmail.readonly） | 👤 | 2h |
 | 8.2 | 朝 8:30 EventBridge cron + 当日メール要約 Lambda | 🤖 | 12h |
 | 8.3 | Slack DND status 確認 → スキップ分岐 | 🤖 | 4h |
