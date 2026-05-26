@@ -38,6 +38,7 @@ jobs:
             pydantic structlog psycopg pgvector \
             boto3 slack-sdk slack-bolt aiohttp \
             'sentry-sdk[asyncio]>=2.18.0' \
+            pyyaml \
             pytest pytest-asyncio mypy ruff bandit
 
       - name: Ruff (lint)
