@@ -16,7 +16,7 @@ googleapiclient.discovery.Resource の体裁だけを模した stub を注入す
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import structlog
@@ -54,7 +54,7 @@ class _FakeMethodChain:
     """
 
     # 中間段（path セグメント）として扱うキー
-    _INTERMEDIATES = {
+    _INTERMEDIATES: ClassVar[set[str]] = {
         "users",
         "messages",
         "threads",
@@ -69,7 +69,7 @@ class _FakeMethodChain:
         "keypairs",
     }
     # 末端段（execute() に到達するメソッド）として扱うキー
-    _TERMINALS = {
+    _TERMINALS: ClassVar[set[str]] = {
         "delete",
         "batchDelete",
         "trash",
@@ -92,11 +92,13 @@ class _FakeMethodChain:
 
     def __getattr__(self, name: str) -> Any:
         if name in self._INTERMEDIATES:
+
             def _intermediate(*_args: Any, **_kwargs: Any) -> _FakeMethodChain:
                 return self  # 同じ chain を返すだけ（path 自体は wrapper 側で追跡）
 
             return _intermediate
         if name in self._TERMINALS:
+
             def _terminal(*_args: Any, **_kwargs: Any) -> _FakeHttpRequest:
                 self.last_terminal = name
                 return _FakeHttpRequest(tag=name)
