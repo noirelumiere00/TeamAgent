@@ -137,6 +137,59 @@ def test_search_filter_industry_added_to_where(
     assert call_kwargs["content_col"] == "content"
 
 
+def test_search_passes_app_role_to_connection(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """既定で app_role='teamagent_app' が PgVectorClient.connection() に渡る（RLS bypass 防止）。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+    )
+    skill.run(input=SearchInput(query="x"), ctx=SkillContext())
+
+    conn_kwargs = fake_pgvector.connection.call_args.kwargs
+    assert conn_kwargs["app_role"] == "teamagent_app"
+
+
+def test_search_passes_user_email_from_ctx_metadata(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """ctx.metadata['user_email'] が connection() に user_email として伝播する。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+    )
+    ctx = SkillContext(
+        metadata={
+            "user_email": "alice@vectorinc.co.jp",
+            "user_groups": ["sales@vectorinc.co.jp"],
+            "user_role": "member",
+        }
+    )
+    skill.run(input=SearchInput(query="x"), ctx=ctx)
+
+    conn_kwargs = fake_pgvector.connection.call_args.kwargs
+    assert conn_kwargs["user_email"] == "alice@vectorinc.co.jp"
+    assert conn_kwargs["user_groups"] == ["sales@vectorinc.co.jp"]
+    assert conn_kwargs["user_role"] == "member"
+
+
+def test_search_app_role_can_be_disabled(fake_bedrock: MagicMock, fake_pgvector: MagicMock) -> None:
+    """app_role=None を渡すと SET ROLE しない（ローカル開発で teamagent_app 未作成時）。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+        app_role=None,
+    )
+    skill.run(input=SearchInput(query="x"), ctx=SkillContext())
+
+    conn_kwargs = fake_pgvector.connection.call_args.kwargs
+    assert conn_kwargs["app_role"] is None
+
+
 def test_search_filter_industry_ignored_without_metadata_col(
     fake_bedrock: MagicMock, fake_pgvector: MagicMock
 ) -> None:

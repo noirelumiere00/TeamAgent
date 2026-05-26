@@ -46,6 +46,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         metadata_col: str | None = None,
         extra_cols: list[str] | None = None,
         use_contextual: bool = False,
+        app_role: str | None = "teamagent_app",
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
 
@@ -55,6 +56,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         use_contextual=True を指定すると proposals_chunks_contextual テーブルを使い、
         Anthropic Contextual Retrieval（前置詞付き chunk + 再 embedding）で検索する。
         scripts/contextual_retrieval.py で事前にテーブルを作成しておく必要がある。
+
+        app_role: Postgres ロール切替（migration 0002 で導入の `teamagent_app`）。
+          - 本番では必ず `teamagent_app` を渡し、SET ROLE で RLS を効かせる
+          - ローカル開発で `teamagent_app` が未作成の環境では None を渡す（旧挙動）
+          - 既存 proposals_chunks 系は RLS 未適用テーブルだが、teamagent_app role に
+            migration 0002 で GRANT 済なので問題なくアクセス可能
         """
         self._bedrock = bedrock or BedrockClient.from_env()
         self._pgvector = pgvector or PgVectorClient.from_env()
@@ -72,6 +79,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             self._content_col = content_col
         self._metadata_col = metadata_col
         self._extra_cols = list(extra_cols or ["file_name", "page_num", "drive_url"])
+        self._app_role = app_role
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
@@ -86,8 +94,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 1. クエリを embedding 化
         embedding = self._embed(input.query)
 
-        # 2. pgvector で類似 chunk を取得
-        hits = self._retrieve(embedding, input)
+        # 2. pgvector で類似 chunk を取得（RLS 評価用 user_email を ctx から取得）
+        hits = self._retrieve(embedding, input, ctx)
 
         # 3. Bedrock で要約（chunk が 0 件のときはスキップ）
         answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
@@ -133,14 +141,35 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
         return self._embedder.embed(text)
 
-    def _retrieve(self, embedding: list[float], input: SearchInput) -> list[SearchHit]:
-        """pgvector で類似検索する。"""
+    def _retrieve(
+        self, embedding: list[float], input: SearchInput, ctx: SkillContext
+    ) -> list[SearchHit]:
+        """pgvector で類似検索する。
+
+        ctx.metadata から RLS 評価用の user_email / user_groups / user_role を取得し、
+        PgVectorClient.connection() に渡す。runtime/slack_bot.py の SkillDispatcher が
+        Slack user_id → email 解決を行ってから metadata に詰めるのが理想形。
+        現状は metadata 未設定でも動く（その場合は teamagent_app + user_email 未注入
+        = RLS で何も見えない fail-safe、ただし proposals_chunks 系は RLS 未適用なので
+        通常通り見える）。
+        """
         where: str | None = None
         if input.filter_industry and self._metadata_col is not None:
             # メタデータ JSONB のフィルタ。metadata 列を持つテーブルでのみ有効
             where = f"{self._metadata_col}->>'industry' = '{input.filter_industry}'"
 
-        with self._pgvector.connection() as conn:
+        # ctx.metadata から RLS GUC 用の値を取得（runtime 層が注入することを想定）
+        user_email = ctx.metadata.get("user_email")
+        user_groups_raw = ctx.metadata.get("user_groups")
+        user_groups = list(user_groups_raw) if isinstance(user_groups_raw, (list, tuple)) else None
+        user_role = ctx.metadata.get("user_role")
+
+        with self._pgvector.connection(
+            app_role=self._app_role,
+            user_email=user_email,
+            user_groups=user_groups,
+            user_role=user_role,
+        ) as conn:
             return self._pgvector.search_similar(
                 conn=conn,
                 embedding=embedding,
