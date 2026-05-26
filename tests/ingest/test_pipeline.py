@@ -155,14 +155,27 @@ def test_ingest_slack_channel_handler_calls_repository(
     fake_history = HistoryBatch(messages=(parent,), next_cursor=None, has_more=False)
     fake_replies = HistoryBatch(messages=(parent,), next_cursor=None, has_more=False)
 
+    from teamagent.adapters.slack_channel_ingest_client import SlackChannelMember
+
     fake_client = MagicMock()
     fake_client.list_channel_history.return_value = fake_history
     fake_client.list_thread_replies.return_value = fake_replies
+    # 新規 ACL 解決経路: list_channel_members + get_user_emails
+    fake_client.list_channel_members.return_value = (["U001", "U002"], None)
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email="taro@x.jp", display_name="Taro"),
+        SlackChannelMember(user_id="U002", email="jiro@x.jp", display_name="Jiro"),
+    ]
 
     monkeypatch.setattr(
         "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
         classmethod(lambda cls: fake_client),
     )
+
+    # 共有 cache をテスト間で汚さないようにクリア
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
 
     from teamagent.ingest.pipeline import _ingest_slack_channel
 
@@ -200,10 +213,16 @@ def test_ingest_slack_channel_dry_run_skips_repository(
     fake_client.list_channel_history.return_value = HistoryBatch(
         messages=(parent,), next_cursor=None, has_more=False
     )
+    fake_client.list_channel_members.return_value = ([], None)
+    fake_client.get_user_emails.return_value = []
     monkeypatch.setattr(
         "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
         classmethod(lambda cls: fake_client),
     )
+
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
 
     from teamagent.ingest.pipeline import _ingest_slack_channel
 
@@ -218,6 +237,146 @@ def test_ingest_slack_channel_dry_run_skips_repository(
         request_id="r",
     )
     assert len(repo.upsert_calls) == 0
+
+
+# -----------------------------------------------------------
+# ACL 解決ヘルパー（_collect_all_member_ids / _resolve_member_emails）
+# -----------------------------------------------------------
+def test_collect_all_member_ids_paginates() -> None:
+    """list_channel_members を cursor 続く限り呼んで全 ID を集める。"""
+    from teamagent.ingest.pipeline import _collect_all_member_ids
+
+    fake = MagicMock()
+    fake.list_channel_members.side_effect = [
+        (["U001", "U002"], "PAGE2"),
+        (["U003"], None),
+    ]
+    ids = _collect_all_member_ids(fake, "C0", "r")
+    assert ids == ["U001", "U002", "U003"]
+    assert fake.list_channel_members.call_count == 2
+
+
+def test_ingest_slack_channel_skips_when_no_acl_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """email 解決 0 件 + extra_acl_emails 空 → channel ごと skip (fail-safe)。"""
+    from teamagent.adapters.slack_channel_ingest_client import HistoryBatch, SlackMessage
+
+    parent = SlackMessage(ts="1700.000001", user="U1", text="x")
+    fake_client = MagicMock()
+    fake_client.list_channel_history.return_value = HistoryBatch(
+        messages=(parent,), next_cursor=None, has_more=False
+    )
+    fake_client.list_channel_members.return_value = (["U001", "U002"], None)
+    # email 全部 None → 解決ゼロ
+    from teamagent.adapters.slack_channel_ingest_client import SlackChannelMember
+
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email=None, display_name="A"),
+        SlackChannelMember(user_id="U002", email=None, display_name="B"),
+    ]
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
+        classmethod(lambda cls: fake_client),
+    )
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    from teamagent.ingest.pipeline import _ingest_slack_channel
+
+    spec = SlackChannelSpec(
+        channel_id="C0NOACL",
+        channel_name="#noacl",
+        description="",
+        extra_acl_emails=(),  # 空
+    )
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_slack_channel(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    # skip された → 0 件、repository も呼ばれない
+    assert docs_n == 0
+    assert chunks_n == 0
+    assert len(repo.upsert_calls) == 0
+    # list_channel_history が呼ばれる前に skip するので、呼ばれていてもいいし
+    # 呼ばれていなくてもいい（実装は呼ばれない想定だが厳密にしすぎないこと）
+
+
+def test_ingest_slack_channel_uses_extra_acl_when_email_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """extra_acl_emails があれば email 解決ゼロでも取り込み続行。"""
+    from teamagent.adapters.slack_channel_ingest_client import HistoryBatch, SlackMessage
+
+    parent = SlackMessage(ts="1700.000001", user="U1", text="hello world")
+    fake_client = MagicMock()
+    fake_client.list_channel_history.return_value = HistoryBatch(
+        messages=(parent,), next_cursor=None, has_more=False
+    )
+    fake_client.list_channel_members.return_value = (["U001"], None)
+    from teamagent.adapters.slack_channel_ingest_client import SlackChannelMember
+
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email=None, display_name="A"),
+    ]
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
+        classmethod(lambda cls: fake_client),
+    )
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    from teamagent.ingest.pipeline import _ingest_slack_channel
+
+    spec = SlackChannelSpec(
+        channel_id="C0EXTRA",
+        channel_name="#extra",
+        description="",
+        extra_acl_emails=("alice@x.jp",),  # 解決失敗してもこれが ACL
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_slack_channel(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    assert docs_n == 1
+    assert len(repo.upsert_calls) == 1
+
+
+def test_resolve_member_emails_caches_and_excludes_bots() -> None:
+    """get_user_emails を呼んで cache、Bot/deleted は除外。"""
+    from teamagent.adapters.slack_channel_ingest_client import SlackChannelMember
+    from teamagent.ingest import pipeline as pipeline_mod
+    from teamagent.ingest.pipeline import _resolve_member_emails
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    fake = MagicMock()
+    fake.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email="taro@x.jp", display_name="Taro"),
+        SlackChannelMember(user_id="U002", email=None, display_name="NoMail"),
+        SlackChannelMember(user_id="U003", email="bot@x.jp", display_name="Bot", is_bot=True),
+        SlackChannelMember(user_id="U004", email="old@x.jp", display_name="Old", deleted=True),
+    ]
+    emails = _resolve_member_emails(fake, ["U001", "U002", "U003", "U004"], "r")
+    # bot / deleted / email無し はすべて除外
+    assert emails == ["taro@x.jp"]
+    # 2 回目は cache hit で API 呼ばない
+    fake.get_user_emails.reset_mock()
+    emails2 = _resolve_member_emails(fake, ["U001"], "r")
+    assert emails2 == ["taro@x.jp"]
+    fake.get_user_emails.assert_not_called()
 
 
 # -----------------------------------------------------------
