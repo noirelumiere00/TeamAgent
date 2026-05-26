@@ -22,6 +22,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 MIGRATION_FILE = PROJECT_ROOT / "infra" / "migrations" / "0001_unified_documents.sql"
+MIGRATION_0004 = PROJECT_ROOT / "infra" / "migrations" / "0004_add_gsheets_source_type.sql"
 
 
 # -----------------------------------------------------------
@@ -86,6 +87,38 @@ def test_migration_has_hnsw_index() -> None:
     """chunks の HNSW index が cosine ops で作成されていること。"""
     sql = MIGRATION_FILE.read_text(encoding="utf-8")
     assert re.search(r"chunks_embedding_hnsw_idx.*USING hnsw.*vector_cosine_ops", sql, re.S)
+
+
+# -----------------------------------------------------------
+# migration 0004: gsheets ENUM 追加
+# -----------------------------------------------------------
+def test_migration_0004_file_exists() -> None:
+    """migration 0004（gsheets ENUM 追加）が存在する。"""
+    assert MIGRATION_0004.exists(), f"missing migration: {MIGRATION_0004}"
+
+
+def test_migration_0004_adds_gsheets_to_enum() -> None:
+    """ALTER TYPE で 'gsheets' を ENUM に追加している。"""
+    sql = MIGRATION_0004.read_text(encoding="utf-8")
+    assert "ALTER TYPE document_source_type ADD VALUE 'gsheets'" in sql
+
+
+def test_migration_0004_is_idempotent() -> None:
+    """既に 'gsheets' があれば skip する DO ブロック構造。"""
+    sql = MIGRATION_0004.read_text(encoding="utf-8")
+    # ENUM 存在チェック
+    assert "FROM pg_enum" in sql
+    assert "WHERE enumtypid" in sql
+    assert "enumlabel = 'gsheets'" in sql
+
+
+def test_pipeline_uses_gsheets_source_type() -> None:
+    """ingest/pipeline.py が 'gsheets' source_type を使っている（'other' fallback ではない）。"""
+    pipeline_py = PROJECT_ROOT / "src" / "teamagent" / "ingest" / "pipeline.py"
+    code = pipeline_py.read_text(encoding="utf-8")
+    assert 'source_type="gsheets"' in code, "pipeline.py が gsheets source_type を使っていない"
+    # 古い 'other' fallback コメントが残っていない
+    assert 'source_type="other"' not in code, "'other' fallback が残っています"
 
 
 def test_migration_has_acl_gin_indexes() -> None:

@@ -460,7 +460,7 @@ def _ingest_gsheet(
                 continue
             external_id = build_external_id(spec.sheet_id, tab.gid, row_idx)
             doc = DocumentUpsert(
-                source_type="other",  # gsheets を ENUM に追加するのは migration 0003 で
+                source_type="gsheets",  # migration 0004 で ENUM に追加済
                 external_id=external_id,
                 source_uri=f"https://docs.google.com/spreadsheets/d/{spec.sheet_id}/edit?gid={tab.gid}#gid={tab.gid}&range={row_idx}:{row_idx}",
                 title=f"{spec.sheet_name} - {tab.tab_name} - row {row_idx}",
