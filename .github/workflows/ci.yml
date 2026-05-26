@@ -20,7 +20,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
@@ -59,7 +59,7 @@ jobs:
     name: gitleaks (secrets scan)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Run gitleaks
@@ -74,7 +74,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [lint-and-test, gitleaks]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: 報告
         run: |
           echo "✅ main マージ後の smoke test 枠"
