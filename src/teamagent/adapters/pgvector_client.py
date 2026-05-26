@@ -60,14 +60,50 @@ class PgVectorClient:
         return cls(dsn=dsn)
 
     @contextmanager
-    def connection(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
+    def connection(
+        self,
+        *,
+        app_role: str | None = None,
+        user_email: str | None = None,
+        user_groups: list[str] | None = None,
+        user_role: str | None = None,
+    ) -> Iterator[psycopg.Connection[dict[str, Any]]]:
         """コンテキストマネージャで接続を取得する。
+
+        Sprint 3 / migration 0002 で RLS 連携を導入：
+        - `app_role` を指定すると `SET ROLE` で RLS を効かせるロール
+          （例 "teamagent_app"）に切り替わる。本番 documents/chunks 検索時は
+          必ず "teamagent_app" を渡すこと。
+          （default は None = SET ROLE しない＝旧挙動互換 + ローカル開発で
+          migration 0002 を流していなくても動く）
+        - `user_email` / `user_groups` / `user_role` を渡すと、対応する
+          `app.user_*` GUC を SET LOCAL で注入し、RLS policy 評価に使われる
+        - これらは transaction 単位で適用、commit 後は破棄
 
         終了時に必ず close する。例外時もロールバックされる。
         """
         conn = psycopg.connect(self.dsn, row_factory=dict_row)
         try:
             register_vector(conn)
+            with conn.cursor() as cur:
+                if app_role:
+                    # SET ROLE は session レベル（commit を跨いで持続）
+                    # psycopg は parameterized identifier をサポートしないので
+                    # app_role はコード内固定値のみ受け付ける
+                    if not app_role.replace("_", "").isalnum():
+                        raise ValueError(f"invalid app_role: {app_role!r}")
+                    cur.execute(f"SET ROLE {app_role}")  # nosec B608
+                # RLS policy 評価用 GUC（transaction-local）
+                # SET LOCAL は parameterize 不可なので set_config(name, value, is_local=true) を使う
+                if user_role:
+                    cur.execute("SELECT set_config('app.user_role', %s, true)", (user_role,))
+                if user_email:
+                    cur.execute("SELECT set_config('app.user_email', %s, true)", (user_email,))
+                if user_groups:
+                    cur.execute(
+                        "SELECT set_config('app.user_groups', %s, true)",
+                        (",".join(user_groups),),
+                    )
             yield conn
             conn.commit()
         except Exception:

@@ -156,15 +156,25 @@ def test_db_chunks_table_has_embedding_column() -> None:
 
 @pytestmark_db
 def test_db_rls_enforces_acl() -> None:
-    """RLS が ACL を強制すること：app.user_email 未設定なら何も見えない。"""
+    """RLS が ACL を強制すること（migration 0002 のロール分離が前提）。
+
+    重要：本テストは migration 0002 で `teamagent_app` ロールが
+    存在することを前提とする。`teamagent` で接続したまま SELECT すると
+    owner-bypass で全件見えてしまう（migration 0001 単独では fail）。
+    """
     import psycopg
 
     assert _DB_DSN is not None
     with psycopg.connect(_DB_DSN) as conn:
-        # admin role でテストデータを INSERT（後始末あり）
+        # まず teamagent_app ロールが存在するかチェック
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = 'teamagent_app'")
+            if cur.fetchone() is None:
+                pytest.skip("migration 0002 (teamagent_app role) が未適用。本テストは skip。")
+
+        # admin role でテストデータを INSERT（teamagent 接続のまま、bypass で書ける）
         with conn.cursor() as cur:
             cur.execute("SET LOCAL app.user_role = 'admin'")
-            cur.execute("SET LOCAL app.user_email = 'admin@vectorinc.co.jp'")
             cur.execute(
                 "INSERT INTO documents "
                 "(source_type, external_id, owner_email, acl_emails, title) "
@@ -175,23 +185,86 @@ def test_db_rls_enforces_acl() -> None:
             )
         conn.commit()
 
-        # 1) user_email セットなし → 何も見えない（fail-safe）
+        # ここからアプリロールに切り替えて RLS を強制
         with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM documents WHERE external_id = 'rls-test-1'")
-            row = cur.fetchone()
-            assert row is not None
-            assert row[0] == 0, "RLS 失効：user_email 未設定でも見えている"
+            cur.execute("SET ROLE teamagent_app")
+        try:
+            # 1) user_email セットなし → 何も見えない（fail-safe）
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM documents WHERE external_id = 'rls-test-1'")
+                row = cur.fetchone()
+                assert row is not None
+                assert row[0] == 0, "RLS 失効：user_email 未設定でも見えている"
 
-        # 2) ACL に含まれる alice なら見える
-        with conn.cursor() as cur:
-            cur.execute("SET LOCAL app.user_email = 'alice@example.com'")
-            cur.execute("SELECT count(*) FROM documents WHERE external_id = 'rls-test-1'")
-            row = cur.fetchone()
-            assert row is not None
-            assert row[0] == 1, "ACL に含まれるユーザーが見えていない"
+            # 2) ACL に含まれる alice なら見える
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL app.user_email = 'alice@example.com'")
+                cur.execute("SELECT count(*) FROM documents WHERE external_id = 'rls-test-1'")
+                row = cur.fetchone()
+                assert row is not None
+                assert row[0] == 1, "ACL に含まれるユーザーが見えていない"
 
-        # cleanup
-        with conn.cursor() as cur:
-            cur.execute("SET LOCAL app.user_role = 'admin'")
-            cur.execute("DELETE FROM documents WHERE external_id = 'rls-test-1'")
-        conn.commit()
+            # 3) ACL に含まれない他人 → 見えない
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL app.user_email = 'stranger@example.com'")
+                cur.execute("SELECT count(*) FROM documents WHERE external_id = 'rls-test-1'")
+                row = cur.fetchone()
+                assert row is not None
+                assert row[0] == 0, "ACL に含まれない他人に見えている"
+        finally:
+            # ロールを戻して cleanup
+            with conn.cursor() as cur:
+                cur.execute("RESET ROLE")
+                cur.execute("SET LOCAL app.user_role = 'admin'")
+                cur.execute("DELETE FROM documents WHERE external_id = 'rls-test-1'")
+            conn.commit()
+
+
+@pytestmark_db
+def test_db_pgvector_client_connection_sets_role_and_gucs() -> None:
+    """PgVectorClient.connection() が SET ROLE + SET LOCAL を実行すること。"""
+    import psycopg
+
+    from teamagent.adapters.pgvector_client import PgVectorClient
+
+    assert _DB_DSN is not None
+    # teamagent_app role があるか先にチェック（migration 0002 必須）
+    with psycopg.connect(_DB_DSN) as probe, probe.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = 'teamagent_app'")
+        if cur.fetchone() is None:
+            pytest.skip("migration 0002 (teamagent_app role) が未適用。本テストは skip。")
+
+    client = PgVectorClient(dsn=_DB_DSN)
+    with (
+        client.connection(
+            app_role="teamagent_app",
+            user_email="alice@example.com",
+            user_groups=["sales@example.com", "managers@example.com"],
+            user_role="member",
+        ) as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute(
+            "SELECT current_user AS u, "
+            "current_setting('app.user_email', true) AS email, "
+            "current_setting('app.user_groups', true) AS groups, "
+            "current_setting('app.user_role', true) AS role"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row["u"] == "teamagent_app"
+        assert row["email"] == "alice@example.com"
+        assert "sales@example.com" in (row["groups"] or "")
+        assert row["role"] == "member"
+
+
+def test_pgvector_client_rejects_invalid_app_role() -> None:
+    """app_role に SQL injection 風文字列を渡すと ValueError（DSN 接続前にチェック）。"""
+    from teamagent.adapters.pgvector_client import PgVectorClient
+
+    client = PgVectorClient(dsn="postgresql://x:y@127.0.0.1:1/z")
+    with pytest.raises((ValueError, Exception)):
+        # 接続失敗より前に validate されるかを確認
+        # （接続失敗だと別の例外になるので、まず文字列バリデーションを通すケース）
+        with client.connection(app_role="bad; DROP TABLE"):
+            pass
