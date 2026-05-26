@@ -185,20 +185,22 @@
 
 | # | タスク | 担当 | 工数 |
 |---|---|---|---|
-| S3-01 | GCP プロジェクト作成・OAuth 同意画面設定（Internal） | 👤 | 2h |
-| S3-02 | Drive OAuth クライアント申請（drive.readonly, drive.metadata） | 👤+🏢 | 3h |
-| S3-03 | Drive API 用 IT 承認取得（Workspace Admin + Domain-Wide Delegation） | 🏢 | 4h |
-| S3-04 | ベクトル社 営業 Drive フォルダ構造調査（命名規則、階層、件数） | 👤 | 3h |
-| S3-05 | adapters/gdrive_client.py 実装（list_files, download, change_token） | 🤖 | 6h |
-| S3-06 | Drive 差分監視（changes.list API + EventBridge cron 15min） | 🤖 | 5h |
-| S3-07 | ingest_pdfs.py 拡張：Drive 経由の自動取り込み統合 | 🤖 | 4h |
-| S3-08 | Drive メタデータ → pgvector に source_uri / owner / modified_at 反映 | 🤖 | 3h |
-| S3-09 | Gmail OAuth クライアント申請（gmail.readonly） | 👤+🏢 | 3h |
-| S3-10 | Gmail Domain-Wide Delegation 要否の判断 | 👤 | 2h |
-| S3-11 | adapters/gmail_client.py 実装 | 🤖 | 7h |
-| S3-12 | Gmail 取り込みパイプライン（label フィルタ → 正規化 → chunk） | 🤖 | 5h |
-| S3-13 | Slack チャネル取り込みコネクタ（conversations.history） | 🤖 | 5h |
-| S3-14 | pgvector スキーマ最終化（source_type ENUM, ACL 列） | 🤖 | 3h |
+| S3-01 | GCP プロジェクト作成・OAuth 同意画面設定（Internal） | 👤 | 2h | 🔴 |
+| S3-02 | Drive OAuth クライアント申請（**drive.file + drive.metadata.readonly = CASA 不要**、v1.5 で方針更新） | 👤+🏢 | 3h | 🔴 |
+| S3-03 | ~~Drive API 用 IT 承認取得（DWD）~~ → **個人 OAuth 推奨で DWD 不要に**（v1.5） | 🏢 | -- | 🟢 不要化 |
+| S3-04 | ベクトル社 営業 Drive フォルダ構造調査 | 👤 | 3h | 🔴 |
+| S3-05 | adapters/gdrive_client.py **雛形**（PR #36 完了、本実装は credentials 取得後） | 🤖 | 6h | ✅ 雛形 |
+| S3-06 | Drive 差分監視（changes.list、EventBridge cron は Sprint 4） | 🤖 | 5h | 🟡 interface 完了 |
+| S3-07 | ingest_pdfs.py 拡張：Drive 取り込み統合（PR-6 で実施） | 🤖 | 4h | 🔴 |
+| S3-08 | Drive メタデータ → pgvector の source_uri / owner / modified_at 反映 | 🤖 | 3h | 🟡 スキーマ準備済 |
+| S3-09 | Gmail OAuth クライアント申請（**gmail.modify 1 本で読み + 下書き、CASA 不要**、v1.5 確定） | 👤+🏢 | 3h | 🔴 |
+| S3-10 | ~~Gmail DWD 要否判断~~ → **個人 OAuth で十分**（v1.5） | 👤 | -- | 🟢 不要化 |
+| S3-11 | adapters/gmail_client.py **雛形**（PR #37 完了、隠しラベル管理含む） | 🤖 | 7h | ✅ 雛形 |
+| S3-12 | Gmail 取り込みパイプライン | 🤖 | 5h | 🔴 |
+| S3-13 | Slack チャネル取り込みコネクタ **雛形**（PR #39 完了） | 🤖 | 5h | ✅ 雛形 |
+| S3-14 | pgvector スキーマ最終化（**source_type ENUM + ACL + RLS、本番 RDS 適用済**、PR #35 + #38） | 🤖 | 3h | ✅ 完了 |
+| S3-15 | **追加：gsheets_client.py 雛形**（ユーザー貴重情報源対応、PR #40） | 🤖 | 3h | ✅ 雛形 |
+| S3-16 | **追加：data/ingest_sources.yaml + ingest dispatcher (PR-6)** | 🤖 | 4h | 🔴 次回 |
 
 ### Sprint 4（6/27 〜 7/10）検索 Skill 本番化 & 全 PDF 投入
 
@@ -412,6 +414,7 @@
 | 2026-05-22 深夜 | v1.2 | Slack xoxb- ローテ TODO を削除（外部漏洩リスクなしと判断、Sprint 14 の定期サイクルで実施）。Drive URL 手動取得タスクも Sprint 3 自動連携に統合。 |
 | 2026-05-23 | v1.3 | Day 3 着手分を反映。2.3（.env.production 雛形 + load_secrets.sh）/ 2.6（CloudWatch メトリクスフィルタ + アラーム）/ 2.7（CloudTrail + IAM Access Analyzer + Bedrock invocation logging + RDS force_ssl + PII スキャン）/ 2.8（引用フォーマット強化）を完了。Terraform 8 リソース追加、テスト 40 → 43、運用ドキュメント 1 本追加。 |
 | 2026-05-23 夕方 | v1.4 | Sentry SDK 組込完了。`src/teamagent/observability/sentry.py`（DSN 空で no-op / before_send で xoxb-/sk-ant-/AKIA/メール/長文を再帰スクラブ / request_id を tag 昇格）+ `@app.error` ハンドラ + `loop.set_exception_handler` で Bolt AsyncApp の例外を二重キャッチ。Sentry Python SDK 2.60.0 採用、テスト 43 → 69（observability 25 件 + slack_bot 1 件追加）。残るは👤による Sentry プロジェクト作成 + DSN 投入のみ。 |
+| 2026-05-26 | v1.5 | **Day 4 大進捗：1 日で 7 PR / +5,500 行**。Sentry 本番動作確認（vectorinc.sentry.io）→ 本番 RDS E2E 動作確認（INPEX クエリ実機成功、score=0.89）→ PR #34 テンプレ修正 → PR #35 統合 documents/chunks スキーマ + RLS → PR #36/#37 gdrive/gmail 雛形 → PR #38 RLS hotfix（teamagent_app role 分離、本番 RLS 13/13 検証 PASS）→ PR #39 Slack ingest + 取り込みソース宣言（ユーザー貴重情報源 2 セット） → PR #40 gsheets adapter。本番 RDS に migration 0001 + 0002 適用済。pytest 53→147、mypy strict 18→24 source files。Sprint 3 着手の足場完成。次は PR-6 (ingest dispatcher) と GCP OAuth 取得。 |
 
 ---
 

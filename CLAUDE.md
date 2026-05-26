@@ -217,10 +217,97 @@ TeamAgent/
   - CloudWatch Logs Insights で過去 N 時間を走査、xoxb-/sk-ant-/メール/長文を検出
 ✅ **運用ドキュメント**：`docs/v3.2/ops/observability_and_security.md`（apply 手順 + 検証コマンド）
 
-### ⚠️ TODO（Sprint 2 開始時に対応）
-- [ ] **data/proposal_drive_map.json の PLACEHOLDER を実 Drive URL に差し替え**（Sprint 3 の Drive API 連携で自動化されるので、それまでは保留可）
-- [x] **本番 RDS への migration**：ローカル → 東京 RDS proposals_chunks_contextual（PR #22 で完了）
-- [ ] **Drive 取り込みパイプライン（Sprint 3）**：Google Drive API + webViewLink 自動取得
+### Day 3 完了時点の累計 PR：#1〜#33（PR #33 で Day 3 完結）
+
+### Day 4（2026/5/26）— Sprint 3 着手 + 本番 RLS 検証完了
+> 1 日で 7 PR / +5,500 行 / pytest 53→147 / mypy strict 18→24 files / 本番 RDS migration 0001+0002 適用
+
+#### Sentry 動作確認 + 本番 RDS 接続 E2E（午前）
+✅ **Sentry プロジェクト作成（vectorinc.sentry.io / teamagent-dev）**：
+  - GitHub アカウントで sign up → Python SDK 選択 → DSN 取得
+  - `aws secretsmanager create-secret --name teamagent/dev/sentry_dsn` で投入
+  - Bot 起動時に `sentry_enabled=True` を本番ログで確認
+  - 3 件の OperationalError を Sentry が捕捉 → PII スクラブ完全動作（xoxb-/メールが [REDACTED] 化）
+✅ **本番 RDS への E2E 動作確認**：
+  - `.env.production.template` の `<aws_account>` プレースホルダが bash の `<>` リダイレクト解釈で消失 → 30 分デバッグ
+  - SSM port forwarding（踏み台 EC2 経由）で `localhost:15432` → RDS 接続
+  - INPEX 案件クエリで実 Slack 応答成功（要約 + 引用 5 件 + score=0.89）
+
+#### Sprint 1-2 完全クローズ + テンプレ修正（PR #34）
+✅ **chore: env テンプレ bash 安全化 + .env.local.template 分離 + tunnel docs**：
+  - プレースホルダを `__RDS_ENDPOINT__` 形式に統一（bash 安全）
+  - `.env.local.template` 新設（ローカル Mac から SSM tunnel 経由用）
+  - `scripts/load_secrets.sh` にプレースホルダ検知 + mode ログ追加
+  - `docs/v3.2/ops/local_dev_with_tunnel.md` 新設
+
+#### Sprint 3 PR-1: 統合 documents/chunks スキーマ + RLS（PR #35）
+✅ **`infra/migrations/0001_unified_documents.sql`**：
+  - source_type ENUM (`pdf|gdrive|gmail|slack|other`)
+  - documents（id, source_type, source_uri, external_id, owner_email, acl_emails, acl_groups, modified_at, metadata 等 12 列）
+  - chunks（document_id FK, embedding vector(1024) + HNSW cosine, contextualized, page_num 等）
+  - Postgres RLS policy（current_setting('app.user_email', true) で ACL 評価、`role='admin'` で bypass、groups 対応）
+  - 既存 proposals_chunks に source_type / owner_email / acl_emails / external_id 列追加（後方互換）
+  - **本番 RDS 適用済**（98 chunks データ保護維持）
+✅ **`scripts/migrate.py`** — forward-only runner、SHA-256 改竄検知、`--dry-run`/`--rerun`
+
+#### Sprint 3 PR-2/PR-3: Drive + Gmail 雛形（PR #36 / #37）
+✅ **gdrive_client.py 雛形 + 13 tests**：
+  - `list_files / list_permissions / download_file_bytes / get_changes / get_start_page_token`
+  - `extract_acl_emails()` で permissions → acl_emails 写像
+  - スコープ既定 `drive.file + drive.metadata.readonly`（**CASA 不要**）、明示時のみ `drive.readonly`
+✅ **gmail_client.py 雛形 + 20 tests**：
+  - `list_messages / get_message / modify_message_labels / create_draft / create_hidden_label`
+  - `ensure_team_agent_labels()` で `TeamAgent/processed|draft-pending|error|skip` を labelHide+hide で作成
+  - スコープ既定 `gmail.modify` 1 本（読み + 下書き + ラベル + 送信、**Sensitive Tier 2 / CASA 不要**）
+  - `extract_plain_text / extract_thread_participants / _build_raw_email`（UTF-8 日本語対応）
+
+#### Sprint 3 hotfix: RLS bypass 根治（PR #38）
+✅ **migration 0002 + PgVectorClient 拡張**：
+  - 発見：`teamagent` master user で接続したまま SELECT すると、table owner として
+    FORCE ROW LEVEL SECURITY を入れても実質 bypass される production-critical 課題
+  - 解決：`teamagent_app` ロール (NOLOGIN, NOBYPASSRLS) を作成、`SET ROLE` でアプリ実行
+  - `PgVectorClient.connection(app_role, user_email, user_groups, user_role)` で session 注入
+  - 本番 RDS で **13/13 RLS 実機検証 PASS**（未設定→0件 / ACL含む→1件 / 他人→0件）
+
+#### Sprint 3 PR-4: Slack ingest + 取り込みソース宣言（PR #39）
+✅ **ユーザー提供の貴重情報源 2 セットを宣言**：
+  - ナレッジ共有: Slack `#proj-ナレッジ共有` + Drive folder `12FMLe…` + Sheet `1jRmoUPo…`
+  - ショート動画営業 FB（★最重要）: Slack `#proj-ショート動画_営業フィードバック情報` + Sheet `1VukC1Qv…`
+  - ユーザー曰く「**貴重な情報源、DB にしたい**」
+✅ **slack_channel_ingest_client.py 雛形 + 16 tests**：
+  - `list_channel_history / list_thread_replies / list_channel_members / get_user_emails`
+  - 1 スレッド = 1 document（thread_ts 単位）、external_id = `<channel_id>:<thread_ts>`
+  - `format_thread_as_document` / `collect_thread_participants`（ACL 写像）
+✅ **`data/ingest_sources.yaml`** — 全ソース宣言（channel_id は REPLACE_WITH_* プレースホルダ）
+✅ **`docs/v3.2/ingest_sources_v1.md`** — 取り込み戦略 + 後続ロードマップ
+
+#### Sprint 3 PR-5: Sheets adapter（PR #40）
+✅ **gsheets_client.py 雛形 + 15 tests**：
+  - `get_sheet_metadata / get_tab_rows`
+  - スコープ既定 `spreadsheets.readonly`（**Non-sensitive、CASA 不要**）
+  - 1 行 → `column: value\n...` 形式の document に整形
+  - 日本語タブ名 quote / 行末セル省略対応
+  - external_id = `<sheet_id>:<gid>:<row_idx>`
+
+#### Day 4 集計
+- **マージ PR**: #34, #35, #36, #37, #38, #39, #40（7 本）
+- **テスト**: 53 → 147（+94 件、4 件は実 DB 検証 SKIP）
+- **mypy strict**: 18 → 24 source files
+- **本番 RDS**: migration 0001 + 0002 適用済 / RLS 13/13 PASS
+- **PII スクラブ**: Sentry で xoxb-/sk-ant-/メール/長文を確実に redact 確認済
+
+#### Day 5 以降の残タスク
+- **要 user 作業（30 分）**: `data/ingest_sources.yaml` の `REPLACE_WITH_*` を実 channel_id に置換（Bot を Slack ch に invite + conversations.list で取得）
+- **PR-6 (次回着手)**: `scripts/ingest_sources.py` で yaml dispatcher（slack/gdrive/gsheets → ON CONFLICT INSERT + ACL 写像）
+- **要 user 作業（数日〜）**: GCP プロジェクト + OAuth クライアント取得（S3-01〜S3-03）→ Drive/Gmail 本実装解放
+- **Sprint 4**: EventBridge cron 化 / SearchSkill を新スキーマ＋RLS に切替 / proposals_chunks → documents ETL
+
+### ⚠️ 引継ぎポイント（次回最初に読む）
+1. **本番 RDS 接続は SSM tunnel + .env.local 経由** — `docs/v3.2/ops/local_dev_with_tunnel.md` 参照
+2. **RLS を効かせるには `app_role="teamagent_app"`** — `PgVectorClient.connection()` 必須引数
+3. **Drive/Gmail/Sheets は credentials 未取得で `NotImplementedError`** — テストは fake service で通る
+4. **ingest_sources.yaml の channel_id 取得が直近のボトルネック**
+5. **Sentry / CloudWatch / Terraform セキュリティは PR #33 で実装、apply 未実施** — `docs/v3.2/ops/observability_and_security.md` 参照
 
 ### 🔐 Slack トークン管理メモ
 - xoxb- が会話履歴に露出した経緯あるが、チャットは private で外部漏洩リスクなしと判断
