@@ -64,7 +64,7 @@ def _slack_thread_permalink(source_uri: str) -> str | None:
         return None
     if not source_uri.startswith("slack://"):
         return None
-    rest = source_uri[len("slack://"):]
+    rest = source_uri[len("slack://") :]
     parts = rest.split("/", 1)
     if len(parts) != 2:
         return None

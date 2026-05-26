@@ -295,7 +295,9 @@ def test_search_new_schema_filter_industry_passed(
         ctx=SkillContext(),
     )
 
-    call_kwargs: dict[str, Any] = fake_pgvector_new_schema.search_similar_new_schema.call_args.kwargs
+    call_kwargs: dict[str, Any] = (
+        fake_pgvector_new_schema.search_similar_new_schema.call_args.kwargs
+    )
     assert call_kwargs["filter_industry"] == "飲食"
     assert call_kwargs["limit"] == 3
 

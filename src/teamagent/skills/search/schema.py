@@ -52,8 +52,7 @@ class SearchHitOut(BaseModel):
     source_uri: str | None = Field(
         default=None,
         description=(
-            "元データの URI（新スキーマ）。"
-            "'slack://CHANNEL_ID/THREAD_TS' / 'gdrive://FILE_ID' 等"
+            "元データの URI（新スキーマ）。'slack://CHANNEL_ID/THREAD_TS' / 'gdrive://FILE_ID' 等"
         ),
     )
     source_type: str | None = Field(

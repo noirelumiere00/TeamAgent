@@ -123,19 +123,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         str(h.metadata.get("drive_url")) if h.metadata.get("drive_url") else None
                     ),
                     source_uri=(
-                        str(h.metadata["source_uri"])
-                        if h.metadata.get("source_uri")
-                        else None
+                        str(h.metadata["source_uri"]) if h.metadata.get("source_uri") else None
                     ),
                     source_type=(
-                        str(h.metadata["source_type"])
-                        if h.metadata.get("source_type")
-                        else None
+                        str(h.metadata["source_type"]) if h.metadata.get("source_type") else None
                     ),
                     channel_name=(
-                        str(h.metadata["channel_name"])
-                        if h.metadata.get("channel_name")
-                        else None
+                        str(h.metadata["channel_name"]) if h.metadata.get("channel_name") else None
                     ),
                 )
                 for h in hits
