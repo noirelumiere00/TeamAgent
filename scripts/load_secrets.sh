@@ -108,6 +108,33 @@ _load() {
             _log "INFO: Sentry DSN は未投入（skip）"
         fi
     fi
+
+    # Google OAuth (Drive + Gmail) — JSON 形式の単一 secret から 3 値を展開
+    # secret-string は {"client_id":..., "client_secret":..., "refresh_token":...} 形式
+    if [[ -n "${GOOGLE_OAUTH_SECRET_NAME:-}" ]]; then
+        local gjson
+        gjson="$(_get_secret "$GOOGLE_OAUTH_SECRET_NAME" 2>/dev/null || true)"
+        if [[ -n "$gjson" ]]; then
+            # python3 で JSON を parse して 3 値を export
+            # set -u 配下で空文字代入を避けるため if 内で eval
+            local gvals
+            gvals="$(python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+print(f\"export GOOGLE_CLIENT_ID='{d['client_id']}'\")
+print(f\"export GOOGLE_CLIENT_SECRET='{d['client_secret']}'\")
+print(f\"export GOOGLE_OAUTH_REFRESH_TOKEN='{d['refresh_token']}'\")
+" <<<"$gjson" 2>/dev/null || true)"
+            if [[ -n "$gvals" ]]; then
+                eval "$gvals"
+                _log "OK: Google OAuth loaded (client_id=${GOOGLE_CLIENT_ID:0:20}…, refresh_token=${GOOGLE_OAUTH_REFRESH_TOKEN:0:8}…)"
+            else
+                _log "WARN: Google OAuth secret は取得できたが JSON parse 失敗"
+            fi
+        else
+            _log "INFO: Google OAuth secret は未投入（skip）"
+        fi
+    fi
 }
 
 _load
