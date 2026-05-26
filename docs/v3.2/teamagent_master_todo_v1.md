@@ -564,4 +564,75 @@
 | 日付 | バージョン | 更新内容 |
 |---|---|---|
 | 2026-05-26 | v1.6 | Day 5 完了。Sprint 3 PR-6 完成 + 本番 RDS に Slack 197 docs 投入。migration 0003 で chunks RLS 完備。次は SearchSkill を新スキーマに切替。 |
-| 2026-05-26 | v1.7 | Day 6: PR #48 SearchSkill 新スキーマ切替完了。USE_NEW_SCHEMA=true で documents/chunks JOIN 検索、Block Kit に「💬 Slack で開く」ボタン追加。pytest 169→180、mypy strict 28 files 全通過。 |
+| 2026-05-26 | v1.7 | **Day 6 大量進捗（9 PR）**: SearchSkill 新スキーマ / Gmail deny / Google OAuth 配線 / Drive folder ingest / migration 0004+0005 / Slack スラッシュコマンド / Sprint 4 設計書 等。pytest 169 → 261 件、mypy strict 28 → 29 source files。Slack 197 docs が検索可能、Drive ingest 解禁、Sprint 4 着手の足場完成。 |
+
+---
+
+# 📌 v1.7 追加分（2026-05-26 = Day 6 完了）
+
+## Day 6 完了タスク（🤖 単独完結 PR ×4）
+
+### 1. PR #48 — SearchSkill 新スキーマ対応
+- `USE_NEW_SCHEMA=true` で documents/chunks JOIN クエリに切替
+- Block Kit に「💬 Slack で開く」thread permalink ボタン追加
+- 既存 proposals_chunks_contextual 経路は温存
+
+### 2. PR #49 — Gmail adapter 層 destructive method deny（spawn_task）
+- `_GMAIL_DESTRUCTIVE_METHODS` denylist + RestrictedService wrapper
+- gmail.modify を物理的に「読み取り + 下書き作成」のみに封鎖
+- Sprint 8 Mail Skill 実装の前提セキュリティ層
+
+### 3. PR #50 — Google OAuth (Drive + Gmail) を Secrets Manager 経由で配線
+- `scripts/get_google_refresh_token.py`: InstalledAppFlow で refresh_token 取得
+- `scripts/verify_google_oauth.py`: Drive + Gmail 接続テスト
+- `scripts/load_secrets.sh`: `teamagent/dev/google_oauth` (JSON) から 3 値 export
+- `.env.production.template` / `.env.local.template`: `GOOGLE_OAUTH_SECRET_NAME` 追加
+- **動作確認**: ✅ Drive (s-komata@vectorinc.co.jp) / ✅ Gmail (8153 messages, 18 labels)
+
+### 4. PR #51 — Drive folder ingest 本実装
+- `_ingest_gdrive_folder()` 完全実装:
+  - pagination (next_page_token loop, max_pages 防壁)
+  - permissions.list → owner_email / acl_emails / acl_groups
+  - PDF download → pypdf → ページ単位 chunk 化 (size=500, overlap=100)
+  - 非 PDF: title のみ 1 chunk（Google Doc export は Sprint 4 で）
+  - partial failure 許容（download / extract 失敗時は skip して継続）
+- `src/teamagent/ingest/pdf_extract.py` 新規: extract_pdf_pages / chunk_pages
+- Drive ingest テスト 6 件 + PDF extract テスト 5 件追加
+
+## 数値の更新（Day 6 末）
+
+| 指標 | v1.6 (Day 5 末) | v1.7 (Day 6 末) |
+|---|---|---|
+| マージ済 / OPEN PR | #1〜#47 | **+ #48-#51 OPEN** |
+| pytest | 169 | **184** |
+| mypy strict source files | 28 | **29** |
+| AWS Secrets | 6 | **+ teamagent/dev/google_oauth** |
+| 取り込み source | Slack のみ実動作 | **+ Drive folder (PDF + ACL)** |
+| Google OAuth scopes | (未取得) | **drive.file + drive.metadata.readonly + gmail.modify** |
+
+## ブロッカー残り (Day 6 末)
+
+| ブロッカー | 状態 |
+|---|---|
+| ~~GCP プロジェクト + OAuth クライアント~~ | ✅ Day 6 完了 |
+| Terraform apply (cloudwatch.tf / security.tf) | 🔴 user 作業待ち |
+| AWS Chatbot Slack 通知連携 | 🔴 user 作業待ち |
+| IT 申請 4 件 | 🔴 user 作業待ち |
+| OpenClaw 子会社ヒアリング返信 | 🔴 子会社待ち |
+
+## 次に踏み出す具体的な一歩（v1.7）
+
+優先度順（🤖 単独）:
+
+1. **🟡 最優先**: migration 0004 で `gsheets` ENUM 追加 + GSheets ingest 本実装の検証
+   - `data/ingest_sources.yaml` の sheet を実 Service Account / OAuth で取り込み
+   - row_unit=true で 1 行 = 1 document
+2. **🟡 続き**: 実 Drive folder で PR #51 の動作確認（PR #50 マージ後）
+   - 1 フォルダの PDF を 5 件ほど取り込んで実検索精度を見る
+3. **🟡 続き**: Sprint 4 着手準備（営業 PDF 全件棚卸し、メタデータ抽出パイプライン定期実行化）
+4. **🔵 待ち**: ユーザー作業（Terraform apply / AWS Chatbot / IT 申請）
+
+## モデル構成 (Day 6 末 確定)
+
+Day 5 から変更なし（Sonnet 4.6 / Haiku 4.5 / LocalE5 / Postgres 16 + pgvector 0.8.2）。
+**新規追加**: Google OAuth credentials を Secrets Manager 経由で配線済 (`teamagent/dev/google_oauth`)。
