@@ -3,8 +3,8 @@
 # ============================================================
 
 resource "random_password" "db_password" {
-  length  = 32
-  special = true
+  length           = 32
+  special          = true
   override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
@@ -33,7 +33,14 @@ resource "aws_db_parameter_group" "main" {
   # dynamic パラメータ（即時反映可）
   parameter {
     name  = "log_min_duration_statement"
-    value = "1000"  # 1秒以上のクエリをログ
+    value = "1000" # 1秒以上のクエリをログ
+  }
+
+  # SSL 接続を強制（Sprint 2 / 2.7 セキュリティ）
+  # rds.force_ssl=1 で TLS 必須化。接続側は sslmode=require 以上
+  parameter {
+    name  = "rds.force_ssl"
+    value = "1"
   }
 }
 
@@ -90,23 +97,27 @@ resource "aws_security_group_rule" "db_from_bastion" {
 # }
 
 resource "aws_db_instance" "main" {
-  identifier             = "${var.project_name}-${var.environment}"
-  engine                 = "postgres"
-  engine_version         = var.db_engine_version
-  instance_class         = var.db_instance_class
-  allocated_storage      = var.db_allocated_storage
-  storage_type           = "gp3"
-  storage_encrypted      = true
-  db_name                = var.db_name
-  username               = var.db_username
-  password               = random_password.db_password.result
-  parameter_group_name   = aws_db_parameter_group.main.name
-  db_subnet_group_name   = aws_db_subnet_group.main.name
-  vpc_security_group_ids = [aws_security_group.db.id]
-  multi_az               = var.db_multi_az
+  identifier              = "${var.project_name}-${var.environment}"
+  engine                  = "postgres"
+  engine_version          = var.db_engine_version
+  instance_class          = var.db_instance_class
+  allocated_storage       = var.db_allocated_storage
+  storage_type            = "gp3"
+  storage_encrypted       = true
+  db_name                 = var.db_name
+  username                = var.db_username
+  password                = random_password.db_password.result
+  parameter_group_name    = aws_db_parameter_group.main.name
+  db_subnet_group_name    = aws_db_subnet_group.main.name
+  vpc_security_group_ids  = [aws_security_group.db.id]
+  multi_az                = var.db_multi_az
   backup_retention_period = 7
-  skip_final_snapshot    = var.environment != "prod"
-  deletion_protection    = var.environment == "prod"
+  skip_final_snapshot     = var.environment != "prod"
+  deletion_protection     = var.environment == "prod"
+
+  # IAM database authentication を有効化（Sprint 2 / 2.7 セキュリティ）
+  # 本番運用は IAM 認証トークンに移行予定（Sprint 4）
+  iam_database_authentication_enabled = true
 
   lifecycle {
     ignore_changes = [password]

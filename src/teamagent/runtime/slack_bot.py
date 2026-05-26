@@ -26,6 +26,10 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
 from teamagent.adapters.slack_client import SlackClient
+from teamagent.observability.sentry import (
+    capture_event_exception,
+    capture_skill_exception,
+)
 from teamagent.skills.base import SkillContext
 from teamagent.skills.router import SkillRouter
 from teamagent.skills.search.schema import SearchInput, SearchOutput
@@ -46,18 +50,38 @@ def strip_mention(text: str) -> str:
     return _MENTION_PATTERN.sub("", text, count=1).strip()
 
 
+def _format_hit_source_label(hit: Any) -> str:
+    """SearchHitOut から「出典 + ページ」の表示ラベルを組み立てる。
+
+    優先順位：
+      1. file_name + page_num（構造化、Sprint 2 で追加）
+      2. source 文字列（後方互換）
+      3. chunk #N（最終フォールバック）
+    """
+    file_name = getattr(hit, "file_name", None)
+    page_num = getattr(hit, "page_num", None)
+    if file_name:
+        if page_num is not None:
+            return f"📄 *{file_name}* (p.{page_num})"
+        return f"📄 *{file_name}*"
+    if hit.source:
+        return f"📄 {hit.source}"
+    return f"chunk #{hit.chunk_id}"
+
+
 def format_search_response(output: SearchOutput) -> str:
     """SearchOutput を Slack に表示する文字列（フォールバック / 通知用）に整形する。
 
     Block Kit を使う場合も text フィールドにこれを入れて、通知やインデックス用に保持する。
+    引用フォーマット：📄 file_name (p.N) — score=0.91 → Drive で開く
     """
     lines = [output.answer, ""]
     if output.hits:
         lines.append("*参考資料:*")
         for hit in output.hits[:5]:
-            source = hit.source or f"chunk #{hit.chunk_id}"
+            label = _format_hit_source_label(hit)
             link = f" → <{hit.drive_url}|Drive で開く>" if hit.drive_url else ""
-            lines.append(f"• {source}  (score={hit.score:.2f}){link}")
+            lines.append(f"• {label}  _score={hit.score:.2f}_{link}")
     lines.append("")
     lines.append(f"_推算コスト: ${output.total_cost_usd:.4f}_")
     return "\n".join(lines)
@@ -84,8 +108,9 @@ def build_search_blocks(output: SearchOutput) -> list[dict[str, Any]]:
             }
         )
         for hit in output.hits[:5]:
-            source = hit.source or f"chunk #{hit.chunk_id}"
-            line = f"• {source}  _(score={hit.score:.2f})_"
+            label = _format_hit_source_label(hit)
+            # 出典 + score を1行で見やすく（score は item context として末尾に）
+            line = f"• {label}  _score={hit.score:.2f}_"
             section: dict[str, Any] = {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": line},
@@ -258,14 +283,20 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             output = await disp.run_search(query, request_id, user_id)
         except Exception as e:
             logger.exception("search_skill_failed", request_id=request_id)
+            # Sentry へ送信（DSN 未設定なら no-op）。スクラブは before_send で実施
+            capture_skill_exception(
+                e,
+                request_id=request_id,
+                skill="search",
+                user_id=user_id,
+                extra={"channel": channel, "query_len": len(query)},
+            )
             await slack.post_message(
                 channel=channel,
                 text=f"検索中にエラーが発生しました。`request_id={request_id}`",
                 request_id=request_id,
                 thread_ts=thread_ts,
             )
-            # 機密が混ざらないよう例外メッセージはログのみ
-            _ = str(e)
             return
 
         await slack.post_message(
@@ -302,8 +333,15 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
 
         try:
             output = await disp.run_search(text, request_id, user_id)
-        except Exception:
+        except Exception as e:
             logger.exception("search_skill_failed", request_id=request_id)
+            capture_skill_exception(
+                e,
+                request_id=request_id,
+                skill="search",
+                user_id=user_id,
+                extra={"channel": channel, "text_len": len(text), "via": "dm"},
+            )
             await slack.post_message(
                 channel=channel,
                 text=f"検索中にエラーが発生しました。`request_id={request_id}`",
@@ -318,7 +356,42 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             blocks=build_search_blocks(output),
         )
 
+    # Bolt のグローバルエラーハンドラ — ハンドラ外で起きた例外を Sentry に飛ばす
+    @app.error
+    async def handle_bolt_error(error: BaseException, body: dict[str, Any]) -> None:
+        event_type = (body.get("event") or {}).get("type") or body.get("type") or "unknown"
+        logger.exception(
+            "bolt_global_error",
+            event_type=event_type,
+        )
+        capture_event_exception(
+            error,
+            event_type=f"bolt:{event_type}",
+            extra={
+                "team_id": body.get("team_id"),
+                "api_app_id": body.get("api_app_id"),
+            },
+        )
+
     return app
+
+
+def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """asyncio Task で握りつぶされた例外を Sentry / structlog に拾う。
+
+    Bolt / Socket Mode の long-running loop では `fire_and_forget` 的に
+    タスクが落ちると default handler は warning だけ出して終わる。
+    ここで明示的に Sentry に飛ばす。
+    """
+    exc = context.get("exception")
+    message = context.get("message", "asyncio_unhandled")
+    logger.error(
+        "asyncio_unhandled_exception",
+        message=message,
+        exc_type=type(exc).__name__ if exc else None,
+    )
+    if isinstance(exc, BaseException):
+        capture_event_exception(exc, event_type="asyncio:unhandled", extra={"message": message})
 
 
 async def _run() -> None:
@@ -326,9 +399,19 @@ async def _run() -> None:
     if not app_token:
         raise RuntimeError("SLACK_APP_TOKEN が未設定です（xapp- で始まる Socket Mode 用トークン）")
 
+    # Sentry init は async 文脈内で実施
+    # （AsyncioIntegration が起動済み event loop を取りこぼさないため）
+    from teamagent.observability.sentry import init_sentry
+
+    sentry_enabled = init_sentry()
+
+    # asyncio Task 内の握りつぶされた例外を Sentry に拾う
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(_asyncio_exception_handler)
+
     app = build_app()
     handler = AsyncSocketModeHandler(app, app_token)
-    logger.info("slack_bot_start", mode="socket")
+    logger.info("slack_bot_start", mode="socket", sentry_enabled=sentry_enabled)
     await handler.start_async()  # type: ignore[no-untyped-call]
 
 

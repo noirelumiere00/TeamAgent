@@ -6,7 +6,10 @@ Bolt App 自体の起動テストはネットワーク必須なので含めな�
 
 from __future__ import annotations
 
+from typing import Any
+
 from teamagent.runtime.slack_bot import (
+    _asyncio_exception_handler,
     build_search_blocks,
     format_search_response,
     strip_mention,
@@ -152,3 +155,87 @@ def test_build_search_blocks_without_hits() -> None:
     assert blocks[0]["text"]["text"] == "該当なし"
     # divider や参考資料セクションは出ない
     assert not any(b.get("type") == "divider" for b in blocks)
+
+
+def test_format_response_uses_structured_file_name_and_page() -> None:
+    """file_name + page_num が設定されていれば 📄 *file* (p.N) で表示する。"""
+    output = SearchOutput(
+        answer="ans",
+        hits=[
+            SearchHitOut(
+                chunk_id=1,
+                content="...",
+                score=0.93,
+                file_name="proposal_a.pdf",
+                page_num=5,
+                source=None,
+            ),
+        ],
+        total_cost_usd=0.0,
+    )
+    formatted = format_search_response(output)
+    assert "📄 *proposal_a.pdf*" in formatted
+    assert "(p.5)" in formatted
+    assert "score=0.93" in formatted
+
+
+def test_format_response_falls_back_to_source_string() -> None:
+    """file_name が無いが source だけある旧形式でも壊れない。"""
+    output = SearchOutput(
+        answer="ans",
+        hits=[SearchHitOut(chunk_id=1, content="...", score=0.7, source="legacy.pdf (p.2)")],
+        total_cost_usd=0.0,
+    )
+    formatted = format_search_response(output)
+    assert "legacy.pdf (p.2)" in formatted
+
+
+def test_build_blocks_uses_file_name_page() -> None:
+    """Block Kit でも file_name / page_num が構造化表示される。"""
+    output = SearchOutput(
+        answer="x",
+        hits=[
+            SearchHitOut(
+                chunk_id=1,
+                content="...",
+                score=0.88,
+                file_name="b.pdf",
+                page_num=3,
+                drive_url=None,
+            )
+        ],
+        total_cost_usd=0.0,
+    )
+    blocks = build_search_blocks(output)
+    section_texts = [
+        b["text"]["text"]
+        for b in blocks
+        if b.get("type") == "section" and isinstance(b.get("text"), dict)
+    ]
+    assert any("📄 *b.pdf*" in t and "(p.3)" in t for t in section_texts)
+
+
+# -----------------------------------------------------------
+# asyncio exception handler — Sentry no-op 経路
+# -----------------------------------------------------------
+def test_asyncio_exception_handler_no_init_no_raise() -> None:
+    """Sentry 未 init 状態でも _asyncio_exception_handler が例外を投げない。
+
+    context.exception が BaseException でも None でも安全であることを確認。
+    """
+
+    class _DummyLoop:
+        """asyncio loop の最低限スタブ（context.message ログにしか触らない）。"""
+
+    loop: Any = _DummyLoop()
+
+    # 1) exception を伴うケース
+    _asyncio_exception_handler(
+        loop, {"message": "task fail", "exception": RuntimeError("fake-token-leak-test")}
+    )
+
+    # 2) exception 無しのケース（message だけ）
+    _asyncio_exception_handler(loop, {"message": "no exc"})
+
+    # 3) 空 context
+    _asyncio_exception_handler(loop, {})

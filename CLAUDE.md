@@ -196,6 +196,27 @@ TeamAgent/
 
 ### Day 2 完了時点の累計 PR：#1〜#19（19 本マージ）
 
+### Day 3（2026/5/23）— Sprint 2 観測・セキュリティ基盤 + 引用フォーマット強化
+✅ **引用フォーマット強化（PR/feat/sprint2-ops-security）**：
+  - `SearchHitOut` に `file_name` / `page_num` を別フィールドで保持
+  - Slack 表示が `📄 *file* (p.N) — score=0.91 → Drive で開く` の構造化形式に
+  - 既存 source 文字列との後方互換維持、テスト 4 件追加（計 43 件 PASS）
+✅ **Terraform 観測基盤（cloudwatch.tf）**：
+  - SNS Topic + メトリクスフィルタ 3 種（cost_usd / latency_ms / error_count）
+  - アラーム 3 種（日次 $5、p95 15s、5 分で 3 件エラー）
+  - 通知先メールは `alarm_email_endpoints` tfvar で投入
+✅ **Terraform セキュリティ基盤（security.tf）**：
+  - KMS CMK + CloudTrail multi-region + log file validation
+  - IAM Access Analyzer（アカウント単位）
+  - Bedrock invocation logging（S3 + KMS）
+  - RDS `rds.force_ssl=1` + IAM database authentication 有効化
+✅ **本番起動スクリプト**：
+  - `.env.production.template` + `scripts/load_secrets.sh`
+    （Secrets Manager から動的に DATABASE_URL / Slack トークン展開）
+✅ **PII ログスキャン**：`scripts/pii_log_scan.py`
+  - CloudWatch Logs Insights で過去 N 時間を走査、xoxb-/sk-ant-/メール/長文を検出
+✅ **運用ドキュメント**：`docs/v3.2/ops/observability_and_security.md`（apply 手順 + 検証コマンド）
+
 ### ⚠️ TODO（Sprint 2 開始時に対応）
 - [ ] **data/proposal_drive_map.json の PLACEHOLDER を実 Drive URL に差し替え**（Sprint 3 の Drive API 連携で自動化されるので、それまでは保留可）
 - [x] **本番 RDS への migration**：ローカル → 東京 RDS proposals_chunks_contextual（PR #22 で完了）

@@ -38,3 +38,29 @@ output "bastion_connect_command" {
   description = "踏み台への SSM 接続コマンド"
   value       = "aws ssm start-session --target ${aws_instance.bastion.id} --region ${var.aws_region}"
 }
+
+# ---------- Sprint 2 / 観測・セキュリティ ----------
+output "sns_alarm_topic_arn" {
+  description = "アラーム通知 SNS トピック（Slack Chatbot 連携先）"
+  value       = aws_sns_topic.alarms.arn
+}
+
+output "kms_logs_key_arn" {
+  description = "CloudTrail / Bedrock logs 用 KMS CMK ARN"
+  value       = aws_kms_key.logs.arn
+}
+
+output "cloudtrail_bucket" {
+  description = "CloudTrail 配信先 S3 バケット（有効化時のみ）"
+  value       = try(aws_s3_bucket.cloudtrail[0].id, null)
+}
+
+output "bedrock_logs_bucket" {
+  description = "Bedrock invocation logs 配信先 S3 バケット（有効化時のみ）"
+  value       = try(aws_s3_bucket.bedrock_logs[0].id, null)
+}
+
+output "access_analyzer_arn" {
+  description = "IAM Access Analyzer ARN（有効化時のみ）"
+  value       = try(aws_accessanalyzer_analyzer.account[0].arn, null)
+}

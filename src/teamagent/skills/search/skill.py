@@ -14,7 +14,7 @@ CLAUDE.md 6-bis ルール準拠：
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
@@ -101,6 +101,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     content=h.content,
                     score=h.score,
                     source=self._build_source(h),
+                    file_name=(
+                        str(h.metadata.get("file_name")) if h.metadata.get("file_name") else None
+                    ),
+                    page_num=self._safe_int(h.metadata.get("page_num")),
                     drive_url=(
                         str(h.metadata.get("drive_url")) if h.metadata.get("drive_url") else None
                     ),
@@ -175,6 +179,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             cache_system=True,  # 同じ system prompt を頻繁に呼ぶのでキャッシュで input cost 1/10
         )
         return resp.text, resp.usage.cost_usd
+
+    @staticmethod
+    def _safe_int(value: Any) -> int | None:
+        """metadata 値を安全に int 化する。文字列・None・int 混在対応。"""
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _build_source(hit: SearchHit) -> str | None:

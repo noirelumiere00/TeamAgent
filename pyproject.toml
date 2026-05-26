@@ -55,6 +55,10 @@ dependencies = [
     "structlog>=24.4.0",
     "rich>=13.9.0",
 
+    # --- Observability ---
+    # sentry-sdk: DSN 未設定なら no-op、Async/Logging integrations 同梱
+    "sentry-sdk[asyncio]>=2.18.0",
+
     # --- Scheduler / Workflow ---
     "apscheduler>=3.10.0",  # ローカル開発用、本番は EventBridge
 

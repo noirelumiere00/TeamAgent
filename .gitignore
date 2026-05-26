@@ -6,6 +6,10 @@
 .env
 .env.local
 .env.*.local
+.env.production
+.env.staging
+!.env.production.template
+!.env.example
 *.pem
 *.key
 *.p12

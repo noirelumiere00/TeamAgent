@@ -18,12 +18,33 @@ class SearchInput(BaseModel):
 
 
 class SearchHitOut(BaseModel):
-    """検索結果の1ヒット。"""
+    """検索結果の1ヒット。
+
+    引用フォーマット強化（Sprint 2 / 2.8）：
+    - `source` は表示用のフォールバック文字列（後方互換）
+    - `file_name` / `page_num` を別フィールドで持ち、Block Kit で構造化表示する
+    - `score` は cosine 類似度（0.0〜1.0）
+    """
 
     chunk_id: int
     content: str
-    score: float = Field(ge=0.0, le=1.0)
-    source: str | None = None
+    score: float = Field(ge=0.0, le=1.0, description="cosine 類似度（1.0 に近いほど類似）")
+    source: str | None = Field(
+        default=None,
+        description=(
+            "表示用フォールバック（例：'a.pdf (p.3)'）。"
+            "新規実装では file_name / page_num を優先する"
+        ),
+    )
+    file_name: str | None = Field(
+        default=None,
+        description="元 PDF のファイル名（Block Kit で太字表示）",
+    )
+    page_num: int | None = Field(
+        default=None,
+        ge=1,
+        description="元 PDF のページ番号（1 始まり）",
+    )
     drive_url: str | None = Field(
         default=None,
         description="Google Drive 等の正本 URL。営業がクリックして元 PDF を開く",
