@@ -135,13 +135,15 @@ disallow_untyped_defs = true
 # - sentence_transformers: ローカル開発のみ（CI ではインストールしない）
 # - boto3 / aioboto3: 公式に type stub が分離されているが TeamAgent では未導入
 # - pgvector: ライブラリ自体に型ヒントが無い
-# - google.genai: Sprint 11 で本実装
+# - googleapiclient / google.oauth2: Sprint 3 で導入、stub なし
 [[tool.mypy.overrides]]
 module = [
     "sentence_transformers.*",
     "boto3.*",
     "botocore.*",
     "pgvector.*",
+    "googleapiclient.*",
+    "google.oauth2.*",
 ]
 ignore_missing_imports = true
 
