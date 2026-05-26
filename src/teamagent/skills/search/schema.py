@@ -15,6 +15,15 @@ class SearchInput(BaseModel):
         max_length=100,
         description="業界フィルタ（メタデータ JSONB 経由）",
     )
+    strict_industry: bool = Field(
+        default=False,
+        description=(
+            "業界フィルタの厳密度。"
+            "False (soft, 既定): industry=指定値 OR industry IS NULL を許容。"
+            "Router の auto-detect で Slack docs (industry メタ無し) が全件除外されるのを防ぐ。"
+            "True (strict): 厳密一致。ユーザーが明示的に業界を指定したスラッシュコマンド等で使う。"
+        ),
+    )
 
 
 class SearchHitOut(BaseModel):

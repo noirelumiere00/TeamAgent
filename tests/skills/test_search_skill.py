@@ -217,6 +217,52 @@ def test_search_filter_industry_ignored_without_metadata_col(
 # -----------------------------------------------------------
 
 
+def test_search_new_schema_soft_industry_by_default(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """新スキーマで filter_industry を渡しても、既定 (strict_industry=False) で soft 検索。
+
+    Router の auto-detect で industry が付いても、Slack docs (industry メタ無し) を
+    全件除外しないようにする fail-safe。
+    """
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+    skill.run(
+        input=SearchInput(query="INPEX案件", filter_industry="エネルギー"),
+        ctx=SkillContext(),
+    )
+    call_kwargs = fake_pgvector.search_similar_new_schema.call_args.kwargs
+    assert call_kwargs["filter_industry"] == "エネルギー"
+    assert call_kwargs["strict_industry"] is False  # 既定 = soft
+
+
+def test_search_new_schema_strict_industry_explicit(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """strict_industry=True 明示時は厳密一致モードで search_similar_new_schema に渡る。
+
+    スラッシュコマンド `/teamagent_search 案件 industry=飲食` のように
+    ユーザーが明示的に業界を指定した場合の経路。
+    """
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+    skill.run(
+        input=SearchInput(query="飲食事例", filter_industry="飲食", strict_industry=True),
+        ctx=SkillContext(),
+    )
+    call_kwargs = fake_pgvector.search_similar_new_schema.call_args.kwargs
+    assert call_kwargs["filter_industry"] == "飲食"
+    assert call_kwargs["strict_industry"] is True
+
+
 @pytest.fixture
 def fake_pgvector_new_schema() -> MagicMock:
     """新スキーマ用 pgvector モック。search_similar_new_schema() を返す。"""

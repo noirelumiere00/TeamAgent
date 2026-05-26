@@ -190,6 +190,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     limit=input.top_k,
                     filter_industry=input.filter_industry,
                     request_id=ctx.request_id,
+                    strict_industry=input.strict_industry,
                 )
             where: str | None = None
             if input.filter_industry and self._metadata_col is not None:
