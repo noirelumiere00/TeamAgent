@@ -21,3 +21,15 @@ CREATE INDEX IF NOT EXISTS smoke_test_embedding_idx
     ON smoke_test USING hnsw (embedding vector_cosine_ops);
 
 -- 確認: SELECT * FROM pg_extension WHERE extname='vector';
+
+-- ============================================================
+-- Sprint 3 / PR-1: 統合 documents + chunks スキーマ + RLS
+-- ============================================================
+-- 実体は infra/migrations/0001_unified_documents.sql。
+-- docker 起動時は `python scripts/migrate.py` を別途実行して取り込む。
+-- 本番 RDS は踏み台 EC2 上で同コマンドを SSM tunnel 経由で実行。
+--
+-- ローカル一発セットアップ:
+--   docker compose up -d
+--   DATABASE_URL=postgresql://teamagent:teamagent@localhost:5432/teamagent \
+--       python scripts/migrate.py
