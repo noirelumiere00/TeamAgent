@@ -39,7 +39,170 @@ from typing import Any
 
 import structlog
 
+from teamagent.observability import capture_skill_exception
+
 logger = structlog.get_logger(__name__)
+
+
+# -----------------------------------------------------------
+# 破壊的メソッド denylist（adapter 層で物理封鎖）
+# -----------------------------------------------------------
+# OAuth スコープは `gmail.modify` で広い権限を持つが、コード側で「破壊的メソッドを
+# 物理的に呼べない」状態にする（Day 6, 2026-05-26 設計判断）。
+#
+# 出典: Google Gmail API v1 公式リファレンス
+#   https://developers.google.com/gmail/api/reference/rest
+# - users.messages.delete / batchDelete: 完全削除（ゴミ箱経由せず）
+# - users.messages.trash / untrash: ゴミ箱送り / 復元
+# - users.threads.delete / trash / untrash: スレッド単位の削除・ゴミ箱送り
+# - users.labels.delete / patch / update: ラベル削除・更新（隠しラベルが書き換わるリスク）
+# - users.settings.filters.delete: フィルタルール削除
+# - users.settings.forwardingAddresses.delete: 自動転送先削除
+# - users.settings.sendAs.delete: 送信元エイリアス削除
+# - users.settings.cse.identities.delete: クライアントサイド暗号化 ID 削除
+# - users.settings.cse.keypairs.disable / obliterate: CSE 鍵ペア無効化・完全消去
+# - users.watch / stop: Pub/Sub プッシュ通知の有効化・停止（外部副作用を伴う）
+_GMAIL_DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
+    {
+        "users.messages.delete",
+        "users.messages.batchDelete",
+        "users.messages.trash",
+        "users.messages.untrash",
+        "users.threads.delete",
+        "users.threads.trash",
+        "users.threads.untrash",
+        "users.labels.delete",
+        "users.labels.patch",
+        "users.labels.update",
+        "users.settings.filters.delete",
+        "users.settings.forwardingAddresses.delete",
+        "users.settings.sendAs.delete",
+        "users.settings.cse.identities.delete",
+        "users.settings.cse.keypairs.disable",
+        "users.settings.cse.keypairs.obliterate",
+        "users.watch",
+        "users.stop",
+    }
+)
+
+
+class _GmailSafePolicy:
+    """Gmail API method path を denylist 評価する policy。
+
+    Skill / runtime / テストいずれの経路でも `_PolicyEnforcedResource` 経由で
+    `assert_safe(method_path)` が呼ばれ、`_GMAIL_DESTRUCTIVE_METHODS` に含まれる
+    method を呼んだ瞬間に RuntimeError を上げて Sentry に通知する。
+
+    スコープ (`gmail.modify`) では封じられない破壊的呼び出しを物理封鎖するための
+    最終防衛層。
+    """
+
+    def __init__(
+        self,
+        *,
+        denylist: frozenset[str] = _GMAIL_DESTRUCTIVE_METHODS,
+    ) -> None:
+        self._denylist = denylist
+
+    def assert_safe(self, method_path: str) -> None:
+        if method_path not in self._denylist:
+            return
+        logger.error(
+            "gmail_destructive_call_blocked",
+            method_path=method_path,
+            policy="GmailSafePolicy",
+            scope="gmail.modify",
+        )
+        exc = RuntimeError(
+            f"Gmail destructive method '{method_path}' is blocked by adapter-layer denylist. "
+            "Even though the OAuth scope grants write access, this method is physically "
+            "unreachable through GmailClient. If this call is legitimate, the policy must "
+            "be revised explicitly (see _GMAIL_DESTRUCTIVE_METHODS)."
+        )
+        # Sentry に send（DSN 未設定環境では no-op）。ここで raise する前に通知する。
+        capture_skill_exception(
+            exc,
+            request_id="gmail_adapter_policy",
+            skill="gmail_adapter",
+            extra={"method_path": method_path},
+        )
+        raise exc
+
+
+class _PolicyEnforcedResource:
+    """googleapiclient.discovery.Resource を method path 付きで包む wrapper。
+
+    __getattr__ で属性アクセスを intercept し、呼び出しチェーンを点ドット形式の
+    method path に組み立てつつ wrapper を返す。末端で `execute()` を呼ぶ直前に
+    `policy.assert_safe(method_path)` を発火させて、denylist 該当呼び出しを
+    RuntimeError に転化する。
+
+    例：
+        service.users().messages().delete(id="x").execute()
+                └ "users" └ "messages" └ "delete" → method_path="users.messages.delete"
+
+    Resource.execute() は API call の最終トリガーなので、ここで block すれば
+    実際の HTTP リクエストは絶対に走らない。
+
+    注意:
+    - googleapiclient は属性アクセスのたびに新しい Resource を返す
+      （`.users()` は呼び出しのたび別インスタンス）。本 wrapper も同じ要領で
+      新しい `_PolicyEnforcedResource` を返し、path を蓄積する。
+    - `execute` / `_resource` / `_policy` / `_path` は wrapper 自身の属性なので、
+      被ラップ resource への通り抜けが起きないよう __getattr__ より優先する。
+    """
+
+    __slots__ = ("_path", "_policy", "_resource")
+
+    def __init__(
+        self,
+        resource: Any,
+        policy: _GmailSafePolicy,
+        *,
+        path: tuple[str, ...] = (),
+    ) -> None:
+        object.__setattr__(self, "_resource", resource)
+        object.__setattr__(self, "_policy", policy)
+        object.__setattr__(self, "_path", path)
+
+    def __getattr__(self, name: str) -> Any:
+        # __slots__ 経由の属性は通常の属性アクセスで返るのでここに来ない。
+        inner = getattr(self._resource, name)
+        if callable(inner):
+            policy = self._policy
+            current_path = self._path
+
+            def _wrapped(*args: Any, **kwargs: Any) -> Any:
+                next_path = (*current_path, name)
+                result = inner(*args, **kwargs)
+                # 末端: execute() を持つ HttpRequest が返ってきたら、
+                # execute 前に policy 判定して block する。
+                if hasattr(result, "execute") and callable(result.execute):
+                    method_path = ".".join(next_path)
+                    return _PolicyEnforcedHttpRequest(result, policy, method_path)
+                # 中間: 別 Resource なので再帰的に包む
+                return _PolicyEnforcedResource(result, policy, path=next_path)
+
+            return _wrapped
+        return inner
+
+
+class _PolicyEnforcedHttpRequest:
+    """googleapiclient HttpRequest の execute() を policy で gate する wrapper。"""
+
+    __slots__ = ("_method_path", "_policy", "_request")
+
+    def __init__(self, request: Any, policy: _GmailSafePolicy, method_path: str) -> None:
+        object.__setattr__(self, "_request", request)
+        object.__setattr__(self, "_policy", policy)
+        object.__setattr__(self, "_method_path", method_path)
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        self._policy.assert_safe(self._method_path)
+        return self._request.execute(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._request, name)
 
 
 # -----------------------------------------------------------
@@ -133,11 +296,18 @@ class GmailClient:
         service: Any | None = None,
         scopes: tuple[str, ...] | None = None,
         impersonate_user: str | None = None,
+        safe_policy: _GmailSafePolicy | None = None,
     ) -> None:
         self._credentials = credentials
         self._service = service
         self._scopes = scopes or self.SCOPES_MODIFY
         self._impersonate_user = impersonate_user
+        self._safe_policy = safe_policy or _GmailSafePolicy()
+        # service が事前注入されていれば（テスト経路）即座にラップする。
+        # 未注入なら _ensure_safe_service() の最初の呼び出しで遅延構築する。
+        self._service_safe: Any | None = (
+            _PolicyEnforcedResource(service, self._safe_policy) if service is not None else None
+        )
 
     @classmethod
     def from_env(cls, *, readonly: bool = False) -> GmailClient:
@@ -174,7 +344,7 @@ class GmailClient:
         query は Gmail 検索クエリ（例 'from:foo@x.com newer_than:7d'）。
         label_ids で系統的に絞る（例 ['INBOX', '<隠しラベル ID>']）。
         """
-        service = self._ensure_service()
+        service = self._ensure_safe_service()
         kwargs: dict[str, Any] = {
             "userId": user_id,
             "maxResults": max_results,
@@ -220,7 +390,7 @@ class GmailClient:
         user_id: str = "me",
     ) -> GmailMessage:
         """messages.get でメッセージ詳細を取得する。"""
-        service = self._ensure_service()
+        service = self._ensure_safe_service()
         kwargs: dict[str, Any] = {"userId": user_id, "id": msg_id, "format": format}
         if format == "metadata":
             kwargs["metadataHeaders"] = ["From", "To", "Cc", "Subject", "Date"]
@@ -256,7 +426,7 @@ class GmailClient:
     # -------------------------------------------------------
     def list_labels(self, request_id: str, *, user_id: str = "me") -> list[GmailLabel]:
         """全ラベルを列挙する（hidden 含む）。"""
-        service = self._ensure_service()
+        service = self._ensure_safe_service()
         resp = service.users().labels().list(userId=user_id).execute()
         raw = resp.get("labels", []) or []
         labels = [
@@ -284,7 +454,7 @@ class GmailClient:
         labelListVisibility=labelHide → 左サイドバーに表示しない
         messageListVisibility=hide → メール一覧でラベル chip 非表示
         """
-        service = self._ensure_service()
+        service = self._ensure_safe_service()
         body = {
             "name": name,
             "labelListVisibility": "labelHide",
@@ -334,7 +504,7 @@ class GmailClient:
         add / remove は label_id を渡す（名前ではなく ID）。
         ensure_team_agent_labels() の戻り値を使うのが楽。
         """
-        service = self._ensure_service()
+        service = self._ensure_safe_service()
         body: dict[str, Any] = {}
         if add:
             body["addLabelIds"] = add
@@ -371,7 +541,7 @@ class GmailClient:
         thread_id を渡すと既存スレッドへの返信 draft として作成される。
         in_reply_to_message_id を渡すと In-Reply-To / References ヘッダを設定。
         """
-        service = self._ensure_service()
+        service = self._ensure_safe_service()
         raw_email = _build_raw_email(
             to=to,
             subject=subject,
@@ -404,6 +574,11 @@ class GmailClient:
     # 内部
     # -------------------------------------------------------
     def _ensure_service(self) -> Any:
+        """Raw googleapiclient Resource を返す。直接の API 呼び出し用ではない。
+
+        ⚠️ このメソッドは internal/debug 用途のみ。実 API 呼び出しは必ず
+        `_ensure_safe_service()` 経由で denylist 評価される wrapper を使う。
+        """
         if self._service is not None:
             return self._service
         from googleapiclient.discovery import build
@@ -412,6 +587,18 @@ class GmailClient:
             self._credentials = self._build_credentials()
         self._service = build("gmail", "v1", credentials=self._credentials, cache_discovery=False)
         return self._service
+
+    def _ensure_safe_service(self) -> Any:
+        """破壊的メソッドが物理封鎖された Gmail Resource を返す。
+
+        全 public メソッドはこれを経由する。`_GmailSafePolicy` で `users.messages.delete`
+        などの denylist 該当呼び出しを `execute()` 直前に RuntimeError に転化する。
+        """
+        if self._service_safe is not None:
+            return self._service_safe
+        raw = self._ensure_service()
+        self._service_safe = _PolicyEnforcedResource(raw, self._safe_policy)
+        return self._service_safe
 
     def _build_credentials(self) -> Any:
         sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
