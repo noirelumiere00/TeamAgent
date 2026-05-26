@@ -1,0 +1,104 @@
+# ============================================================
+# TeamAgent — 取り込み対象データソース宣言
+# ============================================================
+# このファイルで「どの Slack チャネル / Drive フォルダ / Sheet を取り込むか」を
+# 宣言的に管理。ingest パイプラインが起動時に読んで、各 adapter にディスパッチする。
+#
+# Sprint 3 でユーザーから提供された貴重情報源を反映（2026-05-26）。
+# 機密扱い：このファイル自体はコミットして OK だが、ACL 設計は acl_emails 経由で
+# 必ず制限すること。public channel でも全営業に見せない方針なら、明示的に絞る。
+# ============================================================
+
+version: 1
+
+slack_channels:
+  # ---- 提案ナレッジ ----
+  - channel_id: "REPLACE_WITH_C_ID_FOR_proj-knowledge-sharing"
+    channel_name: "#proj-ナレッジ共有"
+    description: |
+      提案時の情報や資料を共有するチャネル。スレッドに提案の経緯、メンバー間の
+      ディスカッション、Drive へのリンクが含まれる。
+    include_files: true       # 添付された PDF も取り込み対象
+    oldest_days: 180          # 直近半年（過去ナレッジも価値あり）
+    extra_metadata:
+      topic: "提案ナレッジ"
+      use_case: "RAG 検索の主要情報源"
+
+  # ---- ショート動画営業 FB（最重要）----
+  - channel_id: "REPLACE_WITH_C_ID_FOR_proj-short-video-sales-feedback"
+    channel_name: "#proj-ショート動画_営業フィードバック情報"
+    description: |
+      商談 FB・クライアント温度感が大量にあるチャネル。
+      ユーザー曰く「貴重な情報源、DB にしたい」（2026-05-26）。
+    include_files: true
+    oldest_days: 365          # 過去 1 年（温度感の経時変化を保持）
+    extra_metadata:
+      topic: "営業 FB"
+      use_case: "顧客温度感・案件温度感の蓄積"
+      priority: "high"        # 取り込み優先度
+
+gdrive_folders:
+  # ---- ナレッジ共有 Drive フォルダ ----
+  - folder_id: "12FMLe9XG24wlPrBCHOQ_vcr4uELtMN1E"
+    folder_name: "ナレッジ共有 - 添付ファイル"
+    description: "#proj-ナレッジ共有 で共有された添付資料の保管先"
+    include_subfolders: true
+    mime_type_filter: null    # PDF / Doc / Sheet すべて
+    extra_metadata:
+      topic: "提案ナレッジ"
+      source_chain: "slack -> drive"  # Slack → Drive の関係性
+
+gsheets:
+  # ---- ナレッジ共有フォーム回答 ----
+  - sheet_id: "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
+    sheet_name: "ナレッジ共有 - フォーム回答"
+    description: |
+      ナレッジ共有チャネルに紐づく Google Form の回答スプレッドシート。
+      行単位で 1 ナレッジ。column は質問項目（業界 / 商材 / 提案結果 等）。
+    tabs:
+      - gid: 278789217
+        tab_name: "フォーム回答 1"
+    row_unit: true            # 1 行 = 1 document として取り込み
+    extra_metadata:
+      topic: "提案ナレッジ"
+      structure: "form-response"
+
+  # ---- ショート動画営業 FB フォーム回答（最重要）----
+  - sheet_id: "1VukC1Qv0MRqxSvgxuSqDwzpPsM_K1FJNTpTXs10KQhY"
+    sheet_name: "ショート動画営業 FB - フォーム回答"
+    description: |
+      営業 FB のフォーム回答。クライアント温度感・案件温度感が高頻度で更新される。
+      ユーザー曰く「DB にしたい」最重要情報源（2026-05-26）。
+    tabs:
+      - gid: 537831563
+        tab_name: "フォーム回答 1"
+    row_unit: true
+    extra_metadata:
+      topic: "営業 FB"
+      priority: "high"
+      structure: "form-response"
+      use_case: "顧客温度感の経時追跡 + 検索"
+
+# ============================================================
+# Adapter ↔ source_type マッピング
+# ============================================================
+# slack_channels  → adapters/slack_channel_ingest_client.py → source_type='slack'
+# gdrive_folders  → adapters/gdrive_client.py                → source_type='gdrive'
+# gsheets         → adapters/gsheets_client.py (PR-5 で実装)→ source_type='other' 暫定
+#                   （or migration 0003 で gsheets を ENUM に追加）
+
+# ============================================================
+# ACL 既定方針
+# ============================================================
+# - acl_emails: 各 source の参加者（Slack channel members / Drive permissions /
+#               Sheet permissions）を ingest 時に取得して写像
+# - acl_groups: Workspace group は acl_groups[]
+# - 営業 16 名全員に見せていい情報なら sales@vectorinc.co.jp 等の Workspace group
+#   を acl_groups に追加する設計（Sprint 4 で実装）
+
+# ============================================================
+# 取り込み頻度（Sprint 3 / 4 で EventBridge cron 化）
+# ============================================================
+# - Slack: 15 分に 1 回 incremental（前回 ts 以降）
+# - Drive: 15 分に 1 回 changes.list で差分検知
+# - Sheets: 5 分に 1 回（フォーム回答は即時取り込みが価値）
