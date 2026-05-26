@@ -145,6 +145,8 @@ module = [
     "pgvector.*",
     "googleapiclient.*",
     "google.oauth2.*",
+    "pypdf",
+    "pypdf.*",
     "yaml",
 ]
 ignore_missing_imports = true
