@@ -3,20 +3,42 @@
 # TeamAgent — AWS Secrets Manager から本番 secret を取得して
 # 環境変数に展開するスクリプト。
 #
-# Usage:
+# Usage (本番 EC2 / Lambda):
 #   set -a; source .env.production; set +a
+#   source scripts/load_secrets.sh
+#   python -m teamagent.runtime.slack_bot
+#
+# Usage (ローカル Mac、SSM tunnel 経由):
+#   # 別 Terminal で tunnel 起動
+#   set -a; source .env.local; set +a
 #   source scripts/load_secrets.sh
 #   python -m teamagent.runtime.slack_bot
 #
 # 前提：
 #   - aws CLI と適切な IAM 認証（プロファイル or Role）
-#   - .env.production が事前に読み込まれていること
-#     （RDS_HOST / *_SECRET_NAME 等が定義済み）
+#   - .env.* が事前に読み込まれていること（RDS_HOST / *_SECRET_NAME 等）
+#
+# 異常検知（自動 fail）：
+#   - プレースホルダ（__XXX__ / <xxx> 形式）が残っている
+#   - 必須 env が未設定
+#   - Secrets Manager から空文字が返る
 # ============================================================
 
 set -u
 
 _log() { echo "[load_secrets] $*" >&2; }
+
+# プレースホルダ検知（テンプレ値が残っているか）
+_check_placeholder() {
+    local var="$1"
+    local val="${!var:-}"
+    if [[ "$val" =~ ^__.+__$ ]] || [[ "$val" =~ \<.+\>$ ]]; then
+        _log "ERROR: $var にプレースホルダ '$val' が残っています。"
+        _log "       .env.* ファイルを編集して実値に置換してください。"
+        return 1
+    fi
+    return 0
+}
 
 _get_secret() {
     local name="$1"
@@ -40,6 +62,17 @@ _load() {
     _require_env SLACK_BOT_TOKEN_SECRET_NAME || return 1
     _require_env SLACK_APP_TOKEN_SECRET_NAME || return 1
     _require_env RDS_HOST || return 1
+
+    # プレースホルダ残り検知
+    _check_placeholder RDS_HOST || return 1
+
+    # tunnel モード / 本番モードを構造化ログに記載
+    if [[ "$RDS_HOST" == "localhost" || "$RDS_HOST" == "127.0.0.1" ]]; then
+        _log "MODE: local (SSM tunnel 経由想定 / RDS_HOST=$RDS_HOST:${RDS_PORT:-5432})"
+        _log "      別 Terminal で aws ssm start-session が起動済みであること"
+    else
+        _log "MODE: direct (本番 EC2/Lambda 想定 / RDS_HOST=$RDS_HOST:${RDS_PORT:-5432})"
+    fi
 
     local db_pass
     db_pass="$(_get_secret "$DB_PASSWORD_SECRET_NAME")"
