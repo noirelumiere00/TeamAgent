@@ -484,3 +484,84 @@
 4. **🟡 5/29 までに**：IT 申請 4 件
 5. **🟡 5/30 〜**：OpenClaw PoC（aws-samples/sample-OpenClaw-on-AWS-with-Bedrock）
 6. **🔵 子会社返信待ち** → 受領後 docs/v3.2/ に反映 + Sprint 2 末ゲート①判定
+
+---
+
+# 📌 v1.6 追加分（2026-05-26 = Day 5 完了）
+
+## Day 5 完了タスク（全部 🤖 単独完結）
+
+### Sprint 3 着手 PR-6 + 補完（5 PR merged）
+- ✅ **PR #43** Sprint 3 PR-6: ingest dispatcher（loader + repository + pipeline + scripts/ingest_sources.py + 17 件 test）
+- ✅ **PR #44** chore: ingest_sources.yaml の channel_id を実値に更新（C091ZSVTKF1, C0A1207GYHZ）
+- ✅ **PR #45** feat: Slack channel メンバーを ACL に自動写像 + fail-safe skip
+- ✅ **PR #46** fix(rls): chunks の INSERT/UPDATE/DELETE policy 追加 + documents の UPDATE policy（migration 0003）
+
+### 本番 RDS データ投入完了 🎯
+**2026-05-26 15:26 JST に Slack 197 documents + 197 chunks 投入成功**
+
+| channel | documents | acl_emails/doc |
+|---|---|---|
+| #proj-ナレッジ共有 (C091ZSVTKF1) | 97 | 53 emails |
+| #proj-ショート動画_営業フィードバック情報 (C0A1207GYHZ) | 100 | 54 emails |
+
+## 数値の更新
+
+| 指標 | v1.5（Day 4 末） | v1.6（Day 5 末） |
+|---|---|---|
+| マージ済 PR | #1〜#42 | **#1〜#46** |
+| pytest | 150 | **169** |
+| mypy strict source files | 24 | **28** |
+| migration | 0001, 0002 | **0001, 0002, 0003** |
+| 本番 RDS 投入 docs | 98 (旧 proposals_chunks) | **+197 (新 documents/chunks)** |
+| Slack ingest 対象 channel | 0 | **2 (ナレッジ + 営業FB)** |
+| Slack OAuth scopes | 17 | **18 (+users:read.email)** |
+
+## 動作確認済（2026-05-26）
+
+| 経路 | 状態 |
+|---|---|
+| `aws ssm start-session ... portForward` → 本番 RDS | ✅ 安定動作 |
+| `python scripts/ingest_sources.py --sources slack`（dry-run）| ✅ resolved_emails 53/54 |
+| `python scripts/ingest_sources.py --commit --sources slack` | ✅ 197 docs / 197 chunks INSERT、エラー 0 |
+| RLS app_role=teamagent_app + SET LOCAL app.user_email | ✅ chunks INSERT policy 通過 |
+| Sentry: PII スクラブ + 例外捕捉 | ✅（Day 3 から動作中）|
+
+## v1.6 時点でブロック中（user 作業）
+
+| ブロッカー | 担当 | 影響 |
+|---|---|---|
+| **GCP プロジェクト + OAuth クライアント** | 👤 | Drive folder ingest が動かない（PDF 取り込み未開始）|
+| **Terraform apply（cloudwatch.tf / security.tf）** | 👤 | CloudWatch メトリクスフィルタ + アラーム未稼働、CloudTrail multi-region 未起動 |
+| **AWS Chatbot Slack 通知連携** | 👤 | SNS Topic → Slack 通知の手動コンソール作業 |
+| **IT 申請 4 件**（sudo / プロキシ / Slack ポリシー / RDS IP） | 👤+🏢 | 本番運用安定化 |
+| **OpenClaw 子会社ヒアリング返信** | 🏢 | Sprint 2 末ゲート①判定材料 |
+
+## 次に踏み出す具体的な一歩（v1.6）
+
+優先度順（🤖 単独）:
+
+1. **🟢 最優先**: SearchSkill を documents/chunks に切替（`USE_NEW_SCHEMA=true` オプション追加）
+   - Slack 投入済 197 件が **検索可能になる** = ナレッジ AI の本質的価値
+   - 既存 proposals_chunks_contextual 経路は USE_NEW_SCHEMA=false で温存
+   - 想定: 2-3h, 1 PR
+2. **🟡 続き**: migration 0004 で `gsheets` ENUM 追加 + GSheets ingest 本実装
+   - Service Account のみで動く（OAuth 不要、共有設定だけ）
+3. **🟡 続き**: SearchSkill response に「どの Slack thread / channel から来た」を Block Kit で表示
+4. **🔵 待ち**: GCP OAuth 取得後 → Drive folder ingest
+   - Vision API でスライドページ画像化 → 説明文生成 → embedding（Sprint 4 採用候補）
+
+## モデル構成（2026-05-26 確定）
+
+| 役割 | 採用 | 備考 |
+|---|---|---|
+| LLM メイン | Bedrock Sonnet 4.6 (`jp.anthropic.claude-sonnet-4-6`) | 東京推論プロファイル |
+| LLM ルーター | Bedrock Haiku 4.5 (`jp.anthropic.claude-haiku-4-5-20251001-v1:0`) | USE_LLM_ROUTER=true |
+| Embedder | LocalE5 (`intfloat/multilingual-e5-large`, 1024 次元) | ローカル sentence-transformers |
+| DB | RDS PostgreSQL 16 + pgvector 0.8.2 | HNSW cosine + RLS |
+| Framework | 自前 SkillRegistry + 3層分離 (CLAUDE.md 6-bis) | LlamaIndex/LangChain 不採用 |
+| 観測 | Sentry SDK 2.60 + CloudWatch + structlog | PII スクラブ + AsyncioIntegration |
+
+| 日付 | バージョン | 更新内容 |
+|---|---|---|
+| 2026-05-26 | v1.6 | Day 5 完了。Sprint 3 PR-6 完成 + 本番 RDS に Slack 197 docs 投入。migration 0003 で chunks RLS 完備。次は SearchSkill を新スキーマに切替。 |
