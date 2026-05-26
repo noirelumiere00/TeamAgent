@@ -23,6 +23,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 MIGRATION_FILE = PROJECT_ROOT / "infra" / "migrations" / "0001_unified_documents.sql"
 MIGRATION_0004 = PROJECT_ROOT / "infra" / "migrations" / "0004_add_gsheets_source_type.sql"
+MIGRATION_0005 = PROJECT_ROOT / "infra" / "migrations" / "0005_ingest_jobs.sql"
 
 
 # -----------------------------------------------------------
@@ -132,6 +133,72 @@ def test_migration_has_unique_external_id() -> None:
     """source_type + external_id の複合 UNIQUE があること（idempotency）。"""
     sql = MIGRATION_FILE.read_text(encoding="utf-8")
     assert "UNIQUE (source_type, external_id)" in sql
+
+
+# -----------------------------------------------------------
+# migration 0005: ingest_jobs テーブル
+# -----------------------------------------------------------
+def test_migration_0005_file_exists() -> None:
+    assert MIGRATION_0005.exists(), f"missing migration: {MIGRATION_0005}"
+
+
+def test_migration_0005_defines_ingest_jobs_table() -> None:
+    """ingest_jobs テーブルと必須カラムが含まれること。"""
+    sql = MIGRATION_0005.read_text(encoding="utf-8")
+    assert re.search(r"CREATE TABLE IF NOT EXISTS ingest_jobs", sql)
+    for col in (
+        "source_type",
+        "external_id",
+        "state",
+        "batch_id",
+        "attempt_count",
+        "last_error",
+        "scanned_at",
+        "committed_at",
+        "metadata",
+    ):
+        assert col in sql, f"column {col} missing in migration 0005"
+
+
+def test_migration_0005_defines_state_enum() -> None:
+    """ingest_job_state ENUM が 7 状態を持つ。"""
+    sql = MIGRATION_0005.read_text(encoding="utf-8")
+    assert "CREATE TYPE ingest_job_state AS ENUM" in sql
+    for v in (
+        "'SCANNED'",
+        "'DOWNLOADED'",
+        "'EXTRACTED'",
+        "'EMBEDDED'",
+        "'COMMITTED'",
+        "'FAILED_TRANSIENT'",
+        "'POISON'",
+    ):
+        assert v in sql, f"state {v} missing"
+
+
+def test_migration_0005_has_updated_at_trigger() -> None:
+    """updated_at の自動更新トリガーが定義されている。"""
+    sql = MIGRATION_0005.read_text(encoding="utf-8")
+    assert "ingest_jobs_set_updated_at" in sql
+    assert "ingest_jobs_updated_at_trg" in sql
+
+
+def test_migration_0005_grants_app_role() -> None:
+    """teamagent_app ロールに DML 権限が付与されている。"""
+    sql = MIGRATION_0005.read_text(encoding="utf-8")
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON ingest_jobs TO teamagent_app" in sql
+
+
+def test_migration_0005_is_idempotent() -> None:
+    """ENUM / TABLE / TRIGGER が再実行可能な書き方。"""
+    sql = MIGRATION_0005.read_text(encoding="utf-8")
+    assert "IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ingest_job_state')" in sql
+    assert "CREATE TABLE IF NOT EXISTS ingest_jobs" in sql
+    assert "DROP TRIGGER IF EXISTS ingest_jobs_updated_at_trg" in sql
+    # インデックスも IF NOT EXISTS で保護
+    idx_total = len(re.findall(r"CREATE\s+INDEX\b", sql))
+    idx_safe = len(re.findall(r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\b", sql))
+    assert idx_total == idx_safe, "CREATE INDEX without IF NOT EXISTS in migration 0005"
 
 
 def test_rls_policy_uses_current_setting() -> None:
