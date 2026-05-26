@@ -13,7 +13,8 @@ version: 1
 
 slack_channels:
   # ---- 提案ナレッジ ----
-  - channel_id: "REPLACE_WITH_C_ID_FOR_proj-knowledge-sharing"
+  # channel_id を slack_search_channels で確認済 (2026-05-27)
+  - channel_id: "C091ZSVTKF1"
     channel_name: "#proj-ナレッジ共有"
     description: |
       提案時の情報や資料を共有するチャネル。スレッドに提案の経緯、メンバー間の
@@ -25,7 +26,8 @@ slack_channels:
       use_case: "RAG 検索の主要情報源"
 
   # ---- ショート動画営業 FB（最重要）----
-  - channel_id: "REPLACE_WITH_C_ID_FOR_proj-short-video-sales-feedback"
+  # channel_id を slack_search_channels で確認済 (2026-05-27)
+  - channel_id: "C0A1207GYHZ"
     channel_name: "#proj-ショート動画_営業フィードバック情報"
     description: |
       商談 FB・クライアント温度感が大量にあるチャネル。

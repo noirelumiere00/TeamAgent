@@ -40,21 +40,26 @@ def test_is_placeholder_passes_real_values() -> None:
 # -----------------------------------------------------------
 # 実 yaml のパース（既存ファイル）
 # -----------------------------------------------------------
-def test_load_real_yaml_skips_slack_placeholders_by_default() -> None:
-    """data/ingest_sources.yaml は Slack channel_id にプレースホルダがあるので skip される。"""
+def test_load_real_yaml_has_all_sources() -> None:
+    """data/ingest_sources.yaml は実 ID 投入済（2026-05-27 で channel_id 確定）。
+
+    Slack 2 ch / Drive 1 folder / Sheets 2 sheets が含まれる前提。
+    """
     sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
     assert isinstance(sources, IngestSources)
-    # Slack channels はプレースホルダなのでゼロ件にスキップされる
-    assert len(sources.slack_channels) == 0
-    # Drive folder と Sheets は実 ID なので残る
+    assert len(sources.slack_channels) == 2, (
+        f"Slack 2 ch 期待。 channel_id がプレースホルダに戻った場合 skip される。 "
+        f"got={[c.channel_id for c in sources.slack_channels]}"
+    )
     assert len(sources.gdrive_folders) >= 1
     assert len(sources.gsheets) >= 1
 
 
-def test_load_real_yaml_fails_with_strict_mode() -> None:
-    """skip_placeholder=False ではプレースホルダで ValueError。"""
-    with pytest.raises(ValueError, match="placeholder"):
-        load_ingest_sources(REAL_YAML, skip_placeholder=False)
+def test_load_real_yaml_passes_strict_mode() -> None:
+    """すべての ID が実値なので skip_placeholder=False でも通る。"""
+    # raise しないこと
+    sources = load_ingest_sources(REAL_YAML, skip_placeholder=False)
+    assert len(sources.slack_channels) == 2
 
 
 # -----------------------------------------------------------
