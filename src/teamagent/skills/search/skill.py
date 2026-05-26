@@ -46,6 +46,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         metadata_col: str | None = None,
         extra_cols: list[str] | None = None,
         use_contextual: bool = False,
+        use_new_schema: bool = False,
         app_role: str | None = "teamagent_app",
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
@@ -57,6 +58,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         Anthropic Contextual Retrieval（前置詞付き chunk + 再 embedding）で検索する。
         scripts/contextual_retrieval.py で事前にテーブルを作成しておく必要がある。
 
+        use_new_schema=True を指定すると migration 0001 の documents + chunks JOIN を使う。
+        Slack 197 件 + 将来の Drive/Gmail 全件を横断検索できるようになる。
+        USE_NEW_SCHEMA=true 環境変数でも切替可能（runtime/slack_bot.py で制御）。
+
         app_role: Postgres ロール切替（migration 0002 で導入の `teamagent_app`）。
           - 本番では必ず `teamagent_app` を渡し、SET ROLE で RLS を効かせる
           - ローカル開発で `teamagent_app` が未作成の環境では None を渡す（旧挙動）
@@ -66,6 +71,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self._bedrock = bedrock or BedrockClient.from_env()
         self._pgvector = pgvector or PgVectorClient.from_env()
         self._embedder = embedder
+        self._use_new_schema = use_new_schema
         if use_contextual:
             # Contextual Retrieval テーブルを優先（明示指定がなければ）
             self._target_table = (
@@ -116,6 +122,21 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     drive_url=(
                         str(h.metadata.get("drive_url")) if h.metadata.get("drive_url") else None
                     ),
+                    source_uri=(
+                        str(h.metadata["source_uri"])
+                        if h.metadata.get("source_uri")
+                        else None
+                    ),
+                    source_type=(
+                        str(h.metadata["source_type"])
+                        if h.metadata.get("source_type")
+                        else None
+                    ),
+                    channel_name=(
+                        str(h.metadata["channel_name"])
+                        if h.metadata.get("channel_name")
+                        else None
+                    ),
                 )
                 for h in hits
             ],
@@ -152,12 +173,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         現状は metadata 未設定でも動く（その場合は teamagent_app + user_email 未注入
         = RLS で何も見えない fail-safe、ただし proposals_chunks 系は RLS 未適用なので
         通常通り見える）。
-        """
-        where: str | None = None
-        if input.filter_industry and self._metadata_col is not None:
-            # メタデータ JSONB のフィルタ。metadata 列を持つテーブルでのみ有効
-            where = f"{self._metadata_col}->>'industry' = '{input.filter_industry}'"
 
+        use_new_schema=True の場合は search_similar_new_schema() を使い、
+        documents + chunks JOIN で横断検索する（Slack 197 件等が対象）。
+        """
         # ctx.metadata から RLS GUC 用の値を取得（runtime 層が注入することを想定）
         user_email = ctx.metadata.get("user_email")
         user_groups_raw = ctx.metadata.get("user_groups")
@@ -170,6 +189,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             user_groups=user_groups,
             user_role=user_role,
         ) as conn:
+            if self._use_new_schema:
+                return self._pgvector.search_similar_new_schema(
+                    conn=conn,
+                    embedding=embedding,
+                    limit=input.top_k,
+                    filter_industry=input.filter_industry,
+                    request_id=ctx.request_id,
+                )
+            where: str | None = None
+            if input.filter_industry and self._metadata_col is not None:
+                # メタデータ JSONB のフィルタ。metadata 列を持つテーブルでのみ有効
+                where = f"{self._metadata_col}->>'industry' = '{input.filter_industry}'"
             return self._pgvector.search_similar(
                 conn=conn,
                 embedding=embedding,
@@ -223,11 +254,17 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     def _build_source(hit: SearchHit) -> str | None:
         """SearchHit から表示用の source 文字列を組み立てる。
 
-        - metadata に "source" があればそれを使う（本番 RDS 想定）
-        - 無ければ file_name + page_num から組み立てる（ローカル proposals_chunks）
-        - どちらも無ければ None
+        優先順位:
+        1. source_type='slack' → channel_name（新スキーマ）
+        2. metadata "source"（旧スキーマ）
+        3. file_name + page_num（ローカル proposals_chunks）
+        4. None
         """
         meta = hit.metadata or {}
+        source_type = meta.get("source_type")
+        if source_type == "slack":
+            channel = meta.get("channel_name") or "Slack"
+            return str(channel)
         src = meta.get("source")
         if src:
             return str(src)

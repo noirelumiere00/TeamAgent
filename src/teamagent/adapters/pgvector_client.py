@@ -196,3 +196,82 @@ class PgVectorClient:
             top_score=hits[0].score if hits else None,
         )
         return hits
+
+    def search_similar_new_schema(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        embedding: list[float],
+        limit: int = 5,
+        filter_industry: str | None = None,
+        request_id: str | None = None,
+    ) -> list[SearchHit]:
+        """documents + chunks JOIN で cosine 類似度上位 limit 件を返す。
+
+        migration 0001 で作成した新スキーマ（documents / chunks）専用。
+        RLS は connection(app_role='teamagent_app', user_email=...) で有効化済の前提。
+
+        contextualized 列があれば優先して返す（Contextual Retrieval との互換性維持）。
+        chunk_id は UUID から hashtext で安定した整数に変換する（int 型の後方互換性維持）。
+        source_uri / source_type / title / channel_name は metadata に詰めて返す。
+        """
+        where_parts: list[str] = []
+        params: list[Any] = [embedding]  # score 算出の 1st %s
+
+        if filter_industry is not None:
+            where_parts.append("d.metadata->>'industry' = %s")
+            params.append(filter_industry)
+
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+        # chunk_id: hashtext は int4 だが bigint キャストして abs で INT_MIN overflow を防ぐ
+        sql = f"""
+            SELECT
+                abs(hashtext(c.id::text)::bigint) AS chunk_id,
+                COALESCE(c.contextualized, c.content) AS content,
+                1 - (c.embedding <=> %s::vector) AS score,
+                c.page_num,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                d.title,
+                d.metadata->>'channel_name' AS channel_name
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            {where_clause}
+            ORDER BY c.embedding <=> %s::vector
+            LIMIT %s
+        """  # nosec B608
+
+        # ORDER BY + LIMIT 用パラメータを追加
+        params.extend([embedding, limit])
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        hits: list[SearchHit] = []
+        for r in rows:
+            meta: dict[str, Any] = {
+                "source_uri": r.get("source_uri"),
+                "source_type": r.get("source_type"),
+                "title": r.get("title"),
+                "channel_name": r.get("channel_name"),
+            }
+            if r.get("page_num") is not None:
+                meta["page_num"] = r["page_num"]
+            hits.append(
+                SearchHit(
+                    chunk_id=int(r["chunk_id"]),
+                    content=str(r["content"]),
+                    score=float(r["score"]),
+                    metadata=meta,
+                )
+            )
+
+        logger.info(
+            "pgvector_search_new_schema",
+            request_id=request_id,
+            limit=limit,
+            hit_count=len(hits),
+            top_score=hits[0].score if hits else None,
+        )
+        return hits

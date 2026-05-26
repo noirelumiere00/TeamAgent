@@ -50,14 +50,43 @@ def strip_mention(text: str) -> str:
     return _MENTION_PATTERN.sub("", text, count=1).strip()
 
 
+def _slack_thread_permalink(source_uri: str) -> str | None:
+    """slack://CHANNEL_ID/THREAD_TS を Slack permalink URL に変換する。
+
+    変換例: slack://C091ZSVTKF1/1748244936.050099
+          → https://vectorinc.slack.com/archives/C091ZSVTKF1/p1748244936050099
+
+    SLACK_WORKSPACE_DOMAIN 環境変数が未設定の場合は None を返す。
+    """
+    # SLACK_WORKSPACE はワークスペース名のみ（例: "vectorinc"）
+    workspace = os.environ.get("SLACK_WORKSPACE")
+    if not workspace:
+        return None
+    if not source_uri.startswith("slack://"):
+        return None
+    rest = source_uri[len("slack://"):]
+    parts = rest.split("/", 1)
+    if len(parts) != 2:
+        return None
+    channel_id, thread_ts = parts[0], parts[1]
+    # "1748244936.050099" → "1748244936050099" (小数点を除去)
+    ts_digits = thread_ts.replace(".", "")
+    return f"https://{workspace}.slack.com/archives/{channel_id}/p{ts_digits}"
+
+
 def _format_hit_source_label(hit: Any) -> str:
     """SearchHitOut から「出典 + ページ」の表示ラベルを組み立てる。
 
     優先順位：
-      1. file_name + page_num（構造化、Sprint 2 で追加）
-      2. source 文字列（後方互換）
-      3. chunk #N（最終フォールバック）
+      1. source_type='slack' → 💬 channel_name（新スキーマ）
+      2. file_name + page_num（構造化、Sprint 2 で追加）
+      3. source 文字列（後方互換）
+      4. chunk #N（最終フォールバック）
     """
+    source_type = getattr(hit, "source_type", None)
+    if source_type == "slack":
+        channel = getattr(hit, "channel_name", None) or "Slack"
+        return f"💬 *{channel}*"
     file_name = getattr(hit, "file_name", None)
     page_num = getattr(hit, "page_num", None)
     if file_name:
@@ -115,7 +144,19 @@ def build_search_blocks(output: SearchOutput) -> list[dict[str, Any]]:
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": line},
             }
-            if hit.drive_url:
+            # ボタン優先順位: Slack thread > Drive（source_type で判定）
+            source_type = getattr(hit, "source_type", None)
+            source_uri = getattr(hit, "source_uri", None)
+            if source_type == "slack" and source_uri:
+                permalink = _slack_thread_permalink(source_uri)
+                if permalink:
+                    section["accessory"] = {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "💬 Slack で開く"},
+                        "url": permalink,
+                        "action_id": f"open_slack_{hit.chunk_id}",
+                    }
+            elif hit.drive_url:
                 section["accessory"] = {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "📎 Drive で開く"},
@@ -195,11 +236,21 @@ class SkillDispatcher:
             "true",
             "yes",
         )
+        use_new_schema = os.environ.get("USE_NEW_SCHEMA", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         instance = SearchSkill(
             embedder=LocalE5Embedder(),
             use_contextual=use_contextual,
+            use_new_schema=use_new_schema,
         )
-        logger.info("search_skill_initialized", use_contextual=use_contextual)
+        logger.info(
+            "search_skill_initialized",
+            use_contextual=use_contextual,
+            use_new_schema=use_new_schema,
+        )
         self._skill_cache["search"] = instance
         return instance
 
