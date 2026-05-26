@@ -147,6 +147,8 @@ class SkillDispatcher:
 
     def __init__(self, router: SkillRouter | None = None) -> None:
         self._skill_cache: dict[str, Any] = {}
+        # Slack user_id → email cache（RLS GUC 注入用、users.info の呼び出しを削減）
+        self._user_email_cache: dict[str, str | None] = {}
         if router is not None:
             self._router = router
         else:
@@ -201,11 +203,44 @@ class SkillDispatcher:
         self._skill_cache["search"] = instance
         return instance
 
+    async def _resolve_user_email(self, user_id: str | None) -> str | None:
+        """Slack user_id → email を解決する（RLS 評価用、users.info キャッシュ）。
+
+        SLACK_BOT_TOKEN に users:read.email スコープが必要。
+        失敗時は None を返す（RLS 経由で fail-safe に何も見えなくなる）。
+        """
+        if not user_id or user_id == "unknown":
+            return None
+        if user_id in self._user_email_cache:
+            return self._user_email_cache[user_id]
+        try:
+            from teamagent.adapters.slack_client import SlackClient
+
+            slack = SlackClient(bot_token=os.environ.get("SLACK_BOT_TOKEN", ""))
+            # slack_sdk の users_info を直接叩く（adapter に専用 method 未実装のため暫定）
+            resp = await slack._client.users_info(user=user_id)
+            profile: dict[str, Any] = (resp.get("user") or {}).get("profile", {}) or {}
+            email = profile.get("email")
+            self._user_email_cache[user_id] = email
+            logger.info(
+                "slack_user_email_resolved",
+                user_id=user_id,
+                resolved=bool(email),
+            )
+            return email
+        except Exception:
+            logger.exception("slack_user_email_resolve_failed", user_id=user_id)
+            return None
+
     async def run_search(self, query: str, request_id: str, user_id: str | None) -> SearchOutput:
         """SearchSkill を別スレッドで実行（同期 I/O が含まれるため）。
 
         SkillRouter で クエリを判定し、industry キーワードが含まれていれば
         SearchInput.filter_industry に自動付与する。
+
+        Slack user_id → email を解決して ctx.metadata['user_email'] に注入。
+        SearchSkill 側で PgVectorClient.connection(app_role='teamagent_app',
+        user_email=...) として RLS policy が評価される（documents/chunks 切替後に有効）。
         """
         decision = self._router.route(query, request_id=request_id)
         logger.info(
@@ -221,8 +256,20 @@ class SkillDispatcher:
         # 注：meta / compare は今は通常検索で代用（Sprint 2 で本格実装）
         # query_type=COMPARE/META はログ出すだけで content と同じ動作にする
 
+        # RLS 評価用に Slack user_id → email を解決
+        user_email = await self._resolve_user_email(user_id)
+
         skill = self.get_search_skill()
-        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        ctx = SkillContext(
+            request_id=request_id,
+            user_id=user_id,
+            metadata={
+                # PgVectorClient.connection() に渡される RLS GUC
+                "user_email": user_email,
+                # user_groups は将来 Slack User Group → email_list 解決時に注入予定
+                "user_role": "member",
+            },
+        )
         input_obj = SearchInput(
             query=query,
             top_k=5,
