@@ -537,18 +537,16 @@
 | **IT 申請 4 件**（sudo / プロキシ / Slack ポリシー / RDS IP） | 👤+🏢 | 本番運用安定化 |
 | **OpenClaw 子会社ヒアリング返信** | 🏢 | Sprint 2 末ゲート①判定材料 |
 
-## 次に踏み出す具体的な一歩（v1.6）
+## 次に踏み出す具体的な一歩（v1.7）
 
 優先度順（🤖 単独）:
 
-1. **🟢 最優先**: SearchSkill を documents/chunks に切替（`USE_NEW_SCHEMA=true` オプション追加）
-   - Slack 投入済 197 件が **検索可能になる** = ナレッジ AI の本質的価値
-   - 既存 proposals_chunks_contextual 経路は USE_NEW_SCHEMA=false で温存
-   - 想定: 2-3h, 1 PR
-2. **🟡 続き**: migration 0004 で `gsheets` ENUM 追加 + GSheets ingest 本実装
+1. ✅ **完了 (Day 6)**: SearchSkill を documents/chunks に切替（PR #48）
+   - `USE_NEW_SCHEMA=true` + `SLACK_WORKSPACE=vectorinc` で Slack 197 件が実検索可能
+   - Block Kit に「💬 Slack で開く」ボタン追加（Slack thread permalink）
+2. **🟡 次**: migration 0004 で `gsheets` ENUM 追加 + GSheets ingest 本実装
    - Service Account のみで動く（OAuth 不要、共有設定だけ）
-3. **🟡 続き**: SearchSkill response に「どの Slack thread / channel から来た」を Block Kit で表示
-4. **🔵 待ち**: GCP OAuth 取得後 → Drive folder ingest
+3. **🔵 待ち**: GCP OAuth 取得後 → Drive folder ingest
    - Vision API でスライドページ画像化 → 説明文生成 → embedding（Sprint 4 採用候補）
 
 ## モデル構成（2026-05-26 確定）
@@ -565,3 +563,4 @@
 | 日付 | バージョン | 更新内容 |
 |---|---|---|
 | 2026-05-26 | v1.6 | Day 5 完了。Sprint 3 PR-6 完成 + 本番 RDS に Slack 197 docs 投入。migration 0003 で chunks RLS 完備。次は SearchSkill を新スキーマに切替。 |
+| 2026-05-26 | v1.7 | Day 6: PR #48 SearchSkill 新スキーマ切替完了。USE_NEW_SCHEMA=true で documents/chunks JOIN 検索、Block Kit に「💬 Slack で開く」ボタン追加。pytest 169→180、mypy strict 28 files 全通過。 |

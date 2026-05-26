@@ -10,6 +10,7 @@ from typing import Any
 
 from teamagent.runtime.slack_bot import (
     _asyncio_exception_handler,
+    _slack_thread_permalink,
     build_search_blocks,
     format_search_response,
     strip_mention,
@@ -213,6 +214,78 @@ def test_build_blocks_uses_file_name_page() -> None:
         if b.get("type") == "section" and isinstance(b.get("text"), dict)
     ]
     assert any("📄 *b.pdf*" in t and "(p.3)" in t for t in section_texts)
+
+
+# -----------------------------------------------------------
+# _slack_thread_permalink
+# -----------------------------------------------------------
+def test_slack_thread_permalink_generates_url(monkeypatch: Any) -> None:
+    """SLACK_WORKSPACE が設定されているとき permalink が生成される。"""
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    url = _slack_thread_permalink("slack://C091ZSVTKF1/1748244936.050099")
+    assert url == "https://vectorinc.slack.com/archives/C091ZSVTKF1/p1748244936050099"
+
+
+def test_slack_thread_permalink_no_domain_returns_none(monkeypatch: Any) -> None:
+    """SLACK_WORKSPACE 未設定のとき None を返す。"""
+    monkeypatch.delenv("SLACK_WORKSPACE", raising=False)
+    assert _slack_thread_permalink("slack://C091ZSVTKF1/1748244936.050099") is None
+
+
+def test_slack_thread_permalink_non_slack_uri_returns_none(monkeypatch: Any) -> None:
+    """slack:// でない URI は None を返す。"""
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    assert _slack_thread_permalink("gdrive://abc123") is None
+
+
+def test_build_search_blocks_slack_source_shows_thread_button(monkeypatch: Any) -> None:
+    """source_type='slack' + SLACK_WORKSPACE 設定済みのとき Slack ボタンが生成される。"""
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    output = SearchOutput(
+        answer="Slack から見つかりました",
+        hits=[
+            SearchHitOut(
+                chunk_id=99,
+                content="...",
+                score=0.92,
+                source="#proj-ナレッジ共有",
+                source_type="slack",
+                source_uri="slack://C091ZSVTKF1/1748244936.050099",
+                channel_name="#proj-ナレッジ共有",
+            ),
+        ],
+        total_cost_usd=0.0,
+    )
+    blocks = build_search_blocks(output)
+
+    button_sections = [b for b in blocks if b.get("type") == "section" and "accessory" in b]
+    assert len(button_sections) == 1
+    btn = button_sections[0]["accessory"]
+    assert btn["type"] == "button"
+    assert "C091ZSVTKF1" in btn["url"]
+    assert btn["text"]["text"] == "💬 Slack で開く"
+
+
+def test_format_search_response_slack_source_shows_channel(monkeypatch: Any) -> None:
+    """source_type='slack' のとき 💬 channel_name で表示される。"""
+    monkeypatch.delenv("SLACK_WORKSPACE_DOMAIN", raising=False)
+    output = SearchOutput(
+        answer="ans",
+        hits=[
+            SearchHitOut(
+                chunk_id=1,
+                content="...",
+                score=0.9,
+                source_type="slack",
+                channel_name="#proj-ナレッジ共有",
+                source_uri="slack://C091ZSVTKF1/1748244936.050099",
+            )
+        ],
+        total_cost_usd=0.0,
+    )
+    formatted = format_search_response(output)
+    assert "💬" in formatted
+    assert "#proj-ナレッジ共有" in formatted
 
 
 # -----------------------------------------------------------

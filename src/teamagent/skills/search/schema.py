@@ -49,6 +49,20 @@ class SearchHitOut(BaseModel):
         default=None,
         description="Google Drive 等の正本 URL。営業がクリックして元 PDF を開く",
     )
+    source_uri: str | None = Field(
+        default=None,
+        description=(
+            "元データの URI（新スキーマ）。'slack://CHANNEL_ID/THREAD_TS' / 'gdrive://FILE_ID' 等"
+        ),
+    )
+    source_type: str | None = Field(
+        default=None,
+        description="ソース種別（'slack' / 'pdf' / 'gdrive' 等）。新スキーマ用",
+    )
+    channel_name: str | None = Field(
+        default=None,
+        description="Slack チャネル名（source_type='slack' の場合に設定）",
+    )
 
 
 class SearchOutput(BaseModel):

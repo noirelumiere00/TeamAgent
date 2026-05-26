@@ -210,3 +210,110 @@ def test_search_filter_industry_ignored_without_metadata_col(
     assert call_kwargs["where"] is None
     assert call_kwargs["content_col"] == "text"
     assert call_kwargs["metadata_col"] is None
+
+
+# -----------------------------------------------------------
+# use_new_schema=True パス（documents + chunks 新スキーマ）
+# -----------------------------------------------------------
+
+
+@pytest.fixture
+def fake_pgvector_new_schema() -> MagicMock:
+    """新スキーマ用 pgvector モック。search_similar_new_schema() を返す。"""
+    mock = MagicMock()
+    cm_mock = MagicMock()
+    cm_mock.__enter__ = MagicMock(return_value=MagicMock())
+    cm_mock.__exit__ = MagicMock(return_value=False)
+    mock.connection.return_value = cm_mock
+
+    from teamagent.adapters.pgvector_client import SearchHit
+
+    mock.search_similar_new_schema.return_value = [
+        SearchHit(
+            chunk_id=123456,
+            content="営業FB: SNS広告運用で飲食 CPA 30%改善",
+            score=0.92,
+            metadata={
+                "source_uri": "slack://C091ZSVTKF1/1748244936.050099",
+                "source_type": "slack",
+                "title": "#proj-ナレッジ共有 1748244936.050099",
+                "channel_name": "#proj-ナレッジ共有",
+            },
+        ),
+    ]
+    return mock
+
+
+def test_search_new_schema_calls_new_method(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """use_new_schema=True のとき search_similar_new_schema() が呼ばれること。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+    out = skill.run(input=SearchInput(query="飲食の事例は？"), ctx=SkillContext())
+
+    fake_pgvector_new_schema.search_similar_new_schema.assert_called_once()
+    fake_pgvector_new_schema.search_similar.assert_not_called()
+    assert len(out.hits) == 1
+
+
+def test_search_new_schema_populates_source_fields(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """新スキーマの SearchHit から source_uri / source_type / channel_name が SearchHitOut に反映される。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+    out = skill.run(input=SearchInput(query="飲食の事例は？"), ctx=SkillContext())
+
+    hit = out.hits[0]
+    assert hit.source_uri == "slack://C091ZSVTKF1/1748244936.050099"
+    assert hit.source_type == "slack"
+    assert hit.channel_name == "#proj-ナレッジ共有"
+    assert hit.source == "#proj-ナレッジ共有"  # _build_source の戻り値
+
+
+def test_search_new_schema_filter_industry_passed(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """use_new_schema=True + filter_industry が search_similar_new_schema に渡ること。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+    skill.run(
+        input=SearchInput(query="飲食事例", top_k=3, filter_industry="飲食"),
+        ctx=SkillContext(),
+    )
+
+    call_kwargs: dict[str, Any] = (
+        fake_pgvector_new_schema.search_similar_new_schema.call_args.kwargs
+    )
+    assert call_kwargs["filter_industry"] == "飲食"
+    assert call_kwargs["limit"] == 3
+
+
+def test_search_old_schema_not_affected_by_new_flag(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """use_new_schema=False（デフォルト）では旧 search_similar() が呼ばれること。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+        use_new_schema=False,
+    )
+    skill.run(input=SearchInput(query="x"), ctx=SkillContext())
+
+    fake_pgvector.search_similar.assert_called_once()
+    fake_pgvector.search_similar_new_schema = MagicMock()  # 呼ばれていないことを確認
+    fake_pgvector.search_similar_new_schema.assert_not_called()
