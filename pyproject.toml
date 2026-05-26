@@ -54,6 +54,7 @@ dependencies = [
     "tenacity>=9.0.0",  # リトライ
     "structlog>=24.4.0",
     "rich>=13.9.0",
+    "pyyaml>=6.0.0",          # data/ingest_sources.yaml パース用（Sprint 3 PR-6）
 
     # --- Observability ---
     # sentry-sdk: DSN 未設定なら no-op、Async/Logging integrations 同梱
@@ -144,6 +145,7 @@ module = [
     "pgvector.*",
     "googleapiclient.*",
     "google.oauth2.*",
+    "yaml",
 ]
 ignore_missing_imports = true
 
