@@ -13,6 +13,7 @@ from teamagent.runtime.slack_bot import (
     _slack_thread_permalink,
     build_search_blocks,
     format_search_response,
+    parse_command_text,
     strip_mention,
 )
 from teamagent.skills.search.schema import SearchHitOut, SearchOutput
@@ -286,6 +287,59 @@ def test_format_search_response_slack_source_shows_channel(monkeypatch: Any) -> 
     formatted = format_search_response(output)
     assert "💬" in formatted
     assert "#proj-ナレッジ共有" in formatted
+
+
+# -----------------------------------------------------------
+# parse_command_text — /teamagent_search のオプション抽出
+# -----------------------------------------------------------
+def test_parse_command_text_pure_query() -> None:
+    """key=value が無いケース: 文字列はそのまま query、options は空。"""
+    assert parse_command_text("飲食店PR事例") == ("飲食店PR事例", {})
+
+
+def test_parse_command_text_with_industry() -> None:
+    """末尾の industry=飲食 が options に行き、query から外れる。"""
+    assert parse_command_text("案件 industry=飲食") == ("案件", {"industry": "飲食"})
+
+
+def test_parse_command_text_with_top_k() -> None:
+    """top_k=10 もオプションとして抽出される（値は str のまま）。"""
+    q, opts = parse_command_text("案件 top_k=10")
+    assert q == "案件"
+    assert opts == {"top_k": "10"}
+
+
+def test_parse_command_text_options_first() -> None:
+    """先頭にオプションがあっても query が正しく残る（順不同許容）。"""
+    q, opts = parse_command_text("industry=飲食 top_k=10 飲食店PR事例")
+    assert q == "飲食店PR事例"
+    assert opts == {"industry": "飲食", "top_k": "10"}
+
+
+def test_parse_command_text_quoted_value_with_space() -> None:
+    """\"...\" でクォートされた値の中の空白は値の一部として扱う。"""
+    q, opts = parse_command_text('industry="飲食 業界" 案件')
+    assert opts["industry"] == "飲食 業界"
+    assert q == "案件"
+
+
+def test_parse_command_text_unknown_key_stays_in_query() -> None:
+    """ホワイトリスト外のキー (foo=bar) は options に取らず query に残す。"""
+    q, opts = parse_command_text("foo=bar 案件 industry=飲食")
+    assert "foo=bar" in q
+    assert opts == {"industry": "飲食"}
+
+
+def test_parse_command_text_empty_string() -> None:
+    """空文字を渡しても落ちず ('', {}) を返す。"""
+    assert parse_command_text("") == ("", {})
+
+
+def test_parse_command_text_only_options_returns_empty_query() -> None:
+    """オプションだけ渡された場合 query は空文字（呼び出し側で「使い方」を返す）。"""
+    q, opts = parse_command_text("industry=飲食 top_k=5")
+    assert q == ""
+    assert opts == {"industry": "飲食", "top_k": "5"}
 
 
 # -----------------------------------------------------------

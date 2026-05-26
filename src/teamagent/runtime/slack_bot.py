@@ -56,7 +56,7 @@ def _slack_thread_permalink(source_uri: str) -> str | None:
     変換例: slack://C091ZSVTKF1/1748244936.050099
           → https://vectorinc.slack.com/archives/C091ZSVTKF1/p1748244936050099
 
-    SLACK_WORKSPACE_DOMAIN 環境変数が未設定の場合は None を返す。
+    SLACK_WORKSPACE 環境変数が未設定の場合は None を返す。
     """
     # SLACK_WORKSPACE はワークスペース名のみ（例: "vectorinc"）
     workspace = os.environ.get("SLACK_WORKSPACE")
@@ -72,6 +72,39 @@ def _slack_thread_permalink(source_uri: str) -> str | None:
     # "1748244936.050099" → "1748244936050099" (小数点を除去)
     ts_digits = thread_ts.replace(".", "")
     return f"https://{workspace}.slack.com/archives/{channel_id}/p{ts_digits}"
+
+
+# /teamagent_search で受け付けるオプションのホワイトリスト
+# 未知キーは query にそのまま残す（=有効な値が誤って options に吸われない fail-safe）
+_SLASH_COMMAND_ALLOWED_KEYS: frozenset[str] = frozenset({"industry", "top_k"})
+
+_KV_PATTERN = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<val>\"[^\"]*\"|\S+)")
+
+
+def parse_command_text(text: str) -> tuple[str, dict[str, str]]:
+    """Slack スラッシュコマンドの text を「自然文クエリ + key=value オプション」に分解する。
+
+    例:
+        "案件 industry=飲食"             → ("案件", {"industry": "飲食"})
+        "industry=飲食 top_k=10 PR事例"  → ("PR事例", {"industry": "飲食", "top_k": "10"})
+        'industry="飲食 業界" 案件'       → ("案件", {"industry": "飲食 業界"})
+
+    未知のキー（ホワイトリスト外）は options に取らず、query 側にそのまま残す。
+    "Escape channels, users, and links" は Slack App 設定で OFF にする前提。
+    """
+    options: dict[str, str] = {}
+
+    def _take(m: re.Match[str]) -> str:
+        key = m.group("key")
+        if key not in _SLASH_COMMAND_ALLOWED_KEYS:
+            return m.group(0)  # 未知キーは query に残す
+        val = m.group("val").strip('"')
+        options[key] = val
+        return ""
+
+    residual = _KV_PATTERN.sub(_take, text)
+    query = " ".join(residual.split()).strip()
+    return query, options
 
 
 def _format_hit_source_label(hit: Any) -> str:
@@ -283,11 +316,23 @@ class SkillDispatcher:
             logger.exception("slack_user_email_resolve_failed", user_id=user_id)
             return None
 
-    async def run_search(self, query: str, request_id: str, user_id: str | None) -> SearchOutput:
+    async def run_search(
+        self,
+        query: str,
+        request_id: str,
+        user_id: str | None,
+        *,
+        filter_industry_override: str | None = None,
+        top_k: int = 5,
+    ) -> SearchOutput:
         """SearchSkill を別スレッドで実行（同期 I/O が含まれるため）。
 
         SkillRouter で クエリを判定し、industry キーワードが含まれていれば
         SearchInput.filter_industry に自動付与する。
+
+        filter_industry_override / top_k はスラッシュコマンドから明示指定する用途。
+        - filter_industry_override が非 None なら Router の auto-detection より優先
+        - top_k は 1〜20 の範囲にサニタイズ（呼び出し側で済んでいる前提だが二重防御）
 
         Slack user_id → email を解決して ctx.metadata['user_email'] に注入。
         SearchSkill 側で PgVectorClient.connection(app_role='teamagent_app',
@@ -301,11 +346,17 @@ class SkillDispatcher:
             confidence=decision.confidence,
             filter=decision.extracted_filter,
             reason=decision.reason,
+            filter_industry_override=filter_industry_override,
+            top_k=top_k,
         )
 
-        filter_industry = decision.extracted_filter.get("industry")
+        # 明示指定が最優先、無ければ router の自動検出
+        filter_industry = filter_industry_override or decision.extracted_filter.get("industry")
         # 注：meta / compare は今は通常検索で代用（Sprint 2 で本格実装）
         # query_type=COMPARE/META はログ出すだけで content と同じ動作にする
+
+        # top_k を 1〜20 にサニタイズ（API 経由の異常値防御）
+        top_k_safe = max(1, min(top_k, 20))
 
         # RLS 評価用に Slack user_id → email を解決
         user_email = await self._resolve_user_email(user_id)
@@ -323,7 +374,7 @@ class SkillDispatcher:
         )
         input_obj = SearchInput(
             query=query,
-            top_k=5,
+            top_k=top_k_safe,
             filter_industry=filter_industry,
         )
         loop = asyncio.get_running_loop()
@@ -451,6 +502,91 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             channel=channel,
             text=format_search_response(output),
             request_id=request_id,
+            blocks=build_search_blocks(output),
+        )
+
+    @app.command("/teamagent_search")
+    async def handle_teamagent_search(
+        ack: Any,
+        respond: Any,
+        command: dict[str, Any],
+    ) -> None:
+        """Slack スラッシュコマンド `/teamagent_search <query> [industry=...] [top_k=N]`
+
+        3 秒制約: ack() を先頭で即時に呼ぶ。検索本体は response_url 経由で `respond()` する。
+        コマンドが何も渡されなかったら使い方を ephemeral で返す。
+        エラーは ephemeral で本人にだけ通知（チャネルを汚さない）。
+        """
+        await ack()
+
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        user_id = command.get("user_id")
+        channel_id = command.get("channel_id", "")
+        raw_text = (command.get("text") or "").strip()
+
+        logger.info(
+            "slack_slash_command",
+            request_id=request_id,
+            user_id=user_id,
+            channel=channel_id,
+            text_len=len(raw_text),
+        )
+
+        if not raw_text:
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "使い方: `/teamagent_search <自然文クエリ> [industry=飲食] [top_k=10]`\n"
+                    "例: `/teamagent_search 飲食店PR事例 industry=飲食 top_k=5`"
+                ),
+            )
+            return
+
+        query, options = parse_command_text(raw_text)
+        if not query:
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "クエリ本文が空です。`/teamagent_search 飲食店事例` のように指定してください。"
+                ),
+            )
+            return
+
+        filter_industry = options.get("industry")
+        top_k_raw = options.get("top_k", "5")
+        try:
+            top_k_val = int(top_k_raw)
+        except ValueError:
+            top_k_val = 5
+
+        try:
+            output = await disp.run_search(
+                query,
+                request_id,
+                user_id,
+                filter_industry_override=filter_industry,
+                top_k=top_k_val,
+            )
+        except Exception as e:
+            logger.exception("slash_command_search_failed", request_id=request_id)
+            capture_skill_exception(
+                e,
+                request_id=request_id,
+                skill="search",
+                user_id=user_id,
+                extra={"channel": channel_id, "via": "slash"},
+            )
+            await respond(
+                response_type="ephemeral",
+                text=f"検索中にエラーが発生しました。`request_id={request_id}`",
+            )
+            return
+
+        # 結果は in_channel で公開（営業同士で共有価値があるため）。
+        # コマンド本人のみに見せたいなら response_type="ephemeral" に変える。
+        await respond(
+            response_type="in_channel",
+            text=format_search_response(output),
             blocks=build_search_blocks(output),
         )
 
