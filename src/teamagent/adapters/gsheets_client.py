@@ -250,7 +250,7 @@ class GSheetsClient:
         if sa_path:
             from google.oauth2 import service_account
 
-            return service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
+            return service_account.Credentials.from_service_account_file(  # type: ignore
                 sa_path, scopes=list(self._scopes)
             )
         refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN")
@@ -259,7 +259,7 @@ class GSheetsClient:
         if refresh_token and client_id and client_secret:
             from google.oauth2.credentials import Credentials
 
-            return Credentials(  # type: ignore[no-untyped-call]
+            return Credentials(  # type: ignore
                 token=None,
                 refresh_token=refresh_token,
                 token_uri="https://oauth2.googleapis.com/token",

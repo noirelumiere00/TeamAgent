@@ -418,7 +418,7 @@ class GmailClient:
         if sa_path:
             from google.oauth2 import service_account
 
-            creds = service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
+            creds = service_account.Credentials.from_service_account_file(  # type: ignore
                 sa_path, scopes=list(self._scopes)
             )
             # DWD: impersonate user 指定で全社員になりすまし可能（要 Workspace Admin 承認）
@@ -431,7 +431,7 @@ class GmailClient:
         if refresh_token and client_id and client_secret:
             from google.oauth2.credentials import Credentials
 
-            return Credentials(  # type: ignore[no-untyped-call]
+            return Credentials(  # type: ignore
                 token=None,
                 refresh_token=refresh_token,
                 token_uri="https://oauth2.googleapis.com/token",
