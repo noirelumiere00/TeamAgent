@@ -420,3 +420,258 @@ def test_ingest_gsheet_handler_row_per_document(monkeypatch: pytest.MonkeyPatch)
     # external_id は <sheet_id>:<gid>:<row_idx> 形式（row_idx=2 から）
     assert repo.upsert_calls[0]["external_id"] == "1V:537831563:2"
     assert repo.upsert_calls[1]["external_id"] == "1V:537831563:3"
+
+
+# -----------------------------------------------------------
+# Drive folder ingest — PDF 本文抽出 + ACL 解決
+# -----------------------------------------------------------
+def _make_drive_file(
+    id: str,
+    name: str = "test.pdf",
+    mime: str = "application/pdf",
+    owners: tuple[str, ...] = (),
+) -> Any:
+    from teamagent.adapters.gdrive_client import DriveFile
+
+    return DriveFile(
+        id=id,
+        name=name,
+        mime_type=mime,
+        modified_time="2026-05-26T16:00:00Z",
+        size=1234,
+        parents=(),
+        web_view_link=f"https://drive.google.com/file/d/{id}/view",
+        owners_email=owners,
+    )
+
+
+def _make_drive_perm(type: str, role: str, email: str | None, deleted: bool = False) -> Any:
+    from teamagent.adapters.gdrive_client import DrivePermission
+
+    return DrivePermission(
+        id="p1", type=type, role=role, email_address=email, domain=None, deleted=deleted
+    )
+
+
+def test_ingest_gdrive_folder_pdf_extracts_chunks_and_resolves_acl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PDF を download → 抽出 → 複数 chunk + ACL を解決して upsert する。"""
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [_make_drive_file(id="F1", name="提案書.pdf", owners=("alice@x.jp",))],
+        None,
+    )
+    fake_client.list_permissions.return_value = [
+        _make_drive_perm("user", "owner", "alice@x.jp"),
+        _make_drive_perm("user", "writer", "bob@x.jp"),
+        _make_drive_perm("group", "reader", "sales@x.jp"),
+    ]
+    fake_client.download_file_bytes.return_value = b"<fake-pdf-bytes>"
+
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls: fake_client),
+    )
+
+    # pypdf を monkeypatch して 3 ページの PDF を擬似する
+    fake_reader = MagicMock()
+    p1 = MagicMock()
+    p1.extract_text.return_value = "ページ 1 提案書本文" * 50  # 長文 → 複数 chunk
+    p2 = MagicMock()
+    p2.extract_text.return_value = "ページ 2"
+    fake_reader.pages = [p1, p2]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="営業提案書",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-drive",
+    )
+    assert docs_n == 1
+    assert chunks_n >= 2  # 複数 chunks（page 1 が長文なので分割される）
+    call = repo.upsert_calls[0]
+    assert call["external_id"] == "F1"
+    assert call["source_type"] == "gdrive"
+
+
+def test_ingest_gdrive_folder_non_pdf_uses_title_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 PDF（Google Doc 等）は title だけで 1 chunk 作る（雛形動作）。"""
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [
+            _make_drive_file(
+                id="DOC1",
+                name="議事録.gdoc",
+                mime="application/vnd.google-apps.document",
+                owners=("alice@x.jp",),
+            )
+        ],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER2",
+        folder_name="議事録",
+        description="",
+        mime_type_filter=None,
+    )
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    assert docs_n == 1
+    assert chunks_n == 1
+    # download_file_bytes は呼ばれない（PDF 以外）
+    fake_client.download_file_bytes.assert_not_called()
+
+
+def test_ingest_gdrive_folder_skips_pdf_when_download_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """download_file_bytes が例外を投げると、その 1 件は skip され他はそのまま処理される。"""
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [
+            _make_drive_file(id="OK", name="ok.pdf", owners=("alice@x.jp",)),
+            _make_drive_file(id="FAIL", name="fail.pdf", owners=("alice@x.jp",)),
+        ],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+
+    def _dl(file_id: str, request_id: str) -> bytes:
+        if file_id == "FAIL":
+            raise RuntimeError("simulated 403")
+        return b"<fake>"
+
+    fake_client.download_file_bytes.side_effect = _dl
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls: fake_client),
+    )
+    fake_reader = MagicMock()
+    p = MagicMock()
+    p.extract_text.return_value = "ok content"
+    fake_reader.pages = [p]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="F",
+        folder_name="x",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    # OK 1 件のみ upsert される
+    assert docs_n == 1
+    assert chunks_n >= 1
+    assert len(repo.upsert_calls) == 1
+    assert repo.upsert_calls[0]["external_id"] == "OK"
+
+
+def test_ingest_gdrive_folder_paginates_list_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list_files の next_page_token を辿って全件取得する。"""
+    fake_client = MagicMock()
+    fake_client.list_files.side_effect = [
+        ([_make_drive_file(id="F1", mime="application/vnd.google-apps.document")], "PAGE2"),
+        ([_make_drive_file(id="F2", mime="application/vnd.google-apps.document")], None),
+    ]
+    fake_client.list_permissions.return_value = []
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(folder_id="F", folder_name="x", description="", mime_type_filter=None)
+    repo = _FakeRepository()
+    docs_n, _chunks_n = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    assert docs_n == 2
+    assert fake_client.list_files.call_count == 2
+
+
+def test_resolve_drive_file_acl_extracts_owner_and_acl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_resolve_drive_file_acl が owner / user / group を正しく分解する。"""
+    fake_client = MagicMock()
+    fake_client.list_permissions.return_value = [
+        _make_drive_perm("user", "owner", "owner@x.jp"),
+        _make_drive_perm("user", "writer", "bob@x.jp"),
+        _make_drive_perm("user", "reader", "carol@x.jp", deleted=True),  # 除外
+        _make_drive_perm("group", "reader", "sales@x.jp"),
+    ]
+
+    from teamagent.ingest.pipeline import _resolve_drive_file_acl
+
+    owner, emails, groups = _resolve_drive_file_acl(
+        fake_client, "F1", "r", fallback_owner_email="fallback@x.jp"
+    )
+    assert owner == "owner@x.jp"
+    # owner は ACL に含まれる（fail-safe）+ user role!='owner' な bob のみ
+    assert set(emails) == {"owner@x.jp", "bob@x.jp"}
+    assert groups == ["sales@x.jp"]
+
+
+def test_resolve_drive_file_acl_returns_fallback_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """permissions.list が例外を投げたら fallback owner を返す。"""
+    fake_client = MagicMock()
+    fake_client.list_permissions.side_effect = RuntimeError("403")
+
+    from teamagent.ingest.pipeline import _resolve_drive_file_acl
+
+    owner, emails, groups = _resolve_drive_file_acl(
+        fake_client, "F1", "r", fallback_owner_email="fallback@x.jp"
+    )
+    assert owner == "fallback@x.jp"
+    assert emails == ["fallback@x.jp"]
+    assert groups == []

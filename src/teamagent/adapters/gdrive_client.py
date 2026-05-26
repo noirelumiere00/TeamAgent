@@ -405,7 +405,7 @@ class GDriveClient:
         if sa_path:
             from google.oauth2 import service_account
 
-            return service_account.Credentials.from_service_account_file(
+            return service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
                 sa_path, scopes=list(self._scopes)
             )
         # OAuth refresh token パス（個人 OAuth）
@@ -415,7 +415,7 @@ class GDriveClient:
         if refresh_token and client_id and client_secret:
             from google.oauth2.credentials import Credentials
 
-            return Credentials(
+            return Credentials(  # type: ignore[no-untyped-call]
                 token=None,
                 refresh_token=refresh_token,
                 token_uri="https://oauth2.googleapis.com/token",

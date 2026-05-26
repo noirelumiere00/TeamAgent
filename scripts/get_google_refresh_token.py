@@ -108,11 +108,11 @@ def main() -> int:
     print()
     print("  # 既存 secret が無い場合（初回）:")
     print(
-        f"  aws secretsmanager create-secret "
-        f"--name teamagent/dev/google_oauth "
-        f"--description 'Google OAuth (Drive + Gmail) for TeamAgent' "
-        f"--region ap-northeast-1 "
-        f"--secret-string '"
+        "  aws secretsmanager create-secret "
+        "--name teamagent/dev/google_oauth "
+        "--description 'Google OAuth (Drive + Gmail) for TeamAgent' "
+        "--region ap-northeast-1 "
+        "--secret-string '"
         + json.dumps(
             {
                 "client_id": client_id,
@@ -125,10 +125,10 @@ def main() -> int:
     print()
     print("  # 既存 secret を更新する場合:")
     print(
-        f"  aws secretsmanager put-secret-value "
-        f"--secret-id teamagent/dev/google_oauth "
-        f"--region ap-northeast-1 "
-        f"--secret-string '"
+        "  aws secretsmanager put-secret-value "
+        "--secret-id teamagent/dev/google_oauth "
+        "--region ap-northeast-1 "
+        "--secret-string '"
         + json.dumps(
             {
                 "client_id": client_id,

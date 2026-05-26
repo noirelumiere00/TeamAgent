@@ -239,6 +239,71 @@ def _ingest_slack_channel(
     return docs_n, chunks_n
 
 
+def _list_all_gdrive_files(
+    client: Any,
+    folder_id: str | None,
+    request_id: str,
+    mime_type_filter: str | None,
+    *,
+    max_pages: int = 100,
+) -> list[Any]:
+    """folder 内 file を pagination を回して全件取得する（max_pages で防壁）。"""
+    out: list[Any] = []
+    token: str | None = None
+    for _ in range(max_pages):
+        files, token = client.list_files(
+            folder_id=folder_id,
+            request_id=request_id,
+            page_size=100,
+            page_token=token,
+            mime_type_filter=mime_type_filter,
+        )
+        out.extend(files)
+        if not token:
+            break
+    return out
+
+
+def _resolve_drive_file_acl(
+    client: Any,
+    file_id: str,
+    request_id: str,
+    fallback_owner_email: str,
+) -> tuple[str, list[str], list[str]]:
+    """Drive file の ACL を解決する。
+
+    戻り値: (owner_email, acl_emails, acl_groups)
+    permissions.list 失敗時は fallback_owner_email + [fallback_owner_email] を返す。
+    """
+    from teamagent.adapters.gdrive_client import extract_acl_emails
+
+    try:
+        perms = client.list_permissions(file_id=file_id, request_id=request_id)
+    except Exception:
+        logger.exception("gdrive_list_permissions_failed", file_id=file_id)
+        return fallback_owner_email, [fallback_owner_email], []
+
+    # owner_email: role='owner' の最初の user
+    owner_email = fallback_owner_email
+    for p in perms:
+        if p.role == "owner" and p.type == "user" and p.email_address and not p.deleted:
+            owner_email = p.email_address
+            break
+
+    acl_emails, acl_groups = extract_acl_emails(perms)
+    # owner は必ず ACL に含める（自分が ingest した document を fail-safe で見られるように）
+    if owner_email not in acl_emails:
+        acl_emails.append(owner_email)
+    return owner_email, acl_emails, acl_groups
+
+
+_PDF_MIME_TYPES: frozenset[str] = frozenset(
+    {
+        "application/pdf",
+    }
+)
+
+
 def _ingest_gdrive_folder(
     spec: GDriveFolderSpec,
     *,
@@ -248,48 +313,104 @@ def _ingest_gdrive_folder(
     dry_run: bool,
     request_id: str,
 ) -> tuple[int, int]:
-    """1 Drive folder を取り込む（雛形：ファイル名 + メタのみ、本文抽出は Sprint 4）。"""
+    """1 Drive folder を取り込む。
+
+    対象: spec.mime_type_filter で絞り込んだファイル（既定は spec 側で application/pdf）。
+    - PDF: download_file_bytes → pypdf でテキスト抽出 → ページごとにチャンク化 → embedding
+    - 非 PDF: title だけ embed して 1 chunk（メタデータ用、将来 Google Doc export 対応で拡張）
+
+    ACL は permissions.list を呼んで documents.acl_emails / acl_groups に写像する。
+    """
     from teamagent.adapters.gdrive_client import GDriveClient
+    from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
 
     client = GDriveClient.from_env()
     docs_n = 0
     chunks_n = 0
+    skipped: list[str] = []
 
-    files, _ = client.list_files(
+    files = _list_all_gdrive_files(
+        client=client,
         folder_id=spec.folder_id,
         request_id=request_id,
-        page_size=100,
         mime_type_filter=spec.mime_type_filter,
     )
 
     for f in files:
-        # ACL は permissions.list で取得（Sprint 4 で本格実装、ここでは owner のみ）
-        acl_emails = [owner_email]
-        external_id = f.id
-        # 雛形：本文は title だけ embed（PDF 本文抽出は Sprint 4 で）
-        text = f"{f.name} ({f.mime_type})"
+        # ACL を permissions.list で解決
+        file_owner_email, acl_emails, acl_groups = _resolve_drive_file_acl(
+            client=client,
+            file_id=f.id,
+            request_id=request_id,
+            fallback_owner_email=f.owners_email[0] if f.owners_email else owner_email,
+        )
+
+        # 本文抽出: PDF のみ実 chunk 化、それ以外は title のみ
+        chunks: list[ChunkUpsert] = []
+        if f.mime_type in _PDF_MIME_TYPES:
+            try:
+                data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+            except Exception:
+                logger.exception(
+                    "gdrive_pdf_download_failed",
+                    file_id=f.id,
+                    file_name=f.name,
+                )
+                skipped.append(f.id)
+                continue
+            try:
+                pages = extract_pdf_pages(data)
+            except Exception:
+                logger.exception(
+                    "gdrive_pdf_extract_failed",
+                    file_id=f.id,
+                    file_name=f.name,
+                )
+                skipped.append(f.id)
+                continue
+            page_chunks = chunk_pages(pages, size=500, overlap=100)
+            if not page_chunks:
+                logger.warning("gdrive_pdf_empty_text", file_id=f.id, file_name=f.name)
+                skipped.append(f.id)
+                continue
+            for idx, (page_num, text) in enumerate(page_chunks):
+                chunks.append(
+                    ChunkUpsert(
+                        chunk_idx=idx,
+                        content=text,
+                        embedding=embedder.embed(text),
+                        metadata={"page_num": page_num},
+                    )
+                )
+        else:
+            # 非 PDF: 雛形と同じ（title + mime のみ、Google Doc export 対応は Sprint 4 で）
+            text = f"{f.name} ({f.mime_type})"
+            chunks.append(
+                ChunkUpsert(
+                    chunk_idx=0,
+                    content=text,
+                    embedding=embedder.embed(text),
+                    metadata={"mime_type": f.mime_type, "title_only": True},
+                )
+            )
+
         doc = DocumentUpsert(
             source_type="gdrive",
-            external_id=external_id,
+            external_id=f.id,
             source_uri=f.web_view_link or f"gdrive://{f.id}",
             title=f.name,
-            owner_email=owner_email,
+            owner_email=file_owner_email,
             acl_emails=acl_emails,
+            acl_groups=acl_groups,
             metadata={
                 **spec.extra_metadata,
                 "mime_type": f.mime_type,
                 "size": f.size,
+                "drive_folder_id": spec.folder_id,
+                "drive_folder_name": spec.folder_name,
             },
             modified_at=f.modified_time,
         )
-        chunks = [
-            ChunkUpsert(
-                chunk_idx=0,
-                content=text,
-                embedding=embedder.embed(text),
-                metadata={},
-            )
-        ]
         docs_n += 1
         chunks_n += len(chunks)
         if not dry_run:
@@ -301,6 +422,7 @@ def _ingest_gdrive_folder(
         folder_name=spec.folder_name,
         documents=docs_n,
         chunks=chunks_n,
+        skipped=len(skipped),
         dry_run=dry_run,
     )
     return docs_n, chunks_n

@@ -83,7 +83,7 @@ class GeminiClient:
     def _ensure_client(self) -> Any:
         """google-genai クライアントを遅延初期化。"""
         if self._client is None:
-            from google import genai  # type: ignore[import-not-found]
+            from google import genai  # type: ignore[attr-defined]
 
             self._client = genai.Client(api_key=self.api_key)
         return self._client
