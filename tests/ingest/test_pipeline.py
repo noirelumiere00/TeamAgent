@@ -169,7 +169,7 @@ def test_ingest_slack_channel_handler_calls_repository(
 
     monkeypatch.setattr(
         "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
-        classmethod(lambda cls: fake_client),
+        classmethod(lambda cls, **kwargs: fake_client),
     )
 
     # 共有 cache をテスト間で汚さないようにクリア
@@ -217,7 +217,7 @@ def test_ingest_slack_channel_dry_run_skips_repository(
     fake_client.get_user_emails.return_value = []
     monkeypatch.setattr(
         "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
-        classmethod(lambda cls: fake_client),
+        classmethod(lambda cls, **kwargs: fake_client),
     )
 
     from teamagent.ingest import pipeline as pipeline_mod
@@ -277,7 +277,7 @@ def test_ingest_slack_channel_skips_when_no_acl_resolved(
     ]
     monkeypatch.setattr(
         "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
-        classmethod(lambda cls: fake_client),
+        classmethod(lambda cls, **kwargs: fake_client),
     )
     from teamagent.ingest import pipeline as pipeline_mod
 
@@ -327,7 +327,7 @@ def test_ingest_slack_channel_uses_extra_acl_when_email_unresolved(
     ]
     monkeypatch.setattr(
         "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
-        classmethod(lambda cls: fake_client),
+        classmethod(lambda cls, **kwargs: fake_client),
     )
     from teamagent.ingest import pipeline as pipeline_mod
 
@@ -395,7 +395,7 @@ def test_ingest_gsheet_handler_row_per_document(monkeypatch: pytest.MonkeyPatch)
     )
     monkeypatch.setattr(
         "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
-        classmethod(lambda cls: fake_client),
+        classmethod(lambda cls, **kwargs: fake_client),
     )
 
     from teamagent.ingest.pipeline import _ingest_gsheet
@@ -471,7 +471,7 @@ def test_ingest_gdrive_folder_pdf_extracts_chunks_and_resolves_acl(
 
     monkeypatch.setattr(
         "teamagent.adapters.gdrive_client.GDriveClient.from_env",
-        classmethod(lambda cls: fake_client),
+        classmethod(lambda cls, **kwargs: fake_client),
     )
 
     # pypdf を monkeypatch して 3 ページの PDF を擬似する
@@ -526,7 +526,7 @@ def test_ingest_gdrive_folder_non_pdf_uses_title_only(
     fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
     monkeypatch.setattr(
         "teamagent.adapters.gdrive_client.GDriveClient.from_env",
-        classmethod(lambda cls: fake_client),
+        classmethod(lambda cls, **kwargs: fake_client),
     )
 
     from teamagent.ingest.pipeline import _ingest_gdrive_folder
@@ -574,7 +574,7 @@ def test_ingest_gdrive_folder_skips_pdf_when_download_fails(
     fake_client.download_file_bytes.side_effect = _dl
     monkeypatch.setattr(
         "teamagent.adapters.gdrive_client.GDriveClient.from_env",
-        classmethod(lambda cls: fake_client),
+        classmethod(lambda cls, **kwargs: fake_client),
     )
     fake_reader = MagicMock()
     p = MagicMock()
@@ -618,7 +618,7 @@ def test_ingest_gdrive_folder_paginates_list_files(
     fake_client.list_permissions.return_value = []
     monkeypatch.setattr(
         "teamagent.adapters.gdrive_client.GDriveClient.from_env",
-        classmethod(lambda cls: fake_client),
+        classmethod(lambda cls, **kwargs: fake_client),
     )
 
     from teamagent.ingest.pipeline import _ingest_gdrive_folder
