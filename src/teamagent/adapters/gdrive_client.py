@@ -98,6 +98,15 @@ class DriveChange:
     drive_id: str | None = None  # 共有ドライブ ID（マイドライブなら None）
 
 
+@dataclass(frozen=True)
+class SharedDrive:
+    """drives.list() の 1 件分（共有ドライブ）。"""
+
+    id: str
+    name: str
+    created_time: str | None = None
+
+
 # -----------------------------------------------------------
 # クライアント本体
 # -----------------------------------------------------------
@@ -316,6 +325,138 @@ class GDriveClient:
             latency_ms=latency_ms,
         )
         return data
+
+    def list_shared_drives(
+        self,
+        request_id: str,
+        *,
+        page_size: int = 100,
+        max_pages: int = 10,
+    ) -> list[SharedDrive]:
+        """ユーザーがメンバーになっている共有ドライブを全件取得する。
+
+        Day 7 (2026-05-27) で追加: 共有ドライブ全自動 crawl 用の起点 API。
+        マイドライブ や「Shared with me」 は含まれない。
+        """
+        service = self._ensure_service()
+        out: list[SharedDrive] = []
+        page_token: str | None = None
+        for _ in range(max_pages):
+            kwargs: dict[str, Any] = {
+                "pageSize": page_size,
+                "fields": "nextPageToken, drives(id, name, createdTime)",
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
+            resp = service.drives().list(**kwargs).execute()
+            for d in resp.get("drives", []):
+                out.append(
+                    SharedDrive(
+                        id=str(d.get("id", "")),
+                        name=str(d.get("name", "")),
+                        created_time=d.get("createdTime"),
+                    )
+                )
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        logger.info("gdrive_list_shared_drives", request_id=request_id, count=len(out))
+        return out
+
+    def walk_files_recursive(
+        self,
+        root_id: str,
+        request_id: str,
+        *,
+        drive_id: str | None = None,
+        max_files: int = 5000,
+        max_depth: int = 10,
+    ) -> list[DriveFile]:
+        """指定 root_id (フォルダ or 共有ドライブ root) 配下を BFS で全件 walk する。
+
+        Day 7 (2026-05-27) で追加: 共有ドライブのサブフォルダ含む全 file を回収する。
+
+        Args:
+            root_id: 起点フォルダ ID（共有ドライブ root の場合は driveId と同じ）
+            drive_id: 共有ドライブの ID（指定すると corpora="drive" + driveId で絞る、
+                       共有ドライブ専用クエリで効率化）
+            max_files: 安全装置（暴走防止、1 共有ドライブで 5000 ファイルが上限）
+            max_depth: フォルダ階層の最大深度
+
+        Returns:
+            files (フォルダ自身は除外、通常ファイルのみ)
+        """
+        folder_mime = "application/vnd.google-apps.folder"
+        service = self._ensure_service()
+        out: list[DriveFile] = []
+        queue: list[tuple[str, int]] = [(root_id, 0)]  # (folder_id, depth)
+        visited: set[str] = set()
+
+        while queue and len(out) < max_files:
+            folder_id, depth = queue.pop(0)
+            if folder_id in visited or depth > max_depth:
+                continue
+            visited.add(folder_id)
+
+            # この folder 直下の files / sub-folders を取得（全 page）
+            page_token: str | None = None
+            for _ in range(20):  # 1 folder の最大ページ数（page_size=1000 × 20 = 20k 上限）
+                kwargs: dict[str, Any] = {
+                    "q": f"'{folder_id}' in parents and trashed = false",
+                    "pageSize": 1000,
+                    "fields": (
+                        "nextPageToken, files("
+                        "id, name, mimeType, modifiedTime, size, parents, "
+                        "webViewLink, owners(emailAddress))"
+                    ),
+                    "supportsAllDrives": True,
+                    "includeItemsFromAllDrives": True,
+                }
+                if drive_id:
+                    kwargs["corpora"] = "drive"
+                    kwargs["driveId"] = drive_id
+                if page_token:
+                    kwargs["pageToken"] = page_token
+
+                resp = service.files().list(**kwargs).execute()
+                for f in resp.get("files", []):
+                    mime = str(f.get("mimeType", ""))
+                    if mime == folder_mime:
+                        # sub-folder → queue に追加
+                        queue.append((str(f.get("id", "")), depth + 1))
+                    else:
+                        out.append(
+                            DriveFile(
+                                id=str(f.get("id", "")),
+                                name=str(f.get("name", "")),
+                                mime_type=mime,
+                                modified_time=f.get("modifiedTime"),
+                                size=int(f["size"]) if f.get("size") else None,
+                                parents=tuple(f.get("parents", ()) or ()),
+                                web_view_link=f.get("webViewLink"),
+                                owners_email=tuple(
+                                    o.get("emailAddress")
+                                    for o in (f.get("owners") or [])
+                                    if o.get("emailAddress")
+                                ),
+                            )
+                        )
+                        if len(out) >= max_files:
+                            break
+                page_token = resp.get("nextPageToken")
+                if not page_token or len(out) >= max_files:
+                    break
+
+        logger.info(
+            "gdrive_walk_files_recursive",
+            request_id=request_id,
+            root_id=root_id,
+            drive_id=drive_id,
+            folders_visited=len(visited),
+            files_collected=len(out),
+            hit_max=len(out) >= max_files,
+        )
+        return out
 
     def get_start_page_token(self, request_id: str) -> str:
         """changes.list の since 起点となる token を取得する。

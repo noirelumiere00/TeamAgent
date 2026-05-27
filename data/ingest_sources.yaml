@@ -50,6 +50,22 @@ gdrive_folders:
       topic: "提案ナレッジ"
       source_chain: "slack -> drive"  # Slack → Drive の関係性
 
+  # ---- ショート動画資料全般 (Day 7 = 2026-05-27 追加、最重要) ----
+  # 営業との合意で「命名ルール付きで全資料をここに集約」する運用に決定。
+  # 共有ドライブ作戦 (共有ドライブにアップ義務化) は機能しなかったため、
+  # 営業の Drive 内に置いた特定フォルダを「ナレッジ集約場所」にする方針に切替。
+  - folder_id: "14Wfp6GVCwaJROGhmEbd-r4_CfUymjwDL"
+    folder_name: "ショート動画資料全般"
+    description: |
+      営業と命名ルール合意済の主要ナレッジ集約フォルダ。
+      ショート動画関連の提案書 / 議事録 / 価格表 / クライアント FB が集まる想定。
+    include_subfolders: true
+    mime_type_filter: null    # PDF / Doc / Sheet すべて
+    extra_metadata:
+      topic: "ショート動画 主要ナレッジ"
+      use_case: "営業 RAG 検索の主要情報源"
+      priority: "high"
+
 gsheets:
   # ---- ナレッジ共有フォーム回答 ----
   - sheet_id: "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
@@ -80,6 +96,24 @@ gsheets:
       priority: "high"
       structure: "form-response"
       use_case: "顧客温度感の経時追跡 + 検索"
+
+# ============================================================
+# 共有ドライブ全自動 crawl (Day 7 = 2026-05-27 追加)
+# ============================================================
+# s-komata がメンバーになっている全共有ドライブを再帰 walk し、
+# 営業資料として価値ありそうなものだけ取り込む。
+# - sales_relevance_filter=true: mime_type whitelist + ノイズ除外 + 更新日制限
+# - max_files_per_drive: 1 ドライブあたりの安全上限
+# - modified_within_days: 過去 N 日以内に更新されたファイルのみ（古い案件除外）
+shared_drives_crawl:
+  enabled: true
+  name_filter: []                  # 空: 全共有ドライブ。["営業", "ナレッジ"] で絞れる
+  sales_relevance_filter: true     # PDF/Doc/Sheet/Slide + ノイズ除外
+  max_files_per_drive: 3000
+  modified_within_days: 730        # 2 年以内（null で全期間）
+  extra_metadata:
+    topic: "共有ドライブ横断クロール"
+    use_case: "営業 RAG 検索の網羅性"
 
 # ============================================================
 # Adapter ↔ source_type マッピング

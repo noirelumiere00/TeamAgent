@@ -68,6 +68,29 @@ class GSheetSpec:
 
 
 @dataclass(frozen=True)
+class SharedDriveCrawlSpec:
+    """共有ドライブ全自動 crawl の設定（Day 7, 2026-05-27 追加）。
+
+    yaml で:
+        shared_drives_crawl:
+          enabled: true
+          name_filter: ["営業", "ナレッジ"]  # 名前 substring match (空 [] なら全部)
+          sales_relevance_filter: true
+          max_files_per_drive: 5000
+          modified_within_days: 730   # 過去 2 年（null で全期間）
+          extra_metadata:
+            topic: "共有ドライブ横断"
+    """
+
+    enabled: bool = False
+    name_filter: tuple[str, ...] = ()
+    sales_relevance_filter: bool = True
+    max_files_per_drive: int = 5000
+    modified_within_days: int | None = 730
+    extra_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class IngestSources:
     """ingest_sources.yaml 全体。"""
 
@@ -75,6 +98,7 @@ class IngestSources:
     slack_channels: tuple[SlackChannelSpec, ...]
     gdrive_folders: tuple[GDriveFolderSpec, ...]
     gsheets: tuple[GSheetSpec, ...]
+    shared_drives_crawl: SharedDriveCrawlSpec | None = None
 
 
 # -----------------------------------------------------------
@@ -126,6 +150,7 @@ def load_ingest_sources(
         raw.get("gdrive_folders", []) or [], skip_placeholder=skip_placeholder
     )
     gsheets = _parse_gsheets(raw.get("gsheets", []) or [], skip_placeholder=skip_placeholder)
+    shared_crawl = _parse_shared_drives_crawl(raw.get("shared_drives_crawl"))
 
     logger.info(
         "ingest_sources_loaded",
@@ -134,12 +159,32 @@ def load_ingest_sources(
         slack_channels=len(slack_channels),
         gdrive_folders=len(gdrive_folders),
         gsheets=len(gsheets),
+        shared_drives_crawl_enabled=shared_crawl is not None and shared_crawl.enabled,
     )
     return IngestSources(
         version=version,
         slack_channels=slack_channels,
         gdrive_folders=gdrive_folders,
         gsheets=gsheets,
+        shared_drives_crawl=shared_crawl,
+    )
+
+
+def _parse_shared_drives_crawl(raw: Any) -> SharedDriveCrawlSpec | None:
+    """yaml の shared_drives_crawl: セクションをパースする（None / 空なら None を返す）。"""
+    if not raw or not isinstance(raw, dict):
+        return None
+    return SharedDriveCrawlSpec(
+        enabled=bool(raw.get("enabled", False)),
+        name_filter=tuple(raw.get("name_filter", []) or []),
+        sales_relevance_filter=bool(raw.get("sales_relevance_filter", True)),
+        max_files_per_drive=int(raw.get("max_files_per_drive", 5000)),
+        modified_within_days=(
+            int(raw["modified_within_days"])
+            if raw.get("modified_within_days") is not None
+            else None
+        ),
+        extra_metadata=dict(raw.get("extra_metadata", {}) or {}),
     )
 
 
