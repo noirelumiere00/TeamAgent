@@ -119,7 +119,12 @@ class GDriveClient:
         "https://www.googleapis.com/auth/drive.file",
         "https://www.googleapis.com/auth/drive.metadata.readonly",  # ACL 取得用
     )
-    SCOPES_READONLY: tuple[str, ...] = ("https://www.googleapis.com/auth/drive.readonly",)
+    # Day 7 (2026-05-27): folder bulk ingest 用。Internal OAuth なら CASA 不要。
+    # drive.metadata.readonly も同梱で permissions.list 等も問題なく動作する。
+    SCOPES_READONLY: tuple[str, ...] = (
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+    )
 
     def __init__(
         self,

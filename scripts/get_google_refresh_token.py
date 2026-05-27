@@ -31,8 +31,14 @@ import os
 import sys
 
 REQUIRED_SCOPES = [
+    # Drive: folder bulk ingest のため drive.readonly に拡張（Day 7, 2026-05-27）
+    # Internal OAuth (vectorinc.co.jp 限定) なので CASA 審査不要。
+    # drive.file は per-file opened only で folder ingest に向かないため readonly に。
+    "https://www.googleapis.com/auth/drive.readonly",
+    # drive.file は ユーザーが書き込み作業する想定で温存
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive.metadata.readonly",
+    # Gmail: adapter 層 deny (PR #49) で破壊的メソッドは物理封鎖済
     "https://www.googleapis.com/auth/gmail.modify",
 ]
 

@@ -324,7 +324,10 @@ def _ingest_gdrive_folder(
     from teamagent.adapters.gdrive_client import GDriveClient
     from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
 
-    client = GDriveClient.from_env()
+    # Day 7: folder bulk ingest のため readonly=True で drive.readonly スコープを使う。
+    # Internal OAuth なので CASA 審査不要。drive.file ではフォルダ単位の取り込みが
+    # できない（per-file opened only の制約）ため、readonly に切替。
+    client = GDriveClient.from_env(readonly=True)
     docs_n = 0
     chunks_n = 0
     skipped: list[str] = []
