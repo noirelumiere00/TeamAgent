@@ -23,6 +23,33 @@ from teamagent.adapters.pgvector_client import PgVectorClient
 logger = structlog.get_logger(__name__)
 
 
+# Day 7 (2026-05-27): PDF / Doc 抽出時に NUL バイト (0x00) が混入することがあり、
+# PostgreSQL の TEXT 列は NUL を許容しないため DataError になる。
+# repository 境界で防御的にサニタイズする（境界 1 箇所で済ませる原則）。
+def _strip_nul(value: str | None) -> str | None:
+    """str 中の NUL バイト (0x00) を除去する。None 透過。"""
+    if value is None:
+        return None
+    return value.replace("\x00", "")
+
+
+def _sanitize_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """metadata dict の文字列値から NUL バイトを再帰的に除去する。"""
+    if not meta:
+        return meta
+    out: dict[str, Any] = {}
+    for k, v in meta.items():
+        if isinstance(v, str):
+            out[k] = v.replace("\x00", "")
+        elif isinstance(v, dict):
+            out[k] = _sanitize_metadata(v)
+        elif isinstance(v, list):
+            out[k] = [item.replace("\x00", "") if isinstance(item, str) else item for item in v]
+        else:
+            out[k] = v
+    return out
+
+
 # -----------------------------------------------------------
 # repository が受け取る正規化済みデータ型
 # -----------------------------------------------------------
@@ -147,14 +174,14 @@ class IngestRepository:
                 sql,
                 (
                     doc.source_type,
-                    doc.external_id,
-                    doc.source_uri,
-                    doc.title,
-                    doc.owner_email,
-                    doc.acl_emails,
-                    doc.acl_groups,
-                    doc.client_code,
-                    json.dumps(doc.metadata, ensure_ascii=False),
+                    _strip_nul(doc.external_id),
+                    _strip_nul(doc.source_uri),
+                    _strip_nul(doc.title),
+                    _strip_nul(doc.owner_email),
+                    [_strip_nul(e) or "" for e in doc.acl_emails],
+                    [_strip_nul(g) or "" for g in doc.acl_groups],
+                    _strip_nul(doc.client_code),
+                    json.dumps(_sanitize_metadata(doc.metadata), ensure_ascii=False),
                     doc.modified_at,
                 ),
             )
@@ -190,10 +217,10 @@ class IngestRepository:
                     (
                         document_id,
                         c.chunk_idx,
-                        c.content,
-                        c.contextualized,
+                        _strip_nul(c.content) or "",
+                        _strip_nul(c.contextualized),
                         c.embedding,
                         c.page_num,
-                        json.dumps(c.metadata, ensure_ascii=False),
+                        json.dumps(_sanitize_metadata(c.metadata), ensure_ascii=False),
                     ),
                 )
