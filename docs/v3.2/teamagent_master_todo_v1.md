@@ -683,13 +683,34 @@ Day 5 から変更なし（Sonnet 4.6 / Haiku 4.5 / LocalE5 / Postgres 16 + pgve
 ## Day 7 推奨着手順
 
 ```
+0. ⭐ A0 drive スコープ拡張 (drive.file → drive.readonly)  ← Day 7 朝イチ必須 (15-30分)
+   - 現状 drive.file はフォルダ単位 bulk ingest に不適合（per-file opened only）
+   - Internal OAuth (vectorinc.co.jp) なら drive.readonly でも CASA 不要
+   - GCP コンソール → データアクセス → +drive.readonly
+   - scripts/get_google_refresh_token.py 再実行 + Secrets Manager 更新
+
 1. A1 営業 Drive PDF 全件取り込み  ← 最大インパクト（営業 PDF 100+ 件追加で体感劇変）
+   - python scripts/ingest_sources.py --sources gdrive --dry-run （件数確認）
+   - python scripts/ingest_sources.py --sources gdrive --commit （実取り込み）
+   - Bot 再起動後 Slack で「@TeamAgent ナレッジ共有の資料」確認
    ↓ user 棚卸し待ちなら並行で
 2. A2 Slack Contextual Retrieval   ← Anthropic 公式手法、-49% 失敗率
 3. A3 長 Slack thread sub-chunk     ← 検索粒度改善
 4. A4 メタデータ自動抽出            ← industry strict filter が活きるようにする
 5. B3 source_type filter            ← PDF / Slack 切替で営業の業務フロー対応
 ```
+
+## Day 6 → Day 7 引き継ぎの真の Critical Path
+
+**「資料が少ない」体感の真因 = OAuth 取得 ≠ Drive 取り込み実行**
+
+| ステップ | 状態 | 解決 |
+|---|---|---|
+| OAuth credentials 取得 | ✅ Day 6 完了 | — |
+| ingest_sources.yaml に Drive folder 登録 | ✅ 1 folder 登録済（`12FMLe9XG24wlPrBCHOQ_vcr4uELtMN1E`）| — |
+| ingest コマンド実行 | ❌ **1 度も実行してない** | Day 7 A1 で実行 |
+| drive.file スコープ問題 | ⚠️ folder bulk ingest 不適合 | Day 7 A0 で drive.readonly に切替 |
+| documents に Drive PDF 投入 | ❌ 0 件 | A0 + A1 完了後に大量投入 |
 
 ## Day 6 → Day 7 引き継ぎ事項
 
