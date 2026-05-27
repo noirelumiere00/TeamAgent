@@ -26,6 +26,7 @@ from teamagent.ingest.loader import (
     GDriveFolderSpec,
     GSheetSpec,
     IngestSources,
+    SharedDriveCrawlSpec,
     SlackChannelSpec,
 )
 from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepository
@@ -304,6 +305,104 @@ _PDF_MIME_TYPES: frozenset[str] = frozenset(
 )
 
 
+# Day 7: 共有ドライブ全自動 crawl の営業資料判定用 whitelist / noise filter
+# 営業に役立つドキュメントの拡張子 / mime_type のみ取り込み対象とする。
+_SALES_ALLOWED_MIME_TYPES: frozenset[str] = frozenset(
+    {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # pptx
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
+        "application/msword",  # doc (legacy)
+        "application/vnd.ms-powerpoint",  # ppt (legacy)
+        "application/vnd.ms-excel",  # xls (legacy)
+        "application/vnd.google-apps.document",  # gdoc
+        "application/vnd.google-apps.spreadsheet",  # gsheet
+        "application/vnd.google-apps.presentation",  # gslide
+        "text/plain",
+        "text/markdown",
+        "text/csv",
+    }
+)
+
+# Google ネイティブ形式（size が None で返ってくる）
+_GOOGLE_NATIVE_MIME_TYPES: frozenset[str] = frozenset(
+    {
+        "application/vnd.google-apps.document",
+        "application/vnd.google-apps.spreadsheet",
+        "application/vnd.google-apps.presentation",
+    }
+)
+
+# ノイズキーワード（営業資料として価値が低い tmp/backup/test 系）
+_NOISE_NAME_KEYWORDS: tuple[str, ...] = (
+    ".tmp",
+    "_tmp",
+    "_old",
+    "_backup",
+    "_bk",
+    ".bak",
+    "_test",
+    "test_",
+    "_draft",
+    "ignore",
+    "trash",
+    "duplicate",
+    "コピー",
+    "（コピー）",
+)
+
+
+def _is_sales_relevant(
+    f: Any,  # DriveFile だが循環 import 回避で Any
+    *,
+    modified_within_days: int | None = 730,
+) -> tuple[bool, str]:
+    """Drive file が営業資料として取り込む価値ありそうか判定する。
+
+    判定基準:
+    1. mime_type が whitelist に含まれる（PDF / Office / Google native / text）
+    2. 名前にノイズキーワードが含まれない（tmp / backup / test / コピー 等）
+    3. size が妥当（100 byte 未満 / 50 MB 超は除外。Google native は size=None で許容）
+    4. modified_within_days 以内に更新されている（None なら無視）
+
+    戻り値: (relevant, reason)。reason は採用/除外理由（ログ用）。
+    """
+    import datetime as _dt
+
+    # 1. mime type
+    if f.mime_type not in _SALES_ALLOWED_MIME_TYPES:
+        return False, f"mime_type not in whitelist: {f.mime_type}"
+
+    # 2. ノイズキーワード
+    name_lower = f.name.lower()
+    for kw in _NOISE_NAME_KEYWORDS:
+        if kw in name_lower or kw in f.name:
+            return False, f"noise keyword in name: {kw}"
+
+    # 3. サイズチェック（Google native は size=None で OK）
+    if f.mime_type not in _GOOGLE_NATIVE_MIME_TYPES:
+        if f.size is None:
+            return False, "size unknown (non-native, suspicious)"
+        if f.size < 100:
+            return False, f"size too small: {f.size} bytes"
+        if f.size > 50 * 1024 * 1024:
+            return False, f"size too large: {f.size} bytes"
+
+    # 4. 更新日時
+    if modified_within_days is not None and f.modified_time:
+        try:
+            modified_dt = _dt.datetime.fromisoformat(f.modified_time.replace("Z", "+00:00"))
+            cutoff = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=modified_within_days)
+            if modified_dt < cutoff:
+                return False, f"stale: modified {f.modified_time}"
+        except (ValueError, TypeError):
+            # parse 失敗時は許容（fail-safe で取り込み）
+            pass
+
+    return True, "passed"
+
+
 def _ingest_gdrive_folder(
     spec: GDriveFolderSpec,
     *,
@@ -431,6 +530,167 @@ def _ingest_gdrive_folder(
     return docs_n, chunks_n
 
 
+def _ingest_shared_drives_crawl(
+    spec: SharedDriveCrawlSpec,
+    *,
+    embedder: _EmbedderProto,
+    repository: IngestRepository,
+    owner_email: str,
+    dry_run: bool,
+    request_id: str,
+) -> tuple[int, int]:
+    """共有ドライブ全件 crawl + 営業資料フィルタで取り込む (Day 7, 2026-05-27)。
+
+    対象: s-komata がメンバーになっている全共有ドライブ。
+    - spec.name_filter が指定されてれば substring match で絞る
+    - 各ドライブを再帰 walk
+    - spec.sales_relevance_filter=True なら _is_sales_relevant で営業価値判定
+    - ACL は permissions.list で解決して acl_emails / acl_groups に写像
+    - PDF はテキスト抽出 + chunk 化、それ以外は title のみで 1 chunk
+    """
+    from teamagent.adapters.gdrive_client import GDriveClient
+    from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
+
+    client = GDriveClient.from_env(readonly=True)
+    docs_n = 0
+    chunks_n = 0
+    skipped_count = 0
+    filtered_count = 0
+
+    # 1. 共有ドライブ列挙
+    all_drives = client.list_shared_drives(request_id=request_id)
+    if spec.name_filter:
+        drives = [d for d in all_drives if any(kw in d.name for kw in spec.name_filter)]
+    else:
+        drives = all_drives
+    logger.info(
+        "ingest_shared_drives_filtered",
+        request_id=request_id,
+        total=len(all_drives),
+        after_name_filter=len(drives),
+        name_filter=list(spec.name_filter),
+    )
+
+    for drive in drives:
+        # 2. 各ドライブを再帰 walk
+        files = client.walk_files_recursive(
+            root_id=drive.id,
+            request_id=request_id,
+            drive_id=drive.id,
+            max_files=spec.max_files_per_drive,
+        )
+        logger.info(
+            "ingest_shared_drive_walked",
+            request_id=request_id,
+            drive_id=drive.id,
+            drive_name=drive.name,
+            files_found=len(files),
+        )
+
+        for f in files:
+            # 3. 営業関連判定
+            if spec.sales_relevance_filter:
+                relevant, _reason = _is_sales_relevant(
+                    f, modified_within_days=spec.modified_within_days
+                )
+                if not relevant:
+                    filtered_count += 1
+                    continue
+
+            # 4. ACL 解決
+            file_owner_email, acl_emails, acl_groups = _resolve_drive_file_acl(
+                client=client,
+                file_id=f.id,
+                request_id=request_id,
+                fallback_owner_email=f.owners_email[0] if f.owners_email else owner_email,
+            )
+
+            # 5. 本文抽出
+            chunks: list[ChunkUpsert] = []
+            if f.mime_type in _PDF_MIME_TYPES:
+                try:
+                    data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+                except Exception:
+                    logger.exception(
+                        "shared_drive_pdf_download_failed",
+                        file_id=f.id,
+                        file_name=f.name,
+                        drive_id=drive.id,
+                    )
+                    skipped_count += 1
+                    continue
+                try:
+                    pages = extract_pdf_pages(data)
+                except Exception:
+                    logger.exception(
+                        "shared_drive_pdf_extract_failed",
+                        file_id=f.id,
+                        file_name=f.name,
+                    )
+                    skipped_count += 1
+                    continue
+                page_chunks = chunk_pages(pages, size=500, overlap=100)
+                if not page_chunks:
+                    skipped_count += 1
+                    continue
+                for idx, (page_num, text) in enumerate(page_chunks):
+                    chunks.append(
+                        ChunkUpsert(
+                            chunk_idx=idx,
+                            content=text,
+                            embedding=embedder.embed(text),
+                            metadata={"page_num": page_num},
+                        )
+                    )
+            else:
+                # 非 PDF: title + mime のみ（Google Doc/Sheet/Slide export 対応は Sprint 4）
+                text = f"{f.name} ({f.mime_type})"
+                chunks.append(
+                    ChunkUpsert(
+                        chunk_idx=0,
+                        content=text,
+                        embedding=embedder.embed(text),
+                        metadata={"mime_type": f.mime_type, "title_only": True},
+                    )
+                )
+
+            # 6. DocumentUpsert 組み立て
+            doc = DocumentUpsert(
+                source_type="gdrive",
+                external_id=f.id,
+                source_uri=f.web_view_link or f"gdrive://{f.id}",
+                title=f.name,
+                owner_email=file_owner_email,
+                acl_emails=acl_emails,
+                acl_groups=acl_groups,
+                metadata={
+                    **spec.extra_metadata,
+                    "mime_type": f.mime_type,
+                    "size": f.size,
+                    "shared_drive_id": drive.id,
+                    "shared_drive_name": drive.name,
+                    "via": "shared_drive_crawl",
+                },
+                modified_at=f.modified_time,
+            )
+            docs_n += 1
+            chunks_n += len(chunks)
+            if not dry_run:
+                repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+
+    logger.info(
+        "ingest_shared_drives_crawl_done",
+        request_id=request_id,
+        drives_processed=len(drives),
+        documents=docs_n,
+        chunks=chunks_n,
+        skipped=skipped_count,
+        filtered_out=filtered_count,
+        dry_run=dry_run,
+    )
+    return docs_n, chunks_n
+
+
 def _ingest_gsheet(
     spec: GSheetSpec,
     *,
@@ -525,7 +785,7 @@ class IngestRunner:
 
         kinds: ['slack','gdrive','gsheets'] のサブセット。None なら全部。
         """
-        kinds = kinds or ["slack", "gdrive", "gsheets"]
+        kinds = kinds or ["slack", "gdrive", "gsheets", "shared_drives"]
         result = IngestResult()
         request_id = f"ingest-{uuid.uuid4().hex[:12]}"
 
@@ -555,6 +815,23 @@ class IngestRunner:
             result.by_kind["gsheets"] = self._run_kind(
                 "gsheets", sources.gsheets, _ingest_gsheet, request_id=request_id
             )
+        if "shared_drives" in kinds:
+            # 共有ドライブ全自動 crawl: spec が 0 or 1 件（yaml の単一 toggle）
+            shared_spec = sources.shared_drives_crawl
+            if shared_spec is not None and shared_spec.enabled:
+                result.by_kind["shared_drives"] = self._run_kind(
+                    "shared_drives",
+                    (shared_spec,),
+                    _ingest_shared_drives_crawl,
+                    request_id=request_id,
+                )
+            else:
+                logger.info(
+                    "ingest_shared_drives_skipped",
+                    request_id=request_id,
+                    reason=("shared_drives_crawl が yaml に未定義 or enabled=false の場合 skip"),
+                )
+                result.by_kind["shared_drives"] = IngestStats(source_kind="shared_drives")
 
         logger.info(
             "ingest_runner_done",
