@@ -581,14 +581,21 @@ class GDriveClient:
 def extract_acl_emails(perms: list[DrivePermission]) -> tuple[list[str], list[str]]:
     """permissions.list の結果を documents.acl_emails / acl_groups に分解する。
 
-    - type='user', role!='owner', not deleted: emails 行に追加
-    - type='group', not deleted: groups 行に追加
-    - type='domain' / 'anyone': セキュリティ警告（広すぎる ACL）→ ログ
-    - role='owner': 別途 documents.owner_email に
+    会社思想 (Day 7, 2026-05-27 ユーザー確認): 「資料は全て共有物」原則。
+    Drive で domain / anyone 共有されているファイルは、ワークスペース内 (vectorinc.co.jp)
+    全員に見せる方針。WORKSPACE_DOMAIN env で workspace を指定（既定 'vectorinc.co.jp'）。
+
+    マッピング:
+        type='user',  email=alice@... , not deleted → acl_emails に追加
+        type='group', email=sales@...,  not deleted → acl_groups に追加
+        type='domain', domain='vectorinc.co.jp'     → acl_groups に domain 追加
+        type='anyone'                                → acl_groups に WORKSPACE_DOMAIN 追加
+        role='owner'                                 → 別途 documents.owner_email に
     """
+    workspace_domain = os.environ.get("WORKSPACE_DOMAIN", "vectorinc.co.jp")
+
     emails: list[str] = []
     groups: list[str] = []
-    has_wide_acl = False
     for p in perms:
         if p.deleted:
             continue
@@ -596,11 +603,12 @@ def extract_acl_emails(perms: list[DrivePermission]) -> tuple[list[str], list[st
             emails.append(p.email_address)
         elif p.type == "group" and p.email_address:
             groups.append(p.email_address)
-        elif p.type in ("domain", "anyone"):
-            has_wide_acl = True
-    if has_wide_acl:
-        logger.warning(
-            "gdrive_wide_acl_detected",
-            note="domain / anyone permissions are not mirrored to acl_emails (would over-share)",
-        )
-    return emails, groups
+        elif p.type == "domain" and p.domain:
+            # ドメイン共有: domain 名そのものを group key として扱う
+            groups.append(p.domain)
+        elif p.type == "anyone":
+            # 「リンクを知ってる全員に公開」: 会社思想に従い workspace 全員に見せる
+            groups.append(workspace_domain)
+
+    # 重複除去（同じ domain が複数 permission で出ても 1 件に）
+    return emails, sorted(set(groups))
