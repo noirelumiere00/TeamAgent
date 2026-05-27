@@ -113,10 +113,10 @@ def test_search_zero_hits_skips_bedrock(fake_bedrock: MagicMock, fake_pgvector: 
     fake_bedrock.converse.assert_not_called()
 
 
-def test_search_filter_industry_added_to_where(
+def test_search_filter_industry_passed_as_metadata_filters(
     fake_bedrock: MagicMock, fake_pgvector: MagicMock
 ) -> None:
-    """filter_industry を指定したとき、metadata 列がある場合のみ WHERE 句が pgvector に渡る。"""
+    """filter_industry は metadata_filters dict として adapter に渡る（SQL placeholder 化）。"""
     skill = SearchSkill(
         bedrock=fake_bedrock,
         pgvector=fake_pgvector,
@@ -131,10 +131,43 @@ def test_search_filter_industry_added_to_where(
     )
 
     call_kwargs: dict[str, Any] = fake_pgvector.search_similar.call_args.kwargs
-    assert call_kwargs["where"] == "metadata->>'industry' = '飲食'"
+    assert call_kwargs["metadata_filters"] == {"industry": "飲食"}
     assert call_kwargs["limit"] == 3
     assert call_kwargs["metadata_col"] == "metadata"
     assert call_kwargs["content_col"] == "content"
+    # 旧 where API は廃止
+    assert "where" not in call_kwargs
+
+
+def test_search_filter_industry_no_injection(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """悪意ある filter_industry 文字列でも生 SQL に補間されず、placeholder に bind されること。
+
+    Pydantic の max_length=100 を通せば従来の f-string 実装では
+    ``metadata->>'industry' = ''; DROP TABLE chunks; --'`` のような SQL が生成され、
+    将来 validation が緩和されると injection の余地が残る。本テストは
+    値が dict として渡り、adapter 側で placeholder にバインドされるべきことを固定する。
+    """
+    payload = "'; DROP TABLE chunks; --"
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+        target_table="proposal_chunks",
+        content_col="content",
+        metadata_col="metadata",
+    )
+    skill.run(
+        input=SearchInput(query="injection check", filter_industry=payload),
+        ctx=SkillContext(),
+    )
+
+    call_kwargs: dict[str, Any] = fake_pgvector.search_similar.call_args.kwargs
+    # 1. 値は dict のまま透過 — クォートや SQL 断片で wrap されていない
+    assert call_kwargs["metadata_filters"] == {"industry": payload}
+    # 2. もはや where 文字列に補間されることはない
+    assert "where" not in call_kwargs
 
 
 def test_search_passes_app_role_to_connection(
@@ -207,7 +240,7 @@ def test_search_filter_industry_ignored_without_metadata_col(
         ctx=SkillContext(),
     )
     call_kwargs: dict[str, Any] = fake_pgvector.search_similar.call_args.kwargs
-    assert call_kwargs["where"] is None
+    assert call_kwargs["metadata_filters"] is None
     assert call_kwargs["content_col"] == "text"
     assert call_kwargs["metadata_col"] is None
 

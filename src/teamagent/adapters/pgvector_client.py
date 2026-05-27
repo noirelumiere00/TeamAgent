@@ -118,7 +118,7 @@ class PgVectorClient:
         embedding: list[float],
         table: str,
         limit: int = 5,
-        where: str | None = None,
+        metadata_filters: dict[str, str] | None = None,
         request_id: str | None = None,
         *,
         id_col: str = "id",
@@ -134,7 +134,10 @@ class PgVectorClient:
             embedding: クエリベクトル（1024 次元想定）
             table: 検索対象テーブル名（外部入力禁止、コード内固定で渡すこと）
             limit: 上位件数
-            where: 追加の WHERE 句（外部入力禁止、コード内固定の文字列）
+            metadata_filters: JSONB メタデータの等価フィルタ。例: ``{"industry": "エネルギー"}``。
+                key / value はどちらも ``metadata_col->>%s = %s`` の placeholder に
+                bind され、SQL injection から保護される。``metadata_col is None`` の
+                テーブル（旧 proposals_chunks 等）では無視される（fail-safe）。
             request_id: トレース ID
             id_col: 主キー列名（デフォルト "id"）
             content_col: 本文列名（デフォルト "content"、proposals_chunks では "text"）
@@ -143,7 +146,6 @@ class PgVectorClient:
             extra_cols: metadata 列が無い場合に metadata dict として格納したい追加列名
         """
         # SQL インジェクション対策: 列名・テーブル名はコード内固定値のみ受け付ける
-        where_clause = f"WHERE {where}" if where else ""
         select_cols: list[str] = [
             f"{id_col} AS chunk_id",
             f"{content_col} AS content",
@@ -155,8 +157,17 @@ class PgVectorClient:
         for col in extras:
             select_cols.append(col)
 
-        # bandit B608: 列名・テーブル名・where_clause はコード内固定値のみで構築
-        # SQL インジェクションのリスクなし（external input ではない）
+        # WHERE: metadata_filters の (key, value) を placeholder にバインド。
+        # metadata_col が None のテーブルでは JSONB 取得不可なのでフィルタを無視する。
+        where_clauses: list[str] = []
+        filter_params: list[Any] = []
+        if metadata_filters and metadata_col is not None:
+            for key, value in metadata_filters.items():
+                where_clauses.append(f"{metadata_col}->>%s = %s")
+                filter_params.extend([key, value])
+        where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        # bandit B608: 列名・テーブル名はコード内固定値、metadata_filters の値は placeholder
         sql = f"""
             SELECT {", ".join(select_cols)}
             FROM {table}
@@ -164,8 +175,9 @@ class PgVectorClient:
             ORDER BY {embedding_col} <=> %s::vector
             LIMIT %s
         """  # nosec B608
+        params: list[Any] = [embedding, *filter_params, embedding, limit]
         with conn.cursor() as cur:
-            cur.execute(sql, (embedding, embedding, limit))
+            cur.execute(sql, params)
             rows = cur.fetchall()
 
         hits: list[SearchHit] = []
@@ -206,6 +218,7 @@ class PgVectorClient:
         request_id: str | None = None,
         *,
         strict_industry: bool = False,
+        metadata_filters: dict[str, str] | None = None,
     ) -> list[SearchHit]:
         """documents + chunks JOIN で cosine 類似度上位 limit 件を返す。
 
@@ -220,6 +233,11 @@ class PgVectorClient:
         - strict_industry=False（既定）: soft filter。industry=指定値 OR industry IS NULL を許容。
           Router の自動付与で Slack docs (industry メタ無し) が全件除外されるのを防ぐ。
         - strict_industry=True: 厳密一致。明示的に user が「飲食だけ」と指定したい場合用。
+
+        metadata_filters:
+            ``d.metadata->>%s = %s`` の追加 AND 条件として bind される（厳密一致のみ）。
+            filter_industry とは独立に AND 結合する。key / value は placeholder 化される
+            ため SQL injection から保護される。
         """
         where_parts: list[str] = []
         params: list[Any] = [embedding]  # score 算出の 1st %s
@@ -236,6 +254,11 @@ class PgVectorClient:
                     "(d.metadata->>'industry' = %s OR d.metadata->>'industry' IS NULL)"
                 )
                 params.append(filter_industry)
+
+        if metadata_filters:
+            for key, value in metadata_filters.items():
+                where_parts.append("d.metadata->>%s = %s")
+                params.extend([key, value])
 
         where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
