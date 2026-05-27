@@ -364,6 +364,15 @@ class SkillDispatcher:
         # RLS 評価用に Slack user_id → email を解決
         user_email = await self._resolve_user_email(user_id)
 
+        # 会社思想 (Day 7, 2026-05-27): 「資料は全て共有物」
+        # user_email の domain を user_groups に自動注入する。
+        # → documents.acl_groups に 'vectorinc.co.jp' / 'domain名' が入っていれば
+        #   RLS の acl_groups intersect で workspace 全員に見せられる。
+        # 将来 Slack User Group → group email[] 解決時に追加で merge する。
+        user_groups: list[str] = []
+        if user_email and "@" in user_email:
+            user_groups.append(user_email.split("@", 1)[1])  # 'vectorinc.co.jp'
+
         skill = self.get_search_skill()
         ctx = SkillContext(
             request_id=request_id,
@@ -371,7 +380,7 @@ class SkillDispatcher:
             metadata={
                 # PgVectorClient.connection() に渡される RLS GUC
                 "user_email": user_email,
-                # user_groups は将来 Slack User Group → email_list 解決時に注入予定
+                "user_groups": user_groups,
                 "user_role": "member",
             },
         )

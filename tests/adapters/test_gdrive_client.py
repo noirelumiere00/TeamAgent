@@ -229,7 +229,14 @@ def test_list_permissions_maps_to_dataclass() -> None:
 # -----------------------------------------------------------
 # extract_acl_emails
 # -----------------------------------------------------------
-def test_extract_acl_emails_filters_owner_and_deleted() -> None:
+def test_extract_acl_emails_filters_owner_and_deleted(monkeypatch: Any) -> None:
+    """Day 7 (2026-05-27) Workspace-wide ACL: domain/anyone も groups に展開する。
+
+    会社思想「資料は全て共有物」原則:
+      - type='domain' → その domain 名を acl_groups に
+      - type='anyone' → WORKSPACE_DOMAIN を acl_groups に
+    """
+    monkeypatch.setenv("WORKSPACE_DOMAIN", "vectorinc.co.jp")
     perms = [
         DrivePermission(id="1", type="user", role="owner", email_address="o@x.jp"),
         DrivePermission(id="2", type="user", role="reader", email_address="r@x.jp"),
@@ -245,8 +252,30 @@ def test_extract_acl_emails_filters_owner_and_deleted() -> None:
     assert "sales@x.jp" in groups
     # deleted は除外
     assert "old@x.jp" not in emails
-    # domain / anyone は emails / groups に入れない（広すぎる ACL）
-    assert all("x.jp" != e for e in emails if "@" not in e)
+    # domain は domain 名を group に展開
+    assert "x.jp" in groups
+    # anyone は WORKSPACE_DOMAIN (vectorinc.co.jp) を group に展開
+    assert "vectorinc.co.jp" in groups
+
+
+def test_extract_acl_emails_workspace_domain_env_override(monkeypatch: Any) -> None:
+    """WORKSPACE_DOMAIN を env で上書きすると anyone がその domain に展開される。"""
+    monkeypatch.setenv("WORKSPACE_DOMAIN", "example.co.jp")
+    perms = [DrivePermission(id="1", type="anyone", role="reader")]
+    _, groups = extract_acl_emails(perms)
+    assert groups == ["example.co.jp"]
+
+
+def test_extract_acl_emails_dedup_groups(monkeypatch: Any) -> None:
+    """同じ group / domain が複数 permission で出ても 1 件に dedup される。"""
+    monkeypatch.setenv("WORKSPACE_DOMAIN", "vectorinc.co.jp")
+    perms = [
+        DrivePermission(id="1", type="domain", role="reader", domain="vectorinc.co.jp"),
+        DrivePermission(id="2", type="anyone", role="reader"),
+        DrivePermission(id="3", type="domain", role="writer", domain="vectorinc.co.jp"),
+    ]
+    _, groups = extract_acl_emails(perms)
+    assert groups == ["vectorinc.co.jp"]  # 1 件のみ
 
 
 # -----------------------------------------------------------
