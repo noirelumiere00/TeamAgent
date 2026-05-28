@@ -1,0 +1,173 @@
+# TeamAgent 検索精度評価 Gold Set v1
+#
+# 目的:
+#   Sprint 4 で実装した機能 (Cohere Rerank, FB Drive Match, prompt v2 等) の
+#   検索精度を **数値で計測** する。1 事例の anecdote (例: 日本ガイシ rank 6→1) に
+#   依存せず、25 ケースの平均で改善を検証する。
+#
+# 評価指標:
+#   - **top1_hit**: 期待 chunk が top-1 にあるか (0 or 1)
+#   - **top5_hit**: top-5 に含まれるか
+#   - **mrr**: 1 / (期待 chunk の rank)、含まれなければ 0
+#   - **precision@5**: top-5 中の関連 chunk 比率
+#   - **cost_usd / latency_ms**: 横軸として記録
+#
+# 期待 chunk マッチ判定:
+#   - `expect_keywords`: chunk の content に **すべて** 含まれていれば match
+#   - `expect_source_type`: optional、source_type が一致しているか
+#   - `expect_client_name`: optional、metadata.client_name に部分一致
+#   - `expect_metadata`: optional、metadata の他フィールドへの追加条件
+#
+# 作成方針:
+#   - 1〜10: Day 8 で実機検証済の Slack FB 案件 (確実に DB にある)
+#   - 11〜20: BtoB / BtoC / 業界別の汎用クエリ (パターン抽出評価)
+#   - 21〜25: ネガティブケース (該当無しが正解、hallucination 防止)
+
+version: 1
+description: "Sprint 4 検索精度 baseline 評価セット (Day 8 = 2026-05-28 作成)"
+
+cases:
+  # ==========================================
+  # 1. Day 8 実機検証済の固有案件 (確実にヒットすべき)
+  # ==========================================
+  - id: 1
+    query: "日本ガイシのケイパ提案について教えて"
+    expect_keywords: ["日本ガイシ", "ADK中部", "ケイパ"]
+    expect_source_type: "slack"
+    expect_client_name: "日本ガイシ"
+    notes: "Day 8 動作確認で dense rank 6 → Rerank rank 1 を実証した代表ケース"
+
+  - id: 2
+    query: "マンダムのヒアリング案件の温度感を教えて"
+    expect_keywords: ["マンダム", "ヒアリング"]
+    expect_source_type: "slack"
+    expect_client_name: "マンダム"
+
+  - id: 3
+    query: "ニチレイの1回目提案フィードバック"
+    expect_keywords: ["ニチレイ"]
+    expect_source_type: "slack"
+
+  - id: 4
+    query: "ADK中部 BtoBリクルーティング案件"
+    expect_keywords: ["ADK中部", "リクルーティング"]
+    expect_source_type: "slack"
+
+  - id: 5
+    query: "アサヒビールのケイパ提案"
+    expect_keywords: ["アサヒビール", "ケイパ"]
+    expect_source_type: "slack"
+
+  - id: 6
+    query: "電通キリン案件の商談感触"
+    expect_keywords: ["電通", "キリン"]
+
+  - id: 7
+    query: "PPIHのケイパ提案フィードバック"
+    expect_keywords: ["PPIH"]
+    expect_source_type: "slack"
+
+  - id: 8
+    query: "サントリーのケイパ提案"
+    expect_keywords: ["サントリー", "ケイパ"]
+    expect_source_type: "slack"
+
+  - id: 9
+    query: "クラシエのケイパ提案"
+    expect_keywords: ["クラシエ", "ケイパ"]
+    expect_source_type: "slack"
+
+  - id: 10
+    query: "ユニーの2回目提案"
+    expect_keywords: ["ユニー", "2回目以降提案"]
+    expect_source_type: "slack"
+
+  # ==========================================
+  # 2. 業界別パターン抽出 (汎用クエリ、prompt v2 効果評価)
+  # ==========================================
+  - id: 11
+    query: "BtoB企業のケイパ提案で過去刺さった訴求は？"
+    expect_keywords: ["BtoB"]
+    expect_metadata:
+      deal_phase: "ケイパ"
+    notes: "v2 prompt で「展示会活用 / 先行者利益 / 既存資産再活用」抽出を期待"
+
+  - id: 12
+    query: "飲料メーカー向けの提案実績"
+    expect_keywords: ["伊藤園", "アサヒ", "サントリー", "キリン"]  # いずれか
+    notes: "OR マッチ (expect_keywords_any) は将来拡張、v1 では先頭でも OK"
+
+  - id: 13
+    query: "UGCのTTOで成功した事例"
+    expect_keywords: ["UGC"]
+
+  - id: 14
+    query: "失注した案件と失注理由"
+    expect_keywords: []
+    expect_metadata:
+      bant_score: "C"  # C 評価 = 検討止まりに近い
+    notes: "BANT C 案件のレビュー、推奨アクション抽出を期待"
+
+  - id: 15
+    query: "BANT A の前向きな案件一覧"
+    expect_keywords: []
+    expect_metadata:
+      bant_score: "A"
+
+  - id: 16
+    query: "代理店経由の案件で刺さりやすい訴求"
+    expect_metadata:
+      channel_type: "代理店"
+
+  - id: 17
+    query: "直販案件のフィードバック傾向"
+    expect_metadata:
+      channel_type: "直販"
+
+  - id: 18
+    query: "テレビCMとの予算配分が課題になった案件"
+    expect_keywords: ["テレビCM", "予算"]
+    notes: "negative_reaction での共通パターン抽出"
+
+  - id: 19
+    query: "薬事審査が論点になった案件"
+    expect_keywords: ["薬事"]
+    notes: "化粧品/医薬品系の規制論点"
+
+  - id: 20
+    query: "リクルーティング目的の提案で成功したケース"
+    expect_keywords: ["リクルーティング"]
+
+  # ==========================================
+  # 3. Drive 資料系 (PDF / フォルダ取り込み結果評価)
+  # ==========================================
+  - id: 21
+    query: "NewsTV の採用向け資料"
+    expect_keywords: ["NewsTV", "採用"]
+    expect_source_type: "gdrive"
+    notes: "Drive ingest 完了の検証 (Day 7 確認済)"
+
+  - id: 22
+    query: "ショート動画戦略の基本資料"
+    expect_keywords: ["ショート動画"]
+
+  # ==========================================
+  # 4. ネガティブケース (hallucination 防止、該当無しが正解)
+  # ==========================================
+  - id: 23
+    query: "東芝の半導体事業の提案について"
+    expect_keywords: []
+    expect_zero_hits: true
+    notes: "DB に無いはず。Bot は「資料に記載がありません」と返すべき"
+
+  - id: 24
+    query: "2027 年 4 月のキャンペーン計画"
+    expect_keywords: []
+    expect_zero_hits: true
+    notes: "未来の架空イベント、hallucinate しないか"
+
+  - id: 25
+    query: "TeamAgent Bot 自身の開発履歴"
+    expect_keywords: []
+    expect_zero_hits: true
+    notes: "メタ質問、検索対象外"

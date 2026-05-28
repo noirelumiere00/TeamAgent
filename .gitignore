@@ -150,3 +150,7 @@ Desktop.ini
 *.bak
 *.tmp
 .fuse_hidden*
+
+# --- Eval results (Day 8 Sprint 4-C) ---
+# 実行ごとに timestamp 付き JSON が増える、レポジトリ汚染防止
+data/eval/results/
