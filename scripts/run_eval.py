@@ -1,0 +1,326 @@
+#!/usr/bin/env python
+"""TeamAgent 検索精度評価ハーネス。
+
+Sprint 4 で実装した機能 (Rerank, FB Drive Match, prompt v2 等) の精度を
+gold set で数値化する。A/B 比較で改善を立証するための共通基盤。
+
+Usage:
+    # baseline (Rerank OFF, prompt v1)
+    python scripts/run_eval.py --label baseline
+
+    # Rerank ON (Sprint 4-A 効果)
+    USE_COHERE_RERANK=true python scripts/run_eval.py --label rerank
+
+    # フル構成 (Day 8 完成形)
+    USE_COHERE_RERANK=true USE_FB_DRIVE_MATCH=true PROMPT_VERSION=v2 \\
+      python scripts/run_eval.py --label day8_full
+
+    # 結果を比較
+    python scripts/run_eval.py --compare baseline rerank day8_full
+
+出力:
+    `data/eval/results/<label>_<timestamp>.json` に詳細を保存。
+    標準出力に集計サマリ。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+GOLD_SET_PATH = PROJECT_ROOT / "data" / "eval" / "sales_gold_set.yaml"
+RESULTS_DIR = PROJECT_ROOT / "data" / "eval" / "results"
+
+
+@dataclass
+class CaseResult:
+    """1 query の評価結果。"""
+
+    case_id: int
+    query: str
+    top1_hit: bool = False
+    top5_hit: bool = False
+    mrr: float = 0.0
+    expected_rank: int | None = None  # 1-based、見つからなければ None
+    actual_top_hits: list[dict[str, Any]] = field(default_factory=list)  # debug 用
+    cost_usd: float = 0.0
+    latency_ms: int = 0
+    error: str | None = None
+
+
+@dataclass
+class EvalSummary:
+    """全 case の集計。"""
+
+    label: str
+    timestamp: str
+    config: dict[str, Any]  # 環境変数 + flags
+    total_cases: int
+    top1_hit_rate: float
+    top5_hit_rate: float
+    mean_mrr: float
+    mean_cost_usd: float
+    mean_latency_ms: float
+    zero_hit_correct: int  # ネガティブケースの正解数
+    zero_hit_total: int
+    per_case: list[CaseResult]
+
+
+def _load_gold_set() -> list[dict[str, Any]]:
+    """gold set YAML を読み込む。"""
+    with GOLD_SET_PATH.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return list(data["cases"])
+
+
+def _match_hit(hit_content: str, hit_metadata: dict[str, Any], case: dict[str, Any]) -> bool:
+    """gold case の期待条件に hit がマッチするかを判定。
+
+    - expect_keywords: 全部 content に含まれていれば True (空リストなら無視)
+    - expect_source_type: source_type が一致
+    - expect_client_name: metadata.client_name に部分一致
+    - expect_metadata: 各 key の値が一致
+    """
+    keywords: list[str] = case.get("expect_keywords") or []
+    for kw in keywords:
+        if kw not in hit_content:
+            return False
+
+    expect_st = case.get("expect_source_type")
+    if expect_st and hit_metadata.get("source_type") != expect_st:
+        return False
+
+    expect_client = case.get("expect_client_name")
+    if expect_client:
+        actual = str(hit_metadata.get("client_name") or "")
+        if expect_client not in actual:
+            return False
+
+    expect_meta = case.get("expect_metadata") or {}
+    for k, expected_v in expect_meta.items():
+        actual_v = str(hit_metadata.get(k) or "")
+        if str(expected_v) not in actual_v:
+            return False
+
+    return True
+
+
+def _evaluate_case(skill: Any, ctx_cls: Any, case: dict[str, Any]) -> CaseResult:
+    """1 ケースを SearchSkill 経由で実行 + 評価。"""
+    from teamagent.skills.search.schema import SearchInput
+
+    result = CaseResult(case_id=case["id"], query=case["query"])
+    expect_zero = bool(case.get("expect_zero_hits"))
+
+    start = time.perf_counter()
+    try:
+        out = skill.run(
+            input=SearchInput(query=case["query"], top_k=5),
+            ctx=ctx_cls(
+                metadata={
+                    "user_email": os.environ.get("EVAL_USER_EMAIL", "noreply@vectorinc.co.jp"),
+                    "user_groups": ["vectorinc.co.jp"],
+                    "user_role": "admin",
+                }
+            ),
+        )
+    except Exception as e:
+        result.error = f"{type(e).__name__}: {e}"
+        result.latency_ms = int((time.perf_counter() - start) * 1000)
+        return result
+
+    result.latency_ms = int((time.perf_counter() - start) * 1000)
+    result.cost_usd = float(out.total_cost_usd)
+    result.actual_top_hits = [
+        {
+            "chunk_id": h.chunk_id,
+            "score": round(h.score, 4),
+            "source_type": h.source_type,
+            "content_preview": h.content[:120],
+        }
+        for h in out.hits[:5]
+    ]
+
+    # ネガティブケース: 0 ヒットが正解
+    if expect_zero:
+        result.top1_hit = len(out.hits) == 0
+        result.top5_hit = len(out.hits) == 0
+        result.mrr = 1.0 if len(out.hits) == 0 else 0.0
+        return result
+
+    # 通常ケース: 期待 chunk が top-5 に居るか
+    for rank, h in enumerate(out.hits[:5], start=1):
+        if _match_hit(h.content, h.metadata or {}, case):
+            result.expected_rank = rank
+            result.top1_hit = rank == 1
+            result.top5_hit = True
+            result.mrr = 1.0 / rank
+            break
+
+    return result
+
+
+def _summarize(results: list[CaseResult], label: str, config: dict[str, Any]) -> EvalSummary:
+    """全 case の結果を集計。"""
+    n = len(results)
+    if n == 0:
+        raise ValueError("結果がありません")
+
+    top1_count = sum(1 for r in results if r.top1_hit)
+    top5_count = sum(1 for r in results if r.top5_hit)
+    mrr_sum = sum(r.mrr for r in results)
+    cost_sum = sum(r.cost_usd for r in results)
+    latency_sum = sum(r.latency_ms for r in results)
+
+    # ネガティブケースの正解数 (expect_zero_hits=true で 0 件返したか)
+    # ここでは top1_hit=True かつ実 hits=0 のものを正解とみなす
+    zero_cases = [r for r in results if not r.actual_top_hits and r.top1_hit]
+
+    return EvalSummary(
+        label=label,
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        config=config,
+        total_cases=n,
+        top1_hit_rate=round(top1_count / n, 4),
+        top5_hit_rate=round(top5_count / n, 4),
+        mean_mrr=round(mrr_sum / n, 4),
+        mean_cost_usd=round(cost_sum / n, 6),
+        mean_latency_ms=round(latency_sum / n, 1),
+        zero_hit_correct=len(zero_cases),
+        zero_hit_total=sum(1 for r in results if not r.actual_top_hits),
+        per_case=results,
+    )
+
+
+def _print_summary(s: EvalSummary) -> None:
+    print()
+    print("=" * 60)
+    print(f"Eval: {s.label}")
+    print(f"timestamp: {s.timestamp}")
+    print(f"config: {s.config}")
+    print("=" * 60)
+    print(f"total cases:        {s.total_cases}")
+    print(f"top-1 hit rate:     {s.top1_hit_rate * 100:.1f}%")
+    print(f"top-5 hit rate:     {s.top5_hit_rate * 100:.1f}%")
+    print(f"mean MRR:           {s.mean_mrr:.4f}")
+    print(f"mean cost / query:  ${s.mean_cost_usd:.4f}")
+    print(f"mean latency / q:   {s.mean_latency_ms:.0f} ms")
+    print(f"zero-hit handling:  {s.zero_hit_correct}/{s.zero_hit_total} correct")
+    print("=" * 60)
+    # 詳細 (失敗ケースのみ)
+    failed = [r for r in s.per_case if not r.top5_hit]
+    if failed:
+        print(f"\n--- top-5 漏れケース ({len(failed)} 件) ---")
+        for r in failed:
+            print(f"  case {r.case_id}: {r.query}")
+            if r.error:
+                print(f"    ERROR: {r.error}")
+            elif r.actual_top_hits:
+                print(f"    top-1 hit: chunk_id={r.actual_top_hits[0]['chunk_id']}")
+
+
+def _save_results(s: EvalSummary) -> Path:
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{s.label}_{ts}.json"
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(asdict(s), f, ensure_ascii=False, indent=2)
+    return path
+
+
+def _build_skill() -> Any:
+    """環境変数から SearchSkill を組み立てる (slack_bot.py と同じロジック)。"""
+    from teamagent.adapters.embeddings_client import LocalE5Embedder
+    from teamagent.skills.search.skill import SearchSkill
+
+    use_contextual = os.environ.get("USE_CONTEXTUAL", "false").lower() in ("1", "true", "yes")
+    use_new_schema = os.environ.get("USE_NEW_SCHEMA", "true").lower() in ("1", "true", "yes")
+    use_fb_drive_match = os.environ.get("USE_FB_DRIVE_MATCH", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    use_cohere_rerank = os.environ.get("USE_COHERE_RERANK", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    prompt_version = os.environ.get("PROMPT_VERSION", "v1")
+
+    return (
+        SearchSkill(
+            embedder=LocalE5Embedder(),
+            use_contextual=use_contextual,
+            use_new_schema=use_new_schema,
+            use_fb_drive_match=use_fb_drive_match,
+            use_cohere_rerank=use_cohere_rerank,
+            prompt_version=prompt_version,
+        ),
+        {
+            "USE_NEW_SCHEMA": use_new_schema,
+            "USE_CONTEXTUAL": use_contextual,
+            "USE_FB_DRIVE_MATCH": use_fb_drive_match,
+            "USE_COHERE_RERANK": use_cohere_rerank,
+            "PROMPT_VERSION": prompt_version,
+        },
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--label",
+        required=True,
+        help="この実行を識別するラベル (例: baseline, rerank, day8_full)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="先頭 N 件だけ実行 (smoke test 用)",
+    )
+    args = parser.parse_args()
+
+    cases = _load_gold_set()
+    if args.limit:
+        cases = cases[: args.limit]
+
+    print("--- Loading SearchSkill ---")
+    skill, config = _build_skill()
+    print(f"config: {config}")
+
+    from teamagent.skills.base import SkillContext
+
+    results: list[CaseResult] = []
+    print(f"\n--- Running {len(cases)} cases ---")
+    for case in cases:
+        r = _evaluate_case(skill, SkillContext, case)
+        marker = "✓" if r.top5_hit else "✗"
+        rank_str = f"rank {r.expected_rank}" if r.expected_rank else "miss"
+        err = f" ERROR: {r.error}" if r.error else ""
+        print(
+            f"  [{marker}] case {r.case_id:2d}: {rank_str:8s} "
+            f"cost=${r.cost_usd:.4f} latency={r.latency_ms}ms{err}"
+        )
+        results.append(r)
+
+    summary = _summarize(results, args.label, config)
+    _print_summary(summary)
+    path = _save_results(summary)
+    print(f"\nresults saved: {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
