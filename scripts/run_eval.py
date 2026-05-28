@@ -160,8 +160,19 @@ def _evaluate_case(skill: Any, ctx_cls: Any, case: dict[str, Any]) -> CaseResult
         return result
 
     # 通常ケース: 期待 chunk が top-5 に居るか
+    # SearchHitOut (Pydantic) は flat fields なので metadata dict を組み立て直す
     for rank, h in enumerate(out.hits[:5], start=1):
-        if _match_hit(h.content, h.metadata or {}, case):
+        hit_meta = {
+            "source_type": h.source_type,
+            "source_uri": h.source_uri,
+            "channel_name": h.channel_name,
+            "file_name": h.file_name,
+            "page_num": h.page_num,
+            # client_name / deal_phase / bant_score 等は SearchHitOut に
+            # 露出されていない (Pydantic schema にない)。
+            # 暫定: content に含まれているかで擬似マッチ判定する。
+        }
+        if _match_hit(h.content, hit_meta, case):
             result.expected_rank = rank
             result.top1_hit = rank == 1
             result.top5_hit = True
@@ -257,6 +268,10 @@ def _build_skill() -> Any:
         "yes",
     )
     prompt_version = os.environ.get("PROMPT_VERSION", "v1")
+    try:
+        summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "4096"))
+    except ValueError:
+        summary_max_tokens = 4096
 
     return (
         SearchSkill(
@@ -266,6 +281,7 @@ def _build_skill() -> Any:
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
             prompt_version=prompt_version,
+            summary_max_tokens=summary_max_tokens,
         ),
         {
             "USE_NEW_SCHEMA": use_new_schema,
@@ -273,6 +289,7 @@ def _build_skill() -> Any:
             "USE_FB_DRIVE_MATCH": use_fb_drive_match,
             "USE_COHERE_RERANK": use_cohere_rerank,
             "PROMPT_VERSION": prompt_version,
+            "SEARCH_MAX_TOKENS": summary_max_tokens,
         },
     )
 
