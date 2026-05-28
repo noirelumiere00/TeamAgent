@@ -27,11 +27,17 @@ Usage:
 from __future__ import annotations
 
 import os
+import socket
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
+
+# Day 7 (2026-05-27): SSL socket が無期限ハングする問題への対策。
+# 大 PDF download (8-10MB) で httplib2 のデフォルト無限 timeout が原因で固まることがある。
+# 60 秒で諦めて TimeoutError を上げさせ、上位の try/except でスキップさせる。
+socket.setdefaulttimeout(60)
 
 logger = structlog.get_logger(__name__)
 

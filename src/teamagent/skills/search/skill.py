@@ -192,16 +192,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     request_id=ctx.request_id,
                     strict_industry=input.strict_industry,
                 )
-            where: str | None = None
+            # メタデータ JSONB のフィルタ。値は adapter 側で placeholder にバインド
+            # されるため SQL injection から保護される。metadata 列を持つテーブルで
+            # のみ有効（adapter 側で metadata_col is None なら無視される fail-safe）。
+            metadata_filters: dict[str, str] | None = None
             if input.filter_industry and self._metadata_col is not None:
-                # メタデータ JSONB のフィルタ。metadata 列を持つテーブルでのみ有効
-                where = f"{self._metadata_col}->>'industry' = '{input.filter_industry}'"
+                metadata_filters = {"industry": input.filter_industry}
             return self._pgvector.search_similar(
                 conn=conn,
                 embedding=embedding,
                 table=self._target_table,
                 limit=input.top_k,
-                where=where,
+                metadata_filters=metadata_filters,
                 content_col=self._content_col,
                 metadata_col=self._metadata_col,
                 extra_cols=self._extra_cols,
