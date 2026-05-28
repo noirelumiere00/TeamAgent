@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+import structlog
 from pydantic import BaseModel
 
 from teamagent.adapters.bedrock_client import BedrockClient
@@ -24,6 +25,8 @@ from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
+
+logger = structlog.get_logger(__name__)
 
 
 @register
@@ -49,6 +52,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         use_new_schema: bool = False,
         use_fb_drive_match: bool = False,
         fb_drive_match_limit: int = 3,
+        use_cohere_rerank: bool = False,
+        rerank_pool_size: int = 30,
         app_role: str | None = "teamagent_app",
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
@@ -93,6 +98,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # USE_FB_DRIVE_MATCH=true 環境変数で gating (デフォルト OFF、段階ロールアウト用)。
         self._use_fb_drive_match = use_fb_drive_match
         self._fb_drive_match_limit = fb_drive_match_limit
+        # Day 8 (2026-05-28) Sprint 4-A: Cohere Rerank v3.5 (Bedrock 東京)。
+        # USE_COHERE_RERANK=true で有効化。top_k=rerank_pool_size 取得 → Rerank → top_k 絞り込み。
+        # Anthropic 公式ベンチで dense retrieval の失敗率 5.7% → 1.9% (-67%) を実現する中核機能。
+        self._use_cohere_rerank = use_cohere_rerank
+        self._rerank_pool_size = rerank_pool_size
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
@@ -191,14 +201,29 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             user_role=user_role,
         ) as conn:
             if self._use_new_schema:
+                # Day 8 Sprint 4-A: Cohere Rerank 有効時は pool_size まで広く retrieve
+                # → Rerank で top_k に絞る (dense retrieval の固有名詞弱点を補強)
+                retrieve_limit = (
+                    max(input.top_k, self._rerank_pool_size)
+                    if self._use_cohere_rerank
+                    else input.top_k
+                )
                 hits = self._pgvector.search_similar_new_schema(
                     conn=conn,
                     embedding=embedding,
-                    limit=input.top_k,
+                    limit=retrieve_limit,
                     filter_industry=input.filter_industry,
                     request_id=ctx.request_id,
                     strict_industry=input.strict_industry,
                 )
+                # Rerank: top_k に絞り直す (relevance_score で再ソート)
+                if self._use_cohere_rerank and hits:
+                    hits = self._apply_cohere_rerank(
+                        query=input.query,
+                        hits=hits,
+                        top_k=input.top_k,
+                        request_id=ctx.request_id,
+                    )
                 # Day 8 Phase 2: FB hits があれば client_name で Drive 資料を追加 retrieve
                 if self._use_fb_drive_match and hits:
                     related = self._fetch_related_drive_hits(
@@ -225,6 +250,51 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 metadata_col=self._metadata_col,
                 extra_cols=self._extra_cols,
             )
+
+    def _apply_cohere_rerank(
+        self,
+        query: str,
+        hits: list[SearchHit],
+        top_k: int,
+        request_id: str,
+    ) -> list[SearchHit]:
+        """Cohere Rerank v3.5 で hits を relevance score 順に並べ替え、top_k に絞る。
+
+        Day 8 (2026-05-28) Sprint 4-A の中核処理。
+        - 入力: pgvector top_pool_size hits (dense retrieval 結果)
+        - 処理: Bedrock Rerank API で query との関連性を再評価
+        - 出力: relevance_score 降順 top_k 件 (元 hits.score は Rerank score で上書き)
+
+        失敗時はオリジナル hits を top_k で truncate して返す (fail-safe, 副作用最小化)。
+        """
+        try:
+            documents = [h.content for h in hits]
+            response = self._bedrock.rerank(
+                query=query,
+                documents=documents,
+                request_id=request_id,
+                top_n=top_k,
+            )
+        except Exception:
+            # Rerank 失敗は致命傷ではない: dense retrieval 結果をそのまま使う
+            logger.exception("cohere_rerank_failed_falling_back_to_dense", request_id=request_id)
+            return hits[:top_k]
+
+        # Rerank 結果に従って元 hits を並べ替え + score を Rerank score で更新
+        reranked: list[SearchHit] = []
+        for r in response.results:
+            if r.index < 0 or r.index >= len(hits):
+                continue
+            original = hits[r.index]
+            reranked.append(
+                SearchHit(
+                    chunk_id=original.chunk_id,
+                    content=original.content,
+                    score=r.relevance_score,  # dense score → rerank relevance score
+                    metadata={**original.metadata, "dense_score": original.score},
+                )
+            )
+        return reranked
 
     def _fetch_related_drive_hits(
         self,

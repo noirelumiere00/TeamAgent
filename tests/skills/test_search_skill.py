@@ -530,3 +530,112 @@ def test_phase2_dedupes_client_names(
 
     call_kwargs = fake_pgvector_with_fb_hit.search_drive_by_client_names.call_args.kwargs
     assert call_kwargs["client_names"] == ["日本ガイシ"]  # 重複除外
+
+
+# ==================================================================
+# Day 8 (2026-05-28) Sprint 4-A: Cohere Rerank v3.5
+# ==================================================================
+@pytest.fixture
+def fake_pgvector_rerank_pool() -> MagicMock:
+    """rerank pool 用に top-10 hits を返す pgvector mock。"""
+    mock = MagicMock()
+    cm_mock = MagicMock()
+    cm_mock.__enter__ = MagicMock(return_value=MagicMock())
+    cm_mock.__exit__ = MagicMock(return_value=False)
+    mock.connection.return_value = cm_mock
+    hits = [
+        SearchHit(
+            chunk_id=i,
+            content=f"chunk_{i} content",
+            score=0.9 - i * 0.01,  # dense score 降順 (0.90, 0.89, ..., 0.81)
+            metadata={"source_type": "slack"},
+        )
+        for i in range(10)
+    ]
+    mock.search_similar_new_schema.return_value = hits
+    return mock
+
+
+def test_rerank_calls_bedrock_rerank_and_reorders(
+    fake_bedrock: MagicMock, fake_pgvector_rerank_pool: MagicMock
+) -> None:
+    """USE_COHERE_RERANK=True で rerank が呼ばれ、index 順に並び替えること。"""
+    from teamagent.adapters.bedrock_client import RerankResponse, RerankResult
+
+    # Rerank が rank 6 を rank 1 に持ってくる結果を返す
+    fake_bedrock.rerank.return_value = RerankResponse(
+        results=[
+            RerankResult(index=6, relevance_score=0.98),  # 元 dense rank 7 が 1 位に
+            RerankResult(index=0, relevance_score=0.65),
+            RerankResult(index=3, relevance_score=0.50),
+        ],
+        model_arn="arn:aws:bedrock:ap-northeast-1::foundation-model/cohere.rerank-v3-5:0",
+        latency_ms=200,
+        query_count=1,
+    )
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_rerank_pool,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_cohere_rerank=True,
+        rerank_pool_size=10,
+    )
+    out = skill.run(input=SearchInput(query="日本ガイシ", top_k=3), ctx=SkillContext())
+
+    # pgvector は pool_size=10 で呼ばれた
+    pg_kwargs = fake_pgvector_rerank_pool.search_similar_new_schema.call_args.kwargs
+    assert pg_kwargs["limit"] == 10
+    # Bedrock rerank が呼ばれた
+    fake_bedrock.rerank.assert_called_once()
+    rerank_kwargs = fake_bedrock.rerank.call_args.kwargs
+    assert rerank_kwargs["query"] == "日本ガイシ"
+    assert len(rerank_kwargs["documents"]) == 10
+    assert rerank_kwargs["top_n"] == 3
+
+    # 出力は rerank で並び替え後の top-3 (chunk_id 6 が先頭)
+    assert len(out.hits) == 3
+    assert out.hits[0].chunk_id == 6
+    assert out.hits[0].score == 0.98  # rerank score で上書き
+    assert out.hits[1].chunk_id == 0
+    assert out.hits[2].chunk_id == 3
+
+
+def test_rerank_disabled_by_default(
+    fake_bedrock: MagicMock, fake_pgvector_rerank_pool: MagicMock
+) -> None:
+    """use_cohere_rerank=False (default) で rerank が呼ばれず、dense 結果がそのまま使われる。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_rerank_pool,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        # use_cohere_rerank 指定なし
+    )
+    out = skill.run(input=SearchInput(query="x", top_k=3), ctx=SkillContext())
+
+    fake_bedrock.rerank.assert_not_called()
+    # dense retrieval の top_k だけが返される (pool_size に膨らまない)
+    pg_kwargs = fake_pgvector_rerank_pool.search_similar_new_schema.call_args.kwargs
+    assert pg_kwargs["limit"] == 3
+    assert len(out.hits) == 10  # mock は 10 件返すが、top_k=3 でフェッチ → mock が無視して 10 返す
+
+
+def test_rerank_failure_falls_back_to_dense(
+    fake_bedrock: MagicMock, fake_pgvector_rerank_pool: MagicMock
+) -> None:
+    """Rerank API が例外を投げても dense top_k で fail-safe に返ること。"""
+    fake_bedrock.rerank.side_effect = RuntimeError("rerank API down")
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_rerank_pool,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_cohere_rerank=True,
+        rerank_pool_size=10,
+    )
+    out = skill.run(input=SearchInput(query="x", top_k=3), ctx=SkillContext())
+
+    # rerank 失敗時は dense 順上位 3 件 (chunk_id 0,1,2)
+    assert len(out.hits) == 3
+    assert [h.chunk_id for h in out.hits] == [0, 1, 2]

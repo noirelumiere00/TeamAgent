@@ -281,17 +281,27 @@ class SkillDispatcher:
             "true",
             "yes",
         )
+        # Day 8 (2026-05-28) Sprint 4-A: Cohere Rerank v3.5 (Bedrock 東京)。
+        # USE_COHERE_RERANK=true で有効化、top_k=30 retrieve → Rerank → top-5。
+        # Anthropic ベンチで失敗率 -67%、$2/1000 queries (10560 query/月で $21 想定)。
+        use_cohere_rerank = os.environ.get("USE_COHERE_RERANK", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         instance = SearchSkill(
             embedder=LocalE5Embedder(),
             use_contextual=use_contextual,
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
+            use_cohere_rerank=use_cohere_rerank,
         )
         logger.info(
             "search_skill_initialized",
             use_contextual=use_contextual,
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
+            use_cohere_rerank=use_cohere_rerank,
         )
         self._skill_cache["search"] = instance
         return instance

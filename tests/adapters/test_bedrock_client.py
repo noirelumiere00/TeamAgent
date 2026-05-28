@@ -172,3 +172,99 @@ def test_converse_without_cache_system(fake_bedrock_response_mock: dict[str, Any
     )
     call_kwargs = mock_client.converse.call_args.kwargs
     assert call_kwargs["system"] == [{"text": "plain system"}]
+
+
+# ==================================================================
+# Day 8 (2026-05-28) Sprint 4-A: Cohere Rerank v3.5 サポート
+# ==================================================================
+def test_rerank_calls_bedrock_agent_runtime_with_correct_schema() -> None:
+    """rerank() が bedrock-agent-runtime.rerank に正しい schema で呼び出すこと。"""
+    from unittest.mock import MagicMock
+
+    mock_rerank_client = MagicMock()
+    mock_rerank_client.rerank.return_value = {
+        "results": [
+            {"index": 2, "relevanceScore": 0.95},
+            {"index": 0, "relevanceScore": 0.72},
+            {"index": 1, "relevanceScore": 0.40},
+        ]
+    }
+    client = BedrockClient(
+        region="ap-northeast-1",
+        model_id="jp.anthropic.claude-sonnet-4-6",
+        client=MagicMock(),
+        rerank_client=mock_rerank_client,
+    )
+
+    resp = client.rerank(
+        query="日本ガイシ ケイパ",
+        documents=["doc 1 about A", "doc 2 about B", "doc 3 about 日本ガイシ ケイパ"],
+        request_id="req-rerank-1",
+        top_n=2,
+    )
+
+    # API call kwargs を検証
+    call_kwargs = mock_rerank_client.rerank.call_args.kwargs
+    assert call_kwargs["queries"] == [{"type": "TEXT", "textQuery": {"text": "日本ガイシ ケイパ"}}]
+    assert call_kwargs["rerankingConfiguration"]["type"] == "BEDROCK_RERANKING_MODEL"
+    assert (
+        call_kwargs["rerankingConfiguration"]["bedrockRerankingConfiguration"][
+            "modelConfiguration"
+        ]["modelArn"]
+        == "arn:aws:bedrock:ap-northeast-1::foundation-model/cohere.rerank-v3-5:0"
+    )
+    assert (
+        call_kwargs["rerankingConfiguration"]["bedrockRerankingConfiguration"]["numberOfResults"]
+        == 2
+    )
+    assert len(call_kwargs["sources"]) == 3
+    assert (
+        call_kwargs["sources"][0]["inlineDocumentSource"]["textDocument"]["text"] == "doc 1 about A"
+    )
+
+    # Response 検証: relevance_score 降順、index は元 documents の位置
+    assert len(resp.results) == 3
+    assert resp.results[0].index == 2
+    assert resp.results[0].relevance_score == 0.95
+    assert resp.results[1].index == 0
+    assert resp.query_count == 1
+
+
+def test_rerank_empty_documents_raises() -> None:
+    """documents=[] は ValueError。"""
+    from unittest.mock import MagicMock
+
+    client = BedrockClient(
+        region="ap-northeast-1",
+        model_id="x",
+        client=MagicMock(),
+        rerank_client=MagicMock(),
+    )
+    with pytest.raises(ValueError, match="documents が空"):
+        client.rerank(query="x", documents=[], request_id="req")
+
+
+def test_rerank_too_many_documents_raises() -> None:
+    """documents > 1000 は ValueError (API spec の上限)。"""
+    from unittest.mock import MagicMock
+
+    client = BedrockClient(
+        region="ap-northeast-1",
+        model_id="x",
+        client=MagicMock(),
+        rerank_client=MagicMock(),
+    )
+    with pytest.raises(ValueError, match="最大 1000 件"):
+        client.rerank(query="x", documents=["d"] * 1001, request_id="req")
+
+
+def test_rerank_cost_estimation_uses_query_count() -> None:
+    """Cohere Rerank v3.5 のコストは $2/1000 queries (1 query 固定 = $0.002)。"""
+
+    from teamagent.adapters.bedrock_client import _estimate_rerank_cost
+
+    arn = "arn:aws:bedrock:ap-northeast-1::foundation-model/cohere.rerank-v3-5:0"
+    assert _estimate_rerank_cost(arn, query_count=1) == 0.002
+    assert _estimate_rerank_cost(arn, query_count=10) == 0.02
+    # 未知の model は 0
+    assert _estimate_rerank_cost("arn:aws:bedrock:::foundation-model/unknown", query_count=1) == 0.0
