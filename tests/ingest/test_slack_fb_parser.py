@@ -181,6 +181,40 @@ def test_empty_string_returns_empty_dict() -> None:
     assert parse_fb_post("") == {}
 
 
+def test_parse_empty_client_case_does_not_eat_next_label() -> None:
+    """Day 8 (2026-05-28) 回帰テスト: 空 value のとき次ラベル行を吸い込まない。
+
+    `*顧客名/案件名*` が空のとき、本番 RDS 19 件で client_name に
+    `*商談フェーズ*\\nケイパ` のような壊れた値が入っていたバグの再発防止。
+    """
+    content = (
+        "*商流*\n直販\n"
+        "*顧客名*\nアルファ広告社\n"
+        "*顧客名/案件名*\n"  # 値なし、すぐ次のラベル行
+        "*商談フェーズ*\nケイパ\n"
+        "*提案メニュー*\n"  # こちらも値なし
+        "*商談感触（BANT）*\nB（前向き）\n"
+        "*顧客反応（ポジティブ）*\n良い反応\n"
+    )
+    meta = parse_fb_post(content)
+    # client_case は空欄なので metadata に含まれない（空 value は drop される）
+    assert "client_case" not in meta
+    # 重要: deal_phase が正しく 'ケイパ' のみ（前 label を吸い込んでない）
+    assert meta["deal_phase"] == "ケイパ"
+    assert meta["channel_type"] == "直販"
+    assert meta["agency_name"] == "アルファ広告社"
+    assert meta["bant_score"] == "B（前向き）"
+    assert meta["positive_reaction"] == "良い反応"
+    # proposed_menu も空欄なので metadata に含まれない
+    assert "proposed_menu" not in meta
+
+
+def test_extract_client_name_from_empty_client_case_falls_back() -> None:
+    """空 client_case のとき extract_client_name は agency_name にフォールバックする。"""
+    meta = {"agency_name": "アルファ広告社"}  # client_case 無し
+    assert extract_client_name(meta) == "アルファ広告社"
+
+
 def test_unknown_labels_are_ignored() -> None:
     """未知ラベル (例: `*天気*`) は metadata 化されない。"""
     content = (
