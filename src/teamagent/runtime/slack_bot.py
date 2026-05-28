@@ -289,12 +289,17 @@ class SkillDispatcher:
             "true",
             "yes",
         )
+        # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
+        # 「過去要約」→「パターン抽出 + 推奨アクション」に役割進化。
+        # PROMPT_VERSION=v2 で有効化、デフォルト v1 (既存挙動互換)。
+        prompt_version = os.environ.get("PROMPT_VERSION", "v1")
         instance = SearchSkill(
             embedder=LocalE5Embedder(),
             use_contextual=use_contextual,
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
+            prompt_version=prompt_version,
         )
         logger.info(
             "search_skill_initialized",
@@ -302,6 +307,7 @@ class SkillDispatcher:
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
+            prompt_version=prompt_version,
         )
         self._skill_cache["search"] = instance
         return instance

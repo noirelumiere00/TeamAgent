@@ -54,6 +54,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         fb_drive_match_limit: int = 3,
         use_cohere_rerank: bool = False,
         rerank_pool_size: int = 30,
+        prompt_version: str = "v1",
         app_role: str | None = "teamagent_app",
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
@@ -103,6 +104,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # Anthropic 公式ベンチで dense retrieval の失敗率 5.7% → 1.9% (-67%) を実現する中核機能。
         self._use_cohere_rerank = use_cohere_rerank
         self._rerank_pool_size = rerank_pool_size
+        # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
+        # 「過去のチャンク要約」から「パターン抽出 + 推奨アクション」に役割を進化させる。
+        # ユーザー指摘 (Day 8): "あたりまえの過去事例リサーチは不要、リサーチ＆改善の思考が欲しい"
+        # PROMPT_VERSION 環境変数 (v1 / v2) で切替可能、本番ロールアウトは v2 を既定にする予定。
+        self._prompt_version = prompt_version
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
@@ -353,7 +359,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if not hits:
             return ("該当する資料が見つかりませんでした。", 0.0)
 
-        system = load_prompt("search", "v1", "system")
+        system = load_prompt("search", self._prompt_version, "system")
 
         # 主検索結果と関連 Drive 資料を分離 (Phase 2 新機能)
         primary_hits = [h for h in hits if not (h.metadata or {}).get("is_related_drive")]
