@@ -290,9 +290,15 @@ class SkillDispatcher:
             "yes",
         )
         # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
-        # 「過去要約」→「パターン抽出 + 推奨アクション」に役割進化。
-        # PROMPT_VERSION=v2 で有効化、デフォルト v1 (既存挙動互換)。
+        # PROMPT_VERSION=v1 / v2 / v2c で切替。デフォルト v1 (既存挙動互換)。
+        # v2c は v2 の compact 版 (Sprint 4-D, latency 短縮目的)。
         prompt_version = os.environ.get("PROMPT_VERSION", "v1")
+        # Day 8 (2026-05-28) Sprint 4-D: max_tokens 制限で latency 短縮。
+        # 既定 4096、v2c と組合せて 1200 程度で運用想定 (46s → 20s 以下狙い)。
+        try:
+            summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "4096"))
+        except ValueError:
+            summary_max_tokens = 4096
         instance = SearchSkill(
             embedder=LocalE5Embedder(),
             use_contextual=use_contextual,
@@ -300,6 +306,7 @@ class SkillDispatcher:
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
             prompt_version=prompt_version,
+            summary_max_tokens=summary_max_tokens,
         )
         logger.info(
             "search_skill_initialized",
@@ -308,6 +315,7 @@ class SkillDispatcher:
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
             prompt_version=prompt_version,
+            summary_max_tokens=summary_max_tokens,
         )
         self._skill_cache["search"] = instance
         return instance

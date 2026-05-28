@@ -55,6 +55,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         use_cohere_rerank: bool = False,
         rerank_pool_size: int = 30,
         prompt_version: str = "v1",
+        summary_max_tokens: int = 4096,
         app_role: str | None = "teamagent_app",
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
@@ -107,8 +108,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
         # 「過去のチャンク要約」から「パターン抽出 + 推奨アクション」に役割を進化させる。
         # ユーザー指摘 (Day 8): "あたりまえの過去事例リサーチは不要、リサーチ＆改善の思考が欲しい"
-        # PROMPT_VERSION 環境変数 (v1 / v2) で切替可能、本番ロールアウトは v2 を既定にする予定。
+        # PROMPT_VERSION 環境変数 (v1 / v2 / v2c) で切替可能。
+        # v2c は v2 の compact 版 (104→41行)、output token 削減でレイテンシ 46s→目標 20s 以下。
         self._prompt_version = prompt_version
+        # Day 8 Sprint 4-D: Bedrock Converse の max_tokens 制限。
+        # SEARCH_MAX_TOKENS env で runtime 制御、v2c と組合せて latency を半減狙い。
+        self._summary_max_tokens = summary_max_tokens
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
@@ -387,6 +392,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             request_id=request_id,
             system=system,
             cache_system=True,  # 同じ system prompt を頻繁に呼ぶのでキャッシュで input cost 1/10
+            max_tokens=self._summary_max_tokens,
         )
         return resp.text, resp.usage.cost_usd
 

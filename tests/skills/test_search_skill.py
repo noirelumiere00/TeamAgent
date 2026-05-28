@@ -696,3 +696,56 @@ def test_prompt_v2_file_exists_and_has_insight_keywords() -> None:
     assert "刺さった" in content  # 成功パターン
     # 旧スタイルとの差別化
     assert "戦略" in content or "翻訳" in content  # insight role
+
+
+# ==================================================================
+# Day 8 (2026-05-28) Sprint 4-D: v2 compact (v2c) + max_tokens 制限
+# ==================================================================
+def test_prompt_v2c_file_exists_and_is_compact() -> None:
+    """v2c prompt が v2 より大幅に短いこと (latency 短縮の根本)。"""
+    from teamagent.prompts.loader import load_prompt
+
+    v2 = load_prompt("search", "v2", "system")
+    v2c = load_prompt("search", "v2c", "system")
+    # v2c は v2 の compact 版、行数で 60% 以下 (latency 短縮の前提)
+    assert len(v2c.splitlines()) < len(v2.splitlines()) * 0.6, (
+        f"v2c should be < 60% of v2 length ({len(v2c.splitlines())} vs {len(v2.splitlines())})"
+    )
+    # ただし insight 設計の核は保持
+    assert "パターン" in v2c
+    assert "推奨アクション" in v2c
+    assert "打ち返し" in v2c
+    assert "戦略" in v2c or "翻訳" in v2c
+
+
+def test_summary_max_tokens_passed_to_bedrock(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """summary_max_tokens が converse() に渡されること (latency 制御)。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+        target_table="proposal_chunks",
+        summary_max_tokens=1200,
+    )
+    skill.run(input=SearchInput(query="x"), ctx=SkillContext())
+
+    call_kwargs = fake_bedrock.converse.call_args.kwargs
+    assert call_kwargs["max_tokens"] == 1200
+
+
+def test_summary_max_tokens_default_unchanged(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """summary_max_tokens 未指定なら 4096 が converse に渡る (既存互換)。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector,
+        embedder=FakeEmbedder(),
+        target_table="proposal_chunks",
+    )
+    skill.run(input=SearchInput(query="x"), ctx=SkillContext())
+
+    call_kwargs = fake_bedrock.converse.call_args.kwargs
+    assert call_kwargs["max_tokens"] == 4096

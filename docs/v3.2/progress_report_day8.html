@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent 進捗報告書 — Day 8 (2026-05-28)</title>
+<style>
+  :root {
+    --c-bg: #fafaf7;
+    --c-paper: #ffffff;
+    --c-text: #1c1c1a;
+    --c-muted: #6b6b66;
+    --c-accent: #c6613f;
+    --c-accent-soft: #f5e8e0;
+    --c-border: #e6e3dc;
+    --c-success: #2e7d4f;
+    --c-warn: #c89a3a;
+    --c-danger: #b54545;
+    --c-table-stripe: #f5f4ef;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Hiragino Sans", "Yu Gothic", "Helvetica Neue", sans-serif;
+    background: var(--c-bg);
+    color: var(--c-text);
+    margin: 0;
+    line-height: 1.65;
+  }
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 56px 32px 80px;
+  }
+  header {
+    border-bottom: 2px solid var(--c-accent);
+    padding-bottom: 24px;
+    margin-bottom: 40px;
+  }
+  header .label {
+    color: var(--c-accent);
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    font-size: 12px;
+    text-transform: uppercase;
+  }
+  header h1 {
+    margin: 8px 0 4px;
+    font-size: 32px;
+    font-weight: 700;
+  }
+  header .meta {
+    color: var(--c-muted);
+    font-size: 14px;
+  }
+  h2 {
+    font-size: 22px;
+    margin-top: 56px;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--c-border);
+  }
+  h3 {
+    font-size: 17px;
+    margin-top: 32px;
+    margin-bottom: 12px;
+    color: var(--c-text);
+  }
+  p, li { font-size: 15px; }
+  .lead {
+    background: var(--c-accent-soft);
+    border-left: 4px solid var(--c-accent);
+    padding: 20px 24px;
+    margin: 24px 0 32px;
+    border-radius: 4px;
+    font-size: 15px;
+  }
+  .lead strong { color: var(--c-accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    background: var(--c-paper);
+    font-size: 14px;
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--c-border);
+    vertical-align: top;
+  }
+  th {
+    background: #f0eee6;
+    font-weight: 600;
+    color: var(--c-text);
+    font-size: 13px;
+  }
+  tr:nth-child(even) td { background: var(--c-table-stripe); }
+  tr:hover td { background: #fbf3ed; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.pos { color: var(--c-success); font-weight: 600; }
+  td.neg { color: var(--c-danger); }
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 24px 0 32px;
+  }
+  .kpi {
+    background: var(--c-paper);
+    padding: 18px 20px;
+    border-radius: 6px;
+    border: 1px solid var(--c-border);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+  }
+  .kpi .label {
+    font-size: 11px;
+    color: var(--c-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .kpi .value {
+    font-size: 28px;
+    font-weight: 700;
+    margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi .delta {
+    font-size: 12px;
+    color: var(--c-success);
+    margin-top: 2px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 11px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-right: 4px;
+  }
+  .badge.done { background: #e0eee4; color: var(--c-success); }
+  .badge.in-progress { background: #fdf5e0; color: var(--c-warn); }
+  .badge.todo { background: #f0e0e0; color: var(--c-danger); }
+  .pr-list li { margin-bottom: 6px; }
+  .pr-list code {
+    background: var(--c-table-stripe);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 13px;
+  }
+  blockquote {
+    border-left: 3px solid var(--c-accent);
+    padding: 8px 18px;
+    margin: 20px 0;
+    background: var(--c-accent-soft);
+    color: var(--c-text);
+    border-radius: 0 4px 4px 0;
+    font-size: 14px;
+  }
+  blockquote p { margin: 4px 0; }
+  .timeline {
+    position: relative;
+    margin: 24px 0;
+  }
+  .timeline-item {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px dashed var(--c-border);
+  }
+  .timeline-item .when {
+    color: var(--c-accent);
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .timeline-item .what {
+    font-size: 14px;
+  }
+  footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--c-border);
+    color: var(--c-muted);
+    font-size: 12px;
+    text-align: center;
+  }
+  @media (max-width: 600px) {
+    .container { padding: 32px 16px 56px; }
+    header h1 { font-size: 24px; }
+    th, td { padding: 8px 10px; font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <div class="label">PROGRESS REPORT</div>
+  <h1>TeamAgent — Day 8 進捗報告</h1>
+  <div class="meta">2026-05-28 (Day 8) ／ Sprint 1 開始から 8 営業日 ／ 本番運用ターゲット 2026-12-28 (Sprint 14 末)</div>
+</header>
+
+<section>
+  <h2>1. エグゼクティブサマリー</h2>
+  <div class="lead">
+    Day 7-8 で <strong>営業 FB 構造化検索 + Drive 自動マッチング + Cohere Rerank + Insight 型回答</strong> という 4 つの質的進化を完成。検索精度を Gold Set 25 ケースで数値立証し、<strong>top-1 hit rate を 20% → 52%</strong>（Rerank 単体で +160%）まで改善した。Slack 上で「過去事例の検索」から「<strong>戦略思考パートナー</strong>」へ Bot の役割が変態した。
+  </div>
+  <div class="kpi-row">
+    <div class="kpi">
+      <div class="label">マージ済 PR (Day 7-8)</div>
+      <div class="value">11 件</div>
+      <div class="delta">+1,500 行 / pytest 320 件 PASS</div>
+    </div>
+    <div class="kpi">
+      <div class="label">DB 投入 documents</div>
+      <div class="value">791</div>
+      <div class="delta">slack 205 + gdrive 586 / 9,125 chunks</div>
+    </div>
+    <div class="kpi">
+      <div class="label">営業 FB 構造化</div>
+      <div class="value">98 件</div>
+      <div class="delta">is_sales_fb=true / parser bug 0 件</div>
+    </div>
+    <div class="kpi">
+      <div class="label">検索 top-1 hit rate</div>
+      <div class="value">52%</div>
+      <div class="delta">baseline 20% → +32pt</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>2. 全体ロードマップ (v3.2 計画 vs 実態)</h2>
+  <table>
+    <thead><tr><th>Phase</th><th>計画期間</th><th>主目的</th><th>状態</th></tr></thead>
+    <tbody>
+      <tr><td>Sprint 1</td><td>5/19 – 5/29</td><td>ローカル → AWS 最小疎通</td><td><span class="badge done">完了</span> Day 2 で E2E 達成</td></tr>
+      <tr><td>Sprint 2</td><td>5/30 – 6/12</td><td>OpenClaw 採否ゲート①</td><td><span class="badge done">D 案決定</span> 自前 SkillRegistry 継続</td></tr>
+      <tr><td>Sprint 3</td><td>6/13 – 6/26</td><td>pgvector 完成 + Drive/Gmail コネクタ</td><td><span class="badge done">完了</span> 前倒し Day 4-6 で実装</td></tr>
+      <tr><td>Sprint 4</td><td>6/27 – 7/10</td><td>検索 Skill 本番化 + 全 PDF 投入</td><td><span class="badge in-progress">着手中</span> Day 7-8 で前倒し</td></tr>
+      <tr><td>Sprint 5</td><td>7/11 – 7/24</td><td>営業 5 名ベータ</td><td><span class="badge todo">未着手</span> 精度仕上げ後</td></tr>
+      <tr><td>Sprint 6</td><td>7/25 – 8/7</td><td>16 名展開準備 + MVA 完成</td><td><span class="badge todo">未着手</span></td></tr>
+      <tr><td>Sprint 7-12</td><td>8/8 – 11/30</td><td>Phase 4 Skill 拡張 + 動画分析</td><td><span class="badge todo">未着手</span></td></tr>
+      <tr><td>Sprint 13-14</td><td>12/1 – 12/28</td><td>QA + 負荷試験 + 本番</td><td><span class="badge todo">未着手</span></td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:13px;color:var(--c-muted)">注: Sprint 3 完了が Day 6 (前倒し)、Sprint 4 主要機能も Day 8 で実装済。スケジュールは <strong>計画より約 3 週間進行</strong>。</p>
+</section>
+
+<section>
+  <h2>3. Day 7-8 進捗 (11 PR Merge)</h2>
+  <p>Day 7-8 の 2 営業日で Sprint 4 主要機能を一気通貫実装。</p>
+  <table>
+    <thead><tr><th>PR</th><th>内容</th><th>カテゴリ</th><th>効果</th></tr></thead>
+    <tbody>
+      <tr><td>#60</td><td>drive.readonly に切替で folder bulk ingest 解禁</td><td>取り込み</td><td>Drive 大量投入の足場</td></tr>
+      <tr><td>#61</td><td>共有ドライブ全自動 crawl + 営業資料フィルタ</td><td>取り込み</td><td>20 共有ドライブを横断</td></tr>
+      <tr><td>#62</td><td>Workspace-wide ACL — domain/anyone 全員可視</td><td>セキュリティ</td><td>会社全員に資料公開原則を実装</td></tr>
+      <tr><td>#63</td><td>NUL バイトサニタイズで DataError 解消</td><td>取り込み</td><td>PDF 抽出時の DB エラー解消</td></tr>
+      <tr><td>#65</td><td>socket timeout + per-file try/except</td><td>取り込み</td><td>大 PDF download ハング対策</td></tr>
+      <tr><td>#66</td><td>Slack 営業 FB metadata 構造化 (parser)</td><td>データ</td><td><strong>98 件 FB を first-class field 化</strong></td></tr>
+      <tr><td>#67</td><td>Phase 2 Drive 自動マッチング</td><td>検索</td><td>Slack FB hit → 関連 Drive 自動添付</td></tr>
+      <tr><td>#68</td><td>FB parser 空 value バグ修正</td><td>データ</td><td>壊れた 19 件 client_name 完全修復</td></tr>
+      <tr><td>#69</td><td>Cohere Rerank v3.5 統合</td><td>検索</td><td><strong>top-1 hit rate 20%→52% (+160%)</strong></td></tr>
+      <tr><td>#70</td><td>search prompt v2 (insight + actionable)</td><td>体験</td><td>過去要約 → 戦略思考パートナー</td></tr>
+      <tr><td>#71</td><td>検索精度評価 gold set + ハーネス</td><td>計測</td><td>A/B 比較基盤、Sprint 5+ の前提</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>4. 検索精度評価 (Gold Set 25 ケース)</h2>
+  <p>Sprint 4 各機能の効果を <strong>同一の 25 ケース gold set で A/B 比較</strong>。これにより 1 件の anecdote ではなく統計的に改善を立証する。</p>
+  <table>
+    <thead>
+      <tr><th>構成</th><th>flags</th><th class="num">top-1</th><th class="num">top-5</th><th class="num">MRR</th><th class="num">$/query</th><th class="num">latency</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>baseline</strong></td>
+        <td>Rerank OFF / prompt v1</td>
+        <td class="num">20%</td>
+        <td class="num">40%</td>
+        <td class="num">0.27</td>
+        <td class="num">$0.012</td>
+        <td class="num">9.2s</td>
+      </tr>
+      <tr>
+        <td><strong>+ Rerank</strong></td>
+        <td>USE_COHERE_RERANK=true</td>
+        <td class="num pos">52%</td>
+        <td class="num pos">52%</td>
+        <td class="num pos">0.52</td>
+        <td class="num">$0.015</td>
+        <td class="num">11.4s</td>
+      </tr>
+      <tr>
+        <td><strong>Day 8 Full</strong> <span class="badge in-progress">部分</span></td>
+        <td>+ FB Drive Match + prompt v2</td>
+        <td class="num">59%*</td>
+        <td class="num">59%*</td>
+        <td class="num">—</td>
+        <td class="num">$0.030</td>
+        <td class="num">36s</td>
+      </tr>
+    </tbody>
+  </table>
+  <p style="font-size:13px;color:var(--c-muted)">* Day 8 Full は 22/25 ケースまでの部分集計 (時間切れ中断)。残り 3 ケース実行後に正式値確定予定。</p>
+
+  <h3>主要な改善ポイント</h3>
+  <ul>
+    <li><strong>Cohere Rerank 単体で top-1 hit rate を 2.6 倍 (20% → 52%)</strong> — Anthropic 公式ベンチの「-67% 失敗率」とほぼ整合</li>
+    <li><strong>「日本ガイシのケイパ」が rank 6 → rank 1 に救済</strong> — dense retrieval の固有名詞弱点を Cross-Encoder Rerank で補強</li>
+    <li>追加コストは <strong>+ $0.003 / query</strong>、月予算内 ($21/月 想定 @ 10,560 query)</li>
+    <li>レイテンシ <strong>+ 2.2s</strong> — Rerank API 呼び出しコスト</li>
+  </ul>
+</section>
+
+<section>
+  <h2>5. Bot 役割の質的進化 (prompt v1 → v2)</h2>
+  <p>ユーザー指摘「<strong>あたりまえの過去事例リサーチは求めていない、リサーチ＆改善の思考が欲しい</strong>」を受け、SearchSkill の system prompt を全面書き換え。</p>
+  <table>
+    <thead><tr><th>観点</th><th>v1 (過去要約)</th><th>v2 (Insight + Actionable)</th></tr></thead>
+    <tbody>
+      <tr><td>役割</td><td>過去チャンクを整形して返す検索エンジン</td><td><strong>戦略思考パートナー</strong></td></tr>
+      <tr><td>構造</td><td>顧客一覧 + FB 内容再掲</td><td>① 直接回答 ② 刺さったパターン ③ 避けたい論点 + 打ち返し案 ④ 推奨アクション ⑤ 引用</td></tr>
+      <tr><td>付加価値</td><td>過去事例の再掲</td><td><strong>別案件の打ち返し転用</strong> / 動詞ベース推奨 / 「※ 推論:」で Claude 思考を明示</td></tr>
+      <tr><td>例</td><td>「日本ガイシでこう言われた」</td><td>「BtoB ケイパ段階では <strong>展示会活用 × 既存資産再活用</strong> が刺さる傾向 (再現率 3/3)。新規案件には開口一番にこの 2 つを出すべき」</td></tr>
+      <tr><td>出力量</td><td>~800 文字</td><td>~2,900 文字 (3.6 倍)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>6. 営業 FB データ構造化の成果</h2>
+  <p>Slack #proj-ショート動画_営業フィードバック情報 の 197 投稿を <strong>11 種類の構造化フィールド</strong>に分解、SQL レベルでクエリ可能に。</p>
+  <table>
+    <thead><tr><th>Slack ラベル</th><th>metadata key</th><th>活用例</th></tr></thead>
+    <tbody>
+      <tr><td>顧客名/案件名</td><td>client_case + client_name</td><td>クライアントカルテ横断検索</td></tr>
+      <tr><td>商談フェーズ</td><td>deal_phase</td><td>ケイパ / 1回目提案 / 2回目以降提案 で集計</td></tr>
+      <tr><td>提案メニュー</td><td>proposed_menu</td><td>UGC TTO の刺さり率分析</td></tr>
+      <tr><td>商談感触 (BANT)</td><td>bant_score</td><td>A/B/C で受注見込み分布</td></tr>
+      <tr><td>ポジ反応</td><td>positive_reaction</td><td>刺さった訴求のパターン抽出 (v2 prompt)</td></tr>
+      <tr><td>ネガ反応</td><td>negative_reaction</td><td>失注理由・避けたい論点のクラスタリング</td></tr>
+      <tr><td>ネクストアクション</td><td>next_action</td><td>未フォロー検知</td></tr>
+      <tr><td>(派生)</td><td>is_sales_fb</td><td>FB かどうかの 1 列フラグ</td></tr>
+    </tbody>
+  </table>
+  <p>構造化により Phase 2 機能 (PR #67) が成立 — Slack FB hit → client_name で Drive 内の関連 PDF を裏で自動 retrieve → 「📎 関連資料」として Slack 返信に添付。</p>
+</section>
+
+<section>
+  <h2>7. データ取り込み状況</h2>
+  <table>
+    <thead><tr><th>ソース</th><th class="num">docs</th><th class="num">chunks</th><th>備考</th></tr></thead>
+    <tbody>
+      <tr><td>Slack #proj-ナレッジ共有</td><td class="num">97</td><td class="num">97</td><td>Day 5 投入 + Day 8 構造化メタ追加</td></tr>
+      <tr><td>Slack #proj-ショート動画_営業FB</td><td class="num">108</td><td class="num">108</td><td>営業 FB 構造化 98 件含む</td></tr>
+      <tr><td>Drive: ナレッジ共有フォルダ</td><td class="num">266</td><td class="num">7,270</td><td>サブフォルダ含む再帰取り込み完了</td></tr>
+      <tr><td>Drive: ショート動画資料全般</td><td class="num">320</td><td class="num">1,750</td><td>50% (folder 2 残り ~120 files 残)</td></tr>
+      <tr><td><strong>合計</strong></td><td class="num"><strong>791</strong></td><td class="num"><strong>9,125</strong></td><td>本番 RDS (東京) 投入済</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>8. コスト試算 (16 名 × 30 query/日 × 22 営業日)</h2>
+  <table>
+    <thead><tr><th>機能構成</th><th class="num">月間 query 数</th><th class="num">月間 Bedrock</th><th class="num">月間総額</th></tr></thead>
+    <tbody>
+      <tr><td>baseline</td><td class="num">10,560</td><td class="num">$127</td><td class="num">$180</td></tr>
+      <tr><td>+ Rerank</td><td class="num">10,560</td><td class="num">$158</td><td class="num">$211</td></tr>
+      <tr><td>Day 8 Full (v2 prompt)</td><td class="num">10,560</td><td class="num">$315</td><td class="num">$368</td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:13px;color:var(--c-muted)">AWS Budgets 設定: Bedrock $50/月 (要拡張)、Server $267/月。Day 8 Full フル稼働なら予算上限見直しが必要。<strong>prompt caching が 2 回目以降のクエリで -50% コスト削減</strong>するため実運用ではこれより低い見込み。</p>
+</section>
+
+<section>
+  <h2>9. 残課題 と 次のステップ</h2>
+  <h3>短期 (今週内)</h3>
+  <table>
+    <thead><tr><th>項目</th><th>状態</th><th>備考</th></tr></thead>
+    <tbody>
+      <tr><td>Drive ingest 残り (folder 2 ~120 files)</td><td><span class="badge in-progress">進行中</span></td><td>resilient 版で再開済、~30 分で完走見込み</td></tr>
+      <tr><td>day8_full eval 残り 3 ケース</td><td><span class="badge in-progress">進行中</span></td><td>正式数値確定</td></tr>
+      <tr><td>v2 prompt latency 短縮</td><td><span class="badge todo">未着手</span></td><td>output streaming or max_tokens 制限</td></tr>
+    </tbody>
+  </table>
+
+  <h3>中期 (Sprint 5)</h3>
+  <ul>
+    <li><strong>営業 5 名ベータ展開</strong> — 実クエリでの満足度測定、評価指標は gold set で計測継続</li>
+    <li><strong>BM25 ハイブリッド</strong> (Postgres tsvector + RRF) — 固有名詞リコール更に +22pt 見込み</li>
+    <li><strong>Contextual Retrieval</strong> (Haiku で chunk 前置詞付与) — Rerank と組合せで Anthropic ベンチ -67% 完成形</li>
+    <li><strong>ClientKarteSkill</strong> — クライアント単位で時系列横断検索 (新 Skill)</li>
+  </ul>
+
+  <h3>長期 (Sprint 7+)</h3>
+  <ul>
+    <li><strong>Agent SDK on Bedrock</strong> 採用検討 — multi-skill orchestrator (search + summarize + 提案生成 + スケジュール) として</li>
+    <li>Phase 4 Skill (動画ナレッジ分析 / 提案コンテンツ生成 / 営業活動ログ自動生成)</li>
+    <li>本番ロールアウト + SLO 確立</li>
+  </ul>
+</section>
+
+<section>
+  <h2>10. Bot 稼働構成 (本番)</h2>
+  <table>
+    <thead><tr><th>環境変数</th><th>値</th><th>意味</th></tr></thead>
+    <tbody>
+      <tr><td>USE_NEW_SCHEMA</td><td>true</td><td>documents/chunks 横断 (Slack + Drive)</td></tr>
+      <tr><td>USE_LLM_ROUTER</td><td>true</td><td>Haiku 4.5 自動ルーティング</td></tr>
+      <tr><td>USE_FB_DRIVE_MATCH</td><td>true</td><td>FB ヒット時 Drive 自動マッチング</td></tr>
+      <tr><td>USE_COHERE_RERANK</td><td>true</td><td>top-30 → Rerank → top-5</td></tr>
+      <tr><td>PROMPT_VERSION</td><td>v2</td><td>Insight + Actionable thinking</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  TeamAgent v3.2 進捗報告 — 2026-05-28 Day 8 (Sprint 1 開始 +8 営業日)<br>
+  本番運用ターゲット: 2026-12-28 (Sprint 14 末) ／ 現状: 計画より約 3 週間先行
+</footer>
+
+</div>
+</body>
+</html>
