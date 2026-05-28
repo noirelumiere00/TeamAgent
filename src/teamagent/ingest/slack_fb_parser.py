@@ -50,9 +50,7 @@ _LABEL_TO_METADATA_KEY: dict[str, str] = {
 # FB 投稿らしさを判定するための最小条件。
 # このうち N 個以上 hit したら「営業 FB 投稿」と認定する。
 # 短い雑談・通常投稿が誤分類されないよう、商談関連の必須コアラベルを 3 つ要求。
-_FB_CORE_LABELS = frozenset(
-    {"商流", "顧客名", "顧客名/案件名", "商談フェーズ", "商談感触（BANT）"}
-)
+_FB_CORE_LABELS = frozenset({"商流", "顧客名", "顧客名/案件名", "商談フェーズ", "商談感触（BANT）"})
 _FB_MIN_CORE_HITS = 3
 
 # Slack workflow bot が投稿末尾に自動付与する定型フッターマーカー。
