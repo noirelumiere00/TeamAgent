@@ -70,7 +70,8 @@ def parse_fb_post(content: str) -> dict[str, str]:
         content: Slack 投稿本文（thread parent text、format_thread_as_document の出力でも可）
 
     Returns:
-        - FB 投稿と判定された場合: known label → 値 の dict (例: {"client_case": "SCSK/スモカ歯磨", ...})
+        - FB 投稿と判定された場合: known label → 値 の dict
+          (例: {"client_case": "SCSK/スモカ歯磨", "deal_phase": "ヒアリング", ...})
         - FB 投稿でない場合: 空 dict {}
 
     既知ラベル以外は無視する (未知ラベルが追加されたら _LABEL_TO_METADATA_KEY に追記)。
