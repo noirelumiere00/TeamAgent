@@ -201,7 +201,30 @@ def _ingest_slack_channel(
         # ACL: channel メンバー全員（resolved） + yaml extra（少なくとも owner は確実に入る）
         acl_emails = channel_acl_emails or [owner_email]
 
+        # Day 8 (2026-05-28): 営業 FB 投稿の構造化。
+        # `*商流*` `*顧客名*` 等の Slack bold marker をパースして metadata に first-class field 化。
+        # FB じゃない通常投稿は parse_fb_post() が空 dict を返すので副作用ゼロ。
+        # 列名 alias 等の詳細は slack_fb_parser.py を参照。
+        from teamagent.ingest.slack_fb_parser import (
+            extract_client_name,
+            parse_fb_post,
+        )
+
+        fb_metadata = parse_fb_post(text)
+        derived_client_name = extract_client_name(fb_metadata) if fb_metadata else None
+
         external_id = f"{spec.channel_id}:{parent.thread_ts or parent.ts}"
+        doc_metadata: dict[str, Any] = {
+            **spec.extra_metadata,
+            "channel_name": spec.channel_name,
+            "channel_member_count": len(channel_acl_emails),
+        }
+        if fb_metadata:
+            doc_metadata["is_sales_fb"] = True
+            doc_metadata.update(fb_metadata)
+            if derived_client_name:
+                doc_metadata["client_name"] = derived_client_name
+
         doc = DocumentUpsert(
             source_type="slack",
             external_id=external_id,
@@ -209,11 +232,7 @@ def _ingest_slack_channel(
             title=f"{spec.channel_name} {parent.ts}",
             owner_email=owner_email,
             acl_emails=acl_emails,
-            metadata={
-                **spec.extra_metadata,
-                "channel_name": spec.channel_name,
-                "channel_member_count": len(channel_acl_emails),
-            },
+            metadata=doc_metadata,
             modified_at=None,
         )
         chunks = [

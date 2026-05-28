@@ -1,0 +1,224 @@
+"""Slack 営業 FB parser のユニットテスト。
+
+実投稿 (4 件) を fixture 化して構造化結果を検証する。
+PII (実顧客名・実営業担当者名) は仮名化する。
+"""
+
+from __future__ import annotations
+
+from teamagent.ingest.slack_fb_parser import extract_client_name, parse_fb_post
+
+
+def _fb_sample_hearing() -> str:
+    """商談フェーズ=ヒアリング のサンプル (SCSK/スモカ歯磨 ベース、仮名化)。"""
+    return (
+        "[2026-05-27 10:00] <B0ATTE7LXME>: <!channel>\n"
+        "\n"
+        "<@U999XXXXX> さんからの共有です！\n"
+        "\n"
+        "\n"
+        "*商流*\n"
+        "代理店\n"
+        "*顧客名*\n"
+        "アルファ広告社\n"
+        "*顧客名/案件名*\n"
+        "ベータ商事 / ガンマ製品\n"
+        "*商談フェーズ*\n"
+        "ヒアリング\n"
+        "*提案メニュー*\n"
+        "UGC（TTO，切り抜きなど）\n"
+        "*商談感触（BANT）*\n"
+        "B（前向き）\n"
+        "*顧客反応（ポジティブ）*\n"
+        "ショート動画戦略は特定製品への適合性が高いと評価され、"
+        "従来のB2B広告手法を補完する選択肢として具体的な検討が進められる。\n"
+        "*顧客反応（質問事項、ネガティブ）*\n"
+        "どの商材をどう組み合わせるかによって見積もりが異なる点、"
+        "また進行管理費用として別途15%が必要となる点について確認があった。\n"
+        "*ネクストアクション*\n"
+        "事例動画・サービス資料の共有、CLさんへ一次提案後に具体的なPKGの調整\n"
+    )
+
+
+def _fb_sample_keipa_multiline() -> str:
+    """商談フェーズ=ケイパ のサンプル (日本ガイシ/リクルーティング ベース、仮名化、
+    ポジ/ネガ反応が箇条書き複数行)。"""
+    return (
+        "[2026-05-19 11:08] <B0AKBPSAHD0>: <!channel>\n"
+        "\n"
+        "<@U999YYYYY> さんからの共有です！\n"
+        "\n"
+        "\n"
+        "*商流*\n"
+        "代理店\n"
+        "*顧客名*\n"
+        "デルタ広告中部\n"
+        "*顧客名/案件名*\n"
+        "エプシロン工業/リクルーティング\n"
+        "*商談フェーズ*\n"
+        "ケイパ\n"
+        "*提案メニュー*\n"
+        "UGC（TTO、切り抜きなど）\n"
+        "*商談感触（BANT）*\n"
+        "B（前向き）\n"
+        "*顧客反応（ポジティブ）*\n"
+        "・既存のTTO（BtoC向け）をBtoB向けに活用できる可能性を認識\n"
+        "・年齢層ターゲティングへの不安が解消：\n"
+        "ゼータ案件の実績事例（40代以上層へのリーチ成功）を示すことで、"
+        "TikTokでもターゲット層への配信が可能であることを確信\n"
+        "・PDCA運用の柔軟性を高く評価\n"
+        "*顧客反応（質問事項、ネガティブ）*\n"
+        "・テレビCMとの予算配分に関する懸念：\n"
+        "クライアントがテレビCMに大きな予算を配分している状況では、新規予算獲得は難しい見通し\n"
+        "・BtoB企業の難解な製品紹介の難しさ\n"
+        "*ネクストアクション*\n"
+        "・クライアント提案準備：\n"
+        "営業チーム内で情報共有し、適合するクライアントにアプローチ\n"
+        "・イータ案件等の事例共有：\n"
+        "クイズ形式など難解な製品でも視聴者を引き付ける工夫事例を別途共有\n"
+        "*共有メモ*\n"
+        "\n"
+    )
+
+
+def _fb_sample_with_meta_url() -> str:
+    """共有メモ欄が空 + 末尾に Google Spreadsheet リンクが付くケース (実投稿フォーマット)。"""
+    return (
+        "<@U999ZZZZZ> さんからの共有です！\n"
+        "\n"
+        "*商流*\n"
+        "直販\n"
+        "*顧客名*\n"
+        "アルファ広告社\n"
+        "*顧客名/案件名*\n"
+        "シータ食品\n"
+        "*商談フェーズ*\n"
+        "2回目以降提案\n"
+        "*提案メニュー*\n"
+        "【メディア】グレースモード（EMMEなど）\n"
+        "*商談感触（BANT）*\n"
+        "B（前向き）\n"
+        "*顧客反応（ポジティブ）*\n"
+        "EMMEメイトで、Xでの話題形成をご提案したが、施策の考え方や話題形成の手法としては◯\n"
+        "*顧客反応（質問事項、ネガティブ）*\n"
+        "ブランドの現状的には少し早いかも\n"
+        "*ネクストアクション*\n"
+        "10月までの半期でのご提案で認知率向上に向けて広告施策とPRをかけ合わせたご提案\n"
+        "*共有メモ*\n"
+        "\n"
+        "\n"
+        "これまで共有されたフィードバックは"
+        "<https://docs.google.com/spreadsheets/d/REDACTED/edit|こちら>\n"
+    )
+
+
+def _non_fb_chitchat() -> str:
+    """営業 FB じゃない通常の Slack 投稿 (雑談・告知)。parse は空 dict を返すべき。"""
+    return (
+        "[2026-05-27 09:00] <@U123XYZ>: みなさんおはようございます！\n"
+        "今日の朝会は10時からです。Zoom リンクは下記。\n"
+        "https://zoom.us/j/XXXX\n"
+    )
+
+
+def _non_fb_with_one_bold() -> str:
+    """`*foo*` が 1 個だけ含まれる通常投稿 (誤判定しないこと)。"""
+    return "*重要* 明日は休業日です。緊急連絡は私の携帯まで。\n"
+
+
+# ==================================================================
+# parse_fb_post
+# ==================================================================
+def test_parse_hearing_post_extracts_all_known_fields() -> None:
+    meta = parse_fb_post(_fb_sample_hearing())
+    assert meta["channel_type"] == "代理店"
+    assert meta["agency_name"] == "アルファ広告社"
+    assert meta["client_case"] == "ベータ商事 / ガンマ製品"
+    assert meta["deal_phase"] == "ヒアリング"
+    assert meta["proposed_menu"] == "UGC（TTO，切り抜きなど）"
+    assert meta["bant_score"] == "B（前向き）"
+    assert "従来のB2B広告手法を補完" in meta["positive_reaction"]
+    assert "進行管理費用として別途15%" in meta["negative_reaction"]
+    assert "CLさんへ一次提案" in meta["next_action"]
+
+
+def test_parse_keipa_post_preserves_multiline_bullets() -> None:
+    meta = parse_fb_post(_fb_sample_keipa_multiline())
+    assert meta["deal_phase"] == "ケイパ"
+    # 箇条書き複数行が値内に保持される
+    assert meta["positive_reaction"].count("\n") >= 3
+    assert "・既存のTTO" in meta["positive_reaction"]
+    assert "・年齢層ターゲティング" in meta["positive_reaction"]
+    assert "・PDCA運用の柔軟性" in meta["positive_reaction"]
+    assert "・テレビCMとの予算配分" in meta["negative_reaction"]
+    assert "・BtoB企業の難解な製品紹介" in meta["negative_reaction"]
+    # 空欄ラベル (共有メモ) は出力に含めない (値が空)
+    assert "shared_memo" not in meta
+
+
+def test_parse_post_with_trailing_url_block() -> None:
+    """末尾の Spreadsheet リンクブロックは無視して既知ラベルだけ拾う。"""
+    meta = parse_fb_post(_fb_sample_with_meta_url())
+    assert meta["agency_name"] == "アルファ広告社"
+    assert meta["client_case"] == "シータ食品"
+    assert meta["deal_phase"] == "2回目以降提案"
+    # 末尾 URL は metadata に混入しない
+    for v in meta.values():
+        assert "spreadsheets" not in v
+
+
+def test_non_fb_post_returns_empty_dict() -> None:
+    """営業 FB じゃない通常投稿は空 dict を返す (副作用ゼロ)。"""
+    assert parse_fb_post(_non_fb_chitchat()) == {}
+
+
+def test_single_bold_marker_post_returns_empty_dict() -> None:
+    """`*重要*` 等のラベル 1 個だけの通常投稿は誤分類しない。"""
+    assert parse_fb_post(_non_fb_with_one_bold()) == {}
+
+
+def test_empty_string_returns_empty_dict() -> None:
+    assert parse_fb_post("") == {}
+
+
+def test_unknown_labels_are_ignored() -> None:
+    """未知ラベル (例: `*天気*`) は metadata 化されない。"""
+    content = (
+        "*商流*\n直販\n"
+        "*顧客名*\nアルファ\n"
+        "*顧客名/案件名*\nベータ\n"
+        "*商談フェーズ*\nヒアリング\n"
+        "*天気*\n晴れ\n"
+        "*謎ラベル*\n値\n"
+    )
+    meta = parse_fb_post(content)
+    assert "weather" not in meta
+    assert meta["channel_type"] == "直販"
+    # 未知ラベルが metadata に key として現れない
+    assert all(k in {"channel_type", "agency_name", "client_case", "deal_phase"} for k in meta)
+
+
+# ==================================================================
+# extract_client_name
+# ==================================================================
+def test_extract_client_name_from_slash_separated() -> None:
+    """'SCSK / スモカ歯磨' → 'SCSK' (主クライアント)。"""
+    meta = {"client_case": "SCSK / スモカ歯磨"}
+    assert extract_client_name(meta) == "SCSK"
+
+
+def test_extract_client_name_from_single_name() -> None:
+    """スラッシュなし → そのまま返す。"""
+    meta = {"client_case": "ニチレイ"}
+    assert extract_client_name(meta) == "ニチレイ"
+
+
+def test_extract_client_name_falls_back_to_agency() -> None:
+    """client_case 空 → agency_name を返す。"""
+    meta = {"agency_name": "アルファ広告社", "client_case": ""}
+    assert extract_client_name(meta) == "アルファ広告社"
+
+
+def test_extract_client_name_returns_none_when_both_empty() -> None:
+    assert extract_client_name({}) is None
+    assert extract_client_name({"client_case": "", "agency_name": ""}) is None
