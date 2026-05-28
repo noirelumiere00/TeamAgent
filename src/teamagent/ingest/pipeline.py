@@ -421,7 +421,6 @@ def _ingest_gdrive_folder(
     ACL は permissions.list を呼んで documents.acl_emails / acl_groups に写像する。
     """
     from teamagent.adapters.gdrive_client import GDriveClient
-    from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
 
     # Day 7: folder bulk ingest のため readonly=True で drive.readonly スコープを使う。
     # Internal OAuth なので CASA 審査不要。drive.file ではフォルダ単位の取り込みが
@@ -503,7 +502,8 @@ def _process_one_gdrive_file(
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
-    Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないように、呼び出し側を try/except でラップ可能に。
+    Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないように、
+    呼び出し側を try/except でラップ可能に。
     """
     from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
 
