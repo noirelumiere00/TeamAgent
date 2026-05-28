@@ -639,3 +639,60 @@ def test_rerank_failure_falls_back_to_dense(
     # rerank 失敗時は dense 順上位 3 件 (chunk_id 0,1,2)
     assert len(out.hits) == 3
     assert [h.chunk_id for h in out.hits] == [0, 1, 2]
+
+
+# ==================================================================
+# Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)
+# ==================================================================
+def test_prompt_version_default_is_v1(fake_bedrock: MagicMock, fake_pgvector: MagicMock) -> None:
+    """prompt_version 未指定なら v1 が load される (既存挙動互換)。"""
+    from unittest.mock import patch
+
+    with patch("teamagent.skills.search.skill.load_prompt") as mock_load:
+        mock_load.return_value = "fake system v1"
+        skill = SearchSkill(
+            bedrock=fake_bedrock,
+            pgvector=fake_pgvector,
+            embedder=FakeEmbedder(),
+            target_table="proposal_chunks",
+        )
+        skill.run(input=SearchInput(query="x"), ctx=SkillContext())
+
+        mock_load.assert_called_with("search", "v1", "system")
+
+
+def test_prompt_version_v2_is_used_when_specified(
+    fake_bedrock: MagicMock, fake_pgvector: MagicMock
+) -> None:
+    """prompt_version='v2' を指定すると v2 prompt が load される。"""
+    from unittest.mock import patch
+
+    with patch("teamagent.skills.search.skill.load_prompt") as mock_load:
+        mock_load.return_value = "fake system v2 (insight + actionable)"
+        skill = SearchSkill(
+            bedrock=fake_bedrock,
+            pgvector=fake_pgvector,
+            embedder=FakeEmbedder(),
+            target_table="proposal_chunks",
+            prompt_version="v2",
+        )
+        skill.run(input=SearchInput(query="x"), ctx=SkillContext())
+
+        mock_load.assert_called_with("search", "v2", "system")
+
+
+def test_prompt_v2_file_exists_and_has_insight_keywords() -> None:
+    """src/teamagent/prompts/search/v2/system.md が存在し、insight 設計の主要キーワードを含むこと。
+
+    回帰テスト: prompt v2 設計の根幹キーワードを偶発的に消さない。
+    """
+    from teamagent.prompts.loader import load_prompt
+
+    content = load_prompt("search", "v2", "system")
+    # 重要な役割転換キーワード
+    assert "パターン" in content  # パターン抽出
+    assert "推奨アクション" in content  # actionable
+    assert "避けたい論点" in content  # negative pattern
+    assert "刺さった" in content  # 成功パターン
+    # 旧スタイルとの差別化
+    assert "戦略" in content or "翻訳" in content  # insight role
