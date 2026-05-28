@@ -396,3 +396,137 @@ def test_search_old_schema_not_affected_by_new_flag(
     fake_pgvector.search_similar.assert_called_once()
     fake_pgvector.search_similar_new_schema = MagicMock()  # 呼ばれていないことを確認
     fake_pgvector.search_similar_new_schema.assert_not_called()
+
+
+# ==================================================================
+# Day 8 (2026-05-28) Phase 2: FB Drive 自動マッチング
+# ==================================================================
+@pytest.fixture
+def fake_pgvector_with_fb_hit() -> MagicMock:
+    """営業 FB ヒット + Drive 関連資料を返す mock。"""
+    mock = MagicMock()
+    cm_mock = MagicMock()
+    cm_mock.__enter__ = MagicMock(return_value=MagicMock())
+    cm_mock.__exit__ = MagicMock(return_value=False)
+    mock.connection.return_value = cm_mock
+
+    # 主検索: Slack FB ヒット (is_sales_fb=True + client_name=日本ガイシ)
+    mock.search_similar_new_schema.return_value = [
+        SearchHit(
+            chunk_id=100,
+            content="*商談フェーズ* ケイパ *顧客名* 日本ガイシ ...",
+            score=0.87,
+            metadata={
+                "source_uri": "slack://C0A1207GYHZ/1779188889.248589",
+                "source_type": "slack",
+                "title": "#proj-ショート動画_営業フィードバック情報 ts",
+                "channel_name": "#proj-ショート動画_営業フィードバック情報",
+                "is_sales_fb": True,
+                "client_name": "日本ガイシ",
+                "deal_phase": "ケイパ",
+            },
+        ),
+    ]
+    # Drive 関連資料 (Phase 2 で取得される想定)
+    mock.search_drive_by_client_names.return_value = [
+        SearchHit(
+            chunk_id=200,
+            content="日本ガイシ向け提案資料の冒頭抜粋...",
+            score=1.0,
+            metadata={
+                "source_uri": "https://drive.google.com/file/d/abc",
+                "source_type": "gdrive",
+                "title": "日本ガイシ_リクルーティング提案_v2.pdf",
+                "is_related_drive": True,
+            },
+        ),
+    ]
+    return mock
+
+
+def test_phase2_fb_drive_match_triggers_secondary_query(
+    fake_bedrock: MagicMock, fake_pgvector_with_fb_hit: MagicMock
+) -> None:
+    """use_fb_drive_match=True + Slack FB ヒット → search_drive_by_client_names が呼ばれる。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_with_fb_hit,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_fb_drive_match=True,
+    )
+    out = skill.run(input=SearchInput(query="日本ガイシのケイパ"), ctx=SkillContext())
+
+    fake_pgvector_with_fb_hit.search_drive_by_client_names.assert_called_once()
+    call_kwargs = fake_pgvector_with_fb_hit.search_drive_by_client_names.call_args.kwargs
+    assert call_kwargs["client_names"] == ["日本ガイシ"]
+    assert call_kwargs["limit"] == 3
+    # 主 hit + 関連 Drive hit が両方 SearchOutput.hits に入る
+    assert len(out.hits) == 2
+
+
+def test_phase2_disabled_by_default_no_secondary_query(
+    fake_bedrock: MagicMock, fake_pgvector_with_fb_hit: MagicMock
+) -> None:
+    """use_fb_drive_match=False (デフォルト) → search_drive_by_client_names は呼ばれない。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_with_fb_hit,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        # use_fb_drive_match 指定なし
+    )
+    out = skill.run(input=SearchInput(query="日本ガイシのケイパ"), ctx=SkillContext())
+
+    fake_pgvector_with_fb_hit.search_drive_by_client_names.assert_not_called()
+    assert len(out.hits) == 1  # 主 hit のみ、関連 Drive なし
+
+
+def test_phase2_no_fb_hits_no_secondary_query(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """主検索に FB がない場合は search_drive_by_client_names を呼ばない (副作用ゼロ)。"""
+    # fake_pgvector_new_schema は is_sales_fb なしの hit を返す
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_fb_drive_match=True,
+    )
+    fake_pgvector_new_schema.search_drive_by_client_names = MagicMock()
+    skill.run(input=SearchInput(query="x"), ctx=SkillContext())
+
+    fake_pgvector_new_schema.search_drive_by_client_names.assert_not_called()
+
+
+def test_phase2_dedupes_client_names(
+    fake_bedrock: MagicMock, fake_pgvector_with_fb_hit: MagicMock
+) -> None:
+    """複数 FB hit で同じ client_name は 1 度だけ Drive 検索される。"""
+    # 同じ client_name の FB を 2 件返すよう書き換え
+    fake_pgvector_with_fb_hit.search_similar_new_schema.return_value = [
+        SearchHit(
+            chunk_id=100,
+            content="hit1",
+            score=0.87,
+            metadata={"is_sales_fb": True, "client_name": "日本ガイシ"},
+        ),
+        SearchHit(
+            chunk_id=101,
+            content="hit2",
+            score=0.85,
+            metadata={"is_sales_fb": True, "client_name": "日本ガイシ"},
+        ),
+    ]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_with_fb_hit,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_fb_drive_match=True,
+    )
+    skill.run(input=SearchInput(query="日本ガイシ"), ctx=SkillContext())
+
+    call_kwargs = fake_pgvector_with_fb_hit.search_drive_by_client_names.call_args.kwargs
+    assert call_kwargs["client_names"] == ["日本ガイシ"]  # 重複除外

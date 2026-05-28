@@ -263,6 +263,8 @@ class PgVectorClient:
         where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
         # chunk_id: hashtext は int4 だが bigint キャストして abs で INT_MIN overflow を防ぐ
+        # Day 8 (2026-05-28): Slack 営業 FB の is_sales_fb / client_name を expose。
+        # Phase 2 で Drive 自動マッチングに使う (SearchSkill._find_related_drive_docs)。
         sql = f"""
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
@@ -272,7 +274,10 @@ class PgVectorClient:
                 d.source_uri,
                 d.source_type::text AS source_type,
                 d.title,
-                d.metadata->>'channel_name' AS channel_name
+                d.metadata->>'channel_name' AS channel_name,
+                d.metadata->>'is_sales_fb' AS is_sales_fb,
+                d.metadata->>'client_name' AS client_name,
+                d.metadata->>'deal_phase' AS deal_phase
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             {where_clause}
@@ -297,6 +302,13 @@ class PgVectorClient:
             }
             if r.get("page_num") is not None:
                 meta["page_num"] = r["page_num"]
+            # Day 8: 営業 FB metadata (Phase 2 Drive 自動マッチング用)
+            if r.get("is_sales_fb") == "true":
+                meta["is_sales_fb"] = True
+                if r.get("client_name"):
+                    meta["client_name"] = r["client_name"]
+                if r.get("deal_phase"):
+                    meta["deal_phase"] = r["deal_phase"]
             hits.append(
                 SearchHit(
                     chunk_id=int(r["chunk_id"]),
@@ -312,5 +324,98 @@ class PgVectorClient:
             limit=limit,
             hit_count=len(hits),
             top_score=hits[0].score if hits else None,
+        )
+        return hits
+
+    def search_drive_by_client_names(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        client_names: list[str],
+        *,
+        limit: int = 3,
+        exclude_chunk_ids: list[int] | None = None,
+        request_id: str | None = None,
+    ) -> list[SearchHit]:
+        """指定クライアント名にマッチする Drive ドキュメントを取得する。
+
+        Day 8 (2026-05-28) Phase 2 で追加。Slack 営業 FB がヒットしたとき、
+        その client_name で Drive 資料を裏で検索して「関連資料」として attach する用途。
+
+        - 検索条件: source_type='gdrive' AND (title ILIKE OR content ILIKE) で client_name 部分一致
+        - 重複: exclude_chunk_ids にメイン検索ヒット済の chunk_id を渡して除外
+        - 順位: modified_at DESC (新しい資料優先)、なければ title の作成順
+        - RLS: conn は事前に connection(app_role='teamagent_app', user_email=...) で設定済前提
+        - score は 1.0 固定 (関連 attach 用途、ranking には使わない)
+        """
+        if not client_names:
+            return []
+
+        # NULL や空文字を除外、user 入力を直接 ILIKE に流すので escape
+        clean_names = [n.strip() for n in client_names if n and n.strip()]
+        if not clean_names:
+            return []
+
+        # 各 client_name について (title ILIKE %s OR content ILIKE %s) を OR で連結
+        like_clauses: list[str] = []
+        params: list[Any] = []
+        for name in clean_names:
+            like_pattern = f"%{name}%"
+            like_clauses.append("(d.title ILIKE %s OR c.content ILIKE %s)")
+            params.extend([like_pattern, like_pattern])
+
+        where = "d.source_type = 'gdrive' AND (" + " OR ".join(like_clauses) + ")"
+
+        # 重複除外用 (chunk_id は hashtext なので元 UUID に戻すのは困難 → content hash で除外)
+        # 既存ヒットの chunk_id 完全一致は SearchSkill 側で post-filter する方が安全
+        sql = f"""
+            SELECT
+                abs(hashtext(c.id::text)::bigint) AS chunk_id,
+                COALESCE(c.contextualized, c.content) AS content,
+                c.page_num,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                d.title,
+                d.modified_at
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE {where} AND c.chunk_idx = 0
+            ORDER BY d.modified_at DESC NULLS LAST, d.ingested_at DESC
+            LIMIT %s
+        """  # nosec B608
+        params.append(limit)
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        excluded = set(exclude_chunk_ids or [])
+        hits: list[SearchHit] = []
+        for r in rows:
+            cid = int(r["chunk_id"])
+            if cid in excluded:
+                continue
+            meta: dict[str, Any] = {
+                "source_uri": r.get("source_uri"),
+                "source_type": r.get("source_type"),
+                "title": r.get("title"),
+                "is_related_drive": True,  # SearchSkill / Slack Block Kit でこの flag を見て分類
+            }
+            if r.get("page_num") is not None:
+                meta["page_num"] = r["page_num"]
+            hits.append(
+                SearchHit(
+                    chunk_id=cid,
+                    content=str(r["content"]),
+                    score=1.0,  # ranking 用ではなく attach 用、固定値
+                    metadata=meta,
+                )
+            )
+
+        logger.info(
+            "pgvector_search_drive_by_clients",
+            request_id=request_id,
+            client_names=clean_names,
+            limit=limit,
+            hit_count=len(hits),
         )
         return hits

@@ -47,6 +47,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         extra_cols: list[str] | None = None,
         use_contextual: bool = False,
         use_new_schema: bool = False,
+        use_fb_drive_match: bool = False,
+        fb_drive_match_limit: int = 3,
         app_role: str | None = "teamagent_app",
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
@@ -86,6 +88,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self._metadata_col = metadata_col
         self._extra_cols = list(extra_cols or ["file_name", "page_num", "drive_url"])
         self._app_role = app_role
+        # Day 8 (2026-05-28) Phase 2: Slack 営業 FB がヒットしたとき、その client_name で
+        # Drive 資料を裏で検索して「関連資料」として attach する機能。
+        # USE_FB_DRIVE_MATCH=true 環境変数で gating (デフォルト OFF、段階ロールアウト用)。
+        self._use_fb_drive_match = use_fb_drive_match
+        self._fb_drive_match_limit = fb_drive_match_limit
 
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
@@ -184,7 +191,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             user_role=user_role,
         ) as conn:
             if self._use_new_schema:
-                return self._pgvector.search_similar_new_schema(
+                hits = self._pgvector.search_similar_new_schema(
                     conn=conn,
                     embedding=embedding,
                     limit=input.top_k,
@@ -192,6 +199,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     request_id=ctx.request_id,
                     strict_industry=input.strict_industry,
                 )
+                # Day 8 Phase 2: FB hits があれば client_name で Drive 資料を追加 retrieve
+                if self._use_fb_drive_match and hits:
+                    related = self._fetch_related_drive_hits(
+                        conn=conn,
+                        primary_hits=hits,
+                        request_id=ctx.request_id,
+                    )
+                    if related:
+                        hits = list(hits) + related
+                return hits
             # メタデータ JSONB のフィルタ。値は adapter 側で placeholder にバインド
             # されるため SQL injection から保護される。metadata 列を持つテーブルで
             # のみ有効（adapter 側で metadata_col is None なら無視される fail-safe）。
@@ -209,25 +226,85 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 extra_cols=self._extra_cols,
             )
 
+    def _fetch_related_drive_hits(
+        self,
+        conn: Any,
+        primary_hits: list[SearchHit],
+        request_id: str,
+    ) -> list[SearchHit]:
+        """Slack 営業 FB がヒットしたら、その client_name で Drive 資料を追加取得する。
+
+        Day 8 (2026-05-28) Phase 2 の中核処理。
+        - primary_hits のうち metadata.is_sales_fb=True のものから client_name を集める
+        - 同じ client_name の Drive doc を最大 _fb_drive_match_limit 件追加検索
+        - 既存 chunk_id と重複したら除外
+        - 戻り値の metadata.is_related_drive=True で「関連資料」マーカー付与
+
+        副作用なし: FB がなければ空 list を返す。
+        """
+        client_names: list[str] = []
+        seen_names: set[str] = set()
+        for h in primary_hits:
+            meta = h.metadata or {}
+            if not meta.get("is_sales_fb"):
+                continue
+            name = meta.get("client_name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            cleaned = name.strip()
+            if cleaned not in seen_names:
+                seen_names.add(cleaned)
+                client_names.append(cleaned)
+
+        if not client_names:
+            return []
+
+        primary_chunk_ids = [h.chunk_id for h in primary_hits]
+        related = self._pgvector.search_drive_by_client_names(
+            conn=conn,
+            client_names=client_names,
+            limit=self._fb_drive_match_limit,
+            exclude_chunk_ids=primary_chunk_ids,
+            request_id=request_id,
+        )
+        return related
+
     def _summarize(
         self,
         query: str,
         hits: list[SearchHit],
         request_id: str,
     ) -> tuple[str, float]:
-        """Bedrock に system prompt + chunks + query を渡して要約させる。"""
+        """Bedrock に system prompt + chunks + query を渡して要約させる。
+
+        Day 8 Phase 2: is_related_drive=True の hits は「関連 Drive 資料」セクションに
+        分離して渡すことで、Sonnet 4.6 が主検索結果と関連資料を区別して回答できるようにする。
+        """
         if not hits:
             return ("該当する資料が見つかりませんでした。", 0.0)
 
         system = load_prompt("search", "v1", "system")
-        context_block = "\n\n".join(
-            f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}]\n{h.content}" for h in hits
+
+        # 主検索結果と関連 Drive 資料を分離 (Phase 2 新機能)
+        primary_hits = [h for h in hits if not (h.metadata or {}).get("is_related_drive")]
+        related_hits = [h for h in hits if (h.metadata or {}).get("is_related_drive")]
+
+        primary_block = "\n\n".join(
+            f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}]\n{h.content}" for h in primary_hits
         )
-        user_message = (
-            f"以下の社内資料から質問に答えてください。\n\n"
-            f"# 質問\n{query}\n\n"
-            f"# 参考資料\n{context_block}"
-        )
+        sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
+        if related_hits:
+            related_block = "\n\n".join(
+                f"[chunk_id: {h.chunk_id}] {(h.metadata or {}).get('title', '')}\n{h.content}"
+                for h in related_hits
+            )
+            sections.append(
+                "# 関連 Drive 資料 (営業 FB のクライアント名で自動マッチング)\n"
+                "本資料は質問内容と直接マッチした FB 投稿のクライアントについて、"
+                "Drive に存在する関連 PDF / Doc の冒頭抜粋です。回答中で別途紹介してください。\n\n"
+                + related_block
+            )
+        user_message = "以下の社内資料から質問に答えてください。\n\n" + "\n\n".join(sections)
 
         resp = self._bedrock.converse(
             messages=[{"role": "user", "content": [{"text": user_message}]}],

@@ -274,15 +274,24 @@ class SkillDispatcher:
             "true",
             "yes",
         )
+        # Day 8 (2026-05-28) Phase 2: Slack 営業 FB の client_name で Drive 資料を裏で検索して
+        # 「関連資料」として attach する機能。USE_FB_DRIVE_MATCH=true で有効化。
+        use_fb_drive_match = os.environ.get("USE_FB_DRIVE_MATCH", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         instance = SearchSkill(
             embedder=LocalE5Embedder(),
             use_contextual=use_contextual,
             use_new_schema=use_new_schema,
+            use_fb_drive_match=use_fb_drive_match,
         )
         logger.info(
             "search_skill_initialized",
             use_contextual=use_contextual,
             use_new_schema=use_new_schema,
+            use_fb_drive_match=use_fb_drive_match,
         )
         self._skill_cache["search"] = instance
         return instance
