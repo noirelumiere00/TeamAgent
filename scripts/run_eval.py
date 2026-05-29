@@ -241,13 +241,32 @@ def _print_summary(s: EvalSummary) -> None:
                 print(f"    top-1 hit: chunk_id={r.actual_top_hits[0]['chunk_id']}")
 
 
-def _save_results(s: EvalSummary) -> Path:
+def _save_results(s: EvalSummary, run_ts: str) -> Path:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    path = RESULTS_DIR / f"{s.label}_{ts}.json"
+    path = RESULTS_DIR / f"{s.label}_{run_ts}.json"
     with path.open("w", encoding="utf-8") as f:
         json.dump(asdict(s), f, ensure_ascii=False, indent=2)
     return path
+
+
+def _partial_path(label: str, run_ts: str) -> Path:
+    """中断時の途中経過保存先 (JSONL)。consolidated JSON と run_ts で対応づく。"""
+    return RESULTS_DIR / f"{label}_{run_ts}_partial.jsonl"
+
+
+def _append_partial(path: Path, result: CaseResult) -> None:
+    """1 ケース完了ごとに JSONL で 1 行追記する (crash-safe な途中経過保存)。
+
+    Day 8 教訓 #5: 長時間 eval 中に SSM トンネル断 / Ctrl-C / スリープで
+    プロセスが死ぬと、最後の consolidated 保存に到達できず全件失われていた。
+    各ケース直後に append + flush することで、プロセスが殺されても
+    ここまでの結果がディスクに残る。正常完走時は main() が partial を削除する。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(asdict(result), ensure_ascii=False))
+        f.write("\n")
+        f.flush()
 
 
 def _build_skill() -> Any:
@@ -319,23 +338,45 @@ def main() -> int:
 
     from teamagent.skills.base import SkillContext
 
+    run_ts = time.strftime("%Y%m%d_%H%M%S")
+    partial_path = _partial_path(args.label, run_ts)
+
     results: list[CaseResult] = []
+    interrupted = False
     print(f"\n--- Running {len(cases)} cases ---")
-    for case in cases:
-        r = _evaluate_case(skill, SkillContext, case)
-        marker = "✓" if r.top5_hit else "✗"
-        rank_str = f"rank {r.expected_rank}" if r.expected_rank else "miss"
-        err = f" ERROR: {r.error}" if r.error else ""
+    try:
+        for case in cases:
+            r = _evaluate_case(skill, SkillContext, case)
+            marker = "✓" if r.top5_hit else "✗"
+            rank_str = f"rank {r.expected_rank}" if r.expected_rank else "miss"
+            err = f" ERROR: {r.error}" if r.error else ""
+            print(
+                f"  [{marker}] case {r.case_id:2d}: {rank_str:8s} "
+                f"cost=${r.cost_usd:.4f} latency={r.latency_ms}ms{err}"
+            )
+            results.append(r)
+            # 各ケース直後に途中経過を JSONL 追記 (中断耐性)
+            _append_partial(partial_path, r)
+    except KeyboardInterrupt:
+        interrupted = True
         print(
-            f"  [{marker}] case {r.case_id:2d}: {rank_str:8s} "
-            f"cost=${r.cost_usd:.4f} latency={r.latency_ms}ms{err}"
+            f"\n[interrupted] Ctrl-C 受信。ここまでの {len(results)}/{len(cases)} 件を集計します。"
         )
-        results.append(r)
+
+    if not results:
+        print("結果ゼロのため集計をスキップします。")
+        return 1
 
     summary = _summarize(results, args.label, config)
     _print_summary(summary)
-    path = _save_results(summary)
+    path = _save_results(summary, run_ts)
     print(f"\nresults saved: {path}")
+    if interrupted:
+        # 中断時は partial を残す (どこで止まったかの証跡)
+        print(f"(中断: {len(results)}/{len(cases)} 件のみ。途中経過: {partial_path})")
+        return 130
+    # 正常完走時は consolidated JSON が上位互換なので partial を掃除する
+    partial_path.unlink(missing_ok=True)
     return 0
 
 
