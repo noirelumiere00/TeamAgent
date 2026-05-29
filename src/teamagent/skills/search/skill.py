@@ -24,6 +24,7 @@ from teamagent.adapters.embeddings_client import Embedder
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
@@ -55,6 +56,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         use_cohere_rerank: bool = False,
         rerank_pool_size: int = 30,
         min_relevance: float = 0.0,
+        use_aggregation_mode: bool = False,
         prompt_version: str = "v1",
         summary_max_tokens: int = 4096,
         app_role: str | None = "teamagent_app",
@@ -112,6 +114,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # SEARCH_MIN_RELEVANCE env で制御 (既定 0.0 = OFF)。Rerank score (0-1) 前提。
         # gold set 実測: 実ヒット最低 0.50 / expect_zero 最高 0.23 → 0.4 で綺麗に分離。
         self._min_relevance = min_relevance
+        # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」等を検出したら
+        # 意味検索ではなくメタデータフィルタ列挙 (list_by_metadata) で答える。
+        # USE_AGGREGATION_MODE=true で有効化 (既定 OFF)。new_schema 前提。
+        self._use_aggregation_mode = use_aggregation_mode
         # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
         # 「過去のチャンク要約」から「パターン抽出 + 推奨アクション」に役割を進化させる。
         # ユーザー指摘 (Day 8): "あたりまえの過去事例リサーチは不要、リサーチ＆改善の思考が欲しい"
@@ -231,6 +237,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             user_role=user_role,
         ) as conn:
             if self._use_new_schema:
+                # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」「失注案件」等は
+                # 意味検索では答えられないため、メタデータフィルタで FB を列挙する。
+                # フィルタが取れたときだけ列挙経路に入り、取れなければ通常の意味検索へ。
+                if self._use_aggregation_mode:
+                    agg_filters = extract_aggregation_filter(input.query)
+                    if agg_filters:
+                        agg_hits = self._pgvector.list_by_metadata(
+                            conn=conn,
+                            metadata_filters=agg_filters,
+                            limit=input.top_k,
+                            request_id=ctx.request_id,
+                        )
+                        if agg_hits:
+                            return agg_hits
                 # Day 8 Sprint 4-A: Cohere Rerank 有効時は pool_size まで広く retrieve
                 # → Rerank で top_k に絞る (dense retrieval の固有名詞弱点を補強)
                 retrieve_limit = (
