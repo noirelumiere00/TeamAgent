@@ -290,15 +290,19 @@ class SkillDispatcher:
             "yes",
         )
         # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
-        # PROMPT_VERSION=v1 / v2 / v2c で切替。デフォルト v1 (既存挙動互換)。
+        # PROMPT_VERSION=v1 / v2 / v2c で切替。
         # v2c は v2 の compact 版 (Sprint 4-D, latency 短縮目的)。
-        prompt_version = os.environ.get("PROMPT_VERSION", "v1")
+        # Day 9 (2026-05-29) Sprint 4-D 確定: gold set 25 ケース完走で
+        # v2c + max=800 が top-1 52% / latency 18.1s / $0.0197/q を達成
+        # (latency 20s 目標・cost $0.020 目標を両方クリア、精度は Rerank baseline 維持)。
+        # この結果を受け既定を v2c に変更。
+        prompt_version = os.environ.get("PROMPT_VERSION", "v2c")
         # Day 8 (2026-05-28) Sprint 4-D: max_tokens 制限で latency 短縮。
-        # 既定 4096、v2c と組合せて 1200 程度で運用想定 (46s → 20s 以下狙い)。
+        # Day 9 確定: max=800 で v2 の 36s → 18.1s に半減 (精度 52% 維持)。既定を 800 に変更。
         try:
-            summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "4096"))
+            summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "800"))
         except ValueError:
-            summary_max_tokens = 4096
+            summary_max_tokens = 800
         instance = SearchSkill(
             embedder=LocalE5Embedder(),
             use_contextual=use_contextual,
