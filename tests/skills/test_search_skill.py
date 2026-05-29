@@ -749,3 +749,54 @@ def test_summary_max_tokens_default_unchanged(
 
     call_kwargs = fake_bedrock.converse.call_args.kwargs
     assert call_kwargs["max_tokens"] == 4096
+
+
+# -----------------------------------------------------------
+# min_relevance（反ハルシネーション閾値, Sprint 5）
+# -----------------------------------------------------------
+def test_min_relevance_drops_hits_below_threshold(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """min_relevance を超えない hit は落とされ、空なら 0 件になる。
+
+    fixture の hit は score=0.92。閾値 0.95 で全件落ち → hits 0 件 →
+    Bot は「資料に記載がありません」相当を返す (expect_zero 救済の中核)。
+    """
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        min_relevance=0.95,
+    )
+    out = skill.run(input=SearchInput(query="東芝の半導体事業"), ctx=SkillContext())
+    assert len(out.hits) == 0
+
+
+def test_min_relevance_keeps_hits_above_threshold(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """閾値以上の hit は残る（score 0.92 >= 0.4）。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        min_relevance=0.4,
+    )
+    out = skill.run(input=SearchInput(query="飲食の事例は？"), ctx=SkillContext())
+    assert len(out.hits) == 1
+
+
+def test_min_relevance_default_off_keeps_all(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """既定 (min_relevance=0.0) では一切フィルタしない。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+    out = skill.run(input=SearchInput(query="飲食の事例は？"), ctx=SkillContext())
+    assert len(out.hits) == 1

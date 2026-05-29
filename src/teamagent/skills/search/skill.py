@@ -54,6 +54,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         fb_drive_match_limit: int = 3,
         use_cohere_rerank: bool = False,
         rerank_pool_size: int = 30,
+        min_relevance: float = 0.0,
         prompt_version: str = "v1",
         summary_max_tokens: int = 4096,
         app_role: str | None = "teamagent_app",
@@ -105,6 +106,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # Anthropic 公式ベンチで dense retrieval の失敗率 5.7% → 1.9% (-67%) を実現する中核機能。
         self._use_cohere_rerank = use_cohere_rerank
         self._rerank_pool_size = rerank_pool_size
+        # Sprint 5: 反ハルシネーション閾値。Rerank relevance がこの値未満の hit は
+        # 「根拠として弱い」とみなし落とす。全 hit が落ちれば 0 件 = Bot は
+        # 「資料に記載がありません」と返し、無い情報を捏造しない。
+        # SEARCH_MIN_RELEVANCE env で制御 (既定 0.0 = OFF)。Rerank score (0-1) 前提。
+        # gold set 実測: 実ヒット最低 0.50 / expect_zero 最高 0.23 → 0.4 で綺麗に分離。
+        self._min_relevance = min_relevance
         # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
         # 「過去のチャンク要約」から「パターン抽出 + 推奨アクション」に役割を進化させる。
         # ユーザー指摘 (Day 8): "あたりまえの過去事例リサーチは不要、リサーチ＆改善の思考が欲しい"
@@ -241,6 +248,21 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         top_k=input.top_k,
                         request_id=ctx.request_id,
                     )
+                # Sprint 5: 反ハルシネーション閾値。relevance < 閾値の hit を落とす。
+                # Rerank 後の relevance score に対して適用 (drive-match の固定 score=1.0
+                # より前に評価し、弱い根拠しか無いクエリでは drive-match も発火させない)。
+                if self._min_relevance > 0.0 and hits:
+                    kept = [h for h in hits if h.score >= self._min_relevance]
+                    if len(kept) != len(hits):
+                        logger.info(
+                            "min_relevance_filter",
+                            request_id=ctx.request_id,
+                            min_relevance=self._min_relevance,
+                            before=len(hits),
+                            after=len(kept),
+                            top_score=hits[0].score,
+                        )
+                    hits = kept
                 # Day 8 Phase 2: FB hits があれば client_name で Drive 資料を追加 retrieve
                 if self._use_fb_drive_match and hits:
                     related = self._fetch_related_drive_hits(
