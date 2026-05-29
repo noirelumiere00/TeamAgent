@@ -136,3 +136,46 @@ def test_search_similar_new_schema_metadata_filters_uses_placeholders() -> None:
     assert payload not in sql
     assert payload in params
     assert "client_company" in params
+
+
+def test_search_similar_new_schema_filter_industry_uses_placeholder() -> None:
+    """本番経路の filter_industry= 引数を injection しても placeholder にバインドされる。
+
+    filter_industry は Router の auto-detection やスラッシュコマンド
+    (industry=...) 経由でユーザー入力の影響を受けるため、metadata_filters とは
+    別経路として soft / strict 両分岐で値が SQL リテラルに混入しないことを固定する。
+    """
+    payload = "'; DROP TABLE chunks; --"
+
+    # soft (strict_industry=False, 既定): industry=値 OR NULL の OR 句
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn()
+    client.search_similar_new_schema(
+        conn=conn,
+        embedding=[0.1] * 1024,
+        limit=5,
+        filter_industry=payload,
+    )
+    sql_soft: str = cur.execute.call_args.args[0]
+    params_soft: list[Any] = list(cur.execute.call_args.args[1])
+    assert "d.metadata->>'industry' = %s" in sql_soft
+    assert "IS NULL" in sql_soft  # soft 経路は OR NULL を含む
+    assert payload not in sql_soft
+    assert "DROP TABLE" not in sql_soft
+    assert payload in params_soft
+
+    # strict (strict_industry=True): industry=値 のみ
+    conn2, cur2 = _mock_conn()
+    client.search_similar_new_schema(
+        conn=conn2,
+        embedding=[0.1] * 1024,
+        limit=5,
+        filter_industry=payload,
+        strict_industry=True,
+    )
+    sql_strict: str = cur2.execute.call_args.args[0]
+    params_strict: list[Any] = list(cur2.execute.call_args.args[1])
+    assert "d.metadata->>'industry' = %s" in sql_strict
+    assert payload not in sql_strict
+    assert "DROP TABLE" not in sql_strict
+    assert payload in params_strict
