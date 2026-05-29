@@ -173,6 +173,9 @@ def _evaluate_case(skill: Any, ctx_cls: Any, case: dict[str, Any]) -> CaseResult
             # 関わらず常に miss 判定になっていた = "52% の天井" の正体 (eval 測定バグ)。
             "client_name": h.client_name,
             "deal_phase": h.deal_phase,
+            # Sprint 5: expect_metadata (bant_score / channel_type) の判定用 (case 14-17)
+            "bant_score": h.bant_score,
+            "channel_type": h.channel_type,
         }
         if _match_hit(h.content, hit_meta, case):
             result.expected_rank = rank
