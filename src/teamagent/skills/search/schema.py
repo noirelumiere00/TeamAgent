@@ -80,6 +80,14 @@ class SearchHitOut(BaseModel):
         default=None,
         description="案件フェーズ（ヒアリング/提案/受注 等。営業 FB の構造化メタ）",
     )
+    bant_score: str | None = Field(
+        default=None,
+        description="BANT 評価（A/B/C 等。営業 FB の構造化メタ）",
+    )
+    channel_type: str | None = Field(
+        default=None,
+        description="チャネル種別（代理店/直販 等。営業 FB の構造化メタ）",
+    )
 
 
 class SearchOutput(BaseModel):

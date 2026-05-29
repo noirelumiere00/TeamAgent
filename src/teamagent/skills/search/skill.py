@@ -172,6 +172,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     deal_phase=(
                         str(h.metadata["deal_phase"]) if h.metadata.get("deal_phase") else None
                     ),
+                    bant_score=(
+                        str(h.metadata["bant_score"]) if h.metadata.get("bant_score") else None
+                    ),
+                    channel_type=(
+                        str(h.metadata["channel_type"]) if h.metadata.get("channel_type") else None
+                    ),
                 )
                 for h in hits
             ],

@@ -277,7 +277,9 @@ class PgVectorClient:
                 d.metadata->>'channel_name' AS channel_name,
                 d.metadata->>'is_sales_fb' AS is_sales_fb,
                 d.metadata->>'client_name' AS client_name,
-                d.metadata->>'deal_phase' AS deal_phase
+                d.metadata->>'deal_phase' AS deal_phase,
+                d.metadata->>'bant_score' AS bant_score,
+                d.metadata->>'channel_type' AS channel_type
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             {where_clause}
@@ -309,6 +311,12 @@ class PgVectorClient:
                     meta["client_name"] = r["client_name"]
                 if r.get("deal_phase"):
                     meta["deal_phase"] = r["deal_phase"]
+                # Sprint 5: BANT 評価 / チャネル種別 (代理店/直販)。検索結果での
+                # フィルタ・表示・eval 判定 (expect_metadata) に使う。
+                if r.get("bant_score"):
+                    meta["bant_score"] = r["bant_score"]
+                if r.get("channel_type"):
+                    meta["channel_type"] = r["channel_type"]
             hits.append(
                 SearchHit(
                     chunk_id=int(r["chunk_id"]),
