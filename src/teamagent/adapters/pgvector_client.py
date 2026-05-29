@@ -335,6 +335,90 @@ class PgVectorClient:
         )
         return hits
 
+    def list_by_metadata(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        metadata_filters: dict[str, str],
+        limit: int = 5,
+        request_id: str | None = None,
+    ) -> list[SearchHit]:
+        """メタデータフィルタに一致する FB chunk を新しい順に列挙する (集約・一覧クエリ用)。
+
+        「BANT A の案件一覧」「失注案件」のような列挙系クエリは意味検索では
+        答えられないため、``WHERE metadata->>'bant_score' = 'A'`` 等で
+        構造化フィルタ一致を modified_at 降順 (新しい案件優先) で返す。
+
+        embedding を使わないため score は recency proxy ではなく 1.0 固定
+        (フィルタ完全一致 = 高信頼)。min_relevance 閾値より上に置き、落とされない。
+        key / value は placeholder 化され SQL injection から保護される。
+        """
+        if not metadata_filters:
+            return []
+
+        where_parts = ["d.metadata->>'is_sales_fb' = 'true'"]
+        params: list[Any] = []
+        for key, value in metadata_filters.items():
+            where_parts.append("d.metadata->>%s = %s")
+            params.extend([key, value])
+        where_clause = " AND ".join(where_parts)
+
+        sql = f"""
+            SELECT
+                abs(hashtext(c.id::text)::bigint) AS chunk_id,
+                COALESCE(c.contextualized, c.content) AS content,
+                c.page_num,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                d.title,
+                d.metadata->>'channel_name' AS channel_name,
+                d.metadata->>'client_name' AS client_name,
+                d.metadata->>'deal_phase' AS deal_phase,
+                d.metadata->>'bant_score' AS bant_score,
+                d.metadata->>'channel_type' AS channel_type
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE {where_clause}
+            ORDER BY d.modified_at DESC NULLS LAST, c.chunk_idx ASC
+            LIMIT %s
+        """  # nosec B608
+        params.append(limit)
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        hits: list[SearchHit] = []
+        for r in rows:
+            meta: dict[str, Any] = {
+                "source_uri": r.get("source_uri"),
+                "source_type": r.get("source_type"),
+                "title": r.get("title"),
+                "channel_name": r.get("channel_name"),
+                "is_sales_fb": True,
+            }
+            if r.get("page_num") is not None:
+                meta["page_num"] = r["page_num"]
+            for k in ("client_name", "deal_phase", "bant_score", "channel_type"):
+                if r.get(k):
+                    meta[k] = r[k]
+            hits.append(
+                SearchHit(
+                    chunk_id=int(r["chunk_id"]),
+                    content=str(r["content"]),
+                    score=1.0,
+                    metadata=meta,
+                )
+            )
+
+        logger.info(
+            "pgvector_list_by_metadata",
+            request_id=request_id,
+            filters=metadata_filters,
+            limit=limit,
+            hit_count=len(hits),
+        )
+        return hits
+
     def search_drive_by_client_names(
         self,
         conn: psycopg.Connection[dict[str, Any]],

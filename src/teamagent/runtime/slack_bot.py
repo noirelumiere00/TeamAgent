@@ -312,6 +312,12 @@ class SkillDispatcher:
             min_relevance = float(os.environ.get("SEARCH_MIN_RELEVANCE", "0.0"))
         except ValueError:
             min_relevance = 0.0
+        # Sprint 5: 集約・一覧クエリモード (「BANT A の案件一覧」等をメタデータ列挙で回答)。
+        use_aggregation_mode = os.environ.get("USE_AGGREGATION_MODE", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         instance = SearchSkill(
             embedder=LocalE5Embedder(),
             use_contextual=use_contextual,
@@ -319,6 +325,7 @@ class SkillDispatcher:
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
             min_relevance=min_relevance,
+            use_aggregation_mode=use_aggregation_mode,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
         )
@@ -329,6 +336,7 @@ class SkillDispatcher:
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
             min_relevance=min_relevance,
+            use_aggregation_mode=use_aggregation_mode,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
         )
