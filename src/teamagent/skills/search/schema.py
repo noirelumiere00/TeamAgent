@@ -72,6 +72,14 @@ class SearchHitOut(BaseModel):
         default=None,
         description="Slack チャネル名（source_type='slack' の場合に設定）",
     )
+    client_name: str | None = Field(
+        default=None,
+        description="クライアント名（営業 FB の構造化メタ。Slack FB hit で設定）",
+    )
+    deal_phase: str | None = Field(
+        default=None,
+        description="案件フェーズ（ヒアリング/提案/受注 等。営業 FB の構造化メタ）",
+    )
 
 
 class SearchOutput(BaseModel):

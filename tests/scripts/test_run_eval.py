@@ -47,6 +47,34 @@ def test_partial_path_uses_label_and_run_ts() -> None:
     assert path.suffix == ".jsonl"
 
 
+def test_match_hit_compares_client_name() -> None:
+    """expect_client_name が hit の client_name と部分一致するか判定される。
+
+    回帰: 以前は eval が hit_meta に client_name を詰めず、expect_client_name の
+    ケース (日本ガイシ/マンダム) が検索品質に関わらず常に miss = "52% の天井" だった。
+    """
+    case = {"id": 1, "expect_client_name": "日本ガイシ"}
+    # client_name が一致 → hit
+    assert run_eval._match_hit("本文", {"client_name": "日本ガイシ"}, case) is True
+    # client_name が別 → miss
+    assert run_eval._match_hit("本文", {"client_name": "マンダム"}, case) is False
+    # client_name が無い (None) → miss (詰め忘れの再発検知)
+    assert run_eval._match_hit("本文", {"client_name": None}, case) is False
+
+
+def test_match_hit_requires_all_keywords_and_client() -> None:
+    """expect_keywords は全一致、かつ client_name も満たす必要がある。"""
+    case = {
+        "id": 2,
+        "expect_keywords": ["マンダム", "ヒアリング"],
+        "expect_client_name": "マンダム",
+    }
+    meta = {"client_name": "マンダム"}
+    assert run_eval._match_hit("マンダムのヒアリング記録", meta, case) is True
+    # キーワード欠落 → miss
+    assert run_eval._match_hit("マンダムの提案", meta, case) is False
+
+
 def test_append_partial_writes_one_jsonl_line_per_case(tmp_path: Path) -> None:
     """_append_partial は 1 ケースにつき 1 行の有効な JSON を追記する。"""
     path = tmp_path / "results" / "lbl_ts_partial.jsonl"

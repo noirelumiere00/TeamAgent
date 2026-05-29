@@ -159,6 +159,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     channel_name=(
                         str(h.metadata["channel_name"]) if h.metadata.get("channel_name") else None
                     ),
+                    client_name=(
+                        str(h.metadata["client_name"]) if h.metadata.get("client_name") else None
+                    ),
+                    deal_phase=(
+                        str(h.metadata["deal_phase"]) if h.metadata.get("deal_phase") else None
+                    ),
                 )
                 for h in hits
             ],

@@ -168,9 +168,11 @@ def _evaluate_case(skill: Any, ctx_cls: Any, case: dict[str, Any]) -> CaseResult
             "channel_name": h.channel_name,
             "file_name": h.file_name,
             "page_num": h.page_num,
-            # client_name / deal_phase / bant_score 等は SearchHitOut に
-            # 露出されていない (Pydantic schema にない)。
-            # 暫定: content に含まれているかで擬似マッチ判定する。
+            # client_name / deal_phase は SearchHitOut に露出済 (Sprint 5)。
+            # これが無いと expect_client_name のケース (case 1,2) が検索品質に
+            # 関わらず常に miss 判定になっていた = "52% の天井" の正体 (eval 測定バグ)。
+            "client_name": h.client_name,
+            "deal_phase": h.deal_phase,
         }
         if _match_hit(h.content, hit_meta, case):
             result.expected_rank = rank
