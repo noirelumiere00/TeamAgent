@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -321,6 +322,140 @@ class PgVectorClient:
         logger.info(
             "pgvector_search_new_schema",
             request_id=request_id,
+            limit=limit,
+            hit_count=len(hits),
+            top_score=hits[0].score if hits else None,
+        )
+        return hits
+
+    def search_lexical_new_schema(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        terms: list[str],
+        limit: int = 30,
+        filter_industry: str | None = None,
+        request_id: str | None = None,
+        *,
+        strict_industry: bool = False,
+        metadata_filters: dict[str, str] | None = None,
+    ) -> list[SearchHit]:
+        """pg_bigm バイグラム索引上の idf 重み付き語彙検索 (BM25 ハイブリッドの語彙側)。
+
+        ``terms`` (hybrid.extract_terms で抽出した内容語) のうち content に
+        含まれるものの idf を合算してスコアとし、降順 top ``limit`` 件を返す。
+        idf = ln((N+1)/(df+1)) + 1 (smoothed)。df は chunks 全体での出現 chunk 数。
+
+        dense 検索 (search_similar_new_schema) が苦手な固有名詞リコールを補う。
+        RLS / filter_industry / metadata_filters のセマンティクスは dense 側と同一。
+        terms が空、または全 term が df=0 のときは [] を返す (語彙ヒット無し)。
+
+        スコア式は CASE WHEN ... LIKE %s の動的組み立てだが、term / idf / filter 値は
+        すべて placeholder 化されるため SQL injection から保護される。
+        """
+        if not terms:
+            return []
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM chunks")
+            count_row = cur.fetchone()
+            total = int(count_row["n"]) if count_row else 0
+            # 各 term の df を 1 クエリで取得 (unnest)。LIKE はバイグラム索引で加速。
+            cur.execute(
+                "SELECT t AS term, "
+                "(SELECT count(*) FROM chunks WHERE content LIKE '%%' || t || '%%') AS df "
+                "FROM unnest(%s::text[]) AS t",
+                (terms,),
+            )
+            df_by_term = {r["term"]: int(r["df"]) for r in cur.fetchall()}
+
+        # df>0 の term だけ採用 (出現しない固有名詞はスコアに寄与しない)
+        active = [t for t in terms if df_by_term.get(t, 0) > 0]
+        if not active:
+            return []
+        idf = {t: math.log((total + 1) / (df_by_term[t] + 1)) + 1.0 for t in active}
+
+        # SELECT 側スコア式: Σ CASE WHEN content LIKE <term> THEN <idf> ELSE 0
+        score_expr = " + ".join("CASE WHEN c.content LIKE %s THEN %s ELSE 0 END" for _ in active)
+        params: list[Any] = []
+        for t in active:
+            params.append(f"%{t}%")
+            params.append(idf[t])
+
+        # WHERE: いずれかの term に命中 + dense 側と同じ filter
+        where_parts: list[str] = ["(" + " OR ".join("c.content LIKE %s" for _ in active) + ")"]
+        params.extend(f"%{t}%" for t in active)
+
+        if filter_industry is not None:
+            if strict_industry:
+                where_parts.append("d.metadata->>'industry' = %s")
+                params.append(filter_industry)
+            else:
+                where_parts.append(
+                    "(d.metadata->>'industry' = %s OR d.metadata->>'industry' IS NULL)"
+                )
+                params.append(filter_industry)
+
+        if metadata_filters:
+            for key, value in metadata_filters.items():
+                where_parts.append("d.metadata->>%s = %s")
+                params.extend([key, value])
+
+        where_clause = " AND ".join(where_parts)
+
+        sql = f"""
+            SELECT
+                abs(hashtext(c.id::text)::bigint) AS chunk_id,
+                COALESCE(c.contextualized, c.content) AS content,
+                ({score_expr}) AS score,
+                c.page_num,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                d.title,
+                d.metadata->>'channel_name' AS channel_name,
+                d.metadata->>'is_sales_fb' AS is_sales_fb,
+                d.metadata->>'client_name' AS client_name,
+                d.metadata->>'deal_phase' AS deal_phase
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE {where_clause}
+            ORDER BY score DESC
+            LIMIT %s
+        """  # nosec B608
+        params.append(limit)
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        hits: list[SearchHit] = []
+        for r in rows:
+            meta: dict[str, Any] = {
+                "source_uri": r.get("source_uri"),
+                "source_type": r.get("source_type"),
+                "title": r.get("title"),
+                "channel_name": r.get("channel_name"),
+            }
+            if r.get("page_num") is not None:
+                meta["page_num"] = r["page_num"]
+            if r.get("is_sales_fb") == "true":
+                meta["is_sales_fb"] = True
+                if r.get("client_name"):
+                    meta["client_name"] = r["client_name"]
+                if r.get("deal_phase"):
+                    meta["deal_phase"] = r["deal_phase"]
+            hits.append(
+                SearchHit(
+                    chunk_id=int(r["chunk_id"]),
+                    content=str(r["content"]),
+                    score=float(r["score"]),
+                    metadata=meta,
+                )
+            )
+
+        logger.info(
+            "pgvector_search_lexical",
+            request_id=request_id,
+            term_count=len(active),
             limit=limit,
             hit_count=len(hits),
             top_score=hits[0].score if hits else None,

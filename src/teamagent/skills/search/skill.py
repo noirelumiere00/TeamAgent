@@ -24,6 +24,7 @@ from teamagent.adapters.embeddings_client import Embedder
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.search.hybrid import extract_terms, reciprocal_rank_fusion
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
@@ -54,6 +55,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         fb_drive_match_limit: int = 3,
         use_cohere_rerank: bool = False,
         rerank_pool_size: int = 30,
+        use_bm25_hybrid: bool = False,
         prompt_version: str = "v1",
         summary_max_tokens: int = 4096,
         app_role: str | None = "teamagent_app",
@@ -105,6 +107,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # Anthropic 公式ベンチで dense retrieval の失敗率 5.7% → 1.9% (-67%) を実現する中核機能。
         self._use_cohere_rerank = use_cohere_rerank
         self._rerank_pool_size = rerank_pool_size
+        # Sprint 5: BM25 ハイブリッド。dense top-N ⊕ pg_bigm 語彙 top-N を RRF 融合 → Rerank。
+        # USE_BM25_HYBRID=true で有効化。dense が外す固有名詞リコールを語彙側で補強する。
+        self._use_bm25_hybrid = use_bm25_hybrid
         # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
         # 「過去のチャンク要約」から「パターン抽出 + 推奨アクション」に役割を進化させる。
         # ユーザー指摘 (Day 8): "あたりまえの過去事例リサーチは不要、リサーチ＆改善の思考が欲しい"
@@ -158,6 +163,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     ),
                     channel_name=(
                         str(h.metadata["channel_name"]) if h.metadata.get("channel_name") else None
+                    ),
+                    client_name=(
+                        str(h.metadata["client_name"]) if h.metadata.get("client_name") else None
+                    ),
+                    deal_phase=(
+                        str(h.metadata["deal_phase"]) if h.metadata.get("deal_phase") else None
                     ),
                 )
                 for h in hits
@@ -227,6 +238,24 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     request_id=ctx.request_id,
                     strict_industry=input.strict_industry,
                 )
+                # Sprint 5: BM25 ハイブリッド。pg_bigm 語彙検索を同 pool で取り、
+                # dense ランキングと RRF 融合してから Rerank に渡す。
+                # dense が外す固有名詞 (「日本ガイシ」等) を語彙側が拾い、RRF で順位が浮く。
+                if self._use_bm25_hybrid:
+                    terms = extract_terms(input.query)
+                    if terms:
+                        lexical_hits = self._pgvector.search_lexical_new_schema(
+                            conn=conn,
+                            terms=terms,
+                            limit=retrieve_limit,
+                            filter_industry=input.filter_industry,
+                            request_id=ctx.request_id,
+                            strict_industry=input.strict_industry,
+                        )
+                        if lexical_hits:
+                            hits = reciprocal_rank_fusion(
+                                [hits, lexical_hits], limit=retrieve_limit
+                            )
                 # Rerank: top_k に絞り直す (relevance_score で再ソート)
                 if self._use_cohere_rerank and hits:
                     hits = self._apply_cohere_rerank(

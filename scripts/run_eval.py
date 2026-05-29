@@ -168,9 +168,11 @@ def _evaluate_case(skill: Any, ctx_cls: Any, case: dict[str, Any]) -> CaseResult
             "channel_name": h.channel_name,
             "file_name": h.file_name,
             "page_num": h.page_num,
-            # client_name / deal_phase / bant_score 等は SearchHitOut に
-            # 露出されていない (Pydantic schema にない)。
-            # 暫定: content に含まれているかで擬似マッチ判定する。
+            # client_name / deal_phase は SearchHitOut に露出済 (Sprint 5)。
+            # これが無いと expect_client_name のケース (case 1,2) が
+            # 検索品質に関わらず常に miss 判定になっていた (eval 測定バグ)。
+            "client_name": h.client_name,
+            "deal_phase": h.deal_phase,
         }
         if _match_hit(h.content, hit_meta, case):
             result.expected_rank = rank
@@ -286,6 +288,11 @@ def _build_skill() -> Any:
         "true",
         "yes",
     )
+    use_bm25_hybrid = os.environ.get("USE_BM25_HYBRID", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     prompt_version = os.environ.get("PROMPT_VERSION", "v1")
     try:
         summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "4096"))
@@ -299,6 +306,7 @@ def _build_skill() -> Any:
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
+            use_bm25_hybrid=use_bm25_hybrid,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
         ),
@@ -307,6 +315,7 @@ def _build_skill() -> Any:
             "USE_CONTEXTUAL": use_contextual,
             "USE_FB_DRIVE_MATCH": use_fb_drive_match,
             "USE_COHERE_RERANK": use_cohere_rerank,
+            "USE_BM25_HYBRID": use_bm25_hybrid,
             "PROMPT_VERSION": prompt_version,
             "SEARCH_MAX_TOKENS": summary_max_tokens,
         },

@@ -289,6 +289,14 @@ class SkillDispatcher:
             "true",
             "yes",
         )
+        # Sprint 5: BM25 ハイブリッド。USE_BM25_HYBRID=true で dense ⊕ pg_bigm 語彙を
+        # RRF 融合してから Rerank に渡す。dense が外す固有名詞リコールを底上げする。
+        # migration 0006 (pg_bigm + バイグラム索引) 適用済が前提。
+        use_bm25_hybrid = os.environ.get("USE_BM25_HYBRID", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
         # PROMPT_VERSION=v1 / v2 / v2c / v2d で切替。
         # v2c は v2 の compact 版 (Sprint 4-D, latency 短縮目的)。
@@ -311,6 +319,7 @@ class SkillDispatcher:
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
+            use_bm25_hybrid=use_bm25_hybrid,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
         )
@@ -320,6 +329,7 @@ class SkillDispatcher:
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
+            use_bm25_hybrid=use_bm25_hybrid,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
         )
