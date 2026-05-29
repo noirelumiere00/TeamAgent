@@ -41,6 +41,9 @@ _SECRET_PATTERNS: Final[list[re.Pattern[str]]] = [
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),  # Anthropic API key
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
     re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]+?-----END [A-Z ]+PRIVATE KEY-----"),
+    # URI userinfo (postgresql://user:PASS@host 等の接続文字列パスワード)。
+    # ://直後〜@手前の user:pass 全体を redact。パスワードに : を含むケースも許容。
+    re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]+(?=@)"),
 ]
 
 # PII（メール / 電話）— redact だが分類は別タグ
@@ -115,12 +118,19 @@ def before_send(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] |
         if "params" in msg:
             msg["params"] = scrub_value(msg["params"])
 
-    # exception.values[].value（例外メッセージ自体）もスクラブ
+    # exception.values[].value（例外メッセージ自体）と stacktrace の frame locals をスクラブ。
+    # attach_stacktrace=True で全フレームのローカル変数 (vars) が添付されるため、
+    # DB 接続文字列を握ったローカル変数経由のシークレット漏れをここで塞ぐ。
     exception = event.get("exception")
     if isinstance(exception, dict):
         for ex in exception.get("values", []) or []:
             if isinstance(ex.get("value"), str):
                 ex["value"] = _scrub_str(ex["value"])
+            stacktrace = ex.get("stacktrace")
+            if isinstance(stacktrace, dict):
+                for frame in stacktrace.get("frames", []) or []:
+                    if isinstance(frame, dict) and isinstance(frame.get("vars"), dict):
+                        frame["vars"] = scrub_value(frame["vars"])
 
     # request_id を tag に昇格
     extra = event.get("extra") or {}

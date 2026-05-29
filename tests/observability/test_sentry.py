@@ -100,6 +100,31 @@ def test_scrub_redacts_google_api_key() -> None:
     assert "AI" + "za" not in out
 
 
+def test_scrub_redacts_db_connection_string_password() -> None:
+    """postgresql://user:PASS@host 形式の接続文字列パスワードを redact する。
+
+    本番 traceback でこの形が漏れたため回帰防止。パスワードに記号や : を
+    含むケース（実際に漏れた値が該当）でも user:pass 部が消えることを固定。
+    """
+    pwd = "q9W0I" + "$>ezJxe>6UVOLqYe" + "$971)K:UzUh"  # : を含む実形に寄せた疑似値
+    raw = f"could not connect to postgresql://teamagent:{pwd}@db.example.com:5432/teamagent?sslmode=require"
+    out = scrub_value(raw)
+    assert pwd not in out
+    assert "teamagent:" not in out  # user:pass 全体が消える
+    assert "[REDACTED_SECRET]" in out
+    # host 以降の構造は残る（デバッグ可能性を維持）
+    assert "@db.example.com:5432/teamagent" in out
+
+
+def test_scrub_redacts_db_connection_string_in_nested_dict() -> None:
+    """ローカル変数 dict に埋まった DSN もネスト走査で redact される。"""
+    obj = {"conn_str": "postgresql://u:secretpw@h:5432/d", "safe": 1}
+    out = scrub_value(obj)
+    assert "secretpw" not in out["conn_str"]
+    assert "[REDACTED_SECRET]" in out["conn_str"]
+    assert out["safe"] == 1
+
+
 def test_scrub_redacts_private_key_block() -> None:
     raw = (
         "header\n-----BEGIN RSA PRIVATE KEY-----\nABCDEFG\nXYZ\n"
@@ -227,6 +252,44 @@ def test_before_send_scrubs_exception_value() -> None:
     out = before_send(event, {})
     assert out is not None
     assert "xox" + "b-" not in out["exception"]["values"][0]["value"]
+
+
+def test_before_send_scrubs_stacktrace_frame_vars() -> None:
+    """stacktrace の frame locals (vars) に握られた DSN を redact する。
+
+    attach_stacktrace=True で全フレームのローカル変数が添付されるため、
+    例外メッセージに出なくてもローカル変数経由で漏れるのを before_send で塞ぐ。
+    本番で DB パスワードが漏れた経路の回帰テスト。
+    """
+    event: dict[str, Any] = {
+        "exception": {
+            "values": [
+                {
+                    "type": "OperationalError",
+                    "value": "connection failed",
+                    "stacktrace": {
+                        "frames": [
+                            {
+                                "function": "connect",
+                                "vars": {
+                                    "dsn": "postgresql://u:topsecret@h:5432/d",
+                                    "retries": "3",
+                                },
+                            },
+                            {"function": "outer", "vars": {"ok": "value"}},
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+    out = before_send(event, {})
+    assert out is not None
+    frames = out["exception"]["values"][0]["stacktrace"]["frames"]
+    assert "topsecret" not in frames[0]["vars"]["dsn"]
+    assert "[REDACTED_SECRET]" in frames[0]["vars"]["dsn"]
+    assert frames[0]["vars"]["retries"] == "3"
+    assert frames[1]["vars"]["ok"] == "value"
 
 
 def test_before_send_promotes_request_id_to_tag() -> None:
