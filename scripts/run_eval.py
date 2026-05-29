@@ -293,6 +293,10 @@ def _build_skill() -> Any:
         summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "4096"))
     except ValueError:
         summary_max_tokens = 4096
+    try:
+        min_relevance = float(os.environ.get("SEARCH_MIN_RELEVANCE", "0.0"))
+    except ValueError:
+        min_relevance = 0.0
 
     return (
         SearchSkill(
@@ -301,6 +305,7 @@ def _build_skill() -> Any:
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
+            min_relevance=min_relevance,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
         ),
@@ -309,6 +314,7 @@ def _build_skill() -> Any:
             "USE_CONTEXTUAL": use_contextual,
             "USE_FB_DRIVE_MATCH": use_fb_drive_match,
             "USE_COHERE_RERANK": use_cohere_rerank,
+            "SEARCH_MIN_RELEVANCE": min_relevance,
             "PROMPT_VERSION": prompt_version,
             "SEARCH_MAX_TOKENS": summary_max_tokens,
         },

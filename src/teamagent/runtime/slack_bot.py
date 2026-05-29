@@ -305,12 +305,20 @@ class SkillDispatcher:
             summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "800"))
         except ValueError:
             summary_max_tokens = 800
+        # Sprint 5: 反ハルシネーション閾値。Rerank relevance がこの値未満なら
+        # 該当 hit を落とし、空なら「資料に記載がありません」と返す。
+        # 既定 0.0 = OFF。gold set 実測では 0.4 で expect_zero を綺麗に分離。
+        try:
+            min_relevance = float(os.environ.get("SEARCH_MIN_RELEVANCE", "0.0"))
+        except ValueError:
+            min_relevance = 0.0
         instance = SearchSkill(
             embedder=LocalE5Embedder(),
             use_contextual=use_contextual,
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
+            min_relevance=min_relevance,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
         )
@@ -320,6 +328,7 @@ class SkillDispatcher:
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
+            min_relevance=min_relevance,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
         )
