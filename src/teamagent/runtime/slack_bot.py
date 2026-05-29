@@ -290,15 +290,17 @@ class SkillDispatcher:
             "yes",
         )
         # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
-        # PROMPT_VERSION=v1 / v2 / v2c で切替。
+        # PROMPT_VERSION=v1 / v2 / v2c / v2d で切替。
         # v2c は v2 の compact 版 (Sprint 4-D, latency 短縮目的)。
-        # Day 9 (2026-05-29) Sprint 4-D 確定: gold set 25 ケース完走で
-        # v2c + max=800 が top-1 52% / latency 18.1s / $0.0197/q を達成
-        # (latency 20s 目標・cost $0.020 目標を両方クリア、精度は Rerank baseline 維持)。
-        # この結果を受け既定を v2c に変更。
-        prompt_version = os.environ.get("PROMPT_VERSION", "v2c")
+        # Day 9 (2026-05-29) 本番実機検証で v2c + max=800 が回答途中切れ
+        # (stop_reason=max_tokens) を起こすと判明。eval は検索 hit rate のみ測り
+        # 生成回答の完全性を測らないため見逃していた。v2d はプロンプト側で項目数と
+        # 文字数 (550字以内) を絞り、800tok 内で必ず end_turn する compact 版。
+        # 実機8件で全件 end_turn (output 397-535tok)、latency 12-18s、hit rate 維持。
+        # この結果を受け既定を v2d に変更。
+        prompt_version = os.environ.get("PROMPT_VERSION", "v2d")
         # Day 8 (2026-05-28) Sprint 4-D: max_tokens 制限で latency 短縮。
-        # Day 9 確定: max=800 で v2 の 36s → 18.1s に半減 (精度 52% 維持)。既定を 800 に変更。
+        # Day 9: max=800 維持。v2d プロンプトが上限内で完結するため truncation なし。
         try:
             summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "800"))
         except ValueError:
