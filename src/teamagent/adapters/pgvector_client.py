@@ -358,8 +358,11 @@ class PgVectorClient:
         where_parts = ["d.metadata->>'is_sales_fb' = 'true'"]
         params: list[Any] = []
         for key, value in metadata_filters.items():
-            where_parts.append("d.metadata->>%s = %s")
-            params.extend([key, value])
+            # 完全一致でなく部分一致 (LIKE)。bant_score は "C（検討）" のように
+            # 評価記号 + 注釈で格納され、複数評価 "B（前向き）, C（検討）" もあるため、
+            # 「C」で "C（検討）" を拾えるようにする。channel_type は完全値だが部分一致でも安全。
+            where_parts.append("d.metadata->>%s LIKE %s")
+            params.extend([key, f"%{value}%"])
         where_clause = " AND ".join(where_parts)
 
         sql = f"""
