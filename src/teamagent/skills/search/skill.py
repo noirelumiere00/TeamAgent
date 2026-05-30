@@ -128,6 +128,30 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # SEARCH_MAX_TOKENS env で runtime 制御、v2c と組合せて latency を半減狙い。
         self._summary_max_tokens = summary_max_tokens
 
+    def retrieve_hits(
+        self,
+        query: str,
+        ctx: SkillContext,
+        *,
+        top_k: int = 5,
+        filter_industry: str | None = None,
+        strict_industry: bool = False,
+    ) -> list[SearchHit]:
+        """要約せず検索ヒットだけを返す公開メソッド (他 Skill からの再利用口)。
+
+        embed → _retrieve のラッパ。新スキーマ + Rerank + min_relevance + 集約モード等、
+        run() と同じ retrieval パイプライン (gold set top-1 88% 構成) をそのまま通す。
+        ProposalDraftSkill 等が「類似過去提案の取得」に再利用する。
+        """
+        embedding = self._embed(query)
+        retrieval_input = SearchInput(
+            query=query,
+            top_k=top_k,
+            filter_industry=filter_industry,
+            strict_industry=strict_industry,
+        )
+        return self._retrieve(embedding, retrieval_input, ctx)
+
     def run(self, input: SearchInput, ctx: SkillContext) -> SearchOutput:
         """検索 Skill のメインフロー。"""
         log = ctx.bind_logger(self.name)

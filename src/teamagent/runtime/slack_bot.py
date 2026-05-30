@@ -385,6 +385,53 @@ class SkillDispatcher:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 
+    def get_draft_skill(self) -> Any:
+        """ProposalDraftSkill をキャッシュして返す。検索基盤 (SearchSkill) を再利用する。"""
+        if "proposal_draft" in self._skill_cache:
+            return self._skill_cache["proposal_draft"]
+        from teamagent.skills.proposal.skill import ProposalDraftSkill
+
+        draft_prompt_version = os.environ.get("DRAFT_PROMPT_VERSION", "v1")
+        # 同じ SearchSkill インスタンス (本番 88% 構成) を注入して retrieval を共有
+        instance = ProposalDraftSkill(
+            search=self.get_search_skill(),
+            prompt_version=draft_prompt_version,
+        )
+        logger.info("proposal_draft_skill_initialized", prompt_version=draft_prompt_version)
+        self._skill_cache["proposal_draft"] = instance
+        return instance
+
+    async def run_draft(
+        self,
+        brief: str,
+        request_id: str,
+        user_id: str | None,
+        *,
+        industry: str | None = None,
+        top_k: int = 8,
+    ) -> Any:
+        """ProposalDraftSkill を実行して提案ドラフト骨子を返す。"""
+        user_email = await self._resolve_user_email(user_id)
+        user_groups: list[str] = []
+        if user_email and "@" in user_email:
+            user_groups.append(user_email.split("@", 1)[1])
+
+        skill = self.get_draft_skill()
+        ctx = SkillContext(
+            request_id=request_id,
+            user_id=user_id,
+            metadata={
+                "user_email": user_email,
+                "user_groups": user_groups,
+                "user_role": "member",
+            },
+        )
+        from teamagent.skills.proposal.schema import ProposalDraftInput
+
+        input_obj = ProposalDraftInput(brief=brief, industry=industry, top_k=top_k)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, skill.run, input_obj, ctx)
+
     async def _resolve_user_email(self, user_id: str | None) -> str | None:
         """Slack user_id → email を解決する（RLS 評価用、users.info キャッシュ）。
 
@@ -757,6 +804,70 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         await respond(
             response_type="in_channel",
             text=f"{header}\n\n{output.answer}",
+        )
+
+    @app.command("/teamagent_draft")
+    async def handle_teamagent_draft(
+        ack: Any,
+        respond: Any,
+        command: dict[str, Any],
+    ) -> None:
+        """Slack スラッシュコマンド `/teamagent_draft <案件ブリーフ> [industry=...]`
+
+        新規案件ブリーフから類似の過去提案を検索し、提案ドラフト骨子を返す。
+        ※ Slack アプリ側で `/teamagent_draft` コマンドの登録が必要。
+        """
+        await ack()
+
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        user_id = command.get("user_id")
+        channel_id = command.get("channel_id", "")
+        raw_text = (command.get("text") or "").strip()
+
+        logger.info(
+            "slack_slash_draft",
+            request_id=request_id,
+            user_id=user_id,
+            channel=channel_id,
+            text_len=len(raw_text),
+        )
+
+        if not raw_text:
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "使い方: `/teamagent_draft <案件ブリーフ> [industry=飲食]`\n"
+                    "例: `/teamagent_draft 飲食チェーンのTikTok集客 認知拡大 industry=飲食`"
+                ),
+            )
+            return
+
+        brief, options = parse_command_text(raw_text)
+        industry = options.get("industry")
+
+        try:
+            output = await disp.run_draft(brief or raw_text, request_id, user_id, industry=industry)
+        except Exception as e:
+            logger.exception("slash_command_draft_failed", request_id=request_id)
+            capture_skill_exception(
+                e,
+                request_id=request_id,
+                skill="proposal_draft",
+                user_id=user_id,
+                extra={"channel": channel_id, "via": "slash"},
+            )
+            await respond(
+                response_type="ephemeral",
+                text=f"ドラフト生成中にエラーが発生しました。`request_id={request_id}`",
+            )
+            return
+
+        header = (
+            f"*📝 提案ドラフト* （参照 {output.source_count} 件 / ${output.total_cost_usd:.3f}）"
+        )
+        await respond(
+            response_type="ephemeral",
+            text=f"{header}\n\n{output.draft}",
         )
 
     # Bolt のグローバルエラーハンドラ — ハンドラ外で起きた例外を Sentry に飛ばす
