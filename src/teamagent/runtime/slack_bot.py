@@ -343,6 +343,48 @@ class SkillDispatcher:
         self._skill_cache["search"] = instance
         return instance
 
+    def get_karte_skill(self) -> Any:
+        """ClientKarteSkill インスタンスをキャッシュして返す。"""
+        if "clientkarte" in self._skill_cache:
+            return self._skill_cache["clientkarte"]
+        from teamagent.skills.clientkarte.skill import ClientKarteSkill
+
+        karte_prompt_version = os.environ.get("KARTE_PROMPT_VERSION", "v1")
+        instance = ClientKarteSkill(prompt_version=karte_prompt_version)
+        logger.info("clientkarte_skill_initialized", prompt_version=karte_prompt_version)
+        self._skill_cache["clientkarte"] = instance
+        return instance
+
+    async def run_karte(
+        self,
+        client_name: str,
+        request_id: str,
+        user_id: str | None,
+        *,
+        limit: int = 20,
+    ) -> Any:
+        """ClientKarteSkill を実行してカルテを返す。RLS 用に user_email を解決する。"""
+        user_email = await self._resolve_user_email(user_id)
+        user_groups: list[str] = []
+        if user_email and "@" in user_email:
+            user_groups.append(user_email.split("@", 1)[1])
+
+        skill = self.get_karte_skill()
+        ctx = SkillContext(
+            request_id=request_id,
+            user_id=user_id,
+            metadata={
+                "user_email": user_email,
+                "user_groups": user_groups,
+                "user_role": "member",
+            },
+        )
+        from teamagent.skills.clientkarte.schema import ClientKarteInput
+
+        input_obj = ClientKarteInput(client_name=client_name, limit=limit)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, skill.run, input_obj, ctx)
+
     async def _resolve_user_email(self, user_id: str | None) -> str | None:
         """Slack user_id → email を解決する（RLS 評価用、users.info キャッシュ）。
 
@@ -657,6 +699,64 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             response_type="in_channel",
             text=format_search_response(output),
             blocks=build_search_blocks(output),
+        )
+
+    @app.command("/teamagent_karte")
+    async def handle_teamagent_karte(
+        ack: Any,
+        respond: Any,
+        command: dict[str, Any],
+    ) -> None:
+        """Slack スラッシュコマンド `/teamagent_karte <クライアント名>`
+
+        指定クライアントの提案履歴・温度感推移・次アクションを 1 枚のカルテで返す。
+        ※ Slack アプリ側で `/teamagent_karte` コマンドの登録が必要。
+        """
+        await ack()
+
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        user_id = command.get("user_id")
+        channel_id = command.get("channel_id", "")
+        client_name = (command.get("text") or "").strip()
+
+        logger.info(
+            "slack_slash_karte",
+            request_id=request_id,
+            user_id=user_id,
+            channel=channel_id,
+            text_len=len(client_name),
+        )
+
+        if not client_name:
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "使い方: `/teamagent_karte <クライアント名>`\n例: `/teamagent_karte 日本ガイシ`"
+                ),
+            )
+            return
+
+        try:
+            output = await disp.run_karte(client_name, request_id, user_id)
+        except Exception as e:
+            logger.exception("slash_command_karte_failed", request_id=request_id)
+            capture_skill_exception(
+                e,
+                request_id=request_id,
+                skill="clientkarte",
+                user_id=user_id,
+                extra={"channel": channel_id, "via": "slash"},
+            )
+            await respond(
+                response_type="ephemeral",
+                text=f"カルテ生成中にエラーが発生しました。`request_id={request_id}`",
+            )
+            return
+
+        header = f"*🗂️ {output.client_name} カルテ* （FB {output.event_count} 件）"
+        await respond(
+            response_type="in_channel",
+            text=f"{header}\n\n{output.answer}",
         )
 
     # Bolt のグローバルエラーハンドラ — ハンドラ外で起きた例外を Sentry に飛ばす
