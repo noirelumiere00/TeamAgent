@@ -422,6 +422,92 @@ class PgVectorClient:
         )
         return hits
 
+    def list_client_timeline(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        client_name: str,
+        limit: int = 20,
+        request_id: str | None = None,
+    ) -> list[SearchHit]:
+        """指定クライアントの営業 FB を時系列 (古い順) に束ねる (ClientKarte 用)。
+
+        client_name 部分一致 (「日本ガイシ」で「NGK（日本ガイシ）」も拾う) の営業 FB を
+        modified_at 昇順で返す。各 FB の構造化メタ (deal_phase / bant_score /
+        positive_reaction / negative_reaction / next_action / proposed_menu) を
+        metadata に詰めて返し、Skill 側で温度感推移の合成に使う。
+
+        client_name は placeholder 化され SQL injection から保護される。
+        """
+        if not client_name.strip():
+            return []
+
+        sql = """
+            SELECT
+                abs(hashtext(c.id::text)::bigint) AS chunk_id,
+                COALESCE(c.contextualized, c.content) AS content,
+                to_char(d.modified_at, 'YYYY-MM-DD') AS occurred_at,
+                d.source_uri,
+                d.title,
+                d.metadata->>'client_name' AS client_name,
+                d.metadata->>'deal_phase' AS deal_phase,
+                d.metadata->>'bant_score' AS bant_score,
+                d.metadata->>'channel_type' AS channel_type,
+                d.metadata->>'positive_reaction' AS positive_reaction,
+                d.metadata->>'negative_reaction' AS negative_reaction,
+                d.metadata->>'next_action' AS next_action,
+                d.metadata->>'proposed_menu' AS proposed_menu
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE d.metadata->>'is_sales_fb' = 'true'
+              AND d.metadata->>'client_name' LIKE %s
+            ORDER BY d.modified_at ASC NULLS LAST, c.chunk_idx ASC
+            LIMIT %s
+        """  # nosec B608
+        params: list[Any] = [f"%{client_name}%", limit]
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        hits: list[SearchHit] = []
+        for r in rows:
+            meta: dict[str, Any] = {
+                "source_uri": r.get("source_uri"),
+                "source_type": "slack",
+                "title": r.get("title"),
+                "occurred_at": r.get("occurred_at"),
+                "is_sales_fb": True,
+            }
+            for k in (
+                "client_name",
+                "deal_phase",
+                "bant_score",
+                "channel_type",
+                "positive_reaction",
+                "negative_reaction",
+                "next_action",
+                "proposed_menu",
+            ):
+                if r.get(k):
+                    meta[k] = r[k]
+            hits.append(
+                SearchHit(
+                    chunk_id=int(r["chunk_id"]),
+                    content=str(r["content"]),
+                    score=1.0,
+                    metadata=meta,
+                )
+            )
+
+        logger.info(
+            "pgvector_list_client_timeline",
+            request_id=request_id,
+            client_name=client_name,
+            limit=limit,
+            hit_count=len(hits),
+        )
+        return hits
+
     def search_drive_by_client_names(
         self,
         conn: psycopg.Connection[dict[str, Any]],
