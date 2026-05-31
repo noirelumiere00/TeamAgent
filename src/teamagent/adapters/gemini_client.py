@@ -56,36 +56,70 @@ def _estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> floa
 
 
 class GeminiClient:
-    """Gemini 2.5 Flash の薄ラッパー。
+    """Gemini 2.5 Flash の薄ラッパー。2 つの認証経路をサポートする。
 
-    Sprint 11 で動画分析 Skill から呼ばれる。
-    API キーは GEMINI_API_KEY 環境変数経由（Google AI Studio で発行）。
+    1. **Vertex AI** (仕様 §7.2 の指定・推奨): 既存 GCP プロジェクト経由。
+       `GEMINI_USE_VERTEX=true` + `GEMINI_VERTEX_PROJECT` で有効化。認証は ADC
+       (GOOGLE_APPLICATION_CREDENTIALS のサービスアカウント等)。社内の
+       AI Studio 制限を回避でき、Drive/Gmail と同じ GCP の土俵に揃う。
+    2. **AI Studio API キー**: `GEMINI_API_KEY` 環境変数 (個人向け、制限環境では不可)。
     """
 
-    def __init__(self, api_key: str, model_id: str = "gemini-2.5-flash") -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model_id: str = "gemini-2.5-flash",
+        *,
+        use_vertex: bool = False,
+        project: str | None = None,
+        location: str = "us-central1",
+    ) -> None:
         self.api_key = api_key
         self.model_id = model_id
+        self.use_vertex = use_vertex
+        self.project = project
+        self.location = location
         # 遅延 import：google-genai は heavy & 一部環境で SSL 問題が出るため
         self._client: Any | None = None
 
     @classmethod
     def from_env(cls) -> GeminiClient:
-        """環境変数から API キーとモデルを読む。"""
+        """環境変数から認証経路とモデルを読む。Vertex を優先する。"""
+        model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash")
+
+        use_vertex = os.environ.get("GEMINI_USE_VERTEX", "false").lower() in ("1", "true", "yes")
+        if use_vertex:
+            project = os.environ.get("GEMINI_VERTEX_PROJECT") or os.environ.get(
+                "GOOGLE_CLOUD_PROJECT"
+            )
+            if not project:
+                raise RuntimeError(
+                    "GEMINI_USE_VERTEX=true ですが GEMINI_VERTEX_PROJECT (GCP プロジェクト ID) "
+                    "が未設定です。Vertex AI を有効化した GCP プロジェクト ID を設定してください"
+                )
+            location = os.environ.get("GEMINI_VERTEX_LOCATION", "us-central1")
+            return cls(model_id=model_id, use_vertex=True, project=project, location=location)
+
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key or api_key.startswith("AIzaSyxxxxx"):
             raise RuntimeError(
-                "GEMINI_API_KEY が未設定です。"
-                "Google AI Studio でキーを発行して .env に設定してください"
+                "Gemini の認証が未設定です。次のいずれかを設定してください: "
+                "(1) GEMINI_USE_VERTEX=true + GEMINI_VERTEX_PROJECT (推奨・社内 GCP 経由)、"
+                "(2) GEMINI_API_KEY (Google AI Studio 発行)"
             )
-        model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash")
         return cls(api_key=api_key, model_id=model_id)
 
     def _ensure_client(self) -> Any:
-        """google-genai クライアントを遅延初期化。"""
+        """google-genai クライアントを遅延初期化 (Vertex / API キーを切替)。"""
         if self._client is None:
             from google import genai
 
-            self._client = genai.Client(api_key=self.api_key)
+            if self.use_vertex:
+                self._client = genai.Client(
+                    vertexai=True, project=self.project, location=self.location
+                )
+            else:
+                self._client = genai.Client(api_key=self.api_key)
         return self._client
 
     def analyze_video_url(

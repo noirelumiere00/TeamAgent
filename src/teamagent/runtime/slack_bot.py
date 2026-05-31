@@ -524,10 +524,11 @@ class SkillDispatcher:
             try:
                 video = await self.run_video(intent.video_url, request_id, user_id)
             except RuntimeError as e:
-                if "GEMINI_API_KEY" in str(e):
+                if "GEMINI" in str(e):
                     return (
-                        "🎬 動画分析は GEMINI_API_KEY 設定後に有効化されます"
-                        "（Google AI Studio でキー発行 → Secrets Manager 登録）。",
+                        "🎬 動画分析は Gemini の認証設定後に有効化されます"
+                        "（Vertex AI: GCP プロジェクト + GEMINI_USE_VERTEX、"
+                        "または AI Studio: GEMINI_API_KEY）。",
                         None,
                     )
                 raise
@@ -1087,10 +1088,10 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         try:
             output = await disp.run_video(url, request_id, user_id)
         except Exception as e:
-            if isinstance(e, RuntimeError) and "GEMINI_API_KEY" in str(e):
+            if isinstance(e, RuntimeError) and "GEMINI" in str(e):
                 await respond(
                     response_type="ephemeral",
-                    text="🎬 動画分析は GEMINI_API_KEY 設定後に有効化されます。",
+                    text="🎬 動画分析は Gemini の認証設定後に有効化されます（Vertex AI/APIキー）。",
                 )
                 return
             logger.exception("slash_command_video_failed", request_id=request_id)
