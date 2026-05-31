@@ -212,6 +212,20 @@ def build_search_blocks(output: SearchOutput) -> list[dict[str, Any]]:
     return blocks
 
 
+def _first_line(analysis: str) -> str:
+    """動画分析テキストから 1 行サマリを抜き出す (横断まとめの個別索引用)。"""
+    lines = [ln.strip() for ln in analysis.splitlines()]
+    for i, ln in enumerate(lines):
+        if "一行サマリ" in ln:
+            for nxt in lines[i + 1 :]:
+                if nxt:
+                    return nxt[:90]
+    for ln in lines:
+        if ln and not ln.startswith("#"):
+            return ln[:90]
+    return (analysis.strip()[:90]) or "（要約なし）"
+
+
 class SkillDispatcher:
     """mention テキストを Skill に振り分けて結果を返す。
 
@@ -500,6 +514,85 @@ class SkillDispatcher:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 
+    async def run_video_bytes(
+        self, data: bytes, mime: str, request_id: str, user_id: str | None
+    ) -> Any:
+        """アップロードされた動画 bytes を分析する。"""
+        skill = self.get_video_skill()
+        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: skill.analyze_bytes(data, mime, ctx))
+
+    async def run_video_batch(
+        self, urls: list[str], request_id: str, user_id: str | None
+    ) -> tuple[str, float]:
+        """複数動画 URL を並行分析し、横断まとめ + 個別サマリを返す。"""
+
+        sem = asyncio.Semaphore(4)  # 同時実行を絞り memory / rate を保護
+
+        async def _one(u: str) -> tuple[str | None, float]:
+            async with sem:
+                try:
+                    out = await self.run_video(u, request_id, user_id)
+                    return out.analysis, out.total_cost_usd
+                except Exception:
+                    logger.warning("video_batch_item_failed", request_id=request_id)
+                    return None, 0.0
+
+        results = await asyncio.gather(*[_one(u) for u in urls])
+        return await self._synthesize_many(results, request_id, user_id, kind="URL")
+
+    async def run_video_uploads(
+        self,
+        items: list[tuple[bytes, str]],
+        request_id: str,
+        user_id: str | None,
+    ) -> tuple[str, float]:
+        """複数のアップロード動画 (bytes, mime) を分析し、横断まとめを返す。"""
+
+        sem = asyncio.Semaphore(3)
+
+        async def _one(item: tuple[bytes, str]) -> tuple[str | None, float]:
+            data, mime = item
+            async with sem:
+                try:
+                    out = await self.run_video_bytes(data, mime, request_id, user_id)
+                    return out.analysis, out.total_cost_usd
+                except Exception:
+                    logger.warning("video_upload_item_failed", request_id=request_id)
+                    return None, 0.0
+
+        results = await asyncio.gather(*[_one(it) for it in items])
+        return await self._synthesize_many(results, request_id, user_id, kind="アップロード")
+
+    async def _synthesize_many(
+        self,
+        results: list[tuple[str | None, float]],
+        request_id: str,
+        user_id: str | None,
+        *,
+        kind: str,
+    ) -> tuple[str, float]:
+        """個別分析リスト → (1本ならそのまま / 複数なら横断まとめ + 個別サマリ)。"""
+        ok = [(a, c) for (a, c) in results if a]
+        total = sum(c for (_, c) in results)
+        if not ok:
+            return (
+                f"🎬 {kind}の動画を分析できませんでした（非公開・取得不可・容量超過の可能性）。",
+                total,
+            )
+        if len(ok) == 1:
+            return f"*🎬 動画分析* （${total:.4f}）\n\n{ok[0][0]}", total
+
+        skill = self.get_video_skill()
+        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        loop = asyncio.get_running_loop()
+        analyses = [a for (a, _) in ok]
+        synth, scost = await loop.run_in_executor(None, skill.synthesize_batch, analyses, ctx)
+        index = "\n".join(f"{i + 1}. {_first_line(a)}" for i, a in enumerate(analyses))
+        header = f"*🎬 {len(ok)}本の横断分析* （${total + scost:.4f}）"
+        return f"{header}\n\n{synth}\n\n*— 個別サマリ —*\n{index}", total + scost
+
     async def dispatch_auto(
         self, message: str, request_id: str, user_id: str | None
     ) -> tuple[str, list[dict[str, Any]] | None]:
@@ -520,9 +613,16 @@ class SkillDispatcher:
             reason=intent.reason,
         )
 
-        if intent.skill == "video_analysis" and intent.video_url:
+        if intent.skill == "video_analysis" and intent.video_urls:
+            # 複数 URL は並行分析 + 横断まとめ (per-item 失敗は内部で握りつぶす)
+            if len(intent.video_urls) > 1:
+                text, _cost = await self.run_video_batch(
+                    list(intent.video_urls), request_id, user_id
+                )
+                return text, None
+            # 単一 URL: エラーマーカーをユーザー案内に変換
             try:
-                video = await self.run_video(intent.video_url, request_id, user_id)
+                video = await self.run_video(intent.video_urls[0], request_id, user_id)
             except RuntimeError as e:
                 if "VIDEO_DOWNLOAD_FAILED" in str(e):
                     return (
@@ -699,6 +799,29 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
     slack = SlackClient(bot_token=bot_token)
     disp = dispatcher or SkillDispatcher()
 
+    async def _video_upload_reply(
+        files: list[dict[str, Any]], request_id: str, user_id: str | None
+    ) -> str | None:
+        """添付に動画があれば DL → 分析して返信文を返す。動画が無ければ None。"""
+        video_files = [f for f in files if str(f.get("mimetype", "")).startswith("video/")]
+        if not video_files:
+            return None
+        items: list[tuple[bytes, str]] = []
+        for f in video_files[:10]:  # アップロードは最大 10 本
+            file_url = f.get("url_private_download") or f.get("url_private")
+            if not file_url:
+                continue
+            try:
+                data = await slack.download_file(file_url, request_id=request_id, max_mb=20)
+            except Exception:
+                logger.warning("slack_file_download_failed", request_id=request_id)
+                continue
+            items.append((data, str(f.get("mimetype", "video/mp4"))))
+        if not items:
+            return "🎬 アップロード動画を取得できませんでした（容量超過 20MB の可能性）。"
+        text, _cost = await disp.run_video_uploads(items, request_id, user_id)
+        return text
+
     @app.event("app_mention")
     async def handle_app_mention(event: dict[str, Any]) -> None:
         request_id = f"req-{uuid.uuid4().hex[:12]}"
@@ -716,6 +839,17 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             raw_len=len(raw_text),
             query_len=len(query),
         )
+
+        # 動画ファイルの添付があれば最優先で分析 (URL もテキストも不要)
+        upload_reply = await _video_upload_reply(event.get("files") or [], request_id, user_id)
+        if upload_reply is not None:
+            await slack.post_message(
+                channel=channel,
+                text=upload_reply,
+                request_id=request_id,
+                thread_ts=thread_ts,
+            )
+            return
 
         if not query:
             await slack.post_message(
@@ -774,6 +908,12 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             channel=channel,
             text_len=len(text),
         )
+
+        # 動画ファイルの添付があれば最優先で分析
+        upload_reply = await _video_upload_reply(event.get("files") or [], request_id, user_id)
+        if upload_reply is not None:
+            await slack.post_message(channel=channel, text=upload_reply, request_id=request_id)
+            return
 
         if not text:
             return

@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import structlog
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -112,3 +113,29 @@ class SlackClient:
             latency_ms=latency_ms,
         )
         return profile
+
+    async def download_file(
+        self,
+        url_private: str,
+        *,
+        request_id: str | None = None,
+        max_mb: int = 20,
+    ) -> bytes:
+        """Slack にアップロードされたファイルを url_private から取得する。
+
+        url_private は bot token の Authorization ヘッダが必須。動画は大きいので
+        タイムアウトを長めにし、max_mb 超は Gemini inline 上限のため拒否する。
+        """
+        dl_timeout = httpx.Timeout(60.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=dl_timeout) as client:
+            resp = await client.get(
+                url_private,
+                headers={"Authorization": f"Bearer {self._bot_token}"},
+            )
+        resp.raise_for_status()
+        data = resp.content
+        size_mb = len(data) / 1024 / 1024
+        if size_mb > max_mb:
+            raise RuntimeError(f"VIDEO_FILE_TOO_LARGE: {size_mb:.0f}MB > {max_mb}MB")
+        logger.info("slack_file_downloaded", request_id=request_id, size_mb=round(size_mb, 2))
+        return data

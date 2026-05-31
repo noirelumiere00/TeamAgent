@@ -109,3 +109,52 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
             model_id=resp.model_id,
             total_cost_usd=resp.cost_usd,
         )
+
+    def analyze_bytes(
+        self,
+        data: bytes,
+        mime_type: str,
+        ctx: SkillContext,
+        *,
+        focus: str | None = None,
+        label: str = "uploaded",
+    ) -> VideoAnalysisOutput:
+        """Slack 等にアップロードされた動画 bytes を直接分析する (URL 不要)。"""
+        log = ctx.bind_logger(self.name)
+        log.info("video_analysis_start", source="bytes", size_kb=len(data) // 1024)
+
+        system = load_prompt("video", self._prompt_version, "system")
+        user_prompt = "この動画を、システム指示のフォーマットに従って構造分析してください。"
+        if focus:
+            user_prompt += f"\n特に次の観点を重視: {focus}"
+
+        resp = self._client().analyze_video_bytes(
+            data=data,
+            mime_type=mime_type,
+            prompt=user_prompt,
+            request_id=ctx.request_id,
+            system=system,
+        )
+        log.info("video_analysis_done", cost_usd=resp.cost_usd, model_id=resp.model_id)
+        return VideoAnalysisOutput(
+            url=label,
+            analysis=resp.text or "（分析結果が空でした）",
+            model_id=resp.model_id,
+            total_cost_usd=resp.cost_usd,
+        )
+
+    def synthesize_batch(self, analyses: list[str], ctx: SkillContext) -> tuple[str, float]:
+        """複数動画の個別分析を横断まとめに合成する。(text, cost) を返す。"""
+        if not analyses:
+            return ("分析できた動画がありませんでした。", 0.0)
+        if len(analyses) == 1:
+            return (analyses[0], 0.0)
+
+        system = load_prompt("video", self._prompt_version, "batch_synthesis")
+        joined = "\n\n".join(f"## 動画 {i + 1} の分析\n{a}" for i, a in enumerate(analyses))
+        prompt = (
+            f"# {len(analyses)} 本のショート動画の個別分析\n{joined}\n\n"
+            "上記を横断して、フォーマットに従ってまとめてください。"
+        )
+        resp = self._client().generate_text(prompt, ctx.request_id, system=system)
+        return resp.text or "（まとめ生成に失敗しました）", resp.cost_usd
