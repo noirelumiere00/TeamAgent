@@ -49,6 +49,19 @@ def test_routes_to_proposal_draft(msg: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "msg",
+    [
+        "この提案レビューして：飲食チェーン向けTikTok…",
+        "提案を添削してほしい",
+        "この提案の診断おねがい",
+        "提案をブラッシュアップして",
+    ],
+)
+def test_routes_to_proposal_review(msg: str) -> None:
+    assert detect_skill(msg).skill == "proposal_review"
+
+
+@pytest.mark.parametrize(
     "msg,client",
     [
         ("日本ガイシのカルテ", "日本ガイシ"),

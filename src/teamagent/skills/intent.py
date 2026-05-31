@@ -12,6 +12,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+# proposal_review 起動トリガー: 「レビュー/添削/診断/チェック」。draft より先に判定。
+# 「フィードバック」は営業 FB と紛らわしいので採らない。
+_REVIEW_RE = re.compile(r"レビュー|添削|診断|ブラッシュアップ|提案.{0,4}チェック|チェックして")
+
 # proposal_draft 起動トリガー: 「提案」+ 作成系動詞、または「ドラフト/たたき台/骨子」
 _DRAFT_RE = re.compile(
     r"提案.{0,6}(作|つく|ドラフト|たたき台|骨子|考え|練|まとめ)"
@@ -45,7 +49,7 @@ _VIDEO_URL_RE = re.compile(
 class SkillIntent:
     """自動ルーティングの判定結果。"""
 
-    skill: str  # "search" | "clientkarte" | "proposal_draft" | "video_analysis"
+    skill: str  # search|clientkarte|proposal_draft|proposal_review|video_analysis
     client_name: str | None  # clientkarte のときのみ抽出
     reason: str
     video_url: str | None = None  # video_analysis のときのみ抽出
@@ -88,7 +92,11 @@ def detect_skill(message: str) -> SkillIntent:
             video_url=video_url,
         )
 
-    # 1. 提案ドラフト作成意図 (動詞が明確なので最優先)
+    # 1a. 提案レビュー意図 (レビュー/添削/診断)。draft より先に判定。
+    if _REVIEW_RE.search(text):
+        return SkillIntent(skill="proposal_review", client_name=None, reason="review trigger")
+
+    # 1b. 提案ドラフト作成意図 (動詞が明確)
     if _DRAFT_RE.search(text):
         return SkillIntent(skill="proposal_draft", client_name=None, reason="draft trigger")
 

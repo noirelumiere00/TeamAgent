@@ -432,6 +432,51 @@ class SkillDispatcher:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 
+    def get_review_skill(self) -> Any:
+        """ProposalReviewSkill をキャッシュして返す。検索基盤 (SearchSkill) を再利用する。"""
+        if "proposal_review" in self._skill_cache:
+            return self._skill_cache["proposal_review"]
+        from teamagent.skills.proposal_review.skill import ProposalReviewSkill
+
+        review_prompt_version = os.environ.get("REVIEW_PROMPT_VERSION", "v1")
+        instance = ProposalReviewSkill(
+            search=self.get_search_skill(),
+            prompt_version=review_prompt_version,
+        )
+        logger.info("proposal_review_skill_initialized", prompt_version=review_prompt_version)
+        self._skill_cache["proposal_review"] = instance
+        return instance
+
+    async def run_review(
+        self,
+        proposal_text: str,
+        request_id: str,
+        user_id: str | None,
+        *,
+        industry: str | None = None,
+    ) -> Any:
+        """ProposalReviewSkill を実行して提案の診断を返す。"""
+        user_email = await self._resolve_user_email(user_id)
+        user_groups: list[str] = []
+        if user_email and "@" in user_email:
+            user_groups.append(user_email.split("@", 1)[1])
+
+        skill = self.get_review_skill()
+        ctx = SkillContext(
+            request_id=request_id,
+            user_id=user_id,
+            metadata={
+                "user_email": user_email,
+                "user_groups": user_groups,
+                "user_role": "member",
+            },
+        )
+        from teamagent.skills.proposal_review.schema import ProposalReviewInput
+
+        input_obj = ProposalReviewInput(proposal_text=proposal_text, industry=industry)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, skill.run, input_obj, ctx)
+
     def get_video_skill(self) -> Any:
         """VideoAnalysisSkill をキャッシュして返す (GEMINI_API_KEY は遅延解決)。"""
         if "video_analysis" in self._skill_cache:
@@ -493,6 +538,14 @@ class SkillDispatcher:
             karte = await self.run_karte(intent.client_name, request_id, user_id)
             header = f"*🗂️ {karte.client_name} カルテ* （FB {karte.event_count} 件）"
             return f"{header}\n\n{karte.answer}", None
+
+        if intent.skill == "proposal_review":
+            review = await self.run_review(message, request_id, user_id)
+            header = (
+                f"*🔎 提案レビュー* （照合 {review.source_count} 件 / "
+                f"${review.total_cost_usd:.3f}）"
+            )
+            return f"{header}\n\n{review.review}", None
 
         if intent.skill == "proposal_draft":
             draft = await self.run_draft(message, request_id, user_id)
@@ -942,6 +995,60 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             response_type="ephemeral",
             text=f"{header}\n\n{output.draft}",
         )
+
+    @app.command("/teamagent_review")
+    async def handle_teamagent_review(
+        ack: Any,
+        respond: Any,
+        command: dict[str, Any],
+    ) -> None:
+        """Slack スラッシュコマンド `/teamagent_review <提案テキスト>`
+
+        提案を過去の勝ち筋・失注理由と照合して診断する。
+        ※ Slack アプリ側での `/teamagent_review` コマンド登録が必要。
+        """
+        await ack()
+
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        user_id = command.get("user_id")
+        channel_id = command.get("channel_id", "")
+        proposal_text = (command.get("text") or "").strip()
+
+        logger.info(
+            "slack_slash_review",
+            request_id=request_id,
+            user_id=user_id,
+            channel=channel_id,
+            text_len=len(proposal_text),
+        )
+
+        if not proposal_text:
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "使い方: `/teamagent_review <提案テキスト>`\n"
+                    "提案の骨子や本文を貼り付けてください。過去の勝ち筋と照合して診断します。"
+                ),
+            )
+            return
+
+        try:
+            output = await disp.run_review(proposal_text, request_id, user_id)
+        except Exception as e:
+            logger.exception("slash_command_review_failed", request_id=request_id)
+            capture_skill_exception(
+                e, request_id=request_id, skill="proposal_review", user_id=user_id
+            )
+            await respond(
+                response_type="ephemeral",
+                text=f"レビュー中にエラーが発生しました。`request_id={request_id}`",
+            )
+            return
+
+        header = (
+            f"*🔎 提案レビュー* （照合 {output.source_count} 件 / ${output.total_cost_usd:.3f}）"
+        )
+        await respond(response_type="ephemeral", text=f"{header}\n\n{output.review}")
 
     @app.command("/teamagent_video")
     async def handle_teamagent_video(
