@@ -432,6 +432,42 @@ class SkillDispatcher:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 
+    async def dispatch_auto(
+        self, message: str, request_id: str, user_id: str | None
+    ) -> tuple[str, list[dict[str, Any]] | None]:
+        """メッセージ内容から Skill を自動判定して実行し、(text, blocks) を返す。
+
+        スラッシュコマンド不要で、@メンション / DM の自然文から
+        search / clientkarte / proposal_draft を振り分ける。曖昧なら search。
+        戻り値の blocks が None ならテキストのみ投稿する。
+        """
+        from teamagent.skills.intent import detect_skill
+
+        intent = detect_skill(message)
+        logger.info(
+            "skill_auto_route",
+            request_id=request_id,
+            skill=intent.skill,
+            client_name=intent.client_name,
+            reason=intent.reason,
+        )
+
+        if intent.skill == "clientkarte" and intent.client_name:
+            karte = await self.run_karte(intent.client_name, request_id, user_id)
+            header = f"*🗂️ {karte.client_name} カルテ* （FB {karte.event_count} 件）"
+            return f"{header}\n\n{karte.answer}", None
+
+        if intent.skill == "proposal_draft":
+            draft = await self.run_draft(message, request_id, user_id)
+            header = (
+                f"*📝 提案ドラフト* （参照 {draft.source_count} 件 / ${draft.total_cost_usd:.3f}）"
+            )
+            return f"{header}\n\n{draft.draft}", None
+
+        # 既定: 横断検索 (Block Kit 付き)
+        output = await self.run_search(message, request_id, user_id)
+        return format_search_response(output), build_search_blocks(output)
+
     async def _resolve_user_email(self, user_id: str | None) -> str | None:
         """Slack user_id → email を解決する（RLS 評価用、users.info キャッシュ）。
 
@@ -587,20 +623,20 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             return
 
         try:
-            output = await disp.run_search(query, request_id, user_id)
+            text, blocks = await disp.dispatch_auto(query, request_id, user_id)
         except Exception as e:
-            logger.exception("search_skill_failed", request_id=request_id)
+            logger.exception("skill_dispatch_failed", request_id=request_id)
             # Sentry へ送信（DSN 未設定なら no-op）。スクラブは before_send で実施
             capture_skill_exception(
                 e,
                 request_id=request_id,
-                skill="search",
+                skill="auto",
                 user_id=user_id,
                 extra={"channel": channel, "query_len": len(query)},
             )
             await slack.post_message(
                 channel=channel,
-                text=f"検索中にエラーが発生しました。`request_id={request_id}`",
+                text=f"処理中にエラーが発生しました。`request_id={request_id}`",
                 request_id=request_id,
                 thread_ts=thread_ts,
             )
@@ -608,10 +644,10 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
 
         await slack.post_message(
             channel=channel,
-            text=format_search_response(output),
+            text=text,
             request_id=request_id,
             thread_ts=thread_ts,
-            blocks=build_search_blocks(output),
+            blocks=blocks,
         )
 
     @app.event("message")
@@ -639,28 +675,28 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             return
 
         try:
-            output = await disp.run_search(text, request_id, user_id)
+            reply, blocks = await disp.dispatch_auto(text, request_id, user_id)
         except Exception as e:
-            logger.exception("search_skill_failed", request_id=request_id)
+            logger.exception("skill_dispatch_failed", request_id=request_id)
             capture_skill_exception(
                 e,
                 request_id=request_id,
-                skill="search",
+                skill="auto",
                 user_id=user_id,
                 extra={"channel": channel, "text_len": len(text), "via": "dm"},
             )
             await slack.post_message(
                 channel=channel,
-                text=f"検索中にエラーが発生しました。`request_id={request_id}`",
+                text=f"処理中にエラーが発生しました。`request_id={request_id}`",
                 request_id=request_id,
             )
             return
 
         await slack.post_message(
             channel=channel,
-            text=format_search_response(output),
+            text=reply,
             request_id=request_id,
-            blocks=build_search_blocks(output),
+            blocks=blocks,
         )
 
     @app.command("/teamagent_search")
