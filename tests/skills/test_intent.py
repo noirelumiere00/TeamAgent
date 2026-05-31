@@ -4,7 +4,34 @@ from __future__ import annotations
 
 import pytest
 
-from teamagent.skills.intent import detect_skill
+from teamagent.skills.intent import detect_skill, extract_video_url
+
+
+@pytest.mark.parametrize(
+    "msg,expected_url",
+    [
+        ("この動画分析して https://youtube.com/shorts/abc123", "https://youtube.com/shorts/abc123"),
+        ("<https://youtu.be/xYz>", "https://youtu.be/xYz"),
+        ("競合 https://www.tiktok.com/@u/video/123 を見て", "https://www.tiktok.com/@u/video/123"),
+        ("普通の質問です", None),
+    ],
+)
+def test_extract_video_url(msg: str, expected_url: str | None) -> None:
+    assert extract_video_url(msg) == expected_url
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "この動画分析して https://youtube.com/shorts/abc123",
+        "https://youtu.be/xYz これどう？",
+        "https://www.instagram.com/reel/abc/ の構成教えて",
+    ],
+)
+def test_routes_to_video_analysis(msg: str) -> None:
+    intent = detect_skill(msg)
+    assert intent.skill == "video_analysis"
+    assert intent.video_url is not None
 
 
 @pytest.mark.parametrize(

@@ -145,6 +145,8 @@ module = [
     "pgvector.*",
     "googleapiclient.*",
     "google.oauth2.*",
+    "google.genai",
+    "google.genai.*",
     "pypdf",
     "pypdf.*",
     "yaml",

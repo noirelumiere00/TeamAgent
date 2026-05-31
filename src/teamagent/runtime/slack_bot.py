@@ -432,6 +432,29 @@ class SkillDispatcher:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 
+    def get_video_skill(self) -> Any:
+        """VideoAnalysisSkill をキャッシュして返す (GEMINI_API_KEY は遅延解決)。"""
+        if "video_analysis" in self._skill_cache:
+            return self._skill_cache["video_analysis"]
+        from teamagent.skills.video.skill import VideoAnalysisSkill
+
+        instance = VideoAnalysisSkill(prompt_version=os.environ.get("VIDEO_PROMPT_VERSION", "v1"))
+        logger.info("video_analysis_skill_initialized")
+        self._skill_cache["video_analysis"] = instance
+        return instance
+
+    async def run_video(
+        self, url: str, request_id: str, user_id: str | None, *, focus: str | None = None
+    ) -> Any:
+        """VideoAnalysisSkill を実行して競合動画の構造分析を返す。"""
+        skill = self.get_video_skill()
+        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        from teamagent.skills.video.schema import VideoAnalysisInput
+
+        input_obj = VideoAnalysisInput(url=url, focus=focus)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, skill.run, input_obj, ctx)
+
     async def dispatch_auto(
         self, message: str, request_id: str, user_id: str | None
     ) -> tuple[str, list[dict[str, Any]] | None]:
@@ -451,6 +474,20 @@ class SkillDispatcher:
             client_name=intent.client_name,
             reason=intent.reason,
         )
+
+        if intent.skill == "video_analysis" and intent.video_url:
+            try:
+                video = await self.run_video(intent.video_url, request_id, user_id)
+            except RuntimeError as e:
+                if "GEMINI_API_KEY" in str(e):
+                    return (
+                        "🎬 動画分析は GEMINI_API_KEY 設定後に有効化されます"
+                        "（Google AI Studio でキー発行 → Secrets Manager 登録）。",
+                        None,
+                    )
+                raise
+            header = f"*🎬 動画分析* （${video.total_cost_usd:.4f} / {video.model_id}）"
+            return f"{header}\n\n{video.analysis}", None
 
         if intent.skill == "clientkarte" and intent.client_name:
             karte = await self.run_karte(intent.client_name, request_id, user_id)
@@ -905,6 +942,62 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             response_type="ephemeral",
             text=f"{header}\n\n{output.draft}",
         )
+
+    @app.command("/teamagent_video")
+    async def handle_teamagent_video(
+        ack: Any,
+        respond: Any,
+        command: dict[str, Any],
+    ) -> None:
+        """Slack スラッシュコマンド `/teamagent_video <動画URL>`
+
+        競合 PR 動画(YouTube/Shorts)を Gemini で構造分析する。
+        ※ Slack アプリ側でのコマンド登録 + GEMINI_API_KEY の設定が必要。
+        """
+        await ack()
+
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        user_id = command.get("user_id")
+        channel_id = command.get("channel_id", "")
+        raw_text = (command.get("text") or "").strip()
+
+        logger.info("slack_slash_video", request_id=request_id, user_id=user_id, channel=channel_id)
+
+        from teamagent.skills.intent import extract_video_url
+
+        url = extract_video_url(raw_text)
+        if not url:
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "使い方: `/teamagent_video <動画URL>`\n"
+                    "例: `/teamagent_video https://youtube.com/shorts/xxxx`\n"
+                    "（対応: YouTube / Shorts。TikTok/IG は今後対応）"
+                ),
+            )
+            return
+
+        try:
+            output = await disp.run_video(url, request_id, user_id)
+        except Exception as e:
+            if isinstance(e, RuntimeError) and "GEMINI_API_KEY" in str(e):
+                await respond(
+                    response_type="ephemeral",
+                    text="🎬 動画分析は GEMINI_API_KEY 設定後に有効化されます。",
+                )
+                return
+            logger.exception("slash_command_video_failed", request_id=request_id)
+            capture_skill_exception(
+                e, request_id=request_id, skill="video_analysis", user_id=user_id
+            )
+            await respond(
+                response_type="ephemeral",
+                text=f"動画分析中にエラーが発生しました。`request_id={request_id}`",
+            )
+            return
+
+        header = f"*🎬 動画分析* （${output.total_cost_usd:.4f} / {output.model_id}）"
+        await respond(response_type="in_channel", text=f"{header}\n\n{output.analysis}")
 
     # Bolt のグローバルエラーハンドラ — ハンドラ外で起きた例外を Sentry に飛ばす
     @app.error

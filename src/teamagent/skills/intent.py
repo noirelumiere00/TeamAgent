@@ -32,13 +32,34 @@ _KARTE_EXTRACT = re.compile(
 _TRAILING = re.compile(r"[\s　]*(?:の|は|って|が|を|に|へ|、|。|！|!|？|\?)+$")
 
 
+# 動画 URL (YouTube/Shorts/TikTok/Instagram)。検出したら video_analysis へ。
+# Slack は <https://...> のように山括弧で包むことがあるため、それも許容して抽出する。
+_VIDEO_URL_RE = re.compile(
+    r"https?://(?:www\.)?"
+    r"(?:youtube\.com/\S+|youtu\.be/\S+|m\.youtube\.com/\S+"
+    r"|tiktok\.com/\S+|instagram\.com/(?:reel|p)/\S+)"
+)
+
+
 @dataclass(frozen=True)
 class SkillIntent:
     """自動ルーティングの判定結果。"""
 
-    skill: str  # "search" | "clientkarte" | "proposal_draft"
+    skill: str  # "search" | "clientkarte" | "proposal_draft" | "video_analysis"
     client_name: str | None  # clientkarte のときのみ抽出
     reason: str
+    video_url: str | None = None  # video_analysis のときのみ抽出
+
+
+def extract_video_url(message: str) -> str | None:
+    """メッセージから動画 URL を 1 つ抽出する。Slack の <...> 括りも剥がす。"""
+    m = _VIDEO_URL_RE.search(message)
+    if not m:
+        return None
+    url = m.group(0)
+    # Slack は <url> や <url|label> で包むので末尾の > / |label を除去
+    url = url.split("|", 1)[0].rstrip(">")
+    return url
 
 
 def _extract_client_name(message: str) -> str | None:
@@ -56,6 +77,16 @@ def detect_skill(message: str) -> SkillIntent:
     優先順位: proposal_draft (明確な作成意図) → clientkarte (カルテ/状況) → search (既定)。
     """
     text = message.strip()
+
+    # 0. 動画 URL があれば最優先で動画分析 (URL は強い意図シグナル)
+    video_url = extract_video_url(text)
+    if video_url:
+        return SkillIntent(
+            skill="video_analysis",
+            client_name=None,
+            reason="video url detected",
+            video_url=video_url,
+        )
 
     # 1. 提案ドラフト作成意図 (動詞が明確なので最優先)
     if _DRAFT_RE.search(text):

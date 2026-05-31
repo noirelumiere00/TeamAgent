@@ -83,7 +83,7 @@ class GeminiClient:
     def _ensure_client(self) -> Any:
         """google-genai クライアントを遅延初期化。"""
         if self._client is None:
-            from google import genai  # type: ignore[import-not-found]
+            from google import genai  # type: ignore[import-untyped]
 
             self._client = genai.Client(api_key=self.api_key)
         return self._client
@@ -93,46 +93,76 @@ class GeminiClient:
         url: str,
         prompt: str,
         request_id: str,
+        *,
+        system: str | None = None,
     ) -> GeminiResponse:
-        """YouTube / TikTok / Instagram などの動画 URL を Gemini に分析させる。
+        """YouTube / YouTube Shorts などの動画 URL を Gemini に分析させる。
 
         Args:
-            url: 動画の公開 URL（YouTube / TikTok / Instagram 等）
+            url: 動画の公開 URL。**Gemini が file_uri で直接取得できるのは YouTube 系**。
+                TikTok / Instagram は yt-dlp での取得 (別タスク) が必要。
             prompt: 分析依頼の自然文プロンプト
             request_id: トレース ID
+            system: system instruction (任意、分析フォーマット指定用)
 
         Returns:
-            GeminiResponse（テキスト本文 + usage / cost）
+            GeminiResponse（テキスト本文 + usage / cost / latency）
 
         Notes:
-            Sprint 11 で実装する想定。今は構造だけ用意。
-            実装時は client.models.generate_content() を使い、
-            contents に {"file_data": {"file_uri": url, "mime_type": "video/*"}}
-            を含める。
+            著作権ガード: 動画はダウンロードせず file_uri (stream URL) で渡す。
+            google-genai SDK の generate_content に file_data part を含める。
         """
-        client = self._ensure_client()
-        time.perf_counter()
+        from google.genai import types
 
-        # 実装はここから（Sprint 11）。雛形では NotImplementedError を返す。
-        # response = client.models.generate_content(
-        #     model=self.model_id,
-        #     contents=[
-        #         {
-        #             "role": "user",
-        #             "parts": [
-        #                 {"file_data": {"file_uri": url, "mime_type": "video/*"}},
-        #                 {"text": prompt},
-        #             ],
-        #         }
-        #     ],
-        # )
-        # text = response.text
-        # usage = response.usage_metadata
-        # ...
-        del client  # 未使用警告抑制
-        raise NotImplementedError(
-            "Sprint 11（Phase 4-d）で実装予定。"
-            "現在は雛形のみで、API 呼び出しコードはコメントアウト状態。"
+        client = self._ensure_client()
+        start = time.perf_counter()
+
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part(file_data=types.FileData(file_uri=url, mime_type="video/*")),
+                    types.Part(text=prompt),
+                ],
+            )
+        ]
+        config = types.GenerateContentConfig(system_instruction=system) if system else None
+
+        try:
+            response = client.models.generate_content(
+                model=self.model_id,
+                contents=contents,
+                config=config,
+            )
+        except Exception as e:
+            # 生 URL/プロンプトはログに残さない (CLAUDE.md 6-bis)
+            logger.exception("gemini_generate_failed", request_id=request_id)
+            raise RuntimeError(f"Gemini 動画分析に失敗しました: {type(e).__name__}") from e
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        text = response.text or ""
+        usage = getattr(response, "usage_metadata", None)
+        input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+        output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+        cost_usd = _estimate_cost(self.model_id, input_tokens, output_tokens)
+
+        logger.info(
+            "gemini_analyze_video",
+            request_id=request_id,
+            model_id=self.model_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            latency_ms=latency_ms,
+            text_len=len(text),
+        )
+        return GeminiResponse(
+            text=text,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            model_id=self.model_id,
+            latency_ms=latency_ms,
         )
 
     def health_check(self) -> bool:
