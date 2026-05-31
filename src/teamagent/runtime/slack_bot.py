@@ -524,6 +524,19 @@ class SkillDispatcher:
             try:
                 video = await self.run_video(intent.video_url, request_id, user_id)
             except RuntimeError as e:
+                if "VIDEO_DOWNLOAD_FAILED" in str(e):
+                    return (
+                        "🎬 この動画を取得できませんでした。"
+                        "非公開・削除済み、または容量が大きすぎる可能性があります。"
+                        "別の公開動画でお試しください。",
+                        None,
+                    )
+                if "VIDEO_URL_NOT_FETCHABLE" in str(e):
+                    return (
+                        "🎬 この動画は直接取得できませんでした。"
+                        "公開URLか確認のうえ、別の動画でお試しください。",
+                        None,
+                    )
                 if "GEMINI" in str(e):
                     return (
                         "🎬 動画分析は Gemini の認証設定後に有効化されます"
@@ -1088,6 +1101,17 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         try:
             output = await disp.run_video(url, request_id, user_id)
         except Exception as e:
+            if isinstance(e, RuntimeError) and (
+                "VIDEO_URL_NOT_FETCHABLE" in str(e) or "VIDEO_DOWNLOAD_FAILED" in str(e)
+            ):
+                await respond(
+                    response_type="ephemeral",
+                    text=(
+                        "🎬 この動画を取得できませんでした。"
+                        "非公開・削除済み・容量超過の可能性があります。別の動画でお試しください。"
+                    ),
+                )
+                return
             if isinstance(e, RuntimeError) and "GEMINI" in str(e):
                 await respond(
                     response_type="ephemeral",
