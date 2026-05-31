@@ -98,3 +98,32 @@ def test_karte_trigger_without_client_falls_back_to_search() -> None:
 def test_draft_takes_precedence_over_karte() -> None:
     """提案作成意図はカルテより優先。"""
     assert detect_skill("マンダムの状況を踏まえて提案を作って").skill == "proposal_draft"
+
+
+def test_extract_video_urls_multiple() -> None:
+    from teamagent.skills.intent import extract_video_urls
+
+    msg = (
+        "競合まとめ\n"
+        "https://www.tiktok.com/@a/video/1\n"
+        "https://www.tiktok.com/@b/video/2\n"
+        "https://youtu.be/xyz"
+    )
+    urls = extract_video_urls(msg)
+    assert len(urls) == 3
+    assert "https://www.tiktok.com/@a/video/1" in urls
+
+
+def test_extract_video_urls_dedupes_and_caps() -> None:
+    from teamagent.skills.intent import extract_video_urls
+
+    msg = " ".join(["https://youtu.be/x"] * 5)  # 同一 URL × 5
+    assert extract_video_urls(msg) == ["https://youtu.be/x"]
+    many = " ".join(f"https://www.tiktok.com/@u/video/{i}" for i in range(30))
+    assert len(extract_video_urls(many, limit=20)) == 20
+
+
+def test_detect_skill_multi_url_sets_video_urls() -> None:
+    intent = detect_skill("この2本 https://youtu.be/a https://www.tiktok.com/@u/video/2 分析して")
+    assert intent.skill == "video_analysis"
+    assert len(intent.video_urls) == 2

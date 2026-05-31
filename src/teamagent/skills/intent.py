@@ -45,6 +45,10 @@ _VIDEO_URL_RE = re.compile(
 )
 
 
+# 一度に受け付ける動画 URL の上限 (コスト/レイテンシ防御)
+MAX_VIDEO_URLS = 20
+
+
 @dataclass(frozen=True)
 class SkillIntent:
     """自動ルーティングの判定結果。"""
@@ -52,18 +56,32 @@ class SkillIntent:
     skill: str  # search|clientkarte|proposal_draft|proposal_review|video_analysis
     client_name: str | None  # clientkarte のときのみ抽出
     reason: str
-    video_url: str | None = None  # video_analysis のときのみ抽出
+    video_url: str | None = None  # video_analysis 単一のときの先頭 URL (後方互換)
+    video_urls: tuple[str, ...] = ()  # video_analysis の全 URL (複数一括対応)
+
+
+def _clean_url(raw: str) -> str:
+    """Slack の <url> / <url|label> 括りを剥がす。"""
+    return raw.split("|", 1)[0].rstrip(">")
+
+
+def extract_video_urls(message: str, *, limit: int = MAX_VIDEO_URLS) -> list[str]:
+    """メッセージから動画 URL を全て抽出する (重複除去・登場順・上限 limit)。"""
+    seen: list[str] = []
+    for m in _VIDEO_URL_RE.findall(message):
+        # findall はグループ無しパターンなので全文マッチが返る
+        url = _clean_url(m if isinstance(m, str) else m[0])
+        if url not in seen:
+            seen.append(url)
+        if len(seen) >= limit:
+            break
+    return seen
 
 
 def extract_video_url(message: str) -> str | None:
-    """メッセージから動画 URL を 1 つ抽出する。Slack の <...> 括りも剥がす。"""
-    m = _VIDEO_URL_RE.search(message)
-    if not m:
-        return None
-    url = m.group(0)
-    # Slack は <url> や <url|label> で包むので末尾の > / |label を除去
-    url = url.split("|", 1)[0].rstrip(">")
-    return url
+    """メッセージから動画 URL を 1 つ (先頭) 抽出する。Slack の <...> 括りも剥がす。"""
+    urls = extract_video_urls(message, limit=1)
+    return urls[0] if urls else None
 
 
 def _extract_client_name(message: str) -> str | None:
@@ -82,14 +100,15 @@ def detect_skill(message: str) -> SkillIntent:
     """
     text = message.strip()
 
-    # 0. 動画 URL があれば最優先で動画分析 (URL は強い意図シグナル)
-    video_url = extract_video_url(text)
-    if video_url:
+    # 0. 動画 URL があれば最優先で動画分析 (URL は強い意図シグナル)。複数対応。
+    video_urls = extract_video_urls(text)
+    if video_urls:
         return SkillIntent(
             skill="video_analysis",
             client_name=None,
-            reason="video url detected",
-            video_url=video_url,
+            reason=f"video url detected ({len(video_urls)})",
+            video_url=video_urls[0],
+            video_urls=tuple(video_urls),
         )
 
     # 1a. 提案レビュー意図 (レビュー/添削/診断)。draft より先に判定。

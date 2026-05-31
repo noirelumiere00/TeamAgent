@@ -101,3 +101,36 @@ def test_instagram_reel_uses_download(fake_gemini: MagicMock) -> None:
     skill.run(VideoAnalysisInput(url="https://www.instagram.com/reel/abc/"), ctx=SkillContext())
     downloader.assert_called_once()
     fake_gemini.analyze_video_bytes.assert_called_once()
+
+
+def test_analyze_bytes_path(fake_gemini: MagicMock) -> None:
+    """アップロード動画 bytes を直接分析する。"""
+    skill = VideoAnalysisSkill(gemini=fake_gemini)
+    out = skill.analyze_bytes(b"\x00video", "video/mp4", SkillContext())
+    fake_gemini.analyze_video_bytes.assert_called_once()
+    assert "一行サマリ" in out.analysis
+    assert out.url == "uploaded"
+
+
+def test_synthesize_batch_single_returns_as_is(fake_gemini: MagicMock) -> None:
+    skill = VideoAnalysisSkill(gemini=fake_gemini)
+    text, cost = skill.synthesize_batch(["only one analysis"], SkillContext())
+    assert text == "only one analysis"
+    assert cost == 0.0
+    fake_gemini.generate_text.assert_not_called()
+
+
+def test_synthesize_batch_multiple_calls_gemini(fake_gemini: MagicMock) -> None:
+    fake_gemini.generate_text.return_value = GeminiResponse(
+        text="### 1. 全体サマリ\n3本に共通する勝ち筋",
+        input_tokens=2000,
+        output_tokens=300,
+        cost_usd=0.0005,
+        model_id="gemini-2.5-flash",
+        latency_ms=3000,
+    )
+    skill = VideoAnalysisSkill(gemini=fake_gemini)
+    text, cost = skill.synthesize_batch(["a", "b", "c"], SkillContext())
+    assert "全体サマリ" in text
+    assert cost == pytest.approx(0.0005)
+    fake_gemini.generate_text.assert_called_once()

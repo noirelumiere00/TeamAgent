@@ -166,10 +166,18 @@ class GeminiClient:
         ]
         return self._generate_video(parts, request_id, system=system)
 
+    def generate_text(
+        self, prompt: str, request_id: str, *, system: str | None = None
+    ) -> GeminiResponse:
+        """テキストのみの生成 (複数動画分析の横断まとめ等)。動画 part は含めない。"""
+        from google.genai import types
+
+        return self._generate_video([types.Part(text=prompt)], request_id, system=system)
+
     def _generate_video(
         self, parts: list[Any], request_id: str, *, system: str | None
     ) -> GeminiResponse:
-        """動画 part + prompt を generate_content に投げ GeminiResponse に整形する共通処理。"""
+        """動画/テキスト part を generate_content に投げ GeminiResponse に整形する共通処理。"""
         from google.genai import types
 
         client = self._ensure_client()
