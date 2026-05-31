@@ -130,36 +130,51 @@ class GeminiClient:
         *,
         system: str | None = None,
     ) -> GeminiResponse:
-        """YouTube / YouTube Shorts などの動画 URL を Gemini に分析させる。
+        """YouTube / YouTube Shorts の動画 URL を file_uri で Gemini に分析させる。
 
-        Args:
-            url: 動画の公開 URL。**Gemini が file_uri で直接取得できるのは YouTube 系**。
-                TikTok / Instagram は yt-dlp での取得 (別タスク) が必要。
-            prompt: 分析依頼の自然文プロンプト
-            request_id: トレース ID
-            system: system instruction (任意、分析フォーマット指定用)
-
-        Returns:
-            GeminiResponse（テキスト本文 + usage / cost / latency）
-
-        Notes:
-            著作権ガード: 動画はダウンロードせず file_uri (stream URL) で渡す。
-            google-genai SDK の generate_content に file_data part を含める。
+        **Gemini が file_uri で直接取得できるのは YouTube 系のみ**。TikTok/Instagram は
+        URL_ROBOTED で拒否されるので analyze_video_bytes (yt-dlp DL) を使う。
+        著作権ガード: 動画はダウンロードせず file_uri (stream URL) で渡す。
         """
+        from google.genai import types
+
+        parts = [
+            types.Part(file_data=types.FileData(file_uri=url, mime_type="video/*")),
+            types.Part(text=prompt),
+        ]
+        return self._generate_video(parts, request_id, system=system)
+
+    def analyze_video_bytes(
+        self,
+        data: bytes,
+        mime_type: str,
+        prompt: str,
+        request_id: str,
+        *,
+        system: str | None = None,
+    ) -> GeminiResponse:
+        """ダウンロード済みの動画 bytes を inline で Gemini に分析させる。
+
+        TikTok/Instagram など file_uri で取得できない動画用 (yt-dlp で取得した bytes)。
+        Vertex/Gemini の inline 上限に収まるサイズ前提 (~20MB)。
+        """
+        from google.genai import types
+
+        parts = [
+            types.Part.from_bytes(data=data, mime_type=mime_type),
+            types.Part(text=prompt),
+        ]
+        return self._generate_video(parts, request_id, system=system)
+
+    def _generate_video(
+        self, parts: list[Any], request_id: str, *, system: str | None
+    ) -> GeminiResponse:
+        """動画 part + prompt を generate_content に投げ GeminiResponse に整形する共通処理。"""
         from google.genai import types
 
         client = self._ensure_client()
         start = time.perf_counter()
-
-        contents = [
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part(file_data=types.FileData(file_uri=url, mime_type="video/*")),
-                    types.Part(text=prompt),
-                ],
-            )
-        ]
+        contents = [types.Content(role="user", parts=parts)]
         config = types.GenerateContentConfig(system_instruction=system) if system else None
 
         try:
@@ -171,6 +186,13 @@ class GeminiClient:
         except Exception as e:
             # 生 URL/プロンプトはログに残さない (CLAUDE.md 6-bis)
             logger.exception("gemini_generate_failed", request_id=request_id)
+            msg = str(e)
+            # file_uri を直接クロールできない URL (TikTok/IG、robots 拒否 YouTube 等)。
+            # 設定不良ではなく URL 側の制約なので専用マーカーで上げ案内に変換させる。
+            if "Cannot fetch content" in msg or "ROBOTED" in msg:
+                raise RuntimeError(
+                    "VIDEO_URL_NOT_FETCHABLE: この動画URLは直接取得できませんでした"
+                ) from e
             raise RuntimeError(f"Gemini 動画分析に失敗しました: {type(e).__name__}") from e
 
         latency_ms = int((time.perf_counter() - start) * 1000)

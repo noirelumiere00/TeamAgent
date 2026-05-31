@@ -41,6 +41,7 @@ dependencies = [
 
     # --- 動画分析（機能④） ---
     "yt-dlp>=2025.1.0",
+    "curl-cffi>=0.7.0",  # yt-dlp の TikTok 等ブラウザ偽装 (impersonation) 用
     "google-genai>=0.5.0",  # Gemini 2.5 Flash 用
 
     # --- HTML → PDF/PPTX 変換 ---
@@ -148,6 +149,8 @@ module = [
     "google.oauth2.*",
     "google.genai",
     "google.genai.*",
+    "yt_dlp",
+    "yt_dlp.*",
     "pypdf",
     "pypdf.*",
     "yaml",

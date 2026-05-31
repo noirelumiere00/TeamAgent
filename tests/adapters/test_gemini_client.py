@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from teamagent.adapters.gemini_client import GeminiClient, _estimate_cost
@@ -60,3 +62,28 @@ def test_from_env_vertex_requires_project(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("GEMINI_USE_VERTEX", "true")
     with pytest.raises(RuntimeError, match="GEMINI_VERTEX_PROJECT"):
         GeminiClient.from_env()
+
+
+def test_analyze_video_unfetchable_url_maps_to_marker() -> None:
+    """TikTok 等のクロール不可 URL は VIDEO_URL_NOT_FETCHABLE マーカーで上がる。"""
+    pytest.importorskip("google.genai")  # CI に未導入なら skip (ローカルでは実行)
+    client = GeminiClient(api_key="AIzaReal-key-123")
+    fake = MagicMock()
+    fake.models.generate_content.side_effect = Exception(
+        "400 INVALID_ARGUMENT. Cannot fetch content from the provided URL. "
+        "Status: URL_ROBOTED-ROBOTED_DENIED"
+    )
+    client._client = fake  # _ensure_client はこれを返す
+    with pytest.raises(RuntimeError, match="VIDEO_URL_NOT_FETCHABLE"):
+        client.analyze_video_url("https://www.tiktok.com/@x/video/1", "p", "req-1")
+
+
+def test_analyze_video_other_error_generic_message() -> None:
+    """その他のエラーは汎用メッセージ (マーカー無し)。"""
+    pytest.importorskip("google.genai")  # CI に未導入なら skip
+    client = GeminiClient(api_key="AIzaReal-key-123")
+    fake = MagicMock()
+    fake.models.generate_content.side_effect = Exception("500 internal")
+    client._client = fake
+    with pytest.raises(RuntimeError, match="動画分析に失敗"):
+        client.analyze_video_url("https://youtube.com/shorts/x", "p", "req-2")

@@ -15,10 +15,8 @@ from teamagent.skills.video.schema import VideoAnalysisInput
 from teamagent.skills.video.skill import VideoAnalysisSkill
 
 
-@pytest.fixture
-def fake_gemini() -> MagicMock:
-    mock = MagicMock()
-    mock.analyze_video_url.return_value = GeminiResponse(
+def _resp() -> GeminiResponse:
+    return GeminiResponse(
         text="### 1. 一行サマリ\n冒頭1秒の衝撃ビジュアルで離脱を防ぐ [0:00]",
         input_tokens=5000,
         output_tokens=400,
@@ -26,6 +24,13 @@ def fake_gemini() -> MagicMock:
         model_id="gemini-2.5-flash",
         latency_ms=8000,
     )
+
+
+@pytest.fixture
+def fake_gemini() -> MagicMock:
+    mock = MagicMock()
+    mock.analyze_video_url.return_value = _resp()
+    mock.analyze_video_bytes.return_value = _resp()
     return mock
 
 
@@ -62,3 +67,37 @@ def test_video_analysis_empty_text_fallback(fake_gemini: MagicMock) -> None:
     skill = VideoAnalysisSkill(gemini=fake_gemini)
     out = skill.run(VideoAnalysisInput(url="https://youtube.com/shorts/y"), ctx=SkillContext())
     assert "確認してください" in out.analysis
+
+
+def test_youtube_uses_file_uri_not_download(fake_gemini: MagicMock) -> None:
+    """YouTube は file_uri 経路（DL しない）。"""
+    downloader = MagicMock()
+    skill = VideoAnalysisSkill(gemini=fake_gemini, downloader=downloader)
+    skill.run(VideoAnalysisInput(url="https://youtu.be/abc"), ctx=SkillContext())
+    fake_gemini.analyze_video_url.assert_called_once()
+    fake_gemini.analyze_video_bytes.assert_not_called()
+    downloader.assert_not_called()
+
+
+def test_tiktok_downloads_then_analyzes_bytes(fake_gemini: MagicMock) -> None:
+    """TikTok は yt-dlp で DL → inline bytes 経路。"""
+    downloader = MagicMock(return_value=(b"\x00\x01videobytes", "video/mp4"))
+    skill = VideoAnalysisSkill(gemini=fake_gemini, downloader=downloader)
+    out = skill.run(
+        VideoAnalysisInput(url="https://www.tiktok.com/@u/video/123"), ctx=SkillContext()
+    )
+    downloader.assert_called_once_with("https://www.tiktok.com/@u/video/123")
+    fake_gemini.analyze_video_bytes.assert_called_once()
+    fake_gemini.analyze_video_url.assert_not_called()
+    kwargs = fake_gemini.analyze_video_bytes.call_args.kwargs
+    assert kwargs["data"] == b"\x00\x01videobytes"
+    assert kwargs["mime_type"] == "video/mp4"
+    assert "一行サマリ" in out.analysis
+
+
+def test_instagram_reel_uses_download(fake_gemini: MagicMock) -> None:
+    downloader = MagicMock(return_value=(b"data", "video/mp4"))
+    skill = VideoAnalysisSkill(gemini=fake_gemini, downloader=downloader)
+    skill.run(VideoAnalysisInput(url="https://www.instagram.com/reel/abc/"), ctx=SkillContext())
+    downloader.assert_called_once()
+    fake_gemini.analyze_video_bytes.assert_called_once()
