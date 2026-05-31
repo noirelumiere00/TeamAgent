@@ -144,6 +144,7 @@ module = [
     "botocore.*",
     "pgvector.*",
     "googleapiclient.*",
+    "google",
     "google.oauth2.*",
     "google.genai",
     "google.genai.*",
