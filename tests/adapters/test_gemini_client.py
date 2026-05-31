@@ -66,6 +66,7 @@ def test_from_env_vertex_requires_project(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_analyze_video_unfetchable_url_maps_to_marker() -> None:
     """TikTok 等のクロール不可 URL は VIDEO_URL_NOT_FETCHABLE マーカーで上がる。"""
+    pytest.importorskip("google.genai")  # CI に未導入なら skip (ローカルでは実行)
     client = GeminiClient(api_key="AIzaReal-key-123")
     fake = MagicMock()
     fake.models.generate_content.side_effect = Exception(
@@ -79,6 +80,7 @@ def test_analyze_video_unfetchable_url_maps_to_marker() -> None:
 
 def test_analyze_video_other_error_generic_message() -> None:
     """その他のエラーは汎用メッセージ (マーカー無し)。"""
+    pytest.importorskip("google.genai")  # CI に未導入なら skip
     client = GeminiClient(api_key="AIzaReal-key-123")
     fake = MagicMock()
     fake.models.generate_content.side_effect = Exception("500 internal")
