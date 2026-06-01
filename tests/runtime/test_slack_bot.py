@@ -11,12 +11,40 @@ from typing import Any
 from teamagent.runtime.slack_bot import (
     _asyncio_exception_handler,
     _slack_thread_permalink,
+    build_ack_message,
     build_search_blocks,
     format_search_response,
     parse_command_text,
     strip_mention,
 )
 from teamagent.skills.search.schema import SearchHitOut, SearchOutput
+
+
+def test_build_ack_message_tiktok() -> None:
+    """TikTok 検索意図には TikTok 用の受付文 (ブラウザ収集を明示) を返す。"""
+    msg = build_ack_message("TikTokで新宿 ランチ で検索して")
+    assert "受け付けました" in msg
+    assert "TikTok" in msg
+
+
+def test_build_ack_message_video() -> None:
+    """動画 URL には動画分析の受付文を返す。"""
+    msg = build_ack_message("https://www.tiktok.com/@u/video/123 を分析して")
+    assert "受け付けました" in msg
+    assert "動画" in msg
+
+
+def test_build_ack_message_search_default() -> None:
+    """通常の質問は検索の受付文。"""
+    msg = build_ack_message("飲食店のPR事例を教えて")
+    assert "受け付けました" in msg
+    assert "検索" in msg
+
+
+def test_build_ack_message_always_acknowledges() -> None:
+    """どんな入力でも必ず『受け付けました』を含む (空・記号でも落ちない)。"""
+    for s in ["", "   ", "！？", "提案を作って", "マンダムの状況教えて"]:
+        assert "受け付けました" in build_ack_message(s)
 
 
 def test_strip_mention_removes_leading_at() -> None:
