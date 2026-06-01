@@ -86,6 +86,8 @@ yarn-error.log*
 .pnpm-debug.log*
 package-lock.json
 yarn.lock
+# TikTok スクレイパは外部依存(puppeteer-core)の再現性が重要なので lock を追跡する
+!tools/tiktok_scraper/package-lock.json
 
 # --- IDE / Editor ---
 .vscode/

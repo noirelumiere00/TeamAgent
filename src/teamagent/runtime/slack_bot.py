@@ -226,6 +226,69 @@ def _first_line(analysis: str) -> str:
     return (analysis.strip()[:90]) or "（要約なし）"
 
 
+def _fmt_count(n: int) -> str:
+    """再生数等を 1.2万 / 3.4M 風に短縮表示する。"""
+    if n >= 10000:
+        return f"{n / 10000:.1f}万"
+    if n >= 1000:
+        return f"{n / 1000:.1f}K"
+    return str(n)
+
+
+def _format_tiktok_response(out: Any) -> str:
+    """TikTokSearchOutput を Slack メッセージに整形する (上位動画リスト + 横断分析)。"""
+    type_label = {
+        "keyword": "キーワード",
+        "hashtag": "ハッシュタグ",
+        "keyword(fallback)": "キーワード(タグ→検索)",
+    }.get(out.search_type, out.search_type)
+    header = f"*🎵 TikTok 検索「{out.query}」* （{type_label} / {out.count}本）"
+
+    if out.count == 0:
+        return (
+            f"{header}\n\n"
+            "動画を取得できませんでした。キーワードを変えるか、少し時間をおいて再度お試しください。"
+        )
+
+    rows: list[str] = []
+    for v in out.videos:
+        title = (v.desc or "").replace("\n", " ").strip()[:50] or "（説明なし）"
+        rows.append(
+            f"{v.rank}. <{v.url}|@{v.author}> ▶︎{_fmt_count(v.play_count)} "
+            f"♥{_fmt_count(v.digg_count)} 💬{_fmt_count(v.comment_count)} "
+            f"🔖{_fmt_count(v.collect_count)} (係数{v.engagement_rate:.1%})\n   {title}"
+        )
+    table = "\n".join(rows)
+
+    parts = [header, "", table]
+    if out.analysis:
+        cost = f" （分析 ${out.total_cost_usd:.4f}）" if out.total_cost_usd else ""
+        parts += ["", f"*📊 横断分析*{cost}", out.analysis]
+    return "\n".join(parts)
+
+
+def _tiktok_error_reply(err: str) -> str:
+    """TikTokScrapeError のマーカーをユーザー向け案内に変換する。"""
+    if "TIKTOK_NODE_UNAVAILABLE" in err or "TIKTOK_SCRAPER_MISSING" in err:
+        return (
+            "🎵 TikTok 検索の実行環境が未整備です（Node.js / スクレイパ依存の未インストール）。"
+            "サーバ側のセットアップが必要です。"
+        )
+    if "TIKTOK_NO_OUTPUT" in err:
+        return (
+            "🎵 TikTok 検索を起動できませんでした（Chrome 未検出の可能性）。"
+            "サーバに Google Chrome が必要です。"
+        )
+    if "TIKTOK_TIMEOUT" in err:
+        return "🎵 TikTok 検索がタイムアウトしました。少し時間をおいて再度お試しください。"
+    if "TIKTOK_EMPTY_RESULT" in err:
+        return (
+            "🎵 該当する動画が見つかりませんでした（地域制限・CAPTCHA・0件の可能性）。"
+            "キーワードを変えてお試しください。"
+        )
+    return "🎵 TikTok 検索でエラーが発生しました。少し時間をおいて再度お試しください。"
+
+
 class SkillDispatcher:
     """mention テキストを Skill に振り分けて結果を返す。
 
@@ -593,13 +656,42 @@ class SkillDispatcher:
         header = f"*🎬 {len(ok)}本の横断分析* （${total + scost:.4f}）"
         return f"{header}\n\n{synth}\n\n*— 個別サマリ —*\n{index}", total + scost
 
+    def get_tiktok_skill(self) -> Any:
+        """TikTokSearchSkill をキャッシュして返す。"""
+        if "tiktok_search" in self._skill_cache:
+            return self._skill_cache["tiktok_search"]
+        from teamagent.skills.tiktok_search.skill import TikTokSearchSkill
+
+        instance = TikTokSearchSkill(prompt_version=os.environ.get("TIKTOK_PROMPT_VERSION", "v1"))
+        logger.info("tiktok_search_skill_initialized")
+        self._skill_cache["tiktok_search"] = instance
+        return instance
+
+    async def run_tiktok(
+        self,
+        query: str,
+        request_id: str,
+        user_id: str | None,
+        *,
+        search_type: str = "keyword",
+        max_videos: int = 10,
+    ) -> Any:
+        """TikTokSearchSkill を別スレッドで実行 (Node subprocess + Gemini が同期 I/O)。"""
+        skill = self.get_tiktok_skill()
+        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        from teamagent.skills.tiktok_search.schema import TikTokSearchInput
+
+        input_obj = TikTokSearchInput(query=query, search_type=search_type, max_videos=max_videos)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, skill.run, input_obj, ctx)
+
     async def dispatch_auto(
         self, message: str, request_id: str, user_id: str | None
     ) -> tuple[str, list[dict[str, Any]] | None]:
         """メッセージ内容から Skill を自動判定して実行し、(text, blocks) を返す。
 
         スラッシュコマンド不要で、@メンション / DM の自然文から
-        search / clientkarte / proposal_draft を振り分ける。曖昧なら search。
+        search / clientkarte / proposal_draft / tiktok_search を振り分ける。曖昧なら search。
         戻り値の blocks が None ならテキストのみ投稿する。
         """
         from teamagent.skills.intent import detect_skill
@@ -647,6 +739,18 @@ class SkillDispatcher:
                 raise
             header = f"*🎬 動画分析* （${video.total_cost_usd:.4f} / {video.model_id}）"
             return f"{header}\n\n{video.analysis}", None
+
+        if intent.skill == "tiktok_search" and intent.query:
+            try:
+                out = await self.run_tiktok(
+                    intent.query,
+                    request_id,
+                    user_id,
+                    search_type=intent.search_type,
+                )
+            except RuntimeError as e:
+                return _tiktok_error_reply(str(e)), None
+            return _format_tiktok_response(out), None
 
         if intent.skill == "clientkarte" and intent.client_name:
             karte = await self.run_karte(intent.client_name, request_id, user_id)
