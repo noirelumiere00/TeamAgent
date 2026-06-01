@@ -88,6 +88,9 @@ package-lock.json
 yarn.lock
 # TikTok スクレイパは外部依存(puppeteer-core)の再現性が重要なので lock を追跡する
 !tools/tiktok_scraper/package-lock.json
+!tools/rakko_scraper/package-lock.json
+# ラッコ ログインセッション (cookie=認証情報なのでコミット禁止)
+tools/rakko_scraper/.userdata/
 
 # --- IDE / Editor ---
 .vscode/
