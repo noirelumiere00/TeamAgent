@@ -36,7 +36,7 @@ jobs:
           pip install --no-deps -e .
           pip install \
             pydantic structlog psycopg pgvector \
-            boto3 slack-sdk slack-bolt aiohttp \
+            boto3 slack-sdk slack-bolt aiohttp httpx \
             'sentry-sdk[asyncio]>=2.18.0' \
             pyyaml pypdf \
             pytest pytest-asyncio mypy ruff bandit
