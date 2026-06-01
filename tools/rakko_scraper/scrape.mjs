@@ -54,6 +54,32 @@ function findChrome() {
   if (process.env.CHROMIUM_PATH && fs.existsSync(process.env.CHROMIUM_PATH)) {
     return process.env.CHROMIUM_PATH;
   }
+  // 最優先: @puppeteer/browsers でこのディレクトリに入れた専用 Chrome for Testing。
+  // 普段使いの Google Chrome と分離でき、2重起動の競合 (起動タイムアウト) を避けられる。
+  const cftRoot = path.join(__dirname, "chrome");
+  if (fs.existsSync(cftRoot)) {
+    try {
+      for (const ver of fs.readdirSync(cftRoot).sort().reverse()) {
+        const p = path.join(
+          cftRoot,
+          ver,
+          "chrome-mac-arm64",
+          "Google Chrome for Testing.app",
+          "Contents",
+          "MacOS",
+          "Google Chrome for Testing",
+        );
+        if (fs.existsSync(p)) return p;
+        // x64 / Linux 命名も一応見る
+        const alt = path.join(cftRoot, ver, "chrome-mac-x64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing");
+        if (fs.existsSync(alt)) return alt;
+        const lin = path.join(cftRoot, ver, "chrome-linux64", "chrome");
+        if (fs.existsSync(lin)) return lin;
+      }
+    } catch {
+      /* fallthrough */
+    }
+  }
   const candidates = [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
