@@ -49,15 +49,46 @@ _VIDEO_URL_RE = re.compile(
 MAX_VIDEO_URLS = 20
 
 
+# TikTok 検索トリガー: 「TikTok/ティックトック」+「検索/調べ/リサーチ/探し」
+# 例: 「TikTokで新宿 ランチ 検索して」「ティックトックで日焼け止め調べて」
+# クエリが TikTok 名と検索動詞の間に入る (= 距離が空く) ため、近接ではなく
+# 「TikTok 名の存在」AND「検索動詞の存在」で判定する。
+_TIKTOK_NAME = r"(?:tiktok|ティックトック|ティクトック|ティックトック)"
+_TIKTOK_NAME_RE = re.compile(_TIKTOK_NAME, re.IGNORECASE)
+_SEARCH_VERB_RE = re.compile(r"検索|調べ|リサーチ|サーチ|探し|探って")
+
+
+def _is_tiktok_search(text: str) -> bool:
+    """TikTok 名と検索動詞が両方あれば TikTok 検索意図とみなす。"""
+    return bool(_TIKTOK_NAME_RE.search(text) and _SEARCH_VERB_RE.search(text))
+# ハッシュタグ検索トリガー: 「#新宿 で調べて」「#日焼け止め 検索」
+# (URL ではない素の #語)。TikTok 文脈と解釈する。
+_HASHTAG_SEARCH_RE = re.compile(
+    r"[#＃]\s*([^\s#＃、。,]{1,40})\s*(?:で|を)?\s*"
+    r"(?:調べ|検索|リサーチ|探し|見て|サーチ)"
+)
+# クエリ抽出用: 先頭の「TikTokで」等と、末尾の「(で/を) 検索して」等を削ぐ
+_TIKTOK_NAME_PREFIX = re.compile(
+    rf"^.*?{_TIKTOK_NAME}\s*(?:で|にて|から|の|を)?\s*", re.IGNORECASE
+)
+_SEARCH_VERB_SUFFIX = re.compile(
+    r"\s*(?:で|を|について|に関して)?\s*"
+    r"(?:検索|調べ|リサーチ|サーチ|探し|探って)(?:して|て|てみて|てみたい|る)?"
+    r"[\s　]*[。.!！?？]*\s*$"
+)
+
+
 @dataclass(frozen=True)
 class SkillIntent:
     """自動ルーティングの判定結果。"""
 
-    skill: str  # search|clientkarte|proposal_draft|proposal_review|video_analysis
+    skill: str  # search|clientkarte|proposal_draft|proposal_review|video_analysis|tiktok_search
     client_name: str | None  # clientkarte のときのみ抽出
     reason: str
     video_url: str | None = None  # video_analysis 単一のときの先頭 URL (後方互換)
     video_urls: tuple[str, ...] = ()  # video_analysis の全 URL (複数一括対応)
+    query: str | None = None  # tiktok_search の検索語
+    search_type: str = "keyword"  # tiktok_search: keyword | hashtag
 
 
 def _clean_url(raw: str) -> str:
@@ -93,6 +124,37 @@ def _extract_client_name(message: str) -> str | None:
     return name if len(name) >= 2 else None
 
 
+# TikTok 検索クエリの前後から削ぎ落とす語 (命令文の定型)
+_TIKTOK_STRIP = re.compile(r"^(?:で|にて|から|の|を|について)\s*|\s*(?:について|に関して)$")
+
+
+def _extract_tiktok_query(message: str) -> tuple[str | None, str]:
+    """TikTok 検索の (query, search_type) を抽出する。
+
+    - 「#新宿 で調べて」→ ("新宿", "hashtag")
+    - 「TikTokで新宿 ランチ で検索して」→ ("新宿 ランチ", "keyword")
+    抽出できなければ (None, "keyword")。
+    """
+    text = message.strip()
+
+    # ハッシュタグ優先 (# が付いていれば hashtag 意図)
+    mh = _HASHTAG_SEARCH_RE.search(text)
+    if mh:
+        q = mh.group(1).strip()
+        if len(q) >= 1:
+            return q, "hashtag"
+
+    # 「TikTokで <query> 検索して」: 先頭の TikTok 名句と末尾の検索動詞句を削ぐ
+    q = _TIKTOK_NAME_PREFIX.sub("", text, count=1)
+    q = _SEARCH_VERB_SUFFIX.sub("", q, count=1)
+    q = _TIKTOK_STRIP.sub("", q.strip()).strip()
+    q = _TRAILING.sub("", q).strip()
+    if len(q) >= 1:
+        return q, "keyword"
+
+    return None, "keyword"
+
+
 def detect_skill(message: str) -> SkillIntent:
     """メッセージから起動 Skill を判定する。
 
@@ -110,6 +172,20 @@ def detect_skill(message: str) -> SkillIntent:
             video_url=video_urls[0],
             video_urls=tuple(video_urls),
         )
+
+    # 0b. TikTok 検索意図 (「TikTokで○○検索して」「#○○ で調べて」)。
+    # 社内 RAG 検索 (search) と紛れないよう、TikTok 名 or ハッシュタグが明示された
+    # ときのみ tiktok_search に倒す。URL の次・提案系より前に判定。
+    if _is_tiktok_search(text) or _HASHTAG_SEARCH_RE.search(text):
+        q, stype = _extract_tiktok_query(text)
+        if q:
+            return SkillIntent(
+                skill="tiktok_search",
+                client_name=None,
+                reason=f"tiktok search trigger ({stype})",
+                query=q,
+                search_type=stype,
+            )
 
     # 1a. 提案レビュー意図 (レビュー/添削/診断)。draft より先に判定。
     if _REVIEW_RE.search(text):

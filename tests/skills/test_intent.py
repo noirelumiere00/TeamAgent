@@ -127,3 +127,41 @@ def test_detect_skill_multi_url_sets_video_urls() -> None:
     intent = detect_skill("この2本 https://youtu.be/a https://www.tiktok.com/@u/video/2 分析して")
     assert intent.skill == "video_analysis"
     assert len(intent.video_urls) == 2
+
+
+@pytest.mark.parametrize(
+    "msg,query,stype",
+    [
+        ("TikTokで新宿 ランチ で検索して", "新宿 ランチ", "keyword"),
+        ("tiktokで新宿ランチ検索", "新宿ランチ", "keyword"),
+        ("ティックトックで日焼け止め調べて", "日焼け止め", "keyword"),
+        ("TikTokで新宿 ランチ をリサーチして", "新宿 ランチ", "keyword"),
+        ("#新宿 で調べて", "新宿", "hashtag"),
+        ("#日焼け止め 検索して", "日焼け止め", "hashtag"),
+    ],
+)
+def test_routes_to_tiktok_search(msg: str, query: str, stype: str) -> None:
+    intent = detect_skill(msg)
+    assert intent.skill == "tiktok_search"
+    assert intent.query == query
+    assert intent.search_type == stype
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        # TikTok 言及があっても検索動詞が無ければ search/動画分析に倒す
+        "新宿のランチについて教えて",
+        "飲食店のPR事例を教えて",
+        # ハッシュタグだけ (検索動詞なし) は誤爆させない
+        "#新宿 のカフェ いいよね",
+    ],
+)
+def test_tiktok_search_not_overtriggered(msg: str) -> None:
+    assert detect_skill(msg).skill != "tiktok_search"
+
+
+def test_tiktok_url_still_routes_to_video_analysis() -> None:
+    """TikTok の動画 URL は検索ではなく動画分析へ (URL が最優先)。"""
+    intent = detect_skill("https://www.tiktok.com/@u/video/123 を分析して")
+    assert intent.skill == "video_analysis"
