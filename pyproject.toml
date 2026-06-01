@@ -157,6 +157,17 @@ module = [
 ]
 ignore_missing_imports = true
 
+# google-auth の Credentials.from_service_account_file 等は型注釈が無く strict の
+# disallow_untyped_calls に引っかかる (google-auth 更新で CI 3.13 でも顕在化)。
+# これらを薄くラップしている adapter ではこのチェックのみ無効化する。
+[[tool.mypy.overrides]]
+module = [
+    "teamagent.adapters.gdrive_client",
+    "teamagent.adapters.gmail_client",
+    "teamagent.adapters.gsheets_client",
+]
+disallow_untyped_calls = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
