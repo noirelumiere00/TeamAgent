@@ -662,9 +662,7 @@ class SkillDispatcher:
             return self._skill_cache["tiktok_search"]
         from teamagent.skills.tiktok_search.skill import TikTokSearchSkill
 
-        instance = TikTokSearchSkill(
-            prompt_version=os.environ.get("TIKTOK_PROMPT_VERSION", "v1")
-        )
+        instance = TikTokSearchSkill(prompt_version=os.environ.get("TIKTOK_PROMPT_VERSION", "v1"))
         logger.info("tiktok_search_skill_initialized")
         self._skill_cache["tiktok_search"] = instance
         return instance
@@ -683,9 +681,7 @@ class SkillDispatcher:
         ctx = SkillContext(request_id=request_id, user_id=user_id)
         from teamagent.skills.tiktok_search.schema import TikTokSearchInput
 
-        input_obj = TikTokSearchInput(
-            query=query, search_type=search_type, max_videos=max_videos
-        )
+        input_obj = TikTokSearchInput(query=query, search_type=search_type, max_videos=max_videos)
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 

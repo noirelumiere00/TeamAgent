@@ -61,6 +61,8 @@ _SEARCH_VERB_RE = re.compile(r"検索|調べ|リサーチ|サーチ|探し|探�
 def _is_tiktok_search(text: str) -> bool:
     """TikTok 名と検索動詞が両方あれば TikTok 検索意図とみなす。"""
     return bool(_TIKTOK_NAME_RE.search(text) and _SEARCH_VERB_RE.search(text))
+
+
 # ハッシュタグ検索トリガー: 「#新宿 で調べて」「#日焼け止め 検索」
 # (URL ではない素の #語)。TikTok 文脈と解釈する。
 _HASHTAG_SEARCH_RE = re.compile(
@@ -68,9 +70,7 @@ _HASHTAG_SEARCH_RE = re.compile(
     r"(?:調べ|検索|リサーチ|探し|見て|サーチ)"
 )
 # クエリ抽出用: 先頭の「TikTokで」等と、末尾の「(で/を) 検索して」等を削ぐ
-_TIKTOK_NAME_PREFIX = re.compile(
-    rf"^.*?{_TIKTOK_NAME}\s*(?:で|にて|から|の|を)?\s*", re.IGNORECASE
-)
+_TIKTOK_NAME_PREFIX = re.compile(rf"^.*?{_TIKTOK_NAME}\s*(?:で|にて|から|の|を)?\s*", re.IGNORECASE)
 _SEARCH_VERB_SUFFIX = re.compile(
     r"\s*(?:で|を|について|に関して)?\s*"
     r"(?:検索|調べ|リサーチ|サーチ|探し|探って)(?:して|て|てみて|てみたい|る)?"

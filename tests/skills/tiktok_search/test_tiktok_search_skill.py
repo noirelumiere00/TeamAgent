@@ -66,9 +66,7 @@ def fake_gemini() -> MagicMock:
 def test_search_returns_videos_and_analysis(fake_gemini: MagicMock) -> None:
     searcher = MagicMock(return_value=_fake_result(3))
     skill = TikTokSearchSkill(gemini=fake_gemini, searcher=searcher)
-    out = skill.run(
-        TikTokSearchInput(query="新宿 ランチ", max_videos=10), ctx=SkillContext()
-    )
+    out = skill.run(TikTokSearchInput(query="新宿 ランチ", max_videos=10), ctx=SkillContext())
 
     assert out.query == "新宿 ランチ"
     assert out.count == 3
@@ -94,9 +92,7 @@ def test_search_passes_hashtag_type(fake_gemini: MagicMock) -> None:
 def test_analyze_false_skips_gemini(fake_gemini: MagicMock) -> None:
     searcher = MagicMock(return_value=_fake_result(3))
     skill = TikTokSearchSkill(gemini=fake_gemini, searcher=searcher)
-    out = skill.run(
-        TikTokSearchInput(query="新宿 ランチ", analyze=False), ctx=SkillContext()
-    )
+    out = skill.run(TikTokSearchInput(query="新宿 ランチ", analyze=False), ctx=SkillContext())
     assert out.count == 3
     assert out.analysis is None
     fake_gemini.generate_text.assert_not_called()

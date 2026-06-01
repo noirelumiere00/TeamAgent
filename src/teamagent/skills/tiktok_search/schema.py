@@ -22,9 +22,7 @@ class TikTokSearchInput(BaseModel):
         default="keyword",
         description="keyword | hashtag。hashtag が空振りしたら keyword に自動フォールバック",
     )
-    max_videos: int = Field(
-        default=10, ge=1, le=30, description="取得する上位動画の本数 (既定 10)"
-    )
+    max_videos: int = Field(default=10, ge=1, le=30, description="取得する上位動画の本数 (既定 10)")
     analyze: bool = Field(
         default=True, description="取得後に Gemini で横断分析するか (false ならデータのみ)"
     )

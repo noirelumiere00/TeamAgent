@@ -74,8 +74,11 @@ def _mock_proc(stdout: str, returncode: int = 0, stderr: str = "") -> MagicMock:
 
 
 def test_search_parses_videos() -> None:
-    with patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"), patch.object(
-        tiktok_scraper.subprocess, "run", return_value=_mock_proc(json.dumps(_SAMPLE))
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(
+            tiktok_scraper.subprocess, "run", return_value=_mock_proc(json.dumps(_SAMPLE))
+        ),
     ):
         res = search_tiktok("新宿 ランチ", max_videos=10)
 
@@ -103,8 +106,9 @@ def test_search_passes_correct_cli_args() -> None:
         captured["cwd"] = kwargs.get("cwd")
         return _mock_proc(json.dumps(_SAMPLE))
 
-    with patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"), patch.object(
-        tiktok_scraper.subprocess, "run", side_effect=_fake_run
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(tiktok_scraper.subprocess, "run", side_effect=_fake_run),
     ):
         search_tiktok("新宿", search_type="hashtag", max_videos=15)
 
@@ -116,35 +120,52 @@ def test_search_passes_correct_cli_args() -> None:
 
 
 def test_search_empty_result_raises() -> None:
-    payload = {"ok": False, "query": "x", "type": "keyword", "count": 0, "videos": [], "error": "captcha"}
-    with patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"), patch.object(
-        tiktok_scraper.subprocess, "run", return_value=_mock_proc(json.dumps(payload), returncode=2)
+    payload = {
+        "ok": False,
+        "query": "x",
+        "type": "keyword",
+        "count": 0,
+        "videos": [],
+        "error": "captcha",
+    }
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(
+            tiktok_scraper.subprocess,
+            "run",
+            return_value=_mock_proc(json.dumps(payload), returncode=2),
+        ),
     ):
         with pytest.raises(TikTokScrapeError, match="TIKTOK_EMPTY_RESULT"):
             search_tiktok("x")
 
 
 def test_search_no_output_raises() -> None:
-    with patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"), patch.object(
-        tiktok_scraper.subprocess, "run", return_value=_mock_proc("", returncode=1)
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(tiktok_scraper.subprocess, "run", return_value=_mock_proc("", returncode=1)),
     ):
         with pytest.raises(TikTokScrapeError, match="TIKTOK_NO_OUTPUT"):
             search_tiktok("x")
 
 
 def test_search_bad_json_raises() -> None:
-    with patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"), patch.object(
-        tiktok_scraper.subprocess, "run", return_value=_mock_proc("not json at all")
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(tiktok_scraper.subprocess, "run", return_value=_mock_proc("not json at all")),
     ):
         with pytest.raises(TikTokScrapeError, match="TIKTOK_BAD_JSON"):
             search_tiktok("x")
 
 
 def test_search_timeout_raises() -> None:
-    with patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"), patch.object(
-        tiktok_scraper.subprocess,
-        "run",
-        side_effect=subprocess.TimeoutExpired(cmd="node", timeout=120),
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(
+            tiktok_scraper.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="node", timeout=120),
+        ),
     ):
         with pytest.raises(TikTokScrapeError, match="TIKTOK_TIMEOUT"):
             search_tiktok("x")
@@ -156,8 +177,9 @@ def test_empty_query_raises() -> None:
 
 
 def test_node_unavailable_raises() -> None:
-    with patch.object(tiktok_scraper.shutil, "which", return_value=None), patch.dict(
-        tiktok_scraper.os.environ, {}, clear=False
+    with (
+        patch.object(tiktok_scraper.shutil, "which", return_value=None),
+        patch.dict(tiktok_scraper.os.environ, {}, clear=False),
     ):
         # TIKTOK_NODE_BIN を一時的に外す
         tiktok_scraper.os.environ.pop("TIKTOK_NODE_BIN", None)
