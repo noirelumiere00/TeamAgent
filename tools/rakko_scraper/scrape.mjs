@@ -82,16 +82,32 @@ async function runLogin() {
     userDataDir: USER_DATA_DIR,
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--window-size=1280,900", "--lang=ja-JP"],
   });
+  // ログイン中のリダイレクトで frame detach の未処理 rejection が出てもクラッシュさせない
+  process.on("unhandledRejection", (e) => {
+    log("(無視) unhandledRejection:", String((e && e.message) || e));
+  });
+
   const page = await browser.newPage();
-  await page.goto("https://rakkokeyword.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
-  log("ブラウザを開きました。手動でログインしてください。");
-  log("ログイン完了後、このウィンドウを閉じるとセッションが保存されます。");
+  // goto はリダイレクトで detach し得るので失敗しても続行 (ログインは手動で進める)
+  try {
+    await page.goto("https://rakkokeyword.com/login", {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+  } catch (e) {
+    log("(続行) 初期遷移エラー:", String((e && e.message) || e));
+  }
+  log("==================================================");
+  log(" ブラウザが開きました。ラッコにログインしてください。");
+  log(" ログインできたら、このブラウザ画面を手で閉じてください。");
+  log(" → 閉じるとセッション(cookie)が .userdata/ に保存されます。");
+  log("==================================================");
 
   // ブラウザが閉じられるまで待つ (disconnected イベント)
   await new Promise((resolve) => {
     browser.on("disconnected", resolve);
   });
-  // userDataDir に cookie が永続化される
+  // userDataDir に cookie が永続化される (browser は既に閉じているので IO のみ)
   process.stdout.write(
     JSON.stringify({
       ok: true,
@@ -139,6 +155,11 @@ async function scrapeOne(page, kw, limit) {
 }
 
 async function runQuery() {
+  // ナビゲート中の frame detach 等でクラッシュさせない (結果は best-effort)
+  process.on("unhandledRejection", (e) => {
+    log("(無視) unhandledRejection:", String((e && e.message) || e));
+  });
+
   const result = { ok: false, mode: "query", results: {}, error: null };
 
   if (!fs.existsSync(USER_DATA_DIR)) {
