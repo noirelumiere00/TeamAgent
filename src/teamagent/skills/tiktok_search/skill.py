@@ -113,6 +113,7 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
                 engagement_rate=v.engagement_rate,
                 duration=v.duration,
                 hashtags=list(v.hashtags),
+                cover_url=v.cover_url,
             )
             for i, v in enumerate(result.videos)
         ]

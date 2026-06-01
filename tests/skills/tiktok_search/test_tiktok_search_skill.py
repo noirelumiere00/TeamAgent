@@ -29,7 +29,6 @@ def _video(vid: str, plays: int, likes: int) -> TikTokVideo:
         desc=f"動画{vid}の説明 #新宿グルメ",
         create_time=1764061063,
         duration=20,
-        cover_url="",
         author=TikTokAuthor(unique_id="u", nickname="U", follower_count=10000),
         play_count=plays,
         digg_count=likes,
@@ -38,6 +37,7 @@ def _video(vid: str, plays: int, likes: int) -> TikTokVideo:
         collect_count=50,
         hashtags=("新宿グルメ", "新宿ランチ"),
         music_title="曲",
+        cover_url=f"https://cdn/{vid}.jpg",
     )
 
 
@@ -73,6 +73,7 @@ def test_search_returns_videos_and_analysis(fake_gemini: MagicMock) -> None:
     assert out.videos[0].rank == 1
     assert out.videos[0].author == "u"
     assert out.videos[0].play_count == 100000
+    assert out.videos[0].cover_url == "https://cdn/0.jpg"  # サムネが skill 出力まで通る
     assert "サマリ" in (out.analysis or "")
     assert out.model_id == "gemini-2.5-flash"
     assert out.total_cost_usd == pytest.approx(0.0005)
