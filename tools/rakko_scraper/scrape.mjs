@@ -129,10 +129,29 @@ async function runLogin() {
   log(" → 閉じるとセッション(cookie)が .userdata/ に保存されます。");
   log("==================================================");
 
-  // ブラウザが閉じられるまで待つ (disconnected イベント)
-  await new Promise((resolve) => {
-    browser.on("disconnected", resolve);
-  });
+  // ブラウザが閉じられるまで待つ。
+  // 注意: `disconnected` イベントは headful + 非対話起動で「起動直後に誤発火」する
+  // ことがあるため使わない。代わりに Chrome の OS プロセス生存を直接ポーリングする
+  // (ユーザーがウィンドウを閉じる = プロセス終了 を検知)。
+  const proc = browser.process();
+  const pid = proc ? proc.pid : null;
+  if (pid) {
+    log(`(Chrome pid=${pid} の終了を待機します。ログイン後にウィンドウを閉じてください)`);
+    await new Promise((resolve) => {
+      const timer = setInterval(() => {
+        try {
+          process.kill(pid, 0); // 生存確認 (シグナル送らず存在チェック)
+        } catch {
+          clearInterval(timer); // ESRCH = プロセス終了
+          resolve();
+        }
+      }, 1000);
+    });
+  } else {
+    // プロセス参照が取れない場合のフォールバック (disconnected)
+    await new Promise((resolve) => browser.on("disconnected", resolve));
+  }
+
   // userDataDir に cookie が永続化される (browser は既に閉じているので IO のみ)
   process.stdout.write(
     JSON.stringify({
