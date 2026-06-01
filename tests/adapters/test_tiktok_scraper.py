@@ -15,6 +15,7 @@ import pytest
 from teamagent.adapters import tiktok_scraper
 from teamagent.adapters.tiktok_scraper import (
     TikTokScrapeError,
+    get_tiktok_comments,
     search_tiktok,
 )
 
@@ -186,3 +187,69 @@ def test_node_unavailable_raises() -> None:
         tiktok_scraper.os.environ.pop("TIKTOK_NODE_BIN", None)
         with pytest.raises(TikTokScrapeError, match="TIKTOK_NODE_UNAVAILABLE"):
             search_tiktok("新宿 ランチ")
+
+
+_COMMENTS_SAMPLE = {
+    "ok": True,
+    "mode": "comments",
+    "url": "https://www.tiktok.com/@u/video/123",
+    "count": 2,
+    "comments": [
+        {"text": "これ最高！どこで買えますか？", "likes": 42, "author": "user_a"},
+        {"text": "値段が気になる", "likes": 7, "author": "user_b"},
+    ],
+    "error": None,
+}
+
+
+def test_get_comments_parses() -> None:
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(
+            tiktok_scraper.subprocess, "run", return_value=_mock_proc(json.dumps(_COMMENTS_SAMPLE))
+        ),
+    ):
+        res = get_tiktok_comments("https://www.tiktok.com/@u/video/123", max_comments=50)
+
+    assert res.count == 2
+    assert res.comments[0].text == "これ最高！どこで買えますか？"
+    assert res.comments[0].likes == 42
+    assert res.comments[0].author == "user_a"
+
+
+def test_get_comments_passes_cli_args() -> None:
+    captured = {}
+
+    def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        return _mock_proc(json.dumps(_COMMENTS_SAMPLE))
+
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(tiktok_scraper.subprocess, "run", side_effect=_fake_run),
+    ):
+        get_tiktok_comments("https://www.tiktok.com/@u/video/9", max_comments=30)
+
+    cmd = captured["cmd"]
+    assert "--mode" in cmd and "comments" in cmd
+    assert "--url" in cmd and "https://www.tiktok.com/@u/video/9" in cmd
+    assert "--max-comments" in cmd and "30" in cmd
+
+
+def test_get_comments_invalid_url_raises() -> None:
+    with pytest.raises(TikTokScrapeError, match="TIKTOK_INVALID_URL"):
+        get_tiktok_comments("https://example.com/not-tiktok")
+
+
+def test_get_comments_empty_raises() -> None:
+    payload = {"ok": False, "mode": "comments", "count": 0, "comments": [], "error": "0件"}
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(
+            tiktok_scraper.subprocess,
+            "run",
+            return_value=_mock_proc(json.dumps(payload), returncode=2),
+        ),
+    ):
+        with pytest.raises(TikTokScrapeError, match="TIKTOK_EMPTY_RESULT"):
+            get_tiktok_comments("https://www.tiktok.com/@u/video/123")

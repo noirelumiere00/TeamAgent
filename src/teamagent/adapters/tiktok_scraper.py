@@ -83,6 +83,27 @@ class TikTokVideo:
 
 
 @dataclass(frozen=True)
+class TikTokComment:
+    """動画 1 件のコメント。"""
+
+    text: str
+    likes: int
+    author: str
+
+
+@dataclass(frozen=True)
+class TikTokCommentResult:
+    """get_tiktok_comments の返り値。"""
+
+    video_url: str
+    comments: tuple[TikTokComment, ...]
+
+    @property
+    def count(self) -> int:
+        return len(self.comments)
+
+
+@dataclass(frozen=True)
 class TikTokSearchResult:
     query: str
     search_type: str  # keyword | hashtag | keyword(fallback)
@@ -234,4 +255,96 @@ def search_tiktok(
         count=result.count,
         search_type=result.search_type,
     )
+    return result
+
+
+def get_tiktok_comments(
+    video_url: str,
+    *,
+    max_comments: int = 50,
+    request_id: str | None = None,
+    timeout_s: int = _DEFAULT_TIMEOUT_S,
+) -> TikTokCommentResult:
+    """TikTok 動画 URL からコメントを取得する (コメント API を傍受)。
+
+    Args:
+        video_url: TikTok 動画 URL (例: https://www.tiktok.com/@user/video/123)
+        max_comments: 取得する最大コメント数
+        request_id: トレース ID
+        timeout_s: subprocess の最大待ち秒
+
+    Raises:
+        TikTokScrapeError: URL 不正 / node 不在 / タイムアウト / 0 件 等。
+    """
+    if not video_url.strip() or "tiktok.com" not in video_url:
+        raise TikTokScrapeError("TIKTOK_INVALID_URL: 有効な TikTok 動画 URL ではありません")
+    if not _SCRAPER_SCRIPT.exists():
+        raise TikTokScrapeError(f"TIKTOK_SCRAPER_MISSING: {_SCRAPER_SCRIPT} がありません")
+
+    node = _node_bin()
+    cmd = [
+        node,
+        str(_SCRAPER_SCRIPT),
+        "--mode",
+        "comments",
+        "--url",
+        video_url,
+        "--max-comments",
+        str(max_comments),
+    ]
+    logger.info(
+        "tiktok_comments_start",
+        request_id=request_id,
+        max_comments=max_comments,
+        url_len=len(video_url),
+    )
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(_SCRAPER_DIR),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        logger.warning("tiktok_comments_timeout", request_id=request_id, timeout_s=timeout_s)
+        raise TikTokScrapeError(
+            f"TIKTOK_TIMEOUT: コメント取得が {timeout_s}s 以内に終わりませんでした"
+        ) from e
+
+    stdout = (proc.stdout or "").strip()
+    if not stdout:
+        logger.warning(
+            "tiktok_comments_no_output",
+            request_id=request_id,
+            returncode=proc.returncode,
+            stderr_tail=(proc.stderr or "")[-300:],
+        )
+        raise TikTokScrapeError(
+            f"TIKTOK_NO_OUTPUT: スクレイパが結果を返しませんでした (exit={proc.returncode})"
+        )
+
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as e:
+        logger.warning("tiktok_comments_bad_json", request_id=request_id, head=stdout[:200])
+        raise TikTokScrapeError("TIKTOK_BAD_JSON: スクレイパ出力を解析できませんでした") from e
+
+    if not payload.get("ok"):
+        err = payload.get("error") or "不明なエラー"
+        logger.info("tiktok_comments_empty", request_id=request_id, error=err)
+        raise TikTokScrapeError(f"TIKTOK_EMPTY_RESULT: {err}")
+
+    comments = tuple(
+        TikTokComment(
+            text=c.get("text", ""),
+            likes=int(c.get("likes", 0) or 0),
+            author=c.get("author", ""),
+        )
+        for c in payload.get("comments", [])
+    )
+    result = TikTokCommentResult(video_url=video_url, comments=comments)
+    logger.info("tiktok_comments_done", request_id=request_id, count=result.count)
     return result
