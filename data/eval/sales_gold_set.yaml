@@ -22,9 +22,16 @@
 #   - 1〜10: Day 8 で実機検証済の Slack FB 案件 (確実に DB にある)
 #   - 11〜20: BtoB / BtoC / 業界別の汎用クエリ (パターン抽出評価)
 #   - 21〜25: ネガティブケース (該当無しが正解、hallucination 防止)
+#   - 26〜50 [v2 拡張, 2026-06-01]: Day 9 で判明した 52% 天井の miss 類型を狙撃:
+#       26〜29: deal_phase 取り違え (同一クライアント複数フェーズの弁別)
+#       30〜34: 集約・横断クエリ (一覧/傾向/全般 → aggregation mode)
+#       35〜39: 固有クライアント追加 (実在 FB の取りこぼし)
+#       40〜44: 訴求・論点パターン (positive/negative_reaction 横断抽出)
+#       45〜46: Drive 資料系 (gdrive source_type 切り分け)
+#       47〜50: ネガティブ追加 (hallucination 防止強化、雑談弾き)
 
-version: 1
-description: "Sprint 4 検索精度 baseline 評価セット (Day 8 = 2026-05-28 作成)"
+version: 2
+description: "検索精度 評価セット v2 (50 ケース)。v1=Day8 baseline 25 + v2=Day10 miss類型狙撃 25"
 
 cases:
   # ==========================================
@@ -171,3 +178,158 @@ cases:
     expect_keywords: []
     expect_zero_hits: true
     notes: "メタ質問、検索対象外"
+
+  # ==========================================
+  # 5. [v2] deal_phase 取り違え対策 (Day 9 miss 類型①)
+  #    同一クライアントで複数フェーズが混在するとき、正しいフェーズを引けるか
+  # ==========================================
+  - id: 26
+    query: "日本ガイシのリクルーティング案件はどうなってる"
+    expect_keywords: ["日本ガイシ"]
+    expect_client_name: "日本ガイシ"
+    notes: "ケイパ案件と混同せずリクルーティング側を引けるか (Day9 case1 の取り違え対策)"
+
+  - id: 27
+    query: "マンダムのケイパ提案の内容"
+    expect_keywords: ["マンダム"]
+    expect_client_name: "マンダム"
+    notes: "ヒアリング案件 (id 2) と別フェーズを引けるか"
+
+  - id: 28
+    query: "ヒアリング段階の案件で出た主な懸念"
+    expect_metadata:
+      deal_phase: "ヒアリング"
+    notes: "フェーズ横断。deal_phase メタの soft filter が効くか"
+
+  - id: 29
+    query: "ケイパ提案まで進んだ案件の共通フィードバック"
+    expect_metadata:
+      deal_phase: "ケイパ"
+    notes: "フェーズ集約。複数クライアントのケイパ FB を束ねられるか"
+
+  # ==========================================
+  # 6. [v2] 集約・横断クエリ (Day 9 miss 類型②)
+  #    「一覧」「傾向」「全般」系。aggregation mode で metadata 列挙
+  # ==========================================
+  - id: 30
+    query: "BANT C の検討止まり案件を一覧で"
+    expect_keywords: []
+    expect_metadata:
+      bant_score: "C"
+    notes: "集約モード。LIKE '%C%' 列挙 (bant_score は 'C（検討）' 形式)"
+
+  - id: 31
+    query: "これまでの提案案件を全部リストアップして"
+    expect_keywords: []
+    notes: "全件集約。aggregation mode が件数列挙で答えるべき (要約に流れない)"
+
+  - id: 32
+    query: "代理店経由の案件は全体で何件くらいある"
+    expect_metadata:
+      channel_type: "代理店"
+    notes: "件数・傾向系。channel_type メタ列挙"
+
+  - id: 33
+    query: "BtoC 飲料系で提案したクライアントの傾向"
+    expect_keywords: []
+    notes: "業界横断の傾向抽出。単一 chunk でなく複数を束ねる"
+
+  - id: 34
+    query: "ケイパ提案で繰り返し出てくる勝ち筋は"
+    expect_metadata:
+      deal_phase: "ケイパ"
+    notes: "横断パターン抽出。v2 prompt の actionable thinking 評価"
+
+  # ==========================================
+  # 7. [v2] 固有クライアント追加 (実在 FB の取りこぼし確認)
+  # ==========================================
+  - id: 35
+    query: "伊藤園の提案フィードバック"
+    expect_keywords: ["伊藤園"]
+    expect_source_type: "slack"
+
+  - id: 36
+    query: "キリンビバレッジ向けの商談メモ"
+    expect_keywords: ["キリン"]
+    expect_source_type: "slack"
+
+  - id: 37
+    query: "ニチレイフーズの2回目以降の提案"
+    expect_keywords: ["ニチレイ"]
+    expect_source_type: "slack"
+
+  - id: 38
+    query: "PPIH ドンキ向けのショート動画提案"
+    expect_keywords: ["PPIH"]
+    expect_source_type: "slack"
+
+  - id: 39
+    query: "クラシエの温度感と次アクション"
+    expect_keywords: ["クラシエ"]
+    expect_client_name: "クラシエ"
+
+  # ==========================================
+  # 8. [v2] 訴求・論点パターン (negative/positive_reaction 抽出)
+  # ==========================================
+  - id: 40
+    query: "展示会の活用が刺さった案件"
+    expect_keywords: ["展示会"]
+    notes: "positive_reaction の共通訴求抽出 (BtoB)"
+
+  - id: 41
+    query: "先行者利益を訴求して前向きになった案件"
+    expect_keywords: ["先行者"]
+
+  - id: 42
+    query: "既存資産の再活用を提案したケース"
+    expect_keywords: ["既存資産"]
+
+  - id: 43
+    query: "予算が原因で停滞した案件の共通点"
+    expect_keywords: ["予算"]
+    notes: "negative_reaction 横断。失注/停滞の予算論点"
+
+  - id: 44
+    query: "UGC施策で成果が出た提案の構成"
+    expect_keywords: ["UGC"]
+
+  # ==========================================
+  # 9. [v2] Drive 資料系の追加 (gdrive source_type)
+  # ==========================================
+  - id: 45
+    query: "ショート動画の制作フロー資料"
+    expect_keywords: ["ショート動画"]
+    expect_source_type: "gdrive"
+    notes: "Drive ingest 資料。slack FB と source_type で切り分く"
+
+  - id: 46
+    query: "営業提案テンプレートの資料"
+    expect_keywords: ["提案"]
+    expect_source_type: "gdrive"
+
+  # ==========================================
+  # 10. [v2] ネガティブケース追加 (hallucination 防止強化)
+  # ==========================================
+  - id: 47
+    query: "トヨタ自動車の EV 向けキャンペーン提案"
+    expect_keywords: []
+    expect_zero_hits: true
+    notes: "DB に無いはず。固有名詞だが該当無し"
+
+  - id: 48
+    query: "競合の電通自身への提案実績"
+    expect_keywords: []
+    expect_zero_hits: true
+    notes: "電通は代理店として登場するが『電通への提案』は無いはず"
+
+  - id: 49
+    query: "2030年のメタバース広告戦略"
+    expect_keywords: []
+    expect_zero_hits: true
+    notes: "未来の架空テーマ、hallucinate しないか"
+
+  - id: 50
+    query: "今日のランチのおすすめは"
+    expect_keywords: []
+    expect_zero_hits: true
+    notes: "業務無関係の雑談。検索対象外として弾けるか"
