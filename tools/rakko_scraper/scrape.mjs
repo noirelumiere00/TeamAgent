@@ -96,6 +96,19 @@ function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// 前回起動の残ロックを消す。これが残っていると Chrome が
+// 「ProcessSingleton 作成失敗 (SingletonLock: File exists)」で起動拒否する。
+// ログイン用 Chrome が完全終了する前に query を叩くと残りやすい。
+function clearSingletonLocks() {
+  for (const name of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    try {
+      fs.rmSync(path.join(USER_DATA_DIR, name), { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 const RESULT_URL = (kw) =>
   `https://rakkokeyword.com/result/relatedKeywords?q=${encodeURIComponent(kw)}`;
 
@@ -221,6 +234,8 @@ async function runQuery() {
     process.stdout.write(JSON.stringify(result));
     process.exit(1);
   }
+
+  clearSingletonLocks(); // 前回の残ロックを消してから起動 (2重起動拒否を回避)
 
   let browser;
   try {
