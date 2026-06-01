@@ -91,6 +91,9 @@ yarn.lock
 !tools/rakko_scraper/package-lock.json
 # ラッコ ログインセッション (cookie=認証情報なのでコミット禁止)
 tools/rakko_scraper/.userdata/
+# Puppeteer専用 Chrome for Testing (大きいバイナリ、各自 npx で取得)
+tools/rakko_scraper/chrome/
+tools/tiktok_scraper/chrome/
 
 # --- IDE / Editor ---
 .vscode/

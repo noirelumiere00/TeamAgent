@@ -54,6 +54,32 @@ function findChrome() {
   if (process.env.CHROMIUM_PATH && fs.existsSync(process.env.CHROMIUM_PATH)) {
     return process.env.CHROMIUM_PATH;
   }
+  // 最優先: @puppeteer/browsers でこのディレクトリに入れた専用 Chrome for Testing。
+  // 普段使いの Google Chrome と分離でき、2重起動の競合 (起動タイムアウト) を避けられる。
+  const cftRoot = path.join(__dirname, "chrome");
+  if (fs.existsSync(cftRoot)) {
+    try {
+      for (const ver of fs.readdirSync(cftRoot).sort().reverse()) {
+        const p = path.join(
+          cftRoot,
+          ver,
+          "chrome-mac-arm64",
+          "Google Chrome for Testing.app",
+          "Contents",
+          "MacOS",
+          "Google Chrome for Testing",
+        );
+        if (fs.existsSync(p)) return p;
+        // x64 / Linux 命名も一応見る
+        const alt = path.join(cftRoot, ver, "chrome-mac-x64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing");
+        if (fs.existsSync(alt)) return alt;
+        const lin = path.join(cftRoot, ver, "chrome-linux64", "chrome");
+        if (fs.existsSync(lin)) return lin;
+      }
+    } catch {
+      /* fallthrough */
+    }
+  }
   const candidates = [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -70,6 +96,19 @@ function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// 前回起動の残ロックを消す。これが残っていると Chrome が
+// 「ProcessSingleton 作成失敗 (SingletonLock: File exists)」で起動拒否する。
+// ログイン用 Chrome が完全終了する前に query を叩くと残りやすい。
+function clearSingletonLocks() {
+  for (const name of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    try {
+      fs.rmSync(path.join(USER_DATA_DIR, name), { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 const RESULT_URL = (kw) =>
   `https://rakkokeyword.com/result/relatedKeywords?q=${encodeURIComponent(kw)}`;
 
@@ -82,16 +121,51 @@ async function runLogin() {
     userDataDir: USER_DATA_DIR,
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--window-size=1280,900", "--lang=ja-JP"],
   });
-  const page = await browser.newPage();
-  await page.goto("https://rakkokeyword.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
-  log("ブラウザを開きました。手動でログインしてください。");
-  log("ログイン完了後、このウィンドウを閉じるとセッションが保存されます。");
-
-  // ブラウザが閉じられるまで待つ (disconnected イベント)
-  await new Promise((resolve) => {
-    browser.on("disconnected", resolve);
+  // ログイン中のリダイレクトで frame detach の未処理 rejection が出てもクラッシュさせない
+  process.on("unhandledRejection", (e) => {
+    log("(無視) unhandledRejection:", String((e && e.message) || e));
   });
-  // userDataDir に cookie が永続化される
+
+  const page = await browser.newPage();
+  // goto はリダイレクトで detach し得るので失敗しても続行 (ログインは手動で進める)
+  try {
+    await page.goto("https://rakkokeyword.com/login", {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+  } catch (e) {
+    log("(続行) 初期遷移エラー:", String((e && e.message) || e));
+  }
+  log("==================================================");
+  log(" ブラウザが開きました。ラッコにログインしてください。");
+  log(" ログインできたら、このブラウザ画面を手で閉じてください。");
+  log(" → 閉じるとセッション(cookie)が .userdata/ に保存されます。");
+  log("==================================================");
+
+  // ブラウザが閉じられるまで待つ。
+  // 注意: `disconnected` イベントは headful + 非対話起動で「起動直後に誤発火」する
+  // ことがあるため使わない。代わりに Chrome の OS プロセス生存を直接ポーリングする
+  // (ユーザーがウィンドウを閉じる = プロセス終了 を検知)。
+  const proc = browser.process();
+  const pid = proc ? proc.pid : null;
+  if (pid) {
+    log(`(Chrome pid=${pid} の終了を待機します。ログイン後にウィンドウを閉じてください)`);
+    await new Promise((resolve) => {
+      const timer = setInterval(() => {
+        try {
+          process.kill(pid, 0); // 生存確認 (シグナル送らず存在チェック)
+        } catch {
+          clearInterval(timer); // ESRCH = プロセス終了
+          resolve();
+        }
+      }, 1000);
+    });
+  } else {
+    // プロセス参照が取れない場合のフォールバック (disconnected)
+    await new Promise((resolve) => browser.on("disconnected", resolve));
+  }
+
+  // userDataDir に cookie が永続化される (browser は既に閉じているので IO のみ)
   process.stdout.write(
     JSON.stringify({
       ok: true,
@@ -139,6 +213,11 @@ async function scrapeOne(page, kw, limit) {
 }
 
 async function runQuery() {
+  // ナビゲート中の frame detach 等でクラッシュさせない (結果は best-effort)
+  process.on("unhandledRejection", (e) => {
+    log("(無視) unhandledRejection:", String((e && e.message) || e));
+  });
+
   const result = { ok: false, mode: "query", results: {}, error: null };
 
   if (!fs.existsSync(USER_DATA_DIR)) {
@@ -155,6 +234,8 @@ async function runQuery() {
     process.stdout.write(JSON.stringify(result));
     process.exit(1);
   }
+
+  clearSingletonLocks(); // 前回の残ロックを消してから起動 (2重起動拒否を回避)
 
   let browser;
   try {
