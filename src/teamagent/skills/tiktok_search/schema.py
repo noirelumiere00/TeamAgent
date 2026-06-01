@@ -44,6 +44,7 @@ class TikTokVideoOut(BaseModel):
     engagement_rate: float
     duration: int
     hashtags: list[str] = Field(default_factory=list)
+    cover_url: str = ""  # サムネイル (HTML レポート用)
 
 
 class TikTokSearchOutput(BaseModel):

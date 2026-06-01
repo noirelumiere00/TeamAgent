@@ -92,6 +92,7 @@ def test_search_parses_videos() -> None:
     assert v0.digg_count == 14800
     assert "新宿グルメ" in v0.hashtags
     assert v0.music_title == "オリジナル楽曲"
+    assert v0.cover_url == "https://cdn/x.jpg"  # サムネ (HTML レポート用)
     # engagement_rate = (14800+22+1506+8750)/742400
     assert v0.engagement_rate == pytest.approx((14800 + 22 + 1506 + 8750) / 742400, abs=1e-4)
     # 再生 0 の動画は engagement_rate 0 (ゼロ除算しない)
