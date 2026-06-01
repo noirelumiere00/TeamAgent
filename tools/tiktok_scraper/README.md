@@ -22,13 +22,18 @@ Chrome/Chromium が必要:
 ## 使い方 (CLI)
 
 ```bash
+# 検索モード (既定)
 node search.mjs --query "新宿 ランチ" --type keyword --max 10
 node search.mjs --query "新宿"        --type hashtag  --max 10   # タグ空振り時は keyword に自動フォールバック
 node search.mjs --query "日焼け止め"  --max 5 --out /tmp/out.json # 結果をファイルにも書く
 node search.mjs --query "新宿 カフェ" --headful                  # ブラウザを可視化 (デバッグ用)
+
+# コメント取得モード
+node search.mjs --mode comments --url "https://www.tiktok.com/@u/video/123" --max-comments 50
 ```
 
-- 標準出力: JSON のみ (`{ ok, query, type, count, videos: [...], error }`)
+- 検索モード stdout: `{ ok, query, type, count, videos: [...], error }`
+- コメントモード stdout: `{ ok, mode:"comments", url, count, comments: [{text,likes,author}], error }`
 - 標準エラー: ブラウザの進捗ログ (Python 側は stdout だけ parse する)
 
 ## Python から

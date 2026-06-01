@@ -20,12 +20,24 @@ import puppeteer from "puppeteer-core";
 
 // ---- 引数パース ----
 function parseArgs(argv) {
-  const a = { query: "", type: "keyword", max: 10, out: null, headful: false };
+  const a = {
+    mode: "search", // "search" | "comments"
+    query: "",
+    type: "keyword",
+    max: 10,
+    url: "", // comments モードの対象動画 URL
+    maxComments: 50,
+    out: null,
+    headful: false,
+  };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
-    if (k === "--query") a.query = argv[++i];
+    if (k === "--mode") a.mode = argv[++i];
+    else if (k === "--query") a.query = argv[++i];
     else if (k === "--type") a.type = argv[++i];
     else if (k === "--max") a.max = parseInt(argv[++i], 10) || 10;
+    else if (k === "--url") a.url = argv[++i];
+    else if (k === "--max-comments") a.maxComments = parseInt(argv[++i], 10) || 50;
     else if (k === "--out") a.out = argv[++i];
     else if (k === "--headful") a.headful = true;
   }
@@ -244,8 +256,128 @@ async function searchOnce(browser, query, type, maxVideos) {
   }
 }
 
+// 1 本の動画 URL からコメントを取得する (コメント API /api/comment/list/ を傍受)。
+// 出典: vseo-analytics-web の scrapeTikTokComments を移植。スクロールで追加コメントを誘発。
+async function scrapeComments(browser, videoUrl, maxComments) {
+  const context = await browser.createBrowserContext();
+  const page = await context.newPage();
+  const comments = [];
+  const seen = new Set();
+
+  try {
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.setUserAgent(USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]);
+    await page.setExtraHTTPHeaders({ "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.7" });
+
+    if (process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
+      await page.authenticate({
+        username: `${process.env.PROXY_USERNAME}-session-${Date.now()}`,
+        password: process.env.PROXY_PASSWORD,
+      });
+    }
+
+    // コメント API を傍受 (json.comments[].text)
+    page.on("response", async (resp) => {
+      const url = resp.url();
+      if (!url.includes("/api/comment/list/")) return;
+      try {
+        const text = await resp.text();
+        if (!text || text.includes("<html")) return;
+        const json = JSON.parse(text);
+        for (const c of json?.comments || []) {
+          const t = (c?.text || "").trim();
+          if (t && !seen.has(t)) {
+            seen.add(t);
+            comments.push({
+              text: t,
+              likes: c?.digg_count || 0,
+              author: c?.user?.unique_id || c?.user?.nickname || "",
+            });
+          }
+        }
+        log(`comment API: +intercepted (total ${comments.length})`);
+      } catch {
+        /* 非 JSON は無視 */
+      }
+    });
+
+    log(`goto video: ${videoUrl}`);
+    await page.goto(videoUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await humanDelay(3000, 4500);
+
+    // コメント欄を読み込ませるためにスクロール (最大 8 回、目標件数まで)
+    for (let s = 0; s < 8 && comments.length < maxComments; s++) {
+      await page.evaluate(() => {
+        const panel = document.querySelector(
+          '[data-e2e="comment-list"], [class*="DivCommentListContainer"]',
+        );
+        if (panel) panel.scrollTop = panel.scrollHeight;
+        window.scrollBy(0, 1000);
+      });
+      await humanDelay(2000, 3500);
+    }
+    log(`comments complete: ${comments.length}`);
+    return comments.slice(0, maxComments);
+  } finally {
+    await page.close();
+    await context.close();
+  }
+}
+
+function buildChromeArgs() {
+  const chromeArgs = [
+    "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+    "--disable-gpu", "--window-size=1280,900", "--lang=ja-JP",
+  ];
+  if (process.env.PROXY_SERVER) {
+    chromeArgs.push(`--proxy-server=${process.env.PROXY_SERVER}`);
+    if (process.env.PROXY_KYC_VERIFIED !== "true") chromeArgs.push("--ignore-certificate-errors");
+  }
+  return chromeArgs;
+}
+
+// ---- main: comments モード ----
+async function mainComments() {
+  const result = { ok: false, mode: "comments", url: args.url, count: 0, comments: [], error: null };
+  if (!args.url || !args.url.includes("tiktok.com")) {
+    result.error = "有効な TikTok 動画 URL が必要です (--url)";
+    process.stdout.write(JSON.stringify(result));
+    process.exit(2);
+  }
+  let browser;
+  try {
+    const chrome = findChrome();
+    log(`launch chrome: ${chrome} (headless=${!args.headful})`);
+    browser = await puppeteer.launch({
+      executablePath: chrome,
+      headless: !args.headful,
+      args: buildChromeArgs(),
+    });
+    const comments = await scrapeComments(browser, args.url, args.maxComments);
+    result.ok = comments.length > 0;
+    result.count = comments.length;
+    result.comments = comments;
+    if (comments.length === 0) {
+      result.error = "コメントを取得できませんでした (非公開/0件/captcha の可能性)";
+    }
+  } catch (e) {
+    result.error = String((e && e.message) || e);
+    log("ERROR:", result.error);
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+  const out = JSON.stringify(result);
+  if (args.out) fs.writeFileSync(args.out, out);
+  process.stdout.write(out);
+  process.exit(result.ok ? 0 : 2);
+}
+
 // ---- main ----
 async function main() {
+  if (args.mode === "comments") {
+    await mainComments();
+    return;
+  }
   if (!args.query) {
     process.stdout.write(JSON.stringify({ ok: false, error: "query が空です" }));
     process.exit(1);
@@ -255,18 +387,10 @@ async function main() {
   try {
     const chrome = findChrome();
     log(`launch chrome: ${chrome} (headless=${!args.headful})`);
-    const chromeArgs = [
-      "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-      "--disable-gpu", "--window-size=1280,900", "--lang=ja-JP",
-    ];
-    if (process.env.PROXY_SERVER) {
-      chromeArgs.push(`--proxy-server=${process.env.PROXY_SERVER}`);
-      if (process.env.PROXY_KYC_VERIFIED !== "true") chromeArgs.push("--ignore-certificate-errors");
-    }
     browser = await puppeteer.launch({
       executablePath: chrome,
       headless: !args.headful,
-      args: chromeArgs,
+      args: buildChromeArgs(),
     });
     let videos = await searchOnce(browser, args.query, args.type, args.max);
 
