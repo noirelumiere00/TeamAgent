@@ -289,6 +289,34 @@ def _tiktok_error_reply(err: str) -> str:
     return "🎵 TikTok 検索でエラーが発生しました。少し時間をおいて再度お試しください。"
 
 
+# Skill ごとの受付メッセージ (どの処理を始めたか + 想定待ち時間をユーザーに伝える)。
+# 重い処理 (動画/TikTok は実ブラウザや Gemini を使うため数十秒) ほど明示する価値が高い。
+_ACK_BY_SKILL: dict[str, str] = {
+    "search": "🔎 検索を受け付けました。資料を探しています…（10〜20秒）",
+    "clientkarte": "🗂️ カルテ作成を受け付けました。履歴をまとめています…（10〜20秒）",
+    "proposal_draft": "📝 提案ドラフトを受け付けました。過去提案を参照しています…（15〜30秒）",
+    "proposal_review": "🔬 提案レビューを受け付けました。照合・診断しています…（15〜30秒）",
+    "video_analysis": "🎬 動画分析を受け付けました。取得して解析しています…（30〜90秒）",
+    "tiktok_search": "🎵 TikTok 検索を受け付けました。収集して分析しています…（30〜90秒）",
+}
+_ACK_DEFAULT = "🤖 受け付けました。処理しています…"
+
+
+def build_ack_message(message: str) -> str:
+    """受信メッセージからどの Skill が動くか判定し、受付メッセージを返す。
+
+    本処理 (dispatch_auto) より前に Slack へ即時投稿して「受け付けた」ことを伝える。
+    判定は intent.detect_skill と同じヒューリスティックなので、実際に動く Skill と一致する。
+    """
+    from teamagent.skills.intent import detect_skill
+
+    try:
+        skill = detect_skill(message).skill
+    except Exception:
+        return _ACK_DEFAULT
+    return _ACK_BY_SKILL.get(skill, _ACK_DEFAULT)
+
+
 class SkillDispatcher:
     """mention テキストを Skill に振り分けて結果を返す。
 
@@ -964,6 +992,14 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             )
             return
 
+        # 受付メッセージを即時投稿 (重い処理の前にユーザーへ「受け付けた」と伝える)
+        await slack.post_message(
+            channel=channel,
+            text=build_ack_message(query),
+            request_id=request_id,
+            thread_ts=thread_ts,
+        )
+
         try:
             text, blocks = await disp.dispatch_auto(query, request_id, user_id)
         except Exception as e:
@@ -1021,6 +1057,13 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
 
         if not text:
             return
+
+        # 受付メッセージを即時投稿 (重い処理の前に「受け付けた」と伝える)
+        await slack.post_message(
+            channel=channel,
+            text=build_ack_message(text),
+            request_id=request_id,
+        )
 
         try:
             reply, blocks = await disp.dispatch_auto(text, request_id, user_id)
