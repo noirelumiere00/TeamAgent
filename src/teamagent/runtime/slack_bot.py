@@ -289,6 +289,37 @@ def _tiktok_error_reply(err: str) -> str:
     return "🎵 TikTok 検索でエラーが発生しました。少し時間をおいて再度お試しください。"
 
 
+def _format_oplog_response(out: Any) -> str:
+    """OperationLogOutput を Slack メッセージに整形する (ログ本文 + 構造化サマリ)。"""
+    header = f"*🧾 営業活動ログ* （{out.source_message_count} 件のやり取りから）"
+    fields: list[str] = []
+    if out.deal_phase:
+        fields.append(f"フェーズ: *{out.deal_phase}*")
+    if out.action:
+        fields.append(f"アクション: {out.action}")
+    if out.next_step:
+        fields.append(f"次の一手: {out.next_step}")
+    bant = out.bant
+    bant_parts = [
+        f"{label}: {val}"
+        for label, val in (
+            ("予算", bant.budget),
+            ("決裁", bant.authority),
+            ("課題", bant.need),
+            ("時期", bant.timeline),
+        )
+        if val
+    ]
+    parts = [header, "", out.log_entry]
+    if fields:
+        parts += ["", "*— CRM 項目 —*", " / ".join(fields)]
+    if bant_parts:
+        parts += [f"BANT: {' / '.join(bant_parts)}"]
+    if out.total_cost_usd:
+        parts += ["", f"_概算コスト: ${out.total_cost_usd:.4f}_"]
+    return "\n".join(parts)
+
+
 # Skill ごとの受付メッセージ (どの処理を始めたか + 想定待ち時間をユーザーに伝える)。
 # 重い処理 (動画/TikTok は実ブラウザや Gemini を使うため数十秒) ほど明示する価値が高い。
 _ACK_BY_SKILL: dict[str, str] = {
@@ -298,6 +329,7 @@ _ACK_BY_SKILL: dict[str, str] = {
     "proposal_review": "🔬 提案レビューを受け付けました。照合・診断しています…（15〜30秒）",
     "video_analysis": "🎬 動画分析を受け付けました。取得して解析しています…（30〜90秒）",
     "tiktok_search": "🎵 TikTok 検索を受け付けました。収集して分析しています…（30〜90秒）",
+    "operation_log": "🧾 営業ログ化を受け付けました。スレッドを読んでまとめています…（10〜20秒）",
 }
 _ACK_DEFAULT = "🤖 受け付けました。処理しています…"
 
@@ -713,14 +745,46 @@ class SkillDispatcher:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 
+    def get_oplog_skill(self) -> Any:
+        """OperationLogSkill をキャッシュして返す。"""
+        if "operation_log" in self._skill_cache:
+            return self._skill_cache["operation_log"]
+        from teamagent.skills.operation_log.skill import OperationLogSkill
+
+        instance = OperationLogSkill(prompt_version=os.environ.get("OPLOG_PROMPT_VERSION", "v1"))
+        logger.info("operation_log_skill_initialized")
+        self._skill_cache["operation_log"] = instance
+        return instance
+
+    async def run_oplog(
+        self, channel_id: str, thread_ts: str, request_id: str, user_id: str | None
+    ) -> Any:
+        """OperationLogSkill を別スレッドで実行 (Slack 取得 + Bedrock が同期 I/O)。"""
+        skill = self.get_oplog_skill()
+        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        from teamagent.skills.operation_log.schema import OperationLogInput
+
+        input_obj = OperationLogInput(channel_id=channel_id, thread_ts=thread_ts)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, skill.run, input_obj, ctx)
+
     async def dispatch_auto(
-        self, message: str, request_id: str, user_id: str | None
+        self,
+        message: str,
+        request_id: str,
+        user_id: str | None,
+        *,
+        channel_id: str | None = None,
+        thread_ts: str | None = None,
     ) -> tuple[str, list[dict[str, Any]] | None]:
         """メッセージ内容から Skill を自動判定して実行し、(text, blocks) を返す。
 
         スラッシュコマンド不要で、@メンション / DM の自然文から
-        search / clientkarte / proposal_draft / tiktok_search を振り分ける。曖昧なら search。
-        戻り値の blocks が None ならテキストのみ投稿する。
+        search / clientkarte / proposal_draft / tiktok_search / operation_log を振り分ける。
+        曖昧なら search。戻り値の blocks が None ならテキストのみ投稿する。
+
+        channel_id / thread_ts は operation_log がスレッド会話を取得するのに使う
+        (メンションされたスレッドを CRM ログ化する)。他 Skill では未使用。
         """
         from teamagent.skills.intent import detect_skill
 
@@ -779,6 +843,17 @@ class SkillDispatcher:
             except RuntimeError as e:
                 return _tiktok_error_reply(str(e)), None
             return _format_tiktok_response(out), None
+
+        if intent.skill == "operation_log":
+            # スレッド内でメンションされたらそのスレッドをログ化。スレッド外なら案内。
+            if not (channel_id and thread_ts):
+                return (
+                    "🧾 営業ログ化は、ログにしたい *スレッド内* で "
+                    "「@TeamAgent ログ化して」とメンションしてください。",
+                    None,
+                )
+            oplog = await self.run_oplog(channel_id, thread_ts, request_id, user_id)
+            return _format_oplog_response(oplog), None
 
         if intent.skill == "clientkarte" and intent.client_name:
             karte = await self.run_karte(intent.client_name, request_id, user_id)
@@ -1001,7 +1076,16 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         )
 
         try:
-            text, blocks = await disp.dispatch_auto(query, request_id, user_id)
+            # operation_log 用: スレッド内メンションなら、その親スレッドをログ化対象にする。
+            # event["thread_ts"] はスレッド内のときだけ存在 (トップレベルでは None)。
+            oplog_thread = event.get("thread_ts")
+            text, blocks = await disp.dispatch_auto(
+                query,
+                request_id,
+                user_id,
+                channel_id=channel if oplog_thread else None,
+                thread_ts=oplog_thread,
+            )
         except Exception as e:
             logger.exception("skill_dispatch_failed", request_id=request_id)
             # Sentry へ送信（DSN 未設定なら no-op）。スクラブは before_send で実施

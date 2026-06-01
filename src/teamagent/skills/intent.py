@@ -23,6 +23,14 @@ _DRAFT_RE = re.compile(
     r"|ドラフト|たたき台|提案骨子|どう提案"
 )
 
+# operation_log 起動トリガー: 「ログ化/活動ログ/営業ログ/CRM/議事録/記録して」等。
+# Slack スレッドの会話を CRM 営業ログに構造化する意図。karte より先に判定
+# (「記録」「ログ」は karte の「履歴」と紛れないよう明確な動詞・名詞のみ採用)。
+_OPLOG_RE = re.compile(
+    r"ログ化|活動ログ|営業ログ|商談ログ|CRM|議事録|"
+    r"(?:会話|やり取り|スレッド|商談).{0,4}(?:記録|ログ|まとめ)|記録して"
+)
+
 # clientkarte 起動トリガー: 「カルテ」または「(の)状況/近況/温度感/履歴/どうなってる」等
 _KARTE_TRIGGER = re.compile(r"カルテ|近況|温度感|どうなって|どんな感じ|今どう|状況|経緯|履歴")
 
@@ -194,6 +202,10 @@ def detect_skill(message: str) -> SkillIntent:
     # 1b. 提案ドラフト作成意図 (動詞が明確)
     if _DRAFT_RE.search(text):
         return SkillIntent(skill="proposal_draft", client_name=None, reason="draft trigger")
+
+    # 1c. 営業活動ログ (会話→CRM ログ)。カルテより先に判定。
+    if _OPLOG_RE.search(text):
+        return SkillIntent(skill="operation_log", client_name=None, reason="oplog trigger")
 
     # 2. クライアントカルテ (トリガー + クライアント名が抽出できたときのみ)
     if _KARTE_TRIGGER.search(text):
