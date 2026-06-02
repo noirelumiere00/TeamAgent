@@ -39,6 +39,7 @@ jobs:
             boto3 slack-sdk slack-bolt aiohttp httpx \
             'sentry-sdk[asyncio]>=2.18.0' \
             pyyaml pypdf \
+            google-auth google-api-python-client \
             pytest pytest-asyncio mypy ruff bandit
 
       - name: Ruff (lint)

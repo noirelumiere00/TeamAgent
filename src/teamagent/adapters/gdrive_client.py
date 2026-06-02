@@ -34,6 +34,11 @@ from typing import Any
 
 import structlog
 
+from teamagent.adapters.google_auth import (
+    build_oauth_credentials,
+    force_oauth_enabled,
+)
+
 # Day 7 (2026-05-27): SSL socket が無期限ハングする問題への対策。
 # 大 PDF download (8-10MB) で httplib2 のデフォルト無限 timeout が原因で固まることがある。
 # 60 秒で諦めて TimeoutError を上げさせ、上位の try/except でスキップさせる。
@@ -553,31 +558,23 @@ class GDriveClient:
         現状は雛形で NotImplementedError。S3-01〜S3-03 で GCP プロジェクトと OAuth
         同意画面・Service Account が用意できたら実装する。
         """
+        # 1. SA 鍵があり、かつ OAuth 強制でなければ Service Account
         sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        if sa_path:
+        if sa_path and not force_oauth_enabled():
             from google.oauth2 import service_account
 
             return service_account.Credentials.from_service_account_file(
                 sa_path, scopes=list(self._scopes)
             )
-        # OAuth refresh token パス（個人 OAuth）
-        refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN")
-        client_id = os.environ.get("GOOGLE_CLIENT_ID")
-        client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
-        if refresh_token and client_id and client_secret:
-            from google.oauth2.credentials import Credentials
-
-            return Credentials(
-                token=None,
-                refresh_token=refresh_token,
-                token_uri="https://oauth2.googleapis.com/token",
-                client_id=client_id,
-                client_secret=client_secret,
-                scopes=list(self._scopes),
-            )
+        # 2. 個人 OAuth（refresh token）。Drive のスコープは共有トークンの許可内なので
+        #    self._scopes をそのまま要求してよい（GOOGLE_OAUTH_SCOPES で上書き可）。
+        creds = build_oauth_credentials(self._scopes)
+        if creds is not None:
+            return creds
         raise NotImplementedError(
-            "GCP credentials が未設定です。Sprint 3 の S3-01〜S3-03 で OAuth クライアントを "
-            "用意してから本実装。テストでは service=Fake service を渡してください。"
+            "GCP credentials が未設定です。Service Account (GOOGLE_APPLICATION_CREDENTIALS) "
+            "または OAuth (GOOGLE_OAUTH_REFRESH_TOKEN + GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET) "
+            "を設定してください。テストでは service=Fake service を渡してください。"
         )
 
 

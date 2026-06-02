@@ -61,11 +61,17 @@ class VideoApprovalSkill(BaseSkill[VideoApprovalInput, VideoApprovalOutput]):
         prompt_version: str = "v1",
         drive_downloader: Downloader | None = None,
         video_downloader: Downloader | None = None,
+        proxy_fn: Callable[[bytes, str], tuple[bytes, str]] | None = None,
+        max_download_mb: int = 300,
     ) -> None:
         self._gemini = gemini
         self._prompt_version = prompt_version
         self._drive_downloader = drive_downloader
         self._video_downloader = video_downloader
+        self._proxy_fn = proxy_fn
+        # 納品動画は短尺でも高画質で 25〜50MB あるため、まず大きめに DL してから
+        # proxy(ffmpeg)で Gemini inline 上限以下へ縮める。max は OOM 防御の絶対上限。
+        self._max_download_mb = max_download_mb
 
     def _client(self) -> GeminiClient:
         if self._gemini is None:
@@ -77,7 +83,7 @@ class VideoApprovalSkill(BaseSkill[VideoApprovalInput, VideoApprovalOutput]):
             return self._drive_downloader(url)
         from teamagent.adapters.drive_video import download_drive_video
 
-        return download_drive_video(url, request_id=request_id)
+        return download_drive_video(url, request_id=request_id, max_mb=self._max_download_mb)
 
     def _download_other(self, url: str, request_id: str) -> tuple[bytes, str]:
         if self._video_downloader is not None:
@@ -85,6 +91,14 @@ class VideoApprovalSkill(BaseSkill[VideoApprovalInput, VideoApprovalOutput]):
         from teamagent.adapters.video_download import download_video
 
         return download_video(url, request_id=request_id)
+
+    def _ensure_under_limit(self, data: bytes, mime: str, request_id: str) -> tuple[bytes, str]:
+        """Gemini inline 上限を超える動画は ffmpeg proxy で縮める（テスト差し替え可）。"""
+        if self._proxy_fn is not None:
+            return self._proxy_fn(data, mime)
+        from teamagent.adapters.video_proxy import ensure_under_limit
+
+        return ensure_under_limit(data, mime, request_id=request_id)
 
     def run(self, input: VideoApprovalInput, ctx: SkillContext) -> VideoApprovalOutput:
         log = ctx.bind_logger(self.name)
@@ -122,6 +136,8 @@ class VideoApprovalSkill(BaseSkill[VideoApprovalInput, VideoApprovalOutput]):
                 if is_drive
                 else self._download_other(url, ctx.request_id)
             )
+            # Gemini inline 上限(~20MB)超なら ffmpeg proxy で縮めてから渡す
+            data, mime = self._ensure_under_limit(data, mime, ctx.request_id)
             resp = self._client().analyze_video_bytes(
                 data=data,
                 mime_type=mime,

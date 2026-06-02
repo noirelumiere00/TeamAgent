@@ -119,7 +119,10 @@ def download_drive_video(
     if gdrive is None:
         from teamagent.adapters.gdrive_client import GDriveClient
 
-        gdrive = GDriveClient.from_env()
+        # readonly=True → drive.readonly スコープ。個人 OAuth トークンが実際に持つのは
+        # drive.readonly（任意の閲覧可能ファイルを読める）であり、既定の drive.file は
+        # 「アプリが作成/開いたファイル」限定で他人作成の納品動画には 403/404 になる。
+        gdrive = GDriveClient.from_env(readonly=True)
 
     # 動画 bytes を取得 (GDriveClient.download_file_bytes は files.get_media)。
     # サイズはダウンロード後にチェックする (事前メタ取得 API は未実装のため)。
