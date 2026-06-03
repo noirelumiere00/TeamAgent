@@ -147,6 +147,7 @@ module = [
     "googleapiclient.*",
     "google",
     "google.oauth2.*",
+    "google_auth_oauthlib.*",
     "google.genai",
     "google.genai.*",
     "yt_dlp",
@@ -170,6 +171,7 @@ module = [
     "teamagent.adapters.gcalendar_client",
     "teamagent.adapters.gpeople_client",
     "teamagent.adapters.google_auth",
+    "teamagent.adapters.google_oauth_flow",
 ]
 disallow_untyped_calls = false
 
