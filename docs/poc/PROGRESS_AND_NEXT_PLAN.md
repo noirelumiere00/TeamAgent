@@ -76,8 +76,8 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
 ## 3. 重大ゲート / 意思決定事項（先に握るべき）
 1. **Node CLI を本番ランタイムに入れるか**：SDKは同梱Node CLIをsubprocess spawn。findings で「本番非持込＝死守ライン」と書いた一線を越える判断。ECS/Lambda に Node 24 を同梱する運用変更が伴う → **ゲート①で再確認**。
 2. **Mail/Drive 横断のデータガバナンス**：PII/DLP/同意/最小権限を満たす独立ゲート（Phase 6）。「自分のMail分析」は本人受信箱限定が大前提。
-3. **CLAUDE.md の更新**：先頭が今も「OpenClaw フル採用」のままで**今回の決定（SDK採用）と矛盾**。Claude Code が毎回読むので早急に訂正（OpenClaw→SDK、Step2の本番ラインも明記）。
-4. **ゲート①の日付**：資料間で **6/7 と 6/12** 不一致。確定要。
+3. ✅ **CLAUDE.md の矛盾を訂正済み**（poc/multiskill-orchestrator ブランチ・2026-06-03）：L13/L37/L420 の「OpenClaw フル採用で確定／不採用にしない」断定を「**再評価中・ゲート①(6/07)で最終確定。orchestrator PoC は SDK on Bedrock 採用・OpenClaw不採用を推奨**」へ修正（L168-178 の status-change 注記と整合）。プラットフォーム全体の採否はゲート①の領分として温存（断定回避）。※本ブランチのみの修正なので **main へは merge 時に反映**（または cherry-pick）。本番ブランチ feat/video-approval-sheet-writeback には非干渉。
+4. **ゲート①の日付（不一致の解消）**：**6/07＝ゲート①判断会議日**（CLAUDE.md/overview/findings で一致する支配的日付）、**6/12＝Sprint 2 W2 ウィンドウ末日**（2026-06-06〜06-12）。両者は別物で矛盾ではない（会議は週内の6/07）。最終確定日は会議主催者に要確認。※CLAUDE.md本体への日付補足追記は auto-mode が自己改変として拒否したため、本書に記載（CLAUDE.md L178 は既に「2026-06-07」で正）。
 
 ---
 
