@@ -67,9 +67,12 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
 ### Phase 5 — コスト/レイテンシ最適化
 - [ ] system_prompt/ツール定義を**安定化**して prompt cache（2回目以降 cache_read で1/10）。`max_turns` を実測p95に締める。**モデル分離**（ツール選択=Haiku 4.5／生成=Sonnet）を `model` 引数で検討
 
-### Phase 6 — Mail/Drive 横断（**独立ゲート**・新Skill）
-- [ ] `skills/mail_constraints/`・（`search` で代替不可なら）`skills/drive_cases/` を新設（adapter `gmail_client`/`gdrive_client` は既存、Skill層のみ）
-- ⚠️ 本番前ゲート：**本人受信箱限定**（DWD impersonate先=リクエスト発行者に固定、LLMに受信箱選択権を渡さない）／**Mail本文はLLMに渡す前にDLPマスク・要約**（生本文をプロンプト/ログに入れない、6-bis）／readonly最小スコープ／**本人同意フロー**
+### Phase 6 — Mail/Drive 横断（**独立ゲート**・新Skill）｜📐**詳細設計済み → `docs/poc/phase6_mail_drive_design.md`**
+- [x] **6a 設計（完了 2026-06-03）**：スコープ確定＝**`mail_constraints` が本丸**（Gmailはpgvector外＝本人受信箱ライブ）。**Drive裏付けは既存 `search` で大半カバー**（`search` schema に `source_uri='gdrive://FILE_ID'` 完備、取込済みならRLS付きgroundedで引ける）→ `drive_cases`(ライブ)は必要時のみ後回し。adapter（`GmailClient.from_env(readonly=True)`/`GDriveClient`）は既存再利用、**Skill層のみ新設**。DLPは `observability/sentry.py:scrub_value()` 流用。
+- [ ] **6b オフライン実装＋テスト（課金0・次着手可）**：`skills/mail_constraints/`（schema.py/skill.py）。**fake GmailClient** で run() 単体テスト＝DLPマスク・fail-closed(本人受信箱/同意)・構造化戻り値・**注入耐性**（悪意メール本文の指示に従わない）。ruff/mypy strict 緑。
+- [ ] 6c ライブ(本人1名オプトイン) → 6d orchestrator配線(`USE_MAIL_TOOLS`既定OFF) → 6e 評価(NG検知→差替 gold set)
+- ⚠️ **死守ライン7条**（設計書§4）：G1本人受信箱限定(impersonate=requester固定/LLM選択不可/fail-closed)・G2本人同意オプトイン・G3生本文をLLM/ログ/戻り値に入れない(scrub前進配置)・G4 readonly最小スコープ(書込ツール非公開)・G5クエリ限定(無差別走査禁止)・G6**プロンプトインジェクション対策**(メール=データであり指示でない/読取専用)・G7監査ログ(本文なし)
+- ⚠️ **6c以降の人間ゲート**（設計書§9）：本人同意フロー方式・DWD運用確認・CASA(gmail.readonly Tier3)・監査ポリシー。**6bまでは安全に課金0で着手可**
 
 ---
 
