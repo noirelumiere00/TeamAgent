@@ -58,7 +58,10 @@ def _build_search_skill() -> Any:
         rerank_pool_size=rerank_pool_size,
         min_relevance=min_relevance,
         min_relevance_fallback=min_relevance_fallback,
-        use_client_boost=_envflag("USE_CLIENT_BOOST"),
+        # client-boost は A/B で +4pp 実証済み・固有名詞のみ発火で副作用なし・DB障害時は
+        # fail-open（語彙取得失敗→ブースト無効）。よって orchestrator では既定 ON を採用
+        # （USE_CLIENT_BOOST=false で明示無効化は可能）。
+        use_client_boost=_envflag("USE_CLIENT_BOOST", "true"),
         use_aggregation_mode=_envflag("USE_AGGREGATION_MODE"),
         prompt_version=os.environ.get("PROMPT_VERSION", "v2d"),
         summary_max_tokens=summary_max_tokens,

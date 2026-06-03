@@ -36,6 +36,10 @@ from teamagent.orchestrator.eval import (  # noqa: E402
     summarize,
 )
 from teamagent.orchestrator.factory import build_production_tools  # noqa: E402
+from teamagent.orchestrator.faithfulness import (  # noqa: E402
+    FaithfulnessScore,
+    score_faithfulness,
+)
 from teamagent.orchestrator.sdk_runner import run_sdk_agent  # noqa: E402
 
 
@@ -54,7 +58,9 @@ def _flags_satisfied(case: GoldCase) -> bool:
     return all(os.environ.get(f, "").lower() in ("1", "true", "yes") for f in case.needs_flags)
 
 
-async def _run_one(case: GoldCase, model: str, user_email: str) -> tuple[CaseScore, float]:
+async def _run_one(
+    case: GoldCase, model: str, user_email: str
+) -> tuple[CaseScore, float, FaithfulnessScore]:
     result = await run_sdk_agent(
         goal=case.goal,
         request_id=f"eval-{case.id}",
@@ -69,7 +75,9 @@ async def _run_one(case: GoldCase, model: str, user_email: str) -> tuple[CaseSco
     )
     score = score_case(case, result.tool_calls, result.num_turns)
     cost = result.session_total_cost_usd or result.total_cost_usd
-    return score, float(cost)
+    # ⑤-g: 引用忠実性も常設指標化（捏造引用＝最終回答が実取得 chunk_id 以外を引用）。
+    faith = score_faithfulness(result.answer, result.available_chunk_ids)
+    return score, float(cost), faith
 
 
 async def _main() -> int:
@@ -87,6 +95,7 @@ async def _main() -> int:
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else len(GOLD_CASES)
 
     scores: list[CaseScore] = []
+    faiths: list[FaithfulnessScore] = []
     skipped: list[str] = []
     total_cost = 0.0
     print(f"==== Phase 4 orchestration eval（{min(limit, len(GOLD_CASES))} ケース上限）====\n")
@@ -95,19 +104,28 @@ async def _main() -> int:
             skipped.append(case.id)
             print(f"⏭️  SKIP {case.id}（needs_flags 未設定: {', '.join(case.needs_flags)}）")
             continue
-        score, cost = await _run_one(case, model, user_email)
+        score, cost, faith = await _run_one(case, model, user_email)
         total_cost += cost
         mark = "✅ PASS" if score.passed else "❌ FAIL"
+        fab = f" ⚠️捏造{list(faith.fabricated)}" if faith.fabricated else ""
         print(
-            f"{mark} {case.id}  tools={list(score.tools_called)} turns={score.num_turns} ${cost:.4f}"
+            f"{mark} {case.id}  tools={list(score.tools_called)} turns={score.num_turns} "
+            f"${cost:.4f}  cite={len(faith.valid)}/{len(faith.cited)}{fab}"
         )
         if not score.passed:
             print(f"        理由: {' / '.join(score.reasons)}")
         scores.append(score)
+        faiths.append(faith)
 
     print("\n==== サマリ ====")
     summary = summarize(scores)
     print(f"採点: {summary}")
+    # ⑤-g: 忠実性サマリ（捏造引用は 0 が望ましい＝回帰監視）。
+    total_fab = sum(len(f.fabricated) for f in faiths)
+    fab_cases = [s.case_id for s, f in zip(scores, faiths, strict=False) if f.fabricated]
+    print(f"忠実性: 捏造引用 {total_fab} 件（{len(fab_cases)}/{len(faiths)} ケース・0が望ましい）")
+    if fab_cases:
+        print(f"  ⚠️ 捏造のあったケース: {fab_cases}")
     if skipped:
         print(f"スキップ（needs_flags 未充足）: {skipped}")
     print(f"総コスト（SDK実コスト）: ${round(total_cost, 4)}")
