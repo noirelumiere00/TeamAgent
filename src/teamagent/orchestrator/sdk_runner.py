@@ -300,6 +300,11 @@ async def run_sdk_agent(
         max_turns=max_turns,
         max_budget_usd=cost_cap_usd,
         permission_mode="bypassPermissions",  # ヘッドレス（承認プロンプト無し）
+        # SDK 隔離モード: filesystem settings を一切読まない（setting_sources=None だと
+        # cwd の CLAUDE.md / .claude/settings.json を自動文脈化し、古い「DBは空かも」等の
+        # 記述にLLMが引っ張られツール結果を無視→ハルシ/暈す原因になる）。
+        # オーケストレーターは system_prompt + MCPツール + goal だけを文脈にする。
+        setting_sources=[],
     )
 
     result = SdkAgentResult(answer="")
