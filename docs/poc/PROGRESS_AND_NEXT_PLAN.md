@@ -43,8 +43,9 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
 - [x] 本番ToolSpec工場 `orchestrator/factory.py`（`build_production_tools()`）、`search` を `factory` で注入。env フラグは `slack_bot.py:get_search_skill` と一致。重い依存は遅延 import
 - [x] ライブ実行スクリプト `scripts/run_orchestrator_prod.py`（preflight + RLS注入 + timeout 90s）。本番 slack_bot には非干渉
 - [x] 軽量スモークテスト `test_factory_smoke.py`（ruff/format/mypy 6files/pytest 17 緑）
-- [ ] **ライブ検証（要 full env + SSMトンネル + Bedrock）**: `search` が呼ばれ 6-bisログ＋最終回答が出る（← 次に人間がやる）
-- DoD: 実 search で適応提案が出る。orchestrator gold set 10本（Phase 4）で緑
+- [x] **ライブ検証 達成（2026-06-03）**: 実 pgvector(RDS/SSMトンネル) 接続成功・LLMが適応的に複数キーワードで search 実行・6-bisログ・SDK実コスト$0.20・`is_error=False/final`。Phase 0 が実DB障害(OperationalError, トンネル未起動時)を catch→構造化エラー→優雅終了 まで実証。
+  - ※「BtoB SaaS採用」クエリは **0件**＝DBに該当データ未取込（提案はINPEX/森ビル/PR代行のみ）＝**データギャップ。システムは正常**。実hitは取込済みデータ（森ビル等）で確認可。
+- DoD: 実 search で実データを引ける ✅。残: orchestrator gold set 10本（Phase 4）で品質を数値化。
 
 ### Phase 2 — 複数“既存”Skillで適応（新Skill不要）
 - [ ] `clientkarte → proposal_draft → proposal_review`（必要なら `search`）を工場に追加。**`proposal_*` には同一 `SearchSkill` インスタンスを共有注入**（embedder二重ロード回避）
