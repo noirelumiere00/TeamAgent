@@ -7,7 +7,7 @@
 ---
 
 ## 0. 現在地（ひと言）
-**Phase 0→1→2 ライブ達成。2026-06-03 に「実コーパスからの grounded 出力」を実証（commit `9d415d6`）。** 実RDS(9420 chunks)から chunk_id/Drive URL/見積数値つきの根拠付き提案を、実Bedrockで生成できることを確認（hit 10/5/5・top_score 0.49-0.86・is_error=False・$0.106・ハルシ無し）。**さらに Phase 6（Mail/Drive横断）の 6a設計・6b実装・6d配線まで完了（commit `f69bcbd`、`mail_constraints` スキル＝『MailのNG→別案差替』の中核、課金0・pytest 10 passed・既定OFF）**。残: Phase 4（orchestration gold set 定量評価）、Phase 6c（実受信箱接続=人間ゲート後）、Phase 3（runtime統合=ゲート①）。
+**Phase 0→1→2 ライブ達成。2026-06-03 に「実コーパスからの grounded 出力」を実証（commit `9d415d6`）。** 実RDS(9420 chunks)から chunk_id/Drive URL/見積数値つきの根拠付き提案を、実Bedrockで生成できることを確認（hit 10/5/5・top_score 0.49-0.86・is_error=False・$0.106・ハルシ無し）。**さらに Phase 6（Mail/Drive横断）の 6a設計・6b実装・6d配線まで完了（commit `f69bcbd`、`mail_constraints` スキル＝『MailのNG→別案差替』の中核、課金0・pytest 10 passed・既定OFF）**。**Phase 4 のオフライン採点土台も完了（commit `0b7bd2b`、gold set 10本＋決定的採点・pytest 26緑）**。残: Phase 4 実Bedrock eval 実行（課金~$1・承認待ち）、Phase 6c（実受信箱接続=人間ゲート後）、Phase 3（runtime統合=ゲート①）。
 
 > ⚠️ **過去記録の訂正（重要）**: 旧版は Phase 1/2 を「DBは実質空・データギャップ・全クエリ0件」と記載していたが**誤り**。DB には実ショート動画/PR提案データ（9420 chunks）が存在し、RLS(email)で正常にアクセス可能。0件の真因は **3つのバグ**だった: ① SearchSkill要約モデルが実行リージョンと不一致（`jp.*` プロファイルを us-east-1 で呼び ValidationException）② `SEARCH_MIN_RELEVANCE=0.4` が borderline クエリの Rerank スコア(0.3)を足切り ③ SDKが cwd の CLAUDE.md を自動文脈化し古い記述でハルシ。①②③すべて対処済。
 
@@ -60,9 +60,10 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
 - [ ] 全クエリをorchestrator化しない（$0.10/run・レイテンシ増）。**起動ゲート**＝多段・横断・データ依存分岐を要する要求のみ。1ユーザー/日上限＋月次予算アラート
 - ⚠️ **ゲート判断**：本番ランタイムに **同梱Node CLI を持ち込む**＝findings Step2の「本番非持込ライン」を越える決定。ゲート①で明示再確認すること
 
-### Phase 4 — オーケストレーション eval（gold set）
-- [ ] 既存 gold set（検索hit rate中心・50ケース）とは**別軸**の orchestration gold set（goal→期待ツール列の部分集合／禁止手法回避／上限内）最低10本。temperature=0×複数seedで分散測定
-- DoD: 「期待ツール列を踏む率」「cost/turn分布」を数値化。CIは決定的mockのみ（課金ゼロ）、実Bedrock evalは手動/nightly
+### Phase 4 — オーケストレーション eval（gold set）｜**オフライン土台 完了**（commit `0b7bd2b`）
+- [x] **gold set 10本＋決定的採点ハーネス（課金0）**：`src/teamagent/orchestrator/eval.py`（`GoldCase`/`score_case`純関数/`summarize`/`GOLD_CASES`）。goal→期待ツール列の部分集合（`expect_all`/`expect_any`）・禁止（`forbid`）・反復上限（`max_turns`）・`needs_flags`。`sdk_runner` に `tool_calls`（呼び出し列）を追加（後方互換）。`tests/orchestrator/test_orchestration_eval.py` で採点の全分岐＋ゴールドセット健全性を検証（pytest 26緑）。
+- [ ] **実Bedrock eval 実行（課金 ~$1・手動ゲート）**：`scripts/eval_orchestration.py`（実装済・未実行）。非mail 8ケースを実行→「期待ツール列を踏む率」「cost/turn分布」を数値化。mail系2本は 6c ゲート後に `USE_MAIL_TOOLS=1` で評価。複数seed分散測定は次段。
+- DoD: 採点ロジックはCI決定的（課金0）✅。実数値化は手動eval実行で取得（コスト承認待ち）。
 
 ### Phase 5 — コスト/レイテンシ最適化
 - [ ] system_prompt/ツール定義を**安定化**して prompt cache（2回目以降 cache_read で1/10）。`max_turns` を実測p95に締める。**モデル分離**（ツール選択=Haiku 4.5／生成=Sonnet）を `model` 引数で検討
