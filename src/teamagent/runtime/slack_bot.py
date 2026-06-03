@@ -289,6 +289,41 @@ def _tiktok_error_reply(err: str) -> str:
     return "🎵 TikTok 検索でエラーが発生しました。少し時間をおいて再度お試しください。"
 
 
+def _video_approval_error_reply(err: str) -> str:
+    """VideoApproval の例外マーカーをユーザー向け案内に変換する。"""
+    if "VIDEO_PROXY_NO_FFMPEG" in err:
+        return (
+            "🎬 納品動画が大きく、軽量化に必要な ffmpeg がサーバに見つかりませんでした。"
+            "ffmpeg の導入が必要です。"
+        )
+    if "VIDEO_PROXY" in err:
+        return (
+            "🎬 納品動画の軽量化（ffmpeg 変換）に失敗しました。"
+            "ファイル形式をご確認のうえ再度お試しください。"
+        )
+    if "DRIVE_FILE_TOO_LARGE" in err:
+        return (
+            "🎬 納品動画の容量が大きすぎて取得できませんでした。"
+            "圧縮版か、別途 GCS 経由でのチェックをご検討ください。"
+        )
+    if "DRIVE_DOWNLOAD_FAILED" in err or "DRIVE_BAD_URL" in err:
+        return (
+            "🎬 Drive の納品動画を取得できませんでした（URL かアクセス権の可能性）。"
+            "シートの FIX動画URL と共有設定をご確認ください。"
+        )
+    if "GEMINI" in err:
+        return (
+            "🎬 動画審査は Gemini の認証設定後に有効化されます"
+            "（Vertex AI: GEMINI_USE_VERTEX、または GEMINI_API_KEY）。"
+        )
+    if "invalid_scope" in err or "insufficient" in err.lower():
+        return (
+            "🎬 シート/Drive の読取権限が不足しています（OAuth スコープ）。"
+            "GOOGLE_FORCE_OAUTH=1 と個人 OAuth の設定をご確認ください。"
+        )
+    return "🎬 動画の一次チェック中にエラーが発生しました。"
+
+
 def _format_oplog_response(out: Any) -> str:
     """OperationLogOutput を Slack メッセージに整形する (ログ本文 + 構造化サマリ)。"""
     header = f"*🧾 営業活動ログ* （{out.source_message_count} 件のやり取りから）"
@@ -328,6 +363,7 @@ _ACK_BY_SKILL: dict[str, str] = {
     "proposal_draft": "📝 提案ドラフトを受け付けました。過去提案を参照しています…（15〜30秒）",
     "proposal_review": "🔬 提案レビューを受け付けました。照合・診断しています…（15〜30秒）",
     "video_analysis": "🎬 動画分析を受け付けました。取得して解析しています…（30〜90秒）",
+    "video_approval": "🎬 動画の一次チェックを受け付けました。オリエンと照合中…（30〜90秒）",
     "tiktok_search": "🎵 TikTok 検索を受け付けました。収集して分析しています…（30〜90秒）",
     "operation_log": "🧾 営業ログ化を受け付けました。スレッドを読んでまとめています…（10〜20秒）",
 }
@@ -768,6 +804,94 @@ class SkillDispatcher:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 
+    def get_video_approval_skill(self) -> Any:
+        """VideoApprovalSkill をキャッシュして返す (Gemini/Drive は遅延解決)。"""
+        if "video_approval" in self._skill_cache:
+            return self._skill_cache["video_approval"]
+        from teamagent.skills.video_approval.skill import VideoApprovalSkill
+
+        instance = VideoApprovalSkill(
+            prompt_version=os.environ.get("VIDEO_APPROVAL_PROMPT_VERSION", "v1")
+        )
+        logger.info("video_approval_skill_initialized")
+        self._skill_cache["video_approval"] = instance
+        return instance
+
+    def _extract_orientation(self, sheet_id: str, management_no: str, request_id: str) -> Any:
+        """案件シートから 1 クリエイティブ分のオリエン + 納品動画URLを取り出す (同期 I/O)。"""
+        from teamagent.skills.video_approval.sheet_orientation import OrientationExtractor
+
+        extractor = OrientationExtractor(
+            client_name=os.environ.get("VIDEO_APPROVAL_CLIENT_NAME") or None
+        )
+        return extractor.extract(sheet_id, management_no, request_id=request_id)
+
+    async def run_video_approval(
+        self,
+        management_no: str | None,
+        request_id: str,
+        user_id: str | None,
+        *,
+        sheet_id: str | None = None,
+    ) -> str:
+        """管理番号 → オリエン抽出 → 納品動画 DL → 一次FB審査 → Slack 整形文を返す。
+
+        テスト段階の出力先は Slack。シート列への書込は spreadsheets 再認証後に解禁。
+        失敗系はユーザー向けの案内文に変換して返す（例外は投げない）。
+        """
+        resolved_sheet = sheet_id or os.environ.get("VIDEO_APPROVAL_SHEET_ID")
+        if not resolved_sheet:
+            return (
+                "🎬 審査対象のスプレッドシートが未設定です。"
+                "メッセージにシート URL を含めるか、VIDEO_APPROVAL_SHEET_ID を設定してください。"
+            )
+        if not management_no:
+            return (
+                "🎬 管理番号を指定してください。例: `@TeamAgent 動画チェック E01-01`\n"
+                "（管理番号は投稿管理シートの B 列の値です）"
+            )
+
+        loop = asyncio.get_running_loop()
+        try:
+            extract = await loop.run_in_executor(
+                None, self._extract_orientation, resolved_sheet, management_no, request_id
+            )
+        except Exception as e:  # シート読取失敗 (権限/スコープ等)
+            logger.exception("video_approval_extract_failed", request_id=request_id)
+            return _video_approval_error_reply(str(e))
+
+        if extract is None:
+            return (
+                f"🎬 管理番号 `{management_no}` が投稿管理シートに見つかりませんでした。"
+                "番号をご確認ください。"
+            )
+        if not extract.has_drive_video:
+            current = extract.video_url or "（空）"
+            return (
+                f"🎬 `{management_no}` はまだ納品動画（Drive URL）が入っていません"
+                f"（現在の値: {current}）。編集者の入稿後に再度お試しください。"
+            )
+
+        skill = self.get_video_approval_skill()
+        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        from teamagent.skills.video_approval.schema import VideoApprovalInput
+
+        input_obj = VideoApprovalInput(orientation=extract.orientation, video_url=extract.video_url)
+        try:
+            out = await loop.run_in_executor(None, skill.run, input_obj, ctx)
+        except Exception as e:  # Drive DL / Gemini 失敗
+            logger.exception("video_approval_run_failed", request_id=request_id)
+            return _video_approval_error_reply(str(e))
+
+        from teamagent.skills.video_approval.sheet_writeback import format_check_slack
+
+        return format_check_slack(
+            out,
+            management_no=management_no,
+            creative_name=extract.orientation.main_message,
+            video_url=extract.video_url,
+        )
+
     async def dispatch_auto(
         self,
         message: str,
@@ -796,6 +920,12 @@ class SkillDispatcher:
             client_name=intent.client_name,
             reason=intent.reason,
         )
+
+        if intent.skill == "video_approval":
+            text = await self.run_video_approval(
+                intent.management_no, request_id, user_id, sheet_id=intent.sheet_id
+            )
+            return text, None
 
         if intent.skill == "video_analysis" and intent.video_urls:
             # 複数 URL は並行分析 + 横断まとめ (per-item 失敗は内部で握りつぶす)

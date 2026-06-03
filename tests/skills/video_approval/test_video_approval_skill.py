@@ -174,3 +174,30 @@ def test_malformed_json_still_returns_feedback(orientation: OrientationBrief) ->
     assert "一次FB" in out.feedback_text
     # JSON 無し → issues 空 → verdict は OK にフォールバック (issuesベース)
     assert out.issues == []
+
+
+def test_large_video_passes_through_proxy(orientation: OrientationBrief) -> None:
+    """DL した動画は proxy(ffmpeg縮小)を通してから Gemini に渡る。"""
+    gemini = MagicMock()
+    gemini.analyze_video_bytes.return_value = _resp(_LLM_OK)
+    proxy_calls: list[tuple[bytes, str]] = []
+
+    def _proxy(data: bytes, mime: str) -> tuple[bytes, str]:
+        proxy_calls.append((data, mime))
+        return b"small-proxy", "video/mp4"
+
+    skill = VideoApprovalSkill(
+        gemini=gemini,
+        drive_downloader=lambda u: (b"BIG-RAW-BYTES", "video/mp4"),
+        proxy_fn=_proxy,
+    )
+    skill.run(
+        VideoApprovalInput(
+            orientation=orientation,
+            video_url="https://drive.google.com/file/d/ABC123ABC123ABC123ABC123x/view",
+        ),
+        ctx=SkillContext(),
+    )
+    assert proxy_calls == [(b"BIG-RAW-BYTES", "video/mp4")]
+    # Gemini に渡るのは proxy 後の bytes
+    assert gemini.analyze_video_bytes.call_args.kwargs["data"] == b"small-proxy"

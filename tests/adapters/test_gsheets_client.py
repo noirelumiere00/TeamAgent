@@ -34,10 +34,15 @@ class _FakeValuesResource:
     def __init__(self, get_response: Any) -> None:
         self._get = get_response
         self.last_get_kwargs: dict[str, Any] = {}
+        self.update_calls: list[dict[str, Any]] = []
 
     def get(self, **kwargs: Any) -> _FakeReq:
         self.last_get_kwargs = kwargs
         return _FakeReq(self._get)
+
+    def update(self, **kwargs: Any) -> _FakeReq:
+        self.update_calls.append(kwargs)
+        return _FakeReq({"updatedCells": 1})
 
 
 class _FakeSpreadsheetsResource:
@@ -257,8 +262,127 @@ def test_build_credentials_raises_when_nothing_configured(
         "GOOGLE_OAUTH_REFRESH_TOKEN",
         "GOOGLE_CLIENT_ID",
         "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_FORCE_OAUTH",
     ):
         monkeypatch.delenv(k, raising=False)
     client = GSheetsClient(service=None)
     with pytest.raises(NotImplementedError):
         client._build_credentials()
+
+
+def _set_oauth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_OAUTH_REFRESH_TOKEN", "rt-xyz")
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "csecret")
+    monkeypatch.delenv("GOOGLE_OAUTH_SCOPES", raising=False)
+
+
+def test_build_credentials_oauth_uses_drive_scope_not_spreadsheets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SA 無し + OAuth env のとき、Sheets でも drive.readonly を要求する。
+
+    共有リフレッシュトークンは spreadsheets.* を持たないため、drive.readonly で読む。
+    """
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("GOOGLE_FORCE_OAUTH", raising=False)
+    _set_oauth_env(monkeypatch)
+
+    from google.oauth2.credentials import Credentials
+
+    creds = GSheetsClient.from_env()._build_credentials()
+    assert isinstance(creds, Credentials)
+    assert "https://www.googleapis.com/auth/drive.readonly" in creds.scopes
+    assert "https://www.googleapis.com/auth/spreadsheets.readonly" not in creds.scopes
+
+
+def test_build_credentials_force_oauth_skips_service_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GOOGLE_FORCE_OAUTH=1 なら SA 鍵があっても OAuth を使う。
+
+    組織ポリシーで SA 共有が弾かれるため、個人 OAuth を強制するのが本フローの肝。
+    """
+    # 実在しないパスでも、force なら読まれないのでOK
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/sa.json")
+    monkeypatch.setenv("GOOGLE_FORCE_OAUTH", "1")
+    _set_oauth_env(monkeypatch)
+
+    from google.oauth2.credentials import Credentials
+
+    creds = GSheetsClient.from_env()._build_credentials()
+    assert isinstance(creds, Credentials)
+    assert "https://www.googleapis.com/auth/drive.readonly" in creds.scopes
+
+
+def test_build_credentials_uses_service_account_when_not_forced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """force でなければ SA を優先する（SA 経路に入ることをモックで確認）。"""
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/some/sa.json")
+    monkeypatch.delenv("GOOGLE_FORCE_OAUTH", raising=False)
+
+    import google.oauth2.service_account as sa_mod
+
+    called: dict[str, Any] = {}
+
+    def _fake_from_file(path: str, scopes: list[str]) -> str:
+        called["path"] = path
+        called["scopes"] = scopes
+        return "SA_CREDS"
+
+    monkeypatch.setattr(sa_mod.Credentials, "from_service_account_file", _fake_from_file)
+    creds = GSheetsClient.from_env()._build_credentials()
+    assert creds == "SA_CREDS"
+    assert called["path"] == "/some/sa.json"
+    assert "https://www.googleapis.com/auth/spreadsheets.readonly" in called["scopes"]
+
+
+def test_build_credentials_oauth_write_uses_spreadsheets_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from_env(write=True) の OAuth 経路は spreadsheets スコープを要求する。"""
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("GOOGLE_FORCE_OAUTH", raising=False)
+    _set_oauth_env(monkeypatch)
+
+    from google.oauth2.credentials import Credentials
+
+    creds = GSheetsClient.from_env(write=True)._build_credentials()
+    assert isinstance(creds, Credentials)
+    assert "https://www.googleapis.com/auth/spreadsheets" in creds.scopes
+    # 読取専用 drive スコープではない（書込なので）
+    assert "https://www.googleapis.com/auth/drive.readonly" not in creds.scopes
+
+
+# -----------------------------------------------------------
+# update_single_cell（削除ゼロの砦）
+# -----------------------------------------------------------
+def test_update_single_cell_writes_exactly_one_cell() -> None:
+    fake = FakeSheetsService()
+    client = GSheetsClient(service=fake)
+    client.update_single_cell(
+        sheet_id="sid", tab_name="投稿管理シート", cell="AB5", value="判定:要修正", request_id="r"
+    )
+    calls = fake.spreadsheets().values().update_calls
+    assert len(calls) == 1
+    kw = calls[0]
+    assert kw["range"] == "'投稿管理シート'!AB5"
+    assert kw["valueInputOption"] == "RAW"  # 数式インジェクション防止
+    assert kw["body"] == {"values": [["判定:要修正"]]}
+
+
+@pytest.mark.parametrize(
+    "bad_cell",
+    ["A1:B2", "A1:A100", "AB", "5", "A0", "ab5", "'シート'!A1", "A1 ", "", "A1:Z"],
+)
+def test_update_single_cell_rejects_non_single_cell(bad_cell: str) -> None:
+    """範囲・複数列・不正 A1 は拒否（既存データ削除防止の核）。"""
+    fake = FakeSheetsService()
+    client = GSheetsClient(service=fake)
+    with pytest.raises(ValueError):
+        client.update_single_cell(
+            sheet_id="sid", tab_name="t", cell=bad_cell, value="x", request_id="r"
+        )
+    # 拒否時は API を一切叩かない
+    assert fake.spreadsheets().values().update_calls == []

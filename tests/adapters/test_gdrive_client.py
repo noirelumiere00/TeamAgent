@@ -350,9 +350,28 @@ def test_build_credentials_raises_when_nothing_configured(
     monkeypatch.delenv("GOOGLE_OAUTH_REFRESH_TOKEN", raising=False)
     monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
     monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("GOOGLE_FORCE_OAUTH", raising=False)
     client = GDriveClient(credentials=None, service=None)
     with pytest.raises(NotImplementedError):
         client._build_credentials()
+
+
+def test_build_credentials_force_oauth_skips_service_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GOOGLE_FORCE_OAUTH=1 なら SA 鍵があっても OAuth を使う（組織ポリシー回避）。"""
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/sa.json")
+    monkeypatch.setenv("GOOGLE_FORCE_OAUTH", "1")
+    monkeypatch.setenv("GOOGLE_OAUTH_REFRESH_TOKEN", "rt-xyz")
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "csecret")
+    monkeypatch.delenv("GOOGLE_OAUTH_SCOPES", raising=False)
+
+    from google.oauth2.credentials import Credentials
+
+    creds = GDriveClient.from_env(readonly=True)._build_credentials()
+    assert isinstance(creds, Credentials)
+    assert "https://www.googleapis.com/auth/drive.readonly" in creds.scopes
 
 
 def test_scopes_default_to_drive_file() -> None:

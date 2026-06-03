@@ -165,3 +165,50 @@ def test_tiktok_url_still_routes_to_video_analysis() -> None:
     """TikTok の動画 URL は検索ではなく動画分析へ (URL が最優先)。"""
     intent = detect_skill("https://www.tiktok.com/@u/video/123 を分析して")
     assert intent.skill == "video_analysis"
+
+
+# -----------------------------------------------------------
+# video_approval (動画一次FB審査) の自動ルーティング
+# -----------------------------------------------------------
+@pytest.mark.parametrize(
+    "msg,mno",
+    [
+        ("動画チェック E01-01", "E01-01"),
+        ("E01-01 の動画チェックして", "E01-01"),
+        ("E01-01の動画を確認して", "E01-01"),  # 助詞が直後でも管理番号を拾う
+        ("納品チェック 1-1", "1-1"),
+        ("E08-02-c の一次FBお願い", "E08-02-c"),
+        ("テロップチェックして E01-02", "E01-02"),
+    ],
+)
+def test_routes_to_video_approval(msg: str, mno: str) -> None:
+    intent = detect_skill(msg)
+    assert intent.skill == "video_approval"
+    assert intent.management_no == mno
+
+
+def test_video_approval_extracts_sheet_id() -> None:
+    intent = detect_skill(
+        "動画チェック E01-01 "
+        "https://docs.google.com/spreadsheets/d/1Og-679JNTc-ecYyw27u6yBRGaaEq1N6y9fZX2wXuyvY/edit#gid=0"
+    )
+    assert intent.skill == "video_approval"
+    assert intent.sheet_id == "1Og-679JNTc-ecYyw27u6yBRGaaEq1N6y9fZX2wXuyvY"
+    assert intent.management_no == "E01-01"
+
+
+def test_video_approval_keyword_without_number_still_routes() -> None:
+    """キーワードはあるが管理番号が無い → video_approval に倒し、番号 None (案内文を返す)。"""
+    intent = detect_skill("動画チェックお願いします")
+    assert intent.skill == "video_approval"
+    assert intent.management_no is None
+
+
+def test_plain_check_still_routes_to_review() -> None:
+    """「動画/納品」を伴わない「チェックして」は従来通り proposal_review。"""
+    assert detect_skill("この提案チェックして").skill == "proposal_review"
+
+
+def test_bare_management_no_without_keyword_not_video_approval() -> None:
+    """管理番号だけ・動画文脈なしは video_approval に誤爆させない。"""
+    assert detect_skill("E01-01 ってどうなってる").skill != "video_approval"

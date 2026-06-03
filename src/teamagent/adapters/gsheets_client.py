@@ -34,13 +34,22 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
 
+from teamagent.adapters.google_auth import (
+    build_oauth_credentials,
+    force_oauth_enabled,
+)
+
 logger = structlog.get_logger(__name__)
+
+# 単一セル A1（例 "AB5"）だけを許す。範囲（":"）や複数列を弾く＝既存データ削除防止の要。
+_SINGLE_CELL_RE = re.compile(r"^[A-Z]+[1-9][0-9]*$")
 
 
 # -----------------------------------------------------------
@@ -92,6 +101,19 @@ class GSheetsClient:
     SCOPES_READONLY: tuple[str, ...] = ("https://www.googleapis.com/auth/spreadsheets.readonly",)
     # 書き込み必要な場合（Sprint 4 で要件出たら）
     SCOPES_WRITE: tuple[str, ...] = ("https://www.googleapis.com/auth/spreadsheets",)
+
+    # --- 個人 OAuth で読む場合のスコープ ---------------------------------
+    # 共有リフレッシュトークンは spreadsheets.* スコープを持たないため、
+    # 代わりに drive.readonly で読む（Sheets API v4 は drive.readonly でも読取可）。
+    # 詳細は adapters/google_auth.py を参照。
+    SCOPES_OAUTH_READONLY: tuple[str, ...] = (
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+    )
+    # 個人 OAuth で書く場合（AI一次チェック列への追記）。
+    # spreadsheets スコープが refresh_token に含まれている必要がある
+    # （scripts/get_google_refresh_token.py で再認証して付与）。
+    SCOPES_OAUTH_WRITE: tuple[str, ...] = ("https://www.googleapis.com/auth/spreadsheets",)
 
     def __init__(
         self,
@@ -232,6 +254,57 @@ class GSheetsClient:
             row_count=len(rows),
         )
 
+    def update_single_cell(
+        self,
+        *,
+        sheet_id: str,
+        tab_name: str,
+        cell: str,
+        value: str,
+        request_id: str,
+    ) -> None:
+        """**1 セルだけ**に値を書き込む（AI一次チェック列への追記用）。
+
+        「既存データを絶対に削除しない」ための設計上の砦:
+        - 受け付けるのは単一セル A1（例 ``"AB5"``）のみ。範囲指定（``A1:B2``）や
+          複数列・複数行は ``ValueError`` で拒否する。万一バグっても 1 セルしか触れない。
+        - 使う API は ``values.update`` だけ。``values.clear`` / ``batchClear`` /
+          ``batchUpdate(deleteDimension/deleteRange)`` 等の**削除系は本クラスに実装しない**。
+        - ``valueInputOption=RAW``: 文字列をそのまま格納（先頭 ``=`` を数式解釈させない＝
+          数式インジェクション防止。他セルへ波及する関数を書かせない）。
+
+        呼び出し側（sheet_writeback）は必ず「既存データの無い列」を選んで書くこと。
+        """
+        if not _SINGLE_CELL_RE.match(cell):
+            raise ValueError(
+                f"update_single_cell は単一セル A1 のみ許可（受領: {cell!r}）。"
+                "範囲・複数列は既存データ削除防止のため禁止。"
+            )
+        service = self._ensure_service()
+        full_range = f"'{tab_name}'!{cell}"
+        start = time.perf_counter()
+        (
+            service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=sheet_id,
+                range=full_range,
+                valueInputOption="RAW",
+                body={"values": [[value]]},
+            )
+            .execute()
+        )
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "gsheets_update_single_cell",
+            request_id=request_id,
+            sheet_id=sheet_id,
+            tab_name=tab_name,
+            cell=cell,
+            value_len=len(value),
+            latency_ms=latency_ms,
+        )
+
     # -------------------------------------------------------
     # 内部
     # -------------------------------------------------------
@@ -246,30 +319,33 @@ class GSheetsClient:
         return self._service
 
     def _build_credentials(self) -> Any:
+        # 1. SA 鍵があり、かつ OAuth 強制でなければ Service Account
         sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        if sa_path:
+        if sa_path and not force_oauth_enabled():
             from google.oauth2 import service_account
 
             return service_account.Credentials.from_service_account_file(
                 sa_path, scopes=list(self._scopes)
             )
-        refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN")
-        client_id = os.environ.get("GOOGLE_CLIENT_ID")
-        client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
-        if refresh_token and client_id and client_secret:
-            from google.oauth2.credentials import Credentials
 
-            return Credentials(
-                token=None,
-                refresh_token=refresh_token,
-                token_uri="https://oauth2.googleapis.com/token",
-                client_id=client_id,
-                client_secret=client_secret,
-                scopes=list(self._scopes),
-            )
+        # 2. 個人 OAuth。
+        #    - 読取: 共有トークンは spreadsheets.* を持たないため drive.readonly で読む
+        #      （Sheets API v4 は drive.readonly でも読取可）。
+        #    - 書込: spreadsheets スコープを要求（refresh_token に付与済みが前提。
+        #      未付与なら invalid_scope。scripts/get_google_refresh_token.py で再認証）。
+        oauth_scopes = (
+            self.SCOPES_OAUTH_WRITE
+            if self._scopes == self.SCOPES_WRITE
+            else self.SCOPES_OAUTH_READONLY
+        )
+        creds = build_oauth_credentials(oauth_scopes)
+        if creds is not None:
+            return creds
+
         raise NotImplementedError(
-            "Google credentials が未設定です。Sprint 3 の S3-01 で OAuth クライアントを "
-            "用意してから本実装。テストでは service=Fake service を渡してください。"
+            "Google credentials が未設定です。Service Account (GOOGLE_APPLICATION_CREDENTIALS) "
+            "または OAuth (GOOGLE_OAUTH_REFRESH_TOKEN + GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET) "
+            "を設定してください。テストでは service=Fake service を渡してください。"
         )
 
 

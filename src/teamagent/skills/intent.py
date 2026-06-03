@@ -86,17 +86,36 @@ _SEARCH_VERB_SUFFIX = re.compile(
 )
 
 
+# video_approval (動画一次FB審査) 起動トリガー: 「動画/納品 + チェック/審査/FB」または
+# 「一次FB」「オリエン照合」「テロップチェック」。proposal_review (「チェックして」) より
+# 先に、かつ「動画/納品」を伴う場合のみ採るので誤爆しにくい。
+_VIDEO_APPROVAL_RE = re.compile(
+    r"動画.{0,4}(?:チェック|審査|フィードバック|ＦＢ|FB|確認|レビュー)"
+    r"|納品.{0,4}(?:チェック|確認|ＦＢ|FB|審査)"
+    r"|一次\s*(?:ＦＢ|FB)|オリエン.{0,3}照合|テロップ.{0,3}チェック"
+)
+# 管理番号 (例: E01-01 / 1-1 / E08-02-c)。日本語助詞 (の/を) が直後に来ても拾えるよう、
+# 境界は「数字の連続」だけを弾く (前後が数字＝より長い番号の一部、なら採らない)。
+_MANAGEMENT_NO_RE = re.compile(r"(?<!\d)([A-Za-z]{0,3}\d{1,3}-\d{1,3}(?:-[A-Za-z0-9]{1,3})?)(?!\d)")
+# メッセージ中の Google スプレッドシート URL から sheet_id を拾う (任意指定)。
+_SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]{20,})")
+
+
 @dataclass(frozen=True)
 class SkillIntent:
     """自動ルーティングの判定結果。"""
 
-    skill: str  # search|clientkarte|proposal_draft|proposal_review|video_analysis|tiktok_search
+    # search|clientkarte|proposal_draft|proposal_review|video_analysis|tiktok_search|
+    # operation_log|video_approval
+    skill: str
     client_name: str | None  # clientkarte のときのみ抽出
     reason: str
     video_url: str | None = None  # video_analysis 単一のときの先頭 URL (後方互換)
     video_urls: tuple[str, ...] = ()  # video_analysis の全 URL (複数一括対応)
     query: str | None = None  # tiktok_search の検索語
     search_type: str = "keyword"  # tiktok_search: keyword | hashtag
+    management_no: str | None = None  # video_approval: 審査するクリエイティブの管理番号
+    sheet_id: str | None = None  # video_approval: メッセージで明示されたシート (任意)
 
 
 def _clean_url(raw: str) -> str:
@@ -194,6 +213,19 @@ def detect_skill(message: str) -> SkillIntent:
                 query=q,
                 search_type=stype,
             )
+
+    # 0c. 動画一次FB審査 (オリエン照合)。「動画/納品 + チェック」+ 管理番号で判定。
+    # proposal_review の「チェックして」より先に、かつ「動画/納品/一次FB」を伴うときのみ。
+    if _VIDEO_APPROVAL_RE.search(text):
+        mno = _MANAGEMENT_NO_RE.search(text)
+        sid = _SHEET_ID_RE.search(text)
+        return SkillIntent(
+            skill="video_approval",
+            client_name=None,
+            reason="video approval trigger",
+            management_no=mno.group(1) if mno else None,
+            sheet_id=sid.group(1) if sid else None,
+        )
 
     # 1a. 提案レビュー意図 (レビュー/添削/診断)。draft より先に判定。
     if _REVIEW_RE.search(text):
