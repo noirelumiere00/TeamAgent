@@ -94,3 +94,12 @@ def test_mail_cases_are_flagged() -> None:
         uses_mail = "mail_constraints" in (*c.expect_all, *c.expect_any)
         if uses_mail:
             assert "USE_MAIL_TOOLS" in c.needs_flags, f"{c.id}: USE_MAIL_TOOLS 未タグ"
+
+
+def test_review_case_passes_with_proposal_review_only() -> None:
+    """proposal_review は内部で過去事例を検索(self-grounding)するため、search を別途
+    呼ばなくても合格すべき。2026-06-03 の実eval で得た校正（当初 expect_any=('search',)
+    は誤りだった）の回帰ガード。"""
+    case = next(c for c in GOLD_CASES if c.id == "review_existing_idea")
+    s = score_case(case, ["proposal_review"], num_turns=2)
+    assert s.passed, s.reasons

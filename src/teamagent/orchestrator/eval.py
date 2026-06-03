@@ -147,9 +147,11 @@ GOLD_CASES: tuple[GoldCase, ...] = (
         id="review_existing_idea",
         goal="『インフルエンサータイアップで認知拡大』という案を、過去の勝ち筋/失注理由と照合して診断して",
         expect_all=("proposal_review",),
-        expect_any=("search",),
+        # 注: proposal_review は内部で過去事例を pgvector+rerank で検索（self-grounding）する。
+        # よって別途 search を必須にしない（2026-06-03 実eval で agent は proposal_review 単独で
+        # 根拠つき診断を生成。当初の expect_any=("search",) は誤りだったため除去）。
         max_turns=8,
-        note="既存案のレビュー。",
+        note="既存案のレビュー。proposal_review が自前で過去事例を引くため search は任意。",
     ),
     GoldCase(
         id="client_then_propose",

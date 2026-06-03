@@ -7,7 +7,7 @@
 ---
 
 ## 0. 現在地（ひと言）
-**Phase 0→1→2 ライブ達成。2026-06-03 に「実コーパスからの grounded 出力」を実証（commit `9d415d6`）。** 実RDS(9420 chunks)から chunk_id/Drive URL/見積数値つきの根拠付き提案を、実Bedrockで生成できることを確認（hit 10/5/5・top_score 0.49-0.86・is_error=False・$0.106・ハルシ無し）。**さらに Phase 6（Mail/Drive横断）の 6a設計・6b実装・6d配線まで完了（commit `f69bcbd`、`mail_constraints` スキル＝『MailのNG→別案差替』の中核、課金0・pytest 10 passed・既定OFF）**。**Phase 4 のオフライン採点土台も完了（commit `0b7bd2b`、gold set 10本＋決定的採点・pytest 26緑）**。残: Phase 4 実Bedrock eval 実行（課金~$1・承認待ち）、Phase 6c（実受信箱接続=人間ゲート後）、Phase 3（runtime統合=ゲート①）。
+**Phase 0→1→2 ライブ達成。2026-06-03 に「実コーパスからの grounded 出力」を実証（commit `9d415d6`）。** 実RDS(9420 chunks)から chunk_id/Drive URL/見積数値つきの根拠付き提案を、実Bedrockで生成できることを確認（hit 10/5/5・top_score 0.49-0.86・is_error=False・$0.106・ハルシ無し）。**さらに Phase 6（Mail/Drive横断）の 6a設計・6b実装・6d配線まで完了（commit `f69bcbd`、`mail_constraints` スキル＝『MailのNG→別案差替』の中核、課金0・pytest 10 passed・既定OFF）**。**Phase 4 完了（commit `0b7bd2b`＋実eval 2026-06-03）**：gold set 10本＋決定的採点（pytest 27緑）、実Bedrock eval で **実質 8/8（100%）ルーティング・$0.76**、唯一の不合格はゴールド校正欠陥を検出（proposal_review の self-grounding）＝評価が機能。残: Phase 6c（実受信箱接続=人間ゲート後）、Phase 3（runtime統合=ゲート①）、（任意）複数seed分散測定・Phase 5コスト最適化。
 
 > ⚠️ **過去記録の訂正（重要）**: 旧版は Phase 1/2 を「DBは実質空・データギャップ・全クエリ0件」と記載していたが**誤り**。DB には実ショート動画/PR提案データ（9420 chunks）が存在し、RLS(email)で正常にアクセス可能。0件の真因は **3つのバグ**だった: ① SearchSkill要約モデルが実行リージョンと不一致（`jp.*` プロファイルを us-east-1 で呼び ValidationException）② `SEARCH_MIN_RELEVANCE=0.4` が borderline クエリの Rerank スコア(0.3)を足切り ③ SDKが cwd の CLAUDE.md を自動文脈化し古い記述でハルシ。①②③すべて対処済。
 
@@ -62,7 +62,9 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
 
 ### Phase 4 — オーケストレーション eval（gold set）｜**オフライン土台 完了**（commit `0b7bd2b`）
 - [x] **gold set 10本＋決定的採点ハーネス（課金0）**：`src/teamagent/orchestrator/eval.py`（`GoldCase`/`score_case`純関数/`summarize`/`GOLD_CASES`）。goal→期待ツール列の部分集合（`expect_all`/`expect_any`）・禁止（`forbid`）・反復上限（`max_turns`）・`needs_flags`。`sdk_runner` に `tool_calls`（呼び出し列）を追加（後方互換）。`tests/orchestrator/test_orchestration_eval.py` で採点の全分岐＋ゴールドセット健全性を検証（pytest 26緑）。
-- [ ] **実Bedrock eval 実行（課金 ~$1・手動ゲート）**：`scripts/eval_orchestration.py`（実装済・未実行）。非mail 8ケースを実行→「期待ツール列を踏む率」「cost/turn分布」を数値化。mail系2本は 6c ゲート後に `USE_MAIL_TOOLS=1` で評価。複数seed分散測定は次段。
+- [x] **実Bedrock eval 実行（2026-06-03・$0.764+再$0.05）**：非mail 8ケース実行。生 **87.5%（7/8）→ ゴールド校正後 実質 8/8（100%）**・平均≈$0.095/ケース。多段適応ルーティング実証（`client_then_propose`＝clientkarte→search×3→proposal_draft→proposal_review を5ターンで正しく連鎖）。
+  - **唯一の不合格 `review_existing_idea` は agent 不具合でなく“ゴールド期待の誤り”と判明**（単独再実行で `tool_calls=['proposal_review']`・2ターン・根拠つき診断を生成）。`proposal_review` が**内部で過去事例を pgvector+rerank 検索＝self-grounding**するため、別途 `search` は不要。当初 `expect_any=('search',)` が誤り → **除去（回帰テスト追加）**。**Phase 4 の狙い（評価が校正欠陥を検出）が機能した好例**。
+  - mail系2本は想定通りスキップ。単一seed（複数seed分散測定は次段）。
 - DoD: 採点ロジックはCI決定的（課金0）✅。実数値化は手動eval実行で取得（コスト承認待ち）。
 
 ### Phase 5 — コスト/レイテンシ最適化
