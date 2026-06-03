@@ -64,7 +64,7 @@ def build_production_tools() -> list[ToolSpec]:
     from teamagent.skills.search.skill import SearchSkill
 
     search = _build_search_skill()  # 共有インスタンス
-    return [
+    specs = [
         ToolSpec(SearchSkill.name, SearchSkill.description, SearchSkill, factory=lambda: search),
         ToolSpec(ClientKarteSkill.name, ClientKarteSkill.description, ClientKarteSkill),
         ToolSpec(
@@ -80,6 +80,23 @@ def build_production_tools() -> list[ToolSpec]:
             factory=lambda: ProposalReviewSkill(search=search),
         ),
     ]
+
+    # Phase 6 (6d): Mail 制約ツール。**既定 OFF**（USE_MAIL_TOOLS=1 で opt-in）。
+    # 実行時に run() が G1 本人受信箱限定 / G2 本人同意（MAIL_CONSENT_EMAILS）を
+    # fail-closed で強制。実受信箱接続（6c）の人間ゲート（同意/DWD/CASA）承認後に有効化。
+    if _envflag("USE_MAIL_TOOLS"):
+        from teamagent.skills.mail_constraints.skill import MailConstraintsSkill
+
+        specs.append(
+            ToolSpec(
+                MailConstraintsSkill.name,
+                MailConstraintsSkill.description,
+                MailConstraintsSkill,
+                factory=lambda: MailConstraintsSkill(),
+            )
+        )
+
+    return specs
 
 
 __all__ = ["build_production_tools"]

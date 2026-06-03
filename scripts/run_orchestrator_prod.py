@@ -45,6 +45,25 @@ _SYSTEM_PROMPT = """\
 - 本当に hits が 0 件のときだけ「該当データ無し（データ未取込の可能性）」と明記する。
 """
 
+# Phase 6 (6d): mail_constraints ツールが有効な時だけ付ける適応フロー指示。
+# ツールが無い時に付けると誤呼び出しを誘発するため、USE_MAIL_TOOLS で条件付与する。
+_MAIL_CLAUSE = """\
+
+【制約チェック（mail_constraints が使える場合）】
+- 施策ドラフトを作ったら、mail_constraints でそのクライアント/案件の制約（NG手法・予算・
+  期限・関係性）を確認する。**NG に触れる施策は採用せず、別案へ差し替える**こと。
+- mail_constraints は構造化された制約だけを返す（メール生本文は返らない）。返った制約を
+  根拠として「なぜ別案にしたか」を提案内に明記する。
+"""
+
+
+def _build_system_prompt() -> str:
+    """USE_MAIL_TOOLS が有効な時のみ mail 制約フローを足したシステムプロンプトを返す。"""
+    base = _SYSTEM_PROMPT
+    if os.environ.get("USE_MAIL_TOOLS", "").lower() in ("1", "true", "yes"):
+        return base + _MAIL_CLAUSE
+    return base
+
 
 def _preflight() -> list[str]:
     missing: list[str] = []
@@ -76,7 +95,7 @@ async def _main() -> int:
         request_id="req-prod-search-001",
         specs=build_production_tools(),
         model=model,
-        system_prompt=_SYSTEM_PROMPT,
+        system_prompt=_build_system_prompt(),
         user_id=os.environ.get("TEAMAGENT_USER_ID"),
         ctx_metadata={"user_email": user_email} if user_email else {},
         require_rls=bool(user_email),  # user_email があれば RLS 強制（fail-closed）
