@@ -1,0 +1,92 @@
+# マルチSkill適応オーケストレーター — 進捗 & 次フェーズ計画
+
+> 2026-06-03。worktree `teamagent-orchestrator-poc`（branch `poc/multiskill-orchestrator`）。
+> 基盤＝**Claude Agent SDK on Bedrock**（評議で採用。OpenClaw不採用／自前ループはフォールバック温存）。
+> 本書は「現状TODOに対する到達点」と「Agent協議で固めた最適な次フェーズ計画」をまとめる。
+
+---
+
+## 0. 現在地（ひと言）
+**PoC は実Bedrockで“適応エージェントが提案を完遂”するところまで到達・コミット済（`ba0d3ff`）。** ただし動いているのは **fixtureスキル**で、**実Skill接続・本番runtime統合・Mail/Drive横断・本番品質ガードは未着手**。本番配線の前に「堅牢化フェーズ(Phase 0)」が必須。
+
+---
+
+## 1. 完了（DONE）✅ — commit `ba0d3ff`
+
+- [x] 基盤選定をAgent評議（OpenClaw / 自前 / Agent SDK）→ **Agent SDK on Bedrock 採用**（`docs/poc/agent_orchestrator_poc_findings.md`）
+- [x] オーケストレーター中核 `src/teamagent/orchestrator/`
+  - [x] `sdk_runner.py`：既存Skillを `@tool` 化→SDKループ（方式B）
+  - [x] `loop.py`（自前ループ＝比較/フォールバック）/ `decider.py`（`LLMDecider` 抽象・差し替え口）/ `tools.py`（`ToolSpec.factory` = 実Skill差し替えの唯一のseam）
+- [x] **6-bis per-call コストログ**：`AssistantMessage.usage` から呼び出し毎 cost/token を `request_id` 付き出力（last-wins dedup、最終回答は `ResultMessage.result`、コストは SDK実コストを正）
+- [x] ガードレール：SDKネイティブ `max_turns` + `max_budget_usd`、preflight（`aws sts` で資格情報実検証）
+- [x] **実Bedrockで適応シナリオ完遂**（履歴→認知滑り検知→CV転換→施策→Mail NG→差替→Drive裏付け→**文章で最終提案**）。1run ≈ $0.10
+- [x] 品質ゲート：**pytest 7（offline）/ ruff / mypy strict 緑**、`docs/poc/`（設計・採否findings・本書）
+
+> 補足：この完遂は **fixtureスキル＋プロンプト誘導** での実証。「ループ機構・6-bis・SDK on Bedrock の実在性」は固いが、**実データでの提案品質はまだ未測定**（Phase 4 の gold set が要る）。
+
+---
+
+## 2. 未完（TODO）= 次フェーズ計画（Agent協議の統合版）
+
+### 🔴 Phase 0 — 本番前“堅牢化”（最優先。Red-teamが本番配線前の必須と指摘）
+PoCのままでは本番に出せない欠陥を先に潰す。**コードはこのworktreeで完結**（実接続不要）。
+- [ ] **エラー/予算/拒否の可観測性**：`ResultMessage.is_error / api_error_status / stop_reason / permission_denials` を読み、`SdkAgentResult.stopped_reason` に反映。打ち切り時は**劣化回答を返さず明示エラー**（現状 `stopped_reason="final"` 固定でエラーを握り潰す）
+- [ ] **RLSコンテキスト注入**：`_make_handler` の `SkillContext` に `user_id/user_email/user_groups/user_role` を伝播（現状 request_id のみ）。未注入は本番 **fail-closed**（越権防止）
+- [ ] **ツールハンドラに try/except + per-tool timeout**：Skill失敗をLLMに構造化エラーとして観測させ、`max_turns/budget` で迷走を縛る
+- [ ] **同期Skillを `run_in_executor`／別ワーカー**で実行（Slackの単一イベントループを塞がない。SDKはNode subprocessも spawnするため二重に重い）
+- [ ] **同一ツール×同一入力の連続呼び出しを機械的に拒否**（無限ループ殺し。fixtureで実際にスタックした failure mode）
+- [ ] **6-bisコスト較正**：トークンは SDK per-turn usage を一次、cost USD は `ResultMessage.model_usage`（モデル別実集計）で較正。`Price` を config 化。`session_id` も記録
+- [ ] **SDK を `==0.2.87` 厳密pin** ＋ ci.yml 列挙、Node版固定（[[feedback_ci_no_deps_manual_enumeration]]）
+- DoD: 上記を `tests/orchestrator` の決定的テストで検証（課金ゼロ）。
+
+### Phase 1 — 実Skill 1個（`search`）を**隔離環境**でE2E
+- [ ] 本番ToolSpec工場 `orchestrator/factory.py` 新設、`search` を `factory` で注入（DIロジックは `slack_bot.py` の `get_search_skill()` を流用/共通化）
+- [ ] 隔離（**本番 slack_bot には触れない**）・別プロセス・timeout・RLS注入込みで実Bedrock+実pgvectorで緑
+- DoD: `search` ツールが呼ばれ 6-bisログ＋最終回答。orchestrator gold set 10本で緑（Phase 4 前倒し可）
+
+### Phase 2 — 複数“既存”Skillで適応（新Skill不要）
+- [ ] `clientkarte → proposal_draft → proposal_review`（必要なら `search`）を工場に追加。**`proposal_*` には同一 `SearchSkill` インスタンスを共有注入**（embedder二重ロード回避）
+- DoD: 「クライアントXに次施策を提案して」で review 指摘→draft やり直しの適応分岐が実Claudeトレースで1本
+
+### Phase 3 — runtime統合（opt-in・単発フロー併存）⚠️ゲート判断含む
+- [ ] **既存 intent→単発dispatch には触らず**、新規の明示トリガ（例: 新Slashコマンド／`@TeamAgent 深く考えて`）で起動。`USE_ORCHESTRATOR` 既定OFF→特定ユーザー→全体の段階ロールアウト
+- [ ] 全クエリをorchestrator化しない（$0.10/run・レイテンシ増）。**起動ゲート**＝多段・横断・データ依存分岐を要する要求のみ。1ユーザー/日上限＋月次予算アラート
+- ⚠️ **ゲート判断**：本番ランタイムに **同梱Node CLI を持ち込む**＝findings Step2の「本番非持込ライン」を越える決定。ゲート①で明示再確認すること
+
+### Phase 4 — オーケストレーション eval（gold set）
+- [ ] 既存 gold set（検索hit rate中心・50ケース）とは**別軸**の orchestration gold set（goal→期待ツール列の部分集合／禁止手法回避／上限内）最低10本。temperature=0×複数seedで分散測定
+- DoD: 「期待ツール列を踏む率」「cost/turn分布」を数値化。CIは決定的mockのみ（課金ゼロ）、実Bedrock evalは手動/nightly
+
+### Phase 5 — コスト/レイテンシ最適化
+- [ ] system_prompt/ツール定義を**安定化**して prompt cache（2回目以降 cache_read で1/10）。`max_turns` を実測p95に締める。**モデル分離**（ツール選択=Haiku 4.5／生成=Sonnet）を `model` 引数で検討
+
+### Phase 6 — Mail/Drive 横断（**独立ゲート**・新Skill）
+- [ ] `skills/mail_constraints/`・（`search` で代替不可なら）`skills/drive_cases/` を新設（adapter `gmail_client`/`gdrive_client` は既存、Skill層のみ）
+- ⚠️ 本番前ゲート：**本人受信箱限定**（DWD impersonate先=リクエスト発行者に固定、LLMに受信箱選択権を渡さない）／**Mail本文はLLMに渡す前にDLPマスク・要約**（生本文をプロンプト/ログに入れない、6-bis）／readonly最小スコープ／**本人同意フロー**
+
+---
+
+## 3. 重大ゲート / 意思決定事項（先に握るべき）
+1. **Node CLI を本番ランタイムに入れるか**：SDKは同梱Node CLIをsubprocess spawn。findings で「本番非持込＝死守ライン」と書いた一線を越える判断。ECS/Lambda に Node 24 を同梱する運用変更が伴う → **ゲート①で再確認**。
+2. **Mail/Drive 横断のデータガバナンス**：PII/DLP/同意/最小権限を満たす独立ゲート（Phase 6）。「自分のMail分析」は本人受信箱限定が大前提。
+3. **CLAUDE.md の更新**：先頭が今も「OpenClaw フル採用」のままで**今回の決定（SDK採用）と矛盾**。Claude Code が毎回読むので早急に訂正（OpenClaw→SDK、Step2の本番ラインも明記）。
+4. **ゲート①の日付**：資料間で **6/7 と 6/12** 不一致。確定要。
+
+---
+
+## 4. リスク要約（Red-team killer-risk）
+| # | リスク | 対策フェーズ |
+|---|---|---|
+| RLSコンテキスト喪失（越権/PII） | `_make_handler` が裸の `SkillContext` | Phase 0 |
+| 打ち切り沈黙（予算/エラーで劣化回答を正常返却） | `stopped_reason` 固定・ResultMessageのerror未読 | Phase 0 |
+| Slackイベントループ阻害 | async内で同期Skill直呼び＋Node subprocess | Phase 0 |
+| 無限ループ/スタック（実LLMで再発） | プロンプト抑制は確率的 | Phase 0（機械的拒否） |
+| コスト/レイテンシ暴走 | 起動ゲート無し・全件orchestrator化 | Phase 3/5 |
+| Mail PII/越権 | DWDで全社員受信箱なりすまし可 | Phase 6（独立ゲート） |
+| 改善/退行を測れない | orchestrator用gold set不在 | Phase 4 |
+| Node版ドリフト | SDK同梱CLI・pin下限のみ | Phase 0（厳密pin） |
+
+---
+
+## 5. master TODO との関係
+本件は `docs/v3.2/teamagent_master_todo_v1.md` の **「Sprint 7+ / C案＝multi-skill orchestrator」** に相当する先行PoC。当初ペンディングだった「OpenClaw採否／Agent SDK採否」を**実機で決着（SDK採用）**させた。本番統合（Phase 3）はゲート①の意思決定事項として上程する。
