@@ -113,7 +113,36 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # Workspace 横断ツール（カレンダー予定・連絡先）。**既定 OFF**（USE_WORKSPACE_TOOLS=1）。
+    # 本人 OAuth（TokenStore）で本人の Workspace のみ参照。未連携は run() が fail-closed。
+    # 実トークン解決は OAUTH_KMS_KEY_ID + RDS（RdsTokenStore）。無ければ InMemory（空=未連携）。
+    if _envflag("USE_WORKSPACE_TOOLS"):
+        from teamagent.skills.workspace_search.skill import WorkspaceSearchSkill
+
+        token_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                WorkspaceSearchSkill.name,
+                WorkspaceSearchSkill.description,
+                WorkspaceSearchSkill,
+                factory=lambda: WorkspaceSearchSkill(token_store=token_store),
+            )
+        )
+
     return specs
+
+
+def _build_token_store() -> Any:
+    """per-user TokenStore を構築（OAUTH_KMS_KEY_ID + RDS。無ければ dev 用 InMemory）。"""
+    key_id = os.environ.get("OAUTH_KMS_KEY_ID")
+    if not key_id:
+        from teamagent.adapters.oauth_token_store import InMemoryTokenStore
+
+        return InMemoryTokenStore()  # プロセス内のみ（空＝全員未連携）。実運用は RDS+KMS。
+    from teamagent.adapters.oauth_token_store import KmsCipher, RdsTokenStore
+    from teamagent.adapters.pgvector_client import PgVectorClient
+
+    return RdsTokenStore(PgVectorClient.from_env(), KmsCipher(key_id))
 
 
 __all__ = ["build_production_tools"]
