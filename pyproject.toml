@@ -165,6 +165,9 @@ module = [
     "teamagent.adapters.gdrive_client",
     "teamagent.adapters.gmail_client",
     "teamagent.adapters.gsheets_client",
+    "teamagent.adapters.gdocs_client",
+    "teamagent.adapters.gslides_client",
+    "teamagent.adapters.google_auth",
 ]
 disallow_untyped_calls = false
 
