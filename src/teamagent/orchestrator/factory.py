@@ -52,21 +52,32 @@ def _build_search_skill() -> Any:
 
 
 def build_production_tools() -> list[ToolSpec]:
-    """本番 Skill を ToolSpec 群へ束ねる（Phase 1 は `search` のみ）.
+    """本番 Skill を ToolSpec 群へ束ねる（Phase 1-2: search + clientkarte + proposal_draft/review）.
 
-    SearchSkill は 1 インスタンスを共有して factory から返す（embedder 二重ロード回避）。
-    Phase 2 で clientkarte / proposal_draft / proposal_review を追加予定
-    （proposal_* には同じ search インスタンスを注入する）。
+    SearchSkill は 1 インスタンスを共有（embedder 二重ロード回避）。proposal_draft / proposal_review
+    は内部で SearchSkill.retrieve_hits を再利用するため **同じ search を注入**する
+    （runtime/slack_bot.py と同じ共有方針）。clientkarte は pgvector 直で search 非依存。
     """
+    from teamagent.skills.clientkarte.skill import ClientKarteSkill
+    from teamagent.skills.proposal.skill import ProposalDraftSkill
+    from teamagent.skills.proposal_review.skill import ProposalReviewSkill
     from teamagent.skills.search.skill import SearchSkill
 
-    search = _build_search_skill()
+    search = _build_search_skill()  # 共有インスタンス
     return [
+        ToolSpec(SearchSkill.name, SearchSkill.description, SearchSkill, factory=lambda: search),
+        ToolSpec(ClientKarteSkill.name, ClientKarteSkill.description, ClientKarteSkill),
         ToolSpec(
-            name=SearchSkill.name,
-            description=SearchSkill.description,
-            skill_cls=SearchSkill,
-            factory=lambda: search,
+            ProposalDraftSkill.name,
+            ProposalDraftSkill.description,
+            ProposalDraftSkill,
+            factory=lambda: ProposalDraftSkill(search=search),
+        ),
+        ToolSpec(
+            ProposalReviewSkill.name,
+            ProposalReviewSkill.description,
+            ProposalReviewSkill,
+            factory=lambda: ProposalReviewSkill(search=search),
         ),
     ]
 
