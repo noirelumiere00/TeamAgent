@@ -74,7 +74,8 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
 - [x] **6a 設計（完了 2026-06-03）**：スコープ確定＝**`mail_constraints` が本丸**（Gmailはpgvector外＝本人受信箱ライブ）。**Drive裏付けは既存 `search` で大半カバー**（`search` schema に `source_uri='gdrive://FILE_ID'` 完備、取込済みならRLS付きgroundedで引ける）→ `drive_cases`(ライブ)は必要時のみ後回し。adapter（`GmailClient.from_env(readonly=True)`/`GDriveClient`）は既存再利用、**Skill層のみ新設**。DLPは `observability/sentry.py:scrub_value()` 流用。
 - [x] **6b オフライン実装＋テスト（完了 2026-06-03・commit `f69bcbd`）**：`skills/mail_constraints/`（schema.py/skill.py/__init__.py）。**fake GmailClient/Bedrock** で run() 単体テスト＝DLPマスク(G3)・fail-closed(G1本人受信箱/G2同意)・構造化戻り値・**注入耐性(G6)**(悪意メール本文の指示に従わない=システム規則+`<<<MAIL>>>`区切り)・クエリ限定(G5)・parse堅牢性。**pytest 10 passed**・ruff/format/mypy strict 緑。既存adapter(extract_plain_text/scrub_value/BedrockClient.converse)再利用、google系は遅延importでci.yml変更不要。
 - [x] **6d orchestrator配線（完了 2026-06-03・同 commit）**：`factory.build_production_tools()` に `USE_MAIL_TOOLS`(**既定OFF**)でToolSpec追加。`run_orchestrator_prod.py` はフラグON時のみ「NG→差替」フローをsystem_promptに付与。ON/OFF検証済(OFF=従来4ツール/ON=+mail_constraints)・orchestrator回帰17 passed。
-- [ ] 6c ライブ(本人1名オプトイン)【⚠️人間ゲート後】 → 6e 評価(NG検知→差替 gold set)
+- [x] **6c コード準備（完了 2026-06-03・commit `a789072`）**：G1 を **requester束縛の不変条件**へ昇格（`from_env(impersonate_user=requester)`・旧env一致チェック撤廃）＋同意を `ConsentStore` Protocol 化（backend は人間ゲート後にドロップイン）。従来ゼロカバーの env 経路に回帰テスト。**実Gmail接続は未実施**（後方互換・本番非干渉・pytest 89緑）。
+- [ ] 6c **ライブ接続**(本人1名オプトイン)【⚠️人間ゲート後＝同意フローbackend確定/DWD/CASA】 → 6e 評価(NG検知→差替 gold set)
 - ⚠️ **死守ライン7条**（設計書§4）：G1本人受信箱限定(impersonate=requester固定/LLM選択不可/fail-closed)・G2本人同意オプトイン・G3生本文をLLM/ログ/戻り値に入れない(scrub前進配置)・G4 readonly最小スコープ(書込ツール非公開)・G5クエリ限定(無差別走査禁止)・G6**プロンプトインジェクション対策**(メール=データであり指示でない/読取専用)・G7監査ログ(本文なし)
 - ⚠️ **6c以降の人間ゲート**（設計書§9）：本人同意フロー方式・DWD運用確認・CASA(gmail.readonly Tier3)・監査ポリシー。**6bまでは安全に課金0で着手可**
 

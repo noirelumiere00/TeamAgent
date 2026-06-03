@@ -150,8 +150,9 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
             total_cost_usd=cost)
 ```
 
-### 3.4 adapter への最小改修（任意・推奨）
-現状 `GmailClient.from_env(readonly)` は impersonate を env から取る。**本人性を確実にするため `from_env(impersonate_user=requester)` を明示注入できる経路**を足すと、起動環境の env に依存せず「requester=受信箱」を保証できる（`__init__` には既に `impersonate_user` 引数あり。`from_env` に通すだけ＝小改修）。
+### 3.4 adapter への最小改修（✅ 実装済み・commit `a789072`）
+~~現状 `GmailClient.from_env(readonly)` は impersonate を env から取る。~~
+**実装済み**: `GmailClient.from_env(*, readonly, impersonate_user=None)` を追加（明示指定が env より優先・未指定時のみ env フォールバック＝後方互換）。`mail_constraints._resolve_gmail` は `from_env(readonly=True, impersonate_user=requester)` で **requester を束縛**するよう変更し、旧「env 文字列一致チェック」の暫定実装を撤廃。これで「本人受信箱限定（G1）」が起動 env に依存せず**コードで保証される不変条件**になった。さらに同意判定を `ConsentStore` Protocol 化（既定 `EmailSetConsentStore`、backend は 6c ゲート後に差し込み）。従来ゼロカバーだった env 経路に回帰テストを追加（pytest 89 緑）。
 
 ---
 
