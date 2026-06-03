@@ -34,6 +34,8 @@ from typing import Any
 
 import structlog
 
+from teamagent.adapters.oauth_token_store import OAuthToken
+
 # Day 7 (2026-05-27): SSL socket が無期限ハングする問題への対策。
 # 大 PDF download (8-10MB) で httplib2 のデフォルト無限 timeout が原因で固まることがある。
 # 60 秒で諦めて TimeoutError を上げさせ、上位の try/except でスキップさせる。
@@ -176,6 +178,14 @@ class GDriveClient:
                 ),
             )
         return cls(credentials=None, scopes=scopes)
+
+    @classmethod
+    def from_user_token(cls, token: OAuthToken, *, readonly: bool = True) -> GDriveClient:
+        """per-user: 本人の refresh token から構築（本人の Drive のみ参照可）。"""
+        from teamagent.adapters.google_auth import build_user_credentials
+
+        scopes = cls.SCOPES_READONLY if readonly else cls.SCOPES_FILE
+        return cls(credentials=build_user_credentials(token), scopes=scopes)
 
     # -------------------------------------------------------
     # API 呼び出し

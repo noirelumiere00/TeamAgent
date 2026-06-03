@@ -39,6 +39,7 @@ from typing import Any
 
 import structlog
 
+from teamagent.adapters.oauth_token_store import OAuthToken
 from teamagent.observability import capture_skill_exception
 
 logger = structlog.get_logger(__name__)
@@ -329,6 +330,14 @@ class GmailClient:
                 ),
             )
         return cls(credentials=None, scopes=scopes, impersonate_user=impersonate_user)
+
+    @classmethod
+    def from_user_token(cls, token: OAuthToken, *, readonly: bool = True) -> GmailClient:
+        """per-user: 本人の refresh token から構築（本人の受信箱のみ参照可）。"""
+        from teamagent.adapters.google_auth import build_user_credentials
+
+        scopes = cls.SCOPES_READONLY if readonly else cls.SCOPES_MODIFY
+        return cls(credentials=build_user_credentials(token), scopes=scopes)
 
     # -------------------------------------------------------
     # メッセージ一覧
