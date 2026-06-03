@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True, repr=False)
@@ -71,4 +71,101 @@ class InMemoryTokenStore:
         return self._norm(user_email) in self._tokens
 
 
-__all__ = ["InMemoryTokenStore", "OAuthToken", "TokenStore"]
+@runtime_checkable
+class TokenCipher(Protocol):
+    """refresh token の暗号化/復号（at-rest 暗号化・G8）。本番は KMS 実装を注入する。"""
+
+    def encrypt(self, plaintext: str) -> bytes: ...
+
+    def decrypt(self, ciphertext: bytes) -> str: ...
+
+
+class KmsCipher:
+    """AWS KMS で refresh token を暗号化/復号する（直接 KMS・boto3 は遅延 import）。
+
+    refresh token は十分小さく KMS 直接暗号化(最大4KB)に収まる。復号には KMS Decrypt の
+    IAM 権限が必要＝DB を読めても token は復号できない（G8 を真に満たす）。
+    """
+
+    def __init__(self, key_id: str, client: Any | None = None) -> None:
+        self._key_id = key_id
+        self._client = client
+
+    def _kms(self) -> Any:
+        if self._client is None:
+            import boto3
+
+            self._client = boto3.client("kms")
+        return self._client
+
+    def encrypt(self, plaintext: str) -> bytes:
+        resp = self._kms().encrypt(KeyId=self._key_id, Plaintext=plaintext.encode("utf-8"))
+        return bytes(resp["CiphertextBlob"])
+
+    def decrypt(self, ciphertext: bytes) -> str:
+        resp = self._kms().decrypt(CiphertextBlob=ciphertext)
+        return str(resp["Plaintext"].decode("utf-8"))
+
+
+class RdsTokenStore:
+    """RDS(oauth_tokens) に refresh token を保管する TokenStore（per-user・暗号化・RLS）。
+
+    migration 0006_oauth_tokens.sql のテーブルを使う。refresh token は cipher で暗号化して
+    BYTEA 格納。`pgvector.connection(app_role, user_email)` が app.user_email GUC を立て、
+    RLS が「本人行のみ」を保証する（アプリのバグでも他人の token に触れない）。
+    """
+
+    def __init__(
+        self, pgvector: Any, cipher: TokenCipher, *, app_role: str = "teamagent_app"
+    ) -> None:
+        self._pgvector = pgvector
+        self._cipher = cipher
+        self._app_role = app_role
+
+    @staticmethod
+    def _norm(email: str) -> str:
+        return email.strip().lower()
+
+    def get(self, user_email: str) -> OAuthToken | None:
+        email = self._norm(user_email)
+        with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT refresh_token_enc, scopes FROM oauth_tokens WHERE user_email = %s",
+                    (email,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        refresh = self._cipher.decrypt(bytes(row["refresh_token_enc"]))
+        return OAuthToken(refresh_token=refresh, scopes=tuple(row["scopes"] or ()))
+
+    def put(self, user_email: str, token: OAuthToken) -> None:
+        email = self._norm(user_email)
+        enc = self._cipher.encrypt(token.refresh_token)
+        with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO oauth_tokens (user_email, refresh_token_enc, scopes)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_email) DO UPDATE
+                      SET refresh_token_enc = EXCLUDED.refresh_token_enc,
+                          scopes = EXCLUDED.scopes
+                    """,
+                    (email, enc, list(token.scopes)),
+                )
+            conn.commit()
+
+    def has(self, user_email: str) -> bool:
+        return self.get(user_email) is not None
+
+
+__all__ = [
+    "InMemoryTokenStore",
+    "KmsCipher",
+    "OAuthToken",
+    "RdsTokenStore",
+    "TokenCipher",
+    "TokenStore",
+]
