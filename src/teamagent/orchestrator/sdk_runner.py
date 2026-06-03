@@ -145,6 +145,7 @@ class SdkAgentResult:
     api_error_status: int | None = None
     errors: list[str] = field(default_factory=list)
     permission_denials: list[Any] = field(default_factory=list)
+    tool_calls: list[str] = field(default_factory=list)  # 実際に呼ばれたツール名（順序つき）
 
     @property
     def ok(self) -> bool:
@@ -160,6 +161,7 @@ def _make_handler(
     call_counts: dict[str, int],
     tool_timeout_s: float,
     max_same_call: int = 2,
+    tool_calls: list[str] | None = None,
 ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
     """Skill を SDK ツールハンドラへ変換（Phase 0 ガード込み）.
 
@@ -168,6 +170,8 @@ def _make_handler(
     - 非阻害: 同期 skill.run を run_in_executor + timeout で実行（Slack ループを塞がない）。
     - 失敗（入力不正/タイムアウト/例外）は raise せず is_error の構造化結果で返す。
     """
+
+    calls = tool_calls if tool_calls is not None else []
 
     def _err(text: str) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": text}], "is_error": True}
@@ -198,6 +202,7 @@ def _make_handler(
             )
             return _err(f"入力がスキーマに合いません（{type(e).__name__}）")
 
+        calls.append(spec.name)  # 有効な入力で呼ばれた＝エージェントのツール選択を記録（評価用）
         ctx = SkillContext(request_id=request_id, user_id=user_id, metadata=dict(ctx_metadata))
         loop = asyncio.get_running_loop()
         try:
@@ -232,10 +237,12 @@ def build_skill_tools(
     user_id: str | None = None,
     ctx_metadata: dict[str, Any] | None = None,
     tool_timeout_s: float = 60.0,
+    tool_calls: list[str] | None = None,
 ) -> list[Any]:
     """ToolSpec 群 → SDK MCP ツール群（Pydantic input_schema を JSON Schema で渡す）.
 
     call_counts を全ツールで共有し、同一入力の繰返し呼び出しを run 単位で抑制する。
+    tool_calls（任意）を渡すと、全ツールで共有して呼び出し順を記録する（評価用）。
     """
     call_counts: dict[str, int] = {}
     meta = ctx_metadata or {}
@@ -248,6 +255,7 @@ def build_skill_tools(
             ctx_metadata=meta,
             call_counts=call_counts,
             tool_timeout_s=tool_timeout_s,
+            tool_calls=tool_calls,
         )
         sdk_tools.append(
             tool(spec.name, spec.description, spec.input_schema.model_json_schema())(handler)
@@ -281,6 +289,7 @@ async def run_sdk_agent(
             "RLS required but ctx_metadata['user_email'] is missing (fail-closed)"
         )
 
+    tool_calls: list[str] = []
     server = create_sdk_mcp_server(
         "teamagent",
         tools=build_skill_tools(
@@ -289,6 +298,7 @@ async def run_sdk_agent(
             user_id=user_id,
             ctx_metadata=meta,
             tool_timeout_s=tool_timeout_s,
+            tool_calls=tool_calls,
         ),
     )
     options = ClaudeAgentOptions(
@@ -351,6 +361,7 @@ async def run_sdk_agent(
 
     # 最終回答: ResultMessage.result を優先、無ければ assistant テキストを連結.
     result.answer = (final_text or "\n".join(answer_parts)).strip()
+    result.tool_calls = tool_calls
     if result.is_error and not result.answer:
         result.answer = f"(エージェント未完了: stopped_reason={result.stopped_reason})"
     logger.info(
@@ -361,6 +372,7 @@ async def run_sdk_agent(
         session_total_cost_usd=result.session_total_cost_usd,
         num_turns=result.num_turns,
         estimated_cost_usd=round(result.total_cost_usd, 6),
+        tool_calls=result.tool_calls,
     )
 
     return result
