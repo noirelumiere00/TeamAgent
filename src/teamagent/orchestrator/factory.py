@@ -58,6 +58,7 @@ def _build_search_skill() -> Any:
         rerank_pool_size=rerank_pool_size,
         min_relevance=min_relevance,
         min_relevance_fallback=min_relevance_fallback,
+        use_client_boost=_envflag("USE_CLIENT_BOOST"),
         use_aggregation_mode=_envflag("USE_AGGREGATION_MODE"),
         prompt_version=os.environ.get("PROMPT_VERSION", "v2d"),
         summary_max_tokens=summary_max_tokens,

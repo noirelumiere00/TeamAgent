@@ -422,6 +422,31 @@ class PgVectorClient:
         )
         return hits
 
+    def list_client_names(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        request_id: str | None = None,
+        *,
+        limit: int = 1000,
+    ) -> list[str]:
+        """既知のクライアント名（distinct）を返す（read-only）。
+
+        クエリ中の固有名詞（例「ユニーの2回目提案」）を既知クライアント名の語彙へ
+        substring 照合し、client_name で絞った検索を追加する「クライアント名ブースト」
+        （SearchSkill use_client_boost）の語彙に使う。RLS は connection() 側で有効化済の前提。
+        """
+        sql = """
+            SELECT DISTINCT d.metadata->>'client_name' AS client_name
+            FROM documents d
+            WHERE d.metadata->>'client_name' IS NOT NULL
+              AND d.metadata->>'client_name' <> ''
+            LIMIT %s
+        """  # nosec B608
+        with conn.cursor() as cur:
+            cur.execute(sql, [limit])
+            rows = cur.fetchall()
+        return [str(r["client_name"]) for r in rows if r.get("client_name")]
+
     def list_client_timeline(
         self,
         conn: psycopg.Connection[dict[str, Any]],

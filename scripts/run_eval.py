@@ -313,6 +313,11 @@ def _build_skill() -> Any:
         "true",
         "yes",
     )
+    use_client_boost = os.environ.get("USE_CLIENT_BOOST", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
     return (
         SearchSkill(
@@ -324,6 +329,7 @@ def _build_skill() -> Any:
             rerank_pool_size=rerank_pool_size,
             min_relevance=min_relevance,
             min_relevance_fallback=min_relevance_fallback,
+            use_client_boost=use_client_boost,
             use_aggregation_mode=use_aggregation_mode,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
@@ -336,6 +342,7 @@ def _build_skill() -> Any:
             "SEARCH_RERANK_POOL_SIZE": rerank_pool_size,
             "SEARCH_MIN_RELEVANCE": min_relevance,
             "SEARCH_MIN_RELEVANCE_FALLBACK": min_relevance_fallback,
+            "USE_CLIENT_BOOST": use_client_boost,
             "USE_AGGREGATION_MODE": use_aggregation_mode,
             "PROMPT_VERSION": prompt_version,
             "SEARCH_MAX_TOKENS": summary_max_tokens,

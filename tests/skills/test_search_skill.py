@@ -866,3 +866,67 @@ def test_min_relevance_fallback_default_off_backward_compatible(
     )
     hits = skill.retrieve_hits("q", SkillContext(), top_k=5)
     assert hits == []  # 0 件（後方互換）
+
+
+# -----------------------------------------------------------
+# Sprint 7: クライアント名ブースト（固有名詞リコール補強）
+# -----------------------------------------------------------
+def test_client_boost_merges_filtered_hits(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """固有名詞クエリで client_name 絞り検索が rerank プールへ合流する。"""
+    fake_pgvector_new_schema.list_client_names.return_value = ["ユニー", "日本ガイシ"]
+    dense = [SearchHit(chunk_id=1, content="dense", score=0.5, metadata={})]
+    boost = [
+        SearchHit(chunk_id=2, content="ユニーの提案", score=0.4, metadata={"client_name": "ユニー"})
+    ]
+    fake_pgvector_new_schema.search_similar_new_schema.side_effect = [dense, boost]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_client_boost=True,
+    )
+    hits = skill.retrieve_hits("ユニーの2回目提案", SkillContext(), top_k=5)
+    assert sorted(h.chunk_id for h in hits) == [1, 2]  # dense + boost 合流
+    second = fake_pgvector_new_schema.search_similar_new_schema.call_args_list[1]
+    assert second.kwargs["metadata_filters"] == {"client_name": "ユニー"}
+
+
+def test_client_boost_no_match_no_extra_search(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """既知クライアント名に一致しないクエリ（カテゴリ等）ではブースト検索を行わない。"""
+    fake_pgvector_new_schema.list_client_names.return_value = ["ユニー"]
+    fake_pgvector_new_schema.search_similar_new_schema.return_value = [
+        SearchHit(chunk_id=1, content="x", score=0.5, metadata={})
+    ]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_client_boost=True,
+    )
+    hits = skill.retrieve_hits("飲料メーカー向けの提案実績", SkillContext(), top_k=5)
+    assert [h.chunk_id for h in hits] == [1]
+    assert fake_pgvector_new_schema.search_similar_new_schema.call_count == 1  # ブースト無し
+
+
+def test_client_boost_default_off(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """既定 (use_client_boost=False) では語彙取得もブーストもしない（後方互換）。"""
+    fake_pgvector_new_schema.search_similar_new_schema.return_value = [
+        SearchHit(chunk_id=1, content="x", score=0.5, metadata={})
+    ]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,  # use_client_boost 未指定 = False
+    )
+    hits = skill.retrieve_hits("ユニーの2回目提案", SkillContext(), top_k=5)
+    assert [h.chunk_id for h in hits] == [1]
+    fake_pgvector_new_schema.list_client_names.assert_not_called()
