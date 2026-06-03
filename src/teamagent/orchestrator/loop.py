@@ -40,9 +40,7 @@ def _find_tool(tools: list[ToolSpec], name: str) -> ToolSpec:
     for t in tools:
         if t.name == name:
             return t
-    raise OrchestratorError(
-        f"unknown tool: {name!r} (available: {[t.name for t in tools]})"
-    )
+    raise OrchestratorError(f"unknown tool: {name!r} (available: {[t.name for t in tools]})")
 
 
 def run_agent(

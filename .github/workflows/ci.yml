@@ -38,6 +38,7 @@ jobs:
             pydantic structlog psycopg pgvector \
             boto3 slack-sdk slack-bolt aiohttp httpx \
             'sentry-sdk[asyncio]>=2.18.0' \
+            claude-agent-sdk==0.2.87 \
             pyyaml pypdf \
             pytest pytest-asyncio mypy ruff bandit
 

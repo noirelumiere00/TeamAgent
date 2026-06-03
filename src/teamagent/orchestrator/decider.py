@@ -48,9 +48,7 @@ class Observation:
 class LLMDecider(Protocol):
     """goal と これまでの観測から、次の一手を決める。"""
 
-    def decide(
-        self, goal: str, tools: list[ToolSpec], history: list[Observation]
-    ) -> Decision: ...
+    def decide(self, goal: str, tools: list[ToolSpec], history: list[Observation]) -> Decision: ...
 
 
 __all__ = ["Decision", "FinalAnswer", "LLMDecider", "Observation", "ToolCall"]

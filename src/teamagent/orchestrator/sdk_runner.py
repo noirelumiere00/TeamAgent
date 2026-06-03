@@ -4,18 +4,26 @@
 （自前 loop.py は使わない＝SDKがループの主体）。6-bis 準拠のため、SDK が返す
 `AssistantMessage.usage`（**呼び出し毎**のトークン）から cost/token を記録する。
 
+Phase 0（堅牢化）を反映:
+  - RLS: SkillContext に user_id / metadata(user_email 等) を伝播。require_rls で fail-closed。
+  - エラー/予算可観測性: ResultMessage の is_error/subtype 等を読み stopped_reason に反映。
+  - 無限ループ殺し: 同一ツール×同一入力の連続呼び出しを上限で拒否。
+  - イベントループ非阻害: 同期 Skill を run_in_executor + per-tool timeout で実行。
+  - 失敗は構造化エラーとして LLM に返す（ループを落とさない）。
+
 ⚠️ 実行要件（ライブ）:
   - 同梱 Node CLI（SDK が spawn）→ Node 24 系
   - Bedrock: env `CLAUDE_CODE_USE_BEDROCK=1` + AWS 資格情報 + `AWS_REGION`
     + inference profile ID（`model` 引数）。本番 Bot と同じ Bedrock を指す。
-  `run_sdk_agent()` はこれらが揃って初めて動く。
 
-オフライン検証可能な部分: `usage_to_record()` / `log_cost_record()`（6-bis のコスト抽出ロジック）。
-tests/orchestrator/test_sdk_cost_logging.py が SDK の実メッセージ型で検証する。
+オフライン検証可能な部分: `usage_to_record()` / `classify_result()` / `_make_handler()` の
+ガード（RLS伝播・繰返し拒否・timeout・例外→構造化エラー）。tests/orchestrator が検証する。
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -32,6 +40,7 @@ from claude_agent_sdk import (
 
 from teamagent.skills.base import SkillContext
 
+from .loop import OrchestratorError
 from .tools import ToolSpec
 
 logger = structlog.get_logger(__name__)
@@ -42,6 +51,7 @@ class Price:
     """Bedrock の概算単価（USD / 1M tokens）。PoC 既定値（Sonnet 4.6 想定）。
 
     cache_read は入力の 0.1x、cache_write(=creation) は 1.25x（6-bis-5 / Bedrock 仕様）。
+    **概算**。正確な実コストは ResultMessage.total_cost_usd / model_usage（SDK集計）を正とする。
     実値は config 化して差し替える。
     """
 
@@ -53,7 +63,7 @@ class Price:
 
 @dataclass(frozen=True)
 class CostRecord:
-    """1 Bedrock 呼び出し分の 6-bis ログレコード。"""
+    """1 Bedrock 呼び出し分の 6-bis ログレコード（トークンは実測、cost は概算）。"""
 
     request_id: str
     model: str
@@ -112,45 +122,136 @@ def log_cost_record(rec: CostRecord) -> None:
     )
 
 
+def classify_result(*, subtype: str, is_error: bool) -> str:
+    """ResultMessage の subtype/is_error → stopped_reason（純関数, テスト可）.
+
+    例: success→"final" / error_max_turns / error_max_budget_usd / その他 subtype をそのまま返す。
+    """
+    if is_error or (subtype and subtype != "success"):
+        return subtype or "error"
+    return "final"
+
+
 @dataclass
 class SdkAgentResult:
     answer: str
     cost_records: list[CostRecord] = field(default_factory=list)
-    total_cost_usd: float = 0.0
-    session_total_cost_usd: float | None = None  # ResultMessage 由来（SDK 集計）
+    total_cost_usd: float = 0.0  # 自前概算（参考）
+    session_total_cost_usd: float | None = None  # ResultMessage 由来（SDK実コスト=正）
+    model_usage: dict[str, Any] | None = None  # モデル別実集計（cost較正用）
     num_turns: int = 0
     stopped_reason: str = "final"
+    is_error: bool = False
+    api_error_status: int | None = None
+    errors: list[str] = field(default_factory=list)
+    permission_denials: list[Any] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.stopped_reason == "final" and not self.is_error
 
 
 def _make_handler(
-    spec: ToolSpec, request_id: str
+    spec: ToolSpec,
+    *,
+    request_id: str,
+    user_id: str | None,
+    ctx_metadata: dict[str, Any],
+    call_counts: dict[str, int],
+    tool_timeout_s: float,
+    max_same_call: int = 2,
 ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
-    """Skill を SDK ツールハンドラへ変換。request_id を SkillContext で伝播。"""
+    """Skill を SDK ツールハンドラへ変換（Phase 0 ガード込み）.
+
+    - RLS: SkillContext に request_id / user_id / metadata を伝播。
+    - 無限ループ殺し: 同一ツール×同一入力が max_same_call を超えたら構造化エラーを返す。
+    - 非阻害: 同期 skill.run を run_in_executor + timeout で実行（Slack ループを塞がない）。
+    - 失敗（入力不正/タイムアウト/例外）は raise せず is_error の構造化結果で返す。
+    """
+
+    def _err(text: str) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": text}], "is_error": True}
 
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
-        ctx = SkillContext(request_id=request_id)
-        skill = spec.instantiate()
-        skill_input = spec.input_schema(**args)
-        output = skill.run(skill_input, ctx)
+        key = f"{spec.name}:{json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}"
+        call_counts[key] = call_counts.get(key, 0) + 1
+        if call_counts[key] > max_same_call:
+            logger.warning(
+                "tool_repeat_blocked",
+                request_id=request_id,
+                skill=spec.name,
+                count=call_counts[key],
+            )
+            return _err(
+                f"ツール {spec.name} は同一入力で既に {max_same_call} 回呼ばれています。"
+                "別の手法を試すか、得られた情報で最終回答をまとめてください。"
+            )
+
+        try:
+            skill_input = spec.input_schema(**args)
+        except Exception as e:
+            logger.warning(
+                "tool_input_invalid",
+                request_id=request_id,
+                skill=spec.name,
+                error=type(e).__name__,
+            )
+            return _err(f"入力がスキーマに合いません（{type(e).__name__}）")
+
+        ctx = SkillContext(request_id=request_id, user_id=user_id, metadata=dict(ctx_metadata))
+        loop = asyncio.get_running_loop()
+        try:
+            output = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: spec.instantiate().run(skill_input, ctx)),
+                timeout=tool_timeout_s,
+            )
+        except TimeoutError:
+            logger.warning(
+                "tool_timeout", request_id=request_id, skill=spec.name, timeout_s=tool_timeout_s
+            )
+            return _err(f"ツール {spec.name} が {tool_timeout_s}s でタイムアウトしました。")
+        except Exception as e:
+            logger.warning(
+                "tool_error", request_id=request_id, skill=spec.name, error=type(e).__name__
+            )
+            return _err(f"ツール {spec.name} 実行エラー（{type(e).__name__}）。別手段を検討して。")
+
         # Skill 内部が Bedrock を叩いた場合のコストも 6-bis ログ（取りこぼし防止）.
         skill_cost = float(getattr(output, "total_cost_usd", 0.0) or 0.0)
         if skill_cost:
-            logger.info(
-                "skill_cost", request_id=request_id, skill=spec.name, cost_usd=skill_cost
-            )
+            logger.info("skill_cost", request_id=request_id, skill=spec.name, cost_usd=skill_cost)
         return {"content": [{"type": "text", "text": output.model_dump_json()}]}
 
     return handler
 
 
-def build_skill_tools(specs: list[ToolSpec], request_id: str) -> list[Any]:
-    """ToolSpec 群 → SDK MCP ツール群（Pydantic input_schema を JSON Schema で渡す）。"""
+def build_skill_tools(
+    specs: list[ToolSpec],
+    *,
+    request_id: str,
+    user_id: str | None = None,
+    ctx_metadata: dict[str, Any] | None = None,
+    tool_timeout_s: float = 60.0,
+) -> list[Any]:
+    """ToolSpec 群 → SDK MCP ツール群（Pydantic input_schema を JSON Schema で渡す）.
+
+    call_counts を全ツールで共有し、同一入力の繰返し呼び出しを run 単位で抑制する。
+    """
+    call_counts: dict[str, int] = {}
+    meta = ctx_metadata or {}
     sdk_tools: list[Any] = []
     for spec in specs:
-        decorated = tool(
-            spec.name, spec.description, spec.input_schema.model_json_schema()
-        )(_make_handler(spec, request_id))
-        sdk_tools.append(decorated)
+        handler = _make_handler(
+            spec,
+            request_id=request_id,
+            user_id=user_id,
+            ctx_metadata=meta,
+            call_counts=call_counts,
+            tool_timeout_s=tool_timeout_s,
+        )
+        sdk_tools.append(
+            tool(spec.name, spec.description, spec.input_schema.model_json_schema())(handler)
+        )
     return sdk_tools
 
 
@@ -161,17 +262,34 @@ async def run_sdk_agent(
     specs: list[ToolSpec],
     model: str,
     system_prompt: str,
+    user_id: str | None = None,
+    ctx_metadata: dict[str, Any] | None = None,
+    require_rls: bool = False,
     max_turns: int = 8,
     cost_cap_usd: float = 0.5,
+    tool_timeout_s: float = 60.0,
     price: Price | None = None,
 ) -> SdkAgentResult:
     """SDK on Bedrock で goal を回す（ライブ; Node CLI + Bedrock 資格情報が必要）。
 
     ガードレールは SDK ネイティブ: `max_turns`（反復上限）と `max_budget_usd`（コスト上限）。
-    6-bis ログは AssistantMessage.usage を呼び出し毎に記録。
+    require_rls=True の場合、ctx_metadata に user_email が無ければ fail-closed（越権防止）。
     """
+    meta = ctx_metadata or {}
+    if require_rls and not meta.get("user_email"):
+        raise OrchestratorError(
+            "RLS required but ctx_metadata['user_email'] is missing (fail-closed)"
+        )
+
     server = create_sdk_mcp_server(
-        "teamagent", tools=build_skill_tools(specs, request_id)
+        "teamagent",
+        tools=build_skill_tools(
+            specs,
+            request_id=request_id,
+            user_id=user_id,
+            ctx_metadata=meta,
+            tool_timeout_s=tool_timeout_s,
+        ),
     )
     options = ClaudeAgentOptions(
         mcp_servers={"teamagent": server},
@@ -197,8 +315,16 @@ async def run_sdk_agent(
             else:
                 no_id.append(message)
         elif isinstance(message, ResultMessage):
+            # エラー/予算/拒否の可観測性（黙って劣化回答を返さない）.
             result.session_total_cost_usd = message.total_cost_usd
-            # 最終回答は ResultMessage.result が正規（合成テキストはここに入る）.
+            result.model_usage = message.model_usage
+            result.is_error = bool(message.is_error)
+            result.api_error_status = message.api_error_status
+            result.errors = list(message.errors or [])
+            result.permission_denials = list(message.permission_denials or [])
+            result.stopped_reason = classify_result(
+                subtype=message.subtype, is_error=bool(message.is_error)
+            )
             if message.result:
                 final_text = message.result
 
@@ -220,9 +346,13 @@ async def run_sdk_agent(
 
     # 最終回答: ResultMessage.result を優先、無ければ assistant テキストを連結.
     result.answer = (final_text or "\n".join(answer_parts)).strip()
+    if result.is_error and not result.answer:
+        result.answer = f"(エージェント未完了: stopped_reason={result.stopped_reason})"
     logger.info(
         "agent_result",
         request_id=request_id,
+        stopped_reason=result.stopped_reason,
+        is_error=result.is_error,
         session_total_cost_usd=result.session_total_cost_usd,
         num_turns=result.num_turns,
         estimated_cost_usd=round(result.total_cost_usd, 6),
@@ -236,6 +366,7 @@ __all__ = [
     "Price",
     "SdkAgentResult",
     "build_skill_tools",
+    "classify_result",
     "log_cost_record",
     "run_sdk_agent",
     "usage_to_record",

@@ -40,16 +40,18 @@ def test_adaptive_trace_pivots_to_cv_and_swaps_on_mail_ng() -> None:
     # ①〜⑤ のツール呼び出し順（②の方針転換と④'の差し替えを含む）
     assert result.tool_trace == [
         "get_client_history",
-        "draft_measure",          # ② 認知→CV ピボット後の最初の案
+        "draft_measure",  # ② 認知→CV ピボット後の最初の案
         "check_mail_constraints",  # ④ Mail制約チェック
-        "draft_measure",          # ④' NGだったので別案へ差し替え
-        "search_past_cases",       # ⑤ Driveから裏付け
+        "draft_measure",  # ④' NGだったので別案へ差し替え
+        "search_past_cases",  # ⑤ Driveから裏付け
     ]
 
     # 適応の証拠
-    assert result.steps[2].output["ng"] is True             # Mailが手法をNG判定
-    assert "NG回避" in result.steps[3].input["brief"]        # 2案目はNG回避指示で差し替え
-    assert result.steps[3].output["approach"] != result.steps[1].output["approach"]  # 手法が変わった
+    assert result.steps[2].output["ng"] is True  # Mailが手法をNG判定
+    assert "NG回避" in result.steps[3].input["brief"]  # 2案目はNG回避指示で差し替え
+    assert (
+        result.steps[3].output["approach"] != result.steps[1].output["approach"]
+    )  # 手法が変わった
 
     # 最終回答に「認知の失敗→CV提案」「裏付け」が反映
     assert "CV" in result.answer
@@ -93,9 +95,7 @@ def test_cost_cap_guardrail_stops_expensive_loop() -> None:
 class _BadDecider:
     """未登録ツールを指す decider（エラー処理検証用）。"""
 
-    def decide(
-        self, goal: str, tools: list[ToolSpec], history: list[Observation]
-    ) -> Decision:
+    def decide(self, goal: str, tools: list[ToolSpec], history: list[Observation]) -> Decision:
         return ToolCall("does_not_exist", {})
 
 

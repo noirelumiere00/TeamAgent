@@ -41,9 +41,7 @@ class GetClientHistorySkill(BaseSkill[ClientHistoryInput, ClientHistoryOutput]):
     input_schema = ClientHistoryInput
     output_schema = ClientHistoryOutput
 
-    def run(
-        self, input: ClientHistoryInput, ctx: SkillContext
-    ) -> ClientHistoryOutput:
+    def run(self, input: ClientHistoryInput, ctx: SkillContext) -> ClientHistoryOutput:
         return ClientHistoryOutput(
             summary=f"{input.client}は過去に『認知』施策を実施したがKPI未達（滑った）",
             flopped_axis="認知",
@@ -165,9 +163,7 @@ class ScenarioDecider:
     「結果次第で分岐する」性質を実コードで検証できる。
     """
 
-    def decide(
-        self, goal: str, tools: list[ToolSpec], history: list[Observation]
-    ) -> Decision:
+    def decide(self, goal: str, tools: list[ToolSpec], history: list[Observation]) -> Decision:
         hist = [o for o in history if o.tool == "get_client_history"]
         drafts = [o for o in history if o.tool == "draft_measure"]
         mail = [o for o in history if o.tool == "check_mail_constraints"]
@@ -218,18 +214,14 @@ class ScenarioDecider:
 class RunawayDecider:
     """常にツールを呼び続ける（max_steps ガードレール検証用）。"""
 
-    def decide(
-        self, goal: str, tools: list[ToolSpec], history: list[Observation]
-    ) -> Decision:
+    def decide(self, goal: str, tools: list[ToolSpec], history: list[Observation]) -> Decision:
         return ToolCall("search_past_cases", {"query": "loop"})
 
 
 class ExpensiveDecider:
     """高コストツールを呼び続ける（cost_cap ガードレール検証用）。"""
 
-    def decide(
-        self, goal: str, tools: list[ToolSpec], history: list[Observation]
-    ) -> Decision:
+    def decide(self, goal: str, tools: list[ToolSpec], history: list[Observation]) -> Decision:
         return ToolCall("expensive_tool", {"query": "x"})
 
 
