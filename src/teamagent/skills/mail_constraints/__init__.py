@@ -10,9 +10,15 @@ from teamagent.skills.mail_constraints.schema import (
     MailConstraintsInput,
     MailConstraintsOutput,
 )
-from teamagent.skills.mail_constraints.skill import MailConstraintsSkill
+from teamagent.skills.mail_constraints.skill import (
+    ConsentStore,
+    EmailSetConsentStore,
+    MailConstraintsSkill,
+)
 
 __all__ = [
+    "ConsentStore",
+    "EmailSetConsentStore",
     "MailConstraint",
     "MailConstraintsInput",
     "MailConstraintsOutput",

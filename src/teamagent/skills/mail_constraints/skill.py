@@ -21,7 +21,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 import structlog
 from pydantic import BaseModel
@@ -38,6 +38,34 @@ from teamagent.skills.mail_constraints.schema import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+@runtime_checkable
+class ConsentStore(Protocol):
+    """G2: メール参照の本人同意を判定する差し替え可能な口。
+
+    6c の人間ゲート（設計 §9）で backend（DB/設定/Slack オプトイン）を確定するまでの間、
+    既定は env/集合ベースの `EmailSetConsentStore`。確定後は本 Protocol を実装した
+    `DbConsentStore` 等を `MailConstraintsSkill(consent_store=...)` で注入するだけで差し替え可能
+    （スキル本体の再実装は不要）。
+    """
+
+    def is_consented(self, email: str) -> bool: ...
+
+
+class EmailSetConsentStore:
+    """同意済みメール集合で判定する既定実装（明示集合 or env MAIL_CONSENT_EMAILS）。"""
+
+    def __init__(self, emails: set[str] | None = None) -> None:
+        if emails is not None:
+            self._emails = frozenset(e.strip().lower() for e in emails if e.strip())
+        else:
+            raw = os.environ.get("MAIL_CONSENT_EMAILS", "")
+            self._emails = frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+
+    def is_consented(self, email: str) -> bool:
+        return email.strip().lower() in self._emails
+
 
 # G6: メール本文は「資料（データ）」であり指示ではない、を明示する抽出器プロンプト。
 # 本文中の命令・依頼・プロンプトには従わせず、制約抽出のみ JSON で出させる。
@@ -91,6 +119,7 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
         bedrock: BedrockClient | None = None,
         *,
         consent_emails: set[str] | None = None,
+        consent_store: ConsentStore | None = None,
         max_body_chars: int = 2000,
         summary_max_tokens: int = 900,
         prompt_version: str = "v1",
@@ -98,12 +127,11 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
         # gmail/bedrock は遅延構築（テストでは fake を注入）。
         self._gmail = gmail
         self._bedrock = bedrock
-        # G2: 同意済みメールの集合。未指定なら env MAIL_CONSENT_EMAILS（カンマ区切り）。
-        if consent_emails is not None:
-            self._consent_emails = frozenset(e.strip().lower() for e in consent_emails if e.strip())
+        # G2: 同意判定は差し替え可能な ConsentStore。優先順: 明示 store > consent_emails > env。
+        if consent_store is not None:
+            self._consent_store: ConsentStore = consent_store
         else:
-            raw = os.environ.get("MAIL_CONSENT_EMAILS", "")
-            self._consent_emails = frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+            self._consent_store = EmailSetConsentStore(consent_emails)
         self._max_body_chars = max_body_chars
         self._summary_max_tokens = summary_max_tokens
         self._prompt_version = prompt_version
@@ -126,8 +154,8 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
             )
         requester = requester.strip()
 
-        # G2: 本人同意（オプトイン）必須（fail-closed）。
-        if requester.lower() not in self._consent_emails:
+        # G2: 本人同意（オプトイン）必須（fail-closed）。判定は差し替え可能な ConsentStore。
+        if not self._consent_store.is_consented(requester):
             raise PermissionError(
                 "mail_constraints はメール参照の本人同意が必要です（オプトイン未登録）"
             )
@@ -178,20 +206,17 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
     # ── 依存解決 ───────────────────────────────────────────────────────────
 
     def _resolve_gmail(self, requester: str) -> GmailClient:
-        """G1: impersonate 先を requester に固定して GmailClient を得る。
+        """G1: impersonate 先を requester に**束縛**して GmailClient を得る。
 
-        テスト/明示注入があればそれを使う。無ければ env から構築するが、
-        **env の impersonate 先が requester と一致しない場合は fail-closed**。
-        （6c で adapter に requester-subject 明示注入経路を足すまでの暫定実装。）
+        テスト/明示注入があればそれを使う。無ければ requester を明示注入して構築する
+        （`from_env(impersonate_user=requester)`）。これで「本人受信箱限定」が deploy 時の
+        env 一致に依存せず**コードで保証される不変条件**になる（旧: env 文字列一致チェックの
+        暫定実装を解消）。実 Gmail 接続自体は 6c の人間ゲート（同意/DWD/CASA）承認後に有効化。
         """
         if self._gmail is not None:
             return self._gmail
-        env_subject = (os.environ.get("GOOGLE_GMAIL_IMPERSONATE_USER", "") or "").strip()
-        if env_subject.lower() != requester.lower():
-            raise PermissionError(
-                "mail_constraints: impersonate 先がリクエスト発行者と一致しません（fail-closed）"
-            )
-        return GmailClient.from_env(readonly=True)  # G4: gmail.readonly のみ
+        # G1: impersonate=requester を束縛（env/LLM でなく呼び出し側が固定）。G4: readonly のみ。
+        return GmailClient.from_env(readonly=True, impersonate_user=requester)
 
     def _resolve_bedrock(self) -> BedrockClient:
         if self._bedrock is None:

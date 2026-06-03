@@ -233,3 +233,53 @@ def test_mask_email_and_hash() -> None:
     assert _mask_email("noatsign") == "***"
     assert _hash_id("abc") == _hash_id("abc")  # 決定的
     assert len(_hash_id("abc")) == 12
+
+
+# ── 6c コード準備: G1 requester束縛 / ConsentStore 差し替え ──────────────────
+
+
+def test_from_env_impersonate_user_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """from_env(impersonate_user=...) は env GOOGLE_GMAIL_IMPERSONATE_USER より優先される。"""
+    from teamagent.adapters.gmail_client import GmailClient
+
+    monkeypatch.setenv("GOOGLE_GMAIL_IMPERSONATE_USER", "someone-else@vectorinc.co.jp")
+    client = GmailClient.from_env(readonly=True, impersonate_user="s-komata@vectorinc.co.jp")
+    assert client._impersonate_user == "s-komata@vectorinc.co.jp"  # 明示引数が勝つ
+
+
+def test_resolve_gmail_binds_requester(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_resolve_gmail は from_env を impersonate_user=requester / readonly=True で呼ぶ。
+
+    env 文字列一致でなく requester 束縛＝G1 を不変条件化。従来ゼロカバーだった env 経路の回帰ガード。
+    """
+    import teamagent.skills.mail_constraints.skill as mod
+
+    captured: dict[str, Any] = {}
+
+    def _spy_from_env(*, readonly: bool = False, impersonate_user: str | None = None) -> FakeGmail:
+        captured["readonly"] = readonly
+        captured["impersonate_user"] = impersonate_user
+        return FakeGmail(["x"])  # 実 Gmail を作らない
+
+    monkeypatch.setattr(mod.GmailClient, "from_env", staticmethod(_spy_from_env))
+    skill = MailConstraintsSkill(bedrock=FakeBedrock("{}"), consent_emails=CONSENT)  # gmail 未注入
+    skill._resolve_gmail("s-komata@vectorinc.co.jp")
+    assert captured == {"readonly": True, "impersonate_user": "s-komata@vectorinc.co.jp"}
+
+
+def test_consent_store_injection() -> None:
+    """consent_store= を注入すると G2 判定がそれに委譲される（backend 差し替え可能）。"""
+
+    class OnlyBob:
+        def is_consented(self, email: str) -> bool:
+            return email.strip().lower() == "bob@vectorinc.co.jp"
+
+    skill = MailConstraintsSkill(
+        gmail=FakeGmail([]),
+        bedrock=FakeBedrock('{"constraints":[],"summary":""}'),
+        consent_store=OnlyBob(),
+    )
+    with pytest.raises(PermissionError):  # store が拒否する requester
+        skill.run(MailConstraintsInput(client_name="A社"), _ctx("s-komata@vectorinc.co.jp"))
+    out = skill.run(MailConstraintsInput(client_name="A社"), _ctx("bob@vectorinc.co.jp"))
+    assert out.scanned_count == 0  # store が許可 → 通る

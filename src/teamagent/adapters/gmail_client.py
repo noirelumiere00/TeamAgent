@@ -310,9 +310,14 @@ class GmailClient:
         )
 
     @classmethod
-    def from_env(cls, *, readonly: bool = False) -> GmailClient:
+    def from_env(
+        cls, *, readonly: bool = False, impersonate_user: str | None = None
+    ) -> GmailClient:
         scopes = cls.SCOPES_READONLY if readonly else cls.SCOPES_MODIFY
-        impersonate_user = os.environ.get("GOOGLE_GMAIL_IMPERSONATE_USER")
+        # 明示 impersonate_user を優先（本人受信箱を呼び出し側で束縛）。
+        # 未指定時のみ env GOOGLE_GMAIL_IMPERSONATE_USER へフォールバック（後方互換）。
+        if impersonate_user is None:
+            impersonate_user = os.environ.get("GOOGLE_GMAIL_IMPERSONATE_USER")
         if not (
             os.environ.get("GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         ):
