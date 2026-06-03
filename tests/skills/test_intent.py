@@ -212,3 +212,33 @@ def test_plain_check_still_routes_to_review() -> None:
 def test_bare_management_no_without_keyword_not_video_approval() -> None:
     """管理番号だけ・動画文脈なしは video_approval に誤爆させない。"""
     assert detect_skill("E01-01 ってどうなってる").skill != "video_approval"
+
+
+# -----------------------------------------------------------
+# video_algorithm (VSEO 動画アルゴリズム読み解き) の自動ルーティング
+# -----------------------------------------------------------
+@pytest.mark.parametrize(
+    "msg,expect_terms",
+    [
+        ("VSEO分析 新宿 ランチ", ["新宿", "ランチ"]),
+        ("新宿ランチをアルゴリズム分析して", ["新宿"]),
+        ("TikTokでアルゴリズム分析 日焼け止め", ["日焼け止め"]),
+        ("検索上位を分析して 渋谷 カフェ", ["渋谷", "カフェ"]),
+    ],
+)
+def test_routes_to_video_algorithm(msg: str, expect_terms: list[str]) -> None:
+    intent = detect_skill(msg)
+    assert intent.skill == "video_algorithm"
+    assert intent.query is not None
+    for t in expect_terms:
+        assert t in intent.query
+
+
+def test_video_algorithm_beats_tiktok_search() -> None:
+    """『アルゴリズム分析』は tiktok_search(検索/調べ) ではなく video_algorithm。"""
+    assert detect_skill("TikTokで日焼け止めをアルゴリズム分析して").skill == "video_algorithm"
+
+
+def test_plain_tiktok_search_not_video_algorithm() -> None:
+    """『TikTokで○○検索して』は従来通り tiktok_search（分析ではない）。"""
+    assert detect_skill("TikTokで新宿ランチ検索して").skill == "tiktok_search"

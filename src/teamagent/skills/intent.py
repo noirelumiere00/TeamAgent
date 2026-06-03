@@ -100,6 +100,17 @@ _MANAGEMENT_NO_RE = re.compile(r"(?<!\d)([A-Za-z]{0,3}\d{1,3}-\d{1,3}(?:-[A-Za-z
 # メッセージ中の Google スプレッドシート URL から sheet_id を拾う (任意指定)。
 _SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]{20,})")
 
+# video_algorithm (VSEO 動画アルゴリズム読み解き) 起動トリガー:
+# 「VSEO分析」「アルゴリズム分析」「検索上位(を)分析」等。tiktok_search(=検索/調べ)とは
+# 別物（"分析" は検索動詞に含めない）なので衝突しない。
+_VSEO_ALGO_RE = re.compile(r"VSEO\s*分析|アルゴリズム\s*分析|検索\s*上位.{0,4}分析", re.IGNORECASE)
+# KW 抽出用: トリガー語・プラットフォーム名・末尾の依頼語を削ぐ
+_VSEO_STRIP = re.compile(
+    r"VSEO|ヴイエスイーオー|アルゴリズム|検索\s*上位\s*\d*\s*本?|"
+    r"tiktok|ティックトック|ティクトック|動画|分析|して(ほしい|ください)?|お願い",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class SkillIntent:
@@ -182,6 +193,15 @@ def _extract_tiktok_query(message: str) -> tuple[str | None, str]:
     return None, "keyword"
 
 
+def _extract_vseo_query(message: str) -> str | None:
+    """「VSEO分析 新宿ランチ」「○○をアルゴリズム分析して」→ 検索KW を抜く。"""
+    q = _VSEO_STRIP.sub(" ", message)
+    q = re.sub(r"[\s　]+", " ", q).strip()
+    q = _TRAILING.sub("", q).strip()
+    q = re.sub(r"^[\sでをのにへ、,]+|[\sでをのにへ、,]+$", "", q).strip()
+    return q or None
+
+
 def detect_skill(message: str) -> SkillIntent:
     """メッセージから起動 Skill を判定する。
 
@@ -198,6 +218,17 @@ def detect_skill(message: str) -> SkillIntent:
             reason=f"video url detected ({len(video_urls)})",
             video_url=video_urls[0],
             video_urls=tuple(video_urls),
+        )
+
+    # 0a-2. VSEO 動画アルゴリズム読み解き (「VSEO分析 ○○」「○○をアルゴリズム分析」)。
+    # tiktok_search より先に判定（"分析" は検索動詞でないので元々衝突しないが明示的に優先）。
+    if _VSEO_ALGO_RE.search(text):
+        q = _extract_vseo_query(text)
+        return SkillIntent(
+            skill="video_algorithm",
+            client_name=None,
+            reason="vseo algorithm trigger",
+            query=q,
         )
 
     # 0b. TikTok 検索意図 (「TikTokで○○検索して」「#○○ で調べて」)。
