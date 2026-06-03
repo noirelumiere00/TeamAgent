@@ -167,6 +167,8 @@ module = [
     "teamagent.adapters.gsheets_client",
     "teamagent.adapters.gdocs_client",
     "teamagent.adapters.gslides_client",
+    "teamagent.adapters.gcalendar_client",
+    "teamagent.adapters.gpeople_client",
     "teamagent.adapters.google_auth",
 ]
 disallow_untyped_calls = false
