@@ -40,6 +40,7 @@ from claude_agent_sdk import (
 
 from teamagent.skills.base import SkillContext
 
+from .faithfulness import extract_chunk_ids_from_tool_json
 from .loop import OrchestratorError
 from .tools import ToolSpec
 
@@ -146,6 +147,8 @@ class SdkAgentResult:
     errors: list[str] = field(default_factory=list)
     permission_denials: list[Any] = field(default_factory=list)
     tool_calls: list[str] = field(default_factory=list)  # 実際に呼ばれたツール名（順序つき）
+    # ツールが返した chunk_id（最終回答の引用が捏造でないかの忠実性照合用）
+    available_chunk_ids: list[int] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -162,6 +165,7 @@ def _make_handler(
     tool_timeout_s: float,
     max_same_call: int = 2,
     tool_calls: list[str] | None = None,
+    available_chunk_ids: list[int] | None = None,
 ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
     """Skill を SDK ツールハンドラへ変換（Phase 0 ガード込み）.
 
@@ -172,6 +176,7 @@ def _make_handler(
     """
 
     calls = tool_calls if tool_calls is not None else []
+    chunk_sink = available_chunk_ids if available_chunk_ids is not None else []
 
     def _err(text: str) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": text}], "is_error": True}
@@ -225,7 +230,10 @@ def _make_handler(
         skill_cost = float(getattr(output, "total_cost_usd", 0.0) or 0.0)
         if skill_cost:
             logger.info("skill_cost", request_id=request_id, skill=spec.name, cost_usd=skill_cost)
-        return {"content": [{"type": "text", "text": output.model_dump_json()}]}
+        result_text = output.model_dump_json()
+        # 忠実性照合用: ツールが返した chunk_id を蓄積（最終回答の引用が捏造でないか後で検証）.
+        chunk_sink.extend(extract_chunk_ids_from_tool_json(result_text))
+        return {"content": [{"type": "text", "text": result_text}]}
 
     return handler
 
@@ -238,11 +246,13 @@ def build_skill_tools(
     ctx_metadata: dict[str, Any] | None = None,
     tool_timeout_s: float = 60.0,
     tool_calls: list[str] | None = None,
+    available_chunk_ids: list[int] | None = None,
 ) -> list[Any]:
     """ToolSpec 群 → SDK MCP ツール群（Pydantic input_schema を JSON Schema で渡す）.
 
     call_counts を全ツールで共有し、同一入力の繰返し呼び出しを run 単位で抑制する。
-    tool_calls（任意）を渡すと、全ツールで共有して呼び出し順を記録する（評価用）。
+    tool_calls / available_chunk_ids（任意）を渡すと、全ツールで共有して呼び出し順・
+    返却 chunk_id を記録する（評価・忠実性照合用）。
     """
     call_counts: dict[str, int] = {}
     meta = ctx_metadata or {}
@@ -256,6 +266,7 @@ def build_skill_tools(
             call_counts=call_counts,
             tool_timeout_s=tool_timeout_s,
             tool_calls=tool_calls,
+            available_chunk_ids=available_chunk_ids,
         )
         sdk_tools.append(
             tool(spec.name, spec.description, spec.input_schema.model_json_schema())(handler)
@@ -290,6 +301,7 @@ async def run_sdk_agent(
         )
 
     tool_calls: list[str] = []
+    available_chunk_ids: list[int] = []
     server = create_sdk_mcp_server(
         "teamagent",
         tools=build_skill_tools(
@@ -299,6 +311,7 @@ async def run_sdk_agent(
             ctx_metadata=meta,
             tool_timeout_s=tool_timeout_s,
             tool_calls=tool_calls,
+            available_chunk_ids=available_chunk_ids,
         ),
     )
     options = ClaudeAgentOptions(
@@ -362,6 +375,7 @@ async def run_sdk_agent(
     # 最終回答: ResultMessage.result を優先、無ければ assistant テキストを連結.
     result.answer = (final_text or "\n".join(answer_parts)).strip()
     result.tool_calls = tool_calls
+    result.available_chunk_ids = list(dict.fromkeys(available_chunk_ids))  # 重複除去
     if result.is_error and not result.answer:
         result.answer = f"(エージェント未完了: stopped_reason={result.stopped_reason})"
     logger.info(

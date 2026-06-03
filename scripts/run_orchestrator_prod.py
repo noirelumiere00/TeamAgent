@@ -24,6 +24,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 
 from teamagent.orchestrator.factory import build_production_tools  # noqa: E402
+from teamagent.orchestrator.faithfulness import score_faithfulness  # noqa: E402
 from teamagent.orchestrator.sdk_runner import run_sdk_agent  # noqa: E402
 
 _SYSTEM_PROMPT = """\
@@ -110,6 +111,13 @@ async def _main() -> int:
     print(f"num_turns        : {result.num_turns}")
     print(f"cost (SDK実コスト): ${result.session_total_cost_usd}")
     print(f"tools(6-bis log) : {len(result.cost_records)} 呼び出し")
+    # ⑤ 忠実性: 最終回答の引用 chunk_id が、ツールが返した chunk_id に裏付けられているか.
+    fs = score_faithfulness(result.answer, result.available_chunk_ids)
+    print(
+        f"faithfulness     : 引用{len(fs.cited)}件 / 裏付けあり{len(fs.valid)} / "
+        f"捏造{len(fs.fabricated)}{tuple(fs.fabricated) if fs.fabricated else ''} "
+        f"(validity={fs.citation_validity:.2f}, available={fs.available_count})"
+    )
     print(f"answer           :\n{result.answer}")
     return 0
 
