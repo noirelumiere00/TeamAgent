@@ -98,6 +98,45 @@ class SlackClient:
         )
         return result
 
+    async def upload_file(
+        self,
+        channel: str,
+        file_path: str,
+        request_id: str,
+        *,
+        title: str | None = None,
+        initial_comment: str | None = None,
+        thread_ts: str | None = None,
+    ) -> bool:
+        """ローカルファイル（HTMLレポート等）を channel にアップロードする。
+
+        files.upload v2 を使う。失敗しても例外を投げず False を返す（通知本体は別途投稿済の想定）。
+        """
+        start = time.perf_counter()
+        kwargs: dict[str, Any] = {"channel": channel, "file": file_path}
+        if title is not None:
+            kwargs["title"] = title
+        if initial_comment is not None:
+            kwargs["initial_comment"] = initial_comment
+        if thread_ts is not None:
+            kwargs["thread_ts"] = thread_ts
+        try:
+            resp = await self._client.files_upload_v2(**kwargs)
+            ok = bool(resp.get("ok", False))
+        except Exception:
+            logger.exception("slack_upload_file_failed", request_id=request_id, channel=channel)
+            return False
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "slack_upload_file",
+            request_id=request_id,
+            channel=channel,
+            ok=ok,
+            file=file_path,
+            latency_ms=latency_ms,
+        )
+        return ok
+
     async def get_user_profile(self, user_id: str, request_id: str) -> dict[str, Any]:
         """users.profile.get 呼び出し。Bot に話しかけた人の情報を取るのに使う。"""
         start = time.perf_counter()

@@ -55,14 +55,15 @@ def download_video(
         outtmpl = os.path.join(tmpdir, "v.%(ext)s")
         ydl_opts: dict[str, Any] = {
             "outtmpl": outtmpl,
-            # サイズ制限内の最良画質。無ければ mp4/best にフォールバック
-            "format": f"best[filesize<{max_filesize_mb}M]/mp4/best",
+            # サイズ制限内の最良画質。無ければ mp4/best、最後は worst まで降りて取り切る
+            "format": f"best[filesize<{max_filesize_mb}M]/mp4/best/worst",
             "max_filesize": max_filesize_mb * 1024 * 1024,
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
             "socket_timeout": 30,
-            "retries": 2,
+            "retries": 3,  # 一過性ネットワーク揺れの再試行（2→3）
+            "fragment_retries": 3,  # HLS/DASH 断片の transient 救済
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
