@@ -7,7 +7,9 @@
 ---
 
 ## 0. 現在地（ひと言）
-**PoC（実Bedrockで適応提案を完遂）＋ Phase 0 堅牢化まで完了・コミット済（`ba0d3ff`→`2bd10d0`）。** 動作は **fixtureスキル**段階で、**実Skill接続・本番runtime統合・Mail/Drive横断は未着手**。次は **Phase 1（実 `search` を隔離環境で接続）**。
+**Phase 0→1→2 ライブ達成。さらに 2026-06-03 に「実コーパスからの grounded 出力」を実証（commit `9d415d6`）。** 実RDS(9420 chunks)から chunk_id/Drive URL/見積数値つきの根拠付き提案を、実Bedrockで生成できることを確認（hit 10/5/5・top_score 0.49-0.86・is_error=False・$0.106・ハルシ無し）。本番runtime統合(Phase 3)・Mail/Drive(Phase 6)は未着手。**次は Phase 4（orchestration gold set で品質を数値化）= データアクセスが確立したので着手可能**。
+
+> ⚠️ **過去記録の訂正（重要）**: 旧版は Phase 1/2 を「DBは実質空・データギャップ・全クエリ0件」と記載していたが**誤り**。DB には実ショート動画/PR提案データ（9420 chunks）が存在し、RLS(email)で正常にアクセス可能。0件の真因は **3つのバグ**だった: ① SearchSkill要約モデルが実行リージョンと不一致（`jp.*` プロファイルを us-east-1 で呼び ValidationException）② `SEARCH_MIN_RELEVANCE=0.4` が borderline クエリの Rerank スコア(0.3)を足切り ③ SDKが cwd の CLAUDE.md を自動文脈化し古い記述でハルシ。①②③すべて対処済。
 
 ---
 
@@ -44,14 +46,14 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
 - [x] ライブ実行スクリプト `scripts/run_orchestrator_prod.py`（preflight + RLS注入 + timeout 90s）。本番 slack_bot には非干渉
 - [x] 軽量スモークテスト `test_factory_smoke.py`（ruff/format/mypy 6files/pytest 17 緑）
 - [x] **ライブ検証 達成（2026-06-03）**: 実 pgvector(RDS/SSMトンネル) 接続成功・LLMが適応的に複数キーワードで search 実行・6-bisログ・SDK実コスト$0.20・`is_error=False/final`。Phase 0 が実DB障害(OperationalError, トンネル未起動時)を catch→構造化エラー→優雅終了 まで実証。
-  - ※「BtoB SaaS採用」クエリは **0件**＝DBに該当データ未取込（提案はINPEX/森ビル/PR代行のみ）＝**データギャップ。システムは正常**。実hitは取込済みデータ（森ビル等）で確認可。
-- DoD: 実 search で実データを引ける ✅。残: orchestrator gold set 10本（Phase 4）で品質を数値化。
+  - ※「BtoB SaaS採用」が0件だったのは**データギャップではなくバグ**（上記①②③）。同DBに**ショート動画/PR提案の実データが豊富**にあり、`s-komata@vectorinc.co.jp` の RLS で 30 raw hits（cosine 0.91）→ Rerank → grounded 出力まで到達済。
+- DoD: 実 search で実データを引き、**chunk_id/URL/数値つきで grounded 回答**できる ✅（commit `9d415d6`）。残: orchestrator gold set 10本（Phase 4）で品質を数値化。
 
 ### ✅ Phase 2 — 複数“既存”Skillで適応（**ライブ達成 2026-06-03**・commit `a5aa5e6`）
 - [x] `clientkarte / proposal_draft / proposal_review` を `factory.build_production_tools()` に追加。**`proposal_*` に同一 `SearchSkill` を共有注入**（embedder二重ロード回避）
 - [x] **ライブ達成**: 「森ビル向け次施策を提案＋レビュー」で proposal_draft＋**proposal_review（勝ち筋照合・リスク診断）まで実行**し、4施策＋フェーズ計画＋セルフレビュー＋ネクストアクションの提案を実Bedrockで生成。多段が成立
-  - ※今回も DB に提案PDF未取込で 0件＝**データギャップ**。エージェントは検知し「PDF投入→再実行で精度UP」と注記（システム正常）
-- DoD: 多段適応が実Claudeで成立 ✅。グラウンディング精度は **データ取込後**に Phase 4 gold set で評価
+  - ※当時 0件だったのはバグ（上記①②③）。修正後は proposal_* も含め実データで grounded 出力に到達
+- DoD: 多段適応が実Claudeで成立 ✅。グラウンディングも実データで成立 ✅（commit `9d415d6`）。**残るは Phase 4 gold set での定量評価**（hit率・期待ツール列・cost分布）
 
 ### Phase 3 — runtime統合（opt-in・単発フロー併存）⚠️ゲート判断含む
 - [ ] **既存 intent→単発dispatch には触らず**、新規の明示トリガ（例: 新Slashコマンド／`@TeamAgent 深く考えて`）で起動。`USE_ORCHESTRATOR` 既定OFF→特定ユーザー→全体の段階ロールアウト
