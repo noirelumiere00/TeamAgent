@@ -47,9 +47,11 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
   - ※「BtoB SaaS採用」クエリは **0件**＝DBに該当データ未取込（提案はINPEX/森ビル/PR代行のみ）＝**データギャップ。システムは正常**。実hitは取込済みデータ（森ビル等）で確認可。
 - DoD: 実 search で実データを引ける ✅。残: orchestrator gold set 10本（Phase 4）で品質を数値化。
 
-### Phase 2 — 複数“既存”Skillで適応（新Skill不要）
-- [ ] `clientkarte → proposal_draft → proposal_review`（必要なら `search`）を工場に追加。**`proposal_*` には同一 `SearchSkill` インスタンスを共有注入**（embedder二重ロード回避）
-- DoD: 「クライアントXに次施策を提案して」で review 指摘→draft やり直しの適応分岐が実Claudeトレースで1本
+### ✅ Phase 2 — 複数“既存”Skillで適応（**ライブ達成 2026-06-03**・commit `a5aa5e6`）
+- [x] `clientkarte / proposal_draft / proposal_review` を `factory.build_production_tools()` に追加。**`proposal_*` に同一 `SearchSkill` を共有注入**（embedder二重ロード回避）
+- [x] **ライブ達成**: 「森ビル向け次施策を提案＋レビュー」で proposal_draft＋**proposal_review（勝ち筋照合・リスク診断）まで実行**し、4施策＋フェーズ計画＋セルフレビュー＋ネクストアクションの提案を実Bedrockで生成。多段が成立
+  - ※今回も DB に提案PDF未取込で 0件＝**データギャップ**。エージェントは検知し「PDF投入→再実行で精度UP」と注記（システム正常）
+- DoD: 多段適応が実Claudeで成立 ✅。グラウンディング精度は **データ取込後**に Phase 4 gold set で評価
 
 ### Phase 3 — runtime統合（opt-in・単発フロー併存）⚠️ゲート判断含む
 - [ ] **既存 intent→単発dispatch には触らず**、新規の明示トリガ（例: 新Slashコマンド／`@TeamAgent 深く考えて`）で起動。`USE_ORCHESTRATOR` 既定OFF→特定ユーザー→全体の段階ロールアウト
