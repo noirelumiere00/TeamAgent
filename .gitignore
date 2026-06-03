@@ -162,3 +162,6 @@ Desktop.ini
 # --- Eval results (Day 8 Sprint 4-C) ---
 # 実行ごとに timestamp 付き JSON が増える、レポジトリ汚染防止
 data/eval/results/
+
+# --- VSEO video_algorithm のローカル生成レポート（誤コミット防止） ---
+.local_out/

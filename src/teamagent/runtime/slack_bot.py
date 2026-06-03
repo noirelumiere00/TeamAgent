@@ -365,6 +365,7 @@ _ACK_BY_SKILL: dict[str, str] = {
     "video_analysis": "🎬 動画分析を受け付けました。取得して解析しています…（30〜90秒）",
     "video_approval": "🎬 動画の一次チェックを受け付けました。オリエンと照合中…（30〜90秒）",
     "tiktok_search": "🎵 TikTok 検索を受け付けました。収集して分析しています…（30〜90秒）",
+    "video_algorithm": "🔎 VSEO動画アルゴリズム分析を受付。上位動画を取得し解析中…（1〜3分）",
     "operation_log": "🧾 営業ログ化を受け付けました。スレッドを読んでまとめています…（10〜20秒）",
 }
 _ACK_DEFAULT = "🤖 受け付けました。処理しています…"
@@ -892,6 +893,92 @@ class SkillDispatcher:
             video_url=extract.video_url,
         )
 
+    def get_video_algorithm_skill(self) -> Any:
+        """VideoAlgorithmSkill をキャッシュして返す。"""
+        if "video_algorithm" in self._skill_cache:
+            return self._skill_cache["video_algorithm"]
+        from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
+
+        instance = VideoAlgorithmSkill(
+            prompt_version=os.environ.get("VIDEO_ALGO_PROMPT_VERSION", "v1")
+        )
+        logger.info("video_algorithm_skill_initialized")
+        self._skill_cache["video_algorithm"] = instance
+        return instance
+
+    async def run_video_algorithm(
+        self,
+        query: str | None,
+        request_id: str,
+        user_id: str | None,
+        *,
+        reply_channel: str | None = None,
+        reply_thread_ts: str | None = None,
+    ) -> str:
+        """検索KWの上位動画を分析し、HTMLレポートを Slack に添付して通知文を返す。
+
+        Slack は『通知』のみ（全詳細は添付 HTML に埋め込む）。reply_channel があれば
+        その場所にレポートをファイル添付する。
+        """
+        if not query:
+            return (
+                "🔎 分析する検索キーワードを指定してください。例: `@TeamAgent VSEO分析 新宿 ランチ`"
+            )
+        skill = self.get_video_algorithm_skill()
+        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        from teamagent.skills.video_algorithm.schema import (
+            VideoAlgorithmInput,
+            VideoAlgorithmOutput,
+        )
+
+        input_obj = VideoAlgorithmInput(
+            query=query,
+            max_videos=int(os.environ.get("VIDEO_ALGO_MAX_VIDEOS", "5")),
+            client_name=os.environ.get("VIDEO_APPROVAL_CLIENT_NAME") or None,
+        )
+        loop = asyncio.get_running_loop()
+        out: VideoAlgorithmOutput
+        try:
+            out = await loop.run_in_executor(None, skill.run, input_obj, ctx)
+        except RuntimeError as e:
+            if "TIKTOK" in str(e):
+                return _tiktok_error_reply(str(e))
+            if "GEMINI" in str(e):
+                return "🔎 動画分析は Gemini の認証設定後に有効化されます（Vertex/APIキー）。"
+            raise
+
+        # レポートを非公開S3に公開し署名付きURL(7日)を通知に添える（URL形式配信）
+        report_url: str | None = None
+        if out.report_html_path:
+            from teamagent.adapters.report_publish import publish_html_file
+
+            path = out.report_html_path
+            report_url = await loop.run_in_executor(
+                None,
+                lambda: publish_html_file(path, request_id=request_id, query=query or ""),
+            )
+
+        # HTML レポートを Slack にも添付（オフライン閲覧用・通知文は dispatch 経由で別途投稿）
+        if out.report_html_path and reply_channel:
+            try:
+                from teamagent.adapters.slack_client import SlackClient
+
+                slack = SlackClient(bot_token=os.environ.get("SLACK_BOT_TOKEN", ""))
+                await slack.upload_file(
+                    reply_channel,
+                    out.report_html_path,
+                    request_id,
+                    title=f"VSEO分析レポート_{query}.html",
+                    thread_ts=reply_thread_ts,
+                )
+            except Exception:
+                logger.warning("video_algorithm_report_upload_failed", request_id=request_id)
+
+        summary = out.slack_summary
+        if report_url:
+            summary += f"\n🔗 *レポートURL*（7日間有効・ブラウザで開けます）: {report_url}"
+        return summary
+
     async def dispatch_auto(
         self,
         message: str,
@@ -900,6 +987,8 @@ class SkillDispatcher:
         *,
         channel_id: str | None = None,
         thread_ts: str | None = None,
+        reply_channel: str | None = None,
+        reply_thread_ts: str | None = None,
     ) -> tuple[str, list[dict[str, Any]] | None]:
         """メッセージ内容から Skill を自動判定して実行し、(text, blocks) を返す。
 
@@ -908,7 +997,9 @@ class SkillDispatcher:
         曖昧なら search。戻り値の blocks が None ならテキストのみ投稿する。
 
         channel_id / thread_ts は operation_log がスレッド会話を取得するのに使う
-        (メンションされたスレッドを CRM ログ化する)。他 Skill では未使用。
+        (メンションされたスレッドを CRM ログ化する)。
+        reply_channel / reply_thread_ts は返信先 (video_algorithm が HTML レポートを
+        その場所へファイル添付するのに使う)。
         """
         from teamagent.skills.intent import detect_skill
 
@@ -924,6 +1015,16 @@ class SkillDispatcher:
         if intent.skill == "video_approval":
             text = await self.run_video_approval(
                 intent.management_no, request_id, user_id, sheet_id=intent.sheet_id
+            )
+            return text, None
+
+        if intent.skill == "video_algorithm":
+            text = await self.run_video_algorithm(
+                intent.query,
+                request_id,
+                user_id,
+                reply_channel=reply_channel,
+                reply_thread_ts=reply_thread_ts,
             )
             return text, None
 
@@ -1215,6 +1316,8 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                 user_id,
                 channel_id=channel if oplog_thread else None,
                 thread_ts=oplog_thread,
+                reply_channel=channel,
+                reply_thread_ts=thread_ts,
             )
         except Exception as e:
             logger.exception("skill_dispatch_failed", request_id=request_id)
@@ -1280,7 +1383,9 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         )
 
         try:
-            reply, blocks = await disp.dispatch_auto(text, request_id, user_id)
+            reply, blocks = await disp.dispatch_auto(
+                text, request_id, user_id, reply_channel=channel
+            )
         except Exception as e:
             logger.exception("skill_dispatch_failed", request_id=request_id)
             capture_skill_exception(
