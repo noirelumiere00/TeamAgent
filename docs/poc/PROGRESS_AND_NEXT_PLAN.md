@@ -39,10 +39,12 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
 - [x] **SDK `==0.2.87` 厳密pin**（pyproject）＋ ci.yml 依存列挙（[[feedback_ci_no_deps_manual_enumeration]]）
 - 残（任意・小）: `session_id` 記録の追加、`Price` の env/config 化
 
-### Phase 1 — 実Skill 1個（`search`）を**隔離環境**でE2E
-- [ ] 本番ToolSpec工場 `orchestrator/factory.py` 新設、`search` を `factory` で注入（DIロジックは `slack_bot.py` の `get_search_skill()` を流用/共通化）
-- [ ] 隔離（**本番 slack_bot には触れない**）・別プロセス・timeout・RLS注入込みで実Bedrock+実pgvectorで緑
-- DoD: `search` ツールが呼ばれ 6-bisログ＋最終回答。orchestrator gold set 10本で緑（Phase 4 前倒し可）
+### 🟡 Phase 1 — 実Skill 1個（`search`）を**隔離環境**でE2E（コード実装済・commit `741a0be`／ライブ検証 待ち）
+- [x] 本番ToolSpec工場 `orchestrator/factory.py`（`build_production_tools()`）、`search` を `factory` で注入。env フラグは `slack_bot.py:get_search_skill` と一致。重い依存は遅延 import
+- [x] ライブ実行スクリプト `scripts/run_orchestrator_prod.py`（preflight + RLS注入 + timeout 90s）。本番 slack_bot には非干渉
+- [x] 軽量スモークテスト `test_factory_smoke.py`（ruff/format/mypy 6files/pytest 17 緑）
+- [ ] **ライブ検証（要 full env + SSMトンネル + Bedrock）**: `search` が呼ばれ 6-bisログ＋最終回答が出る（← 次に人間がやる）
+- DoD: 実 search で適応提案が出る。orchestrator gold set 10本（Phase 4）で緑
 
 ### Phase 2 — 複数“既存”Skillで適応（新Skill不要）
 - [ ] `clientkarte → proposal_draft → proposal_review`（必要なら `search`）を工場に追加。**`proposal_*` には同一 `SearchSkill` インスタンスを共有注入**（embedder二重ロード回避）
