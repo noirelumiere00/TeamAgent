@@ -18,8 +18,10 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-# 回答テキスト中の人間可読な引用: "[chunk_id: 123]" / "chunk_id：123" 等。
-_ANSWER_CITE_RE = re.compile(r"chunk_id[\s:：=]+(\d+)")
+# 回答テキスト中の人間可読な引用: "[chunk_id: 123]" / "chunk_id：123" /
+# markdown の "chunk_id: `123`" 等。chunk_id と数字の間の区切り（: ： = 空白 ` * 等の
+# 非単語文字）を \W で許容する（{0,6} で日本語本文へ食い込まない・誤検知を避ける）。
+_ANSWER_CITE_RE = re.compile(r"chunk_id\W{0,6}(\d+)")
 # ツールが返す JSON 中の "chunk_id": 123（available 集合の抽出用）。
 _JSON_CHUNK_RE = re.compile(r'"chunk_id"\s*:\s*(\d+)')
 

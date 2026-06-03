@@ -17,6 +17,17 @@ def test_extract_cited_from_answer() -> None:
     assert extract_cited_chunk_ids(a) == [123, 456, 789]
 
 
+def test_extract_cited_markdown_backtick() -> None:
+    # LLM が実際に使う markdown 形式（⑤-d 実 run で判明した実フォーマット）。
+    a = "> 出典 chunk_id: `1272220392`｜[GDrive](https://x)。chunk_id: `585373476`"
+    assert extract_cited_chunk_ids(a) == [1272220392, 585373476]
+
+
+def test_extract_no_false_positive_on_japanese() -> None:
+    # 「chunk_id」直後が数字でなく日本語なら引用とみなさない（誤検知防止）。
+    assert extract_cited_chunk_ids("chunk_id は重要な概念です") == []
+
+
 def test_extract_from_tool_json() -> None:
     j = '{"hits":[{"chunk_id": 123,"content":"x"},{"chunk_id":456}]}'
     assert extract_chunk_ids_from_tool_json(j) == [123, 456]
