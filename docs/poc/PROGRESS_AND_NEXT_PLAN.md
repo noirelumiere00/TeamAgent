@@ -7,7 +7,7 @@
 ---
 
 ## 0. 現在地（ひと言）
-**Phase 0→1→2 ライブ達成。さらに 2026-06-03 に「実コーパスからの grounded 出力」を実証（commit `9d415d6`）。** 実RDS(9420 chunks)から chunk_id/Drive URL/見積数値つきの根拠付き提案を、実Bedrockで生成できることを確認（hit 10/5/5・top_score 0.49-0.86・is_error=False・$0.106・ハルシ無し）。本番runtime統合(Phase 3)・Mail/Drive(Phase 6)は未着手。**次は Phase 4（orchestration gold set で品質を数値化）= データアクセスが確立したので着手可能**。
+**Phase 0→1→2 ライブ達成。2026-06-03 に「実コーパスからの grounded 出力」を実証（commit `9d415d6`）。** 実RDS(9420 chunks)から chunk_id/Drive URL/見積数値つきの根拠付き提案を、実Bedrockで生成できることを確認（hit 10/5/5・top_score 0.49-0.86・is_error=False・$0.106・ハルシ無し）。**さらに Phase 6（Mail/Drive横断）の 6a設計・6b実装・6d配線まで完了（commit `f69bcbd`、`mail_constraints` スキル＝『MailのNG→別案差替』の中核、課金0・pytest 10 passed・既定OFF）**。残: Phase 4（orchestration gold set 定量評価）、Phase 6c（実受信箱接続=人間ゲート後）、Phase 3（runtime統合=ゲート①）。
 
 > ⚠️ **過去記録の訂正（重要）**: 旧版は Phase 1/2 を「DBは実質空・データギャップ・全クエリ0件」と記載していたが**誤り**。DB には実ショート動画/PR提案データ（9420 chunks）が存在し、RLS(email)で正常にアクセス可能。0件の真因は **3つのバグ**だった: ① SearchSkill要約モデルが実行リージョンと不一致（`jp.*` プロファイルを us-east-1 で呼び ValidationException）② `SEARCH_MIN_RELEVANCE=0.4` が borderline クエリの Rerank スコア(0.3)を足切り ③ SDKが cwd の CLAUDE.md を自動文脈化し古い記述でハルシ。①②③すべて対処済。
 
@@ -69,8 +69,9 @@ Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_ph
 
 ### Phase 6 — Mail/Drive 横断（**独立ゲート**・新Skill）｜📐**詳細設計済み → `docs/poc/phase6_mail_drive_design.md`**
 - [x] **6a 設計（完了 2026-06-03）**：スコープ確定＝**`mail_constraints` が本丸**（Gmailはpgvector外＝本人受信箱ライブ）。**Drive裏付けは既存 `search` で大半カバー**（`search` schema に `source_uri='gdrive://FILE_ID'` 完備、取込済みならRLS付きgroundedで引ける）→ `drive_cases`(ライブ)は必要時のみ後回し。adapter（`GmailClient.from_env(readonly=True)`/`GDriveClient`）は既存再利用、**Skill層のみ新設**。DLPは `observability/sentry.py:scrub_value()` 流用。
-- [ ] **6b オフライン実装＋テスト（課金0・次着手可）**：`skills/mail_constraints/`（schema.py/skill.py）。**fake GmailClient** で run() 単体テスト＝DLPマスク・fail-closed(本人受信箱/同意)・構造化戻り値・**注入耐性**（悪意メール本文の指示に従わない）。ruff/mypy strict 緑。
-- [ ] 6c ライブ(本人1名オプトイン) → 6d orchestrator配線(`USE_MAIL_TOOLS`既定OFF) → 6e 評価(NG検知→差替 gold set)
+- [x] **6b オフライン実装＋テスト（完了 2026-06-03・commit `f69bcbd`）**：`skills/mail_constraints/`（schema.py/skill.py/__init__.py）。**fake GmailClient/Bedrock** で run() 単体テスト＝DLPマスク(G3)・fail-closed(G1本人受信箱/G2同意)・構造化戻り値・**注入耐性(G6)**(悪意メール本文の指示に従わない=システム規則+`<<<MAIL>>>`区切り)・クエリ限定(G5)・parse堅牢性。**pytest 10 passed**・ruff/format/mypy strict 緑。既存adapter(extract_plain_text/scrub_value/BedrockClient.converse)再利用、google系は遅延importでci.yml変更不要。
+- [x] **6d orchestrator配線（完了 2026-06-03・同 commit）**：`factory.build_production_tools()` に `USE_MAIL_TOOLS`(**既定OFF**)でToolSpec追加。`run_orchestrator_prod.py` はフラグON時のみ「NG→差替」フローをsystem_promptに付与。ON/OFF検証済(OFF=従来4ツール/ON=+mail_constraints)・orchestrator回帰17 passed。
+- [ ] 6c ライブ(本人1名オプトイン)【⚠️人間ゲート後】 → 6e 評価(NG検知→差替 gold set)
 - ⚠️ **死守ライン7条**（設計書§4）：G1本人受信箱限定(impersonate=requester固定/LLM選択不可/fail-closed)・G2本人同意オプトイン・G3生本文をLLM/ログ/戻り値に入れない(scrub前進配置)・G4 readonly最小スコープ(書込ツール非公開)・G5クエリ限定(無差別走査禁止)・G6**プロンプトインジェクション対策**(メール=データであり指示でない/読取専用)・G7監査ログ(本文なし)
 - ⚠️ **6c以降の人間ゲート**（設計書§9）：本人同意フロー方式・DWD運用確認・CASA(gmail.readonly Tier3)・監査ポリシー。**6bまでは安全に課金0で着手可**
 
