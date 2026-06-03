@@ -7,7 +7,7 @@
 ---
 
 ## 0. 現在地（ひと言）
-**PoC は実Bedrockで“適応エージェントが提案を完遂”するところまで到達・コミット済（`ba0d3ff`）。** ただし動いているのは **fixtureスキル**で、**実Skill接続・本番runtime統合・Mail/Drive横断・本番品質ガードは未着手**。本番配線の前に「堅牢化フェーズ(Phase 0)」が必須。
+**PoC（実Bedrockで適応提案を完遂）＋ Phase 0 堅牢化まで完了・コミット済（`ba0d3ff`→`2bd10d0`）。** 動作は **fixtureスキル**段階で、**実Skill接続・本番runtime統合・Mail/Drive横断は未着手**。次は **Phase 1（実 `search` を隔離環境で接続）**。
 
 ---
 
@@ -28,16 +28,16 @@
 
 ## 2. 未完（TODO）= 次フェーズ計画（Agent協議の統合版）
 
-### 🔴 Phase 0 — 本番前“堅牢化”（最優先。Red-teamが本番配線前の必須と指摘）
-PoCのままでは本番に出せない欠陥を先に潰す。**コードはこのworktreeで完結**（実接続不要）。
-- [ ] **エラー/予算/拒否の可観測性**：`ResultMessage.is_error / api_error_status / stop_reason / permission_denials` を読み、`SdkAgentResult.stopped_reason` に反映。打ち切り時は**劣化回答を返さず明示エラー**（現状 `stopped_reason="final"` 固定でエラーを握り潰す）
-- [ ] **RLSコンテキスト注入**：`_make_handler` の `SkillContext` に `user_id/user_email/user_groups/user_role` を伝播（現状 request_id のみ）。未注入は本番 **fail-closed**（越権防止）
-- [ ] **ツールハンドラに try/except + per-tool timeout**：Skill失敗をLLMに構造化エラーとして観測させ、`max_turns/budget` で迷走を縛る
-- [ ] **同期Skillを `run_in_executor`／別ワーカー**で実行（Slackの単一イベントループを塞がない。SDKはNode subprocessも spawnするため二重に重い）
-- [ ] **同一ツール×同一入力の連続呼び出しを機械的に拒否**（無限ループ殺し。fixtureで実際にスタックした failure mode）
-- [ ] **6-bisコスト較正**：トークンは SDK per-turn usage を一次、cost USD は `ResultMessage.model_usage`（モデル別実集計）で較正。`Price` を config 化。`session_id` も記録
-- [ ] **SDK を `==0.2.87` 厳密pin** ＋ ci.yml 列挙、Node版固定（[[feedback_ci_no_deps_manual_enumeration]]）
-- DoD: 上記を `tests/orchestrator` の決定的テストで検証（課金ゼロ）。
+### ✅ Phase 0 — 本番前“堅牢化”（**完了**・commit `2bd10d0`）
+Red-team指摘の致命リスクを実装で対処。`tests/orchestrator/test_phase0_hardening.py` で検証（pytest 15 / ruff / ruff format / mypy strict 緑）。
+- [x] **エラー/予算/拒否の可観測性**：`ResultMessage` の is_error/subtype/permission_denials を読み `stopped_reason` に反映（`classify_result`）。打ち切りは劣化回答でなく明示
+- [x] **RLSコンテキスト注入**：`_make_handler` が `SkillContext` に user_id/metadata(user_email等) を伝播。`run_sdk_agent(require_rls=True)` で fail-closed
+- [x] **try/except + per-tool timeout**：失敗を構造化エラー(is_error)で返す（ループを落とさない）
+- [x] **同期Skillを `run_in_executor` + timeout**（Slackイベントループ非阻害）
+- [x] **同一ツール×同一入力の連続呼び出しを機械的に拒否**（無限ループ殺し）
+- [x] **コスト較正**：`ResultMessage.model_usage` を保持（SDK実コストが正、`Price` は概算）
+- [x] **SDK `==0.2.87` 厳密pin**（pyproject）＋ ci.yml 依存列挙（[[feedback_ci_no_deps_manual_enumeration]]）
+- 残（任意・小）: `session_id` 記録の追加、`Price` の env/config 化
 
 ### Phase 1 — 実Skill 1個（`search`）を**隔離環境**でE2E
 - [ ] 本番ToolSpec工場 `orchestrator/factory.py` 新設、`search` を `factory` で注入（DIロジックは `slack_bot.py` の `get_search_skill()` を流用/共通化）
