@@ -800,3 +800,69 @@ def test_min_relevance_default_off_keeps_all(
     )
     out = skill.run(input=SearchInput(query="飲食の事例は？"), ctx=SkillContext())
     assert len(out.hits) == 1
+
+
+# -----------------------------------------------------------
+# Sprint 7: 2段階 min_relevance（strict guard + relax fallback）
+# -----------------------------------------------------------
+def test_min_relevance_two_stage_fallback_rescues(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """strict で全 hit が落ちても fallback で救出し、0 件化を防ぐ＋低信頼マークを付ける。
+
+    score 0.30/0.20 は strict 0.4 で全滅するが、fallback 0.15 で両方救出される。
+    """
+    fake_pgvector_new_schema.search_similar_new_schema.return_value = [
+        SearchHit(chunk_id=1, content="borderline A", score=0.30, metadata={}),
+        SearchHit(chunk_id=2, content="borderline B", score=0.20, metadata={}),
+    ]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        min_relevance=0.4,
+        min_relevance_fallback=0.15,
+    )
+    hits = skill.retrieve_hits("日本ガイシのケイパ", SkillContext(), top_k=5)
+    assert [h.chunk_id for h in hits] == [1, 2]  # 0 件にならず救出
+    assert all(h.metadata.get("is_low_confidence") for h in hits)  # 低信頼マーク
+
+
+def test_min_relevance_two_stage_strict_wins_when_hits_pass(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """strict を満たす hit があれば fallback に入らず low_confidence も付かない。"""
+    fake_pgvector_new_schema.search_similar_new_schema.return_value = [
+        SearchHit(chunk_id=1, content="strong", score=0.55, metadata={}),
+        SearchHit(chunk_id=2, content="weak", score=0.30, metadata={}),
+    ]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        min_relevance=0.4,
+        min_relevance_fallback=0.15,
+    )
+    hits = skill.retrieve_hits("q", SkillContext(), top_k=5)
+    assert [h.chunk_id for h in hits] == [1]  # strict 0.4 を満たす 0.55 のみ
+    assert not hits[0].metadata.get("is_low_confidence")
+
+
+def test_min_relevance_fallback_default_off_backward_compatible(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """fallback 既定 0.0 では strict 全滅→0 件（従来の単一しきい値挙動と完全一致）。"""
+    fake_pgvector_new_schema.search_similar_new_schema.return_value = [
+        SearchHit(chunk_id=1, content="borderline", score=0.30, metadata={}),
+    ]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        min_relevance=0.4,  # fallback 未指定 = 0.0
+    )
+    hits = skill.retrieve_hits("q", SkillContext(), top_k=5)
+    assert hits == []  # 0 件（後方互換）

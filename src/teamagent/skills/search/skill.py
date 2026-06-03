@@ -56,6 +56,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         use_cohere_rerank: bool = False,
         rerank_pool_size: int = 30,
         min_relevance: float = 0.0,
+        min_relevance_fallback: float = 0.0,
         use_aggregation_mode: bool = False,
         prompt_version: str = "v1",
         summary_max_tokens: int = 4096,
@@ -114,6 +115,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # SEARCH_MIN_RELEVANCE env で制御 (既定 0.0 = OFF)。Rerank score (0-1) 前提。
         # gold set 実測: 実ヒット最低 0.50 / expect_zero 最高 0.23 → 0.4 で綺麗に分離。
         self._min_relevance = min_relevance
+        # Sprint 7: 2段階しきい値の fallback。strict(min_relevance)で全 hit が落ちた
+        # クエリのみ、この緩いしきい値で救出し is_low_confidence を付与する（borderline
+        # 実ヒットの 0 件化を防ぎつつ、弱い根拠での断定を抑える）。既定 0.0 = fallback 無効
+        # = 従来の単一しきい値挙動と完全一致（後方互換）。SEARCH_MIN_RELEVANCE_FALLBACK で制御。
+        self._min_relevance_fallback = min_relevance_fallback
         # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」等を検出したら
         # 意味検索ではなくメタデータフィルタ列挙 (list_by_metadata) で答える。
         # USE_AGGREGATION_MODE=true で有効化 (既定 OFF)。new_schema 前提。
@@ -303,7 +309,25 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # より前に評価し、弱い根拠しか無いクエリでは drive-match も発火させない)。
                 if self._min_relevance > 0.0 and hits:
                     kept = [h for h in hits if h.score >= self._min_relevance]
-                    if len(kept) != len(hits):
+                    if not kept and self._min_relevance_fallback > 0.0:
+                        # strict で全滅 → fallback しきい値で救出（低信頼マーク付き）。
+                        # borderline 実ヒットの 0 件化を防ぐ。metadata は frozen dataclass の
+                        # 可変 dict なので in-place 付与（再代入はしない）。
+                        rescued = [h for h in hits if h.score >= self._min_relevance_fallback]
+                        for h in rescued:
+                            h.metadata["is_low_confidence"] = True
+                        if rescued:
+                            logger.info(
+                                "min_relevance_fallback",
+                                request_id=ctx.request_id,
+                                strict=self._min_relevance,
+                                fallback=self._min_relevance_fallback,
+                                before=len(hits),
+                                rescued=len(rescued),
+                                top_score=hits[0].score,
+                            )
+                        kept = rescued
+                    elif len(kept) != len(hits):
                         logger.info(
                             "min_relevance_filter",
                             request_id=ctx.request_id,
@@ -449,9 +473,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         related_hits = [h for h in hits if (h.metadata or {}).get("is_related_drive")]
 
         primary_block = "\n\n".join(
-            f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}]\n{h.content}" for h in primary_hits
+            f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}"
+            + ("（関連度低・参考）" if (h.metadata or {}).get("is_low_confidence") else "")
+            + f"]\n{h.content}"
+            for h in primary_hits
         )
         sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
+        # 2段階しきい値の fallback で救出した低信頼 hit がある場合、断定を抑える注意を付す。
+        if any((h.metadata or {}).get("is_low_confidence") for h in primary_hits):
+            sections.append(
+                "# 注意（グラウンディング）\n"
+                "上記で『関連度低・参考』と付記した資料は関連度が低い参考情報です。確証が持てない"
+                "場合は断定せず、『資料に明確な記載はないが関連しうる』等と不確実性を明示してください。"
+            )
         if related_hits:
             related_block = "\n\n".join(
                 f"[chunk_id: {h.chunk_id}] {(h.metadata or {}).get('title', '')}\n{h.content}"

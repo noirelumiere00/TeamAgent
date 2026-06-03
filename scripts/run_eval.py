@@ -300,6 +300,10 @@ def _build_skill() -> Any:
         min_relevance = float(os.environ.get("SEARCH_MIN_RELEVANCE", "0.0"))
     except ValueError:
         min_relevance = 0.0
+    try:
+        min_relevance_fallback = float(os.environ.get("SEARCH_MIN_RELEVANCE_FALLBACK", "0.0"))
+    except ValueError:
+        min_relevance_fallback = 0.0
     use_aggregation_mode = os.environ.get("USE_AGGREGATION_MODE", "false").lower() in (
         "1",
         "true",
@@ -314,6 +318,7 @@ def _build_skill() -> Any:
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
             min_relevance=min_relevance,
+            min_relevance_fallback=min_relevance_fallback,
             use_aggregation_mode=use_aggregation_mode,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
@@ -324,6 +329,7 @@ def _build_skill() -> Any:
             "USE_FB_DRIVE_MATCH": use_fb_drive_match,
             "USE_COHERE_RERANK": use_cohere_rerank,
             "SEARCH_MIN_RELEVANCE": min_relevance,
+            "SEARCH_MIN_RELEVANCE_FALLBACK": min_relevance_fallback,
             "USE_AGGREGATION_MODE": use_aggregation_mode,
             "PROMPT_VERSION": prompt_version,
             "SEARCH_MAX_TOKENS": summary_max_tokens,

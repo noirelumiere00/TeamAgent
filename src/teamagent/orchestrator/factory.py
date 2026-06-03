@@ -37,6 +37,11 @@ def _build_search_skill() -> Any:
         min_relevance = float(os.environ.get("SEARCH_MIN_RELEVANCE", "0.0"))
     except ValueError:
         min_relevance = 0.0
+    try:
+        # 2段階しきい値の fallback（既定 0.0 = 無効＝従来挙動）。
+        min_relevance_fallback = float(os.environ.get("SEARCH_MIN_RELEVANCE_FALLBACK", "0.0"))
+    except ValueError:
+        min_relevance_fallback = 0.0
 
     return SearchSkill(
         embedder=LocalE5Embedder(),
@@ -45,6 +50,7 @@ def _build_search_skill() -> Any:
         use_fb_drive_match=_envflag("USE_FB_DRIVE_MATCH"),
         use_cohere_rerank=_envflag("USE_COHERE_RERANK"),
         min_relevance=min_relevance,
+        min_relevance_fallback=min_relevance_fallback,
         use_aggregation_mode=_envflag("USE_AGGREGATION_MODE"),
         prompt_version=os.environ.get("PROMPT_VERSION", "v2d"),
         summary_max_tokens=summary_max_tokens,
