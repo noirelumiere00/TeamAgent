@@ -41,10 +41,17 @@ def test_build_ack_message_search_default() -> None:
     assert "検索" in msg
 
 
-def test_build_ack_message_always_acknowledges() -> None:
-    """どんな入力でも必ず『受け付けました』を含む (空・記号でも落ちない)。"""
-    for s in ["", "   ", "！？", "提案を作って", "マンダムの状況教えて"]:
-        assert "受け付けました" in build_ack_message(s)
+def test_build_ack_message_acknowledges_tasks() -> None:
+    """タスク系入力は必ず『受け付けました』を含む (空・未知でも落ちない)。"""
+    for s in ["", "   ", "提案を作って", "マンダムの状況教えて"]:
+        ack = build_ack_message(s)
+        assert ack is not None and "受け付けました" in ack
+
+
+def test_build_ack_message_chitchat_is_none() -> None:
+    """雑談/挨拶/記号のみ/能力質問は受付メッセージを出さない (None・1通で即答するため)。"""
+    for s in ["こんにちは", "ありがとう！", "！？", "👍", "何ができる？"]:
+        assert build_ack_message(s) is None
 
 
 def test_strip_mention_removes_leading_at() -> None:
