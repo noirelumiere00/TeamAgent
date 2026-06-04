@@ -55,15 +55,28 @@ class _FakeCal:
 
 
 def test_calendar_happy_masks_pii(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        cal.GCalendarClient, "from_user_token", classmethod(lambda cls, token: _FakeCal())
-    )
+    captured: dict[str, OAuthToken] = {}
+
+    def _fake(cls: object, token: OAuthToken) -> _FakeCal:
+        captured["token"] = token
+        return _FakeCal()
+
+    monkeypatch.setattr(cal.GCalendarClient, "from_user_token", classmethod(_fake))
     skill = WorkspaceSearchSkill(token_store=_store_with("a@x.com"))
     out = skill.run(WorkspaceSearchInput(service="calendar", query="森ビル"), _ctx("a@x.com"))
     assert out.count == 1
     assert out.hits[0].title == "森ビル 商談"
     assert "tanaka@client.co.jp" not in out.hits[0].detail  # メールは DLP マスク
     assert out.owner_masked == "a***@x.com"
+    # G1: skill が本人のトークンを adapter に渡している（他人/None でない）
+    assert captured["token"].refresh_token == "rt"
+
+
+def test_fail_closed_blank_user_email() -> None:
+    """空白のみの user_email は fail-closed（空 email で RLS/認可が崩れるのを防ぐ）。"""
+    skill = WorkspaceSearchSkill(token_store=InMemoryTokenStore())
+    with pytest.raises(PermissionError):
+        skill.run(WorkspaceSearchInput(service="calendar", query="x"), _ctx("   "))
 
 
 class _FakePeople:

@@ -45,6 +45,12 @@ def main() -> int:
         print("Usage: python scripts/connect_workspace.py <your-email>", file=sys.stderr)
         return 1
     email = sys.argv[1].strip().lower()
+    if not email or "@" not in email:
+        print(
+            "ERROR: 有効なメールアドレスを指定してください（例 you@vectorinc.co.jp）",
+            file=sys.stderr,
+        )
+        return 1
 
     client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
@@ -77,7 +83,8 @@ def main() -> int:
         prompt="consent",
         authorization_prompt_message=(
             "\n=== Google Workspace 認可（あなた本人）===\n"
-            "ブラウザで自分のアカウントにログインし、5-7サービス（readonly）の参照を許可してください。\n"
+            "次のURLをブラウザで開き、自分のアカウントで 5-7サービス（readonly）の参照を許可してください:\n"
+            "{url}\n"
         ),
         success_message="✅ 認可完了。タブを閉じてターミナルに戻ってください。",
         open_browser=True,

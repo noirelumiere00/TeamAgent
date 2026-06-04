@@ -31,3 +31,15 @@ def test_existing_adapters_readonly_scope_by_default(monkeypatch: pytest.MonkeyP
     assert GmailClient.from_user_token(tok)._scopes == GmailClient.SCOPES_READONLY
     assert GDriveClient.from_user_token(tok)._scopes == GDriveClient.SCOPES_READONLY
     assert GSheetsClient.from_user_token(tok)._scopes == GSheetsClient.SCOPES_READONLY
+
+
+def test_build_user_credentials_empty_refresh_token_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """クライアント設定済みでも refresh_token 空なら未認可として弾く（G2 fail-closed の裏口）。"""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret")
+    from teamagent.adapters.google_auth import build_user_credentials
+
+    with pytest.raises(ValueError, match="未認可"):
+        build_user_credentials(OAuthToken(refresh_token=""))

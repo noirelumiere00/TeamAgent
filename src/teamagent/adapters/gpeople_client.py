@@ -83,6 +83,8 @@ class GPeopleClient:
 
     def search_contacts(self, query: str, request_id: str, *, page_size: int = 10) -> list[Contact]:
         """people.searchContacts で連絡先を検索する。"""
+        # People API searchContacts の pageSize 上限は 30（schema は最大50を許すためクランプ）。
+        page_size = max(1, min(page_size, 30))
         service = self._ensure_service()
         start = time.perf_counter()
         resp = (

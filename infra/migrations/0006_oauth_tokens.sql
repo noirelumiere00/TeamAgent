@@ -17,7 +17,9 @@
 
 CREATE TABLE IF NOT EXISTS oauth_tokens (
     -- 正規化済み email（lower/trim、InMemoryTokenStore._norm と同じ規約）
-    user_email          TEXT PRIMARY KEY,
+    -- 空文字 / @ 無しを構造的に禁止（空 user_email で fail-closed と RLS が崩れるのを防ぐ）
+    user_email          TEXT PRIMARY KEY
+                        CHECK (user_email <> '' AND position('@' IN user_email) > 0),
     -- KMS Encrypt の CiphertextBlob。平文 refresh token は決して保存しない。
     refresh_token_enc   BYTEA NOT NULL,
     -- 認可済みスコープ（readonly 群）
@@ -47,11 +49,13 @@ ALTER TABLE oauth_tokens FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS oauth_tokens_self ON oauth_tokens;
 CREATE POLICY oauth_tokens_self ON oauth_tokens
     USING (
-        user_email = current_setting('app.user_email', true)
+        (current_setting('app.user_email', true) <> ''
+         AND user_email = current_setting('app.user_email', true))
         OR current_setting('app.user_role', true) = 'admin'
     )
     WITH CHECK (
-        user_email = current_setting('app.user_email', true)
+        (current_setting('app.user_email', true) <> ''
+         AND user_email = current_setting('app.user_email', true))
         OR current_setting('app.user_role', true) = 'admin'
     );
 

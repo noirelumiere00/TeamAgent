@@ -63,6 +63,8 @@ class WorkspaceSearchSkill(BaseSkill[WorkspaceSearchInput, WorkspaceSearchOutput
         if not requester or not isinstance(requester, str):
             raise PermissionError("workspace_search は本人 user_email が必須です（fail-closed）")
         requester = requester.strip()
+        if not requester:  # 空白のみ → fail-closed（空 user_email で RLS/認可が崩れるのを防ぐ）
+            raise PermissionError("本人 user_email が必須です（空不可・fail-closed）")
 
         # G2: 本人が未連携なら fail-closed。
         if self._token_store is None:

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -75,9 +76,9 @@ class InMemoryTokenStore:
 class TokenCipher(Protocol):
     """refresh token の暗号化/復号（at-rest 暗号化・G8）。本番は KMS 実装を注入する。"""
 
-    def encrypt(self, plaintext: str) -> bytes: ...
+    def encrypt(self, plaintext: str, *, context: dict[str, str] | None = None) -> bytes: ...
 
-    def decrypt(self, ciphertext: bytes) -> str: ...
+    def decrypt(self, ciphertext: bytes, *, context: dict[str, str] | None = None) -> str: ...
 
 
 class KmsCipher:
@@ -87,23 +88,33 @@ class KmsCipher:
     IAM 権限が必要＝DB を読めても token は復号できない（G8 を真に満たす）。
     """
 
-    def __init__(self, key_id: str, client: Any | None = None) -> None:
+    def __init__(
+        self, key_id: str, client: Any | None = None, *, region: str | None = None
+    ) -> None:
         self._key_id = key_id
         self._client = client
+        # KMS鍵のregion。鍵はRDSと同じ東京、Bedrockはus-east-1で食い違うため明示pinが必要。
+        self._region = region or os.environ.get("OAUTH_KMS_REGION") or "ap-northeast-1"
 
     def _kms(self) -> Any:
         if self._client is None:
             import boto3
 
-            self._client = boto3.client("kms")
+            self._client = boto3.client("kms", region_name=self._region)
         return self._client
 
-    def encrypt(self, plaintext: str) -> bytes:
-        resp = self._kms().encrypt(KeyId=self._key_id, Plaintext=plaintext.encode("utf-8"))
+    def encrypt(self, plaintext: str, *, context: dict[str, str] | None = None) -> bytes:
+        kwargs: dict[str, Any] = {"KeyId": self._key_id, "Plaintext": plaintext.encode("utf-8")}
+        if context:
+            kwargs["EncryptionContext"] = context  # AAD: 復号時に同一 context 必須（per-user 束縛）
+        resp = self._kms().encrypt(**kwargs)
         return bytes(resp["CiphertextBlob"])
 
-    def decrypt(self, ciphertext: bytes) -> str:
-        resp = self._kms().decrypt(CiphertextBlob=ciphertext)
+    def decrypt(self, ciphertext: bytes, *, context: dict[str, str] | None = None) -> str:
+        kwargs: dict[str, Any] = {"CiphertextBlob": ciphertext, "KeyId": self._key_id}
+        if context:
+            kwargs["EncryptionContext"] = context  # encrypt 時と不一致なら KMS が復号拒否
+        resp = self._kms().decrypt(**kwargs)
         return str(resp["Plaintext"].decode("utf-8"))
 
 
@@ -137,12 +148,14 @@ class RdsTokenStore:
                 row = cur.fetchone()
         if not row:
             return None
-        refresh = self._cipher.decrypt(bytes(row["refresh_token_enc"]))
+        refresh = self._cipher.decrypt(
+            bytes(row["refresh_token_enc"]), context={"user_email": email}
+        )
         return OAuthToken(refresh_token=refresh, scopes=tuple(row["scopes"] or ()))
 
     def put(self, user_email: str, token: OAuthToken) -> None:
         email = self._norm(user_email)
-        enc = self._cipher.encrypt(token.refresh_token)
+        enc = self._cipher.encrypt(token.refresh_token, context={"user_email": email})
         with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:
             with conn.cursor() as cur:
                 cur.execute(

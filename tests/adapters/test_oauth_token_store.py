@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from teamagent.adapters.oauth_token_store import (
     InMemoryTokenStore,
     OAuthToken,
@@ -49,13 +51,20 @@ def test_satisfies_protocol() -> None:
 
 
 class _FakeCipher:
-    """テスト用: encode/decode を暗号化に見立てる（cipher 経路が通ることの確認用）。"""
+    """テスト用 cipher: 平文と異なる ciphertext を返し（暗号化を模す）、context を記録する。"""
 
-    def encrypt(self, plaintext: str) -> bytes:
-        return plaintext.encode("utf-8")
+    def __init__(self) -> None:
+        self.enc_context: dict[str, str] | None = None
+        self.dec_context: dict[str, str] | None = None
 
-    def decrypt(self, ciphertext: bytes) -> str:
-        return ciphertext.decode("utf-8")
+    def encrypt(self, plaintext: str, *, context: dict[str, str] | None = None) -> bytes:
+        self.enc_context = context
+        return b"ENC:" + plaintext.encode("utf-8")[::-1]  # 反転で平文 substring を残さない
+
+    def decrypt(self, ciphertext: bytes, *, context: dict[str, str] | None = None) -> str:
+        self.dec_context = context
+        assert ciphertext.startswith(b"ENC:"), "cipher を通っていない平文が来ている"
+        return ciphertext[4:][::-1].decode("utf-8")
 
 
 class _FakeCursor:
@@ -104,28 +113,96 @@ class _FakePgvector:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
         self.last_user_email: str | None = None
+        self.last_conn: _FakeConn | None = None
 
     def connection(self, *, app_role: str, user_email: str) -> _FakeConn:
         self.last_user_email = user_email  # RLS GUC 用に渡される本人 email
-        return _FakeConn(self.rows)
+        self.last_conn = _FakeConn(self.rows)
+        return self.last_conn
 
 
 def test_rds_token_store_roundtrip() -> None:
     pg = _FakePgvector()
-    store = RdsTokenStore(pg, _FakeCipher())
+    cipher = _FakeCipher()
+    store = RdsTokenStore(pg, cipher)
     assert not store.has("A@X.com")
     assert store.get("A@X.com") is None
 
     store.put("A@X.com", OAuthToken(refresh_token="secret-rt", scopes=("gmail.readonly",)))
+    # put は commit する（最後の get で last_conn が上書きされる前に確認）
+    assert pg.last_conn is not None and pg.last_conn.committed is True
     assert store.has("a@x.com")  # email 正規化
     got = store.get("  A@X.COM  ")
     assert got is not None
     assert got.refresh_token == "secret-rt"
     assert got.scopes == ("gmail.readonly",)
-    # 平文でなく cipher 通過後の bytes が格納されている（G8）
-    assert pg.rows["a@x.com"]["refresh_token_enc"] == b"secret-rt"
+    # 平文が DB に残らない（cipher 通過後の ciphertext のみ）— G8
+    stored = pg.rows["a@x.com"]["refresh_token_enc"]
+    assert b"secret-rt" not in stored
+    assert stored.startswith(b"ENC:")
+    # KMS EncryptionContext に本人 email が綴じられる（per-user 暗号束縛・#1）
+    assert cipher.enc_context == {"user_email": "a@x.com"}
+    assert cipher.dec_context == {"user_email": "a@x.com"}
     # RLS 用に本人 email が connection() に渡る
     assert pg.last_user_email == "a@x.com"
+
+
+def test_rds_token_store_upsert_updates_existing() -> None:
+    """同一 email に2回 put → 上書き更新（再認可でのトークンローテーション）。"""
+    pg = _FakePgvector()
+    store = RdsTokenStore(pg, _FakeCipher())
+    store.put("a@x.com", OAuthToken(refresh_token="old-rt"))
+    store.put("a@x.com", OAuthToken(refresh_token="new-rt", scopes=("drive.readonly",)))
+    assert len(pg.rows) == 1  # 行は増えない（PK upsert）
+    got = store.get("a@x.com")
+    assert got is not None and got.refresh_token == "new-rt"
+    assert got.scopes == ("drive.readonly",)
+
+
+class _StubKms:
+    """boto3 KMS client の最小 stub（課金0）。EncryptionContext を ciphertext に綴じ込み、
+    復号時に不一致なら拒否する＝実 KMS の AAD 挙動を模す。"""
+
+    def __init__(self) -> None:
+        self.last_encrypt: dict[str, Any] = {}
+        self.last_decrypt: dict[str, Any] = {}
+
+    @staticmethod
+    def _ctx_bytes(kw: dict[str, Any]) -> bytes:
+        import json
+
+        return json.dumps(kw.get("EncryptionContext", {}), sort_keys=True).encode("utf-8")
+
+    def encrypt(self, **kw: Any) -> dict[str, Any]:
+        self.last_encrypt = kw
+        return {"CiphertextBlob": b"K:" + self._ctx_bytes(kw) + b"::" + kw["Plaintext"]}
+
+    def decrypt(self, **kw: Any) -> dict[str, Any]:
+        self.last_decrypt = kw
+        blob = bytes(kw["CiphertextBlob"])
+        ctx_part, pt = blob[2:].split(b"::", 1)
+        if ctx_part != self._ctx_bytes(kw):
+            raise ValueError("InvalidCiphertextException: EncryptionContext mismatch")
+        return {"Plaintext": pt}
+
+
+def test_kms_cipher_roundtrip_and_encryption_context() -> None:
+    """KmsCipher が KeyId/EncryptionContext を正しく渡し round-trip する。context 不一致は復号拒否。"""
+    from teamagent.adapters.oauth_token_store import KmsCipher
+
+    stub = _StubKms()
+    cipher = KmsCipher("key-1", client=stub)
+    blob = cipher.encrypt("super-secret", context={"user_email": "a@x.com"})
+    assert isinstance(blob, bytes)
+    assert stub.last_encrypt["KeyId"] == "key-1"
+    assert stub.last_encrypt["Plaintext"] == b"super-secret"  # bytes で渡る
+    assert stub.last_encrypt["EncryptionContext"] == {"user_email": "a@x.com"}
+    # round-trip（同一 context）
+    assert cipher.decrypt(blob, context={"user_email": "a@x.com"}) == "super-secret"
+    assert stub.last_decrypt["KeyId"] == "key-1"  # decrypt も KeyId をガードに渡す
+    # 他人の context では復号できない（per-user 束縛の暗号レイヤ担保）
+    with pytest.raises(ValueError):
+        cipher.decrypt(blob, context={"user_email": "b@x.com"})
 
 
 def test_rds_token_store_satisfies_protocol() -> None:
