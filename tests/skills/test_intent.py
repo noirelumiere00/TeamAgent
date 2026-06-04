@@ -242,3 +242,47 @@ def test_video_algorithm_beats_tiktok_search() -> None:
 def test_plain_tiktok_search_not_video_algorithm() -> None:
     """『TikTokで○○検索して』は従来通り tiktok_search（分析ではない）。"""
     assert detect_skill("TikTokで新宿ランチ検索して").skill == "tiktok_search"
+
+
+# --- 雑談ルーティング（Hello 等を検索に流さず会話へ） ---
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "Hello",
+        "こんにちは",
+        "おはよう！",
+        "お疲れさまです",
+        "ありがとう！",
+        "ありがとうございます",
+        "あざす",
+        "OK",
+        "了解です",
+        "なるほど",
+        "👍",
+        "🙏",
+        "何ができる？",
+        "使い方を教えて",
+        "ヘルプ",
+        "できること教えて",
+    ],
+)
+def test_routes_to_chitchat(msg: str) -> None:
+    """挨拶・お礼・相槌・能力質問は chitchat（検索に流さない）。"""
+    assert detect_skill(msg).skill == "chitchat"
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "A社",  # 社名のみの検索意図を雑談に奪わない
+        "新宿のランチ",
+        "ありがとう、A社の提案見せて",  # お礼+タスク混在 → タスク優先
+        "VSEO分析して",
+        "日本ガイシの状況",
+        "飲食店のPR事例を教えて",
+        "提案作って",
+    ],
+)
+def test_task_not_misrouted_to_chitchat(msg: str) -> None:
+    """業務語/社名を含む入力は chitchat に誤分類されない（task-first・実検索を壊さない）。"""
+    assert detect_skill(msg).skill != "chitchat"

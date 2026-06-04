@@ -202,10 +202,60 @@ def _extract_vseo_query(message: str) -> str | None:
     return q or None
 
 
+# --- 会話/雑談ルーティング（task-first: 業務語があれば必ず検索/各Skillへ流す） ---
+# 業務・検索を示唆する語。1つでも含めば chitchat にしない（複合文「ありがとう、A社の提案は?」を
+# search に残す＝実検索の取りこぼし防止）。社名マーカー(社/御社/弊社)も task 扱い。
+_TASK_HINT_RE = re.compile(
+    r"提案|案件|顧客|クライアント|カルテ|資料|事例|実績|見積|予算|BANT|商談|施策|競合|"
+    r"分析|動画|tiktok|ティック|検索|調べ|まとめ|レビュー|添削|診断|ログ|オリエン|"
+    r"株式会社|御社|弊社|[ぁ-んァ-ヶ一-龯A-Za-z0-9]社(?:さん|様)?",
+    re.IGNORECASE,
+)
+# 能力・使い方の質問（Bot は何ができる？）。task ガードより優先（「機能教えて」を拾う）。
+_CAPABILITY_RE = re.compile(
+    r"何が?でき|なにが?でき|使い方|どう使|ヘルプ|help|"
+    r"機能.{0,4}(教え|一覧|ある|は|？|\?)|コマンド.{0,4}(教え|一覧|ある)|できること",
+    re.IGNORECASE,
+)
+# 挨拶（文頭一致）
+_GREETING_RE = re.compile(
+    r"^(?:hi|hello|hey|yo|やあ|やほ|ヤッホ|おは|こんにち[はわ]|こんばん[はわ]|"
+    r"はじめまして|久しぶり|おひさ|お疲れ|おつかれ|おつ[!！]?$|どうも)",
+    re.IGNORECASE,
+)
+# お礼・相槌（ほぼ全体一致）
+_THANKS_BACKCHANNEL_RE = re.compile(
+    r"^(?:"
+    r"ありがとう?(?:ございま(?:す|した))?|あざ(?:っ?す|ます)|"
+    r"thanks?|thank\s*you|サンキュ[ーう]?|感謝(?:します)?|"
+    r"助か(?:る|った|ります|りました)|"
+    r"ok|okay|おけ|おk|了解(?:です)?|りょう?(?:かい)?|"
+    r"わか(?:った|りました)|なるほど|いいね|そうだね|"
+    r"はい+|うん+|大丈夫(?:です)?|👍|🙏|😊|🙆|👏"
+    r")[\s。、.!！？?〜ー]*$",
+    re.IGNORECASE,
+)
+# 記号・絵文字のみ（「？」「👍」「!!」等）
+_SYMBOLS_ONLY_RE = re.compile(r"^[\W_\s]+$", re.UNICODE)
+
+
+def _is_chitchat(text: str) -> bool:
+    """雑談/挨拶/お礼/相槌/能力質問なら True。task-first: 業務語を含めば False（検索へ）。"""
+    if _CAPABILITY_RE.search(text):  # 「何ができる?」等は最優先
+        return True
+    if _TASK_HINT_RE.search(text):  # 業務語/社名 → 雑談ではない（必ず検索/各Skillへ）
+        return False
+    return bool(
+        _GREETING_RE.match(text)
+        or _THANKS_BACKCHANNEL_RE.match(text)
+        or _SYMBOLS_ONLY_RE.match(text)
+    )
+
+
 def detect_skill(message: str) -> SkillIntent:
     """メッセージから起動 Skill を判定する。
 
-    優先順位: proposal_draft (明確な作成意図) → clientkarte (カルテ/状況) → search (既定)。
+    優先順位: 動画/VSEO/TikTok/審査/提案/oplog/カルテ → 雑談(chitchat) → search (既定)。
     """
     text = message.strip()
 
@@ -277,6 +327,10 @@ def detect_skill(message: str) -> SkillIntent:
             return SkillIntent(
                 skill="clientkarte", client_name=client, reason="karte trigger + client"
             )
+
+    # 2b. 雑談/挨拶/お礼/能力質問 → 会話応答（task-first: 上のトリガ全不一致 ∧ 業務語なしのみ）
+    if _is_chitchat(text):
+        return SkillIntent(skill="chitchat", client_name=None, reason="chitchat/greeting")
 
     # 3. 既定は横断検索
     return SkillIntent(skill="search", client_name=None, reason="default search")

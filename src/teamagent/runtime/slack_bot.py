@@ -371,11 +371,12 @@ _ACK_BY_SKILL: dict[str, str] = {
 _ACK_DEFAULT = "🤖 受け付けました。処理しています…"
 
 
-def build_ack_message(message: str) -> str:
+def build_ack_message(message: str) -> str | None:
     """受信メッセージからどの Skill が動くか判定し、受付メッセージを返す。
 
     本処理 (dispatch_auto) より前に Slack へ即時投稿して「受け付けた」ことを伝える。
     判定は intent.detect_skill と同じヒューリスティックなので、実際に動く Skill と一致する。
+    chitchat（雑談/挨拶/お礼/能力質問）は 1 通で即答するため受付メッセージを出さない（None）。
     """
     from teamagent.skills.intent import detect_skill
 
@@ -383,6 +384,8 @@ def build_ack_message(message: str) -> str:
         skill = detect_skill(message).skill
     except Exception:
         return _ACK_DEFAULT
+    if skill == "chitchat":
+        return None  # 雑談は即答（「🔎検索を受け付けました」のような不自然な ack を出さない）
     return _ACK_BY_SKILL.get(skill, _ACK_DEFAULT)
 
 
@@ -805,6 +808,27 @@ class SkillDispatcher:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 
+    def get_chitchat_skill(self) -> Any:
+        """ChitchatSkill をキャッシュして返す（RAG/embedder を持たない軽量会話 Skill）。"""
+        if "chitchat" in self._skill_cache:
+            return self._skill_cache["chitchat"]
+        from teamagent.skills.chitchat.skill import ChitchatSkill
+
+        instance = ChitchatSkill(prompt_version=os.environ.get("CHITCHAT_PROMPT_VERSION", "v1"))
+        logger.info("chitchat_skill_initialized")
+        self._skill_cache["chitchat"] = instance
+        return instance
+
+    async def run_chitchat(self, message: str, request_id: str, user_id: str | None) -> Any:
+        """ChitchatSkill を別スレッドで実行（Bedrock が同期 I/O）。検索/RAG は走らせない。"""
+        skill = self.get_chitchat_skill()
+        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        from teamagent.skills.chitchat.schema import ChitchatInput
+
+        input_obj = ChitchatInput(message=message)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, skill.run, input_obj, ctx)
+
     def get_video_approval_skill(self) -> Any:
         """VideoApprovalSkill をキャッシュして返す (Gemini/Drive は遅延解決)。"""
         if "video_approval" in self._skill_cache:
@@ -1011,6 +1035,11 @@ class SkillDispatcher:
             client_name=intent.client_name,
             reason=intent.reason,
         )
+
+        # 雑談/挨拶/お礼/能力質問 → 会話AI応答（検索/RAG は走らせない・1通で即答）
+        if intent.skill == "chitchat":
+            out = await self.run_chitchat(message, request_id, user_id)
+            return out.reply, None
 
         if intent.skill == "video_approval":
             text = await self.run_video_approval(
@@ -1298,13 +1327,16 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             )
             return
 
-        # 受付メッセージを即時投稿 (重い処理の前にユーザーへ「受け付けた」と伝える)
-        await slack.post_message(
-            channel=channel,
-            text=build_ack_message(query),
-            request_id=request_id,
-            thread_ts=thread_ts,
-        )
+        # 受付メッセージを即時投稿 (重い処理の前にユーザーへ「受け付けた」と伝える)。
+        # chitchat（雑談）は build_ack_message が None を返す → ack を出さず 1 通で即答。
+        ack = build_ack_message(query)
+        if ack is not None:
+            await slack.post_message(
+                channel=channel,
+                text=ack,
+                request_id=request_id,
+                thread_ts=thread_ts,
+            )
 
         try:
             # operation_log 用: スレッド内メンションなら、その親スレッドをログ化対象にする。
@@ -1375,12 +1407,14 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         if not text:
             return
 
-        # 受付メッセージを即時投稿 (重い処理の前に「受け付けた」と伝える)
-        await slack.post_message(
-            channel=channel,
-            text=build_ack_message(text),
-            request_id=request_id,
-        )
+        # 受付メッセージを即時投稿。chitchat は None → ack を出さず即答。
+        ack = build_ack_message(text)
+        if ack is not None:
+            await slack.post_message(
+                channel=channel,
+                text=ack,
+                request_id=request_id,
+            )
 
         try:
             reply, blocks = await disp.dispatch_auto(
