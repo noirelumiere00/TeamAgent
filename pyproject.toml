@@ -11,7 +11,7 @@ license = { text = "Proprietary" }
 
 dependencies = [
     # --- Claude Agent SDK ---
-    "claude-agent-sdk>=0.2.0",
+    "claude-agent-sdk==0.2.87",  # 同梱Node CLIの版ドリフト防止のため厳密pin (Phase0)
     "anthropic>=0.40.0",
     "boto3>=1.34.0",  # Bedrock 経由でも使える
 
@@ -150,6 +150,7 @@ module = [
     "googleapiclient.*",
     "google",
     "google.oauth2.*",
+    "google_auth_oauthlib.*",
     "google.genai",
     "google.genai.*",
     "yt_dlp",
@@ -168,7 +169,12 @@ module = [
     "teamagent.adapters.gdrive_client",
     "teamagent.adapters.gmail_client",
     "teamagent.adapters.gsheets_client",
+    "teamagent.adapters.gdocs_client",
+    "teamagent.adapters.gslides_client",
+    "teamagent.adapters.gcalendar_client",
+    "teamagent.adapters.gpeople_client",
     "teamagent.adapters.google_auth",
+    "teamagent.adapters.google_oauth_flow",
 ]
 disallow_untyped_calls = false
 

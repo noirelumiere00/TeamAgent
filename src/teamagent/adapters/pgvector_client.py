@@ -22,7 +22,34 @@ import structlog
 from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 
+from teamagent.adapters.pg_pool import ConnectionPool, PoolStats
+
 logger = structlog.get_logger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    """env を int として読む（空・不正値は default）。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """env を float として読む（空・不正値は default）。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _connect_pg(dsn: str) -> psycopg.Connection[dict[str, Any]]:
+    """プール用の物理接続ファクトリ。dict_row + pgvector 型登録まで済ませて返す。"""
+    conn = psycopg.connect(dsn, row_factory=dict_row)
+    register_vector(conn)
+    return conn
 
 
 @dataclass(frozen=True)
@@ -44,20 +71,53 @@ class PgVectorClient:
     Skill 層からは psycopg / pgvector を直接見せない。
     """
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(
+        self, dsn: str, *, pool: ConnectionPool[psycopg.Connection[dict[str, Any]]] | None = None
+    ) -> None:
         self.dsn = dsn
+        # pool 指定時は connection() がプールから借用・返却（RESET ROLE で RLS リセット）。
+        # None 時は従来どおり毎回 connect→close（テストや単発スクリプト向けの後方互換）。
+        self._pool = pool
 
     @classmethod
     def from_env(cls) -> PgVectorClient:
-        """環境変数 DATABASE_URL から接続情報を取得する。
+        """環境変数 DATABASE_URL から接続情報を取得する（既定でコネクションプール有効）。
 
         ローカル: postgresql://teamagent:teamagent@localhost:5432/teamagent
         本番: 踏み台経由・Secrets Manager 経由で組み立てた URL を入れる
+
+        プール設定（任意）:
+        - ``PGVECTOR_POOL_MAX``: 総接続上限（既定 8）。``0`` で**プール無効**（直結・旧挙動）。
+        - ``PGVECTOR_POOL_MIN``: 起動時ウォームアップ数（既定 0）。
+        - ``PGVECTOR_POOL_TIMEOUT_S``: 空き接続の待ち上限秒（既定 10）。
         """
         dsn = os.environ.get("DATABASE_URL")
         if not dsn:
             raise RuntimeError("DATABASE_URL が未設定です。.env を読み込んでから起動してください")
-        return cls(dsn=dsn)
+        max_size = _env_int("PGVECTOR_POOL_MAX", 8)
+        if max_size <= 0:
+            return cls(dsn=dsn)  # プール無効（直結）
+        pool: ConnectionPool[psycopg.Connection[dict[str, Any]]] = ConnectionPool(
+            connect=lambda: _connect_pg(dsn),
+            max_size=max_size,
+            min_size=_env_int("PGVECTOR_POOL_MIN", 0),
+            timeout=_env_float("PGVECTOR_POOL_TIMEOUT_S", 10.0),
+        )
+        return cls(dsn=dsn, pool=pool)
+
+    def close(self) -> None:
+        """プールを閉じる（保有接続を解放）。直結モードでは no-op。シャットダウン時に呼ぶ。"""
+        if self._pool is not None:
+            self._pool.close()
+
+    def pool_stats(self) -> PoolStats | None:
+        """接続プールの観測値（PoolStats）を返す。直結モード（プール無効）では None。
+
+        管理画面の runtime_metrics 定期スナップショット用。in_use/idle/timeouts 等を読む。
+        """
+        if self._pool is None:
+            return None
+        return self._pool.stats()
 
     @contextmanager
     def connection(
@@ -80,30 +140,31 @@ class PgVectorClient:
           `app.user_*` GUC を SET LOCAL で注入し、RLS policy 評価に使われる
         - これらは transaction 単位で適用、commit 後は破棄
 
-        終了時に必ず close する。例外時もロールバックされる。
+        終了時に必ず close（プール時は RESET ROLE で reset し返却）する。例外時もロールバック。
+
+        ⚠️ これは **同期・ブロッキング API**（プール取得は ``threading.Semaphore.acquire`` で
+        最大 ``PGVECTOR_POOL_TIMEOUT_S`` 秒ブロックし得る）。**async 文脈から直接呼ばない**こと
+        （イベントループが固まり Slack bot 全体が無応答になる）。Skill は必ず
+        ``loop.run_in_executor(...)`` 等でワーカースレッド上で実行し、その中で本 API を使う。
+        完全 async 化する場合は psycopg_pool.AsyncConnectionPool を検討。
         """
+        if self._pool is not None:
+            # --- プール経路: 借用→設定→commit/rollback→返却（RESET ROLE は pool 側） ---
+            with self._pool.connection() as conn:
+                try:
+                    self._apply_session(conn, app_role, user_email, user_groups, user_role)
+                    yield conn
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            return
+
+        # --- 直結経路（プール無効・後方互換）: 毎回 connect→close ---
         conn = psycopg.connect(self.dsn, row_factory=dict_row)
         try:
             register_vector(conn)
-            with conn.cursor() as cur:
-                if app_role:
-                    # SET ROLE は session レベル（commit を跨いで持続）
-                    # psycopg は parameterized identifier をサポートしないので
-                    # app_role はコード内固定値のみ受け付ける
-                    if not app_role.replace("_", "").isalnum():
-                        raise ValueError(f"invalid app_role: {app_role!r}")
-                    cur.execute(f"SET ROLE {app_role}")  # nosec B608
-                # RLS policy 評価用 GUC（transaction-local）
-                # SET LOCAL は parameterize 不可なので set_config(name, value, is_local=true) を使う
-                if user_role:
-                    cur.execute("SELECT set_config('app.user_role', %s, true)", (user_role,))
-                if user_email:
-                    cur.execute("SELECT set_config('app.user_email', %s, true)", (user_email,))
-                if user_groups:
-                    cur.execute(
-                        "SELECT set_config('app.user_groups', %s, true)",
-                        (",".join(user_groups),),
-                    )
+            self._apply_session(conn, app_role, user_email, user_groups, user_role)
             yield conn
             conn.commit()
         except Exception:
@@ -111,6 +172,35 @@ class PgVectorClient:
             raise
         finally:
             conn.close()
+
+    @staticmethod
+    def _apply_session(
+        conn: psycopg.Connection[dict[str, Any]],
+        app_role: str | None,
+        user_email: str | None,
+        user_groups: list[str] | None,
+        user_role: str | None,
+    ) -> None:
+        """RLS 用のロール/GUC を接続に設定する（プール経路・直結経路で共通）。
+
+        - ``SET ROLE`` は session 持続（プールでは返却時に RESET ROLE で必ず戻す）。
+          psycopg は識別子の parameterize 不可なので app_role はコード内固定の英数/_ のみ許可。
+        - ``app.user_*`` GUC は ``set_config(name, value, is_local=true)`` で transaction-local。
+        """
+        with conn.cursor() as cur:
+            if app_role:
+                if not app_role.replace("_", "").isalnum():
+                    raise ValueError(f"invalid app_role: {app_role!r}")
+                cur.execute(f"SET ROLE {app_role}")  # nosec B608
+            if user_role:
+                cur.execute("SELECT set_config('app.user_role', %s, true)", (user_role,))
+            if user_email:
+                cur.execute("SELECT set_config('app.user_email', %s, true)", (user_email,))
+            if user_groups:
+                cur.execute(
+                    "SELECT set_config('app.user_groups', %s, true)",
+                    (",".join(user_groups),),
+                )
 
     def search_similar(
         self,
@@ -421,6 +511,31 @@ class PgVectorClient:
             hit_count=len(hits),
         )
         return hits
+
+    def list_client_names(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        request_id: str | None = None,
+        *,
+        limit: int = 1000,
+    ) -> list[str]:
+        """既知のクライアント名（distinct）を返す（read-only）。
+
+        クエリ中の固有名詞（例「ユニーの2回目提案」）を既知クライアント名の語彙へ
+        substring 照合し、client_name で絞った検索を追加する「クライアント名ブースト」
+        （SearchSkill use_client_boost）の語彙に使う。RLS は connection() 側で有効化済の前提。
+        """
+        sql = """
+            SELECT DISTINCT d.metadata->>'client_name' AS client_name
+            FROM documents d
+            WHERE d.metadata->>'client_name' IS NOT NULL
+              AND d.metadata->>'client_name' <> ''
+            LIMIT %s
+        """  # nosec B608
+        with conn.cursor() as cur:
+            cur.execute(sql, [limit])
+            rows = cur.fetchall()
+        return [str(r["client_name"]) for r in rows if r.get("client_name")]
 
     def list_client_timeline(
         self,

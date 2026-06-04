@@ -56,6 +56,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         use_cohere_rerank: bool = False,
         rerank_pool_size: int = 30,
         min_relevance: float = 0.0,
+        min_relevance_fallback: float = 0.0,
+        use_client_boost: bool = False,
+        client_boost_limit: int = 10,
         use_aggregation_mode: bool = False,
         prompt_version: str = "v1",
         summary_max_tokens: int = 4096,
@@ -114,6 +117,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # SEARCH_MIN_RELEVANCE env で制御 (既定 0.0 = OFF)。Rerank score (0-1) 前提。
         # gold set 実測: 実ヒット最低 0.50 / expect_zero 最高 0.23 → 0.4 で綺麗に分離。
         self._min_relevance = min_relevance
+        # Sprint 7: 2段階しきい値の fallback。strict(min_relevance)で全 hit が落ちた
+        # クエリのみ、この緩いしきい値で救出し is_low_confidence を付与する（borderline
+        # 実ヒットの 0 件化を防ぎつつ、弱い根拠での断定を抑える）。既定 0.0 = fallback 無効
+        # = 従来の単一しきい値挙動と完全一致（後方互換）。SEARCH_MIN_RELEVANCE_FALLBACK で制御。
+        self._min_relevance_fallback = min_relevance_fallback
+        # Sprint 7: クライアント名ブースト。固有名詞クエリ（例「ユニーの2回目提案」）で
+        # 既知クライアント名に substring 一致したら、client_name で絞った検索を追加で実行し
+        # rerank プールに合流させる（dense が固有名詞を取りこぼすリコール弱点を補強）。
+        # 既定 OFF（USE_CLIENT_BOOST）。語彙は初回に1度だけ取得しキャッシュする。
+        self._use_client_boost = use_client_boost
+        self._client_boost_limit = client_boost_limit
+        self._client_vocab: list[str] | None = None
         # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」等を検出したら
         # 意味検索ではなくメタデータフィルタ列挙 (list_by_metadata) で答える。
         # USE_AGGREGATION_MODE=true で有効化 (既定 OFF)。new_schema 前提。
@@ -290,6 +305,17 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     request_id=ctx.request_id,
                     strict_industry=input.strict_industry,
                 )
+                # Sprint 7: クライアント名ブースト。固有名詞クエリで dense が正解 chunk を
+                # 取りこぼすのを補強（client_name 絞り検索を rerank プールへ合流）。
+                if self._use_client_boost:
+                    hits = self._apply_client_boost(
+                        conn=conn,
+                        query=input.query,
+                        hits=hits,
+                        embedding=embedding,
+                        input=input,
+                        request_id=ctx.request_id,
+                    )
                 # Rerank: top_k に絞り直す (relevance_score で再ソート)
                 if self._use_cohere_rerank and hits:
                     hits = self._apply_cohere_rerank(
@@ -303,7 +329,25 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # より前に評価し、弱い根拠しか無いクエリでは drive-match も発火させない)。
                 if self._min_relevance > 0.0 and hits:
                     kept = [h for h in hits if h.score >= self._min_relevance]
-                    if len(kept) != len(hits):
+                    if not kept and self._min_relevance_fallback > 0.0:
+                        # strict で全滅 → fallback しきい値で救出（低信頼マーク付き）。
+                        # borderline 実ヒットの 0 件化を防ぐ。metadata は frozen dataclass の
+                        # 可変 dict なので in-place 付与（再代入はしない）。
+                        rescued = [h for h in hits if h.score >= self._min_relevance_fallback]
+                        for h in rescued:
+                            h.metadata["is_low_confidence"] = True
+                        if rescued:
+                            logger.info(
+                                "min_relevance_fallback",
+                                request_id=ctx.request_id,
+                                strict=self._min_relevance,
+                                fallback=self._min_relevance_fallback,
+                                before=len(hits),
+                                rescued=len(rescued),
+                                top_score=hits[0].score,
+                            )
+                        kept = rescued
+                    elif len(kept) != len(hits):
                         logger.info(
                             "min_relevance_filter",
                             request_id=ctx.request_id,
@@ -428,6 +472,56 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
         return related
 
+    def _match_client(self, query: str, conn: Any, request_id: str) -> str | None:
+        """クエリ文字列に既知クライアント名が substring で含まれれば最長一致を返す。"""
+        if self._client_vocab is None:
+            try:
+                self._client_vocab = self._pgvector.list_client_names(
+                    conn=conn, request_id=request_id
+                )
+            except Exception:  # 語彙取得失敗時はブースト無効（検索本体は継続）
+                self._client_vocab = []
+        # 長い名前を優先（短い部分名の誤爆を避ける）
+        matched = [n for n in self._client_vocab if n and n in query]
+        return max(matched, key=len) if matched else None
+
+    def _apply_client_boost(
+        self,
+        *,
+        conn: Any,
+        query: str,
+        hits: list[SearchHit],
+        embedding: list[float],
+        input: SearchInput,
+        request_id: str,
+    ) -> list[SearchHit]:
+        """固有名詞クエリで client_name 絞り検索を追加し rerank プールへ合流する。"""
+        matched = self._match_client(query, conn, request_id)
+        if not matched:
+            return hits
+        boost = self._pgvector.search_similar_new_schema(
+            conn=conn,
+            embedding=embedding,
+            limit=self._client_boost_limit,
+            filter_industry=input.filter_industry,
+            request_id=request_id,
+            strict_industry=input.strict_industry,
+            metadata_filters={"client_name": matched},
+        )
+        if not boost:
+            return hits
+        seen = {h.chunk_id for h in hits}
+        added = [h for h in boost if h.chunk_id not in seen]
+        if added:
+            logger.info(
+                "client_boost_applied",
+                request_id=request_id,
+                client_name=matched,
+                added=len(added),
+                pool_before=len(hits),
+            )
+        return list(hits) + added
+
     def _summarize(
         self,
         query: str,
@@ -449,9 +543,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         related_hits = [h for h in hits if (h.metadata or {}).get("is_related_drive")]
 
         primary_block = "\n\n".join(
-            f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}]\n{h.content}" for h in primary_hits
+            f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}"
+            + ("（関連度低・参考）" if (h.metadata or {}).get("is_low_confidence") else "")
+            + f"]\n{h.content}"
+            for h in primary_hits
         )
         sections = [f"# 質問\n{query}\n\n# 参考資料\n{primary_block}"]
+        # 2段階しきい値の fallback で救出した低信頼 hit がある場合、断定を抑える注意を付す。
+        if any((h.metadata or {}).get("is_low_confidence") for h in primary_hits):
+            sections.append(
+                "# 注意（グラウンディング）\n"
+                "上記で『関連度低・参考』と付記した資料は関連度が低い参考情報です。確証が持てない"
+                "場合は断定せず、『資料に明確な記載はないが関連しうる』等と不確実性を明示してください。"
+            )
         if related_hits:
             related_block = "\n\n".join(
                 f"[chunk_id: {h.chunk_id}] {(h.metadata or {}).get('title', '')}\n{h.content}"

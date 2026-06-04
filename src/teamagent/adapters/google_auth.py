@@ -1,23 +1,18 @@
-"""Google 認証の共通ヘルパ (gsheets / gdrive / gmail 共有)。
+"""Google 認証ヘルパ（共有 OAuth と per-user OAuth の両対応）。
 
-認証の優先順位:
-  1. GOOGLE_FORCE_OAUTH=1 → Service Account を無視して必ず個人 OAuth を使う
-  2. GOOGLE_APPLICATION_CREDENTIALS (SA 鍵) があれば Service Account
-  3. OAuth リフレッシュトークン
-     (GOOGLE_OAUTH_REFRESH_TOKEN + GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET)
+■ 共有 OAuth（video_approval 等の案件シート読取・現行）:
+  優先順位 1. GOOGLE_FORCE_OAUTH=1 → SA を無視して個人 OAuth 強制
+           2. GOOGLE_APPLICATION_CREDENTIALS (SA 鍵)
+           3. OAuth リフレッシュトークン (GOOGLE_OAUTH_REFRESH_TOKEN + CLIENT_ID/SECRET)
+  本番 SA は組織ポリシーで外部シート/Drive を共有できないため案件シートは個人 OAuth で読む。
+  共有トークンは固定スコープ集合で発行されるため drive.readonly 等の集合を要求する。
+  → force_oauth_enabled() / resolve_oauth_scopes() / build_oauth_credentials()
 
-なぜ「OAuth 強制」が要るか (2026-06-01 実機で確定):
-  本番 SA `teamagent-vertex@ntv-ai.iam.gserviceaccount.com` は組織ポリシーで
-  外部スプレッドシート/ドライブへ共有追加できない (共有先に SA を足すのが拒否)。
-  そのため案件シートは「各担当者の個人 Google アカウントの OAuth」で読む。
-  ところが共有リフレッシュトークンは固定スコープ集合で発行されているため、
-  API ごとの狭いスコープ (例: spreadsheets.readonly) を要求すると
-  ``invalid_scope`` で弾かれる。共有トークンが実際に持つスコープ
-  (drive.readonly 等。Sheets API も drive.readonly で読める) を要求する。
-
-将来 (#44 方式B: 各人別 OAuth) では、env 依存をこの 1 ファイルに閉じておくことで
-per-user のトークン注入 (build_oauth_credentials の引数 or override env) に
-差し替えやすくする。
+■ per-user OAuth（connect 機能・各営業が自分の Google を自己認可・G1「本人のデータのみ」）:
+  共有 OAuth クライアント(env)＋各人の refresh token(TokenStore 由来 OAuthToken)から
+  Credentials を作る。各アダプタの from_user_token がこれを使う。
+  → build_user_credentials(token)
+  設計: docs/poc/workspace_integration_design.md §5。
 """
 
 from __future__ import annotations
@@ -29,13 +24,14 @@ from typing import Any
 
 import structlog
 
+from teamagent.adapters.oauth_token_store import OAuthToken
+
 logger = structlog.get_logger(__name__)
 
 GOOGLE_OAUTH_TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 # 個人 OAuth リフレッシュトークンが実際に許可されているスコープ (2026-06-01 時点)。
 # drive.readonly は Sheets API v4 の読取も認可する (シートは Drive 配下のファイル扱い)。
-# 各クライアントはこの集合の「部分集合」だけを要求しないと invalid_scope になる。
 SHARED_OAUTH_SCOPES: tuple[str, ...] = (
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/drive.metadata.readonly",
@@ -60,12 +56,8 @@ def _split_scopes(raw: str) -> list[str]:
 def resolve_oauth_scopes(preferred: Sequence[str]) -> list[str]:
     """OAuth で要求するスコープを決める。
 
-    優先順位:
-      1. GOOGLE_OAUTH_SCOPES (カンマ/空白区切り) — per-user 上書き・実験用
-      2. 呼び出し側が渡した preferred (= そのクライアントが OAuth 用に選んだ集合)
-
-    preferred には「共有トークンが実際に持つスコープの部分集合」を渡すこと
-    (例: Sheets 読取なら spreadsheets.readonly ではなく drive.readonly)。
+    優先順位: 1. GOOGLE_OAUTH_SCOPES(env override) 2. 呼び出し側の preferred。
+    preferred は「共有トークンが実際に持つスコープの部分集合」を渡すこと。
     """
     override = os.environ.get("GOOGLE_OAUTH_SCOPES")
     if override:
@@ -76,10 +68,7 @@ def resolve_oauth_scopes(preferred: Sequence[str]) -> list[str]:
 
 
 def build_oauth_credentials(preferred_scopes: Sequence[str]) -> Any | None:
-    """環境変数から個人 OAuth の Credentials を構築する。
-
-    必要な env が揃っていなければ None を返す (呼び出し側でフォールバック/例外化)。
-    """
+    """環境変数から共有個人 OAuth の Credentials を構築（必要 env が無ければ None）。"""
     refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN")
     client_id = os.environ.get("GOOGLE_CLIENT_ID")
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
@@ -97,4 +86,32 @@ def build_oauth_credentials(preferred_scopes: Sequence[str]) -> Any | None:
         client_id=client_id,
         client_secret=client_secret,
         scopes=scopes,
+    )
+
+
+def build_user_credentials(token: OAuthToken) -> Any:
+    """本人の refresh token から OAuth Credentials を組み立てる（per-user・connect 用）。
+
+    共有 OAuth クライアント(env GOOGLE_CLIENT_ID/SECRET)を使う。未設定/未認可は ValueError
+    （fail-closed＝未認可は弾く）。
+    """
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    if not (client_id and client_secret):
+        raise ValueError(
+            "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET が未設定です"
+            "（W1: Google Cloud で OAuth クライアントを作成してください）"
+        )
+    if not token.refresh_token:
+        raise ValueError("OAuthToken.refresh_token が空です（本人が未認可）")
+
+    from google.oauth2.credentials import Credentials
+
+    return Credentials(
+        token=None,
+        refresh_token=token.refresh_token,
+        token_uri=GOOGLE_OAUTH_TOKEN_URI,
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=list(token.scopes) or None,
     )

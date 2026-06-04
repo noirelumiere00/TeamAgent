@@ -10,7 +10,7 @@
 **TeamAgent v3.1** — 社内営業16名向け Slack ベース AI Agent プラットフォーム。
 
 ### アーキ核心
-- **OpenClaw Runtime** をオーケストレータに（フル採用）
+- **オーケストレータ基盤は再評価中**（最終確定＝ゲート①2026-06-07）。v3.1の「OpenClaw フル採用」は2026-05-22に「再評価中」へ変更済（§下部 ⚠️）。**multi-skill orchestrator(C案) のPoCは Claude Agent SDK on Bedrock 採用・OpenClaw不採用 を推奨**（`docs/poc/agent_orchestrator_poc_findings.md`、実機でgrounded出力まで実証）
 - **AWS Bedrock 経由** で Claude Sonnet 4.6 / Haiku 4.5 を呼ぶ
 - **pgvector (PostgreSQL 16)** でデータ層
 - **Skill Registry / Plugin** パターンで Skill 数は無限に拡張可能
@@ -34,7 +34,7 @@ TeamAgent/
 ├── README.md                  ← 一般向け README（v3.1 版）
 ├── README.v2.md               ← v2.x 時代の README バックアップ
 ├── docs/
-│   ├── v3.1/                  ← 最新ドキュメント（OpenClaw フル採用版）
+│   ├── v3.1/                  ← v3.1ドキュメント（OpenClaw採用前提・5/22に再評価中へ／最新方針は §下部⚠️ と docs/poc/findings）
 │   │   ├── teamagent_overview_v3.1.html
 │   │   ├── teamagent_implementation_plan_v3.1.html
 │   │   ├── teamagent_mva_spec_v1.1.html
@@ -417,7 +417,7 @@ python scripts/demo_pdf_vectorize.py
 
 ## 6. 重要な技術的判断（変えないでほしい）
 
-1. **OpenClaw フル採用**（v3.1 で確定）— 不採用にしない。子会社運用実績 + セキュリティ運用ルールでカバー
+1. **オーケストレータ基盤＝ゲート①(2026-06-07)で最終確定**（v3.1の「OpenClaw フル採用」は2026-05-22に「再評価中」へ変更済・§上部⚠️）。multi-skill orchestrator(C案)のPoCは **Claude Agent SDK on Bedrock 採用・OpenClaw不採用** を推奨（実機でgrounded出力まで実証、`docs/poc/agent_orchestrator_poc_findings.md`）。判断会議で確定するまで「フル採用で確定／不採用にしない」と断定しないこと
 2. **AWS Bedrock 経由で Claude を呼ぶ** — Anthropic API 直接ではなく Bedrock 必須
    - 理由：2026/4 の Anthropic サブスク制限事件があったため、Bedrock 経由で政策変動を遮断
 3. **pgvector 0.8.0 以上を必ず使う** — 古いとフィルタで結果ゼロのバグ

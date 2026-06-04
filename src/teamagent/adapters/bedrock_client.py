@@ -16,13 +16,79 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import boto3
 import structlog
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
+
+from teamagent.runtime.retry import RetryPolicy, call_with_retry
 
 logger = structlog.get_logger(__name__)
+
+
+# Bedrock で「一過性（リトライ可）」と判断するエラーコード。
+# スロットリングと一時的なサーバ/接続エラーのみ。ValidationException や
+# AccessDeniedException 等の恒久エラーはリトライしても無駄なので含めない。
+# 除外の意図（公式エラー表と突合済み）:
+#   - ServiceQuotaExceededException は「上限超過」で一過性でない → 非対象。
+#   - ModelStreamErrorException / ModelErrorException は ConverseStream 専用。本実装は
+#     非ストリーミングの converse()/rerank() のみなので対象外。
+# コード名が将来変わっても HTTP status (429/5xx) の二段構えで拾える。
+_RETRYABLE_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "ThrottlingException",
+        "Throttling",
+        "ThrottledException",
+        "TooManyRequestsException",
+        "RequestThrottledException",
+        "ServiceUnavailableException",
+        "ServiceUnavailable",
+        "InternalServerException",
+        "ModelTimeoutException",
+        "ModelNotReadyException",
+    }
+)
+_RETRYABLE_HTTP_STATUS: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_bedrock_retryable(exc: BaseException) -> bool:
+    """Bedrock 呼び出しの例外が「一過性＝リトライすべき」かを判定する。
+
+    - ``ClientError``: error code か HTTP status で throttling / 5xx を判定。
+    - ``BotoCoreError``: 接続断・読み取りタイムアウト等の一時的ネットワーク障害（リトライ可）。
+    - それ以外（ValidationException 等の恒久エラーや想定外）: リトライしない。
+    """
+    if isinstance(exc, ClientError):
+        err = exc.response.get("Error", {}) or {}
+        code = err.get("Code")
+        if code in _RETRYABLE_ERROR_CODES:
+            return True
+        status = (exc.response.get("ResponseMetadata", {}) or {}).get("HTTPStatusCode")
+        return isinstance(status, int) and status in _RETRYABLE_HTTP_STATUS
+    # ReadTimeout / Connect / EndpointConnection 等は BotoCoreError 配下（一時的）
+    return isinstance(exc, BotoCoreError)
+
+
+def _env_int(name: str, default: int) -> int:
+    """env を int として読む（空・不正値は default）。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """env を float として読む（空・不正値は default）。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
 
 
 # 2026/5 時点の東京リージョン on-demand 料金（USD / 1M tokens）
@@ -136,14 +202,35 @@ class BedrockClient:
         client: Any | None = None,
         rerank_client: Any | None = None,
         rerank_model_arn: str | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.region = region
         self.model_id = model_id
-        self._client = client or boto3.client("bedrock-runtime", region_name=region)
+        # リトライは本クラスの call_with_retry が一元管理する。botocore 内部リトライは
+        # total_max_attempts=1（=初回のみ・リトライ無し）に固定し、自前リトライとの二重化で
+        # 待ち時間が掛け算になるのを防ぐ。
+        #   ⚠️ Config では `max_attempts` は「リトライ回数(初回を含まない)」の意味になり、
+        #      max_attempts=1 を指定しても解決値は total_max_attempts=2（初回+1リトライ）になる
+        #      （実機 botocore 1.43 で確認）。総試行1回にしたいので必ず total_max_attempts を使う。
+        # 併せて read/connect タイムアウトと TCP keepalive を明示する。
+        #   - 既定 read 60s だと長い生成で早期に切れる事があるため 120s。
+        #   - tcp_keepalive: VPC/NAT/NLB の固定 350s アイドルで接続が無言切断され、再利用時に
+        #     70s+ の cold-start/接続リセットになるのを防ぐ（AWS Bedrock 公式推奨）。
+        #     OS 側も net.ipv4.tcp_keepalive_time<350 を設定すること（デプロイ runbook 参照）。
+        self._retry_policy = retry_policy or RetryPolicy()
+        boto_config = Config(
+            retries={"total_max_attempts": 1, "mode": "standard"},
+            connect_timeout=10,
+            read_timeout=120,
+            tcp_keepalive=True,
+        )
+        self._client = client or boto3.client(
+            "bedrock-runtime", region_name=region, config=boto_config
+        )
         # Day 8 (2026-05-28) Sprint 4-A: Cohere Rerank v3.5 サポート。
         # `bedrock-agent-runtime` は `bedrock-runtime` (Converse 用) とは別クライアント。
         self._rerank_client = rerank_client or boto3.client(
-            "bedrock-agent-runtime", region_name=region
+            "bedrock-agent-runtime", region_name=region, config=boto_config
         )
         # ap-northeast-1 で Cohere Rerank v3.5 が In-Region 提供されている。
         # 出典: https://docs.aws.amazon.com/bedrock/latest/userguide/rerank-supported.html
@@ -161,7 +248,42 @@ class BedrockClient:
         region = os.environ.get("AWS_REGION", "ap-northeast-1")
         model_id = os.environ.get("BEDROCK_MODEL_ID", "jp.anthropic.claude-sonnet-4-6")
         rerank_arn = os.environ.get("BEDROCK_RERANK_MODEL_ARN")
-        return cls(region=region, model_id=model_id, rerank_model_arn=rerank_arn)
+        # 任意で env からバックオフを上書き（既定: 5回 / base 0.5s / cap 20s）。
+        policy = RetryPolicy(
+            max_attempts=_env_int("BEDROCK_MAX_ATTEMPTS", 5),
+            base_delay_s=_env_float("BEDROCK_RETRY_BASE_S", 0.5),
+            max_delay_s=_env_float("BEDROCK_RETRY_MAX_S", 20.0),
+        )
+        return cls(
+            region=region,
+            model_id=model_id,
+            rerank_model_arn=rerank_arn,
+            retry_policy=policy,
+        )
+
+    def _make_retry_logger(
+        self, event: str, request_id: str
+    ) -> Callable[[int, float, BaseException], None]:
+        """``call_with_retry`` の on_retry フック。リトライを構造化ログに warning で残す。
+
+        スロットリングの頻度は「同時実行を絞るべきか / 上限緩和申請が要るか」の一次データ。
+        管理画面のコスト・混雑可視化でも集計対象になる。
+        """
+
+        def _log(attempt: int, delay_s: float, exc: BaseException) -> None:
+            if isinstance(exc, ClientError):
+                code = str((exc.response.get("Error", {}) or {}).get("Code", "unknown"))
+            else:
+                code = type(exc).__name__
+            logger.warning(
+                event,
+                request_id=request_id,
+                attempt=attempt,
+                backoff_s=round(delay_s, 3),
+                error_code=code,
+            )
+
+        return _log
 
     def converse(
         self,
@@ -204,7 +326,12 @@ class BedrockClient:
             kwargs["system"] = system_blocks
 
         start = time.perf_counter()
-        resp = self._client.converse(**kwargs)
+        resp = call_with_retry(
+            lambda: self._client.converse(**kwargs),
+            is_retryable=_is_bedrock_retryable,
+            policy=self._retry_policy,
+            on_retry=self._make_retry_logger("bedrock_converse_retry", request_id),
+        )
         latency_ms = int((time.perf_counter() - start) * 1000)
 
         usage_raw = resp.get("usage", {})
@@ -324,7 +451,12 @@ class BedrockClient:
         }
 
         start = time.perf_counter()
-        resp = self._rerank_client.rerank(**request_body)
+        resp = call_with_retry(
+            lambda: self._rerank_client.rerank(**request_body),
+            is_retryable=_is_bedrock_retryable,
+            policy=self._retry_policy,
+            on_retry=self._make_retry_logger("bedrock_rerank_retry", request_id),
+        )
         latency_ms = int((time.perf_counter() - start) * 1000)
 
         results_raw = resp.get("results", []) or []
