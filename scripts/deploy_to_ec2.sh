@@ -71,16 +71,30 @@ aws s3 cp "s3://$BUCKET/deploy/teamagent-bot.tar.gz" /tmp/app.tar.gz
 aws s3 cp "s3://$BUCKET/deploy/teamagent.env.base" /opt/teamagent/teamagent.env.base
 rm -rf app && mkdir -p app && tar xzf /tmp/app.tar.gz -C app
 cd app
+# /tmp は tmpfs(2GB) で torch 等の展開が溢れる → TMPDIR をディスクへ
+mkdir -p /opt/teamagent/piptmp
+export TMPDIR=/opt/teamagent/piptmp
 python3.11 -m venv .venv
 ./.venv/bin/pip install -q -U pip
 ./.venv/bin/pip install -q -e .
+# search の e5 embedder(torch含む・重い)。pyproject 外なので明示導入
+./.venv/bin/pip install -q --no-cache-dir sentence-transformers
 # TikTok スクレイパの node 依存（node_modules は tarball 非同梱）
 ( cd tools/tiktok_scraper && npm ci --no-audit --no-fund )
-# Chrome 本体（puppeteer browsers）→ 実パスを CHROMIUM_PATH として env.base に追記
-npx --yes @puppeteer/browsers install chrome@stable --path /opt/teamagent/chrome >/tmp/chrome_install.log 2>&1 || true
-CHROME_BIN="$(find /opt/teamagent/chrome -type f -name chrome 2>/dev/null | head -1)"
-if [[ -n "$CHROME_BIN" ]]; then
-  grep -q '^CHROMIUM_PATH=' /opt/teamagent/teamagent.env.base || echo "CHROMIUM_PATH=$CHROME_BIN" >> /opt/teamagent/teamagent.env.base
+# Chrome: Chrome-for-Testing に arm64 Linux 版が無い(t4g=arm64)→ Playwright chromium(arm64) を使う
+export PLAYWRIGHT_BROWSERS_PATH=/opt/teamagent/pw
+./.venv/bin/python -m playwright install chromium >/tmp/pw_install.log 2>&1 || true
+PW_CHROME="$(find /opt/teamagent/pw -type f -name chrome 2>/dev/null | head -1)"
+if [[ -n "$PW_CHROME" ]]; then
+  sed -i '/^CHROMIUM_PATH=/d' /opt/teamagent/teamagent.env.base
+  echo "CHROMIUM_PATH=$PW_CHROME" >> /opt/teamagent/teamagent.env.base
+fi
+rm -rf /opt/teamagent/piptmp
+# OOM 安全網: swap 4GB（e5 ロード時のメモリ逼迫対策・永続）
+if ! swapon --show | grep -q /swapfile; then
+  fallocate -l 4G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=4096 status=none
+  chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile
+  grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 systemctl daemon-reload
 systemctl enable teamagent-bot

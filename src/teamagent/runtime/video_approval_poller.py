@@ -48,6 +48,9 @@ class ProcessedStore:
     def mark(self, key: str) -> None:
         self._seen.add(key)
 
+    def unmark(self, key: str) -> None:
+        self._seen.discard(key)  # claim 取り消し（処理失敗時に次ティックへ戻す）
+
     def __len__(self) -> int:
         return len(self._seen)
 
@@ -91,18 +94,22 @@ async def poll_once(
     ]
     stats = {"new": len(targets), "processed": 0, "baselined": 0, "errors": 0}
     for r in targets:
+        # claim-before-await: await を挟む前に mark で所有権を確定（並行 poll_once でも
+        # 二重処理しない。asyncio は await 間が非分割なので seen→mark はアトミック）。
+        if store.seen(r.management_no):  # 別コルーチンが先に claim 済み
+            continue
+        store.mark(r.management_no)
         if baseline:
-            store.mark(r.management_no)
             stats["baselined"] += 1
             continue
         try:
             text = await run_one(r.management_no)
             await post(text)
-            store.mark(r.management_no)  # 成功時のみ既読化
             stats["processed"] += 1
         except Exception:
+            store.unmark(r.management_no)  # 失敗は claim を戻し次ティックで再試行
             logger.exception("video_approval_poll_item_failed", management_no=r.management_no)
-            stats["errors"] += 1  # mark しない＝次ティックで再試行
+            stats["errors"] += 1
     if stats["baselined"] or stats["processed"]:
         store.save()
     return stats

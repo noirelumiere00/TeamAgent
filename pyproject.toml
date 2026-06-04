@@ -30,6 +30,7 @@ dependencies = [
     # --- 外部連携: Slack ---
     "slack-bolt>=1.21.0",
     "slack-sdk>=3.33.0",
+    "aiohttp>=3.10.0",  # slack-bolt socket-mode(async) が要求。extra扱いで pip install -e . に自動で入らない
 
     # --- ドキュメント解析 ---
     "pypdf>=5.0.0",
