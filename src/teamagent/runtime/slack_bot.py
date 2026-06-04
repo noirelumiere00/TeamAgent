@@ -1775,6 +1775,66 @@ def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict[st
         capture_event_exception(exc, event_type="asyncio:unhandled", extra={"message": message})
 
 
+def _maybe_start_video_approval_poller(app: AsyncApp, loop: asyncio.AbstractEventLoop) -> None:
+    """Phase2: シート定期監視→自動一次審査→Slack通知 の poller を起動（既定 OFF・安全）。
+
+    `USE_VIDEO_APPROVAL_POLLING=true` かつ `VIDEO_APPROVAL_POLL_CHANNEL`/`VIDEO_APPROVAL_SHEET_ID`
+    が揃ったときだけ起動。投稿のみ（シート書込はしない）。冪等性=ローカル永続+初回ベースライン。
+    """
+    if os.environ.get("USE_VIDEO_APPROVAL_POLLING", "false").lower() not in ("1", "true", "yes"):
+        return
+    channel = os.environ.get("VIDEO_APPROVAL_POLL_CHANNEL")
+    sheet_id = os.environ.get("VIDEO_APPROVAL_SHEET_ID")
+    if not channel or not sheet_id:
+        logger.warning(
+            "video_approval_poll_disabled_missing_config",
+            has_channel=bool(channel),
+            has_sheet=bool(sheet_id),
+        )
+        return
+    channel_s: str = channel
+    sheet_id_s: str = sheet_id
+
+    import uuid as _uuid
+
+    from teamagent.runtime.video_approval_poller import ProcessedStore, poll_loop
+    from teamagent.skills.video_approval.sheet_orientation import OrientationExtractor
+
+    dispatcher = SkillDispatcher()
+    store = ProcessedStore(
+        os.environ.get("VIDEO_APPROVAL_STATE_PATH", ".local_state/video_approval_processed.json")
+    )
+    interval = int(os.environ.get("VIDEO_APPROVAL_POLL_INTERVAL_SEC", "300"))
+
+    async def _list() -> list[Any]:
+        def _sync() -> list[Any]:
+            ex = OrientationExtractor(
+                client_name=os.environ.get("VIDEO_APPROVAL_CLIENT_NAME") or None
+            )
+            return ex.list_creatives(sheet_id_s, request_id="vapoll")
+
+        return await loop.run_in_executor(None, _sync)
+
+    async def _run_one(mgmt: str) -> str:
+        return await dispatcher.run_video_approval(
+            mgmt, "vapoll-" + _uuid.uuid4().hex[:8], None, sheet_id=sheet_id_s
+        )
+
+    async def _post(text: str) -> None:
+        await app.client.chat_postMessage(channel=channel_s, text=text)
+
+    loop.create_task(
+        poll_loop(
+            list_creatives=_list,
+            run_one=_run_one,
+            post=_post,
+            store=store,
+            interval_sec=interval,
+        )
+    )
+    logger.info("video_approval_poll_enabled", channel=channel_s, interval_sec=interval)
+
+
 async def _run() -> None:
     app_token = os.environ.get("SLACK_APP_TOKEN")
     if not app_token:
@@ -1792,6 +1852,7 @@ async def _run() -> None:
 
     app = build_app()
     handler = AsyncSocketModeHandler(app, app_token)
+    _maybe_start_video_approval_poller(app, loop)  # Phase2 poller（既定 OFF）
     logger.info("slack_bot_start", mode="socket", sentry_enabled=sentry_enabled)
     await handler.start_async()  # type: ignore[no-untyped-call]
 

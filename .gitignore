@@ -165,3 +165,6 @@ data/eval/results/
 
 # --- VSEO video_algorithm のローカル生成レポート（誤コミット防止） ---
 .local_out/
+
+# 動画一次FB審査 Phase2 poller の処理済み永続先
+.local_state/
