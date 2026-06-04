@@ -54,7 +54,9 @@ def test_score_no_citations() -> None:
     s = score_faithfulness("一般論で根拠を引用していない回答", [1, 2])
     assert not s.has_citations
     assert s.is_clean  # 捏造引用は無い
-    assert s.citation_validity == 1.0  # 引用なしは validity で減点しない（has_citations で別途判定）
+    assert (
+        s.citation_validity == 1.0
+    )  # 引用なしは validity で減点しない（has_citations で別途判定）
 
 
 def test_dedup_cited() -> None:

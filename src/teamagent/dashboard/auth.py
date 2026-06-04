@@ -74,9 +74,10 @@ def verify_google_id_token(
     from google.oauth2 import id_token as gid
 
     req = greq.Request()
-    claims: dict[str, Any] = gid.verify_oauth2_token(  # type: ignore[no-untyped-call]
-        token, req, client_id
-    )
+    # google-auth は型注釈が無く、かつ CI では google 未導入で override により Any 化する。
+    # 両環境で安定させるため Any 経由で呼ぶ（strict の no-untyped-call / unused-ignore を回避）。
+    verify_fn: Any = gid.verify_oauth2_token
+    claims: dict[str, Any] = verify_fn(token, req, client_id)
     return claims
 
 
