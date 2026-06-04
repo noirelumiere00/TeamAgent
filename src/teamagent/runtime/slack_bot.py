@@ -1337,6 +1337,56 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                     )
                 )
 
+    @app.command("/teamagent_connect")
+    async def handle_teamagent_connect(
+        ack: Any,
+        respond: Any,
+        command: dict[str, Any],
+    ) -> None:
+        """`/teamagent connect`: 本人専用の Google 連携リンクを ephemeral で返す。
+
+        営業はこのリンクを開いて自分の Google で 7サービス(readonly) を許可するだけで連携完了
+        （ターミナル不要）。同意後は connect_web の /oauth2/callback が token を KMS暗号化保存する。
+        """
+        await ack()
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        user_id = command.get("user_id")
+        email = await disp._resolve_user_email(user_id)
+        if not email:
+            await respond(
+                response_type="ephemeral",
+                text="メール取得に失敗（管理者に users:read.email スコープを確認してください）。",
+            )
+            return
+        redirect_uri = os.environ.get("OAUTH_REDIRECT_URI", "").strip()
+        if not redirect_uri:
+            await respond(
+                response_type="ephemeral",
+                text="連携機能が未設定です（管理者: OAUTH_REDIRECT_URI を設定してください）。",
+            )
+            return
+        try:
+            from teamagent.adapters.google_oauth_flow import OAuthConsentFlow
+
+            url, _state = OAuthConsentFlow(redirect_uri=redirect_uri).authorization_url(email)
+        except Exception:
+            logger.warning("teamagent_connect_url_failed", request_id=request_id, user_id=user_id)
+            await respond(
+                response_type="ephemeral",
+                text="連携リンク生成に失敗（管理者に OAuth 系 env の設定を確認）。",
+            )
+            return
+        logger.info("teamagent_connect_link_issued", request_id=request_id, user_id=user_id)
+        await respond(
+            response_type="ephemeral",
+            text=(
+                f"👋 *{email}* の Google を連携します（1回だけ）。\n"
+                "下のリンクを開いて 7サービス(readonly) を *許可* してください:\n"
+                f"{url}\n\n"
+                "「✅ 連携が完了しました」が出れば成功。あとは AI に話しかけるだけです。"
+            ),
+        )
+
     @app.command("/teamagent_search")
     async def handle_teamagent_search(
         ack: Any,
