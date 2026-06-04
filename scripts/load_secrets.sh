@@ -135,6 +135,22 @@ print(f\"export GOOGLE_OAUTH_REFRESH_TOKEN='{d['refresh_token']}'\")
             _log "INFO: Google OAuth secret は未投入（skip）"
         fi
     fi
+
+    # Vertex SA JSON（Gemini 動画分析）— Secrets Manager から取得してファイル化。
+    # EC2 向け。Mac は VERTEX_SA_SECRET_NAME 未設定なので skip し .env のローカルパスを使う。
+    if [[ -n "${VERTEX_SA_SECRET_NAME:-}" ]]; then
+        local sa_json sa_path
+        sa_path="${VERTEX_SA_PATH:-/opt/teamagent/secrets/vertex-sa.json}"
+        sa_json="$(_get_secret "$VERTEX_SA_SECRET_NAME" 2>/dev/null || true)"
+        if [[ -n "$sa_json" ]]; then
+            mkdir -p "$(dirname "$sa_path")"
+            (umask 077; printf '%s' "$sa_json" >"$sa_path")  # 0600 で書き出し
+            export GOOGLE_APPLICATION_CREDENTIALS="$sa_path"
+            _log "OK: Vertex SA materialized → $sa_path"
+        else
+            _log "WARN: VERTEX_SA_SECRET_NAME 設定済だが取得失敗（Gemini 動画分析が動かない可能性）"
+        fi
+    fi
 }
 
 _load

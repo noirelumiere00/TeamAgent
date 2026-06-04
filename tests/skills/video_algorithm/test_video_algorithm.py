@@ -571,6 +571,18 @@ def test_parse_analysis_recovery_is_logged() -> None:
     assert any("pacing" in f for f in rec["reset_fields"])
 
 
+def test_parse_analysis_recovers_out_of_range_coherence() -> None:
+    """message_coherence の範囲外(150>100)は棄却せず default(None) に戻して救済。"""
+    bad = _json_block(kw_telop=True, cta=True, brand=True, dur=18).replace(
+        '"caption_relevance":"キャプションと一致"',
+        '"caption_relevance":"キャプションと一致","message_coherence":150',
+    )
+    a = parse_analysis(bad)
+    assert a is not None
+    assert a.message_coherence is None  # 範囲外→default に戻る（bogus値を表示しない）
+    assert a.duration_sec == 18  # 他フィールドは無傷
+
+
 # -----------------------------------------------------------
 # over-fetch バックフィル（DL失敗を後続候補で埋めて狙った本数を揃える）
 # -----------------------------------------------------------
