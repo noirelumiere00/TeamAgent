@@ -110,9 +110,14 @@ def create_app(
         try:
             token = _exchange(code)
             _get_store().put(email, token)
-        except Exception:
-            # 本文/トークン/PII はログに出さない（request_id 相当の email のみ）
-            logger.warning("connect_callback_store_failed", user_email=email)
+        except Exception as exc:
+            # トークン/本文は出さない。診断用に例外の型と短い説明のみ。
+            logger.warning(
+                "connect_callback_store_failed",
+                user_email=email,
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",

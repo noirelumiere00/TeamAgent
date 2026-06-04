@@ -101,16 +101,20 @@ class OAuthConsentFlow:
         access_type=offline + prompt=consent で refresh token を確実に取得する。
         """
         state = make_state(user_email)
+        # include_granted_scopes は使わない（他アプリで許可済みの scope=gmail.modify 等まで
+        # 合算され、要求と返却が食い違う＋readonly の約束に反する write scope が混ざるため）。
         url, _ = self._flow().authorization_url(
             access_type="offline",
             prompt="consent",
-            include_granted_scopes="true",
             state=state,
         )
         return str(url), state
 
     def exchange(self, code: str) -> OAuthToken:
         """authorization code を refresh token に交換して OAuthToken を返す。"""
+        # Google はアカウントが既に許可済みの scope を追加で返すことがある。oauthlib は既定で
+        # 「要求と返却の scope 不一致」を例外にするため、緩和しておく（交換自体は成功させる）。
+        os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
         flow = self._flow()
         flow.fetch_token(code=code)
         creds = flow.credentials
