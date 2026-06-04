@@ -79,7 +79,7 @@ class ColorSwatch(BaseModel):
 
     hex: str = ""  # "#RRGGBB"（不正値は描画側でサニタイズ）
     role: ColorRole = "dominant"
-    ratio: float = 0.0  # 画面占有率 0.0-1.0（スウォッチ幅に使う）
+    ratio: float = Field(default=0.0, ge=0.0, le=1.0)  # 画面占有率 0.0-1.0
     tone: Tone = "neutral"
 
 
@@ -170,7 +170,7 @@ class VideoVSEOAnalysis(BaseModel):
     keyword_matches: list[KeywordMatch] = Field(default_factory=list)
     caption_relevance: str = ""  # キャプション本文と動画内容/KWの関連性の評価（判断要素）
     # メッセージ一貫性（テロップ↔キャプション↔映像中身が同じことを言っているか）
-    message_coherence: int | None = None  # 0-100（Geminiの読み）
+    message_coherence: int | None = Field(default=None, ge=0, le=100)  # 0-100
     layer_messages: LayerMessages | None = None  # 3者がそれぞれ言っている要旨
     divergence_note: str | None = None  # ズレ（乖離）の名指し（一致時は None）
     reinforcement_note: str | None = None  # どう補強し合っているか1文
