@@ -118,3 +118,33 @@ async def test_error_isolation_does_not_mark(tmp_path: Path) -> None:
     assert not store.seen("E01-01")  # 失敗は既読化しない＝次ティックで再試行
     assert store.seen("E01-02")
     assert len(posted) == 1  # 成功した1件のみ投稿（失敗分は投稿しない）
+
+
+# --- 並行 poll_once でも二重処理しない（負荷テストの敵対シナリオが発見した race の回帰）---
+async def test_concurrent_poll_once_no_double_processing(tmp_path: Path) -> None:
+    import asyncio
+
+    refs = [_Ref(f"E{i:02d}") for i in range(1, 11)]  # 10件
+    run_calls: list[str] = []
+
+    async def _list() -> list[_Ref]:
+        return refs
+
+    async def _run(mgmt: str) -> str:
+        await asyncio.sleep(0)  # await 境界で並行を誘発
+        run_calls.append(mgmt)
+        return "ok"
+
+    async def _post(text: str) -> None:
+        await asyncio.sleep(0)
+
+    store = ProcessedStore(str(tmp_path / "s.json"))
+    # 同一 store に対し 2 つの poll_once を同時実行（claim-before-await が効くか）
+    await asyncio.gather(
+        poll_once(list_creatives=_list, run_one=_run, post=_post, store=store, baseline=False),
+        poll_once(list_creatives=_list, run_one=_run, post=_post, store=store, baseline=False),
+    )
+    # 各 management_no がちょうど 1 回だけ処理（二重ゼロ）
+    assert len(run_calls) == 10
+    assert sorted(run_calls) == sorted(r.management_no for r in refs)
+    assert len(set(run_calls)) == 10
