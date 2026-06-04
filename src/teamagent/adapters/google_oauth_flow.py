@@ -85,8 +85,14 @@ class OAuthConsentFlow:
                 "redirect_uris": [self._redirect_uri],
             }
         }
+        # PKCE は無効化する。本フローは「URL生成」と「code交換」が別プロセス(別 Flow 実体)に
+        # 分かれるため、PKCE を使うと code_verifier が一致せず交換に失敗する。Web型(機密)
+        # クライアントは client_secret で保護されるため PKCE は不要。
         return Flow.from_client_config(
-            config, scopes=list(self._scopes), redirect_uri=self._redirect_uri
+            config,
+            scopes=list(self._scopes),
+            redirect_uri=self._redirect_uri,
+            autogenerate_code_verifier=False,
         )
 
     def authorization_url(self, user_email: str) -> tuple[str, str]:
