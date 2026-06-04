@@ -45,6 +45,7 @@ from teamagent.adapters.google_auth import (
     build_oauth_credentials,
     force_oauth_enabled,
 )
+from teamagent.adapters.oauth_token_store import OAuthToken
 
 logger = structlog.get_logger(__name__)
 
@@ -144,6 +145,14 @@ class GSheetsClient:
                 ),
             )
         return cls(credentials=None, scopes=scopes)
+
+    @classmethod
+    def from_user_token(cls, token: OAuthToken, *, write: bool = False) -> GSheetsClient:
+        """per-user: 本人の refresh token から構築（本人のシートのみ参照可）。"""
+        from teamagent.adapters.google_auth import build_user_credentials
+
+        scopes = cls.SCOPES_WRITE if write else cls.SCOPES_READONLY
+        return cls(credentials=build_user_credentials(token), scopes=scopes)
 
     # -------------------------------------------------------
     # メタデータ取得

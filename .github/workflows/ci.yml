@@ -37,7 +37,9 @@ jobs:
           pip install \
             pydantic structlog psycopg pgvector \
             boto3 slack-sdk slack-bolt aiohttp httpx \
+            fastapi uvicorn \
             'sentry-sdk[asyncio]>=2.18.0' \
+            claude-agent-sdk==0.2.87 \
             pyyaml pypdf \
             google-auth google-api-python-client \
             pytest pytest-asyncio mypy ruff bandit

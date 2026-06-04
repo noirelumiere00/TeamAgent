@@ -40,6 +40,9 @@ _SECRET_PATTERNS: Final[list[re.Pattern[str]]] = [
     re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),  # Anthropic API key
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
+    re.compile(r"1//0[A-Za-z0-9_\-]{20,}"),  # Google OAuth refresh token (1//0...)
+    re.compile(r"GOCSPX-[A-Za-z0-9_\-]{20,}"),  # Google OAuth client secret (GOCSPX-)
+    re.compile(r"ya29\.[A-Za-z0-9_\-]{20,}"),  # Google OAuth access token (ya29.)
     re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]+?-----END [A-Z ]+PRIVATE KEY-----"),
     # URI userinfo (postgresql://user:PASS@host 等の接続文字列パスワード)。
     # ://直後〜@手前の user:pass 全体を redact。パスワードに : を含むケースも許容。
@@ -49,7 +52,9 @@ _SECRET_PATTERNS: Final[list[re.Pattern[str]]] = [
 # PII（メール / 電話）— redact だが分類は別タグ
 _PII_PATTERNS: Final[list[re.Pattern[str]]] = [
     re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"),
-    re.compile(r"0\d{1,4}-\d{1,4}-\d{4}"),  # 日本の電話番号
+    re.compile(r"0\d{1,4}-\d{1,4}-\d{4}"),  # 日本の電話番号（ハイフン区切り）
+    re.compile(r"0[789]0\d{8}"),  # 日本の携帯（ハイフン無し 070/080/090）
+    re.compile(r"\+\d{1,3}[\d\- ]{7,}\d"),  # 国際電話（+81-90-... 等）
 ]
 
 # 1 フィールドの最大長（提案 PDF 全文や会話履歴の混入を防ぐ hard cap）

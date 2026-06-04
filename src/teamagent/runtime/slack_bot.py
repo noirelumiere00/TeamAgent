@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 import uuid
 from typing import Any
 
@@ -25,16 +26,51 @@ import structlog
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
+from teamagent.adapters.pgvector_client import PgVectorClient
 from teamagent.adapters.slack_client import SlackClient
 from teamagent.observability.sentry import (
     capture_event_exception,
     capture_skill_exception,
 )
+from teamagent.runtime.metrics_snapshot import MetricsSnapshotter
+from teamagent.runtime.request_gate import (
+    GateTimeoutError,
+    QueueFullError,
+    RequestGate,
+)
+from teamagent.runtime.usage_recorder import UsageEvent, UsageRecorder, UsageTrace
 from teamagent.skills.base import SkillContext
 from teamagent.skills.router import SkillRouter
 from teamagent.skills.search.schema import SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
+
+
+def _gate_env_int(name: str, default: int) -> int:
+    """env を int として読む（空・不正値は default）。RequestGate のチューニング用。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+# snapshot タスクの強参照を保持（GC でタスクが消えないように）
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _start_snapshotter(snapshotter: MetricsSnapshotter) -> None:
+    """実行中ループがあれば runtime_metrics snapshot タスクを開始する。
+
+    同期テスト等でループが無いときは何もしない（実機は asyncio.run 配下なので走る）。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(snapshotter.run())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 # Slack の @mention は <@U12345> 形式で来るので、テキストから剥がすための正規表現
@@ -1013,8 +1049,12 @@ class SkillDispatcher:
         thread_ts: str | None = None,
         reply_channel: str | None = None,
         reply_thread_ts: str | None = None,
+        trace: UsageTrace | None = None,
     ) -> tuple[str, list[dict[str, Any]] | None]:
         """メッセージ内容から Skill を自動判定して実行し、(text, blocks) を返す。
+
+        trace を渡すと、実行した Skill の LLM コスト（total_cost_usd）を trace.cost_usd に
+        書き戻す（管理画面 usage_events 用）。記録は呼び出し側ハンドラの出口で行う。
 
         スラッシュコマンド不要で、@メンション / DM の自然文から
         search / clientkarte / proposal_draft / tiktok_search / operation_log を振り分ける。
@@ -1117,11 +1157,15 @@ class SkillDispatcher:
 
         if intent.skill == "clientkarte" and intent.client_name:
             karte = await self.run_karte(intent.client_name, request_id, user_id)
+            if trace is not None:
+                trace.cost_usd = getattr(karte, "total_cost_usd", 0.0)
             header = f"*🗂️ {karte.client_name} カルテ* （FB {karte.event_count} 件）"
             return f"{header}\n\n{karte.answer}", None
 
         if intent.skill == "proposal_review":
             review = await self.run_review(message, request_id, user_id)
+            if trace is not None:
+                trace.cost_usd = review.total_cost_usd
             header = (
                 f"*🔎 提案レビュー* （照合 {review.source_count} 件 / "
                 f"${review.total_cost_usd:.3f}）"
@@ -1130,6 +1174,8 @@ class SkillDispatcher:
 
         if intent.skill == "proposal_draft":
             draft = await self.run_draft(message, request_id, user_id)
+            if trace is not None:
+                trace.cost_usd = draft.total_cost_usd
             header = (
                 f"*📝 提案ドラフト* （参照 {draft.source_count} 件 / ${draft.total_cost_usd:.3f}）"
             )
@@ -1137,6 +1183,8 @@ class SkillDispatcher:
 
         # 既定: 横断検索 (Block Kit 付き)
         output = await self.run_search(message, request_id, user_id)
+        if trace is not None:
+            trace.cost_usd = output.total_cost_usd
         return format_search_response(output), build_search_blocks(output)
 
     async def _resolve_user_email(self, user_id: str | None) -> str | None:
@@ -1265,6 +1313,29 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
     app = AsyncApp(token=bot_token)
     slack = SlackClient(bot_token=bot_token)
     disp = dispatcher or SkillDispatcher()
+    # 入口の総量規制（同時≤concurrency・超過はFIFOキュー・キュー満杯/待ち過ぎは明示拒否）。
+    # プロセスに1個を全ハンドラで共有する。重い dispatch_auto だけを gate.submit で通し、
+    # ack/受付メッセージは gate の外で先に出す（Slack の3秒ackを守る）。
+    gate = RequestGate(
+        concurrency=_gate_env_int("REQUEST_GATE_CONCURRENCY", 4),
+        queue_max=_gate_env_int("REQUEST_GATE_QUEUE_MAX", 64),
+    )
+    # 管理画面テレメトリ（best-effort・DATABASE_URL 未設定なら無効化して bot は通常起動）:
+    #  - recorder: 1リクエスト1行を usage_events に記録（各ハンドラ出口）。
+    #  - snapshotter: 15秒ごとに GateMetrics/PoolStats を runtime_metrics に snapshot。
+    recorder: UsageRecorder | None = None
+    try:
+        telemetry_pg = PgVectorClient.from_env()
+        recorder = UsageRecorder(telemetry_pg)
+        _start_snapshotter(
+            MetricsSnapshotter(
+                gate,
+                telemetry_pg,
+                interval_s=float(_gate_env_int("RUNTIME_METRICS_INTERVAL_S", 15)),
+            )
+        )
+    except Exception:
+        logger.warning("dashboard_telemetry_disabled", exc_info=True)
 
     async def _video_upload_reply(
         files: list[dict[str, Any]], request_id: str, user_id: str | None
@@ -1338,11 +1409,21 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                 thread_ts=thread_ts,
             )
 
+        # 管理画面記録用: skill はここで確定（dispatch を通らない queue_full/timeout でも残す）。
+        from teamagent.skills.intent import detect_skill
+
+        skill = detect_skill(query).skill
+        trace = UsageTrace()
+        t0 = time.perf_counter()
+        status = "ok"
+        error_code: str | None = None
         try:
             # operation_log 用: スレッド内メンションなら、その親スレッドをログ化対象にする。
             # event["thread_ts"] はスレッド内のときだけ存在 (トップレベルでは None)。
             oplog_thread = event.get("thread_ts")
-            text, blocks = await disp.dispatch_auto(
+            # 重い本処理だけを Gate に通す（同時≤4・超過はキュー）。ack は上で投稿済み。
+            text, blocks = await gate.submit(
+                disp.dispatch_auto,
                 query,
                 request_id,
                 user_id,
@@ -1350,8 +1431,29 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                 thread_ts=oplog_thread,
                 reply_channel=channel,
                 reply_thread_ts=thread_ts,
+                trace=trace,
+            )
+        except QueueFullError:
+            status = "queue_full"
+            logger.warning("request_gate_queue_full", request_id=request_id)
+            await slack.post_message(
+                channel=channel,
+                text="ただいま混雑しています。少し待って再度お試しください。🙏",
+                request_id=request_id,
+                thread_ts=thread_ts,
+            )
+        except GateTimeoutError:
+            status = "timeout"
+            logger.warning("request_gate_timeout", request_id=request_id)
+            await slack.post_message(
+                channel=channel,
+                text="順番待ちが長くなっています。後ほど再度お試しください。🙏",
+                request_id=request_id,
+                thread_ts=thread_ts,
             )
         except Exception as e:
+            status = "error"
+            error_code = type(e).__name__
             logger.exception("skill_dispatch_failed", request_id=request_id)
             # Sentry へ送信（DSN 未設定なら no-op）。スクラブは before_send で実施
             capture_skill_exception(
@@ -1367,15 +1469,32 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                 request_id=request_id,
                 thread_ts=thread_ts,
             )
-            return
-
-        await slack.post_message(
-            channel=channel,
-            text=text,
-            request_id=request_id,
-            thread_ts=thread_ts,
-            blocks=blocks,
-        )
+        else:
+            await slack.post_message(
+                channel=channel,
+                text=text,
+                request_id=request_id,
+                thread_ts=thread_ts,
+                blocks=blocks,
+            )
+        finally:
+            # 応答投稿の後に best-effort 記録（失敗してもユーザ影響なし・本文は保存しない）。
+            if recorder is not None:
+                email = await disp._resolve_user_email(user_id)
+                await recorder.record(
+                    UsageEvent(
+                        request_id=request_id,
+                        skill=skill,
+                        status=status,
+                        user_email=email,
+                        user_id=user_id,
+                        cost_usd=trace.cost_usd,
+                        latency_ms=int((time.perf_counter() - t0) * 1000),
+                        error_code=error_code,
+                        query_chars=len(query),
+                        via="mention",
+                    )
+                )
 
     @app.event("message")
     async def handle_message(event: dict[str, Any]) -> None:
@@ -1416,11 +1535,37 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                 request_id=request_id,
             )
 
+        from teamagent.skills.intent import detect_skill
+
+        skill = detect_skill(text).skill
+        trace = UsageTrace()
+        t0 = time.perf_counter()
+        status = "ok"
+        error_code: str | None = None
         try:
-            reply, blocks = await disp.dispatch_auto(
-                text, request_id, user_id, reply_channel=channel
+            # 重い本処理だけを Gate に通す（同時≤4・超過はキュー）。ack は上で投稿済み。
+            reply, blocks = await gate.submit(
+                disp.dispatch_auto, text, request_id, user_id, reply_channel=channel, trace=trace
+            )
+        except QueueFullError:
+            status = "queue_full"
+            logger.warning("request_gate_queue_full", request_id=request_id)
+            await slack.post_message(
+                channel=channel,
+                text="ただいま混雑しています。少し待って再度お試しください。🙏",
+                request_id=request_id,
+            )
+        except GateTimeoutError:
+            status = "timeout"
+            logger.warning("request_gate_timeout", request_id=request_id)
+            await slack.post_message(
+                channel=channel,
+                text="順番待ちが長くなっています。後ほど再度お試しください。🙏",
+                request_id=request_id,
             )
         except Exception as e:
+            status = "error"
+            error_code = type(e).__name__
             logger.exception("skill_dispatch_failed", request_id=request_id)
             capture_skill_exception(
                 e,
@@ -1434,13 +1579,79 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                 text=f"処理中にエラーが発生しました。`request_id={request_id}`",
                 request_id=request_id,
             )
-            return
+        else:
+            await slack.post_message(
+                channel=channel,
+                text=reply,
+                request_id=request_id,
+                blocks=blocks,
+            )
+        finally:
+            if recorder is not None:
+                email = await disp._resolve_user_email(user_id)
+                await recorder.record(
+                    UsageEvent(
+                        request_id=request_id,
+                        skill=skill,
+                        status=status,
+                        user_email=email,
+                        user_id=user_id,
+                        cost_usd=trace.cost_usd,
+                        latency_ms=int((time.perf_counter() - t0) * 1000),
+                        error_code=error_code,
+                        query_chars=len(text),
+                        via="dm",
+                    )
+                )
 
-        await slack.post_message(
-            channel=channel,
-            text=reply,
-            request_id=request_id,
-            blocks=blocks,
+    @app.command("/teamagent_connect")
+    async def handle_teamagent_connect(
+        ack: Any,
+        respond: Any,
+        command: dict[str, Any],
+    ) -> None:
+        """`/teamagent connect`: 本人専用の Google 連携リンクを ephemeral で返す。
+
+        営業はこのリンクを開いて自分の Google で 7サービス(readonly) を許可するだけで連携完了
+        （ターミナル不要）。同意後は connect_web の /oauth2/callback が token を KMS暗号化保存する。
+        """
+        await ack()
+        request_id = f"req-{uuid.uuid4().hex[:12]}"
+        user_id = command.get("user_id")
+        email = await disp._resolve_user_email(user_id)
+        if not email:
+            await respond(
+                response_type="ephemeral",
+                text="メール取得に失敗（管理者に users:read.email スコープを確認してください）。",
+            )
+            return
+        redirect_uri = os.environ.get("OAUTH_REDIRECT_URI", "").strip()
+        if not redirect_uri:
+            await respond(
+                response_type="ephemeral",
+                text="連携機能が未設定です（管理者: OAUTH_REDIRECT_URI を設定してください）。",
+            )
+            return
+        try:
+            from teamagent.adapters.google_oauth_flow import OAuthConsentFlow
+
+            url, _state = OAuthConsentFlow(redirect_uri=redirect_uri).authorization_url(email)
+        except Exception:
+            logger.warning("teamagent_connect_url_failed", request_id=request_id, user_id=user_id)
+            await respond(
+                response_type="ephemeral",
+                text="連携リンク生成に失敗（管理者に OAuth 系 env の設定を確認）。",
+            )
+            return
+        logger.info("teamagent_connect_link_issued", request_id=request_id, user_id=user_id)
+        await respond(
+            response_type="ephemeral",
+            text=(
+                f"👋 *{email}* の Google を連携します（1回だけ）。\n"
+                "下のリンクを開いて 7サービス(readonly) を *許可* してください:\n"
+                f"{url}\n\n"
+                "「✅ 連携が完了しました」が出れば成功。あとは AI に話しかけるだけです。"
+            ),
         )
 
     @app.command("/teamagent_search")
