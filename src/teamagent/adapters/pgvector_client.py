@@ -45,10 +45,43 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _connect_kwargs() -> dict[str, Any]:
+    """psycopg.connect に渡す堅牢化 kwargs（接続/文/ロックのタイムアウト＋keepalive）。
+
+    RDS 再起動・AZ障害時に、新規接続が OS の TCP タイムアウト（分単位）まで成立せず
+    ワーカースレッドを占有し executor 枯渇→全機能ハングするのを防ぐ（connect_timeout）。
+    さらに statement/lock/idle-in-tx のサーバ側タイムアウトで、ハングしたクエリが
+    プールスロットを無期限占有してプール枯渇連鎖を起こすのを防ぐ。すべて env で上書き可能。
+    """
+    statement_ms = _env_int("PG_STATEMENT_TIMEOUT_MS", 30000)
+    lock_ms = _env_int("PG_LOCK_TIMEOUT_MS", 5000)
+    idle_tx_ms = _env_int("PG_IDLE_TX_TIMEOUT_MS", 30000)
+    # 注意: DSN(DATABASE_URL)側に `options=` を付けると libpq 仕様で本 kwarg が上書きする
+    # （連結しない）。search_path 等を将来注入するなら、この文字列側に合流させること。
+    options = (
+        f"-c statement_timeout={statement_ms} "
+        f"-c lock_timeout={lock_ms} "
+        f"-c idle_in_transaction_session_timeout={idle_tx_ms}"
+    )
+    return {
+        "connect_timeout": _env_int("PG_CONNECT_TIMEOUT_S", 5),
+        "options": options,
+        # 死んだ接続を検知して落とす（NAT/RDS フェイルオーバー後のゾンビ接続対策）。
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 3,
+    }
+
+
 def _connect_pg(dsn: str) -> psycopg.Connection[dict[str, Any]]:
-    """プール用の物理接続ファクトリ。dict_row + pgvector 型登録まで済ませて返す。"""
-    conn = psycopg.connect(dsn, row_factory=dict_row)
-    register_vector(conn)
+    """物理接続ファクトリ。タイムアウト/keepalive 付き + dict_row + pgvector 型登録まで済ます。"""
+    conn = psycopg.connect(dsn, row_factory=dict_row, **_connect_kwargs())
+    try:
+        register_vector(conn)
+    except Exception:
+        conn.close()  # 型登録に失敗したらソケットをリークさせず確実に閉じる
+        raise
     return conn
 
 
@@ -161,9 +194,9 @@ class PgVectorClient:
             return
 
         # --- 直結経路（プール無効・後方互換）: 毎回 connect→close ---
-        conn = psycopg.connect(self.dsn, row_factory=dict_row)
+        # _connect_pg でタイムアウト/keepalive と pgvector 型登録を適用する（プール経路と同条件）。
+        conn = _connect_pg(self.dsn)
         try:
-            register_vector(conn)
             self._apply_session(conn, app_role, user_email, user_groups, user_role)
             yield conn
             conn.commit()
