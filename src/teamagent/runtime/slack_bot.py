@@ -20,6 +20,7 @@ import os
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import structlog
@@ -167,6 +168,27 @@ def _format_hit_source_label(hit: Any) -> str:
     return f"chunk #{hit.chunk_id}"
 
 
+def build_suggestions(output: SearchOutput) -> list[str] | None:
+    """検索結果に添える「その他の提案」(関連 Skill への自然な導線)を最大3件返す。
+
+    要件「ただの検索Bot ではなく提案までする相棒」を、追加 LLM コスト 0・レイテンシ 0 で満たす。
+    提案文は **そのまま打てば次の Skill が起動する実トリガー語**にする（＝ワンクリック相当の導線）。
+    hit に client_name があれば文脈語として差し込む。hits 0 件なら None（提案を出さない）。
+    """
+    if not output.hits:
+        return None
+    client = next(
+        (h.client_name for h in output.hits if getattr(h, "client_name", None)),
+        None,
+    )
+    karte = f"「{client}の状況を教えて」" if client else "「〇〇社の状況を教えて」"
+    return [
+        f"🗂️ 取引先の経緯・温度感をまとめる → {karte}",
+        "📝 この内容で提案のたたき台を作る → 「〇〇社向けの提案を作って」",
+        "🎬 競合のショート動画を分析する → 動画URLを貼る / 「TikTokで〇〇を検索して」",
+    ]
+
+
 def format_search_response(output: SearchOutput) -> str:
     """SearchOutput を Slack に表示する文字列（フォールバック / 通知用）に整形する。
 
@@ -180,6 +202,11 @@ def format_search_response(output: SearchOutput) -> str:
             label = _format_hit_source_label(hit)
             link = f" → <{hit.drive_url}|Drive で開く>" if hit.drive_url else ""
             lines.append(f"• {label}  _score={hit.score:.2f}_{link}")
+    suggestions = build_suggestions(output)
+    if suggestions:
+        lines.append("")
+        lines.append("*💡 その他の提案:*")
+        lines.extend(f"• {s}" for s in suggestions)
     lines.append("")
     lines.append(f"_推算コスト: ${output.total_cost_usd:.4f}_")
     return "\n".join(lines)
@@ -233,6 +260,19 @@ def build_search_blocks(output: SearchOutput) -> list[dict[str, Any]]:
                     "action_id": f"open_drive_{hit.chunk_id}",
                 }
             blocks.append(section)
+
+    suggestions = build_suggestions(output)
+    if suggestions:  # hits があるときだけ（no-hits は divider を出さない契約を守る）
+        blocks.append({"type": "divider"})
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*💡 その他の提案*\n" + "\n".join(f"• {s}" for s in suggestions),
+                },
+            }
+        )
 
     blocks.append(
         {
@@ -414,7 +454,7 @@ def build_ack_message(message: str) -> str | None:
     判定は intent.detect_skill と同じヒューリスティックなので、実際に動く Skill と一致する。
     chitchat（雑談/挨拶/お礼/能力質問）は 1 通で即答するため受付メッセージを出さない（None）。
     """
-    from teamagent.skills.intent import detect_skill
+    from teamagent.skills.intent import detect_skill, extract_search_topic
 
     try:
         skill = detect_skill(message).skill
@@ -422,6 +462,12 @@ def build_ack_message(message: str) -> str | None:
         return _ACK_DEFAULT
     if skill == "chitchat":
         return None  # 雑談は即答（「🔎検索を受け付けました」のような不自然な ack を出さない）
+    if skill == "search":
+        topic = extract_search_topic(message)
+        if topic:
+            # 話題を復唱（要件:「受け付けました。〇〇について検索します」）。
+            return f"🔎 受け付けました。『{topic}』について検索します（資料を探索中…10〜20秒）"
+        # 話題が抽出できなければ従来の汎用 search ack（「受け付けました」「検索」を温存）。
     return _ACK_BY_SKILL.get(skill, _ACK_DEFAULT)
 
 
@@ -1316,9 +1362,12 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
     # 入口の総量規制（同時≤concurrency・超過はFIFOキュー・キュー満杯/待ち過ぎは明示拒否）。
     # プロセスに1個を全ハンドラで共有する。重い dispatch_auto だけを gate.submit で通し、
     # ack/受付メッセージは gate の外で先に出す（Slack の3秒ackを守る）。
+    _acq_timeout = _gate_env_int("REQUEST_GATE_ACQUIRE_TIMEOUT_S", 120)
     gate = RequestGate(
         concurrency=_gate_env_int("REQUEST_GATE_CONCURRENCY", 4),
         queue_max=_gate_env_int("REQUEST_GATE_QUEUE_MAX", 64),
+        # キュー待ち上限秒（既定120s）。無限待ち回避＋「順番待ちが長い」通知発火。0以下で無制限。
+        acquire_timeout_s=float(_acq_timeout) if _acq_timeout > 0 else None,
     )
     # 管理画面テレメトリ（best-effort・DATABASE_URL 未設定なら無効化して bot は通常起動）:
     #  - recorder: 1リクエスト1行を usage_events に記録（各ハンドラ出口）。
@@ -2080,6 +2129,23 @@ def _maybe_start_video_approval_poller(app: AsyncApp, loop: asyncio.AbstractEven
     logger.info("video_approval_poll_enabled", channel=channel_s, interval_sec=interval)
 
 
+def _configure_runtime_concurrency(loop: asyncio.AbstractEventLoop) -> None:
+    """本番の 4 同時実行に向けて event loop の default executor を明示サイズで張り替える。
+
+    既定の ThreadPoolExecutor は max_workers≈cpu+4（2vCPU なら ~6）と狭い。各 skill.run を
+    run_in_executor(None, ...) で逃がす本実装では、4 並列＋動画内部並列で枯渇 → DB 借用待ち →
+    PgVector の PoolTimeout 連鎖を招きうる。十分広い専用 executor に張り替えて吸収する
+    （論理同時実行は RequestGate=4 で別途キャップ済みなので過走しない）。スレッドは遅延生成のため
+    広めでも常駐コストは小さい。BLAS/torch のスレッド数は env（OMP_NUM_THREADS 等）で 1 に寄せる
+    運用（ec2.overrides.env）で 4 並列 embed の CPU オーバーサブスクリプションを抑える。
+    """
+    workers = _gate_env_int("RUNTIME_EXECUTOR_WORKERS", 24)
+    loop.set_default_executor(
+        ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ta-skill")
+    )
+    logger.info("runtime_concurrency_configured", executor_workers=workers)
+
+
 async def _run() -> None:
     app_token = os.environ.get("SLACK_APP_TOKEN")
     if not app_token:
@@ -2094,6 +2160,9 @@ async def _run() -> None:
     # asyncio Task 内の握りつぶされた例外を Sentry に拾う
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(_asyncio_exception_handler)
+    _configure_runtime_concurrency(
+        loop
+    )  # 4 同時に向け executor 幅を拡張（枯渇→PoolTimeout 連鎖防止）
 
     app = build_app()
     handler = AsyncSocketModeHandler(app, app_token)

@@ -4,7 +4,7 @@
 > Skill / 技術スタック / アーキテクチャ / インフラ / 運用 / 品質 / セキュリティ / コスト / 設計判断を一望する。
 > 図解・データフローは [`architecture_and_flows.md`](architecture_and_flows.md) を併読。
 
-最終更新: 2026-06-04 ／ Python 3.11+ ／ main: 全機能マージ済 ／ テスト 597 passed
+最終更新: 2026-06-05 ／ Python 3.11+ ／ main: 全機能マージ済 ／ テスト 831 passed
 
 ---
 
@@ -12,7 +12,7 @@
 
 | # | Skill | 一言 | 主要技術 | トリガ例 |
 |---|---|---|---|---|
-| 1 | **search** | 営業16名が過去の提案書・議事録・メールを**自然文で横断検索** | pgvector + pg_bigm(BM25) + RRF + Cohere Rerank + Contextual | `@TeamAgent ◯◯社の提案で響いた訴求は？` |
+| 1 | **search** | 営業16名が過去の提案書・議事録・メールを**自然文で横断検索** | pgvector(dense) + クライアント名ブースト + **Cohere Rerank** + Contextual Retrieval + min_relevance | `@TeamAgent ◯◯社の提案で響いた訴求は？` |
 | 2 | **clientkarte** | 指定クライアントの**提案履歴・温度感・次アクションを時系列**で束ねる | pgvector timeline + Claude | `@TeamAgent ◯◯社のカルテ` |
 | 3 | **proposal_draft** | **提案書ドラフト**を自動生成（検索基盤を再利用） | 検索 + Claude | `@TeamAgent ◯◯向けの提案たたき` |
 | 4 | **proposal_review** | 提案書の**レビュー・改善提案** | Claude | `@TeamAgent この提案レビューして` |
@@ -39,7 +39,8 @@
 - **Embedding**: LocalE5Embedder（**multilingual-e5-large**, 1024次元・sentence-transformers）
 
 ### データ / RAG
-- **psycopg[binary]** + **pgvector**（ベクトル）+ **pg_bigm**（バイグラムBM25）、sqlalchemy、alembic（migration）
+- **psycopg[binary]** + **pgvector**（dense ベクトル検索＝現行の検索本体）、sqlalchemy、alembic（migration）
+  - ※ pg_bigm(語彙BM25)+RRF ハイブリッドは設計のみで**現状未実装**（検索は dense + Cohere Rerank が本番経路）
 
 ### Slack
 - **slack-bolt** / **slack-sdk** / **aiohttp**（Socket Mode・非同期）
@@ -57,7 +58,7 @@
 - fastapi + uvicorn（将来のHTTP口）、httpx、**sentry-sdk**（エラー監視）、apscheduler
 
 ### 開発 / CI
-- **ruff**（lint+format）、**mypy**（strict）、**pytest** + pytest-asyncio（597 tests）、**bandit**（SAST）、**gitleaks**（秘密スキャン）
+- **ruff**（lint+format）、**mypy**（strict）、**pytest** + pytest-asyncio（831 tests）、**bandit**（SAST）、**gitleaks**（秘密スキャン）
 - IaC: **Terraform**
 
 ---
@@ -84,7 +85,7 @@ Adapter 層   外部I/Oを隠蔽（全て差し替え可能＝テストはモッ
 ### AWS（acct 718959508629 / ap-northeast-1）
 | リソース | 内容 |
 |---|---|
-| RDS PostgreSQL 16（db.t4g.micro） | **pgvector 0.8.2 + pg_bigm**。ナレッジ正本 |
+| RDS PostgreSQL 16（db.t4g.micro） | **pgvector 0.8.2**（dense 検索）。ナレッジ正本。RLS で行レベル権限分離 |
 | Bedrock | **Claude Sonnet 4.6 / Haiku 4.5 / Cohere Rerank v3.5**（テキスト=AWS課金） |
 | EC2 worker（t4g.medium・arm64） | 常駐Bot + VSEO。`i-0feaa3c...`（**現在停止中**）。SSMのみ/IMDSv2/swap4GB |
 | EC2 bastion（t4g.nano） | SSM踏み台（開発時のRDSトンネル） |
@@ -103,7 +104,8 @@ Adapter 層   外部I/Oを隠蔽（全て差し替え可能＝テストはモッ
 
 ## 5. 検索（RAG）パイプライン
 取込: Slack履歴 + Drive資料 → チャンク化 → **e5 埋め込み** → RDS(documents/chunks)。
-検索: **ベクトル(pgvector) + 語彙(pg_bigm)** を **RRF 融合** → top-30 → **Cohere Rerank** → top-5 → **min_relevance**（弱根拠は「記載なし」=反ハルシネーション）→ Claude で回答。
+検索: **ベクトル検索(pgvector cosine, top-30)** ＋ クライアント名ブースト → **Cohere Rerank v3.5（東京）** → top-5 → **min_relevance**（弱根拠は「記載なし」=反ハルシネーション）→ **Postgres RLS** で本人の閲覧可能行に限定 → Claude で回答（v2d 教示プロンプト）。
+> ※ 語彙検索(pg_bigm BM25)+RRF ハイブリッドは設計のみ・**未実装**。現行本番は dense + Cohere Rerank。固有名詞リコールは将来ハイブリッドで強化予定。
 本番フラグ: `USE_NEW_SCHEMA/USE_CONTEXTUAL/USE_COHERE_RERANK/USE_LLM_ROUTER/USE_AGGREGATION_MODE = true`、`PROMPT_VERSION=v2d`。
 
 ---
@@ -124,7 +126,7 @@ KW → スクレイパ（over-fetch 目標+4本）→ 各動画[yt-dlp DL → ff
 ---
 
 ## 8. 品質 / CI / テスト
-- CI（`.github/workflows/ci.yml`）: ruff(lint+format) → mypy(strict) → **pytest 597** → bandit → gitleaks
+- CI（`.github/workflows/ci.yml`）: ruff(lint+format) → mypy(strict) → **pytest 831** → bandit → gitleaks
 - ⚠️ 依存は `pip install --no-deps` ＋ **手動列挙**（新importは ci.yml に追加。pyproject の欠落に注意＝aiohttp/httpx の罠あり）
 - テストは Adapter をモック注入し**外部I/O・課金ゼロ**で実行
 
@@ -152,7 +154,7 @@ KW → スクレイパ（over-fetch 目標+4本）→ 各動画[yt-dlp DL → ff
 
 ## 11. 主要な設計判断（ADR 要約）
 1. **テキスト=Bedrock(Claude) / 動画=Gemini(Vertex)**。Nova A/BでテロップOCR 24 vs 0〜5 と判明し動画はGemini維持（`video_backend_eval_gemini_vs_nova.md`）
-2. **検索=pgvector + pg_bigm の RRF ハイブリッド + Cohere Rerank**（gold set top-1 改善で採用）
+2. **検索=pgvector(dense) + Cohere Rerank**（gold set top-1 を 20%→52%→**64%** に改善し採用。pg_bigm+RRF ハイブリッドは将来）
 3. **VSEO 失敗ゼロ化**（over-fetchバックフィル + 寛容パース）
 4. **EC2 は arm64(t4g) + Playwright chromium**（Chrome-for-Testing に arm64 Linux 版が無いため）
 5. **マルチSkill基盤に Claude Agent SDK on Bedrock を採用**（適応型オーケストレーション）

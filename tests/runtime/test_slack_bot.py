@@ -13,6 +13,7 @@ from teamagent.runtime.slack_bot import (
     _slack_thread_permalink,
     build_ack_message,
     build_search_blocks,
+    build_suggestions,
     format_search_response,
     parse_command_text,
     strip_mention,
@@ -52,6 +53,43 @@ def test_build_ack_message_chitchat_is_none() -> None:
     """雑談/挨拶/記号のみ/能力質問は受付メッセージを出さない (None・1通で即答するため)。"""
     for s in ["こんにちは", "ありがとう！", "！？", "👍", "何ができる？"]:
         assert build_ack_message(s) is None
+
+
+def test_build_ack_message_search_echoes_topic() -> None:
+    """検索 ack は話題(〇〇)を復唱する（要件:「受け付けました。〇〇について検索します」）。"""
+    msg = build_ack_message("飲食店のPR事例を教えて")
+    assert msg is not None
+    assert "受け付けました" in msg  # 既存契約を温存
+    assert "検索" in msg
+    assert "飲食店のPR事例" in msg  # 話題復唱
+
+
+def test_build_suggestions_with_hits_and_without() -> None:
+    """hits があれば「その他の提案」を最大3件返し、client_name を文脈に差し込む。空なら None。"""
+    assert build_suggestions(SearchOutput(answer="該当なし", hits=[], total_cost_usd=0.0)) is None
+    out = SearchOutput(
+        answer="マンダムは飲料業で実績あり",
+        hits=[SearchHitOut(chunk_id=1, content="...", score=0.9, client_name="マンダム")],
+        total_cost_usd=0.001,
+    )
+    sug = build_suggestions(out)
+    assert sug is not None and len(sug) == 3
+    assert any("マンダム" in s for s in sug)  # client_name 差し込み
+    # 提案文は次 Skill の実トリガー語を含む（カルテ/提案/動画）
+    joined = "\n".join(sug)
+    assert "状況を教えて" in joined and "提案を作って" in joined
+
+
+def test_format_search_response_includes_suggestions_when_hits() -> None:
+    """hits があれば本文末尾に「その他の提案」が付く。空 hits では付かない。"""
+    out = SearchOutput(
+        answer="ans",
+        hits=[SearchHitOut(chunk_id=1, content="...", score=0.9, source="a.pdf")],
+        total_cost_usd=0.001,
+    )
+    assert "その他の提案" in format_search_response(out)
+    no_hits = SearchOutput(answer="該当なし", hits=[], total_cost_usd=0.0)
+    assert "その他の提案" not in format_search_response(no_hits)
 
 
 def test_strip_mention_removes_leading_at() -> None:
