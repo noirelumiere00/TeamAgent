@@ -431,6 +431,64 @@ def _format_oplog_response(out: Any) -> str:
     return "\n".join(parts)
 
 
+def _mail_ref_label(ref: Any) -> str:
+    """InternalRef を Slack mrkdwn の 1 行に整形する（slack:// は permalink へ変換）。"""
+    icon = {"slack": "💬", "drive": "📄", "doc": "📄", "fb": "🗒️"}.get(ref.kind, "🔖")
+    title = ref.title or "社内ナレッジ"
+    url: str | None = None
+    if ref.kind == "slack" and ref.source_uri:
+        url = _slack_thread_permalink(ref.source_uri)  # SLACK_WORKSPACE 未設定なら None
+    if url is None and ref.drive_url:
+        url = ref.drive_url
+    score = f"（関連度 {ref.score:.2f}）" if ref.score else ""
+    if url:
+        return f"{icon} <{url}|{title}> {score}".rstrip()
+    snippet = (
+        ref.snippet[:80] + "…" if ref.snippet and len(ref.snippet) > 80 else (ref.snippet or "")
+    )
+    line = f"{icon} {title} {score}".rstrip()
+    return f"{line}\n   {snippet}" if snippet else line
+
+
+def _format_mail_link_response(out: Any) -> str:
+    """MailInternalContextOutput を Slack 表示用に整形（シグナル + 社内参照リンク）。"""
+    sig = out.mail_signal
+    lines = [f"*🔗 {out.client_name} — メール×社内ナレッジ*"]
+    mail_bits = [f"直近メール {sig.recent_count} 件"]
+    if sig.counterpart_domains:
+        mail_bits.append("相手: " + ", ".join(sig.counterpart_domains))
+    if sig.latest_at:
+        mail_bits.append(f"最終 {sig.latest_at[:10]}")
+    lines.append("📧 " + " / ".join(mail_bits))
+    if out.summary:
+        lines += ["", out.summary]
+    if out.internal_refs:
+        lines += ["", "*— 社内の関連スレッド・資料 —*"]
+        lines += [f"• {_mail_ref_label(r)}" for r in out.internal_refs]
+    else:
+        lines += ["", "社内に該当する会話・資料は見つかりませんでした。"]
+    if out.note:
+        lines += ["", f"_{out.note}_"]
+    if out.total_cost_usd:
+        lines += [f"_概算コスト: ${out.total_cost_usd:.4f}_"]
+    return "\n".join(lines)
+
+
+def _format_mail_followup_response(out: Any) -> str:
+    """MailFollowupOutput を Slack メッセージに整形する（放置日数つきトリアージ）。"""
+    if not out.items:
+        return (
+            f"📭 {out.client_name} について、対象期間に放置気味の受信メールは見つかりませんでした。"
+            f"\n_{out.note}_"
+        )
+    lines = [f"*📬 {out.client_name} — 相手から来たまま動いていないメール* （{len(out.items)} 件）"]
+    for it in out.items:
+        subj = it.subject_scrubbed or "(件名なし)"
+        lines.append(f"• *{it.idle_days}日経過* / {it.counterpart_masked} / {subj}")
+    lines += ["", f"_{out.note}_"]
+    return "\n".join(lines)
+
+
 # Skill ごとの受付メッセージ (どの処理を始めたか + 想定待ち時間をユーザーに伝える)。
 # 重い処理 (動画/TikTok は実ブラウザや Gemini を使うため数十秒) ほど明示する価値が高い。
 _ACK_BY_SKILL: dict[str, str] = {
@@ -443,6 +501,8 @@ _ACK_BY_SKILL: dict[str, str] = {
     "tiktok_search": "🎵 TikTok 検索を受け付けました。収集して分析しています…（30〜90秒）",
     "video_algorithm": "🔎 VSEO動画アルゴリズム分析を受付。上位動画を取得し解析中…（1〜3分）",
     "operation_log": "🧾 営業ログ化を受け付けました。スレッドを読んでまとめています…（10〜20秒）",
+    "mail_to_internal_context": "🔗 メールと社内ナレッジの突き合わせを受け付けました…（10〜20秒）",
+    "mail_followup": "📬 受信箱のトリアージを受け付けました。確認しています…（5〜15秒）",
 }
 _ACK_DEFAULT = "🤖 受け付けました。処理しています…"
 
@@ -482,6 +542,8 @@ class SkillDispatcher:
         self._skill_cache: dict[str, Any] = {}
         # Slack user_id → email cache（RLS GUC 注入用、users.info の呼び出しを削減）
         self._user_email_cache: dict[str, str | None] = {}
+        # per-user OAuth TokenStore（mail_* Skill が本人トークンを引く）。遅延構築・キャッシュ。
+        self._token_store: Any | None = None
         if router is not None:
             self._router = router
         else:
@@ -890,6 +952,122 @@ class SkillDispatcher:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, skill.run, input_obj, ctx)
 
+    # ── メール系 Skill（per-user OAuth・readonly）─────────────────────────────
+
+    def _get_token_store(self) -> Any:
+        """per-user OAuth TokenStore を遅延構築してキャッシュ（factory._build_token_store と同型）。
+
+        OAUTH_KMS_KEY_ID + RDS が無ければ InMemory（空＝全員未連携）にフォールバックする。
+        本番 Bot プロセスは RDS pgvector + KMS に到達できる必要がある（届かないと全員未連携）。
+        """
+        if self._token_store is not None:
+            return self._token_store
+        key_id = os.environ.get("OAUTH_KMS_KEY_ID")
+        if not key_id:
+            from teamagent.adapters.oauth_token_store import InMemoryTokenStore
+
+            logger.warning(
+                "mail_token_store_inmemory", reason="OAUTH_KMS_KEY_ID 未設定（全員未連携）"
+            )
+            self._token_store = InMemoryTokenStore()
+            return self._token_store
+        from teamagent.adapters.oauth_token_store import KmsCipher, RdsTokenStore
+        from teamagent.adapters.pgvector_client import PgVectorClient
+
+        self._token_store = RdsTokenStore(PgVectorClient.from_env(), KmsCipher(key_id))
+        logger.info("mail_token_store_rds_initialized")
+        return self._token_store
+
+    def get_mail_link_skill(self) -> Any:
+        """MailToInternalContextSkill をキャッシュ（per-user token + SearchSkill 再利用）。"""
+        if "mail_to_internal_context" in self._skill_cache:
+            return self._skill_cache["mail_to_internal_context"]
+        from teamagent.skills.mail_to_internal_context.skill import MailToInternalContextSkill
+
+        use_summary = os.environ.get("USE_MAIL_LINK_SUMMARY", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        bedrock = None
+        if use_summary:
+            from teamagent.adapters.bedrock_client import BedrockClient
+
+            bedrock = BedrockClient.from_env()
+        instance = MailToInternalContextSkill(
+            token_store=self._get_token_store(),
+            search_skill=self.get_search_skill(),
+            bedrock=bedrock,
+            use_summary=use_summary,
+        )
+        logger.info("mail_to_internal_context_skill_initialized", use_summary=use_summary)
+        self._skill_cache["mail_to_internal_context"] = instance
+        return instance
+
+    async def run_mail_link(self, client_name: str, request_id: str, user_id: str | None) -> Any:
+        """MailToInternalContextSkill を別スレッドで実行（Gmail/pgvector が同期 I/O）。"""
+        user_email = await self._resolve_user_email(user_id)
+        user_groups: list[str] = []
+        if user_email and "@" in user_email:
+            user_groups.append(user_email.split("@", 1)[1])
+
+        skill = self.get_mail_link_skill()
+        ctx = SkillContext(
+            request_id=request_id,
+            user_id=user_id,
+            metadata={
+                "user_email": user_email,
+                "user_groups": user_groups,
+                "user_role": "member",
+            },
+        )
+        from teamagent.skills.mail_to_internal_context.schema import MailInternalContextInput
+
+        input_obj = MailInternalContextInput(client_name=client_name)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, skill.run, input_obj, ctx)
+
+    def get_mail_followup_skill(self) -> Any:
+        """MailFollowupSkill をキャッシュして返す（per-user token・LLM 不使用）。"""
+        if "mail_followup" in self._skill_cache:
+            return self._skill_cache["mail_followup"]
+        from teamagent.skills.mail_followup.skill import MailFollowupSkill
+
+        instance = MailFollowupSkill(token_store=self._get_token_store())
+        logger.info("mail_followup_skill_initialized")
+        self._skill_cache["mail_followup"] = instance
+        return instance
+
+    async def run_mail_followup(
+        self,
+        client_name: str,
+        request_id: str,
+        user_id: str | None,
+        *,
+        idle_days: int | None = None,
+    ) -> Any:
+        """MailFollowupSkill を別スレッドで実行（Gmail が同期 I/O）。"""
+        user_email = await self._resolve_user_email(user_id)
+        user_groups: list[str] = []
+        if user_email and "@" in user_email:
+            user_groups.append(user_email.split("@", 1)[1])
+
+        skill = self.get_mail_followup_skill()
+        ctx = SkillContext(
+            request_id=request_id,
+            user_id=user_id,
+            metadata={
+                "user_email": user_email,
+                "user_groups": user_groups,
+                "user_role": "member",
+            },
+        )
+        from teamagent.skills.mail_followup.schema import MailFollowupInput
+
+        input_obj = MailFollowupInput(client_name=client_name, idle_days=idle_days)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, skill.run, input_obj, ctx)
+
     def get_chitchat_skill(self) -> Any:
         """ChitchatSkill をキャッシュして返す（RAG/embedder を持たない軽量会話 Skill）。"""
         if "chitchat" in self._skill_cache:
@@ -1200,6 +1378,46 @@ class SkillDispatcher:
                 )
             oplog = await self.run_oplog(channel_id, thread_ts, request_id, user_id)
             return _format_oplog_response(oplog), None
+
+        if intent.skill == "mail_to_internal_context":
+            # client が抽出できなければ本人に指定を促す（None を Skill に渡さない）。
+            if not intent.client_name:
+                return (
+                    "📧 どのクライアントのメールか教えてください。"
+                    "例: 「@TeamAgent ○○社のメール、社内で何か話してた?」",
+                    None,
+                )
+            # 外側ハンドラは全例外を汎用エラー化するため、未連携はここで案内に変換する。
+            try:
+                link = await self.run_mail_link(intent.client_name, request_id, user_id)
+            except PermissionError:
+                return (
+                    "🔗 メール連携が必要です。`/teamagent connect` で自分の Google を"
+                    "認可してください（gmail.readonly のみ・読み取り専用）。",
+                    None,
+                )
+            if trace is not None:
+                trace.cost_usd = getattr(link, "total_cost_usd", 0.0)
+            return _format_mail_link_response(link), None
+
+        if intent.skill == "mail_followup":
+            if not intent.client_name:
+                return (
+                    "📬 どのクライアントの要返信メールか教えてください。"
+                    "例: 「@TeamAgent ○○社の要返信メール教えて」",
+                    None,
+                )
+            try:
+                fu = await self.run_mail_followup(
+                    intent.client_name, request_id, user_id, idle_days=intent.followup_days
+                )
+            except PermissionError:
+                return (
+                    "🔗 メール連携が必要です。`/teamagent connect` で自分の Google を"
+                    "認可してください（gmail.readonly のみ・読み取り専用）。",
+                    None,
+                )
+            return _format_mail_followup_response(fu), None
 
         if intent.skill == "clientkarte" and intent.client_name:
             karte = await self.run_karte(intent.client_name, request_id, user_id)

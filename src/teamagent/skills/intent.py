@@ -31,6 +31,82 @@ _OPLOG_RE = re.compile(
     r"(?:会話|やり取り|スレッド|商談).{0,4}(?:記録|ログ|まとめ)|記録して"
 )
 
+# mail_to_internal_context 起動トリガー（メール×社内ナレッジ横断）。
+# 「メール/受信/このメール」と「社内/スレッド/関連/カルテ/過去提案…」が近接した時のみ。
+# 単独の「メール管理」「メールの内容を確認」は社内語が無いので発火せず search へ落ちる
+# （誤爆防止）。karte より先・oplog の直後に判定する。
+_MAIL_LINK_RE = re.compile(
+    r"(?:メール|mail|受信(?:箱|メール)?|このメール).{0,12}"
+    r"(?:社内|スレッド|スレ|関連|カルテ|文脈|話(?:し|題)?|触れ|議論|やり取り|過去提案)"
+    r"|(?:社内|スレッド|関連|過去提案).{0,12}(?:メール|mail|受信)",
+    re.IGNORECASE,
+)
+
+# mail_followup 起動トリガー（要返信トリアージ・メタデータのみ）。
+# 「要返信/未返信/返信漏れ/返信待ち/放置メール」等の明確な滞留語を要求する
+# （単独『メールある?』は client=None の再質問ループになるため採らない）。
+_FOLLOWUP_RE = re.compile(
+    # 強い滞留名詞は単独可。曖昧な「返信…ない」は メール/受信箱 と近接した時だけ採る
+    # （「返信してないんだよね」等の雑談を奪わないため）。両方の語順を許容。
+    r"要返信|未返信|返信漏れ|返信忘れ|返信待ち|放置.{0,4}メール|"
+    r"(?:メール|受信箱).{0,8}(?:返信.{0,3}(?:して)?(?:い|お)?ら?ない|溜ま|トリアージ|未読)|"
+    r"返信.{0,3}(?:して)?(?:い|お)?ら?ない.{0,8}メール",
+    re.IGNORECASE,
+)
+# 「3日以上」「5営業日」等から日数を拾う（mail_followup の idle_days 用・任意）。
+_FOLLOWUP_DAYS_RE = re.compile(r"(\d{1,3})\s*(?:営業)?日")
+
+# メール系のクライアント名抽出: 既存 _extract_client_name(カルテ語アンカー)は
+# メール文では None を返すため専用。メール/要返信語の直前の固有名詞っぽい塊を取る。
+# ひらがな始まりの動詞句(「返信してない」等)を巻き込まないよう、名前の文字種から
+# ひらがなを除外（社名は漢字/カタカナ/英数/「社」が中心）。
+_MAIL_CLIENT_RE = re.compile(
+    r"(?P<name>[0-9A-Za-zＡ-Ｚａ-ｚ０-９ァ-ヶ一-龯ーｦ-ﾟ＆&・]{2,40}?(?:社)?)"
+    r"(?:から(?:の)?|のこの|への?|の|は|が|で|へ|宛|に|って)?\s*(?:この)?\s*"
+    # 名前と末尾トリガーの間に挟まる「返信(して)(い)ない」動詞句を任意で吸収する
+    # （「花王の返信してないメール」→ 花王）。bare「返信」をトリガーにすると
+    # 「3日以上 返信してない花王のメール」で先頭の日付句を拾ってしまうため、橋渡しに留める。
+    r"(?:返信(?:して)?(?:い|お)?ら?ない\s*)?"
+    r"(?:要返信|未返信|返信漏れ|返信待ち|返信忘れ|放置|未読|トリアージ|メール|mail|受信)",
+    re.IGNORECASE,
+)
+
+# 抽出名がこれらの構造語そのものなら無効（client ではない）→ None で本人へ再質問させる。
+_MAIL_CLIENT_STOPWORDS = frozenset(
+    {
+        "受信箱",
+        "受信",
+        "メール",
+        "mail",
+        "スレッド",
+        "スレ",
+        "関連",
+        "過去提案",
+        "社内",
+        "文脈",
+        "近況",
+        "履歴",
+        "状況",
+        "経緯",
+        "今日",
+        "昨日",
+        "明日",
+        "今週",
+        "未読",
+        "放置",
+        "要返信",
+        "未返信",
+        "返信",
+        "返信漏れ",
+        "返信待ち",
+        "返信忘れ",
+        "トリアージ",
+        "この",
+        "その",
+        "あの",
+    }
+)
+
 # clientkarte 起動トリガー: 「カルテ」または「(の)状況/近況/温度感/履歴/どうなってる」等
 _KARTE_TRIGGER = re.compile(r"カルテ|近況|温度感|どうなって|どんな感じ|今どう|状況|経緯|履歴")
 
@@ -117,9 +193,9 @@ class SkillIntent:
     """自動ルーティングの判定結果。"""
 
     # search|clientkarte|proposal_draft|proposal_review|video_analysis|tiktok_search|
-    # operation_log|video_approval
+    # operation_log|video_approval|mail_to_internal_context|mail_followup
     skill: str
-    client_name: str | None  # clientkarte のときのみ抽出
+    client_name: str | None  # clientkarte / mail_* のときに抽出
     reason: str
     video_url: str | None = None  # video_analysis 単一のときの先頭 URL (後方互換)
     video_urls: tuple[str, ...] = ()  # video_analysis の全 URL (複数一括対応)
@@ -127,6 +203,7 @@ class SkillIntent:
     search_type: str = "keyword"  # tiktok_search: keyword | hashtag
     management_no: str | None = None  # video_approval: 審査するクリエイティブの管理番号
     sheet_id: str | None = None  # video_approval: メッセージで明示されたシート (任意)
+    followup_days: int | None = None  # mail_followup: 「N日以上放置」の N (任意)
 
 
 def _clean_url(raw: str) -> str:
@@ -160,6 +237,39 @@ def _extract_client_name(message: str) -> str | None:
     name = _TRAILING.sub("", m.group(1).strip())
     # 1 文字や空は固有名詞として弱いので採用しない
     return name if len(name) >= 2 else None
+
+
+def _extract_mail_client(message: str) -> str | None:
+    """メール系メッセージからクライアント名を抽出する（karte 抽出器はメール文で None を返す）。
+
+    例:「森ビルの要返信メール教えて」→「森ビル」/「A社からのこのメール、社内の関連スレッド出して」
+    →「A社」/「3日以上 返信してない花王のメールある?」→「花王」。
+    名前の文字種からひらがなを除外しているため、動詞句（「返信してない」等）を巻き込まない。
+    抽出不能・短すぎ(1文字)は None（呼び出し側は本人へ再質問する）。
+    """
+    m = _MAIL_CLIENT_RE.search(message.strip())
+    if not m:
+        return None
+    name = (m.group("name") or "").strip()
+    name = _TRAILING.sub("", name).strip()
+    if not (2 <= len(name) <= 40):
+        return None
+    # 構造語（受信箱/過去提案/今日/未読 等）は client ではない → None（本人へ再質問）。
+    if name.lower() in _MAIL_CLIENT_STOPWORDS:
+        return None
+    return name
+
+
+def _extract_followup_days(message: str) -> int | None:
+    """「3日以上」「5営業日」等から日数 N を拾う（mail_followup の idle_days 用・任意）。"""
+    m = _FOLLOWUP_DAYS_RE.search(message)
+    if not m:
+        return None
+    try:
+        n = int(m.group(1))
+    except ValueError:
+        return None
+    return n if 1 <= n <= 90 else None
 
 
 # TikTok 検索クエリの前後から削ぎ落とす語 (命令文の定型)
@@ -349,6 +459,24 @@ def detect_skill(message: str) -> SkillIntent:
     # 1c. 営業活動ログ (会話→CRM ログ)。カルテより先に判定。
     if _OPLOG_RE.search(text):
         return SkillIntent(skill="operation_log", client_name=None, reason="oplog trigger")
+
+    # 1d. メール×社内ナレッジ横断 (mail_to_internal_context)。カルテより先・要返信より先に判定。
+    # 「メール…社内/関連/カルテ」のクロスリファレンス意図を、要返信トリアージより優先する。
+    if _MAIL_LINK_RE.search(text):
+        return SkillIntent(
+            skill="mail_to_internal_context",
+            client_name=_extract_mail_client(text),
+            reason="mail-link trigger",
+        )
+
+    # 1e. 要返信トリアージ (mail_followup・メタデータのみ)。
+    if _FOLLOWUP_RE.search(text):
+        return SkillIntent(
+            skill="mail_followup",
+            client_name=_extract_mail_client(text),
+            reason="mail-followup trigger",
+            followup_days=_extract_followup_days(text),
+        )
 
     # 2. クライアントカルテ (トリガー + クライアント名が抽出できたときのみ)
     if _KARTE_TRIGGER.search(text):

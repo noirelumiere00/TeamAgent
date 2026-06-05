@@ -309,3 +309,98 @@ def test_routes_to_chitchat(msg: str) -> None:
 def test_task_not_misrouted_to_chitchat(msg: str) -> None:
     """業務語/社名を含む入力は chitchat に誤分類されない（task-first・実検索を壊さない）。"""
     assert detect_skill(msg).skill != "chitchat"
+
+
+# ── mail_to_internal_context / mail_followup ルーティング（Mail×Slack リリース） ──
+
+
+@pytest.mark.parametrize(
+    "msg,client",
+    [
+        ("森ビルからのこのメール、社内の関連スレッド出して", "森ビル"),
+        ("マンダムのメール、社内で何か話してた?", "マンダム"),
+        ("INPEXのメール、関連する過去提案ある?", "INPEX"),
+        ("花王のメールに触れてる社内スレッドある?", "花王"),
+    ],
+)
+def test_routes_to_mail_to_internal_context(msg: str, client: str) -> None:
+    """メール×社内ナレッジ横断: メール語と社内/関連語の近接で発火し、client を抽出する。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_to_internal_context"
+    assert it.client_name == client
+
+
+@pytest.mark.parametrize(
+    "msg,client,days",
+    [
+        ("森ビルの要返信メール教えて", "森ビル", None),
+        ("A社で要返信のメールある?", "A社", None),
+        ("3日以上 返信してない花王のメールある?", "花王", 3),
+        ("マンダムの未返信メール教えて", "マンダム", None),
+    ],
+)
+def test_routes_to_mail_followup(msg: str, client: str, days: int | None) -> None:
+    """要返信トリアージ: 滞留語で発火し、client と（あれば）日数を抽出する。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_followup"
+    assert it.client_name == client
+    assert it.followup_days == days
+
+
+@pytest.mark.parametrize(
+    "msg,expected",
+    [
+        # 既存ルートが新正規表現追加後も不変であること（衝突回帰）
+        ("提案チェックして", "proposal_review"),
+        ("飲食店のPR事例を教えて", "search"),
+        ("森ビルのカルテ", "clientkarte"),
+        ("このスレッドをログ化して", "operation_log"),
+        ("提案作って", "proposal_draft"),
+        # メール語単独・社内語なしは横断機能を発火させず search へ（誤爆防止・仕様）
+        ("メール管理", "search"),
+        ("メールの内容を確認", "search"),
+    ],
+)
+def test_mail_features_do_not_break_existing_routes(msg: str, expected: str) -> None:
+    assert detect_skill(msg).skill == expected
+
+
+@pytest.mark.parametrize(
+    "msg",
+    ["返信してないんだよね", "なんか最近返信できてない", "もう返信できてないや"],
+)
+def test_venting_not_routed_to_mail_followup(msg: str) -> None:
+    """『返信してない』だけの愚痴はメール語が近接しないので mail_followup を奪わない。"""
+    assert detect_skill(msg).skill != "mail_followup"
+
+
+@pytest.mark.parametrize(
+    "msg,client,days",
+    [
+        ("花王への返信漏れ", "花王", None),
+        ("A社の返信忘れ", "A社", None),
+        ("森ビルの返信待ち", "森ビル", None),
+        ("花王の返信してないメール", "花王", None),
+    ],
+)
+def test_named_followup_extracts_client(msg: str, client: str, days: int | None) -> None:
+    """指名つき要返信フレーズは client を抽出し、不要な再質問を避ける。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_followup"
+    assert it.client_name == client
+    assert it.followup_days == days
+
+
+@pytest.mark.parametrize(
+    "msg,skill",
+    [
+        ("過去提案のメール社内で見て", "mail_to_internal_context"),
+        ("今日のメール、社内の関連スレッド", "mail_to_internal_context"),
+        ("未読メール溜まってる", "mail_followup"),
+    ],
+)
+def test_structural_words_not_used_as_client(msg: str, skill: str) -> None:
+    """構造語(過去提案/今日/未読 等)は client にしない → None で再質問へ（誤った空検索を防ぐ）。"""
+    it = detect_skill(msg)
+    assert it.skill == skill
+    assert it.client_name is None

@@ -129,6 +129,38 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # メール×社内ナレッジ横断ツール（read-only・per-user OAuth）。**既定 OFF**
+    # （USE_MAIL_LINK_TOOL=1）。本番 Slack Bot へは intent.py + slack_bot.py 経由で届くため、
+    # ここはオーケストレータ（Agent SDK）用の並行配線（dark）に過ぎない。token_store を必ず渡す。
+    if _envflag("USE_MAIL_LINK_TOOL"):
+        from teamagent.skills.mail_to_internal_context.skill import MailToInternalContextSkill
+
+        mail_link_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                MailToInternalContextSkill.name,
+                MailToInternalContextSkill.description,
+                MailToInternalContextSkill,
+                factory=lambda: MailToInternalContextSkill(token_store=mail_link_store),
+            )
+        )
+
+    # 要返信トリアージツール（read-only・メタデータのみ・LLM不使用）。**既定 OFF**
+    # （USE_FOLLOWUP_TOOL=1）。mail_constraints のトークンレス factory は踏襲しない
+    # （per-user の本人トークンを渡す）。
+    if _envflag("USE_FOLLOWUP_TOOL"):
+        from teamagent.skills.mail_followup.skill import MailFollowupSkill
+
+        followup_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                MailFollowupSkill.name,
+                MailFollowupSkill.description,
+                MailFollowupSkill,
+                factory=lambda: MailFollowupSkill(token_store=followup_store),
+            )
+        )
+
     return specs
 
 
