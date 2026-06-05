@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent アーキテクチャ 計画(v2.2) × 現状(v3.x) 比較 + TODO</title>
+<style>
+  :root{
+    --ink:#0E1430; --ink2:#1A2350; --paper:#fff; --bg:#F4F6FB;
+    --cyan:#0E7490; --cyan-l:#22D3EE; --violet:#5B53C6; --coral:#E11D48;
+    --amber:#B45309; --amber-bg:#FEF3C7; --green:#047857; --green-bg:#D1FAE5;
+    --mute:#5B6577; --line:#E3E8F2; --card:#F8FAFD;
+    --plan:#6366F1; --plan-bg:#EEF0FF; --now:#0E9488; --now-bg:#E6FBF7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif;
+    line-height:1.7;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 22px 90px}
+  /* hero */
+  .hero{background:linear-gradient(135deg,#0E1430 0%,#1A2350 60%,#243169 100%);color:#fff;
+    margin:0 -22px 0;padding:46px 40px 40px;border-radius:0 0 26px 26px;position:relative;overflow:hidden}
+  .hero::after{content:"";position:absolute;right:-90px;top:-90px;width:300px;height:300px;
+    background:rgba(34,211,238,.10);border-radius:50%}
+  .hero .tag{display:inline-block;font-size:12px;font-weight:700;letter-spacing:2px;color:var(--cyan-l);
+    border:1px solid rgba(34,211,238,.4);padding:4px 12px;border-radius:20px;margin-bottom:16px}
+  .hero h1{margin:0 0 8px;font-size:33px;line-height:1.35;letter-spacing:.5px}
+  .hero h1 small{display:block;font-size:16px;font-weight:500;color:#C7D2FE;margin-top:8px}
+  .hero .meta{font-size:13px;color:#8893C4;margin-top:18px}
+  /* verdict */
+  .verdict{background:#fff;border-radius:16px;padding:26px 28px;margin:-26px 0 26px;position:relative;z-index:2;
+    box-shadow:0 12px 34px rgba(20,27,52,.13);border:1px solid var(--line)}
+  .verdict h2{margin:0 0 6px;font-size:20px;color:var(--coral)}
+  .verdict p{margin:8px 0 0;font-size:15px}
+  .verdict .big{font-size:16px;font-weight:700;color:var(--ink)}
+  /* stat row */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:22px 0 8px}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:13px;padding:16px 16px 14px}
+  .stat .n{font-size:23px;font-weight:800;color:var(--cyan);line-height:1.2}
+  .stat .n.now{color:var(--now)} .stat .n.plan{color:var(--plan)}
+  .stat .l{font-size:12px;color:var(--mute);margin-top:4px;line-height:1.5}
+  h2.sec{font-size:21px;margin:42px 0 6px;padding-left:13px;border-left:5px solid var(--cyan);}
+  .sub{color:var(--mute);font-size:13.5px;margin:0 0 18px}
+  /* arch compare */
+  .arch{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:18px 0}
+  .col{border-radius:15px;padding:18px 18px 20px;border:1.5px solid}
+  .col.plan{background:var(--plan-bg);border-color:#C7CBFF}
+  .col.now{background:var(--now-bg);border-color:#A8E8DD}
+  .col h3{margin:0 0 4px;font-size:16px}
+  .col.plan h3{color:var(--plan)} .col.now h3{color:var(--now)}
+  .col .cap{font-size:12px;color:var(--mute);margin-bottom:14px}
+  .node{background:#fff;border:1px solid var(--line);border-radius:9px;padding:9px 12px;margin:7px 0;font-size:13px}
+  .node b{font-size:13.5px} .node .d{color:var(--mute);font-size:11.5px;display:block;margin-top:1px}
+  .flowarrow{text-align:center;color:var(--mute);font-size:15px;margin:1px 0}
+  .layer{font-size:11px;font-weight:700;color:var(--mute);letter-spacing:1px;margin:13px 0 3px;text-transform:uppercase}
+  /* table */
+  table{width:100%;border-collapse:collapse;margin:10px 0 6px;font-size:13.3px;background:#fff;
+    border-radius:13px;overflow:hidden;box-shadow:0 3px 16px rgba(20,27,52,.06)}
+  thead th{background:var(--ink);color:#fff;text-align:left;padding:12px 13px;font-size:12.5px;font-weight:700;position:sticky;top:0}
+  thead th:nth-child(2){background:#2A3470} thead th:nth-child(3){background:#0C6E63}
+  td{padding:11px 13px;border-top:1px solid var(--line);vertical-align:top}
+  td:first-child{font-weight:700;width:14%;color:var(--ink)}
+  td.plan{width:31%;background:#FAFBFF;color:#3A3F66}
+  td.now{width:31%;background:#F6FCFB;color:#234}
+  td.j{width:11%;text-align:center}
+  tbody tr:hover td{background:#F0F4FA}
+  .badge{display:inline-block;font-size:11px;font-weight:700;padding:3px 9px;border-radius:11px;white-space:nowrap;line-height:1.6}
+  .b-match{background:var(--green-bg);color:var(--green)}
+  .b-up{background:#DBEAFE;color:#1D4ED8}
+  .b-simp{background:#E0E7FF;color:#4338CA}
+  .b-warn{background:var(--amber-bg);color:var(--amber)}
+  .b-no{background:#FEE2E2;color:#B91C1C}
+  .legend{display:flex;flex-wrap:wrap;gap:9px;margin:12px 0 0;font-size:12px;color:var(--mute)}
+  .legend .badge{font-size:10.5px}
+  /* ahead callout */
+  .callout{background:linear-gradient(120deg,#E6FBF7,#EFFaf8);border:1.5px solid #A8E8DD;border-radius:14px;
+    padding:18px 22px;margin:20px 0}
+  .callout h3{margin:0 0 8px;color:var(--now);font-size:16px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+  .chip{background:#fff;border:1px solid #A8E8DD;border-radius:18px;padding:4px 12px;font-size:12.5px;color:#0C6E63;font-weight:600}
+  /* todo */
+  .todo-group{margin:14px 0 6px}
+  .pri{display:inline-block;font-size:12px;font-weight:800;color:#fff;border-radius:7px;padding:3px 11px;margin-right:8px}
+  .p0{background:var(--coral)} .p1{background:var(--amber)} .p2{background:var(--cyan)} .p3{background:var(--mute)}
+  .todo{background:#fff;border:1px solid var(--line);border-radius:12px;padding:6px 8px;margin:8px 0 18px}
+  .todo .item{display:flex;gap:12px;padding:11px 10px;border-top:1px solid var(--line);align-items:flex-start}
+  .todo .item:first-child{border-top:none}
+  .chk{width:19px;height:19px;border:2px solid var(--line);border-radius:5px;flex-shrink:0;margin-top:2px}
+  .todo .tt{font-size:14px;font-weight:700}
+  .todo .td{font-size:12.5px;color:var(--mute);margin-top:2px}
+  .todo .why{font-size:12px;color:var(--cyan);margin-top:3px}
+  .tag-now{font-size:10.5px;background:var(--green-bg);color:var(--green);border-radius:9px;padding:2px 7px;font-weight:700;margin-left:6px}
+  .footer{margin-top:38px;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--mute)}
+  @media(max-width:820px){.stats{grid-template-columns:repeat(2,1fr)}.arch{grid-template-columns:1fr}
+    td:first-child,td.plan,td.now,td.j{width:auto;display:block}thead{display:none}
+    td{border-top:none}tbody tr{display:block;border-top:2px solid var(--line);padding:6px 0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <span class="tag">ARCHITECTURE — PLAN vs REALITY</span>
+    <h1>TeamAgent アーキテクチャ：計画(v2.2) × 現状(v3.x) 比較
+      <small>「基本設計はこの通りになっているか？」への回答と、差分の TODO</small>
+    </h1>
+    <div class="meta">比較対象：アーキテクチャ図書 v2.2（2026-05-13）　×　現行 main 実装（2026-06-05 時点／全機能マージ済・831テストpass）</div>
+  </div>
+
+  <div class="verdict">
+    <h2>結論：いいえ。基本設計は「意図的に大きくピボット」しています。</h2>
+    <p class="big">計画(v2.2) ＝ AWS サーバーレス（Lambda×4 + Fargate + SQS + API Gateway + RDS Proxy）× 5機能。<br>
+       現状(v3.x) ＝ <u>単一プロセス常駐Bot × EC2 1台</u> ＋ <u>ルールベース・ローカル埋め込み</u> × <u>12スキル</u>。</p>
+    <p>方向性は同じ（Slack入口・pgvector ナレッジ脳・Claude/Gemini 併用）ですが、<b>実行基盤は計画の重厚なサーバーレス群を採らず、20名/同時4の実規模に合わせて単一プロセスへ簡素化</b>。一方で<b>検索（Rerank＋行レベル権限）・PR動画ドメイン（VSEO/動画チェック/TikTok）・雑談</b>は計画を超えて厚く、<b>②朝メール／⑤週次サマリー／多経路リサーチ／connect本番配線</b>が未実装、という構図です。</p>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="n plan">5機能 → 12</div><div class="l">計画は5機能。現状は12スキル登録（PR動画系を中心に拡張）</div></div>
+    <div class="stat"><div class="n">Lambda×4+Fargate<br>→ EC2×1</div><div class="l">サーバーレス群は不採用。常駐単一プロセスへ簡素化（active Lambda 0）</div></div>
+    <div class="stat"><div class="n now">Bedrock → ローカルe5</div><div class="l">埋め込みは multilingual-e5-large（sentence-transformers, EC2内）</div></div>
+    <div class="stat"><div class="n">3-way LLM → ルール</div><div class="l">意図判定はルールベース detect_skill。LLMルーターは将来候補</div></div>
+  </div>
+
+  <!-- ARCHITECTURE COMPARE -->
+  <h2 class="sec">1. アーキテクチャ全体像の対比</h2>
+  <p class="sub">左＝計画(v2.2 図書)の論理トポロジー、右＝現状(v3.x)の実トポロジー。色＝<span style="color:var(--plan);font-weight:700">計画</span> / <span style="color:var(--now);font-weight:700">現状</span>。</p>
+  <div class="arch">
+    <div class="col plan">
+      <h3>計画 v2.2（AWS サーバーレス）</h3>
+      <div class="cap">17 Sprint / 8.5ヶ月・C4図書</div>
+      <div class="layer">入口</div>
+      <div class="node"><b>API Gateway（HTTP）</b><span class="d">Slack Events API ／ 3秒ack ／ OAuth callback</span></div>
+      <div class="flowarrow">↓ SQS で非同期 fan-out</div>
+      <div class="layer">コンピュート</div>
+      <div class="node"><b>Lambda ×4</b><span class="d">Slack Receiver / Suggester① / Mail Worker② / Video Analyzer④</span></div>
+      <div class="node"><b>SummaryWorker Lambda⑤</b><span class="d">週次サマリー（独立IAM）</span></div>
+      <div class="node"><b>Fargate（Composer③）</b><span class="d">提案生成・5フェーズ・5〜30分</span></div>
+      <div class="node"><b>EventBridge</b><span class="d">朝8時Mail / 月9時Summary / 5分死活</span></div>
+      <div class="flowarrow">↓ RDS Proxy（接続プール）</div>
+      <div class="layer">データ</div>
+      <div class="node"><b>RDS db.r7g.large・Multi-AZ</b><span class="d">pgvector ／ Bedrock Titan/Cohere 埋め込み</span></div>
+    </div>
+    <div class="col now">
+      <h3>現状 v3.x（単一プロセス常駐）</h3>
+      <div class="cap">main 実装・本番EC2（停止中→要再デプロイ）</div>
+      <div class="layer">入口</div>
+      <div class="node"><b>Slack Socket Mode（WebSocket常駐）</b><span class="d">API GWなし。受付メッセージで即応 ／ connectのOAuth callbackのみ API GW</span></div>
+      <div class="flowarrow">↓ in-process（同一プロセス内）</div>
+      <div class="layer">コンピュート</div>
+      <div class="node"><b>単一プロセス Bot ×1（EC2 t4g.medium）</b><span class="d">asyncio。12スキルを @register で内包。active Lambda/Fargate/SQS なし</span></div>
+      <div class="node"><b>RequestGate（総量規制）</b><span class="d">同時≤4・FIFOキュー64・待ち120s（SQS/Proxyの代替）</span></div>
+      <div class="node" style="opacity:.6"><b>EventBridge / 定期バッチ</b><span class="d">なし（pollerはasyncio・既定OFF）→ ②⑤自動化は未稼働</span></div>
+      <div class="flowarrow">↓ 直結（プール内蔵）</div>
+      <div class="layer">データ</div>
+      <div class="node"><b>RDS db.t4g.micro 単一</b><span class="d">pgvector 0.8.2 ＋ <b>RLS行レベル権限</b> ／ ローカルe5埋め込み ／ Proxy・Multi-AZ なし</span></div>
+    </div>
+  </div>
+
+  <!-- COMPARISON TABLE -->
+  <h2 class="sec">2. 観点別 詳細比較（16項目）</h2>
+  <p class="sub">判定＝ <span class="badge b-match">一致/強化</span> 計画通り or 超え ／ <span class="badge b-simp">方式変更</span> 別手段で実現 ／ <span class="badge b-warn">要判断</span> 縮小・未配線 ／ <span class="badge b-no">未実装</span></p>
+  <table>
+    <thead><tr><th>観点</th><th>計画 v2.2（図書）</th><th>現状 v3.x（実装）</th><th>判定</th></tr></thead>
+    <tbody>
+      <tr><td>実行基盤</td><td class="plan">Lambda×4 ＋ Fargate×1（サーバーレス疎結合）</td><td class="now">単一プロセス常駐Bot × EC2 t4g.medium 1台（＋踏み台）。active Lambda/Fargate なし</td><td class="j"><span class="badge b-simp">簡素化</span></td></tr>
+      <tr><td>Slack 入口</td><td class="plan">API Gateway ＋ Events API（HTTP・3秒ack・署名検証）</td><td class="now">Socket Mode（WebSocket常駐）。受付メッセージで即応。※connectのOAuth callbackのみ API GW</td><td class="j"><span class="badge b-simp">方式変更</span></td></tr>
+      <tr><td>同時実行制御</td><td class="plan">SQS fan-out ＋ RDS Proxy（Lambda 100+接続を集約）</td><td class="now">in-process <b>RequestGate</b>（asyncio semaphore=4・queue=64・timeout=120s・FIFO・解放保証）</td><td class="j"><span class="badge b-simp">簡素化</span></td></tr>
+      <tr><td>意図ルーター</td><td class="plan">3-way LLMルーター（Sonnet・recall/compose/analyze・app_mention統一）</td><td class="now">ルールベース <code>detect_skill</code>（12+分岐）＋ task-first雑談判定。LLMルーターは flag（将来）</td><td class="j"><span class="badge b-simp">方式変更</span></td></tr>
+      <tr><td>機能/スキル</td><td class="plan">5機能：①サジェスト ②Mail朝 ③提案 ④動画URL ⑤週次サマリー</td><td class="now"><b>12スキル</b>：検索/カルテ/提案draft/提案review/営業ログ/VSEO/動画分析/動画チェック/TikTok検索/メール制約/workspace/雑談</td><td class="j"><span class="badge b-up">拡張</span></td></tr>
+      <tr><td>埋め込み</td><td class="plan">Bedrock Titan v2 / Cohere multilingual-v3（1024次元・VPC Endpoint・APIキー不要）</td><td class="now"><b>ローカル e5</b>（multilingual-e5-large・1024次元・sentence-transformers を EC2内で実行）</td><td class="j"><span class="badge b-simp">方式変更</span></td></tr>
+      <tr><td>検索パイプライン</td><td class="plan">pgvector 類似検索（記載のみ・BM25は将来）</td><td class="now">pgvector(dense)＋クライアント名boost＋<b>Cohere Rerank</b>＋<b>RLS</b>＋min_relevance＋Contextual。top-1 20%→64%実証</td><td class="j"><span class="badge b-up">強化</span></td></tr>
+      <tr><td>DB / 可用性</td><td class="plan">db.r7g.large・Multi-AZ ＋ RDS Proxy</td><td class="now">db.t4g.micro 単一（dev規模）。Proxy/Multi-AZ なし</td><td class="j"><span class="badge b-warn">要判断</span></td></tr>
+      <tr><td>オーケストレーション</td><td class="plan">Claude Agent SDK Orchestrator＝4サブエージェントを Lambda/Fargate に展開</td><td class="now">Claude Agent SDK 採用（orchestrator poc・<code>USE_WORKSPACE_TOOLS</code> flag）。live は SkillDispatcher（フル subagent 化は未）</td><td class="j"><span class="badge b-warn">部分</span></td></tr>
+      <tr><td>Gmail/Workspace連携</td><td class="plan">16名OAuth refresh を Secrets Manager 管理、Mail Worker が使用</td><td class="now"><b>per-user connect</b>（OAuth・KMS暗号化・RDS保存）実装済だが<b>live dispatcher 未配線</b>。共有OAuthで Drive ingest は稼働</td><td class="j"><span class="badge b-warn">未配線</span></td></tr>
+      <tr><td>スケジューラ/バッチ</td><td class="plan">EventBridge（朝8時 Mail②・月9時 Summary⑤・5分死活監視）</td><td class="now">定期実行基盤なし（video_approval_poller は asyncio・既定OFF）。<b>②朝メール／⑤週次サマリーの自動バッチは未稼働</b></td><td class="j"><span class="badge b-no">未実装</span></td></tr>
+      <tr><td>リサーチ冗長化</td><td class="plan">Gemini DR Pattern Bravo+ 4経路（Vertex→Bedrock→Tavily/Brave→A6X）</td><td class="now">動画は Gemini(Vertex) 直呼び。多経路 fallback の Pattern Bravo+ は未実装</td><td class="j"><span class="badge b-no">未実装</span></td></tr>
+      <tr><td>監視</td><td class="plan">CloudWatch のみ（Sentry/Datadog 不採用）</td><td class="now">structlog ＋ <b>Sentry</b> ＋ 管理ダッシュボード(poc) ＋ usage metrics ＋ CloudWatch アラーム数本・CloudTrail</td><td class="j"><span class="badge b-simp">差異</span></td></tr>
+      <tr><td>セキュリティ</td><td class="plan">IAM最小権限・KMS・audit_log・opt-out・PIIフィルタ</td><td class="now">同左＋<b>Postgres RLS（行レベル権限分離）</b>＋個人OAuth＋シート削除ゼロ＋反ハルシ＋IMDSv2＋CloudTrail</td><td class="j"><span class="badge b-up">強化</span></td></tr>
+      <tr><td>IaC / CI</td><td class="plan">AWS CDK（TypeScript）＋ GitHub Actions</td><td class="now"><b>Terraform</b>（targeted apply運用）＋ GitHub Actions（ruff/mypy strict/pytest 831 ＋ gitleaks/bandit）</td><td class="j"><span class="badge b-simp">差異</span></td></tr>
+      <tr><td>応答 SLO</td><td class="plan">機能① p95 ≤ 3秒（コールドスタート＋3-wayルーター考慮）</td><td class="now">常駐ゆえコールドスタート無し。受付メッセージで即応。SLO/アラームの正式定義は未整備</td><td class="j"><span class="badge b-warn">要整備</span></td></tr>
+    </tbody>
+  </table>
+
+  <!-- AHEAD OF PLAN -->
+  <div class="callout">
+    <h3>◎ 計画(v2.2)に無かった「現状の強み」（＝先行して作り込まれた部分）</h3>
+    <p style="margin:0 0 4px;font-size:13.5px;color:#234">PR×ショート動画ドメインに最適化したスキルと、検索・権限の作り込みが計画を超えています。</p>
+    <div class="chips">
+      <span class="chip">VSEO動画アルゴリズム分析（看板）</span>
+      <span class="chip">動画チェックAI（制作中）</span>
+      <span class="chip">TikTok検索</span>
+      <span class="chip">取引先カルテ</span>
+      <span class="chip">営業ログ化(CRM)</span>
+      <span class="chip">メール制約抽出</span>
+      <span class="chip">雑談AI（会話の出し分け）</span>
+      <span class="chip">Cohere Rerank（top-1 20→64%）</span>
+      <span class="chip">RLS 行レベル権限分離</span>
+      <span class="chip">per-user connect 基盤</span>
+      <span class="chip">VSEO 失敗ゼロ化</span>
+    </div>
+  </div>
+
+  <!-- TODO -->
+  <h2 class="sec">3. TODO — 差分を埋める／意思決定する</h2>
+  <p class="sub">優先度：<span class="pri p0">P0</span>本番化の要 ／ <span class="pri p1">P1</span>計画機能の要否判断 ／ <span class="pri p2">P2</span>スケール・堅牢化 ／ <span class="pri p3">P3</span>整合・運用</p>
+
+  <div class="todo-group"><span class="pri p0">P0</span><b>いま本番に乗せるための直近作業</b></div>
+  <div class="todo">
+    <div class="item"><div class="chk"></div><div><div class="tt">ライブBotを最新 main で再デプロイ</div>
+      <div class="td">現在ライブは旧コード。再デプロイで「会話の出し分け・その他の提案・全スキル」を本番反映。EC2起動＋GCP課金再開を伴う。</div>
+      <div class="why">→ 本日の会話UX改善（PR #115 merged）を実際のBotへ反映する起点</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">per-user connect を live dispatcher に配線</div>
+      <div class="td">connect（自分のGoogle認可）はコード実装済だが、live の SkillDispatcher から呼ばれない。dispatch_auto に workspace 分岐＋<code>USE_WORKSPACE_TOOLS</code> 有効化、または orchestrator 経路へ接続。</div>
+      <div class="why">→ 計画の「16名OAuth活用」を実機能化（別セッションで配線進行中）</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">本番起動 env のフラグ恒久化を確認</div>
+      <div class="td"><code>USE_NEW_SCHEMA / USE_COHERE_RERANK = true</code>・<code>PROMPT_VERSION=v2d</code> を起動envで固定（.env.production済／既定はfalseのため取りこぼし注意）。</div></div></div>
+  </div>
+
+  <div class="todo-group"><span class="pri p1">P1</span><b>計画にあって現状ない「機能」— やるか判断</b></div>
+  <div class="todo">
+    <div class="item"><div class="chk"></div><div><div class="tt">② Mail 朝ワークフロー（未返信→案A/B/C下書き）</div>
+      <div class="td">現状は <code>mail_constraints</code>（受信箱から制約抽出）のみで、計画の「朝バッチで16名分の未返信に返信案」は未実装。やるなら定期実行基盤＋Gmail per-user取得が必要。</div>
+      <div class="why">→ 営業の朝の工数削減という当初の柱。優先度を再評価</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">⑤ 週次 進捗サマリー（マネージャーDM）</div>
+      <div class="td">受注角度（🟢🟡🔴）判定の週次サマリーは未実装（SummaryWorker相当なし）。マネージャー価値が高いなら設計。</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">定期実行基盤（スケジューラ）</div>
+      <div class="td">②⑤や死活監視のため EventBridge or 常駐スケジューラ（APScheduler）を導入。単一プロセス維持なら APScheduler が軽量。</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">多経路リサーチ（Pattern Bravo+）の要否</div>
+      <div class="td">Vertex 障害時の Bedrock/Tavily/Brave fallback。現状は単経路。動画/リサーチの可用性要件次第で判断。</div></div></div>
+  </div>
+
+  <div class="todo-group"><span class="pri p2">P2</span><b>スケール・堅牢化（現状20名/同時4なら据え置き可）</b></div>
+  <div class="todo">
+    <div class="item"><div class="chk"></div><div><div class="tt">本番DBサイズの昇格判断</div>
+      <div class="td">現状 db.t4g.micro（dev）。本番運用なら r7g.large 等へ。※検索/権限ロジックは現状のままで規模だけの問題。</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">同時実行の追加ハードニング<span class="tag-now">一部 本日実施</span></div>
+      <div class="td">acquire_timeout・executor幅・BLASスレッド抑制は実装済(PR #115)。残：動画アップロード経路の gate 配下化／Gemini(Vertex)リトライ付与。</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">可用性（プロセス監視・将来の多重化）</div>
+      <div class="td">systemd 常駐は有。将来 50名規模なら ECS/Fargate 化や Lambda fan-out を再検討（＝計画の重厚構成は「将来オプション」として残す）。SQS/RDS Proxy も多重化時のみ。</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">SLO/CloudWatch アラームの正式整備</div>
+      <div class="td">応答時間・成功率・コスト（Bedrock/Gemini）アラームを定義。Sentry運用方針も明文化。</div></div></div>
+  </div>
+
+  <div class="todo-group"><span class="pri p3">P3</span><b>整合・運用</b></div>
+  <div class="todo">
+    <div class="item"><div class="chk"></div><div><div class="tt">アーキ図書 v2.2 を現状(v3.x)に改訂</div>
+      <div class="td">図書はサーバーレス5機能前提で<b>実装と乖離</b>。読者（FDE/SRE/監査）が誤解するため、単一プロセス×12スキルの現状版へ更新。<code>docs/v3.2/system_reference.md</code> が現状の正。</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">埋め込み方針の確定（ローカルe5 vs Bedrock）</div>
+      <div class="td">現状ローカルe5（コスト0・EC2 CPU使用）。Bedrock化（計画）はAPI課金だがCPU解放。規模とコストで判断。</div></div></div>
+    <div class="item"><div class="chk"></div><div><div class="tt">ルーター方針の確定（ルール vs LLM 3-way）</div>
+      <div class="td">現状ルールベースで 32/32 適合・コスト0。LLMルーターは曖昧入力に強いが課金/遅延。gold setで効果検証してから。</div></div></div>
+  </div>
+
+  <div class="footer">
+    <b>判定の根拠（一次ソース）</b>：terraform 実リソース（aws_instance×2・aws_db_instance×1・active Lambda 0／Fargate・SQS・RDS Proxy・EventBridge なし）、<code>src/teamagent/skills/</code>（@register 12スキル）、<code>intent.py</code>（ルールベース）、<code>embeddings_client.py</code>（e5）、<code>request_gate.py</code>、<code>.env.production</code> を直接確認。<br>
+    現状の正＝<code>docs/v3.2/system_reference.md</code>（本日更新・テスト831pass）。本資料は計画図書 v2.2(2026-05-13) と現行 main(2026-06-05) の差分整理。
+  </div>
+
+</div>
+</body>
+</html>

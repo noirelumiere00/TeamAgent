@@ -6,7 +6,41 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from teamagent.adapters.gemini_client import GeminiClient, _estimate_cost
+from teamagent.adapters.gemini_client import (
+    GeminiClient,
+    _estimate_cost,
+    _is_retryable_vertex,
+)
+
+
+class _CodedError(Exception):
+    """code 属性つきの疑似 Vertex エラー（google-genai の例外を模す）。"""
+
+    def __init__(self, message: str, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (_CodedError("rate limit exceeded", code=429), True),
+        (_CodedError("Service Unavailable", code=503), True),
+        (_CodedError("internal", code=500), True),
+        (Exception("429 ResourceExhausted: quota"), True),
+        (Exception("503 UNAVAILABLE"), True),
+        (Exception("deadline exceeded"), True),
+        (Exception("request timed out"), True),
+        # 恒久エラー（URL 側制約）→ リトライしない
+        (RuntimeError("Cannot fetch content from the provided URL"), False),
+        (Exception("ROBOTED"), False),
+        # 設定不良など一般エラー → リトライしない
+        (_CodedError("invalid argument", code=400), False),
+        (ValueError("bad config"), False),
+    ],
+)
+def test_is_retryable_vertex(exc: BaseException, expected: bool) -> None:
+    assert _is_retryable_vertex(exc) is expected
 
 
 def test_estimate_cost_flash() -> None:

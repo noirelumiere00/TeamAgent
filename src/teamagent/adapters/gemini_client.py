@@ -23,7 +23,48 @@ from typing import Any
 
 import structlog
 
+from teamagent.runtime.retry import RetryPolicy, call_with_retry
+
 logger = structlog.get_logger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    """env を int として読む（空・不正値は default）。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+# Vertex(Gemini) の一過性エラー（リトライ可）を判定するマーカー。google-genai は版で例外型が
+# 揺れるため、型ではなく code 属性 / メッセージで安全側に分類する。
+_VERTEX_RETRYABLE_MARKERS = (
+    "resourceexhausted",
+    "resource exhausted",
+    "rate limit",
+    "quota",
+    "unavailable",
+    "service unavailable",
+    "deadline",
+    "timeout",
+    "timed out",
+    "internal error",
+)
+
+
+def _is_retryable_vertex(exc: BaseException) -> bool:
+    """Gemini の一過性エラー（429/レート/quota/503/500/timeout）のみ True。
+
+    URL 取得不能（Cannot fetch content / ROBOTED）等の恒久エラーはリトライしない（即上げ）。
+    """
+    msg = str(exc).lower()
+    if "cannot fetch content" in msg or "roboted" in msg:
+        return False
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code in (429, 500, 503):
+        return True
+    return any(marker in msg for marker in _VERTEX_RETRYABLE_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -186,10 +227,27 @@ class GeminiClient:
         config = types.GenerateContentConfig(system_instruction=system) if system else None
 
         try:
-            response = client.models.generate_content(
-                model=self.model_id,
-                contents=contents,
-                config=config,
+            # 一過性エラー（429/レート/quota/503/500/timeout）は指数バックオフで自動リトライ。
+            # Bedrock 側と非対称だった堅牢性を揃える。恒久エラー（URL取得不能等）は即上げ。
+            response = call_with_retry(
+                lambda: client.models.generate_content(
+                    model=self.model_id,
+                    contents=contents,
+                    config=config,
+                ),
+                is_retryable=_is_retryable_vertex,
+                policy=RetryPolicy(
+                    max_attempts=_env_int("GEMINI_RETRY_MAX_ATTEMPTS", 3),
+                    base_delay_s=0.6,
+                    max_delay_s=8.0,
+                ),
+                on_retry=lambda n, d, e: logger.warning(
+                    "gemini_retry",
+                    request_id=request_id,
+                    attempt=n,
+                    delay_s=round(d, 2),
+                    error=type(e).__name__,
+                ),
             )
         except Exception as e:
             # 生 URL/プロンプトはログに残さない (CLAUDE.md 6-bis)

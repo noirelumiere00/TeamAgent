@@ -1369,6 +1369,10 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         # キュー待ち上限秒（既定120s）。無限待ち回避＋「順番待ちが長い」通知発火。0以下で無制限。
         acquire_timeout_s=float(_acq_timeout) if _acq_timeout > 0 else None,
     )
+    # 動画アップロード処理は dispatch_auto(=gate配下) の外で走るため、別枠の小さめ上限で
+    # 同時本数を絞る。多人数が同時に動画を投げても DL(最大20MB×10)+Gemini が一気に並走して
+    # OOM/帯域/Vertexスロットルを起こさないようにする（既定2・env で調整可）。
+    video_upload_sem = asyncio.Semaphore(_gate_env_int("VIDEO_UPLOAD_CONCURRENCY", 2))
     # 管理画面テレメトリ（best-effort・DATABASE_URL 未設定なら無効化して bot は通常起動）:
     #  - recorder: 1リクエスト1行を usage_events に記録（各ハンドラ出口）。
     #  - snapshotter: 15秒ごとに GateMetrics/PoolStats を runtime_metrics に snapshot。
@@ -1393,21 +1397,23 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         video_files = [f for f in files if str(f.get("mimetype", "")).startswith("video/")]
         if not video_files:
             return None
-        items: list[tuple[bytes, str]] = []
-        for f in video_files[:10]:  # アップロードは最大 10 本
-            file_url = f.get("url_private_download") or f.get("url_private")
-            if not file_url:
-                continue
-            try:
-                data = await slack.download_file(file_url, request_id=request_id, max_mb=20)
-            except Exception:
-                logger.warning("slack_file_download_failed", request_id=request_id)
-                continue
-            items.append((data, str(f.get("mimetype", "video/mp4"))))
-        if not items:
-            return "🎬 アップロード動画を取得できませんでした（容量超過 20MB の可能性）。"
-        text, _cost = await disp.run_video_uploads(items, request_id, user_id)
-        return text
+        # 重い処理（DL＋Gemini分析）だけを同時実行上限の下で実行する（プロセス全体の総量規制）。
+        async with video_upload_sem:
+            items: list[tuple[bytes, str]] = []
+            for f in video_files[:10]:  # アップロードは最大 10 本
+                file_url = f.get("url_private_download") or f.get("url_private")
+                if not file_url:
+                    continue
+                try:
+                    data = await slack.download_file(file_url, request_id=request_id, max_mb=20)
+                except Exception:
+                    logger.warning("slack_file_download_failed", request_id=request_id)
+                    continue
+                items.append((data, str(f.get("mimetype", "video/mp4"))))
+            if not items:
+                return "🎬 アップロード動画を取得できませんでした（容量超過 20MB の可能性）。"
+            text, _cost = await disp.run_video_uploads(items, request_id, user_id)
+            return text
 
     @app.event("app_mention")
     async def handle_app_mention(event: dict[str, Any]) -> None:
