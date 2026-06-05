@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamAgent Next — 要件定義書（再構築）</title>
+<style>
+  :root{
+    --ink:#0E1430; --ink2:#1A2350; --bg:#F4F6FB; --paper:#fff;
+    --cyan:#0E7490; --cyan-l:#22D3EE; --violet:#5B53C6; --coral:#E11D48;
+    --amber:#B45309; --amber-bg:#FEF3C7; --green:#047857; --green-bg:#D1FAE5;
+    --mute:#5B6577; --line:#E3E8F2; --card:#F8FAFD; --redbg:#FEE2E2; --redfg:#B91C1C;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif;
+    line-height:1.75;-webkit-font-smoothing:antialiased;font-size:15px}
+  .wrap{max-width:1140px;margin:0 auto;padding:0 22px 100px}
+  code{background:#EEF1F8;border:1px solid #E0E5F0;border-radius:5px;padding:.5px 6px;font-size:.85em;
+    font-family:"SF Mono",Consolas,monospace;color:#334}
+  /* hero */
+  .hero{background:linear-gradient(135deg,#0E1430 0%,#1A2350 55%,#243169 100%);color:#fff;
+    margin:0 -22px;padding:48px 42px 40px;border-radius:0 0 26px 26px;position:relative;overflow:hidden}
+  .hero::after{content:"";position:absolute;right:-80px;top:-80px;width:280px;height:280px;background:rgba(34,211,238,.10);border-radius:50%}
+  .hero .tag{display:inline-block;font-size:12px;font-weight:700;letter-spacing:2px;color:var(--cyan-l);
+    border:1px solid rgba(34,211,238,.4);padding:4px 12px;border-radius:20px;margin-bottom:16px}
+  .hero h1{margin:0 0 10px;font-size:34px;line-height:1.3}
+  .hero p.sub{margin:0;font-size:16px;color:#C7D2FE;max-width:760px}
+  .hero .meta{font-size:12.5px;color:#8893C4;margin-top:18px}
+  /* verdict */
+  .verdict{background:#fff;border-radius:16px;padding:24px 26px;margin:-24px 0 8px;position:relative;z-index:2;
+    box-shadow:0 12px 34px rgba(20,27,52,.13);border:1px solid var(--line)}
+  .verdict h2{margin:0 0 6px;font-size:18px}
+  .v-no{color:var(--coral)} .v-fix{color:var(--cyan)}
+  .verdict p{margin:6px 0 0;font-size:14.5px}
+  .pill{display:inline-block;font-size:11px;font-weight:800;padding:2px 9px;border-radius:11px;vertical-align:middle}
+  .pill-no{background:var(--redbg);color:var(--redfg)} .pill-go{background:var(--green-bg);color:var(--green)}
+  /* nav */
+  .nav{display:flex;flex-wrap:wrap;gap:8px;margin:22px 0 6px}
+  .nav a{font-size:12.5px;text-decoration:none;color:var(--cyan);background:#fff;border:1px solid var(--line);
+    border-radius:18px;padding:5px 13px}
+  .nav a:hover{background:var(--cyan);color:#fff;border-color:var(--cyan)}
+  /* sections */
+  h2.sec{font-size:22px;margin:46px 0 4px;padding-left:13px;border-left:5px solid var(--cyan);scroll-margin-top:14px}
+  .lead{color:var(--mute);font-size:13.5px;margin:2px 0 16px}
+  h3{font-size:16.5px;margin:22px 0 8px;color:var(--ink)}
+  /* table */
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13.2px;background:#fff;border-radius:12px;
+    overflow:hidden;box-shadow:0 3px 16px rgba(20,27,52,.06)}
+  thead th{background:var(--ink);color:#fff;text-align:left;padding:11px 13px;font-size:12.5px;font-weight:700}
+  td{padding:10px 13px;border-top:1px solid var(--line);vertical-align:top}
+  tbody tr:hover td{background:#F0F4FA}
+  td.k{font-weight:700;color:var(--ink);white-space:nowrap}
+  .sev{display:inline-block;font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:10px}
+  .sev-h{background:var(--redbg);color:var(--redfg)} .sev-m{background:var(--amber-bg);color:var(--amber)}
+  /* principle cards */
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+  .pc{background:#fff;border:1px solid var(--line);border-radius:13px;padding:16px 18px;box-shadow:0 3px 14px rgba(20,27,52,.05)}
+  .pc .n{display:inline-block;width:26px;height:26px;border-radius:8px;background:var(--cyan);color:#fff;
+    font-weight:800;text-align:center;line-height:26px;font-size:13px;margin-right:8px}
+  .pc h4{display:inline;font-size:15px} .pc p{margin:8px 0 0;font-size:12.8px;color:#3a4256}
+  /* domain cards */
+  .dom{background:#fff;border:1px solid var(--line);border-left:4px solid var(--violet);border-radius:11px;
+    padding:13px 16px;margin:9px 0;box-shadow:0 2px 10px rgba(20,27,52,.04)}
+  .dom b{font-size:14.5px} .dom .map{font-size:11.5px;color:var(--mute);margin-top:3px}
+  .dom .map code{font-size:11px}
+  /* callout */
+  .callout{border-radius:14px;padding:18px 22px;margin:16px 0;border:1.5px solid}
+  .co-red{background:#FFF5F6;border-color:#F3C0C8} .co-green{background:#EEFBF6;border-color:#A8E8DD}
+  .callout h3{margin:0 0 8px} .co-red h3{color:var(--coral)} .co-green h3{color:var(--green)}
+  .callout ol,.callout ul{margin:6px 0 0;padding-left:20px} .callout li{margin:5px 0;font-size:13.5px}
+  /* phases */
+  .phase{display:flex;gap:14px;margin:10px 0;align-items:flex-start}
+  .phase .p{flex-shrink:0;width:46px;height:46px;border-radius:11px;background:var(--ink);color:#fff;
+    font-weight:800;text-align:center;line-height:46px;font-size:15px}
+  .phase .b{background:#fff;border:1px solid var(--line);border-radius:11px;padding:11px 15px;flex:1;box-shadow:0 2px 10px rgba(20,27,52,.04)}
+  .phase .b .t{font-weight:700;font-size:14px} .phase .b .d{font-size:12.5px;color:var(--mute);margin-top:3px}
+  .phase .b .g{font-size:11.5px;color:var(--cyan);font-weight:700;margin-top:4px}
+  /* open decisions checklist */
+  .od{background:#fff;border:1px solid var(--line);border-radius:12px;padding:6px 8px;margin:10px 0}
+  .od .i{display:flex;gap:11px;padding:10px;border-top:1px solid var(--line);align-items:flex-start}
+  .od .i:first-child{border-top:none} .od .chk{width:18px;height:18px;border:2px solid var(--line);border-radius:5px;flex-shrink:0;margin-top:2px}
+  .od .tt{font-size:13.5px;font-weight:600} .od .dd{font-size:12.3px;color:var(--mute);margin-top:2px}
+  ul.tight{margin:8px 0;padding-left:20px} ul.tight li{margin:4px 0;font-size:13.5px}
+  .footer{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--mute)}
+  @media(max-width:820px){.grid{grid-template-columns:1fr}
+    td.k{white-space:normal} thead{display:none} td{border-top:none;display:block}
+    tbody tr{display:block;border-top:2px solid var(--line);padding:6px 0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <span class="tag">REQUIREMENTS · REBUILD</span>
+    <h1>TeamAgent Next — 要件定義書（再構築）</h1>
+    <p class="sub">「機能がごちゃついて構成がやりづらい」を構造から治し、<b>ごちゃつき再発防止を仕組みに組み込んだ</b>営業支援エージェントへ作り直す。</p>
+    <div class="meta">2026-06-05 ／ PR×ショート動画の社内営業支援（営業16名・同時AI利用4名）／ 根拠: 現状コード実査(8エージェント)＋OpenClaw一次ソース検証 ／ <b>意思決定用ドラフト</b></div>
+  </div>
+
+  <div class="verdict">
+    <h2>一言で</h2>
+    <p>スキル追加が <b>「1ディレクトリ・1 manifest の追加だけ」</b> で済む宣言レジストリを唯一の真実源にし、<b>単一プロセスのまま god-file を解体</b>。日常は決定的な<b>規約ルータ(L1)</b>・横断や曖昧時だけ既存の <b>Agent SDK オーケストレータ(L2)</b> に委ねる。専任ほぼ1名／16名利用／同時4で<b>現実に保守できる</b>構成。</p>
+    <h2 style="margin-top:16px" class="v-no">「OpenClaw 主体で」への回答 <span class="pill pill-no">不採用</span></h2>
+    <p>一次ソース検証の結論。OpenClaw は業務アプリに組み込む<i>ライブラリ</i>ではなく個人向けマルチチャネル常駐<b>ゲートウェイ製品</b>(TS/Swift)で用途がズレ、既存資産(12スキル/RLS/831テスト)を毀損し、<b>RCE/権限奪取の重大CVEが続発</b>しCisco/Microsoftが業務利用を警告。→ <span class="v-fix" style="font-weight:700">Claude Agent SDK on Bedrock を継続</span>（6-bis合格済の <code>orchestrator/</code> を本配線）＋ MCP規格だけ相互運用の保険。<span class="pill pill-go">推奨</span></p>
+  </div>
+
+  <div class="nav">
+    <a href="#s1">1. 診断</a><a href="#s2">2. 設計原則</a><a href="#s3">3. 7ドメイン</a>
+    <a href="#s4">4. 機能要件</a><a href="#s5">5. 非機能要件</a><a href="#s6">6. アーキ構成</a>
+    <a href="#s7">7. 基盤判断</a><a href="#s8">8. 移行段階</a><a href="#s9">9. 未決事項</a>
+  </div>
+
+  <!-- 1 -->
+  <h2 class="sec" id="s1">1. なぜ作り直すか — 現状の構造的負債</h2>
+  <p class="lead">8エージェントが現状コードを実査して特定。「ごちゃつき」の正体は <b>良い抽象(<code>BaseSkill</code>/<code>SkillRegistry</code>)があるのに本番経路で使われていない</b>こと。重大度順。</p>
+  <table>
+    <thead><tr><th style="width:15%">領域</th><th>問題（やりづらさ）</th><th style="width:26%">根本原因</th><th style="width:7%">重大度</th></tr></thead>
+    <tbody>
+      <tr><td class="k">抽象の二重構造</td><td><code>BaseSkill</code>/<code>@register</code> が整備され全スキル登録済みなのに本番Slack経路は使わず、<code>SkillDispatcher</code> が <code>get_X_skill()</code>+<code>run_X()</code> 手書き対を12個並べ <code>dispatch_auto</code> の if連鎖で呼ぶ。registryはCLI/orchestratorだけが使い live では死蔵。env解決が2箇所に重複。</td><td>registryの一律生成に各スキルの<code>__init__</code>引数が乗らず手書き生成に逃げ、抽象を捨てず迂回。</td><td><span class="sev sev-h">高</span></td></tr>
+      <tr><td class="k">追加の作業点過多</td><td>1スキル追加に5〜6箇所を手で同期（intent正規表現/SkillIntentフィールド/get+run/dispatch分岐/ACK辞書/slash）。スキル名文字列が<b>4箇所に手書き重複</b>、中央Enum不在。</td><td>スキルのメタ情報が1箇所に集約されず横断ファイルへ散る水平スライス構造。</td><td><span class="sev sev-h">高</span></td></tr>
+      <tr><td class="k">命名・粒度の不統一</td><td>dir/クラス<code>name</code>/intent文字列の<b>3軸がズレ</b>。<code>video/</code>=<code>video_analysis</code>、<code>video_algorithm/</code>…。VSEO が<b>2箇所に割れ</b>(<code>vseo/</code>は野良ヘルパ、実体は<code>video_algorithm/</code>)。</td><td>命名規約を決めずその場の語感でdirを切り、VSEOの前処理と分析を統合しなかった。</td><td><span class="sev sev-h">高</span></td></tr>
+      <tr><td class="k">god-file 肥大</td><td><code>slack_bot.py</code> が<b>2,186行</b>。Skill実行+表示整形+Slack配線+slash+記録が同居。<code>detect_skill</code> が1メッセージで<b>4回再評価</b>、RLS用 user_groups 構築が<b>4回コピペ</b>(権限事故の温床)。</td><td>runtime層を更に分割せず1ファイルに積層、横断的関心を共通化せずインライン展開。</td><td><span class="sev sev-h">高</span></td></tr>
+      <tr><td class="k">正規表現ルータ肥大</td><td><code>intent.py</code> が純正規表現の巨大塊。優先順位依存の10段if連鎖、各分岐に「○○より先に判定」コメント散在、スキルごとにトリガ用と抽出用で正規表現2本ずつ。</td><td>スキル増のたび衝突を順序と除外条件で手当てし、グローバル順序依存が蓄積。</td><td><span class="sev sev-h">高</span></td></tr>
+      <tr><td class="k">到達不能スキル</td><td><code>@register</code>済でも <code>mail_constraints</code>/<code>workspace_search</code>/<code>proposal_deck</code> は <code>intent.py</code> に分岐ゼロで<b>Slack自然文から起動不能</b>。orchestratorとSlackで対応スキル集合が食い違う。</td><td>スキル登録の真実源が2経路に分裂。</td><td><span class="sev sev-h">高</span></td></tr>
+      <tr><td class="k">二重ルータ</td><td>スキル選択の <code>detect_skill</code> と検索戦略の <code>SkillRouter</code>(QueryType) が別物として直列。後者は「Haiku化」コメントのまま約1年塩漬け、<code>compare</code>/<code>meta</code> は判定だけの死にパス。</td><td>段階移行前提で2レイヤを切りLLM移行未完のまま増築。</td><td><span class="sev sev-m">中</span></td></tr>
+      <tr><td class="k">env knob 乱立</td><td>env由来フラグが<b>66個</b>。<code>slack_bot.py</code>単体で <code>os.environ.get</code> 37回。同じフラグ解決が2箇所に二重実装(既定値ドリフト源)。実験ノブ(v1/v2c/v2d)が本番に恒久ifとして残留。</td><td>全切替をenvで行い決着後も恒久化せずノブを残した。Settings集約層が無い。</td><td><span class="sev sev-m">中</span></td></tr>
+    </tbody>
+  </table>
+
+  <!-- 2 -->
+  <h2 class="sec" id="s2">2. 設計原則（Next の不変条件）</h2>
+  <div class="grid">
+    <div class="pc"><span class="n">1</span><h4>宣言レジストリを唯一の真実源に</h4><p>Convention over Configuration。<code>BaseSkill</code> を1段拡張した <code>CapabilityManifest</code> を唯一の登録点に。ルータ/ディスパッチャ/ack/SDK@tool化の4経路が「manifest を読むだけ」に。intent.pyの手書き分岐を<b>ゼロ</b>に。</p></div>
+    <div class="pc"><span class="n">2</span><h4>ルーティングを2層に分離</h4><p>日常の単発は決定的・低コストな規約ルータ(L1)。横断・曖昧・明示マルチステップのみ Agent SDK(L2)へ委譲。スキル増の編集コストを <b>O(スキル数)→O(1)</b>。</p></div>
+    <div class="pc"><span class="n">3</span><h4>プロセス内モジュラリティ＝堅牢性</h4><p>マイクロサービス化しない。3層境界を <b>import-linter でCI強制</b>し依存を内向き固定。堅牢性は「プロセス数」でなく「1プロセス内の結合度を下げ波及を断つ」で達成。god-file解体。</p></div>
+    <div class="pc"><span class="n">4</span><h4>境界で型固定・内側は純粋関数</h4><p>Pydantic I/O契約。<code>run()</code>は検証済み入力+<code>SkillContext</code>だけ受け、外部I/Oは adapter 注入。表示整形は <code>ResponsePresenter</code> へ退避、スキルは構造化出力のみ返す。</p></div>
+    <div class="pc"><span class="n">5</span><h4>信頼境界を fail-closed 強制＋外部供給ゲート</h4><p>データ系は既定OFF・明示opt-in。RLS/per-user OAuth をランタイムが強制。外部由来ツール/MCPは版pin+権限レビュー+署名検証を通さねば登録不可（ClawHavoc型耐性）。</p></div>
+    <div class="pc"><span class="n">6</span><h4>反ハルシネーションを出力契約に</h4><p>検索系は出典(file_name+page_num)を<b>必須化</b>、根拠不在は断定せず「該当なし」の fail-honest。<code>faithfulness</code> を生成系の受け入れ基準に。架空scoreはログに出さない。</p></div>
+  </div>
+
+  <!-- 3 -->
+  <h2 class="sec" id="s3">3. ケイパビリティ・ドメイン（7）</h2>
+  <p class="lead">散らばった12スキルを、意味のある <b>7ドメイン</b>へ束ね直す。1ドメイン=1パッケージ=1 manifest。</p>
+  <div class="dom"><b>1. Knowledge &amp; Memory（会社の脳）</b> — 散在資料を単一の記憶層にし、自然文の問いに権限制御つきで答える基盤。全ドメインが参照。<div class="map">⟵ <code>search</code> ／ <code>router.py</code>(QueryType戦略=ドメイン内部サブルータへ降格＝二重ルータ解消)</div></div>
+  <div class="dom"><b>2. Deal Intelligence（案件・顧客）</b> — 顧客/案件単位の状態(温度感/履歴/次アクション/BANT)を合成し「今どうか／次に何を」を提示。<div class="map">⟵ <code>clientkarte</code>, <code>operation_log</code>（将来 deal_radar / morning_brief）</div></div>
+  <div class="dom"><b>3. Proposal Studio（提案）</b> — 勝ち筋を再利用して提案を作り→磨き→PPTX成果物化する連続フロー。<div class="map">⟵ <code>proposal_draft</code>, <code>proposal_review</code>, <code>proposal_deck</code>, research を <b>4 Action に統一</b></div></div>
+  <div class="dom"><b>4. Video Intelligence（動画）</b> — 競合分析・VSEO読み解き・納品審査を<b>一つのマルチモーダル動画能力</b>に束ねる（現状最大の重複源）。<div class="map">⟵ <code>video_analysis</code>/<code>video_algorithm</code>/<code>video_approval</code> 統一、野良 <code>vseo/</code> を吸収</div></div>
+  <div class="dom"><b>5. Trend &amp; Market Discovery（外部リサーチ）</b> — 社外のショート動画市場を課金SaaSなしでローカル収集。社内RAGとは別レイヤの外部探索。<div class="map">⟵ <code>tiktok_search</code>（将来 Reel/Shorts・定点モニタ）</div></div>
+  <div class="dom"><b>6. Personal Workspace Bridge（PII境界）</b> — 営業個人のGoogle(メール/カレンダー/連絡先)を本人OAuthで安全取り込み。PII死守ラインを一手に担う境界。<div class="map">⟵ <code>mail_constraints</code>, <code>workspace_search</code>（到達不能だったのを正規経路へ・既定OFF維持）</div></div>
+  <div class="dom"><b>7. Conversation &amp; Orchestration（対話・統括）</b> — 自然な対話の入口。意図判定→各ドメインへ振り分け、雑談は検索せず応答。肥大した <code>detect_skill</code> を L1規約ルータ＋L2委譲へ置換。<div class="map">⟵ <code>chitchat</code>, <code>intent.py</code>, <code>orchestrator/</code>(Agent SDK POC)</div></div>
+  <p style="font-size:13.5px;margin-top:12px"><b>統合で消える冗長:</b> VSEOの2箇所割れ（<code>vseo/</code>→Video吸収）、proposalの粒度ズレ（→4 Action）、二重ルータ（検索戦略をKnowledge内部へ降格）。</p>
+
+  <!-- 4 -->
+  <h2 class="sec" id="s4">4. 機能要件（FR・ドメイン別）</h2>
+  <div class="grid">
+    <div class="pc"><h4>1. Knowledge &amp; Memory</h4><ul class="tight">
+      <li>自然文の横断RAG検索（pgvector dense + Cohere Rerank + RLS + v2d教示）</li>
+      <li>クエリ種別の内部サブルータ（meta/conditional/compare/content）をドメイン内に閉じ込め二重ルータ解消</li>
+      <li>出典(file_name+page_num)を構造化フィールドで必須化、根拠不在は「該当なし」fail-honest</li>
+      <li>（将来）脳の鮮度可視化、勝ちパターン/失注理由の横断ナレッジ化</li></ul></div>
+    <div class="pc"><h4>2. Deal Intelligence</h4><ul class="tight">
+      <li>クライアントカルテ合成（提案履歴・温度感推移・推奨ネクストアクション）</li>
+      <li>Slack商談会話のCRM構造化（フェーズ/アクション/次ステップ/BANT）</li>
+      <li>RLS担当者スコープの一貫適用</li>
+      <li>（将来）停滞案件アラート deal_radar、朝ブリーフィング morning_brief、定点モニタ</li></ul></div>
+    <div class="pc"><h4>3. Proposal Studio</h4><ul class="tight">
+      <li>新規ブリーフからの提案ドラフト生成（類似過去提案を共有注入で再利用）</li>
+      <li>提案の診断（勝ちパターン/失注理由と照合した"レビュー的"FB）</li>
+      <li>提案書FMT v2(95項目)を埋めたPPTX自動生成（proposal_deck）</li>
+      <li>draft/review/deck/research を1ドメイン4 Action に統一、faithfulness を受け入れ基準に</li></ul></div>
+    <div class="pc"><h4>4. Video Intelligence</h4><ul class="tight">
+      <li>競合PR動画の構造分析（構成/フック/テロップ/尺/CTA、YT/Shorts/TikTok/IG）</li>
+      <li>VSEOアルゴリズム読み解き（上位N本の時刻付き分析→勝ち筋→HTMLタイムライン）</li>
+      <li>納品動画の一次FB審査（オリエン必須要素/NG/テロップ/尺と照合）</li>
+      <li>video系3+野良vseoを統一（2箇所割れ一掃）、重処理ガード(1req最大20件)</li></ul></div>
+    <div class="pc"><h4>5. Trend &amp; Market Discovery</h4><ul class="tight">
+      <li>TikTokのKW/ハッシュタグ検索（Puppeteer実ブラウザ+内部API傍受・ローカル完結）</li>
+      <li>上位動画メタ取得＋Gemini横断分析、伸びている勝ちパターン/フック抽出</li>
+      <li>trigger=TikTok名AND検索動詞 or ハッシュタグ を宣言、cost_class=high</li></ul></div>
+    <div class="pc"><h4>6. Personal Workspace Bridge（PII境界）</h4><ul class="tight">
+      <li>本人受信箱からの制約抽出（NG/予算/期限/関係性、<b>生本文を返さず</b>構造化制約のみ）</li>
+      <li>本人OAuthでのWorkspace検索（カレンダー/連絡先、未連携は fail-closed）</li>
+      <li>DLPマスク・監査ログ・最小スコープの一貫適用</li>
+      <li>到達不能だった2スキルを triggers宣言で正規経路へ（既定OFF維持）</li></ul></div>
+    <div class="pc"><h4>7. Conversation &amp; Orchestration</h4><ul class="tight">
+      <li>挨拶/お礼/雑談/能力質問への軽量会話応答（検索しない・0コスト即応）</li>
+      <li>task-first の意図判定と L1ルーティング、受付ack（話題復唱）</li>
+      <li>L1低confidence時の L2委譲、マルチステップ横断（VSEO→提案→PPTX）の解放</li>
+      <li>全reqへの request_id 伝播・構造化JSONログ・Bedrock usage/cost 記録</li></ul></div>
+  </div>
+
+  <!-- 5 -->
+  <h2 class="sec" id="s5">5. 非機能要件（NFR・測定可能）</h2>
+  <table>
+    <thead><tr><th style="width:14%">カテゴリ</th><th>要件</th><th style="width:34%">目標値</th></tr></thead>
+    <tbody>
+      <tr><td class="k">保守性</td><td>新スキル追加が1ディレクトリ内で自己完結し、ルータ/ディスパッチャ本体を編集しない</td><td>共有ファイル<b>0行変更</b>。手書きルーティング正規表現 366行→<b>0行</b>。1スキル実装 ≤800行（god-file禁止）</td></tr>
+      <tr><td class="k">保守性</td><td>全スキルの I/O契約を Pydantic v2 で固定し純ロジックで単体テスト可能</td><td>BaseSkill準拠率100%、run()は外部I/Oゼロ。<b>カバレッジ line≥80% を CIゲート</b></td></tr>
+      <tr><td class="k">拡張性</td><td>ルーティングが能力宣言ベースで、スキル数増に対し編集コスト一定</td><td>12→25スキルでもルーティング判定の<b>行数増0</b>。意図衝突は宣言triggersの重複検査でCI検出</td></tr>
+      <tr><td class="k">堅牢性/可用性</td><td>同時4のピークを単一プロセスで安定処理、1スキル障害が他に波及しない</td><td>同時4で <b>p95≤15秒・エラー率&lt;1%</b>。1スキルException時もプロセス継続。DB障害時はDB依存スキルが fail-honest、非依存は継続</td></tr>
+      <tr><td class="k">堅牢性/データ層</td><td>RDS弱点の復旧目標を明示</td><td><b>RDS Multi-AZ化で RTO≤120秒・RPO≤5分</b>。DB断は3回リトライ後 fail-honest。副次機能は fail-open</td></tr>
+      <tr><td class="k">セキュリティ</td><td>アクセスをランタイムで fail-closed 強制、外部供給を審査ゲートで遮断</td><td>データ系は既定OFF・明示opt-in。RLS/per-user OAuth 100%適用、<b>本人外漏洩0件</b>。無審査マーケット直結0件。secrets平文0件</td></tr>
+      <tr><td class="k">性能/コスト</td><td>1クエリのコスト/レイテンシを実測範囲に維持し暴走を検知</td><td>平均 <b>$0.01–0.02／p50 7–11秒</b> 維持改善。日次$5・p95 15秒・5分3エラーでアラート</td></tr>
+      <tr><td class="k">可観測性</td><td>全層 request_id 伝播・構造化JSON・Bedrock usage/cost 記録</td><td>request_id欠落0件。呼び出し毎に tokens/model/latency/cost を100%記録。架空scoreログ0、エラー5分以内検知</td></tr>
+      <tr><td class="k">CI/開発規律</td><td>main常時グリーン、整形/型/セキュリティを機械強制</td><td>全PRで ruff+mypy+pytest+bandit 必須。新importの ci.yml 追記漏れ0。基盤依存は厳密pin。main CI成功率≥95%</td></tr>
+    </tbody>
+  </table>
+
+  <!-- 6 -->
+  <h2 class="sec" id="s6">6. アーキテクチャ構成</h2>
+  <p class="lead">採用: <b>宣言レジストリを唯一の真実源とする「単一プロセス・モジュラモノリス + 2層オーケストレーション」</b>（3設計案の最良点を接合）。</p>
+  <h3>6.1 レイヤー（物理3層・import方向を内向き固定／import-linter でCI強制）</h3>
+  <ul class="tight">
+    <li><b>adapters層</b> — Slack受信/ack・Bedrock・pgvector・Google・Puppeteer を封じる。表示整形(<code>format_search_response</code>等)を <code>ResponsePresenter</code> へ全量退避、スキルは Pydantic 構造体のみ返す。</li>
+    <li><b>skills層</b> — 検証済み入力+<code>SkillContext</code> だけ受ける純ロジック。共有ポートは乱立させず <b><code>RetrievalPort</code>/<code>GenerationPort</code> の2本に限定</b>（単独利用は adapter 直結＝過剰間接化回避）。</li>
+    <li><b>runtime層</b> — 薄い殻。<code>get_X_skill()</code>/<code>run_X()</code> 12個 + if連鎖 + ACK辞書を、manifestを読む<b>単一 <code>dispatch(intent, ctx)</code></b> に畳む。<code>slack_bot.py</code> を200行台へ。</li>
+  </ul>
+  <h3>6.2 ケイパビリティ（7ドメイン=7パッケージ・各1 manifest）</h3>
+  <p style="font-size:13.5px"><code>CapabilityManifest</code>（<code>BaseSkill</code>の1段拡張: triggers/ack_template/cost_class/permission_scope/handler_factory/eval_fixtures を宣言）を<b>唯一の登録点</b>に。中央 <code>CapabilityId</code>(StrEnum) で命名3軸ズレと4箇所手書きを型で一元化（未定義IDはimport時に弾く）。</p>
+  <h3>6.3 オーケストレーション（2層）</h3>
+  <table>
+    <thead><tr><th style="width:18%">層</th><th>役割</th></tr></thead>
+    <tbody>
+      <tr><td class="k">L1=規約ルータ<br>（既定・決定的）</td><td>登録 manifest の triggers 宣言だけを読む。20名/同時4の大半の単発リクエスト(検索/カルテ/審査/挨拶)を<b>LLMを介さず</b>低レイテンシ・低コスト・高決定性で確定。現状実測($0.01–0.02/p50 7–11秒)とchitchatの0コスト即応を守る核。triggers DSL は keyword/url_signal/named_entity/priority に限定。</td></tr>
+      <tr><td class="k">L2=Agent SDK<br>（委譲）</td><td>L1低confidence or 明示マルチステップ（「VSEOで分析して提案ドラフトとPPTXまで」）のみ起動。registry 全 manifest を ToolSpec 自動@tool化し Claude が自律連鎖。<b>新規実装ではなく</b>、6-bis合格・85MB実deck生成済の <code>orchestrator/</code> を runtime から<b>本配線するだけ</b>。本番ガード(require_rls fail-closed/max_same_call=2/cost_cap/忠実性照合)は内在を実機確認済。</td></tr>
+    </tbody>
+  </table>
+  <h3>6.4 ごちゃつき再発防止の機構（構造的担保）</h3>
+  <ul class="tight">
+    <li>中央 <code>CapabilityId</code>(StrEnum) を真実源化（4箇所手書き→1値、命名3軸→1軸）</li>
+    <li><b>registry-as-single-source</b> — ルータ/ディスパッチャ/ack/SDK@tool化の4経路すべて「manifest を読むだけ」。本番経路のバイパスを構造的に不可能化</li>
+    <li><b>1スキル追加=新manifest1枚</b>の規約（共有ファイル0行変更）</li>
+    <li>CIで manifest網羅・契約チェック（triggers宣言必須=到達不能再発防止／優先度衝突検査／import-linterで依存方向強制）</li>
+    <li>triggers宣言DSLで暗黙優先順位を明示化（「○○より先に判定」コメント→priority整数）</li>
+    <li>env 66個→<code>Settings</code>(pydantic-settings)1モデルへ集約、直 <code>os.environ.get</code> を lint禁止、実験ノブを恒久ifから外す</li>
+    <li>表示整形を <code>ResponsePresenter</code> へ強制分離（引用必須・fail-honest検証を出力直前に）</li>
+    <li>外部Skill供給ゲート（版pin+権限宣言レビュー+署名検証+fail-closed既定OFF＝ClawHavoc型耐性）</li>
+  </ul>
+
+  <!-- 7 -->
+  <h2 class="sec" id="s7">7. 基盤判断：OpenClaw vs Claude Agent SDK</h2>
+  <p class="lead">一次ソース＋リポジトリ実査に基づく確定判断。</p>
+  <div class="callout co-green">
+    <h3>✅ 採用：Claude Agent SDK on Bedrock を継続し本番配線を完遂</h3>
+    <ul>
+      <li>方式B（既存Skillを@tool化しSDKのループに委ねる）が実装・テスト・<b>Bedrock実走(6-bis合格・85MB実deck生成)済</b>。</li>
+      <li><code>sdk_runner.py</code> に require_rls の fail-closed・<code>max_same_call=2</code> の無限ループ殺し・<code>cost_cap_usd</code>・usage/costログ・<code>faithfulness</code> 照合が<b>実在を grep 確認</b>。<code>claude-agent-sdk==0.2.87</code> 厳密pin。</li>
+      <li>残課題は<b>「新基盤への乗り換え」ではなく「runtime からの本配線(ゲート①)」と「detect_skill 正規表現の置換」の2点のみ</b>。</li>
+    </ul>
+  </div>
+  <div class="callout co-red">
+    <h3>🔴 不採用：OpenClaw を主体に据えない（3根拠）</h3>
+    <ol>
+      <li><b>用途ミスマッチ</b> — OpenClaw(旧Moltbot, 2025/11公開)は WhatsApp/Slack/Discord を入口にする<b>個人向けマルチチャネル常駐アシスタント・ゲートウェイ製品</b>(TS/Swift・独立プロダクト・MIT)。必要なのは「業務Pythonアプリに組み込むドメイン特化オーケストレーション・<b>ライブラリ</b>」で粒度・前提が違う。Bedrock/MCPには一次対応だが、それは規格の話。</li>
+      <li><b>資産毀損</b> — 12スキル/RLS/per-user OAuth/教示プロンプト/831テストが <code>openclaw.json</code>/<code>SOUL.md</code>/TS流儀へ作り直し＝「構成をクリーンに」に<b>逆行</b>（言語・運用が二重化）。</li>
+      <li><b>セキュリティ</b> — 生後6–7ヶ月で <b>CVE-2026-25253(1-click RCE)</b>・<b>CVE-2026-35650(prompt injectionで権限/設定/MCP/routing上書き)</b>・log poisoning・SSRF が続発、2026/2に17,500台露出。<b>Cisco/Microsoft が「信頼できないコード実行として扱え、業務端末で動かすな」と警告</b>。会社の脳+per-user資格情報を持つ基盤に攻撃面が過大（ClawHavoc型341悪意Skillインシデント）。</li>
+    </ol>
+    <p style="margin-top:8px;font-size:13px"><b>限定併用（保険）:</b> MCP規格だけ相互運用を維持。OpenClaw を将来評価する場合は必ず Docker隔離+最小IAM+チャネル限定で、本番ナレッジ系とネットワーク分離した別環境で。</p>
+  </div>
+
+  <!-- 8 -->
+  <h2 class="sec" id="s8">8. 移行段階（P0–P5・ストラングラー）</h2>
+  <p class="lead">作り直しではなく段階リファクタ。各Phase末で Slack E2E疎通+全テストgreen、フラグ戻しで即ロールバック。</p>
+  <div class="phase"><div class="p">P0</div><div class="b"><div class="t">土台（破壊なし）</div><div class="d">中央 <code>CapabilityId</code> と <code>Settings</code> 新設。name/intent/ACK を Enum参照へ（4→1箇所）、env66個を Settings集約。<code>CapabilityManifest</code> を各スキルに1枚追加し triggers を機械転記（未使用）。CI manifest網羅/import-linter(warning)。</div><div class="g">→ 真実源の器を作る・slack_bot無改変・テストgreen維持</div></div></div>
+  <div class="phase"><div class="p">P1</div><div class="b"><div class="t">ルータ統合（shadow）</div><div class="d">manifest triggers を読むL1規約ルータを新設し、本番は <code>detect_skill</code> 継続で shadow並走・一致率をログ。gold set50で検証。<code>router.py</code> QueryType を Knowledge内部へ降格（二重ルータ1段化）。</div><div class="g">→ ルータを安全に並走検証</div></div></div>
+  <div class="phase"><div class="p">P2</div><div class="b"><div class="t">ディスパッチャ置換 + god-file解体着手</div><div class="d"><code>get_/run_</code> 12個と <code>dispatch_auto</code> if連鎖を <code>manifest.handler_factory</code> を呼ぶ単一 dispatch に。ACK辞書→<code>manifest.ack_template</code>。<code>detect_skill</code> 4回→1回。<b>intent.py 366行正規表現を削除</b>。Presenter/InboundAdapter 切り出し開始。</div><div class="g">→ 配線をmanifestへ畳む</div></div></div>
+  <div class="phase"><div class="p">P3</div><div class="b"><div class="t">adapter整理・god-file完了</div><div class="d">表示整形を <code>ResponsePresenter</code> へ全量退避、user_groups 4回コピペを <code>PolicyEngine</code> へ集約、共有ポート2本だけ切り出し。<b>slack_bot.py を200行台へ</b>。直 os.environ.get lint禁止、カバレッジ/型/bandit/gitleaks を CIゲート化。</div><div class="g">→ god-file解体完了</div></div></div>
+  <div class="phase"><div class="p">P4</div><div class="b"><div class="t">到達不能スキル復活 + ドメイン再編</div><div class="d"><code>mail_constraints</code>/<code>workspace_search</code>/<code>proposal_deck</code> を triggers宣言で正規経路へ（既定OFF維持）。Video命名崩れ一掃(vseo吸収)、Proposal 4 Action束ね。env解決の二重実装を registry単一factory へ統合。</div><div class="g">→ 重複・到達不能の一掃</div></div></div>
+  <div class="phase"><div class="p">P5</div><div class="b"><div class="t">L2本配線（ゲート①完遂）</div><div class="d">registry 全 manifest を ToolSpec 自動@tool化し、既存 <code>orchestrator/</code>(6-bis合格済)を <code>USE_AGENT_ORCHESTRATOR</code>/低confidence経路に<b>本配線</b>（runtime→orchestrator参照ゼロの解消）。マルチステップ(VSEO→提案→PPTX)を解放。自前ゲート通過分のMCPのみ登録可とする保険レイヤ。</div><div class="g">→ 自律オーケストレーションの解放</div></div></div>
+
+  <!-- 9 -->
+  <h2 class="sec" id="s9">9. 未決事項（確認のうえ確定したい）</h2>
+  <div class="od">
+    <div class="i"><div class="chk"></div><div><div class="tt">ゲート①の承認（Node本番持込）</div><div class="dd">SDK が Node を spawn する前提＝EC2運用に1依存追加を、専任ほぼ1名運用で負える前提でよいか。</div></div></div>
+    <div class="i"><div class="chk"></div><div><div class="tt">L2 の本番デフォルト ON/OFF</div><div class="dd">当面 <code>USE_AGENT_ORCHESTRATOR</code> で明示マルチステップ時のみ起動、単発は L1決定的ルータに留める方針でよいか（全reqをLLMループに通す純化案は不採用想定）。</div></div></div>
+    <div class="i"><div class="chk"></div><div><div class="tt">ドメイン境界の確定（7 vs 6）</div><div class="dd">7ドメインで進めるか、chitchat を Application層FastPathへ降格して6に寄せるか。Proposal 4 Action束ね・Video の vseo統合は移行コスト中規模なので着手順の合意がほしい。</div></div></div>
+    <div class="i"><div class="chk"></div><div><div class="tt">RDS Multi-AZ化の実施時期</div><div class="dd">NFR(RTO≤120秒/RPO≤5分)の補強をどのPhaseで（または並行で）。コスト増を伴うため別途承認。</div></div></div>
+    <div class="i"><div class="chk"></div><div><div class="tt">カバレッジゲートの基準</div><div class="dd">line≥80% を最初から強制するか、Phase進行で段階的に引き上げるか（1名運用での締め付け度合い）。</div></div></div>
+    <div class="i"><div class="chk"></div><div><div class="tt">着手前のブランチ整理</div><div class="dd">現在 <code>feat/proposal-deck-skill</code> で proposal_deck の作業中（別セッション）。着手前に main統合状況とブランチ戦略の整理が必要。</div></div></div>
+  </div>
+
+  <div class="footer">
+    <b>付録A（接合元の3設計レンズ）:</b> A.ケイパビリティ・プラグイン型（採用骨格）／B.ツール中心・自律エージェント（L2＋既存POC昇格の論拠）／C.ヘキサゴナル・サービス（import-linter強制・共有ポート2本・PolicyEngineの論拠）。3案とも「単一プロセス維持／registry唯一の真実源／god-file解体」で一致。<br>
+    <b>付録B（OpenClaw検証の一次ソース）:</b> GitHub(openclaw/openclaw・releases・AGENTS.md)、docs.openclaw.ai(bedrock・mcp)、Microsoft Security Blog(2026/02)、Cisco Blog、The Hacker News(2026/03)、PointGuard AI(CVE-2026-35650)、Infosecurity Magazine、Eye Security。<br><br>
+    TeamAgent Next 要件定義書 ／ 2026-06-05 ／ 本書は意思決定用ドラフト（§9確認のうえ確定）。Markdown版: <code>docs/next/teamagent_next_requirements.md</code>
+  </div>
+
+</div>
+</body>
+</html>
