@@ -202,6 +202,36 @@ def _extract_vseo_query(message: str) -> str | None:
     return q or None
 
 
+# 検索意図メッセージの末尾に付く依頼語（「〜を教えて」「〜について調べて」「〜ある？」等）。
+# 受付メッセージで話題(〇〇)を復唱するために、これを削いで本題だけを残す。LLM/DB 非依存。
+_SEARCH_TOPIC_SUFFIX = re.compile(
+    r"\s*(?:について|に関して|を|の|は|って|が)?\s*"
+    r"(?:教えて?(?:ください|ほしい|くれ)?|調べて?(?:ください|ほしい)?|探して?|"
+    r"検索(?:して)?|まとめて?|確認(?:して)?|リサーチ(?:して)?|"
+    r"知りたい|見せて?|出して?|ある|あります?か?|ますか)"
+    r"\s*[。.!！?？〜ー]*\s*$"
+)
+
+
+def extract_search_topic(message: str, *, max_len: int = 40) -> str | None:
+    """検索意図メッセージから話題(〇〇)を軽く抽出する（ack の話題復唱用）。
+
+    例:「飲食店のPR事例を教えて」→「飲食店のPR事例」/「マンダムの前回提案は？」→「マンダムの前回提案」。
+    抽出不能・空・短すぎ(1文字)・長すぎ(>max_len) は None を返し、
+    呼び出し側は従来の汎用 ack にフォールバックする（崩れた復唱を出さない）。
+    純ロジック＝追加コスト/レイテンシ 0。
+    """
+    t = message.strip()
+    if not t:
+        return None
+    t = _SEARCH_TOPIC_SUFFIX.sub("", t).strip()
+    t = _TRAILING.sub("", t).strip()
+    t = re.sub(r"[\s　]+", " ", t).strip()
+    if len(t) < 2 or len(t) > max_len:
+        return None
+    return t
+
+
 # --- 会話/雑談ルーティング（task-first: 業務語があれば必ず検索/各Skillへ流す） ---
 # 業務・検索を示唆する語。1つでも含めば chitchat にしない（複合文「ありがとう、A社の提案は?」を
 # search に残す＝実検索の取りこぼし防止）。社名マーカー(社/御社/弊社)も task 扱い。

@@ -4,7 +4,30 @@ from __future__ import annotations
 
 import pytest
 
-from teamagent.skills.intent import detect_skill, extract_video_url
+from teamagent.skills.intent import detect_skill, extract_search_topic, extract_video_url
+
+
+@pytest.mark.parametrize(
+    "msg,expected",
+    [
+        ("飲食店のPR事例を教えて", "飲食店のPR事例"),
+        ("新宿のランチ事例を調べて", "新宿のランチ事例"),
+        ("過去の美容案件まとめて", "過去の美容案件"),
+        ("マンダムの前回提案は？", "マンダムの前回提案"),
+        ("競合の提案資料ある？", "競合の提案資料"),
+        ("", None),  # 空はフォールバック
+        ("   ", None),  # 空白のみ
+        ("あ", None),  # 1文字は弱いので採らない
+    ],
+)
+def test_extract_search_topic(msg: str, expected: str | None) -> None:
+    """検索 ack の話題復唱用: 末尾の依頼語を削いで本題だけ返す。空/短すぎは None。"""
+    assert extract_search_topic(msg) == expected
+
+
+def test_extract_search_topic_long_query_falls_back() -> None:
+    """長すぎるクエリは None（崩れた復唱を出さずに汎用 ack へフォールバック）。"""
+    assert extract_search_topic("あ" * 50) is None
 
 
 @pytest.mark.parametrize(
