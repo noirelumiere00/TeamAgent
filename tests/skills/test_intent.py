@@ -404,3 +404,80 @@ def test_structural_words_not_used_as_client(msg: str, skill: str) -> None:
     it = detect_skill(msg)
     assert it.skill == skill
     assert it.client_name is None
+
+
+@pytest.mark.parametrize(
+    "msg,client",
+    [
+        ("森ビルへの返信作って", "森ビル"),
+        ("マンダムのメール作成して", "マンダム"),
+        ("花王のメールに返信ドラフト作って", "花王"),
+        ("INPEXへの返信案ちょうだい", "INPEX"),
+    ],
+)
+def test_routes_to_mail_reply(msg: str, client: str) -> None:
+    """返信ドラフト/メール作成は mail_reply（_DRAFT_RE の『ドラフト』に奪われない）。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_reply"
+    assert it.client_name == client
+
+
+@pytest.mark.parametrize(
+    "msg,client",
+    [
+        ("森ビルのメール要約して", "森ビル"),
+        ("花王のメールまとめて", "花王"),
+        ("マンダムのメールのサマリーちょうだい", "マンダム"),
+    ],
+)
+def test_routes_to_mail_summary(msg: str, client: str) -> None:
+    it = detect_skill(msg)
+    assert it.skill == "mail_summary"
+    assert it.client_name == client
+
+
+@pytest.mark.parametrize(
+    "msg,expected",
+    [
+        ("提案ドラフト作って", "proposal_draft"),  # 提案ドラフトは mail_reply に奪われない
+        ("提案チェックして", "proposal_review"),
+        ("森ビルの要返信メール教えて", "mail_followup"),  # 要返信は mail_reply ではない
+        ("森ビルのカルテ", "clientkarte"),
+    ],
+)
+def test_mail_reply_summary_do_not_break_existing(msg: str, expected: str) -> None:
+    assert detect_skill(msg).skill == expected
+
+
+@pytest.mark.parametrize(
+    "msg,client",
+    [
+        ("A社の提案の返信ドラフト作って", "A社"),  # 「○○社」を最優先抽出（提案に奪われない）
+        ("花王さんのメール、返信案ちょうだい", "花王"),  # さん honorific + 読点
+        ("森ビル様のメールに返信作って", "森ビル"),
+    ],
+)
+def test_reply_client_extraction_robust(msg: str, client: str) -> None:
+    it = detect_skill(msg)
+    assert it.skill == "mail_reply"
+    assert it.client_name == client
+
+
+@pytest.mark.parametrize("msg", ["リプライ作成して", "返信用のメール作成して", "提案の返信作って"])
+def test_reply_trigger_words_not_used_as_client(msg: str) -> None:
+    """トリガー語/構造語（リプライ/返信用/提案）は client にしない → None で再質問。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_reply"
+    assert it.client_name is None
+
+
+def test_private_skills_cover_all_mail_skills() -> None:
+    """メール系スキルは全て『本人にだけ返す（ephemeral）』対象に含める（チャンネル漏えい防止）。"""
+    from teamagent.runtime.slack_bot import _PRIVATE_SKILLS
+
+    assert {
+        "mail_reply",
+        "mail_summary",
+        "mail_to_internal_context",
+        "mail_followup",
+    } <= _PRIVATE_SKILLS

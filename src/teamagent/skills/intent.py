@@ -62,6 +62,7 @@ _FOLLOWUP_DAYS_RE = re.compile(r"(\d{1,3})\s*(?:営業)?日")
 # ひらがなを除外（社名は漢字/カタカナ/英数/「社」が中心）。
 _MAIL_CLIENT_RE = re.compile(
     r"(?P<name>[0-9A-Za-zＡ-Ｚａ-ｚ０-９ァ-ヶ一-龯ーｦ-ﾟ＆&・]{2,40}?(?:社)?)"
+    r"(?:さん|様|御中|君)?[、,]?\s*"
     r"(?:から(?:の)?|のこの|への?|の|は|が|で|へ|宛|に|って)?\s*(?:この)?\s*"
     # 名前と末尾トリガーの間に挟まる「返信(して)(い)ない」動詞句を任意で吸収する
     # （「花王の返信してないメール」→ 花王）。bare「返信」をトリガーにすると
@@ -104,7 +105,65 @@ _MAIL_CLIENT_STOPWORDS = frozenset(
         "この",
         "その",
         "あの",
+        # mail_reply トリガー語そのものは client ではない（→ None で再質問させる）。
+        "提案",
+        "提案書",
+        "返信用",
+        "リプライ",
+        # 自他社代名詞・法人格だけの語は具体的な client 名ではない。
+        "御社",
+        "貴社",
+        "弊社",
+        "当社",
+        "自社",
+        "株式会社",
+        "有限会社",
+        "合同会社",
     }
+)
+
+# 「○○社」で終わる会社名を最優先で拾う（「A社の提案の返信」でも A社 を取れる）。
+# 社員/社内 のような語尾は除外。stopword（御社/弊社 等）は呼び出し側で弾く。
+_COMPANY_TOKEN_RE = re.compile(
+    r"([0-9A-Za-zＡ-Ｚａ-ｚ０-９ァ-ヶ一-龯ーｦ-ﾟ＆&・]{1,38}社)(?![員内中外])"
+)
+
+
+def _preferred_company(message: str) -> str | None:
+    """メッセージ中の「○○社」固有名詞を優先抽出（最初の1件）。無ければ None。"""
+    m = _COMPANY_TOKEN_RE.search(message)
+    if not m:
+        return None
+    cand = m.group(1).strip()
+    if 2 <= len(cand) <= 40 and cand.lower() not in _MAIL_CLIENT_STOPWORDS:
+        return cand
+    return None
+
+
+# mail_reply 起動トリガー（返信ドラフト生成）。「返信案/返信ドラフト/返信下書き」「返信(を)作って/
+# 書いて」「メール作成/起草」。⚠️「ドラフト」を含むため proposal_draft(_DRAFT_RE) より先に判定する。
+# 「要返信」(=mail_followup)とは別物（作成系の語が無いと発火しない）。
+_MAIL_REPLY_RE = re.compile(
+    r"返信(?:文|メール)?.{0,5}(?:案|ドラフト|下書き|起草|文案)"
+    r"|返信(?:文|メール)?.{0,4}(?:を)?\s*(?:作|つく|書い|書こ)"
+    r"|(?:メール|mail|返信|リプライ).{0,4}(?:作成|起草)",
+    re.IGNORECASE,
+)
+
+# mail_summary 起動トリガー（受信メールの要約）。「メール(を)要約/まとめ/サマリ」。
+_MAIL_SUMMARY_RE = re.compile(
+    r"(?:メール|mail|受信(?:箱|メール)?).{0,6}(?:要約|サマリ|まとめて?|総括)"
+    r"|(?:要約|サマリ).{0,4}(?:メール|mail|受信)",
+    re.IGNORECASE,
+)
+
+# mail_reply 用クライアント抽出（返信/作成/メールの直前の固有名詞）。stopword で構造語を弾く。
+_REPLY_CLIENT_RE = re.compile(
+    r"(?P<name>[0-9A-Za-zＡ-Ｚａ-ｚ０-９ァ-ヶ一-龯ーｦ-ﾟ＆&・]{2,40}?(?:社)?)"
+    r"(?:さん|様|御中|君)?[、,]?\s*"
+    r"(?:から(?:の)?|への?|のこの|の|は|が|で|宛|に|って)?\s*(?:この)?\s*"
+    r"(?:返信|メール|mail|作成)",
+    re.IGNORECASE,
 )
 
 # clientkarte 起動トリガー: 「カルテ」または「(の)状況/近況/温度感/履歴/どうなってる」等
@@ -193,7 +252,7 @@ class SkillIntent:
     """自動ルーティングの判定結果。"""
 
     # search|clientkarte|proposal_draft|proposal_review|video_analysis|tiktok_search|
-    # operation_log|video_approval|mail_to_internal_context|mail_followup
+    # operation_log|video_approval|mail_to_internal_context|mail_followup|mail_reply|mail_summary
     skill: str
     client_name: str | None  # clientkarte / mail_* のときに抽出
     reason: str
@@ -247,6 +306,10 @@ def _extract_mail_client(message: str) -> str | None:
     名前の文字種からひらがなを除外しているため、動詞句（「返信してない」等）を巻き込まない。
     抽出不能・短すぎ(1文字)は None（呼び出し側は本人へ再質問する）。
     """
+    # 「○○社」固有名詞があれば最優先（「A社の提案のメール」でも A社 を取れる）。
+    preferred = _preferred_company(message)
+    if preferred:
+        return preferred
     m = _MAIL_CLIENT_RE.search(message.strip())
     if not m:
         return None
@@ -255,6 +318,26 @@ def _extract_mail_client(message: str) -> str | None:
     if not (2 <= len(name) <= 40):
         return None
     # 構造語（受信箱/過去提案/今日/未読 等）は client ではない → None（本人へ再質問）。
+    if name.lower() in _MAIL_CLIENT_STOPWORDS:
+        return None
+    return name
+
+
+def _extract_reply_client(message: str) -> str | None:
+    """mail_reply 用の client 抽出（返信/作成/メールの直前の固有名詞）。
+
+    例:「森ビルへの返信作って」→「森ビル」/「マンダムのメール作成して」→「マンダム」。
+    構造語は stopword で弾く。抽出不能は None（本人へ再質問）。
+    """
+    preferred = _preferred_company(message)
+    if preferred:
+        return preferred
+    m = _REPLY_CLIENT_RE.search(message.strip())
+    if not m:
+        return None
+    name = _TRAILING.sub("", (m.group("name") or "").strip()).strip()
+    if not (2 <= len(name) <= 40):
+        return None
     if name.lower() in _MAIL_CLIENT_STOPWORDS:
         return None
     return name
@@ -446,6 +529,23 @@ def detect_skill(message: str) -> SkillIntent:
             reason="video approval trigger",
             management_no=mno.group(1) if mno else None,
             sheet_id=sid.group(1) if sid else None,
+        )
+
+    # 0d. メール返信ドラフト生成 (mail_reply)。「返信ドラフト/メール作成」は proposal_draft の
+    # 「ドラフト」と衝突するため、_DRAFT_RE より先に判定する。「要返信」(=followup)とは別。
+    if _MAIL_REPLY_RE.search(text):
+        return SkillIntent(
+            skill="mail_reply",
+            client_name=_extract_reply_client(text),
+            reason="mail-reply trigger",
+        )
+
+    # 0e. メール要約 (mail_summary)。「メール要約/まとめ/サマリ」。
+    if _MAIL_SUMMARY_RE.search(text):
+        return SkillIntent(
+            skill="mail_summary",
+            client_name=_extract_mail_client(text),
+            reason="mail-summary trigger",
         )
 
     # 1a. 提案レビュー意図 (レビュー/添削/診断)。draft より先に判定。

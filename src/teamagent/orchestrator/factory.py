@@ -161,6 +161,35 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # メール要約ツール（read-only）。**既定 OFF**（USE_MAIL_SUMMARY_TOOL=1）。
+    if _envflag("USE_MAIL_SUMMARY_TOOL"):
+        from teamagent.skills.mail_summary.skill import MailSummarySkill
+
+        summary_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                MailSummarySkill.name,
+                MailSummarySkill.description,
+                MailSummarySkill,
+                factory=lambda: MailSummarySkill(token_store=summary_store),
+            )
+        )
+
+    # 返信ドラフト生成ツール（gmail.modify・下書き作成のみ・送信は人間）。**既定 OFF**
+    # （USE_MAIL_REPLY_TOOL=1）。利用には各自が gmail.modify を含む connect 再認可が必要。
+    if _envflag("USE_MAIL_REPLY_TOOL"):
+        from teamagent.skills.mail_reply.skill import MailReplySkill
+
+        reply_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                MailReplySkill.name,
+                MailReplySkill.description,
+                MailReplySkill,
+                factory=lambda: MailReplySkill(token_store=reply_store),
+            )
+        )
+
     return specs
 
 

@@ -83,6 +83,10 @@ _GMAIL_DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
         "users.settings.cse.keypairs.obliterate",
         "users.watch",
         "users.stop",
+        # 送信は物理封鎖（gmail.modify は送信も許すが、本 Bot は「下書き作成まで・送信は人間」。
+        # drafts.create は許可、drafts.send / messages.send は封鎖）。
+        "users.messages.send",
+        "users.drafts.send",
     }
 )
 
