@@ -546,7 +546,7 @@ _ACK_DEFAULT = "🤖 受け付けました。処理しています…"
 # 本人の受信箱に由来する個人情報を扱う Skill。@メンション元チャンネルに結果をブロードキャスト
 # せず、本人にだけ ephemeral で返す（共有チャンネルでの情報漏えい防止・G3）。DM は元々本人限定。
 _PRIVATE_SKILLS: frozenset[str] = frozenset(
-    {"mail_reply", "mail_summary", "mail_to_internal_context", "mail_followup"}
+    {"mail_reply", "mail_summary", "mail_to_internal_context", "mail_followup", "connect"}
 )
 
 
@@ -563,8 +563,8 @@ def build_ack_message(message: str) -> str | None:
         skill = detect_skill(message).skill
     except Exception:
         return _ACK_DEFAULT
-    if skill == "chitchat":
-        return None  # 雑談は即答（「🔎検索を受け付けました」のような不自然な ack を出さない）
+    if skill in ("chitchat", "connect"):
+        return None  # 雑談/連携は即答（不自然な「受け付けました」ack を出さない）
     if skill == "search":
         topic = extract_search_topic(message)
         if topic:
@@ -1021,6 +1021,36 @@ class SkillDispatcher:
         logger.info("mail_token_store_rds_initialized")
         return self._token_store
 
+    async def _connect_message(self, user_id: str | None, request_id: str) -> str:
+        """本人専用の Google 連携（認可）リンク文面を作る。スラッシュ/メンション双方で共用。
+
+        スラッシュコマンド未登録の Slack でも、@メンション/DM で「連携」と言えばこの文面を返せる。
+        """
+        email = await self._resolve_user_email(user_id)
+        if not email:
+            return (
+                "🔗 連携の準備に失敗しました"
+                "（管理者へ: Bot に users:read.email スコープが必要です）。"
+            )
+        redirect_uri = os.environ.get("OAUTH_REDIRECT_URI", "").strip()
+        if not redirect_uri:
+            return "🔗 連携機能が未設定です（管理者へ: OAUTH_REDIRECT_URI を設定してください）。"
+        try:
+            from teamagent.adapters.google_oauth_flow import OAuthConsentFlow
+
+            url, _state = OAuthConsentFlow(redirect_uri=redirect_uri).authorization_url(email)
+        except Exception:
+            logger.warning("connect_url_failed", request_id=request_id, user_id=user_id)
+            return "🔗 連携リンクの生成に失敗しました（管理者へ: OAuth 系 env をご確認ください）。"
+        logger.info("connect_link_issued", request_id=request_id, user_id=user_id)
+        return (
+            f"👋 *{email}* の Google を連携します（1回だけ・所要1分）。\n"
+            "下のリンクを開き、表示される権限（メールの読み取り・下書き作成、カレンダー等）を "
+            "*許可* してください:\n"
+            f"{url}\n\n"
+            "「✅ 連携が完了しました」が出れば成功です。あとは AI に話しかけるだけ。"
+        )
+
     def get_mail_link_skill(self) -> Any:
         """MailToInternalContextSkill をキャッシュ（per-user token + SearchSkill 再利用）。"""
         if "mail_to_internal_context" in self._skill_cache:
@@ -1417,6 +1447,11 @@ class SkillDispatcher:
         if intent.skill == "chitchat":
             out = await self.run_chitchat(message, request_id, user_id)
             return out.reply, None
+
+        # Google 連携（スラッシュコマンド未登録でも @メンション/DM で認可リンクを返す）。
+        # 認可リンクは本人専用 → _PRIVATE_SKILLS により ephemeral 配信される。
+        if intent.skill == "connect":
+            return await self._connect_message(user_id, request_id), None
 
         if intent.skill == "video_approval":
             text = await self.run_video_approval(
@@ -2059,49 +2094,16 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         respond: Any,
         command: dict[str, Any],
     ) -> None:
-        """`/teamagent connect`: 本人専用の Google 連携リンクを ephemeral で返す。
+        """`/teamagent_connect`: 本人専用の Google 連携リンクを ephemeral で返す。
 
-        営業はこのリンクを開いて自分の Google で 7サービス(readonly) を許可するだけで連携完了
-        （ターミナル不要）。同意後は connect_web の /oauth2/callback が token を KMS暗号化保存する。
+        ※ スラッシュコマンド未登録の Slack でも、@メンション/DM で「連携」と話しかければ
+        同じ文面（dispatcher の connect 経路）が返る。同意後は connect_web の /oauth2/callback が
+        token を KMS 暗号化保存する。文面生成は `SkillDispatcher._connect_message` に集約。
         """
         await ack()
         request_id = f"req-{uuid.uuid4().hex[:12]}"
-        user_id = command.get("user_id")
-        email = await disp._resolve_user_email(user_id)
-        if not email:
-            await respond(
-                response_type="ephemeral",
-                text="メール取得に失敗（管理者に users:read.email スコープを確認してください）。",
-            )
-            return
-        redirect_uri = os.environ.get("OAUTH_REDIRECT_URI", "").strip()
-        if not redirect_uri:
-            await respond(
-                response_type="ephemeral",
-                text="連携機能が未設定です（管理者: OAUTH_REDIRECT_URI を設定してください）。",
-            )
-            return
-        try:
-            from teamagent.adapters.google_oauth_flow import OAuthConsentFlow
-
-            url, _state = OAuthConsentFlow(redirect_uri=redirect_uri).authorization_url(email)
-        except Exception:
-            logger.warning("teamagent_connect_url_failed", request_id=request_id, user_id=user_id)
-            await respond(
-                response_type="ephemeral",
-                text="連携リンク生成に失敗（管理者に OAuth 系 env の設定を確認）。",
-            )
-            return
-        logger.info("teamagent_connect_link_issued", request_id=request_id, user_id=user_id)
-        await respond(
-            response_type="ephemeral",
-            text=(
-                f"👋 *{email}* の Google を連携します（1回だけ）。\n"
-                "下のリンクを開いて 7サービス(readonly) を *許可* してください:\n"
-                f"{url}\n\n"
-                "「✅ 連携が完了しました」が出れば成功。あとは AI に話しかけるだけです。"
-            ),
-        )
+        text = await disp._connect_message(command.get("user_id"), request_id)
+        await respond(response_type="ephemeral", text=text)
 
     @app.command("/teamagent_search")
     async def handle_teamagent_search(

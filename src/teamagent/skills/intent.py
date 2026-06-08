@@ -31,6 +31,16 @@ _OPLOG_RE = re.compile(
     r"(?:会話|やり取り|スレッド|商談).{0,4}(?:記録|ログ|まとめ)|記録して"
 )
 
+# connect（Google 連携）起動トリガー。スラッシュコマンド未登録環境でも @メンション/DM で
+# 「メール連携」「Google連携」「連携して」「接続して」「connect」等で本人専用の認可リンクを返す。
+# 「連携事例」等の検索を奪わないよう、連携系の語＋意図動詞 or 明示プレフィックスを要求する。
+_CONNECT_RE = re.compile(
+    r"(?:メール|gmail|google|グーグル|アカウント|account)\s*(?:連携|連動|接続)"
+    r"|(?:連携|接続|コネクト|連動)\s*(?:して|したい|する|お願い|よろしく|セットアップ)"
+    r"|連携リンク|認可リンク|連携を?開始|^\s*(?:connect|コネクト)\s*$",
+    re.IGNORECASE,
+)
+
 # mail_to_internal_context 起動トリガー（メール×社内ナレッジ横断）。
 # 「メール/受信/このメール」と「社内/スレッド/関連/カルテ/過去提案…」が近接した時のみ。
 # 単独の「メール管理」「メールの内容を確認」は社内語が無いので発火せず search へ落ちる
@@ -252,7 +262,8 @@ class SkillIntent:
     """自動ルーティングの判定結果。"""
 
     # search|clientkarte|proposal_draft|proposal_review|video_analysis|tiktok_search|
-    # operation_log|video_approval|mail_to_internal_context|mail_followup|mail_reply|mail_summary
+    # operation_log|video_approval|mail_to_internal_context|mail_followup|mail_reply|mail_summary|
+    # connect
     skill: str
     client_name: str | None  # clientkarte / mail_* のときに抽出
     reason: str
@@ -547,6 +558,10 @@ def detect_skill(message: str) -> SkillIntent:
             client_name=_extract_mail_client(text),
             reason="mail-summary trigger",
         )
+
+    # 0f. Google 連携（スラッシュコマンド未登録でも @メンション/DM で認可リンクを返す）。
+    if _CONNECT_RE.search(text):
+        return SkillIntent(skill="connect", client_name=None, reason="connect trigger")
 
     # 1a. 提案レビュー意図 (レビュー/添削/診断)。draft より先に判定。
     if _REVIEW_RE.search(text):

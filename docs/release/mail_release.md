@@ -1,8 +1,15 @@
 # メール機能 リリース手順（営業向け・per-user OAuth）
 
-営業が `/teamagent connect` で自分の Google を認可すると、Slack から自分の受信箱に対して
-4 つのメール機能が使える。全機能 **per-user OAuth・本人の受信箱のみ・結果は本人だけに
-ephemeral 配信**（共有チャンネルに内容を出さない）。
+営業が Google を認可（連携）すると、Slack から自分の受信箱に対して 4 つのメール機能が使える。
+全機能 **per-user OAuth・本人の受信箱のみ・結果は本人だけに ephemeral 配信**（共有チャンネルに
+内容を出さない）。
+
+> ⚠️ **連携の起動方法（重要）**: この Slack アプリには **スラッシュコマンドが登録されていない**
+> （`/teamagent_connect` は「有効なコマンドではありません」になる）。そのため連携は **Bot に
+> 「連携」と話しかける**方式を使う:
+> - 「**@TeamAgent 連携**」（チャンネル）または **DM で「連携」**「メール連携」「Google連携」
+> - → 本人専用の認可リンクが **本人にだけ** 返る（`detect_skill` の connect 経路 / `_connect_message`）。
+> スラッシュコマンドを使いたい場合は別途 api.slack.com でコマンド登録＋再インストールが必要。
 
 | 機能 | Skill | トリガー例 | スコープ |
 |---|---|---|---|
@@ -26,8 +33,8 @@ adapter denylist（`users.messages.send`/`users.drafts.send`/delete/trash 等）
 ## 1. ⚠️ 再同意（gmail.modify への移行・最重要）
 - connect の取得スコープを `gmail.readonly` → **`gmail.modify`** に変更済み
   （`adapters/google_oauth_flow.py` `WORKSPACE_SCOPES`）。
-- **既に readonly で connect 済みの人は、返信ドラフト(`mail_reply`)を使うには `/teamagent connect`
-  を一度やり直す**必要がある（refresh token はスコープ束縛のため）。読み取り3機能は旧トークンでも動く。
+- **既に readonly で connect 済みの人は、返信ドラフト(`mail_reply`)を使うには「連携」をやり直す**
+  必要がある（@TeamAgent に「連携」/ DM。refresh token はスコープ束縛のため）。読み取り3機能は旧トークンでも動く。
 - 「数名だけ」に出すなら、その数名に再 connect してもらえばよい。
 - 同意画面には Gmail の「メールの読み取り・作成・送信・削除」権限が表示される（Google の文言。
   実際の送信/削除は denylist で封鎖）。営業へはその旨を周知する。
@@ -48,7 +55,7 @@ adapter denylist（`users.messages.send`/`users.drafts.send`/delete/trash 等）
   `USE_MAIL_SUMMARY_TOOL` / `USE_MAIL_REPLY_TOOL`（既定 OFF。本番 Slack は rule-based 経路で届く）。
 
 ## 4. 段階ロールアウト
-1. 管理者で smoke（`/teamagent connect` 再認可 → 下記を各機能で確認）:
+1. 管理者で smoke（「@TeamAgent 連携」or DM「連携」で認可 → 下記を各機能で確認）:
    - 「○○社の要返信メール教えて」→ 放置日数つきリスト（本人にだけ表示）
    - 「○○社のメール要約して」→ 横断要約
    - 「○○社のメール、社内で何か話してた?」→ 社内Slack/提案リンク

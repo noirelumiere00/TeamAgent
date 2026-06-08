@@ -481,3 +481,33 @@ def test_private_skills_cover_all_mail_skills() -> None:
         "mail_to_internal_context",
         "mail_followup",
     } <= _PRIVATE_SKILLS
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "連携して",
+        "メール連携したい",
+        "Google連携お願い",
+        "接続して",
+        "connect",
+        "アカウント連携",
+        "連携リンクちょうだい",
+    ],
+)
+def test_routes_to_connect(msg: str) -> None:
+    """スラッシュコマンド未登録でも @メンション/DM の『連携』系で connect 経路に乗る。"""
+    assert detect_skill(msg).skill == "connect"
+
+
+@pytest.mark.parametrize("msg", ["他社との連携事例を教えて", "連携の進め方を調べて"])
+def test_connect_does_not_steal_search(msg: str) -> None:
+    """『連携事例』等は検索意図。connect に奪わせない（意図動詞/プレフィックス必須）。"""
+    assert detect_skill(msg).skill != "connect"
+
+
+def test_connect_is_private_delivery() -> None:
+    """連携リンクは本人専用 → ephemeral 配信対象に含める。"""
+    from teamagent.runtime.slack_bot import _PRIVATE_SKILLS
+
+    assert "connect" in _PRIVATE_SKILLS
