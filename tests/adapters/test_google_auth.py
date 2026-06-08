@@ -106,3 +106,19 @@ def test_connect_client_id_secret_prefers_connect_then_falls_back(
     monkeypatch.setenv("CONNECT_GOOGLE_CLIENT_ID", "connect-id")
     monkeypatch.setenv("CONNECT_GOOGLE_CLIENT_SECRET", "connect-sec")
     assert connect_client_id_secret() == ("connect-id", "connect-sec")  # prefer
+
+
+def test_connect_client_id_secret_does_not_mix_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """連携IDがあり連携secretが欠けても、共有secretへ部分フォールバックしない（食い違い=invalid_client防止）。"""
+    from teamagent.adapters.google_auth import connect_client_id_secret
+
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "shared-id")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "shared-sec")
+    monkeypatch.setenv("CONNECT_GOOGLE_CLIENT_ID", "connect-id")
+    monkeypatch.delenv("CONNECT_GOOGLE_CLIENT_SECRET", raising=False)
+    # 連携IDがあるので連携ペアを返す。secretは None（共有secretを混ぜない）。
+    cid, sec = connect_client_id_secret()
+    assert cid == "connect-id"
+    assert sec is None  # ← 共有 "shared-sec" を混ぜない

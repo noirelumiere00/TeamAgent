@@ -140,7 +140,14 @@ systemctl restart teamagent-bot teamagent-connect
 sleep 6
 echo "----- teamagent-bot -----"; systemctl status teamagent-bot --no-pager | tail -15
 echo "----- teamagent-connect -----"; systemctl status teamagent-connect --no-pager | tail -15
-ss -ltnp 2>/dev/null | grep -q ':8788' && echo "OK: connect_web listening on 8788" || echo "WARN: connect_web が 8788 を listen していない（連携不可）"
+# connect_web は load_secrets 完了後に 8788 を bind するため起動直後は未listenがありうる。
+# 単発チェックは誤報になるので最大~30秒リトライ（ALB healthy なのに WARN を出す問題の対策）。
+_LISTEN=""
+for _i in $(seq 1 10); do
+  if ss -ltnp 2>/dev/null | grep -q ':8788'; then _LISTEN=1; break; fi
+  sleep 3
+done
+[[ -n "$_LISTEN" ]] && echo "OK: connect_web listening on 8788" || echo "WARN: connect_web が 8788 を listen していない（連携不可・systemctl status を確認）"
 RSH
 )
 REMOTE="${REMOTE/__BUCKET__/$BUCKET}"
