@@ -8,7 +8,7 @@ from __future__ import annotations
 import base64
 
 from teamagent.adapters.google_oauth_flow import (
-    WORKSPACE_READONLY_SCOPES,
+    WORKSPACE_SCOPES,
     make_state,
     verify_state,
 )
@@ -40,6 +40,9 @@ def test_verify_state_rejects_tampered_email() -> None:
     assert verify_state(tampered, secret=_SECRET) is None
 
 
-def test_workspace_scopes_are_all_readonly() -> None:
-    assert len(WORKSPACE_READONLY_SCOPES) == 7
-    assert all(s.endswith(".readonly") for s in WORKSPACE_READONLY_SCOPES)
+def test_workspace_scopes_gmail_modify_rest_readonly() -> None:
+    # Gmail のみ modify（読み+下書き作成）。他6つは readonly。Internal アプリ=審査不要。
+    assert len(WORKSPACE_SCOPES) == 7
+    assert WORKSPACE_SCOPES[0].endswith("/auth/gmail.modify")
+    assert all(s.endswith(".readonly") for s in WORKSPACE_SCOPES[1:])
+    assert not any(s.endswith("gmail.readonly") for s in WORKSPACE_SCOPES)

@@ -150,6 +150,9 @@ _EXPECTED_DESTRUCTIVE_METHODS = (
     "users.settings.cse.keypairs.obliterate",
     "users.watch",
     "users.stop",
+    # gmail.modify 付与に伴い送信系も物理封鎖（下書き作成 drafts.create のみ許可）。
+    "users.messages.send",
+    "users.drafts.send",
 )
 
 
@@ -212,17 +215,15 @@ def test_destructive_method_emits_structured_log() -> None:
 _SAFE_METHODS = (
     "users.messages.list",
     "users.messages.get",
-    "users.messages.send",
     "users.messages.modify",
     "users.threads.list",
     "users.threads.get",
     "users.labels.list",
     "users.labels.get",
     "users.labels.create",
-    "users.drafts.create",
+    "users.drafts.create",  # 下書き作成は許可（送信 drafts.send は封鎖）
     "users.drafts.get",
     "users.drafts.list",
-    "users.drafts.send",
 )
 
 
