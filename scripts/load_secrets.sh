@@ -109,6 +109,19 @@ _load() {
         fi
     fi
 
+    # OAuth state HMAC secret（連携 connect の CSRF/本人性検証用・平文禁止＝Secrets Manager 経由）。
+    # Bot(make_state) と connect_web(verify_state) で **同一値** を共有する必要がある。
+    if [[ -n "${OAUTH_STATE_SECRET_NAME:-}" ]]; then
+        local osecret
+        osecret="$(_get_secret "$OAUTH_STATE_SECRET_NAME" 2>/dev/null || true)"
+        if [[ -n "$osecret" ]]; then
+            export OAUTH_STATE_SECRET="$osecret"
+            _log "OK: OAUTH_STATE_SECRET loaded"
+        else
+            _log "WARN: OAUTH_STATE_SECRET_NAME 設定済だが取得失敗（連携が verify_state で失敗）"
+        fi
+    fi
+
     # Google OAuth (Drive + Gmail) — JSON 形式の単一 secret から 3 値を展開
     # secret-string は {"client_id":..., "client_secret":..., "refresh_token":...} 形式
     if [[ -n "${GOOGLE_OAUTH_SECRET_NAME:-}" ]]; then

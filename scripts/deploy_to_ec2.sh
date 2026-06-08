@@ -49,6 +49,19 @@ if grep -Eiq 'xoxb-|xapp-|AKIA[0-9A-Z]{15}|-----BEGIN|PRIVATE KEY' "$WORK/teamag
 fi
 echo "   OK（実値なし）"
 
+echo "== 3b. 連携 必須 env 存在チェック（沈黙故障=全員未連携 を防ぐ）=="
+_MISSING=""
+for k in OAUTH_REDIRECT_URI OAUTH_KMS_KEY_ID OAUTH_KMS_REGION OAUTH_STATE_SECRET_NAME CONNECT_WEB_HOST; do
+  grep -qE "^${k}=" "$WORK/teamagent.env.base" || _MISSING="$_MISSING $k"
+done
+if [[ -n "$_MISSING" ]]; then
+  echo "ERROR: env.base に連携必須キーが不足:${_MISSING}"
+  echo "       無いと Bot は起動するが TokenStore が InMemory に落ち『全員未連携』の沈黙故障になる。"
+  echo "       infra/deploy/ec2.overrides.env を確認してください。"
+  exit 1
+fi
+echo "   OK（連携 env 一式あり）"
+
 if [[ "$GO" -ne 1 ]]; then
   echo ""
   echo "== DRY-RUN 完了 =="
@@ -96,11 +109,37 @@ if ! swapon --show | grep -q /swapfile; then
   chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile
   grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
+# connect_web(OAuth コールバック /oauth2/callback) を常駐させる unit を冪等に設置。
+# 既存インスタンスは user_data を再実行しないため、デプロイ毎にここで ensure する。
+# これが無いと ALB ターゲットが永久 UNHEALTHY＝連携リンクは出ても完了しない。
+cat > /etc/systemd/system/teamagent-connect.service <<'CONNSVC'
+[Unit]
+Description=TeamAgent connect_web (OAuth callback receiver)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+[Service]
+Type=simple
+WorkingDirectory=/opt/teamagent/app
+ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source scripts/load_secrets.sh; set +a; exec ./.venv/bin/python -m teamagent.connect_web'
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+[Install]
+WantedBy=multi-user.target
+CONNSVC
+# 旧 connect_web(systemd管理外の手動起動)が 8788 を掴んでいると unit が bind 失敗するため先に止める。
+systemctl stop teamagent-connect 2>/dev/null || true
+( command -v fuser >/dev/null && fuser -k 8788/tcp ) 2>/dev/null || pkill -f 'teamagent.connect_web' 2>/dev/null || true
+sleep 2
 systemctl daemon-reload
-systemctl enable teamagent-bot
-systemctl restart teamagent-bot
+systemctl enable teamagent-bot teamagent-connect
+systemctl restart teamagent-bot teamagent-connect
 sleep 6
-systemctl status teamagent-bot --no-pager | tail -20
+echo "----- teamagent-bot -----"; systemctl status teamagent-bot --no-pager | tail -15
+echo "----- teamagent-connect -----"; systemctl status teamagent-connect --no-pager | tail -15
+ss -ltnp 2>/dev/null | grep -q ':8788' && echo "OK: connect_web listening on 8788" || echo "WARN: connect_web が 8788 を listen していない（連携不可）"
 RSH
 )
 REMOTE="${REMOTE/__BUCKET__/$BUCKET}"
