@@ -89,18 +89,31 @@ def build_oauth_credentials(preferred_scopes: Sequence[str]) -> Any | None:
     )
 
 
+def connect_client_id_secret() -> tuple[str | None, str | None]:
+    """per-user 連携(connect)用の OAuth クライアント(client_id, client_secret)を返す。
+
+    連携(ブラウザ→API Gateway リダイレクト)は **ウェブ型**クライアントが必須、一方で共有OAuth
+    (動画シート/Drive・loopback・書込スコープ)は **デスクトップ型**が自然＝両者は別クライアント。
+    そこで連携用は `CONNECT_GOOGLE_CLIENT_ID/SECRET` を優先し、未設定なら従来の共有
+    `GOOGLE_CLIENT_ID/SECRET` にフォールバックする（後方互換）。これで「連携=web / 共有=desktop」を
+    1つの secret を奪い合わずに両立できる。
+    """
+    cid = os.environ.get("CONNECT_GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_CLIENT_ID")
+    sec = os.environ.get("CONNECT_GOOGLE_CLIENT_SECRET") or os.environ.get("GOOGLE_CLIENT_SECRET")
+    return cid, sec
+
+
 def build_user_credentials(token: OAuthToken) -> Any:
     """本人の refresh token から OAuth Credentials を組み立てる（per-user・connect 用）。
 
-    共有 OAuth クライアント(env GOOGLE_CLIENT_ID/SECRET)を使う。未設定/未認可は ValueError
-    （fail-closed＝未認可は弾く）。
+    連携用 OAuth クライアント（CONNECT_GOOGLE_CLIENT_ID/SECRET 優先・無ければ GOOGLE_*）を使う。
+    未設定/未認可は ValueError（fail-closed＝未認可は弾く）。
     """
-    client_id = os.environ.get("GOOGLE_CLIENT_ID")
-    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    client_id, client_secret = connect_client_id_secret()
     if not (client_id and client_secret):
         raise ValueError(
-            "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET が未設定です"
-            "（W1: Google Cloud で OAuth クライアントを作成してください）"
+            "連携用 OAuth クライアントが未設定です"
+            "（CONNECT_GOOGLE_CLIENT_ID/SECRET または GOOGLE_CLIENT_ID/SECRET を設定）"
         )
     if not token.refresh_token:
         raise ValueError("OAuthToken.refresh_token が空です（本人が未認可）")
