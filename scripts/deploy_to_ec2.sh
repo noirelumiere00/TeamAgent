@@ -51,7 +51,8 @@ echo "   OK（実値なし）"
 
 echo "== 3b. 連携 必須 env 存在チェック（沈黙故障=全員未連携 を防ぐ）=="
 _MISSING=""
-for k in OAUTH_REDIRECT_URI OAUTH_KMS_KEY_ID OAUTH_KMS_REGION OAUTH_STATE_SECRET_NAME CONNECT_WEB_HOST; do
+for k in OAUTH_REDIRECT_URI OAUTH_KMS_KEY_ID OAUTH_KMS_REGION OAUTH_STATE_SECRET_NAME CONNECT_WEB_HOST \
+         CONNECT_GOOGLE_CLIENT_ID CONNECT_GOOGLE_CLIENT_SECRET_NAME; do
   grep -qE "^${k}=" "$WORK/teamagent.env.base" || _MISSING="$_MISSING $k"
 done
 if [[ -n "$_MISSING" ]]; then
