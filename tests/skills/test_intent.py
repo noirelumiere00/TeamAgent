@@ -511,3 +511,9 @@ def test_connect_is_private_delivery() -> None:
     from teamagent.runtime.slack_bot import _PRIVATE_SKILLS
 
     assert "connect" in _PRIVATE_SKILLS
+
+
+@pytest.mark.parametrize("msg", ["連携", "接続", "再連携", "連携！", "connect", "コネクト"])
+def test_routes_to_connect_bare_word(msg: str) -> None:
+    """メッセージ全体が連携系の語だけ（単独「連携」等）でも connect に乗る（検索に流さない）。"""
+    assert detect_skill(msg).skill == "connect"

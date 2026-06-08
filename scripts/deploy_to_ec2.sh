@@ -144,11 +144,15 @@ RSH
 )
 REMOTE="${REMOTE/__BUCKET__/$BUCKET}"
 B64="$(printf '%s' "$REMOTE" | base64 | tr -d '\n')"
-CID=$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE_ID" \
+CID="$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE_ID" \
   --document-name AWS-RunShellScript --comment "TeamAgent bot deploy" \
   --parameters commands="echo $B64 | base64 -d | bash" \
-  --query Command.CommandId --output text)
-echo "   CommandId=$CID（完了待ち・最大10分）"
+  --query Command.CommandId --output text 2>/dev/null || true)"
+if [[ -z "${CID:-}" || "${CID}" == "None" ]]; then
+  echo "ERROR: SSM send-command が CommandId を返しませんでした（IAM/接続/サイズを確認）" >&2
+  exit 1
+fi
+echo "   CommandId=${CID}（完了待ち・最大10分）"
 for i in $(seq 1 60); do
   sleep 10
   ST=$(aws ssm get-command-invocation --region "$REGION" --command-id "$CID" --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)

@@ -74,10 +74,16 @@ class OAuthConsentFlow:
     def _flow(self) -> Any:
         from google_auth_oauthlib.flow import Flow
 
-        client_id = os.environ.get("GOOGLE_CLIENT_ID")
-        client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+        from teamagent.adapters.google_auth import connect_client_id_secret
+
+        # 連携(web)用クライアント: CONNECT_GOOGLE_CLIENT_ID/SECRET 優先・無ければ GOOGLE_*。
+        # 共有(desktop)クライアントとは分離する（B案）。
+        client_id, client_secret = connect_client_id_secret()
         if not (client_id and client_secret):
-            raise ValueError("GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET が未設定です（W1）")
+            raise ValueError(
+                "連携用 OAuth クライアントが未設定です"
+                "（CONNECT_GOOGLE_CLIENT_ID/SECRET または GOOGLE_CLIENT_ID/SECRET）"
+            )
         config = {
             "web": {
                 "client_id": client_id,

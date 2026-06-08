@@ -122,6 +122,18 @@ _load() {
         fi
     fi
 
+    # 連携(per-user web)専用クライアントの secret（共有 desktop クライアントと分離・B案）。
+    if [[ -n "${CONNECT_GOOGLE_CLIENT_SECRET_NAME:-}" ]]; then
+        local csecret
+        csecret="$(_get_secret "$CONNECT_GOOGLE_CLIENT_SECRET_NAME" 2>/dev/null || true)"
+        if [[ -n "$csecret" ]]; then
+            export CONNECT_GOOGLE_CLIENT_SECRET="$csecret"
+            _log "OK: CONNECT_GOOGLE_CLIENT_SECRET loaded"
+        else
+            _log "WARN: CONNECT_GOOGLE_CLIENT_SECRET_NAME 設定済だが取得失敗（連携が client未設定で失敗）"
+        fi
+    fi
+
     # Google OAuth (Drive + Gmail) — JSON 形式の単一 secret から 3 値を展開
     # secret-string は {"client_id":..., "client_secret":..., "refresh_token":...} 形式
     if [[ -n "${GOOGLE_OAUTH_SECRET_NAME:-}" ]]; then
