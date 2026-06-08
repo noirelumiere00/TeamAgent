@@ -11,7 +11,7 @@ license = { text = "Proprietary" }
 
 dependencies = [
     # --- Claude Agent SDK ---
-    "claude-agent-sdk==0.2.87",  # 同梱Node CLIの版ドリフト防止のため厳密pin (Phase0)
+    "claude-agent-sdk==0.2.93",  # 同梱Node CLIの版ドリフト防止のため厳密pin (Phase0)
     "anthropic>=0.40.0",
     "boto3>=1.34.0",  # Bedrock 経由でも使える
 
