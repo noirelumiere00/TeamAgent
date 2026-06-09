@@ -178,6 +178,16 @@ module = [
 ]
 disallow_untyped_calls = false
 
+# mcp(低レベル Server) の @server.list_tools()/@server.call_tool() デコレータは型注釈が
+# 無く strict の disallow_untyped_decorators / disallow_untyped_calls に引っかかる。
+# 境界ラッパ(mcp_gateway.server)ではこの2チェックのみ無効化する。
+[[tool.mypy.overrides]]
+module = [
+    "teamagent.mcp_gateway.server",
+]
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
