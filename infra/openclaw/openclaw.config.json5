@@ -1,0 +1,100 @@
+// OpenClaw 設定テンプレ（~/.openclaw/openclaw.json にマウント / perm 600・Git レビュー必須）
+// JSON5（コメント可）。★ 秘密値は書かない。${VAR}（英大文字）で注入された環境変数を参照するだけ。
+//
+// 設計意図（§A 一次ソース確認に基づく）:
+//  - tool を最小化し、exec/shell/fs/browser を構造的に塞ぐ → 2026-05-28 の exec/shell 系 CVE 群を無効化。
+//  - 営業データには触れず、唯一の能力は「Slack 受け」「Bedrock 推論」「teamagent MCP の読取系 tool」だけ。
+//  - per-user 認可は OpenClaw でなく MCP 境界内で行う（OpenClaw は単一信頼オペレータモデル）。
+{
+  // ── エージェント／ペルソナ ───────────────────────────────────────────────
+  agents: {
+    defaults: {
+      // P1 はプロアクティブ無効（heartbeat 0m）。プロアクティブは P2/WS-D で HEARTBEAT.md と共に解禁。
+      heartbeat: { every: "0m" },
+      // ファイル操作はワークスペース内に限定（万一 fs tool が出ても外へ出さない）。
+      sandbox: { mode: "all", backend: "docker" },
+    },
+    list: [
+      {
+        id: "teamagent",
+        default: true,
+        model: "jp.anthropic.claude-sonnet-4-6-v1:0", // ★deploy 時に list-inference-profiles で要確認
+        identity: { name: "TeamAgent", emoji: "🧭" },
+        skipBootstrap: true, // 自動生成させず、レビュー済み SOUL.md/HEARTBEAT.md のみ使う
+      },
+    ],
+  },
+
+  // ── tool ポリシー（最小権限＝攻撃面の縮小） ───────────────────────────────
+  tools: {
+    profile: "messaging", // 既定を最小級に（full/coding は使わない）
+    exec: { mode: "deny", applyPatch: { workspaceOnly: true } }, // host コマンド実行を禁止
+    fs: { workspaceOnly: true },
+    // 危険な外部安全バイパスは一切使わない（既定 false のまま）。
+    sandbox: {
+      // sandbox セッションでも MCP の読取 tool だけは見せる（bundle-mcp を許可）。
+      tools: { alsoAllow: ["bundle-mcp"] },
+    },
+  },
+
+  // ── ゲートウェイ（ローカル限定） ─────────────────────────────────────────
+  gateway: {
+    bind: "loopback", // 0.0.0.0 へは絶対に出さない。管理は SSH/Tailscale。
+    // 共有 gateway secret は full operator scope 相当＝root 級。値は注入し、loopback+ファイル perm で守る。
+    auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" },
+  },
+
+  // ── ブラウザ（SSRF 既定の厳格を維持・私設網へ出さない） ───────────────────
+  browser: {
+    // dangerouslyAllowPrivateNetwork は設定しない（=private/internal 宛は遮断のまま）。
+  },
+
+  // ── MCP（外部 stdio ではなく streamable-http で creds 分離） ─────────────────
+  mcp: {
+    servers: {
+      teamagent: {
+        url: "http://teamagent-mcp:8787/mcp", // mcpnet 内部のみ到達可
+        transport: "streamable-http",
+        headers: { Authorization: "Bearer ${TEAMAGENT_MCP_BEARER}" }, // 値は注入
+        timeout: 60,
+        // P1 は読取系だけ露出（重操作は現行 Bot 側／HITL は P2/WS-D で別 tool 化）。
+        toolFilter: {
+          include: [
+            "search",
+            "clientkarte",
+            "mail_summary",
+            "mail_followup",
+            "mail_constraints",
+            "mail_to_internal_context",
+            "video_*",
+          ],
+          // 念のため書込み/下書き/確定系は明示除外（送信/削除はそもそも非実装）。
+          exclude: ["*write*", "*draft*", "*reply*", "proposal_deck", "*confirm*"],
+        },
+      },
+    },
+  },
+
+  // ── モデルプロバイダ：Amazon Bedrock（IAM/aws-sdk・APIキー不要） ───────────
+  models: {
+    providers: {
+      "amazon-bedrock": {
+        baseUrl: "https://bedrock-runtime.ap-northeast-1.amazonaws.com", // 東京
+        api: "bedrock-converse-stream",
+        auth: "aws-sdk", // ← APIキー無し。インスタンスロール / 既定資格情報チェーン。
+        // discovery は無効化（ListFoundationModels を IAM から外せる＝最小権限）。
+        discovery: { enabled: false },
+        models: [
+          {
+            id: "jp.anthropic.claude-sonnet-4-6-v1:0",
+            name: "Claude Sonnet 4.6 (Bedrock Tokyo)",
+            reasoning: true,
+            input: ["text"],
+            contextWindow: 200000,
+            maxTokens: 8192,
+          },
+        ],
+      },
+    },
+  },
+}

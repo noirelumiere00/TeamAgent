@@ -1,0 +1,41 @@
+{
+  "_comment": "TeamAgent-MCP バックエンドロールの権限ポリシー（雛形）。creds を持つのはこちらだけ。対象 Secret 名・KMS 鍵・RDS リソースは本人の本番設定に合わせ <…> を置換し最小限に絞る。secretsmanager は GetSecretValue を“対象 Secret ARN だけ”に限定（* にしない）。",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOnlyTargetSecrets",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": [
+        "arn:aws:secretsmanager:ap-northeast-1:<ACCOUNT_ID>:secret:teamagent/*"
+      ]
+    },
+    {
+      "Sid": "DecryptOAuthKeyOnly",
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt"],
+      "Resource": ["arn:aws:kms:ap-northeast-1:<ACCOUNT_ID>:key/<OAUTH_KMS_KEY_ID>"]
+    },
+    {
+      "Sid": "RdsIamConnect",
+      "Effect": "Allow",
+      "Action": ["rds-db:connect"],
+      "Resource": [
+        "arn:aws:rds-db:ap-northeast-1:<ACCOUNT_ID>:dbuser:<DB_RESOURCE_ID>/<DB_USER>"
+      ]
+    },
+    {
+      "Sid": "BedrockL2Loop",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:ap-northeast-1:<ACCOUNT_ID>:inference-profile/jp.anthropic.*",
+        "arn:aws:bedrock:*::foundation-model/anthropic.*",
+        "arn:aws:bedrock:ap-northeast-1::foundation-model/cohere.rerank*"
+      ]
+    }
+  ]
+}
