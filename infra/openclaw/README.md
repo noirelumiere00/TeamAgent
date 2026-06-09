@@ -34,7 +34,7 @@ TeamAgent を OpenClaw＋Claude(Bedrock) の自律型エージェントへ移行
 | ファイル | 役割 |
 |---|---|
 | `docker-compose.yml` | 隔離 gateway（digest pin・read_only・cap_drop ALL・no-new-privileges・loopback・資源上限）＋ creds 保持の `teamagent-mcp`。私設網 `mcpnet`(internal) で接続 |
-| `openclaw.config.json5` | tool 最小化（exec deny / fs workspaceOnly / browser 既定厳格）・MCP(http,bearer,読取系のみ)・Bedrock(aws-sdk,東京,discovery 無効) |
+| `openclaw.config.json5` | tool 最小化（exec deny / fs workspaceOnly / browser 既定厳格）・MCP(http,bearer,読取系のみ)・Bedrock(aws-sdk,東京,discovery 無効)。**§D: 外側=Haiku4.5＋prompt caching(`cacheRetention:"long"`)＋`session.dmScope:"per-channel-peer"`(多人数の会話分離)** |
 | `iam/openclaw-role.policy.json` | 外殻ロール: `bedrock:InvokeModel(+Stream)` のみ Allow / Secrets・KMS・RDS は明示 Deny |
 | `iam/mcp-backend-role.policy.json` | バックエンドロール: 対象 Secret・KMS decrypt・RDS connect・L2 Bedrock |
 | `SOUL.md` / `HEARTBEAT.md` | ペルソナ / （P2 用）プロアクティブ・チェックリスト（P1 は heartbeat 無効） |

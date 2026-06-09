@@ -13,17 +13,27 @@
       heartbeat: { every: "0m" },
       // ファイル操作はワークスペース内に限定（万一 fs tool が出ても外へ出さない）。
       sandbox: { mode: "all", backend: "docker" },
+      // §D 速度チューニング: prompt caching で安定prefix(system+tool定義)をキャッシュし2ターン目を高速化。
+      models: {
+        "amazon-bedrock/jp.anthropic.claude-haiku-4-5-v1:0": {
+          params: { cacheRetention: "long" }, // ★モデルref表記は deploy 時に要確認
+        },
+      },
     },
     list: [
       {
         id: "teamagent",
         default: true,
-        model: "jp.anthropic.claude-sonnet-4-6-v1:0", // ★deploy 時に list-inference-profiles で要確認
+        // §D: 外側ループ=Haiku4.5（ツール判断＋最終整形＝速い/安い）。重い合成は MCP 境界内(L2)に任せる。
+        model: "jp.anthropic.claude-haiku-4-5-v1:0", // ★deploy 時に list-inference-profiles で要確認
         identity: { name: "TeamAgent", emoji: "🧭" },
         skipBootstrap: true, // 自動生成させず、レビュー済み SOUL.md/HEARTBEAT.md のみ使う
       },
     ],
   },
+
+  // ── セッション分離（多人数で会話が混ざらないように／§D・既定 main は Alice↔Bob 漏れる） ──
+  session: { dmScope: "per-channel-peer" },
 
   // ── tool ポリシー（最小権限＝攻撃面の縮小） ───────────────────────────────
   tools: {
@@ -57,6 +67,7 @@
         transport: "streamable-http",
         headers: { Authorization: "Bearer ${TEAMAGENT_MCP_BEARER}" }, // 値は注入
         timeout: 60,
+        // §D: ツールは「データ/構造化結果」を返し、最終合成は外側Haikuが行う（LLM二重化=二重コスト回避）。
         // P1 は読取系だけ露出（重操作は現行 Bot 側／HITL は P2/WS-D で別 tool 化）。
         toolFilter: {
           include: [
@@ -86,7 +97,15 @@
         discovery: { enabled: false },
         models: [
           {
-            id: "jp.anthropic.claude-sonnet-4-6-v1:0",
+            id: "jp.anthropic.claude-haiku-4-5-v1:0", // §D: 外側ループ既定（速い・安い）
+            name: "Claude Haiku 4.5 (Bedrock Tokyo)",
+            reasoning: false,
+            input: ["text"],
+            contextWindow: 200000,
+            maxTokens: 8192,
+          },
+          {
+            id: "jp.anthropic.claude-sonnet-4-6-v1:0", // 重い処理用（任意・通常は MCP 側 L2 が使用）
             name: "Claude Sonnet 4.6 (Bedrock Tokyo)",
             reasoning: true,
             input: ["text"],
