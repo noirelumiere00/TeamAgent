@@ -11,6 +11,7 @@ OC（OpenClaw）前面では OpenClaw を信用せず、Slack `user_id` から�
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -75,6 +76,20 @@ def no_access_metadata() -> dict[str, Any]:
         KEY_USER_ROLE: ROLE_MEMBER,
         KEY_IDENTITY_VERIFIED: False,
     }
+
+
+def shared_company_domains_from_env() -> frozenset[str] | None:
+    """``TEAMAGENT_SHARED_COMPANY_DOMAINS``（カンマ区切り）の会社共有ドメイン集合。未設定は None。
+
+    会社共有モデル(§G)の**単一真実源**。MCP gateway（会社メンバー identity の ``user_groups``）と
+    ingest（``documents.acl_groups`` への会社ドメイン付与）が同じ値を使うことで、
+    「会社メンバーが全社の共有ナレッジを読める」を一貫させる（片側だけ設定するズレを防ぐ）。
+    """
+    raw = os.environ.get("TEAMAGENT_SHARED_COMPANY_DOMAINS")
+    if not raw:
+        return None
+    domains = frozenset(d.strip().lower() for d in raw.split(",") if d.strip())
+    return domains or None
 
 
 def company_member_metadata(allowed_domains: frozenset[str]) -> dict[str, Any]:

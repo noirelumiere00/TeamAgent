@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 import structlog
 
+from teamagent.identity import shared_company_domains_from_env
 from teamagent.ingest.loader import (
     GDriveFolderSpec,
     GSheetSpec,
@@ -32,6 +33,16 @@ from teamagent.ingest.loader import (
 from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepository
 
 logger = structlog.get_logger(__name__)
+
+
+def _company_acl_groups() -> list[str]:
+    """§G 会社共有: ``TEAMAGENT_SHARED_COMPANY_DOMAINS`` を ``documents.acl_groups`` に付与する。
+
+    未設定なら ``[]``（従来挙動・後方互換）。設定時は会社メンバー identity が
+    RLS の acl_groups intersect で当該 doc を読める＝社内ナレッジの横連携を有効化。
+    Slack/GSheet 取込は従来 channel/owner スコープのため、本付与で会社共有にそろえる。
+    """
+    return sorted(shared_company_domains_from_env() or frozenset())
 
 
 # -----------------------------------------------------------
@@ -232,6 +243,7 @@ def _ingest_slack_channel(
             title=f"{spec.channel_name} {parent.ts}",
             owner_email=owner_email,
             acl_emails=acl_emails,
+            acl_groups=_company_acl_groups(),  # §G 会社共有（未設定なら []）
             metadata=doc_metadata,
             modified_at=None,
         )
@@ -804,6 +816,7 @@ def _ingest_gsheet(
                 title=f"{spec.sheet_name} - {tab.tab_name} - row {row_idx}",
                 owner_email=owner_email,
                 acl_emails=[owner_email],
+                acl_groups=_company_acl_groups(),  # §G 会社共有（未設定なら []）
                 metadata={**spec.extra_metadata, "tab_name": tab.tab_name, "row_idx": row_idx},
                 modified_at=None,
             )

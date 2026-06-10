@@ -43,6 +43,7 @@ class _FakeRepository:
             {
                 "external_id": doc.external_id,
                 "source_type": doc.source_type,
+                "acl_groups": list(doc.acl_groups),
                 "chunk_count": len(chunks),
                 "request_id": request_id,
             }
@@ -200,6 +201,17 @@ def test_ingest_slack_channel_handler_calls_repository(
     call = repo.upsert_calls[0]
     assert call["external_id"] == "C0XYZ:1700000001.000001"
     assert call["source_type"] == "slack"
+    assert call["acl_groups"] == []  # §G env 未設定なら従来どおり空（後方互換）
+
+
+def test_company_acl_groups_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§G: TEAMAGENT_SHARED_COMPANY_DOMAINS 設定時のみ会社ドメインを acl_groups に付与。"""
+    from teamagent.ingest.pipeline import _company_acl_groups
+
+    monkeypatch.delenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", raising=False)
+    assert _company_acl_groups() == []
+    monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "VectorInc.co.jp")
+    assert _company_acl_groups() == ["vectorinc.co.jp"]
 
 
 def test_ingest_slack_channel_dry_run_skips_repository(

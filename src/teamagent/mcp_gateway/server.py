@@ -33,6 +33,7 @@ from teamagent.identity import (
     build_rls_metadata,
     company_member_metadata,
     no_access_metadata,
+    shared_company_domains_from_env,
 )
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import SkillContext
@@ -236,12 +237,8 @@ def build_slack_identity_resolver() -> IdentityResolver | None:
 
 
 def company_shared_groups_from_env() -> frozenset[str] | None:
-    """``TEAMAGENT_SHARED_COMPANY_DOMAINS``（カンマ区切り）。設定時は会社共有モード（§G）。"""
-    raw = os.environ.get("TEAMAGENT_SHARED_COMPANY_DOMAINS")
-    if not raw:
-        return None
-    groups = frozenset(d.strip().lower() for d in raw.split(",") if d.strip())
-    return groups or None
+    """会社共有モード（§G）のドメイン集合。identity の単一真実源に委譲（ingest と同値を保証）。"""
+    return shared_company_domains_from_env()
 
 
 def build_server(
