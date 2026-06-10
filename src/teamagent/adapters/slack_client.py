@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -19,7 +20,15 @@ import httpx
 import structlog
 from slack_sdk.web.async_client import AsyncWebClient
 
+from teamagent.identity import ResolvedIdentity, normalize_email
+
 logger = structlog.get_logger(__name__)
+
+# Slack user id 形式（U=通常 / W=Enterprise Grid）。偽 id は API 前に弾く。
+_SLACK_USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{2,}$")
+# 身元解決キャッシュ TTL（秒）。成功は長め・失敗(None)は短め（退職/取消の反映を早める）。
+_IDENTITY_TTL_OK = 3600.0
+_IDENTITY_TTL_NONE = 60.0
 
 
 @dataclass(frozen=True)
@@ -41,6 +50,8 @@ class SlackClient:
     def __init__(self, bot_token: str, client: AsyncWebClient | None = None) -> None:
         self._bot_token = bot_token
         self._client = client or AsyncWebClient(token=bot_token)
+        # user_id → (身元 or None, 失効 monotonic 時刻)。anti-spoof 解決の TTL キャッシュ。
+        self._identity_cache: dict[str, tuple[ResolvedIdentity | None, float]] = {}
 
     @classmethod
     def from_env(cls) -> SlackClient:
@@ -152,6 +163,77 @@ class SlackClient:
             latency_ms=latency_ms,
         )
         return profile
+
+    async def resolve_identity(
+        self, user_id: str | None, *, request_id: str = "-"
+    ) -> ResolvedIdentity | None:
+        """Slack ``user_id`` をサーバ側で身元解決する（OC 申告を信用しない anti-spoof の起点）。
+
+        次のいずれかなら **None=fail-closed**: id 形式不正/``unknown``、外部ワークスペース
+        （``SLACK_TEAM_ID`` 設定時に ``team_id`` 不一致）、ゲスト（restricted/ultra_restricted）、
+        is_stranger（Slack Connect 外部）、is_bot、削除済、email 欠落/不正。
+        成功時のみ正規化済み email を持つ ``ResolvedIdentity`` を返す。TTL キャッシュ付き。
+        """
+        if not user_id or not _SLACK_USER_ID_RE.match(user_id):
+            return None
+        now = time.monotonic()
+        cached = self._identity_cache.get(user_id)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        identity = await self._resolve_identity_uncached(user_id, request_id=request_id)
+        ttl = _IDENTITY_TTL_OK if identity is not None else _IDENTITY_TTL_NONE
+        self._identity_cache[user_id] = (identity, now + ttl)
+        return identity
+
+    async def _resolve_identity_uncached(
+        self, user_id: str, *, request_id: str
+    ) -> ResolvedIdentity | None:
+        try:
+            resp = await self._client.users_info(user=user_id)
+        except Exception:
+            logger.warning("slack_resolve_identity_failed", request_id=request_id, user_id=user_id)
+            return None
+
+        user: dict[str, Any] = dict(resp.get("user") or {})
+        if (
+            user.get("deleted")
+            or user.get("is_bot")
+            or user.get("is_restricted")
+            or user.get("is_ultra_restricted")
+            or user.get("is_stranger")
+        ):
+            logger.info(
+                "slack_resolve_identity_rejected", request_id=request_id, reason="guest_or_bot"
+            )
+            return None
+
+        expected_team = os.environ.get("SLACK_TEAM_ID")
+        if expected_team and str(user.get("team_id") or "") != expected_team:
+            logger.info(
+                "slack_resolve_identity_rejected", request_id=request_id, reason="foreign_team"
+            )
+            return None
+
+        profile: dict[str, Any] = dict(user.get("profile") or {})
+        email = normalize_email(profile.get("email"))
+        if email is None:
+            return None
+
+        raw_display = profile.get("display_name") or profile.get("real_name")
+        display = raw_display if isinstance(raw_display, str) and raw_display else None
+        return ResolvedIdentity(
+            slack_user_id=user_id,
+            email=email,
+            is_member=True,
+            groups=(),
+            display=display,
+            source="slack_users_info",
+        )
+
+    async def resolve_user_email(self, user_id: str | None, *, request_id: str = "-") -> str | None:
+        """``resolve_identity`` の email だけを返す後方互換ヘルパ（bot の本人解決用）。"""
+        identity = await self.resolve_identity(user_id, request_id=request_id)
+        return identity.email if identity else None
 
     async def download_file(
         self,
