@@ -67,20 +67,14 @@
         transport: "streamable-http",
         headers: { Authorization: "Bearer ${TEAMAGENT_MCP_BEARER}" }, // 値は注入
         timeout: 60,
-        // §D: ツールは「データ/構造化結果」を返し、最終合成は外側Haikuが行う（LLM二重化=二重コスト回避）。
-        // P1 は読取系だけ露出（重操作は現行 Bot 側／HITL は P2/WS-D で別 tool 化）。
+        // §G: 会社共有の「ナレッジ系・読取」のみ露出。MCP公開(build_production_tools)済の4つ。
+        // 本人OAuth依存(per-user)の mail_*/workspace_search は除外＝現行Botに残す（§G）。
+        // ※ video_*/VSEO(video_algorithm)/operation_log/tiktok_search は build_production_tools 未登録＝
+        //   OpenClaw露出には WS-A 拡張(factory登録)が必要（P1拡充の次手）。
         toolFilter: {
-          include: [
-            "search",
-            "clientkarte",
-            "mail_summary",
-            "mail_followup",
-            "mail_constraints",
-            "mail_to_internal_context",
-            "video_*",
-          ],
-          // 念のため書込み/下書き/確定系は明示除外（送信/削除はそもそも非実装）。
-          exclude: ["*write*", "*draft*", "*reply*", "proposal_deck", "*confirm*"],
+          include: ["search", "clientkarte", "proposal_draft", "proposal_review"],
+          // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
+          exclude: ["mail_*", "workspace_search", "proposal_deck", "*reply*", "*confirm*", "*write*"],
         },
       },
     },
