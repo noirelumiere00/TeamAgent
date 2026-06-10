@@ -10,7 +10,7 @@
 
 **一言で:** スキル追加が「**1ディレクトリ・1 manifest の追加だけ**」で済む宣言レジストリを唯一の真実源にし、**単一プロセスのまま god-file を解体**して、日常は決定的な**規約ルータ(L1)**・横断や曖昧時だけ既存の**Agent SDK オーケストレータ(L2)**に委ねる。専任ほぼ1名／16名利用／同時4で**現実に保守できる**構成にする。
 
-**「OpenClaw を主体に」への回答（一次ソース検証の結論）:** **不採用**。OpenClaw は「業務アプリ内に組み込むオーケストレーション・ライブラリ」ではなく「個人向けマルチチャネル常駐アシスタント・**ゲートウェイ製品**(TS/Swift・独立プロダクト)」で用途がズレ、既存資産(12スキル/RLS/per-user OAuth/831テスト)を毀損し、生後6–7ヶ月でRCE/権限奪取の重大CVEが続発しCisco/Microsoftが業務利用を警告している。**Claude Agent SDK on Bedrock を継続**（既に6-bis合格・85MB実deck生成済の `orchestrator/` 資産がある）し、**MCP規格だけ相互運用の保険**として残す。詳細は §7。
+**「OpenClaw を主体に」への回答（2026-06-09 改訂・決定事項＝不変）:** **採用**。OpenClaw を「自律オーケストレーションの**外殻**(L0=ingress / cron 自発起動 / 会話記憶 / Claude#1)」として前段に置く。**既存資産(12スキル/RLS/per-user OAuth/テスト)は作り直さず**、OpenClaw からは **MCP境界(streamable-http)越しにしか触らせない**。OpenClaw の重大リスク（§A 一次調査で 2026-05-28 の GHSA 30+件=Critical2/High多数を自分で確認）は **Docker隔離＋専用最小IAM＋営業データ非接触＋WS-C anti-spoof で構造的に封じ込める**（＝本書 設計原則#5「fail-closed をランタイム強制・外部供給は審査ゲート」の実装そのもの）。境界の内側は **Claude Agent SDK on Bedrock(L2)** を継続。詳細は §7（改訂版）。
 
 **「ごちゃつき」の正体（最重要）:** 良い抽象(`BaseSkill`/`SkillRegistry`/`@register`)が**存在するのに本番経路で使われていない**こと。本番Slack経路はそれをバイパスして、スキル名を `intent.py`(366行正規表現)/`dispatch_auto`(if連鎖)/`_ACK_BY_SKILL`/各 `skill.name` の**4箇所に手書き重複**し、`slack_bot.py`(2,186行=god-file)に配線が集中、env knob が66個に散乱している。**スキル1個の追加に5〜6ファイルの同期編集**を強いる水平スライス構造が、ユーザーの不満の主因。Next は「抽象を作る」のではなく「**既にある抽象を唯一の登録点に昇格させる**」ことで治す。
 
@@ -140,11 +140,13 @@
 
 ### 6.2 ケイパビリティ（7ドメイン=7パッケージ・各1 manifest）
 - `CapabilityManifest`（`BaseSkill` の1段拡張）を**唯一の登録点**に昇格。1ドメイン=1ディレクトリ=1 `capability_manifest.py`（triggers/ack_template/cost_class/permission_scope/handler_factory/eval_fixtures を宣言）+ 複数 Action サブスキル。
+- **OpenClaw採用で分類軸を追加（重要）**：`access:read|write`／`data_class:sales|none`／`rls_required`／`identity_verified_required`(OAuth系)／`hitl_required`(重操作 propose→confirm)／`mcp_exposed`。これで **manifest 1枚から自動派生**できる：①L1 triggers ②L2 @tool ③MCP gateway 公開tool(`build_production_tools`) ④**OpenClaw `openclaw.json` の `toolFilter.include/exclude`**（現状手書き→生成で二重定義解消） ⑤HITL対象 ⑥RLS/identity_verified の enforcement。＝WS-G(manifest単一真実源)が OpenClaw 露出にも効く。
 - **中央 `CapabilityId`(StrEnum)** を新設し、命名3軸ズレ(dir/class.name/intent文字列)と文字列4箇所手書きを**型で一元化**（未定義IDはimport時にmypy/registryで弾く）。
 
-### 6.3 オーケストレーション（2層）
-- **L1=規約ルータ（既定パス・決定的）** — 登録 manifest の triggers 宣言だけを読む。20名/同時4の大半を占める単発リクエスト(検索/カルテ/審査/挨拶)を**LLMを介さず**低レイテンシ・低コスト・高決定性で確定。現状実測($0.01–0.02/p50 7–11秒)と chitchat の0コスト即応を守る核。triggers DSL は keyword/url_signal/named_entity/priority に**意図的に限定**し、複雑判定は早期に L2 へ委譲（"manifest内regex肥大で分散しただけ"の再発防止）。
-- **L2=Agent SDK オーケストレータ（委譲パス）** — L1低confidence or 明示マルチステップ（「VSEOで分析して提案ドラフトとPPTXまで」）のみ起動。registry 全 manifest を `ToolSpec` 自動 @tool 化し Claude が自律連鎖。**新規実装ではなく**、既に `orchestrator/`(tools/factory/sdk_runner/faithfulness)として実装・6-bis合格・85MB実deck生成済の資産を **runtime から本配線するだけ**（残課題は配線のみ）。本番ガード(`require_rls` fail-closed/`max_same_call=2`/`cost_cap_usd`/コスト計上/忠実性照合)は `sdk_runner.py` に内在を実機確認済。
+### 6.3 オーケストレーション（3層：L0 外殻 / L1 決定的 / L2 自律）※OpenClaw採用で2層→3層に改訂
+- **L0=OpenClaw 外殻（ingress・自発起動・Claude#1）** — Slack受け・cron/heartbeat の**プロアクティブ起動**・会話記憶・ルーティング推論を担う隔離コンテナ。外側モデルは Haiku＋prompt caching で軽量化。**触れるのは MCP境界の読取系tool のみ**（`openclaw.json` の `toolFilter` は manifest から自動派生＝§6.2）。営業データ非接触。
+- **L1=規約ルータ（境界内・決定的・低コスト）** — OpenClaw が**個別 MCP tool を直叩き**する経路。モデルの内側ループを増やさず、manifest の triggers/cost が示す単発(検索/カルテ/審査)を低レイテンシで確定。⚠️ 純粋な「LLM非介在・0コスト即応(chitchat)」は OpenClaw 前面化で薄まるため、どこまで高速路を守るかは §9 でP1実測決定。triggers DSL は keyword/url_signal/named_entity/priority に**意図的に限定**（regex肥大の再発防止）。
+- **L2=Agent SDK オーケストレータ（境界内・委譲）** — L1低confidence or 明示マルチステップ（「VSEOで分析して提案ドラフトとPPTXまで」）のみ。OpenClaw が `run_agent` MCP tool を1回呼ぶと、境界内で Claude#2 が registry 全 manifest を `ToolSpec` @tool 化し自律連鎖。**新規実装ではなく** `orchestrator/`(6-bis合格・85MB実deck生成済)を本配線。本番ガード(`require_rls` fail-closed/`max_same_call=2`/`cost_cap_usd`/コスト計上/忠実性照合)は `sdk_runner.py` 内在を実機確認済。
 
 ### 6.4 ごちゃつき再発防止の機構（構造的担保）
 1. **中央 `CapabilityId`(StrEnum)** を真実源化（4箇所手書き→1値、命名3軸→1軸）
@@ -158,23 +160,24 @@
 
 ---
 
-## 7. 基盤判断：OpenClaw vs Claude Agent SDK（一次ソース検証）
+## 7. 基盤判断：OpenClaw を外殻に採用（2026-06-09 改訂・決定事項＝不変）
 
-**結論: Claude Agent SDK on Bedrock を継続採用し本番配線を完遂。OpenClaw は主体として不採用（MCPレイヤのみ相互運用の保険として限定併用）。**
+**結論（改訂）: OpenClaw を自律外殻(L0)として採用。ドメインは Claude Agent SDK on Bedrock(L2)のまま MCP境界の内側に温存し、OpenClaw からは MCP tool 越しにのみ触らせる。** 6/5版の「不採用」は *OpenClaw を裸でアプリに飲ませる前提* の判断であり、**MCP境界＋隔離で封じ込める前提なら採用が成立**する（懸念は §7.2 の通り構造で解消）。
 
-### 7.1 現行 Claude Agent SDK（`orchestrator/`）の実態
-- 方式B（既存Skillを@tool化しSDKのエージェントループに委ねる）が実装・テスト・**Bedrock実走(6-bis合格・85MB実deck生成)済**。
-- `sdk_runner.py` に `require_rls` の fail-closed（user_email欠落で越権防止）、`max_same_call=2` の無限ループ殺し、`cost_cap_usd` 予算上限、Bedrock呼び出し毎の usage/cost ログ、`faithfulness` 忠実性照合が**実在を grep 確認**。`claude-agent-sdk==0.2.87` は同梱Node CLIの版ドリフト防止で厳密pin。
-- **残課題は「新基盤への乗り換え」ではなく「runtime からの本配線(ゲート①: Node CLI本番持込)」と「detect_skill 正規表現の置換」の2点のみ**。
+### 7.1 採用アーキ（役割分担）
+- **L0 = OpenClaw 外殻**：Slack ingress・cron/heartbeat による**自発起動**・会話記憶(SQLite)・ルーティング推論(Claude#1=Haiku4.5)。**Docker隔離・専用最小IAM(bedrock:InvokeModel系のみ)・営業データ非接触**。版pin `v2026.6.1`(digest)。
+- **MCP境界(信頼境界)**：`mcp_gateway`（WS-A 実装済）。RLS行権限・per-user OAuth・fail-closed・反ハルシ・**本人解決(WS-C)** を Python側で死守。OpenClaw 申告の email/groups/role は採らない(STRICT)。
+- **L2 = Claude Agent SDK(Claude#2)**：境界内のマルチステップ。`require_rls`/`max_turns`/`cost_cap`/faithfulness は `sdk_runner.py` 内在（6-bis合格・85MB実deck生成済・`claude-agent-sdk==0.2.87` 厳密pin）。
 
-### 7.2 OpenClaw 不採用の3根拠（検証事実）
-1. **用途ミスマッチ** — OpenClaw（旧 Moltbot、2025/11公開）は WhatsApp/Telegram/Slack/Discord を入口にする**個人向けマルチチャネル常駐アシスタント・ゲートウェイ製品**（TypeScript/Swift・独立プロダクト・MIT・OpenClaw Foundation）。TeamAgent が要るのは「業務Pythonアプリ内に組み込むドメイン特化オーケストレーション・**ライブラリ**」で、粒度・前提が違う（OpenClawは入口アダプタですらなくアプリ全体を飲み込む別プロダクト）。Bedrock(IAMチェーン/APIキー不要)・MCP(stdio+HTTP/SSE)には**一次対応**で接続性は良いが、それは規格としての話。
-2. **資産毀損** — 既存12スキル/RLS/per-user OAuth/教示プロンプト/831テストが `openclaw.json`/`SOUL.md`/TS流儀へ作り直しになり、「構成をクリーンに」という今回の動機に**むしろ逆行**（言語・運用が二重化）。
-3. **セキュリティ** — 生後6–7ヶ月で **CVE-2026-25253(WebSocket origin未検証の1-click RCE)**・**CVE-2026-35650(prompt injection で sandbox/plugin権限・MCP設定・routing hook を上書きしホスト乗っ取り)**・log poisoning・SSRF 等が相次ぎ、2026/2には17,500台が露出。**Cisco/Microsoft が「信頼できないコード実行として扱え、業務端末で動かすな」と明確に警告**。会社の脳(営業ナレッジ)+per-user資格情報(KMS暗号化トークン)を持つ本番基盤に**攻撃面が過大**で、設計原則の fail-closed/自前審査ゲートと正面衝突（CLAUDE.md 記載の ClawHavoc 型 341悪意Skillインシデント）。
+### 7.2 6/5版「不採用3根拠」への回答（封じ込めで解消）
+1. **用途ミスマッチ** → OpenClaw は「アプリを飲む製品」だが、**前段の殻としてだけ使い、ドメインは飲ませない**。OpenClaw は MCP tool 越しにしかドメインに届かず、粒度の衝突を境界で回避。Bedrock(IAM)・MCP(streamable-http) 一次対応はそのまま接続に活用。
+2. **資産毀損** → **作り直しゼロ**。12スキル/RLS/OAuth/テストはそのまま、`build_production_tools()` を MCP 公開するだけ(WS-A)。`openclaw.json`/`SOUL.md` は外殻の薄い設定のみ（Gitレビュー必須・秘密値非コミット）。
+3. **セキュリティ** → §A で一次再確認（2026-05-28 GHSA一括: RCE/exec/MCP権限漏れ/Critical2、min-safe≥2026.5.26）。**隔離コンテナ(read-only/cap-drop ALL/digest pin)＋最小IAM(Secrets/KMS/RDS 明示Deny)＋営業データ非接触＋ `tools.exec.mode:deny` で exec/shell系CVEを構造無効化＋ WS-C で per-user 越権を封鎖**。これは本書 原則#5・#8(審査ゲート)の実装。CVE追従(月次パッチ/版pin)は運用の前提コストとして受容（専任1名の最大慢性負荷・P1で工数実測）。
 
-### 7.3 限定併用（保険）
-- **MCP規格だけ相互運用**を維持（現行 `create_sdk_mcp_server` と、将来 OpenClaw/外部が公開する `@modelcontextprotocol` 準拠サーバ）。本体は SDK 一本。
-- OpenClaw を将来評価する場合（別チャネル=Discord/音声/Canvas を足したくなった時の PoC 等）は、**必ず Docker隔離+最小IAM+チャネル限定で、本番ナレッジ系とはネットワーク分離した別環境**で。
+### 7.3 OpenClaw 採用が突きつける新論点（§9 で確定）
+- OpenClaw は **単一信頼オペレータ設計**（敵対的マルチテナント境界でない・`sessionKey`は認可でない・`dmScope`既定は会話漏れ）→ **認可はMCP内側で死守**（本書#5と一致）＋ `dmScope:"per-channel-peer"` 必須。
+- **水平スケール非対応・会話メモリはローカル** → ~40名は単一GW(垂直)＋速度チューニング(Haiku外側＋prompt caching)で可、**同時実行上限は P1 実測**。
+- MCP は **streamable-http**（stdio は OpenClaw が MCP を子同居させ creds/network 隔離を壊すため本番不可）。
 
 ---
 
@@ -191,6 +194,11 @@
 
 各Phase末で **Slack E2E疎通 + 全テストgreen** を維持。
 
+**OpenClaw 外殻トラック（本書のドメイン内リファクタと並行・統合ロードマップ）:**
+- **済(2026-06-09)**: WS-A `mcp_gateway`（=P5前半 ToolSpec公開の先取り）／WS-B OpenClaw隔離デプロイ雛形(版pin/最小IAM/egress/Haiku+cache+dmScope)／WS-C 本人解決の単一真実源（=P3 PolicyEngine の種・admin/なりすまし封鎖・900テストgreen）。
+- **次にやること**: ①Next **P0–P2**(CapabilityId/Settings集約/**god-file解体**/intent.py 366行削除)＝OpenClaw前面化の前提整備（内側がごちゃつくと境界も汚れる）。②**manifest 6軸 → `toolFilter` 自動生成**(§6.2)。③**P0隔離PoC**(実DBで RLS-through-MCP漏洩0 / インジェクション越権0 / Bedrock(IAM)疎通)。④**P1パイロット**(OpenClaw単一GW前面・専用ch少数・読取のみ・同時実行/レイテンシ/コスト実測)→ゲート通過で **P2本番**(プロアクティブ/HITL解放)。
+- 旧 §8 P5「runtime→orchestrator 本配線」は **L2 を MCP境界内に置き OpenClaw(L0) から `run_agent` で叩く形** に更新。`USE_OPENCLAW_FRONTEND` flag で段階導入＋現行Bot へ1分ロールバック（Socket Mode 二重接続不可のため OC は専用Slackアプリ/ch）。
+
 ---
 
 ## 9. 未決事項（確認のうえ確定したい）
@@ -201,6 +209,9 @@
 4. **RDS Multi-AZ化の実施時期** — NFR(RTO≤120秒/RPO≤5分)の補強を本リファクタのどのPhaseで（または並行で）。コスト増を伴うため別途承認。
 5. **カバレッジゲートの基準** — line≥80% を最初から強制するか、Phase進行で段階的に引き上げるか（1名運用での締め付け度合い）。
 6. **ブランチ/着手前提** — 現在 `feat/proposal-deck-skill` で proposal_deck の作業中（別セッション）。本リファクタ着手前に main統合状況とブランチ戦略の整理が必要。
+7. **【OpenClaw採用で追加】分離方式(~40名)** — 単一GW(垂直・速度は Haiku+cache で近似)で進め、**同時実行上限/SPOF は P1 実測**で確認。本格分離(利用者別GW)は P2 前に判断。`dmScope:"per-channel-peer"` 必須。配置は **ECS Fargate**(per-task IAM で外殻/境界の権限分離)推奨・**RDS Multi-AZ**。
+8. **【OpenClaw採用で追加】L1決定ルートの去就** — OpenClaw 前面化で「LLM非介在の0コスト即応(chitchat/単発)」が薄まる。現行Bot 高速路を一部フォールバック保持するか、OpenClaw側 Haiku+cache で近似に寄せるか(§6.3 L1)を **P1 レイテンシ/コスト実測**で確定。
+9. **【OpenClaw採用で追加】CVE運用** — OpenClaw の月次パッチ/版pin/赤チームが専任1名の最大慢性負荷。P1 で「月あたり運用工数」を実測し P2 Go の判断材料に（可逆性=flag1つで現行Bot復帰 を常時担保）。
 
 ---
 
@@ -212,4 +223,6 @@
 3案とも「単一プロセス維持」「registry を唯一の真実源に」「god-file解体」で一致。差は L2委譲の比重とポートの数。**過剰間接化を避けるため C のポートは2本に限定**、**B の自律ルーティングは L2(委譲時)に限定**して接合。
 
 ## 付録B：OpenClaw 検証の一次ソース
-GitHub(`openclaw/openclaw`・releases・AGENTS.md)、`docs.openclaw.ai`(providers/bedrock・cli/mcp)、Wikipedia、Microsoft Security Blog(2026/02 identity-isolation-runtime-risk)、Cisco Blog(personal-ai-agents security nightmare)、The Hacker News(2026/03 agent flaws)、PointGuard AI(CVE-2026-35650)、Infosecurity Magazine(six new flaws)、Eye Security(log poisoning)。
+**2026-06-09 一次再確認（§A・WS-B-B1・自分で `gh`/公式docs 直確認）**: `openclaw/openclaw`(377k★・**MIT**・最新stable **v2026.6.1**・TS/Node 22.19+)、GitHub Security Advisories(**2026-05-28 GHSA 30+件**: Critical2/High多数・RCE/exec/MCP権限漏れ・stdio env注入 GHSA-mj59-h3q9-ghfh fixed 2026.4.20・min-safe≥2026.5.26)、`docs.openclaw.ai`(channels/slack=Socket Mode単一接続 vs HTTP Events、concepts/session=**`dmScope`既定`main`は会話漏れ**、gateway/multiple-gateways=**水平スケール非対応**、providers/bedrock=auth `aws-sdk`、concepts/agent-loop=**tool無→1ターン**、reference/prompt-caching=`cacheRetention`、gateway/security=**単一信頼オペレータ**)。旧版の個別CVE番号(CVE-2026-25253 等)は本一次確認(GHSA一括)で置換。
+
+（旧版の二次情報）GitHub(`openclaw/openclaw`・releases・AGENTS.md)、`docs.openclaw.ai`(providers/bedrock・cli/mcp)、Wikipedia、Microsoft Security Blog(2026/02 identity-isolation-runtime-risk)、Cisco Blog(personal-ai-agents security nightmare)、The Hacker News(2026/03 agent flaws)、PointGuard AI(CVE-2026-35650)、Infosecurity Magazine(six new flaws)、Eye Security(log poisoning)。
