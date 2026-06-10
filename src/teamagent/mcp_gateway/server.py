@@ -31,6 +31,7 @@ from mcp.types import TextContent, Tool
 from teamagent.identity import (
     IdentityResolver,
     build_rls_metadata,
+    company_member_metadata,
     no_access_metadata,
 )
 from teamagent.orchestrator.tools import ToolSpec
@@ -98,14 +99,25 @@ async def _resolve_metadata(
     require_rls: bool,
     identity_resolver: IdentityResolver | None,
     allowed_domains: frozenset[str] | None,
+    company_shared_groups: frozenset[str] | None,
     tool: str,
 ) -> tuple[dict[str, Any], list[TextContent] | None]:
     """RLS メタを決める。返り値 ``(metadata, fail_response)``。fail_response 非 None なら即返す。
 
+    COMPANY_SHARED（会社共有・§G）：全員が会社ナレッジを読む。本人IDは認可に使わず監査のみ。
     STRICT（resolver 有）：slack_user_id をサーバ側解決し、外殻申告は破棄。
     LEGACY（resolver 無）：テスト/PoC 専用。user_email を使うが role は member 強制。
     """
     slack_user_id = raw.get("slack_user_id")
+
+    if company_shared_groups is not None:
+        # 会社共有モード: 全員が同じ会社ナレッジを見る。OC 申告の email/groups/role は破棄、
+        # slack_user_id は「誰が聞いたか」の監査用途のみ（認可には一切使わない）。
+        if raw.get("user_email") or raw.get("user_groups") or raw.get("user_role"):
+            logger.warning("identity_spoof_rejected", tool=tool, reason="oc_fields_dropped")
+        audit_uid = slack_user_id if isinstance(slack_user_id, str) and slack_user_id else None
+        logger.info("identity_company_shared", tool=tool, slack_user_id_audit=audit_uid)
+        return company_member_metadata(company_shared_groups), None
 
     if identity_resolver is not None:
         # 外殻が email/groups/role を申告してきたら破棄して警告（攻撃 or バグの早期検知）。
@@ -154,6 +166,7 @@ async def dispatch_tool(
     require_rls: bool = True,
     identity_resolver: IdentityResolver | None = None,
     allowed_domains: frozenset[str] | None = None,
+    company_shared_groups: frozenset[str] | None = None,
 ) -> list[TextContent]:
     """1 tool 呼び出しを実行する（身元解決 → 入力検証 → 同期 skill を thread 実行）。
 
@@ -169,6 +182,7 @@ async def dispatch_tool(
         require_rls=require_rls,
         identity_resolver=identity_resolver,
         allowed_domains=allowed_domains,
+        company_shared_groups=company_shared_groups,
         tool=name,
     )
     if fail is not None:
@@ -221,12 +235,22 @@ def build_slack_identity_resolver() -> IdentityResolver | None:
     return _resolver
 
 
+def company_shared_groups_from_env() -> frozenset[str] | None:
+    """``TEAMAGENT_SHARED_COMPANY_DOMAINS``（カンマ区切り）。設定時は会社共有モード（§G）。"""
+    raw = os.environ.get("TEAMAGENT_SHARED_COMPANY_DOMAINS")
+    if not raw:
+        return None
+    groups = frozenset(d.strip().lower() for d in raw.split(",") if d.strip())
+    return groups or None
+
+
 def build_server(
     specs: list[ToolSpec] | None = None,
     *,
     require_rls: bool = True,
     identity_resolver: IdentityResolver | None = None,
     allowed_domains: frozenset[str] | None = None,
+    company_shared_groups: frozenset[str] | None = None,
 ) -> Server:
     """TeamAgent MCP サーバを構築する（specs 省略時は本番ツールを遅延構築）。"""
     if specs is None:
@@ -249,17 +273,25 @@ def build_server(
             require_rls=require_rls,
             identity_resolver=identity_resolver,
             allowed_domains=allowed_domains,
+            company_shared_groups=company_shared_groups,
         )
 
     return server
 
 
 def build_production_server() -> Server:
-    """本番用に resolver 必須で構築する（SLACK_BOT_TOKEN 未設定なら fail-closed で起動拒否）。"""
+    """本番用に構築する。会社共有(§G)優先＝`TEAMAGENT_SHARED_COMPANY_DOMAINS` があればそれ、
+
+    無ければ per-user resolver 必須（`SLACK_BOT_TOKEN` 未設定なら fail-closed で起動拒否）。
+    """
+    company = company_shared_groups_from_env()
+    if company is not None:
+        return build_server(company_shared_groups=company)
     resolver = build_slack_identity_resolver()
     if resolver is None:
         raise RuntimeError(
-            "SLACK_BOT_TOKEN が未設定です。MCP は本人解決 resolver 必須で起動します（fail-closed）"
+            "TEAMAGENT_SHARED_COMPANY_DOMAINS も SLACK_BOT_TOKEN も未設定です。"
+            "会社共有モードか本人解決 resolver のいずれかが必須です（fail-closed）"
         )
     return build_server(identity_resolver=resolver, allowed_domains=allowed_domains_from_env())
 

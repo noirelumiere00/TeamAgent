@@ -77,6 +77,26 @@ def no_access_metadata() -> dict[str, Any]:
     }
 
 
+def company_member_metadata(allowed_domains: frozenset[str]) -> dict[str, Any]:
+    """会社共有モデルの RLS メタ（全員が会社ナレッジを読む・本人識別は使わない）。
+
+    社内の営業ナレッジは「会社の資産」で横連携のため全員可視＝per-user 行隔離は不要、という
+    方針(§G)用。本人識別が信頼できない共有GW(OpenClaw)前提でも安全に会社ナレッジを出せる。
+
+    - ``user_email=None``：owner_email/acl_emails 比較は不一致だが、``user_groups`` の
+      acl_groups intersect で **会社ドメイン共有 doc** が見える（個人 owner-only doc は ingest 側で
+      共有化する＝§G 実装デルタ）。
+    - ``user_groups``=会社ドメイン群、``user_role="member"``（admin/書込は不可）、
+      ``identity_verified=False``（万一 OAuth系tool が呼ばれても本人未確認で fail-closed）。
+    """
+    return {
+        KEY_USER_EMAIL: None,
+        KEY_USER_GROUPS: sorted(allowed_domains),
+        KEY_USER_ROLE: ROLE_MEMBER,
+        KEY_IDENTITY_VERIFIED: False,
+    }
+
+
 def build_rls_metadata(
     subject: ResolvedIdentity | str | None,
     *,

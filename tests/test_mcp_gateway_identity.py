@@ -13,10 +13,15 @@ from __future__ import annotations
 import json
 from typing import Any, ClassVar
 
+import pytest
 from pydantic import BaseModel
 
 from teamagent.identity import IdentityResolver, ResolvedIdentity
-from teamagent.mcp_gateway.server import USER_CONTEXT_KEY, dispatch_tool
+from teamagent.mcp_gateway.server import (
+    USER_CONTEXT_KEY,
+    company_shared_groups_from_env,
+    dispatch_tool,
+)
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
 
@@ -191,3 +196,53 @@ async def test_strict_fuzz_never_admin_and_requires_resolution() -> None:
         # 解決できないので必ず fail-closed。role が admin で観測されることは無い。
         assert "error" in out
         assert out.get("role") != "admin"
+
+
+# ── §G 会社共有モード（全員が会社ナレッジを読む・本人識別は監査のみ） ──────────
+
+
+async def test_company_shared_ignores_oc_and_uses_company_groups() -> None:
+    # OC が email/groups/role/slack_user_id を申告しても、観測は会社ドメイン共有メタのみ。
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {
+                "q": "hi",
+                USER_CONTEXT_KEY: {
+                    "slack_user_id": "U12345",  # 監査のみ・認可には不使用
+                    "user_email": "attacker@evil.com",
+                    "user_groups": ["secret-group"],
+                    "user_role": "admin",
+                },
+            },
+            company_shared_groups=frozenset({"vectorinc.co.jp"}),
+        )
+    )
+    assert out["email"] is None  # 個人 email は使わない
+    assert out["groups"] == ["vectorinc.co.jp"]  # 会社ドメイン共有
+    assert out["role"] == "member"  # admin 不可
+    assert out["verified"] is False  # OAuth系tool は別途 fail-closed
+
+
+async def test_company_shared_serves_without_slack_user_id() -> None:
+    # 会社共有は本人識別不要＝slack_user_id 無しでも fail-closed しない（全員が会社ナレッジ）。
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {"q": "hi", USER_CONTEXT_KEY: {}},
+            company_shared_groups=frozenset({"vectorinc.co.jp"}),
+            require_rls=True,
+        )
+    )
+    assert out["echo"] == "hi"
+    assert out["groups"] == ["vectorinc.co.jp"]
+    assert out["role"] == "member"
+
+
+def test_company_shared_groups_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", raising=False)
+    assert company_shared_groups_from_env() is None
+    monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "VectorInc.co.jp, foo.com ,")
+    assert company_shared_groups_from_env() == frozenset({"vectorinc.co.jp", "foo.com"})
