@@ -146,13 +146,14 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
             max_messages=input.max_messages,
         )
 
-        # G1: 本人受信箱限定（fail-closed）。
-        requester = ctx.metadata.get("user_email")
-        if not requester or not isinstance(requester, str):
+        # G1: 本人受信箱限定＋正規化（fail-closed）。email 取り違えで他人の受信箱を読むのを防ぐ。
+        from teamagent.identity import normalize_email
+
+        requester = normalize_email(ctx.metadata.get("user_email"))
+        if requester is None:
             raise PermissionError(
                 "mail_constraints は本人 user_email が必須です（本人受信箱限定・fail-closed）"
             )
-        requester = requester.strip()
 
         # G2: 本人同意（オプトイン）必須（fail-closed）。判定は差し替え可能な ConsentStore。
         if not self._consent_store.is_consented(requester):

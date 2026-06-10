@@ -29,6 +29,7 @@ from slack_bolt.async_app import AsyncApp
 
 from teamagent.adapters.pgvector_client import PgVectorClient
 from teamagent.adapters.slack_client import SlackClient
+from teamagent.identity import build_rls_metadata, no_access_metadata
 from teamagent.observability.sentry import (
     capture_event_exception,
     capture_skill_exception,
@@ -624,19 +625,11 @@ class SkillDispatcher:
     ) -> Any:
         """ClientKarteSkill を実行してカルテを返す。RLS 用に user_email を解決する。"""
         user_email = await self._resolve_user_email(user_id)
-        user_groups: list[str] = []
-        if user_email and "@" in user_email:
-            user_groups.append(user_email.split("@", 1)[1])
-
         skill = self.get_karte_skill()
         ctx = SkillContext(
             request_id=request_id,
             user_id=user_id,
-            metadata={
-                "user_email": user_email,
-                "user_groups": user_groups,
-                "user_role": "member",
-            },
+            metadata=build_rls_metadata(user_email) or no_access_metadata(),
         )
         from teamagent.skills.clientkarte.schema import ClientKarteInput
 
@@ -671,19 +664,11 @@ class SkillDispatcher:
     ) -> Any:
         """ProposalDraftSkill を実行して提案ドラフト骨子を返す。"""
         user_email = await self._resolve_user_email(user_id)
-        user_groups: list[str] = []
-        if user_email and "@" in user_email:
-            user_groups.append(user_email.split("@", 1)[1])
-
         skill = self.get_draft_skill()
         ctx = SkillContext(
             request_id=request_id,
             user_id=user_id,
-            metadata={
-                "user_email": user_email,
-                "user_groups": user_groups,
-                "user_role": "member",
-            },
+            metadata=build_rls_metadata(user_email) or no_access_metadata(),
         )
         from teamagent.skills.proposal.schema import ProposalDraftInput
 
@@ -716,19 +701,11 @@ class SkillDispatcher:
     ) -> Any:
         """ProposalReviewSkill を実行して提案の診断を返す。"""
         user_email = await self._resolve_user_email(user_id)
-        user_groups: list[str] = []
-        if user_email and "@" in user_email:
-            user_groups.append(user_email.split("@", 1)[1])
-
         skill = self.get_review_skill()
         ctx = SkillContext(
             request_id=request_id,
             user_id=user_id,
-            metadata={
-                "user_email": user_email,
-                "user_groups": user_groups,
-                "user_role": "member",
-            },
+            metadata=build_rls_metadata(user_email) or no_access_metadata(),
         )
         from teamagent.skills.proposal_review.schema import ProposalReviewInput
 
@@ -1234,33 +1211,19 @@ class SkillDispatcher:
         return format_search_response(output), build_search_blocks(output)
 
     async def _resolve_user_email(self, user_id: str | None) -> str | None:
-        """Slack user_id → email を解決する（RLS 評価用、users.info キャッシュ）。
+        """Slack user_id → email を解決する（RLS 評価用）。adapter に委譲し外部/ゲストを拒否。
 
-        SLACK_BOT_TOKEN に users:read.email スコープが必要。
-        失敗時は None を返す（RLS 経由で fail-safe に何も見えなくなる）。
+        SLACK_BOT_TOKEN に users:read.email スコープが必要。失敗/外部ユーザ/ゲストは None
+        （RLS 経由で fail-safe に何も見えなくなる）。返る email は normalize 済み。
         """
         if not user_id or user_id == "unknown":
             return None
         if user_id in self._user_email_cache:
             return self._user_email_cache[user_id]
-        try:
-            from teamagent.adapters.slack_client import SlackClient
-
-            slack = SlackClient(bot_token=os.environ.get("SLACK_BOT_TOKEN", ""))
-            # slack_sdk の users_info を直接叩く（adapter に専用 method 未実装のため暫定）
-            resp = await slack._client.users_info(user=user_id)
-            profile: dict[str, Any] = (resp.get("user") or {}).get("profile", {}) or {}
-            email = profile.get("email")
-            self._user_email_cache[user_id] = email
-            logger.info(
-                "slack_user_email_resolved",
-                user_id=user_id,
-                resolved=bool(email),
-            )
-            return email
-        except Exception:
-            logger.exception("slack_user_email_resolve_failed", user_id=user_id)
-            return None
+        slack = SlackClient(bot_token=os.environ.get("SLACK_BOT_TOKEN", ""))
+        email = await slack.resolve_user_email(user_id, request_id="-")
+        self._user_email_cache[user_id] = email
+        return email
 
     async def run_search(
         self,
@@ -1307,28 +1270,15 @@ class SkillDispatcher:
         # top_k を 1〜20 にサニタイズ（API 経由の異常値防御）
         top_k_safe = max(1, min(top_k, 20))
 
-        # RLS 評価用に Slack user_id → email を解決
+        # RLS 評価用に Slack user_id → email を解決。会社思想「資料は全て共有物」に従い
+        # build_rls_metadata が email domain を user_groups に入れる（acl_groups intersect 用）。
+        # 将来 Slack User Group → group email[] 解決時は ResolvedIdentity.groups へ merge する。
         user_email = await self._resolve_user_email(user_id)
-
-        # 会社思想 (Day 7, 2026-05-27): 「資料は全て共有物」
-        # user_email の domain を user_groups に自動注入する。
-        # → documents.acl_groups に 'vectorinc.co.jp' / 'domain名' が入っていれば
-        #   RLS の acl_groups intersect で workspace 全員に見せられる。
-        # 将来 Slack User Group → group email[] 解決時に追加で merge する。
-        user_groups: list[str] = []
-        if user_email and "@" in user_email:
-            user_groups.append(user_email.split("@", 1)[1])  # 'vectorinc.co.jp'
-
         skill = self.get_search_skill()
         ctx = SkillContext(
             request_id=request_id,
             user_id=user_id,
-            metadata={
-                # PgVectorClient.connection() に渡される RLS GUC
-                "user_email": user_email,
-                "user_groups": user_groups,
-                "user_role": "member",
-            },
+            metadata=build_rls_metadata(user_email) or no_access_metadata(),
         )
         input_obj = SearchInput(
             query=query,

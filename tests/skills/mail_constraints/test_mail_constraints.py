@@ -267,6 +267,15 @@ def test_resolve_gmail_binds_requester(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured == {"readonly": True, "impersonate_user": "s-komata@vectorinc.co.jp"}
 
 
+def test_user_email_normalized_before_consent_and_mask() -> None:
+    """WS-C: 大小/空白付き user_email を正規化してから同意判定・受信箱束縛する（取り違え防止）。"""
+    out = _skill(FakeGmail([]), FakeBedrock("{}")).run(
+        MailConstraintsInput(client_name="A社"), _ctx("  S-Komata@VectorInc.co.jp ")
+    )
+    assert out.inbox_owner_masked == "s***@vectorinc.co.jp"  # 正規化して本人判定・マスク
+    assert out.scanned_count == 0
+
+
 def test_consent_store_injection() -> None:
     """consent_store= を注入すると G2 判定がそれに委譲される（backend 差し替え可能）。"""
 
