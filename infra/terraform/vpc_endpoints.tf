@@ -49,3 +49,20 @@ resource "aws_vpc_endpoint" "interface" {
 
   tags = { Name = "${var.project_name}-${var.environment}-vpce-${each.key}" }
 }
+
+# §J: S3 gateway endpoint — ECR の層blob は S3 配信。interface(ecr.api/ecr.dkr)だけでは層 pull が
+# internet 経由のままで private 化が不成立。gateway endpoint は**無料**・route table に attach。
+data "aws_route_tables" "default" {
+  count  = var.enable_vpc_endpoints ? 1 : 0
+  vpc_id = data.aws_vpc.default.id
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  count             = var.enable_vpc_endpoints ? 1 : 0
+  vpc_id            = data.aws_vpc.default.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = data.aws_route_tables.default[0].ids
+
+  tags = { Name = "${var.project_name}-${var.environment}-vpce-s3" }
+}

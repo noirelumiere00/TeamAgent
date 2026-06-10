@@ -94,24 +94,28 @@ data "aws_iam_policy_document" "ecs_tasks_assume" {
   }
 }
 
-# --- 実行ロール（共有）: ECR pull / Logs / secrets valueFrom 注入 ---
-resource "aws_iam_role" "ecs_execution" {
-  name               = "${var.project_name}-${var.environment}-ecs-exec"
+# --- 実行ロール: タスク別に分割（§J）---
+# ⚠️ 実行ロール(launch時の secrets 注入)はタスクロールの Deny の影響を受けない。共有にすると
+# OpenClaw の実行ロールが database-url を読めてしまい「OpenClaw=営業データ非接触」が崩れる。
+# → OpenClaw実行ロールは database-url を持たない／MCP実行ロールだけが持つ。両者とも ECR pull/Logs は共通。
+
+# OpenClaw 実行ロール: bearer / slack-bot / slack-app / gateway-token のみ（database-url は不可）
+resource "aws_iam_role" "ecs_execution_openclaw" {
+  name               = "${var.project_name}-${var.environment}-ecs-exec-openclaw"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
 }
 
-resource "aws_iam_role_policy_attachment" "ecs_execution_managed" {
-  role       = aws_iam_role.ecs_execution.name
+resource "aws_iam_role_policy_attachment" "ecs_execution_openclaw_managed" {
+  role       = aws_iam_role.ecs_execution_openclaw.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-data "aws_iam_policy_document" "ecs_execution_secrets" {
+data "aws_iam_policy_document" "ecs_execution_openclaw_secrets" {
   statement {
-    sid     = "ReadInjectedSecrets"
+    sid     = "ReadOpenClawSecrets"
     actions = ["secretsmanager:GetSecretValue"]
     resources = [
       data.aws_secretsmanager_secret.bearer.arn,
-      data.aws_secretsmanager_secret.database_url.arn,
       data.aws_secretsmanager_secret.slack_bot.arn,
       data.aws_secretsmanager_secret.slack_app.arn,
       data.aws_secretsmanager_secret.gateway_token.arn,
@@ -119,10 +123,38 @@ data "aws_iam_policy_document" "ecs_execution_secrets" {
   }
 }
 
-resource "aws_iam_role_policy" "ecs_execution_secrets" {
-  name   = "${var.project_name}-${var.environment}-ecs-exec-secrets"
-  role   = aws_iam_role.ecs_execution.id
-  policy = data.aws_iam_policy_document.ecs_execution_secrets.json
+resource "aws_iam_role_policy" "ecs_execution_openclaw_secrets" {
+  name   = "${var.project_name}-${var.environment}-ecs-exec-openclaw-secrets"
+  role   = aws_iam_role.ecs_execution_openclaw.id
+  policy = data.aws_iam_policy_document.ecs_execution_openclaw_secrets.json
+}
+
+# MCP 実行ロール: bearer / database-url のみ
+resource "aws_iam_role" "ecs_execution_mcp" {
+  name               = "${var.project_name}-${var.environment}-ecs-exec-mcp"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_mcp_managed" {
+  role       = aws_iam_role.ecs_execution_mcp.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
+  statement {
+    sid     = "ReadMcpSecrets"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      data.aws_secretsmanager_secret.bearer.arn,
+      data.aws_secretsmanager_secret.database_url.arn,
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_execution_mcp_secrets" {
+  name   = "${var.project_name}-${var.environment}-ecs-exec-mcp-secrets"
+  role   = aws_iam_role.ecs_execution_mcp.id
+  policy = data.aws_iam_policy_document.ecs_execution_mcp_secrets.json
 }
 
 # --- OpenClaw タスクロール: Bedrock InvokeModel のみ ＋ Secrets/KMS/RDS 明示 Deny ---
@@ -162,8 +194,10 @@ data "aws_iam_policy_document" "mcp_task" {
   statement {
     sid     = "ReadTargetSecrets"
     actions = ["secretsmanager:GetSecretValue"]
+    # §J: wildcard をやめ MCP が runtime に必要な2 secret に限定（Slack tokens 等は対象外）
     resources = [
-      "arn:aws:secretsmanager:${var.aws_region}:${local.account_id}:secret:${var.project_name}/${var.environment}/*",
+      data.aws_secretsmanager_secret.bearer.arn,
+      data.aws_secretsmanager_secret.database_url.arn,
     ]
   }
   statement {
@@ -256,7 +290,7 @@ resource "aws_ecs_task_definition" "mcp" {
     cpu_architecture        = "ARM64"
     operating_system_family = "LINUX"
   }
-  execution_role_arn = aws_iam_role.ecs_execution.arn
+  execution_role_arn = aws_iam_role.ecs_execution_mcp.arn
   task_role_arn      = aws_iam_role.mcp_task.arn
 
   container_definitions = jsonencode([{
@@ -303,19 +337,26 @@ resource "aws_ecs_task_definition" "openclaw" {
     cpu_architecture        = "ARM64"
     operating_system_family = "LINUX"
   }
-  execution_role_arn = aws_iam_role.ecs_execution.arn
+  execution_role_arn = aws_iam_role.ecs_execution_openclaw.arn
   task_role_arn      = aws_iam_role.openclaw_task.arn
 
-  # read-only rootfs + state 用 tmpfs（§C 同等。state は揮発で可・会話記憶はパイロット範囲）
+  # §J: read-only rootfs を実装。書込みは state(/home/node/.openclaw) と /tmp の2 volume のみに限定。
   volume {
     name = "openclaw-state"
   }
+  volume {
+    name = "openclaw-tmp"
+  }
 
   container_definitions = jsonencode([{
-    name        = "openclaw"
-    image       = var.openclaw_image
-    essential   = true
-    mountPoints = [{ sourceVolume = "openclaw-state", containerPath = "/home/node/.openclaw", readOnly = false }]
+    name                   = "openclaw"
+    image                  = var.openclaw_image
+    essential              = true
+    readonlyRootFilesystem = true # §J: rootfs は read-only（書込みは下記2 volume のみ）
+    mountPoints = [
+      { sourceVolume = "openclaw-state", containerPath = "/home/node/.openclaw", readOnly = false },
+      { sourceVolume = "openclaw-tmp", containerPath = "/tmp", readOnly = false },
+    ]
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "OPENCLAW_CONFIG_PATH", value = "/opt/teamagent/openclaw.json" },
@@ -371,7 +412,7 @@ resource "aws_ecs_service" "openclaw" {
     security_groups  = [aws_security_group.openclaw.id]
     assign_public_ip = true # Slack(Socket Mode wss)/Bedrock への egress 用。inbound は無し。
   }
-  depends_on = [aws_ecs_service.mcp]
+  # §J: depends_on は撤去（OpenClaw は MCP へ起動後に再接続。count-gated service への depends_on を回避）。
 }
 
 output "mcp_service_dns" {
