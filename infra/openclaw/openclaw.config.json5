@@ -68,12 +68,16 @@
         transport: "streamable-http",
         headers: { Authorization: "Bearer ${TEAMAGENT_MCP_BEARER}" }, // 値は注入
         timeout: 60,
-        // §G: 会社共有の「ナレッジ系・読取」のみ露出。MCP公開(build_production_tools)済の4つ。
+        // §G: 会社共有の「ナレッジ系・読取」を露出。§L Phase1 で取得系(tiktok/動画)を追加。
         // 本人OAuth依存(per-user)の mail_*/workspace_search は除外＝現行Botに残す（§G）。
-        // ※ video_*/VSEO(video_algorithm)/operation_log/tiktok_search は build_production_tools 未登録＝
-        //   OpenClaw露出には WS-A 拡張(factory登録)が必要（P1拡充の次手）。
+        // ※ tiktok_search/video_analysis/video_algorithm は MCPツール（factory: USE_VIDEO_TOOLS/
+        //   USE_TIKTOK_TOOLS=1）として金庫内で実行＝OpenClaw自身は native exec/browser を使わない（§L）。
+        //   これらを include する前に、MCPバックエンド側で当該 env flag を ON にすること。
         toolFilter: {
-          include: ["search", "clientkarte", "proposal_draft", "proposal_review"],
+          include: [
+            "search", "clientkarte", "proposal_draft", "proposal_review",
+            "tiktok_search", "video_analysis", "video_algorithm",
+          ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
           exclude: ["mail_*", "workspace_search", "proposal_deck", "*reply*", "*confirm*", "*write*"],
         },

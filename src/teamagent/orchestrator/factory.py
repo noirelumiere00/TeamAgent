@@ -129,6 +129,27 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # §L Phase1: スクレイプ/動画ツール。既定OFF（USE_VIDEO_TOOLS/USE_TIKTOK_TOOLS=1 で opt-in）。
+    # 会社共有・読取専用（per-user非依存）。OpenClaw は native exec/browser を使わず MCP ツール越しに
+    # 取得＝実スクレイプ(Puppeteer/yt-dlp/ffmpeg)は金庫内で実行。依存は run() で遅延生成。
+    if _envflag("USE_VIDEO_TOOLS"):
+        from teamagent.skills.video.skill import VideoAnalysisSkill
+        from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
+
+        specs.append(
+            ToolSpec(VideoAnalysisSkill.name, VideoAnalysisSkill.description, VideoAnalysisSkill)
+        )
+        specs.append(
+            ToolSpec(VideoAlgorithmSkill.name, VideoAlgorithmSkill.description, VideoAlgorithmSkill)
+        )
+
+    if _envflag("USE_TIKTOK_TOOLS"):
+        from teamagent.skills.tiktok_search.skill import TikTokSearchSkill
+
+        specs.append(
+            ToolSpec(TikTokSearchSkill.name, TikTokSearchSkill.description, TikTokSearchSkill)
+        )
+
     return specs
 
 

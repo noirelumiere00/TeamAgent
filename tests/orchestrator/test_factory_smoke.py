@@ -24,3 +24,14 @@ def test_envflag_helper() -> None:
     assert factory._envflag("__TA_TEST_FLAG__") is False
     del os.environ["__TA_TEST_FLAG__"]
     assert factory._envflag("__TA_TEST_FLAG__", "false") is False
+
+
+def test_scrape_video_skills_importable() -> None:
+    # §L Phase1: 露出候補スキルが軽量 import できる（重依存は lazy ＝ google-genai/yt-dlp 無しでもOK）.
+    from teamagent.skills.tiktok_search.skill import TikTokSearchSkill
+    from teamagent.skills.video.skill import VideoAnalysisSkill
+    from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
+
+    assert VideoAnalysisSkill.name == "video_analysis"
+    assert VideoAlgorithmSkill.name == "video_algorithm"
+    assert TikTokSearchSkill.name == "tiktok_search"

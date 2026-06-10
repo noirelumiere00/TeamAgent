@@ -9,6 +9,8 @@
 #
 # build:  docker build -f infra/docker/Dockerfile.teamagent-mcp -t teamagent-mcp:local .
 #         （※ DOCKER_BUILDKIT=1 前提。Fargate は linux/arm64 推奨 → --platform linux/arm64）
+# §L: スクレイプ系(tiktok/動画)ツールを使う“拡張版”は --build-arg WITH_SCRAPE_TOOLS=true で
+#     node/chromium/ffmpeg を載せる（既定 false＝P1薄殻イメージは軽量のまま）。
 # ============================================================
 
 FROM python:3.11-slim AS base
@@ -20,6 +22,15 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl libpq5 build-essential \
     && rm -rf /var/lib/apt/lists/*
+
+# §L: スクレイプ系の実行ランタイム（tiktok_search=Puppeteer/Node・video_*=yt-dlp+ffmpeg）。
+# 既定 false。USE_VIDEO_TOOLS/USE_TIKTOK_TOOLS を ON にする“拡張版”ビルド時のみ載せる。
+ARG WITH_SCRAPE_TOOLS=false
+RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        nodejs npm chromium ffmpeg \
+      && rm -rf /var/lib/apt/lists/* ; \
+    fi
 
 # 1) 依存だけ先に解決（lock 駆動・layer cache）。MCP は extra。dev(ruff/mypy/pytest)は除外。
 COPY pyproject.toml uv.lock ./
@@ -33,6 +44,12 @@ COPY infra/migrations/ ./infra/migrations/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra mcp
 
+# §L: tiktok_search の Node スクレイパ（tools/tiktok_scraper）を拡張版のみ同梱＋npm install。
+COPY tools/ ./tools/
+RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ] && [ -f tools/tiktok_scraper/package.json ]; then \
+      npm --prefix tools/tiktok_scraper install --omit=dev ; \
+    fi
+
 # 非root
 RUN useradd -m -u 10001 mcp && chown -R mcp:mcp /app
 USER mcp
@@ -41,7 +58,9 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     TEAMAGENT_MCP_HOST=0.0.0.0 \
     TEAMAGENT_MCP_PORT=8787 \
     TEAMAGENT_MCP_PATH=/mcp \
-    AWS_REGION=ap-northeast-1
+    AWS_REGION=ap-northeast-1 \
+    TIKTOK_NODE_BIN=node \
+    CHROMIUM_PATH=/usr/bin/chromium
 EXPOSE 8787
 
 # /healthz は bearer 不要（run_mcp_http_server.py）。TEAMAGENT_MCP_BEARER 未注入なら起動拒否(exit 2)。
