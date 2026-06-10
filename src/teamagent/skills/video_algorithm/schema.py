@@ -420,7 +420,8 @@ class VideoAlgorithmOutput(BaseModel):
     query: str
     videos: list[AnalyzedVideo] = Field(default_factory=list)
     cross: CrossAnalysis = Field(default_factory=CrossAnalysis)
-    report_html_path: str | None = None
+    report_html_path: str | None = None  # ローカルパス（runtime/Slack添付用・金庫外からは不可視）
+    report_url: str | None = None  # §M: 非公開S3の署名URL（金庫外OpenClawが読める・未発行None）
     slack_summary: str = ""
     total_cost_usd: float = Field(default=0.0, ge=0.0)
     model_id: str | None = None

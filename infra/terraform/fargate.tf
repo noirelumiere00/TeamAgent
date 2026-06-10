@@ -36,6 +36,11 @@ data "aws_secretsmanager_secret" "slack_app" {
 data "aws_secretsmanager_secret" "gateway_token" {
   name = var.openclaw_gateway_token_secret_name
 }
+# §M: スクレイプ/動画ツール有効時のみ（Gemini APIキー）。Vertex 利用なら不要。
+data "aws_secretsmanager_secret" "gemini" {
+  count = var.enable_scrape_tools ? 1 : 0
+  name  = var.gemini_secret_name
+}
 
 # ---------- クラスタ ----------
 resource "aws_ecs_cluster" "main" {
@@ -144,10 +149,10 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
   statement {
     sid     = "ReadMcpSecrets"
     actions = ["secretsmanager:GetSecretValue"]
-    resources = [
+    resources = concat([
       data.aws_secretsmanager_secret.bearer.arn,
       data.aws_secretsmanager_secret.database_url.arn,
-    ]
+    ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.gemini[0].arn] : [])
   }
 }
 
@@ -194,16 +199,29 @@ data "aws_iam_policy_document" "mcp_task" {
   statement {
     sid     = "ReadTargetSecrets"
     actions = ["secretsmanager:GetSecretValue"]
-    # §J: wildcard をやめ MCP が runtime に必要な2 secret に限定（Slack tokens 等は対象外）
-    resources = [
+    # §J: wildcard をやめ MCP が runtime に必要な secret に限定（Slack tokens 等は対象外）。
+    # §M: 拡張版は Gemini も追加。
+    resources = concat([
       data.aws_secretsmanager_secret.bearer.arn,
       data.aws_secretsmanager_secret.database_url.arn,
-    ]
+    ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.gemini[0].arn] : [])
   }
   statement {
     sid       = "KmsDecrypt"
     actions   = ["kms:Decrypt"]
     resources = ["arn:aws:kms:${var.aws_region}:${local.account_id}:key/*"]
+  }
+  # §M: VSEO レポートの非公開S3発行（vseo-reports/ prefix に限定・presigned 用）。拡張版のみ。
+  dynamic "statement" {
+    for_each = var.enable_scrape_tools ? [1] : []
+    content {
+      sid     = "VseoReportS3"
+      actions = ["s3:PutObject", "s3:GetObject", "s3:GetBucketLocation"]
+      resources = [
+        aws_s3_bucket.raw_files.arn,
+        "${aws_s3_bucket.raw_files.arn}/vseo-reports/*",
+      ]
+    }
   }
   statement {
     sid = "BedrockInvoke"
@@ -298,17 +316,24 @@ resource "aws_ecs_task_definition" "mcp" {
     image        = var.mcp_image
     essential    = true
     portMappings = [{ containerPort = 8787, protocol = "tcp" }]
-    environment = [
+    environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
       { name = "TEAMAGENT_MCP_HOST", value = "0.0.0.0" },
       { name = "TEAMAGENT_MCP_PORT", value = "8787" },
       { name = "TEAMAGENT_MCP_PATH", value = "/mcp" },
       { name = "TEAMAGENT_SHARED_COMPANY_DOMAINS", value = var.shared_company_domains },
-    ]
-    secrets = [
+      ], var.enable_scrape_tools ? [
+      # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
+      { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
+      { name = "USE_VIDEO_TOOLS", value = "1" },
+      { name = "USE_TIKTOK_TOOLS", value = "1" },
+    ] : [])
+    secrets = concat([
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-    ]
+      ], var.enable_scrape_tools ? [
+      { name = "GEMINI_API_KEY", valueFrom = data.aws_secretsmanager_secret.gemini[0].arn },
+    ] : [])
     logConfiguration = {
       logDriver = "awslogs"
       options = {

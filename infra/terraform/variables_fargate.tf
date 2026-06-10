@@ -83,6 +83,20 @@ variable "openclaw_gateway_token_secret_name" {
   default     = "teamagent/dev/openclaw/gateway-token"
 }
 
+# §M: スクレイプ/動画ツール（USE_VIDEO_TOOLS/USE_TIKTOK_TOOLS）を有効化する“拡張版”の配線。
+# true で Gemini secret 注入・S3(vseo-reports)権限・VSEO_REPORT_BUCKET を MCP タスクへ足す。既定 false＝P1薄殻は不要。
+variable "enable_scrape_tools" {
+  description = "スクレイプ/動画ツールを有効化（Gemini secret/S3権限/VSEO_REPORT_BUCKETを配線）。Dockerは WITH_SCRAPE_TOOLS=true でビルド。"
+  type        = bool
+  default     = false
+}
+
+variable "gemini_secret_name" {
+  description = "Gemini APIキーの Secrets Manager 名（enable_scrape_tools=true 時に GEMINI_API_KEY として注入。Vertex 利用なら不要＝task role+GOOGLE_CLOUD_PROJECT を別途）"
+  type        = string
+  default     = "teamagent/dev/gemini-api-key"
+}
+
 variable "enable_vpc_endpoints" {
   description = "VPC interface endpoint（bedrock/secrets/kms/ecr/logs）を作成して egress を private 化する"
   type        = bool

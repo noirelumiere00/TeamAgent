@@ -1030,9 +1030,10 @@ class SkillDispatcher:
                 return "🔎 動画分析は Gemini の認証設定後に有効化されます（Vertex/APIキー）。"
             raise
 
-        # レポートを非公開S3に公開し署名付きURL(7日)を通知に添える（URL形式配信）
-        report_url: str | None = None
-        if out.report_html_path:
+        # レポートを非公開S3に公開し署名付きURL(7日)を通知に添える（URL形式配信）。
+        # §M: skill が既に発行済み(out.report_url)ならそれを再利用（二重publish回避）。
+        report_url: str | None = out.report_url
+        if report_url is None and out.report_html_path:
             from teamagent.adapters.report_publish import publish_html_file
 
             path = out.report_html_path

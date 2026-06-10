@@ -138,6 +138,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         report_dir: str | None = None,
         max_workers: int = 3,
         overfetch_buffer: int = _OVERFETCH_BUFFER,
+        publisher: Callable[..., str | None] | None = None,
     ) -> None:
         self._gemini = gemini
         self._prompt_version = prompt_version
@@ -147,6 +148,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         self._report_dir = report_dir
         self._max_workers = max_workers
         self._overfetch_buffer = overfetch_buffer
+        self._publisher = publisher
 
     # --- 依存の遅延解決（テスト差し替え可） ---
     def _client(self) -> GeminiClient:
@@ -351,6 +353,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             model_id=model_id,
         )
         out.report_html_path = self._write_report(out, ctx.request_id)
+        if out.report_html_path:
+            # §M: 金庫外の OpenClaw 等が読めるよう、非公開S3へ発行して署名URLを出力に載せる。
+            out.report_url = self._publish(out.report_html_path, ctx.request_id, input.query)
         out.slack_summary = self._slack_summary(out, backfilled)
         log.info(
             "video_algorithm_done",
@@ -363,6 +368,20 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             report=out.report_html_path,
         )
         return out
+
+    def _publish(self, path: str, request_id: str, query: str) -> str | None:
+        """ローカル HTML レポートを非公開S3へ発行し署名URL(7日)を返す（失敗は None＝graceful）。
+
+        注入 publisher があればそれを使う（テスト差し替え）。無ければ VSEO_REPORT_BUCKET 設定時のみ
+        既定実装を遅延使用＝ローカル/テスト（bucket未設定）では S3 を叩かず None。
+        """
+        if self._publisher is not None:
+            return self._publisher(path, request_id=request_id, query=query)
+        if not os.environ.get("VSEO_REPORT_BUCKET"):
+            return None
+        from teamagent.adapters.report_publish import publish_html_file
+
+        return publish_html_file(path, request_id=request_id, query=query)
 
     def _write_report(self, out: VideoAlgorithmOutput, request_id: str) -> str | None:
         try:
@@ -384,11 +403,15 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         ok = sum(1 for v in out.videos if v.analysis)
         bf = f"／下位繰上げ{backfilled}本" if backfilled else ""
         top = f"　最有力の勝ち筋: 『{c.win_factors[0].factor}』" if c.win_factors else ""
+        report_line = (
+            f"📄 詳細レポート（7日有効）: {out.report_url}"
+            if out.report_url
+            else "📄 詳細は添付の HTML レポートをご覧ください"
+        )
         return (
             f"🔎 *VSEO動画アルゴリズム分析* 完了「{out.query}」"
             f"（上位{len(out.videos)}本／分析成功{ok}本{bf}）\n"
             f"{c.summary}{top}\n"
-            f"📄 詳細は添付の HTML レポートをご覧ください"
-            f"（タイムライン/テロップ位置/ブランド検出/勝ち筋）。\n"
+            f"{report_line}（タイムライン/テロップ位置/ブランド検出/勝ち筋）。\n"
             f"_概算 ${out.total_cost_usd:.4f}・n={c.video_count} の観測仮説（相関≠因果）_"
         )
