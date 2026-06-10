@@ -1,14 +1,16 @@
-"""TeamAgent を spec-MCP (stdio) サーバとして公開する薄いラッパ（自律外殻 ⟷ ドメイン能力の境界）。
+"""TeamAgent を spec-MCP サーバとして公開する薄いラッパ（自律外殻 ⟷ ドメイン能力の境界）。
 
 OpenClaw 等の MCP クライアント（＝自律オーケストレーションの外殻）が、TeamAgent のドメイン能力を
 tool として叩くための境界。RLS 行権限・per-user OAuth・fail-closed・反ハルシは本サーバ
 （＝境界の内側 Python）で死守し、外殻はここを越えて RDS/Secrets/Google に直接触れない。
 
-セキュリティ不変条件:
-- 各 tool は呼び出し元の ``_user_context.user_email`` を要求し、無ければ fail-closed（越権防止）。
-  RLS は ``SkillContext.metadata`` 経由で adapter 層（SET ROLE + GUC）が強制する。
-- ⚠️ P0 段階は外殻から渡る user_email を受けて「RLS が MCP 越しでも漏れない」ことを検証する。
-  user_email の“信頼できる解決”（Slack token から MCP 側で確定し詐称を排除）は WS-C で差し替える。
+セキュリティ不変条件（WS-C 強化版）:
+- **STRICT モード（resolver 注入＝本番）**：外殻は ``_user_context.slack_user_id`` のみ渡す。
+  email/groups/role はサーバ側で Slack から解決し、**外殻申告の email/groups/role は一切採らない**。
+  slack_user_id 欠落・解決不能・resolver 例外は require_rls 下で fail-closed（ダウングレード不可）。
+- ``user_role`` は常にサーバ導出の ``"member"``＝MCP 越しの admin 昇格は構造的に不可能。
+- **LEGACY モード（resolver 未注入）**：単体テスト/PoC 専用。本番エントリポイントは resolver 必須で
+  起動（``build_slack_identity_resolver`` が None なら起動拒否）。legacy でも role は member 強制。
 - 重操作（シート書込/メール下書き/PPTX 確定）の HITL propose→confirm 化は WS-D で別 tool 化する。
 
 3層分離: 本モジュールは runtime 寄りの境界層。adapter は直叩きせず、既存 ToolSpec/Skill 経由で呼ぶ。
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 
 import structlog
@@ -25,6 +28,11 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from teamagent.identity import (
+    IdentityResolver,
+    build_rls_metadata,
+    no_access_metadata,
+)
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import SkillContext
 
@@ -35,16 +43,21 @@ USER_CONTEXT_KEY = "_user_context"
 
 
 def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """入力スキーマに RLS 用の ``_user_context`` を足す（外殻が user_email を渡す口）。"""
+    """入力スキーマに RLS 用の ``_user_context`` を足す（外殻が身元を渡す口）。"""
     out = dict(schema)
     props = dict(out.get("properties") or {})
     props[USER_CONTEXT_KEY] = {
         "type": "object",
         "description": (
-            "RLS 用の呼び出し元コンテキスト。営業データは user_email でスコープされる"
-            "（未指定は fail-closed で拒否）。"
+            "RLS 用の呼び出し元コンテキスト。本番(STRICT)では slack_user_id のみ有効＝サーバ側で"
+            "身元解決され権威となる（user_email/user_groups/user_role の外殻申告は無視）。"
         ),
         "properties": {
+            "slack_user_id": {
+                "type": "string",
+                "description": "Slack user_id。本番はこれだけでサーバが email/groups を解決。",
+            },
+            # 後方互換（LEGACY=テスト/PoC のみ有効。STRICT では破棄される）。
             "user_email": {"type": "string"},
             "user_groups": {"type": "array", "items": {"type": "string"}},
             "user_role": {"type": "string"},
@@ -66,14 +79,11 @@ def list_tool_defs(specs: list[ToolSpec]) -> list[Tool]:
     ]
 
 
-def _extract_user_context(arguments: dict[str, Any]) -> dict[str, Any]:
-    """引数から RLS 用 user_context を取り出し正規化する。"""
-    raw = arguments.get(USER_CONTEXT_KEY) or {}
-    return {
-        "user_email": raw.get("user_email"),
-        "user_groups": list(raw.get("user_groups") or []),
-        "user_role": raw.get("user_role"),
-    }
+def _domain_of(email: str | None) -> str | None:
+    """email のドメイン部（監査ログ用・平文 email は出さない）。"""
+    if email and "@" in email:
+        return email.split("@", 1)[1]
+    return None
 
 
 def _err(message: str, **extra: Any) -> list[TextContent]:
@@ -82,14 +92,70 @@ def _err(message: str, **extra: Any) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
 
 
+async def _resolve_metadata(
+    raw: dict[str, Any],
+    *,
+    require_rls: bool,
+    identity_resolver: IdentityResolver | None,
+    allowed_domains: frozenset[str] | None,
+    tool: str,
+) -> tuple[dict[str, Any], list[TextContent] | None]:
+    """RLS メタを決める。返り値 ``(metadata, fail_response)``。fail_response 非 None なら即返す。
+
+    STRICT（resolver 有）：slack_user_id をサーバ側解決し、外殻申告は破棄。
+    LEGACY（resolver 無）：テスト/PoC 専用。user_email を使うが role は member 強制。
+    """
+    slack_user_id = raw.get("slack_user_id")
+
+    if identity_resolver is not None:
+        # 外殻が email/groups/role を申告してきたら破棄して警告（攻撃 or バグの早期検知）。
+        if raw.get("user_email") or raw.get("user_groups") or raw.get("user_role"):
+            logger.warning("identity_spoof_rejected", tool=tool, reason="oc_fields_dropped")
+        if not slack_user_id or not isinstance(slack_user_id, str):
+            if require_rls:
+                logger.warning("identity_spoof_rejected", tool=tool, reason="missing_slack_user_id")
+                return {}, _err("RLS required: slack_user_id is missing (fail-closed)")
+            return no_access_metadata(), None
+        try:
+            identity = await identity_resolver(slack_user_id)
+        except Exception:
+            logger.warning("identity_spoof_rejected", tool=tool, reason="resolver_error")
+            identity = None
+        meta = build_rls_metadata(identity, allowed_domains=allowed_domains) if identity else None
+        if meta is None:
+            if require_rls:
+                logger.warning("identity_spoof_rejected", tool=tool, reason="resolve_none")
+                return {}, _err("RLS required: identity could not be resolved (fail-closed)")
+            return no_access_metadata(), None
+        logger.info(
+            "identity_resolved", tool=tool, source="resolver", domain=_domain_of(meta["user_email"])
+        )
+        return meta, None
+
+    # LEGACY モード（resolver 未注入＝テスト/PoC 専用）。本番エントリポイントは resolver 必須。
+    email = raw.get("user_email")
+    if require_rls and not email:
+        logger.warning("mcp_rls_fail_closed", tool=tool)
+        return {}, _err("RLS required: _user_context.user_email is missing (fail-closed)")
+    meta = {
+        "user_email": email,
+        "user_groups": list(raw.get("user_groups") or []),
+        "user_role": "member",  # OC 申告 role は採らない（admin 昇格は legacy でも不可）。
+        "identity_verified": False,
+    }
+    return meta, None
+
+
 async def dispatch_tool(
     by_name: dict[str, ToolSpec],
     name: str,
     arguments: dict[str, Any],
     *,
     require_rls: bool = True,
+    identity_resolver: IdentityResolver | None = None,
+    allowed_domains: frozenset[str] | None = None,
 ) -> list[TextContent]:
-    """1 tool 呼び出しを実行する（fail-closed → 入力検証 → 同期 skill を thread 実行）。
+    """1 tool 呼び出しを実行する（身元解決 → 入力検証 → 同期 skill を thread 実行）。
 
     例外は握って構造化エラーで返す（MCP サーバも外殻のループも落とさない）。
     """
@@ -97,11 +163,16 @@ async def dispatch_tool(
     if spec is None:
         return _err(f"unknown tool: {name}")
 
-    uctx = _extract_user_context(arguments)
-    # fail-closed: RLS 必須なのに user_email 無し → 越権防止（境界での一次防壁）。
-    if require_rls and not uctx["user_email"]:
-        logger.warning("mcp_rls_fail_closed", tool=name)
-        return _err("RLS required: _user_context.user_email is missing (fail-closed)")
+    raw = arguments.get(USER_CONTEXT_KEY) or {}
+    metadata, fail = await _resolve_metadata(
+        raw,
+        require_rls=require_rls,
+        identity_resolver=identity_resolver,
+        allowed_domains=allowed_domains,
+        tool=name,
+    )
+    if fail is not None:
+        return fail
 
     skill_args = {k: v for k, v in arguments.items() if k != USER_CONTEXT_KEY}
     try:
@@ -109,7 +180,7 @@ async def dispatch_tool(
     except Exception as e:  # 入力検証エラーは構造化で返す
         return _err(f"invalid input: {type(e).__name__}: {e}")
 
-    ctx = SkillContext(user_id=uctx["user_email"], metadata=uctx)
+    ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
     try:
         # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
         output = await asyncio.to_thread(spec.instantiate().run, skill_input, ctx)
@@ -123,7 +194,40 @@ async def dispatch_tool(
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]
 
 
-def build_server(specs: list[ToolSpec] | None = None, *, require_rls: bool = True) -> Server:
+def allowed_domains_from_env() -> frozenset[str] | None:
+    """``TEAMAGENT_ALLOWED_EMAIL_DOMAINS``（カンマ区切り）の許可ドメイン集合。無指定は None。"""
+    raw = os.environ.get("TEAMAGENT_ALLOWED_EMAIL_DOMAINS")
+    if not raw:
+        return None
+    domains = frozenset(d.strip().lower() for d in raw.split(",") if d.strip())
+    return domains or None
+
+
+def build_slack_identity_resolver() -> IdentityResolver | None:
+    """``SLACK_BOT_TOKEN`` があれば ``SlackClient.resolve_identity`` を resolver として返す。
+
+    本番エントリポイントはこれが None なら起動拒否（後方互換 LEGACY パスを本番から到達不能化）。
+    """
+    if not os.environ.get("SLACK_BOT_TOKEN"):
+        return None
+    from teamagent.adapters.slack_client import SlackClient
+    from teamagent.identity import ResolvedIdentity
+
+    client = SlackClient.from_env()
+
+    async def _resolver(slack_user_id: str) -> ResolvedIdentity | None:
+        return await client.resolve_identity(slack_user_id)
+
+    return _resolver
+
+
+def build_server(
+    specs: list[ToolSpec] | None = None,
+    *,
+    require_rls: bool = True,
+    identity_resolver: IdentityResolver | None = None,
+    allowed_domains: frozenset[str] | None = None,
+) -> Server:
     """TeamAgent MCP サーバを構築する（specs 省略時は本番ツールを遅延構築）。"""
     if specs is None:
         from teamagent.orchestrator.factory import build_production_tools
@@ -138,19 +242,36 @@ def build_server(specs: list[ToolSpec] | None = None, *, require_rls: bool = Tru
 
     @server.call_tool()
     async def _call(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-        return await dispatch_tool(by_name, name, arguments, require_rls=require_rls)
+        return await dispatch_tool(
+            by_name,
+            name,
+            arguments,
+            require_rls=require_rls,
+            identity_resolver=identity_resolver,
+            allowed_domains=allowed_domains,
+        )
 
     return server
 
 
+def build_production_server() -> Server:
+    """本番用に resolver 必須で構築する（SLACK_BOT_TOKEN 未設定なら fail-closed で起動拒否）。"""
+    resolver = build_slack_identity_resolver()
+    if resolver is None:
+        raise RuntimeError(
+            "SLACK_BOT_TOKEN が未設定です。MCP は本人解決 resolver 必須で起動します（fail-closed）"
+        )
+    return build_server(identity_resolver=resolver, allowed_domains=allowed_domains_from_env())
+
+
 async def _amain() -> None:
-    server = build_server()
+    server = build_production_server()
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 def main() -> None:
-    """stdio で MCP サーバを起動する CLI エントリポイント。"""
+    """stdio で MCP サーバを起動する CLI エントリポイント（resolver 必須）。"""
     asyncio.run(_amain())
 
 

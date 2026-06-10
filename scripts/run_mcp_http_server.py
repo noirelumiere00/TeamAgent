@@ -41,7 +41,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
-from teamagent.mcp_gateway.server import build_server
+from teamagent.mcp_gateway.server import build_production_server
 
 logger = structlog.get_logger(__name__)
 
@@ -77,8 +77,8 @@ class BearerAuthMiddleware:
 
 
 def build_app(*, bearer: str, path: str) -> Starlette:
-    """streamable-http の ASGI アプリを組む（RLS は MCP 境界の内側で必須＝require_rls=True）。"""
-    server = build_server(require_rls=True)
+    """streamable-http の ASGI アプリを組む（RLS+本人解決 resolver 必須＝STRICT で起動）。"""
+    server = build_production_server()  # SLACK_BOT_TOKEN 未設定なら起動拒否（fail-closed）
     session_manager = StreamableHTTPSessionManager(app=server, json_response=False, stateless=False)
 
     async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
