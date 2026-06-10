@@ -1,0 +1,51 @@
+# ============================================================
+# VPC Interface Endpoints（任意・enable_vpc_endpoints）§H 主要設計判断
+# ============================================================
+# 目的: Secrets/Bedrock/ECR/Logs を internet 経由せず private 解決＝OpenClaw/MCP の egress を締める。
+#   ※ Slack(Socket Mode) は AWS外のため endpoint 化不可（egress は残る）。endpoint は ~$7/月×数=コスト。
+#   ※ default VPC の subnet は public（IGW）。endpoint を入れると当該サービスは private 経路を優先。
+
+resource "aws_security_group" "vpce" {
+  count       = var.enable_vpc_endpoints ? 1 : 0
+  name        = "${var.project_name}-${var.environment}-vpce-sg"
+  description = "Interface endpoints: 443 from OpenClaw/MCP tasks only"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description     = "HTTPS from Fargate tasks"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.openclaw.id, aws_security_group.mcp.id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "${var.project_name}-${var.environment}-vpce-sg" }
+}
+
+locals {
+  vpce_services = var.enable_vpc_endpoints ? [
+    "bedrock-runtime",
+    "secretsmanager",
+    "kms",
+    "ecr.api",
+    "ecr.dkr",
+    "logs",
+  ] : []
+}
+
+resource "aws_vpc_endpoint" "interface" {
+  for_each            = toset(local.vpce_services)
+  vpc_id              = data.aws_vpc.default.id
+  service_name        = "com.amazonaws.${var.aws_region}.${each.key}"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = data.aws_subnets.default.ids
+  security_group_ids  = [aws_security_group.vpce[0].id]
+  private_dns_enabled = true
+
+  tags = { Name = "${var.project_name}-${var.environment}-vpce-${each.key}" }
+}

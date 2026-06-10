@@ -63,7 +63,8 @@
   mcp: {
     servers: {
       teamagent: {
-        url: "http://teamagent-mcp:8787/mcp", // mcpnet 内部のみ到達可
+        // Fargate: Cloud Map private DNS（fargate.tf の service_discovery と一致）。docker-compose ローカルは "teamagent-mcp"。
+        url: "http://teamagent-mcp.teamagent.internal:8787/mcp",
         transport: "streamable-http",
         headers: { Authorization: "Bearer ${TEAMAGENT_MCP_BEARER}" }, // 値は注入
         timeout: 60,

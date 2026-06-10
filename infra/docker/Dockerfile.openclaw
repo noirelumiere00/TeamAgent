@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+# ============================================================
+# OpenClaw 外殻（版pin）+ レビュー済み設定/ペルソナを焼いた薄い overlay — ECS Fargate
+# ============================================================
+# 役割: 自律外殻(L0)。creds/RDS到達なし。MCP境界(streamable-http)越しにしかドメインに触れない。
+# 設定は Git レビュー済みを image に焼く＝immutable・監査可能。**秘密値は焼かない**（ECS secrets で注入）。
+#
+# 注意（config と state の分離）:
+#   - OpenClaw は ~/.openclaw に「状態」も書く。read-only/ephemeral 前提では config を別パスに置き
+#     OPENCLAW_CONFIG_PATH で参照、state/workspace は書込み可能な tmpfs/volume にする（task def 側で指定）。
+#   - workspace の SOUL.md/HEARTBEAT.md は起動時に seed（entrypoint で書込み可能 workspace へコピー）。
+#   ⚠️ deploy 時に「config 読込・workspace seed・gateway 起動」の実動作を必ず確認（環境依存が残る箇所）。
+#
+# build:  docker build -f infra/docker/Dockerfile.openclaw -t teamagent-openclaw:local .
+# ============================================================
+
+# 版pin: 最新 stable v2026.6.1（§A: min-safe >= 2026.5.26 を充足）。digest は README の手順で再確認。
+FROM ghcr.io/openclaw/openclaw:2026.6.1@sha256:b12f76a7947e4cdd328bf3ea1045d41a5494b33852c911e9bc4fdd03dde469d5
+
+# レビュー済み設定（read-only パスに焼く。state は書かない）
+COPY infra/openclaw/openclaw.config.json5 /opt/teamagent/openclaw.json
+# workspace に seed するペルソナ（起動時に書込み可能 workspace へコピー）
+COPY infra/openclaw/SOUL.md infra/openclaw/HEARTBEAT.md /opt/teamagent/workspace-seed/
+COPY infra/docker/openclaw-entrypoint.sh /opt/teamagent/entrypoint.sh
+
+# config は別パス参照（~/.openclaw は state 用に書込み可能のまま）
+ENV OPENCLAW_CONFIG_PATH=/opt/teamagent/openclaw.json \
+    OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace \
+    AWS_REGION=ap-northeast-1
+
+# 公式は非root node(uid1000)。entrypoint は seed → 公式 gateway 起動。
+ENTRYPOINT ["/opt/teamagent/entrypoint.sh"]
+CMD ["node", "dist/index.js", "gateway", "--bind", "loopback", "--port", "18789"]

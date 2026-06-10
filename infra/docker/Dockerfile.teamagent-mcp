@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+# ============================================================
+# TeamAgent-MCP バックエンド（streamable-http・会社共有RLS境界） — ECS Fargate(arm64)
+# ============================================================
+# 役割: OpenClaw外殻から MCP(streamable-http/bearer) でしか触れない「信頼境界の内側」。
+#   creds(Secrets/RDS/Bedrock) を持つのはこのコンテナだけ。scripts/run_mcp_http_server.py を起動。
+# 会社共有モデル(§G): TEAMAGENT_SHARED_COMPANY_DOMAINS 設定で会社メンバーidentity・本人識別不要。
+# 秘密値は焼かない（ECS task の secrets valueFrom で注入）。
+#
+# build:  docker build -f infra/docker/Dockerfile.teamagent-mcp -t teamagent-mcp:local .
+#         （※ DOCKER_BUILDKIT=1 前提。Fargate は linux/arm64 推奨 → --platform linux/arm64）
+# ============================================================
+
+FROM python:3.11-slim AS base
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
+
+# システム依存: psycopg(libpq)・healthcheck(curl)・一部wheelのビルド
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl libpq5 build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# 1) 依存だけ先に解決（lock 駆動・layer cache）。MCP は extra。dev(ruff/mypy/pytest)は除外。
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project --extra mcp
+
+# 2) アプリ本体（src/scripts/migrations のみ。.env や secrets は含めない）
+COPY src/ ./src/
+COPY scripts/ ./scripts/
+COPY infra/migrations/ ./infra/migrations/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra mcp
+
+# 非root
+RUN useradd -m -u 10001 mcp && chown -R mcp:mcp /app
+USER mcp
+
+ENV PATH="/app/.venv/bin:${PATH}" \
+    TEAMAGENT_MCP_HOST=0.0.0.0 \
+    TEAMAGENT_MCP_PORT=8787 \
+    TEAMAGENT_MCP_PATH=/mcp \
+    AWS_REGION=ap-northeast-1
+EXPOSE 8787
+
+# /healthz は bearer 不要（run_mcp_http_server.py）。TEAMAGENT_MCP_BEARER 未注入なら起動拒否(exit 2)。
+HEALTHCHECK --interval=30s --timeout=5s --retries=5 --start-period=40s \
+  CMD curl -fsS "http://127.0.0.1:8787/healthz" || exit 1
+
+CMD ["python", "scripts/run_mcp_http_server.py"]
