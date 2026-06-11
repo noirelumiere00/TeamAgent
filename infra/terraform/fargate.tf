@@ -374,6 +374,9 @@ resource "aws_ecs_task_definition" "openclaw" {
     name      = "openclaw"
     image     = var.openclaw_image
     essential = true
+    # §S診断: Slack@mention無反応の切り分け用に debug ログを有効化（ソケット接続/イベント受信を可視化）。
+    # CMD(Dockerfile)に --log-level debug を前置（グローバルフラグはsubcommand前）。安定後は外す。
+    command = ["node", "dist/index.js", "--log-level", "debug", "gateway", "--bind", "loopback", "--port", "18789"]
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "OPENCLAW_CONFIG_PATH", value = "/opt/teamagent/openclaw.json" },

@@ -28,6 +28,25 @@ ENV OPENCLAW_CONFIG_PATH=/opt/teamagent/openclaw.json \
     OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace \
     AWS_REGION=ap-northeast-1
 
+# §S2: /opt/teamagent を node 所有に（COPY は root 所有＝公式 non-root が書けない）。
+# これで (1) plugins install 先 /opt/teamagent/npm が書ける (2) 起動時の
+# openclaw.json.last-good バックアップ書込み(EACCES)も解消。
+# base は USER node なので chown のため一時的に root へ。
+USER root
+RUN chown -R node:node /opt/teamagent
+USER node
+
+# §S2: install は config にプラグイン登録を書き込むが、comment付きjson5(大)→canonical(小)の縮小を
+# OpenClawのsize-dropガードが拒否する（実測:8217->2907)。先に canonical JSON へ正規化しておけば、
+# install の書込みは「プラグイン追記＝微増」になりガードを通過＝登録成功→gatewayがslackチャンネルを起動。
+# （comment付き源泉は git の .json5 が保持。eval は build時の信頼済みファイルのみ）
+RUN node -e "const fs=require('fs');const p='/opt/teamagent/openclaw.json';const o=(0,eval)('('+fs.readFileSync(p,'utf8')+')');fs.writeFileSync(p,JSON.stringify(o,null,2));"
+
+# §S2: Slack はバンドルされず別プラグイン。build時に npm から焼き込む（runtime は ephemeral state ＝
+# /opt/teamagent/npm=config dir配下に入るので image 層に残る）。npm は社内proxyを通る（実測）。
+# 互換版を自動選択（@openclaw/slack@2026.6.1）。--pin で解決版を固定。
+RUN node /app/dist/index.js plugins install @openclaw/slack --pin
+
 # 公式は非root node(uid1000)。entrypoint は seed → 公式 gateway 起動。
 ENTRYPOINT ["/opt/teamagent/entrypoint.sh"]
 CMD ["node", "dist/index.js", "gateway", "--bind", "loopback", "--port", "18789"]
