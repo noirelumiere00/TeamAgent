@@ -35,7 +35,7 @@ RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ]; then \
 # 1) 依存だけ先に解決（lock 駆動・layer cache）。MCP は extra。dev(ruff/mypy/pytest)は除外。
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project --extra mcp
+    uv sync --frozen --no-dev --no-install-project --extra mcp --extra embeddings
 
 # 2) アプリ本体（src/scripts/migrations のみ。.env や secrets は含めない）
 # README.md は hatchling のプロジェクトbuild（editable install）が必須要求（pyproject:8 readme）。
@@ -44,7 +44,8 @@ COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY infra/migrations/ ./infra/migrations/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra mcp
+    uv sync --frozen --no-dev --extra mcp --extra embeddings
+
 
 # §L: tiktok_search の Node スクレイパ（tools/tiktok_scraper）を拡張版のみ同梱＋npm install。
 COPY tools/ ./tools/
@@ -52,9 +53,16 @@ RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ] && [ -f tools/tiktok_scraper/package.js
       npm --prefix tools/tiktok_scraper install --omit=dev ; \
     fi
 
-# 非root
-RUN useradd -m -u 10001 mcp && chown -R mcp:mcp /app
+# 非root（chown -R /app は巨大レイヤ複製になるため書込み先のみ所有権付与）
+RUN useradd -m -u 10001 mcp && mkdir -p /app/.local_out /app/.hf-cache \
+    && chown mcp:mcp /app/.local_out /app/.hf-cache
 USER mcp
+
+# E5埋め込みモデル(multilingual-e5-large ~2.2GB)を**イメージに焼き込み**（mcpユーザーで取得）。
+# Fargate volume は ephemeral＝毎起動DLだと healthcheck 猶予(~190s)を超え crash-loop するため、
+# build時に取得して起動を決定的にする（go-live実測の教訓）。キャッシュ先=HF_HOME（runtimeも同値）。
+ENV HF_HOME=/app/.hf-cache
+RUN /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-large')"
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     TEAMAGENT_MCP_HOST=0.0.0.0 \

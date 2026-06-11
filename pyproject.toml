@@ -84,6 +84,13 @@ mcp = [
     # MCP SDK（外部 SaaS の MCP 化を実装するとき用）
     "mcp>=0.9.0",
 ]
+embeddings = [
+    # SearchSkill の LocalE5Embedder（multilingual-e5-large）。重い(torch)ため optional。
+    # MCPバックエンドのDockerは --extra embeddings で同梱（go-live実測: 欠落で起動crash）。
+    # torch を直接依存にして [tool.uv.sources] の CPU index pin を効かせる（推移的依存には効かない）。
+    "sentence-transformers>=3.0.0",
+    "torch>=2.4",
+]
 
 [project.scripts]
 teamagent = "teamagent.cli:main"
@@ -91,6 +98,16 @@ teamagent = "teamagent.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# torch は Linux では CPU 版に固定（既定の PyPI は arm64/Linux でも CUDA 依存
+# nvidia-* を数GB引き込み、MCPイメージが10GB級になるため）。mac/開発環境は PyPI のまま。
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/teamagent"]
