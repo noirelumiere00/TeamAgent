@@ -38,6 +38,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project --extra mcp
 
 # 2) アプリ本体（src/scripts/migrations のみ。.env や secrets は含めない）
+# README.md は hatchling のプロジェクトbuild（editable install）が必須要求（pyproject:8 readme）。
+COPY README.md ./
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY infra/migrations/ ./infra/migrations/
