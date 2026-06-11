@@ -83,6 +83,16 @@ sed 's/<COMPANY_DOMAIN>/vectorinc.co.jp/g' infra/migrations/0011_backfill_compan
 ```
 - **RLS 実走検証（M1/P0）**: 2 ユーザ相当で「会社ドメイン doc は見える / 会社外は0 / `user_role=admin` 詐称は無効」を確認（`scripts/smoke_mcp.py --full` か手動 SQL）。
 
+### 5.5 OpenClaw 起動ログ確認（§O・config 妥当性の実機確認）
+CloudWatch `/teamagent/dev`（stream prefix `openclaw`）で以下を確認:
+- **Slack connected**（channels.slack=Socket Mode が確立。出なければ token/scope/`channels.slack` 設定を疑う）
+- **gateway listening**（loopback:18789。ECS healthCheck はこれを叩く）
+- **MCP teamagent 接続**（streamable-http 8787。`tools/list` が toolFilter どおりか）
+- **モデル解決**（`amazon-bedrock/jp.anthropic.claude-haiku-4-5-v1:0`。unknown model なら §0 の list-inference-profiles 値とズレ）
+- `discovery` キー位置の警告が出ていないか（出たら plugins.entries 配下へ移動を検討・起動は止めない）
+- ⚠️ **既知制限（P1 許容・記録）**: 会話メモリ（~/.openclaw/memory/SQLite）は **タスク再起動で消える**（volume は ephemeral）。
+  スレッド文脈は Slack 側にも残るため P1 は許容。P2 で EFS マウント or stateless 設計を判断。
+
 ## 6. 起動確認 & smoke
 ```sh
 # タスクが RUNNING / healthz green を確認

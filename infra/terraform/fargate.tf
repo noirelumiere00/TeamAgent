@@ -392,6 +392,19 @@ resource "aws_ecs_task_definition" "openclaw" {
       { name = "SLACK_APP_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_app.arn },
       { name = "OPENCLAW_GATEWAY_TOKEN", valueFrom = data.aws_secretsmanager_secret.gateway_token.arn },
     ]
+    # §O: gateway healthz（loopback:18789）。docker-compose.yml:77-86 と同形（curl 非同梱のため node fetch）。
+    healthCheck = {
+      command = [
+        "CMD",
+        "node",
+        "-e",
+        "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+      ]
+      interval    = 30
+      timeout     = 5
+      retries     = 5
+      startPeriod = 40
+    }
     logConfiguration = {
       logDriver = "awslogs"
       options = {

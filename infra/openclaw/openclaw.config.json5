@@ -11,25 +11,36 @@
     defaults: {
       // P1 はプロアクティブ無効（heartbeat 0m）。プロアクティブは P2/WS-D で HEARTBEAT.md と共に解禁。
       heartbeat: { every: "0m" },
-      // ファイル操作はワークスペース内に限定（万一 fs tool が出ても外へ出さない）。
-      sandbox: { mode: "all", backend: "docker" },
-      // §D 速度チューニング: prompt caching で安定prefix(system+tool定義)をキャッシュし2ターン目を高速化。
-      models: {
-        "amazon-bedrock/jp.anthropic.claude-haiku-4-5-v1:0": {
-          params: { cacheRetention: "long" }, // ★モデルref表記は deploy 時に要確認
-        },
-      },
+      // §O: Fargate に docker socket は無い（backend:"docker" は local daemon 必須＝公式）ため off。
+      // 多層防御は tools.profile:messaging / exec deny / fs workspaceOnly / browser off /
+      // toolFilter / readonly rootfs / IAM Deny / SG で維持（sandbox は元々「万一の追加層」）。
+      sandbox: { mode: "off" },
+      // §O: cacheRetention の明示パラメータは Bedrock 公式 doc に記載なし(unverified)のため
+      // 削除して既定挙動に。★prompt caching チューニングは P1 実測後に再評価（§D）。
     },
     list: [
       {
         id: "teamagent",
         default: true,
         // §D: 外側ループ=Haiku4.5（ツール判断＋最終整形＝速い/安い）。重い合成は MCP 境界内(L2)に任せる。
-        model: "jp.anthropic.claude-haiku-4-5-v1:0", // ★deploy 時に list-inference-profiles で要確認
+        // §O: 公式は provider/model 記法（amazon-bedrock/ プレフィックス必須）。
+        // ★モデルID実値は deploy 時に list-inference-profiles で要確認
+        model: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-v1:0",
         identity: { name: "TeamAgent", emoji: "🧭" },
         skipBootstrap: true, // 自動生成させず、レビュー済み SOUL.md/HEARTBEAT.md のみ使う
       },
     ],
+  },
+
+  // ── Slack 接続（§O: channels.slack の config 宣言が必須＝公式。env 注入だけでは立ち上がらない） ──
+  // トークン値は書かない: ${VAR} は ECS secrets（fargate.tf の SLACK_BOT_TOKEN/SLACK_APP_TOKEN）で注入。
+  channels: {
+    slack: {
+      enabled: true,
+      mode: "socket", // Socket Mode（公開エンドポイント不要・outbound WebSocket のみ）
+      botToken: "${SLACK_BOT_TOKEN}",
+      appToken: "${SLACK_APP_TOKEN}",
+    },
   },
 
   // ── セッション分離（多人数で会話が混ざらないように／§D・既定 main は Alice↔Bob 漏れる） ──
