@@ -15,8 +15,10 @@ locals {
 }
 
 # ---------- SNS Topic（メール通知）----------
+# go-live実測: "${project}-${env}-alarms" は本番repo(~/Documents/TeamAgent)のstateが同名で
+# 既保有＝CreateTopicがタグ差で400。両stateの同一リソース取り合いを避け、openclaw側は別名にする。
 resource "aws_sns_topic" "alarms" {
-  name = "${var.project_name}-${var.environment}-alarms"
+  name = "${var.project_name}-${var.environment}-openclaw-alarms"
 }
 
 resource "aws_sns_topic_subscription" "alarms_email" {
