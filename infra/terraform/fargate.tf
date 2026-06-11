@@ -365,23 +365,15 @@ resource "aws_ecs_task_definition" "openclaw" {
   execution_role_arn = aws_iam_role.ecs_execution_openclaw.arn
   task_role_arn      = aws_iam_role.openclaw_task.arn
 
-  # §J: read-only rootfs を実装。書込みは state(/home/node/.openclaw) と /tmp の2 volume のみに限定。
-  volume {
-    name = "openclaw-state"
-  }
-  volume {
-    name = "openclaw-tmp"
-  }
-
+  # §R(go-live): Fargate の空ボリュームは root 所有で、公式OpenClawイメージは非root(node uid1000)。
+  # readonly rootfs＋root所有volume だと node が /home/node/.openclaw に書けず crash（実測）。
+  # P1 は readonly rootfs と volume を外し、node が自分の HOME(書込み可ephemeral層)に state を持つ。
+  # ＝会話メモリはタスク再起動で揮発（既知のP1制限どおり）。readonly rootfs と state永続化は
+  # P2 で EFS access point(uid/gid 1000) で両立する（要 EFS 作成）。
   container_definitions = jsonencode([{
-    name                   = "openclaw"
-    image                  = var.openclaw_image
-    essential              = true
-    readonlyRootFilesystem = true # §J: rootfs は read-only（書込みは下記2 volume のみ）
-    mountPoints = [
-      { sourceVolume = "openclaw-state", containerPath = "/home/node/.openclaw", readOnly = false },
-      { sourceVolume = "openclaw-tmp", containerPath = "/tmp", readOnly = false },
-    ]
+    name      = "openclaw"
+    image     = var.openclaw_image
+    essential = true
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "OPENCLAW_CONFIG_PATH", value = "/opt/teamagent/openclaw.json" },

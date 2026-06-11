@@ -27,7 +27,8 @@
         // §P: ID は list-inference-profiles の実測値で確定（2026-06-11・account 718959508629/東京）。
         model: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
         identity: { name: "TeamAgent", emoji: "🧭" },
-        skipBootstrap: true, // 自動生成させず、レビュー済み SOUL.md/HEARTBEAT.md のみ使う
+        // §S: skipBootstrap は v2026.6.1 schema の agents.list[] に無い（config validate で弾かれた）ため削除。
+        // レビュー済み SOUL.md/HEARTBEAT.md は entrypoint が workspace に seed 済み。
       },
     ],
   },
@@ -40,6 +41,9 @@
       mode: "socket", // Socket Mode（公開エンドポイント不要・outbound WebSocket のみ）
       botToken: "${SLACK_BOT_TOKEN}",
       appToken: "${SLACK_APP_TOKEN}",
+      // §S: groupPolicy 既定は "allowlist"（許可ch未設定だと無応答）。P1は招待された専用chで
+      // 応答させるため "open"（botが居るchでのみ反応・到達範囲は招待で限定）。
+      groupPolicy: "open",
     },
   },
 
@@ -60,6 +64,10 @@
 
   // ── ゲートウェイ（ローカル限定） ─────────────────────────────────────────
   gateway: {
+    // §S: mode は必須（"local"=channels+agent runtime を本コンテナで動かす／"remote"=外部transport）。
+    // 無いと「Gateway start blocked: missing gateway.mode」で起動拒否(exit78)＝実測。
+    mode: "local",
+    port: 18789, // healthCheck(fargate.tf)が叩く 18789 に明示一致させる
     bind: "loopback", // 0.0.0.0 へは絶対に出さない。管理は SSH/Tailscale。
     // 共有 gateway secret は full operator scope 相当＝root 級。値は注入し、loopback+ファイル perm で守る。
     auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" },
@@ -103,8 +111,8 @@
         baseUrl: "https://bedrock-runtime.ap-northeast-1.amazonaws.com", // 東京
         api: "bedrock-converse-stream",
         auth: "aws-sdk", // ← APIキー無し。インスタンスロール / 既定資格情報チェーン。
-        // discovery は無効化（ListFoundationModels を IAM から外せる＝最小権限）。
-        discovery: { enabled: false },
+        // §S: discovery は v2026.6.1 schema の provider に無い（config validate で弾かれた）ため削除。
+        // models[] を明示しているので discovery(ListFoundationModels) は元々不要＝最小権限のまま。
         // §P: id は list-inference-profiles 実測値（2026-06-11・東京）。Sonnet4.6 はサフィックス無し。
         models: [
           {
