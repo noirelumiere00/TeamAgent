@@ -77,6 +77,7 @@ def build_production_tools() -> list[ToolSpec]:
     """
     from teamagent.skills.clientkarte.skill import ClientKarteSkill
     from teamagent.skills.proposal.skill import ProposalDraftSkill
+    from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
     from teamagent.skills.proposal_review.skill import ProposalReviewSkill
     from teamagent.skills.search.skill import SearchSkill
 
@@ -95,6 +96,13 @@ def build_production_tools() -> list[ToolSpec]:
             ProposalReviewSkill.description,
             ProposalReviewSkill,
             factory=lambda: ProposalReviewSkill(search=search),
+        ),
+        # 提案書 .pptx 生成。Agent は search/proposal_draft/clientkarte で素材を集めてから
+        # research_material に渡して呼ぶ。FMT テンプレは env TEAMAGENT_FMT_TEMPLATE。
+        ToolSpec(
+            ProposalDeckSkill.name,
+            ProposalDeckSkill.description,
+            ProposalDeckSkill,
         ),
     ]
 

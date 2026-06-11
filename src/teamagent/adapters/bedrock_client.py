@@ -203,6 +203,7 @@ class BedrockClient:
         rerank_client: Any | None = None,
         rerank_model_arn: str | None = None,
         retry_policy: RetryPolicy | None = None,
+        read_timeout: int = 120,
     ) -> None:
         self.region = region
         self.model_id = model_id
@@ -221,7 +222,7 @@ class BedrockClient:
         boto_config = Config(
             retries={"total_max_attempts": 1, "mode": "standard"},
             connect_timeout=10,
-            read_timeout=120,
+            read_timeout=read_timeout,
             tcp_keepalive=True,
         )
         self._client = client or boto3.client(
@@ -259,6 +260,9 @@ class BedrockClient:
             model_id=model_id,
             rerank_model_arn=rerank_arn,
             retry_policy=policy,
+            # 既定 120s。proposal_deck 等の長い生成（16k tokens）は
+            # BEDROCK_READ_TIMEOUT で延長する。
+            read_timeout=_env_int("BEDROCK_READ_TIMEOUT", 120),
         )
 
     def _make_retry_logger(
