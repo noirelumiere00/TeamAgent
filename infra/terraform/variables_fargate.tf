@@ -47,9 +47,10 @@ variable "shared_company_domains" {
 
 variable "openclaw_model_id" {
   # §J: 既定を openclaw.config.json5（焼込・権威）と一致させる。本 var は参照/将来の env 注入用。
-  description = "OpenClaw外側モデル（Haiku4.5・東京推論プロファイル）。権威=openclaw.config.json5。deploy時 list-inference-profiles で確認"
+  # §P: list-inference-profiles 実測値で確定（2026-06-11・account 718959508629/東京）。
+  description = "OpenClaw外側モデル（Haiku4.5・東京推論プロファイル実ID）。権威=openclaw.config.json5"
   type        = string
-  default     = "jp.anthropic.claude-haiku-4-5-v1:0"
+  default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
 # ---------- 秘密値の secret 名（本人が Secrets Manager に作成。値は注入のみ） ----------

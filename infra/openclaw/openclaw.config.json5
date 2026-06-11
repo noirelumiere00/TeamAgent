@@ -24,8 +24,8 @@
         default: true,
         // §D: 外側ループ=Haiku4.5（ツール判断＋最終整形＝速い/安い）。重い合成は MCP 境界内(L2)に任せる。
         // §O: 公式は provider/model 記法（amazon-bedrock/ プレフィックス必須）。
-        // ★モデルID実値は deploy 時に list-inference-profiles で要確認
-        model: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-v1:0",
+        // §P: ID は list-inference-profiles の実測値で確定（2026-06-11・account 718959508629/東京）。
+        model: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
         identity: { name: "TeamAgent", emoji: "🧭" },
         skipBootstrap: true, // 自動生成させず、レビュー済み SOUL.md/HEARTBEAT.md のみ使う
       },
@@ -105,9 +105,10 @@
         auth: "aws-sdk", // ← APIキー無し。インスタンスロール / 既定資格情報チェーン。
         // discovery は無効化（ListFoundationModels を IAM から外せる＝最小権限）。
         discovery: { enabled: false },
+        // §P: id は list-inference-profiles 実測値（2026-06-11・東京）。Sonnet4.6 はサフィックス無し。
         models: [
           {
-            id: "jp.anthropic.claude-haiku-4-5-v1:0", // §D: 外側ループ既定（速い・安い）
+            id: "jp.anthropic.claude-haiku-4-5-20251001-v1:0", // §D: 外側ループ既定（速い・安い）
             name: "Claude Haiku 4.5 (Bedrock Tokyo)",
             reasoning: false,
             input: ["text"],
@@ -115,7 +116,7 @@
             maxTokens: 8192,
           },
           {
-            id: "jp.anthropic.claude-sonnet-4-6-v1:0", // 重い処理用（任意・通常は MCP 側 L2 が使用）
+            id: "jp.anthropic.claude-sonnet-4-6", // 重い処理用（任意・通常は MCP 側 L2 が使用）
             name: "Claude Sonnet 4.6 (Bedrock Tokyo)",
             reasoning: true,
             input: ["text"],
