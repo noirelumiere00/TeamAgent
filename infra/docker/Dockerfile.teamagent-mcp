@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# go-live: base は ECR Public ミラー（Docker Hub の匿名 pull rate limit 429 を回避・CodeBuild共有IP対策）。
 # ============================================================
 # TeamAgent-MCP バックエンド（streamable-http・会社共有RLS境界） — ECS Fargate(arm64)
 # ============================================================
@@ -13,7 +14,7 @@
 #     node/chromium/ffmpeg を載せる（既定 false＝P1薄殻イメージは軽量のまま）。
 # ============================================================
 
-FROM python:3.11-slim AS base
+FROM public.ecr.aws/docker/library/python:3.11-slim AS base
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
