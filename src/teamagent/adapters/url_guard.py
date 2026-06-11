@@ -103,11 +103,17 @@ def validate_scrape_url(
     *,
     request_id: str | None = None,
     resolve: IpResolver | None = None,
+    check_dns: bool = True,
 ) -> str:
     """スクレイプ対象 URL を SSRF allowlist で検証し、通れば正規化 URL を返す。
 
+    ``check_dns=True``（既定・**実ネットワーク I/O 直前の adapter backstop 用**）は DNS 解決先の
+    内部IPまで検査。``check_dns=False``（skill 層の早期拒否用）はスキーム/host/ドメイン allowlist
+    の安価な検査のみ＝非ネットワークで決定的（IPリテラル・非許可ドメインはここで弾かれ、許可ドメイン
+    が内部IPに解決する稀ケースだけ adapter backstop に委ねる）。
+
     Raises:
-        UrlGuardError: 空 / 長すぎ / 非 http(s) / host 無し / 非許可ドメイン / 内部IP解決。
+        UrlGuardError: 空 / 長すぎ / 非http(s) / host無し / 非許可ドメイン / (check_dns時)内部IP。
     """
     if not url or not url.strip():
         raise UrlGuardError("URL_EMPTY: URL が空です")
@@ -124,7 +130,7 @@ def validate_scrape_url(
     if not _host_matches(host, allowed):
         logger.warning("url_guard_domain_blocked", request_id=request_id, host=host)
         raise UrlGuardError("URL_DOMAIN_BLOCKED: 許可されていないドメインです")
-    if _host_blocked_ip(host, resolve or _default_resolve):
+    if check_dns and _host_blocked_ip(host, resolve or _default_resolve):
         logger.warning("url_guard_ip_blocked", request_id=request_id, host=host)
         raise UrlGuardError("URL_IP_BLOCKED: 内部アドレスへのアクセスは禁止です")
     return cleaned

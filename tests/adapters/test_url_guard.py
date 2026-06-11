@@ -91,3 +91,16 @@ def test_default_allowed_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("SCRAPE_ALLOWED_DOMAINS", raising=False)
     doms = allowed_domains_from_env()
     assert "tiktok.com" in doms and "youtube.com" in doms
+
+
+def test_check_dns_false_skips_resolution_but_keeps_allowlist() -> None:
+    # skill層の安価検証: DNS を引かず（resolver未注入でもネットワーク不要）許可ドメインは通る。
+    assert (
+        validate_scrape_url("https://www.tiktok.com/@u/video/1", check_dns=False)
+        == "https://www.tiktok.com/@u/video/1"
+    )
+    # 非許可ドメイン・IPリテラルは DNS 無しでも弾く。
+    with pytest.raises(UrlGuardError):
+        validate_scrape_url("https://evil.example/x", check_dns=False)
+    with pytest.raises(UrlGuardError):
+        validate_scrape_url("http://169.254.169.254/", check_dns=False)

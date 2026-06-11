@@ -47,8 +47,18 @@ def download_video(
     自動削除され、動画はディスクに残らない。
 
     Raises:
-        VideoDownloadError: 取得不可 / 上限超過 / フォーマット無し等。
+        VideoDownloadError: URL 非許可(SSRF) / 取得不可 / 上限超過 / フォーマット無し等。
     """
+    # §N: SSRF 必須関門。全 DL 経路（video_analysis/video_algorithm）が必ず通る backstop。
+    from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
+
+    try:
+        url = validate_scrape_url(url, request_id=request_id)
+    except UrlGuardError as e:
+        # 生 URL はログに残さない（message に URL は含まれない）
+        logger.warning("video_download_url_blocked", request_id=request_id, reason=str(e))
+        raise VideoDownloadError(f"VIDEO_URL_BLOCKED: {e}") from e
+
     import yt_dlp  # 遅延 import (heavy)
 
     with tempfile.TemporaryDirectory(prefix="teamagent_vdl_") as tmpdir:

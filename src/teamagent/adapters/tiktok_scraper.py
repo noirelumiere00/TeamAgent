@@ -276,8 +276,13 @@ def get_tiktok_comments(
     Raises:
         TikTokScrapeError: URL 不正 / node 不在 / タイムアウト / 0 件 等。
     """
-    if not video_url.strip() or "tiktok.com" not in video_url:
-        raise TikTokScrapeError("TIKTOK_INVALID_URL: 有効な TikTok 動画 URL ではありません")
+    # §N: 部分文字列チェック（`?x=tiktok.com` で突破可）を SSRF allowlist 検証に置換。
+    from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
+
+    try:
+        video_url = validate_scrape_url(video_url, request_id=request_id)
+    except UrlGuardError as e:
+        raise TikTokScrapeError(f"TIKTOK_INVALID_URL: {e}") from e
     if not _SCRAPER_SCRIPT.exists():
         raise TikTokScrapeError(f"TIKTOK_SCRAPER_MISSING: {_SCRAPER_SCRIPT} がありません")
 
