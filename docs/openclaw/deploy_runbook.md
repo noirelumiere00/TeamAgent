@@ -12,6 +12,7 @@ OpenClaw 外殻 ＋ TeamAgent-MCP 境界（会社共有モデル §G）を **ECS
 - [ ] **Bedrock モデル確認**：`aws bedrock list-inference-profiles --region ap-northeast-1` で
       Haiku4.5 の推論プロファイル ID を確定（`variables_fargate.tf:openclaw_model_id` / `openclaw.config.json5` の `★deploy時要確認` を実値へ）。
 - [ ] リージョン=`ap-northeast-1`、account=`718959508629`、tfstate=既存 S3 backend（`main.tf:32-38`）。
+- [ ] **P1 範囲＝会社ナレッジ4ツール（search/clientkarte/proposal_draft/proposal_review）読取のみ**。スクレイプ/動画ツールは**既定 OFF**＝有効化は P1 安定後に §9（別承認）。
 
 ## 1. Secrets 作成（値は本人が投入・コミット禁止）
 Secrets Manager に 5 つ作成（名前は `variables_fargate.tf` の default に合わせる）:
@@ -105,5 +106,37 @@ aws ecs update-service --cluster <cluster> --service <ecs_service_openclaw> --de
 - 専用ch・2-3名・読取のみで**1週間**。`teamagent-dev-openclaw-pilot` ダッシュボードで監視。
 - 合格: **同時4で p95≤15s／エラー<1%／RLS越権0（会社外/admin不可）／コスト許容／無事故**＋ OpenClaw 単一GWの同時実行上限・月運用工数を記録。
 
+## 9. （拡張版・任意）スクレイプ/動画ツール有効化（§L/§M/§N・別承認）
+P1 の4ナレッジツールに加え、**TikTok検索・動画分析・VSEOアルゴリズム分析**を OpenClaw に出す“拡張版”。
+**既定 OFF**（`enable_scrape_tools=false`／P1 薄殻には一切影響しない）。有効化は P1 安定後・別判断で。
+前提＝**§N の SSRF 硬化（`adapters/url_guard.py`）が入っていること**（読取専用・HITL不要）。
+
+```sh
+R=ap-northeast-1
+# (a) Gemini 認証 secret（variables_fargate.tf:gemini_secret_name と一致。Vertex 利用なら task role + GOOGLE_CLOUD_PROJECT）
+aws secretsmanager create-secret --region $R --name teamagent/dev/gemini-api-key --secret-string "AI..."
+# (b) node/chromium/ffmpeg 入りの“拡張版”イメージを再ビルド/push
+docker buildx build --platform linux/arm64 --build-arg WITH_SCRAPE_TOOLS=true \
+  -f infra/docker/Dockerfile.teamagent-mcp -t "$MCP_URL:p1-scrape" --push .
+# (c) terraform.tfvars に enable_scrape_tools=true（＋必要なら mcp_image を新digestへ）→ targeted apply
+#     これで Gemini secret 注入 / S3(vseo-reports/*)最小権限 / VSEO_REPORT_BUCKET / USE_VIDEO_TOOLS=1 / USE_TIKTOK_TOOLS=1 が連動
+terraform apply -target=aws_iam_role_policy.mcp_task -target=aws_ecs_task_definition.mcp -target=aws_ecs_service.mcp
+# (d) 任意: 許可ドメインを絞る（未設定なら url_guard の保守的既定 youtube/youtu.be/tiktok/instagram）
+#     task env SCRAPE_ALLOWED_DOMAINS="youtube.com,youtu.be,tiktok.com,instagram.com"
+```
+- (e) OpenClaw `openclaw.json` の `toolFilter.include` に `tiktok_search`/`video_analysis`/`video_algorithm` を追加（既にテンプレ記載・コメント参照）。
+- **検証**:
+  ```sh
+  # 3ツールが露出していること
+  TEAMAGENT_MCP_BEARER=<bearer> uv run python scripts/smoke_mcp.py --base-url http://127.0.0.1:8787 --expect-scrape
+  # video_analysis が SSRF URL(IMDS/localhost/private/非許可) を拒否すること
+  TEAMAGENT_MCP_BEARER=<bearer> uv run python scripts/attack_mcp.py --base-url http://127.0.0.1:8787 --mode ssrf
+  ```
+- **残存リスク（記録・P2検討）**:
+  - **DNS rebinding**：検証時の解決と yt-dlp/Node の実接続が別タイミング＝TOCTOU 余地。allowlist＋内部IP拒否＋社内＋読取専用で実害を限定。完全対処（pinned-connect）は P2。
+  - **Gemini の $ ハードキャップ無し**：1リクエスト費用は max_videos 上限（≤10/≤30）×単価で**算術的に有界**。動的キャップ実装は重く、**CloudWatch コストアラート（M4）で監視**する方針。
+  - **video_algorithm の同期処理（DL+Gemini+presigned）が OpenClaw 既定 60s timeout に収まるか**を P1 拡張時に監視（超過なら max_videos を下げる）。
+
 ## コスト目安（パイロット）
 - Fargate 2 task（小）＋ ECR ＋ CloudWatch ＋ VPC endpoints(任意 ~$7/月×6) ＋ Bedrock(Haiku外側+cache)。詳細は §9。
+- 拡張版(§9)有効時は Gemini 従量＋動画DL帯域が加算（VSEO分析 1回 ≈ $0.x・max_videos に比例）。

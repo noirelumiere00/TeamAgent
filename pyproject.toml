@@ -154,7 +154,6 @@ module = [
     "google.genai",
     "google.genai.*",
     "yt_dlp",
-    "yt_dlp.*",
     "pypdf",
     "pypdf.*",
     "yaml",

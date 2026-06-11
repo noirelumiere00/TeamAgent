@@ -76,7 +76,8 @@ def _ip_is_blocked(ip_s: str) -> bool:
 
 
 def _default_resolve(host: str) -> list[str]:
-    return [ai[4][0] for ai in socket.getaddrinfo(host, None) if ai[4]]
+    # getaddrinfo の sockaddr[0] は str（IPv4/IPv6 とも）。型を str に明示。
+    return [str(ai[4][0]) for ai in socket.getaddrinfo(host, None) if ai[4]]
 
 
 def _host_blocked_ip(host: str, resolve: IpResolver) -> bool:
