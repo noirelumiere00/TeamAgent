@@ -24,6 +24,7 @@ import argparse
 import dataclasses
 import os
 import sys
+from collections.abc import Callable
 
 # gateway が破棄すべき OC 申告フィールドを詰めた攻撃 vector。"baseline" は無害＝比較基準。
 ATTACK_PAYLOADS: dict[str, dict[str, object]] = {
@@ -75,6 +76,41 @@ def check_no_outsider(vector: str, result_repr: str, outsider_needle: str) -> Ch
     )
 
 
+# §N: scrape系ツール(video_analysis 等)が url_guard で弾くべき SSRF URL。
+# MCP に露出する user制御URLは video_analysis.url のみ（tiktok_search/video_algorithm は query）。
+SSRF_URL_PAYLOADS: dict[str, str] = {
+    "imds": "http://169.254.169.254/latest/meta-data/",  # AWS メタデータ
+    "localhost": "http://127.0.0.1:8787/mcp",  # 自分自身/内部サービス
+    "private_10": "http://10.0.0.5/",  # 内部ネットワーク
+    "substr_bypass": "https://attacker.com/?x=tiktok.com",  # 部分文字列bypass
+    "scheme_file": "file:///etc/passwd",  # 非http(s)
+    "userinfo": "https://tiktok.com@attacker.com/",  # userinfo偽装 → host=attacker.com
+    "nonallowed": "https://evil.example/video/1",  # 非許可ドメイン
+}
+ALLOWED_URL_SAMPLES: tuple[str, ...] = (
+    "https://www.tiktok.com/@u/video/1",
+    "https://youtu.be/abc",
+)
+
+
+def check_url_guard_blocks(name: str, url: str, validate: Callable[[str], object]) -> Check:
+    """SSRF payload が UrlGuardError 系で弾かれる（純ロジック・I/O無し）。拒否されれば成功。"""
+    try:
+        validate(url)
+    except Exception as e:
+        return Check(f"ssrf:{name}:blocked", "UrlGuard" in type(e).__name__, type(e).__name__)
+    return Check(f"ssrf:{name}:blocked", False, "NOT blocked!")
+
+
+def check_url_guard_allows(name: str, url: str, validate: Callable[[str], object]) -> Check:
+    """許可ドメインは通る（過剰ブロックでないこと）。"""
+    try:
+        validate(url)
+    except Exception as e:
+        return Check(f"ssrf:{name}:allowed", False, f"wrongly blocked: {type(e).__name__}")
+    return Check(f"ssrf:{name}:allowed", True, "allowed")
+
+
 def summarize(checks: list[Check]) -> bool:
     all_ok = True
     for c in checks:
@@ -120,16 +156,61 @@ def _run(
     return checks
 
 
+def _run_ssrf(*, base_url: str, bearer: str, path: str, slack_user_id: str) -> list[Check]:
+    """network 実行部: video_analysis に SSRF URL を投げ、backend が拒否(isError)することを実証。
+
+    USE_VIDEO_TOOLS が ON の backend に対して実行する（単体テスト対象外）。重い依存は遅延 import。
+    """
+    import anyio
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async def _probe() -> list[Check]:
+        headers = {"Authorization": f"Bearer {bearer}"}
+        checks: list[Check] = []
+        async with streamablehttp_client(f"{base_url}{path}", headers=headers) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                names = {t.name for t in (await session.list_tools()).tools}
+                if "video_analysis" not in names:
+                    return [
+                        Check(
+                            "ssrf:video_analysis:exposed",
+                            False,
+                            "tool未露出（USE_VIDEO_TOOLS=1 の backend で実行せよ）",
+                        )
+                    ]
+                ctx: dict[str, object] = {"slack_user_id": slack_user_id}
+                for key in ("imds", "localhost", "private_10", "substr_bypass", "nonallowed"):
+                    res = await session.call_tool(
+                        "video_analysis", {"url": SSRF_URL_PAYLOADS[key], "_user_context": ctx}
+                    )
+                    checks.append(
+                        Check(
+                            f"ssrf:video_analysis:{key}_rejected",
+                            bool(res.isError),
+                            "isError" if res.isError else "NOT rejected!",
+                        )
+                    )
+        return checks
+
+    return anyio.run(_probe)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="MCP 越しの身元詐称→無効化 を検証する P0 敵対ハーネス")
+    ap.add_argument(
+        "--mode",
+        choices=["identity", "ssrf"],
+        default="identity",
+        help="identity=身元詐称無効化 / ssrf=scrape系URLのSSRF拒否",
+    )
     ap.add_argument(
         "--base-url", default=os.environ.get("TEAMAGENT_MCP_BASE_URL", "http://127.0.0.1:8787")
     )
     ap.add_argument("--path", default=os.environ.get("TEAMAGENT_MCP_PATH", "/mcp"))
-    ap.add_argument("--query", required=True, help="会社doc・会社外doc 双方が候補に挙がる検索語")
-    ap.add_argument(
-        "--outsider-needle", required=True, help="会社外 doc にのみ含まれる固有トークン"
-    )
+    ap.add_argument("--query", help="[identity] 会社doc・会社外doc 双方が候補に挙がる検索語")
+    ap.add_argument("--outsider-needle", help="[identity] 会社外 doc にのみ含まれる固有トークン")
     ap.add_argument(
         "--slack-user-id", default="U0P0HARNESS", help="baseline の監査用 slack_user_id"
     )
@@ -139,14 +220,25 @@ def main() -> int:
     if not bearer:
         print("TEAMAGENT_MCP_BEARER 未設定（harness は bearer 必須）", file=sys.stderr)
         return 2
-    checks = _run(
-        base_url=args.base_url.rstrip("/"),
-        bearer=bearer,
-        path=args.path,
-        query=args.query,
-        outsider_needle=args.outsider_needle,
-        slack_user_id=args.slack_user_id,
-    )
+    if args.mode == "ssrf":
+        checks = _run_ssrf(
+            base_url=args.base_url.rstrip("/"),
+            bearer=bearer,
+            path=args.path,
+            slack_user_id=args.slack_user_id,
+        )
+    else:
+        if not args.query or not args.outsider_needle:
+            print("identity モードは --query と --outsider-needle が必須", file=sys.stderr)
+            return 2
+        checks = _run(
+            base_url=args.base_url.rstrip("/"),
+            bearer=bearer,
+            path=args.path,
+            query=args.query,
+            outsider_needle=args.outsider_needle,
+            slack_user_id=args.slack_user_id,
+        )
     return 0 if summarize(checks) else 1
 
 

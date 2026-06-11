@@ -61,3 +61,30 @@ def test_summarize_false_if_any_fail() -> None:
         _atk.check_results_identical("admin_role", "a", "b"),
     ]
     assert _atk.summarize(checks) is False
+
+
+def _validate_no_dns(url: str) -> object:
+    # 単体テストは非ネットワーク（check_dns=False＝DNS解決を伴わない安価検査）。
+    from teamagent.adapters.url_guard import validate_scrape_url
+
+    return validate_scrape_url(url, check_dns=False)
+
+
+def test_url_guard_blocks_ssrf_payloads() -> None:
+    # IMDS/localhost/private/部分文字列bypass/scheme/userinfo/非許可 が全て弾かれる。
+    for name in (
+        "imds",
+        "localhost",
+        "private_10",
+        "substr_bypass",
+        "scheme_file",
+        "userinfo",
+        "nonallowed",
+    ):
+        chk = _atk.check_url_guard_blocks(name, _atk.SSRF_URL_PAYLOADS[name], _validate_no_dns)
+        assert chk.ok, f"{name} NOT blocked: {chk.detail}"
+
+
+def test_url_guard_allows_known_domains() -> None:
+    for url in _atk.ALLOWED_URL_SAMPLES:
+        assert _atk.check_url_guard_allows("ok", url, _validate_no_dns).ok
