@@ -17,7 +17,9 @@ def _load_smoke() -> ModuleType:
     spec = importlib.util.spec_from_file_location("smoke_mcp", path)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["smoke_mcp"] = mod  # @dataclass の module 解決(sys.modules参照)のため登録してから exec
+    sys.modules["smoke_mcp"] = (
+        mod  # @dataclass の module 解決(sys.modules参照)のため登録してから exec
+    )
     spec.loader.exec_module(mod)
     return mod
 
@@ -72,3 +74,21 @@ def test_company_scoped_fails_on_outside_domain() -> None:
 def test_summarize_returns_false_if_any_fail(capsys: object) -> None:
     checks = [_smoke.check_healthz(200), _smoke.check_healthz(500)]
     assert _smoke.summarize(checks) is False
+
+
+def test_scrape_tools_absent_by_default() -> None:
+    # 既定(expect_scrape=False)では scrape系が露出していないことが合格条件（既定OFF回帰）。
+    base = ["search", "clientkarte", "proposal_draft", "proposal_review"]
+    assert _smoke.check_scrape_tools(base, expect_scrape=False).ok is True
+    leaked = _smoke.check_scrape_tools([*base, "video_analysis"], expect_scrape=False)
+    assert leaked.ok is False
+    assert "video_analysis" in leaked.detail
+
+
+def test_scrape_tools_present_when_expected() -> None:
+    base = ["search", "clientkarte", "proposal_draft", "proposal_review"]
+    full = [*base, "tiktok_search", "video_analysis", "video_algorithm"]
+    assert _smoke.check_scrape_tools(full, expect_scrape=True).ok is True
+    missing = _smoke.check_scrape_tools([*base, "tiktok_search"], expect_scrape=True)
+    assert missing.ok is False
+    assert "missing" in missing.detail

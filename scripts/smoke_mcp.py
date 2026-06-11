@@ -32,6 +32,8 @@ FORBIDDEN_TOOLS = frozenset(
         "mail_to_internal_context",
     }
 )
+# §N: スクレイプ/動画ツール（enable_scrape_tools=true の拡張版でのみ露出すべき）。
+SCRAPE_TOOLS = frozenset({"tiktok_search", "video_analysis", "video_algorithm"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,6 +69,18 @@ def check_tool_exposure(tool_names: Iterable[str]) -> Check:
     return Check("tool_exposure", ok, detail)
 
 
+def check_scrape_tools(tool_names: Iterable[str], *, expect_scrape: bool) -> Check:
+    """expect_scrape=True なら3ツール露出を、False なら非露出（既定OFF不変条件の回帰）を検証。"""
+    names = set(tool_names)
+    present = names & SCRAPE_TOOLS
+    if expect_scrape:
+        missing = SCRAPE_TOOLS - names
+        return Check(
+            "scrape_tools", not missing, f"present={sorted(present)} missing={sorted(missing)}"
+        )
+    return Check("scrape_tools_absent", not present, f"unexpected_present={sorted(present)}")
+
+
 def check_company_scoped(doc_domains: Iterable[str], allowed_domains: Iterable[str]) -> Check:
     """--full: 返却 doc の所属ドメインが全て許可（会社）ドメイン内＝会社外データ0。"""
     allowed = {d.strip().lower() for d in allowed_domains if d.strip()}
@@ -89,7 +103,13 @@ def summarize(checks: list[Check]) -> bool:
 
 
 def _run(
-    *, base_url: str, bearer: str, path: str, full: bool, allowed_domains: list[str]
+    *,
+    base_url: str,
+    bearer: str,
+    path: str,
+    full: bool,
+    allowed_domains: list[str],
+    expect_scrape: bool,
 ) -> list[Check]:
     """network 実行部（post-deploy／単体テスト対象外）。重い依存は遅延 import。"""
     import anyio
@@ -112,7 +132,11 @@ def _run(
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 listed = await session.list_tools()
-                out = [check_tool_exposure([t.name for t in listed.tools])]
+                tool_names = [t.name for t in listed.tools]
+                out = [
+                    check_tool_exposure(tool_names),
+                    check_scrape_tools(tool_names, expect_scrape=expect_scrape),
+                ]
                 if full:
                     res = await session.call_tool(
                         "search",
@@ -138,6 +162,12 @@ def main() -> int:
         action="store_true",
         help="search を実呼びして会社共有RLSまで検証（要DB/トンネル）",
     )
+    ap.add_argument(
+        "--expect-scrape",
+        action="store_true",
+        default=os.environ.get("EXPECT_SCRAPE_TOOLS", "").lower() in ("1", "true", "yes"),
+        help="拡張版(enable_scrape_tools=true)向け: scrape系3ツールの露出を要求（既定は非露出を検証）",
+    )
     args = ap.parse_args()
 
     bearer = os.environ.get("TEAMAGENT_MCP_BEARER")
@@ -151,6 +181,7 @@ def main() -> int:
         path=args.path,
         full=args.full,
         allowed_domains=allowed,
+        expect_scrape=args.expect_scrape,
     )
     return 0 if summarize(checks) else 1
 
