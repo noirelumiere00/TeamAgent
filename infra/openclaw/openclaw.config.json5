@@ -44,6 +44,11 @@
       // §S: groupPolicy 既定は "allowlist"（許可ch未設定だと無応答）。P1は招待された専用chで
       // 応答させるため "open"（botが居るchでのみ反応・到達範囲は招待で限定）。
       groupPolicy: "open",
+      // §T1: 返信はスレッドに付ける（既定 off＝chに平打ち・ユーザー要望2026-06-12）。
+      // ch/グループ=全返信スレッド化・DM=平打ち（DMにスレッドは不自然）。docs/channels/slack で一次確認。
+      replyToModeByChatType: { channel: "all", group: "all", direct: "off" },
+      // §T1: 受付リアクション（処理中が見える＝「無視された？」を防ぐ実運用の詰まり潰し）。
+      ackReaction: "eyes",
     },
   },
 
