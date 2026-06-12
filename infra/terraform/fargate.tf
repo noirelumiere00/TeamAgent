@@ -36,10 +36,11 @@ data "aws_secretsmanager_secret" "slack_app" {
 data "aws_secretsmanager_secret" "gateway_token" {
   name = var.openclaw_gateway_token_secret_name
 }
-# §M: スクレイプ/動画ツール有効時のみ（Gemini APIキー）。Vertex 利用なら不要。
-data "aws_secretsmanager_secret" "gemini" {
+# §M改(VSEO有効化): Gemini 認証は本番EC2と同方式の Vertex SA（teamagent/dev/vertex_sa）。
+# entrypoint ラッパが SA JSON をファイル化して ADC に渡す（scripts/run_mcp_vertex_entrypoint.sh）。
+data "aws_secretsmanager_secret" "vertex_sa" {
   count = var.enable_scrape_tools ? 1 : 0
-  name  = var.gemini_secret_name
+  name  = var.vertex_sa_secret_name
 }
 
 # ---------- クラスタ ----------
@@ -152,7 +153,7 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
     resources = concat([
       data.aws_secretsmanager_secret.bearer.arn,
       data.aws_secretsmanager_secret.database_url.arn,
-    ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.gemini[0].arn] : [])
+    ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [])
   }
 }
 
@@ -207,7 +208,7 @@ data "aws_iam_policy_document" "mcp_task" {
     resources = concat([
       data.aws_secretsmanager_secret.bearer.arn,
       data.aws_secretsmanager_secret.database_url.arn,
-    ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.gemini[0].arn] : [])
+    ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [])
   }
   statement {
     sid       = "KmsDecrypt"
@@ -314,7 +315,7 @@ resource "aws_ecs_task_definition" "mcp" {
   execution_role_arn = aws_iam_role.ecs_execution_mcp.arn
   task_role_arn      = aws_iam_role.mcp_task.arn
 
-  container_definitions = jsonencode([{
+  container_definitions = jsonencode([merge({
     name         = "teamagent-mcp"
     image        = var.mcp_image
     essential    = true
@@ -330,12 +331,16 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
       { name = "USE_VIDEO_TOOLS", value = "1" },
       { name = "USE_TIKTOK_TOOLS", value = "1" },
+      # §M改: Gemini は Vertex（本番EC2 .env.production と同値・SA JSON は entrypoint がファイル化）。
+      { name = "GEMINI_USE_VERTEX", value = "true" },
+      { name = "GEMINI_VERTEX_PROJECT", value = var.gemini_vertex_project },
+      { name = "GEMINI_VERTEX_LOCATION", value = var.gemini_vertex_location },
     ] : [])
     secrets = concat([
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       ], var.enable_scrape_tools ? [
-      { name = "GEMINI_API_KEY", valueFrom = data.aws_secretsmanager_secret.gemini[0].arn },
+      { name = "VERTEX_SA_JSON", valueFrom = data.aws_secretsmanager_secret.vertex_sa[0].arn },
     ] : [])
     logConfiguration = {
       logDriver = "awslogs"
@@ -352,7 +357,10 @@ resource "aws_ecs_task_definition" "mcp" {
       retries     = 5
       startPeriod = 40
     }
-  }])
+    }, var.enable_scrape_tools ? {
+    # §M改: 拡張版のみ SA JSON ファイル化ラッパで起動（既定はイメージの CMD のまま＝挙動不変）。
+    command = ["sh", "scripts/run_mcp_vertex_entrypoint.sh"]
+  } : {})])
 }
 
 resource "aws_ecs_task_definition" "openclaw" {

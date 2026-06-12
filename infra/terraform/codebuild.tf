@@ -98,6 +98,11 @@ resource "aws_codebuild_project" "image" {
       name  = "IMAGE_TAG"
       value = "p1a"
     }
+    # §VSEO: 拡張版（node/chromium/ffmpeg入り）は start-build の env override で true に。既定 false＝薄殻。
+    environment_variable {
+      name  = "WITH_SCRAPE_TOOLS"
+      value = "false"
+    }
   }
 
   source {
@@ -112,7 +117,7 @@ resource "aws_codebuild_project" "image" {
         build:
           commands:
             - echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m)"
-            - docker build -f infra/docker/Dockerfile.teamagent-mcp -t $MCP_REPO:$IMAGE_TAG .
+            - docker build -f infra/docker/Dockerfile.teamagent-mcp --build-arg WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS -t $MCP_REPO:$IMAGE_TAG .
         post_build:
           commands:
             - docker push $MCP_REPO:$IMAGE_TAG

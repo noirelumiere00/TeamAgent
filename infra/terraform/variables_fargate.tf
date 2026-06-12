@@ -92,10 +92,23 @@ variable "enable_scrape_tools" {
   default     = false
 }
 
-variable "gemini_secret_name" {
-  description = "Gemini APIキーの Secrets Manager 名（enable_scrape_tools=true 時に GEMINI_API_KEY として注入。Vertex 利用なら不要＝task role+GOOGLE_CLOUD_PROJECT を別途）"
+# §M改(VSEO有効化): Gemini 認証は本番EC2と同方式の Vertex SA を採用（API キー方式は廃止）。
+variable "vertex_sa_secret_name" {
+  description = "Vertex AI SA JSON の secret 名（本番EC2 load_secrets.sh と同一ソース・enable_scrape_tools=true 時に VERTEX_SA_JSON として注入）"
   type        = string
-  default     = "teamagent/dev/gemini-api-key"
+  default     = "teamagent/dev/vertex_sa"
+}
+
+variable "gemini_vertex_project" {
+  description = "Vertex AI の GCP プロジェクトID（本番 .env.production と同値）"
+  type        = string
+  default     = "ntv-ai"
+}
+
+variable "gemini_vertex_location" {
+  description = "Vertex AI ロケーション（本番 .env.production と同値）"
+  type        = string
+  default     = "us-central1"
 }
 
 variable "enable_vpc_endpoints" {
