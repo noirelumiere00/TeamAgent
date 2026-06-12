@@ -178,6 +178,9 @@ data "aws_iam_policy_document" "openclaw_task" {
       "rds:*",
       "rds-db:*",
       "rds-data:*",
+      # §Q-Q2: 金庫の中身が DynamoDB(aiia per-user token 4表)にも広がったため明示 Deny に追加
+      #（reminder/notified は平文の per-user 状態＝kms Deny では守れない・将来の誤付与への保険）。
+      "dynamodb:*",
     ]
     resources = ["*"]
   }

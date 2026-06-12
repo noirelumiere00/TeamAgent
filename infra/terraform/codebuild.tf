@@ -51,6 +51,7 @@ data "aws_iam_policy_document" "codebuild" {
       "ecr:PutImage",
       "ecr:BatchGetImage",
       "ecr:GetDownloadUrlForLayer",
+      "ecr:DescribeImages", # buildspec post_build の digest 取得（無いと tee が空のまま SUCCEEDED）
     ]
     resources = [aws_ecr_repository.mcp.arn, aws_ecr_repository.openclaw.arn]
   }

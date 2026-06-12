@@ -12,11 +12,16 @@ resource "aws_security_group" "vpce" {
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description     = "HTTPS from Fargate tasks"
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.openclaw.id, aws_security_group.mcp.id]
+    description = "HTTPS from Fargate tasks"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    # §Q-Q2: aiia-mcp も endpoint 経由（ECR pull/Secrets注入/Logs/KMS/Bedrock）。
+    # ここに入れ忘れると private_dns_enabled=true のため当該タスクだけ 443 が落ち provisioning ループになる。
+    security_groups = concat(
+      [aws_security_group.openclaw.id, aws_security_group.mcp.id],
+      var.enable_aiia_mcp ? [aws_security_group.aiia_mcp[0].id] : [],
+    )
   }
   egress {
     from_port   = 0
@@ -65,4 +70,16 @@ resource "aws_vpc_endpoint" "s3" {
   route_table_ids   = data.aws_route_tables.default[0].ids
 
   tags = { Name = "${var.project_name}-${var.environment}-vpce-s3" }
+}
+
+# §Q-Q2: DynamoDB gateway endpoint（無料）— aiia-mcp の本務（per-user token 4表）を private 経路に。
+# これが無いと DynamoDB だけ IGW 依存＝将来 public IP を外すと真っ先に切れる。
+resource "aws_vpc_endpoint" "dynamodb" {
+  count             = var.enable_vpc_endpoints ? 1 : 0
+  vpc_id            = data.aws_vpc.default.id
+  service_name      = "com.amazonaws.${var.aws_region}.dynamodb"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = data.aws_route_tables.default[0].ids
+
+  tags = { Name = "${var.project_name}-${var.environment}-vpce-dynamodb" }
 }
