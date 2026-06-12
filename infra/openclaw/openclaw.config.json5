@@ -49,6 +49,14 @@
       replyToModeByChatType: { channel: "all", group: "all", direct: "off" },
       // §T1: 受付リアクション（処理中が見える＝「無視された？」を防ぐ実運用の詰まり潰し）。
       ackReaction: "eyes",
+      // §T2: DM は許可リスト制（既定 pairing＝オーナーCLI承認制は Fargate では打つ場所が無く、
+      // 承認stateも ephemeral で再起動消失）。"open" にしない理由＝Vector ワークスペースには
+      // 社外ゲスト（クライアント）が居る前提で、DM経由で会社ナレッジに触れさせない。
+      // チャンネルは groupPolicy:"open" のまま（招待制で統制）。パイロット参加者をここに追記。
+      dmPolicy: "allowlist",
+      allowFrom: [
+        "U09CX1CCBLN", // 小俣翔碁
+      ],
     },
   },
 
