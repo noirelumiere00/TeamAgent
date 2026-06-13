@@ -356,6 +356,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         if out.report_html_path:
             # §M: 金庫外の OpenClaw 等が読めるよう、非公開S3へ発行して署名URLを出力に載せる。
             out.report_url = self._publish(out.report_html_path, ctx.request_id, input.query)
+        # §Q-HTML→PPTX: 提案資料組み込み用の追加成果物（要求時のみ・graceful＝本体分析は壊さない）。
+        if "slides" in input.outputs or "pptx" in input.outputs:
+            self._build_proposal_outputs(out, input, ctx.request_id)
         out.slack_summary = self._slack_summary(out, backfilled)
         log.info(
             "video_algorithm_done",
@@ -383,6 +386,59 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
         return publish_html_file(path, request_id=request_id, query=query)
 
+    def _build_proposal_outputs(
+        self, out: VideoAlgorithmOutput, input: VideoAlgorithmInput, request_id: str
+    ) -> None:
+        """提案資料向け slides(HTML)/pptx を生成しS3署名URLを out に載せる（全工程graceful）。
+
+        - slides: render_slides(out) を S3 へ（HTML・編集可・営業がブラウザで直す）。
+        - pptx:   slides を playwright で要素スクショ→python-pptx→S3（拡張版イメージの chromium）。
+        どの段が失敗しても本体分析(out)は壊さない＝報告だけ残して None のまま進む。
+        """
+        report_dir = self._report_dir or os.path.join(os.getcwd(), ".local_out", "vseo_reports")
+        safe = re.sub(r"[^\w]+", "_", out.query).strip("_")[:40] or "kw"
+        if "slides" in input.outputs or "pptx" in input.outputs:
+            try:
+                from teamagent.skills.video_algorithm.slides import render_slides
+
+                os.makedirs(report_dir, exist_ok=True)
+                spath = os.path.join(report_dir, f"vseo_slides_{safe}_{uuid.uuid4().hex[:8]}.html")
+                with open(spath, "w", encoding="utf-8") as f:
+                    f.write(render_slides(out))
+                if "slides" in input.outputs:
+                    out.slides_url = self._publish_artifact(
+                        spath, request_id, out.query, kind="slides"
+                    )
+                if "pptx" in input.outputs:
+                    out.pptx_url = self._build_pptx(out, report_dir, safe, request_id)
+            except Exception:
+                logger.warning("vseo_proposal_outputs_failed", request_id=request_id)
+
+    def _build_pptx(
+        self, out: VideoAlgorithmOutput, report_dir: str, safe: str, request_id: str
+    ) -> str | None:
+        try:
+            from teamagent.skills.video_algorithm.pptx_export import render_pptx
+
+            ppath = os.path.join(report_dir, f"vseo_proposal_{safe}_{uuid.uuid4().hex[:8]}.pptx")
+            if render_pptx(out, ppath) is None:
+                return None
+            return self._publish_artifact(ppath, request_id, out.query, kind="pptx")
+        except Exception:
+            logger.warning("vseo_pptx_build_failed", request_id=request_id)
+            return None
+
+    def _publish_artifact(self, path: str, request_id: str, query: str, *, kind: str) -> str | None:
+        """slides/pptx を非公開S3へ発行（publisher 注入優先・bucket未設定なら None）。"""
+        if self._publisher is not None:
+            return self._publisher(path, request_id=request_id, query=query)
+        if not os.environ.get("VSEO_REPORT_BUCKET"):
+            return None
+        from teamagent.adapters.report_publish import publish_html_file, publish_pptx_file
+
+        fn = publish_pptx_file if kind == "pptx" else publish_html_file
+        return fn(path, request_id=request_id, query=query)
+
     def _write_report(self, out: VideoAlgorithmOutput, request_id: str) -> str | None:
         try:
             report_dir = self._report_dir or os.path.join(os.getcwd(), ".local_out", "vseo_reports")
@@ -403,6 +459,11 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         ok = sum(1 for v in out.videos if v.analysis)
         bf = f"／下位繰上げ{backfilled}本" if backfilled else ""
         top = f"　最有力の勝ち筋: 『{c.win_factors[0].factor}』" if c.win_factors else ""
+        proposal_lines = ""
+        if out.pptx_url:
+            proposal_lines += f"\n📊 提案用パワポ（7日有効・そのまま提案資料へ）: {out.pptx_url}"
+        if out.slides_url:
+            proposal_lines += f"\n✏️ 編集用スライド（ブラウザで直接編集）: {out.slides_url}"
         report_line = (
             f"📄 詳細レポート（7日有効）: {out.report_url}"
             if out.report_url
@@ -412,6 +473,6 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             f"🔎 *VSEO動画アルゴリズム分析* 完了「{out.query}」"
             f"（上位{len(out.videos)}本／分析成功{ok}本{bf}）\n"
             f"{c.summary}{top}\n"
-            f"{report_line}（タイムライン/テロップ位置/ブランド検出/勝ち筋）。\n"
+            f"{report_line}（タイムライン/テロップ位置/ブランド検出/勝ち筋）。{proposal_lines}\n"
             f"_概算 ${out.total_cost_usd:.4f}・n={c.video_count} の観測仮説（相関≠因果）_"
         )

@@ -27,9 +27,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # §L: スクレイプ系の実行ランタイム（tiktok_search=Puppeteer/Node・video_*=yt-dlp+ffmpeg）。
 # 既定 false。USE_VIDEO_TOOLS/USE_TIKTOK_TOOLS を ON にする“拡張版”ビルド時のみ載せる。
 ARG WITH_SCRAPE_TOOLS=false
+# fonts-noto-cjk: §Q-HTML→PPTX で playwright が要点スライドを画像化する際の日本語フォント
+# （無いと PNG/PPTX で日本語が豆腐□になる）。chromium は提案PPTXのレンダリングにも使う。
 RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ]; then \
       apt-get update && apt-get install -y --no-install-recommends \
-        nodejs npm chromium ffmpeg \
+        nodejs npm chromium ffmpeg fonts-noto-cjk \
       && rm -rf /var/lib/apt/lists/* ; \
     fi
 

@@ -145,6 +145,7 @@ ignore = [
 "scripts/**/*.py" = ["E501", "T201"]
 # HTML レポート生成は inline テンプレート文字列が長くなる（可読性のため1行維持）
 "src/teamagent/skills/video_algorithm/report.py" = ["E501"]
+"src/teamagent/skills/video_algorithm/slides.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
