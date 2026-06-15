@@ -77,7 +77,6 @@ def build_production_tools() -> list[ToolSpec]:
     """
     from teamagent.skills.clientkarte.skill import ClientKarteSkill
     from teamagent.skills.proposal.skill import ProposalDraftSkill
-    from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
     from teamagent.skills.proposal_review.skill import ProposalReviewSkill
     from teamagent.skills.search.skill import SearchSkill
 
@@ -96,13 +95,6 @@ def build_production_tools() -> list[ToolSpec]:
             ProposalReviewSkill.description,
             ProposalReviewSkill,
             factory=lambda: ProposalReviewSkill(search=search),
-        ),
-        # 提案書 .pptx 生成。Agent は search/proposal_draft/clientkarte で素材を集めてから
-        # research_material に渡して呼ぶ。FMT テンプレは env TEAMAGENT_FMT_TEMPLATE。
-        ToolSpec(
-            ProposalDeckSkill.name,
-            ProposalDeckSkill.description,
-            ProposalDeckSkill,
         ),
     ]
 
@@ -169,6 +161,22 @@ def build_production_tools() -> list[ToolSpec]:
                 OperationLogSkill.name,
                 OperationLogSkill.description,
                 OperationLogSkill,
+            )
+        )
+
+    # proposal_deck: 商材情報+研究素材 → FMT v2 95項目 → .pptx 生成。**既定 OFF**
+    # （USE_PROPOSAL_DECK_TOOLS=1 で opt-in）。run() は TEAMAGENT_FMT_TEMPLATE（FMT v2 .pptx の
+    # 実パス）が無いと ValueError/FileNotFoundError になるため、テンプレを provision してから
+    # 有効化する（他の任意スキルと同じ gate パターンに統一）。Agent は search/proposal_draft/
+    # clientkarte で素材を集めてから research_material に渡して呼ぶ。
+    if _envflag("USE_PROPOSAL_DECK_TOOLS"):
+        from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
+
+        specs.append(
+            ToolSpec(
+                ProposalDeckSkill.name,
+                ProposalDeckSkill.description,
+                ProposalDeckSkill,
             )
         )
 

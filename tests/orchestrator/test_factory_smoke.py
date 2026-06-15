@@ -54,3 +54,23 @@ def test_operation_log_envflag_wired() -> None:
     src = inspect.getsource(factory.build_production_tools)
     assert "USE_OPERATION_LOG_TOOLS" in src
     assert "OperationLogSkill" in src
+
+
+def test_proposal_deck_skill_importable() -> None:
+    # Wave3-⑧: proposal_deck Skill が軽量 import できる（bedrock 依存は __init__/run で遅延生成）.
+    from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
+
+    assert ProposalDeckSkill.name == "proposal_deck"
+
+
+def test_proposal_deck_envflag_gated() -> None:
+    # proposal_deck は USE_PROPOSAL_DECK_TOOLS gated（既定 OFF）で append される分岐を持つ.
+    # FMT テンプレ未提供で呼ぶと必ずエラーになるため、他の任意スキルと同じ opt-in に統一済。
+    import inspect
+
+    src = inspect.getsource(factory.build_production_tools)
+    assert "USE_PROPOSAL_DECK_TOOLS" in src
+    assert "ProposalDeckSkill" in src
+    # 初期 specs（常時 ON 群）に proposal_deck が混ざっていない＝gate ブロック側にあること。
+    # 「ProposalDeckSkill」の初出が USE_PROPOSAL_DECK_TOOLS 分岐より後にあることで担保する。
+    assert src.index("USE_PROPOSAL_DECK_TOOLS") < src.index("ProposalDeckSkill")
