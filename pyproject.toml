@@ -175,6 +175,12 @@ module = [
     "pypdf",
     "pypdf.*",
     "yaml",
+    "openpyxl",
+    "openpyxl.*",
+    "docx",
+    "docx.*",
+    "pptx",
+    "pptx.*",
 ]
 ignore_missing_imports = true
 

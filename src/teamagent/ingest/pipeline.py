@@ -537,6 +537,11 @@ def _process_one_gdrive_file(
     Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないように、
     呼び出し側を try/except でラップ可能に。
     """
+    from teamagent.ingest.office_extract import (
+        GDOC_NATIVE_MIME,
+        OFFICE_BINARY_MIMES,
+        extract_office_pages,
+    )
     from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
 
     # ACL を permissions.list で解決
@@ -547,7 +552,7 @@ def _process_one_gdrive_file(
         fallback_owner_email=f.owners_email[0] if f.owners_email else owner_email,
     )
 
-    # 本文抽出: PDF のみ実 chunk 化、それ以外は title のみ
+    # PDF / Office (docx/pptx/xlsx) / Google native gdoc は chunk 化、他は title のみ
     chunks: list[ChunkUpsert] = []
     if f.mime_type in _PDF_MIME_TYPES:
         try:
@@ -584,8 +589,81 @@ def _process_one_gdrive_file(
                     metadata={"page_num": page_num},
                 )
             )
+    elif f.mime_type in OFFICE_BINARY_MIMES:
+        # docx / pptx / xlsx: download → extract → chunk_pages（PDF と同じ I/F）
+        try:
+            data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+        except Exception:
+            logger.exception(
+                "gdrive_office_download_failed",
+                file_id=f.id,
+                file_name=f.name,
+                mime_type=f.mime_type,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        try:
+            pages = extract_office_pages(data, mime_type=f.mime_type)
+        except Exception:
+            logger.exception(
+                "gdrive_office_extract_failed",
+                file_id=f.id,
+                file_name=f.name,
+                mime_type=f.mime_type,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        page_chunks = chunk_pages(pages, size=500, overlap=100)
+        if not page_chunks:
+            logger.warning(
+                "gdrive_office_empty_text",
+                file_id=f.id,
+                file_name=f.name,
+                mime_type=f.mime_type,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        for idx, (page_num, text) in enumerate(page_chunks):
+            chunks.append(
+                ChunkUpsert(
+                    chunk_idx=idx,
+                    content=text,
+                    embedding=embedder.embed(text),
+                    metadata={"page_num": page_num},
+                )
+            )
+    elif f.mime_type == GDOC_NATIVE_MIME:
+        # Google native gdoc: Docs API で plain text 抽出（download_file_bytes は使えない）
+        try:
+            from teamagent.adapters.gdocs_client import GDocsClient
+
+            gdocs = GDocsClient.from_env()
+            doc_content = gdocs.get_document_text(document_id=f.id, request_id=request_id)
+            text = doc_content.text or ""
+        except Exception:
+            logger.exception(
+                "gdrive_gdoc_extract_failed",
+                file_id=f.id,
+                file_name=f.name,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        if not text.strip():
+            logger.warning("gdrive_gdoc_empty_text", file_id=f.id, file_name=f.name)
+            skipped.append(f.id)
+            return 0, 0
+        page_chunks = chunk_pages([(1, text)], size=500, overlap=100)
+        for idx, (page_num, content) in enumerate(page_chunks):
+            chunks.append(
+                ChunkUpsert(
+                    chunk_idx=idx,
+                    content=content,
+                    embedding=embedder.embed(content),
+                    metadata={"page_num": page_num},
+                )
+            )
     else:
-        # 非 PDF: 雛形と同じ（title + mime のみ、Google Doc export 対応は Sprint 4 で）
+        # 未対応 mime_type: title + mime のフォールバック（検索ヒットだけは可能にする）
         text = f"{f.name} ({f.mime_type})"
         chunks.append(
             ChunkUpsert(
