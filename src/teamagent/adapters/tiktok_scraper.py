@@ -161,6 +161,7 @@ def search_tiktok(
     max_videos: int = 10,
     request_id: str | None = None,
     timeout_s: int = _DEFAULT_TIMEOUT_S,
+    sessions: int | None = None,
 ) -> TikTokSearchResult:
     """TikTok をキーワード/ハッシュタグで検索し、上位動画のメタを返す。
 
@@ -184,6 +185,11 @@ def search_tiktok(
         )
 
     node = _node_bin()
+    if sessions is None:
+        sessions = max(1, int(os.environ.get("TIKTOK_SESSIONS", "1") or "1"))
+    # 複数セッションは1回あたり~60-70sかかるため timeout を比例拡大 (既定 sessions=1 では不変)
+    if sessions > 1:
+        timeout_s = max(timeout_s, sessions * 75)
     cmd = [
         node,
         str(_SCRAPER_SCRIPT),
@@ -193,6 +199,8 @@ def search_tiktok(
         "hashtag" if search_type == "hashtag" else "keyword",
         "--max",
         str(max_videos),
+        "--sessions",
+        str(sessions),
     ]
     logger.info(
         "tiktok_search_start",
@@ -200,6 +208,7 @@ def search_tiktok(
         search_type=search_type,
         max_videos=max_videos,
         query_len=len(query),
+        sessions=sessions,
     )
 
     try:
@@ -240,8 +249,20 @@ def search_tiktok(
 
     if not payload.get("ok"):
         err = payload.get("error") or "不明なエラー"
-        logger.info("tiktok_search_empty", request_id=request_id, error=err)
-        raise TikTokScrapeError(f"TIKTOK_EMPTY_RESULT: {err}")
+        error_code = payload.get("errorCode") or "TIKTOK_EMPTY_RESULT"
+        diag = payload.get("diag") or {}
+        # 空振りの原因切り分け用にブラウザ層 stderr と診断を必ず残す
+        # (captcha壁 / 真の0件 / API形状変更 を推測でなくログで判別できるようにする)
+        logger.warning(
+            "tiktok_search_empty",
+            request_id=request_id,
+            error=err,
+            error_code=error_code,
+            diag=diag,
+            stderr_tail=(proc.stderr or "")[-600:],
+        )
+        msg = err if err.startswith(error_code) else f"{error_code}: {err}"
+        raise TikTokScrapeError(msg)
 
     videos = tuple(_parse_video(v) for v in payload.get("videos", []))
     result = TikTokSearchResult(
@@ -254,6 +275,7 @@ def search_tiktok(
         request_id=request_id,
         count=result.count,
         search_type=result.search_type,
+        diag=payload.get("diag") or {},
     )
     return result
 

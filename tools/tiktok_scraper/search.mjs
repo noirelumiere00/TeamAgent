@@ -29,6 +29,7 @@ function parseArgs(argv) {
     maxComments: 50,
     out: null,
     headful: false,
+    sessions: 1, // 独立セッション数 (>1 で複数回検索→出現頻度ランク=単発失敗に強くする)
   };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
@@ -39,6 +40,7 @@ function parseArgs(argv) {
     else if (k === "--url") a.url = argv[++i];
     else if (k === "--max-comments") a.maxComments = parseInt(argv[++i], 10) || 50;
     else if (k === "--out") a.out = argv[++i];
+    else if (k === "--sessions") a.sessions = Math.max(1, parseInt(argv[++i], 10) || 1);
     else if (k === "--headful") a.headful = true;
   }
   return a;
@@ -74,6 +76,24 @@ const USER_AGENTS = [
 function humanDelay(minMs, maxMs) {
   const ms = minMs + Math.random() * (maxMs - minMs);
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// captcha/verify ページの能動検出 (推測でなく実検知)。0件の原因切り分け用。
+async function detectBotWall(page) {
+  try {
+    return await page.evaluate(() => {
+      const url = location.href || "";
+      const title = document.title || "";
+      if (/\/(verify|captcha|security-check)/i.test(url)) return true;
+      if (/captcha|verif|セキュリティ|認証|ロボットでは/i.test(title)) return true;
+      const sels = [
+        "#captcha-verify-page", ".captcha_verify_container", '[id*="captcha" i]',
+        '[class*="captcha" i]', '[class*="Captcha"]', '[data-e2e="verify-bar"]',
+      ];
+      for (const s of sels) { try { if (document.querySelector(s)) return true; } catch (e) {} }
+      return false;
+    });
+  } catch (e) { return false; }
 }
 
 // API レスポンス item → 動画オブジェクト (search/general 形式: {type:1, item:{...}})
@@ -128,6 +148,9 @@ async function searchOnce(browser, query, type, maxVideos) {
   const allVideos = [];
   let pagesFetched = 0;
   let latestHasMore = true;
+  let captchaDetected = false;
+  let gridFound = false;
+  let ssrCount = 0;
 
   const MAX_PAGES = 18;
   const MAX_SCROLL = 20;
@@ -178,9 +201,14 @@ async function searchOnce(browser, query, type, maxVideos) {
       } catch { /* 非JSONは無視 */ }
     });
 
-    // 初回 Cookie 取得
+    // 初回 Cookie/トークン取得 (ウォームアップ): トップで滞在＋軽いスクロール/マウスで ttwid/msToken を成熟させてから検索へ
     await page.goto("https://www.tiktok.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
-    await humanDelay(2000, 3500);
+    await humanDelay(2500, 4000);
+    try {
+      await page.evaluate(() => window.scrollTo(0, 600));
+      await page.mouse.move(400 + Math.random() * 300, 300 + Math.random() * 200);
+    } catch (e) { /* warmup は best-effort */ }
+    await humanDelay(1500, 2500);
 
     // 検索/タグページへ
     const navUrl = isTag
@@ -194,7 +222,11 @@ async function searchOnce(browser, query, type, maxVideos) {
       : '[data-e2e="search_top-item-list"], [class*="DivItemContainerV2"]';
     try {
       await page.waitForSelector(waitSel, { timeout: 15000 });
+      gridFound = true;
     } catch { log("grid selector timeout, continue with SSR/scroll"); }
+    // captcha/verify を能動検出 (0件の原因を推測でなく実検知で切り分け)
+    captchaDetected = await detectBotWall(page);
+    if (captchaDetected) log("CAPTCHA/verify page detected (bot wall)");
     await humanDelay(3000, 4500);
 
     // SSR フォールバック (傍受で 0 件のとき埋め込み JSON から)
@@ -216,9 +248,9 @@ async function searchOnce(browser, query, type, maxVideos) {
         if (Array.isArray(ssr)) {
           for (const it of ssr) {
             const v = isTag ? normalizeVideo(it) : parseSearchItem(it);
-            if (v && !allVideos.find((e) => e.id === v.id)) allVideos.push(v);
+            if (v && !allVideos.find((e) => e.id === v.id)) { allVideos.push(v); ssrCount++; }
           }
-          log(`SSR extraction: ${allVideos.length} videos`);
+          log(`SSR extraction: ${allVideos.length} videos (ssr+${ssrCount})`);
         }
       } catch (e) { log("SSR extraction failed:", e.message); }
     }
@@ -249,7 +281,8 @@ async function searchOnce(browser, query, type, maxVideos) {
       else { noNew++; if (noNew >= 5) { log("no new data x5, stop"); break; } if (noNew >= 2) await humanDelay(2000, 3000); }
     }
 
-    return allVideos.slice(0, maxVideos);
+    const diag = { pagesFetched, captchaDetected, gridFound, ssrCount, videosFound: allVideos.length };
+    return { videos: allVideos.slice(0, maxVideos), diag };
   } finally {
     await page.close();
     await context.close();
@@ -383,31 +416,75 @@ async function main() {
     process.exit(1);
   }
   let browser;
-  const result = { ok: false, query: args.query, type: args.type, count: 0, videos: [], error: null };
+  const result = { ok: false, query: args.query, type: args.type, count: 0, videos: [], error: null, errorCode: null, diag: null };
   try {
     const chrome = findChrome();
-    log(`launch chrome: ${chrome} (headless=${!args.headful})`);
+    log(`launch chrome: ${chrome} (headless=${!args.headful}) sessions=${args.sessions}`);
     browser = await puppeteer.launch({
       executablePath: chrome,
       headless: !args.headful,
       args: buildChromeArgs(),
     });
-    let videos = await searchOnce(browser, args.query, args.type, args.max);
 
-    // タグページ (hashtag) は challenge API が発火せず空振りしやすい。
-    // 空なら検索エンドポイント (keyword) にフォールバックする (検索 API は安定)。
-    if (videos.length === 0 && args.type === "hashtag") {
-      log("hashtag 空振り → keyword 検索にフォールバック");
-      videos = await searchOnce(browser, args.query, "keyword", args.max);
-      if (videos.length > 0) result.type = "keyword(fallback)";
+    let videos = [];
+    let diag = { pagesFetched: 0, captchaDetected: false, gridFound: false, ssrCount: 0, sessionsRun: 0 };
+
+    if (args.sessions <= 1) {
+      // 単一セッション (既定・低レイテンシ)
+      const r = await searchOnce(browser, args.query, args.type, args.max);
+      videos = r.videos;
+      diag = { ...r.diag, sessionsRun: 1 };
+      // タグ空振り → keyword 検索フォールバック (検索 API は安定)
+      if (videos.length === 0 && args.type === "hashtag") {
+        log("hashtag 空振り → keyword 検索にフォールバック");
+        const r2 = await searchOnce(browser, args.query, "keyword", args.max);
+        videos = r2.videos;
+        diag = { ...r2.diag, sessionsRun: 1 };
+        if (videos.length > 0) result.type = "keyword(fallback)";
+      }
+    } else {
+      // 複数セッション順次 → 出現頻度ランク (1回失敗しても他で代替=単発失敗に強い。VSEO の triple search 方式)
+      const freq = new Map();
+      for (let si = 0; si < args.sessions; si++) {
+        if (si > 0) await humanDelay(10000, 20000); // セッション間ギャップ (同一IP連打回避)
+        const r = await searchOnce(browser, args.query, args.type, args.max);
+        diag.sessionsRun++;
+        diag.pagesFetched += r.diag.pagesFetched;
+        diag.captchaDetected = diag.captchaDetected || r.diag.captchaDetected;
+        diag.gridFound = diag.gridFound || r.diag.gridFound;
+        diag.ssrCount += r.diag.ssrCount;
+        for (const v of r.videos) {
+          const e = freq.get(v.id);
+          if (e) { e.count++; } else { freq.set(v.id, { video: v, count: 1 }); }
+        }
+        log(`session ${si + 1}/${args.sessions}: unique ${freq.size}`);
+      }
+      videos = [...freq.values()]
+        .sort((a, b) => b.count - a.count || (b.video.stats.playCount - a.video.stats.playCount))
+        .map((x) => x.video)
+        .slice(0, args.max);
     }
 
     result.ok = videos.length > 0;
     result.count = videos.length;
     result.videos = videos;
-    if (videos.length === 0) result.error = "動画を取得できませんでした (captcha/地域制限/0件の可能性)";
+    result.diag = diag;
+    if (videos.length === 0) {
+      // 推測でなく診断で分類: captcha実検知 or 傍受0回 → BOT_WALL / API応答あり0件 → TRULY_EMPTY
+      if (diag.captchaDetected) {
+        result.errorCode = "TIKTOK_BOT_WALL";
+        result.error = "TIKTOK_BOT_WALL: captcha/verify ページを検知 (Bot対策に阻まれた)";
+      } else if (diag.pagesFetched === 0) {
+        result.errorCode = "TIKTOK_BOT_WALL";
+        result.error = "TIKTOK_BOT_WALL: 内部API応答0回 (Bot壁/DC-IP評価/署名欠落の可能性)";
+      } else {
+        result.errorCode = "TIKTOK_TRULY_EMPTY";
+        result.error = "TIKTOK_TRULY_EMPTY: API応答はあるが該当動画0件";
+      }
+    }
   } catch (e) {
     result.error = String((e && e.message) || e);
+    result.errorCode = "TIKTOK_EXCEPTION";
     log("ERROR:", result.error);
   } finally {
     if (browser) await browser.close().catch(() => {});
