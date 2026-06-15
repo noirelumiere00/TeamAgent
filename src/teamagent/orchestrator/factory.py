@@ -150,6 +150,20 @@ def build_production_tools() -> list[ToolSpec]:
             ToolSpec(TikTokSearchSkill.name, TikTokSearchSkill.description, TikTokSearchSkill)
         )
 
+    # operation_log: Slackスレッド営業会話 → CRM 転記用の構造化ログ（フェーズ/アクション/BANT）。
+    # 既定 OFF（USE_OPERATION_LOG_TOOLS=1 で opt-in）。Bedrock/Slack 依存は run() で遅延生成。
+    # 既存のSlack配線（slack_bot.py）と独立して MCP 経由でも呼べる（factory 登録だけが必要）。
+    if _envflag("USE_OPERATION_LOG_TOOLS"):
+        from teamagent.skills.operation_log.skill import OperationLogSkill
+
+        specs.append(
+            ToolSpec(
+                OperationLogSkill.name,
+                OperationLogSkill.description,
+                OperationLogSkill,
+            )
+        )
+
     return specs
 
 

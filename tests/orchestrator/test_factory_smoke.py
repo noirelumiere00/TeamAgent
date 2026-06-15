@@ -35,3 +35,22 @@ def test_scrape_video_skills_importable() -> None:
     assert VideoAnalysisSkill.name == "video_analysis"
     assert VideoAlgorithmSkill.name == "video_algorithm"
     assert TikTokSearchSkill.name == "tiktok_search"
+
+
+def test_operation_log_skill_importable() -> None:
+    # Wave1-②: operation_log Skill が軽量 import できる（bedrock/slack 依存は run() で遅延生成）.
+    from teamagent.skills.operation_log.skill import OperationLogSkill
+
+    assert OperationLogSkill.name == "operation_log"
+    # description に CRM 関連語があるか（factory 登録時の説明文として配線確認に使う）
+    assert "CRM" in OperationLogSkill.description or "活動ログ" in OperationLogSkill.description
+
+
+def test_operation_log_envflag_wired() -> None:
+    # factory.py が USE_OPERATION_LOG_TOOLS gated で operation_log を append する分岐を持つ.
+    # build_production_tools() の重 deps を呼ばずに、ソース文字列で配線の存在を確認するスモーク。
+    import inspect
+
+    src = inspect.getsource(factory.build_production_tools)
+    assert "USE_OPERATION_LOG_TOOLS" in src
+    assert "OperationLogSkill" in src

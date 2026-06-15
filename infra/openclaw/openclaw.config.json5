@@ -109,6 +109,8 @@
           include: [
             "search", "clientkarte", "proposal_draft", "proposal_review",
             "tiktok_search", "video_analysis", "video_algorithm",
+            // operation_log: Slackスレッド営業会話→CRM転記用構造化（USE_OPERATION_LOG_TOOLS=1 で MCP側に出る）。
+            "operation_log",
           ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
           exclude: ["mail_*", "workspace_search", "proposal_deck", "*reply*", "*confirm*", "*write*"],
