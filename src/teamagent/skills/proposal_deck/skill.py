@@ -84,6 +84,10 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         out_path = out_dir / f"{ctx.request_id}_{safe}.pptx"
         rendered = render_deck(composer_out, template, out_path)
 
+        # Wave3-⑨: 既定 OFF。USE_PROPOSAL_DECK_PUBLISH=1 のとき VSEO と同じ非公開 S3
+        # presigned URL (7d) で publish して Slack から開ける状態にする。
+        pptx_url = self._publish_if_enabled(str(rendered), input.product_name, ctx.request_id)
+
         skipped_ids = sorted(s.id for s in composer_out.skipped_placeholders)
         log.info(
             "proposal_deck_done",
@@ -91,15 +95,34 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             filled=len(composer_out.placeholders),
             skipped=len(skipped_ids),
             cost_usd=cost_usd,
+            published=bool(pptx_url),
         )
         return ProposalDeckOutput(
             pptx_path=str(rendered),
+            pptx_url=pptx_url,
             filled_count=len(composer_out.placeholders),
             skipped_count=len(skipped_ids),
             coverage_ratio=composer_out.coverage_ratio,
             skipped_ids=skipped_ids,
             total_cost_usd=cost_usd,
         )
+
+    @staticmethod
+    def _publish_if_enabled(pptx_path: str, product_name: str, request_id: str) -> str | None:
+        """USE_PROPOSAL_DECK_PUBLISH=1 のときだけ publish_pptx_file で署名付き URL を返す.
+
+        既定 OFF。S3 認証や VSEO_REPORT_BUCKET 未設定なら publish_file 側が None を返すため、
+        失敗しても skill 全体は成功扱い（Slack に URL は出ないだけ）。
+        """
+        if os.environ.get("USE_PROPOSAL_DECK_PUBLISH", "false").lower() not in ("1", "true", "yes"):
+            return None
+        try:
+            from teamagent.adapters.report_publish import publish_pptx_file
+
+            return publish_pptx_file(pptx_path, request_id=request_id, query=product_name)
+        except Exception:
+            logger.exception("proposal_deck_publish_failed", pptx_path=pptx_path)
+            return None
 
     def _resolve_template(self, input: ProposalDeckInput) -> Path:
         raw = input.template_path or os.environ.get("TEAMAGENT_FMT_TEMPLATE")

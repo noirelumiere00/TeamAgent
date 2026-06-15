@@ -121,3 +121,63 @@ def test_exhausted_repair_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         skill.run(_input(template, tmp_path / "out", max_repair=1), ctx=SkillContext())
     assert bedrock.converse.call_count == 2
+
+
+def test_publish_disabled_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wave3-⑨: USE_PROPOSAL_DECK_PUBLISH 未設定なら pptx_url=None・publish_pptx_file は呼ばれない."""
+    from unittest.mock import patch
+
+    monkeypatch.delenv("USE_PROPOSAL_DECK_PUBLISH", raising=False)
+    template = _dummy_template(tmp_path / "t.pptx")
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(_full_composer_json())
+
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    with patch("teamagent.adapters.report_publish.publish_pptx_file") as mock_pub:
+        out = skill.run(_input(template, tmp_path / "out"), ctx=SkillContext())
+    assert out.pptx_url is None
+    mock_pub.assert_not_called()
+
+
+def test_publish_enabled_returns_signed_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wave3-⑨: USE_PROPOSAL_DECK_PUBLISH=1 で publish_pptx_file を呼んで URL を載せる."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("USE_PROPOSAL_DECK_PUBLISH", "1")
+    template = _dummy_template(tmp_path / "t.pptx")
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(_full_composer_json())
+
+    fake_url = "https://example.s3.ap-northeast-1.amazonaws.com/proposal_deck/x.pptx?sig=..."
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    with patch(
+        "teamagent.adapters.report_publish.publish_pptx_file", return_value=fake_url
+    ) as mock_pub:
+        out = skill.run(_input(template, tmp_path / "out"), ctx=SkillContext())
+    assert out.pptx_url == fake_url
+    mock_pub.assert_called_once()
+    kwargs = mock_pub.call_args.kwargs
+    assert kwargs.get("query") == "ACME 青汁"
+
+
+def test_publish_failure_falls_back_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wave3-⑨: publish_pptx_file が例外を投げても skill は成功扱い (pptx_url=None)."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("USE_PROPOSAL_DECK_PUBLISH", "true")
+    template = _dummy_template(tmp_path / "t.pptx")
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(_full_composer_json())
+
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    with patch(
+        "teamagent.adapters.report_publish.publish_pptx_file",
+        side_effect=RuntimeError("S3 down"),
+    ):
+        out = skill.run(_input(template, tmp_path / "out"), ctx=SkillContext())
+    assert out.pptx_url is None
+    assert out.coverage_ratio == 1.0  # skill 自体は成功

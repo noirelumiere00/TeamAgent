@@ -42,7 +42,14 @@ class ProposalDeckInput(BaseModel):
 class ProposalDeckOutput(BaseModel):
     """proposal_deck Skill の出力（生入力は含めない＝CLAUDE.md 6-bis）。"""
 
-    pptx_path: str = Field(description="生成された .pptx のパス")
+    pptx_path: str = Field(description="生成された .pptx のパス（コンテナ内ローカル）")
+    pptx_url: str | None = Field(
+        default=None,
+        description=(
+            "Slack から開ける署名付き URL（既定: 非公開 S3 presigned 7 日）。"
+            "USE_PROPOSAL_DECK_PUBLISH=1 + VSEO_REPORT_BUCKET 設定時のみ非 None。"
+        ),
+    )
     filled_count: int = Field(ge=0, description="埋めた placeholder 数")
     skipped_count: int = Field(ge=0, description="要確認（データ未検出）の placeholder 数")
     coverage_ratio: float = Field(ge=0.0, le=1.0, description="埋め率（filled / 95）")
