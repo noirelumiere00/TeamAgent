@@ -30,6 +30,7 @@ from teamagent.ingest.loader import (
     SharedDriveCrawlSpec,
     SlackChannelSpec,
 )
+from teamagent.ingest.ops_alert import IngestOpsAlerter
 from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepository
 
 logger = structlog.get_logger(__name__)
@@ -857,11 +858,14 @@ class IngestRunner:
         *,
         owner_email: str,
         dry_run: bool = True,
+        alerter: IngestOpsAlerter | None = None,
     ) -> None:
         self._repo = repository
         self._embedder = embedder
         self._owner_email = owner_email
         self._dry_run = dry_run
+        # webhook 未設定なら alerter は no-op（from_env 内で webhook_url=None）
+        self._alerter = alerter if alerter is not None else IngestOpsAlerter.from_env()
 
     def run(
         self,
@@ -961,4 +965,12 @@ class IngestRunner:
                 )
                 stats.sources_skipped += 1
                 stats.errors.append(f"{type(e).__name__}: {e}")
+                # #ops 通知（webhook 未設定 / dry-run なら no-op・失敗しても続行）。
+                self._alerter.send_ingest_failure(
+                    kind=kind,
+                    exc=e,
+                    request_id=request_id,
+                    spec_repr=str(spec)[:200],
+                    dry_run=self._dry_run,
+                )
         return stats

@@ -109,6 +109,18 @@ _load() {
         fi
     fi
 
+    # ingest #ops 通知用 Slack Incoming Webhook（任意 — 未投入なら ingest pipeline の通知が no-op）
+    if [[ -n "${OPS_SLACK_WEBHOOK_SECRET_NAME:-}" ]]; then
+        local ops_webhook
+        ops_webhook="$(_get_secret "$OPS_SLACK_WEBHOOK_SECRET_NAME" 2>/dev/null || true)"
+        if [[ -n "$ops_webhook" ]]; then
+            export OPS_SLACK_WEBHOOK_URL="$ops_webhook"
+            _log "OK: OPS_SLACK_WEBHOOK_URL loaded"
+        else
+            _log "INFO: OPS_SLACK_WEBHOOK_SECRET_NAME は設定済だが secret 未投入（ingest alerts は disabled）"
+        fi
+    fi
+
     # Google OAuth (Drive + Gmail) — JSON 形式の単一 secret から 3 値を展開
     # secret-string は {"client_id":..., "client_secret":..., "refresh_token":...} 形式
     if [[ -n "${GOOGLE_OAUTH_SECRET_NAME:-}" ]]; then

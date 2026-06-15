@@ -94,6 +94,7 @@ def test_runner_catches_handler_exception(monkeypatch: pytest.MonkeyPatch) -> No
         embedder=_FakeEmbedder(),
         owner_email="x@y.jp",
         dry_run=True,
+        alerter=None,  # from_env() で no-op alerter（OPS_SLACK_WEBHOOK_URL 未設定想定）
     )
 
     sources = IngestSources(
@@ -122,6 +123,69 @@ def test_runner_catches_handler_exception(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(stats.errors) == 1
     assert stats.documents_upserted == 4  # 2 OK source × 2 docs
     assert stats.chunks_inserted == 6
+
+
+def test_runner_calls_alerter_on_handler_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wave1-③: handler 例外時に alerter.send_ingest_failure が（dry_run=False で）呼ばれる。"""
+    from teamagent.ingest.ops_alert import IngestOpsAlerter
+
+    fake_alerter = MagicMock(spec=IngestOpsAlerter)
+    runner = IngestRunner(
+        repository=_FakeRepository(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+        alerter=fake_alerter,
+    )
+
+    sources = IngestSources(
+        version=1,
+        slack_channels=(),
+        gdrive_folders=(GDriveFolderSpec(folder_id="FAIL", folder_name="fail", description=""),),
+        gsheets=(),
+    )
+
+    def _fake_handler(spec: GDriveFolderSpec, **kwargs: Any) -> tuple[int, int]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("teamagent.ingest.pipeline._ingest_gdrive_folder", _fake_handler)
+
+    runner.run(sources, kinds=["gdrive"])
+    # 1 source 1 failure ⇒ 1 alert
+    assert fake_alerter.send_ingest_failure.call_count == 1
+    kwargs = fake_alerter.send_ingest_failure.call_args.kwargs
+    assert kwargs["kind"] == "gdrive"
+    assert kwargs["dry_run"] is False
+    assert isinstance(kwargs["exc"], RuntimeError)
+
+
+def test_runner_passes_dry_run_to_alerter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """dry_run=True なら alerter は呼ばれるが dry_run=True が伝達され、内部で no-op になる。"""
+    from teamagent.ingest.ops_alert import IngestOpsAlerter
+
+    fake_alerter = MagicMock(spec=IngestOpsAlerter)
+    runner = IngestRunner(
+        repository=_FakeRepository(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=True,
+        alerter=fake_alerter,
+    )
+    sources = IngestSources(
+        version=1,
+        slack_channels=(),
+        gdrive_folders=(GDriveFolderSpec(folder_id="FAIL", folder_name="fail", description=""),),
+        gsheets=(),
+    )
+
+    def _fake_handler(spec: GDriveFolderSpec, **kwargs: Any) -> tuple[int, int]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("teamagent.ingest.pipeline._ingest_gdrive_folder", _fake_handler)
+
+    runner.run(sources, kinds=["gdrive"])
+    fake_alerter.send_ingest_failure.assert_called_once()
+    assert fake_alerter.send_ingest_failure.call_args.kwargs["dry_run"] is True
 
 
 # -----------------------------------------------------------
