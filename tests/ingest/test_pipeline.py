@@ -43,6 +43,7 @@ class _FakeRepository:
             {
                 "external_id": doc.external_id,
                 "source_type": doc.source_type,
+                "acl_groups": list(doc.acl_groups),
                 "chunk_count": len(chunks),
                 "request_id": request_id,
             }
@@ -93,6 +94,7 @@ def test_runner_catches_handler_exception(monkeypatch: pytest.MonkeyPatch) -> No
         embedder=_FakeEmbedder(),
         owner_email="x@y.jp",
         dry_run=True,
+        alerter=None,  # from_env() で no-op alerter（OPS_SLACK_WEBHOOK_URL 未設定想定）
     )
 
     sources = IngestSources(
@@ -121,6 +123,69 @@ def test_runner_catches_handler_exception(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(stats.errors) == 1
     assert stats.documents_upserted == 4  # 2 OK source × 2 docs
     assert stats.chunks_inserted == 6
+
+
+def test_runner_calls_alerter_on_handler_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wave1-③: handler 例外時に alerter.send_ingest_failure が（dry_run=False で）呼ばれる。"""
+    from teamagent.ingest.ops_alert import IngestOpsAlerter
+
+    fake_alerter = MagicMock(spec=IngestOpsAlerter)
+    runner = IngestRunner(
+        repository=_FakeRepository(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+        alerter=fake_alerter,
+    )
+
+    sources = IngestSources(
+        version=1,
+        slack_channels=(),
+        gdrive_folders=(GDriveFolderSpec(folder_id="FAIL", folder_name="fail", description=""),),
+        gsheets=(),
+    )
+
+    def _fake_handler(spec: GDriveFolderSpec, **kwargs: Any) -> tuple[int, int]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("teamagent.ingest.pipeline._ingest_gdrive_folder", _fake_handler)
+
+    runner.run(sources, kinds=["gdrive"])
+    # 1 source 1 failure ⇒ 1 alert
+    assert fake_alerter.send_ingest_failure.call_count == 1
+    kwargs = fake_alerter.send_ingest_failure.call_args.kwargs
+    assert kwargs["kind"] == "gdrive"
+    assert kwargs["dry_run"] is False
+    assert isinstance(kwargs["exc"], RuntimeError)
+
+
+def test_runner_passes_dry_run_to_alerter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """dry_run=True なら alerter は呼ばれるが dry_run=True が伝達され、内部で no-op になる。"""
+    from teamagent.ingest.ops_alert import IngestOpsAlerter
+
+    fake_alerter = MagicMock(spec=IngestOpsAlerter)
+    runner = IngestRunner(
+        repository=_FakeRepository(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=True,
+        alerter=fake_alerter,
+    )
+    sources = IngestSources(
+        version=1,
+        slack_channels=(),
+        gdrive_folders=(GDriveFolderSpec(folder_id="FAIL", folder_name="fail", description=""),),
+        gsheets=(),
+    )
+
+    def _fake_handler(spec: GDriveFolderSpec, **kwargs: Any) -> tuple[int, int]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("teamagent.ingest.pipeline._ingest_gdrive_folder", _fake_handler)
+
+    runner.run(sources, kinds=["gdrive"])
+    fake_alerter.send_ingest_failure.assert_called_once()
+    assert fake_alerter.send_ingest_failure.call_args.kwargs["dry_run"] is True
 
 
 # -----------------------------------------------------------
@@ -200,6 +265,17 @@ def test_ingest_slack_channel_handler_calls_repository(
     call = repo.upsert_calls[0]
     assert call["external_id"] == "C0XYZ:1700000001.000001"
     assert call["source_type"] == "slack"
+    assert call["acl_groups"] == []  # §G env 未設定なら従来どおり空（後方互換）
+
+
+def test_company_acl_groups_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§G: TEAMAGENT_SHARED_COMPANY_DOMAINS 設定時のみ会社ドメインを acl_groups に付与。"""
+    from teamagent.ingest.pipeline import _company_acl_groups
+
+    monkeypatch.delenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", raising=False)
+    assert _company_acl_groups() == []
+    monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "VectorInc.co.jp")
+    assert _company_acl_groups() == ["vectorinc.co.jp"]
 
 
 def test_ingest_slack_channel_dry_run_skips_repository(
@@ -510,14 +586,18 @@ def test_ingest_gdrive_folder_pdf_extracts_chunks_and_resolves_acl(
 def test_ingest_gdrive_folder_non_pdf_uses_title_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """非 PDF（Google Doc 等）は title だけで 1 chunk 作る（雛形動作）。"""
+    """未対応 mime（image/zip 等）は title だけで 1 chunk 作る（雛形動作）.
+
+    Wave2-④ 以降、gdoc/docx/pptx/xlsx は実本文抽出に変わったため、
+    本テストでは「未対応 mime」を使って title-only fallback を確認する。
+    """
     fake_client = MagicMock()
     fake_client.list_files.return_value = (
         [
             _make_drive_file(
                 id="DOC1",
-                name="議事録.gdoc",
-                mime="application/vnd.google-apps.document",
+                name="image.png",
+                mime="image/png",
                 owners=("alice@x.jp",),
             )
         ],
@@ -549,6 +629,201 @@ def test_ingest_gdrive_folder_non_pdf_uses_title_only(
     assert docs_n == 1
     assert chunks_n == 1
     # download_file_bytes は呼ばれない（PDF 以外）
+    fake_client.download_file_bytes.assert_not_called()
+
+
+def test_ingest_gdrive_folder_docx_extracts_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave2-④: docx を download → office_extract → chunk 化して upsert."""
+    from io import BytesIO
+
+    from docx import Document
+
+    from teamagent.ingest.office_extract import DOCX_MIME
+
+    # 実 docx バイナリを作る
+    doc = Document()
+    doc.add_paragraph("提案書の本文サンプル。" * 60)
+    buf = BytesIO()
+    doc.save(buf)
+    docx_bytes = buf.getvalue()
+
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [_make_drive_file(id="DOCX1", name="提案書.docx", mime=DOCX_MIME, owners=("a@x.jp",))],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
+    fake_client.download_file_bytes.return_value = docx_bytes
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(folder_id="F", folder_name="x", description="", mime_type_filter=None)
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    assert docs_n == 1
+    assert chunks_n >= 1
+    assert repo.upsert_calls[0]["external_id"] == "DOCX1"
+    fake_client.download_file_bytes.assert_called_once()
+
+
+def test_ingest_gdrive_folder_pptx_extracts_per_slide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave2-④: pptx は slide 単位で page_num を持つ chunk になる."""
+    from io import BytesIO
+
+    from pptx import Presentation
+
+    from teamagent.ingest.office_extract import PPTX_MIME
+
+    prs = Presentation()
+    layout = prs.slide_layouts[5]
+    s1 = prs.slides.add_slide(layout)
+    s1.shapes.title.text = "スライド1"
+    s2 = prs.slides.add_slide(layout)
+    s2.shapes.title.text = "スライド2"
+    buf = BytesIO()
+    prs.save(buf)
+    pptx_bytes = buf.getvalue()
+
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [_make_drive_file(id="P1", name="deck.pptx", mime=PPTX_MIME, owners=("a@x.jp",))],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
+    fake_client.download_file_bytes.return_value = pptx_bytes
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(folder_id="F", folder_name="x", description="", mime_type_filter=None)
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    assert docs_n == 1
+    assert chunks_n == 2  # 2 slides → 2 chunks（小さいので分割なし）
+
+
+def test_ingest_gdrive_folder_xlsx_extracts_per_sheet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave2-④: xlsx は sheet 単位で page_num を持つ chunk になる."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    from teamagent.ingest.office_extract import XLSX_MIME
+
+    wb = Workbook()
+    wb.active.title = "Sheet1"
+    wb.active["A1"] = "顧客"
+    wb.active["B1"] = 100
+    wb.create_sheet("Sheet2")["A1"] = "備考"
+    buf = BytesIO()
+    wb.save(buf)
+    xlsx_bytes = buf.getvalue()
+
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [_make_drive_file(id="X1", name="売上.xlsx", mime=XLSX_MIME, owners=("a@x.jp",))],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
+    fake_client.download_file_bytes.return_value = xlsx_bytes
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(folder_id="F", folder_name="x", description="", mime_type_filter=None)
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    assert docs_n == 1
+    assert chunks_n == 2  # 2 sheets → 2 chunks
+
+
+def test_ingest_gdrive_folder_gdoc_uses_gdocs_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wave2-④: Google native gdoc は GDocsClient.get_document_text で本文取得 → chunk 化."""
+    from teamagent.adapters.gdocs_client import DocContent
+
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [
+            _make_drive_file(
+                id="GDOC1",
+                name="議事録.gdoc",
+                mime="application/vnd.google-apps.document",
+                owners=("a@x.jp",),
+            )
+        ],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    # GDocsClient.from_env を fake で差し替え（実 Google API は呼ばない）
+    fake_gdocs = MagicMock()
+    fake_gdocs.get_document_text.return_value = DocContent(
+        document_id="GDOC1", title="議事録", text="議事録の本文サンプル。" * 30
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gdocs_client.GDocsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_gdocs),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(folder_id="F", folder_name="x", description="", mime_type_filter=None)
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    assert docs_n == 1
+    assert chunks_n >= 1
+    fake_gdocs.get_document_text.assert_called_once()
+    # download_file_bytes は呼ばれない（gdoc は Docs API 経由）
     fake_client.download_file_bytes.assert_not_called()
 
 
@@ -609,11 +884,15 @@ def test_ingest_gdrive_folder_skips_pdf_when_download_fails(
 def test_ingest_gdrive_folder_paginates_list_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """list_files の next_page_token を辿って全件取得する。"""
+    """list_files の next_page_token を辿って全件取得する.
+
+    pagination 自体の検証なので、本文抽出を伴わない未対応 mime（image/png）を使う
+    （gdoc は GDocsClient credentials を要するため別テストで扱う）。
+    """
     fake_client = MagicMock()
     fake_client.list_files.side_effect = [
-        ([_make_drive_file(id="F1", mime="application/vnd.google-apps.document")], "PAGE2"),
-        ([_make_drive_file(id="F2", mime="application/vnd.google-apps.document")], None),
+        ([_make_drive_file(id="F1", mime="image/png")], "PAGE2"),
+        ([_make_drive_file(id="F2", mime="image/png")], None),
     ]
     fake_client.list_permissions.return_value = []
     monkeypatch.setattr(

@@ -41,6 +41,11 @@ DEFAULT_YAML = PROJECT_ROOT / "data" / "ingest_sources.yaml"
 
 
 def main() -> int:
+    # 構造化ログの出力形式を確定（STRUCTLOG_FORMAT=json で CloudWatch 向け JSON）。
+    from teamagent.observability.logging_config import configure_logging
+
+    configure_logging()
+
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--yaml", default=str(DEFAULT_YAML), help="ingest_sources.yaml のパス")
     p.add_argument(

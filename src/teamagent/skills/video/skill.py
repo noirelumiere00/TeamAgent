@@ -70,6 +70,14 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
 
     def run(self, input: VideoAnalysisInput, ctx: SkillContext) -> VideoAnalysisOutput:
         log = ctx.bind_logger(self.name)
+        # §N: SSRF 早期拒否（YouTube file_uri 経路含む全入口を DL/Gemini 前にコスト0で弾く）。
+        from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
+
+        try:
+            # check_dns=False＝安価/非ネットワーク（解決先IPの最終検査は download_video backstop）。
+            validate_scrape_url(input.url, request_id=ctx.request_id, check_dns=False)
+        except UrlGuardError as e:
+            raise RuntimeError(f"VIDEO_URL_BLOCKED: {e}") from e
         is_youtube = bool(_YOUTUBE_RE.search(input.url))
         log.info(
             "video_analysis_start",

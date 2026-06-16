@@ -84,6 +84,13 @@ mcp = [
     # MCP SDK（外部 SaaS の MCP 化を実装するとき用）
     "mcp>=0.9.0",
 ]
+embeddings = [
+    # SearchSkill の LocalE5Embedder（multilingual-e5-large）。重い(torch)ため optional。
+    # MCPバックエンドのDockerは --extra embeddings で同梱（go-live実測: 欠落で起動crash）。
+    # torch を直接依存にして [tool.uv.sources] の CPU index pin を効かせる（推移的依存には効かない）。
+    "sentence-transformers>=3.0.0",
+    "torch>=2.4",
+]
 
 [project.scripts]
 teamagent = "teamagent.cli:main"
@@ -91,6 +98,16 @@ teamagent = "teamagent.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# torch は Linux では CPU 版に固定（既定の PyPI は arm64/Linux でも CUDA 依存
+# nvidia-* を数GB引き込み、MCPイメージが10GB級になるため）。mac/開発環境は PyPI のまま。
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/teamagent"]
@@ -128,6 +145,7 @@ ignore = [
 "scripts/**/*.py" = ["E501", "T201"]
 # HTML レポート生成は inline テンプレート文字列が長くなる（可読性のため1行維持）
 "src/teamagent/skills/video_algorithm/report.py" = ["E501"]
+"src/teamagent/skills/video_algorithm/slides.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -154,10 +172,21 @@ module = [
     "google.genai",
     "google.genai.*",
     "yt_dlp",
-    "yt_dlp.*",
     "pypdf",
     "pypdf.*",
     "yaml",
+    "openpyxl",
+    "openpyxl.*",
+    "docx",
+    "docx.*",
+    "pptx",
+    "pptx.*",
+    # weasyprint / playwright は重い依存で CI(--no-deps)に非導入＝import-not-found になるため
+    # stub 無し扱い（遅延 import・実行時のみ必要。他の CI 非導入依存と同じ扱い）。
+    "weasyprint",
+    "weasyprint.*",
+    "playwright",
+    "playwright.*",
 ]
 ignore_missing_imports = true
 
@@ -178,8 +207,44 @@ module = [
 ]
 disallow_untyped_calls = false
 
+# mcp(低レベル Server) の @server.list_tools()/@server.call_tool() デコレータは型注釈が
+# 無く strict の disallow_untyped_decorators / disallow_untyped_calls に引っかかる。
+# 境界ラッパ(mcp_gateway.server)ではこの2チェックのみ無効化する。
+[[tool.mypy.overrides]]
+module = [
+    "teamagent.mcp_gateway.server",
+]
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 addopts = "-ra --strict-markers --strict-config"
+
+# ============================================================
+# import-linter: 3層分離（CLAUDE.md 6-bis）を CI で強制（spec matrix 実行基盤#27）
+#   一方向: runtime → skills → adapters。下位層が上位層を import しない。
+#   2026-06-16 に runtime/retry.py を adapters/retry.py へ移動し adapters→runtime 逆流を解消。
+# ============================================================
+[tool.importlinter]
+root_package = "teamagent"
+
+[[tool.importlinter.contracts]]
+name = "adapters は最下層（runtime/skills/orchestrator/mcp_gateway/ingest を import しない）"
+type = "forbidden"
+source_modules = ["teamagent.adapters"]
+forbidden_modules = [
+    "teamagent.runtime",
+    "teamagent.skills",
+    "teamagent.orchestrator",
+    "teamagent.mcp_gateway",
+    "teamagent.ingest",
+]
+
+[[tool.importlinter.contracts]]
+name = "skills は runtime を import しない（runtime → skills の一方向）"
+type = "forbidden"
+source_modules = ["teamagent.skills"]
+forbidden_modules = ["teamagent.runtime"]

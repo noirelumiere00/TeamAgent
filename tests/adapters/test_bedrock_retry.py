@@ -14,7 +14,7 @@ import pytest
 from botocore.exceptions import BotoCoreError, ClientError
 
 from teamagent.adapters.bedrock_client import BedrockClient, _is_bedrock_retryable
-from teamagent.runtime.retry import RetryPolicy
+from teamagent.adapters.retry import RetryPolicy
 
 # テスト用: 待ち時間ゼロ・最大3試行（初回 + 2リトライ）
 _NO_WAIT = RetryPolicy(max_attempts=3, base_delay_s=0.0, max_delay_s=0.0)

@@ -1,0 +1,156 @@
+// OpenClaw 設定テンプレ（~/.openclaw/openclaw.json にマウント / perm 600・Git レビュー必須）
+// JSON5（コメント可）。★ 秘密値は書かない。${VAR}（英大文字）で注入された環境変数を参照するだけ。
+//
+// 設計意図（§A 一次ソース確認に基づく）:
+//  - tool を最小化し、exec/shell/fs/browser を構造的に塞ぐ → 2026-05-28 の exec/shell 系 CVE 群を無効化。
+//  - 営業データには触れず、唯一の能力は「Slack 受け」「Bedrock 推論」「teamagent MCP の読取系 tool」だけ。
+//  - per-user 認可は OpenClaw でなく MCP 境界内で行う（OpenClaw は単一信頼オペレータモデル）。
+{
+  // ── エージェント／ペルソナ ───────────────────────────────────────────────
+  agents: {
+    defaults: {
+      // P1 はプロアクティブ無効（heartbeat 0m）。プロアクティブは P2/WS-D で HEARTBEAT.md と共に解禁。
+      heartbeat: { every: "0m" },
+      // §O: Fargate に docker socket は無い（backend:"docker" は local daemon 必須＝公式）ため off。
+      // 多層防御は tools.profile:messaging / exec deny / fs workspaceOnly / browser off /
+      // toolFilter / readonly rootfs / IAM Deny / SG で維持（sandbox は元々「万一の追加層」）。
+      sandbox: { mode: "off" },
+      // §O: cacheRetention の明示パラメータは Bedrock 公式 doc に記載なし(unverified)のため
+      // 削除して既定挙動に。★prompt caching チューニングは P1 実測後に再評価（§D）。
+    },
+    list: [
+      {
+        id: "teamagent",
+        default: true,
+        // §D: 外側ループ=Haiku4.5（ツール判断＋最終整形＝速い/安い）。重い合成は MCP 境界内(L2)に任せる。
+        // §O: 公式は provider/model 記法（amazon-bedrock/ プレフィックス必須）。
+        // §P: ID は list-inference-profiles の実測値で確定（2026-06-11・account 718959508629/東京）。
+        model: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+        identity: { name: "TeamAgent", emoji: "🧭" },
+        // §S: skipBootstrap は v2026.6.1 schema の agents.list[] に無い（config validate で弾かれた）ため削除。
+        // レビュー済み SOUL.md/HEARTBEAT.md は entrypoint が workspace に seed 済み。
+      },
+    ],
+  },
+
+  // ── Slack 接続（§O: channels.slack の config 宣言が必須＝公式。env 注入だけでは立ち上がらない） ──
+  // トークン値は書かない: ${VAR} は ECS secrets（fargate.tf の SLACK_BOT_TOKEN/SLACK_APP_TOKEN）で注入。
+  channels: {
+    slack: {
+      enabled: true,
+      mode: "socket", // Socket Mode（公開エンドポイント不要・outbound WebSocket のみ）
+      botToken: "${SLACK_BOT_TOKEN}",
+      appToken: "${SLACK_APP_TOKEN}",
+      // §S: groupPolicy 既定は "allowlist"（許可ch未設定だと無応答）。P1は招待された専用chで
+      // 応答させるため "open"（botが居るchでのみ反応・到達範囲は招待で限定）。
+      groupPolicy: "open",
+      // §T1: 返信はスレッドに付ける（既定 off＝chに平打ち・ユーザー要望2026-06-12）。
+      // ch/グループ=全返信スレッド化・DM=平打ち（DMにスレッドは不自然）。docs/channels/slack で一次確認。
+      replyToModeByChatType: { channel: "all", group: "all", direct: "off" },
+      // §T1: 受付リアクション（処理中が見える＝「無視された？」を防ぐ実運用の詰まり潰し）。
+      ackReaction: "eyes",
+      // §T2: DM は許可リスト制（既定 pairing＝オーナーCLI承認制は Fargate では打つ場所が無く、
+      // 承認stateも ephemeral で再起動消失）。"open" にしない理由＝Vector ワークスペースには
+      // 社外ゲスト（クライアント）が居る前提で、DM経由で会社ナレッジに触れさせない。
+      // チャンネルは groupPolicy:"open" のまま（招待制で統制）。パイロット参加者をここに追記。
+      dmPolicy: "allowlist",
+      allowFrom: [
+        "U09CX1CCBLN", // 小俣翔碁
+      ],
+    },
+  },
+
+  // ── セッション分離（多人数で会話が混ざらないように／§D・既定 main は Alice↔Bob 漏れる） ──
+  session: { dmScope: "per-channel-peer" },
+
+  // ── tool ポリシー（最小権限＝攻撃面の縮小） ───────────────────────────────
+  tools: {
+    profile: "messaging", // 既定を最小級に（full/coding は使わない）
+    exec: { mode: "deny", applyPatch: { workspaceOnly: true } }, // host コマンド実行を禁止
+    fs: { workspaceOnly: true },
+    // 危険な外部安全バイパスは一切使わない（既定 false のまま）。
+    sandbox: {
+      // sandbox セッションでも MCP の読取 tool だけは見せる（bundle-mcp を許可）。
+      tools: { alsoAllow: ["bundle-mcp"] },
+    },
+  },
+
+  // ── ゲートウェイ（ローカル限定） ─────────────────────────────────────────
+  gateway: {
+    // §S: mode は必須（"local"=channels+agent runtime を本コンテナで動かす／"remote"=外部transport）。
+    // 無いと「Gateway start blocked: missing gateway.mode」で起動拒否(exit78)＝実測。
+    mode: "local",
+    port: 18789, // healthCheck(fargate.tf)が叩く 18789 に明示一致させる
+    bind: "loopback", // 0.0.0.0 へは絶対に出さない。管理は SSH/Tailscale。
+    // 共有 gateway secret は full operator scope 相当＝root 級。値は注入し、loopback+ファイル perm で守る。
+    auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" },
+  },
+
+  // ── ブラウザ（SSRF 既定の厳格を維持・私設網へ出さない） ───────────────────
+  browser: {
+    // dangerouslyAllowPrivateNetwork は設定しない（=private/internal 宛は遮断のまま）。
+  },
+
+  // ── MCP（外部 stdio ではなく streamable-http で creds 分離） ─────────────────
+  mcp: {
+    servers: {
+      teamagent: {
+        // Fargate: Cloud Map private DNS（fargate.tf の service_discovery と一致）。docker-compose ローカルは "teamagent-mcp"。
+        url: "http://teamagent-mcp.teamagent.internal:8787/mcp",
+        transport: "streamable-http",
+        headers: { Authorization: "Bearer ${TEAMAGENT_MCP_BEARER}" }, // 値は注入
+        timeout: 60,
+        // §G: 会社共有の「ナレッジ系・読取」を露出。§L Phase1 で取得系(tiktok/動画)を追加。
+        // 本人OAuth依存(per-user)の mail_*/workspace_search は除外＝現行Botに残す（§G）。
+        // ※ tiktok_search/video_analysis/video_algorithm は MCPツール（factory: USE_VIDEO_TOOLS/
+        //   USE_TIKTOK_TOOLS=1）として金庫内で実行＝OpenClaw自身は native exec/browser を使わない（§L）。
+        //   これらを include する前に、MCPバックエンド側で当該 env flag を ON にすること。
+        toolFilter: {
+          include: [
+            "search", "clientkarte", "proposal_draft", "proposal_review",
+            "tiktok_search", "video_analysis", "video_algorithm",
+            // operation_log: Slackスレッド営業会話→CRM転記用構造化（USE_OPERATION_LOG_TOOLS=1 で MCP側に出る）。
+            "operation_log",
+          ],
+          // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
+          // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
+          //   この include に **意図的に入れない**＝パイロット中は dark。OpenClaw 自身がオーケスト
+          //   レーションの外殻なので二重オーケストレーションを避ける。解禁はパイロット後に別途判断（§L C2）。
+          exclude: ["mail_*", "workspace_search", "proposal_deck", "*reply*", "*confirm*", "*write*"],
+        },
+      },
+    },
+  },
+
+  // ── モデルプロバイダ：Amazon Bedrock（IAM/aws-sdk・APIキー不要） ───────────
+  models: {
+    providers: {
+      "amazon-bedrock": {
+        baseUrl: "https://bedrock-runtime.ap-northeast-1.amazonaws.com", // 東京
+        api: "bedrock-converse-stream",
+        auth: "aws-sdk", // ← APIキー無し。インスタンスロール / 既定資格情報チェーン。
+        // §S: discovery は v2026.6.1 schema の provider に無い（config validate で弾かれた）ため削除。
+        // models[] を明示しているので discovery(ListFoundationModels) は元々不要＝最小権限のまま。
+        // §P: id は list-inference-profiles 実測値（2026-06-11・東京）。Sonnet4.6 はサフィックス無し。
+        models: [
+          {
+            id: "jp.anthropic.claude-haiku-4-5-20251001-v1:0", // §D: 外側ループ既定（速い・安い）
+            name: "Claude Haiku 4.5 (Bedrock Tokyo)",
+            reasoning: false,
+            input: ["text"],
+            contextWindow: 200000,
+            maxTokens: 8192,
+          },
+          {
+            id: "jp.anthropic.claude-sonnet-4-6", // 重い処理用（任意・通常は MCP 側 L2 が使用）
+            name: "Claude Sonnet 4.6 (Bedrock Tokyo)",
+            reasoning: true,
+            input: ["text"],
+            contextWindow: 200000,
+            maxTokens: 8192,
+          },
+        ],
+      },
+    },
+  },
+}

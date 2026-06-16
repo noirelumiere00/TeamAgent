@@ -1,0 +1,83 @@
+# syntax=docker/dockerfile:1
+# go-live: base は ECR Public ミラー（Docker Hub の匿名 pull rate limit 429 を回避・CodeBuild共有IP対策）。
+# ============================================================
+# TeamAgent-MCP バックエンド（streamable-http・会社共有RLS境界） — ECS Fargate(arm64)
+# ============================================================
+# 役割: OpenClaw外殻から MCP(streamable-http/bearer) でしか触れない「信頼境界の内側」。
+#   creds(Secrets/RDS/Bedrock) を持つのはこのコンテナだけ。scripts/run_mcp_http_server.py を起動。
+# 会社共有モデル(§G): TEAMAGENT_SHARED_COMPANY_DOMAINS 設定で会社メンバーidentity・本人識別不要。
+# 秘密値は焼かない（ECS task の secrets valueFrom で注入）。
+#
+# build:  docker build -f infra/docker/Dockerfile.teamagent-mcp -t teamagent-mcp:local .
+#         （※ DOCKER_BUILDKIT=1 前提。Fargate は linux/arm64 推奨 → --platform linux/arm64）
+# §L: スクレイプ系(tiktok/動画)ツールを使う“拡張版”は --build-arg WITH_SCRAPE_TOOLS=true で
+#     node/chromium/ffmpeg を載せる（既定 false＝P1薄殻イメージは軽量のまま）。
+# ============================================================
+
+FROM public.ecr.aws/docker/library/python:3.11-slim AS base
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
+
+# システム依存: psycopg(libpq)・healthcheck(curl)・一部wheelのビルド
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl libpq5 build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# §L: スクレイプ系の実行ランタイム（tiktok_search=Puppeteer/Node・video_*=yt-dlp+ffmpeg）。
+# 既定 false。USE_VIDEO_TOOLS/USE_TIKTOK_TOOLS を ON にする“拡張版”ビルド時のみ載せる。
+ARG WITH_SCRAPE_TOOLS=false
+# fonts-noto-cjk: §Q-HTML→PPTX で playwright が要点スライドを画像化する際の日本語フォント
+# （無いと PNG/PPTX で日本語が豆腐□になる）。chromium は提案PPTXのレンダリングにも使う。
+RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        nodejs npm chromium ffmpeg fonts-noto-cjk \
+      && rm -rf /var/lib/apt/lists/* ; \
+    fi
+
+# 1) 依存だけ先に解決（lock 駆動・layer cache）。MCP は extra。dev(ruff/mypy/pytest)は除外。
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project --extra mcp --extra embeddings
+
+# 2) アプリ本体（src/scripts/migrations のみ。.env や secrets は含めない）
+# README.md は hatchling のプロジェクトbuild（editable install）が必須要求（pyproject:8 readme）。
+COPY README.md ./
+COPY src/ ./src/
+COPY scripts/ ./scripts/
+COPY infra/migrations/ ./infra/migrations/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra mcp --extra embeddings
+
+
+# §L: tiktok_search の Node スクレイパ（tools/tiktok_scraper）を拡張版のみ同梱＋npm install。
+COPY tools/ ./tools/
+RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ] && [ -f tools/tiktok_scraper/package.json ]; then \
+      npm --prefix tools/tiktok_scraper install --omit=dev ; \
+    fi
+
+# 非root（chown -R /app は巨大レイヤ複製になるため書込み先のみ所有権付与）
+RUN useradd -m -u 10001 mcp && mkdir -p /app/.local_out /app/.hf-cache \
+    && chown mcp:mcp /app/.local_out /app/.hf-cache
+USER mcp
+
+# E5埋め込みモデル(multilingual-e5-large ~2.2GB)を**イメージに焼き込み**（mcpユーザーで取得）。
+# Fargate volume は ephemeral＝毎起動DLだと healthcheck 猶予(~190s)を超え crash-loop するため、
+# build時に取得して起動を決定的にする（go-live実測の教訓）。キャッシュ先=HF_HOME（runtimeも同値）。
+ENV HF_HOME=/app/.hf-cache
+RUN /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-large')"
+
+ENV PATH="/app/.venv/bin:${PATH}" \
+    TEAMAGENT_MCP_HOST=0.0.0.0 \
+    TEAMAGENT_MCP_PORT=8787 \
+    TEAMAGENT_MCP_PATH=/mcp \
+    AWS_REGION=ap-northeast-1 \
+    TIKTOK_NODE_BIN=node \
+    CHROMIUM_PATH=/usr/bin/chromium
+EXPOSE 8787
+
+# /healthz は bearer 不要（run_mcp_http_server.py）。TEAMAGENT_MCP_BEARER 未注入なら起動拒否(exit 2)。
+HEALTHCHECK --interval=30s --timeout=5s --retries=5 --start-period=40s \
+  CMD curl -fsS "http://127.0.0.1:8787/healthz" || exit 1
+
+CMD ["python", "scripts/run_mcp_http_server.py"]

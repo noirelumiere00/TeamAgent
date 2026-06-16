@@ -406,12 +406,20 @@ class CrossAnalysis(BaseModel):
     summary: str = ""
 
 
+def _default_outputs() -> list[Literal["report", "slides", "pptx"]]:
+    """outputs の既定（report のみ）。lambda だと list[str] 推論で mypy strict が弾くため関数化。"""
+    return ["report"]
+
+
 class VideoAlgorithmInput(BaseModel):
     """入力: 検索KW1つ。"""
 
     query: str
     max_videos: int = Field(default=5, ge=1, le=10)
     client_name: str | None = None  # brand_relation 判定用（任意）
+    # §Q-HTML→PPTX: 追加出力。既定は report のみ＝既存挙動/契約を壊さない。
+    # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（提案資料に組み込む）。
+    outputs: list[Literal["report", "slides", "pptx"]] = Field(default_factory=_default_outputs)
 
 
 class VideoAlgorithmOutput(BaseModel):
@@ -420,7 +428,11 @@ class VideoAlgorithmOutput(BaseModel):
     query: str
     videos: list[AnalyzedVideo] = Field(default_factory=list)
     cross: CrossAnalysis = Field(default_factory=CrossAnalysis)
-    report_html_path: str | None = None
+    report_html_path: str | None = None  # ローカルパス（runtime/Slack添付用・金庫外からは不可視）
+    report_url: str | None = None  # §M: 非公開S3の署名URL（金庫外OpenClawが読める・未発行None）
+    # §Q-HTML→PPTX: 提案資料組み込み用の追加成果物（要求時のみ・graceful・未発行None）。
+    slides_url: str | None = None  # 編集可スライドHTML（営業がブラウザで直接編集）
+    pptx_url: str | None = None  # 提案用 PPTX（16:9・そのまま提案資料に差し込む）
     slack_summary: str = ""
     total_cost_usd: float = Field(default=0.0, ge=0.0)
     model_id: str | None = None

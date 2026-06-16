@@ -58,13 +58,12 @@ class WorkspaceSearchSkill(BaseSkill[WorkspaceSearchInput, WorkspaceSearchOutput
         log = ctx.bind_logger(self.name)
         log.info("workspace_search_start", service=input.service)
 
-        # G1: 本人限定（fail-closed）。
-        requester = ctx.metadata.get("user_email")
-        if not requester or not isinstance(requester, str):
+        # G1: 本人限定＋正規化（fail-closed）。TokenStore キー/RLS と一致させ email 取り違えを防ぐ。
+        from teamagent.identity import normalize_email
+
+        requester = normalize_email(ctx.metadata.get("user_email"))
+        if requester is None:
             raise PermissionError("workspace_search は本人 user_email が必須です（fail-closed）")
-        requester = requester.strip()
-        if not requester:  # 空白のみ → fail-closed（空 user_email で RLS/認可が崩れるのを防ぐ）
-            raise PermissionError("本人 user_email が必須です（空不可・fail-closed）")
 
         # G2: 本人が未連携なら fail-closed。
         if self._token_store is None:

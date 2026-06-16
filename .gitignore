@@ -124,6 +124,7 @@ crash.*.log
 # --- Data / runtime artifacts ---
 data/proposals/
 data/proposal_drive_map.json
+data/templates/
 *.sqlite
 *.sqlite3
 *.db

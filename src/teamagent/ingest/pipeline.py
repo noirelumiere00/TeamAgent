@@ -16,12 +16,14 @@ Usage (CLI):
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import structlog
 
+from teamagent.identity import shared_company_domains_from_env
 from teamagent.ingest.loader import (
     GDriveFolderSpec,
     GSheetSpec,
@@ -29,9 +31,66 @@ from teamagent.ingest.loader import (
     SharedDriveCrawlSpec,
     SlackChannelSpec,
 )
+from teamagent.ingest.ops_alert import IngestOpsAlerter
 from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepository
 
 logger = structlog.get_logger(__name__)
+
+
+def _envflag(name: str, default: str = "false") -> bool:
+    """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。
+
+    増分同期（``USE_INCREMENTAL_SYNC``）は既定 OFF。設定時のみ cursor 駆動の差分取得に切り替わる。
+    """
+    return os.environ.get(name, default).lower() in ("1", "true", "yes")
+
+
+def _spec_source_id(spec: Any) -> str | None:
+    """source spec から connector_state の source_id に使う識別子を引く（無ければ None）。"""
+    for attr in ("channel_id", "folder_id", "sheet_id"):
+        value = getattr(spec, attr, None)
+        if value:
+            return str(value)
+    return None
+
+
+def _drain_changes(
+    client: Any,
+    start_token: str,
+    request_id: str,
+    *,
+    max_pages: int = 50,
+) -> tuple[set[str], str | None]:
+    """Drive changes.list を辿り、変更 file_id 集合と次回 cursor を返す。
+
+    戻り値: (changed_file_ids, next_cursor)。next_cursor は最終ページの
+    new_start_page_token（無ければ最後に使った token を保つ）。
+    removed=True の変更は再取り込み対象外なので除外する。
+    """
+    changed: set[str] = set()
+    token: str | None = start_token
+    next_cursor: str | None = start_token
+    for _ in range(max_pages):
+        if token is None:
+            break
+        batch = client.get_changes(page_token=token, request_id=request_id)
+        for change in batch.changes:
+            if change.file_id and not change.removed:
+                changed.add(change.file_id)
+        if batch.new_start_page_token:
+            next_cursor = batch.new_start_page_token
+        token = batch.next_page_token
+    return changed, next_cursor
+
+
+def _company_acl_groups() -> list[str]:
+    """§G 会社共有: ``TEAMAGENT_SHARED_COMPANY_DOMAINS`` を ``documents.acl_groups`` に付与する。
+
+    未設定なら ``[]``（従来挙動・後方互換）。設定時は会社メンバー identity が
+    RLS の acl_groups intersect で当該 doc を読める＝社内ナレッジの横連携を有効化。
+    Slack/GSheet 取込は従来 channel/owner スコープのため、本付与で会社共有にそろえる。
+    """
+    return sorted(shared_company_domains_from_env() or frozenset())
 
 
 # -----------------------------------------------------------
@@ -232,6 +291,7 @@ def _ingest_slack_channel(
             title=f"{spec.channel_name} {parent.ts}",
             owner_email=owner_email,
             acl_emails=acl_emails,
+            acl_groups=_company_acl_groups(),  # §G 会社共有（未設定なら []）
             metadata=doc_metadata,
             modified_at=None,
         )
@@ -449,6 +509,38 @@ def _ingest_gdrive_folder(
     chunks_n = 0
     skipped: list[str] = []
 
+    # 増分同期（USE_INCREMENTAL_SYNC=1 で opt-in・既定 OFF＝従来フル走査で完全後方互換）。
+    # connector_state の前回 cursor から Drive changes.list の差分（変更 file のみ）に絞り込む。
+    incremental = _envflag("USE_INCREMENTAL_SYNC")
+    changed_ids: set[str] | None = None
+    next_cursor: str | None = None
+    if incremental:
+        prior_cursor: str | None = None
+        try:
+            state = repository.load_connector_state("gdrive", spec.folder_id)
+            prior_cursor = state.cursor if state else None
+        except Exception:
+            logger.exception(
+                "connector_state_load_failed", source_kind="gdrive", source_id=spec.folder_id
+            )
+        if prior_cursor:
+            try:
+                changed_ids, next_cursor = _drain_changes(client, prior_cursor, request_id)
+                logger.info(
+                    "gdrive_incremental_changes",
+                    folder_id=spec.folder_id,
+                    changed=len(changed_ids),
+                )
+            except Exception:
+                logger.exception("gdrive_get_changes_failed", folder_id=spec.folder_id)
+                changed_ids = None  # 差分取得失敗 → フル走査にフォールバック
+        if changed_ids is None:
+            # 初回（cursor 無し）または差分取得失敗: 次回用の start token を取得（今回はフル走査）。
+            try:
+                next_cursor = client.get_start_page_token(request_id)
+            except Exception:
+                logger.exception("gdrive_start_page_token_failed", folder_id=spec.folder_id)
+
     if spec.include_subfolders:
         # Day 7 (2026-05-27): walk_files_recursive はサブフォルダを BFS する。
         # mime_type は server-side で絞れないので、client-side で post-filter する。
@@ -468,6 +560,10 @@ def _ingest_gdrive_folder(
             mime_type_filter=spec.mime_type_filter,
         )
 
+    # 増分: 変更があった file だけに絞る（changed_ids が None ＝フル走査）。
+    if changed_ids is not None:
+        files = [f for f in files if f.id in changed_ids]
+
     for f in files:
         # Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないよう全体を try/except でラップ。
         # 既存の細かい try/except (download/extract) はそのまま生かす。
@@ -485,6 +581,8 @@ def _ingest_gdrive_folder(
             )
             docs_n += docs_added
             chunks_n += chunks_added
+            if incremental and not dry_run and docs_added > 0:
+                _safe_record_job(repository, "gdrive", f.id, success=True, request_id=request_id)
         except Exception:
             logger.exception(
                 "gdrive_file_unexpected_error",
@@ -493,7 +591,25 @@ def _ingest_gdrive_folder(
                 folder_id=spec.folder_id,
             )
             skipped.append(f.id)
+            if incremental and not dry_run:
+                _safe_record_job(
+                    repository,
+                    "gdrive",
+                    f.id,
+                    success=False,
+                    error="gdrive_file_unexpected_error",
+                    request_id=request_id,
+                )
             continue
+
+    # 成功時に cursor を前進保存（次回はこの cursor 以降の差分だけ取る）。
+    if incremental and not dry_run:
+        try:
+            repository.save_connector_state(
+                "gdrive", spec.folder_id, cursor=next_cursor, success=True
+            )
+        except Exception:
+            logger.exception("connector_state_save_failed", folder_id=spec.folder_id)
 
     logger.info(
         "ingest_gdrive_folder_done",
@@ -502,9 +618,33 @@ def _ingest_gdrive_folder(
         documents=docs_n,
         chunks=chunks_n,
         skipped=len(skipped),
+        incremental=incremental,
         dry_run=dry_run,
     )
     return docs_n, chunks_n
+
+
+def _safe_record_job(
+    repository: IngestRepository,
+    source_type: str,
+    external_id: str,
+    *,
+    success: bool,
+    error: str | None = None,
+    request_id: str,
+) -> None:
+    """ingest_jobs への state 記録を best-effort で行う（記録失敗で取り込みは止めない）。"""
+    try:
+        repository.record_ingest_job(
+            source_type,
+            external_id,
+            state="COMMITTED" if success else "FAILED_TRANSIENT",
+            batch_id=request_id,
+            success=success,
+            error=error,
+        )
+    except Exception:
+        logger.exception("ingest_job_record_failed", external_id=external_id)
 
 
 def _process_one_gdrive_file(
@@ -524,6 +664,11 @@ def _process_one_gdrive_file(
     Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないように、
     呼び出し側を try/except でラップ可能に。
     """
+    from teamagent.ingest.office_extract import (
+        GDOC_NATIVE_MIME,
+        OFFICE_BINARY_MIMES,
+        extract_office_pages,
+    )
     from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
 
     # ACL を permissions.list で解決
@@ -534,7 +679,7 @@ def _process_one_gdrive_file(
         fallback_owner_email=f.owners_email[0] if f.owners_email else owner_email,
     )
 
-    # 本文抽出: PDF のみ実 chunk 化、それ以外は title のみ
+    # PDF / Office (docx/pptx/xlsx) / Google native gdoc は chunk 化、他は title のみ
     chunks: list[ChunkUpsert] = []
     if f.mime_type in _PDF_MIME_TYPES:
         try:
@@ -571,8 +716,81 @@ def _process_one_gdrive_file(
                     metadata={"page_num": page_num},
                 )
             )
+    elif f.mime_type in OFFICE_BINARY_MIMES:
+        # docx / pptx / xlsx: download → extract → chunk_pages（PDF と同じ I/F）
+        try:
+            data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+        except Exception:
+            logger.exception(
+                "gdrive_office_download_failed",
+                file_id=f.id,
+                file_name=f.name,
+                mime_type=f.mime_type,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        try:
+            pages = extract_office_pages(data, mime_type=f.mime_type)
+        except Exception:
+            logger.exception(
+                "gdrive_office_extract_failed",
+                file_id=f.id,
+                file_name=f.name,
+                mime_type=f.mime_type,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        page_chunks = chunk_pages(pages, size=500, overlap=100)
+        if not page_chunks:
+            logger.warning(
+                "gdrive_office_empty_text",
+                file_id=f.id,
+                file_name=f.name,
+                mime_type=f.mime_type,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        for idx, (page_num, text) in enumerate(page_chunks):
+            chunks.append(
+                ChunkUpsert(
+                    chunk_idx=idx,
+                    content=text,
+                    embedding=embedder.embed(text),
+                    metadata={"page_num": page_num},
+                )
+            )
+    elif f.mime_type == GDOC_NATIVE_MIME:
+        # Google native gdoc: Docs API で plain text 抽出（download_file_bytes は使えない）
+        try:
+            from teamagent.adapters.gdocs_client import GDocsClient
+
+            gdocs = GDocsClient.from_env()
+            doc_content = gdocs.get_document_text(document_id=f.id, request_id=request_id)
+            text = doc_content.text or ""
+        except Exception:
+            logger.exception(
+                "gdrive_gdoc_extract_failed",
+                file_id=f.id,
+                file_name=f.name,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        if not text.strip():
+            logger.warning("gdrive_gdoc_empty_text", file_id=f.id, file_name=f.name)
+            skipped.append(f.id)
+            return 0, 0
+        page_chunks = chunk_pages([(1, text)], size=500, overlap=100)
+        for idx, (page_num, content) in enumerate(page_chunks):
+            chunks.append(
+                ChunkUpsert(
+                    chunk_idx=idx,
+                    content=content,
+                    embedding=embedder.embed(content),
+                    metadata={"page_num": page_num},
+                )
+            )
     else:
-        # 非 PDF: 雛形と同じ（title + mime のみ、Google Doc export 対応は Sprint 4 で）
+        # 未対応 mime_type: title + mime のフォールバック（検索ヒットだけは可能にする）
         text = f"{f.name} ({f.mime_type})"
         chunks.append(
             ChunkUpsert(
@@ -804,6 +1022,7 @@ def _ingest_gsheet(
                 title=f"{spec.sheet_name} - {tab.tab_name} - row {row_idx}",
                 owner_email=owner_email,
                 acl_emails=[owner_email],
+                acl_groups=_company_acl_groups(),  # §G 会社共有（未設定なら []）
                 metadata={**spec.extra_metadata, "tab_name": tab.tab_name, "row_idx": row_idx},
                 modified_at=None,
             )
@@ -844,11 +1063,14 @@ class IngestRunner:
         *,
         owner_email: str,
         dry_run: bool = True,
+        alerter: IngestOpsAlerter | None = None,
     ) -> None:
         self._repo = repository
         self._embedder = embedder
         self._owner_email = owner_email
         self._dry_run = dry_run
+        # webhook 未設定なら alerter は no-op（from_env 内で webhook_url=None）
+        self._alerter = alerter if alerter is not None else IngestOpsAlerter.from_env()
 
     def run(
         self,
@@ -948,4 +1170,31 @@ class IngestRunner:
                 )
                 stats.sources_skipped += 1
                 stats.errors.append(f"{type(e).__name__}: {e}")
+                # #ops 通知（webhook 未設定 / dry-run なら no-op・失敗しても続行）。
+                self._alerter.send_ingest_failure(
+                    kind=kind,
+                    exc=e,
+                    request_id=request_id,
+                    spec_repr=str(spec)[:200],
+                    dry_run=self._dry_run,
+                )
+                # 増分同期 ON のとき source 単位の連続失敗を connector_state に刻む
+                # （attempt_count++・last_error＝backoff/#ops しきい値判断の根拠）。
+                # 既定 OFF なので従来挙動・既存テストの fake repo には影響しない。
+                if not self._dry_run and _envflag("USE_INCREMENTAL_SYNC"):
+                    source_id = _spec_source_id(spec)
+                    if source_id is not None:
+                        try:
+                            self._repo.save_connector_state(
+                                kind,
+                                source_id,
+                                success=False,
+                                error=f"{type(e).__name__}: {e}",
+                            )
+                        except Exception:
+                            logger.exception(
+                                "connector_state_failure_record_failed",
+                                kind=kind,
+                                source_id=source_id,
+                            )
         return stats

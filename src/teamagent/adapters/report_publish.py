@@ -32,8 +32,19 @@ def _bucket_region(s3: Any, bucket: str) -> str:
         return os.environ.get("AWS_DEFAULT_REGION") or "ap-northeast-1"
 
 
-def publish_html_file(path: str, *, request_id: str = "vseo", query: str = "") -> str | None:
-    """HTMLファイルを非公開S3に置き、署名付きGET URL（7日）を返す。失敗で None。"""
+def publish_file(
+    path: str,
+    *,
+    content_type: str,
+    ext: str,
+    prefix: str | None = None,
+    request_id: str = "vseo",
+    query: str = "",
+) -> str | None:
+    """任意のローカルファイルを非公開S3に置き、署名付きGET URL（7日）を返す。失敗で None。
+
+    HTML/PPTX 等を content_type/ext/prefix の差し替えで共通配布する（§Q-HTML→PPTX で流用）。
+    """
     try:
         import boto3
 
@@ -45,18 +56,18 @@ def publish_html_file(path: str, *, request_id: str = "vseo", query: str = "") -
     if not body:
         return None
     bucket = os.environ.get("VSEO_REPORT_BUCKET") or _DEFAULT_BUCKET
-    prefix = os.environ.get("VSEO_REPORT_PREFIX") or _DEFAULT_PREFIX
-    key = f"{prefix}{uuid.uuid4().hex}.html"
+    key_prefix = prefix or os.environ.get("VSEO_REPORT_PREFIX") or _DEFAULT_PREFIX
+    key = f"{key_prefix}{uuid.uuid4().hex}{ext}"
     try:
         sess = boto3.session.Session()
         region = _bucket_region(sess.client("s3"), bucket)
         s3 = sess.client("s3", region_name=region)
-        # ContentType を付けてブラウザでインライン表示させる（octet-stream だとDLになる）
+        # ContentType を付けてブラウザでインライン表示/正しいDLにする（octet-stream を避ける）
         s3.put_object(
             Bucket=bucket,
             Key=key,
             Body=body,
-            ContentType="text/html; charset=utf-8",
+            ContentType=content_type,
             CacheControl="private, max-age=604800",
         )
         url: str = s3.generate_presigned_url(
@@ -74,3 +85,43 @@ def publish_html_file(path: str, *, request_id: str = "vseo", query: str = "") -
     except Exception as e:
         logger.warning("report_publish_failed", request_id=request_id, error=type(e).__name__)
         return None
+
+
+def publish_html_file(path: str, *, request_id: str = "vseo", query: str = "") -> str | None:
+    """HTMLファイルを非公開S3に置き、署名付きGET URL（7日）を返す（publish_file の薄いラッパ）。"""
+    return publish_file(
+        path,
+        content_type="text/html; charset=utf-8",
+        ext=".html",
+        request_id=request_id,
+        query=query,
+    )
+
+
+# §Q-HTML→PPTX: 提案用 PPTX の配布（別 prefix・PPTX MIME）。
+_PPTX_CT = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_PPTX_PREFIX = "vseo-proposals/"
+
+
+def publish_pptx_file(path: str, *, request_id: str = "vseo", query: str = "") -> str | None:
+    """提案用 PPTX を非公開S3に置き署名付きURL（7日）を返す。失敗で None。"""
+    return publish_file(
+        path,
+        content_type=_PPTX_CT,
+        ext=".pptx",
+        prefix=_PPTX_PREFIX,
+        request_id=request_id,
+        query=query,
+    )
+
+
+def publish_pdf_file(path: str, *, request_id: str = "vseo", query: str = "") -> str | None:
+    """提案用 PDF を非公開S3に置き署名付きURL（7日）を返す。失敗で None（PPTX と同 prefix）。"""
+    return publish_file(
+        path,
+        content_type="application/pdf",
+        ext=".pdf",
+        prefix=_PPTX_PREFIX,
+        request_id=request_id,
+        query=query,
+    )

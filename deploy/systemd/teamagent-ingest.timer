@@ -1,0 +1,21 @@
+# TeamAgent — ナレッジ ingest の定期スケジュール。
+# 既定は「週次（毎週月曜 18:00 UTC = 火曜 03:00 JST、オフピーク）」。
+# 社内ナレッジは月20件程度の増加なので週次で取りこぼしは最大7日と十分。
+# 埋め込みはローカル計算で API 課金は無いため、鮮度を上げたければ日次化も可
+# （OnCalendar を "*-*-* 18:00:00" に変更。README 参照）。
+#
+# 配置: /etc/systemd/system/teamagent-ingest.timer
+[Unit]
+Description=Run TeamAgent knowledge ingest weekly
+
+[Timer]
+# 毎週月曜 18:00 UTC（= 火曜 03:00 JST）
+OnCalendar=Mon *-*-* 18:00:00
+# インスタンス停止等で発火を逃した場合、起動後に取りこぼし分を1回だけ実行
+Persistent=true
+# 同時刻集中を避けるためのランダム遅延（最大10分）
+RandomizedDelaySec=600
+Unit=teamagent-ingest.service
+
+[Install]
+WantedBy=timers.target

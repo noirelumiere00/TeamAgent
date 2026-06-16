@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from teamagent.runtime.retry import RetryPolicy, backoff_cap, call_with_retry
+from teamagent.adapters.retry import RetryPolicy, backoff_cap, call_with_retry
 
 
 class _TransientError(Exception):

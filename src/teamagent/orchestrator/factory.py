@@ -129,6 +129,57 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # §L Phase1: スクレイプ/動画ツール。既定OFF（USE_VIDEO_TOOLS/USE_TIKTOK_TOOLS=1 で opt-in）。
+    # 会社共有・読取専用（per-user非依存）。OpenClaw は native exec/browser 不使用＝MCP ツール越しに
+    # 取得（実スクレイプ Puppeteer/yt-dlp/ffmpeg は金庫内で実行）。依存は run() で遅延生成。
+    if _envflag("USE_VIDEO_TOOLS"):
+        from teamagent.skills.video.skill import VideoAnalysisSkill
+        from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
+
+        specs.append(
+            ToolSpec(VideoAnalysisSkill.name, VideoAnalysisSkill.description, VideoAnalysisSkill)
+        )
+        specs.append(
+            ToolSpec(VideoAlgorithmSkill.name, VideoAlgorithmSkill.description, VideoAlgorithmSkill)
+        )
+
+    if _envflag("USE_TIKTOK_TOOLS"):
+        from teamagent.skills.tiktok_search.skill import TikTokSearchSkill
+
+        specs.append(
+            ToolSpec(TikTokSearchSkill.name, TikTokSearchSkill.description, TikTokSearchSkill)
+        )
+
+    # operation_log: Slackスレッド営業会話 → CRM 転記用の構造化ログ（フェーズ/アクション/BANT）。
+    # 既定 OFF（USE_OPERATION_LOG_TOOLS=1 で opt-in）。Bedrock/Slack 依存は run() で遅延生成。
+    # 既存のSlack配線（slack_bot.py）と独立して MCP 経由でも呼べる（factory 登録だけが必要）。
+    if _envflag("USE_OPERATION_LOG_TOOLS"):
+        from teamagent.skills.operation_log.skill import OperationLogSkill
+
+        specs.append(
+            ToolSpec(
+                OperationLogSkill.name,
+                OperationLogSkill.description,
+                OperationLogSkill,
+            )
+        )
+
+    # proposal_deck: 商材情報+研究素材 → FMT v2 95項目 → .pptx 生成。**既定 OFF**
+    # （USE_PROPOSAL_DECK_TOOLS=1 で opt-in）。run() は TEAMAGENT_FMT_TEMPLATE（FMT v2 .pptx の
+    # 実パス）が無いと ValueError/FileNotFoundError になるため、テンプレを provision してから
+    # 有効化する（他の任意スキルと同じ gate パターンに統一）。Agent は search/proposal_draft/
+    # clientkarte で素材を集めてから research_material に渡して呼ぶ。
+    if _envflag("USE_PROPOSAL_DECK_TOOLS"):
+        from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
+
+        specs.append(
+            ToolSpec(
+                ProposalDeckSkill.name,
+                ProposalDeckSkill.description,
+                ProposalDeckSkill,
+            )
+        )
+
     # メール×社内ナレッジ横断ツール（read-only・per-user OAuth）。**既定 OFF**
     # （USE_MAIL_LINK_TOOL=1）。本番 Slack Bot へは intent.py + slack_bot.py 経由で届くため、
     # ここはオーケストレータ（Agent SDK）用の並行配線（dark）に過ぎない。token_store を必ず渡す。

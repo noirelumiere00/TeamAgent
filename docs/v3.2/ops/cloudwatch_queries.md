@@ -1,10 +1,13 @@
 # CloudWatch Logs Insights クエリ集
 
-**作成日**: 2026-05-22 Day 2
-**対象ログ**: `/teamagent/dev`（Terraform で作成済）
-**前提**: 構造化ログ JSON が CloudWatch に流れている（Sprint 4 で本番 EC2 デプロイ後に有効化）
+**作成日**: 2026-05-22 Day 2 ／ **更新**: 2026-06-16（JSON ログ化・対象ロググループ整理）
+**対象ログ（本番経路）**: **`/teamagent/dev/teamagent-mcp`**（Slack→OpenClaw→MCP の Python MCP。実トラフィックはここ）
+**前提**: 構造化ログが **JSON Lines**（`STRUCTLOG_FORMAT=json`・`observability/logging_config.py`）。下記の `filter event=...` / `$.field` は JSON 前提でそのまま効く。
 
-> 本ドキュメントは「本番 EC2 で Bot が動き始めたら、即座にこのクエリ集を CloudWatch Logs Insights に貼って運用開始する」ための備え。
+> ⚠️ 2026-06-16 時点の注意:
+> - MCP の JSON 化は `40afded` で実装済だが、**まとめてデプロイ（`bundled_deploy_2026-06-16.md`）で MCP 再ビルド+ECS roll するまで live は console 形式**＝それまで `event=` 系はマッチしない（デプロイ後に有効）。
+> - 旧 `/teamagent/dev`（worker EC2 旧 slack_bot）は **ログ未到達（0 bytes・EC2 に CloudWatch agent 無し）**＝対象にしても何も返らない。本番は MCP ロググループを使う。
+> - 日次のパイロット健全性は **`scripts/pilot_health.py --hours 24`**（p95/エラー率/コスト/cache_hit を SLO 照合）でまとめて読める。下記は個別深掘り用。
 
 ---
 

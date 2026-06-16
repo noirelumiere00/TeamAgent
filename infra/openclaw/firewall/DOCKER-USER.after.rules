@@ -1,0 +1,23 @@
+# /etc/ufw/after.rules に *filter セクションとして追記（IPv6 は after6.rules にも）。
+# 公開コンテナポートはホストの INPUT を迂回するため、DOCKER-USER チェーンで明示制御が必須
+# （§A: OpenClaw 公式セキュリティ docs の指針）。下記は「内部網からのみ到達可・他は遮断」の ingress 許可。
+#
+# 併せて egress（OpenClaw コンテナの外向き）も絞ること。AWS/Slack は IP が動的なため
+# DOCKER-USER の宛先IP allowlist は現実的でない → **VPC セキュリティグループ / NACL / 送信プロキシ**で
+# 「Bedrock(ap-northeast-1) エンドポイント・Slack・teamagent-mcp のみ」に限定するのが本筋。
+# openclaw.config.json5 の bind:loopback と internal:true な mcpnet も二重の歯止め。
+
+*filter
+:DOCKER-USER - [0:0]
+# 既存・関連は通す
+-A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+# ループバック / プライベート網からの管理アクセスのみ許可
+-A DOCKER-USER -s 127.0.0.0/8 -j RETURN
+-A DOCKER-USER -s 10.0.0.0/8 -j RETURN
+-A DOCKER-USER -s 172.16.0.0/12 -j RETURN
+-A DOCKER-USER -s 192.168.0.0/16 -j RETURN
+-A DOCKER-USER -s 100.64.0.0/10 -j RETURN
+# 新規のインバウンドはドロップ（公開ポートを外部に晒さない）
+-A DOCKER-USER -m conntrack --ctstate NEW -j DROP
+-A DOCKER-USER -j RETURN
+COMMIT

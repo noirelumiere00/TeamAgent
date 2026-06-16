@@ -1,0 +1,39 @@
+{
+  "_comment": "OpenClaw 外殻ロールの最小権限ポリシー（雛形）。Bedrock 推論だけ許可し、営業データ系は明示 Deny。<ACCOUNT_ID> は適用時に置換。inference profile / foundation model の ARN は `aws bedrock list-inference-profiles --region ap-northeast-1` で確認して絞る。Deny は Allow より優先＝越権を構造的に封じる。",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockInvokeTokyoOnly",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": [
+        "arn:aws:bedrock:ap-northeast-1:<ACCOUNT_ID>:inference-profile/jp.anthropic.claude-sonnet-4-6-v1:0",
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6-v1:0"
+      ]
+    },
+    {
+      "Sid": "DenyAllSalesDataReach",
+      "Effect": "Deny",
+      "Action": [
+        "secretsmanager:*",
+        "kms:*",
+        "rds:*",
+        "rds-db:connect",
+        "rds-data:*",
+        "dynamodb:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyBedrockBeyondInvoke",
+      "Effect": "Deny",
+      "Action": [
+        "bedrock:CreateModelCustomizationJob",
+        "bedrock:CreateAgent",
+        "bedrock:DeleteModelInvocationLoggingConfiguration",
+        "bedrock:PutModelInvocationLoggingConfiguration"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

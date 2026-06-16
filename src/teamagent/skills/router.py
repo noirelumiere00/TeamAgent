@@ -1,4 +1,4 @@
-"""Skill Router（ルールベース、Sprint 2 で Haiku ベースに差替予定）。
+"""Skill Router（rule-based 主体 + 低確信時に Haiku フォールバック）。
 
 mention テキストから「どの検索戦略を使うか」を判定する。
 検索 Skill 設計書 (docs/v3.1/teamagent_search_skill_design_v1.md) の Section 3 を実装。
@@ -9,8 +9,11 @@ QueryType:
 - compare:     比較系（「A と B の違い」）
 - content:     通常の意味検索（デフォルト）
 
-Sprint 2 で Haiku 4.5 ベースの判定に置き換える。
-今は正規表現/キーワード判定の rule-based 実装。
+現状（2026-06-16 時点・spec matrix LLM#4 で整理）:
+- **rule-based（正規表現/キーワード）が主体**で、confidence が低い時のみ
+  Haiku 4.5 にフォールバックするハイブリッド（旧「Sprint 2 で完全 Haiku 化」TODO は撤回）。
+- 本番経路は OpenClaw の agent loop がスキル選択を担うため、この内部 router の比重は低い
+  （legacy/補助。完全 Haiku 化や compare/meta の実装差別化は P1/P4 リファクタ＝検索#29 で扱う）。
 """
 
 from __future__ import annotations

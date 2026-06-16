@@ -1,0 +1,28 @@
+# TeamAgent — 社内ナレッジ定期 ingest（oneshot）。
+# teamagent-ingest.timer から起動される。scripts/run_ingest.sh が env/secrets を
+# Bot と同一手順でロードし、Slack/Drive/Sheets を pgvector へ冪等 upsert する。
+#
+# 配置: /etc/systemd/system/teamagent-ingest.service
+[Unit]
+Description=TeamAgent knowledge ingest (Slack/Drive/Sheets -> pgvector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/teamagent/app
+# Bot と同じく login shell でラッパを起動（PATH/venv/環境を揃える）
+ExecStart=/bin/bash -lc 'exec scripts/run_ingest.sh'
+Environment=PYTHONUNBUFFERED=1
+# Bot と同じ既定（必要なら drop-in で上書き可）
+Environment=INGEST_SOURCES=slack,gdrive,gsheets
+Environment=INGEST_OWNER_EMAIL=shogo@vectorinc.co.jp
+# #ops 通知用 Slack Incoming Webhook 名（Secrets Manager 名のみ・実値は load_secrets.sh で展開）
+# 未投入なら ingest 失敗時の通知は no-op（pipeline は続行）。
+Environment=OPS_SLACK_WEBHOOK_SECRET_NAME=teamagent/prod/ops-slack-webhook
+# 暴走時の保険（ingest が固まっても 1 時間で打ち切り）
+TimeoutStartSec=3600
+# oneshot のため Restart は付けない（失敗は次回 timer に委ねる＝多重起動を避ける）
+
+[Install]
+WantedBy=multi-user.target

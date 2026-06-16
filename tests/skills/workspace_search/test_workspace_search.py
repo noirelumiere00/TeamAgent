@@ -98,3 +98,17 @@ def test_unsupported_service() -> None:
     skill = WorkspaceSearchSkill(token_store=_store_with("a@x.com"))
     with pytest.raises(ValueError, match="未対応"):
         skill.run(WorkspaceSearchInput(service="drive", query="x"), _ctx("a@x.com"))
+
+
+def test_user_email_normalized_for_token_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WS-C: 大小/前後空白付き user_email を正規化して TokenStore キーに一致させる。
+
+    正規化しないと 'A@X.com' のキーで本人トークンが引けない／別表記で他人トークンを引く
+    取り違えが起き得る。小文字キーで保存した本人トークンに正規化後の email が当たることを固定。
+    """
+    monkeypatch.setattr(
+        cal.GCalendarClient, "from_user_token", classmethod(lambda cls, token: _FakeCal())
+    )
+    skill = WorkspaceSearchSkill(token_store=_store_with("a@x.com"))  # 小文字キーで保存
+    out = skill.run(WorkspaceSearchInput(service="calendar", query="x"), _ctx("  A@X.com "))
+    assert out.count == 1  # 正規化で小文字キーに一致＝取り違え防止

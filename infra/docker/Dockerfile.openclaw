@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+# ============================================================
+# OpenClaw 外殻（版pin）+ レビュー済み設定/ペルソナを焼いた薄い overlay — ECS Fargate
+# ============================================================
+# 役割: 自律外殻(L0)。creds/RDS到達なし。MCP境界(streamable-http)越しにしかドメインに触れない。
+# 設定は Git レビュー済みを image に焼く＝immutable・監査可能。**秘密値は焼かない**（ECS secrets で注入）。
+#
+# 注意（config と state の分離）:
+#   - OpenClaw は ~/.openclaw に「状態」も書く。read-only/ephemeral 前提では config を別パスに置き
+#     OPENCLAW_CONFIG_PATH で参照、state/workspace は書込み可能な tmpfs/volume にする（task def 側で指定）。
+#   - workspace の SOUL.md/HEARTBEAT.md は起動時に seed（entrypoint で書込み可能 workspace へコピー）。
+#   ⚠️ deploy 時に「config 読込・workspace seed・gateway 起動」の実動作を必ず確認（環境依存が残る箇所）。
+#
+# build:  docker build -f infra/docker/Dockerfile.openclaw -t teamagent-openclaw:local .
+# ============================================================
+
+# 版pin: stable v2026.6.5（§S3: @openclaw/amazon-bedrock-provider が openclaw>=2026.6.5 を要求するため
+# 2026.6.1 から版上げ。min-safe >= 2026.5.26 充足・新規high/critical GHSA無しを2026-06-12に再確認）。
+# digest は manifest list（multi-arch）。
+FROM ghcr.io/openclaw/openclaw:2026.6.5@sha256:037f49ba1595be9502fb345138d727cd0cfaecf1392cbe0cfe053fb4681386cd
+
+# レビュー済み設定（read-only パスに焼く。state は書かない）
+COPY infra/openclaw/openclaw.config.json5 /opt/teamagent/openclaw.json
+# workspace に seed するペルソナ（起動時に書込み可能 workspace へコピー）
+COPY infra/openclaw/SOUL.md infra/openclaw/HEARTBEAT.md /opt/teamagent/workspace-seed/
+COPY infra/docker/openclaw-entrypoint.sh /opt/teamagent/entrypoint.sh
+
+# config は別パス参照（~/.openclaw は state 用に書込み可能のまま）
+ENV OPENCLAW_CONFIG_PATH=/opt/teamagent/openclaw.json \
+    OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace \
+    AWS_REGION=ap-northeast-1
+
+# §S2: /opt/teamagent を node 所有に（COPY は root 所有＝公式 non-root が書けない）。
+# これで (1) plugins install 先 /opt/teamagent/npm が書ける (2) 起動時の
+# openclaw.json.last-good バックアップ書込み(EACCES)も解消。
+# base は USER node なので chown のため一時的に root へ。
+USER root
+RUN chown -R node:node /opt/teamagent
+USER node
+
+# §S2: install は config にプラグイン登録を書き込むが、comment付きjson5(大)→canonical(小)の縮小を
+# OpenClawのsize-dropガードが拒否する（実測:8217->2907)。先に canonical JSON へ正規化しておけば、
+# install の書込みは「プラグイン追記＝微増」になりガードを通過＝登録成功→gatewayがslackチャンネルを起動。
+# （comment付き源泉は git の .json5 が保持。eval は build時の信頼済みファイルのみ）
+RUN node -e "const fs=require('fs');const p='/opt/teamagent/openclaw.json';const o=(0,eval)('('+fs.readFileSync(p,'utf8')+')');fs.writeFileSync(p,JSON.stringify(o,null,2));"
+
+# §S2: Slack はバンドルされず別プラグイン。build時に npm から焼き込む（runtime は ephemeral state ＝
+# /opt/teamagent/npm=config dir配下に入るので image 層に残る）。npm は社内proxyを通る（実測）。
+# 互換版を自動選択（base 2026.6.5 → slack 2026.6.5）。--pin で解決版を固定。
+RUN node /app/dist/index.js plugins install @openclaw/slack --pin
+
+# §S3: Bedrock の api アダプタ(bedrock-converse-stream)もコア非同梱＝別プラグイン。無いと実行時に
+# `No API provider registered for api: bedrock-converse-stream`（go-live実測・LLM request failed の正体）。
+RUN node /app/dist/index.js plugins install @openclaw/amazon-bedrock-provider --pin
+
+# 公式は非root node(uid1000)。entrypoint は seed → 公式 gateway 起動。
+ENTRYPOINT ["/opt/teamagent/entrypoint.sh"]
+CMD ["node", "dist/index.js", "gateway", "--bind", "loopback", "--port", "18789"]

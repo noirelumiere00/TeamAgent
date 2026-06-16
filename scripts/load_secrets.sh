@@ -109,6 +109,18 @@ _load() {
         fi
     fi
 
+    # ingest #ops 通知用 Slack Incoming Webhook（任意 — 未投入なら ingest pipeline の通知が no-op）
+    if [[ -n "${OPS_SLACK_WEBHOOK_SECRET_NAME:-}" ]]; then
+        local ops_webhook
+        ops_webhook="$(_get_secret "$OPS_SLACK_WEBHOOK_SECRET_NAME" 2>/dev/null || true)"
+        if [[ -n "$ops_webhook" ]]; then
+            export OPS_SLACK_WEBHOOK_URL="$ops_webhook"
+            _log "OK: OPS_SLACK_WEBHOOK_URL loaded"
+        else
+            _log "INFO: OPS_SLACK_WEBHOOK_SECRET_NAME は設定済だが secret 未投入（ingest alerts は disabled）"
+        fi
+    fi
+
     # OAuth state HMAC secret（連携 connect の CSRF/本人性検証用・平文禁止＝Secrets Manager 経由）。
     # Bot(make_state) と connect_web(verify_state) で **同一値** を共有する必要がある。
     if [[ -n "${OAUTH_STATE_SECRET_NAME:-}" ]]; then
