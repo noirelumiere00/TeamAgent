@@ -3,10 +3,10 @@
 本番経路のテレメトリは `usage_events`（旧 slack_bot 専用）に入らない（Part B で確認）。
 本番 SLI の一次ソースは CloudWatch Logs `/teamagent/dev/teamagent-mcp` の構造化ログ。
 
-⚠️ MCP のログは structlog の **console 形式**（JSON でない）。よって `event="..."` や
-`$.field` のような JSON 前提クエリはバインドしない（実証済み）。本スクリプトは
-`parse @message /.../ ` の **正規表現抽出**でフィールドを取り出す。
-（同じ理由で terraform の JSON metric filter `{ $.cost_usd = * }` 等は空振りの疑い＝別タスク）
+MCP は `STRUCTLOG_FORMAT=json`（observability/logging_config.py）で **JSON ログ**を出す。
+よって `event` / `latency_ms` / `cost_usd` / `cache_read_input_tokens` / `level` は
+Logs Insights のトップレベルフィールドとして自動抽出され、regex parse なしで集計できる。
+（同じ JSON 化で terraform の metric filter `{ $.cost_usd = * }` 等も発火するようになる）
 
 1週間 P1 パイロットの日次ゲート確認（p95≤15s / エラー<1% / コスト許容）の一次ソースに使う。
 
@@ -48,25 +48,24 @@ DEFAULT_REGION = "ap-northeast-1"
 # 検索 L2 合成（中量レイテンシ/コストの一次イベント）。検索 1 回 ≒ bedrock_converse 1 回。
 SEARCH_EVENT = "bedrock_converse"
 
-# Logs Insights クエリ（console 形式向け・regex parse）。
+# Logs Insights クエリ（JSON ログ向け＝STRUCTLOG_FORMAT=json 後）。
+# JSON ログでは `event`/`latency_ms`/`cost_usd`/`cache_read_input_tokens`/`level` が
+# トップレベルフィールドとして自動抽出されるので、regex parse なしで集計できる。
 # 1) イベント別 latency 分布
 _Q_LATENCY = (
-    r"parse @message /\]\s+(?<ev>[a-z_]+)/ "
-    r"| parse @message /latency_ms=(?<lat>\d+)/ "
-    r"| filter ispresent(lat) "
-    r"| stats count(*) as n, pct(lat,50) as p50, pct(lat,95) as p95, "
-    r"pct(lat,99) as p99, max(lat) as max_ms by ev"
+    "filter ispresent(latency_ms) "
+    "| stats count(*) as n, pct(latency_ms,50) as p50, pct(latency_ms,95) as p95, "
+    "pct(latency_ms,99) as p99, max(latency_ms) as max_ms by event"
 )
 # 2) コスト & キャッシュ（bedrock_converse 限定）
 _Q_COST_CACHE = (
-    r"filter @message like /bedrock_converse/ "
-    r"| parse @message /cost_usd=(?<cost>[0-9.]+)/ "
-    r"| parse @message /cache_read_input_tokens=(?<cr>\d+)/ "
-    r"| stats count(*) as n, sum(cost) as cost_sum, pct(cost,50) as cost_p50, "
-    r"sum(cr) as cache_read_sum, sum(cr > 0) as cache_hit_n"
+    'filter event="bedrock_converse" '
+    "| stats count(*) as n, sum(cost_usd) as cost_sum, pct(cost_usd,50) as cost_p50, "
+    "sum(cache_read_input_tokens) as cache_read_sum, "
+    "sum(cache_read_input_tokens > 0) as cache_hit_n"
 )
-# 3) エラー件数（level=error 行 or *_failed イベント）
-_Q_ERRORS = r"filter @message like /[error/ or @message like /_failed/ | stats count(*) as n"
+# 3) エラー件数（level=error or *_failed イベント）
+_Q_ERRORS = 'filter level="error" or event like /_failed/ | stats count(*) as n'
 
 
 @dataclass
@@ -122,7 +121,7 @@ def build_readout(
     r = Readout(window_label=window_label)
 
     for d in _rows_to_dicts(latency_results):
-        ev = d.get("ev", "")
+        ev = d.get("event", "")
         if not ev:
             continue
         r.latency_by_event[ev] = {

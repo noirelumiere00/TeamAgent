@@ -102,6 +102,11 @@ def build_app(*, bearer: str, path: str) -> Starlette:
 
 def main() -> None:
     """streamable-http で MCP サーバを起動する CLI エントリポイント。"""
+    # 構造化ログの出力形式を最初に確定（STRUCTLOG_FORMAT=json で CloudWatch 向け JSON）。
+    from teamagent.observability.logging_config import configure_logging
+
+    configure_logging()
+
     bearer = os.environ.get("TEAMAGENT_MCP_BEARER")
     if not bearer:
         # fail-closed: 無認証の MCP エンドポイント公開は禁止。

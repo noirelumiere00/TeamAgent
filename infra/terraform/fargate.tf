@@ -326,6 +326,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "TEAMAGENT_MCP_PORT", value = "8787" },
       { name = "TEAMAGENT_MCP_PATH", value = "/mcp" },
       { name = "TEAMAGENT_SHARED_COMPANY_DOMAINS", value = var.shared_company_domains },
+      # 構造化ログを JSON Lines 化（CloudWatch metric filter `{ $.cost_usd = * }` 等が
+      # バインドして cost/error/spoof アラームが発火する。observability/logging_config.py）。
+      { name = "STRUCTLOG_FORMAT", value = "json" },
       ], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },

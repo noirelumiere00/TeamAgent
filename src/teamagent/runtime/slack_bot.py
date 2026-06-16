@@ -2130,6 +2130,10 @@ async def _run() -> None:
 
 def main() -> None:
     """CLI エントリポイント。"""
+    # 構造化ログの出力形式を確定（STRUCTLOG_FORMAT=json で CloudWatch 向け JSON）。
+    from teamagent.observability.logging_config import configure_logging
+
+    configure_logging()
     asyncio.run(_run())
 
 
