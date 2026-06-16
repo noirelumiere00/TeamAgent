@@ -67,12 +67,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run gitleaks (CLI, no GitHub API)
+        # gitleaks-action@v2 は pull_request 時に GitHub API を叩き
+        # "Resource not accessible by integration"（GITHUB_TOKEN 権限）でクラッシュし、
+        # かつ Node20 deprecation 警告を出す。API 非依存の公式 CLI イメージで作業ツリーを
+        # 直接スキャンする（権限不要・決定的・leak 検出時は exit 1 でジョブを赤化）。
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" \
+            zricethezav/gitleaks:v8.24.3 detect \
+            --source /repo --no-git --redact --no-banner
 
   # 本番デプロイ前提のテスト（main マージ後のみ）
   smoke-test:
