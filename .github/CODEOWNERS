@@ -1,0 +1,23 @@
+# CODEOWNERS — AiLa PDCA loop 編集禁止ファイルの human-only ガード
+# 出典: RULES.md §1.7 / PDCA_LOOP.md §9.2（allowed_files から除外＝Maker subagent 編集禁止）
+#
+# ここに挙げたパスへの変更を含む PR は @noirelumiere00 のレビュー必須（GitHub branch protection で
+# "Require review from Code Owners" を有効化して効かせる）。PDCA loop は draft PR を base=dev に出すが、
+# これらのファイルに触れた diff は Checker が必ず verdict=block にし、人間が最終判断する。
+#
+# 注: Skill 本体（~/.claude/skills/aila-pdca/**）/ schedules.json / MEMORY.md / state.md / plans は
+#     リポジトリ外のため CODEOWNERS の対象外。それらは Skill の SHA256 ゲートと allowed_files ロジックで守る。
+
+# ── ガバナンス文書（北極星 / 現状 / 規範 / loop 仕様）──────────────────────────────
+/docs/aila_loop/                  @noirelumiere00
+/docs/openclaw/deploy_runbook.md  @noirelumiere00
+/docs/v3.2/slo_v1.md              @noirelumiere00
+
+# ── CI / pre-commit / オーナー定義そのもの（self-modification guard）──────────────
+/.github/CODEOWNERS               @noirelumiere00
+/.github/workflows/ci.yml         @noirelumiere00
+/.pre-commit-config.yaml          @noirelumiere00
+/scripts/hooks/                   @noirelumiere00
+
+# ── 本番デプロイスクリプト（物理ガード付き・改変も human-only）───────────────────
+/scripts/deploy_to_ec2.sh         @noirelumiere00

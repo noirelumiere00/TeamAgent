@@ -72,3 +72,13 @@ repos:
         language: system
         files: \.(py|md|json|yaml|yml|toml|env|tf)$
         exclude: ^(\.pre-commit-config\.yaml|\.gitleaks\.toml|docs/.*)$
+
+  # AiLa PDCA loop secret / forbidden-file ガード（RULES.md §1.2 Q5 / SHOGO_ACTIONS action 5）
+  # full-shape regex（xox*/AKIA*/ASIA*/ya29.*/eyJ*.*.*/BEGIN PRIVATE KEY）+ *.env /
+  # service-account.json / vertex_sa.json のステージ拒否。全ステージファイルを検査（filter なし）。
+  - repo: local
+    hooks:
+      - id: aila-secret-guard
+        name: AiLa secret / forbidden-file guard (RULES.md §1.2)
+        entry: python3 scripts/hooks/aila_secret_guard.py
+        language: system

@@ -18,6 +18,14 @@
 # ============================================================
 set -euo pipefail
 
+# ── AiLa PDCA loop 物理ガード（RULES.md §1.4 Q7 / SHOGO_ACTIONS action 5）──────────
+# PDCA loop（Maker subagent）は dev/prod 問わず deploy 系を実行禁止。
+# Skill が PDCA_LOOP_MODE=1 を強制 env で立てるので、ここで物理的に弾く。
+if [ "${PDCA_LOOP_MODE:-}" = "1" ]; then
+  echo "blocked: deploy_to_ec2.sh は PDCA_LOOP_MODE=1 では実行禁止（RULES.md §1.4 Q7）" >&2
+  exit 1
+fi
+
 REGION="${AWS_REGION:-ap-northeast-1}"
 INSTANCE_ID="${WORKER_INSTANCE_ID:-i-0feaa3c103ab6ef91}"
 BUCKET="${DEPLOY_BUCKET:-teamagent-dev-raw-files}"
