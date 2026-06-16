@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, ClassVar
@@ -86,7 +87,11 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         # 版 ID: 再生成ごとに一意。版管理/差し替え追跡の anchor（提案#12,#19）。
         version_id = f"v-{uuid.uuid4().hex[:12]}"
         template = self._resolve_template(input)
-        out_dir = Path(input.out_dir or os.environ.get("TEAMAGENT_DECK_OUT_DIR", "/tmp"))
+        # 出力先: 明示指定 > env > OS の一時ディレクトリ（Linux コンテナでは /tmp）。
+        # tempfile.gettempdir() で TMPDIR を尊重しハードコード /tmp（bandit B108）を避ける。
+        out_dir = Path(
+            input.out_dir or os.environ.get("TEAMAGENT_DECK_OUT_DIR") or tempfile.gettempdir()
+        )
         safe = _SAFE_NAME.sub("_", input.product_name).strip("_") or "deck"
         out_path = out_dir / f"{ctx.request_id}_{safe}.pptx"
         rendered = render_deck(composer_out, template, out_path)
