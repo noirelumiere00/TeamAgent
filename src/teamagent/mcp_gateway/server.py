@@ -284,17 +284,18 @@ async def dispatch_run_agent(
     if not isinstance(goal, str) or not goal.strip():
         return _err("invalid input: 'goal' (non-empty string) is required")
 
-    # 遅延 import: claude_agent_sdk(Node CLI) は重く本番ライブ専用。
-    # MCP モジュール import を軽く保つため呼び出し時に import する。
-    from teamagent.orchestrator.agent_config import (
-        build_orchestrator_system_prompt,
-        orchestrator_model_from_env,
-    )
-    from teamagent.orchestrator.sdk_runner import run_sdk_agent
-
     user_email = metadata.get("user_email")
     request_id = f"run-agent-{uuid.uuid4().hex[:12]}"
     try:
+        # 遅延 import: claude_agent_sdk(Node CLI) は重く本番ライブ専用。MCP モジュール import を
+        # 軽く保つため呼び出し時に import する。SDK 未導入環境の ImportError も握って構造化エラー化
+        # する（dispatch の「例外で外殻ループを落とさない」契約を import 失敗でも守る）。
+        from teamagent.orchestrator.agent_config import (
+            build_orchestrator_system_prompt,
+            orchestrator_model_from_env,
+        )
+        from teamagent.orchestrator.sdk_runner import run_sdk_agent
+
         result = await run_sdk_agent(
             goal=goal,
             request_id=request_id,

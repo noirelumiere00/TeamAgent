@@ -71,7 +71,7 @@ def build_proposal_html(
 
 def _html_to_pdf(html_str: str, out_path: Path) -> None:
     """HTML 文字列を PDF に書き出す（weasyprint を遅延 import）。"""
-    from weasyprint import HTML  # type: ignore[import-untyped]
+    from weasyprint import HTML
 
     HTML(string=html_str).write_pdf(str(out_path))
 

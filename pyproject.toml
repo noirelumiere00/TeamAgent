@@ -181,6 +181,9 @@ module = [
     "docx.*",
     "pptx",
     "pptx.*",
+    # weasyprint は重い C 依存で CI(--no-deps)に非導入＝import-not-found になるため stub 無し扱い。
+    "weasyprint",
+    "weasyprint.*",
 ]
 ignore_missing_imports = true
 
