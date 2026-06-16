@@ -39,7 +39,9 @@ def _row(**kv: str) -> list[dict[str, str]]:
 _LATENCY = [
     _row(event="bedrock_converse", n="3", p50="10400", p95="10600", p99="10600", max_ms="10601"),
     _row(event="embedder_embed", n="3", p50="500", p95="500", p99="500", max_ms="535"),
-    _row(event="gemini_analyze_video", n="1", p50="18045", p95="18045", p99="18045", max_ms="18045"),
+    _row(
+        event="gemini_analyze_video", n="1", p50="18045", p95="18045", p99="18045", max_ms="18045"
+    ),
 ]
 _COST = [_row(n="3", cost_sum="0.0359", cost_p50="0.0125", cache_read_sum="0", cache_hit_n="0")]
 _ERRORS = [_row(n="0")]
@@ -74,7 +76,9 @@ def test_evaluate_go_when_within_slo() -> None:
 
 def test_evaluate_no_go_when_p95_exceeds_slo() -> None:
     slow = [
-        _row(event="bedrock_converse", n="50", p50="16000", p95="20000", p99="25000", max_ms="30000")
+        _row(
+            event="bedrock_converse", n="50", p50="16000", p95="20000", p99="25000", max_ms="30000"
+        )
     ]
     cost = [_row(n="50", cost_sum="1.0", cost_p50="0.015", cache_read_sum="0", cache_hit_n="0")]
     r = ph.build_readout(
@@ -85,7 +89,9 @@ def test_evaluate_no_go_when_p95_exceeds_slo() -> None:
 
 
 def test_evaluate_no_go_when_error_rate_high() -> None:
-    lat = [_row(event="bedrock_converse", n="90", p50="5000", p95="9000", p99="11000", max_ms="12000")]
+    lat = [
+        _row(event="bedrock_converse", n="90", p50="5000", p95="9000", p99="11000", max_ms="12000")
+    ]
     cost = [_row(n="90", cost_sum="0.5", cost_p50="0.005", cache_read_sum="100", cache_hit_n="40")]
     errors = [_row(n="10")]  # 10 / (90+10) = 10% > 1%
     r = ph.build_readout(
@@ -97,7 +103,9 @@ def test_evaluate_no_go_when_error_rate_high() -> None:
 
 
 def test_evaluate_no_go_when_cost_p50_exceeds() -> None:
-    lat = [_row(event="bedrock_converse", n="20", p50="5000", p95="9000", p99="11000", max_ms="12000")]
+    lat = [
+        _row(event="bedrock_converse", n="20", p50="5000", p95="9000", p99="11000", max_ms="12000")
+    ]
     cost = [_row(n="20", cost_sum="2.0", cost_p50="0.05", cache_read_sum="0", cache_hit_n="0")]
     r = ph.build_readout(
         window_label="w", latency_results=lat, cost_results=cost, error_results=[_row(n="0")]

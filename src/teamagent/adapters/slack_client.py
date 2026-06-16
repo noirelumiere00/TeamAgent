@@ -109,6 +109,42 @@ class SlackClient:
         )
         return result
 
+    async def post_ephemeral(
+        self,
+        channel: str,
+        user: str,
+        text: str,
+        request_id: str,
+        thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> SlackPostResult:
+        """chat.postEphemeral 呼び出し（指定ユーザーにのみ見えるメッセージ）。
+
+        メール等のプライバシー機微な結果を、@メンション元のチャンネルに漏らさず
+        「本人だけに」返すために使う（受信箱内容を共有チャンネルにブロードキャストしない）。
+        """
+        start = time.perf_counter()
+        kwargs: dict[str, Any] = {"channel": channel, "user": user, "text": text}
+        if thread_ts is not None:
+            kwargs["thread_ts"] = thread_ts
+        if blocks is not None:
+            kwargs["blocks"] = blocks
+
+        resp = await self._client.chat_postEphemeral(**kwargs)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        ok = bool(resp.get("ok", False))
+        result = SlackPostResult(channel=channel, ts=str(resp.get("message_ts", "")), ok=ok)
+        logger.info(
+            "slack_post_ephemeral",
+            request_id=request_id,
+            channel=channel,
+            thread_ts=thread_ts,
+            ok=ok,
+            latency_ms=latency_ms,
+            text_len=len(text),
+        )
+        return result
+
     async def upload_file(
         self,
         channel: str,

@@ -309,3 +309,211 @@ def test_routes_to_chitchat(msg: str) -> None:
 def test_task_not_misrouted_to_chitchat(msg: str) -> None:
     """業務語/社名を含む入力は chitchat に誤分類されない（task-first・実検索を壊さない）。"""
     assert detect_skill(msg).skill != "chitchat"
+
+
+# ── mail_to_internal_context / mail_followup ルーティング（Mail×Slack リリース） ──
+
+
+@pytest.mark.parametrize(
+    "msg,client",
+    [
+        ("森ビルからのこのメール、社内の関連スレッド出して", "森ビル"),
+        ("マンダムのメール、社内で何か話してた?", "マンダム"),
+        ("INPEXのメール、関連する過去提案ある?", "INPEX"),
+        ("花王のメールに触れてる社内スレッドある?", "花王"),
+    ],
+)
+def test_routes_to_mail_to_internal_context(msg: str, client: str) -> None:
+    """メール×社内ナレッジ横断: メール語と社内/関連語の近接で発火し、client を抽出する。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_to_internal_context"
+    assert it.client_name == client
+
+
+@pytest.mark.parametrize(
+    "msg,client,days",
+    [
+        ("森ビルの要返信メール教えて", "森ビル", None),
+        ("A社で要返信のメールある?", "A社", None),
+        ("3日以上 返信してない花王のメールある?", "花王", 3),
+        ("マンダムの未返信メール教えて", "マンダム", None),
+    ],
+)
+def test_routes_to_mail_followup(msg: str, client: str, days: int | None) -> None:
+    """要返信トリアージ: 滞留語で発火し、client と（あれば）日数を抽出する。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_followup"
+    assert it.client_name == client
+    assert it.followup_days == days
+
+
+@pytest.mark.parametrize(
+    "msg,expected",
+    [
+        # 既存ルートが新正規表現追加後も不変であること（衝突回帰）
+        ("提案チェックして", "proposal_review"),
+        ("飲食店のPR事例を教えて", "search"),
+        ("森ビルのカルテ", "clientkarte"),
+        ("このスレッドをログ化して", "operation_log"),
+        ("提案作って", "proposal_draft"),
+        # メール語単独・社内語なしは横断機能を発火させず search へ（誤爆防止・仕様）
+        ("メール管理", "search"),
+        ("メールの内容を確認", "search"),
+    ],
+)
+def test_mail_features_do_not_break_existing_routes(msg: str, expected: str) -> None:
+    assert detect_skill(msg).skill == expected
+
+
+@pytest.mark.parametrize(
+    "msg",
+    ["返信してないんだよね", "なんか最近返信できてない", "もう返信できてないや"],
+)
+def test_venting_not_routed_to_mail_followup(msg: str) -> None:
+    """『返信してない』だけの愚痴はメール語が近接しないので mail_followup を奪わない。"""
+    assert detect_skill(msg).skill != "mail_followup"
+
+
+@pytest.mark.parametrize(
+    "msg,client,days",
+    [
+        ("花王への返信漏れ", "花王", None),
+        ("A社の返信忘れ", "A社", None),
+        ("森ビルの返信待ち", "森ビル", None),
+        ("花王の返信してないメール", "花王", None),
+    ],
+)
+def test_named_followup_extracts_client(msg: str, client: str, days: int | None) -> None:
+    """指名つき要返信フレーズは client を抽出し、不要な再質問を避ける。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_followup"
+    assert it.client_name == client
+    assert it.followup_days == days
+
+
+@pytest.mark.parametrize(
+    "msg,skill",
+    [
+        ("過去提案のメール社内で見て", "mail_to_internal_context"),
+        ("今日のメール、社内の関連スレッド", "mail_to_internal_context"),
+        ("未読メール溜まってる", "mail_followup"),
+    ],
+)
+def test_structural_words_not_used_as_client(msg: str, skill: str) -> None:
+    """構造語(過去提案/今日/未読 等)は client にしない → None で再質問へ（誤った空検索を防ぐ）。"""
+    it = detect_skill(msg)
+    assert it.skill == skill
+    assert it.client_name is None
+
+
+@pytest.mark.parametrize(
+    "msg,client",
+    [
+        ("森ビルへの返信作って", "森ビル"),
+        ("マンダムのメール作成して", "マンダム"),
+        ("花王のメールに返信ドラフト作って", "花王"),
+        ("INPEXへの返信案ちょうだい", "INPEX"),
+    ],
+)
+def test_routes_to_mail_reply(msg: str, client: str) -> None:
+    """返信ドラフト/メール作成は mail_reply（_DRAFT_RE の『ドラフト』に奪われない）。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_reply"
+    assert it.client_name == client
+
+
+@pytest.mark.parametrize(
+    "msg,client",
+    [
+        ("森ビルのメール要約して", "森ビル"),
+        ("花王のメールまとめて", "花王"),
+        ("マンダムのメールのサマリーちょうだい", "マンダム"),
+    ],
+)
+def test_routes_to_mail_summary(msg: str, client: str) -> None:
+    it = detect_skill(msg)
+    assert it.skill == "mail_summary"
+    assert it.client_name == client
+
+
+@pytest.mark.parametrize(
+    "msg,expected",
+    [
+        ("提案ドラフト作って", "proposal_draft"),  # 提案ドラフトは mail_reply に奪われない
+        ("提案チェックして", "proposal_review"),
+        ("森ビルの要返信メール教えて", "mail_followup"),  # 要返信は mail_reply ではない
+        ("森ビルのカルテ", "clientkarte"),
+    ],
+)
+def test_mail_reply_summary_do_not_break_existing(msg: str, expected: str) -> None:
+    assert detect_skill(msg).skill == expected
+
+
+@pytest.mark.parametrize(
+    "msg,client",
+    [
+        ("A社の提案の返信ドラフト作って", "A社"),  # 「○○社」を最優先抽出（提案に奪われない）
+        ("花王さんのメール、返信案ちょうだい", "花王"),  # さん honorific + 読点
+        ("森ビル様のメールに返信作って", "森ビル"),
+    ],
+)
+def test_reply_client_extraction_robust(msg: str, client: str) -> None:
+    it = detect_skill(msg)
+    assert it.skill == "mail_reply"
+    assert it.client_name == client
+
+
+@pytest.mark.parametrize("msg", ["リプライ作成して", "返信用のメール作成して", "提案の返信作って"])
+def test_reply_trigger_words_not_used_as_client(msg: str) -> None:
+    """トリガー語/構造語（リプライ/返信用/提案）は client にしない → None で再質問。"""
+    it = detect_skill(msg)
+    assert it.skill == "mail_reply"
+    assert it.client_name is None
+
+
+def test_private_skills_cover_all_mail_skills() -> None:
+    """メール系スキルは全て『本人にだけ返す（ephemeral）』対象に含める（チャンネル漏えい防止）。"""
+    from teamagent.runtime.slack_bot import _PRIVATE_SKILLS
+
+    assert {
+        "mail_reply",
+        "mail_summary",
+        "mail_to_internal_context",
+        "mail_followup",
+    } <= _PRIVATE_SKILLS
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "連携して",
+        "メール連携したい",
+        "Google連携お願い",
+        "接続して",
+        "connect",
+        "アカウント連携",
+        "連携リンクちょうだい",
+    ],
+)
+def test_routes_to_connect(msg: str) -> None:
+    """スラッシュコマンド未登録でも @メンション/DM の『連携』系で connect 経路に乗る。"""
+    assert detect_skill(msg).skill == "connect"
+
+
+@pytest.mark.parametrize("msg", ["他社との連携事例を教えて", "連携の進め方を調べて"])
+def test_connect_does_not_steal_search(msg: str) -> None:
+    """『連携事例』等は検索意図。connect に奪わせない（意図動詞/プレフィックス必須）。"""
+    assert detect_skill(msg).skill != "connect"
+
+
+def test_connect_is_private_delivery() -> None:
+    """連携リンクは本人専用 → ephemeral 配信対象に含める。"""
+    from teamagent.runtime.slack_bot import _PRIVATE_SKILLS
+
+    assert "connect" in _PRIVATE_SKILLS
+
+
+@pytest.mark.parametrize("msg", ["連携", "接続", "再連携", "連携！", "connect", "コネクト"])
+def test_routes_to_connect_bare_word(msg: str) -> None:
+    """メッセージ全体が連携系の語だけ（単独「連携」等）でも connect に乗る（検索に流さない）。"""
+    assert detect_skill(msg).skill == "connect"

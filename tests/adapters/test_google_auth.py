@@ -89,3 +89,20 @@ def test_build_oauth_credentials_builds_with_scopes(
     assert isinstance(creds, Credentials)
     assert creds.refresh_token == "rt-xyz"
     assert "https://www.googleapis.com/auth/drive.readonly" in creds.scopes
+
+
+def test_connect_client_id_secret_prefers_connect_then_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """連携用クライアントは CONNECT_* を優先し、無ければ共有 GOOGLE_* にフォールバック（B案）。"""
+    from teamagent.adapters.google_auth import connect_client_id_secret
+
+    monkeypatch.delenv("CONNECT_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("CONNECT_GOOGLE_CLIENT_SECRET", raising=False)
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "shared-id")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "shared-sec")
+    assert connect_client_id_secret() == ("shared-id", "shared-sec")  # fallback
+
+    monkeypatch.setenv("CONNECT_GOOGLE_CLIENT_ID", "connect-id")
+    monkeypatch.setenv("CONNECT_GOOGLE_CLIENT_SECRET", "connect-sec")
+    assert connect_client_id_secret() == ("connect-id", "connect-sec")  # prefer

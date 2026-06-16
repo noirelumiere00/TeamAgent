@@ -19,9 +19,13 @@ from typing import Any
 
 from teamagent.adapters.oauth_token_store import OAuthToken
 
-# 全7サービス readonly スコープ（W1 同意画面・各アダプタ SCOPES_READONLY と一致）。
-WORKSPACE_READONLY_SCOPES: tuple[str, ...] = (
-    "https://www.googleapis.com/auth/gmail.readonly",
+# Workspace 連携スコープ（W1 同意画面・OAuth 同意画面 User Type=Internal＝審査不要）。
+# Gmail のみ **modify**（読み＋下書き作成＋ラベル）。送信/削除は GmailClient の adapter-layer
+# denylist で物理封鎖し、create_draft（下書き専用）だけ通す＝「AIは要約・提案・下書きまで、
+# 送信は人間」をコードで強制。他6サービスは readonly。
+# ⚠️ 既に readonly で connect 済みの人は、下書き作成(gmail.modify)を使うには再 connect が必要。
+WORKSPACE_SCOPES: tuple[str, ...] = (
+    "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/documents.readonly",
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -63,19 +67,23 @@ def verify_state(state: str, *, secret: bytes | None = None) -> str | None:
 class OAuthConsentFlow:
     """`google-auth-oauthlib` の Flow を薄くラップ（同意URL生成 + code交換）。"""
 
-    def __init__(
-        self, redirect_uri: str, scopes: tuple[str, ...] = WORKSPACE_READONLY_SCOPES
-    ) -> None:
+    def __init__(self, redirect_uri: str, scopes: tuple[str, ...] = WORKSPACE_SCOPES) -> None:
         self._redirect_uri = redirect_uri
         self._scopes = scopes
 
     def _flow(self) -> Any:
         from google_auth_oauthlib.flow import Flow
 
-        client_id = os.environ.get("GOOGLE_CLIENT_ID")
-        client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+        from teamagent.adapters.google_auth import connect_client_id_secret
+
+        # 連携(web)用クライアント: CONNECT_GOOGLE_CLIENT_ID/SECRET 優先・無ければ GOOGLE_*。
+        # 共有(desktop)クライアントとは分離する（B案）。
+        client_id, client_secret = connect_client_id_secret()
         if not (client_id and client_secret):
-            raise ValueError("GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET が未設定です（W1）")
+            raise ValueError(
+                "連携用 OAuth クライアントが未設定です"
+                "（CONNECT_GOOGLE_CLIENT_ID/SECRET または GOOGLE_CLIENT_ID/SECRET）"
+            )
         config = {
             "web": {
                 "client_id": client_id,
@@ -129,7 +137,7 @@ class OAuthConsentFlow:
 
 
 __all__ = [
-    "WORKSPACE_READONLY_SCOPES",
+    "WORKSPACE_SCOPES",
     "OAuthConsentFlow",
     "make_state",
     "verify_state",
