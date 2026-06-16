@@ -32,6 +32,39 @@ resource "aws_s3_bucket_public_access_block" "raw_files" {
   restrict_public_buckets = true
 }
 
+# ---------- ライフサイクル（Glacier 遷移 + 非現行版整理。監視#20）----------
+# 成果物（vseo-reports/・vseo-proposals/・codebuild/）を一定日数後に Glacier IR へ遷移し、
+# バージョニングの非現行版を整理してストレージ費を抑える。署名付き URL は 7 日で失効するため
+# 遷移後（既定 90 日）にアクセスが残ることは稀。versioning 有効が前提。
+resource "aws_s3_bucket_lifecycle_configuration" "raw_files" {
+  bucket = aws_s3_bucket.raw_files.id
+
+  rule {
+    id     = "archive-current-to-glacier-ir"
+    status = "Enabled"
+
+    filter {} # バケット全体
+
+    transition {
+      days          = var.s3_glacier_transition_days
+      storage_class = "GLACIER_IR"
+    }
+  }
+
+  rule {
+    id     = "expire-noncurrent-versions"
+    status = "Enabled"
+
+    filter {} # バケット全体
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.s3_noncurrent_expiration_days
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.raw_files]
+}
+
 # ---------- IAM Role for Lambda ----------
 data "aws_iam_policy_document" "lambda_assume" {
   statement {

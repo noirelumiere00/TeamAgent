@@ -113,3 +113,15 @@ def publish_pptx_file(path: str, *, request_id: str = "vseo", query: str = "") -
         request_id=request_id,
         query=query,
     )
+
+
+def publish_pdf_file(path: str, *, request_id: str = "vseo", query: str = "") -> str | None:
+    """提案用 PDF を非公開S3に置き署名付きURL（7日）を返す。失敗で None（PPTX と同 prefix）。"""
+    return publish_file(
+        path,
+        content_type="application/pdf",
+        ext=".pdf",
+        prefix=_PPTX_PREFIX,
+        request_id=request_id,
+        query=query,
+    )

@@ -17,6 +17,16 @@ db_username          = "teamagent"
 db_name              = "teamagent"
 db_multi_az          = false             # 本番 = true 推奨
 
+# ---- 本番化（インフラ#1,#8・コスト承認＝人手ゲート後に切替）----
+# ⚠️ 月額が増えるため apply は別途承認後。承認されたら上の3行を以下へ差し替えて targeted apply。
+# db_instance_class    = "db.r7g.large"  # pgvector 検索の安定レイテンシ用（メモリ大）
+# db_multi_az          = true            # フェイルオーバー（概ね月額 2 倍）
+# db_allocated_storage = 100             # 取り込み量に応じて拡張
+
+# S3 ライフサイクル（監視#20・既定で有効・成果物の保管コスト最適化）
+s3_glacier_transition_days    = 90
+s3_noncurrent_expiration_days = 180
+
 # Lambda / Bedrock（東京リージョン推論プロファイル）
 bedrock_model_id   = "jp.anthropic.claude-sonnet-4-6"
 lambda_memory_size = 1024

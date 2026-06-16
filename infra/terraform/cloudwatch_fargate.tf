@@ -48,6 +48,23 @@ resource "aws_cloudwatch_log_metric_filter" "mcp_cost_usd" {
   }
 }
 
+# 検索#17: 引用忠実性 KPI（最終回答の引用が、ツールが返した根拠に裏付けられている割合 0..1）。
+# orchestrator(L2 run_agent)/検索経路が JSON ログに citation_validity を吐くと束ねる。
+# JSON 値抽出のため datapoint が出るのは当該フィールドを emit する版がデプロイされてから。
+resource "aws_cloudwatch_log_metric_filter" "mcp_citation_validity" {
+  name           = "${var.project_name}-${var.environment}-mcp-citation-validity"
+  log_group_name = aws_cloudwatch_log_group.mcp.name
+  pattern        = "{ $.citation_validity = * }"
+
+  metric_transformation {
+    name          = "McpCitationValidity"
+    namespace     = local.metric_namespace
+    value         = "$.citation_validity"
+    default_value = "0"
+    unit          = "None"
+  }
+}
+
 # ---------- alarms ----------
 # なりすまし拒否は「攻撃 or バグの早期検知」シグナル＝5分窓で1件でも通知。
 resource "aws_cloudwatch_metric_alarm" "mcp_spoof_rejected" {
@@ -146,6 +163,58 @@ resource "aws_cloudwatch_dashboard" "fargate" {
           title  = "MCP recent identity & errors"
           region = var.aws_region
           query  = "SOURCE '${aws_cloudwatch_log_group.mcp.name}' | fields @timestamp, event, tool, reason, slack_user_id_audit | filter event in ['identity_company_shared','identity_spoof_rejected','mcp_tool_error'] | sort @timestamp desc | limit 50"
+        }
+      },
+    ]
+  })
+}
+
+# ---------- ingest / 検索品質ダッシュボード（監視#19・インフラ#19・検索#17）----------
+# 取り込んだナレッジが検索で実際に引かれ、引用が忠実か（citation KPI）を 1 枚で見る。
+# ⚠️ 既知ギャップ: ingest 本体は worker EC2(journald) で動き CloudWatch 未到達のため、
+#    取り込み件数等の ingest 内部メトリクスはここに出ない（EC2 CloudWatch agent 導入は別タスク）。
+#    本ダッシュボードは MCP 経路（検索の消費側）に出る品質シグナルを束ねる。
+resource "aws_cloudwatch_dashboard" "ingest" {
+  dashboard_name = "${var.project_name}-${var.environment}-ingest"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Citation faithfulness KPI (avg, 検索#17)"
+          region = var.aws_region
+          view   = "timeSeries"
+          metrics = [
+            [local.metric_namespace, "McpCitationValidity", { stat = "Average", label = "citation_validity" }],
+          ]
+          yAxis = { left = { min = 0, max = 1 } }
+        }
+      },
+      {
+        type   = "log"
+        x      = 12
+        y      = 0
+        width  = 12
+        height = 6
+        properties = {
+          title  = "検索イベント（取り込んだナレッジが引かれているか）"
+          region = var.aws_region
+          query  = "SOURCE '${aws_cloudwatch_log_group.mcp.name}' | fields @timestamp, event, latency_ms, cost_usd | filter event in ['bedrock_converse','search_skill_done','agent_result'] | sort @timestamp desc | limit 50"
+        }
+      },
+      {
+        type   = "text"
+        x      = 0
+        y      = 6
+        width  = 24
+        height = 3
+        properties = {
+          markdown = "### ingest 内部メトリクスの所在\ningest は worker EC2(journald) で実行され CloudWatch へ未到達のため、取り込み件数/失敗率はここに出ません。一次ソースは `connector_state`/`ingest_jobs`/`audit_log`（RDS・migration 0005/0012/0014）と `scripts/pilot_health.py`。EC2 CloudWatch agent 導入は別タスク（`docs/v3.2/bundled_deploy_2026-06-16.md` の既知ギャップ）。"
         }
       },
     ]

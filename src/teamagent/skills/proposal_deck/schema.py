@@ -37,6 +37,13 @@ class ProposalDeckInput(BaseModel):
     max_repair: int = Field(
         default=4, ge=0, le=8, description="ComposerOutput 検証失敗時の自己修復回数"
     )
+    emit_pdf: bool = Field(
+        default=False,
+        description=(
+            "PPTX に加えて PDF コンパニオンも生成する（weasyprint で HTML→PDF）。"
+            "env USE_PROPOSAL_DECK_PDF=1 でも有効化。既定 OFF。"
+        ),
+    )
 
 
 class ProposalDeckOutput(BaseModel):
@@ -49,6 +56,17 @@ class ProposalDeckOutput(BaseModel):
             "Slack から開ける署名付き URL（既定: 非公開 S3 presigned 7 日）。"
             "USE_PROPOSAL_DECK_PUBLISH=1 + VSEO_REPORT_BUCKET 設定時のみ非 None。"
         ),
+    )
+    version_id: str = Field(
+        default="",
+        description="この生成物の版 ID（再生成ごとに一意。版管理/差し替え追跡の anchor）。",
+    )
+    pdf_path: str | None = Field(
+        default=None, description="生成された PDF コンパニオンのパス（emit_pdf 時のみ非 None）。"
+    )
+    pdf_url: str | None = Field(
+        default=None,
+        description="PDF の署名付き URL（emit_pdf + USE_PROPOSAL_DECK_PUBLISH=1 時のみ非 None）。",
     )
     filled_count: int = Field(ge=0, description="埋めた placeholder 数")
     skipped_count: int = Field(ge=0, description="要確認（データ未検出）の placeholder 数")

@@ -53,6 +53,21 @@ variable "db_multi_az" {
   default     = false
 }
 
+# ---------- S3 ライフサイクル（提案/レポート成果物の保管コスト最適化・監視#20）----------
+# 提案 PDF/PPTX/HTML レポートは生成直後だけ高頻度アクセス、その後は監査/再利用の低頻度に移行する。
+# Glacier Instant Retrieval（ミリ秒取得・長期保管で安価）へ自動遷移してストレージ費を抑える。
+variable "s3_glacier_transition_days" {
+  description = "raw-files の現行オブジェクトを Glacier Instant Retrieval へ遷移するまでの日数"
+  type        = number
+  default     = 90
+}
+
+variable "s3_noncurrent_expiration_days" {
+  description = "バージョニングの非現行バージョンを削除するまでの日数（履歴肥大の抑制）"
+  type        = number
+  default     = 180
+}
+
 # ---------- Lambda / Bedrock ----------
 variable "bedrock_model_id" {
   description = "Bedrock で利用する Claude モデル ID（東京リージョン推論プロファイル）"

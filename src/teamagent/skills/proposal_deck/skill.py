@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -31,6 +32,10 @@ logger = structlog.get_logger(__name__)
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 _SAFE_NAME = re.compile(r"[^\w\-]+", re.UNICODE)
+
+
+def _envflag(name: str) -> bool:
+    return os.environ.get(name, "false").lower() in ("1", "true", "yes")
 
 
 def _extract_json(text: str) -> str:
@@ -78,6 +83,8 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
 
         composer_out, cost_usd = self._compose(input, ctx)
 
+        # 版 ID: 再生成ごとに一意。版管理/差し替え追跡の anchor（提案#12,#19）。
+        version_id = f"v-{uuid.uuid4().hex[:12]}"
         template = self._resolve_template(input)
         out_dir = Path(input.out_dir or os.environ.get("TEAMAGENT_DECK_OUT_DIR", "/tmp"))
         safe = _SAFE_NAME.sub("_", input.product_name).strip("_") or "deck"
@@ -86,20 +93,33 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
 
         # Wave3-⑨: 既定 OFF。USE_PROPOSAL_DECK_PUBLISH=1 のとき VSEO と同じ非公開 S3
         # presigned URL (7d) で publish して Slack から開ける状態にする。
-        pptx_url = self._publish_if_enabled(str(rendered), input.product_name, ctx.request_id)
+        pptx_url = self._publish_if_enabled(
+            str(rendered), input.product_name, ctx.request_id, kind="pptx"
+        )
+
+        # PDF コンパニオン（提案#10,#17）: emit_pdf or USE_PROPOSAL_DECK_PDF=1 のとき生成。
+        # weasyprint 失敗は握って pdf_path/url=None（PPTX は正本なので skill は成功扱い）。
+        pdf_path, pdf_url = self._emit_pdf_if_enabled(
+            composer_out, input, ctx, version_id=version_id, out_dir=out_dir, safe=safe
+        )
 
         skipped_ids = sorted(s.id for s in composer_out.skipped_placeholders)
         log.info(
             "proposal_deck_done",
             pptx=str(rendered),
+            version_id=version_id,
             filled=len(composer_out.placeholders),
             skipped=len(skipped_ids),
             cost_usd=cost_usd,
             published=bool(pptx_url),
+            pdf=bool(pdf_path),
         )
         return ProposalDeckOutput(
             pptx_path=str(rendered),
             pptx_url=pptx_url,
+            version_id=version_id,
+            pdf_path=pdf_path,
+            pdf_url=pdf_url,
             filled_count=len(composer_out.placeholders),
             skipped_count=len(skipped_ids),
             coverage_ratio=composer_out.coverage_ratio,
@@ -107,21 +127,55 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             total_cost_usd=cost_usd,
         )
 
+    def _emit_pdf_if_enabled(
+        self,
+        composer_out: ComposerOutput,
+        input: ProposalDeckInput,
+        ctx: SkillContext,
+        *,
+        version_id: str,
+        out_dir: Path,
+        safe: str,
+    ) -> tuple[str | None, str | None]:
+        """emit_pdf 有効時に PDF を生成（+ publish 有効なら S3 URL）。失敗は (None, None)。"""
+        if not (input.emit_pdf or _envflag("USE_PROPOSAL_DECK_PDF")):
+            return None, None
+        try:
+            from teamagent.skills.proposal_deck.pdf_export import render_proposal_pdf
+
+            pdf_out = out_dir / f"{ctx.request_id}_{safe}.pdf"
+            rendered_pdf = render_proposal_pdf(
+                composer_out,
+                product_name=input.product_name,
+                version_id=version_id,
+                out_path=pdf_out,
+            )
+        except Exception:
+            logger.exception("proposal_deck_pdf_failed", product=input.product_name)
+            return None, None
+        pdf_url = self._publish_if_enabled(
+            str(rendered_pdf), input.product_name, ctx.request_id, kind="pdf"
+        )
+        return str(rendered_pdf), pdf_url
+
     @staticmethod
-    def _publish_if_enabled(pptx_path: str, product_name: str, request_id: str) -> str | None:
-        """USE_PROPOSAL_DECK_PUBLISH=1 のときだけ publish_pptx_file で署名付き URL を返す.
+    def _publish_if_enabled(
+        path: str, product_name: str, request_id: str, *, kind: str = "pptx"
+    ) -> str | None:
+        """USE_PROPOSAL_DECK_PUBLISH=1 のときだけ署名付き URL を返す（kind=pptx|pdf）.
 
         既定 OFF。S3 認証や VSEO_REPORT_BUCKET 未設定なら publish_file 側が None を返すため、
         失敗しても skill 全体は成功扱い（Slack に URL は出ないだけ）。
         """
-        if os.environ.get("USE_PROPOSAL_DECK_PUBLISH", "false").lower() not in ("1", "true", "yes"):
+        if not _envflag("USE_PROPOSAL_DECK_PUBLISH"):
             return None
         try:
-            from teamagent.adapters.report_publish import publish_pptx_file
+            from teamagent.adapters.report_publish import publish_pdf_file, publish_pptx_file
 
-            return publish_pptx_file(pptx_path, request_id=request_id, query=product_name)
+            publisher = publish_pdf_file if kind == "pdf" else publish_pptx_file
+            return publisher(path, request_id=request_id, query=product_name)
         except Exception:
-            logger.exception("proposal_deck_publish_failed", pptx_path=pptx_path)
+            logger.exception("proposal_deck_publish_failed", path=path, kind=kind)
             return None
 
     def _resolve_template(self, input: ProposalDeckInput) -> Path:
