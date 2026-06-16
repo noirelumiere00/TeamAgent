@@ -132,3 +132,13 @@ aws ecs update-service --cluster teamagent-dev --service teamagent-dev-mcp \
 
 ## 7. パイロット人手ゲート（デプロイ後・`pilot_gate_status_2026-06-15.md` と併用）
 ゲート①署名 / #17 2人混線 / #18 1週間観測。機械検証（RLS・検索 latency・可観測性）は GO 済。
+
+---
+
+## 8. 実施記録（2026-06-16・無停止で実行済）
+- ソース: dev `c3cf803` → CodeBuild `teamagent-dev-image-builder`（tag `p2x-bundle`・WITH_SCRAPE_TOOLS=true・~4分で SUCCEEDED）→ ECR digest `sha256:4d8904a6…`。
+- taskdef: `teamagent-dev-mcp:6` を register（image=新digest／**STRUCTLOG_FORMAT=json 注入**／USE_OPERATION_LOG_TOOLS=1 維持／USE_PROPOSAL_DECK_TOOLS は付けず＝proposal_deck 非露出）。
+- ECS: `update-service` → rolloutState COMPLETED・新タスク RUNNING/HEALTHY・**無停止**。
+- 検証: ✅ JSON flip 確認（`{ $.event="mcp_http_started" }` で JSON 行マッチ＝structlog JSON 化が本番稼働）／✅ `pilot_health.py --hours 1` が JSON ログに対し正常動作（検索0件＝判定不可 GO）。
+- **未（要 operator/パイロット）**: `McpCostUSD` への初 datapoint＋MCP アラームの INSUFFICIENT_DATA 脱出は、OpenClaw 経由の**初回実検索**で確認。
+- rollback 可: `aws ecs update-service ... --task-definition teamagent-dev-mcp:5`。
