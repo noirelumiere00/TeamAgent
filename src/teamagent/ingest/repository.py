@@ -81,6 +81,22 @@ class ChunkUpsert:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ConnectorState:
+    """connector_state テーブル 1 行の読み出し結果（migration 0012）。
+
+    増分同期（Wave3 / Batch C1）で (source_kind, source_id) ごとの前回 cursor を持ち回る。
+    """
+
+    source_kind: str
+    source_id: str
+    cursor: str | None = None
+    oldest: float | None = None
+    revision: int | None = None
+    attempt_count: int = 0
+    last_error: str | None = None
+
+
 # -----------------------------------------------------------
 # repository 本体
 # -----------------------------------------------------------
@@ -140,6 +156,149 @@ class IngestRepository:
             chunk_count=len(chunks),
         )
         return document_id
+
+    # -------------------------------------------------------
+    # 増分同期: connector_state（migration 0012）
+    # -------------------------------------------------------
+    def _ops_connection(self) -> Any:
+        """connector_state / ingest_jobs 用の接続（RLS 非対象の ops テーブル）。
+
+        documents/chunks と同じ teamagent_app role 経由で接続する（最小権限）。
+        これらの ops テーブルには RLS policy が無いので user_email は不要だが、
+        既存 upsert と同条件にそろえて owner_email を渡す。
+        """
+        return self._pgvector.connection(
+            app_role=self._app_role,
+            user_email=self._owner_email,
+            user_role="admin",
+        )
+
+    def load_connector_state(self, source_kind: str, source_id: str) -> ConnectorState | None:
+        """(source_kind, source_id) の前回状態を 1 行ロードする。未登録なら None。"""
+        sql = """
+            SELECT source_kind, source_id, cursor, oldest, revision,
+                   attempt_count, last_error
+            FROM connector_state
+            WHERE source_kind = %s AND source_id = %s
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, (source_kind, source_id))
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return ConnectorState(
+            source_kind=row["source_kind"],
+            source_id=row["source_id"],
+            cursor=row["cursor"],
+            oldest=row["oldest"],
+            revision=row["revision"],
+            attempt_count=row["attempt_count"],
+            last_error=row["last_error"],
+        )
+
+    def save_connector_state(
+        self,
+        source_kind: str,
+        source_id: str,
+        *,
+        cursor: str | None = None,
+        oldest: float | None = None,
+        revision: int | None = None,
+        success: bool = True,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """(source_kind, source_id) の状態を upsert する。
+
+        success=True: cursor/oldest/revision を前進し last_success_at=now()・
+        attempt_count=0 にリセット。
+        success=False: cursor 等は触らず attempt_count++・last_error を記録
+        （backoff / #ops alert しきい値の根拠）。
+        """
+        import json
+
+        meta_json = json.dumps(_sanitize_metadata(metadata or {}), ensure_ascii=False)
+        if success:
+            sql = """
+                INSERT INTO connector_state
+                    (source_kind, source_id, cursor, oldest, revision,
+                     last_success_at, attempt_count, last_error, metadata)
+                VALUES (%s, %s, %s, %s, %s, now(), 0, NULL, %s::jsonb)
+                ON CONFLICT (source_kind, source_id) DO UPDATE SET
+                    cursor = COALESCE(EXCLUDED.cursor, connector_state.cursor),
+                    oldest = COALESCE(EXCLUDED.oldest, connector_state.oldest),
+                    revision = COALESCE(EXCLUDED.revision, connector_state.revision),
+                    last_success_at = now(),
+                    attempt_count = 0,
+                    last_error = NULL,
+                    metadata = connector_state.metadata || EXCLUDED.metadata
+            """
+            params: tuple[Any, ...] = (source_kind, source_id, cursor, oldest, revision, meta_json)
+        else:
+            sql = """
+                INSERT INTO connector_state
+                    (source_kind, source_id, attempt_count, last_error, metadata)
+                VALUES (%s, %s, 1, %s, %s::jsonb)
+                ON CONFLICT (source_kind, source_id) DO UPDATE SET
+                    attempt_count = connector_state.attempt_count + 1,
+                    last_error = EXCLUDED.last_error,
+                    metadata = connector_state.metadata || EXCLUDED.metadata
+            """
+            params = (source_kind, source_id, _strip_nul(error), meta_json)
+        with self._ops_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+
+    def record_ingest_job(
+        self,
+        source_type: str,
+        external_id: str,
+        *,
+        state: str = "COMMITTED",
+        batch_id: str | None = None,
+        error: str | None = None,
+        success: bool = True,
+        max_attempts: int = 5,
+    ) -> None:
+        """ingest_jobs に 1 document の取り込み状態を記録する（migration 0005 の state machine）。
+
+        success=True: ``state``（既定 COMMITTED）へ遷移。COMMITTED なら committed_at を更新。
+        success=False: attempt_count++ し、max_attempts 到達で POISON、未満なら FAILED_TRANSIENT。
+        (source_type, external_id) UNIQUE で同 document の再試行は同 row を UPDATE する。
+        """
+        if success:
+            sql = """
+                INSERT INTO ingest_jobs
+                    (source_type, external_id, state, batch_id, attempt_count, committed_at)
+                VALUES (%s::document_source_type, %s, %s::ingest_job_state, %s, 0,
+                        CASE WHEN %s = 'COMMITTED' THEN now() ELSE NULL END)
+                ON CONFLICT (source_type, external_id) DO UPDATE SET
+                    state = EXCLUDED.state,
+                    batch_id = COALESCE(EXCLUDED.batch_id, ingest_jobs.batch_id),
+                    last_error = NULL,
+                    committed_at = CASE WHEN EXCLUDED.state = 'COMMITTED' THEN now()
+                                        ELSE ingest_jobs.committed_at END
+            """
+            params: tuple[Any, ...] = (source_type, external_id, state, batch_id, state)
+        else:
+            sql = """
+                INSERT INTO ingest_jobs
+                    (source_type, external_id, state, batch_id, attempt_count, last_error)
+                VALUES (%s::document_source_type, %s,
+                        'FAILED_TRANSIENT'::ingest_job_state, %s, 1, %s)
+                ON CONFLICT (source_type, external_id) DO UPDATE SET
+                    attempt_count = ingest_jobs.attempt_count + 1,
+                    last_error = EXCLUDED.last_error,
+                    batch_id = COALESCE(EXCLUDED.batch_id, ingest_jobs.batch_id),
+                    state = CASE WHEN ingest_jobs.attempt_count + 1 >= %s
+                                 THEN 'POISON'::ingest_job_state
+                                 ELSE 'FAILED_TRANSIENT'::ingest_job_state END
+            """
+            params = (source_type, external_id, batch_id, _strip_nul(error), max_attempts)
+        with self._ops_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
 
     # -------------------------------------------------------
     # 内部

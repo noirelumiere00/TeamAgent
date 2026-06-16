@@ -16,6 +16,7 @@ Usage (CLI):
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -34,6 +35,52 @@ from teamagent.ingest.ops_alert import IngestOpsAlerter
 from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepository
 
 logger = structlog.get_logger(__name__)
+
+
+def _envflag(name: str, default: str = "false") -> bool:
+    """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。
+
+    増分同期（``USE_INCREMENTAL_SYNC``）は既定 OFF。設定時のみ cursor 駆動の差分取得に切り替わる。
+    """
+    return os.environ.get(name, default).lower() in ("1", "true", "yes")
+
+
+def _spec_source_id(spec: Any) -> str | None:
+    """source spec から connector_state の source_id に使う識別子を引く（無ければ None）。"""
+    for attr in ("channel_id", "folder_id", "sheet_id"):
+        value = getattr(spec, attr, None)
+        if value:
+            return str(value)
+    return None
+
+
+def _drain_changes(
+    client: Any,
+    start_token: str,
+    request_id: str,
+    *,
+    max_pages: int = 50,
+) -> tuple[set[str], str | None]:
+    """Drive changes.list を辿り、変更 file_id 集合と次回 cursor を返す。
+
+    戻り値: (changed_file_ids, next_cursor)。next_cursor は最終ページの
+    new_start_page_token（無ければ最後に使った token を保つ）。
+    removed=True の変更は再取り込み対象外なので除外する。
+    """
+    changed: set[str] = set()
+    token: str | None = start_token
+    next_cursor: str | None = start_token
+    for _ in range(max_pages):
+        if token is None:
+            break
+        batch = client.get_changes(page_token=token, request_id=request_id)
+        for change in batch.changes:
+            if change.file_id and not change.removed:
+                changed.add(change.file_id)
+        if batch.new_start_page_token:
+            next_cursor = batch.new_start_page_token
+        token = batch.next_page_token
+    return changed, next_cursor
 
 
 def _company_acl_groups() -> list[str]:
@@ -462,6 +509,38 @@ def _ingest_gdrive_folder(
     chunks_n = 0
     skipped: list[str] = []
 
+    # 増分同期（USE_INCREMENTAL_SYNC=1 で opt-in・既定 OFF＝従来フル走査で完全後方互換）。
+    # connector_state の前回 cursor から Drive changes.list の差分（変更 file のみ）に絞り込む。
+    incremental = _envflag("USE_INCREMENTAL_SYNC")
+    changed_ids: set[str] | None = None
+    next_cursor: str | None = None
+    if incremental:
+        prior_cursor: str | None = None
+        try:
+            state = repository.load_connector_state("gdrive", spec.folder_id)
+            prior_cursor = state.cursor if state else None
+        except Exception:
+            logger.exception(
+                "connector_state_load_failed", source_kind="gdrive", source_id=spec.folder_id
+            )
+        if prior_cursor:
+            try:
+                changed_ids, next_cursor = _drain_changes(client, prior_cursor, request_id)
+                logger.info(
+                    "gdrive_incremental_changes",
+                    folder_id=spec.folder_id,
+                    changed=len(changed_ids),
+                )
+            except Exception:
+                logger.exception("gdrive_get_changes_failed", folder_id=spec.folder_id)
+                changed_ids = None  # 差分取得失敗 → フル走査にフォールバック
+        if changed_ids is None:
+            # 初回（cursor 無し）または差分取得失敗: 次回用の start token を取得（今回はフル走査）。
+            try:
+                next_cursor = client.get_start_page_token(request_id)
+            except Exception:
+                logger.exception("gdrive_start_page_token_failed", folder_id=spec.folder_id)
+
     if spec.include_subfolders:
         # Day 7 (2026-05-27): walk_files_recursive はサブフォルダを BFS する。
         # mime_type は server-side で絞れないので、client-side で post-filter する。
@@ -481,6 +560,10 @@ def _ingest_gdrive_folder(
             mime_type_filter=spec.mime_type_filter,
         )
 
+    # 増分: 変更があった file だけに絞る（changed_ids が None ＝フル走査）。
+    if changed_ids is not None:
+        files = [f for f in files if f.id in changed_ids]
+
     for f in files:
         # Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないよう全体を try/except でラップ。
         # 既存の細かい try/except (download/extract) はそのまま生かす。
@@ -498,6 +581,8 @@ def _ingest_gdrive_folder(
             )
             docs_n += docs_added
             chunks_n += chunks_added
+            if incremental and not dry_run and docs_added > 0:
+                _safe_record_job(repository, "gdrive", f.id, success=True, request_id=request_id)
         except Exception:
             logger.exception(
                 "gdrive_file_unexpected_error",
@@ -506,7 +591,25 @@ def _ingest_gdrive_folder(
                 folder_id=spec.folder_id,
             )
             skipped.append(f.id)
+            if incremental and not dry_run:
+                _safe_record_job(
+                    repository,
+                    "gdrive",
+                    f.id,
+                    success=False,
+                    error="gdrive_file_unexpected_error",
+                    request_id=request_id,
+                )
             continue
+
+    # 成功時に cursor を前進保存（次回はこの cursor 以降の差分だけ取る）。
+    if incremental and not dry_run:
+        try:
+            repository.save_connector_state(
+                "gdrive", spec.folder_id, cursor=next_cursor, success=True
+            )
+        except Exception:
+            logger.exception("connector_state_save_failed", folder_id=spec.folder_id)
 
     logger.info(
         "ingest_gdrive_folder_done",
@@ -515,9 +618,33 @@ def _ingest_gdrive_folder(
         documents=docs_n,
         chunks=chunks_n,
         skipped=len(skipped),
+        incremental=incremental,
         dry_run=dry_run,
     )
     return docs_n, chunks_n
+
+
+def _safe_record_job(
+    repository: IngestRepository,
+    source_type: str,
+    external_id: str,
+    *,
+    success: bool,
+    error: str | None = None,
+    request_id: str,
+) -> None:
+    """ingest_jobs への state 記録を best-effort で行う（記録失敗で取り込みは止めない）。"""
+    try:
+        repository.record_ingest_job(
+            source_type,
+            external_id,
+            state="COMMITTED" if success else "FAILED_TRANSIENT",
+            batch_id=request_id,
+            success=success,
+            error=error,
+        )
+    except Exception:
+        logger.exception("ingest_job_record_failed", external_id=external_id)
 
 
 def _process_one_gdrive_file(
@@ -1051,4 +1178,23 @@ class IngestRunner:
                     spec_repr=str(spec)[:200],
                     dry_run=self._dry_run,
                 )
+                # 増分同期 ON のとき source 単位の連続失敗を connector_state に刻む
+                # （attempt_count++・last_error＝backoff/#ops しきい値判断の根拠）。
+                # 既定 OFF なので従来挙動・既存テストの fake repo には影響しない。
+                if not self._dry_run and _envflag("USE_INCREMENTAL_SYNC"):
+                    source_id = _spec_source_id(spec)
+                    if source_id is not None:
+                        try:
+                            self._repo.save_connector_state(
+                                kind,
+                                source_id,
+                                success=False,
+                                error=f"{type(e).__name__}: {e}",
+                            )
+                        except Exception:
+                            logger.exception(
+                                "connector_state_failure_record_failed",
+                                kind=kind,
+                                source_id=source_id,
+                            )
         return stats
