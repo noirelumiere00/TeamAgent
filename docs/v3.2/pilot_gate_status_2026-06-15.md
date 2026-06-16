@@ -60,9 +60,11 @@ OpenClaw(Node) 本番持込の組織承認署名。go-live 実機検証は完了
 
 ## 新規発見・改善候補
 
-1. **観測性ギャップ（要対応）**: `usage_events` テーブルは旧 `slack_bot.handle_app_mention` のみが書き込み、本番経路（Slack→OpenClaw→MCP）は書かない。よって本番 SLI（p95/エラー率/コスト）の一次ソースは現状 CloudWatch Logs の構造化ログのみ。`slo_v1.md` §5 の「未実装: 月次可用性集計」と整合。
-   - 対応案: MCP server 側に usage 記録を足す or CloudWatch Logs Insights クエリを定期実行してダッシュボード化（Wave3 SLI 自動化候補）。
-2. **prompt caching が低トラフィックで不発**: cachePoint TTL（~5分）より検索間隔が長いと cache_read=0。パイロットで連続利用されれば改善する見込みだが、SLO の「1検索コスト ≤$0.02」はキャッシュ前提なので、パイロット中に cache_read>0 の比率を実測して妥当性を確認。
+1. **観測性ギャップ（→ readout で一次対応済・2026-06-16）**: `usage_events` テーブルは旧 `slack_bot.handle_app_mention` のみが書き込み、本番経路（Slack→OpenClaw→MCP）は書かない。よって本番 SLI（p95/エラー率/コスト）の一次ソースは現状 CloudWatch Logs の構造化ログのみ。`slo_v1.md` §5 の「未実装: 月次可用性集計」と整合。
+   - **対応（実装済）**: `scripts/pilot_health.py` を新設。CloudWatch Logs `/teamagent/dev/teamagent-mcp` から検索 p95 / エラー率 / 1検索コスト p50 / cache_hit 比を集計し SLO（p95≤15s・error≤1%・cost p50≤$0.02）と照合して GO/NO-GO を出す。**パイロット中は毎日 `python scripts/pilot_health.py --hours 24` を実行**して #18 の日次ゲートを読む。実走確認済（過去14日: bedrock_converse p95=10.6s / cost_p50=$0.011 / cache_hit 0% を再現・OVERALL GO）。
+   - 恒久対応案（別タスク）: MCP server 側に usage 記録を足す or 本 readout を日次 cron 化してダッシュボード/Slack 通知に。
+2. **⚠️ MCP ログが console 形式 → JSON 前提の metric filter/alarm が空振りの疑い（要確認）**: `/teamagent/dev/teamagent-mcp` のログは structlog の **console 形式**（`2026-.. [info ] bedrock_converse latency_ms=..`）で JSON ではない。よって Logs Insights の `event="..."` 自動フィールドも、terraform の JSON metric filter（`infra/terraform/cloudwatch_fargate.tf` の `{ $.cost_usd = * }` / `{ $.event="mcp_tool_error" || $.level="error" }`）も **バインドしない**＝**既存 CloudWatch アラーム（コスト/エラー/レイテンシ）は発火していない可能性が高い**。`pilot_health.py` は回避策として regex parse（`parse @message /.../`）で集計している。恒久対策は「MCP を JSON ログ出力に切替（structlog JSONRenderer・env で）」か「metric filter を console パターンに書換」。**コード/デプロイ変更を伴うため別タスク**。
+3. **prompt caching が低トラフィックで不発**: cachePoint TTL（~5分）より検索間隔が長いと cache_read=0。パイロットで連続利用されれば改善する見込みだが、SLO の「1検索コスト ≤$0.02」はキャッシュ前提なので、パイロット中に `pilot_health.py` の cache_hit 比で妥当性を確認。
 
 ---
 
