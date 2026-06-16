@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from typing import Any
 
 import structlog
@@ -42,6 +43,15 @@ logger = structlog.get_logger(__name__)
 
 # 呼び出し元（外殻）が RLS 用コンテキストを渡す予約キー。skill 入力とは分離する。
 USER_CONTEXT_KEY = "_user_context"
+
+# L2 適応オーケストレーター（run_sdk_agent）を 1 つの MCP tool として露出する時の名前。
+# `USE_AGENT_ORCHESTRATOR=1` の時だけ list/call に出す（既定 OFF・dark）。
+RUN_AGENT_TOOL_NAME = "run_agent"
+
+
+def _envflag(name: str, default: str = "false") -> bool:
+    """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。"""
+    return os.environ.get(name, default).lower() in ("1", "true", "yes")
 
 
 def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +89,37 @@ def list_tool_defs(specs: list[ToolSpec]) -> list[Tool]:
         )
         for s in specs
     ]
+
+
+def _run_agent_tool_def() -> Tool:
+    """L2 オーケストレーター（run_agent）の MCP Tool 定義。"""
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "goal": {
+                "type": "string",
+                "description": "エージェントに与える調査/提案ゴール（自然文）。",
+            },
+        },
+        "required": ["goal"],
+    }
+    return Tool(
+        name=RUN_AGENT_TOOL_NAME,
+        description=(
+            "L2 適応オーケストレーター。goal を受け取り、search/clientkarte/proposal_* 等の "
+            "L1 ツールを自律的に複数ステップ呼び出して最終提案をまとめる"
+            "（USE_AGENT_ORCHESTRATOR=1 の時だけ露出）。"
+        ),
+        inputSchema=_augment_schema(schema),
+    )
+
+
+def list_all_tool_defs(specs: list[ToolSpec], *, enable_orchestrator: bool) -> list[Tool]:
+    """L1 ツール定義 + （有効時のみ）L2 run_agent 定義を返す。"""
+    defs = list_tool_defs(specs)
+    if enable_orchestrator:
+        defs.append(_run_agent_tool_def())
+    return defs
 
 
 def _domain_of(email: str | None) -> str | None:
@@ -209,6 +250,82 @@ async def dispatch_tool(
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]
 
 
+async def dispatch_run_agent(
+    specs: list[ToolSpec],
+    arguments: dict[str, Any],
+    *,
+    require_rls: bool = True,
+    identity_resolver: IdentityResolver | None = None,
+    allowed_domains: frozenset[str] | None = None,
+    company_shared_groups: frozenset[str] | None = None,
+    max_turns: int = 8,
+    cost_cap_usd: float = 0.5,
+    tool_timeout_s: float = 90.0,
+) -> list[TextContent]:
+    """L2 オーケストレーター（run_sdk_agent）を 1 回の MCP 呼び出しとして実行する。
+
+    身元解決は dispatch_tool と同じ境界（_resolve_metadata）を通す。L1 tool（specs）を
+    そのまま SDK に渡す（run_agent 自身は specs に含まれないので再帰しない）。
+    Bedrock/Node CLI を要するライブ実行。例外は構造化エラーで返す（外殻ループを落とさない）。
+    """
+    raw = arguments.get(USER_CONTEXT_KEY) or {}
+    metadata, fail = await _resolve_metadata(
+        raw,
+        require_rls=require_rls,
+        identity_resolver=identity_resolver,
+        allowed_domains=allowed_domains,
+        company_shared_groups=company_shared_groups,
+        tool=RUN_AGENT_TOOL_NAME,
+    )
+    if fail is not None:
+        return fail
+
+    goal = arguments.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        return _err("invalid input: 'goal' (non-empty string) is required")
+
+    # 遅延 import: claude_agent_sdk(Node CLI) は重く本番ライブ専用。
+    # MCP モジュール import を軽く保つため呼び出し時に import する。
+    from teamagent.orchestrator.agent_config import (
+        build_orchestrator_system_prompt,
+        orchestrator_model_from_env,
+    )
+    from teamagent.orchestrator.sdk_runner import run_sdk_agent
+
+    user_email = metadata.get("user_email")
+    request_id = f"run-agent-{uuid.uuid4().hex[:12]}"
+    try:
+        result = await run_sdk_agent(
+            goal=goal,
+            request_id=request_id,
+            specs=specs,
+            model=orchestrator_model_from_env(),
+            system_prompt=build_orchestrator_system_prompt(),
+            user_id=user_email,
+            ctx_metadata=metadata,
+            # user_email があれば fail-closed で RLS 強制。
+            # 会社共有モードは email 無＝groups で認可済なので require_rls=False。
+            require_rls=bool(user_email),
+            max_turns=max_turns,
+            cost_cap_usd=cost_cap_usd,
+            tool_timeout_s=tool_timeout_s,
+        )
+    except Exception as e:
+        logger.warning("run_agent_error", error=type(e).__name__, request_id=request_id)
+        return _err(f"{type(e).__name__}: {e}", request_id=request_id)
+
+    payload: dict[str, Any] = {
+        "answer": result.answer,
+        "stopped_reason": result.stopped_reason,
+        "is_error": result.is_error,
+        "num_turns": result.num_turns,
+        "tool_calls": result.tool_calls,
+        "session_total_cost_usd": result.session_total_cost_usd,
+        "request_id": request_id,
+    }
+    return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, default=str))]
+
+
 def allowed_domains_from_env() -> frozenset[str] | None:
     """``TEAMAGENT_ALLOWED_EMAIL_DOMAINS``（カンマ区切り）の許可ドメイン集合。無指定は None。"""
     raw = os.environ.get("TEAMAGENT_ALLOWED_EMAIL_DOMAINS")
@@ -255,14 +372,25 @@ def build_server(
 
         specs = build_production_tools()
     by_name = {s.name: s for s in specs}
+    enable_orchestrator = _envflag("USE_AGENT_ORCHESTRATOR")
     server: Server = Server("teamagent")
 
     @server.list_tools()
     async def _list() -> list[Tool]:
-        return list_tool_defs(specs)
+        return list_all_tool_defs(specs, enable_orchestrator=enable_orchestrator)
 
     @server.call_tool()
     async def _call(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        # L2: run_agent は specs に無い特別 tool。有効時のみ専用ディスパッチへ。
+        if enable_orchestrator and name == RUN_AGENT_TOOL_NAME:
+            return await dispatch_run_agent(
+                specs,
+                arguments,
+                require_rls=require_rls,
+                identity_resolver=identity_resolver,
+                allowed_domains=allowed_domains,
+                company_shared_groups=company_shared_groups,
+            )
         return await dispatch_tool(
             by_name,
             name,

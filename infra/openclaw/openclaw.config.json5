@@ -113,6 +113,9 @@
             "operation_log",
           ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
+          // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
+          //   この include に **意図的に入れない**＝パイロット中は dark。OpenClaw 自身がオーケスト
+          //   レーションの外殻なので二重オーケストレーションを避ける。解禁はパイロット後に別途判断（§L C2）。
           exclude: ["mail_*", "workspace_search", "proposal_deck", "*reply*", "*confirm*", "*write*"],
         },
       },

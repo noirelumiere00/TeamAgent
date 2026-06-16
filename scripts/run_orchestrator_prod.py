@@ -23,47 +23,13 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 
+from teamagent.orchestrator.agent_config import (  # noqa: E402
+    build_orchestrator_system_prompt,
+    orchestrator_model_from_env,
+)
 from teamagent.orchestrator.factory import build_production_tools  # noqa: E402
 from teamagent.orchestrator.faithfulness import score_faithfulness  # noqa: E402
 from teamagent.orchestrator.sdk_runner import run_sdk_agent  # noqa: E402
-
-_SYSTEM_PROMPT = """\
-あなたは営業の調査・提案を支援するエージェントです。利用可能なツールを使い、結果を見て次の手を
-適応的に変えてください。代表的な流れ:
-1) clientkarte でクライアントの過去提案履歴・温度感・次アクションを把握
-2) search で関連する過去事例・勝ち筋を調べる
-3) proposal_draft で施策ドラフトを作る
-4) proposal_review でドラフトを過去の勝ち筋/失注理由と照合して診断し、弱ければ作り直す
-5) 最後は必ず文章で最終提案（根拠・過去の踏まえ・想定リスク）をまとめる
-同じツールを同一入力で繰り返さないこと。ツールが使えない時は別手段か、得た情報でまとめること。
-
-【グラウンディング厳守】
-- 事実・事例・数値・出典は、必ず **ツールが返した結果（search の hits 等）のみ** を根拠にすること。
-- 出典を書くときは search が返した file_name / score など **実際に返ってきた値** を引用する。
-- ファイルパス・Slackチャンネル名・「Day○記録」・スクリプト名などを **推測で創作してはならない**。
-  自分の事前知識やこの作業環境の話を持ち込まない。ツール結果に無いものは「無い」と書く。
-- search が hits を返したら、それを使って具体的に答える。「DB未参照」「暫定版」と暈さない。
-- 本当に hits が 0 件のときだけ「該当データ無し（データ未取込の可能性）」と明記する。
-"""
-
-# Phase 6 (6d): mail_constraints ツールが有効な時だけ付ける適応フロー指示。
-# ツールが無い時に付けると誤呼び出しを誘発するため、USE_MAIL_TOOLS で条件付与する。
-_MAIL_CLAUSE = """\
-
-【制約チェック（mail_constraints が使える場合）】
-- 施策ドラフトを作ったら、mail_constraints でそのクライアント/案件の制約（NG手法・予算・
-  期限・関係性）を確認する。**NG に触れる施策は採用せず、別案へ差し替える**こと。
-- mail_constraints は構造化された制約だけを返す（メール生本文は返らない）。返った制約を
-  根拠として「なぜ別案にしたか」を提案内に明記する。
-"""
-
-
-def _build_system_prompt() -> str:
-    """USE_MAIL_TOOLS が有効な時のみ mail 制約フローを足したシステムプロンプトを返す。"""
-    base = _SYSTEM_PROMPT
-    if os.environ.get("USE_MAIL_TOOLS", "").lower() in ("1", "true", "yes"):
-        return base + _MAIL_CLAUSE
-    return base
 
 
 def _preflight() -> list[str]:
@@ -85,9 +51,7 @@ async def _main() -> int:
             print(f"   - {m}")
         return 2
 
-    model = os.environ.get("TEAMAGENT_BEDROCK_MODEL") or os.environ.get(
-        "BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6"
-    )
+    model = orchestrator_model_from_env()
     goal = sys.argv[1] if len(sys.argv) > 1 else "過去の提案資料から関連事例を調べて要約して"
     user_email = os.environ.get("TEAMAGENT_USER_EMAIL", "")
 
@@ -96,7 +60,7 @@ async def _main() -> int:
         request_id="req-prod-search-001",
         specs=build_production_tools(),
         model=model,
-        system_prompt=_build_system_prompt(),
+        system_prompt=build_orchestrator_system_prompt(),
         user_id=os.environ.get("TEAMAGENT_USER_ID"),
         ctx_metadata={"user_email": user_email} if user_email else {},
         require_rls=bool(user_email),  # user_email があれば RLS 強制（fail-closed）
