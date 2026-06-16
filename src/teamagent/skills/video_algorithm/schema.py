@@ -406,6 +406,11 @@ class CrossAnalysis(BaseModel):
     summary: str = ""
 
 
+def _default_outputs() -> list[Literal["report", "slides", "pptx"]]:
+    """outputs の既定（report のみ）。lambda だと list[str] 推論で mypy strict が弾くため関数化。"""
+    return ["report"]
+
+
 class VideoAlgorithmInput(BaseModel):
     """入力: 検索KW1つ。"""
 
@@ -414,7 +419,7 @@ class VideoAlgorithmInput(BaseModel):
     client_name: str | None = None  # brand_relation 判定用（任意）
     # §Q-HTML→PPTX: 追加出力。既定は report のみ＝既存挙動/契約を壊さない。
     # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（提案資料に組み込む）。
-    outputs: list[Literal["report", "slides", "pptx"]] = Field(default_factory=lambda: ["report"])
+    outputs: list[Literal["report", "slides", "pptx"]] = Field(default_factory=_default_outputs)
 
 
 class VideoAlgorithmOutput(BaseModel):

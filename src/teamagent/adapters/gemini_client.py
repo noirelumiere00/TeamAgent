@@ -23,7 +23,7 @@ from typing import Any
 
 import structlog
 
-from teamagent.runtime.retry import RetryPolicy, call_with_retry
+from teamagent.adapters.retry import RetryPolicy, call_with_retry
 
 logger = structlog.get_logger(__name__)
 

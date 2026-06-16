@@ -216,3 +216,29 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 addopts = "-ra --strict-markers --strict-config"
+
+# ============================================================
+# import-linter: 3層分離（CLAUDE.md 6-bis）を CI で強制（spec matrix 実行基盤#27）
+#   一方向: runtime → skills → adapters。下位層が上位層を import しない。
+#   2026-06-16 に runtime/retry.py を adapters/retry.py へ移動し adapters→runtime 逆流を解消。
+# ============================================================
+[tool.importlinter]
+root_package = "teamagent"
+
+[[tool.importlinter.contracts]]
+name = "adapters は最下層（runtime/skills/orchestrator/mcp_gateway/ingest を import しない）"
+type = "forbidden"
+source_modules = ["teamagent.adapters"]
+forbidden_modules = [
+    "teamagent.runtime",
+    "teamagent.skills",
+    "teamagent.orchestrator",
+    "teamagent.mcp_gateway",
+    "teamagent.ingest",
+]
+
+[[tool.importlinter.contracts]]
+name = "skills は runtime を import しない（runtime → skills の一方向）"
+type = "forbidden"
+source_modules = ["teamagent.skills"]
+forbidden_modules = ["teamagent.runtime"]

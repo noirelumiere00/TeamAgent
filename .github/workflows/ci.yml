@@ -42,7 +42,7 @@ jobs:
             claude-agent-sdk==0.2.87 \
             pyyaml pypdf python-pptx python-docx openpyxl \
             google-auth google-api-python-client \
-            pytest pytest-asyncio mypy ruff bandit
+            pytest pytest-asyncio pytest-cov mypy ruff bandit import-linter
 
       - name: Ruff (lint)
         run: ruff check src/ tests/ scripts/
@@ -50,11 +50,14 @@ jobs:
       - name: Ruff (format check)
         run: ruff format --check src/ tests/ scripts/
 
+      - name: Import layering (import-linter)
+        run: lint-imports
+
       - name: Mypy (strict)
         run: mypy src/teamagent
 
       - name: Pytest
-        run: pytest tests/ -q
+        run: pytest tests/ -q --cov=teamagent --cov-report=term-missing
 
       - name: Bandit (security scan)
         run: bandit -r src/teamagent -ll  # low+ severity 以上

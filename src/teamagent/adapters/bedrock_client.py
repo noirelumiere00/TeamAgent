@@ -25,7 +25,7 @@ import structlog
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
-from teamagent.runtime.retry import RetryPolicy, call_with_retry
+from teamagent.adapters.retry import RetryPolicy, call_with_retry
 
 logger = structlog.get_logger(__name__)
 

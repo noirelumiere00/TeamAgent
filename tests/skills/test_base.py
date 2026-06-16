@@ -40,6 +40,36 @@ def test_register_and_get_skill() -> None:
     assert out.upper == "HELLO"
 
 
+def test_base_skill_meta_defaults_and_override() -> None:
+    """任意メタ（version/owner/required_scope/audit_tag）の既定値と上書き（実行基盤#17,#23）。"""
+    SkillRegistry._clear()
+
+    class DefaultSkill(BaseSkill[DummyIn, DummyOut]):
+        name: ClassVar[str] = "meta_default"
+        description: ClassVar[str] = "d"
+        input_schema: ClassVar[type[BaseModel]] = DummyIn
+        output_schema: ClassVar[type[BaseModel]] = DummyOut
+
+        def run(self, input: DummyIn, ctx: SkillContext) -> DummyOut:
+            return DummyOut(upper=input.text.upper())
+
+    # 既定（後方互換・既存スキルは未指定でこの値）
+    assert DefaultSkill.version == "1.0"
+    assert DefaultSkill.owner == ""
+    assert DefaultSkill.required_scope == ()
+    assert DefaultSkill.audit_tag == ""
+
+    class ScopedSkill(DefaultSkill):
+        name: ClassVar[str] = "meta_scoped"
+        version: ClassVar[str] = "2.1"
+        owner: ClassVar[str] = "sales-platform"
+        required_scope: ClassVar[tuple[str, ...]] = ("knowledge.read",)
+        audit_tag: ClassVar[str] = "rag"
+
+    assert ScopedSkill.required_scope == ("knowledge.read",)
+    assert ScopedSkill.owner == "sales-platform"
+
+
 def test_register_duplicate_name_raises() -> None:
     """同じ name を 2 回登録すると ValueError。"""
     SkillRegistry._clear()

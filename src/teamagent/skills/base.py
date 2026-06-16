@@ -69,12 +69,26 @@ class BaseSkill(ABC, Generic[TInput, TOutput]):
     - description: 何をする Skill か（Registry の自己説明用）
     - input_schema: Pydantic v2 BaseModel のサブクラス
     - output_schema: Pydantic v2 BaseModel のサブクラス
+
+    任意メタ（既定安全・後方互換／spec matrix 実行基盤#17・#23）:
+    - version: SemVer 風の版（既定 "1.0"）。register() がログに出す。
+    - owner: 担当（チーム/個人。空可）。
+    - required_scope: このスキルが要求する権限スコープのタプル。空＝制約なし。
+      MCP 境界（mcp_gateway.server.dispatch_tool）が将来この値で照合する足場
+      （現状は空既定で no-op＝従来挙動）。openclaw.config.json5 の toolFilter
+      手書きとの二重定義をここへ寄せていく出発点。
+    - audit_tag: 監査ログ用の分類タグ（空可）。
     """
 
     name: ClassVar[str]
     description: ClassVar[str]
     input_schema: ClassVar[type[BaseModel]]
     output_schema: ClassVar[type[BaseModel]]
+    # 任意メタ（未指定でも動く＝既存スキル非改変で安全）
+    version: ClassVar[str] = "1.0"
+    owner: ClassVar[str] = ""
+    required_scope: ClassVar[tuple[str, ...]] = ()
+    audit_tag: ClassVar[str] = ""
 
     @abstractmethod
     def run(self, input: TInput, ctx: SkillContext) -> TOutput:
@@ -100,6 +114,13 @@ class SkillRegistry:
         if skill_cls.name in cls._skills:
             raise ValueError(f"Skill 名 {skill_cls.name!r} が重複しています")
         cls._skills[skill_cls.name] = skill_cls
+        logger.debug(
+            "skill_registered",
+            skill=skill_cls.name,
+            version=getattr(skill_cls, "version", "1.0"),
+            owner=getattr(skill_cls, "owner", ""),
+            required_scope=list(getattr(skill_cls, "required_scope", ())),
+        )
         return skill_cls
 
     @classmethod
