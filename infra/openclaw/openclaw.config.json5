@@ -99,7 +99,11 @@
         url: "http://teamagent-mcp.teamagent.internal:8787/mcp",
         transport: "streamable-http",
         headers: { Authorization: "Bearer ${TEAMAGENT_MCP_BEARER}" }, // 値は注入
-        timeout: 60,
+        // video_algorithm（同期・5〜10本の TikTok 動画 DL+ffmpeg+Gemini 分析）が
+        // 60s では完走できず report_url/slides_url が返らない問題への対応で 300s に延長。
+        // 全ツール共通の上限（天井）＝通常の高速ツールには無影響。本数は MCP の
+        // VIDEO_ALGO_MAX_VIDEOS と整合させること（10本の重い回は 300s に迫り得る＝将来は非同期化）。
+        timeout: 300,
         // §G: 会社共有の「ナレッジ系・読取」を露出。§L Phase1 で取得系(tiktok/動画)を追加。
         // 本人OAuth依存(per-user)の mail_*/workspace_search は除外＝現行Botに残す（§G）。
         // ※ tiktok_search/video_analysis/video_algorithm は MCPツール（factory: USE_VIDEO_TOOLS/

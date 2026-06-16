@@ -92,6 +92,12 @@ variable "enable_scrape_tools" {
   default     = false
 }
 
+variable "video_algo_max_videos" {
+  description = "video_algorithm の既定分析本数（5〜10）。同期処理なので OpenClaw timeout(300s)と整合させること。値変更は taskdef env 差し替えのみで反映可。"
+  type        = string
+  default     = "5"
+}
+
 # §M改(VSEO有効化): Gemini 認証は本番EC2と同方式の Vertex SA を採用（API キー方式は廃止）。
 variable "vertex_sa_secret_name" {
   description = "Vertex AI SA JSON の secret 名（本番EC2 load_secrets.sh と同一ソース・enable_scrape_tools=true 時に VERTEX_SA_JSON として注入）"

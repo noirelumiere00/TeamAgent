@@ -10,6 +10,7 @@ Gemini 出力は欠落しうるので、全フィールドに default を与え�
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -407,18 +408,37 @@ class CrossAnalysis(BaseModel):
 
 
 def _default_outputs() -> list[Literal["report", "slides", "pptx"]]:
-    """outputs の既定（report のみ）。lambda だと list[str] 推論で mypy strict が弾くため関数化。"""
-    return ["report"]
+    """outputs の既定。report（分析レポートHTML）＋ slides（編集可スライドHTML・16:9）。
+
+    HTML-first 方針（URL配布→ブラウザでノーコード編集）に合わせ、編集可スライドを既定で発行する。
+    slides は HTML 生成のみ＝chromium 不要・数秒。pptx は重い（playwright/chromium）ので
+    明示要求時のみ＝既定には入れない。lambda だと list[str] 推論で mypy strict が弾くため関数化。
+    """
+    return ["report", "slides"]
+
+
+def _default_max_videos() -> int:
+    """max_videos の既定を VIDEO_ALGO_MAX_VIDEOS（env）で可変化（既定 5・clamp 1〜10）。
+
+    OpenClaw が明示指定すればそれを優先、未指定なら本 env 既定（運用側で 5〜10 を調整可）。
+    同期処理なので本数は OpenClaw の timeout（openclaw.config.json5）と整合させること。
+    """
+    raw = os.environ.get("VIDEO_ALGO_MAX_VIDEOS", "5")
+    try:
+        return max(1, min(10, int(raw)))
+    except ValueError:
+        return 5
 
 
 class VideoAlgorithmInput(BaseModel):
     """入力: 検索KW1つ。"""
 
     query: str
-    max_videos: int = Field(default=5, ge=1, le=10)
+    # 既定は env VIDEO_ALGO_MAX_VIDEOS（5・clamp 1〜10）。入力で明示指定も可（1〜10）。
+    max_videos: int = Field(default_factory=_default_max_videos, ge=1, le=10)
     client_name: str | None = None  # brand_relation 判定用（任意）
-    # §Q-HTML→PPTX: 追加出力。既定は report のみ＝既存挙動/契約を壊さない。
-    # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（提案資料に組み込む）。
+    # §Q-HTML→PPTX: 追加出力。既定 = report + slides（編集可HTML）。
+    # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（明示要求時のみ・重い）。
     outputs: list[Literal["report", "slides", "pptx"]] = Field(default_factory=_default_outputs)
 
 

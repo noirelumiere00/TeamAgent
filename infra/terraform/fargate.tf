@@ -334,6 +334,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
       { name = "USE_VIDEO_TOOLS", value = "1" },
       { name = "USE_TIKTOK_TOOLS", value = "1" },
+      # video_algorithm の既定分析本数（5〜10）。同期処理なので OpenClaw timeout(300s)と整合。
+      # 値変更は taskdef env 差し替えのみで反映可（再ビルド不要）。
+      { name = "VIDEO_ALGO_MAX_VIDEOS", value = var.video_algo_max_videos },
       # §M改: Gemini は Vertex（本番EC2 .env.production と同値・SA JSON は entrypoint がファイル化）。
       { name = "GEMINI_USE_VERTEX", value = "true" },
       { name = "GEMINI_VERTEX_PROJECT", value = var.gemini_vertex_project },

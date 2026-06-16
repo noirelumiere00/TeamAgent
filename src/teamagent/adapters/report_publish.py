@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -122,6 +123,46 @@ def publish_pdf_file(path: str, *, request_id: str = "vseo", query: str = "") ->
         content_type="application/pdf",
         ext=".pdf",
         prefix=_PPTX_PREFIX,
+        request_id=request_id,
+        query=query,
+    )
+
+
+# ── HTML-first 統合（docs/v3.2/html_first_proposal_strategy.md Phase I）──────────────
+# 資料種別 → (content_type, ext, prefix) を 1 か所に集約。どのスキルも
+# publish_artifact(path, kind=...) で同一経路に乗せられる（個別の publish_* は後方互換で据置）。
+@dataclass(frozen=True)
+class _ArtifactSpec:
+    content_type: str
+    ext: str
+    prefix: str
+
+
+ARTIFACT_KINDS: dict[str, _ArtifactSpec] = {
+    "report_html": _ArtifactSpec("text/html; charset=utf-8", ".html", _DEFAULT_PREFIX),
+    "slides_html": _ArtifactSpec("text/html; charset=utf-8", ".html", _DEFAULT_PREFIX),
+    "proposal_html": _ArtifactSpec("text/html; charset=utf-8", ".html", _PPTX_PREFIX),
+    "pptx": _ArtifactSpec(_PPTX_CT, ".pptx", _PPTX_PREFIX),
+    "pdf": _ArtifactSpec("application/pdf", ".pdf", _PPTX_PREFIX),
+}
+
+
+def publish_artifact(
+    path: str, kind: str, *, request_id: str = "vseo", query: str = ""
+) -> str | None:
+    """資料を kind 別の content_type/ext/prefix で非公開S3へ発行し署名付きURL（7日）を返す。
+
+    kind ∈ ARTIFACT_KINDS（report_html/slides_html/proposal_html/pptx/pdf）。
+    未知の kind は ValueError。HTML-first 統合の単一入口（既存 publish_* ラッパの上位の汎用版）。
+    """
+    spec = ARTIFACT_KINDS.get(kind)
+    if spec is None:
+        raise ValueError(f"unknown artifact kind: {kind!r} (allowed: {sorted(ARTIFACT_KINDS)})")
+    return publish_file(
+        path,
+        content_type=spec.content_type,
+        ext=spec.ext,
+        prefix=spec.prefix,
         request_id=request_id,
         query=query,
     )
