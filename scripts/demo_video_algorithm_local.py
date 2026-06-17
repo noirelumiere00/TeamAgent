@@ -38,7 +38,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="VideoAlgorithm ローカル実走デモ")
     parser.add_argument("query", nargs="?", default="集中", help="TikTok 検索キーワード")
     parser.add_argument(
-        "--max-videos", type=int, default=None, help="分析本数（1〜10・既定は env）"
+        "--max-videos", type=int, default=None, help="深掘り分析本数（1〜10・既定は env）"
+    )
+    parser.add_argument(
+        "--board-size", type=int, default=None, help="取得（ボード）本数（5〜30・既定は env=30）"
     )
     args = parser.parse_args()
 
@@ -51,6 +54,8 @@ def main() -> int:
     kwargs: dict[str, object] = {"query": args.query, "outputs": ["report", "slides"]}
     if args.max_videos is not None:
         kwargs["max_videos"] = args.max_videos
+    if args.board_size is not None:
+        kwargs["board_size"] = args.board_size
     inp = VideoAlgorithmInput(**kwargs)  # type: ignore[arg-type]
     ctx = SkillContext(request_id=f"local-vseo-{uuid.uuid4().hex[:8]}")
 

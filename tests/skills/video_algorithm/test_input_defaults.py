@@ -1,7 +1,8 @@
 """VideoAlgorithmInput の既定値（HTML-first 化）の検証。
 
 - outputs 既定 = ["report", "slides"]（編集可スライドHTMLを既定で発行・pptx は明示要求のみ）。
-- max_videos 既定 = env VIDEO_ALGO_MAX_VIDEOS（既定 5・clamp 1〜10）。
+- max_videos 既定 = env VIDEO_ALGO_MAX_VIDEOS（既定 5・clamp 1〜10）＝深掘り分析する本数。
+- board_size 既定 = env VIDEO_ALGO_BOARD_SIZE（既定 30・clamp 5〜30）＝取得（スクレイプ）本数。
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import pytest
 
 from teamagent.skills.video_algorithm.schema import (
     VideoAlgorithmInput,
+    _default_board_size,
     _default_max_videos,
     _default_outputs,
 )
@@ -55,3 +57,32 @@ def test_explicit_max_videos_overrides_env(monkeypatch: pytest.MonkeyPatch) -> N
     assert VideoAlgorithmInput(query="x", max_videos=10).max_videos == 10
     with pytest.raises(ValueError):  # le=10 を超える明示指定は弾く
         VideoAlgorithmInput(query="x", max_videos=11)
+
+
+def test_default_board_size_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 既定（env 未設定）= 30 本取得
+    monkeypatch.delenv("VIDEO_ALGO_BOARD_SIZE", raising=False)
+    assert _default_board_size() == 30
+    assert VideoAlgorithmInput(query="x").board_size == 30
+    # env で運用調整可
+    monkeypatch.setenv("VIDEO_ALGO_BOARD_SIZE", "20")
+    assert _default_board_size() == 20
+    assert VideoAlgorithmInput(query="x").board_size == 20
+
+
+def test_default_board_size_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VIDEO_ALGO_BOARD_SIZE", "50")  # 上限 30 に clamp（スクレイパ天井）
+    assert _default_board_size() == 30
+    monkeypatch.setenv("VIDEO_ALGO_BOARD_SIZE", "1")  # 下限 5 に clamp
+    assert _default_board_size() == 5
+    monkeypatch.setenv("VIDEO_ALGO_BOARD_SIZE", "xyz")  # 不正値は既定 30
+    assert _default_board_size() == 30
+
+
+def test_board_size_independent_of_max_videos() -> None:
+    # 取得（board_size）と 深掘り分析（max_videos）は独立。30取得・上位5深掘りが既定の二段構成。
+    inp = VideoAlgorithmInput(query="x", max_videos=5, board_size=30)
+    assert inp.max_videos == 5
+    assert inp.board_size == 30
+    with pytest.raises(ValueError):  # le=30 を超える取得は弾く
+        VideoAlgorithmInput(query="x", board_size=40)

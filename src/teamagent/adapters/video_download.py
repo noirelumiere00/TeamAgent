@@ -39,6 +39,7 @@ def download_video(
     *,
     max_filesize_mb: int = 20,
     request_id: str | None = None,
+    _skip_url_guard: bool = False,
 ) -> tuple[bytes, str]:
     """動画 URL を一時ダウンロードして (bytes, mime_type) を返す。
 
@@ -46,18 +47,25 @@ def download_video(
     (TikTok/IG のショート動画は通常 2〜10MB)。一時ディレクトリは関数終了時に
     自動削除され、動画はディスクに残らない。
 
+    `_skip_url_guard=True` は download_video_chained が外側で SSRF 検証済みのときに使う
+    （二重 DNS 解決の回避）。直接呼ぶ場合は False のまま＝必ず SSRF 関門を通す。
+
+    会社プロキシ下では `HTTPS_PROXY` を yt-dlp に渡し、CA バンドルは `SSL_CERT_FILE`/
+    `REQUESTS_CA_BUNDLE` を yt-dlp の内部 urllib が自動採用する（追加コードは proxy のみ）。
+
     Raises:
         VideoDownloadError: URL 非許可(SSRF) / 取得不可 / 上限超過 / フォーマット無し等。
     """
     # §N: SSRF 必須関門。全 DL 経路（video_analysis/video_algorithm）が必ず通る backstop。
-    from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
+    if not _skip_url_guard:
+        from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
 
-    try:
-        url = validate_scrape_url(url, request_id=request_id)
-    except UrlGuardError as e:
-        # 生 URL はログに残さない（message に URL は含まれない）
-        logger.warning("video_download_url_blocked", request_id=request_id, reason=str(e))
-        raise VideoDownloadError(f"VIDEO_URL_BLOCKED: {e}") from e
+        try:
+            url = validate_scrape_url(url, request_id=request_id)
+        except UrlGuardError as e:
+            # 生 URL はログに残さない（message に URL は含まれない）
+            logger.warning("video_download_url_blocked", request_id=request_id, reason=str(e))
+            raise VideoDownloadError(f"VIDEO_URL_BLOCKED: {e}") from e
 
     import yt_dlp  # 遅延 import (heavy)
 
@@ -75,6 +83,10 @@ def download_video(
             "retries": 3,  # 一過性ネットワーク揺れの再試行（2→3）
             "fragment_retries": 3,  # HLS/DASH 断片の transient 救済
         }
+        # 会社プロキシ下のみ proxy を明示注入（本番EC2=未設定→キー無し＝通常DL）。
+        _proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        if _proxy:
+            ydl_opts["proxy"] = _proxy
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
@@ -105,3 +117,67 @@ def download_video(
         mime=mime,
     )
     return data, mime
+
+
+# 3層DLチェーンの取得経路名（VIDEO_DL_ORDER で順序を切替）。cover-only は skill 層が担う最終層。
+_VALID_DL_STEPS = ("browser", "ytdlp")
+
+
+def _dl_order() -> list[str]:
+    """VIDEO_DL_ORDER（カンマ区切り）から有効な取得順を返す。既定 browser→ytdlp。
+
+    ローカル(会社プロキシ下)=ブラウザ内DL優先 / 本番EC2(プロキシ外)=ytdlp,browser を推奨。
+    未知の値は無視し、空になったら既定にフォールバック（必ず1経路は試す）。
+    """
+    raw = os.environ.get("VIDEO_DL_ORDER", "browser,ytdlp")
+    order = [s.strip() for s in raw.split(",") if s.strip() in _VALID_DL_STEPS]
+    return order or ["browser", "ytdlp"]
+
+
+def download_video_chained(
+    url: str,
+    *,
+    max_filesize_mb: int = 20,
+    request_id: str | None = None,
+) -> tuple[bytes, str]:
+    """ブラウザ内DL → yt-dlp の順（VIDEO_DL_ORDER で切替）で動画取得を試みる。
+
+    どの層も best-effort。SSRF はこの関数の冒頭で **1回だけ** 完全検証し、内側の各経路は
+    `_skip_url_guard=True` で二重 DNS 解決を避ける。全経路が落ちたら ALL_DOWNLOAD_FAILED を
+    送出し、skill 層が cover-only 軽量分析へ縮退する（深掘りは全滅しても board は無傷）。
+
+    Raises:
+        VideoDownloadError: URL 非許可(SSRF) / 全取得経路が失敗。
+    """
+    from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
+
+    try:
+        url = validate_scrape_url(url, request_id=request_id)
+    except UrlGuardError as e:
+        logger.warning("video_download_url_blocked", request_id=request_id, reason=str(e))
+        raise VideoDownloadError(f"VIDEO_URL_BLOCKED: {e}") from e
+
+    last_error: str | None = None
+    for step in _dl_order():
+        try:
+            if step == "browser":
+                from teamagent.adapters.tiktok_scraper import download_tiktok_video
+
+                return download_tiktok_video(url, request_id=request_id, _skip_url_guard=True)
+            # step == "ytdlp"
+            return download_video(
+                url,
+                max_filesize_mb=max_filesize_mb,
+                request_id=request_id,
+                _skip_url_guard=True,
+            )
+        except Exception as e:  # 各層失敗は次経路へ（生URLはログに残さない）
+            last_error = type(e).__name__
+            logger.info(
+                "video_download_chain_step_failed",
+                request_id=request_id,
+                step=step,
+                error=last_error,
+            )
+
+    raise VideoDownloadError(f"ALL_DOWNLOAD_FAILED: 全ての取得経路が失敗しました ({last_error})")
