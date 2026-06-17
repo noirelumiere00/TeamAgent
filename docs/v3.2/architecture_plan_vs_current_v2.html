@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>元仕様書 × 現状実装 比較（2026-06-15 最新版）</title>
+<style>
+:root{--ink:#1d1d1b;--muted:#5f5e5a;--line:#e3e1da;--bg:#faf9f6;--card:#fff;--teal:#0f6e56;--amber:#854f0b;--red:#a32d2d}
+*{box-sizing:border-box}
+body{font-family:-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;color:var(--ink);background:var(--bg);margin:0;line-height:1.7;font-size:15px}
+.wrap{max-width:1040px;margin:0 auto;padding:32px 28px 64px}
+h1{font-size:24px;font-weight:600;margin:0 0 4px}
+h2{font-size:18px;font-weight:600;margin:34px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--line)}
+.sub{color:var(--muted);font-size:13px;margin:0 0 2px}
+.banner{background:#fff8e6;border:1px solid #f0d98a;border-radius:8px;padding:10px 14px;font-size:13px;color:#6b5410;margin:14px 0}
+.meta{font-size:12.5px;color:var(--muted);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:8px 0 6px}
+.verdict{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--teal);border-radius:0 8px 8px 0;padding:14px 18px;font-size:14px}
+.bar{display:flex;height:30px;border-radius:7px;overflow:hidden;border:1px solid var(--line);margin:14px 0 6px}
+.bar div{display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600}
+.legend{font-size:12px;color:var(--muted);margin-bottom:4px}
+table{width:100%;border-collapse:collapse;font-size:13px;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th,td{text-align:left;padding:9px 11px;vertical-align:top;border-bottom:1px solid var(--line)}
+th{background:#f3f1ea;font-weight:600;color:var(--muted);font-size:12px}
+td.area{font-weight:600;width:15%}
+td.hl{color:#444;font-size:12.5px}
+.chip{display:inline-block;padding:2px 9px;border-radius:11px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.box{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 18px}
+.box.add{border-top:3px solid var(--teal)} .box.drop{border-top:3px solid var(--amber)}
+.box h3{font-size:14px;font-weight:600;margin:12px 0 6px}
+.box ul{margin:0 0 12px;padding-left:18px} .box li{margin:5px 0;font-size:12.5px}
+.foot{margin-top:30px;font-size:12px;color:var(--muted);border-top:1px solid var(--line);padding-top:12px}
+code{background:#f0eee7;padding:1px 5px;border-radius:4px;font-size:12px}
+@media print{body{background:#fff}.wrap{max-width:none}}
+@media(max-width:720px){.two{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+
+<h1>元仕様書 × 現状実装 比較</h1>
+<p class="sub">TeamAgent / AiLa ｜ 2026-06-15 最新版 ｜ 情シス・経営報告用</p>
+<div class="banner"><b>本書は <code>architecture_plan_vs_current.html</code>（2026-06-05）を置き換える最新版です。</b> 旧版はOpenClaw移行go-live（6/11-12）・メール本番化・VSEO→PPTX・セキュリティ監査・ingest自動化の<b>すべて以前</b>のため、現状を反映していません。</div>
+
+<div class="meta">
+<b>突合元（元々予定されていた仕様書）</b>: docs/v3.0 要件定義 ／ v3.1 MVA仕様 ／ v3.2 実装計画＋master_todo ／ docs/next 次期要件 ＋ 6/5 旧比較doc<br>
+<b>突合方法</b>: 各仕様書から計画スコープを構造化抽出 → 領域別に repo / git / 移行計画書で実装到達点を検証（自律エージェント・ワークフロー20体／391ツール実行）<br>
+<b>突合規模</b>: 317 要件行 ／ 12 領域
+</div>
+
+<h2>エグゼクティブ結論</h2>
+<div class="verdict">元仕様書(計画v2.2「Lambda×4+Fargate×1のサーバーレス疎結合・5機能」と後続のv3.0要件/MVA仕様/next要件)に対し、313の要件行を突合した結果、「方式変更」を含めれば実装は計画意図を概ね達成しつつあるが、計画した『形』そのままで残っている領域は少ない。最大の構造転換は実行基盤で、Lambda/SQS/API Gateway/RDS Proxyのサーバーレス疎結合は全面不採用となり、OpenClaw(Fargate)外殻+MCP金庫(streamable-http)+EC2 worker構成へピボットし、2026-06-12に本番E2E実返信(@AiLa→3.3秒/スレッド返信/isError=false)でgo-liveまで到達した。コア価値(横断RAG検索)はCohere Rerank+Contextual Retrieval+RLS+per-user OAuthで計画を上回る強化(top-1 20%→64%実証)で本番稼働、セキュリティ(IAM3分離/KMS/RLS強制/gitleaks-bandit CIゲート/敵対ハーネスでインジェクション拒否実証)も計画前倒しで厚い。一方、next要件のリファクタ計画(CapabilityManifest単一登録点・CapabilityId StrEnum・import-linter・intent.py 366行解体・7ドメイン再編・L2自律オーケストレーション本配線)はOpenClaw移行優先でほぼ全面未着手であり、週次/月次サマリー・3層メモリ(Redis短期/project中期/user長期)・提案書5フェーズ自律生成・ゲート②工数実証(20h→8-12h)・Personal AI Coachは未実装のまま残る。判定内訳は一致/前倒し68・強化18(合わせて達成27%)、方式変更47・部分101(進行中47%)、未実装76(24%)、削除/不要化3で、「半分が達成または進行中、4分の1が計画通り完了、4分の1が未着手」という到達度。誇張なく言えば、MVAの心臓部(横断検索E2E)は本番で動いているが、要件書全体の整理リファクタと自律オーケストレーション/週次サマリー/提案書自動生成といった『野心的な拡張部』は設計段階に留まる。</div>
+
+<h2>到達度サマリー（317要件）</h2>
+<div class="bar">
+<div style="width:27.4%;background:#9FE1CB;color:#04342C">達成 87（27.4%）</div>
+<div style="width:47.6%;background:#FAC775;color:#412402">進行中 151（47.6%）</div>
+<div style="width:24.0%;background:#F7C1C1;color:#501313">未着手 76（24.0%）</div>
+<div style="width:0.9%;background:#D3D1C7;color:#2C2C2A">3</div>
+</div>
+<p class="legend">達成 = 一致53＋前倒し17＋強化17 ／ 進行中 = 方式変更48＋部分103 ／ 未着手 = 未実装76 ／ 不要化 3</p>
+
+<h2>タイムライン評価（本番リリース目標 = 2026-12-28 / Sprint14）</h2>
+<div class="verdict" style="border-left-color:var(--amber)">元計画では Sprint14=2026-12-28 を本番リリース(営業16名展開)目標としていた。現在地(2026-06-15)は、本来Sprint8-14相当の中核(OpenClaw本番go-live・本番RDS接続E2E・Bedrock経由Sonnet4.6/Haiku4.5二段運用・セキュリティ監査報告書・CIゲート)を約半年前倒しで達成しており、機能E2Eとしては大幅に先行している。ただしこれは『パイロット前段階』であり、計画のSprintマイルストーン(S5末振り返り/S6全社展開承認/S13負荷試験/S14 SLO文書化・Go-No-Go②)はスケジュール未到来かつ未着手。具体的な残ブロッカーは、露出Slackトークン3本のローテーション・2人混線テスト・1週間パイロット(16名実利用)・16名allowlist拡張・p95レイテンシ目標未達(検索20.2s/目標15s・prompt caching未効)・Multi-AZ昇格(P2)・ゲート②工数実証。総括すると『機能の到達は前倒し、本番運用・全社展開・性能チューニング・組織承認は計画線上かやや手前』で、12月本番目標に対しては機能面で余裕がある一方、運用成熟度(SLO/障害訓練/オンコール/負荷試験50並列)は依然Sprint13-14スコープに残る。順当〜やや前倒し。</div>
+
+<h2>領域別マトリクス（12観点）</h2>
+<table>
+<thead><tr><th>領域</th><th>計画</th><th>現状</th><th>判定</th><th>要点 / 残差分</th></tr></thead>
+<tbody><tr>
+<td class="area">実行基盤・アーキテクチャ</td>
+<td>Lambda×4+Fargate×1のサーバーレス疎結合(SQS fan-out/API Gateway/RDS Proxy)、機能別Lambda分割、ゲート①でOpenClaw採否判定</td>
+<td>サーバーレス全面不採用→ECS Fargate×2(OpenClaw外殻+teamagent-mcp境界)+EC2 worker+bastion。Lambdaは器(IAM/S3)のみで関数本体0、SQS/APIGW/RDS Proxyゼロ。in-process RequestGate(concurrency=4)で代替。2026-06-12本番E2E go-live済</td>
+<td><span class="chip" style="background:#FAEEDA;color:#633806">方式変更(13/39が未実装=next要件P0-P5リファクタ未着手)</span></td>
+<td class="hl">最大のピボット。サーバーレス計画は破棄しOpenClaw+MCP金庫へ。本番稼働は達成だが、CapabilityManifest単一登録点・CapabilityId StrEnum・import-linter・intent.py 366行解体・slack_bot.py 2137行god-file解体・7ドメイン再編は全面未着手</td>
+</tr><tr>
+<td class="area">検索・RAG(中核価値)</td>
+<td>pgvector dense+将来Titan v2/Cohere埋め込み、BM25は将来、引用付きサマリー、MVA=16名横断検索</td>
+<td>pgvector dense+クライアントboost+Cohere Rerank(v3.5/Bedrock東京)+RLS+Contextual Retrieval+集約モードで本番E2E稼働。埋め込みはローカルe5(1024dim)固定。top-1 20%→52%→64%をgold set50ケースで実証</td>
+<td><span class="chip" style="background:#E1F5EE;color:#085041">強化・計画超え(ただし埋め込みはTitan→e5へ方式変更)</span></td>
+<td class="hl">プロジェクトの心臓部で計画を最も上回った領域。本番E2E実証済。残課題はp95レイテンシ(L2二重LLMで20.2s・prompt caching cache_read=0で未効)、BM25ハイブリッド/in:from:構文/フィードバックボタン未実装、引用率90%/捏造率0%の定量KPIダッシュボード未確立</td>
+</tr><tr>
+<td class="area">データ取込ingest</td>
+<td>Drive/Gmail/Slack/Sheetsコネクタ、5分以内増分同期、5-10万件48hバルク、再開機能、削除伝播、800tokenチャンク</td>
+<td>Slack/Drive/Sheetsはフル実装し本番205doc投入(Day8で gdrive 586doc/9125chunk実績)。gdrive_client差分API(changes.list)実装済だがpipeline未配線。チャンクは500字/overlap100</td>
+<td><span class="chip" style="background:#E1F5EE;color:#085041">部分・強化混在(10/28が部分)</span></td>
+<td class="hl">Slack/Sheetsコネクタは雛形→本番投入まで到達(強化)。一方、増分同期(5分)・削除伝播(GDPR)・Gmail→pgvector取込・PDF以外(docx/pptx/xlsx)本文抽出・再Embeddingバッチ・保持期間ポリシーは未実装。現本番DB(205doc)にDrive PDFが反映されているかは要再確認</td>
+</tr><tr>
+<td class="area">メール・Workspace(AiLa)</td>
+<td>朝8:30で16名未返信検出+返信案A/B/C下書き、週次受注角度サマリー、本人/他人メール区別、opt-out</td>
+<td>別repo AiLa(~/Documents/AI-IA-UAE)に朝ワークフロー実装し本人1人で実Gmail21件→Bedrock要約→DM配信E2E成功。mail_constraints/workspace_searchは正規経路復活・既定OFF・fail-closed完全実装</td>
+<td><span class="chip" style="background:#FAEEDA;color:#633806">部分・要判断(8/22が部分・本番未展開)</span></td>
+<td class="hl">コアは実装・本人E2E成功だが、A/B/C複数案でなく単案、配信は8:30→9:30、10名AWS展開は組織SCP(公開Lambda禁止)でブロック中、OpenClaw未結線(§Q3)。週次受注角度サマリーは完全未実装(progress=Phase4-e)</td>
+</tr><tr>
+<td class="area">動画分析・VSEO</td>
+<td>Gemini動画理解で競合PR動画構造分析(構成/フック/テロップ/尺/CTA)、4プラットフォーム、横断勝ち筋、納品FB審査</td>
+<td>video_analysis/video_algorithm/video_approvalが本番稼働。2026-06-12にTikTok検索→Puppeteer10本→Gemini分析(Vertex $0.0008/18s)→Slack回答をE2E実証。VSEO→提案PPTX(slides.py+pptx_export.py)まで前倒し</td>
+<td><span class="chip" style="background:#E1F5EE;color:#085041">強化・計画超え(一致4+強化4が中心)</span></td>
+<td class="hl">計画を最も忠実かつ前倒しに達成した機能領域。schemaはscenes[]を超えBrandDetection/hook_type/cta等まで構造化。残は動画分析結果のpgvector永続化(後続Proposal参照)・外部SaaS統合(dpro/Buzzmiru=不要化の可能性)・Bedrock vision fallback未実装</td>
+</tr><tr>
+<td class="area">提案書生成</td>
+<td>5フェーズ対話型生成(要件→構成→本文→図表→校閲)、FMT v2 95項目PPTX、ゲート②工数実証20h→8-12h、週次進捗サマリー</td>
+<td>proposal_draft/proposal_reviewは本番MCP配線・Sonnet4.6で稼働。proposal_deck(95枠/python-pptx)はコード完成も本番orchestrator未配線・toolFilterで明示EXCLUDE=到達不能。5フェーズ統合は設計のみ</td>
+<td><span class="chip" style="background:#FCEBEB;color:#791F1F">部分・未実装が支配的(9未実装/11部分)</span></td>
+<td class="hl">最も計画から遅れた領域の一つ。draft/reviewは動くが、5フェーズ自律生成・research Action・PDF変換・HTML↔PPTX単一真実源2レンダラ・版管理・週次サマリー・ゲート②工数実証(20h→8-12h対照実験)は未着手。proposal_deckは存在するが本番から構造的に切離されている</td>
+</tr><tr>
+<td class="area">セキュリティ・権限分離</td>
+<td>IAM最小権限/KMS/audit_log/PIIフィルタ、Tier0-3ラベルRBAC、ClawHubホワイトリスト、token rotation、薬機法/景表法チェック</td>
+<td>IAM3タスクロール分離(OpenClaw=InvokeModelのみ+明示Deny)、KMS CMK、RLS FORCE強制、per-user OAuth(KMS EncryptionContext束縛)、gitleaks+bandit CIゲート、敵対ハーネスでインジェクション拒否/身元詐称無効化を実DB実証、監査報告書</td>
+<td><span class="chip" style="background:#E1F5EE;color:#085041">強化・前倒し(11部分/7未実装も残)</span></td>
+<td class="hl">計画を大きく上回り前倒しで厚い。死守ライン(RLS/per-user OAuth/fail-closed/anti-spoof STRICT)は実装の善意に依存しない構造強制で実証済。ただしTier0-3ラベルRBAC・薬機法/景表法/ステマチェック・KOL契約期限管理・生成文出口PIIマスク・Slackトークン3本rotation・Macie/Snyk常設は未。ClawHubホワイトリストは不使用方針で不要化</td>
+</tr><tr>
+<td class="area">スケジューラ・自動化</td>
+<td>EventBridge常設(朝8時メール/月9時サマリー/5分死活監視)、Slack自動サジェスト(Events APIサブスク)、週次自動投稿</td>
+<td>EventBridgeはterraformに皆無(0件)。自動サジェスト・週次自動投稿・summarize_progressは全て未実装。OpenClaw heartbeatは配線済だがP1で意図的に無効(0m)。ingestはsystemd timer(週次)へ方式変更も未コミット・本番未実走</td>
+<td><span class="chip" style="background:#FCEBEB;color:#791F1F">未実装が支配的(5未実装/9)</span></td>
+<td class="hl">最も着手の少ない領域。プロアクティブ起動(朝ブリーフ/deal_radar/morning_brief)はHEARTBEAT.mdにテンプレ化済だがP2/WS-D待ち。死活監視はコンテナhealthCheck(30s)で部分代替のみ。スケジューラ基盤全般が設計段階</td>
+</tr><tr>
+<td class="area">インフラ・IaC・CI</td>
+<td>AWS CDK(TypeScript)、RDS r7g.large Multi-AZ、GitHub Actions、Secrets Manager、3環境分離、Terraform一括apply</td>
+<td>IaC=Terraform(CDKでなく・19 .tf/S3 backend/targeted apply)で全面構築・本番稼働。CI=GitHub Actions(ruff/mypy strict/pytest/bandit/gitleaks・3.11&amp;3.13マトリクス)。RDSはt4g.micro/単一AZ(dev規模)で本番運用</td>
+<td><span class="chip" style="background:#E1F5EE;color:#085041">部分・一致混在(IaCツールは方式変更)</span></td>
+<td class="hl">CIは計画完全準拠+α。IaCはCDK→Terraformへ言語変更だが意図達成。残はMulti-AZ昇格(P2・RTO/RPO数値未達)・staging環境未構築・カバレッジ80%CIゲート未配線・terraform冪等性(2回apply差分ゼロ)未実証・Lambda(sync)関数本体未デプロイ</td>
+</tr><tr>
+<td class="area">監視・運用・コスト</td>
+<td>CloudWatchのみ、p95≤3s、SLO文書化、48hモニタ/DR(RTO4h)/障害訓練、AWS Budgets$50+$267、月次¥95-105K</td>
+<td>CloudWatch+CloudTrail+Sentry(本番動作確認)+FastAPI管理ダッシュボード+CloudWatch Fargate dashboard(配備済)と計画より多層。usage_eventsでcost/latency/token記録。コスト$0.0125/検索実測</td>
+<td><span class="chip" style="background:#FAEEDA;color:#633806">部分・要判断が支配的(18部分/35)</span></td>
+<td class="hl">監視基盤は計画超えだが、SLO/SLA正式文書・DR計画(RTO/RPO)・障害訓練・50並列負荷試験・AWS Chatbot Slack通知・S3 Glacier 1年アーカイブ・取込監視ダッシュボードは未。最大の性能課題=p95 20.2s(目標3s/15s超過・prompt caching未効)。コスト目標¥95-105KとBudgets実装($50/$267≒¥47K)は数値不整合</td>
+</tr><tr>
+<td class="area">UI・UX</td>
+<td>@メンション起動(誤検知ゼロ/応答3秒)、Slash Command、App Homeタブ、WYSIWYGエディタ(10版版管理)、Workflow Builder+Block Kit Modal</td>
+<td>@AiLaメンション→スレッド返信+👀受付リアクションを本番実証(3.3秒)。VSEOスライドはcontenteditable編集可。Slash/App Home/Modal/Workflow Builderは未実装。検索応答は引用サマリー+Drive/Slackリンク(c両方表示)</td>
+<td><span class="chip" style="background:#FAEEDA;color:#633806">方式変更・未実装混在</span></td>
+<td class="hl">起動UXは前倒し達成。だがApp Homeタブ・進捗バー・再試行ボタン・Slash Command・WYSIWYG提案書エディタ・10版版管理・Block Kit Modal入力は未着手。2名ベータ手続き/feedback_sprint2.mdは作られず本番E2Eで代替</td>
+</tr><tr>
+<td class="area">LLM・オーケストレーション</td>
+<td>3-way LLMルーター(Sonnet)、Agent SDK Orchestratorで4サブエージェント展開、L1規約ルータ(manifest駆動)、L2自律オーケストレーション本配線</td>
+<td>本番はOpenClaw外殻Haiku4.5 agent loopが意図ルーティング。Agent SDK(sdk_runner)はコード完成・6-bis合格・85MB deck生成も本番未配線(scriptのみ)。intent.py 366行・router.py rule-base主体が残存</td>
+<td><span class="chip" style="background:#FAEEDA;color:#633806">方式変更・部分が中心(7未実装)</span></td>
+<td class="hl">3-way Sonnetルーター案は破棄されOpenClaw LLM loopへ。L2 SDKは存在するがrun_agent MCP tool未定義・USE_AGENT_ORCHESTRATORフラグ無しで本番未結線。マルチステップ横断(VSEO→提案→PPTX)自律解放はP5計画のまま未達。皮肉にも要件書が不採用想定した『全reqをLLMループに通す純化案』に近い構成が実態として稼働中</td>
+</tr></tbody>
+</table>
+
+<h2>2026-06-05 以降の変化（差分）</h2>
+<div class="verdict" style="border-left-color:#185fa5">6/5の既存比較doc(計画v2.2「Lambdaサーバーレス×5機能」vs 現状「単一プロセスEC2×12スキル」)以降、現状はさらに大きく進んだ。(1)OpenClaw(Fargate)+MCP金庫(streamable-http)への移行が完了し2026-06-12に本番E2E実返信go-live=6/5時点の『単一プロセスEC2常駐Bot』はレガシー化し、本番入口はOpenClaw agent loopに移行(slack_bot.py 2137行は本番未使用経路に)。(2)メール機能が別repo AiLa(aiia-mcp)として本番RUNNINGし、本人1人で実Gmail→Bedrock要約→Slack DM配信E2E成功(ただしOpenClaw未結線・10名展開はSCPブロック)。(3)VSEO動画分析→提案PPTX出力(slides.py+pptx_export.py)が前倒し実装され、TikTok検索→Gemini分析→Slackの全チェーンがエラー0でE2E実証。(4)セキュリティ監査報告書(security_audit_2026-06-12.md)を産出し、IAM3分離/RLS強制/敵対ハーネスでインジェクション拒否・身元詐称無効化を実DB実証、gitleaks+bandit CIゲートも前倒し配線。(5)ingest自動化がEventBridge→systemd timer(週次)へ方式変更でコード化(未コミット・本番未実走)。(6)ゲート①がOpenClaw採用(B案)確定で通過し、6/3旧CLAUDE.mdの『SDK採用・OpenClaw不採用推奨』は逆転。総じて6/5の『大きくピボット』という結論はさらに深化し、機能E2Eは本番稼働まで到達した一方、next要件のP0-P5リファクタは依然未着手のまま据え置かれている。</div>
+
+<h2>計画との乖離</h2>
+<div class="two">
+<div class="box add"><h3>① 計画になかったのに作り込んだ強み</h3><ul><li>OpenClaw(Fargate)外殻+MCP金庫(streamable-http/bearer/internal私設網)という第3アーキへのピボットと2026-06-12本番E2E go-live(3.3秒/isError=false)</li><li>Cohere Rerank v3.5+Contextual Retrieval(Sprint6予定を前倒し)でtop-1 20%→64%をgold set50ケース実証=計画baseline(pgvector dense+Titan将来)を大幅超過</li><li>per-user OAuth(KMS EncryptionContext=user_emailで束縛・他人行複製でも復号不能)+RLS FORCE強制+anti-spoof STRICTの構造的セキュリティ死守ライン、敵対ハーネス(attack_mcp)で身元詐称無効化/インジェクション拒否を実DB+live MCPで実証</li><li>gitleaks+bandit CIゲート・Sentry本番統合・CloudWatch多層ダッシュボード(Fargate版配備済)をSprint計画より前倒し整備</li><li>VSEO動画分析→提案PPTX出力(slides.py HTML+pptx_export.py playwright)の前倒し実装、video_algorithm schemaのBrandDetection/hook_type/cta等の計画超え構造化</li><li>別repo AiLaでの朝メールワークフロー実体化(triage 7カテゴリ分類・Bedrock draft・calendar 5分前通知・トーン分析)と本人E2E成功</li><li>セキュリティ監査報告書(security_audit_2026-06-12.md)とデータフロー図=Sprint6相当成果を前倒し産出</li><li>tiktok_search本番E2E(Puppeteer実ブラウザ10本→Gemini横断分析)をローカル完結で稼働</li></ul></div>
+<div class="box drop"><h3>② 計画から落ちた / 不要化した項目</h3><ul><li>Lambda×4機能別分割/SQS非同期fan-out/API Gateway入口/RDS Proxy接続プール集約(サーバーレス疎結合)=全面不採用でin-process RequestGate/Fargate直受けへ</li><li>AWS CDK(TypeScript)=Terraform(HCL)へ言語変更</li><li>Bedrock Titan v2/Cohere/Voyage埋め込み=ローカルe5(API課金ゼロ)で事実上確定し未実装</li><li>Redis(短期メモリ/頻出クエリキャッシュ/3層メモリのproject中期・user長期)=アーキから消滅(OpenClawセッション/SQLite/会話揮発で代替)</li><li>X(Twitter)連携=完全未着手でTrend発見はTikTokに集約</li><li>ClawHub Skillホワイトリスト/5軸スコア/四半期再レビュー=ClawHub不使用方針で不要化(toolFilter+digest pinで代替)</li><li>Anthropic pptx skill=自前proposal_deck(python-pptx)/VSEO pptx_export(playwright)へ置換</li><li>EventBridge常設(朝/月/5分cron)=systemd timer(ingest限定・週次)へ縮小、自動サジェスト/週次サマリーのスケジューラ駆動は未実装</li><li>next要件P0-P5の整理リファクタ群(CapabilityManifest単一登録点・CapabilityId StrEnum・import-linter CI強制・intent.py 366行削除・slack_bot.py god-file解体・7ドメイン再編・RetrievalPort/GenerationPort・Settings集約)=OpenClaw移行優先で全面未着手</li><li>Personal AI Coach(Phase5機能⑥)・週次/月次進捗サマリー(機能⑤受注角度DM)=要件文書のみで実装ゼロ</li></ul></div>
+</div>
+
+<div class="foot">
+全317要件の根拠コミット付きフル判定表 → <code>docs/v3.2/spec_vs_current_full_matrix_2026-06-15.md</code><br>
+生成: 自律エージェント・ワークフロー（仕様抽出6 → 領域別実装突合12 → 統合1）。判定は repo/git/移行計画書の実コードで裏取り。
+</div>
+
+</div></body></html>

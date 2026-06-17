@@ -60,6 +60,36 @@ class SkippedPlaceholder(BaseModel):
         return v
 
 
+class EvidenceImage(BaseModel):
+    """証拠画像メタ（実物サムネ等）。Composer は生成せず、フィーダ（TikTok 等）が後付けする。
+
+    画像バイトは載せず参照型（URL/パス）のみ保持し JSON 安全に保つ
+    （raw bytes を model_dump_json すると Pydantic v2 が UTF-8 で落ちるため）。
+    renderer（Phase3）が source_url/image_path を解決して add_picture する。
+    placeholder_id は 95 枠の text id と直交（被覆 validator は不参照）。
+    """
+
+    placeholder_id: int = Field(..., description="貼り先 placeholder/枠ヒント（VALID_IDS）")
+    rank: int = Field(..., ge=1, description="同一枠内での優先順位（1 始まり）")
+    keyword: str = Field(..., min_length=1, description="由来キーワード（例: ラーメン）")
+    source_url: str | None = Field(default=None, description="元画像 URL（例: TikTok cover_url）")
+    image_path: str | None = Field(default=None, description="ローカル取得済み画像パス")
+    video_url: str | None = Field(default=None, description="由来動画 URL（任意・トレース用）")
+
+    @field_validator("placeholder_id")
+    @classmethod
+    def _valid_placeholder_id(cls, v: int) -> int:
+        if v not in VALID_IDS:
+            raise ValueError(f"invalid placeholder id: {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _at_least_one_source(self) -> EvidenceImage:
+        if not (self.source_url or self.image_path):
+            raise ValueError("EvidenceImage requires source_url or image_path")
+        return self
+
+
 class ComposerOutput(BaseModel):
     """Composer 出力（FMT v2 / 95 placeholder 完全網羅契約）。renderer の入力。
 
@@ -70,6 +100,8 @@ class ComposerOutput(BaseModel):
     placeholders: dict[int, str] = Field(default_factory=dict)
     citations_per_placeholder: dict[int, list[str]] = Field(default_factory=dict)
     skipped_placeholders: list[SkippedPlaceholder] = Field(default_factory=list)
+    # フィーダ（TikTok 等）が後付けする証拠画像メタ。95 枠 text 被覆とは直交（既定空＝後方互換）。
+    evidence_images: dict[int, list[EvidenceImage]] = Field(default_factory=dict)
 
     @field_validator("placeholders")
     @classmethod
@@ -88,6 +120,23 @@ class ComposerOutput(BaseModel):
         bad = set(v) - VALID_IDS
         if bad:
             raise ValueError(f"citations reference invalid ids: {sorted(bad)}")
+        return v
+
+    @field_validator("evidence_images")
+    @classmethod
+    def _evidence_ids_valid(
+        cls, v: dict[int, list[EvidenceImage]]
+    ) -> dict[int, list[EvidenceImage]]:
+        bad = set(v) - VALID_IDS
+        if bad:
+            raise ValueError(f"evidence_images reference invalid ids: {sorted(bad)}")
+        for pid, imgs in v.items():
+            for img in imgs:
+                if img.placeholder_id != pid:
+                    raise ValueError(
+                        f"evidence_images key {pid} does not match "
+                        f"image.placeholder_id {img.placeholder_id}"
+                    )
         return v
 
     @model_validator(mode="after")
@@ -119,4 +168,4 @@ class ComposerOutput(BaseModel):
         return len(self.placeholders) / len(VALID_IDS)
 
 
-__all__ = ["LENGTH_RULES", "VALID_IDS", "ComposerOutput", "SkippedPlaceholder"]
+__all__ = ["LENGTH_RULES", "VALID_IDS", "ComposerOutput", "EvidenceImage", "SkippedPlaceholder"]

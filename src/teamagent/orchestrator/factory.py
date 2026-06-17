@@ -180,6 +180,21 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # proposal_campaign: KW群 → 並列で TikTok 1位の実物サムネ → {58-92}枠の evidence_images。
+    # **既定 OFF**（USE_PROPOSAL_CAMPAIGN_TOOLS=1 で opt-in）。video_algorithm と同列の取得系で、
+    # 並列検索/サムネ取得/正規化は skill 内 ThreadPool に閉じる（OC は 1 回呼ぶだけ）。OC 露出は
+    # openclaw.config.json5 の toolFilter.include に追加してから（=人間ゲート）。
+    if _envflag("USE_PROPOSAL_CAMPAIGN_TOOLS"):
+        from teamagent.skills.proposal_campaign.skill import ProposalCampaignSkill
+
+        specs.append(
+            ToolSpec(
+                ProposalCampaignSkill.name,
+                ProposalCampaignSkill.description,
+                ProposalCampaignSkill,
+            )
+        )
+
     # メール×社内ナレッジ横断ツール（read-only・per-user OAuth）。**既定 OFF**
     # （USE_MAIL_LINK_TOOL=1）。本番 Slack Bot へは intent.py + slack_bot.py 経由で届くため、
     # ここはオーケストレータ（Agent SDK）用の並行配線（dark）に過ぎない。token_store を必ず渡す。
