@@ -214,6 +214,7 @@ class VideoMeta(BaseModel):
     rank: int = 0
     url: str = ""
     author: str = ""
+    follower_count: int = 0  # 投稿者フォロワー数（上位ボード掲載用・tiktok_search 由来）
     desc: str = ""  # キャプション本文
     play_count: int = 0
     digg_count: int = 0  # いいね
@@ -418,10 +419,11 @@ def _default_outputs() -> list[Literal["report", "slides", "pptx"]]:
 
 
 def _default_max_videos() -> int:
-    """max_videos の既定を VIDEO_ALGO_MAX_VIDEOS（env）で可変化（既定 5・clamp 1〜10）。
+    """深掘り分析（DL+Gemini）する本数。env VIDEO_ALGO_MAX_VIDEOS（既定5・clamp1〜10）。
 
-    OpenClaw が明示指定すればそれを優先、未指定なら本 env 既定（運用側で 5〜10 を調整可）。
-    同期処理なので本数は OpenClaw の timeout（openclaw.config.json5）と整合させること。
+    「取得（スクレイプ）数」ではなく、各動画を実際に DL→Gemini で深掘り解析する本数。
+    1本ごとに DL+Gemini で重いので、OpenClaw の timeout（openclaw.config.json5）と整合させること。
+    取得（上位ボードの一覧本数）は board_size（VIDEO_ALGO_BOARD_SIZE）で別管理＝軽い。
     """
     raw = os.environ.get("VIDEO_ALGO_MAX_VIDEOS", "5")
     try:
@@ -430,12 +432,28 @@ def _default_max_videos() -> int:
         return 5
 
 
+def _default_board_size() -> int:
+    """取得（スクレイプ）してボードに載せる本数。env VIDEO_ALGO_BOARD_SIZE（既定30・clamp5〜30）。
+
+    メタ情報（アカウント/再生数/フォロワー/保存率/サムネ/説明文）だけの軽い取得なので大きくできる。
+    深掘り分析（max_videos）と分離＝ボードは board_size 本・深掘りは上位 max_videos 本の二段構成。
+    上限 30 はスクレイパ実証済みの天井（_MAX_POOL と整合）。
+    """
+    raw = os.environ.get("VIDEO_ALGO_BOARD_SIZE", "30")
+    try:
+        return max(5, min(30, int(raw)))
+    except ValueError:
+        return 30
+
+
 class VideoAlgorithmInput(BaseModel):
     """入力: 検索KW1つ。"""
 
     query: str
-    # 既定は env VIDEO_ALGO_MAX_VIDEOS（5・clamp 1〜10）。入力で明示指定も可（1〜10）。
+    # 深掘り分析（DL+Gemini）する本数。env VIDEO_ALGO_MAX_VIDEOS（5・clamp1〜10）。重い。
     max_videos: int = Field(default_factory=_default_max_videos, ge=1, le=10)
+    # 取得（スクレイプ）してボードに載せる本数。env VIDEO_ALGO_BOARD_SIZE（30・clamp5〜30）。軽い。
+    board_size: int = Field(default_factory=_default_board_size, ge=5, le=30)
     client_name: str | None = None  # brand_relation 判定用（任意）
     # §Q-HTML→PPTX: 追加出力。既定 = report + slides（編集可HTML）。
     # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（明示要求時のみ・重い）。
@@ -446,7 +464,10 @@ class VideoAlgorithmOutput(BaseModel):
     """出力: 各動画分析 + 横断 + レポート。"""
 
     query: str
-    videos: list[AnalyzedVideo] = Field(default_factory=list)
+    videos: list[AnalyzedVideo] = Field(default_factory=list)  # 深掘り分析した上位本（max_videos）
+    board: list[VideoMeta] = Field(
+        default_factory=list
+    )  # 取得した全メタ（上位ボード board_size 本）
     cross: CrossAnalysis = Field(default_factory=CrossAnalysis)
     report_html_path: str | None = None  # ローカルパス（runtime/Slack添付用・金庫外からは不可視）
     report_url: str | None = None  # §M: 非公開S3の署名URL（金庫外OpenClawが読める・未発行None）

@@ -93,9 +93,15 @@ variable "enable_scrape_tools" {
 }
 
 variable "video_algo_max_videos" {
-  description = "video_algorithm の既定分析本数（5〜10）。同期処理なので OpenClaw timeout(300s)と整合させること。値変更は taskdef env 差し替えのみで反映可。"
+  description = "video_algorithm の既定『深掘り分析』本数（5〜10）。同期処理なので OpenClaw timeout(300s)と整合させること。値変更は taskdef env 差し替えのみで反映可。"
   type        = string
   default     = "5"
+}
+
+variable "video_algo_board_size" {
+  description = "video_algorithm の『取得（上位ボード）』本数（5〜30・既定30）。メタのみ取得＝軽く、深掘り分析(video_algo_max_videos)とは独立。値変更は taskdef env 差し替えのみで反映可。"
+  type        = string
+  default     = "30"
 }
 
 # §M改(VSEO有効化): Gemini 認証は本番EC2と同方式の Vertex SA を採用（API キー方式は廃止）。

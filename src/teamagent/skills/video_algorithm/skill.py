@@ -173,6 +173,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     rank=i + 1,
                     url=getattr(v, "url", ""),
                     author=str(author_name),
+                    follower_count=int(getattr(author, "follower_count", 0) or 0),
                     desc=getattr(v, "desc", "") or "",
                     play_count=getattr(v, "play_count", 0) or 0,
                     digg_count=getattr(v, "digg_count", 0) or 0,
@@ -283,13 +284,18 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
     def run(self, input: VideoAlgorithmInput, ctx: SkillContext) -> VideoAlgorithmOutput:
         log = ctx.bind_logger(self.name)
-        log.info("video_algorithm_start", query=input.query, max_videos=input.max_videos)
-
-        target = input.max_videos
-        # over-fetch: 目標+buffer 本を1回だけ検索し、DL/分析失敗を後続候補でバックフィル
-        pool = self._search(
-            input.query, min(target + self._overfetch_buffer, _MAX_POOL), ctx.request_id
+        log.info(
+            "video_algorithm_start",
+            query=input.query,
+            max_videos=input.max_videos,
+            board_size=input.board_size,
         )
+
+        target = input.max_videos  # 深掘り分析（DL+Gemini）する本数。重い。
+        # 取得（スクレイプ）= 上位ボード board_size 本。メタのみ＝軽い。
+        # 深掘り分析の予備候補も兼ねる（DL/分析失敗を後続候補でバックフィル）。天井は _MAX_POOL。
+        board_target = min(max(input.board_size, target + self._overfetch_buffer), _MAX_POOL)
+        pool = self._search(input.query, board_target, ctx.request_id)
         if not pool:
             return VideoAlgorithmOutput(
                 query=input.query,
@@ -348,6 +354,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         out = VideoAlgorithmOutput(
             query=input.query,
             videos=analyzed,
+            board=pool,  # 取得した全メタ（上位ボード board_size 本・深掘りは上位 target 本のみ）
             cross=cross,
             total_cost_usd=total_cost,
             model_id=model_id,
@@ -363,6 +370,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         log.info(
             "video_algorithm_done",
             requested=input.max_videos,
+            board_size=input.board_size,
+            scraped=len(pool),
             attempted=attempted,
             analyzed=sum(1 for v in analyzed if v.analysis),
             backfilled=backfilled,

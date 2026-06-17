@@ -223,6 +223,56 @@ def test_skill_run_full_pipeline(tmp_path: object) -> None:
     assert "ユニクロ" in html and 'class="nle"' in html
 
 
+def test_board_decoupled_from_deep_analysis(tmp_path: object) -> None:
+    """取得（board_size 本のメタ）と 深掘り分析（max_videos 本）は独立。
+
+    30本取得・上位3本だけ深掘り → out.board=全12メタ / out.videos=3分析、
+    レポートに「取得ボード」全12行＋★（深掘り対象）が出ることを検証。
+    """
+    metas = [
+        VideoMeta(
+            rank=i,
+            url=f"https://t/{i}",
+            author=f"acc{i}",
+            follower_count=10000 * i,
+            desc="新宿 ランチ",
+            play_count=500000,
+            collect_count=8000,
+            cover_url=f"https://cdn/{i}.jpg",
+        )
+        for i in range(1, 13)  # 12 本取得
+    ]
+    gemini = MagicMock()
+    gemini.analyze_video_bytes.return_value = _resp(
+        _json_block(kw_telop=True, cta=True, brand=True, dur=18)
+    )
+    skill = VideoAlgorithmSkill(
+        gemini=gemini,
+        searcher=lambda q, n, r: metas[:n],
+        downloader=lambda url: (b"vid", "video/mp4"),
+        proxy=lambda d, m: (d, m),
+        report_dir=str(tmp_path),
+    )
+    out = skill.run(
+        VideoAlgorithmInput(query="新宿 ランチ", max_videos=3, board_size=12),
+        ctx=SkillContext(),
+    )
+    # 取得は12本（ボード）、深掘り分析は3本だけ（分離）
+    assert len(out.board) == 12
+    assert len(out.videos) == 3
+    assert all(v.analysis is not None for v in out.videos)
+    # ボードはフォロワー数も保持（投稿者規模）
+    assert out.board[0].follower_count == 10000
+    # 深掘りされたのは Gemini を3回呼んだ分だけ（30本DLしていない＝コスト分離）
+    assert gemini.analyze_video_bytes.call_count == 3
+    # レポートに取得ボードが出る（12行＋★深掘りマーカー）
+    with open(out.report_html_path, encoding="utf-8") as f:  # type: ignore[arg-type]
+        html = f.read()
+    assert "検索上位 取得ボード" in html
+    assert html.count('class="sbr"') == 12  # 取得12本ぶんの行
+    assert "sbdeep" in html  # ★深掘り対象マーカー
+
+
 # -----------------------------------------------------------
 # フレーム抽出 / 統計 / 色味（新機能）
 # -----------------------------------------------------------

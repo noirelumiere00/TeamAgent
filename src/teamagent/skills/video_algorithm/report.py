@@ -29,6 +29,7 @@ from teamagent.skills.video_algorithm.schema import (
     FrameShot,
     StatsAnalysis,
     VideoAlgorithmOutput,
+    VideoMeta,
     VideoVSEOAnalysis,
 )
 
@@ -245,6 +246,56 @@ def _mini_bar(value: float, vmax: float, *, accent: bool) -> str:
     w = 0.0 if vmax <= 0 else max(0.0, min(100.0, value / vmax * 100.0))
     cls = "miniba acc" if accent else "miniba"
     return f'<span class="{cls}"><i style="width:{w:.0f}%"></i></span>'
+
+
+def _scrape_board(out: VideoAlgorithmOutput) -> str:
+    """取得（スクレイプ）した上位 board_size 本のメタ一覧（深掘り分析の有無に依らず全件）。
+
+    提案書の「上位N動画ボード(03-5)」の素材。営業がここから提案に載せる動画を選定する。
+    深掘り分析（DL+Gemini）した上位本には ★ を付ける（取得≠分析を明示）。
+    """
+    metas = out.board
+    if not metas:
+        return ""
+    n = len(metas)
+    analyzed_ranks = {v.meta.rank for v in out.videos if v.analysis}
+
+    def row(m: VideoMeta) -> str:
+        deep = (
+            '<span class="sbdeep" title="DL+Gemini深掘り分析対象">★</span>'
+            if m.rank in analyzed_ranks
+            else ""
+        )
+        thumb = (
+            f'<img class="sbth" src="{_esc(m.cover_url)}" alt="#{m.rank}" loading="lazy">'
+            if m.cover_url
+            else '<div class="sbth ph"></div>'
+        )
+        auth = _esc(m.author) or "—"
+        return (
+            "<tr>"
+            f'<td class="sbr">#{m.rank}{deep}</td>'
+            f'<td class="sbtdth">{thumb}</td>'
+            f'<td class="sbauth"><a href="{_esc(m.url)}" target="_blank" rel="noopener">@{auth}</a></td>'
+            f'<td class="sbnum">{_fmt(m.follower_count)}</td>'
+            f'<td class="sbnum">{_fmt(m.play_count)}</td>'
+            f'<td class="sbnum">{m.save_rate():.1f}%</td>'
+            f'<td class="sbnum">{_fmt(m.digg_count)}</td>'
+            f'<td class="sbcap">{_esc(_shorten(m.desc, 46))}</td>'
+            "</tr>"
+        )
+
+    body = "".join(row(m) for m in metas)
+    return (
+        '<section><div class="th big">検索上位 取得ボード'
+        f"（「{_esc(out.query)}」上位{n}本のメタ一覧・★＝深掘り分析対象）</div>"
+        '<div class="sbwrap"><table class="sboard">'
+        "<thead><tr><th>#</th><th>サムネ</th><th>アカウント</th><th>フォロワー</th>"
+        "<th>再生</th><th>保存率</th><th>いいね</th><th>キャプション</th></tr></thead>"
+        f"<tbody>{body}</tbody></table></div>"
+        '<div class="muted small">※ サムネはTikTok署名URL（時間経過で失効する場合あり）。'
+        "営業はこの一覧から提案に載せる動画を選定。</div></section>"
+    )
 
 
 def _top5_board(out: VideoAlgorithmOutput) -> str:
@@ -876,6 +927,21 @@ section{margin:0 0 40px}
 .pitch{margin-top:13px;background:#eef5ff;border:1px solid #cfe0fb;border-radius:8px;padding:9px 13px;font-size:13px;color:#1e40af;line-height:1.55}
 .tscroll{max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:6px}
 .drill-fail{border:1px solid var(--line);border-radius:8px;padding:11px 16px;color:var(--sub);font-size:13px;margin:0 0 12px;background:#fff}
+/* B0 取得ボード（メタ一覧 board_size 本） */
+.sbwrap{max-height:430px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.sboard{width:100%;border-collapse:collapse;font-size:12px}
+.sboard thead th{position:sticky;top:0;background:var(--soft);color:var(--sub);font-weight:600;padding:6px 8px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;z-index:1}
+.sboard td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+.sboard tbody tr:hover{background:var(--soft)}
+.sbr{font-weight:700;white-space:nowrap;color:var(--ink)}
+.sbdeep{margin-left:3px;color:var(--accent)}
+.sbtdth{padding:3px 8px!important}
+.sbth{width:42px;height:56px;object-fit:cover;border-radius:4px;display:block;background:var(--soft)}
+.sbth.ph{background:repeating-linear-gradient(45deg,var(--soft),var(--soft) 6px,#fff 6px,#fff 12px)}
+.sbauth a{color:var(--ink);text-decoration:none;font-weight:600}
+.sbauth a:hover{text-decoration:underline}
+.sbnum{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.sbcap{color:var(--sub);max-width:300px}
 /* C Top5ボード */
 .board{display:grid;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
 .blab,.bcol{display:flex;flex-direction:column}
@@ -1162,7 +1228,7 @@ def render_report(out: VideoAlgorithmOutput, *, generated_at: str = "") -> str:
     tabs += "".join(_video_tab_btn(v, i) for i, v in analyzed)
     # 統計（全体横断）pane
     overview = (
-        f"{_verdict_band(out)}{_top5_board(out)}{_thumb_board(out)}"
+        f"{_verdict_band(out)}{_scrape_board(out)}{_top5_board(out)}{_thumb_board(out)}"
         f"{_synthesis_block(out)}{_matrix_block(out)}{_stats_block(out.cross.stats)}"
     )
     # 個別レポート pane（動画ごと）
@@ -1175,9 +1241,9 @@ def render_report(out: VideoAlgorithmOutput, *, generated_at: str = "") -> str:
         "入賞率はテスト投稿での検証を推奨します。"
     )
     stamp = f"　/　{_esc(generated_at)}" if generated_at else ""
-    total = len(out.videos)
+    scraped = len(out.board) or len(out.videos)
     n = _analyzed(out)
-    scope = f"取得{total}本中 分析成立{n}本" + ("（取得失敗を母数から除外）" if n < total else "")
+    scope = f"取得{scraped}本・深掘り分析{n}本"
     return (
         "<!doctype html><html lang='ja'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
