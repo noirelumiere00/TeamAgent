@@ -684,3 +684,64 @@ def test_overfetch_exhausted_shows_failures(tmp_path: object) -> None:
     out = skill.run(VideoAlgorithmInput(query="x", max_videos=3), ctx=SkillContext())
     assert out.videos  # 空にしない
     assert all(v.analysis is None for v in out.videos)  # 全部 error 表示
+
+
+# -----------------------------------------------------------
+# cover-only 縮退（動画DL全滅でもサムネ1枚で軽量分析・全滅回避）
+# -----------------------------------------------------------
+def test_cover_only_fallback_when_download_fails(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """動画DL全滅でも cover(サムネ)1枚で軽量分析し、error 文字列で動画ベースと区別する。"""
+    from teamagent.skills.video_algorithm import thumbnails
+
+    metas = [VideoMeta(rank=1, url="https://t/1", play_count=1000, cover_url="https://cdn/1.jpg")]
+
+    def _boom(url: str) -> tuple[bytes, str]:
+        raise RuntimeError("ALL_DOWNLOAD_FAILED")
+
+    # cover 取得をモック（実 JPEG マジックバイト → image/jpeg と判定される）
+    monkeypatch.setattr(thumbnails, "fetch_cover", lambda *a, **k: b"\xff\xd8\xff\xe0jpegdata")
+    gemini = MagicMock()
+    gemini.analyze_video_bytes.return_value = _resp(
+        _json_block(kw_telop=True, cta=True, brand=True, dur=18)
+    )
+    skill = VideoAlgorithmSkill(
+        gemini=gemini,
+        searcher=lambda q, n, r: metas,
+        downloader=_boom,
+        proxy=lambda d, m: (d, m),
+        report_dir=str(tmp_path),
+    )
+    out = skill.run(VideoAlgorithmInput(query="新宿 ランチ", max_videos=1), ctx=SkillContext())
+    assert out.videos[0].analysis is not None  # サムネだけでも分析が付く（全滅回避）
+    assert out.videos[0].error == "動画取得失敗・サムネのみ軽量分析"  # 動画ベース成功と区別
+    # cover は image/jpeg で Gemini に渡る（動画 mime ではない）
+    call = gemini.analyze_video_bytes.call_args
+    assert call.kwargs["mime_type"] == "image/jpeg"
+
+
+def test_cover_only_falls_through_when_no_cover(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cover も取れなければ従来どおり error カード（捏造せず Gemini も呼ばない）。"""
+    from teamagent.skills.video_algorithm import thumbnails
+
+    metas = [VideoMeta(rank=1, url="https://t/1", play_count=1000, cover_url="https://cdn/1.jpg")]
+    monkeypatch.setattr(thumbnails, "fetch_cover", lambda *a, **k: None)  # cover 取得失敗
+
+    def _boom(url: str) -> tuple[bytes, str]:
+        raise RuntimeError("ALL_DOWNLOAD_FAILED")
+
+    gemini = MagicMock()
+    skill = VideoAlgorithmSkill(
+        gemini=gemini,
+        searcher=lambda q, n, r: metas,
+        downloader=_boom,
+        proxy=lambda d, m: (d, m),
+        report_dir=str(tmp_path),
+    )
+    out = skill.run(VideoAlgorithmInput(query="x", max_videos=1), ctx=SkillContext())
+    assert out.videos[0].analysis is None
+    assert "取得失敗" in (out.videos[0].error or "")
+    gemini.analyze_video_bytes.assert_not_called()  # cover無し→Geminiも呼ばない

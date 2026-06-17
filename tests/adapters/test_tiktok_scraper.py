@@ -15,6 +15,7 @@ import pytest
 from teamagent.adapters import tiktok_scraper
 from teamagent.adapters.tiktok_scraper import (
     TikTokScrapeError,
+    download_tiktok_video,
     get_tiktok_comments,
     search_tiktok,
 )
@@ -253,3 +254,93 @@ def test_get_comments_empty_raises() -> None:
     ):
         with pytest.raises(TikTokScrapeError, match="TIKTOK_EMPTY_RESULT"):
             get_tiktok_comments("https://www.tiktok.com/@u/video/123")
+
+
+# -----------------------------------------------------------
+# download_tiktok_video（ブラウザ内DL・subprocess モック）
+# -----------------------------------------------------------
+def test_download_video_reads_saved_file(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """node が --out に書いた保存ファイルを読み、(bytes, mime) を返す。"""
+    saved = tmp_path / "v.mp4"
+    saved.write_bytes(b"vid-bytes")
+    payload = {
+        "ok": True,
+        "mode": "download",
+        "url": "https://www.tiktok.com/@u/video/123",
+        "savedTo": str(saved),
+        "mime": "video/mp4",
+        "bytes": 9,
+        "error": None,
+    }
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(
+            tiktok_scraper.subprocess, "run", return_value=_mock_proc(json.dumps(payload))
+        ),
+    ):
+        data, mime = download_tiktok_video("https://www.tiktok.com/@u/video/123")
+
+    assert data == b"vid-bytes"
+    assert mime == "video/mp4"
+
+
+def test_download_video_passes_cli_args() -> None:
+    """--mode download / --url / --out が node に渡る（--out 実体を読むことも検証）。"""
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        out = cmd[cmd.index("--out") + 1]  # download_tiktok_video が tempdir に作る out_path
+        with open(out, "wb") as f:
+            f.write(b"vid")
+        return _mock_proc(json.dumps({"ok": True, "savedTo": out, "mime": "video/mp4"}))
+
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(tiktok_scraper.subprocess, "run", side_effect=_fake_run),
+    ):
+        download_tiktok_video("https://www.tiktok.com/@u/video/9")
+
+    cmd = captured["cmd"]
+    assert "--mode" in cmd and "download" in cmd
+    assert "--url" in cmd and "https://www.tiktok.com/@u/video/9" in cmd
+    assert "--out" in cmd
+
+
+def test_download_video_invalid_url_raises() -> None:
+    with pytest.raises(TikTokScrapeError, match="TIKTOK_INVALID_URL"):
+        download_tiktok_video("https://example.com/not-tiktok")
+
+
+def test_download_video_skip_guard_bypasses_ssrf() -> None:
+    """_skip_url_guard=True なら SSRF を通さない（chained が外側で検証済みの経路）。"""
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        out = cmd[cmd.index("--out") + 1]
+        with open(out, "wb") as f:
+            f.write(b"v")
+        return _mock_proc(json.dumps({"ok": True, "savedTo": out, "mime": "video/mp4"}))
+
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(tiktok_scraper.subprocess, "run", side_effect=_fake_run),
+    ):
+        # 非 tiktok URL でも _skip_url_guard=True なら弾かれず node に渡る
+        data, _mime = download_tiktok_video("https://example.com/x", _skip_url_guard=True)
+    assert data == b"v"
+
+
+def test_download_video_not_ok_raises() -> None:
+    payload = {"ok": False, "mode": "download", "error": "playAddr を取得できませんでした"}
+    with (
+        patch.object(tiktok_scraper, "_node_bin", return_value="/usr/bin/node"),
+        patch.object(
+            tiktok_scraper.subprocess,
+            "run",
+            return_value=_mock_proc(json.dumps(payload), returncode=2),
+        ),
+    ):
+        with pytest.raises(TikTokScrapeError, match="TIKTOK_DL_FAILED"):
+            download_tiktok_video("https://www.tiktok.com/@u/video/123")

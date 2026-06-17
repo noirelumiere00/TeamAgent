@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -375,3 +376,109 @@ def get_tiktok_comments(
     result = TikTokCommentResult(video_url=video_url, comments=comments)
     logger.info("tiktok_comments_done", request_id=request_id, count=result.count)
     return result
+
+
+def download_tiktok_video(
+    video_url: str,
+    *,
+    request_id: str | None = None,
+    timeout_s: int = _DEFAULT_TIMEOUT_S,
+    _skip_url_guard: bool = False,
+) -> tuple[bytes, str]:
+    """search.mjs --mode download でブラウザ内DLし (動画bytes, mime) を返す。
+
+    検索と同一の Puppeteer 経路で playAddr を確定し、ブラウザ自身（署名/Cookie/UA/proxy を
+    自前管理）にバイトを取らせる。会社プロキシ下で yt-dlp が SSL/Unable to extract で落ちる
+    動画の primary 経路。取得した動画は一時ディレクトリに保存し、bytes を読んだら即破棄する
+    （ToS 配慮・ディスクに残さない / video_download.py と同方針）。
+
+    `_skip_url_guard=True` は download_video_chained が外側で SSRF 検証済みのときに使う
+    （二重 DNS 解決の回避）。直接呼ぶ場合は False のまま＝必ず SSRF 関門を通す。
+
+    Raises:
+        TikTokScrapeError: URL不正(SSRF) / node不在 / スクリプト不在 / タイムアウト / 取得失敗。
+    """
+    if not _skip_url_guard:
+        from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
+
+        try:
+            video_url = validate_scrape_url(video_url, request_id=request_id)
+        except UrlGuardError as e:
+            raise TikTokScrapeError(f"TIKTOK_INVALID_URL: {e}") from e
+    if not _SCRAPER_SCRIPT.exists():
+        raise TikTokScrapeError(f"TIKTOK_SCRAPER_MISSING: {_SCRAPER_SCRIPT} がありません")
+
+    node = _node_bin()
+    with tempfile.TemporaryDirectory(prefix="teamagent_btdl_") as tmpdir:
+        out_path = os.path.join(tmpdir, "v.mp4")
+        cmd = [
+            node,
+            str(_SCRAPER_SCRIPT),
+            "--mode",
+            "download",
+            "--url",
+            video_url,
+            "--out",
+            out_path,
+        ]
+        logger.info("tiktok_download_start", request_id=request_id, url_len=len(video_url))
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(_SCRAPER_DIR),
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            logger.warning("tiktok_download_timeout", request_id=request_id, timeout_s=timeout_s)
+            raise TikTokScrapeError(
+                f"TIKTOK_TIMEOUT: 動画取得が {timeout_s}s 以内に終わりませんでした"
+            ) from e
+
+        stdout = (proc.stdout or "").strip()
+        if not stdout:
+            logger.warning(
+                "tiktok_download_no_output",
+                request_id=request_id,
+                returncode=proc.returncode,
+                stderr_tail=(proc.stderr or "")[-300:],
+            )
+            raise TikTokScrapeError(
+                f"TIKTOK_NO_OUTPUT: スクレイパが結果を返しませんでした (exit={proc.returncode})"
+            )
+
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("tiktok_download_bad_json", request_id=request_id, head=stdout[:200])
+            raise TikTokScrapeError("TIKTOK_BAD_JSON: スクレイパ出力を解析できませんでした") from e
+
+        if not payload.get("ok"):
+            err = payload.get("error") or "不明なエラー"
+            logger.info("tiktok_download_failed", request_id=request_id, error=err)
+            raise TikTokScrapeError(f"TIKTOK_DL_FAILED: {err}")
+
+        saved = payload.get("savedTo") or out_path
+        try:
+            with open(saved, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            raise TikTokScrapeError(
+                f"TIKTOK_DL_FAILED: 保存ファイルを読めません ({type(e).__name__})"
+            ) from e
+        if not data:
+            raise TikTokScrapeError("TIKTOK_DL_FAILED: 取得した動画が空でした")
+        mime = str(payload.get("mime") or "video/mp4").split(";")[0].strip()
+        if not mime.startswith("video/"):
+            mime = "video/mp4"
+
+    logger.info(
+        "tiktok_download_done",
+        request_id=request_id,
+        size_mb=round(len(data) / 1024 / 1024, 2),
+        mime=mime,
+    )
+    return data, mime

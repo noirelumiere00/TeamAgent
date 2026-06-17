@@ -115,6 +115,23 @@ def parse_analysis(text: str) -> VideoVSEOAnalysis | None:
         return obj
 
 
+def _sniff_image_mime(data: bytes) -> str:
+    """画像 bytes のマジックバイトから mime を判定（cover-only 分析で Gemini に正しく渡す）。
+
+    TikTok の cover は jpeg のことが多いが webp/heic もあり得る。誤った mime を渡すと
+    Gemini が拒否/誤読するため、判定不能時のみ image/jpeg にフォールバックする。
+    """
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[4:12] in (b"ftypheic", b"ftypheif", b"ftypmif1"):
+        return "image/heic"
+    return "image/jpeg"
+
+
 @register
 class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
     """検索上位動画を分析し『なぜ上位か』を読み解く Skill。"""
@@ -189,9 +206,10 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
     def _download(self, url: str, request_id: str) -> tuple[bytes, str]:
         if self._downloader is not None:
             return self._downloader(url)
-        from teamagent.adapters.video_download import download_video
+        # 3層DLチェーン（ブラウザ内DL→yt-dlp→…）。全滅時は _analyze_one が cover-only へ縮退。
+        from teamagent.adapters.video_download import download_video_chained
 
-        return download_video(url, request_id=request_id)
+        return download_video_chained(url, request_id=request_id)
 
     def _shrink(self, data: bytes, mime: str, request_id: str) -> tuple[bytes, str]:
         if self._proxy is not None:
@@ -207,9 +225,11 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         try:
             data, mime = self._download(meta.url, request_id)
             data, mime = self._shrink(data, mime, request_id)
-        except Exception as e:  # 取得/圧縮失敗
+        except Exception as e:  # 取得/圧縮失敗 → サムネのみの軽量分析へ縮退（全滅回避）
             logger.warning("video_algorithm_fetch_failed", rank=meta.rank, error=type(e).__name__)
-            return AnalyzedVideo(meta=meta, error=f"取得失敗: {type(e).__name__}")
+            return self._cover_only_analysis(
+                meta, query=query, system=system, request_id=request_id, cause=type(e).__name__
+            )
 
         user_prompt = (
             f"# 検索KW: {query}\n"
@@ -258,6 +278,53 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             cover_data_uri=cover_uri,
             thumb=thumb,
             error=None if analysis else "JSONパース失敗",
+            cost_usd=resp.cost_usd,
+            model_id=getattr(resp, "model_id", None),
+        )
+
+    def _cover_only_analysis(
+        self, meta: VideoMeta, *, query: str, system: str, request_id: str, cause: str
+    ) -> AnalyzedVideo:
+        """動画DL全滅時の縮退: cover(サムネ静止画)1枚だけを Gemini に渡す軽量分析。
+
+        cover も取れなければ従来どおり error カードに倒す（捏造しない）。静止画なので秒系
+        フィールド（テロップ遷移秒/CTA秒/シーン分割）は観測不可＝プロンプトで空/既定に倒させる。
+        cover は小サイズ画像なので _shrink（動画 transcode 経路）は通さず素通しする。
+        """
+        from teamagent.skills.video_algorithm.thumbnails import fetch_cover
+
+        cover = fetch_cover(meta.cover_url, request_id=request_id)
+        if not cover:
+            return AnalyzedVideo(meta=meta, error=f"取得失敗: {cause}")
+        user_prompt = (
+            f"# 検索KW: {query}\n"
+            f"# この動画の表示順位: {meta.rank}位\n"
+            f"# キャプション本文: {meta.desc}\n\n"
+            "注記: 動画本体を取得できなかったため、入力は**サムネイル静止画1枚**です。"
+            "秒単位のタイムライン・テロップ遷移・CTA出現秒・シーン分割は観測できません。"
+            "静止画から読み取れる範囲（被写体・色/トーン・焼き込みテキスト・訴求の方向性）"
+            "のみを、システム指示のJSON形式で出力してください。観測できない項目は"
+            "推測で埋めず、空配列/既定値のままにしてください。"
+        )
+        try:
+            resp = self._client().analyze_video_bytes(
+                data=cover,
+                mime_type=_sniff_image_mime(cover),
+                prompt=user_prompt,
+                request_id=request_id,
+                system=system,
+            )
+        except Exception as e:
+            logger.warning("video_algorithm_cover_failed", rank=meta.rank, error=type(e).__name__)
+            return AnalyzedVideo(meta=meta, error=f"取得失敗: {cause}")
+        analysis = parse_analysis(resp.text)
+        cover_uri, thumb = self._build_thumb(meta.cover_url, [], request_id)
+        return AnalyzedVideo(
+            meta=meta,
+            analysis=analysis,
+            cover_data_uri=cover_uri,
+            thumb=thumb,
+            error="動画取得失敗・サムネのみ軽量分析" if analysis else f"取得失敗: {cause}",
             cost_usd=resp.cost_usd,
             model_id=getattr(resp, "model_id", None),
         )

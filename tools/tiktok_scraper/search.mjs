@@ -21,7 +21,7 @@ import puppeteer from "puppeteer-core";
 // ---- 引数パース ----
 function parseArgs(argv) {
   const a = {
-    mode: "search", // "search" | "comments"
+    mode: "search", // "search" | "comments" | "download"
     query: "",
     type: "keyword",
     max: 10,
@@ -122,6 +122,12 @@ function normalizeVideo(v) {
     createTime: v.createTime || 0,
     duration: v.video?.duration || 0,
     coverUrl: v.video?.cover || v.video?.originCover || "",
+    // ダウンロード用 URL（download モードが使う。検索/board には非破壊で追加するだけ）
+    playAddr: v.video?.playAddr || "",
+    downloadAddr: v.video?.downloadAddr || "",
+    bitrateUrls: Array.isArray(v.video?.bitrateInfo)
+      ? v.video.bitrateInfo.map((b) => b?.PlayAddr?.UrlList?.[0]).filter(Boolean)
+      : [],
     author: {
       uniqueId: author.uniqueId || "",
       nickname: author.nickname || "",
@@ -357,6 +363,156 @@ async function scrapeComments(browser, videoUrl, maxComments) {
   }
 }
 
+// 動画オブジェクト v から DL 候補 URL を集める（playAddr > downloadAddr > bitrate variants）。
+function collectPlayAddrs(v, arr) {
+  if (!v) return;
+  const push = (u) => {
+    if (u && typeof u === "string" && u.startsWith("http") && !arr.includes(u)) arr.push(u);
+  };
+  push(v.playAddr);
+  push(v.downloadAddr);
+  if (Array.isArray(v.bitrateInfo)) {
+    for (const b of v.bitrateInfo) {
+      const list = b?.PlayAddr?.UrlList;
+      if (Array.isArray(list) && list.length) push(list[list.length - 1]); // 末尾=軽量画質を優先
+    }
+  }
+}
+
+// 1 本の動画 URL から動画バイトを取得して outPath に保存する。
+// 検索と同一 Chrome session（ブラウザが署名/Cookie/UA/proxy を自前管理）で playAddr を確定し、
+//  (第一) playAddr へ page.goto → response.buffer()  … ナビゲーション＝CORS非該当・最堅牢
+//  (第二) goto 全滅時のみ動画ページに戻って fetch → arrayBuffer  … opaque リスク有の最後の手段
+async function downloadVideoFromUrl(browser, videoUrl, outPath) {
+  const context = await browser.createBrowserContext();
+  const page = await context.newPage();
+  const playAddrs = [];
+  let lastErr = null;
+  try {
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.setUserAgent(USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]);
+    await page.setExtraHTTPHeaders({ "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.7" });
+    if (process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
+      await page.authenticate({
+        username: `${process.env.PROXY_USERNAME}-session-${Date.now()}`,
+        password: process.env.PROXY_PASSWORD,
+      });
+    }
+
+    // 動画詳細 API を傍受して playAddr を集める
+    page.on("response", async (resp) => {
+      const url = resp.url();
+      if (!url.includes("/api/item/detail/") && !url.includes("/aweme/v1/")) return;
+      try {
+        const text = await resp.text();
+        if (!text || text.includes("<html")) return;
+        const json = JSON.parse(text);
+        const v = json?.itemInfo?.itemStruct?.video || json?.aweme_detail?.video || null;
+        collectPlayAddrs(v, playAddrs);
+      } catch {
+        /* 非 JSON は無視 */
+      }
+    });
+
+    log(`goto video: ${videoUrl}`);
+    await page.goto(videoUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await humanDelay(2500, 4000);
+
+    // SSR フォールバック（傍受で 0 件のとき埋め込み JSON から）
+    if (playAddrs.length === 0) {
+      try {
+        const ssrVideo = await page.evaluate(() => {
+          const el = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
+          if (!el?.textContent) return null;
+          try {
+            const p = JSON.parse(el.textContent);
+            const scope = p?.["__DEFAULT_SCOPE__"] || {};
+            return scope["webapp.video-detail"]?.itemInfo?.itemStruct?.video || null;
+          } catch {
+            return null;
+          }
+        });
+        collectPlayAddrs(ssrVideo, playAddrs);
+      } catch (e) {
+        log("SSR video extraction failed:", e.message);
+      }
+    }
+    if (playAddrs.length === 0) throw new Error("playAddr を取得できませんでした (SSR/API 双方空)");
+    log(`playAddr candidates: ${playAddrs.length}`);
+
+    let buf = null;
+    let mime = "video/mp4";
+
+    // 第一: tiktok.com origin に留まったまま fetch（ブラウザが Cookie/UA/Referer/proxy を自前付与）。
+    // TikTok web プレイヤー自身が同じ署名URLを fetch するため、同origin文脈が最も自然に通る。
+    // ※媒体URLへ page.goto すると 'load' を待ち続けてハングするため、ナビゲーションは使わない。
+    for (const addr of playAddrs) {
+      const got = await page.evaluate(async (u) => {
+        try {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 25000);
+          const r = await fetch(u, { credentials: "include", signal: ctrl.signal });
+          clearTimeout(t);
+          if (!r.ok) return { ok: false, status: r.status };
+          const ab = await r.arrayBuffer();
+          const bytes = new Uint8Array(ab);
+          let s = "";
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          return { ok: true, b64: btoa(s), ct: r.headers.get("content-type") || "" };
+        } catch (e) {
+          return { ok: false, error: String((e && e.message) || e) };
+        }
+      }, addr);
+      if (got && got.ok && got.b64) {
+        const cand = Buffer.from(got.b64, "base64");
+        if (cand.length > 0) {
+          buf = cand;
+          if (got.ct) mime = got.ct;
+          log(`downloaded via in-page fetch (${cand.length} bytes)`);
+          break;
+        }
+      } else {
+        lastErr = new Error("fetch: " + JSON.stringify(got));
+        log("fetch candidate failed:", JSON.stringify(got));
+      }
+    }
+
+    // 第二: fetch が opaque/失敗のとき、commit 待ちナビゲーション + response.buffer()。
+    // waitUntil:"commit" は応答受信時点で解決＝媒体URLで load を待ち続けるハングを避ける。
+    if (!buf) {
+      for (const addr of playAddrs) {
+        try {
+          const resp = await page.goto(addr, { waitUntil: "commit", timeout: 25000 });
+          if (resp && resp.ok()) {
+            const b = await resp.buffer();
+            if (b && b.length > 0) {
+              buf = b;
+              mime = resp.headers()["content-type"] || mime;
+              log(`downloaded via page.goto/commit (${b.length} bytes)`);
+              break;
+            }
+          }
+        } catch (e) {
+          lastErr = e;
+          log("goto candidate failed:", String((e && e.message) || e));
+        }
+      }
+    }
+    if (!buf || buf.length === 0) {
+      throw new Error("動画バイト取得失敗 " + (lastErr ? String(lastErr.message || lastErr) : ""));
+    }
+    mime = String(mime).split(";")[0].trim() || "video/mp4"; // charset 等を落とす
+    fs.writeFileSync(outPath, buf);
+    return { savedTo: outPath, mime, bytes: buf.length };
+  } finally {
+    await page.close().catch(() => {});
+    await context.close().catch(() => {});
+  }
+}
+
 function buildChromeArgs() {
   const chromeArgs = [
     "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
@@ -405,10 +561,57 @@ async function mainComments() {
   process.exit(result.ok ? 0 : 2);
 }
 
+// ---- main: download モード ----
+// バイトは --out（ファイル）に保存し、stdout には薄いメタ JSON のみ出す
+// （巨大 base64 で stdout を汚さない＝Python の subprocess capture を膨らませない）。
+async function mainDownload() {
+  const result = {
+    ok: false, mode: "download", url: args.url,
+    savedTo: null, mime: null, bytes: 0, error: null,
+  };
+  if (!args.url || !args.url.includes("tiktok.com")) {
+    result.error = "有効な TikTok 動画 URL が必要です (--url)";
+    process.stdout.write(JSON.stringify(result));
+    process.exit(2);
+  }
+  if (!args.out) {
+    result.error = "保存先 --out が必要です (バイトは stdout に載せません)";
+    process.stdout.write(JSON.stringify(result));
+    process.exit(2);
+  }
+  let browser;
+  try {
+    const chrome = findChrome();
+    log(`launch chrome: ${chrome} (headless=${!args.headful})`);
+    browser = await puppeteer.launch({
+      executablePath: chrome,
+      headless: !args.headful,
+      args: buildChromeArgs(),
+    });
+    const dl = await downloadVideoFromUrl(browser, args.url, args.out);
+    result.ok = dl.bytes > 0;
+    result.savedTo = dl.savedTo;
+    result.mime = dl.mime;
+    result.bytes = dl.bytes;
+    if (!result.ok) result.error = "動画バイトを取得できませんでした";
+  } catch (e) {
+    result.error = String((e && e.message) || e);
+    log("ERROR:", result.error);
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+  process.stdout.write(JSON.stringify(result));
+  process.exit(result.ok ? 0 : 2);
+}
+
 // ---- main ----
 async function main() {
   if (args.mode === "comments") {
     await mainComments();
+    return;
+  }
+  if (args.mode === "download") {
+    await mainDownload();
     return;
   }
   if (!args.query) {
