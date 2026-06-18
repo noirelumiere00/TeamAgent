@@ -42,11 +42,17 @@ _check_placeholder() {
 
 _get_secret() {
     local name="$1"
+    # タイムアウト必須: Secrets Manager エンドポイント不達時に **無限ハング** すると
+    # ExecStart(source load_secrets.sh) ごと固まり、起動が永久に完了せず healthz=000 に
+    # なる（2026-06-18 connect-web インシデントの真因）。connect/read を短く切って fail-fast。
     aws secretsmanager get-secret-value \
         --secret-id "$name" \
         --region "${AWS_REGION:-ap-northeast-1}" \
         --query SecretString \
-        --output text 2>/dev/null
+        --output text \
+        --cli-connect-timeout "${AWS_SM_CONNECT_TIMEOUT:-5}" \
+        --cli-read-timeout "${AWS_SM_READ_TIMEOUT:-10}" \
+        2>/dev/null
 }
 
 _require_env() {
@@ -58,40 +64,52 @@ _require_env() {
 }
 
 _load() {
-    _require_env DB_PASSWORD_SECRET_NAME || return 1
-    _require_env SLACK_BOT_TOKEN_SECRET_NAME || return 1
-    _require_env SLACK_APP_TOKEN_SECRET_NAME || return 1
-    _require_env RDS_HOST || return 1
+    # env 優先フォールバック: 既に env に値があれば Secrets Manager を引かない。これにより
+    # SM が一時不達でも、運用側が DATABASE_URL / SLACK_* を env 注入しておけば起動できる
+    # （SM 障害で起動ごと落ちるのを防ぐ・2026-06-18 インシデント対策）。fetch が要る secret
+    # 名のみ _require_env する。
 
-    # プレースホルダ残り検知
-    _check_placeholder RDS_HOST || return 1
-
-    # tunnel モード / 本番モードを構造化ログに記載
-    if [[ "$RDS_HOST" == "localhost" || "$RDS_HOST" == "127.0.0.1" ]]; then
-        _log "MODE: local (SSM tunnel 経由想定 / RDS_HOST=$RDS_HOST:${RDS_PORT:-5432})"
-        _log "      別 Terminal で aws ssm start-session が起動済みであること"
+    # --- DATABASE_URL ---
+    if [[ -n "${DATABASE_URL:-}" ]]; then
+        _log "INFO: DATABASE_URL は env 既設（Secrets Manager fetch をスキップ）"
     else
-        _log "MODE: direct (本番 EC2/Lambda 想定 / RDS_HOST=$RDS_HOST:${RDS_PORT:-5432})"
+        _require_env DB_PASSWORD_SECRET_NAME || return 1
+        _require_env RDS_HOST || return 1
+        _check_placeholder RDS_HOST || return 1
+
+        # tunnel モード / 本番モードを構造化ログに記載
+        if [[ "$RDS_HOST" == "localhost" || "$RDS_HOST" == "127.0.0.1" ]]; then
+            _log "MODE: local (SSM tunnel 経由想定 / RDS_HOST=$RDS_HOST:${RDS_PORT:-5432})"
+            _log "      別 Terminal で aws ssm start-session が起動済みであること"
+        else
+            _log "MODE: direct (本番 EC2/Lambda 想定 / RDS_HOST=$RDS_HOST:${RDS_PORT:-5432})"
+        fi
+
+        local db_pass
+        db_pass="$(_get_secret "$DB_PASSWORD_SECRET_NAME")"
+        if [[ -z "$db_pass" ]]; then
+            _log "ERROR: $DB_PASSWORD_SECRET_NAME から DB パスワードを取得できませんでした"
+            return 1
+        fi
+
+        # DATABASE_URL を組み立て（SSL を必ず有効化）
+        # password に @ や : が含まれていても安全なように urlencode
+        local enc_pass
+        enc_pass="$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.stdin.read().strip(), safe=""))' <<<"$db_pass")"
+        export DATABASE_URL="postgresql://${RDS_USER:-teamagent}:${enc_pass}@${RDS_HOST}:${RDS_PORT:-5432}/${RDS_DBNAME:-teamagent}?sslmode=${RDS_SSL_MODE:-require}"
+        _log "OK: DATABASE_URL を組み立て（host=${RDS_HOST}, ssl=${RDS_SSL_MODE:-require}）"
     fi
 
-    local db_pass
-    db_pass="$(_get_secret "$DB_PASSWORD_SECRET_NAME")"
-    if [[ -z "$db_pass" ]]; then
-        _log "ERROR: $DB_PASSWORD_SECRET_NAME から DB パスワードを取得できませんでした"
-        return 1
+    # --- Slack tokens（未設定のときだけ SM から取得）---
+    if [[ -z "${SLACK_BOT_TOKEN:-}" ]]; then
+        _require_env SLACK_BOT_TOKEN_SECRET_NAME || return 1
+        export SLACK_BOT_TOKEN="$(_get_secret "$SLACK_BOT_TOKEN_SECRET_NAME")"
     fi
-
-    # DATABASE_URL を組み立て（SSL を必ず有効化）
-    # password に @ や : が含まれていても安全なように urlencode
-    local enc_pass
-    enc_pass="$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.stdin.read().strip(), safe=""))' <<<"$db_pass")"
-    export DATABASE_URL="postgresql://${RDS_USER:-teamagent}:${enc_pass}@${RDS_HOST}:${RDS_PORT:-5432}/${RDS_DBNAME:-teamagent}?sslmode=${RDS_SSL_MODE:-require}"
-    _log "OK: DATABASE_URL を組み立て（host=${RDS_HOST}, ssl=${RDS_SSL_MODE:-require}）"
-
-    export SLACK_BOT_TOKEN="$(_get_secret "$SLACK_BOT_TOKEN_SECRET_NAME")"
-    export SLACK_APP_TOKEN="$(_get_secret "$SLACK_APP_TOKEN_SECRET_NAME")"
-
-    if [[ -z "$SLACK_BOT_TOKEN" || -z "$SLACK_APP_TOKEN" ]]; then
+    if [[ -z "${SLACK_APP_TOKEN:-}" ]]; then
+        _require_env SLACK_APP_TOKEN_SECRET_NAME || return 1
+        export SLACK_APP_TOKEN="$(_get_secret "$SLACK_APP_TOKEN_SECRET_NAME")"
+    fi
+    if [[ -z "${SLACK_BOT_TOKEN:-}" || -z "${SLACK_APP_TOKEN:-}" ]]; then
         _log "ERROR: Slack トークン取得失敗"
         return 1
     fi
@@ -142,7 +160,7 @@ print(f\"export GOOGLE_OAUTH_REFRESH_TOKEN='{d['refresh_token']}'\")
     # 上の GOOGLE_* (Desktop型/共有サービス認証) を connect の認可フローで使うと redirect
     # 登録先(Web型)と client 不一致 → callback 500 になるため、connect 専用に分離する。
     # google_oauth_flow.connect_client_id_secret() が CONNECT_GOOGLE_* を優先する。
-    if [[ -n "${CONNECT_GOOGLE_SECRET_NAME:-}" ]]; then
+    if [[ -n "${CONNECT_GOOGLE_SECRET_NAME:-}" && -z "${CONNECT_GOOGLE_CLIENT_SECRET:-}" ]]; then
         local csec
         csec="$(_get_secret "$CONNECT_GOOGLE_SECRET_NAME" 2>/dev/null || true)"
         if [[ -n "$csec" ]]; then
