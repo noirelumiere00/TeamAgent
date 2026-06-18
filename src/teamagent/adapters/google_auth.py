@@ -98,9 +98,14 @@ def connect_client_id_secret() -> tuple[str | None, str | None]:
     `GOOGLE_CLIENT_ID/SECRET` にフォールバックする（後方互換）。これで「連携=web / 共有=desktop」を
     1つの secret を奪い合わずに両立できる。
     """
-    cid = os.environ.get("CONNECT_GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_CLIENT_ID")
-    sec = os.environ.get("CONNECT_GOOGLE_CLIENT_SECRET") or os.environ.get("GOOGLE_CLIENT_SECRET")
-    return cid, sec
+    # ペアで揃える: 連携ID(CONNECT_GOOGLE_CLIENT_ID)があるのに secret だけ欠ける時、共有
+    # GOOGLE_CLIENT_SECRET へ部分フォールバックすると id(pgd1)/secret(r194) 食い違いで
+    # invalid_client になる。連携IDがあれば連携secret(欠けても None)を返し呼び出し側で明示エラーに。
+    # 連携ID未設定のときだけ共有 GOOGLE_* ペアにフォールバック。
+    connect_id = os.environ.get("CONNECT_GOOGLE_CLIENT_ID")
+    if connect_id:
+        return connect_id, os.environ.get("CONNECT_GOOGLE_CLIENT_SECRET")
+    return os.environ.get("GOOGLE_CLIENT_ID"), os.environ.get("GOOGLE_CLIENT_SECRET")
 
 
 def build_user_credentials(token: OAuthToken) -> Any:

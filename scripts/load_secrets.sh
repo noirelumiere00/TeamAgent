@@ -142,7 +142,7 @@ _load() {
             export CONNECT_GOOGLE_CLIENT_SECRET="$csecret"
             _log "OK: CONNECT_GOOGLE_CLIENT_SECRET loaded"
         else
-            _log "WARN: CONNECT_GOOGLE_CLIENT_SECRET_NAME 設定済だが取得失敗（連携が client未設定で失敗）"
+            _log "WARN: CONNECT_GOOGLE_CLIENT_SECRET を Secrets Manager から取得できず（secret不在/権限/region違い）。連携(per-user)はコールバックで失敗する"
         fi
     fi
 
