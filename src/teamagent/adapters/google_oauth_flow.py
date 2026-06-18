@@ -33,6 +33,21 @@ _AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
+def connect_client_id_secret() -> tuple[str | None, str | None]:
+    """連携用 OAuth クライアント(Web型)。CONNECT_GOOGLE_CLIENT_ID/SECRET 優先・無ければ GOOGLE_*。
+
+    redirect の登録先は connect-web の Web 型クライアント(connect.newstv.co.jp)。一方
+    `scripts/load_secrets.sh` は GOOGLE_OAUTH_SECRET_NAME から GOOGLE_CLIENT_ID/SECRET を
+    Desktop 型で上書きする（Gmail/Drive 共有サービス認証用）。両者を区別せず GOOGLE_* を
+    そのまま使うと、認可URL生成と code 交換で client が redirect 登録先(Web)と食い違い、
+    callback が 500 / redirect_uri_mismatch になる。connect 専用の CONNECT_GOOGLE_* を
+    優先することで、共有サービス認証(GOOGLE_*)と本人連携フローを分離する。
+    """
+    cid = os.environ.get("CONNECT_GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_CLIENT_ID")
+    sec = os.environ.get("CONNECT_GOOGLE_CLIENT_SECRET") or os.environ.get("GOOGLE_CLIENT_SECRET")
+    return cid, sec
+
+
 def _state_secret() -> bytes:
     secret = os.environ.get("OAUTH_STATE_SECRET")
     if not secret:
@@ -72,10 +87,12 @@ class OAuthConsentFlow:
     def _flow(self) -> Any:
         from google_auth_oauthlib.flow import Flow
 
-        client_id = os.environ.get("GOOGLE_CLIENT_ID")
-        client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+        client_id, client_secret = connect_client_id_secret()
         if not (client_id and client_secret):
-            raise ValueError("GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET が未設定です（W1）")
+            raise ValueError(
+                "連携用 OAuth クライアント未設定"
+                "（CONNECT_GOOGLE_CLIENT_ID/SECRET または GOOGLE_CLIENT_ID/SECRET が必要・W1）"
+            )
         config = {
             "web": {
                 "client_id": client_id,
@@ -131,6 +148,7 @@ class OAuthConsentFlow:
 __all__ = [
     "WORKSPACE_READONLY_SCOPES",
     "OAuthConsentFlow",
+    "connect_client_id_secret",
     "make_state",
     "verify_state",
 ]

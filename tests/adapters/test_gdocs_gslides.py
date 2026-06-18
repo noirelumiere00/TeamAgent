@@ -103,6 +103,8 @@ def test_gslides_get_presentation_text() -> None:
 
 def test_from_user_token_fail_closed_without_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """OAuth クライアント未設定（W1 未完）なら from_user_token は ValueError（fail-closed）。"""
+    monkeypatch.delenv("CONNECT_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("CONNECT_GOOGLE_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
     monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
     tok = OAuthToken(refresh_token="rt", scopes=("documents.readonly",))

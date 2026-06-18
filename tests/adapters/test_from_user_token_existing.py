@@ -15,6 +15,8 @@ from teamagent.adapters.oauth_token_store import OAuthToken
 
 
 def test_existing_adapters_from_user_token_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CONNECT_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("CONNECT_GOOGLE_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
     monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
     tok = OAuthToken(refresh_token="rt", scopes=("gmail.readonly",))

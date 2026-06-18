@@ -7,13 +7,23 @@ from __future__ import annotations
 
 import base64
 
+import pytest
+
 from teamagent.adapters.google_oauth_flow import (
     WORKSPACE_READONLY_SCOPES,
+    connect_client_id_secret,
     make_state,
     verify_state,
 )
 
 _SECRET = b"unit-test-secret"
+
+_CONNECT_ENV_VARS = (
+    "CONNECT_GOOGLE_CLIENT_ID",
+    "CONNECT_GOOGLE_CLIENT_SECRET",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+)
 
 
 def test_make_verify_state_roundtrip() -> None:
@@ -43,3 +53,46 @@ def test_verify_state_rejects_tampered_email() -> None:
 def test_workspace_scopes_are_all_readonly() -> None:
     assert len(WORKSPACE_READONLY_SCOPES) == 7
     assert all(s.endswith(".readonly") for s in WORKSPACE_READONLY_SCOPES)
+
+
+@pytest.fixture
+def _clean_oauth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """connect / 共有 OAuth の env を一旦全削除してから各テストで個別に設定する。"""
+    for var in _CONNECT_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_connect_client_prefers_connect_specific_env(
+    monkeypatch: pytest.MonkeyPatch, _clean_oauth_env: None
+) -> None:
+    """connect 専用(Web型)が共有 GOOGLE_*(Desktop型)より優先される＝client 不一致の根治。"""
+    monkeypatch.setenv("CONNECT_GOOGLE_CLIENT_ID", "web.apps.googleusercontent.com")
+    monkeypatch.setenv("CONNECT_GOOGLE_CLIENT_SECRET", "GOCSPX-web")
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-desktop")
+    assert connect_client_id_secret() == ("web.apps.googleusercontent.com", "GOCSPX-web")
+
+
+def test_connect_client_falls_back_to_shared_google_env(
+    monkeypatch: pytest.MonkeyPatch, _clean_oauth_env: None
+) -> None:
+    """CONNECT_* 未設定なら GOOGLE_* にフォールバック（後方互換・ローカル開発）。"""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "shared.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-shared")
+    assert connect_client_id_secret() == ("shared.apps.googleusercontent.com", "GOCSPX-shared")
+
+
+def test_connect_client_falls_back_per_variable(
+    monkeypatch: pytest.MonkeyPatch, _clean_oauth_env: None
+) -> None:
+    """id/secret は変数ごとに独立してフォールバックする（本番=id平文+secretのみSM の構成に対応）。"""
+    monkeypatch.setenv("CONNECT_GOOGLE_CLIENT_ID", "web.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "GOCSPX-shared")
+    assert connect_client_id_secret() == ("web.apps.googleusercontent.com", "GOCSPX-shared")
+
+
+def test_connect_client_none_when_unset(
+    monkeypatch: pytest.MonkeyPatch, _clean_oauth_env: None
+) -> None:
+    """何も無ければ (None, None)＝_flow() が明示エラーを出す前提。"""
+    assert connect_client_id_secret() == (None, None)

@@ -136,6 +136,23 @@ print(f\"export GOOGLE_OAUTH_REFRESH_TOKEN='{d['refresh_token']}'\")
         fi
     fi
 
+    # Connect-web 専用 Google OAuth (Web型クライアント) の client_secret。
+    # CONNECT_GOOGLE_CLIENT_ID は env(teamagent.env.base)に平文、client_secret のみ
+    # Secrets Manager。secret-string は client_secret の生文字列（JSONではない）。
+    # 上の GOOGLE_* (Desktop型/共有サービス認証) を connect の認可フローで使うと redirect
+    # 登録先(Web型)と client 不一致 → callback 500 になるため、connect 専用に分離する。
+    # google_oauth_flow.connect_client_id_secret() が CONNECT_GOOGLE_* を優先する。
+    if [[ -n "${CONNECT_GOOGLE_SECRET_NAME:-}" ]]; then
+        local csec
+        csec="$(_get_secret "$CONNECT_GOOGLE_SECRET_NAME" 2>/dev/null || true)"
+        if [[ -n "$csec" ]]; then
+            export CONNECT_GOOGLE_CLIENT_SECRET="$csec"
+            _log "OK: CONNECT_GOOGLE_CLIENT_SECRET loaded (${CONNECT_GOOGLE_CLIENT_SECRET:0:8}…)"
+        else
+            _log "WARN: CONNECT_GOOGLE_SECRET_NAME 設定済だが取得失敗（connect の Google 連携が client 不一致になる可能性）"
+        fi
+    fi
+
     # Vertex SA JSON（Gemini 動画分析）— Secrets Manager から取得してファイル化。
     # EC2 向け。Mac は VERTEX_SA_SECRET_NAME 未設定なので skip し .env のローカルパスを使う。
     if [[ -n "${VERTEX_SA_SECRET_NAME:-}" ]]; then

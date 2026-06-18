@@ -24,6 +24,7 @@ from typing import Any
 
 import structlog
 
+from teamagent.adapters.google_oauth_flow import connect_client_id_secret
 from teamagent.adapters.oauth_token_store import OAuthToken
 
 logger = structlog.get_logger(__name__)
@@ -92,15 +93,16 @@ def build_oauth_credentials(preferred_scopes: Sequence[str]) -> Any | None:
 def build_user_credentials(token: OAuthToken) -> Any:
     """本人の refresh token から OAuth Credentials を組み立てる（per-user・connect 用）。
 
-    共有 OAuth クライアント(env GOOGLE_CLIENT_ID/SECRET)を使う。未設定/未認可は ValueError
-    （fail-closed＝未認可は弾く）。
+    連携用 OAuth クライアント(CONNECT_GOOGLE_* 優先・無ければ GOOGLE_*)を使う。refresh token は
+    発行元 client に束縛されるため、consent(OAuthConsentFlow._flow) と **同一クライアント** で
+    refresh しなければ invalid_client で失敗する。両者とも connect_client_id_secret() を使い
+    クライアントを一致させる。未設定/未認可は ValueError（fail-closed＝未認可は弾く）。
     """
-    client_id = os.environ.get("GOOGLE_CLIENT_ID")
-    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    client_id, client_secret = connect_client_id_secret()
     if not (client_id and client_secret):
         raise ValueError(
-            "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET が未設定です"
-            "（W1: Google Cloud で OAuth クライアントを作成してください）"
+            "連携用 OAuth クライアント未設定"
+            "（CONNECT_GOOGLE_CLIENT_ID/SECRET または GOOGLE_CLIENT_ID/SECRET が必要・W1）"
         )
     if not token.refresh_token:
         raise ValueError("OAuthToken.refresh_token が空です（本人が未認可）")
