@@ -17,10 +17,14 @@ resource "aws_security_group" "vpce" {
     to_port     = 443
     protocol    = "tcp"
     # §Q-Q2: aiia-mcp も endpoint 経由（ECR pull/Secrets注入/Logs/KMS/Bedrock）。
+    # §U: connect-web も同様（Secrets/KMS/Logs を VPC 内で解決）。本日 2026-06-18 インシデントの
+    # 「EC2 worker SG 漏れで SM 不達」を Fargate 化に伴って繰り返さないための必須配線。
     # ここに入れ忘れると private_dns_enabled=true のため当該タスクだけ 443 が落ち provisioning ループになる。
     security_groups = concat(
       [aws_security_group.openclaw.id, aws_security_group.mcp.id],
       var.enable_aiia_mcp ? [aws_security_group.aiia_mcp[0].id] : [],
+      var.enable_connect_web ? [aws_security_group.connect_web[0].id] : [],
+      var.enable_ingest_schedule ? [aws_security_group.ingest[0].id] : [],
     )
   }
   egress {
