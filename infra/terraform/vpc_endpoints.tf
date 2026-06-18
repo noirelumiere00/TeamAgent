@@ -23,8 +23,13 @@ resource "aws_security_group" "vpce" {
     security_groups = concat(
       [aws_security_group.openclaw.id, aws_security_group.mcp.id],
       var.enable_aiia_mcp ? [aws_security_group.aiia_mcp[0].id] : [],
+      # §U-Phase1: connect-web Fargate も VPC endpoint 経由（PR #129）。
       var.enable_connect_web ? [aws_security_group.connect_web[0].id] : [],
+      # §U-Phase2: ingest Scheduled Task も VPC endpoint 経由（PR #129）。
       var.enable_ingest_schedule ? [aws_security_group.ingest[0].id] : [],
+      # §U-Part3-Step C: morning_digest Scheduled Task も VPC endpoint 経由（PR #131）。
+      # 追加忘れると private_dns_enabled=true のため 443 が落ち provisioning ループになる必須配線。
+      var.enable_morning_digest ? [aws_security_group.morning_digest[0].id] : [],
     )
   }
   egress {
