@@ -153,6 +153,22 @@ print(f\"export GOOGLE_OAUTH_REFRESH_TOKEN='{d['refresh_token']}'\")
         fi
     fi
 
+    # CSRF state 署名鍵（connect-web の make_state/verify_state が必須）。未設定だと
+    # /oauth2/callback が verify_state で ValueError → **生 500**（store の try/except の外で
+    # 起きるため connect_callback_store_failed ログにも出ない）。OAUTH_STATE_SECRET_NAME が
+    # あれば Secrets Manager から OAUTH_STATE_SECRET に展開（生文字列）。既に env で明示設定済なら
+    # 上書きしない。署名鍵なので値は **一切ログに出さない**（長さのみ）。
+    if [[ -n "${OAUTH_STATE_SECRET_NAME:-}" && -z "${OAUTH_STATE_SECRET:-}" ]]; then
+        local ostate
+        ostate="$(_get_secret "$OAUTH_STATE_SECRET_NAME" 2>/dev/null || true)"
+        if [[ -n "$ostate" ]]; then
+            export OAUTH_STATE_SECRET="$ostate"
+            _log "OK: OAUTH_STATE_SECRET loaded (len=${#OAUTH_STATE_SECRET})"
+        else
+            _log "WARN: OAUTH_STATE_SECRET_NAME 設定済だが取得失敗（connect callback が 500 になる）"
+        fi
+    fi
+
     # Vertex SA JSON（Gemini 動画分析）— Secrets Manager から取得してファイル化。
     # EC2 向け。Mac は VERTEX_SA_SECRET_NAME 未設定なので skip し .env のローカルパスを使う。
     if [[ -n "${VERTEX_SA_SECRET_NAME:-}" ]]; then
