@@ -24,6 +24,7 @@ resource "aws_security_group" "vpce" {
       [aws_security_group.openclaw.id, aws_security_group.mcp.id],
       var.enable_aiia_mcp ? [aws_security_group.aiia_mcp[0].id] : [],
       var.enable_connect_web ? [aws_security_group.connect_web[0].id] : [],
+      var.enable_ingest_schedule ? [aws_security_group.ingest[0].id] : [],
     )
   }
   egress {
