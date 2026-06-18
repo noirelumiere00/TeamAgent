@@ -269,7 +269,7 @@ resource "aws_ecs_task_definition" "connect_web" {
     name      = "connect-web"
     image     = var.mcp_image
     essential = true
-    command   = ["uv", "run", "python", "-m", "teamagent.connect_web"]
+    command   = ["python", "-m", "teamagent.connect_web"]
     portMappings = [
       { containerPort = 8788, protocol = "tcp" },
     ]

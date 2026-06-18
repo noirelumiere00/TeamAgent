@@ -184,7 +184,7 @@ resource "aws_ecs_task_definition" "ingest" {
     name      = "ingest"
     image     = var.mcp_image
     essential = true
-    command   = ["uv", "run", "python", "scripts/run_ingest_fargate.py"]
+    command   = ["python", "scripts/run_ingest_fargate.py"]
     environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
       { name = "INGEST_SOURCES", value = var.ingest_sources },

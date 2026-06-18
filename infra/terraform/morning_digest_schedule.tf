@@ -175,7 +175,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
     name      = "morning-digest"
     image     = var.mcp_image
     essential = true
-    command   = ["uv", "run", "python", "scripts/run_morning_digest_fargate.py"]
+    command   = ["python", "scripts/run_morning_digest_fargate.py"]
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
