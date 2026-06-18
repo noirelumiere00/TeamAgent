@@ -130,7 +130,7 @@
           //   この include に **意図的に入れない**＝パイロット中は dark。OpenClaw 自身がオーケスト
           //   レーションの外殻なので二重オーケストレーションを避ける。解禁はパイロット後に別途判断（§L C2）。
           // mail_constraints は運用外（factory 既定 OFF）なので明示 exclude。
-          // *reply* / *write* ワイルドカードは外し、include の明示許可リスト（mail_reply）に置き換え。
+          // *reply* / *write* ワイルドカードは Step C で外し、include の明示許可リスト（mail_reply）に置き換え。
           exclude: ["mail_constraints", "workspace_search", "proposal_deck", "*confirm*"],
         },
       },

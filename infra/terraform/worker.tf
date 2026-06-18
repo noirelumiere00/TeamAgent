@@ -51,8 +51,8 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
 data "aws_iam_policy_document" "worker_app" {
   # dev 配下の Secrets（Google OAuth / Slack / DB 等）を読む
   statement {
-    sid       = "ReadDevSecrets"
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    sid     = "ReadDevSecrets"
+    actions = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
     resources = [
       "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.project_name}/${var.environment}/*",
     ]
@@ -65,7 +65,7 @@ data "aws_iam_policy_document" "worker_app" {
   }
   # Bedrock 推論（検索/LLM系スキル。Gemini は Google Vertex=AWS権限不要）
   statement {
-    sid     = "BedrockInvoke"
+    sid = "BedrockInvoke"
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",

@@ -1,0 +1,313 @@
+# ============================================================
+# §U-Phase2: ingest を ECS Scheduled Task に移行（EC2 worker 廃止 Phase 2）
+# ============================================================
+# 役割: 社内ナレッジ（Slack / Google Drive / Sheets）を週次で pgvector に取り込む処理を
+#   EC2 systemd timer (`teamagent-ingest.timer`、毎週月 18:00 UTC = 火 03:00 JST) から
+#   EventBridge Scheduled Task → ECS RunTask（Fargate）に移行する（§U・2026-06-18 着手）。
+#
+# 選定理由（Plan の Phase 2 評価表に従う）:
+#   - Lambda+VPC ENI: 15 分制限・ENI cold start で重バッチに不向き
+#   - ECS Scheduled Task（本実装）: 15 分制限なし・既存 Fargate IAM 流用・OpenClaw cluster 同居
+#   - AWS Batch: 設定複雑・週次 1 回には過剰
+#
+# image: 既存 teamagent-mcp の ECR image をそのまま流用（teamagent パッケージ同一）。
+#   ENTRYPOINT は scripts/run_ingest_fargate.py（GOOGLE_OAUTH_JSON 展開 + ingest_sources.py 呼び出し）。
+
+# ---------- 変数 ----------
+variable "enable_ingest_schedule" {
+  description = "ingest の ECS Scheduled Task（taskdef/EventBridge rule/target/IAM）を有効化"
+  type        = bool
+  default     = false
+}
+
+variable "fargate_ingest_cpu" {
+  description = "ingest タスク CPU（embedding + Bedrock API call + RDS bulk write）"
+  type        = number
+  default     = 1024
+}
+
+variable "fargate_ingest_memory" {
+  description = "ingest タスク メモリ MB"
+  type        = number
+  default     = 4096
+}
+
+variable "ingest_owner_email" {
+  description = "ingest が走るときの owner_email（Drive/Sheets の per-user OAuth subject）"
+  type        = string
+  default     = "shogo@vectorinc.co.jp"
+}
+
+variable "ingest_sources" {
+  description = "取り込むソース（カンマ区切り・slack,gdrive,gsheets）"
+  type        = string
+  default     = "slack,gdrive,gsheets"
+}
+
+variable "ingest_schedule_expression" {
+  description = "EventBridge cron 式（既定: 毎週月 18:00 UTC = 火 03:00 JST・EC2 systemd timer と同タイミング）"
+  type        = string
+  default     = "cron(0 18 ? * MON *)"
+}
+
+variable "ingest_google_oauth_secret_name" {
+  description = "GOOGLE_OAUTH_JSON の Secrets Manager 名（client_id/client_secret/refresh_token の JSON 形式）"
+  type        = string
+  default     = "teamagent/dev/google_oauth"
+}
+
+# ---------- CloudWatch Logs ----------
+resource "aws_cloudwatch_log_group" "ingest" {
+  name              = "/${var.project_name}/${var.environment}/ingest"
+  retention_in_days = 30
+}
+
+# ---------- 以降は enable_ingest_schedule ゲート ----------
+
+# ingest が必要とする SM secrets（既存 data sources を流用しつつ、google_oauth のみ追加）
+data "aws_secretsmanager_secret" "google_oauth" {
+  count = var.enable_ingest_schedule ? 1 : 0
+  name  = var.ingest_google_oauth_secret_name
+}
+
+# --- 実行ロール（launch 時 secrets 注入用） ---
+resource "aws_iam_role" "ecs_execution_ingest" {
+  count              = var.enable_ingest_schedule ? 1 : 0
+  name               = "${var.project_name}-${var.environment}-ecs-exec-ingest"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_ingest_managed" {
+  count      = var.enable_ingest_schedule ? 1 : 0
+  role       = aws_iam_role.ecs_execution_ingest[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+data "aws_iam_policy_document" "ecs_execution_ingest_secrets" {
+  count = var.enable_ingest_schedule ? 1 : 0
+  statement {
+    sid     = "ReadIngestSecrets"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = concat([
+      data.aws_secretsmanager_secret.database_url.arn,
+      data.aws_secretsmanager_secret.slack_bot.arn,
+      data.aws_secretsmanager_secret.google_oauth[0].arn,
+    ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [])
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_execution_ingest_secrets" {
+  count  = var.enable_ingest_schedule ? 1 : 0
+  name   = "${var.project_name}-${var.environment}-ecs-exec-ingest-secrets"
+  role   = aws_iam_role.ecs_execution_ingest[0].id
+  policy = data.aws_iam_policy_document.ecs_execution_ingest_secrets[0].json
+}
+
+# --- タスクロール: RDS connect + Bedrock(embedding) + KMS Decrypt ---
+data "aws_iam_policy_document" "ingest_task" {
+  count = var.enable_ingest_schedule ? 1 : 0
+  statement {
+    sid       = "KmsDecryptForOauthTokens"
+    actions   = ["kms:Decrypt"]
+    resources = ["arn:aws:kms:${var.aws_region}:${local.account_id}:key/*"]
+  }
+  statement {
+    sid = "BedrockInvokeForEmbedding"
+    actions = [
+      "bedrock:InvokeModel",
+      "bedrock:InvokeModelWithResponseStream",
+    ]
+    resources = local.bedrock_resources
+  }
+}
+
+resource "aws_iam_role" "ingest_task" {
+  count              = var.enable_ingest_schedule ? 1 : 0
+  name               = "${var.project_name}-${var.environment}-ingest-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role_policy" "ingest_task" {
+  count  = var.enable_ingest_schedule ? 1 : 0
+  name   = "${var.project_name}-${var.environment}-ingest-task"
+  role   = aws_iam_role.ingest_task[0].id
+  policy = data.aws_iam_policy_document.ingest_task[0].json
+}
+
+# --- SG: ingress 無し（外部から到達不要・egress のみ） ---
+resource "aws_security_group" "ingest" {
+  count       = var.enable_ingest_schedule ? 1 : 0
+  name        = "${var.project_name}-${var.environment}-ingest-sg"
+  description = "ingest Scheduled Task (egress only: RDS/Secrets/Bedrock/Slack/Google API)"
+  vpc_id      = data.aws_vpc.default.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "${var.project_name}-${var.environment}-ingest-sg" }
+}
+
+# RDS への 5432 を ingest SG から許可（既存 db_from_mcp と同型・純加算）
+resource "aws_security_group_rule" "db_from_ingest" {
+  count                    = var.enable_ingest_schedule ? 1 : 0
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.ingest[0].id
+  security_group_id        = aws_security_group.db.id
+  description              = "PostgreSQL from ingest Scheduled Task"
+}
+
+# --- Task Definition ---
+# image は既存 teamagent-mcp（teamagent パッケージ同一・command で run_ingest_fargate.py を起動）。
+# GOOGLE_OAUTH_JSON は JSON 形式で SM から注入し、scripts/run_ingest_fargate.py が parse して 3 env に展開。
+resource "aws_ecs_task_definition" "ingest" {
+  count                    = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+  family                   = "${var.project_name}-${var.environment}-ingest"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.fargate_ingest_cpu
+  memory                   = var.fargate_ingest_memory
+  execution_role_arn       = aws_iam_role.ecs_execution_ingest[0].arn
+  task_role_arn            = aws_iam_role.ingest_task[0].arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+
+  container_definitions = jsonencode([{
+    name      = "ingest"
+    image     = var.mcp_image
+    essential = true
+    command   = ["uv", "run", "python", "scripts/run_ingest_fargate.py"]
+    environment = concat([
+      { name = "AWS_REGION", value = var.aws_region },
+      { name = "INGEST_SOURCES", value = var.ingest_sources },
+      { name = "INGEST_OWNER_EMAIL", value = var.ingest_owner_email },
+      { name = "STRUCTLOG_FORMAT", value = "json" },
+      ], var.enable_scrape_tools ? [
+      { name = "VERTEX_SA_PATH", value = "/tmp/vertex-sa.json" },
+      { name = "GEMINI_USE_VERTEX", value = "true" },
+      { name = "GEMINI_VERTEX_PROJECT", value = var.gemini_vertex_project },
+      { name = "GEMINI_VERTEX_LOCATION", value = var.gemini_vertex_location },
+    ] : [])
+    secrets = concat([
+      { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
+      { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
+      { name = "GOOGLE_OAUTH_JSON", valueFrom = data.aws_secretsmanager_secret.google_oauth[0].arn },
+      ], var.enable_scrape_tools ? [
+      { name = "VERTEX_SA_JSON", valueFrom = data.aws_secretsmanager_secret.vertex_sa[0].arn },
+    ] : [])
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.ingest.name
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "ingest"
+      }
+    }
+    # Scheduled Task なので long-running ではない・healthCheck 不要（exit code が成否を語る）
+  }])
+}
+
+# --- EventBridge → ECS RunTask の IAM role ---
+data "aws_iam_policy_document" "events_assume" {
+  count = var.enable_ingest_schedule ? 1 : 0
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "events_ingest_invoke" {
+  count              = var.enable_ingest_schedule ? 1 : 0
+  name               = "${var.project_name}-${var.environment}-events-ingest-invoke"
+  assume_role_policy = data.aws_iam_policy_document.events_assume[0].json
+}
+
+data "aws_iam_policy_document" "events_ingest_run_task" {
+  count = var.enable_ingest_schedule ? 1 : 0
+  statement {
+    sid       = "RunIngestTask"
+    actions   = ["ecs:RunTask"]
+    resources = [replace(aws_ecs_task_definition.ingest[0].arn, "/:[0-9]+$/", ":*")]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [aws_ecs_cluster.main.arn]
+    }
+  }
+  statement {
+    sid     = "PassExecutionAndTaskRoles"
+    actions = ["iam:PassRole"]
+    resources = [
+      aws_iam_role.ecs_execution_ingest[0].arn,
+      aws_iam_role.ingest_task[0].arn,
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "events_ingest_run_task" {
+  count  = var.enable_ingest_schedule ? 1 : 0
+  name   = "${var.project_name}-${var.environment}-events-ingest-run-task"
+  role   = aws_iam_role.events_ingest_invoke[0].id
+  policy = data.aws_iam_policy_document.events_ingest_run_task[0].json
+}
+
+# --- EventBridge rule: 毎週月 18:00 UTC = 火 03:00 JST（EC2 systemd timer と同タイミング） ---
+resource "aws_cloudwatch_event_rule" "ingest_weekly" {
+  count               = var.enable_ingest_schedule ? 1 : 0
+  name                = "${var.project_name}-${var.environment}-ingest-weekly"
+  description         = "週次 ingest（Slack/Drive/Sheets → pgvector）の Fargate 起動トリガ"
+  schedule_expression = var.ingest_schedule_expression
+}
+
+resource "aws_cloudwatch_event_target" "ingest_run_task" {
+  count    = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+  rule     = aws_cloudwatch_event_rule.ingest_weekly[0].name
+  arn      = aws_ecs_cluster.main.arn
+  role_arn = aws_iam_role.events_ingest_invoke[0].arn
+
+  ecs_target {
+    task_definition_arn = aws_ecs_task_definition.ingest[0].arn
+    task_count          = 1
+    launch_type         = "FARGATE"
+    platform_version    = "LATEST"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.ingest[0].id]
+      assign_public_ip = true
+    }
+  }
+
+  # 失敗時の retry（max 1 回・遅延 5 分）
+  retry_policy {
+    maximum_event_age_in_seconds = 3600
+    maximum_retry_attempts       = 1
+  }
+}
+
+# ---------- Outputs ----------
+output "ingest_task_definition_arn" {
+  description = "ingest Scheduled Task の TaskDefinition ARN（手動 run-task 検証用）"
+  value       = var.enable_ingest_schedule && var.mcp_image != "" ? aws_ecs_task_definition.ingest[0].arn : ""
+}
+
+output "ingest_log_group" {
+  description = "CloudWatch Logs グループ"
+  value       = aws_cloudwatch_log_group.ingest.name
+}
+
+output "ingest_event_rule" {
+  description = "EventBridge rule 名（Test Event で起動検証）"
+  value       = var.enable_ingest_schedule ? aws_cloudwatch_event_rule.ingest_weekly[0].name : ""
+}
