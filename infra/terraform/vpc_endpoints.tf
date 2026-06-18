@@ -21,6 +21,9 @@ resource "aws_security_group" "vpce" {
     security_groups = concat(
       [aws_security_group.openclaw.id, aws_security_group.mcp.id],
       var.enable_aiia_mcp ? [aws_security_group.aiia_mcp[0].id] : [],
+      # §U-Part3-Step C: morning_digest Scheduled Task も VPC endpoint 経由（SM/KMS/Bedrock/Logs）。
+      # ingest_schedule と同様に追加忘れると 443 が落ちて provisioning ループになる必須配線。
+      var.enable_morning_digest ? [aws_security_group.morning_digest[0].id] : [],
     )
   }
   egress {

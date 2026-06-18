@@ -256,6 +256,22 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # §U-Part3 Step C: 朝ダイジェスト Skill。EventBridge Scheduled Task（平日 9:30 JST）が
+    # scripts/run_morning_digest_fargate.py 経由で各 user_email ごとに呼ぶ。mention 経由では
+    # ないが統一的に ToolSpec 登録（ローカル検証用）。**既定 OFF**（USE_MORNING_DIGEST_TOOL=1）。
+    if _envflag("USE_MORNING_DIGEST_TOOL"):
+        from teamagent.skills.morning_digest.skill import MorningDigestSkill
+
+        morning_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                MorningDigestSkill.name,
+                MorningDigestSkill.description,
+                MorningDigestSkill,
+                factory=lambda: MorningDigestSkill(token_store=morning_store),
+            )
+        )
+
     return specs
 
 

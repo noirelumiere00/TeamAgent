@@ -332,10 +332,15 @@ resource "aws_ecs_task_definition" "mcp" {
       # §U-PartA-Step A: メール機能（readonly 3 つ）を OpenClaw mention 経由で公開（@AiLa メール要約等）。
       # factory.py の _envflag() ベースで ToolSpec 登録される（既に dev branch に実装済・PR #119）。
       # per-user OAuth は RdsTokenStore（昨日復旧した connect.newstv.co.jp 経由 token）を使う。
-      # mail_reply（書き込み系）は morning_digest 実装時に同 PR で公開（write 系の段階導入）。
       { name = "USE_MAIL_SUMMARY_TOOL", value = "true" },
       { name = "USE_FOLLOWUP_TOOL", value = "true" },
       { name = "USE_MAIL_LINK_TOOL", value = "true" },
+      # §U-Part3-Step C: 返信下書き生成（gmail.modify drafts.create のみ・送信は人間）。
+      # G4' で send/delete は denylist 物理封鎖（mail_reply/skill.py）。
+      { name = "USE_MAIL_REPLY_TOOL", value = "true" },
+      # 朝ダイジェスト Skill。EventBridge Scheduled Task（平日 9:30 JST）が
+      # scripts/run_morning_digest_fargate.py 経由で呼ぶ。mention 経由でも露出（ローカル検証用）。
+      { name = "USE_MORNING_DIGEST_TOOL", value = "true" },
       ], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },

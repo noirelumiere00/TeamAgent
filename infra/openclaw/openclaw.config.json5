@@ -117,16 +117,21 @@
             "operation_log",
             // §U-PartA-Step A: メール機能（readonly 3つ）を mention 経由で公開（@AiLa メール要約・要返信トリアージ・社内資料横断）。
             // per-user OAuth(本人受信箱)で動作・DLPマスク後 Bedrock 要約（mail_summary/skill.py の G1-G7 死守）。
-            // mail_reply（書き込み系・Gmail draft 作成）は morning_digest 実装時に同 PR で公開する（write 系の段階導入）。
             "mail_summary", "mail_followup", "mail_to_internal_context",
+            // §U-Part3-Step C: 返信下書き生成も公開（gmail.modify drafts.create のみ・送信は人間が手動）。
+            // mail_reply.skill.py の G4' で send/delete は denylist 物理封鎖（コードで保証）。
+            "mail_reply",
+            // morning_digest は EventBridge Scheduled Task で起動・mention 経由で呼ばれないが、
+            // ローカル検証・将来の手動 trigger 用に include しておく。USE_MORNING_DIGEST_TOOL=1 が必要。
+            "morning_digest",
           ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
           //   この include に **意図的に入れない**＝パイロット中は dark。OpenClaw 自身がオーケスト
           //   レーションの外殻なので二重オーケストレーションを避ける。解禁はパイロット後に別途判断（§L C2）。
-          // mail_* は include で個別判定に切替（mail_summary/mail_followup/mail_to_internal_context は明示公開、
-          // mail_reply は *reply* で引き続き exclude・mail_constraints は include に入れず exclude へ）。
-          exclude: ["mail_constraints", "workspace_search", "proposal_deck", "*reply*", "*confirm*", "*write*"],
+          // mail_constraints は運用外（factory 既定 OFF）なので明示 exclude。
+          // *reply* / *write* ワイルドカードは外し、include の明示許可リスト（mail_reply）に置き換え。
+          exclude: ["mail_constraints", "workspace_search", "proposal_deck", "*confirm*"],
         },
       },
     },
