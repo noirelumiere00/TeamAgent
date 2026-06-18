@@ -188,9 +188,34 @@ resource "aws_instance" "worker" {
     [Service]
     Type=simple
     WorkingDirectory=/opt/teamagent/app
-    ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source scripts/load_secrets.sh; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
+    # env 既設なら load_secrets は skip し、SM 一時不達でも起動できるようにする（load_secrets
+    # 内部にもタイムアウトと env 優先 fallback あり・2026-06-18 SM 不達インシデント対策）。
+    ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; if [[ -z "$DATABASE_URL" || -z "$SLACK_BOT_TOKEN" ]]; then source scripts/load_secrets.sh; fi; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
     Restart=always
     RestartSec=5
+    TimeoutStartSec=60
+    Environment=PYTHONUNBUFFERED=1
+    [Install]
+    WantedBy=multi-user.target
+    SVC
+    # connect-web は **起動時に DB/Secret を要求しない**（create_app は OAUTH_REDIRECT_URI のみ・
+    # store(KMS/RDS) は /oauth2/callback 初回まで遅延）。よって load_secrets を起動 path から
+    # 外し、env(.env.base) だけで起動できる構成にする（SM 不達で起動ごと無限ハングを防止・
+    # 2026-06-18 インシデントの恒久対策）。call back 動作に必要な値は teamagent.env.base か
+    # 一時 EnvironmentFile で注入。
+    cat > /etc/systemd/system/teamagent-connect.service <<'SVC'
+    [Unit]
+    Description=TeamAgent Connect Web (per-user OAuth callback)
+    After=network-online.target
+    Wants=network-online.target
+    [Service]
+    Type=simple
+    WorkingDirectory=/opt/teamagent/app
+    EnvironmentFile=-/opt/teamagent/connect_web.env
+    ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; if [[ -n "$CONNECT_WEB_LOAD_SECRETS" && -z "$DATABASE_URL" ]]; then source scripts/load_secrets.sh || true; fi; set +a; exec ./.venv/bin/python -m teamagent.connect_web'
+    Restart=always
+    RestartSec=5
+    TimeoutStartSec=60
     Environment=PYTHONUNBUFFERED=1
     [Install]
     WantedBy=multi-user.target

@@ -94,6 +94,62 @@ aws ec2 stop-instances --region ap-northeast-1 --instance-ids i-0feaa3c103ab6ef9
 - 稼働中: t4g.medium ≈ $29/mo + EBS。停止中: EBS 30GB ≈ $2.4/mo のみ。
 - 完全ゼロ化: `terraform destroy -target=aws_instance.worker`（再構築は worker.tf で targeted apply・5分）。
 
+## インシデント runbook: Secrets Manager 不達で connect-web/Bot が起動不能
+
+2026-06-18 発生インシデント。SM エンドポイントだけ TCP ブラックホール（STS は健全）→
+`load_secrets.sh` 内の `aws secretsmanager get-secret-value` が無限ハング（旧版はタイムアウト無）
+→ ExecStart ごと固まり :8788 未 listen → healthz=000。
+
+### 診断（30秒で判定）
+SSM 対話シェル（Run Command は無効）で：
+```bash
+getent hosts secretsmanager.ap-northeast-1.amazonaws.com   # private 172.31.x = VPC endpoint 不健全 / public = NAT 経路
+getent hosts sts.ap-northeast-1.amazonaws.com               # 比較対象（NAT 健全性の指標）
+timeout 5 bash -c 'exec 3<>/dev/tcp/secretsmanager.ap-northeast-1.amazonaws.com/443' && echo SM443=OK || echo SM443=FAIL
+ps -eo pid,etimes,cmd | grep -E 'secretsmanager|connect_web' | grep -v grep   # 詰まったプロセス
+```
+
+### 復旧 A: SM が到達可能なら再起動だけ
+```bash
+sudo systemctl restart teamagent-connect.service
+sleep 25; for i in $(seq 1 8); do curl -s -o /dev/null -w "healthz=%{http_code}\n" http://127.0.0.1:8788/healthz; sleep 12; done
+```
+
+### 復旧 B: SM 不達のまま healthz 200 に即戻す（ブリッジ）
+connect-web は起動時に DB/Secret 不要（store は callback 遅延）。`load_secrets` を噛ませない
+drop-in で env だけ起動：
+```bash
+sudo systemctl stop teamagent-connect.service
+sudo systemctl kill -s 9 teamagent-connect.service 2>/dev/null || true
+sudo mkdir -p /etc/systemd/system/teamagent-connect.service.d
+sudo tee /etc/systemd/system/teamagent-connect.service.d/bridge-no-loadsecrets.conf >/dev/null <<'CONF'
+[Service]
+ExecStart=
+ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; set +a; cd /opt/teamagent/app; exec ./.venv/bin/python -m teamagent.connect_web'
+CONF
+sudo systemctl daemon-reload && sudo systemctl start teamagent-connect.service
+```
+SM 回復後は drop-in を削除して通常運用へ戻す（`sudo rm …/bridge-no-loadsecrets.conf; sudo systemctl daemon-reload; sudo systemctl restart teamagent-connect.service`）。
+
+### 復旧 C: callback まで完全動作させたいが SM 不達のまま
+B のブリッジで起動し、callback で必要な値を `/opt/teamagent/teamagent.env.base` に手注入：
+- `DATABASE_URL`（`teamagent/dev/db_password` から `postgresql://teamagent:<pass>@<RDS_HOST>:5432/teamagent?sslmode=require` を組み立て・urlencode 必要）
+- `GOOGLE_CLIENT_SECRET`（`teamagent/dev/connect_google_secret` の生文字列）
+- `OAUTH_KMS_KEY_ID`、`OAUTH_STATE_SECRET`（投入済の場合は不要）
+値は SM 直接 or AWS コンソールから別経路で取得。`sudo systemctl restart teamagent-connect.service`。
+
+### 恒久対策（コードで根治・本ブランチで実装済）
+- `scripts/load_secrets.sh`: `_get_secret()` に `--cli-connect-timeout 5/--cli-read-timeout 10` で
+  fail-fast（無限ハング根絶）＋ `DATABASE_URL`/`SLACK_*`/`CONNECT_GOOGLE_CLIENT_SECRET` が env に
+  あれば SM 取得を skip。
+- `infra/terraform/worker.tf` の `teamagent-connect.service` ユニット: `load_secrets` を条件付き
+  （`CONNECT_WEB_LOAD_SECRETS=1` ＋ `DATABASE_URL` 未設定）で呼び、`|| true` で失敗時も起動継続。
+  `TimeoutStartSec=60` を付与し、systemd の restart ループに乗せる。
+- VPC endpoint 障害（diag で private IP 解決される場合）: SM 用 VPC interface endpoint の SG/ENI/
+  Private DNS を点検・修復、必要なら一旦削除して NAT 経由に戻す（`getent` が public IP 解決に
+  戻れば NAT 経路）。Terraform 外で作られているため `aws ec2 describe-vpc-endpoints
+  --filters Name=service-name,Values=com.amazonaws.ap-northeast-1.secretsmanager` で確認。
+
 ## 関連
 - IaC: `infra/terraform/worker.tf`（PR #107）/ EC2上書き: `infra/deploy/ec2.overrides.env`
 - デプロイ: `scripts/deploy_to_ec2.sh` / 秘密展開: `scripts/load_secrets.sh`
