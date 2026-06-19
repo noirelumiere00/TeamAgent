@@ -154,12 +154,43 @@ async def _resolve_metadata(
 
     if company_shared_groups is not None:
         # 会社共有モード: 全員が同じ会社ナレッジを見る。OC 申告の email/groups/role は破棄、
-        # slack_user_id は「誰が聞いたか」の監査用途のみ（認可には一切使わない）。
+        # slack_user_id は「誰が聞いたか」の監査用途。
         if raw.get("user_email") or raw.get("user_groups") or raw.get("user_role"):
             logger.warning("identity_spoof_rejected", tool=tool, reason="oc_fields_dropped")
+        meta = company_member_metadata(company_shared_groups)
         audit_uid = slack_user_id if isinstance(slack_user_id, str) and slack_user_id else None
-        logger.info("identity_company_shared", tool=tool, slack_user_id_audit=audit_uid)
-        return company_member_metadata(company_shared_groups), None
+        # §U: per-user OAuth tool（mail_*/morning_digest）用に本人 user_email も server-side で
+        # 解決して載せる（会社共有グループは維持＝search 等は従来どおり全社可視）。OAuth token は
+        # Slack 会社メールを key に保存される（make_connect_links/connect 開始時の state）ため、
+        # ここで slack_user_id → 会社メール を解決すれば mail tool が token を引ける。
+        # 解決失敗（resolver 無/Slack 不達/非メンバ）は user_email=None のまま＝search は company
+        # groups で動き続け（可用性維持）、mail は skill 側で fail-closed（本人未解決で拒否）。
+        if identity_resolver is not None and audit_uid:
+            try:
+                identity = await identity_resolver(audit_uid)
+            except Exception:
+                logger.warning("identity_spoof_rejected", tool=tool, reason="resolver_error")
+                identity = None
+            resolved = (
+                build_rls_metadata(identity, allowed_domains=allowed_domains) if identity else None
+            )
+            if resolved and resolved.get("user_email"):
+                meta = {
+                    **meta,
+                    "user_email": resolved["user_email"],
+                    # 会社共有グループ + 本人ドメイングループをマージ（重複除去）。
+                    "user_groups": sorted(set(meta["user_groups"]) | set(resolved["user_groups"])),
+                    "identity_verified": True,
+                }
+                logger.info(
+                    "identity_resolved",
+                    tool=tool,
+                    source="company_shared+resolver",
+                    domain=_domain_of(resolved["user_email"]),
+                )
+        if meta.get("user_email") is None:
+            logger.info("identity_company_shared", tool=tool, slack_user_id_audit=audit_uid)
+        return meta, None
 
     if identity_resolver is not None:
         # 外殻が email/groups/role を申告してきたら破棄して警告（攻撃 or バグの早期検知）。
@@ -169,9 +200,8 @@ async def _resolve_metadata(
             if require_rls:
                 logger.warning("identity_spoof_rejected", tool=tool, reason="missing_slack_user_id")
                 return {}, _err(
-                    "RLS required: _user_context.slack_user_id is missing. "
-                    "Caller MUST retry with arguments including "
-                    '_user_context: {"slack_user_id": "<the slack user_id of the requester in this conversation>"}.'
+                    "RLS required: _user_context.slack_user_id is missing. Caller MUST retry "
+                    'with arguments including _user_context: {"slack_user_id": "<requester id>"}.'
                 )
             return no_access_metadata(), None
         try:
@@ -179,20 +209,24 @@ async def _resolve_metadata(
         except Exception:
             logger.warning("identity_spoof_rejected", tool=tool, reason="resolver_error")
             identity = None
-        meta = build_rls_metadata(identity, allowed_domains=allowed_domains) if identity else None
-        if meta is None:
+        strict_meta = (
+            build_rls_metadata(identity, allowed_domains=allowed_domains) if identity else None
+        )
+        if strict_meta is None:
             if require_rls:
                 logger.warning("identity_spoof_rejected", tool=tool, reason="resolve_none")
                 return {}, _err(
-                    "RLS required: identity could not be resolved from the provided "
-                    "_user_context.slack_user_id. "
-                    "Verify the slack_user_id is correct and the user has completed /teamagent connect."
+                    "RLS required: identity could not be resolved from "
+                    "_user_context.slack_user_id. Verify it and /teamagent connect completion."
                 )
             return no_access_metadata(), None
         logger.info(
-            "identity_resolved", tool=tool, source="resolver", domain=_domain_of(meta["user_email"])
+            "identity_resolved",
+            tool=tool,
+            source="resolver",
+            domain=_domain_of(strict_meta["user_email"]),
         )
-        return meta, None
+        return strict_meta, None
 
     # LEGACY モード（resolver 未注入＝テスト/PoC 専用）。本番エントリポイントは resolver 必須。
     email = raw.get("user_email")
@@ -421,10 +455,18 @@ def build_production_server() -> Server:
     """本番用に構築する。会社共有(§G)優先＝`TEAMAGENT_SHARED_COMPANY_DOMAINS` があればそれ、
 
     無ければ per-user resolver 必須（`SLACK_BOT_TOKEN` 未設定なら fail-closed で起動拒否）。
+
+    §U ハイブリッド: 会社共有モードでも `SLACK_BOT_TOKEN` があれば resolver を併せて渡す。
+    search 等は会社共有グループで全社可視のまま、mail_*/morning_digest は resolver が解決した
+    本人 user_email で per-user OAuth token を引ける（_resolve_metadata の company_shared 参照）。
     """
     company = company_shared_groups_from_env()
     if company is not None:
-        return build_server(company_shared_groups=company)
+        return build_server(
+            company_shared_groups=company,
+            identity_resolver=build_slack_identity_resolver(),
+            allowed_domains=allowed_domains_from_env(),
+        )
     resolver = build_slack_identity_resolver()
     if resolver is None:
         raise RuntimeError(

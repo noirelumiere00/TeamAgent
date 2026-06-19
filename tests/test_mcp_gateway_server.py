@@ -85,7 +85,7 @@ def test_list_tools_includes_user_context() -> None:
 
 async def test_fail_closed_without_user_email() -> None:
     out = _parse(await dispatch_tool(_BY_NAME, "echo", {"q": "hi"}, require_rls=True))
-    assert "fail-closed" in out["error"]
+    assert "RLS required" in out["error"]
 
 
 async def test_rls_context_propagates_with_user_email() -> None:

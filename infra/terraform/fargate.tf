@@ -153,6 +153,8 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
     resources = concat([
       data.aws_secretsmanager_secret.bearer.arn,
       data.aws_secretsmanager_secret.database_url.arn,
+      # §U ハイブリッド identity: mcp task が SLACK_BOT_TOKEN を注入できるよう取得権限を付与。
+      data.aws_secretsmanager_secret.slack_bot.arn,
     ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [])
   }
 }
@@ -359,6 +361,10 @@ resource "aws_ecs_task_definition" "mcp" {
     secrets = concat([
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
+      # §U ハイブリッド identity: mcp が slack_user_id → 会社メールを server-side 解決して
+      # per-user OAuth(mail_*/morning_digest) の token を引くために必要（users:read.email scope）。
+      # openclaw と同じ secret を共用。会社共有グループ(search)はこれ無しでも動く（graceful degrade）。
+      { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_JSON", valueFrom = data.aws_secretsmanager_secret.vertex_sa[0].arn },
     ] : [])

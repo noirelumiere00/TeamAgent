@@ -112,7 +112,7 @@ async def test_strict_downgrade_closed_without_slack_user_id() -> None:
             require_rls=True,
         )
     )
-    assert "fail-closed" in out["error"]
+    assert "RLS required" in out["error"]
     assert "slack_user_id" in out["error"]
 
 
@@ -126,7 +126,7 @@ async def test_strict_resolver_none_fail_closed() -> None:
             require_rls=True,
         )
     )
-    assert "fail-closed" in out["error"]
+    assert "RLS required" in out["error"]
 
 
 async def test_strict_resolver_exception_fail_closed() -> None:
@@ -139,7 +139,7 @@ async def test_strict_resolver_exception_fail_closed() -> None:
             require_rls=True,
         )
     )
-    assert "fail-closed" in out["error"]
+    assert "RLS required" in out["error"]
 
 
 async def test_strict_disallowed_domain_fail_closed() -> None:
@@ -154,7 +154,7 @@ async def test_strict_disallowed_domain_fail_closed() -> None:
             require_rls=True,
         )
     )
-    assert "fail-closed" in out["error"]
+    assert "RLS required" in out["error"]
 
 
 async def test_legacy_forces_member_role() -> None:
@@ -246,3 +246,82 @@ def test_company_shared_groups_from_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert company_shared_groups_from_env() is None
     monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "VectorInc.co.jp, foo.com ,")
     assert company_shared_groups_from_env() == frozenset({"vectorinc.co.jp", "foo.com"})
+
+
+# ── §U ハイブリッド: 会社共有グループ維持 + per-user 本人 email 解決 ────────────────
+
+
+async def test_company_shared_with_resolver_loads_user_email() -> None:
+    # 会社共有 + resolver: search 用の会社グループは維持しつつ、mail 用の本人 user_email も載る。
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {"q": "hi", USER_CONTEXT_KEY: {"slack_user_id": "U12345"}},
+            company_shared_groups=frozenset({"vectorinc.co.jp"}),
+            identity_resolver=_OK,
+        )
+    )
+    assert out["email"] == "taro@vectorinc.co.jp"  # mail token lookup 用に解決される
+    assert "vectorinc.co.jp" in out["groups"]  # 会社共有グループは維持＝search 全社可視
+    assert out["role"] == "member"  # admin 昇格不可は不変
+    assert out["verified"] is True  # server-side 解決済
+
+
+async def test_company_shared_with_resolver_oc_fields_dropped() -> None:
+    # 会社共有 + resolver でも OC 申告 email/groups/role は破棄（解決は slack_user_id のみが権威）。
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {
+                "q": "hi",
+                USER_CONTEXT_KEY: {
+                    "slack_user_id": "U12345",
+                    "user_email": "attacker@evil.com",
+                    "user_groups": ["secret"],
+                    "user_role": "admin",
+                },
+            },
+            company_shared_groups=frozenset({"vectorinc.co.jp"}),
+            identity_resolver=_OK,
+        )
+    )
+    assert out["email"] == "taro@vectorinc.co.jp"  # OC 申告 email は不採用・解決値のみ
+    assert "secret" not in out["groups"]
+    assert out["role"] == "member"
+
+
+async def test_company_shared_resolver_none_keeps_company_groups() -> None:
+    # 解決失敗(未知ユーザ)でも会社共有は維持＝search は動き続け（fail-closed しない）、mail は
+    # user_email=None で skill 側 fail-closed。graceful degradation の要。
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {"q": "hi", USER_CONTEXT_KEY: {"slack_user_id": "U99999"}},  # 未知→解決None
+            company_shared_groups=frozenset({"vectorinc.co.jp"}),
+            identity_resolver=_OK,
+            require_rls=True,
+        )
+    )
+    assert "error" not in out  # 会社共有は fail-closed しない（search 可用性維持）
+    assert out["email"] is None  # mail は本人未解決＝skill 側で fail-closed
+    assert out["groups"] == ["vectorinc.co.jp"]
+
+
+async def test_company_shared_resolver_exception_keeps_company_groups() -> None:
+    # resolver 例外でも会社共有は維持（mail だけ未解決）。
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {"q": "hi", USER_CONTEXT_KEY: {"slack_user_id": "U12345"}},
+            company_shared_groups=frozenset({"vectorinc.co.jp"}),
+            identity_resolver=_resolver({}, raises=True),
+            require_rls=True,
+        )
+    )
+    assert "error" not in out
+    assert out["email"] is None
+    assert out["groups"] == ["vectorinc.co.jp"]

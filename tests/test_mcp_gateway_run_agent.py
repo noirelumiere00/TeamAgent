@@ -128,7 +128,7 @@ async def test_dispatch_run_agent_rls_fail_closed(monkeypatch: pytest.MonkeyPatc
             require_rls=True,
         )
     )
-    assert "fail-closed" in out["error"]
+    assert "RLS required" in out["error"]
     assert called["n"] == 0
 
 
