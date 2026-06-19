@@ -6,6 +6,7 @@ UI/UX 改善（スコアボード / 要返信の独立 section / 下書き昇格
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -68,7 +69,9 @@ def _digest() -> MorningDigestOutput:
                 start_at="2026-06-19T01:00:00+00:00",
                 location_scrubbed="渋谷オフィス 3F会議室A",
             ),
-            CalendarEventItem(summary_scrubbed="社内レビュー", start_at="2026-06-19T05:00:00+00:00"),
+            CalendarEventItem(
+                summary_scrubbed="社内レビュー", start_at="2026-06-19T05:00:00+00:00"
+            ),
         ],
         drafts_created=1,
     )
@@ -122,3 +125,33 @@ def test_medium_compressed_with_remaining() -> None:
 def test_fmt_time_parses_iso_to_jst() -> None:
     assert mod._fmt_time("2026-06-19T01:00:00+00:00") == "10:00"  # UTC 01:00 → JST 10:00
     assert mod._fmt_time(None) == "?"
+
+
+class _FakeAsyncClient:
+    """SlackClient._client (AsyncWebClient) の最小フェイク（async メソッド）。"""
+
+    async def users_lookupByEmail(self, *, email: str) -> dict[str, Any]:  # noqa: N802
+        assert email == "s-komata@vectorinc.co.jp"
+        return {"ok": True, "user": {"id": "U09CX1CCBLN"}}
+
+    async def conversations_open(self, *, users: str) -> dict[str, Any]:
+        assert users == "U09CX1CCBLN"
+        return {"ok": True, "channel": {"id": "D0BA1TWN6AC"}}
+
+
+class _FakeSlack:
+    """SlackClient のフェイク（WebClient を _client で保持）。"""
+
+    def __init__(self) -> None:
+        self._client = _FakeAsyncClient()
+
+
+def test_email_to_slack_user_id_uses_underscore_client() -> None:
+    # 回帰固定: _web_client/client でなく _client から AsyncWebClient を取り await する。
+    uid = asyncio.run(mod._email_to_slack_user_id(_FakeSlack(), "s-komata@vectorinc.co.jp"))
+    assert uid == "U09CX1CCBLN"
+
+
+def test_open_im_channel_uses_underscore_client() -> None:
+    ch = asyncio.run(mod._open_im_channel(_FakeSlack(), "U09CX1CCBLN"))
+    assert ch == "D0BA1TWN6AC"

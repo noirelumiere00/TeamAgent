@@ -272,24 +272,35 @@ async def _deliver_to_slack(user_email: str, text: str, blocks: list[dict[str, A
 async def _email_to_slack_user_id(slack: Any, email: str) -> str | None:
     """users.lookupByEmail で Slack user_id を解決（bot scope: users:read.email）。"""
     try:
-        client = getattr(slack, "_web_client", None) or getattr(slack, "client", None)
+        # SlackClient は AsyncWebClient を self._client に保持。async メソッドは直接 await する
+        # （to_thread に渡すと coroutine が未await のまま返り解決できない）。
+        client = getattr(slack, "_client", None)
         if client is None:
+            print("[run_morning_digest_fargate] WARN: slack._client 取得失敗", file=sys.stderr)
             return None
-        resp = await asyncio.to_thread(client.users_lookupByEmail, email=email)
+        resp = await client.users_lookupByEmail(email=email)
         return str(resp.get("user", {}).get("id", "")) or None
-    except Exception:
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: lookupByEmail 失敗 {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return None
 
 
 async def _open_im_channel(slack: Any, user_id: str) -> str | None:
     """conversations.open で本人 IM channel を取得（bot scope: im:write）。"""
     try:
-        client = getattr(slack, "_web_client", None) or getattr(slack, "client", None)
+        client = getattr(slack, "_client", None)
         if client is None:
             return None
-        resp = await asyncio.to_thread(client.conversations_open, users=user_id)
+        resp = await client.conversations_open(users=user_id)
         return str(resp.get("channel", {}).get("id", "")) or None
-    except Exception:
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: conversations.open 失敗 {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return None
 
 
