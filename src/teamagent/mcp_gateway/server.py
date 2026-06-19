@@ -168,7 +168,11 @@ async def _resolve_metadata(
         if not slack_user_id or not isinstance(slack_user_id, str):
             if require_rls:
                 logger.warning("identity_spoof_rejected", tool=tool, reason="missing_slack_user_id")
-                return {}, _err("RLS required: slack_user_id is missing (fail-closed)")
+                return {}, _err(
+                    "RLS required: _user_context.slack_user_id is missing. "
+                    "Caller MUST retry with arguments including "
+                    '_user_context: {"slack_user_id": "<the slack user_id of the requester in this conversation>"}.'
+                )
             return no_access_metadata(), None
         try:
             identity = await identity_resolver(slack_user_id)
@@ -179,7 +183,11 @@ async def _resolve_metadata(
         if meta is None:
             if require_rls:
                 logger.warning("identity_spoof_rejected", tool=tool, reason="resolve_none")
-                return {}, _err("RLS required: identity could not be resolved (fail-closed)")
+                return {}, _err(
+                    "RLS required: identity could not be resolved from the provided "
+                    "_user_context.slack_user_id. "
+                    "Verify the slack_user_id is correct and the user has completed /teamagent connect."
+                )
             return no_access_metadata(), None
         logger.info(
             "identity_resolved", tool=tool, source="resolver", domain=_domain_of(meta["user_email"])
@@ -190,7 +198,11 @@ async def _resolve_metadata(
     email = raw.get("user_email")
     if require_rls and not email:
         logger.warning("mcp_rls_fail_closed", tool=tool)
-        return {}, _err("RLS required: _user_context.user_email is missing (fail-closed)")
+        return {}, _err(
+            "RLS required: _user_context.user_email is missing. "
+            "Caller MUST retry with arguments including "
+            '_user_context: {"user_email": "<the requester\'s email>"} (LEGACY mode).'
+        )
     meta = {
         "user_email": email,
         "user_groups": list(raw.get("user_groups") or []),

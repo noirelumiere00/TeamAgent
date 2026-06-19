@@ -64,6 +64,7 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
         "本人の受信箱（gmail.readonly・メタデータのみ）で指定クライアントのメールを確認し、"
         "対応する社内のSlackスレッド・過去提案・営業FBを突き合わせて参照リンクつきで返す。"
         "『このメール、社内で何か話してた?』に答える。本人が /teamagent connect 済みの時のみ。"
+        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める（mcp 境界の本人解決鍵）。"
     )
     input_schema: ClassVar[type[BaseModel]] = MailInternalContextInput
     output_schema: ClassVar[type[BaseModel]] = MailInternalContextOutput

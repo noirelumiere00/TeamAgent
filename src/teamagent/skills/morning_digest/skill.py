@@ -100,6 +100,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         "本人の受信箱・カレンダー・Slack 未返信メンションをまとめた朝ダイジェストを組み立てる。"
         "重要メールに対しては Gmail draft も作成する（送信しない）。"
         "本人が連携済みの時のみ動作。Mention 経由ではなく EventBridge Scheduled Task で起動される。"
+        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める（mcp 境界の本人解決鍵）。"
     )
     input_schema: ClassVar[type[BaseModel]] = MorningDigestInput
     output_schema: ClassVar[type[BaseModel]] = MorningDigestOutput
