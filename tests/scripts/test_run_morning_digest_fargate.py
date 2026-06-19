@@ -1,0 +1,124 @@
+"""scripts/run_morning_digest_fargate.py の Block Kit 整形ロジック単体テスト。
+
+UI/UX 改善（スコアボード / 要返信の独立 section / 下書き昇格 / カレンダー会議室 /
+アクションボタン）を固定する。scripts/ は package でないため importlib でロードする。
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from typing import Any
+
+from teamagent.skills.morning_digest.schema import (
+    CalendarEventItem,
+    MailDigestItem,
+    MorningDigestOutput,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+SCRIPT_PATH = PROJECT_ROOT / "scripts" / "run_morning_digest_fargate.py"
+
+
+def _load() -> Any:
+    mod_name = "run_morning_digest_under_test"
+    spec = importlib.util.spec_from_file_location(mod_name, SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+mod = _load()
+
+
+def _digest() -> MorningDigestOutput:
+    return MorningDigestOutput(
+        user_email_masked="s***@vectorinc.co.jp",
+        mail_digest=[
+            MailDigestItem(
+                counterpart_masked="え***@nobel.co.jp",
+                subject_scrubbed="動画制作の件",
+                importance="high",
+                summary="25日投稿に向け判断待ち。",
+                has_draft=True,
+            ),
+            MailDigestItem(
+                counterpart_masked="k***@gmo.com",
+                subject_scrubbed="振込自動化",
+                importance="high",
+                summary="回答待ち。",
+                has_draft=False,
+            ),
+            MailDigestItem(
+                counterpart_masked="a***@ex.com", subject_scrubbed="請求書", importance="medium"
+            ),
+            MailDigestItem(
+                counterpart_masked="b***@ex.com", subject_scrubbed="日程調整", importance="medium"
+            ),
+            MailDigestItem(
+                counterpart_masked="c***@ex.com", subject_scrubbed="お知らせ", importance="low"
+            ),
+        ],
+        calendar_events=[
+            CalendarEventItem(
+                summary_scrubbed="ノーベル定例",
+                start_at="2026-06-19T01:00:00+00:00",
+                location_scrubbed="渋谷オフィス 3F会議室A",
+            ),
+            CalendarEventItem(summary_scrubbed="社内レビュー", start_at="2026-06-19T05:00:00+00:00"),
+        ],
+        drafts_created=1,
+    )
+
+
+def test_scoreboard_counts() -> None:
+    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    # 2番目の block が fields スコアボード。high=2 / drafts=1 / cal=2 / medium=2。
+    fields_text = " ".join(f["text"] for f in blocks[1]["fields"])
+    assert "要返信*  `2件`" in fields_text
+    assert "下書き済*  `1件`" in fields_text
+    assert "今日の予定*  `2件`" in fields_text
+    assert "要確認*  `2件`" in fields_text
+
+
+def test_high_priority_section_and_draft_elevated() -> None:
+    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    dump = str(blocks)
+    assert "いますぐ返信したい（2件）" in dump
+    # has_draft=True の high 項目に「✏️ 返信下書き作成済」+ 下書きリンクが出る。
+    assert "✏️ 返信下書き作成済" in dump
+    assert "下書きを見る" in dump
+
+
+def test_calendar_shows_room_location() -> None:
+    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    dump = str(blocks)
+    assert "🗓 *今日の予定*" in dump
+    assert "📍渋谷オフィス 3F会議室A" in dump  # 会議室を 📍付きで明記
+    assert "*10:00*" in dump  # ISO → HH:MM 変換（UTC 01:00 → JST 表示でなく原時刻 HH:MM）
+
+
+def test_action_buttons_present() -> None:
+    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    actions = [b for b in blocks if b.get("type") == "actions"]
+    assert actions, "アクションバーが無い"
+    labels = [e["text"]["text"] for e in actions[0]["elements"]]
+    assert any("下書きを確認" in label for label in labels)  # drafts>0 なので出る
+    assert any("受信トレイ" in label for label in labels)
+    assert any("カレンダー" in label for label in labels)
+
+
+def test_medium_compressed_with_remaining() -> None:
+    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    dump = str(blocks)
+    # medium 2件 + low 1件。medium[:3] で2件表示・残り low 1件は「+1件」省略。
+    assert "目を通したい（2件）" in dump
+    assert "〈+1件〉" in dump
+
+
+def test_fmt_time_parses_iso_to_jst() -> None:
+    assert mod._fmt_time("2026-06-19T01:00:00+00:00") == "10:00"  # UTC 01:00 → JST 10:00
+    assert mod._fmt_time(None) == "?"

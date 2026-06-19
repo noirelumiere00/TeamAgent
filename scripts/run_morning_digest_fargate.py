@@ -16,6 +16,7 @@ EventBridge cron (平日 0:30 UTC = 9:30 JST) が ECS RunTask で本スクリプ
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import json
 import os
 import sys
@@ -76,10 +77,40 @@ def _mask_email(email: str) -> str:
     return f"{local[:1] if local else ''}***@{domain}"
 
 
+# Gmail/Calendar への deep link（受信トレイ全体＝DLP 安全。項目別 from: はマスク済みのため不採用）。
+_GMAIL_DRAFTS_URL = "https://mail.google.com/mail/u/0/#drafts"
+_GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox"
+_CALENDAR_URL = "https://calendar.google.com/"
+
+
+_JST = _dt.timezone(_dt.timedelta(hours=9))
+
+
+def _fmt_time(iso: str | None) -> str:
+    """ISO 開始時刻 → JST の HH:MM（本人は日本在勤）。パース失敗時は原文 or '?'。"""
+    if not iso:
+        return "?"
+    try:
+        dt = _dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(_JST)
+        return dt.strftime("%H:%M")
+    except (ValueError, TypeError):
+        return iso[:16]
+
+
 def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
-    """MorningDigestOutput → Slack Block Kit blocks。"""
+    """MorningDigestOutput → Slack Block Kit blocks（要返信を最上部・スコアボード・アクション付き）。"""
     masked = _mask_email(user_email)
     text = f"☀️ おはようございます！{masked} さんの本日のダイジェストです。"
+
+    mail_items = list(getattr(digest, "mail_digest", []) or [])
+    high = [m for m in mail_items if m.importance == "high"]
+    medium = [m for m in mail_items if m.importance == "medium"]
+    low = [m for m in mail_items if m.importance == "low"]
+    cal_items = list(getattr(digest, "calendar_events", []) or [])
+    slack_items = list(getattr(digest, "slack_unread", []) or [])
+    drafts = int(getattr(digest, "drafts_created", 0) or 0)
 
     blocks: list[dict[str, Any]] = [
         {
@@ -88,61 +119,103 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
         },
     ]
 
-    # --- メール ---
-    mail_items = list(getattr(digest, "mail_digest", []) or [])
-    if mail_items:
-        high = [m for m in mail_items if m.importance == "high"]
-        medium = [m for m in mail_items if m.importance == "medium"]
-        lines = [f"*📧 メール（要返信 {len(high)} / 確認 {len(medium)}）*"]
-        for m in mail_items[:8]:
-            badge = {"high": "🔴", "medium": "🟡", "low": "⚪"}.get(m.importance, "⚪")
-            draft_mark = " ✏️" if m.has_draft else ""
-            subj = m.subject_scrubbed or "(件名なし)"
-            line = f"{badge} *{subj}* — {m.counterpart_masked}{draft_mark}"
-            if m.summary:
-                line += f"\n      _{m.summary}_"
-            lines.append(line)
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-    else:
+    # --- スコアボード（3秒で全体量・fields 2x2）---
+    blocks.append(
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"🔴 *要返信*  `{len(high)}件`"},
+                {"type": "mrkdwn", "text": f"✏️ *下書き済*  `{drafts}件`"},
+                {"type": "mrkdwn", "text": f"🗓 *今日の予定*  `{len(cal_items)}件`"},
+                {"type": "mrkdwn", "text": f"🟡 *要確認*  `{len(medium)}件`"},
+            ],
+        }
+    )
+    blocks.append({"type": "divider"})
+
+    # --- 要返信メール（high のみ・本文 section + メタ context の2段で厚く）---
+    if high:
         blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": "*📧 メール*: 直近の新着なし"}}
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"🔴 *いますぐ返信したい（{len(high)}件）*"},
+            }
+        )
+        for m in high[:5]:
+            subj = m.subject_scrubbed or "(件名なし)"
+            body = f"*{subj}* — {m.counterpart_masked}"
+            if m.summary:
+                body += f"\n_{m.summary}_"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
+            meta = []
+            if m.has_draft:
+                meta.append({"type": "mrkdwn", "text": "✏️ 返信下書き作成済"})
+                meta.append({"type": "mrkdwn", "text": f"<{_GMAIL_DRAFTS_URL}|下書きを見る>"})
+            meta.append({"type": "mrkdwn", "text": f"<{_GMAIL_INBOX_URL}|Gmailで開く>"})
+            blocks.append({"type": "context", "elements": meta})
+        blocks.append({"type": "divider"})
+    elif not mail_items:
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": "📧 *メール*: 直近の新着なし"}}
         )
 
-    # --- カレンダー ---
-    cal_items = list(getattr(digest, "calendar_events", []) or [])
+    # --- 今日の予定（時刻太字・会議室/場所を 📍付きで明記）---
     if cal_items:
-        lines = ["*🗓 今日の予定*"]
+        lines = ["🗓 *今日の予定*"]
         for ev in cal_items[:6]:
-            start = ev.start_at or "?"
-            lines.append(
-                f"• {start} *{ev.summary_scrubbed or '(無題)'}* {ev.location_scrubbed or ''}"
-            )
+            loc = (ev.location_scrubbed or "").strip()
+            place = f" 📍{loc}" if loc else ""
+            lines.append(f"• *{_fmt_time(ev.start_at)}* {ev.summary_scrubbed or '(無題)'}{place}")
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        blocks.append({"type": "divider"})
+
+    # --- 要確認メール（medium・1行圧縮 + 「+N件」省略）---
+    if medium:
+        lines = [f"🟡 *目を通したい（{len(medium)}件）*"]
+        for m in medium[:3]:
+            subj = m.subject_scrubbed or "(件名なし)"
+            lines.append(f"• {subj} — {m.counterpart_masked}")
+        remaining = max(0, len(medium) - 3) + len(low)
+        if remaining > 0:
+            lines.append(f"• 〈+{remaining}件〉")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
 
-    # --- Slack 未返信 ---
-    slack_items = list(getattr(digest, "slack_unread", []) or [])
+    # --- Slack 未返信（データがある時のみ）---
     if slack_items:
-        lines = [f"*💬 Slack 未返信メンション（{len(slack_items)} 件）*"]
+        lines = [f"💬 *Slack 未返信メンション（{len(slack_items)} 件）*"]
         for s in slack_items[:5]:
             link = s.permalink or "(リンクなし)"
             lines.append(f"• {s.channel_name_masked} — <{link}|開く>")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
 
-    # --- 下書き ---
-    drafts = int(getattr(digest, "drafts_created", 0) or 0)
+    # --- アクションバー（deep link button）---
+    actions: list[dict[str, Any]] = []
     if drafts > 0:
-        blocks.append(
+        actions.append(
             {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"✏️ 重要メール {drafts} 件に返信下書きを作成しました（Gmail の下書きフォルダに保存・送信は手動）",
-                    }
-                ],
+                "type": "button",
+                "text": {"type": "plain_text", "text": "✏️ 下書きを確認", "emoji": True},
+                "url": _GMAIL_DRAFTS_URL,
+                "style": "primary",
             }
         )
+    actions.append(
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "📥 受信トレイ", "emoji": True},
+            "url": _GMAIL_INBOX_URL,
+        }
+    )
+    actions.append(
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "🗓 カレンダー", "emoji": True},
+            "url": _CALENDAR_URL,
+        }
+    )
+    blocks.append({"type": "actions", "elements": actions})
 
+    # --- 脚注（DLP マスク注記）---
     blocks.append({"type": "divider"})
     blocks.append(
         {
@@ -150,7 +223,10 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": "_TeamAgent AiLa morning_digest｜日付/件名/相手は DLP マスク後表示_",
+                    "text": (
+                        "_AiLa morning_digest｜件名・相手・本文は DLP マスク後表示。"
+                        "下書きは送信されません（手動送信）。_"
+                    ),
                 }
             ],
         }
