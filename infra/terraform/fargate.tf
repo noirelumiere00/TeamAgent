@@ -155,6 +155,10 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
       data.aws_secretsmanager_secret.database_url.arn,
       # §U ハイブリッド identity: mcp task が SLACK_BOT_TOKEN を注入できるよう取得権限を付与。
       data.aws_secretsmanager_secret.slack_bot.arn,
+      # §U: 本人 token リフレッシュ用 Web クライアント client_secret の注入権限。
+      data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
+      # §U: oauth_connect の state 署名鍵の注入権限。
+      data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
     ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [])
   }
 }
@@ -328,6 +332,21 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "TEAMAGENT_MCP_PORT", value = "8787" },
       { name = "TEAMAGENT_MCP_PATH", value = "/mcp" },
       { name = "TEAMAGENT_SHARED_COMPANY_DOMAINS", value = var.shared_company_domains },
+      # §U: per-user OAuth token の復号鍵。これが無いと factory._build_token_store() が
+      # InMemoryTokenStore（空＝全員未連携）にフォールバックし、mail_* が「連携してください」で
+      # 落ちる（RDS に token があっても見えない）。connect-web/morning-digest と同じ alias を共用。
+      # mcp_task role は kms:Decrypt on key/* を保持済（KmsDecrypt statement）。
+      { name = "OAUTH_KMS_KEY_ID", value = "alias/teamagent-oauth-tokens" },
+      # §U: 本人 refresh token から Gmail クライアントを構築する OAuth Web 型クライアント（pgd1mj4）。
+      # これが無いと build_user_credentials(google_auth.py) が ValueError → mail_summary が
+      # PermissionError「認証情報を解決できません/再認可」で落ちる（token 取得・KMS 復号は成功してても）。
+      # connect-web と同じ client（token を mint した本体）でないと refresh できない。secret は下の secrets。
+      { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
+      # §U: oauth_connect skill が個別 OAuth URL を生成するための設定。
+      # OAUTH_REDIRECT_URI は connect-web と同じ公開 callback URL。OAUTH_STATE_SECRET（下の secrets）
+      # は connect-web と同一値必須＝mcp が make_state で署名→connect-web callback が verify_state で検証。
+      { name = "OAUTH_REDIRECT_URI", value = var.connect_redirect_uri },
+      { name = "USE_OAUTH_CONNECT_TOOL", value = "true" },
       # 構造化ログを JSON Lines 化（CloudWatch metric filter `{ $.cost_usd = * }` 等が
       # バインドして cost/error/spoof アラームが発火する。observability/logging_config.py）。
       { name = "STRUCTLOG_FORMAT", value = "json" },
@@ -365,6 +384,10 @@ resource "aws_ecs_task_definition" "mcp" {
       # per-user OAuth(mail_*/morning_digest) の token を引くために必要（users:read.email scope）。
       # openclaw と同じ secret を共用。会社共有グループ(search)はこれ無しでも動く（graceful degrade）。
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
+      # §U: 本人 token リフレッシュ用 Web クライアントの client_secret（connect-web と同じ data source）。
+      { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
+      # §U: oauth_connect の state 署名鍵（connect-web と同一値＝署名/検証を共有）。
+      { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_JSON", valueFrom = data.aws_secretsmanager_secret.vertex_sa[0].arn },
     ] : [])

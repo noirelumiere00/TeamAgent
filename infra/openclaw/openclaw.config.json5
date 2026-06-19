@@ -124,6 +124,10 @@
             // morning_digest は EventBridge Scheduled Task で起動・mention 経由で呼ばれないが、
             // ローカル検証・将来の手動 trigger 用に include しておく。USE_MORNING_DIGEST_TOOL=1 が必要。
             "morning_digest",
+            // §U: oauth_connect — @AiLa「連携」で本人専用の Google 認可 URL を返す。
+            // OpenClaw に connect 経路が無い問題への対応。URL生成のみ（token保存は connect-web）。
+            // USE_OAUTH_CONNECT_TOOL=1 + OAUTH_REDIRECT_URI/OAUTH_STATE_SECRET/CONNECT_GOOGLE_* が必要。
+            "oauth_connect",
           ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は

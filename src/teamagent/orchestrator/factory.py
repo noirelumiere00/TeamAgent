@@ -272,6 +272,22 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # §U: oauth_connect — 本人専用の Google 連携 URL を発行（@AiLa「連携」で個別 URL）。
+    # OpenClaw に connect 経路が無い問題への対応。URL 生成のみ＝token_store 依存なし。
+    # 実行時に run() が本人 user_email を metadata から必須取得し fail-closed。
+    # **既定 OFF**（USE_OAUTH_CONNECT_TOOL=1）。OAUTH_REDIRECT_URI/OAUTH_STATE_SECRET/
+    # CONNECT_GOOGLE_CLIENT_ID/SECRET が env/secret に要る（fargate.tf で配線）。
+    if _envflag("USE_OAUTH_CONNECT_TOOL"):
+        from teamagent.skills.oauth_connect.skill import OAuthConnectSkill
+
+        specs.append(
+            ToolSpec(
+                OAuthConnectSkill.name,
+                OAuthConnectSkill.description,
+                OAuthConnectSkill,
+            )
+        )
+
     return specs
 
 
