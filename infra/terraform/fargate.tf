@@ -332,6 +332,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "TEAMAGENT_MCP_PORT", value = "8787" },
       { name = "TEAMAGENT_MCP_PATH", value = "/mcp" },
       { name = "TEAMAGENT_SHARED_COMPANY_DOMAINS", value = var.shared_company_domains },
+      # §U: 5名運用の pgvector pool ウォームアップ。起動時に2接続確立し初回検索のレイテンシを下げる
+      # （max=8 で5並行に余裕＝枯渇なし）。
+      { name = "PGVECTOR_POOL_MIN", value = "2" },
       # §U: per-user OAuth token の復号鍵。これが無いと factory._build_token_store() が
       # InMemoryTokenStore（空＝全員未連携）にフォールバックし、mail_* が「連携してください」で
       # 落ちる（RDS に token があっても見えない）。connect-web/morning-digest と同じ alias を共用。
@@ -440,6 +443,9 @@ resource "aws_ecs_task_definition" "openclaw" {
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "OPENCLAW_CONFIG_PATH", value = "/opt/teamagent/openclaw.json" },
+      # §U: DM 許可リスト（カンマ区切り Slack user_id）。entrypoint が起動時に allowFrom へ注入。
+      # メンバー追加は本 var を編集 + apply（task 再デプロイ）だけ＝image rebuild 不要・15名まで可動。
+      { name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist },
     ]
     secrets = [
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },

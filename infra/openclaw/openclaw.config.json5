@@ -54,6 +54,9 @@
       // 社外ゲスト（クライアント）が居る前提で、DM経由で会社ナレッジに触れさせない。
       // チャンネルは groupPolicy:"open" のまま（招待制で統制）。パイロット参加者をここに追記。
       dmPolicy: "allowlist",
+      // §U: これは焼き込みの fallback。本番は entrypoint が env `SLACK_DM_ALLOWLIST`
+      // （カンマ区切り Slack user_id）から allowFrom を起動時に上書きする＝メンバー追加は
+      // env 変更 + 再デプロイのみ（image rebuild 不要）。15名規模まで可動。
       allowFrom: [
         "U09CX1CCBLN", // 小俣翔碁
       ],

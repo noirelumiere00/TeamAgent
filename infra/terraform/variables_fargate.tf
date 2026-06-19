@@ -45,6 +45,12 @@ variable "shared_company_domains" {
   default     = ""
 }
 
+variable "slack_dm_allowlist" {
+  description = "DM を許可する Slack user_id（カンマ区切り）。openclaw entrypoint が起動時に allowFrom へ注入。メンバー追加は本値の編集 + apply のみ（image rebuild 不要・15名まで可動）。空なら焼込み値を使用。"
+  type        = string
+  default     = ""
+}
+
 variable "openclaw_model_id" {
   # §J: 既定を openclaw.config.json5（焼込・権威）と一致させる。本 var は参照/将来の env 注入用。
   # §P: list-inference-profiles 実測値で確定（2026-06-11・account 718959508629/東京）。
