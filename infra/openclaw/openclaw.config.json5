@@ -49,11 +49,13 @@
       replyToModeByChatType: { channel: "all", group: "all", direct: "off" },
       // §T1: 受付リアクション（処理中が見える＝「無視された？」を防ぐ実運用の詰まり潰し）。
       ackReaction: "eyes",
-      // §T2: DM は許可リスト制（既定 pairing＝オーナーCLI承認制は Fargate では打つ場所が無く、
-      // 承認stateも ephemeral で再起動消失）。"open" にしない理由＝Vector ワークスペースには
-      // 社外ゲスト（クライアント）が居る前提で、DM経由で会社ナレッジに触れさせない。
-      // チャンネルは groupPolicy:"open" のまま（招待制で統制）。パイロット参加者をここに追記。
-      dmPolicy: "allowlist",
+      // §V (2026-06-20): 営業がセルフで連携できるよう dmPolicy を "open" 化。
+      // 社外ゲスト懸念は **サーバ側の本人解決で多層防御済**：mcp_gateway/slack_client が
+      // is_restricted/is_ultra_restricted（ゲスト）・is_stranger（Slack Connect 外部）・is_bot・
+      // foreign_team を fail-closed で拒否＝ゲストが DM しても会社ナレッジ/メールには非到達。
+      // メールは各自の oauth_token のみ（RLS+KMS で個人隔離）。＝open でも社外にデータは開かない。
+      // 厳密に特定メンバーだけに絞りたい時は "allowlist" + allowFrom(env SLACK_DM_ALLOWLIST) に戻す。
+      dmPolicy: "open",
       // §U: これは焼き込みの fallback。本番は entrypoint が env `SLACK_DM_ALLOWLIST`
       // （カンマ区切り Slack user_id）から allowFrom を起動時に上書きする＝メンバー追加は
       // env 変更 + 再デプロイのみ（image rebuild 不要）。15名規模まで可動。
