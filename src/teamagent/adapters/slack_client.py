@@ -145,6 +145,73 @@ class SlackClient:
         )
         return result
 
+    async def update_message(
+        self,
+        channel: str,
+        ts: str,
+        text: str,
+        request_id: str,
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> SlackPostResult:
+        """chat.update 呼び出し（既存メッセージを差し替える）。
+
+        ボタン押下後に「✅ 対応済みにしました」等へブロックを置き換える用途
+        （interactivity ハンドラが応答として使う）。blocks=[] で全ブロック消去可。
+        """
+        start = time.perf_counter()
+        kwargs: dict[str, Any] = {"channel": channel, "ts": ts, "text": text}
+        if blocks is not None:
+            kwargs["blocks"] = blocks
+
+        resp = await self._client.chat_update(**kwargs)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        ok = bool(resp.get("ok", False))
+        result = SlackPostResult(channel=channel, ts=str(resp.get("ts", ts)), ok=ok)
+        logger.info(
+            "slack_update_message",
+            request_id=request_id,
+            channel=channel,
+            ok=ok,
+            ts=ts,
+            latency_ms=latency_ms,
+            text_len=len(text),
+        )
+        return result
+
+    async def add_reaction(self, channel: str, ts: str, name: str, request_id: str) -> bool:
+        """reactions.add 呼び出し（メッセージに絵文字スタンプ）。
+
+        受付・完了の即時フィードバック用。既に付与済（already_reacted）は成功扱い。
+        失敗しても例外を投げず False（本体処理は別途完了済みの想定）。
+        """
+        start = time.perf_counter()
+        try:
+            resp = await self._client.reactions_add(
+                channel=channel, timestamp=ts, name=name.strip(":")
+            )
+            ok = bool(resp.get("ok", False))
+        except Exception as exc:
+            # already_reacted は冪等成功とみなす（同じ操作の二度押し等）。
+            if "already_reacted" in str(exc):
+                return True
+            logger.warning(
+                "slack_add_reaction_failed",
+                request_id=request_id,
+                channel=channel,
+                err=type(exc).__name__,
+            )
+            return False
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "slack_add_reaction",
+            request_id=request_id,
+            channel=channel,
+            ok=ok,
+            name=name,
+            latency_ms=latency_ms,
+        )
+        return ok
+
     async def upload_file(
         self,
         channel: str,

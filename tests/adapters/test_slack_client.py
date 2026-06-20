@@ -81,3 +81,43 @@ def test_from_env_raises_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="SLACK_BOT_TOKEN"):
         SlackClient.from_env()
+
+
+async def test_update_message_passes_ts_and_blocks(fake_web_client: AsyncMock) -> None:
+    """update_message が chat.update に channel/ts/text/blocks を渡すこと。"""
+    fake_web_client.chat_update.return_value = {"ok": True, "ts": "1716000000.000100"}
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "✅ 対応済み"}}]
+    client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
+
+    result = await client.update_message(
+        channel="C1", ts="1716000000.000100", text="done", request_id="r", blocks=blocks
+    )
+
+    assert result.ok is True
+    call_kwargs: dict[str, Any] = fake_web_client.chat_update.call_args.kwargs
+    assert call_kwargs["channel"] == "C1"
+    assert call_kwargs["ts"] == "1716000000.000100"
+    assert call_kwargs["blocks"] == blocks
+
+
+async def test_add_reaction_strips_colons(fake_web_client: AsyncMock) -> None:
+    """add_reaction が reactions.add に colon を外した emoji 名を渡すこと。"""
+    fake_web_client.reactions_add.return_value = {"ok": True}
+    client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
+
+    ok = await client.add_reaction("C1", "1716000000.000100", ":white_check_mark:", "r")
+
+    assert ok is True
+    call_kwargs: dict[str, Any] = fake_web_client.reactions_add.call_args.kwargs
+    assert call_kwargs["name"] == "white_check_mark"
+    assert call_kwargs["timestamp"] == "1716000000.000100"
+
+
+async def test_add_reaction_already_reacted_is_success(fake_web_client: AsyncMock) -> None:
+    """already_reacted は冪等成功（True）として扱う。"""
+    fake_web_client.reactions_add.side_effect = Exception("already_reacted")
+    client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
+
+    ok = await client.add_reaction("C1", "1716000000.000100", "eyes", "r")
+
+    assert ok is True

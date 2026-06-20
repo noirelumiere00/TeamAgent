@@ -77,6 +77,27 @@ variable "connect_web_vpc_cidr" {
   default     = "172.31.0.0/16"
 }
 
+# §V: メールサマリーのインタラクティブ・ボタン（/slack/interactivity を connect-web で host）。
+# enable_interactive_mail=true で connect-web タスクに署名検証鍵 + 第2 App bot token を注入し、
+# task role に Bedrock（「対応する」の下書き生成）を許可する。secret は本人が Secrets Manager に作成。
+variable "enable_interactive_mail" {
+  description = "メールサマリーのボタン（/slack/interactivity）を有効化（署名鍵/第2App token/Bedrock を connect-web に配線）"
+  type        = bool
+  default     = false
+}
+
+variable "interactive_mail_signing_secret_name" {
+  description = "SLACK_SIGNING_SECRET の Secrets Manager 名（インタラクティブ用 第2 Slack App の署名シークレット）"
+  type        = string
+  default     = "teamagent/dev/interactive_mail/signing_secret"
+}
+
+variable "interactive_mail_bot_token_secret_name" {
+  description = "INTERACTIVE_MAIL_BOT_TOKEN の Secrets Manager 名（第2 Slack App の xoxb・本人解決/投稿用）"
+  type        = string
+  default     = "teamagent/dev/interactive_mail/bot_token"
+}
+
 # ---------- CloudWatch Logs（非ゲート・無害） ----------
 resource "aws_cloudwatch_log_group" "connect_web" {
   name              = "/${var.project_name}/${var.environment}/connect-web"
@@ -102,6 +123,16 @@ data "aws_kms_alias" "connect_oauth" {
   name  = "alias/teamagent-oauth-tokens"
 }
 
+# §V interactivity 用 secret（enable_interactive_mail ゲート・本人が Secrets Manager に作成）。
+data "aws_secretsmanager_secret" "interactive_mail_signing" {
+  count = var.enable_interactive_mail ? 1 : 0
+  name  = var.interactive_mail_signing_secret_name
+}
+data "aws_secretsmanager_secret" "interactive_mail_bot_token" {
+  count = var.enable_interactive_mail ? 1 : 0
+  name  = var.interactive_mail_bot_token_secret_name
+}
+
 # --- 実行ロール（launch 時 secrets 注入用・connect 関連 secret + database_url のみ） ---
 resource "aws_iam_role" "ecs_execution_connect_web" {
   count              = var.enable_connect_web ? 1 : 0
@@ -120,11 +151,16 @@ data "aws_iam_policy_document" "ecs_execution_connect_web_secrets" {
   statement {
     sid     = "ReadConnectWebSecrets"
     actions = ["secretsmanager:GetSecretValue"]
-    resources = [
-      data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
-      data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
-      data.aws_secretsmanager_secret.database_url.arn,
-    ]
+    # interactive 用 2 secret は splat で加算（enable_interactive_mail=false なら [] で増えない）。
+    resources = concat(
+      [
+        data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
+        data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
+        data.aws_secretsmanager_secret.database_url.arn,
+      ],
+      data.aws_secretsmanager_secret.interactive_mail_signing[*].arn,
+      data.aws_secretsmanager_secret.interactive_mail_bot_token[*].arn,
+    )
   }
 }
 
@@ -146,6 +182,19 @@ data "aws_iam_policy_document" "connect_web_task" {
     resources = [
       data.aws_kms_alias.connect_oauth[0].target_key_arn,
     ]
+  }
+  # §V: 「対応する」ボタンが mail_reply（Bedrock 起草）をインプロセス実行するため、
+  # interactivity 有効時のみ Bedrock InvokeModel を許可する。
+  dynamic "statement" {
+    for_each = var.enable_interactive_mail ? [1] : []
+    content {
+      sid = "BedrockInvokeForMailReply"
+      actions = [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+      ]
+      resources = local.bedrock_resources
+    }
   }
 }
 
@@ -284,11 +333,18 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
     ]
-    secrets = [
-      { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
-      { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
-      { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-    ]
+    secrets = concat(
+      [
+        { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
+        { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
+        { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
+      ],
+      # §V interactivity（enable_interactive_mail=false なら splat が空＝増えない）。
+      [for arn in data.aws_secretsmanager_secret.interactive_mail_signing[*].arn :
+      { name = "SLACK_SIGNING_SECRET", valueFrom = arn }],
+      [for arn in data.aws_secretsmanager_secret.interactive_mail_bot_token[*].arn :
+      { name = "INTERACTIVE_MAIL_BOT_TOKEN", valueFrom = arn }],
+    )
     logConfiguration = {
       logDriver = "awslogs"
       options = {

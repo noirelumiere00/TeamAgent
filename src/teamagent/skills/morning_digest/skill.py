@@ -100,7 +100,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         "本人の受信箱・カレンダー・Slack 未返信メンションをまとめた朝ダイジェストを組み立てる。"
         "重要メールに対しては Gmail draft も作成する（送信しない）。"
         "本人が連携済みの時のみ動作。Mention 経由ではなく EventBridge Scheduled Task で起動される。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める（mcp 境界の本人解決鍵）。"
+        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
+        "必ず含める（mcp 境界の本人解決鍵）。"
     )
     input_schema: ClassVar[type[BaseModel]] = MorningDigestInput
     output_schema: ClassVar[type[BaseModel]] = MorningDigestOutput
@@ -261,6 +262,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
                     subject_scrubbed=str(scrub_value(msg.headers.get("Subject", "")))[:80],
                     occurred_at=_iso_or_none(msg.internal_date_ms),
+                    thread_id=str(getattr(msg, "thread_id", "") or ""),
                 )
             )
             body = extract_plain_text(msg.payload)
@@ -276,9 +278,15 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     item.importance = triaged[idx].get("importance", "medium")
                     item.summary = str(triaged[idx].get("summary", ""))[:200]
 
-        # importance="high" → "medium" → "low" の順にソート
+        # importance="high" → "medium" → "low" の順にソート。
+        # ⚠️ items と full_msgs は index 対応（_create_drafts が raw_msgs[i] で参照）。
+        # items だけソートすると下書きが別メールから生成される旧バグ → ペアで安定ソートする。
         order = {"high": 0, "medium": 1, "low": 2}
-        items.sort(key=lambda x: order.get(x.importance, 3))
+        paired = sorted(
+            zip(items, full_msgs, strict=True), key=lambda p: order.get(p[0].importance, 3)
+        )
+        items = [p[0] for p in paired]
+        full_msgs = [p[1] for p in paired]
         return items, cost, full_msgs
 
     def _triage(
@@ -327,12 +335,15 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             time_max=horizon.isoformat(),
             max_results=20,
         )
+        # ⚠️ CalendarEvent の属性は start / end / location（旧コードは start_at/end_at で
+        # 取りこぼし＝時刻・会議室が空だった）。正しい属性名で取得する。
         return [
             CalendarEventItem(
                 summary_scrubbed=str(scrub_value(getattr(ev, "summary", "")))[:80],
-                start_at=str(getattr(ev, "start_at", "") or "") or None,
-                end_at=str(getattr(ev, "end_at", "") or "") or None,
+                start_at=str(getattr(ev, "start", "") or "") or None,
+                end_at=str(getattr(ev, "end", "") or "") or None,
                 location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
+                meeting_url=str(getattr(ev, "hangout_link", "") or ""),
             )
             for ev in events
         ]

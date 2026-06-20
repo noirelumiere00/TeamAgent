@@ -64,7 +64,8 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
         "本人の受信箱（gmail.readonly）から指定クライアント/案件の直近メールを取得し、"
         "横断要約（論点・依頼・期限・懸念）を返す。生本文は返さない。"
         "本人が /teamagent connect 済みの時のみ使える。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める（mcp 境界の本人解決鍵）。"
+        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
+        "必ず含める（mcp 境界の本人解決鍵）。"
     )
     input_schema: ClassVar[type[BaseModel]] = MailSummaryInput
     output_schema: ClassVar[type[BaseModel]] = MailSummaryOutput
@@ -118,6 +119,7 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
                     subject_scrubbed=str(scrub_value(msg.headers.get("Subject", "")))[:80],
                     occurred_at=_iso_or_none(msg.internal_date_ms),
+                    thread_id=str(getattr(msg, "thread_id", "") or ""),
                 )
             )
             body = extract_plain_text(msg.payload)

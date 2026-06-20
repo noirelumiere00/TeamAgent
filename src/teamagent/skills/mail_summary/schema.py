@@ -29,6 +29,10 @@ class MailHighlight(BaseModel):
     counterpart_masked: str = Field(description="相手アドレスのマスク表示")
     subject_scrubbed: str = Field(default="", max_length=80, description="件名（マスク後・短縮）")
     occurred_at: str | None = Field(default=None, description="受信日時（ISO・判明時）")
+    thread_id: str = Field(
+        default="",
+        description="Gmail スレッド ID（スレッド deep-link 用。生 messageId ではない）",
+    )
 
 
 class MailSummaryOutput(BaseModel):

@@ -91,10 +91,13 @@ class _FakeGCal:
 
 @dataclass
 class _FakeCalEvent:
+    # 実 CalendarEvent と同じ属性名（start/end/location/hangout_link）。
     summary: str = ""
-    start_at: str | None = None
-    end_at: str | None = None
+    start: str = ""
+    end: str = ""
     location: str = ""
+    hangout_link: str = ""
+    attendees: tuple[str, ...] = ()
 
 
 class _FakeTokenStore:
@@ -297,9 +300,10 @@ def test_calendar_events_collected(fake_msgs, triage_json) -> None:
     events = [
         _FakeCalEvent(
             summary="営業 MTG",
-            start_at="2026-06-18T10:00:00+09:00",
-            end_at="2026-06-18T11:00:00+09:00",
-            location="本社",
+            start="2026-06-18T10:00:00+09:00",
+            end="2026-06-18T11:00:00+09:00",
+            location="本社 13F 会議室A",
+            hangout_link="https://meet.google.com/abc-defg-hij",
         ),
     ]
     skill = MorningDigestSkill(
@@ -312,7 +316,12 @@ def test_calendar_events_collected(fake_msgs, triage_json) -> None:
     out = skill.run(MorningDigestInput(max_drafts=0), ctx)
 
     assert len(out.calendar_events) == 1
-    assert out.calendar_events[0].summary_scrubbed == "営業 MTG"
+    ev0 = out.calendar_events[0]
+    assert ev0.summary_scrubbed == "営業 MTG"
+    # 旧コードの start_at/location 取りこぼしバグの回帰防止：時刻・会議室・会議URLが入る
+    assert ev0.start_at == "2026-06-18T10:00:00+09:00"
+    assert ev0.location_scrubbed == "本社 13F 会議室A"
+    assert ev0.meeting_url == "https://meet.google.com/abc-defg-hij"
 
 
 def test_user_email_masked_in_output(fake_msgs, triage_json) -> None:

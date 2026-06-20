@@ -77,11 +77,17 @@ data "aws_iam_policy_document" "ecs_execution_morning_digest_secrets" {
   statement {
     sid     = "ReadMorningDigestSecrets"
     actions = ["secretsmanager:GetSecretValue"]
-    resources = [
-      data.aws_secretsmanager_secret.database_url.arn,
-      data.aws_secretsmanager_secret.slack_bot.arn,
-      data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn,
-    ]
+    resources = concat(
+      [
+        data.aws_secretsmanager_secret.database_url.arn,
+        data.aws_secretsmanager_secret.slack_bot.arn,
+        data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn,
+        # §U: 本人 token リフレッシュ用 Web クライアント client_secret の注入権限。
+        data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
+      ],
+      # §V: interactive 配信用 第2 App bot token（enable_interactive_mail=false なら空）。
+      data.aws_secretsmanager_secret.interactive_mail_bot_token[*].arn,
+    )
   }
 }
 
@@ -183,12 +189,24 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。
       { name = "OAUTH_KMS_KEY_ID", value = "alias/teamagent-oauth-tokens" },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
+      # §U: per-user mail（RdsTokenStore→build_user_credentials）に必要な Web クライアント client_id。
+      # 無いと morning_digest のメール処理が ValueError → PermissionError で落ちる（mcp と同根）。
+      { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
+      # §V: ボタン付きカード配信の ON/OFF（true で第2 App token を使い [対応する] 等を出す）。
+      { name = "USE_INTERACTIVE_MAIL", value = var.enable_interactive_mail ? "true" : "" },
     ]
-    secrets = [
-      { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-      { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
-      { name = "GOOGLE_OAUTH_JSON", valueFrom = data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn },
-    ]
+    secrets = concat(
+      [
+        { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
+        { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
+        { name = "GOOGLE_OAUTH_JSON", valueFrom = data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn },
+        # §U: 本人 token リフレッシュ用 Web クライアント client_secret。
+        { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
+      ],
+      # §V: interactive 配信は第2 App の bot token で投稿（enable_interactive_mail=false なら空）。
+      [for arn in data.aws_secretsmanager_secret.interactive_mail_bot_token[*].arn :
+      { name = "INTERACTIVE_MAIL_BOT_TOKEN", valueFrom = arn }],
+    )
     logConfiguration = {
       logDriver = "awslogs"
       options = {
