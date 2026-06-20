@@ -41,10 +41,10 @@ class MorningDigestInput(BaseModel):
         description="Slack 未返信メンションの遡り日数（既定 7 日）",
     )
     max_drafts: int = Field(
-        default=3,
+        default=10,
         ge=0,
         le=10,
-        description="要返信メールに対する下書き生成の上限（コスト抑制・既定 3 件）",
+        description="要返信メールに対する下書き生成の上限（要返信を可能な限り・最大10件）",
     )
 
 

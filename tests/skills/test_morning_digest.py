@@ -19,7 +19,7 @@ import pytest
 
 from teamagent.skills.base import SkillContext
 from teamagent.skills.morning_digest.schema import MorningDigestInput
-from teamagent.skills.morning_digest.skill import MorningDigestSkill
+from teamagent.skills.morning_digest.skill import MorningDigestSkill, _safe_json_array
 
 # ─────────────────────────────────────────────────────────────
 # テスト用 fakes（軽量）
@@ -358,3 +358,78 @@ def test_has_draft_painted_only_for_high(fake_msgs, triage_json) -> None:
             assert m.has_draft is True
         else:
             assert m.has_draft is False
+
+
+# ── triage 打ち切り耐性（要返信→自動下書きが0にならないこと）─────────────────
+
+
+def test_safe_json_array_salvages_truncated() -> None:
+    # 完全な配列はそのまま
+    full = '[{"importance":"high","summary":"a"}, {"importance":"low","summary":"b"}]'
+    assert len(_safe_json_array(full)) == 2
+    # 末尾打ち切り（配列が閉じず・最後のオブジェクトが不完全）→ 完結分だけ拾う
+    cut = (
+        '[{"importance":"high","summary":"a"}, {"importance":"low","summary":"b"}, '
+        '{"importance":"medi'
+    )
+    got = _safe_json_array(cut)
+    assert len(got) == 2
+    assert got[0]["importance"] == "high"
+    assert got[1]["importance"] == "low"
+    # 壊れ/空は空リスト
+    assert _safe_json_array("") == []
+    assert _safe_json_array("not json at all") == []
+
+
+def test_triage_truncation_keeps_high_not_all_medium(fake_msgs) -> None:
+    # 3通だが triage 応答が途中で打ち切られた想定（2件だけ完結・配列閉じず）。
+    # 旧バグ＝件数不一致で全 medium 化 → high0 → 下書き0。修正後は拾えた high を活かす。
+    truncated = (
+        '[{"importance":"high","summary":"緊急の契約"}, '
+        '{"importance":"low","summary":"ニュース"}, {"importance":"medi'
+    )
+    gmail = _FakeGmail(fake_msgs)
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=gmail,
+        gcalendar=_FakeGCal([]),
+        bedrock=_FakeBedrock(truncated),
+    )
+    ctx = SkillContext(request_id="req-trunc", metadata={"user_email": "me@vectorinc.co.jp"})
+    out = skill.run(MorningDigestInput(), ctx)
+
+    importances = [m.importance for m in out.mail_digest]
+    assert "high" in importances  # 全 medium に潰れていない
+    assert out.mail_digest[0].importance == "high"  # high が先頭にソート
+    assert out.drafts_created == 1  # high に下書きが作られる
+    assert len(gmail.created_drafts) == 1
+    assert out.total_cost_usd > 0.0  # フォールバックでも実コストを返す
+
+
+def test_max_drafts_default_creates_up_to_ten() -> None:
+    # 5通すべて high → 既定 max_drafts=10 なので5件すべて下書き（旧既定3なら3で止まる）。
+    msgs = [
+        _FakeMsg(
+            headers={
+                "From": f"c{i}@x.com",
+                "To": "me@vectorinc.co.jp",
+                "Subject": f"要対応{i}",
+                "Message-ID": f"<m{i}>",
+            },
+            payload={"body": {"data": "Y2hlY2s="}},  # "check"
+            internal_date_ms=1718681400000 + i,
+        )
+        for i in range(5)
+    ]
+    triage = "[" + ",".join('{"importance":"high","summary":"要対応"}' for _ in range(5)) + "]"
+    gmail = _FakeGmail(msgs)
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=gmail,
+        gcalendar=_FakeGCal([]),
+        bedrock=_FakeBedrock(triage),
+    )
+    ctx = SkillContext(request_id="req-ten", metadata={"user_email": "me@vectorinc.co.jp"})
+    out = skill.run(MorningDigestInput(), ctx)  # 既定 max_drafts=10
+    assert out.drafts_created == 5
+    assert len(gmail.created_drafts) == 5
