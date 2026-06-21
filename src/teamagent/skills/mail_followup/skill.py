@@ -58,7 +58,8 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         "本人の受信箱から、指定クライアントについて『相手から最後に来たまま動いていない』"
         "メールを放置日数つきで列挙する。本文は読まず件名・相手はマスク。返信済みかは未判定。"
         "本人が /teamagent connect で連携済みの時のみ使える（未連携は不可）。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める（mcp 境界の本人解決鍵）。"
+        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
+        "必ず含める（mcp 境界の本人解決鍵）。"
     )
     input_schema: ClassVar[type[BaseModel]] = MailFollowupInput
     output_schema: ClassVar[type[BaseModel]] = MailFollowupOutput

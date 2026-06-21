@@ -141,6 +141,10 @@ def test_happy_path_creates_draft_does_not_send() -> None:
     assert out.draft_subject == "Re: 見積のご相談"
     assert out.to_display == "tanaka@moribuild.co.jp"  # 返信先（本人の取引相手）
     assert "送信" in out.note  # 「送信していない」旨
+    # 「Gmailでスレッドを開く」deep-link（thread_id でスレッドを開く）が出力 + note に含まれる
+    assert out.thread_url == "https://mail.google.com/mail/u/0/#all/th-1"
+    assert "Gmailでスレッドを開く" in out.note
+    assert out.thread_url in out.note
     # create_draft が 1 回・正しい宛先/件名/スレッドで呼ばれた（= 送信は呼ばれない）
     assert len(gmail.create_draft_calls) == 1
     call = gmail.create_draft_calls[0]

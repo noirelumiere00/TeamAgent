@@ -100,7 +100,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         "本人の受信箱・カレンダー・Slack 未返信メンションをまとめた朝ダイジェストを組み立てる。"
         "重要メールに対しては Gmail draft も作成する（送信しない）。"
         "本人が連携済みの時のみ動作。Mention 経由ではなく EventBridge Scheduled Task で起動される。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める（mcp 境界の本人解決鍵）。"
+        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
+        "必ず含める（mcp 境界の本人解決鍵）。"
     )
     input_schema: ClassVar[type[BaseModel]] = MorningDigestInput
     output_schema: ClassVar[type[BaseModel]] = MorningDigestOutput
@@ -114,7 +115,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         slack: Any | None = None,
         bedrock: Any | None = None,
         max_body_chars: int = 1500,
-        triage_max_tokens: int = 600,
+        triage_max_tokens: int = 4096,
         draft_max_tokens: int = 500,
     ) -> None:
         self._token_store = token_store
@@ -261,6 +262,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
                     subject_scrubbed=str(scrub_value(msg.headers.get("Subject", "")))[:80],
                     occurred_at=_iso_or_none(msg.internal_date_ms),
+                    thread_id=str(getattr(msg, "thread_id", "") or ""),
                 )
             )
             body = extract_plain_text(msg.payload)
@@ -276,9 +278,15 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     item.importance = triaged[idx].get("importance", "medium")
                     item.summary = str(triaged[idx].get("summary", ""))[:200]
 
-        # importance="high" → "medium" → "low" の順にソート
+        # importance="high" → "medium" → "low" の順にソート。
+        # ⚠️ items と full_msgs は index 対応（_create_drafts が raw_msgs[i] で参照）。
+        # items だけソートすると下書きが別メールから生成される旧バグ → ペアで安定ソートする。
         order = {"high": 0, "medium": 1, "low": 2}
-        items.sort(key=lambda x: order.get(x.importance, 3))
+        paired = sorted(
+            zip(items, full_msgs, strict=True), key=lambda p: order.get(p[0].importance, 3)
+        )
+        items = [p[0] for p in paired]
+        full_msgs = [p[1] for p in paired]
         return items, cost, full_msgs
 
     def _triage(
@@ -308,10 +316,26 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             )
         except Exception:
             return ([{"importance": "medium", "summary": ""} for _ in masked_bodies], 0.0)
+        cost = float(getattr(resp.usage, "cost_usd", 0.0))
         parsed = _safe_json_array(resp.text)
-        if not parsed or len(parsed) != len(masked_bodies):
-            return ([{"importance": "medium", "summary": ""} for _ in masked_bodies], 0.0)
-        return (parsed, float(getattr(resp.usage, "cost_usd", 0.0)))
+        n = len(masked_bodies)
+        if len(parsed) != n:
+            # 打ち切り等で件数が合わなくても全捨てしない（旧バグ：全 medium 化で high=0→下書き0）。
+            # 拾えた分は活かし、足りない分だけ medium で埋める（index 整列）。実コストは返す。
+            logger.warning(
+                "morning_digest_triage_partial",
+                request_id=ctx.request_id,
+                parsed=len(parsed),
+                expected=n,
+            )
+        out: list[dict[str, str]] = []
+        for i in range(n):
+            obj = parsed[i] if i < len(parsed) and isinstance(parsed[i], dict) else {}
+            imp = str(obj.get("importance", "medium")).strip().lower()
+            if imp not in ("high", "medium", "low"):
+                imp = "medium"
+            out.append({"importance": imp, "summary": str(obj.get("summary", ""))})
+        return (out, cost)
 
     # ── 2. カレンダー ─────────────────────────────────────────────────────
 
@@ -327,12 +351,15 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             time_max=horizon.isoformat(),
             max_results=20,
         )
+        # ⚠️ CalendarEvent の属性は start / end / location（旧コードは start_at/end_at で
+        # 取りこぼし＝時刻・会議室が空だった）。正しい属性名で取得する。
         return [
             CalendarEventItem(
                 summary_scrubbed=str(scrub_value(getattr(ev, "summary", "")))[:80],
-                start_at=str(getattr(ev, "start_at", "") or "") or None,
-                end_at=str(getattr(ev, "end_at", "") or "") or None,
+                start_at=str(getattr(ev, "start", "") or "") or None,
+                end_at=str(getattr(ev, "end", "") or "") or None,
                 location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
+                meeting_url=str(getattr(ev, "hangout_link", "") or ""),
             )
             for ev in events
         ]
@@ -464,22 +491,34 @@ def _iso_or_none(internal_date_ms: int | None) -> str | None:
 
 
 def _safe_json_array(text: str) -> list[dict[str, str]]:
-    """LLM の出力から JSON 配列を最善努力で抽出（前置き/後置きを許容）。"""
+    """LLM の出力から JSON 配列を最善努力で抽出（前置き/後置き・末尾打ち切りを許容）。
+
+    配列全体が valid ならそれを使う。max_tokens 打ち切り等で配列が壊れていても、
+    完結している `{...}` オブジェクトだけを個別に拾う（末尾の不完全オブジェクトは捨てる）。
+    """
     import json
     import re
 
     if not text:
         return []
     m = re.search(r"\[.*\]", text, re.DOTALL)
-    if not m:
-        return []
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(data, list):
-        return []
-    return [d for d in data if isinstance(d, dict)]
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, list):
+                return [d for d in data if isinstance(d, dict)]
+        except json.JSONDecodeError:
+            pass
+    # 救済: 完結した平坦オブジェクト（triage はネスト無し）だけ個別に拾う。
+    out: list[dict[str, str]] = []
+    for om in re.finditer(r"\{[^{}]*\}", text, re.DOTALL):
+        try:
+            obj = json.loads(om.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
 
 
 def _extract_reply_to(headers: dict[str, str], requester: str) -> str:

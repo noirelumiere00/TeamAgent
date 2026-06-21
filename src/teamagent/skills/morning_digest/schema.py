@@ -41,10 +41,10 @@ class MorningDigestInput(BaseModel):
         description="Slack 未返信メンションの遡り日数（既定 7 日）",
     )
     max_drafts: int = Field(
-        default=3,
+        default=10,
         ge=0,
         le=10,
-        description="要返信メールに対する下書き生成の上限（コスト抑制・既定 3 件）",
+        description="要返信メールに対する下書き生成の上限（要返信を可能な限り・最大10件）",
     )
 
 
@@ -57,6 +57,10 @@ class MailDigestItem(BaseModel):
     occurred_at: str | None = Field(default=None, description="受信日時（ISO・判明時）")
     summary: str = Field(default="", max_length=200, description="1 行サマリ（LLM 生成）")
     has_draft: bool = Field(default=False, description="この件で下書きを生成したか")
+    thread_id: str = Field(
+        default="",
+        description="Gmail スレッド ID（deep-link・ボタン value 用。生 messageId ではない）",
+    )
 
 
 class CalendarEventItem(BaseModel):
@@ -65,7 +69,8 @@ class CalendarEventItem(BaseModel):
     summary_scrubbed: str = Field(default="", max_length=80, description="件名（マスク後）")
     start_at: str | None = Field(default=None, description="開始時刻（ISO）")
     end_at: str | None = Field(default=None, description="終了時刻（ISO）")
-    location_scrubbed: str = Field(default="", max_length=80, description="場所（マスク後）")
+    location_scrubbed: str = Field(default="", max_length=80, description="場所/会議室（マスク後）")
+    meeting_url: str = Field(default="", description="会議参加 URL（Meet/Zoom 等・あれば）")
 
 
 class SlackUnreadItem(BaseModel):

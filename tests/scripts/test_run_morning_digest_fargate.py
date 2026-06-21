@@ -12,6 +12,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from teamagent import mail_action_ui as ui
 from teamagent.skills.morning_digest.schema import (
     CalendarEventItem,
     MailDigestItem,
@@ -45,6 +48,7 @@ def _digest() -> MorningDigestOutput:
                 importance="high",
                 summary="25日投稿に向け判断待ち。",
                 has_draft=True,
+                thread_id="thr-aaa",
             ),
             MailDigestItem(
                 counterpart_masked="k***@gmo.com",
@@ -68,6 +72,7 @@ def _digest() -> MorningDigestOutput:
                 summary_scrubbed="ノーベル定例",
                 start_at="2026-06-19T01:00:00+00:00",
                 location_scrubbed="渋谷オフィス 3F会議室A",
+                meeting_url="https://meet.google.com/xyz-abcd-efg",
             ),
             CalendarEventItem(
                 summary_scrubbed="社内レビュー", start_at="2026-06-19T05:00:00+00:00"
@@ -91,9 +96,12 @@ def test_high_priority_section_and_draft_elevated() -> None:
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
     assert "いますぐ返信したい（2件）" in dump
-    # has_draft=True の high 項目に「✏️ 返信下書き作成済」+ 下書きリンクが出る。
+    # has_draft=True の high 項目に「✏️ 返信下書き作成済」+ そのスレッドを開く deep-link。
     assert "✏️ 返信下書き作成済" in dump
-    assert "下書きを見る" in dump
+    assert "下書きを確認して送信" in dump
+    assert "Gmailでスレッドを開く" in dump
+    # thread_id があれば各件はそのスレッドの deep-link（#all/<thread_id>）になる。
+    assert "https://mail.google.com/mail/u/0/#all/thr-aaa" in dump
 
 
 def test_calendar_shows_room_location() -> None:
@@ -102,6 +110,7 @@ def test_calendar_shows_room_location() -> None:
     assert "🗓 *今日の予定*" in dump
     assert "📍渋谷オフィス 3F会議室A" in dump  # 会議室を 📍付きで明記
     assert "*10:00*" in dump  # ISO → HH:MM 変換（UTC 01:00 → JST 表示でなく原時刻 HH:MM）
+    assert "<https://meet.google.com/xyz-abcd-efg|会議リンク>" in dump  # 会議URLがあれば 会議リンク
 
 
 def test_action_buttons_present() -> None:
@@ -155,3 +164,51 @@ def test_email_to_slack_user_id_uses_underscore_client() -> None:
 def test_open_im_channel_uses_underscore_client() -> None:
     ch = asyncio.run(mod._open_im_channel(_FakeSlack(), "U09CX1CCBLN"))
     assert ch == "D0BA1TWN6AC"
+
+
+# ── interactive モード（ボタン付きカード）─────────────────────────────────────
+
+
+def test_header_interactive_omits_detail_shows_pointer() -> None:
+    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp", interactive=True)
+    dump = str(blocks)
+    # ヘッダーには要返信件数の案内のみ（個別リンクは出さない＝カード側に出す）
+    assert "下のカードから" in dump
+    assert "下書きを確認して送信" not in dump
+
+
+class _CapturingSlack:
+    """post_message を記録するフェイク（_client は既存 _FakeAsyncClient を流用）。"""
+
+    def __init__(self) -> None:
+        self._client = _FakeAsyncClient()
+        self.posts: list[dict[str, Any]] = []
+
+    async def post_message(
+        self,
+        channel: str,
+        text: str,
+        request_id: str,
+        thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> Any:
+        self.posts.append({"channel": channel, "text": text, "blocks": blocks})
+
+        class _R:
+            ok = True
+
+        return _R()
+
+
+def test_deliver_interactive_posts_header_plus_cards(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _CapturingSlack()
+    monkeypatch.setattr(mod, "_make_slack", lambda *, interactive: cap)
+    ok = asyncio.run(mod._deliver_interactive("s-komata@vectorinc.co.jp", _digest()))
+    assert ok is True
+    # header(1) + 要返信カード（thread_id を持つ high のみ＝1件）
+    assert len(cap.posts) == 2
+    card = cap.posts[1]
+    dump = str(card["blocks"])
+    assert ui.ACTION_TAKE in dump  # [対応する] ボタン
+    assert ui.ACTION_DONE in dump
+    assert "thr-aaa" in dump  # その high 項目の thread_id

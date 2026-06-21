@@ -439,6 +439,49 @@ class GmailClient:
         )
         return msg
 
+    def get_thread(
+        self,
+        thread_id: str,
+        request_id: str,
+        *,
+        format: str = "full",
+        user_id: str = "me",
+    ) -> list[GmailMessage]:
+        """threads.get でスレッド内の全メッセージを取得する（readonly・古い順）。
+
+        ボタン「対応する」がスレッド単位で返信下書きを起草する際、生 messageId を
+        外部（Slack ボタン value）に出さずにスレッドを特定するために使う。
+        """
+        service = self._ensure_safe_service()
+        start = time.perf_counter()
+        resp = service.users().threads().get(userId=user_id, id=thread_id, format=format).execute()
+        latency_ms = int((time.perf_counter() - start) * 1000)
+
+        out: list[GmailMessage] = []
+        for m in resp.get("messages", []) or []:
+            payload = m.get("payload", {}) or {}
+            headers_list = payload.get("headers", []) or []
+            headers = {h.get("name", ""): h.get("value", "") for h in headers_list if h.get("name")}
+            out.append(
+                GmailMessage(
+                    id=str(m.get("id", "")),
+                    thread_id=str(m.get("threadId", "")),
+                    label_ids=tuple(m.get("labelIds", []) or ()),
+                    snippet=str(m.get("snippet", "")),
+                    internal_date_ms=int(m["internalDate"]) if m.get("internalDate") else None,
+                    headers=headers,
+                    payload=payload,
+                )
+            )
+        logger.info(
+            "gmail_get_thread",
+            request_id=request_id,
+            thread_id=thread_id,
+            messages=len(out),
+            latency_ms=latency_ms,
+        )
+        return out
+
     # -------------------------------------------------------
     # ラベル管理（隠しラベルで TeamAgent 状態を管理）
     # -------------------------------------------------------

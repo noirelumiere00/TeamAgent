@@ -28,10 +28,12 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gmail_client import (
     GmailClient,
+    GmailDraft,
     extract_plain_text,
     extract_thread_participants,
 )
 from teamagent.adapters.oauth_token_store import TokenStore
+from teamagent.gmail_links import gmail_thread_url, slack_link
 from teamagent.observability import scrub_value
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_reply.schema import MailReplyInput, MailReplyOutput
@@ -69,7 +71,8 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         "本人受信箱の指定クライアントの直近メールへの返信案を起草し、Gmail の下書きとして"
         "保存する（送信はしない＝本人が確認して送信）。本人が /teamagent connect で"
         "gmail.modify を認可済みの時のみ使える。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める（mcp 境界の本人解決鍵）。"
+        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
+        "必ず含める（mcp 境界の本人解決鍵）。"
     )
     input_schema: ClassVar[type[BaseModel]] = MailReplyInput
     output_schema: ClassVar[type[BaseModel]] = MailReplyOutput
@@ -109,8 +112,8 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         # G4': gmail.modify（drafts.create のみ。send/delete は denylist で封鎖）。
         gmail = self._resolve_gmail(requester)
 
-        # G5: 対象メールを client+期間で絞り、最新の受信（自分の送信は除外）を返信元にする。
-        target = self._find_target(gmail, input, ctx)
+        # G5: client+期間 or thread で対象を絞り、最新の受信（自分の送信は除外）を返信元に。
+        target = self._find_target(gmail, input, ctx, requester)
         if target is None:
             log.info("mail_reply_no_target")
             return MailReplyOutput(client_name=input.client_name, created=False, note=_NO_TARGET)
@@ -128,7 +131,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         reply_subject = _reply_subject(orig_subject)
 
         # 書込は drafts.create のみ（送信はしない）。失敗時は再連携案内に寄せる。
-        draft_id = self._create_draft(
+        draft = self._create_draft(
             gmail,
             to=sender,
             subject=reply_subject,
@@ -138,15 +141,25 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             request_id=ctx.request_id,
         )
 
-        log.info("mail_reply_done", created=bool(draft_id), cost_usd=cost)  # 本文・宛先は出さない
+        # 「Gmailでスレッドを開く（下書きを確認して送信）」リンク。
+        # create_draft の thread_id（無ければ返信元 target.thread_id）でスレッドを開く＝
+        # 返信下書きはスレッド内にインライン表示されるので、本人が確認→送信できる。
+        thread_url = gmail_thread_url(draft.thread_id or target.thread_id)
+        note = _NOTE_DRAFT
+        link = slack_link(thread_url, "📩 Gmailでスレッドを開く（下書きを確認して送信）")
+        if link:
+            note = f"{_NOTE_DRAFT}\n{link}"
+
+        log.info("mail_reply_done", created=bool(draft.id), cost_usd=cost)  # 本文・宛先は出さない
         return MailReplyOutput(
             client_name=input.client_name,
-            created=bool(draft_id),
+            created=bool(draft.id),
             to_display=sender,  # 本人の取引相手＝本人にのみ ephemeral 表示（確認用）
             draft_subject=reply_subject,
             draft_body=draft_body,
-            gmail_draft_id=draft_id,
-            note=_NOTE_DRAFT,
+            gmail_draft_id=draft.id,
+            thread_url=thread_url or "",
+            note=note,
             total_cost_usd=cost,
         )
 
@@ -172,10 +185,17 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             ) from e
 
     def _find_target(
-        self, gmail: GmailClient, input: MailReplyInput, ctx: SkillContext
+        self, gmail: GmailClient, input: MailReplyInput, ctx: SkillContext, requester: str
     ) -> Any | None:
         if input.target_message_id:
             return gmail.get_message(input.target_message_id, ctx.request_id)
+        if input.target_thread_id:
+            # ボタン「対応する」経路: スレッド内の最新の受信（本人以外が From）を返信元にする。
+            msgs = gmail.get_thread(input.target_thread_id, ctx.request_id)
+            req = requester.strip().lower()
+            inbound = [m for m in msgs if _first_external(m.headers, req) is not None]
+            chosen = inbound[-1] if inbound else (msgs[-1] if msgs else None)
+            return chosen
         query = f'"{input.client_name}" newer_than:{input.lookback_days}d -in:sent in:inbox'
         refs, _ = gmail.list_messages(query, ctx.request_id, max_results=10)
         if not refs:
@@ -192,7 +212,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         thread_id: str | None,
         in_reply_to: str | None,
         request_id: str,
-    ) -> str:
+    ) -> GmailDraft:
         try:
             draft = gmail.create_draft(
                 to=to,
@@ -209,7 +229,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
                 "下書きの作成に失敗しました。`/teamagent connect` で Google を再認可"
                 "（メールの下書き作成権限を許可）してから、もう一度お試しください。"
             ) from e
-        return draft.id
+        return draft
 
     # ── 起草（G6）──────────────────────────────────────────────────────────
 

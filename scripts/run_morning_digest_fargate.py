@@ -25,7 +25,26 @@ from typing import Any
 
 import structlog
 
+from teamagent import mail_action_ui as ui
+from teamagent.gmail_links import gmail_thread_url
+
 logger = structlog.get_logger(__name__)
+
+
+def _interactive_enabled() -> bool:
+    """USE_INTERACTIVE_MAIL=1/true で、要返信メールをボタン付きカードで配信する。"""
+    return os.environ.get("USE_INTERACTIVE_MAIL", "").strip().lower() in ("1", "true", "yes")
+
+
+def _make_slack(*, interactive: bool) -> Any:
+    """配信用 SlackClient。interactive はボタン処理する第2 App の bot token で投稿する。"""
+    from teamagent.adapters.slack_client import SlackClient
+
+    if interactive:
+        token = os.environ.get("INTERACTIVE_MAIL_BOT_TOKEN", "").strip()
+        if token:
+            return SlackClient(bot_token=token)
+    return SlackClient.from_env()
 
 
 def _resolve_target_users() -> list[str]:
@@ -99,8 +118,14 @@ def _fmt_time(iso: str | None) -> str:
         return iso[:16]
 
 
-def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
-    """MorningDigestOutput → Slack Block Kit blocks（要返信を最上部・スコアボード・アクション付き）。"""
+def _format_block_kit(
+    digest: Any, user_email: str, *, interactive: bool = False
+) -> tuple[str, list[dict[str, Any]]]:
+    """MorningDigestOutput → Slack Block Kit blocks（要返信を最上部・スコアボード・アクション付き）。
+
+    interactive=True のときは要返信メールの詳細は別メッセージ（カード）で配信するため、
+    本ヘッダーには件数のみ表示する（カード側に [対応する] 等のボタンが付く）。
+    """
     masked = _mask_email(user_email)
     text = f"☀️ おはようございます！{masked} さんの本日のダイジェストです。"
 
@@ -134,7 +159,22 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     blocks.append({"type": "divider"})
 
     # --- 要返信メール（high のみ・本文 section + メタ context の2段で厚く）---
-    if high:
+    if high and interactive:
+        # interactive: 詳細は個別カード（ボタン付き）で配信。ヘッダーは案内のみ。
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"🔴 *いますぐ返信したい（{len(high)}件）*"
+                        "\n下のカードから *対応する / 対応済み / 後で* を選べます。"
+                    ),
+                },
+            }
+        )
+        blocks.append({"type": "divider"})
+    elif high:
         blocks.append(
             {
                 "type": "section",
@@ -147,11 +187,13 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             if m.summary:
                 body += f"\n_{m.summary}_"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
+            # 各件はそのスレッドを直接開く deep-link（thread_id があれば）。
+            thread_url = gmail_thread_url(getattr(m, "thread_id", "")) or _GMAIL_INBOX_URL
             meta = []
             if m.has_draft:
                 meta.append({"type": "mrkdwn", "text": "✏️ 返信下書き作成済"})
-                meta.append({"type": "mrkdwn", "text": f"<{_GMAIL_DRAFTS_URL}|下書きを見る>"})
-            meta.append({"type": "mrkdwn", "text": f"<{_GMAIL_INBOX_URL}|Gmailで開く>"})
+                meta.append({"type": "mrkdwn", "text": f"<{thread_url}|下書きを確認して送信>"})
+            meta.append({"type": "mrkdwn", "text": f"<{thread_url}|Gmailでスレッドを開く>"})
             blocks.append({"type": "context", "elements": meta})
         blocks.append({"type": "divider"})
     elif not mail_items:
@@ -165,7 +207,11 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
         for ev in cal_items[:6]:
             loc = (ev.location_scrubbed or "").strip()
             place = f" 📍{loc}" if loc else ""
-            lines.append(f"• *{_fmt_time(ev.start_at)}* {ev.summary_scrubbed or '(無題)'}{place}")
+            mtg_url = (getattr(ev, "meeting_url", "") or "").strip()
+            meet = f"  <{mtg_url}|会議リンク>" if mtg_url else ""
+            lines.append(
+                f"• *{_fmt_time(ev.start_at)}* {ev.summary_scrubbed or '(無題)'}{place}{meet}"
+            )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         blocks.append({"type": "divider"})
 
@@ -304,6 +350,48 @@ async def _open_im_channel(slack: Any, user_id: str) -> str | None:
         return None
 
 
+async def _deliver_interactive(user_email: str, digest: Any) -> bool:
+    """interactive 配信: ヘッダー（スコアボード/予定）+ 要返信メール 1件1カード（ボタン付き）。
+
+    各カードを個別メッセージにすることで、ボタン押下時に response_url が
+    そのカードだけを差し替える（全体ダイジェストを巻き込まない）。
+    """
+    slack = _make_slack(interactive=True)
+    user_id = await _email_to_slack_user_id(slack, user_email)
+    if not user_id:
+        return False
+    im_channel = await _open_im_channel(slack, user_id)
+    if not im_channel:
+        return False
+
+    rid = f"morning-intr-{uuid.uuid4().hex[:8]}"
+    header_text, header_blocks = _format_block_kit(digest, user_email, interactive=True)
+    header = await slack.post_message(
+        channel=im_channel, text=header_text, request_id=rid, blocks=header_blocks
+    )
+    delivered = bool(getattr(header, "ok", False))
+
+    high = [m for m in (getattr(digest, "mail_digest", []) or []) if m.importance == "high"]
+    for m in high[:5]:
+        tid = str(getattr(m, "thread_id", "") or "")
+        if not tid:
+            continue  # thread_id 無し＝スレッドを特定できない＝ボタンを出さない
+        item_blocks = ui.summary_item_blocks(
+            thread_id=tid,
+            subject=m.subject_scrubbed,
+            counterpart=m.counterpart_masked,
+            summary=m.summary,
+        )
+        subj = m.subject_scrubbed or "(件名なし)"
+        await slack.post_message(
+            channel=im_channel,
+            text=f"🔴 要返信: {subj}",
+            request_id=rid,
+            blocks=item_blocks,
+        )
+    return delivered
+
+
 def main() -> int:
     users = _resolve_target_users()
     if not users:
@@ -318,6 +406,8 @@ def main() -> int:
     token_store = _build_token_store()
     skill = MorningDigestSkill(token_store=token_store)
     skill_input = MorningDigestInput()
+    interactive = _interactive_enabled()
+    print(f"[run_morning_digest_fargate] interactive={interactive}", flush=True)
 
     summary = {"users": len(users), "delivered": 0, "skipped": 0, "errors": 0}
     for email in users:
@@ -337,8 +427,11 @@ def main() -> int:
             summary["errors"] += 1
             continue
 
-        text, blocks = _format_block_kit(digest, email)
-        delivered = asyncio.run(_deliver_to_slack(email, text, blocks))
+        if interactive:
+            delivered = asyncio.run(_deliver_interactive(email, digest))
+        else:
+            text, blocks = _format_block_kit(digest, email)
+            delivered = asyncio.run(_deliver_to_slack(email, text, blocks))
         if delivered:
             digest.delivered = True
             summary["delivered"] += 1

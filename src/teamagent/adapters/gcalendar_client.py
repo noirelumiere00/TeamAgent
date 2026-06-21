@@ -29,6 +29,22 @@ class CalendarEvent:
     start: str  # ISO 文字列（dateTime か date）
     end: str
     attendees: tuple[str, ...]  # 参加者メール（マスクは上位層の責務）
+    location: str = ""  # 会議室・場所（生テキスト・マスクは上位層）
+    hangout_link: str = ""  # Google Meet / Zoom 等の会議参加 URL（あれば）
+
+
+def _extract_meeting_url(it: dict[str, Any]) -> str:
+    """予定から会議参加 URL を取り出す（hangoutLink 優先・無ければ conferenceData の video）。"""
+    link = it.get("hangoutLink")
+    if isinstance(link, str) and link.strip():
+        return link.strip()
+    conf = it.get("conferenceData") or {}
+    for ep in conf.get("entryPoints") or []:
+        if isinstance(ep, dict) and ep.get("entryPointType") == "video":
+            uri = ep.get("uri")
+            if isinstance(uri, str) and uri.strip():
+                return uri.strip()
+    return ""
 
 
 def extract_events(items: list[dict[str, Any]]) -> list[CalendarEvent]:
@@ -47,6 +63,8 @@ def extract_events(items: list[dict[str, Any]]) -> list[CalendarEvent]:
                 start=str(start),
                 end=str(end),
                 attendees=attendees,
+                location=str(it.get("location", "") or ""),
+                hangout_link=_extract_meeting_url(it),
             )
         )
     return out
