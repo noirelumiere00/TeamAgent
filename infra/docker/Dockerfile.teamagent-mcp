@@ -46,6 +46,9 @@ COPY README.md ./
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY infra/migrations/ ./infra/migrations/
+# ingest が読む data/ingest_sources.yaml（＋eval gold set）。これが無いと Fargate ingest が
+# "ingest sources yaml not found" で exit 2（従来 data/ は COPY されておらず Scheduled ingest は不発だった）。
+COPY data/ ./data/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra mcp --extra embeddings
 

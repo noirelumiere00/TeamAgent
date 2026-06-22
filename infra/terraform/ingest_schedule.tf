@@ -190,6 +190,9 @@ resource "aws_ecs_task_definition" "ingest" {
       { name = "INGEST_SOURCES", value = var.ingest_sources },
       { name = "INGEST_OWNER_EMAIL", value = var.ingest_owner_email },
       { name = "STRUCTLOG_FORMAT", value = "json" },
+      # §知識ベース（2026-06-22）: Drive 取り込み時に Bedrock で資料を自動分類
+      # （案件/業界/種別/フェーズ→documents.metadata）。ingest_task は bedrock:InvokeModel 保持済。
+      { name = "USE_DOC_CLASSIFY", value = "true" },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_PATH", value = "/tmp/vertex-sa.json" },
       { name = "GEMINI_USE_VERTEX", value = "true" },

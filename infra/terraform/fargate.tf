@@ -365,6 +365,12 @@ resource "aws_ecs_task_definition" "mcp" {
       # 朝ダイジェスト Skill。EventBridge Scheduled Task（平日 9:30 JST）が
       # scripts/run_morning_digest_fargate.py 経由で呼ぶ。mention 経由でも露出（ローカル検証用）。
       { name = "USE_MORNING_DIGEST_TOOL", value = "true" },
+      # §知識ベース（2026-06-22）: 新スキーマ(documents/chunks=本番794件)を検索対象にし、
+      # 資料種別フィルタ(knowledge_filters)と実ファイル配信(knowledge_deliver)を有効化。
+      # USE_NEW_SCHEMA が無いと search は旧 proposals_chunks(3件)しか見ず知識機能が空振りする。
+      { name = "USE_NEW_SCHEMA", value = "true" },
+      { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
+      { name = "USE_KNOWLEDGE_DELIVER", value = "true" },
       ], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
