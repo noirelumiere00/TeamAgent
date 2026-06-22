@@ -65,6 +65,39 @@ resource "aws_cloudwatch_log_metric_filter" "mcp_citation_validity" {
   }
 }
 
+# 柱2(2026-06-22 事故対策): OpenClaw 起動時の設定矛盾を拾う。entrypoint(openclaw-entrypoint.sh)が
+# 注入後の実効configを検査し、dmPolicy:open なのに allowFrom に "*" 無し等で
+# openclaw_config_invariant_violation を JSON で出して fail-loud する。それを即通知。
+resource "aws_cloudwatch_log_metric_filter" "openclaw_config_violation" {
+  name           = "${var.project_name}-${var.environment}-openclaw-config-violation"
+  log_group_name = aws_cloudwatch_log_group.openclaw.name
+  pattern        = "{ $.event = \"openclaw_config_invariant_violation\" }"
+
+  metric_transformation {
+    name          = "OpenClawConfigViolation"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+# 柱2: 連携(oauth_connect)の失敗を拾う。本人未解決 fail-closed(oauth_connect_fail_closed)＋
+# URL生成失敗(oauth_connect_url_failed)。「連携が機能していない」直近シグナル＝低閾値で通知。
+resource "aws_cloudwatch_log_metric_filter" "oauth_connect_failed" {
+  name           = "${var.project_name}-${var.environment}-oauth-connect-failed"
+  log_group_name = aws_cloudwatch_log_group.mcp.name
+  pattern        = "{ $.event = \"oauth_connect_fail_closed\" || $.event = \"oauth_connect_url_failed\" }"
+
+  metric_transformation {
+    name          = "OAuthConnectFailed"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
 # ---------- alarms ----------
 # なりすまし拒否は「攻撃 or バグの早期検知」シグナル＝5分窓で1件でも通知。
 resource "aws_cloudwatch_metric_alarm" "mcp_spoof_rejected" {
@@ -72,6 +105,38 @@ resource "aws_cloudwatch_metric_alarm" "mcp_spoof_rejected" {
   alarm_description   = "MCP境界で identity 詐称/不整合を拒否（攻撃 or 結線バグの兆候）"
   namespace           = local.metric_namespace
   metric_name         = "McpIdentitySpoofRejected"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
+# 設定矛盾で OpenClaw が起動時 fail-loud＝即通知（無音で動き続けるより遥かにマシ）。
+resource "aws_cloudwatch_metric_alarm" "openclaw_config_violation" {
+  alarm_name          = "${var.project_name}-${var.environment}-openclaw-config-violation"
+  alarm_description   = "OpenClaw 起動時に設定不変条件違反（dmPolicy:open なのに allowFrom に \"*\" 無し等）"
+  namespace           = local.metric_namespace
+  metric_name         = "OpenClawConfigViolation"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
+# 連携失敗は「営業がAiLaを使い始められない」直結 シグナル＝5分窓で1件でも通知。
+resource "aws_cloudwatch_metric_alarm" "oauth_connect_failed" {
+  alarm_name          = "${var.project_name}-${var.environment}-oauth-connect-failed"
+  alarm_description   = "oauth_connect が失敗（本人未解決 fail-closed or URL生成失敗）＝連携が機能していない兆候"
+  namespace           = local.metric_namespace
+  metric_name         = "OAuthConnectFailed"
   statistic           = "Sum"
   period              = 300
   evaluation_periods  = 1
