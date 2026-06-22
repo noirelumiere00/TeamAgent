@@ -88,6 +88,10 @@ class SearchHitOut(BaseModel):
         default=None,
         description="チャネル種別（代理店/直販 等。営業 FB の構造化メタ）",
     )
+    title: str | None = Field(
+        default=None,
+        description="資料タイトル（Drive ファイル名 / Slack スレッド見出し等。新スキーマ）",
+    )
     project: str | None = Field(
         default=None,
         description="案件名/取引先（ナレッジ自動分類 cls_project）",

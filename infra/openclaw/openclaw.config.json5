@@ -131,6 +131,9 @@
             // OpenClaw に connect 経路が無い問題への対応。URL生成のみ（token保存は connect-web）。
             // USE_OAUTH_CONNECT_TOOL=1 + OAUTH_REDIRECT_URI/OAUTH_STATE_SECRET/CONNECT_GOOGLE_* が必要。
             "oauth_connect",
+            // knowledge_deliver: 「資料そのものを出して」系で該当ファイルを依頼者 DM に添付配信
+            // （USE_KNOWLEDGE_DELIVER=1 で MCP 側に出る）。検索+読取DLのみ・Drive書込なし。
+            "knowledge_deliver",
           ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は

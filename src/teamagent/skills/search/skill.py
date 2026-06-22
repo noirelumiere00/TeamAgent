@@ -229,6 +229,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     channel_type=(
                         str(h.metadata["channel_type"]) if h.metadata.get("channel_type") else None
                     ),
+                    title=(str(h.metadata["title"]) if h.metadata.get("title") else None),
                     project=(
                         str(h.metadata["cls_project"]) if h.metadata.get("cls_project") else None
                     ),

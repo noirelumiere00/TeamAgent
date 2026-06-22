@@ -101,6 +101,21 @@ def build_production_tools() -> list[ToolSpec]:
         ),
     ]
 
+    # ナレッジ配信: 検索 → 該当資料の実ファイルを依頼者 DM に添付して届ける。
+    # 既定 OFF（USE_KNOWLEDGE_DELIVER=1 で opt-in）。共有 search を注入（埋め込み二重ロード回避）。
+    # slack/gdrive は run() で遅延生成。Drive 書込はせず読取 DL のみ（drive.readonly）。
+    if _envflag("USE_KNOWLEDGE_DELIVER"):
+        from teamagent.skills.knowledge_deliver.skill import KnowledgeDeliverSkill
+
+        specs.append(
+            ToolSpec(
+                KnowledgeDeliverSkill.name,
+                KnowledgeDeliverSkill.description,
+                KnowledgeDeliverSkill,
+                factory=lambda: KnowledgeDeliverSkill(search=search),
+            )
+        )
+
     # Phase 6 (6d): Mail 制約ツール。**既定 OFF**（USE_MAIL_TOOLS=1 で opt-in）。
     # 実行時に run() が G1 本人受信箱限定 / G2 本人同意（MAIL_CONSENT_EMAILS）を
     # fail-closed で強制。実受信箱接続（6c）の人間ゲート（同意/DWD/CASA）承認後に有効化。
