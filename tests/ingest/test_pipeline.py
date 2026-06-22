@@ -44,6 +44,7 @@ class _FakeRepository:
                 "external_id": doc.external_id,
                 "source_type": doc.source_type,
                 "acl_groups": list(doc.acl_groups),
+                "metadata": dict(doc.metadata),
                 "chunk_count": len(chunks),
                 "request_id": request_id,
             }
@@ -630,6 +631,104 @@ def test_ingest_gdrive_folder_non_pdf_uses_title_only(
     assert chunks_n == 1
     # download_file_bytes は呼ばれない（PDF 以外）
     fake_client.download_file_bytes.assert_not_called()
+
+
+def _setup_fake_drive_pdf(monkeypatch: pytest.MonkeyPatch, *, name: str) -> Any:
+    """分類テスト用: PDF 1 本を返す fake GDriveClient をセットアップする。"""
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [_make_drive_file(id="F1", name=name, owners=("alice@x.jp",))],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = b"<fake-pdf>"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    fake_reader = MagicMock()
+    page = MagicMock()
+    page.extract_text.return_value = "アース製薬向け SNS 提案の本文" * 10
+    fake_reader.pages = [page]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+    return fake_client
+
+
+def test_ingest_gdrive_folder_applies_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """USE_DOC_CLASSIFY=1 のとき、本文を分類して cls_* を documents.metadata に付与する。"""
+    monkeypatch.setenv("USE_DOC_CLASSIFY", "1")
+    _setup_fake_drive_pdf(monkeypatch, name="アース製薬_提案.pdf")
+
+    fake_bedrock = MagicMock()
+    fake_bedrock.converse.return_value = MagicMock(
+        text='{"project": "アース製薬", "industry": "日用品", "doc_type": "提案書", "phase": "提案"}'
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.bedrock_client.BedrockClient.from_env",
+        classmethod(lambda cls: fake_bedrock),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="ナレッジ",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-cls",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    assert md["cls_project"] == "アース製薬"
+    assert md["cls_industry"] == "日用品"
+    assert md["cls_doc_type"] == "提案書"
+    assert md["cls_phase"] == "提案"
+    assert md["industry"] == "日用品"  # 既存の業界フィルタと整合
+
+
+def test_ingest_gdrive_folder_no_classification_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """USE_DOC_CLASSIFY 未設定（既定）なら分類せず、Bedrock も呼ばない（完全後方互換）。"""
+    monkeypatch.delenv("USE_DOC_CLASSIFY", raising=False)
+    _setup_fake_drive_pdf(monkeypatch, name="提案.pdf")
+
+    def _boom(cls: type) -> None:
+        raise AssertionError("分類無効時に Bedrock を呼んではいけない")
+
+    monkeypatch.setattr(
+        "teamagent.adapters.bedrock_client.BedrockClient.from_env", classmethod(_boom)
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="ナレッジ",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-nocls",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    assert "cls_project" not in md
+    assert "cls_doc_type" not in md
 
 
 def test_ingest_gdrive_folder_docx_extracts_chunks(

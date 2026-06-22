@@ -402,7 +402,11 @@ class PgVectorClient:
                 d.metadata->>'client_name' AS client_name,
                 d.metadata->>'deal_phase' AS deal_phase,
                 d.metadata->>'bant_score' AS bant_score,
-                d.metadata->>'channel_type' AS channel_type
+                d.metadata->>'channel_type' AS channel_type,
+                d.metadata->>'cls_project' AS cls_project,
+                d.metadata->>'cls_industry' AS cls_industry,
+                d.metadata->>'cls_doc_type' AS cls_doc_type,
+                d.metadata->>'cls_phase' AS cls_phase
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             {where_clause}
@@ -440,6 +444,11 @@ class PgVectorClient:
                     meta["bant_score"] = r["bant_score"]
                 if r.get("channel_type"):
                     meta["channel_type"] = r["channel_type"]
+            # ナレッジ自動分類タグ（ingest.classify が付与・案件/業界/種別/フェーズ）。
+            # is_sales_fb と独立に常に拾う（Drive 資料は FB ではないが分類対象）。
+            for cls_key in ("cls_project", "cls_industry", "cls_doc_type", "cls_phase"):
+                if r.get(cls_key):
+                    meta[cls_key] = r[cls_key]
             hits.append(
                 SearchHit(
                     chunk_id=int(r["chunk_id"]),

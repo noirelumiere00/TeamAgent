@@ -63,6 +63,9 @@ def _build_search_skill() -> Any:
         # （USE_CLIENT_BOOST=false で明示無効化は可能）。
         use_client_boost=_envflag("USE_CLIENT_BOOST", "true"),
         use_aggregation_mode=_envflag("USE_AGGREGATION_MODE"),
+        # ナレッジ Q&A: 「○○業界の提案事例」等の資料種別語を cls_doc_type で絞る
+        # （0 件なら通常検索にフォールバック＝副作用なし）。USE_KNOWLEDGE_FILTERS で有効化。
+        use_knowledge_filters=_envflag("USE_KNOWLEDGE_FILTERS"),
         prompt_version=os.environ.get("PROMPT_VERSION", "v2d"),
         summary_max_tokens=summary_max_tokens,
     )

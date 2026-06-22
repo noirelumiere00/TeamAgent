@@ -69,7 +69,9 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         "本人受信箱の指定クライアントの直近メールへの返信案を起草し、Gmail の下書きとして"
         "保存する（送信はしない＝本人が確認して送信）。本人が /teamagent connect で"
         "gmail.modify を認可済みの時のみ使える。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める（mcp 境界の本人解決鍵）。"
+        "呼び出し時は arguments に "
+        "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
+        "必ず含める（mcp 境界の本人解決鍵）。"
     )
     input_schema: ClassVar[type[BaseModel]] = MailReplyInput
     output_schema: ClassVar[type[BaseModel]] = MailReplyOutput

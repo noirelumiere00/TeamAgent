@@ -25,6 +25,7 @@ from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
+from teamagent.skills.search.knowledge_query import extract_knowledge_filters
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
@@ -60,6 +61,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         use_client_boost: bool = False,
         client_boost_limit: int = 10,
         use_aggregation_mode: bool = False,
+        use_knowledge_filters: bool = False,
         prompt_version: str = "v1",
         summary_max_tokens: int = 4096,
         app_role: str | None = "teamagent_app",
@@ -133,6 +135,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 意味検索ではなくメタデータフィルタ列挙 (list_by_metadata) で答える。
         # USE_AGGREGATION_MODE=true で有効化 (既定 OFF)。new_schema 前提。
         self._use_aggregation_mode = use_aggregation_mode
+        # ナレッジ Q&A: 「○○業界の提案事例」等の資料種別語を cls_doc_type フィルタに変換し、
+        # まず分類メタで絞った意味検索→0件なら外して通常検索にフォールバック。
+        # USE_KNOWLEDGE_FILTERS で有効化（既定 OFF）。new_schema + 自動分類済 docs 前提。
+        self._use_knowledge_filters = use_knowledge_filters
         # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
         # 「過去のチャンク要約」から「パターン抽出 + 推奨アクション」に役割を進化させる。
         # ユーザー指摘 (Day 8): "あたりまえの過去事例リサーチは不要、リサーチ＆改善の思考が欲しい"
@@ -223,6 +229,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     channel_type=(
                         str(h.metadata["channel_type"]) if h.metadata.get("channel_type") else None
                     ),
+                    project=(
+                        str(h.metadata["cls_project"]) if h.metadata.get("cls_project") else None
+                    ),
+                    industry=(
+                        str(h.metadata["cls_industry"]) if h.metadata.get("cls_industry") else None
+                    ),
+                    doc_type=(
+                        str(h.metadata["cls_doc_type"]) if h.metadata.get("cls_doc_type") else None
+                    ),
                 )
                 for h in hits
             ],
@@ -297,6 +312,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     if self._use_cohere_rerank
                     else input.top_k
                 )
+                # ナレッジ Q&A: 資料種別語（「提案事例」「議事録」等）が読めたら、まず
+                # 自動分類メタ（cls_doc_type）で絞った意味検索を試す。
+                knowledge_filters = (
+                    extract_knowledge_filters(input.query) if self._use_knowledge_filters else None
+                )
                 hits = self._pgvector.search_similar_new_schema(
                     conn=conn,
                     embedding=embedding,
@@ -304,7 +324,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     filter_industry=input.filter_industry,
                     request_id=ctx.request_id,
                     strict_industry=input.strict_industry,
+                    metadata_filters=knowledge_filters,
                 )
+                # 絞り込んで 0 件 → 種別フィルタを外して通常の意味検索にフォールバック
+                # （分類済 docs がまだ少ない初期でも空振りしない）。
+                if not hits and knowledge_filters:
+                    hits = self._pgvector.search_similar_new_schema(
+                        conn=conn,
+                        embedding=embedding,
+                        limit=retrieve_limit,
+                        filter_industry=input.filter_industry,
+                        request_id=ctx.request_id,
+                        strict_industry=input.strict_industry,
+                    )
                 # Sprint 7: クライアント名ブースト。固有名詞クエリで dense が正解 chunk を
                 # 取りこぼすのを補強（client_name 絞り検索を rerank プールへ合流）。
                 if self._use_client_boost:

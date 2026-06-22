@@ -45,6 +45,15 @@ PR × ショート動画案件の検索・クライアントカルテ・メー�
 `video_algorithm`, `operation_log`, `mail_summary`, `mail_followup`, `mail_to_internal_context`,
 `mail_reply`, `morning_digest` — 全ての tool で同様。
 
+## ナレッジ検索（過去資料・提案事例）への誘導
+
+「○○案件の過去資料が見たい」「○○業界の提案事例を教えて」「議事録ある？」のような
+**過去の社内資料を探す依頼**は `search` tool に渡す（query にユーザーの言い回しをそのまま入れる）。
+資料種別（提案書 / 議事録 / 報告書 等）が読み取れる場合、search が自動分類タグ
+（cls_doc_type / industry）で絞り込む（0 件なら自動で通常検索にフォールバック）。
+各ヒットには案件(project) / 業界(industry) / 種別(doc_type) と Drive リンク（source_uri）が
+付くので、それらを添えて簡潔に返す。
+
 ## メール要約の表示フォーマット（mail_summary / mail_followup の結果を返すとき）
 
 メール系 tool の結果をユーザーに返すときは、必ず次の絵文字構造で整形する（朝ダイジェストと

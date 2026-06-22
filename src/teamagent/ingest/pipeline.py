@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
@@ -33,6 +33,9 @@ from teamagent.ingest.loader import (
 )
 from teamagent.ingest.ops_alert import IngestOpsAlerter
 from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepository
+
+if TYPE_CHECKING:
+    from teamagent.ingest.classify import DocClassifier
 
 logger = structlog.get_logger(__name__)
 
@@ -500,11 +503,14 @@ def _ingest_gdrive_folder(
     ACL は permissions.list を呼んで documents.acl_emails / acl_groups に写像する。
     """
     from teamagent.adapters.gdrive_client import GDriveClient
+    from teamagent.ingest.classify import build_classifier_from_env
 
     # Day 7: folder bulk ingest のため readonly=True で drive.readonly スコープを使う。
     # Internal OAuth なので CASA 審査不要。drive.file ではフォルダ単位の取り込みが
     # できない（per-file opened only の制約）ため、readonly に切替。
     client = GDriveClient.from_env(readonly=True)
+    # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。folder 単位で 1 回構築）。
+    classifier = build_classifier_from_env()
     docs_n = 0
     chunks_n = 0
     skipped: list[str] = []
@@ -578,6 +584,7 @@ def _ingest_gdrive_folder(
                 dry_run=dry_run,
                 request_id=request_id,
                 skipped=skipped,
+                classifier=classifier,
             )
             docs_n += docs_added
             chunks_n += chunks_added
@@ -658,11 +665,15 @@ def _process_one_gdrive_file(
     dry_run: bool,
     request_id: str,
     skipped: list[str],
+    classifier: DocClassifier | None = None,
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
     Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないように、
     呼び出し側を try/except でラップ可能に。
+
+    classifier が非 None（USE_DOC_CLASSIFY=1）の時は本文抜粋を分類し、
+    案件 / 業界 / 資料種別 / 商談フェーズを documents.metadata に付与する（fail-open）。
     """
     from teamagent.ingest.office_extract import (
         GDOC_NATIVE_MIME,
@@ -801,6 +812,21 @@ def _process_one_gdrive_file(
             )
         )
 
+    # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
+    # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。失敗しても取り込みは継続（fail-open）。
+    cls_metadata: dict[str, str] = {}
+    if classifier is not None and chunks:
+        sample = "\n".join(c.content for c in chunks[:8])
+        try:
+            classification = classifier.classify(
+                title=f.name or "", text=sample, request_id=request_id
+            )
+        except Exception:
+            logger.exception("gdrive_classify_unexpected", file_id=f.id, file_name=f.name)
+            classification = None
+        if classification is not None:
+            cls_metadata = classification.as_metadata()
+
     doc = DocumentUpsert(
         source_type="gdrive",
         external_id=f.id,
@@ -815,6 +841,7 @@ def _process_one_gdrive_file(
             "size": f.size,
             "drive_folder_id": spec.folder_id,
             "drive_folder_name": spec.folder_name,
+            **cls_metadata,
         },
         modified_at=f.modified_time,
     )
