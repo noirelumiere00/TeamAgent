@@ -103,6 +103,16 @@ resource "aws_codebuild_project" "image" {
       name  = "WITH_SCRAPE_TOOLS"
       value = "false"
     }
+    # 柱4(2026-06-22): ビルド出所追跡。start-build の --environment-variables-override で
+    # GIT_COMMIT=$(git rev-parse HEAD) / GIT_BRANCH=$(git branch --show-current) を渡す。
+    environment_variable {
+      name  = "GIT_COMMIT"
+      value = "unknown"
+    }
+    environment_variable {
+      name  = "GIT_BRANCH"
+      value = "unknown"
+    }
   }
 
   source {
@@ -117,7 +127,7 @@ resource "aws_codebuild_project" "image" {
         build:
           commands:
             - echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m)"
-            - docker build -f infra/docker/Dockerfile.teamagent-mcp --build-arg WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS -t $MCP_REPO:$IMAGE_TAG .
+            - docker build -f infra/docker/Dockerfile.teamagent-mcp --build-arg WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS --build-arg GIT_COMMIT="$GIT_COMMIT" --build-arg GIT_BRANCH="$GIT_BRANCH" -t $MCP_REPO:$IMAGE_TAG .
         post_build:
           commands:
             - docker push $MCP_REPO:$IMAGE_TAG

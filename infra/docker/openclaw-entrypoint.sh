@@ -3,6 +3,9 @@
 # read-only config(OPENCLAW_CONFIG_PATH)はそのまま参照。secrets は env(ECS secrets)から。
 set -eu
 
+# 柱4: 本番で動いている image の出所 commit を起動時にログ（CloudWatch から追える）。
+echo "[entrypoint] build commit=${TEAMAGENT_BUILD_COMMIT:-unknown} branch=${TEAMAGENT_BUILD_BRANCH:-unknown}" >&2
+
 WS="${OPENCLAW_WORKSPACE_DIR:-/home/node/.openclaw/workspace}"
 mkdir -p "$WS"
 # 既存があれば上書きしない（-n）。state は触らない。

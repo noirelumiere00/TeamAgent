@@ -19,6 +19,13 @@
 # digest は manifest list（multi-arch）。
 FROM ghcr.io/openclaw/openclaw:2026.6.5@sha256:037f49ba1595be9502fb345138d727cd0cfaecf1392cbe0cfe053fb4681386cd
 
+# 柱4(2026-06-22): ビルド出所追跡（image↔commit）。build時 --build-arg GIT_COMMIT/GIT_BRANCH で注入。
+# entrypoint が起動時に commit をログ出力＝本番で動く image の出所が CloudWatch から追える。
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ENV TEAMAGENT_BUILD_COMMIT=$GIT_COMMIT TEAMAGENT_BUILD_BRANCH=$GIT_BRANCH
+LABEL org.opencontainers.image.revision=$GIT_COMMIT
+
 # レビュー済み設定（read-only パスに焼く。state は書かない）
 COPY infra/openclaw/openclaw.config.json5 /opt/teamagent/openclaw.json
 # workspace に seed するペルソナ（起動時に書込み可能 workspace へコピー）
