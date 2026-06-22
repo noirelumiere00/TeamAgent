@@ -55,13 +55,16 @@
       // 外部ワークスペース/Slack Connect stranger/guest/bot/email欠落を None 拒否し、MCP 境界(server.py)が
       // RLS を fail-closed 強制（ダウングレード不可）。よって open でも社外/ゲストにデータは届かない。
       // 残る露出は「外部ゲストでも Haiku 会話レイヤーには応答し得る（データは出ない・コスト/存在のみ）」
-      // の一点で、これはユーザー判断で許容（2026-06-22）。allowFrom は open 下では参照されない（保持のみ）。
+      // の一点で、これはユーザー判断で許容（2026-06-22）。
       dmPolicy: "open",
-      // §U: これは焼き込みの fallback。本番は entrypoint が env `SLACK_DM_ALLOWLIST`
-      // （カンマ区切り Slack user_id）から allowFrom を起動時に上書きする＝メンバー追加は
-      // env 変更 + 再デプロイのみ（image rebuild 不要）。15名規模まで可動。
+      // ⚠️§T2b 訂正(2026-06-22)：当初「allowFrom は open 下では参照されない」と書いたが**誤り**。
+      // 実コード(@openclaw/slack)は `dmPolicy==="open" && allowFrom.includes("*")` の時のみ全通過し、
+      // "*" が無ければ open でも allowFrom 列挙者だけの allowlist として gating する。
+      // よって全社内開放には **allowFrom に "*" が必須**。本番は entrypoint が env `SLACK_DM_ALLOWLIST`
+      // （tfvars slack_dm_allowlist="*"）から allowFrom=["*"] を起動時に注入＝下の焼き込みを上書きする。
+      // ここを ["*"] にしておくのは env 未設定で再ビルドした時の退行防止（[]は全拒否なので不可）。
       allowFrom: [
-        "U09CX1CCBLN", // 小俣翔碁
+        "*", // 全社内開放（社外/ゲスト/bot はサーバ側 resolve_identity で fail-closed）
       ],
     },
   },
