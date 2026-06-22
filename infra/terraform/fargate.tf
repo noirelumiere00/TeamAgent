@@ -159,6 +159,8 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
       data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
       # §U: oauth_connect の state 署名鍵の注入権限。
       data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
+      # §知識ベース: knowledge_deliver が共有 Drive(個人OAuth)で実ファイルを DL する token。
+      data.aws_secretsmanager_secret.google_oauth[0].arn,
     ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [])
   }
 }
@@ -371,6 +373,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_NEW_SCHEMA", value = "true" },
       { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
       { name = "USE_KNOWLEDGE_DELIVER", value = "true" },
+      # §知識ベース: knowledge_deliver の Drive DL は共有「個人OAuth」を使う。これが無いと
+      # GOOGLE_APPLICATION_CREDENTIALS(Vertex SA) が選ばれ、SA は外部 Drive 非対応で DL 失敗する。
+      { name = "GOOGLE_FORCE_OAUTH", value = "1" },
       ], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
@@ -397,6 +402,11 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
       # §U: oauth_connect の state 署名鍵（connect-web と同一値＝署名/検証を共有）。
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
+      # §知識ベース: 共有「個人OAuth」3点を google_oauth(JSON) から個別キー抽出して注入。
+      # knowledge_deliver が GDriveClient.from_env で本人 Drive token を組み立て実ファイルを DL。
+      { name = "GOOGLE_CLIENT_ID", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:client_id::" },
+      { name = "GOOGLE_CLIENT_SECRET", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:client_secret::" },
+      { name = "GOOGLE_OAUTH_REFRESH_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:refresh_token::" },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_JSON", valueFrom = data.aws_secretsmanager_secret.vertex_sa[0].arn },
     ] : [])

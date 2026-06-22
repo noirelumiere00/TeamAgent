@@ -193,6 +193,9 @@ resource "aws_ecs_task_definition" "ingest" {
       # §知識ベース（2026-06-22）: Drive 取り込み時に Bedrock で資料を自動分類
       # （案件/業界/種別/フェーズ→documents.metadata）。ingest_task は bedrock:InvokeModel 保持済。
       { name = "USE_DOC_CLASSIFY", value = "true" },
+      # §知識ベース: 共有ドライブの走査/DL は「個人OAuth」を使う。これが無いと Vertex SA が
+      # 選ばれ、SA は外部 Drive 非対応で walk が 0 件になる（OAuth3点は GOOGLE_OAUTH_JSON から展開済）。
+      { name = "GOOGLE_FORCE_OAUTH", value = "1" },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_PATH", value = "/tmp/vertex-sa.json" },
       { name = "GEMINI_USE_VERTEX", value = "true" },
