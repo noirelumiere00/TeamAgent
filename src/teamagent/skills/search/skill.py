@@ -26,7 +26,10 @@ from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
-from teamagent.skills.search.knowledge_query import extract_knowledge_filters
+from teamagent.skills.search.knowledge_query import (
+    extract_knowledge_filters,
+    extract_query_industry,
+)
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
@@ -253,6 +256,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     doc_type=(
                         str(h.metadata["cls_doc_type"]) if h.metadata.get("cls_doc_type") else None
                     ),
+                    is_low_confidence=bool(h.metadata.get("is_low_confidence", False)),
                 )
                 for h in hits
             ],
@@ -332,23 +336,28 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 knowledge_filters = (
                     extract_knowledge_filters(input.query) if self._use_knowledge_filters else None
                 )
+                # 業界語（「飲料系/化粧品」等）を soft filter_industry に（明示指定が優先）。
+                # soft=「industry=値 OR NULL」なので未分類 docs は除外されない＝過剰絞り込みなし。
+                eff_industry = input.filter_industry or (
+                    extract_query_industry(input.query) if self._use_knowledge_filters else None
+                )
                 hits = self._pgvector.search_similar_new_schema(
                     conn=conn,
                     embedding=embedding,
                     limit=retrieve_limit,
-                    filter_industry=input.filter_industry,
+                    filter_industry=eff_industry,
                     request_id=ctx.request_id,
                     strict_industry=input.strict_industry,
                     metadata_filters=knowledge_filters,
                 )
-                # 絞り込んで 0 件 → 種別フィルタを外して通常の意味検索にフォールバック
+                # 絞り込んで 0 件 → 種別/業界フィルタを外して通常の意味検索にフォールバック
                 # （分類済 docs がまだ少ない初期でも空振りしない）。
-                if not hits and knowledge_filters:
+                if not hits and (knowledge_filters or eff_industry):
                     hits = self._pgvector.search_similar_new_schema(
                         conn=conn,
                         embedding=embedding,
                         limit=retrieve_limit,
-                        filter_industry=input.filter_industry,
+                        filter_industry=None,
                         request_id=ctx.request_id,
                         strict_industry=input.strict_industry,
                     )

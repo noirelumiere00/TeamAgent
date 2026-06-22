@@ -22,6 +22,24 @@ _DOC_TYPE_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+# 業界キーワード → cls_industry 正規値（classify._CLASSIFY_SYSTEM_PROMPT の例語彙に寄せる）。
+# 「飲料系」「飲食」等を業界フィルタに変換。filter_industry は soft（industry=値 OR NULL）で
+# 渡すため、未分類 docs は除外されない＝過剰絞り込みしない安全設計。
+_INDUSTRY_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("飲料", "ドリンク", "飲み物"), "飲料"),
+    (("飲食", "レストラン", "居酒屋", "カフェ", "外食"), "飲食"),
+    (("化粧品", "コスメ", "美容", "スキンケア"), "化粧品"),
+    (("日用品", "トイレタリー"), "日用品"),
+    (("食品", "食料品"), "食品"),
+    (("小売", "EC", "通販", "店舗", "リテール"), "小売"),
+    (("不動産", "賃貸", "マンション"), "不動産"),
+    (("金融", "銀行", "保険", "証券"), "金融"),
+    (("人材", "採用", "求人", "HR"), "人材"),
+    (("メーカー", "製造", "工場"), "メーカー"),
+    (("IT", "SaaS", "ソフトウェア", "システム"), "IT"),
+)
+
+
 def extract_knowledge_filters(query: str) -> dict[str, str] | None:
     """クエリから資料種別の絞り込みフィルタを抽出する。
 
@@ -34,4 +52,19 @@ def extract_knowledge_filters(query: str) -> dict[str, str] | None:
     for keywords, doc_type in _DOC_TYPE_KEYWORDS:
         if any(kw in query for kw in keywords):
             return {"cls_doc_type": doc_type}
+    return None
+
+
+def extract_query_industry(query: str) -> str | None:
+    """クエリから業界（cls_industry 値）を抽出する。該当語が無ければ None。
+
+    soft な filter_industry として使う（industry=値 OR NULL を許容）＋ 配信側の業界不一致
+    スキップにも使う。自動分類が free-text のため exact 一致は保証されないが、soft なので
+    過剰除外はしない（未分類・別表記は通る）。
+    """
+    if not query:
+        return None
+    for keywords, industry in _INDUSTRY_KEYWORDS:
+        if any(kw in query for kw in keywords):
+            return industry
     return None

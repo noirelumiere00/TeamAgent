@@ -231,3 +231,39 @@ def test_score_gate_threshold_env() -> None:
         assert out.delivered_count == 1
     finally:
         del os.environ["KNOWLEDGE_DELIVER_MIN_SCORE"]
+
+
+def test_low_confidence_hit_not_delivered() -> None:
+    # 低信頼ヒット（2段階しきい値で救出された borderline）は添付しない。
+    hits = [
+        _hit(
+            source_type="gdrive",
+            source_uri="gdrive://F1",
+            title="a.pdf",
+            is_low_confidence=True,
+        )
+    ]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+    out = skill.run(KnowledgeDeliverInput(query="x"), _ctx())
+    assert out.delivered_count == 0
+    slack.upload_file.assert_not_awaited()
+
+
+def test_industry_mismatch_not_delivered() -> None:
+    # クエリが「化粧品」を指定、ヒットの業界が「飲食」→ 別業界なので添付しない。
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf", industry="飲食")]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+    out = skill.run(KnowledgeDeliverInput(query="化粧品の提案資料出して"), _ctx())
+    assert out.delivered_count == 0
+    slack.upload_file.assert_not_awaited()
+
+
+def test_industry_match_delivered() -> None:
+    # クエリ「化粧品」とヒット業界「化粧品」が一致 → 配信される。
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf", industry="化粧品")]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+    out = skill.run(KnowledgeDeliverInput(query="化粧品の提案資料出して"), _ctx())
+    assert out.delivered_count == 1

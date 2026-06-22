@@ -29,6 +29,7 @@ from teamagent.skills.knowledge_deliver.schema import (
     KnowledgeDeliverOutput,
     KnowledgeRef,
 )
+from teamagent.skills.search.knowledge_query import extract_query_industry
 from teamagent.skills.search.schema import SearchInput
 
 logger = structlog.get_logger(__name__)
@@ -96,13 +97,16 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             ctx,
         )
 
-        # 2. ヒットから「Drive 実体があり、かつ十分に関連が高い資料」を重複排除して配信候補に。
-        #    score ゲート: 弱いヒット（無関係・本文なし title-only は低 score）は添付しない。
-        #    これが無いと「サンマルク」検索で無関係な客の PDF を誤添付してしまう。
+        # 2. ヒットから「Drive 実体があり、かつ確信を持って関連が高い資料」だけを配信候補に。
+        #    確信配信ポリシー（無関係/本文なし/別業界を添付しない・"参考"ダンプ廃止）:
+        #    - score >= 閾値（rerank relevance スケール。USE_COHERE_RERANK で真の関連度になる）
+        #    - 低信頼(is_low_confidence)はスキップ
+        #    - クエリが業界を指定し、ヒットの業界が設定済かつ不一致ならスキップ
         try:
-            min_score = float(os.environ.get("KNOWLEDGE_DELIVER_MIN_SCORE", "0.6"))
+            min_score = float(os.environ.get("KNOWLEDGE_DELIVER_MIN_SCORE", "0.5"))
         except ValueError:
-            min_score = 0.6
+            min_score = 0.5
+        query_industry = extract_query_industry(input.query)
         refs: list[KnowledgeRef] = []
         candidates: list[tuple[str, str]] = []  # (file_id, filename)
         seen_ids: set[str] = set()
@@ -117,9 +121,12 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 delivered=False,
             )
             refs.append(ref)
+            industry_mismatch = bool(query_industry and h.industry and h.industry != query_industry)
             if (
                 file_id
                 and h.score >= min_score
+                and not h.is_low_confidence
+                and not industry_mismatch
                 and file_id not in seen_ids
                 and len(candidates) < input.top_k
             ):

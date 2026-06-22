@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from teamagent.skills.search.knowledge_query import extract_knowledge_filters
+from teamagent.skills.search.knowledge_query import (
+    extract_knowledge_filters,
+    extract_query_industry,
+)
 
 
 def test_proposal_examples() -> None:
@@ -30,3 +33,11 @@ def test_no_doc_type_signal_returns_none() -> None:
 
 def test_empty_returns_none() -> None:
     assert extract_knowledge_filters("") is None
+
+
+def test_extract_query_industry() -> None:
+    assert extract_query_industry("飲料系の提案資料出して") == "飲料"
+    assert extract_query_industry("化粧品のコスメ提案ある？") == "化粧品"
+    assert extract_query_industry("飲食店向けの事例") == "飲食"
+    assert extract_query_industry("アース製薬の過去資料") is None  # 業界語なし
+    assert extract_query_industry("") is None

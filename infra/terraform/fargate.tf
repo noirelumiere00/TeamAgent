@@ -245,6 +245,13 @@ data "aws_iam_policy_document" "mcp_task" {
     ]
     resources = local.bedrock_resources
   }
+  # §知識ベース: Cohere Rerank（検索の真の関連度で並べ替え＝業界/客の違いを区別）。
+  # bedrock:Rerank は InvokeModel とは別アクションなので明示付与が必要。
+  statement {
+    sid       = "BedrockRerank"
+    actions   = ["bedrock:Rerank"]
+    resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/cohere.rerank-v3-5:0"]
+  }
 }
 
 resource "aws_iam_role" "mcp_task" {
@@ -376,10 +383,13 @@ resource "aws_ecs_task_definition" "mcp" {
       # §知識ベース: knowledge_deliver の Drive DL は共有「個人OAuth」を使う。これが無いと
       # GOOGLE_APPLICATION_CREDENTIALS(Vertex SA) が選ばれ、SA は外部 Drive 非対応で DL 失敗する。
       { name = "GOOGLE_FORCE_OAUTH", value = "1" },
-      # §知識ベース: 検索の関連性しきい値（弱いヒットを要約から落とす）＋配信スコアゲート
-      # （無関係/本文なしファイルを添付しない）。サンマルク検索で無関係客の PDF を誤添付した対策。
+      # §知識ベース: Cohere 再ランク（クエリと資料本文の真の関連度で並べ替え＝「PR提案資料」が
+      # 全部 cos~0.6 で似て見える問題を解消・無関係業界/客は低 relevance で落ちる）。
+      { name = "USE_COHERE_RERANK", value = "true" },
+      # 検索の関連性しきい値＋配信スコアゲート（rerank relevance スケール 0-1）。
+      # 無関係/本文なしファイルを添付しない。飲料系検索で無関係客の PDF を誤添付した対策。
       { name = "SEARCH_MIN_RELEVANCE", value = "0.4" },
-      { name = "KNOWLEDGE_DELIVER_MIN_SCORE", value = "0.6" },
+      { name = "KNOWLEDGE_DELIVER_MIN_SCORE", value = "0.5" },
       ], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },

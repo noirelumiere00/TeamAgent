@@ -104,6 +104,10 @@ class SearchHitOut(BaseModel):
         default=None,
         description="資料種別（提案書/議事録/報告書 等・自動分類 cls_doc_type）",
     )
+    is_low_confidence: bool = Field(
+        default=False,
+        description="低信頼ヒット（fallback しきい値で救出された borderline）。配信は控える",
+    )
 
 
 class SearchOutput(BaseModel):
