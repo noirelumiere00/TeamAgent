@@ -376,6 +376,10 @@ resource "aws_ecs_task_definition" "mcp" {
       # §知識ベース: knowledge_deliver の Drive DL は共有「個人OAuth」を使う。これが無いと
       # GOOGLE_APPLICATION_CREDENTIALS(Vertex SA) が選ばれ、SA は外部 Drive 非対応で DL 失敗する。
       { name = "GOOGLE_FORCE_OAUTH", value = "1" },
+      # §知識ベース: 検索の関連性しきい値（弱いヒットを要約から落とす）＋配信スコアゲート
+      # （無関係/本文なしファイルを添付しない）。サンマルク検索で無関係客の PDF を誤添付した対策。
+      { name = "SEARCH_MIN_RELEVANCE", value = "0.4" },
+      { name = "KNOWLEDGE_DELIVER_MIN_SCORE", value = "0.6" },
       ], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },

@@ -14,6 +14,7 @@ CLAUDE.md 6-bis ルール準拠：
 
 from __future__ import annotations
 
+import re
 from typing import Any, ClassVar
 
 import structlog
@@ -29,6 +30,19 @@ from teamagent.skills.search.knowledge_query import extract_knowledge_filters
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
+
+# ユーザー向け回答から内部マーカー（chunk_id 引用・低信頼タグ）を除去する。
+# v2d プロンプトでも chunk_id を出さない指示にしたが、Bedrock が入力チャンクの
+# `[chunk_id: N]` を echo することがあるため後段でも保険で落とす（営業に技術IDを見せない）。
+_CHUNK_ID_RE = re.compile(r"\s*[\[(][^\[\]()]*chunk_id[^\[\]()]*[\])]")
+
+
+def _strip_internal_markers(text: str) -> str:
+    if not text:
+        return text
+    out = _CHUNK_ID_RE.sub("", text)
+    out = out.replace("（関連度低・参考）", "")
+    return out.strip()
 
 
 @register
@@ -609,7 +623,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             cache_system=True,  # 同じ system prompt を頻繁に呼ぶのでキャッシュで input cost 1/10
             max_tokens=self._summary_max_tokens,
         )
-        return resp.text, resp.usage.cost_usd
+        return _strip_internal_markers(resp.text), resp.usage.cost_usd
 
     @staticmethod
     def _safe_int(value: Any) -> int | None:

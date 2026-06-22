@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -95,7 +96,13 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             ctx,
         )
 
-        # 2. ヒットから「Drive 実体のある資料」を重複排除して配信候補に。
+        # 2. ヒットから「Drive 実体があり、かつ十分に関連が高い資料」を重複排除して配信候補に。
+        #    score ゲート: 弱いヒット（無関係・本文なし title-only は低 score）は添付しない。
+        #    これが無いと「サンマルク」検索で無関係な客の PDF を誤添付してしまう。
+        try:
+            min_score = float(os.environ.get("KNOWLEDGE_DELIVER_MIN_SCORE", "0.6"))
+        except ValueError:
+            min_score = 0.6
         refs: list[KnowledgeRef] = []
         candidates: list[tuple[str, str]] = []  # (file_id, filename)
         seen_ids: set[str] = set()
@@ -110,7 +117,12 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 delivered=False,
             )
             refs.append(ref)
-            if file_id and file_id not in seen_ids and len(candidates) < input.top_k:
+            if (
+                file_id
+                and h.score >= min_score
+                and file_id not in seen_ids
+                and len(candidates) < input.top_k
+            ):
                 seen_ids.add(file_id)
                 candidates.append((file_id, _safe_filename(h.title or h.file_name)))
 

@@ -205,3 +205,29 @@ def test_download_failure_skips_that_file() -> None:
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=gdrive)
     out = skill.run(KnowledgeDeliverInput(query="x"), _ctx())
     assert out.delivered_count == 1  # 落ちた1件はスキップ、1件は配信
+
+
+def test_low_score_hits_not_delivered() -> None:
+    # 弱いヒット（無関係・本文なし）は score ゲートで添付しない＝間違ったファイルを送らない。
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="無関係.pdf", score=0.45)]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+    out = skill.run(KnowledgeDeliverInput(query="サンマルクの資料"), _ctx())
+    assert out.delivered_count == 0
+    assert "見つかりません" in out.note
+    slack.upload_file.assert_not_awaited()
+
+
+def test_score_gate_threshold_env() -> None:
+    # KNOWLEDGE_DELIVER_MIN_SCORE を下げれば弱いヒットも配信対象になる（env 駆動の確認）。
+    import os
+
+    os.environ["KNOWLEDGE_DELIVER_MIN_SCORE"] = "0.3"
+    try:
+        hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf", score=0.45)]
+        slack = _slack_mock()
+        skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+        out = skill.run(KnowledgeDeliverInput(query="x"), _ctx())
+        assert out.delivered_count == 1
+    finally:
+        del os.environ["KNOWLEDGE_DELIVER_MIN_SCORE"]
