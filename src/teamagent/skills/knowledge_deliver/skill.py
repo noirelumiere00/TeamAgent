@@ -133,33 +133,44 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                     continue
                 prepared.append((file_id, path, filename))
 
-        # 4. 依頼者本人の DM に添付配信（user_email 未解決なら配信せず note のみ）。
+        # 4. 配信。聞かれたチャンネル/スレッドがあればそこに添付（メール以外は基本チャンネル完結）。
+        #    無ければ依頼者本人の DM にフォールバック（個人的・気まずい依頼や DM 直依頼向け）。
         requester = ctx.metadata.get("user_email")
+        requester_email = (
+            requester.strip() if isinstance(requester, str) and requester.strip() else None
+        )
+        channel_id = ctx.metadata.get("channel_id")
+        channel_id = channel_id if isinstance(channel_id, str) and channel_id else None
+        thread_ts = ctx.metadata.get("thread_ts")
+        thread_ts = thread_ts if isinstance(thread_ts, str) and thread_ts else None
+
         delivered_ids: set[str] = set()
+        where = ""
         if not prepared:
             note = "該当する添付可能な資料が見つかりませんでした（要約のみお返しします）。"
-        elif not isinstance(requester, str) or not requester.strip():
-            note = (
-                "資料は見つかりましたが、DM へお届けできませんでした"
-                "（連携が未完了の可能性があります）。"
-            )
+        elif not channel_id and not requester_email:
+            note = "資料は見つかりましたが、配信先が分からずお届けできませんでした（要約のみ）。"
         else:
             try:
-                delivered_ids = asyncio.run(
+                delivered_ids, where = asyncio.run(
                     self._deliver(
-                        email=requester.strip(),
                         prepared=prepared,
                         answer=s_out.answer,
                         request_id=ctx.request_id,
+                        channel_id=channel_id,
+                        thread_ts=thread_ts,
+                        email=requester_email,
                     )
                 )
             except Exception:
-                log.warning("knowledge_deliver_dm_failed")
-                delivered_ids = set()
-            if delivered_ids:
+                log.warning("knowledge_deliver_failed")
+                delivered_ids, where = set(), ""
+            if where == "thread":
+                note = f"該当資料 {len(delivered_ids)} 件をこのスレッドにお出ししました。"
+            elif where == "dm":
                 note = f"該当資料 {len(delivered_ids)} 件をあなたの DM にお送りしました。"
             else:
-                note = "DM 配信に失敗しました（要約のみお返しします）。"
+                note = "資料配信に失敗しました（要約のみお返しします）。"
 
         # 配信できたファイルに対応する ref を delivered=True に。
         if delivered_ids:
@@ -189,27 +200,58 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
     async def _deliver(
         self,
         *,
-        email: str,
+        prepared: list[tuple[str, str, str]],
+        answer: str,
+        request_id: str,
+        channel_id: str | None = None,
+        thread_ts: str | None = None,
+        email: str | None = None,
+    ) -> tuple[set[str], str]:
+        """prepared を配信。返り値 (配信できた file_id 集合, 配信先種別 "thread"|"dm"|"")。
+
+        1) channel_id があれば そのチャンネル/スレッドに添付（メール以外は基本チャンネル完結）。
+        2) チャンネル配信が 0 件 or channel_id 無しなら、email から本人 DM にフォールバック。
+        """
+        slack = self._slack or self._build_slack()
+
+        if channel_id:
+            delivered = await self._upload_all(
+                slack, channel_id, thread_ts, prepared, answer, request_id
+            )
+            if delivered:
+                return delivered, "thread"
+
+        if email:
+            user_id = await slack.lookup_user_id_by_email(email, request_id)
+            if user_id:
+                dm = await slack.open_dm(user_id, request_id)
+                if dm:
+                    delivered = await self._upload_all(
+                        slack, dm, None, prepared, answer, request_id
+                    )
+                    if delivered:
+                        return delivered, "dm"
+        return set(), ""
+
+    @staticmethod
+    async def _upload_all(
+        slack: Any,
+        channel: str,
+        thread_ts: str | None,
         prepared: list[tuple[str, str, str]],
         answer: str,
         request_id: str,
     ) -> set[str]:
-        """本人 DM を開いて prepared を添付。配信できた file_id 集合を返す。"""
-        slack = self._slack or self._build_slack()
-        user_id = await slack.lookup_user_id_by_email(email, request_id)
-        if not user_id:
-            return set()
-        dm = await slack.open_dm(user_id, request_id)
-        if not dm:
-            return set()
+        """prepared を channel（任意で thread_ts）に添付。要約は最初の1件のコメントに同梱。"""
         delivered: set[str] = set()
         for i, (file_id, path, filename) in enumerate(prepared):
             ok = await slack.upload_file(
-                dm,
+                channel,
                 path,
                 request_id,
                 title=filename,
                 initial_comment=answer if i == 0 else None,
+                thread_ts=thread_ts,
             )
             if ok:
                 delivered.add(file_id)

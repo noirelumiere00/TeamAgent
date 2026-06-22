@@ -73,6 +73,16 @@ def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
             "user_email": {"type": "string"},
             "user_groups": {"type": "array", "items": {"type": "string"}},
             "user_role": {"type": "string"},
+            # 配信先ルーティング hint（identity ではない＝RLS/認可には一切使わない）。
+            # チャンネル/スレッド発の依頼で、skill が「そのスレッドに添付」するために使う。
+            "channel_id": {
+                "type": "string",
+                "description": "依頼が発せられた Slack channel_id（配信ルーティング用・任意）。",
+            },
+            "thread_ts": {
+                "type": "string",
+                "description": "親メッセージの ts（スレッド配信用・任意）。",
+            },
         },
     }
     out["properties"] = props
@@ -151,6 +161,10 @@ async def _resolve_metadata(
     LEGACY（resolver 無）：テスト/PoC 専用。user_email を使うが role は member 強制。
     """
     slack_user_id = raw.get("slack_user_id")
+    # 配信先ルーティング hint（identity ではない＝認可/RLS には一切使わない）。
+    # knowledge_deliver が「聞かれたチャンネル/スレッドに添付」するのに使う。無ければ DM 配信。
+    channel_id = raw.get("channel_id")
+    thread_ts = raw.get("thread_ts")
 
     if company_shared_groups is not None:
         # 会社共有モード: 全員が同じ会社ナレッジを見る。OC 申告の email/groups/role は破棄、
@@ -190,7 +204,7 @@ async def _resolve_metadata(
                 )
         if meta.get("user_email") is None:
             logger.info("identity_company_shared", tool=tool, slack_user_id_audit=audit_uid)
-        return meta, None
+        return {**meta, "channel_id": channel_id, "thread_ts": thread_ts}, None
 
     if identity_resolver is not None:
         # 外殻が email/groups/role を申告してきたら破棄して警告（攻撃 or バグの早期検知）。
@@ -226,7 +240,7 @@ async def _resolve_metadata(
             source="resolver",
             domain=_domain_of(strict_meta["user_email"]),
         )
-        return strict_meta, None
+        return {**strict_meta, "channel_id": channel_id, "thread_ts": thread_ts}, None
 
     # LEGACY モード（resolver 未注入＝テスト/PoC 専用）。本番エントリポイントは resolver 必須。
     email = raw.get("user_email")
@@ -242,6 +256,8 @@ async def _resolve_metadata(
         "user_groups": list(raw.get("user_groups") or []),
         "user_role": "member",  # OC 申告 role は採らない（admin 昇格は legacy でも不可）。
         "identity_verified": False,
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
     }
     return meta, None
 
