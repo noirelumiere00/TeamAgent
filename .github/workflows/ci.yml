@@ -20,7 +20,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
@@ -66,7 +66,7 @@ jobs:
     name: gitleaks (secrets scan)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run gitleaks (CLI, no GitHub API)
         # gitleaks-action@v2 は pull_request 時に GitHub API を叩き
         # "Resource not accessible by integration"（GITHUB_TOKEN 権限）でクラッシュし、
@@ -84,7 +84,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [lint-and-test, gitleaks]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: 報告
         run: |
           echo "✅ main マージ後の smoke test 枠"
