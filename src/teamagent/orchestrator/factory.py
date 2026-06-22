@@ -260,15 +260,21 @@ def build_production_tools() -> list[ToolSpec]:
     # scripts/run_morning_digest_fargate.py 経由で各 user_email ごとに呼ぶ。mention 経由では
     # ないが統一的に ToolSpec 登録（ローカル検証用）。**既定 OFF**（USE_MORNING_DIGEST_TOOL=1）。
     if _envflag("USE_MORNING_DIGEST_TOOL"):
+        from teamagent.skills._shared.deal_decisions import build_deal_provider_from_env
         from teamagent.skills.morning_digest.skill import MorningDigestSkill
 
         morning_store = _build_token_store()
+        # USE_DEAL_DECISIONS=1 のとき、案件Slackの決定事項を下書きに織り込む provider を注入。
+        # 既定 OFF / 依存構築失敗時は None＝従来の下書き生成のまま（後方互換）。
+        morning_deal_provider = build_deal_provider_from_env()
         specs.append(
             ToolSpec(
                 MorningDigestSkill.name,
                 MorningDigestSkill.description,
                 MorningDigestSkill,
-                factory=lambda: MorningDigestSkill(token_store=morning_store),
+                factory=lambda: MorningDigestSkill(
+                    token_store=morning_store, deal_provider=morning_deal_provider
+                ),
             )
         )
 

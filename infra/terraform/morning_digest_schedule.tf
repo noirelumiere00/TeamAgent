@@ -183,6 +183,11 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。
       { name = "OAUTH_KMS_KEY_ID", value = "alias/teamagent-oauth-tokens" },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
+      # 案件Slackの決定事項を下書きに織り込む付加機能（既定 OFF）。
+      # ON にする前に bot へ channels:read/groups:read scope 付与＋案件 ch への招待が前提。
+      # 抽出は安価な Haiku で実行（要約/triage は Sonnet のまま）。
+      { name = "USE_DEAL_DECISIONS", value = "false" },
+      { name = "DEAL_DECISIONS_MODEL_ID", value = "jp.anthropic.claude-haiku-4-5" },
     ]
     secrets = [
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },

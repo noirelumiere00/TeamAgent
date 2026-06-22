@@ -316,7 +316,12 @@ def main() -> int:
     from teamagent.skills.morning_digest.skill import MorningDigestSkill
 
     token_store = _build_token_store()
-    skill = MorningDigestSkill(token_store=token_store)
+    # USE_DEAL_DECISIONS=1 のとき、案件Slackの決定事項を下書きに織り込む provider を注入。
+    # 既定 OFF / 依存構築失敗時は None＝従来の下書き生成のまま（後方互換）。
+    from teamagent.skills._shared.deal_decisions import build_deal_provider_from_env
+
+    deal_provider = build_deal_provider_from_env()
+    skill = MorningDigestSkill(token_store=token_store, deal_provider=deal_provider)
     skill_input = MorningDigestInput()
 
     summary = {"users": len(users), "delivered": 0, "skipped": 0, "errors": 0}
