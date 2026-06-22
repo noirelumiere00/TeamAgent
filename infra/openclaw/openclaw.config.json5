@@ -49,11 +49,14 @@
       replyToModeByChatType: { channel: "all", group: "all", direct: "off" },
       // §T1: 受付リアクション（処理中が見える＝「無視された？」を防ぐ実運用の詰まり潰し）。
       ackReaction: "eyes",
-      // §T2: DM は許可リスト制（既定 pairing＝オーナーCLI承認制は Fargate では打つ場所が無く、
-      // 承認stateも ephemeral で再起動消失）。"open" にしない理由＝Vector ワークスペースには
-      // 社外ゲスト（クライアント）が居る前提で、DM経由で会社ナレッジに触れさせない。
-      // チャンネルは groupPolicy:"open" のまま（招待制で統制）。パイロット参加者をここに追記。
-      dmPolicy: "allowlist",
+      // §T2→§T2b(2026-06-22): DM を "open" に変更（社内なら誰でも @AiLa にDMで「連携して」で
+      // セルフ利用可＝口コミ運用）。当初 allowlist にした理由は「社外ゲストに会社ナレッジを触れさせない」
+      // だったが、その懸念は **サーバ側 fail-closed で別途担保済**＝slack_client.resolve_identity が
+      // 外部ワークスペース/Slack Connect stranger/guest/bot/email欠落を None 拒否し、MCP 境界(server.py)が
+      // RLS を fail-closed 強制（ダウングレード不可）。よって open でも社外/ゲストにデータは届かない。
+      // 残る露出は「外部ゲストでも Haiku 会話レイヤーには応答し得る（データは出ない・コスト/存在のみ）」
+      // の一点で、これはユーザー判断で許容（2026-06-22）。allowFrom は open 下では参照されない（保持のみ）。
+      dmPolicy: "open",
       // §U: これは焼き込みの fallback。本番は entrypoint が env `SLACK_DM_ALLOWLIST`
       // （カンマ区切り Slack user_id）から allowFrom を起動時に上書きする＝メンバー追加は
       // env 変更 + 再デプロイのみ（image rebuild 不要）。15名規模まで可動。
