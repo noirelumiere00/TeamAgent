@@ -286,6 +286,74 @@ class SlackChannelIngestClient:
         )
         return members
 
+    # -------------------------------------------------------
+    # 本人解決 / 参加チャネル（オンデマンド付加機能用・users:read.email 等）
+    # -------------------------------------------------------
+    def lookup_user_id_by_email(self, email: str, request_id: str) -> str | None:
+        """users.lookupByEmail で email → Slack user_id を引く（scope: users:read.email）。
+
+        失敗時は None（呼び出し側は fail-open）。
+        """
+        if not email or "@" not in email:
+            return None
+        try:
+            resp = asyncio.run(self._client.users_lookupByEmail(email=email))
+            user: dict[str, Any] = resp.get("user", {}) or {}
+            uid = str(user.get("id", "")) or None
+        except Exception:
+            logger.warning("slack_lookup_user_by_email_failed", request_id=request_id)
+            return None
+        return uid
+
+    def list_user_conversations(
+        self,
+        user_id: str | None,
+        request_id: str,
+        *,
+        types: str = "public_channel,private_channel",
+        limit: int = 200,
+    ) -> list[tuple[str, str]]:
+        """users.conversations で「ある user が参加しているチャネル」を (id, name) で返す。
+
+        user_id=None なら bot 自身の参加チャネル。bot token なので、返るのは bot から
+        見えるチャネルに限られる（＝後段の履歴取得が成功し得るものに概ね一致）。
+        scope: channels:read / groups:read。失敗時は空リスト（fail-open）。
+        """
+        out: list[tuple[str, str]] = []
+        cursor: str | None = None
+        try:
+            for _ in range(10):  # 念のためページ上限（最大 ~2000 ch）
+                kwargs: dict[str, Any] = {
+                    "types": types,
+                    "limit": limit,
+                    "exclude_archived": True,
+                }
+                if user_id:
+                    kwargs["user"] = user_id
+                if cursor:
+                    kwargs["cursor"] = cursor
+                resp = asyncio.run(self._client.users_conversations(**kwargs))
+                raw_channels: list[dict[str, Any]] = list(resp.get("channels", []) or [])
+                for ch in raw_channels:
+                    cid = str(ch.get("id", ""))
+                    name = str(ch.get("name", ""))
+                    if cid:
+                        out.append((cid, name))
+                meta: dict[str, Any] = resp.get("response_metadata", {}) or {}
+                cursor = meta.get("next_cursor") or None
+                if not cursor:
+                    break
+        except Exception:
+            logger.warning("slack_list_user_conversations_failed", request_id=request_id)
+            return out
+        logger.info(
+            "slack_list_user_conversations",
+            request_id=request_id,
+            user_scoped=bool(user_id),
+            returned=len(out),
+        )
+        return out
+
 
 # -----------------------------------------------------------
 # 変換ヘルパー

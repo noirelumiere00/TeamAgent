@@ -240,14 +240,19 @@ class BedrockClient:
         )
 
     @classmethod
-    def from_env(cls) -> BedrockClient:
+    def from_env(cls, *, model_id: str | None = None) -> BedrockClient:
         """環境変数から BedrockClient を構築する。
 
         必須: AWS_REGION, BEDROCK_MODEL_ID
         オプション: BEDROCK_RERANK_MODEL_ARN (省略時は ap-northeast-1 の Cohere v3.5)
+
+        Args:
+            model_id: 明示指定すると BEDROCK_MODEL_ID より優先する。安価モデル（Haiku）で
+                走らせたい補助タスク（決定事項抽出等）が、既定の要約モデルと別モデルを
+                使うための上書き口。省略時は従来どおり BEDROCK_MODEL_ID。
         """
         region = os.environ.get("AWS_REGION", "ap-northeast-1")
-        model_id = os.environ.get("BEDROCK_MODEL_ID", "jp.anthropic.claude-sonnet-4-6")
+        model_id = model_id or os.environ.get("BEDROCK_MODEL_ID", "jp.anthropic.claude-sonnet-4-6")
         rerank_arn = os.environ.get("BEDROCK_RERANK_MODEL_ARN")
         # 任意で env からバックオフを上書き（既定: 5回 / base 0.5s / cap 20s）。
         policy = RetryPolicy(

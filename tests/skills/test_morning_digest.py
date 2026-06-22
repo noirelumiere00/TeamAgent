@@ -349,3 +349,126 @@ def test_has_draft_painted_only_for_high(fake_msgs, triage_json) -> None:
             assert m.has_draft is True
         else:
             assert m.has_draft is False
+
+
+# ─────────────────────────────────────────────────────────────
+# 案件Slackの決定事項を下書きに反映（deal_provider 注入）
+# ─────────────────────────────────────────────────────────────
+class _RecordingBedrock:
+    """triage と draft を出し分けつつ、draft の user message を記録する。"""
+
+    def __init__(self, triage_json: str, draft_text: str = "下書きです。"):
+        self._triage = triage_json
+        self._draft = draft_text
+        self.draft_user_messages: list[str] = []
+
+    def converse(self, **kwargs: Any) -> _FakeBedrockResp:
+        if "分類規則" in str(kwargs.get("system", "")):
+            return _FakeBedrockResp(self._triage)
+        try:
+            self.draft_user_messages.append(kwargs["messages"][0]["content"][0]["text"])
+        except Exception:
+            pass
+        return _FakeBedrockResp(self._draft)
+
+
+class _FakeDealProvider:
+    def __init__(self, bullets: list[str]):
+        self._bullets = bullets
+        self.calls: list[tuple[str, str | None]] = []
+
+    def fetch(self, client_hint: str, requester: str | None, ctx: Any) -> Any:
+        self.calls.append((client_hint, requester))
+        from teamagent.skills._shared.deal_decisions import DealDecisionsResult, DecisionSource
+
+        if not self._bullets:
+            return DealDecisionsResult.empty()
+        return DealDecisionsResult(
+            bullets=list(self._bullets),
+            sources=[DecisionSource("案件_森ビル", "slack://C1")],
+            cost_usd=0.001,
+        )
+
+
+def _deal_msg() -> _FakeMsg:
+    return _FakeMsg(
+        headers={
+            "From": "山田 <yamada@moribuilding.co.jp>",
+            "To": "me@vectorinc.co.jp",
+            "Subject": "ご依頼の件",
+            "Message-ID": "<d1>",
+        },
+        payload={"body": {"data": "Y2hlY2sgcGxlYXNl"}},  # "check please"
+        internal_date_ms=1718681400000,
+    )
+
+
+def test_deal_decisions_injected_into_morning_draft() -> None:
+    gmail = _FakeGmail([_deal_msg()])
+    bedrock = _RecordingBedrock('[{"importance": "high", "summary": "依頼対応"}]')
+    provider = _FakeDealProvider(["次回MTGは6/25で合意", "提案書を今週中に提出"])
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=gmail,
+        gcalendar=_FakeGCal([]),
+        bedrock=bedrock,
+        deal_provider=provider,
+    )
+    ctx = SkillContext(request_id="req-deal", metadata={"user_email": "me@vectorinc.co.jp"})
+    skill.run(MorningDigestInput(max_drafts=1), ctx)
+
+    # provider が本人 email 付きで呼ばれた
+    assert provider.calls
+    _, req = provider.calls[0]
+    assert req == "me@vectorinc.co.jp"
+    # 下書きプロンプトに決定事項セクションが注入された
+    assert any("# 案件の決定事項" in m for m in bedrock.draft_user_messages)
+    assert any("次回MTGは6/25" in m for m in bedrock.draft_user_messages)
+    # 作られた下書き本文に注記が付く（出典 permalink は本文に入れない）
+    assert gmail.created_drafts
+    body = gmail.created_drafts[0]["body_text"]
+    assert "決定事項を反映" in body
+    assert "slack://C1" not in body
+
+
+def test_no_deal_provider_is_backward_compatible() -> None:
+    gmail = _FakeGmail([_deal_msg()])
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=gmail,
+        gcalendar=_FakeGCal([]),
+        bedrock=_FakeBedrock('[{"importance": "high", "summary": "x"}]'),
+        # deal_provider 未指定（既定 None）
+    )
+    ctx = SkillContext(request_id="req-bc", metadata={"user_email": "me@vectorinc.co.jp"})
+    skill.run(MorningDigestInput(max_drafts=1), ctx)
+    assert gmail.created_drafts
+    assert "決定事項を反映" not in gmail.created_drafts[0]["body_text"]
+
+
+def test_deal_decisions_empty_adds_no_note() -> None:
+    # 解決できず空result のときは注記を付けない（誤った印象を与えない）。
+    gmail = _FakeGmail([_deal_msg()])
+    provider = _FakeDealProvider([])  # 空
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=gmail,
+        gcalendar=_FakeGCal([]),
+        bedrock=_FakeBedrock('[{"importance": "high", "summary": "x"}]'),
+        deal_provider=provider,
+    )
+    ctx = SkillContext(request_id="req-empty", metadata={"user_email": "me@vectorinc.co.jp"})
+    skill.run(MorningDigestInput(max_drafts=1), ctx)
+    assert gmail.created_drafts
+    assert "決定事項を反映" not in gmail.created_drafts[0]["body_text"]
+
+
+def test_client_hint_from_from() -> None:
+    from teamagent.skills.morning_digest.skill import _client_hint_from_from
+
+    assert _client_hint_from_from("山田 <yamada@moribuilding.co.jp>") == "山田 moribuilding"
+    # 表示名なし（生メール）→ 名前は使わず SLD のみ
+    assert _client_hint_from_from("yamada@moribuilding.co.jp") == "moribuilding"
+    # 公開メールドメインは手がかりにしない
+    assert _client_hint_from_from("田中 <tanaka@gmail.com>") == "田中"
+    assert _client_hint_from_from("") == ""
