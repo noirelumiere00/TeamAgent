@@ -344,6 +344,43 @@ async def _open_im_channel(slack: Any, user_id: str) -> str | None:
         return None
 
 
+def _process_user(skill: Any, skill_input: Any, email: str) -> str:
+    """1 ユーザー分を処理し "delivered"/"skipped"/"error" を返す（例外は内側で封じ込め）。
+
+    スレッドから呼ぶため副作用は print（stderr・マスク済）と Slack 配信のみ・共有状態を書かない。
+    """
+    from teamagent.skills.base import SkillContext
+
+    request_id = f"morning-{uuid.uuid4().hex[:10]}"
+    ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
+    try:
+        digest = skill.run(skill_input, ctx)
+    except PermissionError:
+        return "skipped"  # 未連携
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: {_mask_email(email)} skill 失敗 "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return "error"
+    # 配信(整形+Slack)も封じ込め（1 人の失敗で全体を落とさない）。
+    try:
+        text, blocks = _format_block_kit(digest, email)
+        delivered = asyncio.run(_deliver_to_slack(email, text, blocks))
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: {_mask_email(email)} 配信失敗 "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return "error"
+    if delivered:
+        digest.delivered = True
+        return "delivered"
+    return "error"
+
+
 def main() -> int:
     users = _resolve_target_users()
     if not users:
@@ -351,51 +388,37 @@ def main() -> int:
         return 0
     print(f"[run_morning_digest_fargate] start users={len(users)}", flush=True)
 
-    from teamagent.skills.base import SkillContext
     from teamagent.skills.morning_digest.schema import MorningDigestInput
     from teamagent.skills.morning_digest.skill import MorningDigestSkill
 
+    try:
+        concurrency = max(1, int(os.environ.get("MORNING_DIGEST_CONCURRENCY", "1")))
+    except ValueError:
+        concurrency = 1
+
     token_store = _build_token_store()
-    skill = MorningDigestSkill(token_store=token_store)
+    if concurrency > 1:
+        # 並列時は Bedrock クライアントを事前生成して共有（lazy-init の競合を避ける）。
+        from teamagent.adapters.bedrock_client import BedrockClient
+
+        skill = MorningDigestSkill(token_store=token_store, bedrock=BedrockClient.from_env())
+    else:
+        skill = MorningDigestSkill(token_store=token_store)
     skill_input = MorningDigestInput()
 
-    summary = {"users": len(users), "delivered": 0, "skipped": 0, "errors": 0}
-    for email in users:
-        request_id = f"morning-{uuid.uuid4().hex[:10]}"
-        ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
-        try:
-            digest = skill.run(skill_input, ctx)
-        except PermissionError:
-            # 未連携・skip
-            summary["skipped"] += 1
-            continue
-        except Exception as exc:
-            print(
-                f"[run_morning_digest_fargate] WARN: {_mask_email(email)} skill 失敗 "
-                f"{type(exc).__name__}",
-                file=sys.stderr,
-            )
-            summary["errors"] += 1
-            continue
+    # concurrency=1（既定）は従来どおり逐次。>1 で人数に応じた所要時間短縮。
+    if concurrency > 1:
+        from concurrent.futures import ThreadPoolExecutor
 
-        # ⚠️ 配信(整形+Slack)も try で囲む。ここで例外が漏れると main 全体が落ち、
-        # その後ろのユーザーが全員処理されなくなる（耐障害＝1人の失敗を封じ込める）。
-        try:
-            text, blocks = _format_block_kit(digest, email)
-            delivered = asyncio.run(_deliver_to_slack(email, text, blocks))
-        except Exception as exc:
-            print(
-                f"[run_morning_digest_fargate] WARN: {_mask_email(email)} 配信失敗 "
-                f"{type(exc).__name__}",
-                file=sys.stderr,
-            )
-            summary["errors"] += 1
-            continue
-        if delivered:
-            digest.delivered = True
-            summary["delivered"] += 1
-        else:
-            summary["errors"] += 1
+        print(f"[run_morning_digest_fargate] concurrency={concurrency}", flush=True)
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            results = list(ex.map(lambda e: _process_user(skill, skill_input, e), users))
+    else:
+        results = [_process_user(skill, skill_input, e) for e in users]
+
+    summary = {"users": len(users), "delivered": 0, "skipped": 0, "errors": 0}
+    for r in results:
+        summary["delivered" if r == "delivered" else "skipped" if r == "skipped" else "errors"] += 1
 
     print(
         f"[run_morning_digest_fargate] done {json.dumps(summary, ensure_ascii=False)}",

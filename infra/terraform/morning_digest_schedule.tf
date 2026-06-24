@@ -55,6 +55,12 @@ variable "digest_internal_domain" {
   default     = "vectorinc.co.jp"
 }
 
+variable "morning_digest_concurrency" {
+  description = "1 タスク内で同時処理するユーザー数。1=逐次（既定）。人数増加時に上げ所要時間を短縮。"
+  type        = number
+  default     = 1
+}
+
 variable "morning_digest_schedule_expression" {
   description = "EventBridge cron 式（既定: 平日 0:30 UTC = 9:30 JST）"
   type        = string
@@ -201,6 +207,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_EXCLUDE", value = var.morning_digest_exclude },
       { name = "IMPORTANT_SENDERS", value = var.digest_important_senders },
       { name = "DIGEST_INTERNAL_DOMAIN", value = var.digest_internal_domain },
+      { name = "MORNING_DIGEST_CONCURRENCY", value = tostring(var.morning_digest_concurrency) },
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。
       { name = "OAUTH_KMS_KEY_ID", value = "alias/teamagent-oauth-tokens" },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },

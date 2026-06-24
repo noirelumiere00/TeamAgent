@@ -219,6 +219,20 @@ def test_M17_skill_resolves_own_token_per_user():
     assert asked == [U1, U2]  # 渡された email の分だけ・取り違えなし
 
 
+def test_M21_concurrency_processes_all_users(monkeypatch, capsys):
+    """MORNING_DIGEST_CONCURRENCY>1 で並列実行しても全員を処理（順不同可・取りこぼしなし）。"""
+    import teamagent.adapters.bedrock_client as bc
+
+    monkeypatch.setenv("MORNING_DIGEST_CONCURRENCY", "4")
+    monkeypatch.setattr(bc.BedrockClient, "from_env", classmethod(lambda cls: object()))
+    users = [f"u{i}@vectorinc.co.jp" for i in range(12)]
+    rec = _patch_main(monkeypatch, users)
+    assert mod.main() == 0
+    assert sorted(rec["run"]) == sorted(users)  # 並列でも全員 skill.run
+    assert sorted(rec["deliver"]) == sorted(users)  # 全員に配信
+    assert '"delivered": 12' in capsys.readouterr().out
+
+
 def test_M20_delivery_exception_is_contained(monkeypatch, capsys):
     """配信中に1人で例外が出ても main 全体は落ちず、後続ユーザーまで処理する（耐障害）。"""
     rec = _patch_main(monkeypatch, [U1, U2, U3])
