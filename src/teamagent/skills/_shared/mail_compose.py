@@ -124,7 +124,14 @@ def build_thread_history(
         frm = str(headers.get("From", "")).lower()
         who = "自分(営業)" if req and req in frm else "先方"
         body = extract_plain_text(getattr(m, "payload", {}) or {})
-        masked = str(scrub_value(body)).strip()[:per_msg_chars]
+        # G6: scrub に加え境界トークン(<<< / >>>)を無害化し、本文が枠から脱出して
+        # 指示位置に注入されるのを防ぐ（攻撃者制御テキストのため）。
+        masked = (
+            str(scrub_value(body))
+            .strip()[:per_msg_chars]
+            .replace("<<<", "‹‹‹")
+            .replace(">>>", "›››")
+        )
         if not masked:
             continue
         rendered.append(f"<<<HISTORY from={who}>>>\n{masked}\n<<<END>>>")
