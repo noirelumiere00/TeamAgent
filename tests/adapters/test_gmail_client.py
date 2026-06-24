@@ -618,3 +618,45 @@ def test_extract_plain_text_concatenates_multiple_parts() -> None:
     payload = {"mimeType": "multipart/mixed", "parts": [_p("本文です。"), _p("-- 署名 --")]}
     out = extract_plain_text(payload)
     assert "本文です。" in out and "-- 署名 --" in out  # 両方拾う（旧実装は本文だけ）
+
+
+def test_decode_b64url_rescues_mislabeled_utf8_as_latin1() -> None:
+    """実体 UTF-8 を latin-1/iso-8859-1 と誤ラベルしたメールでも文字化けせず救済する。
+
+    latin-1 系は任意バイトを“成功裏に”誤デコードしてしまうため、宣言を盲信すると
+    mojibake が確定する（最終ハント確証バグ）。宣言が単バイト系のときは UTF-8 を優先。
+    """
+    import base64
+
+    from teamagent.adapters.gmail_client import _decode_b64url
+
+    body = "納品書を添付します。ご確認ください。"
+    data = base64.urlsafe_b64encode(body.encode("utf-8")).decode().rstrip("=")
+    # iso-8859-1 と誤ラベルされても UTF-8 として正しく読める（旧実装は mojibake）。
+    assert _decode_b64url(data, "iso-8859-1") == body
+    assert _decode_b64url(data, "latin-1") == body
+    assert _decode_b64url(data, "windows-1252") == body
+
+
+def test_decode_b64url_genuine_latin1_still_decodes() -> None:
+    """本当に latin-1 な本文（妥当な UTF-8 ではない）は宣言どおり latin-1 で読む。"""
+    import base64
+
+    from teamagent.adapters.gmail_client import _decode_b64url
+
+    body = "café déjà vu"  # é/à を含む
+    raw = body.encode("latin-1")  # 0xE9 等。これは妥当な UTF-8 連続ではない。
+    data = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    # UTF-8 strict は失敗 → 宣言 latin-1 にフォールバックして正しく読む。
+    assert _decode_b64url(data, "iso-8859-1") == body
+
+
+def test_decode_b64url_respects_reliable_charset_unchanged() -> None:
+    """ISO-2022-JP/Shift_JIS など raise する charset は優先順を変えず従来挙動。"""
+    import base64
+
+    from teamagent.adapters.gmail_client import _decode_b64url
+
+    jis = "請求書の件"
+    data = base64.urlsafe_b64encode(jis.encode("iso-2022-jp")).decode().rstrip("=")
+    assert _decode_b64url(data, "ISO-2022-JP") == jis

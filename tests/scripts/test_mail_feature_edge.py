@@ -470,3 +470,27 @@ def test_E23_mass_mail_salutation_after_long_preamble_no_draft():
     assert is_mass_or_impersonal({"From": "info@x.com"}, body) is True
     # 個人宛の通常メールは False のまま
     assert is_mass_or_impersonal({"From": "a@x.com"}, "山田様\nお世話になります。") is False
+
+
+def test_E27_max_drafts_backfills_when_top_candidate_deduped():
+    """上位候補が既存下書きで dedupe されても、下位の作成可能スレッドへ繰り上げる。
+
+    max_drafts=1・高重要×本人宛が2スレッド。上位 tA は既存下書きあり→スキップ。
+    旧実装は候補数を max_drafts で打ち切り tA だけ拾って created=0 になっていた。
+    修正後は作成数基準のキャップで tB に繰り上げ created=1。
+    """
+    msgs = [_to_me(thread="tA", subj="A"), _to_me(thread="tB", subj="B")]
+    t = '[{"importance":"high","summary":"a"},{"importance":"high","summary":"b"}]'
+    g = _Gmail(msgs, existing=["tA"])  # tA には既に下書きがある
+    out = _run(_skill(g, triage=t), max_drafts=1)
+    assert out.drafts_created == 1
+    assert [d["thread_id"] for d in g.created] == ["tB"]  # 下位 tB へ繰り上げ
+
+
+def test_E28_max_drafts_cap_still_enforced_on_created_count():
+    """backfill 後も作成数の上限（max_drafts）は厳守する（作りすぎない）。"""
+    msgs = [_to_me(thread=f"t{i}", subj=f"s{i}") for i in range(4)]
+    t = "[" + ",".join(['{"importance":"high","summary":"x"}'] * 4) + "]"
+    g = _Gmail(msgs)
+    out = _run(_skill(g, triage=t), max_drafts=2)
+    assert out.drafts_created == 2 and len(g.created) == 2  # 4候補でも2件で停止

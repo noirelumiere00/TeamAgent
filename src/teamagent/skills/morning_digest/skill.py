@@ -494,6 +494,11 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             return (0, 0.0)
         # 下書き対象: 重要度 ∈ draft_importances かつ「本人が To に直接入っている」スレッド。
         # CC のみ・メーリングリスト宛（To=リスト）は下書きを作らない（誤下書きの根治）。
+        # max_drafts のキャップは「作成数」基準（下の生成ループで created>=max_drafts で
+        # break）。ここで候補数を max_drafts で打ち切ると、上位候補が後段の
+        # dedupe/一斉送信/空本文で脱落したとき下位の作成可能スレッドへ繰り上がらず、
+        # 作成数が max_drafts に満たない取りこぼしになる。候補は全部集める
+        # （全体は digest 規模＝max_threads で有界）。
         targets: list[tuple[int, Any]] = []
         for i, item in enumerate(digest_items):
             if item.importance not in self._draft_importances:
@@ -503,8 +508,6 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             if not _is_addressed_to(getattr(raw_msgs[i], "headers", {}) or {}, requester):
                 continue
             targets.append((i, raw_msgs[i]))
-            if len(targets) >= input.max_drafts:
-                break
         if not targets:
             return (0, 0.0)
 
@@ -522,6 +525,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         cost = 0.0
         created = 0
         for idx, msg in targets:
+            if created >= input.max_drafts:
+                break  # 作成数の上限に到達（後段脱落分を下位候補で埋めた結果）。
             thread_id = str(getattr(msg, "thread_id", "") or "")
             if self._dedupe_drafts and thread_id and thread_id in existing_threads:
                 continue

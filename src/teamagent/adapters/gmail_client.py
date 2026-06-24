@@ -825,22 +825,52 @@ def _part_charset(node: dict[str, Any]) -> str:
     return "utf-8"
 
 
+# これらの単バイト系 charset は「どんなバイト列でも例外を出さずデコード成立」して
+# しまうため、宣言が誤っていても文字化けを検出できない。実体が UTF-8 のメールが
+# これらで誤ラベルされる事故が多いので、宣言がこの集合のときは先に UTF-8 strict を
+# 試し、成功すれば（＝妥当な UTF-8 なら）そちらを採用する。
+_UNRELIABLE_SINGLE_BYTE: frozenset[str] = frozenset(
+    {
+        "latin-1",
+        "latin1",
+        "latin_1",
+        "iso-8859-1",
+        "iso8859-1",
+        "iso_8859-1",
+        "l1",
+        "cp1252",
+        "windows-1252",
+    }
+)
+
+
 def _decode_b64url(s: str, charset: str = "utf-8") -> str:
     """Gmail 本文（base64url）を charset を尊重してデコードする。
 
     日本のメールは ISO-2022-JP / Shift_JIS(cp932) も多い。utf-8 固定だと文字化けして
     triage/下書きに渡るため、宣言 charset→utf-8→cp932→latin-1 の順でフォールバック。
+
+    宣言 charset が「常に成功する単バイト系」(latin-1 等)の場合だけは、UTF-8 strict を
+    優先する。誤ラベルされた UTF-8 本文が latin-1 で“成功する誤デコード”として
+    文字化けのまま確定するのを防ぐため（正しくラベルされた ISO-2022-JP/Shift_JIS は
+    それぞれ誤バイトで raise するので、この優先は掛けない＝挙動不変）。
     """
     pad = "=" * (-len(s) % 4)
     raw = base64.urlsafe_b64decode(s + pad)
+    declared = (charset or "utf-8").strip().lower()
+    if declared in _UNRELIABLE_SINGLE_BYTE:
+        try:
+            return raw.decode("utf-8")
+        except (LookupError, UnicodeDecodeError):
+            pass  # 妥当な UTF-8 でなければ宣言どおりの単バイト系で読む（下のループ）。
     seen: set[str] = set()
-    for enc in (charset, "utf-8", "cp932", "latin-1"):
+    for enc in (declared, "utf-8", "cp932", "latin-1"):
         e = (enc or "").lower()
         if not e or e in seen:
             continue
         seen.add(e)
         try:
-            return raw.decode(enc)
+            return raw.decode(e)
         except (LookupError, UnicodeDecodeError):
             continue
     return raw.decode("utf-8", errors="replace")

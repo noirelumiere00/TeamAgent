@@ -255,8 +255,8 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 {
                     "type": "mrkdwn",
                     "text": (
-                        "_AiLa morning_digest｜件名・相手・本文は DLP マスク後表示。"
-                        "下書きは送信されません（手動送信）。_"
+                        "_AiLa morning_digest｜本人だけに届く DM です（件名・相手は実名表示／"
+                        "監査ログ側はマスク）。下書きは送信されません（手動送信）。_"
                     ),
                 }
             ],
