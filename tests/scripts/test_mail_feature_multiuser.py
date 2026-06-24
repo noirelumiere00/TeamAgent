@@ -219,6 +219,23 @@ def test_M17_skill_resolves_own_token_per_user():
     assert asked == [U1, U2]  # 渡された email の分だけ・取り違えなし
 
 
+def test_M20_delivery_exception_is_contained(monkeypatch, capsys):
+    """配信中に1人で例外が出ても main 全体は落ちず、後続ユーザーまで処理する（耐障害）。"""
+    rec = _patch_main(monkeypatch, [U1, U2, U3])
+
+    async def _boom(email, text, blocks):
+        rec["deliver"].append(email)
+        if email == U2:
+            raise RuntimeError("slack render boom")
+        return True
+
+    monkeypatch.setattr(mod, "_deliver_to_slack", _boom)
+    assert mod.main() == 0  # クラッシュしない
+    out = capsys.readouterr().out
+    assert rec["deliver"] == [U1, U2, U3]  # U2 で例外でも U3 まで到達
+    assert '"delivered": 2' in out and '"errors": 1' in out
+
+
 def test_M19_error_log_masks_email_no_pii(monkeypatch, capsys):
     """1 人の処理で例外時、ログに生メールアドレスを出さない（マスクのみ・G3/G7）。"""
     raw = "tanaka.taro@vectorinc.co.jp"

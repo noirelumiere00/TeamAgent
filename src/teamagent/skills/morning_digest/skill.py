@@ -740,7 +740,8 @@ def _short_hash(n: int) -> str:
 
 
 def _iso_or_none(internal_date_ms: int | None) -> str | None:
-    if not internal_date_ms:
+    # 0（=1970-01-01）は有効な epoch。None だけを「不明」として扱う。
+    if internal_date_ms is None:
         return None
     return (
         _dt.datetime.fromtimestamp(int(internal_date_ms) / 1000, tz=_dt.UTC)

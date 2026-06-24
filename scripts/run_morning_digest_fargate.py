@@ -378,8 +378,19 @@ def main() -> int:
             summary["errors"] += 1
             continue
 
-        text, blocks = _format_block_kit(digest, email)
-        delivered = asyncio.run(_deliver_to_slack(email, text, blocks))
+        # ⚠️ 配信(整形+Slack)も try で囲む。ここで例外が漏れると main 全体が落ち、
+        # その後ろのユーザーが全員処理されなくなる（耐障害＝1人の失敗を封じ込める）。
+        try:
+            text, blocks = _format_block_kit(digest, email)
+            delivered = asyncio.run(_deliver_to_slack(email, text, blocks))
+        except Exception as exc:
+            print(
+                f"[run_morning_digest_fargate] WARN: {_mask_email(email)} 配信失敗 "
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+            )
+            summary["errors"] += 1
+            continue
         if delivered:
             digest.delivered = True
             summary["delivered"] += 1

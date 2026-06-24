@@ -406,6 +406,14 @@ def test_E22_cost_aggregated_across_triage_and_drafts():
     assert out.total_cost_usd > 0  # triage + draft のコストが積算される
 
 
+def test_E24_iso_or_none_treats_epoch_zero_as_valid():
+    from teamagent.skills.morning_digest.skill import _iso_or_none
+
+    assert _iso_or_none(None) is None
+    assert _iso_or_none(0) == "1970-01-01T00:00:00+00:00"  # 0 は有効な時刻
+    assert _iso_or_none(1718681400000) is not None
+
+
 def test_E23_mass_mail_salutation_after_long_preamble_no_draft():
     """各位 が本文先頭120字以降にあっても一斉送信と判定し下書きしない（窓拡大の回帰）。"""
     from teamagent.skills._shared.mail_compose import is_mass_or_impersonal

@@ -564,3 +564,9 @@ def test_decode_rfc2047_japanese_headers() -> None:
     assert msg.headers["Subject"] == "見積もりの件"  # デコード済み
     assert "山田 太郎" in msg.headers["From"]
     assert "yamada@acme.co.jp" in msg.headers["From"]
+
+    # CRLF/TAB を含むデコード結果は無害化（ヘッダ注入/Slack 書式崩れ防止）
+    evil = Header("1行目\n偽の警告\r攻撃", "utf-8").encode()
+    out = _decode_header_value(evil)
+    assert "\n" not in out and "\r" not in out
+    assert "1行目" in out and "偽の警告" in out  # 内容は残るが改行は除去

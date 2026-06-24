@@ -610,7 +610,7 @@ class GmailClient:
         request_id: str,
         *,
         max_results: int = 100,
-        max_pages: int = 20,
+        max_pages: int = 50,
         user_id: str = "me",
     ) -> list[GmailDraft]:
         """既存の下書きを全ページ列挙する（readonly・drafts.list）。
@@ -721,15 +721,21 @@ def _decode_header_value(raw: str) -> str:
 
     Gmail API は非 ASCII の Subject/From を RFC2047 のまま返すため、デコードしないと
     日本語の件名・差出人名が文字化けして DM/下書きに出る。失敗時は原文（fail-open）。
+    ⚠️ デコード結果に CR/LF/TAB が紛れ込むとヘッダ注入/Slack 書式崩れになるため無害化する
+    （攻撃者が改行を base64 で仕込むケース）。
     """
-    if not raw or "=?" not in raw:
+    if not raw:
         return raw
-    from email.header import decode_header, make_header
+    if "=?" in raw:
+        from email.header import decode_header, make_header
 
-    try:
-        return str(make_header(decode_header(raw)))
-    except Exception:
-        return raw
+        try:
+            raw = str(make_header(decode_header(raw)))
+        except Exception:
+            pass
+    if "\r" in raw or "\n" in raw or "\t" in raw:
+        raw = raw.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return raw
 
 
 def _message_from_resp(resp: dict[str, Any]) -> GmailMessage:
