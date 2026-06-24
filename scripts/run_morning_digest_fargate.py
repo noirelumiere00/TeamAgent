@@ -124,6 +124,16 @@ def _fmt_time(iso: str | None) -> str:
         return iso[:16]
 
 
+def _slack_escape(s: str) -> str:
+    """Slack mrkdwn の特殊文字をエスケープ。
+
+    実件名/実名(未マスクの display)を mrkdwn に入れるため、メール件名に
+    `<https://evil|クリック>` 等を仕込まれてもリンク偽装/書式崩れにならないようにする。
+    Slack 仕様では & < > のみエスケープが必要。
+    """
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
     """MorningDigestOutput → Slack Block Kit blocks（要返信を最上部・スコアボード・アクション付き）。"""
     masked = _mask_email(user_email)
@@ -165,18 +175,21 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             }
         )
         for m in high[:5]:
-            # display fields are PII; rendered to owner DM only, never logged (G3/G7)
-            subj = getattr(m, "subject_display", "") or m.subject_scrubbed or "(件名なし)"
-            who = getattr(m, "counterpart_display", "") or m.counterpart_masked
+            # display fields are PII; rendered to owner DM only, never logged (G3/G7)。
+            # 未マスクの実件名/実名は Slack エスケープ必須（リンク偽装/書式崩れ防止）。
+            subj = _slack_escape(
+                getattr(m, "subject_display", "") or m.subject_scrubbed or "(件名なし)"
+            )
+            who = _slack_escape(getattr(m, "counterpart_display", "") or m.counterpart_masked)
             tag = f"`{m.sender_label}` " if getattr(m, "sender_label", "") else ""
             thr = f" 〔{m.thread_count}通〕" if getattr(m, "thread_count", 1) > 1 else ""
             body = f"{tag}*{subj}*{thr} — {who}"
             if m.summary:
-                body += f"\n_{m.summary}_"
+                body += f"\n_{_slack_escape(m.summary)}_"
             if getattr(m, "deadline", None):
-                body += f"\n⏰ 期限: {m.deadline}"
+                body += f"\n⏰ 期限: {_slack_escape(str(m.deadline))}"
             if getattr(m, "ask", ""):
-                body += f"\n📌 依頼: {m.ask}"
+                body += f"\n📌 依頼: {_slack_escape(m.ask)}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
             meta = []
             if m.has_draft:
@@ -195,8 +208,10 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
         lines = [f"🟡 *目を通したい（{len(medium)}件）*"]
         for m in medium[:3]:
             # display fields are PII; rendered to owner DM only, never logged (G3/G7)
-            subj = getattr(m, "subject_display", "") or m.subject_scrubbed or "(件名なし)"
-            who = getattr(m, "counterpart_display", "") or m.counterpart_masked
+            subj = _slack_escape(
+                getattr(m, "subject_display", "") or m.subject_scrubbed or "(件名なし)"
+            )
+            who = _slack_escape(getattr(m, "counterpart_display", "") or m.counterpart_masked)
             lines.append(f"• {subj} — {who}")
         remaining = max(0, len(medium) - 3) + len(low)
         if remaining > 0:

@@ -453,11 +453,13 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             time_max=horizon.isoformat(),
             max_results=20,
         )
+        # ⚠️ CalendarEvent の属性は start / end（start_at/end_at ではない）。
+        # 旧コードは start_at を読んでいたため予定の時刻が常に空だった（本番バグ）。
         return [
             CalendarEventItem(
                 summary_scrubbed=str(scrub_value(getattr(ev, "summary", "")))[:80],
-                start_at=str(getattr(ev, "start_at", "") or "") or None,
-                end_at=str(getattr(ev, "end_at", "") or "") or None,
+                start_at=str(getattr(ev, "start", "") or "") or None,
+                end_at=str(getattr(ev, "end", "") or "") or None,
                 location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
             )
             for ev in events
