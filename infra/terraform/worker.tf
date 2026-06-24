@@ -205,6 +205,15 @@ resource "aws_instance" "worker" {
     Name = "${var.project_name}-${var.environment}-worker"
     Role = "slack-bot-worker"
   }
+
+  # worker は本番 Slack Bot 本体＋RDS への SSM port-forward 拠点（24h 常駐）。
+  # data.aws_ami.al2023_arm が most_recent=true で AMI ドリフトすると、無関係な
+  # apply（morning_digest 等）が ami ForceNew でこの本番 EC2 を巻き添え replace し、
+  # アプリ/secrets/Chrome は user_data 外（S3 投入）のため自動復旧しない。
+  # AMI ドリフトを無視し、更新は意図的な taint＋再デプロイで行う。
+  lifecycle {
+    ignore_changes = [ami]
+  }
 }
 
 output "worker_instance_id" {

@@ -496,3 +496,167 @@ def test_team_agent_labels_constants() -> None:
     assert TeamAgentLabels.ERROR == "TeamAgent/error"
     assert TeamAgentLabels.SKIP == "TeamAgent/skip"
     assert len(TeamAgentLabels.all()) == 4
+
+
+def test_list_drafts_paginates_all_pages() -> None:
+    """list_drafts は nextPageToken を辿り全ページ取得する。
+
+    ページングしないと 51 件目以降を取りこぼし、digest の冪等性（重複下書き防止）が
+    壊れる。2 ページのフェイクで全件取得＋pageToken 追跡を確認する。
+    """
+    pages = {
+        None: {
+            "drafts": [{"id": "d1", "message": {"id": "m1", "threadId": "t1"}}],
+            "nextPageToken": "P2",
+        },
+        "P2": {"drafts": [{"id": "d2", "message": {"id": "m2", "threadId": "t2"}}]},
+    }
+    seen_tokens: list[Any] = []
+
+    class _Drafts:
+        def list(self, **kw: Any) -> _FakeReq:
+            seen_tokens.append(kw.get("pageToken"))
+            return _FakeReq(pages[kw.get("pageToken")])
+
+    class _Users:
+        def drafts(self) -> _Drafts:
+            return _Drafts()
+
+    class _Svc:
+        def users(self) -> _Users:
+            return _Users()
+
+    client = GmailClient(service=_Svc())
+    out = client.list_drafts("r")
+    assert [d.thread_id for d in out] == ["t1", "t2"]  # 両ページの下書きを取得
+    assert seen_tokens == [None, "P2"]  # pageToken を辿った
+
+
+def test_decode_rfc2047_japanese_headers() -> None:
+    """RFC2047 エンコードされた日本語 Subject/From を人間可読にデコードする。
+
+    Gmail API は非 ASCII ヘッダを =?UTF-8?B?...?= で返すため、デコードしないと
+    日本語の件名・差出人名が DM/下書きで文字化けする。
+    """
+    from email.header import Header
+
+    from teamagent.adapters.gmail_client import _decode_header_value, _message_from_resp
+
+    enc_subj = Header("重要なご相談", "utf-8").encode()
+    assert "=?" in enc_subj  # 実際にエンコードされている
+    assert _decode_header_value(enc_subj) == "重要なご相談"
+    assert _decode_header_value("Re: meeting") == "Re: meeting"  # ASCII は素通り
+    assert _decode_header_value("") == ""
+
+    frm = Header("山田 太郎", "utf-8").encode() + " <yamada@acme.co.jp>"
+    resp = {
+        "id": "m1",
+        "threadId": "t1",
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": Header("見積もりの件", "utf-8").encode()},
+                {"name": "From", "value": frm},
+                {"name": "Message-ID", "value": "<abc@x>"},
+            ]
+        },
+    }
+    msg = _message_from_resp(resp)
+    assert msg.headers["Subject"] == "見積もりの件"  # デコード済み
+    assert "山田 太郎" in msg.headers["From"]
+    assert "yamada@acme.co.jp" in msg.headers["From"]
+
+    # CRLF/TAB を含むデコード結果は無害化（ヘッダ注入/Slack 書式崩れ防止）
+    evil = Header("1行目\n偽の警告\r攻撃", "utf-8").encode()
+    out = _decode_header_value(evil)
+    assert "\n" not in out and "\r" not in out
+    assert "1行目" in out and "偽の警告" in out  # 内容は残るが改行は除去
+
+
+def test_extract_plain_text_respects_charset() -> None:
+    """本文の Content-Type charset を尊重する（ISO-2022-JP/Shift_JIS の日本語が化けない）。"""
+    import base64
+
+    from teamagent.adapters.gmail_client import extract_plain_text
+
+    jis = "請求書の件、ご確認ください。"
+    data = base64.urlsafe_b64encode(jis.encode("iso-2022-jp")).decode().rstrip("=")
+    part = {
+        "mimeType": "text/plain",
+        "headers": [{"name": "Content-Type", "value": "text/plain; charset=ISO-2022-JP"}],
+        "body": {"data": data},
+    }
+    assert extract_plain_text(part) == jis  # 文字化けしない
+
+    sjis = "見積もり"
+    part2 = {
+        "mimeType": "text/plain",
+        "headers": [{"name": "Content-Type", "value": 'text/plain; charset="Shift_JIS"'}],
+        "body": {"data": base64.urlsafe_b64encode(sjis.encode("cp932")).decode().rstrip("=")},
+    }
+    assert extract_plain_text(part2) == sjis
+
+    # charset 指定なしは UTF-8 として従来どおり
+    utf = {
+        "mimeType": "text/plain",
+        "body": {"data": base64.urlsafe_b64encode("こんにちは".encode()).decode().rstrip("=")},
+    }
+    assert extract_plain_text(utf) == "こんにちは"
+
+
+def test_extract_plain_text_concatenates_multiple_parts() -> None:
+    """multipart/mixed の複数 text/plain（本文＋フッタ等）を全て連結する。"""
+    import base64
+
+    from teamagent.adapters.gmail_client import extract_plain_text
+
+    def _p(t: str) -> dict[str, Any]:
+        return {
+            "mimeType": "text/plain",
+            "body": {"data": base64.urlsafe_b64encode(t.encode()).decode().rstrip("=")},
+        }
+
+    payload = {"mimeType": "multipart/mixed", "parts": [_p("本文です。"), _p("-- 署名 --")]}
+    out = extract_plain_text(payload)
+    assert "本文です。" in out and "-- 署名 --" in out  # 両方拾う（旧実装は本文だけ）
+
+
+def test_decode_b64url_rescues_mislabeled_utf8_as_latin1() -> None:
+    """実体 UTF-8 を latin-1/iso-8859-1 と誤ラベルしたメールでも文字化けせず救済する。
+
+    latin-1 系は任意バイトを“成功裏に”誤デコードしてしまうため、宣言を盲信すると
+    mojibake が確定する（最終ハント確証バグ）。宣言が単バイト系のときは UTF-8 を優先。
+    """
+    import base64
+
+    from teamagent.adapters.gmail_client import _decode_b64url
+
+    body = "納品書を添付します。ご確認ください。"
+    data = base64.urlsafe_b64encode(body.encode("utf-8")).decode().rstrip("=")
+    # iso-8859-1 と誤ラベルされても UTF-8 として正しく読める（旧実装は mojibake）。
+    assert _decode_b64url(data, "iso-8859-1") == body
+    assert _decode_b64url(data, "latin-1") == body
+    assert _decode_b64url(data, "windows-1252") == body
+
+
+def test_decode_b64url_genuine_latin1_still_decodes() -> None:
+    """本当に latin-1 な本文（妥当な UTF-8 ではない）は宣言どおり latin-1 で読む。"""
+    import base64
+
+    from teamagent.adapters.gmail_client import _decode_b64url
+
+    body = "café déjà vu"  # é/à を含む
+    raw = body.encode("latin-1")  # 0xE9 等。これは妥当な UTF-8 連続ではない。
+    data = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    # UTF-8 strict は失敗 → 宣言 latin-1 にフォールバックして正しく読む。
+    assert _decode_b64url(data, "iso-8859-1") == body
+
+
+def test_decode_b64url_respects_reliable_charset_unchanged() -> None:
+    """ISO-2022-JP/Shift_JIS など raise する charset は優先順を変えず従来挙動。"""
+    import base64
+
+    from teamagent.adapters.gmail_client import _decode_b64url
+
+    jis = "請求書の件"
+    data = base64.urlsafe_b64encode(jis.encode("iso-2022-jp")).decode().rstrip("=")
+    assert _decode_b64url(data, "ISO-2022-JP") == jis

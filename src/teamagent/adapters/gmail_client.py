@@ -87,6 +87,28 @@ _GMAIL_DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
         # drafts.create は許可、drafts.send / messages.send は封鎖）。
         "users.messages.send",
         "users.drafts.send",
+        # ── 注入・改竄（本 Bot は使わない mutating メソッド）──
+        "users.messages.import",  # 受信箱へメール注入
+        "users.messages.insert",  # 受信箱へメール注入
+        "users.threads.modify",  # スレッドのラベル改竄（本 Bot は messages.modify のみ使用）
+        "users.drafts.update",  # 下書き改竄（作成のみ許可）
+        "users.drafts.delete",  # 下書き削除
+        # ── 情報持ち出し（exfiltration）系の設定変更 ──
+        "users.settings.updateAutoForwarding",  # 全メール自動転送（最重要・漏洩）
+        "users.settings.forwardingAddresses.create",  # 転送先追加
+        "users.settings.sendAs.create",  # 送信エイリアス追加（なりすまし）
+        "users.settings.sendAs.update",
+        "users.settings.sendAs.patch",
+        "users.settings.sendAs.verify",
+        "users.settings.filters.create",  # 自動転送/削除フィルタ追加
+        "users.settings.updateImap",
+        "users.settings.updatePop",
+        "users.settings.updateVacation",
+        "users.settings.updateLanguage",
+        "users.settings.cse.identities.create",
+        "users.settings.cse.identities.patch",
+        "users.settings.cse.keypairs.create",
+        "users.settings.cse.keypairs.enable",
     }
 )
 
@@ -605,6 +627,57 @@ class GmailClient:
         )
         return draft
 
+    def list_drafts(
+        self,
+        request_id: str,
+        *,
+        max_results: int = 100,
+        max_pages: int = 50,
+        user_id: str = "me",
+    ) -> list[GmailDraft]:
+        """既存の下書きを全ページ列挙する（readonly・drafts.list）。
+
+        冪等性に使う：毎日の digest が同じスレッドに下書きを二重作成しないよう、
+        既存下書きの thread_id 集合を引く。drafts.list は 1 ページ最大 100 件＋nextPageToken の
+        ため、**ページングしないと 51 件目以降を取りこぼし冪等性が壊れる**（重複下書き）。
+        max_pages で暴走を防ぎつつ全ページ辿る。本文・件名は取得しない（G3/G7）。
+        """
+        service = self._ensure_safe_service()
+        start = time.perf_counter()
+        out: list[GmailDraft] = []
+        page_token: str | None = None
+        for _ in range(max_pages):
+            kwargs: dict[str, Any] = {"userId": user_id, "maxResults": max_results}
+            if page_token:
+                kwargs["pageToken"] = page_token
+            resp = service.users().drafts().list(**kwargs).execute()
+            for d in resp.get("drafts", []) or []:
+                m = d.get("message", {}) or {}
+                out.append(
+                    GmailDraft(
+                        id=str(d.get("id", "")),
+                        message_id=str(m.get("id", "")),
+                        thread_id=m.get("threadId"),
+                    )
+                )
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        if page_token:
+            # max_pages で打ち切った＝全下書きを見切れていない＝冪等性が不完全。
+            # 無言にせず警告（運用が下書き整理 or 上限調整できるように）。
+            logger.warning(
+                "gmail_list_drafts_truncated",
+                request_id=request_id,
+                count=len(out),
+                max_pages=max_pages,
+            )
+        logger.info(
+            "gmail_list_drafts", request_id=request_id, count=len(out), latency_ms=latency_ms
+        )
+        return out
+
     # -------------------------------------------------------
     # 内部
     # -------------------------------------------------------
@@ -670,11 +743,43 @@ class GmailClient:
 # -----------------------------------------------------------
 # ヘルパー: MIME 解析 / ACL 抽出
 # -----------------------------------------------------------
+# RFC2047 デコード対象の人間可読ヘッダ（Subject/差出人名などが非ASCIIだとエンコードされる）。
+_DECODE_HEADERS: frozenset[str] = frozenset({"From", "To", "Cc", "Bcc", "Reply-To", "Subject"})
+
+
+def _decode_header_value(raw: str) -> str:
+    """RFC2047 エンコードヘッダ（=?UTF-8?B?...?= 等）を人間可読にデコードする。
+
+    Gmail API は非 ASCII の Subject/From を RFC2047 のまま返すため、デコードしないと
+    日本語の件名・差出人名が文字化けして DM/下書きに出る。失敗時は原文（fail-open）。
+    ⚠️ デコード結果に CR/LF/TAB が紛れ込むとヘッダ注入/Slack 書式崩れになるため無害化する
+    （攻撃者が改行を base64 で仕込むケース）。
+    """
+    if not raw:
+        return raw
+    if "=?" in raw:
+        from email.header import decode_header, make_header
+
+        try:
+            raw = str(make_header(decode_header(raw)))
+        except Exception:
+            pass
+    if "\r" in raw or "\n" in raw or "\t" in raw:
+        raw = raw.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return raw
+
+
 def _message_from_resp(resp: dict[str, Any]) -> GmailMessage:
     """messages.get / threads.get の 1 メッセージ dict を GmailMessage へ写像する。"""
     payload = resp.get("payload", {}) or {}
     headers_list = payload.get("headers", []) or []
-    headers = {h.get("name", ""): h.get("value", "") for h in headers_list if h.get("name")}
+    headers: dict[str, str] = {}
+    for h in headers_list:
+        name = h.get("name", "")
+        if not name:
+            continue
+        value = h.get("value", "")
+        headers[name] = _decode_header_value(value) if name in _DECODE_HEADERS else value
     return GmailMessage(
         id=str(resp.get("id", "")),
         thread_id=str(resp.get("threadId", "")),
@@ -689,29 +794,86 @@ def _message_from_resp(resp: dict[str, Any]) -> GmailMessage:
 def extract_plain_text(payload: dict[str, Any]) -> str:
     """payload (MIME tree) から text/plain 部分を抽出する。
 
-    multipart の場合は parts を再帰探索。text/html しか無い場合は空文字を返す
-    （HTML パースは別レイヤー責務、ここでは plain text のみ）。
+    multipart を再帰探索し、**全ての** text/plain part を文書順に連結する
+    （旧実装は最初の 1 part だけ返し、本文と別 part の署名/フッタを取りこぼした）。
+    text/html しか無い場合は空文字（HTML パースは別レイヤー責務）。
     """
+    parts: list[str] = []
 
-    def _walk(node: dict[str, Any]) -> str | None:
-        mime = node.get("mimeType", "")
-        if mime == "text/plain":
+    def _walk(node: dict[str, Any]) -> None:
+        if node.get("mimeType", "") == "text/plain":
             data = (node.get("body") or {}).get("data")
             if data:
-                return _decode_b64url(data)
+                parts.append(_decode_b64url(data, _part_charset(node)))
+            return  # text/plain は子を持たない
         for child in node.get("parts", []) or []:
-            text = _walk(child)
-            if text:
-                return text
-        return None
+            _walk(child)
 
-    return _walk(payload) or ""
+    _walk(payload)
+    return "\n".join(p for p in parts if p)
 
 
-def _decode_b64url(s: str) -> str:
-    """Gmail 本文は base64url エンコード。padding 補完してデコード。"""
+def _part_charset(node: dict[str, Any]) -> str:
+    """MIME part の Content-Type から charset を取り出す（無ければ utf-8）。"""
+    import re
+
+    for h in node.get("headers", []) or []:
+        if str(h.get("name", "")).lower() == "content-type":
+            m = re.search(r'charset="?([\w\-]+)"?', str(h.get("value", "")), re.IGNORECASE)
+            if m:
+                return m.group(1)
+    return "utf-8"
+
+
+# これらの単バイト系 charset は「どんなバイト列でも例外を出さずデコード成立」して
+# しまうため、宣言が誤っていても文字化けを検出できない。実体が UTF-8 のメールが
+# これらで誤ラベルされる事故が多いので、宣言がこの集合のときは先に UTF-8 strict を
+# 試し、成功すれば（＝妥当な UTF-8 なら）そちらを採用する。
+_UNRELIABLE_SINGLE_BYTE: frozenset[str] = frozenset(
+    {
+        "latin-1",
+        "latin1",
+        "latin_1",
+        "iso-8859-1",
+        "iso8859-1",
+        "iso_8859-1",
+        "l1",
+        "cp1252",
+        "windows-1252",
+    }
+)
+
+
+def _decode_b64url(s: str, charset: str = "utf-8") -> str:
+    """Gmail 本文（base64url）を charset を尊重してデコードする。
+
+    日本のメールは ISO-2022-JP / Shift_JIS(cp932) も多い。utf-8 固定だと文字化けして
+    triage/下書きに渡るため、宣言 charset→utf-8→cp932→latin-1 の順でフォールバック。
+
+    宣言 charset が「常に成功する単バイト系」(latin-1 等)の場合だけは、UTF-8 strict を
+    優先する。誤ラベルされた UTF-8 本文が latin-1 で“成功する誤デコード”として
+    文字化けのまま確定するのを防ぐため（正しくラベルされた ISO-2022-JP/Shift_JIS は
+    それぞれ誤バイトで raise するので、この優先は掛けない＝挙動不変）。
+    """
     pad = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + pad).decode("utf-8", errors="replace")
+    raw = base64.urlsafe_b64decode(s + pad)
+    declared = (charset or "utf-8").strip().lower()
+    if declared in _UNRELIABLE_SINGLE_BYTE:
+        try:
+            return raw.decode("utf-8")
+        except (LookupError, UnicodeDecodeError):
+            pass  # 妥当な UTF-8 でなければ宣言どおりの単バイト系で読む（下のループ）。
+    seen: set[str] = set()
+    for enc in (declared, "utf-8", "cp932", "latin-1"):
+        e = (enc or "").lower()
+        if not e or e in seen:
+            continue
+        seen.add(e)
+        try:
+            return raw.decode(e)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def extract_thread_participants(headers: dict[str, str]) -> list[str]:

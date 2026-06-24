@@ -124,7 +124,14 @@ def build_thread_history(
         frm = str(headers.get("From", "")).lower()
         who = "自分(営業)" if req and req in frm else "先方"
         body = extract_plain_text(getattr(m, "payload", {}) or {})
-        masked = str(scrub_value(body)).strip()[:per_msg_chars]
+        # G6: scrub に加え境界トークン(<<< / >>>)を無害化し、本文が枠から脱出して
+        # 指示位置に注入されるのを防ぐ（攻撃者制御テキストのため）。
+        masked = (
+            str(scrub_value(body))
+            .strip()[:per_msg_chars]
+            .replace("<<<", "‹‹‹")
+            .replace(">>>", "›››")
+        )
         if not masked:
             continue
         rendered.append(f"<<<HISTORY from={who}>>>\n{masked}\n<<<END>>>")
@@ -179,5 +186,9 @@ def is_mass_or_impersonal(headers: dict[str, str], body: str) -> bool:
     frm = (headers.get("From") or "").lower()
     if any(k in frm for k in ("noreply", "no-reply", "donotreply", "do-not-reply", "no_reply")):
         return True
-    head = (body or "").lstrip()[:120]
+    # 本文冒頭の一般宛名を検出。固定 120 字窓だと空行/画像/前置きが先頭にあると
+    # 「各位」等が窓外に出て取りこぼす（＝マスメールを下書きしてしまう）。
+    # 空行を除いた実コンテンツの先頭 6 行（最大 400 字）で判定する。
+    meaningful = [ln for ln in (body or "").splitlines() if ln.strip()]
+    head = "\n".join(meaningful[:6])[:400]
     return any(s in head for s in _BULK_SALUTATIONS)

@@ -102,4 +102,11 @@ resource "aws_instance" "bastion" {
   tags = {
     Name = "${var.project_name}-${var.environment}-bastion"
   }
+
+  # data.aws_ami.al2023_arm は most_recent=true のため AWS が新 AMI を公開するたび
+  # id が変わり、ami は ForceNew → 無関係な apply（例: morning_digest）で踏み台が
+  # 巻き添え replace される footgun。AMI ドリフトは無視し、更新は意図的な taint で行う。
+  lifecycle {
+    ignore_changes = [ami]
+  }
 }
