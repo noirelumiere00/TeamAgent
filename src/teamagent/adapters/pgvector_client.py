@@ -467,6 +467,57 @@ class PgVectorClient:
         )
         return hits
 
+    def list_documents_for_graph(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        *,
+        limit: int = 600,
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """グラフ表示用に documents を新しい順で列挙する（RLS 適用済 conn 前提）。
+
+        ノード=資料・エッジ=共有タグの Obsidian 風グラフを
+        ``connect_web.graph.build_graph`` で組むためのフィールドを返す。
+        excerpt はホバープレビュー用に先頭 chunk の本文を LATERAL で 1 つだけ拾う
+        （chunks の RLS は documents 連動なので本人可視分のみ）。RLS は
+        ``connection(app_role='teamagent_app', user_email=...)`` で有効化済の前提なので、
+        本人 ACL（個人 + 会社共有）に見えるドキュメントのみが返る。
+        列名・テーブル名は固定リテラル、limit は placeholder bind（bandit B608 安全）。
+        """
+        sql = """
+            SELECT
+                abs(hashtext(d.id::text)::bigint) AS node_id,
+                d.title,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                d.metadata->>'cls_industry' AS cls_industry,
+                d.metadata->>'cls_project' AS cls_project,
+                d.metadata->>'cls_doc_type' AS cls_doc_type,
+                d.metadata->>'client_name' AS client_name,
+                ex.excerpt AS excerpt
+            FROM documents d
+            LEFT JOIN LATERAL (
+                SELECT left(COALESCE(c.contextualized, c.content), 160) AS excerpt
+                FROM chunks c
+                WHERE c.document_id = d.id
+                ORDER BY c.chunk_idx ASC
+                LIMIT 1
+            ) ex ON true
+            ORDER BY d.modified_at DESC NULLS LAST
+            LIMIT %s
+        """  # nosec B608
+        with conn.cursor() as cur:
+            cur.execute(sql, [limit])
+            rows = cur.fetchall()
+        docs = [dict(r) for r in rows]
+        logger.info(
+            "pgvector_list_documents_for_graph",
+            request_id=request_id,
+            doc_count=len(docs),
+            limit=limit,
+        )
+        return docs
+
     def list_by_metadata(
         self,
         conn: psycopg.Connection[dict[str, Any]],

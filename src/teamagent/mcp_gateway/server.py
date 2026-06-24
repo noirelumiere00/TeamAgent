@@ -48,6 +48,11 @@ USER_CONTEXT_KEY = "_user_context"
 # `USE_AGENT_ORCHESTRATOR=1` の時だけ list/call に出す（既定 OFF・dark）。
 RUN_AGENT_TOOL_NAME = "run_agent"
 
+# search ツールの応答に「ブラウザ/グラフで開く」Web UI リンクを差し込む対象の tool 名。
+# 注入は本ゲート層でのみ行い、SearchSkill / skills/search/schema.py は不変に保つ
+# （並行編集との衝突回避）。CONNECT_BASE_URL 未設定なら一切載せない（壊れたリンクを出さない）。
+SEARCH_TOOL_NAME = "search"
+
 
 def _envflag(name: str, default: str = "false") -> bool:
     """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。"""
@@ -137,6 +142,18 @@ def _domain_of(email: str | None) -> str | None:
     if email and "@" in email:
         return email.split("@", 1)[1]
     return None
+
+
+def _inject_search_web_links(data: dict[str, Any]) -> None:
+    """search 応答に Web UI リンク（web_url/graph_url）を *この場で* 差し込む（破壊的・in-place）。
+
+    URL 組み立ては knowledge_search_url skill と同一の真実源（build_search_web_links）に委譲。
+    CONNECT_BASE_URL 未設定なら空 dict が返り、キーを一切足さない＝壊れた相対リンクは出さない。
+    SearchSkill / skills/search/schema.py は不変（注入はこのゲート層だけで完結）。
+    """
+    from teamagent.skills.knowledge_search_url.skill import build_search_web_links
+
+    data.update(build_search_web_links())
 
 
 def _err(message: str, **extra: Any) -> list[TextContent]:
@@ -309,6 +326,10 @@ async def dispatch_tool(
         return _err(f"{type(e).__name__}: {e}", request_id=ctx.request_id)
 
     data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
+    # search 応答にだけ Web UI リンクを差し込む（AiLa が「ブラウザ/グラフで開く」を案内できる）。
+    # CONNECT_BASE_URL 未設定なら何も足さない＝壊れたリンクは出さない（後方互換）。
+    if name == SEARCH_TOOL_NAME and isinstance(data, dict):
+        _inject_search_web_links(data)
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]
 
 

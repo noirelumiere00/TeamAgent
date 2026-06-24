@@ -27,6 +27,7 @@ def _build_search_skill() -> Any:
     参照: runtime/slack_bot.py:get_search_skill（同じフラグ・既定値に揃える）。
     """
     from teamagent.adapters.embeddings_client import LocalE5Embedder
+    from teamagent.skills.search.query_planner import build_query_planner_from_env
     from teamagent.skills.search.skill import SearchSkill
 
     try:
@@ -68,6 +69,8 @@ def _build_search_skill() -> Any:
         use_knowledge_filters=_envflag("USE_KNOWLEDGE_FILTERS"),
         prompt_version=os.environ.get("PROMPT_VERSION", "v2d"),
         summary_max_tokens=summary_max_tokens,
+        # P3 エージェント検索（USE_QUERY_PLANNER=1 のときだけ非 None・既定は単一クエリ）。
+        query_planner=build_query_planner_from_env(),
     )
 
 
@@ -303,6 +306,22 @@ def build_production_tools() -> list[ToolSpec]:
                 OAuthConnectSkill.name,
                 OAuthConnectSkill.description,
                 OAuthConnectSkill,
+            )
+        )
+
+    # knowledge_search_url — @AiLa「検索ページ教えて」で資料検索 Web UI（connect-web の
+    # /search・/search/graph）の URL を返す（oauth_connect と同じく URL 生成のみ＝依存なし）。
+    # CONNECT_BASE_URL 未設定なら壊れたリンクを出さず「未公開」と返す（fail-safe）。
+    # **既定 OFF**（USE_KNOWLEDGE_SEARCH_URL_TOOL=1）。OC 露出は openclaw.config.json5 の
+    # toolFilter.include に追加してから（=人間ゲート）。
+    if _envflag("USE_KNOWLEDGE_SEARCH_URL_TOOL"):
+        from teamagent.skills.knowledge_search_url.skill import KnowledgeSearchUrlSkill
+
+        specs.append(
+            ToolSpec(
+                KnowledgeSearchUrlSkill.name,
+                KnowledgeSearchUrlSkill.description,
+                KnowledgeSearchUrlSkill,
             )
         )
 

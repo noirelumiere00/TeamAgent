@@ -26,10 +26,12 @@ from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
+from teamagent.skills.search.fusion import reciprocal_rank_fusion
 from teamagent.skills.search.knowledge_query import (
     extract_knowledge_filters,
     extract_query_industry,
 )
+from teamagent.skills.search.query_planner import QueryPlanner
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
@@ -82,6 +84,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         prompt_version: str = "v1",
         summary_max_tokens: int = 4096,
         app_role: str | None = "teamagent_app",
+        query_planner: QueryPlanner | None = None,
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
 
@@ -165,6 +168,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # Day 8 Sprint 4-D: Bedrock Converse の max_tokens 制限。
         # SEARCH_MAX_TOKENS env で runtime 制御、v2c と組合せて latency を半減狙い。
         self._summary_max_tokens = summary_max_tokens
+        # P3 エージェント検索: 注入時のみ multi-query/HyDE→RRF＋LLMルーティングを使う。
+        # None（既定）なら従来の単一クエリ + substring ルーティングのまま（後方互換）。
+        self._query_planner = query_planner
 
     def retrieve_hits(
         self,
@@ -282,6 +288,38 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
         return self._embedder.embed(text)
 
+    def _pool_search(
+        self,
+        *,
+        conn: Any,
+        embedding: list[float],
+        limit: int,
+        filter_industry: str | None,
+        strict_industry: bool,
+        metadata_filters: dict[str, str] | None,
+        request_id: str,
+    ) -> list[SearchHit]:
+        """新スキーマの単一ベクトル検索。フィルタ指定で 0 件なら外して再検索（fail-open）。"""
+        hits = self._pgvector.search_similar_new_schema(
+            conn=conn,
+            embedding=embedding,
+            limit=limit,
+            filter_industry=filter_industry,
+            request_id=request_id,
+            strict_industry=strict_industry,
+            metadata_filters=metadata_filters,
+        )
+        if not hits and (metadata_filters or filter_industry):
+            hits = self._pgvector.search_similar_new_schema(
+                conn=conn,
+                embedding=embedding,
+                limit=limit,
+                filter_industry=None,
+                request_id=request_id,
+                strict_industry=strict_industry,
+            )
+        return hits
+
     def _retrieve(
         self, embedding: list[float], input: SearchInput, ctx: SkillContext
     ) -> list[SearchHit]:
@@ -331,35 +369,65 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     if self._use_cohere_rerank
                     else input.top_k
                 )
-                # ナレッジ Q&A: 資料種別語（「提案事例」「議事録」等）が読めたら、まず
-                # 自動分類メタ（cls_doc_type）で絞った意味検索を試す。
-                knowledge_filters = (
-                    extract_knowledge_filters(input.query) if self._use_knowledge_filters else None
-                )
-                # 業界語（「飲料系/化粧品」等）を soft filter_industry に（明示指定が優先）。
-                # soft=「industry=値 OR NULL」なので未分類 docs は除外されない＝過剰絞り込みなし。
-                eff_industry = input.filter_industry or (
-                    extract_query_industry(input.query) if self._use_knowledge_filters else None
-                )
-                hits = self._pgvector.search_similar_new_schema(
-                    conn=conn,
-                    embedding=embedding,
-                    limit=retrieve_limit,
-                    filter_industry=eff_industry,
-                    request_id=ctx.request_id,
-                    strict_industry=input.strict_industry,
-                    metadata_filters=knowledge_filters,
-                )
-                # 絞り込んで 0 件 → 種別/業界フィルタを外して通常の意味検索にフォールバック
-                # （分類済 docs がまだ少ない初期でも空振りしない）。
-                if not hits and (knowledge_filters or eff_industry):
-                    hits = self._pgvector.search_similar_new_schema(
+                if self._query_planner is not None:
+                    # P3: LLM ルーティング + multi-query/HyDE → RRF 融合。
+                    plan = self._query_planner.plan(input.query, ctx.request_id)
+                    # plan 由来のメタフィルタ（業界 / 資料種別）は USE_KNOWLEDGE_FILTERS が
+                    # 有効なときのみ適用する（単一クエリ経路の substring ルーティングと同じ
+                    # flag に揃える＝一貫性）。OFF なら multi-query/HyDE/RRF だけを使う。
+                    eff_industry: str | None
+                    kf: dict[str, str] | None
+                    if self._use_knowledge_filters:
+                        eff_industry = input.filter_industry or plan.industry
+                        kf = {"cls_doc_type": plan.doc_type} if plan.doc_type else None
+                    else:
+                        eff_industry = input.filter_industry
+                        kf = None
+                    # multi-query: 元クエリ + 言い換え + HyDE を埋め込む。重複文は除いて
+                    # 余計な embed / RRF リストを増やさない（Haiku が近似文を返しがちなため）。
+                    sub_embeddings = [embedding]
+                    seen_texts = {input.query.strip()}
+                    for para in plan.paraphrases:
+                        norm = para.strip() if para else ""
+                        if norm and norm not in seen_texts:
+                            seen_texts.add(norm)
+                            sub_embeddings.append(self._embed(para))
+                    if plan.hyde_answer:
+                        hyde_norm = plan.hyde_answer.strip()
+                        if hyde_norm and hyde_norm not in seen_texts:
+                            seen_texts.add(hyde_norm)
+                            sub_embeddings.append(self._embed(plan.hyde_answer))
+                    ranked_lists = [
+                        self._pool_search(
+                            conn=conn,
+                            embedding=emb,
+                            limit=retrieve_limit,
+                            filter_industry=eff_industry,
+                            strict_industry=input.strict_industry,
+                            metadata_filters=kf,
+                            request_id=ctx.request_id,
+                        )
+                        for emb in sub_embeddings
+                    ]
+                    hits = reciprocal_rank_fusion(ranked_lists)[:retrieve_limit]
+                else:
+                    # 従来: substring ルーティング（資料種別・業界）＋単一クエリ検索。
+                    knowledge_filters = (
+                        extract_knowledge_filters(input.query)
+                        if self._use_knowledge_filters
+                        else None
+                    )
+                    eff_industry = input.filter_industry or (
+                        extract_query_industry(input.query) if self._use_knowledge_filters else None
+                    )
+                    hits = self._pool_search(
                         conn=conn,
                         embedding=embedding,
                         limit=retrieve_limit,
-                        filter_industry=None,
-                        request_id=ctx.request_id,
+                        filter_industry=eff_industry,
                         strict_industry=input.strict_industry,
+                        metadata_filters=knowledge_filters,
+                        request_id=ctx.request_id,
                     )
                 # Sprint 7: クライアント名ブースト。固有名詞クエリで dense が正解 chunk を
                 # 取りこぼすのを補強（client_name 絞り検索を rerank プールへ合流）。

@@ -277,6 +277,7 @@ def _append_partial(path: Path, result: CaseResult) -> None:
 def _build_skill() -> Any:
     """環境変数から SearchSkill を組み立てる (slack_bot.py と同じロジック)。"""
     from teamagent.adapters.embeddings_client import LocalE5Embedder
+    from teamagent.skills.search.query_planner import build_query_planner_from_env
     from teamagent.skills.search.skill import SearchSkill
 
     use_contextual = os.environ.get("USE_CONTEXTUAL", "false").lower() in ("1", "true", "yes")
@@ -333,6 +334,7 @@ def _build_skill() -> Any:
             use_aggregation_mode=use_aggregation_mode,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
+            query_planner=build_query_planner_from_env(),
         ),
         {
             "USE_NEW_SCHEMA": use_new_schema,
@@ -350,11 +352,127 @@ def _build_skill() -> Any:
     )
 
 
+# ── 比較モード (--compare) ─────────────────────────────────────────────────
+
+
+def _latest_result_path(label: str, results_dir: Path = RESULTS_DIR) -> Path | None:
+    """指定 label の最新 results JSON を返す（無ければ None）。"""
+    if not results_dir.exists():
+        return None
+    candidates = sorted(results_dir.glob(f"{label}_*.json"))
+    return candidates[-1] if candidates else None
+
+
+def _load_summary_dict(label: str, results_dir: Path = RESULTS_DIR) -> dict[str, Any] | None:
+    """label の最新 EvalSummary を dict で読む。"""
+    path = _latest_result_path(label, results_dir)
+    if path is None:
+        return None
+    with path.open(encoding="utf-8") as f:
+        return dict(json.load(f))
+
+
+_COMPARE_METRICS: list[tuple[str, str]] = [
+    ("top-1", "top1_hit_rate"),
+    ("top-5", "top5_hit_rate"),
+    ("MRR", "mean_mrr"),
+    ("cost/q", "mean_cost_usd"),
+    ("latency", "mean_latency_ms"),
+    ("zero-hit", "zero_hit_correct"),
+]
+
+
+def _fmt_metric(key: str, val: float) -> str:
+    if key in ("top1_hit_rate", "top5_hit_rate"):
+        return f"{val * 100:.1f}%"
+    if key == "mean_mrr":
+        return f"{val:.4f}"
+    if key == "mean_cost_usd":
+        return f"${val:.4f}"
+    if key == "mean_latency_ms":
+        return f"{val:.0f}ms"
+    return f"{val:.0f}"
+
+
+def _delta_metric(key: str, base: float, cur: float) -> str:
+    if key in ("top1_hit_rate", "top5_hit_rate"):
+        return f"{(cur - base) * 100:+.1f}pp"
+    if key == "mean_mrr":
+        return f"{cur - base:+.4f}"
+    if key == "mean_cost_usd":
+        return f"{cur - base:+.4f}"
+    if key == "mean_latency_ms":
+        return f"{cur - base:+.0f}ms"
+    return f"{cur - base:+.0f}"
+
+
+def _case_regressions(base: dict[str, Any], cur: dict[str, Any]) -> tuple[list[int], list[int]]:
+    """baseline 比で top-5 が「新たに通った / 落ちた」case_id を返す。"""
+    base_pass = {int(c["case_id"]): bool(c["top5_hit"]) for c in base.get("per_case", [])}
+    newly_passed: list[int] = []
+    newly_failed: list[int] = []
+    for c in cur.get("per_case", []):
+        cid = int(c["case_id"])
+        was = base_pass.get(cid)
+        if was is None:
+            continue
+        now = bool(c["top5_hit"])
+        if now and not was:
+            newly_passed.append(cid)
+        elif was and not now:
+            newly_failed.append(cid)
+    return sorted(newly_passed), sorted(newly_failed)
+
+
+def _print_comparison(labels: list[str], baseline_label: str) -> int:
+    """保存済み results を表で比較し、baseline からの Δ と top-5 回帰を表示する。"""
+    summaries: dict[str, dict[str, Any]] = {}
+    for lb in labels:
+        s = _load_summary_dict(lb)
+        if s is None:
+            print(f"⚠ results 未発見: {lb}  (data/eval/results/{lb}_*.json)")
+            continue
+        summaries[lb] = s
+    if baseline_label not in summaries:
+        print(f"baseline '{baseline_label}' の結果が見つかりません。")
+        return 1
+    base = summaries[baseline_label]
+
+    width = max(14, *(len(lb) + 12 for lb in summaries))
+    print()
+    print("=" * 72)
+    print(f"Comparison (baseline = {baseline_label})")
+    print("=" * 72)
+    header = f"{'metric':<10}" + "".join(f"{lb:>{width}}" for lb in summaries)
+    print(header)
+    print("-" * len(header))
+    for name, key in _COMPARE_METRICS:
+        row = f"{name:<10}"
+        for lb in summaries:
+            cur = float(summaries[lb].get(key, 0.0))
+            cell = _fmt_metric(key, cur)
+            if lb != baseline_label:
+                cell += f" ({_delta_metric(key, float(base.get(key, 0.0)), cur)})"
+            row += f"{cell:>{width}}"
+        print(row)
+    print("-" * len(header))
+    for lb in summaries:
+        if lb == baseline_label:
+            continue
+        passed, failed = _case_regressions(base, summaries[lb])
+        print(f"\n[{lb}] vs {baseline_label}: +通過 {len(passed)} / -脱落(回帰) {len(failed)}")
+        if passed:
+            print(f"  新たに top-5 通過: {passed}")
+        if failed:
+            print(f"  新たに top-5 脱落: {failed}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--label",
-        required=True,
+        default=None,
         help="この実行を識別するラベル (例: baseline, rerank, day8_full)",
     )
     parser.add_argument(
@@ -363,7 +481,27 @@ def main() -> int:
         default=None,
         help="先頭 N 件だけ実行 (smoke test 用)",
     )
+    parser.add_argument(
+        "--compare",
+        nargs="+",
+        metavar="LABEL",
+        default=None,
+        help="保存済み results (各 label の最新 JSON) を比較表示する（評価は実行しない）",
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help="--compare の基準ラベル（既定 = --compare の先頭）",
+    )
     args = parser.parse_args()
+
+    # 比較モード: 評価は走らせず保存済み結果の差分だけ出す。
+    if args.compare:
+        baseline = args.baseline or args.compare[0]
+        return _print_comparison(args.compare, baseline)
+
+    if not args.label:
+        parser.error("--label は必須です（--compare を使う場合を除く）")
 
     cases = _load_gold_set()
     if args.limit:

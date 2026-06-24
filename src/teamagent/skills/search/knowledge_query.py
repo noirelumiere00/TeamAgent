@@ -40,19 +40,35 @@ _INDUSTRY_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+# 商談フェーズキーワード → cls_phase 正規値（classify._PHASES と一致）。過剰絞り込みを
+# 避けるため、フェーズが明確な語だけ拾う（doc_type と衝突する「提案」単独は含めない）。
+_PHASE_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("受注", "成約"), "受注"),
+    (("失注", "見送り", "ロスト"), "失注"),
+    (("見積フェーズ", "見積段階"), "見積"),
+    (("ヒアリング", "初回接触"), "ヒアリング"),
+)
+
+
 def extract_knowledge_filters(query: str) -> dict[str, str] | None:
-    """クエリから資料種別の絞り込みフィルタを抽出する。
+    """クエリから資料種別（cls_doc_type）・商談フェーズ（cls_phase）の絞り込みを抽出する。
 
     返り値:
-        {"cls_doc_type": "提案書"} のようなフィルタ dict。該当語が無ければ None
-        （= 呼び出し側は通常の意味検索にフォールバック）。
+        {"cls_doc_type": "提案書", "cls_phase": "受注"} のような複合 dict（該当キーのみ）。
+        該当語が無ければ None（= 呼び出し側は通常の意味検索にフォールバック）。
     """
     if not query:
         return None
+    filters: dict[str, str] = {}
     for keywords, doc_type in _DOC_TYPE_KEYWORDS:
         if any(kw in query for kw in keywords):
-            return {"cls_doc_type": doc_type}
-    return None
+            filters["cls_doc_type"] = doc_type
+            break
+    for keywords, phase in _PHASE_KEYWORDS:
+        if any(kw in query for kw in keywords):
+            filters["cls_phase"] = phase
+            break
+    return filters or None
 
 
 def extract_query_industry(query: str) -> str | None:

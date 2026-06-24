@@ -108,7 +108,6 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     high = [m for m in mail_items if m.importance == "high"]
     medium = [m for m in mail_items if m.importance == "medium"]
     low = [m for m in mail_items if m.importance == "low"]
-    cal_items = list(getattr(digest, "calendar_events", []) or [])
     slack_items = list(getattr(digest, "slack_unread", []) or [])
     drafts = int(getattr(digest, "drafts_created", 0) or 0)
 
@@ -126,7 +125,6 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             "fields": [
                 {"type": "mrkdwn", "text": f"🔴 *要返信*  `{len(high)}件`"},
                 {"type": "mrkdwn", "text": f"✏️ *下書き済*  `{drafts}件`"},
-                {"type": "mrkdwn", "text": f"🗓 *今日の予定*  `{len(cal_items)}件`"},
                 {"type": "mrkdwn", "text": f"🟡 *要確認*  `{len(medium)}件`"},
             ],
         }
@@ -158,16 +156,6 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
         blocks.append(
             {"type": "section", "text": {"type": "mrkdwn", "text": "📧 *メール*: 直近の新着なし"}}
         )
-
-    # --- 今日の予定（時刻太字・会議室/場所を 📍付きで明記）---
-    if cal_items:
-        lines = ["🗓 *今日の予定*"]
-        for ev in cal_items[:6]:
-            loc = (ev.location_scrubbed or "").strip()
-            place = f" 📍{loc}" if loc else ""
-            lines.append(f"• *{_fmt_time(ev.start_at)}* {ev.summary_scrubbed or '(無題)'}{place}")
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-        blocks.append({"type": "divider"})
 
     # --- 要確認メール（medium・1行圧縮 + 「+N件」省略）---
     if medium:
@@ -204,13 +192,6 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             "type": "button",
             "text": {"type": "plain_text", "text": "📥 受信トレイ", "emoji": True},
             "url": _GMAIL_INBOX_URL,
-        }
-    )
-    actions.append(
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "🗓 カレンダー", "emoji": True},
-            "url": _CALENDAR_URL,
         }
     )
     blocks.append({"type": "actions", "elements": actions})

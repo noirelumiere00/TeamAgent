@@ -140,6 +140,10 @@
             // knowledge_deliver: 「資料そのものを出して」系で該当ファイルを依頼者 DM に添付配信
             // （USE_KNOWLEDGE_DELIVER=1 で MCP 側に出る）。検索+読取DLのみ・Drive書込なし。
             "knowledge_deliver",
+            // knowledge_search_url: @AiLa「検索ページ教えて」で資料検索 Web UI（connect-web の
+            // /search・/search/graph）の URL を返す。URL生成のみ（CONNECT_BASE_URL 未設定なら
+            // 「未公開」を返し壊れたリンクは出さない）。USE_KNOWLEDGE_SEARCH_URL_TOOL=1 が必要。
+            "knowledge_search_url",
           ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は

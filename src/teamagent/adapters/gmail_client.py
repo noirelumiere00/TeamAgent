@@ -417,18 +417,7 @@ class GmailClient:
         resp = service.users().messages().get(**kwargs).execute()
         latency_ms = int((time.perf_counter() - start) * 1000)
 
-        payload = resp.get("payload", {}) or {}
-        headers_list = payload.get("headers", []) or []
-        headers = {h.get("name", ""): h.get("value", "") for h in headers_list if h.get("name")}
-        msg = GmailMessage(
-            id=str(resp.get("id", "")),
-            thread_id=str(resp.get("threadId", "")),
-            label_ids=tuple(resp.get("labelIds", []) or ()),
-            snippet=str(resp.get("snippet", "")),
-            internal_date_ms=int(resp["internalDate"]) if resp.get("internalDate") else None,
-            headers=headers,
-            payload=payload,
-        )
+        msg = _message_from_resp(resp)
         logger.info(
             "gmail_get_message",
             request_id=request_id,
@@ -438,6 +427,34 @@ class GmailClient:
             latency_ms=latency_ms,
         )
         return msg
+
+    def get_thread(
+        self,
+        thread_id: str,
+        request_id: str,
+        *,
+        format: str = "full",  # 'full' | 'metadata' | 'minimal'
+        user_id: str = "me",
+    ) -> list[GmailMessage]:
+        """threads.get でスレッド内の全メッセージを時系列に取得する（read-only）。
+
+        返信下書きに「これまでの経緯」を渡すために使う。`users.threads.get` は
+        denylist 非該当（破壊的でない）なので _ensure_safe_service() 経由でそのまま通る。
+        """
+        service = self._ensure_safe_service()
+        start = time.perf_counter()
+        resp = service.users().threads().get(userId=user_id, id=thread_id, format=format).execute()
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        raw_msgs = resp.get("messages", []) or []
+        msgs = [_message_from_resp(m) for m in raw_msgs]
+        logger.info(
+            "gmail_get_thread",
+            request_id=request_id,
+            thread_id=thread_id,
+            message_count=len(msgs),
+            latency_ms=latency_ms,
+        )
+        return msgs
 
     # -------------------------------------------------------
     # ラベル管理（隠しラベルで TeamAgent 状態を管理）
@@ -653,6 +670,22 @@ class GmailClient:
 # -----------------------------------------------------------
 # ヘルパー: MIME 解析 / ACL 抽出
 # -----------------------------------------------------------
+def _message_from_resp(resp: dict[str, Any]) -> GmailMessage:
+    """messages.get / threads.get の 1 メッセージ dict を GmailMessage へ写像する。"""
+    payload = resp.get("payload", {}) or {}
+    headers_list = payload.get("headers", []) or []
+    headers = {h.get("name", ""): h.get("value", "") for h in headers_list if h.get("name")}
+    return GmailMessage(
+        id=str(resp.get("id", "")),
+        thread_id=str(resp.get("threadId", "")),
+        label_ids=tuple(resp.get("labelIds", []) or ()),
+        snippet=str(resp.get("snippet", "")),
+        internal_date_ms=int(resp["internalDate"]) if resp.get("internalDate") else None,
+        headers=headers,
+        payload=payload,
+    )
+
+
 def extract_plain_text(payload: dict[str, Any]) -> str:
     """payload (MIME tree) から text/plain 部分を抽出する。
 

@@ -46,6 +46,7 @@ class _FakeRepository:
                 "acl_groups": list(doc.acl_groups),
                 "metadata": dict(doc.metadata),
                 "chunk_count": len(chunks),
+                "chunks": list(chunks),
                 "request_id": request_id,
             }
         )
@@ -1053,3 +1054,427 @@ def test_resolve_drive_file_acl_returns_fallback_on_failure(
     assert owner == "fallback@x.jp"
     assert emails == ["fallback@x.jp"]
     assert groups == []
+
+
+# -----------------------------------------------------------
+# Contextual Retrieval 配線（P1）
+# -----------------------------------------------------------
+class _FakeContextualizer:
+    """各 chunk の contextualized / embedding を埋める fake（実 Bedrock/embed なし）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, int]] = []
+
+    def contextualize_chunks(
+        self,
+        doc_title: str,
+        full_text: str,
+        chunks: list[Any],
+        request_id: str,
+    ) -> list[Any]:
+        from dataclasses import replace
+
+        self.calls.append((doc_title, full_text, len(chunks)))
+        return [
+            replace(
+                c,
+                contextualized=f"[ctx] {c.content}",
+                embedding=[0.5] * len(c.embedding),
+            )
+            for c in chunks
+        ]
+
+
+def test_ingest_gdrive_folder_contextualizes_when_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """USE_CONTEXTUAL_INGEST 相当: contextualizer 注入で chunks.contextualized が埋まる。"""
+    _setup_fake_drive_pdf(monkeypatch, name="提案.pdf")
+
+    fake_ctx = _FakeContextualizer()
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env",
+        lambda: fake_ctx,
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="ナレッジ",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-ctx",
+    )
+    assert docs_n == 1
+    assert fake_ctx.calls  # contextualizer が呼ばれた
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert chunks
+    assert all(c.contextualized is not None for c in chunks)
+    assert all(c.contextualized.startswith("[ctx] ") for c in chunks)
+
+
+def test_ingest_gdrive_folder_no_contextualize_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """contextualizer None（既定）なら contextualized は None のまま（完全後方互換）。"""
+    _setup_fake_drive_pdf(monkeypatch, name="提案.pdf")
+
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env",
+        lambda: None,
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="ナレッジ",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-noctx",
+    )
+    assert docs_n == 1
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert chunks
+    assert all(c.contextualized is None for c in chunks)
+
+
+def test_ingest_slack_channel_contextualizes_when_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack 経路でも contextualizer 注入で chunks.contextualized が埋まる。"""
+    from teamagent.adapters.slack_channel_ingest_client import (
+        HistoryBatch,
+        SlackChannelMember,
+        SlackMessage,
+    )
+
+    parent = SlackMessage(ts="1700.000001", user="U1", text="スレッド本文サンプル")
+    fake_client = MagicMock()
+    fake_client.list_channel_history.return_value = HistoryBatch(
+        messages=(parent,), next_cursor=None, has_more=False
+    )
+    fake_client.list_channel_members.return_value = (["U001"], None)
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email="taro@x.jp", display_name="Taro"),
+    ]
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    fake_ctx = _FakeContextualizer()
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env",
+        lambda: fake_ctx,
+    )
+
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    from teamagent.ingest.pipeline import _ingest_slack_channel
+
+    spec = SlackChannelSpec(channel_id="C0CTX", channel_name="#ctx", description="")
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_slack_channel(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-slack-ctx",
+    )
+    assert docs_n == 1
+    assert fake_ctx.calls
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert chunks
+    assert all(c.contextualized is not None for c in chunks)
+
+
+def test_ingest_slack_channel_no_contextualize_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack 経路: contextualizer None（既定）なら contextualized は None のまま。"""
+    from teamagent.adapters.slack_channel_ingest_client import (
+        HistoryBatch,
+        SlackChannelMember,
+        SlackMessage,
+    )
+
+    parent = SlackMessage(ts="1700.000001", user="U1", text="スレッド本文")
+    fake_client = MagicMock()
+    fake_client.list_channel_history.return_value = HistoryBatch(
+        messages=(parent,), next_cursor=None, has_more=False
+    )
+    fake_client.list_channel_members.return_value = (["U001"], None)
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email="taro@x.jp", display_name="Taro"),
+    ]
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env",
+        lambda: None,
+    )
+
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    from teamagent.ingest.pipeline import _ingest_slack_channel
+
+    spec = SlackChannelSpec(channel_id="C0NOCTX", channel_name="#noctx", description="")
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_slack_channel(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-slack-noctx",
+    )
+    assert docs_n == 1
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert chunks
+    assert all(c.contextualized is None for c in chunks)
+
+
+# -----------------------------------------------------------
+# 自動分類の配線: crawl / slack / gsheet 経路にも cls_* が乗ることを検証
+# （USE_DOC_CLASSIFY=1 が gdrive folder だけでなく全経路で効くことの回帰）
+# -----------------------------------------------------------
+class _StubClassifier:
+    """既知の DocClassification を返すスタブ分類器（実 Bedrock なし）。"""
+
+    def __init__(self) -> None:
+        from teamagent.ingest.classify import DocClassification
+
+        self._result = DocClassification(
+            project="アース製薬", industry="日用品", doc_type="提案書", phase="提案"
+        )
+        self.calls: list[tuple[str, str]] = []
+
+    def classify(self, *, title: str, text: str, request_id: str) -> Any:
+        self.calls.append((title, text))
+        return self._result
+
+
+def _assert_classified(md: dict[str, Any]) -> None:
+    assert md["cls_project"] == "アース製薬"
+    assert md["cls_industry"] == "日用品"
+    assert md["cls_doc_type"] == "提案書"
+    assert md["cls_phase"] == "提案"
+    assert md["industry"] == "日用品"  # 既存の業界フィルタと整合
+
+
+def test_ingest_shared_drives_crawl_applies_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """高ボリューム crawl 経路でも cls_* が documents.metadata に乗る。"""
+    from teamagent.adapters.gdrive_client import SharedDrive
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(id="F1", name="アース製薬_提案.pdf", owners=("alice@x.jp",))
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = b"<fake-pdf>"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    fake_reader = MagicMock()
+    page = MagicMock()
+    page.extract_text.return_value = "アース製薬向け SNS 提案の本文" * 10
+    fake_reader.pages = [page]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,  # フィルタを外して fake PDF を確実に通す
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-cls",
+    )
+    assert docs_n == 1
+    assert stub.calls  # 分類器が呼ばれた
+    _assert_classified(repo.upsert_calls[0]["metadata"])
+
+
+def test_ingest_slack_channel_applies_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack 経路でも cls_* が documents.metadata に乗る（doc_metadata に update）。"""
+    from teamagent.adapters.slack_channel_ingest_client import (
+        HistoryBatch,
+        SlackChannelMember,
+        SlackMessage,
+    )
+
+    parent = SlackMessage(ts="1700.000001", user="U1", text="スレッド本文サンプル")
+    fake_client = MagicMock()
+    fake_client.list_channel_history.return_value = HistoryBatch(
+        messages=(parent,), next_cursor=None, has_more=False
+    )
+    fake_client.list_channel_members.return_value = (["U001"], None)
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email="taro@x.jp", display_name="Taro"),
+    ]
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    from teamagent.ingest.pipeline import _ingest_slack_channel
+
+    spec = SlackChannelSpec(channel_id="C0CLS", channel_name="#cls", description="")
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_slack_channel(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-slack-cls",
+    )
+    assert docs_n == 1
+    assert stub.calls
+    md = repo.upsert_calls[0]["metadata"]
+    _assert_classified(md)
+    # 既存キーは cls_* マージで破壊されない（後方互換）
+    assert md["channel_name"] == "#cls"
+
+
+def test_ingest_gsheet_applies_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gsheet 経路でも各行に cls_* が乗る（contextualizer は付けない）。"""
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1V",
+        tab_name="フォーム回答 1",
+        headers=("業界", "温度感"),
+        rows=(("飲食", "高"),),
+        row_count=1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1V",
+        sheet_name="FB",
+        description="",
+        tabs=(GSheetsTabSpec(gid=537831563, tab_name="フォーム回答 1"),),
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-cls",
+    )
+    assert docs_n == 1
+    assert stub.calls
+    md = repo.upsert_calls[0]["metadata"]
+    _assert_classified(md)
+    # 既存キーは cls_* マージで破壊されない（後方互換）
+    assert md["tab_name"] == "フォーム回答 1"
+    assert md["row_idx"] == 2
+
+
+def test_ingest_crawl_no_classification_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """classifier None（USE_DOC_CLASSIFY OFF 相当）なら crawl 経路に cls_* は出ない（後方互換）。"""
+    from teamagent.adapters.gdrive_client import SharedDrive
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(id="F1", name="提案.pdf", owners=("alice@x.jp",))
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = b"<fake-pdf>"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    fake_reader = MagicMock()
+    page = MagicMock()
+    page.extract_text.return_value = "本文" * 50
+    fake_reader.pages = [page]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: None)
+
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-nocls",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    assert "cls_project" not in md
+    assert "cls_doc_type" not in md

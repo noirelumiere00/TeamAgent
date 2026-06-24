@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,11 +38,17 @@ class _FakeMsg:
     payload: dict[str, Any]
     internal_date_ms: int | None = None
     thread_id: str = "thr-1"
+    id: str = ""
+
+
+def _b64(text: str) -> str:
+    return base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
 
 
 class _FakeGmail:
-    def __init__(self, msgs: list[_FakeMsg]):
+    def __init__(self, msgs: list[_FakeMsg], thread_msgs: list[_FakeMsg] | None = None):
         self._msgs = msgs
+        self._thread_msgs = thread_msgs
         self.created_drafts: list[dict[str, Any]] = []
 
     def list_messages(
@@ -52,6 +59,9 @@ class _FakeGmail:
     def get_message(self, msg_id: str, request_id: str) -> _FakeMsg:
         idx = int(msg_id.lstrip("m"))
         return self._msgs[idx]
+
+    def get_thread(self, thread_id: str, request_id: str) -> list[_FakeMsg]:
+        return self._thread_msgs or []
 
     def create_draft(
         self,
@@ -68,6 +78,7 @@ class _FakeGmail:
         self.created_drafts.append(
             dict(
                 to=to,
+                cc=cc,
                 subject=subject,
                 body_text=body_text,
                 thread_id=thread_id,
@@ -124,6 +135,7 @@ class _FakeBedrock:
         self._triage_json = triage_json
         self._draft_text = draft_text
         self.call_count = 0
+        self.last_draft_user_text = ""
 
     def converse(self, **kwargs: Any) -> _FakeBedrockResp:
         self.call_count += 1
@@ -131,6 +143,10 @@ class _FakeBedrock:
         # triage のシステムプロンプトには "分類規則" を含めてある
         if "分類規則" in str(system):
             return _FakeBedrockResp(self._triage_json)
+        try:
+            self.last_draft_user_text = kwargs["messages"][0]["content"][0]["text"]
+        except (KeyError, IndexError, TypeError):
+            self.last_draft_user_text = ""
         return _FakeBedrockResp(self._draft_text)
 
 
@@ -349,3 +365,108 @@ def test_has_draft_painted_only_for_high(fake_msgs, triage_json) -> None:
             assert m.has_draft is True
         else:
             assert m.has_draft is False
+
+
+def _high_msg_with_recipients() -> _FakeMsg:
+    return _FakeMsg(
+        headers={
+            "From": "alice@ext.com",
+            "To": "me@vectorinc.co.jp, carol@ext.com",
+            "Cc": "dave@ext.com, me@vectorinc.co.jp",
+            "Subject": "契約の件",
+            "Message-ID": "<x1>",
+        },
+        payload={"mimeType": "text/plain", "body": {"data": _b64("ご確認ください")}},
+        internal_date_ms=1718681400000,
+        id="m0",
+        thread_id="T9",
+    )
+
+
+def test_reply_all_cc_includes_other_recipients() -> None:
+    fake_gmail = _FakeGmail([_high_msg_with_recipients()])
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=fake_gmail,
+        gcalendar=_FakeGCal([]),
+        bedrock=_FakeBedrock('[{"importance": "high", "summary": "契約"}]'),
+    )
+    ctx = SkillContext(request_id="rc", metadata={"user_email": "me@vectorinc.co.jp"})
+    out = skill.run(MorningDigestInput(max_drafts=1), ctx)
+
+    assert out.drafts_created == 1
+    call = fake_gmail.created_drafts[0]
+    assert call["to"] == "alice@ext.com"
+    cc = call["cc"] or ""
+    assert "carol@ext.com" in cc and "dave@ext.com" in cc
+    assert "me@vectorinc.co.jp" not in cc  # 本人除外
+    assert "alice@ext.com" not in cc  # 主宛先除外
+
+
+def test_reply_all_disabled_sets_no_cc() -> None:
+    fake_gmail = _FakeGmail([_high_msg_with_recipients()])
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=fake_gmail,
+        gcalendar=_FakeGCal([]),
+        bedrock=_FakeBedrock('[{"importance": "high", "summary": "契約"}]'),
+        reply_all=False,
+    )
+    ctx = SkillContext(request_id="rc2", metadata={"user_email": "me@vectorinc.co.jp"})
+    skill.run(MorningDigestInput(max_drafts=1), ctx)
+    assert fake_gmail.created_drafts[0]["cc"] is None
+
+
+def test_thread_history_passed_to_model() -> None:
+    target = _high_msg_with_recipients()
+    prior = _FakeMsg(
+        headers={"From": "alice@ext.com", "Subject": "契約の件"},
+        payload={
+            "mimeType": "text/plain",
+            "body": {"data": _b64("前回のお打ち合わせの宿題の件です")},
+        },
+        internal_date_ms=1718600000000,
+        id="m-prev",
+        thread_id="T9",
+    )
+    bedrock = _FakeBedrock('[{"importance": "high", "summary": "契約"}]', draft_text="返信本文")
+    fake_gmail = _FakeGmail([target], thread_msgs=[prior, target])
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=fake_gmail,
+        gcalendar=_FakeGCal([]),
+        bedrock=bedrock,
+    )
+    ctx = SkillContext(request_id="rt", metadata={"user_email": "me@vectorinc.co.jp"})
+    skill.run(MorningDigestInput(max_drafts=1), ctx)
+
+    assert "これまでの経緯" in bedrock.last_draft_user_text
+    assert "前回のお打ち合わせの宿題" in bedrock.last_draft_user_text
+
+
+def test_mass_email_not_drafted_even_if_high() -> None:
+    msg = _FakeMsg(
+        headers={
+            "From": "info@news.example.com",
+            "To": "me@vectorinc.co.jp",
+            "Subject": "重要なお知らせ",
+            "Message-ID": "<m>",
+            "List-Unsubscribe": "<mailto:unsub@news.example.com>",
+        },
+        payload={"mimeType": "text/plain", "body": {"data": _b64("各位\n至急ご返信ください。")}},
+        internal_date_ms=1718681400000,
+        id="m0",
+        thread_id="T1",
+    )
+    fake_gmail = _FakeGmail([msg])
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=fake_gmail,
+        gcalendar=_FakeGCal([]),
+        bedrock=_FakeBedrock('[{"importance": "high", "summary": "至急返信"}]'),
+    )
+    ctx = SkillContext(request_id="rm", metadata={"user_email": "me@vectorinc.co.jp"})
+    out = skill.run(MorningDigestInput(max_drafts=1), ctx)
+    # high でも一斉送信(List-Unsubscribe / 各位)は下書きしない。
+    assert out.drafts_created == 0
+    assert len(fake_gmail.created_drafts) == 0

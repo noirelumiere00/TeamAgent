@@ -79,12 +79,12 @@ def _digest() -> MorningDigestOutput:
 
 def test_scoreboard_counts() -> None:
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
-    # 2番目の block が fields スコアボード。high=2 / drafts=1 / cal=2 / medium=2。
+    # 2番目の block が fields スコアボード。high=2 / drafts=1 / medium=2（カレンダーは除外）。
     fields_text = " ".join(f["text"] for f in blocks[1]["fields"])
     assert "要返信*  `2件`" in fields_text
     assert "下書き済*  `1件`" in fields_text
-    assert "今日の予定*  `2件`" in fields_text
     assert "要確認*  `2件`" in fields_text
+    assert "今日の予定" not in fields_text
 
 
 def test_high_priority_section_and_draft_elevated() -> None:
@@ -96,12 +96,12 @@ def test_high_priority_section_and_draft_elevated() -> None:
     assert "下書きを見る" in dump
 
 
-def test_calendar_shows_room_location() -> None:
+def test_calendar_section_removed() -> None:
+    # カレンダー（今日の予定）は digest に含めない。
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    assert "🗓 *今日の予定*" in dump
-    assert "📍渋谷オフィス 3F会議室A" in dump  # 会議室を 📍付きで明記
-    assert "*10:00*" in dump  # ISO → HH:MM 変換（UTC 01:00 → JST 表示でなく原時刻 HH:MM）
+    assert "今日の予定" not in dump
+    assert "渋谷オフィス" not in dump
 
 
 def test_action_buttons_present() -> None:
@@ -111,7 +111,7 @@ def test_action_buttons_present() -> None:
     labels = [e["text"]["text"] for e in actions[0]["elements"]]
     assert any("下書きを確認" in label for label in labels)  # drafts>0 なので出る
     assert any("受信トレイ" in label for label in labels)
-    assert any("カレンダー" in label for label in labels)
+    assert not any("カレンダー" in label for label in labels)  # カレンダーボタンは除去
 
 
 def test_medium_compressed_with_remaining() -> None:

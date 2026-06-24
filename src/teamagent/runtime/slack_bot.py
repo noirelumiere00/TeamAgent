@@ -627,6 +627,7 @@ class SkillDispatcher:
             return self._skill_cache["search"]
         # 動的 instance 生成。Skill 固有の init 引数を扱うため Any 経由
         from teamagent.adapters.embeddings_client import LocalE5Embedder
+        from teamagent.skills.search.query_planner import build_query_planner_from_env
         from teamagent.skills.search.skill import SearchSkill
 
         use_contextual = os.environ.get("USE_CONTEXTUAL", "false").lower() in (
@@ -693,6 +694,7 @@ class SkillDispatcher:
             use_aggregation_mode=use_aggregation_mode,
             prompt_version=prompt_version,
             summary_max_tokens=summary_max_tokens,
+            query_planner=build_query_planner_from_env(),
         )
         logger.info(
             "search_skill_initialized",

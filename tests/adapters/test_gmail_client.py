@@ -97,16 +97,28 @@ class _FakeDrafts:
         return _FakeReq(self._create)
 
 
+class _FakeThreads:
+    def __init__(self, get_response: Any) -> None:
+        self._get = get_response
+        self.last_get_kwargs: dict[str, Any] = {}
+
+    def get(self, **kwargs: Any) -> _FakeReq:
+        self.last_get_kwargs = kwargs
+        return _FakeReq(self._get)
+
+
 class _FakeUsersResource:
     def __init__(
         self,
         messages: _FakeMessages,
         labels: _FakeLabels,
         drafts: _FakeDrafts,
+        threads: _FakeThreads,
     ) -> None:
         self._messages = messages
         self._labels = labels
         self._drafts = drafts
+        self._threads = threads
 
     def messages(self) -> _FakeMessages:
         return self._messages
@@ -116,6 +128,9 @@ class _FakeUsersResource:
 
     def drafts(self) -> _FakeDrafts:
         return self._drafts
+
+    def threads(self) -> _FakeThreads:
+        return self._threads
 
 
 class FakeGmailService:
@@ -128,6 +143,7 @@ class FakeGmailService:
         label_create: Any | None = None,
         draft_create: Any | None = None,
         message_modify: Any | None = None,
+        thread_get: Any | None = None,
     ) -> None:
         self._users = _FakeUsersResource(
             _FakeMessages(
@@ -142,6 +158,7 @@ class FakeGmailService:
             _FakeDrafts(
                 draft_create or {"id": "DRAFT_1", "message": {"id": "MSG_1", "threadId": "T_1"}}
             ),
+            _FakeThreads(thread_get or {"messages": []}),
         )
 
     def users(self) -> _FakeUsersResource:
@@ -364,6 +381,48 @@ def test_create_draft_returns_draft_with_ids() -> None:
     assert body["message"]["threadId"] == "T1"
 
 
+def test_get_thread_maps_messages_in_order() -> None:
+    fake = FakeGmailService(
+        thread_get={
+            "messages": [
+                {
+                    "id": "M1",
+                    "threadId": "T1",
+                    "internalDate": "1700000000000",
+                    "payload": {
+                        "mimeType": "text/plain",
+                        "headers": [{"name": "From", "value": "alice@x.com"}],
+                        "body": {"data": ""},
+                    },
+                },
+                {
+                    "id": "M2",
+                    "threadId": "T1",
+                    "internalDate": "1700000100000",
+                    "payload": {
+                        "mimeType": "text/plain",
+                        "headers": [{"name": "From", "value": "bob@y.com"}],
+                        "body": {"data": ""},
+                    },
+                },
+            ]
+        }
+    )
+    client = GmailClient(service=fake)
+    msgs = client.get_thread("T1", request_id="r")
+    assert [m.id for m in msgs] == ["M1", "M2"]
+    assert all(isinstance(m, GmailMessage) for m in msgs)
+    assert msgs[0].headers["From"] == "alice@x.com"
+    assert msgs[1].thread_id == "T1"
+    # threads.get に正しい id が渡る
+    assert fake.users().threads().last_get_kwargs["id"] == "T1"
+
+
+def test_get_thread_handles_empty() -> None:
+    client = GmailClient(service=FakeGmailService())
+    assert client.get_thread("T_missing", request_id="r") == []
+
+
 def test_build_raw_email_encodes_subject_and_body_in_utf8() -> None:
     raw_b64 = _build_raw_email(
         to="alice@x.com",
@@ -377,6 +436,17 @@ def test_build_raw_email_encodes_subject_and_body_in_utf8() -> None:
     assert "alice@x.com" in decoded
     # 件名は MIME-encoded（=?UTF-8?...?=）なので生で日本語は出ない、件名キーは出る
     assert "Subject:" in decoded
+
+
+def test_build_raw_email_includes_cc_header() -> None:
+    raw_b64 = _build_raw_email(
+        to="alice@x.com", subject="s", body_text="b", cc="carol@x.com, dave@x.com"
+    )
+    pad = "=" * (-len(raw_b64) % 4)
+    decoded = base64.urlsafe_b64decode(raw_b64 + pad).decode("utf-8", errors="replace")
+    assert "Cc:" in decoded
+    assert "carol@x.com" in decoded
+    assert "dave@x.com" in decoded
 
 
 # -----------------------------------------------------------

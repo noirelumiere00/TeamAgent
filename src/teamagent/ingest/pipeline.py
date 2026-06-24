@@ -36,6 +36,7 @@ from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepos
 
 if TYPE_CHECKING:
     from teamagent.ingest.classify import DocClassifier
+    from teamagent.ingest.contextualize import ChunkContextualizer
 
 logger = structlog.get_logger(__name__)
 
@@ -201,8 +202,14 @@ def _ingest_slack_channel(
         SlackChannelIngestClient,
         format_thread_as_document,
     )
+    from teamagent.ingest.classify import build_classifier_from_env
+    from teamagent.ingest.contextualize import build_contextualizer_from_env
 
     client = SlackChannelIngestClient.from_env()
+    # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。channel 単位で 1 回構築）。
+    classifier = build_classifier_from_env()
+    # Contextual Retrieval（USE_CONTEXTUAL_INGEST=1 のときだけ非 None。channel 単位で 1 回構築）。
+    contextualizer = build_contextualizer_from_env()
     docs_n = 0
     chunks_n = 0
 
@@ -287,6 +294,26 @@ def _ingest_slack_channel(
             if derived_client_name:
                 doc_metadata["client_name"] = derived_client_name
 
+        # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
+        # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
+        # 失敗しても取り込みは継続（fail-open）。cls_* キーは client_name 等の既存キーと
+        # 衝突しないので update でマージする。contextualize より前（元の thread 本文）に実行。
+        thread_title = f"{spec.channel_name} {parent.ts}"
+        if classifier is not None:
+            try:
+                classification = classifier.classify(
+                    title=thread_title, text=text, request_id=request_id
+                )
+            except Exception:
+                logger.exception(
+                    "slack_classify_unexpected",
+                    channel_id=spec.channel_id,
+                    thread_ts=parent.thread_ts or parent.ts,
+                )
+                classification = None
+            if classification is not None:
+                doc_metadata.update(classification.as_metadata())
+
         doc = DocumentUpsert(
             source_type="slack",
             external_id=external_id,
@@ -306,6 +333,12 @@ def _ingest_slack_channel(
                 metadata={"reply_count": parent.reply_count},
             )
         ]
+        # Contextual Retrieval: thread 本文を full_text に文脈前置詞を付与（fail-open 内蔵）。
+        # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換。
+        if contextualizer is not None:
+            chunks = contextualizer.contextualize_chunks(
+                doc.title or spec.channel_name, text, chunks, request_id
+            )
         docs_n += 1
         chunks_n += len(chunks)
         if not dry_run:
@@ -504,6 +537,7 @@ def _ingest_gdrive_folder(
     """
     from teamagent.adapters.gdrive_client import GDriveClient
     from teamagent.ingest.classify import build_classifier_from_env
+    from teamagent.ingest.contextualize import build_contextualizer_from_env
 
     # Day 7: folder bulk ingest のため readonly=True で drive.readonly スコープを使う。
     # Internal OAuth なので CASA 審査不要。drive.file ではフォルダ単位の取り込みが
@@ -511,6 +545,8 @@ def _ingest_gdrive_folder(
     client = GDriveClient.from_env(readonly=True)
     # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。folder 単位で 1 回構築）。
     classifier = build_classifier_from_env()
+    # Contextual Retrieval（USE_CONTEXTUAL_INGEST=1 のときだけ非 None。folder 単位で 1 回構築）。
+    contextualizer = build_contextualizer_from_env()
     docs_n = 0
     chunks_n = 0
     skipped: list[str] = []
@@ -585,6 +621,7 @@ def _ingest_gdrive_folder(
                 request_id=request_id,
                 skipped=skipped,
                 classifier=classifier,
+                contextualizer=contextualizer,
             )
             docs_n += docs_added
             chunks_n += chunks_added
@@ -666,6 +703,7 @@ def _process_one_gdrive_file(
     request_id: str,
     skipped: list[str],
     classifier: DocClassifier | None = None,
+    contextualizer: ChunkContextualizer | None = None,
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
@@ -674,6 +712,10 @@ def _process_one_gdrive_file(
 
     classifier が非 None（USE_DOC_CLASSIFY=1）の時は本文抜粋を分類し、
     案件 / 業界 / 資料種別 / 商談フェーズを documents.metadata に付与する（fail-open）。
+
+    contextualizer が非 None（USE_CONTEXTUAL_INGEST=1）の時は抽出ページを結合した全文を
+    full_text に各 chunk へ文脈前置詞を付与し contextualized + embedding を差し替える
+    （fail-open）。None（既定）なら chunks はそのまま＝従来挙動・完全後方互換。
     """
     from teamagent.ingest.office_extract import (
         GDOC_NATIVE_MIME,
@@ -827,6 +869,12 @@ def _process_one_gdrive_file(
         if classification is not None:
             cls_metadata = classification.as_metadata()
 
+    # Contextual Retrieval: 抽出ページを結合した全文を full_text に文脈前置詞を付与する。
+    # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換（fail-open）。
+    if contextualizer is not None and chunks:
+        full_text = "\n\n".join(c.content for c in chunks)
+        chunks = contextualizer.contextualize_chunks(f.name or f.id, full_text, chunks, request_id)
+
     doc = DocumentUpsert(
         source_type="gdrive",
         external_id=f.id,
@@ -869,9 +917,15 @@ def _ingest_shared_drives_crawl(
     - PDF はテキスト抽出 + chunk 化、それ以外は title のみで 1 chunk
     """
     from teamagent.adapters.gdrive_client import GDriveClient
+    from teamagent.ingest.classify import build_classifier_from_env
+    from teamagent.ingest.contextualize import build_contextualizer_from_env
     from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
 
     client = GDriveClient.from_env(readonly=True)
+    # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。crawl 単位で 1 回構築）。
+    classifier = build_classifier_from_env()
+    # Contextual Retrieval（USE_CONTEXTUAL_INGEST=1 のときだけ非 None。crawl 単位で 1 回構築）。
+    contextualizer = build_contextualizer_from_env()
     docs_n = 0
     chunks_n = 0
     skipped_count = 0
@@ -974,6 +1028,36 @@ def _ingest_shared_drives_crawl(
                     )
                 )
 
+            # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
+            # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
+            # 失敗しても取り込みは継続（fail-open）。元の chunk 本文で分類するため、
+            # 文脈前置詞を付与する contextualize より前に実行する。
+            cls_metadata: dict[str, str] = {}
+            if classifier is not None and chunks:
+                sample = "\n".join(c.content for c in chunks[:8])
+                try:
+                    classification = classifier.classify(
+                        title=f.name or "", text=sample, request_id=request_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "shared_drive_classify_unexpected",
+                        file_id=f.id,
+                        file_name=f.name,
+                        drive_id=drive.id,
+                    )
+                    classification = None
+                if classification is not None:
+                    cls_metadata = classification.as_metadata()
+
+            # Contextual Retrieval: 抽出ページ結合の全文を full_text に文脈前置詞を付与する。
+            # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換。
+            if contextualizer is not None and chunks:
+                full_text = "\n\n".join(c.content for c in chunks)
+                chunks = contextualizer.contextualize_chunks(
+                    f.name or f.id, full_text, chunks, request_id
+                )
+
             # 6. DocumentUpsert 組み立て
             doc = DocumentUpsert(
                 source_type="gdrive",
@@ -990,6 +1074,7 @@ def _ingest_shared_drives_crawl(
                     "shared_drive_id": drive.id,
                     "shared_drive_name": drive.name,
                     "via": "shared_drive_crawl",
+                    **cls_metadata,
                 },
                 modified_at=f.modified_time,
             )
@@ -1026,8 +1111,12 @@ def _ingest_gsheet(
         build_external_id,
         format_row_as_document,
     )
+    from teamagent.ingest.classify import build_classifier_from_env
 
     client = GSheetsClient.from_env()
+    # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。sheet 単位で 1 回構築）。
+    # gsheet は row_unit=True（1 行 = 1 document = 1 chunk）なので contextualizer は付けない。
+    classifier = build_classifier_from_env()
     docs_n = 0
     chunks_n = 0
 
@@ -1042,15 +1131,42 @@ def _ingest_gsheet(
             if not text.strip():
                 continue
             external_id = build_external_id(spec.sheet_id, tab.gid, row_idx)
+            row_title = f"{spec.sheet_name} - {tab.tab_name} - row {row_idx}"
+
+            # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
+            # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
+            # 失敗しても取り込みは継続（fail-open）。
+            cls_metadata: dict[str, str] = {}
+            if classifier is not None:
+                try:
+                    classification = classifier.classify(
+                        title=row_title, text=text, request_id=request_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "gsheet_classify_unexpected",
+                        sheet_id=spec.sheet_id,
+                        tab_name=tab.tab_name,
+                        row_idx=row_idx,
+                    )
+                    classification = None
+                if classification is not None:
+                    cls_metadata = classification.as_metadata()
+
             doc = DocumentUpsert(
                 source_type="gsheets",  # migration 0004 で ENUM に追加済
                 external_id=external_id,
                 source_uri=f"https://docs.google.com/spreadsheets/d/{spec.sheet_id}/edit?gid={tab.gid}#gid={tab.gid}&range={row_idx}:{row_idx}",
-                title=f"{spec.sheet_name} - {tab.tab_name} - row {row_idx}",
+                title=row_title,
                 owner_email=owner_email,
                 acl_emails=[owner_email],
                 acl_groups=_company_acl_groups(),  # §G 会社共有（未設定なら []）
-                metadata={**spec.extra_metadata, "tab_name": tab.tab_name, "row_idx": row_idx},
+                metadata={
+                    **spec.extra_metadata,
+                    "tab_name": tab.tab_name,
+                    "row_idx": row_idx,
+                    **cls_metadata,
+                },
                 modified_at=None,
             )
             chunks = [

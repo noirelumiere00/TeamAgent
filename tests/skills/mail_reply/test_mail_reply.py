@@ -182,3 +182,29 @@ def test_reply_subject_dedupes_re() -> None:
     assert _reply_subject("Re: 見積の件") == "Re: 見積の件"
     assert _reply_subject("RE: x") == "RE: x"
     assert _reply_subject("") == "Re:"
+
+
+def _inbound_multi() -> _Msg:
+    return _Msg(
+        headers={
+            "From": "田中 <tanaka@moribuild.co.jp>",
+            "To": f"{OWNER}, sato@moribuild.co.jp",
+            "Cc": "ueda@partner.co.jp",
+            "Subject": "見積のご相談",
+            "Message-ID": "<abc123@moribuild.co.jp>",
+        },
+        payload=_payload("お世話になります。見積を再提示いただけますか。"),
+    )
+
+
+def test_reply_all_cc_includes_other_recipients() -> None:
+    gmail = FakeGmail([_inbound_multi()])
+    skill = MailReplySkill(gmail=gmail, bedrock=FakeBedrock())
+    skill.run(MailReplyInput(client_name="森ビル"), _ctx())
+    call = gmail.create_draft_calls[0]
+    assert call["to"] == "tanaka@moribuild.co.jp"
+    cc = call.get("cc") or ""
+    assert "sato@moribuild.co.jp" in cc
+    assert "ueda@partner.co.jp" in cc
+    assert OWNER not in cc  # 本人除外
+    assert "tanaka@moribuild.co.jp" not in cc  # 主宛先除外
