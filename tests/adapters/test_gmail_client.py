@@ -496,3 +496,37 @@ def test_team_agent_labels_constants() -> None:
     assert TeamAgentLabels.ERROR == "TeamAgent/error"
     assert TeamAgentLabels.SKIP == "TeamAgent/skip"
     assert len(TeamAgentLabels.all()) == 4
+
+
+def test_list_drafts_paginates_all_pages() -> None:
+    """list_drafts は nextPageToken を辿り全ページ取得する。
+
+    ページングしないと 51 件目以降を取りこぼし、digest の冪等性（重複下書き防止）が
+    壊れる。2 ページのフェイクで全件取得＋pageToken 追跡を確認する。
+    """
+    pages = {
+        None: {
+            "drafts": [{"id": "d1", "message": {"id": "m1", "threadId": "t1"}}],
+            "nextPageToken": "P2",
+        },
+        "P2": {"drafts": [{"id": "d2", "message": {"id": "m2", "threadId": "t2"}}]},
+    }
+    seen_tokens: list[Any] = []
+
+    class _Drafts:
+        def list(self, **kw: Any) -> _FakeReq:
+            seen_tokens.append(kw.get("pageToken"))
+            return _FakeReq(pages[kw.get("pageToken")])
+
+    class _Users:
+        def drafts(self) -> _Drafts:
+            return _Drafts()
+
+    class _Svc:
+        def users(self) -> _Users:
+            return _Users()
+
+    client = GmailClient(service=_Svc())
+    out = client.list_drafts("r")
+    assert [d.thread_id for d in out] == ["t1", "t2"]  # 両ページの下書きを取得
+    assert seen_tokens == [None, "P2"]  # pageToken を辿った

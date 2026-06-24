@@ -122,9 +122,11 @@ class _FakeGCal:
 
 @dataclass
 class _FakeCalEvent:
+    # 実 CalendarEvent と同じ属性名（start / end）。start_at/end_at だと skill が読めず
+    # 時刻が常に空になる（過去の本番バグ）。フィクスチャも実体に合わせる。
     summary: str = ""
-    start_at: str | None = None
-    end_at: str | None = None
+    start: str = ""
+    end: str = ""
     location: str = ""
 
 
@@ -333,8 +335,8 @@ def test_calendar_events_collected(fake_msgs, triage_json) -> None:
     events = [
         _FakeCalEvent(
             summary="営業 MTG",
-            start_at="2026-06-18T10:00:00+09:00",
-            end_at="2026-06-18T11:00:00+09:00",
+            start="2026-06-18T10:00:00+09:00",
+            end="2026-06-18T11:00:00+09:00",
             location="本社",
         ),
     ]
@@ -349,6 +351,9 @@ def test_calendar_events_collected(fake_msgs, triage_json) -> None:
 
     assert len(out.calendar_events) == 1
     assert out.calendar_events[0].summary_scrubbed == "営業 MTG"
+    # 時刻が空にならないこと（start/end 属性を正しく読む・過去バグの回帰防止）
+    assert out.calendar_events[0].start_at == "2026-06-18T10:00:00+09:00"
+    assert out.calendar_events[0].end_at == "2026-06-18T11:00:00+09:00"
 
 
 def test_user_email_masked_in_output(fake_msgs, triage_json) -> None:

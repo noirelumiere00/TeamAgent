@@ -186,5 +186,9 @@ def is_mass_or_impersonal(headers: dict[str, str], body: str) -> bool:
     frm = (headers.get("From") or "").lower()
     if any(k in frm for k in ("noreply", "no-reply", "donotreply", "do-not-reply", "no_reply")):
         return True
-    head = (body or "").lstrip()[:120]
+    # 本文冒頭の一般宛名を検出。固定 120 字窓だと空行/画像/前置きが先頭にあると
+    # 「各位」等が窓外に出て取りこぼす（＝マスメールを下書きしてしまう）。
+    # 空行を除いた実コンテンツの先頭 6 行（最大 400 字）で判定する。
+    meaningful = [ln for ln in (body or "").splitlines() if ln.strip()]
+    head = "\n".join(meaningful[:6])[:400]
     return any(s in head for s in _BULK_SALUTATIONS)

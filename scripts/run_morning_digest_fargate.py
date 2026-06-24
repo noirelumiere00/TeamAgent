@@ -310,10 +310,19 @@ async def _email_to_slack_user_id(slack: Any, email: str) -> str | None:
             print("[run_morning_digest_fargate] WARN: slack._client 取得失敗", file=sys.stderr)
             return None
         resp = await client.users_lookupByEmail(email=email)
-        return str(resp.get("user", {}).get("id", "")) or None
+        user_id = str(resp.get("user", {}).get("id", "")) or None
+        if user_id is None:
+            # 解決はできたが該当ユーザー無し（Slack 未登録等）。配信失敗と区別して記録。
+            print(
+                f"[run_morning_digest_fargate] WARN: Slack user 未解決 {_mask_email(email)}",
+                file=sys.stderr,
+            )
+        return user_id
     except Exception as exc:
+        # ⚠️ {exc} は email を含み得る（PII）ため型名のみ。email はマスク（G3/G7）。
         print(
-            f"[run_morning_digest_fargate] WARN: lookupByEmail 失敗 {type(exc).__name__}: {exc}",
+            f"[run_morning_digest_fargate] WARN: lookupByEmail 失敗 "
+            f"{_mask_email(email)} {type(exc).__name__}",
             file=sys.stderr,
         )
         return None
@@ -362,7 +371,8 @@ def main() -> int:
             continue
         except Exception as exc:
             print(
-                f"[run_morning_digest_fargate] WARN: {email} skill 失敗 {type(exc).__name__}",
+                f"[run_morning_digest_fargate] WARN: {_mask_email(email)} skill 失敗 "
+                f"{type(exc).__name__}",
                 file=sys.stderr,
             )
             summary["errors"] += 1

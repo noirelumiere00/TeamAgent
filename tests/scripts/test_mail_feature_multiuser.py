@@ -219,6 +219,16 @@ def test_M17_skill_resolves_own_token_per_user():
     assert asked == [U1, U2]  # 渡された email の分だけ・取り違えなし
 
 
+def test_M19_error_log_masks_email_no_pii(monkeypatch, capsys):
+    """1 人の処理で例外時、ログに生メールアドレスを出さない（マスクのみ・G3/G7）。"""
+    raw = "tanaka.taro@vectorinc.co.jp"
+    _patch_main(monkeypatch, [raw], behavior={raw: "error"})
+    mod.main()
+    err = capsys.readouterr().err
+    assert raw not in err  # 生アドレスは出ない
+    assert "t***@vectorinc.co.jp" in err  # マスク版で記録
+
+
 def test_M18_missing_user_email_blocks_run(monkeypatch):
     from teamagent.skills.base import SkillContext
     from teamagent.skills.morning_digest.schema import MorningDigestInput

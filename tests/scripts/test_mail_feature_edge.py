@@ -404,3 +404,13 @@ def test_E21_calendar_failure_does_not_break_mail():
 def test_E22_cost_aggregated_across_triage_and_drafts():
     out = _run(_skill(_Gmail([_to_me()])), max_drafts=1)
     assert out.total_cost_usd > 0  # triage + draft のコストが積算される
+
+
+def test_E23_mass_mail_salutation_after_long_preamble_no_draft():
+    """各位 が本文先頭120字以降にあっても一斉送信と判定し下書きしない（窓拡大の回帰）。"""
+    from teamagent.skills._shared.mail_compose import is_mass_or_impersonal
+
+    body = "\n\n[ロゴ画像]\n\n" + ("ご案内 " * 30) + "\n各位\n本年もよろしくお願いします。"
+    assert is_mass_or_impersonal({"From": "info@x.com"}, body) is True
+    # 個人宛の通常メールは False のまま
+    assert is_mass_or_impersonal({"From": "a@x.com"}, "山田様\nお世話になります。") is False
