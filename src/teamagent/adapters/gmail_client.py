@@ -772,7 +772,7 @@ def extract_plain_text(payload: dict[str, Any]) -> str:
         if mime == "text/plain":
             data = (node.get("body") or {}).get("data")
             if data:
-                return _decode_b64url(data)
+                return _decode_b64url(data, _part_charset(node))
         for child in node.get("parts", []) or []:
             text = _walk(child)
             if text:
@@ -782,10 +782,37 @@ def extract_plain_text(payload: dict[str, Any]) -> str:
     return _walk(payload) or ""
 
 
-def _decode_b64url(s: str) -> str:
-    """Gmail 本文は base64url エンコード。padding 補完してデコード。"""
+def _part_charset(node: dict[str, Any]) -> str:
+    """MIME part の Content-Type から charset を取り出す（無ければ utf-8）。"""
+    import re
+
+    for h in node.get("headers", []) or []:
+        if str(h.get("name", "")).lower() == "content-type":
+            m = re.search(r'charset="?([\w\-]+)"?', str(h.get("value", "")), re.IGNORECASE)
+            if m:
+                return m.group(1)
+    return "utf-8"
+
+
+def _decode_b64url(s: str, charset: str = "utf-8") -> str:
+    """Gmail 本文（base64url）を charset を尊重してデコードする。
+
+    日本のメールは ISO-2022-JP / Shift_JIS(cp932) も多い。utf-8 固定だと文字化けして
+    triage/下書きに渡るため、宣言 charset→utf-8→cp932→latin-1 の順でフォールバック。
+    """
     pad = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + pad).decode("utf-8", errors="replace")
+    raw = base64.urlsafe_b64decode(s + pad)
+    seen: set[str] = set()
+    for enc in (charset, "utf-8", "cp932", "latin-1"):
+        e = (enc or "").lower()
+        if not e or e in seen:
+            continue
+        seen.add(e)
+        try:
+            return raw.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def extract_thread_participants(headers: dict[str, str]) -> list[str]:

@@ -570,3 +570,34 @@ def test_decode_rfc2047_japanese_headers() -> None:
     out = _decode_header_value(evil)
     assert "\n" not in out and "\r" not in out
     assert "1行目" in out and "偽の警告" in out  # 内容は残るが改行は除去
+
+
+def test_extract_plain_text_respects_charset() -> None:
+    """本文の Content-Type charset を尊重する（ISO-2022-JP/Shift_JIS の日本語が化けない）。"""
+    import base64
+
+    from teamagent.adapters.gmail_client import extract_plain_text
+
+    jis = "請求書の件、ご確認ください。"
+    data = base64.urlsafe_b64encode(jis.encode("iso-2022-jp")).decode().rstrip("=")
+    part = {
+        "mimeType": "text/plain",
+        "headers": [{"name": "Content-Type", "value": "text/plain; charset=ISO-2022-JP"}],
+        "body": {"data": data},
+    }
+    assert extract_plain_text(part) == jis  # 文字化けしない
+
+    sjis = "見積もり"
+    part2 = {
+        "mimeType": "text/plain",
+        "headers": [{"name": "Content-Type", "value": 'text/plain; charset="Shift_JIS"'}],
+        "body": {"data": base64.urlsafe_b64encode(sjis.encode("cp932")).decode().rstrip("=")},
+    }
+    assert extract_plain_text(part2) == sjis
+
+    # charset 指定なしは UTF-8 として従来どおり
+    utf = {
+        "mimeType": "text/plain",
+        "body": {"data": base64.urlsafe_b64encode("こんにちは".encode()).decode().rstrip("=")},
+    }
+    assert extract_plain_text(utf) == "こんにちは"
