@@ -530,3 +530,37 @@ def test_list_drafts_paginates_all_pages() -> None:
     out = client.list_drafts("r")
     assert [d.thread_id for d in out] == ["t1", "t2"]  # 両ページの下書きを取得
     assert seen_tokens == [None, "P2"]  # pageToken を辿った
+
+
+def test_decode_rfc2047_japanese_headers() -> None:
+    """RFC2047 エンコードされた日本語 Subject/From を人間可読にデコードする。
+
+    Gmail API は非 ASCII ヘッダを =?UTF-8?B?...?= で返すため、デコードしないと
+    日本語の件名・差出人名が DM/下書きで文字化けする。
+    """
+    from email.header import Header
+
+    from teamagent.adapters.gmail_client import _decode_header_value, _message_from_resp
+
+    enc_subj = Header("重要なご相談", "utf-8").encode()
+    assert "=?" in enc_subj  # 実際にエンコードされている
+    assert _decode_header_value(enc_subj) == "重要なご相談"
+    assert _decode_header_value("Re: meeting") == "Re: meeting"  # ASCII は素通り
+    assert _decode_header_value("") == ""
+
+    frm = Header("山田 太郎", "utf-8").encode() + " <yamada@acme.co.jp>"
+    resp = {
+        "id": "m1",
+        "threadId": "t1",
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": Header("見積もりの件", "utf-8").encode()},
+                {"name": "From", "value": frm},
+                {"name": "Message-ID", "value": "<abc@x>"},
+            ]
+        },
+    }
+    msg = _message_from_resp(resp)
+    assert msg.headers["Subject"] == "見積もりの件"  # デコード済み
+    assert "山田 太郎" in msg.headers["From"]
+    assert "yamada@acme.co.jp" in msg.headers["From"]

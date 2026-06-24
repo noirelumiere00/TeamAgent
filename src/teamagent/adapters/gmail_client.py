@@ -712,11 +712,37 @@ class GmailClient:
 # -----------------------------------------------------------
 # ヘルパー: MIME 解析 / ACL 抽出
 # -----------------------------------------------------------
+# RFC2047 デコード対象の人間可読ヘッダ（Subject/差出人名などが非ASCIIだとエンコードされる）。
+_DECODE_HEADERS: frozenset[str] = frozenset({"From", "To", "Cc", "Bcc", "Reply-To", "Subject"})
+
+
+def _decode_header_value(raw: str) -> str:
+    """RFC2047 エンコードヘッダ（=?UTF-8?B?...?= 等）を人間可読にデコードする。
+
+    Gmail API は非 ASCII の Subject/From を RFC2047 のまま返すため、デコードしないと
+    日本語の件名・差出人名が文字化けして DM/下書きに出る。失敗時は原文（fail-open）。
+    """
+    if not raw or "=?" not in raw:
+        return raw
+    from email.header import decode_header, make_header
+
+    try:
+        return str(make_header(decode_header(raw)))
+    except Exception:
+        return raw
+
+
 def _message_from_resp(resp: dict[str, Any]) -> GmailMessage:
     """messages.get / threads.get の 1 メッセージ dict を GmailMessage へ写像する。"""
     payload = resp.get("payload", {}) or {}
     headers_list = payload.get("headers", []) or []
-    headers = {h.get("name", ""): h.get("value", "") for h in headers_list if h.get("name")}
+    headers: dict[str, str] = {}
+    for h in headers_list:
+        name = h.get("name", "")
+        if not name:
+            continue
+        value = h.get("value", "")
+        headers[name] = _decode_header_value(value) if name in _DECODE_HEADERS else value
     return GmailMessage(
         id=str(resp.get("id", "")),
         thread_id=str(resp.get("threadId", "")),
