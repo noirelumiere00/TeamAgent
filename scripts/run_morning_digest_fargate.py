@@ -48,16 +48,41 @@ def _make_slack(*, interactive: bool) -> Any:
 
 
 def _resolve_target_users() -> list[str]:
-    """env or DB から対象 user_email リストを取得。
+    """env or DB から対象 user_email リストを取得し、除外リストを差し引く。
 
     優先順位:
       1. env `MORNING_DIGEST_USERS`（カンマ区切り・明示指定）
       2. RDS `oauth_tokens` の連携済全員（動的抽出）
+    どちらの経路でも最後に env `MORNING_DIGEST_EXCLUDE` のユーザーを除外する。
     """
     explicit = os.environ.get("MORNING_DIGEST_USERS", "").strip()
     if explicit:
-        return [e.strip().lower() for e in explicit.split(",") if e.strip()]
-    return _fetch_connected_users_from_rds()
+        users = [e.strip().lower() for e in explicit.split(",") if e.strip()]
+    else:
+        users = _fetch_connected_users_from_rds()
+    return _apply_exclude(users)
+
+
+def _apply_exclude(users: list[str]) -> list[str]:
+    """env `MORNING_DIGEST_EXCLUDE`（カンマ区切り）のユーザーを対象から外す。
+
+    Google 連携を切らずに、テストユーザーや一時停止したい人だけを digest 対象から
+    除外する仕組み。明示リスト・RDS 動的抽出のどちらの経路でも最後に適用する。
+    """
+    raw = os.environ.get("MORNING_DIGEST_EXCLUDE", "").strip()
+    if not raw:
+        return users
+    excluded = {e.strip().lower() for e in raw.split(",") if e.strip()}
+    if not excluded:
+        return users
+    kept = [u for u in users if u.lower() not in excluded]
+    removed = len(users) - len(kept)
+    if removed:
+        print(
+            f"[run_morning_digest_fargate] excluded {removed} user(s) via MORNING_DIGEST_EXCLUDE",
+            flush=True,
+        )
+    return kept
 
 
 def _fetch_connected_users_from_rds() -> list[str]:
@@ -182,10 +207,18 @@ def _format_block_kit(
             }
         )
         for m in high[:5]:
-            subj = m.subject_scrubbed or "(件名なし)"
-            body = f"*{subj}* — {m.counterpart_masked}"
+            # display fields are PII; rendered to owner DM only, never logged (G3/G7)
+            subj = m.subject_display or m.subject_scrubbed or "(件名なし)"
+            who = m.counterpart_display or m.counterpart_masked
+            tag = f"`{m.sender_label}` " if getattr(m, "sender_label", "") else ""
+            thr = f" 〔{m.thread_count}通〕" if getattr(m, "thread_count", 1) > 1 else ""
+            body = f"{tag}*{subj}*{thr} — {who}"
             if m.summary:
                 body += f"\n_{m.summary}_"
+            if getattr(m, "deadline", None):
+                body += f"\n⏰ 期限: {m.deadline}"
+            if getattr(m, "ask", ""):
+                body += f"\n📌 依頼: {m.ask}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
             # 各件はそのスレッドを直接開く deep-link（thread_id があれば）。
             thread_url = gmail_thread_url(getattr(m, "thread_id", "")) or _GMAIL_INBOX_URL
@@ -219,8 +252,10 @@ def _format_block_kit(
     if medium:
         lines = [f"🟡 *目を通したい（{len(medium)}件）*"]
         for m in medium[:3]:
-            subj = m.subject_scrubbed or "(件名なし)"
-            lines.append(f"• {subj} — {m.counterpart_masked}")
+            # display fields are PII; rendered to owner DM only, never logged (G3/G7)
+            subj = m.subject_display or m.subject_scrubbed or "(件名なし)"
+            who = m.counterpart_display or m.counterpart_masked
+            lines.append(f"• {subj} — {who}")
         remaining = max(0, len(medium) - 3) + len(low)
         if remaining > 0:
             lines.append(f"• 〈+{remaining}件〉")
@@ -376,13 +411,15 @@ async def _deliver_interactive(user_email: str, digest: Any) -> bool:
         tid = str(getattr(m, "thread_id", "") or "")
         if not tid:
             continue  # thread_id 無し＝スレッドを特定できない＝ボタンを出さない
+        # display fields are PII; rendered to owner DM card only, never logged (G3/G7).
+        # button value は thread_id（非PII）のみ＝summary_item_blocks 内で使用。
         item_blocks = ui.summary_item_blocks(
             thread_id=tid,
-            subject=m.subject_scrubbed,
-            counterpart=m.counterpart_masked,
+            subject=m.subject_display or m.subject_scrubbed,
+            counterpart=m.counterpart_display or m.counterpart_masked,
             summary=m.summary,
         )
-        subj = m.subject_scrubbed or "(件名なし)"
+        subj = m.subject_display or m.subject_scrubbed or "(件名なし)"
         await slack.post_message(
             channel=im_channel,
             text=f"🔴 要返信: {subj}",
@@ -390,6 +427,35 @@ async def _deliver_interactive(user_email: str, digest: Any) -> bool:
             blocks=item_blocks,
         )
     return delivered
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes")
+
+
+def _build_skill_from_env(skill_cls: Any, token_store: Any) -> Any:
+    """env から digest 品質パラメータを読み Skill を構築する（全て後方互換の既定値）。"""
+    important = frozenset(
+        s.strip().lower() for s in os.environ.get("IMPORTANT_SENDERS", "").split(",") if s.strip()
+    )
+    internal_domain = os.environ.get("DIGEST_INTERNAL_DOMAIN", "vectorinc.co.jp").strip()
+    signature = os.environ.get("DIGEST_SIGNATURE", "")
+    try:
+        triage_batch = int(os.environ.get("DIGEST_TRIAGE_BATCH", "8"))
+    except ValueError:
+        triage_batch = 8
+    return skill_cls(
+        token_store=token_store,
+        triage_batch=triage_batch,
+        important_senders=important,
+        internal_domain=internal_domain,
+        signature=signature,
+        reply_all=_env_flag("DIGEST_REPLY_ALL", False),
+        dedupe_drafts=_env_flag("DIGEST_DEDUPE_DRAFTS", True),
+    )
 
 
 def main() -> int:
@@ -404,7 +470,7 @@ def main() -> int:
     from teamagent.skills.morning_digest.skill import MorningDigestSkill
 
     token_store = _build_token_store()
-    skill = MorningDigestSkill(token_store=token_store)
+    skill = _build_skill_from_env(MorningDigestSkill, token_store)
     skill_input = MorningDigestInput()
     interactive = _interactive_enabled()
     print(f"[run_morning_digest_fargate] interactive={interactive}", flush=True)

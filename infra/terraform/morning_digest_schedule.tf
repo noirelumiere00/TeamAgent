@@ -37,6 +37,42 @@ variable "morning_digest_users" {
   default     = ""
 }
 
+variable "morning_digest_exclude" {
+  description = "digest 対象から除外する email リスト（カンマ区切り）。テストユーザーの一時停止など。Google 連携は切らない。"
+  type        = string
+  default     = ""
+}
+
+variable "digest_important_senders" {
+  description = "重要送信者（VIP）の email/ドメイン（カンマ区切り）。triage の優先度ヒントに使う。"
+  type        = string
+  default     = ""
+}
+
+variable "digest_internal_domain" {
+  description = "社内ドメイン（差出人区分 internal 判定用）。"
+  type        = string
+  default     = "vectorinc.co.jp"
+}
+
+variable "digest_signature" {
+  description = "下書きの末尾に付与する署名（複数行可）。空なら付けない。"
+  type        = string
+  default     = ""
+}
+
+variable "digest_reply_all" {
+  description = "下書きを Reply-All（元 To/Cc を Cc 保持）にするか。既定 false。"
+  type        = bool
+  default     = false
+}
+
+variable "digest_dedupe_drafts" {
+  description = "同一スレッドへの下書き二重作成を防ぐ（既存下書きのスレッドはスキップ）。既定 true。"
+  type        = bool
+  default     = true
+}
+
 variable "morning_digest_schedule_expression" {
   description = "EventBridge cron 式（既定: 平日 0:30 UTC = 9:30 JST）"
   type        = string
@@ -186,6 +222,13 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "AWS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
       { name = "MORNING_DIGEST_USERS", value = var.morning_digest_users },
+      { name = "MORNING_DIGEST_EXCLUDE", value = var.morning_digest_exclude },
+      # digest 品質パラメータ（全て後方互換の既定値・空/false なら従来動作）。
+      { name = "IMPORTANT_SENDERS", value = var.digest_important_senders },
+      { name = "DIGEST_INTERNAL_DOMAIN", value = var.digest_internal_domain },
+      { name = "DIGEST_SIGNATURE", value = var.digest_signature },
+      { name = "DIGEST_REPLY_ALL", value = var.digest_reply_all ? "true" : "" },
+      { name = "DIGEST_DEDUPE_DRAFTS", value = var.digest_dedupe_drafts ? "true" : "false" },
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。
       { name = "OAUTH_KMS_KEY_ID", value = "alias/teamagent-oauth-tokens" },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },

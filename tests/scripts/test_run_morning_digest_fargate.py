@@ -212,3 +212,63 @@ def test_deliver_interactive_posts_header_plus_cards(monkeypatch: pytest.MonkeyP
     assert ui.ACTION_TAKE in dump  # [対応する] ボタン
     assert ui.ACTION_DONE in dump
     assert "thr-aaa" in dump  # その high 項目の thread_id
+
+
+# ─────────────────────────────────────────────────────────────
+# MORNING_DIGEST_EXCLUDE（テストユーザーの停止）
+# ─────────────────────────────────────────────────────────────
+
+
+def test_apply_exclude_removes_listed_users(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MORNING_DIGEST_EXCLUDE", "test1@vectorinc.co.jp, Test2@VectorInc.co.jp")
+    users = ["a@vectorinc.co.jp", "test1@vectorinc.co.jp", "test2@vectorinc.co.jp"]
+    assert mod._apply_exclude(users) == ["a@vectorinc.co.jp"]  # 大小無視で 2 名除外
+
+
+def test_apply_exclude_noop_when_unset(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MORNING_DIGEST_EXCLUDE", raising=False)
+    users = ["a@vectorinc.co.jp", "b@vectorinc.co.jp"]
+    assert mod._apply_exclude(users) == users
+
+
+def test_resolve_target_users_applies_exclude_to_rds(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MORNING_DIGEST_USERS", raising=False)
+    monkeypatch.setenv("MORNING_DIGEST_EXCLUDE", "test2@vectorinc.co.jp")
+    monkeypatch.setattr(
+        mod,
+        "_fetch_connected_users_from_rds",
+        lambda: ["owner@vectorinc.co.jp", "test2@vectorinc.co.jp"],
+    )
+    assert mod._resolve_target_users() == ["owner@vectorinc.co.jp"]
+
+
+# ─────────────────────────────────────────────────────────────
+# マスキング緩和: 本人 DM は実名表示、ログ/print には出さない
+# ─────────────────────────────────────────────────────────────
+
+
+def _digest_with_display() -> Any:
+    d = _digest()
+    top = d.mail_digest[0]
+    top.subject_display = "【ノーベル】動画制作の最終確認"
+    top.counterpart_display = "江田 真希"
+    top.deadline = "6/25まで"
+    top.ask = "サムネ案の確定"
+    top.sender_label = "重要"
+    top.thread_count = 4
+    return d
+
+
+def test_block_kit_renders_display_fields() -> None:
+    _text, blocks = mod._format_block_kit(_digest_with_display(), "s-komata@vectorinc.co.jp")
+    dump = str(blocks)
+    assert "【ノーベル】動画制作の最終確認" in dump  # 実件名（未マスク）
+    assert "江田 真希" in dump  # 実名（未マスク）
+    assert "6/25まで" in dump  # 期限
+    assert "サムネ案の確定" in dump  # 依頼
+    assert "4通" in dump  # スレッド件数
+
+
+def test_env_flag_helper() -> None:
+    assert mod._env_flag("NOPE_UNSET", True) is True
+    assert mod._env_flag("NOPE_UNSET", False) is False

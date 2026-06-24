@@ -46,12 +46,29 @@ class MorningDigestInput(BaseModel):
         le=10,
         description="要返信メールに対する下書き生成の上限（要返信を可能な限り・最大10件）",
     )
+    thread_context_msgs: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="triage/下書きに渡すスレッド直近メッセージ数（文脈付与・コスト上限）",
+    )
+    max_threads: int = Field(
+        default=25,
+        ge=1,
+        le=60,
+        description="triage 対象スレッドの上限（重複排除後・バッチ規模/コスト上限）",
+    )
 
 
 class MailDigestItem(BaseModel):
-    """要返信/重要メール 1 件のメタ（DLP マスク後・本文なし）。"""
+    """要返信/重要メール（スレッド）1 件のメタ。
 
-    counterpart_masked: str = Field(description="相手アドレスのマスク表示")
+    ⚠️ マスク版（`*_masked` / `*_scrubbed`）はログ/監査安全＝どこに出してもよい。
+    表示版（`*_display`）は **本人宛 DM のレンダリング専用の PII** で、
+    ログ/print/CloudWatch には絶対に出さないこと（G3/G7）。
+    """
+
+    counterpart_masked: str = Field(description="相手アドレスのマスク表示（ログ安全）")
     subject_scrubbed: str = Field(default="", max_length=80, description="件名（マスク後・短縮）")
     importance: str = Field(default="medium", description="優先度: high / medium / low")
     occurred_at: str | None = Field(default=None, description="受信日時（ISO・判明時）")
@@ -60,6 +77,23 @@ class MailDigestItem(BaseModel):
     thread_id: str = Field(
         default="",
         description="Gmail スレッド ID（deep-link・ボタン value 用。生 messageId ではない）",
+    )
+    # --- 構造化抽出（LLM triage）---
+    deadline: str | None = Field(
+        default=None, description="抽出した期限（自由文・LLM抽出・無ければ None）"
+    )
+    ask: str = Field(default="", max_length=120, description="相手の依頼/要求（1行・LLM抽出）")
+    next_step: str = Field(
+        default="", max_length=120, description="こちらの次アクション（1行・LLM抽出）"
+    )
+    thread_count: int = Field(default=1, ge=1, description="このスレッドに含まれるメッセージ数")
+    sender_label: str = Field(default="", description="差出人区分の表示ラベル（社内/社外/重要 等）")
+    # --- 表示専用（本人宛 DM のみ・未マスク・PII・ログ厳禁）---
+    counterpart_display: str = Field(
+        default="", description="相手の表示名/会社（本人DM限定・未マスク・ログ厳禁）"
+    )
+    subject_display: str = Field(
+        default="", max_length=160, description="件名（本人DM限定・未マスク・ログ厳禁）"
     )
 
 
