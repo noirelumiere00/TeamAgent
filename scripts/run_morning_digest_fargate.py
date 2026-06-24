@@ -29,16 +29,41 @@ logger = structlog.get_logger(__name__)
 
 
 def _resolve_target_users() -> list[str]:
-    """env or DB から対象 user_email リストを取得。
+    """env or DB から対象 user_email リストを取得し、除外リストを差し引く。
 
     優先順位:
       1. env `MORNING_DIGEST_USERS`（カンマ区切り・明示指定）
       2. RDS `oauth_tokens` の連携済全員（動的抽出）
+    どちらの経路でも最後に env `MORNING_DIGEST_EXCLUDE` のユーザーを除外する。
     """
     explicit = os.environ.get("MORNING_DIGEST_USERS", "").strip()
     if explicit:
-        return [e.strip().lower() for e in explicit.split(",") if e.strip()]
-    return _fetch_connected_users_from_rds()
+        users = [e.strip().lower() for e in explicit.split(",") if e.strip()]
+    else:
+        users = _fetch_connected_users_from_rds()
+    return _apply_exclude(users)
+
+
+def _apply_exclude(users: list[str]) -> list[str]:
+    """env `MORNING_DIGEST_EXCLUDE`（カンマ区切り）のユーザーを対象から外す。
+
+    Google 連携を切らずに、テストユーザーや一時停止したい人だけを digest 対象から
+    除外する仕組み。明示リスト・RDS 動的抽出のどちらの経路でも最後に適用する。
+    """
+    raw = os.environ.get("MORNING_DIGEST_EXCLUDE", "").strip()
+    if not raw:
+        return users
+    excluded = {e.strip().lower() for e in raw.split(",") if e.strip()}
+    if not excluded:
+        return users
+    kept = [u for u in users if u.lower() not in excluded]
+    removed = len(users) - len(kept)
+    if removed:
+        print(
+            f"[run_morning_digest_fargate] excluded {removed} user(s) via MORNING_DIGEST_EXCLUDE",
+            flush=True,
+        )
+    return kept
 
 
 def _fetch_connected_users_from_rds() -> list[str]:
@@ -140,10 +165,18 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             }
         )
         for m in high[:5]:
-            subj = m.subject_scrubbed or "(件名なし)"
-            body = f"*{subj}* — {m.counterpart_masked}"
+            # display fields are PII; rendered to owner DM only, never logged (G3/G7)
+            subj = getattr(m, "subject_display", "") or m.subject_scrubbed or "(件名なし)"
+            who = getattr(m, "counterpart_display", "") or m.counterpart_masked
+            tag = f"`{m.sender_label}` " if getattr(m, "sender_label", "") else ""
+            thr = f" 〔{m.thread_count}通〕" if getattr(m, "thread_count", 1) > 1 else ""
+            body = f"{tag}*{subj}*{thr} — {who}"
             if m.summary:
                 body += f"\n_{m.summary}_"
+            if getattr(m, "deadline", None):
+                body += f"\n⏰ 期限: {m.deadline}"
+            if getattr(m, "ask", ""):
+                body += f"\n📌 依頼: {m.ask}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
             meta = []
             if m.has_draft:
@@ -161,8 +194,10 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     if medium:
         lines = [f"🟡 *目を通したい（{len(medium)}件）*"]
         for m in medium[:3]:
-            subj = m.subject_scrubbed or "(件名なし)"
-            lines.append(f"• {subj} — {m.counterpart_masked}")
+            # display fields are PII; rendered to owner DM only, never logged (G3/G7)
+            subj = getattr(m, "subject_display", "") or m.subject_scrubbed or "(件名なし)"
+            who = getattr(m, "counterpart_display", "") or m.counterpart_masked
+            lines.append(f"• {subj} — {who}")
         remaining = max(0, len(medium) - 3) + len(low)
         if remaining > 0:
             lines.append(f"• 〈+{remaining}件〉")

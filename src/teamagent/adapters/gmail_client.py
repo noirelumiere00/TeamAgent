@@ -605,6 +605,34 @@ class GmailClient:
         )
         return draft
 
+    def list_drafts(
+        self, request_id: str, *, max_results: int = 50, user_id: str = "me"
+    ) -> list[GmailDraft]:
+        """既存の下書きを列挙する（readonly・drafts.list）。
+
+        冪等性に使う：毎日の digest が同じスレッドに下書きを二重作成しないよう、
+        既存下書きの thread_id 集合を引く。drafts.list は message.{id,threadId} のみ返す
+        （本文・件名は取得しない＝G3/G7）。
+        """
+        service = self._ensure_safe_service()
+        start = time.perf_counter()
+        resp = service.users().drafts().list(userId=user_id, maxResults=max_results).execute()
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        out: list[GmailDraft] = []
+        for d in resp.get("drafts", []) or []:
+            m = d.get("message", {}) or {}
+            out.append(
+                GmailDraft(
+                    id=str(d.get("id", "")),
+                    message_id=str(m.get("id", "")),
+                    thread_id=m.get("threadId"),
+                )
+            )
+        logger.info(
+            "gmail_list_drafts", request_id=request_id, count=len(out), latency_ms=latency_ms
+        )
+        return out
+
     # -------------------------------------------------------
     # 内部
     # -------------------------------------------------------

@@ -155,3 +155,48 @@ def test_email_to_slack_user_id_uses_underscore_client() -> None:
 def test_open_im_channel_uses_underscore_client() -> None:
     ch = asyncio.run(mod._open_im_channel(_FakeSlack(), "U09CX1CCBLN"))
     assert ch == "D0BA1TWN6AC"
+
+
+# ── MORNING_DIGEST_EXCLUDE（テストユーザー停止）──────────────────────────────
+
+
+def test_apply_exclude_removes_listed_users(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MORNING_DIGEST_EXCLUDE", "test1@vectorinc.co.jp, Test2@VectorInc.co.jp")
+    users = ["a@vectorinc.co.jp", "test1@vectorinc.co.jp", "test2@vectorinc.co.jp"]
+    assert mod._apply_exclude(users) == ["a@vectorinc.co.jp"]
+
+
+def test_apply_exclude_noop_when_unset(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MORNING_DIGEST_EXCLUDE", raising=False)
+    assert mod._apply_exclude(["a@vectorinc.co.jp"]) == ["a@vectorinc.co.jp"]
+
+
+def test_resolve_target_users_applies_exclude_to_rds(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MORNING_DIGEST_USERS", raising=False)
+    monkeypatch.setenv("MORNING_DIGEST_EXCLUDE", "test2@vectorinc.co.jp")
+    monkeypatch.setattr(
+        mod,
+        "_fetch_connected_users_from_rds",
+        lambda: ["owner@vectorinc.co.jp", "test2@vectorinc.co.jp"],
+    )
+    assert mod._resolve_target_users() == ["owner@vectorinc.co.jp"]
+
+
+# ── マスキング緩和: 本人 DM は実名表示 ───────────────────────────────────────
+
+
+def test_block_kit_renders_display_fields() -> None:
+    d = _digest()
+    top = d.mail_digest[0]
+    top.subject_display = "【ノーベル】動画制作の最終確認"
+    top.counterpart_display = "江田 真希"
+    top.deadline = "6/25まで"
+    top.ask = "サムネ案の確定"
+    top.sender_label = "重要"
+    top.thread_count = 4
+    _text, blocks = mod._format_block_kit(d, "s-komata@vectorinc.co.jp")
+    dump = str(blocks)
+    assert "【ノーベル】動画制作の最終確認" in dump  # 実件名（未マスク）
+    assert "江田 真希" in dump  # 実名（未マスク）
+    assert "6/25まで" in dump and "サムネ案の確定" in dump
+    assert "4通" in dump

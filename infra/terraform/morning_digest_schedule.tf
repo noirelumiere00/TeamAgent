@@ -37,6 +37,24 @@ variable "morning_digest_users" {
   default     = ""
 }
 
+variable "morning_digest_exclude" {
+  description = "digest 対象から除外する email リスト（カンマ区切り）。テストユーザーの一時停止など。Google 連携は切らない。"
+  type        = string
+  default     = ""
+}
+
+variable "digest_important_senders" {
+  description = "重要送信者（VIP）の email/ドメイン（カンマ区切り）。triage の優先度ヒントに使う。"
+  type        = string
+  default     = ""
+}
+
+variable "digest_internal_domain" {
+  description = "社内ドメイン（差出人区分 internal 判定用）。"
+  type        = string
+  default     = "vectorinc.co.jp"
+}
+
 variable "morning_digest_schedule_expression" {
   description = "EventBridge cron 式（既定: 平日 0:30 UTC = 9:30 JST）"
   type        = string
@@ -180,6 +198,9 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "AWS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
       { name = "MORNING_DIGEST_USERS", value = var.morning_digest_users },
+      { name = "MORNING_DIGEST_EXCLUDE", value = var.morning_digest_exclude },
+      { name = "IMPORTANT_SENDERS", value = var.digest_important_senders },
+      { name = "DIGEST_INTERNAL_DOMAIN", value = var.digest_internal_domain },
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。
       { name = "OAUTH_KMS_KEY_ID", value = "alias/teamagent-oauth-tokens" },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
