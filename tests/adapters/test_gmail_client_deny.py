@@ -85,6 +85,16 @@ class _FakeMethodChain:
         "obliterate",
         "watch",
         "stop",
+        # 120点ハードニングで追加した封鎖対象メソッド
+        "import",
+        "insert",
+        "verify",
+        "enable",
+        "updateAutoForwarding",
+        "updateImap",
+        "updatePop",
+        "updateVacation",
+        "updateLanguage",
     }
 
     def __init__(self) -> None:
@@ -153,7 +163,38 @@ _EXPECTED_DESTRUCTIVE_METHODS = (
     # gmail.modify 付与に伴い送信系も物理封鎖（下書き作成 drafts.create のみ許可）。
     "users.messages.send",
     "users.drafts.send",
+    # 注入・改竄・情報持ち出し（exfiltration）系を物理封鎖（120点ハードニング）。
+    "users.messages.import",
+    "users.messages.insert",
+    "users.threads.modify",
+    "users.drafts.update",
+    "users.drafts.delete",
+    "users.settings.updateAutoForwarding",
+    "users.settings.forwardingAddresses.create",
+    "users.settings.sendAs.create",
+    "users.settings.sendAs.update",
+    "users.settings.filters.create",
+    "users.settings.cse.keypairs.create",
 )
+
+
+@pytest.mark.parametrize(
+    "method_path",
+    [
+        "users.messages.list",
+        "users.messages.get",
+        "users.threads.get",
+        "users.labels.list",
+        "users.labels.create",  # 隠しラベル作成（使用）
+        "users.messages.modify",  # ラベル付け（使用）
+        "users.drafts.create",  # 下書き作成（使用）
+        "users.drafts.list",  # 冪等性（使用）
+    ],
+)
+def test_legit_methods_remain_allowed(method_path: str) -> None:
+    """Bot が実際に使う read/label/draft 系は封鎖しない（過剰封鎖の回帰防止）。"""
+    assert method_path not in _GMAIL_DESTRUCTIVE_METHODS
+    _GmailSafePolicy().assert_safe(method_path)  # 例外が出なければOK
 
 
 @pytest.mark.parametrize("method_path", _EXPECTED_DESTRUCTIVE_METHODS)

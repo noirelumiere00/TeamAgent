@@ -335,7 +335,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     subject_display=str(anchor.headers.get("Subject", ""))[:160],
                 )
             )
-            body = extract_plain_text(anchor.payload)
+            # HTML 専用メール等で text/plain が無い時は Gmail の snippet（本文プレビュー）で代替。
+            body = extract_plain_text(anchor.payload) or str(getattr(anchor, "snippet", "") or "")
             masked_bodies.append(_strip_sentinels(str(scrub_value(body))[: self._max_body_chars]))
             full_msgs.append(anchor)
             priorities.append(priority)
@@ -528,7 +529,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             if not to_addr:
                 # 返信先不明（自分が唯一の宛先など）は LLM を回す前にスキップ。
                 continue
-            body = extract_plain_text(msg.payload)
+            body = extract_plain_text(msg.payload) or str(getattr(msg, "snippet", "") or "")
             if is_mass_or_impersonal(msg.headers, body):
                 # 一斉送信/自動配信/一般宛名（各位・ご担当者様 等）は個人返信不要 → 下書きしない。
                 continue
@@ -634,7 +635,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             )
         except Exception:
             return ("", 0.0)
-        return (str(resp.text).strip()[:3000], float(getattr(resp.usage, "cost_usd", 0.0)))
+        # ⚠️ resp.text が None だと str(None)="None" が本文になる事故 → "" に正規化。
+        text = (getattr(resp, "text", None) or "").strip()[:3000]
+        return (text, float(getattr(resp.usage, "cost_usd", 0.0)))
 
 
 # ── モジュール関数（純粋・テスト容易）──────────────────────────────────────

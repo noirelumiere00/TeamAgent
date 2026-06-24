@@ -601,3 +601,20 @@ def test_extract_plain_text_respects_charset() -> None:
         "body": {"data": base64.urlsafe_b64encode("こんにちは".encode()).decode().rstrip("=")},
     }
     assert extract_plain_text(utf) == "こんにちは"
+
+
+def test_extract_plain_text_concatenates_multiple_parts() -> None:
+    """multipart/mixed の複数 text/plain（本文＋フッタ等）を全て連結する。"""
+    import base64
+
+    from teamagent.adapters.gmail_client import extract_plain_text
+
+    def _p(t: str) -> dict[str, Any]:
+        return {
+            "mimeType": "text/plain",
+            "body": {"data": base64.urlsafe_b64encode(t.encode()).decode().rstrip("=")},
+        }
+
+    payload = {"mimeType": "multipart/mixed", "parts": [_p("本文です。"), _p("-- 署名 --")]}
+    out = extract_plain_text(payload)
+    assert "本文です。" in out and "-- 署名 --" in out  # 両方拾う（旧実装は本文だけ）

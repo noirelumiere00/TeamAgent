@@ -87,6 +87,28 @@ _GMAIL_DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
         # drafts.create は許可、drafts.send / messages.send は封鎖）。
         "users.messages.send",
         "users.drafts.send",
+        # ── 注入・改竄（本 Bot は使わない mutating メソッド）──
+        "users.messages.import",  # 受信箱へメール注入
+        "users.messages.insert",  # 受信箱へメール注入
+        "users.threads.modify",  # スレッドのラベル改竄（本 Bot は messages.modify のみ使用）
+        "users.drafts.update",  # 下書き改竄（作成のみ許可）
+        "users.drafts.delete",  # 下書き削除
+        # ── 情報持ち出し（exfiltration）系の設定変更 ──
+        "users.settings.updateAutoForwarding",  # 全メール自動転送（最重要・漏洩）
+        "users.settings.forwardingAddresses.create",  # 転送先追加
+        "users.settings.sendAs.create",  # 送信エイリアス追加（なりすまし）
+        "users.settings.sendAs.update",
+        "users.settings.sendAs.patch",
+        "users.settings.sendAs.verify",
+        "users.settings.filters.create",  # 自動転送/削除フィルタ追加
+        "users.settings.updateImap",
+        "users.settings.updatePop",
+        "users.settings.updateVacation",
+        "users.settings.updateLanguage",
+        "users.settings.cse.identities.create",
+        "users.settings.cse.identities.patch",
+        "users.settings.cse.keypairs.create",
+        "users.settings.cse.keypairs.enable",
     }
 )
 
@@ -642,6 +664,15 @@ class GmailClient:
             if not page_token:
                 break
         latency_ms = int((time.perf_counter() - start) * 1000)
+        if page_token:
+            # max_pages で打ち切った＝全下書きを見切れていない＝冪等性が不完全。
+            # 無言にせず警告（運用が下書き整理 or 上限調整できるように）。
+            logger.warning(
+                "gmail_list_drafts_truncated",
+                request_id=request_id,
+                count=len(out),
+                max_pages=max_pages,
+            )
         logger.info(
             "gmail_list_drafts", request_id=request_id, count=len(out), latency_ms=latency_ms
         )
@@ -763,23 +794,23 @@ def _message_from_resp(resp: dict[str, Any]) -> GmailMessage:
 def extract_plain_text(payload: dict[str, Any]) -> str:
     """payload (MIME tree) から text/plain 部分を抽出する。
 
-    multipart の場合は parts を再帰探索。text/html しか無い場合は空文字を返す
-    （HTML パースは別レイヤー責務、ここでは plain text のみ）。
+    multipart を再帰探索し、**全ての** text/plain part を文書順に連結する
+    （旧実装は最初の 1 part だけ返し、本文と別 part の署名/フッタを取りこぼした）。
+    text/html しか無い場合は空文字（HTML パースは別レイヤー責務）。
     """
+    parts: list[str] = []
 
-    def _walk(node: dict[str, Any]) -> str | None:
-        mime = node.get("mimeType", "")
-        if mime == "text/plain":
+    def _walk(node: dict[str, Any]) -> None:
+        if node.get("mimeType", "") == "text/plain":
             data = (node.get("body") or {}).get("data")
             if data:
-                return _decode_b64url(data, _part_charset(node))
+                parts.append(_decode_b64url(data, _part_charset(node)))
+            return  # text/plain は子を持たない
         for child in node.get("parts", []) or []:
-            text = _walk(child)
-            if text:
-                return text
-        return None
+            _walk(child)
 
-    return _walk(payload) or ""
+    _walk(payload)
+    return "\n".join(p for p in parts if p)
 
 
 def _part_charset(node: dict[str, Any]) -> str:

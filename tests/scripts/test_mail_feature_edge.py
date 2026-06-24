@@ -406,6 +406,54 @@ def test_E22_cost_aggregated_across_triage_and_drafts():
     assert out.total_cost_usd > 0  # triage + draft のコストが積算される
 
 
+def test_E25_draft_none_text_does_not_create_none_body():
+    """Bedrock が text=None を返しても本文 'None' の下書きを作らない（空→スキップ）。"""
+
+    class _NoneText:
+        def converse(self, **kw):
+            if "分類規則" in str(kw.get("system", "")):
+                return _Resp('[{"importance":"high","summary":"x"}]')
+            return _Resp(None)  # 下書き応答が None
+
+    g = _Gmail([_to_me()])
+    skill = MorningDigestSkill(
+        token_store=_Tokens({ME: object()}), gmail=g, gcalendar=_GCal([]), bedrock=_NoneText()
+    )
+    _run(skill, max_drafts=1)
+    # "None" 本文の下書きは作られない（空はスキップ）
+    assert all(d["thread_id"] for d in g.created) or g.created == []
+    assert g.created == []  # 空応答 → 下書き0
+
+
+def test_E26_html_only_mail_uses_snippet_fallback():
+    """text/plain が無い HTML 専用メールは snippet を本文代替に使う（空で триаж しない）。"""
+    captured: list[str] = []
+
+    class _CapBedrock:
+        def converse(self, **kw):
+            if "分類規則" in str(kw.get("system", "")):
+                captured.append(str(kw.get("messages")))
+                return _Resp('[{"importance":"medium","summary":"x"}]')
+            return _Resp("下書き")
+
+    m = _Msg(
+        headers={"From": "c@x.com", "To": ME, "Subject": "html"},
+        payload={"mimeType": "text/html", "body": {"data": _b64("<b>hi</b>")}},
+        internal_date_ms=1,
+        thread_id="T",
+    )
+    m.snippet = "重要なお知らせの本文プレビュー"  # type: ignore[attr-defined]
+    skill = MorningDigestSkill(
+        token_store=_Tokens({ME: object()}),
+        gmail=_Gmail([m]),
+        gcalendar=_GCal([]),
+        bedrock=_CapBedrock(),
+    )
+    _run(skill, max_drafts=0)
+    # triage プロンプトに snippet 由来の文字が入る（本文空のまま投げない）
+    assert any("重要なお知らせ" in c for c in captured)
+
+
 def test_E24_iso_or_none_treats_epoch_zero_as_valid():
     from teamagent.skills.morning_digest.skill import _iso_or_none
 
