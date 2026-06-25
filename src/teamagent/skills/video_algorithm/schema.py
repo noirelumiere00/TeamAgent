@@ -458,6 +458,10 @@ class VideoAlgorithmInput(BaseModel):
     # §Q-HTML→PPTX: 追加出力。既定 = report + slides（編集可HTML）。
     # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（明示要求時のみ・重い）。
     outputs: list[Literal["report", "slides", "pptx"]] = Field(default_factory=_default_outputs)
+    # 取得段の委譲(任意): tiktok_acquire が書いた S3 prefix を渡すと、bot内スクレイプの代わりに
+    # その成果物(posts.normalized.json / videos/<pid>.mp4)から読む。未指定=従来どおり実スクレイプ。
+    # OC は tiktok_acquire→status で得た s3_prefix を渡す(取得=隔離 / 分析=既存)。
+    acquire_s3_prefix: str | None = None
 
 
 class VideoAlgorithmOutput(BaseModel):
