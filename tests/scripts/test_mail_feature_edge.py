@@ -621,9 +621,9 @@ def test_E34_unread_section_lists_unread_non_high():
     )
     _t, blocks = runner._format_block_kit(d, ME)
     dump = str(blocks)
-    assert "未開封" in dump
+    assert "未確認" in dump
     assert "未読の通知" in dump and "お知らせ要約" in dump  # 未読medium＋要約
-    assert "既読low" not in dump  # 既読は未開封に出ない
+    assert "既読low" not in dump  # 既読は未確認に出ない
     # high(高重要) は要返信側に出る（未開封側ではボタン無し一覧なので action は high 由来のみ）
     assert "高重要" in dump
 
@@ -723,7 +723,7 @@ def test_E41_non_to_self_high_goes_to_unread_not_reply():
     dump = str(blocks)
     assert "要返信メール（1件）" in dump  # To自分宛の1件だけが要返信
     assert "返信必要" in dump
-    assert "未開封" in dump and "CC高重要" in dump  # To に自分がいない高重要は未開封へ
+    assert "未確認" in dump and "CC高重要" in dump  # To に自分がいない高重要は未確認へ
     # CC高重要 には下書きボタン(action_id)が付かない
     actions = [b for b in blocks if b.get("type") == "actions"]
     all_el = [e for b in actions for e in b.get("elements", [])]

@@ -244,9 +244,9 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             blocks.append({"type": "actions", "elements": _reply_buttons(m)})
         blocks.append({"type": "divider"})
 
-    # --- 📬 未開封（未読・最大5件＋「他N件」・件名/相手＋AI要約）---
+    # --- 📬 未確認（未読・最大5件＋「他N件」・件名/相手＋AI要約）---
     if unread:
-        lines = [f"📬 *未開封（{len(unread)}件）*"]
+        lines = [f"📬 *未確認（{len(unread)}件）*"]
         for m in unread[:5]:
             subj, who = _mail_line(m)
             line = f"• *{subj}* — {who}"

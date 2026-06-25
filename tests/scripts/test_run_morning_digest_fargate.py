@@ -120,10 +120,10 @@ def test_calendar_section_rendered() -> None:
 
 
 def test_unread_section_lists_unread() -> None:
-    """未開封セクション: is_unread かつ非 high の medium 2件が出る（low/既読は出ない）。"""
+    """未確認セクション: is_unread かつ非 high の medium 2件が出る（low/既読は出ない）。"""
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    assert "未開封（2件）" in dump
+    assert "未確認（2件）" in dump
     assert "請求書" in dump and "日程調整" in dump
     assert "お知らせ" not in dump  # low かつ既読 は未開封に出ない
 
