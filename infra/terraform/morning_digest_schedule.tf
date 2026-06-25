@@ -61,6 +61,12 @@ variable "morning_digest_concurrency" {
   default     = 1
 }
 
+variable "morning_digest_model_id" {
+  description = "triage/下書き生成に使う Bedrock モデル ID。既定 Haiku（低コスト・高速）。"
+  type        = string
+  default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+}
+
 variable "morning_digest_schedule_expression" {
   description = "EventBridge cron 式（既定: 平日 0:30 UTC = 9:30 JST）"
   type        = string
@@ -210,6 +216,8 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "IMPORTANT_SENDERS", value = var.digest_important_senders },
       { name = "DIGEST_INTERNAL_DOMAIN", value = var.digest_internal_domain },
       { name = "MORNING_DIGEST_CONCURRENCY", value = tostring(var.morning_digest_concurrency) },
+      # triage / 下書き生成に使う Bedrock モデル（既定 Haiku＝低コスト・高速）。
+      { name = "BEDROCK_MODEL_ID", value = var.morning_digest_model_id },
       # per-user token のリフレッシュに使う connect(web 型)クライアント ID（secret は下の secrets）。
       { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。
