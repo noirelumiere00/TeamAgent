@@ -201,9 +201,15 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     text = "メールと本日の予定をお送りします。"
 
     mail_items = list(getattr(digest, "mail_digest", []) or [])
-    high = [m for m in mail_items if m.importance == "high"]
-    # 未開封 = 実際に未読(UNREAD) かつ 要返信(high) に出ていないもの（二重表示を避ける）。
-    unread = [m for m in mail_items if getattr(m, "is_unread", False) and m.importance != "high"]
+
+    # 要返信メール ＝ high かつ「本人が To に直接いる」（＝自分が返信すべきもの）。
+    # To に自分がいない（CC のみ/メーリス宛）メールは high でも要返信に出さず未開封へ回す。
+    def _is_reply(m: Any) -> bool:
+        return m.importance == "high" and bool(getattr(m, "to_self", False))
+
+    high = [m for m in mail_items if _is_reply(m)]
+    # 未開封 ＝ 未読(UNREAD) かつ 要返信に出ていないもの（To に自分がいない高重要もここ・閲覧のみ）。
+    unread = [m for m in mail_items if getattr(m, "is_unread", False) and not _is_reply(m)]
     cal_items = list(getattr(digest, "calendar_events", []) or [])
 
     # 冒頭の枕詞（飾らない一文）。

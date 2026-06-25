@@ -193,6 +193,7 @@ def test_E02_slack_escape_neutralizes_link_injection():
             MailDigestItem(
                 counterpart_masked="a***@x.com",
                 importance="high",
+                to_self=True,
                 subject_display="緊急 <https://evil.example|今すぐクリック>",
                 counterpart_display="攻撃者 <hack@evil>",
             )
@@ -695,6 +696,38 @@ def test_E40_draft_button_only_for_to_self():
     by = {i.subject_display: i for i in out.mail_digest}
     assert by["To自分"].draft_token != ""  # To自分宛 → 下書きボタンが出る
     assert by["CCのみ"].draft_token == ""  # CC のみ → 下書きボタンは出さない（確認するのみ）
+
+
+def test_E41_non_to_self_high_goes_to_unread_not_reply():
+    """To に自分がいない高重要メールは『要返信』に出さず『未開封』に回す（ユーザー仕様）。"""
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        mail_digest=[
+            MailDigestItem(
+                counterpart_masked="a***@x",
+                importance="high",
+                to_self=True,
+                subject_display="返信必要",
+                draft_token="TOK",
+            ),
+            MailDigestItem(
+                counterpart_masked="b***@x",
+                importance="high",
+                to_self=False,
+                is_unread=True,
+                subject_display="CC高重要",
+            ),
+        ],
+    )
+    _t, blocks = runner._format_block_kit(d, ME)
+    dump = str(blocks)
+    assert "要返信メール（1件）" in dump  # To自分宛の1件だけが要返信
+    assert "返信必要" in dump
+    assert "未開封" in dump and "CC高重要" in dump  # To に自分がいない高重要は未開封へ
+    # CC高重要 には下書きボタン(action_id)が付かない
+    actions = [b for b in blocks if b.get("type") == "actions"]
+    all_el = [e for b in actions for e in b.get("elements", [])]
+    assert len([e for e in all_el if e.get("action_id") == "mail_draft"]) == 1  # 返信必要のみ
 
 
 def test_E39_is_unread_collected_from_label_ids():

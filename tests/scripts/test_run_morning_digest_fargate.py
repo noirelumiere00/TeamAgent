@@ -43,6 +43,7 @@ def _digest() -> MorningDigestOutput:
                 counterpart_masked="え***@nobel.co.jp",
                 subject_scrubbed="動画制作の件",
                 importance="high",
+                to_self=True,
                 summary="25日投稿に向け判断待ち。",
                 has_draft=True,  # 既に下書き有り→「開く」ボタン
             ),
@@ -50,6 +51,7 @@ def _digest() -> MorningDigestOutput:
                 counterpart_masked="k***@gmo.com",
                 subject_scrubbed="振込自動化",
                 importance="high",
+                to_self=True,
                 summary="回答待ち。",
                 has_draft=False,
                 draft_token="TOKB",  # 未作成→「下書きを作成」ボタン

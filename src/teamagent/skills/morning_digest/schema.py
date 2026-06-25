@@ -65,6 +65,7 @@ class MailDigestItem(BaseModel):
     subject_scrubbed: str = Field(default="", max_length=80, description="件名（マスク後・短縮）")
     importance: str = Field(default="medium", description="優先度: high / medium / low")
     is_unread: bool = Field(default=False, description="未読(UNREAD)か＝未開封セクション用")
+    to_self: bool = Field(default=False, description="本人が To に直接いるか＝要返信(下書き)の条件")
     occurred_at: str | None = Field(default=None, description="受信日時（ISO・判明時）")
     summary: str = Field(default="", max_length=200, description="1 行サマリ（LLM 生成）")
     has_draft: bool = Field(default=False, description="この件で下書きを生成したか")

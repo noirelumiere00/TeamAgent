@@ -346,6 +346,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     thread_count=len(thread),
                     sender_label=_sender_label_ja(priority),
                     is_unread=is_unread,
+                    to_self=addressed,  # To に本人がいる＝要返信(下書き)対象
                     # 表示専用（本人 DM のみ・未マスク・PII・ログ厳禁）
                     counterpart_display=_display_counterpart(anchor.headers, requester),
                     subject_display=str(anchor.headers.get("Subject", ""))[:160],
