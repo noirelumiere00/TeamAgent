@@ -167,7 +167,34 @@ ruff check . && ruff format --check src/ tests/ scripts/
 | 構築当時の経緯を追う | `docs/handoff/teamagent_handoff_day0-4_2026-05.md` |
 | 検索 Skill を実装 | `docs/v3.1/teamagent_search_skill_design_v1.md` |
 | AWS リソース ID / モデル ID | §0 + `aws bedrock list-inference-profiles` |
+| AiLa にツール/機能を足したい | §10（4段ゲート＋description＋チェックリスト） |
 
 ---
 
-最終更新：2026-06-25（5月の日記を docs/handoff へ退避し、現状アーキ＋不変ルール＋運用地雷＋多人数原則＋CIゲート＋runbookリンクに全面再構成）
+## 10. AiLa にツール/機能を足すとき ★忘れてはいけない手順（2026-06-25 追記）
+
+新しい能力は「skill を書いたら使える」ではない。**OC(AiLa) に届くには段が4つ**あり、どこかで止まると「実装したのに本番で呼べない」になる（実際 ③`video_approval` は skill 完成済みなのに OC 未露出で長く埋もれていた）。
+
+### E1 ツールが本番で AiLa に届くまでの4段（全部通って初めて稼働）
+1. **skill 実装**：`skills/<name>/{schema,skill}.py` ＋ `@register`（§3）。←ここまでで「実装済」。
+2. **factory 登録（env-gate）**：`orchestrator/factory.py` の `build_production_tools()` に `if _envflag("USE_<X>"): specs.append(ToolSpec(...))`。新規は**必ず既定 OFF**（後方互換）。
+3. **OC 露出（第2ゲート）**：`infra/openclaw/openclaw.config.json5` の `mcp.servers.teamagent.toolFilter.include` に **tool 名を追加**。← factory に在っても include に無ければ **OpenClaw からは見えない**（一番の見落としポイント）。
+4. **本番 ON（デプロイ＝人間ゲート）**：mcp の ECS task env に `USE_<X>=1`（tfvars/CodeBuild）→ apply → run-task 検証（§4）。AWS 書込み（apply/build/push）は **classifier がブロック＝人間が実行**。
+
+> **「実装済」と「稼働」は別。** どの段で止まっているかを常に言う。`factory` だけ＝dark（コードは在るが見えない）／`include` だけ＝MCP 側の `USE_<X>` が無いと呼んでも失敗。
+
+### E2 description は「AI の振り分け判断材料」★曖昧だと誤選択で事故る
+- OC は **name + description だけ**でどの tool を呼ぶか決める。被る tool（特に **動画/TikTok 系**: tiktok_search / tiktok_acquire / video_algorithm / video_analysis / video_approval / proposal_campaign）は、**トリガー語で棲み分け**＋**「これは対象外（→他tool）」の相互排他注記**を description に書く。
+  - 例：`video_approval`=「自社編集者の**納品**動画チェック（誤植/尺/NG）」 vs `video_analysis`=「**外部URLの競合**動画分析・納品物は対象外（→video_approval）」。
+- **新規/変更時はルーティング・シミュで検証**：現実的な依頼を多数流し、正しい tool に行くか・混同ペアが無いかを出荷前に確認（実績：32発話で正答率97%、最大リスクは動画チェック↔競合分析の取り違え＝納品事故）。
+
+### E3 ツール追加チェックリスト
+- [ ] `@register` で skill 登録 / [ ] factory に `USE_<X>` gate（既定 OFF）/ [ ] openclaw.config.json5 `toolFilter.include` に追加 / [ ] description にトリガー語＋相互排他注記（被る tool があるなら）/ [ ] 単体テスト（登録＋description 固定）/ [ ] §4 デプロイ（env ON）は人間ゲート / [ ] 「今どの段か」を PR / `deploy_log.md` に明記
+
+### E4 ブランチ衛生 ★「実装済」が散らばり本番との対応が不明になりがち
+- 機能が**未マージ PR / 未 push ローカルコミット**に散在しやすい（本番イメージが dev より進む／dev にコードが無いのに本番 env に flag がある、等の不整合が起きる）。
+- **新規作業は必ず `origin/dev` 基点で branch を切る**（古い feature 枝の上に積まない＝デプロイ系統からズレる）。「何が本番か」は §1＋`infra/deploy_log.md`＋**本番 ECS task の env を実機で**確認してから判断（`aws ecs describe-task-definition --task-definition teamagent-dev-mcp`）。
+
+---
+
+最終更新：2026-06-25（5月の日記を docs/handoff へ退避し全面再構成。§10「ツール追加の4段ゲート・description 棲み分け・ブランチ衛生」を追記）
