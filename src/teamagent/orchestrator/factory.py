@@ -119,6 +119,22 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # recommend: 新規案件概要 → 類似の過去 提案書/議事録/営業FB をベクトル近傍で3カテゴリ提示。
+    # **既定 OFF**（USE_RECOMMEND_SKILL=1 で opt-in）。SearchSkill.retrieve_hits を再利用するため
+    # 共有 search を注入（埋め込み二重ロード回避）。Bedrock 要約はせず近傍提示のみ＝DB/Bedrock
+    # 追加依存なし。OC 露出は openclaw.config.json5 の toolFilter.include 追加が別途必要。
+    if _envflag("USE_RECOMMEND_SKILL"):
+        from teamagent.skills.recommend.skill import RecommendSkill
+
+        specs.append(
+            ToolSpec(
+                RecommendSkill.name,
+                RecommendSkill.description,
+                RecommendSkill,
+                factory=lambda: RecommendSkill(search=search),
+            )
+        )
+
     # Phase 6 (6d): Mail 制約ツール。**既定 OFF**（USE_MAIL_TOOLS=1 で opt-in）。
     # 実行時に run() が G1 本人受信箱限定 / G2 本人同意（MAIL_CONSENT_EMAILS）を
     # fail-closed で強制。実受信箱接続（6c）の人間ゲート（同意/DWD/CASA）承認後に有効化。
