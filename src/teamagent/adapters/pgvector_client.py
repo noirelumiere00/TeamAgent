@@ -219,7 +219,14 @@ class PgVectorClient:
         - ``SET ROLE`` は session 持続（プールでは返却時に RESET ROLE で必ず戻す）。
           psycopg は識別子の parameterize 不可なので app_role はコード内固定の英数/_ のみ許可。
         - ``app.user_*`` GUC は ``set_config(name, value, is_local=true)`` で transaction-local。
+        - QW-5: ``hnsw.ef_search`` も ``set_config(..., is_local=true)`` で transaction-local に
+          注入する（当該トランザクションの全クエリ＝multi-query RRF の各サブクエリにも効く）。
+          LIMIT30＋HNSW 後に RLS+cls_*+boilerplate+duplicate の多段 post-filter が AND で候補を
+          枯らし上位可視 chunk を取りこぼす「post-filter recall 崖」を緩和する。
+          env ``SEARCH_HNSW_EF_SEARCH`` が未設定（or 0 以下）のときは **発行しない**＝DB 既定
+          （HNSW ef_search=40）のまま＝完全後方互換。本番は 100 を設定して候補を広げる。
         """
+        ef_search = _env_int("SEARCH_HNSW_EF_SEARCH", 0)
         with conn.cursor() as cur:
             if app_role:
                 if not app_role.replace("_", "").isalnum():
@@ -233,6 +240,12 @@ class PgVectorClient:
                 cur.execute(
                     "SELECT set_config('app.user_groups', %s, true)",
                     (",".join(user_groups),),
+                )
+            if ef_search > 0:
+                # set_config の value は文字列。is_local=true で transaction 終了時に自動破棄。
+                cur.execute(
+                    "SELECT set_config('hnsw.ef_search', %s, true)",
+                    (str(ef_search),),
                 )
 
     def search_similar(

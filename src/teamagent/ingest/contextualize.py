@@ -140,7 +140,8 @@ class ChunkContextualizer:
                 )
                 return chunk
             contextualized = f"{prefix}\n\n{chunk.content}"
-            embedding = self._embedder.embed(contextualized)
+            # 取り込み（資料側）なので passage プレフィックスで埋め込む（e5 非対称）。
+            embedding = self._embedder.embed_passage(contextualized)
         except Exception:
             # fail-open: この chunk だけ元のまま（contextualized/embedding 据え置き）。
             logger.warning(

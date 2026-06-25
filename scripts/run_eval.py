@@ -49,6 +49,7 @@ class CaseResult:
 
     case_id: int
     query: str
+    expect_zero: bool = False  # gold case の expect_zero_hits (ネガティブケースか)
     top1_hit: bool = False
     top5_hit: bool = False
     mrr: float = 0.0
@@ -120,8 +121,8 @@ def _evaluate_case(skill: Any, ctx_cls: Any, case: dict[str, Any]) -> CaseResult
     """1 ケースを SearchSkill 経由で実行 + 評価。"""
     from teamagent.skills.search.schema import SearchInput
 
-    result = CaseResult(case_id=case["id"], query=case["query"])
     expect_zero = bool(case.get("expect_zero_hits"))
+    result = CaseResult(case_id=case["id"], query=case["query"], expect_zero=expect_zero)
 
     start = time.perf_counter()
     try:
@@ -199,9 +200,13 @@ def _summarize(results: list[CaseResult], label: str, config: dict[str, Any]) ->
     cost_sum = sum(r.cost_usd for r in results)
     latency_sum = sum(r.latency_ms for r in results)
 
-    # ネガティブケースの正解数 (expect_zero_hits=true で 0 件返したか)
-    # ここでは top1_hit=True かつ実 hits=0 のものを正解とみなす
-    zero_cases = [r for r in results if not r.actual_top_hits and r.top1_hit]
+    # ネガティブケースの正解数。母数は gold set の expect_zero_hits 件数で固定する。
+    # 旧実装は母数を「実 hits が空」(not actual_top_hits) で取っていたため、
+    #   (a) ヒットを返してしまったネガティブケースが分母から脱落 = "黙る能力" が測れず
+    #   (b) 単に検索ミスしたポジティブケースが分母に混入
+    # して 0/0 を満点と誤読していた (QW-3)。expect_zero を母数に据えて根治する。
+    zero_total = sum(1 for r in results if r.expect_zero)
+    zero_correct = sum(1 for r in results if r.expect_zero and not r.actual_top_hits)
 
     return EvalSummary(
         label=label,
@@ -213,8 +218,8 @@ def _summarize(results: list[CaseResult], label: str, config: dict[str, Any]) ->
         mean_mrr=round(mrr_sum / n, 4),
         mean_cost_usd=round(cost_sum / n, 6),
         mean_latency_ms=round(latency_sum / n, 1),
-        zero_hit_correct=len(zero_cases),
-        zero_hit_total=sum(1 for r in results if not r.actual_top_hits),
+        zero_hit_correct=zero_correct,
+        zero_hit_total=zero_total,
         per_case=results,
     )
 
@@ -309,6 +314,11 @@ def _build_skill() -> Any:
         rerank_pool_size = int(os.environ.get("SEARCH_RERANK_POOL_SIZE", "30"))
     except ValueError:
         rerank_pool_size = 30
+    try:
+        # QW-4: rerank 返却数（救済プール幅）。min_relevance の母数を top_k から切離す。
+        rerank_return_size = int(os.environ.get("SEARCH_RERANK_RETURN_SIZE", "100"))
+    except ValueError:
+        rerank_return_size = 100
     use_aggregation_mode = os.environ.get("USE_AGGREGATION_MODE", "false").lower() in (
         "1",
         "true",
@@ -328,6 +338,7 @@ def _build_skill() -> Any:
             use_fb_drive_match=use_fb_drive_match,
             use_cohere_rerank=use_cohere_rerank,
             rerank_pool_size=rerank_pool_size,
+            rerank_return_size=rerank_return_size,
             min_relevance=min_relevance,
             min_relevance_fallback=min_relevance_fallback,
             use_client_boost=use_client_boost,
@@ -342,6 +353,7 @@ def _build_skill() -> Any:
             "USE_FB_DRIVE_MATCH": use_fb_drive_match,
             "USE_COHERE_RERANK": use_cohere_rerank,
             "SEARCH_RERANK_POOL_SIZE": rerank_pool_size,
+            "SEARCH_RERANK_RETURN_SIZE": rerank_return_size,
             "SEARCH_MIN_RELEVANCE": min_relevance,
             "SEARCH_MIN_RELEVANCE_FALLBACK": min_relevance_fallback,
             "USE_CLIENT_BOOST": use_client_boost,

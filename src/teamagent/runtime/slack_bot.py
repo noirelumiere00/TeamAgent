@@ -625,88 +625,18 @@ class SkillDispatcher:
         """
         if "search" in self._skill_cache:
             return self._skill_cache["search"]
-        # 動的 instance 生成。Skill 固有の init 引数を扱うため Any 経由
-        from teamagent.adapters.embeddings_client import LocalE5Embedder
-        from teamagent.skills.search.query_planner import build_query_planner_from_env
-        from teamagent.skills.search.skill import SearchSkill
+        # QW-2: env→引数解決は orchestrator.factory に集約（唯一の真実源）。
+        # かつて本メソッドは rerank_pool_size / min_relevance_fallback / use_client_boost /
+        # use_knowledge_filters を渡さずコンストラクタ既定（30/0.0/False/False）に落ち、本番 env を
+        # 入れても slack_bot 経路では黙って無効だった（構築ドリフト）。build_search_skill_from_env()
+        # に委譲し、factory（MCP/OpenClaw 経路）と同一 env・同一ノブで構築する。
+        from teamagent.orchestrator.factory import (
+            build_search_skill_from_env,
+            resolve_search_skill_config,
+        )
 
-        use_contextual = os.environ.get("USE_CONTEXTUAL", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        use_new_schema = os.environ.get("USE_NEW_SCHEMA", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        # Day 8 (2026-05-28) Phase 2: Slack 営業 FB の client_name で Drive 資料を裏で検索して
-        # 「関連資料」として attach する機能。USE_FB_DRIVE_MATCH=true で有効化。
-        use_fb_drive_match = os.environ.get("USE_FB_DRIVE_MATCH", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        # Day 8 (2026-05-28) Sprint 4-A: Cohere Rerank v3.5 (Bedrock 東京)。
-        # USE_COHERE_RERANK=true で有効化、top_k=30 retrieve → Rerank → top-5。
-        # Anthropic ベンチで失敗率 -67%、$2/1000 queries (10560 query/月で $21 想定)。
-        use_cohere_rerank = os.environ.get("USE_COHERE_RERANK", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
-        # PROMPT_VERSION=v1 / v2 / v2c / v2d で切替。
-        # v2c は v2 の compact 版 (Sprint 4-D, latency 短縮目的)。
-        # Day 9 (2026-05-29) 本番実機検証で v2c + max=800 が回答途中切れ
-        # (stop_reason=max_tokens) を起こすと判明。eval は検索 hit rate のみ測り
-        # 生成回答の完全性を測らないため見逃していた。v2d はプロンプト側で項目数と
-        # 文字数 (550字以内) を絞り、800tok 内で必ず end_turn する compact 版。
-        # 実機8件で全件 end_turn (output 397-535tok)、latency 12-18s、hit rate 維持。
-        # この結果を受け既定を v2d に変更。
-        prompt_version = os.environ.get("PROMPT_VERSION", "v2d")
-        # Day 8 (2026-05-28) Sprint 4-D: max_tokens 制限で latency 短縮。
-        # Day 9: max=800 維持。v2d プロンプトが上限内で完結するため truncation なし。
-        try:
-            summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "800"))
-        except ValueError:
-            summary_max_tokens = 800
-        # Sprint 5: 反ハルシネーション閾値。Rerank relevance がこの値未満なら
-        # 該当 hit を落とし、空なら「資料に記載がありません」と返す。
-        # 既定 0.0 = OFF。gold set 実測では 0.4 で expect_zero を綺麗に分離。
-        try:
-            min_relevance = float(os.environ.get("SEARCH_MIN_RELEVANCE", "0.0"))
-        except ValueError:
-            min_relevance = 0.0
-        # Sprint 5: 集約・一覧クエリモード (「BANT A の案件一覧」等をメタデータ列挙で回答)。
-        use_aggregation_mode = os.environ.get("USE_AGGREGATION_MODE", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        instance = SearchSkill(
-            embedder=LocalE5Embedder(),
-            use_contextual=use_contextual,
-            use_new_schema=use_new_schema,
-            use_fb_drive_match=use_fb_drive_match,
-            use_cohere_rerank=use_cohere_rerank,
-            min_relevance=min_relevance,
-            use_aggregation_mode=use_aggregation_mode,
-            prompt_version=prompt_version,
-            summary_max_tokens=summary_max_tokens,
-            query_planner=build_query_planner_from_env(),
-        )
-        logger.info(
-            "search_skill_initialized",
-            use_contextual=use_contextual,
-            use_new_schema=use_new_schema,
-            use_fb_drive_match=use_fb_drive_match,
-            use_cohere_rerank=use_cohere_rerank,
-            min_relevance=min_relevance,
-            use_aggregation_mode=use_aggregation_mode,
-            prompt_version=prompt_version,
-            summary_max_tokens=summary_max_tokens,
-        )
+        instance = build_search_skill_from_env()
+        logger.info("search_skill_initialized", source="slack_bot", **resolve_search_skill_config())
         self._skill_cache["search"] = instance
         return instance
 

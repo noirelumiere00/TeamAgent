@@ -78,6 +78,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         fb_drive_match_limit: int = 3,
         use_cohere_rerank: bool = False,
         rerank_pool_size: int = 30,
+        rerank_return_size: int = 100,
         min_relevance: float = 0.0,
         min_relevance_fallback: float = 0.0,
         use_client_boost: bool = False,
@@ -136,6 +137,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # Anthropic 公式ベンチで dense retrieval の失敗率 5.7% → 1.9% (-67%) を実現する中核機能。
         self._use_cohere_rerank = use_cohere_rerank
         self._rerank_pool_size = rerank_pool_size
+        # QW-4: rerank が返す件数を top_k から切り離す。Cohere rerank を top_n=top_k(=5) で
+        # 呼ぶと min_relevance/fallback の母数も 5 件に痩せ、6 位以降の閾値超 chunk を救済できない。
+        # top_n=min(len(hits), rerank_return_size) で広く返し、min_relevance 適用後に最終段で
+        # [:top_k] する。SEARCH_MIN_RELEVANCE=0.0（既定）では rerank の上位 top_k が変わらず
+        # 完全等価（no-regression）。Cohere 課金は結果数非依存のためコスト不変。
+        self._rerank_return_size = rerank_return_size
         # Sprint 5: 反ハルシネーション閾値。Rerank relevance がこの値未満の hit は
         # 「根拠として弱い」とみなし落とす。全 hit が落ちれば 0 件 = Bot は
         # 「資料に記載がありません」と返し、無い情報を捏造しない。
@@ -620,12 +627,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             jaccard=self._neardup_jaccard,
                             per_doc_cap=self._per_doc_cap,
                         )
-                # Rerank: top_k に絞り直す (relevance_score で再ソート)
+                # Rerank: relevance_score で再ソートし、広いプール（min(len, return_size)）を返す。
+                # QW-4: top_k には絞らず、min_relevance/fallback の母数を広く保つ。最終 [:top_k] は
+                # 閾値フィルタの後段で行う。
                 if self._use_cohere_rerank and hits:
+                    rerank_n = min(len(hits), self._rerank_return_size)
                     hits = self._apply_cohere_rerank(
                         query=input.query,
                         hits=hits,
-                        top_k=input.top_k,
+                        top_n=rerank_n,
                         request_id=ctx.request_id,
                     )
                 # Sprint 5: 反ハルシネーション閾値。relevance < 閾値の hit を落とす。
@@ -661,6 +671,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             top_score=hits[0].score,
                         )
                     hits = kept
+                # QW-4: rerank は広いプールを返すので、min_relevance 確定後に top_k へ絞る。
+                # rerank を使ったときだけ適用（rerank 無効時は _pool_search の limit=top_k で
+                # 既に top_k 以内＝この truncation は no-op）。budget_sort / fb_drive_match は
+                # 従来どおり top_k 件のリストに対して動く（後方互換）。
+                if self._use_cohere_rerank and len(hits) > input.top_k:
+                    hits = hits[: input.top_k]
                 # 予算近接ソート。rerank・min_relevance 確定後に1段だけ並べ替える（絞らない）。
                 # sort_budget_near に近い順 → 同帯内は低信頼末尾 → 関連度降順。env-gate
                 # SEARCH_BUDGET_SORT（既定 OFF）。FB drive-match（固定 score=1.0）の前に置く。
@@ -697,17 +713,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self,
         query: str,
         hits: list[SearchHit],
-        top_k: int,
+        top_n: int,
         request_id: str,
     ) -> list[SearchHit]:
-        """Cohere Rerank v3.5 で hits を relevance score 順に並べ替え、top_k に絞る。
+        """Cohere Rerank v3.5 で hits を relevance score 順に並べ替え、top_n に絞る。
 
         Day 8 (2026-05-28) Sprint 4-A の中核処理。
         - 入力: pgvector top_pool_size hits (dense retrieval 結果)
         - 処理: Bedrock Rerank API で query との関連性を再評価
-        - 出力: relevance_score 降順 top_k 件 (元 hits.score は Rerank score で上書き)
+        - 出力: relevance_score 降順 top_n 件 (元 hits.score は Rerank score で上書き)
 
-        失敗時はオリジナル hits を top_k で truncate して返す (fail-safe, 副作用最小化)。
+        QW-4: top_n は最終 top_k ではなく救済プール幅（min(len(hits), rerank_return_size)）。
+        最終 top_k への絞り込みは呼び出し側で min_relevance 適用後に行う。
+
+        失敗時はオリジナル hits を top_n で truncate して返す (fail-safe, 副作用最小化)。
         """
         try:
             documents = [h.content for h in hits]
@@ -715,12 +734,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 query=query,
                 documents=documents,
                 request_id=request_id,
-                top_n=top_k,
+                top_n=top_n,
             )
         except Exception:
             # Rerank 失敗は致命傷ではない: dense retrieval 結果をそのまま使う
             logger.exception("cohere_rerank_failed_falling_back_to_dense", request_id=request_id)
-            return hits[:top_k]
+            return hits[:top_n]
 
         # Rerank 結果に従って元 hits を並べ替え + score を Rerank score で更新
         reranked: list[SearchHit] = []

@@ -14,64 +14,96 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import structlog
+
 from .tools import ToolSpec
+
+logger = structlog.get_logger(__name__)
 
 
 def _envflag(name: str, default: str = "false") -> bool:
     return os.environ.get(name, default).lower() in ("1", "true", "yes")
 
 
-def _build_search_skill() -> Any:
-    """実 SearchSkill を本番 runtime と同じ env フラグで構築（依存は内部で遅延生成）.
+def _envint(name: str, default: int) -> int:
+    """env を int として読む（空・不正値は default にフォールバック）。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
 
-    参照: runtime/slack_bot.py:get_search_skill（同じフラグ・既定値に揃える）。
+
+def _envfloat(name: str, default: float) -> float:
+    """env を float として読む（空・不正値は default にフォールバック）。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def resolve_search_skill_config() -> dict[str, Any]:
+    """env → SearchSkill コンストラクタ引数を 1 か所で解決する（**唯一の真実源**）.
+
+    factory（MCP/OpenClaw 経路）と runtime/slack_bot.py（Socket Mode 経路）の双方が
+    本関数を使い、4 ノブ（rerank_pool_size / min_relevance_fallback / use_client_boost /
+    use_knowledge_filters）を含む全ノブを **同じ env から同じ既定で** 解決する。
+    過去は slack_bot 側が 4 ノブを渡さずコンストラクタ既定（30/0.0/False/False）に落ち、
+    本番 env を入れても黙って無効化される構築ドリフトがあった（QW-2 で解消）。
+
+    戻り値は embedder / query_planner を**含まない**純粋な kwargs（int/float/bool/str のみ）。
+    そのまま起動ログにも出せる（観測可能化）。重い依存は呼び出し側で注入する。
+    """
+    return {
+        "use_contextual": _envflag("USE_CONTEXTUAL"),
+        "use_new_schema": _envflag("USE_NEW_SCHEMA"),
+        "use_fb_drive_match": _envflag("USE_FB_DRIVE_MATCH"),
+        "use_cohere_rerank": _envflag("USE_COHERE_RERANK"),
+        # Rerank 候補プール（dense retrieval を何件 rerank に渡すか）。既定 30＝従来挙動。
+        "rerank_pool_size": _envint("SEARCH_RERANK_POOL_SIZE", 30),
+        # QW-4: rerank が返す件数（救済プール幅）。min_relevance の母数を top_k から切り離す。
+        # SEARCH_MIN_RELEVANCE=0.0（既定）では最終 [:top_k] が効き従来挙動と完全等価。
+        "rerank_return_size": _envint("SEARCH_RERANK_RETURN_SIZE", 100),
+        "min_relevance": _envfloat("SEARCH_MIN_RELEVANCE", 0.0),
+        # 2段階しきい値の fallback（既定 0.0 = 無効＝従来挙動）。
+        "min_relevance_fallback": _envfloat("SEARCH_MIN_RELEVANCE_FALLBACK", 0.0),
+        # client-boost は A/B で +4pp 実証済み・固有名詞のみ発火で副作用なし・DB障害時は
+        # fail-open（語彙取得失敗→ブースト無効）。よって既定 ON を採用
+        # （USE_CLIENT_BOOST=false で明示無効化は可能）。両経路で同一既定にする。
+        "use_client_boost": _envflag("USE_CLIENT_BOOST", "true"),
+        "use_aggregation_mode": _envflag("USE_AGGREGATION_MODE"),
+        # ナレッジ Q&A: 「○○業界の提案事例」等の資料種別語を cls_doc_type で絞る
+        # （0 件なら通常検索にフォールバック＝副作用なし）。USE_KNOWLEDGE_FILTERS で有効化。
+        "use_knowledge_filters": _envflag("USE_KNOWLEDGE_FILTERS"),
+        "prompt_version": os.environ.get("PROMPT_VERSION", "v2d"),
+        "summary_max_tokens": _envint("SEARCH_MAX_TOKENS", 800),
+    }
+
+
+def build_search_skill_from_env() -> Any:
+    """実 SearchSkill を env から構築する（factory / slack_bot の**共通**ビルダー）.
+
+    env→引数解決は resolve_search_skill_config() に集約済み。embedder（LocalE5Embedder）と
+    query_planner（USE_QUERY_PLANNER=1 のときだけ非 None）はここで遅延生成して注入する。
+    起動ログに全ノブを出し、どの env でどう構築されたかを観測可能にする（QW-2）。
     """
     from teamagent.adapters.embeddings_client import LocalE5Embedder
     from teamagent.skills.search.query_planner import build_query_planner_from_env
     from teamagent.skills.search.skill import SearchSkill
 
-    try:
-        summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "800"))
-    except ValueError:
-        summary_max_tokens = 800
-    try:
-        min_relevance = float(os.environ.get("SEARCH_MIN_RELEVANCE", "0.0"))
-    except ValueError:
-        min_relevance = 0.0
-    try:
-        # 2段階しきい値の fallback（既定 0.0 = 無効＝従来挙動）。
-        min_relevance_fallback = float(os.environ.get("SEARCH_MIN_RELEVANCE_FALLBACK", "0.0"))
-    except ValueError:
-        min_relevance_fallback = 0.0
-    try:
-        # Rerank 候補プール（dense retrieval を何件 rerank に渡すか）。既定 30＝従来挙動。
-        # 固有名詞クエリのリコール改善を試すための可変ノブ（SEARCH_RERANK_POOL_SIZE）。
-        rerank_pool_size = int(os.environ.get("SEARCH_RERANK_POOL_SIZE", "30"))
-    except ValueError:
-        rerank_pool_size = 30
-
+    config = resolve_search_skill_config()
+    logger.info("search_skill_config_resolved", source="factory", **config)
     return SearchSkill(
         embedder=LocalE5Embedder(),
-        use_contextual=_envflag("USE_CONTEXTUAL"),
-        use_new_schema=_envflag("USE_NEW_SCHEMA"),
-        use_fb_drive_match=_envflag("USE_FB_DRIVE_MATCH"),
-        use_cohere_rerank=_envflag("USE_COHERE_RERANK"),
-        rerank_pool_size=rerank_pool_size,
-        min_relevance=min_relevance,
-        min_relevance_fallback=min_relevance_fallback,
-        # client-boost は A/B で +4pp 実証済み・固有名詞のみ発火で副作用なし・DB障害時は
-        # fail-open（語彙取得失敗→ブースト無効）。よって orchestrator では既定 ON を採用
-        # （USE_CLIENT_BOOST=false で明示無効化は可能）。
-        use_client_boost=_envflag("USE_CLIENT_BOOST", "true"),
-        use_aggregation_mode=_envflag("USE_AGGREGATION_MODE"),
-        # ナレッジ Q&A: 「○○業界の提案事例」等の資料種別語を cls_doc_type で絞る
-        # （0 件なら通常検索にフォールバック＝副作用なし）。USE_KNOWLEDGE_FILTERS で有効化。
-        use_knowledge_filters=_envflag("USE_KNOWLEDGE_FILTERS"),
-        prompt_version=os.environ.get("PROMPT_VERSION", "v2d"),
-        summary_max_tokens=summary_max_tokens,
         # P3 エージェント検索（USE_QUERY_PLANNER=1 のときだけ非 None・既定は単一クエリ）。
         query_planner=build_query_planner_from_env(),
+        **config,
     )
+
+
+# 後方互換エイリアス: connect_web / knowledge_deliver が `_build_search_skill` を import 済。
+_build_search_skill = build_search_skill_from_env
 
 
 def build_production_tools() -> list[ToolSpec]:
