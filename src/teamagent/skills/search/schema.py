@@ -24,6 +24,37 @@ class SearchInput(BaseModel):
             "True (strict): 厳密一致。ユーザーが明示的に業界を指定したスラッシュコマンド等で使う。"
         ),
     )
+    filter_client: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "取引先/案件名フィルタ（部分一致 ILIKE）。"
+            "cls_project（全資料に付く取引先）を主に "
+            "client_name（FB）/ title の OR グループへ照合。"
+            "表記ゆれ（例: 日本ガイシ↔NGK）を部分一致で吸収する。"
+        ),
+    )
+    filter_budget: str | None = Field(
+        default=None,
+        description=(
+            "予算バンドフィルタ（cls_budget 等価・〜100万 / 100〜500万 / 500万〜）。"
+            "fail-open 再検索でも外れない sticky フィルタとして配線する。"
+        ),
+    )
+    include_unknown_budget: bool = Field(
+        default=False,
+        description=(
+            "予算フィルタ時に cls_budget='不明' も含めるか（soft 化）。"
+            "False (既定, strict): 指定バンドのみ。True: 指定バンド OR '不明' を許容する。"
+        ),
+    )
+    sort_budget_near: str | None = Field(
+        default=None,
+        description=(
+            "この予算バンドに近い順で取得後ソート（〜100万 / 100〜500万 / 500万〜）。"
+            "絞らず並べ替えのみ。SEARCH_BUDGET_SORT が有効なときだけ発火する。"
+        ),
+    )
 
 
 class SearchHitOut(BaseModel):
@@ -103,6 +134,10 @@ class SearchHitOut(BaseModel):
     doc_type: str | None = Field(
         default=None,
         description="資料種別（提案書/議事録/報告書 等・自動分類 cls_doc_type）",
+    )
+    budget: str | None = Field(
+        default=None,
+        description="予算バンド（〜100万/100〜500万/500万〜/不明・自動分類 cls_budget）",
     )
     is_low_confidence: bool = Field(
         default=False,

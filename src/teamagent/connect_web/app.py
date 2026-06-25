@@ -37,6 +37,32 @@ _SESSION_TTL_S = 8 * 3600
 _DEFAULT_SEARCH_EMAILS = "s-komata@vectorinc.co.jp"
 
 
+def _env_int(name: str, default: int) -> int:
+    """env を int で読む（未設定/空/不正は default）。task-def の env 差し替えだけで較正可能。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """env を float で読む（未設定/空/不正は default）。concept しきい値の再ビルド無し較正用。"""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _envflag(name: str, default: str = "false") -> bool:
+    """env を bool で読む（"1"/"true"/"yes" を True・前後空白は除去）。
+
+    skills/search/skill._envflag と同流儀（末尾改行や ``"1 "`` でも ON 判定）。
+    """
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
+
+
 def _page(title: str, body: str, *, accent: str = "#36c08a") -> str:
     t = html.escape(title)
     b = html.escape(body)
@@ -109,6 +135,13 @@ _SEARCH_STYLE = (
     "border-radius:10px;color:var(--text);padding:11px 14px;font-size:15px}"
     ".searchbar button{background:var(--accent);color:#fff;border:0;border-radius:10px;"
     "padding:0 20px;font-weight:600;cursor:pointer}"
+    ".filterbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}"
+    ".filterbar input[type=text],.filterbar select{background:var(--bg-elev);"
+    "border:1px solid var(--border);border-radius:8px;color:var(--text);"
+    "padding:7px 10px;font-size:13px}"
+    ".filterbar input[type=text]{min-width:220px}"
+    ".filterbar .ck{display:inline-flex;align-items:center;gap:4px;font-size:12px;"
+    "color:var(--muted);cursor:pointer}"
     ".answer{background:#16203a;border:1px solid #2b3a5e;border-radius:12px;padding:16px 18px;"
     "margin-bottom:18px;line-height:1.7;white-space:pre-wrap}"
     ".answer h2{font-size:13px;color:var(--muted);margin:0 0 8px;font-weight:600}"
@@ -155,6 +188,11 @@ _SEARCH_STYLE = (
 )
 
 
+# 予算バンド allowlist（api_search の filter_budget / sort_budget_near 受けで使う）。
+# UI の <select> option と一致させる。'不明' はフィルタ対象外（ソート末尾扱いのみ）。
+_BUDGET_BANDS = ("〜100万", "100〜500万", "500万〜")
+
+
 # 検索 UI の本体 DOM フラグメント（シェルの #mainList に mount する。_SEARCH_JS が参照）。
 # 見出し/サブは textContent ではなく静的文字列だが「社内ナレッジ検索」をルートテストが参照。
 _SEARCH_DOM = (
@@ -164,6 +202,17 @@ _SEARCH_DOM = (
     '<div class="searchbar">'
     '<input id="q" type="text" placeholder="例: 飲料メーカー向けの保存率訴求の提案">'
     '<button id="go" type="button">検索</button></div>'
+    '<div class="filterbar">'
+    '<input id="fclient" type="text" list="clientlist" '
+    'placeholder="取引先で絞る（例: 日本ガイシ）">'
+    '<datalist id="clientlist"></datalist>'
+    '<select id="fbudget" aria-label="予算で絞る">'
+    '<option value="">予算（指定なし）</option>'
+    "<option>〜100万</option><option>100〜500万</option><option>500万〜</option>"
+    "</select>"
+    '<label class="ck"><input id="bsort" type="checkbox">予算が近い順</label>'
+    '<label class="ck"><input id="bunknown" type="checkbox">予算不明も含める</label>'
+    "</div>"
     '<div id="filters" class="filters"></div>'
     '<div id="results"></div>'
     "</main>"
@@ -176,9 +225,26 @@ const q=document.getElementById('q');
 const go=document.getElementById('go');
 const results=document.getElementById('results');
 const filters=document.getElementById('filters');
+const fclient=document.getElementById('fclient');
+const fbudget=document.getElementById('fbudget');
+const bsort=document.getElementById('bsort');
+const bunknown=document.getElementById('bunknown');
+const clientlist=document.getElementById('clientlist');
 let lastQuery='';
 let activeIndustry=null;
 function safeUrl(u){return (typeof u==='string'&&/^(https?|slack|gdrive):/i.test(u))?u:null;}
+// 取引先 datalist を facets から遅延充填（graph fetch 後にのみ __facets.client が埋まる）。
+// 未定義時は何もしない＝free-text フォールバック（部分一致が効くので候補なしでも検索可）。
+function populateClientList(){
+  if(!clientlist)return;
+  const fac=window.__facets;
+  if(!fac||!fac.client)return;
+  clientlist.textContent='';
+  for(const row of fac.client.slice(0,50)){
+    if(!row||!row.value)continue;
+    const o=document.createElement('option');o.value=row.value;clientlist.appendChild(o);
+  }
+}
 function chip(text){
   const s=document.createElement('span');s.className='chip';s.textContent=text;return s;
 }
@@ -248,6 +314,20 @@ function renderEmpty(query){
     fb.textContent='業界フィルタ「'+activeIndustry+'」を外して再検索';
     fb.onclick=()=>{activeIndustry=null;search();};b.appendChild(fb);
   }
+  const hasClient=fclient&&fclient.value.trim();
+  const hasBudget=fbudget&&fbudget.value;
+  if(hasClient||hasBudget){
+    const cb=document.createElement('button');cb.type='button';
+    cb.textContent='取引先/予算フィルタを外して再検索';
+    cb.onclick=()=>{
+      if(fclient)fclient.value='';
+      if(fbudget)fbudget.value='';
+      if(bsort)bsort.checked=false;
+      if(bunknown)bunknown.checked=false;
+      search();
+    };
+    b.appendChild(cb);
+  }
   const gb=document.createElement('button');gb.type='button';
   gb.textContent='グラフで関連資料を探す';
   gb.onclick=()=>{if(window.shellSetMode)window.shellSetMode('graph');};
@@ -281,6 +361,12 @@ async function search(){
   try{
     const body={query:query,top_k:8};
     if(activeIndustry)body.filter_industry=activeIndustry;
+    const fc=fclient?fclient.value.trim():'';
+    const fb=fbudget?fbudget.value:'';
+    if(fc)body.filter_client=fc;
+    if(fb)body.filter_budget=fb;
+    if(bunknown&&bunknown.checked&&fb)body.include_unknown_budget=true;
+    if(bsort&&bsort.checked&&fb)body.sort_budget_near=fb;
     const resp=await fetch('/api/v1/search',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(body)});
@@ -312,6 +398,7 @@ async function search(){
     card.appendChild(t);
     const chips=document.createElement('div');chips.className='chips';
     for(const c of [h.client_name,h.source_type]){if(c)chips.appendChild(chip(c));}
+    if(h.budget)chips.appendChild(chip(h.budget));
     if(h.industry)chips.appendChild(tagChip('# '+h.industry,'industry',h.industry));
     if(h.doc_type)chips.appendChild(tagChip('# '+h.doc_type,'doc_type',h.doc_type));
     if(h.project)chips.appendChild(tagChip('# '+h.project,'project',h.project));
@@ -339,6 +426,10 @@ q.addEventListener('keydown',e=>{if(e.key==='Enter')search();});
 window.searchRun=search;
 window.searchSetIndustry=function(value){activeIndustry=value;search();};
 window.searchSetQuery=function(value){q.value=value;activeIndustry=null;search();};
+// 取引先 datalist の遅延充填フック（_POWER_JS の __powerReady から graph fetch 後に呼ぶ）。
+window.populateClientList=populateClientList;
+// 既に __facets が用意済（graph 先読み）なら即時充填も試みる（フック取りこぼし保険）。
+populateClientList();
 """
 
 
@@ -361,6 +452,11 @@ _GRAPH_STYLE = (
     "display:none;line-height:1.5;z-index:2;white-space:pre-line}"
     ".status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);"
     "color:var(--muted);font-size:13px}"
+    # --- 大規模グラフ時の隅ヒント（ズーム/ホバーでラベル表示）---
+    ".ghint{position:absolute;left:10px;bottom:10px;z-index:2;pointer-events:none;"
+    "background:rgba(20,28,46,.78);border:1px solid #2b3a5e;border-radius:8px;"
+    "padding:4px 9px;font-size:11px;color:#8fa3c6;max-width:calc(100% - 20px)}"
+    ".ghint[hidden]{display:none}"
     # --- Obsidian 風グラフ設定パネル（左上オーバーレイ）---
     ".gtoggle{position:absolute;top:10px;left:10px;z-index:4;width:30px;height:30px;"
     "display:flex;align-items:center;justify-content:center;background:rgba(20,28,46,.92);"
@@ -633,8 +729,19 @@ let localOn=false,depth=1,colorEdges=false;
 const hideSources=new Set(),hideTypes=new Set();
 const linkedIds=new Set();
 let rules=[];
+// 大規模グラフ（ノード過多）判定とハブ集合。hairball を避けるための LOD/疎開に使う。
+// bigGraph 時は反発を増やして広げ、ラベルは hub+近傍のみ、薄いエッジはズームで段階表示。
+let bigGraph=false;
+const hubIds=new Set();
+const BIG_N=120,HUB_K=15;
+// ズーム閾値: これ未満では大規模グラフのラベル/エッジを描かず「点」だけにする。
+const HUB_LABEL_SCALE=1.15,EDGE_MIN_SCALE=0.55;
+// ノード数に応じた実効反発（スライダ値 REPEL を基準に密集を防ぐ）。
+function effRepel(){
+  return bigGraph?REPEL*(1+nodes.length/200):REPEL;
+}
 const REASON_COLORS={project:'rgba(127,214,160,.65)',client:'rgba(240,153,123,.6)',
-  industry:'rgba(110,168,254,.55)'};
+  industry:'rgba(110,168,254,.55)',concept:'rgba(189,147,249,.5)'};
 function safeUrl(u){return (typeof u==='string'&&/^(https?|slack|gdrive):/i.test(u))?u:null;}
 function colorOf(g){
   if(!groupColors.has(g))groupColors.set(g,PALETTE[groupColors.size%PALETTE.length]);
@@ -682,13 +789,14 @@ function tick(){
   alpha+=(alphaTarget-alpha)*ADECAY;
   if(alpha<AMIN&&alphaTarget===0)alpha=0;
   const cx=W()/2,cy=H()/2,nn=nodes.length;
+  const repel=effRepel();
   for(let i=0;i<nn;i++){
     const a=nodes[i];if(a._hidden)continue;
     for(let j=i+1;j<nn;j++){
       const b=nodes[j];if(b._hidden)continue;
       let dx=b.x-a.x,dy=b.y-a.y,d2=dx*dx+dy*dy;
       if(d2<1e-4){dx=(Math.random()-0.5)*0.1;dy=(Math.random()-0.5)*0.1;d2=dx*dx+dy*dy;}
-      const w=REPEL*alpha/d2;
+      const w=repel*alpha/d2;
       a.vx+=dx*w;a.vy+=dy*w;b.vx-=dx*w;b.vy-=dy*w;
     }
   }
@@ -769,12 +877,18 @@ function draw(){
   const emph=hover||focusNode;
   const hl=emph?adj.get(emph.id):null;
   ctx.lineWidth=LINK_W/view.scale;ctx.lineCap='round';
+  // エッジ de-haze: 大規模グラフはベースを薄く、ズームアウト時は地のエッジを省略して
+  // 「点だけ」にする（淡いエッジの重なりで暗いキャンバスが白っぽく霞むのを防ぐ）。
+  const baseEdge=bigGraph?'rgba(120,140,180,.05)':'rgba(120,140,180,.15)';
+  const drawBase=!bigGraph||view.scale>=EDGE_MIN_SCALE;
   for(const e of edges){
     if(!visible(e.s)||!visible(e.t))continue;
     const on=emph&&(e.s===emph||e.t===emph);
+    // フォーカス/ホバーの接続線は常に明るく上書き描画。地のエッジはズーム閾値で省略可。
+    if(!on&&!drawBase)continue;
     if(on)ctx.strokeStyle='rgba(127,214,160,.7)';
-    else if(colorEdges)ctx.strokeStyle=REASON_COLORS[e.kind]||'rgba(120,140,180,.15)';
-    else ctx.strokeStyle='rgba(120,140,180,.15)';
+    else if(colorEdges)ctx.strokeStyle=REASON_COLORS[e.kind]||baseEdge;
+    else ctx.strokeStyle=baseEdge;
     ctx.beginPath();ctx.moveTo(e.s.x,e.s.y);ctx.lineTo(e.t.x,e.t.y);ctx.stroke();
   }
   for(const n of nodes){
@@ -789,14 +903,30 @@ function draw(){
       ctx.beginPath();ctx.arc(n.x,n.y,r+2,0,6.2832);ctx.stroke();}
     ctx.globalAlpha=1;
   }
+  // ラベル LOD（最重要）: 数百ラベルを一斉描画して重なる「文字の壁」を防ぐ。
+  // ラベルを描くのは — emph（ホバー/フォーカス）か focus の近傍、または
+  // 小規模グラフで十分ズーム、または大規模グラフで hub かつ十分ズーム — のみ。
   const la=Math.max(0,Math.min(1,(view.scale-LABEL_PIVOT)/0.6));
-  if(la>0.02||emph){
+  // 大規模グラフ: hub は scale>=1.15 で、非 hub は更にズームインした時だけ徐々に出す
+  // （深くズームすると Obsidian のように全ラベルが見える）。emph 周辺は常に表示。
+  const hubLabels=bigGraph&&view.scale>=HUB_LABEL_SCALE;
+  const allLa=bigGraph?Math.max(0,Math.min(1,(view.scale-2.0)/1.0)):0;
+  const smallLabels=!bigGraph&&la>0.02;
+  if(emph||hubLabels||smallLabels||allLa>0.02){
     ctx.font='11px sans-serif';ctx.fillStyle='#c5d0e6';
     for(const n of nodes){
       if(!visible(n))continue;
       const near=emph&&(n===emph||(hl&&hl.has(n.id)));
-      if(emph&&!near)continue;
-      ctx.globalAlpha=emph?1:la;
+      let show=false,a=la;
+      if(near){show=true;a=1;}
+      else if(emph){show=false;}
+      else if(smallLabels){show=true;a=la;}
+      else if(bigGraph){
+        if(hubLabels&&hubIds.has(n.id)){show=true;a=1;}
+        else if(allLa>0.02){show=true;a=allLa;}
+      }
+      if(!show)continue;
+      ctx.globalAlpha=a;
       ctx.fillText((n.title||'').slice(0,24),n.x+n.r+3,n.y+3);
     }
     ctx.globalAlpha=1;
@@ -817,6 +947,21 @@ function loop(){
   easeCamera();
   if(sim||camMoving()||dirty){draw();dirty=false;}
   requestAnimationFrame(loop);
+}
+// 大規模グラフ時、隅に小さなヒントを出す（ズーム/ホバーでラベル, ⚙で絞り込み）。
+// _GRAPH_DOM には要素が無いので .graphwrap に動的生成し textContent で安全に設定する。
+let hintEl=null;
+function updateHint(){
+  const wrap=cv.parentElement;if(!wrap)return;
+  if(bigGraph){
+    if(!hintEl){
+      hintEl=document.createElement('div');hintEl.className='ghint';
+      wrap.appendChild(hintEl);
+    }
+    hintEl.textContent='ノード数 '+nodes.length
+      +' — ズーム/ホバーでラベル表示, ⚙で絞り込み';
+    hintEl.hidden=false;
+  }else if(hintEl){hintEl.hidden=true;}
 }
 function buildLegend(){
   legendEl.textContent='';
@@ -863,6 +1008,14 @@ async function load(){
   for(const n of nodes){
     n.deg=adj.get(n.id).size;n.r0=4+Math.sqrt(n.deg)*1.6;n.r=n.r0*NODE_SCALE;
   }
+  // 大規模グラフ判定と hub（高次数 top-K）抽出。ラベル LOD/疎開の基準にする。
+  bigGraph=nodes.length>BIG_N;
+  hubIds.clear();
+  if(bigGraph){
+    const ranked=nodes.slice().sort(function(a,b){return b.deg-a.deg;});
+    for(let i=0;i<Math.min(HUB_K,ranked.length);i++)hubIds.add(ranked[i].id);
+  }
+  updateHint();
   edges=[];
   for(const e of (data.edges||[])){
     const s=byId.get(e.source),t=byId.get(e.target);if(!s||!t)continue;
@@ -1962,8 +2115,11 @@ document.addEventListener('keydown',function(e){
   if(k==='?'){e.preventDefault();openCheat();return;}
 });
 
-// 起動完了フック（loadGraphData 後に呼ばれる。今は no-op だが将来の整合用）。
-window.__powerReady=function(){};
+// 起動完了フック（loadGraphData 後に呼ばれる）。__facets が埋まったので
+// 検索 UI の取引先 datalist を遅延充填する（未定義時は free-text フォールバック）。
+window.__powerReady=function(){
+  if(typeof window.populateClientList==='function'){window.populateClientList();}
+};
 })();
 """
 
@@ -2154,11 +2310,53 @@ def create_app(
                 )
             conn.commit()
 
-    def _list_graph_docs(email: str) -> list[dict[str, Any]]:
-        """グラフ用の資料一覧を取得する（provider 注入時はそれ・本番は RLS 接続で実取得）。"""
+    def _list_graph_docs(email: str, *, with_embeddings: bool = False) -> list[dict[str, Any]]:
+        """グラフ用の資料一覧を取得する（provider 注入時はそれ・本番は RLS 接続で実取得）。
+
+        ``with_embeddings`` が True のときだけ各資料の代表ベクトルも引く（concept edges 用・
+        やや重い）。provider 注入経路はベクトルを返さないため concept は出ない（OK）。
+
+        重複排除（suppressed 除外）の整合性: 検索側（skills/search）は ``DOC_DEDUP_EXCLUDE_SEARCH``
+        が ON のときだけ suppressed を除外する（既定 OFF・後方互換）。グラフ側も同じ env を読み、
+        検索とグラフで「重複資料を隠す/見せる」を連動させる（OFF なら両方見せる）。
+        env 読み取りはこの呼び出し側で行い、pgvector へ ``exclude_duplicates`` として渡す。
+
+        ⚠️ pgvector ``list_documents_for_graph`` は現状 ``exclude_duplicates`` 引数を持たず
+        suppressed を**無条件**で除外する（pgvector_client.py は本タスクで編集禁止）。そのため
+        引数対応の有無を実行時に検査し、対応していれば値を渡す／未対応なら**従来どおり呼ぶ**
+        （= 引数を渡さず TypeError を回避）。env 値はログに出して、未対応時に「グラフが env を
+        無視している」ことを観測可能にする。pgvector に ``exclude_duplicates: bool=False`` が
+        追加され次第、本関数は無改修で連動が効くようになる（ハンドオフ参照）。
+        """
         if graph_docs_provider is not None:
             return graph_docs_provider(email)
+        import inspect
+
         from teamagent.adapters.pgvector_client import PgVectorClient
+
+        # 検索側と同じ env で suppressed 除外を連動（既定 OFF・後方互換）。
+        exclude_duplicates = _envflag("DOC_DEDUP_EXCLUDE_SEARCH")
+        # pgvector が exclude_duplicates 引数を受けられるかを実行時に判定（編集禁止のため）。
+        graph_fn = PgVectorClient.list_documents_for_graph
+        pg_supports_exclude = "exclude_duplicates" in inspect.signature(graph_fn).parameters
+
+        # pgvector が当該引数に対応していれば値を渡す。未対応なら空 dict＝従来呼び出し
+        # （TypeError 回避）。dict 経由の splat にして mypy の静的シグネチャ検査も満たす
+        # （現状の pgvector は exclude_duplicates を持たない＝静的には未対応のため）。
+        extra: dict[str, Any] = {}
+        if pg_supports_exclude:
+            extra["exclude_duplicates"] = exclude_duplicates
+        else:
+            # env と実挙動の乖離（env ON でも pgvector が無条件 suppressed 除外）を観測可能に。
+            logger.info(
+                "graph_dedup_flag_pending_pgvector_support",
+                user_email=email,
+                exclude_duplicates=exclude_duplicates,
+                note=(
+                    "pgvector.list_documents_for_graph に exclude_duplicates 引数が未追加。"
+                    "現状は suppressed を無条件除外。引数追加で env と連動可。"
+                ),
+            )
 
         domain = email.split("@", 1)[1] if "@" in email else email
         pg = PgVectorClient.from_env()
@@ -2168,7 +2366,7 @@ def create_app(
             user_groups=[domain],
             user_role="user",
         ) as conn:
-            return pg.list_documents_for_graph(conn)
+            return pg.list_documents_for_graph(conn, with_embeddings=with_embeddings, **extra)
 
     def _search_email(request: Request) -> str | None:
         """検索 cookie セッションから本人 email を取り出す（未認証/期限切れは None）。"""
@@ -2346,6 +2544,14 @@ def create_app(
         top_k = max(1, min(top_k, 50))
         # タグchipクリックでの絞り込み（Obsidianのタグクリック相当）。空文字は無視。
         filter_industry = str(payload.get("filter_industry", "")).strip() or None
+        # 取引先（部分一致 ILIKE・cls_project 主体）。空文字は無視。
+        filter_client = str(payload.get("filter_client", "")).strip() or None
+        # 予算バンドは allowlist（3バンド literal のみ）で二重防御。不正値は無視。
+        _b = str(payload.get("filter_budget", "")).strip()
+        filter_budget = _b if _b in _BUDGET_BANDS else None
+        include_unknown_budget = bool(payload.get("include_unknown_budget", False))
+        _s = str(payload.get("sort_budget_near", "")).strip()
+        sort_budget_near = _s if _s in _BUDGET_BANDS else None
 
         from teamagent.skills.base import SkillContext
         from teamagent.skills.search.schema import SearchInput
@@ -2360,7 +2566,16 @@ def create_app(
         )
         try:
             out = _get_search_skill().run(
-                SearchInput(query=query, top_k=top_k, filter_industry=filter_industry), ctx
+                SearchInput(
+                    query=query,
+                    top_k=top_k,
+                    filter_industry=filter_industry,
+                    filter_client=filter_client,
+                    filter_budget=filter_budget,
+                    include_unknown_budget=include_unknown_budget,
+                    sort_budget_near=sort_budget_near,
+                ),
+                ctx,
             )
         except Exception as exc:
             logger.warning(
@@ -2382,6 +2597,7 @@ def create_app(
                 "doc_type": h.doc_type,
                 "industry": h.industry,
                 "project": h.project,
+                "budget": h.budget,
                 "deal_phase": h.deal_phase,
                 "doc_id": h.source_uri,
                 "chunk_id": h.chunk_id,
@@ -2454,8 +2670,12 @@ def create_app(
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         from teamagent.connect_web.graph import build_graph
 
+        # 意味クラスタ・エッジ（埋め込み kNN で「タグは違うが意味的に近い」資料を弱リンク）。
+        # 既定 OFF。ON のときだけ代表ベクトルを引いて build_graph に渡す。
+        concept_flag = os.environ.get("GRAPH_CONCEPT_EDGES", "").strip().lower()
+        concept_on = concept_flag in ("1", "true", "yes")
         try:
-            docs = _list_graph_docs(email)
+            docs = _list_graph_docs(email, with_embeddings=concept_on)
         except Exception as exc:
             logger.warning(
                 "graph_api_failed",
@@ -2464,7 +2684,23 @@ def create_app(
                 detail=str(exc)[:200],
             )
             return JSONResponse({"error": "graph_failed"}, status_code=500)
-        return JSONResponse(build_graph(docs))
+        concept_vectors: dict[int, list[float]] | None = None
+        if concept_on:
+            concept_vectors = {
+                int(d["node_id"]): d["embedding"]
+                for d in docs
+                if d.get("node_id") is not None and d.get("embedding")
+            }
+        # しきい値/k は env で上書き可（再ビルド無しで較正）。E5 はベースライン cosine が
+        # 高めなので、団子化したら GRAPH_CONCEPT_THRESHOLD を上げる運用にする。
+        return JSONResponse(
+            build_graph(
+                docs,
+                concept_vectors=concept_vectors,
+                concept_k=_env_int("GRAPH_CONCEPT_K", 4),
+                concept_threshold=_env_float("GRAPH_CONCEPT_THRESHOLD", 0.85),
+            )
+        )
 
     return app
 

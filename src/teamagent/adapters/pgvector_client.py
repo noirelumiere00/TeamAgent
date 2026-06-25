@@ -342,6 +342,10 @@ class PgVectorClient:
         *,
         strict_industry: bool = False,
         metadata_filters: dict[str, str] | None = None,
+        sticky_filters: dict[str, str] | None = None,
+        metadata_contains: dict[str, str] | None = None,
+        exclude_boilerplate: bool = False,
+        exclude_duplicates: bool = False,
     ) -> list[SearchHit]:
         """documents + chunks JOIN で cosine 類似度上位 limit 件を返す。
 
@@ -361,6 +365,48 @@ class PgVectorClient:
             ``d.metadata->>%s = %s`` の追加 AND 条件として bind される（厳密一致のみ）。
             filter_industry とは独立に AND 結合する。key / value は placeholder 化される
             ため SQL injection から保護される。
+
+        sticky_filters:
+            metadata_filters と同じ ``d.metadata->>%s = %s`` 等価 AND だが、**呼び側
+            (_pool_search) が fail-open / exclusion_rescue の再検索でも必ず再注入する**点
+            だけが約束として違う（adapter 自身は普通に AND するだけ）。ユーザーが明示指定した
+            予算バンド（cls_budget）など「0 件は 0 件で返す」べきフィルタを載せる。
+            特別キー ``__budget_or_unknown__`` のときだけ soft 化し、value を band として
+            ``(cls_budget = %s OR cls_budget = '不明')`` の OR 句に展開する（予算「不明も
+            含める」用。等価1値では OR を表現できないため専用扱い）。
+            key / value は placeholder 化されるため SQL injection から保護される。
+
+        metadata_contains:
+            部分一致（ILIKE）フィルタ。value の LIKE メタ文字（パーセント / アンダースコア /
+            バックスラッシュ）は bind 前にエスケープし ``ESCAPE`` 句を付ける。
+            特別キー ``__client__`` は
+            ``cls_project``（全資料に付く取引先）/ ``client_name``（FB）/ ``d.title`` の OR
+            グループへ展開する（client_name 単独だと NULL 行を暗黙除外し FB 投稿だけに痩せる
+            二次被害を避けるため）。それ以外のキーは ``d.metadata->>%s ILIKE %s`` 単独。
+            pattern / key とも placeholder 化されるため SQL injection から保護される。
+
+        exclude_boilerplate:
+            True のとき WHERE に
+            ``AND COALESCE((c.metadata->>'boilerplate')::bool, false) = false`` を足し、
+            テンプレ判定された chunk（表紙/会社紹介など複数資料に共通する定型）を
+            検索対象から外す。既定 False = 句を一切足さず現行 SQL と完全一致。
+            フラグが無ければ COALESCE(...,false)=false が全 chunk で真になり影響しない。
+
+        exclude_duplicates:
+            True のとき WHERE に **「非正本でも、その正本が現 RLS 接続で不可視なら残す」**
+            条件を足す（H3 修正）。dedup は admin で全テナント横断クラスタ化し
+            content_len 最大を正本にするため、正本が狭 ACL（個人共有）だと、会社共有版が
+            suppressed=true で WHERE 除外され、かつ正本は RLS で見えず→クラスタごと検索消失
+            し得る。これを防ぐため、単純な ``suppressed IS DISTINCT FROM 'true'`` ではなく
+            ``AND NOT (suppressed=true AND EXISTS(正本 dc が現 conn で可視))`` を足す：
+            正本が**この RLS conn で見えるときだけ**非正本を除外し、見えなければ
+            非正本（会社共有版）を救済して残す。EXISTS は RLS 適用 conn 上の
+            ``documents`` を引くので、正本が不可視なら EXISTS 偽→除外しない側に倒れる。
+            ``duplicate_of`` が無効 UUID（キャスト失敗）でも EXISTS 偽になるよう、
+            uuid 形式チェック（``~`` 正規表現）でガードしてからキャストする（除外しない側）。
+            既定 False = 句を一切足さず現行 SQL と完全一致。何も suppressed されて
+            いなければ NOT(...) 全体が真になり無影響（後方互換）。exclude_boilerplate と
+            AND 併用可。
         """
         where_parts: list[str] = []
         params: list[Any] = [embedding]  # score 算出の 1st %s
@@ -383,6 +429,64 @@ class PgVectorClient:
                 where_parts.append("d.metadata->>%s = %s")
                 params.extend([key, value])
 
+        # sticky（ユーザー明示・等価）— metadata_filters と同じ AND だが、呼び側
+        # _pool_search が fail-open / exclusion_rescue 再検索でも必ず再注入する点だけが違う。
+        # 特別キー __budget_or_unknown__ は soft 化（cls_budget=値 OR cls_budget='不明'）。
+        # 等価1値では OR を表現できないため、予算「不明も含める」だけ専用に OR 句へ展開する。
+        if sticky_filters:
+            for key, value in sticky_filters.items():
+                if key == "__budget_or_unknown__":
+                    where_parts.append(
+                        "(d.metadata->>'cls_budget' = %s OR d.metadata->>'cls_budget' = '不明')"
+                    )
+                    params.append(value)
+                else:
+                    where_parts.append("d.metadata->>%s = %s")
+                    params.extend([key, value])
+
+        # metadata_contains（部分一致 ILIKE・__client__ は cls_project/client_name/title の OR）。
+        if metadata_contains:
+            for key, value in metadata_contains.items():
+                # LIKE メタ文字をエスケープしてから %wrap（injection は placeholder で別途防御）。
+                safe = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                pat = f"%{safe}%"
+                if key == "__client__":
+                    # 取引先は cls_project（全資料）/ client_name（FB）/ title の OR グループ。
+                    where_parts.append(
+                        "(d.metadata->>'cls_project' ILIKE %s ESCAPE '\\' "
+                        "OR d.metadata->>'client_name' ILIKE %s ESCAPE '\\' "
+                        "OR d.title ILIKE %s ESCAPE '\\')"
+                    )
+                    params.extend([pat, pat, pat])
+                else:
+                    where_parts.append("d.metadata->>%s ILIKE %s ESCAPE '\\'")
+                    params.extend([key, pat])
+
+        if exclude_boilerplate:
+            # テンプレ chunk を検索対象から除外（フラグ無し chunk は影響しない）。
+            where_parts.append("COALESCE((c.metadata->>'boilerplate')::bool, false) = false")
+
+        if exclude_duplicates:
+            # H3: 「非正本（suppressed=true）かつ、その正本（duplicate_of）が現 RLS 接続で
+            # 可視のときだけ」除外する。正本が現 conn で不可視（狭 ACL の個人共有など）なら
+            # EXISTS が偽になり、会社共有版（非正本）をクラスタごと検索消失させず救済する。
+            # EXISTS は RLS 適用 conn 上の documents を引くため、正本の可視性は接続の
+            # ロール/ユーザ GUC で自然に評価される。duplicate_of が無効 UUID でも
+            # ``~`` の uuid 形式チェックで弾き、キャスト例外を出さず除外しない側に倒す。
+            # suppressed が無い doc は NOT(false AND ...) = true で常に残る（後方互換）。
+            where_parts.append(
+                "NOT ("
+                "COALESCE((d.metadata->>'suppressed')::bool, false) "
+                "AND d.metadata->>'duplicate_of' ~ "
+                "'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' "
+                "AND EXISTS ("
+                "SELECT 1 FROM documents dc "
+                "WHERE dc.id = (d.metadata->>'duplicate_of')::uuid"
+                ")"
+                ")"
+            )
+
         where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
         # chunk_id: hashtext は int4 だが bigint キャストして abs で INT_MIN overflow を防ぐ
@@ -394,6 +498,7 @@ class PgVectorClient:
                 COALESCE(c.contextualized, c.content) AS content,
                 1 - (c.embedding <=> %s::vector) AS score,
                 c.page_num,
+                d.id AS document_id,
                 d.source_uri,
                 d.source_type::text AS source_type,
                 d.title,
@@ -406,7 +511,10 @@ class PgVectorClient:
                 d.metadata->>'cls_project' AS cls_project,
                 d.metadata->>'cls_industry' AS cls_industry,
                 d.metadata->>'cls_doc_type' AS cls_doc_type,
-                d.metadata->>'cls_phase' AS cls_phase
+                d.metadata->>'cls_phase' AS cls_phase,
+                d.metadata->>'cls_solution' AS cls_solution,
+                d.metadata->>'cls_budget' AS cls_budget,
+                d.metadata->>'cls_target' AS cls_target
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             {where_clause}
@@ -429,6 +537,11 @@ class PgVectorClient:
                 "title": r.get("title"),
                 "channel_name": r.get("channel_name"),
             }
+            # L1: document_id（資料単位の安定キー）を metadata に詰める。
+            # dedup.cap_per_document が source_uri フォールバックに頼らず正確に
+            # 同一資料を畳めるようにする。UUID は str 化して JSON 親和にする。
+            if r.get("document_id") is not None:
+                meta["document_id"] = str(r["document_id"])
             if r.get("page_num") is not None:
                 meta["page_num"] = r["page_num"]
             # Day 8: 営業 FB metadata (Phase 2 Drive 自動マッチング用)
@@ -444,9 +557,18 @@ class PgVectorClient:
                     meta["bant_score"] = r["bant_score"]
                 if r.get("channel_type"):
                     meta["channel_type"] = r["channel_type"]
-            # ナレッジ自動分類タグ（ingest.classify が付与・案件/業界/種別/フェーズ）。
+            # ナレッジ自動分類タグ（ingest.classify が付与・案件/業界/種別/フェーズ、
+            # および第2世代の解決策/予算/ターゲット軸）。
             # is_sales_fb と独立に常に拾う（Drive 資料は FB ではないが分類対象）。
-            for cls_key in ("cls_project", "cls_industry", "cls_doc_type", "cls_phase"):
+            for cls_key in (
+                "cls_project",
+                "cls_industry",
+                "cls_doc_type",
+                "cls_phase",
+                "cls_solution",
+                "cls_budget",
+                "cls_target",
+            ):
                 if r.get(cls_key):
                     meta[cls_key] = r[cls_key]
             hits.append(
@@ -473,6 +595,7 @@ class PgVectorClient:
         *,
         limit: int = 600,
         request_id: str | None = None,
+        with_embeddings: bool = False,
     ) -> list[dict[str, Any]]:
         """グラフ表示用に documents を新しい順で列挙する（RLS 適用済 conn 前提）。
 
@@ -483,8 +606,44 @@ class PgVectorClient:
         ``connection(app_role='teamagent_app', user_email=...)`` で有効化済の前提なので、
         本人 ACL（個人 + 会社共有）に見えるドキュメントのみが返る。
         列名・テーブル名は固定リテラル、limit は placeholder bind（bandit B608 安全）。
+
+        分類タグは旧軸（industry/project/doc_type）に加えて第2世代の
+        ``cls_solution`` / ``cls_budget`` / ``cls_target`` も射影する（行 dict に乗る）。
+
+        with_embeddings=True のときは、各 doc の**代表埋め込みベクトル**（= その資料の
+        全チャンク embedding の平均 ``AVG(c.embedding)``）を ``embedding`` として float の
+        list で行に乗せる。これは ``connect_web.graph.concept_edges``（意味クラスタ・エッジ）
+        用で重いので、グラフ route が明示要求したときだけ取得する（既定 False = 旧挙動・形は不変）。
+        chunks の RLS は documents 連動なので、本人可視分のチャンクのみが平均に入る。
+
+        ※先頭チャンク（chunk_idx=0）は営業資料では表紙＝テンプレなので代表に使わない。
+        全チャンクの平均にすることで共通テンプレ部分が施策チャンクで希釈され、「表紙が同じ
+        デッキ同士」を意味的に近いと誤判定する（＝新種のハリネズミ）のを防ぐ。pgvector 0.5.0+
+        は ``avg(vector)`` 集約を提供する（本番 RDS は pgvector 0.8.2）。
+
+        重複排除: ``d.metadata->>'suppressed' IS DISTINCT FROM 'true'`` を**無条件**で
+        WHERE に置き、dedup で非正本（隠す方）と印された document をグラフのノードに
+        出さない。何も suppressed されていなければ全 doc で真になり no-op（後方互換）。
         """
-        sql = """
+        # 代表ベクトル = 全チャンク embedding の平均（テンプレ希釈・資料全体の意味）。
+        embedding_select = (
+            ",\n                emb.embedding AS embedding" if with_embeddings else ""
+        )
+        # テンプレ chunk（metadata.boilerplate=true）を平均から除外し、表紙/会社紹介
+        # などの共通テンプレで concept edges がつながるのを防ぐ。フラグが無ければ
+        # COALESCE(...,false)=false が全 chunk で真になり旧挙動と同一（後方互換）。
+        embedding_join = (
+            """
+            LEFT JOIN LATERAL (
+                SELECT AVG(c.embedding) AS embedding
+                FROM chunks c
+                WHERE c.document_id = d.id
+                  AND COALESCE((c.metadata->>'boilerplate')::bool, false) = false
+            ) emb ON true"""
+            if with_embeddings
+            else ""
+        )
+        sql = f"""
             SELECT
                 abs(hashtext(d.id::text)::bigint) AS node_id,
                 d.title,
@@ -493,8 +652,11 @@ class PgVectorClient:
                 d.metadata->>'cls_industry' AS cls_industry,
                 d.metadata->>'cls_project' AS cls_project,
                 d.metadata->>'cls_doc_type' AS cls_doc_type,
+                d.metadata->>'cls_solution' AS cls_solution,
+                d.metadata->>'cls_budget' AS cls_budget,
+                d.metadata->>'cls_target' AS cls_target,
                 d.metadata->>'client_name' AS client_name,
-                ex.excerpt AS excerpt
+                ex.excerpt AS excerpt{embedding_select}
             FROM documents d
             LEFT JOIN LATERAL (
                 SELECT left(COALESCE(c.contextualized, c.content), 160) AS excerpt
@@ -502,19 +664,28 @@ class PgVectorClient:
                 WHERE c.document_id = d.id
                 ORDER BY c.chunk_idx ASC
                 LIMIT 1
-            ) ex ON true
+            ) ex ON true{embedding_join}
+            WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
             ORDER BY d.modified_at DESC NULLS LAST
             LIMIT %s
         """  # nosec B608
         with conn.cursor() as cur:
             cur.execute(sql, [limit])
             rows = cur.fetchall()
-        docs = [dict(r) for r in rows]
+        docs: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            if with_embeddings and d.get("embedding") is not None:
+                # pgvector の Vector / numpy 配列を素の float list に正規化する
+                # （build_graph / concept_edges は純 Python の list を期待する）。
+                d["embedding"] = [float(x) for x in d["embedding"]]
+            docs.append(d)
         logger.info(
             "pgvector_list_documents_for_graph",
             request_id=request_id,
             doc_count=len(docs),
             limit=limit,
+            with_embeddings=with_embeddings,
         )
         return docs
 
