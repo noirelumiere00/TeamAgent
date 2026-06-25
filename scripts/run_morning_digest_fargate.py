@@ -255,7 +255,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
 
     # --- 要確認メール（medium・1行圧縮 + 「+N件」省略）---
     if medium:
-        lines = [f"🟡 *目を通したい（{len(medium)}件）*"]
+        lines = [f"🟡 *未確認・未返信（{len(medium)}件）*"]
         for m in medium[:3]:
             # display fields are PII; rendered to owner DM only, never logged (G3/G7)
             subj = _slack_escape(

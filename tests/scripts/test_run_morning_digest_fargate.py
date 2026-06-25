@@ -192,7 +192,7 @@ def test_medium_compressed_with_remaining() -> None:
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
     # medium 2件 + low 1件。medium[:3] で2件表示・残り low 1件は「+1件」省略。
-    assert "目を通したい（2件）" in dump
+    assert "未確認・未返信（2件）" in dump
     assert "〈+1件〉" in dump
 
 
