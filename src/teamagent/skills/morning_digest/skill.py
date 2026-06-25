@@ -329,6 +329,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     subject_scrubbed=str(scrub_value(anchor.headers.get("Subject", "")))[:80],
                     occurred_at=_iso_or_none(anchor.internal_date_ms),
                     thread_count=len(thread),
+                    # 不透明スレッドID（非PII）。配信層が Gmail スレッド/下書きへ deep link する。
+                    thread_id=tid or None,
                     sender_label=_sender_label_ja(priority),
                     # 表示専用（本人 DM のみ・未マスク・PII・ログ厳禁）
                     counterpart_display=_display_counterpart(anchor.headers, requester),
@@ -565,6 +567,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 )
                 created += 1
                 digest_items[idx].has_draft = True
+                # 本人 DM でそのまま確認できるよう下書き本文を載せる（PII・ログ厳禁）。
+                digest_items[idx].draft_preview = draft_text[:4000]
                 if thread_id:
                     existing_threads.add(thread_id)
             except Exception:
