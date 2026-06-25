@@ -10,9 +10,7 @@ ME = "s-komata@vectorinc.co.jp"
 
 
 def test_gmail_thread_url_authuser_and_fallback() -> None:
-    assert gmail_thread_url(TID, ME) == (
-        f"https://mail.google.com/mail/?authuser={ME}#all/{TID}"
-    )
+    assert gmail_thread_url(TID, ME) == (f"https://mail.google.com/mail/?authuser={ME}#all/{TID}")
     assert gmail_thread_url(TID, "") == f"https://mail.google.com/mail/u/0/#all/{TID}"
     assert gmail_thread_url("", ME) is None
     assert gmail_account_base("") == "https://mail.google.com/mail/u/0/"
@@ -54,9 +52,7 @@ def test_draft_taken_blocks_shows_body_and_open_link() -> None:
 
 
 def test_draft_taken_blocks_escapes_mrkdwn() -> None:
-    blocks = ui.draft_taken_blocks(
-        thread_id=TID, user_email=ME, draft_body="A < B & C > D"
-    )
+    blocks = ui.draft_taken_blocks(thread_id=TID, user_email=ME, draft_body="A < B & C > D")
     dump = str(blocks)
     assert "&lt;" in dump and "&amp;" in dump and "&gt;" in dump
     assert "A < B" not in dump  # 生の < は残さない

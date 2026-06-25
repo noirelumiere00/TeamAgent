@@ -80,9 +80,7 @@ def draft_taken_blocks(
     head = "✅ 返信下書きを作成しました（未送信・Slackでは送信しません）。"
     if subject:
         head += f"\n件名: {_esc(subject)}"
-    blocks: list[dict[str, Any]] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": head}}
-    ]
+    blocks: list[dict[str, Any]] = [{"type": "section", "text": {"type": "mrkdwn", "text": head}}]
     pv = _esc((draft_body or "").strip())
     if len(pv) > _DRAFT_PREVIEW_MAX:
         pv = pv[:_DRAFT_PREVIEW_MAX].rstrip() + "…"
