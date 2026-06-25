@@ -552,3 +552,139 @@ def test_E31_calendar_link_injection_escaped():
     dump = str(blocks)
     assert "<https://evil.example|" not in dump
     assert "&lt;https://evil.example|" in dump
+
+
+# ════ v2 UI: 冒頭文 / スコアボード削除 / 要返信ボタン / 未開封 ════
+
+
+def test_E32_preamble_and_no_scoreboard():
+    """冒頭は『メールと本日の予定をお送りします。』、旧スコアボード(要確認/下書き済)は無い。"""
+    d = MorningDigestOutput(user_email_masked="m***@x")
+    text, blocks = runner._format_block_kit(d, ME)
+    assert text == "メールと本日の予定をお送りします。"
+    dump = str(blocks)
+    assert "メールと本日の予定をお送りします" in dump
+    assert "下書き済" not in dump and "要確認" not in dump  # スコアボード削除
+
+
+def test_E33_reply_buttons_states():
+    """要返信メールのボタン: 未作成→[下書きを作成(action)]＋[確認する(url)]、作成済→[開く(url)]。"""
+    # 未作成（draft_token あり）
+    m1 = MailDigestItem(
+        counterpart_masked="a***@x",
+        importance="high",
+        subject_display="件名A",
+        draft_token="TOK123",
+        thread_gmail_url="https://mail.google.com/mail/u/0/#all/tA",
+    )
+    btns = runner._reply_buttons(m1)
+    create = [b for b in btns if b.get("action_id") == "mail_draft"]
+    assert create and create[0]["value"] == "TOK123"  # 押下で worker が受ける
+    assert any(b.get("url", "").endswith("#all/tA") for b in btns)  # 確認する=スレッド直行
+    assert all("value" not in b or b.get("action_id") for b in btns)  # url ボタンは action 無し
+
+    # 作成済 → 作成ボタンは出ず「開く」url ボタン
+    m2 = MailDigestItem(
+        counterpart_masked="a***@x", importance="high", has_draft=True, draft_token="TOK"
+    )
+    btns2 = runner._reply_buttons(m2)
+    assert not [b for b in btns2 if b.get("action_id") == "mail_draft"]
+    assert any("drafts" in b.get("url", "") for b in btns2)
+
+
+def test_E34_unread_section_lists_unread_non_high():
+    """未開封セクションには is_unread かつ非 high のメールが出る（high は要返信側）。"""
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        mail_digest=[
+            MailDigestItem(
+                counterpart_masked="a***@x",
+                importance="high",
+                is_unread=True,
+                subject_display="高重要",
+            ),
+            MailDigestItem(
+                counterpart_masked="b***@x",
+                importance="medium",
+                is_unread=True,
+                subject_display="未読の通知",
+                summary="お知らせ要約",
+            ),
+            MailDigestItem(
+                counterpart_masked="c***@x",
+                importance="low",
+                is_unread=False,
+                subject_display="既読low",
+            ),
+        ],
+    )
+    _t, blocks = runner._format_block_kit(d, ME)
+    dump = str(blocks)
+    assert "未開封" in dump
+    assert "未読の通知" in dump and "お知らせ要約" in dump  # 未読medium＋要約
+    assert "既読low" not in dump  # 既読は未開封に出ない
+    # high(高重要) は要返信側に出る（未開封側ではボタン無し一覧なので action は high 由来のみ）
+    assert "高重要" in dump
+
+
+# ════ v2 ロジック: オンデマンド下書き ════
+
+
+def test_E35_draft_on_demand_only_skips_auto_generation():
+    """DRAFT_ON_DEMAND_ONLY 時、run() は朝に下書きを自動生成しない（has_draft 照合のみ）。"""
+    g = _Gmail([_to_me(thread="tX")], existing=["tX"])  # 既に下書きあり
+    skill = _skill(g)
+    skill._draft_on_demand_only = True
+    out = _run(skill, max_drafts=3)
+    assert len(g.created) == 0  # 自動生成しない
+    assert out.mail_digest and out.mail_digest[0].has_draft is True  # 既存は has_draft 反映
+
+
+def test_E36_generate_draft_for_thread_creates_reply():
+    """ボタン経由のオンデマンド生成：本人宛スレッドに Reply-All 下書きを1件作る。"""
+    g = _Gmail([_to_me(thread="tZ", subj="見積")])
+    skill = _skill(g)
+    ctx = SkillContext(request_id="r", metadata={"user_email": ME})
+    res = skill.generate_draft_for_thread("tZ", ME, ctx)
+    assert res["created"] is True and res["error"] is None
+    assert len(g.created) == 1 and g.created[0]["thread_id"] == "tZ"
+    assert res["thread_url"].endswith("#all/tZ")
+
+
+def test_E37_generate_draft_for_thread_idempotent():
+    """既に下書きがあるスレッドは二重作成しない（already=True）。"""
+    g = _Gmail([_to_me(thread="tD")], existing=["tD"])
+    skill = _skill(g)
+    ctx = SkillContext(request_id="r", metadata={"user_email": ME})
+    res = skill.generate_draft_for_thread("tD", ME, ctx)
+    assert res["already"] is True and res["created"] is False
+    assert len(g.created) == 0
+
+
+def test_E38_generate_draft_for_thread_rejects_cc_only():
+    """本人が To に居ない（CC のみ）スレッドは下書きを作らない（not_addressed）。"""
+    m = _Msg(
+        headers={"From": "a@x.com", "To": "boss@x.com", "Cc": ME, "Subject": "共有"},
+        payload=_pl("本文"),
+        internal_date_ms=1,
+        thread_id="tC",
+    )
+    g = _Gmail([m])
+    skill = _skill(g)
+    ctx = SkillContext(request_id="r", metadata={"user_email": ME})
+    res = skill.generate_draft_for_thread("tC", ME, ctx)
+    assert res["created"] is False and res["error"] == "not_addressed"
+    assert len(g.created) == 0
+
+
+def test_E39_is_unread_collected_from_label_ids():
+    """スレッドに UNREAD ラベルがあれば item.is_unread=True（未開封セクションの素材）。"""
+    m_unread = _to_me(thread="tU", subj="未読")
+    m_unread.label_ids = ("INBOX", "UNREAD")  # type: ignore[attr-defined]
+    m_read = _to_me(thread="tR", subj="既読")
+    m_read.label_ids = ("INBOX",)  # type: ignore[attr-defined]
+    t = '[{"importance":"medium","summary":"a"},{"importance":"medium","summary":"b"}]'
+    out = _run(_skill(_Gmail([m_unread, m_read]), triage=t), max_drafts=0)
+    by_subj = {i.subject_display: i.is_unread for i in out.mail_digest}
+    assert by_subj.get("未読") is True
+    assert by_subj.get("既読") is False

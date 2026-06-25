@@ -64,6 +64,7 @@ class MailDigestItem(BaseModel):
     counterpart_masked: str = Field(description="相手アドレスのマスク表示（ログ安全）")
     subject_scrubbed: str = Field(default="", max_length=80, description="件名（マスク後・短縮）")
     importance: str = Field(default="medium", description="優先度: high / medium / low")
+    is_unread: bool = Field(default=False, description="未読(UNREAD)か＝未開封セクション用")
     occurred_at: str | None = Field(default=None, description="受信日時（ISO・判明時）")
     summary: str = Field(default="", max_length=200, description="1 行サマリ（LLM 生成）")
     has_draft: bool = Field(default=False, description="この件で下書きを生成したか")
@@ -79,6 +80,11 @@ class MailDigestItem(BaseModel):
     )
     subject_display: str = Field(
         default="", max_length=160, description="件名（本人DM限定・未マスク・ログ厳禁）"
+    )
+    # ボタン用 HMAC 署名トークン。生 thread_id は value/ログに出さない（G3）。
+    draft_token: str = Field(default="", max_length=400, description="下書きボタン用の署名トークン")
+    thread_gmail_url: str = Field(
+        default="", max_length=300, description="そのスレッドの Gmail 直リンク（確認するボタン用）"
     )
 
 

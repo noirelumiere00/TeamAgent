@@ -44,7 +44,7 @@ def _digest() -> MorningDigestOutput:
                 subject_scrubbed="動画制作の件",
                 importance="high",
                 summary="25日投稿に向け判断待ち。",
-                has_draft=True,
+                has_draft=True,  # 既に下書き有り→「開く」ボタン
             ),
             MailDigestItem(
                 counterpart_masked="k***@gmo.com",
@@ -52,12 +52,20 @@ def _digest() -> MorningDigestOutput:
                 importance="high",
                 summary="回答待ち。",
                 has_draft=False,
+                draft_token="TOKB",  # 未作成→「下書きを作成」ボタン
+                thread_gmail_url="https://mail.google.com/mail/u/0/#all/tB",
             ),
             MailDigestItem(
-                counterpart_masked="a***@ex.com", subject_scrubbed="請求書", importance="medium"
+                counterpart_masked="a***@ex.com",
+                subject_scrubbed="請求書",
+                importance="medium",
+                is_unread=True,  # 未開封
             ),
             MailDigestItem(
-                counterpart_masked="b***@ex.com", subject_scrubbed="日程調整", importance="medium"
+                counterpart_masked="b***@ex.com",
+                subject_scrubbed="日程調整",
+                importance="medium",
+                is_unread=True,  # 未開封
             ),
             MailDigestItem(
                 counterpart_masked="c***@ex.com", subject_scrubbed="お知らせ", importance="low"
@@ -77,54 +85,45 @@ def _digest() -> MorningDigestOutput:
     )
 
 
-def test_scoreboard_counts() -> None:
-    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
-    # 2番目の block が fields スコアボード。high=2 / drafts=1 / medium=2（カレンダーは除外）。
-    fields_text = " ".join(f["text"] for f in blocks[1]["fields"])
-    assert "要返信*  `2件`" in fields_text
-    assert "下書き済*  `1件`" in fields_text
-    assert "要確認*  `2件`" in fields_text
-    assert "今日の予定" not in fields_text
+def test_preamble_and_no_scoreboard() -> None:
+    """冒頭は固定の枕詞。旧スコアボード（要返信/下書き済/要確認 カウント）は無い（v2）。"""
+    text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    assert text == "メールと本日の予定をお送りします。"
+    dump = str(blocks)
+    assert "メールと本日の予定をお送りします" in dump
+    assert "下書き済" not in dump and "要確認" not in dump  # スコアボード削除
 
 
-def test_high_priority_section_and_draft_elevated() -> None:
+def test_reply_section_has_per_mail_buttons() -> None:
+    """要返信メール（high 2件）に各件ボタン: 作成済→開く / 未作成→下書きを作成＋確認する。"""
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    assert "いますぐ返信したい（2件）" in dump
-    # has_draft=True の high 項目に「✏️ 返信下書き作成済」+ 下書きリンクが出る。
-    assert "✏️ 返信下書き作成済" in dump
-    assert "下書きを見る" in dump
+    assert "要返信メール（2件）" in dump
+    actions = [b for b in blocks if b.get("type") == "actions"]
+    # 各 high メールに actions ブロック（=2個）。グローバルな一括バーは無い。
+    assert len(actions) == 2
+    all_el = [e for b in actions for e in b["elements"]]
+    assert any(e.get("action_id") == "mail_draft" and e.get("value") == "TOKB" for e in all_el)
+    assert any("作成した下書き" not in str(e) and "確認する" in str(e) for e in all_el)
+    assert any(e.get("url", "").endswith("#drafts") for e in all_el)  # 作成済→開く
 
 
 def test_calendar_section_rendered() -> None:
-    # カレンダー（今日の予定）は DM に描画する（2026-06-25 ユーザー指摘で復活）。
-    # display 未設定時は scrubbed にフォールバックして描画する。
+    """カレンダー（今日の予定）が DM に描画される。display 未設定時は scrubbed にフォールバック。"""
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    assert "今日の予定" in dump  # 予定セクションが出る
-    assert "ノーベル定例" in dump  # 件名が出る
-    assert "渋谷オフィス" in dump  # 場所が出る
-    # スコアボードに予定件数（2件）が出る
-    fields_text = " ".join(f["text"] for f in blocks[1]["fields"])
-    assert "予定*  `2件`" in fields_text
+    assert "今日の予定（2件）" in dump
+    assert "ノーベル定例" in dump  # 件名
+    assert "渋谷オフィス" in dump  # 会議室
 
 
-def test_action_buttons_present() -> None:
-    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
-    actions = [b for b in blocks if b.get("type") == "actions"]
-    assert actions, "アクションバーが無い"
-    labels = [e["text"]["text"] for e in actions[0]["elements"]]
-    assert any("下書きを確認" in label for label in labels)  # drafts>0 なので出る
-    assert any("受信トレイ" in label for label in labels)
-    assert not any("カレンダー" in label for label in labels)  # カレンダーボタンは除去
-
-
-def test_medium_compressed_with_remaining() -> None:
+def test_unread_section_lists_unread() -> None:
+    """未開封セクション: is_unread かつ非 high の medium 2件が出る（low/既読は出ない）。"""
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    # medium 2件 + low 1件。medium[:3] で2件表示・残り low 1件は「+1件」省略。
-    assert "目を通したい（2件）" in dump
-    assert "〈+1件〉" in dump
+    assert "未開封（2件）" in dump
+    assert "請求書" in dump and "日程調整" in dump
+    assert "お知らせ" not in dump  # low かつ既読 は未開封に出ない
 
 
 def test_fmt_time_parses_iso_to_jst() -> None:

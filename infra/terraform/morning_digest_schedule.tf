@@ -218,6 +218,8 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_CONCURRENCY", value = tostring(var.morning_digest_concurrency) },
       # triage / 下書き生成に使う Bedrock モデル（既定 Haiku＝低コスト・高速）。
       { name = "BEDROCK_MODEL_ID", value = var.morning_digest_model_id },
+      # 下書きは朝に自動生成せず、要返信メールのボタン押下でオンデマンド生成する。
+      { name = "DRAFT_ON_DEMAND_ONLY", value = "true" },
       # per-user token のリフレッシュに使う connect(web 型)クライアント ID（secret は下の secrets）。
       { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。

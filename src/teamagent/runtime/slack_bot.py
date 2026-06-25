@@ -1632,6 +1632,35 @@ class SkillDispatcher:
         self._user_email_cache[user_id] = email
         return email
 
+    def _mail_draft_quota_ok(self, email: str, *, limit: int = 10) -> bool:
+        """1 人 1 日あたりの下書き生成上限（コスト/連打対策）。worker 常駐の in-memory カウンタ。"""
+        import datetime as _dt
+
+        today = _dt.date.today().isoformat()
+        counts: dict[str, tuple[str, int]] = getattr(self, "_mail_draft_counts", {})
+        self._mail_draft_counts = counts
+        day, n = counts.get(email, (today, 0))
+        return today != day or n < limit
+
+    def _mail_draft_quota_consume(self, email: str) -> None:
+        """下書きを 1 件作成できた時だけカウントを進める（失敗時は消費しない）。"""
+        import datetime as _dt
+
+        today = _dt.date.today().isoformat()
+        counts: dict[str, tuple[str, int]] = getattr(self, "_mail_draft_counts", {})
+        self._mail_draft_counts = counts
+        day, n = counts.get(email, (today, 0))
+        counts[email] = (today, (n + 1) if today == day else 1)
+
+    def _generate_mail_draft(self, thread_id: str, email: str, request_id: str) -> dict[str, Any]:
+        """ボタン押下からの単一スレッド下書き生成（同期・asyncio.to_thread から呼ぶ）。"""
+        from teamagent.skills.base import SkillContext
+        from teamagent.skills.morning_digest.skill import MorningDigestSkill
+
+        skill = MorningDigestSkill(token_store=self._get_token_store())
+        ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
+        return skill.generate_draft_for_thread(thread_id, email, ctx)
+
     async def run_search(
         self,
         query: str,
@@ -1701,6 +1730,42 @@ class SkillDispatcher:
             ctx,
         )
         return output
+
+
+_GMAIL_DRAFTS_URL = "https://mail.google.com/mail/u/0/#drafts"
+
+
+def _swap_draft_button(
+    blocks: list[dict[str, Any]], block_id: str, open_url: str
+) -> list[dict[str, Any]]:
+    """押下された「✏️ 下書きを作成」ボタンを「📨 作成した下書きを開く」直リンクに差し替える。
+
+    block_id でその actions ブロックを特定し、action_id=mail_draft の要素のみ url ボタンに置換。
+    「🔍 確認する」等は残す。該当が無ければ blocks をそのまま返す（fail-open）。
+    """
+    out: list[dict[str, Any]] = []
+    for b in blocks:
+        if b.get("type") == "actions" and str(b.get("block_id", "")) == block_id:
+            new_el: list[dict[str, Any]] = []
+            for e in b.get("elements", []):
+                if e.get("action_id") == "mail_draft":
+                    new_el.append(
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "📨 作成した下書きを開く",
+                                "emoji": True,
+                            },
+                            "url": open_url,
+                        }
+                    )
+                else:
+                    new_el.append(e)
+            out.append({**b, "elements": new_el})
+        else:
+            out.append(b)
+    return out
 
 
 def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
@@ -2385,6 +2450,102 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
 
         header = f"*🎬 動画分析* （${output.total_cost_usd:.4f} / {output.model_id}）"
         await respond(response_type="in_channel", text=f"{header}\n\n{output.analysis}")
+
+    @app.action("mail_draft")
+    async def handle_mail_draft(
+        ack: Any,
+        body: dict[str, Any],
+        action: dict[str, Any],
+        client: Any,
+        respond: Any,
+    ) -> None:
+        """朝ダイジェストの「✏️ 下書きを作成」押下 → スレッド全文を読み Reply-All 下書きを生成。
+
+        Socket Mode 経由で worker(常駐) が受ける。生 thread_id は載らず HMAC 署名トークンを検証
+        （押下者と所有者の二重照合・期限切れ拒否＝fail-closed）。3 秒以内に ack し、生成は
+        別スレッドで実行、完了後にボタンを「📨 作成した下書きを開く」直リンクへ chat.update する。
+        """
+        await ack()  # Slack の 3 秒制約：まず即 ack
+        request_id = f"act-{uuid.uuid4().hex[:12]}"
+        user_id = (body.get("user") or {}).get("id")
+        token_value = str((action or {}).get("value") or "")
+        block_id = str((action or {}).get("block_id") or "")
+        channel = (body.get("channel") or {}).get("id") or (body.get("container") or {}).get(
+            "channel_id"
+        )
+        message = body.get("message") or {}
+        ts = message.get("ts")
+        logger.info("slack_action_mail_draft", request_id=request_id, user_id=user_id)
+        try:
+            await respond(response_type="ephemeral", text="✏️ 下書きを作成中…数秒お待ちください。")
+        except Exception:
+            pass
+
+        email = await disp._resolve_user_email(user_id)
+        if not email:
+            await respond(
+                response_type="ephemeral",
+                text="ユーザーを特定できませんでした（社外/ゲストは対象外です）。",
+            )
+            return
+
+        from teamagent.skills.morning_digest.draft_token import decode_draft_token
+
+        thread_id = decode_draft_token(token_value, email)
+        if not thread_id:
+            await respond(
+                response_type="ephemeral",
+                text="このボタンは無効です（期限切れ/不正）。最新のダイジェストから操作してください。",
+            )
+            return
+        if not disp._mail_draft_quota_ok(email):
+            await respond(
+                response_type="ephemeral",
+                text="本日の下書き作成上限（10件/日）に達しました。明日また利用できます。",
+            )
+            return
+
+        result = await asyncio.to_thread(disp._generate_mail_draft, thread_id, email, request_id)
+        err = result.get("error")
+        if result.get("created"):
+            disp._mail_draft_quota_consume(email)
+        elif result.get("already"):
+            pass  # 既存下書き有り＝開くだけにする
+        elif err in ("not_connected", "reauth_needed"):
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "下書き作成には Google の再連携が必要です（下書き権限）。"
+                    "AiLa に『連携』と話しかけて Google を許可してください。"
+                ),
+            )
+            return
+        else:
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "下書きを作成できませんでした"
+                    "（スレッドが見つからない/一斉送信/本人宛でない 等）。"
+                ),
+            )
+            return
+
+        # 成功（または既存）→ ボタンをその下書きへの直リンクに置換して message を更新。
+        open_url = _GMAIL_DRAFTS_URL
+        try:
+            new_blocks = _swap_draft_button(message.get("blocks") or [], block_id, open_url)
+            await client.chat_update(
+                channel=channel,
+                ts=ts,
+                blocks=new_blocks,
+                text="メールと本日の予定をお送りします。",
+            )
+        except Exception:
+            # 更新に失敗しても、開くリンクだけは本人に返す（fail-open）。
+            await respond(
+                response_type="ephemeral",
+                text=f"✅ 下書きを作成しました。<{open_url}|Gmail の下書きを開く>",
+            )
 
     # Bolt のグローバルエラーハンドラ — ハンドラ外で起きた例外を Sentry に飛ばす
     @app.error

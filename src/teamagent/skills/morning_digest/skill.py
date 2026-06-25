@@ -48,6 +48,7 @@ from teamagent.skills._shared.mail_compose import (
     is_mass_or_impersonal,
 )
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.morning_digest.draft_token import encode_draft_token
 from teamagent.skills.morning_digest.schema import (
     CalendarEventItem,
     MailDigestItem,
@@ -183,6 +184,10 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         )
         # 冪等性: 既存下書きのあるスレッドへの二重作成を防ぐ（毎日運用で必須）。
         self._dedupe_drafts = env_bool("MORNING_DIGEST_DEDUPE_DRAFTS", True)
+        # オンデマンド下書き: True なら朝は生成せず、要返信メールのボタン押下で生成する。
+        # has_draft は朝に list_drafts 照合のみで埋める（ボタン状態の出し分け用）。
+        # コード既定は False（後方互換＝従来の自動生成）。本番は terraform env で true にする。
+        self._draft_on_demand_only = env_bool("DRAFT_ON_DEMAND_ONLY", False)
 
     def run(self, input: MorningDigestInput, ctx: SkillContext) -> MorningDigestOutput:
         log = ctx.bind_logger(self.name)
@@ -236,13 +241,18 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             )
             out.errors.append(f"slack: {type(exc).__name__}")
 
-        # --- 4. 重要メールへの下書き生成（送信しない・drafts.create のみ） ---
+        # --- 4. 下書き ---
+        # 既定（オンデマンド）: 朝は生成しない。要返信メールのボタン押下で生成する。
+        # 朝は has_draft を list_drafts 照合のみで埋め、ボタン状態（作成 or 開く）を出し分ける。
         try:
-            drafts_count, draft_cost = self._create_drafts(
-                token, requester, input, raw_msgs, out.mail_digest, ctx
-            )
-            out.drafts_created = drafts_count
-            total_cost += draft_cost
+            if self._draft_on_demand_only:
+                self._mark_existing_drafts(token, raw_msgs, out.mail_digest, ctx)
+            else:
+                drafts_count, draft_cost = self._create_drafts(
+                    token, requester, input, raw_msgs, out.mail_digest, ctx
+                )
+                out.drafts_created = drafts_count
+                total_cost += draft_cost
         except Exception as exc:
             logger.warning(
                 "morning_digest_draft_failed", request_id=ctx.request_id, err=type(exc).__name__
@@ -323,6 +333,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             priority = _sender_priority(
                 anchor.headers.get("From", ""), self._important_senders, self._internal_domain
             )
+            # 未読判定（UNREAD）＝未開封用。スレッド内に未読が1つでもあれば未読扱い。
+            is_unread = any("UNREAD" in (getattr(m, "label_ids", ()) or ()) for m in thread)
             items.append(
                 MailDigestItem(
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
@@ -330,9 +342,13 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     occurred_at=_iso_or_none(anchor.internal_date_ms),
                     thread_count=len(thread),
                     sender_label=_sender_label_ja(priority),
+                    is_unread=is_unread,
                     # 表示専用（本人 DM のみ・未マスク・PII・ログ厳禁）
                     counterpart_display=_display_counterpart(anchor.headers, requester),
                     subject_display=str(anchor.headers.get("Subject", ""))[:160],
+                    # ボタン用：生 thread_id は出さず HMAC 署名トークン化（G3）。確認用は直リンク。
+                    draft_token=encode_draft_token(tid, requester) if tid else "",
+                    thread_gmail_url=_gmail_thread_url(tid),
                 )
             )
             # HTML 専用メール等で text/plain が無い時は Gmail の snippet（本文プレビュー）で代替。
@@ -534,47 +550,136 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             thread_id = str(getattr(msg, "thread_id", "") or "")
             if self._dedupe_drafts and thread_id and thread_id in existing_threads:
                 continue
-            to_addr = _extract_reply_to(msg.headers, requester)
-            if not to_addr:
-                # 返信先不明（自分が唯一の宛先など）は LLM を回す前にスキップ。
-                continue
-            body = extract_plain_text(msg.payload) or str(getattr(msg, "snippet", "") or "")
-            if is_mass_or_impersonal(msg.headers, body):
-                # 一斉送信/自動配信/一般宛名（各位・ご担当者様 等）は個人返信不要 → 下書きしない。
-                continue
-            # G6: 本文（攻撃者制御）の境界トークンを無害化してから LLM 枠に入れる。
-            masked = _strip_sentinels(str(scrub_value(body))[: self._max_body_chars])
-            thread_history = self._thread_history(gmail_rw, msg, requester, ctx)
-            decisions_section, deal_cost = self._deal_decisions_section(requester, msg, ctx)
-            cost += deal_cost
-            draft_text, draft_cost = self._generate_draft(
-                masked,
-                ctx,
-                thread_history=thread_history,
-                decisions_section=decisions_section,
-            )
-            cost += draft_cost
-            if not draft_text:
-                continue
-            cc_addr = build_cc(msg.headers, requester, to_addr) if self._reply_all else None
-            try:
-                gmail_rw.create_draft(
-                    to=to_addr,
-                    subject=_reply_subject(msg.headers.get("Subject", "")),
-                    body_text=draft_text,
-                    request_id=ctx.request_id,
-                    thread_id=getattr(msg, "thread_id", None),
-                    cc=cc_addr,
-                    in_reply_to_message_id=msg.headers.get("Message-ID"),
-                )
+            made, c = self._create_single_draft(gmail_rw, msg, requester, ctx)
+            cost += c
+            if made:
                 created += 1
                 digest_items[idx].has_draft = True
                 if thread_id:
                     existing_threads.add(thread_id)
-            except Exception:
-                logger.warning("morning_digest_draft_create_failed", request_id=ctx.request_id)
-                continue
         return (created, cost)
+
+    def _create_single_draft(
+        self, gmail_rw: Any, msg: Any, requester: str, ctx: SkillContext
+    ) -> tuple[bool, float]:
+        """1 メッセージ（=スレッドのアンカー）から Reply-All 下書きを 1 件作る。
+
+        返り値 (created, cost)。返信先不明/一斉送信/空本文/作成失敗は created=False。
+        冪等性チェック（list_drafts）と件数上限は呼び出し側の責務。
+        """
+        cost = 0.0
+        to_addr = _extract_reply_to(msg.headers, requester)
+        if not to_addr:
+            return (False, cost)  # 返信先不明（自分が唯一の宛先など）
+        body = extract_plain_text(msg.payload) or str(getattr(msg, "snippet", "") or "")
+        if is_mass_or_impersonal(msg.headers, body):
+            return (False, cost)  # 一斉送信/自動配信/各位 等は個人返信不要
+        # G6: 本文（攻撃者制御）の境界トークンを無害化してから LLM 枠に入れる。
+        masked = _strip_sentinels(str(scrub_value(body))[: self._max_body_chars])
+        thread_history = self._thread_history(gmail_rw, msg, requester, ctx)
+        decisions_section, deal_cost = self._deal_decisions_section(requester, msg, ctx)
+        cost += deal_cost
+        draft_text, draft_cost = self._generate_draft(
+            masked, ctx, thread_history=thread_history, decisions_section=decisions_section
+        )
+        cost += draft_cost
+        if not draft_text:
+            return (False, cost)
+        cc_addr = build_cc(msg.headers, requester, to_addr) if self._reply_all else None
+        try:
+            gmail_rw.create_draft(
+                to=to_addr,
+                subject=_reply_subject(msg.headers.get("Subject", "")),
+                body_text=draft_text,
+                request_id=ctx.request_id,
+                thread_id=getattr(msg, "thread_id", None),
+                cc=cc_addr,
+                in_reply_to_message_id=msg.headers.get("Message-ID"),
+            )
+            return (True, cost)
+        except Exception:
+            logger.warning("morning_digest_draft_create_failed", request_id=ctx.request_id)
+            return (False, cost)
+
+    def _mark_existing_drafts(
+        self, token: Any, raw_msgs: list[Any], digest_items: list[MailDigestItem], ctx: SkillContext
+    ) -> None:
+        """朝（オンデマンド時）に、既に下書きがあるスレッドの has_draft を埋める（生成しない）。"""
+        if not self._dedupe_drafts:
+            return
+        try:
+            gmail = self._gmail_for(token, readonly=True)
+            existing = {
+                str(d.thread_id)
+                for d in gmail.list_drafts(ctx.request_id)
+                if getattr(d, "thread_id", None)
+            }
+        except Exception:
+            logger.warning("morning_digest_list_drafts_failed", request_id=ctx.request_id)
+            return
+        for i, item in enumerate(digest_items):
+            if i < len(raw_msgs):
+                tid = str(getattr(raw_msgs[i], "thread_id", "") or "")
+                if tid and tid in existing:
+                    item.has_draft = True
+
+    def generate_draft_for_thread(
+        self, thread_id: str, requester: str, ctx: SkillContext
+    ) -> dict[str, Any]:
+        """ボタン押下からの単一スレッド オンデマンド下書き生成（worker から呼ぶ）。
+
+        返り値: {created, already, cost_usd, thread_url, error}。error は None なら成功。
+        - already=True: 既に下書きがあった（冪等スキップ）
+        - error='not_connected'/'reauth_needed'/'thread_gone'/'not_addressed'/'not_draftable' 等
+        """
+        out: dict[str, Any] = {
+            "created": False,
+            "already": False,
+            "cost_usd": 0.0,
+            "thread_url": _gmail_thread_url(thread_id),
+            "error": None,
+        }
+        if not thread_id:
+            out["error"] = "invalid_thread"
+            return out
+        try:
+            token = self._resolve_token(requester)
+        except PermissionError:
+            out["error"] = "not_connected"
+            return out
+        try:
+            gmail_rw = self._gmail_for(token, readonly=False)
+        except Exception:
+            out["error"] = "reauth_needed"  # gmail.modify 未認可など
+            return out
+        # 冪等性: 既に下書き有りならスキップ（二重作成しない）。
+        if self._dedupe_drafts:
+            try:
+                for d in gmail_rw.list_drafts(ctx.request_id):
+                    if str(getattr(d, "thread_id", "") or "") == thread_id:
+                        out["already"] = True
+                        return out
+            except Exception:
+                logger.warning("morning_digest_list_drafts_failed", request_id=ctx.request_id)
+        try:
+            thread = gmail_rw.get_thread(thread_id, ctx.request_id)
+        except Exception:
+            out["error"] = "thread_error"
+            return out
+        if not thread:
+            out["error"] = "thread_gone"
+            return out
+        thread = sorted(thread, key=lambda m: int(getattr(m, "internal_date_ms", 0) or 0))
+        anchor = thread[-1]
+        if not _is_addressed_to(getattr(anchor, "headers", {}) or {}, requester):
+            out["error"] = "not_addressed"  # 本人が To に居ない（CC のみ/メーリス）
+            return out
+        made, cost = self._create_single_draft(gmail_rw, anchor, requester, ctx)
+        out["cost_usd"] = cost
+        out["created"] = made
+        if not made:
+            out["error"] = "not_draftable"  # 返信先不明/一斉送信/生成失敗
+        return out
 
     def _thread_history(self, gmail: Any, msg: Any, requester: str, ctx: SkillContext) -> str:
         """対象メールのスレッド全文を「これまでの経緯」テキストに整形（fail-open）。"""
@@ -749,6 +854,12 @@ def _mask_email(email: str) -> str:
 
 def _short_hash(n: int) -> str:
     return hashlib.sha256(str(n).encode()).hexdigest()[:8]
+
+
+def _gmail_thread_url(thread_id: str) -> str:
+    """そのスレッドの Gmail 直リンク（確認するボタン用）。All Mail で開く＝必ず存在する。"""
+    tid = str(thread_id or "")
+    return f"https://mail.google.com/mail/u/0/#all/{tid}" if tid else ""
 
 
 def _iso_or_none(internal_date_ms: int | None) -> str | None:

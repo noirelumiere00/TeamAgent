@@ -9,8 +9,10 @@ from __future__ import annotations
 from typing import Any
 
 from teamagent.runtime.slack_bot import (
+    SkillDispatcher,
     _asyncio_exception_handler,
     _slack_thread_permalink,
+    _swap_draft_button,
     build_ack_message,
     build_search_blocks,
     build_suggestions,
@@ -19,6 +21,42 @@ from teamagent.runtime.slack_bot import (
     strip_mention,
 )
 from teamagent.skills.search.schema import SearchHitOut, SearchOutput
+
+
+def test_swap_draft_button_replaces_only_draft_action() -> None:
+    """押下した mail_draft ボタンだけを『開く』url ボタンに置換し、確認するは残す。"""
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "件名"}},
+        {
+            "type": "actions",
+            "block_id": "b1",
+            "elements": [
+                {"type": "button", "action_id": "mail_draft", "value": "TOK", "text": {}},
+                {"type": "button", "url": "https://mail.google.com/#all/t1", "text": {}},
+            ],
+        },
+    ]
+    out = _swap_draft_button(blocks, "b1", "https://mail.google.com/mail/u/0/#drafts")
+    actions = out[1]["elements"]
+    assert not [e for e in actions if e.get("action_id") == "mail_draft"]  # 作成ボタンは消える
+    assert any(e.get("url", "").endswith("#drafts") for e in actions)  # 開くボタンに
+    assert any(e.get("url", "").endswith("#all/t1") for e in actions)  # 確認するは残る
+
+
+def test_swap_draft_button_no_match_returns_unchanged() -> None:
+    blocks = [{"type": "actions", "block_id": "other", "elements": []}]
+    assert _swap_draft_button(blocks, "b1", "url") == blocks
+
+
+def test_mail_draft_quota_counts_per_day() -> None:
+    """1 日 10 件で打ち止め。consume した分だけ減る（worker 常駐の in-memory）。"""
+    disp = SkillDispatcher()
+    email = "s-komata@vectorinc.co.jp"
+    for _ in range(10):
+        assert disp._mail_draft_quota_ok(email) is True
+        disp._mail_draft_quota_consume(email)
+    assert disp._mail_draft_quota_ok(email) is False  # 11 件目は不可
+    assert disp._mail_draft_quota_ok("other@vectorinc.co.jp") is True  # 別ユーザーは独立
 
 
 def test_build_ack_message_tiktok() -> None:
