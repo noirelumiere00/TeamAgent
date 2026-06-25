@@ -116,6 +116,9 @@
           include: [
             "search", "clientkarte", "proposal_draft", "proposal_review",
             "tiktok_search", "video_analysis", "video_algorithm",
+            // ③動画チェック: 自社編集者の納品動画をオリエンと照合し合否/誤植/尺の一次FB。
+            //   MCP側に USE_VIDEO_APPROVAL=1 が必要（factory 登録済）。video_analysis(外部競合分析)と棲み分け。
+            "video_approval",
             // operation_log: Slackスレッド営業会話→CRM転記用構造化（USE_OPERATION_LOG_TOOLS=1 で MCP側に出る）。
             "operation_log",
             // §U-PartA-Step A: メール機能（readonly 3つ）を mention 経由で公開（@AiLa メール要約・要返信トリアージ・社内資料横断）。

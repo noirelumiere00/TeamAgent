@@ -150,6 +150,20 @@ def build_production_tools() -> list[ToolSpec]:
             ToolSpec(TikTokSearchSkill.name, TikTokSearchSkill.description, TikTokSearchSkill)
         )
 
+    # ③動画チェック: 自社編集者の納品動画をオリエンと照合し合否/誤植/尺の一次FB。**既定 OFF**
+    # （USE_VIDEO_APPROVAL=1）。OC 露出は openclaw.config.json5 の toolFilter.include 追加が前提。
+    # Gemini/Drive 依存は run() で遅延生成。description で video_analysis(外部競合)と棲み分け済。
+    if _envflag("USE_VIDEO_APPROVAL"):
+        from teamagent.skills.video_approval.skill import VideoApprovalSkill
+
+        specs.append(
+            ToolSpec(
+                VideoApprovalSkill.name,
+                VideoApprovalSkill.description,
+                VideoApprovalSkill,
+            )
+        )
+
     # operation_log: Slackスレッド営業会話 → CRM 転記用の構造化ログ（フェーズ/アクション/BANT）。
     # 既定 OFF（USE_OPERATION_LOG_TOOLS=1 で opt-in）。Bedrock/Slack 依存は run() で遅延生成。
     # 既存のSlack配線（slack_bot.py）と独立して MCP 経由でも呼べる（factory 登録だけが必要）。
