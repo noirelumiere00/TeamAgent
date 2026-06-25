@@ -335,6 +335,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             )
             # 未読判定（UNREAD）＝未開封用。スレッド内に未読が1つでもあれば未読扱い。
             is_unread = any("UNREAD" in (getattr(m, "label_ids", ()) or ()) for m in thread)
+            # 下書きボタンは「本人が To に直接いる」場合だけ出す（CC のみ/メーリス宛は対象外）。
+            # ※ 表示は high なら出るが、下書きトークンが空＝作成ボタンは出ない（確認するのみ）。
+            addressed = _is_addressed_to(anchor.headers, requester)
             items.append(
                 MailDigestItem(
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
@@ -346,8 +349,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     # 表示専用（本人 DM のみ・未マスク・PII・ログ厳禁）
                     counterpart_display=_display_counterpart(anchor.headers, requester),
                     subject_display=str(anchor.headers.get("Subject", ""))[:160],
-                    # ボタン用：生 thread_id は出さず HMAC 署名トークン化（G3）。確認用は直リンク。
-                    draft_token=encode_draft_token(tid, requester) if tid else "",
+                    # ボタン用：生 thread_id は出さず HMAC 署名トークン化（G3）。To 自分宛のみ発行。
+                    draft_token=(encode_draft_token(tid, requester) if (tid and addressed) else ""),
                     thread_gmail_url=_gmail_thread_url(tid),
                 )
             )

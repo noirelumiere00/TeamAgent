@@ -677,6 +677,26 @@ def test_E38_generate_draft_for_thread_rejects_cc_only():
     assert len(g.created) == 0
 
 
+def test_E40_draft_button_only_for_to_self():
+    """要返信(high)でも、To に本人がいない(CCのみ)メールには下書きトークンを出さない。
+
+    2026-06-25 ユーザー指摘：To に自分がいないのに下書きボタンが出ていた。
+    下書きボタン(draft_token)は To自分宛のときだけ発行する。確認するリンクは別途。
+    """
+    to_self = _to_me(thread="tT", subj="To自分")  # To=ME
+    cc_only = _Msg(
+        headers={"From": "a@x.com", "To": "boss@x.com", "Cc": ME, "Subject": "CCのみ"},
+        payload=_pl("本文"),
+        internal_date_ms=2,
+        thread_id="tC",
+    )
+    t = '[{"importance":"high","summary":"a"},{"importance":"high","summary":"b"}]'
+    out = _run(_skill(_Gmail([to_self, cc_only]), triage=t), max_drafts=0)
+    by = {i.subject_display: i for i in out.mail_digest}
+    assert by["To自分"].draft_token != ""  # To自分宛 → 下書きボタンが出る
+    assert by["CCのみ"].draft_token == ""  # CC のみ → 下書きボタンは出さない（確認するのみ）
+
+
 def test_E39_is_unread_collected_from_label_ids():
     """スレッドに UNREAD ラベルがあれば item.is_unread=True（未開封セクションの素材）。"""
     m_unread = _to_me(thread="tU", subj="未読")
