@@ -329,6 +329,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     subject_scrubbed=str(scrub_value(anchor.headers.get("Subject", "")))[:80],
                     occurred_at=_iso_or_none(anchor.internal_date_ms),
                     thread_count=len(thread),
+                    # 不透明スレッドID（非PII）。配信層が Gmail スレッド/下書きへ deep link する。
+                    thread_id=tid or None,
                     sender_label=_sender_label_ja(priority),
                     # 表示専用（本人 DM のみ・未マスク・PII・ログ厳禁）
                     counterpart_display=_display_counterpart(anchor.headers, requester),

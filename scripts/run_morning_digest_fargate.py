@@ -22,6 +22,7 @@ import os
 import sys
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import structlog
 
@@ -102,10 +103,34 @@ def _mask_email(email: str) -> str:
     return f"{local[:1] if local else ''}***@{domain}"
 
 
-# Gmail/Calendar への deep link（受信トレイ全体＝DLP 安全。項目別 from: はマスク済みのため不採用）。
-_GMAIL_DRAFTS_URL = "https://mail.google.com/mail/u/0/#drafts"
-_GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox"
+# Gmail/Calendar への deep link。
+# 項目別 `from:<addr>` クエリリンクはマスク済み差出人を漏らすため不採用だが、
+# Gmail スレッドID（thread_id）は不透明ID＝非PIIなので項目別 deep link でも DLP 安全。
+# 受信トレイ/下書き/スレッドは _gmail_account_base() で本人アカウント固定 URL を都度生成。
 _CALENDAR_URL = "https://calendar.google.com/"
+
+
+def _gmail_account_base(user_email: str) -> str:
+    """アカウント選択つき Gmail ベース URL（ハッシュ直前まで）。
+
+    複数 Google ログイン環境で `u/0`（＝先頭アカウント）だと本人と別アカウントで
+    開く事故が起きるため、email が判明していれば `?authuser=<email>` で本人に固定する。
+    不明時は従来どおり `u/0`。戻り値に `#inbox` / `#drafts` / `#all/<tid>` を連結して使う。
+    """
+    if user_email and "@" in user_email:
+        return f"https://mail.google.com/mail/?authuser={quote(user_email, safe='@')}"
+    return "https://mail.google.com/mail/u/0/"
+
+
+def _gmail_thread_url(thread_id: str | None, user_email: str) -> str | None:
+    """スレッド（会話）を開く deep link。返信下書きはスレッド内にインライン表示される。
+
+    `#all/<thread_id>` は受信トレイ/アーカイブ/下書きのどこに在っても確実に開ける。
+    thread_id が空なら None（呼び出し側で汎用リンクにフォールバック）。
+    """
+    if not thread_id:
+        return None
+    return f"{_gmail_account_base(user_email)}#all/{thread_id}"
 
 
 _JST = _dt.timezone(_dt.timedelta(hours=9))
@@ -138,6 +163,10 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     """MorningDigestOutput → Slack Block Kit blocks（要返信を最上部・スコアボード・アクション付き）。"""
     masked = _mask_email(user_email)
     text = f"☀️ おはようございます！{masked} さんの本日のダイジェストです。"
+
+    # 本人アカウントに固定した Gmail deep link（複数 Google ログイン環境での誤アカウント回避）。
+    inbox_url = f"{_gmail_account_base(user_email)}#inbox"
+    drafts_url = f"{_gmail_account_base(user_email)}#drafts"
 
     mail_items = list(getattr(digest, "mail_digest", []) or [])
     high = [m for m in mail_items if m.importance == "high"]
@@ -192,10 +221,20 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 body += f"\n📌 依頼: {_slack_escape(m.ask)}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
             meta = []
+            thread_url = _gmail_thread_url(getattr(m, "thread_id", None), user_email)
             if m.has_draft:
                 meta.append({"type": "mrkdwn", "text": "✏️ 返信下書き作成済"})
-                meta.append({"type": "mrkdwn", "text": f"<{_GMAIL_DRAFTS_URL}|下書きを見る>"})
-            meta.append({"type": "mrkdwn", "text": f"<{_GMAIL_INBOX_URL}|Gmailで開く>"})
+                if thread_url:
+                    # 下書きはスレッド内にインライン表示＝開けば確認してそのまま送信できる。
+                    meta.append(
+                        {"type": "mrkdwn", "text": f"<{thread_url}|📩 Gmailで下書きを開く>"}
+                    )
+                else:
+                    meta.append({"type": "mrkdwn", "text": f"<{drafts_url}|下書きを見る>"})
+            else:
+                meta.append(
+                    {"type": "mrkdwn", "text": f"<{thread_url or inbox_url}|📩 Gmailで開く>"}
+                )
             blocks.append({"type": "context", "elements": meta})
         blocks.append({"type": "divider"})
     elif not mail_items:
@@ -233,7 +272,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "✏️ 下書きを確認", "emoji": True},
-                "url": _GMAIL_DRAFTS_URL,
+                "url": drafts_url,
                 "style": "primary",
             }
         )
@@ -241,7 +280,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
         {
             "type": "button",
             "text": {"type": "plain_text", "text": "📥 受信トレイ", "emoji": True},
-            "url": _GMAIL_INBOX_URL,
+            "url": inbox_url,
         }
     )
     blocks.append({"type": "actions", "elements": actions})

@@ -92,8 +92,59 @@ def test_high_priority_section_and_draft_elevated() -> None:
     dump = str(blocks)
     assert "いますぐ返信したい（2件）" in dump
     # has_draft=True の high 項目に「✏️ 返信下書き作成済」+ 下書きリンクが出る。
+    # （fixture は thread_id 無し＝汎用「下書きを見る」フォールバック）。
     assert "✏️ 返信下書き作成済" in dump
     assert "下書きを見る" in dump
+
+
+def test_draft_links_to_thread_with_authuser() -> None:
+    # thread_id を持つ has_draft 項目は、汎用 #drafts ではなくスレッド deep link
+    # (#all/<tid>) に「📩 Gmailで下書きを開く」で飛ぶ。複数ログイン対策に authuser を付ける。
+    d = MorningDigestOutput(
+        user_email_masked="s***@vectorinc.co.jp",
+        mail_digest=[
+            MailDigestItem(
+                counterpart_masked="e***@nobel.co.jp",
+                subject_scrubbed="動画提出の件",
+                importance="high",
+                has_draft=True,
+                thread_id="thr_ABC123",
+            ),
+        ],
+        drafts_created=1,
+    )
+    _text, blocks = mod._format_block_kit(d, "s-komata@vectorinc.co.jp")
+    dump = str(blocks)
+    assert "📩 Gmailで下書きを開く" in dump
+    assert "https://mail.google.com/mail/?authuser=s-komata@vectorinc.co.jp#all/thr_ABC123" in dump
+
+
+def test_action_buttons_pin_account_with_authuser() -> None:
+    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    actions = next(b for b in blocks if b.get("type") == "actions")
+    urls = [e.get("url", "") for e in actions["elements"]]
+    assert all("authuser=s-komata@vectorinc.co.jp" in u for u in urls)
+    assert any(u.endswith("#drafts") for u in urls)  # ✏️ 下書きを確認
+    assert any(u.endswith("#inbox") for u in urls)  # 📥 受信トレイ
+
+
+def test_links_fall_back_to_u0_when_email_unknown() -> None:
+    # email 不明時は従来どおり u/0（authuser を付けない）。
+    _text, blocks = mod._format_block_kit(_digest(), "")
+    dump = str(blocks)
+    assert "mail/u/0/#inbox" in dump
+    assert "authuser=" not in dump
+
+
+def test_gmail_thread_url_helper() -> None:
+    assert mod._gmail_thread_url(None, "x@y.com") is None
+    assert mod._gmail_thread_url("", "x@y.com") is None
+    assert (
+        mod._gmail_thread_url("T1", "u@vectorinc.co.jp")
+        == "https://mail.google.com/mail/?authuser=u@vectorinc.co.jp#all/T1"
+    )
+    assert mod._gmail_thread_url("T1", "") == "https://mail.google.com/mail/u/0/#all/T1"
+    assert mod._gmail_account_base("") == "https://mail.google.com/mail/u/0/"
 
 
 def test_calendar_section_removed() -> None:

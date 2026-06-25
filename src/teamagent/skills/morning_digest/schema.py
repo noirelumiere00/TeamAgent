@@ -67,6 +67,13 @@ class MailDigestItem(BaseModel):
     occurred_at: str | None = Field(default=None, description="受信日時（ISO・判明時）")
     summary: str = Field(default="", max_length=200, description="1 行サマリ（LLM 生成）")
     has_draft: bool = Field(default=False, description="この件で下書きを生成したか")
+    thread_id: str | None = Field(
+        default=None,
+        description=(
+            "Gmail スレッドID（不透明ID・非PII・ログ安全）。スレッド/下書きへの deep link 用。"
+            "`from:<addr>` クエリと違い差出人を漏らさないため項目別リンクでも DLP 安全。"
+        ),
+    )
     # --- 構造化抽出（LLM triage）---
     deadline: str | None = Field(default=None, description="抽出した期限（自由文・LLM抽出）")
     ask: str = Field(default="", max_length=120, description="相手の依頼/要求（1行・LLM抽出）")
