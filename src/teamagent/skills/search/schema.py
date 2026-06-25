@@ -34,6 +34,25 @@ class SearchInput(BaseModel):
             "表記ゆれ（例: 日本ガイシ↔NGK）を部分一致で吸収する。"
         ),
     )
+    filter_doc_type: str | None = Field(
+        default=None,
+        max_length=50,
+        description=(
+            "資料種別フィルタ（cls_doc_type 等価）。"
+            "提案書 / 議事録 / 報告書 / 価格表 / 契約 のいずれか。"
+            "fail-open 再検索でも外れない sticky フィルタとして配線する"
+            "（クエリ自動抽出 extract_knowledge_filters より優先）。"
+        ),
+    )
+    filter_solution: str | None = Field(
+        default=None,
+        max_length=50,
+        description=(
+            "施策/ソリューション種別フィルタ（cls_solution 等価）。"
+            "SNS運用 / 動画広告 / インフルエンサー / SEO / Web制作 / 広告運用 / イベント 等。"
+            "fail-open 再検索でも外れない sticky フィルタとして配線する。"
+        ),
+    )
     filter_budget: str | None = Field(
         default=None,
         description=(

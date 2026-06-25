@@ -267,3 +267,112 @@ def test_industry_match_delivered() -> None:
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
     out = skill.run(KnowledgeDeliverInput(query="化粧品の提案資料出して"), _ctx())
     assert out.delivered_count == 1
+
+
+# ── 明示フィルタ（取引先/資料種別/施策/業界）→ SearchInput 伝播 ──────────────
+def test_filters_propagate_to_search_input() -> None:
+    # KnowledgeDeliverInput の4フィルタが SearchInput にそのまま渡る。
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf")]
+    search = _search_mock(hits)
+    skill = KnowledgeDeliverSkill(search=search, slack=_slack_mock(), gdrive=_gdrive_mock())
+    skill.run(
+        KnowledgeDeliverInput(
+            query="電通への動画広告の提案資料",
+            filter_client="電通",
+            filter_doc_type="提案書",
+            filter_solution="動画広告",
+            filter_industry="食品",
+        ),
+        _ctx(),
+    )
+    si = search.run.call_args.args[0]  # SearchInput
+    assert si.filter_client == "電通"
+    assert si.filter_doc_type == "提案書"
+    assert si.filter_solution == "動画広告"
+    assert si.filter_industry == "食品"
+
+
+def test_filters_default_none_backward_compat() -> None:
+    # 未指定なら SearchInput の各フィルタは None（従来挙動）。
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf")]
+    search = _search_mock(hits)
+    skill = KnowledgeDeliverSkill(search=search, slack=_slack_mock(), gdrive=_gdrive_mock())
+    skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+    si = search.run.call_args.args[0]
+    assert si.filter_client is None
+    assert si.filter_doc_type is None
+    assert si.filter_solution is None
+    assert si.filter_industry is None
+
+
+# ── 明示フィルタ優先（industry-mismatch ゲート）─────────────────────────────
+def test_explicit_filter_industry_overrides_query_for_mismatch() -> None:
+    # 明示 filter_industry=化粧品 → ヒット業界「飲食」は別業界なので添付しない
+    # （クエリ文には業界語が無くても明示が効く）。
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf", industry="飲食")]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+    out = skill.run(
+        KnowledgeDeliverInput(query="提案資料出して", filter_industry="化粧品"),
+        _ctx(),
+    )
+    assert out.delivered_count == 0
+    slack.upload_file.assert_not_awaited()
+
+
+def test_explicit_filter_industry_match_delivers() -> None:
+    # 明示 filter_industry=化粧品 とヒット業界「化粧品」が一致 → 配信。
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf", industry="化粧品")]
+    slack = _slack_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
+    out = skill.run(
+        KnowledgeDeliverInput(query="提案資料出して", filter_industry="化粧品"),
+        _ctx(),
+    )
+    assert out.delivered_count == 1
+
+
+# ── note 文言（適用フィルタ表示・0件緩和提案）──────────────────────────────
+def test_note_shows_applied_filters_on_delivery() -> None:
+    # 配信成功 note に「電通 × 提案書 で」のような適用フィルタが出る。
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf")]
+    skill = KnowledgeDeliverSkill(
+        search=_search_mock(hits), slack=_slack_mock(), gdrive=_gdrive_mock()
+    )
+    out = skill.run(
+        KnowledgeDeliverInput(
+            query="電通への提案資料", filter_client="電通", filter_doc_type="提案書"
+        ),
+        _ctx(),
+    )
+    assert out.delivered_count == 1
+    assert "電通 × 提案書 で" in out.note
+    assert "DM にお送りしました" in out.note
+
+
+def test_note_zero_hit_states_filters_and_relaxation() -> None:
+    # 0件 note に適用フィルタと緩和提案が出る。
+    hits = [_hit(source_type="slack", source_uri="slack://C1/1.2", title="FB")]  # gdrive なし
+    skill = KnowledgeDeliverSkill(
+        search=_search_mock(hits), slack=_slack_mock(), gdrive=_gdrive_mock()
+    )
+    out = skill.run(
+        KnowledgeDeliverInput(
+            query="電通への提案資料", filter_client="電通", filter_doc_type="提案書"
+        ),
+        _ctx(),
+    )
+    assert out.delivered_count == 0
+    assert "電通 × 提案書 で" in out.note
+    assert "緩めて再検索" in out.note
+
+
+def test_note_zero_hit_no_filter_keeps_plain_message() -> None:
+    # フィルタ未指定の 0件は従来の素の文言（緩和提案を足さない）。
+    hits = [_hit(source_type="slack", source_uri="slack://C1/1.2", title="FB")]
+    skill = KnowledgeDeliverSkill(
+        search=_search_mock(hits), slack=_slack_mock(), gdrive=_gdrive_mock()
+    )
+    out = skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+    assert out.delivered_count == 0
+    assert out.note == "該当する添付可能な資料が見つかりませんでした（要約のみお返しします）。"

@@ -61,15 +61,42 @@ def _safe_filename(name: str | None, *, fallback: str = "document") -> str:
     return base[:120] or fallback
 
 
+def _format_applied_filters(input: KnowledgeDeliverInput) -> str:
+    """適用した明示フィルタを「電通 × 提案書 × 食品」のラベルに整形する。
+
+    取引先・施策・資料種別・業界の順で、指定されたものだけを ` × ` で連結する。
+    何も指定されていなければ空文字（note 側で『何で絞ったか』を出さない）。
+    """
+    parts = [
+        input.filter_client,
+        input.filter_solution,
+        input.filter_doc_type,
+        input.filter_industry,
+    ]
+    return " × ".join(p.strip() for p in parts if p and p.strip())
+
+
 @register
 class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOutput]):
     """検索 → 該当資料の実ファイルを依頼者 DM に届けるスキル。"""
 
     name: ClassVar[str] = "knowledge_deliver"
     description: ClassVar[str] = (
-        "「〇〇業界の提案資料出して」「〇〇の成功事例ある？」「〇〇のレポート出して」のような依頼に対し、"
-        "社内ナレッジを検索して要約し、該当資料の実ファイルを依頼者本人の DM に添付して届ける。"
-        "ファイル本体が欲しい時に使う（リンク・要約だけで良い時は search）。"
+        "「〇〇への提案資料出して」「〇〇業界の提案事例ある？」「〇〇施策のレポート出して」"
+        "のような依頼に対し、社内ナレッジを検索して要約し、該当資料の実ファイルを"
+        "依頼者本人の DM（チャンネル/スレッド内ならその場）に添付して届ける。"
+        "ファイル本体が欲しい時に使う（リンク・要約だけで良い時は search）。\n"
+        "依頼文に含まれる条件は必ず該当フィールドに振り分けて埋めること（自然文の精度が上がる）:\n"
+        "- 取引先/会社名（電通・サイバーエージェント・ニチレイ・アース製薬 等）→ filter_client\n"
+        "- 資料種別（提案資料/提案書→提案書、レポート/施策レポート→報告書、議事録、"
+        "価格表/料金表→価格表、契約書→契約）→ filter_doc_type\n"
+        "- 施策/ソリューション（SNS運用・動画広告・インフルエンサー・SEO 等の『○○施策』の○○）"
+        "→ filter_solution\n"
+        "- 業界（食品・飲料・化粧品・小売・金融・IT 等の『○○業界』の○○）→ filter_industry\n"
+        "例: 『電通への提案資料』→filter_client=電通, filter_doc_type=提案書 / "
+        "『食品業界の提案事例』→filter_industry=食品, filter_doc_type=提案書 / "
+        "『動画広告施策のレポート』→filter_solution=動画広告, filter_doc_type=報告書。\n"
+        "query には依頼文全体（自然文）をそのまま入れてよい。"
         "呼び出し時は arguments に "
         "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める。"
     )
@@ -93,6 +120,9 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 query=input.query,
                 top_k=max(input.top_k, 5),
                 filter_industry=input.filter_industry,
+                filter_client=input.filter_client,
+                filter_doc_type=input.filter_doc_type,
+                filter_solution=input.filter_solution,
             ),
             ctx,
         )
@@ -106,7 +136,9 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             min_score = float(os.environ.get("KNOWLEDGE_DELIVER_MIN_SCORE", "0.5"))
         except ValueError:
             min_score = 0.5
-        query_industry = extract_query_industry(input.query)
+        # 明示 filter_industry が来たらそれを優先（クエリ自動抽出より上位）。明示が無ければ
+        # 従来どおりクエリ文字列から推定して別業界の誤添付を防ぐ（設計 E: 明示フィルタ優先）。
+        query_industry = input.filter_industry or extract_query_industry(input.query)
         refs: list[KnowledgeRef] = []
         candidates: list[tuple[str, str]] = []  # (file_id, filename)
         seen_ids: set[str] = set()
@@ -163,10 +195,22 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         thread_ts = ctx.metadata.get("thread_ts")
         thread_ts = thread_ts if isinstance(thread_ts, str) and thread_ts else None
 
+        # 適用フィルタのラベル（例「電通 × 提案書」）。note に「何で絞ったか」を明示し、
+        # 0 件時は絞りを述べて緩和提案する（設計 E）。
+        applied = _format_applied_filters(input)
+        filt_prefix = f"{applied} で" if applied else ""
+
         delivered_ids: set[str] = set()
         where = ""
         if not prepared:
-            note = "該当する添付可能な資料が見つかりませんでした（要約のみお返しします）。"
+            if applied:
+                note = (
+                    f"{applied} で該当する添付可能な資料が見つかりませんでした"
+                    "（要約のみお返しします）。"
+                    "取引先のみ／資料種別を外す等、条件を緩めて再検索しますか。"
+                )
+            else:
+                note = "該当する添付可能な資料が見つかりませんでした（要約のみお返しします）。"
         elif not channel_id and not requester_email:
             note = "資料は見つかりましたが、配信先が分からずお届けできませんでした（要約のみ）。"
         else:
@@ -184,10 +228,11 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             except Exception:
                 log.warning("knowledge_deliver_failed")
                 delivered_ids, where = set(), ""
+            n = len(delivered_ids)
             if where == "thread":
-                note = f"該当資料 {len(delivered_ids)} 件をこのスレッドにお出ししました。"
+                note = f"{filt_prefix}該当資料 {n} 件をこのスレッドにお出ししました。"
             elif where == "dm":
-                note = f"該当資料 {len(delivered_ids)} 件をあなたの DM にお送りしました。"
+                note = f"{filt_prefix}該当資料 {n} 件をあなたの DM にお送りしました。"
             else:
                 note = "資料配信に失敗しました（要約のみお返しします）。"
 

@@ -26,7 +26,42 @@ class KnowledgeDeliverInput(BaseModel):
     )
     top_k: int = Field(default=3, ge=1, le=5, description="DM に届ける最大ファイル数")
     filter_industry: str | None = Field(
-        default=None, max_length=100, description="業界フィルタ（任意）"
+        default=None,
+        max_length=100,
+        description=(
+            "業界フィルタ（任意）。依頼文に業界が出たら入れる"
+            "（例: 食品 / 飲料 / 化粧品 / 小売 / 金融 / IT）。"
+            "『○○業界の提案資料』の○○。"
+        ),
+    )
+    filter_client: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "取引先/クライアント名フィルタ（任意・部分一致）。"
+            "依頼文に会社名・取引先名が出たら入れる"
+            "（例: 電通 / サイバーエージェント / ニチレイ / アース製薬）。"
+            "『○○への提案資料』『○○の資料』の○○。表記ゆれは部分一致で吸収する。"
+        ),
+    )
+    filter_doc_type: str | None = Field(
+        default=None,
+        max_length=50,
+        description=(
+            "資料種別フィルタ（任意）。提案書 / 議事録 / 報告書 / 価格表 / 契約 のいずれか。"
+            "『提案資料・提案書・提案事例』→提案書、『レポート・施策レポート・報告書』→報告書、"
+            "『議事録・打ち合わせメモ』→議事録、『価格表・料金表』→価格表、"
+            "『契約書・契約条件』→契約。"
+        ),
+    )
+    filter_solution: str | None = Field(
+        default=None,
+        max_length=50,
+        description=(
+            "施策/ソリューション種別フィルタ（任意）。"
+            "SNS運用 / 動画広告 / インフルエンサー / SEO / Web制作 / 広告運用 / イベント 等。"
+            "『○○施策レポート』『○○の事例』の○○（施策名）を入れる。"
+        ),
     )
 
 

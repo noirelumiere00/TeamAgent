@@ -284,3 +284,186 @@ def test_no_explicit_filters_passes_none() -> None:
     first = pg.search_similar_new_schema.call_args_list[0].kwargs
     assert first["metadata_contains"] is None
     assert first["sticky_filters"] is None
+
+
+# --- doc_type / solution sticky（資料引用ツール）-----------------------------------------
+
+
+def test_single_query_passes_doc_type_and_solution() -> None:
+    """明示 doc_type / solution が cls_doc_type / cls_solution の等価 sticky で渡る。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    _skill(pg).run(
+        input=SearchInput(
+            query="動画広告の提案資料",
+            filter_doc_type="提案書",
+            filter_solution="動画広告",
+        ),
+        ctx=SkillContext(),
+    )
+    first = pg.search_similar_new_schema.call_args_list[0].kwargs
+    assert first["sticky_filters"] == {"cls_doc_type": "提案書", "cls_solution": "動画広告"}
+
+
+def test_doc_type_solution_combine_with_budget_sticky() -> None:
+    """budget + doc_type + solution は同一 sticky dict に併載される。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    _skill(pg).run(
+        input=SearchInput(
+            query="x",
+            filter_budget="500万〜",
+            filter_doc_type="報告書",
+            filter_solution="SNS運用",
+        ),
+        ctx=SkillContext(),
+    )
+    first = pg.search_similar_new_schema.call_args_list[0].kwargs
+    assert first["sticky_filters"] == {
+        "cls_budget": "500万〜",
+        "cls_doc_type": "報告書",
+        "cls_solution": "SNS運用",
+    }
+
+
+def test_fail_open_keeps_doc_type_solution_sticky() -> None:
+    """fail-open 再検索でも doc_type / solution sticky は保持される（落とさない）。"""
+    pg = _pgvector(side_effect=[[], [_hit(1)]])
+    _skill(pg).run(
+        input=SearchInput(
+            query="食品の提案資料",
+            filter_industry="食品",
+            filter_doc_type="提案書",
+            filter_solution="動画広告",
+        ),
+        ctx=SkillContext(),
+    )
+    assert pg.search_similar_new_schema.call_count == 2
+    reopen = pg.search_similar_new_schema.call_args_list[1].kwargs
+    assert reopen["sticky_filters"] == {"cls_doc_type": "提案書", "cls_solution": "動画広告"}
+    assert reopen["filter_industry"] is None  # 自動付与の業界は外れる
+
+
+def test_query_planner_branch_wires_doc_type_solution() -> None:
+    """query_planner 経路の全 _pool_search にも doc_type / solution sticky が渡る。"""
+    plan = QueryPlan(
+        paraphrases=["言い換えA"],
+        hyde_answer="想定回答",
+        industry=None,
+        doc_type=None,
+        client_names=[],
+        is_aggregation=False,
+    )
+    pg = _pgvector(side_effect=[[_hit(1)], [_hit(2)], [_hit(3)]])
+    _skill(pg, planner=_FakePlanner(plan)).run(
+        input=SearchInput(query="元", filter_doc_type="提案書", filter_solution="SEO"),
+        ctx=SkillContext(),
+    )
+    assert pg.search_similar_new_schema.call_count == 3
+    for call in pg.search_similar_new_schema.call_args_list:
+        assert call.kwargs["sticky_filters"] == {
+            "cls_doc_type": "提案書",
+            "cls_solution": "SEO",
+        }
+
+
+def test_explicit_doc_type_overrides_planner_doc_type() -> None:
+    """明示 filter_doc_type があれば plan.doc_type は metadata_filters に載らない（明示優先）。"""
+    plan = QueryPlan(
+        paraphrases=[],
+        hyde_answer="",
+        industry=None,
+        doc_type="議事録",  # 自動抽出は議事録だが…
+        client_names=[],
+        is_aggregation=False,
+    )
+    pg = _pgvector(return_value=[_hit(1)])
+    _skill(pg, planner=_FakePlanner(plan), use_knowledge_filters=True).run(
+        input=SearchInput(query="x", filter_doc_type="提案書"),  # …明示は提案書
+        ctx=SkillContext(),
+    )
+    first = pg.search_similar_new_schema.call_args_list[0].kwargs
+    # 明示 doc_type は sticky に、自動 plan.doc_type は metadata_filters に載らない
+    assert first["sticky_filters"] == {"cls_doc_type": "提案書"}
+    assert first["metadata_filters"] is None
+
+
+def test_explicit_doc_type_drops_auto_extracted_in_single_query() -> None:
+    """単一クエリ経路: クエリ自動抽出 cls_doc_type は明示があれば外す（衝突回避・明示優先）。"""
+    # クエリ「議事録」で自動抽出 cls_doc_type=議事録 だが、明示は提案書。
+    pg = _pgvector(return_value=[_hit(1)])
+    _skill(pg, use_knowledge_filters=True).run(
+        input=SearchInput(query="議事録ください", filter_doc_type="提案書"),
+        ctx=SkillContext(),
+    )
+    first = pg.search_similar_new_schema.call_args_list[0].kwargs
+    assert first["sticky_filters"] == {"cls_doc_type": "提案書"}
+    # 自動抽出の cls_doc_type は metadata_filters から外れている
+    mf = first["metadata_filters"]
+    assert mf is None or "cls_doc_type" not in mf
+
+
+def test_no_doc_type_solution_passes_none() -> None:
+    """doc_type / solution 未指定なら sticky_filters は None（後方互換）。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    _skill(pg).run(input=SearchInput(query="x"), ctx=SkillContext())
+    first = pg.search_similar_new_schema.call_args_list[0].kwargs
+    assert first["sticky_filters"] is None
+
+
+# --- client_boost が明示 doc_type/solution sticky を運ぶ（major fix）-------------------
+
+
+def _boost_call(pg: MagicMock) -> dict[str, object]:
+    """metadata_filters に client_name を持つ呼び出し（= boost のサブ検索）を返す。"""
+    for call in pg.search_similar_new_schema.call_args_list:
+        mf = call.kwargs.get("metadata_filters")
+        if isinstance(mf, dict) and "client_name" in mf:
+            return dict(call.kwargs)
+    raise AssertionError("client_boost のサブ検索が見つからない")
+
+
+def test_client_boost_carries_explicit_doc_type_solution_sticky() -> None:
+    """boost が走るとき、明示 doc_type/solution の等価 sticky を boost サブ検索にも運ぶ。
+
+    filter_client 未指定で boost が起動する経路（『電通の動画広告施策レポート』など query に
+    client 名を置き doc_type/solution を明示するケース）で、boost が doc_type/solution を無視して
+    別種別の資料を合流させないことを保証する（設計 §A/§E の不変条件）。
+    """
+    pg = _pgvector(return_value=[_hit(1)])
+    skill = _skill(pg, use_client_boost=True)
+    skill._match_client = MagicMock(return_value="電通")  # type: ignore[method-assign]
+    skill.run(
+        input=SearchInput(
+            query="電通の動画広告施策レポート",
+            filter_doc_type="報告書",
+            filter_solution="動画広告",
+        ),
+        ctx=SkillContext(),
+    )
+    boost = _boost_call(pg)
+    assert boost["sticky_filters"] == {"cls_doc_type": "報告書", "cls_solution": "動画広告"}
+    # filter_client 未指定なので boost の metadata_contains（__client__）は None
+    assert boost["metadata_contains"] is None
+
+
+def test_client_boost_carries_budget_sticky() -> None:
+    """boost が走るとき、明示 budget sticky も boost サブ検索へ運ぶ（既存 sticky も同様に保護）。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    skill = _skill(pg, use_client_boost=True)
+    skill._match_client = MagicMock(return_value="電通")  # type: ignore[method-assign]
+    skill.run(
+        input=SearchInput(query="電通の提案", filter_budget="500万〜"),
+        ctx=SkillContext(),
+    )
+    boost = _boost_call(pg)
+    assert boost["sticky_filters"] == {"cls_budget": "500万〜"}
+
+
+def test_client_boost_sticky_none_when_no_explicit_filters() -> None:
+    """明示フィルタ無しなら boost の sticky_filters / metadata_contains は None（後方互換）。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    skill = _skill(pg, use_client_boost=True)
+    skill._match_client = MagicMock(return_value="電通")  # type: ignore[method-assign]
+    skill.run(input=SearchInput(query="電通の提案"), ctx=SkillContext())
+    boost = _boost_call(pg)
+    assert boost["sticky_filters"] is None
+    assert boost["metadata_contains"] is None

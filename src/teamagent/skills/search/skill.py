@@ -491,14 +491,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 mc: dict[str, str] | None = (
                     {"__client__": input.filter_client} if input.filter_client else None
                 )
-                sticky: dict[str, str] | None
+                # ユーザー明示の doc_type / solution は等価 sticky（budget と同じ・fail-open でも
+                # 落とさない）。自動抽出（extract_knowledge_filters / plan.doc_type）と衝突したら
+                # この明示フィルタを優先するため、後段で自動抽出側から該当キーを外す。
+                sticky_pairs: dict[str, str] = {}
                 if input.filter_budget:
                     if input.include_unknown_budget:
-                        sticky = {"__budget_or_unknown__": input.filter_budget}
+                        sticky_pairs["__budget_or_unknown__"] = input.filter_budget
                     else:
-                        sticky = {"cls_budget": input.filter_budget}
-                else:
-                    sticky = None
+                        sticky_pairs["cls_budget"] = input.filter_budget
+                if input.filter_doc_type:
+                    sticky_pairs["cls_doc_type"] = input.filter_doc_type
+                if input.filter_solution:
+                    sticky_pairs["cls_solution"] = input.filter_solution
+                sticky: dict[str, str] | None = sticky_pairs or None
                 if self._query_planner is not None:
                     # P3: LLM ルーティング + multi-query/HyDE → RRF 融合。
                     plan = self._query_planner.plan(input.query, ctx.request_id)
@@ -509,7 +515,13 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     kf: dict[str, str] | None
                     if self._use_knowledge_filters:
                         eff_industry = input.filter_industry or plan.industry
-                        kf = {"cls_doc_type": plan.doc_type} if plan.doc_type else None
+                        # 明示 filter_doc_type は sticky 側で優先するため、自動 plan.doc_type は
+                        # 明示が無いときだけ採用する（衝突時に二重 AND で 0 件化させない）。
+                        kf = (
+                            {"cls_doc_type": plan.doc_type}
+                            if plan.doc_type and not input.filter_doc_type
+                            else None
+                        )
                     else:
                         eff_industry = input.filter_industry
                         kf = None
@@ -549,6 +561,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         if self._use_knowledge_filters
                         else None
                     )
+                    # 明示 doc_type / solution があれば、同名の自動抽出キーは外す（sticky 側で
+                    # 等価に効くため二重 AND を避け、明示フィルタを優先する）。
+                    if knowledge_filters:
+                        if input.filter_doc_type:
+                            knowledge_filters.pop("cls_doc_type", None)
+                        if input.filter_solution:
+                            knowledge_filters.pop("cls_solution", None)
+                        knowledge_filters = knowledge_filters or None
                     eff_industry = input.filter_industry or (
                         extract_query_industry(input.query) if self._use_knowledge_filters else None
                     )
@@ -575,6 +595,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         embedding=embedding,
                         input=input,
                         request_id=ctx.request_id,
+                        sticky_filters=sticky,  # 明示 doc_type/solution/budget を boost でも保持
+                        metadata_contains=mc,  # 通常 None（filter_client 未指定時のみ boost）
                     )
                 # M1 資料の被り対策。**プール段階（rerank の前）**に噛ませる。
                 # 旧実装は rerank→top_k 後段に置いていたため、最良 doc が 2 chunk に圧縮され
@@ -781,8 +803,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         embedding: list[float],
         input: SearchInput,
         request_id: str,
+        sticky_filters: dict[str, str] | None = None,
+        metadata_contains: dict[str, str] | None = None,
     ) -> list[SearchHit]:
-        """固有名詞クエリで client_name 絞り検索を追加し rerank プールへ合流する。"""
+        """固有名詞クエリで client_name 絞り検索を追加し rerank プールへ合流する。
+
+        sticky_filters / metadata_contains は _retrieve で構築したユーザー明示フィルタ
+        （cls_doc_type / cls_solution / cls_budget の等価 sticky・client の __client__ 部分一致）。
+        boost のサブ検索にも必ず渡す。さもないと client 名だけにマッチした別種別の資料
+        （議事録・価格表等）が doc_type/solution を無視してプールへ合流し、明示フィルタ違反の
+        ヒットが rerank 後に表面化する（設計 §A/§E「明示フィルタは全再検索で保持」の穴）。
+        client_boost は input.filter_client 未指定時のみ走るため通常 metadata_contains の
+        __client__ は None だが、後方互換のため受け取って素通しする。
+        """
         matched = self._match_client(query, conn, request_id)
         if not matched:
             return hits
@@ -794,6 +827,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             request_id=request_id,
             strict_industry=input.strict_industry,
             metadata_filters={"client_name": matched},
+            sticky_filters=sticky_filters,
+            metadata_contains=metadata_contains,
             exclude_boilerplate=self._exclude_boilerplate,
             exclude_duplicates=self._exclude_duplicates,
         )
