@@ -187,6 +187,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             draft_subject=reply_subject,
             draft_body=draft_body,
             gmail_draft_id=draft_id,
+            thread_id=str(getattr(target, "thread_id", "") or ""),
             note=_NOTE_DRAFT,
             total_cost_usd=cost,
         )
@@ -215,6 +216,21 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
     def _find_target(
         self, gmail: GmailClient, input: MailReplyInput, ctx: SkillContext
     ) -> Any | None:
+        # スレッド指定（Slackボタン等）: スレッドを取得し、本人以外が From の最新メッセージを
+        # 返信元にする（自分の送信は返信元にしない＝相手の最後の発言に返す）。
+        if input.target_thread_id:
+            try:
+                messages = gmail.get_thread(input.target_thread_id, ctx.request_id)
+            except Exception:
+                return None
+            if not messages:
+                return None
+            requester = str(ctx.metadata.get("user_email", "") or "").strip().lower()
+            ordered = sorted(messages, key=lambda m: int(getattr(m, "internal_date_ms", 0) or 0))
+            for m in reversed(ordered):
+                if _from_is_external(getattr(m, "headers", {}).get("From", ""), requester):
+                    return m
+            return ordered[-1]
         if input.target_message_id:
             return gmail.get_message(input.target_message_id, ctx.request_id)
         query = f'"{input.client_name}" newer_than:{input.lookback_days}d -in:sent in:inbox'
@@ -335,6 +351,16 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
 
 
 # ── モジュール関数（純粋・テスト容易）──────────────────────────────────────
+
+
+def _from_is_external(from_header: str, requester: str) -> bool:
+    """From ヘッダの差出人が本人以外か（target_thread_id の返信元選定用）。"""
+    if not from_header:
+        return False
+    for email in extract_thread_participants({"From": from_header}):
+        if email.strip().lower() != requester:
+            return True
+    return False
 
 
 def _first_external(headers: dict[str, str], requester: str) -> str | None:
