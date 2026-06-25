@@ -134,6 +134,23 @@ def _slack_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _fmt_event_time(start_at: str | None, end_at: str | None) -> str:
+    """ISO 文字列（…T10:00:00+09:00 / 日付のみ=終日）を '10:00–11:00' / '終日' に整形する。"""
+
+    def _hm(s: str | None) -> str | None:
+        if not s:
+            return ""
+        if "T" not in s:  # 日付のみ ＝ 終日イベント
+            return None
+        return s.split("T", 1)[1][:5]  # "HH:MM"
+
+    sh = _hm(start_at)
+    if sh is None:
+        return "終日"
+    eh = _hm(end_at)
+    return f"{sh}–{eh}" if eh else (sh or "")
+
+
 def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
     """MorningDigestOutput → Slack Block Kit blocks（要返信を最上部・スコアボード・アクション付き）。"""
     masked = _mask_email(user_email)
@@ -144,6 +161,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     medium = [m for m in mail_items if m.importance == "medium"]
     low = [m for m in mail_items if m.importance == "low"]
     slack_items = list(getattr(digest, "slack_unread", []) or [])
+    cal_items = list(getattr(digest, "calendar_events", []) or [])
     drafts = int(getattr(digest, "drafts_created", 0) or 0)
 
     blocks: list[dict[str, Any]] = [
@@ -161,10 +179,29 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 {"type": "mrkdwn", "text": f"🔴 *要返信*  `{len(high)}件`"},
                 {"type": "mrkdwn", "text": f"✏️ *下書き済*  `{drafts}件`"},
                 {"type": "mrkdwn", "text": f"🟡 *要確認*  `{len(medium)}件`"},
+                {"type": "mrkdwn", "text": f"📅 *予定*  `{len(cal_items)}件`"},
             ],
         }
     )
     blocks.append({"type": "divider"})
+
+    # --- 今日の予定（カレンダー・本人 DM のみ実名表示。display は PII＝ログには出さない G3/G7）---
+    if cal_items:
+        lines = [f"📅 *今日の予定（{len(cal_items)}件）*"]
+        for ev in cal_items[:8]:
+            when = _fmt_event_time(getattr(ev, "start_at", None), getattr(ev, "end_at", None))
+            title = _slack_escape(
+                getattr(ev, "summary_display", "")
+                or getattr(ev, "summary_scrubbed", "")
+                or "(無題)"
+            )
+            loc = getattr(ev, "location_display", "") or getattr(ev, "location_scrubbed", "")
+            line = f"• `{when}`  {title}"
+            if loc:
+                line += f"  〔{_slack_escape(loc)}〕"
+            lines.append(line)
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        blocks.append({"type": "divider"})
 
     # --- 要返信メール（high のみ・本文 section + メタ context の2段で厚く）---
     if high:

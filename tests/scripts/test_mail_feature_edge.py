@@ -17,6 +17,7 @@ from typing import Any
 
 from teamagent.skills.base import SkillContext
 from teamagent.skills.morning_digest.schema import (
+    CalendarEventItem,
     MailDigestItem,
     MorningDigestInput,
     MorningDigestOutput,
@@ -494,3 +495,58 @@ def test_E28_max_drafts_cap_still_enforced_on_created_count():
     g = _Gmail(msgs)
     out = _run(_skill(g, triage=t), max_drafts=2)
     assert out.drafts_created == 2 and len(g.created) == 2  # 4候補でも2件で停止
+
+
+def test_E29_fmt_event_time_timed_allday_empty():
+    """予定時刻整形：通常は HH:MM–HH:MM、日付のみは終日、空は空。"""
+    assert (
+        runner._fmt_event_time("2026-06-25T10:00:00+09:00", "2026-06-25T11:30:00+09:00")
+        == "10:00–11:30"
+    )
+    assert runner._fmt_event_time("2026-06-25", "2026-06-26") == "終日"  # 終日イベント
+    assert runner._fmt_event_time(None, None) == ""
+    assert runner._fmt_event_time("2026-06-25T09:00:00+09:00", None) == "09:00"  # 終了不明
+
+
+def test_E30_calendar_section_rendered_with_real_titles():
+    """回帰固定：カレンダー予定が DM に描画され、本人DMでは実名(display)で出る。
+
+    以前は _collect_calendar が収集しても _format_block_kit に描画が無く、予定が
+    一切表示されなかった（2026-06-25 ユーザー指摘）。
+    """
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        calendar_events=[
+            CalendarEventItem(
+                summary_scrubbed="営***",
+                summary_display="営業定例 with 法人A",
+                start_at="2026-06-25T10:00:00+09:00",
+                end_at="2026-06-25T11:00:00+09:00",
+                location_display="本社3F",
+            )
+        ],
+    )
+    _t, blocks = runner._format_block_kit(d, ME)
+    dump = str(blocks)
+    assert "今日の予定" in dump  # 予定セクションが出る
+    assert "営業定例 with 法人A" in dump  # 実名(display)で表示
+    assert "10:00–11:00" in dump  # 時刻が出る
+    assert "本社3F" in dump  # 場所が出る
+
+
+def test_E31_calendar_link_injection_escaped():
+    """予定名に <url|text> が含まれても Block Kit でエスケープされ偽リンク化しない。"""
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        calendar_events=[
+            CalendarEventItem(
+                summary_display="緊急 <https://evil.example|今すぐ>",
+                start_at="2026-06-25T09:00:00+09:00",
+                end_at="2026-06-25T09:30:00+09:00",
+            )
+        ],
+    )
+    _t, blocks = runner._format_block_kit(d, ME)
+    dump = str(blocks)
+    assert "<https://evil.example|" not in dump
+    assert "&lt;https://evil.example|" in dump

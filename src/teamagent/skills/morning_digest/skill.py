@@ -459,9 +459,12 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         return [
             CalendarEventItem(
                 summary_scrubbed=str(scrub_value(getattr(ev, "summary", "")))[:80],
+                # 本人 DM 表示用の実名（未マスク）。runner が DM にだけ描画しログには出さない。
+                summary_display=str(getattr(ev, "summary", "") or "")[:120],
                 start_at=str(getattr(ev, "start", "") or "") or None,
                 end_at=str(getattr(ev, "end", "") or "") or None,
                 location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
+                location_display=str(getattr(ev, "location", "") or "")[:120],
             )
             for ev in events
         ]

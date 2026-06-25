@@ -96,12 +96,17 @@ def test_high_priority_section_and_draft_elevated() -> None:
     assert "下書きを見る" in dump
 
 
-def test_calendar_section_removed() -> None:
-    # カレンダー（今日の予定）は digest に含めない。
+def test_calendar_section_rendered() -> None:
+    # カレンダー（今日の予定）は DM に描画する（2026-06-25 ユーザー指摘で復活）。
+    # display 未設定時は scrubbed にフォールバックして描画する。
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    assert "今日の予定" not in dump
-    assert "渋谷オフィス" not in dump
+    assert "今日の予定" in dump  # 予定セクションが出る
+    assert "ノーベル定例" in dump  # 件名が出る
+    assert "渋谷オフィス" in dump  # 場所が出る
+    # スコアボードに予定件数（2件）が出る
+    fields_text = " ".join(f["text"] for f in blocks[1]["fields"])
+    assert "予定*  `2件`" in fields_text
 
 
 def test_action_buttons_present() -> None:

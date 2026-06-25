@@ -85,10 +85,18 @@ class MailDigestItem(BaseModel):
 class CalendarEventItem(BaseModel):
     """当日の予定 1 件（DLP マスク後）。"""
 
-    summary_scrubbed: str = Field(default="", max_length=80, description="件名（マスク後）")
+    summary_scrubbed: str = Field(default="", max_length=80, description="件名（マスク後・ログ用）")
+    summary_display: str = Field(
+        default="", max_length=120, description="件名（本人DM表示用・未マスク）"
+    )
     start_at: str | None = Field(default=None, description="開始時刻（ISO）")
     end_at: str | None = Field(default=None, description="終了時刻（ISO）")
-    location_scrubbed: str = Field(default="", max_length=80, description="場所（マスク後）")
+    location_scrubbed: str = Field(
+        default="", max_length=80, description="場所（マスク後・ログ用）"
+    )
+    location_display: str = Field(
+        default="", max_length=120, description="場所（本人DM表示用・未マスク）"
+    )
 
 
 class SlackUnreadItem(BaseModel):
