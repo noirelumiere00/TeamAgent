@@ -91,15 +91,15 @@ def test_high_priority_section_and_draft_elevated() -> None:
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
     assert "いますぐ返信したい（2件）" in dump
-    # has_draft=True の high 項目に「✏️ 返信下書き作成済」+ 下書きリンクが出る。
-    # （fixture は thread_id 無し＝汎用「下書きを見る」フォールバック）。
+    # has_draft=True の high 項目に「✏️ 返信下書き作成済」+「Gmailを開く」リンクが出る。
+    # （Slack 上では送信せず Gmail を開くだけ。）
     assert "✏️ 返信下書き作成済" in dump
-    assert "下書きを見る" in dump
+    assert "Gmailを開く" in dump
 
 
 def test_draft_links_to_thread_with_authuser() -> None:
     # thread_id を持つ has_draft 項目は、汎用 #drafts ではなくスレッド deep link
-    # (#all/<tid>) に「📩 Gmailで下書きを開く」で飛ぶ。複数ログイン対策に authuser を付ける。
+    # (#all/<tid>) を「Gmailを開く」で開く。複数ログイン対策に authuser を付ける。
     d = MorningDigestOutput(
         user_email_masked="s***@vectorinc.co.jp",
         mail_digest=[
@@ -115,7 +115,7 @@ def test_draft_links_to_thread_with_authuser() -> None:
     )
     _text, blocks = mod._format_block_kit(d, "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    assert "📩 Gmailで下書きを開く" in dump
+    assert "Gmailを開く" in dump
     assert "https://mail.google.com/mail/?authuser=s-komata@vectorinc.co.jp#all/thr_ABC123" in dump
 
 

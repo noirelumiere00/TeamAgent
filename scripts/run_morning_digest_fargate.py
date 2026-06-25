@@ -224,17 +224,10 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             thread_url = _gmail_thread_url(getattr(m, "thread_id", None), user_email)
             if m.has_draft:
                 meta.append({"type": "mrkdwn", "text": "✏️ 返信下書き作成済"})
-                if thread_url:
-                    # 下書きはスレッド内にインライン表示＝開けば確認してそのまま送信できる。
-                    meta.append(
-                        {"type": "mrkdwn", "text": f"<{thread_url}|📩 Gmailで下書きを開く>"}
-                    )
-                else:
-                    meta.append({"type": "mrkdwn", "text": f"<{drafts_url}|下書きを見る>"})
-            else:
-                meta.append(
-                    {"type": "mrkdwn", "text": f"<{thread_url or inbox_url}|📩 Gmailで開く>"}
-                )
+            # Gmail を開くだけの導線（Slack 上では送信しない＝確認・送信は Gmail 側）。
+            # thread_id があればその案件のスレッド、無ければ下書き/受信トレイにフォールバック。
+            open_url = thread_url or (drafts_url if m.has_draft else inbox_url)
+            meta.append({"type": "mrkdwn", "text": f"<{open_url}|Gmailを開く>"})
             blocks.append({"type": "context", "elements": meta})
         blocks.append({"type": "divider"})
     elif not mail_items:
