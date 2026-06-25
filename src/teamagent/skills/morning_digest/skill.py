@@ -465,6 +465,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 end_at=str(getattr(ev, "end", "") or "") or None,
                 location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
                 location_display=str(getattr(ev, "location", "") or "")[:120],
+                meeting_url=str(getattr(ev, "meeting_url", "") or "")[:600],
             )
             for ev in events
         ]

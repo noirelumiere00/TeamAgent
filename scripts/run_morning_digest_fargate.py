@@ -199,6 +199,10 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             line = f"• `{when}`  {title}"
             if loc:
                 line += f"  〔{_slack_escape(loc)}〕"
+            url = getattr(ev, "meeting_url", "")
+            if url:
+                # 会議リンクは本物の URL なのでエスケープしない（ラベルのみ固定文言）。
+                line += f"  <{url}|🔗参加>"
             lines.append(line)
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         blocks.append({"type": "divider"})

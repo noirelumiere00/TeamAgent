@@ -97,6 +97,9 @@ class CalendarEventItem(BaseModel):
     location_display: str = Field(
         default="", max_length=120, description="場所（本人DM表示用・未マスク）"
     )
+    meeting_url: str = Field(
+        default="", max_length=600, description="会議リンク（Meet/Zoom等・本人DM表示用）"
+    )
 
 
 class SlackUnreadItem(BaseModel):

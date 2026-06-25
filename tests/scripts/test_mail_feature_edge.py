@@ -523,6 +523,7 @@ def test_E30_calendar_section_rendered_with_real_titles():
                 start_at="2026-06-25T10:00:00+09:00",
                 end_at="2026-06-25T11:00:00+09:00",
                 location_display="本社3F",
+                meeting_url="https://meet.google.com/abc-defg-hij",
             )
         ],
     )
@@ -532,6 +533,7 @@ def test_E30_calendar_section_rendered_with_real_titles():
     assert "営業定例 with 法人A" in dump  # 実名(display)で表示
     assert "10:00–11:00" in dump  # 時刻が出る
     assert "本社3F" in dump  # 場所が出る
+    assert "https://meet.google.com/abc-defg-hij|🔗参加" in dump  # 会議リンクが出る
 
 
 def test_E31_calendar_link_injection_escaped():
