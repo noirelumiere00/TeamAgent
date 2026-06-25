@@ -220,15 +220,33 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             if getattr(m, "ask", ""):
                 body += f"\n📌 依頼: {_slack_escape(m.ask)}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
-            meta = []
-            thread_url = _gmail_thread_url(getattr(m, "thread_id", None), user_email)
-            if m.has_draft:
-                meta.append({"type": "mrkdwn", "text": "✏️ 返信下書き作成済"})
+            # 作成した返信下書きの本文を Slack でそのまま確認（未送信・本人DM限定・PII）。
+            draft_preview = getattr(m, "draft_preview", "") if m.has_draft else ""
+            if draft_preview:
+                pv = _slack_escape(draft_preview).strip()
+                if len(pv) > 1200:
+                    pv = pv[:1200].rstrip() + "…"
+                quoted = "\n".join(">" + ln for ln in pv.split("\n"))
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "✏️ *返信下書き（未送信・Slackでは送信しません）*\n" + quoted,
+                        },
+                    }
+                )
             # Gmail を開くだけの導線（Slack 上では送信しない＝確認・送信は Gmail 側）。
             # thread_id があればその案件のスレッド、無ければ下書き/受信トレイにフォールバック。
+            thread_url = _gmail_thread_url(getattr(m, "thread_id", None), user_email)
             open_url = thread_url or (drafts_url if m.has_draft else inbox_url)
-            meta.append({"type": "mrkdwn", "text": f"<{open_url}|Gmailを開く>"})
-            blocks.append({"type": "context", "elements": meta})
+            label = "Gmailを開く（確認して送信）" if m.has_draft else "Gmailを開く"
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": f"<{open_url}|{label}>"}],
+                }
+            )
         blocks.append({"type": "divider"})
     elif not mail_items:
         blocks.append(

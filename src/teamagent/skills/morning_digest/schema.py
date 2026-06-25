@@ -87,6 +87,11 @@ class MailDigestItem(BaseModel):
     subject_display: str = Field(
         default="", max_length=160, description="件名（本人DM限定・未マスク・ログ厳禁）"
     )
+    draft_preview: str = Field(
+        default="",
+        max_length=4000,
+        description="作成した返信下書きの本文（本人DM限定・未マスク・PII・ログ厳禁）。Slack確認用。",
+    )
 
 
 class CalendarEventItem(BaseModel):

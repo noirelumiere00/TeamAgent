@@ -567,6 +567,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 )
                 created += 1
                 digest_items[idx].has_draft = True
+                # 本人 DM でそのまま確認できるよう下書き本文を載せる（PII・ログ厳禁）。
+                digest_items[idx].draft_preview = draft_text[:4000]
                 if thread_id:
                     existing_threads.add(thread_id)
             except Exception:

@@ -91,9 +91,32 @@ def test_high_priority_section_and_draft_elevated() -> None:
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
     assert "いますぐ返信したい（2件）" in dump
-    # has_draft=True の high 項目に「✏️ 返信下書き作成済」+「Gmailを開く」リンクが出る。
+    # has_draft=True の high 項目に「Gmailを開く（確認して送信）」リンクが出る。
     # （Slack 上では送信せず Gmail を開くだけ。）
-    assert "✏️ 返信下書き作成済" in dump
+    assert "Gmailを開く（確認して送信）" in dump
+
+
+def test_draft_body_shown_for_review() -> None:
+    # draft_preview があれば、その本文を Slack でそのまま確認できる（未送信）。
+    d = MorningDigestOutput(
+        user_email_masked="s***@vectorinc.co.jp",
+        drafts_created=1,
+        mail_digest=[
+            MailDigestItem(
+                counterpart_masked="t***@tategata.co.jp",
+                subject_scrubbed="動画提出",
+                importance="high",
+                has_draft=True,
+                thread_id="thr_X",
+                draft_preview="タテガタ ご担当者様\nお世話になっております。本日中に審査します。",
+            ),
+        ],
+    )
+    _text, blocks = mod._format_block_kit(d, "s-komata@vectorinc.co.jp")
+    dump = str(blocks)
+    assert "返信下書き（未送信" in dump  # 確認用の下書きセクションが出る
+    assert "本日中に審査します" in dump  # 本文がそのまま読める
+    assert "Slackでは送信しません" in dump  # 送信は Slack でしない明示
     assert "Gmailを開く" in dump
 
 
