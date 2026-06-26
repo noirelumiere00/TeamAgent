@@ -88,14 +88,16 @@ def build_search_skill_from_env() -> Any:
     query_planner（USE_QUERY_PLANNER=1 のときだけ非 None）はここで遅延生成して注入する。
     起動ログに全ノブを出し、どの env でどう構築されたかを観測可能にする（QW-2）。
     """
-    from teamagent.adapters.embeddings_client import LocalE5Embedder
+    from teamagent.adapters.embeddings_client import build_embedder_from_env
     from teamagent.skills.search.query_planner import build_query_planner_from_env
     from teamagent.skills.search.skill import SearchSkill
 
     config = resolve_search_skill_config()
     logger.info("search_skill_config_resolved", source="factory", **config)
     return SearchSkill(
-        embedder=LocalE5Embedder(),
+        # EMBEDDER_BACKEND（既定 local）で local-e5 / Bedrock Cohere を切替。
+        # EMBEDDING_COLUMN とのペア整合は build_embedder_from_env 内で fail-loud 検証する。
+        embedder=build_embedder_from_env(),
         # P3 エージェント検索（USE_QUERY_PLANNER=1 のときだけ非 None・既定は単一クエリ）。
         query_planner=build_query_planner_from_env(),
         **config,

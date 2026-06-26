@@ -50,9 +50,27 @@ def batched(rows: Sequence[Any], size: int) -> Iterator[list[Any]]:
         yield list(rows[i : i + size])
 
 
-def build_update_params(chunk_id: Any, embedding: list[float]) -> tuple[str, tuple[Any, ...]]:
-    """1 chunk 分の UPDATE 文とパラメータを組み立てる（pgvector は list をそのまま渡す）。"""
-    sql = "UPDATE chunks SET embedding = %s WHERE id = %s"
+# UPDATE 先の embedding 列の許可リスト（識別子を SQL に埋めるため固定値のみ・injection 防止）。
+# embedding=e5（インプレース上書き＝rollback 不能）/ embedding_cohere=Bedrock Cohere の並行列
+# （e5 列を残すので env を戻すだけで rollback 可能）。
+_ALLOWED_TARGET_COLUMNS: frozenset[str] = frozenset({"embedding", "embedding_cohere"})
+
+
+def build_update_params(
+    chunk_id: Any, embedding: list[float], target_column: str = "embedding"
+) -> tuple[str, tuple[Any, ...]]:
+    """1 chunk 分の UPDATE 文とパラメータを組み立てる（pgvector は list をそのまま渡す）。
+
+    target_column は SQL 識別子として埋め込むため固定許可リスト
+    （embedding / embedding_cohere）のみ受け付け、それ以外は ValueError（injection 防止）。
+    既定 ``embedding``＝従来挙動（e5 インプレース上書き）。Cohere 並行列に書くときは
+    ``embedding_cohere`` を渡す（e5 列を残し rollback 可能にする）。
+    """
+    if target_column not in _ALLOWED_TARGET_COLUMNS:
+        raise ValueError(
+            f"target_column は {sorted(_ALLOWED_TARGET_COLUMNS)} のいずれか (got {target_column!r})"
+        )
+    sql = f"UPDATE chunks SET {target_column} = %s WHERE id = %s"  # nosec B608
     return sql, (embedding, chunk_id)
 
 
@@ -66,26 +84,45 @@ def reembed(
     batch_size: int,
     commit: bool,
     limit: int | None = None,
+    target_column: str = "embedding",
 ) -> dict[str, int]:
-    """chunks を再 embed する。戻り値: 集計 dict。"""
+    """chunks を再 embed する。戻り値: 集計 dict。
+
+    取り込み時ロジック（contextualize: contextualized=prefix+content を embed_passage）と
+    一致させるため、``COALESCE(contextualized, content)`` を embed する（contextualized が
+    あればそれを優先）。target_column は build_update_params が許可リスト検証する
+    （既定 embedding＝従来挙動）。
+    """
+    if target_column not in _ALLOWED_TARGET_COLUMNS:
+        raise ValueError(
+            f"target_column は {sorted(_ALLOWED_TARGET_COLUMNS)} のいずれか (got {target_column!r})"
+        )
     import psycopg
 
     stats = {"scanned": 0, "updated": 0}
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
-            q = "SELECT id, content FROM chunks ORDER BY id"
+            # 取り込み時は contextualized（prefix+content）を embed_passage する。再 embed も
+            # 同じソースを使い検索/取り込みのサブ空間を一致させる（contextualized 無しは content）。
+            q = "SELECT id, COALESCE(contextualized, content) AS src FROM chunks ORDER BY id"
             if limit:
                 q += f" LIMIT {int(limit)}"
             cur.execute(q)
             rows = cur.fetchall()
 
-        logger.info("reembed_start", total=len(rows), batch_size=batch_size, commit=commit)
+        logger.info(
+            "reembed_start",
+            total=len(rows),
+            batch_size=batch_size,
+            commit=commit,
+            target_column=target_column,
+        )
         for batch in batched(rows, batch_size):
-            for chunk_id, content in batch:
+            for chunk_id, src in batch:
                 stats["scanned"] += 1
-                vec = embedder.embed_passage(content or "")
+                vec = embedder.embed_passage(src or "")
                 if commit:
-                    sql, params = build_update_params(chunk_id, vec)
+                    sql, params = build_update_params(chunk_id, vec, target_column)
                     with conn.cursor() as cur:
                         cur.execute(sql, params)
                     stats["updated"] += 1
@@ -105,6 +142,17 @@ def main() -> int:
     p.add_argument("--batch-size", type=int, default=200)
     p.add_argument("--limit", type=int, default=None, help="先頭 N 件のみ（検証用）")
     p.add_argument("--commit", action="store_true", help="既定 dry-run。指定時のみ UPDATE")
+    p.add_argument(
+        "--target-column",
+        default="embedding",
+        choices=sorted(_ALLOWED_TARGET_COLUMNS),
+        help=(
+            "書き込む embedding 列。embedding=e5 インプレース上書き（既定・rollback 不能）/ "
+            "embedding_cohere=Bedrock Cohere 並行列（e5 を残し env 戻しで rollback 可能）。"
+            "EMBEDDER_BACKEND と整合必須（cohere⇄embedding_cohere / local⇄embedding）。"
+            "不整合は main() が起動時 fail-loud で停止する。"
+        ),
+    )
     args = p.parse_args()
 
     import os
@@ -114,20 +162,39 @@ def main() -> int:
         print("[ERROR] DATABASE_URL 未設定（load_secrets.sh を source）", file=sys.stderr)
         return 2
 
-    from teamagent.adapters.embeddings_client import LocalE5Embedder
+    # EMBEDDER_BACKEND（既定 local）で local-e5 / Bedrock Cohere を切替（検索/取り込みと同一構築点）。
+    # build_embedder_from_env は EMBEDDING_COLUMN との整合を検証するが、再 embed が実際に
+    # 書き込むのは --target-column（別ノブ）。両者がズレると Cohere ベクトルを e5 列 embedding に
+    # インプレース上書き（rollback 不能）する全壊が成立しうるため、検索側 fail-loud と同じ
+    # 不変条件を「書込列」に対しても直接検証する（cohere⇄embedding_cohere / local⇄embedding）。
+    from teamagent.adapters.embeddings_client import (
+        build_embedder_from_env,
+        resolve_embedder_backend,
+        validate_embedder_column_pair,
+    )
+
+    try:
+        validate_embedder_column_pair(resolve_embedder_backend(), args.target_column)
+    except ValueError as e:
+        print(f"[ERROR] backend と --target-column の不整合: {e}", file=sys.stderr)
+        return 2
 
     try:
         stats = reembed(
             dsn=dsn,
-            embedder=LocalE5Embedder(),
+            embedder=build_embedder_from_env(),
             batch_size=args.batch_size,
             commit=args.commit,
             limit=args.limit,
+            target_column=args.target_column,
         )
     except Exception as e:
         print(f"[ERROR] reembed failed: {e}", file=sys.stderr)
         return 2
-    print(f"scanned={stats['scanned']} updated={stats['updated']} commit={args.commit}")
+    print(
+        f"scanned={stats['scanned']} updated={stats['updated']} "
+        f"commit={args.commit} target_column={args.target_column}"
+    )
     return 0
 
 

@@ -47,7 +47,63 @@ def test_batched_rejects_nonpositive() -> None:
 
 def test_build_update_params() -> None:
     sql, params = rc.build_update_params("c-1", [0.1, 0.2, 0.3])
-    assert "UPDATE chunks SET embedding" in sql
+    assert "UPDATE chunks SET embedding = %s" in sql
     assert "WHERE id = %s" in sql
     # pgvector は list をそのまま渡す（embedding, id の順）
     assert params == ([0.1, 0.2, 0.3], "c-1")
+
+
+def test_build_update_params_default_is_e5_column() -> None:
+    """target_column 既定は embedding（e5・従来挙動）。"""
+    sql, _ = rc.build_update_params("c-1", [0.1])
+    assert "UPDATE chunks SET embedding = %s WHERE id = %s" == sql
+
+
+def test_build_update_params_cohere_target_column() -> None:
+    """embedding_cohere を指定すると並行列に書く（e5 列は触らない）。"""
+    sql, params = rc.build_update_params("c-2", [0.5], target_column="embedding_cohere")
+    assert sql == "UPDATE chunks SET embedding_cohere = %s WHERE id = %s"
+    assert params == ([0.5], "c-2")
+
+
+def test_build_update_params_rejects_unknown_column() -> None:
+    """許可リスト外の列名（injection 試行）は ValueError。"""
+    with pytest.raises(ValueError, match="target_column"):
+        rc.build_update_params("c", [0.1], target_column="embedding; DROP TABLE chunks")
+
+
+def test_main_rejects_backend_target_column_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EMBEDDER_BACKEND=cohere なのに --target-column embedding（既定）だと全壊するので
+    DB に触れる前に fail-loud で 2 を返す（Cohere ベクトルを e5 列へ書く事故を防ぐ）。"""
+    monkeypatch.setattr(sys, "argv", ["reembed_chunks.py", "--commit"])
+    monkeypatch.setenv("DATABASE_URL", "postgresql://stub/db")
+    monkeypatch.setenv("EMBEDDER_BACKEND", "cohere")
+    monkeypatch.setenv("EMBEDDING_COLUMN", "embedding_cohere")  # build_embedder のペアは合致
+
+    # reembed が呼ばれたら DB に触れてしまう＝検証が効いていない証拠なので fail させる。
+    def _boom(*_a: Any, **_k: Any) -> dict[str, int]:
+        raise AssertionError("reembed must not be reached on mismatch")
+
+    monkeypatch.setattr(rc, "reembed", _boom)
+
+    assert rc.main() == 2
+
+
+def test_main_reverse_mismatch_local_backend_cohere_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """逆向き（EMBEDDER_BACKEND=local + --target-column embedding_cohere）も
+    e5 ベクトルを cohere 列に汚染するので fail-loud で 2。"""
+    monkeypatch.setattr(
+        sys, "argv", ["reembed_chunks.py", "--commit", "--target-column", "embedding_cohere"]
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://stub/db")
+    monkeypatch.delenv("EMBEDDER_BACKEND", raising=False)  # 既定 local
+    monkeypatch.delenv("EMBEDDING_COLUMN", raising=False)  # 既定 embedding（build_embedder は合致）
+
+    def _boom(*_a: Any, **_k: Any) -> dict[str, int]:
+        raise AssertionError("reembed must not be reached on mismatch")
+
+    monkeypatch.setattr(rc, "reembed", _boom)
+
+    assert rc.main() == 2

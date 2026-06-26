@@ -26,6 +26,12 @@ from teamagent.adapters.pg_pool import ConnectionPool, PoolStats
 
 logger = structlog.get_logger(__name__)
 
+# chunks の embedding 列を SQL 識別子として f 文字列に埋める際の許可リスト。
+# 値ではなく **識別子** を埋めるため placeholder にできず、injection 防止は固定許可リスト
+# で行う（embeddings_client.ALLOWED_EMBEDDING_COLUMNS と同一集合）。e5=embedding /
+# Bedrock Cohere=embedding_cohere（migration 0016 で並行追加）。
+_ALLOWED_EMBEDDING_COLUMNS: frozenset[str] = frozenset({"embedding", "embedding_cohere"})
+
 
 def _env_int(name: str, default: int) -> int:
     """env を int として読む（空・不正値は default）。"""
@@ -359,6 +365,7 @@ class PgVectorClient:
         metadata_contains: dict[str, str] | None = None,
         exclude_boilerplate: bool = False,
         exclude_duplicates: bool = False,
+        embedding_col: str = "embedding",
     ) -> list[SearchHit]:
         """documents + chunks JOIN で cosine 類似度上位 limit 件を返す。
 
@@ -420,7 +427,22 @@ class PgVectorClient:
             既定 False = 句を一切足さず現行 SQL と完全一致。何も suppressed されて
             いなければ NOT(...) 全体が真になり無影響（後方互換）。exclude_boilerplate と
             AND 併用可。
+
+        embedding_col:
+            類似度算出/ORDER BY に使う chunks の embedding 列名。既定 ``"embedding"``
+            （e5・従来挙動と完全一致）。Bedrock Cohere 移行時は ``"embedding_cohere"`` を
+            渡し並行列で検索する。**SQL 識別子として f 文字列に埋め込む**ため、固定の許可
+            リスト（``embedding`` / ``embedding_cohere``）のみ受け付け、それ以外は ValueError
+            で即落とす（injection 防止＝nosec B608 の前提を維持）。クエリ側 embedder と列の
+            ベクトル空間が一致している必要がある（呼び側 SearchSkill が EMBEDDER_BACKEND と
+            ペアで解決・起動時 fail-loud 検証する）。
         """
+        # 識別子 injection 防止: 列名は固定の許可リストのみ（値ではなく識別子として埋める）。
+        if embedding_col not in _ALLOWED_EMBEDDING_COLUMNS:
+            raise ValueError(
+                f"embedding_col は {sorted(_ALLOWED_EMBEDDING_COLUMNS)} のいずれか "
+                f"(got {embedding_col!r})"
+            )
         where_parts: list[str] = []
         params: list[Any] = [embedding]  # score 算出の 1st %s
 
@@ -509,7 +531,7 @@ class PgVectorClient:
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
                 COALESCE(c.contextualized, c.content) AS content,
-                1 - (c.embedding <=> %s::vector) AS score,
+                1 - (c.{embedding_col} <=> %s::vector) AS score,
                 c.page_num,
                 d.id AS document_id,
                 d.source_uri,
@@ -531,7 +553,7 @@ class PgVectorClient:
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             {where_clause}
-            ORDER BY c.embedding <=> %s::vector
+            ORDER BY c.{embedding_col} <=> %s::vector
             LIMIT %s
         """  # nosec B608
 
@@ -798,21 +820,32 @@ class PgVectorClient:
     ) -> list[str]:
         """既知のクライアント名（distinct）を返す（read-only）。
 
-        クエリ中の固有名詞（例「ユニーの2回目提案」）を既知クライアント名の語彙へ
-        substring 照合し、client_name で絞った検索を追加する「クライアント名ブースト」
-        （SearchSkill use_client_boost）の語彙に使う。RLS は connection() 側で有効化済の前提。
+        クエリ中の固有名詞（例「ユニーの2回目提案」「出光興産の提案」）を既知クライアント名の
+        語彙へ substring 照合し、client_name で絞った検索を追加する「クライアント名ブースト」
+        （SearchSkill use_client_boost）や B6 の client_match sort の語彙に使う。
+
+        語彙は ``client_name``（FB に付く取引先）∪ ``cls_project``（全資料に付く取引先・自動
+        分類）の **UNION DISTINCT**。client_name 単独だと FB の無い案件（Drive 提案資料だけの
+        取引先）を取りこぼし、固有名詞クエリが boost/sort で発火しなかった。cls_project を
+        足すことで「出光興産」等の bare entity を実案件へ寄せられる（B6 の前提条件）。
+        RLS は connection() 側で有効化済の前提。
         """
         sql = """
-            SELECT DISTINCT d.metadata->>'client_name' AS client_name
-            FROM documents d
-            WHERE d.metadata->>'client_name' IS NOT NULL
-              AND d.metadata->>'client_name' <> ''
+            SELECT DISTINCT name FROM (
+                SELECT d.metadata->>'client_name' AS name FROM documents d
+                WHERE d.metadata->>'client_name' IS NOT NULL
+                  AND d.metadata->>'client_name' <> ''
+                UNION
+                SELECT d.metadata->>'cls_project' AS name FROM documents d
+                WHERE d.metadata->>'cls_project' IS NOT NULL
+                  AND d.metadata->>'cls_project' <> ''
+            ) AS names
             LIMIT %s
         """  # nosec B608
         with conn.cursor() as cur:
             cur.execute(sql, [limit])
             rows = cur.fetchall()
-        return [str(r["client_name"]) for r in rows if r.get("client_name")]
+        return [str(r["name"]) for r in rows if r.get("name")]
 
     def list_client_timeline(
         self,

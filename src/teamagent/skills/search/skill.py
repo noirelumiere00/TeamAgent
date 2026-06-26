@@ -34,7 +34,7 @@ from teamagent.skills.search.knowledge_query import (
     extract_query_industry,
 )
 from teamagent.skills.search.query_planner import QueryPlanner
-from teamagent.skills.search.rerank import sort_by_budget_proximity
+from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
@@ -217,6 +217,26 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # env 読み取りは __init__ で1回（factory 無改修・_build_search_skill はモジュール関数で
         # self を持たないため）。**既定 OFF・後方互換**：無効なら sort 段を一切呼ばない（恒等）。
         self._budget_sort = self._envflag("SEARCH_BUDGET_SORT")
+        # B6: クライアント名クエリで実案件（cls_project/client_name 一致）を rerank 後の
+        # 最終 top_k 内で前出しする 1 段並べ替え（絞らない＝取りこぼしても最悪ランク後退のみ）。
+        # 既知クライアント名（client_name ∪ cls_project の UNION）に substring 一致したときだけ
+        # 発火。env-gate SEARCH_CLIENT_MATCH_SORT（既定 OFF・恒等）。USE_CLIENT_BOOST は不変。
+        self._client_match_sort = self._envflag("SEARCH_CLIENT_MATCH_SORT")
+        # 検索に使う chunks の embedding 列（既定 'embedding'＝e5・従来挙動と完全一致）。
+        # EMBEDDING_COLUMN env を __init__ で 1 回だけ解決し（boilerplate flag と同じ流儀）、
+        # search_similar_new_schema へ embedding_col として運ぶ（純 SQL は pgvector 側の責務）。
+        # Bedrock Cohere 移行時は EMBEDDING_COLUMN=embedding_cohere。EMBEDDER_BACKEND との
+        # ペア整合（cohere⇄embedding_cohere / local⇄embedding）を起動時 fail-loud で検証する。
+        # 検証は embedder が build_embedder_from_env() 経由（factory）で既に行われるが、
+        # skill 単体構築（テスト/旧経路）でも空間不整合を防ぐためここでも検証する。
+        from teamagent.adapters.embeddings_client import (
+            resolve_embedder_backend,
+            resolve_embedding_column,
+            validate_embedder_column_pair,
+        )
+
+        self._embedding_column = resolve_embedding_column()
+        validate_embedder_column_pair(resolve_embedder_backend(), self._embedding_column)
 
     @staticmethod
     def _envflag(name: str, default: str = "false") -> bool:
@@ -397,6 +417,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             metadata_contains=metadata_contains,
             exclude_boilerplate=self._exclude_boilerplate,
             exclude_duplicates=self._exclude_duplicates,
+            embedding_col=self._embedding_column,
         )
         if not hits and (metadata_filters or filter_industry):
             hits = self._pgvector.search_similar_new_schema(
@@ -410,6 +431,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 metadata_contains=metadata_contains,  # 明示 client は保持
                 exclude_boilerplate=self._exclude_boilerplate,
                 exclude_duplicates=self._exclude_duplicates,
+                embedding_col=self._embedding_column,
             )
         # L3: ここまで 0 件 かつ exclude 系が効いている → exclude を全外しで最後の再検索。
         if (
@@ -428,6 +450,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 metadata_contains=metadata_contains,  # 明示 client は最後まで保持
                 exclude_boilerplate=False,
                 exclude_duplicates=False,
+                embedding_col=self._embedding_column,
             )
             if rescued:
                 # frozen dataclass の可変 dict なので in-place 付与（再代入はしない）。
@@ -698,6 +721,25 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # SEARCH_BUDGET_SORT（既定 OFF）。FB drive-match（固定 score=1.0）の前に置く。
                 if self._budget_sort and input.sort_budget_near and hits:
                     hits = sort_by_budget_proximity(hits, input.sort_budget_near)
+                # B6: クライアント名クエリで実案件（cls_project/client_name 一致）を前出し。
+                # rerank・min_relevance・top_k 絞り確定後、fb_drive_match の前に 1 段だけ
+                # 並べ替える（絞らない）。明示 filter_client があればそれを、無ければ既知
+                # クライアント語彙への substring 一致（_match_client・初回のみ語彙取得しキャッシュ）
+                # を基準にする。env-gate SEARCH_CLIENT_MATCH_SORT（既定 OFF・恒等）。
+                if self._client_match_sort and hits:
+                    client_for_sort = input.filter_client or self._match_client(
+                        input.query, conn, ctx.request_id
+                    )
+                    if client_for_sort:
+                        before_top = hits[0].chunk_id if hits else None
+                        hits = sort_by_client_match(hits, client_for_sort)
+                        if hits and hits[0].chunk_id != before_top:
+                            logger.info(
+                                "search_client_match_sort",
+                                request_id=ctx.request_id,
+                                client=client_for_sort,
+                                pool=len(hits),
+                            )
                 # Day 8 Phase 2: FB hits があれば client_name で Drive 資料を追加 retrieve
                 if self._use_fb_drive_match and hits:
                     related = self._fetch_related_drive_hits(
@@ -866,6 +908,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             metadata_contains=metadata_contains,
             exclude_boilerplate=self._exclude_boilerplate,
             exclude_duplicates=self._exclude_duplicates,
+            embedding_col=self._embedding_column,
         )
         if not boost:
             return hits
