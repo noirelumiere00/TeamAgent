@@ -339,6 +339,22 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 朝ダイジェストの「✏️ 下書きを作成」ボタン押下を処理するツール（OpenClaw 経由）。
+    # 押下 → OpenClaw(socket) が system event でエージェントへ転送 → SOUL 指示で本ツールを呼ぶ。
+    # その案件へ Reply-All 下書きを作成（送信しない）。**既定 OFF**（USE_MAIL_DRAFT_TOOL=1）。
+    if _envflag("USE_MAIL_DRAFT_TOOL"):
+        from teamagent.skills.mail_draft.skill import MailDraftSkill
+
+        draft_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                MailDraftSkill.name,
+                MailDraftSkill.description,
+                MailDraftSkill,
+                factory=lambda: MailDraftSkill(token_store=draft_store),
+            )
+        )
+
     # §U-Part3 Step C: 朝ダイジェスト Skill。EventBridge Scheduled Task（平日 9:30 JST）が
     # scripts/run_morning_digest_fargate.py 経由で各 user_email ごとに呼ぶ。mention 経由では
     # ないが統一的に ToolSpec 登録（ローカル検証用）。**既定 OFF**（USE_MORNING_DIGEST_TOOL=1）。
