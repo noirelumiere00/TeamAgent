@@ -467,3 +467,96 @@ def test_client_boost_sticky_none_when_no_explicit_filters() -> None:
     boost = _boost_call(pg)
     assert boost["sticky_filters"] is None
     assert boost["metadata_contains"] is None
+
+
+# --- §D: NL client 抽出 → __client__ 昇格（query_planner 経路）------------------------
+
+
+def _plan(client_names: list[str]) -> QueryPlan:
+    return QueryPlan(
+        paraphrases=[],  # 言い換え無し → 元クエリ 1 本のみ（_pool_search 呼び出し1回）
+        hyde_answer="",
+        industry=None,
+        doc_type=None,
+        client_names=client_names,
+        is_aggregation=False,
+    )
+
+
+def test_plan_client_promoted_to_metadata_contains() -> None:
+    """USE_QUERY_PLANNER 経路で plan.client_names 先頭を __client__ へ昇格（NL client）。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    _skill(
+        pg,
+        planner=_FakePlanner(_plan(["電通", "博報堂"])),
+        use_knowledge_filters=True,
+    ).run(input=SearchInput(query="電通への提案資料"), ctx=SkillContext())
+    for call in pg.search_similar_new_schema.call_args_list:
+        assert call.kwargs["metadata_contains"] == {"__client__": "電通"}
+
+
+def test_explicit_filter_client_not_overridden_by_plan() -> None:
+    """明示 filter_client があれば plan.client_names では上書きしない（mc is None ガード）。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    _skill(
+        pg,
+        planner=_FakePlanner(_plan(["博報堂"])),  # plan は別 client を抽出するが…
+        use_knowledge_filters=True,
+    ).run(
+        input=SearchInput(query="提案", filter_client="電通"),  # …明示が優先
+        ctx=SkillContext(),
+    )
+    for call in pg.search_similar_new_schema.call_args_list:
+        assert call.kwargs["metadata_contains"] == {"__client__": "電通"}
+
+
+def test_empty_plan_client_names_is_noop() -> None:
+    """plan.client_names が空なら __client__ は乗らない（後方互換・no-op）。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    _skill(
+        pg,
+        planner=_FakePlanner(_plan([])),
+        use_knowledge_filters=True,
+    ).run(input=SearchInput(query="提案"), ctx=SkillContext())
+    for call in pg.search_similar_new_schema.call_args_list:
+        assert call.kwargs["metadata_contains"] is None
+
+
+def test_plan_client_not_promoted_when_knowledge_filters_off() -> None:
+    """USE_KNOWLEDGE_FILTERS OFF なら plan.client_names は昇格しない（gate 一貫性）。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    _skill(
+        pg,
+        planner=_FakePlanner(_plan(["電通"])),
+        use_knowledge_filters=False,
+    ).run(input=SearchInput(query="電通への提案"), ctx=SkillContext())
+    for call in pg.search_similar_new_schema.call_args_list:
+        assert call.kwargs["metadata_contains"] is None
+
+
+def test_plan_client_promotion_skips_client_boost() -> None:
+    """plan 由来 client を昇格したら client_boost をスキップ（明示時と挙動を揃える）。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    skill = _skill(
+        pg,
+        use_client_boost=True,
+        planner=_FakePlanner(_plan(["電通"])),
+        use_knowledge_filters=True,
+    )
+    skill._apply_client_boost = MagicMock()  # type: ignore[method-assign]
+    skill.run(input=SearchInput(query="電通への提案"), ctx=SkillContext())
+    skill._apply_client_boost.assert_not_called()
+
+
+def test_boost_runs_when_plan_has_no_client() -> None:
+    """plan に client が無ければ boost は従来どおり走る（昇格していないので skip しない）。"""
+    pg = _pgvector(return_value=[_hit(1)])
+    skill = _skill(
+        pg,
+        use_client_boost=True,
+        planner=_FakePlanner(_plan([])),
+        use_knowledge_filters=True,
+    )
+    skill._apply_client_boost = MagicMock(return_value=[_hit(1)])  # type: ignore[method-assign]
+    skill.run(input=SearchInput(query="ふつうの検索"), ctx=SkillContext())
+    skill._apply_client_boost.assert_called_once()

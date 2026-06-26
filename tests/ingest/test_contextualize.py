@@ -48,12 +48,19 @@ class _FakeEmbedder:
         self.seen.append(text)
         return list(self._vec)
 
+    def embed_passage(self, text: str) -> list[float]:
+        # contextualize は passage 側で埋め込む。seen 記録の経路を揃える。
+        return self.embed(text)
+
 
 class _RaisingEmbedder:
     """embed() が常に例外を投げる fake（fail-open 検証用）。"""
 
     def embed(self, text: str) -> list[float]:
         raise RuntimeError("embed failed")
+
+    def embed_passage(self, text: str) -> list[float]:
+        return self.embed(text)
 
 
 _ORIG_EMBED = [0.1] * 1024

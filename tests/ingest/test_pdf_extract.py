@@ -103,3 +103,211 @@ def test_extract_pdf_pages_skips_empty_pages(monkeypatch: pytest.MonkeyPatch) ->
     pages = extract_pdf_pages(b"fake")
     # 1-indexed なので 1 と 4 のみ
     assert pages == [(1, "有効ページ"), (4, "最後のページ")]
+
+
+# -----------------------------------------------------------
+# D: min_chars 最小文字数ガード
+# -----------------------------------------------------------
+def test_extract_pdf_pages_min_chars_default_is_backward_compatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """min_chars 既定 0 では極小テキストも残る（現行挙動）。"""
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = False
+    fake_reader.pages = [
+        _make_fake_page("a"),  # 1 文字
+        _make_fake_page("十分に長い本文テキスト"),
+    ]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    pages = extract_pdf_pages(b"fake")
+    assert pages == [(1, "a"), (2, "十分に長い本文テキスト")]
+
+
+def test_extract_pdf_pages_min_chars_drops_tiny_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """min_chars 以上の文字数のページだけ残り、極小ページは空扱いで落ちる。"""
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = False
+    fake_reader.pages = [
+        _make_fake_page("ab"),  # 2 文字 → min_chars=5 未満で除外
+        _make_fake_page("有効な本文ページ"),  # 8 文字 → 残る
+        _make_fake_page("xy"),  # 2 文字 → 除外
+        _make_fake_page("もう一つの本文"),  # 7 文字 → 残る
+    ]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    pages = extract_pdf_pages(b"fake", min_chars=5)
+    # 1-indexed で page 2, 4 のみ残る
+    assert pages == [(2, "有効な本文ページ"), (4, "もう一つの本文")]
+
+
+def test_extract_pdf_pages_min_chars_boundary_inclusive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ちょうど min_chars 文字のページは残る（< min_chars だけ落とす）。"""
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = False
+    fake_reader.pages = [
+        _make_fake_page("abcd"),  # 4 文字 = min_chars → 残る
+        _make_fake_page("abc"),  # 3 文字 < min_chars → 除外
+    ]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    pages = extract_pdf_pages(b"fake", min_chars=4)
+    assert pages == [(1, "abcd")]
+
+
+def test_extract_pdf_pages_min_chars_logs_low_text_yield(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """min_chars で落ちたページがあると low_text_yield 構造化ログを出す。"""
+    captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def _fake_info(*args: Any, **kwargs: Any) -> None:
+        captured.append((args, kwargs))
+
+    monkeypatch.setattr("teamagent.ingest.pdf_extract.logger.info", _fake_info)
+
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = False
+    fake_reader.pages = [
+        _make_fake_page("ab"),  # 落ちる
+        _make_fake_page("有効な本文ページ"),  # 残る
+    ]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    extract_pdf_pages(b"fake", min_chars=5)
+
+    events = [a[0] for a, _ in captured]
+    assert "low_text_yield" in events
+    # low_text_yield の kwargs に歩留まり情報が乗る
+    low = next(kw for (a, kw) in captured if a and a[0] == "low_text_yield")
+    assert low["min_chars"] == 5
+    assert low["low_text_pages"] == 1
+    assert low["kept_pages"] == 1
+    assert low["total_pages"] == 2
+
+
+def test_extract_pdf_pages_min_chars_no_log_when_nothing_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全ページが min_chars 以上なら low_text_yield ログは出ない。"""
+    captured: list[str] = []
+
+    def _fake_info(event: str = "", *args: Any, **kwargs: Any) -> None:
+        captured.append(event)
+
+    monkeypatch.setattr("teamagent.ingest.pdf_extract.logger.info", _fake_info)
+
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = False
+    fake_reader.pages = [
+        _make_fake_page("十分に長い本文1"),
+        _make_fake_page("十分に長い本文2"),
+    ]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    extract_pdf_pages(b"fake", min_chars=3)
+    assert "low_text_yield" not in captured
+
+
+# -----------------------------------------------------------
+# J: 暗号化シグナル（decrypt 試行 + ログ）
+# -----------------------------------------------------------
+def test_extract_pdf_pages_encrypted_attempts_decrypt_and_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """is_encrypted=True なら空 PW で decrypt を試み、失敗時 pdf_encrypted を warn。"""
+    warnings: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def _fake_warning(*args: Any, **kwargs: Any) -> None:
+        warnings.append((args, kwargs))
+
+    monkeypatch.setattr("teamagent.ingest.pdf_extract.logger.warning", _fake_warning)
+
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = True
+    fake_reader.decrypt.return_value = 0  # FAILED（空 PW では開けない）
+    fake_reader.pages = [_make_fake_page("復号できなかった本文")]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    extract_pdf_pages(b"fake")
+
+    # 空 PW で decrypt が試行された
+    fake_reader.decrypt.assert_called_once_with("")
+    # pdf_encrypted で warn された（corrupt とは別イベント）
+    events = [a[0] for a, _ in warnings if a]
+    assert "pdf_encrypted" in events
+    pe = next(kw for (a, kw) in warnings if a and a[0] == "pdf_encrypted")
+    assert pe["reason"] == "decrypt_failed"
+    assert pe["empty_password"] is True
+
+
+def test_extract_pdf_pages_encrypted_decrypt_success_logs_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """空 PW で decrypt 成功なら pdf_encrypted decrypt_ok を info ログし本文も取れる。"""
+    infos: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def _fake_info(*args: Any, **kwargs: Any) -> None:
+        infos.append((args, kwargs))
+
+    monkeypatch.setattr("teamagent.ingest.pdf_extract.logger.info", _fake_info)
+
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = True
+    fake_reader.decrypt.return_value = 1  # USER PW で開けた
+    fake_reader.pages = [_make_fake_page("復号できた本文")]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    pages = extract_pdf_pages(b"fake")
+
+    fake_reader.decrypt.assert_called_once_with("")
+    events = [a[0] for a, _ in infos if a]
+    assert "pdf_encrypted" in events
+    pe = next(kw for (a, kw) in infos if a and a[0] == "pdf_encrypted")
+    assert pe["reason"] == "decrypt_ok"
+    # 復号後にページ本文が取れている
+    assert pages == [(1, "復号できた本文")]
+
+
+def test_extract_pdf_pages_encrypted_decrypt_raises_logs_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """decrypt 自体が例外でも pdf_encrypted を warn して抽出を続行する。"""
+    warnings: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def _fake_warning(*args: Any, **kwargs: Any) -> None:
+        warnings.append((args, kwargs))
+
+    monkeypatch.setattr("teamagent.ingest.pdf_extract.logger.warning", _fake_warning)
+
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = True
+    fake_reader.decrypt.side_effect = NotImplementedError("AES unsupported")
+    fake_reader.pages = [_make_fake_page("本文")]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    pages = extract_pdf_pages(b"fake")
+
+    pe = next(kw for (a, kw) in warnings if a and a[0] == "pdf_encrypted")
+    assert pe["reason"] == "decrypt_raised"
+    # 抽出は続行され本文が取れる
+    assert pages == [(1, "本文")]
+
+
+def test_extract_pdf_pages_not_encrypted_skips_decrypt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """is_encrypted=False では decrypt を呼ばない（無駄な復号試行をしない）。"""
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = False
+    fake_reader.pages = [_make_fake_page("通常本文")]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    pages = extract_pdf_pages(b"fake")
+
+    fake_reader.decrypt.assert_not_called()
+    assert pages == [(1, "通常本文")]

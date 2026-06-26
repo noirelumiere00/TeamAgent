@@ -390,6 +390,13 @@ resource "aws_ecs_task_definition" "mcp" {
       # 無関係/本文なしファイルを添付しない。飲料系検索で無関係客の PDF を誤添付した対策。
       { name = "SEARCH_MIN_RELEVANCE", value = "0.4" },
       { name = "KNOWLEDGE_DELIVER_MIN_SCORE", value = "0.5" },
+      # 「資料の被り」対策（L1）: @AiLa の社内資料検索でも、テンプレページ由来の重複ヒットと
+      # 同一資料の結果独占を抑える（近似重複の畳み込み＋同一資料の上限・既定2）。env で OFF 可。
+      { name = "SEARCH_DEDUP_RESULTS", value = "true" },
+      # テンプレ箇所/まるごと重複を検索から除外（ingest の boilerplate/doc-dedup の印を読む）。
+      # 印が付くのは再取込後なので、印が無いうちは no-op（後方互換）。
+      { name = "BOILERPLATE_EXCLUDE_SEARCH", value = "true" },
+      { name = "DOC_DEDUP_EXCLUDE_SEARCH", value = "true" },
       ], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },

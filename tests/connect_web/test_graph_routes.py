@@ -38,6 +38,9 @@ _SAMPLE_DOCS: list[dict[str, Any]] = [
         "cls_industry": "食品",
         "cls_project": "ニチレイ",
         "cls_doc_type": "提案書",
+        "cls_solution": "動画広告",
+        "cls_budget": "1000万",
+        "cls_target": "ファミリー層",
         "client_name": "ニチレイ",
     },
     {
@@ -110,9 +113,23 @@ def test_api_graph_returns_nodes_and_edges() -> None:
     body = r.json()
     assert {n["id"] for n in body["nodes"]} == {1, 2, 3}
     # doc1-doc2 は project 共有でエッジ、doc3 は孤立
-    assert body["edges"] == [{"source": 1, "target": 2, "reason": "project:ニチレイ"}]
+    # （edges には後方互換な strength フィールドが付与される）
+    assert body["edges"] == [
+        {"source": 1, "target": 2, "reason": "project:ニチレイ", "strength": "strong"}
+    ]
     # RLS: provider に cookie 由来の本人 email が渡る
     assert seen == [_EMAIL]
+
+
+def test_api_graph_projects_new_classification_axes() -> None:
+    # L2 射影: provider が返す cls_solution/cls_budget/cls_target が node に乗る。
+    client, _ = _build()
+    r = client.get("/api/v1/graph", cookies=_auth_cookie())
+    assert r.status_code == 200
+    node1 = next(n for n in r.json()["nodes"] if n["id"] == 1)
+    assert node1["solution"] == "動画広告"
+    assert node1["budget"] == "1000万"
+    assert node1["target"] == "ファミリー層"
 
 
 def test_api_graph_handles_provider_error() -> None:

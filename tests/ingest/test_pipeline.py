@@ -24,6 +24,9 @@ class _FakeEmbedder:
     def embed(self, text: str) -> list[float]:
         return [0.1] * 1024
 
+    def embed_passage(self, text: str) -> list[float]:
+        return self.embed(text)
+
 
 class _FakeRepository:
     """実 DB なしで upsert を記録する fake。"""
@@ -1478,3 +1481,570 @@ def test_ingest_crawl_no_classification_when_disabled(
     md = repo.upsert_calls[0]["metadata"]
     assert "cls_project" not in md
     assert "cls_doc_type" not in md
+
+
+# -----------------------------------------------------------
+# crawl 経路の Office (pptx/docx/xlsx) 本文抽出の配線
+# （高ボリューム crawl が title だけでなく中身も index 化することの回帰。
+#   営業提案書は大半が pptx なので、ここが title_only に落ちると検索が死ぬ。）
+# -----------------------------------------------------------
+def test_ingest_shared_drives_crawl_pptx_extracts_content_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """crawl 経路でも pptx は slide 単位の本文 chunk になる（title_only に落ちない）。"""
+    from io import BytesIO
+
+    from pptx import Presentation
+
+    from teamagent.adapters.gdrive_client import SharedDrive
+    from teamagent.ingest.office_extract import PPTX_MIME
+
+    prs = Presentation()
+    layout = prs.slide_layouts[5]
+    s1 = prs.slides.add_slide(layout)
+    s1.shapes.title.text = "アース製薬向け SNS 提案 スライド1"
+    s2 = prs.slides.add_slide(layout)
+    s2.shapes.title.text = "施策概要 スライド2"
+    buf = BytesIO()
+    prs.save(buf)
+    pptx_bytes = buf.getvalue()
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(id="P1", name="提案.pptx", mime=PPTX_MIME, owners=("alice@x.jp",))
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = pptx_bytes
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,  # フィルタを外して fake pptx を確実に通す
+    )
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-pptx",
+    )
+    assert docs_n == 1
+    assert chunks_n == 2  # 2 slides → 2 本文 chunk（小さいので分割なし）
+    fake_client.download_file_bytes.assert_called_once()
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert len(chunks) == 2
+    # 本文抽出 chunk であることの検証: page_num を持ち、title_only に落ちていない
+    for c in chunks:
+        assert "page_num" in c.metadata
+        assert not c.metadata.get("title_only")
+
+
+def test_ingest_shared_drives_crawl_office_badzip_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """壊れた pptx (BadZipFile) は fail-open で skip され、crawl は他ファイルを処理し続ける。"""
+    import zipfile
+
+    from teamagent.adapters.gdrive_client import SharedDrive
+    from teamagent.ingest.office_extract import PPTX_MIME
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    # 1 件目: 壊れた pptx（skip される）、2 件目: 正常 PDF（処理される）
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(id="BAD", name="corrupt.pptx", mime=PPTX_MIME, owners=("alice@x.jp",)),
+        _make_drive_file(id="OK", name="ok.pdf", owners=("alice@x.jp",)),
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = b"<bytes>"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    # extract_office_pages は pipeline 内で lazy import されるので、元モジュールを差し替える。
+    def _boom(_data: bytes, *, mime_type: str) -> list[tuple[int, str]]:
+        raise zipfile.BadZipFile("File is not a zip file")
+
+    monkeypatch.setattr("teamagent.ingest.office_extract.extract_office_pages", _boom)
+
+    # 正常 PDF 側の pypdf を擬似
+    fake_reader = MagicMock()
+    page = MagicMock()
+    page.extract_text.return_value = "正常な PDF 本文" * 20
+    fake_reader.pages = [page]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-badzip",
+    )
+    # 壊れた pptx は skip、正常 PDF だけが doc 化されて crawl は止まらない
+    assert docs_n == 1
+    assert repo.upsert_calls[0]["external_id"] == "OK"
+
+
+# -----------------------------------------------------------
+# テンプレ検出（boilerplate）配線: env ゲートで mark_boilerplate を呼ぶ／呼ばない
+# -----------------------------------------------------------
+class _NoopOpsCursor:
+    """_disable_statement_timeout が ``SET LOCAL statement_timeout`` を発行できるよう、
+    cursor の context manager を最小実装した fake（実行内容は記録するだけ）。"""
+
+    def __init__(self, executed: list[str]) -> None:
+        self._executed = executed
+
+    def __enter__(self) -> _NoopOpsCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: object = None) -> None:
+        self._executed.append(sql)
+
+
+class _FakeOpsConn:
+    """``_ops_connection()`` が返す接続本体の fake。``cursor()`` で no-op cursor を返す。
+
+    H1 の ``_disable_statement_timeout(conn)`` が ``conn.cursor()`` を呼ぶため、
+    plain ``object()`` では落ちる。実 SQL は走らせないが、発行された SQL は
+    ``executed`` に記録して検証可能にする。"""
+
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+
+    def cursor(self) -> _NoopOpsCursor:
+        return _NoopOpsCursor(self.executed)
+
+
+class _OpsConnCtx:
+    """repository._ops_connection() が返す context manager の fake。"""
+
+    def __init__(self, conn: object) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> object:
+        return self._conn
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _RepoWithOpsConn(_FakeRepository):
+    """_ops_connection() を持つ fake repository（boilerplate 配線テスト用）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ops_conn = _FakeOpsConn()
+        self.ops_conn_calls = 0
+
+    def _ops_connection(self) -> _OpsConnCtx:
+        self.ops_conn_calls += 1
+        return _OpsConnCtx(self.ops_conn)
+
+
+def _empty_sources() -> IngestSources:
+    return IngestSources(version=1, slack_channels=(), gdrive_folders=(), gsheets=())
+
+
+def test_boilerplate_not_called_when_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BOILERPLATE_DETECT 未設定なら mark_boilerplate は呼ばれない＝現行と完全一致。"""
+    monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs: calls.append(min_docs) or 0,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert calls == []
+    assert repo.ops_conn_calls == 0
+
+
+def test_boilerplate_not_called_in_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """dry-run では env ON でも DB を書かないので呼ばない。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs: calls.append(min_docs) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=True,
+    )
+    runner.run(_empty_sources())
+    assert calls == []
+
+
+def test_boilerplate_called_when_env_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BOILERPLATE_DETECT=1 + commit で mark_boilerplate が ops 接続付きで呼ばれる。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+    monkeypatch.delenv("BOILERPLATE_MIN_DOCS", raising=False)
+    seen: list[tuple[object, int]] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs, **_: seen.append((conn, min_docs)) or 7,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert len(seen) == 1
+    conn, min_docs = seen[0]
+    assert conn is repo.ops_conn  # 既存の admin role 接続を再利用
+    assert min_docs == 3  # 既定値
+    assert repo.ops_conn_calls == 1
+    # H1: mark 実行前に当該 tx 内で statement_timeout を無制限にしている。
+    assert any("SET LOCAL statement_timeout" in s for s in repo.ops_conn.executed)
+
+
+def test_boilerplate_min_docs_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BOILERPLATE_MIN_DOCS で閾値を上書きできる。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "true")
+    monkeypatch.setenv("BOILERPLATE_MIN_DOCS", "5")
+    seen: list[int] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs, **_: seen.append(min_docs) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert seen == [5]
+
+
+def test_boilerplate_failure_is_fail_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mark_boilerplate が例外でも run() は成功して結果を返す（fail-open）。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+
+    def _boom(conn: object, *, min_docs: int, **_: object) -> int:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("teamagent.ingest.pipeline.mark_boilerplate", _boom)
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    result = runner.run(_empty_sources())  # 例外を投げない
+    assert isinstance(result, IngestResult)
+    assert result.total_documents() == 0
+
+
+# -----------------------------------------------------------
+# 資料まるごと重複排除（docdedup）配線: env ゲートで mark_duplicate_documents を呼ぶ／呼ばない
+# -----------------------------------------------------------
+def test_docdedup_not_called_when_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOC_DEDUP_DETECT 未設定なら mark_duplicate_documents は呼ばれない＝現行と完全一致。"""
+    monkeypatch.delenv("DOC_DEDUP_DETECT", raising=False)
+    monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
+    calls: list[float] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold: calls.append(jaccard_threshold) or 0,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert calls == []
+    assert repo.ops_conn_calls == 0
+
+
+def test_docdedup_not_called_in_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """dry-run では env ON でも DB を書かないので呼ばない。"""
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+    calls: list[float] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold: calls.append(jaccard_threshold) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=True,
+    )
+    runner.run(_empty_sources())
+    assert calls == []
+
+
+def test_docdedup_called_when_env_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOC_DEDUP_DETECT=1 + commit で mark_duplicate_documents が ops 接続付きで呼ばれる。"""
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+    monkeypatch.delenv("DOC_DEDUP_JACCARD", raising=False)
+    monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
+    seen: list[tuple[object, float]] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold, **_: seen.append((conn, jaccard_threshold)) or 4,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert len(seen) == 1
+    conn, jaccard_threshold = seen[0]
+    assert conn is repo.ops_conn  # 既存の admin role 接続を再利用
+    assert jaccard_threshold == 0.7  # 既定値
+    assert repo.ops_conn_calls == 1
+    # H1: mark 実行前に当該 tx 内で statement_timeout を無制限にしている。
+    assert any("SET LOCAL statement_timeout" in s for s in repo.ops_conn.executed)
+
+
+def test_docdedup_jaccard_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOC_DEDUP_JACCARD でしきい値を上書きできる。"""
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "true")
+    monkeypatch.setenv("DOC_DEDUP_JACCARD", "0.85")
+    seen: list[float] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold, **_: seen.append(jaccard_threshold) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert seen == [0.85]
+
+
+def test_docdedup_failure_is_fail_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mark_duplicate_documents が例外でも run() は成功して結果を返す（fail-open）。"""
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+
+    def _boom(conn: object, *, jaccard_threshold: float, **_: object) -> int:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("teamagent.ingest.pipeline.mark_duplicate_documents", _boom)
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    result = runner.run(_empty_sources())  # 例外を投げない
+    assert isinstance(result, IngestResult)
+    assert result.total_documents() == 0
+
+
+def test_boilerplate_runs_after_docdedup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """両 env ON のとき docdedup → boilerplate の順で呼ばれる（M3・同じ ops 接続を各々取得）。
+
+    M3: boilerplate の指紋集計は suppressed（非正本）doc を母数から外すため、同一 run 内で
+    先に docdedup が suppressed を確定させてから boilerplate を走らせる必要がある。
+    """
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+    order: list[str] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs, **_: order.append("boilerplate") or 0,
+    )
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold, **_: order.append("docdedup") or 0,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert order == ["docdedup", "boilerplate"]
+    assert repo.ops_conn_calls == 2
+
+
+# -----------------------------------------------------------
+# M5: 非数値 env でも crash せず default にフォールバック（_envint / _envfloat）
+# -----------------------------------------------------------
+def test_envint_falls_back_on_blank_and_nonnumeric(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空文字・非数値・未設定はすべて default に倒れ、有効値は反映される（ingest CRASH 防止）。"""
+    from teamagent.ingest.pipeline import _envint
+
+    monkeypatch.delenv("X_INT", raising=False)
+    assert _envint("X_INT", 7) == 7  # 未設定
+    monkeypatch.setenv("X_INT", "")
+    assert _envint("X_INT", 7) == 7  # 空文字
+    monkeypatch.setenv("X_INT", "   ")
+    assert _envint("X_INT", 7) == 7  # 空白のみ
+    monkeypatch.setenv("X_INT", "3x")
+    assert _envint("X_INT", 7) == 7  # 非数値
+    monkeypatch.setenv("X_INT", "11")
+    assert _envint("X_INT", 7) == 11  # 有効値
+
+
+def test_envfloat_falls_back_on_blank_and_nonnumeric(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空文字・非数値・未設定はすべて default に倒れ、有効値は反映される（ingest CRASH 防止）。"""
+    from teamagent.ingest.pipeline import _envfloat
+
+    monkeypatch.delenv("X_FLOAT", raising=False)
+    assert _envfloat("X_FLOAT", 0.7) == 0.7  # 未設定
+    monkeypatch.setenv("X_FLOAT", "")
+    assert _envfloat("X_FLOAT", 0.7) == 0.7  # 空文字
+    monkeypatch.setenv("X_FLOAT", "abc")
+    assert _envfloat("X_FLOAT", 0.7) == 0.7  # 非数値
+    monkeypatch.setenv("X_FLOAT", "0.85")
+    assert _envfloat("X_FLOAT", 0.7) == 0.85  # 有効値
+
+
+def test_runner_does_not_crash_on_nonnumeric_detection_envs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非数値 BOILERPLATE_MIN_DOCS / DOC_DEDUP_JACCARD でも run() は CRASH せず default で進む（M5）。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+    monkeypatch.setenv("BOILERPLATE_MIN_DOCS", "")  # 空文字 → 3
+    monkeypatch.setenv("BOILERPLATE_MIN_CHARS", "x")  # 非数値 → 40
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+    monkeypatch.setenv("DOC_DEDUP_JACCARD", "3x")  # 非数値 → 0.7
+    monkeypatch.setenv("DOC_DEDUP_MAX_DOCS", "")  # 空文字 → 5000
+    seen_bp: list[tuple[int, int]] = []
+    seen_dd: list[float] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs, min_chars, **_: seen_bp.append((min_docs, min_chars)) or 0,
+    )
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold, **_: seen_dd.append(jaccard_threshold) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())  # 例外を投げない
+    assert seen_bp == [(3, 40)]  # 既定値にフォールバック
+    assert seen_dd == [0.7]
+
+
+# -----------------------------------------------------------
+# L4: _envflag が末尾空白を strip して判定する
+# -----------------------------------------------------------
+def test_envflag_strips_trailing_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """末尾改行/空白付きの "true\\n" 等でも ON と判定される（skill._envflag と同流儀）。"""
+    from teamagent.ingest.pipeline import _envflag
+
+    monkeypatch.setenv("X_FLAG", "true\n")
+    assert _envflag("X_FLAG") is True
+    monkeypatch.setenv("X_FLAG", "  1  ")
+    assert _envflag("X_FLAG") is True
+    monkeypatch.setenv("X_FLAG", "yes\t")
+    assert _envflag("X_FLAG") is True
+    monkeypatch.setenv("X_FLAG", " false ")
+    assert _envflag("X_FLAG") is False
+
+
+# -----------------------------------------------------------
+# M4: crawl の file ループは file 単位 try/except で 1 file 例外を吸収する
+# -----------------------------------------------------------
+def test_crawl_one_file_exception_does_not_kill_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """crawl で 1 file の embed 例外が source 全体を落とさず、後続 file は処理される（M4）。
+
+    folder 経路（pipeline.py ~838）には file 単位 try/except があるが crawl 経路には無く、
+    embed / DB upsert の例外で残り全ファイルが道連れになっていた。file 単位で skip して継続する。
+    """
+    from teamagent.adapters.gdrive_client import SharedDrive
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    # 1 件目: embed が落ちる title_only file（旧バイナリ等）、2 件目: 正常 file。
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(
+            id="BOOM", name="boom.bin", mime="application/x-unknown", owners=("a@x.jp",)
+        ),
+        _make_drive_file(id="OK", name="ok.bin", mime="application/x-unknown", owners=("a@x.jp",)),
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    class _BoomOnFirstEmbedder:
+        """最初の file（external_id=BOOM）の title_only テキストだけ embed で例外を投げる。"""
+
+        def embed(self, text: str) -> list[float]:
+            if "boom.bin" in text:
+                raise RuntimeError("embed exploded")
+            return [0.1] * 1024
+
+        def embed_passage(self, text: str) -> list[float]:
+            return self.embed(text)
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,
+    )
+    repo = _FakeRepository()
+    # 例外を投げず、正常 file (OK) だけが doc 化される。
+    docs_n, _ = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_BoomOnFirstEmbedder(),  # type: ignore[arg-type]
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-boom",
+    )
+    assert docs_n == 1
+    assert [c["external_id"] for c in repo.upsert_calls] == ["OK"]

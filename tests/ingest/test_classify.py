@@ -45,6 +45,30 @@ def test_as_metadata_omits_empty() -> None:
     assert cls.as_metadata() == {"cls_industry": "IT", "industry": "IT"}
 
 
+def test_as_metadata_emits_new_axes() -> None:
+    cls = DocClassification(solution="インフルエンサー", budget="100〜500万", target="若年女性")
+    md = cls.as_metadata()
+    assert md["cls_solution"] == "インフルエンサー"
+    assert md["cls_budget"] == "100〜500万"
+    assert md["cls_target"] == "若年女性"
+    # 旧軸が空なら出さない（後方互換）。
+    assert "cls_project" not in md
+    assert "cls_doc_type" not in md
+
+
+def test_as_metadata_omits_empty_new_axes() -> None:
+    # 新軸がすべて空なら新キーは一切出ない。
+    cls = DocClassification(project="A社")
+    assert cls.as_metadata() == {"cls_project": "A社"}
+
+
+def test_is_empty_false_with_only_new_axis() -> None:
+    assert not DocClassification(solution="動画広告").is_empty()
+    assert not DocClassification(budget="不明").is_empty()
+    assert not DocClassification(target="シニア").is_empty()
+    assert DocClassification().is_empty()
+
+
 def test_classify_salvages_first_object_when_array_like_breaks() -> None:
     # 完結オブジェクト + 末尾に壊れたオブジェクト → 救済フォールバックで先頭を拾う。
     bedrock = _fake_bedrock(
@@ -75,6 +99,55 @@ def test_classify_unknown_choices_drop_to_empty() -> None:
     assert cls is not None
     assert cls.doc_type == ""  # 語彙外は落とす
     assert cls.phase == ""
+
+
+def test_classify_reads_new_axes() -> None:
+    bedrock = _fake_bedrock(
+        '{"project": "", "industry": "", "doc_type": "", "phase": "",'
+        ' "solution": "SNS運用", "budget": "100〜500万", "target": "主婦"}'
+    )
+    cls = DocClassifier(bedrock).classify(title="t", text="x", request_id="r")
+    assert cls is not None
+    assert cls.solution == "SNS運用"
+    assert cls.budget == "100〜500万"
+    assert cls.target == "主婦"
+
+
+def test_classify_solution_normalizes_to_vocab() -> None:
+    bedrock = _fake_bedrock('{"solution": "インフルエンサーマーケティング施策"}')
+    cls = DocClassifier(bedrock).classify(title="t", text="x", request_id="r")
+    assert cls is not None
+    assert cls.solution == "インフルエンサー"  # 代表語彙へ部分一致正規化
+
+
+def test_classify_solution_keeps_raw_when_unknown() -> None:
+    bedrock = _fake_bedrock('{"solution": "サンプリング配布"}')
+    cls = DocClassifier(bedrock).classify(title="t", text="x", request_id="r")
+    assert cls is not None
+    assert cls.solution == "サンプリング配布"  # 語彙外は生値を短く保持
+
+
+def test_classify_budget_normalizes_band() -> None:
+    bedrock = _fake_bedrock('{"budget": "100〜500万"}')
+    cls = DocClassifier(bedrock).classify(title="t", text="x", request_id="r")
+    assert cls is not None
+    assert cls.budget == "100〜500万"
+
+
+def test_classify_budget_offvocab_drops_to_empty() -> None:
+    # 予算帯と無関係な語は _norm_choice で "" に落ちる＝推測で埋めない（fail-open）。
+    bedrock = _fake_bedrock('{"budget": "要相談", "solution": "動画広告"}')
+    cls = DocClassifier(bedrock).classify(title="t", text="x", request_id="r")
+    assert cls is not None
+    assert cls.budget == ""
+    assert cls.solution == "動画広告"
+
+
+def test_classify_budget_unknown_band_preserved() -> None:
+    bedrock = _fake_bedrock('{"budget": "不明", "solution": "SEO"}')
+    cls = DocClassifier(bedrock).classify(title="t", text="x", request_id="r")
+    assert cls is not None
+    assert cls.budget == "不明"
 
 
 def test_classify_bedrock_error_returns_none() -> None:

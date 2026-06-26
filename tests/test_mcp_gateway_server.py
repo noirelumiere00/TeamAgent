@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from teamagent.mcp_gateway.server import (
     SEARCH_TOOL_NAME,
     USER_CONTEXT_KEY,
+    _envflag,
     dispatch_tool,
     list_tool_defs,
 )
@@ -228,3 +229,29 @@ async def test_non_search_tool_never_gets_web_links(
     )
     assert "web_url" not in out
     assert "graph_url" not in out
+
+
+# --- L4: _envflag は前後空白を strip してから判定する（末尾改行/スペース付きでも ON） ---
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["1 ", " 1", "true ", " true ", "yes\n", "\tTRUE\t", " True "],
+)
+def test_envflag_on_with_surrounding_whitespace(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    # task-def の env に紛れた末尾空白/改行付きの "1" 等でも True 判定（取りこぼし防止）。
+    monkeypatch.setenv("TA_ENVFLAG_TEST", raw)
+    assert _envflag("TA_ENVFLAG_TEST") is True
+
+
+@pytest.mark.parametrize("raw", ["0 ", " false ", "", "  ", "no\n", "off "])
+def test_envflag_off_values_after_strip(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    # 偽値・空白のみは strip 後も False のまま（誤って ON にならない）。
+    monkeypatch.setenv("TA_ENVFLAG_TEST", raw)
+    assert _envflag("TA_ENVFLAG_TEST") is False
+
+
+def test_envflag_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TA_ENVFLAG_TEST", raising=False)
+    assert _envflag("TA_ENVFLAG_TEST") is False
+    assert _envflag("TA_ENVFLAG_TEST", default="1") is True

@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export AWS_REGION=ap-northeast-1
 MODE=${1:?usage: reingest.sh small|full}
-NEW_IMAGE=718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:9d4070ad9d39abfb75af4c9ee1a8ce1fc7bb94917b61bf799e8061303d101324
+NEW_IMAGE=718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:05be4a78636c45161bb533ceb64646fe44b2ba55434fda3a173ccf1ee25c6483
 CLUSTER=teamagent-dev
 FAMILY=teamagent-dev-ingest
 BASE_REV=13   # 唯一の ACTIVE revision（10 等は deregister 済み）
@@ -49,7 +49,7 @@ echo "== run-task（${MODE}: INGEST_SOURCES=${SOURCES}・USE_CONTEXTUAL_INGEST=1
 TASK=$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
   --task-definition "$NEWREV" \
   --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=ENABLED}" \
-  --overrides "{\"containerOverrides\":[{\"name\":\"ingest\",\"environment\":[{\"name\":\"INGEST_SOURCES\",\"value\":\"$SOURCES\"},{\"name\":\"USE_CONTEXTUAL_INGEST\",\"value\":\"1\"},{\"name\":\"USE_DOC_CLASSIFY\",\"value\":\"1\"}]}]}" \
+  --overrides "{\"containerOverrides\":[{\"name\":\"ingest\",\"environment\":[{\"name\":\"INGEST_SOURCES\",\"value\":\"$SOURCES\"},{\"name\":\"USE_CONTEXTUAL_INGEST\",\"value\":\"1\"},{\"name\":\"USE_DOC_CLASSIFY\",\"value\":\"1\"},{\"name\":\"INGEST_RICH_EXTRACT\",\"value\":\"1\"},{\"name\":\"BOILERPLATE_DETECT\",\"value\":\"1\"},{\"name\":\"DOC_DEDUP_DETECT\",\"value\":\"1\"},{\"name\":\"BEDROCK_MODEL_ID\",\"value\":\"jp.anthropic.claude-haiku-4-5-20251001-v1:0\"}]}]}" \
   --query 'tasks[0].taskArn' --output text)
 echo "   ✅ task = $TASK"
 echo

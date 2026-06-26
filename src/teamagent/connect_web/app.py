@@ -192,6 +192,11 @@ _SEARCH_STYLE = (
 # UI の <select> option と一致させる。'不明' はフィルタ対象外（ソート末尾扱いのみ）。
 _BUDGET_BANDS = ("〜100万", "100〜500万", "500万〜")
 
+# 資料種別 allowlist（api_search の filter_doc_type 受けで使う）。ingest.classify._DOC_TYPES
+# と同値の literal を connect_web に置く（_BUDGET_BANDS と同じ作法）。UI の <select> option と
+# 一致させる必要があるためモジュール定数化する。drift は test_search_doc_type_filter で検知。
+_DOC_TYPES = ("提案書", "議事録", "報告書", "価格表", "契約", "その他")
+
 
 # 検索 UI の本体 DOM フラグメント（シェルの #mainList に mount する。_SEARCH_JS が参照）。
 # 見出し/サブは textContent ではなく静的文字列だが「社内ナレッジ検索」をルートテストが参照。
@@ -212,6 +217,15 @@ _SEARCH_DOM = (
     "</select>"
     '<label class="ck"><input id="bsort" type="checkbox">予算が近い順</label>'
     '<label class="ck"><input id="bunknown" type="checkbox">予算不明も含める</label>'
+    # 詳細絞り込み（任意）。doc_type は _DOC_TYPES 固定 option・solution は自由入力。
+    # 静的 literal・依存ゼロ（予算 select の作法に倣う）。
+    '<select id="fdoctype" aria-label="資料種別で絞る">'
+    '<option value="">種別（指定なし）</option>'
+    "<option>提案書</option><option>議事録</option><option>報告書</option>"
+    "<option>価格表</option><option>契約</option><option>その他</option>"
+    "</select>"
+    '<input id="fsolution" type="text" maxlength="50" '
+    'placeholder="施策で絞る（例: 動画広告）">'
     "</div>"
     '<div id="filters" class="filters"></div>'
     '<div id="results"></div>'
@@ -229,6 +243,8 @@ const fclient=document.getElementById('fclient');
 const fbudget=document.getElementById('fbudget');
 const bsort=document.getElementById('bsort');
 const bunknown=document.getElementById('bunknown');
+const fdoctype=document.getElementById('fdoctype');
+const fsolution=document.getElementById('fsolution');
 const clientlist=document.getElementById('clientlist');
 let lastQuery='';
 let activeIndustry=null;
@@ -316,14 +332,18 @@ function renderEmpty(query){
   }
   const hasClient=fclient&&fclient.value.trim();
   const hasBudget=fbudget&&fbudget.value;
-  if(hasClient||hasBudget){
+  const hasDocType=fdoctype&&fdoctype.value;
+  const hasSolution=fsolution&&fsolution.value.trim();
+  if(hasClient||hasBudget||hasDocType||hasSolution){
     const cb=document.createElement('button');cb.type='button';
-    cb.textContent='取引先/予算フィルタを外して再検索';
+    cb.textContent='絞り込み条件を外して再検索';
     cb.onclick=()=>{
       if(fclient)fclient.value='';
       if(fbudget)fbudget.value='';
       if(bsort)bsort.checked=false;
       if(bunknown)bunknown.checked=false;
+      if(fdoctype)fdoctype.value='';
+      if(fsolution)fsolution.value='';
       search();
     };
     b.appendChild(cb);
@@ -367,6 +387,9 @@ async function search(){
     if(fb)body.filter_budget=fb;
     if(bunknown&&bunknown.checked&&fb)body.include_unknown_budget=true;
     if(bsort&&bsort.checked&&fb)body.sort_budget_near=fb;
+    if(fdoctype&&fdoctype.value)body.filter_doc_type=fdoctype.value;
+    const fs=fsolution?fsolution.value.trim():'';
+    if(fs)body.filter_solution=fs;
     const resp=await fetch('/api/v1/search',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(body)});
@@ -2552,9 +2575,16 @@ def create_app(
         include_unknown_budget = bool(payload.get("include_unknown_budget", False))
         _s = str(payload.get("sort_budget_near", "")).strip()
         sort_budget_near = _s if _s in _BUDGET_BANDS else None
+        # 資料種別は allowlist（_DOC_TYPES literal のみ）で二重防御。不正値は無視。
+        _dt = str(payload.get("filter_doc_type", "")).strip()
+        filter_doc_type = _dt if _dt in _DOC_TYPES else None
+        # 施策/ソリューションは自由語彙（cls_solution は固定語彙に閉じない）。strip-or-None で
+        # 受け、長すぎは SearchInput.filter_solution の max_length=50 に合わせて切り詰める。
+        _sol = str(payload.get("filter_solution", "")).strip()
+        filter_solution = _sol[:50] or None
 
         from teamagent.skills.base import SkillContext
-        from teamagent.skills.search.schema import SearchInput
+        from teamagent.skills.search.schema import SearchHitOut, SearchInput
 
         domain = email.split("@", 1)[1] if "@" in email else email
         ctx = SkillContext(
@@ -2574,6 +2604,8 @@ def create_app(
                     filter_budget=filter_budget,
                     include_unknown_budget=include_unknown_budget,
                     sort_budget_near=sort_budget_near,
+                    filter_doc_type=filter_doc_type,
+                    filter_solution=filter_solution,
                 ),
                 ctx,
             )
@@ -2585,11 +2617,24 @@ def create_app(
                 detail=str(exc)[:200],
             )
             return JSONResponse({"error": "search_failed"}, status_code=500)
+        # gdrive:// は実ブラウザで開けないため、Drive の view リンクへ整形して「出典を開く」を
+        # 実クリック可能にする（資料提出 段階1）。file_id 抽出失敗時は従来 source_uri に
+        # fail-open。doc_id（FB 識別子）は元の h.source_uri のままに保つ。
+        from teamagent.skills.knowledge_deliver.skill import extract_drive_file_id
+
+        def _open_url(h: SearchHitOut) -> str | None:
+            uri: str | None = h.source_uri or h.drive_url
+            if h.source_type == "gdrive":
+                fid = extract_drive_file_id(h.source_uri)
+                if fid:
+                    return f"https://drive.google.com/file/d/{fid}/view"
+            return uri
+
         hits = [
             {
                 "title": h.title or h.file_name or h.source or "(無題)",
                 "excerpt": (h.content or "")[:120],
-                "source_uri": h.source_uri or h.drive_url,
+                "source_uri": _open_url(h),
                 "source_type": h.source_type,
                 "score": h.score,
                 "client_name": h.client_name,

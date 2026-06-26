@@ -152,7 +152,9 @@ def test_api_search_calls_skill_with_user_email_ctx() -> None:
     hit = body["hits"][0]
     assert hit["title"] == "飲料メーカー提案 2025Q3"
     assert len(hit["excerpt"]) <= 120  # content 先頭120文字
-    assert hit["source_uri"] == "gdrive://FILE_42"
+    # gdrive:// は実ブラウザで開ける Drive view リンクへ整形（資料提出 段階1）。
+    assert hit["source_uri"] == "https://drive.google.com/file/d/FILE_42/view"
+    assert hit["doc_id"] == "gdrive://FILE_42"  # FB 識別子は元の gdrive:// を保つ
     assert sk.calls[0][0].query == "保存率の提案"
     # ctx に本人 email / groups / role が入っていること
     _, ctx = sk.calls[0]

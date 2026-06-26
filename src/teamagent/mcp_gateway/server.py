@@ -55,8 +55,12 @@ SEARCH_TOOL_NAME = "search"
 
 
 def _envflag(name: str, default: str = "false") -> bool:
-    """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。"""
-    return os.environ.get(name, default).lower() in ("1", "true", "yes")
+    """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。
+
+    末尾/先頭の空白は ``.strip()`` で除去する。task-def の env に紛れた末尾改行や
+    スペース付き ``"1 "`` でも意図どおり ON 判定されるようにする（フラグの取りこぼし防止）。
+    """
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
 
 
 def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:

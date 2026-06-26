@@ -308,6 +308,21 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "USE_NEW_SCHEMA", value = "true" },
       { name = "USE_COHERE_RERANK", value = "true" },
       { name = "USE_CLIENT_BOOST", value = "true" },
+      # 「資料の被り」対策（L1）: 営業資料はテンプレページ（表紙/会社紹介/料金）を使い回すため、
+      # 検索結果でテンプレチャンクが複数資料から重複ヒット＆同一資料が結果を独占する。
+      # rerank/min_relevance の後段で「近似重複の畳み込み＋同一資料の上限(既定2)」を噛ませる。
+      { name = "SEARCH_DEDUP_RESULTS", value = "true" },
+      # テンプレ箇所/まるごと重複を検索から除外（ingest の boilerplate/doc-dedup の印を読む）。
+      # 印が付くのは再取込後なので、印が無いうちは no-op（後方互換）。
+      { name = "BOILERPLATE_EXCLUDE_SEARCH", value = "true" },
+      { name = "DOC_DEDUP_EXCLUDE_SEARCH", value = "true" },
+      # 意味クラスタ・エッジ（L3A）: 資料の代表ベクトル(全チャンク平均)で kNN を取り、
+      # 「タグは違うが意味的に近い」資料を弱い concept リンクで結ぶ＝AIならではの発見線。
+      # ★初期は OFF で出荷。E5 系埋め込みは無関係ペアでも cosine ベースラインが高く、固定しきい値
+      #   のまま点灯すると団子化（ハリネズミ）再発の恐れがあるため、実データで較正してから ON にする。
+      #   ON の手順（再ビルド不要・この env を差し替えるだけ）:
+      #     GRAPH_CONCEPT_EDGES=true / GRAPH_CONCEPT_THRESHOLD=0.90 等で点灯→グラフを見て上げ下げ。
+      { name = "GRAPH_CONCEPT_EDGES", value = "false" },
     ]
     secrets = [
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },

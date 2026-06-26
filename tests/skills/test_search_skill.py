@@ -591,9 +591,12 @@ def test_rerank_calls_bedrock_rerank_and_reorders(
     rerank_kwargs = fake_bedrock.rerank.call_args.kwargs
     assert rerank_kwargs["query"] == "日本ガイシ"
     assert len(rerank_kwargs["documents"]) == 10
-    assert rerank_kwargs["top_n"] == 3
+    # QW-4: top_n は top_k(=3) ではなく救済プール幅 min(len(hits), rerank_return_size)。
+    # プールは 10 件・return_size 既定 100 → top_n=10。最終 top_k 絞りは後段で行う。
+    assert rerank_kwargs["top_n"] == 10
 
-    # 出力は rerank で並び替え後の top-3 (chunk_id 6 が先頭)
+    # 出力は rerank 並び替え後 → min_relevance(=0.0 既定で素通り) → 最終 [:top_k=3]。
+    # rerank mock は 3 件返すので結果は top-3 (chunk_id 6 が先頭)＝従来挙動と等価。
     assert len(out.hits) == 3
     assert out.hits[0].chunk_id == 6
     assert out.hits[0].score == 0.98  # rerank score で上書き
@@ -639,6 +642,83 @@ def test_rerank_failure_falls_back_to_dense(
     # rerank 失敗時は dense 順上位 3 件 (chunk_id 0,1,2)
     assert len(out.hits) == 3
     assert [h.chunk_id for h in out.hits] == [0, 1, 2]
+
+
+def test_qw4_rerank_min_relevance_applied_to_full_pool_then_truncated(
+    fake_bedrock: MagicMock, fake_pgvector_rerank_pool: MagicMock
+) -> None:
+    """QW-4: min_relevance は rerank の広い母数（top_k 超）に効き、最終段で top_k へ絞る。
+
+    旧実装は top_n=top_k(=3) で rerank し閾値も 3 件母数に効いた → rerank-rank 4 以降の
+    閾値超 chunk を救済できなかった。本テストは母数=プール全体（10件）で閾値判定され、
+    閾値超が top_k より多くても最終 [:top_k] で正しく 3 件に収束することを固定する。
+    """
+    from teamagent.adapters.bedrock_client import RerankResponse, RerankResult
+
+    # rerank は降順スコアで 6 件返す。min_relevance=0.5 で上位 4 件（rank1-4）が閾値超。
+    # rank4(chunk_id=7, score=0.60) は旧 top_n=3 では母数外＝救済不能だった chunk。
+    fake_bedrock.rerank.return_value = RerankResponse(
+        results=[
+            RerankResult(index=6, relevance_score=0.90),
+            RerankResult(index=0, relevance_score=0.80),
+            RerankResult(index=3, relevance_score=0.70),
+            RerankResult(index=7, relevance_score=0.60),  # rank4: 閾値超だが旧母数外
+            RerankResult(index=1, relevance_score=0.20),  # 閾値未満
+            RerankResult(index=2, relevance_score=0.10),  # 閾値未満
+        ],
+        model_arn="arn:aws:bedrock:ap-northeast-1::foundation-model/cohere.rerank-v3-5:0",
+        latency_ms=200,
+        query_count=1,
+    )
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_rerank_pool,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_cohere_rerank=True,
+        rerank_pool_size=10,
+        min_relevance=0.5,
+    )
+    out = skill.run(input=SearchInput(query="x", top_k=3), ctx=SkillContext())
+
+    # rerank は救済プール幅（=10）で呼ばれた（top_k=3 ではない）。
+    assert fake_bedrock.rerank.call_args.kwargs["top_n"] == 10
+    # 閾値超 4 件のうち最終 [:top_k=3] で上位 3 件に収束（chunk_id 6,0,3）。
+    assert [h.chunk_id for h in out.hits] == [6, 0, 3]
+    assert all(h.score >= 0.5 for h in out.hits)
+
+
+def test_qw4_rerank_return_size_default_is_backward_compatible(
+    fake_bedrock: MagicMock, fake_pgvector_rerank_pool: MagicMock
+) -> None:
+    """QW-4: min_relevance=0.0（既定）では rerank の上位 top_k がそのまま出る＝従来等価。"""
+    from teamagent.adapters.bedrock_client import RerankResponse, RerankResult
+
+    fake_bedrock.rerank.return_value = RerankResponse(
+        results=[
+            RerankResult(index=6, relevance_score=0.98),
+            RerankResult(index=0, relevance_score=0.65),
+            RerankResult(index=3, relevance_score=0.50),
+            RerankResult(index=5, relevance_score=0.40),
+            RerankResult(index=1, relevance_score=0.30),
+        ],
+        model_arn="arn:aws:bedrock:ap-northeast-1::foundation-model/cohere.rerank-v3-5:0",
+        latency_ms=200,
+        query_count=1,
+    )
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_rerank_pool,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_cohere_rerank=True,
+        rerank_pool_size=10,
+        # min_relevance 既定 0.0・rerank_return_size 既定 100
+    )
+    out = skill.run(input=SearchInput(query="x", top_k=3), ctx=SkillContext())
+
+    # 5 件 rerank 結果のうち最終 [:top_k=3]＝上位 3 件（従来挙動と同一）。
+    assert [h.chunk_id for h in out.hits] == [6, 0, 3]
 
 
 # ==================================================================

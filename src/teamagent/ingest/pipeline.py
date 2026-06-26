@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 import structlog
 
 from teamagent.identity import shared_company_domains_from_env
+from teamagent.ingest.boilerplate import mark_boilerplate
+from teamagent.ingest.docdedup import mark_duplicate_documents
 from teamagent.ingest.loader import (
     GDriveFolderSpec,
     GSheetSpec,
@@ -45,8 +47,55 @@ def _envflag(name: str, default: str = "false") -> bool:
     """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。
 
     増分同期（``USE_INCREMENTAL_SYNC``）は既定 OFF。設定時のみ cursor 駆動の差分取得に切り替わる。
+
+    末尾/前後空白は ``.strip()`` で落としてから判定する（skill.py の ``_envflag`` と同流儀）。
+    これが無いと ``"true\n"`` 等の末尾空白付き値が無効化されて意図せず OFF 扱いになる。
     """
-    return os.environ.get(name, default).lower() in ("1", "true", "yes")
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
+
+
+def _envint(name: str, default: int) -> int:
+    """ENV を int に変換。未設定/空文字/非数値は ``default`` にフォールバックする。
+
+    ``int(os.environ[...])`` を try 外で直接呼ぶと ``""`` や ``"3x"`` 等の非数値で
+    ``ValueError`` が送出され ingest 全体が CRASH する。空文字も既定値に倒す
+    （skill.py:202-210 の ``_envint`` と同流儀）。
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _envfloat(name: str, default: float) -> float:
+    """ENV を float に変換。未設定/空文字/非数値は ``default`` にフォールバックする。
+
+    ``float(os.environ[...])`` を try 外で直接呼ぶと非数値で ``ValueError`` が送出され
+    ingest 全体が CRASH する（skill.py:212-220 の ``_envfloat`` と同流儀）。
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _disable_statement_timeout(conn: Any) -> None:
+    """当該トランザクション内だけ ``statement_timeout`` を無制限（0）にする（H1）。
+
+    コーパス横断の印付け（boilerplate / docdedup）は全 chunk / 全 doc を走査する重い
+    UPDATE で、既定の ``statement_timeout``（本番は 30s）では途中で打ち切られて例外になり、
+    呼び出し側の fail-open で無音 no-op に倒れる（印が一切付かない）。``SET LOCAL`` は
+    現在のトランザクション内でのみ有効でコミット/ロールバックで自動失効するため、検索系の
+    別接続（30s 既定）には一切影響しない。本関数は文字列リテラルのみで動的値を埋めない。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '0'")  # nosec B608  # 固定リテラル・動的値なし
 
 
 def _spec_source_id(spec: Any) -> str | None:
@@ -130,6 +179,8 @@ class IngestResult:
 # -----------------------------------------------------------
 class _EmbedderProto(Protocol):
     def embed(self, text: str) -> list[float]: ...
+    # 取り込みは passage 側プレフィックスで埋め込む（e5 非対称・embeddings_client 参照）。
+    def embed_passage(self, text: str) -> list[float]: ...
 
 
 # -----------------------------------------------------------
@@ -157,6 +208,52 @@ def _collect_all_member_ids(
 
 # プロセス内 users.info キャッシュ（同 user の複数 channel 出現に効く）
 _USER_EMAIL_CACHE: dict[str, str | None] = {}
+
+
+def _is_title_only(chunks: list[ChunkUpsert]) -> bool:
+    """この chunk 群が title_only フォールバック（未対応 mime の雛形）かを判定する。
+
+    title_only 経路は chunk を 1 つだけ作り metadata に ``title_only=True`` を立てる。
+    本文抽出経路の chunk には ``title_only`` フラグが無い（page_num を持つ）ので区別できる。
+    空 chunk は title_only 扱いしない（呼び出し側で別途処理される）。
+    """
+    return bool(chunks) and all(c.metadata.get("title_only") for c in chunks)
+
+
+def _guarded_upsert(
+    repository: IngestRepository,
+    doc: DocumentUpsert,
+    chunks: list[ChunkUpsert],
+    *,
+    request_id: str,
+    content_registry: set[tuple[str, str]] | None = None,
+) -> bool:
+    """§2 ガード付き upsert。本文版を書いた key を title_only 版で上書きしない。
+
+    dedup は repository.py:319 の ``ON CONFLICT (source_type, external_id)`` last-writer
+    方式なので、folder 経路→crawl 経路の実行順で同一 file が本文版→title_only 版の順に
+    書かれると本文が title_only に上書きされ得る。本ガードで退行を塞ぐ。
+
+    ``content_registry`` は (source_type, external_id) → 本文版を書いたか、を記録する set。
+    None なら呼び出し 1 回かぎりの空 set ＝ ガードは（同一呼び出し内でしか効かないが）安全側。
+    ``IngestRunner.run`` は folder/crawl で 1 個を共有して渡す（run 間では新規 set ＝漏れない）。
+
+    戻り値: 実際に upsert を行ったら True、ガードで skip したら False。
+    """
+    registry = content_registry if content_registry is not None else set()
+    key = (doc.source_type, doc.external_id)
+    if _is_title_only(chunks) and key in registry:
+        logger.info(
+            "ingest_skip_title_only_over_content",
+            source_type=doc.source_type,
+            external_id=doc.external_id,
+            request_id=request_id,
+        )
+        return False
+    repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+    if not _is_title_only(chunks):
+        registry.add(key)
+    return True
 
 
 def _resolve_member_emails(
@@ -329,7 +426,7 @@ def _ingest_slack_channel(
             ChunkUpsert(
                 chunk_idx=0,
                 content=text,
-                embedding=embedder.embed(text),
+                embedding=embedder.embed_passage(text),
                 metadata={"reply_count": parent.reply_count},
             )
         ]
@@ -418,6 +515,186 @@ _PDF_MIME_TYPES: frozenset[str] = frozenset(
         "application/pdf",
     }
 )
+
+# Google ネイティブ本文化（INGEST_RICH_EXTRACT=1 のときだけ有効）。
+# gdoc は従来から folder 経路で本文化されている（_process_one_gdrive_file 〜815-844）。
+# gslide / gsheet / plain-text は rich モードで初めて本文 chunk になる。
+_GSLIDE_NATIVE_MIME = "application/vnd.google-apps.presentation"
+_GSHEET_NATIVE_MIME = "application/vnd.google-apps.spreadsheet"
+
+# rich モードで本文化する plain-text 系 mime（download_file_bytes → decode → chunk）。
+_PLAIN_TEXT_MIMES: frozenset[str] = frozenset(
+    {
+        "text/plain",
+        "text/markdown",
+        "text/csv",
+    }
+)
+
+# Google ネイティブ gsheet を crawl で本文化する際のセル/行ガード（xlsx の上限ガードと対称）。
+# 1 タブあたり、1 spreadsheet あたりの行数を上限で打ち切り、暴走を防ぐ。
+_GSHEET_MAX_ROWS_PER_TAB = 2000
+_GSHEET_MAX_ROWS_PER_SHEET = 20000
+
+
+def _rich_extract_enabled() -> bool:
+    """``INGEST_RICH_EXTRACT`` を 1 回だけ読む（"1"/"true"/"yes" で有効・既定 OFF）。
+
+    OFF のとき pipeline の挙動は現行と 1 バイトも変えない（後方互換）。
+    呼び出し側（folder / crawl handler）が handler 開始時に 1 回だけ呼ぶ。
+    """
+    return _envflag("INGEST_RICH_EXTRACT")
+
+
+def _decode_text_bytes(data: bytes) -> str:
+    """text/plain・markdown・csv のバイト列を UTF-8（不正バイトは置換）でデコードする。"""
+    return data.decode("utf-8", errors="replace")
+
+
+def _extract_gslide_pages(file_id: str, request_id: str) -> list[tuple[int, str]] | None:
+    """gslide 本文＋ノートを取得して [(1, text)] を返す（fail-open: 失敗時 None）。
+
+    None を返すと呼び出し側は title_only にフォールバックする。lazy import で
+    adapter 依存をこの分岐内に閉じる。
+    """
+    try:
+        from teamagent.adapters.gslides_client import GSlidesClient
+
+        gslides = GSlidesClient.from_env()
+        content = gslides.get_presentation_text(file_id, request_id)
+        text = (content.text or "").strip()
+    except Exception:
+        logger.warning(
+            "gdrive_gslide_extract_failed", file_id=file_id, request_id=request_id, exc_info=True
+        )
+        return None
+    if not text:
+        logger.warning("gdrive_gslide_empty_text", file_id=file_id, request_id=request_id)
+        return None
+    return [(1, text)]
+
+
+def _extract_gsheet_native_pages(file_id: str, request_id: str) -> list[tuple[int, str]] | None:
+    """Google ネイティブ gsheet をタブ単位で document 化（fail-open: 失敗時 None）。
+
+    get_sheet_metadata でタブを列挙 → 各タブ get_tab_rows → format_row_as_document。
+    xlsx と同様にセル/行の上限ガードを入れ、暴走を防ぐ。タブ＝page_num（1 始まり）。
+    None を返すと呼び出し側は title_only にフォールバックする。
+    """
+    try:
+        from teamagent.adapters.gsheets_client import (
+            GSheetsClient,
+            format_row_as_document,
+        )
+
+        gsheets = GSheetsClient.from_env()
+        meta = gsheets.get_sheet_metadata(sheet_id=file_id, request_id=request_id)
+        pages: list[tuple[int, str]] = []
+        total_rows = 0
+        for tab_idx, tab in enumerate(meta.tabs, start=1):
+            tab_rows = gsheets.get_tab_rows(
+                sheet_id=file_id, tab_name=tab.title, request_id=request_id
+            )
+            if not tab_rows.headers:
+                continue
+            lines: list[str] = []
+            for row in tab_rows.rows:
+                if total_rows >= _GSHEET_MAX_ROWS_PER_SHEET:
+                    logger.warning(
+                        "gsheet_native_sheet_truncated",
+                        file_id=file_id,
+                        max_rows=_GSHEET_MAX_ROWS_PER_SHEET,
+                    )
+                    break
+                if len(lines) >= _GSHEET_MAX_ROWS_PER_TAB:
+                    logger.warning(
+                        "gsheet_native_tab_truncated",
+                        file_id=file_id,
+                        tab_name=tab.title,
+                        max_rows=_GSHEET_MAX_ROWS_PER_TAB,
+                    )
+                    break
+                doc_text = format_row_as_document(tab_rows.headers, row)
+                if doc_text.strip():
+                    lines.append(doc_text)
+                    total_rows += 1
+            if lines:
+                pages.append((tab_idx, "\n\n".join(lines)))
+            if total_rows >= _GSHEET_MAX_ROWS_PER_SHEET:
+                break
+    except Exception:
+        logger.warning(
+            "gdrive_gsheet_extract_failed", file_id=file_id, request_id=request_id, exc_info=True
+        )
+        return None
+    if not pages:
+        logger.warning("gdrive_gsheet_empty_text", file_id=file_id, request_id=request_id)
+        return None
+    return pages
+
+
+def _extract_plaintext_pages(
+    client: Any, file_id: str, request_id: str
+) -> list[tuple[int, str]] | None:
+    """text/plain・markdown・csv を download → UTF-8 decode → [(1, text)]（fail-open）。"""
+    try:
+        data = client.download_file_bytes(file_id=file_id, request_id=request_id)
+        text = _decode_text_bytes(data).strip()
+    except Exception:
+        logger.warning(
+            "gdrive_plaintext_extract_failed",
+            file_id=file_id,
+            request_id=request_id,
+            exc_info=True,
+        )
+        return None
+    if not text:
+        logger.warning("gdrive_plaintext_empty_text", file_id=file_id, request_id=request_id)
+        return None
+    return [(1, text)]
+
+
+def _rich_native_pages(f: Any, *, client: Any, request_id: str) -> list[tuple[int, str]] | None:
+    """rich モードで gdoc/gslide/gsheet/plain-text を本文ページ化する。
+
+    対象 mime でないか、抽出に失敗（fail-open）した場合は ``None`` を返し、
+    呼び出し側は既存ロジック（title_only など）にフォールバックする。
+    呼び出し側は ``INGEST_RICH_EXTRACT`` が ON のときだけ本関数を呼ぶこと。
+    """
+    from teamagent.ingest.office_extract import GDOC_NATIVE_MIME
+
+    mime = f.mime_type
+    if mime == GDOC_NATIVE_MIME:
+        return _extract_gdoc_pages(f.id, request_id)
+    if mime == _GSLIDE_NATIVE_MIME:
+        return _extract_gslide_pages(f.id, request_id)
+    if mime == _GSHEET_NATIVE_MIME:
+        return _extract_gsheet_native_pages(f.id, request_id)
+    if mime in _PLAIN_TEXT_MIMES:
+        return _extract_plaintext_pages(client, f.id, request_id)
+    return None
+
+
+def _extract_gdoc_pages(file_id: str, request_id: str) -> list[tuple[int, str]] | None:
+    """gdoc 本文を Docs API で取得して [(1, text)] を返す（fail-open: 失敗時 None）。
+
+    folder 経路の既存 gdoc 実装（〜815-844）と同じ作法。crawl 経路から共用する。
+    """
+    try:
+        from teamagent.adapters.gdocs_client import GDocsClient
+
+        gdocs = GDocsClient.from_env()
+        doc_content = gdocs.get_document_text(document_id=file_id, request_id=request_id)
+        text = (doc_content.text or "").strip()
+    except Exception:
+        logger.warning(
+            "gdrive_gdoc_extract_failed", file_id=file_id, request_id=request_id, exc_info=True
+        )
+        return None
+    if not text:
+        logger.warning("gdrive_gdoc_empty_text", file_id=file_id, request_id=request_id)
+        return None
+    return [(1, text)]
 
 
 # Day 7: 共有ドライブ全自動 crawl の営業資料判定用 whitelist / noise filter
@@ -526,6 +803,7 @@ def _ingest_gdrive_folder(
     owner_email: str,
     dry_run: bool,
     request_id: str,
+    content_registry: set[tuple[str, str]] | None = None,
 ) -> tuple[int, int]:
     """1 Drive folder を取り込む。
 
@@ -622,6 +900,7 @@ def _ingest_gdrive_folder(
                 skipped=skipped,
                 classifier=classifier,
                 contextualizer=contextualizer,
+                content_registry=content_registry,
             )
             docs_n += docs_added
             chunks_n += chunks_added
@@ -704,6 +983,7 @@ def _process_one_gdrive_file(
     skipped: list[str],
     classifier: DocClassifier | None = None,
     contextualizer: ChunkContextualizer | None = None,
+    content_registry: set[tuple[str, str]] | None = None,
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
@@ -723,6 +1003,24 @@ def _process_one_gdrive_file(
         extract_office_pages,
     )
     from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
+
+    # INGEST_RICH_EXTRACT=1 のときだけ rich 抽出（gslide/gsheet/plain-text 本文化・抽出器の
+    # rich 引数）を有効化。OFF（既定）は現行と 1 バイトも挙動を変えない（後方互換）。
+    rich = _rich_extract_enabled()
+    # rich 引数は kwargs dict で渡す（OFF のときは空 dict ＝引数なし呼び出しと同じ）。
+    # 別 agent が extract_pdf_pages / extract_office_pages に同名・既定値=現行挙動で
+    # これらを実装する。OFF（既定）では空 dict なので両関数の現行シグネチャと完全互換。
+    pdf_kwargs: dict[str, Any] = {"min_chars": 40} if rich else {}
+    office_kwargs: dict[str, Any] = (
+        {
+            "include_notes": True,
+            "include_tables": True,
+            "formula_fallback": True,
+            "min_chars": 40,
+        }
+        if rich
+        else {}
+    )
 
     # ACL を permissions.list で解決
     file_owner_email, acl_emails, acl_groups = _resolve_drive_file_acl(
@@ -746,7 +1044,7 @@ def _process_one_gdrive_file(
             skipped.append(f.id)
             return 0, 0
         try:
-            pages = extract_pdf_pages(data)
+            pages = extract_pdf_pages(data, **pdf_kwargs)
         except Exception:
             logger.exception(
                 "gdrive_pdf_extract_failed",
@@ -765,7 +1063,7 @@ def _process_one_gdrive_file(
                 ChunkUpsert(
                     chunk_idx=idx,
                     content=text,
-                    embedding=embedder.embed(text),
+                    embedding=embedder.embed_passage(text),
                     metadata={"page_num": page_num},
                 )
             )
@@ -783,7 +1081,7 @@ def _process_one_gdrive_file(
             skipped.append(f.id)
             return 0, 0
         try:
-            pages = extract_office_pages(data, mime_type=f.mime_type)
+            pages = extract_office_pages(data, mime_type=f.mime_type, **office_kwargs)
         except Exception:
             logger.exception(
                 "gdrive_office_extract_failed",
@@ -808,7 +1106,7 @@ def _process_one_gdrive_file(
                 ChunkUpsert(
                     chunk_idx=idx,
                     content=text,
-                    embedding=embedder.embed(text),
+                    embedding=embedder.embed_passage(text),
                     metadata={"page_num": page_num},
                 )
             )
@@ -838,18 +1136,65 @@ def _process_one_gdrive_file(
                 ChunkUpsert(
                     chunk_idx=idx,
                     content=content,
-                    embedding=embedder.embed(content),
+                    embedding=embedder.embed_passage(content),
                     metadata={"page_num": page_num},
                 )
             )
+    elif rich and (
+        f.mime_type in (_GSLIDE_NATIVE_MIME, _GSHEET_NATIVE_MIME)
+        or f.mime_type in _PLAIN_TEXT_MIMES
+    ):
+        # INGEST_RICH_EXTRACT=1: gslide/gsheet/plain-text を本文 chunk 化（gdoc は上で処理済）。
+        # 失敗（fail-open）時は native_pages が None → 下の title_only にフォールバックする。
+        native_pages = _rich_native_pages(f, client=client, request_id=request_id)
+        if native_pages is None:
+            # fail-open: 抽出失敗 → title_only（検索ヒットだけは可能にする）。
+            text = f"{f.name} ({f.mime_type})"
+            chunks.append(
+                ChunkUpsert(
+                    chunk_idx=0,
+                    content=text,
+                    embedding=embedder.embed_passage(text),
+                    metadata={"mime_type": f.mime_type, "title_only": True},
+                )
+            )
+        else:
+            page_chunks = chunk_pages(native_pages, size=500, overlap=100)
+            if not page_chunks:
+                logger.warning(
+                    "gdrive_native_empty_text",
+                    file_id=f.id,
+                    file_name=f.name,
+                    mime_type=f.mime_type,
+                )
+                skipped.append(f.id)
+                return 0, 0
+            for idx, (page_num, content) in enumerate(page_chunks):
+                chunks.append(
+                    ChunkUpsert(
+                        chunk_idx=idx,
+                        content=content,
+                        embedding=embedder.embed_passage(content),
+                        metadata={"page_num": page_num},
+                    )
+                )
     else:
-        # 未対応 mime_type: title + mime のフォールバック（検索ヒットだけは可能にする）
+        # 未対応 mime_type: title + mime のフォールバック（検索ヒットだけは可能にする）。
+        # §M: 個人ドライブ folder 経路でも title-only に落ちたことを可視化する
+        # （crawl 経路 shared_drive_title_only と対称・無音落ちを防ぐ）。
+        logger.info(
+            "gdrive_folder_title_only",
+            file_id=f.id,
+            file_name=f.name,
+            mime_type=f.mime_type,
+            folder_id=spec.folder_id,
+        )
         text = f"{f.name} ({f.mime_type})"
         chunks.append(
             ChunkUpsert(
                 chunk_idx=0,
                 content=text,
-                embedding=embedder.embed(text),
+                embedding=embedder.embed_passage(text),
                 metadata={"mime_type": f.mime_type, "title_only": True},
             )
         )
@@ -894,7 +1239,12 @@ def _process_one_gdrive_file(
         modified_at=f.modified_time,
     )
     if not dry_run:
-        repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+        # §2 ガード: 本文版を title_only 版で上書きしない（folder→crawl 順の退行を塞ぐ）。
+        wrote = _guarded_upsert(
+            repository, doc, chunks, request_id=request_id, content_registry=content_registry
+        )
+        if not wrote:
+            return 0, 0
     return 1, len(chunks)
 
 
@@ -906,6 +1256,7 @@ def _ingest_shared_drives_crawl(
     owner_email: str,
     dry_run: bool,
     request_id: str,
+    content_registry: set[tuple[str, str]] | None = None,
 ) -> tuple[int, int]:
     """共有ドライブ全件 crawl + 営業資料フィルタで取り込む (Day 7, 2026-05-27)。
 
@@ -914,11 +1265,16 @@ def _ingest_shared_drives_crawl(
     - 各ドライブを再帰 walk
     - spec.sales_relevance_filter=True なら _is_sales_relevant で営業価値判定
     - ACL は permissions.list で解決して acl_emails / acl_groups に写像
-    - PDF はテキスト抽出 + chunk 化、それ以外は title のみで 1 chunk
+    - PDF / Office (docx/pptx/xlsx) はテキスト抽出 + chunk 化、それ以外は title のみで 1 chunk
     """
     from teamagent.adapters.gdrive_client import GDriveClient
     from teamagent.ingest.classify import build_classifier_from_env
     from teamagent.ingest.contextualize import build_contextualizer_from_env
+    from teamagent.ingest.office_extract import (
+        GDOC_NATIVE_MIME,
+        OFFICE_BINARY_MIMES,
+        extract_office_pages,
+    )
     from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
 
     client = GDriveClient.from_env(readonly=True)
@@ -926,6 +1282,20 @@ def _ingest_shared_drives_crawl(
     classifier = build_classifier_from_env()
     # Contextual Retrieval（USE_CONTEXTUAL_INGEST=1 のときだけ非 None。crawl 単位で 1 回構築）。
     contextualizer = build_contextualizer_from_env()
+    # INGEST_RICH_EXTRACT=1 のときだけ rich 抽出（gdoc/gslide/gsheet/plain-text 本文化・抽出器の
+    # rich 引数）を有効化。OFF（既定）は現行と 1 バイトも挙動を変えない（crawl 単位で 1 回読む）。
+    rich = _rich_extract_enabled()
+    pdf_kwargs: dict[str, Any] = {"min_chars": 40} if rich else {}
+    office_kwargs: dict[str, Any] = (
+        {
+            "include_notes": True,
+            "include_tables": True,
+            "formula_fallback": True,
+            "min_chars": 40,
+        }
+        if rich
+        else {}
+    )
     docs_n = 0
     chunks_n = 0
     skipped_count = 0
@@ -962,126 +1332,270 @@ def _ingest_shared_drives_crawl(
         )
 
         for f in files:
-            # 3. 営業関連判定
-            if spec.sales_relevance_filter:
-                relevant, _reason = _is_sales_relevant(
-                    f, modified_within_days=spec.modified_within_days
+            # M4: file ループ本体を file 単位 try/except で囲む。folder 経路（~838）は
+            # file 単位 try/except があるが crawl 経路には無く、embed / DB upsert の例外で
+            # crawl spec 全体（残り全ファイル）が死んでいた。1 ファイル失敗は skip して継続する。
+            try:
+                # 3. 営業関連判定
+                if spec.sales_relevance_filter:
+                    relevant, _reason = _is_sales_relevant(
+                        f, modified_within_days=spec.modified_within_days
+                    )
+                    if not relevant:
+                        filtered_count += 1
+                        continue
+
+                # 4. ACL 解決
+                file_owner_email, acl_emails, acl_groups = _resolve_drive_file_acl(
+                    client=client,
+                    file_id=f.id,
+                    request_id=request_id,
+                    fallback_owner_email=f.owners_email[0] if f.owners_email else owner_email,
                 )
-                if not relevant:
-                    filtered_count += 1
-                    continue
 
-            # 4. ACL 解決
-            file_owner_email, acl_emails, acl_groups = _resolve_drive_file_acl(
-                client=client,
-                file_id=f.id,
-                request_id=request_id,
-                fallback_owner_email=f.owners_email[0] if f.owners_email else owner_email,
-            )
-
-            # 5. 本文抽出
-            chunks: list[ChunkUpsert] = []
-            if f.mime_type in _PDF_MIME_TYPES:
-                try:
-                    data = client.download_file_bytes(file_id=f.id, request_id=request_id)
-                except Exception:
-                    logger.exception(
-                        "shared_drive_pdf_download_failed",
+                # 5. 本文抽出
+                chunks: list[ChunkUpsert] = []
+                if f.mime_type in _PDF_MIME_TYPES:
+                    try:
+                        data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+                    except Exception:
+                        logger.exception(
+                            "shared_drive_pdf_download_failed",
+                            file_id=f.id,
+                            file_name=f.name,
+                            drive_id=drive.id,
+                        )
+                        skipped_count += 1
+                        continue
+                    try:
+                        pages = extract_pdf_pages(data, **pdf_kwargs)
+                    except Exception:
+                        logger.exception(
+                            "shared_drive_pdf_extract_failed",
+                            file_id=f.id,
+                            file_name=f.name,
+                        )
+                        skipped_count += 1
+                        continue
+                    page_chunks = chunk_pages(pages, size=500, overlap=100)
+                    if not page_chunks:
+                        # §E: 抽出 0 で skip を file_id/name 付きで可視化（my_drive 側と対称）。
+                        logger.warning(
+                            "shared_drive_pdf_empty_text",
+                            request_id=request_id,
+                            file_id=f.id,
+                            file_name=f.name,
+                            drive_id=drive.id,
+                        )
+                        skipped_count += 1
+                        continue
+                    for idx, (page_num, text) in enumerate(page_chunks):
+                        chunks.append(
+                            ChunkUpsert(
+                                chunk_idx=idx,
+                                content=text,
+                                embedding=embedder.embed_passage(text),
+                                metadata={"page_num": page_num},
+                            )
+                        )
+                elif f.mime_type in OFFICE_BINARY_MIMES:
+                    # docx / pptx / xlsx: download → extract → chunk_pages（PDF と同じ I/F）。
+                    # 営業提案書は大半が pptx なので、ここで本文を index 化することが肝。
+                    # 壊れた pptx は extract_office_pages が zipfile.BadZipFile を投げるが、
+                    # fail-open でその 1 ファイルを skip して crawl は継続する。
+                    try:
+                        data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+                    except Exception:
+                        logger.exception(
+                            "shared_drive_office_download_failed",
+                            file_id=f.id,
+                            file_name=f.name,
+                            mime_type=f.mime_type,
+                            drive_id=drive.id,
+                        )
+                        skipped_count += 1
+                        continue
+                    try:
+                        pages = extract_office_pages(data, mime_type=f.mime_type, **office_kwargs)
+                    except Exception:
+                        logger.exception(
+                            "shared_drive_office_extract_failed",
+                            file_id=f.id,
+                            file_name=f.name,
+                            mime_type=f.mime_type,
+                            drive_id=drive.id,
+                        )
+                        skipped_count += 1
+                        continue
+                    page_chunks = chunk_pages(pages, size=500, overlap=100)
+                    if not page_chunks:
+                        # §E: 抽出 0 で skip を file_id/name 付きで可視化（my_drive 側と対称）。
+                        logger.warning(
+                            "shared_drive_office_empty_text",
+                            request_id=request_id,
+                            file_id=f.id,
+                            file_name=f.name,
+                            mime_type=f.mime_type,
+                            drive_id=drive.id,
+                        )
+                        skipped_count += 1
+                        continue
+                    for idx, (page_num, text) in enumerate(page_chunks):
+                        chunks.append(
+                            ChunkUpsert(
+                                chunk_idx=idx,
+                                content=text,
+                                embedding=embedder.embed_passage(text),
+                                metadata={"page_num": page_num},
+                            )
+                        )
+                elif rich and (
+                    f.mime_type in (_GSLIDE_NATIVE_MIME, _GSHEET_NATIVE_MIME)
+                    or f.mime_type == GDOC_NATIVE_MIME
+                    or f.mime_type in _PLAIN_TEXT_MIMES
+                ):
+                    # INGEST_RICH_EXTRACT=1: crawl 経路でも gdoc/gslide/gsheet/plain-text を
+                    # 本文 chunk 化（folder 経路の gdoc 実装と同作法・gslide/gsheet/plain を追加）。
+                    # 失敗時は native_pages=None → title_only にフォールバック（fail-open）。
+                    native_pages = _rich_native_pages(f, client=client, request_id=request_id)
+                    if native_pages is None:
+                        logger.info(
+                            "shared_drive_title_only",
+                            request_id=request_id,
+                            file_id=f.id,
+                            file_name=f.name,
+                            mime_type=f.mime_type,
+                            drive_id=drive.id,
+                        )
+                        text = f"{f.name} ({f.mime_type})"
+                        chunks.append(
+                            ChunkUpsert(
+                                chunk_idx=0,
+                                content=text,
+                                embedding=embedder.embed_passage(text),
+                                metadata={"mime_type": f.mime_type, "title_only": True},
+                            )
+                        )
+                    else:
+                        page_chunks = chunk_pages(native_pages, size=500, overlap=100)
+                        if not page_chunks:
+                            logger.warning(
+                                "shared_drive_native_empty_text",
+                                request_id=request_id,
+                                file_id=f.id,
+                                file_name=f.name,
+                                mime_type=f.mime_type,
+                                drive_id=drive.id,
+                            )
+                            skipped_count += 1
+                            continue
+                        for idx, (page_num, text) in enumerate(page_chunks):
+                            chunks.append(
+                                ChunkUpsert(
+                                    chunk_idx=idx,
+                                    content=text,
+                                    embedding=embedder.embed_passage(text),
+                                    metadata={"page_num": page_num},
+                                )
+                            )
+                else:
+                    # 未対応 mime: title + mime のみ。レガシー Office(.ppt/.doc/.xls＝旧バイナリ)や
+                    # Google native はここに来る（標準ライブラリが旧形式を読めず本文抽出不可）。
+                    # 無音で本文が落ちると気づけないため、title-only フォールバックを必ずログする。
+                    logger.info(
+                        "shared_drive_title_only",
+                        request_id=request_id,
                         file_id=f.id,
                         file_name=f.name,
+                        mime_type=f.mime_type,
                         drive_id=drive.id,
                     )
-                    skipped_count += 1
-                    continue
-                try:
-                    pages = extract_pdf_pages(data)
-                except Exception:
-                    logger.exception(
-                        "shared_drive_pdf_extract_failed",
-                        file_id=f.id,
-                        file_name=f.name,
-                    )
-                    skipped_count += 1
-                    continue
-                page_chunks = chunk_pages(pages, size=500, overlap=100)
-                if not page_chunks:
-                    skipped_count += 1
-                    continue
-                for idx, (page_num, text) in enumerate(page_chunks):
+                    text = f"{f.name} ({f.mime_type})"
                     chunks.append(
                         ChunkUpsert(
-                            chunk_idx=idx,
+                            chunk_idx=0,
                             content=text,
-                            embedding=embedder.embed(text),
-                            metadata={"page_num": page_num},
+                            embedding=embedder.embed_passage(text),
+                            metadata={"mime_type": f.mime_type, "title_only": True},
                         )
                     )
-            else:
-                # 非 PDF: title + mime のみ（Google Doc/Sheet/Slide export 対応は Sprint 4）
-                text = f"{f.name} ({f.mime_type})"
-                chunks.append(
-                    ChunkUpsert(
-                        chunk_idx=0,
-                        content=text,
-                        embedding=embedder.embed(text),
-                        metadata={"mime_type": f.mime_type, "title_only": True},
+
+                # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
+                # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
+                # 失敗しても取り込みは継続（fail-open）。元の chunk 本文で分類するため、
+                # 文脈前置詞を付与する contextualize より前に実行する。
+                cls_metadata: dict[str, str] = {}
+                if classifier is not None and chunks:
+                    sample = "\n".join(c.content for c in chunks[:8])
+                    try:
+                        classification = classifier.classify(
+                            title=f.name or "", text=sample, request_id=request_id
+                        )
+                    except Exception:
+                        logger.exception(
+                            "shared_drive_classify_unexpected",
+                            file_id=f.id,
+                            file_name=f.name,
+                            drive_id=drive.id,
+                        )
+                        classification = None
+                    if classification is not None:
+                        cls_metadata = classification.as_metadata()
+
+                # Contextual Retrieval: 抽出ページ結合の全文を full_text に文脈前置詞を付与する。
+                # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換。
+                if contextualizer is not None and chunks:
+                    full_text = "\n\n".join(c.content for c in chunks)
+                    chunks = contextualizer.contextualize_chunks(
+                        f.name or f.id, full_text, chunks, request_id
                     )
+
+                # 6. DocumentUpsert 組み立て
+                doc = DocumentUpsert(
+                    source_type="gdrive",
+                    external_id=f.id,
+                    source_uri=f.web_view_link or f"gdrive://{f.id}",
+                    title=f.name,
+                    owner_email=file_owner_email,
+                    acl_emails=acl_emails,
+                    acl_groups=acl_groups,
+                    metadata={
+                        **spec.extra_metadata,
+                        "mime_type": f.mime_type,
+                        "size": f.size,
+                        "shared_drive_id": drive.id,
+                        "shared_drive_name": drive.name,
+                        "via": "shared_drive_crawl",
+                        **cls_metadata,
+                    },
+                    modified_at=f.modified_time,
                 )
-
-            # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
-            # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
-            # 失敗しても取り込みは継続（fail-open）。元の chunk 本文で分類するため、
-            # 文脈前置詞を付与する contextualize より前に実行する。
-            cls_metadata: dict[str, str] = {}
-            if classifier is not None and chunks:
-                sample = "\n".join(c.content for c in chunks[:8])
-                try:
-                    classification = classifier.classify(
-                        title=f.name or "", text=sample, request_id=request_id
+                if not dry_run:
+                    # §2 ガード: 本文版を title_only 版で上書きしない（退行を塞ぐ）。
+                    wrote = _guarded_upsert(
+                        repository,
+                        doc,
+                        chunks,
+                        request_id=request_id,
+                        content_registry=content_registry,
                     )
-                except Exception:
-                    logger.exception(
-                        "shared_drive_classify_unexpected",
-                        file_id=f.id,
-                        file_name=f.name,
-                        drive_id=drive.id,
-                    )
-                    classification = None
-                if classification is not None:
-                    cls_metadata = classification.as_metadata()
-
-            # Contextual Retrieval: 抽出ページ結合の全文を full_text に文脈前置詞を付与する。
-            # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換。
-            if contextualizer is not None and chunks:
-                full_text = "\n\n".join(c.content for c in chunks)
-                chunks = contextualizer.contextualize_chunks(
-                    f.name or f.id, full_text, chunks, request_id
+                    if not wrote:
+                        skipped_count += 1
+                        continue
+                docs_n += 1
+                chunks_n += len(chunks)
+            except Exception:
+                # fail-open: 1 ファイルの想定外例外（embed / upsert 等）で crawl 全体を
+                # 落とさない。folder 経路と対称に exception ログ＋skip カウント＋次へ。
+                logger.exception(
+                    "shared_drive_file_unexpected_error",
+                    request_id=request_id,
+                    file_id=f.id,
+                    file_name=f.name,
+                    drive_id=drive.id,
                 )
-
-            # 6. DocumentUpsert 組み立て
-            doc = DocumentUpsert(
-                source_type="gdrive",
-                external_id=f.id,
-                source_uri=f.web_view_link or f"gdrive://{f.id}",
-                title=f.name,
-                owner_email=file_owner_email,
-                acl_emails=acl_emails,
-                acl_groups=acl_groups,
-                metadata={
-                    **spec.extra_metadata,
-                    "mime_type": f.mime_type,
-                    "size": f.size,
-                    "shared_drive_id": drive.id,
-                    "shared_drive_name": drive.name,
-                    "via": "shared_drive_crawl",
-                    **cls_metadata,
-                },
-                modified_at=f.modified_time,
-            )
-            docs_n += 1
-            chunks_n += len(chunks)
-            if not dry_run:
-                repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+                skipped_count += 1
+                continue
 
     logger.info(
         "ingest_shared_drives_crawl_done",
@@ -1173,7 +1687,7 @@ def _ingest_gsheet(
                 ChunkUpsert(
                     chunk_idx=0,
                     content=text,
-                    embedding=embedder.embed(text),
+                    embedding=embedder.embed_passage(text),
                     metadata={},
                 )
             ]
@@ -1229,6 +1743,11 @@ class IngestRunner:
         result = IngestResult()
         request_id = f"ingest-{uuid.uuid4().hex[:12]}"
 
+        # §2 dedup ガード用レジストリ。この run の gdrive folder 経路と shared_drives crawl 経路で
+        # 1 個を共有し、folder→crawl の順で本文版を title_only 版が上書きするのを塞ぐ。
+        # run ごとに新しい set ＝ run 間で漏れない（プロセス内の別 run やテストに影響しない）。
+        content_registry: set[tuple[str, str]] = set()
+
         logger.info(
             "ingest_runner_start",
             request_id=request_id,
@@ -1250,6 +1769,7 @@ class IngestRunner:
                 sources.gdrive_folders,
                 _ingest_gdrive_folder,
                 request_id=request_id,
+                extra_kwargs={"content_registry": content_registry},
             )
         if "gsheets" in kinds:
             result.by_kind["gsheets"] = self._run_kind(
@@ -1264,6 +1784,7 @@ class IngestRunner:
                     (shared_spec,),
                     _ingest_shared_drives_crawl,
                     request_id=request_id,
+                    extra_kwargs={"content_registry": content_registry},
                 )
             else:
                 logger.info(
@@ -1272,6 +1793,20 @@ class IngestRunner:
                     reason=("shared_drives_crawl が yaml に未定義 or enabled=false の場合 skip"),
                 )
                 result.by_kind["shared_drives"] = IngestStats(source_kind="shared_drives")
+
+        # M3: 実行順は dedup（docdedup）→ boilerplate。boilerplate の指紋集計は
+        # suppressed（非正本）doc を除外して数えるため、同一 run 内で先に docdedup が
+        # 確定させた suppressed 印を参照できるよう、docdedup を先に走らせる。
+        #
+        # 全 upsert 完了後にコーパス横断の資料まるごと重複排除を 1 回だけ走らせる
+        # （DOC_DEDUP_DETECT=1 のときだけ・dry-run では走らせない・fail-open）。
+        # OFF（既定）では呼ばない＝現行と完全一致。
+        self._maybe_mark_duplicate_documents(request_id=request_id)
+
+        # 重複排除の直後に、コーパス横断のテンプレ検出を 1 回だけ走らせる
+        # （BOILERPLATE_DETECT=1 のときだけ・dry-run では走らせない・fail-open）。
+        # OFF（既定）では呼ばない＝現行と完全一致。
+        self._maybe_mark_boilerplate(request_id=request_id)
 
         logger.info(
             "ingest_runner_done",
@@ -1282,6 +1817,92 @@ class IngestRunner:
         )
         return result
 
+    def _maybe_mark_boilerplate(self, *, request_id: str) -> None:
+        """全 upsert 完了後、env ゲートが ON ならコーパス横断でテンプレ印を付け直す。
+
+        ゲート: ``BOILERPLATE_DETECT``（既定 OFF）。dry-run では DB を書かないので skip。
+        既存の書込み接続（repository が持つ pgvector client の admin role 接続）を
+        再利用し、新規接続を増やさない。失敗は fail-open（WARN ログ＋取り込みは成功扱い）。
+
+        ``mark_boilerplate`` は admin role で chunks を UPDATE する必要があるため、
+        ``upsert_document_with_chunks`` / ``_ops_connection`` と同条件
+        （app_role + ``user_role='admin'``）の接続を取得する。
+        """
+        if self._dry_run or not _envflag("BOILERPLATE_DETECT"):
+            return
+        min_docs = _envint("BOILERPLATE_MIN_DOCS", 3)
+        # M2: 正規化長がこの文字数未満の短い chunk はテンプレ判定の対象外（既定 40）。
+        min_chars = _envint("BOILERPLATE_MIN_CHARS", 40)
+        try:
+            # repository が ingest_jobs / connector_state 用に持つ admin role 接続を再利用。
+            # chunks の UPDATE policy（migration 0003）は user_role='admin' で bypass される。
+            with self._repo._ops_connection() as conn:
+                # H1: 印付け SQL（コーパス全 chunk 走査）は既定 statement_timeout=30s では
+                # 途中で打ち切られ、fail-open で無音 no-op になる。当該 tx 内だけ timeout を
+                # 無制限にする（検索系の 30s 既定は別接続なので不変）。SET LOCAL は tx 終了で
+                # 自動失効するので他クエリに漏れない。
+                _disable_statement_timeout(conn)
+                affected = mark_boilerplate(conn, min_docs=min_docs, min_chars=min_chars)
+            logger.info(
+                "ingest_boilerplate_done",
+                request_id=request_id,
+                min_docs=min_docs,
+                min_chars=min_chars,
+                affected=affected,
+            )
+        except Exception:
+            # fail-open: テンプレ検出が落ちても取り込み自体は成功扱いにする。
+            logger.warning(
+                "ingest_boilerplate_failed",
+                request_id=request_id,
+                min_docs=min_docs,
+                exc_info=True,
+            )
+
+    def _maybe_mark_duplicate_documents(self, *, request_id: str) -> None:
+        """テンプレ検出の直後、env ゲートが ON なら資料まるごと重複排除を実行する。
+
+        ゲート: ``DOC_DEDUP_DETECT``（既定 OFF）。dry-run では DB を書かないので skip。
+        しきい値は ``DOC_DEDUP_JACCARD``（既定 0.7・MinHash Jaccard 推定）。
+        ``mark_boilerplate`` と同じく既存の admin role 接続（``_ops_connection``）を
+        再利用し、新規接続を増やさない。失敗は fail-open（WARN ログ＋取り込みは成功扱い）。
+        """
+        if self._dry_run or not _envflag("DOC_DEDUP_DETECT"):
+            return
+        jaccard_threshold = _envfloat("DOC_DEDUP_JACCARD", 0.7)
+        # H2: OOM/timeout 回避の上限（doc 数・per-doc 文字数）。env で上書き可。
+        max_docs = _envint("DOC_DEDUP_MAX_DOCS", 5000)
+        max_chars = _envint("DOC_DEDUP_MAX_CHARS", 500_000)
+        try:
+            # repository が ingest_jobs / connector_state 用に持つ admin role 接続を再利用。
+            # documents の UPDATE policy は user_role='admin' で bypass される（boilerplate 同様）。
+            with self._repo._ops_connection() as conn:
+                # H1: docdedup は全 doc 全文ロード＋全ペア比較＋UPDATE で長時間化し得るため、
+                # boilerplate と同様に当該 tx 内だけ statement_timeout を無制限にする。
+                _disable_statement_timeout(conn)
+                affected = mark_duplicate_documents(
+                    conn,
+                    jaccard_threshold=jaccard_threshold,
+                    max_docs=max_docs,
+                    max_chars=max_chars,
+                )
+            logger.info(
+                "ingest_docdedup_done",
+                request_id=request_id,
+                jaccard_threshold=jaccard_threshold,
+                max_docs=max_docs,
+                max_chars=max_chars,
+                affected=affected,
+            )
+        except Exception:
+            # fail-open: 重複排除が落ちても取り込み自体は成功扱いにする。
+            logger.warning(
+                "ingest_docdedup_failed",
+                request_id=request_id,
+                jaccard_threshold=jaccard_threshold,
+                exc_info=True,
+            )
+
     def _run_kind(
         self,
         kind: str,
@@ -1289,7 +1910,11 @@ class IngestRunner:
         handler: Any,
         *,
         request_id: str,
+        extra_kwargs: dict[str, Any] | None = None,
     ) -> IngestStats:
+        # gdrive / shared_drives 経路にだけ §2 dedup ガード用レジストリを渡す
+        # （folder→crawl で本文版を title_only 版が上書きしないよう、run 内で 1 個共有）。
+        handler_kwargs = extra_kwargs or {}
         stats = IngestStats(source_kind=kind)
         for spec in specs:
             try:
@@ -1300,6 +1925,7 @@ class IngestRunner:
                     owner_email=self._owner_email,
                     dry_run=self._dry_run,
                     request_id=request_id,
+                    **handler_kwargs,
                 )
                 stats.documents_upserted += docs_n
                 stats.chunks_inserted += chunks_n

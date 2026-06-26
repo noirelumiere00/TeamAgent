@@ -28,7 +28,46 @@ def test_contract() -> None:
 
 def test_no_doc_type_signal_returns_none() -> None:
     assert extract_knowledge_filters("アース製薬の過去資料を見せて") is None
-    assert extract_knowledge_filters("SNS運用のコツは？") is None
+
+
+def test_solution_filter() -> None:
+    assert extract_knowledge_filters("SNS運用の事例ある？") == {"cls_solution": "SNS運用"}
+    assert extract_knowledge_filters("インフルエンサー施策の提案書") == {
+        "cls_doc_type": "提案書",
+        "cls_solution": "インフルエンサー",
+    }
+
+
+def test_budget_amount_filter() -> None:
+    # 「予算100万くらいの動画広告の事例」→ budget と solution の両方が載る。
+    assert extract_knowledge_filters("予算100万くらいの動画広告の事例") == {
+        "cls_solution": "動画広告",
+        "cls_budget": "100〜500万",
+    }
+    assert extract_knowledge_filters("予算は80万くらいの施策")["cls_budget"] == "〜100万"
+    assert extract_knowledge_filters("予算800万のキャンペーン")["cls_budget"] == "500万〜"
+
+
+def test_budget_qualitative_filter() -> None:
+    assert extract_knowledge_filters("低予算でできるSEO施策")["cls_budget"] == "〜100万"
+
+
+def test_target_filter() -> None:
+    assert extract_knowledge_filters("若年女性向けの提案事例") == {
+        "cls_doc_type": "提案書",
+        "cls_target": "若年女性",
+    }
+    assert extract_knowledge_filters("シニア向けの施策")["cls_target"] == "シニア"
+    assert extract_knowledge_filters("BtoBの事例")["cls_target"] == "BtoB"
+
+
+def test_combined_axes() -> None:
+    f = extract_knowledge_filters("Z世代向けに予算300万でインフルエンサーの提案事例")
+    assert f is not None
+    assert f["cls_doc_type"] == "提案書"
+    assert f["cls_solution"] == "インフルエンサー"
+    assert f["cls_budget"] == "100〜500万"
+    assert f["cls_target"] == "Z世代"
 
 
 def test_empty_returns_none() -> None:

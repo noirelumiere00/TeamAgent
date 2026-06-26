@@ -329,14 +329,33 @@ class GDriveClient:
         from googleapiclient.http import MediaIoBaseDownload
 
         start = time.perf_counter()
-        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        # acknowledgeAbuse=True: 大容量/スキャン未確認ファイルで Google が本体の代わりに
+        # 「ウイルススキャンできませんでした」確認応答を返し、結果として後段の zip/pdf 解析が
+        # "File is not a zip file" 等で無音失敗するのを防ぐ（本体バイトを返させる）。非該当
+        # ファイルには無害。num_retries で httplib2 の一過性失敗を吸収（大容量DLの途中切れ対策）。
+        request = service.files().get_media(
+            fileId=file_id, supportsAllDrives=True, acknowledgeAbuse=True
+        )
         buf = BytesIO()
         downloader = MediaIoBaseDownload(buf, request, chunksize=1024 * 1024)
         done = False
         while not done:
-            _status, done = downloader.next_chunk()
+            _status, done = downloader.next_chunk(num_retries=3)
         data = buf.getvalue()
         latency_ms = int((time.perf_counter() - start) * 1000)
+        # office(PK..)/pdf(%PDF) は決して HTML で始まらない。先頭が HTML マーカーなら本体取得に
+        # 失敗して確認/エラーページが降ってきた証拠 → 無音 BadZipFile より前に fail-loud にして
+        # 原因を可視化（呼び出し側は download_failed として skip＝fail-open は維持）。
+        head = data[:64].lstrip()[:15].lower()
+        if head.startswith(b"<!doctype") or head.startswith(b"<html"):
+            logger.warning(
+                "gdrive_download_not_binary",
+                request_id=request_id,
+                file_id=file_id,
+                bytes=len(data),
+                head=data[:48].decode("latin-1", "replace"),
+            )
+            raise RuntimeError(f"gdrive download returned non-binary content for {file_id}")
         logger.info(
             "gdrive_download_file",
             request_id=request_id,

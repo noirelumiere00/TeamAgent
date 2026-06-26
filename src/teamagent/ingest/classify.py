@@ -1,10 +1,11 @@
-"""アップロード資料の自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
+"""アップロード資料の自動分類（案件 / 業界 / 資料種別 / 商談フェーズ / 施策 / 予算 / ターゲット）。
 
 ナレッジ用 Drive 取り込み時に、本文抜粋を Bedrock に渡して検索の絞り込みキーになる
 分類タグを付与する。付与先は ``documents.metadata`` のフラットキー
-（``cls_project`` / ``cls_industry`` / ``cls_doc_type`` / ``cls_phase``）で、
+（``cls_project`` / ``cls_industry`` / ``cls_doc_type`` / ``cls_phase`` /
+``cls_solution`` / ``cls_budget`` / ``cls_target``）で、
 ``pgvector_client.search_similar_new_schema(metadata_filters=...)`` の
-``d.metadata->>key`` フィルタがそのまま効く形にする。
+``d.metadata->>key`` フィルタがそのまま効く形にする（JSONB 格納のため DB migration 不要）。
 
 - ``USE_DOC_CLASSIFY=1`` のときだけ有効（既定 OFF＝従来挙動と完全後方互換）。
 - Bedrock 失敗・パース失敗時は分類なしで取り込み継続（fail-open＝ナレッジ自体は失わない）。
@@ -27,6 +28,23 @@ logger = structlog.get_logger(__name__)
 _DOC_TYPES = ("提案書", "議事録", "報告書", "価格表", "契約", "その他")
 _PHASES = ("ヒアリング", "提案", "見積", "受注", "失注", "不明")
 
+# 施策タイプ: 代表語彙へ部分一致正規化（該当なしは _clean 生値を短く保持）。
+# テンプレ以外で資料を区別する最重要軸のため、固定語彙に閉じず生値も許容する。
+_SOLUTIONS = (
+    "SNS運用",
+    "動画広告",
+    "インフルエンサー",
+    "SEO",
+    "Web制作",
+    "広告運用",
+    "イベント",
+    "その他",
+)
+
+# 予算感: 正規化バンド。本文に金額が無いことが多いので、読み取れなければ "不明"
+# （推測で埋めない＝fail-open）。
+_BUDGETS = ("〜100万", "100〜500万", "500万〜", "不明")
+
 _CLASSIFY_SYSTEM_PROMPT = """\
 あなたは営業資料を分類するアシスタントです。
 
@@ -40,9 +58,16 @@ _CLASSIFY_SYSTEM_PROMPT = """\
 - industry: 業界（例: 食品 / 化粧品 / 小売 / IT / 金融 / メーカー 等）。不明なら ""。
 - doc_type: 資料種別。次のいずれか 1 つ: 提案書 / 議事録 / 報告書 / 価格表 / 契約 / その他。
 - phase: 商談フェーズ。次のいずれか 1 つ: ヒアリング / 提案 / 見積 / 受注 / 失注 / 不明。
+- solution: 施策タイプ（例: SNS運用 / 動画広告 / インフルエンサー / SEO / Web制作 /
+  広告運用 / イベント / その他）。読み取れなければ ""。
+- budget: 予算感。本文に明確な金額がある場合のみ次のいずれか:
+  〜100万 / 100〜500万 / 500万〜。金額が読み取れなければ "不明"（推測しない）。
+- target: ターゲット / 客層（例: 若年女性 / 主婦 / シニア / BtoB / ファミリー /
+  Z世代 等）。読み取れなければ ""。
 
 【出力形式（JSON オブジェクトのみ）】
-{"project": "アース製薬", "industry": "日用品", "doc_type": "提案書", "phase": "提案"}
+{"project": "アース製薬", "industry": "日用品", "doc_type": "提案書", "phase": "提案",
+ "solution": "SNS運用", "budget": "100〜500万", "target": "若年女性"}
 """
 
 
@@ -54,9 +79,20 @@ class DocClassification:
     industry: str = ""
     doc_type: str = ""
     phase: str = ""
+    solution: str = ""
+    budget: str = ""
+    target: str = ""
 
     def is_empty(self) -> bool:
-        return not (self.project or self.industry or self.doc_type or self.phase)
+        return not (
+            self.project
+            or self.industry
+            or self.doc_type
+            or self.phase
+            or self.solution
+            or self.budget
+            or self.target
+        )
 
     def as_metadata(self) -> dict[str, str]:
         """``documents.metadata`` にマージするフラットキー dict（空項目は出さない）。"""
@@ -71,6 +107,12 @@ class DocClassification:
             md["cls_doc_type"] = self.doc_type
         if self.phase:
             md["cls_phase"] = self.phase
+        if self.solution:
+            md["cls_solution"] = self.solution
+        if self.budget:
+            md["cls_budget"] = self.budget
+        if self.target:
+            md["cls_target"] = self.target
         return md
 
 
@@ -95,10 +137,27 @@ def _norm_choice(value: Any, allowed: tuple[str, ...], *, default: str = "") -> 
     return default
 
 
+def _norm_open(value: Any, allowed: tuple[str, ...], *, max_len: int = 40) -> str:
+    """allowed への部分一致正規化を試み、該当なしは _clean した生値を短く保持する。
+
+    自由度の高い軸（施策タイプ等）向け。代表語彙に寄せられればそれを、寄せられ
+    なければ生値を返す（固定語彙に閉じない）。空入力は "" を返す。
+    """
+    s = _clean(value, max_len=max_len)
+    if not s:
+        return ""
+    if s in allowed:
+        return s
+    for a in allowed:
+        if a in s or s in a:
+            return a
+    return s
+
+
 class DocClassifier:
     """Bedrock を使った資料分類器。失敗時は None を返す（呼び出し側で fail-open）。"""
 
-    def __init__(self, bedrock: Any, *, max_tokens: int = 300, sample_chars: int = 4000) -> None:
+    def __init__(self, bedrock: Any, *, max_tokens: int = 400, sample_chars: int = 4000) -> None:
         self._bedrock = bedrock
         self._max_tokens = max_tokens
         self._sample_chars = sample_chars
@@ -133,6 +192,9 @@ class DocClassifier:
             industry=_clean(obj.get("industry")),
             doc_type=_norm_choice(obj.get("doc_type"), _DOC_TYPES),
             phase=_norm_choice(obj.get("phase"), _PHASES),
+            solution=_norm_open(obj.get("solution"), _SOLUTIONS),
+            budget=_norm_choice(obj.get("budget"), _BUDGETS),
+            target=_clean(obj.get("target"), max_len=40),
         )
         return None if cls.is_empty() else cls
 

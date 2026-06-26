@@ -498,6 +498,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 mc: dict[str, str] | None = (
                     {"__client__": input.filter_client} if input.filter_client else None
                 )
+                # NL client 配線: query_planner が抽出した client 名を、ユーザーが明示的に
+                # filter_client を指定していないときだけ __client__ に昇格する（plan 取得後）。
+                # 昇格したら filter_client 明示時と同じ扱いにするため boost をスキップする。
+                plan_client_used = False
                 # ユーザー明示の doc_type / solution は等価 sticky（budget と同じ・fail-open でも
                 # 落とさない）。自動抽出（extract_knowledge_filters / plan.doc_type）と衝突したら
                 # この明示フィルタを優先するため、後段で自動抽出側から該当キーを外す。
@@ -529,6 +533,14 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             if plan.doc_type and not input.filter_doc_type
                             else None
                         )
+                        # NL client 抽出を __client__ へ昇格（自然言語処理の肝）。明示
+                        # filter_client があれば上書きしない（mc is None ガード）。先頭のみ。
+                        # client は metadata_contains（OR-ILIKE 部分一致）側で扱い、昇格時は
+                        # plan_client_used=True にして boost をスキップ（明示時と挙動を揃え
+                        # 別 client 混入を防ぐ）。fail-open（空 plan は no-op）。
+                        if mc is None and plan.client_names:
+                            mc = {"__client__": plan.client_names[0]}
+                            plan_client_used = True
                     else:
                         eff_industry = input.filter_industry
                         kf = None
@@ -594,7 +606,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # 取りこぼすのを補強（client_name 絞り検索を rerank プールへ合流）。
                 # ただし input.filter_client 明示時はユーザーの絞り込みを優先し boost をスキップ
                 # （自動 boost が別 client を混ぜ「A 社で絞ったのに B 社が混ざる」のを防ぐ）。
-                if self._use_client_boost and not input.filter_client:
+                # plan 由来 client を __client__ に昇格したときも明示時と同じ扱いでスキップする。
+                if self._use_client_boost and not input.filter_client and not plan_client_used:
                     hits = self._apply_client_boost(
                         conn=conn,
                         query=input.query,
