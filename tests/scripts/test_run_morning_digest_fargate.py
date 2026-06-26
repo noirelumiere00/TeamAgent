@@ -105,8 +105,9 @@ def test_reply_section_has_per_mail_buttons() -> None:
     # 各 high メールに actions ブロック（=2個）。グローバルな一括バーは無い。
     assert len(actions) == 2
     all_el = [e for b in actions for e in b["elements"]]
-    assert any(e.get("action_id") == "mail_draft" and e.get("value") == "TOKB" for e in all_el)
-    assert any("作成した下書き" not in str(e) and "確認する" in str(e) for e in all_el)
+    # 未作成→『下書きを作成』は url ボタン（connect-web /mail/draft に token を載せて飛ばす）。
+    assert any("/mail/draft" in e.get("url", "") and "t=TOKB" in e.get("url", "") for e in all_el)
+    assert any("確認する" in str(e) for e in all_el)
     assert any(e.get("url", "").endswith("#drafts") for e in all_el)  # 作成済→開く
 
 

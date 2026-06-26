@@ -569,7 +569,14 @@ def test_E32_preamble_and_no_scoreboard():
 
 
 def test_E33_reply_buttons_states():
-    """要返信メールのボタン: 未作成→[下書きを作成(action)]＋[確認する(url)]、作成済→[開く(url)]。"""
+    """要返信メールのボタン: 未作成→[下書きを作成(url→connect-web)]＋[確認する(url)]、作成済→[開く(url)]。
+
+    『下書きを作成』は url ボタン（connect-web /mail/draft?t=&u=）＝OpenClaw 非依存。
+    どのボタンも url のみ・action_id/value は持たない（block_actions を発火させない）。
+    """
+    import urllib.parse as _u
+
+    owner = "s-komata@vectorinc.co.jp"
     # 未作成（draft_token あり）
     m1 = MailDigestItem(
         counterpart_masked="a***@x",
@@ -578,18 +585,21 @@ def test_E33_reply_buttons_states():
         draft_token="TOK123",
         thread_gmail_url="https://mail.google.com/mail/u/0/#all/tA",
     )
-    btns = runner._reply_buttons(m1)
-    create = [b for b in btns if b.get("action_id") == "mail_draft"]
-    assert create and create[0]["value"] == "TOK123"  # 押下で worker が受ける
+    btns = runner._reply_buttons(m1, owner)
+    assert all("action_id" not in b and "value" not in b for b in btns)  # 全部 url ボタン
+    create = [b for b in btns if "下書きを作成" in b["text"]["text"]]
+    assert create, "『下書きを作成』ボタンが無い"
+    cu = create[0]["url"]
+    assert "/mail/draft" in cu and "t=TOK123" in cu
+    assert f"u={_u.quote(owner)}" in cu  # owner を載せる（HMAC で照合）
     assert any(b.get("url", "").endswith("#all/tA") for b in btns)  # 確認する=スレッド直行
-    assert all("value" not in b or b.get("action_id") for b in btns)  # url ボタンは action 無し
 
     # 作成済 → 作成ボタンは出ず「開く」url ボタン
     m2 = MailDigestItem(
         counterpart_masked="a***@x", importance="high", has_draft=True, draft_token="TOK"
     )
-    btns2 = runner._reply_buttons(m2)
-    assert not [b for b in btns2 if b.get("action_id") == "mail_draft"]
+    btns2 = runner._reply_buttons(m2, owner)
+    assert not [b for b in btns2 if "下書きを作成" in b["text"]["text"]]
     assert any("drafts" in b.get("url", "") for b in btns2)
 
 
@@ -724,10 +734,11 @@ def test_E41_non_to_self_high_goes_to_unread_not_reply():
     assert "要返信メール（1件）" in dump  # To自分宛の1件だけが要返信
     assert "返信必要" in dump
     assert "未確認" in dump and "CC高重要" in dump  # To に自分がいない高重要は未確認へ
-    # CC高重要 には下書きボタン(action_id)が付かない
+    # CC高重要 には『下書きを作成』ボタン(url)が付かない（要返信=To自分宛のみ）。
     actions = [b for b in blocks if b.get("type") == "actions"]
     all_el = [e for b in actions for e in b.get("elements", [])]
-    assert len([e for e in all_el if e.get("action_id") == "mail_draft"]) == 1  # 返信必要のみ
+    draft_btns = [e for e in all_el if "下書きを作成" in e.get("text", {}).get("text", "")]
+    assert len(draft_btns) == 1  # 返信必要のみ
 
 
 def test_E39_is_unread_collected_from_label_ids():

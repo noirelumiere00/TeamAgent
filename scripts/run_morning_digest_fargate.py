@@ -22,6 +22,7 @@ import os
 import sys
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import structlog
 
@@ -107,10 +108,6 @@ _GMAIL_DRAFTS_URL = "https://mail.google.com/mail/u/0/#drafts"
 _GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox"
 _CALENDAR_URL = "https://calendar.google.com/"
 
-# ボタン押下（block_actions）を worker(Socket Mode) が受ける action_id。slack_bot.py の
-# @app.action と一致させること。value は HMAC 署名トークン（生 thread_id は載せない＝G3）。
-_ACTION_MAIL_DRAFT = "mail_draft"
-
 
 _JST = _dt.timezone(_dt.timedelta(hours=9))
 
@@ -162,12 +159,22 @@ def _mail_line(m: Any) -> tuple[str, str]:
     return subj, who
 
 
-def _reply_buttons(m: Any) -> list[dict[str, Any]]:
-    """要返信メール 1 件のボタン行：[下書きを作成 or 開く] ＋ [確認する(スレッド直行)]。"""
+def _mail_draft_base() -> str:
+    """『下書きを作成』URL ボタンの着地先（connect-web）ベース URL。"""
+    return os.environ.get("MAIL_DRAFT_BASE_URL", "https://connect.newstv.co.jp").rstrip("/")
+
+
+def _reply_buttons(m: Any, user_email: str) -> list[dict[str, Any]]:
+    """要返信メール 1 件のボタン行：[下書きを作成 or 開く] ＋ [確認する(スレッド直行)]。
+
+    「✏️ 下書きを作成」は **url ボタン**＝connect-web の /mail/draft に飛ばし、そこで token を
+    検証して Reply-All 下書きを作成→Gmail へリダイレクトする（OpenClaw 非依存）。
+    value(token) と owner(u) を URL に載せる。token は HMAC 署名＝owner は詐称不可。
+    """
     btns: list[dict[str, Any]] = []
     thread_url = getattr(m, "thread_gmail_url", "") or _GMAIL_INBOX_URL
     if getattr(m, "has_draft", False):
-        # 既に下書き有り → 作成ボタンは出さず、その下書きへ（block_actions 非発火の url ボタン）。
+        # 既に下書き有り → 作成ボタンは出さず、その下書きへ（url ボタン）。
         btns.append(
             {
                 "type": "button",
@@ -176,13 +183,13 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
             }
         )
     elif getattr(m, "draft_token", ""):
-        # 押下→worker が block_actions を受けてオンデマンド生成。value は HMAC 署名トークン。
+        # 押下→connect-web /mail/draft が token を検証して下書き作成→Gmail へリダイレクト。
+        url = f"{_mail_draft_base()}/mail/draft?t={quote(str(m.draft_token))}&u={quote(user_email)}"
         btns.append(
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "✏️ 下書きを作成", "emoji": True},
-                "action_id": _ACTION_MAIL_DRAFT,
-                "value": m.draft_token,
+                "url": url,
                 "style": "primary",
             }
         )
@@ -190,7 +197,7 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
         {
             "type": "button",
             "text": {"type": "plain_text", "text": "🔍 確認する", "emoji": True},
-            "url": thread_url,  # そのスレッドへワンタップ直行（url ボタン＝非発火）
+            "url": thread_url,  # そのスレッドへワンタップ直行（url ボタン）
         }
     )
     return btns
@@ -241,7 +248,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             if getattr(m, "ask", ""):
                 body += f"\n📌 依頼: {_slack_escape(m.ask)}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
-            blocks.append({"type": "actions", "elements": _reply_buttons(m)})
+            blocks.append({"type": "actions", "elements": _reply_buttons(m, user_email)})
         blocks.append({"type": "divider"})
 
     # --- 📬 未確認（未読・最大5件＋「他N件」・件名/相手＋AI要約）---

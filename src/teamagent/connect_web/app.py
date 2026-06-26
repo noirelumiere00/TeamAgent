@@ -13,8 +13,10 @@ from __future__ import annotations
 import html
 import json
 import os
+import uuid
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
 import structlog
 from fastapi import FastAPI, Request
@@ -2440,6 +2442,72 @@ def create_app(
                 "このタブは閉じて大丈夫です。",
             ),
             status_code=200,
+        )
+
+    @app.get("/mail/draft")
+    def mail_draft(request: Request) -> Response:
+        """朝ダイジェストの「✏️ 下書きを作成」リンクの着地点。
+
+        `?t=<HMAC署名トークン>&u=<owner_email>`。token を検証（署名・所有者照合・失効）し、
+        当該スレッドの **Reply-All 返信下書き**を本人 Gmail に作成（送信しない）→ Gmail の
+        下書き画面（スレッド内インライン）へ 302 リダイレクトする。OpenClaw 非依存・全 Python。
+        u は token の owner_hash と照合されるため詐称不可（decode_draft_token が fail-closed）。
+        """
+        from teamagent.skills.base import SkillContext
+        from teamagent.skills.morning_digest.draft_token import decode_draft_token
+
+        token = (request.query_params.get("t") or "").strip()
+        owner = (request.query_params.get("u") or "").strip()
+        thread_id = decode_draft_token(token, owner) if (token and owner) else None
+        if not thread_id:
+            return HTMLResponse(
+                _page(
+                    "リンクが無効です",
+                    "このリンクは期限切れか不正です。最新のダイジェストから操作してください。",
+                    accent="#f9667a",
+                ),
+                status_code=400,
+            )
+
+        try:
+            from teamagent.skills.morning_digest.skill import MorningDigestSkill
+
+            skill = MorningDigestSkill(token_store=_get_store())
+            ctx = SkillContext(
+                request_id=f"webdraft-{uuid.uuid4().hex[:10]}",
+                metadata={"user_email": owner},
+            )
+            res = skill.generate_draft_for_thread(thread_id, owner, ctx)
+        except Exception:
+            logger.warning("connect_mail_draft_failed")  # token/本文/宛先は出さない
+            return HTMLResponse(
+                _page(
+                    "下書きを作成できませんでした",
+                    "時間をおいて再度お試しください。",
+                    accent="#f9667a",
+                ),
+                status_code=500,
+            )
+
+        if res.get("created") or res.get("already"):
+            # 本人アカウント固定で、その案件スレッド（返信下書きがインライン表示）を開く。
+            gmail_url = (
+                f"https://mail.google.com/mail/?authuser={quote(owner, safe='@')}#all/{thread_id}"
+            )
+            return RedirectResponse(gmail_url, status_code=302)
+
+        err = str(res.get("error") or "")
+        msg = {
+            "not_connected": (
+                "下書き作成には Google の連携が必要です。"
+                "Slack で AiLa に『連携』と話しかけて許可してください。"
+            ),
+            "reauth_needed": "下書き作成には Google の再連携（下書き作成権限）が必要です。",
+            "not_addressed": "このスレッドはご本人宛（To）ではないため下書きは作成しません。",
+            "thread_gone": "対象のスレッドが見つかりませんでした。",
+        }.get(err, "下書きを作成できませんでした（返信先不明/一斉送信 等）。")
+        return HTMLResponse(
+            _page("下書きを作成できませんでした", msg, accent="#f9667a"), status_code=200
         )
 
     # ============================================================
