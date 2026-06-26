@@ -53,12 +53,13 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
         log = ctx.bind_logger(self.name)
 
         # G1: 本人 user_email 必須（fail-closed・他人分の URL を作らない）。
+        # 観測性(柱2): 本人未解決での fail-closed は「連携が機能していない」直近シグナル。
+        # 構造化 event を出して metric filter→alarm で拾えるようにする（無音にしない）。
         requester = ctx.metadata.get("user_email")
-        if not requester or not isinstance(requester, str):
+        if not requester or not isinstance(requester, str) or not requester.strip():
+            log.warning("oauth_connect_fail_closed", reason="no_user_email")
             raise PermissionError("oauth_connect は本人 user_email が必須です（本人専用リンク）")
         requester = requester.strip()
-        if not requester:
-            raise PermissionError("本人 user_email が必須です（空不可・fail-closed）")
 
         redirect = os.environ.get("OAUTH_REDIRECT_URI", "").strip()
         if not redirect:

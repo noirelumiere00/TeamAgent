@@ -29,16 +29,41 @@ logger = structlog.get_logger(__name__)
 
 
 def _resolve_target_users() -> list[str]:
-    """env or DB から対象 user_email リストを取得。
+    """env or DB から対象 user_email リストを取得し、除外リストを差し引く。
 
     優先順位:
       1. env `MORNING_DIGEST_USERS`（カンマ区切り・明示指定）
       2. RDS `oauth_tokens` の連携済全員（動的抽出）
+    どちらの経路でも最後に env `MORNING_DIGEST_EXCLUDE` のユーザーを除外する。
     """
     explicit = os.environ.get("MORNING_DIGEST_USERS", "").strip()
     if explicit:
-        return [e.strip().lower() for e in explicit.split(",") if e.strip()]
-    return _fetch_connected_users_from_rds()
+        users = [e.strip().lower() for e in explicit.split(",") if e.strip()]
+    else:
+        users = _fetch_connected_users_from_rds()
+    return _apply_exclude(users)
+
+
+def _apply_exclude(users: list[str]) -> list[str]:
+    """env `MORNING_DIGEST_EXCLUDE`（カンマ区切り）のユーザーを対象から外す。
+
+    Google 連携を切らずに、テストユーザーや一時停止したい人だけを digest 対象から
+    除外する仕組み。明示リスト・RDS 動的抽出のどちらの経路でも最後に適用する。
+    """
+    raw = os.environ.get("MORNING_DIGEST_EXCLUDE", "").strip()
+    if not raw:
+        return users
+    excluded = {e.strip().lower() for e in raw.split(",") if e.strip()}
+    if not excluded:
+        return users
+    kept = [u for u in users if u.lower() not in excluded]
+    removed = len(users) - len(kept)
+    if removed:
+        print(
+            f"[run_morning_digest_fargate] excluded {removed} user(s) via MORNING_DIGEST_EXCLUDE",
+            flush=True,
+        )
+    return kept
 
 
 def _fetch_connected_users_from_rds() -> list[str]:
@@ -82,6 +107,10 @@ _GMAIL_DRAFTS_URL = "https://mail.google.com/mail/u/0/#drafts"
 _GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox"
 _CALENDAR_URL = "https://calendar.google.com/"
 
+# ボタン押下（block_actions）を worker(Socket Mode) が受ける action_id。slack_bot.py の
+# @app.action と一致させること。value は HMAC 署名トークン（生 thread_id は載せない＝G3）。
+_ACTION_MAIL_DRAFT = "mail_draft"
+
 
 _JST = _dt.timezone(_dt.timedelta(hours=9))
 
@@ -99,123 +128,168 @@ def _fmt_time(iso: str | None) -> str:
         return iso[:16]
 
 
-def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
-    """MorningDigestOutput → Slack Block Kit blocks（要返信を最上部・スコアボード・アクション付き）。"""
-    masked = _mask_email(user_email)
-    text = f"☀️ おはようございます！{masked} さんの本日のダイジェストです。"
+def _slack_escape(s: str) -> str:
+    """Slack mrkdwn の特殊文字をエスケープ。
 
-    mail_items = list(getattr(digest, "mail_digest", []) or [])
-    high = [m for m in mail_items if m.importance == "high"]
-    medium = [m for m in mail_items if m.importance == "medium"]
-    low = [m for m in mail_items if m.importance == "low"]
-    cal_items = list(getattr(digest, "calendar_events", []) or [])
-    slack_items = list(getattr(digest, "slack_unread", []) or [])
-    drafts = int(getattr(digest, "drafts_created", 0) or 0)
+    実件名/実名(未マスクの display)を mrkdwn に入れるため、メール件名に
+    `<https://evil|クリック>` 等を仕込まれてもリンク偽装/書式崩れにならないようにする。
+    Slack 仕様では & < > のみエスケープが必要。
+    """
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    blocks: list[dict[str, Any]] = [
+
+def _fmt_event_time(start_at: str | None, end_at: str | None) -> str:
+    """ISO 文字列（…T10:00:00+09:00 / 日付のみ=終日）を '10:00–11:00' / '終日' に整形する。"""
+
+    def _hm(s: str | None) -> str | None:
+        if not s:
+            return ""
+        if "T" not in s:  # 日付のみ ＝ 終日イベント
+            return None
+        return s.split("T", 1)[1][:5]  # "HH:MM"
+
+    sh = _hm(start_at)
+    if sh is None:
+        return "終日"
+    eh = _hm(end_at)
+    return f"{sh}–{eh}" if eh else (sh or "")
+
+
+def _mail_line(m: Any) -> tuple[str, str]:
+    """1 メール（スレッド）の (件名section本文, 相手) を作る。display は本人 DM のみ・ログ厳禁。"""
+    subj = _slack_escape(getattr(m, "subject_display", "") or m.subject_scrubbed or "(件名なし)")
+    who = _slack_escape(getattr(m, "counterpart_display", "") or m.counterpart_masked)
+    return subj, who
+
+
+def _reply_buttons(m: Any) -> list[dict[str, Any]]:
+    """要返信メール 1 件のボタン行：[下書きを作成 or 開く] ＋ [確認する(スレッド直行)]。"""
+    btns: list[dict[str, Any]] = []
+    thread_url = getattr(m, "thread_gmail_url", "") or _GMAIL_INBOX_URL
+    if getattr(m, "has_draft", False):
+        # 既に下書き有り → 作成ボタンは出さず、その下書きへ（block_actions 非発火の url ボタン）。
+        btns.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "📨 下書きを開く", "emoji": True},
+                "url": _GMAIL_DRAFTS_URL,
+            }
+        )
+    elif getattr(m, "draft_token", ""):
+        # 押下→worker が block_actions を受けてオンデマンド生成。value は HMAC 署名トークン。
+        btns.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "✏️ 下書きを作成", "emoji": True},
+                "action_id": _ACTION_MAIL_DRAFT,
+                "value": m.draft_token,
+                "style": "primary",
+            }
+        )
+    btns.append(
         {
-            "type": "header",
-            "text": {"type": "plain_text", "text": "☀️ 今日のダイジェスト", "emoji": True},
-        },
-    ]
-
-    # --- スコアボード（3秒で全体量・fields 2x2）---
-    blocks.append(
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"🔴 *要返信*  `{len(high)}件`"},
-                {"type": "mrkdwn", "text": f"✏️ *下書き済*  `{drafts}件`"},
-                {"type": "mrkdwn", "text": f"🗓 *今日の予定*  `{len(cal_items)}件`"},
-                {"type": "mrkdwn", "text": f"🟡 *要確認*  `{len(medium)}件`"},
-            ],
+            "type": "button",
+            "text": {"type": "plain_text", "text": "🔍 確認する", "emoji": True},
+            "url": thread_url,  # そのスレッドへワンタップ直行（url ボタン＝非発火）
         }
     )
-    blocks.append({"type": "divider"})
+    return btns
 
-    # --- 要返信メール（high のみ・本文 section + メタ context の2段で厚く）---
+
+def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
+    """MorningDigestOutput → Slack Block Kit（要返信→未開封→今日の予定。下書きはボタン生成）。"""
+    text = "メールと本日の予定をお送りします。"
+
+    mail_items = list(getattr(digest, "mail_digest", []) or [])
+
+    # 要返信メール ＝ high かつ「本人が To に直接いる」（＝自分が返信すべきもの）。
+    # To に自分がいない（CC のみ/メーリス宛）メールは high でも要返信に出さず未開封へ回す。
+    def _is_reply(m: Any) -> bool:
+        return m.importance == "high" and bool(getattr(m, "to_self", False))
+
+    high = [m for m in mail_items if _is_reply(m)]
+    # 未開封 ＝ 未読(UNREAD) かつ 要返信に出ていないもの（To に自分がいない高重要もここ・閲覧のみ）。
+    unread = [m for m in mail_items if getattr(m, "is_unread", False) and not _is_reply(m)]
+    cal_items = list(getattr(digest, "calendar_events", []) or [])
+
+    # 冒頭の枕詞（飾らない一文）。
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "📬 *メールと本日の予定をお送りします。*"},
+        },
+        {"type": "divider"},
+    ]
+
+    # --- 🔴 要返信メール（最大10件・各件にボタン）---
     if high:
         blocks.append(
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"🔴 *いますぐ返信したい（{len(high)}件）*"},
+                "text": {"type": "mrkdwn", "text": f"🔴 *要返信メール（{len(high)}件）*"},
             }
         )
-        for m in high[:5]:
-            subj = m.subject_scrubbed or "(件名なし)"
-            body = f"*{subj}* — {m.counterpart_masked}"
+        for m in high[:10]:
+            subj, who = _mail_line(m)
+            tag = f"`{m.sender_label}` " if getattr(m, "sender_label", "") else ""
+            thr = f" 〔{m.thread_count}通〕" if getattr(m, "thread_count", 1) > 1 else ""
+            body = f"{tag}*{subj}*{thr} — {who}"
             if m.summary:
-                body += f"\n_{m.summary}_"
+                body += f"\n_{_slack_escape(m.summary)}_"
+            if getattr(m, "deadline", None):
+                body += f"\n⏰ 期限: {_slack_escape(str(m.deadline))}"
+            if getattr(m, "ask", ""):
+                body += f"\n📌 依頼: {_slack_escape(m.ask)}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
-            meta = []
-            if m.has_draft:
-                meta.append({"type": "mrkdwn", "text": "✏️ 返信下書き作成済"})
-                meta.append({"type": "mrkdwn", "text": f"<{_GMAIL_DRAFTS_URL}|下書きを見る>"})
-            meta.append({"type": "mrkdwn", "text": f"<{_GMAIL_INBOX_URL}|Gmailで開く>"})
-            blocks.append({"type": "context", "elements": meta})
+            blocks.append({"type": "actions", "elements": _reply_buttons(m)})
         blocks.append({"type": "divider"})
-    elif not mail_items:
+
+    # --- 📬 未確認（未読・最大5件＋「他N件」・件名/相手＋AI要約）---
+    if unread:
+        lines = [f"📬 *未確認（{len(unread)}件）*"]
+        for m in unread[:5]:
+            subj, who = _mail_line(m)
+            line = f"• *{subj}* — {who}"
+            if m.summary:
+                line += f"\n　_{_slack_escape(m.summary)}_"
+            lines.append(line)
+        rem = max(0, len(unread) - 5)
+        if rem:
+            lines.append(f"• 〈他{rem}件〉")
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        blocks.append({"type": "divider"})
+
+    if not high and not unread:
         blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": "📧 *メール*: 直近の新着なし"}}
+            {"type": "section", "text": {"type": "mrkdwn", "text": "📭 *メール*: 新着なし"}}
         )
-
-    # --- 今日の予定（時刻太字・会議室/場所を 📍付きで明記）---
-    if cal_items:
-        lines = ["🗓 *今日の予定*"]
-        for ev in cal_items[:6]:
-            loc = (ev.location_scrubbed or "").strip()
-            place = f" 📍{loc}" if loc else ""
-            lines.append(f"• *{_fmt_time(ev.start_at)}* {ev.summary_scrubbed or '(無題)'}{place}")
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         blocks.append({"type": "divider"})
 
-    # --- 要確認メール（medium・1行圧縮 + 「+N件」省略）---
-    if medium:
-        lines = [f"🟡 *目を通したい（{len(medium)}件）*"]
-        for m in medium[:3]:
-            subj = m.subject_scrubbed or "(件名なし)"
-            lines.append(f"• {subj} — {m.counterpart_masked}")
-        remaining = max(0, len(medium) - 3) + len(low)
-        if remaining > 0:
-            lines.append(f"• 〈+{remaining}件〉")
+    # --- 📅 今日の予定（予定・会議室・会議リンク。display は本人 DM のみ・ログ厳禁 G3/G7）---
+    if cal_items:
+        lines = [f"📅 *今日の予定（{len(cal_items)}件）*"]
+        for ev in cal_items[:10]:
+            when = _fmt_event_time(getattr(ev, "start_at", None), getattr(ev, "end_at", None))
+            title = _slack_escape(
+                getattr(ev, "summary_display", "")
+                or getattr(ev, "summary_scrubbed", "")
+                or "(無題)"
+            )
+            loc = getattr(ev, "location_display", "") or getattr(ev, "location_scrubbed", "")
+            line = f"• `{when}`  {title}"
+            if loc:
+                line += f"  〔{_slack_escape(loc)}〕"
+            url = getattr(ev, "meeting_url", "")
+            if url:
+                line += f"  <{url}|🔗参加>"  # 会議リンクは実 URL なのでエスケープしない
+            lines.append(line)
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-
-    # --- Slack 未返信（データがある時のみ）---
-    if slack_items:
-        lines = [f"💬 *Slack 未返信メンション（{len(slack_items)} 件）*"]
-        for s in slack_items[:5]:
-            link = s.permalink or "(リンクなし)"
-            lines.append(f"• {s.channel_name_masked} — <{link}|開く>")
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-
-    # --- アクションバー（deep link button）---
-    actions: list[dict[str, Any]] = []
-    if drafts > 0:
-        actions.append(
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "✏️ 下書きを確認", "emoji": True},
-                "url": _GMAIL_DRAFTS_URL,
-                "style": "primary",
-            }
+    else:
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": "📅 *今日の予定*: なし"}}
         )
-    actions.append(
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "📥 受信トレイ", "emoji": True},
-            "url": _GMAIL_INBOX_URL,
-        }
-    )
-    actions.append(
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "🗓 カレンダー", "emoji": True},
-            "url": _CALENDAR_URL,
-        }
-    )
-    blocks.append({"type": "actions", "elements": actions})
 
-    # --- 脚注（DLP マスク注記）---
+    # --- 脚注（DLP 注記）---
     blocks.append({"type": "divider"})
     blocks.append(
         {
@@ -224,8 +298,8 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 {
                     "type": "mrkdwn",
                     "text": (
-                        "_AiLa morning_digest｜件名・相手・本文は DLP マスク後表示。"
-                        "下書きは送信されません（手動送信）。_"
+                        "_AiLa｜本人だけに届く DM です（件名・相手は実名表示／監査ログ側はマスク）。"
+                        "下書きはボタンを押した時に生成し、送信はされません（手動送信）。_"
                     ),
                 }
             ],
@@ -279,10 +353,19 @@ async def _email_to_slack_user_id(slack: Any, email: str) -> str | None:
             print("[run_morning_digest_fargate] WARN: slack._client 取得失敗", file=sys.stderr)
             return None
         resp = await client.users_lookupByEmail(email=email)
-        return str(resp.get("user", {}).get("id", "")) or None
+        user_id = str(resp.get("user", {}).get("id", "")) or None
+        if user_id is None:
+            # 解決はできたが該当ユーザー無し（Slack 未登録等）。配信失敗と区別して記録。
+            print(
+                f"[run_morning_digest_fargate] WARN: Slack user 未解決 {_mask_email(email)}",
+                file=sys.stderr,
+            )
+        return user_id
     except Exception as exc:
+        # ⚠️ {exc} は email を含み得る（PII）ため型名のみ。email はマスク（G3/G7）。
         print(
-            f"[run_morning_digest_fargate] WARN: lookupByEmail 失敗 {type(exc).__name__}: {exc}",
+            f"[run_morning_digest_fargate] WARN: lookupByEmail 失敗 "
+            f"{_mask_email(email)} {type(exc).__name__}",
             file=sys.stderr,
         )
         return None
@@ -304,6 +387,43 @@ async def _open_im_channel(slack: Any, user_id: str) -> str | None:
         return None
 
 
+def _process_user(skill: Any, skill_input: Any, email: str) -> str:
+    """1 ユーザー分を処理し "delivered"/"skipped"/"error" を返す（例外は内側で封じ込め）。
+
+    スレッドから呼ぶため副作用は print（stderr・マスク済）と Slack 配信のみ・共有状態を書かない。
+    """
+    from teamagent.skills.base import SkillContext
+
+    request_id = f"morning-{uuid.uuid4().hex[:10]}"
+    ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
+    try:
+        digest = skill.run(skill_input, ctx)
+    except PermissionError:
+        return "skipped"  # 未連携
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: {_mask_email(email)} skill 失敗 "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return "error"
+    # 配信(整形+Slack)も封じ込め（1 人の失敗で全体を落とさない）。
+    try:
+        text, blocks = _format_block_kit(digest, email)
+        delivered = asyncio.run(_deliver_to_slack(email, text, blocks))
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: {_mask_email(email)} 配信失敗 "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return "error"
+    if delivered:
+        digest.delivered = True
+        return "delivered"
+    return "error"
+
+
 def main() -> int:
     users = _resolve_target_users()
     if not users:
@@ -311,39 +431,37 @@ def main() -> int:
         return 0
     print(f"[run_morning_digest_fargate] start users={len(users)}", flush=True)
 
-    from teamagent.skills.base import SkillContext
     from teamagent.skills.morning_digest.schema import MorningDigestInput
     from teamagent.skills.morning_digest.skill import MorningDigestSkill
 
+    try:
+        concurrency = max(1, int(os.environ.get("MORNING_DIGEST_CONCURRENCY", "1")))
+    except ValueError:
+        concurrency = 1
+
     token_store = _build_token_store()
-    skill = MorningDigestSkill(token_store=token_store)
+    if concurrency > 1:
+        # 並列時は Bedrock クライアントを事前生成して共有（lazy-init の競合を避ける）。
+        from teamagent.adapters.bedrock_client import BedrockClient
+
+        skill = MorningDigestSkill(token_store=token_store, bedrock=BedrockClient.from_env())
+    else:
+        skill = MorningDigestSkill(token_store=token_store)
     skill_input = MorningDigestInput()
 
-    summary = {"users": len(users), "delivered": 0, "skipped": 0, "errors": 0}
-    for email in users:
-        request_id = f"morning-{uuid.uuid4().hex[:10]}"
-        ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
-        try:
-            digest = skill.run(skill_input, ctx)
-        except PermissionError:
-            # 未連携・skip
-            summary["skipped"] += 1
-            continue
-        except Exception as exc:
-            print(
-                f"[run_morning_digest_fargate] WARN: {email} skill 失敗 {type(exc).__name__}",
-                file=sys.stderr,
-            )
-            summary["errors"] += 1
-            continue
+    # concurrency=1（既定）は従来どおり逐次。>1 で人数に応じた所要時間短縮。
+    if concurrency > 1:
+        from concurrent.futures import ThreadPoolExecutor
 
-        text, blocks = _format_block_kit(digest, email)
-        delivered = asyncio.run(_deliver_to_slack(email, text, blocks))
-        if delivered:
-            digest.delivered = True
-            summary["delivered"] += 1
-        else:
-            summary["errors"] += 1
+        print(f"[run_morning_digest_fargate] concurrency={concurrency}", flush=True)
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            results = list(ex.map(lambda e: _process_user(skill, skill_input, e), users))
+    else:
+        results = [_process_user(skill, skill_input, e) for e in users]
+
+    summary = {"users": len(users), "delivered": 0, "skipped": 0, "errors": 0}
+    for r in results:
+        summary["delivered" if r == "delivered" else "skipped" if r == "skipped" else "errors"] += 1
 
     print(
         f"[run_morning_digest_fargate] done {json.dumps(summary, ensure_ascii=False)}",

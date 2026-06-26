@@ -269,7 +269,7 @@ def main() -> int:
 
                 # 要約 + 元 chunk を結合して embedding
                 contextualized = f"{context_prefix}\n\n{chunk['text']}"
-                embedding = embedder.embed(contextualized)
+                embedding = embedder.embed_passage(contextualized)
 
                 with conn.cursor() as cur:
                     cur.execute(

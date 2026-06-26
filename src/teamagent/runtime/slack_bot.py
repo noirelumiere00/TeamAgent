@@ -659,86 +659,18 @@ class SkillDispatcher:
         """
         if "search" in self._skill_cache:
             return self._skill_cache["search"]
-        # 動的 instance 生成。Skill 固有の init 引数を扱うため Any 経由
-        from teamagent.adapters.embeddings_client import LocalE5Embedder
-        from teamagent.skills.search.skill import SearchSkill
+        # QW-2: env→引数解決は orchestrator.factory に集約（唯一の真実源）。
+        # かつて本メソッドは rerank_pool_size / min_relevance_fallback / use_client_boost /
+        # use_knowledge_filters を渡さずコンストラクタ既定（30/0.0/False/False）に落ち、本番 env を
+        # 入れても slack_bot 経路では黙って無効だった（構築ドリフト）。build_search_skill_from_env()
+        # に委譲し、factory（MCP/OpenClaw 経路）と同一 env・同一ノブで構築する。
+        from teamagent.orchestrator.factory import (
+            build_search_skill_from_env,
+            resolve_search_skill_config,
+        )
 
-        use_contextual = os.environ.get("USE_CONTEXTUAL", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        use_new_schema = os.environ.get("USE_NEW_SCHEMA", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        # Day 8 (2026-05-28) Phase 2: Slack 営業 FB の client_name で Drive 資料を裏で検索して
-        # 「関連資料」として attach する機能。USE_FB_DRIVE_MATCH=true で有効化。
-        use_fb_drive_match = os.environ.get("USE_FB_DRIVE_MATCH", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        # Day 8 (2026-05-28) Sprint 4-A: Cohere Rerank v3.5 (Bedrock 東京)。
-        # USE_COHERE_RERANK=true で有効化、top_k=30 retrieve → Rerank → top-5。
-        # Anthropic ベンチで失敗率 -67%、$2/1000 queries (10560 query/月で $21 想定)。
-        use_cohere_rerank = os.environ.get("USE_COHERE_RERANK", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        # Day 8 (2026-05-28) Sprint 4-B: prompt v2 (insight + actionable thinking)。
-        # PROMPT_VERSION=v1 / v2 / v2c / v2d で切替。
-        # v2c は v2 の compact 版 (Sprint 4-D, latency 短縮目的)。
-        # Day 9 (2026-05-29) 本番実機検証で v2c + max=800 が回答途中切れ
-        # (stop_reason=max_tokens) を起こすと判明。eval は検索 hit rate のみ測り
-        # 生成回答の完全性を測らないため見逃していた。v2d はプロンプト側で項目数と
-        # 文字数 (550字以内) を絞り、800tok 内で必ず end_turn する compact 版。
-        # 実機8件で全件 end_turn (output 397-535tok)、latency 12-18s、hit rate 維持。
-        # この結果を受け既定を v2d に変更。
-        prompt_version = os.environ.get("PROMPT_VERSION", "v2d")
-        # Day 8 (2026-05-28) Sprint 4-D: max_tokens 制限で latency 短縮。
-        # Day 9: max=800 維持。v2d プロンプトが上限内で完結するため truncation なし。
-        try:
-            summary_max_tokens = int(os.environ.get("SEARCH_MAX_TOKENS", "800"))
-        except ValueError:
-            summary_max_tokens = 800
-        # Sprint 5: 反ハルシネーション閾値。Rerank relevance がこの値未満なら
-        # 該当 hit を落とし、空なら「資料に記載がありません」と返す。
-        # 既定 0.0 = OFF。gold set 実測では 0.4 で expect_zero を綺麗に分離。
-        try:
-            min_relevance = float(os.environ.get("SEARCH_MIN_RELEVANCE", "0.0"))
-        except ValueError:
-            min_relevance = 0.0
-        # Sprint 5: 集約・一覧クエリモード (「BANT A の案件一覧」等をメタデータ列挙で回答)。
-        use_aggregation_mode = os.environ.get("USE_AGGREGATION_MODE", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        instance = SearchSkill(
-            embedder=LocalE5Embedder(),
-            use_contextual=use_contextual,
-            use_new_schema=use_new_schema,
-            use_fb_drive_match=use_fb_drive_match,
-            use_cohere_rerank=use_cohere_rerank,
-            min_relevance=min_relevance,
-            use_aggregation_mode=use_aggregation_mode,
-            prompt_version=prompt_version,
-            summary_max_tokens=summary_max_tokens,
-        )
-        logger.info(
-            "search_skill_initialized",
-            use_contextual=use_contextual,
-            use_new_schema=use_new_schema,
-            use_fb_drive_match=use_fb_drive_match,
-            use_cohere_rerank=use_cohere_rerank,
-            min_relevance=min_relevance,
-            use_aggregation_mode=use_aggregation_mode,
-            prompt_version=prompt_version,
-            summary_max_tokens=summary_max_tokens,
-        )
+        instance = build_search_skill_from_env()
+        logger.info("search_skill_initialized", source="slack_bot", **resolve_search_skill_config())
         self._skill_cache["search"] = instance
         return instance
 
@@ -1664,6 +1596,35 @@ class SkillDispatcher:
         self._user_email_cache[user_id] = email
         return email
 
+    def _mail_draft_quota_ok(self, email: str, *, limit: int = 10) -> bool:
+        """1 人 1 日あたりの下書き生成上限（コスト/連打対策）。worker 常駐の in-memory カウンタ。"""
+        import datetime as _dt
+
+        today = _dt.date.today().isoformat()
+        counts: dict[str, tuple[str, int]] = getattr(self, "_mail_draft_counts", {})
+        self._mail_draft_counts = counts
+        day, n = counts.get(email, (today, 0))
+        return today != day or n < limit
+
+    def _mail_draft_quota_consume(self, email: str) -> None:
+        """下書きを 1 件作成できた時だけカウントを進める（失敗時は消費しない）。"""
+        import datetime as _dt
+
+        today = _dt.date.today().isoformat()
+        counts: dict[str, tuple[str, int]] = getattr(self, "_mail_draft_counts", {})
+        self._mail_draft_counts = counts
+        day, n = counts.get(email, (today, 0))
+        counts[email] = (today, (n + 1) if today == day else 1)
+
+    def _generate_mail_draft(self, thread_id: str, email: str, request_id: str) -> dict[str, Any]:
+        """ボタン押下からの単一スレッド下書き生成（同期・asyncio.to_thread から呼ぶ）。"""
+        from teamagent.skills.base import SkillContext
+        from teamagent.skills.morning_digest.skill import MorningDigestSkill
+
+        skill = MorningDigestSkill(token_store=self._get_token_store())
+        ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
+        return skill.generate_draft_for_thread(thread_id, email, ctx)
+
     async def run_search(
         self,
         query: str,
@@ -1733,6 +1694,42 @@ class SkillDispatcher:
             ctx,
         )
         return output
+
+
+_GMAIL_DRAFTS_URL = "https://mail.google.com/mail/u/0/#drafts"
+
+
+def _swap_draft_button(
+    blocks: list[dict[str, Any]], block_id: str, open_url: str
+) -> list[dict[str, Any]]:
+    """押下された「✏️ 下書きを作成」ボタンを「📨 作成した下書きを開く」直リンクに差し替える。
+
+    block_id でその actions ブロックを特定し、action_id=mail_draft の要素のみ url ボタンに置換。
+    「🔍 確認する」等は残す。該当が無ければ blocks をそのまま返す（fail-open）。
+    """
+    out: list[dict[str, Any]] = []
+    for b in blocks:
+        if b.get("type") == "actions" and str(b.get("block_id", "")) == block_id:
+            new_el: list[dict[str, Any]] = []
+            for e in b.get("elements", []):
+                if e.get("action_id") == "mail_draft":
+                    new_el.append(
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "📨 作成した下書きを開く",
+                                "emoji": True,
+                            },
+                            "url": open_url,
+                        }
+                    )
+                else:
+                    new_el.append(e)
+            out.append({**b, "elements": new_el})
+        else:
+            out.append(b)
+    return out
 
 
 def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
@@ -2430,6 +2427,102 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
 
         header = f"*🎬 動画分析* （${output.total_cost_usd:.4f} / {output.model_id}）"
         await respond(response_type="in_channel", text=f"{header}\n\n{output.analysis}")
+
+    @app.action("mail_draft")
+    async def handle_mail_draft(
+        ack: Any,
+        body: dict[str, Any],
+        action: dict[str, Any],
+        client: Any,
+        respond: Any,
+    ) -> None:
+        """朝ダイジェストの「✏️ 下書きを作成」押下 → スレッド全文を読み Reply-All 下書きを生成。
+
+        Socket Mode 経由で worker(常駐) が受ける。生 thread_id は載らず HMAC 署名トークンを検証
+        （押下者と所有者の二重照合・期限切れ拒否＝fail-closed）。3 秒以内に ack し、生成は
+        別スレッドで実行、完了後にボタンを「📨 作成した下書きを開く」直リンクへ chat.update する。
+        """
+        await ack()  # Slack の 3 秒制約：まず即 ack
+        request_id = f"act-{uuid.uuid4().hex[:12]}"
+        user_id = (body.get("user") or {}).get("id")
+        token_value = str((action or {}).get("value") or "")
+        block_id = str((action or {}).get("block_id") or "")
+        channel = (body.get("channel") or {}).get("id") or (body.get("container") or {}).get(
+            "channel_id"
+        )
+        message = body.get("message") or {}
+        ts = message.get("ts")
+        logger.info("slack_action_mail_draft", request_id=request_id, user_id=user_id)
+        try:
+            await respond(response_type="ephemeral", text="✏️ 下書きを作成中…数秒お待ちください。")
+        except Exception:
+            pass
+
+        email = await disp._resolve_user_email(user_id)
+        if not email:
+            await respond(
+                response_type="ephemeral",
+                text="ユーザーを特定できませんでした（社外/ゲストは対象外です）。",
+            )
+            return
+
+        from teamagent.skills.morning_digest.draft_token import decode_draft_token
+
+        thread_id = decode_draft_token(token_value, email)
+        if not thread_id:
+            await respond(
+                response_type="ephemeral",
+                text="このボタンは無効です（期限切れ/不正）。最新のダイジェストから操作してください。",
+            )
+            return
+        if not disp._mail_draft_quota_ok(email):
+            await respond(
+                response_type="ephemeral",
+                text="本日の下書き作成上限（10件/日）に達しました。明日また利用できます。",
+            )
+            return
+
+        result = await asyncio.to_thread(disp._generate_mail_draft, thread_id, email, request_id)
+        err = result.get("error")
+        if result.get("created"):
+            disp._mail_draft_quota_consume(email)
+        elif result.get("already"):
+            pass  # 既存下書き有り＝開くだけにする
+        elif err in ("not_connected", "reauth_needed"):
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "下書き作成には Google の再連携が必要です（下書き権限）。"
+                    "AiLa に『連携』と話しかけて Google を許可してください。"
+                ),
+            )
+            return
+        else:
+            await respond(
+                response_type="ephemeral",
+                text=(
+                    "下書きを作成できませんでした"
+                    "（スレッドが見つからない/一斉送信/本人宛でない 等）。"
+                ),
+            )
+            return
+
+        # 成功（または既存）→ ボタンをその下書きへの直リンクに置換して message を更新。
+        open_url = _GMAIL_DRAFTS_URL
+        try:
+            new_blocks = _swap_draft_button(message.get("blocks") or [], block_id, open_url)
+            await client.chat_update(
+                channel=channel,
+                ts=ts,
+                blocks=new_blocks,
+                text="メールと本日の予定をお送りします。",
+            )
+        except Exception:
+            # 更新に失敗しても、開くリンクだけは本人に返す（fail-open）。
+            await respond(
+                response_type="ephemeral",
+                text=f"✅ 下書きを作成しました。<{open_url}|Gmail の下書きを開く>",
+            )
 
     # Bolt のグローバルエラーハンドラ — ハンドラ外で起きた例外を Sentry に飛ばす
     @app.error

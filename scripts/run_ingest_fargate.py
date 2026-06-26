@@ -25,7 +25,10 @@ def _expand_google_oauth_json() -> None:
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        print(f"[run_ingest_fargate] WARN: GOOGLE_OAUTH_JSON の JSON parse 失敗: {exc}", file=sys.stderr)
+        print(
+            f"[run_ingest_fargate] WARN: GOOGLE_OAUTH_JSON の JSON parse 失敗: {exc}",
+            file=sys.stderr,
+        )
         return
     for key, env_name in (
         ("client_id", "GOOGLE_CLIENT_ID"),
@@ -67,7 +70,10 @@ def main() -> int:
         "--owner-email",
         owner_email,
     ]
-    print(f"[run_ingest_fargate] start sources={sources} owner={owner_email} dry_run={dry_run}", flush=True)
+    print(
+        f"[run_ingest_fargate] start sources={sources} owner={owner_email} dry_run={dry_run}",
+        flush=True,
+    )
 
     # ingest_sources.py は __main__ 実行を前提に CLI として書かれているので、import 後に
     # サブモジュールの main() を呼ぶか、runpy で起動する。シンプルに runpy で。

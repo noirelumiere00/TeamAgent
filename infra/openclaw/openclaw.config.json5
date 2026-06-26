@@ -49,16 +49,22 @@
       replyToModeByChatType: { channel: "all", group: "all", direct: "off" },
       // §T1: 受付リアクション（処理中が見える＝「無視された？」を防ぐ実運用の詰まり潰し）。
       ackReaction: "eyes",
-      // §T2: DM は許可リスト制（既定 pairing＝オーナーCLI承認制は Fargate では打つ場所が無く、
-      // 承認stateも ephemeral で再起動消失）。"open" にしない理由＝Vector ワークスペースには
-      // 社外ゲスト（クライアント）が居る前提で、DM経由で会社ナレッジに触れさせない。
-      // チャンネルは groupPolicy:"open" のまま（招待制で統制）。パイロット参加者をここに追記。
-      dmPolicy: "allowlist",
-      // §U: これは焼き込みの fallback。本番は entrypoint が env `SLACK_DM_ALLOWLIST`
-      // （カンマ区切り Slack user_id）から allowFrom を起動時に上書きする＝メンバー追加は
-      // env 変更 + 再デプロイのみ（image rebuild 不要）。15名規模まで可動。
+      // §T2→§T2b(2026-06-22): DM を "open" に変更（社内なら誰でも @AiLa にDMで「連携して」で
+      // セルフ利用可＝口コミ運用）。当初 allowlist にした理由は「社外ゲストに会社ナレッジを触れさせない」
+      // だったが、その懸念は **サーバ側 fail-closed で別途担保済**＝slack_client.resolve_identity が
+      // 外部ワークスペース/Slack Connect stranger/guest/bot/email欠落を None 拒否し、MCP 境界(server.py)が
+      // RLS を fail-closed 強制（ダウングレード不可）。よって open でも社外/ゲストにデータは届かない。
+      // 残る露出は「外部ゲストでも Haiku 会話レイヤーには応答し得る（データは出ない・コスト/存在のみ）」
+      // の一点で、これはユーザー判断で許容（2026-06-22）。
+      dmPolicy: "open",
+      // ⚠️§T2b 訂正(2026-06-22)：当初「allowFrom は open 下では参照されない」と書いたが**誤り**。
+      // 実コード(@openclaw/slack)は `dmPolicy==="open" && allowFrom.includes("*")` の時のみ全通過し、
+      // "*" が無ければ open でも allowFrom 列挙者だけの allowlist として gating する。
+      // よって全社内開放には **allowFrom に "*" が必須**。本番は entrypoint が env `SLACK_DM_ALLOWLIST`
+      // （tfvars slack_dm_allowlist="*"）から allowFrom=["*"] を起動時に注入＝下の焼き込みを上書きする。
+      // ここを ["*"] にしておくのは env 未設定で再ビルドした時の退行防止（[]は全拒否なので不可）。
       allowFrom: [
-        "U09CX1CCBLN", // 小俣翔碁
+        "*", // 全社内開放（社外/ゲスト/bot はサーバ側 resolve_identity で fail-closed）
       ],
     },
   },
@@ -134,6 +140,13 @@
             // OpenClaw に connect 経路が無い問題への対応。URL生成のみ（token保存は connect-web）。
             // USE_OAUTH_CONNECT_TOOL=1 + OAUTH_REDIRECT_URI/OAUTH_STATE_SECRET/CONNECT_GOOGLE_* が必要。
             "oauth_connect",
+            // knowledge_deliver: 「資料そのものを出して」系で該当ファイルを依頼者 DM に添付配信
+            // （USE_KNOWLEDGE_DELIVER=1 で MCP 側に出る）。検索+読取DLのみ・Drive書込なし。
+            "knowledge_deliver",
+            // knowledge_search_url: @AiLa「検索ページ教えて」で資料検索 Web UI（connect-web の
+            // /search・/search/graph）の URL を返す。URL生成のみ（CONNECT_BASE_URL 未設定なら
+            // 「未公開」を返し壊れたリンクは出さない）。USE_KNOWLEDGE_SEARCH_URL_TOOL=1 が必要。
+            "knowledge_search_url",
           ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は

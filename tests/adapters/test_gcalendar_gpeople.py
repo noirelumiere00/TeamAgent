@@ -40,6 +40,43 @@ def test_extract_events() -> None:
     assert events[1].start == "2026-05-02"  # 終日は date
 
 
+def test_extract_events_location_and_meeting_url() -> None:
+    """会議室(location)と会議リンク(hangoutLink / conferenceData)を取り出す。"""
+    items: list[dict[str, Any]] = [
+        {
+            "id": "m1",
+            "summary": "定例",
+            "start": {"dateTime": "2026-05-01T10:00:00+09:00"},
+            "end": {"dateTime": "2026-05-01T11:00:00+09:00"},
+            "location": "本社 3F 会議室A",
+            "hangoutLink": "https://meet.google.com/abc-defg-hij",
+        },
+        {
+            "id": "m2",
+            "summary": "Zoom MTG",
+            "start": {"dateTime": "2026-05-01T12:00:00+09:00"},
+            "end": {"dateTime": "2026-05-01T12:30:00+09:00"},
+            "conferenceData": {
+                "entryPoints": [
+                    {"entryPointType": "phone", "uri": "tel:+81-3-0000"},
+                    {"entryPointType": "video", "uri": "https://zoom.us/j/123"},
+                ]
+            },
+        },
+        {
+            "id": "m3",
+            "summary": "リンク無し",
+            "start": {"date": "2026-05-02"},
+            "end": {"date": "2026-05-03"},
+        },
+    ]
+    events = extract_events(items)
+    assert events[0].location == "本社 3F 会議室A"
+    assert events[0].meeting_url == "https://meet.google.com/abc-defg-hij"  # Meet
+    assert events[1].meeting_url == "https://zoom.us/j/123"  # conferenceData video
+    assert events[2].location == "" and events[2].meeting_url == ""  # 無しは空
+
+
 def test_gcalendar_list_events() -> None:
     svc = MagicMock()
     svc.events().list().execute.return_value = {

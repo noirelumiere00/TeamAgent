@@ -9,10 +9,18 @@ Embedder のモデル差替（e5→Titan 等）や次元/前処理変更の後�
 - 進捗は構造化ログ。本文は出さない（CLAUDE.md 6-bis・text_len のみ）。
 - DB は DATABASE_URL（load_secrets.sh が組み立て）。embedder は LocalE5Embedder。
 
+QW-1（e5 passage プレフィックス）の本番反映はこのスクリプトがゲート:
+- 平常時は env を立てず（USE_E5_PASSAGE_PREFIX 未設定）embed_passage() も "query: " を
+  付与する＝既存コーパスと同一サブ空間（後方互換）。
+- passage 化するときは **USE_E5_PASSAGE_PREFIX=1 を立てて本スクリプトで全 chunks を
+  --commit 再 embed** し、コーパス全体を "passage: " に切替える（検索側 embed() は常に
+  "query: "）。中途半端に一部だけ切ると空間不整合になるため、必ず全走させること。
+
 Usage:
     set -a; source .env.production; set +a; source scripts/load_secrets.sh
     python scripts/reembed_chunks.py --dry-run         # 件数だけ
-    python scripts/reembed_chunks.py --commit --batch-size 200
+    # passage 化する本番反映時のみ:
+    USE_E5_PASSAGE_PREFIX=1 python scripts/reembed_chunks.py --commit --batch-size 200
 """
 
 from __future__ import annotations
@@ -75,7 +83,7 @@ def reembed(
         for batch in batched(rows, batch_size):
             for chunk_id, content in batch:
                 stats["scanned"] += 1
-                vec = embedder.embed(content or "")
+                vec = embedder.embed_passage(content or "")
                 if commit:
                     sql, params = build_update_params(chunk_id, vec)
                     with conn.cursor() as cur:

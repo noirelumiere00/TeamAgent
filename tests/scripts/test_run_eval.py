@@ -115,6 +115,81 @@ def test_append_partial_writes_one_jsonl_line_per_case(tmp_path: Path) -> None:
     assert rec2["top5_hit"] is False
 
 
+def _make_case(
+    case_id: int,
+    *,
+    expect_zero: bool = False,
+    hits: bool = False,
+    top1: bool = False,
+    top5: bool = False,
+) -> Any:
+    """テスト用 CaseResult を組み立てる。hits=True で actual_top_hits を 1 件持たせる。"""
+    r = run_eval.CaseResult(case_id=case_id, query=f"q{case_id}", expect_zero=expect_zero)
+    r.top1_hit = top1
+    r.top5_hit = top5
+    if hits:
+        r.actual_top_hits = [{"chunk_id": f"c{case_id}", "score": 0.5}]
+    return r
+
+
+def test_summarize_zero_hit_total_is_gold_set_negative_count() -> None:
+    """zero_hit_total は expect_zero=True のケース数 = gold set のネガティブ件数。
+
+    回帰: 旧実装は母数を「実 hits が空」(not actual_top_hits) で取っていたため、
+    検索ミスしたポジティブケースが分母に混入していた。expect_zero を母数に据える。
+    """
+    results = [
+        # ポジティブで hit あり (zero とは無関係)
+        _make_case(1, expect_zero=False, hits=True, top1=True, top5=True),
+        # ポジティブだが検索ミス (hits 空) → zero 母数に混ぜてはいけない
+        _make_case(2, expect_zero=False, hits=False),
+        # ネガティブで正しく 0 件
+        _make_case(3, expect_zero=True, hits=False),
+        # ネガティブで正しく 0 件
+        _make_case(4, expect_zero=True, hits=False),
+    ]
+    s = run_eval._summarize(results, "lbl", {})
+    # ネガティブは 2 件のみ (case 3, 4)。case 2 のミスは混入しない。
+    assert s.zero_hit_total == 2
+    assert s.zero_hit_correct == 2
+
+
+def test_summarize_zero_hit_counts_negative_that_wrongly_returned_hits() -> None:
+    """ヒットを返してしまったネガティブケースは total に残り correct から外れる。
+
+    回帰の核心 (QW-3): 旧実装ではこのケースが分子分母から脱落し 0/0 を満点と誤読していた。
+    「黙るべきなのに喋った」失敗を可視化する。
+    """
+    results = [
+        # ネガティブで正しく 0 件 → correct
+        _make_case(1, expect_zero=True, hits=False),
+        # ネガティブなのにヒットを返した → total には数え、correct には数えない
+        _make_case(2, expect_zero=True, hits=True),
+    ]
+    s = run_eval._summarize(results, "lbl", {})
+    assert s.zero_hit_total == 2
+    assert s.zero_hit_correct == 1
+
+
+def test_summarize_no_negative_cases_yields_zero_total() -> None:
+    """ネガティブケースが無ければ zero_hit_total=0 (0/0 を満点に化けさせない)。"""
+    results = [
+        _make_case(1, expect_zero=False, hits=True, top1=True, top5=True),
+        _make_case(2, expect_zero=False, hits=False),
+    ]
+    s = run_eval._summarize(results, "lbl", {})
+    assert s.zero_hit_total == 0
+    assert s.zero_hit_correct == 0
+
+
+def test_case_result_expect_zero_round_trips_through_partial(tmp_path: Path) -> None:
+    """expect_zero は asdict 経由の JSONL 保存で round-trip する (新フィールドの永続化)。"""
+    path = tmp_path / "p.jsonl"
+    run_eval._append_partial(path, run_eval.CaseResult(case_id=9, query="meta", expect_zero=True))
+    rec = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert rec["expect_zero"] is True
+
+
 def test_append_partial_is_crash_safe_each_line_independent(tmp_path: Path) -> None:
     """途中で停止しても、追記済みの行は完全な JSON として読める (部分行が残らない)。
 

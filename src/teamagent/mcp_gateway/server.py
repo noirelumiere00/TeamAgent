@@ -48,10 +48,19 @@ USER_CONTEXT_KEY = "_user_context"
 # `USE_AGENT_ORCHESTRATOR=1` の時だけ list/call に出す（既定 OFF・dark）。
 RUN_AGENT_TOOL_NAME = "run_agent"
 
+# search ツールの応答に「ブラウザ/グラフで開く」Web UI リンクを差し込む対象の tool 名。
+# 注入は本ゲート層でのみ行い、SearchSkill / skills/search/schema.py は不変に保つ
+# （並行編集との衝突回避）。CONNECT_BASE_URL 未設定なら一切載せない（壊れたリンクを出さない）。
+SEARCH_TOOL_NAME = "search"
+
 
 def _envflag(name: str, default: str = "false") -> bool:
-    """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。"""
-    return os.environ.get(name, default).lower() in ("1", "true", "yes")
+    """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。
+
+    末尾/先頭の空白は ``.strip()`` で除去する。task-def の env に紛れた末尾改行や
+    スペース付き ``"1 "`` でも意図どおり ON 判定されるようにする（フラグの取りこぼし防止）。
+    """
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
 
 
 def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -73,6 +82,16 @@ def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
             "user_email": {"type": "string"},
             "user_groups": {"type": "array", "items": {"type": "string"}},
             "user_role": {"type": "string"},
+            # 配信先ルーティング hint（identity ではない＝RLS/認可には一切使わない）。
+            # チャンネル/スレッド発の依頼で、skill が「そのスレッドに添付」するために使う。
+            "channel_id": {
+                "type": "string",
+                "description": "依頼が発せられた Slack channel_id（配信ルーティング用・任意）。",
+            },
+            "thread_ts": {
+                "type": "string",
+                "description": "親メッセージの ts（スレッド配信用・任意）。",
+            },
         },
     }
     out["properties"] = props
@@ -129,6 +148,18 @@ def _domain_of(email: str | None) -> str | None:
     return None
 
 
+def _inject_search_web_links(data: dict[str, Any]) -> None:
+    """search 応答に Web UI リンク（web_url/graph_url）を *この場で* 差し込む（破壊的・in-place）。
+
+    URL 組み立ては knowledge_search_url skill と同一の真実源（build_search_web_links）に委譲。
+    CONNECT_BASE_URL 未設定なら空 dict が返り、キーを一切足さない＝壊れた相対リンクは出さない。
+    SearchSkill / skills/search/schema.py は不変（注入はこのゲート層だけで完結）。
+    """
+    from teamagent.skills.knowledge_search_url.skill import build_search_web_links
+
+    data.update(build_search_web_links())
+
+
 def _err(message: str, **extra: Any) -> list[TextContent]:
     """構造化エラーを TextContent で返す（サーバ/外殻ループを落とさない）。"""
     payload: dict[str, Any] = {"error": message, **extra}
@@ -151,6 +182,10 @@ async def _resolve_metadata(
     LEGACY（resolver 無）：テスト/PoC 専用。user_email を使うが role は member 強制。
     """
     slack_user_id = raw.get("slack_user_id")
+    # 配信先ルーティング hint（identity ではない＝認可/RLS には一切使わない）。
+    # knowledge_deliver が「聞かれたチャンネル/スレッドに添付」するのに使う。無ければ DM 配信。
+    channel_id = raw.get("channel_id")
+    thread_ts = raw.get("thread_ts")
 
     if company_shared_groups is not None:
         # 会社共有モード: 全員が同じ会社ナレッジを見る。OC 申告の email/groups/role は破棄、
@@ -190,7 +225,7 @@ async def _resolve_metadata(
                 )
         if meta.get("user_email") is None:
             logger.info("identity_company_shared", tool=tool, slack_user_id_audit=audit_uid)
-        return meta, None
+        return {**meta, "channel_id": channel_id, "thread_ts": thread_ts}, None
 
     if identity_resolver is not None:
         # 外殻が email/groups/role を申告してきたら破棄して警告（攻撃 or バグの早期検知）。
@@ -226,7 +261,7 @@ async def _resolve_metadata(
             source="resolver",
             domain=_domain_of(strict_meta["user_email"]),
         )
-        return strict_meta, None
+        return {**strict_meta, "channel_id": channel_id, "thread_ts": thread_ts}, None
 
     # LEGACY モード（resolver 未注入＝テスト/PoC 専用）。本番エントリポイントは resolver 必須。
     email = raw.get("user_email")
@@ -242,6 +277,8 @@ async def _resolve_metadata(
         "user_groups": list(raw.get("user_groups") or []),
         "user_role": "member",  # OC 申告 role は採らない（admin 昇格は legacy でも不可）。
         "identity_verified": False,
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
     }
     return meta, None
 
@@ -293,6 +330,10 @@ async def dispatch_tool(
         return _err(f"{type(e).__name__}: {e}", request_id=ctx.request_id)
 
     data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
+    # search 応答にだけ Web UI リンクを差し込む（AiLa が「ブラウザ/グラフで開く」を案内できる）。
+    # CONNECT_BASE_URL 未設定なら何も足さない＝壊れたリンクは出さない（後方互換）。
+    if name == SEARCH_TOOL_NAME and isinstance(data, dict):
+        _inject_search_web_links(data)
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]
 
 

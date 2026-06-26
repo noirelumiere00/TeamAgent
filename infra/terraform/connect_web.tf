@@ -137,7 +137,8 @@ resource "aws_iam_role_policy" "ecs_execution_connect_web_secrets" {
 
 # --- タスクロール: KMS Encrypt/Decrypt（oauth_tokens 暗号化）・RDS connect 経由 ---
 # connect-web は callback で token を KMS 暗号化して RDS に保存する。Decrypt は将来再連携時に必要。
-# Bedrock は不要（Skill 実行は teamagent-mcp の責務）。
+# P4 で同一タスクに「資料検索 Web UI」を載せ、SearchSkill（Bedrock 要約 + Cohere Rerank）を
+# プロセス内で実行するため Bedrock 権限を追加する（旧コメントの「Bedrock は不要」は P4 で失効）。
 data "aws_iam_policy_document" "connect_web_task" {
   count = var.enable_connect_web ? 1 : 0
   statement {
@@ -146,6 +147,24 @@ data "aws_iam_policy_document" "connect_web_task" {
     resources = [
       data.aws_kms_alias.connect_oauth[0].target_key_arn,
     ]
+  }
+  # P4 資料検索 Web UI: SearchSkill の要約（Converse / InvokeModel）に必要。
+  statement {
+    sid = "BedrockInvokeForSearch"
+    actions = [
+      "bedrock:InvokeModel",
+      "bedrock:InvokeModelWithResponseStream",
+      "bedrock:Converse",
+      "bedrock:ConverseStream",
+    ]
+    resources = local.bedrock_resources
+  }
+  # P4 資料検索 Web UI: Cohere Rerank（USE_COHERE_RERANK 有効時の関連度並べ替え）。
+  # bedrock:Rerank は InvokeModel とは別アクションなので明示付与が必要（fargate.tf の MCP と同型）。
+  statement {
+    sid       = "BedrockRerankForSearch"
+    actions   = ["bedrock:Rerank"]
+    resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/cohere.rerank-v3-5:0"]
   }
 }
 
@@ -283,6 +302,27 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "OAUTH_KMS_KEY_ID", value = var.connect_oauth_kms_key_id != "" ? var.connect_oauth_kms_key_id : data.aws_kms_alias.connect_oauth[0].target_key_arn },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
+      # P4 検索 UI（/search・/api/v1/search）が SearchSkill を新スキーマで動かすための
+      # フラグ。USE_NEW_SCHEMA を入れ忘れると factory が既定 false → RLS 未適用の旧
+      # proposals_chunks を引いてしまい RLS スコープが no-op になる（セキュリティ上必須）。
+      { name = "USE_NEW_SCHEMA", value = "true" },
+      { name = "USE_COHERE_RERANK", value = "true" },
+      { name = "USE_CLIENT_BOOST", value = "true" },
+      # 「資料の被り」対策（L1）: 営業資料はテンプレページ（表紙/会社紹介/料金）を使い回すため、
+      # 検索結果でテンプレチャンクが複数資料から重複ヒット＆同一資料が結果を独占する。
+      # rerank/min_relevance の後段で「近似重複の畳み込み＋同一資料の上限(既定2)」を噛ませる。
+      { name = "SEARCH_DEDUP_RESULTS", value = "true" },
+      # テンプレ箇所/まるごと重複を検索から除外（ingest の boilerplate/doc-dedup の印を読む）。
+      # 印が付くのは再取込後なので、印が無いうちは no-op（後方互換）。
+      { name = "BOILERPLATE_EXCLUDE_SEARCH", value = "true" },
+      { name = "DOC_DEDUP_EXCLUDE_SEARCH", value = "true" },
+      # 意味クラスタ・エッジ（L3A）: 資料の代表ベクトル(全チャンク平均)で kNN を取り、
+      # 「タグは違うが意味的に近い」資料を弱い concept リンクで結ぶ＝AIならではの発見線。
+      # ★初期は OFF で出荷。E5 系埋め込みは無関係ペアでも cosine ベースラインが高く、固定しきい値
+      #   のまま点灯すると団子化（ハリネズミ）再発の恐れがあるため、実データで較正してから ON にする。
+      #   ON の手順（再ビルド不要・この env を差し替えるだけ）:
+      #     GRAPH_CONCEPT_EDGES=true / GRAPH_CONCEPT_THRESHOLD=0.90 等で点灯→グラフを見て上げ下げ。
+      { name = "GRAPH_CONCEPT_EDGES", value = "false" },
     ]
     secrets = [
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },

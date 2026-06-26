@@ -18,6 +18,11 @@ FROM public.ecr.aws/docker/library/python:3.11-slim AS base
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
+# 柱4(2026-06-22): ビルド出所追跡（image↔commit）。build時 --build-arg GIT_COMMIT/GIT_BRANCH で注入。
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ENV TEAMAGENT_BUILD_COMMIT=$GIT_COMMIT TEAMAGENT_BUILD_BRANCH=$GIT_BRANCH
+LABEL org.opencontainers.image.revision=$GIT_COMMIT
 
 # システム依存: psycopg(libpq)・healthcheck(curl)・一部wheelのビルド
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -46,6 +51,9 @@ COPY README.md ./
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY infra/migrations/ ./infra/migrations/
+# ingest が読む data/ingest_sources.yaml（＋eval gold set）。これが無いと Fargate ingest が
+# "ingest sources yaml not found" で exit 2（従来 data/ は COPY されておらず Scheduled ingest は不発だった）。
+COPY data/ ./data/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra mcp --extra embeddings
 

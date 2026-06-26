@@ -18,6 +18,9 @@ class _FakeEmbedder:
     def embed(self, text: str) -> list[float]:
         return [0.1] * 1024
 
+    def embed_passage(self, text: str) -> list[float]:
+        return self.embed(text)
+
 
 class _FakeIncrementalRepo:
     """connector_state / ingest_jobs 呼び出しを記録する fake repository。"""

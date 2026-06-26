@@ -53,6 +53,11 @@ jobs:
       - name: Import layering (import-linter)
         run: lint-imports
 
+      - name: OpenClaw config invariants
+        # 設定矛盾（dmPolicy:open なのに allowFrom に "*" が無い等）を PR で fail-loud に弾く。
+        # 2026-06-22 の無音 DM drop 事故の再発防止（柱1）。標準ライブラリのみで依存追加なし。
+        run: python scripts/check_openclaw_config.py
+
       - name: Mypy (strict)
         run: mypy src/teamagent
 

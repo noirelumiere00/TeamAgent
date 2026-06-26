@@ -229,6 +229,31 @@ class SlackClient:
         )
         return ok
 
+    async def lookup_user_id_by_email(self, email: str, request_id: str) -> str | None:
+        """会社メール → Slack user_id を解決（bot scope: users:read.email）。
+
+        morning_digest の DM 配信と同じ経路。解決できなければ None（呼び出し側で fail-open）。
+        """
+        try:
+            resp = await self._client.users_lookupByEmail(email=email)
+            user: dict[str, Any] = dict(resp.get("user", {}))
+            uid = str(user.get("id", "")) or None
+        except Exception:
+            logger.warning("slack_lookup_user_by_email_failed", request_id=request_id)
+            return None
+        return uid
+
+    async def open_dm(self, user_id: str, request_id: str) -> str | None:
+        """conversations.open で本人 IM channel を取得（bot scope: im:write）。"""
+        try:
+            resp = await self._client.conversations_open(users=user_id)
+            channel: dict[str, Any] = dict(resp.get("channel", {}))
+            ch = str(channel.get("id", "")) or None
+        except Exception:
+            logger.warning("slack_open_dm_failed", request_id=request_id)
+            return None
+        return ch
+
     async def get_user_profile(self, user_id: str, request_id: str) -> dict[str, Any]:
         """users.profile.get 呼び出し。Bot に話しかけた人の情報を取るのに使う。"""
         start = time.perf_counter()

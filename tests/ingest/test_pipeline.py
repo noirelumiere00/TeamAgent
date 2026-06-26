@@ -24,6 +24,9 @@ class _FakeEmbedder:
     def embed(self, text: str) -> list[float]:
         return [0.1] * 1024
 
+    def embed_passage(self, text: str) -> list[float]:
+        return self.embed(text)
+
 
 class _FakeRepository:
     """実 DB なしで upsert を記録する fake。"""
@@ -44,7 +47,9 @@ class _FakeRepository:
                 "external_id": doc.external_id,
                 "source_type": doc.source_type,
                 "acl_groups": list(doc.acl_groups),
+                "metadata": dict(doc.metadata),
                 "chunk_count": len(chunks),
+                "chunks": list(chunks),
                 "request_id": request_id,
             }
         )
@@ -632,6 +637,104 @@ def test_ingest_gdrive_folder_non_pdf_uses_title_only(
     fake_client.download_file_bytes.assert_not_called()
 
 
+def _setup_fake_drive_pdf(monkeypatch: pytest.MonkeyPatch, *, name: str) -> Any:
+    """分類テスト用: PDF 1 本を返す fake GDriveClient をセットアップする。"""
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [_make_drive_file(id="F1", name=name, owners=("alice@x.jp",))],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = b"<fake-pdf>"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    fake_reader = MagicMock()
+    page = MagicMock()
+    page.extract_text.return_value = "アース製薬向け SNS 提案の本文" * 10
+    fake_reader.pages = [page]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+    return fake_client
+
+
+def test_ingest_gdrive_folder_applies_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """USE_DOC_CLASSIFY=1 のとき、本文を分類して cls_* を documents.metadata に付与する。"""
+    monkeypatch.setenv("USE_DOC_CLASSIFY", "1")
+    _setup_fake_drive_pdf(monkeypatch, name="アース製薬_提案.pdf")
+
+    fake_bedrock = MagicMock()
+    fake_bedrock.converse.return_value = MagicMock(
+        text='{"project": "アース製薬", "industry": "日用品", "doc_type": "提案書", "phase": "提案"}'
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.bedrock_client.BedrockClient.from_env",
+        classmethod(lambda cls: fake_bedrock),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="ナレッジ",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-cls",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    assert md["cls_project"] == "アース製薬"
+    assert md["cls_industry"] == "日用品"
+    assert md["cls_doc_type"] == "提案書"
+    assert md["cls_phase"] == "提案"
+    assert md["industry"] == "日用品"  # 既存の業界フィルタと整合
+
+
+def test_ingest_gdrive_folder_no_classification_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """USE_DOC_CLASSIFY 未設定（既定）なら分類せず、Bedrock も呼ばない（完全後方互換）。"""
+    monkeypatch.delenv("USE_DOC_CLASSIFY", raising=False)
+    _setup_fake_drive_pdf(monkeypatch, name="提案.pdf")
+
+    def _boom(cls: type) -> None:
+        raise AssertionError("分類無効時に Bedrock を呼んではいけない")
+
+    monkeypatch.setattr(
+        "teamagent.adapters.bedrock_client.BedrockClient.from_env", classmethod(_boom)
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="ナレッジ",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-nocls",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    assert "cls_project" not in md
+    assert "cls_doc_type" not in md
+
+
 def test_ingest_gdrive_folder_docx_extracts_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -954,3 +1057,994 @@ def test_resolve_drive_file_acl_returns_fallback_on_failure(
     assert owner == "fallback@x.jp"
     assert emails == ["fallback@x.jp"]
     assert groups == []
+
+
+# -----------------------------------------------------------
+# Contextual Retrieval 配線（P1）
+# -----------------------------------------------------------
+class _FakeContextualizer:
+    """各 chunk の contextualized / embedding を埋める fake（実 Bedrock/embed なし）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, int]] = []
+
+    def contextualize_chunks(
+        self,
+        doc_title: str,
+        full_text: str,
+        chunks: list[Any],
+        request_id: str,
+    ) -> list[Any]:
+        from dataclasses import replace
+
+        self.calls.append((doc_title, full_text, len(chunks)))
+        return [
+            replace(
+                c,
+                contextualized=f"[ctx] {c.content}",
+                embedding=[0.5] * len(c.embedding),
+            )
+            for c in chunks
+        ]
+
+
+def test_ingest_gdrive_folder_contextualizes_when_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """USE_CONTEXTUAL_INGEST 相当: contextualizer 注入で chunks.contextualized が埋まる。"""
+    _setup_fake_drive_pdf(monkeypatch, name="提案.pdf")
+
+    fake_ctx = _FakeContextualizer()
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env",
+        lambda: fake_ctx,
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="ナレッジ",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-ctx",
+    )
+    assert docs_n == 1
+    assert fake_ctx.calls  # contextualizer が呼ばれた
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert chunks
+    assert all(c.contextualized is not None for c in chunks)
+    assert all(c.contextualized.startswith("[ctx] ") for c in chunks)
+
+
+def test_ingest_gdrive_folder_no_contextualize_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """contextualizer None（既定）なら contextualized は None のまま（完全後方互換）。"""
+    _setup_fake_drive_pdf(monkeypatch, name="提案.pdf")
+
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env",
+        lambda: None,
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="ナレッジ",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-noctx",
+    )
+    assert docs_n == 1
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert chunks
+    assert all(c.contextualized is None for c in chunks)
+
+
+def test_ingest_slack_channel_contextualizes_when_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack 経路でも contextualizer 注入で chunks.contextualized が埋まる。"""
+    from teamagent.adapters.slack_channel_ingest_client import (
+        HistoryBatch,
+        SlackChannelMember,
+        SlackMessage,
+    )
+
+    parent = SlackMessage(ts="1700.000001", user="U1", text="スレッド本文サンプル")
+    fake_client = MagicMock()
+    fake_client.list_channel_history.return_value = HistoryBatch(
+        messages=(parent,), next_cursor=None, has_more=False
+    )
+    fake_client.list_channel_members.return_value = (["U001"], None)
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email="taro@x.jp", display_name="Taro"),
+    ]
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    fake_ctx = _FakeContextualizer()
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env",
+        lambda: fake_ctx,
+    )
+
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    from teamagent.ingest.pipeline import _ingest_slack_channel
+
+    spec = SlackChannelSpec(channel_id="C0CTX", channel_name="#ctx", description="")
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_slack_channel(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-slack-ctx",
+    )
+    assert docs_n == 1
+    assert fake_ctx.calls
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert chunks
+    assert all(c.contextualized is not None for c in chunks)
+
+
+def test_ingest_slack_channel_no_contextualize_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack 経路: contextualizer None（既定）なら contextualized は None のまま。"""
+    from teamagent.adapters.slack_channel_ingest_client import (
+        HistoryBatch,
+        SlackChannelMember,
+        SlackMessage,
+    )
+
+    parent = SlackMessage(ts="1700.000001", user="U1", text="スレッド本文")
+    fake_client = MagicMock()
+    fake_client.list_channel_history.return_value = HistoryBatch(
+        messages=(parent,), next_cursor=None, has_more=False
+    )
+    fake_client.list_channel_members.return_value = (["U001"], None)
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email="taro@x.jp", display_name="Taro"),
+    ]
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env",
+        lambda: None,
+    )
+
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    from teamagent.ingest.pipeline import _ingest_slack_channel
+
+    spec = SlackChannelSpec(channel_id="C0NOCTX", channel_name="#noctx", description="")
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_slack_channel(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-slack-noctx",
+    )
+    assert docs_n == 1
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert chunks
+    assert all(c.contextualized is None for c in chunks)
+
+
+# -----------------------------------------------------------
+# 自動分類の配線: crawl / slack / gsheet 経路にも cls_* が乗ることを検証
+# （USE_DOC_CLASSIFY=1 が gdrive folder だけでなく全経路で効くことの回帰）
+# -----------------------------------------------------------
+class _StubClassifier:
+    """既知の DocClassification を返すスタブ分類器（実 Bedrock なし）。"""
+
+    def __init__(self) -> None:
+        from teamagent.ingest.classify import DocClassification
+
+        self._result = DocClassification(
+            project="アース製薬", industry="日用品", doc_type="提案書", phase="提案"
+        )
+        self.calls: list[tuple[str, str]] = []
+
+    def classify(self, *, title: str, text: str, request_id: str) -> Any:
+        self.calls.append((title, text))
+        return self._result
+
+
+def _assert_classified(md: dict[str, Any]) -> None:
+    assert md["cls_project"] == "アース製薬"
+    assert md["cls_industry"] == "日用品"
+    assert md["cls_doc_type"] == "提案書"
+    assert md["cls_phase"] == "提案"
+    assert md["industry"] == "日用品"  # 既存の業界フィルタと整合
+
+
+def test_ingest_shared_drives_crawl_applies_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """高ボリューム crawl 経路でも cls_* が documents.metadata に乗る。"""
+    from teamagent.adapters.gdrive_client import SharedDrive
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(id="F1", name="アース製薬_提案.pdf", owners=("alice@x.jp",))
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = b"<fake-pdf>"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    fake_reader = MagicMock()
+    page = MagicMock()
+    page.extract_text.return_value = "アース製薬向け SNS 提案の本文" * 10
+    fake_reader.pages = [page]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,  # フィルタを外して fake PDF を確実に通す
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-cls",
+    )
+    assert docs_n == 1
+    assert stub.calls  # 分類器が呼ばれた
+    _assert_classified(repo.upsert_calls[0]["metadata"])
+
+
+def test_ingest_slack_channel_applies_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack 経路でも cls_* が documents.metadata に乗る（doc_metadata に update）。"""
+    from teamagent.adapters.slack_channel_ingest_client import (
+        HistoryBatch,
+        SlackChannelMember,
+        SlackMessage,
+    )
+
+    parent = SlackMessage(ts="1700.000001", user="U1", text="スレッド本文サンプル")
+    fake_client = MagicMock()
+    fake_client.list_channel_history.return_value = HistoryBatch(
+        messages=(parent,), next_cursor=None, has_more=False
+    )
+    fake_client.list_channel_members.return_value = (["U001"], None)
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email="taro@x.jp", display_name="Taro"),
+    ]
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest import pipeline as pipeline_mod
+
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    from teamagent.ingest.pipeline import _ingest_slack_channel
+
+    spec = SlackChannelSpec(channel_id="C0CLS", channel_name="#cls", description="")
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_slack_channel(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-slack-cls",
+    )
+    assert docs_n == 1
+    assert stub.calls
+    md = repo.upsert_calls[0]["metadata"]
+    _assert_classified(md)
+    # 既存キーは cls_* マージで破壊されない（後方互換）
+    assert md["channel_name"] == "#cls"
+
+
+def test_ingest_gsheet_applies_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gsheet 経路でも各行に cls_* が乗る（contextualizer は付けない）。"""
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1V",
+        tab_name="フォーム回答 1",
+        headers=("業界", "温度感"),
+        rows=(("飲食", "高"),),
+        row_count=1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1V",
+        sheet_name="FB",
+        description="",
+        tabs=(GSheetsTabSpec(gid=537831563, tab_name="フォーム回答 1"),),
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-cls",
+    )
+    assert docs_n == 1
+    assert stub.calls
+    md = repo.upsert_calls[0]["metadata"]
+    _assert_classified(md)
+    # 既存キーは cls_* マージで破壊されない（後方互換）
+    assert md["tab_name"] == "フォーム回答 1"
+    assert md["row_idx"] == 2
+
+
+def test_ingest_crawl_no_classification_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """classifier None（USE_DOC_CLASSIFY OFF 相当）なら crawl 経路に cls_* は出ない（後方互換）。"""
+    from teamagent.adapters.gdrive_client import SharedDrive
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(id="F1", name="提案.pdf", owners=("alice@x.jp",))
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = b"<fake-pdf>"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    fake_reader = MagicMock()
+    page = MagicMock()
+    page.extract_text.return_value = "本文" * 50
+    fake_reader.pages = [page]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: None)
+
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-nocls",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    assert "cls_project" not in md
+    assert "cls_doc_type" not in md
+
+
+# -----------------------------------------------------------
+# crawl 経路の Office (pptx/docx/xlsx) 本文抽出の配線
+# （高ボリューム crawl が title だけでなく中身も index 化することの回帰。
+#   営業提案書は大半が pptx なので、ここが title_only に落ちると検索が死ぬ。）
+# -----------------------------------------------------------
+def test_ingest_shared_drives_crawl_pptx_extracts_content_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """crawl 経路でも pptx は slide 単位の本文 chunk になる（title_only に落ちない）。"""
+    from io import BytesIO
+
+    from pptx import Presentation
+
+    from teamagent.adapters.gdrive_client import SharedDrive
+    from teamagent.ingest.office_extract import PPTX_MIME
+
+    prs = Presentation()
+    layout = prs.slide_layouts[5]
+    s1 = prs.slides.add_slide(layout)
+    s1.shapes.title.text = "アース製薬向け SNS 提案 スライド1"
+    s2 = prs.slides.add_slide(layout)
+    s2.shapes.title.text = "施策概要 スライド2"
+    buf = BytesIO()
+    prs.save(buf)
+    pptx_bytes = buf.getvalue()
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(id="P1", name="提案.pptx", mime=PPTX_MIME, owners=("alice@x.jp",))
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = pptx_bytes
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,  # フィルタを外して fake pptx を確実に通す
+    )
+    repo = _FakeRepository()
+    docs_n, chunks_n = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-pptx",
+    )
+    assert docs_n == 1
+    assert chunks_n == 2  # 2 slides → 2 本文 chunk（小さいので分割なし）
+    fake_client.download_file_bytes.assert_called_once()
+    chunks = repo.upsert_calls[0]["chunks"]
+    assert len(chunks) == 2
+    # 本文抽出 chunk であることの検証: page_num を持ち、title_only に落ちていない
+    for c in chunks:
+        assert "page_num" in c.metadata
+        assert not c.metadata.get("title_only")
+
+
+def test_ingest_shared_drives_crawl_office_badzip_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """壊れた pptx (BadZipFile) は fail-open で skip され、crawl は他ファイルを処理し続ける。"""
+    import zipfile
+
+    from teamagent.adapters.gdrive_client import SharedDrive
+    from teamagent.ingest.office_extract import PPTX_MIME
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    # 1 件目: 壊れた pptx（skip される）、2 件目: 正常 PDF（処理される）
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(id="BAD", name="corrupt.pptx", mime=PPTX_MIME, owners=("alice@x.jp",)),
+        _make_drive_file(id="OK", name="ok.pdf", owners=("alice@x.jp",)),
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = b"<bytes>"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    # extract_office_pages は pipeline 内で lazy import されるので、元モジュールを差し替える。
+    def _boom(_data: bytes, *, mime_type: str) -> list[tuple[int, str]]:
+        raise zipfile.BadZipFile("File is not a zip file")
+
+    monkeypatch.setattr("teamagent.ingest.office_extract.extract_office_pages", _boom)
+
+    # 正常 PDF 側の pypdf を擬似
+    fake_reader = MagicMock()
+    page = MagicMock()
+    page.extract_text.return_value = "正常な PDF 本文" * 20
+    fake_reader.pages = [page]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-badzip",
+    )
+    # 壊れた pptx は skip、正常 PDF だけが doc 化されて crawl は止まらない
+    assert docs_n == 1
+    assert repo.upsert_calls[0]["external_id"] == "OK"
+
+
+# -----------------------------------------------------------
+# テンプレ検出（boilerplate）配線: env ゲートで mark_boilerplate を呼ぶ／呼ばない
+# -----------------------------------------------------------
+class _NoopOpsCursor:
+    """_disable_statement_timeout が ``SET LOCAL statement_timeout`` を発行できるよう、
+    cursor の context manager を最小実装した fake（実行内容は記録するだけ）。"""
+
+    def __init__(self, executed: list[str]) -> None:
+        self._executed = executed
+
+    def __enter__(self) -> _NoopOpsCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: object = None) -> None:
+        self._executed.append(sql)
+
+
+class _FakeOpsConn:
+    """``_ops_connection()`` が返す接続本体の fake。``cursor()`` で no-op cursor を返す。
+
+    H1 の ``_disable_statement_timeout(conn)`` が ``conn.cursor()`` を呼ぶため、
+    plain ``object()`` では落ちる。実 SQL は走らせないが、発行された SQL は
+    ``executed`` に記録して検証可能にする。"""
+
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+
+    def cursor(self) -> _NoopOpsCursor:
+        return _NoopOpsCursor(self.executed)
+
+
+class _OpsConnCtx:
+    """repository._ops_connection() が返す context manager の fake。"""
+
+    def __init__(self, conn: object) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> object:
+        return self._conn
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _RepoWithOpsConn(_FakeRepository):
+    """_ops_connection() を持つ fake repository（boilerplate 配線テスト用）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ops_conn = _FakeOpsConn()
+        self.ops_conn_calls = 0
+
+    def _ops_connection(self) -> _OpsConnCtx:
+        self.ops_conn_calls += 1
+        return _OpsConnCtx(self.ops_conn)
+
+
+def _empty_sources() -> IngestSources:
+    return IngestSources(version=1, slack_channels=(), gdrive_folders=(), gsheets=())
+
+
+def test_boilerplate_not_called_when_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BOILERPLATE_DETECT 未設定なら mark_boilerplate は呼ばれない＝現行と完全一致。"""
+    monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs: calls.append(min_docs) or 0,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert calls == []
+    assert repo.ops_conn_calls == 0
+
+
+def test_boilerplate_not_called_in_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """dry-run では env ON でも DB を書かないので呼ばない。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs: calls.append(min_docs) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=True,
+    )
+    runner.run(_empty_sources())
+    assert calls == []
+
+
+def test_boilerplate_called_when_env_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BOILERPLATE_DETECT=1 + commit で mark_boilerplate が ops 接続付きで呼ばれる。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+    monkeypatch.delenv("BOILERPLATE_MIN_DOCS", raising=False)
+    seen: list[tuple[object, int]] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs, **_: seen.append((conn, min_docs)) or 7,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert len(seen) == 1
+    conn, min_docs = seen[0]
+    assert conn is repo.ops_conn  # 既存の admin role 接続を再利用
+    assert min_docs == 3  # 既定値
+    assert repo.ops_conn_calls == 1
+    # H1: mark 実行前に当該 tx 内で statement_timeout を無制限にしている。
+    assert any("SET LOCAL statement_timeout" in s for s in repo.ops_conn.executed)
+
+
+def test_boilerplate_min_docs_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BOILERPLATE_MIN_DOCS で閾値を上書きできる。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "true")
+    monkeypatch.setenv("BOILERPLATE_MIN_DOCS", "5")
+    seen: list[int] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs, **_: seen.append(min_docs) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert seen == [5]
+
+
+def test_boilerplate_failure_is_fail_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mark_boilerplate が例外でも run() は成功して結果を返す（fail-open）。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+
+    def _boom(conn: object, *, min_docs: int, **_: object) -> int:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("teamagent.ingest.pipeline.mark_boilerplate", _boom)
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    result = runner.run(_empty_sources())  # 例外を投げない
+    assert isinstance(result, IngestResult)
+    assert result.total_documents() == 0
+
+
+# -----------------------------------------------------------
+# 資料まるごと重複排除（docdedup）配線: env ゲートで mark_duplicate_documents を呼ぶ／呼ばない
+# -----------------------------------------------------------
+def test_docdedup_not_called_when_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOC_DEDUP_DETECT 未設定なら mark_duplicate_documents は呼ばれない＝現行と完全一致。"""
+    monkeypatch.delenv("DOC_DEDUP_DETECT", raising=False)
+    monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
+    calls: list[float] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold: calls.append(jaccard_threshold) or 0,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert calls == []
+    assert repo.ops_conn_calls == 0
+
+
+def test_docdedup_not_called_in_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """dry-run では env ON でも DB を書かないので呼ばない。"""
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+    calls: list[float] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold: calls.append(jaccard_threshold) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=True,
+    )
+    runner.run(_empty_sources())
+    assert calls == []
+
+
+def test_docdedup_called_when_env_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOC_DEDUP_DETECT=1 + commit で mark_duplicate_documents が ops 接続付きで呼ばれる。"""
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+    monkeypatch.delenv("DOC_DEDUP_JACCARD", raising=False)
+    monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
+    seen: list[tuple[object, float]] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold, **_: seen.append((conn, jaccard_threshold)) or 4,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert len(seen) == 1
+    conn, jaccard_threshold = seen[0]
+    assert conn is repo.ops_conn  # 既存の admin role 接続を再利用
+    assert jaccard_threshold == 0.7  # 既定値
+    assert repo.ops_conn_calls == 1
+    # H1: mark 実行前に当該 tx 内で statement_timeout を無制限にしている。
+    assert any("SET LOCAL statement_timeout" in s for s in repo.ops_conn.executed)
+
+
+def test_docdedup_jaccard_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOC_DEDUP_JACCARD でしきい値を上書きできる。"""
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "true")
+    monkeypatch.setenv("DOC_DEDUP_JACCARD", "0.85")
+    seen: list[float] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold, **_: seen.append(jaccard_threshold) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert seen == [0.85]
+
+
+def test_docdedup_failure_is_fail_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mark_duplicate_documents が例外でも run() は成功して結果を返す（fail-open）。"""
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+
+    def _boom(conn: object, *, jaccard_threshold: float, **_: object) -> int:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("teamagent.ingest.pipeline.mark_duplicate_documents", _boom)
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    result = runner.run(_empty_sources())  # 例外を投げない
+    assert isinstance(result, IngestResult)
+    assert result.total_documents() == 0
+
+
+def test_boilerplate_runs_after_docdedup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """両 env ON のとき docdedup → boilerplate の順で呼ばれる（M3・同じ ops 接続を各々取得）。
+
+    M3: boilerplate の指紋集計は suppressed（非正本）doc を母数から外すため、同一 run 内で
+    先に docdedup が suppressed を確定させてから boilerplate を走らせる必要がある。
+    """
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+    order: list[str] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs, **_: order.append("boilerplate") or 0,
+    )
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold, **_: order.append("docdedup") or 0,
+    )
+    repo = _RepoWithOpsConn()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())
+    assert order == ["docdedup", "boilerplate"]
+    assert repo.ops_conn_calls == 2
+
+
+# -----------------------------------------------------------
+# M5: 非数値 env でも crash せず default にフォールバック（_envint / _envfloat）
+# -----------------------------------------------------------
+def test_envint_falls_back_on_blank_and_nonnumeric(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空文字・非数値・未設定はすべて default に倒れ、有効値は反映される（ingest CRASH 防止）。"""
+    from teamagent.ingest.pipeline import _envint
+
+    monkeypatch.delenv("X_INT", raising=False)
+    assert _envint("X_INT", 7) == 7  # 未設定
+    monkeypatch.setenv("X_INT", "")
+    assert _envint("X_INT", 7) == 7  # 空文字
+    monkeypatch.setenv("X_INT", "   ")
+    assert _envint("X_INT", 7) == 7  # 空白のみ
+    monkeypatch.setenv("X_INT", "3x")
+    assert _envint("X_INT", 7) == 7  # 非数値
+    monkeypatch.setenv("X_INT", "11")
+    assert _envint("X_INT", 7) == 11  # 有効値
+
+
+def test_envfloat_falls_back_on_blank_and_nonnumeric(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空文字・非数値・未設定はすべて default に倒れ、有効値は反映される（ingest CRASH 防止）。"""
+    from teamagent.ingest.pipeline import _envfloat
+
+    monkeypatch.delenv("X_FLOAT", raising=False)
+    assert _envfloat("X_FLOAT", 0.7) == 0.7  # 未設定
+    monkeypatch.setenv("X_FLOAT", "")
+    assert _envfloat("X_FLOAT", 0.7) == 0.7  # 空文字
+    monkeypatch.setenv("X_FLOAT", "abc")
+    assert _envfloat("X_FLOAT", 0.7) == 0.7  # 非数値
+    monkeypatch.setenv("X_FLOAT", "0.85")
+    assert _envfloat("X_FLOAT", 0.7) == 0.85  # 有効値
+
+
+def test_runner_does_not_crash_on_nonnumeric_detection_envs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非数値 BOILERPLATE_MIN_DOCS / DOC_DEDUP_JACCARD でも run() は CRASH せず default で進む（M5）。"""
+    monkeypatch.setenv("BOILERPLATE_DETECT", "1")
+    monkeypatch.setenv("BOILERPLATE_MIN_DOCS", "")  # 空文字 → 3
+    monkeypatch.setenv("BOILERPLATE_MIN_CHARS", "x")  # 非数値 → 40
+    monkeypatch.setenv("DOC_DEDUP_DETECT", "1")
+    monkeypatch.setenv("DOC_DEDUP_JACCARD", "3x")  # 非数値 → 0.7
+    monkeypatch.setenv("DOC_DEDUP_MAX_DOCS", "")  # 空文字 → 5000
+    seen_bp: list[tuple[int, int]] = []
+    seen_dd: list[float] = []
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_boilerplate",
+        lambda conn, *, min_docs, min_chars, **_: seen_bp.append((min_docs, min_chars)) or 0,
+    )
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.mark_duplicate_documents",
+        lambda conn, *, jaccard_threshold, **_: seen_dd.append(jaccard_threshold) or 0,
+    )
+    runner = IngestRunner(
+        repository=_RepoWithOpsConn(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),
+        owner_email="x@y.jp",
+        dry_run=False,
+    )
+    runner.run(_empty_sources())  # 例外を投げない
+    assert seen_bp == [(3, 40)]  # 既定値にフォールバック
+    assert seen_dd == [0.7]
+
+
+# -----------------------------------------------------------
+# L4: _envflag が末尾空白を strip して判定する
+# -----------------------------------------------------------
+def test_envflag_strips_trailing_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """末尾改行/空白付きの "true\\n" 等でも ON と判定される（skill._envflag と同流儀）。"""
+    from teamagent.ingest.pipeline import _envflag
+
+    monkeypatch.setenv("X_FLAG", "true\n")
+    assert _envflag("X_FLAG") is True
+    monkeypatch.setenv("X_FLAG", "  1  ")
+    assert _envflag("X_FLAG") is True
+    monkeypatch.setenv("X_FLAG", "yes\t")
+    assert _envflag("X_FLAG") is True
+    monkeypatch.setenv("X_FLAG", " false ")
+    assert _envflag("X_FLAG") is False
+
+
+# -----------------------------------------------------------
+# M4: crawl の file ループは file 単位 try/except で 1 file 例外を吸収する
+# -----------------------------------------------------------
+def test_crawl_one_file_exception_does_not_kill_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """crawl で 1 file の embed 例外が source 全体を落とさず、後続 file は処理される（M4）。
+
+    folder 経路（pipeline.py ~838）には file 単位 try/except があるが crawl 経路には無く、
+    embed / DB upsert の例外で残り全ファイルが道連れになっていた。file 単位で skip して継続する。
+    """
+    from teamagent.adapters.gdrive_client import SharedDrive
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
+    # 1 件目: embed が落ちる title_only file（旧バイナリ等）、2 件目: 正常 file。
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(
+            id="BOOM", name="boom.bin", mime="application/x-unknown", owners=("a@x.jp",)
+        ),
+        _make_drive_file(id="OK", name="ok.bin", mime="application/x-unknown", owners=("a@x.jp",)),
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    class _BoomOnFirstEmbedder:
+        """最初の file（external_id=BOOM）の title_only テキストだけ embed で例外を投げる。"""
+
+        def embed(self, text: str) -> list[float]:
+            if "boom.bin" in text:
+                raise RuntimeError("embed exploded")
+            return [0.1] * 1024
+
+        def embed_passage(self, text: str) -> list[float]:
+            return self.embed(text)
+
+    spec = SharedDriveCrawlSpec(
+        enabled=True,
+        name_filter=("営業",),
+        sales_relevance_filter=False,
+    )
+    repo = _FakeRepository()
+    # 例外を投げず、正常 file (OK) だけが doc 化される。
+    docs_n, _ = _ingest_shared_drives_crawl(
+        spec,
+        embedder=_BoomOnFirstEmbedder(),  # type: ignore[arg-type]
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-crawl-boom",
+    )
+    assert docs_n == 1
+    assert [c["external_id"] for c in repo.upsert_calls] == ["OK"]

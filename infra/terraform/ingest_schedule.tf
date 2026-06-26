@@ -190,6 +190,21 @@ resource "aws_ecs_task_definition" "ingest" {
       { name = "INGEST_SOURCES", value = var.ingest_sources },
       { name = "INGEST_OWNER_EMAIL", value = var.ingest_owner_email },
       { name = "STRUCTLOG_FORMAT", value = "json" },
+      # §知識ベース（2026-06-22）: Drive 取り込み時に Bedrock で資料を自動分類
+      # （案件/業界/種別/フェーズ→documents.metadata）。ingest_task は bedrock:InvokeModel 保持済。
+      { name = "USE_DOC_CLASSIFY", value = "true" },
+      # §コンテンツ拡充（2026-06-24）: 取り込みのたびに走る恒久処理（週次 ingest にも適用）。
+      # ① rich-extract: Googleネイティブ(gdoc/gslide/gsheet)本文化＋pptxノート/表/group＋xlsx数式＋
+      #    text/csv＋最小文字数ガード。② boilerplate: テンプレ(使い回し)箇所をコーパス統計で検出し
+      #    chunks.metadata.boilerplate に印（検索/グラフが共通項扱いを除外）。③ doc-dedup: 資料まるごと
+      #    near-dup(PDF≒PPTX)を文字n-gram Jaccardで検出し非正本に documents.metadata.suppressed の印。
+      # 全て冪等・再取込のたび再評価＝今後追加される資料にも自動適用。既定OFFの機能をここでONにする。
+      { name = "INGEST_RICH_EXTRACT", value = "true" },
+      { name = "BOILERPLATE_DETECT", value = "true" },
+      { name = "DOC_DEDUP_DETECT", value = "true" },
+      # §知識ベース: 共有ドライブの走査/DL は「個人OAuth」を使う。これが無いと Vertex SA が
+      # 選ばれ、SA は外部 Drive 非対応で walk が 0 件になる（OAuth3点は GOOGLE_OAUTH_JSON から展開済）。
+      { name = "GOOGLE_FORCE_OAUTH", value = "1" },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_PATH", value = "/tmp/vertex-sa.json" },
       { name = "GEMINI_USE_VERTEX", value = "true" },

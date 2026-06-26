@@ -96,7 +96,14 @@ def _commit() -> int:
         )
         repo.upsert_document_with_chunks(
             doc,
-            [ChunkUpsert(chunk_idx=0, content=text, embedding=embedder.embed(text), metadata={})],
+            [
+                ChunkUpsert(
+                    chunk_idx=0,
+                    content=text,
+                    embedding=embedder.embed_passage(text),
+                    metadata={},
+                )
+            ],
             request_id="p0harness",
         )
         print(f"upserted {key}: owner={owner} acl_groups={acl_groups}")

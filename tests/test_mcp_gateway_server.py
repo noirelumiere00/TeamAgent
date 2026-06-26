@@ -13,10 +13,13 @@ from __future__ import annotations
 import json
 from typing import Any, ClassVar
 
+import pytest
 from pydantic import BaseModel
 
 from teamagent.mcp_gateway.server import (
+    SEARCH_TOOL_NAME,
     USER_CONTEXT_KEY,
+    _envflag,
     dispatch_tool,
     list_tool_defs,
 )
@@ -135,3 +138,120 @@ async def test_require_rls_false_allows_no_email() -> None:
     out = _parse(await dispatch_tool(_BY_NAME, "echo", {"q": "hi"}, require_rls=False))
     assert out["echo"] == "hi"
     assert out["saw_user_email"] is None
+
+
+# --- search 応答への Web UI リンク注入（ゲート層のみ・SearchSkill 不変） ---------------
+
+
+class _FakeSearchOutput(BaseModel):
+    answer: str
+
+
+class _FakeSearchSkill(BaseSkill[_EchoInput, _FakeSearchOutput]):
+    """name="search" のフェイク skill（Web UI リンク注入の検証用・外部I/O無し）。"""
+
+    name: ClassVar[str] = SEARCH_TOOL_NAME
+    description: ClassVar[str] = "テスト用フェイク検索。"
+    input_schema: ClassVar[type[BaseModel]] = _EchoInput
+    output_schema: ClassVar[type[BaseModel]] = _FakeSearchOutput
+
+    def run(self, input: _EchoInput, ctx: SkillContext) -> _FakeSearchOutput:
+        return _FakeSearchOutput(answer=f"hits for {input.q}")
+
+
+_SEARCH_BY_NAME = {SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "fake", _FakeSearchSkill)}
+
+
+async def test_search_includes_web_links_when_base_url_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example.co.jp")
+    out = _parse(
+        await dispatch_tool(
+            _SEARCH_BY_NAME,
+            SEARCH_TOOL_NAME,
+            {"q": "見積もり", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    assert out["answer"] == "hits for 見積もり"  # 元応答は保持
+    assert out["web_url"] == "https://connect.example.co.jp/search"
+    assert out["graph_url"] == "https://connect.example.co.jp/search/graph"
+
+
+async def test_search_web_links_trailing_slash_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 末尾スラッシュ付きの base でも二重スラッシュにならない。
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example.co.jp/")
+    out = _parse(
+        await dispatch_tool(
+            _SEARCH_BY_NAME,
+            SEARCH_TOOL_NAME,
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    assert out["web_url"] == "https://connect.example.co.jp/search"
+    assert out["graph_url"] == "https://connect.example.co.jp/search/graph"
+
+
+async def test_search_omits_web_links_when_base_url_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CONNECT_BASE_URL", raising=False)
+    out = _parse(
+        await dispatch_tool(
+            _SEARCH_BY_NAME,
+            SEARCH_TOOL_NAME,
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    # 壊れた相対リンクを出さない＝キー自体を省く（後方互換）。
+    assert "web_url" not in out
+    assert "graph_url" not in out
+    assert out["answer"] == "hits for x"
+
+
+async def test_non_search_tool_never_gets_web_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # search 以外の tool には CONNECT_BASE_URL 設定済みでもリンクを足さない。
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example.co.jp")
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {"q": "hi", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    assert "web_url" not in out
+    assert "graph_url" not in out
+
+
+# --- L4: _envflag は前後空白を strip してから判定する（末尾改行/スペース付きでも ON） ---
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["1 ", " 1", "true ", " true ", "yes\n", "\tTRUE\t", " True "],
+)
+def test_envflag_on_with_surrounding_whitespace(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    # task-def の env に紛れた末尾空白/改行付きの "1" 等でも True 判定（取りこぼし防止）。
+    monkeypatch.setenv("TA_ENVFLAG_TEST", raw)
+    assert _envflag("TA_ENVFLAG_TEST") is True
+
+
+@pytest.mark.parametrize("raw", ["0 ", " false ", "", "  ", "no\n", "off "])
+def test_envflag_off_values_after_strip(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    # 偽値・空白のみは strip 後も False のまま（誤って ON にならない）。
+    monkeypatch.setenv("TA_ENVFLAG_TEST", raw)
+    assert _envflag("TA_ENVFLAG_TEST") is False
+
+
+def test_envflag_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TA_ENVFLAG_TEST", raising=False)
+    assert _envflag("TA_ENVFLAG_TEST") is False
+    assert _envflag("TA_ENVFLAG_TEST", default="1") is True

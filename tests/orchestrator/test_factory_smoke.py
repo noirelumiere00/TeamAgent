@@ -56,6 +56,27 @@ def test_operation_log_envflag_wired() -> None:
     assert "OperationLogSkill" in src
 
 
+def test_recommend_skill_importable() -> None:
+    # recommend Skill が軽量 import できる（SearchSkill 型参照のみ・heavy deps は search が遅延生成）.
+    from teamagent.skills.recommend.skill import RecommendSkill
+
+    assert RecommendSkill.name == "recommend"
+
+
+def test_recommend_envflag_gated() -> None:
+    # recommend は USE_RECOMMEND_SKILL gated（既定 OFF）で append される分岐を持つ.
+    import inspect
+
+    src = inspect.getsource(factory.build_production_tools)
+    assert "USE_RECOMMEND_SKILL" in src
+    assert "RecommendSkill" in src
+    assert src.index("USE_RECOMMEND_SKILL") < src.index("RecommendSkill")
+    # 常時 ON 群（最初の env-gate より前の head スライス）に RecommendSkill が混ざっていない
+    # ＝必ず gate ブロック側にあることを担保（後方互換・既定 OFF の回帰検知）。
+    head = src[: src.index("USE_KNOWLEDGE_DELIVER")]
+    assert "RecommendSkill" not in head
+
+
 def test_proposal_deck_skill_importable() -> None:
     # Wave3-⑧: proposal_deck Skill が軽量 import できる（bedrock 依存は __init__/run で遅延生成）.
     from teamagent.skills.proposal_deck.skill import ProposalDeckSkill

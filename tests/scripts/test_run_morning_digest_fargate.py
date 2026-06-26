@@ -43,21 +43,31 @@ def _digest() -> MorningDigestOutput:
                 counterpart_masked="え***@nobel.co.jp",
                 subject_scrubbed="動画制作の件",
                 importance="high",
+                to_self=True,
                 summary="25日投稿に向け判断待ち。",
-                has_draft=True,
+                has_draft=True,  # 既に下書き有り→「開く」ボタン
             ),
             MailDigestItem(
                 counterpart_masked="k***@gmo.com",
                 subject_scrubbed="振込自動化",
                 importance="high",
+                to_self=True,
                 summary="回答待ち。",
                 has_draft=False,
+                draft_token="TOKB",  # 未作成→「下書きを作成」ボタン
+                thread_gmail_url="https://mail.google.com/mail/u/0/#all/tB",
             ),
             MailDigestItem(
-                counterpart_masked="a***@ex.com", subject_scrubbed="請求書", importance="medium"
+                counterpart_masked="a***@ex.com",
+                subject_scrubbed="請求書",
+                importance="medium",
+                is_unread=True,  # 未開封
             ),
             MailDigestItem(
-                counterpart_masked="b***@ex.com", subject_scrubbed="日程調整", importance="medium"
+                counterpart_masked="b***@ex.com",
+                subject_scrubbed="日程調整",
+                importance="medium",
+                is_unread=True,  # 未開封
             ),
             MailDigestItem(
                 counterpart_masked="c***@ex.com", subject_scrubbed="お知らせ", importance="low"
@@ -77,49 +87,45 @@ def _digest() -> MorningDigestOutput:
     )
 
 
-def test_scoreboard_counts() -> None:
-    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
-    # 2番目の block が fields スコアボード。high=2 / drafts=1 / cal=2 / medium=2。
-    fields_text = " ".join(f["text"] for f in blocks[1]["fields"])
-    assert "要返信*  `2件`" in fields_text
-    assert "下書き済*  `1件`" in fields_text
-    assert "今日の予定*  `2件`" in fields_text
-    assert "要確認*  `2件`" in fields_text
+def test_preamble_and_no_scoreboard() -> None:
+    """冒頭は固定の枕詞。旧スコアボード（要返信/下書き済/要確認 カウント）は無い（v2）。"""
+    text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    assert text == "メールと本日の予定をお送りします。"
+    dump = str(blocks)
+    assert "メールと本日の予定をお送りします" in dump
+    assert "下書き済" not in dump and "要確認" not in dump  # スコアボード削除
 
 
-def test_high_priority_section_and_draft_elevated() -> None:
+def test_reply_section_has_per_mail_buttons() -> None:
+    """要返信メール（high 2件）に各件ボタン: 作成済→開く / 未作成→下書きを作成＋確認する。"""
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    assert "いますぐ返信したい（2件）" in dump
-    # has_draft=True の high 項目に「✏️ 返信下書き作成済」+ 下書きリンクが出る。
-    assert "✏️ 返信下書き作成済" in dump
-    assert "下書きを見る" in dump
-
-
-def test_calendar_shows_room_location() -> None:
-    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
-    dump = str(blocks)
-    assert "🗓 *今日の予定*" in dump
-    assert "📍渋谷オフィス 3F会議室A" in dump  # 会議室を 📍付きで明記
-    assert "*10:00*" in dump  # ISO → HH:MM 変換（UTC 01:00 → JST 表示でなく原時刻 HH:MM）
-
-
-def test_action_buttons_present() -> None:
-    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    assert "要返信メール（2件）" in dump
     actions = [b for b in blocks if b.get("type") == "actions"]
-    assert actions, "アクションバーが無い"
-    labels = [e["text"]["text"] for e in actions[0]["elements"]]
-    assert any("下書きを確認" in label for label in labels)  # drafts>0 なので出る
-    assert any("受信トレイ" in label for label in labels)
-    assert any("カレンダー" in label for label in labels)
+    # 各 high メールに actions ブロック（=2個）。グローバルな一括バーは無い。
+    assert len(actions) == 2
+    all_el = [e for b in actions for e in b["elements"]]
+    assert any(e.get("action_id") == "mail_draft" and e.get("value") == "TOKB" for e in all_el)
+    assert any("作成した下書き" not in str(e) and "確認する" in str(e) for e in all_el)
+    assert any(e.get("url", "").endswith("#drafts") for e in all_el)  # 作成済→開く
 
 
-def test_medium_compressed_with_remaining() -> None:
+def test_calendar_section_rendered() -> None:
+    """カレンダー（今日の予定）が DM に描画される。display 未設定時は scrubbed にフォールバック。"""
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    # medium 2件 + low 1件。medium[:3] で2件表示・残り low 1件は「+1件」省略。
-    assert "目を通したい（2件）" in dump
-    assert "〈+1件〉" in dump
+    assert "今日の予定（2件）" in dump
+    assert "ノーベル定例" in dump  # 件名
+    assert "渋谷オフィス" in dump  # 会議室
+
+
+def test_unread_section_lists_unread() -> None:
+    """未確認セクション: is_unread かつ非 high の medium 2件が出る（low/既読は出ない）。"""
+    _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    dump = str(blocks)
+    assert "未確認（2件）" in dump
+    assert "請求書" in dump and "日程調整" in dump
+    assert "お知らせ" not in dump  # low かつ既読 は未開封に出ない
 
 
 def test_fmt_time_parses_iso_to_jst() -> None:
@@ -155,3 +161,48 @@ def test_email_to_slack_user_id_uses_underscore_client() -> None:
 def test_open_im_channel_uses_underscore_client() -> None:
     ch = asyncio.run(mod._open_im_channel(_FakeSlack(), "U09CX1CCBLN"))
     assert ch == "D0BA1TWN6AC"
+
+
+# ── MORNING_DIGEST_EXCLUDE（テストユーザー停止）──────────────────────────────
+
+
+def test_apply_exclude_removes_listed_users(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MORNING_DIGEST_EXCLUDE", "test1@vectorinc.co.jp, Test2@VectorInc.co.jp")
+    users = ["a@vectorinc.co.jp", "test1@vectorinc.co.jp", "test2@vectorinc.co.jp"]
+    assert mod._apply_exclude(users) == ["a@vectorinc.co.jp"]
+
+
+def test_apply_exclude_noop_when_unset(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MORNING_DIGEST_EXCLUDE", raising=False)
+    assert mod._apply_exclude(["a@vectorinc.co.jp"]) == ["a@vectorinc.co.jp"]
+
+
+def test_resolve_target_users_applies_exclude_to_rds(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MORNING_DIGEST_USERS", raising=False)
+    monkeypatch.setenv("MORNING_DIGEST_EXCLUDE", "test2@vectorinc.co.jp")
+    monkeypatch.setattr(
+        mod,
+        "_fetch_connected_users_from_rds",
+        lambda: ["owner@vectorinc.co.jp", "test2@vectorinc.co.jp"],
+    )
+    assert mod._resolve_target_users() == ["owner@vectorinc.co.jp"]
+
+
+# ── マスキング緩和: 本人 DM は実名表示 ───────────────────────────────────────
+
+
+def test_block_kit_renders_display_fields() -> None:
+    d = _digest()
+    top = d.mail_digest[0]
+    top.subject_display = "【ノーベル】動画制作の最終確認"
+    top.counterpart_display = "江田 真希"
+    top.deadline = "6/25まで"
+    top.ask = "サムネ案の確定"
+    top.sender_label = "重要"
+    top.thread_count = 4
+    _text, blocks = mod._format_block_kit(d, "s-komata@vectorinc.co.jp")
+    dump = str(blocks)
+    assert "【ノーベル】動画制作の最終確認" in dump  # 実件名（未マスク）
+    assert "江田 真希" in dump  # 実名（未マスク）
+    assert "6/25まで" in dump and "サムネ案の確定" in dump
+    assert "4通" in dump

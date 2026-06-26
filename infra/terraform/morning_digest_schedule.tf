@@ -37,6 +37,36 @@ variable "morning_digest_users" {
   default     = ""
 }
 
+variable "morning_digest_exclude" {
+  description = "digest 対象から除外する email リスト（カンマ区切り）。テストユーザーの一時停止など。Google 連携は切らない。"
+  type        = string
+  default     = ""
+}
+
+variable "digest_important_senders" {
+  description = "重要送信者（VIP）の email/ドメイン（カンマ区切り）。triage の優先度ヒントに使う。"
+  type        = string
+  default     = ""
+}
+
+variable "digest_internal_domain" {
+  description = "社内ドメイン（差出人区分 internal 判定用）。"
+  type        = string
+  default     = "vectorinc.co.jp"
+}
+
+variable "morning_digest_concurrency" {
+  description = "1 タスク内で同時処理するユーザー数。1=逐次（既定）。人数増加時に上げ所要時間を短縮。"
+  type        = number
+  default     = 1
+}
+
+variable "morning_digest_model_id" {
+  description = "triage/下書き生成に使う Bedrock モデル ID。既定 Haiku（低コスト・高速）。"
+  type        = string
+  default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+}
+
 variable "morning_digest_schedule_expression" {
   description = "EventBridge cron 式（既定: 平日 0:30 UTC = 9:30 JST）"
   type        = string
@@ -81,6 +111,8 @@ data "aws_iam_policy_document" "ecs_execution_morning_digest_secrets" {
       data.aws_secretsmanager_secret.database_url.arn,
       data.aws_secretsmanager_secret.slack_bot.arn,
       data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn,
+      # per-user token refresh 用の connect(web 型)クライアント secret（CONNECT_GOOGLE_CLIENT_SECRET）。
+      data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
     ]
   }
 }
@@ -180,6 +212,16 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "AWS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
       { name = "MORNING_DIGEST_USERS", value = var.morning_digest_users },
+      { name = "MORNING_DIGEST_EXCLUDE", value = var.morning_digest_exclude },
+      { name = "IMPORTANT_SENDERS", value = var.digest_important_senders },
+      { name = "DIGEST_INTERNAL_DOMAIN", value = var.digest_internal_domain },
+      { name = "MORNING_DIGEST_CONCURRENCY", value = tostring(var.morning_digest_concurrency) },
+      # triage / 下書き生成に使う Bedrock モデル（既定 Haiku＝低コスト・高速）。
+      { name = "BEDROCK_MODEL_ID", value = var.morning_digest_model_id },
+      # 下書きは朝に自動生成せず、要返信メールのボタン押下でオンデマンド生成する。
+      { name = "DRAFT_ON_DEMAND_ONLY", value = "true" },
+      # per-user token のリフレッシュに使う connect(web 型)クライアント ID（secret は下の secrets）。
+      { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。
       { name = "OAUTH_KMS_KEY_ID", value = "alias/teamagent-oauth-tokens" },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
@@ -188,6 +230,12 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
       { name = "GOOGLE_OAUTH_JSON", valueFrom = data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn },
+      # build_user_credentials() は CONNECT_GOOGLE_CLIENT_ID/SECRET(env) を要求する。per-user の
+      # refresh token は Slack「連携」＝connect(web 型)クライアントで発行されるため、リフレッシュも
+      # 同じ web 型クライアントでないと RefreshError になる（desktop 型の GOOGLE_OAUTH_JSON では不可）。
+      # connect-web / fargate と同じ connect_google_client_secret を使う。欠落すると mail/calendar
+      # 収集が build_user_credentials で失敗し全 0 件になる（2026-06-25 回帰）。
+      { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
     ]
     logConfiguration = {
       logDriver = "awslogs"
