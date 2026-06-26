@@ -109,6 +109,51 @@ class SlackClient:
         )
         return result
 
+    async def update_message(
+        self,
+        channel: str,
+        ts: str,
+        text: str,
+        request_id: str,
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> SlackPostResult:
+        """chat.update 呼び出し。既存メッセージを書き換える（タイムラインを汚さない）。
+
+        受付メッセージ → 最終結果 をひと続きで同じ ts に書き換える「段階表示」用。
+        ts が空（受付投稿に失敗していた等）なら no-op で ok=False を返す（呼び側で
+        フォールバック投稿できるよう本関数は例外を投げない設計）。
+        """
+        if not ts:
+            logger.info("slack_update_skipped_empty_ts", request_id=request_id, channel=channel)
+            return SlackPostResult(channel=channel, ts="", ok=False)
+        start = time.perf_counter()
+        kwargs: dict[str, Any] = {"channel": channel, "ts": ts, "text": text}
+        if blocks is not None:
+            kwargs["blocks"] = blocks
+        try:
+            resp = await self._client.chat_update(**kwargs)
+        except Exception:
+            logger.warning(
+                "slack_update_message_failed",
+                request_id=request_id,
+                channel=channel,
+                ts=ts,
+            )
+            return SlackPostResult(channel=channel, ts=ts, ok=False)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        ok = bool(resp.get("ok", False))
+        result = SlackPostResult(channel=channel, ts=ts, ok=ok)
+        logger.info(
+            "slack_update_message",
+            request_id=request_id,
+            channel=channel,
+            ok=ok,
+            ts=ts,
+            latency_ms=latency_ms,
+            text_len=len(text),
+        )
+        return result
+
     async def post_ephemeral(
         self,
         channel: str,
