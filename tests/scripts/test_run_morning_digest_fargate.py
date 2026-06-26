@@ -274,3 +274,45 @@ def test_block_kit_renders_display_fields() -> None:
     assert "江田 真希" in dump  # 実名（未マスク）
     assert "6/25まで" in dump and "サムネ案の確定" in dump
     assert "4通" in dump
+
+
+# ── インタラクティブ「下書き作成」モード（flag 既定 OFF）─────────────────────
+
+
+def test_interactive_draft_enabled_env(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MORNING_DIGEST_INTERACTIVE_DRAFT", raising=False)
+    assert mod._interactive_draft_enabled() is False
+    monkeypatch.setenv("MORNING_DIGEST_INTERACTIVE_DRAFT", "1")
+    assert mod._interactive_draft_enabled() is True
+
+
+def test_interactive_mode_shows_two_buttons(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MORNING_DIGEST_INTERACTIVE_DRAFT", "1")
+    d = MorningDigestOutput(
+        user_email_masked="s***@vectorinc.co.jp",
+        mail_digest=[
+            MailDigestItem(
+                counterpart_masked="t***@tategata.co.jp",
+                subject_scrubbed="動画提出",
+                importance="high",
+                has_draft=False,  # タップ作成モードでは自動作成しない
+                thread_id="thr_INT",
+            ),
+        ],
+    )
+    _text, blocks = mod._format_block_kit(d, "s-komata@vectorinc.co.jp")
+    actions = [b for b in blocks if b.get("type") == "actions"]
+    labels = [e["text"]["text"] for b in actions for e in b["elements"]]
+    aids = [e.get("action_id") for b in actions for e in b["elements"]]
+    # 要返信に [✏️下書き作成(action_id付き)] [📩Gmailを開く(url)] が出る
+    assert any("下書き作成" in label for label in labels)
+    assert "aila:mail_draft" in aids
+    # 下書き作成は url ボタンではない（押下が OC に届く）
+    draft_btn = next(
+        e for b in actions for e in b["elements"] if e.get("action_id") == "aila:mail_draft"
+    )
+    assert "url" not in draft_btn
+    # Gmailを開く（その案件スレッド・本人アカウント固定）
+    assert any("#all/thr_INT" in (e.get("url") or "") for b in actions for e in b["elements"])
+    # 押下前は下書き本文セクションを出さない
+    assert "返信下書き（未送信" not in str(blocks)

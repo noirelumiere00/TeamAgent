@@ -133,6 +133,19 @@ def _gmail_thread_url(thread_id: str | None, user_email: str) -> str | None:
     return f"{_gmail_account_base(user_email)}#all/{thread_id}"
 
 
+def _interactive_draft_enabled() -> bool:
+    """タップで下書き作成モード（既定 OFF）。
+
+    ON のとき朝は下書きを自動作成せず、要返信に [✏️下書き作成][📩Gmailを開く] ボタンを出す。
+    押下は OpenClaw(socket) が捌いて mail_reply(target_thread_id) で作成する。
+    """
+    return os.environ.get("MORNING_DIGEST_INTERACTIVE_DRAFT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 _JST = _dt.timezone(_dt.timedelta(hours=9))
 
 
@@ -167,6 +180,10 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     # 本人アカウントに固定した Gmail deep link（複数 Google ログイン環境での誤アカウント回避）。
     inbox_url = f"{_gmail_account_base(user_email)}#inbox"
     drafts_url = f"{_gmail_account_base(user_email)}#drafts"
+
+    from teamagent import mail_action_ui as ui
+
+    interactive = _interactive_draft_enabled()
 
     mail_items = list(getattr(digest, "mail_digest", []) or [])
     high = [m for m in mail_items if m.importance == "high"]
@@ -220,6 +237,22 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             if getattr(m, "ask", ""):
                 body += f"\n📌 依頼: {_slack_escape(m.ask)}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
+            if interactive:
+                # タップで作成モード: 朝は自動作成せず [✏️下書き作成][📩Gmailを開く] を出す。
+                # 押下は OpenClaw(socket) が捌いて mail_reply(target_thread_id) で作成。
+                tid = str(getattr(m, "thread_id", "") or "")
+                if tid:
+                    blocks.append(ui.mail_action_block(tid, user_email))
+                else:
+                    # thread_id 不明（稀）: Gmailを開く（受信トレイ）だけ。
+                    blocks.append(
+                        {
+                            "type": "context",
+                            "elements": [{"type": "mrkdwn", "text": f"<{inbox_url}|Gmailを開く>"}],
+                        }
+                    )
+                continue
+            # --- 自動作成モード（既定）---
             # 作成した返信下書きの本文を Slack でそのまま確認（未送信・本人DM限定・PII）。
             draft_preview = getattr(m, "draft_preview", "") if m.has_draft else ""
             if draft_preview:
@@ -454,7 +487,11 @@ def main() -> int:
         skill = MorningDigestSkill(token_store=token_store, bedrock=BedrockClient.from_env())
     else:
         skill = MorningDigestSkill(token_store=token_store)
-    skill_input = MorningDigestInput()
+    if _interactive_draft_enabled():
+        # タップ作成モード: 朝は下書きを自動作成しない（ユーザーが「下書き作成」を押した時だけ）。
+        skill_input = MorningDigestInput(max_drafts=0)
+    else:
+        skill_input = MorningDigestInput()
 
     # concurrency=1（既定）は従来どおり逐次。>1 で人数に応じた所要時間短縮。
     if concurrency > 1:

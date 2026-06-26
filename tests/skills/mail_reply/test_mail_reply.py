@@ -65,6 +65,9 @@ class FakeGmail:
         idx = int(msg_id[1:]) if msg_id[1:].isdigit() else 0
         return self._msgs[idx]
 
+    def get_thread(self, thread_id: str, request_id: str, **kw: Any) -> list[_Msg]:
+        return list(self._msgs)
+
     def create_draft(
         self, *, to: str, subject: str, body_text: str, request_id: str, **kw: Any
     ) -> _Draft:
@@ -115,6 +118,47 @@ def _inbound() -> _Msg:
         },
         payload=_payload("お世話になります。見積を再提示いただけますか。"),
     )
+
+
+def test_target_thread_id_replies_to_latest_inbound() -> None:
+    # Slackボタン経路: target_thread_id 指定。スレッド内の「本人以外が From の最新」に返信し、
+    # 自分の送信（古い own）は返信元にしない。client_name 無しでも動く。
+    own = _Msg(
+        headers={"From": OWNER, "To": "tanaka@moribuild.co.jp", "Subject": "Re: 見積"},
+        payload=_payload("先ほどお送りしました。"),
+        internal_date_ms=1_700_000_000_000,
+        id="m0",
+        thread_id="th-9",
+    )
+    inbound = _Msg(
+        headers={
+            "From": "田中 <tanaka@moribuild.co.jp>",
+            "To": OWNER,
+            "Subject": "Re: 見積",
+            "Message-ID": "<x@moribuild.co.jp>",
+        },
+        payload=_payload("ありがとうございます。1点だけ確認させてください。"),
+        internal_date_ms=1_700_000_100_000,
+        id="m1",
+        thread_id="th-9",
+    )
+    gmail = FakeGmail([own, inbound])
+    skill = MailReplySkill(gmail=gmail, bedrock=FakeBedrock())
+    out = skill.run(MailReplyInput(target_thread_id="th-9"), _ctx())
+
+    assert out.created is True
+    assert out.thread_id == "th-9"
+    assert out.to_display == "tanaka@moribuild.co.jp"  # 相手に返信（自分宛にしない）
+    call = gmail.create_draft_calls[0]
+    assert call["thread_id"] == "th-9"
+    assert call["to"] == "tanaka@moribuild.co.jp"
+
+
+def test_input_requires_one_target() -> None:
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        MailReplyInput()  # client_name / target_message_id / target_thread_id いずれも無し
 
 
 def test_g1_requires_user_email() -> None:
