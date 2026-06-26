@@ -374,6 +374,9 @@ resource "aws_ecs_task_definition" "mcp" {
       # 朝ダイジェスト Skill。EventBridge Scheduled Task（平日 9:30 JST）が
       # scripts/run_morning_digest_fargate.py 経由で呼ぶ。mention 経由でも露出（ローカル検証用）。
       { name = "USE_MORNING_DIGEST_TOOL", value = "true" },
+      # 朝ダイジェストの「✏️下書きを作成」ボタン押下処理ツール（OpenClaw が interaction を system
+      # event で渡し、SOUL 指示で本ツールを呼ぶ→当該スレッドへ Reply-All 下書き作成・送信しない）。
+      { name = "USE_MAIL_DRAFT_TOOL", value = "true" },
       # §知識ベース（2026-06-22）: 新スキーマ(documents/chunks=本番794件)を検索対象にし、
       # 資料種別フィルタ(knowledge_filters)と実ファイル配信(knowledge_deliver)を有効化。
       # USE_NEW_SCHEMA が無いと search は旧 proposals_chunks(3件)しか見ず知識機能が空振りする。

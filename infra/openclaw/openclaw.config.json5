@@ -130,6 +130,10 @@
             // §U-Part3-Step C: 返信下書き生成も公開（gmail.modify drafts.create のみ・送信は人間が手動）。
             // mail_reply.skill.py の G4' で send/delete は denylist 物理封鎖（コードで保証）。
             "mail_reply",
+            // 朝ダイジェストの「✏️下書きを作成」ボタン押下処理。OpenClaw が interaction を system
+            // event でエージェントへ渡し、SOUL 指示で本ツールを呼ぶ（draft_token を検証→Reply-All
+            // 下書き作成・送信しない）。USE_MAIL_DRAFT_TOOL=1 が必要。
+            "mail_draft",
             // morning_digest は EventBridge Scheduled Task で起動・mention 経由で呼ばれないが、
             // ローカル検証・将来の手動 trigger 用に include しておく。USE_MORNING_DIGEST_TOOL=1 が必要。
             "morning_digest",
