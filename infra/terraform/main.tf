@@ -26,6 +26,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.70"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
 
   # tfstate を S3 + DynamoDB ロックで管理（2026/5/22 有効化）

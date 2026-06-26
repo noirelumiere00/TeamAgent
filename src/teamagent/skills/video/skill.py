@@ -40,7 +40,11 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
     """競合動画を Gemini で構造分析する Skill。"""
 
     name: ClassVar[str] = "video_analysis"
-    description: ClassVar[str] = "競合 PR 動画(YouTube/Shorts/TikTok/IG)の構成・フック・CTA を分析"
+    description: ClassVar[str] = (
+        "外部URLの競合・他社PR動画(YouTube/Shorts/TikTok/IG)の構成・フック・CTA を分析する。"
+        "URLが提示され『競合/他社/この動画の構成を分析』のとき。"
+        "自社編集者の納品物・合否/誤植/尺チェックは対象外(→ video_approval)"
+    )
     input_schema: ClassVar[type[BaseModel]] = VideoAnalysisInput
     output_schema: ClassVar[type[BaseModel]] = VideoAnalysisOutput
 

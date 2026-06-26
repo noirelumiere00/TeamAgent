@@ -173,9 +173,34 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             self._gemini = GeminiClient.from_env()
         return self._gemini
 
-    def _search(self, query: str, n: int, request_id: str) -> list[VideoMeta]:
-        if self._searcher is not None:
-            return self._searcher(query, n, request_id)
+    def _posts_to_metas(self, posts: list[dict[str, Any]]) -> list[VideoMeta]:
+        """tiktok_acquire の posts.normalized.json item を VideoMeta へ写像（S3委譲経路）。"""
+        metas: list[VideoMeta] = []
+        for p in posts:
+            metas.append(
+                VideoMeta(
+                    rank=int(p.get("rank_display", 0) or 0),
+                    url=str(p.get("url", "") or ""),
+                    author=str(p.get("account_id") or p.get("account_name") or ""),
+                    follower_count=int(p.get("followers", 0) or 0),
+                    desc=str(p.get("title", "") or ""),
+                    play_count=int(p.get("plays", 0) or 0),
+                    digg_count=int(p.get("likes", 0) or 0),
+                    comment_count=int(p.get("comments", 0) or 0),
+                    share_count=int(p.get("shares", 0) or 0),
+                    collect_count=int(p.get("saves", 0) or 0),
+                    engagement_rate=float(p.get("eg_rate", 0.0) or 0.0) / 100.0,
+                    cover_url=None,
+                )
+            )
+        return metas
+
+    def _search(
+        self, query: str, n: int, request_id: str, searcher: Searcher | None = None
+    ) -> list[VideoMeta]:
+        s = searcher or self._searcher
+        if s is not None:
+            return s(query, n, request_id)
         from teamagent.adapters.tiktok_scraper import search_tiktok
 
         res = search_tiktok(query, search_type="keyword", max_videos=n, request_id=request_id)
@@ -203,9 +228,12 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             )
         return metas
 
-    def _download(self, url: str, request_id: str) -> tuple[bytes, str]:
-        if self._downloader is not None:
-            return self._downloader(url)
+    def _download(
+        self, url: str, request_id: str, downloader: Downloader | None = None
+    ) -> tuple[bytes, str]:
+        d = downloader or self._downloader
+        if d is not None:
+            return d(url)
         # 3層DLチェーン（ブラウザ内DL→yt-dlp→…）。全滅時は _analyze_one が cover-only へ縮退。
         from teamagent.adapters.video_download import download_video_chained
 
@@ -220,10 +248,17 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
     # --- 1動画の分析（download→proxy→gemini→parse） ---
     def _analyze_one(
-        self, meta: VideoMeta, *, query: str, client_name: str | None, system: str, request_id: str
+        self,
+        meta: VideoMeta,
+        *,
+        query: str,
+        client_name: str | None,
+        system: str,
+        request_id: str,
+        downloader: Downloader | None = None,
     ) -> AnalyzedVideo:
         try:
-            data, mime = self._download(meta.url, request_id)
+            data, mime = self._download(meta.url, request_id, downloader=downloader)
             data, mime = self._shrink(data, mime, request_id)
         except Exception as e:  # 取得/圧縮失敗 → サムネのみの軽量分析へ縮退（全滅回避）
             logger.warning("video_algorithm_fetch_failed", rank=meta.rank, error=type(e).__name__)
@@ -362,7 +397,24 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         # 取得（スクレイプ）= 上位ボード board_size 本。メタのみ＝軽い。
         # 深掘り分析の予備候補も兼ねる（DL/分析失敗を後続候補でバックフィル）。天井は _MAX_POOL。
         board_target = min(max(input.board_size, target + self._overfetch_buffer), _MAX_POOL)
-        pool = self._search(input.query, board_target, ctx.request_id)
+
+        # 取得段の委譲: acquire_s3_prefix があれば tiktok_acquire 成果物(S3)から読む(スクレイプ無)。
+        # per-call override はローカルで組み立て self へ保存しない(共有インスタンス安全)。
+        call_searcher: Searcher | None = None
+        call_downloader: Downloader | None = None
+        if input.acquire_s3_prefix:
+            from teamagent.adapters.tiktok_s3_source import TikTokS3Source
+
+            _src = TikTokS3Source(input.acquire_s3_prefix)
+
+            def _s3_search(q: str, n: int, rid: str) -> list[VideoMeta]:
+                return self._posts_to_metas(_src.posts(n))
+
+            call_searcher = _s3_search
+            call_downloader = _src.download
+            log.info("video_algorithm_s3_source", prefix=input.acquire_s3_prefix[:60])
+
+        pool = self._search(input.query, board_target, ctx.request_id, searcher=call_searcher)
         if not pool:
             return VideoAlgorithmOutput(
                 query=input.query,
@@ -387,6 +439,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                             client_name=input.client_name,
                             system=system,
                             request_id=ctx.request_id,
+                            downloader=call_downloader,
                         ),
                         batch,
                     )

@@ -58,7 +58,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     """過去資料を pgvector で検索 → Claude で要約する Skill。"""
 
     name: ClassVar[str] = "search"
-    description: ClassVar[str] = "営業16名が過去の提案書・議事録・メールを自然文クエリで検索する"
+    description: ClassVar[str] = (
+        "営業16名が過去の提案書・議事録・メールを自然文で検索する一次窓口。"
+        "『探して/あったっけ/どれ?/見つけて』など“あるか/どれが該当するか”の探索・列挙はここ"
+    )
     input_schema: ClassVar[type[BaseModel]] = SearchInput
     output_schema: ClassVar[type[BaseModel]] = SearchOutput
 

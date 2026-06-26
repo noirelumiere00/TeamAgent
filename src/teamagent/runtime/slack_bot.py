@@ -551,6 +551,40 @@ _PRIVATE_SKILLS: frozenset[str] = frozenset(
 )
 
 
+async def _send_or_update(
+    slack: Any,
+    *,
+    channel: str,
+    ack_ts: str | None,
+    text: str,
+    request_id: str,
+    thread_ts: str | None,
+    blocks: list[dict[str, Any]] | None = None,
+) -> None:
+    """受付メッセージの ts があれば chat.update で書き換え、無ければ通常投稿する。
+
+    「考え中 → 結果」を一つのメッセージで完結させ Slack タイムラインを汚さないための
+    薄いヘルパ。update に失敗したら通常投稿にフォールバック（ユーザー無影響・graceful）。
+    """
+    if ack_ts:
+        upd = await slack.update_message(
+            channel=channel,
+            ts=ack_ts,
+            text=text,
+            request_id=request_id,
+            blocks=blocks,
+        )
+        if upd.ok:
+            return
+    await slack.post_message(
+        channel=channel,
+        text=text,
+        request_id=request_id,
+        thread_ts=thread_ts,
+        blocks=blocks,
+    )
+
+
 def build_ack_message(message: str) -> str | None:
     """受信メッセージからどの Skill が動くか判定し、受付メッセージを返す。
 
@@ -1816,7 +1850,10 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
 
         # 受付メッセージを即時投稿 (重い処理の前にユーザーへ「受け付けた」と伝える)。
         # chitchat（雑談）は build_ack_message が None を返す → ack を出さず 1 通で即答。
+        # 通常投稿の場合は ts を保持し、最終結果を chat.update で**同じメッセージに書き換える**
+        # （Slack タイムラインを「受付」「結果」の2通で汚さず、見た目を「考え中→結果」に統合）。
         ack = build_ack_message(query)
+        ack_ts: str | None = None  # 通常投稿のみ保持（ephemeral は update 非対応）
         if ack is not None:
             if is_private:
                 await slack.post_ephemeral(
@@ -1827,12 +1864,14 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                     thread_ts=thread_ts,
                 )
             else:
-                await slack.post_message(
+                ack_result = await slack.post_message(
                     channel=channel,
                     text=ack,
                     request_id=request_id,
                     thread_ts=thread_ts,
                 )
+                if ack_result.ok and ack_result.ts:
+                    ack_ts = ack_result.ts
 
         trace = UsageTrace()
         t0 = time.perf_counter()
@@ -1857,8 +1896,10 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         except QueueFullError:
             status = "queue_full"
             logger.warning("request_gate_queue_full", request_id=request_id)
-            await slack.post_message(
+            await _send_or_update(
+                slack,
                 channel=channel,
+                ack_ts=ack_ts,
                 text="ただいま混雑しています。少し待って再度お試しください。🙏",
                 request_id=request_id,
                 thread_ts=thread_ts,
@@ -1866,8 +1907,10 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         except GateTimeoutError:
             status = "timeout"
             logger.warning("request_gate_timeout", request_id=request_id)
-            await slack.post_message(
+            await _send_or_update(
+                slack,
                 channel=channel,
+                ack_ts=ack_ts,
                 text="順番待ちが長くなっています。後ほど再度お試しください。🙏",
                 request_id=request_id,
                 thread_ts=thread_ts,
@@ -1884,8 +1927,10 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                 user_id=user_id,
                 extra={"channel": channel, "query_len": len(query)},
             )
-            await slack.post_message(
+            await _send_or_update(
+                slack,
                 channel=channel,
+                ack_ts=ack_ts,
                 text=f"処理中にエラーが発生しました。`request_id={request_id}`",
                 request_id=request_id,
                 thread_ts=thread_ts,
@@ -1902,8 +1947,10 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                     blocks=blocks,
                 )
             else:
-                await slack.post_message(
+                await _send_or_update(
+                    slack,
                     channel=channel,
+                    ack_ts=ack_ts,
                     text=text,
                     request_id=request_id,
                     thread_ts=thread_ts,

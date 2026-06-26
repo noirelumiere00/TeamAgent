@@ -49,7 +49,10 @@ class VideoApprovalSkill(BaseSkill[VideoApprovalInput, VideoApprovalOutput]):
 
     name: ClassVar[str] = "video_approval"
     description: ClassVar[str] = (
-        "編集者納品の動画をオリエン(必須要素/NG/テロップ/尺仕様)と照合し一次FBを生成"
+        "自社編集者が納品した動画の合否チェック(一次FB)。オリエン(必須要素/NG/テロップ/誤植/尺仕様)と"
+        "照合する。『納品/編集者/上がってきた/オリエン/誤植/誤字/テロップ/尺オーバー/NGチェック/直すとこ』"
+        "で発火し、『この動画チェックして』のような曖昧指示もデフォルトでここ"
+        "(外部URLの競合・他社PR動画の構成分析は video_analysis)"
     )
     input_schema: ClassVar[type[BaseModel]] = VideoApprovalInput
     output_schema: ClassVar[type[BaseModel]] = VideoApprovalOutput
