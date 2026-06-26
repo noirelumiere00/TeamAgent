@@ -288,6 +288,37 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # TikTok取得ツール（30本/KW・上位N本は動画本体DL→S3）。**既定 OFF**（USE_TIKTOK_ACQUIRE=1）。
+    # video_algorithm/tiktok_search が bot プロセス内でスクレイプするのと違い、submit は SQS 投函
+    # のみ（RunTask/PassRole 非保有）で、実取得は使い捨て Fargate に隔離（A′トポロジ）。
+    # env: TIKTOK_TASK_QUEUE / TIKTOK_JOBS_TABLE / TIKTOK_S3_BUCKET（tiktok_acquire.tf）。
+    # OC 露出は openclaw.config.json5 の toolFilter.include に追加してから（=人間ゲート）。
+    # 本番ONの前提: ToS/stealth の法務承認（O1・承認済）＋ infra apply 済み。
+    if _envflag("USE_TIKTOK_ACQUIRE"):
+        from teamagent.adapters.tiktok_task_store import TikTokTaskStore
+        from teamagent.skills.tiktok_acquire.skill import (
+            TikTokAcquireSkill,
+            TikTokAcquireStatusSkill,
+        )
+
+        _tk_store = TikTokTaskStore()
+        specs.append(
+            ToolSpec(
+                TikTokAcquireSkill.name,
+                TikTokAcquireSkill.description,
+                TikTokAcquireSkill,
+                factory=lambda: TikTokAcquireSkill(store=_tk_store),
+            )
+        )
+        specs.append(
+            ToolSpec(
+                TikTokAcquireStatusSkill.name,
+                TikTokAcquireStatusSkill.description,
+                TikTokAcquireStatusSkill,
+                factory=lambda: TikTokAcquireStatusSkill(store=_tk_store),
+            )
+        )
+
     return specs
 
 
