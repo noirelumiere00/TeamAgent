@@ -10,9 +10,11 @@ AI 要約 + 結果カードを返す。👍/👎 は search_feedback テーブ�
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import os
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -185,6 +187,18 @@ _SEARCH_STYLE = (
     ".emptyx .eb button:hover{background:#2c3a58}"
     ".emptyx .es .lead{color:var(--muted);font-size:12px;margin-right:4px}"
     ".errx{border-color:#7a3b3b;background:rgba(120,50,50,.18)}"
+    # 検索中の視覚状態（#4）: ボタン disable + スケルトンカード（shimmer アニメ）。
+    ".searchbar button:disabled{opacity:.55;cursor:progress}"
+    ".card.skel{pointer-events:none}"
+    ".skl{border-radius:6px;background:linear-gradient(90deg,var(--bg-hover) 25%,"
+    "#2c3a58 37%,var(--bg-hover) 63%);background-size:400% 100%;"
+    "animation:skshine 1.4s ease infinite}"
+    ".skl-t{height:16px;width:55%;margin-bottom:10px}"
+    ".skl-l{height:12px;width:90%;margin-bottom:8px}"
+    ".skl-l.short{width:70%;margin-bottom:0}"
+    "@keyframes skshine{0%{background-position:100% 0}100%{background-position:0 0}}"
+    # アクセシビリティ: 動きを減らす設定ではシマーを止める（静的プレースホルダ化）。
+    "@media (prefers-reduced-motion:reduce){.skl{animation:none}}"
 )
 
 
@@ -248,6 +262,11 @@ const fsolution=document.getElementById('fsolution');
 const clientlist=document.getElementById('clientlist');
 let lastQuery='';
 let activeIndustry=null;
+// 連打対策（#4）: 進行中 fetch の中止用 controller と「最新の検索か」を判定する世代カウンタ。
+// abort で旧リクエストを止め（サーバー側は is_disconnected で Bedrock 前に破棄）、
+// 万一 abort が間に合わず resolve しても世代不一致なら描画しない（二重防御）。
+let currentSearch=null;
+let searchGen=0;
 function safeUrl(u){return (typeof u==='string'&&/^(https?|slack|gdrive):/i.test(u))?u:null;}
 // 取引先 datalist を facets から遅延充填（graph fetch 後にのみ __facets.client が埋まる）。
 // 未定義時は何もしない＝free-text フォールバック（部分一致が効くので候補なしでも検索可）。
@@ -374,9 +393,26 @@ function renderEmpty(query){
   }
   results.appendChild(c);
 }
+function setSearching(on){
+  if(go){go.disabled=on;go.textContent=on?'検索中…':'検索';}
+}
+function renderSkeleton(){
+  results.textContent='';
+  for(let i=0;i<3;i++){
+    const c=document.createElement('div');c.className='card skel';
+    c.setAttribute('aria-hidden','true');
+    const t=document.createElement('div');t.className='skl skl-t';c.appendChild(t);
+    const l1=document.createElement('div');l1.className='skl skl-l';c.appendChild(l1);
+    const l2=document.createElement('div');l2.className='skl skl-l short';c.appendChild(l2);
+    results.appendChild(c);
+  }
+}
 async function search(){
   const query=q.value.trim();if(!query)return;
-  lastQuery=query;renderFilters();results.textContent='検索中…';
+  if(currentSearch)currentSearch.abort();
+  const ctl=new AbortController();currentSearch=ctl;
+  const gen=++searchGen;
+  lastQuery=query;renderFilters();setSearching(true);renderSkeleton();
   let data;
   try{
     const body={query:query,top_k:8};
@@ -392,10 +428,16 @@ async function search(){
     if(fs)body.filter_solution=fs;
     const resp=await fetch('/api/v1/search',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(body)});
+      body:JSON.stringify(body),signal:ctl.signal});
     if(resp.status===401){location.href='/search/login';return;}
     data=await resp.json();
-  }catch(e){renderError();return;}
+  }catch(e){
+    if(e&&e.name==='AbortError')return;
+    if(gen===searchGen){setSearching(false);renderError();}
+    return;
+  }
+  if(gen!==searchGen)return;
+  setSearching(false);
   results.textContent='';
   if(data.answer){
     const a=document.createElement('div');a.className='answer';
@@ -2269,8 +2311,25 @@ def create_app(
     app = FastAPI(title="TeamAgent Connect", docs_url=None, redoc_url=None, openapi_url=None)
     search_cfg = search_config or _load_search_config()
     # SearchSkill は embedder が重いのでプロセス内 lazy-singleton（初回検索時に1度だけ生成）。
+    # api_search が run() を to_thread へオフロードするため、初回検索が同時に来ると複数の
+    # worker スレッドが同時到達しうる。Lock の double-checked locking で構築を1回に保つ。
     search_state: dict[str, Any] = {"skill": None}
+    search_skill_lock = threading.Lock()
     feedback_state: dict[str, Any] = {"store": feedback_store}
+    # 検索の同時実行上限（LocalE5 CPU 推論の worker スレッド暴走防止）。env で再ビルド無し較正。
+    search_concurrency = max(1, _env_int("SEARCH_CONCURRENCY", 4))
+    # asyncio.Semaphore は最初に await したイベントループに bind される。TestClient は
+    # リクエストごとに新しいループを作るため、ループ単位で lazy 生成する（本番 uvicorn は
+    # 単一ループなので実質プロセスに1個＝全検索リクエストで共有される）。
+    search_sema_state: dict[str, Any] = {"sema": None, "loop": None}
+
+    def _get_search_semaphore() -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        if search_sema_state["sema"] is None or search_sema_state["loop"] is not loop:
+            search_sema_state["sema"] = asyncio.Semaphore(search_concurrency)
+            search_sema_state["loop"] = loop
+        sema: asyncio.Semaphore = search_sema_state["sema"]
+        return sema
 
     def _exchange(code: str) -> OAuthToken:
         if exchange_fn is not None:
@@ -2290,17 +2349,24 @@ def create_app(
         return RdsTokenStore(PgVectorClient.from_env(), KmsCipher(key_id), app_role=app_role)
 
     def _get_search_skill() -> Any:
-        """SearchSkill を lazy-singleton で取得（embedder の二重ロードを避ける）。"""
+        """SearchSkill を lazy-singleton で取得（embedder の二重ロードを避ける）。
+
+        to_thread オフロード後は複数 worker スレッドから並行到達しうるため、
+        double-checked locking で重い初回構築（LocalE5 ロード）を1回に保つ。
+        """
         skill = search_state["skill"]
         if skill is None:
-            if search_skill_factory is not None:
-                skill = search_skill_factory()
-            else:
-                # 本番: orchestrator.factory の構築ロジックを流用（runtime と env フラグ一致）。
-                from teamagent.orchestrator.factory import _build_search_skill
+            with search_skill_lock:
+                skill = search_state["skill"]
+                if skill is None:
+                    if search_skill_factory is not None:
+                        skill = search_skill_factory()
+                    else:
+                        # 本番: orchestrator.factory の構築ロジックを流用（env フラグ一致）。
+                        from teamagent.orchestrator.factory import _build_search_skill
 
-                skill = _build_search_skill()
-            search_state["skill"] = skill
+                        skill = _build_search_skill()
+                    search_state["skill"] = skill
         return skill
 
     def _save_feedback(row: dict[str, Any]) -> None:
@@ -2594,8 +2660,10 @@ def create_app(
                 "user_role": "user",
             }
         )
-        try:
-            out = _get_search_skill().run(
+
+        def _run_search() -> Any:
+            # worker スレッド側: skill 取得（初回のみ重い構築・Lock で単一初期化）+ 同期 run。
+            return _get_search_skill().run(
                 SearchInput(
                     query=query,
                     top_k=top_k,
@@ -2609,6 +2677,19 @@ def create_app(
                 ),
                 ctx,
             )
+
+        try:
+            # 同時実行を制限（セマフォ取得は async 側・run 本体は下の to_thread 側）。
+            async with _get_search_semaphore():
+                # キュー待ちの間にクライアントが abort/切断済みなら、embed/Bedrock 要約を
+                # 走らせる前に破棄する（捨てられたリクエストへの課金回避）。499 は nginx の
+                # Client Closed Request 慣行に合わせた非標準コード。
+                if await request.is_disconnected():
+                    logger.info("search_api_client_disconnected", user_email=email)
+                    return JSONResponse({"error": "client_closed_request"}, status_code=499)
+                # 同期 run をイベントループ外へ（1人の遅い検索が他の全リクエストを
+                # 止めないようにする）。healthz/graph/feedback はブロックされなくなる。
+                out = await asyncio.to_thread(_run_search)
         except Exception as exc:
             logger.warning(
                 "search_api_failed",
