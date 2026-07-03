@@ -199,6 +199,13 @@ _SEARCH_STYLE = (
     "@keyframes skshine{0%{background-position:100% 0}100%{background-position:0 0}}"
     # アクセシビリティ: 動きを減らす設定ではシマーを止める（静的プレースホルダ化）。
     "@media (prefers-reduced-motion:reduce){.skl{animation:none}}"
+    # クエリ語ハイライト（#2）: excerpt 中の検索語を span.hl で強調（textContent 分割挿入）。
+    ".hl{background:rgba(255,193,79,.18);color:#ffd27a;border-radius:3px;padding:0 1px}"
+    # 二段レスポンス（#1）: AI要約の生成中プレースホルダ＋失敗時の再試行ボタン。
+    ".answer .abody.pending{color:var(--muted)}"
+    ".answer .aretry{margin-left:8px;background:var(--bg-hover);border:1px solid #34425f;"
+    "color:#c5d0e6;border-radius:8px;padding:2px 10px;font-size:12px;cursor:pointer}"
+    ".answer .aretry:hover{background:#2c3a58}"
 )
 
 
@@ -407,45 +414,123 @@ function renderSkeleton(){
     results.appendChild(c);
   }
 }
+// クエリ語ハイライト（#2）: 空白区切りで 2 文字以上の語だけを対象にする。
+function hlTerms(query){
+  return String(query||'').split(/\s+/).filter(function(w){return w.length>=2;});
+}
+// text をクエリ語で分割し、text node と span.hl を交互に append する。
+// createTextNode/createElement/textContent のみ使用（innerHTML 不使用＝XSS 安全）。
+// 大小文字は区別しない。同位置に複数語が一致したら長い語を優先する。
+function appendHighlighted(el,text,terms){
+  el.textContent='';
+  const t=String(text||'');
+  if(!terms||!terms.length){el.textContent=t;return;}
+  const lower=t.toLowerCase();
+  let pos=0;
+  while(pos<t.length){
+    let at=-1,ln=0;
+    for(const w of terms){
+      const lw=w.toLowerCase();
+      const idx=lower.indexOf(lw,pos);
+      if(idx===-1)continue;
+      if(at===-1||idx<at||(idx===at&&lw.length>ln)){at=idx;ln=lw.length;}
+    }
+    if(at===-1){el.appendChild(document.createTextNode(t.slice(pos)));break;}
+    if(at>pos)el.appendChild(document.createTextNode(t.slice(pos,at)));
+    const sp=document.createElement('span');sp.className='hl';
+    sp.textContent=t.slice(at,at+ln);el.appendChild(sp);
+    pos=at+ln;
+  }
+}
+// シェル側（右プレビュー/hover ポップ）から使う公開フック。直近クエリの語で強調し、
+// 未検索（lastQuery 空）なら素の textContent と等価＝グラフ発プレビューは無強調。
+window.searchHighlight=function(el,text){appendHighlighted(el,text,hlTerms(lastQuery));};
+function buildBody(query){
+  const body={query:query,top_k:8};
+  if(activeIndustry)body.filter_industry=activeIndustry;
+  const fc=fclient?fclient.value.trim():'';
+  const fb=fbudget?fbudget.value:'';
+  if(fc)body.filter_client=fc;
+  if(fb)body.filter_budget=fb;
+  if(bunknown&&bunknown.checked&&fb)body.include_unknown_budget=true;
+  if(bsort&&bsort.checked&&fb)body.sort_budget_near=fb;
+  if(fdoctype&&fdoctype.value)body.filter_doc_type=fdoctype.value;
+  const fs=fsolution?fsolution.value.trim():'';
+  if(fs)body.filter_solution=fs;
+  return body;
+}
+// /api/v1/search を 1 回叩く。二段レスポンス（#1）の (a)fast=include_answer:false と
+// (b)answer=include_answer:true の両方がここを通り、AbortController を共有する。
+async function fetchSearch(body,withAnswer,ctl){
+  const resp=await fetch('/api/v1/search',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(Object.assign({include_answer:withAnswer},body)),
+    signal:ctl.signal});
+  if(resp.status===401){
+    location.href='/search/login';
+    const e=new Error('unauthorized');e.name='UnauthorizedError';throw e;
+  }
+  if(!resp.ok)throw new Error('http '+resp.status);
+  return resp.json();
+}
+// AI要約カード（プレースホルダ状態）。(b) 到着で .abody だけ差し替える。
+function renderAnswerPending(){
+  const a=document.createElement('div');a.className='answer';
+  const h=document.createElement('h2');h.textContent='AI 要約';a.appendChild(h);
+  const b=document.createElement('div');b.className='abody pending';
+  b.textContent='AI要約を生成中…';a.appendChild(b);
+  a.appendChild(fbButtons('answer',null,null));
+  return a;
+}
+// (b) answer フェッチの結果を要約カードへ差し込む。(b) の hits は使わない
+// （(a) の描画を維持＝ちらつき防止）。失敗時は再試行ボタンで (b) だけ再実行。
+function attachAnswer(card,promise,body,ctl,gen){
+  const el=card.querySelector('.abody');
+  promise.then(function(data){
+    if(gen!==searchGen)return;
+    if(data&&data.answer){el.classList.remove('pending');el.textContent=data.answer;}
+    else{card.remove();}
+  }).catch(function(e){
+    if(e&&(e.name==='AbortError'||e.name==='UnauthorizedError'))return;
+    if(gen!==searchGen)return;
+    el.classList.remove('pending');
+    el.textContent='要約の生成に失敗しました ';
+    const rb=document.createElement('button');rb.type='button';rb.className='aretry';
+    rb.textContent='再試行';
+    rb.onclick=function(){
+      if(gen!==searchGen)return;
+      el.classList.add('pending');el.textContent='AI要約を生成中…';
+      attachAnswer(card,fetchSearch(body,true,ctl),body,ctl,gen);
+    };
+    el.appendChild(rb);
+  });
+}
 async function search(){
   const query=q.value.trim();if(!query)return;
   if(currentSearch)currentSearch.abort();
   const ctl=new AbortController();currentSearch=ctl;
   const gen=++searchGen;
   lastQuery=query;renderFilters();setSearching(true);renderSkeleton();
+  const body=buildBody(query);
+  // 二段レスポンス（#1）: (a) hits 即描画（include_answer:false）と (b) AI要約
+  // （include_answer:true）を並行フェッチ。ctl/gen を共有し、連打時は 2 本とも中止。
+  const answerPromise=fetchSearch(body,true,ctl);
+  answerPromise.catch(function(){});// 早期 reject の unhandledrejection 抑止（attachAnswer で処理）
   let data;
   try{
-    const body={query:query,top_k:8};
-    if(activeIndustry)body.filter_industry=activeIndustry;
-    const fc=fclient?fclient.value.trim():'';
-    const fb=fbudget?fbudget.value:'';
-    if(fc)body.filter_client=fc;
-    if(fb)body.filter_budget=fb;
-    if(bunknown&&bunknown.checked&&fb)body.include_unknown_budget=true;
-    if(bsort&&bsort.checked&&fb)body.sort_budget_near=fb;
-    if(fdoctype&&fdoctype.value)body.filter_doc_type=fdoctype.value;
-    const fs=fsolution?fsolution.value.trim():'';
-    if(fs)body.filter_solution=fs;
-    const resp=await fetch('/api/v1/search',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(body),signal:ctl.signal});
-    if(resp.status===401){location.href='/search/login';return;}
-    data=await resp.json();
+    data=await fetchSearch(body,false,ctl);
   }catch(e){
-    if(e&&e.name==='AbortError')return;
-    if(gen===searchGen){setSearching(false);renderError();}
+    if(e&&(e.name==='AbortError'||e.name==='UnauthorizedError'))return;
+    if(gen===searchGen){setSearching(false);renderError();ctl.abort();}
     return;
   }
   if(gen!==searchGen)return;
   setSearching(false);
   results.textContent='';
-  if(data.answer){
-    const a=document.createElement('div');a.className='answer';
-    const h=document.createElement('h2');h.textContent='AI 要約';a.appendChild(h);
-    const body=document.createElement('div');body.textContent=data.answer;a.appendChild(body);
-    a.appendChild(fbButtons('answer',null,null));
-    results.appendChild(a);
-  }
+  const answerCard=renderAnswerPending();
+  results.appendChild(answerCard);
+  attachAnswer(answerCard,answerPromise,body,ctl,gen);
+  const terms=hlTerms(query);
   const hits=data.hits||[];
   if(!hits.length){renderEmpty(query);return;}
   for(const h of hits){
@@ -470,7 +555,7 @@ async function search(){
     if(h.deal_phase)chips.appendChild(tagChip('# '+h.deal_phase,'deal_phase',h.deal_phase));
     if(chips.childNodes.length)card.appendChild(chips);
     const ex=document.createElement('div');ex.className='excerpt';
-    ex.textContent=h.excerpt||'';card.appendChild(ex);
+    appendHighlighted(ex,h.excerpt||'',terms);card.appendChild(ex);
     const meta=document.createElement('div');meta.className='meta';
     const su=safeUrl(h.source_uri);
     if(su){
@@ -1704,7 +1789,10 @@ window.openPreview=function(doc){
     previewTagChip('# '+doc.project,'client',doc.project));
   if(chips.childNodes.length)wrap.appendChild(chips);
   if(doc.excerpt){const ex=document.createElement('div');ex.className='pvex';
-    ex.textContent=doc.excerpt;wrap.appendChild(ex);}
+    // 直近クエリの語を span.hl で強調（未検索なら素の textContent と等価・XSS 安全）。
+    if(window.searchHighlight)window.searchHighlight(ex,doc.excerpt);
+    else ex.textContent=doc.excerpt;
+    wrap.appendChild(ex);}
   const su=safeUrlS(doc.source_uri);
   if(su){const ob=document.createElement('button');ob.className='pvopen';ob.type='button';
     ob.textContent='出典を開く ↗';
@@ -2002,7 +2090,10 @@ function fillPop(d){
   }
   if(pills.childNodes.length)p.appendChild(pills);
   if(d.excerpt){var ex=document.createElement('div');ex.className='hx';
-    ex.textContent=d.excerpt.slice(0,200);p.appendChild(ex);}
+    // 直近クエリの語を span.hl で強調（未検索なら素の textContent と等価・XSS 安全）。
+    if(window.searchHighlight)window.searchHighlight(ex,d.excerpt.slice(0,200));
+    else ex.textContent=d.excerpt.slice(0,200);
+    p.appendChild(ex);}
   var deg=document.createElement('div');deg.className='hd';
   deg.textContent='接続 '+degreeOf(d.title)+'件';p.appendChild(deg);
 }
@@ -2648,6 +2739,9 @@ def create_app(
         # 受け、長すぎは SearchInput.filter_solution の max_length=50 に合わせて切り詰める。
         _sol = str(payload.get("filter_solution", "")).strip()
         filter_solution = _sol[:50] or None
+        # 二段レスポンス (#1): False なら要約（Bedrock 数秒）をスキップし hits を即返す。
+        # 既定 True＝完全後方互換（旧フロント・API 直叩きは無変更で従来挙動）。
+        include_answer = bool(payload.get("include_answer", True))
 
         from teamagent.skills.base import SkillContext
         from teamagent.skills.search.schema import SearchHitOut, SearchInput
@@ -2674,6 +2768,7 @@ def create_app(
                     sort_budget_near=sort_budget_near,
                     filter_doc_type=filter_doc_type,
                     filter_solution=filter_solution,
+                    include_answer=include_answer,
                 ),
                 ctx,
             )

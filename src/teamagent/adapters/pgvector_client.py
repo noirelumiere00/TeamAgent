@@ -668,8 +668,13 @@ class PgVectorClient:
 
         ノード=資料・エッジ=共有タグの Obsidian 風グラフを
         ``connect_web.graph.build_graph`` で組むためのフィールドを返す。
-        excerpt はホバープレビュー用に先頭 chunk の本文を LATERAL で 1 つだけ拾う
-        （chunks の RLS は documents 連動なので本人可視分のみ）。RLS は
+        excerpt はホバープレビュー用に chunk 本文を LATERAL で 1 つだけ拾う。
+        先頭 chunk（表紙＝会社紹介テンプレ）が全資料の excerpt になり同文プレビュー化
+        するのを防ぐため、``metadata.boilerplate`` / ``metadata.title_only`` の chunk を
+        ORDER BY で後ろへ回し「テンプレでない最小 chunk_idx」を代表にする。全 chunk が
+        テンプレなら並びが chunk_idx ASC に退化して従来の先頭 chunk に fail-open する
+        （句は固定リテラル・値 bind なし。chunks の RLS は documents 連動なので本人可視分のみ）。
+        RLS は
         ``connection(app_role='teamagent_app', user_email=...)`` で有効化済の前提なので、
         本人 ACL（個人 + 会社共有）に見えるドキュメントのみが返る。
         列名・テーブル名は固定リテラル、limit は placeholder bind（bandit B608 安全）。
@@ -729,7 +734,9 @@ class PgVectorClient:
                 SELECT left(COALESCE(c.contextualized, c.content), 160) AS excerpt
                 FROM chunks c
                 WHERE c.document_id = d.id
-                ORDER BY c.chunk_idx ASC
+                ORDER BY (COALESCE((c.metadata->>'boilerplate')::bool, false)
+                          OR COALESCE((c.metadata->>'title_only')::bool, false)) ASC,
+                         c.chunk_idx ASC
                 LIMIT 1
             ) ex ON true{embedding_join}
             WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'

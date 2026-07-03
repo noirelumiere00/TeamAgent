@@ -311,8 +311,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 2. pgvector で類似 chunk を取得（RLS 評価用 user_email を ctx から取得）
         hits = self._retrieve(embedding, input, ctx)
 
-        # 3. Bedrock で要約（chunk が 0 件のときはスキップ）
-        answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
+        # 3. Bedrock で要約（chunk が 0 件のときはスキップ）。
+        #    include_answer=False（二段レスポンスの fast path）は要約そのものを
+        #    スキップし answer='' / 要約コスト 0 で hits だけ返す。0 件時の
+        #    「該当する資料が見つかりませんでした。」も要約側の文言なので出さない
+        #    （フロントは include_answer=True の並行フェッチで従来文言を得る）。
+        if input.include_answer:
+            answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
+        else:
+            answer, cost_usd = "", 0.0
 
         # 4. 出力スキーマに整形
         output = SearchOutput(

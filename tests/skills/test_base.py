@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import BaseModel
 
 from teamagent.skills.base import BaseSkill, SkillContext, SkillRegistry, register
+
+
+@pytest.fixture(autouse=True)
+def _restore_skill_registry() -> Any:
+    """各テストが ``_clear()`` でレジストリを汚してもテスト間に波及させない。
+
+    ``SkillRegistry._skills`` はモジュールグローバル。本ファイルの登録テストが
+    ``_clear()`` すると、プロセス内で既に import 済み（＝再 import しても
+    ``@register`` が再実行されない）の全スキル登録が失われる。すると後続の
+    ``tests/skills/video_approval/test_routing_descriptions.py::test_video_approval_registered``
+    などが順序依存で落ちる（フルスイートで FAIL／単体で PASS の flake）。
+    スナップショット→復元でテスト独立性を担保する。
+    """
+    snapshot = dict(SkillRegistry._skills)
+    try:
+        yield
+    finally:
+        SkillRegistry._skills.clear()
+        SkillRegistry._skills.update(snapshot)
 
 
 class DummyIn(BaseModel):
