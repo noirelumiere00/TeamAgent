@@ -365,6 +365,8 @@ class PgVectorClient:
         metadata_contains: dict[str, str] | None = None,
         exclude_boilerplate: bool = False,
         exclude_duplicates: bool = False,
+        exclude_templates: bool = False,
+        exclude_recurring: bool = False,
         embedding_col: str = "embedding",
     ) -> list[SearchHit]:
         """documents + chunks JOIN で cosine 類似度上位 limit 件を返す。
@@ -426,6 +428,25 @@ class PgVectorClient:
             uuid 形式チェック（``~`` 正規表現）でガードしてからキャストする（除外しない側）。
             既定 False = 句を一切足さず現行 SQL と完全一致。何も suppressed されて
             いなければ NOT(...) 全体が真になり無影響（後方互換）。exclude_boilerplate と
+            AND 併用可。
+
+        exclude_templates:
+            True のとき WHERE に
+            ``AND COALESCE((d.metadata->>'cls_is_template')::bool, false) = false`` を足し、
+            テンプレ/雛形と分類された文書（ingest.classify の is_template・タイトルルール
+            または LLM 判定）を検索対象から外す。印なし文書（キー無し）は
+            COALESCE(...,false)=false が真で常に残る（後方互換）。句は固定リテラルのみで
+            bind 値を持たない（injection 面の追加リスクなし）。既定 False = 句を一切
+            足さず現行 SQL と完全一致。
+
+        exclude_recurring:
+            True のとき WHERE に
+            ``AND COALESCE((d.metadata->>'cls_is_recurring')::bool, false) = false`` を足し、
+            定期報告（上期/下期/月次/売上データ等・ingest.classify の is_recurring）を
+            検索対象から外す。「提案事例」検索に他社の定期売上報告が混入するノイズ対策で、
+            呼び側（SearchSkill）は**提案書 intent のときだけ**立てる（「上期報告を見たい」
+            クエリを殺さない）。印なし文書は常に残る（後方互換）。既定 False = 句を
+            一切足さず現行 SQL と完全一致。exclude_templates / boilerplate / duplicates と
             AND 併用可。
 
         embedding_col:
@@ -500,6 +521,17 @@ class PgVectorClient:
         if exclude_boilerplate:
             # テンプレ chunk を検索対象から除外（フラグ無し chunk は影響しない）。
             where_parts.append("COALESCE((c.metadata->>'boilerplate')::bool, false) = false")
+
+        if exclude_templates:
+            # テンプレ/雛形と分類された **文書**（cls_is_template="true"）を除外。
+            # boilerplate（chunk 単位の定型ページ）と違い document 単位。印なし文書は
+            # COALESCE(...,false)=false が真で常に残る（後方互換）。固定リテラル句のみ。
+            where_parts.append("COALESCE((d.metadata->>'cls_is_template')::bool, false) = false")
+
+        if exclude_recurring:
+            # 定期報告（cls_is_recurring="true"）を除外。呼び側が「提案書 intent」のときだけ
+            # 立てる想定（「上期報告を見たい」を殺さない）。印なし文書は常に残る（後方互換）。
+            where_parts.append("COALESCE((d.metadata->>'cls_is_recurring')::bool, false) = false")
 
         if exclude_duplicates:
             # H3: 「非正本（suppressed=true）かつ、その正本（duplicate_of）が現 RLS 接続で

@@ -7,8 +7,10 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from teamagent.ingest.classify import (
+    _CLASSIFY_SYSTEM_PROMPT,
     DocClassification,
     DocClassifier,
+    _kind_from_title,
     build_classifier_from_env,
 )
 
@@ -198,3 +200,179 @@ def test_build_classifier_init_failure_returns_none(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(bc.BedrockClient, "from_env", classmethod(_boom))
     assert build_classifier_from_env() is None  # 初期化失敗でも取り込みは止めない
+
+
+# ── is_template / is_recurring（決定論タイトルルール + LLM OR マージ） ──────────
+
+
+def test_kind_from_title_recurring_keywords() -> None:
+    for title in (
+        "2025年上期売上報告",
+        "下期実績まとめ",
+        "四半期レビュー資料",
+        "月次レポート_6月",
+        "週次定例MTG資料",
+        "A社_売上データ_2025",
+        "実績データ集計",
+        "上半期振り返り",
+        "通期見通し",
+        "月報_営業部",
+    ):
+        is_template, is_recurring = _kind_from_title(title)
+        assert is_recurring is True, title
+        assert is_template is False, title
+
+
+def test_kind_from_title_template_keywords() -> None:
+    for title in (
+        "提案書テンプレート",
+        "提案書テンプレ_v2",
+        "proposal_template.pptx",
+        "PROPOSAL_TEMPLATE",  # ASCII は大文字小文字無視
+        "見積書雛形",
+        "議事録ひな形",
+        "報告フォーマット",
+        "サンプル提案書",
+        "新規事業計画（案）",
+        "新規事業計画(案)",
+        "運用ガイドライン",
+    ):
+        is_template, _is_recurring = _kind_from_title(title)
+        assert is_template is True, title
+
+
+def test_kind_from_title_short_english_fmt_not_matched() -> None:
+    # 短い英語 FMT / format は正規資料名（新提案書FMT 等）に誤爆するため対象外。
+    for title in ("新提案書FMT", "report_format_2025", "FMT一覧"):
+        is_template, _is_recurring = _kind_from_title(title)
+        assert is_template is False, title
+
+
+def test_kind_from_title_plain_proposal_is_neither() -> None:
+    assert _kind_from_title("出光興産様向けSNS運用提案書") == (False, False)
+    assert _kind_from_title("") == (False, False)
+
+
+def test_kind_from_title_period_word_alone_is_not_recurring() -> None:
+    # 期間語単独（報告系語なし）の提案書タイトルは recurring にしない
+    # （提案書intentクエリからの silent drop 防止）。
+    for title in (
+        "提案_出光興産_2026上期施策",
+        "出光興産様 2026年上期プロモーション提案書",
+        "【提案書】下期キャンペーン企画_アース製薬",
+        "四半期ごとのSNS運用プラン提案書",
+        "前年比120%以上期待できる施策のご提案",  # substring 誤爆（以上期待→上期）
+        "不定期開催イベントのご提案",  # 「不定期」の 定期 は除外
+        "毎月報告会つき運用プランのご提案",  # 「毎月報告」の 月報 は除外
+    ):
+        _is_template, is_recurring = _kind_from_title(title)
+        assert is_recurring is False, title
+
+
+def test_kind_from_title_weak_template_word_in_campaign_is_not_template() -> None:
+    # 弱語（サンプル/ガイドライン/フォーマット）が施策文脈で出るタイトルは template にしない
+    # （exclude_templates 常時ONでの全検索不可視化の防止）。
+    for title in (
+        "無料サンプル配布キャンペーン提案書",
+        "サンプリング施策提案書",  # サンプル ⊄ サンプリング
+        "ガイドライン策定支援のご提案",
+        "薬機法ガイドライン改定対応のご提案",
+        "IR資料フォーマット刷新のご提案",
+    ):
+        is_template, _is_recurring = _kind_from_title(title)
+        assert is_template is False, title
+
+
+def test_kind_from_title_both_flags() -> None:
+    assert _kind_from_title("月次報告テンプレート") == (True, True)
+
+
+def test_classify_llm_flags_read_without_rules_gate() -> None:
+    # LLM 出力の is_template / is_recurring は gate 無関係に読む（プロンプト由来）。
+    bedrock = _fake_bedrock('{"doc_type": "報告書", "is_template": false, "is_recurring": true}')
+    cls = DocClassifier(bedrock, use_kind_rules=False).classify(
+        title="ふつうのタイトル", text="x", request_id="r"
+    )
+    assert cls is not None
+    assert cls.is_recurring is True
+    assert cls.is_template is False
+
+
+def test_classify_rules_gate_off_ignores_title(monkeypatch: Any) -> None:
+    # 既定（USE_DOC_KIND_RULES 未設定）はタイトルルール無効＝従来挙動と完全一致。
+    monkeypatch.delenv("USE_DOC_KIND_RULES", raising=False)
+    bedrock = _fake_bedrock('{"doc_type": "提案書"}')
+    cls = DocClassifier(bedrock).classify(
+        title="2025年上期売上報告テンプレート", text="x", request_id="r"
+    )
+    assert cls is not None
+    assert cls.is_template is False
+    assert cls.is_recurring is False
+
+
+def test_classify_rules_gate_on_via_env(monkeypatch: Any) -> None:
+    monkeypatch.setenv("USE_DOC_KIND_RULES", "1")
+    bedrock = _fake_bedrock('{"doc_type": "報告書", "is_template": false, "is_recurring": false}')
+    cls = DocClassifier(bedrock).classify(title="月次売上データ", text="x", request_id="r")
+    assert cls is not None
+    assert cls.is_recurring is True  # ルールが LLM(false) より優先（OR マージ）
+
+
+def test_classify_rules_or_merge_with_llm() -> None:
+    # タイトルはテンプレ語なし・LLM が is_template=true → OR で true。
+    bedrock = _fake_bedrock('{"doc_type": "その他", "is_template": true}')
+    cls = DocClassifier(bedrock, use_kind_rules=True).classify(
+        title="会社紹介", text="x", request_id="r"
+    )
+    assert cls is not None
+    assert cls.is_template is True
+    assert cls.is_recurring is False
+
+
+def test_classify_bedrock_failure_with_rules_returns_flags_only() -> None:
+    # LLM 失敗でもタイトルルールが立てばフラグだけの分類を返す（従来は None）。
+    bedrock = MagicMock()
+    bedrock.converse.side_effect = RuntimeError("bedrock down")
+    cls = DocClassifier(bedrock, use_kind_rules=True).classify(
+        title="提案書テンプレート", text="x", request_id="r"
+    )
+    assert cls == DocClassification(is_template=True)
+
+
+def test_classify_bedrock_failure_without_rules_stays_none() -> None:
+    bedrock = MagicMock()
+    bedrock.converse.side_effect = RuntimeError("bedrock down")
+    cls = DocClassifier(bedrock, use_kind_rules=False).classify(
+        title="提案書テンプレート", text="x", request_id="r"
+    )
+    assert cls is None  # gate OFF は従来どおり fail-open で None
+
+
+def test_classify_llm_bool_string_coerced() -> None:
+    bedrock = _fake_bedrock('{"is_template": "true", "is_recurring": "no"}')
+    cls = DocClassifier(bedrock, use_kind_rules=False).classify(title="t", text="x", request_id="r")
+    assert cls is not None
+    assert cls.is_template is True
+    assert cls.is_recurring is False
+
+
+def test_as_metadata_flags_only_when_true() -> None:
+    md = DocClassification(is_template=True, is_recurring=True).as_metadata()
+    assert md == {"cls_is_template": "true", "cls_is_recurring": "true"}
+    # 偽ならキー自体を出さない（後方互換・JSONB migration 不要）。
+    md2 = DocClassification(project="A社").as_metadata()
+    assert "cls_is_template" not in md2
+    assert "cls_is_recurring" not in md2
+
+
+def test_is_empty_false_with_only_flags() -> None:
+    assert not DocClassification(is_template=True).is_empty()
+    assert not DocClassification(is_recurring=True).is_empty()
+
+
+def test_prompt_mentions_flags_and_recurring_rule() -> None:
+    # プロンプト回 regression 防止: 2 フラグと「定期報告は報告書」の指示を含むこと。
+    assert '"is_template"' in _CLASSIFY_SYSTEM_PROMPT
+    assert '"is_recurring"' in _CLASSIFY_SYSTEM_PROMPT
+    assert "報告書" in _CLASSIFY_SYSTEM_PROMPT
+    assert "提案の事例" in _CLASSIFY_SYSTEM_PROMPT

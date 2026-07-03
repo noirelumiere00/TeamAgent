@@ -205,6 +205,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 判定・除外は pgvector 側（SQL）の責務＝この skill は flag を運ぶだけ。**既定 OFF・
         # 後方互換**：DOC_DEDUP_EXCLUDE_SEARCH 無効なら exclude_duplicates=False で従来と完全一致。
         self._exclude_duplicates = self._envflag("DOC_DEDUP_EXCLUDE_SEARCH")
+        # テンプレ/雛形（cls_is_template）・定期報告（cls_is_recurring）の文書単位除外。
+        # ingest.classify の 2 フラグ（決定論タイトルルール OR LLM）を検索側 WHERE で使う。
+        # TEMPLATE_EXCLUDE_SEARCH（既定 OFF・後方互換）で:
+        # - exclude_templates は**常時** True（テンプレは何を探していても事例ではない）
+        # - exclude_recurring は「提案書 intent」（明示 filter_doc_type=提案書 or 自動
+        #   knowledge_filters / plan.doc_type=提案書）のときだけ True＝「上期報告を見たい」
+        #   クエリを殺さない。判定は _retrieve（_is_proposal_intent）で行い _pool_search /
+        #   _apply_client_boost へパラメータで運ぶ。無効なら両フラグ False で従来と完全一致。
+        self._exclude_templates = self._envflag("TEMPLATE_EXCLUDE_SEARCH")
         # L3: boilerplate/suppressed の SQL 除外句が fail-open（業界フィルタ解除）の再検索すら
         # 0 件にしてしまい、近傍があるのに「該当資料なし」と返す事故への最後の砦。
         # _pool_search の通常経路で hits が空 かつ exclude 系（boilerplate/duplicates）の
@@ -393,17 +402,24 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         request_id: str,
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
+        exclude_recurring: bool = False,
     ) -> list[SearchHit]:
         """新スキーマの単一ベクトル検索。フィルタ指定で 0 件なら外して再検索（fail-open）。
 
-        L3: フィルタ解除後も 0 件 かつ exclude 系（boilerplate/duplicates）が真のときは、
-        最後の砦として exclude を全て外して 1 回だけ再検索し、救済 hit に
-        is_low_confidence=True を付ける（テンプレ/重複除外が近傍まで巻き込んで 0 件化する
-        事故の保険）。SEARCH_EXCLUSION_RESCUE で gating（既定 ON、exclude 系 OFF なら無影響）。
+        L3: フィルタ解除後も 0 件 かつ exclude 系（boilerplate/duplicates/templates/
+        recurring）が真のときは、最後の砦として exclude を全て外して 1 回だけ再検索し、
+        救済 hit に is_low_confidence=True を付ける（テンプレ/重複除外が近傍まで巻き込んで
+        0 件化する事故の保険）。SEARCH_EXCLUSION_RESCUE で gating
+        （既定 ON、exclude 系 OFF なら無影響）。
 
         sticky_filters / metadata_contains（ユーザー明示の budget / client）は、自動付与の
         metadata_filters や filter_industry を fail-open で外すときでも**必ず再注入**する
         （「500万〜で絞ったのに 0 件→黙って全予算帯が返る」無音 drop を防ぐ）。
+
+        exclude_recurring は _retrieve が「提案書 intent」のときだけ True にして渡す
+        （env TEMPLATE_EXCLUDE_SEARCH が前提）。exclude_templates は常時 env 値
+        （self._exclude_templates）。fail-open 再検索でも両者は維持し、rescue 経路でのみ
+        他 exclude と一緒に False へ倒す。
         """
         hits = self._pgvector.search_similar_new_schema(
             conn=conn,
@@ -417,6 +433,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             metadata_contains=metadata_contains,
             exclude_boilerplate=self._exclude_boilerplate,
             exclude_duplicates=self._exclude_duplicates,
+            exclude_templates=self._exclude_templates,
+            exclude_recurring=exclude_recurring,
             embedding_col=self._embedding_column,
         )
         if not hits and (metadata_filters or filter_industry):
@@ -431,13 +449,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 metadata_contains=metadata_contains,  # 明示 client は保持
                 exclude_boilerplate=self._exclude_boilerplate,
                 exclude_duplicates=self._exclude_duplicates,
+                exclude_templates=self._exclude_templates,
+                exclude_recurring=exclude_recurring,
                 embedding_col=self._embedding_column,
             )
         # L3: ここまで 0 件 かつ exclude 系が効いている → exclude を全外しで最後の再検索。
         if (
             not hits
             and self._exclusion_rescue
-            and (self._exclude_boilerplate or self._exclude_duplicates)
+            and (
+                self._exclude_boilerplate
+                or self._exclude_duplicates
+                or self._exclude_templates
+                or exclude_recurring
+            )
         ):
             rescued = self._pgvector.search_similar_new_schema(
                 conn=conn,
@@ -450,6 +475,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 metadata_contains=metadata_contains,  # 明示 client は最後まで保持
                 exclude_boilerplate=False,
                 exclude_duplicates=False,
+                exclude_templates=False,
+                exclude_recurring=False,
                 embedding_col=self._embedding_column,
             )
             if rescued:
@@ -462,9 +489,24 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     rescued=len(rescued),
                     exclude_boilerplate=self._exclude_boilerplate,
                     exclude_duplicates=self._exclude_duplicates,
+                    exclude_templates=self._exclude_templates,
+                    exclude_recurring=exclude_recurring,
                 )
                 hits = rescued
         return hits
+
+    @staticmethod
+    def _is_proposal_intent(filter_doc_type: str | None, auto_doc_type: str | None) -> bool:
+        """「提案書 intent」判定（exclude_recurring を立てるかどうか）。
+
+        明示 filter_doc_type があればそれだけで判定する（明示優先＝ユーザーが「議事録」と
+        指定したのに自動抽出の「提案事例」で定期報告を落とす、を防ぐ）。明示が無ければ
+        自動抽出（extract_knowledge_filters の cls_doc_type / plan.doc_type）の 提案書 を
+        採用する。どちらも無ければ False＝「上期報告を見たい」等の定期報告クエリを殺さない。
+        """
+        if filter_doc_type:
+            return filter_doc_type == "提案書"
+        return auto_doc_type == "提案書"
 
     def _retrieve(
         self, embedding: list[float], input: SearchInput, ctx: SkillContext
@@ -542,6 +584,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 if input.filter_solution:
                     sticky_pairs["cls_solution"] = input.filter_solution
                 sticky: dict[str, str] | None = sticky_pairs or None
+                # 定期報告（cls_is_recurring）の除外は「提案書 intent」のときだけ。
+                # env OFF（既定）なら _exclude_templates=False で常に False（後方互換）。
+                excl_recurring = False
                 if self._query_planner is not None:
                     # P3: LLM ルーティング + multi-query/HyDE → RRF 融合。
                     plan = self._query_planner.plan(input.query, ctx.request_id)
@@ -570,6 +615,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     else:
                         eff_industry = input.filter_industry
                         kf = None
+                    # 提案書 intent（明示 filter_doc_type 優先・無ければ plan.doc_type）。
+                    # plan.doc_type はフィルタ適用と同じく USE_KNOWLEDGE_FILTERS 有効時のみ。
+                    excl_recurring = self._exclude_templates and self._is_proposal_intent(
+                        input.filter_doc_type,
+                        plan.doc_type if self._use_knowledge_filters else None,
+                    )
                     # multi-query: 元クエリ + 言い換え + HyDE を埋め込む。重複文は除いて
                     # 余計な embed / RRF リストを増やさない（Haiku が近似文を返しがちなため）。
                     sub_embeddings = [embedding]
@@ -595,6 +646,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             sticky_filters=sticky,
                             metadata_contains=mc,
                             request_id=ctx.request_id,
+                            exclude_recurring=excl_recurring,
                         )
                         for emb in sub_embeddings
                     ]
@@ -605,6 +657,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         extract_knowledge_filters(input.query)
                         if self._use_knowledge_filters
                         else None
+                    )
+                    # 提案書 intent（明示 filter_doc_type 優先・無ければ自動抽出の
+                    # cls_doc_type）。pop 前に読む（明示 doc_type 指定時は明示側で判定）。
+                    excl_recurring = self._exclude_templates and self._is_proposal_intent(
+                        input.filter_doc_type,
+                        (knowledge_filters or {}).get("cls_doc_type"),
                     )
                     # 明示 doc_type / solution があれば、同名の自動抽出キーは外す（sticky 側で
                     # 等価に効くため二重 AND を避け、明示フィルタを優先する）。
@@ -627,6 +685,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         sticky_filters=sticky,
                         metadata_contains=mc,
                         request_id=ctx.request_id,
+                        exclude_recurring=excl_recurring,
                     )
                 # Sprint 7: クライアント名ブースト。固有名詞クエリで dense が正解 chunk を
                 # 取りこぼすのを補強（client_name 絞り検索を rerank プールへ合流）。
@@ -643,6 +702,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         request_id=ctx.request_id,
                         sticky_filters=sticky,  # 明示 doc_type/solution/budget を boost でも保持
                         metadata_contains=mc,  # 通常 None（filter_client 未指定時のみ boost）
+                        exclude_recurring=excl_recurring,  # 提案書 intent 時のみ（boost も同じ）
                     )
                 # M1 資料の被り対策。**プール段階（rerank の前）**に噛ませる。
                 # 旧実装は rerank→top_k 後段に置いていたため、最良 doc が 2 chunk に圧縮され
@@ -882,6 +942,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         request_id: str,
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
+        exclude_recurring: bool = False,
     ) -> list[SearchHit]:
         """固有名詞クエリで client_name 絞り検索を追加し rerank プールへ合流する。
 
@@ -892,6 +953,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         ヒットが rerank 後に表面化する（設計 §A/§E「明示フィルタは全再検索で保持」の穴）。
         client_boost は input.filter_client 未指定時のみ走るため通常 metadata_contains の
         __client__ は None だが、後方互換のため受け取って素通しする。
+
+        exclude_templates / exclude_recurring も本検索（_pool_search）と同値で渡す。
+        さもないと client 名一致のテンプレ/定期報告がここからプールへ合流し、除外設計が
+        boost 経路だけ素通しになる（boilerplate/duplicates で過去 2 回検出済みの取りこぼしと
+        同型の穴）。exclude_recurring は _retrieve が判定した提案書 intent の値。
         """
         matched = self._match_client(query, conn, request_id)
         if not matched:
@@ -908,6 +974,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             metadata_contains=metadata_contains,
             exclude_boilerplate=self._exclude_boilerplate,
             exclude_duplicates=self._exclude_duplicates,
+            exclude_templates=self._exclude_templates,
+            exclude_recurring=exclude_recurring,
             embedding_col=self._embedding_column,
         )
         if not boost:

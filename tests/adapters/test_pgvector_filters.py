@@ -136,3 +136,56 @@ def test_embedding_col_rejects_injection() -> None:
 
     with pytest.raises(ValueError, match="embedding_col"):
         _run(embedding_col="embedding; DROP TABLE chunks --")
+
+
+# ── exclude_templates / exclude_recurring（テンプレ・定期報告の文書単位除外） ──
+
+
+def test_exclude_templates_adds_coalesce_clause_without_params() -> None:
+    """exclude_templates=True で固定リテラル COALESCE 句が入り、bind params は増えない。"""
+    _, params_base = _run()
+    sql, params = _run(exclude_templates=True)
+    assert "COALESCE((d.metadata->>'cls_is_template')::bool, false) = false" in sql
+    # 値 bind は一切増えない（句は固定リテラルのみ＝injection 面の追加リスクなし）
+    assert params == params_base
+    assert "cls_is_recurring" not in sql
+
+
+def test_exclude_recurring_adds_coalesce_clause_without_params() -> None:
+    _, params_base = _run()
+    sql, params = _run(exclude_recurring=True)
+    assert "COALESCE((d.metadata->>'cls_is_recurring')::bool, false) = false" in sql
+    assert params == params_base
+    assert "cls_is_template" not in sql
+
+
+def test_exclude_templates_and_recurring_coexist_with_and() -> None:
+    sql, _ = _run(exclude_templates=True, exclude_recurring=True)
+    assert "COALESCE((d.metadata->>'cls_is_template')::bool, false) = false" in sql
+    assert "COALESCE((d.metadata->>'cls_is_recurring')::bool, false) = false" in sql
+    assert " AND " in sql
+
+
+def test_exclude_flags_off_sql_byte_identical() -> None:
+    """両フラグ既定 False（未指定）は従来 SQL とバイト等価（後方互換）。"""
+    sql_base, params_base = _run()
+    sql_off, params_off = _run(exclude_templates=False, exclude_recurring=False)
+    assert sql_base == sql_off
+    assert params_base == params_off
+    assert "cls_is_template" not in sql_off
+    assert "cls_is_recurring" not in sql_off
+
+
+def test_exclude_flags_combine_with_other_filters() -> None:
+    """既存 exclude（boilerplate/duplicates）や sticky と AND 共存する。"""
+    sql, params = _run(
+        exclude_templates=True,
+        exclude_recurring=True,
+        exclude_boilerplate=True,
+        sticky_filters={"cls_doc_type": "提案書"},
+    )
+    assert "COALESCE((c.metadata->>'boilerplate')::bool, false) = false" in sql
+    assert "COALESCE((d.metadata->>'cls_is_template')::bool, false) = false" in sql
+    assert "COALESCE((d.metadata->>'cls_is_recurring')::bool, false) = false" in sql
+    assert "cls_doc_type" in params
+    assert "提案書" in params
