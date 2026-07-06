@@ -1658,9 +1658,32 @@ def _ingest_gsheet(
     docs_n = 0
     chunks_n = 0
 
+    # 2026-07-06: タブ名は運用でリネームされ得る（命名ルール導入時に実際に発生し
+    # "Unable to parse range" で全シート取り込み失敗した）。gid は不変なので、取り込み時に
+    # gid → 現在のタブ名を解決し、yaml の tab_name は解決失敗時の fallback に降格する。
+    # external_id は従来どおり gid ベース＝リネーム後の再取り込みも冪等 upsert のまま。
+    try:
+        _meta = client.get_sheet_metadata(spec.sheet_id, request_id)
+        _gid_to_title = {t.gid: t.title for t in _meta.tabs if t.title}
+    except Exception:
+        logger.exception(
+            "gsheet_metadata_failed_fallback_tab_name",
+            sheet_id=spec.sheet_id,
+        )
+        _gid_to_title = {}
+
     for tab in spec.tabs:
+        tab_title = _gid_to_title.get(tab.gid) or tab.tab_name
+        if tab_title != tab.tab_name:
+            logger.info(
+                "gsheet_tab_renamed_resolved_by_gid",
+                sheet_id=spec.sheet_id,
+                gid=tab.gid,
+                yaml_tab_name=tab.tab_name,
+                resolved_title=tab_title,
+            )
         tab_rows = client.get_tab_rows(
-            sheet_id=spec.sheet_id, tab_name=tab.tab_name, request_id=request_id
+            sheet_id=spec.sheet_id, tab_name=tab_title, request_id=request_id
         )
         if not tab_rows.headers:
             continue

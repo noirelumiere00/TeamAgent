@@ -2525,3 +2525,57 @@ def test_crawl_one_file_exception_does_not_kill_source(
     )
     assert docs_n == 1
     assert [c["external_id"] for c in repo.upsert_calls] == ["OK"]
+
+
+def test_ingest_gsheet_resolves_renamed_tab_by_gid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """タブがリネームされても gid で現タイトルを解決して取り込める(本番障害の回帰テスト)。
+
+    2026-07-06: 命名ルール導入でタブ名が変わり "Unable to parse range: 'フォーム回答 1'"
+    で全シート取り込みが失敗した。gid は不変なので metadata から現タイトルを解決する。
+    """
+    from teamagent.adapters.gsheets_client import SheetMetadata, SheetTab, TabRows
+
+    fake_client = MagicMock()
+    # yaml 上は「フォーム回答 1」だが、実シートは「営業FB_回答」にリネーム済み
+    fake_client.get_sheet_metadata.return_value = SheetMetadata(
+        sheet_id="1V",
+        title="FB",
+        tabs=(
+            SheetTab(sheet_id="1V", gid=537831563, title="営業FB_回答", row_count=2, col_count=2),
+        ),
+    )
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1V",
+        tab_name="営業FB_回答",
+        headers=("業界", "温度感"),
+        rows=(("飲食", "高"),),
+        row_count=1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1V",
+        sheet_name="FB",
+        description="",
+        tabs=(GSheetsTabSpec(gid=537831563, tab_name="フォーム回答 1"),),
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    assert docs_n == 1
+    # get_tab_rows は yaml の旧名でなく gid 解決後の現タイトルで呼ばれる
+    _, kwargs = fake_client.get_tab_rows.call_args
+    assert kwargs["tab_name"] == "営業FB_回答"
+    # external_id は gid ベースのまま(リネームしても冪等 upsert)
+    assert "537831563" in repo.upsert_calls[0]["external_id"]
