@@ -72,6 +72,12 @@ def _hnsw_index_ddl(target_column: str) -> tuple[str, str]:
     作り直す（pgvector 一括ロードの定石）。CREATE 文に WITH 句は付けない（0013 の記録どおり
     m/ef_construction チューニング未実施＝既存定義と一致させるため）。target_column は
     固定許可リスト検証で識別子 injection を防ぐ。
+
+    注意: embedding_cohere を NULL→4KB ベクトルに UPDATE すると行が肥大化して HOT 更新に
+    ならず（新タプル生成）、**テーブル上の全 HNSW 索引が新タプルを指すよう再構築**される。
+    つまり cohere 列の索引だけ落としても、残る e5 列 embedding の HNSW 索引が毎行 ~1s 保守されて
+    遅い（実測で確定）。よって reembed 側は _HNSW_INDEX_BY_COLUMN の**全 HNSW 索引**を落として
+    書き、完了後に全て作り直す（この関数は各列 1 本分の DDL を返す純関数のまま）。
     """
     if target_column not in _HNSW_INDEX_BY_COLUMN:
         raise ValueError(
@@ -163,7 +169,10 @@ def reembed(
     batch_fn = getattr(embedder, "embed_passage_batch", None)
     # 一括再 embed の間だけ HNSW 索引を落とす（毎行の索引保守で激遅になる罠の回避）。
     # dry-run（commit 無し）では索引を触らない。--keep-index で従来どおり触らない。
+    # 非 HOT 更新はテーブル上の全 HNSW 索引を保守するため、target_column の索引だけでなく
+    # chunks の全 HNSW 索引（e5・cohere 両方）を落として書き、完了後に全て作り直す。
     manage_index = commit and not keep_index
+    managed_cols = sorted(_HNSW_INDEX_BY_COLUMN) if manage_index else []
     with psycopg.connect(dsn) as conn:
         # 【ハング根治・必須】この生接続に vector 型アダプタを登録する。未登録だと list[float] が
         # float8[] としてバインドされ、pgvector に float8[]→vector の暗黙キャストが無いため、
@@ -171,8 +180,8 @@ def reembed(
         # pgvector_client._connect_pg は全接続で register_vector を呼ぶが、reembed は独自接続で
         # 取りこぼしていた（本ハングの根本原因・調査で確定）。
         register_vector(conn)
-        if manage_index:
-            _run_index_ddl(dsn, target_column, action="drop")
+        for col in managed_cols:
+            _run_index_ddl(dsn, col, action="drop")
         try:
             with conn.cursor() as cur:
                 # 取り込み時は contextualized（prefix+content）を embed_passage する。再 embed も
@@ -220,10 +229,11 @@ def reembed(
                     "reembed_batch_done", scanned=stats["scanned"], updated=stats["updated"]
                 )
         finally:
-            # 例外時も索引を作り直す（落としたまま放置しない）。IF NOT EXISTS で冪等。
-            # SIGKILL 等で finally が動かず索引欠落しても本番検索は e5 列を読むので無害＝再実行で復旧。
-            if manage_index:
-                _run_index_ddl(dsn, target_column, action="create")
+            # 例外時も落とした全索引を作り直す（落としたまま放置しない）。IF NOT EXISTS で冪等。
+            # SIGKILL 等で finally が動かず索引欠落しても、再実行で復旧（本番使用の e5 索引が
+            # 一時欠落すると検索は seq scan で遅くなるが動作はする＝夜間の一括作業として許容）。
+            for col in managed_cols:
+                _run_index_ddl(dsn, col, action="create")
     logger.info("reembed_done", **stats)
     return stats
 

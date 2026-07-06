@@ -162,8 +162,11 @@ class _FakeEmbedder:
         return [0.1, 0.2]
 
 
-def test_reembed_drops_then_creates_index_on_commit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """commit かつ keep_index=False で 索引 DROP→CREATE が各1回 target_column 付きで走る。"""
+def test_reembed_drops_then_creates_all_hnsw_indexes_on_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """commit かつ keep_index=False で chunks の全 HNSW 索引（e5・cohere 両方）を
+    DROP→（書込）→CREATE する。非 HOT 更新が全索引を保守するため target 列だけでは不十分。"""
     ddl = _install_fake_db(monkeypatch, rows=[("c1", "t1"), ("c2", "t2")])
     rc.reembed(
         dsn="x",
@@ -172,7 +175,12 @@ def test_reembed_drops_then_creates_index_on_commit(monkeypatch: pytest.MonkeyPa
         commit=True,
         target_column="embedding_cohere",
     )
-    assert ddl == [("drop", "embedding_cohere"), ("create", "embedding_cohere")]
+    assert ddl == [
+        ("drop", "embedding"),
+        ("drop", "embedding_cohere"),
+        ("create", "embedding"),
+        ("create", "embedding_cohere"),
+    ]
 
 
 def test_reembed_keep_index_skips_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -217,8 +225,13 @@ def test_reembed_recreates_index_even_on_exception(monkeypatch: pytest.MonkeyPat
             commit=True,
             target_column="embedding_cohere",
         )
-    # DROP は走り、例外後も CREATE が finally で走る
-    assert ddl == [("drop", "embedding_cohere"), ("create", "embedding_cohere")]
+    # 全索引 DROP は走り、例外後も全 CREATE が finally で走る
+    assert ddl == [
+        ("drop", "embedding"),
+        ("drop", "embedding_cohere"),
+        ("create", "embedding"),
+        ("create", "embedding_cohere"),
+    ]
 
 
 def test_keep_index_argparse(monkeypatch: pytest.MonkeyPatch) -> None:
