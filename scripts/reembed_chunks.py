@@ -55,6 +55,35 @@ def batched(rows: Sequence[Any], size: int) -> Iterator[list[Any]]:
 # （e5 列を残すので env を戻すだけで rollback 可能）。
 _ALLOWED_TARGET_COLUMNS: frozenset[str] = frozenset({"embedding", "embedding_cohere"})
 
+# 各 embedding 列の HNSW 索引名（migration の DDL と完全一致・_ALLOWED_TARGET_COLUMNS と 1:1）。
+# embedding=0001 の chunks_embedding_hnsw_idx / embedding_cohere=0016 の同名 _cohere。
+# 両者とも pgvector 既定パラメータ（WITH 句なし・opclass vector_cosine_ops）。
+_HNSW_INDEX_BY_COLUMN: dict[str, str] = {
+    "embedding": "chunks_embedding_hnsw_idx",
+    "embedding_cohere": "chunks_embedding_cohere_hnsw_idx",
+}
+
+
+def _hnsw_index_ddl(target_column: str) -> tuple[str, str]:
+    """(drop_sql, create_sql) を返す。既存 migration(0001/0016)の DDL と完全一致。
+
+    ベクトル列に HNSW 索引がある状態で 1 行ずつ UPDATE すると毎行索引を保守して激遅
+    （82K 件で事実上終わらない）ため、一括再 embed では索引を落として書き、完了後に
+    作り直す（pgvector 一括ロードの定石）。CREATE 文に WITH 句は付けない（0013 の記録どおり
+    m/ef_construction チューニング未実施＝既存定義と一致させるため）。target_column は
+    固定許可リスト検証で識別子 injection を防ぐ。
+    """
+    if target_column not in _HNSW_INDEX_BY_COLUMN:
+        raise ValueError(
+            f"target_column は {sorted(_HNSW_INDEX_BY_COLUMN)} のいずれか (got {target_column!r})"
+        )
+    idx = _HNSW_INDEX_BY_COLUMN[target_column]
+    drop_sql = f"DROP INDEX IF EXISTS {idx}"  # nosec B608
+    create_sql = (  # nosec B608
+        f"CREATE INDEX IF NOT EXISTS {idx} ON chunks USING hnsw ({target_column} vector_cosine_ops)"
+    )
+    return drop_sql, create_sql
+
 
 def build_update_params(
     chunk_id: Any, embedding: list[float], target_column: str = "embedding"
@@ -77,6 +106,23 @@ def build_update_params(
 # -----------------------------------------------------------
 # DB 実行部
 # -----------------------------------------------------------
+def _run_index_ddl(dsn: str, target_column: str, *, action: str) -> None:
+    """対象列の HNSW 索引を DROP または CREATE する（別の使い捨て autocommit 接続で実行）。
+
+    書き込み用の通常接続とは分離する（DDL を通常トランザクションに混ぜない）。
+    非 CONCURRENTLY: embedding_cohere は本番検索未使用（EMBEDDING_COLUMN 既定 embedding）なので
+    短時間の ACCESS EXCLUSIVE を許容し、CONCURRENTLY より速く確実。先例 migrate_to_prod_rds.py。
+    """
+    import psycopg
+
+    drop_sql, create_sql = _hnsw_index_ddl(target_column)
+    sql = drop_sql if action == "drop" else create_sql
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+    logger.info("reembed_index_ddl", action=action, target_column=target_column)
+
+
 def reembed(
     *,
     dsn: str,
@@ -86,6 +132,7 @@ def reembed(
     limit: int | None = None,
     target_column: str = "embedding",
     only_missing: bool = False,
+    keep_index: bool = False,
 ) -> dict[str, int]:
     """chunks を再 embed する。戻り値: 集計 dict。
 
@@ -99,6 +146,11 @@ def reembed(
 
     embedder が embed_passage_batch を持つ場合（BedrockCohereEmbedder）はバッチAPIで
     まとめて埋め込む（1件ずつの逐次呼び出しだと 8万件で10時間超・バッチなら数十分）。
+
+    keep_index=False（既定）かつ commit のとき、対象列の HNSW 索引を書き込み前に DROP し
+    完了後（例外時も finally で）CREATE で作り直す。ベクトル列に索引がある状態で 1 行ずつ
+    UPDATE すると毎行索引を保守して激遅（8万件で事実上終わらない）ため。keep_index=True で
+    従来どおり索引を触らない（小件数追い足しや本番使用列 embedding 向け）。
     """
     if target_column not in _ALLOWED_TARGET_COLUMNS:
         raise ValueError(
@@ -109,6 +161,9 @@ def reembed(
 
     stats = {"scanned": 0, "updated": 0}
     batch_fn = getattr(embedder, "embed_passage_batch", None)
+    # 一括再 embed の間だけ HNSW 索引を落とす（毎行の索引保守で激遅になる罠の回避）。
+    # dry-run（commit 無し）では索引を触らない。--keep-index で従来どおり触らない。
+    manage_index = commit and not keep_index
     with psycopg.connect(dsn) as conn:
         # 【ハング根治・必須】この生接続に vector 型アダプタを登録する。未登録だと list[float] が
         # float8[] としてバインドされ、pgvector に float8[]→vector の暗黙キャストが無いため、
@@ -116,49 +171,59 @@ def reembed(
         # pgvector_client._connect_pg は全接続で register_vector を呼ぶが、reembed は独自接続で
         # 取りこぼしていた（本ハングの根本原因・調査で確定）。
         register_vector(conn)
-        with conn.cursor() as cur:
-            # 取り込み時は contextualized（prefix+content）を embed_passage する。再 embed も
-            # 同じソースを使い検索/取り込みのサブ空間を一致させる（contextualized 無しは content）。
-            q = "SELECT id, COALESCE(contextualized, content) AS src FROM chunks"
-            if only_missing:
-                # target_column は許可リスト検証済みの固定識別子（injection 不能）。
-                q += f" WHERE {target_column} IS NULL"  # nosec B608
-            q += " ORDER BY id"
-            if limit:
-                q += f" LIMIT {int(limit)}"
-            cur.execute(q)
-            rows = cur.fetchall()
+        if manage_index:
+            _run_index_ddl(dsn, target_column, action="drop")
+        try:
+            with conn.cursor() as cur:
+                # 取り込み時は contextualized（prefix+content）を embed_passage する。再 embed も
+                # 同じソースを使い検索/取り込みのサブ空間を一致させる（contextualized 無しは content）。
+                q = "SELECT id, COALESCE(contextualized, content) AS src FROM chunks"
+                if only_missing:
+                    # target_column は許可リスト検証済みの固定識別子（injection 不能）。
+                    q += f" WHERE {target_column} IS NULL"  # nosec B608
+                q += " ORDER BY id"
+                if limit:
+                    q += f" LIMIT {int(limit)}"
+                cur.execute(q)
+                rows = cur.fetchall()
 
-        logger.info(
-            "reembed_start",
-            total=len(rows),
-            batch_size=batch_size,
-            commit=commit,
-            target_column=target_column,
-            only_missing=only_missing,
-            batched_api=bool(batch_fn),
-        )
-        for batch in batched(rows, batch_size):
-            if batch_fn is not None:
-                # バッチAPI: DBバッチ単位でまとめて埋め込み（96件/コールは embedder 側が分割）。
-                srcs = [src or "" for _, src in batch]
-                vecs = batch_fn(srcs)
-                pairs = list(zip((cid for cid, _ in batch), vecs, strict=True))
-            else:
-                pairs = [(cid, embedder.embed_passage(src or "")) for cid, src in batch]
-            stats["scanned"] += len(batch)
-            if commit:
-                # per-row UPDATE。VPC内（Fargate）実行では1件あたり ~1ms でバッチ全体でも高速。
-                # 注記: psycopg3 の executemany を pgvector パラメータで使うと（vector 型の
-                # bulk バインドで）ハングする事象を実測したため採用しない。トンネル越しで
-                # per-row が遅い問題は、この再 embed を Fargate(VPC内) で走らせることで解消する。
-                with conn.cursor() as cur:
-                    for chunk_id, vec in pairs:
-                        sql, params = build_update_params(chunk_id, vec, target_column)
-                        cur.execute(sql, params)
-                stats["updated"] += len(pairs)
-                conn.commit()
-            logger.info("reembed_batch_done", scanned=stats["scanned"], updated=stats["updated"])
+            logger.info(
+                "reembed_start",
+                total=len(rows),
+                batch_size=batch_size,
+                commit=commit,
+                target_column=target_column,
+                only_missing=only_missing,
+                batched_api=bool(batch_fn),
+                manage_index=manage_index,
+            )
+            for batch in batched(rows, batch_size):
+                if batch_fn is not None:
+                    # バッチAPI: DBバッチ単位でまとめて埋め込み（96件/コールは embedder 側が分割）。
+                    srcs = [src or "" for _, src in batch]
+                    vecs = batch_fn(srcs)
+                    pairs = list(zip((cid for cid, _ in batch), vecs, strict=True))
+                else:
+                    pairs = [(cid, embedder.embed_passage(src or "")) for cid, src in batch]
+                stats["scanned"] += len(batch)
+                if commit:
+                    # per-row UPDATE。索引を落としてあるので毎行の索引保守が無く、VPC内なら高速。
+                    # 注記: psycopg3 の executemany を pgvector パラメータで使うと（vector 型の
+                    # bulk バインドで）ハングする事象を実測したため採用しない。
+                    with conn.cursor() as cur:
+                        for chunk_id, vec in pairs:
+                            sql, params = build_update_params(chunk_id, vec, target_column)
+                            cur.execute(sql, params)
+                    stats["updated"] += len(pairs)
+                    conn.commit()
+                logger.info(
+                    "reembed_batch_done", scanned=stats["scanned"], updated=stats["updated"]
+                )
+        finally:
+            # 例外時も索引を作り直す（落としたまま放置しない）。IF NOT EXISTS で冪等。
+            # SIGKILL 等で finally が動かず索引欠落しても本番検索は e5 列を読むので無害＝再実行で復旧。
+            if manage_index:
+                _run_index_ddl(dsn, target_column, action="create")
     logger.info("reembed_done", **stats)
     return stats
 
@@ -176,6 +241,16 @@ def main() -> int:
         "--only-missing",
         action="store_true",
         help="target_column が NULL の行だけ対象（中断からの再開用）",
+    )
+    p.add_argument(
+        "--keep-index",
+        action="store_true",
+        help=(
+            "対象列の HNSW 索引を落とさず従来どおり実行（既定 False=索引を DROP→再embed→CREATE で"
+            "作り直し高速化）。小件数の追い足し（--only-missing で数百件）は索引再ビルドが逆に高コスト、"
+            "また --target-column embedding（e5＝本番使用列）は本番検索の索引を落とさないため、"
+            "いずれも --keep-index 推奨。"
+        ),
     )
     p.add_argument(
         "--target-column",
@@ -223,6 +298,7 @@ def main() -> int:
             limit=args.limit,
             target_column=args.target_column,
             only_missing=args.only_missing,
+            keep_index=args.keep_index,
         )
     except Exception as e:
         print(f"[ERROR] reembed failed: {e}", file=sys.stderr)
