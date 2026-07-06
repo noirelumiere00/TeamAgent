@@ -10,6 +10,7 @@ from teamagent.ingest.classify import (
     _CLASSIFY_SYSTEM_PROMPT,
     DocClassification,
     DocClassifier,
+    _kind_from_folder,
     _kind_from_title,
     build_classifier_from_env,
 )
@@ -376,3 +377,94 @@ def test_prompt_mentions_flags_and_recurring_rule() -> None:
     assert '"is_recurring"' in _CLASSIFY_SYSTEM_PROMPT
     assert "報告書" in _CLASSIFY_SYSTEM_PROMPT
     assert "提案の事例" in _CLASSIFY_SYSTEM_PROMPT
+    # ④: 格納フォルダを判断材料にする指示（本文優先の但し書き込み）を含むこと。
+    assert "格納フォルダ" in _CLASSIFY_SYSTEM_PROMPT
+
+
+# -----------------------------------------------------------
+# ④ フォルダ置き位置の決定論ルール（_kind_from_folder）＋ classify の folder_name
+# -----------------------------------------------------------
+def test_kind_from_folder_template_keywords() -> None:
+    # 番号 prefix / 年度 suffix / 表記ゆれに耐える（キーワード search）
+    assert _kind_from_folder("99_テンプレート") == (True, False)
+    assert _kind_from_folder("テンプレ置き場") == (True, False)
+    assert _kind_from_folder("00_雛形(2026)") == (True, False)
+    assert _kind_from_folder("ひな形フォルダ") == (True, False)
+    assert _kind_from_folder("Templates") == (True, False)
+    # パス風の入力でも効く
+    assert _kind_from_folder("営業共有/99_テンプレ") == (True, False)
+
+
+def test_kind_from_folder_recurring_keywords() -> None:
+    assert _kind_from_folder("03_定期報告") == (False, True)
+    assert _kind_from_folder("定期レポート_2026年度") == (False, True)
+    assert _kind_from_folder("売上データ") == (False, True)
+    assert _kind_from_folder("実績データ置き場") == (False, True)
+    assert _kind_from_folder("週報") == (False, True)
+    assert _kind_from_folder("定例MTG") == (False, True)
+
+
+def test_kind_from_folder_weak_words_do_not_fire() -> None:
+    """タイトルルールの弱語はフォルダでは不採用（配下全ファイルへ波及するため誤爆コスト大）。"""
+    # サンプル/フォーマット/ガイドライン/（案）はフォルダでは発火しない
+    assert _kind_from_folder("サンプル動画") == (False, False)
+    assert _kind_from_folder("提案フォーマット刷新PJ") == (False, False)
+    assert _kind_from_folder("ガイドライン策定支援") == (False, False)
+    # 素の「定期」は使わない（定期便等の商材語に誤爆させない）・期間語単独も不採用
+    assert _kind_from_folder("定期便キャンペーン") == (False, False)
+    assert _kind_from_folder("2026上期") == (False, False)
+    assert _kind_from_folder("不定期報告") == (False, False)
+    assert _kind_from_folder("") == (False, False)
+
+
+def test_classify_folder_rule_or_merged_when_gate_on() -> None:
+    """gate ON: フォルダのテンプレ語がタイトル/LLM(false) より優先（OR マージ）。"""
+    bedrock = _fake_bedrock('{"doc_type": "提案書", "is_template": false, "is_recurring": false}')
+    cls = DocClassifier(bedrock, use_kind_rules=True).classify(
+        title="アース製薬向け提案", text="x", request_id="r", folder_name="99_テンプレート"
+    )
+    assert cls is not None
+    assert cls.is_template is True
+    assert cls.is_recurring is False
+
+
+def test_classify_folder_rule_ignored_when_gate_off() -> None:
+    """gate OFF（既定）: フォルダ決定論は無効（フラグは LLM 出力のみ＝既定でも安全）。"""
+    bedrock = _fake_bedrock('{"doc_type": "提案書"}')
+    cls = DocClassifier(bedrock, use_kind_rules=False).classify(
+        title="アース製薬向け提案", text="x", request_id="r", folder_name="99_テンプレート"
+    )
+    assert cls is not None
+    assert cls.is_template is False
+    assert cls.is_recurring is False
+
+
+def test_classify_folder_name_added_to_prompt_as_hint() -> None:
+    """(b) Haiku ヒント: folder_name があれば user prompt に「格納フォルダ: XX」行が入る。"""
+    bedrock = _fake_bedrock('{"doc_type": "提案書"}')
+    DocClassifier(bedrock, use_kind_rules=False).classify(
+        title="t", text="x", request_id="r", folder_name="提案事例アーカイブ"
+    )
+    user_text = bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
+    assert "格納フォルダ: 提案事例アーカイブ\n" in user_text
+
+
+def test_classify_without_folder_name_prompt_unchanged() -> None:
+    """folder_name 未指定（既定 ""）なら prompt は従来とバイト等価（後方互換）。"""
+    bedrock = _fake_bedrock('{"doc_type": "提案書"}')
+    DocClassifier(bedrock, use_kind_rules=False).classify(
+        title="タイトル", text="本文", request_id="r"
+    )
+    user_text = bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
+    assert "格納フォルダ" not in user_text
+    assert user_text.startswith("資料タイトル: タイトル\n\n本文抜粋")
+
+
+def test_classify_bedrock_failure_with_folder_rule_returns_flags_only() -> None:
+    """LLM 失敗でもフォルダルールが立てばフラグだけの分類を返す（タイトルルールと対称）。"""
+    bedrock = MagicMock()
+    bedrock.converse.side_effect = RuntimeError("bedrock down")
+    cls = DocClassifier(bedrock, use_kind_rules=True).classify(
+        title="ふつうのタイトル", text="x", request_id="r", folder_name="03_定期報告"
+    )
+    assert cls == DocClassification(is_recurring=True)
