@@ -105,10 +105,17 @@ def reembed(
             f"target_column は {sorted(_ALLOWED_TARGET_COLUMNS)} のいずれか (got {target_column!r})"
         )
     import psycopg
+    from pgvector.psycopg import register_vector
 
     stats = {"scanned": 0, "updated": 0}
     batch_fn = getattr(embedder, "embed_passage_batch", None)
     with psycopg.connect(dsn) as conn:
+        # 【ハング根治・必須】この生接続に vector 型アダプタを登録する。未登録だと list[float] が
+        # float8[] としてバインドされ、pgvector に float8[]→vector の暗黙キャストが無いため、
+        # psycopg が prepare/pipeline 化した時点で沈黙ハングする（executemany・per-row 反復とも）。
+        # pgvector_client._connect_pg は全接続で register_vector を呼ぶが、reembed は独自接続で
+        # 取りこぼしていた（本ハングの根本原因・調査で確定）。
+        register_vector(conn)
         with conn.cursor() as cur:
             # 取り込み時は contextualized（prefix+content）を embed_passage する。再 embed も
             # 同じソースを使い検索/取り込みのサブ空間を一致させる（contextualized 無しは content）。
