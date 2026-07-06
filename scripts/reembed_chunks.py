@@ -141,14 +141,14 @@ def reembed(
                 pairs = [(cid, embedder.embed_passage(src or "")) for cid, src in batch]
             stats["scanned"] += len(batch)
             if commit:
-                # UPDATE を executemany で1バッチ送信する。psycopg3.1+ は executemany を
-                # 内部でパイプライン化し、リモートDB（SSMトンネル越し等）では per-row の
-                # cur.execute ループ比で 3〜4桁高速（1件ずつ round-trip だと 200件/108秒だった）。
-                # SQL/列は build_update_params と同一の許可リスト検証済み固定文（injection 不能）。
-                update_sql, _ = build_update_params(0, [], target_column)
-                seq = [(vec, chunk_id) for chunk_id, vec in pairs]
+                # per-row UPDATE。VPC内（Fargate）実行では1件あたり ~1ms でバッチ全体でも高速。
+                # 注記: psycopg3 の executemany を pgvector パラメータで使うと（vector 型の
+                # bulk バインドで）ハングする事象を実測したため採用しない。トンネル越しで
+                # per-row が遅い問題は、この再 embed を Fargate(VPC内) で走らせることで解消する。
                 with conn.cursor() as cur:
-                    cur.executemany(update_sql, seq)
+                    for chunk_id, vec in pairs:
+                        sql, params = build_update_params(chunk_id, vec, target_column)
+                        cur.execute(sql, params)
                 stats["updated"] += len(pairs)
                 conn.commit()
             logger.info("reembed_batch_done", scanned=stats["scanned"], updated=stats["updated"])
