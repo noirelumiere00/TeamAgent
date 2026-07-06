@@ -92,6 +92,7 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 - **B8 `DRAFT_ON_DEMAND_ONLY="true"`**（`morning_digest_schedule.tf`）：朝は自動下書きせずボタン押下でオンデマンド生成＝Bedrock コスト削減。**既定 false で建てると毎朝全ユーザー分の下書きを生成してコスト/レイテンシ爆発**。
 - **B9 `reingest.sh` の `NEW_IMAGE` digest は手動更新**：新 MCP image を push したら実行前に最新 digest へ。古いと image not found。
 - **B10 Slack は 1 App で Socket Mode + HTTP interactivity を併用できない**（アーキ制約）。
+- **B11 ⚡ECS サービス/taskdef は CLI 管理（terraform apply で本番を壊さない）**：2026-06-26 に `apply_openclaw.sh` を `-var openclaw_image=` 無しで実行 → `var.openclaw_image=""` → `count = var.openclaw_image=="" ? 0 : 1` が **0**＝openclaw service が destroy・image="" で task def 再作成失敗＝**AiLa 全断**（mcp/connect-web は無傷）。**ECS の image/env デプロイは terraform でなく CLI（`register-task-definition` + `update-service`）で行う**。恒久対策＝①`terraform.tfvars` に `mcp_image`/`enable_*`/`slack_dm_allowlist` を明記（B1 徹底）②`fargate.tf`/`connect_web.tf` の mcp・connect-web task def/service に `lifecycle { ignore_changes }`（CLI の env/taskdef を terraform が巻き戻さない）③**openclaw は完全 CLI 管理**＝`tfvars` に `openclaw_image` を**書かない**（書くと terraform が重複 service を作る）。openclaw の image/DM-allowlist 変更は `apply_openclaw.sh <image>`（CLI 化済）で。**`terraform apply` は bare/`-target`/`-auto-approve` 禁止、打つ前に必ず full `terraform plan` で destroy=0 / replace=0 を目視、他セッションのデプロイ中は実行しない**。`apply_resilience.sh` は ECS target を除去＋既定 plan のみに無害化済。復旧は CLI `aws ecs create-service`（td family の正常 revision から）。
 
 ---
 

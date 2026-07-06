@@ -34,9 +34,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG WITH_SCRAPE_TOOLS=false
 # fonts-noto-cjk: §Q-HTML→PPTX で playwright が要点スライドを画像化する際の日本語フォント
 # （無いと PNG/PPTX で日本語が豆腐□になる）。chromium は提案PPTXのレンダリングにも使う。
+# 2026-07-06: chromium 本体は apt でなく Playwright 管理版に切替。apt の chromium 150 が arm64 Fargate 上で
+# 起動直後 SIGTRAP する回帰を実証したため(全フラグ回避不能)。--with-deps が必要な共有ライブラリも入れる。
+# /usr/bin/chromium へ symlink して既存 CHROMIUM_PATH=/usr/bin/chromium(下段 ENV)を不変に保つ。
 RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ]; then \
       apt-get update && apt-get install -y --no-install-recommends \
-        nodejs npm chromium ffmpeg fonts-noto-cjk \
+        nodejs npm ffmpeg fonts-noto-cjk \
+      && PLAYWRIGHT_BROWSERS_PATH=/opt/pw npx -y playwright@1.55.0 install --with-deps chromium \
+      && ln -sf "$(find /opt/pw -type f -name chrome | head -1)" /usr/bin/chromium \
+      && chmod -R a+rx /opt/pw \
       && rm -rf /var/lib/apt/lists/* ; \
     fi
 

@@ -30,6 +30,9 @@ resource "aws_security_group" "vpce" {
       # §U-Part3-Step C: morning_digest Scheduled Task も VPC endpoint 経由（PR #131）。
       # 追加忘れると private_dns_enabled=true のため 443 が落ち provisioning ループになる必須配線。
       var.enable_morning_digest ? [aws_security_group.morning_digest[0].id] : [],
+      # 2026-06-26: tiktok-acquire 使い捨て Fargate も ECR pull/Logs/Dynamo を endpoint 経由で解決。
+      # 上記同様、ここに入れ忘れると ECR auth pull が i/o timeout で TaskFailedToStart になる（実際に発生）。
+      var.enable_tiktok_acquire ? [aws_security_group.tiktok_tasks[0].id] : [],
     )
   }
   egress {

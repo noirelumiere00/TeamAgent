@@ -197,6 +197,7 @@ resource "aws_iam_role" "tiktok_task" {
 }
 
 data "aws_iam_policy_document" "tiktok_task_app" {
+  count = local.tk_enabled # 2026-06-26: 無 count だと無効時に [0] 参照で full plan が壊れる
   statement {
     sid       = "S3PutPrefix"
     actions   = ["s3:PutObject"]
@@ -218,7 +219,7 @@ resource "aws_iam_role_policy" "tiktok_task_app" {
   count  = local.tk_enabled
   name   = "${local.tk_name}-task-app"
   role   = aws_iam_role.tiktok_task[0].id
-  policy = data.aws_iam_policy_document.tiktok_task_app.json
+  policy = data.aws_iam_policy_document.tiktok_task_app[0].json
 }
 
 # ---------- ECS Task Definition(arm64) ----------
@@ -291,6 +292,7 @@ resource "aws_iam_role" "tiktok_dispatch" {
 }
 
 data "aws_iam_policy_document" "tiktok_dispatch_policy" {
+  count = local.tk_enabled # 2026-06-26: 無 count だと無効時に [0] 参照で full plan が壊れる
   statement {
     sid       = "SqsConsume"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
@@ -322,7 +324,7 @@ resource "aws_iam_role_policy" "tiktok_dispatch_policy" {
   count  = local.tk_enabled
   name   = "${local.tk_name}-dispatch-policy"
   role   = aws_iam_role.tiktok_dispatch[0].id
-  policy = data.aws_iam_policy_document.tiktok_dispatch_policy.json
+  policy = data.aws_iam_policy_document.tiktok_dispatch_policy[0].json
 }
 
 resource "aws_lambda_function" "tiktok_dispatch" {
@@ -356,14 +358,17 @@ resource "aws_lambda_event_source_mapping" "tiktok_dispatch" {
 # ---------- IAM: OC/AiLa(MCP)ロールに付ける権限(SQS送信/Dynamo参照/S3署名) ----------
 # ★RunTask/PassRoleは絶対に含めない(権限分離=敵対レビューhigh対応)
 data "aws_iam_policy_document" "tiktok_mcp_policy" {
+  count = local.tk_enabled # 2026-06-26: 無 count だと無効時に [0] 参照で full plan が壊れる
   statement {
     sid       = "SqsSend"
     actions   = ["sqs:SendMessage"]
     resources = [aws_sqs_queue.tiktok_jobs[0].arn]
   }
   statement {
-    sid       = "DynamoRead"
-    actions   = ["dynamodb:GetItem"]
+    # 2026-06-26: submit が初期ステータスを put_item（tiktok_task_store.py:62）するため PutItem 必須。
+    # GetItem は status ポーリング用。UpdateItem は使い捨て Fargate(tiktok_task ロール)側のみ。
+    sid       = "DynamoStatusRW"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
     resources = [aws_dynamodb_table.tiktok_jobs[0].arn]
   }
   statement {
@@ -378,25 +383,13 @@ resource "aws_iam_role_policy" "tiktok_mcp_policy" {
   count  = (local.tk_enabled == 1 && var.tiktok_mcp_task_role_name != "") ? 1 : 0
   name   = "${local.tk_name}-mcp-access"
   role   = var.tiktok_mcp_task_role_name
-  policy = data.aws_iam_policy_document.tiktok_mcp_policy.json
+  policy = data.aws_iam_policy_document.tiktok_mcp_policy[0].json
 }
 
 # ---------- S3 ライフサイクル(tiktok-acquire/ を30日でexpire) ----------
-# 注意: バケットに lifecycle config が他に無いこと前提(1バケット1config)。既存があれば統合すること。
-resource "aws_s3_bucket_lifecycle_configuration" "tiktok_acquire" {
-  count  = local.tk_enabled
-  bucket = aws_s3_bucket.raw_files.id
-  rule {
-    id     = "tiktok-acquire-expire"
-    status = "Enabled"
-    filter {
-      prefix = "tiktok-acquire/"
-    }
-    expiration {
-      days = 30
-    }
-  }
-}
+# 2026-07-06: lambda_iam.tf の aws_s3_bucket_lifecycle_configuration.raw_files へ統合済み。
+# S3 lifecycle は「1バケット1config」で、別 resource だと互いに全ルールを上書きし合う
+# （2026-06-26 の apply で Glacier ルールが一時消失する事故が実際に発生）。ここには置かないこと。
 
 # ---------- 出力 ----------
 output "tiktok_jobs_queue_url" {

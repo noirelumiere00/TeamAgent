@@ -57,8 +57,11 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
 
     name: ClassVar[str] = "tiktok_search"
     description: ClassVar[str] = (
-        "TikTok をキーワード/ハッシュタグで検索し、上位動画のデータ(再生数/いいね/作者/"
-        "ハッシュタグ等)を取得して Gemini で横断分析する"
+        "TikTok をキーワード/ハッシュタグで「今すぐ中身を見たい・調べたい」ときに使う同期ツール"
+        "（その場で完結）。上位N本(既定10)の再生数/いいね/作者/タグを返し、"
+        "任意で Gemini が横断分析する。"
+        "トリガー=「TikTokで検索/調べて/今すぐ見たい/どんな動画が伸びてる/上位だけ見せて」。"
+        "動画本体(mp4)のDLや提案用の素材一括収集はしない→それは tiktok_acquire。"
     )
     input_schema: ClassVar[type[BaseModel]] = TikTokSearchInput
     output_schema: ClassVar[type[BaseModel]] = TikTokSearchOutput

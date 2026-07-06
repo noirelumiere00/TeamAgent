@@ -163,12 +163,19 @@ def _verdict_band(out: VideoAlgorithmOutput) -> str:
         )
         or '<span class="muted small">顕著な共通項なし</span>'
     )
-    gate = (
-        f'<div class="nbanner">⚠ 分析成立 n={n}（極小サンプル）。下記は<b>断定でなく観測仮説</b>。'
-        "テスト投稿での検証前提でお読みください。</div>"
-        if n < 3
-        else ""
-    )
+    # 審査所見R7: 警告は n<6 まで段階化（n<3=強・3≤n<6=中）。n=5 既定運用でも小サンプルは明示する
+    if n < 3:
+        gate = (
+            f'<div class="nbanner">⚠ 分析成立 n={n}（極小サンプル）。下記は<b>断定でなく観測仮説</b>。'
+            "テスト投稿での検証前提でお読みください。</div>"
+        )
+    elif n < 6:
+        gate = (
+            f'<div class="nbanner">△ 分析成立 n={n}（小サンプル）。下記は傾向の参考値で、'
+            "<b>断定には本数が足りません</b>。テスト投稿での検証を推奨します。</div>"
+        )
+    else:
+        gate = ""
     sub_html = f'<div class="vsub">{_esc(sub)}</div>' if sub else ""
     # クリエイティブ指示 = プランナーの creative_brief 優先、無ければ次の一手テンプレ
     brief = syn.creative_brief if (syn and syn.creative_brief) else _next_actions(out)
@@ -870,12 +877,18 @@ def _stats_block(s: StatsAnalysis | None) -> str:
         f'<div class="th">フック型の分布（強フック {_esc(s.strong_hook_ratio)}）</div>'
         f'<div class="kvrow">{hooks or "—"}</div>'
     )
-    # 特徴量マトリクスは Top5比較ボードと重複するので付録では出さない（免責もフッタに一元化）
+    # 特徴量マトリクスは Top5比較ボードと重複するので付録では出さない
+    # 審査所見R7: 生成済みの caveats（免責）が未描画だった。統計の直下に箇条書きで明示する
+    caveats_html = (
+        '<ul class="caveats">' + "".join(f"<li>{_esc(c)}</li>" for c in s.caveats) + "</ul>"
+        if s.caveats
+        else ""
+    )
     return (
         '<details class="appendix"><summary class="th big">'
         f"統計付録（n={s.sample_size}・有意性なし／クリックで展開）</summary>"
         f'<div class="stats-grid"><div>{corr_tbl}{dist_tbl}</div>'
-        f"<div>{cov_block}{hook_block}</div></div></details>"
+        f"<div>{cov_block}{hook_block}</div></div>{caveats_html}</details>"
     )
 
 
@@ -1069,6 +1082,7 @@ section{margin:0 0 40px}
 /* H 統計付録 */
 .appendix{border:1px solid var(--line);border-radius:8px;padding:4px 18px;background:#fff}
 .appendix>summary{cursor:pointer;padding:12px 0}
+.caveats{margin:14px 0 12px;padding-left:18px;color:var(--warn);font-size:11.5px;line-height:1.7}
 .stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:8px}
 @media(max-width:1080px){.stats-grid{grid-template-columns:1fr}.verdict{grid-template-columns:1fr}.nmon{grid-template-columns:1fr}.nscreen{width:100%}}
 .bar{position:relative;height:8px;background:var(--soft);border-radius:5px;width:64px;display:inline-block;vertical-align:middle}

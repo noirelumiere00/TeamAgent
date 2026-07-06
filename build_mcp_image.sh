@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 export AWS_REGION=ap-northeast-1
 PROJECT=teamagent-dev-image-builder
 BUCKET=teamagent-dev-raw-files
-TAG="search-$(date +%s)"   # ECR immutable tag のため毎回ユニーク
+TAG="mcpfat-$(date +%s)"   # ECR immutable tag のため毎回ユニーク（fat=scrape tools入り）
 
 echo "== 1) working tree を zip → S3 =="
 TMPZIP=/tmp/search_src_$$.zip
@@ -21,6 +21,7 @@ GIT_BRANCH=$(git branch --show-current 2>/dev/null || true); GIT_BRANCH=${GIT_BR
 BUILD_ID=$(aws codebuild start-build --project-name "$PROJECT" \
   --environment-variables-override \
     "name=IMAGE_TAG,value=$TAG,type=PLAINTEXT" \
+    "name=WITH_SCRAPE_TOOLS,value=true,type=PLAINTEXT" \
     "name=GIT_COMMIT,value=$GIT_COMMIT,type=PLAINTEXT" \
     "name=GIT_BRANCH,value=$GIT_BRANCH,type=PLAINTEXT" \
   --query 'build.id' --output text)

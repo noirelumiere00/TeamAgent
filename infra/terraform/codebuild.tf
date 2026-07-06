@@ -53,7 +53,8 @@ data "aws_iam_policy_document" "codebuild" {
       "ecr:GetDownloadUrlForLayer",
       "ecr:DescribeImages", # buildspec post_build の digest 取得（無いと tee が空のまま SUCCEEDED）
     ]
-    resources = [aws_ecr_repository.mcp.arn, aws_ecr_repository.openclaw.arn]
+    # 2026-06-26: tiktok-acquire イメージも CodeBuild で push 可に（count=0 時は splat で空＝無効時無影響）。
+    resources = concat([aws_ecr_repository.mcp.arn, aws_ecr_repository.openclaw.arn], aws_ecr_repository.tiktok_acquire[*].arn)
   }
   statement {
     sid       = "S3Source"

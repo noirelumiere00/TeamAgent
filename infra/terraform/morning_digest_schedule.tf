@@ -247,6 +247,11 @@ resource "aws_ecs_task_definition" "morning_digest" {
     }
     # Scheduled Task なので healthCheck 不要（exit code が成否を語る）
   }])
+
+  # 2026-06-26 恒久対策(§4 B11): CLI 再登録(deploy_digest_test.sh 等)で drift 済。apply で巻き戻さない。
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
 # --- EventBridge → ECS RunTask の IAM role ---

@@ -151,6 +151,10 @@
             // /search・/search/graph）の URL を返す。URL生成のみ（CONNECT_BASE_URL 未設定なら
             // 「未公開」を返し壊れたリンクは出さない）。USE_KNOWLEDGE_SEARCH_URL_TOOL=1 が必要。
             "knowledge_search_url",
+            // tiktok_acquire: 「○○でTikTok取得して(上位動画も)」→ 30本/KW 取得＋上位N本DL を使い捨て
+            //   Fargate に投げる(SQS submit のみ)。tiktok_acquire_status で job 照会＋成果の署名URL。
+            //   MCP側に USE_TIKTOK_ACQUIRE=1＋TIKTOK_TASK_QUEUE/TIKTOK_JOBS_TABLE/TIKTOK_S3_BUCKET が必要。
+            "tiktok_acquire", "tiktok_acquire_status",
           ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
