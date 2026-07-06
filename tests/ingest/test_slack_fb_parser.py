@@ -6,7 +6,11 @@ PII (実顧客名・実営業担当者名) は仮名化する。
 
 from __future__ import annotations
 
-from teamagent.ingest.slack_fb_parser import extract_client_name, parse_fb_post
+from teamagent.ingest.slack_fb_parser import (
+    extract_client_name,
+    map_fb_fields,
+    parse_fb_post,
+)
 
 
 def _fb_sample_hearing() -> str:
@@ -230,6 +234,100 @@ def test_unknown_labels_are_ignored() -> None:
     assert meta["channel_type"] == "直販"
     # 未知ラベルが metadata に key として現れない
     assert all(k in {"channel_type", "agency_name", "client_case", "deal_phase"} for k in meta)
+
+
+# ==================================================================
+# map_fb_fields (gsheets フォーム回答行との共通コア)
+# ==================================================================
+def test_map_fb_fields_sheet_headers_with_variants() -> None:
+    """フォーム回答シートの実ヘッダ (表記ゆれ込み) を metadata に写像する。
+
+    シート特有の表記ゆれ (2026-07-03 実データ確認):
+    - 「顧客名・案件名」 ('・' 区切り) → client_case
+    - 「顧客反応(ポジ・ネガ)」 (半角括弧・ポジネガ統合 1 列) → client_reaction
+    """
+    fields = {
+        "タイムスタンプ": "2026/06/30 10:00:00",
+        "商流": "代理店",
+        "顧客名": "アルファ広告社",
+        "顧客名・案件名": "ベータ商事 / ガンマ製品",
+        "商談フェーズ": "ヒアリング",
+        "商談感触（BANT）": "B（前向き）",
+        "顧客反応(ポジ・ネガ)": "ポジ: 適合性を評価 / ネガ: 予算感に懸念",
+        "提案メニュー": "UGC（TTO、切り抜きなど）",
+    }
+    meta = map_fb_fields(fields)
+    assert meta["channel_type"] == "代理店"
+    assert meta["agency_name"] == "アルファ広告社"
+    assert meta["client_case"] == "ベータ商事 / ガンマ製品"
+    assert meta["deal_phase"] == "ヒアリング"
+    assert meta["bant_score"] == "B（前向き）"
+    assert meta["client_reaction"] == "ポジ: 適合性を評価 / ネガ: 予算感に懸念"
+    assert meta["proposed_menu"] == "UGC（TTO、切り抜きなど）"
+    # 未知ヘッダ (タイムスタンプ) は写像されない
+    assert set(meta) == {
+        "channel_type",
+        "agency_name",
+        "client_case",
+        "deal_phase",
+        "bant_score",
+        "client_reaction",
+        "proposed_menu",
+    }
+    # extract_client_name も従来どおり導出できる ('/' 左側)
+    assert extract_client_name(meta) == "ベータ商事"
+
+
+def test_map_fb_fields_normalizes_half_width_parens_and_whitespace() -> None:
+    """半角括弧「商談感触(BANT)」・前後空白付きヘッダも canonical 扱いでコア判定に乗る。"""
+    fields = {
+        " 商流 ": "直販",
+        "顧客名": "アルファ広告社",
+        "商談フェーズ": "ケイパ",
+        "商談感触(BANT)": "B（前向き）",
+    }
+    meta = map_fb_fields(fields)
+    assert meta["channel_type"] == "直販"
+    assert meta["bant_score"] == "B（前向き）"
+    assert meta["deal_phase"] == "ケイパ"
+
+
+def test_map_fb_fields_non_fb_headers_return_empty_dict() -> None:
+    """ナレッジ共有フォーム等の非 FB ヘッダ (コア列 < 3) は空 dict (副作用ゼロ)。"""
+    fields = {
+        "タイムスタンプ": "2026/06/30 10:00:00",
+        "共有者": "山田太郎",
+        "ナレッジ内容": "TikTok の新機能について",
+        "カテゴリ": "メディア動向",
+    }
+    assert map_fb_fields(fields) == {}
+
+
+def test_map_fb_fields_core_headers_present_but_below_threshold() -> None:
+    """コア列 2 個 (< _FB_MIN_CORE_HITS=3) では FB と認定しない。"""
+    fields = {"商流": "直販", "顧客名": "アルファ広告社", "備考": "メモ"}
+    assert map_fb_fields(fields) == {}
+
+
+def test_map_fb_fields_drops_empty_values() -> None:
+    """FB シートでも空値の列は metadata に含めない (全コア値が空なら空 dict)。"""
+    headers_all_empty = {
+        "商流": "",
+        "顧客名": "",
+        "顧客名・案件名": "",
+        "商談フェーズ": "",
+        "商談感触（BANT）": "",
+    }
+    # コア列は揃っている (閾値は通過する) が、値が全部空 → 空 dict
+    assert map_fb_fields(headers_all_empty) == {}
+
+    partially_filled = dict(headers_all_empty, 商談フェーズ="ヒアリング")
+    meta = map_fb_fields(partially_filled)
+    assert meta == {"deal_phase": "ヒアリング"}
+
+
+def test_map_fb_fields_empty_input() -> None:
+    assert map_fb_fields({}) == {}
 
 
 # ==================================================================

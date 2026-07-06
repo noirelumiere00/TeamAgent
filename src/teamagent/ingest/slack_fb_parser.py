@@ -15,11 +15,19 @@ Day 8 (2026-05-28) で追加。投稿は Workflow Bot がフォーム形式で�
 - chunk content (embedding 対象) は **変更しない** → 既存検索に副作用なし
 - 非 FB 投稿は parse_fb_post() が空 dict を返す → 通常の Slack ingest 経路と同じ
 - migration 不要 (documents.metadata JSONB に append するだけ)
+
+2026-07-03: gsheets フォーム回答シート (row_unit) からも同品質のメタを付けるため、
+「ラベル/ヘッダ → 値 dict を metadata dict へ写像する」コア (map_fb_fields) を
+切り出した。parse_fb_post は Slack bold marker の抽出だけ担当し、写像・FB 判定は
+map_fb_fields に委譲する (後方互換)。_ingest_gsheet はシート行のヘッダ → 値 dict を
+map_fb_fields に直接渡す。シートヘッダの表記ゆれ (半角括弧・`顧客名・案件名` 等) は
+_normalize_fb_label で canonical ラベルに正規化する。
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 
 # Slack の bold marker `*Label*\n` を検出する正規表現。
 # - 行頭の `*` で開始 (MULTILINE で `^` は各行先頭)
@@ -37,9 +45,9 @@ _FB_FIELD_PATTERN = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 
-# ラベル文字列 (Slack 表示) → metadata JSONB key の写像。
+# ラベル文字列 (Slack 表示 / シートヘッダの canonical 形) → metadata JSONB key の写像。
 # 営業 FB の現行フォーム (2026-05 時点) を実投稿から確認して作成。
-# 新規ラベルが追加されたらここに足すだけ。
+# 新規ラベルが追加されたらここに足すだけ。lookup 前に _normalize_fb_label を通すこと。
 _LABEL_TO_METADATA_KEY: dict[str, str] = {
     "商流": "channel_type",
     "顧客名": "agency_name",
@@ -49,8 +57,19 @@ _LABEL_TO_METADATA_KEY: dict[str, str] = {
     "商談感触（BANT）": "bant_score",
     "顧客反応（ポジティブ）": "positive_reaction",
     "顧客反応（質問事項、ネガティブ）": "negative_reaction",
+    # gsheets フォーム回答シートはポジ/ネガが 1 列に統合されている (2026-07-03 実データ確認)。
+    # positive_reaction / negative_reaction へ寄せると意味が壊れる (ネガ内容がポジ扱いに
+    # なる) ので、統合列専用の新キーにする。
+    "顧客反応（ポジ・ネガ）": "client_reaction",
     "ネクストアクション": "next_action",
     "共有メモ": "shared_memo",
+}
+
+# ラベル/ヘッダの表記ゆれ → canonical ラベルの alias。
+# _normalize_fb_label で括弧・スラッシュを正規化した **後** に適用する。
+_LABEL_ALIASES: dict[str, str] = {
+    # gsheets フォーム回答シートのヘッダは '・' 区切り (Slack フォームは '/')
+    "顧客名・案件名": "顧客名/案件名",
 }
 
 # FB 投稿らしさを判定するための最小条件。
@@ -67,6 +86,61 @@ _FOOTER_MARKERS: tuple[str, ...] = (
 )
 
 
+def _normalize_fb_label(label: str) -> str:
+    """ラベル/シートヘッダの表記ゆれを canonical ラベルへ正規化する。
+
+    - 前後 whitespace 除去
+    - 半角括弧 `()` → 全角括弧 `（）` (シート「顧客反応(ポジ・ネガ)」等)
+    - 全角スラッシュ `／` → 半角 `/`
+    - alias 適用 (「顧客名・案件名」 → 「顧客名/案件名」等)
+    """
+    normalized = label.strip().replace("(", "（").replace(")", "）").replace("／", "/")
+    return _LABEL_ALIASES.get(normalized, normalized)
+
+
+def map_fb_fields(fields: Mapping[str, str]) -> dict[str, str]:
+    """ラベル/ヘッダ → 値 の dict を営業 FB metadata JSONB 用 dict に写像する。
+
+    Slack 投稿 (parse_fb_post 経由) と gsheets フォーム回答行 (_ingest_gsheet) の
+    共通コア。ヘッダは _normalize_fb_label で正規化してから照合するので、
+    シート特有の表記ゆれ (半角括弧・`顧客名・案件名`) も吸収する。
+
+    Returns:
+        - 正規化後のコアラベルが _FB_MIN_CORE_HITS 個以上見つかった場合:
+          known label → 非空値 の dict (空値の列/ラベルは含めない)
+        - コアラベル不足 (= 営業 FB ではない) の場合: 空 dict {}
+          → 非 FB シート/投稿への副作用ゼロ
+
+    コアラベル判定は「ラベル (列) の存在」で行い値の有無は問わない (Slack 経路の
+    従来挙動と同一)。既知ラベル以外は無視する。
+    """
+    if not fields:
+        return {}
+
+    normalized: dict[str, str] = {}
+    for label, value in fields.items():
+        canonical = _normalize_fb_label(label)
+        # 表記ゆれで同一 canonical に潰れた場合は非空値を優先 (空値で上書きしない)
+        if canonical not in normalized or value.strip():
+            normalized[canonical] = value
+
+    core_hits = len(normalized.keys() & _FB_CORE_LABELS)
+    if core_hits < _FB_MIN_CORE_HITS:
+        return {}
+
+    out: dict[str, str] = {}
+    for canonical, value in normalized.items():
+        key = _LABEL_TO_METADATA_KEY.get(canonical)
+        if key is None:
+            continue
+        cleaned = value.strip()
+        if not cleaned:
+            continue
+        out[key] = cleaned
+
+    return out
+
+
 def parse_fb_post(content: str) -> dict[str, str]:
     """Slack 営業 FB 投稿の `*ラベル*` 形式を解析し、metadata JSONB 用 dict を返す。
 
@@ -80,6 +154,7 @@ def parse_fb_post(content: str) -> dict[str, str]:
 
     既知ラベル以外は無視する (未知ラベルが追加されたら _LABEL_TO_METADATA_KEY に追記)。
     値は前後 whitespace を strip するが、改行・箇条書きは保持する。
+    写像と FB 判定は map_fb_fields (gsheets 経路と共通) に委譲する。
     """
     if not content:
         return {}
@@ -95,24 +170,13 @@ def parse_fb_post(content: str) -> dict[str, str]:
     if not matches:
         return {}
 
-    # FB 投稿判定: コアラベルが N 個以上 hit するか
-    found_labels = {label.strip() for label, _ in matches}
-    core_hits = len(found_labels & _FB_CORE_LABELS)
-    if core_hits < _FB_MIN_CORE_HITS:
-        return {}
-
-    # 既知ラベルだけ拾って metadata 化
-    out: dict[str, str] = {}
+    # ラベル → 値 dict 化。重複ラベルは従来挙動 (後勝ち・ただし空値では上書きしない) を踏襲。
+    fields: dict[str, str] = {}
     for label, value in matches:
-        key = _LABEL_TO_METADATA_KEY.get(label.strip())
-        if key is None:
-            continue
-        cleaned = value.strip()
-        if not cleaned:
-            continue
-        out[key] = cleaned
+        if label not in fields or value.strip():
+            fields[label] = value
 
-    return out
+    return map_fb_fields(fields)
 
 
 def extract_client_name(metadata: dict[str, str]) -> str | None:

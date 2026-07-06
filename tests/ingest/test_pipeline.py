@@ -504,6 +504,149 @@ def test_ingest_gsheet_handler_row_per_document(monkeypatch: pytest.MonkeyPatch)
 
 
 # -----------------------------------------------------------
+# Sheet handler — 営業 FB フォーム回答シートの構造化メタ（2026-07-03）
+# -----------------------------------------------------------
+# ショート動画営業 FB のフォーム回答シートの実ヘッダ（ユーザー実データ確認済・仮名化不要）。
+# 「顧客名・案件名」（'・' 区切り）と「顧客反応(ポジ・ネガ)」（半角括弧・統合列）が
+# Slack フォームのラベルとの表記ゆれポイント。
+_FB_SHEET_HEADERS = (
+    "タイムスタンプ",
+    "商流",
+    "顧客名",
+    "顧客名・案件名",
+    "商談フェーズ",
+    "商談感触（BANT）",
+    "顧客反応(ポジ・ネガ)",
+    "提案メニュー",
+)
+
+
+def test_ingest_gsheet_fb_sheet_rows_get_structured_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FB シート行はヘッダ → 値が Slack FB 経路と同じキーでメタ化される。
+
+    is_sales_fb / channel_type / agency_name / client_case / deal_phase /
+    bant_score / client_reaction / proposed_menu / client_name（導出）。
+    """
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1V",
+        tab_name="フォーム回答 1",
+        headers=_FB_SHEET_HEADERS,
+        rows=(
+            (
+                "2026/06/30 10:00:00",
+                "代理店",
+                "アルファ広告社",
+                "ベータ商事 / ガンマ製品",
+                "ヒアリング",
+                "B（前向き）",
+                "ポジ: 適合性を評価 / ネガ: 予算感に懸念",
+                "UGC（TTO、切り抜きなど）",
+            ),
+            # コア列が全部空（タイムスタンプのみ）の行 → FB メタは付かない
+            ("2026/07/01 09:00:00", "", "", "", "", "", "", ""),
+        ),
+        row_count=2,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1V",
+        sheet_name="ショート動画営業 FB - フォーム回答",
+        description="",
+        tabs=(GSheetsTabSpec(gid=537831563, tab_name="フォーム回答 1"),),
+        extra_metadata={"topic": "営業 FB", "priority": "high"},
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-fb",
+    )
+    assert docs_n == 2
+
+    md = repo.upsert_calls[0]["metadata"]
+    # Slack FB 経路と同じ first-class メタ
+    assert md["is_sales_fb"] is True
+    assert md["channel_type"] == "代理店"
+    assert md["agency_name"] == "アルファ広告社"
+    assert md["client_case"] == "ベータ商事 / ガンマ製品"
+    assert md["deal_phase"] == "ヒアリング"
+    assert md["bant_score"] == "B（前向き）"
+    assert md["client_reaction"] == "ポジ: 適合性を評価 / ネガ: 予算感に懸念"
+    assert md["proposed_menu"] == "UGC（TTO、切り抜きなど）"
+    # client_name は client_case の '/' 左側から導出
+    assert md["client_name"] == "ベータ商事"
+    # 既存の固定キー / extra_metadata は破壊されない
+    assert md["tab_name"] == "フォーム回答 1"
+    assert md["row_idx"] == 2
+    assert md["topic"] == "営業 FB"
+    assert md["priority"] == "high"
+
+    # コア列が全部空の行には FB メタを付けない
+    md_empty = repo.upsert_calls[1]["metadata"]
+    assert "is_sales_fb" not in md_empty
+    assert "client_name" not in md_empty
+    assert "deal_phase" not in md_empty
+
+
+def test_ingest_gsheet_non_fb_sheet_metadata_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 FB シート（ナレッジ共有フォーム等・コア列 < 3）は従来どおりメタ追加なし。"""
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1K",
+        tab_name="フォーム回答 1",
+        headers=("タイムスタンプ", "共有者", "ナレッジ内容", "カテゴリ"),
+        rows=(("2026/06/30 10:00:00", "山田太郎", "TikTok 新機能について", "メディア動向"),),
+        row_count=1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1K",
+        sheet_name="ナレッジ共有",
+        description="",
+        tabs=(GSheetsTabSpec(gid=1, tab_name="フォーム回答 1"),),
+        extra_metadata={"topic": "提案ナレッジ"},
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-nonfb",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    # 従来キーのみ（FB メタは一切付かない）
+    assert set(md) == {"topic", "tab_name", "row_idx"}
+    assert "is_sales_fb" not in md
+
+
+# -----------------------------------------------------------
 # Drive folder ingest — PDF 本文抽出 + ACL 解決
 # -----------------------------------------------------------
 def _make_drive_file(
@@ -1433,6 +1576,72 @@ def test_ingest_gsheet_applies_classification(monkeypatch: pytest.MonkeyPatch) -
     # 既存キーは cls_* マージで破壊されない（後方互換）
     assert md["tab_name"] == "フォーム回答 1"
     assert md["row_idx"] == 2
+
+
+def test_ingest_gsheet_fb_metadata_coexists_with_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FB シートで FB メタと cls_* が共存する（fb → cls の順で合成・cls_* を上書きしない）。
+
+    deal_phase（フォーム実値）と cls_phase（Haiku 分類）は別キーなので両立する。
+    """
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1V",
+        tab_name="フォーム回答 1",
+        headers=_FB_SHEET_HEADERS,
+        rows=(
+            (
+                "2026/06/30 10:00:00",
+                "直販",
+                "アルファ広告社",
+                "シータ食品",
+                "2回目以降提案",
+                "B（前向き）",
+                "施策の考え方は好評",
+                "【メディア】グレースモード",
+            ),
+        ),
+        row_count=1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1V",
+        sheet_name="ショート動画営業 FB - フォーム回答",
+        description="",
+        tabs=(GSheetsTabSpec(gid=537831563, tab_name="フォーム回答 1"),),
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-fb-cls",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    # cls_* は FB メタに上書きされない（stub の値のまま）
+    _assert_classified(md)
+    # FB メタも同時に付く（deal_phase=フォーム実値、cls_phase=分類値で両立）
+    assert md["is_sales_fb"] is True
+    assert md["channel_type"] == "直販"
+    assert md["client_case"] == "シータ食品"
+    assert md["deal_phase"] == "2回目以降提案"
+    assert md["cls_phase"] == "提案"
+    assert md["client_name"] == "シータ食品"
 
 
 def test_ingest_crawl_no_classification_when_disabled(

@@ -1627,6 +1627,11 @@ def _ingest_gsheet(
     )
     from teamagent.ingest.classify import build_classifier_from_env
 
+    # 2026-07-03: 営業 FB フォーム回答シートの構造化。
+    # 行のヘッダ → 値 を Slack FB 経路 (slack_fb_parser) と同じ写像でメタ化する。
+    # 非 FB シート (コアヘッダ < 閾値) は map_fb_fields が空 dict を返すので副作用ゼロ。
+    from teamagent.ingest.slack_fb_parser import extract_client_name, map_fb_fields
+
     client = GSheetsClient.from_env()
     # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。sheet 単位で 1 回構築）。
     # gsheet は row_unit=True（1 行 = 1 document = 1 chunk）なので contextualizer は付けない。
@@ -1646,6 +1651,18 @@ def _ingest_gsheet(
                 continue
             external_id = build_external_id(spec.sheet_id, tab.gid, row_idx)
             row_title = f"{spec.sheet_name} - {tab.tab_name} - row {row_idx}"
+
+            # 営業 FB シート行の構造化メタ (Slack FB 経路 pipeline.py の
+            # _ingest_slack_channel と同品質・同キー)。row が headers より短い分は
+            # 空値扱い (format_row_as_document と同じ) なので strict=False で zip する。
+            fb_metadata = map_fb_fields(dict(zip(tab_rows.headers, row, strict=False)))
+            fb_doc_metadata: dict[str, Any] = {}
+            if fb_metadata:
+                fb_doc_metadata["is_sales_fb"] = True
+                fb_doc_metadata.update(fb_metadata)
+                derived_client_name = extract_client_name(fb_metadata)
+                if derived_client_name:
+                    fb_doc_metadata["client_name"] = derived_client_name
 
             # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
             # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
@@ -1679,6 +1696,8 @@ def _ingest_gsheet(
                     **spec.extra_metadata,
                     "tab_name": tab.tab_name,
                     "row_idx": row_idx,
+                    # Slack 経路と同じ合成順: 固定キー → fb → cls (cls_* を上書きしない)
+                    **fb_doc_metadata,
                     **cls_metadata,
                 },
                 modified_at=None,
