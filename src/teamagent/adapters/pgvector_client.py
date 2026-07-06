@@ -972,6 +972,98 @@ class PgVectorClient:
         )
         return hits
 
+    def list_client_timeline_recent(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        client_name: str,
+        limit: int = 20,
+        request_id: str | None = None,
+    ) -> list[SearchHit]:
+        """指定クライアントの営業 FB の【最新 N 件】を古い順で返す（カルテ用・read-only）。
+
+        ``list_client_timeline`` は ASC LIMIT のため、FB が limit を超えるクライアントで
+        【最古の N 件】を返し、最新 FB とヘッダ（直近フェーズ/BANT/最終接触）が欠落する。
+        本メソッドは modified_at DESC NULLS LAST（同日内は chunk_idx DESC）で最新 N 件を
+        取得し、Python 側で反転して既存契約どおり【古い順】（同日内 chunk_idx 昇順）で
+        返す。呼び出し側の ``timeline[-1]``＝最新 という前提はそのまま使える。
+        DESC の NULLS LAST により modified_at NULL の行は「最古」扱いで、limit 超過時は
+        最初に切り落とされる（日付不明の行が「最新」ヘッダを汚さない）。
+
+        射影列・SearchHit の形は ``list_client_timeline`` と同一。client_name は
+        placeholder 化され SQL injection から保護される。
+        """
+        if not client_name.strip():
+            return []
+
+        sql = """
+            SELECT
+                abs(hashtext(c.id::text)::bigint) AS chunk_id,
+                COALESCE(c.contextualized, c.content) AS content,
+                to_char(d.modified_at, 'YYYY-MM-DD') AS occurred_at,
+                d.source_uri,
+                d.title,
+                d.metadata->>'client_name' AS client_name,
+                d.metadata->>'deal_phase' AS deal_phase,
+                d.metadata->>'bant_score' AS bant_score,
+                d.metadata->>'channel_type' AS channel_type,
+                d.metadata->>'positive_reaction' AS positive_reaction,
+                d.metadata->>'negative_reaction' AS negative_reaction,
+                d.metadata->>'next_action' AS next_action,
+                d.metadata->>'proposed_menu' AS proposed_menu
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE d.metadata->>'is_sales_fb' = 'true'
+              AND d.metadata->>'client_name' LIKE %s
+            ORDER BY d.modified_at DESC NULLS LAST, c.chunk_idx DESC
+            LIMIT %s
+        """  # nosec B608
+        params: list[Any] = [f"%{client_name}%", limit]
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        hits: list[SearchHit] = []
+        for r in rows:
+            meta: dict[str, Any] = {
+                "source_uri": r.get("source_uri"),
+                "source_type": "slack",
+                "title": r.get("title"),
+                "occurred_at": r.get("occurred_at"),
+                "is_sales_fb": True,
+            }
+            for k in (
+                "client_name",
+                "deal_phase",
+                "bant_score",
+                "channel_type",
+                "positive_reaction",
+                "negative_reaction",
+                "next_action",
+                "proposed_menu",
+            ):
+                if r.get(k):
+                    meta[k] = r[k]
+            hits.append(
+                SearchHit(
+                    chunk_id=int(r["chunk_id"]),
+                    content=str(r["content"]),
+                    score=1.0,
+                    metadata=meta,
+                )
+            )
+        # DESC で取った最新 N 件を古い順へ戻す（timeline[-1]＝最新 の契約を保つ）
+        hits.reverse()
+
+        logger.info(
+            "pgvector_list_client_timeline_recent",
+            request_id=request_id,
+            client_name=client_name,
+            limit=limit,
+            hit_count=len(hits),
+        )
+        return hits
+
     def search_drive_by_client_names(
         self,
         conn: psycopg.Connection[dict[str, Any]],
@@ -1064,3 +1156,80 @@ class PgVectorClient:
             hit_count=len(hits),
         )
         return hits
+
+    def list_documents_for_client(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        client_name: str,
+        *,
+        limit: int = 50,
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """指定クライアントの関連資料（非 FB）を新しい順で列挙する（カルテ/Vault 用・read-only）。
+
+        クライアントカルテページ（connect_web GET /search/client/{client}）と
+        Obsidian Vault エクスポータ（scripts/export_vault.py）の「関連資料一覧」を
+        1 クエリで賄う。既存メソッドの穴を埋める最小追加:
+
+        - ``list_client_timeline`` は cls_industry を返さない → 本メソッドの射影で補完
+        - ``list_documents_for_graph`` は modified_at を射影せず・クライアント絞りの
+          WHERE が無い（600 件キャップの Python filter になる）→ SQL 側で絞る
+        - ``search_drive_by_client_names`` は cls_doc_type 等の分類メタを落とす
+
+        条件: suppressed（dedup 非正本）を無条件除外し、FB（is_sales_fb='true'）は
+        timeline 側で出すため資料一覧から除外する。クライアント照合は
+        cls_project / client_name / title の ILIKE 部分一致（「日本ガイシ」で
+        「NGK（日本ガイシ）」も拾う）。excerpt は list_documents_for_graph と同じ
+        「テンプレでない最小 chunk」LATERAL（boilerplate/title_only を後回し）で 160 字。
+
+        client_name は placeholder bind（SQL injection 安全）。空白のみなら [] を即返す。
+        RLS は ``connection(app_role='teamagent_app', user_email=...)`` で有効化済の前提。
+        """
+        if not client_name.strip():
+            return []
+
+        sql = """
+            SELECT
+                d.title,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                to_char(d.modified_at, 'YYYY-MM-DD') AS modified_at,
+                d.metadata->>'cls_industry' AS cls_industry,
+                d.metadata->>'cls_project' AS cls_project,
+                d.metadata->>'cls_doc_type' AS cls_doc_type,
+                d.metadata->>'cls_solution' AS cls_solution,
+                d.metadata->>'cls_budget' AS cls_budget,
+                d.metadata->>'cls_target' AS cls_target,
+                d.metadata->>'client_name' AS client_name,
+                ex.excerpt AS excerpt
+            FROM documents d
+            LEFT JOIN LATERAL (
+                SELECT left(COALESCE(c.contextualized, c.content), 160) AS excerpt
+                FROM chunks c
+                WHERE c.document_id = d.id
+                ORDER BY (COALESCE((c.metadata->>'boilerplate')::bool, false)
+                          OR COALESCE((c.metadata->>'title_only')::bool, false)) ASC,
+                         c.chunk_idx ASC
+                LIMIT 1
+            ) ex ON true
+            WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+              AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
+              AND (d.metadata->>'cls_project' ILIKE %s
+                   OR d.metadata->>'client_name' ILIKE %s
+                   OR d.title ILIKE %s)
+            ORDER BY d.modified_at DESC NULLS LAST
+            LIMIT %s
+        """  # nosec B608
+        like_pattern = f"%{client_name}%"
+        with conn.cursor() as cur:
+            cur.execute(sql, [like_pattern, like_pattern, like_pattern, limit])
+            rows = cur.fetchall()
+        docs = [dict(r) for r in rows]
+        logger.info(
+            "pgvector_list_documents_for_client",
+            request_id=request_id,
+            client_name=client_name,
+            limit=limit,
+            doc_count=len(docs),
+        )
+        return docs

@@ -15,6 +15,7 @@ import html
 import json
 import os
 import threading
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -85,8 +86,19 @@ def _page(title: str, body: str, *, accent: str = "#36c08a") -> str:
 
 
 def _js_str(value: str) -> str:
-    """文字列を安全な JS 文字列リテラルにする（email を textContent 設定する用）。"""
-    return json.dumps(value, ensure_ascii=True)
+    """文字列を安全な JS 文字列リテラルにする（インライン <script> への埋め込み用）。
+
+    json.dumps は ``</script>`` の ``<`` をエスケープしないため、値に閉じタグが入ると
+    HTML パーサが script を早期終了させて XSS が成立し得る（カルテのクライアント名
+    のような任意文字列を埋め込むようになったため顕在化）。``<`` ``>`` ``&`` を
+    \\uXXXX へ置換して防ぐ（JS 文字列リテラルとしては同値・挙動不変）。
+    """
+    return (
+        json.dumps(value, ensure_ascii=True)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
 
 
 def _load_search_config(env: dict[str, str] | None = None) -> DashboardConfig:
@@ -562,6 +574,15 @@ async function search(){
       const link=document.createElement('a');link.href=su;
       link.target='_blank';link.rel='noopener noreferrer';
       link.textContent='出典を開く';meta.appendChild(link);
+    }
+    // カルテ導線: client_name / cls_project がある hit はクライアントカルテへ。
+    // アプリ内固定パス（相対）なので safeUrl（絶対 scheme allowlist）は通さず、
+    // encodeURIComponent + textContent の既存流儀で安全に組む。
+    const kn=h.client_name||h.project;
+    if(kn){
+      const kl=document.createElement('a');
+      kl.href='/search/client/'+encodeURIComponent(kn);
+      kl.textContent='カルテを見る';meta.appendChild(kl);
     }
     const sc=document.createElement('span');sc.className='score';
     const sv=(typeof h.score==='number'?h.score.toFixed(3):h.score);
@@ -1799,6 +1820,13 @@ window.openPreview=function(doc){
     ob.addEventListener('click',function(){
       window.open(su,'_blank','noopener,noreferrer');});
     wrap.appendChild(ob);}
+  // カルテ導線: 検索カード/グラフノード両方の openPreview をここ1箇所でカバー。
+  const kn=doc.client_name||doc.project;
+  if(kn){const kb=document.createElement('button');kb.className='pvopen';kb.type='button';
+    kb.textContent='カルテを見る →';
+    kb.addEventListener('click',function(){
+      location.href='/search/client/'+encodeURIComponent(kn);});
+    wrap.appendChild(kb);}
   // 関連資料（同じ /api/v1/graph の隣接から導出。新 API 不要）。
   const relhead=document.createElement('div');relhead.className='relhead';
   relhead.textContent='🔗 関連資料';wrap.appendChild(relhead);
@@ -2376,6 +2404,265 @@ def _shell_page(email: str, *, mode: str) -> str:
     return head + body
 
 
+# ============================================================
+# クライアントカルテページ（GET /search/client/{client}）。
+# Karpathy 式 Second Brain の「wiki 層」: 1 クライアントの最新状況ヘッダ +
+# FB 時系列（日付降順）+ 関連資料一覧を 1 画面に集約する。AI 要約はスコープ外。
+# スタイルは _ROOT_TOKENS + _SEARCH_STYLE を再利用（.card/.chip/.meta/.excerpt）。
+# ============================================================
+_KARTE_STYLE = (
+    ".ksec{font-size:14px;color:var(--text);font-weight:600;margin:24px 0 10px}"
+    ".kdate{color:var(--muted);font-size:12px;margin-right:8px;"
+    "font-variant-numeric:tabular-nums}"
+    ".kv{font-size:12.5px;color:#c5d0e6;margin:3px 0;line-height:1.6}"
+    ".kvl{color:var(--muted);margin-right:6px}"
+)
+
+
+# カルテページの最小フロント（依存ゼロ・textContent/createElement のみ＝XSS 安全）。
+# クライアント名は window.__karteClient（_js_str で安全に注入）から読む。
+_KARTE_JS = r"""
+const CLIENT=window.__karteClient||'';
+const khead=document.getElementById('khead');
+const ktl=document.getElementById('ktimeline');
+const kdocs=document.getElementById('kdocs');
+const ksecFb=document.getElementById('ksecFb');
+const ksecDocs=document.getElementById('ksecDocs');
+function kSafeUrl(u){return (typeof u==='string'&&/^(https?|slack|gdrive):/i.test(u))?u:null;}
+function kChip(text){
+  const s=document.createElement('span');s.className='chip';s.textContent=text;return s;
+}
+function kv(parent,label,value){
+  if(!value)return;
+  const p=document.createElement('div');p.className='kv';
+  const l=document.createElement('span');l.className='kvl';l.textContent=label;p.appendChild(l);
+  const v=document.createElement('span');v.textContent=value;p.appendChild(v);
+  parent.appendChild(p);
+}
+function kEmptyCard(msg){
+  const c=document.createElement('div');c.className='emptyx';
+  const i=document.createElement('div');i.className='ei';i.textContent='🗂';c.appendChild(i);
+  const t=document.createElement('div');t.className='et';t.textContent=msg;c.appendChild(t);
+  return c;
+}
+function renderHeader(h){
+  khead.textContent='';
+  const card=document.createElement('div');card.className='card';
+  const chips=document.createElement('div');chips.className='chips';
+  if(h.industry)chips.appendChild(kChip('業界 '+h.industry));
+  if(h.deal_phase)chips.appendChild(kChip('フェーズ '+h.deal_phase));
+  if(h.bant_score)chips.appendChild(kChip('BANT '+h.bant_score));
+  if(h.last_contact)chips.appendChild(kChip('最終接触 '+h.last_contact));
+  chips.appendChild(kChip('FB '+(h.fb_count||0)+'件'));
+  chips.appendChild(kChip('資料 '+(h.doc_count||0)+'件'));
+  card.appendChild(chips);
+  khead.appendChild(card);
+}
+function renderTimeline(items){
+  ktl.textContent='';
+  if(!items.length){
+    const e=document.createElement('div');e.className='empty';
+    e.textContent='FB の記録はまだありません。';ktl.appendChild(e);return;
+  }
+  for(const it of items){
+    const card=document.createElement('div');card.className='card';
+    const t=document.createElement('div');t.className='title';
+    const d=document.createElement('span');d.className='kdate';
+    d.textContent=it.occurred_at||'----';t.appendChild(d);
+    t.appendChild(document.createTextNode(it.title||'(無題)'));
+    card.appendChild(t);
+    const chips=document.createElement('div');chips.className='chips';
+    if(it.deal_phase)chips.appendChild(kChip(it.deal_phase));
+    if(it.bant_score)chips.appendChild(kChip('BANT '+it.bant_score));
+    if(it.channel_type)chips.appendChild(kChip(it.channel_type));
+    if(chips.childNodes.length)card.appendChild(chips);
+    if(it.content){
+      const ex=document.createElement('div');ex.className='excerpt';
+      ex.textContent=it.content;card.appendChild(ex);
+    }
+    kv(card,'ポジ反応',it.positive_reaction);
+    kv(card,'ネガ反応',it.negative_reaction);
+    kv(card,'次アクション',it.next_action);
+    kv(card,'提案メニュー',it.proposed_menu);
+    const su=kSafeUrl(it.source_uri);
+    if(su){
+      const meta=document.createElement('div');meta.className='meta';
+      const a=document.createElement('a');a.href=su;
+      a.target='_blank';a.rel='noopener noreferrer';
+      a.textContent='出典を開く';meta.appendChild(a);
+      card.appendChild(meta);
+    }
+    ktl.appendChild(card);
+  }
+}
+function renderDocs(items){
+  kdocs.textContent='';
+  if(!items.length){
+    const e=document.createElement('div');e.className='empty';
+    e.textContent='関連資料はまだありません。';kdocs.appendChild(e);return;
+  }
+  for(const it of items){
+    const card=document.createElement('div');card.className='card';
+    const t=document.createElement('div');t.className='title';
+    t.textContent=it.title||'(無題)';card.appendChild(t);
+    const chips=document.createElement('div');chips.className='chips';
+    if(it.doc_type)chips.appendChild(kChip(it.doc_type));
+    if(it.source_type)chips.appendChild(kChip(it.source_type));
+    if(it.solution)chips.appendChild(kChip(it.solution));
+    if(it.modified_at)chips.appendChild(kChip(it.modified_at));
+    if(chips.childNodes.length)card.appendChild(chips);
+    if(it.excerpt){
+      const ex=document.createElement('div');ex.className='excerpt';
+      ex.textContent=it.excerpt;card.appendChild(ex);
+    }
+    const su=kSafeUrl(it.open_url);
+    if(su){
+      const meta=document.createElement('div');meta.className='meta';
+      const a=document.createElement('a');a.href=su;
+      a.target='_blank';a.rel='noopener noreferrer';
+      a.textContent='資料を開く';meta.appendChild(a);
+      card.appendChild(meta);
+    }
+    kdocs.appendChild(card);
+  }
+}
+async function loadKarte(){
+  let data;
+  try{
+    const resp=await fetch('/api/v1/client/'+encodeURIComponent(CLIENT));
+    if(resp.status===401){location.href='/search/login';return;}
+    if(!resp.ok)throw new Error('http '+resp.status);
+    data=await resp.json();
+  }catch(e){
+    khead.textContent='';
+    khead.appendChild(kEmptyCard('カルテの取得に失敗しました。少し待って再読み込みしてください。'));
+    ktl.textContent='';kdocs.textContent='';
+    ksecFb.hidden=true;ksecDocs.hidden=true;
+    return;
+  }
+  const tl=data.timeline||[];
+  const docs=data.documents||[];
+  if(!tl.length&&!docs.length){
+    khead.textContent='';
+    khead.appendChild(kEmptyCard('まだ記録がありません'));
+    ktl.textContent='';kdocs.textContent='';
+    ksecFb.hidden=true;ksecDocs.hidden=true;
+    return;
+  }
+  renderHeader(data.header||{});
+  renderTimeline(tl);
+  renderDocs(docs);
+}
+loadKarte();
+"""
+
+
+def _karte_page(client: str) -> str:
+    """クライアントカルテの HTML を組む（_shell_page と同じ Python 文字列連結流儀）。
+
+    動的値の差し込みは HTML 側 html.escape / JS 側 _js_str の二流儀のみ（XSS 防御）。
+    データは /api/v1/client/{client} から fetch し、DOM は textContent だけで組む。
+    """
+    client_e = html.escape(client)
+    style = _ROOT_TOKENS + _SEARCH_STYLE + _KARTE_STYLE
+    return (
+        '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>クライアントカルテ: {client_e}</title><style>" + style + "</style></head><body>"
+        "<main>"
+        '<div class="toplinks"><a href="/search">← 検索に戻る</a>'
+        '<a href="/search/graph">グラフ</a></div>'
+        f"<h1>📇 クライアントカルテ: {client_e}</h1>"
+        '<p class="sub">営業FBの時系列と関連資料を 1 画面に集約します（AI要約は後続）。</p>'
+        '<div id="khead"><div class="empty">読み込み中…</div></div>'
+        '<div id="ksecFb" class="ksec">📈 営業FB時系列（新しい順）</div>'
+        '<div id="ktimeline"></div>'
+        '<div id="ksecDocs" class="ksec">📎 関連資料</div>'
+        '<div id="kdocs"></div>'
+        "</main>"
+        "<script>window.__karteClient=" + _js_str(client) + ";</script>"
+        "<script>" + _KARTE_JS + "</script>"
+        "</body></html>"
+    )
+
+
+def _karte_payload(
+    client: str,
+    timeline: list[Any],
+    documents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """カルテ API のレスポンス JSON を組む（純関数・DB 非依存）。
+
+    - timeline: ``PgVectorClient.list_client_timeline_recent`` の SearchHit list
+      （**最新 N 件を古い順**。ASC LIMIT の list_client_timeline だと FB 多数クライアントで
+      「最古の N 件」になりヘッダ/時系列が誤るため recent 版を使う）。
+      表示は日付降順が要件なので ``reversed()`` し、最新状況ヘッダ（直近フェーズ/BANT/
+      最終接触）は末尾＝最新要素から取る。
+    - documents: ``PgVectorClient.list_documents_for_client`` の行 dict list
+      （modified_at 降順）。timeline は cls_industry を返さないため、ヘッダの業界は
+      資料側 cls_industry の最頻値で補完する。
+    - gdrive:// は api_search の _open_url イディオムどおり Drive view URL へ整形
+      （抽出失敗時は元 source_uri に fail-open）。
+    """
+    from teamagent.skills.knowledge_deliver.skill import extract_drive_file_id
+
+    latest = timeline[-1] if timeline else None
+    industries = [str(d["cls_industry"]) for d in documents if d.get("cls_industry")]
+    industry = Counter(industries).most_common(1)[0][0] if industries else None
+
+    header: dict[str, Any] = {
+        "client": client,
+        "industry": industry,
+        "deal_phase": latest.metadata.get("deal_phase") if latest else None,
+        "bant_score": latest.metadata.get("bant_score") if latest else None,
+        "last_contact": latest.metadata.get("occurred_at") if latest else None,
+        "fb_count": len(timeline),
+        "doc_count": len(documents),
+    }
+
+    timeline_out: list[dict[str, Any]] = []
+    for h in reversed(timeline):
+        m = h.metadata
+        timeline_out.append(
+            {
+                "occurred_at": m.get("occurred_at"),
+                "title": m.get("title"),
+                "content": (h.content or "")[:300],
+                "deal_phase": m.get("deal_phase"),
+                "bant_score": m.get("bant_score"),
+                "channel_type": m.get("channel_type"),
+                "positive_reaction": m.get("positive_reaction"),
+                "negative_reaction": m.get("negative_reaction"),
+                "next_action": m.get("next_action"),
+                "proposed_menu": m.get("proposed_menu"),
+                "source_uri": m.get("source_uri"),
+            }
+        )
+
+    docs_out: list[dict[str, Any]] = []
+    for d in documents:
+        open_url: str | None = d.get("source_uri")
+        if d.get("source_type") == "gdrive":
+            fid = extract_drive_file_id(d.get("source_uri"))
+            if fid:
+                open_url = f"https://drive.google.com/file/d/{fid}/view"
+        docs_out.append(
+            {
+                "title": d.get("title"),
+                "doc_type": d.get("cls_doc_type"),
+                "source_type": d.get("source_type"),
+                "modified_at": d.get("modified_at"),
+                "open_url": open_url,
+                "excerpt": d.get("excerpt"),
+                "solution": d.get("cls_solution"),
+                "industry": d.get("cls_industry"),
+                "project": d.get("cls_project"),
+            }
+        )
+
+    return {"client": client, "header": header, "timeline": timeline_out, "documents": docs_out}
+
+
 def create_app(
     *,
     redirect_uri: str | None = None,
@@ -2388,6 +2675,7 @@ def create_app(
     search_verifier: Verifier | None = None,
     feedback_store: Any | None = None,
     graph_docs_provider: Callable[[str], list[dict[str, Any]]] | None = None,
+    client_karte_provider: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> FastAPI:
     """連携コールバックアプリを構築する。redirect_uri/kms_key_id は env 既定、注入も可。
 
@@ -2397,6 +2685,9 @@ def create_app(
       - search_config: 認証設定（未指定時は env から _load_search_config）。
       - search_verifier: Google id_token 検証器（テストでネットワーク排除）。
       - feedback_store: search_feedback への保存器（未指定時は RDS に遅延生成）。
+      - client_karte_provider: (email, client) -> {"timeline": SearchHit list（古い順）,
+        "documents": dict list} を返す callable（テストで実 DB を排除・graph_docs_provider
+        と同列）。本番未指定時は RLS 接続で pgvector から実取得。
     """
     redirect = redirect_uri or os.environ.get("OAUTH_REDIRECT_URI", "")
     app = FastAPI(title="TeamAgent Connect", docs_url=None, redoc_url=None, openapi_url=None)
@@ -2547,6 +2838,32 @@ def create_app(
             user_role="user",
         ) as conn:
             return pg.list_documents_for_graph(conn, with_embeddings=with_embeddings, **extra)
+
+    def _client_karte_data(email: str, client: str) -> dict[str, Any]:
+        """カルテ用の生データを取得する（provider 注入時はそれ・本番は RLS 接続で実取得）。
+
+        返り値: {"timeline": SearchHit list（list_client_timeline_recent・最新50件を古い順）,
+                 "documents": dict list（list_documents_for_client・新しい順）}。
+        timeline に ASC LIMIT の list_client_timeline を使うと FB が 50 件を超える
+        クライアントで「最古の50件」になり最新 FB/ヘッダが誤るため recent 版を使う。
+        接続の流儀は _list_graph_docs と同一（app_role + user_email/user_groups/user_role）。
+        """
+        if client_karte_provider is not None:
+            return client_karte_provider(email, client)
+        from teamagent.adapters.pgvector_client import PgVectorClient
+
+        domain = email.split("@", 1)[1] if "@" in email else email
+        pg = PgVectorClient.from_env()
+        with pg.connection(
+            app_role=app_role,
+            user_email=email,
+            user_groups=[domain],
+            user_role="user",
+        ) as conn:
+            return {
+                "timeline": pg.list_client_timeline_recent(conn, client, limit=50),
+                "documents": pg.list_documents_for_client(conn, client, limit=50),
+            }
 
     def _search_email(request: Request) -> str | None:
         """検索 cookie セッションから本人 email を取り出す（未認証/期限切れは None）。"""
@@ -2922,6 +3239,54 @@ def create_app(
                 concept_threshold=_env_float("GRAPH_CONCEPT_THRESHOLD", 0.85),
             )
         )
+
+    @app.get("/search/client/{client:path}")
+    def search_client_karte_ui(client: str, request: Request) -> Response:
+        """クライアントカルテ UI（未認証は /search/login へリダイレクト）。
+
+        client は FastAPI のパスパラメータで受ける（%エンコードは ASGI 層で復号済）。
+        ``:path`` コンバータにするのは「A/B商事」のようにスラッシュを含むクライアント名が
+        %2F 復号後の 1 セグメントマッチでは 404 になるため。値はデータとしてのみ扱い、
+        HTML への差し込みは _karte_page 内で html.escape / _js_str により XSS 防御する。
+        """
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login", status_code=303)
+        name = client.strip()
+        if not name:
+            return RedirectResponse("/search", status_code=303)
+        return HTMLResponse(_karte_page(name))
+
+    @app.get("/api/v1/client/{client:path}")
+    def api_client_karte(client: str, request: Request) -> JSONResponse:
+        """カルテデータ API（ヘッダ + FB 時系列（日付降順）+ 関連資料一覧）。
+
+        api_graph と同じ形（sync def・純 SQL 読み・401 JSON・500 は warning ログ）。
+        ``:path`` はスラッシュ入りクライアント名対応（UI route と同じ理由）。
+        データが 0 件でも 200 で空 list を返し、空状態の文言は UI 側で出す。
+        """
+        email = _search_email(request)
+        if email is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        name = client.strip()
+        if not name:
+            return JSONResponse({"error": "empty_client"}, status_code=400)
+        try:
+            data = _client_karte_data(email, name)
+            payload = _karte_payload(
+                name,
+                list(data.get("timeline") or []),
+                list(data.get("documents") or []),
+            )
+        except Exception as exc:
+            logger.warning(
+                "client_karte_api_failed",
+                user_email=email,
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            return JSONResponse({"error": "karte_failed"}, status_code=500)
+        return JSONResponse(payload)
 
     return app
 
