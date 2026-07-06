@@ -37,13 +37,17 @@ ARG WITH_SCRAPE_TOOLS=false
 # 2026-07-06: chromium 本体は apt でなく Playwright 管理版に切替。apt の chromium 150 が arm64 Fargate 上で
 # 起動直後 SIGTRAP する回帰を実証したため(全フラグ回避不能)。--with-deps が必要な共有ライブラリも入れる。
 # /usr/bin/chromium へ symlink して既存 CHROMIUM_PATH=/usr/bin/chromium(下段 ENV)を不変に保つ。
-RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ]; then \
+# find が0件だと ln -sf "" が dangling symlink を作り exit0=ビルド緑のまま、実行時に §Q PPTX画像化や
+# tiktok_search が「実行ファイル無し」で落ちる(レビュー指摘)。test -x で実在確認して build 段で fail-fast。
+RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ]; then set -eux; \
       apt-get update && apt-get install -y --no-install-recommends \
-        nodejs npm ffmpeg fonts-noto-cjk \
-      && PLAYWRIGHT_BROWSERS_PATH=/opt/pw npx -y playwright@1.55.0 install --with-deps chromium \
-      && ln -sf "$(find /opt/pw -type f -name chrome | head -1)" /usr/bin/chromium \
-      && chmod -R a+rx /opt/pw \
-      && rm -rf /var/lib/apt/lists/* ; \
+        nodejs npm ffmpeg fonts-noto-cjk ; \
+      PLAYWRIGHT_BROWSERS_PATH=/opt/pw npx -y playwright@1.55.0 install --with-deps chromium ; \
+      CHROME_BIN="$(find /opt/pw -type f -name chrome | head -1)" ; \
+      test -n "$CHROME_BIN" && test -x "$CHROME_BIN" ; \
+      ln -sf "$CHROME_BIN" /usr/bin/chromium ; \
+      chmod -R a+rx /opt/pw ; \
+      rm -rf /var/lib/apt/lists/* ; \
     fi
 
 # 1) 依存だけ先に解決（lock 駆動・layer cache）。MCP は extra。dev(ruff/mypy/pytest)は除外。

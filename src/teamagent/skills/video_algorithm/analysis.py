@@ -89,15 +89,31 @@ def _pooled_save_rate_diff(
 
     審査所見R7(b): 保存/再生を試行数つきの比率として扱い、差が標準誤差2本分に満たない
     ものは「ドライバー」と呼ばない（有意性検定の代替としての最低限の目安）。
+
+    レビュー指摘(回帰修正): 帯合計だと play_count==0 の動画の保存数だけが分子に載り、
+    pooled>1 で math.sqrt(負値) が ValueError を送出してスキル全体が落ちる。また p_top が
+    100%を超える物理的にあり得ない値をドライバー文言に出す。対策として
+    (1) play_count<=0 の動画は帯集計から除外（旧 save_rate() の 0除算ガードと整合）、
+    (2) 保存率が 1.0(=100%)を超える帯は「保存数>再生数」の破損データなので、clamp して
+        無理に出すのではなくドライバー不採用にする（統計的誠実性: 破損帯は判定不能）。
     """
+    top = [v for v in top if v.meta.play_count > 0]
+    bottom = [v for v in bottom if v.meta.play_count > 0]
+    if not top or not bottom:
+        return None
     top_saves = sum(v.meta.collect_count for v in top)
     top_plays = sum(v.meta.play_count for v in top)
     bot_saves = sum(v.meta.collect_count for v in bottom)
     bot_plays = sum(v.meta.play_count for v in bottom)
     if top_plays <= 0 or bot_plays <= 0:
         return None
-    p_top, p_bot = top_saves / top_plays, bot_saves / bot_plays
+    p_top = top_saves / top_plays
+    p_bot = bot_saves / bot_plays
     pooled = (top_saves + bot_saves) / (top_plays + bot_plays)
+    # save_rate は本来 0..1 の比率。>1 は破損データ = sqrt(負値)クラッシュ&106%表示の元凶なので
+    # ドライバーとして採用しない（判定不能扱い）。
+    if not (0.0 <= p_top <= 1.0 and 0.0 <= p_bot <= 1.0 and pooled <= 1.0):
+        return None
     se = math.sqrt(pooled * (1 - pooled) * (1 / top_plays + 1 / bot_plays))
     if p_top - p_bot > 2 * se:
         return p_top * 100, p_bot * 100

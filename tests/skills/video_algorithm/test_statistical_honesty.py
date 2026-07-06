@@ -10,6 +10,8 @@ n小の横断分析が「板全体でも同率の特徴」「帯あたり数本�
 
 from __future__ import annotations
 
+import re
+
 from teamagent.skills.video_algorithm.analysis import cross_analyze
 from teamagent.skills.video_algorithm.report import render_report
 from teamagent.skills.video_algorithm.schema import (
@@ -142,3 +144,28 @@ def test_report_renders_stats_caveats() -> None:
     html = _report_html(5)
     assert '<ul class="caveats">' in html
     assert "生存者バイアス" in html  # caveats 定型文の1つ
+
+
+# -----------------------------------------------------------
+# (e) レビュー回帰: 保存数>再生数の破損帯で落ちない/106%を出さない
+# -----------------------------------------------------------
+def test_pooled_save_rate_no_crash_when_saves_exceed_plays() -> None:
+    """帯合計で保存数>再生数（play_count=0 や整合ズレ）でも math.sqrt(負値)で落ちず、
+    100%超の非現実的な保存率をドライバーに出さない（破損帯は判定不能＝不採用）。"""
+    # 上位帯(rank1-4)を保存数>再生数の破損データにする。旧コードは pooled>1 で ValueError。
+    videos = [
+        _av(1, saves=200, plays=0),  # play_count=0（分母に寄与せず保存だけ分子へ）
+        _av(2, saves=200, plays=50),  # saves>plays（比率>1）
+        _av(3, saves=200, plays=50),
+        _av(4, saves=200, plays=50),
+        _av(5, saves=5, plays=100000),
+        _av(6, saves=5, plays=100000),
+        _av(7, saves=5, plays=100000),
+        _av(8, saves=5, plays=100000),
+    ]
+    cross = cross_analyze(videos, "新宿 ランチ")  # 例外を投げないこと（回帰の主眼）
+    # 破損帯はドライバーに採用しない。万一出しても 100% 超の値は絶対に出さない。
+    assert not any("保存率" in d for d in cross.rank_diff_drivers)
+    for d in cross.rank_diff_drivers:
+        for token in re.findall(r"([0-9]+(?:\.[0-9]+)?)%", d):
+            assert float(token) <= 100.0, f"保存率が100%超: {d}"
