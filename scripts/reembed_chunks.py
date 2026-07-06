@@ -85,6 +85,7 @@ def reembed(
     commit: bool,
     limit: int | None = None,
     target_column: str = "embedding",
+    only_missing: bool = False,
 ) -> dict[str, int]:
     """chunks を再 embed する。戻り値: 集計 dict。
 
@@ -92,6 +93,12 @@ def reembed(
     一致させるため、``COALESCE(contextualized, content)`` を embed する（contextualized が
     あればそれを優先）。target_column は build_update_params が許可リスト検証する
     （既定 embedding＝従来挙動）。
+
+    only_missing=True で ``target_column IS NULL`` の行だけを対象にする（中断からの再開用。
+    2026-07-06: 8万chunk規模の再embedを途中再開できず最初からやり直す事故を防ぐ）。
+
+    embedder が embed_passage_batch を持つ場合（BedrockCohereEmbedder）はバッチAPIで
+    まとめて埋め込む（1件ずつの逐次呼び出しだと 8万件で10時間超・バッチなら数十分）。
     """
     if target_column not in _ALLOWED_TARGET_COLUMNS:
         raise ValueError(
@@ -100,11 +107,16 @@ def reembed(
     import psycopg
 
     stats = {"scanned": 0, "updated": 0}
+    batch_fn = getattr(embedder, "embed_passage_batch", None)
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             # 取り込み時は contextualized（prefix+content）を embed_passage する。再 embed も
             # 同じソースを使い検索/取り込みのサブ空間を一致させる（contextualized 無しは content）。
-            q = "SELECT id, COALESCE(contextualized, content) AS src FROM chunks ORDER BY id"
+            q = "SELECT id, COALESCE(contextualized, content) AS src FROM chunks"
+            if only_missing:
+                # target_column は許可リスト検証済みの固定識別子（injection 不能）。
+                q += f" WHERE {target_column} IS NULL"  # nosec B608
+            q += " ORDER BY id"
             if limit:
                 q += f" LIMIT {int(limit)}"
             cur.execute(q)
@@ -116,17 +128,24 @@ def reembed(
             batch_size=batch_size,
             commit=commit,
             target_column=target_column,
+            only_missing=only_missing,
+            batched_api=bool(batch_fn),
         )
         for batch in batched(rows, batch_size):
-            for chunk_id, src in batch:
-                stats["scanned"] += 1
-                vec = embedder.embed_passage(src or "")
-                if commit:
-                    sql, params = build_update_params(chunk_id, vec, target_column)
-                    with conn.cursor() as cur:
-                        cur.execute(sql, params)
-                    stats["updated"] += 1
+            if batch_fn is not None:
+                # バッチAPI: DBバッチ単位でまとめて埋め込み（96件/コールは embedder 側が分割）。
+                srcs = [src or "" for _, src in batch]
+                vecs = batch_fn(srcs)
+                pairs = list(zip((cid for cid, _ in batch), vecs, strict=True))
+            else:
+                pairs = [(cid, embedder.embed_passage(src or "")) for cid, src in batch]
+            stats["scanned"] += len(batch)
             if commit:
+                with conn.cursor() as cur:
+                    for chunk_id, vec in pairs:
+                        sql, params = build_update_params(chunk_id, vec, target_column)
+                        cur.execute(sql, params)
+                stats["updated"] += len(pairs)
                 conn.commit()
             logger.info("reembed_batch_done", scanned=stats["scanned"], updated=stats["updated"])
     logger.info("reembed_done", **stats)
@@ -142,6 +161,11 @@ def main() -> int:
     p.add_argument("--batch-size", type=int, default=200)
     p.add_argument("--limit", type=int, default=None, help="先頭 N 件のみ（検証用）")
     p.add_argument("--commit", action="store_true", help="既定 dry-run。指定時のみ UPDATE")
+    p.add_argument(
+        "--only-missing",
+        action="store_true",
+        help="target_column が NULL の行だけ対象（中断からの再開用）",
+    )
     p.add_argument(
         "--target-column",
         default="embedding",
@@ -187,6 +211,7 @@ def main() -> int:
             commit=args.commit,
             limit=args.limit,
             target_column=args.target_column,
+            only_missing=args.only_missing,
         )
     except Exception as e:
         print(f"[ERROR] reembed failed: {e}", file=sys.stderr)
