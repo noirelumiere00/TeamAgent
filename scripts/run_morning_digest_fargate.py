@@ -189,7 +189,7 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
     btns.append(
         {
             "type": "button",
-            "text": {"type": "plain_text", "text": "🔍 確認する", "emoji": True},
+            "text": {"type": "plain_text", "text": "✅ 下書きを確認", "emoji": True},
             "url": thread_url,  # そのスレッドへワンタップ直行（url ボタン＝非発火）
         }
     )
@@ -447,7 +447,9 @@ def main() -> int:
         skill = MorningDigestSkill(token_store=token_store, bedrock=BedrockClient.from_env())
     else:
         skill = MorningDigestSkill(token_store=token_store)
-    skill_input = MorningDigestInput()
+    skill_input = MorningDigestInput(
+        max_drafts=max(1, int(os.environ.get("MORNING_DIGEST_MAX_DRAFTS", "3"))),
+    )
 
     # concurrency=1（既定）は従来どおり逐次。>1 で人数に応じた所要時間短縮。
     if concurrency > 1:
