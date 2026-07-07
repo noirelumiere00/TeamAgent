@@ -48,8 +48,10 @@ resource "aws_ecs_cluster" "main" {
   name = "${var.project_name}-${var.environment}"
 
   setting {
-    name  = "containerInsights"
-    value = "enabled"
+    name = "containerInsights"
+    # コスト最適化(2026-06-29): Container Insights を無効化（テレメトリのみ・アプリログは別途維持。約-$11/月）。
+    # 既にCLIで無効化済み。詳細監視を戻す場合は "enabled"。
+    value = "disabled"
   }
 }
 
