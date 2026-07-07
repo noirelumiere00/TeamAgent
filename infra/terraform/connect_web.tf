@@ -65,6 +65,28 @@ variable "connect_base_url" {
   default     = "https://connect.newstv.co.jp"
 }
 
+# ---------- Slack 個人OAuth(xoxp) 用（2026-07-07 追加） ----------
+variable "connect_slack_client_id_secret_name" {
+  description = "CONNECT_SLACK_CLIENT_ID の Secrets Manager 名（Slack app OAuth client_id）"
+  type        = string
+  default     = "teamagent/dev/connect_slack_client_id"
+}
+variable "connect_slack_client_secret_name" {
+  description = "CONNECT_SLACK_CLIENT_SECRET の Secrets Manager 名"
+  type        = string
+  default     = "teamagent/dev/connect_slack_secret"
+}
+variable "slack_oauth_state_secret_name" {
+  description = "SLACK_OAUTH_STATE_SECRET の Secrets Manager 名（Slack state 署名・Google と分離）"
+  type        = string
+  default     = "teamagent/dev/slack_oauth_state_secret"
+}
+variable "slack_oauth_redirect_uri" {
+  description = "SLACK_OAUTH_REDIRECT_URI（Slack app に登録した callback URL）"
+  type        = string
+  default     = "https://connect.newstv.co.jp/slack/oauth/callback"
+}
+
 variable "connect_oauth_kms_key_id" {
   description = "OAUTH_KMS_KEY_ID（oauth_tokens 暗号化に使う既存 KMS 鍵の ARN・既定 alias 解決）"
   type        = string
@@ -93,6 +115,18 @@ data "aws_secretsmanager_secret" "connect_oauth_state" {
 data "aws_secretsmanager_secret" "connect_google_client_secret" {
   count = var.enable_connect_web ? 1 : 0
   name  = var.connect_google_client_secret_name
+}
+data "aws_secretsmanager_secret" "connect_slack_client_id" {
+  count = var.enable_connect_web ? 1 : 0
+  name  = var.connect_slack_client_id_secret_name
+}
+data "aws_secretsmanager_secret" "connect_slack_client_secret" {
+  count = var.enable_connect_web ? 1 : 0
+  name  = var.connect_slack_client_secret_name
+}
+data "aws_secretsmanager_secret" "slack_oauth_state_secret" {
+  count = var.enable_connect_web ? 1 : 0
+  name  = var.slack_oauth_state_secret_name
 }
 
 # KMS 鍵：aiia と同じ `alias/teamagent-oauth-tokens` を共用（oauth_tokens 暗号化）。
@@ -123,6 +157,9 @@ data "aws_iam_policy_document" "ecs_execution_connect_web_secrets" {
     resources = [
       data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
       data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
+      data.aws_secretsmanager_secret.connect_slack_client_id[0].arn,
+      data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn,
+      data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn,
       data.aws_secretsmanager_secret.database_url.arn,
     ]
   }
@@ -297,6 +334,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "CONNECT_WEB_HOST", value = "0.0.0.0" },
       { name = "CONNECT_WEB_PORT", value = "8788" },
       { name = "OAUTH_REDIRECT_URI", value = var.connect_redirect_uri },
+      { name = "SLACK_OAUTH_REDIRECT_URI", value = var.slack_oauth_redirect_uri },
       { name = "CONNECT_BASE_URL", value = var.connect_base_url },
       { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
       { name = "OAUTH_KMS_KEY_ID", value = var.connect_oauth_kms_key_id != "" ? var.connect_oauth_kms_key_id : data.aws_kms_alias.connect_oauth[0].target_key_arn },
@@ -327,6 +365,9 @@ resource "aws_ecs_task_definition" "connect_web" {
     secrets = [
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
+      { name = "CONNECT_SLACK_CLIENT_ID", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_id[0].arn },
+      { name = "CONNECT_SLACK_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn },
+      { name = "SLACK_OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
     ]
     logConfiguration = {
