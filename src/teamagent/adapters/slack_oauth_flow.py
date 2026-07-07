@@ -43,8 +43,9 @@ _AUTHORIZE_URI = "https://slack.com/oauth/v2/authorize"
 
 # state の署名鍵は Google の OAUTH_STATE_SECRET と分離する（署名ドメインを分ける）。
 _STATE_SECRET_ENV = "SLACK_OAUTH_STATE_SECRET"
-# state のデフォルト有効期限（秒）。認可リンクを踏むまでの猶予。
-_DEFAULT_STATE_TTL_S = 600
+# state のデフォルト有効期限（秒）。xoxp は本人なりすまし級のため短めに（漏洩窓を縮小）。
+# ※厳密なワンタイム化（サーバ側 nonce 消費）は後続 PR。それまでは短 TTL で残リスクを抑える。
+_DEFAULT_STATE_TTL_S = 180
 # payload 区切り。email/nonce/数値/hex いずれにも出現しない文字を使う。
 _SEP = "|"
 

@@ -965,9 +965,11 @@ class SkillDispatcher:
         return self._token_store
 
     async def _connect_message(self, user_id: str | None, request_id: str) -> str:
-        """本人専用の Google 連携（認可）リンク文面を作る。スラッシュ/メンション双方で共用。
+        """本人専用の Google＋Slack 連携（認可）リンク文面を作る。スラッシュ/メンション双方で共用。
 
         スラッシュコマンド未登録の Slack でも、@メンション/DM で「連携」と言えばこの文面を返せる。
+        Google（メール/カレンダー）に加え、Slack 個人トークン（本人検索/巡回）の認可URLも並記する。
+        Slack 側は SLACK_OAUTH_REDIRECT_URI が未設定なら出さず（後方互換）、その旨を1行添える。
         """
         email = await self._resolve_user_email(user_id)
         if not email:
@@ -981,18 +983,51 @@ class SkillDispatcher:
         try:
             from teamagent.adapters.google_oauth_flow import OAuthConsentFlow
 
-            url, _state = OAuthConsentFlow(redirect_uri=redirect_uri).authorization_url(email)
+            url_google, _state = OAuthConsentFlow(
+                redirect_uri=redirect_uri
+            ).authorization_url(email)
         except Exception:
             logger.warning("connect_url_failed", request_id=request_id, user_id=user_id)
             return "🔗 連携リンクの生成に失敗しました（管理者へ: OAuth 系 env をご確認ください）。"
-        logger.info("connect_link_issued", request_id=request_id, user_id=user_id)
-        return (
-            f"👋 *{email}* の Google を連携します（1回だけ・所要1分）。\n"
-            "下のリンクを開き、表示される権限（メールの読み取り・下書き作成、カレンダー等）を "
-            "*許可* してください:\n"
-            f"{url}\n\n"
-            "「✅ 連携が完了しました」が出れば成功です。あとは AI に話しかけるだけ。"
+
+        # Slack 個人トークン(xoxp) の認可URL。未設定時は Slack リンクを出さない。
+        slack_redirect = os.environ.get("SLACK_OAUTH_REDIRECT_URI", "").strip()
+        url_slack: str | None = None
+        if slack_redirect:
+            try:
+                from teamagent.adapters.slack_oauth_flow import SlackOAuthConsentFlow
+
+                url_slack, _ = SlackOAuthConsentFlow(
+                    redirect_uri=slack_redirect
+                ).authorization_url(email)
+            except Exception:
+                logger.warning(
+                    "connect_slack_url_failed", request_id=request_id, user_id=user_id
+                )
+                url_slack = None
+
+        logger.info(
+            "connect_link_issued",
+            request_id=request_id,
+            user_id=user_id,
+            slack_included=bool(url_slack),
         )
+        lines = [
+            f"👋 *{email}* を連携します（1回だけ・所要1分）。\n",
+            "下のリンクを開き、表示される権限を *許可* してください:\n",
+            "*① Google を連携*（メールの読み取り・下書き作成、カレンダー等）\n",
+            f"{url_google}\n",
+        ]
+        if url_slack:
+            lines.append("\n*② Slack を連携*（本人としての検索・チャンネル巡回）\n")
+            lines.append(f"{url_slack}\n")
+        else:
+            lines.append(
+                "\n※ Slack 連携は現在未設定です"
+                "（管理者へ: SLACK_OAUTH_REDIRECT_URI を設定してください）。\n"
+            )
+        lines.append("\n「✅ 連携が完了しました」が出れば成功です。あとは AI に話しかけるだけ。")
+        return "".join(lines)
 
     def get_mail_link_skill(self) -> Any:
         """MailToInternalContextSkill をキャッシュ（per-user token + SearchSkill 再利用）。"""
