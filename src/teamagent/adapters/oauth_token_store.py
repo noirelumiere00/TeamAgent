@@ -32,6 +32,27 @@ class OAuthToken:
         return f"OAuthToken(refresh_token=***, scopes={self.scopes!r})"
 
 
+@dataclass(frozen=True, repr=False)
+class SlackOAuthToken:
+    """1ユーザー分の Slack user token(xoxp)（＋認可済みスコープ・本人 Slack id）。
+
+    repr で access_token を伏せる（誤ってログ/例外に出るのを防ぐ・G8）。xoxp は
+    本人なりすまし級の高感度資格情報なので Google の OAuthToken より厳に扱う。
+    """
+
+    access_token: str  # xoxp-...
+    scopes: tuple[str, ...] = ()
+    slack_user_id: str = ""
+    team_id: str = ""
+
+    def __repr__(self) -> str:
+        return (
+            "SlackOAuthToken(access_token=***, "
+            f"scopes={self.scopes!r}, slack_user_id={self.slack_user_id!r}, "
+            f"team_id={self.team_id!r})"
+        )
+
+
 @runtime_checkable
 class TokenStore(Protocol):
     """user_email → OAuthToken の差し替え可能な保管口。
@@ -174,11 +195,78 @@ class RdsTokenStore:
         return self.get(user_email) is not None
 
 
+class SlackTokenStore:
+    """RDS(slack_oauth_tokens) に xoxp を保管する（per-user・KMS暗号化・RLS）。
+
+    migration 0016_slack_oauth_tokens.sql のテーブルを使う。RdsTokenStore と対称で、
+    `pgvector.connection(app_role, user_email)` が app.user_email GUC を立て、RLS が
+    「本人行のみ」を保証する。xoxp は cipher で暗号化して BYTEA 格納（平文は持たない・G8）。
+    """
+
+    def __init__(
+        self, pgvector: Any, cipher: TokenCipher, *, app_role: str = "teamagent_app"
+    ) -> None:
+        self._pgvector = pgvector
+        self._cipher = cipher
+        self._app_role = app_role
+
+    @staticmethod
+    def _norm(email: str) -> str:
+        return email.strip().lower()
+
+    def get(self, user_email: str) -> SlackOAuthToken | None:
+        email = self._norm(user_email)
+        with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT xoxp_token_enc, scopes, slack_user_id, team_id "
+                    "FROM slack_oauth_tokens WHERE user_email = %s",
+                    (email,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        xoxp = self._cipher.decrypt(
+            bytes(row["xoxp_token_enc"]), context={"user_email": email}
+        )
+        return SlackOAuthToken(
+            access_token=xoxp,
+            scopes=tuple(row["scopes"] or ()),
+            slack_user_id=str(row["slack_user_id"] or ""),
+            team_id=str(row["team_id"] or ""),
+        )
+
+    def put(self, user_email: str, token: SlackOAuthToken) -> None:
+        email = self._norm(user_email)
+        enc = self._cipher.encrypt(token.access_token, context={"user_email": email})
+        with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO slack_oauth_tokens
+                        (user_email, xoxp_token_enc, slack_user_id, team_id, scopes)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (user_email) DO UPDATE
+                      SET xoxp_token_enc = EXCLUDED.xoxp_token_enc,
+                          slack_user_id  = EXCLUDED.slack_user_id,
+                          team_id        = EXCLUDED.team_id,
+                          scopes         = EXCLUDED.scopes
+                    """,
+                    (email, enc, token.slack_user_id, token.team_id, list(token.scopes)),
+                )
+            conn.commit()
+
+    def has(self, user_email: str) -> bool:
+        return self.get(user_email) is not None
+
+
 __all__ = [
     "InMemoryTokenStore",
     "KmsCipher",
     "OAuthToken",
     "RdsTokenStore",
+    "SlackOAuthToken",
+    "SlackTokenStore",
     "TokenCipher",
     "TokenStore",
 ]
