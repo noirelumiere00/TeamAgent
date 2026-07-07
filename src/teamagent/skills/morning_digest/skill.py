@@ -553,6 +553,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 break  # 作成数の上限に到達（後段脱落分を下位候補で埋めた結果）。
             thread_id = str(getattr(msg, "thread_id", "") or "")
             if self._dedupe_drafts and thread_id and thread_id in existing_threads:
+                # 既存下書きありは作成せずスキップ。ボタンを「開く」に統一する
+                # （_mark_existing_drafts と挙動を揃える）。
+                digest_items[idx].has_draft = True
                 continue
             made, c = self._create_single_draft(gmail_rw, msg, requester, ctx)
             cost += c

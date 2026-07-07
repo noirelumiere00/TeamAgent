@@ -447,9 +447,13 @@ def main() -> int:
         skill = MorningDigestSkill(token_store=token_store, bedrock=BedrockClient.from_env())
     else:
         skill = MorningDigestSkill(token_store=token_store)
-    skill_input = MorningDigestInput(
-        max_drafts=max(1, int(os.environ.get("MORNING_DIGEST_MAX_DRAFTS", "3"))),
-    )
+    # concurrency と同じく env 不正値でも落とさない。schema は 0..10、0=自動下書き無効。
+    try:
+        max_drafts = int(os.environ.get("MORNING_DIGEST_MAX_DRAFTS", "3"))
+    except ValueError:
+        max_drafts = 3
+    max_drafts = min(10, max(0, max_drafts))
+    skill_input = MorningDigestInput(max_drafts=max_drafts)
 
     # concurrency=1（既定）は従来どおり逐次。>1 で人数に応じた所要時間短縮。
     if concurrency > 1:
