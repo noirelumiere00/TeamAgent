@@ -53,11 +53,15 @@ locals {
 }
 
 resource "aws_vpc_endpoint" "interface" {
-  for_each            = toset(local.vpce_services)
-  vpc_id              = data.aws_vpc.default.id
-  service_name        = "com.amazonaws.${var.aws_region}.${each.key}"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = data.aws_subnets.default.ids
+  for_each          = toset(local.vpce_services)
+  vpc_id            = data.aws_vpc.default.id
+  service_name      = "com.amazonaws.${var.aws_region}.${each.key}"
+  vpc_endpoint_type = "Interface"
+  # コスト最適化(2026-06-29): インターフェースエンドポイントを3AZ→1AZへ集約（恒久 約-$121/月）。
+  # 既にCLIで1AZ化済み。本指定でterraform apply時も同状態を維持し、削減を巻き戻さない。
+  # PrivateDNS有効のため単一AZのENIでも全AZのタスクから到達可能。3AZへ復元する場合は
+  # data.aws_subnets.default.ids に戻す（可逆）。単一AZ障害域となる点は試験環境として許容。
+  subnet_ids          = ["subnet-07e0d4e58b3b83b8a"]
   security_group_ids  = [aws_security_group.vpce[0].id]
   private_dns_enabled = true
 
