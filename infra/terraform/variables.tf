@@ -70,9 +70,9 @@ variable "s3_noncurrent_expiration_days" {
 
 # ---------- Lambda / Bedrock ----------
 variable "bedrock_model_id" {
-  description = "Bedrock で利用する Claude モデル ID（東京リージョン推論プロファイル）"
+  description = "Bedrock で利用する Claude モデル ID（東京リージョン推論プロファイル）。コスト方針によりスキル/オーケストレーター既定を Haiku 4.5 に固定（2026-06-29）。"
   type        = string
-  default     = "jp.anthropic.claude-sonnet-4-6"
+  default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
 variable "lambda_memory_size" {
