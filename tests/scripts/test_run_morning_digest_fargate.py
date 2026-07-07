@@ -97,17 +97,23 @@ def test_preamble_and_no_scoreboard() -> None:
 
 
 def test_reply_section_has_per_mail_buttons() -> None:
-    """要返信メール（high 2件）に各件ボタン: 作成済→開く / 未作成→下書きを作成＋確認する。"""
+    """要返信メール（high 2件）: 行は「✅ 下書きを確認」1つ（未作成のみ「作成」追加）。
+    行内の「下書きを開く」は廃止し、末尾に「📁 下書き一覧を開く」を1つだけ集約する。"""
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
     assert "要返信メール（2件）" in dump
     actions = [b for b in blocks if b.get("type") == "actions"]
-    # 各 high メールに actions ブロック（=2個）。グローバルな一括バーは無い。
-    assert len(actions) == 2
     all_el = [e for b in actions for e in b["elements"]]
+    # 未作成メール（TOKB）のみ「作成」アクションが出る。
     assert any(e.get("action_id") == "mail_draft" and e.get("value") == "TOKB" for e in all_el)
-    assert any("作成した下書き" not in str(e) and "確認する" in str(e) for e in all_el)
-    assert any(e.get("url", "").endswith("#drafts") for e in all_el)  # 作成済→開く
+    # 各行に「✅ 下書きを確認」（スレッド直行）。
+    assert any("下書きを確認" in str(e) for e in all_el)
+    # 旧・行内の「📨 下書きを開く」（下書きフォルダ直行）は廃止。
+    assert not any("下書きを開く" in str(e) for e in all_el)
+    # 末尾に「📁 下書き一覧を開く」が1つだけ（下書きフォルダ #drafts）。
+    list_btns = [e for e in all_el if "下書き一覧を開く" in str(e)]
+    assert len(list_btns) == 1
+    assert list_btns[0].get("url", "").endswith("#drafts")
 
 
 def test_calendar_section_rendered() -> None:

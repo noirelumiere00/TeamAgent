@@ -163,33 +163,30 @@ def _mail_line(m: Any) -> tuple[str, str]:
 
 
 def _reply_buttons(m: Any) -> list[dict[str, Any]]:
-    """要返信メール 1 件のボタン行：[下書きを作成 or 開く] ＋ [確認する(スレッド直行)]。"""
+    """要返信メール 1 件のボタン行：未作成のみ [✏️ 下書きを作成]、常に [✅ 下書きを確認]。
+
+    作成済みの下書きはスレッドを開けばそこに表示されるので、行内は「確認」1つで足りる。
+    旧「📨 下書きを開く」（＝下書きフォルダ直行）は重複のため廃止し、一覧は DM 末尾に集約する。
+    """
     btns: list[dict[str, Any]] = []
     thread_url = getattr(m, "thread_gmail_url", "") or _GMAIL_INBOX_URL
-    if getattr(m, "has_draft", False):
-        # 既に下書き有り → 作成ボタンは出さず、その下書きへ（block_actions 非発火の url ボタン）。
-        btns.append(
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "📨 下書きを開く", "emoji": True},
-                "url": _GMAIL_DRAFTS_URL,
-            }
-        )
-    elif getattr(m, "draft_token", ""):
-        # 押下→worker が block_actions を受けてオンデマンド生成。value は HMAC 署名トークン。
+    has_draft = bool(getattr(m, "has_draft", False))
+    draft_token = getattr(m, "draft_token", "")
+    if not has_draft and draft_token:
+        # 下書き未作成（オンデマンド/生成失敗）時のみ。押下→worker が block_actions で生成。
         btns.append(
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "✏️ 下書きを作成", "emoji": True},
                 "action_id": _ACTION_MAIL_DRAFT,
-                "value": m.draft_token,
+                "value": draft_token,
                 "style": "primary",
             }
         )
     btns.append(
         {
             "type": "button",
-            "text": {"type": "plain_text", "text": "🔍 確認する", "emoji": True},
+            "text": {"type": "plain_text", "text": "✅ 下書きを確認", "emoji": True},
             "url": thread_url,  # そのスレッドへワンタップ直行（url ボタン＝非発火）
         }
     )
@@ -242,6 +239,25 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 body += f"\n📌 依頼: {_slack_escape(m.ask)}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
             blocks.append({"type": "actions", "elements": _reply_buttons(m)})
+        # 作り置き済みの下書きが1件でもあれば、末尾に「一覧をまとめて開く」を1つだけ集約する
+        # （行内の重複を排し、下書きフォルダへの導線はここに一本化）。
+        if any(getattr(m, "has_draft", False) for m in high):
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "📁 下書き一覧を開く",
+                                "emoji": True,
+                            },
+                            "url": _GMAIL_DRAFTS_URL,
+                        }
+                    ],
+                }
+            )
         blocks.append({"type": "divider"})
 
     # --- 📬 未確認（未読・最大5件＋「他N件」・件名/相手＋AI要約）---
@@ -447,7 +463,13 @@ def main() -> int:
         skill = MorningDigestSkill(token_store=token_store, bedrock=BedrockClient.from_env())
     else:
         skill = MorningDigestSkill(token_store=token_store)
-    skill_input = MorningDigestInput()
+    # concurrency と同じく env 不正値でも落とさない。schema は 0..10、0=自動下書き無効。
+    try:
+        max_drafts = int(os.environ.get("MORNING_DIGEST_MAX_DRAFTS", "3"))
+    except ValueError:
+        max_drafts = 3
+    max_drafts = min(10, max(0, max_drafts))
+    skill_input = MorningDigestInput(max_drafts=max_drafts)
 
     # concurrency=1（既定）は従来どおり逐次。>1 で人数に応じた所要時間短縮。
     if concurrency > 1:
