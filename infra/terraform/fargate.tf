@@ -161,6 +161,9 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
       data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
       # §U: oauth_connect の state 署名鍵の注入権限。
       data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
+      # §Slack個人連携(xoxp): DM 認可URL生成用（client_id / state 署名鍵）の注入権限。
+      data.aws_secretsmanager_secret.connect_slack_client_id[0].arn,
+      data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn,
       # §知識ベース: knowledge_deliver が共有 Drive(個人OAuth)で実ファイルを DL する token。
       data.aws_secretsmanager_secret.google_oauth[0].arn,
     ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [])
@@ -360,6 +363,8 @@ resource "aws_ecs_task_definition" "mcp" {
       # OAUTH_REDIRECT_URI は connect-web と同じ公開 callback URL。OAUTH_STATE_SECRET（下の secrets）
       # は connect-web と同一値必須＝mcp が make_state で署名→connect-web callback が verify_state で検証。
       { name = "OAUTH_REDIRECT_URI", value = var.connect_redirect_uri },
+      # §Slack個人連携(xoxp): DM『連携』が Slack 認可URLを生成するのに必要（未設定なら Slack リンク非表示）。
+      { name = "SLACK_OAUTH_REDIRECT_URI", value = var.slack_oauth_redirect_uri },
       { name = "USE_OAUTH_CONNECT_TOOL", value = "true" },
       # 構造化ログを JSON Lines 化（CloudWatch metric filter `{ $.cost_usd = * }` 等が
       # バインドして cost/error/spoof アラームが発火する。observability/logging_config.py）。
@@ -428,6 +433,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
       # §U: oauth_connect の state 署名鍵（connect-web と同一値＝署名/検証を共有）。
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
+      # §Slack個人連携(xoxp): DM 認可URL生成に必要（client_secret は connect-web callback 側のみ）。
+      { name = "CONNECT_SLACK_CLIENT_ID", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_id[0].arn },
+      { name = "SLACK_OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn },
       # §知識ベース: 共有「個人OAuth」3点を google_oauth(JSON) から個別キー抽出して注入。
       # knowledge_deliver が GDriveClient.from_env で本人 Drive token を組み立て実ファイルを DL。
       { name = "GOOGLE_CLIENT_ID", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:client_id::" },
