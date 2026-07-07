@@ -21,7 +21,17 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from teamagent.adapters.google_oauth_flow import OAuthConsentFlow, verify_state
-from teamagent.adapters.oauth_token_store import OAuthToken
+from teamagent.adapters.oauth_token_store import (
+    OAuthToken,
+    SlackOAuthToken,
+    SlackTokenStore,
+)
+from teamagent.adapters.slack_oauth_flow import (
+    SlackOAuthConsentFlow,
+)
+from teamagent.adapters.slack_oauth_flow import (
+    verify_state as slack_verify_state,
+)
 from teamagent.dashboard.auth import (
     Verifier,
     authenticate_id_token,
@@ -2250,6 +2260,9 @@ def create_app(
     app_role: str = "teamagent_app",
     exchange_fn: Callable[[str], OAuthToken] | None = None,
     store: Any | None = None,
+    slack_redirect_uri: str | None = None,
+    slack_exchange_fn: Callable[[str], SlackOAuthToken] | None = None,
+    slack_store: Any | None = None,
     search_skill_factory: Callable[[], Any] | None = None,
     search_config: DashboardConfig | None = None,
     search_verifier: Verifier | None = None,
@@ -2264,8 +2277,14 @@ def create_app(
       - search_config: 認証設定（未指定時は env から _load_search_config）。
       - search_verifier: Google id_token 検証器（テストでネットワーク排除）。
       - feedback_store: search_feedback への保存器（未指定時は RDS に遅延生成）。
+
+    Slack per-user 連携（/slack/oauth/callback・Google 版と対称）:
+      - slack_redirect_uri: Slack 認可の redirect_uri（未指定時 env SLACK_OAUTH_REDIRECT_URI）。
+      - slack_exchange_fn: code→SlackOAuthToken 交換（テストで注入・実 Slack API を排除）。
+      - slack_store: xoxp の保管器（未指定時 KMS+RDS に遅延生成した SlackTokenStore）。
     """
     redirect = redirect_uri or os.environ.get("OAUTH_REDIRECT_URI", "")
+    slack_redirect = slack_redirect_uri or os.environ.get("SLACK_OAUTH_REDIRECT_URI", "")
     app = FastAPI(title="TeamAgent Connect", docs_url=None, redoc_url=None, openapi_url=None)
     search_cfg = search_config or _load_search_config()
     # SearchSkill は embedder が重いのでプロセス内 lazy-singleton（初回検索時に1度だけ生成）。
@@ -2288,6 +2307,23 @@ def create_app(
         if not key_id:
             raise RuntimeError("OAUTH_KMS_KEY_ID が未設定です")
         return RdsTokenStore(PgVectorClient.from_env(), KmsCipher(key_id), app_role=app_role)
+
+    def _slack_exchange(code: str) -> SlackOAuthToken:
+        if slack_exchange_fn is not None:
+            return slack_exchange_fn(code)
+        return SlackOAuthConsentFlow(redirect_uri=slack_redirect).exchange(code)
+
+    def _get_slack_store() -> Any:
+        if slack_store is not None:
+            return slack_store
+        # 遅延 import（テストは slack_store 注入で本番依存を回避）。
+        from teamagent.adapters.oauth_token_store import KmsCipher
+        from teamagent.adapters.pgvector_client import PgVectorClient
+
+        key_id = kms_key_id or os.environ.get("OAUTH_KMS_KEY_ID")
+        if not key_id:
+            raise RuntimeError("OAUTH_KMS_KEY_ID が未設定です")
+        return SlackTokenStore(PgVectorClient.from_env(), KmsCipher(key_id), app_role=app_role)
 
     def _get_search_skill() -> Any:
         """SearchSkill を lazy-singleton で取得（embedder の二重ロードを避ける）。"""
@@ -2460,6 +2496,84 @@ def create_app(
             _page(
                 "✅ 連携が完了しました",
                 f"{email} の Google 連携が完了しました。Slack に戻って AI に話しかけてください。"
+                "このタブは閉じて大丈夫です。",
+            ),
+            status_code=200,
+        )
+
+    @app.get("/slack/oauth/callback")
+    def slack_oauth_callback(request: Request) -> Response:
+        params = request.query_params
+        err = params.get("error", "")
+        if err:
+            logger.warning("connect_slack_callback_user_denied", error=err)
+            return HTMLResponse(
+                _page(
+                    "認可がキャンセルされました",
+                    "もう一度 Slack で /teamagent connect をお試しください。",
+                ),
+                status_code=400,
+            )
+        code = params.get("code", "")
+        state = params.get("state", "")
+        if not code or not state:
+            return HTMLResponse(
+                _page(
+                    "不正なリクエスト",
+                    "リンクが壊れています。Slack で /teamagent connect をやり直してください。",
+                ),
+                status_code=400,
+            )
+        email = slack_verify_state(state)
+        if not email:
+            logger.warning("connect_slack_callback_bad_state")
+            return HTMLResponse(
+                _page(
+                    "検証に失敗しました",
+                    "リンクが古いか不正です。Slack で /teamagent connect をやり直してください。",
+                    accent="#f9667a",
+                ),
+                status_code=400,
+            )
+        try:
+            token = _slack_exchange(code)
+            # 外部WSの xoxp を他 email に紐付けないよう team_id 照合（設定時のみ）。
+            expected_team = os.environ.get("SLACK_TEAM_ID", "").strip()
+            if expected_team and token.team_id and token.team_id != expected_team:
+                logger.warning(
+                    "connect_slack_callback_team_mismatch",
+                    user_email=email,
+                    got_team=token.team_id,
+                )
+                return HTMLResponse(
+                    _page(
+                        "対象ワークスペースが違います",
+                        "所属ワークスペースの Slack で /teamagent connect をお試しください。",
+                        accent="#f9667a",
+                    ),
+                    status_code=403,
+                )
+            _get_slack_store().put(email, token)
+        except Exception as exc:
+            # xoxp/code/secret を露出させない。診断は例外型のみ（G8・str(exc) は出さない）。
+            logger.warning(
+                "connect_slack_callback_store_failed",
+                user_email=email,
+                error=type(exc).__name__,
+            )
+            return HTMLResponse(
+                _page(
+                    "連携に失敗しました",
+                    "時間をおいて Slack で /teamagent connect をやり直してください。",
+                    accent="#f9667a",
+                ),
+                status_code=500,
+            )
+        logger.info("connect_slack_callback_ok", user_email=email, scopes=len(token.scopes))
+        return HTMLResponse(
+            _page(
+                "✅ Slack連携が完了しました",
+                f"{email} の Slack 連携が完了しました。Slack に戻って AI に話しかけてください。"
                 "このタブは閉じて大丈夫です。",
             ),
             status_code=200,

@@ -66,6 +66,34 @@ class SlackClient:
             )
         return cls(bot_token=token)
 
+    @classmethod
+    def from_user_token(
+        cls, xoxp: str, client: AsyncWebClient | None = None
+    ) -> SlackClient:
+        """各営業「本人」の Slack User Token(xoxp) で動く SlackClient を組む。
+
+        要件B: 各営業が OAuth 同意フローで取得した個人 user token(xoxp) を使い、
+        Bot ではなく **本人として** Slack API を叩くための別経路。共有 Bot Token
+        (xoxb) を使う ``from_env`` とは用途も権限主体も異なるので混同しないこと。
+
+        - ``from_env``    → 共有 Bot Token(xoxb)。ワークスペース共通の bot 権限。
+        - ``from_user_token`` → 個人 User Token(xoxp)。当該営業本人の権限・本人名義。
+
+        実装上は ``__init__(bot_token=...)`` がトークン概念を持つだけで
+        AsyncWebClient(token=...) にそのまま流すため、xoxp を bot_token 引数に
+        渡しても同型に通る（token の中身が xoxp である点だけが違う）。呼び出し側で
+        xoxb/xoxp を取り違えないよう、必ずこの classmethod 経由で構築する。
+
+        Args:
+            xoxp: 当該営業本人の Slack User OAuth Token（``xoxp-`` 始まり）。
+            client: テスト用に AsyncWebClient を差し替える場合に注入。
+        """
+        if not xoxp:
+            raise ValueError(
+                "xoxp(Slack User Token) が空です。OAuth 同意フロー完了後のトークンを渡してください"
+            )
+        return cls(bot_token=xoxp, client=client)
+
     async def post_message(
         self,
         channel: str,
