@@ -22,6 +22,9 @@ class DashboardConfig:
     db_app_role: str = "teamagent_dashboard"  # 読み取り用ロール（migration 0007）
     session_ttl_s: int = 8 * 3600  # セッション有効期間（既定8h）
     cookie_secure: bool = False  # 公開(HTTPS)時は True（ローカルHTTPでは False）
+    allowed_hd_opens_domain: bool = False
+    # True: hd(会社ドメイン)一致なら allowlist 不問で許可＝会社ドメイン全体に開放（connect-web の全社共有用）。
+    # False(既定): 従来どおり hd は絞り込みの AND 条件で allowlist 必須（ダッシュボードのオーナー限定を維持）。
 
     @property
     def auth_enabled(self) -> bool:

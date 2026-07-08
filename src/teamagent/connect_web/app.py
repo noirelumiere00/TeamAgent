@@ -158,6 +158,9 @@ def _load_search_config(env: dict[str, str] | None = None) -> DashboardConfig:
         session_secret=secret,
         dev_bypass=False,
         cookie_secure=secure_raw in {"1", "true", "yes", "on"},
+        # CONNECT_SEARCH_ALLOWED_HD を設定したら「会社ドメイン全体に開放」を意図する
+        # （＝@vectorinc.co.jp 全員可）。ダッシュボード側は load_config が本フラグを渡さず既定 False。
+        allowed_hd_opens_domain=hd is not None,
     )
 
 
