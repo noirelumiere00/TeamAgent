@@ -72,12 +72,13 @@ def _static_app_html() -> str:
 def _safe_next(raw: str | None) -> str:
     """ログイン後の戻り先を検証（オープンリダイレクト防止）。
 
-    既知の内部ページ（``/app`` / ``/search``）のみ許可し、それ以外は ``/search``。
+    既知の内部ページ（``/app`` / ``/search``）のみ許可し、それ以外は既定 ``/app``。
+    ＝ログイン後は原則 Obsidian 風 UI(/app) に着地する（旧 /search UI は明示遷移時のみ）。
     外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
     """
     if (raw or "").strip() in {"/app", "/search"}:
         return raw.strip()
-    return "/search"
+    return "/app"
 
 _SEARCH_COOKIE = "ta_search_session"
 _SESSION_TTL_S = 8 * 3600

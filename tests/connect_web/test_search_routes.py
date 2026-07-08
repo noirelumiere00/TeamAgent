@@ -126,7 +126,7 @@ def test_login_verify_sets_cookie_and_redirects() -> None:
     client, _, _ = _build()
     r = client.post("/search/auth/verify", data={"credential": "tok"}, follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/search"
+    assert r.headers["location"] == "/app"
     assert "ta_search_session" in r.headers.get("set-cookie", "")
 
 
