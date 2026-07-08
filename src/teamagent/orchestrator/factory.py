@@ -330,12 +330,13 @@ def build_production_tools() -> list[ToolSpec]:
         from teamagent.skills.mail_reply.skill import MailReplySkill
 
         reply_store = _build_token_store()
+        reply_slack = _build_slack_context_provider()
         specs.append(
             ToolSpec(
                 MailReplySkill.name,
                 MailReplySkill.description,
                 MailReplySkill,
-                factory=lambda: MailReplySkill(token_store=reply_store),
+                factory=lambda: MailReplySkill(token_store=reply_store, deal_provider=reply_slack),
             )
         )
 
@@ -362,12 +363,15 @@ def build_production_tools() -> list[ToolSpec]:
         from teamagent.skills.morning_digest.skill import MorningDigestSkill
 
         morning_store = _build_token_store()
+        morning_slack = _build_slack_context_provider()
         specs.append(
             ToolSpec(
                 MorningDigestSkill.name,
                 MorningDigestSkill.description,
                 MorningDigestSkill,
-                factory=lambda: MorningDigestSkill(token_store=morning_store),
+                factory=lambda: MorningDigestSkill(
+                    token_store=morning_store, deal_provider=morning_slack
+                ),
             )
         )
 
@@ -448,6 +452,30 @@ def _build_token_store() -> Any:
     from teamagent.adapters.pgvector_client import PgVectorClient
 
     return RdsTokenStore(PgVectorClient.from_env(), KmsCipher(key_id))
+
+
+def _build_slack_store() -> Any:
+    """本人 Slack(xoxp) TokenStore を構築（OAUTH_KMS_KEY_ID + RDS。無ければ空ストア）。"""
+    key_id = os.environ.get("OAUTH_KMS_KEY_ID")
+    if not key_id:
+        from teamagent.adapters.oauth_token_store import InMemoryTokenStore
+
+        return InMemoryTokenStore()  # 空＝全員未連携（provider は fail-open で素通り）。
+    from teamagent.adapters.oauth_token_store import KmsCipher, SlackTokenStore
+    from teamagent.adapters.pgvector_client import PgVectorClient
+
+    return SlackTokenStore(PgVectorClient.from_env(), KmsCipher(key_id))
+
+
+def _build_slack_context_provider() -> Any:
+    """USE_SLACK_CONTEXT 有効時のみ、本人Slack文脈プロバイダを構築（それ以外は None）。"""
+    from teamagent.skills._shared.mail_compose import env_bool
+
+    if not env_bool("USE_SLACK_CONTEXT", False):
+        return None
+    from teamagent.skills._shared.slack_context import SlackContextProvider
+
+    return SlackContextProvider(slack_store=_build_slack_store())
 
 
 __all__ = ["build_production_tools"]

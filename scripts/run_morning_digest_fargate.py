@@ -456,13 +456,21 @@ def main() -> int:
         concurrency = 1
 
     token_store = _build_token_store()
+    # 本人Slack文脈（USE_SLACK_CONTEXT 有効時のみ非 None）。朝ダイジェストの自動下書きにも反映。
+    from teamagent.orchestrator.factory import _build_slack_context_provider
+
+    slack_ctx = _build_slack_context_provider()
     if concurrency > 1:
         # 並列時は Bedrock クライアントを事前生成して共有（lazy-init の競合を避ける）。
         from teamagent.adapters.bedrock_client import BedrockClient
 
-        skill = MorningDigestSkill(token_store=token_store, bedrock=BedrockClient.from_env())
+        skill = MorningDigestSkill(
+            token_store=token_store,
+            bedrock=BedrockClient.from_env(),
+            deal_provider=slack_ctx,
+        )
     else:
-        skill = MorningDigestSkill(token_store=token_store)
+        skill = MorningDigestSkill(token_store=token_store, deal_provider=slack_ctx)
     # concurrency と同じく env 不正値でも落とさない。schema は 0..10、0=自動下書き無効。
     try:
         max_drafts = int(os.environ.get("MORNING_DIGEST_MAX_DRAFTS", "3"))

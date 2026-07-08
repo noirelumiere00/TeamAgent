@@ -208,3 +208,55 @@ def test_reply_all_cc_includes_other_recipients() -> None:
     assert "ueda@partner.co.jp" in cc
     assert OWNER not in cc  # 本人除外
     assert "tanaka@moribuild.co.jp" not in cc  # 主宛先除外
+
+
+class _FakeSlackProvider:
+    """deal_provider 契約の fake（fetch 引数を記録し bullets/cost を返す）。"""
+
+    def __init__(self, bullets: list[str], cost: float = 0.003) -> None:
+        self._bullets = bullets
+        self._cost = cost
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def fetch(self, client_hint: str, requester: str, ctx: Any) -> Any:
+        from teamagent.skills._shared.slack_context import SlackContextResult
+
+        self.calls.append((client_hint, requester, dict(ctx.metadata)))
+        return SlackContextResult(bullets=self._bullets, cost_usd=self._cost)
+
+
+def test_slack_context_injected_when_gate_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USE_SLACK_CONTEXT", "1")
+    gmail = FakeGmail([_inbound()])
+    bedrock = FakeBedrock()
+    prov = _FakeSlackProvider(["○○社は金曜納期で合意", "予算は300万"])
+    skill = MailReplySkill(gmail=gmail, bedrock=bedrock, deal_provider=prov)
+    ctx = SkillContext(
+        request_id="r",
+        user_id="U1",
+        metadata={"user_email": OWNER, "channel_id": "C1", "thread_ts": "1.1"},
+    )
+    out = skill.run(MailReplyInput(client_name="森ビル"), ctx)
+
+    msg = str(bedrock.last_messages)
+    assert "社内Slackの関連文脈" in msg  # セクションが注入される
+    assert "金曜納期" in msg
+    assert out.total_cost_usd == pytest.approx(0.007)  # draft 0.004 + slack 0.003
+    # provider に client_name と現スレッド channel/thread が渡る
+    assert prov.calls[0][0] == "森ビル"
+    assert prov.calls[0][2]["channel_id"] == "C1"
+    assert prov.calls[0][2]["thread_ts"] == "1.1"
+    # 送信は呼ばれない（create_draft のみ）
+    assert len(gmail.create_draft_calls) == 1
+
+
+def test_slack_context_skipped_when_gate_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("USE_SLACK_CONTEXT", raising=False)
+    gmail = FakeGmail([_inbound()])
+    bedrock = FakeBedrock()
+    prov = _FakeSlackProvider(["出てはいけない"])
+    skill = MailReplySkill(gmail=gmail, bedrock=bedrock, deal_provider=prov)
+    skill.run(MailReplyInput(client_name="森ビル"), _ctx())
+
+    assert "社内Slackの関連文脈" not in str(bedrock.last_messages)
+    assert prov.calls == []  # gate OFF なら provider は呼ばれない
