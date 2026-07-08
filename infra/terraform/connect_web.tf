@@ -337,6 +337,9 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "SLACK_OAUTH_REDIRECT_URI", value = var.slack_oauth_redirect_uri },
       { name = "CONNECT_BASE_URL", value = var.connect_base_url },
       { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
+      # /app・/search を @vectorinc.co.jp の社員全員に開放（email_verified + 会社ドメイン hd 許可）。
+      # 未設定だと既定 allowlist（s-komata 1名）のみ。2026-07-07 ユーザー承認（全社ナレッジ共有）。
+      { name = "CONNECT_SEARCH_ALLOWED_HD", value = "vectorinc.co.jp" },
       { name = "OAUTH_KMS_KEY_ID", value = var.connect_oauth_kms_key_id != "" ? var.connect_oauth_kms_key_id : data.aws_kms_alias.connect_oauth[0].target_key_arn },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },

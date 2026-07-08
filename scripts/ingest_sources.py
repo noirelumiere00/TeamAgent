@@ -71,7 +71,7 @@ def main() -> int:
     args = p.parse_args()
 
     # 設定読み込み
-    from teamagent.adapters.embeddings_client import LocalE5Embedder
+    from teamagent.adapters.embeddings_client import build_embedder_from_env
     from teamagent.adapters.pgvector_client import PgVectorClient
     from teamagent.ingest.loader import load_ingest_sources
     from teamagent.ingest.pipeline import IngestRunner
@@ -102,7 +102,8 @@ def main() -> int:
         app_role=args.app_role if args.app_role.lower() != "none" else None,
         owner_email=args.owner_email,
     )
-    embedder = LocalE5Embedder()
+    # EMBEDDER_BACKEND（既定 local）で local-e5 / Bedrock Cohere を切替（検索側と同一構築点）。
+    embedder = build_embedder_from_env()
 
     kinds_raw = args.sources.lower()
     if kinds_raw in ("", "all"):

@@ -1010,3 +1010,56 @@ def test_client_boost_default_off(
     hits = skill.retrieve_hits("ユニーの2回目提案", SkillContext(), top_k=5)
     assert [h.chunk_id for h in hits] == [1]
     fake_pgvector_new_schema.list_client_names.assert_not_called()
+
+
+# -----------------------------------------------------------
+# B6: SEARCH_CLIENT_MATCH_SORT（クライアント一致を rerank 後に前出し）
+# -----------------------------------------------------------
+def test_client_match_sort_promotes_real_deal(
+    fake_bedrock: MagicMock,
+    fake_pgvector_new_schema: MagicMock,
+    monkeypatch: Any,
+) -> None:
+    """SEARCH_CLIENT_MATCH_SORT=1 で、汎用イントロ(高score)より実案件(cls_project一致)が先頭。"""
+    monkeypatch.setenv("SEARCH_CLIENT_MATCH_SORT", "1")
+    fake_pgvector_new_schema.list_client_names.return_value = ["出光興産"]
+    # dense は汎用イントロ(1, 高score) と 実案件(2, 低score・cls_project一致) を返す。
+    fake_pgvector_new_schema.search_similar_new_schema.return_value = [
+        SearchHit(chunk_id=1, content="会社紹介", score=0.95, metadata={}),
+        SearchHit(
+            chunk_id=2, content="出光案件提案", score=0.40, metadata={"cls_project": "出光興産"}
+        ),
+    ]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_client_boost=False,  # boost と独立に sort 単独で前出しできることを確認
+    )
+    hits = skill.retrieve_hits("出光興産の提案資料", SkillContext(), top_k=5)
+    assert hits[0].chunk_id == 2  # 実案件が先頭に来る
+    assert {h.chunk_id for h in hits} == {1, 2}  # 絞らない（件数不変）
+
+
+def test_client_match_sort_default_off_keeps_dense_order(
+    fake_bedrock: MagicMock,
+    fake_pgvector_new_schema: MagicMock,
+    monkeypatch: Any,
+) -> None:
+    """既定 OFF（env 未設定）では並べ替えず dense の順序を保つ（後方互換・恒等）。"""
+    monkeypatch.delenv("SEARCH_CLIENT_MATCH_SORT", raising=False)
+    fake_pgvector_new_schema.search_similar_new_schema.return_value = [
+        SearchHit(chunk_id=1, content="会社紹介", score=0.95, metadata={}),
+        SearchHit(chunk_id=2, content="出光案件", score=0.40, metadata={"cls_project": "出光興産"}),
+    ]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_client_boost=False,
+    )
+    hits = skill.retrieve_hits("出光興産の提案資料", SkillContext(), top_k=5)
+    assert [h.chunk_id for h in hits] == [1, 2]  # dense 順のまま
+    fake_pgvector_new_schema.list_client_names.assert_not_called()  # 語彙取得もしない

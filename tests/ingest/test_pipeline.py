@@ -504,6 +504,363 @@ def test_ingest_gsheet_handler_row_per_document(monkeypatch: pytest.MonkeyPatch)
 
 
 # -----------------------------------------------------------
+# Sheet handler — 営業 FB フォーム回答シートの構造化メタ（2026-07-03）
+# -----------------------------------------------------------
+# ショート動画営業 FB のフォーム回答シートの実ヘッダ（ユーザー実データ確認済・仮名化不要）。
+# 「顧客名・案件名」（'・' 区切り）と「顧客反応(ポジ・ネガ)」（半角括弧・統合列）が
+# Slack フォームのラベルとの表記ゆれポイント。
+_FB_SHEET_HEADERS = (
+    "タイムスタンプ",
+    "商流",
+    "顧客名",
+    "顧客名・案件名",
+    "商談フェーズ",
+    "商談感触（BANT）",
+    "顧客反応(ポジ・ネガ)",
+    "提案メニュー",
+)
+
+
+def test_ingest_gsheet_fb_sheet_rows_get_structured_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FB シート行はヘッダ → 値が Slack FB 経路と同じキーでメタ化される。
+
+    is_sales_fb / channel_type / agency_name / client_case / deal_phase /
+    bant_score / client_reaction / proposed_menu / client_name（導出）。
+    """
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1V",
+        tab_name="フォーム回答 1",
+        headers=_FB_SHEET_HEADERS,
+        rows=(
+            (
+                "2026/06/30 10:00:00",
+                "代理店",
+                "アルファ広告社",
+                "ベータ商事 / ガンマ製品",
+                "ヒアリング",
+                "B（前向き）",
+                "ポジ: 適合性を評価 / ネガ: 予算感に懸念",
+                "UGC（TTO、切り抜きなど）",
+            ),
+            # コア列が全部空（タイムスタンプのみ）の行 → FB メタは付かない
+            ("2026/07/01 09:00:00", "", "", "", "", "", "", ""),
+        ),
+        row_count=2,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1V",
+        sheet_name="ショート動画営業 FB - フォーム回答",
+        description="",
+        tabs=(GSheetsTabSpec(gid=537831563, tab_name="フォーム回答 1"),),
+        extra_metadata={"topic": "営業 FB", "priority": "high"},
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-fb",
+    )
+    assert docs_n == 2
+
+    md = repo.upsert_calls[0]["metadata"]
+    # Slack FB 経路と同じ first-class メタ
+    assert md["is_sales_fb"] is True
+    assert md["channel_type"] == "代理店"
+    assert md["agency_name"] == "アルファ広告社"
+    assert md["client_case"] == "ベータ商事 / ガンマ製品"
+    assert md["deal_phase"] == "ヒアリング"
+    assert md["bant_score"] == "B（前向き）"
+    assert md["client_reaction"] == "ポジ: 適合性を評価 / ネガ: 予算感に懸念"
+    assert md["proposed_menu"] == "UGC（TTO、切り抜きなど）"
+    # client_name は client_case の '/' 左側から導出
+    assert md["client_name"] == "ベータ商事"
+    # 既存の固定キー / extra_metadata は破壊されない
+    assert md["tab_name"] == "フォーム回答 1"
+    assert md["row_idx"] == 2
+    assert md["topic"] == "営業 FB"
+    assert md["priority"] == "high"
+
+    # コア列が全部空の行には FB メタを付けない
+    md_empty = repo.upsert_calls[1]["metadata"]
+    assert "is_sales_fb" not in md_empty
+    assert "client_name" not in md_empty
+    assert "deal_phase" not in md_empty
+
+    # FB シートにはナレッジ共有メタは付かない（コアヘッダが交差しない・相互排他）
+    assert "is_knowledge_share" not in md
+    assert "client_company" not in md
+    assert "knowledge_kind" not in md
+
+
+def test_ingest_gsheet_non_fb_sheet_metadata_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 FB シート（ナレッジ共有フォーム等・コア列 < 3）は従来どおりメタ追加なし。"""
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1K",
+        tab_name="フォーム回答 1",
+        headers=("タイムスタンプ", "共有者", "ナレッジ内容", "カテゴリ"),
+        rows=(("2026/06/30 10:00:00", "山田太郎", "TikTok 新機能について", "メディア動向"),),
+        row_count=1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1K",
+        sheet_name="ナレッジ共有",
+        description="",
+        tabs=(GSheetsTabSpec(gid=1, tab_name="フォーム回答 1"),),
+        extra_metadata={"topic": "提案ナレッジ"},
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-nonfb",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    # 従来キーのみ（FB メタもナレッジ共有メタも一切付かない）
+    assert set(md) == {"topic", "tab_name", "row_idx"}
+    assert "is_sales_fb" not in md
+    assert "is_knowledge_share" not in md
+
+
+# -----------------------------------------------------------
+# Sheet handler — ナレッジ共有フォーム回答シートの構造化メタ（2026-07-06）
+# -----------------------------------------------------------
+# ナレッジ共有フォーム回答シートの実ヘッダ 13 列（Drive API 実データ 190 行で確認済・
+# 仮名化不要）。値は実データの形（法人格/敬称/カンマ多選択/GAS 運用列）を模した仮名。
+_KNOWLEDGE_SHEET_HEADERS = (
+    "ファイルをアップ",
+    "正式社名",
+    "案件名",
+    "クライアント種別",
+    "提案プロダクト",
+    "資料の概要",
+    "このナレッジのポイントはここ！",
+    "なぜそのナレッジ（資料）を共有したのか？",
+    "フリーコメント",
+    "送信者",
+    "タイムスタンプ",
+    "ドライブ格納",
+    "保管先フォルダID記録（GAS処理)",
+)
+
+
+def test_ingest_gsheet_knowledge_sheet_rows_get_structured_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ナレッジ共有シート行は form_mappings の写像で first-class メタ化される。
+
+    is_knowledge_share / client_company / client_case / client_type / proposed_menu /
+    knowledge_kind / submitter ＋ client_name（正式社名から FB と同品質で導出）。
+    is_sales_fb は立てない（これは FB ではなくナレッジ共有）。
+    """
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1J",
+        tab_name="フォーム回答 1",
+        headers=_KNOWLEDGE_SHEET_HEADERS,
+        rows=(
+            (
+                "https://slack.example/files/F1/deck.pdf",
+                "株式会社デルタ製薬様",  # 法人格 prefix ＋ 敬称 suffix（実データの揺れ形）
+                "新製品プロモーション",
+                "TOP500 or ベス10,メーカー",  # カンマ多選択（実値域は企業属性・業種ではない）
+                "ビデオリリース,タテガタ",  # カンマ多選択（自社プロダクト名）
+                "提案",
+                "",  # このナレッジのポイントはここ！（実データでは全行空）
+                "",  # なぜ共有したのか（同上）
+                "参考までに共有します（長文自由記述）",
+                "@山田太郎",
+                "2025/06/17 13:14:45",
+                "20250617_デルタ製薬",
+                "-",
+            ),
+            # 正式社名がプレースホルダの行 → client_name は導出されない
+            (
+                "",
+                "なし",
+                "",
+                "その他",
+                "その他",
+                "その他ナレッジ",
+                "",
+                "",
+                "社内 Tips です",
+                "@佐藤花子",
+                "2025/07/01 09:00:00",
+                "",
+                "-",
+            ),
+        ),
+        row_count=2,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1J",
+        sheet_name="ナレッジ共有 - フォーム回答",
+        description="",
+        tabs=(GSheetsTabSpec(gid=278789217, tab_name="フォーム回答 1"),),
+        extra_metadata={"topic": "提案ナレッジ"},
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-knowledge",
+    )
+    assert docs_n == 2
+
+    md = repo.upsert_calls[0]["metadata"]
+    assert md["is_knowledge_share"] is True
+    assert md["client_company"] == "株式会社デルタ製薬様"  # 生値（監査用）
+    assert md["client_name"] == "デルタ製薬"  # 法人格・敬称を落とした first-class 名
+    assert md["client_case"] == "新製品プロモーション"
+    assert md["client_type"] == "TOP500 or ベス10,メーカー"
+    assert md["proposed_menu"] == "ビデオリリース,タテガタ"
+    assert md["knowledge_kind"] == "提案"
+    assert md["submitter"] == "@山田太郎"
+    # FB フラグは立てない・運用列（URL/フリーコメント/タイムスタンプ/GAS 列）は写像しない
+    assert "is_sales_fb" not in md
+    assert set(md) == {
+        "topic",
+        "tab_name",
+        "row_idx",
+        "is_knowledge_share",
+        "client_company",
+        "client_name",
+        "client_case",
+        "client_type",
+        "proposed_menu",
+        "knowledge_kind",
+        "submitter",
+    }
+    # 既存の固定キー / extra_metadata は破壊されない
+    assert md["tab_name"] == "フォーム回答 1"
+    assert md["row_idx"] == 2
+    assert md["topic"] == "提案ナレッジ"
+
+    # プレースホルダ社名（なし）の行: 写像は付くが client_name は導出されない
+    md2 = repo.upsert_calls[1]["metadata"]
+    assert md2["is_knowledge_share"] is True
+    assert md2["client_company"] == "なし"
+    assert "client_name" not in md2
+    assert "client_case" not in md2  # 空値は drop
+
+
+def test_ingest_gsheet_knowledge_metadata_coexists_with_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ナレッジ共有メタと cls_* が併存する（合成順 knowledge → cls・キーは交差しない）。
+
+    人間入力（client_type/proposed_menu/knowledge_kind）と Haiku
+    （cls_industry/cls_solution/cls_doc_type）は別キー設計なので、cls を後置しても
+    人間入力が上書きされることはない（根拠は form_mappings の module docstring）。
+    """
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1J",
+        tab_name="フォーム回答 1",
+        headers=_KNOWLEDGE_SHEET_HEADERS,
+        rows=(
+            (
+                "",
+                "イプシロン食品株式会社",
+                "レトルト新商品ローンチ",
+                "上場企業",
+                "ソリューションプラン",
+                "提案,クロージング",
+                "",
+                "",
+                "決め手になった構成です",
+                "@田中一郎",
+                "2025/07/02 10:00:00",
+                "",
+                "-",
+            ),
+        ),
+        row_count=1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1J",
+        sheet_name="ナレッジ共有 - フォーム回答",
+        description="",
+        tabs=(GSheetsTabSpec(gid=278789217, tab_name="フォーム回答 1"),),
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-knowledge-cls",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    # cls_* はナレッジメタに上書きされない（stub の値のまま）
+    _assert_classified(md)
+    # 人間入力メタも同時に付く（proposed_menu=人間入力、cls_solution 系は Haiku で併存）
+    assert md["is_knowledge_share"] is True
+    assert md["client_name"] == "イプシロン食品"  # 法人格 suffix を除去
+    assert md["client_type"] == "上場企業"
+    assert md["proposed_menu"] == "ソリューションプラン"
+    assert md["knowledge_kind"] == "提案,クロージング"
+    assert md["cls_doc_type"] == "提案書"  # Haiku の doc_type はそのまま
+
+
+# -----------------------------------------------------------
 # Drive folder ingest — PDF 本文抽出 + ACL 解決
 # -----------------------------------------------------------
 def _make_drive_file(
@@ -1276,9 +1633,12 @@ class _StubClassifier:
             project="アース製薬", industry="日用品", doc_type="提案書", phase="提案"
         )
         self.calls: list[tuple[str, str]] = []
+        # ④ フォルダ文脈: classify に渡された folder_name を記録（未指定は ""）。
+        self.folder_names: list[str] = []
 
-    def classify(self, *, title: str, text: str, request_id: str) -> Any:
+    def classify(self, *, title: str, text: str, request_id: str, folder_name: str = "") -> Any:
         self.calls.append((title, text))
+        self.folder_names.append(folder_name)
         return self._result
 
 
@@ -1335,6 +1695,57 @@ def test_ingest_shared_drives_crawl_applies_classification(
     )
     assert docs_n == 1
     assert stub.calls  # 分類器が呼ばれた
+    _assert_classified(repo.upsert_calls[0]["metadata"])
+    # ④ crawl 経路はフォルダ文脈を渡さない（walk が親フォルダ名を保持しない・
+    # drive.name はドライブ名でフォルダ名ではない＝正直なスコープ制限）
+    assert stub.folder_names == [""]
+
+
+def test_ingest_gdrive_folder_passes_folder_name_to_classifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """④ gdrive_folders 経路は spec.folder_name を classify のフォルダ文脈として渡す。"""
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [_make_drive_file(id="F1", name="提案書.pdf", owners=("alice@x.jp",))],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    fake_client.download_file_bytes.return_value = b"<fake-pdf>"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    fake_reader = MagicMock()
+    page = MagicMock()
+    page.extract_text.return_value = "アース製薬向け SNS 提案の本文" * 10
+    fake_reader.pages = [page]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _s: fake_reader)
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    spec = GDriveFolderSpec(
+        folder_id="FOLDER1",
+        folder_name="ショート動画資料全般",
+        description="",
+        mime_type_filter="application/pdf",
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gdrive_folder(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-drive-folder-cls",
+    )
+    assert docs_n == 1
+    assert stub.calls
+    # フォルダ文脈が classify に届く（決定論ルール＋Haiku ヒントの入口）
+    assert stub.folder_names == ["ショート動画資料全般"]
     _assert_classified(repo.upsert_calls[0]["metadata"])
 
 
@@ -1433,6 +1844,72 @@ def test_ingest_gsheet_applies_classification(monkeypatch: pytest.MonkeyPatch) -
     # 既存キーは cls_* マージで破壊されない（後方互換）
     assert md["tab_name"] == "フォーム回答 1"
     assert md["row_idx"] == 2
+
+
+def test_ingest_gsheet_fb_metadata_coexists_with_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FB シートで FB メタと cls_* が共存する（fb → cls の順で合成・cls_* を上書きしない）。
+
+    deal_phase（フォーム実値）と cls_phase（Haiku 分類）は別キーなので両立する。
+    """
+    from teamagent.adapters.gsheets_client import TabRows
+
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1V",
+        tab_name="フォーム回答 1",
+        headers=_FB_SHEET_HEADERS,
+        rows=(
+            (
+                "2026/06/30 10:00:00",
+                "直販",
+                "アルファ広告社",
+                "シータ食品",
+                "2回目以降提案",
+                "B（前向き）",
+                "施策の考え方は好評",
+                "【メディア】グレースモード",
+            ),
+        ),
+        row_count=1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    stub = _StubClassifier()
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1V",
+        sheet_name="ショート動画営業 FB - フォーム回答",
+        description="",
+        tabs=(GSheetsTabSpec(gid=537831563, tab_name="フォーム回答 1"),),
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-fb-cls",
+    )
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    # cls_* は FB メタに上書きされない（stub の値のまま）
+    _assert_classified(md)
+    # FB メタも同時に付く（deal_phase=フォーム実値、cls_phase=分類値で両立）
+    assert md["is_sales_fb"] is True
+    assert md["channel_type"] == "直販"
+    assert md["client_case"] == "シータ食品"
+    assert md["deal_phase"] == "2回目以降提案"
+    assert md["cls_phase"] == "提案"
+    assert md["client_name"] == "シータ食品"
 
 
 def test_ingest_crawl_no_classification_when_disabled(
@@ -2048,3 +2525,57 @@ def test_crawl_one_file_exception_does_not_kill_source(
     )
     assert docs_n == 1
     assert [c["external_id"] for c in repo.upsert_calls] == ["OK"]
+
+
+def test_ingest_gsheet_resolves_renamed_tab_by_gid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """タブがリネームされても gid で現タイトルを解決して取り込める(本番障害の回帰テスト)。
+
+    2026-07-06: 命名ルール導入でタブ名が変わり "Unable to parse range: 'フォーム回答 1'"
+    で全シート取り込みが失敗した。gid は不変なので metadata から現タイトルを解決する。
+    """
+    from teamagent.adapters.gsheets_client import SheetMetadata, SheetTab, TabRows
+
+    fake_client = MagicMock()
+    # yaml 上は「フォーム回答 1」だが、実シートは「営業FB_回答」にリネーム済み
+    fake_client.get_sheet_metadata.return_value = SheetMetadata(
+        sheet_id="1V",
+        title="FB",
+        tabs=(
+            SheetTab(sheet_id="1V", gid=537831563, title="営業FB_回答", row_count=2, col_count=2),
+        ),
+    )
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1V",
+        tab_name="営業FB_回答",
+        headers=("業界", "温度感"),
+        rows=(("飲食", "高"),),
+        row_count=1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1V",
+        sheet_name="FB",
+        description="",
+        tabs=(GSheetsTabSpec(gid=537831563, tab_name="フォーム回答 1"),),
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r",
+    )
+    assert docs_n == 1
+    # get_tab_rows は yaml の旧名でなく gid 解決後の現タイトルで呼ばれる
+    _, kwargs = fake_client.get_tab_rows.call_args
+    assert kwargs["tab_name"] == "営業FB_回答"
+    # external_id は gid ベースのまま(リネームしても冪等 upsert)
+    assert "537831563" in repo.upsert_calls[0]["external_id"]

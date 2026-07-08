@@ -26,6 +26,12 @@ from teamagent.adapters.pg_pool import ConnectionPool, PoolStats
 
 logger = structlog.get_logger(__name__)
 
+# chunks の embedding 列を SQL 識別子として f 文字列に埋める際の許可リスト。
+# 値ではなく **識別子** を埋めるため placeholder にできず、injection 防止は固定許可リスト
+# で行う（embeddings_client.ALLOWED_EMBEDDING_COLUMNS と同一集合）。e5=embedding /
+# Bedrock Cohere=embedding_cohere（migration 0016 で並行追加）。
+_ALLOWED_EMBEDDING_COLUMNS: frozenset[str] = frozenset({"embedding", "embedding_cohere"})
+
 
 def _env_int(name: str, default: int) -> int:
     """env を int として読む（空・不正値は default）。"""
@@ -359,6 +365,9 @@ class PgVectorClient:
         metadata_contains: dict[str, str] | None = None,
         exclude_boilerplate: bool = False,
         exclude_duplicates: bool = False,
+        exclude_templates: bool = False,
+        exclude_recurring: bool = False,
+        embedding_col: str = "embedding",
     ) -> list[SearchHit]:
         """documents + chunks JOIN で cosine 類似度上位 limit 件を返す。
 
@@ -420,7 +429,41 @@ class PgVectorClient:
             既定 False = 句を一切足さず現行 SQL と完全一致。何も suppressed されて
             いなければ NOT(...) 全体が真になり無影響（後方互換）。exclude_boilerplate と
             AND 併用可。
+
+        exclude_templates:
+            True のとき WHERE に
+            ``AND COALESCE((d.metadata->>'cls_is_template')::bool, false) = false`` を足し、
+            テンプレ/雛形と分類された文書（ingest.classify の is_template・タイトルルール
+            または LLM 判定）を検索対象から外す。印なし文書（キー無し）は
+            COALESCE(...,false)=false が真で常に残る（後方互換）。句は固定リテラルのみで
+            bind 値を持たない（injection 面の追加リスクなし）。既定 False = 句を一切
+            足さず現行 SQL と完全一致。
+
+        exclude_recurring:
+            True のとき WHERE に
+            ``AND COALESCE((d.metadata->>'cls_is_recurring')::bool, false) = false`` を足し、
+            定期報告（上期/下期/月次/売上データ等・ingest.classify の is_recurring）を
+            検索対象から外す。「提案事例」検索に他社の定期売上報告が混入するノイズ対策で、
+            呼び側（SearchSkill）は**提案書 intent のときだけ**立てる（「上期報告を見たい」
+            クエリを殺さない）。印なし文書は常に残る（後方互換）。既定 False = 句を
+            一切足さず現行 SQL と完全一致。exclude_templates / boilerplate / duplicates と
+            AND 併用可。
+
+        embedding_col:
+            類似度算出/ORDER BY に使う chunks の embedding 列名。既定 ``"embedding"``
+            （e5・従来挙動と完全一致）。Bedrock Cohere 移行時は ``"embedding_cohere"`` を
+            渡し並行列で検索する。**SQL 識別子として f 文字列に埋め込む**ため、固定の許可
+            リスト（``embedding`` / ``embedding_cohere``）のみ受け付け、それ以外は ValueError
+            で即落とす（injection 防止＝nosec B608 の前提を維持）。クエリ側 embedder と列の
+            ベクトル空間が一致している必要がある（呼び側 SearchSkill が EMBEDDER_BACKEND と
+            ペアで解決・起動時 fail-loud 検証する）。
         """
+        # 識別子 injection 防止: 列名は固定の許可リストのみ（値ではなく識別子として埋める）。
+        if embedding_col not in _ALLOWED_EMBEDDING_COLUMNS:
+            raise ValueError(
+                f"embedding_col は {sorted(_ALLOWED_EMBEDDING_COLUMNS)} のいずれか "
+                f"(got {embedding_col!r})"
+            )
         where_parts: list[str] = []
         params: list[Any] = [embedding]  # score 算出の 1st %s
 
@@ -479,6 +522,17 @@ class PgVectorClient:
             # テンプレ chunk を検索対象から除外（フラグ無し chunk は影響しない）。
             where_parts.append("COALESCE((c.metadata->>'boilerplate')::bool, false) = false")
 
+        if exclude_templates:
+            # テンプレ/雛形と分類された **文書**（cls_is_template="true"）を除外。
+            # boilerplate（chunk 単位の定型ページ）と違い document 単位。印なし文書は
+            # COALESCE(...,false)=false が真で常に残る（後方互換）。固定リテラル句のみ。
+            where_parts.append("COALESCE((d.metadata->>'cls_is_template')::bool, false) = false")
+
+        if exclude_recurring:
+            # 定期報告（cls_is_recurring="true"）を除外。呼び側が「提案書 intent」のときだけ
+            # 立てる想定（「上期報告を見たい」を殺さない）。印なし文書は常に残る（後方互換）。
+            where_parts.append("COALESCE((d.metadata->>'cls_is_recurring')::bool, false) = false")
+
         if exclude_duplicates:
             # H3: 「非正本（suppressed=true）かつ、その正本（duplicate_of）が現 RLS 接続で
             # 可視のときだけ」除外する。正本が現 conn で不可視（狭 ACL の個人共有など）なら
@@ -509,7 +563,7 @@ class PgVectorClient:
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
                 COALESCE(c.contextualized, c.content) AS content,
-                1 - (c.embedding <=> %s::vector) AS score,
+                1 - (c.{embedding_col} <=> %s::vector) AS score,
                 c.page_num,
                 d.id AS document_id,
                 d.source_uri,
@@ -531,7 +585,7 @@ class PgVectorClient:
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             {where_clause}
-            ORDER BY c.embedding <=> %s::vector
+            ORDER BY c.{embedding_col} <=> %s::vector
             LIMIT %s
         """  # nosec B608
 
@@ -614,8 +668,13 @@ class PgVectorClient:
 
         ノード=資料・エッジ=共有タグの Obsidian 風グラフを
         ``connect_web.graph.build_graph`` で組むためのフィールドを返す。
-        excerpt はホバープレビュー用に先頭 chunk の本文を LATERAL で 1 つだけ拾う
-        （chunks の RLS は documents 連動なので本人可視分のみ）。RLS は
+        excerpt はホバープレビュー用に chunk 本文を LATERAL で 1 つだけ拾う。
+        先頭 chunk（表紙＝会社紹介テンプレ）が全資料の excerpt になり同文プレビュー化
+        するのを防ぐため、``metadata.boilerplate`` / ``metadata.title_only`` の chunk を
+        ORDER BY で後ろへ回し「テンプレでない最小 chunk_idx」を代表にする。全 chunk が
+        テンプレなら並びが chunk_idx ASC に退化して従来の先頭 chunk に fail-open する
+        （句は固定リテラル・値 bind なし。chunks の RLS は documents 連動なので本人可視分のみ）。
+        RLS は
         ``connection(app_role='teamagent_app', user_email=...)`` で有効化済の前提なので、
         本人 ACL（個人 + 会社共有）に見えるドキュメントのみが返る。
         列名・テーブル名は固定リテラル、limit は placeholder bind（bandit B608 安全）。
@@ -675,7 +734,9 @@ class PgVectorClient:
                 SELECT left(COALESCE(c.contextualized, c.content), 160) AS excerpt
                 FROM chunks c
                 WHERE c.document_id = d.id
-                ORDER BY c.chunk_idx ASC
+                ORDER BY (COALESCE((c.metadata->>'boilerplate')::bool, false)
+                          OR COALESCE((c.metadata->>'title_only')::bool, false)) ASC,
+                         c.chunk_idx ASC
                 LIMIT 1
             ) ex ON true{embedding_join}
             WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
@@ -798,21 +859,32 @@ class PgVectorClient:
     ) -> list[str]:
         """既知のクライアント名（distinct）を返す（read-only）。
 
-        クエリ中の固有名詞（例「ユニーの2回目提案」）を既知クライアント名の語彙へ
-        substring 照合し、client_name で絞った検索を追加する「クライアント名ブースト」
-        （SearchSkill use_client_boost）の語彙に使う。RLS は connection() 側で有効化済の前提。
+        クエリ中の固有名詞（例「ユニーの2回目提案」「出光興産の提案」）を既知クライアント名の
+        語彙へ substring 照合し、client_name で絞った検索を追加する「クライアント名ブースト」
+        （SearchSkill use_client_boost）や B6 の client_match sort の語彙に使う。
+
+        語彙は ``client_name``（FB に付く取引先）∪ ``cls_project``（全資料に付く取引先・自動
+        分類）の **UNION DISTINCT**。client_name 単独だと FB の無い案件（Drive 提案資料だけの
+        取引先）を取りこぼし、固有名詞クエリが boost/sort で発火しなかった。cls_project を
+        足すことで「出光興産」等の bare entity を実案件へ寄せられる（B6 の前提条件）。
+        RLS は connection() 側で有効化済の前提。
         """
         sql = """
-            SELECT DISTINCT d.metadata->>'client_name' AS client_name
-            FROM documents d
-            WHERE d.metadata->>'client_name' IS NOT NULL
-              AND d.metadata->>'client_name' <> ''
+            SELECT DISTINCT name FROM (
+                SELECT d.metadata->>'client_name' AS name FROM documents d
+                WHERE d.metadata->>'client_name' IS NOT NULL
+                  AND d.metadata->>'client_name' <> ''
+                UNION
+                SELECT d.metadata->>'cls_project' AS name FROM documents d
+                WHERE d.metadata->>'cls_project' IS NOT NULL
+                  AND d.metadata->>'cls_project' <> ''
+            ) AS names
             LIMIT %s
         """  # nosec B608
         with conn.cursor() as cur:
             cur.execute(sql, [limit])
             rows = cur.fetchall()
-        return [str(r["client_name"]) for r in rows if r.get("client_name")]
+        return [str(r["name"]) for r in rows if r.get("name")]
 
     def list_client_timeline(
         self,
@@ -893,6 +965,98 @@ class PgVectorClient:
 
         logger.info(
             "pgvector_list_client_timeline",
+            request_id=request_id,
+            client_name=client_name,
+            limit=limit,
+            hit_count=len(hits),
+        )
+        return hits
+
+    def list_client_timeline_recent(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        client_name: str,
+        limit: int = 20,
+        request_id: str | None = None,
+    ) -> list[SearchHit]:
+        """指定クライアントの営業 FB の【最新 N 件】を古い順で返す（カルテ用・read-only）。
+
+        ``list_client_timeline`` は ASC LIMIT のため、FB が limit を超えるクライアントで
+        【最古の N 件】を返し、最新 FB とヘッダ（直近フェーズ/BANT/最終接触）が欠落する。
+        本メソッドは modified_at DESC NULLS LAST（同日内は chunk_idx DESC）で最新 N 件を
+        取得し、Python 側で反転して既存契約どおり【古い順】（同日内 chunk_idx 昇順）で
+        返す。呼び出し側の ``timeline[-1]``＝最新 という前提はそのまま使える。
+        DESC の NULLS LAST により modified_at NULL の行は「最古」扱いで、limit 超過時は
+        最初に切り落とされる（日付不明の行が「最新」ヘッダを汚さない）。
+
+        射影列・SearchHit の形は ``list_client_timeline`` と同一。client_name は
+        placeholder 化され SQL injection から保護される。
+        """
+        if not client_name.strip():
+            return []
+
+        sql = """
+            SELECT
+                abs(hashtext(c.id::text)::bigint) AS chunk_id,
+                COALESCE(c.contextualized, c.content) AS content,
+                to_char(d.modified_at, 'YYYY-MM-DD') AS occurred_at,
+                d.source_uri,
+                d.title,
+                d.metadata->>'client_name' AS client_name,
+                d.metadata->>'deal_phase' AS deal_phase,
+                d.metadata->>'bant_score' AS bant_score,
+                d.metadata->>'channel_type' AS channel_type,
+                d.metadata->>'positive_reaction' AS positive_reaction,
+                d.metadata->>'negative_reaction' AS negative_reaction,
+                d.metadata->>'next_action' AS next_action,
+                d.metadata->>'proposed_menu' AS proposed_menu
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE d.metadata->>'is_sales_fb' = 'true'
+              AND d.metadata->>'client_name' LIKE %s
+            ORDER BY d.modified_at DESC NULLS LAST, c.chunk_idx DESC
+            LIMIT %s
+        """  # nosec B608
+        params: list[Any] = [f"%{client_name}%", limit]
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        hits: list[SearchHit] = []
+        for r in rows:
+            meta: dict[str, Any] = {
+                "source_uri": r.get("source_uri"),
+                "source_type": "slack",
+                "title": r.get("title"),
+                "occurred_at": r.get("occurred_at"),
+                "is_sales_fb": True,
+            }
+            for k in (
+                "client_name",
+                "deal_phase",
+                "bant_score",
+                "channel_type",
+                "positive_reaction",
+                "negative_reaction",
+                "next_action",
+                "proposed_menu",
+            ):
+                if r.get(k):
+                    meta[k] = r[k]
+            hits.append(
+                SearchHit(
+                    chunk_id=int(r["chunk_id"]),
+                    content=str(r["content"]),
+                    score=1.0,
+                    metadata=meta,
+                )
+            )
+        # DESC で取った最新 N 件を古い順へ戻す（timeline[-1]＝最新 の契約を保つ）
+        hits.reverse()
+
+        logger.info(
+            "pgvector_list_client_timeline_recent",
             request_id=request_id,
             client_name=client_name,
             limit=limit,
@@ -992,3 +1156,80 @@ class PgVectorClient:
             hit_count=len(hits),
         )
         return hits
+
+    def list_documents_for_client(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        client_name: str,
+        *,
+        limit: int = 50,
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """指定クライアントの関連資料（非 FB）を新しい順で列挙する（カルテ/Vault 用・read-only）。
+
+        クライアントカルテページ（connect_web GET /search/client/{client}）と
+        Obsidian Vault エクスポータ（scripts/export_vault.py）の「関連資料一覧」を
+        1 クエリで賄う。既存メソッドの穴を埋める最小追加:
+
+        - ``list_client_timeline`` は cls_industry を返さない → 本メソッドの射影で補完
+        - ``list_documents_for_graph`` は modified_at を射影せず・クライアント絞りの
+          WHERE が無い（600 件キャップの Python filter になる）→ SQL 側で絞る
+        - ``search_drive_by_client_names`` は cls_doc_type 等の分類メタを落とす
+
+        条件: suppressed（dedup 非正本）を無条件除外し、FB（is_sales_fb='true'）は
+        timeline 側で出すため資料一覧から除外する。クライアント照合は
+        cls_project / client_name / title の ILIKE 部分一致（「日本ガイシ」で
+        「NGK（日本ガイシ）」も拾う）。excerpt は list_documents_for_graph と同じ
+        「テンプレでない最小 chunk」LATERAL（boilerplate/title_only を後回し）で 160 字。
+
+        client_name は placeholder bind（SQL injection 安全）。空白のみなら [] を即返す。
+        RLS は ``connection(app_role='teamagent_app', user_email=...)`` で有効化済の前提。
+        """
+        if not client_name.strip():
+            return []
+
+        sql = """
+            SELECT
+                d.title,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                to_char(d.modified_at, 'YYYY-MM-DD') AS modified_at,
+                d.metadata->>'cls_industry' AS cls_industry,
+                d.metadata->>'cls_project' AS cls_project,
+                d.metadata->>'cls_doc_type' AS cls_doc_type,
+                d.metadata->>'cls_solution' AS cls_solution,
+                d.metadata->>'cls_budget' AS cls_budget,
+                d.metadata->>'cls_target' AS cls_target,
+                d.metadata->>'client_name' AS client_name,
+                ex.excerpt AS excerpt
+            FROM documents d
+            LEFT JOIN LATERAL (
+                SELECT left(COALESCE(c.contextualized, c.content), 160) AS excerpt
+                FROM chunks c
+                WHERE c.document_id = d.id
+                ORDER BY (COALESCE((c.metadata->>'boilerplate')::bool, false)
+                          OR COALESCE((c.metadata->>'title_only')::bool, false)) ASC,
+                         c.chunk_idx ASC
+                LIMIT 1
+            ) ex ON true
+            WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+              AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
+              AND (d.metadata->>'cls_project' ILIKE %s
+                   OR d.metadata->>'client_name' ILIKE %s
+                   OR d.title ILIKE %s)
+            ORDER BY d.modified_at DESC NULLS LAST
+            LIMIT %s
+        """  # nosec B608
+        like_pattern = f"%{client_name}%"
+        with conn.cursor() as cur:
+            cur.execute(sql, [like_pattern, like_pattern, like_pattern, limit])
+            rows = cur.fetchall()
+        docs = [dict(r) for r in rows]
+        logger.info(
+            "pgvector_list_documents_for_client",
+            request_id=request_id,
+            client_name=client_name,
+            limit=limit,
+            doc_count=len(docs),
+        )
+        return docs

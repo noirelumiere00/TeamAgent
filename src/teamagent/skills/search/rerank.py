@@ -52,3 +52,49 @@ def sort_by_budget_proximity(hits: list[SearchHit], target_band: str) -> list[Se
         return (band_dist, low_conf, -float(h.score))
 
     return sorted(hits, key=key)  # Python sorted は安定ソート
+
+
+def _hit_matches_client(h: SearchHit, client: str) -> bool:
+    """hit の cls_project / client_name が client と双方向 substring 一致するか。
+
+    表記ゆれの完全吸収（alias 正規化）は別タスク。ここは「クエリ語が案件名/取引先名に
+    含まれる」または「案件名/取引先名がクエリ語に含まれる」の双方向部分一致で拾う。
+    cls_project は全資料に付く取引先、client_name は FB に付く取引先（pgvector が
+    SearchHit.metadata に露出済）。
+    """
+    needle = client.strip()
+    if not needle:
+        return False
+    for k in ("cls_project", "client_name"):
+        v = h.metadata.get(k)
+        if not v:
+            continue
+        s = str(v).strip()
+        if s and (needle in s or s in needle):
+            return True
+    return False
+
+
+def sort_by_client_match(hits: list[SearchHit], client: str) -> list[SearchHit]:
+    """client に一致する hit（cls_project / client_name）を同点内で前出しする（絞らない）。
+
+    ``sort_by_budget_proximity`` と同型の「絞らず 1 段だけ並べ替え」純関数。固有名詞クエリで
+    汎用イントロ chunk が dense で実案件を上回る現象（bare entity 負け）を、rerank 後の
+    最終 top_k 内で実案件 chunk が前に来るよう補正する。
+
+    ソートキー（安定ソート・2 段）:
+    1. client 一致 0/1 昇順（一致を前へ＝False(0) より True を先にしたいので ``not match``）
+    2. -score 降順（一致グループ/非一致グループそれぞれ内は関連度が高い順）
+
+    絞り込みは一切しない（母数を痩せさせない）。client が空 or 一致 0 件でも安定ソートで
+    元の相対順序を保つため、取りこぼしても最悪「ランク後退なし」で安全。env-gate
+    （``SEARCH_CLIENT_MATCH_SORT``）と呼び出し判定は呼び側（skill.py）の責務。
+    """
+    if not client or not client.strip():
+        return hits
+
+    def key(h: SearchHit) -> tuple[int, float]:
+        match_rank = 0 if _hit_matches_client(h, client) else 1
+        return (match_rank, -float(h.score))
+
+    return sorted(hits, key=key)  # Python sorted は安定ソート

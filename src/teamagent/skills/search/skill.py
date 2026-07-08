@@ -34,7 +34,7 @@ from teamagent.skills.search.knowledge_query import (
     extract_query_industry,
 )
 from teamagent.skills.search.query_planner import QueryPlanner
-from teamagent.skills.search.rerank import sort_by_budget_proximity
+from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 logger = structlog.get_logger(__name__)
@@ -205,6 +205,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 判定・除外は pgvector 側（SQL）の責務＝この skill は flag を運ぶだけ。**既定 OFF・
         # 後方互換**：DOC_DEDUP_EXCLUDE_SEARCH 無効なら exclude_duplicates=False で従来と完全一致。
         self._exclude_duplicates = self._envflag("DOC_DEDUP_EXCLUDE_SEARCH")
+        # テンプレ/雛形（cls_is_template）・定期報告（cls_is_recurring）の文書単位除外。
+        # ingest.classify の 2 フラグ（決定論タイトルルール OR LLM）を検索側 WHERE で使う。
+        # TEMPLATE_EXCLUDE_SEARCH（既定 OFF・後方互換）で:
+        # - exclude_templates は**常時** True（テンプレは何を探していても事例ではない）
+        # - exclude_recurring は「提案書 intent」（明示 filter_doc_type=提案書 or 自動
+        #   knowledge_filters / plan.doc_type=提案書）のときだけ True＝「上期報告を見たい」
+        #   クエリを殺さない。判定は _retrieve（_is_proposal_intent）で行い _pool_search /
+        #   _apply_client_boost へパラメータで運ぶ。無効なら両フラグ False で従来と完全一致。
+        self._exclude_templates = self._envflag("TEMPLATE_EXCLUDE_SEARCH")
         # L3: boilerplate/suppressed の SQL 除外句が fail-open（業界フィルタ解除）の再検索すら
         # 0 件にしてしまい、近傍があるのに「該当資料なし」と返す事故への最後の砦。
         # _pool_search の通常経路で hits が空 かつ exclude 系（boilerplate/duplicates）の
@@ -217,6 +226,26 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # env 読み取りは __init__ で1回（factory 無改修・_build_search_skill はモジュール関数で
         # self を持たないため）。**既定 OFF・後方互換**：無効なら sort 段を一切呼ばない（恒等）。
         self._budget_sort = self._envflag("SEARCH_BUDGET_SORT")
+        # B6: クライアント名クエリで実案件（cls_project/client_name 一致）を rerank 後の
+        # 最終 top_k 内で前出しする 1 段並べ替え（絞らない＝取りこぼしても最悪ランク後退のみ）。
+        # 既知クライアント名（client_name ∪ cls_project の UNION）に substring 一致したときだけ
+        # 発火。env-gate SEARCH_CLIENT_MATCH_SORT（既定 OFF・恒等）。USE_CLIENT_BOOST は不変。
+        self._client_match_sort = self._envflag("SEARCH_CLIENT_MATCH_SORT")
+        # 検索に使う chunks の embedding 列（既定 'embedding'＝e5・従来挙動と完全一致）。
+        # EMBEDDING_COLUMN env を __init__ で 1 回だけ解決し（boilerplate flag と同じ流儀）、
+        # search_similar_new_schema へ embedding_col として運ぶ（純 SQL は pgvector 側の責務）。
+        # Bedrock Cohere 移行時は EMBEDDING_COLUMN=embedding_cohere。EMBEDDER_BACKEND との
+        # ペア整合（cohere⇄embedding_cohere / local⇄embedding）を起動時 fail-loud で検証する。
+        # 検証は embedder が build_embedder_from_env() 経由（factory）で既に行われるが、
+        # skill 単体構築（テスト/旧経路）でも空間不整合を防ぐためここでも検証する。
+        from teamagent.adapters.embeddings_client import (
+            resolve_embedder_backend,
+            resolve_embedding_column,
+            validate_embedder_column_pair,
+        )
+
+        self._embedding_column = resolve_embedding_column()
+        validate_embedder_column_pair(resolve_embedder_backend(), self._embedding_column)
 
     @staticmethod
     def _envflag(name: str, default: str = "false") -> bool:
@@ -282,8 +311,15 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 2. pgvector で類似 chunk を取得（RLS 評価用 user_email を ctx から取得）
         hits = self._retrieve(embedding, input, ctx)
 
-        # 3. Bedrock で要約（chunk が 0 件のときはスキップ）
-        answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
+        # 3. Bedrock で要約（chunk が 0 件のときはスキップ）。
+        #    include_answer=False（二段レスポンスの fast path）は要約そのものを
+        #    スキップし answer='' / 要約コスト 0 で hits だけ返す。0 件時の
+        #    「該当する資料が見つかりませんでした。」も要約側の文言なので出さない
+        #    （フロントは include_answer=True の並行フェッチで従来文言を得る）。
+        if input.include_answer:
+            answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
+        else:
+            answer, cost_usd = "", 0.0
 
         # 4. 出力スキーマに整形
         output = SearchOutput(
@@ -373,17 +409,24 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         request_id: str,
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
+        exclude_recurring: bool = False,
     ) -> list[SearchHit]:
         """新スキーマの単一ベクトル検索。フィルタ指定で 0 件なら外して再検索（fail-open）。
 
-        L3: フィルタ解除後も 0 件 かつ exclude 系（boilerplate/duplicates）が真のときは、
-        最後の砦として exclude を全て外して 1 回だけ再検索し、救済 hit に
-        is_low_confidence=True を付ける（テンプレ/重複除外が近傍まで巻き込んで 0 件化する
-        事故の保険）。SEARCH_EXCLUSION_RESCUE で gating（既定 ON、exclude 系 OFF なら無影響）。
+        L3: フィルタ解除後も 0 件 かつ exclude 系（boilerplate/duplicates/templates/
+        recurring）が真のときは、最後の砦として exclude を全て外して 1 回だけ再検索し、
+        救済 hit に is_low_confidence=True を付ける（テンプレ/重複除外が近傍まで巻き込んで
+        0 件化する事故の保険）。SEARCH_EXCLUSION_RESCUE で gating
+        （既定 ON、exclude 系 OFF なら無影響）。
 
         sticky_filters / metadata_contains（ユーザー明示の budget / client）は、自動付与の
         metadata_filters や filter_industry を fail-open で外すときでも**必ず再注入**する
         （「500万〜で絞ったのに 0 件→黙って全予算帯が返る」無音 drop を防ぐ）。
+
+        exclude_recurring は _retrieve が「提案書 intent」のときだけ True にして渡す
+        （env TEMPLATE_EXCLUDE_SEARCH が前提）。exclude_templates は常時 env 値
+        （self._exclude_templates）。fail-open 再検索でも両者は維持し、rescue 経路でのみ
+        他 exclude と一緒に False へ倒す。
         """
         hits = self._pgvector.search_similar_new_schema(
             conn=conn,
@@ -397,6 +440,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             metadata_contains=metadata_contains,
             exclude_boilerplate=self._exclude_boilerplate,
             exclude_duplicates=self._exclude_duplicates,
+            exclude_templates=self._exclude_templates,
+            exclude_recurring=exclude_recurring,
+            embedding_col=self._embedding_column,
         )
         if not hits and (metadata_filters or filter_industry):
             hits = self._pgvector.search_similar_new_schema(
@@ -410,12 +456,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 metadata_contains=metadata_contains,  # 明示 client は保持
                 exclude_boilerplate=self._exclude_boilerplate,
                 exclude_duplicates=self._exclude_duplicates,
+                exclude_templates=self._exclude_templates,
+                exclude_recurring=exclude_recurring,
+                embedding_col=self._embedding_column,
             )
         # L3: ここまで 0 件 かつ exclude 系が効いている → exclude を全外しで最後の再検索。
         if (
             not hits
             and self._exclusion_rescue
-            and (self._exclude_boilerplate or self._exclude_duplicates)
+            and (
+                self._exclude_boilerplate
+                or self._exclude_duplicates
+                or self._exclude_templates
+                or exclude_recurring
+            )
         ):
             rescued = self._pgvector.search_similar_new_schema(
                 conn=conn,
@@ -428,6 +482,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 metadata_contains=metadata_contains,  # 明示 client は最後まで保持
                 exclude_boilerplate=False,
                 exclude_duplicates=False,
+                exclude_templates=False,
+                exclude_recurring=False,
+                embedding_col=self._embedding_column,
             )
             if rescued:
                 # frozen dataclass の可変 dict なので in-place 付与（再代入はしない）。
@@ -439,9 +496,24 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     rescued=len(rescued),
                     exclude_boilerplate=self._exclude_boilerplate,
                     exclude_duplicates=self._exclude_duplicates,
+                    exclude_templates=self._exclude_templates,
+                    exclude_recurring=exclude_recurring,
                 )
                 hits = rescued
         return hits
+
+    @staticmethod
+    def _is_proposal_intent(filter_doc_type: str | None, auto_doc_type: str | None) -> bool:
+        """「提案書 intent」判定（exclude_recurring を立てるかどうか）。
+
+        明示 filter_doc_type があればそれだけで判定する（明示優先＝ユーザーが「議事録」と
+        指定したのに自動抽出の「提案事例」で定期報告を落とす、を防ぐ）。明示が無ければ
+        自動抽出（extract_knowledge_filters の cls_doc_type / plan.doc_type）の 提案書 を
+        採用する。どちらも無ければ False＝「上期報告を見たい」等の定期報告クエリを殺さない。
+        """
+        if filter_doc_type:
+            return filter_doc_type == "提案書"
+        return auto_doc_type == "提案書"
 
     def _retrieve(
         self, embedding: list[float], input: SearchInput, ctx: SkillContext
@@ -519,6 +591,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 if input.filter_solution:
                     sticky_pairs["cls_solution"] = input.filter_solution
                 sticky: dict[str, str] | None = sticky_pairs or None
+                # 定期報告（cls_is_recurring）の除外は「提案書 intent」のときだけ。
+                # env OFF（既定）なら _exclude_templates=False で常に False（後方互換）。
+                excl_recurring = False
                 if self._query_planner is not None:
                     # P3: LLM ルーティング + multi-query/HyDE → RRF 融合。
                     plan = self._query_planner.plan(input.query, ctx.request_id)
@@ -547,6 +622,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     else:
                         eff_industry = input.filter_industry
                         kf = None
+                    # 提案書 intent（明示 filter_doc_type 優先・無ければ plan.doc_type）。
+                    # plan.doc_type はフィルタ適用と同じく USE_KNOWLEDGE_FILTERS 有効時のみ。
+                    excl_recurring = self._exclude_templates and self._is_proposal_intent(
+                        input.filter_doc_type,
+                        plan.doc_type if self._use_knowledge_filters else None,
+                    )
                     # multi-query: 元クエリ + 言い換え + HyDE を埋め込む。重複文は除いて
                     # 余計な embed / RRF リストを増やさない（Haiku が近似文を返しがちなため）。
                     sub_embeddings = [embedding]
@@ -572,6 +653,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                             sticky_filters=sticky,
                             metadata_contains=mc,
                             request_id=ctx.request_id,
+                            exclude_recurring=excl_recurring,
                         )
                         for emb in sub_embeddings
                     ]
@@ -582,6 +664,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         extract_knowledge_filters(input.query)
                         if self._use_knowledge_filters
                         else None
+                    )
+                    # 提案書 intent（明示 filter_doc_type 優先・無ければ自動抽出の
+                    # cls_doc_type）。pop 前に読む（明示 doc_type 指定時は明示側で判定）。
+                    excl_recurring = self._exclude_templates and self._is_proposal_intent(
+                        input.filter_doc_type,
+                        (knowledge_filters or {}).get("cls_doc_type"),
                     )
                     # 明示 doc_type / solution があれば、同名の自動抽出キーは外す（sticky 側で
                     # 等価に効くため二重 AND を避け、明示フィルタを優先する）。
@@ -604,6 +692,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         sticky_filters=sticky,
                         metadata_contains=mc,
                         request_id=ctx.request_id,
+                        exclude_recurring=excl_recurring,
                     )
                 # Sprint 7: クライアント名ブースト。固有名詞クエリで dense が正解 chunk を
                 # 取りこぼすのを補強（client_name 絞り検索を rerank プールへ合流）。
@@ -620,6 +709,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         request_id=ctx.request_id,
                         sticky_filters=sticky,  # 明示 doc_type/solution/budget を boost でも保持
                         metadata_contains=mc,  # 通常 None（filter_client 未指定時のみ boost）
+                        exclude_recurring=excl_recurring,  # 提案書 intent 時のみ（boost も同じ）
                     )
                 # M1 資料の被り対策。**プール段階（rerank の前）**に噛ませる。
                 # 旧実装は rerank→top_k 後段に置いていたため、最良 doc が 2 chunk に圧縮され
@@ -698,6 +788,25 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # SEARCH_BUDGET_SORT（既定 OFF）。FB drive-match（固定 score=1.0）の前に置く。
                 if self._budget_sort and input.sort_budget_near and hits:
                     hits = sort_by_budget_proximity(hits, input.sort_budget_near)
+                # B6: クライアント名クエリで実案件（cls_project/client_name 一致）を前出し。
+                # rerank・min_relevance・top_k 絞り確定後、fb_drive_match の前に 1 段だけ
+                # 並べ替える（絞らない）。明示 filter_client があればそれを、無ければ既知
+                # クライアント語彙への substring 一致（_match_client・初回のみ語彙取得しキャッシュ）
+                # を基準にする。env-gate SEARCH_CLIENT_MATCH_SORT（既定 OFF・恒等）。
+                if self._client_match_sort and hits:
+                    client_for_sort = input.filter_client or self._match_client(
+                        input.query, conn, ctx.request_id
+                    )
+                    if client_for_sort:
+                        before_top = hits[0].chunk_id if hits else None
+                        hits = sort_by_client_match(hits, client_for_sort)
+                        if hits and hits[0].chunk_id != before_top:
+                            logger.info(
+                                "search_client_match_sort",
+                                request_id=ctx.request_id,
+                                client=client_for_sort,
+                                pool=len(hits),
+                            )
                 # Day 8 Phase 2: FB hits があれば client_name で Drive 資料を追加 retrieve
                 if self._use_fb_drive_match and hits:
                     related = self._fetch_related_drive_hits(
@@ -840,6 +949,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         request_id: str,
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
+        exclude_recurring: bool = False,
     ) -> list[SearchHit]:
         """固有名詞クエリで client_name 絞り検索を追加し rerank プールへ合流する。
 
@@ -850,6 +960,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         ヒットが rerank 後に表面化する（設計 §A/§E「明示フィルタは全再検索で保持」の穴）。
         client_boost は input.filter_client 未指定時のみ走るため通常 metadata_contains の
         __client__ は None だが、後方互換のため受け取って素通しする。
+
+        exclude_templates / exclude_recurring も本検索（_pool_search）と同値で渡す。
+        さもないと client 名一致のテンプレ/定期報告がここからプールへ合流し、除外設計が
+        boost 経路だけ素通しになる（boilerplate/duplicates で過去 2 回検出済みの取りこぼしと
+        同型の穴）。exclude_recurring は _retrieve が判定した提案書 intent の値。
         """
         matched = self._match_client(query, conn, request_id)
         if not matched:
@@ -866,6 +981,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             metadata_contains=metadata_contains,
             exclude_boilerplate=self._exclude_boilerplate,
             exclude_duplicates=self._exclude_duplicates,
+            exclude_templates=self._exclude_templates,
+            exclude_recurring=exclude_recurring,
+            embedding_col=self._embedding_column,
         )
         if not boost:
             return hits

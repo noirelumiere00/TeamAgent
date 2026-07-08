@@ -166,9 +166,11 @@ def build_contextualizer_from_env() -> ChunkContextualizer | None:
         return None
     try:
         from teamagent.adapters.bedrock_client import BedrockClient
-        from teamagent.adapters.embeddings_client import LocalE5Embedder
+        from teamagent.adapters.embeddings_client import build_embedder_from_env
 
-        return ChunkContextualizer(BedrockClient.from_env(), LocalE5Embedder())
+        # EMBEDDER_BACKEND（既定 local）で local-e5 / Bedrock Cohere を切替。
+        # 検索側（factory）と同一構築点を使うことで取り込み/検索のサブ空間整合を保つ。
+        return ChunkContextualizer(BedrockClient.from_env(), build_embedder_from_env())
     except Exception:
         logger.warning("contextualize_init_failed")
         return None

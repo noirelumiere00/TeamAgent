@@ -21,9 +21,13 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Protocol
+import uuid
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
+
+if TYPE_CHECKING:
+    from teamagent.adapters.bedrock_client import BedrockClient
 
 logger = structlog.get_logger(__name__)
 
@@ -132,3 +136,130 @@ class LocalE5Embedder:
             latency_ms=latency_ms,
         )
         return list(vec)
+
+
+class BedrockCohereEmbedder:
+    """Bedrock Cohere Embed multilingual v3 を使う Embedder（1024 次元・L2 正規化済）。
+
+    Cohere v3 は **非対称** 埋め込みを ``input_type`` でネイティブに表現する。e5 の
+    "query: "/"passage: " プレフィックスに相当する区別をここで閉じる:
+    - ``embed()``        → input_type="search_query"   （検索クエリ）
+    - ``embed_passage()``→ input_type="search_document"（取り込み資料）
+
+    非対称をクラス境界に閉じることで、検索側と取り込み側のサブ空間整合がクラス内で
+    保証される（env を跨いで片方だけ切替わる事故を構造的に防ぐ）。boto3 直叩きは禁止
+    （CLAUDE.md 3層）のため、リクエストは ``BedrockClient.embed_texts()`` に委譲する。
+    """
+
+    def __init__(self, bedrock: BedrockClient | None = None) -> None:
+        # 重い import（boto3 経由）を遅延させ、本モジュール import 自体は軽量に保つ。
+        from teamagent.adapters.bedrock_client import BedrockClient
+
+        self._bedrock = bedrock or BedrockClient.from_env()
+        self.model_id = self._bedrock.embed_model_id
+        logger.info(
+            "embedder_loaded",
+            model=self.model_id,
+            backend="bedrock-cohere",
+        )
+
+    def embed(self, text: str) -> list[float]:
+        """検索クエリを 1024 次元ベクトルに変換する（input_type=search_query）。"""
+        return self._one(text, "search_query")
+
+    def embed_passage(self, text: str) -> list[float]:
+        """文書／パッセージを 1024 次元ベクトルに変換する（input_type=search_document）。"""
+        return self._one(text, "search_document")
+
+    def embed_passage_batch(self, texts: list[str]) -> list[list[float]]:
+        """複数のパッセージを一括で埋め込む（再 embed の往復削減用・Protocol 外）。
+
+        ``embed_passage()`` と同じ input_type=search_document。空入力は空リストを返す。
+        BedrockClient.embed_texts が 96 件超を内部で分割する。
+        """
+        if not texts:
+            return []
+        resp = self._bedrock.embed_texts(
+            list(texts),
+            request_id=f"embed-batch-{uuid.uuid4().hex[:8]}",
+            input_type="search_document",
+        )
+        return resp.embeddings
+
+    def _one(self, text: str, input_type: str) -> list[float]:
+        """単一テキストを embed_texts 経由で 1 ベクトルに変換する。"""
+        resp = self._bedrock.embed_texts(
+            [text],
+            request_id=f"embed-{uuid.uuid4().hex[:8]}",
+            input_type=input_type,
+        )
+        if not resp.embeddings:
+            raise RuntimeError("BedrockCohereEmbedder: embeddings が空で返りました")
+        return resp.embeddings[0]
+
+
+# ----------------------------------------------------------------------------
+# 単一構築点（EMBEDDER_BACKEND）＋ backend×column ペア整合バリデーション
+# ----------------------------------------------------------------------------
+
+# EMBEDDER_BACKEND と、その backend が書く/読む chunks の embedding 列の正準ペア。
+# local（e5）⇄ embedding 列 / cohere ⇄ embedding_cohere 列。
+# 検索側クエリ空間と列のベクトル空間がこのペアで一致する。不一致は全コーパスが別空間に
+# なり検索全壊するため、起動時に fail-loud で落とす（下の validate_embedder_column_pair）。
+_BACKEND_COLUMN_PAIR: dict[str, str] = {
+    "local": "embedding",
+    "cohere": "embedding_cohere",
+}
+_DEFAULT_BACKEND = "local"
+# EMBEDDING_COLUMN として SQL 識別子に埋め込んでよい許可リスト（injection 防止）。
+ALLOWED_EMBEDDING_COLUMNS: frozenset[str] = frozenset(_BACKEND_COLUMN_PAIR.values())
+
+
+def resolve_embedder_backend() -> str:
+    """``EMBEDDER_BACKEND`` を解決する（既定 ``local``＝後方互換）。"""
+    return os.environ.get("EMBEDDER_BACKEND", _DEFAULT_BACKEND).strip().lower() or _DEFAULT_BACKEND
+
+
+def resolve_embedding_column() -> str:
+    """``EMBEDDING_COLUMN`` を解決する（既定 ``embedding``＝後方互換・許可リスト検証付き）。"""
+    col = os.environ.get("EMBEDDING_COLUMN", "embedding").strip() or "embedding"
+    if col not in ALLOWED_EMBEDDING_COLUMNS:
+        raise ValueError(
+            f"EMBEDDING_COLUMN は {sorted(ALLOWED_EMBEDDING_COLUMNS)} のいずれか (got {col!r})"
+        )
+    return col
+
+
+def validate_embedder_column_pair(backend: str, column: str) -> None:
+    """backend と embedding 列のペア整合を検証し、不一致なら ValueError で落とす。
+
+    cohere ⇄ embedding_cohere / local ⇄ embedding 以外は、クエリ空間と列のベクトル空間が
+    食い違い検索が全壊するため、起動時 fail-loud で停止させる（設定不変条件チェックの系譜）。
+    """
+    expected = _BACKEND_COLUMN_PAIR.get(backend)
+    if expected is None:
+        raise ValueError(
+            f"EMBEDDER_BACKEND は {sorted(_BACKEND_COLUMN_PAIR)} のいずれか (got {backend!r})"
+        )
+    if column != expected:
+        raise ValueError(
+            "EMBEDDER_BACKEND と EMBEDDING_COLUMN のペアが不整合です: "
+            f"backend={backend!r} は列 {expected!r} を要求しますが EMBEDDING_COLUMN={column!r} "
+            "が設定されています。検索クエリと列のベクトル空間が食い違い検索が全壊します。"
+            "（cohere⇄embedding_cohere / local⇄embedding でペア指定してください）"
+        )
+
+
+def build_embedder_from_env() -> Embedder:
+    """``EMBEDDER_BACKEND``（既定 local）から Embedder を構築する**単一構築点**。
+
+    併せて ``EMBEDDING_COLUMN`` とのペア整合を起動時に検証する（不一致は fail-loud）。
+    既定（EMBEDDER_BACKEND 未設定＝local / EMBEDDING_COLUMN 未設定＝embedding）では
+    ``LocalE5Embedder()`` を返し、従来挙動とバイト等価（後方互換）。
+    """
+    backend = resolve_embedder_backend()
+    column = resolve_embedding_column()
+    validate_embedder_column_pair(backend, column)
+    if backend == "cohere":
+        return BedrockCohereEmbedder()
+    return LocalE5Embedder()
