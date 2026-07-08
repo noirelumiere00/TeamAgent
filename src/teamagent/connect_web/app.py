@@ -17,6 +17,8 @@ import os
 import threading
 from collections import Counter
 from collections.abc import Callable
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -34,6 +36,37 @@ from teamagent.dashboard.auth import (
 from teamagent.dashboard.config import DashboardConfig
 
 logger = structlog.get_logger(__name__)
+
+
+_APP_HTML_MISSING = (
+    "<!doctype html><meta charset=utf-8><title>準備中</title>"
+    "<div style='font-family:system-ui,-apple-system,sans-serif;max-width:640px;"
+    "margin:80px auto;padding:0 24px;color:#333;line-height:1.7'>"
+    "<h1 style='font-weight:800'>Obsidian ビューは準備中です</h1>"
+    "<p>このイメージには静的ビュー（<code>static/app.html</code>）が同梱されていません。"
+    "最新の再デプロイで反映されます。それまでは検索を "
+    "<a href='/search' style='color:#5b4fd6'>/search</a> からご利用ください。</p></div>"
+)
+
+
+@lru_cache(maxsize=1)
+def _static_app_html() -> str:
+    """Obsidian 風 単一 HTML（自己完結・約3MB）をパッケージ相対で1回だけ読む。
+
+    ``COPY src/ ./src/``（Dockerfile.teamagent-mcp）でイメージに同梱される
+    ``static/app.html`` を返す。cwd 非依存・全リクエスト共有。
+
+    ``app.html`` は機密ナレッジ埋め込みのため git 管理外（``.gitignore``）で、
+    再デプロイ（``redeploy_app.sh``）でイメージに焼き込む運用。git 由来の
+    launch/CI イメージには同梱されないため、その場合は 404/500 ではなく
+    「準備中」プレースホルダを返して壊さない（``/app`` ルートは main 常在可）。
+    """
+    p = Path(__file__).resolve().parent / "static" / "app.html"
+    try:
+        return p.read_text("utf-8")
+    except OSError as exc:  # FileNotFoundError 等。ルートだけ在る launch イメージ向け。
+        logger.warning("static_app_html_missing", path=str(p), error=str(exc))
+        return _APP_HTML_MISSING
 
 _SEARCH_COOKIE = "ta_search_session"
 _SESSION_TTL_S = 8 * 3600
@@ -3020,6 +3053,18 @@ def create_app(
         if email is None:
             return RedirectResponse("/search/login", status_code=303)
         return HTMLResponse(_shell_page(email, mode="list"))
+
+    @app.get("/app")
+    def obsidian_app(request: Request) -> Response:
+        """Obsidian 風 単一 HTML UI（allowlist 認証の内側でのみ配信）。
+
+        ⚠️ 認証必須。単一 HTML のため per-user RLS は掛からない（allowlist を
+        通った全員が同一内容を見る）。埋め込むのは共有可のナレッジのみ。
+        """
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login", status_code=303)
+        return HTMLResponse(_static_app_html())
 
     @app.post("/api/v1/search")
     async def api_search(request: Request) -> JSONResponse:

@@ -173,3 +173,7 @@ data/eval/results/
 # terraform plan の生成物（バイナリ・state 値混入の恐れ・コミット禁止）
 *.tfplan
 infra/terraform/tf.plan
+
+# connect-web の Obsidian風 静的HTML（機密ナレッジ埋め込み・git履歴に残さない。
+# ビルドzipには含めてイメージへ同梱する）
+src/teamagent/connect_web/static/app.html
