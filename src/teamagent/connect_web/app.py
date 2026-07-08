@@ -68,6 +68,17 @@ def _static_app_html() -> str:
         logger.warning("static_app_html_missing", path=str(p), error=str(exc))
         return _APP_HTML_MISSING
 
+
+def _safe_next(raw: str | None) -> str:
+    """ログイン後の戻り先を検証（オープンリダイレクト防止）。
+
+    既知の内部ページ（``/app`` / ``/search``）のみ許可し、それ以外は ``/search``。
+    外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
+    """
+    if (raw or "").strip() in {"/app", "/search"}:
+        return raw.strip()
+    return "/search"
+
 _SEARCH_COOKIE = "ta_search_session"
 _SESSION_TTL_S = 8 * 3600
 _DEFAULT_SEARCH_EMAILS = "s-komata@vectorinc.co.jp"
@@ -2980,8 +2991,11 @@ def create_app(
     # ============================================================
 
     @app.get("/search/login", response_class=HTMLResponse)
-    def search_login() -> HTMLResponse:
-        """Google Sign-In ボタンを出す（許可アカウントのみ）。"""
+    def search_login(request: Request) -> HTMLResponse:
+        """Google Sign-In ボタンを出す（許可アカウントのみ）。
+
+        ``?next=`` でログイン後の戻り先を引き継ぐ（/app から来たら /app へ戻す）。
+        """
         cid = search_cfg.google_client_id
         if not cid:
             return HTMLResponse(
@@ -2992,6 +3006,7 @@ def create_app(
                 )
             )
         cid_e = html.escape(cid)
+        nxt_e = html.escape(_safe_next(request.query_params.get("next")))
         scripts = (
             '<script src="https://accounts.google.com/gsi/client" async></script>'
             "<script>function onCred(r){"
@@ -3003,7 +3018,8 @@ def create_app(
             '<div id="g_id_onload" data-client_id="' + cid_e + '" data-callback="onCred"></div>'
             '<div class="g_id_signin" data-type="standard" data-size="large"></div>'
             '<form id="idform" method="post" action="/search/auth/verify">'
-            '<input type="hidden" id="credential" name="credential" value=""></form>'
+            '<input type="hidden" id="credential" name="credential" value="">'
+            '<input type="hidden" name="next" value="' + nxt_e + '"></form>'
         )
         html_doc = (
             '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
@@ -3023,9 +3039,10 @@ def create_app(
 
     @app.post("/search/auth/verify")
     async def search_auth_verify(request: Request) -> Response:
-        """id_token を検証 → 許可判定 → 署名 cookie を発行して /search へ。"""
+        """id_token を検証 → 許可判定 → 署名 cookie を発行して next（既定 /search）へ。"""
         form = await request.form()
         credential = str(form.get("credential", ""))
+        nxt = _safe_next(str(form.get("next", "")))
         ok, email = authenticate_id_token(credential, search_cfg, verifier=search_verifier)
         if not ok or email is None:
             logger.warning("search_login_denied", email=email)
@@ -3037,8 +3054,8 @@ def create_app(
                 ),
                 status_code=403,
             )
-        logger.info("search_login_ok", user_email=email)
-        resp = RedirectResponse("/search", status_code=303)
+        logger.info("search_login_ok", user_email=email, next=nxt)
+        resp = RedirectResponse(nxt, status_code=303)
         resp.set_cookie(
             _SEARCH_COOKIE,
             make_session(email, search_cfg.session_secret, ttl_s=_SESSION_TTL_S),
@@ -3066,7 +3083,7 @@ def create_app(
         """
         email = _search_email(request)
         if email is None:
-            return RedirectResponse("/search/login", status_code=303)
+            return RedirectResponse("/search/login?next=%2Fapp", status_code=303)
         return HTMLResponse(_static_app_html())
 
     @app.post("/api/v1/search")
