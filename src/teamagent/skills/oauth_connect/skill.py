@@ -22,6 +22,7 @@ import structlog
 from pydantic import BaseModel
 
 from teamagent.adapters.google_oauth_flow import OAuthConsentFlow
+from teamagent.adapters.slack_oauth_flow import SlackOAuthConsentFlow
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.oauth_connect.schema import OAuthConnectInput, OAuthConnectOutput
 
@@ -41,10 +42,11 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
 
     name: ClassVar[str] = "oauth_connect"
     description: ClassVar[str] = (
-        "ユーザーが自分の Google アカウントを連携（認可）するための"
-        "本人専用リンクを発行する。『連携』『連携したい』『Google連携』『接続』『connect』"
-        "等を言われたら呼ぶ。対象は常に話しかけている本人で、引数は不要"
-        "（本人は MCP 境界が解決する）。返した URL を本人に提示すること。"
+        "ユーザーが自分の Google と Slack のアカウントを連携（認可）するための"
+        "本人専用リンクを発行する。『連携』『連携したい』『Google連携』『Slack連携』"
+        "『接続』『connect』等を言われたら呼ぶ。対象は常に話しかけている本人で、引数は不要"
+        "（本人は MCP 境界が解決する）。返した message（Google＋Slack の URL を含む）を"
+        "本人に提示すること。"
     )
     input_schema: ClassVar[type[BaseModel]] = OAuthConnectInput
     output_schema: ClassVar[type[BaseModel]] = OAuthConnectOutput
@@ -73,14 +75,43 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
                 "連携リンクの生成に失敗しました（管理者へ: OAuth 系 env をご確認ください）"
             ) from e
 
+        # Slack 個人トークン(xoxp) の認可URL。SLACK_OAUTH_REDIRECT_URI 未設定なら
+        # Slack リンクを出さない（後方互換）。生成失敗も Google のみで継続（fail-open）。
+        slack_redirect = os.environ.get("SLACK_OAUTH_REDIRECT_URI", "").strip()
+        slack_url: str | None = None
+        if slack_redirect:
+            try:
+                slack_url, _ = SlackOAuthConsentFlow(
+                    redirect_uri=slack_redirect
+                ).authorization_url(requester)
+            except Exception as e:
+                log.warning("oauth_connect_slack_url_failed", error=type(e).__name__)
+                slack_url = None
+
         masked = _mask_email(requester)
-        message = (
-            f"👋 *{requester}* の Google を連携します（1回だけ・所要1分）。\n"
-            "下のリンクは *あなた専用* です（他の人と共有しないでください）。\n"
-            "開いて、表示される権限（メールの読み取り・下書き作成、カレンダー等）を"
-            "*許可* してください:\n"
-            f"{url}\n\n"
-            "「✅ 連携が完了しました」が出れば成功です。あとは話しかけるだけ。"
+        lines = [
+            f"👋 *{requester}* を連携します（1回だけ・所要1分）。\n",
+            "下のリンクは *あなた専用* です（他の人と共有しないでください）。\n",
+            "開いて、表示される権限を *許可* してください:\n",
+            "*① Google を連携*（メールの読み取り・下書き作成、カレンダー等）\n",
+            f"{url}\n",
+        ]
+        if slack_url:
+            lines.append("\n*② Slack を連携*（本人としての検索・チャンネル巡回）\n")
+            lines.append(f"{slack_url}\n")
+        else:
+            lines.append(
+                "\n※ Slack 連携は現在未設定です"
+                "（管理者へ: SLACK_OAUTH_REDIRECT_URI を設定してください）。\n"
+            )
+        lines.append("\n「✅ 連携が完了しました」が出れば成功です。あとは話しかけるだけ。")
+        message = "".join(lines)
+
+        log.info(
+            "oauth_connect_url_issued",
+            user_email_masked=masked,
+            slack_included=bool(slack_url),
         )
-        log.info("oauth_connect_url_issued", user_email_masked=masked)
-        return OAuthConnectOutput(url=url, user_email_masked=masked, message=message)
+        return OAuthConnectOutput(
+            url=url, slack_url=slack_url, user_email_masked=masked, message=message
+        )
