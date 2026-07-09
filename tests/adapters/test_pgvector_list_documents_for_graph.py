@@ -80,13 +80,60 @@ def test_with_embeddings_excludes_boilerplate_from_avg() -> None:
     assert "COALESCE((c.metadata->>'boilerplate')::bool, false) = false" in sql
 
 
-def test_default_no_boilerplate_clause() -> None:
-    """with_embeddings=False（既定）では boilerplate 句は一切出ない（旧挙動）。"""
+def test_default_no_embedding_lateral_but_excerpt_order_always_present() -> None:
+    """with_embeddings=False（既定）でも excerpt LATERAL のテンプレ後回し句は常に入る。
+
+    旧仕様は excerpt が ORDER BY c.chunk_idx ASC の先頭チャンク固定＝表紙/会社紹介
+    テンプレが全資料のプレビューになる実バグだった。修正後は boilerplate/title_only を
+    ORDER BY で後ろへ回す（embedding 用の AVG LATERAL が既定で出ない点は従来どおり）。
+    """
     client = PgVectorClient(dsn="postgresql://stub")
     conn, cur = _mock_conn()
     client.list_documents_for_graph(conn)
     sql: str = cur.execute.call_args.args[0]
-    assert "boilerplate" not in sql
+    assert "AVG(c.embedding)" not in sql
+    assert "COALESCE((c.metadata->>'boilerplate')::bool, false)" in sql
+    assert "COALESCE((c.metadata->>'title_only')::bool, false)" in sql
+
+
+def test_excerpt_lateral_deprioritizes_boilerplate_and_title_only() -> None:
+    """excerpt はテンプレ chunk を除外した最小 chunk_idx を代表にする（#2 同文プレビュー修正）。
+
+    除外は excerpt LATERAL の ORDER BY（(boilerplate OR title_only) ASC, chunk_idx ASC）
+    で行う。bool の ASC は false < true なので非テンプレ chunk が先に来る。
+    値 bind なしの固定リテラル句のみ（B608 前提は不変）。
+    """
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn()
+    client.list_documents_for_graph(conn)
+    sql: str = cur.execute.call_args.args[0]
+    # 既定では LATERAL は excerpt 用の 1 つだけ
+    assert sql.count("LEFT JOIN LATERAL") == 1
+    lateral = sql.split("LEFT JOIN LATERAL", 1)[1]
+    assert "LIMIT 1" in lateral
+    order_by = lateral.split("ORDER BY", 1)[1].split("LIMIT", 1)[0]
+    assert "COALESCE((c.metadata->>'boilerplate')::bool, false)" in order_by
+    assert "COALESCE((c.metadata->>'title_only')::bool, false)" in order_by
+    # テンプレ後回しの複合キーの末尾は従来どおり chunk_idx 昇順
+    assert "c.chunk_idx ASC" in order_by
+
+
+def test_excerpt_lateral_fail_open_via_order_by_not_where() -> None:
+    """全 chunk がテンプレでも excerpt が NULL にならない（従来の先頭 chunk に fail-open）。
+
+    boilerplate/title_only の除外を LATERAL の WHERE に足すと該当なし時に excerpt 自体が
+    NULL になる。ORDER BY 方式なら並びが chunk_idx ASC に退化するだけで必ず 1 行返る。
+    WHERE には document_id 結合条件しか置かないことを構造で固定する。
+    """
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn()
+    client.list_documents_for_graph(conn)
+    sql: str = cur.execute.call_args.args[0]
+    lateral = sql.split("LEFT JOIN LATERAL", 1)[1].split(") ex ON true", 1)[0]
+    where = lateral.split("WHERE", 1)[1].split("ORDER BY", 1)[0]
+    assert "c.document_id = d.id" in where
+    assert "boilerplate" not in where
+    assert "title_only" not in where
 
 
 def test_with_embeddings_normalizes_to_float_list() -> None:

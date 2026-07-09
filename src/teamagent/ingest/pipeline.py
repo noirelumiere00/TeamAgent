@@ -1205,8 +1205,18 @@ def _process_one_gdrive_file(
     if classifier is not None and chunks:
         sample = "\n".join(c.content for c in chunks[:8])
         try:
+            # 2026-07-06: フォルダ置き位置を分類に注入する。gdrive_folders 経路で確実に
+            # 取れるフォルダ文脈は spec.folder_name（yaml の起点フォルダ名）のみ:
+            # walk_files_recursive はサブフォルダ名を保持しない（DriveFile.parents は
+            # ID のみ）ため、サブフォルダ配下のファイルにも起点フォルダ名を渡す
+            # （直上フォルダ名が取れないのは正直なスコープ制限）。
+            # 効き方は classify() 側: Haiku ヒント（格納フォルダ: XX 行）＋
+            # USE_DOC_KIND_RULES gate 配下の決定論ルール（テンプレ/定期報告キーワード）。
             classification = classifier.classify(
-                title=f.name or "", text=sample, request_id=request_id
+                title=f.name or "",
+                text=sample,
+                request_id=request_id,
+                folder_name=spec.folder_name or "",
             )
         except Exception:
             logger.exception("gdrive_classify_unexpected", file_id=f.id, file_name=f.name)
@@ -1524,6 +1534,11 @@ def _ingest_shared_drives_crawl(
                 # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
                 # 失敗しても取り込みは継続（fail-open）。元の chunk 本文で分類するため、
                 # 文脈前置詞を付与する contextualize より前に実行する。
+                # 2026-07-06: フォルダ文脈（classify の folder_name）は crawl 経路では
+                # 渡さない＝対象外。walk_files_recursive は親フォルダ名を保持せず
+                # （DriveFile.parents は ID のみ）、drive.name はドライブ名であって
+                # フォルダ名ではない（広すぎて配下全ファイルへの誤爆リスクが勝る）。
+                # 親フォルダ名が取れる gdrive_folders 経路のみ実装（正直なスコープ）。
                 cls_metadata: dict[str, str] = {}
                 if classifier is not None and chunks:
                     sample = "\n".join(c.content for c in chunks[:8])
@@ -1627,6 +1642,15 @@ def _ingest_gsheet(
     )
     from teamagent.ingest.classify import build_classifier_from_env
 
+    # 2026-07-06: ナレッジ共有フォーム回答シートの構造化 (FB と同設計・form_mappings 参照)。
+    # こちらも「このシート固有のコアヘッダ閾値」判定なので非対象シートには空 dict ＝副作用ゼロ。
+    from teamagent.ingest.form_mappings import derive_knowledge_client_name, map_knowledge_fields
+
+    # 2026-07-03: 営業 FB フォーム回答シートの構造化。
+    # 行のヘッダ → 値 を Slack FB 経路 (slack_fb_parser) と同じ写像でメタ化する。
+    # 非 FB シート (コアヘッダ < 閾値) は map_fb_fields が空 dict を返すので副作用ゼロ。
+    from teamagent.ingest.slack_fb_parser import extract_client_name, map_fb_fields
+
     client = GSheetsClient.from_env()
     # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。sheet 単位で 1 回構築）。
     # gsheet は row_unit=True（1 行 = 1 document = 1 chunk）なので contextualizer は付けない。
@@ -1634,9 +1658,32 @@ def _ingest_gsheet(
     docs_n = 0
     chunks_n = 0
 
+    # 2026-07-06: タブ名は運用でリネームされ得る（命名ルール導入時に実際に発生し
+    # "Unable to parse range" で全シート取り込み失敗した）。gid は不変なので、取り込み時に
+    # gid → 現在のタブ名を解決し、yaml の tab_name は解決失敗時の fallback に降格する。
+    # external_id は従来どおり gid ベース＝リネーム後の再取り込みも冪等 upsert のまま。
+    try:
+        _meta = client.get_sheet_metadata(spec.sheet_id, request_id)
+        _gid_to_title = {t.gid: t.title for t in _meta.tabs if t.title}
+    except Exception:
+        logger.exception(
+            "gsheet_metadata_failed_fallback_tab_name",
+            sheet_id=spec.sheet_id,
+        )
+        _gid_to_title = {}
+
     for tab in spec.tabs:
+        tab_title = _gid_to_title.get(tab.gid) or tab.tab_name
+        if tab_title != tab.tab_name:
+            logger.info(
+                "gsheet_tab_renamed_resolved_by_gid",
+                sheet_id=spec.sheet_id,
+                gid=tab.gid,
+                yaml_tab_name=tab.tab_name,
+                resolved_title=tab_title,
+            )
         tab_rows = client.get_tab_rows(
-            sheet_id=spec.sheet_id, tab_name=tab.tab_name, request_id=request_id
+            sheet_id=spec.sheet_id, tab_name=tab_title, request_id=request_id
         )
         if not tab_rows.headers:
             continue
@@ -1646,6 +1693,34 @@ def _ingest_gsheet(
                 continue
             external_id = build_external_id(spec.sheet_id, tab.gid, row_idx)
             row_title = f"{spec.sheet_name} - {tab.tab_name} - row {row_idx}"
+
+            # 営業 FB シート行の構造化メタ (Slack FB 経路 pipeline.py の
+            # _ingest_slack_channel と同品質・同キー)。row が headers より短い分は
+            # 空値扱い (format_row_as_document と同じ) なので strict=False で zip する。
+            row_fields = dict(zip(tab_rows.headers, row, strict=False))
+            fb_metadata = map_fb_fields(row_fields)
+            fb_doc_metadata: dict[str, Any] = {}
+            if fb_metadata:
+                fb_doc_metadata["is_sales_fb"] = True
+                fb_doc_metadata.update(fb_metadata)
+                derived_client_name = extract_client_name(fb_metadata)
+                if derived_client_name:
+                    fb_doc_metadata["client_name"] = derived_client_name
+
+            # ナレッジ共有フォーム回答シート行の構造化メタ (2026-07-06・form_mappings)。
+            # FB とはコアヘッダが交差しないため相互排他 (テストで固定)。is_sales_fb は
+            # 立てない (これは FB ではなくナレッジ共有) 代わりに is_knowledge_share を立て、
+            # client_name は 正式社名 から FB と同品質 (法人格/敬称/注記なし) で導出する。
+            knowledge_metadata = map_knowledge_fields(row_fields)
+            knowledge_doc_metadata: dict[str, Any] = {}
+            if knowledge_metadata:
+                knowledge_doc_metadata["is_knowledge_share"] = True
+                knowledge_doc_metadata.update(knowledge_metadata)
+                derived_knowledge_client = derive_knowledge_client_name(
+                    knowledge_metadata.get("client_company", "")
+                )
+                if derived_knowledge_client:
+                    knowledge_doc_metadata["client_name"] = derived_knowledge_client
 
             # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
             # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
@@ -1679,6 +1754,14 @@ def _ingest_gsheet(
                     **spec.extra_metadata,
                     "tab_name": tab.tab_name,
                     "row_idx": row_idx,
+                    # Slack 経路と同じ合成順: 固定キー → fb → knowledge → cls。
+                    # fb と knowledge はコアヘッダが交差せず同一シートで両方立つことはない。
+                    # 人間入力 (fb/knowledge) と Haiku (cls_*) はキーが交差しない設計
+                    # (client_type/proposed_menu/knowledge_kind ≠ cls_industry/cls_solution/
+                    # cls_doc_type・根拠は form_mappings の module docstring) なので、
+                    # cls を後置しても人間入力が Haiku に上書きされることはない＝併存。
+                    **fb_doc_metadata,
+                    **knowledge_doc_metadata,
                     **cls_metadata,
                 },
                 modified_at=None,
