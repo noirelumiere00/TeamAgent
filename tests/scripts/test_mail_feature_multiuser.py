@@ -71,7 +71,9 @@ def _patch_main(monkeypatch, users, behavior=None, deliver_fail=None):
 
     async def _fake_deliver(email, text, blocks):
         recorder["deliver"].append(email)
-        return email not in deliver_fail
+        # 新契約（v0.3 Task5）: (delivered, im_channel) を返す。
+        ok = email not in deliver_fail
+        return (ok, "D_IM" if ok else None)
 
     monkeypatch.setattr(mod, "_deliver_to_slack", _fake_deliver)
     return recorder
@@ -241,7 +243,7 @@ def test_M20_delivery_exception_is_contained(monkeypatch, capsys):
         rec["deliver"].append(email)
         if email == U2:
             raise RuntimeError("slack render boom")
-        return True
+        return (True, "D_IM")
 
     monkeypatch.setattr(mod, "_deliver_to_slack", _boom)
     assert mod.main() == 0  # クラッシュしない

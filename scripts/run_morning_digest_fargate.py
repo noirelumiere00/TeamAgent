@@ -405,8 +405,69 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     return text, blocks
 
 
-async def _deliver_to_slack(user_email: str, text: str, blocks: list[dict[str, Any]]) -> bool:
-    """Slack DM 配信（chat.postMessage with user IM channel）。"""
+def _reminders_enabled() -> bool:
+    """MORNING_DIGEST_REMINDERS=1 のときのみ予定リマインドを登録（既定OFF・§10 E1-2）。"""
+    return os.environ.get("MORNING_DIGEST_REMINDERS", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _schedule_event_reminders(digest: Any, im_channel: str) -> int:
+    """当日予定の「開始 N 分前」リマインドを EventBridge Scheduler に登録する（v0.3 Task5）。
+
+    - 対象: start_at が「今から lead+1 分より先」の予定のみ（過ぎた/直近すぎる予定は skip）
+    - 終日予定（date のみ）は対象外
+    - payload に予定タイトルは載せない（PII を SQS/Lambda に流さない・G3。通知文は
+      「まもなく予定があります（HH:MM〜）＋リンク」で成立する）
+    - schedule 名は channel×開始時刻から決定的＝再実行でも二重登録しない（Conflict→成功扱い）
+    """
+    from teamagent.adapters.scheduler_client import SchedulerClient
+
+    try:
+        scheduler = SchedulerClient.from_env()
+    except ValueError as exc:
+        print(f"[run_morning_digest_fargate] WARN: reminder 設定不備 {exc}", file=sys.stderr)
+        return 0
+    try:
+        lead_min = int(os.environ.get("REMINDER_LEAD_MINUTES", "5"))
+    except ValueError:
+        lead_min = 5
+    lead_min = min(60, max(1, lead_min))
+
+    now = _dt.datetime.now(tz=_JST)
+    count = 0
+    for ev in list(getattr(digest, "calendar_events", []) or []):
+        start_iso = str(getattr(ev, "start_at", "") or "")
+        if "T" not in start_iso:
+            continue  # 終日 or 不明
+        try:
+            start = _dt.datetime.fromisoformat(start_iso)
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=_JST)
+        except ValueError:
+            continue
+        fire_at = start - _dt.timedelta(minutes=lead_min)
+        if fire_at <= now + _dt.timedelta(minutes=1):
+            continue  # もう間に合わない/過去の予定
+        url = str(getattr(ev, "meeting_url", "") or "") or _CALENDAR_URL
+        ok = scheduler.schedule_reminder(
+            channel=im_channel,
+            start_iso=start_iso,
+            fire_at=fire_at,
+            url=url,
+            request_id=f"reminder-{uuid.uuid4().hex[:8]}",
+        )
+        if ok:
+            count += 1
+    return count
+
+
+async def _deliver_to_slack(
+    user_email: str, text: str, blocks: list[dict[str, Any]]
+) -> tuple[bool, str | None]:
+    """Slack DM 配信（chat.postMessage with user IM channel）。
+
+    返り値 (delivered, im_channel)。im_channel はリマインド登録（v0.3 Task5）が
+    通知先として使う（配信失敗時は None）。
+    """
     from teamagent.adapters.slack_client import SlackClient
 
     try:
@@ -415,29 +476,29 @@ async def _deliver_to_slack(user_email: str, text: str, blocks: list[dict[str, A
         print(
             f"[run_morning_digest_fargate] WARN: SlackClient.from_env 失敗 {exc}", file=sys.stderr
         )
-        return False
+        return (False, None)
 
     # email → Slack user_id → IM channel を開く
     try:
         user_id = await _email_to_slack_user_id(slack, user_email)
         if not user_id:
-            return False
+            return (False, None)
         im_channel = await _open_im_channel(slack, user_id)
         if not im_channel:
-            return False
+            return (False, None)
         result = await slack.post_message(
             channel=im_channel,
             text=text,
             request_id=f"morning-digest-{uuid.uuid4().hex[:8]}",
             blocks=blocks,
         )
-        return bool(getattr(result, "ok", False))
+        return (bool(getattr(result, "ok", False)), im_channel)
     except Exception as exc:
         print(
             f"[run_morning_digest_fargate] WARN: Slack 配信失敗 {type(exc).__name__}",
             file=sys.stderr,
         )
-        return False
+        return (False, None)
 
 
 async def _email_to_slack_user_id(slack: Any, email: str) -> str | None:
@@ -507,7 +568,7 @@ def _process_user(skill: Any, skill_input: Any, email: str) -> str:
     # 配信(整形+Slack)も封じ込め（1 人の失敗で全体を落とさない）。
     try:
         text, blocks = _format_block_kit(digest, email)
-        delivered = asyncio.run(_deliver_to_slack(email, text, blocks))
+        delivered, im_channel = asyncio.run(_deliver_to_slack(email, text, blocks))
     except Exception as exc:
         print(
             f"[run_morning_digest_fargate] WARN: {_mask_email(email)} 配信失敗 "
@@ -517,6 +578,18 @@ def _process_user(skill: Any, skill_input: Any, email: str) -> str:
         return "error"
     if delivered:
         digest.delivered = True
+        # v0.3 Task5: 当日予定の開始前リマインドをワンタイム登録（flag 既定OFF・fail-open＝
+        # 登録失敗してもダイジェスト配信の成功は変えない）。
+        if im_channel and _reminders_enabled():
+            try:
+                n = _schedule_event_reminders(digest, im_channel)
+                if n:
+                    print(f"[run_morning_digest_fargate] reminders scheduled: {n}", flush=True)
+            except Exception as exc:
+                print(
+                    f"[run_morning_digest_fargate] WARN: reminder 登録失敗 {type(exc).__name__}",
+                    file=sys.stderr,
+                )
         return "delivered"
     return "error"
 

@@ -253,6 +253,12 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_CALENDAR_BUTTON", value = var.morning_digest_calendar_button ? "true" : "false" },
       # 🗓日程候補提案ボタン（v0.3 Task4・既定OFF）。押下先 schedule_propose tool の有効化とセットで ON。
       { name = "MORNING_DIGEST_SCHEDULE_BUTTON", value = var.morning_digest_schedule_button ? "true" : "false" },
+      # 予定リマインド（v0.3 Task5・既定OFF）。enable_reminders=true で基盤を建ててから ON。
+      { name = "MORNING_DIGEST_REMINDERS", value = (var.enable_reminders && var.morning_digest_reminders) ? "true" : "false" },
+      { name = "REMINDER_LEAD_MINUTES", value = tostring(var.reminder_lead_minutes) },
+      { name = "REMINDER_SCHEDULER_GROUP", value = var.enable_reminders ? aws_scheduler_schedule_group.reminders[0].name : "" },
+      { name = "REMINDER_QUEUE_ARN", value = var.enable_reminders ? aws_sqs_queue.reminders[0].arn : "" },
+      { name = "REMINDER_SCHEDULER_ROLE_ARN", value = var.enable_reminders ? aws_iam_role.reminder_scheduler[0].arn : "" },
     ]
     secrets = [
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
