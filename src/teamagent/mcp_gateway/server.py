@@ -357,8 +357,15 @@ async def dispatch_tool(
         return _err(f"{type(e).__name__}: {e}", request_id=ctx.request_id)
 
     data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
-    # search 応答にだけ Web UI リンクを差し込む（AiLa が「ブラウザ/グラフで開く」を案内できる）。
-    # CONNECT_BASE_URL 未設定なら何も足さない＝壊れたリンクは出さない（後方互換）。
+    # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
+    # (1) 長文退避（Task8・USE_PAYLOAD_OFFLOAD 既定OFF）: 切り詰めは注入キーに触れない
+    #     よう **リンク注入より先** に行う（逆順だと注入したURLごと切り詰め対象になる）。
+    # (2) リンク注入（Task6）: search 応答にだけ Web UI/AiLaVault リンクを差し込む。
+    # 将来の usage 計測/quota（Task10）は (0) として tool 実行の前後に入る想定。
+    if isinstance(data, dict):
+        from teamagent.mcp_gateway.payload_offload import maybe_offload
+
+        data = maybe_offload(name, data, request_id=ctx.request_id)
     if name == SEARCH_TOOL_NAME and isinstance(data, dict):
         _inject_search_web_links(data)
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]

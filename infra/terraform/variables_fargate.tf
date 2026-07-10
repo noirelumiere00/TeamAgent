@@ -57,6 +57,12 @@ variable "use_schedule_propose_tool" {
   default     = false
 }
 
+variable "use_payload_offload" {
+  description = "MCP 長文ペイロードの S3 退避（v0.3 Task8）。既定 false。対象は会社共有ナレッジ系 tool のみ（allowlist・per-user PII 系は対象外）。"
+  type        = bool
+  default     = false
+}
+
 variable "slack_team_id" {
   description = "自社 Slack workspace の team_id（T で始まる）。設定すると resolve_identity が他ワークスペースのユーザーを fail-closed で拒否する。空だと team 検証 skip（fail-open・起動後の初回解決で WARN ログ）。多人数運用では必ず設定（CLAUDE.md §5-C4）。"
   type        = string
