@@ -113,6 +113,8 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 - **D2 `ruff format --check` 必須**（auto-fix step は無い）。push 前にローカルで `ruff format` を実行。
 - **D3 import-linter で 3層分離を強制**（§3）。adapters→runtime/skills は CI fail。
 - **D4 `scripts/check_openclaw_config.py`** が OpenClaw config 不変条件（B6 の `dmPolicy:open ⇒ allowFrom:["*"]` 等）を CI ゲート。
+- **D5 trivy ゲート（2026-07-10 追加）**：`trivy fs`（uv.lock の依存 CVE）＋ `trivy config`（infra/ の IaC misconfig）が CRITICAL/HIGH で fail。依存 CVE は `.trivyignore` に足さず**依存バンプで直す**（`--ignore-unfixed` 運用＝修正版が出た時点で赤くなる）。misconfig の例外は `.trivyignore` に理由・再判定期限コメント付きでのみ追加可。image スキャンは CI 対象外（E5 2.2GB 焼き込みで PR 毎 build 不可）＝ECR scan_on_push＋別チケット。
+- **D6 CI トリガーは `branches: [main, dev]`**（2026-07-10 修正）：かつて `[main]` のみで**dev ベース PR では CI が一切発火していなかった**（branches フィルタは PR の base branch 基準）。dev に赤が蓄積する構造だったため、dev PR も全ゲートを通る。
 
 ---
 
