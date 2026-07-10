@@ -83,12 +83,17 @@ _GMAIL_DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
         "users.settings.cse.keypairs.obliterate",
         "users.watch",
         "users.stop",
+        # batch 経由の一括実行は個別 request の assert_safe を踏まず denylist を迂回できる
+        # （v0.3 Task2 レビューで PoC 実証）ため、batch 自体を封鎖する。
+        "new_batch_http_request",
         # 送信は物理封鎖（gmail.modify は送信も許すが、本 Bot は「下書き作成まで・送信は人間」。
         # drafts.create は許可、drafts.send / messages.send は封鎖）。
         "users.messages.send",
         "users.drafts.send",
         # ── 注入・改竄（本 Bot は使わない mutating メソッド）──
-        "users.messages.import",  # 受信箱へメール注入
+        # ⚠️ googleapiclient は予約語 import を import_ に改名する。denylist は実属性名で
+        #    書かないと永久に一致しない（v0.3 Task2 レビューで発覚・calendar と同修正）。
+        "users.messages.import_",  # 受信箱へメール注入
         "users.messages.insert",  # 受信箱へメール注入
         "users.threads.modify",  # スレッドのラベル改竄（本 Bot は messages.modify のみ使用）
         "users.drafts.update",  # 下書き改竄（作成のみ許可）

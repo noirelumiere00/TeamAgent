@@ -31,6 +31,11 @@ WORKSPACE_SCOPES: tuple[str, ...] = (
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/presentations.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
+    # v0.3 Task2: カレンダー書込（MTG登録提案/日程打診の仮予定）。delete/update/acl 等の
+    # 破壊的メソッドは gcalendar_client の _GCalSafePolicy が物理封鎖（gmail と同型・G4）。
+    # ⚠️ このスコープ追加により既連携ユーザーは再 connect が必要（include_granted_scopes
+    # 不使用＝全スコープ一括再要求。再同意イベントは Slack 分と合わせ1回に束ねる＝Step0 裁定）。
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/contacts.readonly",
 )
 _AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
