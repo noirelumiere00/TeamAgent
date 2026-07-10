@@ -61,6 +61,12 @@ variable "morning_digest_concurrency" {
   default     = 1
 }
 
+variable "morning_digest_slack_unread" {
+  description = "Slack 返信漏れ検知（v0.3 Task1）を朝ダイジェストに含める。既定 false（§10 E1-2）。"
+  type        = bool
+  default     = false
+}
+
 variable "morning_digest_model_id" {
   description = "triage/下書き生成に使う Bedrock モデル ID。既定 Haiku（低コスト・高速）。"
   type        = string
@@ -227,6 +233,10 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # OAUTH_KMS_KEY_ID は token store の復号に必要（既存 alias を流用）。
       { name = "OAUTH_KMS_KEY_ID", value = "alias/teamagent-oauth-tokens" },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
+      # Slack 返信漏れ検知（v0.3 Task1・既定OFF）。ON には Slack app の User Token Scopes
+      # (search:read 等) 設定＋対象ユーザーの Slack 連携（xoxp・search:read 込み）が前提。
+      # 未連携ユーザーは fail-open で空＝段階ロールアウト可。
+      { name = "MORNING_DIGEST_SLACK_UNREAD", value = var.morning_digest_slack_unread ? "true" : "false" },
     ]
     secrets = [
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
