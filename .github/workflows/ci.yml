@@ -2,9 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # dev を含めないと「実開発 PR（dev ベース）で CI が一切発火しない」罠になる
+    # （branches フィルタは PR の base branch 基準。2026-07-10 の v0.3 監査で発覚・是正）。
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 # 同じブランチで複数 push されたら古いランをキャンセル
 concurrency:
@@ -41,7 +43,7 @@ jobs:
             'sentry-sdk[asyncio]>=2.18.0' \
             claude-agent-sdk==0.2.87 \
             pyyaml pypdf python-pptx pillow python-docx openpyxl \
-            google-auth google-api-python-client \
+            google-auth google-api-python-client google-auth-oauthlib \
             pytest pytest-asyncio pytest-cov mypy ruff bandit import-linter
 
       - name: Ruff (lint)
@@ -82,12 +84,56 @@ jobs:
             zricethezav/gitleaks:v8.24.3 detect \
             --source /repo --no-git --redact --no-banner
 
+  trivy:
+    name: trivy (vuln + misconfig scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # 依存脆弱性スキャン（uv.lock / package-lock.json が対象）。
+      # - CRITICAL/HIGH 検出で exit 1（ゲート）。
+      # - --ignore-unfixed: 修正版が存在しない CVE で恒常赤化して CI が形骸化するのを防ぐ。
+      #   修正版が出た時点で検出→依存バンプを強制する運用（例: 2026-07-10 に
+      #   cryptography/starlette/yt-dlp の HIGH 5件をこの方式でバンプ済み）。
+      #   ＝依存に修正版 CVE が出た瞬間、無関係な PR でも赤くなる（仕様）。その場合は
+      #   依存バンプを先行 merge して rebase する。
+      # - 例外は .trivyignore.yaml（paths でリソース単位スコープ＋expired_at 機械強制期限）。
+      # - DB 取得は GHCR/GCR のレート制限（TOOMANYREQUESTS）対策で複数レジストリにフォールバック。
+      #   image スキャン（teamagent-mcp/openclaw は E5 2.2GB 焼き込みで PR 毎 build は非現実的）は
+      #   CI では行わず、ECR scan_on_push＋CodeBuild 側での定期スキャンに分離（別チケット）。
+      # - action は R17 の digest pin 文化に合わせ SHA 固定（= v0.36.0）。
+      - name: Trivy fs scan (依存脆弱性)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        env:
+          TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2"
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+
+      # IaC/Dockerfile の misconfig スキャン（infra/ 配下）。
+      # 既存 10 件（SG egress 全開 6 件等）は .trivyignore.yaml にベースライン登録済み
+      # （paths スコープ＋理由＋expired_at）。新規の CRITICAL/HIGH misconfig のみ弾く。
+      - name: Trivy config scan (IaC misconfig)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: infra/
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          trivyignores: .trivyignore.yaml
+          skip-setup-trivy: true # fs スキャン step で導入済みの trivy を再利用（PATH 引き継ぎ）
+
   # 本番デプロイ前提のテスト（main マージ後のみ）
   smoke-test:
     name: smoke test (post-merge)
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [lint-and-test, gitleaks]
+    needs: [lint-and-test, gitleaks, trivy]
     steps:
       - uses: actions/checkout@v6
       - name: 報告

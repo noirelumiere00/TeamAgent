@@ -117,9 +117,7 @@ class SlackOAuthConsentFlow:
     は温存し、ここで得る per-user xoxp は別経路（保管トークンから WebClient を組む）で使う。
     """
 
-    def __init__(
-        self, redirect_uri: str, scopes: tuple[str, ...] = SLACK_USER_SCOPES
-    ) -> None:
+    def __init__(self, redirect_uri: str, scopes: tuple[str, ...] = SLACK_USER_SCOPES) -> None:
         self._redirect_uri = redirect_uri
         self._scopes = scopes
 
@@ -160,9 +158,7 @@ class SlackOAuthConsentFlow:
         authed: dict[str, Any] = resp.get("authed_user") or {}
         xoxp = authed.get("access_token")
         if not xoxp:
-            raise ValueError(
-                "Slack user token (xoxp) を取得できません（user_scope の同意を確認）"
-            )
+            raise ValueError("Slack user token (xoxp) を取得できません（user_scope の同意を確認）")
         team: dict[str, Any] = resp.get("team") or {}
         scope_str = str(authed.get("scope") or "")
         scopes = tuple(s for s in scope_str.split(",") if s) or self._scopes

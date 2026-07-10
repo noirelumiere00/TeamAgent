@@ -569,7 +569,11 @@ def test_E32_preamble_and_no_scoreboard():
 
 
 def test_E33_reply_buttons_states():
-    """要返信メールのボタン: 未作成→[下書きを作成(action)]＋[確認する(url)]、作成済→[開く(url)]。"""
+    """要返信メールのボタン: 未作成→[✏️作成(action)]＋[✅確認(url)]、作成済→[✅確認(url)]のみ。
+
+    旧「📨 下書きを開く」（drafts フォルダ直行）は #151 で行内から廃止され、
+    下書きフォルダへの導線は DM 末尾の「📁 下書き一覧を開く」に一本化された。
+    """
     # 未作成（draft_token あり）
     m1 = MailDigestItem(
         counterpart_masked="a***@x",
@@ -584,13 +588,59 @@ def test_E33_reply_buttons_states():
     assert any(b.get("url", "").endswith("#all/tA") for b in btns)  # 確認する=スレッド直行
     assert all("value" not in b or b.get("action_id") for b in btns)  # url ボタンは action 無し
 
-    # 作成済 → 作成ボタンは出ず「開く」url ボタン
+    # 作成済 → 行内は作成ボタン無し・✅確認(url) のみ（drafts フォルダ直行ボタンは出ない）
     m2 = MailDigestItem(
         counterpart_masked="a***@x", importance="high", has_draft=True, draft_token="TOK"
     )
     btns2 = runner._reply_buttons(m2)
     assert not [b for b in btns2 if b.get("action_id") == "mail_draft"]
-    assert any("drafts" in b.get("url", "") for b in btns2)
+    assert [b for b in btns2 if b.get("url")]  # ✅ 下書きを確認（スレッド直行）
+    assert all("drafts" not in b.get("url", "") for b in btns2)  # 行内 drafts 直行は廃止済み
+
+    # 下書きフォルダへの導線は DM 全体で「📁 下書き一覧を開く」に集約（作り置き1件以上で末尾に出る）
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        mail_digest=[
+            MailDigestItem(
+                counterpart_masked="a***@x",
+                importance="high",
+                to_self=True,
+                has_draft=True,
+                subject_display="件名B",
+            )
+        ],
+    )
+    _t, blocks = runner._format_block_kit(d, ME)
+    urls = [
+        e.get("url", "")
+        for b in blocks
+        if b.get("type") == "actions"
+        for e in b.get("elements", [])
+    ]
+    assert any("drafts" in u for u in urls)  # 📁 下書き一覧を開く
+
+    # 負ケース: 作り置きが 1 件も無ければ 📁 一覧ボタンは出ない
+    d0 = MorningDigestOutput(
+        user_email_masked="m***@x",
+        mail_digest=[
+            MailDigestItem(
+                counterpart_masked="a***@x",
+                importance="high",
+                to_self=True,
+                has_draft=False,
+                draft_token="TOK",
+                subject_display="件名C",
+            )
+        ],
+    )
+    _t0, blocks0 = runner._format_block_kit(d0, ME)
+    urls0 = [
+        e.get("url", "")
+        for b in blocks0
+        if b.get("type") == "actions"
+        for e in b.get("elements", [])
+    ]
+    assert all("drafts" not in u for u in urls0)
 
 
 def test_E34_unread_section_lists_unread_non_high():

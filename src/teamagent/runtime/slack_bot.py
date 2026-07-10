@@ -983,9 +983,9 @@ class SkillDispatcher:
         try:
             from teamagent.adapters.google_oauth_flow import OAuthConsentFlow
 
-            url_google, _state = OAuthConsentFlow(
-                redirect_uri=redirect_uri
-            ).authorization_url(email)
+            url_google, _state = OAuthConsentFlow(redirect_uri=redirect_uri).authorization_url(
+                email
+            )
         except Exception:
             logger.warning("connect_url_failed", request_id=request_id, user_id=user_id)
             return "🔗 連携リンクの生成に失敗しました（管理者へ: OAuth 系 env をご確認ください）。"
@@ -997,13 +997,11 @@ class SkillDispatcher:
             try:
                 from teamagent.adapters.slack_oauth_flow import SlackOAuthConsentFlow
 
-                url_slack, _ = SlackOAuthConsentFlow(
-                    redirect_uri=slack_redirect
-                ).authorization_url(email)
-            except Exception:
-                logger.warning(
-                    "connect_slack_url_failed", request_id=request_id, user_id=user_id
+                url_slack, _ = SlackOAuthConsentFlow(redirect_uri=slack_redirect).authorization_url(
+                    email
                 )
+            except Exception:
+                logger.warning("connect_slack_url_failed", request_id=request_id, user_id=user_id)
                 url_slack = None
 
         logger.info(
