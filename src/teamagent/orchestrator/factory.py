@@ -342,6 +342,21 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 朝ダイジェストの「🗓 日程候補を提案」ボタン押下を処理するツール（OpenClaw 経由）。
+    # 空き枠計算→候補入り返信下書き＋透明仮予定（送信/招待なし）。**既定 OFF**。
+    if _envflag("USE_SCHEDULE_PROPOSE_TOOL"):
+        from teamagent.skills.schedule_propose.skill import ScheduleProposeSkill
+
+        sched_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                ScheduleProposeSkill.name,
+                ScheduleProposeSkill.description,
+                ScheduleProposeSkill,
+                factory=lambda: ScheduleProposeSkill(token_store=sched_store),
+            )
+        )
+
     # 朝ダイジェストの「📅 カレンダーに登録」ボタン押下を処理するツール（OpenClaw 経由）。
     # 本人カレンダーへ登録のみ（招待送信なし・削除/変更は adapter 物理封鎖）。**既定 OFF**。
     if _envflag("USE_CALENDAR_EVENT_TOOL"):

@@ -87,7 +87,9 @@ def decode_event_token(
     return MeetingEventPayload(start_iso=start, end_iso=end, title=str(payload.get("l") or ""))
 
 
-def stable_event_id(start_iso: str, end_iso: str, owner_email: str) -> str:
+def stable_event_id(
+    start_iso: str, end_iso: str, owner_email: str, *, kind: str = "confirm"
+) -> str:
     """冪等 event_id（base32hex 小文字）を導出する（連打＋翌日再ダイジェスト対策）。
 
     トークン全体でなく **安定フィールド（所有者×開始×終了）** から導出する:
@@ -98,8 +100,13 @@ def stable_event_id(start_iso: str, end_iso: str, owner_email: str) -> str:
     hexdigest（0-9a-f）は base32hex アルファベット [a-v0-9] の部分集合＝形式安全。
     ⚠️ トレードオフ: UI から手動削除した同一予定を再登録しようとしても 409
     （「登録済み」案内）になる。その場合は手動作成が必要（既知の制限・adapter docstring 参照）。
+
+    ⚠️ ``kind`` で名前空間を分離する（confirm=📅本登録 / hold=🗓透明ホールド）。分離しないと
+    「🗓で仮ホールドを置いたスロットへ、相手の確定返信後に📅で本登録しようとすると 409＝
+    登録済み扱いになるが、実際は透明ホールドしか無く freebusy にも映らない」という
+    本来の成功パスの自壊＋ダブルブッキング誘発が起きる（Task4 反対尋問レビュー F1 で実証）。
     """
-    basis = f"{_owner_hash(owner_email)}|{start_iso}|{end_iso}"
+    basis = f"{kind}|{_owner_hash(owner_email)}|{start_iso}|{end_iso}"
     return "aila" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:40]
 
 
