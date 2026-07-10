@@ -67,9 +67,7 @@ class SlackClient:
         return cls(bot_token=token)
 
     @classmethod
-    def from_user_token(
-        cls, xoxp: str, client: AsyncWebClient | None = None
-    ) -> SlackClient:
+    def from_user_token(cls, xoxp: str, client: AsyncWebClient | None = None) -> SlackClient:
         """各営業「本人」の Slack User Token(xoxp) で動く SlackClient を組む。
 
         要件B: 各営業が OAuth 同意フローで取得した個人 user token(xoxp) を使い、
