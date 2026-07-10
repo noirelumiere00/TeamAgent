@@ -69,9 +69,7 @@ class SlackUserReader:
         self._client = client or AsyncWebClient(token=xoxp)
 
     @classmethod
-    def from_user_token(
-        cls, xoxp: str, *, client: AsyncWebClient | None = None
-    ) -> SlackUserReader:
+    def from_user_token(cls, xoxp: str, *, client: AsyncWebClient | None = None) -> SlackUserReader:
         return cls(xoxp, client=client)
 
     def read_thread(
