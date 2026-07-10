@@ -98,6 +98,11 @@ def build_cc(
 # ── B1. スレッド履歴（これまでの経緯）の整形 ───────────────────────────────
 
 
+_THREAD_MAX_MSGS_CEIL = 60
+_THREAD_MAX_CHARS_CEIL = 40000
+_THREAD_PER_MSG_CEIL = 4000
+
+
 def build_thread_history(
     messages: list[Any],
     *,
@@ -112,7 +117,12 @@ def build_thread_history(
     messages: GmailMessage 風（.id / .headers / .payload / .internal_date_ms）の list。
     返信対象(exclude_id)自身は除外。時系列（古→新）。直近 max_msgs 通・合計 max_chars 字まで。
     各メッセージは scrub 済み本文を境界で囲む（差出人は本人/先方のみ・生アドレス非表示）。
+    max_msgs/max_chars/per_msg_chars は env ノブ由来でも暴走しないよう上限で丸める。
     """
+    # コード側ハードキャップ（env 誤設定でのコスト暴発を防ぐ）。
+    max_msgs = max(1, min(max_msgs, _THREAD_MAX_MSGS_CEIL))
+    max_chars = max(1, min(max_chars, _THREAD_MAX_CHARS_CEIL))
+    per_msg_chars = max(1, min(per_msg_chars, _THREAD_PER_MSG_CEIL))
     req = (requester or "").strip().lower()
     ordered = sorted(messages, key=lambda m: getattr(m, "internal_date_ms", 0) or 0)
     prior = [m for m in ordered if getattr(m, "id", None) != exclude_id]
