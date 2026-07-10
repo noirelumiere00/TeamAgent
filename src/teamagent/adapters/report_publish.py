@@ -88,6 +88,48 @@ def publish_file(
         return None
 
 
+def publish_text(
+    text: str,
+    *,
+    content_type: str = "application/json; charset=utf-8",
+    ext: str = ".json",
+    prefix: str | None = None,
+    bucket: str | None = None,
+    request_id: str = "payload",
+) -> str | None:
+    """テキスト（JSON等）を非公開S3へ直接置き、署名付きGET URL（7日）を返す。失敗で None。
+
+    v0.3 Task8（長文ペイロード退避）用の小拡張。publish_file と同じ bucket/署名規約。
+    ファイルを経由しない（一時ファイルの掃除漏れ・競合を持たない）。
+    """
+    if not text:
+        return None
+    try:
+        import boto3
+
+        bucket = bucket or os.environ.get("VSEO_REPORT_BUCKET") or _DEFAULT_BUCKET
+        key_prefix = prefix or os.environ.get("VSEO_REPORT_PREFIX") or _DEFAULT_PREFIX
+        key = f"{key_prefix}{uuid.uuid4().hex}{ext}"
+        sess = boto3.session.Session()
+        region = _bucket_region(sess.client("s3"), bucket)
+        s3 = sess.client("s3", region_name=region)
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=text.encode("utf-8"),
+            ContentType=content_type,
+            CacheControl="private, max-age=604800",
+        )
+        url: str = s3.generate_presigned_url(
+            "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=_EXPIRES_S
+        )
+        logger.info("report_published", request_id=request_id, bucket=bucket, key=key)
+        return url
+    except Exception as e:
+        logger.warning("report_publish_failed", request_id=request_id, error=type(e).__name__)
+        return None
+
+
 def publish_html_file(path: str, *, request_id: str = "vseo", query: str = "") -> str | None:
     """HTMLファイルを非公開S3に置き、署名付きGET URL（7日）を返す（publish_file の薄いラッパ）。"""
     return publish_file(
