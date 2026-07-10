@@ -87,7 +87,10 @@ class SchedulerClient:
         fire_jst = fire_at.astimezone(_JST)
         start_hm = ""
         try:
-            start_hm = _dt.datetime.fromisoformat(start_iso).astimezone(_JST).strftime("%H:%M")
+            parsed = _dt.datetime.fromisoformat(start_iso)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=_JST)  # naive は JST（runner と同解釈・レビュー L2）
+            start_hm = parsed.astimezone(_JST).strftime("%H:%M")
         except (ValueError, TypeError):
             pass
         payload = {"v": 1, "channel": channel, "start_hm": start_hm, "url": url}

@@ -64,9 +64,10 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     for record in records:
         body = json.loads(record["body"])
         channel = str(body.get("channel") or "")
-        if not channel:
-            # 不正 payload はリトライしても直らない＝スキップ（DLQ を汚さない）。
-            print(json.dumps({"event": "reminder_skip_invalid", "reason": "no_channel"}))
+        if not channel.startswith("D"):
+            # DM channel（D…）以外へは投稿しない（defense-in-depth・レビュー L1）。
+            # 形式不正はリトライしても直らない＝スキップ（DLQ を汚さない）。
+            print(json.dumps({"event": "reminder_skip_invalid", "reason": "not_dm_channel"}))
             continue
         start_hm = str(body.get("start_hm") or "")
         url = str(body.get("url") or "")

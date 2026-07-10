@@ -120,7 +120,9 @@ data "aws_iam_policy_document" "reminder_producer" {
 }
 
 resource "aws_iam_role_policy" "morning_digest_reminders" {
-  count  = local.rem_enabled
+  # morning_digest task role は enable_morning_digest ゲート配下＝両方 true の時のみ付与
+  # （enable_reminders 単独 true だと Invalid index で plan が死ぬ・レビュー M1）。
+  count  = (var.enable_reminders && var.enable_morning_digest) ? 1 : 0
   name   = "${local.rem_name}-producer"
   role   = aws_iam_role.morning_digest_task[0].id
   policy = data.aws_iam_policy_document.reminder_producer[0].json
@@ -204,6 +206,8 @@ resource "aws_cloudwatch_metric_alarm" "reminders_dlq" {
   dimensions = {
     QueueName = aws_sqs_queue.reminders_dlq[0].name
   }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  # SQS はアイドル~6時間でメトリクス発行が止まる＝missing を正常扱い（他アラームと同流儀）。
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alarms.arn]
+  ok_actions         = [aws_sns_topic.alarms.arn]
 }
