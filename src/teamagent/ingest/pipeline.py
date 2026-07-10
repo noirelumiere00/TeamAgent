@@ -17,6 +17,7 @@ Usage (CLI):
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -804,6 +805,9 @@ def _ingest_gdrive_folder(
     dry_run: bool,
     request_id: str,
     content_registry: set[tuple[str, str]] | None = None,
+    exclude_folder_name_re: str | None = None,
+    observed_gdrive_ids: set[str] | None = None,
+    truncated_walk_roots: set[str] | None = None,
 ) -> tuple[int, int]:
     """1 Drive folder を取り込む。
 
@@ -812,10 +816,29 @@ def _ingest_gdrive_folder(
     - 非 PDF: title だけ embed して 1 chunk（メタデータ用、将来 Google Doc export 対応で拡張）
 
     ACL は permissions.list を呼んで documents.acl_emails / acl_groups に写像する。
+
+    入れ込み v2 (2026-07-10):
+    - exclude_folder_name_re: サブフォルダ名の除外 regex（yaml グローバルキー由来。
+      None ならコード既定 DEFAULT_EXCLUDE_FOLDER_NAME_RE・空文字 "" で除外なし）。
+    - observed_gdrive_ids: run 中に Drive 上で観測した file_id を集める set
+      （INGEST_MARK_STALE の stale 差集合用。run 単位で 1 個を共有）。
+    - truncated_walk_roots: walk が max_files 上限で打ち切られた root（folder_id）を
+      集める set（stale 堅牢化。打ち切り run では観測集合が不完全＝mark を skip する）。
     """
-    from teamagent.adapters.gdrive_client import GDriveClient
+    from teamagent.adapters.gdrive_client import (
+        DEFAULT_EXCLUDE_FOLDER_NAME_RE,
+        DEFAULT_WALK_MAX_FILES,
+        GDriveClient,
+    )
     from teamagent.ingest.classify import build_classifier_from_env
     from teamagent.ingest.contextualize import build_contextualizer_from_env
+
+    # yaml キー未記載（None）→ コード既定の 99_一次倉庫系除外。空文字 "" → 除外なし。
+    effective_exclude_re = (
+        exclude_folder_name_re
+        if exclude_folder_name_re is not None
+        else DEFAULT_EXCLUDE_FOLDER_NAME_RE
+    )
 
     # Day 7: folder bulk ingest のため readonly=True で drive.readonly スコープを使う。
     # Internal OAuth なので CASA 審査不要。drive.file ではフォルダ単位の取り込みが
@@ -867,7 +890,17 @@ def _ingest_gdrive_folder(
         all_files = client.walk_files_recursive(
             root_id=spec.folder_id,
             request_id=request_id,
+            exclude_folder_name_re=effective_exclude_re,
         )
+        # stale 堅牢化: walk が max_files（既定値）で打ち切られた可能性がある場合は
+        # run 単位フラグに集約する（打ち切り run では mark を skip）。len >= 上限は
+        # 打ち切りの必要条件で、丁度一致の偽陽性は mark skip 側＝安全側に倒れる。
+        if truncated_walk_roots is not None and len(all_files) >= DEFAULT_WALK_MAX_FILES:
+            truncated_walk_roots.add(spec.folder_id)
+        # stale 差集合用: mime post-filter の**前**（Drive 上に存在が確認できた全 file）で
+        # 観測済みを記録する（設定の絞り込みで存在中の file が stale 誤爆しないよう安全側）。
+        if observed_gdrive_ids is not None:
+            observed_gdrive_ids.update(f.id for f in all_files)
         if spec.mime_type_filter:
             files = [f for f in all_files if f.mime_type == spec.mime_type_filter]
         else:
@@ -879,6 +912,12 @@ def _ingest_gdrive_folder(
             request_id=request_id,
             mime_type_filter=spec.mime_type_filter,
         )
+        # こちらは server-side mime filter 後しか列挙できない（観測＝列挙できた file）。
+        if observed_gdrive_ids is not None:
+            observed_gdrive_ids.update(f.id for f in files)
+
+    # 増分絞り込みの**前**に観測を取る理由: 増分 run でも列挙自体はフル走査なので、
+    # 「変更が無かっただけの file」が stale 扱いになる誤爆を防げる。
 
     # 増分: 変更があった file だけに絞る（changed_ids が None ＝フル走査）。
     if changed_ids is not None:
@@ -1267,6 +1306,9 @@ def _ingest_shared_drives_crawl(
     dry_run: bool,
     request_id: str,
     content_registry: set[tuple[str, str]] | None = None,
+    exclude_folder_name_re: str | None = None,
+    observed_gdrive_ids: set[str] | None = None,
+    truncated_walk_roots: set[str] | None = None,
 ) -> tuple[int, int]:
     """共有ドライブ全件 crawl + 営業資料フィルタで取り込む (Day 7, 2026-05-27)。
 
@@ -1276,8 +1318,16 @@ def _ingest_shared_drives_crawl(
     - spec.sales_relevance_filter=True なら _is_sales_relevant で営業価値判定
     - ACL は permissions.list で解決して acl_emails / acl_groups に写像
     - PDF / Office (docx/pptx/xlsx) はテキスト抽出 + chunk 化、それ以外は title のみで 1 chunk
+
+    入れ込み v2 (2026-07-10): exclude_folder_name_re / observed_gdrive_ids /
+    truncated_walk_roots は gdrive_folders 経路（_ingest_gdrive_folder）と同義
+    （crawl 経路にも同じ除外と stale 観測・打ち切り検知を配線し、99_ 系フォルダの
+    取り込みを両経路で保証して塞ぐ）。crawl の walk 上限は spec.max_files_per_drive。
     """
-    from teamagent.adapters.gdrive_client import GDriveClient
+    from teamagent.adapters.gdrive_client import (
+        DEFAULT_EXCLUDE_FOLDER_NAME_RE,
+        GDriveClient,
+    )
     from teamagent.ingest.classify import build_classifier_from_env
     from teamagent.ingest.contextualize import build_contextualizer_from_env
     from teamagent.ingest.office_extract import (
@@ -1325,6 +1375,13 @@ def _ingest_shared_drives_crawl(
         name_filter=list(spec.name_filter),
     )
 
+    # yaml キー未記載（None）→ コード既定の 99_一次倉庫系除外。空文字 "" → 除外なし。
+    effective_exclude_re = (
+        exclude_folder_name_re
+        if exclude_folder_name_re is not None
+        else DEFAULT_EXCLUDE_FOLDER_NAME_RE
+    )
+
     for drive in drives:
         # 2. 各ドライブを再帰 walk
         files = client.walk_files_recursive(
@@ -1332,7 +1389,16 @@ def _ingest_shared_drives_crawl(
             request_id=request_id,
             drive_id=drive.id,
             max_files=spec.max_files_per_drive,
+            exclude_folder_name_re=effective_exclude_re,
         )
+        # stale 堅牢化: walk が max_files_per_drive で打ち切られた可能性がある場合は
+        # run 単位フラグに集約する（打ち切り run では mark を skip・folder 経路と同義）。
+        if truncated_walk_roots is not None and len(files) >= spec.max_files_per_drive:
+            truncated_walk_roots.add(drive.id)
+        # stale 差集合用: 営業価値フィルタの**前**（Drive 上に存在が確認できた全 file）で
+        # 観測済みを記録する（フィルタ落ちした存在中の file が stale 誤爆しないよう安全側）。
+        if observed_gdrive_ids is not None:
+            observed_gdrive_ids.update(f.id for f in files)
         logger.info(
             "ingest_shared_drive_walked",
             request_id=request_id,
@@ -1791,6 +1857,126 @@ def _ingest_gsheet(
 
 
 # -----------------------------------------------------------
+# ルート検査 preflight（入れ込み v2 2026-07-10）
+# -----------------------------------------------------------
+_NN_PREFIX_RE = re.compile(r"^\s*(\d{2})[_＿]")
+_FOLDER_MIME = "application/vnd.google-apps.folder"
+
+
+def _check_rulebook_root(
+    sources: IngestSources,
+    *,
+    request_id: str,
+    client: Any | None = None,
+) -> None:
+    """gdrive kind 実行冒頭の preflight: ルールブック ルート直下のカバレッジ検査。
+
+    yaml グローバルキー ``gdrive_rulebook_root_folder_id`` 設定時のみ呼ばれる。
+    ルート直下フォルダを列挙し:
+    (a) ``NN_`` 接頭フォルダのうち 99_ 系以外で yaml の gdrive_folders に folder_id が
+        載っていないものがあれば **exit 1**（silent 未取込の防止・不足フォルダ名一覧を表示）
+    (b) 99_ 系（99_ 接頭 or 除外 regex マッチ）が yaml に載っていたら **exit 1**
+        （一次倉庫の誤取込防止）
+
+    env ``INGEST_ROOT_CHECK_WARN_ONLY=true`` で exit を WARNING に降格できる。
+    ルート列挙自体の失敗も fail-loud（検査できない状態で黙って進まない）。
+    client はテスト用に注入可（None なら GDriveClient.from_env）。
+    """
+    from teamagent.adapters.gdrive_client import (
+        DEFAULT_EXCLUDE_FOLDER_NAME_RE,
+        GDriveClient,
+    )
+
+    root_id = sources.gdrive_rulebook_root_folder_id
+    warn_only = _envflag("INGEST_ROOT_CHECK_WARN_ONLY")
+    if client is None:
+        client = GDriveClient.from_env(readonly=True)
+
+    exclude_pattern = (
+        sources.gdrive_exclude_folder_name_re
+        if sources.gdrive_exclude_folder_name_re is not None
+        else DEFAULT_EXCLUDE_FOLDER_NAME_RE
+    )
+    exclude_re = re.compile(exclude_pattern) if exclude_pattern else None
+
+    def _fail(event: str, message: str, **kwargs: Any) -> None:
+        if warn_only:
+            logger.warning(event + "_warn_only", message=message, **kwargs)
+            return
+        logger.error(event, message=message, **kwargs)
+        import sys as _sys
+
+        print(f"[ERROR] {message}", file=_sys.stderr)
+        raise SystemExit(1)
+
+    try:
+        subfolders = _list_all_gdrive_files(
+            client=client,
+            folder_id=root_id,
+            request_id=request_id,
+            mime_type_filter=_FOLDER_MIME,
+        )
+    except Exception as exc:
+        _fail(
+            "rulebook_root_list_failed",
+            (
+                f"ルールブック ルート ({root_id}) 直下の列挙に失敗しました: {exc}。"
+                "検査できない状態で黙って進みません"
+                "（run_ingest_task.sh --root-check-warn-only で警告降格可）"
+            ),
+            root_folder_id=root_id,
+        )
+        return  # warn_only のときだけ到達
+
+    yaml_folder_ids = {s.folder_id for s in sources.gdrive_folders}
+    missing: list[str] = []  # NN_ フォルダなのに yaml 未登録（silent 未取込）
+    banned: list[str] = []  # 99_ 系なのに yaml に登録されている（誤取込）
+    for folder in subfolders:
+        name = folder.name or ""
+        m = _NN_PREFIX_RE.match(name)
+        is_excluded_kind = (m is not None and m.group(1) == "99") or (
+            exclude_re is not None and exclude_re.search(name)
+        )
+        if is_excluded_kind:
+            if folder.id in yaml_folder_ids:
+                banned.append(name)
+            continue
+        if m is None:
+            continue  # NN_ 接頭でないフォルダは検査対象外
+        if folder.id not in yaml_folder_ids:
+            missing.append(name)
+
+    logger.info(
+        "rulebook_root_check",
+        request_id=request_id,
+        root_folder_id=root_id,
+        subfolders=len(subfolders),
+        missing=missing,
+        banned=banned,
+    )
+    if banned:
+        _fail(
+            "rulebook_root_banned_folder_in_yaml",
+            (
+                f"99_ 系（検索対象外）フォルダが yaml の gdrive_folders に登録されています: "
+                f"{banned}。エントリを削除してください"
+                "（run_ingest_task.sh --root-check-warn-only で警告降格可）"
+            ),
+            banned=banned,
+        )
+    if missing:
+        _fail(
+            "rulebook_root_missing_folders",
+            (
+                f"ルールブック ルート直下の NN_ フォルダが yaml の gdrive_folders に不足しています"
+                f"（silent 未取込の防止）: {missing}。yaml に folder_id を追加してください"
+                "（run_ingest_task.sh --root-check-warn-only で警告降格可）"
+            ),
+            missing=missing,
+        )
+
+
+# -----------------------------------------------------------
 # IngestRunner（orchestrator）
 # -----------------------------------------------------------
 class IngestRunner:
@@ -1831,6 +2017,20 @@ class IngestRunner:
         # run ごとに新しい set ＝ run 間で漏れない（プロセス内の別 run やテストに影響しない）。
         content_registry: set[tuple[str, str]] = set()
 
+        # 入れ込み v2: run 中に Drive 上で観測した gdrive file_id 全集合
+        # （INGEST_MARK_STALE の stale 差集合用。folder / crawl 両経路で 1 個を共有）。
+        observed_gdrive_ids: set[str] = set()
+        # stale 堅牢化: walk が max_files 上限で打ち切られた root（folder/drive の ID）集合。
+        # 打ち切りがあった run は観測集合が不完全＝mark を skip する（両経路で 1 個を共有）。
+        truncated_walk_roots: set[str] = set()
+        # フォルダ名除外 regex（yaml グローバルキー。None ならコード既定を handler 側で解決）。
+        gdrive_extra_kwargs: dict[str, Any] = {
+            "content_registry": content_registry,
+            "exclude_folder_name_re": sources.gdrive_exclude_folder_name_re,
+            "observed_gdrive_ids": observed_gdrive_ids,
+            "truncated_walk_roots": truncated_walk_roots,
+        }
+
         logger.info(
             "ingest_runner_start",
             request_id=request_id,
@@ -1838,6 +2038,11 @@ class IngestRunner:
             dry_run=self._dry_run,
             owner_email=self._owner_email,
         )
+
+        # ルート検査 preflight: gdrive kind 実行の冒頭・yaml でルート指定時のみ。
+        # NN_ フォルダの yaml 不足 / 99_ 系の誤登録を fail-loud で止める（exit 1）。
+        if "gdrive" in kinds and sources.gdrive_rulebook_root_folder_id:
+            _check_rulebook_root(sources, request_id=request_id)
 
         if "slack" in kinds:
             result.by_kind["slack"] = self._run_kind(
@@ -1852,7 +2057,7 @@ class IngestRunner:
                 sources.gdrive_folders,
                 _ingest_gdrive_folder,
                 request_id=request_id,
-                extra_kwargs={"content_registry": content_registry},
+                extra_kwargs=gdrive_extra_kwargs,
             )
         if "gsheets" in kinds:
             result.by_kind["gsheets"] = self._run_kind(
@@ -1867,7 +2072,7 @@ class IngestRunner:
                     (shared_spec,),
                     _ingest_shared_drives_crawl,
                     request_id=request_id,
-                    extra_kwargs={"content_registry": content_registry},
+                    extra_kwargs=gdrive_extra_kwargs,
                 )
             else:
                 logger.info(
@@ -1890,6 +2095,18 @@ class IngestRunner:
         # （BOILERPLATE_DETECT=1 のときだけ・dry-run では走らせない・fail-open）。
         # OFF（既定）では呼ばない＝現行と完全一致。
         self._maybe_mark_boilerplate(request_id=request_id)
+
+        # 入れ込み v2: run 末尾の stale soft-delete（INGEST_MARK_STALE=true のときだけ・
+        # 量的ブレーキ付き）。OFF（既定）では呼ばない＝現行と完全一致。
+        # stale 堅牢化: result（gdrive 系列挙の部分失敗の検知）と truncated_walk_roots
+        # （walk 打ち切りの検知）を渡し、観測集合が不完全な run では mark を skip させる。
+        self._maybe_mark_stale_documents(
+            observed_gdrive_ids,
+            kinds=kinds,
+            request_id=request_id,
+            result=result,
+            truncated_walk_roots=truncated_walk_roots,
+        )
 
         logger.info(
             "ingest_runner_done",
@@ -1985,6 +2202,148 @@ class IngestRunner:
                 jaccard_threshold=jaccard_threshold,
                 exc_info=True,
             )
+
+    def _maybe_mark_stale_documents(
+        self,
+        observed_gdrive_ids: set[str],
+        *,
+        kinds: list[str],
+        request_id: str,
+        result: IngestResult | None = None,
+        truncated_walk_roots: set[str] | None = None,
+    ) -> None:
+        """run 末尾の stale soft-delete（入れ込み v2・env ゲート ``INGEST_MARK_STALE``）。
+
+        run 中に Drive 上で観測できなかった source_type='gdrive' の documents に
+        metadata.stale='true' + stale_marked_at を jsonb 付与し（物理 DELETE はしない）、
+        観測できた documents からは stale 印を除去する（復活対応）。
+
+        観測完全性ガード（stale 堅牢化 2026-07-10）:
+        - ``result`` の gdrive / shared_drives kind に stats.errors > 0 または
+          sources_skipped > 0（＝walk 例外等で source ごと fail-open skip）がある run、
+        - または ``truncated_walk_roots`` 非空（＝walk の max_files 打ち切り）の run では、
+          失敗フォルダ/上限超過分の生存 file が「未観測」に見えて誤 stale されるため
+          **mark を skip** して WARNING（``ingest_mark_stale_skipped``・reason で区別）を出す。
+          clear（観測できた doc の stale 解除）は観測済み id のみ対象で安全なので続行する。
+          どちらの引数も None（旧呼び出し）ならガード無し＝従来挙動。
+
+        量的ブレーキ:
+        - 新規 stale 候補が既存 gdrive documents 総数の **50% 超** → 中止して exit 1
+          （``INGEST_STALE_ALLOW_MASS=true`` で明示続行可）
+        - **30% 超 50% 以下** → WARNING を出して実行
+
+        boilerplate / docdedup と違い **fail-open にしない**（operator が明示的に
+        依頼した掃除が黙って劣化しないよう、DB エラー等はそのまま伝播＝非0終了）。
+        """
+        if not _envflag("INGEST_MARK_STALE"):
+            return
+        if self._dry_run:
+            logger.info("ingest_mark_stale_skipped", request_id=request_id, reason="dry_run")
+            return
+        if "gdrive" not in kinds:
+            # gdrive を走らせていない run では観測集合が意味を持たない（全 doc が
+            # 未観測に見えて大量 stale になる）。誤爆を防いで skip を明示する。
+            logger.warning(
+                "ingest_mark_stale_skipped",
+                request_id=request_id,
+                reason="kinds に gdrive が無い run では stale 判定しない（観測集合が空になるため）",
+                kinds=kinds,
+            )
+            return
+
+        # 観測完全性ガード: 列挙の部分失敗 / walk 打ち切りがあった run では mark しない。
+        # shared_drives は gdrive と同じ observed_gdrive_ids を共有するため両 kind を見る。
+        failed_kinds: dict[str, dict[str, int]] = {}
+        if result is not None:
+            for k in ("gdrive", "shared_drives"):
+                stats = result.by_kind.get(k)
+                if stats is not None and (stats.errors or stats.sources_skipped):
+                    failed_kinds[k] = {
+                        "errors": len(stats.errors),
+                        "sources_skipped": stats.sources_skipped,
+                    }
+        incomplete_reasons: list[str] = []
+        if failed_kinds:
+            incomplete_reasons.append("source_failure（gdrive 系列挙に部分失敗）")
+        if truncated_walk_roots:
+            incomplete_reasons.append("walk_truncated（max_files 打ち切りで列挙が不完全）")
+        if incomplete_reasons:
+            # clear は観測できた doc の stale 解除のみ＝安全なのでガード外扱いで続行する。
+            cleared = self._repo.clear_documents_stale(sorted(observed_gdrive_ids))
+            logger.warning(
+                "ingest_mark_stale_skipped",
+                request_id=request_id,
+                reason=(
+                    "観測集合が不完全なため stale mark を skip（誤 stale 防止・"
+                    "観測分の clear のみ実行）: " + " / ".join(incomplete_reasons)
+                ),
+                failed_kinds=failed_kinds,
+                truncated_walk_roots=sorted(truncated_walk_roots or set()),
+                observed=len(observed_gdrive_ids),
+                cleared=cleared,
+            )
+            return
+
+        existing = self._repo.list_gdrive_external_ids_with_stale()
+        total = len(existing)
+        if total == 0:
+            logger.info(
+                "ingest_mark_stale_skipped",
+                request_id=request_id,
+                reason="gdrive documents が 0 件",
+            )
+            return
+
+        # 新規 stale 候補 = 未観測 かつ まだ stale でない doc（既 stale の再マークはしない＝
+        # 初回 stale_marked_at を保持し、ブレーキの分子も「今回新たに消える量」に限定する）。
+        new_candidates = [
+            eid for eid, is_stale in existing if eid not in observed_gdrive_ids and not is_stale
+        ]
+        ratio = len(new_candidates) / total
+        allow_mass = _envflag("INGEST_STALE_ALLOW_MASS")
+        if ratio > 0.5 and not allow_mass:
+            message = (
+                f"stale 候補 {len(new_candidates)} 件が既存 gdrive documents 総数 {total} 件の "
+                f"50% を超えています（{ratio:.0%}）。誤設定（yaml 縮小 / walk 失敗）の疑いが"
+                "あるため中止します。意図的な大量掃除なら INGEST_STALE_ALLOW_MASS=true で"
+                "明示続行してください"
+            )
+            logger.error(
+                "ingest_mark_stale_aborted",
+                request_id=request_id,
+                candidates=len(new_candidates),
+                total=total,
+                ratio=round(ratio, 3),
+                message=message,
+            )
+            import sys as _sys
+
+            print(f"[ERROR] {message}", file=_sys.stderr)
+            raise SystemExit(1)
+        if ratio > 0.3:
+            logger.warning(
+                "ingest_mark_stale_mass_warning",
+                request_id=request_id,
+                candidates=len(new_candidates),
+                total=total,
+                ratio=round(ratio, 3),
+                allow_mass=allow_mass,
+            )
+
+        import datetime as _dt
+
+        marked_at = _dt.datetime.now(_dt.UTC).isoformat()
+        marked = self._repo.mark_documents_stale(new_candidates, marked_at_iso=marked_at)
+        cleared = self._repo.clear_documents_stale(sorted(observed_gdrive_ids))
+        logger.info(
+            "ingest_mark_stale_done",
+            request_id=request_id,
+            observed=len(observed_gdrive_ids),
+            total=total,
+            marked=marked,
+            cleared=cleared,
+            marked_at=marked_at,
+        )
 
     def _run_kind(
         self,

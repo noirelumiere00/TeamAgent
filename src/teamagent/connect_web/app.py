@@ -11,6 +11,7 @@ AI 要約 + 結果カードを返す。👍/👎 は search_feedback テーブ�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import os
@@ -77,6 +78,90 @@ def _static_app_html() -> str:
     except OSError as exc:  # FileNotFoundError 等。ルートだけ在る launch イメージ向け。
         logger.warning("static_app_html_missing", path=str(p), error=str(exc))
         return _APP_HTML_MISSING
+
+
+# --- /app 配信 HTML の S3 ホットスワップ ---------------------------------------
+# env CONNECT_APP_HTML_S3_URI（例 s3://teamagent-dev-raw-files/codebuild/connect-web-app.html）
+# が設定されていれば S3 版を優先配信する。「S3 cp + force-new-deployment（約3分）」で
+# コンテンツ更新でき、CodeBuild bake（イメージ焼き込み）はコード変更時専用に退役できる。
+# プロセス内キャッシュは無期限（反映は force-new-deployment＝プロセス再起動で行う前提）。
+_app_html_state: dict[str, Any] = {"html": None, "source": None, "sha12": None}
+_app_html_lock = threading.Lock()
+
+
+def _reset_app_html_cache() -> None:
+    """テスト用: /app 配信 HTML のプロセス内キャッシュを破棄する（本番では呼ばない）。"""
+    with _app_html_lock:
+        _app_html_state.update({"html": None, "source": None, "sha12": None})
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    """``s3://bucket/key`` を (bucket, key) に分解する（不正形式は ValueError）。"""
+    if not uri.startswith("s3://"):
+        raise ValueError(f"s3:// 形式の URI ではありません: {uri}")
+    bucket, _, key = uri[len("s3://") :].partition("/")
+    if not bucket or not key:
+        raise ValueError(f"bucket/key を解決できません: {uri}")
+    return bucket, key
+
+
+def _fetch_app_html_from_s3(uri: str) -> str:
+    """S3 から app.html を取得する。
+
+    boto3 は遅延 import（モジュール先頭で import しない）＝ boto3 の無いテスト環境でも
+    既存テストが壊れない。失敗は例外を上げ、呼び出し側（_resolve_app_html）が
+    フォールバックを判断する。
+    """
+    import boto3
+
+    bucket, key = _parse_s3_uri(uri)
+    obj = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+    body: bytes = obj["Body"].read()
+    return body.decode("utf-8")
+
+
+def _resolve_app_html() -> dict[str, Any]:
+    """/app で配信する HTML を初回アクセス時に1回だけ解決しキャッシュする（スレッドセーフ）。
+
+    優先順位:
+      1. env ``CONNECT_APP_HTML_S3_URI`` 設定時は S3 から取得（source="s3"）。
+         取得失敗（S3 障害・IAM 不備・URI 不正）は ERROR ログの上 2. へフォールバック。
+         **サービスは落とさない**（可用性優先。劣化の検知は /healthz の
+         ``app_html_source`` と publish script 側の検証が担う＝黙って劣化しない）
+      2. イメージ同梱 ``static/app.html``（source="baked"・従来挙動）
+      3. どちらも無ければ「準備中」プレースホルダ（source="missing"・従来挙動）
+
+    複数 worker スレッドの同時初回アクセスは _get_search_skill と同じ
+    double-checked locking で S3 取得を1回に保つ。
+    """
+    if _app_html_state["html"] is not None:
+        return _app_html_state
+    with _app_html_lock:
+        if _app_html_state["html"] is not None:
+            return _app_html_state
+        html_text: str | None = None
+        source = ""
+        uri = os.environ.get("CONNECT_APP_HTML_S3_URI", "").strip()
+        if uri:
+            try:
+                html_text = _fetch_app_html_from_s3(uri)
+                source = "s3"
+            except Exception as exc:
+                logger.error(
+                    "app_html_s3_fetch_failed",
+                    uri=uri,
+                    error=type(exc).__name__,
+                    detail=str(exc)[:200],
+                )
+        if html_text is None:
+            html_text = _static_app_html()
+            source = "missing" if html_text == _APP_HTML_MISSING else "baked"
+        data = html_text.encode("utf-8")
+        sha12 = hashlib.sha256(data).hexdigest()[:12]
+        # "html" を最後に書く（ロック外の先読みが half-populated な状態を見ないための番兵）。
+        _app_html_state.update({"source": source, "sha12": sha12, "html": html_text})
+        logger.info("app_html_resolved", source=source, sha256_12=sha12, bytes=len(data))
+        return _app_html_state
 
 
 def _safe_next(raw: str | None) -> str:
@@ -2961,7 +3046,23 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
-        return JSONResponse({"ok": True})
+        # 既存フィールド ok は維持しつつ /app 配信 HTML の鮮度を露出する
+        # （publish script がデプロイ後に「sha 一致 && source=='s3'」を検証する）。
+        # セキュリティ上のトレードオフ（意図的・許容済み）: /healthz は無認証で
+        # インターネットから到達可能であり、sha12（先頭12hex・内容復元不可）と
+        # source（s3/baked/missing）を publish 検証のため意図的に露出する。
+        # 第三者は更新タイミングの観測・流出コピーとのハッシュ照合・劣化状態の
+        # 観測が可能だが、内容漏洩はないため許容する。加えて S3 書込権限者は
+        # 配信 HTML を差し替え可能（既存の CodeBuild 注入経路と同等の信頼境界）。
+        # 詳細: docs/runbooks/connect_web_monthly.md の注意（既知の地雷）。
+        state = _resolve_app_html()
+        return JSONResponse(
+            {
+                "ok": True,
+                "app_html_sha256": state["sha12"],
+                "app_html_source": state["source"],
+            }
+        )
 
     @app.get("/oauth2/callback")
     def oauth2_callback(request: Request) -> Response:
@@ -3208,11 +3309,13 @@ def create_app(
 
         ⚠️ 認証必須。単一 HTML のため per-user RLS は掛からない（allowlist を
         通った全員が同一内容を見る）。埋め込むのは共有可のナレッジのみ。
+        配信内容は _resolve_app_html が S3 オーバーライド→イメージ同梱→準備中の
+        優先順位で初回アクセス時に1回だけ解決する（No-AI 配信は維持）。
         """
         email = _search_email(request)
         if email is None:
             return RedirectResponse("/search/login?next=%2Fapp", status_code=303)
-        return HTMLResponse(_static_app_html())
+        return HTMLResponse(_resolve_app_html()["html"])
 
     @app.post("/api/v1/search")
     async def api_search(request: Request) -> JSONResponse:

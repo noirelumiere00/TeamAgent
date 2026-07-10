@@ -55,11 +55,13 @@ def test_load_real_yaml_has_all_sources() -> None:
     assert len(sources.gsheets) >= 1
 
 
-def test_load_real_yaml_passes_strict_mode() -> None:
-    """すべての ID が実値なので skip_placeholder=False でも通る。"""
-    # raise しないこと
-    sources = load_ingest_sources(REAL_YAML, skip_placeholder=False)
-    assert len(sources.slack_channels) == 2
+def test_load_real_yaml_strict_mode_raises_on_rulebook_placeholders() -> None:
+    """入れ込み v2（2026-07-10）でルールブック 01〜06 のプレースホルダエントリを
+    意図的に宣言したため、strict mode（skip_placeholder=False）は ValueError になる。
+    folder_id 確定後に実 ID を貼れば再び strict mode でも通る。
+    """
+    with pytest.raises(ValueError, match="placeholder folder_id"):
+        load_ingest_sources(REAL_YAML, skip_placeholder=False)
 
 
 # -----------------------------------------------------------

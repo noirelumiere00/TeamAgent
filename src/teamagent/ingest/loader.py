@@ -99,6 +99,14 @@ class IngestSources:
     gdrive_folders: tuple[GDriveFolderSpec, ...]
     gsheets: tuple[GSheetSpec, ...]
     shared_drives_crawl: SharedDriveCrawlSpec | None = None
+    # 入れ込み v2 (2026-07-10) グローバルキー:
+    # - gdrive_exclude_folder_name_re: walk 時のサブフォルダ名除外 regex の上書き。
+    #   None（キー未記載）ならコード既定（gdrive_client.DEFAULT_EXCLUDE_FOLDER_NAME_RE）、
+    #   空文字 "" を明示すると除外なし。
+    # - gdrive_rulebook_root_folder_id: ルールブック用ルートフォルダ ID（設定時のみ
+    #   pipeline が gdrive kind 実行冒頭で NN_ フォルダのカバレッジ検査を行う）。
+    gdrive_exclude_folder_name_re: str | None = None
+    gdrive_rulebook_root_folder_id: str | None = None
 
 
 # -----------------------------------------------------------
@@ -108,8 +116,12 @@ _PLACEHOLDER_MARKERS = ("REPLACE_WITH_", "__RDS_", "<aws_account>", "TODO_FILL")
 
 
 def _is_placeholder(value: str) -> bool:
-    """REPLACE_WITH_... 等の未置換マーカーか判定。"""
-    return any(marker in value for marker in _PLACEHOLDER_MARKERS)
+    """REPLACE_WITH_... 等の未置換マーカーか判定。
+
+    入れ込み v2 (2026-07-10): ``REPLACE_`` **始まり**も placeholder 扱いに拡張
+    （yaml に ID 未確定エントリを安全に置けるようにする。従来の substring 判定は維持）。
+    """
+    return value.startswith("REPLACE_") or any(marker in value for marker in _PLACEHOLDER_MARKERS)
 
 
 # -----------------------------------------------------------
@@ -134,12 +146,15 @@ def load_ingest_sources(
         FileNotFoundError: yaml が存在しない
         ValueError: skip_placeholder=False でプレースホルダ検出
     """
+    import hashlib
+
     import yaml  # 遅延 import（PyYAML は重くないが慣例で）
 
     if not yaml_path.exists():
         raise FileNotFoundError(f"ingest sources yaml not found: {yaml_path}")
 
-    raw: dict[str, Any] = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    raw_bytes = yaml_path.read_bytes()
+    raw: dict[str, Any] = yaml.safe_load(raw_bytes.decode("utf-8")) or {}
 
     version = int(raw.get("version", 1))
 
@@ -151,15 +166,21 @@ def load_ingest_sources(
     )
     gsheets = _parse_gsheets(raw.get("gsheets", []) or [], skip_placeholder=skip_placeholder)
     shared_crawl = _parse_shared_drives_crawl(raw.get("shared_drives_crawl"))
+    exclude_folder_name_re = _parse_exclude_folder_name_re(raw.get("gdrive_exclude_folder_name_re"))
+    rulebook_root = _parse_rulebook_root_folder_id(raw.get("gdrive_rulebook_root_folder_id"))
 
     logger.info(
         "ingest_sources_loaded",
         path=str(yaml_path),
+        # どの内容の yaml を読んだかを追跡できるよう sha256 を必ず出す（入れ込み v2）。
+        sha256=hashlib.sha256(raw_bytes).hexdigest()[:12],
         version=version,
         slack_channels=len(slack_channels),
         gdrive_folders=len(gdrive_folders),
         gsheets=len(gsheets),
         shared_drives_crawl_enabled=shared_crawl is not None and shared_crawl.enabled,
+        gdrive_exclude_folder_name_re=exclude_folder_name_re,
+        gdrive_rulebook_root_folder_id=rulebook_root,
     )
     return IngestSources(
         version=version,
@@ -167,7 +188,41 @@ def load_ingest_sources(
         gdrive_folders=gdrive_folders,
         gsheets=gsheets,
         shared_drives_crawl=shared_crawl,
+        gdrive_exclude_folder_name_re=exclude_folder_name_re,
+        gdrive_rulebook_root_folder_id=rulebook_root,
     )
+
+
+def _parse_exclude_folder_name_re(raw: Any) -> str | None:
+    """グローバルキー ``gdrive_exclude_folder_name_re`` をパースする。
+
+    キー未記載（None）→ None（コード既定の regex を pipeline が使う）。
+    記載あり → str へ正規化（空文字 "" は「除外なし」の明示）。
+    """
+    if raw is None:
+        return None
+    return str(raw)
+
+
+def _parse_rulebook_root_folder_id(raw: Any) -> str | None:
+    """グローバルキー ``gdrive_rulebook_root_folder_id`` をパースする。
+
+    placeholder（REPLACE_ 始まり等）は「未設定」として WARNING 付きで None に落とす
+    （ID 未確定のまま yaml に置いてもルート検査が誤発火しないように）。
+    """
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    if _is_placeholder(value):
+        logger.warning(
+            "ingest_sources_skip_placeholder",
+            section="gdrive_rulebook_root_folder_id",
+            folder_id=value,
+        )
+        return None
+    return value
 
 
 def _parse_shared_drives_crawl(raw: Any) -> SharedDriveCrawlSpec | None:

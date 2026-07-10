@@ -119,6 +119,76 @@ def _kind_from_folder(folder_name: str) -> tuple[bool, bool]:
     return bool(_TEMPLATE_FOLDER_RE.search(f)), bool(_RECURRING_FOLDER_RE.search(f))
 
 
+# ── 決定論ルールブック命名パーサ（種別語_クライアント名_内容・2026-07-10）──────────────
+# ナレッジ Drive のルールブック命名 ``種別語_クライアント名_内容`` をタイトルだけで
+# 決定論に解析する（LLM 非依存・コスト $0）。種別語 6 種（提案/議事録/報告/価格/契約/
+# テンプレ・「提案書」「報告書」等の接尾ゆれ許容）が **先頭セグメントに完全一致** した
+# ときだけマッチとし、doc_type（既存 _DOC_TYPES 語彙へ正規化）と project（第2セグメント
+# ＝クライアント名）を確定させる。USE_DOC_KIND_RULES gate 配下でタイトル/フォルダルール
+# （_kind_from_title / _kind_from_folder）と同じく LLM 判定より優先。
+# 区切りの表記ゆれ: 全角 ``＿``・空白（全角 U+3000 含む）を ``_`` と同一視し、連続は
+# 1 区切りに畳む。拡張子（.pdf / .pptx 等）は解析前に除去する。
+# ただしルールブック命名はアンダースコア必須: タイトルに ``_`` も ``＿`` も 1 つも
+# 無ければ不一致（空白のみ区切りの通常タイトル『提案書 v2 最終』『議事録 まとめ』等が
+# cls_project を汚染し LLM 分類までスキップされる過剰マッチの防止）。命名内の空白ゆれ
+# （『提案_アース製薬 SNS施策』等）は従来どおり許容する。
+_RULEBOOK_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
+_RULEBOOK_SEP_RE = re.compile(r"[_＿\s]+")
+# (先頭セグメントの fullmatch パターン, 既存 _DOC_TYPES 語彙, is_template) の順。
+# - 契約書 → 「契約」（既存語彙は「契約書」でなく「契約」）
+# - テンプレ → doc_type は既存語彙に無いため「その他」＋ is_template=true の 2 段で表現
+#   （勝手な新語彙「テンプレ」を作らない。検索側の除外は cls_is_template が担う）。
+_RULEBOOK_KINDS: tuple[tuple[re.Pattern[str], str, bool], ...] = (
+    (re.compile(r"提案書?"), "提案書", False),
+    (re.compile(r"議事録"), "議事録", False),
+    (re.compile(r"報告書?"), "報告書", False),
+    (re.compile(r"価格表?"), "価格表", False),
+    (re.compile(r"契約書?"), "契約", False),
+    (re.compile(r"テンプレ(ート)?"), "その他", True),
+)
+# 第2セグメントが数字・日付記号のみならクライアント名として不成立 → 不一致（fail-open）。
+# Slack 経路の thread タイトル（"{channel名} {ts}"・pipeline 参照）で channel 名が
+# 「提案」「議事録」等のとき ts が cls_project に化ける誤爆を防ぐ（日付 "2026-06" 等も除外）。
+_RULEBOOK_NON_CLIENT_RE = re.compile(r"[\d.\-/年月日]+")
+
+
+@dataclass(frozen=True)
+class RulebookMatch:
+    """ルールブック命名タイトルの決定論解析結果（doc_type / project 確定値）。"""
+
+    doc_type: str  # 既存 _DOC_TYPES のいずれか（テンプレは "その他"）
+    project: str  # 第2セグメント＝クライアント名（cls_project へ）
+    is_template: bool  # 種別語がテンプレのとき真（cls_is_template へ OR マージ）
+
+
+def _parse_rulebook_title(title: str) -> RulebookMatch | None:
+    """タイトルをルールブック命名 ``種別語_クライアント名_内容`` として決定論解析する。
+
+    純関数（DB / LLM 非依存）。タイトルにアンダースコア（``_`` / ``＿``）が含まれ、
+    先頭セグメントが種別語 6 種に完全一致し、かつ第2セグメント（クライアント名）が
+    存在するときだけ RulebookMatch を返す。パターン不一致は None（fail-open ＝呼び出し側は
+    何もしない・現状挙動と同一）。「アース製薬様向けSNS運用提案書」のような通常タイトルは
+    先頭セグメント不一致で、「提案書 v2 最終」のような空白区切りタイトルはアンダースコア
+    必須ガードで発火しない（substring / 空白区切り誤爆防止）。
+    """
+    t = _RULEBOOK_EXT_RE.sub("", (title or "").strip())
+    # アンダースコア必須ガード: ``_`` / ``＿`` が無いタイトルは空白区切りの通常タイトル
+    # とみなし不一致（fail-open ＝ LLM フォールバックへ）。空白はあくまで命名「内」の
+    # 表記ゆれとしてのみ許容する。
+    if "_" not in t and "＿" not in t:
+        return None
+    segments = [s for s in _RULEBOOK_SEP_RE.split(t) if s]
+    if len(segments) < 2:
+        return None
+    for pattern, doc_type, is_template in _RULEBOOK_KINDS:
+        if pattern.fullmatch(segments[0]):
+            project = _clean(segments[1])
+            if not project or _RULEBOOK_NON_CLIENT_RE.fullmatch(project):
+                return None  # クライアント名が取れない命名は不一致（LLM フォールバックへ）
+            return RulebookMatch(doc_type=doc_type, project=project, is_template=is_template)
+    return None
+
+
 def _kind_rules_enabled() -> bool:
     """USE_DOC_KIND_RULES env gate（既定 OFF＝決定論ルール無効・従来挙動と完全一致）。"""
     return os.environ.get("USE_DOC_KIND_RULES", "false").strip().lower() in ("1", "true", "yes")
@@ -279,6 +349,10 @@ class DocClassifier:
     真＝ルール優先）。Bedrock 失敗 / パース失敗時も、ルールが立てば 2 フラグだけの分類を
     返す（タイトルは手元にあり LLM 不要のため・従来は None）。gate OFF なら従来挙動と
     完全一致（フラグは LLM 出力のみ・プロンプトは新 JSON 例を含むが正規化は不変）。
+
+    さらに同 gate 配下で、タイトルがルールブック命名（種別語_クライアント名_内容・
+    _parse_rulebook_title）に一致したら doc_type / project を決定論確定し LLM 呼び出し
+    自体をスキップする（分類はルール決定論 first・LLM はフォールバック）。
     """
 
     def __init__(
@@ -312,6 +386,12 @@ class DocClassifier:
         2. 決定論ルール: USE_DOC_KIND_RULES gate ON のとき _kind_from_folder を
            タイトルルールと OR マージ（人間が「テンプレ」フォルダに置いた事実は
            LLM 判定より信頼できる置き位置シグナルのため、ルール優先＝ OR）。
+        3. ルールブック命名: gate ON かつタイトルがルールブック命名
+           （種別語_クライアント名_内容・_parse_rulebook_title）に一致したら doc_type /
+           project を決定論で確定し、**LLM 呼び出し自体をスキップ** する（コスト $0 ＋
+           本文を LLM に送らない）。industry / phase / solution / budget / target の
+           LLM 専用軸は付与されないトレードオフを許容（命名規則が確定させる 2 軸が
+           検索の主キーのため）。パターン不一致は従来どおり LLM へ（fail-open）。
         """
         sample = (text or "")[: self._sample_chars]
         if not sample.strip() and not (title or "").strip():
@@ -324,6 +404,26 @@ class DocClassifier:
                 folder_template, folder_recurring = _kind_from_folder(folder_name)
                 rule_template = rule_template or folder_template
                 rule_recurring = rule_recurring or folder_recurring
+            # ルールブック命名で doc_type と project の両方が確定したら LLM を呼ばずに
+            # 決定論の分類を返す（ルール確定値は LLM 結果より優先、の最も強い形）。
+            # is_template / is_recurring はタイトル/フォルダルールと OR マージ
+            # （例: 「テンプレ_共通_月次報告FMT」→ template も recurring も真）。
+            rulebook = _parse_rulebook_title(title or "")
+            if rulebook is not None:
+                logger.info(
+                    "doc_classify_rulebook_matched",
+                    request_id=request_id,
+                    title=(title or "")[:80],
+                    doc_type=rulebook.doc_type,
+                    project=rulebook.project,
+                    llm_skipped=True,
+                )
+                return DocClassification(
+                    project=rulebook.project,
+                    doc_type=rulebook.doc_type,
+                    is_template=rule_template or rulebook.is_template,
+                    is_recurring=rule_recurring,
+                )
         # 格納フォルダ行は folder_name があるときだけ挿入（無指定なら従来 prompt とバイト等価）。
         folder_line = f"格納フォルダ: {folder_name}\n" if folder_name else ""
         user_message = (
