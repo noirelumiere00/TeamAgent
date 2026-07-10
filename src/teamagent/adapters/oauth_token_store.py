@@ -226,9 +226,7 @@ class SlackTokenStore:
                 row = cur.fetchone()
         if not row:
             return None
-        xoxp = self._cipher.decrypt(
-            bytes(row["xoxp_token_enc"]), context={"user_email": email}
-        )
+        xoxp = self._cipher.decrypt(bytes(row["xoxp_token_enc"]), context={"user_email": email})
         return SlackOAuthToken(
             access_token=xoxp,
             scopes=tuple(row["scopes"] or ()),

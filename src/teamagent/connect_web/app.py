@@ -86,9 +86,11 @@ def _safe_next(raw: str | None) -> str:
     ＝ログイン後は原則 Obsidian 風 UI(/app) に着地する（旧 /search UI は明示遷移時のみ）。
     外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
     """
-    if (raw or "").strip() in {"/app", "/search"}:
-        return raw.strip()
+    candidate = (raw or "").strip()
+    if candidate in {"/app", "/search"}:
+        return candidate
     return "/app"
+
 
 _SEARCH_COOKIE = "ta_search_session"
 _SESSION_TTL_S = 8 * 3600
@@ -181,7 +183,8 @@ def _load_search_config(env: dict[str, str] | None = None) -> DashboardConfig:
         dev_bypass=False,
         cookie_secure=secure_raw in {"1", "true", "yes", "on"},
         # CONNECT_SEARCH_ALLOWED_HD を設定したら「会社ドメイン全体に開放」を意図する
-        # （＝@vectorinc.co.jp 全員可）。ダッシュボード側は load_config が本フラグを渡さず既定 False。
+        # （＝@vectorinc.co.jp 全員可）。ダッシュボード側は load_config が本フラグを
+        # 渡さず既定 False。
         allowed_hd_opens_domain=hd is not None,
     )
 
