@@ -7,17 +7,27 @@ URL を生成して案内文と一緒に返すだけで、データ I/O は一�
 URL は ``CONNECT_BASE_URL`` から組み立てる:
   - 検索ページ:   ``{base}/search``
   - グラフ閲覧:   ``{base}/search/graph``
+  - AiLaVault:    ``{base}/app``（＋ ``#client:<名前>`` ディープリンク）
 ``CONNECT_BASE_URL`` 未設定（Web UI 未デプロイ）のときは、壊れた相対リンクを返さず
 「まだ公開されていない」旨を返す（fail-safe・後方互換）。
 
-URL 組み立てロジック（``build_search_web_links``）は MCP 境界（mcp_gateway）からも再利用し、
-search ツールの応答に web_url/graph_url を載せるときと同一の真実源にする。
+URL 組み立てロジック（``build_search_web_links`` / ``build_app_client_link``）は
+MCP 境界（mcp_gateway）からも再利用し、search ツールの応答に web_url/graph_url/app_url を
+載せるときと同一の真実源にする。
+
+ディープリンクのフラグメント規約（app.html 側 JS と対）:
+  - ``#client:<percent-encoded クライアント名>`` … 該当クライアントのノートを開く。
+    名前解決は app.html 側の ``navTarget()``（stem 直一致 → ``nrm()`` 正規化一致の二段）が担う
+    ため、ここでは **生のクライアント名を percent-encode するだけ**でよい（stem 化しない）。
+  - フラグメントはサーバに送信されず、ログイン境界（form POST）では消えるため、
+    login ページが sessionStorage に退避し app.html が復元する（connect_web/app.py 参照）。
 """
 
 from __future__ import annotations
 
 import os
 from typing import ClassVar
+from urllib.parse import quote
 
 import structlog
 from pydantic import BaseModel
@@ -54,6 +64,29 @@ def build_search_web_links(base: str | None = None) -> dict[str, str]:
     if not resolved:
         return {}
     return {"web_url": f"{resolved}/search", "graph_url": f"{resolved}/search/graph"}
+
+
+def build_app_url(base: str | None = None) -> str:
+    """AiLaVault（Obsidian 風ナレッジ UI ``/app``）の URL。base 未解決なら ""。"""
+    resolved = connect_base_url() if base is None else base.strip().rstrip("/")
+    if not resolved:
+        return ""
+    return f"{resolved}/app"
+
+
+def build_app_client_link(client_name: str, base: str | None = None) -> str:
+    """クライアントノートへのディープリンク ``{base}/app#client:<name>`` を返す。
+
+    - クライアント名は**生の名前のまま** percent-encode する（``#`` フラグメント内で
+      Slack の自動リンク化が日本語で切れないように quote(safe="")）。stem 化・正規化は
+      しない＝解決は app.html 側 navTarget()（stem 直一致→nrm() 正規化一致）に委譲する。
+    - base 未解決 or 名前が空白のみなら ""（壊れたリンクを出さない・呼び出し側は真偽で分岐）。
+    """
+    app = build_app_url(base)
+    name = (client_name or "").strip()
+    if not app or not name:
+        return ""
+    return f"{app}#client:{quote(name, safe='')}"
 
 
 @register

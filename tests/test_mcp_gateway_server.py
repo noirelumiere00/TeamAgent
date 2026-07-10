@@ -255,3 +255,94 @@ def test_envflag_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TA_ENVFLAG_TEST", raising=False)
     assert _envflag("TA_ENVFLAG_TEST") is False
     assert _envflag("TA_ENVFLAG_TEST", default="1") is True
+
+
+# --- AiLaVault ディープリンク注入（v0.3 Task6・USE_AILAVAULT_DEEPLINKS 既定OFF） ---------
+
+
+class _FakeSearchHitsOutput(BaseModel):
+    answer: str
+    hits: list[dict[str, Any]] = []
+
+
+class _FakeSearchHitsSkill(BaseSkill[_EchoInput, _FakeSearchHitsOutput]):
+    """client_name 付き/無しの hit を返すフェイク search（ディープリンク注入の検証用）。"""
+
+    name: ClassVar[str] = SEARCH_TOOL_NAME
+    description: ClassVar[str] = "テスト用フェイク検索（hits あり）。"
+    input_schema: ClassVar[type[BaseModel]] = _EchoInput
+    output_schema: ClassVar[type[BaseModel]] = _FakeSearchHitsOutput
+
+    def run(self, input: _EchoInput, ctx: SkillContext) -> _FakeSearchHitsOutput:
+        return _FakeSearchHitsOutput(
+            answer=f"hits for {input.q}",
+            hits=[
+                {"chunk_id": 1, "client_name": "株式会社ベクトル"},
+                {"chunk_id": 2, "client_name": None},
+            ],
+        )
+
+
+_SEARCH_HITS_BY_NAME = {SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "fake", _FakeSearchHitsSkill)}
+
+
+async def test_ailavault_links_injected_when_flag_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from urllib.parse import quote
+
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example.co.jp")
+    monkeypatch.setenv("USE_AILAVAULT_DEEPLINKS", "1")
+    out = _parse(
+        await dispatch_tool(
+            _SEARCH_HITS_BY_NAME,
+            SEARCH_TOOL_NAME,
+            {"q": "ベクトル", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    assert out["app_url"] == "https://connect.example.co.jp/app"
+    expected = "https://connect.example.co.jp/app#client:" + quote("株式会社ベクトル", safe="")
+    assert out["hits"][0]["app_client_url"] == expected
+    # client_name の無い hit にはキー自体を足さない。
+    assert "app_client_url" not in out["hits"][1]
+    # 既存キーは従来どおり（後方互換）。
+    assert out["web_url"] == "https://connect.example.co.jp/search"
+
+
+async def test_ailavault_links_absent_when_flag_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 既定 OFF（§10 E1-2）: CONNECT_BASE_URL があっても app 系キーは一切足さない。
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example.co.jp")
+    monkeypatch.delenv("USE_AILAVAULT_DEEPLINKS", raising=False)
+    out = _parse(
+        await dispatch_tool(
+            _SEARCH_HITS_BY_NAME,
+            SEARCH_TOOL_NAME,
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    assert "app_url" not in out
+    assert all("app_client_url" not in h for h in out["hits"])
+    assert out["web_url"] == "https://connect.example.co.jp/search"  # 既存注入は不変
+
+
+async def test_ailavault_links_absent_when_base_url_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # flag ON でも CONNECT_BASE_URL 未設定なら何も足さない（壊れたリンクを出さない）。
+    monkeypatch.delenv("CONNECT_BASE_URL", raising=False)
+    monkeypatch.setenv("USE_AILAVAULT_DEEPLINKS", "1")
+    out = _parse(
+        await dispatch_tool(
+            _SEARCH_HITS_BY_NAME,
+            SEARCH_TOOL_NAME,
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    assert "app_url" not in out
+    assert all("app_client_url" not in h for h in out["hits"])
+    assert "web_url" not in out

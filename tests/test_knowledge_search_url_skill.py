@@ -15,6 +15,8 @@ from teamagent.skills.base import SkillContext
 from teamagent.skills.knowledge_search_url.schema import KnowledgeSearchUrlInput
 from teamagent.skills.knowledge_search_url.skill import (
     KnowledgeSearchUrlSkill,
+    build_app_client_link,
+    build_app_url,
     build_search_web_links,
 )
 
@@ -72,3 +74,44 @@ def test_build_search_web_links_helper(monkeypatch: pytest.MonkeyPatch) -> None:
         "web_url": "https://y.test/search",
         "graph_url": "https://y.test/search/graph",
     }
+
+
+# --- AiLaVault（/app）ディープリンク builder（v0.3 Task6・ゲート層と共有する真実源） ---
+
+
+def test_build_app_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://x.test/")
+    assert build_app_url() == "https://x.test/app"
+    monkeypatch.delenv("CONNECT_BASE_URL", raising=False)
+    assert build_app_url() == ""  # 未設定は空＝壊れた相対リンクを出さない
+    assert build_app_url("https://y.test//") == "https://y.test/app"
+
+
+def test_build_app_client_link_encodes_japanese(monkeypatch: pytest.MonkeyPatch) -> None:
+    from urllib.parse import quote, unquote
+
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://x.test")
+    link = build_app_client_link("株式会社ベクトル")
+    assert link == "https://x.test/app#client:" + quote("株式会社ベクトル", safe="")
+    # フラグメント値は非 ASCII を含まない（Slack の自動リンク化が途中で切れない）。
+    assert link.isascii()
+    # decode すると元の名前に戻る（app.html 側 decodeURIComponent と対）。
+    assert unquote(link.split("#client:", 1)[1]) == "株式会社ベクトル"
+
+
+def test_build_app_client_link_fail_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    # base 未設定 → 空（名前があっても出さない）。
+    monkeypatch.delenv("CONNECT_BASE_URL", raising=False)
+    assert build_app_client_link("ベクトル") == ""
+    # 名前が空/空白のみ → 空（/app#client: という無意味リンクを出さない）。
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://x.test")
+    assert build_app_client_link("") == ""
+    assert build_app_client_link("   ") == ""
+
+
+def test_build_app_client_link_encodes_url_specials(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 名前に URL 特殊文字（スペース・# ・/）が混ざっても fragment が壊れない。
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://x.test")
+    link = build_app_client_link("A&B社 #2/営業")
+    frag = link.split("#client:", 1)[1]
+    assert "#" not in frag and "/" not in frag and " " not in frag
