@@ -52,6 +52,8 @@ class SlackClient:
         self._client = client or AsyncWebClient(token=bot_token)
         # user_id → (身元 or None, 失効 monotonic 時刻)。anti-spoof 解決の TTL キャッシュ。
         self._identity_cache: dict[str, tuple[ResolvedIdentity | None, float]] = {}
+        # SLACK_TEAM_ID 未設定（team 検証 skip＝fail-open）の警告を 1 プロセス 1 回に抑える。
+        self._team_check_warned = False
 
     @classmethod
     def from_env(cls) -> SlackClient:
@@ -345,6 +347,16 @@ class SlackClient:
                 "slack_resolve_identity_rejected", request_id=request_id, reason="foreign_team"
             )
             return None
+        if not expected_team and not self._team_check_warned:
+            # team 検証は skip される（fail-open）。ゲスト/is_stranger/bot 拒否と email 検証は
+            # 効いているが、多人数運用では SLACK_TEAM_ID を必ず設定すること（CLAUDE.md §5）。
+            # 警告はプロセスごとに 1 回だけ（毎解決で吐くとログが埋まる）。
+            self._team_check_warned = True
+            logger.warning(
+                "slack_team_check_disabled",
+                request_id=request_id,
+                hint="set SLACK_TEAM_ID to reject foreign-workspace users (fail-closed)",
+            )
 
         profile: dict[str, Any] = dict(user.get("profile") or {})
         email = normalize_email(profile.get("email"))
