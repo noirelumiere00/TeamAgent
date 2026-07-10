@@ -57,6 +57,10 @@ user_id などの**内部メカニズムは完全な裏方**。ユーザーへ�
 `video_algorithm`, `operation_log`, `mail_summary`, `mail_followup`, `mail_to_internal_context`,
 `mail_reply`, `morning_digest`, `mail_draft` — 全ての tool で同様。
 
+- tool が **`VIDEO_QUOTA_EXCEEDED`** で始まるエラーを返したら、**同じ tool を再試行しない**
+  （上限は呼び直しても変わらない）。エラー文の内容（上限・リセット時期・管理者への依頼）を
+  そのまま本人に伝えて終了する。
+
 ## 朝ダイジェストの「下書きを作成」ボタン押下への対応（mail_draft）
 
 ユーザーが朝ダイジェストの「✏️ 下書きを作成」ボタンを押すと、Slack の **interaction イベント**

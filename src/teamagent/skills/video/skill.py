@@ -127,6 +127,23 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
                 total_cost_usd=0.0,
             )
 
+        def _consume_quota_or_raise() -> None:
+            # v0.3 Task10: 月間クォータ（既定OFF・キャッシュヒットは消費しない＝裁定）。
+            # 実際に Gemini へ投げる直前に 1 本消費。超過は構造化エラーで OC が本人へ伝える。
+            from teamagent.adapters.quota_store import VideoQuotaStore
+
+            if not VideoQuotaStore.enabled():
+                return
+            email = str(ctx.metadata.get("user_email", "") or "")
+            result = VideoQuotaStore().try_consume(email, 1, request_id=ctx.request_id)
+            if not result.allowed:
+                # SOUL.md 側に「上限エラーは再試行しない」を指示済み（リトライループ防止）。
+                raise RuntimeError(
+                    f"VIDEO_QUOTA_EXCEEDED: 今月の動画分析上限（{result.limit}本）に達しました"
+                    f"（使用 {result.used}本）。リセットは来月1日（JST）です。"
+                    "お急ぎの場合は管理者に上限引き上げを依頼してください。"
+                )
+
         if is_youtube:
             key = None
             basis = normalize_video_url(input.url)
@@ -135,6 +152,7 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
                 hit = cache.get(key, request_id=ctx.request_id)
                 if hit is not None:
                     return _hit_output(hit)
+            _consume_quota_or_raise()
             # YouTube/Shorts: file_uri で直接 (DL 不要)
             resp = self._client().analyze_video_url(
                 url=input.url,
@@ -151,6 +169,7 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
                 hit = cache.get(key, request_id=ctx.request_id)
                 if hit is not None:
                     return _hit_output(hit)
+            _consume_quota_or_raise()
             resp = self._client().analyze_video_bytes(
                 data=data,
                 mime_type=mime,
