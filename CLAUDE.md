@@ -103,7 +103,8 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 - **C3 Fargate からの Drive ファイルアクセス（knowledge_deliver / ingest）は `GOOGLE_FORCE_OAUTH=1`**：Vertex SA だと共有ドライブを開けず失敗 → 個人 OAuth に強制。（morning_digest は別経路＝per-user token refresh なので GOOGLE_FORCE_OAUTH は使わない）。
 - **C4 Slack identity は fail-closed**：`adapters/slack_client.py` の identity 解決が社外/ゲスト/bot を拒否（データ非到達で安全）。dmPolicy:open でも resolve_identity が最終ガード。
 - **既知 caveat（未修正・このまま運用）**：`connect_web/app.py` の `_DEFAULT_SEARCH_EMAILS = "s-komata@..."` は env `CONNECT_SEARCH_ALLOWED_EMAILS` 未設定時に**個人固定にフォールバック**する。多人数で使うなら**本番は必ず `CONNECT_SEARCH_ALLOWED_EMAILS` を明示**すること。
-- **未検証メモ（要確認・着手前に裏取り）**：① `resolve_identity` が `SLACK_TEAM_ID` 未設定時に team 検証を skip（fail-open）の疑い。② `connect_google_client_id` 変数が `variables*.tf` に未定義で `enable_connect_web=false` 時に terraform error の疑い。
+- **C5 `SLACK_TEAM_ID` を本番 mcp env に必ず設定**（2026-07-10 検証済み・①は事実だった）：`resolve_identity` は `SLACK_TEAM_ID` 未設定だと team 検証を **skip（fail-open）** する（`slack_client.py` の `expected_team` ガード）。ゲスト/is_stranger/bot 拒否と email 検証は残るが、多人数運用では tfvars に `slack_team_id = "T…"` を明示して他ワークスペースを fail-closed で拒否すること。未設定のまま起動すると初回解決時に `slack_team_check_disabled` の WARN が出る。
+- **未検証メモ（要確認・着手前に裏取り）**：② `connect_google_client_id` 変数が `variables*.tf` に未定義で `enable_connect_web=false` 時に terraform error の疑い。
 
 ---
 

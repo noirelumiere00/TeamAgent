@@ -93,3 +93,18 @@ async def test_resolve_user_email_returns_email() -> None:
     assert await client.resolve_user_email("U12345") == "taro@vectorinc.co.jp"
     client2, _ = _client({**_MEMBER, "is_restricted": True})
     assert await client2.resolve_user_email("U12345") is None
+
+
+async def test_team_check_skipped_when_env_unset_warns_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SLACK_TEAM_ID 未設定は team 検証 skip（fail-open・仕様として明文化）＋WARN は1回だけ。
+
+    多人数運用では tfvars の slack_team_id を必ず設定すること（CLAUDE.md §5-C5）。
+    """
+    monkeypatch.delenv("SLACK_TEAM_ID", raising=False)
+    client, _ = _client({**_MEMBER, "team_id": "T_FOREIGN"})
+    assert not client._team_check_warned
+    ident = await client.resolve_identity("U12345")
+    assert ident is not None  # 未設定＝他 team でも通る（fail-open。他ガードは別途有効）
+    assert client._team_check_warned  # 警告済みフラグが立つ（2回目以降は出さない）
