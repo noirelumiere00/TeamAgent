@@ -99,3 +99,42 @@ def test_skill_returns_empty_when_provider_none() -> None:
         ME, MorningDigestInput(), SkillContext(request_id="r", metadata={"user_email": ME})
     )
     assert items == []
+
+
+# ── v0.3 Task3: 📅 カレンダー登録ボタンの描画（flag 既定OFF） ────────────────
+
+
+def _meeting_item(**kw: Any) -> Any:
+    from teamagent.skills.morning_digest.schema import MailDigestItem
+
+    return MailDigestItem(
+        counterpart_masked="a***@x",
+        importance="high",
+        to_self=True,
+        subject_display="7/15 定例の件",
+        draft_token="DTOK",
+        meeting_start="2026-07-15T14:00:00+09:00",
+        meeting_end="2026-07-15T15:00:00+09:00",
+        meeting_title="◯◯様 定例",
+        event_token=kw.get("event_token", "ETOK"),
+    )
+
+
+def test_calendar_button_rendered_when_flag_on(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MORNING_DIGEST_CALENDAR_BUTTON", "1")
+    btns = runner._reply_buttons(_meeting_item())
+    cal = [b for b in btns if b.get("action_id") == "calendar_event"]
+    assert cal and cal[0]["value"] == "ETOK"
+
+
+def test_calendar_button_absent_when_flag_off(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MORNING_DIGEST_CALENDAR_BUTTON", raising=False)
+    btns = runner._reply_buttons(_meeting_item())
+    assert not [b for b in btns if b.get("action_id") == "calendar_event"]
+
+
+def test_calendar_button_absent_without_token(monkeypatch: Any) -> None:
+    # 日時未確定/To 本人でない → event_token 空 → flag ON でもボタン無し。
+    monkeypatch.setenv("MORNING_DIGEST_CALENDAR_BUTTON", "1")
+    btns = runner._reply_buttons(_meeting_item(event_token=""))
+    assert not [b for b in btns if b.get("action_id") == "calendar_event"]

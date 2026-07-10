@@ -189,6 +189,16 @@ def extract_events(items: list[dict[str, Any]]) -> list[CalendarEvent]:
     return out
 
 
+class DuplicateEventError(Exception):
+    """同一 event_id の予定が既に存在する（409 duplicate）。
+
+    冪等キー付き insert のボタン連打・再送で発生する正常系エラー。skill 層は
+    「既に登録済みのようです」と応答する（⚠️ UI から手動削除された同 id でも
+    409 になるため、表示と実態がズレる可能性は skill 層の文言で吸収する）。
+    3層分離: skill に googleapiclient.HttpError を漏らさないためのドメイン例外。
+    """
+
+
 @dataclass(frozen=True)
 class InsertedEvent:
     """insert_event の結果（本人カレンダーに作成された予定）。"""
@@ -341,9 +351,19 @@ class GCalendarClient:
             body["transparency"] = "transparent"  # freebusy に busy として乗せない
 
         start = time.perf_counter()
-        resp = (
-            service.events().insert(calendarId="primary", body=body, sendUpdates="none").execute()
-        )
+        try:
+            resp = (
+                service.events()
+                .insert(calendarId="primary", body=body, sendUpdates="none")
+                .execute()
+            )
+        except Exception as e:
+            status = getattr(getattr(e, "resp", None), "status", None) or getattr(
+                e, "status_code", None
+            )
+            if str(status) == "409":
+                raise DuplicateEventError(str(event_id or "")) from e
+            raise
         logger.info(
             "gcalendar_insert_event",
             request_id=request_id,

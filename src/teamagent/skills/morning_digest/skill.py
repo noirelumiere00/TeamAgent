@@ -49,6 +49,7 @@ from teamagent.skills._shared.mail_compose import (
 )
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.morning_digest.draft_token import encode_draft_token
+from teamagent.skills.morning_digest.event_token import encode_event_token
 from teamagent.skills.morning_digest.schema import (
     CalendarEventItem,
     MailDigestItem,
@@ -80,10 +81,18 @@ _TRIAGE_SYSTEM_PROMPT = """\
 - deadline: 本文から読み取れる期限（例「6/30まで」「今週中」）。無ければ null。
 - ask: 相手がこちらに求めていること（60 字以内）。無ければ ""。
 - next_step: こちらが取るべき次アクション（60 字以内）。無ければ ""。
+- meeting_start / meeting_end: 本文で **開催日時が確定している** 打合せ/MTG がある場合のみ、
+  その開始/終了を ISO8601（+09:00 付き・例 "2026-07-15T14:00:00+09:00"）で。終了不明なら
+  開始+1時間。候補出し・調整中・曖昧（「来週あたり」等）は **null**（推測で確定させない）。
+- meeting_title: 上記 MTG の呼び名（30 字以内・例「◯◯様 定例」）。無ければ ""。
+- scheduling_request: 相手が「空いている日程を教えて」等こちらの都合の提示を求めている
+  場合のみ true。それ以外 false。
 
-【出力形式（JSON 配列・1 スレッド 1 オブジェクト・入力順・要素数も入力と同じ）】
+【出力形式（JSON 配列・1 スレッド 1 オブジェクト・入力順・要素数も入力と同じ・ネスト禁止）】
 [
-  {"importance":"high|medium|low","summary":"…","deadline":"… or null","ask":"…","next_step":"…"},
+  {"importance":"high|medium|low","summary":"…","deadline":"… or null","ask":"…","next_step":"…",
+   "meeting_start":"… or null","meeting_end":"… or null","meeting_title":"…",
+   "scheduling_request":false},
   ...
 ]
 """
@@ -375,6 +384,22 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     item.deadline = str(dl)[:80] if dl else None
                     item.ask = str(t.get("ask", ""))[:120]
                     item.next_step = str(t.get("next_step", ""))[:120]
+                    # v0.3 Task3/4: 確定MTG・日程打診の抽出（フラットキー＝打ち切り救済と互換）。
+                    start_iso = _meeting_iso(t.get("meeting_start"))
+                    end_iso = _meeting_iso(t.get("meeting_end"))
+                    if start_iso:
+                        item.meeting_start = start_iso
+                        item.meeting_end = end_iso or _plus_hour(start_iso)
+                        item.meeting_title = str(t.get("meeting_title") or "")[:60]
+                        # 📅ボタン用トークン（To 本人のみ・LLM 由来の日時は encode 前に検証済み）。
+                        if item.to_self:
+                            item.event_token = encode_event_token(
+                                start_iso=item.meeting_start,
+                                end_iso=item.meeting_end,
+                                title=item.meeting_title or item.subject_display[:60],
+                                owner_email=requester,
+                            )
+                    item.scheduling_request = bool(t.get("scheduling_request", False))
 
         # importance 順に items と full_msgs をペアで安定ソート（index 対応を維持）。
         order = {"high": 0, "medium": 1, "low": 2}
@@ -865,8 +890,42 @@ def _display_counterpart(headers: dict[str, str], requester: str) -> str:
     return ""
 
 
+def _meeting_iso(v: Any) -> str | None:
+    """LLM 由来の meeting_start/end を検証して ISO で返す（不正/naive は JST 付与を試み、
+    それでも不正なら None＝ボタンを出さない。fail-safe: 誤登録より欠落を選ぶ）。"""
+    if not v:
+        return None
+    raw = str(v).strip()
+    if not raw or raw.lower() == "null":
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        # プロンプトは +09:00 を要求しているが、naive が来たら JST とみなして付与する。
+        parsed = parsed.replace(tzinfo=_dt.timezone(_dt.timedelta(hours=9)))
+    return parsed.isoformat()
+
+
+def _plus_hour(start_iso: str) -> str:
+    """終了不明時の既定: 開始+1時間。"""
+    parsed = _dt.datetime.fromisoformat(start_iso)
+    return (parsed + _dt.timedelta(hours=1)).isoformat()
+
+
 def _medium_triage() -> dict[str, Any]:
-    return {"importance": "medium", "summary": "", "deadline": None, "ask": "", "next_step": ""}
+    return {
+        "importance": "medium",
+        "summary": "",
+        "deadline": None,
+        "ask": "",
+        "next_step": "",
+        "meeting_start": None,
+        "meeting_end": None,
+        "meeting_title": "",
+        "scheduling_request": False,
+    }
 
 
 def _mask_email(email: str) -> str:

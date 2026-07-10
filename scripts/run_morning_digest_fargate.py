@@ -110,6 +110,20 @@ _CALENDAR_URL = "https://calendar.google.com/"
 # ボタン押下（block_actions）を worker(Socket Mode) が受ける action_id。slack_bot.py の
 # @app.action と一致させること。value は HMAC 署名トークン（生 thread_id は載せない＝G3）。
 _ACTION_MAIL_DRAFT = "mail_draft"
+# 📅 カレンダー登録ボタン（v0.3 Task3）。value は event_token（HMAC署名・日時/タイトル入り）。
+_ACTION_CALENDAR_EVENT = "calendar_event"
+
+
+def _calendar_button_enabled() -> bool:
+    """MORNING_DIGEST_CALENDAR_BUTTON=1 のときのみ📅ボタンを描画（既定OFF・§10 E1-2）。
+
+    ボタンは押下先の calendar_event tool（USE_CALENDAR_EVENT_TOOL + toolFilter.include）が
+    本番で有効になってから ON にする（先に出すと無反応ボタンになる）。"""
+    return os.environ.get("MORNING_DIGEST_CALENDAR_BUTTON", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 _JST = _dt.timezone(_dt.timedelta(hours=9))
@@ -190,6 +204,17 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
             "url": thread_url,  # そのスレッドへワンタップ直行（url ボタン＝非発火）
         }
     )
+    # 📅 確定MTGのカレンダー登録（v0.3 Task3・既定OFF）。日時確定×To本人のみ token が発行される。
+    event_token = getattr(m, "event_token", "")
+    if event_token and _calendar_button_enabled():
+        btns.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "📅 カレンダーに登録", "emoji": True},
+                "action_id": _ACTION_CALENDAR_EVENT,
+                "value": event_token,
+            }
+        )
     return btns
 
 
