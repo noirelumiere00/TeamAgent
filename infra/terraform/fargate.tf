@@ -372,6 +372,10 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "TEAMAGENT_SHARED_COMPANY_DOMAINS", value = var.shared_company_domains },
       # §5-C4: 他ワークスペースユーザーの fail-closed 拒否（空=検証skip・WARN。多人数運用では設定必須）。
       { name = "SLACK_TEAM_ID", value = var.slack_team_id },
+      # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が
+      # 空 dict を返し web_url/app_url が一切載らない）。2026-07-10 の実機確認で live に
+      # 無いことを確認済み＝この行が入って初めて Slack に検索 UI リンクが出る。
+      { name = "CONNECT_BASE_URL", value = var.connect_base_url },
       # §U: 5名運用の pgvector pool ウォームアップ。起動時に2接続確立し初回検索のレイテンシを下げる
       # （max=8 で5並行に余裕＝枯渇なし）。
       { name = "PGVECTOR_POOL_MIN", value = "2" },
