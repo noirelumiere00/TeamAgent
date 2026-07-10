@@ -57,6 +57,12 @@ variable "use_schedule_propose_tool" {
   default     = false
 }
 
+variable "use_analysis_cache" {
+  description = "Gemini 動画分析結果の S3 キャッシュ（v0.3 Task10）。既定 false。同一動画×同一プロンプトの再分析を回避（Gemini=GCP課金の数少ないガード）。"
+  type        = bool
+  default     = false
+}
+
 variable "use_payload_offload" {
   description = "MCP 長文ペイロードの S3 退避（v0.3 Task8）。既定 false。対象は会社共有ナレッジ系 tool のみ（allowlist・per-user PII 系は対象外）。"
   type        = bool

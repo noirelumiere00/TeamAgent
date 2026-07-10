@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import uuid
 from typing import Any
 
@@ -347,6 +348,7 @@ async def dispatch_tool(
         return _err(f"invalid input: {type(e).__name__}: {e}")
 
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
+    _started = time.perf_counter()
     try:
         # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
         output = await asyncio.to_thread(spec.instantiate().run, skill_input, ctx)
@@ -357,6 +359,20 @@ async def dispatch_tool(
         return _err(f"{type(e).__name__}: {e}", request_id=ctx.request_id)
 
     data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
+    # ── ミドルウェア(0): usage 計測（v0.3 Task10・常時ON・PII 無し）────────────────
+    # 本番主経路（AiLa→MCP）の tool 使用量がどこにも記録されていなかった穴（監査指摘）を
+    # まず構造化ログで塞ぐ（CloudWatch Insights で user 単位/tool 単位に集計可能）。
+    # DB 計上（クォータ台帳）は migration 0017 とセットで次段（このログが検証データになる）。
+    logger.info(
+        "mcp_tool_usage",
+        tool=name,
+        request_id=ctx.request_id,
+        latency_ms=int((time.perf_counter() - _started) * 1000),
+        # ⚠️ キー名は cost_usd に**しない**こと: cloudwatch_fargate.tf のメトリックフィルタ
+        # { $.cost_usd = * } が adapter/skill 層の既存ログと合算して日次コストアラームを
+        # 二重〜三重計上に汚染する（レビュー F-1）。usage 集計は専用 Insights クエリで行う。
+        tool_cost_usd=float(data.get("total_cost_usd") or 0.0) if isinstance(data, dict) else 0.0,
+    )
     # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
     # (1) 長文退避（Task8・USE_PAYLOAD_OFFLOAD 既定OFF）: 切り詰めは注入キーに触れない
     #     よう **リンク注入より先** に行う（逆順だと注入したURLごと切り詰め対象になる）。

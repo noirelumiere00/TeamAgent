@@ -239,6 +239,17 @@ data "aws_iam_policy_document" "mcp_task" {
       ]
     }
   }
+  # v0.3 Task10: 分析結果キャッシュ（analysis-cache/ prefix 限定・presigned 不要＝Get/Put のみ）。
+  dynamic "statement" {
+    for_each = var.use_analysis_cache ? [1] : []
+    content {
+      sid     = "AnalysisCacheS3"
+      actions = ["s3:PutObject", "s3:GetObject"]
+      resources = [
+        "${aws_s3_bucket.raw_files.arn}/analysis-cache/*",
+      ]
+    }
+  }
   # v0.3 Task8: 長文ペイロード退避（payload-offload/ prefix 限定・presigned 用）。
   # ⚠️ この文が無いと USE_PAYLOAD_OFFLOAD=1 でも AccessDenied→fail-open で黙って無効
   # （「フラグは中身を保証しない」型の地雷・レビュー F1）。
@@ -407,6 +418,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_PAYLOAD_OFFLOAD", value = var.use_payload_offload ? "true" : "false" },
       # 退避先 bucket（scrape 系の VSEO_REPORT_BUCKET と独立に指定＝両立時のキー衝突なし）。
       { name = "PAYLOAD_OFFLOAD_BUCKET", value = var.use_payload_offload ? aws_s3_bucket.raw_files.bucket : "" },
+      # v0.3 Task10: 分析結果キャッシュ（既定 false・IAM 文とセット＝フラグだけでは動かない F1 型の回避）。
+      { name = "ANALYSIS_CACHE_ENABLED", value = var.use_analysis_cache ? "true" : "false" },
+      { name = "ANALYSIS_CACHE_BUCKET", value = var.use_analysis_cache ? aws_s3_bucket.raw_files.bucket : "" },
       # §知識ベース（2026-06-22）: 新スキーマ(documents/chunks=本番794件)を検索対象にし、
       # 資料種別フィルタ(knowledge_filters)と実ファイル配信(knowledge_deliver)を有効化。
       # USE_NEW_SCHEMA が無いと search は旧 proposals_chunks(3件)しか見ず知識機能が空振りする。

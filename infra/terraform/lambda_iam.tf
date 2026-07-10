@@ -51,6 +51,21 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_files" {
     }
   }
 
+  # v0.3 Task10: 分析結果キャッシュは prompt_version/model 込みキーで陳腐化を防いでいるが、
+  # ストレージ衛生のため 60 日で現行版ごと削除（ヒット率と費用のバランスは運用で調整）。
+  rule {
+    id     = "expire-analysis-cache"
+    status = "Enabled"
+
+    filter {
+      prefix = "analysis-cache/"
+    }
+
+    expiration {
+      days = 60
+    }
+  }
+
   # v0.3 Task8: 長文ペイロード退避（payload-offload/）は営業FB全文等を含むため
   # 無期限蓄積させない（署名URLの実効期限より十分長い 14 日で現行版ごと削除）。
   rule {
