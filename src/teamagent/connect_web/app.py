@@ -3125,11 +3125,21 @@ def create_app(
             )
         cid_e = html.escape(cid)
         nxt_e = html.escape(_safe_next(request.query_params.get("next")))
+        # AiLaVault ディープリンク（/app#client:… 等）の維持:
+        # URL フラグメントはサーバに送信されないが、303 リダイレクトではブラウザが
+        # 引き継ぐため、この login ページの URL には残っている。一方この後の
+        # Google Sign-In → form POST → 303 /app の遷移でフラグメントは消えるので、
+        # ここで sessionStorage に退避し、/app 側（app.html の初期化 JS）が復元する。
+        # キー名 'ailavault.pendingHash' は app.html 生成器側と対（変えるなら両方）。
         scripts = (
             '<script src="https://accounts.google.com/gsi/client" async></script>'
             "<script>function onCred(r){"
             "document.getElementById('credential').value=r.credential;"
-            "document.getElementById('idform').submit();}</script>"
+            "document.getElementById('idform').submit();}"
+            "try{if(location.hash&&location.hash.length>1){"
+            "sessionStorage.setItem('ailavault.pendingHash',location.hash);}"
+            "else{sessionStorage.removeItem('ailavault.pendingHash');}}catch(e){}"
+            "</script>"
         )
         body = (
             "<p>許可されたアカウントのみ社内ナレッジ検索を利用できます。</p>"

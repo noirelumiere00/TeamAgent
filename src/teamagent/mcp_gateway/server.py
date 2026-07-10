@@ -154,10 +154,37 @@ def _inject_search_web_links(data: dict[str, Any]) -> None:
     URL 組み立ては knowledge_search_url skill と同一の真実源（build_search_web_links）に委譲。
     CONNECT_BASE_URL 未設定なら空 dict が返り、キーを一切足さない＝壊れた相対リンクは出さない。
     SearchSkill / skills/search/schema.py は不変（注入はこのゲート層だけで完結）。
+
+    v0.3 Task6: ``USE_AILAVAULT_DEEPLINKS=1``（既定 OFF・§10 E1-2）のとき、追加で
+    AiLaVault（/app）へのディープリンクも注入する:
+      - トップレベル ``app_url``: /app そのもの
+      - 各 hit の ``app_client_url``: hit に client_name があるときだけ ``/app#client:<名前>``
+    フラグ既定 OFF の理由: リンク先の app.html 側ハッシュ展開 JS（別デプロイ・repo 外生成器）
+    が先に本番へ出ていないと、リンクは開くが該当ノートが自動展開されない（実害は無いが
+    中途半端な UX になる）ため、両方が揃った時点で人間が ON にする（§10 E1-4）。
     """
-    from teamagent.skills.knowledge_search_url.skill import build_search_web_links
+    from teamagent.skills.knowledge_search_url.skill import (
+        build_app_client_link,
+        build_app_url,
+        build_search_web_links,
+    )
 
     data.update(build_search_web_links())
+    if not _envflag("USE_AILAVAULT_DEEPLINKS"):
+        return
+    app_url = build_app_url()
+    if not app_url:
+        return  # CONNECT_BASE_URL 未設定＝壊れたリンクを出さない
+    data["app_url"] = app_url
+    hits = data.get("hits")
+    if not isinstance(hits, list):
+        return
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        link = build_app_client_link(str(hit.get("client_name") or ""))
+        if link:
+            hit["app_client_url"] = link
 
 
 def _err(message: str, **extra: Any) -> list[TextContent]:
