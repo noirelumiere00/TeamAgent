@@ -208,6 +208,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     # 未開封 ＝ 未読(UNREAD) かつ 要返信に出ていないもの（To に自分がいない高重要もここ・閲覧のみ）。
     unread = [m for m in mail_items if getattr(m, "is_unread", False) and not _is_reply(m)]
     cal_items = list(getattr(digest, "calendar_events", []) or [])
+    slack_unread = list(getattr(digest, "slack_unread", []) or [])
 
     # 冒頭の枕詞（飾らない一文）。
     blocks: list[dict[str, Any]] = [
@@ -279,6 +280,24 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
         blocks.append(
             {"type": "section", "text": {"type": "mrkdwn", "text": "📭 *メール*: 新着なし"}}
         )
+        blocks.append({"type": "divider"})
+
+    # --- 💬 Slack 返信漏れ（未返信メンション・最大5件。display は本人 DM のみ・ログ厳禁 G3/G7）---
+    if slack_unread:
+        lines = [f"💬 *Slack 返信漏れ（{len(slack_unread)}件）*"]
+        for it in slack_unread[:5]:
+            ch = _slack_escape(
+                getattr(it, "channel_name_display", "") or getattr(it, "channel_name_masked", "")
+            )
+            ex = _slack_escape(
+                getattr(it, "excerpt_display", "") or getattr(it, "excerpt_scrubbed", "")
+            )
+            line = f"• *#{ch or '(不明)'}*: {ex}" if ex else f"• *#{ch or '(不明)'}*"
+            link = getattr(it, "permalink", None)
+            if link:
+                line += f"  <{link}|開く>"  # permalink は実 URL なのでエスケープしない
+            lines.append(line)
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         blocks.append({"type": "divider"})
 
     # --- 📅 今日の予定（予定・会議室・会議リンク。display は本人 DM のみ・ログ厳禁 G3/G7）---
@@ -460,6 +479,14 @@ def main() -> int:
     from teamagent.orchestrator.factory import _build_slack_context_provider
 
     slack_ctx = _build_slack_context_provider()
+    # Slack 返信漏れ検知（v0.3 Task1・MORNING_DIGEST_SLACK_UNREAD=1 のときのみ非 None・既定OFF）。
+    # Provider は fail-open（未連携ユーザーは空）なので、flag ON でも既存挙動を壊さない。
+    slack_unreplied = None
+    if os.environ.get("MORNING_DIGEST_SLACK_UNREAD", "").strip().lower() in {"1", "true", "yes"}:
+        from teamagent.orchestrator.factory import _build_slack_store
+        from teamagent.skills._shared.slack_unreplied import SlackUnrepliedProvider
+
+        slack_unreplied = SlackUnrepliedProvider(slack_store=_build_slack_store())
     if concurrency > 1:
         # 並列時は Bedrock クライアントを事前生成して共有（lazy-init の競合を避ける）。
         from teamagent.adapters.bedrock_client import BedrockClient
@@ -468,9 +495,12 @@ def main() -> int:
             token_store=token_store,
             bedrock=BedrockClient.from_env(),
             deal_provider=slack_ctx,
+            slack=slack_unreplied,
         )
     else:
-        skill = MorningDigestSkill(token_store=token_store, deal_provider=slack_ctx)
+        skill = MorningDigestSkill(
+            token_store=token_store, deal_provider=slack_ctx, slack=slack_unreplied
+        )
     # concurrency と同じく env 不正値でも落とさない。schema は 0..10、0=自動下書き無効。
     try:
         max_drafts = int(os.environ.get("MORNING_DIGEST_MAX_DRAFTS", "3"))

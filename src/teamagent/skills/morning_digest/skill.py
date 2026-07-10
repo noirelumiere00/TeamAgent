@@ -495,13 +495,30 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
     def _collect_slack_unread(
         self, requester: str, input: MorningDigestInput, ctx: SkillContext
     ) -> list[SlackUnreadItem]:
+        """Slack 返信漏れ（未返信メンション）を集める。
+
+        判定と xoxp I/O は SlackUnrepliedProvider（skills/_shared/slack_unreplied.py）
+        に委譲。self._slack が None（機能フラグ OFF / 未配線）なら空＝従来挙動。
+        Provider は fail-open（未連携・scope 不足・API 失敗はすべて空リスト）なので、
+        ここでの例外は想定外のみ（呼び出し元 run() が errors へ封じ込める）。
+        """
         if self._slack is None:
-            # search.messages は bot token では使えない（user scope 必須）ため、本機能は
-            # Slack User OAuth (xoxp) が未実装の現状では「未対応」とし空を返す。
-            # 将来 Plan の「個人 DM/スレッド要約」実装時に同経路で実装する。
             return []
-        # 将来実装: self._slack.search_messages(f"<@{slack_user_id}>", ...)
-        return []
+        mentions = self._slack.collect(requester, input.slack_unread_horizon_days, ctx.request_id)
+        items: list[SlackUnreadItem] = []
+        for m in mentions:
+            items.append(
+                SlackUnreadItem(
+                    channel_name_masked=str(scrub_value(m.channel_name))[:40],
+                    excerpt_scrubbed=_strip_sentinels(str(scrub_value(m.text))[:120]),
+                    # display はマスク無し（本人 DM 専用・G3/G7: ログには絶対に出さない）。
+                    channel_name_display=str(m.channel_name)[:80],
+                    excerpt_display=str(m.text)[:200],
+                    permalink=m.permalink or None,
+                    occurred_at=m.occurred_at or None,
+                )
+            )
+        return items
 
     # ── 4. 重要メールへの下書き生成（drafts.create のみ・送信しない） ───
 

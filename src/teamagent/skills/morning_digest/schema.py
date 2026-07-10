@@ -110,10 +110,16 @@ class CalendarEventItem(BaseModel):
 
 
 class SlackUnreadItem(BaseModel):
-    """Slack 未返信メンション 1 件（DLP マスク後）。"""
+    """Slack 未返信メンション 1 件（DLP マスク後＋本人 DM 表示用の display）。"""
 
     channel_name_masked: str = Field(default="", description="チャンネル名のマスク表示")
     excerpt_scrubbed: str = Field(default="", max_length=120, description="抜粋（マスク後）")
+    channel_name_display: str = Field(
+        default="", max_length=80, description="チャンネル名（本人DM表示用・未マスク・ログ厳禁）"
+    )
+    excerpt_display: str = Field(
+        default="", max_length=200, description="抜粋（本人DM表示用・未マスク・ログ厳禁）"
+    )
     permalink: str | None = Field(default=None, description="Slack の permalink")
     occurred_at: str | None = Field(default=None, description="メンション日時（ISO）")
 
