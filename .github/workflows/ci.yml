@@ -95,12 +95,15 @@ jobs:
       # - --ignore-unfixed: 修正版が存在しない CVE で恒常赤化して CI が形骸化するのを防ぐ。
       #   修正版が出た時点で検出→依存バンプを強制する運用（例: 2026-07-10 に
       #   cryptography/starlette/yt-dlp の HIGH 5件をこの方式でバンプ済み）。
-      # - 例外は .trivyignore（理由・期限コメント必須）で管理。
+      #   ＝依存に修正版 CVE が出た瞬間、無関係な PR でも赤くなる（仕様）。その場合は
+      #   依存バンプを先行 merge して rebase する。
+      # - 例外は .trivyignore.yaml（paths でリソース単位スコープ＋expired_at 機械強制期限）。
       # - DB 取得は GHCR/GCR のレート制限（TOOMANYREQUESTS）対策で複数レジストリにフォールバック。
       #   image スキャン（teamagent-mcp/openclaw は E5 2.2GB 焼き込みで PR 毎 build は非現実的）は
       #   CI では行わず、ECR scan_on_push＋CodeBuild 側での定期スキャンに分離（別チケット）。
+      # - action は R17 の digest pin 文化に合わせ SHA 固定（= v0.36.0）。
       - name: Trivy fs scan (依存脆弱性)
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         env:
           TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2"
         with:
@@ -110,20 +113,20 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
-          trivyignores: .trivyignore
+          trivyignores: .trivyignore.yaml
 
       # IaC/Dockerfile の misconfig スキャン（infra/ 配下）。
-      # 既存 10 件（SG egress 全開 6 件等）は .trivyignore にベースライン登録済み
-      # （各行に理由と再判定期限を明記）。新規の CRITICAL/HIGH misconfig のみ弾く。
+      # 既存 10 件（SG egress 全開 6 件等）は .trivyignore.yaml にベースライン登録済み
+      # （paths スコープ＋理由＋expired_at）。新規の CRITICAL/HIGH misconfig のみ弾く。
       - name: Trivy config scan (IaC misconfig)
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           scan-type: config
           scan-ref: infra/
           severity: CRITICAL,HIGH
           exit-code: "1"
-          trivyignores: .trivyignore
-          skip-setup-trivy: true # fs スキャン step で導入済みの trivy を再利用
+          trivyignores: .trivyignore.yaml
+          skip-setup-trivy: true # fs スキャン step で導入済みの trivy を再利用（PATH 引き継ぎ）
 
   # 本番デプロイ前提のテスト（main マージ後のみ）
   smoke-test:

@@ -619,6 +619,29 @@ def test_E33_reply_buttons_states():
     ]
     assert any("drafts" in u for u in urls)  # 📁 下書き一覧を開く
 
+    # 負ケース: 作り置きが 1 件も無ければ 📁 一覧ボタンは出ない
+    d0 = MorningDigestOutput(
+        user_email_masked="m***@x",
+        mail_digest=[
+            MailDigestItem(
+                counterpart_masked="a***@x",
+                importance="high",
+                to_self=True,
+                has_draft=False,
+                draft_token="TOK",
+                subject_display="件名C",
+            )
+        ],
+    )
+    _t0, blocks0 = runner._format_block_kit(d0, ME)
+    urls0 = [
+        e.get("url", "")
+        for b in blocks0
+        if b.get("type") == "actions"
+        for e in b.get("elements", [])
+    ]
+    assert all("drafts" not in u for u in urls0)
+
 
 def test_E34_unread_section_lists_unread_non_high():
     """未開封セクションには is_unread かつ非 high のメールが出る（high は要返信側）。"""
