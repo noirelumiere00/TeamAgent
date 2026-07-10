@@ -86,7 +86,8 @@ class _FakeMethodChain:
         "watch",
         "stop",
         # 120点ハードニングで追加した封鎖対象メソッド
-        "import",
+        # （googleapiclient は予約語 import を import_ に改名＝実属性名で持つ。v0.3 Task2 修正）
+        "import_",
         "insert",
         "verify",
         "enable",
@@ -164,7 +165,7 @@ _EXPECTED_DESTRUCTIVE_METHODS = (
     "users.messages.send",
     "users.drafts.send",
     # 注入・改竄・情報持ち出し（exfiltration）系を物理封鎖（120点ハードニング）。
-    "users.messages.import",
+    "users.messages.import_",
     "users.messages.insert",
     "users.threads.modify",
     "users.drafts.update",

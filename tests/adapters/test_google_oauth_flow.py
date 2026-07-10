@@ -40,9 +40,17 @@ def test_verify_state_rejects_tampered_email() -> None:
     assert verify_state(tampered, secret=_SECRET) is None
 
 
-def test_workspace_scopes_gmail_modify_rest_readonly() -> None:
-    # Gmail のみ modify（読み+下書き作成）。他6つは readonly。Internal アプリ=審査不要。
-    assert len(WORKSPACE_SCOPES) == 7
+def test_workspace_scopes_write_is_gmail_and_calendar_only() -> None:
+    # 書込スコープは gmail.modify（読み+下書き作成）と calendar.events（v0.3 Task2・
+    # insert のみ実装/破壊系は _GCalSafePolicy 物理封鎖）の2つだけ。他は readonly。
+    # Internal アプリ=審査不要。
+    assert len(WORKSPACE_SCOPES) == 8
     assert WORKSPACE_SCOPES[0].endswith("/auth/gmail.modify")
-    assert all(s.endswith(".readonly") for s in WORKSPACE_SCOPES[1:])
+    write_scopes = {s for s in WORKSPACE_SCOPES if not s.endswith(".readonly")}
+    assert write_scopes == {
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/calendar.events",
+    }
     assert not any(s.endswith("gmail.readonly") for s in WORKSPACE_SCOPES)
+    # calendar は readonly（freebusy/list 用）と events（insert 用）の両方を持つ。
+    assert "https://www.googleapis.com/auth/calendar.readonly" in WORKSPACE_SCOPES
