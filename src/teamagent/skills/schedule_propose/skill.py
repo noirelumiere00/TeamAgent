@@ -45,6 +45,8 @@ _ERR_MSG: dict[str, str] = {
     "not_connected": "日程提案には Google の連携が必要です"
     "（@AiLa に『連携』と話しかけて許可してください）。",
     "no_slots": "直近5営業日に空き枠が見つかりませんでした。お手数ですが手動でご調整ください。",
+    "freebusy_failed": "カレンダーの空き状況を取得できませんでした。"
+    "時間をおいて再度お試しください。",
     "draft_failed": "返信下書きの作成に失敗しました。時間をおいて再度お試しください。",
 }
 _HOLD_TITLE = "仮: 日程候補（AiLa）"
@@ -107,9 +109,11 @@ class ScheduleProposeSkill(BaseSkill[ScheduleProposeInput, ScheduleProposeOutput
                 time_max=(now + _dt.timedelta(days=9)).isoformat(),
             )
         except Exception as e:
-            # freebusy 失敗でも下書き提案自体は成立しない（候補が出せない）＝案内して終了。
+            # API 障害は「空き枠なし」と別事象（偽の事実を断言しない・レビュー F3）。
             log.warning("schedule_propose_freebusy_failed", err=type(e).__name__)
-            return ScheduleProposeOutput(error="no_slots", message=_ERR_MSG["no_slots"])
+            return ScheduleProposeOutput(
+                error="freebusy_failed", message=_ERR_MSG["freebusy_failed"]
+            )
         slots = find_slots(busy, now=now)
         if not slots:
             log.info("schedule_propose_no_slots")
@@ -153,7 +157,9 @@ class ScheduleProposeSkill(BaseSkill[ScheduleProposeInput, ScheduleProposeOutput
                         end_iso=end.isoformat(),
                         tentative=True,
                         transparent=True,  # 自分の freebusy を潰さない（レビュー F5 裁定）
-                        event_id=stable_event_id(start.isoformat(), end.isoformat(), requester),
+                        event_id=stable_event_id(
+                            start.isoformat(), end.isoformat(), requester, kind="hold"
+                        ),
                     )
                     holds += 1
                 except DuplicateEventError:

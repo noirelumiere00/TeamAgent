@@ -587,6 +587,11 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         for i, item in enumerate(digest_items):
             if item.importance not in self._draft_importances:
                 continue
+            if item.scheduling_request:
+                # 日程打診は 🗓 schedule_propose（候補入り決定的下書き）の担当。ここで汎用
+                # LLM 下書きを作ると、冪等スキップ（既存下書きあり→already）により 🗓 が
+                # 永久に candidates を出せなくなる（Task4 反対尋問レビュー F2）。
+                continue
             if i >= len(raw_msgs):
                 continue
             if not _is_addressed_to(getattr(raw_msgs[i], "headers", {}) or {}, requester):

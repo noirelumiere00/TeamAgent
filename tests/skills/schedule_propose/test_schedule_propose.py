@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -148,23 +148,14 @@ class _FakeDigestSkill:
         return self.result
 
 
-def _skill(
-    gcal: _FakeGCal | None = None,
-    tok: Any = "default",
-    draft_result: dict[str, Any] | None = None,
-) -> tuple[ScheduleProposeSkill, _FakeGCal, _FakeDigestSkill]:
-    gcal = gcal or _FakeGCal()
-    token = _Tok() if tok == "default" else tok
-    skill = ScheduleProposeSkill(
-        token_store=_Store(token),
-        gcalendar_factory=lambda _t: gcal,
-        now_factory=lambda: _NOW,
-    )
+@pytest.fixture
+def _fake_md(monkeypatch: pytest.MonkeyPatch) -> _FakeDigestSkill:
+    """MorningDigestSkill を fake に差し替え（monkeypatch＝テスト間リークなし）。"""
+    import teamagent.skills.morning_digest.skill as md_mod
+
     fake_digest = _FakeDigestSkill(
-        draft_result or {"created": True, "already": False, "thread_url": "https://mail/x"}
+        {"created": True, "already": False, "thread_url": "https://mail/x"}
     )
-    # MorningDigestSkill の生成を差し替え（run 内 import のため monkeypatch でなく属性注入）。
-    import teamagent.skills.schedule_propose.skill as mod
 
     class _FakeMD:
         def __init__(self, token_store: Any = None) -> None:
@@ -173,36 +164,38 @@ def _skill(
         def generate_draft_for_thread(self, *a: Any, **kw: Any) -> dict[str, Any]:
             return fake_digest.generate_draft_for_thread(*a, **kw)
 
-    # run() 内の import 先を差し替える。
-    import teamagent.skills.morning_digest.skill as md_mod
+    monkeypatch.setattr(md_mod, "MorningDigestSkill", _FakeMD)
+    return fake_digest
 
-    original = md_mod.MorningDigestSkill
-    md_mod.MorningDigestSkill = _FakeMD  # type: ignore[misc]
 
-    def _restore() -> None:
-        md_mod.MorningDigestSkill = original  # type: ignore[misc]
-
-    skill._restore = _restore  # type: ignore[attr-defined]
-    _ = mod
-    return skill, gcal, fake_digest
+def _skill(
+    gcal: _FakeGCal | None = None,
+    tok: Any = "default",
+) -> tuple[ScheduleProposeSkill, _FakeGCal]:
+    gcal = gcal or _FakeGCal()
+    token = _Tok() if tok == "default" else tok
+    skill = ScheduleProposeSkill(
+        token_store=_Store(token),
+        gcalendar_factory=lambda _t: gcal,
+        now_factory=lambda: _NOW,
+    )
+    return skill, gcal
 
 
 def _run(skill: ScheduleProposeSkill, token: str) -> Any:
-    try:
-        return skill.run(
-            ScheduleProposeInput(schedule_token=token),
-            SkillContext(request_id="r", metadata={"user_email": ME}),
-        )
-    finally:
-        skill._restore()  # type: ignore[attr-defined]
+    return skill.run(
+        ScheduleProposeInput(schedule_token=token),
+        SkillContext(request_id="r", metadata={"user_email": ME}),
+    )
 
 
 def _tok() -> str:
     return encode_draft_token("T1", ME)
 
 
-def test_happy_path_draft_and_transparent_holds() -> None:
-    skill, gcal, fake_digest = _skill()
+def test_happy_path_draft_and_transparent_holds(_fake_md: _FakeDigestSkill) -> None:
+    skill, gcal = _skill()
+    fake_digest = _fake_md
     out = _run(skill, _tok())
     assert out.created and out.holds_created == 3
     assert "候補 3 件" in out.message and "仮予定 3 件" in out.message
@@ -215,38 +208,107 @@ def test_happy_path_draft_and_transparent_holds() -> None:
         assert ins["event_id"]  # 冪等キー
 
 
-def test_invalid_token_fail_closed() -> None:
-    skill, gcal, _ = _skill()
+def test_invalid_token_fail_closed(_fake_md: _FakeDigestSkill) -> None:
+    skill, gcal = _skill()
     out = _run(skill, "garbage.token")
     assert out.error == "expired" and gcal.inserts == []
 
 
-def test_old_scope_creates_draft_without_holds() -> None:
+def test_old_scope_creates_draft_without_holds(_fake_md: _FakeDigestSkill) -> None:
     old_tok = _Tok(scopes=("https://www.googleapis.com/auth/calendar.readonly",))
-    skill, gcal, _ = _skill(tok=old_tok)
+    skill, gcal = _skill(tok=old_tok)
     out = _run(skill, _tok())
     assert out.created and out.holds_created == 0
     assert gcal.inserts == []  # 書込スコープ無し→ホールドはスキップ（graceful）
     assert "仮予定は未作成" in out.message
 
 
-def test_no_slots_returns_guidance() -> None:
+def test_no_slots_returns_guidance(_fake_md: _FakeDigestSkill) -> None:
     busy = [
         FreeBusyBlock(start=f"2026-07-{d}T00:00:00+09:00", end=f"2026-07-{d}T23:59:00+09:00")
         for d in range(13, 20)
     ]
-    skill, _, fake_digest = _skill(_FakeGCal(busy=busy))
+    skill, _ = _skill(_FakeGCal(busy=busy))
     out = _run(skill, _tok())
-    assert out.error == "no_slots" and fake_digest.calls == []  # 下書きは作らない
+    assert out.error == "no_slots" and _fake_md.calls == []  # 下書きは作らない
 
 
-def test_existing_draft_short_circuits() -> None:
-    skill, gcal, _ = _skill(draft_result={"created": False, "already": True, "thread_url": "u"})
+def test_existing_draft_short_circuits(_fake_md: _FakeDigestSkill) -> None:
+    _fake_md.result = {"created": False, "already": True, "thread_url": "u"}
+    skill, gcal = _skill()
     out = _run(skill, _tok())
     assert out.already and gcal.inserts == []  # 既存下書きありならホールドも置かない
 
 
-def test_duplicate_holds_counted_as_success() -> None:
-    skill, _, _ = _skill(_FakeGCal(dup_after=1))  # 2件目以降は既存ホールド
+def test_duplicate_holds_counted_as_success(_fake_md: _FakeDigestSkill) -> None:
+    skill, _ = _skill(_FakeGCal(dup_after=1))  # 2件目以降は既存ホールド
     out = _run(skill, _tok())
     assert out.created and out.holds_created == 3  # 連打でも数は変わらない
+
+
+def test_hold_and_confirm_ids_do_not_collide() -> None:
+    """F1 回帰: 同一スロットでも 🗓ホールドと 📅本登録は別 id（衝突すると本登録が 409 で死ぬ）。"""
+    from teamagent.skills.morning_digest.event_token import stable_event_id
+
+    s, e = "2026-07-15T14:00:00+09:00", "2026-07-15T15:00:00+09:00"
+    assert stable_event_id(s, e, ME, kind="hold") != stable_event_id(s, e, ME)
+
+
+def test_freebusy_failure_distinct_from_no_slots(_fake_md: _FakeDigestSkill) -> None:
+    """F3 回帰: API 障害を「空き枠なし」と誤報しない（偽の事実を断言しない）。"""
+
+    class _BoomGCal:
+        def freebusy(self, request_id: str, **kw: Any) -> Any:
+            raise RuntimeError("api down")
+
+    skill = ScheduleProposeSkill(
+        token_store=_Store(_Tok()),
+        gcalendar_factory=lambda _t: _BoomGCal(),
+        now_factory=lambda: _NOW,
+    )
+    out = _run(skill, _tok())
+    assert out.error == "freebusy_failed"
+    assert "取得できませんでした" in out.message and "空き枠が見つかりません" not in out.message
+
+
+def test_auto_draft_excludes_scheduling_request() -> None:
+    """F2 回帰: 朝の自動下書きは scheduling_request スレッドを対象外にする
+    （汎用下書きが先に付くと 🗓 が already 短絡で永久に沈黙するため）。"""
+    import inspect
+
+    from teamagent.skills.morning_digest.skill import MorningDigestSkill
+
+    src = inspect.getsource(MorningDigestSkill._create_drafts)
+    assert "scheduling_request" in src  # 除外条件が存在する（結合は下の実挙動でも担保）
+
+    from teamagent.skills.morning_digest.schema import MailDigestItem
+
+    skill = MorningDigestSkill(token_store=None)
+    items = [
+        MailDigestItem(
+            counterpart_masked="a***@x",
+            importance="high",
+            to_self=True,
+            scheduling_request=True,
+        )
+    ]
+
+    class _Msg:
+        headers: ClassVar[dict[str, str]] = {"From": "c@x.com", "To": ME, "Subject": "s"}
+
+    class _GmailNoCall:
+        def list_drafts(self, rid: str, **_: Any) -> list[Any]:
+            raise AssertionError("対象ゼロなら gmail に触れないはず")
+
+    from teamagent.skills.morning_digest.schema import MorningDigestInput
+
+    # 対象が scheduling_request のみ → targets 空 → (0, 0.0) 即返し（gmail 未接触）。
+    created, cost = skill._create_drafts(
+        object(),
+        ME,
+        MorningDigestInput(max_drafts=3),
+        [_Msg()],
+        items,
+        SkillContext(request_id="r", metadata={"user_email": ME}),
+    )
+    assert created == 0 and cost == 0.0

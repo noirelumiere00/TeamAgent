@@ -39,6 +39,11 @@ def find_slots(
       - 土日を除く「翌営業日」以降（当日は提案しない＝相手への礼儀と準備時間）
       - **候補は別日優先**（1日1枠で埋め、足りなければ同日2枠目以降で補完）
       - busy と 1 分でも重なる枠は除外
+
+    ⚠️ 既知の限界: **日本の祝日は考慮しない**（直近例: 2026-07-20 海の日にも候補が出る）。
+    本人カレンダーに終日予定（会社の祝日カレンダー等）が入っていれば busy として自然に
+    除外される。祝日リストの静的保持は鮮度リスクがあるため Phase 2 パイロットで
+    「祝日カレンダー購読を busy に含める」運用と合わせて裁定する。
     """
     now_jst = now.astimezone(_JST) if now.tzinfo else now.replace(tzinfo=_JST)
     busy_ranges: list[tuple[_dt.datetime, _dt.datetime]] = []
