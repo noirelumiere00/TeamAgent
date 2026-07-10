@@ -94,6 +94,7 @@ def publish_text(
     content_type: str = "application/json; charset=utf-8",
     ext: str = ".json",
     prefix: str | None = None,
+    bucket: str | None = None,
     request_id: str = "payload",
 ) -> str | None:
     """テキスト（JSON等）を非公開S3へ直接置き、署名付きGET URL（7日）を返す。失敗で None。
@@ -106,7 +107,7 @@ def publish_text(
     try:
         import boto3
 
-        bucket = os.environ.get("VSEO_REPORT_BUCKET") or _DEFAULT_BUCKET
+        bucket = bucket or os.environ.get("VSEO_REPORT_BUCKET") or _DEFAULT_BUCKET
         key_prefix = prefix or os.environ.get("VSEO_REPORT_PREFIX") or _DEFAULT_PREFIX
         key = f"{key_prefix}{uuid.uuid4().hex}{ext}"
         sess = boto3.session.Session()

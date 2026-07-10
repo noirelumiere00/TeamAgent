@@ -22,6 +22,8 @@ from teamagent.skills.base import BaseSkill, SkillContext
 @pytest.fixture(autouse=True)
 def _on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USE_PAYLOAD_OFFLOAD", "1")
+    # 会社共有モードが前提（F6: STRICT per-user 構成では発動しない）。
+    monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "vectorinc.co.jp")
     monkeypatch.setenv("PAYLOAD_OFFLOAD_MAX_CHARS", "1000")
     monkeypatch.setenv("PAYLOAD_OFFLOAD_FIELD_CHARS", "100")
 
@@ -126,3 +128,42 @@ async def test_dispatch_offloads_then_injects_links(monkeypatch: pytest.MonkeyPa
     # リンク注入は offload の後＝注入キーは切り詰められず完全な URL のまま（順序契約）。
     assert out["web_url"] == "https://connect.example.co.jp/search"
     assert len(out["web_url"]) < 100  # 切り詰めマークが付いていない
+
+
+def test_disabled_without_company_shared_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F6 回帰: STRICT per-user 構成（shared domains 未設定）では flag ON でも発動しない。"""
+    monkeypatch.delenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", raising=False)
+    _fake_publish(monkeypatch, "https://s3/x")
+    big = {"answer": "x" * 5000}
+    assert po.maybe_offload("search", big, request_id="r") is big
+
+
+def test_data_uri_is_dropped_not_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F2 回帰: data URI は「リンク」ではなく本体＝温存せず省略に置換（数MB素通り防止）。"""
+    _fake_publish(monkeypatch, "https://s3/full")
+    data = {
+        "answer": "a" * 2000,
+        "video_data_uri": "data:video/mp4;base64," + "A" * 5000,
+        "frames": [{"data_uri": "data:image/png;base64," + "B" * 3000}],
+    }
+    out = po.maybe_offload("video_algorithm", data, request_id="r")
+    assert out["video_data_uri"] == "<data URI は省略・全文は full_url へ>"
+    assert out["frames"][0]["data_uri"] == "<data URI は省略・全文は full_url へ>"
+
+
+def test_post_trim_size_is_bounded_by_list_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F3 回帰: フィールド切り詰めだけでは収まらない大量 hits を末尾から間引いて総量を抑える。"""
+    _fake_publish(monkeypatch, "https://s3/full")
+    data = {"answer": "a", "hits": [{"content": "c" * 90} for _ in range(60)]}
+    out = po.maybe_offload("search", data, request_id="r")
+    assert out["offloaded"] is True
+    assert len(out["hits"]) < 60 and out["omitted_items"]["hits"] > 0  # 黙って消さない
+    assert len(json.dumps(out, ensure_ascii=False)) <= 1000 + 400  # note/URL ぶんの余裕込み
+
+
+def test_list_direct_strings_are_trimmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F4 回帰: list 直下の str も親キー規則で切り詰める（素通し穴の解消）。"""
+    _fake_publish(monkeypatch, "https://s3/full")
+    data = {"answer": "a" * 2000, "notes": ["n" * 3000]}
+    out = po.maybe_offload("search", data, request_id="r")
+    assert len(out["notes"][0]) <= 100 + 30

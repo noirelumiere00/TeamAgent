@@ -57,29 +57,79 @@ def _env_int(name: str, default: int) -> int:
 
 
 def enabled() -> bool:
-    """USE_PAYLOAD_OFFLOAD=1 のときのみ発動（既定 OFF・§10 E1-2）。"""
-    return os.environ.get("USE_PAYLOAD_OFFLOAD", "").strip().lower() in {"1", "true", "yes"}
+    """USE_PAYLOAD_OFFLOAD=1 かつ会社共有モードのときのみ発動（既定 OFF・§10 E1-2）。
+
+    allowlist の「会社共有だから署名URL化して良い」前提は §G company-shared モード
+    （TEAMAGENT_SHARED_COMPANY_DOMAINS 設定時）でのみ真。STRICT per-user RLS 構成では
+    本人フィルタ済み結果を無認証 URL 化することになるため発動しない（レビュー F6）。
+    """
+    flag = os.environ.get("USE_PAYLOAD_OFFLOAD", "").strip().lower() in {"1", "true", "yes"}
+    shared = bool(os.environ.get("TEAMAGENT_SHARED_COMPANY_DOMAINS", "").strip())
+    return flag and shared
 
 
-def _truncate_strings(node: Any, field_chars: int) -> Any:
-    """構造を保って長い文字列だけ切り詰める（dict/list を再帰・URL キーは温存）。"""
+def _trim_str(v: str, key_lower: str, field_chars: int) -> str:
+    """1 文字列の切り詰め規則（data URI 置換 > リンク温存 > 要約5倍 > 既定 cap）。"""
+    if v.startswith("data:"):
+        # base64 埋め込み（動画/画像）は「リンク」ではなく本体＝最優先で落とす（レビュー F2。
+        # 温存すると video_algorithm の数MBが素通りし退避が無意味になる）。
+        return "<data URI は省略・全文は full_url へ>"
+    if key_lower.endswith(("url", "uri", "permalink", "link")):
+        return v  # 実リンクは切らない
+    cap = field_chars * 5 if key_lower in _SUMMARY_KEYS else field_chars
+    return v if len(v) <= cap else v[:cap] + _TRUNC_MARK
+
+
+def _truncate_strings(node: Any, field_chars: int, parent_key: str = "") -> Any:
+    """構造を保って長い文字列だけ切り詰める（dict/list を再帰）。
+
+    list 直下の str は親キーの規則を引き継ぐ（レビュー F4: 素通し穴の解消）。
+    """
     if isinstance(node, dict):
         out: dict[str, Any] = {}
         for k, v in node.items():
             key = str(k)
             if isinstance(v, str):
-                lowered = key.lower()
-                if lowered.endswith(("url", "uri", "permalink", "link")):
-                    out[key] = v  # リンクは切らない
-                    continue
-                cap = field_chars * 5 if lowered in _SUMMARY_KEYS else field_chars
-                out[key] = v if len(v) <= cap else v[:cap] + _TRUNC_MARK
+                out[key] = _trim_str(v, key.lower(), field_chars)
             else:
-                out[key] = _truncate_strings(v, field_chars)
+                out[key] = _truncate_strings(v, field_chars, parent_key=key.lower())
         return out
     if isinstance(node, list):
-        return [_truncate_strings(v, field_chars) for v in node]
+        return [
+            _trim_str(v, parent_key, field_chars)
+            if isinstance(v, str)
+            else _truncate_strings(v, field_chars, parent_key=parent_key)
+            for v in node
+        ]
     return node
+
+
+def _shrink_lists_to_fit(data: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """切り詰め後もまだ大きい場合、トップレベルの最大 list を末尾から間引く（レビュー F3）。
+
+    フィールド単位の切り詰めは件数が多いと総量を保証できない（60 hits×500字=3万字）。
+    大きい list から半減を繰り返し、omitted_items に間引き数を記録する（黙って消さない）。
+    """
+    omitted: dict[str, int] = {}
+    for _ in range(12):  # 半減×12 で必ず収束（1件未満にはしない）
+        raw = json.dumps(data, ensure_ascii=False, default=str)
+        if len(raw) <= max_chars:
+            break
+        candidates = [
+            (len(json.dumps(v, ensure_ascii=False, default=str)), k)
+            for k, v in data.items()
+            if isinstance(v, list) and len(v) > 1
+        ]
+        if not candidates:
+            break  # 間引ける list が無い＝これ以上は諦める（構造破壊はしない）
+        _, key = max(candidates)
+        lst = data[key]
+        keep = max(1, len(lst) // 2)
+        omitted[key] = omitted.get(key, 0) + (len(lst) - keep)
+        data[key] = lst[:keep]
+    if omitted:
+        data["omitted_items"] = omitted
+    return data
 
 
 def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[str, Any]:
@@ -103,6 +153,7 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
     url = publish_text(
         raw,
         prefix=os.environ.get("PAYLOAD_OFFLOAD_PREFIX") or "payload-offload/",
+        bucket=os.environ.get("PAYLOAD_OFFLOAD_BUCKET") or None,
         request_id=request_id,
     )
     if not url:
@@ -111,11 +162,12 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
         return data
     field_chars = _env_int("PAYLOAD_OFFLOAD_FIELD_CHARS", _DEFAULT_FIELD_CHARS)
     trimmed = _truncate_strings(data, field_chars)
+    trimmed = _shrink_lists_to_fit(trimmed, max_chars)
     trimmed["offloaded"] = True
     trimmed["full_url"] = url
     trimmed["offload_note"] = (
-        "本文が長いため全文を退避しました（リンクは7日間有効・社外共有不可）。"
-        "以下の内容は要点のみの切り詰め版です。"
+        "本文が長いため全文を退避しました（リンクは最長7日・実行環境により短くなる場合あり。"
+        "社外共有不可）。以下は要点のみの切り詰め版です。"
     )
     logger.info(
         "payload_offloaded",
@@ -123,7 +175,7 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
         tool=tool,
         original_chars=len(raw),
     )
-    return trimmed  # type: ignore[no-any-return]
+    return trimmed
 
 
 __all__ = ["OFFLOAD_TOOLS", "enabled", "maybe_offload"]

@@ -51,6 +51,21 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_files" {
     }
   }
 
+  # v0.3 Task8: 長文ペイロード退避（payload-offload/）は営業FB全文等を含むため
+  # 無期限蓄積させない（署名URLの実効期限より十分長い 14 日で現行版ごと削除）。
+  rule {
+    id     = "expire-payload-offload"
+    status = "Enabled"
+
+    filter {
+      prefix = "payload-offload/"
+    }
+
+    expiration {
+      days = 14
+    }
+  }
+
   rule {
     id     = "expire-noncurrent-versions"
     status = "Enabled"

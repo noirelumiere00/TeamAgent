@@ -239,6 +239,20 @@ data "aws_iam_policy_document" "mcp_task" {
       ]
     }
   }
+  # v0.3 Task8: 長文ペイロード退避（payload-offload/ prefix 限定・presigned 用）。
+  # ⚠️ この文が無いと USE_PAYLOAD_OFFLOAD=1 でも AccessDenied→fail-open で黙って無効
+  # （「フラグは中身を保証しない」型の地雷・レビュー F1）。
+  dynamic "statement" {
+    for_each = var.use_payload_offload ? [1] : []
+    content {
+      sid     = "PayloadOffloadS3"
+      actions = ["s3:PutObject", "s3:GetObject", "s3:GetBucketLocation"]
+      resources = [
+        aws_s3_bucket.raw_files.arn,
+        "${aws_s3_bucket.raw_files.arn}/payload-offload/*",
+      ]
+    }
+  }
   statement {
     sid = "BedrockInvoke"
     actions = [
@@ -391,6 +405,8 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_SCHEDULE_PROPOSE_TOOL", value = var.use_schedule_propose_tool ? "true" : "false" },
       # v0.3 Task8: 長文ペイロードの S3 退避（既定 false・allowlist対象のみ・PII系は対象外）。
       { name = "USE_PAYLOAD_OFFLOAD", value = var.use_payload_offload ? "true" : "false" },
+      # 退避先 bucket（scrape 系の VSEO_REPORT_BUCKET と独立に指定＝両立時のキー衝突なし）。
+      { name = "PAYLOAD_OFFLOAD_BUCKET", value = var.use_payload_offload ? aws_s3_bucket.raw_files.bucket : "" },
       # §知識ベース（2026-06-22）: 新スキーマ(documents/chunks=本番794件)を検索対象にし、
       # 資料種別フィルタ(knowledge_filters)と実ファイル配信(knowledge_deliver)を有効化。
       # USE_NEW_SCHEMA が無いと search は旧 proposals_chunks(3件)しか見ず知識機能が空振りする。
