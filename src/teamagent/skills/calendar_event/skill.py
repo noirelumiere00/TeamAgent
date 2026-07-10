@@ -93,7 +93,7 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
             return CalendarEventOutput(error="reauth_needed", message=_ERR_MSG["reauth_needed"])
 
         gcal = self._gcalendar_factory(token)  # type: ignore[operator]
-        event_id = stable_event_id(input.event_token)
+        event_id = stable_event_id(payload.start_iso, payload.end_iso, requester)
         try:
             inserted = gcal.insert_event(
                 ctx.request_id,
@@ -111,11 +111,19 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
             return CalendarEventOutput(error="expired", message=_ERR_MSG["expired"])
         except Exception as e:
             name = type(e).__name__
-            # googleapiclient HttpError 403（insufficient scope）→ 再連携案内。
+            # googleapiclient HttpError 403: 権限系（insufficient scope 等）のみ再連携案内。
+            # Calendar API は rate limit 系（rateLimitExceeded 等）も 403 を返すため、
+            # reason で判別しないとバースト時に全員へ誤った再認可誘導をする（レビュー F4）。
             status = getattr(getattr(e, "resp", None), "status", None)
             if str(status) == "403":
-                log.info("calendar_event_reauth_needed", via="api_403")
-                return CalendarEventOutput(error="reauth_needed", message=_ERR_MSG["reauth_needed"])
+                reason = (
+                    f"{getattr(e, 'reason', '') or ''} {getattr(e, 'error_details', '') or ''}"
+                ).lower()
+                if any(k in reason for k in ("insufficient", "permission", "scope", "forbidden")):
+                    log.info("calendar_event_reauth_needed", via="api_403")
+                    return CalendarEventOutput(
+                        error="reauth_needed", message=_ERR_MSG["reauth_needed"]
+                    )
             log.warning("calendar_event_insert_failed", err=name)
             return CalendarEventOutput(error="insert_failed", message=_ERR_MSG["insert_failed"])
 

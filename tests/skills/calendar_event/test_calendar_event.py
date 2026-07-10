@@ -53,7 +53,11 @@ def test_token_roundtrip() -> None:
 def test_token_rejects_other_owner_and_tamper_and_expiry() -> None:
     t = _token()
     assert decode_event_token(t, "other@vectorinc.co.jp") is None  # 所有者不一致
-    assert decode_event_token(t[:-2] + "xx", ME) is None  # 署名改竄
+    # 署名改竄: base64 末尾は非有意ビットがあり末尾差し替えだと 1/256 で素通りする（フレーク）。
+    # 本文中央の 1 文字を必ず別値に差し替える＝決定的に HMAC 不一致にする。
+    body, sig = t.split(".", 1)
+    flip = "A" if body[5] != "A" else "B"
+    assert decode_event_token(body[:5] + flip + body[6:] + "." + sig, ME) is None
     old = _token(now=1_000_000)  # 発行が大昔＝失効
     assert decode_event_token(old, ME) is None
 
@@ -66,9 +70,8 @@ def test_token_fail_closed_without_secret(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_stable_event_id_is_base32hex_and_deterministic() -> None:
-    t = _token()
-    eid = stable_event_id(t)
-    assert eid == stable_event_id(t)  # 決定的＝連打で同一 id
+    eid = stable_event_id("2026-07-15T14:00:00+09:00", "2026-07-15T15:00:00+09:00", ME)
+    assert eid == stable_event_id("2026-07-15T14:00:00+09:00", "2026-07-15T15:00:00+09:00", ME)
     import re
 
     assert re.fullmatch(r"[a-v0-9]{5,1024}", eid)
@@ -136,7 +139,9 @@ def test_happy_path_inserts_with_idempotent_id() -> None:
     out = _run(skill, t)
     assert out.created and out.event_url.startswith("https://calendar.google.com/")
     call = gcal.calls[0]
-    assert call["event_id"] == stable_event_id(t)  # 冪等キー
+    assert call["event_id"] == stable_event_id(
+        "2026-07-15T14:00:00+09:00", "2026-07-15T15:00:00+09:00", ME
+    )  # 冪等キー（安定フィールド由来）
     assert call["summary"] == "◯◯様 定例"
     assert call["start_iso"] == "2026-07-15T14:00:00+09:00"
     assert "attendees" not in call  # 招待は API 面ごと存在しない
@@ -181,3 +186,112 @@ def test_insert_failure_is_contained() -> None:
     skill, _ = _skill(_FakeGCal(raise_exc=RuntimeError("api down")))
     out = _run(skill, _token())
     assert out.error == "insert_failed" and not out.created
+
+
+# ── F1 回帰: triage → event_token 発行の結合（fake Bedrock で全経路を通す） ──
+
+
+def test_triage_to_event_token_integration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM が meeting_* を返したら MailDigestItem に event_token が発行される（結合）。
+
+    _triage_batch_call の出力組み立てがホワイトリスト方式のため、新キーの追加漏れが
+    あると全ゲート ON でも機能が沈黙する（レビュー F1）。この結合テストが唯一それを捕まえる。
+    """
+    import base64 as _b64
+    import datetime as _dt
+    import json as _json
+
+    from teamagent.skills.morning_digest.schema import MorningDigestInput
+    from teamagent.skills.morning_digest.skill import MorningDigestSkill
+
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    future = (
+        (_dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))) + _dt.timedelta(days=2))
+        .replace(minute=0, second=0, microsecond=0)
+        .isoformat()
+    )
+    triage_json = _json.dumps(
+        [
+            {
+                "importance": "high",
+                "summary": "定例の確定連絡",
+                "deadline": None,
+                "ask": "",
+                "next_step": "",
+                "meeting_start": future,
+                "meeting_end": None,
+                "meeting_title": "◯◯様 定例",
+                "scheduling_request": True,
+            }
+        ]
+    )
+
+    class _Resp:
+        def __init__(self, text: str) -> None:
+            self.text = text
+            self.usage = type("U", (), {"cost_usd": 0.001})()
+
+    class _Bedrock:
+        def converse(self, **kw: Any) -> _Resp:
+            return _Resp(triage_json)
+
+    class _Msg:
+        def __init__(self) -> None:
+            self.headers = {"From": "c@x.com", "To": ME, "Subject": "定例の件"}
+            self.payload = {
+                "mimeType": "text/plain",
+                "body": {"data": _b64.urlsafe_b64encode("7/15 14:00 確定です".encode()).decode()},
+            }
+            self.internal_date_ms = 1000
+            self.thread_id = "T1"
+            self.id = "m1"
+            self.label_ids = ()
+
+    class _Gmail:
+        def list_messages(self, q: str, rid: str, max_results: int = 30) -> Any:
+            ref = type("R", (), {"id": "m1", "thread_id": "T1"})()
+            return ([ref], None)
+
+        def get_thread(self, tid: str, rid: str, **_: Any) -> list[Any]:
+            return [_Msg()]
+
+        def list_drafts(self, rid: str, **_: Any) -> list[Any]:
+            return []
+
+    class _Tokens:
+        def get(self, e: str) -> Any:
+            return object()
+
+    skill = MorningDigestSkill(token_store=_Tokens(), gmail=_Gmail(), bedrock=_Bedrock())
+    skill._draft_on_demand_only = True  # 下書き生成はスキップ（このテストの対象外）
+    skill._gcalendar = object()  # calendar 収集は失敗して errors に入るだけでよい
+    out = skill.run(
+        MorningDigestInput(max_drafts=0),
+        SkillContext(request_id="r", metadata={"user_email": ME}),
+    )
+    item = out.mail_digest[0]
+    assert item.meeting_start == future  # triage → item へ伝播（F1）
+    assert item.meeting_end  # +1h 補完
+    assert item.scheduling_request is True  # Task4 用フラグも伝播
+    assert item.event_token  # To 本人×日時確定 → token 発行
+    p = decode_event_token(item.event_token, ME)
+    assert p is not None and p.start_iso == future
+
+
+def test_meeting_iso_rejects_date_only_and_past() -> None:
+    from teamagent.skills.morning_digest.skill import _meeting_iso
+
+    assert _meeting_iso("2026-07-15") is None  # 日付のみ＝深夜0時に化けるので不採用
+    assert _meeting_iso("2026-13-45T10:00:00+09:00") is None  # 不正
+    assert _meeting_iso("2026-07-15T14:00:00") == "2026-07-15T14:00:00+09:00"  # naive→JST
+
+
+def test_stable_event_id_survives_token_reissue() -> None:
+    """F3 回帰: 翌日再発行された token（失効時刻が違う）でも同一日時なら同一 id。"""
+    a = stable_event_id("2026-07-15T14:00:00+09:00", "2026-07-15T15:00:00+09:00", ME)
+    b = stable_event_id("2026-07-15T14:00:00+09:00", "2026-07-15T15:00:00+09:00", ME)
+    c = stable_event_id("2026-07-16T14:00:00+09:00", "2026-07-16T15:00:00+09:00", ME)
+    assert a == b and a != c
+    import re
+
+    assert re.fullmatch(r"[a-v0-9]{5,1024}", a)

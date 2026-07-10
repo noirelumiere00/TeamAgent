@@ -1,8 +1,9 @@
 """朝ダイジェスト「📅 カレンダーに登録」ボタン用の署名トークン（HMAC-SHA256）。
 
 draft_token.py と同じ方式（鍵・署名・base64url・fail-closed）で、確定 MTG の
-日時・タイトルを Slack button value に安全に載せる。生の予定情報を value に
-平文で置かない（G3）＋押下者と所有者の照合＋24h 失効。
+日時・タイトルを Slack button value に載せる。HMAC は **改竄・鋳造・他人使用の防止**
+（完全性と所有者束縛）であり **秘匿ではない**（base64 なので読める。本人 DM 内にのみ
+置かれる前提）＋24h 失効。
 
 Fargate（digest 描画）が encode、calendar_event skill（押下処理）が decode する。
 """
@@ -86,14 +87,20 @@ def decode_event_token(
     return MeetingEventPayload(start_iso=start, end_iso=end, title=str(payload.get("l") or ""))
 
 
-def stable_event_id(token: str) -> str:
-    """トークンから冪等 event_id（base32hex 小文字）を導出する（ボタン連打対策）。
+def stable_event_id(start_iso: str, end_iso: str, owner_email: str) -> str:
+    """冪等 event_id（base32hex 小文字）を導出する（連打＋翌日再ダイジェスト対策）。
 
-    同一トークン＝同一予定なので、二度押しは Google 側で 409 duplicate になる。
+    トークン全体でなく **安定フィールド（所有者×開始×終了）** から導出する:
+    同一スレッドは lookback（既定3日）の間ダイジェストに再登場し、都度 token の
+    失効時刻が変わる。token ハッシュだと毎日別 id＝翌日押すと二重登録になるため
+    （反対尋問レビュー F3）、日時が同じなら同じ id → Google 側 409 で冪等になる。
+    title は LLM の揺れがあるため含めない。
     hexdigest（0-9a-f）は base32hex アルファベット [a-v0-9] の部分集合＝形式安全。
-    署名部ではなく本文込み全体をハッシュする（本文が同じなら同じ id）。
+    ⚠️ トレードオフ: UI から手動削除した同一予定を再登録しようとしても 409
+    （「登録済み」案内）になる。その場合は手動作成が必要（既知の制限・adapter docstring 参照）。
     """
-    return "aila" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:40]
+    basis = f"{_owner_hash(owner_email)}|{start_iso}|{end_iso}"
+    return "aila" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:40]
 
 
 __all__ = [

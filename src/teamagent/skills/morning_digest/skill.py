@@ -387,6 +387,19 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     # v0.3 Task3/4: 確定MTG・日程打診の抽出（フラットキー＝打ち切り救済と互換）。
                     start_iso = _meeting_iso(t.get("meeting_start"))
                     end_iso = _meeting_iso(t.get("meeting_end"))
+                    # 過去の会議に📅は無意味（3日 lookback 内の昨日の会議に出さない・F5）。
+                    if start_iso and _dt.datetime.fromisoformat(start_iso) <= _dt.datetime.now(
+                        _dt.timezone(_dt.timedelta(hours=9))
+                    ):
+                        start_iso = None
+                    # 終了が開始以前なら不正とみなし +1h 補完に落とす（Google 400 回避・F5）。
+                    if (
+                        start_iso
+                        and end_iso
+                        and _dt.datetime.fromisoformat(end_iso)
+                        <= _dt.datetime.fromisoformat(start_iso)
+                    ):
+                        end_iso = None
                     if start_iso:
                         item.meeting_start = start_iso
                         item.meeting_end = end_iso or _plus_hour(start_iso)
@@ -481,6 +494,11 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     "deadline": (str(dl) if dl not in (None, "", "null") else None),
                     "ask": str(obj.get("ask", "")),
                     "next_step": str(obj.get("next_step", "")),
+                    # v0.3 Task3/4（⚠️ここを追加しないと下流に届かない＝ホワイトリスト方式）。
+                    "meeting_start": obj.get("meeting_start"),
+                    "meeting_end": obj.get("meeting_end"),
+                    "meeting_title": str(obj.get("meeting_title", "") or ""),
+                    "scheduling_request": bool(obj.get("scheduling_request", False)),
                 }
             )
         return (out, cost)
@@ -897,6 +915,9 @@ def _meeting_iso(v: Any) -> str | None:
         return None
     raw = str(v).strip()
     if not raw or raw.lower() == "null":
+        return None
+    if "T" not in raw:
+        # 日付のみ＝時刻不明。深夜0:00の予定として化けるため「確定」とみなさない（F5）。
         return None
     try:
         parsed = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))

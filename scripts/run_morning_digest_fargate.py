@@ -152,6 +152,17 @@ def _slack_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _fmt_meeting_button_time(start_iso: str | None) -> str:
+    """meeting_start(ISO) → 「7/15 14:00」（📅ボタン文言用・JST）。不正は "" で汎用文言に落とす。"""
+    if not start_iso:
+        return ""
+    try:
+        dt = _dt.datetime.fromisoformat(start_iso).astimezone(_JST)
+        return f"{dt.month}/{dt.day} {dt.strftime('%H:%M')}"
+    except (ValueError, TypeError):
+        return ""
+
+
 def _fmt_event_time(start_at: str | None, end_at: str | None) -> str:
     """ISO 文字列（…T10:00:00+09:00 / 日付のみ=終日）を '10:00–11:00' / '終日' に整形する。"""
 
@@ -205,12 +216,16 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
         }
     )
     # 📅 確定MTGのカレンダー登録（v0.3 Task3・既定OFF）。日時確定×To本人のみ token が発行される。
+    # ボタン文言に登録される日時を明示する（何が登録されるか見えない「盲目の同意」を防ぐ。
+    # メール本文＝攻撃者制御値を LLM が抽出した日時なので、押す前に本人が検証できることが HITL の実質）。
     event_token = getattr(m, "event_token", "")
     if event_token and _calendar_button_enabled():
+        when = _fmt_meeting_button_time(getattr(m, "meeting_start", None))
+        label = f"📅 {when} に登録" if when else "📅 カレンダーに登録"
         btns.append(
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "📅 カレンダーに登録", "emoji": True},
+                "text": {"type": "plain_text", "text": label[:75], "emoji": True},
                 "action_id": _ACTION_CALENDAR_EVENT,
                 "value": event_token,
             }
