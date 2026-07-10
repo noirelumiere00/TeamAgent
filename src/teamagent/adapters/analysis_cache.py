@@ -29,12 +29,14 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-_DEFAULT_BUCKET = "teamagent-dev-raw-files"
 _DEFAULT_PREFIX = "analysis-cache/"
 
 # YouTube 動画IDの抽出（watch?v= / youtu.be/ / shorts/ / embed/）。
+# watch は [?&]v= で「v というパラメータ名」だけに一致させる（[^#]*v= は貪欲で cv= 等
+# 「v で終わる別パラメータ」の値を誤抽出し、別動画の分析を返す誤ヒットになる＝レビュー F-3）。
 _YT_ID_RE = re.compile(
-    r"(?:youtube\.com/(?:watch\?[^#]*v=|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{6,20})"
+    r"(?:youtube\.com/(?:watch\?(?:[^#]*[?&])?v=|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{6,20})",
+    re.IGNORECASE,
 )
 
 
@@ -73,7 +75,9 @@ class AnalysisCache:
         prefix: str | None = None,
         client: Any | None = None,
     ) -> None:
-        self._bucket = bucket or os.environ.get("ANALYSIS_CACHE_BUCKET") or _DEFAULT_BUCKET
+        # bucket はデフォルトを持たない（ENABLED=1 かつ bucket 未設定という設定ミスが
+        # 環境跨ぎ＋無音空振りになるのを防ぐ＝レビュー F-5。未設定なら get/put が明示 WARN）。
+        self._bucket = bucket or os.environ.get("ANALYSIS_CACHE_BUCKET") or ""
         self._prefix = prefix or os.environ.get("ANALYSIS_CACHE_PREFIX") or _DEFAULT_PREFIX
         self._client = client
 
@@ -95,6 +99,9 @@ class AnalysisCache:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def get(self, key: str, *, request_id: str) -> CachedAnalysis | None:
+        if not self._bucket:
+            logger.warning("analysis_cache_bucket_missing", request_id=request_id)
+            return None
         start = time.perf_counter()
         try:
             resp = self._ensure_client().get_object(
@@ -115,14 +122,31 @@ class AnalysisCache:
                 original_cost_usd=float(payload.get("cost_usd") or 0.0),
             )
         except Exception as e:
-            if type(e).__name__ not in ("NoSuchKey", "ClientError"):
-                logger.warning(
-                    "analysis_cache_get_failed", request_id=request_id, error=type(e).__name__
-                )
-            return None  # miss / 障害 いずれも fail-open（分析本体へ進む）
+            # miss の実型は IAM 依存（レビュー F-2）: s3:ListBucket が無い現 IAM では
+            # 404/NoSuchKey ではなく 403 AccessDenied（ClientError）が「通常の miss」。
+            # そのため AccessDenied も無音 miss として扱う（区別したければ IAM に
+            # ListBucket + s3:prefix condition を足して真の 404 化する＝PR 本文参照）。
+            code = ""
+            resp_meta = getattr(e, "response", None)
+            if isinstance(resp_meta, dict):
+                code = str((resp_meta.get("Error") or {}).get("Code") or "")
+            if code in ("NoSuchKey", "404", "AccessDenied", "NoSuchBucket") or type(e).__name__ in (
+                "NoSuchKey",
+            ):
+                return None  # 通常の miss（無音）
+            logger.warning(
+                "analysis_cache_get_failed",
+                request_id=request_id,
+                error=type(e).__name__,
+                code=code,
+            )
+            return None  # 障害も fail-open（分析本体へ進む）
 
     def put(self, key: str, *, text: str, model_id: str, cost_usd: float, request_id: str) -> None:
         if not text:
+            return
+        if not self._bucket:
+            logger.warning("analysis_cache_bucket_missing", request_id=request_id)
             return
         try:
             body = json.dumps(

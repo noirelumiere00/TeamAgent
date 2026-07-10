@@ -368,7 +368,10 @@ async def dispatch_tool(
         tool=name,
         request_id=ctx.request_id,
         latency_ms=int((time.perf_counter() - _started) * 1000),
-        cost_usd=float(data.get("total_cost_usd") or 0.0) if isinstance(data, dict) else 0.0,
+        # ⚠️ キー名は cost_usd に**しない**こと: cloudwatch_fargate.tf のメトリックフィルタ
+        # { $.cost_usd = * } が adapter/skill 層の既存ログと合算して日次コストアラームを
+        # 二重〜三重計上に汚染する（レビュー F-1）。usage 集計は専用 Insights クエリで行う。
+        tool_cost_usd=float(data.get("total_cost_usd") or 0.0) if isinstance(data, dict) else 0.0,
     )
     # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
     # (1) 長文退避（Task8・USE_PAYLOAD_OFFLOAD 既定OFF）: 切り詰めは注入キーに触れない

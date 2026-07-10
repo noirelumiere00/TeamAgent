@@ -109,6 +109,7 @@ class _FakeGemini:
 @pytest.fixture
 def _cache_on(monkeypatch: pytest.MonkeyPatch) -> _FakeS3:
     monkeypatch.setenv("ANALYSIS_CACHE_ENABLED", "1")
+    monkeypatch.setenv("ANALYSIS_CACHE_BUCKET", "test-bucket")
     s3 = _FakeS3()
     import teamagent.adapters.analysis_cache as ac
 
@@ -146,3 +147,31 @@ def test_skill_cache_disabled_is_passthrough(monkeypatch: pytest.MonkeyPatch) ->
     _run(skill, url)
     _run(skill, url)
     assert gemini.url_calls == 2  # 既定OFF＝毎回分析（従来挙動そのまま）
+
+
+def test_regex_does_not_grab_trailing_v_param() -> None:
+    """F-3 回帰: cv= 等「v で終わる別パラメータ」を動画IDと誤抽出しない（誤ヒット防止）。"""
+    assert normalize_video_url("https://www.youtube.com/watch?v=REALID12345&cv=SHAREDVAL99") == (
+        "yt:REALID12345"
+    )
+    assert normalize_video_url("https://YOUTU.BE/abc123XYZ_-") == "yt:abc123XYZ_-"  # 大小同一視
+
+
+def test_access_denied_is_silent_miss() -> None:
+    """F-2 回帰: ListBucket 無し IAM では miss が 403 AccessDenied で返る＝無音 miss 扱い。"""
+
+    class _Denied:
+        def get_object(self, **kw: Any) -> Any:
+            e = type("ClientError", (Exception,), {})()
+            e.response = {"Error": {"Code": "AccessDenied"}}
+            raise e
+
+    cache = AnalysisCache(bucket="b", client=_Denied())
+    assert cache.get("k", request_id="r") is None
+
+
+def test_missing_bucket_is_warned_noop() -> None:
+    """F-5 回帰: ENABLED でも bucket 未設定なら無音空振りせず WARN 付き no-op。"""
+    cache = AnalysisCache(bucket=None)
+    assert cache.get("k", request_id="r") is None
+    cache.put("k", text="x", model_id="m", cost_usd=0.1, request_id="r")  # 落ちない
