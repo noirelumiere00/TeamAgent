@@ -2461,6 +2461,48 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
         header = f"*🎬 動画分析* （${output.total_cost_usd:.4f} / {output.model_id}）"
         await respond(response_type="in_channel", text=f"{header}\n\n{output.analysis}")
 
+    @app.action("calendar_event")
+    async def handle_calendar_event(
+        ack: Any,
+        body: dict[str, Any],
+        action: dict[str, Any],
+        respond: Any,
+    ) -> None:
+        """朝ダイジェストの「📅 カレンダーに登録」押下 → 本人カレンダーへ予定登録（v0.3 Task3）。
+
+        OpenClaw と worker が同一 Slack app で Socket Mode 二重接続する構成では interaction が
+        どちらへ届くか不定のため、mail_draft と対称に worker 側にもハンドラを置く（無反応
+        ボタン防止・レビュー F2）。判断ロジックは CalendarEventSkill を再利用（二重実装しない）。
+        """
+        await ack()  # Slack の 3 秒制約：まず即 ack
+        request_id = f"act-{uuid.uuid4().hex[:12]}"
+        user_id = (body.get("user") or {}).get("id")
+        token_value = str((action or {}).get("value") or "")
+        logger.info("slack_action_calendar_event", request_id=request_id, user_id=user_id)
+
+        email = await disp._resolve_user_email(user_id)
+        if not email:
+            await respond(
+                response_type="ephemeral",
+                text="ユーザーを特定できませんでした（社外/ゲストは対象外です）。",
+            )
+            return
+
+        from teamagent.skills.base import SkillContext
+        from teamagent.skills.calendar_event.schema import CalendarEventInput
+        from teamagent.skills.calendar_event.skill import CalendarEventSkill
+
+        skill = CalendarEventSkill(token_store=disp._get_token_store())
+        out = await asyncio.to_thread(
+            skill.run,
+            CalendarEventInput(event_token=token_value),
+            SkillContext(request_id=request_id, metadata={"user_email": email}),
+        )
+        text = out.message
+        if out.event_url:
+            text += f"\n<{out.event_url}|カレンダーで開く>"
+        await respond(response_type="ephemeral", text=text)
+
     @app.action("mail_draft")
     async def handle_mail_draft(
         ack: Any,

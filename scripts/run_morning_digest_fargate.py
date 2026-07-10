@@ -110,6 +110,20 @@ _CALENDAR_URL = "https://calendar.google.com/"
 # ボタン押下（block_actions）を worker(Socket Mode) が受ける action_id。slack_bot.py の
 # @app.action と一致させること。value は HMAC 署名トークン（生 thread_id は載せない＝G3）。
 _ACTION_MAIL_DRAFT = "mail_draft"
+# 📅 カレンダー登録ボタン（v0.3 Task3）。value は event_token（HMAC署名・日時/タイトル入り）。
+_ACTION_CALENDAR_EVENT = "calendar_event"
+
+
+def _calendar_button_enabled() -> bool:
+    """MORNING_DIGEST_CALENDAR_BUTTON=1 のときのみ📅ボタンを描画（既定OFF・§10 E1-2）。
+
+    ボタンは押下先の calendar_event tool（USE_CALENDAR_EVENT_TOOL + toolFilter.include）が
+    本番で有効になってから ON にする（先に出すと無反応ボタンになる）。"""
+    return os.environ.get("MORNING_DIGEST_CALENDAR_BUTTON", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 _JST = _dt.timezone(_dt.timedelta(hours=9))
@@ -136,6 +150,17 @@ def _slack_escape(s: str) -> str:
     Slack 仕様では & < > のみエスケープが必要。
     """
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _fmt_meeting_button_time(start_iso: str | None) -> str:
+    """meeting_start(ISO) → 「7/15 14:00」（📅ボタン文言用・JST）。不正は "" で汎用文言に落とす。"""
+    if not start_iso:
+        return ""
+    try:
+        dt = _dt.datetime.fromisoformat(start_iso).astimezone(_JST)
+        return f"{dt.month}/{dt.day} {dt.strftime('%H:%M')}"
+    except (ValueError, TypeError):
+        return ""
 
 
 def _fmt_event_time(start_at: str | None, end_at: str | None) -> str:
@@ -190,6 +215,21 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
             "url": thread_url,  # そのスレッドへワンタップ直行（url ボタン＝非発火）
         }
     )
+    # 📅 確定MTGのカレンダー登録（v0.3 Task3・既定OFF）。日時確定×To本人のみ token が発行される。
+    # ボタン文言に登録される日時を明示する（何が登録されるか見えない「盲目の同意」を防ぐ。
+    # メール本文＝攻撃者制御値を LLM が抽出した日時なので、押す前に本人が検証できることが HITL の実質）。
+    event_token = getattr(m, "event_token", "")
+    if event_token and _calendar_button_enabled():
+        when = _fmt_meeting_button_time(getattr(m, "meeting_start", None))
+        label = f"📅 {when} に登録" if when else "📅 カレンダーに登録"
+        btns.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": label[:75], "emoji": True},
+                "action_id": _ACTION_CALENDAR_EVENT,
+                "value": event_token,
+            }
+        )
     return btns
 
 

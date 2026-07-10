@@ -342,6 +342,21 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 朝ダイジェストの「📅 カレンダーに登録」ボタン押下を処理するツール（OpenClaw 経由）。
+    # 本人カレンダーへ登録のみ（招待送信なし・削除/変更は adapter 物理封鎖）。**既定 OFF**。
+    if _envflag("USE_CALENDAR_EVENT_TOOL"):
+        from teamagent.skills.calendar_event.skill import CalendarEventSkill
+
+        cal_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                CalendarEventSkill.name,
+                CalendarEventSkill.description,
+                CalendarEventSkill,
+                factory=lambda: CalendarEventSkill(token_store=cal_store),
+            )
+        )
+
     # 朝ダイジェストの「✏️ 下書きを作成」ボタン押下を処理するツール（OpenClaw 経由）。
     # 押下 → OpenClaw(socket) が system event でエージェントへ転送 → SOUL 指示で本ツールを呼ぶ。
     # その案件へ Reply-All 下書きを作成（送信しない）。**既定 OFF**（USE_MAIL_DRAFT_TOOL=1）。

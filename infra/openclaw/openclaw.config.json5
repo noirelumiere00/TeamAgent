@@ -137,6 +137,8 @@
             // event でエージェントへ渡し、SOUL 指示で本ツールを呼ぶ（draft_token を検証→Reply-All
             // 下書き作成・送信しない）。USE_MAIL_DRAFT_TOOL=1 が必要。
             "mail_draft",
+            // v0.3 Task3: 📅カレンダー登録ボタン（本人カレンダーのみ・招待送信なし・既定OFFのenv gateあり）
+            "calendar_event",
             // morning_digest は EventBridge Scheduled Task で起動・mention 経由で呼ばれないが、
             // ローカル検証・将来の手動 trigger 用に include しておく。USE_MORNING_DIGEST_TOOL=1 が必要。
             "morning_digest",

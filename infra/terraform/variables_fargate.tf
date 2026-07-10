@@ -45,6 +45,12 @@ variable "shared_company_domains" {
   default     = ""
 }
 
+variable "use_calendar_event_tool" {
+  description = "calendar_event tool（📅カレンダー登録ボタンの押下処理・v0.3 Task3）を mcp で有効化。既定 false。ON 後に morning_digest_calendar_button=true にする（順序を守らないと無反応ボタン）。"
+  type        = bool
+  default     = false
+}
+
 variable "slack_team_id" {
   description = "自社 Slack workspace の team_id（T で始まる）。設定すると resolve_identity が他ワークスペースのユーザーを fail-closed で拒否する。空だと team 検証 skip（fail-open・起動後の初回解決で WARN ログ）。多人数運用では必ず設定（CLAUDE.md §5-C4）。"
   type        = string

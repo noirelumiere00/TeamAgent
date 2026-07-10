@@ -87,6 +87,22 @@ class MailDigestItem(BaseModel):
     thread_gmail_url: str = Field(
         default="", max_length=300, description="そのスレッドの Gmail 直リンク（確認するボタン用）"
     )
+    # --- v0.3 Task3/4: 確定MTG・日程打診（LLM triage 抽出・フラットキー） ---
+    meeting_start: str | None = Field(
+        default=None, description="本文で確定しているMTGの開始（ISO・offset付き・検証済み）"
+    )
+    meeting_end: str | None = Field(default=None, description="同・終了（不明時は開始+1h を補完）")
+    meeting_title: str = Field(
+        default="", max_length=60, description="MTGの呼び名（本人DM表示・📅ボタン文言用）"
+    )
+    scheduling_request: bool = Field(
+        default=False, description="相手が日程提示を求めているか（Task4 🗓ボタンの条件）"
+    )
+    event_token: str = Field(
+        default="",
+        max_length=500,
+        description="📅カレンダー登録ボタン用の署名トークン（To本人かつ日時確定時のみ発行）",
+    )
 
 
 class CalendarEventItem(BaseModel):

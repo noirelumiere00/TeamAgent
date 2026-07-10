@@ -67,6 +67,12 @@ variable "morning_digest_slack_unread" {
   default     = false
 }
 
+variable "morning_digest_calendar_button" {
+  description = "📅カレンダー登録ボタン（v0.3 Task3）を朝ダイジェストに描画。既定 false。ON は calendar_event tool（USE_CALENDAR_EVENT_TOOL + toolFilter）が本番有効になってから（先に出すと無反応ボタン）。"
+  type        = bool
+  default     = false
+}
+
 variable "morning_digest_model_id" {
   description = "triage/下書き生成に使う Bedrock モデル ID。既定 Haiku（低コスト・高速）。"
   type        = string
@@ -237,6 +243,8 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # (search:read 等) 設定＋対象ユーザーの Slack 連携（xoxp・search:read 込み）が前提。
       # 未連携ユーザーは fail-open で空＝段階ロールアウト可。
       { name = "MORNING_DIGEST_SLACK_UNREAD", value = var.morning_digest_slack_unread ? "true" : "false" },
+      # 📅カレンダー登録ボタン（v0.3 Task3・既定OFF）。押下先 calendar_event tool の有効化とセットで ON。
+      { name = "MORNING_DIGEST_CALENDAR_BUTTON", value = var.morning_digest_calendar_button ? "true" : "false" },
     ]
     secrets = [
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
