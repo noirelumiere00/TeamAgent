@@ -418,6 +418,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_PAYLOAD_OFFLOAD", value = var.use_payload_offload ? "true" : "false" },
       # 退避先 bucket（scrape 系の VSEO_REPORT_BUCKET と独立に指定＝両立時のキー衝突なし）。
       { name = "PAYLOAD_OFFLOAD_BUCKET", value = var.use_payload_offload ? aws_s3_bucket.raw_files.bucket : "" },
+      # v0.3 Task10: 月間クォータ（既定 false・**migration 0017 の本番適用が前提**）。
+      { name = "VIDEO_QUOTA_ENABLED", value = var.video_quota_enabled ? "true" : "false" },
+      { name = "VIDEO_MONTHLY_QUOTA", value = tostring(var.video_monthly_quota) },
       # v0.3 Task10: 分析結果キャッシュ（既定 false・IAM 文とセット＝フラグだけでは動かない F1 型の回避）。
       { name = "ANALYSIS_CACHE_ENABLED", value = var.use_analysis_cache ? "true" : "false" },
       { name = "ANALYSIS_CACHE_BUCKET", value = var.use_analysis_cache ? aws_s3_bucket.raw_files.bucket : "" },

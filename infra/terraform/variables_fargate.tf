@@ -57,6 +57,18 @@ variable "use_schedule_propose_tool" {
   default     = false
 }
 
+variable "video_quota_enabled" {
+  description = "動画分析の月間クォータ（v0.3 Task10）。既定 false。有効化前に migration 0017 の本番適用が必須（未適用だと fail-open で素通り・WARN のみ）。"
+  type        = bool
+  default     = false
+}
+
+variable "video_monthly_quota" {
+  description = "ユーザーごとの月間動画分析上限（本・JST月次リセット・Step0裁定の初期値20）。"
+  type        = number
+  default     = 20
+}
+
 variable "use_analysis_cache" {
   description = "Gemini 動画分析結果の S3 キャッシュ（v0.3 Task10）。既定 false。同一動画×同一プロンプトの再分析を回避（Gemini=GCP課金の数少ないガード）。"
   type        = bool
