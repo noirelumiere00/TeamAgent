@@ -387,6 +387,8 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_MAIL_DRAFT_TOOL", value = "true" },
       # v0.3 Task3: 📅カレンダー登録（既定 false・tfvars で ON。ボタン描画フラグより先に ON にする）。
       { name = "USE_CALENDAR_EVENT_TOOL", value = var.use_calendar_event_tool ? "true" : "false" },
+      # v0.3 Task4: 🗓日程候補提案（既定 false・ボタン描画フラグより先に ON）。
+      { name = "USE_SCHEDULE_PROPOSE_TOOL", value = var.use_schedule_propose_tool ? "true" : "false" },
       # §知識ベース（2026-06-22）: 新スキーマ(documents/chunks=本番794件)を検索対象にし、
       # 資料種別フィルタ(knowledge_filters)と実ファイル配信(knowledge_deliver)を有効化。
       # USE_NEW_SCHEMA が無いと search は旧 proposals_chunks(3件)しか見ず知識機能が空振りする。

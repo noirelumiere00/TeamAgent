@@ -112,6 +112,17 @@ _CALENDAR_URL = "https://calendar.google.com/"
 _ACTION_MAIL_DRAFT = "mail_draft"
 # 📅 カレンダー登録ボタン（v0.3 Task3）。value は event_token（HMAC署名・日時/タイトル入り）。
 _ACTION_CALENDAR_EVENT = "calendar_event"
+# 🗓 日程候補を提案ボタン（v0.3 Task4）。value は draft_token（同一形式・thread_id 由来）。
+_ACTION_SCHEDULE_PROPOSE = "schedule_propose"
+
+
+def _schedule_button_enabled() -> bool:
+    """MORNING_DIGEST_SCHEDULE_BUTTON=1 のときのみ🗓ボタンを描画（既定OFF・§10 E1-2）。"""
+    return os.environ.get("MORNING_DIGEST_SCHEDULE_BUTTON", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _calendar_button_enabled() -> bool:
@@ -228,6 +239,17 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
                 "text": {"type": "plain_text", "text": label[:75], "emoji": True},
                 "action_id": _ACTION_CALENDAR_EVENT,
                 "value": event_token,
+            }
+        )
+    # 🗓 日程打診への候補提案（v0.3 Task4・既定OFF）。相手が日程を求めている×To本人のみ。
+    # value は draft_token（thread_id 由来・schedule_propose がスレッドへの返信下書きに使う）。
+    if getattr(m, "scheduling_request", False) and draft_token and _schedule_button_enabled():
+        btns.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "🗓 日程候補を提案", "emoji": True},
+                "action_id": _ACTION_SCHEDULE_PROPOSE,
+                "value": draft_token,
             }
         )
     return btns

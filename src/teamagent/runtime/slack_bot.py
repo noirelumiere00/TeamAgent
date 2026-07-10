@@ -2503,6 +2503,50 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
             text += f"\n<{out.event_url}|カレンダーで開く>"
         await respond(response_type="ephemeral", text=text)
 
+    @app.action("schedule_propose")
+    async def handle_schedule_propose(
+        ack: Any,
+        body: dict[str, Any],
+        action: dict[str, Any],
+        respond: Any,
+    ) -> None:
+        """朝ダイジェストの「🗓 日程候補を提案」押下（v0.3 Task4・calendar_event と対称）。"""
+        await ack()
+        request_id = f"act-{uuid.uuid4().hex[:12]}"
+        user_id = (body.get("user") or {}).get("id")
+        token_value = str((action or {}).get("value") or "")
+        logger.info("slack_action_schedule_propose", request_id=request_id, user_id=user_id)
+        try:
+            await respond(
+                response_type="ephemeral",
+                text="🗓 空き枠を確認して下書きを作成中…数秒お待ちください。",
+            )
+        except Exception:
+            pass
+
+        email = await disp._resolve_user_email(user_id)
+        if not email:
+            await respond(
+                response_type="ephemeral",
+                text="ユーザーを特定できませんでした（社外/ゲストは対象外です）。",
+            )
+            return
+
+        from teamagent.skills.base import SkillContext
+        from teamagent.skills.schedule_propose.schema import ScheduleProposeInput
+        from teamagent.skills.schedule_propose.skill import ScheduleProposeSkill
+
+        skill = ScheduleProposeSkill(token_store=disp._get_token_store())
+        out = await asyncio.to_thread(
+            skill.run,
+            ScheduleProposeInput(schedule_token=token_value),
+            SkillContext(request_id=request_id, metadata={"user_email": email}),
+        )
+        text = out.message
+        if out.open_url:
+            text += f"\n<{out.open_url}|Gmailで開く>"
+        await respond(response_type="ephemeral", text=text)
+
     @app.action("mail_draft")
     async def handle_mail_draft(
         ack: Any,

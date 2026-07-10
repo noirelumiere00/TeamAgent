@@ -627,29 +627,40 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         return (created, cost)
 
     def _create_single_draft(
-        self, gmail_rw: Any, msg: Any, requester: str, ctx: SkillContext
+        self,
+        gmail_rw: Any,
+        msg: Any,
+        requester: str,
+        ctx: SkillContext,
+        *,
+        body_override: str | None = None,
     ) -> tuple[bool, float]:
         """1 メッセージ（=スレッドのアンカー）から Reply-All 下書きを 1 件作る。
 
         返り値 (created, cost)。返信先不明/一斉送信/空本文/作成失敗は created=False。
         冪等性チェック（list_drafts）と件数上限は呼び出し側の責務。
+        body_override 指定時は LLM 生成をスキップし決定的本文で作る（schedule_propose の
+        日程候補下書き用・コストゼロ・is_mass 判定もスキップ＝本人のボタン明示依頼のため）。
         """
         cost = 0.0
         to_addr = _extract_reply_to(msg.headers, requester)
         if not to_addr:
             return (False, cost)  # 返信先不明（自分が唯一の宛先など）
-        body = extract_plain_text(msg.payload) or str(getattr(msg, "snippet", "") or "")
-        if is_mass_or_impersonal(msg.headers, body):
-            return (False, cost)  # 一斉送信/自動配信/各位 等は個人返信不要
-        # G6: 本文（攻撃者制御）の境界トークンを無害化してから LLM 枠に入れる。
-        masked = _strip_sentinels(str(scrub_value(body))[: self._max_body_chars])
-        thread_history = self._thread_history(gmail_rw, msg, requester, ctx)
-        decisions_section, deal_cost = self._deal_decisions_section(requester, msg, ctx)
-        cost += deal_cost
-        draft_text, draft_cost = self._generate_draft(
-            masked, ctx, thread_history=thread_history, decisions_section=decisions_section
-        )
-        cost += draft_cost
+        if body_override is not None:
+            draft_text = body_override
+        else:
+            body = extract_plain_text(msg.payload) or str(getattr(msg, "snippet", "") or "")
+            if is_mass_or_impersonal(msg.headers, body):
+                return (False, cost)  # 一斉送信/自動配信/各位 等は個人返信不要
+            # G6: 本文（攻撃者制御）の境界トークンを無害化してから LLM 枠に入れる。
+            masked = _strip_sentinels(str(scrub_value(body))[: self._max_body_chars])
+            thread_history = self._thread_history(gmail_rw, msg, requester, ctx)
+            decisions_section, deal_cost = self._deal_decisions_section(requester, msg, ctx)
+            cost += deal_cost
+            draft_text, draft_cost = self._generate_draft(
+                masked, ctx, thread_history=thread_history, decisions_section=decisions_section
+            )
+            cost += draft_cost
         if not draft_text:
             return (False, cost)
         cc_addr = build_cc(msg.headers, requester, to_addr) if self._reply_all else None
@@ -691,7 +702,12 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     item.has_draft = True
 
     def generate_draft_for_thread(
-        self, thread_id: str, requester: str, ctx: SkillContext
+        self,
+        thread_id: str,
+        requester: str,
+        ctx: SkillContext,
+        *,
+        body_override: str | None = None,
     ) -> dict[str, Any]:
         """ボタン押下からの単一スレッド オンデマンド下書き生成（worker から呼ぶ）。
 
@@ -741,7 +757,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         if not _is_addressed_to(getattr(anchor, "headers", {}) or {}, requester):
             out["error"] = "not_addressed"  # 本人が To に居ない（CC のみ/メーリス）
             return out
-        made, cost = self._create_single_draft(gmail_rw, anchor, requester, ctx)
+        made, cost = self._create_single_draft(
+            gmail_rw, anchor, requester, ctx, body_override=body_override
+        )
         out["cost_usd"] = cost
         out["created"] = made
         if not made:

@@ -67,6 +67,12 @@ variable "morning_digest_slack_unread" {
   default     = false
 }
 
+variable "morning_digest_schedule_button" {
+  description = "🗓日程候補提案ボタン（v0.3 Task4）を朝ダイジェストに描画。既定 false。ON は schedule_propose tool の本番有効化後。"
+  type        = bool
+  default     = false
+}
+
 variable "morning_digest_calendar_button" {
   description = "📅カレンダー登録ボタン（v0.3 Task3）を朝ダイジェストに描画。既定 false。ON は calendar_event tool（USE_CALENDAR_EVENT_TOOL + toolFilter）が本番有効になってから（先に出すと無反応ボタン）。"
   type        = bool
@@ -245,6 +251,8 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_SLACK_UNREAD", value = var.morning_digest_slack_unread ? "true" : "false" },
       # 📅カレンダー登録ボタン（v0.3 Task3・既定OFF）。押下先 calendar_event tool の有効化とセットで ON。
       { name = "MORNING_DIGEST_CALENDAR_BUTTON", value = var.morning_digest_calendar_button ? "true" : "false" },
+      # 🗓日程候補提案ボタン（v0.3 Task4・既定OFF）。押下先 schedule_propose tool の有効化とセットで ON。
+      { name = "MORNING_DIGEST_SCHEDULE_BUTTON", value = var.morning_digest_schedule_button ? "true" : "false" },
     ]
     secrets = [
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },

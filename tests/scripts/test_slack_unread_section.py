@@ -138,3 +138,33 @@ def test_calendar_button_absent_without_token(monkeypatch: Any) -> None:
     monkeypatch.setenv("MORNING_DIGEST_CALENDAR_BUTTON", "1")
     btns = runner._reply_buttons(_meeting_item(event_token=""))
     assert not [b for b in btns if b.get("action_id") == "calendar_event"]
+
+
+# ── v0.3 Task4: 🗓 日程候補を提案ボタンの描画（flag 既定OFF） ────────────────
+
+
+def test_schedule_button_rendered_when_flag_on(monkeypatch: Any) -> None:
+    from teamagent.skills.morning_digest.schema import MailDigestItem
+
+    monkeypatch.setenv("MORNING_DIGEST_SCHEDULE_BUTTON", "1")
+    m = MailDigestItem(
+        counterpart_masked="a***@x",
+        importance="high",
+        to_self=True,
+        draft_token="DTOK",
+        scheduling_request=True,
+    )
+    btns = runner._reply_buttons(m)
+    sched = [b for b in btns if b.get("action_id") == "schedule_propose"]
+    assert sched and sched[0]["value"] == "DTOK"  # draft_token を流用（thread_id 由来）
+
+    # flag OFF なら出ない。
+    monkeypatch.delenv("MORNING_DIGEST_SCHEDULE_BUTTON", raising=False)
+    assert not [b for b in runner._reply_buttons(m) if b.get("action_id") == "schedule_propose"]
+
+    # scheduling_request=False なら flag ON でも出ない。
+    monkeypatch.setenv("MORNING_DIGEST_SCHEDULE_BUTTON", "1")
+    m2 = MailDigestItem(
+        counterpart_masked="a***@x", importance="high", to_self=True, draft_token="DTOK"
+    )
+    assert not [b for b in runner._reply_buttons(m2) if b.get("action_id") == "schedule_propose"]

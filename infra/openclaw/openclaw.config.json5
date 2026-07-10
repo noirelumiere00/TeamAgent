@@ -139,6 +139,8 @@
             "mail_draft",
             // v0.3 Task3: 📅カレンダー登録ボタン（本人カレンダーのみ・招待送信なし・既定OFFのenv gateあり）
             "calendar_event",
+            // v0.3 Task4: 🗓日程候補提案ボタン（候補入り下書き＋透明仮予定・送信/招待なし・既定OFF）
+            "schedule_propose",
             // morning_digest は EventBridge Scheduled Task で起動・mention 経由で呼ばれないが、
             // ローカル検証・将来の手動 trigger 用に include しておく。USE_MORNING_DIGEST_TOOL=1 が必要。
             "morning_digest",
