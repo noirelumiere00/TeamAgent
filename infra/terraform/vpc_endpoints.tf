@@ -16,13 +16,12 @@ resource "aws_security_group" "vpce" {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    # §Q-Q2: aiia-mcp も endpoint 経由（ECR pull/Secrets注入/Logs/KMS/Bedrock）。
-    # §U: connect-web も同様（Secrets/KMS/Logs を VPC 内で解決）。本日 2026-06-18 インシデントの
+    # §U: connect-web も endpoint 経由（Secrets/KMS/Logs を VPC 内で解決）。本日 2026-06-18 インシデントの
     # 「EC2 worker SG 漏れで SM 不達」を Fargate 化に伴って繰り返さないための必須配線。
     # ここに入れ忘れると private_dns_enabled=true のため当該タスクだけ 443 が落ち provisioning ループになる。
+    # （aiia-mcp の SG は #128 の退役で削除済み）
     security_groups = concat(
       [aws_security_group.openclaw.id, aws_security_group.mcp.id],
-      var.enable_aiia_mcp ? [aws_security_group.aiia_mcp[0].id] : [],
       # §U-Phase1: connect-web Fargate も VPC endpoint 経由（PR #129）。
       var.enable_connect_web ? [aws_security_group.connect_web[0].id] : [],
       # §U-Phase2: ingest Scheduled Task も VPC endpoint 経由（PR #129）。
@@ -85,8 +84,8 @@ resource "aws_vpc_endpoint" "s3" {
   tags = { Name = "${var.project_name}-${var.environment}-vpce-s3" }
 }
 
-# §Q-Q2: DynamoDB gateway endpoint（無料）— aiia-mcp の本務（per-user token 4表）を private 経路に。
-# これが無いと DynamoDB だけ IGW 依存＝将来 public IP を外すと真っ先に切れる。
+# DynamoDB gateway endpoint（無料）— private 経路で DynamoDB アクセスを維持
+# （aiia-mcp 退役後も terraform-tflock や将来用途のため endpoint は残す）。
 resource "aws_vpc_endpoint" "dynamodb" {
   count             = var.enable_vpc_endpoints ? 1 : 0
   vpc_id            = data.aws_vpc.default.id

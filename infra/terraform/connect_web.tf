@@ -90,7 +90,7 @@ variable "slack_oauth_redirect_uri" {
 variable "connect_oauth_kms_key_id" {
   description = "OAUTH_KMS_KEY_ID（oauth_tokens 暗号化に使う既存 KMS 鍵の ARN・既定 alias 解決）"
   type        = string
-  default     = "" # 空なら data.aws_kms_alias.aiia_oauth で解決した key arn を使用（aiia と共用）
+  default     = "" # 空なら data.aws_kms_alias.connect_oauth（alias/teamagent-oauth-tokens）で解決した key arn を使用
 }
 
 variable "connect_web_vpc_cidr" {
@@ -129,8 +129,8 @@ data "aws_secretsmanager_secret" "slack_oauth_state_secret" {
   name  = var.slack_oauth_state_secret_name
 }
 
-# KMS 鍵：aiia と同じ `alias/teamagent-oauth-tokens` を共用（oauth_tokens 暗号化）。
-# enable_aiia_mcp が false でも単独で解決できるよう data を別途定義。
+# KMS 鍵：`alias/teamagent-oauth-tokens`（oauth_tokens 暗号化）。もとは aiia と共用だった鍵で、
+# aiia-mcp 退役（#128）後も connect-web が使い続けるため、退役時の aiia リソース掃除で削除しないこと。
 data "aws_kms_alias" "connect_oauth" {
   count = var.enable_connect_web ? 1 : 0
   name  = "alias/teamagent-oauth-tokens"
