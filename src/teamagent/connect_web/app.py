@@ -10,10 +10,15 @@ AI 要約 + 結果カードを返す。👍/👎 は search_feedback テーブ�
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import os
+import threading
+from collections import Counter
 from collections.abc import Callable
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -41,6 +46,49 @@ from teamagent.dashboard.auth import (
 from teamagent.dashboard.config import DashboardConfig
 
 logger = structlog.get_logger(__name__)
+
+
+_APP_HTML_MISSING = (
+    "<!doctype html><meta charset=utf-8><title>準備中</title>"
+    "<div style='font-family:system-ui,-apple-system,sans-serif;max-width:640px;"
+    "margin:80px auto;padding:0 24px;color:#333;line-height:1.7'>"
+    "<h1 style='font-weight:800'>Obsidian ビューは準備中です</h1>"
+    "<p>このイメージには静的ビュー（<code>static/app.html</code>）が同梱されていません。"
+    "最新の再デプロイで反映されます。それまでは検索を "
+    "<a href='/search' style='color:#5b4fd6'>/search</a> からご利用ください。</p></div>"
+)
+
+
+@lru_cache(maxsize=1)
+def _static_app_html() -> str:
+    """Obsidian 風 単一 HTML（自己完結・約3MB）をパッケージ相対で1回だけ読む。
+
+    ``COPY src/ ./src/``（Dockerfile.teamagent-mcp）でイメージに同梱される
+    ``static/app.html`` を返す。cwd 非依存・全リクエスト共有。
+
+    ``app.html`` は機密ナレッジ埋め込みのため git 管理外（``.gitignore``）で、
+    再デプロイ（``redeploy_app.sh``）でイメージに焼き込む運用。git 由来の
+    launch/CI イメージには同梱されないため、その場合は 404/500 ではなく
+    「準備中」プレースホルダを返して壊さない（``/app`` ルートは main 常在可）。
+    """
+    p = Path(__file__).resolve().parent / "static" / "app.html"
+    try:
+        return p.read_text("utf-8")
+    except OSError as exc:  # FileNotFoundError 等。ルートだけ在る launch イメージ向け。
+        logger.warning("static_app_html_missing", path=str(p), error=str(exc))
+        return _APP_HTML_MISSING
+
+
+def _safe_next(raw: str | None) -> str:
+    """ログイン後の戻り先を検証（オープンリダイレクト防止）。
+
+    既知の内部ページ（``/app`` / ``/search``）のみ許可し、それ以外は既定 ``/app``。
+    ＝ログイン後は原則 Obsidian 風 UI(/app) に着地する（旧 /search UI は明示遷移時のみ）。
+    外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
+    """
+    if (raw or "").strip() in {"/app", "/search"}:
+        return raw.strip()
+    return "/app"
 
 _SEARCH_COOKIE = "ta_search_session"
 _SESSION_TTL_S = 8 * 3600
@@ -93,8 +141,19 @@ def _page(title: str, body: str, *, accent: str = "#36c08a") -> str:
 
 
 def _js_str(value: str) -> str:
-    """文字列を安全な JS 文字列リテラルにする（email を textContent 設定する用）。"""
-    return json.dumps(value, ensure_ascii=True)
+    """文字列を安全な JS 文字列リテラルにする（インライン <script> への埋め込み用）。
+
+    json.dumps は ``</script>`` の ``<`` をエスケープしないため、値に閉じタグが入ると
+    HTML パーサが script を早期終了させて XSS が成立し得る（カルテのクライアント名
+    のような任意文字列を埋め込むようになったため顕在化）。``<`` ``>`` ``&`` を
+    \\uXXXX へ置換して防ぐ（JS 文字列リテラルとしては同値・挙動不変）。
+    """
+    return (
+        json.dumps(value, ensure_ascii=True)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
 
 
 def _load_search_config(env: dict[str, str] | None = None) -> DashboardConfig:
@@ -121,6 +180,9 @@ def _load_search_config(env: dict[str, str] | None = None) -> DashboardConfig:
         session_secret=secret,
         dev_bypass=False,
         cookie_secure=secure_raw in {"1", "true", "yes", "on"},
+        # CONNECT_SEARCH_ALLOWED_HD を設定したら「会社ドメイン全体に開放」を意図する
+        # （＝@vectorinc.co.jp 全員可）。ダッシュボード側は load_config が本フラグを渡さず既定 False。
+        allowed_hd_opens_domain=hd is not None,
     )
 
 
@@ -195,6 +257,25 @@ _SEARCH_STYLE = (
     ".emptyx .eb button:hover{background:#2c3a58}"
     ".emptyx .es .lead{color:var(--muted);font-size:12px;margin-right:4px}"
     ".errx{border-color:#7a3b3b;background:rgba(120,50,50,.18)}"
+    # 検索中の視覚状態（#4）: ボタン disable + スケルトンカード（shimmer アニメ）。
+    ".searchbar button:disabled{opacity:.55;cursor:progress}"
+    ".card.skel{pointer-events:none}"
+    ".skl{border-radius:6px;background:linear-gradient(90deg,var(--bg-hover) 25%,"
+    "#2c3a58 37%,var(--bg-hover) 63%);background-size:400% 100%;"
+    "animation:skshine 1.4s ease infinite}"
+    ".skl-t{height:16px;width:55%;margin-bottom:10px}"
+    ".skl-l{height:12px;width:90%;margin-bottom:8px}"
+    ".skl-l.short{width:70%;margin-bottom:0}"
+    "@keyframes skshine{0%{background-position:100% 0}100%{background-position:0 0}}"
+    # アクセシビリティ: 動きを減らす設定ではシマーを止める（静的プレースホルダ化）。
+    "@media (prefers-reduced-motion:reduce){.skl{animation:none}}"
+    # クエリ語ハイライト（#2）: excerpt 中の検索語を span.hl で強調（textContent 分割挿入）。
+    ".hl{background:rgba(255,193,79,.18);color:#ffd27a;border-radius:3px;padding:0 1px}"
+    # 二段レスポンス（#1）: AI要約の生成中プレースホルダ＋失敗時の再試行ボタン。
+    ".answer .abody.pending{color:var(--muted)}"
+    ".answer .aretry{margin-left:8px;background:var(--bg-hover);border:1px solid #34425f;"
+    "color:#c5d0e6;border-radius:8px;padding:2px 10px;font-size:12px;cursor:pointer}"
+    ".answer .aretry:hover{background:#2c3a58}"
 )
 
 
@@ -258,6 +339,11 @@ const fsolution=document.getElementById('fsolution');
 const clientlist=document.getElementById('clientlist');
 let lastQuery='';
 let activeIndustry=null;
+// 連打対策（#4）: 進行中 fetch の中止用 controller と「最新の検索か」を判定する世代カウンタ。
+// abort で旧リクエストを止め（サーバー側は is_disconnected で Bedrock 前に破棄）、
+// 万一 abort が間に合わず resolve しても世代不一致なら描画しない（二重防御）。
+let currentSearch=null;
+let searchGen=0;
 function safeUrl(u){return (typeof u==='string'&&/^(https?|slack|gdrive):/i.test(u))?u:null;}
 // 取引先 datalist を facets から遅延充填（graph fetch 後にのみ __facets.client が埋まる）。
 // 未定義時は何もしない＝free-text フォールバック（部分一致が効くので候補なしでも検索可）。
@@ -384,36 +470,137 @@ function renderEmpty(query){
   }
   results.appendChild(c);
 }
+function setSearching(on){
+  if(go){go.disabled=on;go.textContent=on?'検索中…':'検索';}
+}
+function renderSkeleton(){
+  results.textContent='';
+  for(let i=0;i<3;i++){
+    const c=document.createElement('div');c.className='card skel';
+    c.setAttribute('aria-hidden','true');
+    const t=document.createElement('div');t.className='skl skl-t';c.appendChild(t);
+    const l1=document.createElement('div');l1.className='skl skl-l';c.appendChild(l1);
+    const l2=document.createElement('div');l2.className='skl skl-l short';c.appendChild(l2);
+    results.appendChild(c);
+  }
+}
+// クエリ語ハイライト（#2）: 空白区切りで 2 文字以上の語だけを対象にする。
+function hlTerms(query){
+  return String(query||'').split(/\s+/).filter(function(w){return w.length>=2;});
+}
+// text をクエリ語で分割し、text node と span.hl を交互に append する。
+// createTextNode/createElement/textContent のみ使用（innerHTML 不使用＝XSS 安全）。
+// 大小文字は区別しない。同位置に複数語が一致したら長い語を優先する。
+function appendHighlighted(el,text,terms){
+  el.textContent='';
+  const t=String(text||'');
+  if(!terms||!terms.length){el.textContent=t;return;}
+  const lower=t.toLowerCase();
+  let pos=0;
+  while(pos<t.length){
+    let at=-1,ln=0;
+    for(const w of terms){
+      const lw=w.toLowerCase();
+      const idx=lower.indexOf(lw,pos);
+      if(idx===-1)continue;
+      if(at===-1||idx<at||(idx===at&&lw.length>ln)){at=idx;ln=lw.length;}
+    }
+    if(at===-1){el.appendChild(document.createTextNode(t.slice(pos)));break;}
+    if(at>pos)el.appendChild(document.createTextNode(t.slice(pos,at)));
+    const sp=document.createElement('span');sp.className='hl';
+    sp.textContent=t.slice(at,at+ln);el.appendChild(sp);
+    pos=at+ln;
+  }
+}
+// シェル側（右プレビュー/hover ポップ）から使う公開フック。直近クエリの語で強調し、
+// 未検索（lastQuery 空）なら素の textContent と等価＝グラフ発プレビューは無強調。
+window.searchHighlight=function(el,text){appendHighlighted(el,text,hlTerms(lastQuery));};
+function buildBody(query){
+  const body={query:query,top_k:8};
+  if(activeIndustry)body.filter_industry=activeIndustry;
+  const fc=fclient?fclient.value.trim():'';
+  const fb=fbudget?fbudget.value:'';
+  if(fc)body.filter_client=fc;
+  if(fb)body.filter_budget=fb;
+  if(bunknown&&bunknown.checked&&fb)body.include_unknown_budget=true;
+  if(bsort&&bsort.checked&&fb)body.sort_budget_near=fb;
+  if(fdoctype&&fdoctype.value)body.filter_doc_type=fdoctype.value;
+  const fs=fsolution?fsolution.value.trim():'';
+  if(fs)body.filter_solution=fs;
+  return body;
+}
+// /api/v1/search を 1 回叩く。二段レスポンス（#1）の (a)fast=include_answer:false と
+// (b)answer=include_answer:true の両方がここを通り、AbortController を共有する。
+async function fetchSearch(body,withAnswer,ctl){
+  const resp=await fetch('/api/v1/search',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(Object.assign({include_answer:withAnswer},body)),
+    signal:ctl.signal});
+  if(resp.status===401){
+    location.href='/search/login';
+    const e=new Error('unauthorized');e.name='UnauthorizedError';throw e;
+  }
+  if(!resp.ok)throw new Error('http '+resp.status);
+  return resp.json();
+}
+// AI要約カード（プレースホルダ状態）。(b) 到着で .abody だけ差し替える。
+function renderAnswerPending(){
+  const a=document.createElement('div');a.className='answer';
+  const h=document.createElement('h2');h.textContent='AI 要約';a.appendChild(h);
+  const b=document.createElement('div');b.className='abody pending';
+  b.textContent='AI要約を生成中…';a.appendChild(b);
+  a.appendChild(fbButtons('answer',null,null));
+  return a;
+}
+// (b) answer フェッチの結果を要約カードへ差し込む。(b) の hits は使わない
+// （(a) の描画を維持＝ちらつき防止）。失敗時は再試行ボタンで (b) だけ再実行。
+function attachAnswer(card,promise,body,ctl,gen){
+  const el=card.querySelector('.abody');
+  promise.then(function(data){
+    if(gen!==searchGen)return;
+    if(data&&data.answer){el.classList.remove('pending');el.textContent=data.answer;}
+    else{card.remove();}
+  }).catch(function(e){
+    if(e&&(e.name==='AbortError'||e.name==='UnauthorizedError'))return;
+    if(gen!==searchGen)return;
+    el.classList.remove('pending');
+    el.textContent='要約の生成に失敗しました ';
+    const rb=document.createElement('button');rb.type='button';rb.className='aretry';
+    rb.textContent='再試行';
+    rb.onclick=function(){
+      if(gen!==searchGen)return;
+      el.classList.add('pending');el.textContent='AI要約を生成中…';
+      attachAnswer(card,fetchSearch(body,true,ctl),body,ctl,gen);
+    };
+    el.appendChild(rb);
+  });
+}
 async function search(){
   const query=q.value.trim();if(!query)return;
-  lastQuery=query;renderFilters();results.textContent='検索中…';
+  if(currentSearch)currentSearch.abort();
+  const ctl=new AbortController();currentSearch=ctl;
+  const gen=++searchGen;
+  lastQuery=query;renderFilters();setSearching(true);renderSkeleton();
+  const body=buildBody(query);
+  // 二段レスポンス（#1）: (a) hits 即描画（include_answer:false）と (b) AI要約
+  // （include_answer:true）を並行フェッチ。ctl/gen を共有し、連打時は 2 本とも中止。
+  const answerPromise=fetchSearch(body,true,ctl);
+  answerPromise.catch(function(){});// 早期 reject の unhandledrejection 抑止（attachAnswer で処理）
   let data;
   try{
-    const body={query:query,top_k:8};
-    if(activeIndustry)body.filter_industry=activeIndustry;
-    const fc=fclient?fclient.value.trim():'';
-    const fb=fbudget?fbudget.value:'';
-    if(fc)body.filter_client=fc;
-    if(fb)body.filter_budget=fb;
-    if(bunknown&&bunknown.checked&&fb)body.include_unknown_budget=true;
-    if(bsort&&bsort.checked&&fb)body.sort_budget_near=fb;
-    if(fdoctype&&fdoctype.value)body.filter_doc_type=fdoctype.value;
-    const fs=fsolution?fsolution.value.trim():'';
-    if(fs)body.filter_solution=fs;
-    const resp=await fetch('/api/v1/search',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(body)});
-    if(resp.status===401){location.href='/search/login';return;}
-    data=await resp.json();
-  }catch(e){renderError();return;}
-  results.textContent='';
-  if(data.answer){
-    const a=document.createElement('div');a.className='answer';
-    const h=document.createElement('h2');h.textContent='AI 要約';a.appendChild(h);
-    const body=document.createElement('div');body.textContent=data.answer;a.appendChild(body);
-    a.appendChild(fbButtons('answer',null,null));
-    results.appendChild(a);
+    data=await fetchSearch(body,false,ctl);
+  }catch(e){
+    if(e&&(e.name==='AbortError'||e.name==='UnauthorizedError'))return;
+    if(gen===searchGen){setSearching(false);renderError();ctl.abort();}
+    return;
   }
+  if(gen!==searchGen)return;
+  setSearching(false);
+  results.textContent='';
+  const answerCard=renderAnswerPending();
+  results.appendChild(answerCard);
+  attachAnswer(answerCard,answerPromise,body,ctl,gen);
+  const terms=hlTerms(query);
   const hits=data.hits||[];
   if(!hits.length){renderEmpty(query);return;}
   for(const h of hits){
@@ -438,13 +625,22 @@ async function search(){
     if(h.deal_phase)chips.appendChild(tagChip('# '+h.deal_phase,'deal_phase',h.deal_phase));
     if(chips.childNodes.length)card.appendChild(chips);
     const ex=document.createElement('div');ex.className='excerpt';
-    ex.textContent=h.excerpt||'';card.appendChild(ex);
+    appendHighlighted(ex,h.excerpt||'',terms);card.appendChild(ex);
     const meta=document.createElement('div');meta.className='meta';
     const su=safeUrl(h.source_uri);
     if(su){
       const link=document.createElement('a');link.href=su;
       link.target='_blank';link.rel='noopener noreferrer';
       link.textContent='出典を開く';meta.appendChild(link);
+    }
+    // カルテ導線: client_name / cls_project がある hit はクライアントカルテへ。
+    // アプリ内固定パス（相対）なので safeUrl（絶対 scheme allowlist）は通さず、
+    // encodeURIComponent + textContent の既存流儀で安全に組む。
+    const kn=h.client_name||h.project;
+    if(kn){
+      const kl=document.createElement('a');
+      kl.href='/search/client/'+encodeURIComponent(kn);
+      kl.textContent='カルテを見る';meta.appendChild(kl);
     }
     const sc=document.createElement('span');sc.className='score';
     const sv=(typeof h.score==='number'?h.score.toFixed(3):h.score);
@@ -1672,13 +1868,23 @@ window.openPreview=function(doc){
     previewTagChip('# '+doc.project,'client',doc.project));
   if(chips.childNodes.length)wrap.appendChild(chips);
   if(doc.excerpt){const ex=document.createElement('div');ex.className='pvex';
-    ex.textContent=doc.excerpt;wrap.appendChild(ex);}
+    // 直近クエリの語を span.hl で強調（未検索なら素の textContent と等価・XSS 安全）。
+    if(window.searchHighlight)window.searchHighlight(ex,doc.excerpt);
+    else ex.textContent=doc.excerpt;
+    wrap.appendChild(ex);}
   const su=safeUrlS(doc.source_uri);
   if(su){const ob=document.createElement('button');ob.className='pvopen';ob.type='button';
     ob.textContent='出典を開く ↗';
     ob.addEventListener('click',function(){
       window.open(su,'_blank','noopener,noreferrer');});
     wrap.appendChild(ob);}
+  // カルテ導線: 検索カード/グラフノード両方の openPreview をここ1箇所でカバー。
+  const kn=doc.client_name||doc.project;
+  if(kn){const kb=document.createElement('button');kb.className='pvopen';kb.type='button';
+    kb.textContent='カルテを見る →';
+    kb.addEventListener('click',function(){
+      location.href='/search/client/'+encodeURIComponent(kn);});
+    wrap.appendChild(kb);}
   // 関連資料（同じ /api/v1/graph の隣接から導出。新 API 不要）。
   const relhead=document.createElement('div');relhead.className='relhead';
   relhead.textContent='🔗 関連資料';wrap.appendChild(relhead);
@@ -1970,7 +2176,10 @@ function fillPop(d){
   }
   if(pills.childNodes.length)p.appendChild(pills);
   if(d.excerpt){var ex=document.createElement('div');ex.className='hx';
-    ex.textContent=d.excerpt.slice(0,200);p.appendChild(ex);}
+    // 直近クエリの語を span.hl で強調（未検索なら素の textContent と等価・XSS 安全）。
+    if(window.searchHighlight)window.searchHighlight(ex,d.excerpt.slice(0,200));
+    else ex.textContent=d.excerpt.slice(0,200);
+    p.appendChild(ex);}
   var deg=document.createElement('div');deg.className='hd';
   deg.textContent='接続 '+degreeOf(d.title)+'件';p.appendChild(deg);
 }
@@ -2253,6 +2462,265 @@ def _shell_page(email: str, *, mode: str) -> str:
     return head + body
 
 
+# ============================================================
+# クライアントカルテページ（GET /search/client/{client}）。
+# Karpathy 式 Second Brain の「wiki 層」: 1 クライアントの最新状況ヘッダ +
+# FB 時系列（日付降順）+ 関連資料一覧を 1 画面に集約する。AI 要約はスコープ外。
+# スタイルは _ROOT_TOKENS + _SEARCH_STYLE を再利用（.card/.chip/.meta/.excerpt）。
+# ============================================================
+_KARTE_STYLE = (
+    ".ksec{font-size:14px;color:var(--text);font-weight:600;margin:24px 0 10px}"
+    ".kdate{color:var(--muted);font-size:12px;margin-right:8px;"
+    "font-variant-numeric:tabular-nums}"
+    ".kv{font-size:12.5px;color:#c5d0e6;margin:3px 0;line-height:1.6}"
+    ".kvl{color:var(--muted);margin-right:6px}"
+)
+
+
+# カルテページの最小フロント（依存ゼロ・textContent/createElement のみ＝XSS 安全）。
+# クライアント名は window.__karteClient（_js_str で安全に注入）から読む。
+_KARTE_JS = r"""
+const CLIENT=window.__karteClient||'';
+const khead=document.getElementById('khead');
+const ktl=document.getElementById('ktimeline');
+const kdocs=document.getElementById('kdocs');
+const ksecFb=document.getElementById('ksecFb');
+const ksecDocs=document.getElementById('ksecDocs');
+function kSafeUrl(u){return (typeof u==='string'&&/^(https?|slack|gdrive):/i.test(u))?u:null;}
+function kChip(text){
+  const s=document.createElement('span');s.className='chip';s.textContent=text;return s;
+}
+function kv(parent,label,value){
+  if(!value)return;
+  const p=document.createElement('div');p.className='kv';
+  const l=document.createElement('span');l.className='kvl';l.textContent=label;p.appendChild(l);
+  const v=document.createElement('span');v.textContent=value;p.appendChild(v);
+  parent.appendChild(p);
+}
+function kEmptyCard(msg){
+  const c=document.createElement('div');c.className='emptyx';
+  const i=document.createElement('div');i.className='ei';i.textContent='🗂';c.appendChild(i);
+  const t=document.createElement('div');t.className='et';t.textContent=msg;c.appendChild(t);
+  return c;
+}
+function renderHeader(h){
+  khead.textContent='';
+  const card=document.createElement('div');card.className='card';
+  const chips=document.createElement('div');chips.className='chips';
+  if(h.industry)chips.appendChild(kChip('業界 '+h.industry));
+  if(h.deal_phase)chips.appendChild(kChip('フェーズ '+h.deal_phase));
+  if(h.bant_score)chips.appendChild(kChip('BANT '+h.bant_score));
+  if(h.last_contact)chips.appendChild(kChip('最終接触 '+h.last_contact));
+  chips.appendChild(kChip('FB '+(h.fb_count||0)+'件'));
+  chips.appendChild(kChip('資料 '+(h.doc_count||0)+'件'));
+  card.appendChild(chips);
+  khead.appendChild(card);
+}
+function renderTimeline(items){
+  ktl.textContent='';
+  if(!items.length){
+    const e=document.createElement('div');e.className='empty';
+    e.textContent='FB の記録はまだありません。';ktl.appendChild(e);return;
+  }
+  for(const it of items){
+    const card=document.createElement('div');card.className='card';
+    const t=document.createElement('div');t.className='title';
+    const d=document.createElement('span');d.className='kdate';
+    d.textContent=it.occurred_at||'----';t.appendChild(d);
+    t.appendChild(document.createTextNode(it.title||'(無題)'));
+    card.appendChild(t);
+    const chips=document.createElement('div');chips.className='chips';
+    if(it.deal_phase)chips.appendChild(kChip(it.deal_phase));
+    if(it.bant_score)chips.appendChild(kChip('BANT '+it.bant_score));
+    if(it.channel_type)chips.appendChild(kChip(it.channel_type));
+    if(chips.childNodes.length)card.appendChild(chips);
+    if(it.content){
+      const ex=document.createElement('div');ex.className='excerpt';
+      ex.textContent=it.content;card.appendChild(ex);
+    }
+    kv(card,'ポジ反応',it.positive_reaction);
+    kv(card,'ネガ反応',it.negative_reaction);
+    kv(card,'次アクション',it.next_action);
+    kv(card,'提案メニュー',it.proposed_menu);
+    const su=kSafeUrl(it.source_uri);
+    if(su){
+      const meta=document.createElement('div');meta.className='meta';
+      const a=document.createElement('a');a.href=su;
+      a.target='_blank';a.rel='noopener noreferrer';
+      a.textContent='出典を開く';meta.appendChild(a);
+      card.appendChild(meta);
+    }
+    ktl.appendChild(card);
+  }
+}
+function renderDocs(items){
+  kdocs.textContent='';
+  if(!items.length){
+    const e=document.createElement('div');e.className='empty';
+    e.textContent='関連資料はまだありません。';kdocs.appendChild(e);return;
+  }
+  for(const it of items){
+    const card=document.createElement('div');card.className='card';
+    const t=document.createElement('div');t.className='title';
+    t.textContent=it.title||'(無題)';card.appendChild(t);
+    const chips=document.createElement('div');chips.className='chips';
+    if(it.doc_type)chips.appendChild(kChip(it.doc_type));
+    if(it.source_type)chips.appendChild(kChip(it.source_type));
+    if(it.solution)chips.appendChild(kChip(it.solution));
+    if(it.modified_at)chips.appendChild(kChip(it.modified_at));
+    if(chips.childNodes.length)card.appendChild(chips);
+    if(it.excerpt){
+      const ex=document.createElement('div');ex.className='excerpt';
+      ex.textContent=it.excerpt;card.appendChild(ex);
+    }
+    const su=kSafeUrl(it.open_url);
+    if(su){
+      const meta=document.createElement('div');meta.className='meta';
+      const a=document.createElement('a');a.href=su;
+      a.target='_blank';a.rel='noopener noreferrer';
+      a.textContent='資料を開く';meta.appendChild(a);
+      card.appendChild(meta);
+    }
+    kdocs.appendChild(card);
+  }
+}
+async function loadKarte(){
+  let data;
+  try{
+    const resp=await fetch('/api/v1/client/'+encodeURIComponent(CLIENT));
+    if(resp.status===401){location.href='/search/login';return;}
+    if(!resp.ok)throw new Error('http '+resp.status);
+    data=await resp.json();
+  }catch(e){
+    khead.textContent='';
+    khead.appendChild(kEmptyCard('カルテの取得に失敗しました。少し待って再読み込みしてください。'));
+    ktl.textContent='';kdocs.textContent='';
+    ksecFb.hidden=true;ksecDocs.hidden=true;
+    return;
+  }
+  const tl=data.timeline||[];
+  const docs=data.documents||[];
+  if(!tl.length&&!docs.length){
+    khead.textContent='';
+    khead.appendChild(kEmptyCard('まだ記録がありません'));
+    ktl.textContent='';kdocs.textContent='';
+    ksecFb.hidden=true;ksecDocs.hidden=true;
+    return;
+  }
+  renderHeader(data.header||{});
+  renderTimeline(tl);
+  renderDocs(docs);
+}
+loadKarte();
+"""
+
+
+def _karte_page(client: str) -> str:
+    """クライアントカルテの HTML を組む（_shell_page と同じ Python 文字列連結流儀）。
+
+    動的値の差し込みは HTML 側 html.escape / JS 側 _js_str の二流儀のみ（XSS 防御）。
+    データは /api/v1/client/{client} から fetch し、DOM は textContent だけで組む。
+    """
+    client_e = html.escape(client)
+    style = _ROOT_TOKENS + _SEARCH_STYLE + _KARTE_STYLE
+    return (
+        '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>クライアントカルテ: {client_e}</title><style>" + style + "</style></head><body>"
+        "<main>"
+        '<div class="toplinks"><a href="/search">← 検索に戻る</a>'
+        '<a href="/search/graph">グラフ</a></div>'
+        f"<h1>📇 クライアントカルテ: {client_e}</h1>"
+        '<p class="sub">営業FBの時系列と関連資料を 1 画面に集約します（AI要約は後続）。</p>'
+        '<div id="khead"><div class="empty">読み込み中…</div></div>'
+        '<div id="ksecFb" class="ksec">📈 営業FB時系列（新しい順）</div>'
+        '<div id="ktimeline"></div>'
+        '<div id="ksecDocs" class="ksec">📎 関連資料</div>'
+        '<div id="kdocs"></div>'
+        "</main>"
+        "<script>window.__karteClient=" + _js_str(client) + ";</script>"
+        "<script>" + _KARTE_JS + "</script>"
+        "</body></html>"
+    )
+
+
+def _karte_payload(
+    client: str,
+    timeline: list[Any],
+    documents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """カルテ API のレスポンス JSON を組む（純関数・DB 非依存）。
+
+    - timeline: ``PgVectorClient.list_client_timeline_recent`` の SearchHit list
+      （**最新 N 件を古い順**。ASC LIMIT の list_client_timeline だと FB 多数クライアントで
+      「最古の N 件」になりヘッダ/時系列が誤るため recent 版を使う）。
+      表示は日付降順が要件なので ``reversed()`` し、最新状況ヘッダ（直近フェーズ/BANT/
+      最終接触）は末尾＝最新要素から取る。
+    - documents: ``PgVectorClient.list_documents_for_client`` の行 dict list
+      （modified_at 降順）。timeline は cls_industry を返さないため、ヘッダの業界は
+      資料側 cls_industry の最頻値で補完する。
+    - gdrive:// は api_search の _open_url イディオムどおり Drive view URL へ整形
+      （抽出失敗時は元 source_uri に fail-open）。
+    """
+    from teamagent.skills.knowledge_deliver.skill import extract_drive_file_id
+
+    latest = timeline[-1] if timeline else None
+    industries = [str(d["cls_industry"]) for d in documents if d.get("cls_industry")]
+    industry = Counter(industries).most_common(1)[0][0] if industries else None
+
+    header: dict[str, Any] = {
+        "client": client,
+        "industry": industry,
+        "deal_phase": latest.metadata.get("deal_phase") if latest else None,
+        "bant_score": latest.metadata.get("bant_score") if latest else None,
+        "last_contact": latest.metadata.get("occurred_at") if latest else None,
+        "fb_count": len(timeline),
+        "doc_count": len(documents),
+    }
+
+    timeline_out: list[dict[str, Any]] = []
+    for h in reversed(timeline):
+        m = h.metadata
+        timeline_out.append(
+            {
+                "occurred_at": m.get("occurred_at"),
+                "title": m.get("title"),
+                "content": (h.content or "")[:300],
+                "deal_phase": m.get("deal_phase"),
+                "bant_score": m.get("bant_score"),
+                "channel_type": m.get("channel_type"),
+                "positive_reaction": m.get("positive_reaction"),
+                "negative_reaction": m.get("negative_reaction"),
+                "next_action": m.get("next_action"),
+                "proposed_menu": m.get("proposed_menu"),
+                "source_uri": m.get("source_uri"),
+            }
+        )
+
+    docs_out: list[dict[str, Any]] = []
+    for d in documents:
+        open_url: str | None = d.get("source_uri")
+        if d.get("source_type") == "gdrive":
+            fid = extract_drive_file_id(d.get("source_uri"))
+            if fid:
+                open_url = f"https://drive.google.com/file/d/{fid}/view"
+        docs_out.append(
+            {
+                "title": d.get("title"),
+                "doc_type": d.get("cls_doc_type"),
+                "source_type": d.get("source_type"),
+                "modified_at": d.get("modified_at"),
+                "open_url": open_url,
+                "excerpt": d.get("excerpt"),
+                "solution": d.get("cls_solution"),
+                "industry": d.get("cls_industry"),
+                "project": d.get("cls_project"),
+            }
+        )
+
+    return {"client": client, "header": header, "timeline": timeline_out, "documents": docs_out}
+
+
 def create_app(
     *,
     redirect_uri: str | None = None,
@@ -2268,6 +2736,7 @@ def create_app(
     search_verifier: Verifier | None = None,
     feedback_store: Any | None = None,
     graph_docs_provider: Callable[[str], list[dict[str, Any]]] | None = None,
+    client_karte_provider: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> FastAPI:
     """連携コールバックアプリを構築する。redirect_uri/kms_key_id は env 既定、注入も可。
 
@@ -2277,6 +2746,9 @@ def create_app(
       - search_config: 認証設定（未指定時は env から _load_search_config）。
       - search_verifier: Google id_token 検証器（テストでネットワーク排除）。
       - feedback_store: search_feedback への保存器（未指定時は RDS に遅延生成）。
+      - client_karte_provider: (email, client) -> {"timeline": SearchHit list（古い順）,
+        "documents": dict list} を返す callable（テストで実 DB を排除・graph_docs_provider
+        と同列）。本番未指定時は RLS 接続で pgvector から実取得。
 
     Slack per-user 連携（/slack/oauth/callback・Google 版と対称）:
       - slack_redirect_uri: Slack 認可の redirect_uri（未指定時 env SLACK_OAUTH_REDIRECT_URI）。
@@ -2288,8 +2760,25 @@ def create_app(
     app = FastAPI(title="TeamAgent Connect", docs_url=None, redoc_url=None, openapi_url=None)
     search_cfg = search_config or _load_search_config()
     # SearchSkill は embedder が重いのでプロセス内 lazy-singleton（初回検索時に1度だけ生成）。
+    # api_search が run() を to_thread へオフロードするため、初回検索が同時に来ると複数の
+    # worker スレッドが同時到達しうる。Lock の double-checked locking で構築を1回に保つ。
     search_state: dict[str, Any] = {"skill": None}
+    search_skill_lock = threading.Lock()
     feedback_state: dict[str, Any] = {"store": feedback_store}
+    # 検索の同時実行上限（LocalE5 CPU 推論の worker スレッド暴走防止）。env で再ビルド無し較正。
+    search_concurrency = max(1, _env_int("SEARCH_CONCURRENCY", 4))
+    # asyncio.Semaphore は最初に await したイベントループに bind される。TestClient は
+    # リクエストごとに新しいループを作るため、ループ単位で lazy 生成する（本番 uvicorn は
+    # 単一ループなので実質プロセスに1個＝全検索リクエストで共有される）。
+    search_sema_state: dict[str, Any] = {"sema": None, "loop": None}
+
+    def _get_search_semaphore() -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        if search_sema_state["sema"] is None or search_sema_state["loop"] is not loop:
+            search_sema_state["sema"] = asyncio.Semaphore(search_concurrency)
+            search_sema_state["loop"] = loop
+        sema: asyncio.Semaphore = search_sema_state["sema"]
+        return sema
 
     def _exchange(code: str) -> OAuthToken:
         if exchange_fn is not None:
@@ -2326,17 +2815,24 @@ def create_app(
         return SlackTokenStore(PgVectorClient.from_env(), KmsCipher(key_id), app_role=app_role)
 
     def _get_search_skill() -> Any:
-        """SearchSkill を lazy-singleton で取得（embedder の二重ロードを避ける）。"""
+        """SearchSkill を lazy-singleton で取得（embedder の二重ロードを避ける）。
+
+        to_thread オフロード後は複数 worker スレッドから並行到達しうるため、
+        double-checked locking で重い初回構築（LocalE5 ロード）を1回に保つ。
+        """
         skill = search_state["skill"]
         if skill is None:
-            if search_skill_factory is not None:
-                skill = search_skill_factory()
-            else:
-                # 本番: orchestrator.factory の構築ロジックを流用（runtime と env フラグ一致）。
-                from teamagent.orchestrator.factory import _build_search_skill
+            with search_skill_lock:
+                skill = search_state["skill"]
+                if skill is None:
+                    if search_skill_factory is not None:
+                        skill = search_skill_factory()
+                    else:
+                        # 本番: orchestrator.factory の構築ロジックを流用（env フラグ一致）。
+                        from teamagent.orchestrator.factory import _build_search_skill
 
-                skill = _build_search_skill()
-            search_state["skill"] = skill
+                        skill = _build_search_skill()
+                    search_state["skill"] = skill
         return skill
 
     def _save_feedback(row: dict[str, Any]) -> None:
@@ -2426,6 +2922,32 @@ def create_app(
             user_role="user",
         ) as conn:
             return pg.list_documents_for_graph(conn, with_embeddings=with_embeddings, **extra)
+
+    def _client_karte_data(email: str, client: str) -> dict[str, Any]:
+        """カルテ用の生データを取得する（provider 注入時はそれ・本番は RLS 接続で実取得）。
+
+        返り値: {"timeline": SearchHit list（list_client_timeline_recent・最新50件を古い順）,
+                 "documents": dict list（list_documents_for_client・新しい順）}。
+        timeline に ASC LIMIT の list_client_timeline を使うと FB が 50 件を超える
+        クライアントで「最古の50件」になり最新 FB/ヘッダが誤るため recent 版を使う。
+        接続の流儀は _list_graph_docs と同一（app_role + user_email/user_groups/user_role）。
+        """
+        if client_karte_provider is not None:
+            return client_karte_provider(email, client)
+        from teamagent.adapters.pgvector_client import PgVectorClient
+
+        domain = email.split("@", 1)[1] if "@" in email else email
+        pg = PgVectorClient.from_env()
+        with pg.connection(
+            app_role=app_role,
+            user_email=email,
+            user_groups=[domain],
+            user_role="user",
+        ) as conn:
+            return {
+                "timeline": pg.list_client_timeline_recent(conn, client, limit=50),
+                "documents": pg.list_documents_for_client(conn, client, limit=50),
+            }
 
     def _search_email(request: Request) -> str | None:
         """検索 cookie セッションから本人 email を取り出す（未認証/期限切れは None）。"""
@@ -2584,8 +3106,11 @@ def create_app(
     # ============================================================
 
     @app.get("/search/login", response_class=HTMLResponse)
-    def search_login() -> HTMLResponse:
-        """Google Sign-In ボタンを出す（許可アカウントのみ）。"""
+    def search_login(request: Request) -> HTMLResponse:
+        """Google Sign-In ボタンを出す（許可アカウントのみ）。
+
+        ``?next=`` でログイン後の戻り先を引き継ぐ（/app から来たら /app へ戻す）。
+        """
         cid = search_cfg.google_client_id
         if not cid:
             return HTMLResponse(
@@ -2596,6 +3121,7 @@ def create_app(
                 )
             )
         cid_e = html.escape(cid)
+        nxt_e = html.escape(_safe_next(request.query_params.get("next")))
         scripts = (
             '<script src="https://accounts.google.com/gsi/client" async></script>'
             "<script>function onCred(r){"
@@ -2607,7 +3133,8 @@ def create_app(
             '<div id="g_id_onload" data-client_id="' + cid_e + '" data-callback="onCred"></div>'
             '<div class="g_id_signin" data-type="standard" data-size="large"></div>'
             '<form id="idform" method="post" action="/search/auth/verify">'
-            '<input type="hidden" id="credential" name="credential" value=""></form>'
+            '<input type="hidden" id="credential" name="credential" value="">'
+            '<input type="hidden" name="next" value="' + nxt_e + '"></form>'
         )
         html_doc = (
             '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
@@ -2627,9 +3154,10 @@ def create_app(
 
     @app.post("/search/auth/verify")
     async def search_auth_verify(request: Request) -> Response:
-        """id_token を検証 → 許可判定 → 署名 cookie を発行して /search へ。"""
+        """id_token を検証 → 許可判定 → 署名 cookie を発行して next（既定 /search）へ。"""
         form = await request.form()
         credential = str(form.get("credential", ""))
+        nxt = _safe_next(str(form.get("next", "")))
         ok, email = authenticate_id_token(credential, search_cfg, verifier=search_verifier)
         if not ok or email is None:
             logger.warning("search_login_denied", email=email)
@@ -2641,8 +3169,8 @@ def create_app(
                 ),
                 status_code=403,
             )
-        logger.info("search_login_ok", user_email=email)
-        resp = RedirectResponse("/search", status_code=303)
+        logger.info("search_login_ok", user_email=email, next=nxt)
+        resp = RedirectResponse(nxt, status_code=303)
         resp.set_cookie(
             _SEARCH_COOKIE,
             make_session(email, search_cfg.session_secret, ttl_s=_SESSION_TTL_S),
@@ -2660,6 +3188,18 @@ def create_app(
         if email is None:
             return RedirectResponse("/search/login", status_code=303)
         return HTMLResponse(_shell_page(email, mode="list"))
+
+    @app.get("/app")
+    def obsidian_app(request: Request) -> Response:
+        """Obsidian 風 単一 HTML UI（allowlist 認証の内側でのみ配信）。
+
+        ⚠️ 認証必須。単一 HTML のため per-user RLS は掛からない（allowlist を
+        通った全員が同一内容を見る）。埋め込むのは共有可のナレッジのみ。
+        """
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login?next=%2Fapp", status_code=303)
+        return HTMLResponse(_static_app_html())
 
     @app.post("/api/v1/search")
     async def api_search(request: Request) -> JSONResponse:
@@ -2696,6 +3236,9 @@ def create_app(
         # 受け、長すぎは SearchInput.filter_solution の max_length=50 に合わせて切り詰める。
         _sol = str(payload.get("filter_solution", "")).strip()
         filter_solution = _sol[:50] or None
+        # 二段レスポンス (#1): False なら要約（Bedrock 数秒）をスキップし hits を即返す。
+        # 既定 True＝完全後方互換（旧フロント・API 直叩きは無変更で従来挙動）。
+        include_answer = bool(payload.get("include_answer", True))
 
         from teamagent.skills.base import SkillContext
         from teamagent.skills.search.schema import SearchHitOut, SearchInput
@@ -2708,8 +3251,10 @@ def create_app(
                 "user_role": "user",
             }
         )
-        try:
-            out = _get_search_skill().run(
+
+        def _run_search() -> Any:
+            # worker スレッド側: skill 取得（初回のみ重い構築・Lock で単一初期化）+ 同期 run。
+            return _get_search_skill().run(
                 SearchInput(
                     query=query,
                     top_k=top_k,
@@ -2720,9 +3265,23 @@ def create_app(
                     sort_budget_near=sort_budget_near,
                     filter_doc_type=filter_doc_type,
                     filter_solution=filter_solution,
+                    include_answer=include_answer,
                 ),
                 ctx,
             )
+
+        try:
+            # 同時実行を制限（セマフォ取得は async 側・run 本体は下の to_thread 側）。
+            async with _get_search_semaphore():
+                # キュー待ちの間にクライアントが abort/切断済みなら、embed/Bedrock 要約を
+                # 走らせる前に破棄する（捨てられたリクエストへの課金回避）。499 は nginx の
+                # Client Closed Request 慣行に合わせた非標準コード。
+                if await request.is_disconnected():
+                    logger.info("search_api_client_disconnected", user_email=email)
+                    return JSONResponse({"error": "client_closed_request"}, status_code=499)
+                # 同期 run をイベントループ外へ（1人の遅い検索が他の全リクエストを
+                # 止めないようにする）。healthz/graph/feedback はブロックされなくなる。
+                out = await asyncio.to_thread(_run_search)
         except Exception as exc:
             logger.warning(
                 "search_api_failed",
@@ -2860,6 +3419,54 @@ def create_app(
                 concept_threshold=_env_float("GRAPH_CONCEPT_THRESHOLD", 0.85),
             )
         )
+
+    @app.get("/search/client/{client:path}")
+    def search_client_karte_ui(client: str, request: Request) -> Response:
+        """クライアントカルテ UI（未認証は /search/login へリダイレクト）。
+
+        client は FastAPI のパスパラメータで受ける（%エンコードは ASGI 層で復号済）。
+        ``:path`` コンバータにするのは「A/B商事」のようにスラッシュを含むクライアント名が
+        %2F 復号後の 1 セグメントマッチでは 404 になるため。値はデータとしてのみ扱い、
+        HTML への差し込みは _karte_page 内で html.escape / _js_str により XSS 防御する。
+        """
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login", status_code=303)
+        name = client.strip()
+        if not name:
+            return RedirectResponse("/search", status_code=303)
+        return HTMLResponse(_karte_page(name))
+
+    @app.get("/api/v1/client/{client:path}")
+    def api_client_karte(client: str, request: Request) -> JSONResponse:
+        """カルテデータ API（ヘッダ + FB 時系列（日付降順）+ 関連資料一覧）。
+
+        api_graph と同じ形（sync def・純 SQL 読み・401 JSON・500 は warning ログ）。
+        ``:path`` はスラッシュ入りクライアント名対応（UI route と同じ理由）。
+        データが 0 件でも 200 で空 list を返し、空状態の文言は UI 側で出す。
+        """
+        email = _search_email(request)
+        if email is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        name = client.strip()
+        if not name:
+            return JSONResponse({"error": "empty_client"}, status_code=400)
+        try:
+            data = _client_karte_data(email, name)
+            payload = _karte_payload(
+                name,
+                list(data.get("timeline") or []),
+                list(data.get("documents") or []),
+            )
+        except Exception as exc:
+            logger.warning(
+                "client_karte_api_failed",
+                user_email=email,
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            return JSONResponse({"error": "karte_failed"}, status_code=500)
+        return JSONResponse(payload)
 
     return app
 

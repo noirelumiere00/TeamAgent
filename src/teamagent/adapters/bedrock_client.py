@@ -14,6 +14,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable
@@ -125,6 +126,16 @@ class ConverseResponse:
 
 
 @dataclass(frozen=True)
+class EmbedResponse:
+    """embed_texts() の返り値。1024 次元ベクトルのリストと推算コストを持つ。"""
+
+    embeddings: list[list[float]]
+    model_id: str
+    latency_ms: int
+    cost_usd: float
+
+
+@dataclass(frozen=True)
 class RerankResult:
     """rerank() の 1 件の結果。元の sources での index と relevance score。"""
 
@@ -158,6 +169,26 @@ def _estimate_rerank_cost(model_arn: str, query_count: int) -> float:
     for prefix, price in _RERANK_COST_PER_QUERY.items():
         if prefix in model_arn:
             return round(query_count * price, 6)
+    return 0.0
+
+
+# Cohere Embed multilingual v3 の料金 (2026/5 時点): $0.10 / 1M input tokens。
+# 出典: https://aws.amazon.com/bedrock/pricing/
+# トークン数は Bedrock InvokeModel レスポンスから取れないため、文字数を 4 文字/token と
+# 概算する（コスト「推算」用途で十分・課金実体ではない）。
+_EMBED_COST_PER_MILLION_TOKENS: dict[str, float] = {
+    "cohere.embed-multilingual-v3": 0.10,
+    "cohere.embed-english-v3": 0.10,
+}
+_EMBED_CHARS_PER_TOKEN = 4
+
+
+def _estimate_embed_cost(model_id: str, total_chars: int) -> float:
+    """Cohere Embed のコストを文字数から概算する（4 文字 ≒ 1 token・推算用途）。"""
+    for prefix, price in _EMBED_COST_PER_MILLION_TOKENS.items():
+        if model_id.startswith(prefix):
+            est_tokens = total_chars / _EMBED_CHARS_PER_TOKEN
+            return round(est_tokens / 1_000_000 * price, 8)
     return 0.0
 
 
@@ -202,11 +233,15 @@ class BedrockClient:
         client: Any | None = None,
         rerank_client: Any | None = None,
         rerank_model_arn: str | None = None,
+        embed_model_id: str | None = None,
         retry_policy: RetryPolicy | None = None,
         read_timeout: int = 120,
     ) -> None:
         self.region = region
         self.model_id = model_id
+        # Cohere Embed multilingual v3（InvokeModel・bedrock-runtime 側）。
+        # rerank と同じく ap-northeast-1 で In-Region 提供される基盤モデル。
+        self.embed_model_id = embed_model_id or "cohere.embed-multilingual-v3"
         # リトライは本クラスの call_with_retry が一元管理する。botocore 内部リトライは
         # total_max_attempts=1（=初回のみ・リトライ無し）に固定し、自前リトライとの二重化で
         # 待ち時間が掛け算になるのを防ぐ。
@@ -249,6 +284,7 @@ class BedrockClient:
         region = os.environ.get("AWS_REGION", "ap-northeast-1")
         model_id = os.environ.get("BEDROCK_MODEL_ID", "jp.anthropic.claude-sonnet-4-6")
         rerank_arn = os.environ.get("BEDROCK_RERANK_MODEL_ARN")
+        embed_model_id = os.environ.get("COHERE_EMBED_MODEL_ID", "cohere.embed-multilingual-v3")
         # 任意で env からバックオフを上書き（既定: 5回 / base 0.5s / cap 20s）。
         policy = RetryPolicy(
             max_attempts=_env_int("BEDROCK_MAX_ATTEMPTS", 5),
@@ -259,6 +295,7 @@ class BedrockClient:
             region=region,
             model_id=model_id,
             rerank_model_arn=rerank_arn,
+            embed_model_id=embed_model_id,
             retry_policy=policy,
             # 既定 120s。proposal_deck 等の長い生成（16k tokens）は
             # BEDROCK_READ_TIMEOUT で延長する。
@@ -492,4 +529,97 @@ class BedrockClient:
             model_arn=self.rerank_model_arn,
             latency_ms=latency_ms,
             query_count=1,
+        )
+
+    # Cohere Embed v3 の 1 リクエスト最大件数。
+    # 出典: https://docs.cohere.com/reference/embed（texts は最大 96 件）。
+    _EMBED_MAX_BATCH = 96
+
+    def _invoke_embed_with_retry(self, body: str, request_id: str) -> dict[str, Any]:
+        """InvokeModel(Cohere Embed) を 1 回分リトライ付きで呼ぶ（embed_texts のループ補助）。
+
+        ループ変数をクロージャに束縛しないようメソッドに切り出す（B023 回避・型推論明示）。
+        """
+        return call_with_retry(
+            lambda: self._client.invoke_model(modelId=self.embed_model_id, body=body),
+            is_retryable=_is_bedrock_retryable,
+            policy=self._retry_policy,
+            on_retry=self._make_retry_logger("bedrock_embed_retry", request_id),
+        )
+
+    def embed_texts(
+        self,
+        texts: list[str],
+        request_id: str,
+        *,
+        input_type: str,
+    ) -> EmbedResponse:
+        """Cohere Embed multilingual v3 で複数テキストを 1024 次元ベクトル化する。
+
+        rerank() と同じ基盤（call_with_retry / コスト推算 / 構造化ログ）を踏襲する。
+        Converse 用と同じ ``bedrock-runtime`` クライアント（self._client）の InvokeModel を
+        使う（rerank だけが bedrock-agent-runtime 別クライアント）。
+
+        Args:
+            texts: 埋め込む素のテキスト（プレフィックス処理は呼び側 Embedder の責務）。
+            request_id: トレース ID。
+            input_type: ``"search_query"``（検索クエリ）/ ``"search_document"``（取り込み資料）。
+                Cohere v3 の非対称埋め込み。e5 の "query: "/"passage: " に相当。
+
+        Returns:
+            EmbedResponse: embeddings は texts と同順・各 1024 次元（L2 正規化済）。
+
+        Cohere v3 は正規化済みベクトルを返す（vector_cosine_ops 索引をそのまま流用可能）。
+        96 件を超える texts は自動的に分割して複数回 InvokeModel する。
+
+        Raises:
+            ValueError: texts が空、または input_type が不正。
+            botocore.exceptions.ClientError: Bedrock API エラー（上位でハンドル）。
+        """
+        if not texts:
+            raise ValueError("embed_texts: texts が空です")
+        if input_type not in ("search_query", "search_document"):
+            raise ValueError(
+                f"embed_texts: input_type は search_query / search_document のみ (got {input_type})"
+            )
+
+        all_embeddings: list[list[float]] = []
+        total_chars = 0
+        start = time.perf_counter()
+        for i in range(0, len(texts), self._EMBED_MAX_BATCH):
+            batch = texts[i : i + self._EMBED_MAX_BATCH]
+            total_chars += sum(len(t) for t in batch)
+            body = json.dumps(
+                {
+                    "texts": batch,
+                    "input_type": input_type,
+                    # 上限超過テキストは末尾を切る（埋め込み失敗で全体を止めない）。
+                    "truncate": "END",
+                }
+            )
+            # ループ変数 body をクロージャに束縛せず（B023 回避）、専用メソッドへ渡して
+            # リトライする（call_with_retry は同一反復内で同期実行）。
+            resp = self._invoke_embed_with_retry(body, request_id)
+            payload = json.loads(resp["body"].read())
+            for vec in payload.get("embeddings", []) or []:
+                all_embeddings.append([float(x) for x in vec])
+        latency_ms = int((time.perf_counter() - start) * 1000)
+
+        cost_usd = _estimate_embed_cost(self.embed_model_id, total_chars)
+        logger.info(
+            "bedrock_embed",
+            request_id=request_id,
+            model_id=self.embed_model_id,
+            input_type=input_type,
+            input_texts=len(texts),
+            returned=len(all_embeddings),
+            dim=len(all_embeddings[0]) if all_embeddings else 0,
+            cost_usd=cost_usd,
+            latency_ms=latency_ms,
+        )
+        return EmbedResponse(
+            embeddings=all_embeddings,
+            model_id=self.embed_model_id,
+            latency_ms=latency_ms,
+            cost_usd=cost_usd,
         )

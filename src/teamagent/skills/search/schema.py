@@ -74,6 +74,15 @@ class SearchInput(BaseModel):
             "絞らず並べ替えのみ。SEARCH_BUDGET_SORT が有効なときだけ発火する。"
         ),
     )
+    include_answer: bool = Field(
+        default=True,
+        description=(
+            "Bedrock 要約（answer）を生成するか。"
+            "True (既定): 従来どおり要約を生成する（全既存呼び出し元と完全後方互換）。"
+            "False: _summarize をスキップし answer='' / 要約コスト 0 で hits のみ即返す"
+            "（Web UI 二段レスポンスの fast path 用。retrieval は通常どおり実行）。"
+        ),
+    )
 
 
 class SearchHitOut(BaseModel):

@@ -100,6 +100,42 @@ def test_check_allowed_email_verified_string_true() -> None:
     assert ok is True
 
 
+# ---- allowed_hd_opens_domain（会社ドメイン全体に開放・connect-web 全社共有） ----
+def test_hd_opens_domain_allows_any_verified_company_user() -> None:
+    """開放モード: allowlist 外でも hd 一致＋email_verified なら許可（全社共有）。"""
+    claims = {"email": "yu-aoki@vectorinc.co.jp", "email_verified": True, "hd": "vectorinc.co.jp"}
+    ok, email = check_allowed(claims, _cfg(allowed_hd_opens_domain=True))
+    assert ok is True
+    assert email == "yu-aoki@vectorinc.co.jp"
+
+
+def test_hd_opens_domain_still_allows_allowlisted() -> None:
+    claims = {"email": "owner@vectorinc.co.jp", "email_verified": True, "hd": "vectorinc.co.jp"}
+    ok, _ = check_allowed(claims, _cfg(allowed_hd_opens_domain=True))
+    assert ok is True
+
+
+def test_hd_opens_domain_rejects_other_domain() -> None:
+    """開放モードでも別ドメイン(hd不一致)かつ allowlist 外は拒否（詐称防止）。"""
+    claims = {"email": "someone@gmail.com", "email_verified": True, "hd": "gmail.com"}
+    ok, _ = check_allowed(claims, _cfg(allowed_hd_opens_domain=True))
+    assert ok is False
+
+
+def test_hd_opens_domain_rejects_missing_hd() -> None:
+    """開放モードでも hd クレーム無し（非 Workspace）かつ allowlist 外は拒否。"""
+    claims = {"email": "consumer@gmail.com", "email_verified": True}
+    ok, _ = check_allowed(claims, _cfg(allowed_hd_opens_domain=True))
+    assert ok is False
+
+
+def test_hd_opens_domain_rejects_unverified() -> None:
+    """開放モードでも email_verified 未確認は拒否。"""
+    claims = {"email": "yu-aoki@vectorinc.co.jp", "email_verified": False, "hd": "vectorinc.co.jp"}
+    ok, _ = check_allowed(claims, _cfg(allowed_hd_opens_domain=True))
+    assert ok is False
+
+
 # ---- id_token 検証 ---------------------------------------------
 def test_authenticate_id_token_with_injected_verifier() -> None:
     def verifier(token: str, client_id: str) -> dict[str, Any]:

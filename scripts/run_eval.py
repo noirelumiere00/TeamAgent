@@ -281,7 +281,7 @@ def _append_partial(path: Path, result: CaseResult) -> None:
 
 def _build_skill() -> Any:
     """環境変数から SearchSkill を組み立てる (slack_bot.py と同じロジック)。"""
-    from teamagent.adapters.embeddings_client import LocalE5Embedder
+    from teamagent.adapters.embeddings_client import build_embedder_from_env
     from teamagent.skills.search.query_planner import build_query_planner_from_env
     from teamagent.skills.search.skill import SearchSkill
 
@@ -332,7 +332,9 @@ def _build_skill() -> Any:
 
     return (
         SearchSkill(
-            embedder=LocalE5Embedder(),
+            # EMBEDDER_BACKEND（既定 local）/ EMBEDDING_COLUMN（既定 embedding）で A/B eval。
+            # cohere 空間を評価するには EMBEDDER_BACKEND=cohere EMBEDDING_COLUMN=embedding_cohere。
+            embedder=build_embedder_from_env(),
             use_contextual=use_contextual,
             use_new_schema=use_new_schema,
             use_fb_drive_match=use_fb_drive_match,
@@ -360,6 +362,8 @@ def _build_skill() -> Any:
             "USE_AGGREGATION_MODE": use_aggregation_mode,
             "PROMPT_VERSION": prompt_version,
             "SEARCH_MAX_TOKENS": summary_max_tokens,
+            "EMBEDDER_BACKEND": os.environ.get("EMBEDDER_BACKEND", "local"),
+            "EMBEDDING_COLUMN": os.environ.get("EMBEDDING_COLUMN", "embedding"),
         },
     )
 

@@ -14,6 +14,7 @@ from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills.search.rerank import (
     budget_rank,
     sort_by_budget_proximity,
+    sort_by_client_match,
 )
 
 
@@ -99,3 +100,81 @@ def test_count_preserved() -> None:
 
 def test_empty_list() -> None:
     assert sort_by_budget_proximity([], "〜100万") == []
+
+
+# ── B6: sort_by_client_match（cls_project/client_name 一致を前出し・絞らない） ──
+
+
+def _chit(
+    chunk_id: int,
+    score: float,
+    *,
+    cls_project: str | None = None,
+    client_name: str | None = None,
+) -> SearchHit:
+    meta: dict[str, object] = {}
+    if cls_project is not None:
+        meta["cls_project"] = cls_project
+    if client_name is not None:
+        meta["client_name"] = client_name
+    return SearchHit(chunk_id=chunk_id, content="x", score=score, metadata=meta)
+
+
+def test_client_match_promotes_cls_project_over_higher_score_intro() -> None:
+    """汎用イントロ（高 score・client メタ無し）より実案件（cls_project 一致）を前出し。"""
+    hits = [
+        _chit(1, 0.95),  # 汎用イントロ（最高 score・client なし）
+        _chit(2, 0.40, cls_project="出光興産"),  # 実案件（score 低いが一致）
+    ]
+    out = sort_by_client_match(hits, "出光興産")
+    assert _ids(out) == [2, 1]  # 一致が先頭
+
+
+def test_client_match_uses_client_name_too() -> None:
+    """client_name（FB 由来）での一致も拾う。"""
+    hits = [
+        _chit(1, 0.9),
+        _chit(2, 0.3, client_name="ユニー"),
+    ]
+    out = sort_by_client_match(hits, "ユニー")
+    assert out[0].chunk_id == 2
+
+
+def test_client_match_bidirectional_substring() -> None:
+    """クエリ語が案件名に含まれる / 案件名がクエリ語に含まれる の双方向一致。"""
+    # cls_project='出光興産株式会社' に対しクエリ 'a=出光興産'（needle ⊂ s）
+    hits_a = [_chit(1, 0.9), _chit(2, 0.3, cls_project="出光興産株式会社")]
+    assert sort_by_client_match(hits_a, "出光興産")[0].chunk_id == 2
+    # cls_project='ユニー' に対しクエリ 'ユニーの2回目提案'（s ⊂ needle）
+    hits_b = [_chit(1, 0.9), _chit(2, 0.3, cls_project="ユニー")]
+    assert sort_by_client_match(hits_b, "ユニーの2回目提案")[0].chunk_id == 2
+
+
+def test_client_match_within_group_score_descending() -> None:
+    """一致グループ内・非一致グループ内とも score 降順を保つ（安定ソート）。"""
+    hits = [
+        _chit(1, 0.5, cls_project="A社"),
+        _chit(2, 0.9, cls_project="A社"),
+        _chit(3, 0.8),  # 非一致
+        _chit(4, 0.6),  # 非一致
+    ]
+    out = sort_by_client_match(hits, "A社")
+    assert _ids(out) == [2, 1, 3, 4]
+
+
+def test_client_match_no_match_is_noop_count_preserved() -> None:
+    """一致 0 件なら相対順序を保ち件数も不変（取りこぼしてもランク後退なし）。"""
+    hits = [_chit(1, 0.9), _chit(2, 0.5, cls_project="別会社")]
+    out = sort_by_client_match(hits, "出光興産")
+    assert _ids(out) == [1, 2]
+    assert len(out) == 2
+
+
+def test_client_match_empty_client_is_noop() -> None:
+    hits = [_chit(1, 0.5, cls_project="A社"), _chit(2, 0.9)]
+    assert _ids(sort_by_client_match(hits, "")) == [1, 2]
+    assert _ids(sort_by_client_match(hits, "   ")) == [1, 2]
+
+
+def test_client_match_empty_list() -> None:
+    assert sort_by_client_match([], "A社") == []

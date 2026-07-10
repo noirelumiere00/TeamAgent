@@ -93,10 +93,17 @@ def check_allowed(claims: dict[str, Any], config: DashboardConfig) -> tuple[bool
     verified = claims.get("email_verified")
     if not (verified is True or str(verified).lower() == "true"):
         return False, email
-    if config.allowed_hd:
-        hd = str(claims.get("hd", "")).strip().lower()
-        if hd != config.allowed_hd:
-            return False, email
+    hd = str(claims.get("hd", "")).strip().lower()
+    # 会社ドメイン全体に開放するモード（connect-web の全社共有）:
+    # allowlist に居る か hd が会社ドメインに一致すれば許可。id_token は Google 署名済みで
+    # hd は Workspace のみ付与・詐称不可、かつ上で email_verified を確認済みなので安全。
+    if config.allowed_hd_opens_domain and config.allowed_hd:
+        if email in config.allowed_emails or hd == config.allowed_hd:
+            return True, email
+        return False, email
+    # 従来（絞り込み）: hd は AND の追加条件、allowlist は必須（ダッシュボードのオーナー限定）。
+    if config.allowed_hd and hd != config.allowed_hd:
+        return False, email
     if email not in config.allowed_emails:
         return False, email
     return True, email
