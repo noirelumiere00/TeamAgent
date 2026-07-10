@@ -56,7 +56,7 @@ class SchedulerClient:
 
     @classmethod
     def from_env(cls) -> SchedulerClient:
-        """env から構築。REMINDER_SCHEDULER_GROUP / REMINDER_QUEUE_ARN / REMINDER_SCHEDULER_ROLE_ARN。"""
+        """env から構築（REMINDER_SCHEDULER_GROUP / _QUEUE_ARN / _SCHEDULER_ROLE_ARN）。"""
         return cls(
             group_name=os.environ.get("REMINDER_SCHEDULER_GROUP", "").strip(),
             queue_arn=os.environ.get("REMINDER_QUEUE_ARN", "").strip(),
