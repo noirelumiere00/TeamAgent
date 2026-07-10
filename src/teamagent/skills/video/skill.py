@@ -14,6 +14,7 @@ adapters/video_download.py 経由。
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable
 from typing import ClassVar
@@ -95,7 +96,45 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
         if input.focus:
             user_prompt += f"\n特に次の観点を重視: {input.focus}"
 
+        # v0.3 Task10: 分析結果キャッシュ（既定OFF・Gemini=GCP課金の唯一のガードの一角）。
+        # YouTube は動画ID正規化キーで DL/分析前にヒット判定できる。DL 経路は bytes 取得後に
+        # コンテンツハッシュで判定（DL は発生するが Gemini 課金は回避＝支配的コストを削減）。
+        from teamagent.adapters.analysis_cache import (
+            AnalysisCache,
+            CachedAnalysis,
+            content_basis,
+            normalize_video_url,
+        )
+
+        cache = AnalysisCache() if AnalysisCache.enabled() else None
+        model_id_for_key = os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash")
+
+        def _cache_key(basis: str) -> str:
+            return AnalysisCache.cache_key(
+                basis=basis,
+                prompt_version=self._prompt_version,
+                model_id=model_id_for_key,
+                focus=input.focus or "",
+            )
+
+        def _hit_output(hit: CachedAnalysis) -> VideoAnalysisOutput:
+            # ヒット時は cost 0 を計上（管理画面/Budgets 側の実費と乖離させない・監査指摘）。
+            log.info("video_analysis_done", cost_usd=0.0, model_id=hit.model_id, cache_hit=True)
+            return VideoAnalysisOutput(
+                url=input.url,
+                analysis=hit.text,
+                model_id=hit.model_id,
+                total_cost_usd=0.0,
+            )
+
         if is_youtube:
+            key = None
+            basis = normalize_video_url(input.url)
+            if cache is not None and basis is not None:
+                key = _cache_key(basis)
+                hit = cache.get(key, request_id=ctx.request_id)
+                if hit is not None:
+                    return _hit_output(hit)
             # YouTube/Shorts: file_uri で直接 (DL 不要)
             resp = self._client().analyze_video_url(
                 url=input.url,
@@ -106,12 +145,27 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
         else:
             # TikTok/IG 等: yt-dlp で一時 DL → inline bytes (取得後は adapter 内で破棄)
             data, mime = self._download(input.url, ctx.request_id)
+            key = None
+            if cache is not None:
+                key = _cache_key(content_basis(data))
+                hit = cache.get(key, request_id=ctx.request_id)
+                if hit is not None:
+                    return _hit_output(hit)
             resp = self._client().analyze_video_bytes(
                 data=data,
                 mime_type=mime,
                 prompt=user_prompt,
                 request_id=ctx.request_id,
                 system=system,
+            )
+
+        if cache is not None and key is not None and resp.text:
+            cache.put(
+                key,
+                text=resp.text,
+                model_id=resp.model_id,
+                cost_usd=resp.cost_usd,
+                request_id=ctx.request_id,
             )
 
         log.info("video_analysis_done", cost_usd=resp.cost_usd, model_id=resp.model_id)
