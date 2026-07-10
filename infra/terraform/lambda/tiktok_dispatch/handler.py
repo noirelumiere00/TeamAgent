@@ -3,6 +3,7 @@ SQS(tiktok-jobs)からジョブJSONをデキューし、ECS RunTask(Fargate)を�
 ジョブ本文(JSON文字列)を containerOverrides の env TIKTOK_JOB_JSON にそのまま注入する。
 RunTask/PassRole 権限はこのLambdaロールだけが持つ(=MCP/共有botから分離)。
 """
+
 import json
 import os
 
