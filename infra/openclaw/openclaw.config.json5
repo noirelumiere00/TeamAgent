@@ -69,8 +69,19 @@
     },
   },
 
-  // ── セッション分離（多人数で会話が混ざらないように／§D・既定 main は Alice↔Bob 漏れる） ──
+  // ── セッション分離（多人数で会話が混ざらないように／§D・既定 main は Alice↔Bob 漏れる) ──
   session: { dmScope: "per-channel-peer" },
+
+  // ── L0 コンテキスト直近N件制限（v0.3 Task10・§2.1 FinOps F1） ─────────────────
+  // 司令塔ループのプロンプトへ含める会話履歴を直近 20 件に制限し、長文スレッドでの
+  // トークンコスト線形増を止める（v0.3 設計書の初期値 10〜上限 20 の保守側）。
+  // キーは公式 config 例（docs.openclaw.ai/gateway/configuration-examples）の現行スキーマに
+  // 実在する messages.groupChat.historyLimit。⚠️ 本番 2026.6.5 での受理は起動時 config
+  // validate が最終判定（未知キーは exit78 で起動拒否＝§S 実測）。デプロイ後の run-task
+  // 検証で bot 起動を必ず確認し、reject されたら本節を外して再ビルド（=upstream 版上げ待ち）。
+  messages: {
+    groupChat: { historyLimit: 20 },
+  },
 
   // ── tool ポリシー（最小権限＝攻撃面の縮小） ───────────────────────────────
   tools: {
