@@ -13,7 +13,10 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from pydantic import BaseModel, Field
+import structlog
+from pydantic import BaseModel, Field, field_validator
+
+logger = structlog.get_logger(__name__)
 
 Position = Literal["top", "center", "bottom", "full", "unknown"]
 Prominence = Literal["hero", "prominent", "incidental", "background"]
@@ -221,8 +224,24 @@ class VideoMeta(BaseModel):
     comment_count: int = 0
     share_count: int = 0
     collect_count: int = 0  # 保存
-    engagement_rate: float = 0.0
+    engagement_rate: float = 0.0  # %単位（2.9%→2.9）。小数(0.029)と混同しない（審査所見R1）
     cover_url: str | None = None
+
+    @field_validator("engagement_rate")
+    @classmethod
+    def _engagement_rate_is_percent(cls, v: float) -> float:
+        """engagement_rate の%単位を守るガード（審査所見R1: /100・×100 の二重換算事故防止）。
+
+        %としてあり得ない値（負値 / 100超=単位取り違えの疑い）は fail-safe に clamp する。
+        サイレント補正にはせず警告ログを残す（寛容パースと同じ流儀）。
+        """
+        if v < 0.0:
+            logger.warning("video_meta_engagement_rate_clamped", value=v, clamped=0.0)
+            return 0.0
+        if v > 100.0:
+            logger.warning("video_meta_engagement_rate_clamped", value=v, clamped=100.0)
+            return 100.0
+        return v
 
     def save_rate(self) -> float:
         return (self.collect_count / self.play_count * 100) if self.play_count else 0.0

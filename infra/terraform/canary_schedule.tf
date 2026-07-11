@@ -156,6 +156,11 @@ resource "aws_ecs_task_definition" "canary" {
     }
     # Scheduled Task なので healthCheck 不要（exit code が成否を語る）
   }])
+
+  # 2026-06-26 恒久対策(§4 B11): CLI 再登録で env/image が drift しうるため、apply で巻き戻さない。
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
 # EventBridge → ECS RunTask の IAM role ---

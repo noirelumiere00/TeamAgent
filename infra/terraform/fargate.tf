@@ -521,9 +521,19 @@ resource "aws_ecs_task_definition" "mcp" {
     # §M改: 拡張版のみ SA JSON ファイル化ラッパで起動（既定はイメージの CMD のまま＝挙動不変）。
     command = ["sh", "scripts/run_mcp_vertex_entrypoint.sh"]
   } : {})])
+
+  # 2026-06-26 恒久対策: live task def は CLI(register-task-definition)で本番 env(USE_* 多数)を
+  # 載せており、この fargate.tf 定義から drift 済。apply で巻き戻さないよう全属性の変更を無視する
+  # （ECS の image/env は CLI 運用＝CLAUDE.md §4）。count(var.mcp_image)による create/destroy は別管轄。
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
 resource "aws_ecs_task_definition" "openclaw" {
+  # 2026-06-26 恒久対策(§4 B11): openclaw は CLI 管理。openclaw_image が空なら task def も作らない。
+  # 無 count だと image="" で create され apply が "Container.image should not be null or empty" で失敗する。
+  count                    = var.openclaw_image == "" ? 0 : 1
   family                   = "${var.project_name}-${var.environment}-openclaw"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
@@ -604,13 +614,21 @@ resource "aws_ecs_service" "mcp" {
   service_registries {
     registry_arn = aws_service_discovery_service.mcp.arn
   }
+
+  # 2026-06-26 恒久対策: task def は CLI(update-service)で差し替える運用のため、terraform に
+  # 巻き戻させない（CLAUDE.md §4）。
+  # 2026-07-06: desired_count も追加 — 運用側が CLI でコスト停止(desired=0)しており、apply が
+  # 勝手に復帰させると他セッションの停止措置と衝突するため。スケールは CLI 管轄。
+  lifecycle {
+    ignore_changes = [task_definition, desired_count]
+  }
 }
 
 resource "aws_ecs_service" "openclaw" {
   count           = var.openclaw_image == "" ? 0 : 1
   name            = "${var.project_name}-${var.environment}-openclaw"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.openclaw.arn
+  task_definition = aws_ecs_task_definition.openclaw[0].arn
   desired_count   = 1
   launch_type     = "FARGATE"
 

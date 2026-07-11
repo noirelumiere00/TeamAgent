@@ -415,6 +415,12 @@ resource "aws_ecs_task_definition" "connect_web" {
       startPeriod = 30
     }
   }])
+
+  # 2026-06-26 恒久対策: connect-web も CLI(register+update)で env 調整済(USE_QUERY_PLANNER 等)＝drift。
+  # apply で巻き戻さないよう全属性の変更を無視（CLAUDE.md §4）。
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
 # --- ECS Service ---
@@ -449,6 +455,11 @@ resource "aws_ecs_service" "connect_web" {
   depends_on = [
     aws_lb_target_group.connect_web_fargate,
   ]
+
+  # 2026-06-26 恒久対策: task def は CLI(update-service)で差し替える運用のため巻き戻さない（CLAUDE.md §4 B11）。
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 }
 
 # ---------- Outputs ----------

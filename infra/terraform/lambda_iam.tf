@@ -92,6 +92,23 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_files" {
     }
   }
 
+  # 2026-07-06: tiktok-acquire/ の30日expire をここへ統合。S3 lifecycle は「1バケット1config」で、
+  # tiktok_acquire.tf 側に別 resource として持つと本 resource と交互に上書きし合う（実際に
+  # 2026-06-26 の apply で Glacier ルールが一時消失した）。同一バケットのルールは必ずここに足すこと。
+  dynamic "rule" {
+    for_each = var.enable_tiktok_acquire ? [1] : []
+    content {
+      id     = "tiktok-acquire-expire"
+      status = "Enabled"
+      filter {
+        prefix = "tiktok-acquire/"
+      }
+      expiration {
+        days = 30
+      }
+    }
+  }
+
   depends_on = [aws_s3_bucket_versioning.raw_files]
 }
 

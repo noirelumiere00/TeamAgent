@@ -24,6 +24,7 @@ from teamagent.skills.video_algorithm.schema import (
     FeatureRowOut,
     KwCoverage,
     StatsAnalysis,
+    VideoMeta,
     WinFactor,
     WinRange,
 )
@@ -40,9 +41,25 @@ _FLAG_LABELS: dict[str, str] = {
 }
 _STRONG_HOOKS = {"question", "number", "shock", "pov", "problem"}
 
+# 審査所見R7(a): メタだけで判定できるフラグは board 全体の基準率が測れるので、
+# 「板全体でも同率に出る特徴」を勝ち筋と呼ばないよう lift（上位率/基準率）>=1.5 を課す。
+_META_FLAG_MIN_LIFT = 1.5
+
 
 def _query_terms(query: str) -> list[str]:
     return [t for t in re.split(r"[\s　,、]+", query.strip()) if t]
+
+
+def _meta_flag_base_rates(board: Sequence[VideoMeta], terms: list[str]) -> dict[str, float]:
+    """board メタのみで算出できるフラグの全体基準率（審査所見R7(a)）。
+
+    対象は KWキャプション（desc の字面一致・ハッシュタグも desc 内包で拾う）のみ。
+    短尺は VideoMeta に尺が無く、Gemini 分析（duration_sec）でしか観測できないため対象外。
+    """
+    if not board:
+        return {}
+    hits = sum(1 for m in board if any(t and t in m.desc for t in terms))
+    return {"kw_in_caption": hits / len(board)}
 
 
 def _flags_for(video: AnalyzedVideo, terms: list[str]) -> dict[str, bool]:
@@ -65,6 +82,44 @@ def _flags_for(video: AnalyzedVideo, terms: list[str]) -> dict[str, bool]:
     }
 
 
+def _pooled_save_rate_diff(
+    top: Sequence[AnalyzedVideo], bottom: Sequence[AnalyzedVideo]
+) -> tuple[float, float] | None:
+    """上位帯/下位帯の保存率差が pooled 比率の 2SE を超えるときだけ (%上位, %下位) を返す。
+
+    審査所見R7(b): 保存/再生を試行数つきの比率として扱い、差が標準誤差2本分に満たない
+    ものは「ドライバー」と呼ばない（有意性検定の代替としての最低限の目安）。
+
+    レビュー指摘(回帰修正): 帯合計だと play_count==0 の動画の保存数だけが分子に載り、
+    pooled>1 で math.sqrt(負値) が ValueError を送出してスキル全体が落ちる。また p_top が
+    100%を超える物理的にあり得ない値をドライバー文言に出す。対策として
+    (1) play_count<=0 の動画は帯集計から除外（旧 save_rate() の 0除算ガードと整合）、
+    (2) 保存率が 1.0(=100%)を超える帯は「保存数>再生数」の破損データなので、clamp して
+        無理に出すのではなくドライバー不採用にする（統計的誠実性: 破損帯は判定不能）。
+    """
+    top = [v for v in top if v.meta.play_count > 0]
+    bottom = [v for v in bottom if v.meta.play_count > 0]
+    if not top or not bottom:
+        return None
+    top_saves = sum(v.meta.collect_count for v in top)
+    top_plays = sum(v.meta.play_count for v in top)
+    bot_saves = sum(v.meta.collect_count for v in bottom)
+    bot_plays = sum(v.meta.play_count for v in bottom)
+    if top_plays <= 0 or bot_plays <= 0:
+        return None
+    p_top = top_saves / top_plays
+    p_bot = bot_saves / bot_plays
+    pooled = (top_saves + bot_saves) / (top_plays + bot_plays)
+    # save_rate は本来 0..1 の比率。>1 は破損データ = sqrt(負値)クラッシュ&106%表示の元凶なので
+    # ドライバーとして採用しない（判定不能扱い）。
+    if not (0.0 <= p_top <= 1.0 and 0.0 <= p_bot <= 1.0 and pooled <= 1.0):
+        return None
+    se = math.sqrt(pooled * (1 - pooled) * (1 / top_plays + 1 / bot_plays))
+    if p_top - p_bot > 2 * se:
+        return p_top * 100, p_bot * 100
+    return None
+
+
 def _confidence(observed: int, total: int) -> Literal["高", "中", "低"]:
     if total == 0:
         return "低"
@@ -76,8 +131,14 @@ def _confidence(observed: int, total: int) -> Literal["高", "中", "低"]:
     return "低"
 
 
-def cross_analyze(videos: list[AnalyzedVideo], query: str) -> CrossAnalysis:
-    """5本（以下）の分析から横断の読み解きを生成する。"""
+def cross_analyze(
+    videos: list[AnalyzedVideo], query: str, board: Sequence[VideoMeta] | None = None
+) -> CrossAnalysis:
+    """5本（以下）の分析から横断の読み解きを生成する。
+
+    board（取得した全メタ・上位ボード）を渡すと、メタのみで判定できるフラグは
+    board 全体基準率とのリフトで勝ち筋採用をゲートする（審査所見R7(a)）。
+    """
     analyzed = [v for v in videos if v.analysis is not None]
     n = len(analyzed)
     cross = CrossAnalysis(keyword=query, video_count=n)
@@ -104,37 +165,49 @@ def cross_analyze(videos: list[AnalyzedVideo], query: str) -> CrossAnalysis:
     ]
 
     # 勝ち筋（observed>=0.6n を採用、observed降順）
-    win = [
-        WinFactor(
-            factor=_FLAG_LABELS[k],
-            observed_in=counts[k],
-            total=n,
-            confidence=_confidence(counts[k], n),
-            evidence=f"上位{n}本中{counts[k]}本で観測",
+    # 審査所見R7(a): メタで測れるフラグは board 基準率とのリフト>=1.5 も採用条件にする
+    # （例: KWキャプションが板全体でもほぼ100%なら、上位の共通項でも「勝ち筋」ではない）
+    base_rates = _meta_flag_base_rates(board or [], terms)
+    win: list[WinFactor] = []
+    for k in _FLAG_LABELS:
+        if counts[k] < math.ceil(0.6 * n):
+            continue
+        base = base_rates.get(k)
+        if base is not None and base > 0 and (counts[k] / n) / base < _META_FLAG_MIN_LIFT:
+            continue
+        win.append(
+            WinFactor(
+                factor=_FLAG_LABELS[k],
+                observed_in=counts[k],
+                total=n,
+                confidence=_confidence(counts[k], n),
+                evidence=f"上位{n}本中{counts[k]}本で観測",
+            )
         )
-        for k in _FLAG_LABELS
-        if counts[k] >= math.ceil(0.6 * n)
-    ]
     win.sort(key=lambda w: w.observed_in, reverse=True)
     cross.win_factors = win[:5]
 
     # rank 上位帯 vs 下位帯（rankでソートし半分ずつ。中間は無視）
-    by_rank = sorted(analyzed, key=lambda v: v.meta.rank or 99)
-    half = max(1, n // 2)
-    top, bottom = by_rank[:half], by_rank[-half:]
-    top_flags = [_flags_for(v, terms) for v in top]
-    bot_flags = [_flags_for(v, terms) for v in bottom]
+    # 審査所見R7(b): n<8（帯あたり<4本）では 1本の差が丸ごと「傾向」に化けるため出さない
     drivers: list[str] = []
-    for k in _FLAG_LABELS:
-        tr = sum(1 for f in top_flags if f[k]) / len(top_flags)
-        br = sum(1 for f in bot_flags if f[k]) / len(bot_flags)
-        if tr - br >= 0.5:
-            drivers.append(f"上位帯ほど『{_FLAG_LABELS[k]}』（上位{tr:.0%} vs 下位{br:.0%}）")
-    # 保存率の上位/下位差
-    top_save = statistics.mean([v.meta.save_rate() for v in top])
-    bot_save = statistics.mean([v.meta.save_rate() for v in bottom])
-    if top_save - bot_save > 0.05:
-        drivers.append(f"上位帯の保存率が高い（上位{top_save:.2f}% vs 下位{bot_save:.2f}%）")
+    if n >= 8:
+        by_rank = sorted(analyzed, key=lambda v: v.meta.rank or 99)
+        half = max(1, n // 2)
+        top, bottom = by_rank[:half], by_rank[-half:]
+        top_flags = [_flags_for(v, terms) for v in top]
+        bot_flags = [_flags_for(v, terms) for v in bottom]
+        for k in _FLAG_LABELS:
+            tr = sum(1 for f in top_flags if f[k]) / len(top_flags)
+            br = sum(1 for f in bot_flags if f[k]) / len(bot_flags)
+            if tr - br >= 0.5:
+                drivers.append(f"上位帯ほど『{_FLAG_LABELS[k]}』（上位{tr:.0%} vs 下位{br:.0%}）")
+        # 保存率の上位/下位差
+        # 審査所見R7(b): 固定閾値0.05ptでなく、pooled比率（保存/再生を試行とみなす）の
+        # 2SE 超のみ採用＝再生数の少ない帯のノイズ差を「ドライバー」と呼ばない
+        save_diff = _pooled_save_rate_diff(top, bottom)
+        if save_diff is not None:
+            p_top, p_bot = save_diff
+            drivers.append(f"上位帯の保存率が高い（上位{p_top:.2f}% vs 下位{p_bot:.2f}%）")
     cross.rank_diff_drivers = drivers
 
     # サムネ色の横断集計（ffmpeg+stdlib 算出ベース・動画内色は廃止）
@@ -293,7 +366,9 @@ def statistical_analyze(
         rho, npair = _spearman(ranks, series)
         mono = _monotonic([(_num_features(v).get(fname) or 0.0) for v in by_rank])
         direction = ""
-        if rho is not None:
+        # 審査所見R7(c): 弱い相関（|ρ|<0.5）や n<5 での方向断定は過剰解釈。
+        # ρ の数値自体は表に残し、方向ラベルは強い単調傾向のみに限定する
+        if rho is not None and npair >= 5 and abs(rho) >= 0.5:
             direction = "値が大きいほど上位" if rho < 0 else "値が小さいほど上位"
         st.correlations.append(
             CorrItem(

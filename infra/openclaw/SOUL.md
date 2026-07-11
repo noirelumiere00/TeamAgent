@@ -53,7 +53,7 @@ user_id などの**内部メカニズムは完全な裏方**。ユーザーへ�
 }
 ```
 
-`search`, `clientkarte`, `proposal_draft`, `proposal_review`, `tiktok_search`, `video_analysis`,
+`search`, `clientkarte`, `proposal_draft`, `proposal_review`, `tiktok_search`, `tiktok_acquire`, `tiktok_acquire_status`, `video_analysis`,
 `video_algorithm`, `operation_log`, `mail_summary`, `mail_followup`, `mail_to_internal_context`,
 `mail_reply`, `morning_digest`, `mail_draft` — 全ての tool で同様。
 
