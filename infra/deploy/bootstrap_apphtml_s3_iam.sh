@@ -34,13 +34,13 @@ CW_ROLE=$(role_name_of "$CW_TD")
 [ -n "$CW_ROLE" ] || { echo "★td($CW_TD) に taskRoleArn が無い"; exit 1; }
 aws iam put-role-policy --role-name "$CW_ROLE" --policy-name apphtml-s3-read \
   --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/codebuild/connect-web-app.html\"}]}"
-echo "  OK（$CW_ROLE）"
+echo "  OK（${CW_ROLE}）"
 
 echo "== 2) ingest task role: ingest-yaml-s3-read（yaml オーバーライドの読取）=="
 INGEST_ROLE=$(role_name_of "$INGEST_TD")
 [ -n "$INGEST_ROLE" ] || { echo "★td($INGEST_TD) に taskRoleArn が無い"; exit 1; }
 aws iam put-role-policy --role-name "$INGEST_ROLE" --policy-name ingest-yaml-s3-read \
   --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/config/ingest_sources.yaml\"}]}"
-echo "  OK（$INGEST_ROLE）"
+echo "  OK（${INGEST_ROLE}）"
 
 echo "✅ 完了（冪等・以後不要）。"
