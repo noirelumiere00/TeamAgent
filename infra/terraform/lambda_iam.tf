@@ -92,6 +92,25 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_files" {
     }
   }
 
+  # tiktok-acquire の中間生成物は30日で削除（2026-07-11 統合）。
+  # ⚠️ 1バケット1 lifecycle_configuration の原則: 以前は tiktok_acquire.tf 側に別リソースとして
+  # 存在し、同一バケットへの PutBucketLifecycleConfiguration が全ルール置換のため、apply のたびに
+  # こちらの Glacier/expire ルールと交互上書きされる事故構成だった（2026-07-06 の既知地雷の再発）。
+  # raw_files バケットのルールは必ずこのリソースに集約すること。
+  dynamic "rule" {
+    for_each = var.enable_tiktok_acquire ? [1] : []
+    content {
+      id     = "tiktok-acquire-expire"
+      status = "Enabled"
+      filter {
+        prefix = "tiktok-acquire/"
+      }
+      expiration {
+        days = 30
+      }
+    }
+  }
+
   depends_on = [aws_s3_bucket_versioning.raw_files]
 }
 
