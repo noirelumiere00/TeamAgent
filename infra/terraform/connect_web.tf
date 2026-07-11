@@ -347,7 +347,11 @@ resource "aws_ecs_task_definition" "connect_web" {
       # フラグ。USE_NEW_SCHEMA を入れ忘れると factory が既定 false → RLS 未適用の旧
       # proposals_chunks を引いてしまい RLS スコープが no-op になる（セキュリティ上必須）。
       { name = "USE_NEW_SCHEMA", value = "true" },
-      { name = "USE_COHERE_RERANK", value = "true" },
+      # live パリティ（2026-07-11 反対尋問レビューで検出）: /search の Cohere 再ランクは live rev39 で
+      # 明示 OFF（mcp 側=true とは別判断。/search は SEARCH_MIN_RELEVANCE=0.0 で全件表示＋UI 側で
+      # relevance 判断させる設計のため、rerank コスト/レイテンシを掛けない）。true に戻すと apply で
+      # 検索順位が変動し Bedrock 呼び出しが増える。
+      { name = "USE_COHERE_RERANK", value = "false" },
       { name = "USE_CLIENT_BOOST", value = "true" },
       # 「資料の被り」対策（L1）: 営業資料はテンプレページ（表紙/会社紹介/料金）を使い回すため、
       # 検索結果でテンプレチャンクが複数資料から重複ヒット＆同一資料が結果を独占する。

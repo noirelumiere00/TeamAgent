@@ -454,7 +454,8 @@ resource "aws_ecs_task_definition" "mcp" {
       # live パリティ（2026-07-11 監査）: 以下2本は CLI 直登録の taskdef(rev40) にのみ存在し terraform に
       # 無かったため、apply すると剥がれて機能劣化する状態だった。terraform を唯一の正に戻す。
       # mcp スキル/オーケストレーターの Bedrock モデル指定（コスト方針 2026-06-29 = Haiku 既定）。
-      { name = "BEDROCK_MODEL_ID", value = var.bedrock_model_id },
+      # var.bedrock_model_id（Lambda 用・tfvars=Sonnet）とは分離した mcp 専用変数を使う。
+      { name = "BEDROCK_MODEL_ID", value = var.mcp_model_id },
       # pgvector HNSW の探索幅（検索品質/レイテンシのチューニング値・live=100）。
       { name = "SEARCH_HNSW_EF_SEARCH", value = "100" },
       ], var.enable_tiktok_acquire ? [
