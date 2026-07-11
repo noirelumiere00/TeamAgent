@@ -382,21 +382,10 @@ resource "aws_iam_role_policy" "tiktok_mcp_policy" {
 }
 
 # ---------- S3 ライフサイクル(tiktok-acquire/ を30日でexpire) ----------
-# 注意: バケットに lifecycle config が他に無いこと前提(1バケット1config)。既存があれば統合すること。
-resource "aws_s3_bucket_lifecycle_configuration" "tiktok_acquire" {
-  count  = local.tk_enabled
-  bucket = aws_s3_bucket.raw_files.id
-  rule {
-    id     = "tiktok-acquire-expire"
-    status = "Enabled"
-    filter {
-      prefix = "tiktok-acquire/"
-    }
-    expiration {
-      days = 30
-    }
-  }
-}
+# tiktok-acquire-expire ルールは lambda_iam.tf の aws_s3_bucket_lifecycle_configuration.raw_files
+# に統合（2026-07-11）。同一バケットに lifecycle_configuration リソースを2つ置くと
+# PutBucketLifecycleConfiguration が全ルール置換のため交互上書きになる（2026-07-06 の既知地雷）。
+# ここには再追加しないこと。
 
 # ---------- 出力 ----------
 output "tiktok_jobs_queue_url" {

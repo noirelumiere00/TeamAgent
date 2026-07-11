@@ -524,6 +524,10 @@ resource "aws_ecs_task_definition" "mcp" {
 }
 
 resource "aws_ecs_task_definition" "openclaw" {
+  # openclaw は CLI 管理（apply_openclaw.sh・2026-06-26 事故の恒久対策）で tfvars に openclaw_image を
+  # 書かない運用のため、taskdef も service と同条件で gate する（2026-07-11 plan 実測: gate 無しだと
+  # image="" の taskdef を register しようとして apply が ECS の validation で途中失敗する）。
+  count                    = var.openclaw_image == "" ? 0 : 1
   family                   = "${var.project_name}-${var.environment}-openclaw"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
@@ -610,7 +614,7 @@ resource "aws_ecs_service" "openclaw" {
   count           = var.openclaw_image == "" ? 0 : 1
   name            = "${var.project_name}-${var.environment}-openclaw"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.openclaw.arn
+  task_definition = aws_ecs_task_definition.openclaw[0].arn
   desired_count   = 1
   launch_type     = "FARGATE"
 
