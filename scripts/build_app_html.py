@@ -19,6 +19,9 @@ HTML 生成ロジックは元スクリプトと同一。repo 版で加えたの�
   （利用 16 名にデータ鮮度が見える）
 - PII 決定論除外: 正規化後 stem に「請求」を含む資料（請求書/請求金額系）はサイドカーに
   個人名入り stem を列挙せずルールで除外（_is_excluded()。exclude_stems.json の平文 PII 廃止）
+- タグ第1弾: 資料=媒体/動画形式/形式/横断、クライアント=温度感/宿題（いずれも決定論判定・
+  LLM 不使用）＋テーブル「次アクション」列。タグペイン/検索のみでグラフ用 _ctags/_dtags には
+  載せない（タグノード爆発防止）
 
 Usage:
     python scripts/build_app_html.py                          # ~/AiLaVault → 既定 out
@@ -233,6 +236,112 @@ def parse_fb_events(body: str) -> list[dict]:
         return _sort_fb_events(dedup_fb_events(events))
     except Exception:  # タイムラインはベストエフォート（このパースで build を止めない）
         return []
+
+
+# === タグ第1弾: 資料タグ4軸（媒体/動画形式/形式/横断）＋クライアントタグ（温度感/宿題） ===
+# 判定は決定論 regex/計数のみ（LLM 不使用・再実行で同一結果）。付与先は検索・タグペイン用の
+# docTags/clientTags（JS）だけで、グラフ用 _ctags/_dtags には加えない（タグノード爆発防止）。
+
+# 媒体/: title+excerpt から検出（複数付与可・MEDIA_RES の定義順）。誤爆対策:
+# - X: 「X（旧Twitter）/Twitter/ツイッター」を主とし、単独 X は英数字境界かつ大文字限定
+#   （DX・URL の x.com・コラボ表記「A x B」の小文字 x を拾わない）
+# - LINE: 大文字限定+英字境界（online/deadline/GUIDELINE を除外）。カタカナ「ライン」は
+#   ラインナップ/デッドライン等の誤爆源のため対象外
+# - Facebook: 略記 FB は本 Vault で「フィードバック」の意で頻出するため対象外
+# - テレビは TVer を含む ／ OOH はサイネージを含む
+# 出典URL行は判定対象外（excerpt は先頭の「> 」行のみで「- 出典:」行を含まない。main() 参照）
+MEDIA_RES: list[tuple[str, re.Pattern]] = [
+    ("TikTok", re.compile(r"tiktok|ティックトック", re.I)),
+    ("YouTube", re.compile(r"youtube|ユーチューブ", re.I)),
+    ("Instagram", re.compile(r"instagram|インスタ", re.I)),
+    ("X", re.compile(r"X[（(]旧Twitter[)）]|旧Twitter|[Tt]witter|ツイッター|(?<![A-Za-z0-9])X(?![A-Za-z0-9])")),
+    ("LINE", re.compile(r"(?<![A-Za-z])LINE(?![A-Za-z])")),
+    ("Facebook", re.compile(r"facebook|フェイスブック", re.I)),
+    ("テレビ", re.compile(r"テレビ|tver", re.I)),
+    ("OOH", re.compile(r"(?<![A-Za-z])OOH(?![A-Za-z])|サイネージ")),
+]
+
+# 動画形式/: title+excerpt+solution から検出（複数付与可）。「ショート」単体は
+# ショートカット等の誤爆源のため「ショート動画|縦型」のみ（値域規定どおり）
+VIDEO_FORMAT_RES: list[tuple[str, re.Pattern]] = [
+    ("ショート", re.compile(r"ショート動画|縦型")),
+    ("切り抜き", re.compile(r"切り抜き")),
+    ("ライブ配信", re.compile(r"ライブ配信|ライブコマース")),
+    ("長尺", re.compile(r"長尺")),
+]
+
+# 形式/: doc の stem 末尾の拡張子表記（「〜.pptx」のような名前）から判定。
+# 大文字小文字無視・拡張子なしはタグなし
+FILE_FORMAT_RE = re.compile(r"\.(pptx?|pdf|xlsx?|docx?)\s*$", re.I)
+FILE_FORMAT_LABEL = {"ppt": "PPTX", "pptx": "PPTX", "pdf": "PDF",
+                     "xls": "Excel", "xlsx": "Excel", "doc": "Word", "docx": "Word"}
+
+
+def media_tags(text):
+    """媒体/ タグ判定。NFKC 正規化してから regex（全角英字/全角括弧の表記ゆれを吸収）。"""
+    t = unicodedata.normalize("NFKC", text or "")
+    return [name for name, rx in MEDIA_RES if rx.search(t)]
+
+
+def video_format_tags(text):
+    """動画形式/ タグ判定（媒体と同じく NFKC 正規化後に regex）。"""
+    t = unicodedata.normalize("NFKC", text or "")
+    return [name for name, rx in VIDEO_FORMAT_RES if rx.search(t)]
+
+
+def file_format_tag(stem):
+    """形式/ タグ: stem 末尾の拡張子から PPTX/PDF/Excel/Word。該当なしは空文字。"""
+    m = FILE_FORMAT_RE.search(stem or "")
+    return FILE_FORMAT_LABEL[m.group(1).lower()] if m else ""
+
+
+# 温度感/: ネガ反応が実質空（「特になし」系）は 高。先頭の中黒・末尾の句点は許容
+TEMP_NEG_NONE_RE = re.compile(r"^[・\s]*(特になし|特に無し|なし|-)[。、.\s]*$")
+
+
+def temperature_tag(tl):
+    """温度感/ タグ: 最新FBイベント（tl 先頭＝日付降順ソート済・日付なしは末尾）で決定論判定。
+
+    tl は parse_fb_events 済み（Slack/フォーム二重登録は dedup 済なのでそのまま使ってよい）。
+    pos/neg は FB_FIELD_MAP で 120 字に切り詰め済み → 長文FBでは比率が飽和し得るが許容
+    （両方 120 字で頭打ち＝拮抗側に倒れる保守的な挙動）。tl が空ならタグなし。
+    """
+    if not tl:
+        return ""
+    pos, neg = tl[0].get("pos", ""), tl[0].get("neg", "")
+    if not neg.strip() or TEMP_NEG_NONE_RE.match(neg):
+        return "高"
+    if len(pos) >= 2 * len(neg):
+        return "ポジ優勢"
+    if len(neg) >= 2 * len(pos):
+        return "ネガ優勢"
+    return "拮抗"
+
+
+# 宿題/あり: 「次アクションが書いてあるのに最終接点が古い」の炙り出し
+HOMEWORK_STALE_DAYS = 31
+
+
+def next_action(tl):
+    """テーブル「次アクション」列: 最新FBイベントの次アクション先頭40字（無ければ空）。"""
+    return (tl[0].get("next", "") if tl else "")[:40]
+
+
+def homework_flag(nx, last, today):
+    """宿題/あり 判定: 次アクション非空 かつ 最終接点が HOMEWORK_STALE_DAYS 日超過去 or 日付なし。
+
+    接点が新しい（追えている）クライアントには付けない。判定はビルド時点
+    （月次再生成の間の経日は次回ビルドで反映）。不正な日付は「日付なし」扱い＝炙り出し側に倒す。
+    """
+    if not nx:
+        return False
+    if not last:
+        return True
+    try:
+        last_d = datetime.strptime(last, "%Y-%m-%d").date()
+    except ValueError:
+        return True
+    return (today - last_d).days > HOMEWORK_STALE_DAYS
 
 
 EXCL: set[str] = set()  # exclude_stems.json（main() で読み込み・欠落は exit 1）
@@ -646,8 +755,8 @@ DATA.docs.forEach(d=>dByStem[d.stem]=d);
 DATA.reports.forEach(r=>rByStem[r.stem]=r);
 /* 閲覧時点からの経過でバケット化（ビルド日でなく Date.now 基準 = 月次再生成の間も鮮度が生きる） */
 function ageBucket(ds){if(!ds)return"";const t=Date.parse(ds);if(isNaN(t))return"";const dd=(Date.now()-t)/864e5;return dd<=31?"1ヶ月以内":dd<=92?"3ヶ月以内":dd<=183?"半年以内":dd<=366?"1年以内":"1年以上前";}
-function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);t.push("最終接点/"+(ageBucket(c.last)||"記録なし"));return t;}
-function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);return t;}
+function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);t.push("最終接点/"+(ageBucket(c.last)||"記録なし"));if(c.temp)t.push("温度感/"+c.temp);if(c.hw)t.push("宿題/あり");return t;}
+function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);(d.media||[]).forEach(m=>t.push("媒体/"+m));(d.vfmt||[]).forEach(v=>t.push("動画形式/"+v));if(d.fmt)t.push("形式/"+d.fmt);if(d.xc)t.push("横断/"+d.xc);return t;}
 const IDX=[];
 DATA.clients.forEach(c=>IDX.push({kind:"client",stem:c.stem,name:c.name,folder:"clients",tags:clientTags(c),
  props:{"業界":c.industry,"フェーズ":c.phase,"BANT":c.bant,"最終接点":c.last||"—"},hay:(c.name+" "+c.industry+" "+c.phase+" "+c.bant+" "+(c.md||"")).toLowerCase(),ex:c.industry?("業種: "+c.industry):"",obj:c}));
@@ -999,7 +1108,7 @@ const LASTDOC={};
 DATA.docs.forEach(d=>{if(d.cnorm&&d.modified&&(!(d.cnorm in LASTDOC)||d.modified>LASTDOC[d.cnorm]))LASTDOC[d.cnorm]=d.modified;});
 function lastOf(c){const a=c.lastfb||"",b=(c.cnorm&&LASTDOC[c.cnorm])||"";return a>b?a:b;}
 let tblSort={key:"act",dir:-1},tblFilter={q:"",ind:"",phase:""};
-const TCOLS=[["name","取引先",c=>c.name,0],["industry","業界",c=>c.industry,0],["phase","フェーズ",c=>c.phase,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1],["last","最終接点",c=>lastOf(c),0]];
+const TCOLS=[["name","取引先",c=>c.name,0],["industry","業界",c=>c.industry,0],["phase","フェーズ",c=>c.phase,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1],["last","最終接点",c=>lastOf(c),0],["nx","次アクション",c=>c.nx||"",0]];
 const PHASECOLOR={"受注":"#54b981","1回目提案":"#4f9df5","2回目提案":"#4f9df5","ケイパ":"#e0b34c","ヒアリング":"#c98bdb","失注":"#e0685f"};
 function tableView(){showDoc();lastNote={key:"table",title:"取引先テーブル",icon:"table",folder:""};ribbonActive("table");
  renderTableShell();renderTabs();renderVhead();
@@ -1015,7 +1124,8 @@ function tblBody(shown){return shown.map(c=>{const pc=PHASECOLOR[c.phase]||"#8a8
   +'<td>'+(c.industry?'<span class="dotc" style="background:'+colorOf(c.industry)+'"></span>'+esc(c.industry):'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+(c.phase?'<span class="bp" style="background:'+pc+'22;color:'+pc+'">'+esc(c.phase)+'</span>':'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+esc(c.bant||"—")+'</td><td class="num">'+c.fb+'</td><td class="num">'+c.doc+'</td><td class="num">'+(c.fb+c.doc)+'</td>'
-  +'<td>'+(lastOf(c)?esc(lastOf(c)):'<span style="color:var(--faint)">—</span>')+'</td></tr>';}).join("");}
+  +'<td>'+(lastOf(c)?esc(lastOf(c)):'<span style="color:var(--faint)">—</span>')+'</td>'
+  +'<td>'+(c.nx?esc(c.nx):'<span style="color:var(--faint)">—</span>')+'</td></tr>';}).join("");}
 function updateTable(){const rows=tblRows();const tb=$("#inner").querySelector("tbody");if(!tb)return;
  tb.innerHTML=tblBody(rows.slice(0,500));
  $("#inner").querySelector(".bar .n").textContent=rows.length+" 件"+(rows.length>500?"（先頭500表示）":"");
@@ -1384,12 +1494,18 @@ def main(argv: list[str] | None = None) -> int:
         _src = {"gdrive": "Drive", "gsheets": "フォーム", "slack": "Slack"}.get(
             _msrc.group(1) if _msrc else "", ""
         )
+        _dtitle = TITLE_OVERRIDE.get(f.stem) or fm.get("title", f.stem)
         docs.append({
-            "stem": f.stem, "title": TITLE_OVERRIDE.get(f.stem) or fm.get("title", f.stem),
+            "stem": f.stem, "title": _dtitle,
             "client": _dclient, "cnorm": norm(_dclient),
             "industry": fm.get("industry", ""), "solution": fm.get("solution", ""),
             "doc_type": fm.get("doc_type", ""), "modified": fm.get("modified_at", ""),
             "src": _src,
+            # タグ第1弾（資料側）: 媒体=title+excerpt / 動画形式=+solution / 形式=stem 末尾拡張子。
+            # 横断/（xc）は実 wikilink 網の構築後に付与
+            "media": media_tags(_dtitle + "\n" + ex),
+            "vfmt": video_format_tags(_dtitle + "\n" + ex + "\n" + fm.get("solution", "")),
+            "fmt": file_format_tag(f.stem), "xc": "",
             "ex": ex, "md": doc_md(t), "_wl": parse_links(body_of(t)),
         })
 
@@ -1400,6 +1516,14 @@ def main(argv: list[str] | None = None) -> int:
             _lastdoc[_d["cnorm"]] = _d["modified"]
     for _c in clients:
         _c["last"] = max(_c["lastfb"], _lastdoc.get(_c["cnorm"], ""))
+
+    # タグ第1弾（クライアント側）: 温度感/（最新FBのポジネガ比）・テーブル「次アクション」列・
+    # 宿題/あり（次アクションが残っているのに最終接点が31日超過去 or 日付なし）
+    _today = datetime.now(JST).date()
+    for _c in clients:
+        _c["temp"] = temperature_tag(_c["tl"])
+        _c["nx"] = next_action(_c["tl"])
+        _c["hw"] = 1 if homework_flag(_c["nx"], _c["last"], _today) else 0
 
     reports = []
     if REPORTS.exists():
@@ -1506,6 +1630,16 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             _seen_edge.add(_ek)
             links.append([_sk, _tk, _ctx])
+
+    # 横断/: 相異なる取引先（名寄せ後）2社以上の実 wikilink から参照される資料に付与。
+    # links は (src,tgt) 単位で dedup 済み → 同一クライアントからの重複リンクは1社と数える
+    _xref = defaultdict(set)
+    for _sk, _tk, _ctx in links:
+        if _sk.startswith("c:") and _tk.startswith("d:"):
+            _xref[_tk[2:]].add(_sk[2:])
+    for _d in docs:
+        _n = len(_xref.get(_d["stem"], ()))
+        _d["xc"] = "3社以上" if _n >= 3 else ("2社" if _n == 2 else "")
 
     # グラフにも実リンクを追加（既存の名寄せ/タグ辺と重複しない分だけ・ノード数は不変）
     _gpair = set()

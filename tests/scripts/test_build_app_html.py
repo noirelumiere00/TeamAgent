@@ -10,13 +10,17 @@
 - exclude_stems.json のフィルタ配線: 除外 stem の資料が payload に載らない
 - PII 決定論除外: 請求書系 stem（正規化後に「請求」を含む）はサイドカー列挙なしで除外
   （個人名入り stem を repo に平文で持たない）
+- タグ第1弾: 媒体/動画形式/形式/横断（資料）・温度感/宿題（クライアント）の決定論判定と
+  payload/JS 配線（グラフ用 _ctags/_dtags には載せない）＋テーブル「次アクション」列
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -460,3 +464,233 @@ def test_freshness_tag_wiring_in_js(sidecars: Path, vault: Path, tmp_path: Path)
     html = out.read_text(encoding="utf-8")
     for token in ("function ageBucket", "最終接点/", '"更新/"+a', '"情報源/"+d.src'):
         assert token in html, token
+
+
+# ---------------- タグ第1弾: 媒体/（決定論 regex・誤爆対策） ----------------
+
+
+def test_media_tags_positive_cases() -> None:
+    """各媒体の正常系（TikTok ほか）と複数付与・MEDIA_RES 定義順。"""
+    assert _mod.media_tags("TikTok縦型動画のご提案") == ["TikTok"]
+    assert _mod.media_tags("YouTube・Instagram同時配信企画") == ["YouTube", "Instagram"]
+    assert _mod.media_tags("インスタ運用レポート") == ["Instagram"]
+    assert _mod.media_tags("LINE公式アカウント設計") == ["LINE"]
+    assert _mod.media_tags("Facebook広告メニュー") == ["Facebook"]
+    assert _mod.media_tags("テレビCM連動・TVer配信") == ["テレビ"]
+    assert _mod.media_tags("駅サイネージ×OOH展開") == ["OOH"]
+    assert _mod.media_tags("") == []
+
+
+def test_media_tags_x_variants_and_guards() -> None:
+    """X: 「X（旧Twitter）」「Twitter」表記は付き、DX・小文字コラボ表記 x は付かない。"""
+    assert _mod.media_tags("X（旧Twitter）キャンペーン") == ["X"]
+    assert _mod.media_tags("Twitterトレンド分析") == ["X"]
+    assert _mod.media_tags("Ｘ（旧Ｔｗｉｔｔｅｒ）施策") == ["X"]  # 全角も NFKC で吸収
+    assert _mod.media_tags("X運用のご提案") == ["X"]  # 英数字境界の単独 X
+    assert _mod.media_tags("DX推進のご提案") == []
+    assert _mod.media_tags("ブランドA x ブランドB コラボ") == []  # コラボ表記の小文字 x
+    assert _mod.media_tags("https://x.com/example の投稿") == []  # URL の小文字 x
+
+
+def test_media_tags_line_not_confused_by_english_words() -> None:
+    """LINE: online/deadline/GUIDELINE/カタカナのライン系は誤爆しない。"""
+    for text in (
+        "online配信のご案内",
+        "提出deadlineの共有",
+        "ブランドGUIDELINE策定",
+        "オンラインセミナー実施",
+        "デッドライン注意",
+        "商品ラインナップ一覧",
+    ):
+        assert "LINE" not in _mod.media_tags(text), text
+    assert _mod.media_tags("LINEヤフー共同企画") == ["LINE"]  # 直後がカタカナなら付く
+
+
+# ---------------- タグ第1弾: 動画形式/・形式/ ----------------
+
+
+def test_video_format_tags() -> None:
+    assert _mod.video_format_tags("縦型ショート動画企画") == ["ショート"]
+    assert _mod.video_format_tags("切り抜き二次利用について") == ["切り抜き"]
+    assert _mod.video_format_tags("ライブコマース実施要領") == ["ライブ配信"]
+    assert _mod.video_format_tags("ライブ配信＋長尺アーカイブ") == ["ライブ配信", "長尺"]
+    assert _mod.video_format_tags("ショートステイのご案内") == []  # 「ショート」単体では付けない
+
+
+def test_file_format_tag_from_stem_suffix() -> None:
+    """stem 末尾の拡張子表記のみ判定（大文字小文字無視・拡張子なし/途中出現は付けない）。"""
+    assert _mod.file_format_tag("新提案書FMT.pptx") == "PPTX"
+    assert _mod.file_format_tag("実績レポート.PDF") == "PDF"
+    assert _mod.file_format_tag("進行管理表.xlsx") == "Excel"
+    assert _mod.file_format_tag("覚書ドラフト.docx") == "Word"
+    assert _mod.file_format_tag("議事録（拡張子なし）") == ""
+    assert _mod.file_format_tag("pptx資料まとめ") == ""
+    assert _mod.file_format_tag("") == ""
+
+
+# ---------------- タグ第1弾: 温度感/・宿題/（クライアント） ----------------
+
+
+def _tl1(pos: str, neg: str, next_: str = "", d: str = "2026-06-01") -> list[dict]:
+    """温度感/宿題テスト用の最小 tl（parse_fb_events 出力と同形・先頭が最新）。"""
+    return [
+        {
+            "d": d,
+            "src": "Slack",
+            "ph": "",
+            "bant": "",
+            "menu": "",
+            "pos": pos,
+            "neg": neg,
+            "next": next_,
+        }
+    ]
+
+
+def test_temperature_tag_four_branches_and_nashi() -> None:
+    """4分岐: 高（neg空/特になし系）／ポジ優勢／ネガ優勢／拮抗。tl 空はタグなし。"""
+    assert _mod.temperature_tag(_tl1("よい", "")) == "高"
+    assert _mod.temperature_tag(_tl1("よい", "特になし")) == "高"
+    assert _mod.temperature_tag(_tl1("よい", "・なし")) == "高"
+    assert _mod.temperature_tag(_tl1("よい", "-")) == "高"
+    assert _mod.temperature_tag(_tl1("あ" * 10, "い" * 5)) == "ポジ優勢"
+    assert _mod.temperature_tag(_tl1("あ" * 4, "い" * 8)) == "ネガ優勢"
+    assert _mod.temperature_tag(_tl1("あ" * 6, "い" * 5)) == "拮抗"
+    assert _mod.temperature_tag(_tl1("", "予算が合わない")) == "ネガ優勢"  # pos 空は neg 側
+    assert _mod.temperature_tag([]) == ""
+
+
+def test_temperature_tag_uses_latest_event_only() -> None:
+    """判定は先頭（最新）イベントのみ。過去の「特になし」に引きずられない。"""
+    tl = _tl1("あ" * 3, "い" * 8, d="2026-06-01") + _tl1("よい", "特になし", d="2026-05-01")
+    assert _mod.temperature_tag(tl) == "ネガ優勢"
+
+
+def test_next_action_first_40_chars_of_latest_event() -> None:
+    tl = _tl1("", "", next_="あ" * 100) + _tl1("", "", next_="古い方", d="2026-05-01")
+    assert _mod.next_action(tl) == "あ" * 40
+    assert _mod.next_action([]) == ""
+    assert _mod.next_action(_tl1("", "", next_="")) == ""
+
+
+def test_homework_flag_gating() -> None:
+    """次アクションあり×最終接点が新しい→付かない。31日超過去 or 日付なし→付く。"""
+    today = date(2026, 7, 11)
+    assert _mod.homework_flag("与件獲得", "2026-07-01", today) is False  # 10日前 → 追えている
+    assert _mod.homework_flag("与件獲得", "2026-06-10", today) is False  # ちょうど31日 → 付けない
+    assert _mod.homework_flag("与件獲得", "2026-06-09", today) is True  # 32日前 → 放置
+    assert _mod.homework_flag("与件獲得", "", today) is True  # 日付なし
+    assert _mod.homework_flag("与件獲得", "invalid-date", today) is True  # 不正日付は日付なし扱い
+    assert _mod.homework_flag("", "2026-01-01", today) is False  # 次アクションなしなら常に付けない
+
+
+# ---------------- タグ第1弾: payload / JS 配線（統合） ----------------
+
+
+def _write_client_links(vault: Path, name: str, doc_stems: list[str]) -> None:
+    """FB なし・関連資料リンクだけ持つ最小クライアント（横断/ カウント用）。"""
+    links = "\n".join(f"- [[docs/{s}]]" for s in doc_stems)
+    (vault / "clients" / f"{name}.md").write_text(
+        f'---\nclient: "{name}"\nindustry: "メーカー"\ndeal_phase: ""\nbant_score: ""\n'
+        f"fb_count: 0\ndoc_count: {len(doc_stems)}\n---\n\n# {name}\n\n## 関連資料\n{links}\n",
+        encoding="utf-8",
+    )
+
+
+def _doc_field(html: str, stem: str, key: str) -> str | None:
+    """payload JSON から stem の doc オブジェクト内フィールド値を取り出す（テスト用）。"""
+    m = re.search(f'"stem": "{re.escape(stem)}".*?"{key}": "([^"]*)"', html)
+    return m.group(1) if m else None
+
+
+def test_cross_reference_tag_counts_distinct_clients(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """横断/: 2社→2社タグ・3社→3社以上・1社のみは付かない（wikilink 逆引き）。"""
+    # fixture の出光興産は 提案書A のみ参照。帝人・花王を追加して参照網を作る
+    _write_client_links(vault, "帝人", ["提案書A", "議事録C"])
+    _write_client_links(vault, "花王", ["提案書A", "議事録C"])
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert _doc_field(html, "提案書A", "xc") == "3社以上"  # 出光興産+帝人+花王
+    assert _doc_field(html, "議事録C", "xc") == "2社"  # 帝人+花王
+    assert _doc_field(html, "提案書B", "xc") == ""  # 誰からもリンクされない → 付かない
+
+
+def test_doc_tag_fields_in_payload(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """媒体/動画形式/形式が doc payload に載る（title+excerpt 判定・stem 拡張子判定）。"""
+    _write_doc(vault, "TikTok縦型企画案.pptx")
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert '"media": ["TikTok"]' in html
+    assert '"vfmt": ["ショート"]' in html
+    assert _doc_field(html, "TikTok縦型企画案.pptx", "fmt") == "PPTX"
+    assert _doc_field(html, "提案書A", "fmt") == ""  # 拡張子なし stem はタグなし
+
+
+def test_client_tag_fields_and_js_wiring(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """温度感/宿題/次アクションが client payload に載り、JS 配線・テーブル列が生成される。"""
+    (vault / "clients" / "帝人.md").write_text(
+        '---\nclient: "帝人"\nindustry: "メーカー"\ndeal_phase: "ヒアリング"\n'
+        'bant_score: "B（前向き）"\nfb_count: 1\ndoc_count: 0\n---\n\n# 帝人\n\n'
+        "## 営業FB時系列（新しい順）\n\n"
+        "### ---- #proj-ショート動画_営業フィードバック情報 1779101519.347119\n\n"
+        "- フェーズ: ヒアリング\n- ポジ反応: ・保証型がよい\n- ネガ反応: 特になし\n"
+        "- 次アクション: 与件獲得に向けた提案書再提出\n\n"
+        "## 関連資料\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # 帝人: 最終接点 2026-05-18（31日超過去）× 次アクションあり → temp/nx/hw
+    assert '"temp": "高"' in html
+    assert '"nx": "与件獲得に向けた提案書再提出"' in html
+    assert '"hw": 1' in html
+    # 出光興産: FB時系列見出しなし（tl 空）→ 温度感なし・宿題なし
+    assert re.search(r'"stem": "出光興産".*?"temp": ""', html)
+    assert re.search(r'"stem": "出光興産".*?"hw": 0', html)
+    # JS 配線: 新タグは docTags/clientTags のみ（グラフ用 _ctags/_dtags には載せない）
+    for token in (
+        '"温度感/"+c.temp',
+        '"宿題/あり"',
+        '"媒体/"+m',
+        '"動画形式/"+v',
+        '"形式/"+d.fmt',
+        '"横断/"+d.xc',
+    ):
+        assert token in html, token
+    # テーブル「次アクション」列（TCOLS + 行セル）
+    assert '["nx","次アクション",c=>c.nx||"",0]' in html
+    assert "c.nx?esc(c.nx)" in html
+
+
+def test_homework_tag_not_set_when_last_contact_fresh(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """宿題ゲーティング: 次アクションありでも最終接点が新しければ hw=0。"""
+    fresh = date.today().strftime("%Y-%m-%d")
+    (vault / "clients" / "花王.md").write_text(
+        '---\nclient: "花王"\nindustry: "日用品"\ndeal_phase: ""\nbant_score: ""\n'
+        "fb_count: 1\ndoc_count: 1\n---\n\n# 花王\n\n"
+        "## 営業FB時系列（新しい順）\n\n"
+        "### ---- #proj-ch 1779101519.347119\n\n"
+        "- ポジ反応: ・よい\n- 次アクション: 見積提出\n\n"
+        "## 関連資料\n- [[docs/花王向け資料]]\n",
+        encoding="utf-8",
+    )
+    # 今日更新の関連資料 → last が今日になり 31 日以内 → 宿題は付かない
+    (vault / "docs" / "花王向け資料.md").write_text(
+        f'---\ntitle: "花王向け資料"\nclient: "花王"\nindustry: "日用品"\n'
+        f'doc_type: "提案書"\nsolution: ""\nmodified_at: "{fresh}"\n---\n\n> 抜粋\n',
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    m = re.search(r'"stem": "花王".*?"nx": "([^"]*)".*?"hw": (\d)', html)
+    assert m is not None
+    assert m.group(1) == "見積提出"
+    assert m.group(2) == "0"
