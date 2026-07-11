@@ -278,11 +278,18 @@ resource "aws_iam_role_policy" "events_ingest_run_task" {
 }
 
 # --- EventBridge rule: 毎週月 18:00 UTC = 火 03:00 JST（EC2 systemd timer と同タイミング） ---
+variable "ingest_rule_enabled" {
+  description = "週次 ingest の EventBridge ルールを ENABLED にするか。live は手動 DISABLED 運用のため既定 false（state 未指定だと apply のたびに手動 DISABLE が ENABLED に巻き戻る・2026-07-11 監査）。"
+  type        = bool
+  default     = false
+}
+
 resource "aws_cloudwatch_event_rule" "ingest_weekly" {
   count               = var.enable_ingest_schedule ? 1 : 0
   name                = "${var.project_name}-${var.environment}-ingest-weekly"
   description         = "週次 ingest（Slack/Drive/Sheets → pgvector）の Fargate 起動トリガ"
   schedule_expression = var.ingest_schedule_expression
+  state               = var.ingest_rule_enabled ? "ENABLED" : "DISABLED"
 }
 
 resource "aws_cloudwatch_event_target" "ingest_run_task" {

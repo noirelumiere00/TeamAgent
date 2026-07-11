@@ -270,6 +270,10 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # connect-web / fargate と同じ connect_google_client_secret を使う。欠落すると mail/calendar
       # 収集が build_user_credentials で失敗し全 0 件になる（2026-06-25 回帰）。
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
+      # live パリティ（2026-07-11 監査）: ✏️/📅 等メールアクションリンクの HMAC 署名鍵。connect-web 側の
+      # 検証鍵と同一 secret（live は database-url の文字列を鍵として共用・rev32 実機と同値）。
+      # 剥がれると生成する全アクション URL が検証不能になり、ボタン機能有効化時に沈黙する地雷になる。
+      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -333,11 +337,18 @@ resource "aws_iam_role_policy" "events_morning_digest_run_task" {
 }
 
 # --- EventBridge rule: 平日 0:30 UTC = 9:30 JST ---
+variable "morning_digest_rule_enabled" {
+  description = "朝ダイジェストの EventBridge ルールを ENABLED にするか。live は手動 DISABLED 運用のため既定 false（2026-07-11 監査: state 未指定だと provider 既定 ENABLED になり、apply のたびに手動 DISABLE が勝手に巻き戻る）。ロールアウト時はこの変数を true にして apply で点灯する（CLI enable-rule は次回 apply で戻るため使わない）。"
+  type        = bool
+  default     = false
+}
+
 resource "aws_cloudwatch_event_rule" "morning_digest_weekday" {
   count               = var.enable_morning_digest ? 1 : 0
   name                = "${var.project_name}-${var.environment}-morning-digest-weekday"
   description         = "平日朝 9:30 JST の morning_digest Fargate 起動トリガ"
   schedule_expression = var.morning_digest_schedule_expression
+  state               = var.morning_digest_rule_enabled ? "ENABLED" : "DISABLED"
 }
 
 resource "aws_cloudwatch_event_target" "morning_digest_run_task" {

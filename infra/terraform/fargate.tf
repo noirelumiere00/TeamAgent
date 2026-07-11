@@ -451,7 +451,20 @@ resource "aws_ecs_task_definition" "mcp" {
       # 印が付くのは再取込後なので、印が無いうちは no-op（後方互換）。
       { name = "BOILERPLATE_EXCLUDE_SEARCH", value = "true" },
       { name = "DOC_DEDUP_EXCLUDE_SEARCH", value = "true" },
-      ], var.enable_scrape_tools ? [
+      # live パリティ（2026-07-11 監査）: 以下2本は CLI 直登録の taskdef(rev40) にのみ存在し terraform に
+      # 無かったため、apply すると剥がれて機能劣化する状態だった。terraform を唯一の正に戻す。
+      # mcp スキル/オーケストレーターの Bedrock モデル指定（コスト方針 2026-06-29 = Haiku 既定）。
+      { name = "BEDROCK_MODEL_ID", value = var.bedrock_model_id },
+      # pgvector HNSW の探索幅（検索品質/レイテンシのチューニング値・live=100）。
+      { name = "SEARCH_HNSW_EF_SEARCH", value = "100" },
+      ], var.enable_tiktok_acquire ? [
+      # live パリティ: tiktok_acquire 連携のジョブ投入側。mcp が DynamoDB(状態)/SQS(キュー)/S3 を参照。
+      # これらが無いと @AiLa の tiktok_acquire がジョブを投入できず取得パイプラインが停止する。
+      { name = "USE_TIKTOK_ACQUIRE", value = "1" },
+      { name = "TIKTOK_JOBS_TABLE", value = aws_dynamodb_table.tiktok_jobs[0].name },
+      { name = "TIKTOK_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
+      { name = "TIKTOK_TASK_QUEUE", value = aws_sqs_queue.tiktok_jobs[0].url },
+      ] : [], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
       { name = "USE_VIDEO_TOOLS", value = "1" },
