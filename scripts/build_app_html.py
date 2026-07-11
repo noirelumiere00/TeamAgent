@@ -345,6 +345,7 @@ def homework_flag(nx, last, today):
 
 
 EXCL: set[str] = set()  # exclude_stems.json（main() で読み込み・欠落は exit 1）
+INCLUDE_REPORTS = False  # 管理用レポートの搭載可否（--include-reports で ON）
 _exn = lambda s: re.sub(r"[\s_]+", "", s).lower()
 EXCL_N: set[str] = set()
 
@@ -828,7 +829,7 @@ function renderFiles(b,revealKey){
  $("#sideAct2").innerHTML=ic("folder");$("#sideAct2").title="新規フォルダ";
  const wrap=document.createElement("div");wrap.className="tree";b.appendChild(wrap);
  const revGrp=revealKey?({c:"clients",d:"docs",r:"_reports"}[revealKey[0]]):null;
- const groups=[["_reports",DATA.reports.map(r=>({name:r.name,stem:r.stem,k:"r"}))],
+ const groups=[...(DATA.reports.length?[["_reports",DATA.reports.map(r=>({name:r.name,stem:r.stem,k:"r"}))]]:[]),
   ["clients",DATA.clients.map(c=>({name:c.name,stem:c.stem,k:"c"}))],
   ["docs",DATA.docs.map(d=>({name:d.title,stem:d.stem,k:"d"}))]];
  groups.forEach(([nm,items])=>{
@@ -950,7 +951,7 @@ function welcome(){
  const rep=DATA.reports.map(r=>`<div class="wcard" data-k="r" data-s="${esc(r.stem)}">`+ic("report")+`<div><div class="wt">${esc(r.name)}</div><div class="wx">AI洗い出しレポート</div></div></div>`).join("");
  $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} AiLaVault</h1>
   <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。取引先カルテには資料と商談FBを時系列で一望できる<b>施策タイムライン</b>付き。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
-  <div class="wsec">AI洗い出しレポート</div><div class="wgrid">${rep}</div>
+  ${DATA.reports.length?`<div class="wsec">AI洗い出しレポート</div><div class="wgrid">${rep}</div>`:""}
   <div class="wsec">主要な取引先</div><div class="wgrid">${cards(notable)}</div></div>`;
  $("#inner").querySelectorAll(".wcard").forEach(el=>el.onclick=()=>openByK(el.dataset.k,el.dataset.s));
  renderRightTabs();renderRight();markActiveInTree();
@@ -1251,7 +1252,7 @@ function initGraph(){
 
 /* ===== Quick switcher ===== */
 let qItems=[],qSel=0,qMode="nav";
-const CMDS=[["グラフビューを開く","graph",()=>openGraph()],["取引先テーブル(Bases)を開く","table",()=>tableView()],["ホームを開く","files",()=>{lastNote=null;showDoc();welcome();renderTabs();renderVhead();}],["検索を開く","search",()=>setPane("search")],["タグを開く","tags",()=>setPane("tags")],["ブックマークを開く","bookmark",()=>setPane("bookmark")],["レポート: フォロー漏れ洗い出し","report",()=>openReport("followup_gaps")],["レポート: クライアント名寄せ","report",()=>openReport("name_merge_candidates")],["レポート: テンプレ検出","report",()=>openReport("boilerplate_detected")]];
+const CMDS=[["グラフビューを開く","graph",()=>openGraph()],["取引先テーブル(Bases)を開く","table",()=>tableView()],["ホームを開く","files",()=>{lastNote=null;showDoc();welcome();renderTabs();renderVhead();}],["検索を開く","search",()=>setPane("search")],["タグを開く","tags",()=>setPane("tags")],["ブックマークを開く","bookmark",()=>setPane("bookmark")],...(DATA.reports.length?[["レポート: フォロー漏れ洗い出し","report",()=>openReport("followup_gaps")],["レポート: クライアント名寄せ","report",()=>openReport("name_merge_candidates")],["レポート: テンプレ検出","report",()=>openReport("boilerplate_detected")]]:[])];
 const QI=DATA.clients.map(c=>({k:"c",stem:c.stem,name:c.name,pt:c.industry||"取引先",ico:"building"})).concat(DATA.docs.map(d=>({k:"d",stem:d.stem,name:d.title,pt:d.client||"資料",ico:"filetext"}))).concat(DATA.reports.map(r=>({k:"r",stem:r.stem,name:r.name,pt:"レポート",ico:"report"})));
 function qsOpen(mode){qMode=mode||"nav";$("#qsov").classList.add("on");const i=$("#qsin");i.value="";i.placeholder=qMode==="cmd"?"コマンドを実行…  (⌘P)":"ノートに移動…  (⌘O)";qsR("");i.focus();}
 function qsClose(){$("#qsov").classList.remove("on");}
@@ -1407,13 +1408,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="サニティゲート（前回比20%%超減で exit 1）を明示的に通過させる",
     )
+    parser.add_argument(
+        "--include-reports",
+        action="store_true",
+        help="AI洗い出しレポート（_reports/・管理用）を搭載する。既定は非搭載（16名向けには意味不明のため）",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     global VAULT, CLIENTS, DOCS, REPORTS, EXCL, EXCL_N, DOC_DROP, TITLE_OVERRIDE, CHUNK_DROP
+    global INCLUDE_REPORTS
 
     args = _parse_args(argv)
+    INCLUDE_REPORTS = args.include_reports
     VAULT = Path(args.vault).expanduser()
     CLIENTS, DOCS, REPORTS = VAULT / "clients", VAULT / "docs", VAULT / "_reports"
     out = Path(args.out).expanduser()
@@ -1525,8 +1533,12 @@ def main(argv: list[str] | None = None) -> int:
         _c["nx"] = next_action(_c["tl"])
         _c["hw"] = 1 if homework_flag(_c["nx"], _c["last"], _today) else 0
 
+    # AI洗い出しレポート（_reports/）は管理用の内部成果物で、営業16名には
+    # snake_case 名の生 markdown が意味不明（ユーザーFB 2026-07-12）。既定で非搭載とし、
+    # 品質整備セッション用に --include-reports で復元可能にする。
+    # followup_gaps の実用価値は 宿題/あり タグ＋次アクション列が置き換え済み。
     reports = []
-    if REPORTS.exists():
+    if INCLUDE_REPORTS and REPORTS.exists():
         for f in sorted(REPORTS.glob("*.md")):
             _rt = f.read_text(errors="replace")
             reports.append({"stem": f.stem, "name": f.stem, "md": _strip_self_tags(body_of(_rt).strip())[:20000], "_wl": parse_links(body_of(_rt))})
