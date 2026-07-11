@@ -64,13 +64,21 @@ echo "== 5) 現行td取得（ロールバックARN控え） =="
 aws ecs describe-task-definition --region "$R" --task-definition "$TD_FAMILY" --query 'taskDefinition' > /tmp/cwu_td.json
 CUR_ARN=$(jq -r '.taskDefinitionArn' /tmp/cwu_td.json); echo "  ロールバック先: $CUR_ARN"
 
-echo "== 6) 新td生成（宣言的フルセット: image + ALLOWED_HD + Slack env/secrets を毎回 除去→再付与） =="
-jq --arg img "$IMG" --arg hd "$HD" --arg rd "$SLACK_REDIRECT" \
+echo "== 6) 新td生成（宣言的フルセット: image + ALLOWED_HD + app.html S3 URI + No-AI フラグ + Slack env/secrets を毎回 除去→再付与） =="
+# CONNECT_APP_HTML_S3_URI: /app ホットスワップ（publish_app_html.sh）の受け口。
+#   publish script の配置先（s3://$BUCKET/codebuild/connect-web-app.html）と同一定数。
+# USE_QUERY_PLANNER/USE_COHERE_RERANK=false: T1 No-AI 化の恒久化
+#   （runtime td 手術で反映済みの変更が bake で巻き戻らないよう宣言的に固定）。
+APP_HTML_URI="s3://$BUCKET/codebuild/connect-web-app.html"
+jq --arg img "$IMG" --arg hd "$HD" --arg rd "$SLACK_REDIRECT" --arg apphtml "$APP_HTML_URI" \
    --arg cid "$CID_ARN" --arg csec "$CSEC_ARN" --arg cst "$CSTATE_ARN" '
   .containerDefinitions[0].image=$img
   | .containerDefinitions[0].environment=(
-      [.containerDefinitions[0].environment[]|select(.name!="CONNECT_SEARCH_ALLOWED_HD" and .name!="SLACK_OAUTH_REDIRECT_URI")]
-      + [{"name":"CONNECT_SEARCH_ALLOWED_HD","value":$hd},{"name":"SLACK_OAUTH_REDIRECT_URI","value":$rd}])
+      [.containerDefinitions[0].environment[]|select(.name!="CONNECT_SEARCH_ALLOWED_HD" and .name!="SLACK_OAUTH_REDIRECT_URI"
+        and .name!="CONNECT_APP_HTML_S3_URI" and .name!="USE_QUERY_PLANNER" and .name!="USE_COHERE_RERANK")]
+      + [{"name":"CONNECT_SEARCH_ALLOWED_HD","value":$hd},{"name":"SLACK_OAUTH_REDIRECT_URI","value":$rd},
+         {"name":"CONNECT_APP_HTML_S3_URI","value":$apphtml},
+         {"name":"USE_QUERY_PLANNER","value":"false"},{"name":"USE_COHERE_RERANK","value":"false"}])
   | .containerDefinitions[0].secrets=(
       [((.containerDefinitions[0].secrets)//[])[]|select(.name!="CONNECT_SLACK_CLIENT_ID" and .name!="CONNECT_SLACK_CLIENT_SECRET" and .name!="SLACK_OAUTH_STATE_SECRET")]
       + [{"name":"CONNECT_SLACK_CLIENT_ID","valueFrom":$cid},{"name":"CONNECT_SLACK_CLIENT_SECRET","valueFrom":$csec},{"name":"SLACK_OAUTH_STATE_SECRET","valueFrom":$cst}])
@@ -85,5 +93,6 @@ aws ecs wait services-stable --region "$R" --cluster "$CLUSTER" --services "$SVC
 echo ""
 echo "✅ 統合デプロイ完了。3機能同居:"
 echo "   /app（Obsidian UI・実HTML）/ /search（303）/ /slack/oauth/callback（Slack個人連携）"
+echo "   image tag: $TAG（ingest td 配布: bash infra/deploy/register_ingest_td.sh --image-tag $TAG）"
 echo "   検証: https://connect.newstv.co.jp/app を @vectorinc.co.jp でログイン（/appが\"準備中\"でなく実UIか確認）"
 echo "⏪ ロールバック: aws ecs update-service --region $R --cluster $CLUSTER --service $SVC --task-definition $CUR_ARN"

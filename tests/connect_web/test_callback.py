@@ -47,8 +47,9 @@ def _client(
 
 
 def test_healthz(monkeypatch: pytest.MonkeyPatch) -> None:
+    # app_html_* フィールドの中身は test_app_html_s3.py で検証（ここでは ok のみ見る）。
     client, _ = _client(monkeypatch)
-    assert client.get("/healthz").json() == {"ok": True}
+    assert client.get("/healthz").json()["ok"] is True
 
 
 def test_callback_success_stores_token(monkeypatch: pytest.MonkeyPatch) -> None:

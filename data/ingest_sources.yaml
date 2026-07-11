@@ -66,6 +66,63 @@ gdrive_folders:
       use_case: "営業 RAG 検索の主要情報源"
       priority: "high"
 
+  # ============================================================
+  # ルールブック再編フォルダ（資料整理ルールブック_2026-07-03・2026-07-10 追加）
+  # ============================================================
+  # ナレッジ/ ルート直下の 01〜06 を個別に取り込む。folder_id は Drive 側で
+  # フォルダ作成後に実 ID へ貼り替える（REPLACE_WITH_ のままなら loader が
+  # WARNING 付きで skip するので、未確定のまま先行コミットしても既存 ingest は壊れない）。
+  # ⚠️ 99_一次倉庫（検索対象外）は**エントリを書かない**。書くとルート検査
+  #    （gdrive_rulebook_root_folder_id 設定時の preflight）が exit 1 で止める。
+  #    フォルダ名除外（gdrive_exclude_folder_name_re）でも二重にブロックされる。
+  - folder_id: "REPLACE_WITH_KNOWLEDGE_01"
+    folder_name: "01_提案事例"
+    description: "ルールブック 01: 過去の提案書・企画書（種別語「提案」）"
+    include_subfolders: true
+    mime_type_filter: null
+    extra_metadata:
+      rulebook_category: "提案事例"
+
+  - folder_id: "REPLACE_WITH_KNOWLEDGE_02"
+    folder_name: "02_テンプレ・雛形"
+    description: "ルールブック 02: 提案書テンプレ・フォーマット雛形（種別語「テンプレ」）"
+    include_subfolders: true
+    mime_type_filter: null
+    extra_metadata:
+      rulebook_category: "テンプレ・雛形"
+
+  - folder_id: "REPLACE_WITH_KNOWLEDGE_03"
+    folder_name: "03_定期報告・実績データ"
+    description: "ルールブック 03: 定期報告書・実績データ（種別語「報告」）"
+    include_subfolders: true
+    mime_type_filter: null
+    extra_metadata:
+      rulebook_category: "定期報告・実績データ"
+
+  - folder_id: "REPLACE_WITH_KNOWLEDGE_04"
+    folder_name: "04_会社紹介・ケイパ資料"
+    description: "ルールブック 04: 会社紹介・ケイパビリティ資料"
+    include_subfolders: true
+    mime_type_filter: null
+    extra_metadata:
+      rulebook_category: "会社紹介・ケイパ資料"
+
+  - folder_id: "REPLACE_WITH_KNOWLEDGE_05"
+    folder_name: "05_議事録・商談メモ"
+    description: "ルールブック 05: 議事録・商談メモ（種別語「議事録」）"
+    include_subfolders: true
+    mime_type_filter: null
+    extra_metadata:
+      rulebook_category: "議事録・商談メモ"
+
+  - folder_id: "REPLACE_WITH_KNOWLEDGE_06"
+    folder_name: "06_価格・契約"
+    description: "ルールブック 06: 価格表・契約書（種別語「価格」「契約」）"
+    include_subfolders: true
+    mime_type_filter: null
+    extra_metadata:
+      rulebook_category: "価格・契約"
+
 gsheets:
   # ---- ナレッジ共有フォーム回答 ----
   - sheet_id: "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
@@ -114,6 +171,26 @@ shared_drives_crawl:
   extra_metadata:
     topic: "共有ドライブ横断クロール"
     use_case: "営業 RAG 検索の網羅性"
+
+# ============================================================
+# ルールブック運用のグローバル設定（2026-07-10 追加）
+# ============================================================
+# gdrive_rulebook_root_folder_id: ナレッジ/ ルートの folder_id。実 ID を貼ると
+# ingest（gdrive kind）冒頭の preflight がルート直下フォルダと本ファイルの
+# gdrive_folders の整合を検査する（silent 未取込の防止・fail-loud）:
+#   - 99_ 系以外の NN_ フォルダが gdrive_folders に載っていない → exit 1（不足一覧を表示）
+#   - 99_ 系フォルダが gdrive_folders に載っている            → exit 1
+#   - env INGEST_ROOT_CHECK_WARN_ONLY=true で警告に降格可
+# REPLACE_WITH_ プレースホルダのままなら preflight は無効（未設定と同じ扱い）。
+gdrive_rulebook_root_folder_id: "REPLACE_WITH_KNOWLEDGE_ROOT"
+
+# gdrive_exclude_folder_name_re: フォルダ名の除外 regex。gdrive_folders / 共有ドライブ
+# crawl 両経路の walk に適用され、マッチしたサブフォルダは配下ごと skip される
+# （skipped_folder ログで観測可能）。省略時はコード側の既定
+#   ^\s*99[_＿]|一次倉庫|検索対象外
+# が使われる（99_一次倉庫＝検索対象外の運用ルールをコードで保証）。
+# 上書きしたい場合のみ、下の行のコメントを外して編集する:
+# gdrive_exclude_folder_name_re: "^\\s*99[_＿]|一次倉庫|検索対象外"
 
 # ============================================================
 # Adapter ↔ source_type マッピング

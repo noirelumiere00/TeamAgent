@@ -377,7 +377,7 @@ _TIMELINE_SQL = """
 #   ASC LIMIT だと FB が per_client_limit を超えるクライアントで「最古の N 件」になり、
 #   カルテ frontmatter（最新 deal_phase/bant_score）と時系列が古い値で誤るため。
 
-_DOCUMENTS_SQL = """
+_DOCUMENTS_SQL_TEMPLATE = """
     SELECT
         d.title,
         d.source_uri,
@@ -401,12 +401,28 @@ _DOCUMENTS_SQL = """
     ) ex ON true
     WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
       AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
+      {stale_clause}
       AND (d.metadata->>'cls_project' ILIKE %s
            OR d.metadata->>'client_name' ILIKE %s
            OR d.title ILIKE %s)
     ORDER BY d.modified_at DESC NULLS LAST
     LIMIT %s
 """
+
+# 入れ込み v2 (2026-07-10): ingest の stale soft-delete（metadata.stale='true'）を
+# Vault から既定で除外する（Drive 上から消えた/検索対象外に移された資料を配らない）。
+_STALE_EXCLUDE_CLAUSE = "AND d.metadata->>'stale' IS DISTINCT FROM 'true'"
+
+
+def documents_sql(*, include_stale: bool = False) -> str:
+    """資料 SELECT SQL を組む（純関数・テスト対象）。
+
+    既定は stale 除外。``--include-stale`` 指定時のみ従来挙動（stale も含める）。
+    埋め込むのは固定リテラル節のみ（ユーザー入力は入らない）。
+    """
+    return _DOCUMENTS_SQL_TEMPLATE.format(
+        stale_clause="" if include_stale else _STALE_EXCLUDE_CLAUSE
+    )
 
 
 def load_clients_data(
@@ -415,14 +431,18 @@ def load_clients_data(
     client: str | None = None,
     limit: int | None = None,
     per_client_limit: int = 100,
+    include_stale: bool = False,
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
     """クライアント一覧（client_name ∪ cls_project）→ 各クライアントの FB/資料を読む。
 
     SELECT のみ（read-only）。--client 指定時はその部分一致 1 件系に絞り、--limit は
-    クライアント数の先頭 N 件キャップ（検証用）。
+    クライアント数の先頭 N 件キャップ（検証用）。include_stale=False（既定）で
+    metadata.stale='true' の資料を除外する（--include-stale で従来挙動）。
     """
     import psycopg
     from psycopg.rows import dict_row
+
+    docs_sql = documents_sql(include_stale=include_stale)
 
     clients_data: dict[str, dict[str, list[dict[str, Any]]]] = {}
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
@@ -442,7 +462,7 @@ def load_clients_data(
                 # 「timeline は古い順・末尾＝最新」契約を保つ）
                 timeline = [dict(r) for r in reversed(cur.fetchall())]
             with conn.cursor() as cur:
-                cur.execute(_DOCUMENTS_SQL, [like, like, like, per_client_limit])
+                cur.execute(docs_sql, [like, like, like, per_client_limit])
                 documents = [dict(r) for r in cur.fetchall()]
             if timeline or documents:
                 clients_data[name] = {"timeline": timeline, "documents": documents}
@@ -467,6 +487,11 @@ def main() -> int:
     p.add_argument("--commit", action="store_true", help="既定 dry-run。指定時のみ書き出し")
     p.add_argument("--limit", type=int, default=None, help="先頭 N クライアントのみ（検証用）")
     p.add_argument("--client", default=None, help="クライアント名の部分一致で絞り込み")
+    p.add_argument(
+        "--include-stale",
+        action="store_true",
+        help="metadata.stale='true' の資料も含める（既定は除外・従来挙動に戻すフラグ）",
+    )
     args = p.parse_args()
 
     dsn = args.dsn or os.environ.get("DATABASE_URL")
@@ -476,7 +501,9 @@ def main() -> int:
 
     out_dir = Path(args.out).expanduser()
     try:
-        clients_data = load_clients_data(dsn, client=args.client, limit=args.limit)
+        clients_data = load_clients_data(
+            dsn, client=args.client, limit=args.limit, include_stale=args.include_stale
+        )
         files = plan_vault(clients_data)
         stats = write_vault(out_dir, files, commit=args.commit)
     except Exception as e:

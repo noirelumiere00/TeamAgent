@@ -301,6 +301,77 @@ class IngestRepository:
                 cur.execute(sql, params)
 
     # -------------------------------------------------------
+    # stale soft-delete（入れ込み v2 2026-07-10・INGEST_MARK_STALE）
+    # -------------------------------------------------------
+    def list_gdrive_external_ids_with_stale(self) -> list[tuple[str, bool]]:
+        """source_type='gdrive' の全 documents の (external_id, 既に stale か) を返す。
+
+        pipeline の run 末尾で「今回観測した external_id 集合」との差集合を取り、
+        未観測 doc への stale 印付け候補と量的ブレーキ（50% 超で中止）の分母に使う。
+        SELECT のみ（書き込みなし）。
+        """
+        sql = """
+            SELECT external_id,
+                   COALESCE(metadata->>'stale', '') = 'true' AS is_stale
+            FROM documents
+            WHERE source_type = 'gdrive'::document_source_type
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [(str(r["external_id"]), bool(r["is_stale"])) for r in rows]
+
+    def mark_documents_stale(self, external_ids: list[str], *, marked_at_iso: str) -> int:
+        """指定 external_id の gdrive documents に metadata.stale='true' を jsonb 付与する。
+
+        物理 DELETE はしない（soft-delete）。stale_marked_at には run 日時（ISO8601）を
+        記録する。既に stale の doc は呼び出し側で除外される想定（初回付与日時を保持）。
+        戻り値: UPDATE した行数。
+        """
+        if not external_ids:
+            return 0
+        import json
+
+        patch = json.dumps({"stale": "true", "stale_marked_at": marked_at_iso})
+        sql = """
+            UPDATE documents
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb
+            WHERE source_type = 'gdrive'::document_source_type
+              AND external_id = ANY(%s)
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor() as cur:
+                # 大量 doc の一括 UPDATE が既定 statement_timeout(30s) で打ち切られないよう
+                # 当該 tx 内だけ無制限にする（pipeline._disable_statement_timeout と同流儀・
+                # SET LOCAL は tx 終了で自動失効）。
+                cur.execute("SET LOCAL statement_timeout = '0'")  # nosec B608  # 固定リテラル
+                cur.execute(sql, (patch, external_ids))
+                return int(cur.rowcount or 0)
+
+    def clear_documents_stale(self, external_ids: list[str]) -> int:
+        """指定 external_id の gdrive documents から stale / stale_marked_at キーを除去する。
+
+        今回の run で観測された doc の stale 印を解除する（復活対応）。
+        stale キーを持つ行だけを対象にして無駄な書き込みを避ける。
+        戻り値: UPDATE した行数。
+        """
+        if not external_ids:
+            return 0
+        sql = """
+            UPDATE documents
+            SET metadata = (metadata - 'stale') - 'stale_marked_at'
+            WHERE source_type = 'gdrive'::document_source_type
+              AND external_id = ANY(%s)
+              AND metadata ? 'stale'
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '0'")  # nosec B608  # 固定リテラル
+                cur.execute(sql, (external_ids,))
+                return int(cur.rowcount or 0)
+
+    # -------------------------------------------------------
     # 内部
     # -------------------------------------------------------
     @staticmethod

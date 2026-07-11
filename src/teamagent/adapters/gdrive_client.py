@@ -47,6 +47,16 @@ socket.setdefaulttimeout(60)
 
 logger = structlog.get_logger(__name__)
 
+# 入れ込み v2 (2026-07-10): walk_files_recursive の既定フォルダ名除外 regex。
+# 「99_一次倉庫」系（検索対象外の生データ置き場）をコードで保証して取り込まない。
+# yaml のグローバルキー ``gdrive_exclude_folder_name_re`` で上書き可（pipeline 側で配線）。
+DEFAULT_EXCLUDE_FOLDER_NAME_RE = r"^\s*99[_＿]|一次倉庫|検索対象外"
+
+# walk_files_recursive の既定 max_files。定数に切り出す理由: pipeline 側の打ち切り検知
+# （len(files) >= 上限 → stale mark を skip する run 単位フラグ）が同じ値を参照するため。
+# シグネチャに 5000 を直書きすると両者が乖離した時に打ち切りが無検知になる。
+DEFAULT_WALK_MAX_FILES = 5000
+
 
 # -----------------------------------------------------------
 # データ型
@@ -408,8 +418,9 @@ class GDriveClient:
         request_id: str,
         *,
         drive_id: str | None = None,
-        max_files: int = 5000,
+        max_files: int = DEFAULT_WALK_MAX_FILES,
         max_depth: int = 10,
+        exclude_folder_name_re: str | None = None,
     ) -> list[DriveFile]:
         """指定 root_id (フォルダ or 共有ドライブ root) 配下を BFS で全件 walk する。
 
@@ -421,12 +432,20 @@ class GDriveClient:
                        共有ドライブ専用クエリで効率化）
             max_files: 安全装置（暴走防止、1 共有ドライブで 5000 ファイルが上限）
             max_depth: フォルダ階層の最大深度
+            exclude_folder_name_re: サブフォルダ名がこの regex に search マッチしたら
+                配下ごと skip する（入れ込み v2・99_一次倉庫系の除外保証）。
+                None / 空文字なら除外しない（後方互換）。既定値は
+                ``DEFAULT_EXCLUDE_FOLDER_NAME_RE`` を呼び出し側（pipeline）が解決して渡す。
 
         Returns:
             files (フォルダ自身は除外、通常ファイルのみ)
         """
+        import re as _re
+
         folder_mime = "application/vnd.google-apps.folder"
         service = self._ensure_service()
+        # 除外 regex は fail-loud: 不正な regex は即 re.error で落とす（黙って全取込しない）。
+        exclude_re = _re.compile(exclude_folder_name_re) if exclude_folder_name_re else None
         out: list[DriveFile] = []
         queue: list[tuple[str, int]] = [(root_id, 0)]  # (folder_id, depth)
         visited: set[str] = set()
@@ -461,6 +480,18 @@ class GDriveClient:
                 for f in resp.get("files", []):
                     mime = str(f.get("mimeType", ""))
                     if mime == folder_mime:
+                        sub_name = str(f.get("name", ""))
+                        # 入れ込み v2: 除外 regex にマッチするサブフォルダは配下ごと skip
+                        # （99_一次倉庫等の検索対象外フォルダをコードで保証して取り込まない）。
+                        if exclude_re is not None and exclude_re.search(sub_name):
+                            logger.info(
+                                "skipped_folder",
+                                request_id=request_id,
+                                folder_id=str(f.get("id", "")),
+                                folder_name=sub_name,
+                                pattern=exclude_folder_name_re,
+                            )
+                            continue
                         # sub-folder → queue に追加
                         queue.append((str(f.get("id", "")), depth + 1))
                     else:
@@ -486,14 +517,20 @@ class GDriveClient:
                 if not page_token or len(out) >= max_files:
                     break
 
-        logger.info(
+        hit_max = len(out) >= max_files
+        # stale 堅牢化 (2026-07-10): max_files 打ち切りは列挙の不完全＝INGEST_MARK_STALE の
+        # 観測集合の欠損に直結するため、無警告で流さず WARNING に昇格する（イベント名・
+        # 既存キーは維持し、max_files キーを追加して件数と上限を突き合わせ可能にする）。
+        log_fn = logger.warning if hit_max else logger.info
+        log_fn(
             "gdrive_walk_files_recursive",
             request_id=request_id,
             root_id=root_id,
             drive_id=drive_id,
             folders_visited=len(visited),
             files_collected=len(out),
-            hit_max=len(out) >= max_files,
+            hit_max=hit_max,
+            max_files=max_files,
         )
         return out
 
