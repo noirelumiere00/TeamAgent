@@ -206,11 +206,18 @@ resource "aws_iam_role_policy" "events_canary_run_task" {
 }
 
 # EventBridge rule: 1時間ごと ---
+variable "canary_rule_enabled" {
+  description = "カナリアの EventBridge ルールを ENABLED にするか。live は手動 DISABLED 運用のため既定 false（state 未指定だと apply のたびに手動 DISABLE が ENABLED に巻き戻る・2026-07-11 監査）。"
+  type        = bool
+  default     = false
+}
+
 resource "aws_cloudwatch_event_rule" "canary_hourly" {
   count               = var.enable_canary_health ? 1 : 0
   name                = "${var.project_name}-${var.environment}-canary-hourly"
   description         = "1時間ごとの AiLa 合成カナリア Fargate 起動トリガ"
   schedule_expression = var.canary_schedule_expression
+  state               = var.canary_rule_enabled ? "ENABLED" : "DISABLED"
 }
 
 resource "aws_cloudwatch_event_target" "canary_run_task" {

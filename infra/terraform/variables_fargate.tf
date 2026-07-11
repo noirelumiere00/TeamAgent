@@ -45,6 +45,12 @@ variable "shared_company_domains" {
   default     = ""
 }
 
+variable "mcp_model_id" {
+  description = "mcp（スキル/オーケストレーター）の Bedrock モデル ID。コスト方針(2026-06-29)により Haiku 4.5 既定・live rev40 と同値。var.bedrock_model_id を流用しない（あちらは Lambda 用で tfvars が Sonnet を指定しており、共有すると apply で mcp が Sonnet 化する＝2026-07-11 反対尋問レビューで検出）。"
+  type        = string
+  default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+}
+
 variable "use_calendar_event_tool" {
   description = "calendar_event tool（📅カレンダー登録ボタンの押下処理・v0.3 Task3）を mcp で有効化。既定 false。ON 後に morning_digest_calendar_button=true にする（順序を守らないと無反応ボタン）。"
   type        = bool

@@ -347,7 +347,11 @@ resource "aws_ecs_task_definition" "connect_web" {
       # フラグ。USE_NEW_SCHEMA を入れ忘れると factory が既定 false → RLS 未適用の旧
       # proposals_chunks を引いてしまい RLS スコープが no-op になる（セキュリティ上必須）。
       { name = "USE_NEW_SCHEMA", value = "true" },
-      { name = "USE_COHERE_RERANK", value = "true" },
+      # live パリティ（2026-07-11 反対尋問レビューで検出）: /search の Cohere 再ランクは live rev39 で
+      # 明示 OFF（mcp 側=true とは別判断。/search は SEARCH_MIN_RELEVANCE=0.0 で全件表示＋UI 側で
+      # relevance 判断させる設計のため、rerank コスト/レイテンシを掛けない）。true に戻すと apply で
+      # 検索順位が変動し Bedrock 呼び出しが増える。
+      { name = "USE_COHERE_RERANK", value = "false" },
       { name = "USE_CLIENT_BOOST", value = "true" },
       # 「資料の被り」対策（L1）: 営業資料はテンプレページ（表紙/会社紹介/料金）を使い回すため、
       # 検索結果でテンプレチャンクが複数資料から重複ヒット＆同一資料が結果を独占する。
@@ -364,6 +368,24 @@ resource "aws_ecs_task_definition" "connect_web" {
       #   ON の手順（再ビルド不要・この env を差し替えるだけ）:
       #     GRAPH_CONCEPT_EDGES=true / GRAPH_CONCEPT_THRESHOLD=0.90 等で点灯→グラフを見て上げ下げ。
       { name = "GRAPH_CONCEPT_EDGES", value = "false" },
+      # live パリティ（2026-07-11 監査）: 以下8本は CLI 直登録の taskdef(rev39) にのみ存在し terraform に
+      # 無かったため、apply すると剥がれて 16名共有の検索 UI の品質が一斉にデフォルト回帰する状態だった。
+      # 値はすべて live rev39 と同値。terraform を唯一の正に戻す。
+      # テンプレ文書そのものを検索対象から除外（boilerplate 除外より強い・資料単位）。
+      { name = "TEMPLATE_EXCLUDE_SEARCH", value = "1" },
+      # PR#177 ルール分類による doc_kind フィルタ（提案書/議事録等の種別絞り込み）。
+      { name = "USE_DOC_KIND_RULES", value = "1" },
+      # /search は @AiLa と異なり足切りなし（UI 側で relevance 表示・ユーザーが判断）。
+      { name = "SEARCH_MIN_RELEVANCE", value = "0.0" },
+      # クライアント名一致の優先ソートと予算ソート。
+      { name = "SEARCH_CLIENT_MATCH_SORT", value = "1" },
+      { name = "SEARCH_BUDGET_SORT", value = "true" },
+      # pgvector HNSW の探索幅（mcp と同値・live=100）。
+      { name = "SEARCH_HNSW_EF_SEARCH", value = "100" },
+      # クエリプランナは live で明示 OFF（値ごと保存し将来の ON/OFF を taskdef 差し替えだけにする）。
+      { name = "USE_QUERY_PLANNER", value = "false" },
+      # ナレッジフィルタ UI（種別/期間などの絞り込み）。
+      { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
     ]
     secrets = [
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
@@ -372,6 +394,10 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "CONNECT_SLACK_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn },
       { name = "SLACK_OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
+      # live パリティ（2026-07-11 監査）: メールアクションリンクの HMAC 検証鍵。morning-digest が署名し
+      # connect-web が検証する対の鍵で、剥がれると ✏️/📅 等のアクション URL が全て検証不能になる。
+      # live は database-url の secret 文字列を鍵として共用している（rev39 実機と同値・意図的な既存設計）。
+      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
     ]
     logConfiguration = {
       logDriver = "awslogs"
