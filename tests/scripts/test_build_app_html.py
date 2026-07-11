@@ -694,3 +694,30 @@ def test_homework_tag_not_set_when_last_contact_fresh(
     assert m is not None
     assert m.group(1) == "見積提出"
     assert m.group(2) == "0"
+
+
+# ---------------- 管理用レポートの既定非搭載 ----------------
+
+
+def test_reports_excluded_by_default(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """_reports/ が実在しても既定では payload に載らない（16名向け画面から管理物を排除）。"""
+    rdir = vault / "_reports"
+    rdir.mkdir()
+    (rdir / "followup_gaps.md").write_text("# レポート\n\n中身", encoding="utf-8")
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert '"reports": []' in html
+    # payload に report エントリが無いこと（JS ソース内の openReport("...") リテラルは残ってよい）
+    assert '"stem": "followup_gaps"' not in html
+
+
+def test_reports_included_with_flag(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """--include-reports 指定時のみ従来どおり搭載（管理セッション用）。"""
+    rdir = vault / "_reports"
+    rdir.mkdir()
+    (rdir / "followup_gaps.md").write_text("# レポート\n\n中身", encoding="utf-8")
+    out = tmp_path / "o.html"
+    assert _run(vault, out, "--include-reports") == 0
+    html = out.read_text(encoding="utf-8")
+    assert '"stem": "followup_gaps"' in html
