@@ -146,6 +146,95 @@ def bant_short(b):
     return m.group(1) if m else b[:1]
 
 
+# === 施策タイムライン: 営業FB時系列（### ---- 見出し区切り）のパース ===
+FB_HEAD_RE = re.compile(r"^###\s*-{2,}\s*(.*)$", re.M)
+FB_EPOCH_RE = re.compile(r"(1[0-9]{9})(?:\.\d+)?\s*$")
+FB_DATE_RE = re.compile(r"^>\s*\[(\d{4}-\d{2}-\d{2})[^\]]*\]", re.M)
+FB_FIELD_RE = re.compile(
+    r"^-\s*(フェーズ|BANT|ポジ反応|ネガ反応|次アクション|提案メニュー)\s*[:：]\s*(.*)$"
+)
+FB_FIELD_MAP = {
+    "フェーズ": ("ph", 80), "BANT": ("bant", 80), "提案メニュー": ("menu", 60),
+    # pos/neg は当初 160 → 実 Vault 計測で HTML 増分が +402KB と +400KB を超えたため 120 に抑制
+    "ポジ反応": ("pos", 120), "ネガ反応": ("neg", 120), "次アクション": ("next", 120),
+}
+FB_MAX_EVENTS = 30
+
+
+def _fb_dedup_key(ev):
+    """Slack/フォーム二重登録の同定キー: 正規化した (ポジ+ネガ)[:120]。空は dedup 対象外。"""
+    raw = unicodedata.normalize("NFKC", (ev.get("pos", "") + ev.get("neg", "")))
+    return re.sub(r"\s+", "", raw).lower()[:120]
+
+
+def dedup_fb_events(events):
+    """(ポジ+ネガ) が一致する重複 FB を折り畳む。日付を持つ方を正として残す。"""
+    out, seen = [], {}
+    for ev in events:
+        key = _fb_dedup_key(ev)
+        if not key:  # ポジ/ネガ両方欠損は同定不能 → 別物として残す（誤結合防止）
+            out.append(ev)
+            continue
+        j = seen.get(key)
+        if j is None:
+            seen[key] = len(out)
+            out.append(ev)
+        elif ev.get("d") and not out[j].get("d"):
+            out[j] = ev  # 日付を持つ方で置き換え（両方あり/両方なしは先勝ち）
+    return out
+
+
+def _sort_fb_events(events):
+    """日付降順（日付なしは末尾）・最大 FB_MAX_EVENTS 件。"""
+    events.sort(key=lambda e: e.get("d") or "", reverse=True)
+    return events[:FB_MAX_EVENTS]
+
+
+def parse_fb_events(body: str) -> list[dict]:
+    """クライアント md 本文の営業FB時系列をイベント列にパースする（fail-open）。
+
+    見出し `### ---- <ソース名> <slack ts epoch|row N>` で区切り、
+    各 FB の `- フェーズ:` 等のフィールド行と日付（`> [YYYY-MM-DD HH:MM]` 行
+    または見出し末尾の epoch 秒 → UTC+9）を拾う。壊れた見出し/欠損フィールドは
+    空文字で許容し、例外は漏らさない（このパースの失敗で build を止めない）。
+    """
+    try:
+        heads = list(FB_HEAD_RE.finditer(body or ""))
+        events = []
+        for i, m in enumerate(heads):
+            try:
+                head = m.group(1).strip()
+                end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
+                sec = body[m.end():end]
+                nx = re.search(r"^#{1,6}\s", sec, re.M)  # 次の見出し（## 関連資料 / 非FBのh3 等）で打ち切り
+                if nx:
+                    sec = sec[:nx.start()]
+                ev = {"d": "", "src": "", "ph": "", "bant": "", "menu": "", "pos": "", "neg": "", "next": ""}
+                ev["src"] = "フォーム" if ("フォーム" in head or re.search(r"row\s*\d+\s*$", head)) else "Slack"
+                dm = FB_DATE_RE.search(sec)
+                if dm:
+                    ev["d"] = dm.group(1)
+                else:
+                    tsm = FB_EPOCH_RE.search(head)
+                    if tsm:
+                        try:
+                            ev["d"] = datetime.fromtimestamp(int(tsm.group(1)), JST).strftime("%Y-%m-%d")
+                        except (ValueError, OverflowError, OSError):
+                            pass
+                for ln in sec.splitlines():
+                    fm = FB_FIELD_RE.match(ln.strip())
+                    if fm:
+                        key, limit = FB_FIELD_MAP[fm.group(1)]
+                        if not ev[key]:  # 同名フィールド重複は先勝ち
+                            ev[key] = fm.group(2).strip()[:limit]
+                events.append(ev)
+            except Exception:  # 個別 FB の破損は握り潰して次へ（fail-open）
+                continue
+        return _sort_fb_events(dedup_fb_events(events))
+    except Exception:  # タイムラインはベストエフォート（このパースで build を止めない）
+        return []
+
+
 EXCL: set[str] = set()  # exclude_stems.json（main() で読み込み・欠落は exit 1）
 _exn = lambda s: re.sub(r"[\s_]+", "", s).lower()
 EXCL_N: set[str] = set()
@@ -458,6 +547,30 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tbv .num{text-align:right;font-variant-numeric:tabular-nums}
 .tbv .bp{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px}
 .tbv .dotc{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+/* 施策タイムライン（カルテ内・縦タイムライン: 左=日付チップ+縦線 / 右=カード） */
+.tlwrap{margin:4px 0 26px}
+.tlh{display:flex;align-items:center;gap:7px;font-size:var(--f-ui-small);color:var(--muted);font-weight:600;padding:4px 0 9px;border-bottom:1px solid var(--border)}
+.tlh svg.ic{color:var(--accent-2)}
+.tlh .cnt{color:var(--faint);font-weight:400;font-size:var(--f-ui-smaller)}
+.tlbody{padding:12px 0 2px}
+.tlrow{position:relative;display:flex;padding:0 0 12px}
+.tlrow::before{content:"";position:absolute;left:86px;top:6px;bottom:-6px;width:1px;background:var(--border)}
+.tlrow:last-child::before{display:none}
+.tlrow::after{content:"";position:absolute;left:83px;top:6px;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 2px var(--bg-primary)}
+.tlrow.tldoc::after{background:var(--b40)}
+.tld{width:72px;flex:none;text-align:right;font-size:var(--f-ui-smaller);color:var(--faint);font-variant-numeric:tabular-nums;padding-top:1px}
+.tlcard{flex:1;min-width:0;background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--r-m);padding:8px 12px 9px;margin-left:26px}
+.tlbadge{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;font-weight:600;margin-right:6px;white-space:nowrap}
+.tlbadge.tlfb{background:var(--accent-bg);color:var(--accent-2)}
+.tlchip{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;background:var(--hover);color:var(--muted);margin-right:4px;white-space:nowrap}
+.tlt{font-weight:600;font-size:var(--f-ui-small);color:var(--text);margin-top:5px;line-height:1.45;overflow-wrap:anywhere}
+.tlt .wl{color:var(--accent-2);cursor:pointer}
+.tlt .wl:hover{text-decoration:underline}
+.tlx{font-size:var(--f-ui-smaller);color:var(--muted);margin-top:4px;line-height:1.55;overflow-wrap:anywhere}
+.tlnx{font-size:var(--f-ui-smaller);color:var(--accent-2);margin-top:4px;line-height:1.5;overflow-wrap:anywhere}
+.tlmorebtn{display:inline-block;margin:0 0 2px 98px;padding:4px 12px;font-size:var(--f-ui-smaller);color:var(--accent-2);cursor:pointer;border:1px solid var(--border);border-radius:var(--r-s)}
+.tlmorebtn:hover{background:var(--hover);border-color:var(--border-focus)}
+.tlwrap.folded .tlrow.tlhid{display:none}
 kbd{background:var(--bg-float);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:11px;font-family:var(--mono)}
 ::selection{background:hsla(254,80%,68%,.35)}
 .tab.newtab{margin-top:8px;width:30px;justify-content:center;color:var(--faint)}
@@ -531,13 +644,15 @@ const cByStem={},dByStem={},rByStem={},cByNorm={};
 DATA.clients.forEach(c=>{cByStem[c.stem]=c;if(c.name)cByNorm[nrm(c.name)]=c;});
 DATA.docs.forEach(d=>dByStem[d.stem]=d);
 DATA.reports.forEach(r=>rByStem[r.stem]=r);
-function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);return t;}
-function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);return t;}
+/* 閲覧時点からの経過でバケット化（ビルド日でなく Date.now 基準 = 月次再生成の間も鮮度が生きる） */
+function ageBucket(ds){if(!ds)return"";const t=Date.parse(ds);if(isNaN(t))return"";const dd=(Date.now()-t)/864e5;return dd<=31?"1ヶ月以内":dd<=92?"3ヶ月以内":dd<=183?"半年以内":dd<=366?"1年以内":"1年以上前";}
+function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);t.push("最終接点/"+(ageBucket(c.last)||"記録なし"));return t;}
+function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);return t;}
 const IDX=[];
 DATA.clients.forEach(c=>IDX.push({kind:"client",stem:c.stem,name:c.name,folder:"clients",tags:clientTags(c),
- props:{"業界":c.industry,"フェーズ":c.phase,"BANT":c.bant},hay:(c.name+" "+c.industry+" "+c.phase+" "+c.bant+" "+(c.md||"")).toLowerCase(),ex:c.industry?("業種: "+c.industry):"",obj:c}));
+ props:{"業界":c.industry,"フェーズ":c.phase,"BANT":c.bant,"最終接点":c.last||"—"},hay:(c.name+" "+c.industry+" "+c.phase+" "+c.bant+" "+(c.md||"")).toLowerCase(),ex:c.industry?("業種: "+c.industry):"",obj:c}));
 DATA.docs.forEach(d=>IDX.push({kind:"doc",stem:d.stem,name:d.title,folder:"docs",tags:docTags(d),
- props:{"種別":d.doc_type,"取引先":d.client,"業界":d.industry,"施策":d.solution},hay:(d.title+" "+d.client+" "+d.industry+" "+d.solution+" "+d.doc_type+" "+d.ex).toLowerCase(),ex:d.ex,obj:d}));
+ props:{"種別":d.doc_type,"取引先":d.client,"業界":d.industry,"施策":d.solution,"更新":d.modified||"—","情報源":d.src||"—"},hay:(d.title+" "+d.client+" "+d.industry+" "+d.solution+" "+d.doc_type+" "+d.src+" "+d.ex).toLowerCase(),ex:d.ex,obj:d}));
 DATA.reports.forEach(r=>IDX.push({kind:"report",stem:r.stem,name:r.name,folder:"_reports",tags:[],props:{},hay:(r.name+" "+r.md).toLowerCase(),ex:"AI洗い出しレポート",obj:r}));
 // タグ集計(親も加算)
 const tagCount={};
@@ -725,7 +840,7 @@ function welcome(){
  const cards=k=>k.map(c=>`<div class="wcard" data-k="c" data-s="${esc(c.stem)}">`+ic("building")+`<div><div class="wt">${esc(c.name)}</div><div class="wx">${esc(c.industry||"業界未設定")} ・ FB${c.fb} / 資料${c.doc}</div></div></div>`).join("");
  const rep=DATA.reports.map(r=>`<div class="wcard" data-k="r" data-s="${esc(r.stem)}">`+ic("report")+`<div><div class="wt">${esc(r.name)}</div><div class="wx">AI洗い出しレポート</div></div></div>`).join("");
  $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} AiLaVault</h1>
-  <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
+  <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。取引先カルテには資料と商談FBを時系列で一望できる<b>施策タイムライン</b>付き。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
   <div class="wsec">AI洗い出しレポート</div><div class="wgrid">${rep}</div>
   <div class="wsec">主要な取引先</div><div class="wgrid">${cards(notable)}</div></div>`;
  $("#inner").querySelectorAll(".wcard").forEach(el=>el.onclick=()=>openByK(el.dataset.k,el.dataset.s));
@@ -777,12 +892,46 @@ function afterOpen(){
  renderTabs();renderVhead();$("#docPane").scrollTop=0;$("#docPane").querySelector(".doc").scrollIntoView({block:"start"});
  const chars=($("#inner").querySelector(".md")?.textContent||"").length;const bl=((lastNote&&BACKL[lastNote.key])||[]).length;updateStatus(bl,chars);
 }
+/* ===== 施策タイムライン（カルテ内: Drive資料 + 商談FB をクライアント単位で時系列一元化） ===== */
+const DTCOLOR={"提案書":"#8a7cf5","報告書":"#54b981","議事録":"#4f9df5","価格表":"#d0912f","契約":"#d0912f"};
+function dtColor(t){t=t||"";if(DTCOLOR[t])return DTCOLOR[t];if(/価格|契約/.test(t))return "#d0912f";return "#8a8a8a";}
+function tlEvents(c){
+ const ev=(c.tl||[]).map(e=>({d:e.d||"",kind:"fb",e}));
+ if(c.cnorm)DATA.docs.forEach(d=>{if(d.cnorm&&d.cnorm===c.cnorm)ev.push({d:d.modified||"",kind:"doc",e:d});});
+ ev.sort((a,b)=>(b.d||"").localeCompare(a.d||""));  /* 日付降順・日付なしは末尾 */
+ return ev;
+}
+function tlSection(c){
+ const ev=tlEvents(c);if(!ev.length)return "";
+ const rows=ev.map((x,i)=>{
+  const cls="tlrow"+(x.kind==="doc"?" tldoc":"")+(i>=10?" tlhid":"");
+  let card;
+  if(x.kind==="doc"){const d=x.e,col=dtColor(d.doc_type);
+   card='<span class="tlbadge" style="background:'+col+'22;color:'+col+'">'+esc(d.doc_type||"資料")+'</span>'
+    +'<div class="tlt"><span class="wl" data-t="docs/'+esc(d.stem)+'">'+esc(d.title)+'</span></div>';
+  }else{const f=x.e;
+   card='<span class="tlbadge tlfb">商談FB'+(f.src?"・"+esc(f.src):"")+'</span>'
+    +(f.ph?'<span class="tlchip">'+esc(f.ph)+'</span>':"")
+    +(f.bant?'<span class="tlchip">'+esc(f.bant)+'</span>':"")
+    +(f.menu?'<div class="tlt">'+esc(f.menu)+'</div>':"")
+    +(f.pos?'<div class="tlx">'+esc(f.pos)+'</div>':"")
+    +(f.next?'<div class="tlnx">→ 次: '+esc(f.next)+'</div>':"");
+  }
+  return '<div class="'+cls+'"><div class="tld">'+(x.d?esc(x.d):"—")+'</div><div class="tlcard">'+card+'</div></div>';
+ }).join("");
+ const more=ev.length>10?'<div class="tlmorebtn">さらに'+(ev.length-10)+'件を表示</div>':"";
+ return '<div class="tlwrap'+(ev.length>10?" folded":"")+'"><div class="tlh">'+ic("cal")+'施策タイムライン<span class="cnt">'+ev.length+'</span></div><div class="tlbody">'+rows+'</div>'+more+'</div>';
+}
+function bindTl(){const mb=$("#inner").querySelector(".tlmorebtn");
+ if(mb)mb.onclick=()=>{const w=mb.closest(".tlwrap");if(w)w.classList.remove("folded");mb.remove();};}
 function openClient(stem){const c=cByStem[stem];if(!c)return;showDoc();pushHist("c",stem);
  lastNote={key:"c:"+stem,title:c.name,icon:"building",folder:"clients"};
  const bodyMd=c.md?md(c.md):"";
  $("#inner").innerHTML='<div class="inline-title">'+esc(c.name)+'</div>'
   +propsPanel([["list","client",c.name],["list","industry",c.industry],["list","deal_phase",c.phase],["list","bant_score",c.bant],["hash","fb_count",c.fb],["hash","doc_count",c.doc]])
+  +tlSection(c)
   +'<div class="md">'+bodyMd+'</div>';
+ bindTl();
  afterOpen();
 }
 function renderClientBody(m){return md(m).replace(/<h3>/g,'<div class="fbcard"><h3 style="border:none">').replace(/(<\/h3>[\s\S]*?)(?=<div class="fbcard">|$)/g,'$1</div>');}
@@ -845,8 +994,12 @@ function renderRight(){
 function tagJump(t){setPane("search");setTimeout(()=>{const i=$("#searchInput");i.value="tag:"+t;window.__lastQ=i.value;runSearchPane(i.value,$("#searchOut"));},30);}
 
 /* ===== Bases風テーブル ===== */
+/* 最終接点 = max(最終FB日, 関連docsの最新modified)。cnorm単位で事前集計 */
+const LASTDOC={};
+DATA.docs.forEach(d=>{if(d.cnorm&&d.modified&&(!(d.cnorm in LASTDOC)||d.modified>LASTDOC[d.cnorm]))LASTDOC[d.cnorm]=d.modified;});
+function lastOf(c){const a=c.lastfb||"",b=(c.cnorm&&LASTDOC[c.cnorm])||"";return a>b?a:b;}
 let tblSort={key:"act",dir:-1},tblFilter={q:"",ind:"",phase:""};
-const TCOLS=[["name","取引先",c=>c.name,0],["industry","業界",c=>c.industry,0],["phase","フェーズ",c=>c.phase,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1]];
+const TCOLS=[["name","取引先",c=>c.name,0],["industry","業界",c=>c.industry,0],["phase","フェーズ",c=>c.phase,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1],["last","最終接点",c=>lastOf(c),0]];
 const PHASECOLOR={"受注":"#54b981","1回目提案":"#4f9df5","2回目提案":"#4f9df5","ケイパ":"#e0b34c","ヒアリング":"#c98bdb","失注":"#e0685f"};
 function tableView(){showDoc();lastNote={key:"table",title:"取引先テーブル",icon:"table",folder:""};ribbonActive("table");
  renderTableShell();renderTabs();renderVhead();
@@ -861,7 +1014,8 @@ function tblBody(shown){return shown.map(c=>{const pc=PHASECOLOR[c.phase]||"#8a8
  return '<tr data-s="'+esc(c.stem)+'"><td>'+esc(c.name)+'</td>'
   +'<td>'+(c.industry?'<span class="dotc" style="background:'+colorOf(c.industry)+'"></span>'+esc(c.industry):'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+(c.phase?'<span class="bp" style="background:'+pc+'22;color:'+pc+'">'+esc(c.phase)+'</span>':'<span style="color:var(--faint)">—</span>')+'</td>'
-  +'<td>'+esc(c.bant||"—")+'</td><td class="num">'+c.fb+'</td><td class="num">'+c.doc+'</td><td class="num">'+(c.fb+c.doc)+'</td></tr>';}).join("");}
+  +'<td>'+esc(c.bant||"—")+'</td><td class="num">'+c.fb+'</td><td class="num">'+c.doc+'</td><td class="num">'+(c.fb+c.doc)+'</td>'
+  +'<td>'+(lastOf(c)?esc(lastOf(c)):'<span style="color:var(--faint)">—</span>')+'</td></tr>';}).join("");}
 function updateTable(){const rows=tblRows();const tb=$("#inner").querySelector("tbody");if(!tb)return;
  tb.innerHTML=tblBody(rows.slice(0,500));
  $("#inner").querySelector(".bar .n").textContent=rows.length+" 件"+(rows.length>500?"（先頭500表示）":"");
@@ -880,7 +1034,7 @@ function renderTableShell(){
  $("#tblq").addEventListener("input",e=>{tblFilter.q=e.target.value;updateTable();});
  $("#tblind").addEventListener("change",e=>{tblFilter.ind=e.target.value;updateTable();});
  $("#tblph").addEventListener("change",e=>{tblFilter.phase=e.target.value;updateTable();});
- $("#inner").querySelectorAll("thead th").forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(tblSort.key===k)tblSort.dir*=-1;else{tblSort.key=k;tblSort.dir=(k==="fb"||k==="doc"||k==="act")?-1:1;}updateTable();});
+ $("#inner").querySelectorAll("thead th").forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(tblSort.key===k)tblSort.dir*=-1;else{tblSort.key=k;tblSort.dir=(k==="fb"||k==="doc"||k==="act"||k==="last")?-1:1;}updateTable();});
  updateTable();}
 
 /* ===== グラフ ===== */
@@ -1185,12 +1339,14 @@ def main(argv: list[str] | None = None) -> int:
         fm = front(t)
         if _is_self_org(fm.get("client") or ""):
             continue
+        _cname = fm.get("client") or f.stem
         clients.append({
-            "stem": f.stem, "name": fm.get("client") or f.stem,
+            "stem": f.stem, "name": _cname, "cnorm": norm(_cname),
             "industry": fm.get("industry", ""), "phase": fm.get("deal_phase", ""),
             "bant": fm.get("bant_score", ""), "bantg": bant_short(fm.get("bant_score", "")),
             "fb": to_int(fm.get("fb_count", "0")), "doc": to_int(fm.get("doc_count", "0")),
-            "md": client_md(t), "_wl": parse_links(body_of(t)),
+            "md": client_md(t), "tl": parse_fb_events(body_of(t)),
+            "_wl": parse_links(body_of(t)),
         })
 
     # 取引先名寄せ(Tier1): 正規化が一致する表記ゆれ(法人格/敬称/空白/中黒)を正本(最短名)へ統合。件数合算・元Vault不変
@@ -1202,6 +1358,10 @@ def main(argv: list[str] | None = None) -> int:
         _canon = min(_grp, key=lambda c: (len(c["name"]), c["name"]))
         _canon["fb"] = sum(c["fb"] for c in _grp)
         _canon["doc"] = sum(c["doc"] for c in _grp)
+        # 施策タイムライン: グループ全員の FB を結合 → dedup → 日付降順 → 30件cap
+        _canon["tl"] = _sort_fb_events(dedup_fb_events([ev for c in _grp for ev in c["tl"]]))
+        # 最終FB日（日付降順ソート済なので先頭が最新。全件日付なしなら ""）
+        _canon["lastfb"] = _canon["tl"][0]["d"] if _canon["tl"] else ""
         clients.append(_canon)
 
     docs = []
@@ -1220,13 +1380,26 @@ def main(argv: list[str] | None = None) -> int:
         _dclient = fm.get("client", "")
         if _is_self_org(_dclient):         # 自社は取引先に出さない（資料自体は残す）
             _dclient = ""
+        _msrc = re.search(r"^- 出典: \[(\w+)\]", t, re.M)
+        _src = {"gdrive": "Drive", "gsheets": "フォーム", "slack": "Slack"}.get(
+            _msrc.group(1) if _msrc else "", ""
+        )
         docs.append({
             "stem": f.stem, "title": TITLE_OVERRIDE.get(f.stem) or fm.get("title", f.stem),
             "client": _dclient, "cnorm": norm(_dclient),
             "industry": fm.get("industry", ""), "solution": fm.get("solution", ""),
             "doc_type": fm.get("doc_type", ""), "modified": fm.get("modified_at", ""),
+            "src": _src,
             "ex": ex, "md": doc_md(t), "_wl": parse_links(body_of(t)),
         })
+
+    # 最終接点 = max(最終FB日, 関連資料の最新更新日)。タグ用に事前計算（JS テーブル列 lastOf と同式）
+    _lastdoc: dict[str, str] = {}
+    for _d in docs:
+        if _d["cnorm"] and _d["modified"] and _d["modified"] > _lastdoc.get(_d["cnorm"], ""):
+            _lastdoc[_d["cnorm"]] = _d["modified"]
+    for _c in clients:
+        _c["last"] = max(_c["lastfb"], _lastdoc.get(_c["cnorm"], ""))
 
     reports = []
     if REPORTS.exists():
@@ -1397,12 +1570,19 @@ def main(argv: list[str] | None = None) -> int:
     out.write_bytes(html_bytes)
     stats_path.write_text(json.dumps(new_stats, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    # 施策タイムラインのペイロード寄与（+400KB 超過時は FB_FIELD_MAP の pos/neg を 120 へ落とす）
+    _tl_bytes = sum(
+        len(json.dumps(c["tl"], ensure_ascii=False).encode("utf-8")) for c in clients if c.get("tl")
+    )
+    _tl_events = sum(len(c.get("tl") or []) for c in clients)
+
     print(f"✅ 生成: {out}")
     print(
         f"   サイズ: {len(html_bytes) // 1024} KB / clients={len(clients)} docs={len(docs)} "
         f"reports={len(reports)} graph={len(gnodes)}n {len(glinks)}e / "
         f"実リンク={len(links)}(内グラフ追加={_added}) / {stamp}"
     )
+    print(f"   施策タイムライン: FBイベント{_tl_events}件 / tlペイロード {_tl_bytes // 1024} KB")
     print(f"   統計保存: {stats_path}")
     return 0
 

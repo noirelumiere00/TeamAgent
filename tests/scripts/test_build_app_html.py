@@ -237,3 +237,226 @@ def test_corrupt_stats_exits_1(
         _run(vault, out)
     assert ei.value.code == 1
     assert "前回統計" in capsys.readouterr().err
+
+
+# ---------------- parse_fb_events（施策タイムライン） ----------------
+
+
+def test_parse_fb_date_from_quote_line_and_fields() -> None:
+    """Slack 由来 FB: `> [YYYY-MM-DD HH:MM]` 行から日付、全フィールドを抽出。"""
+    body = (
+        "## 営業FB時系列（新しい順）\n\n"
+        "### ---- #proj-ショート動画_営業フィードバック情報 1778489156.830189\n\n"
+        "- フェーズ: ケイパ\n"
+        "- BANT: C（検討）\n"
+        "- チャネル: 代理店\n"
+        "- ポジ反応: ・企業ブランディングの相談は多い。\n"
+        "- ネガ反応: ・PIVOTの問い合わせは多い。\n"
+        "- 次アクション: 全社に展開\n"
+        "- 提案メニュー: UGC（TTO、切り抜きなど）\n\n"
+        "> [2026-05-11 08:45] <B0AK>: 本文抜粋\n\n"
+        "[出典](slack://C0A/1778489156.830189)\n\n"
+        "## 関連資料\n\n- [[docs/x]]\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert len(evs) == 1
+    ev = evs[0]
+    assert ev["d"] == "2026-05-11"  # > [..] 行が epoch より優先
+    assert ev["src"] == "Slack"
+    assert ev["ph"] == "ケイパ"
+    assert ev["bant"] == "C（検討）"
+    assert ev["menu"] == "UGC（TTO、切り抜きなど）"
+    assert ev["pos"] == "・企業ブランディングの相談は多い。"
+    assert ev["neg"] == "・PIVOTの問い合わせは多い。"
+    assert ev["next"] == "全社に展開"
+
+
+def test_parse_fb_epoch_converts_to_jst_date() -> None:
+    """epoch → UTC+9 で日付化(UTC のままだと前日になる境界 epoch で検証)。"""
+    # 1779120000 = 2026-05-19 01:00 JST（UTC では 2026-05-18 16:00）
+    body = "### ---- #proj-ch 1779120000.123456\n\n- ポジ反応: よい\n"
+    evs = _mod.parse_fb_events(body)
+    assert evs[0]["d"] == "2026-05-19"
+    # 仕様書の例: 1779101519.347119 → 2026-05-18
+    evs2 = _mod.parse_fb_events("### ---- #proj-ch 1779101519.347119\n\n- ポジ反応: 別内容\n")
+    assert evs2[0]["d"] == "2026-05-18"
+
+
+def test_parse_fb_dedup_keeps_dated_entry() -> None:
+    """Slack/フォーム二重登録: 正規化 (ポジ+ネガ) 一致 → 日付を持つ方だけ残る。"""
+    body = (
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 9\n\n"
+        "- フェーズ: ケイパ\n"
+        "- ポジ反応: ・相談は 多い。\n"
+        "- ネガ反応: ・質問　あり\n\n"
+        "### ---- #proj-ch 1778489156.830189\n\n"
+        "- フェーズ: ケイパ\n"
+        "- ポジ反応: ・相談は多い。\n"
+        "- ネガ反応: ・質問あり\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert len(evs) == 1  # 空白/全角空白差は正規化で吸収され dedup される
+    assert evs[0]["src"] == "Slack"
+    assert evs[0]["d"] == "2026-05-11"
+
+
+def test_parse_fb_form_src_and_dateless() -> None:
+    body = (
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 3\n\n"
+        "- フェーズ: ヒアリング\n- ポジ反応: 保証型がよい\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert evs[0]["src"] == "フォーム"
+    assert evs[0]["d"] == ""  # フォーム回答は日付なしを許容
+
+
+def test_parse_fb_broken_heading_and_missing_fields_fail_open() -> None:
+    """壊れた見出し・欠損フィールドは空文字で許容し、非FBのh3配下は拾わない。"""
+    body = (
+        "### ---- 壊れた見出し（epochもrowも無い）\n\n"
+        "自由記述のみでフィールド行なし\n\n"
+        "### 通常のh3見出し（FBではない）\n\n"
+        "- フェーズ: 誤検知しない\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert len(evs) == 1
+    ev = evs[0]
+    assert ev["d"] == "" and ev["ph"] == "" and ev["pos"] == "" and ev["next"] == ""
+    assert ev["src"] == "Slack"  # 既定
+    # 非入力・破損入力でも例外を漏らさない
+    assert _mod.parse_fb_events("") == []
+    assert _mod.parse_fb_events("FBセクションなしの本文") == []
+
+
+def test_parse_fb_sorted_desc_dateless_last_and_capped_at_30() -> None:
+    blocks = []
+    for i in range(33):
+        blocks.append(
+            f"### ---- #proj-ch 通番{i}\n\n- ポジ反応: 個別内容{i}\n\n"
+            f"> [2026-01-{(i % 28) + 1:02d} 10:00] x\n"
+        )
+    evs = _mod.parse_fb_events("\n".join(blocks))
+    assert len(evs) == 30  # cap
+    dates = [e["d"] for e in evs]
+    assert dates == sorted(dates, reverse=True)  # 日付降順
+
+    # 日付なしは末尾
+    evs2 = _mod.parse_fb_events(
+        "### ---- 日付なし row 1\n\n- ポジ反応: あ\n\n"
+        "### ---- #ch 1779101519.347119\n\n- ポジ反応: い\n"
+    )
+    assert [e["d"] for e in evs2] == ["2026-05-18", ""]
+
+
+def test_parse_fb_field_truncation() -> None:
+    body = (
+        "### ---- #ch 1779101519\n\n"
+        "- ポジ反応: " + "あ" * 500 + "\n"
+        "- ネガ反応: " + "え" * 500 + "\n"
+        "- 提案メニュー: " + "い" * 100 + "\n"
+        "- 次アクション: " + "う" * 200 + "\n"
+    )
+    ev = _mod.parse_fb_events(body)[0]
+    # pos/neg=120 は実 Vault 計測（+400KB 超過）で 160 から落とした値（本体 FB_FIELD_MAP と対）
+    assert len(ev["pos"]) == 120
+    assert len(ev["neg"]) == 120
+    assert len(ev["menu"]) == 60
+    assert len(ev["next"]) == 120
+
+
+# ---------------- 施策タイムライン: payload / DOM 配線 ----------------
+
+
+def test_timeline_payload_and_dom_in_html(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """FB 持ちクライアントを追加して build → tl/lastfb/cnorm が payload に載り DOM/JS が入る。"""
+    (vault / "clients" / "帝人.md").write_text(
+        '---\nclient: "帝人"\nindustry: "メーカー"\ndeal_phase: "ヒアリング"\n'
+        'bant_score: "B（前向き）"\nfb_count: 1\ndoc_count: 0\n---\n\n# 帝人\n\n'
+        "## 営業FB時系列（新しい順）\n\n"
+        "### ---- #proj-ショート動画_営業フィードバック情報 1779101519.347119\n\n"
+        "- フェーズ: ヒアリング\n- BANT: B（前向き）\n- ポジ反応: ・保証型がよい\n"
+        "- 次アクション: 与件獲得\n- 提案メニュー: UGC\n\n"
+        "## 関連資料\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    _run(vault, out)
+    html = out.read_text(encoding="utf-8")
+    # DOM/JS: タイムラインセクション・トグル・最終接点列
+    assert "tlwrap" in html and "施策タイムライン" in html
+    assert "tlmorebtn" in html
+    assert "最終接点" in html
+    # payload: FB イベント JSON（日付は epoch → JST）と lastfb / cnorm
+    assert '"src": "Slack"' in html
+    assert '"d": "2026-05-18"' in html
+    assert '"lastfb": "2026-05-18"' in html
+    assert '"pos": "・保証型がよい"' in html
+    assert '"cnorm": "帝人"' in html
+
+
+def test_timeline_merged_on_name_dedup(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """名寄せ統合時: 表記ゆれ 2 カルテの FB が結合される（正本1つに tl 2件・lastfb=最新日）。"""
+    for fname, cname, epoch, pos in (
+        ("帝人.md", "帝人", "1779101519.347119", "・保証型がよい"),
+        ("帝人様.md", "帝人様", "1779120000.000000", "・単価感が抑えられる"),
+    ):
+        (vault / "clients" / fname).write_text(
+            f'---\nclient: "{cname}"\nindustry: "メーカー"\ndeal_phase: ""\n'
+            f'bant_score: ""\nfb_count: 1\ndoc_count: 0\n---\n\n# {cname}\n\n'
+            "## 営業FB時系列（新しい順）\n\n"
+            f"### ---- #proj-ch {epoch}\n\n- ポジ反応: {pos}\n\n"
+            "## 関連資料\n",
+            encoding="utf-8",
+        )
+    out = tmp_path / "app.html"
+    _run(vault, out)
+    html = out.read_text(encoding="utf-8")
+    # 名寄せで 1 クライアントに統合され、tl は両カルテの FB を含む
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["clients"] == 2  # 出光興産 + 帝人（帝人様は統合）
+    assert '"pos": "・保証型がよい"' in html
+    assert '"pos": "・単価感が抑えられる"' in html
+    # 最新日（2026-05-19 = 1779120000 JST）が lastfb
+    assert '"lastfb": "2026-05-19"' in html
+
+
+# ---------------- タグ拡充（最終接点/更新/情報源） ----------------
+
+
+def test_doc_src_parsed_from_shutten_line(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """出典行のトークンが src に写像される（gdrive→Drive / gsheets→フォーム）。"""
+    p = vault / "docs" / "提案書A.md"
+    p.write_text(
+        p.read_text() + "\n- 出典: [gdrive](https://drive.google.com/file/d/x/view)\n",
+        encoding="utf-8",
+    )
+    (vault / "docs" / "フォーム回答X.md").write_text(
+        '---\ntitle: "フォーム回答X"\nclient: "出光興産"\nindustry: ""\n'
+        'doc_type: "議事録"\nsolution: ""\nmodified_at: "2026-07-01"\n---\n\n'
+        "> 抜粋\n\n- 出典: [gsheets](https://docs.google.com/spreadsheets/d/x)\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert '"src": "Drive"' in html
+    assert '"src": "フォーム"' in html
+
+
+def test_client_last_is_max_of_lastfb_and_doc_modified(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """最終接点 = max(最終FB日, 関連資料の最新 modified)。FB日付なしなら資料側が採用される。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert '"last": "2026-06-01"' in html
+
+
+def test_freshness_tag_wiring_in_js(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """ageBucket と 最終接点/更新/情報源 タグの JS 配線が生成 HTML に存在する。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    for token in ("function ageBucket", "最終接点/", '"更新/"+a', '"情報源/"+d.src'):
+        assert token in html, token
