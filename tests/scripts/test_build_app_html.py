@@ -12,6 +12,9 @@
   （個人名入り stem を repo に平文で持たない）
 - タグ第1弾: 媒体/動画形式/形式/横断（資料）・温度感/宿題（クライアント）の決定論判定と
   payload/JS 配線（グラフ用 _ctags/_dtags には載せない）＋テーブル「次アクション」列
+- タグ第2弾: 担当/（フォーム由来FB引用の「送信者:」抽出・正規化・名寄せ）と
+  FB日付の第3フォールバック（引用「タイムスタンプ: YYYY/MM/DD」・末尾切断は棄却）＋
+  タグ/テーブル「担当」列/カルテprops の配線
 """
 
 from __future__ import annotations
@@ -368,6 +371,169 @@ def test_parse_fb_field_truncation() -> None:
     assert len(ev["next"]) == 120
 
 
+# ---------------- タグ第2弾: 担当/（FB送信者）+ タイムスタンプ日付フォールバック ----------------
+
+
+def _form_fb(quote: str, pos: str = "内容", row: int = 1) -> str:
+    """フォーム由来FB1件分（見出し+フィールド+引用）。引用は実データ同様1行連結・氏名は架空。"""
+    return (
+        f"### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row {row}\n\n"
+        f"- ポジ反応: {pos}\n\n"
+        f"> {quote}\n"
+    )
+
+
+def test_parse_fb_sender_extraction_and_normalization() -> None:
+    """送信者抽出+正規化: そのまま／半角括弧／全角括弧+全角スペース／アンダースコア／半角スペース。"""
+    cases = [
+        (
+            "送信者: 山本四郎 タイムスタンプ: 2026/05/11 17:38:30 連携ステータス: 連携済み",
+            "山本四郎",
+        ),
+        ("送信者: 鈴木一郎(Suzuki", "鈴木一郎"),  # 半角括弧・300字切断で閉じ括弧なし
+        ("送信者: 田中　次郎（tanaka ji", "田中次郎"),  # 全角括弧+全角スペース
+        ("送信者: 高橋三郎_TakahashiSaburo タイムスタンプ: 2026/06/1", "高橋三郎"),
+        (
+            "送信者: 村山 五郎 タイムスタンプ: 2026/05/21 19:25:37 連携ステータス: 連携済み",
+            "村山五郎",
+        ),
+    ]
+    for i, (quote, expected) in enumerate(cases):
+        evs = _mod.parse_fb_events(_form_fb(f"商流: 直販 {quote}", pos=f"内容{i}", row=i + 1))
+        assert evs[0]["by"] == expected, quote
+
+
+def test_parse_fb_sender_absent_or_slack_is_empty() -> None:
+    """送信者行なし（Slack直投稿は <@UID> のみ）→ by は空文字。"""
+    evs = _mod.parse_fb_events(
+        "### ---- #proj-ch 1779101519.347119\n\n- ポジ反応: あ\n\n"
+        "> [2026-05-18 10:00] <@U012AB>: 本文抜粋\n"
+    )
+    assert evs[0]["by"] == ""
+    assert _mod.parse_fb_events(_form_fb("商流: 直販 顧客名: X社"))[0]["by"] == ""
+
+
+def test_parse_fb_sender_same_person_variants_unify() -> None:
+    """「鈴木一郎(Suzuki…」と「鈴木一郎」は正規化で同一人物へ統合される。"""
+    body = _form_fb(
+        "送信者: 鈴木一郎(Suzuki Ichiro) タイムスタンプ: 2026/05/01 10:00:00 連携ステータス: x",
+        pos="A",
+        row=1,
+    ) + _form_fb(
+        "送信者: 鈴木一郎 タイムスタンプ: 2026/05/02 10:00:00 連携ステータス: x", pos="B", row=2
+    )
+    evs = _mod.parse_fb_events(body)
+    assert [e["by"] for e in evs] == ["鈴木一郎", "鈴木一郎"]
+    assert _mod.tans_of(evs) == ["鈴木一郎"]
+
+
+def test_parse_fb_dedup_backfills_by_from_folded_duplicate() -> None:
+    """Slack転送（先出・日付あり・送信者なし）とフォーム行（実名あり）の二重登録:
+    残るのは従来どおり先出のSlack側だが、by はフォーム側から補完される。"""
+    body = (
+        "### ---- #proj-ch 1778489156.830189\n\n"
+        "- フェーズ: ケイパ\n- ポジ反応: ・相談は多い。\n- ネガ反応: ・質問あり\n\n"
+        "> [2026-05-11 08:45] <@U01>: 本文\n\n"
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 9\n\n"
+        "- フェーズ: ケイパ\n- ポジ反応: ・相談は多い。\n- ネガ反応: ・質問あり\n\n"
+        "> 商流: 代理店 送信者: 山本四郎 タイムスタンプ: 2026/05/11 17:38:30 連携ステータス: x\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert len(evs) == 1
+    assert evs[0]["src"] == "Slack"  # 残す側の規則は不変（日付を持つ先出）
+    assert evs[0]["d"] == "2026-05-11"
+    assert evs[0]["by"] == "山本四郎"  # 消えたフォーム行から補完
+
+
+def test_tans_of_distinct_sorted_capped() -> None:
+    """tans_of: 非空 by の distinct・ソート済み・最大 TANS_MAX 名。空/None は空リスト。"""
+    tl = [
+        {"by": n} for n in ("佐々木", "青木", "", "佐々木", "山田", "田中", "中村", "渡辺", "伊藤")
+    ]
+    tans = _mod.tans_of(tl)
+    assert len(tans) == _mod.TANS_MAX == 5
+    assert tans == sorted(tans)
+    assert "" not in tans and len(set(tans)) == 5
+    assert _mod.tans_of([]) == []
+    assert _mod.tans_of(None) == []
+
+
+def test_parse_fb_timestamp_fallback_accepts_complete_date() -> None:
+    """第3フォールバック: 日付の直後に文字が続く完全な日付のみ採用（YYYY-MM-DD へ変換）。"""
+    evs = _mod.parse_fb_events(
+        _form_fb("送信者: 山本四郎 タイムスタンプ: 2026/05/11 17:38:30 連携ステータス: 連携済み")
+    )
+    assert evs[0]["d"] == "2026-05-11"
+    # 1桁月日はゼロ埋めで正規化（時刻の途中で切断されていても日付自体は完全）
+    evs2 = _mod.parse_fb_events(_form_fb("送信者: 山本四郎 タイムスタンプ: 2026/6/2 1", row=2))
+    assert evs2[0]["d"] == "2026-06-02"
+
+
+def test_parse_fb_timestamp_truncated_at_line_end_rejected() -> None:
+    """300字切断対策: 行末で終わる日付（2026/06/1 → /1X の途中の可能性）は棄却して日付なし。"""
+    evs = _mod.parse_fb_events(_form_fb("送信者: 高橋三郎_T タイムスタンプ: 2026/06/1"))
+    assert evs[0]["d"] == ""
+    # 月までしか残っていない切断も不採用
+    evs2 = _mod.parse_fb_events(_form_fb("送信者: 山本四郎 タイムスタンプ: 2026/04", row=2))
+    assert evs2[0]["d"] == ""
+    # 不正な日付（13月）は datetime 変換で棄却
+    evs3 = _mod.parse_fb_events(
+        _form_fb("タイムスタンプ: 2026/13/05 10:00:00 連携ステータス: x", row=3)
+    )
+    assert evs3[0]["d"] == ""
+
+
+def test_parse_fb_existing_date_sources_win_over_timestamp() -> None:
+    """既存2段（> [日付] 行 → 見出し epoch）が優先。タイムスタンプは両方欠けたときのみ。"""
+    body = (
+        "### ---- #proj-ch 1778489156.830189\n\n- ポジ反応: あ\n\n"
+        "> [2026-05-11 08:45] <@U01>: 本文\n\n> タイムスタンプ: 2026/01/01 09:00:00 x\n"
+    )
+    assert _mod.parse_fb_events(body)[0]["d"] == "2026-05-11"
+    body2 = (
+        "### ---- #proj-ch 1779101519.347119\n\n- ポジ反応: い\n\n"
+        "> タイムスタンプ: 2026/01/01 09:00:00 x\n"
+    )
+    assert _mod.parse_fb_events(body2)[0]["d"] == "2026-05-18"  # 見出し epoch(JST) が優先
+
+
+def test_tans_payload_tags_table_props_wiring(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """担当: payload tans・タグ（clientTags/CATMETA/TAGORDER）・テーブル列・props・タイムライン配線。"""
+    (vault / "clients" / "帝人.md").write_text(
+        '---\nclient: "帝人"\nindustry: "メーカー"\ndeal_phase: "ヒアリング"\n'
+        'bant_score: "B（前向き）"\nfb_count: 2\ndoc_count: 0\n---\n\n# 帝人\n\n'
+        "## 営業FB時系列（新しい順）\n\n"
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 1\n\n"
+        "- フェーズ: ヒアリング\n- ポジ反応: ・保証型がよい\n\n"
+        "> 商流: 直販 顧客名: 帝人 送信者: 鈴木一郎(Suzuki タイムスタンプ: 2026/05/11 17:38:30 連携ステータス: 連携済み\n\n"
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 2\n\n"
+        "- フェーズ: ヒアリング\n- ポジ反応: ・単価感が良い\n\n"
+        "> 商流: 直販 顧客名: 帝人 送信者: 高橋三郎_TakahashiSaburo タイムスタンプ: 2026/06/02 11:27 連携ステー\n\n"
+        "## 関連資料\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # payload: 正規化済み送信者・distinct ソート済み tans・タイムスタンプ由来の日付
+    assert '"by": "鈴木一郎"' in html
+    assert '"tans": ["鈴木一郎", "高橋三郎"]' in html
+    assert '"d": "2026-05-11"' in html and '"d": "2026-06-02"' in html
+    # FBなしクライアント（出光興産）は tans 空
+    assert re.search(r'"stem": "出光興産".*?"tans": \[\]', html)
+    # JS 配線: clientTags → 担当/・CATMETA 系統色・TAGORDER 取引先群（先頭7）
+    assert '(c.tans||[]).forEach(n=>t.push("担当/"+n))' in html
+    assert '"担当":"#' in html
+    assert "TAGORDER.slice(0,7)" in html and "TAGORDER.slice(7)" in html
+    # テーブル: TCOLS「担当」列（ソート可）+ 行セル（空は—）
+    assert '["tans","担当",c=>(c.tans||[]).join("・"),0]' in html
+    assert 'c.tans.join("・")' in html
+    # カルテ props: 担当行
+    assert '["list","担当",(c.tans||[]).join("・")]' in html
+    # 施策タイムライン: FBカードの送信者表示（非空時のみ）
+    assert 'title="FB送信者"' in html and "f.by?" in html
+
+
 # ---------------- 施策タイムライン: payload / DOM 配線 ----------------
 
 
@@ -721,3 +887,216 @@ def test_reports_included_with_flag(sidecars: Path, vault: Path, tmp_path: Path)
     assert _run(vault, out, "--include-reports") == 0
     html = out.read_text(encoding="utf-8")
     assert '"stem": "followup_gaps"' in html
+
+
+# ---------------- タグUX改善（審査済み6機能）: 生成 HTML への配線 ----------------
+
+
+@pytest.fixture()
+def ux_html(sidecars: Path, vault: Path, tmp_path: Path) -> str:
+    """タグUX検証用に1回だけ build した HTML（機能別テストで共有）。"""
+    out = tmp_path / "ux.html"
+    assert _run(vault, out) == 0
+    return out.read_text(encoding="utf-8")
+
+
+def test_ux1_chip_foundation_and_runquery(ux_html: str) -> None:
+    """機能1: CATMETA 14系統・chipHtml 部品・runQuery 集約・ダークテーマ hover 修正。"""
+    html = ux_html
+    # 系統色辞書: 14系統すべて定義（色は既存パレット hex）
+    m = re.search(r"const CATMETA=\{([^}]*)\}", html)
+    assert m is not None
+    for cat in (
+        "宿題",
+        "温度感",
+        "フェーズ",
+        "BANT",
+        "業種",
+        "最終接点",
+        "資料種別",
+        "施策",
+        "媒体",
+        "動画形式",
+        "形式",
+        "横断",
+        "更新",
+        "情報源",
+    ):
+        assert f'"{cat}":"#' in m.group(1), cat
+    # チップ部品: 文字色はCSS変数のみ（--muted/--text）・7pxドット・hoverで系統色枠
+    assert "function chipHtml(tag,mode)" in html
+    assert ".tagchip .tck{color:var(--muted)" in html
+    assert ".tagchip .tcv{color:var(--text)" in html
+    assert ".tcdot{display:inline-block;width:7px;height:7px" in html
+    assert ".tagchip:hover{border-color:var(--cc2,var(--accent))}" in html
+    # runQuery 集約: 4重複コードが単一路に（タグペイン/本文タグ/右パネル・グラフ=tagJump）
+    assert "function runQuery(q)" in html
+    assert "function tagJump(t){runQuery(tagQ(t));}" in html
+    assert "onclick:()=>runQuery(tagQ(full))" in html
+    assert (
+        '.tg,.ntag,.note-tags .tagchip").forEach(el=>el.onclick=()=>runQuery(tagQ(el.dataset.tag)))'
+        in html
+    )
+    # 空白入りタグ値は tag:"値" で発行（引用符対応）
+    assert "function tagQ(t){return /\\s/.test(t)?'tag:\"'+t+'\"':\"tag:\"+t;}" in html
+    # ダークテーマバグ修正: .wcard:hover のハードコード #f0f0f3 廃止
+    assert "#f0f0f3" not in html
+    assert ".wcard:hover{border-color:var(--border-focus);background:var(--hover)}" in html
+
+
+def test_ux2_active_filter_chips_and_qhelp(ux_html: str) -> None:
+    """機能2: ×付きフィルタチップ・すべて解除・0件回復・qhelp実例・debounce。"""
+    html = ux_html
+    # parseQuery と同一 regex の表示用トークナイザ + 完全一致除去（fail-safe）
+    assert "function qTokens(q)" in html
+    assert "function rmToken(val,raw)" in html
+    assert 'data-rm="' in html
+    assert "すべて解除" in html
+    assert "×で条件を外してください" in html  # 0件時の回復導線
+    # qhelp: 実データ由来のクリック実行例 + 従来リファレンス
+    assert "function qhelpHtml()" in html
+    assert "例（クリックで実行）" in html
+    assert "tag:業種/食品" in html  # 構文リファレンスは維持
+    # 120ms debounce（__lastQ は即時更新）
+    assert "dt=setTimeout(()=>runSearchPane(inp.value,out),120)" in html
+    # parseQuery/matchItem は不改造（検索コアの回帰担保・文字列レベル）
+    assert (
+        "function parseQuery(q){const P={plain:[],neg:[],tag:[],path:[],file:[],ntag:[],npath:[],nfile:[],props:[],regex:[]};"
+        in html
+    )
+    assert "for(const t of P.tag)if(!tagMatch(it.tags,t))return false;" in html
+
+
+def test_ux3_chips_on_results_note_rightpanel(ux_html: str) -> None:
+    """機能3: 結果行チップ=AND追加（行openと分離）・カルテ note-tags・右パネルチップ化。"""
+    html = ux_html
+    # 結果行: 先頭3個+「+n」・stopPropagation で行クリックと分離・AND追記は結果行のみ
+    assert 'it.tags.slice(0,3).map(t=>chipHtml(t,"and"))' in html
+    assert (
+        '".sr .tagchip").forEach(ch=>ch.onclick=e=>{e.stopPropagation();addTagToQuery(ch.dataset.tag);})'
+        in html
+    )
+    assert "function addTagToQuery(tag)" in html
+    assert "クリックで絞り込みに追加" in html
+    # カルテ: 未使用だった .note-tags を実際に描画（クリック=置換は afterOpen でバインド）
+    assert '\'<div class="note-tags">\'+ctg.map(t=>chipHtml(t)).join("")' in html
+    assert '\'<div class="note-tags">\'+dtg.map(t=>chipHtml(t)).join("")' in html
+    # 右パネル tags タブ: 素テキスト #タグ をチップに置換（tagJump のまま）
+    assert '<div class="rtagwrap">' in html
+    assert (
+        'b.querySelectorAll(".tagchip").forEach(el=>el.onclick=()=>tagJump(el.dataset.tag))' in html
+    )
+
+
+def test_ux4_tag_pane_enhancements(ux_html: str) -> None:
+    """機能4: 意味順+見出し・系統色・ペイン内絞り込み・件数/五十音トグル・12超畳み・active。"""
+    html = ux_html
+    assert (
+        'const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","施策","媒体","動画形式","形式","横断","更新","情報源"]'
+        in html
+    )
+    assert "取引先のタグ" in html and "資料のタグ" in html
+    assert "タグを絞り込み…" in html
+    assert "tagSortAlpha" in html and "件数順⇄五十音順" in html
+    assert '"他 "+(vk.length-12)+" 件を表示"' in html  # 葉12超の畳み
+    assert "act.some(a=>tagMatch([t],a))" in html  # __lastQ と tagMatch 照合で .active
+    assert "window.__tagFocus" in html  # ホームのテーザー経由初期展開
+
+
+def test_ux5_welcome_quickfilter_and_teaser(ux_html: str) -> None:
+    """機能5: クイックフィルタ（動的存在チェック・件数バッジ）+ タグ系統テーザー。"""
+    html = ux_html
+    assert "クイックフィルタ" in html and "タグで探す" in html
+    # プリセットは1箇所定義 + tagCount による動的存在チェック（0件は非表示）
+    assert 'const QF=[["宿題あり","宿題/あり"]' in html
+    assert "QF.filter(([l,t])=>tagCount[t]>0).slice(0,8)" in html
+    # クリック=runQuery 置換 / テーザー=タグペインを該当系統展開で開く
+    assert '".qfc").forEach(el=>el.onclick=()=>runQuery(el.dataset.q))' in html
+    assert 'window.__tagFocus=el.dataset.c;setPane("tags");' in html
+
+
+def test_ux6_table_temp_and_homework_filters(ux_html: str) -> None:
+    """機能6: 温度感セレクト+宿題チェック（tblFilter 2本追加のみ・TCOLS/ソート不介入）。"""
+    html = ux_html
+    assert 'tblFilter={q:"",ind:"",phase:"",temp:"",hw:false}' in html
+    assert "if(tblFilter.temp)rows=rows.filter(c=>c.temp===tblFilter.temp);" in html
+    assert "if(tblFilter.hw)rows=rows.filter(c=>c.hw);" in html
+    # 温度感4値は実値集合から生成（ラベルはタグペインと同一文字列）+ 宿題チェック
+    assert '["高","ポジ優勢","拮抗","ネガ優勢"].filter(t=>DATA.clients.some(c=>c.temp===t))' in html
+    assert "温度感（すべて）" in html and "宿題ありのみ" in html
+    # 0件時メッセージ + 適用中チップ（native select の補完）
+    assert "条件に一致する取引先がありません — フィルタを1つ外してください" in html
+    assert 'chipHtml("温度感/"+tblFilter.temp)' in html
+    # 既存挙動の不介入: TCOLS・列定義は従来のまま（次アクション列まで9列）
+    assert '["nx","次アクション",c=>c.nx||"",0]' in html
+    # 行クリックはデータ行のみ（0件メッセージ行に openClient を配線しない）
+    assert (
+        'tb.querySelectorAll("tr[data-s]").forEach(tr=>tr.onclick=()=>openClient(tr.dataset.s))'
+        in html
+    )
+
+
+def test_ux5_quickfilter_counts_in_stats(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """機能5: stats.json に QF プリセット8件の件数が焼き込まれる（回帰検知）。"""
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    qf = stats["qf"]
+    assert set(qf.keys()) == set(_mod.QF_PRESET_TAGS)
+    # ダミー Vault: 資料3件は全て doc_type=提案書 / 宿題・温度感・横断等の該当なし
+    assert qf["資料種別/提案書"] == 3
+    assert qf["宿題/あり"] == 0
+    assert qf["横断"] == 0
+
+
+def test_quickfilter_counts_unit() -> None:
+    """_quickfilter_counts: tagMatch 同等の「子タグも一致」判定と ageBucket ミラー。"""
+    today = date(2026, 7, 12)
+    clients = [
+        {
+            "industry": "IT",
+            "phase": "提案",
+            "bantg": "B",
+            "last": "2026-07-01",
+            "temp": "ネガ優勢",
+            "hw": 1,
+        },
+        {"industry": "", "phase": "", "bantg": "", "last": "2024-01-01", "temp": "", "hw": 0},
+    ]
+    docs = [
+        {
+            "doc_type": "提案書",
+            "industry": "IT",
+            "solution": "動画広告",
+            "modified": "2026-07-05",
+            "src": "Drive",
+            "media": ["TikTok"],
+            "vfmt": ["ショート"],
+            "fmt": "PPTX",
+            "xc": "2社",
+        },
+    ]
+    qf = _mod._quickfilter_counts(clients, docs, today)
+    assert qf["宿題/あり"] == 1
+    assert qf["温度感/ネガ優勢"] == 1
+    assert qf["温度感/高"] == 0
+    assert qf["最終接点/1年以上前"] == 1  # 2024-01-01 → 366日超
+    assert qf["更新/1ヶ月以内"] == 1
+    assert qf["横断"] == 1  # 横断/2社 が親 preset「横断」に一致（tagMatch 同等）
+    assert qf["動画形式/ショート"] == 1
+    assert qf["資料種別/提案書"] == 1
+
+
+def test_age_bucket_mirror_boundaries() -> None:
+    """_age_bucket: JS ageBucket と同じ 31/92/183/366 閾値・不正/空は空文字。"""
+    t = date(2026, 7, 12)
+    ab = _mod._age_bucket
+    assert ab("2026-07-12", t) == "1ヶ月以内"
+    assert ab("2026-06-11", t) == "1ヶ月以内"  # 31日前
+    assert ab("2026-06-10", t) == "3ヶ月以内"  # 32日前
+    assert ab("2026-04-11", t) == "3ヶ月以内"  # 92日前
+    assert ab("2026-01-10", t) == "半年以内"  # 183日前
+    assert ab("2025-07-11", t) == "1年以内"  # 366日前
+    assert ab("2025-07-10", t) == "1年以上前"  # 367日前
+    assert ab("", t) == ""
+    assert ab("invalid", t) == ""
