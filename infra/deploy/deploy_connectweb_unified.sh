@@ -35,7 +35,7 @@ aws iam get-role-policy --role-name teamagent-dev-ecs-exec-connect-web --policy-
 echo "  OK（付与済）"
 
 echo "== 1) 最新の機密HTMLを S3(codebuild/) へ配置 + repo static へ（S3=真の格納先 / zip同梱=belt&suspenders） =="
-test -f "$SRC_HTML" || { echo "★生成HTMLが無い: $SRC_HTML（生成器 connect-web-obsidian_build.py で作れ）"; exit 1; }
+test -f "$SRC_HTML" || { echo "★生成HTMLが無い: ${SRC_HTML}（生成器 connect-web-obsidian_build.py で作れ）"; exit 1; }
 mkdir -p "$(dirname "$DST_HTML")"; cp "$SRC_HTML" "$DST_HTML"
 aws s3 cp "$DST_HTML" "s3://$BUCKET/codebuild/connect-web-app.html" --region "$R"
 echo "  $(du -h "$DST_HTML" | cut -f1) -> s3://$BUCKET/codebuild/connect-web-app.html + static/app.html"
@@ -93,6 +93,6 @@ aws ecs wait services-stable --region "$R" --cluster "$CLUSTER" --services "$SVC
 echo ""
 echo "✅ 統合デプロイ完了。3機能同居:"
 echo "   /app（Obsidian UI・実HTML）/ /search（303）/ /slack/oauth/callback（Slack個人連携）"
-echo "   image tag: $TAG（ingest td 配布: bash infra/deploy/register_ingest_td.sh --image-tag $TAG）"
+echo "   image tag: ${TAG}（ingest td 配布: bash infra/deploy/register_ingest_td.sh --image-tag ${TAG}）"
 echo "   検証: https://connect.newstv.co.jp/app を @vectorinc.co.jp でログイン（/appが\"準備中\"でなく実UIか確認）"
 echo "⏪ ロールバック: aws ecs update-service --region $R --cluster $CLUSTER --service $SVC --task-definition $CUR_ARN"

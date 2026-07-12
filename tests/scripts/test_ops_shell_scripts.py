@@ -87,8 +87,8 @@ def test_unified_deploy_contract_strings() -> None:
         "USE_QUERY_PLANNER",
         "USE_COHERE_RERANK",
         "codebuild/connect-web-app.html",  # publish_app_html.sh の配置先と同一定数
-        "image tag: $TAG",
-        "register_ingest_td.sh --image-tag $TAG",
+        "image tag: ${TAG}",
+        "register_ingest_td.sh --image-tag ${TAG}",
     ):
         assert needle in body, f"契約文字列が欠落: {needle}"
 

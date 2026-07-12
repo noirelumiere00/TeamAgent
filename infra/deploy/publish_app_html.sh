@@ -58,13 +58,13 @@ if [ "$ENV_URI" != "s3://$BUCKET/$KEY" ]; then
   echo "★live td の CONNECT_APP_HTML_S3_URI($ENV_URI) が配置先(s3://$BUCKET/$KEY)と不一致"
   exit 1
 fi
-echo "  OK（role=$ROLE_NAME・URI 一致）"
+echo "  OK（role=${ROLE_NAME}・URI 一致）"
 
 echo "== 1) ローカル生成 HTML の sha256 =="
-test -s "$SRC" || { echo "★生成 HTML が無い/空: $SRC（scripts/build_app_html.py で生成）"; exit 1; }
+test -s "$SRC" || { echo "★生成 HTML が無い/空: ${SRC}（scripts/build_app_html.py で生成）"; exit 1; }
 LOCAL_SHA=$(shasum -a 256 "$SRC" | awk '{print $1}')
 SHA12="${LOCAL_SHA:0:12}"
-echo "  $(du -h "$SRC" | cut -f1)  sha256=$LOCAL_SHA（先頭12=$SHA12）"
+echo "  $(du -h "$SRC" | cut -f1)  sha256=${LOCAL_SHA}（先頭12=${SHA12}）"
 
 echo "== 2) S3 へ配置 =="
 aws s3 cp "$SRC" "s3://$BUCKET/$KEY" --region "$R"
@@ -83,7 +83,7 @@ for i in 1 2 3 4 5; do
   GOT_SHA=$(echo "$HZ" | jq -r '.app_html_sha256 // empty')
   GOT_SRC=$(echo "$HZ" | jq -r '.app_html_source // empty')
   if [ "$GOT_SRC" = "s3" ] && [ "$GOT_SHA" = "$SHA12" ]; then OK=true; break; fi
-  echo "  retry $i/5: source=${GOT_SRC:-?} sha=${GOT_SHA:-?}（期待 source=s3 sha=$SHA12）"
+  echo "  retry $i/5: source=${GOT_SRC:-?} sha=${GOT_SHA:-?}（期待 source=s3 sha=${SHA12}）"
   sleep 10
 done
 if [ "$OK" != "true" ]; then
@@ -97,7 +97,7 @@ EOF
   exit 1
 fi
 echo ""
-echo "✅ publish 完了: /app は sha=$SHA12（source=s3）を配信中"
+echo "✅ publish 完了: /app は sha=${SHA12}（source=s3）を配信中"
 echo "   検証: $BASE_URL/app を @vectorinc.co.jp でログインし、フッタの更新日を目視確認"
 echo "⏪ ロールバック（S3 バージョン戻し → 再デプロイ）:"
 echo "   aws s3api list-object-versions --bucket $BUCKET --prefix $KEY \\"

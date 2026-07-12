@@ -156,16 +156,16 @@ if [ -n "$LOG" ]; then
   # タスク側の成功ログ（run_ingest_fargate.py / loader.py）は sha256 を先頭12hexに
   # 短縮して出力するため、full 64hex ではなく12hex接頭辞で照合する。
   if echo "$LOG" | grep -q "${YAML_SHA:0:12}"; then
-    echo "  ✅ yaml sha256 の一致をログで確認（先頭12hex=${YAML_SHA:0:12} / full=$YAML_SHA）"
+    echo "  ✅ yaml sha256 の一致をログで確認（先頭12hex=${YAML_SHA:0:12} / full=${YAML_SHA}）"
   else
     echo "  ⚠ ログに yaml sha256（先頭12hex=${YAML_SHA:0:12}）が見つからない。ingest_sources ログを目視確認せよ"
   fi
 else
-  echo "  ⚠ ログ取得失敗（stream=$STREAM）。aws logs tail $LOG_GROUP --since 3h で確認"
+  echo "  ⚠ ログ取得失敗（stream=${STREAM}）。aws logs tail $LOG_GROUP --since 3h で確認"
 fi
 
 if [ "$EXIT_CODE" != "0" ]; then
-  echo "★ingest 失敗（exitCode=$EXIT_CODE）。上のログと docs/runbooks/connect_web_monthly.md のトラブルシュートを参照"
+  echo "★ingest 失敗（exitCode=${EXIT_CODE}）。上のログと docs/runbooks/connect_web_monthly.md のトラブルシュートを参照"
   echo "  （stale ブレーキ 50% 超で中止した場合は --allow-mass-stale で明示続行）"
   exit 1
 fi
