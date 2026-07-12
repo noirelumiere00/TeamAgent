@@ -12,6 +12,9 @@
   （個人名入り stem を repo に平文で持たない）
 - タグ第1弾: 媒体/動画形式/形式/横断（資料）・温度感/宿題（クライアント）の決定論判定と
   payload/JS 配線（グラフ用 _ctags/_dtags には載せない）＋テーブル「次アクション」列
+- タグ第2弾: 担当/（フォーム由来FB引用の「送信者:」抽出・正規化・名寄せ）と
+  FB日付の第3フォールバック（引用「タイムスタンプ: YYYY/MM/DD」・末尾切断は棄却）＋
+  タグ/テーブル「担当」列/カルテprops の配線
 """
 
 from __future__ import annotations
@@ -366,6 +369,169 @@ def test_parse_fb_field_truncation() -> None:
     assert len(ev["neg"]) == 120
     assert len(ev["menu"]) == 60
     assert len(ev["next"]) == 120
+
+
+# ---------------- タグ第2弾: 担当/（FB送信者）+ タイムスタンプ日付フォールバック ----------------
+
+
+def _form_fb(quote: str, pos: str = "内容", row: int = 1) -> str:
+    """フォーム由来FB1件分（見出し+フィールド+引用）。引用は実データ同様1行連結・氏名は架空。"""
+    return (
+        f"### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row {row}\n\n"
+        f"- ポジ反応: {pos}\n\n"
+        f"> {quote}\n"
+    )
+
+
+def test_parse_fb_sender_extraction_and_normalization() -> None:
+    """送信者抽出+正規化: そのまま／半角括弧／全角括弧+全角スペース／アンダースコア／半角スペース。"""
+    cases = [
+        (
+            "送信者: 山本四郎 タイムスタンプ: 2026/05/11 17:38:30 連携ステータス: 連携済み",
+            "山本四郎",
+        ),
+        ("送信者: 鈴木一郎(Suzuki", "鈴木一郎"),  # 半角括弧・300字切断で閉じ括弧なし
+        ("送信者: 田中　次郎（tanaka ji", "田中次郎"),  # 全角括弧+全角スペース
+        ("送信者: 高橋三郎_TakahashiSaburo タイムスタンプ: 2026/06/1", "高橋三郎"),
+        (
+            "送信者: 村山 五郎 タイムスタンプ: 2026/05/21 19:25:37 連携ステータス: 連携済み",
+            "村山五郎",
+        ),
+    ]
+    for i, (quote, expected) in enumerate(cases):
+        evs = _mod.parse_fb_events(_form_fb(f"商流: 直販 {quote}", pos=f"内容{i}", row=i + 1))
+        assert evs[0]["by"] == expected, quote
+
+
+def test_parse_fb_sender_absent_or_slack_is_empty() -> None:
+    """送信者行なし（Slack直投稿は <@UID> のみ）→ by は空文字。"""
+    evs = _mod.parse_fb_events(
+        "### ---- #proj-ch 1779101519.347119\n\n- ポジ反応: あ\n\n"
+        "> [2026-05-18 10:00] <@U012AB>: 本文抜粋\n"
+    )
+    assert evs[0]["by"] == ""
+    assert _mod.parse_fb_events(_form_fb("商流: 直販 顧客名: X社"))[0]["by"] == ""
+
+
+def test_parse_fb_sender_same_person_variants_unify() -> None:
+    """「鈴木一郎(Suzuki…」と「鈴木一郎」は正規化で同一人物へ統合される。"""
+    body = _form_fb(
+        "送信者: 鈴木一郎(Suzuki Ichiro) タイムスタンプ: 2026/05/01 10:00:00 連携ステータス: x",
+        pos="A",
+        row=1,
+    ) + _form_fb(
+        "送信者: 鈴木一郎 タイムスタンプ: 2026/05/02 10:00:00 連携ステータス: x", pos="B", row=2
+    )
+    evs = _mod.parse_fb_events(body)
+    assert [e["by"] for e in evs] == ["鈴木一郎", "鈴木一郎"]
+    assert _mod.tans_of(evs) == ["鈴木一郎"]
+
+
+def test_parse_fb_dedup_backfills_by_from_folded_duplicate() -> None:
+    """Slack転送（先出・日付あり・送信者なし）とフォーム行（実名あり）の二重登録:
+    残るのは従来どおり先出のSlack側だが、by はフォーム側から補完される。"""
+    body = (
+        "### ---- #proj-ch 1778489156.830189\n\n"
+        "- フェーズ: ケイパ\n- ポジ反応: ・相談は多い。\n- ネガ反応: ・質問あり\n\n"
+        "> [2026-05-11 08:45] <@U01>: 本文\n\n"
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 9\n\n"
+        "- フェーズ: ケイパ\n- ポジ反応: ・相談は多い。\n- ネガ反応: ・質問あり\n\n"
+        "> 商流: 代理店 送信者: 山本四郎 タイムスタンプ: 2026/05/11 17:38:30 連携ステータス: x\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert len(evs) == 1
+    assert evs[0]["src"] == "Slack"  # 残す側の規則は不変（日付を持つ先出）
+    assert evs[0]["d"] == "2026-05-11"
+    assert evs[0]["by"] == "山本四郎"  # 消えたフォーム行から補完
+
+
+def test_tans_of_distinct_sorted_capped() -> None:
+    """tans_of: 非空 by の distinct・ソート済み・最大 TANS_MAX 名。空/None は空リスト。"""
+    tl = [
+        {"by": n} for n in ("佐々木", "青木", "", "佐々木", "山田", "田中", "中村", "渡辺", "伊藤")
+    ]
+    tans = _mod.tans_of(tl)
+    assert len(tans) == _mod.TANS_MAX == 5
+    assert tans == sorted(tans)
+    assert "" not in tans and len(set(tans)) == 5
+    assert _mod.tans_of([]) == []
+    assert _mod.tans_of(None) == []
+
+
+def test_parse_fb_timestamp_fallback_accepts_complete_date() -> None:
+    """第3フォールバック: 日付の直後に文字が続く完全な日付のみ採用（YYYY-MM-DD へ変換）。"""
+    evs = _mod.parse_fb_events(
+        _form_fb("送信者: 山本四郎 タイムスタンプ: 2026/05/11 17:38:30 連携ステータス: 連携済み")
+    )
+    assert evs[0]["d"] == "2026-05-11"
+    # 1桁月日はゼロ埋めで正規化（時刻の途中で切断されていても日付自体は完全）
+    evs2 = _mod.parse_fb_events(_form_fb("送信者: 山本四郎 タイムスタンプ: 2026/6/2 1", row=2))
+    assert evs2[0]["d"] == "2026-06-02"
+
+
+def test_parse_fb_timestamp_truncated_at_line_end_rejected() -> None:
+    """300字切断対策: 行末で終わる日付（2026/06/1 → /1X の途中の可能性）は棄却して日付なし。"""
+    evs = _mod.parse_fb_events(_form_fb("送信者: 高橋三郎_T タイムスタンプ: 2026/06/1"))
+    assert evs[0]["d"] == ""
+    # 月までしか残っていない切断も不採用
+    evs2 = _mod.parse_fb_events(_form_fb("送信者: 山本四郎 タイムスタンプ: 2026/04", row=2))
+    assert evs2[0]["d"] == ""
+    # 不正な日付（13月）は datetime 変換で棄却
+    evs3 = _mod.parse_fb_events(
+        _form_fb("タイムスタンプ: 2026/13/05 10:00:00 連携ステータス: x", row=3)
+    )
+    assert evs3[0]["d"] == ""
+
+
+def test_parse_fb_existing_date_sources_win_over_timestamp() -> None:
+    """既存2段（> [日付] 行 → 見出し epoch）が優先。タイムスタンプは両方欠けたときのみ。"""
+    body = (
+        "### ---- #proj-ch 1778489156.830189\n\n- ポジ反応: あ\n\n"
+        "> [2026-05-11 08:45] <@U01>: 本文\n\n> タイムスタンプ: 2026/01/01 09:00:00 x\n"
+    )
+    assert _mod.parse_fb_events(body)[0]["d"] == "2026-05-11"
+    body2 = (
+        "### ---- #proj-ch 1779101519.347119\n\n- ポジ反応: い\n\n"
+        "> タイムスタンプ: 2026/01/01 09:00:00 x\n"
+    )
+    assert _mod.parse_fb_events(body2)[0]["d"] == "2026-05-18"  # 見出し epoch(JST) が優先
+
+
+def test_tans_payload_tags_table_props_wiring(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """担当: payload tans・タグ（clientTags/CATMETA/TAGORDER）・テーブル列・props・タイムライン配線。"""
+    (vault / "clients" / "帝人.md").write_text(
+        '---\nclient: "帝人"\nindustry: "メーカー"\ndeal_phase: "ヒアリング"\n'
+        'bant_score: "B（前向き）"\nfb_count: 2\ndoc_count: 0\n---\n\n# 帝人\n\n'
+        "## 営業FB時系列（新しい順）\n\n"
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 1\n\n"
+        "- フェーズ: ヒアリング\n- ポジ反応: ・保証型がよい\n\n"
+        "> 商流: 直販 顧客名: 帝人 送信者: 鈴木一郎(Suzuki タイムスタンプ: 2026/05/11 17:38:30 連携ステータス: 連携済み\n\n"
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 2\n\n"
+        "- フェーズ: ヒアリング\n- ポジ反応: ・単価感が良い\n\n"
+        "> 商流: 直販 顧客名: 帝人 送信者: 高橋三郎_TakahashiSaburo タイムスタンプ: 2026/06/02 11:27 連携ステー\n\n"
+        "## 関連資料\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # payload: 正規化済み送信者・distinct ソート済み tans・タイムスタンプ由来の日付
+    assert '"by": "鈴木一郎"' in html
+    assert '"tans": ["鈴木一郎", "高橋三郎"]' in html
+    assert '"d": "2026-05-11"' in html and '"d": "2026-06-02"' in html
+    # FBなしクライアント（出光興産）は tans 空
+    assert re.search(r'"stem": "出光興産".*?"tans": \[\]', html)
+    # JS 配線: clientTags → 担当/・CATMETA 系統色・TAGORDER 取引先群（先頭7）
+    assert '(c.tans||[]).forEach(n=>t.push("担当/"+n))' in html
+    assert '"担当":"#' in html
+    assert "TAGORDER.slice(0,7)" in html and "TAGORDER.slice(7)" in html
+    # テーブル: TCOLS「担当」列（ソート可）+ 行セル（空は—）
+    assert '["tans","担当",c=>(c.tans||[]).join("・"),0]' in html
+    assert 'c.tans.join("・")' in html
+    # カルテ props: 担当行
+    assert '["list","担当",(c.tans||[]).join("・")]' in html
+    # 施策タイムライン: FBカードの送信者表示（非空時のみ）
+    assert 'title="FB送信者"' in html and "f.by?" in html
 
 
 # ---------------- 施策タイムライン: payload / DOM 配線 ----------------
@@ -826,7 +992,7 @@ def test_ux4_tag_pane_enhancements(ux_html: str) -> None:
     """機能4: 意味順+見出し・系統色・ペイン内絞り込み・件数/五十音トグル・12超畳み・active。"""
     html = ux_html
     assert (
-        'const TAGORDER=["宿題","温度感","フェーズ","BANT","業種","最終接点","資料種別","施策","媒体","動画形式","形式","横断","更新","情報源"]'
+        'const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","施策","媒体","動画形式","形式","横断","更新","情報源"]'
         in html
     )
     assert "取引先のタグ" in html and "資料のタグ" in html

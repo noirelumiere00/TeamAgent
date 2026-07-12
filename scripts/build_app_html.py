@@ -22,6 +22,9 @@ HTML 生成ロジックは元スクリプトと同一。repo 版で加えたの�
 - タグ第1弾: 資料=媒体/動画形式/形式/横断、クライアント=温度感/宿題（いずれも決定論判定・
   LLM 不使用）＋テーブル「次アクション」列。タグペイン/検索のみでグラフ用 _ctags/_dtags には
   載せない（タグノード爆発防止）
+- タグ第2弾: クライアント=担当/（フォーム由来FB引用の「送信者:」から決定論抽出・正規化）＋
+  FB日付の第3フォールバック（引用の「タイムスタンプ: YYYY/MM/DD」。引用は300字で切断される
+  ため、行末で終わる日付は切断の可能性があり棄却）＋テーブル「担当」列・カルテprops「担当」
 
 Usage:
     python scripts/build_app_html.py                          # ~/AiLaVault → 既定 out
@@ -163,6 +166,35 @@ FB_FIELD_MAP = {
 }
 FB_MAX_EVENTS = 30
 
+# 担当タグ第2弾: フォーム由来FBの引用（quote）から送信者とタイムスタンプを拾う。
+# 実データの引用は1行に全フィールドが連結される
+# （例「… 送信者: 清水達哉 タイムスタンプ: 2026/05/11 17:38:30 連携ステータス: …」）うえ
+# 300字で切断されるため、送信者値は次フィールド見出し（タイムスタンプ/連携ステータス）か
+# 行末まで、日付は「直後に非数字が続く」完全なものだけ採用する
+# （行末で終わる「2026/06/1」は /1X の途中切断の可能性があるため棄却）。
+FB_SENDER_RE = re.compile(
+    r"送信者[ \t　]*[:：][ \t　]*([^\n]*?)(?=[ \t　]*(?:タイムスタンプ|連携ステータス)[ \t　]*[:：]|\n|$)"
+)
+FB_TS_RE = re.compile(r"タイムスタンプ[ \t　]*[:：][ \t　]*(\d{4})/(\d{1,2})/(\d{1,2})(?=[^\d\n])")
+TANS_MAX = 5  # カルテ/テーブルに出す担当者数の上限
+
+
+def _norm_sender(raw):
+    """送信者名の正規化: （/(/_ 以降を切除 → 全半角スペース除去 → 先頭20字。
+
+    実データの表記ゆれ（「佐藤杏香(Sato」「川上壮汰_KawakamiSota」「小倉　岳之（ogura…」）を
+    同一人物へ寄せる決定論ルール。取れなければ空文字。
+    """
+    s = re.split(r"[（(_]", raw, maxsplit=1)[0]
+    return s.replace(" ", "").replace("　", "").strip()[:20]
+
+
+def _quote_text(sec):
+    """セクション中の引用（> 行）本文を連結して返す（送信者/タイムスタンプの抽出対象）。"""
+    return "\n".join(
+        ln.lstrip()[1:].lstrip() for ln in sec.splitlines() if ln.lstrip().startswith(">")
+    )
+
 
 def _fb_dedup_key(ev):
     """Slack/フォーム二重登録の同定キー: 正規化した (ポジ+ネガ)[:120]。空は dedup 対象外。"""
@@ -171,7 +203,13 @@ def _fb_dedup_key(ev):
 
 
 def dedup_fb_events(events):
-    """(ポジ+ネガ) が一致する重複 FB を折り畳む。日付を持つ方を正として残す。"""
+    """(ポジ+ネガ) が一致する重複 FB を折り畳む。日付を持つ方を正として残す。
+
+    送信者（by）は同一FBでも片ルートにしか載らない（Slack転送=<@UID>のみ／フォーム行=実名）
+    ため、残す側が空なら消える側から補完する（どのイベントを残すかの規則は従来どおり不変。
+    これが無いと先出のSlack転送が実名入りフォーム行を握り潰し、担当タグの実カバレッジが
+    91社→60社へ落ちる）。
+    """
     out, seen = [], {}
     for ev in events:
         key = _fb_dedup_key(ev)
@@ -182,8 +220,12 @@ def dedup_fb_events(events):
         if j is None:
             seen[key] = len(out)
             out.append(ev)
-        elif ev.get("d") and not out[j].get("d"):
-            out[j] = ev  # 日付を持つ方で置き換え（両方あり/両方なしは先勝ち）
+            continue
+        # 残す側: 日付を持つ方（両方あり/両方なしは先勝ち）＝従来規則
+        keep, drop = (ev, out[j]) if (ev.get("d") and not out[j].get("d")) else (out[j], ev)
+        if not keep.get("by") and drop.get("by"):
+            keep = {**keep, "by": drop["by"]}  # 共有 dict を汚さないよう copy して補完
+        out[j] = keep
     return out
 
 
@@ -198,8 +240,11 @@ def parse_fb_events(body: str) -> list[dict]:
 
     見出し `### ---- <ソース名> <slack ts epoch|row N>` で区切り、
     各 FB の `- フェーズ:` 等のフィールド行と日付（`> [YYYY-MM-DD HH:MM]` 行
-    または見出し末尾の epoch 秒 → UTC+9）を拾う。壊れた見出し/欠損フィールドは
-    空文字で許容し、例外は漏らさない（このパースの失敗で build を止めない）。
+    → 見出し末尾の epoch 秒 → UTC+9 → 引用の「タイムスタンプ: YYYY/MM/DD」の3段
+    フォールバック）を拾う。担当タグ用に引用の「送信者:」も抽出する（ev["by"]・
+    フォーム由来のみ実名が入る。Slack直投稿は <@UID> のみ → 空文字）。
+    壊れた見出し/欠損フィールドは空文字で許容し、例外は漏らさない
+    （このパースの失敗で build を止めない）。
     """
     try:
         heads = list(FB_HEAD_RE.finditer(body or ""))
@@ -212,8 +257,12 @@ def parse_fb_events(body: str) -> list[dict]:
                 nx = re.search(r"^#{1,6}\s", sec, re.M)  # 次の見出し（## 関連資料 / 非FBのh3 等）で打ち切り
                 if nx:
                     sec = sec[:nx.start()]
-                ev = {"d": "", "src": "", "ph": "", "bant": "", "menu": "", "pos": "", "neg": "", "next": ""}
+                ev = {"d": "", "src": "", "by": "", "ph": "", "bant": "", "menu": "", "pos": "", "neg": "", "next": ""}
                 ev["src"] = "フォーム" if ("フォーム" in head or re.search(r"row\s*\d+\s*$", head)) else "Slack"
+                quote = _quote_text(sec)
+                sm = FB_SENDER_RE.search(quote)
+                if sm:
+                    ev["by"] = _norm_sender(sm.group(1))
                 dm = FB_DATE_RE.search(sec)
                 if dm:
                     ev["d"] = dm.group(1)
@@ -223,6 +272,13 @@ def parse_fb_events(body: str) -> list[dict]:
                         try:
                             ev["d"] = datetime.fromtimestamp(int(tsm.group(1)), JST).strftime("%Y-%m-%d")
                         except (ValueError, OverflowError, OSError):
+                            pass
+                if not ev["d"]:  # 第3フォールバック: 引用のタイムスタンプ（末尾切断された日付は棄却）
+                    tm = FB_TS_RE.search(quote)
+                    if tm:
+                        try:
+                            ev["d"] = datetime(int(tm.group(1)), int(tm.group(2)), int(tm.group(3))).strftime("%Y-%m-%d")
+                        except ValueError:  # 13月/32日等の不正日付は捨てる
                             pass
                 for ln in sec.splitlines():
                     fm = FB_FIELD_RE.match(ln.strip())
@@ -325,6 +381,11 @@ HOMEWORK_STALE_DAYS = 31
 def next_action(tl):
     """テーブル「次アクション」列: 最新FBイベントの次アクション先頭40字（無ければ空）。"""
     return (tl[0].get("next", "") if tl else "")[:40]
+
+
+def tans_of(tl):
+    """担当/: tl の distinct な非空 ev.by（名寄せ統合後の tl に適用・ソート済・最大 TANS_MAX 名）。"""
+    return sorted({ev.get("by", "") for ev in tl or []} - {""})[:TANS_MAX]
 
 
 def homework_flag(nx, last, today):
@@ -765,6 +826,7 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tlbadge{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;font-weight:600;margin-right:6px;white-space:nowrap}
 .tlbadge.tlfb{background:var(--accent-bg);color:var(--accent-2)}
 .tlchip{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;background:var(--hover);color:var(--muted);margin-right:4px;white-space:nowrap}
+.tlchip.tlby{color:var(--faint)}
 .tlt{font-weight:600;font-size:var(--f-ui-small);color:var(--text);margin-top:5px;line-height:1.45;overflow-wrap:anywhere}
 .tlt .wl{color:var(--accent-2);cursor:pointer}
 .tlt .wl:hover{text-decoration:underline}
@@ -848,7 +910,7 @@ DATA.docs.forEach(d=>dByStem[d.stem]=d);
 DATA.reports.forEach(r=>rByStem[r.stem]=r);
 /* 閲覧時点からの経過でバケット化（ビルド日でなく Date.now 基準 = 月次再生成の間も鮮度が生きる） */
 function ageBucket(ds){if(!ds)return"";const t=Date.parse(ds);if(isNaN(t))return"";const dd=(Date.now()-t)/864e5;return dd<=31?"1ヶ月以内":dd<=92?"3ヶ月以内":dd<=183?"半年以内":dd<=366?"1年以内":"1年以上前";}
-function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);t.push("最終接点/"+(ageBucket(c.last)||"記録なし"));if(c.temp)t.push("温度感/"+c.temp);if(c.hw)t.push("宿題/あり");return t;}
+function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);t.push("最終接点/"+(ageBucket(c.last)||"記録なし"));if(c.temp)t.push("温度感/"+c.temp);if(c.hw)t.push("宿題/あり");(c.tans||[]).forEach(n=>t.push("担当/"+n));return t;}
 function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);(d.media||[]).forEach(m=>t.push("媒体/"+m));(d.vfmt||[]).forEach(v=>t.push("動画形式/"+v));if(d.fmt)t.push("形式/"+d.fmt);if(d.xc)t.push("横断/"+d.xc);return t;}
 const IDX=[];
 DATA.clients.forEach(c=>IDX.push({kind:"client",stem:c.stem,name:c.name,folder:"clients",tags:clientTags(c),
@@ -866,9 +928,9 @@ Object.keys(tagCount).forEach(t=>{const p=t.split("/");if(p.length===1){tagTree[
 /* ===== タグUX基盤: 系統色辞書(CATMETA) + 統一チップ部品(chipHtml) + runQuery 集約 ===== */
 /* 色は既存パレット（PHASECOLOR/DTCOLOR/INDUSTRY_COLORS の hex）流用・中間明度。
    意味は常にラベルが担い、色は7pxドットのみ（色非依存原則・両テーマ共通） */
-const CATMETA={"宿題":"#e0685f","温度感":"#e07a5f","フェーズ":"#4f9df5","BANT":"#c98bdb","業種":"#54b981","最終接点":"#5fc9c9","資料種別":"#8a7cf5","施策":"#e05f8f","媒体":"#7f9cf5","動画形式":"#b5c94a","形式":"#d0a24c","横断":"#e0b34c","更新":"#d0912f","情報源":"#8a8a8a"};
-/* タグペイン/ホームの意味順: 先頭6=取引先のタグ（行動を促す軸を先頭に）・残り=資料のタグ */
-const TAGORDER=["宿題","温度感","フェーズ","BANT","業種","最終接点","資料種別","施策","媒体","動画形式","形式","横断","更新","情報源"];
+const CATMETA={"宿題":"#e0685f","温度感":"#e07a5f","担当":"#d0a24c","フェーズ":"#4f9df5","BANT":"#c98bdb","業種":"#54b981","最終接点":"#5fc9c9","資料種別":"#8a7cf5","施策":"#e05f8f","媒体":"#7f9cf5","動画形式":"#b5c94a","形式":"#d0a24c","横断":"#e0b34c","更新":"#d0912f","情報源":"#8a8a8a"};
+/* タグペイン/ホームの意味順: 先頭7=取引先のタグ（行動を促す軸を先頭に）・残り=資料のタグ */
+const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","施策","媒体","動画形式","形式","横断","更新","情報源"];
 function catColor(t){return CATMETA[(t||"").split("/")[0]]||"var(--accent)";}
 /* 空白入りタグ値は tag:"値" で発行（parseQuery の引用符対応を利用。空白なしは従来と同一文字列） */
 function tagQ(t){return /\s/.test(t)?'tag:"'+t+'"':"tag:"+t;}
@@ -1083,7 +1145,7 @@ function renderTags(b){
   const isAct=t=>act.some(a=>tagMatch([t],a));   /* __lastQ 内のタグと tagMatch 照合 */
   const known=new Set(TAGORDER);
   const extra=Object.keys(tagTree).filter(t=>!known.has(t)).sort();   /* 未知系統は末尾へ（防御） */
-  [["取引先のタグ",TAGORDER.slice(0,6)],["資料のタグ",TAGORDER.slice(6).concat(extra)]].forEach(([gl,cats])=>{
+  [["取引先のタグ",TAGORDER.slice(0,7)],["資料のタグ",TAGORDER.slice(7).concat(extra)]].forEach(([gl,cats])=>{
    const present=cats.filter(c=>tagTree[c]);if(!present.length)return;
    let ghead=null;
    if(!q){ghead=document.createElement("div");ghead.className="tghead";ghead.textContent=gl;wrap.appendChild(ghead);}
@@ -1233,6 +1295,7 @@ function tlSection(c){
    card='<span class="tlbadge tlfb">商談FB'+(f.src?"・"+esc(f.src):"")+'</span>'
     +(f.ph?'<span class="tlchip">'+esc(f.ph)+'</span>':"")
     +(f.bant?'<span class="tlchip">'+esc(f.bant)+'</span>':"")
+    +(f.by?'<span class="tlchip tlby" title="FB送信者">'+esc(f.by)+'</span>':"")
     +(f.menu?'<div class="tlt">'+esc(f.menu)+'</div>':"")
     +(f.pos?'<div class="tlx">'+esc(f.pos)+'</div>':"")
     +(f.next?'<div class="tlnx">→ 次: '+esc(f.next)+'</div>':"");
@@ -1250,7 +1313,7 @@ function openClient(stem){const c=cByStem[stem];if(!c)return;showDoc();pushHist(
  const ctg=clientTags(c);   /* 「このタグの仲間を探す」チップ行（クリック=runQuery置換・afterOpenでバインド） */
  $("#inner").innerHTML='<div class="inline-title">'+esc(c.name)+'</div>'
   +(ctg.length?'<div class="note-tags">'+ctg.map(t=>chipHtml(t)).join("")+'</div>':'')
-  +propsPanel([["list","client",c.name],["list","industry",c.industry],["list","deal_phase",c.phase],["list","bant_score",c.bant],["hash","fb_count",c.fb],["hash","doc_count",c.doc]])
+  +propsPanel([["list","client",c.name],["list","industry",c.industry],["list","deal_phase",c.phase],["list","bant_score",c.bant],["list","担当",(c.tans||[]).join("・")],["hash","fb_count",c.fb],["hash","doc_count",c.doc]])
   +tlSection(c)
   +'<div class="md">'+bodyMd+'</div>';
  bindTl();
@@ -1323,7 +1386,7 @@ const LASTDOC={};
 DATA.docs.forEach(d=>{if(d.cnorm&&d.modified&&(!(d.cnorm in LASTDOC)||d.modified>LASTDOC[d.cnorm]))LASTDOC[d.cnorm]=d.modified;});
 function lastOf(c){const a=c.lastfb||"",b=(c.cnorm&&LASTDOC[c.cnorm])||"";return a>b?a:b;}
 let tblSort={key:"act",dir:-1},tblFilter={q:"",ind:"",phase:"",temp:"",hw:false};   /* モジュール変数=テーブル⇄カルテ往復で選択状態維持 */
-const TCOLS=[["name","取引先",c=>c.name,0],["industry","業界",c=>c.industry,0],["phase","フェーズ",c=>c.phase,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1],["last","最終接点",c=>lastOf(c),0],["nx","次アクション",c=>c.nx||"",0]];
+const TCOLS=[["name","取引先",c=>c.name,0],["industry","業界",c=>c.industry,0],["phase","フェーズ",c=>c.phase,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1],["last","最終接点",c=>lastOf(c),0],["tans","担当",c=>(c.tans||[]).join("・"),0],["nx","次アクション",c=>c.nx||"",0]];
 const PHASECOLOR={"受注":"#54b981","1回目提案":"#4f9df5","2回目提案":"#4f9df5","ケイパ":"#e0b34c","ヒアリング":"#c98bdb","失注":"#e0685f"};
 function tableView(){showDoc();lastNote={key:"table",title:"取引先テーブル",icon:"table",folder:""};ribbonActive("table");
  renderTableShell();renderTabs();renderVhead();
@@ -1342,6 +1405,7 @@ function tblBody(shown){return shown.map(c=>{const pc=PHASECOLOR[c.phase]||"#8a8
   +'<td>'+(c.phase?'<span class="bp" style="background:'+pc+'22;color:'+pc+'">'+esc(c.phase)+'</span>':'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+esc(c.bant||"—")+'</td><td class="num">'+c.fb+'</td><td class="num">'+c.doc+'</td><td class="num">'+(c.fb+c.doc)+'</td>'
   +'<td>'+(lastOf(c)?esc(lastOf(c)):'<span style="color:var(--faint)">—</span>')+'</td>'
+  +'<td>'+((c.tans&&c.tans.length)?esc(c.tans.join("・")):'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+(c.nx?esc(c.nx):'<span style="color:var(--faint)">—</span>')+'</td></tr>';}).join("");}
 function updateTable(){const rows=tblRows();const tb=$("#inner").querySelector("tbody");if(!tb)return;
  tb.innerHTML=rows.length?tblBody(rows.slice(0,500)):'<tr><td colspan="'+TCOLS.length+'" style="color:var(--faint);cursor:default">条件に一致する取引先がありません — フィルタを1つ外してください</td></tr>';
@@ -1750,11 +1814,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # タグ第1弾（クライアント側）: 温度感/（最新FBのポジネガ比）・テーブル「次アクション」列・
     # 宿題/あり（次アクションが残っているのに最終接点が31日超過去 or 日付なし）
+    # タグ第2弾: 担当/（FB送信者の名寄せ統合後 distinct・フォーム由来のみ実名あり）
     _today = datetime.now(JST).date()
     for _c in clients:
         _c["temp"] = temperature_tag(_c["tl"])
         _c["nx"] = next_action(_c["tl"])
         _c["hw"] = 1 if homework_flag(_c["nx"], _c["last"], _today) else 0
+        _c["tans"] = tans_of(_c["tl"])
 
     # AI洗い出しレポート（_reports/）は管理用の内部成果物で、営業16名には
     # snake_case 名の生 markdown が意味不明（ユーザーFB 2026-07-12）。既定で非搭載とし、
@@ -1954,6 +2020,13 @@ def main(argv: list[str] | None = None) -> int:
         f"実リンク={len(links)}(内グラフ追加={_added}) / {stamp}"
     )
     print(f"   施策タイムライン: FBイベント{_tl_events}件 / tlペイロード {_tl_bytes // 1024} KB")
+    _tans_clients = sum(1 for c in clients if c.get("tans"))
+    _tans_names = {n for c in clients for n in c.get("tans") or []}
+    _dated_fb = sum(1 for c in clients for ev in c.get("tl") or [] if ev.get("d"))
+    print(
+        f"   担当タグ: {_tans_clients} クライアント / 担当名 {len(_tans_names)} 種 / "
+        f"日付ありFB {_dated_fb}/{_tl_events} 件"
+    )
     print("   クイックフィルタ件数: " + " / ".join(f"{k}={v}" for k, v in qf_counts.items()))
     print(f"   統計保存: {stats_path}")
     return 0
