@@ -344,6 +344,68 @@ def homework_flag(nx, last, today):
     return (today - last_d).days > HOMEWORK_STALE_DAYS
 
 
+# === タグUX: ホーム「クイックフィルタ」プリセット件数（<out>.stats.json へ焼き込み・回帰検知用） ===
+# JS 側 QF 配列（HTML テンプレート内）と対。タグ値の出力文字列を変えるとここが 0 になり
+# 「プリセットが静かに消えた」ことを stats 差分で検知できる。ageBucket は JS が閲覧時
+# Date.now 基準なのに対し、ここではビルド日基準の近似（回帰検知用途のため許容）。
+QF_PRESET_TAGS = (
+    "宿題/あり", "温度感/ネガ優勢", "温度感/高", "最終接点/1年以上前",
+    "更新/1ヶ月以内", "横断", "動画形式/ショート", "資料種別/提案書",
+)
+
+
+def _age_bucket(ds, today):
+    """JS ageBucket のビルド日基準ミラー（閾値 31/92/183/366 は JS と同一）。"""
+    if not ds:
+        return ""
+    try:
+        d = datetime.strptime(ds, "%Y-%m-%d").date()
+    except ValueError:
+        return ""
+    dd = (today - d).days
+    if dd <= 31: return "1ヶ月以内"
+    if dd <= 92: return "3ヶ月以内"
+    if dd <= 183: return "半年以内"
+    if dd <= 366: return "1年以内"
+    return "1年以上前"
+
+
+def _quickfilter_counts(clients, docs, today):
+    """QF プリセットごとのアイテム件数（JS の tagMatch と同じ「子タグも一致」判定）。"""
+    def ctags(c):
+        t = []
+        if c["industry"]: t.append("業種/" + c["industry"])
+        if c["phase"]: t.append("フェーズ/" + c["phase"])
+        if c["bantg"]: t.append("BANT/" + c["bantg"])
+        t.append("最終接点/" + (_age_bucket(c["last"], today) or "記録なし"))
+        if c["temp"]: t.append("温度感/" + c["temp"])
+        if c["hw"]: t.append("宿題/あり")
+        return t
+
+    def dtags(d):
+        t = []
+        if d["doc_type"]: t.append("資料種別/" + d["doc_type"])
+        if d["industry"]: t.append("業種/" + d["industry"])
+        if d["solution"]: t.append("施策/" + d["solution"])
+        a = _age_bucket(d["modified"], today)
+        if a: t.append("更新/" + a)
+        if d["src"]: t.append("情報源/" + d["src"])
+        t += ["媒体/" + m for m in d["media"]]
+        t += ["動画形式/" + v for v in d["vfmt"]]
+        if d["fmt"]: t.append("形式/" + d["fmt"])
+        if d["xc"]: t.append("横断/" + d["xc"])
+        return t
+
+    tag_lists = [ctags(c) for c in clients] + [dtags(d) for d in docs]
+    return {
+        preset: sum(
+            1 for tags in tag_lists
+            if any(t == preset or t.startswith(preset + "/") for t in tags)
+        )
+        for preset in QF_PRESET_TAGS
+    }
+
+
 EXCL: set[str] = set()  # exclude_stems.json（main() で読み込み・欠落は exit 1）
 INCLUDE_REPORTS = False  # 管理用レポートの搭載可否（--include-reports で ON）
 _exn = lambda s: re.sub(r"[\s_]+", "", s).lower()
@@ -473,6 +535,36 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .scount{padding:6px 12px;color:var(--faint);font-size:var(--f-ui-smaller);border-bottom:1px solid var(--border);margin-bottom:4px}
 .qhelp{padding:8px 12px;color:var(--faint);font-size:11px;line-height:1.7}
 .qhelp code{background:var(--b10);padding:1px 4px;border-radius:3px;color:var(--muted);font-family:var(--mono)}
+/* 統一タグチップ（色は7pxドットのみ・文字色はCSS変数=両テーマ両立・hover枠が系統色） */
+.tagchip{display:inline-flex;align-items:center;gap:5px;background:var(--hover);border:1px solid var(--border);border-radius:9px;padding:2px 8px;font-size:11px;line-height:16px;cursor:pointer;white-space:nowrap;max-width:100%;user-select:none}
+.tagchip:hover{border-color:var(--cc2,var(--accent))}
+.tcdot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:none}
+.tagchip .tck{color:var(--muted);flex:none}
+.tagchip .tcv{color:var(--text);overflow:hidden;text-overflow:ellipsis}
+.tagchip .tcneg{text-decoration:line-through}
+.chiprow{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.chiprow.tzrow{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}   /* テーザーは1行固定（はみ出しは横スクロール） */
+.tcmore{color:var(--faint);font-size:11px;padding:2px 4px;align-self:center}
+.qfn{color:var(--faint);font-variant-numeric:tabular-nums}
+/* 検索ペイン: アクティブフィルタバー（scount 内） */
+.fbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 0 2px}
+.fchip .fx{margin-left:1px;padding:1px 4px;color:var(--faint);cursor:pointer;border-radius:3px;font-size:12px;line-height:14px}
+.fchip .fx:hover{color:var(--err);background:var(--hover)}
+.fclear{color:var(--accent-2);cursor:pointer;font-size:11px;padding:2px 6px;border-radius:var(--r-s);white-space:nowrap}
+.fclear:hover{background:var(--hover)}
+.frec{padding-top:4px;color:var(--faint)}
+.qex .tagchip{margin:2px 4px 2px 0}
+/* 検索結果行のタグチップ */
+.sr .srtags{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px}
+/* タグペイン（意味群見出し・畳み行）/ 右パネルタグ */
+.tghead{padding:8px 10px 3px;color:var(--faint);font-size:11px;font-weight:600;letter-spacing:.03em}
+.trow.tmore{color:var(--accent-2)}
+.rtagwrap{display:flex;flex-wrap:wrap;gap:6px;padding:4px 10px 8px}
+/* テーブル: 宿題チェック+アクティブ表示チップ */
+.tbv .bar .hwck{display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:var(--f-ui-smaller);cursor:pointer;user-select:none}
+.tbv .bar .hwck input{accent-color:var(--accent);margin:0}
+.tfl{display:inline-flex;gap:6px;margin-left:4px}
+.tfl .tagchip{cursor:default}
 /* 中央 */
 .main{background:var(--bg-primary);display:flex;flex-direction:column;min-width:0;min-height:0;position:relative}
 .tabbar{display:flex;align-items:stretch;height:40px;background:var(--bg-sidebar);border-bottom:1px solid var(--border);padding-left:6px;flex:none;overflow-x:auto}
@@ -551,7 +643,7 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .wsec{color:var(--faint);font-size:var(--f-ui-smaller);text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin:24px 0 10px}
 .wgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
 .wcard{background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--r-m);padding:13px 15px;cursor:pointer;display:flex;gap:10px;align-items:flex-start}
-.wcard:hover{border-color:var(--border-focus);background:#f0f0f3}
+.wcard:hover{border-color:var(--border-focus);background:var(--hover)}
 .wcard svg{color:var(--accent-2);margin-top:1px}
 .wcard .wt{font-size:var(--f-ui-small);color:var(--text);font-weight:600;line-height:1.35}
 .wcard .wx{font-size:var(--f-ui-smaller);color:var(--faint);margin-top:3px}
@@ -771,6 +863,21 @@ const tagTree={};
 Object.keys(tagCount).forEach(t=>{const p=t.split("/");if(p.length===1){tagTree[p[0]]=tagTree[p[0]]||{count:tagCount[p[0]]||0,children:{}};}
  else{tagTree[p[0]]=tagTree[p[0]]||{count:tagCount[p[0]]||0,children:{}};tagTree[p[0]].children[t]=tagCount[t];}});
 
+/* ===== タグUX基盤: 系統色辞書(CATMETA) + 統一チップ部品(chipHtml) + runQuery 集約 ===== */
+/* 色は既存パレット（PHASECOLOR/DTCOLOR/INDUSTRY_COLORS の hex）流用・中間明度。
+   意味は常にラベルが担い、色は7pxドットのみ（色非依存原則・両テーマ共通） */
+const CATMETA={"宿題":"#e0685f","温度感":"#e07a5f","フェーズ":"#4f9df5","BANT":"#c98bdb","業種":"#54b981","最終接点":"#5fc9c9","資料種別":"#8a7cf5","施策":"#e05f8f","媒体":"#7f9cf5","動画形式":"#b5c94a","形式":"#d0a24c","横断":"#e0b34c","更新":"#d0912f","情報源":"#8a8a8a"};
+/* タグペイン/ホームの意味順: 先頭6=取引先のタグ（行動を促す軸を先頭に）・残り=資料のタグ */
+const TAGORDER=["宿題","温度感","フェーズ","BANT","業種","最終接点","資料種別","施策","媒体","動画形式","形式","横断","更新","情報源"];
+function catColor(t){return CATMETA[(t||"").split("/")[0]]||"var(--accent)";}
+/* 空白入りタグ値は tag:"値" で発行（parseQuery の引用符対応を利用。空白なしは従来と同一文字列） */
+function tagQ(t){return /\s/.test(t)?'tag:"'+t+'"':"tag:"+t;}
+function chipHtml(tag,mode){const p=tag.split("/"),cat=p[0],val=p.slice(1).join("/");
+ return '<span class="tagchip" data-tag="'+esc(tag)+'" style="--cc2:'+catColor(tag)+'" title="'+(mode==="and"?"クリックで絞り込みに追加":"#"+esc(tag)+" で検索")+'"><span class="tcdot" style="background:'+catColor(tag)+'"></span>'
+  +(val?'<span class="tck">'+esc(cat)+'</span><span class="tcv">'+esc(val)+'</span>':'<span class="tcv">'+esc(cat)+'</span>')+'</span>';}
+/* タグ/クエリ発行の単一路（従来4重複コードと同一手順: 検索ペインへ→input反映→__lastQ→再実行） */
+function runQuery(q){setPane("search");setTimeout(()=>{const i=$("#searchInput");i.value=q;window.__lastQ=q;runSearchPane(q,$("#searchOut"));},30);}
+
 /* ===== 実リンク網（バックリンク/アウトゴーイング/ローカルグラフ） ===== */
 const OUTL={},BACKL={},NEIGH={};
 (DATA.links||[]).forEach(([s,t,ctx])=>{
@@ -809,6 +916,7 @@ function setPane(p){pane=p;ribbonActive(p);$("#sideTitle").textContent=PANE_TITL
 function renderPane(){
  const b=$("#sideBody");b.innerHTML="";
  $("#sideAct1").innerHTML="";$("#sideAct2").innerHTML="";
+ $("#sideAct1").onclick=null;$("#sideAct2").onclick=null;   /* ペイン跨ぎのハンドラ残留防止（タグペインの並び順トグル等） */
  if(pane==="files")return renderFiles(b);
  if(pane==="search")return renderSearchPane(b);
  if(pane==="tags")return renderTags(b);
@@ -818,7 +926,9 @@ function treeRow(opts){// {chevron,icon,label,count,indent,active,onclick,onchev
  const d=document.createElement("div");d.className="trow"+(opts.active?" active":"")+(opts.closed?" closed":"");
  d.style.paddingLeft=(6+(opts.indent||0)*14)+"px";
  d.innerHTML=(opts.chevron?'<span class="tw">'+ic("chev")+'</span>':'<span class="tw"></span>')
-  +(opts.icon?ic(opts.icon,opts.iconCls||""):"")+'<span class="lbl"'+(opts.bold?' style="color:var(--text)"':"")+'>'+esc(opts.label)+'</span>'
+  +(opts.icon?(opts.iconColor?'<span style="color:'+opts.iconColor+';opacity:.85;display:flex">'+ic(opts.icon)+'</span>':ic(opts.icon,opts.iconCls||"")):"")   /* iconColor 指定時は色クラスを外し系統色を効かせる */
+  +(opts.dot?'<span class="tcdot" style="background:'+opts.dot+'"></span>':"")
+  +'<span class="lbl"'+(opts.bold?' style="color:var(--text)"':"")+'>'+esc(opts.label)+'</span>'
   +(opts.count!=null?'<span class="cnt">'+opts.count+'</span>':"");
  if(opts.key){d.dataset.key=opts.key;d.classList.add("filerow");}
  if(opts.onclick)d.onclick=opts.onclick;return d;
@@ -879,39 +989,129 @@ function renderSearchPane(b){
  const f=document.createElement("div");f.className="sfield";f.innerHTML=ic("search")+'<input id="searchInput" placeholder="検索  tag: path: [業界:IT]">';b.appendChild(f);
  const out=document.createElement("div");out.id="searchOut";b.appendChild(out);
  const inp=f.querySelector("input");inp.value=window.__lastQ||"";
- inp.addEventListener("input",()=>{window.__lastQ=inp.value;runSearchPane(inp.value,out);});
+ let dt=null;   /* 120ms debounce（1525件再フィルタの体感改善）。__lastQ は即時更新=状態保持は不変 */
+ inp.addEventListener("input",()=>{window.__lastQ=inp.value;clearTimeout(dt);dt=setTimeout(()=>runSearchPane(inp.value,out),120);});
  runSearchPane(inp.value,out);
 }
+/* ---- アクティブフィルタ可視化: parseQuery と同一 regex 1パスで raw トークンを抽出（表示専用・
+   parseQuery/matchItem は不改造）。表示が万一ズレても検索結果は parseQuery 側で不変（fail-safe） ---- */
+function qTokens(q){const T=[];
+ q=q.replace(/(^|\s)\/((?:\\.|[^\/\\])+)\/(?=\s|$)/g,(m,pre,pat)=>{T.push({raw:"/"+pat+"/",t:"re",v:pat});return pre+" ";});
+ const re=/\[([^\]:]+)(?::([^\]]*))?\]|(-?)(tag|path|file):("[^"]*"|\S+)|"([^"]+)"|(\S+)/g;let m;
+ while(m=re.exec(q)){
+  if(m[1]!=null)T.push({raw:m[0],t:"prop",k:m[1].trim(),v:(m[2]||"").trim()});
+  else if(m[4]){const v=(m[5]||"").replace(/^"|"$/g,"");if(v)T.push({raw:m[0],t:m[4],v:v,neg:m[3]==="-"});}
+  else if(m[6]!=null)T.push({raw:m[0],t:"exact",v:m[6]});
+  else if(m[7]&&m[7]!=="-")T.push(m[7][0]==="-"?{raw:m[0],t:"word",v:m[7].slice(1),neg:true}:{raw:m[0],t:"word",v:m[7]});
+ }return T;}
+/* raw トークンの完全一致除去（前後が空白/端の出現のみ）。見つからなければ何もしない（fail-safe） */
+function rmToken(val,raw){let i=-1;
+ while((i=val.indexOf(raw,i+1))!==-1){
+  const b=i===0||/\s/.test(val[i-1]),a=i+raw.length===val.length||/\s/.test(val[i+raw.length]);
+  if(b&&a)return (val.slice(0,i).trimEnd()+" "+val.slice(i+raw.length).trimStart()).trim();
+ }return val;}
+const TYPELBL={path:"フォルダ",file:"ファイル名",exact:"完全一致",re:"正規表現",word:"含む"};
+function fbarHtml(q){const T=qTokens(q);if(!T.length)return "";
+ let h='<div class="fbar">';
+ T.forEach(tk=>{let inner;
+  if(tk.t==="tag")inner='<span class="tcdot" style="background:'+catColor(tk.v)+'"></span>'+(tk.neg?'<span class="tck">除外</span>':'')+'<span class="tcv'+(tk.neg?' tcneg':'')+'">'+esc(tk.v)+'</span>';
+  else if(tk.t==="prop")inner='<span class="tck">'+esc(tk.k)+'</span><span class="tcv">'+esc(tk.v==="null"?"（値なし）":tk.v===""?"（値あり）":tk.v)+'</span>';
+  else inner='<span class="tck">'+(tk.neg?"除外":TYPELBL[tk.t]||"")+'</span><span class="tcv'+(tk.neg?' tcneg':'')+'">'+esc(tk.v)+'</span>';
+  h+='<span class="tagchip fchip" data-rm="'+esc(tk.raw)+'"'+(tk.t==="tag"?' style="--cc2:'+catColor(tk.v)+'"':'')+'>'+inner+'<span class="fx" title="この条件を外す">×</span></span>';});
+ if(T.length>=2)h+='<span class="fclear">すべて解除</span>';
+ return h+'</div>';}
+/* 空クエリ時ヘルプ: 実データ（tagTree/tagCount）由来のクリック実行例 + 構文リファレンス。
+   例は matchItem で実件数を検証し 1件以上ヒットするものだけ載せる（件数併記は tag 例のみ） */
+function qhelpHtml(){
+ const hitN=q=>{const P=parseQuery(q);return IDX.filter(it=>matchItem(it,P)).length;};
+ const leaves=Object.keys(tagCount).filter(t=>t.includes("/")).sort((a,b)=>tagCount[b]-tagCount[a]);
+ const ex=[],seen=new Set();
+ for(const t of leaves){const c=t.split("/")[0];if(seen.has(c))continue;seen.add(c);ex.push({q:tagQ(t),n:tagCount[t]});if(ex.length>=2)break;}
+ const top=leaves.slice(0,8);
+ outer:for(let i=0;i<top.length;i++)for(let j=0;j<top.length;j++){
+  if(i===j||top[i].split("/")[0]===top[j].split("/")[0])continue;
+  const q=tagQ(top[i])+" "+tagQ(top[j]),n=hitN(q);
+  if(n>0){ex.push({q:q,n:n});break outer;}}
+ outer2:for(let i=0;i<top.length;i++)for(let j=0;j<top.length;j++){
+  if(i===j)continue;
+  const q=tagQ(top[i])+" -"+tagQ(top[j]),n=hitN(q);
+  if(n>0&&n<tagCount[top[i]]){ex.push({q:q,n:n});break outer2;}}
+ const chips=ex.map(e=>'<span class="tagchip qxc" data-q="'+esc(e.q)+'"><span class="tcv">'+esc(e.q)+'</span><span class="qfn">'+e.n+'</span></span>').join(" ");
+ return '<div class="qhelp qex">'+(chips?'<b style="color:var(--muted)">例（クリックで実行）</b><br>'+chips+'<br><br>':'')
+  +'演算子が使えます：<br><code>tag:業種/食品</code> タグ(子も一致)<br><code>-tag:横断</code> タグ除外<br><code>path:clients</code> フォルダ<br><code>file:提案</code> ファイル名<br><code>[業界:IT]</code> プロパティ<br><code>-除外語</code> / <code>"完全一致"</code> / <code>/正規表現/</code></div>';}
 function hl(text,terms){let s=esc(text);terms.forEach(t=>{if(t&&t.length>1){s=s.replace(new RegExp("("+t.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","ig"),"<mark>$1</mark>");}});return s;}
 function runSearchPane(q,out){
  q=q.trim();
- if(!q){out.innerHTML='<div class="qhelp">演算子が使えます：<br><code>tag:業種/食品</code> タグ(子も一致)<br><code>path:clients</code> フォルダ<br><code>file:提案</code> ファイル名<br><code>[業界:IT]</code> プロパティ<br><code>-除外語</code> / <code>"完全一致"</code> / <code>/正規表現/</code></div>';return;}
+ if(!q){if(!window.__qhelp)window.__qhelp=qhelpHtml();out.innerHTML=window.__qhelp;
+  out.querySelectorAll(".qxc").forEach(el=>el.onclick=()=>{const i=$("#searchInput");i.value=el.dataset.q;window.__lastQ=i.value;runSearchPane(i.value,out);});
+  return;}
  const P=parseQuery(q);const hits=IDX.filter(it=>matchItem(it,P));
  const byFolder={clients:[],docs:[],_reports:[]};hits.forEach(h=>byFolder[h.folder].push(h));
- let html='<div class="scount">'+hits.length+' 件ヒット</div>';
+ let html='<div class="scount">'+hits.length+' 件ヒット'+fbarHtml(q)+(hits.length?'':'<div class="frec">×で条件を外してください</div>')+'</div>';
  [["_reports","レポート"],["clients","取引先"],["docs","資料"]].forEach(([fk,label])=>{
   const arr=byFolder[fk];if(!arr.length)return;
   html+='<div class="sgroup"><div class="sg-h">'+ic("folder","folder-ico")+' '+label+'<span class="cnt">'+arr.length+'</span></div><div class="sres">';
-  arr.slice(0,60).forEach(it=>{html+='<div class="sr" data-k="'+it.kind[0]+'" data-s="'+esc(it.stem)+'"><div class="srt">'+esc(it.name)+'</div>'+(it.ex?'<div class="srx">'+hl(it.ex,P.plain)+'</div>':"")+'</div>';});
+  arr.slice(0,60).forEach(it=>{const tg=it.tags.slice(0,3).map(t=>chipHtml(t,"and")).join("")+(it.tags.length>3?'<span class="tcmore">+'+(it.tags.length-3)+'</span>':'');
+   html+='<div class="sr" data-k="'+it.kind[0]+'" data-s="'+esc(it.stem)+'"><div class="srt">'+esc(it.name)+'</div>'+(tg?'<div class="srtags">'+tg+'</div>':'')+(it.ex?'<div class="srx">'+hl(it.ex,P.plain)+'</div>':"")+'</div>';});
   if(arr.length>60)html+='<div class="scount">…他 '+(arr.length-60)+' 件</div>';
   html+='</div></div>';
  });
  out.innerHTML=html;
  out.querySelectorAll(".sr").forEach(el=>el.onclick=()=>openByK(el.dataset.k,el.dataset.s));
+ out.querySelectorAll(".sr .tagchip").forEach(ch=>ch.onclick=e=>{e.stopPropagation();addTagToQuery(ch.dataset.tag);});   /* 結果行チップ=AND追加（行openとは分離） */
+ out.querySelectorAll(".fchip .fx").forEach(x=>x.onclick=e=>{e.stopPropagation();const i=$("#searchInput");i.value=rmToken(i.value,x.parentElement.dataset.rm);window.__lastQ=i.value;runSearchPane(i.value,out);});
+ const fc=out.querySelector(".fclear");if(fc)fc.onclick=()=>{const i=$("#searchInput");i.value="";window.__lastQ="";runSearchPane("",out);};
  out.querySelectorAll(".sg-h").forEach(h=>h.onclick=()=>{const r=h.nextElementSibling;r.style.display=r.style.display==="none"?"":"none";});
 }
-/* ---- タグ(ネスト) ---- */
+/* 一貫則: 結果一覧の中=絞り込み継続（AND追記・重複チェック）。それ以外のタグ面=新しい検索（runQuery置換） */
+function addTagToQuery(tag){const i=$("#searchInput");if(!i)return;
+ if(qTokens(i.value).some(tk=>tk.t==="tag"&&!tk.neg&&tk.v.toLowerCase()===tag.toLowerCase()))return;
+ i.value=(i.value.trim()+" "+tagQ(tag)).trim();window.__lastQ=i.value;runSearchPane(i.value,$("#searchOut"));}
+/* ---- タグ(ネスト・意味順+区切り見出し・系統色・ペイン内絞り込み・件数/五十音トグル・12超畳み・アクティブ表示)
+   クリック挙動は既存置換（runQuery）のまま完全不変。凡例パネルは作らない（意味は常にラベルが担う） ---- */
+let tagSortAlpha=false;
 function renderTags(b){
+ const a1=$("#sideAct1");a1.innerHTML=ic("list");a1.title="並び順を切替（件数順⇄五十音順）";
+ const f=document.createElement("div");f.className="sfield";f.innerHTML=ic("search")+'<input placeholder="タグを絞り込み…">';b.appendChild(f);
  const wrap=document.createElement("div");wrap.className="tree";b.appendChild(wrap);
- Object.keys(tagTree).sort().forEach(top=>{
-  const node=tagTree[top];const kids=Object.keys(node.children).sort();let open=false;
-  const fr=treeRow({chevron:kids.length>0,icon:"hash",iconCls:"tag-ico",label:top,count:node.count,closed:true});
-  const ch=document.createElement("div");ch.className="tchildren hidden";
-  kids.forEach(full=>{const leaf=full.split("/").slice(1).join("/");
-   ch.appendChild(treeRow({icon:"hash",iconCls:"tag-ico",label:leaf,count:node.children[full],indent:1,onclick:()=>{setPane("search");setTimeout(()=>{const i=$("#searchInput");i.value="tag:"+full;window.__lastQ=i.value;runSearchPane(i.value,$("#searchOut"));},30);}}));});
-  fr.onclick=()=>{if(!kids.length){setPane("search");setTimeout(()=>{const i=$("#searchInput");i.value="tag:"+top;window.__lastQ=i.value;runSearchPane(i.value,$("#searchOut"));},30);return;}open=!open;fr.classList.toggle("closed",!open);ch.classList.toggle("hidden",!open);};
-  wrap.appendChild(fr);wrap.appendChild(ch);
- });
+ const inp=f.querySelector("input");
+ const openSet=new Set();if(window.__tagFocus){openSet.add(window.__tagFocus);delete window.__tagFocus;}   /* ホームのテーザー経由の初期展開 */
+ const moreSet=new Set();
+ function build(){
+  wrap.innerHTML="";const q=(inp.value||"").trim().toLowerCase();
+  let act=[];try{act=parseQuery(window.__lastQ||"").tag;}catch(e){}
+  const isAct=t=>act.some(a=>tagMatch([t],a));   /* __lastQ 内のタグと tagMatch 照合 */
+  const known=new Set(TAGORDER);
+  const extra=Object.keys(tagTree).filter(t=>!known.has(t)).sort();   /* 未知系統は末尾へ（防御） */
+  [["取引先のタグ",TAGORDER.slice(0,6)],["資料のタグ",TAGORDER.slice(6).concat(extra)]].forEach(([gl,cats])=>{
+   const present=cats.filter(c=>tagTree[c]);if(!present.length)return;
+   let ghead=null;
+   if(!q){ghead=document.createElement("div");ghead.className="tghead";ghead.textContent=gl;wrap.appendChild(ghead);}
+   let shown=0;
+   present.forEach(top=>{
+    const node=tagTree[top],col=CATMETA[top]||"var(--accent)";
+    const kids=Object.keys(node.children);
+    kids.sort(tagSortAlpha?(x,y)=>x.localeCompare(y,"ja"):(x,y)=>node.children[y]-node.children[x]||x.localeCompare(y,"ja"));
+    let vk=kids;
+    if(q&&!top.toLowerCase().includes(q)){vk=kids.filter(k=>k.toLowerCase().includes(q));if(!vk.length)return;}   /* ヒット枝のみ+自動展開 */
+    shown++;
+    let open=q?true:openSet.has(top);
+    const fr=treeRow({chevron:kids.length>0,icon:"hash",iconCls:"tag-ico",iconColor:col,label:top,count:node.count,closed:!open,active:isAct(top)});
+    const ch=document.createElement("div");ch.className="tchildren"+(open?"":" hidden");
+    const fold=!q&&vk.length>12&&!moreSet.has(top);   /* 葉12超は畳む（progressive disclosure） */
+    (fold?vk.slice(0,12):vk).forEach(full=>{const leaf=full.split("/").slice(1).join("/");
+     ch.appendChild(treeRow({dot:col,label:leaf,count:node.children[full],indent:1,active:isAct(full),onclick:()=>runQuery(tagQ(full))}));});
+    if(fold){const mr=treeRow({label:"他 "+(vk.length-12)+" 件を表示",indent:1});mr.classList.add("tmore");
+     mr.onclick=()=>{moreSet.add(top);openSet.add(top);build();};ch.appendChild(mr);}
+    fr.onclick=()=>{if(!kids.length){runQuery(tagQ(top));return;}open=!open;open?openSet.add(top):openSet.delete(top);fr.classList.toggle("closed",!open);ch.classList.toggle("hidden",!open);};
+    wrap.appendChild(fr);wrap.appendChild(ch);
+   });
+   if(!shown&&ghead)ghead.remove();
+  });
+ }
+ let dt=null;inp.addEventListener("input",()=>{clearTimeout(dt);dt=setTimeout(build,80);});
+ a1.onclick=()=>{tagSortAlpha=!tagSortAlpha;build();};
+ build();
 }
 /* ---- ブックマーク ---- */
 function renderBookmarks(b){
@@ -944,16 +1144,26 @@ function renderVhead(){
 /* ===== 中央表示 ===== */
 function showDoc(){$("#graphWrap").style.display="none";$("#docPane").style.display="block";ribbonActive(pane);}
 function showGraphView(){$("#graphWrap").style.display="block";$("#docPane").style.display="none";ribbonActive("graph");}
+/* ホーム「クイックフィルタ」プリセット（1箇所定義）。タグ値名は直書きに頼らず tagCount の
+   動的存在チェックで防御（生成器の出力文字列変更で 0件/消滅しても静かに壊れない）。
+   件数バッジ=tagCount は全プリセットが「1アイテム1タグ」の系統のみなので検索ヒット件数と一致 */
+const QF=[["宿題あり","宿題/あり"],["温度感ネガ優勢","温度感/ネガ優勢"],["温度感高","温度感/高"],["フォロー漏れ","最終接点/1年以上前"],["更新1ヶ月以内","更新/1ヶ月以内"],["横断ナレッジ","横断"],["ショート動画","動画形式/ショート"],["提案書","資料種別/提案書"]];
 function welcome(){
  showDoc();
  const notable=DATA.clients.filter(c=>c.fb>0).sort((a,b)=>(b.fb+b.doc)-(a.fb+a.doc)).slice(0,6);
  const cards=k=>k.map(c=>`<div class="wcard" data-k="c" data-s="${esc(c.stem)}">`+ic("building")+`<div><div class="wt">${esc(c.name)}</div><div class="wx">${esc(c.industry||"業界未設定")} ・ FB${c.fb} / 資料${c.doc}</div></div></div>`).join("");
  const rep=DATA.reports.map(r=>`<div class="wcard" data-k="r" data-s="${esc(r.stem)}">`+ic("report")+`<div><div class="wt">${esc(r.name)}</div><div class="wx">AI洗い出しレポート</div></div></div>`).join("");
+ const qf=QF.filter(([l,t])=>tagCount[t]>0).slice(0,8).map(([l,t])=>'<span class="tagchip qfc" data-q="'+esc(tagQ(t))+'" style="--cc2:'+catColor(t)+'" title="#'+esc(t)+' で検索"><span class="tcdot" style="background:'+catColor(t)+'"></span><span class="tcv">'+esc(l)+'</span><span class="qfn">'+tagCount[t]+'</span></span>').join("");
+ const tz=TAGORDER.filter(c=>tagTree[c]).map(c=>'<span class="tagchip tzc" data-c="'+esc(c)+'" style="--cc2:'+(CATMETA[c]||"var(--accent)")+'" title="タグペインで「'+esc(c)+'」を開く"><span class="tcdot" style="background:'+(CATMETA[c]||"var(--accent)")+'"></span><span class="tcv">'+esc(c)+'</span><span class="qfn">'+(tagCount[c]||0)+'</span></span>').join("");
  $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} AiLaVault</h1>
   <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。取引先カルテには資料と商談FBを時系列で一望できる<b>施策タイムライン</b>付き。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
+  ${qf?`<div class="wsec">クイックフィルタ</div><div class="chiprow">${qf}</div>`:""}
+  ${tz?`<div class="wsec">タグで探す</div><div class="chiprow tzrow">${tz}</div>`:""}
   ${DATA.reports.length?`<div class="wsec">AI洗い出しレポート</div><div class="wgrid">${rep}</div>`:""}
   <div class="wsec">主要な取引先</div><div class="wgrid">${cards(notable)}</div></div>`;
  $("#inner").querySelectorAll(".wcard").forEach(el=>el.onclick=()=>openByK(el.dataset.k,el.dataset.s));
+ $("#inner").querySelectorAll(".qfc").forEach(el=>el.onclick=()=>runQuery(el.dataset.q));   /* 置換で検索ペインへ（チップバー付きで着地） */
+ $("#inner").querySelectorAll(".tzc").forEach(el=>el.onclick=()=>{window.__tagFocus=el.dataset.c;setPane("tags");});   /* 該当系統を初期展開 */
  renderRightTabs();renderRight();markActiveInTree();
  if(window.updateStatus)updateStatus(0,0);
 }
@@ -997,7 +1207,7 @@ function propsPanel(rows){return '<div class="props"><div class="props-h">プロ
 function navTarget(t){if(t.indexOf("clients/")===0)return openClient(t.slice(8));if(t.indexOf("docs/")===0)return openDoc(t.slice(5));if(cByStem[t])return openClient(t);if(dByStem[t])return openDoc(t);const c=cByNorm[nrm(t)];if(c)return openClient(c.stem);}
 function afterOpen(){
  $("#inner").querySelectorAll(".wl").forEach(el=>el.onclick=()=>navTarget(el.dataset.t));
- $("#inner").querySelectorAll(".tg,.ntag").forEach(el=>el.onclick=()=>{setPane("search");setTimeout(()=>{const i=$("#searchInput");i.value="tag:"+el.dataset.tag;window.__lastQ=i.value;runSearchPane(i.value,$("#searchOut"));},30);});
+ $("#inner").querySelectorAll(".tg,.ntag,.note-tags .tagchip").forEach(el=>el.onclick=()=>runQuery(tagQ(el.dataset.tag)));
  renderRightTabs();renderRight();markActiveInTree();
  renderTabs();renderVhead();$("#docPane").scrollTop=0;$("#docPane").querySelector(".doc").scrollIntoView({block:"start"});
  const chars=($("#inner").querySelector(".md")?.textContent||"").length;const bl=((lastNote&&BACKL[lastNote.key])||[]).length;updateStatus(bl,chars);
@@ -1037,7 +1247,9 @@ function bindTl(){const mb=$("#inner").querySelector(".tlmorebtn");
 function openClient(stem){const c=cByStem[stem];if(!c)return;showDoc();pushHist("c",stem);
  lastNote={key:"c:"+stem,title:c.name,icon:"building",folder:"clients"};
  const bodyMd=c.md?md(c.md):"";
+ const ctg=clientTags(c);   /* 「このタグの仲間を探す」チップ行（クリック=runQuery置換・afterOpenでバインド） */
  $("#inner").innerHTML='<div class="inline-title">'+esc(c.name)+'</div>'
+  +(ctg.length?'<div class="note-tags">'+ctg.map(t=>chipHtml(t)).join("")+'</div>':'')
   +propsPanel([["list","client",c.name],["list","industry",c.industry],["list","deal_phase",c.phase],["list","bant_score",c.bant],["hash","fb_count",c.fb],["hash","doc_count",c.doc]])
   +tlSection(c)
   +'<div class="md">'+bodyMd+'</div>';
@@ -1047,7 +1259,9 @@ function openClient(stem){const c=cByStem[stem];if(!c)return;showDoc();pushHist(
 function renderClientBody(m){return md(m).replace(/<h3>/g,'<div class="fbcard"><h3 style="border:none">').replace(/(<\/h3>[\s\S]*?)(?=<div class="fbcard">|$)/g,'$1</div>');}
 function openDoc(stem){const d=dByStem[stem];if(!d)return;showDoc();pushHist("d",stem);
  lastNote={key:"d:"+stem,title:d.title,icon:"filetext",folder:"docs"};
+ const dtg=docTags(d);
  $("#inner").innerHTML='<div class="inline-title">'+esc(d.title)+'</div>'
+  +(dtg.length?'<div class="note-tags">'+dtg.map(t=>chipHtml(t)).join("")+'</div>':'')
   +propsPanel([["list","title",d.title],["list","doc_type",d.doc_type],["list","client",d.client],["list","industry",d.industry],["list","solution",d.solution],["cal","modified_at",d.modified]])
   +'<div class="md">'+md(d.md||("> "+(d.ex||"（要約なし）")))+'</div>';
  afterOpen();
@@ -1097,18 +1311,18 @@ function renderRight(){
   bindBL(b);
  }else if(rTab==="tags"){
   const tags=noteTags();
-  b.innerHTML='<div class="bkgrp"><div class="bkgrp-h">タグ · '+tags.length+'</div>'+(tags.length?tags.map(t=>'<div class="olink" data-tag="'+esc(t)+'">#'+esc(t)+'</div>').join(""):'<div class="qhelp">タグなし</div>')+'</div>';
-  b.querySelectorAll(".olink[data-tag]").forEach(el=>el.onclick=()=>tagJump(el.dataset.tag));
+  b.innerHTML='<div class="bkgrp"><div class="bkgrp-h">タグ · '+tags.length+'</div>'+(tags.length?'<div class="rtagwrap">'+tags.map(t=>chipHtml(t)).join("")+'</div>':'<div class="qhelp">タグなし</div>')+'</div>';
+  b.querySelectorAll(".tagchip").forEach(el=>el.onclick=()=>tagJump(el.dataset.tag));
  }else{renderOutlineInto(b);}
 }
-function tagJump(t){setPane("search");setTimeout(()=>{const i=$("#searchInput");i.value="tag:"+t;window.__lastQ=i.value;runSearchPane(i.value,$("#searchOut"));},30);}
+function tagJump(t){runQuery(tagQ(t));}
 
 /* ===== Bases風テーブル ===== */
 /* 最終接点 = max(最終FB日, 関連docsの最新modified)。cnorm単位で事前集計 */
 const LASTDOC={};
 DATA.docs.forEach(d=>{if(d.cnorm&&d.modified&&(!(d.cnorm in LASTDOC)||d.modified>LASTDOC[d.cnorm]))LASTDOC[d.cnorm]=d.modified;});
 function lastOf(c){const a=c.lastfb||"",b=(c.cnorm&&LASTDOC[c.cnorm])||"";return a>b?a:b;}
-let tblSort={key:"act",dir:-1},tblFilter={q:"",ind:"",phase:""};
+let tblSort={key:"act",dir:-1},tblFilter={q:"",ind:"",phase:"",temp:"",hw:false};   /* モジュール変数=テーブル⇄カルテ往復で選択状態維持 */
 const TCOLS=[["name","取引先",c=>c.name,0],["industry","業界",c=>c.industry,0],["phase","フェーズ",c=>c.phase,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1],["last","最終接点",c=>lastOf(c),0],["nx","次アクション",c=>c.nx||"",0]];
 const PHASECOLOR={"受注":"#54b981","1回目提案":"#4f9df5","2回目提案":"#4f9df5","ケイパ":"#e0b34c","ヒアリング":"#c98bdb","失注":"#e0685f"};
 function tableView(){showDoc();lastNote={key:"table",title:"取引先テーブル",icon:"table",folder:""};ribbonActive("table");
@@ -1118,6 +1332,8 @@ function tblRows(){let rows=DATA.clients.slice();
  if(tblFilter.q){const q=tblFilter.q.toLowerCase();rows=rows.filter(c=>(c.name+c.industry+c.phase+c.bant).toLowerCase().includes(q));}
  if(tblFilter.ind)rows=rows.filter(c=>c.industry===tblFilter.ind);
  if(tblFilter.phase)rows=rows.filter(c=>c.phase===tblFilter.phase);
+ if(tblFilter.temp)rows=rows.filter(c=>c.temp===tblFilter.temp);
+ if(tblFilter.hw)rows=rows.filter(c=>c.hw);
  const col=TCOLS.find(c=>c[0]===tblSort.key)||TCOLS[6];
  rows.sort((a,b)=>{let x=col[2](a),y=col[2](b);return col[3]?(x-y)*tblSort.dir:(""+x).localeCompare(""+y,"ja")*tblSort.dir;});return rows;}
 function tblBody(shown){return shown.map(c=>{const pc=PHASECOLOR[c.phase]||"#8a8a8a";
@@ -1128,23 +1344,30 @@ function tblBody(shown){return shown.map(c=>{const pc=PHASECOLOR[c.phase]||"#8a8
   +'<td>'+(lastOf(c)?esc(lastOf(c)):'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+(c.nx?esc(c.nx):'<span style="color:var(--faint)">—</span>')+'</td></tr>';}).join("");}
 function updateTable(){const rows=tblRows();const tb=$("#inner").querySelector("tbody");if(!tb)return;
- tb.innerHTML=tblBody(rows.slice(0,500));
+ tb.innerHTML=rows.length?tblBody(rows.slice(0,500)):'<tr><td colspan="'+TCOLS.length+'" style="color:var(--faint);cursor:default">条件に一致する取引先がありません — フィルタを1つ外してください</td></tr>';
+ const act=$("#inner").querySelector("#tblact");   /* native select にドットが付かない補完: 適用中フィルタをチップで可視化 */
+ if(act)act.innerHTML=(tblFilter.temp?chipHtml("温度感/"+tblFilter.temp):"")+(tblFilter.hw?chipHtml("宿題/あり"):"");
  $("#inner").querySelector(".bar .n").textContent=rows.length+" 件"+(rows.length>500?"（先頭500表示）":"");
  $("#inner").querySelectorAll("thead th").forEach(th=>{const a=th.querySelector(".ar");if(a)a.remove();if(th.dataset.k===tblSort.key)th.insertAdjacentHTML("beforeend",'<span class="ar">'+(tblSort.dir>0?"▲":"▼")+'</span>');});
- tb.querySelectorAll("tr").forEach(tr=>tr.onclick=()=>openClient(tr.dataset.s));}
+ tb.querySelectorAll("tr[data-s]").forEach(tr=>tr.onclick=()=>openClient(tr.dataset.s));}
 function renderTableShell(){
  const inds=[...new Set(DATA.clients.map(c=>c.industry).filter(Boolean))].sort();
  const phases=[...new Set(DATA.clients.map(c=>c.phase).filter(Boolean))].sort();
  const optI='<option value="">業界（すべて）</option>'+inds.map(i=>'<option'+(tblFilter.ind===i?" selected":"")+'>'+esc(i)+'</option>').join("");
  const optP='<option value="">フェーズ（すべて）</option>'+phases.map(p=>'<option'+(tblFilter.phase===p?" selected":"")+'>'+esc(p)+'</option>').join("");
+ /* 温度感は実値集合から生成（ラベルはタグペインと同一文字列）。宿題はチェック1つの最小構成 */
+ const temps=["高","ポジ優勢","拮抗","ネガ優勢"].filter(t=>DATA.clients.some(c=>c.temp===t));
+ const optT='<option value="">温度感（すべて）</option>'+temps.map(t=>'<option'+(tblFilter.temp===t?" selected":"")+'>'+esc(t)+'</option>').join("");
  const head=TCOLS.map(c=>'<th data-k="'+c[0]+'"'+(c[3]?' class="num"':'')+'>'+c[1]+'</th>').join("");
  $("#inner").innerHTML='<div class="tbv"><div class="th1">'+ic("table")+'取引先テーブル</div>'
   +'<p class="sub">'+DATA.stats.clients+' 取引先を業界・フェーズ・BANT・FB数で分類。列見出しでソート、行クリックでカルテを開く（Bases風）。</p>'
-  +'<div class="bar"><input id="tblq" placeholder="絞り込み…" value="'+esc(tblFilter.q)+'"><select id="tblind">'+optI+'</select><select id="tblph">'+optP+'</select><span class="n"></span></div>'
+  +'<div class="bar"><input id="tblq" placeholder="絞り込み…" value="'+esc(tblFilter.q)+'"><select id="tblind">'+optI+'</select><select id="tblph">'+optP+'</select><select id="tbltemp">'+optT+'</select><label class="hwck"><input type="checkbox" id="tblhw"'+(tblFilter.hw?" checked":"")+'> 宿題ありのみ</label><span class="tfl" id="tblact"></span><span class="n"></span></div>'
   +'<div class="tblwrap"><table><thead><tr>'+head+'</tr></thead><tbody></tbody></table></div></div>';
  $("#tblq").addEventListener("input",e=>{tblFilter.q=e.target.value;updateTable();});
  $("#tblind").addEventListener("change",e=>{tblFilter.ind=e.target.value;updateTable();});
  $("#tblph").addEventListener("change",e=>{tblFilter.phase=e.target.value;updateTable();});
+ $("#tbltemp").addEventListener("change",e=>{tblFilter.temp=e.target.value;updateTable();});
+ $("#tblhw").addEventListener("change",e=>{tblFilter.hw=e.target.checked;updateTable();});
  $("#inner").querySelectorAll("thead th").forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(tblSort.key===k)tblSort.dir*=-1;else{tblSort.key=k;tblSort.dir=(k==="fb"||k==="doc"||k==="act"||k==="last")?-1:1;}updateTable();});
  updateTable();}
 
@@ -1704,11 +1927,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- サニティゲート（out を上書きする前に判定） ---
     stats_path = _stats_path(out)
+    qf_counts = _quickfilter_counts(clients, docs, _today)   # 横断/（xc）確定後に算出
     new_stats = {
         "clients": len(clients),
         "docs": len(docs),
         "bytes": len(html_bytes),
         "built_at": datetime.now(JST).isoformat(),
+        "qf": qf_counts,
     }
     _sanity_gate(stats_path, new_stats, allow_shrink=args.allow_shrink)
 
@@ -1729,6 +1954,7 @@ def main(argv: list[str] | None = None) -> int:
         f"実リンク={len(links)}(内グラフ追加={_added}) / {stamp}"
     )
     print(f"   施策タイムライン: FBイベント{_tl_events}件 / tlペイロード {_tl_bytes // 1024} KB")
+    print("   クイックフィルタ件数: " + " / ".join(f"{k}={v}" for k, v in qf_counts.items()))
     print(f"   統計保存: {stats_path}")
     return 0
 
