@@ -111,6 +111,22 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_files" {
     }
   }
 
+  # x-research(④効果測定)の中間生成物も30日で削除（tiktok-acquire と同じ扱い・上記地雷準拠で
+  # ここに集約。x_research.tf 側には lifecycle リソースを置かない）。
+  dynamic "rule" {
+    for_each = var.enable_x_research ? [1] : []
+    content {
+      id     = "x-research-expire"
+      status = "Enabled"
+      filter {
+        prefix = "x-research/"
+      }
+      expiration {
+        days = 30
+      }
+    }
+  }
+
   depends_on = [aws_s3_bucket_versioning.raw_files]
 }
 
