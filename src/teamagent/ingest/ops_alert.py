@@ -182,5 +182,67 @@ class IngestOpsAlerter:
             )
             return False
 
+    def send_freshness_warning(
+        self,
+        *,
+        stale: list[Any],
+        request_id: str,
+        dry_run: bool = False,
+    ) -> bool:
+        """取り込み鮮度の警告を webhook 通知（stale=StaleSource のリスト）。
+
+        「ある source_type の取り込みが N 日以上遅れている（or 1件も無い）」を検知した
+        ときに ops へ出す。dry_run / webhook 未設定 / stale 空 なら no-op（False）。
+        通知失敗は握りつぶす（ingest 続行を阻害しない）。
+        """
+        if dry_run or not self.enabled or not stale:
+            return False
+        timestamp = _dt.datetime.now(_dt.UTC).isoformat()
+        srcs = ", ".join(getattr(s, "source_type", "?") for s in stale)
+        title = f":warning: Ingest freshness alert: {srcs} が古い/未取り込み"
+        lines = "\n".join(
+            f"• *{getattr(s, 'source_type', '?')}*: {getattr(s, 'reason', '')}" for s in stale
+        )
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": ":warning: 取り込み鮮度アラート"},
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"{lines}\n\n共有された資料が検索に載っていない可能性があります。"
+                        f"ingest の稼働状況（EventBridge ルール / 手動 run のソース指定）を確認してください。"
+                    ),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"*Request ID* `{request_id}`  *Time* {timestamp}"}
+                ],
+            },
+        ]
+        try:
+            resp = httpx.post(
+                str(self.webhook_url),
+                json={"blocks": blocks, "text": title},
+                timeout=self.timeout_s,
+            )
+            ok = resp.status_code == 200
+            logger.info(
+                "ops_freshness_alert_sent",
+                request_id=request_id,
+                stale_count=len(stale),
+                status=resp.status_code,
+                ok=ok,
+            )
+            return ok
+        except Exception:
+            logger.warning("ops_freshness_alert_failed", request_id=request_id, exc_info=True)
+            return False
+
 
 __all__ = ["AlertType", "IngestOpsAlerter", "classify_exception"]
