@@ -43,8 +43,10 @@ ORCHESTRATOR_MAIL_CLAUSE = """\
 
 def orchestrator_model_from_env() -> str:
     """L2 オーケストレーターが使う Bedrock model（inference profile）ID を env から引く。"""
+    # コスト方針(2026-06-29): 既定 Haiku（本番 mcp は BEDROCK_MODEL_ID=Haiku 注入済みで実効不変。
+    # env の無いローカル/新タスクが silent に Sonnet(US) へ落ちる地雷だけを塞ぐ）。
     return os.environ.get("TEAMAGENT_BEDROCK_MODEL") or os.environ.get(
-        "BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6"
+        "BEDROCK_MODEL_ID", "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
     )
 
 

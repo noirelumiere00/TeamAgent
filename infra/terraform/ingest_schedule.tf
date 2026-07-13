@@ -193,6 +193,9 @@ resource "aws_ecs_task_definition" "ingest" {
       # §知識ベース（2026-06-22）: Drive 取り込み時に Bedrock で資料を自動分類
       # （案件/業界/種別/フェーズ→documents.metadata）。ingest_task は bedrock:InvokeModel 保持済。
       { name = "USE_DOC_CLASSIFY", value = "true" },
+      # コスト方針(2026-06-29)=Haiku。未設定だとコード既定に落ちる（2026-07-13 実測: 週次分類が
+      # Sonnet で 573回/週 走って月次課金の主因だった。CloudTrail で確定）。mcp と同一変数で管理。
+      { name = "BEDROCK_MODEL_ID", value = var.mcp_model_id },
       # §コンテンツ拡充（2026-06-24）: 取り込みのたびに走る恒久処理（週次 ingest にも適用）。
       # ① rich-extract: Googleネイティブ(gdoc/gslide/gsheet)本文化＋pptxノート/表/group＋xlsx数式＋
       #    text/csv＋最小文字数ガード。② boilerplate: テンプレ(使い回し)箇所をコーパス統計で検出し
