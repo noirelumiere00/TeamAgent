@@ -528,8 +528,10 @@ def test_tans_payload_tags_table_props_wiring(sidecars: Path, vault: Path, tmp_p
     # テーブル: TCOLS「担当」列（ソート可）+ 行セル（空は—）
     assert '["tans","担当",c=>(c.tans||[]).join("・"),0]' in html
     assert 'c.tans.join("・")' in html
-    # カルテ props: 担当行
-    assert '["list","担当",(c.tans||[]).join("・")]' in html
+    # カルテ: propsPanel 撤去に伴い「担当」は summaryHeader へ移設（props 行アサートを差し替え）
+    assert '["list","担当",(c.tans||[]).join("・")]' not in html
+    assert "+summaryHeader(c)" in html
+    assert 'khc("👤","担当",c.tans.join("・")' in html
     # 施策タイムライン: FBカードの送信者表示（非空時のみ）
     assert 'title="FB送信者"' in html and "f.by?" in html
 
@@ -588,6 +590,128 @@ def test_timeline_merged_on_name_dedup(sidecars: Path, vault: Path, tmp_path: Pa
     assert '"pos": "・単価感が抑えられる"' in html
     # 最新日（2026-05-19 = 1779120000 JST）が lastfb
     assert '"lastfb": "2026-05-19"' in html
+
+
+# ---------------- カルテUX第2弾: サマリーヘッダ/カード圧縮/日付分離/今日見るべき/経過日数バッジ ----------------
+
+
+def test_summary_header_wiring_replaces_props(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """P1: propsPanel 撤去の受け皿 summaryHeader が openClient に配線され、共通経過日ヘルパが入る。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # 関数定義と openClient への配線
+    assert "function summaryHeader" in html
+    assert "+summaryHeader(c)" in html
+    # 共通ヘルパ（P1/P4/P5 で共用・閾値 31/92）
+    for token in ("function daysAgo", "function ageSev", "function agoLabel"):
+        assert token in html, token
+    # ヘッダの各スロット（絵文字ラベル＋条件付き描画）
+    assert 'khc("⏱","最終接点"' in html
+    assert 'khc("🎯","次の一手",c.nx' in html
+    assert 'khc("👤","担当",c.tans.join("・")' in html
+    assert 'khc("💬","活動","FB"+c.fb+"・資料"+c.doc' in html
+    # 資料だけ取引先(tl 空)の劣化形＝1行畳み（空ラベルを出さない）
+    assert "khdr khmin" in html and "商談FBは未記録" in html
+    # クライアント props の「担当」行は撤去済み（doc 用 propsPanel は残る）
+    assert '["list","担当",(c.tans||[]).join("・")]' not in html
+
+
+def test_timeline_fbcard_compression_wiring(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """P2: FBカードは既定1行プレビュー(=次アクション)＋クリックで全文（ポジ/ネガ/次）展開。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # 圧縮カード構造とトグル・アフォーダンス
+    for token in ('(isfb?" tlfbcard":"")', 'class="tlprev"', 'class="tlfull"', 'class="tltog"'):
+        assert token in html, token
+    # プレビュー行の中身は次アクション（無ければ menu→pos）
+    assert 'f.next?("→ "+f.next):(f.menu||f.pos' in html
+    # 現在未表示だったネガを展開で追加（payload にあり）
+    assert "tlneg" in html and "ネガ" in html
+    # カード委譲クリックの open トグル配線
+    assert "classList.toggle(" in html and 'querySelectorAll(".tlfbcard")' in html
+
+
+def test_timeline_fold_threshold_is_three_and_split(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """B+P3: 外側 fold は 3件目以降（dated 軸側のみ）・ev を dated/undated に分割。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # 旧 10 件しきいは撤廃、新しきいは 3
+    assert "ev.length>10" not in html
+    assert "dated.length>3" in html
+    assert "(dated.length-3)+" in html
+    # 日付あり/なしの分割
+    assert "ev.filter(x=>x.d)" in html and "ev.filter(x=>!x.d)" in html
+    # tlmorebtn は保持（テスト固定クラス）
+    assert "tlmorebtn" in html
+
+
+def test_timeline_undated_group(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """P3: 日付なしFB は「日付不明の記録」ブロックへ分離（「—」列を根絶）。payload に日付なし ev が載る。"""
+    (vault / "clients" / "帝人.md").write_text(
+        '---\nclient: "帝人"\nindustry: "メーカー"\ndeal_phase: "ヒアリング"\n'
+        'bant_score: "B（前向き）"\nfb_count: 2\ndoc_count: 0\n---\n\n# 帝人\n\n'
+        "## 営業FB時系列（新しい順）\n\n"
+        "### ---- #proj-ショート動画_営業フィードバック情報 1779101519.347119\n\n"
+        "- フェーズ: ヒアリング\n- ポジ反応: ・保証型がよい\n- 次アクション: 与件獲得\n\n"
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 9\n\n"
+        "- フェーズ: ヒアリング\n- ポジ反応: ・日付が無い回答\n- 次アクション: 追客\n\n"
+        "## 関連資料\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # 日付なし ev が payload に載る（form 回答は日付なしを許容）
+    assert '"d": ""' in html
+    # 分離ブロックの DOM/文言
+    assert "tlundated" in html and "日付不明の記録" in html and "tluitem" in html
+
+
+def test_home_triage_section_and_hw_payload(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """P4: ホーム「今日見るべき」＝宿題(hw)×放置上位。宿題クライアントが payload に載り節が配線される。"""
+    (vault / "clients" / "帝人.md").write_text(
+        '---\nclient: "帝人"\nindustry: "メーカー"\ndeal_phase: "ヒアリング"\n'
+        'bant_score: "B（前向き）"\nfb_count: 1\ndoc_count: 0\n---\n\n# 帝人\n\n'
+        "## 営業FB時系列（新しい順）\n\n"
+        "### ---- ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 5\n\n"
+        "- フェーズ: ヒアリング\n- 次アクション: 見積提示\n\n"
+        "## 関連資料\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # 次アクションあり＋最終接点日付なし → 宿題（hw=1）が payload に載る
+    assert re.search(r'"stem": "帝人".*?"hw": 1', html)
+    # 節の見出し・順位付け・着地の配線
+    assert "今日見るべき" in html and "trirows" in html
+    assert "DATA.clients.filter(c=>c.hw)" in html
+    assert 'querySelectorAll(".tgrow")' in html
+
+
+def test_table_last_contact_age_badge(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """P5: テーブル最終接点セルが経過日数バッジ（相対＋重症度色）に。ソートは lastOf 不変。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "function ageCell" in html
+    assert "ageCell(lastOf(c))" in html
+    assert 'class="age ' in html
+    # ソートキーは既存 lastOf（表示のみ変更）
+    assert '["last","最終接点",c=>lastOf(c),0]' in html
+
+
+def test_name_emphasis_css(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """C: クライアント/資料名をカード・テーブル先頭列・検索結果で一段階強調（CSS のみ）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert ".wcard .wt{font-size:var(--f-ui-med);color:var(--text);font-weight:700" in html
+    assert ".tbv tbody td:first-child{color:var(--text);font-weight:700}" in html
+    assert ".sr .srt{font-size:var(--f-ui-small);font-weight:600;color:var(--text)" in html
 
 
 # ---------------- タグ拡充（最終接点/更新/情報源） ----------------
