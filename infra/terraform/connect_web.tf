@@ -340,6 +340,13 @@ resource "aws_ecs_task_definition" "connect_web" {
       # /app・/search を @vectorinc.co.jp の社員全員に開放（email_verified + 会社ドメイン hd 許可）。
       # 未設定だと既定 allowlist（s-komata 1名）のみ。2026-07-07 ユーザー承認（全社ナレッジ共有）。
       { name = "CONNECT_SEARCH_ALLOWED_HD", value = "vectorinc.co.jp" },
+      # /app（Obsidian UI）HTML ホットスワップの受け口（07-12 ECS 直運用で追加）。app.py が
+      # この URI の HTML を配信し、未設定だと「準備中」プレースホルダへ回帰する。tf に無かった
+      # ため apply のたびに剥がれ /app 断となった（2026-07-13 td:42→43 応急復旧→44/45 で再発）。
+      # 値は infra/deploy/publish_app_html.sh・deploy_connectweb_unified.sh の配置先と同一定数。
+      # S3 読取は task role の inline policy `apphtml-s3-read`（bootstrap_apphtml_s3_iam.sh 付与・
+      # 名前が別なので terraform apply では剥がれない）。tf 取込時は connect_web_task policy へ。
+      { name = "CONNECT_APP_HTML_S3_URI", value = "s3://${aws_s3_bucket.raw_files.bucket}/codebuild/connect-web-app.html" },
       { name = "OAUTH_KMS_KEY_ID", value = var.connect_oauth_kms_key_id != "" ? var.connect_oauth_kms_key_id : data.aws_kms_alias.connect_oauth[0].target_key_arn },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
