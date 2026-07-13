@@ -418,6 +418,10 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_CALENDAR_EVENT_TOOL", value = var.use_calendar_event_tool ? "true" : "false" },
       # v0.3 Task4: 🗓日程候補提案（既定 false・ボタン描画フラグより先に ON）。
       { name = "USE_SCHEDULE_PROPOSE_TOOL", value = var.use_schedule_propose_tool ? "true" : "false" },
+      # v0.3 Task6: AiLaVault ディープリンク注入（既定 false）。ON で検索結果に /app#client:<名前>
+      # を付与。前提: connect-web が実 app.html 配信中（healthz source=s3）。app.html 側の
+      # applyHashTarget は実装済み（build_app_html.py）＝この env の ON だけで機能する。
+      { name = "USE_AILAVAULT_DEEPLINKS", value = var.use_ailavault_deeplinks ? "true" : "false" },
       # v0.3 Task8: 長文ペイロードの S3 退避（既定 false・allowlist対象のみ・PII系は対象外）。
       { name = "USE_PAYLOAD_OFFLOAD", value = var.use_payload_offload ? "true" : "false" },
       # 退避先 bucket（scrape 系の VSEO_REPORT_BUCKET と独立に指定＝両立時のキー衝突なし）。

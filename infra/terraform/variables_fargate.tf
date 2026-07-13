@@ -63,6 +63,12 @@ variable "use_schedule_propose_tool" {
   default     = false
 }
 
+variable "use_ailavault_deeplinks" {
+  description = "AiLaVault ディープリンク（v0.3 Task6）。ON で mcp が検索結果に /app#client:<名前> リンクを注入し、app.html の applyHashTarget が該当ノートを自動展開する。既定 false。⚠️ONの前提: connect-web が実 app.html を配信中であること（healthz app_html_source=s3。プレースホルダ配信中にONにすると飛べないリンクになる）。"
+  type        = bool
+  default     = false
+}
+
 variable "video_quota_enabled" {
   description = "動画分析の月間クォータ（v0.3 Task10）。既定 false。有効化前に migration 0017 の本番適用が必須（未適用だと fail-open で素通り・WARN のみ）。"
   type        = bool
