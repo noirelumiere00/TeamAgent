@@ -346,3 +346,104 @@ async def test_ailavault_links_absent_when_base_url_unset(
     assert "app_url" not in out
     assert all("app_client_url" not in h for h in out["hits"])
     assert "web_url" not in out
+
+
+# --- 進捗表示（v0.3.1 Task7）が dispatch_tool の返り値を変えないことの統合検証 --------
+
+
+class _ProgFakeSlack:
+    """progress_notify 用の SlackClient ダブル。post/delete を記録。"""
+
+    def __init__(self) -> None:
+        self.posted: list[str] = []
+        self.deleted: list[str] = []
+
+    async def post_message(
+        self, *, channel: str, text: str, request_id: str, thread_ts: str | None = None
+    ) -> Any:
+        self.posted.append(channel)
+
+        class _R:
+            ok = True
+            ts = "9.9"
+
+        return _R()
+
+    async def open_dm(self, user_id: str, request_id: str) -> str | None:
+        return "D1"
+
+    async def delete_message(self, channel: str, ts: str, request_id: str) -> bool:
+        self.deleted.append(ts)
+        return True
+
+
+class _SearchBoomSkill(BaseSkill[_EchoInput, _FakeSearchOutput]):
+    name: ClassVar[str] = SEARCH_TOOL_NAME
+    description: ClassVar[str] = "必ず例外を投げる検索（進捗の finally 削除の検証用）。"
+    input_schema: ClassVar[type[BaseModel]] = _EchoInput
+    output_schema: ClassVar[type[BaseModel]] = _FakeSearchOutput
+
+    def run(self, input: _EchoInput, ctx: SkillContext) -> _FakeSearchOutput:
+        raise RuntimeError("search kaboom")
+
+
+def _install_prog(monkeypatch: pytest.MonkeyPatch, fake: _ProgFakeSlack) -> None:
+    from teamagent.mcp_gateway import progress_notify as pn
+
+    monkeypatch.setattr(pn.SlackClient, "from_env", classmethod(lambda c: fake))
+
+
+async def test_dispatch_progress_on_success_unchanged_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """進捗 ON でも search 応答は不変・進捗は post→delete される。"""
+    monkeypatch.setenv("ENABLE_PROGRESS_NOTIFY", "true")
+    fake = _ProgFakeSlack()
+    _install_prog(monkeypatch, fake)
+    out = _parse(
+        await dispatch_tool(
+            _SEARCH_BY_NAME,
+            SEARCH_TOOL_NAME,
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co", "channel_id": "C1"}},
+            require_rls=True,
+        )
+    )
+    assert out["answer"] == "hits for x"  # 返り値は進捗 ON でも不変
+    assert fake.posted == ["C1"] and fake.deleted == ["9.9"]  # post → delete
+
+
+async def test_dispatch_progress_on_error_still_clears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ツールが例外でも finally で進捗が削除され、構造化エラーが返る。"""
+    monkeypatch.setenv("ENABLE_PROGRESS_NOTIFY", "true")
+    fake = _ProgFakeSlack()
+    _install_prog(monkeypatch, fake)
+    boom_by_name = {SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "fake", _SearchBoomSkill)}
+    out = _parse(
+        await dispatch_tool(
+            boom_by_name,
+            SEARCH_TOOL_NAME,
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co", "channel_id": "C1"}},
+            require_rls=True,
+        )
+    )
+    assert "error" in out  # 構造化エラーで返る（従来どおり）
+    assert fake.deleted == ["9.9"]  # 例外時も進捗は削除される
+
+
+async def test_dispatch_progress_off_no_slack_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """既定 OFF では Slack を一切叩かない（regression ゼロ）。"""
+    monkeypatch.delenv("ENABLE_PROGRESS_NOTIFY", raising=False)
+    fake = _ProgFakeSlack()
+    _install_prog(monkeypatch, fake)
+    out = _parse(
+        await dispatch_tool(
+            _SEARCH_BY_NAME,
+            SEARCH_TOOL_NAME,
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co", "channel_id": "C1"}},
+            require_rls=True,
+        )
+    )
+    assert out["answer"] == "hits for x"
+    assert fake.posted == [] and fake.deleted == []  # OFF なので何も送らない
