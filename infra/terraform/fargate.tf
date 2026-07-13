@@ -422,6 +422,9 @@ resource "aws_ecs_task_definition" "mcp" {
       # を付与。前提: connect-web が実 app.html 配信中（healthz source=s3）。app.html 側の
       # applyHashTarget は実装済み（build_app_html.py）＝この env の ON だけで機能する。
       { name = "USE_AILAVAULT_DEEPLINKS", value = var.use_ailavault_deeplinks ? "true" : "false" },
+      # v0.3.1 Task7: ツール実行中の進捗表示（既定 false・fail-open）。ON で重いツールの実行前に
+      # 「📂 資料を検索しています…」等を Slack へ投稿し完了後に削除する。SLACK_BOT_TOKEN 共用。
+      { name = "ENABLE_PROGRESS_NOTIFY", value = var.enable_progress_notify ? "true" : "false" },
       # v0.3 Task8: 長文ペイロードの S3 退避（既定 false・allowlist対象のみ・PII系は対象外）。
       { name = "USE_PAYLOAD_OFFLOAD", value = var.use_payload_offload ? "true" : "false" },
       # 退避先 bucket（scrape 系の VSEO_REPORT_BUCKET と独立に指定＝両立時のキー衝突なし）。

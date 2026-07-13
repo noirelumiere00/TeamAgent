@@ -189,6 +189,24 @@ class SlackClient:
         )
         return result
 
+    async def delete_message(self, channel: str, ts: str, request_id: str) -> bool:
+        """chat.delete 呼び出し。bot が投稿した一時メッセージ（進捗表示等）を消す。
+
+        進捗メッセージ（v0.3.1 Task7）は「ツール実行中だけ見せて完了後に消す」用途。
+        ts/channel が空なら no-op。失敗しても例外は投げない（fail-open・古い進捗が
+        残るだけで本処理には影響しない）。
+        """
+        if not ts or not channel:
+            return False
+        try:
+            resp = await self._client.chat_delete(channel=channel, ts=ts)
+        except Exception:
+            logger.warning("slack_delete_message_failed", request_id=request_id, channel=channel)
+            return False
+        ok = bool(resp.get("ok", False))
+        logger.info("slack_delete_message", request_id=request_id, channel=channel, ok=ok)
+        return ok
+
     async def post_ephemeral(
         self,
         channel: str,

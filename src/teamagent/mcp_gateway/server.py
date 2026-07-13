@@ -348,15 +348,26 @@ async def dispatch_tool(
         return _err(f"invalid input: {type(e).__name__}: {e}")
 
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
+    # ── 進捗表示（v0.3.1 Task7・ENABLE_PROGRESS_NOTIFY 既定OFF・fail-open）───────────
+    # 重いツールの実行前に「📂 資料を検索しています…」等を Slack へ投稿し、完了後（成功/
+    # 失敗どちらも finally）に削除する。宛先は raw の channel_id → 無ければ slack_user_id DM。
+    # ⚠️ send/clear は latency 計測窓の外に置く（_started はツール実行の直前で取る）＝
+    # mcp_tool_usage.latency_ms を Slack 往復で水増ししない（Task10 台帳の検証データを歪めない）。
+    from teamagent.mcp_gateway.progress_notify import clear_progress, send_progress
+
+    _progress = await send_progress(name, raw, request_id=ctx.request_id)
     _started = time.perf_counter()
     try:
         # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
         output = await asyncio.to_thread(spec.instantiate().run, skill_input, ctx)
+        _elapsed_ms = int((time.perf_counter() - _started) * 1000)
     except Exception as e:
         logger.warning(
             "mcp_tool_error", tool=name, error=type(e).__name__, request_id=ctx.request_id
         )
         return _err(f"{type(e).__name__}: {e}", request_id=ctx.request_id)
+    finally:
+        await clear_progress(_progress, request_id=ctx.request_id)
 
     data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
     # ── ミドルウェア(0): usage 計測（v0.3 Task10・常時ON・PII 無し）────────────────
@@ -367,7 +378,7 @@ async def dispatch_tool(
         "mcp_tool_usage",
         tool=name,
         request_id=ctx.request_id,
-        latency_ms=int((time.perf_counter() - _started) * 1000),
+        latency_ms=_elapsed_ms,
         # ⚠️ キー名は cost_usd に**しない**こと: cloudwatch_fargate.tf のメトリックフィルタ
         # { $.cost_usd = * } が adapter/skill 層の既存ログと合算して日次コストアラームを
         # 二重〜三重計上に汚染する（レビュー F-1）。usage 集計は専用 Insights クエリで行う。
