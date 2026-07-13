@@ -2108,6 +2108,10 @@ class IngestRunner:
             truncated_walk_roots=truncated_walk_roots,
         )
 
+        # 鮮度監視: 各 source_type の最新取り込みが古すぎ（or 未取り込み）なら ops 通知。
+        # 2026-07-13 の「Slack が 6 週間サイレント停止」の再発防止。read-only・fail-open。
+        self._maybe_check_freshness(request_id=request_id)
+
         logger.info(
             "ingest_runner_done",
             request_id=request_id,
@@ -2158,6 +2162,40 @@ class IngestRunner:
                 min_docs=min_docs,
                 exc_info=True,
             )
+
+    def _maybe_check_freshness(self, *, request_id: str) -> None:
+        """run 末尾で source_type 別の取り込み鮮度を検査し、stale を ops 通知する。
+
+        「Slack が 6 週間サイレント停止していたのに誰も気づかない」（2026-07-13）の
+        再発防止。read-only（SELECT のみ）・fail-open（検査が落ちても取り込みは成功扱い）。
+        通知は OPS_SLACK_WEBHOOK_URL 未設定なら no-op。dry-run では skip。
+        """
+        if self._dry_run:
+            return
+        try:
+            import datetime as _dt
+
+            from teamagent.ingest.freshness import find_stale_sources, max_age_days_from_env
+
+            now = _dt.datetime.now(_dt.UTC)
+            max_age = max_age_days_from_env()
+            with self._repo._ops_connection() as conn:
+                with conn.cursor() as cur:
+                    stale = find_stale_sources(cur, now=now, max_age_days=max_age)
+            if stale:
+                logger.warning(
+                    "ingest_freshness_stale",
+                    request_id=request_id,
+                    stale=[s.source_type for s in stale],
+                    max_age_days=max_age,
+                )
+                self._alerter.send_freshness_warning(
+                    stale=stale, request_id=request_id, dry_run=self._dry_run
+                )
+            else:
+                logger.info("ingest_freshness_ok", request_id=request_id, max_age_days=max_age)
+        except Exception:
+            logger.warning("ingest_freshness_check_failed", request_id=request_id, exc_info=True)
 
     def _maybe_mark_duplicate_documents(self, *, request_id: str) -> None:
         """テンプレ検出の直後、env ゲートが ON なら資料まるごと重複排除を実行する。
