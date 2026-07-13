@@ -12,7 +12,7 @@ verify_posts / ig_search / tiktok_comments）だけを呼ぶ。httpx への直�
 - FREE tier の apidojo/tweet-scraper は**黙って0件**を返す（x-reaction-research SKILL.md
   実測）。0件時は run の statusMessage を検査し、プラン起因なら APIFY_TIER で顕在化する。
 - コスト概算は actor 別単価表（bedrock_client._PRICE_TABLE と同型）×件数。CostGuard を
-  注入すると run 前 check（予算超過=fail-close）・run 後 record を自動で行う。
+  注入すると run 前に予算を原子予約（超過=fail-close）・run 後に実費へ精算（settle）する。
 
 env:
   APIFY_API_TOKEN   Apify APIトークン（Secrets Manager 経由で注入）
@@ -140,6 +140,11 @@ def _as_int(v: Any) -> int:
         return 0
 
 
+def _as_dict(v: Any) -> dict[str, Any]:
+    """dict でなければ空 dict（Apify GW の data:null / 想定外形状への防御）。"""
+    return v if isinstance(v, dict) else {}
+
+
 def _parse_x_item(d: dict[str, Any], source_actor: str) -> XPost | None:
     """X系actorの1件を寛容にパースする（不明形式は None＝呼び側でスキップ）。"""
     author_raw = d.get("author") or d.get("user") or {}
@@ -234,7 +239,7 @@ class ApifyClient:
         http: httpx.Client | None = None,
         poll_interval_s: float = _POLL_INTERVAL_S,
     ) -> None:
-        """ledger: CostGuard 互換（check/record を持つ）。None ならガードなし。
+        """ledger: CostGuard 互換（reserve/settle か check/record を持つ）。None でガードなし。
         http: テスト注入用 httpx.Client（実課金ゼロでモック可能）。
         """
         self._token = token
@@ -387,136 +392,147 @@ class ApifyClient:
         est_cost = round(unit_price * max_items, 6)
         warnings, reservation = self._reserve_cost(user_email, est_cost, request_id)
 
+        # 予約は「必ず解放が要る状態」を持つ。reserve〜settle の間で想定外例外（Apify GW が
+        # data:null / 非JSON / 想定外形状を返した時の AttributeError/JSONDecodeError 等）が
+        # 起きても settle を1回だけ通し、幻の予約が台帳に残って月末まで予算を食う事故を防ぐ
+        # （self-review HIGH 指摘）。settled フラグ＋finally で解放を保証する。
+        settled = False
+
+        def _settle_once(cost_usd: float, units: int) -> None:
+            nonlocal settled
+            if settled:
+                return
+            settled = True
+            self._settle_cost(
+                user_email,
+                cost_usd=cost_usd,
+                units=units,
+                request_id=request_id,
+                reservation=reservation,
+            )
+
         start = time.monotonic()
         deadline_at = start + max(0, deadline_s)
         try:
-            resp = self._request(
-                "POST", f"/acts/{actor_id}/runs", json=run_input, deadline_at=deadline_at
-            )
-        except _DeadlineExceededError:
-            self._settle_cost(
-                user_email,
-                cost_usd=0.0,
-                units=0,
-                request_id=request_id,
-                reservation=reservation,
-            )
-            raise ApifyError(
-                f"APIFY_TIMEOUT: {actor_id} を {deadline_s}s 以内に開始できませんでした"
-            ) from None
-        except httpx.HTTPStatusError as e:
-            self._settle_cost(
-                user_email,
-                cost_usd=0.0,
-                units=0,
-                request_id=request_id,
-                reservation=reservation,
-            )
-            raise ApifyError(
-                f"APIFY_HTTP: actor起動に失敗しました ({actor_id}, status={e.response.status_code})"
-            ) from e
-        except httpx.HTTPError as e:
-            self._settle_cost(
-                user_email,
-                cost_usd=0.0,
-                units=0,
-                request_id=request_id,
-                reservation=reservation,
-            )
-            raise ApifyError(f"APIFY_HTTP: actor起動に失敗しました ({actor_id})") from e
-        run = resp.json().get("data", {})
-        run_id = str(run.get("id", ""))
-        logger.info("apify_run_started", request_id=request_id, actor=actor_id, run_id=run_id)
-
-        # ポーリング（READY/RUNNING の間は待つ）。ポーリング/dataset の httpx 例外も
-        # ApifyError に変換する（起動POSTと同じ扱い＝URLを含む生の httpx 例外を skill 層へ
-        # 漏らさない・self-review HIGH 指摘の二重防御）。timeout/失敗時も概算コストを記帳して
-        # 台帳が実支出から乖離しないようにする（run は課金済みのことがあるため）。
-        status = str(run.get("status", ""))
-        status_message = ""
-        dataset_id = str(run.get("defaultDatasetId", ""))
-        try:
-            while status in ("", "READY", "RUNNING"):
-                remaining = deadline_at - time.monotonic()
-                if remaining <= 0:
-                    raise _DeadlineExceededError
-                time.sleep(min(self._poll_interval_s, remaining))
-                run = (
-                    self._request("GET", f"/actor-runs/{run_id}", deadline_at=deadline_at)
-                    .json()
-                    .get("data", {})
+            try:
+                resp = self._request(
+                    "POST", f"/acts/{actor_id}/runs", json=run_input, deadline_at=deadline_at
                 )
-                status = str(run.get("status", ""))
-                status_message = str(run.get("statusMessage") or "")
-                dataset_id = str(run.get("defaultDatasetId", "")) or dataset_id
-
-            if status != "SUCCEEDED":
-                self._record_partial(user_email, est_cost, request_id, reservation)
+            except _DeadlineExceededError:
+                _settle_once(0.0, 0)
                 raise ApifyError(
-                    f"APIFY_RUN_FAILED: {actor_id} status={status} {status_message}".strip()
+                    f"APIFY_TIMEOUT: {actor_id} を {deadline_s}s 以内に開始できませんでした"
+                ) from None
+            except httpx.HTTPStatusError as e:
+                _settle_once(0.0, 0)
+                raise ApifyError(
+                    f"APIFY_HTTP: actor起動に失敗しました ({actor_id}, "
+                    f"status={e.response.status_code})"
+                ) from e
+            except httpx.HTTPError as e:
+                _settle_once(0.0, 0)
+                raise ApifyError(f"APIFY_HTTP: actor起動に失敗しました ({actor_id})") from e
+            run = _as_dict(resp.json().get("data") if isinstance(resp.json(), dict) else None)
+            run_id = str(run.get("id", ""))
+            if not run_id:
+                # POST は 2xx だが run が生成されていない（data:null 等）＝起動失敗。
+                # 課金は発生していないので予約を全解放（settle 0）して弾く。
+                _settle_once(0.0, 0)
+                raise ApifyError(f"APIFY_HTTP: actor起動応答が不正です ({actor_id}, run_id無し)")
+            logger.info("apify_run_started", request_id=request_id, actor=actor_id, run_id=run_id)
+
+            # ポーリング（READY/RUNNING の間は待つ）。ポーリング/dataset の httpx 例外も
+            # ApifyError に変換する（起動POSTと同じ扱い＝URLを含む生の httpx 例外を skill 層へ
+            # 漏らさない・self-review HIGH 指摘の二重防御）。timeout/失敗時も概算コストを記帳して
+            # 台帳が実支出から乖離しないようにする（run は課金済みのことがあるため）。
+            status = str(run.get("status", ""))
+            status_message = ""
+            dataset_id = str(run.get("defaultDatasetId", ""))
+            try:
+                while status in ("", "READY", "RUNNING"):
+                    remaining = deadline_at - time.monotonic()
+                    if remaining <= 0:
+                        raise _DeadlineExceededError
+                    time.sleep(min(self._poll_interval_s, remaining))
+                    body = self._request(
+                        "GET", f"/actor-runs/{run_id}", deadline_at=deadline_at
+                    ).json()
+                    run = _as_dict(body.get("data") if isinstance(body, dict) else None)
+                    status = str(run.get("status", ""))
+                    status_message = str(run.get("statusMessage") or "")
+                    dataset_id = str(run.get("defaultDatasetId", "")) or dataset_id
+
+                if status != "SUCCEEDED":
+                    _settle_once(est_cost, 0)  # run は課金済みのことがある＝保守側で est 保持
+                    raise ApifyError(
+                        f"APIFY_RUN_FAILED: {actor_id} status={status} {status_message}".strip()
+                    )
+
+                items_resp = self._request(
+                    "GET",
+                    f"/datasets/{dataset_id}/items",
+                    deadline_at=deadline_at,
+                    params={"limit": max_items, "clean": "true"},
+                )
+            except _DeadlineExceededError:
+                self._abort(run_id, request_id)
+                _settle_once(est_cost, 0)
+                raise ApifyError(
+                    f"APIFY_TIMEOUT: {actor_id} が {deadline_s}s 以内に完了しませんでした"
+                    "（runは中断済み）"
+                ) from None
+            except httpx.HTTPError as e:
+                _settle_once(est_cost, 0)
+                raise ApifyError(
+                    f"APIFY_HTTP: {actor_id} の実行中にHTTPエラーが発生しました "
+                    f"(status={getattr(getattr(e, 'response', None), 'status_code', '?')})"
+                ) from None
+            items_raw = items_resp.json()
+            items: list[dict[str, Any]] = [it for it in items_raw if isinstance(it, dict)]
+
+            # FREE tier の沈黙0件を顕在化（SKILL.md 実測: プラン不足でも SUCCEEDED+0件になる）
+            if not items and any(h in status_message.lower() for h in _TIER_HINTS):
+                _settle_once(0.0, 0)
+                raise ApifyError(
+                    f"APIFY_TIER: {actor_id} が0件を返しました。Apifyプラン起因の可能性があります"
+                    f"（statusMessage: {status_message[:120]}）。BRONZE以上のプランが必要です。"
                 )
 
-            items_resp = self._request(
-                "GET",
-                f"/datasets/{dataset_id}/items",
-                deadline_at=deadline_at,
-                params={"limit": max_items, "clean": "true"},
-            )
-        except _DeadlineExceededError:
-            self._abort(run_id, request_id)
-            self._record_partial(user_email, est_cost, request_id, reservation)
-            raise ApifyError(
-                f"APIFY_TIMEOUT: {actor_id} が {deadline_s}s 以内に完了しませんでした"
-                "（runは中断済み）"
-            ) from None
-        except httpx.HTTPError as e:
-            self._record_partial(user_email, est_cost, request_id, reservation)
-            raise ApifyError(
-                f"APIFY_HTTP: {actor_id} の実行中にHTTPエラーが発生しました "
-                f"(status={getattr(getattr(e, 'response', None), 'status_code', '?')})"
-            ) from None
-        items_raw = items_resp.json()
-        items: list[dict[str, Any]] = [it for it in items_raw if isinstance(it, dict)]
-
-        # FREE tier の沈黙0件を顕在化（SKILL.md 実測: プラン不足でも SUCCEEDED+0件になる）
-        if not items and any(h in status_message.lower() for h in _TIER_HINTS):
-            self._settle_cost(
-                user_email,
-                cost_usd=0.0,
-                units=0,
+            actual_cost = round(unit_price * len(items), 6)
+            _settle_once(actual_cost, len(items))
+            logger.info(
+                "apify_run_done",
                 request_id=request_id,
-                reservation=reservation,
+                actor=actor_id,
+                run_id=run_id,
+                items=len(items),
+                est_cost_usd=actual_cost,
+                latency_s=round(time.monotonic() - start, 1),
+            )
+            return ApifyRunResult(
+                items=items,
+                actor_id=actor_id,
+                run_id=run_id,
+                status=status,
+                estimated_cost_usd=actual_cost,
+                warnings=warnings,
+            )
+        except ApifyError:
+            raise  # 上の各ハンドラで settle 済み
+        except Exception as e:
+            # 想定外例外（非JSON応答での JSONDecodeError 等）: 生例外は URL/トークンを
+            # 含みうるので ApifyError へ変換し、予約は finally で解放する。
+            logger.warning(
+                "apify_run_unexpected",
+                request_id=request_id,
+                actor=actor_id,
+                error=type(e).__name__,
             )
             raise ApifyError(
-                f"APIFY_TIER: {actor_id} が0件を返しました。Apifyプラン起因の可能性があります"
-                f"（statusMessage: {status_message[:120]}）。BRONZE以上のプランが必要です。"
-            )
-
-        actual_cost = round(unit_price * len(items), 6)
-        self._settle_cost(
-            user_email,
-            cost_usd=actual_cost,
-            units=len(items),
-            request_id=request_id,
-            reservation=reservation,
-        )
-        logger.info(
-            "apify_run_done",
-            request_id=request_id,
-            actor=actor_id,
-            run_id=run_id,
-            items=len(items),
-            est_cost_usd=actual_cost,
-            latency_s=round(time.monotonic() - start, 1),
-        )
-        return ApifyRunResult(
-            items=items,
-            actor_id=actor_id,
-            run_id=run_id,
-            status=status,
-            estimated_cost_usd=actual_cost,
-            warnings=warnings,
-        )
+                f"APIFY_UNEXPECTED: {actor_id} の実行中に想定外のエラーが発生しました"
+            ) from None
+        finally:
+            _settle_once(0.0, 0)  # まだ精算していなければ予約を解放（幻の予約リーク防止）
 
     # ---- 型付き入口: X ------------------------------------------------------
 

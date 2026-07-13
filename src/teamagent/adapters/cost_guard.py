@@ -258,6 +258,20 @@ class CostGuard:
 
         monthly = _envfloat(f"COST_{prov_env}_MONTHLY_USD")
         per_user = _envfloat("COST_PER_USER_MONTHLY_USD")
+        # 単発 est が月次/個人上限そのものを超える場合の早期拒否。_reserve_micro の
+        # ConditionExpression は空行(月初の最初の呼び出し)で attribute_not_exists が短絡し、
+        # remaining=0 でも上限超の予約を通してしまう（check() には無いリグレッション・
+        # self-review 指摘）。per_call と同じく件数を減らさせる。
+        if monthly is not None and est_cost_usd > monthly:
+            raise CostLimitExceededError(
+                f"1回の{prov}実行見積(${est_cost_usd:.2f})が今月の枠(${monthly:.0f})を"
+                "超えます。件数を減らして再実行してください。"
+            )
+        if per_user is not None and email and est_cost_usd > per_user:
+            raise CostLimitExceededError(
+                f"1回の{prov}実行見積(${est_cost_usd:.2f})があなたの今月の枠(${per_user:.0f})を"
+                "超えます。件数を減らして再実行してください。"
+            )
         global_reserved = False
         user_reserved = False
         scope = "monthly"

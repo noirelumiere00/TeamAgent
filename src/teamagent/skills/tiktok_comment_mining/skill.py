@@ -24,6 +24,7 @@ from teamagent.adapters.apify_client import ApifyClient, ApifyError
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
+from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.tiktok_comment_mining.report import render_comment_report
 from teamagent.skills.tiktok_comment_mining.schema import (
@@ -331,13 +332,16 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             if not ins.buckets:
                 continue
             top = sorted(ins.buckets, key=lambda b: b.count, reverse=True)[:3]
-            dist = "・".join(f"{b.category}{b.count}" for b in top)
+            # category はLLM生成なので sanitize（他スキルと整合）。examples は原文コメント＝
+            # 原文保証のため sanitize しない（x_voice の投稿本文と同じ扱い）。
+            dist = "・".join(f"{sanitize_llm_text(b.category, max_len=20)}{b.count}" for b in top)
             lines.append(f"{ins.video_url}\n分布: {dist}（全{ins.total_comments}件）")
             ex = next((b.examples[0] for b in top if b.examples), None)
             if ex:
                 lines.append(f"代表: {ex}")
         if out.cross_vocabulary:
-            lines.append("🗣️ 生活者の語彙: " + "、".join(out.cross_vocabulary[:8]))
+            vocab = [sanitize_llm_text(w, max_len=30) for w in out.cross_vocabulary[:8]]
+            lines.append("🗣️ 生活者の語彙: " + "、".join(vocab))
         if out.report_url:
             lines.append(f"📄 分類レポート（7日有効）: {out.report_url}")
         if out.warnings:

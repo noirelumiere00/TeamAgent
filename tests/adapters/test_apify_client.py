@@ -251,6 +251,26 @@ def test_ledger_reservation_is_settled_with_actual_cost() -> None:
     assert ledger.settled == [(ledger.token, 0.00025, 1)]
 
 
+def test_unexpected_response_releases_reservation_no_phantom_leak() -> None:
+    # Apify GW が data:null（非期待形状）を返しても、予約は必ず settle(解放)される
+    # ＝幻の予約が台帳に残って予算を食う事故を防ぐ（self-review HIGH の回帰）。
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.startswith("/v2/acts/"):
+            return httpx.Response(201, json={"data": None})  # 想定外形状
+        return httpx.Response(404, json={})
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    ledger = _ReservationLedger()
+    client = ApifyClient("tok-secret", ledger=ledger, http=http, poll_interval_s=0.0)
+    with pytest.raises(ApifyError) as ei:
+        client.run_actor_sync(ACTOR_X_SEARCH, {"query": "x"}, max_items=5, request_id="t")
+    # 予約は解放され（settle が呼ばれ）、幻の予約は残らない
+    assert len(ledger.reserved) == 1
+    assert len(ledger.settled) == 1 and ledger.settled[0][1] == 0.0  # cost=0 で解放
+    # 生例外(URL/トークン含みうる)は漏らさず APIFY_ に丸める
+    assert "tok-secret" not in str(ei.value)
+
+
 def test_from_env_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("APIFY_API_TOKEN", raising=False)
     with pytest.raises(ApifyError, match="APIFY_MISCONFIGURED"):

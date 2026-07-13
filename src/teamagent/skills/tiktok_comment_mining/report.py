@@ -9,8 +9,14 @@ import datetime as _dt
 import html as _html
 
 from teamagent.skills._html.theme import FONT_STACK_JP
-from teamagent.skills._shared.text_safety import safe_href
+from teamagent.skills._shared.text_safety import safe_href, sanitize_llm_text
 from teamagent.skills.tiktok_comment_mining.schema import VideoCommentInsight
+
+
+def _clean(s: str, *, max_len: int = 120) -> str:
+    """LLM生成テキストのURL伏字＋長さ制限（examples=原文には使わない）。"""
+    return sanitize_llm_text(s, max_len=max_len)
+
 
 _CSS = f"""
 body{{font-family:{FONT_STACK_JP};background:#f6f7f9;color:#1b1f24;margin:0;padding:24px}}
@@ -53,11 +59,13 @@ def _video_section(ins: VideoCommentInsight) -> str:
         parts.append("<div class='dist'>")
         for b in sorted(ins.buckets, key=lambda x: x.count, reverse=True):
             width = max(2, int(b.count / max_c * 380))
+            cat = _esc(_clean(b.category, max_len=20))
             parts.append(
-                f"<div class='row'><span class='label'>{_esc(b.category)}</span>"
+                f"<div class='row'><span class='label'>{cat}</span>"
                 f"<div class='bar' style='width:{width}px'></div>"
                 f"<span class='cnt'>{b.count}件</span></div>"
             )
+            # examples は原文コメント＝原文保証のため sanitize せず _esc のみ。
             for ex in b.examples:
                 parts.append(f"<div class='ex'>{_esc(ex)}</div>")
         parts.append("</div>")
@@ -68,8 +76,11 @@ def _video_section(ins: VideoCommentInsight) -> str:
         ("購入シグナル", ins.purchase_signals),
         ("テーマ", ins.key_themes),
     ]
+    # axes は LLM 生成の要約群なので URL 伏字＋長さ制限（examples の原文とは別扱い）。
     ax_html = "".join(
-        f"<b>{_esc(label)}:</b> {_esc('／'.join(items))}<br>" for label, items in axes if items
+        f"<b>{_esc(label)}:</b> {_esc('／'.join(_clean(x) for x in items))}<br>"
+        for label, items in axes
+        if items
     )
     if ax_html:
         parts.append(f"<div class='axes'>{ax_html}</div>")
@@ -86,7 +97,10 @@ def render_comment_report(
     total = sum(v.total_comments for v in videos)
     parts: list[str] = []
     if cross_vocabulary:
-        chips = "".join(f"<span class='chip'>{_esc(w)}</span>" for w in cross_vocabulary[:20])
+        chips = "".join(
+            f"<span class='chip'>{_esc(_clean(w, max_len=30))}</span>"
+            for w in cross_vocabulary[:20]
+        )
         parts.append(
             f"<div class='vocab'>🗣️ <b>生活者の語彙（広告文言の元ネタ）</b><br>{chips}</div>"
         )

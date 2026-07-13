@@ -88,6 +88,28 @@ def test_monthly_limit_fail_close(monkeypatch: pytest.MonkeyPatch) -> None:
         _guard(ddb).check("apify", "a@x.jp", est_cost_usd=0.2, request_id="t")
 
 
+def test_reserve_single_est_over_monthly_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 単発 est が月次上限そのものを超える場合、空行でも予約は通さず fail-close する
+    # （_reserve_micro の attribute_not_exists 短絡ですり抜けたリグレッションの回帰）。
+    monkeypatch.setenv("COST_APIFY_MONTHLY_USD", "0.10")
+    monkeypatch.delenv("COST_APIFY_PER_CALL_USD", raising=False)
+    monkeypatch.delenv("COST_PER_USER_MONTHLY_USD", raising=False)
+    ddb = _FakeDdb()  # 空（月初の最初の呼び出し）
+    with pytest.raises(CostLimitExceededError, match="今月の枠"):
+        _guard(ddb).reserve("apify", "a@x.jp", est_cost_usd=0.115, request_id="t")
+    assert ddb.rows == {}  # 台帳に予約が積まれていない（すり抜けゼロ）
+
+
+def test_reserve_single_est_over_per_user_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COST_APIFY_MONTHLY_USD", raising=False)
+    monkeypatch.delenv("COST_APIFY_PER_CALL_USD", raising=False)
+    monkeypatch.setenv("COST_PER_USER_MONTHLY_USD", "0.10")
+    ddb = _FakeDdb()
+    with pytest.raises(CostLimitExceededError, match="あなたの今月の枠"):
+        _guard(ddb).reserve("apify", "a@x.jp", est_cost_usd=0.2, request_id="t")
+    assert ddb.rows == {}
+
+
 def test_monthly_80pct_warns_but_allows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COST_APIFY_MONTHLY_USD", "10")
     monkeypatch.delenv("COST_PER_USER_MONTHLY_USD", raising=False)
