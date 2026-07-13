@@ -591,7 +591,7 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .sres{padding:2px 6px 2px 14px}
 .sr{padding:5px 8px;border-radius:var(--r-s);cursor:pointer;margin-bottom:1px}
 .sr:hover{background:var(--hover)}
-.sr .srt{font-size:var(--f-ui-smaller);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sr .srt{font-size:var(--f-ui-small);font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sr .srx{font-size:11px;color:var(--muted);line-height:1.5;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sr .srx mark{background:var(--mark);color:var(--mark-fg);border-radius:2px;padding:0 1px}
 .scount{padding:6px 12px;color:var(--faint);font-size:var(--f-ui-smaller);border-bottom:1px solid var(--border);margin-bottom:4px}
@@ -653,6 +653,21 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .prow .pk svg{width:15px;height:15px;color:var(--faint)}
 .prow .pkn{overflow:hidden;text-overflow:ellipsis}
 .prow .pv{color:var(--text);flex:1;min-width:0}
+/* P1 サマリーヘッダ「商談スナップショット」（propsPanel 撤去の受け皿・条件付き描画・色は既存トークン流用） */
+.khdr{display:flex;flex-wrap:wrap;align-items:center;gap:7px 16px;margin:10px 0 20px;padding:11px 14px;background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--r-m)}
+.khdr.khmin{color:var(--muted);font-size:var(--f-ui-small);padding:9px 14px}
+.khc{display:inline-flex;align-items:baseline;gap:6px;font-size:var(--f-ui-small);min-width:0;max-width:100%;white-space:nowrap}
+.khc.khnx{flex:1 1 240px;white-space:normal;align-items:baseline}
+.khc .khi{font-size:13px;line-height:1;flex:none}
+.khc .khl{color:var(--faint);font-size:var(--f-ui-smaller);flex:none}
+.khc .khv{color:var(--text);font-weight:600;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.khc.khnx .khv{white-space:normal;overflow-wrap:anywhere}
+.khc.ok .khv{color:var(--ok)}
+.khc.warn .khv{color:var(--warn)}
+.khc.err .khv{color:var(--err)}
+.khc.err .khi{color:var(--err)}
+.khc.muted .khv{color:var(--faint);font-weight:400}
+.khdot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none;align-self:center}
 .pempty{color:var(--faint)}
 /* リーディングビュー md */
 .md{font-size:var(--f-text);line-height:1.6;color:var(--text)}
@@ -702,8 +717,20 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .wcard{background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--r-m);padding:13px 15px;cursor:pointer;display:flex;gap:10px;align-items:flex-start}
 .wcard:hover{border-color:var(--border-focus);background:var(--hover)}
 .wcard svg{color:var(--accent-2);margin-top:1px}
-.wcard .wt{font-size:var(--f-ui-small);color:var(--text);font-weight:600;line-height:1.35}
+.wcard .wt{font-size:var(--f-ui-med);color:var(--text);font-weight:700;line-height:1.35}
 .wcard .wx{font-size:var(--f-ui-smaller);color:var(--faint);margin-top:3px}
+/* P4 今日見るべき（宿題×放置の順位付き短冊・クリックでカルテ直行） */
+.wsub{color:var(--faint);font-weight:400;text-transform:none;letter-spacing:0;font-size:var(--f-ui-smaller)}
+.trirows{display:flex;flex-direction:column;gap:6px}
+.tgrow{display:flex;align-items:baseline;gap:10px;padding:9px 12px;background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--r-m);cursor:pointer}
+.tgrow:hover{border-color:var(--border-focus);background:var(--hover)}
+.tgrow .tgn{font-weight:700;color:var(--text);font-size:var(--f-ui-small);flex:none;max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tgrow .tgd{font-size:var(--f-ui-smaller);font-weight:600;flex:none}
+.tgrow .tgd.ok{color:var(--ok)}
+.tgrow .tgd.warn{color:var(--warn)}
+.tgrow .tgd.err{color:var(--err)}
+.tgrow .tgx{font-size:var(--f-ui-smaller);color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tgrow .tgt{display:inline-flex;align-items:center;gap:5px;font-size:var(--f-ui-smaller);color:var(--faint);flex:none}
 /* 右サイドバー */
 .right{background:var(--bg-sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;min-width:0;min-height:0}
 .right .side-body{padding:4px 0 20px}
@@ -803,10 +830,19 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tbv tbody tr:hover td:first-child{background:var(--bg-elev)}
 .tbv tbody tr{cursor:pointer}
 .tbv tbody tr:hover{background:var(--hover)}
-.tbv tbody td:first-child{color:var(--text);font-weight:500}
+.tbv tbody td:first-child{color:var(--text);font-weight:700}
 .tbv .num{text-align:right;font-variant-numeric:tabular-nums}
 .tbv .bp{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;color:var(--text)}
 .tbv .dotc{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}
+/* P5: テーブル最終接点=経過日数バッジ（相対＋重症度色ドット/淡背景・生日付は title に温存） */
+.tbv .age{display:inline-flex;align-items:center;gap:6px;padding:1px 8px;border-radius:9px;font-variant-numeric:tabular-nums}
+.tbv .age .agedot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--faint)}
+.tbv .age.ok{background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok)}
+.tbv .age.ok .agedot{background:var(--ok)}
+.tbv .age.warn{background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn)}
+.tbv .age.warn .agedot{background:var(--warn)}
+.tbv .age.err{background:color-mix(in srgb,var(--err) 13%,transparent);color:var(--err)}
+.tbv .age.err .agedot{background:var(--err)}
 /* 施策タイムライン（カルテ内・縦タイムライン: 左=日付チップ+縦線 / 右=カード） */
 .tlwrap{margin:4px 0 26px}
 .tlh{display:flex;align-items:center;gap:7px;font-size:var(--f-ui-small);color:var(--muted);font-weight:600;padding:4px 0 9px;border-bottom:1px solid var(--border)}
@@ -832,6 +868,28 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tlmorebtn{display:inline-block;margin:0 0 2px 98px;padding:4px 12px;font-size:var(--f-ui-smaller);color:var(--accent-2);cursor:pointer;border:1px solid var(--border);border-radius:var(--r-s)}
 .tlmorebtn:hover{background:var(--hover);border-color:var(--border-focus)}
 .tlwrap.folded .tlrow.tlhid{display:none}
+/* P3: 日付チップ横の相対表現（日付ある行のみ・捏造なし） */
+.tld .tlrel{display:block;font-size:10px;color:var(--faint);margin-top:1px;line-height:1.3}
+/* P2: FBカード圧縮（既定=1行プレビュー＝次アクション、クリックで全文展開） */
+.tlfbcard{cursor:pointer;position:relative}
+.tlfbcard:hover{border-color:var(--border-focus)}
+.tlhd{display:flex;align-items:center;flex-wrap:wrap;gap:0;padding-right:18px}
+.tltog{position:absolute;top:7px;right:9px;color:var(--faint);font-size:14px;line-height:1;user-select:none}
+.tlprev{font-size:var(--f-ui-smaller);color:var(--accent-2);margin-top:5px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tlfbcard.open .tlprev{display:none}
+.tlfull{display:none;margin-top:5px}
+.tlfbcard.open .tlfull{display:block}
+.tlfull .tlt{margin-top:0}
+.tlx .tlxl{display:inline-block;color:var(--faint);font-weight:600;margin-right:6px;font-size:11px}
+.tlx.tlneg .tlxl{color:var(--err)}
+.tlt.tltinline{display:inline;margin-top:0}
+/* P3: 日付不明の記録（軸・日付列を持たないフラットな圧縮カード列） */
+.tlundated{margin-top:14px;padding-top:12px;border-top:1px dashed var(--border)}
+.tluh{display:flex;align-items:center;gap:6px;font-size:var(--f-ui-smaller);color:var(--muted);font-weight:600;padding:0 0 9px}
+.tluh svg.ic{color:var(--faint);width:14px;height:14px}
+.tluh .cnt{color:var(--faint);font-weight:400}
+.tlulist{display:flex;flex-direction:column;gap:8px}
+.tlcard.tluitem{margin-left:0}
 /* 商談ジャーニーバー（カルテ）+ ホームのパイプライン節。トークンは tagchip/tl 系流用・両テーマCSS変数のみ */
 .jbwrap{margin:4px 0 22px}
 .jbh{display:flex;align-items:center;gap:7px;font-size:var(--f-ui-small);color:var(--muted);font-weight:600;padding:4px 0 9px;border-bottom:1px solid var(--border)}
@@ -923,6 +981,12 @@ DATA.docs.forEach(d=>dByStem[d.stem]=d);
 DATA.reports.forEach(r=>rByStem[r.stem]=r);
 /* 閲覧時点からの経過でバケット化（ビルド日でなく Date.now 基準 = 月次再生成の間も鮮度が生きる） */
 function ageBucket(ds){if(!ds)return"";const t=Date.parse(ds);if(isNaN(t))return"";const dd=(Date.now()-t)/864e5;return dd<=31?"1ヶ月以内":dd<=92?"3ヶ月以内":dd<=183?"半年以内":dd<=366?"1年以内":"1年以上前";}
+/* 経過日数の共通ヘルパ（P1 サマリーヘッダ / P4 今日見るべき / P5 テーブル で共用）。
+   閾値 31/92 は ageBucket・HOMEWORK_STALE_DAYS と一致。日付なし/不正は null＝「出せない」を明示（捏造しない）。 */
+function daysAgo(ds){if(!ds)return null;const t=Date.parse(ds);if(isNaN(t))return null;return Math.floor((Date.now()-t)/864e5);}
+function ageSev(n){return n==null?"":n<=31?"ok":n<=92?"warn":"err";}
+function agoLabel(n){return n==null?"":n<=0?"今日":n+"日前";}
+function agoCoarse(ds){const n=daysAgo(ds);if(n==null)return"";if(n<=0)return"今日";if(n<7)return"約"+n+"日前";if(n<31)return"約"+Math.round(n/7)+"週前";if(n<365)return"約"+Math.round(n/30)+"ヶ月前";return"約"+Math.round(n/365)+"年前";}
 function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);t.push("最終接点/"+(ageBucket(c.last)||"記録なし"));if(c.temp)t.push("温度感/"+c.temp);if(c.hw)t.push("宿題/あり");(c.tans||[]).forEach(n=>t.push("担当/"+n));return t;}
 function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);(d.media||[]).forEach(m=>t.push("媒体/"+m));(d.vfmt||[]).forEach(v=>t.push("動画形式/"+v));if(d.fmt)t.push("形式/"+d.fmt);if(d.xc)t.push("横断/"+d.xc);return t;}
 const IDX=[];
@@ -1246,14 +1310,27 @@ function welcome(){
   +(pcnt["失注"]?'<span class="plarr">・</span>'+plChip("失注"):"")
   +'<span class="plun">未設定 '+unset+'</span>';
  const tz=TAGORDER.filter(c=>tagTree[c]).map(c=>'<span class="tagchip tzc" tabindex="0" role="button" data-c="'+esc(c)+'" style="--cc2:'+(CATMETA[c]||"var(--accent)")+'" title="タグペインで「'+esc(c)+'」を開く"><span class="tcdot" style="background:'+(CATMETA[c]||"var(--accent)")+'"></span><span class="tcv">'+esc(c)+'</span><span class="qfn">'+(tagCount[c]||0)+'</span></span>').join("");
+ /* P4 今日見るべき: 宿題(hw)×放置日数上位6件・同点は温度感ネガ優勢優先。着地は個別カルテ（QF宿題あり→テーブルとは役割分離） */
+ const triage=DATA.clients.filter(c=>c.hw).map(c=>({c,n:daysAgo(c.last)}))
+  .sort((a,b)=>{const an=a.n==null?1e9:a.n,bn=b.n==null?1e9:b.n;if(bn!==an)return bn-an;
+   return (b.c.temp==="ネガ優勢"?1:0)-(a.c.temp==="ネガ優勢"?1:0);}).slice(0,6);
+ const tri=triage.length?`<div class="wsec">今日見るべき <span class="wsub">宿題×放置</span></div><div class="trirows">`+triage.map(({c,n})=>{
+  const sev=n==null?"err":ageSev(n),lbl=n==null?"接点不明":n+"日放置";
+  return '<div class="tgrow" data-s="'+esc(c.stem)+'" role="button" tabindex="0"><span class="tgn">'+esc(c.name)+'</span>'
+   +'<span class="tgd '+sev+'">'+esc(lbl)+'</span>'
+   +(c.nx?'<span class="tgx">→ '+esc(c.nx)+'</span>':"")
+   +(c.temp?'<span class="tgt"><span class="khdot" style="background:'+(CATMETA["温度感"])+'"></span>'+esc(c.temp)+'</span>':"")+'</div>';
+ }).join("")+`</div>`:"";
  $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} AiLaVault</h1>
   <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。取引先カルテには資料と商談FBを時系列で一望できる<b>施策タイムライン</b>付き。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
   ${qf?`<div class="wsec">クイックフィルタ</div><div class="chiprow">${qf}</div>`:""}
+  ${tri}
   <div class="wsec">パイプライン</div><div class="chiprow plrow">${pl}</div>
   ${tz?`<div class="wsec">タグで探す</div><div class="chiprow tzrow">${tz}</div>`:""}
   ${DATA.reports.length?`<div class="wsec">AI洗い出しレポート</div><div class="wgrid">${rep}</div>`:""}
   <div class="wsec">主要な取引先</div><div class="wgrid">${cards(notable)}</div></div>`;
  $("#inner").querySelectorAll(".wcard").forEach(el=>el.onclick=()=>openByK(el.dataset.k,el.dataset.s));
+ $("#inner").querySelectorAll(".tgrow").forEach(el=>el.onclick=()=>openClient(el.dataset.s));   /* P4: 今日見るべき短冊→カルテ直行 */
  $("#inner").querySelectorAll(".qfc").forEach(el=>el.onclick=()=>runQuery(el.dataset.q));   /* 置換で検索ペインへ（チップバー付きで着地） */
  $("#inner").querySelectorAll(".qft").forEach(el=>el.onclick=()=>{tblFilter={q:"",ind:"",phase:"",temp:"",hw:true};tableView();});   /* 宿題あり→テーブル（hwのみON・他条件リセット） */
  $("#inner").querySelectorAll(".plc").forEach(el=>el.onclick=()=>{tblFilter={q:"",ind:"",phase:el.dataset.p,temp:"",hw:false};tableView();});   /* リセット着地=チップ社数と表示件数の一致を保証（select にも selected 復元） */
@@ -1315,32 +1392,52 @@ function tlEvents(c){
  ev.sort((a,b)=>(b.d||"").localeCompare(a.d||""));  /* 日付降順・日付なしは末尾 */
  return ev;
 }
+/* FBカード=既定1行プレビュー(=次アクション。無ければ menu→pos)＋クリックで全文展開(menu/ポジ/ネガ/次)。
+   資料カードは元々1行(バッジ＋タイトルwl)なので展開対象外。P2＝観察1(中央206字/枚)の密度改善。 */
+function tlCardInner(x){
+ if(x.kind==="doc"){const d=x.e,col=dtColor(d.doc_type);
+  return '<span class="tlbadge" style="background:'+col+'22">'+esc(d.doc_type||"資料")+'</span>'
+   +'<span class="tlt tltinline"><span class="wl" data-t="docs/'+esc(d.stem)+'">'+esc(d.title)+'</span></span>';
+ }
+ const f=x.e;
+ const head='<div class="tlhd"><span class="tlbadge tlfb">商談FB'+(f.src?"・"+esc(f.src):"")+'</span>'
+  +(f.ph?'<span class="tlchip">'+esc(f.ph)+'</span>':"")
+  +(f.bant?'<span class="tlchip">'+esc(f.bant)+'</span>':"")
+  +(f.by?'<span class="tlchip tlby" title="FB送信者">'+esc(f.by)+'</span>':"")
+  +'<span class="tltog" aria-hidden="true">＋</span></div>';
+ const prevText=f.next?("→ "+f.next):(f.menu||f.pos||"詳細を表示");
+ const prev='<div class="tlprev">'+esc(prevText)+'</div>';
+ const full='<div class="tlfull">'
+  +(f.menu?'<div class="tlt">'+esc(f.menu)+'</div>':"")
+  +(f.pos?'<div class="tlx"><span class="tlxl">ポジ</span>'+esc(f.pos)+'</div>':"")
+  +(f.neg?'<div class="tlx tlneg"><span class="tlxl">ネガ</span>'+esc(f.neg)+'</div>':"")
+  +(f.next?'<div class="tlnx">→ 次: '+esc(f.next)+'</div>':"")
+  +'</div>';
+ return head+prev+full;
+}
 function tlSection(c){
  const ev=tlEvents(c);
  if(!ev.length)return '<div class="tlwrap"><div class="tlh">'+ic("cal")+'施策タイムライン<span class="cnt">0</span></div><div class="tlbody"><div class="qhelp">記録済みFB・資料なし</div></div></div>';   /* 0件でも見出しごと消さない */
- const rows=ev.map((x,i)=>{
-  const cls="tlrow"+(x.kind==="doc"?" tldoc":"")+(i>=10?" tlhid":"");
-  let card;
-  if(x.kind==="doc"){const d=x.e,col=dtColor(d.doc_type);
-   card='<span class="tlbadge" style="background:'+col+'22">'+esc(d.doc_type||"資料")+'</span>'
-    +'<div class="tlt"><span class="wl" data-t="docs/'+esc(d.stem)+'">'+esc(d.title)+'</span></div>';
-  }else{const f=x.e;
-   card='<span class="tlbadge tlfb">商談FB'+(f.src?"・"+esc(f.src):"")+'</span>'
-    +(f.ph?'<span class="tlchip">'+esc(f.ph)+'</span>':"")
-    +(f.bant?'<span class="tlchip">'+esc(f.bant)+'</span>':"")
-    +(f.by?'<span class="tlchip tlby" title="FB送信者">'+esc(f.by)+'</span>':"")
-    +(f.menu?'<div class="tlt">'+esc(f.menu)+'</div>':"")
-    +(f.pos?'<div class="tlx">'+esc(f.pos)+'</div>':"")
-    +(f.next?'<div class="tlnx">→ 次: '+esc(f.next)+'</div>':"");
-  }
-  return '<div class="'+cls+'"><div class="tld">'+(x.d?esc(x.d):"—")+'</div><div class="tlcard">'+card+'</div></div>';
+ /* P3: 日付あり/なしで分割。dated=従来の縦軸(相対を任意添付)、undated=軸下に別ブロック(「—」列を根絶)。推測日付は生成しない */
+ const dated=ev.filter(x=>x.d),undated=ev.filter(x=>!x.d);
+ /* B: 外側 fold は 3件目以降(dated軸側のみ)。tlmorebtn 保持 */
+ const drows=dated.map((x,i)=>{
+  const isfb=x.kind==="fb";
+  const cls="tlrow"+(x.kind==="doc"?" tldoc":"")+(i>=3?" tlhid":"");
+  return '<div class="'+cls+'"><div class="tld">'+esc(x.d)+'<span class="tlrel">'+esc(agoCoarse(x.d))+'</span></div>'
+   +'<div class="tlcard'+(isfb?" tlfbcard":"")+'">'+tlCardInner(x)+'</div></div>';
  }).join("");
- const more=ev.length>10?'<div class="tlmorebtn">さらに'+(ev.length-10)+'件を表示</div>':"";
- return '<div class="tlwrap'+(ev.length>10?" folded":"")+'"><div class="tlh">'+ic("cal")+'施策タイムライン<span class="cnt">'+ev.length+'</span></div><div class="tlbody">'+rows+'</div>'+more+'</div>';
+ const datedHtml=dated.length?'<div class="tlbody">'+drows+'</div>':"";
+ const more=dated.length>3?'<div class="tlmorebtn">さらに'+(dated.length-3)+'件を表示</div>':"";
+ const ucards=undated.map(x=>'<div class="tlcard tluitem'+(x.kind==="fb"?" tlfbcard":" tludoc")+'">'+tlCardInner(x)+'</div>').join("");
+ const ublock=undated.length?'<div class="tlundated"><div class="tluh">'+ic("help")+'日付不明の記録 <span class="cnt">'+undated.length+'件</span></div><div class="tlulist">'+ucards+'</div></div>':"";
+ return '<div class="tlwrap'+(dated.length>3?" folded":"")+'"><div class="tlh">'+ic("cal")+'施策タイムライン<span class="cnt">'+ev.length+'</span></div>'+datedHtml+more+ublock+'</div>';
 }
 function bindTl(){const mb=$("#inner").querySelector(".tlmorebtn");
  if(mb){const lbl=mb.textContent;   /* 展開⇄再畳みの往復トグル（remove しない） */
-  mb.onclick=()=>{const w=mb.closest(".tlwrap");if(!w)return;const folded=w.classList.toggle("folded");mb.textContent=folded?lbl:"畳む";};}}
+  mb.onclick=()=>{const w=mb.closest(".tlwrap");if(!w)return;const folded=w.classList.toggle("folded");mb.textContent=folded?lbl:"畳む";};}
+ /* P2: FBカードのクリックで全文トグル（カード内に wikilink 無し＝全体クリックに競合なし） */
+ $("#inner").querySelectorAll(".tlfbcard").forEach(el=>el.onclick=()=>{const o=el.classList.toggle("open");const t=el.querySelector(".tltog");if(t)t.textContent=o?"−":"＋";});}
 /* ===== 商談ジャーニーバー（カルテ内: PHASESTEPS 順の現在地 + 到達日） =====
    到達日 = tl の同フェーズ dated イベントの最小日（決定論・payload 増ゼロ・架空日付は出さない）。
    既知の限界: FB_MAX_EVENTS=30 cap で FB30件超のクライアントは最古が切られ初出日が後ろにずれ得る */
@@ -1363,13 +1460,36 @@ function jbSection(c){
  return '<div class="jbwrap"><div class="jbh">'+ic("trend")+'商談ジャーニー</div><div class="jbbar">'+cells
   +(reg?'<span class="jbreg">↩ 後退あり</span>':"")+'</div></div>';
 }
+/* ===== P1 サマリーヘッダ「商談スナップショット」（propsPanel 撤去の受け皿・朝の商談前に見る面） =====
+   全項目 条件付き描画（データが無い項目は枠ごと出さない＝演出禁止）。色は既存 --ok/warn/err・CATMETA 流用。 */
+function khc(emo,label,val,sev,dotcat){
+ const dot=dotcat?'<span class="khdot" style="background:'+(CATMETA[dotcat]||"var(--accent)")+'"></span>':"";
+ return '<div class="khc'+(sev?" "+sev:"")+(label==="次の一手"?" khnx":"")+'">'+(emo?'<span class="khi">'+emo+'</span>':"")+dot
+  +'<span class="khl">'+esc(label)+'</span><span class="khv">'+esc(val)+'</span></div>';
+}
+function summaryHeader(c){
+ /* 資料だけ取引先(62%)の劣化形: tl 空なら1行に畳む（空ラベルを並べない） */
+ if(!(c.tl&&c.tl.length)){
+  const bits=[];if(c.industry)bits.push("業種/"+c.industry);if(c.doc)bits.push("資料"+c.doc+"件");bits.push("商談FBは未記録");
+  return '<div class="khdr khmin">'+esc(bits.join(" ・ "))+'</div>';
+ }
+ const n=daysAgo(c.last),parts=[];
+ parts.push(n!=null?khc("⏱","最終接点",agoLabel(n),ageSev(n)):khc("⏱","最終接点","接点記録なし","muted"));
+ if(c.nx)parts.push(khc("🎯","次の一手",c.nx,c.hw?"err":""));   /* 宿題(hw)なら err で放置を主張＝「次の一手提示」を本項に吸収 */
+ if(c.tans&&c.tans.length)parts.push(khc("👤","担当",c.tans.join("・"),""));
+ if(c.temp)parts.push(khc("","温度感",c.temp,"","温度感"));      /* CATMETA 色ドット */
+ parts.push(khc("💬","活動","FB"+c.fb+"・資料"+c.doc,""));       /* 撤去された fb/doc_count の受け */
+ return '<div class="khdr">'+parts.join("")+'</div>';
+}
+function ageCell(ds){if(!ds)return '<span style="color:var(--faint)">—</span>';   /* P5: テーブル最終接点=相対+重症度色。ソートは lastOf 不変(表示のみ) */
+ const n=daysAgo(ds);return '<span class="age '+ageSev(n)+'" title="'+esc(ds)+'"><span class="agedot"></span>'+esc(agoLabel(n))+'</span>';}
 function openClient(stem){const c=cByStem[stem];if(!c)return;showDoc();pushHist("c",stem);
  lastNote={key:"c:"+stem,title:c.name,icon:"building",folder:"clients"};
  const bodyMd=c.md?md(c.md):"";
  const ctg=clientTags(c);   /* 「このタグの仲間を探す」チップ行（クリック=runQuery置換・afterOpenでバインド） */
  $("#inner").innerHTML='<div class="inline-title">'+esc(c.name)+'</div>'
   +(ctg.length?'<div class="note-tags">'+ctg.map(t=>chipHtml(t)).join("")+'</div>':'')
-  +propsPanel([["list","client",c.name],["list","industry",c.industry],["list","deal_phase",c.phase],["list","bant_score",c.bant],["list","担当",(c.tans||[]).join("・")],["hash","fb_count",c.fb],["hash","doc_count",c.doc]])
+  +summaryHeader(c)   /* propsPanel 撤去の受け皿（P1・経過日数/次の一手/担当/温度感/活動を条件付きで一望） */
   +jbSection(c)
   +tlSection(c)
   +'<div class="md">'+bodyMd+'</div>';
@@ -1467,7 +1587,7 @@ function tblRows(){let rows=DATA.clients.slice();
 function tblBody(shown){return shown.map(c=>{const pc=PHASECOLOR[c.phase]||"#8a8a8a";
  return '<tr data-s="'+esc(c.stem)+'"><td>'+esc(c.name)+'</td>'
   +'<td>'+(c.phase?'<span class="bp" style="background:'+pc+'22">'+esc(c.phase)+'</span>':'<span style="color:var(--faint)">—</span>')+'</td>'
-  +'<td>'+(lastOf(c)?esc(lastOf(c)):'<span style="color:var(--faint)">—</span>')+'</td>'
+  +'<td>'+ageCell(lastOf(c))+'</td>'
   +'<td>'+((c.tans&&c.tans.length)?esc(c.tans.join("・")):'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+(c.nx?esc(c.nx):'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+(c.industry?'<span class="dotc" style="background:'+colorOf(c.industry)+'"></span>'+esc(c.industry):'<span style="color:var(--faint)">—</span>')+'</td>'
