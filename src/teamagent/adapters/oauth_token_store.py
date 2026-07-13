@@ -221,7 +221,7 @@ class RdsTokenStore:
 class SlackTokenStore:
     """RDS(slack_oauth_tokens) に xoxp を保管する（per-user・KMS暗号化・RLS）。
 
-    migration 0016_slack_oauth_tokens.sql のテーブルを使う。RdsTokenStore と対称で、
+    migration 0018_slack_oauth_tokens.sql のテーブルを使う。RdsTokenStore と対称で、
     `pgvector.connection(app_role, user_email)` が app.user_email GUC を立て、RLS が
     「本人行のみ」を保証する。xoxp は cipher で暗号化して BYTEA 格納（平文は持たない・G8）。
     """
