@@ -96,9 +96,12 @@ resource "aws_ce_anomaly_monitor" "service" {
 }
 
 resource "aws_ce_anomaly_subscription" "service" {
-  provider         = aws.us_east_1
-  name             = "${var.project_name}-${var.environment}-anomaly-sub"
-  frequency        = "DAILY"
+  provider = aws.us_east_1
+  name     = "${var.project_name}-${var.environment}-anomaly-sub"
+  # SNS subscriber は IMMEDIATE のみ対応（DAILY/WEEKLY は Email 限定・2026-07-11 apply 実測:
+  # ValidationException "Daily or weekly frequencies only support Email subscriptions"）。
+  # 通知粒度は threshold_expression（インパクト閾値 USD）でノイズ抑制する。
+  frequency        = "IMMEDIATE"
   monitor_arn_list = [aws_ce_anomaly_monitor.service.arn]
 
   subscriber {
