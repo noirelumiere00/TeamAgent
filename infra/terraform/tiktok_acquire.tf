@@ -272,6 +272,8 @@ data "archive_file" "tiktok_dispatch" {
   type        = "zip"
   source_dir  = "${path.module}/lambda/tiktok_dispatch"
   output_path = "${path.module}/build/tiktok_dispatch.zip"
+  # reminder_notify と同様に __pycache__ を除外（.pyc 混入による source_code_hash ドリフト予防）。
+  excludes = ["__pycache__", "**/__pycache__/**"]
 }
 
 data "aws_iam_policy_document" "tiktok_dispatch_assume" {
