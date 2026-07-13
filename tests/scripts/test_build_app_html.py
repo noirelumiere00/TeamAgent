@@ -1100,3 +1100,79 @@ def test_age_bucket_mirror_boundaries() -> None:
     assert ab("2025-07-10", t) == "1年以上前"  # 367日前
     assert ab("", t) == ""
     assert ab("invalid", t) == ""
+
+
+# ---------------- 商談ジャーニー可視化（カルテのバー / ホームのパイプライン / 動線修理） ----------------
+
+
+def test_journey_phasesteps_matches_phasecolor_keys(ux_html: str) -> None:
+    """順序定義 PHASESTEPS は PHASECOLOR キーと完全一致（+失注のみ順序外）。片側だけの語彙変更を検知する回帰テスト。"""
+    m = re.search(r"const PHASESTEPS=\[([^\]]*)\]", ux_html)
+    assert m is not None
+    steps = re.findall(r'"([^"]+)"', m.group(1))
+    # ケイパが先頭（実データの時系列遷移はケイパ→ヒアリング方向・ユーザー確認済みの順序）
+    assert steps == [
+        "ケイパ",
+        "ヒアリング",
+        "1回目提案",
+        "2回目以降提案",
+        "最終交渉",
+        "成約（口頭内示以上）",
+    ]
+    mc = re.search(r"const PHASECOLOR=\{([^}]*)\}", ux_html)
+    assert mc is not None
+    color_keys = set(re.findall(r'"([^"]+)":"#', mc.group(1)))
+    assert set(steps) | {"失注"} == color_keys
+
+
+def test_journey_bar_wiring_and_guard(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """a案: jbSection がカルテ（props と tl の間）に配線され、ph+dated FB 持ちクライアントの
+    payload が載る。フェーズ未設定かつ dated ph 無しはバー非表示のガード付き。"""
+    (vault / "clients" / "帝人.md").write_text(
+        '---\nclient: "帝人"\nindustry: "メーカー"\ndeal_phase: "ヒアリング"\n'
+        'bant_score: "B（前向き）"\nfb_count: 1\ndoc_count: 0\n---\n\n# 帝人\n\n'
+        "## 営業FB時系列（新しい順）\n\n"
+        "### ---- #proj-ショート動画_営業フィードバック情報 1779101519.347119\n\n"
+        "- フェーズ: ヒアリング\n- BANT: B（前向き）\n\n"
+        "## 関連資料\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # バー描画関数と配線（props の直後・タイムラインの直前）
+    assert "function jbSection(c)" in html and "function phaseDates(c)" in html
+    assert "\n  +jbSection(c)\n  +tlSection(c)" in html
+    # ph 持ちクライアントで発火する材料（frontmatter phase + dated ph イベント）が payload に載る
+    assert '"ph": "ヒアリング"' in html and '"d": "2026-05-18"' in html
+    # データ無しクライアントはバー非表示（データが無い演出をしない）・失注は終端 err 差し替え
+    assert 'if(!lost&&idx<0&&!PHASESTEPS.some(p=>dates[p]))return "";' in html
+    assert "jblost" in html and "後退あり" in html
+    # 短縮ラベル（title に正式名）
+    assert '"1回目提案":"提案①"' in html and '"成約（口頭内示以上）":"成約"' in html
+
+
+def test_journey_pipeline_section_on_welcome(ux_html: str) -> None:
+    """b案: ホームのクイックフィルタ直下にパイプライン節。クリックは tblFilter を全リセット+
+    フェーズのみ設定してテーブル着地（select 復元と件数一致）。未設定 N は muted 非クリック。"""
+    html = ux_html
+    assert '<div class="wsec">パイプライン</div>' in html
+    assert '<span class="plarr">→</span>' in html  # PHASESTEPS 順の→区切り
+    assert 'tblFilter={q:"",ind:"",phase:el.dataset.p,temp:"",hw:false};tableView();' in html
+    assert "未設定 '+unset+'" in html  # 空フェーズはテーブル filter で表現できないため非クリック
+    assert (
+        'class="tagchip pld"' in html
+    )  # 0社フェーズは非クリック（select に無い値を選択状態にしない）
+
+
+def test_journey_flow_repairs_homework_and_back(ux_html: str) -> None:
+    """動線修理: 宿題ありチップだけテーブル着地（qft・hwのみON）。他QFチップの検索着地は不変。
+    table 疑似ビューは履歴に積まれ「戻る」で tableView() 復元（tblFilter はモジュール変数で残存）。"""
+    html = ux_html
+    assert 'const tb=l==="宿題あり"' in html
+    assert 'tblFilter={q:"",ind:"",phase:"",temp:"",hw:true};tableView();' in html
+    assert '".qfc").forEach(el=>el.onclick=()=>runQuery(el.dataset.q))' in html  # 既存着地は不変
+    assert 'pushHist("table","")' in html
+    assert 'k==="table"?tableView():' in html
+    # グラフ等他ビューの履歴挙動は変えない（openGraph は pushHist しない）
+    assert 'pushHist("graph"' not in html
