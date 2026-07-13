@@ -92,6 +92,11 @@ class InMemoryTokenStore:
     def has(self, user_email: str) -> bool:
         return self._norm(user_email) in self._tokens
 
+    def scopes(self, user_email: str) -> tuple[str, ...] | None:
+        """認可済みスコープのみ返す（行なしは None）。RdsTokenStore と対称。"""
+        token = self._tokens.get(self._norm(user_email))
+        return None if token is None else token.scopes
+
 
 @runtime_checkable
 class TokenCipher(Protocol):
@@ -192,7 +197,25 @@ class RdsTokenStore:
             conn.commit()
 
     def has(self, user_email: str) -> bool:
-        return self.get(user_email) is not None
+        return self.scopes(user_email) is not None
+
+    def scopes(self, user_email: str) -> tuple[str, ...] | None:
+        """認可済みスコープ列のみ読む（KMS 復号なし・行なしは None）。
+
+        oauth_connect の連携状態チェック用。has()/連携判定のためだけに refresh token を
+        KMS 復号するのは無駄＋監査ログ汚染なので、scopes 列だけを SELECT する。
+        """
+        email = self._norm(user_email)
+        with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT scopes FROM oauth_tokens WHERE user_email = %s",
+                    (email,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return tuple(row["scopes"] or ())
 
 
 class SlackTokenStore:

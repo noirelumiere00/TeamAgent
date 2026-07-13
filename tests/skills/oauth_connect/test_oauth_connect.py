@@ -157,3 +157,82 @@ def test_slack_omitted_when_redirect_unset(monkeypatch: pytest.MonkeyPatch) -> N
     assert out.slack_url is None
     assert out.url is not None and out.url in out.message
     assert "Google を連携" in out.message
+
+
+# ---------------------------------------------------------------------------
+# スコープ対応の再連携（2026-07-13: 既連携ユーザーが v0.3 追加スコープを持たない問題）
+# ---------------------------------------------------------------------------
+
+
+class _ScopedStore:
+    """scopes() を持つトークンストア（スコープ対応判定の注入用）。"""
+
+    def __init__(self, scopes: tuple[str, ...] | None) -> None:
+        self._scopes = scopes
+
+    def scopes(self, _user_email: str) -> tuple[str, ...] | None:
+        return self._scopes
+
+    def has(self, _user_email: str) -> bool:
+        return self._scopes is not None
+
+
+def _full_scopes() -> tuple[str, ...]:
+    from teamagent.adapters.google_oauth_flow import WORKSPACE_SCOPES
+
+    return WORKSPACE_SCOPES
+
+
+def test_scope_upgrade_issues_reconnect_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    """旧スコープ（calendar.events 無し）の既連携ユーザーには再連携リンクを出す。"""
+    for k, v in _OAUTH_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
+    old_scopes = tuple(s for s in _full_scopes() if not s.endswith("calendar.events"))
+    skill = OAuthConnectSkill(google_store=_ScopedStore(old_scopes))
+    out = skill.run(OAuthConnectInput(), _ctx("user@example.com"))
+    assert out.url is not None, "スコープ不足なら再連携リンクを出す"
+    assert "再連携" in out.message
+
+
+def test_full_scopes_returns_connected_without_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    """全スコープ保持ならリンクを出さず連携済み扱い。"""
+    for k, v in _OAUTH_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
+    skill = OAuthConnectSkill(google_store=_ScopedStore(_full_scopes()))
+    out = skill.run(OAuthConnectInput(), _ctx("user@example.com"))
+    assert out.url is None
+    assert "連携済み" in out.message
+
+
+def test_superset_scopes_is_connected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Google が余分な scope を追加返却しても（上位集合）連携済み扱い。"""
+    for k, v in _OAUTH_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
+    extra = (*_full_scopes(), "https://www.googleapis.com/auth/userinfo.email")
+    skill = OAuthConnectSkill(google_store=_ScopedStore(extra))
+    out = skill.run(OAuthConnectInput(), _ctx("user@example.com"))
+    assert out.url is None
+
+
+def test_store_without_scopes_falls_back_to_has(monkeypatch: pytest.MonkeyPatch) -> None:
+    """scopes() 未実装ストア（旧実装/テストダブル）は has() ベースへフォールバック。"""
+    for k, v in _OAUTH_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
+    skill = OAuthConnectSkill(google_store=_FakeStore(connected=True))
+    out = skill.run(OAuthConnectInput(), _ctx("user@example.com"))
+    assert out.url is None, "has()=True かつ scopes 判定不能なら従来どおり連携済み扱い"
+
+
+def test_no_row_still_issues_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    """行なし（未連携）は従来どおりリンクを出す（scope対応で退行しない）。"""
+    for k, v in _OAUTH_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
+    skill = OAuthConnectSkill(google_store=_ScopedStore(None))
+    out = skill.run(OAuthConnectInput(), _ctx("user@example.com"))
+    assert out.url is not None
+    assert "再連携" not in out.message
