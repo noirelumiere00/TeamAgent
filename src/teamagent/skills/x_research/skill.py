@@ -256,10 +256,12 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
 
     name: ClassVar[str] = "x_voice_search"
     description: ClassVar[str] = (
-        "商材/ブランドがX(Twitter)で「世の中でどう言われてるか」を、実在する投稿の"
-        "全文+いいね数+URL付きカード集(HTML署名URL)で集める。投稿ID単位で実在検証済み。"
-        "提案書の『世の中の声』ページやオリエン直後の初動リサーチ用。"
-        "感情ワードでの不満/欲求の発掘は x_needs_mining、期間指定の発話量測定は x_buzz_measure。"
+        "特定の商材/ブランド名がX(Twitter)で「世の中でどう言われてるか」を、実在する投稿の"
+        "全文+いいね数+URL付きカード集(HTML署名URL)で集める。**商材名が主語のとき**は、その商材への"
+        "不満・要望・使われ方を集める依頼でもここ（例『アサヒ白湯の生活者の声＝不満や欲求を集めて』）。"
+        "投稿ID単位で実在検証済み。提案書の『世の中の声』ページやオリエン直後の初動リサーチ用。"
+        "商材を特定せず業界/テーマ全体の不満・欲求を感情ワードで発掘するのは x_needs_mining、"
+        "期間を区切った発話量の増減測定は x_buzz_measure。"
     )
     input_schema: ClassVar[type[BaseModel]] = XVoiceSearchInput
     output_schema: ClassVar[type[BaseModel]] = XVoiceSearchOutput
@@ -404,10 +406,11 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
 
     name: ClassVar[str] = "x_needs_mining"
     description: ClassVar[str] = (
-        "業界/テーマの提案の種さがし。「◯◯ めんどくさい/売ってほしい/高い」等の感情ワード"
-        "掛け合わせでX(Twitter)から生活者の不満・欲求の本音投稿を発掘し、ニーズ分類と"
-        "インサイト仮説付きのレポート(HTML署名URL)にする。いいね数下限でノイズ足切り。"
-        "商材名の evaluated な言及集めは x_voice_search、発話量の時系列測定は x_buzz_measure。"
+        "業界/テーマ全体（特定商材に限定しない）の提案の種さがし。「◯◯ めんどくさい/売ってほしい"
+        "/高い」等の感情ワード掛け合わせでX(Twitter)から生活者の不満・欲求の本音投稿を発掘し、"
+        "ニーズ分類とインサイト仮説付きのレポート(HTML署名URL)にする。いいね数下限でノイズ足切り。"
+        "特定の商材/ブランド名を主語にした声・評判集め（その商材への不満含む）は x_voice_search、"
+        "期間を区切った発話量の測定は x_buzz_measure。"
     )
     input_schema: ClassVar[type[BaseModel]] = XNeedsMiningInput
     output_schema: ClassVar[type[BaseModel]] = XNeedsMiningOutput
