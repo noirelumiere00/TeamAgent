@@ -832,6 +832,22 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tlmorebtn{display:inline-block;margin:0 0 2px 98px;padding:4px 12px;font-size:var(--f-ui-smaller);color:var(--accent-2);cursor:pointer;border:1px solid var(--border);border-radius:var(--r-s)}
 .tlmorebtn:hover{background:var(--hover);border-color:var(--border-focus)}
 .tlwrap.folded .tlrow.tlhid{display:none}
+/* 商談ジャーニーバー（カルテ）+ ホームのパイプライン節。トークンは tagchip/tl 系流用・両テーマCSS変数のみ */
+.jbwrap{margin:4px 0 22px}
+.jbh{display:flex;align-items:center;gap:7px;font-size:var(--f-ui-small);color:var(--muted);font-weight:600;padding:4px 0 9px;border-bottom:1px solid var(--border)}
+.jbh svg.ic{color:var(--accent-2)}
+.jbbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:11px 0 2px}
+.jbstep{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);border-radius:9px;padding:2px 8px;font-size:11px;line-height:16px;white-space:nowrap;color:var(--faint)}
+.jbstep.past{background:var(--hover);color:var(--muted)}
+.jbstep.cur{background:var(--accent-bg);border-color:var(--accent);color:var(--text);font-weight:600}
+.jbstep.cur.jblost{background:transparent;border-color:var(--err);color:var(--err)}
+.jbstep.reg{border-style:dashed;border-color:var(--warn);color:var(--muted)}
+.jbstep .jbd{color:var(--faint);font-size:10px;font-weight:400;font-variant-numeric:tabular-nums}
+.jbsep,.plarr{color:var(--faint);font-size:11px;flex:none;user-select:none}
+.jbreg{color:var(--warn);font-size:11px;white-space:nowrap}
+.plun{color:var(--faint);font-size:11px;white-space:nowrap;margin-left:2px}
+.tagchip.pld{cursor:default;opacity:.55}
+.tagchip.pld:hover{border-color:var(--border)}
 kbd{background:var(--bg-float);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:11px;font-family:var(--mono)}
 ::selection{background:hsla(254,80%,68%,.35)}
 .tab.newtab{margin-top:8px;width:30px;justify-content:center;color:var(--faint)}
@@ -1017,7 +1033,7 @@ function markActiveInTree(){const key=lastNote&&lastNote.key;const b=$("#sideBod
  if(!hit&&key&&/^[cdr]:/.test(key)){b.innerHTML="";renderFiles(b,key);   // 未展開グループ内 → 再描画して開く
   b.querySelectorAll(".trow.filerow").forEach(el=>{const on=el.dataset.key===key;el.classList.toggle("active",on);if(on)hit=el;});}
  if(hit)hit.scrollIntoView({block:"nearest"});}
-function openByK(k,stem){k==="c"?openClient(stem):k==="r"?openReport(stem):openDoc(stem);}
+function openByK(k,stem){k==="c"?openClient(stem):k==="r"?openReport(stem):k==="table"?tableView():openDoc(stem);}   /* table=疑似ビュー復元（tblFilter はモジュール変数で残存するので呼び直しで足りる） */
 
 /* ---- 検索ペイン(演算子対応) ---- */
 function parseQuery(q){const P={plain:[],neg:[],tag:[],path:[],file:[],ntag:[],npath:[],nfile:[],props:[],regex:[]};
@@ -1216,16 +1232,31 @@ function welcome(){
  const notable=DATA.clients.filter(c=>c.fb>0).sort((a,b)=>(b.fb+b.doc)-(a.fb+a.doc)).slice(0,6);
  const cards=k=>k.map(c=>`<div class="wcard" data-k="c" data-s="${esc(c.stem)}">`+ic("building")+`<div><div class="wt">${esc(c.name)}</div><div class="wx">${esc(c.industry||"業界未設定")} ・ FB${c.fb} / 資料${c.doc}</div></div></div>`).join("");
  const rep=DATA.reports.map(r=>`<div class="wcard" data-k="r" data-s="${esc(r.stem)}">`+ic("report")+`<div><div class="wt">${esc(r.name)}</div><div class="wx">AI洗い出しレポート</div></div></div>`).join("");
- const qf=QF.filter(([l,t])=>tagCount[t]>0).slice(0,8).map(([l,t])=>'<span class="tagchip qfc" tabindex="0" role="button" data-q="'+esc(tagQ(t))+'" style="--cc2:'+catColor(t)+'" title="#'+esc(t)+' で検索"><span class="tcdot" style="background:'+catColor(t)+'"></span><span class="tcv">'+esc(l)+'</span><span class="qfn">'+tagCount[t]+'</span></span>').join("");
+ const qf=QF.filter(([l,t])=>tagCount[t]>0).slice(0,8).map(([l,t])=>{const tb=l==="宿題あり";   /* 宿題triageだけ作業面=テーブル着地（次アクション/最終接点列でさばく）。他は従来どおり検索着地 */
+  return '<span class="tagchip '+(tb?"qft":"qfc")+'" tabindex="0" role="button" data-q="'+esc(tagQ(t))+'" style="--cc2:'+catColor(t)+'" title="'+(tb?"宿題ありのみで取引先テーブルを開く":"#"+esc(t)+" で検索")+'"><span class="tcdot" style="background:'+catColor(t)+'"></span><span class="tcv">'+esc(l)+'</span><span class="qfn">'+tagCount[t]+'</span></span>';}).join("");
+ /* パイプライン節: PHASESTEPS 順の分布チップ（クリック=テーブルにフェーズ絞り込み着地）。
+    集計は都度 reduce（860件で無視できる）。0社フェーズは非クリック（テーブル select に無い値を選択状態にしない）。
+    「未設定」は c.phase==="" でテーブルの phase フィルタが表現できないため muted 非クリック */
+ const pcnt={};DATA.clients.forEach(c=>{if(c.phase)pcnt[c.phase]=(pcnt[c.phase]||0)+1;});
+ const unset=DATA.clients.filter(c=>!c.phase).length;
+ const plChip=p=>{const n=pcnt[p]||0,col=PHASECOLOR[p]||"#8a8a8a";
+  return n?'<span class="tagchip plc" tabindex="0" role="button" data-p="'+esc(p)+'" style="--cc2:'+col+'" title="'+esc(p)+' の取引先をテーブルで開く"><span class="tcdot" style="background:'+col+'"></span><span class="tcv">'+esc(phShort(p))+'</span><span class="qfn">'+n+'</span></span>'
+   :'<span class="tagchip pld" title="'+esc(p)+'・該当なし"><span class="tcdot" style="background:'+col+'"></span><span class="tcv">'+esc(phShort(p))+'</span><span class="qfn">0</span></span>';};
+ const pl=PHASESTEPS.map(plChip).join('<span class="plarr">→</span>')
+  +(pcnt["失注"]?'<span class="plarr">・</span>'+plChip("失注"):"")
+  +'<span class="plun">未設定 '+unset+'</span>';
  const tz=TAGORDER.filter(c=>tagTree[c]).map(c=>'<span class="tagchip tzc" tabindex="0" role="button" data-c="'+esc(c)+'" style="--cc2:'+(CATMETA[c]||"var(--accent)")+'" title="タグペインで「'+esc(c)+'」を開く"><span class="tcdot" style="background:'+(CATMETA[c]||"var(--accent)")+'"></span><span class="tcv">'+esc(c)+'</span><span class="qfn">'+(tagCount[c]||0)+'</span></span>').join("");
  $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} AiLaVault</h1>
   <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。取引先カルテには資料と商談FBを時系列で一望できる<b>施策タイムライン</b>付き。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
   ${qf?`<div class="wsec">クイックフィルタ</div><div class="chiprow">${qf}</div>`:""}
+  <div class="wsec">パイプライン</div><div class="chiprow plrow">${pl}</div>
   ${tz?`<div class="wsec">タグで探す</div><div class="chiprow tzrow">${tz}</div>`:""}
   ${DATA.reports.length?`<div class="wsec">AI洗い出しレポート</div><div class="wgrid">${rep}</div>`:""}
   <div class="wsec">主要な取引先</div><div class="wgrid">${cards(notable)}</div></div>`;
  $("#inner").querySelectorAll(".wcard").forEach(el=>el.onclick=()=>openByK(el.dataset.k,el.dataset.s));
  $("#inner").querySelectorAll(".qfc").forEach(el=>el.onclick=()=>runQuery(el.dataset.q));   /* 置換で検索ペインへ（チップバー付きで着地） */
+ $("#inner").querySelectorAll(".qft").forEach(el=>el.onclick=()=>{tblFilter={q:"",ind:"",phase:"",temp:"",hw:true};tableView();});   /* 宿題あり→テーブル（hwのみON・他条件リセット） */
+ $("#inner").querySelectorAll(".plc").forEach(el=>el.onclick=()=>{tblFilter={q:"",ind:"",phase:el.dataset.p,temp:"",hw:false};tableView();});   /* リセット着地=チップ社数と表示件数の一致を保証（select にも selected 復元） */
  $("#inner").querySelectorAll(".tzc").forEach(el=>el.onclick=()=>{window.__tagFocus=el.dataset.c;setPane("tags");});   /* 該当系統を初期展開 */
  renderRightTabs();renderRight();markActiveInTree();
  if(window.updateStatus)updateStatus(0,0);
@@ -1310,6 +1341,28 @@ function tlSection(c){
 function bindTl(){const mb=$("#inner").querySelector(".tlmorebtn");
  if(mb){const lbl=mb.textContent;   /* 展開⇄再畳みの往復トグル（remove しない） */
   mb.onclick=()=>{const w=mb.closest(".tlwrap");if(!w)return;const folded=w.classList.toggle("folded");mb.textContent=folded?lbl:"畳む";};}}
+/* ===== 商談ジャーニーバー（カルテ内: PHASESTEPS 順の現在地 + 到達日） =====
+   到達日 = tl の同フェーズ dated イベントの最小日（決定論・payload 増ゼロ・架空日付は出さない）。
+   既知の限界: FB_MAX_EVENTS=30 cap で FB30件超のクライアントは最古が切られ初出日が後ろにずれ得る */
+function phaseDates(c){const m={};(c.tl||[]).forEach(e=>{if(e.ph&&e.d&&(!m[e.ph]||e.d<m[e.ph]))m[e.ph]=e.d;});return m;}
+function jbSection(c){
+ const dates=phaseDates(c),lost=c.phase==="失注",idx=PHASESTEPS.indexOf(c.phase);
+ if(!lost&&idx<0&&!PHASESTEPS.some(p=>dates[p]))return "";   /* フェーズ未設定/その他かつ dated ph 無し → バー非表示（データが無い演出をしない） */
+ let reg=false;
+ const cells=PHASESTEPS.map((p,i)=>{
+  const fail=lost&&i===PHASESTEPS.length-1;                  /* 失注は終端を err 色で差し替え */
+  const name=fail?"失注":p,d=dates[name]||"";
+  let st="todo";
+  if(fail||i===idx)st="cur";
+  else if(lost||i<idx||(idx<0&&d))st="past";
+  else if(idx>=0&&d){st="reg";reg=true;}                     /* 現在地より後に到達日=後退（点線+日付・色のみに依存しない） */
+  return '<span class="jbstep '+st+(fail?" jblost":"")+'" title="'+esc(name)+(st==="cur"?"（現在地）":"")+(d?"・初出 "+esc(d):"")+'">'
+   +'<span class="tcdot" style="background:'+(PHASECOLOR[name]||"#8a8a8a")+'"></span><span class="jbl">'+esc(phShort(name))+'</span>'
+   +(d&&st!=="todo"?'<span class="jbd">'+esc(d)+'</span>':"")+'</span>';
+ }).join('<span class="jbsep">→</span>');
+ return '<div class="jbwrap"><div class="jbh">'+ic("trend")+'商談ジャーニー</div><div class="jbbar">'+cells
+  +(reg?'<span class="jbreg">↩ 後退あり</span>':"")+'</div></div>';
+}
 function openClient(stem){const c=cByStem[stem];if(!c)return;showDoc();pushHist("c",stem);
  lastNote={key:"c:"+stem,title:c.name,icon:"building",folder:"clients"};
  const bodyMd=c.md?md(c.md):"";
@@ -1317,6 +1370,7 @@ function openClient(stem){const c=cByStem[stem];if(!c)return;showDoc();pushHist(
  $("#inner").innerHTML='<div class="inline-title">'+esc(c.name)+'</div>'
   +(ctg.length?'<div class="note-tags">'+ctg.map(t=>chipHtml(t)).join("")+'</div>':'')
   +propsPanel([["list","client",c.name],["list","industry",c.industry],["list","deal_phase",c.phase],["list","bant_score",c.bant],["list","担当",(c.tans||[]).join("・")],["hash","fb_count",c.fb],["hash","doc_count",c.doc]])
+  +jbSection(c)
   +tlSection(c)
   +'<div class="md">'+bodyMd+'</div>';
  bindTl();
@@ -1394,7 +1448,12 @@ const TCOLS=[["name","取引先",c=>c.name,0],["phase","フェーズ",c=>c.phase
 /* 実Vaultの deal_phase/FB ph 実語彙（ケイパ/ヒアリング/1回目提案/2回目以降提案/最終交渉/成約/失注）。
    「その他」等の未知値は辞書に載せず fallback グレー（テーブル #8a8a8a / グラフ #9a9a9a） */
 const PHASECOLOR={"ケイパ":"#e0b34c","ヒアリング":"#c98bdb","1回目提案":"#4f9df5","2回目以降提案":"#8a7cf5","最終交渉":"#d0912f","成約（口頭内示以上）":"#54b981","失注":"#e0685f"};
-function tableView(){showDoc();$("#docPane").scrollTop=0;lastNote={key:"table",title:"取引先テーブル",icon:"table",folder:""};ribbonActive("table");
+/* 商談ジャーニーの順序定義はこの1定数のみ。文字列は PHASECOLOR のキーと完全一致（回帰テストで担保）。
+   実データの時系列遷移はケイパ→ヒアリング方向（ユーザー確認済み）のためケイパが先頭。失注は順序外の終端差し替え */
+const PHASESTEPS=["ケイパ","ヒアリング","1回目提案","2回目以降提案","最終交渉","成約（口頭内示以上）"];
+const PHASESHORT={"1回目提案":"提案①","2回目以降提案":"提案②","成約（口頭内示以上）":"成約"};   /* 短縮表示（title に正式名） */
+function phShort(p){return PHASESHORT[p]||p;}
+function tableView(){showDoc();$("#docPane").scrollTop=0;pushHist("table","");lastNote={key:"table",title:"取引先テーブル",icon:"table",folder:""};ribbonActive("table");   /* 履歴に積む=カルテから「戻る」でテーブル復帰（朝のtriageループ） */
  renderTableShell();renderTabs();renderVhead();
  $("#rightBody").innerHTML='<div class="qhelp">Obsidian <b>Bases</b> 風テーブル。列見出しでソート、上部で業界/フェーズ絞り込み、行クリックでカルテ。</div>';}
 function tblRows(){let rows=DATA.clients.slice();
