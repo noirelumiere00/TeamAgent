@@ -133,12 +133,16 @@ def render_surface_report(
     today = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).strftime("%Y-%m-%d")
     parts: list[str] = []
     if comparison_summary:
-        parts.append(f"<div class='summary'>📊 <b>面の性格比較</b><br>{_esc(comparison_summary)}</div>")
+        parts.append(
+            f"<div class='summary'>📊 <b>面の性格比較</b><br>{_esc(comparison_summary)}</div>"
+        )
     for kw in keywords:
         parts.append(f"<h2>「{_esc(kw)}」の検索面</h2><div class='grid'>")
         parts.append(_platform_col(by_key.get((kw, "tiktok")), "TikTok（検索面表示順）", "再生数"))
         parts.append(
-            _platform_col(by_key.get((kw, "instagram")), "Instagramリール（出現頻度順）", "再生/いいね")
+            _platform_col(
+                by_key.get((kw, "instagram")), "Instagramリール（出現頻度順）", "再生/いいね"
+            )
         )
         parts.append("</div>")
     client = f"クライアント: {client_name}・" if client_name else ""

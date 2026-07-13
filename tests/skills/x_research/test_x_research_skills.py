@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from teamagent.adapters.apify_client import ApifyError, XPost
-from teamagent.adapters.cost_guard import CostLimitExceeded
+from teamagent.adapters.cost_guard import CostLimitExceededError
 from teamagent.skills.base import SkillContext
 from teamagent.skills.x_research.schema import (
     XBuzzMeasureInput,
@@ -109,9 +109,7 @@ def test_voice_search_happy_path() -> None:
         bedrock=_FakeBedrock(noise_json),
         publisher=_publisher,
     )
-    out = skill.run(
-        XVoiceSearchInput(product_name="白湯", queries=["白湯", "アサヒ 白湯"]), _ctx()
-    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯", "アサヒ 白湯"]), _ctx())
     assert out.selected == 2
     assert out.verified_count == 2
     assert out.posts[0].like_count == 64  # いいね降順
@@ -137,7 +135,9 @@ def test_voice_search_unverified_marked_not_dropped() -> None:
 
 
 def test_voice_search_zero_results() -> None:
-    skill = XVoiceSearchSkill(apify=_FakeApify([]), bedrock=_FakeBedrock("{}"), publisher=_publisher)  # type: ignore[arg-type]
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([]), bedrock=_FakeBedrock("{}"), publisher=_publisher
+    )  # type: ignore[arg-type]
     out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
     assert out.posts == [] and "0件" in out.slack_summary
 
@@ -149,7 +149,9 @@ def test_voice_search_noise_filter_failure_is_fail_open() -> None:
 
     posts = [_post("1"), _post("2")]
     skill = XVoiceSearchSkill(
-        apify=_FakeApify(posts), bedrock=_BrokenBedrock(), publisher=_publisher  # type: ignore[arg-type]
+        apify=_FakeApify(posts),
+        bedrock=_BrokenBedrock(),
+        publisher=_publisher,  # type: ignore[arg-type]
     )
     out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
     assert out.selected == 2  # 全件候補に残る
@@ -159,7 +161,7 @@ def test_voice_search_noise_filter_failure_is_fail_open() -> None:
 def test_voice_search_cost_limit_message() -> None:
     class _DenyApify:
         def search_posts(self, *a: Any, **kw: Any) -> Any:
-            raise CostLimitExceeded("今月のapify利用枠($50)を使い切りました")
+            raise CostLimitExceededError("今月のapify利用枠($50)を使い切りました")
 
     skill = XVoiceSearchSkill(apify=_DenyApify(), bedrock=_FakeBedrock("{}"), publisher=_publisher)  # type: ignore[arg-type]
     out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
@@ -211,7 +213,9 @@ def test_needs_mining_classify_failure_degrades() -> None:
 
     posts = [_post("1", likes=100)]
     skill = XNeedsMiningSkill(
-        apify=_FakeApify(posts), analysis_bedrock=_BrokenBedrock(), publisher=_publisher  # type: ignore[arg-type]
+        apify=_FakeApify(posts),
+        analysis_bedrock=_BrokenBedrock(),
+        publisher=_publisher,  # type: ignore[arg-type]
     )
     out = skill.run(XNeedsMiningInput(theme="コンビニ", min_faves=0), _ctx())
     assert len(out.posts) == 1 and out.clusters == []
@@ -284,7 +288,9 @@ def test_buzz_status_unknown_and_running() -> None:
     skill = XBuzzMeasureStatusSkill(store=_FakeStore(status=None), publisher=_publisher)  # type: ignore[arg-type]
     assert skill.run(XBuzzMeasureStatusInput(job_id="xb_x"), _ctx()).status == "unknown"
 
-    running = _FakeStore(status={"status": "running", "progress": {"days_done": 3, "days_total": 14}})
+    running = _FakeStore(
+        status={"status": "running", "progress": {"days_done": 3, "days_total": 14}}
+    )
     skill2 = XBuzzMeasureStatusSkill(store=running, publisher=_publisher)  # type: ignore[arg-type]
     out = skill2.run(XBuzzMeasureStatusInput(job_id="xb_x"), _ctx())
     assert out.status == "running" and out.progress == {"days_done": 3, "days_total": 14}
@@ -334,7 +340,11 @@ def test_buzz_status_done_uses_cache_without_regeneration() -> None:
             "total_cost_usd": 0.05,
         }
     )
-    store.results = {"spec": {}, "daily_counts": [{"date": "2026-07-01", "count": 1}], "top_posts": []}
+    store.results = {
+        "spec": {},
+        "daily_counts": [{"date": "2026-07-01", "count": 1}],
+        "top_posts": [],
+    }
     bedrock = _FakeBedrock("呼ばれないはず")
     skill = XBuzzMeasureStatusSkill(store=store, analysis_bedrock=bedrock, publisher=_publisher)  # type: ignore[arg-type]
     out = skill.run(XBuzzMeasureStatusInput(job_id="xb_1"), _ctx())
@@ -351,9 +361,7 @@ def test_worker_run_job_writes_results(monkeypatch: pytest.MonkeyPatch) -> None:
 
     statuses: list[tuple[str, dict[str, Any]]] = []
     s3_writes: dict[str, str] = {}
-    monkeypatch.setattr(
-        x_buzz_job, "_update_status", lambda t, j, s, d: statuses.append((s, d))
-    )
+    monkeypatch.setattr(x_buzz_job, "_update_status", lambda t, j, s, d: statuses.append((s, d)))
     monkeypatch.setattr(
         x_buzz_job, "_put_s3", lambda b, k, body, ct: s3_writes.__setitem__(k, body)
     )

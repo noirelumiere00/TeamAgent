@@ -38,9 +38,7 @@ class VideoCommentInsight(BaseModel):
 
 
 class CommentMiningInput(BaseModel):
-    video_urls: list[str] = Field(
-        min_length=1, max_length=3, description="TikTok動画URL（1〜3本）"
-    )
+    video_urls: list[str] = Field(min_length=1, max_length=3, description="TikTok動画URL（1〜3本）")
     max_comments_per_video: int = Field(default=200, ge=20, le=500)
     classify: bool = Field(default=True, description="Bedrockでの反応分類を行うか")
     client_name: str | None = Field(default=None, description="クライアント名（文脈補助・任意）")

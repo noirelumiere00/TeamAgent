@@ -7,8 +7,9 @@ Slack へは通知だけを返し、詳細は本HTMLに全て入れる（video_a
 
 from __future__ import annotations
 
-import html as _html
 import datetime as _dt
+import html as _html
+from typing import Any
 
 from teamagent.skills._html.theme import FONT_STACK_JP
 from teamagent.skills.x_research.schema import NeedCluster, XPostCard
@@ -29,7 +30,8 @@ h1{{font-size:20px;margin:0 0 4px}}
 .badge{{border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700}}
 .ok{{background:#e6f4ea;color:#137333}}
 .warn{{background:#fdeeee;color:#b3261e}}
-.cluster{{background:#eef4fb;border:1px solid #d4e2f4;border-radius:10px;padding:12px 16px;margin:18px 0 6px}}
+.cluster{{background:#eef4fb;border:1px solid #d4e2f4;border-radius:10px;
+  padding:12px 16px;margin:18px 0 6px}}
 .cluster h2{{font-size:15px;margin:0 0 4px}}
 .cluster p{{margin:0;font-size:13px;color:#31405a}}
 .summary{{background:#e9f5ef;border:1px solid #cbe7d8;border-radius:10px;padding:12px 16px;
@@ -111,12 +113,12 @@ def render_needs_report(
     by_id = {p.post_id: p for p in posts}
     parts: list[str] = []
     if hypothesis_summary:
-        parts.append(f"<div class='summary'>💡 <b>インサイト仮説</b><br>{_esc(hypothesis_summary)}</div>")
+        parts.append(
+            f"<div class='summary'>💡 <b>インサイト仮説</b><br>{_esc(hypothesis_summary)}</div>"
+        )
     used: set[str] = set()
     for c in clusters:
-        parts.append(
-            f"<div class='cluster'><h2>{_esc(c.label)}</h2><p>{_esc(c.insight)}</p></div>"
-        )
+        parts.append(f"<div class='cluster'><h2>{_esc(c.label)}</h2><p>{_esc(c.insight)}</p></div>")
         for pid in c.post_ids:
             p = by_id.get(pid)
             if p is not None:
@@ -135,7 +137,7 @@ def render_needs_report(
     )
 
 
-def _bar_chart_svg(daily: list[dict[str, object]], campaign_date: str | None) -> str:
+def _bar_chart_svg(daily: list[dict[str, Any]], campaign_date: str | None) -> str:
     """日別発話数のインラインSVG棒グラフ（JSなし・campaign_dateに縦線）。"""
     if not daily:
         return ""
@@ -186,7 +188,7 @@ def render_buzz_report(
     start_date: str,
     end_date: str,
     campaign_date: str | None,
-    daily_counts: list[dict[str, object]],
+    daily_counts: list[dict[str, Any]],
     top_posts: list[XPostCard],
     spike_analysis: str,
 ) -> str:

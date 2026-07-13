@@ -33,7 +33,7 @@ from typing import Any
 import structlog
 
 from teamagent.adapters.apify_client import ApifyClient, ApifyError
-from teamagent.adapters.cost_guard import CostGuard, CostLimitExceeded
+from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 
 logger = structlog.get_logger(__name__)
 
@@ -111,7 +111,7 @@ def run_job(spec: dict[str, Any], *, apify: ApifyClient | None = None) -> int:
             total_cost += cost
             daily_counts.append({"date": day, "count": len(posts)})
             all_posts.extend(asdict(p) for p in posts)
-        except CostLimitExceeded as e:
+        except CostLimitExceededError as e:
             _update_status(
                 table,
                 job_id,
@@ -129,9 +129,7 @@ def run_job(spec: dict[str, Any], *, apify: ApifyClient | None = None) -> int:
             # 欠測として記録し続行（1日の失敗で全体を止めない）
             daily_counts.append({"date": day, "count": -1})
             failed_days.append(day)
-            logger.warning(
-                "x_buzz_worker_day_failed", job_id=job_id, day=day, error=str(e)[:120]
-            )
+            logger.warning("x_buzz_worker_day_failed", job_id=job_id, day=day, error=str(e)[:120])
         _update_status(
             table,
             job_id,
@@ -145,9 +143,7 @@ def run_job(spec: dict[str, Any], *, apify: ApifyClient | None = None) -> int:
 
     top_posts = sorted(all_posts, key=lambda p: int(p.get("like_count", 0)), reverse=True)[:_TOP_N]
     # 欠測(-1)は 0 扱いでなく除外もせず、そのまま可視化側で扱えるよう 0 に落とし警告を残す
-    clean_daily = [
-        {"date": d["date"], "count": max(0, int(d["count"]))} for d in daily_counts
-    ]
+    clean_daily = [{"date": d["date"], "count": max(0, int(d["count"]))} for d in daily_counts]
     results = {
         "spec": {
             "keyword": keyword,

@@ -21,7 +21,7 @@ import structlog
 from pydantic import BaseModel
 
 from teamagent.adapters.apify_client import ApifyClient, ApifyError
-from teamagent.adapters.cost_guard import CostGuard, CostLimitExceeded
+from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -149,7 +149,7 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
                 video_url, max_comments=max_comments, request_id=request_id, user_email=user
             )
             return comments, "apify", cost
-        except CostLimitExceeded:
+        except CostLimitExceededError:
             raise
         except ApifyError as e:
             warnings.append(f"コメント取得に失敗: {str(e)[:80]}")
@@ -211,9 +211,7 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             return insight, float(resp.usage.cost_usd)
         except Exception as e:
             warnings.append("コメント分類をスキップしました（取得のみ）")
-            logger.warning(
-                "comment_classify_failed", request_id=request_id, error=type(e).__name__
-            )
+            logger.warning("comment_classify_failed", request_id=request_id, error=type(e).__name__)
             return insight, 0.0
 
     # ---- 本体 ---------------------------------------------------------------------
@@ -252,7 +250,7 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
                     insight = VideoCommentInsight(video_url=url, total_comments=len(comments))
                 insight.source = source
                 insights.append(insight)
-        except CostLimitExceeded as e:
+        except CostLimitExceededError as e:
             return CommentMiningOutput(slack_summary=str(e), warnings=[str(e)])
 
         if scraped == 0:
@@ -300,7 +298,8 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
 
     def _slack_summary(self, out: CommentMiningOutput) -> str:
         lines = [
-            f"💬 *コメント欄マイニング* 完了（{len(out.videos)}動画・{out.scraped_comments}コメント）"
+            f"💬 *コメント欄マイニング* 完了"
+            f"（{len(out.videos)}動画・{out.scraped_comments}コメント）"
         ]
         for ins in out.videos:
             if not ins.buckets:

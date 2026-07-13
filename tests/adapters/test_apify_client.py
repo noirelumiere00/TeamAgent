@@ -16,7 +16,7 @@ from teamagent.adapters.apify_client import (
     ApifyClient,
     ApifyError,
 )
-from teamagent.adapters.cost_guard import CostLimitExceeded
+from teamagent.adapters.cost_guard import CostLimitExceededError
 
 
 class _FakeApify:
@@ -108,9 +108,7 @@ def test_tier_error_surfaces_on_silent_zero() -> None:
     fake.items_by_actor[ACTOR_X_SEARCH] = []
     fake.status_message = "This feature requires a paid plan"
     with pytest.raises(ApifyError, match="APIFY_TIER"):
-        fake.client().run_actor_sync(
-            ACTOR_X_SEARCH, {"query": "x"}, max_items=5, request_id="t"
-        )
+        fake.client().run_actor_sync(ACTOR_X_SEARCH, {"query": "x"}, max_items=5, request_id="t")
 
 
 def test_deadline_aborts_run() -> None:
@@ -180,7 +178,7 @@ def test_tiktok_comments_normalized() -> None:
 
 class _DenyLedger:
     def check(self, provider: str, user_email: str, **kw: Any) -> list[str]:
-        raise CostLimitExceeded("今月の枠を使い切りました")
+        raise CostLimitExceededError("今月の枠を使い切りました")
 
     def record(self, *a: Any, **kw: Any) -> None:  # pragma: no cover
         raise AssertionError("record は呼ばれないはず")
@@ -207,7 +205,7 @@ def test_ledger_deny_blocks_before_run() -> None:
     fake = _FakeApify()
     http = httpx.Client(transport=httpx.MockTransport(fake.handler))
     client = ApifyClient("tok", ledger=_DenyLedger(), http=http, poll_interval_s=0.0)
-    with pytest.raises(CostLimitExceeded):
+    with pytest.raises(CostLimitExceededError):
         client.run_actor_sync(ACTOR_X_SEARCH, {"query": "x"}, max_items=5, request_id="t")
     assert fake.calls == []  # fail-close: actor は起動していない＝課金ゼロ
 

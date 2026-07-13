@@ -25,7 +25,7 @@ import structlog
 from pydantic import BaseModel
 
 from teamagent.adapters.apify_client import ApifyClient, ApifyError
-from teamagent.adapters.cost_guard import CostGuard, CostLimitExceeded
+from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -213,7 +213,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             for fut in [ex.submit(_one, kw) for kw in keywords]:
                 try:
                     kw, ig_posts, c = fut.result()
-                except CostLimitExceeded:
+                except CostLimitExceededError:
                     raise
                 except ApifyError as e:
                     warnings.append(f"IG面の取得に失敗: {str(e)[:80]}")
@@ -386,7 +386,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                     warnings=warnings,
                 )
                 total_cost += cost
-        except CostLimitExceeded as e:
+        except CostLimitExceededError as e:
             return SearchSurfaceCheckOutput(
                 keywords=input.keywords, slack_summary=str(e), warnings=[str(e)]
             )
@@ -404,9 +404,10 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         if input.analyze and classify_jobs:
             with ThreadPoolExecutor(max_workers=4) as ex:
                 futs = {
-                    ex.submit(
-                        self._classify, kw, platform, posts, ctx.request_id, warnings
-                    ): (kw, platform)
+                    ex.submit(self._classify, kw, platform, posts, ctx.request_id, warnings): (
+                        kw,
+                        platform,
+                    )
                     for kw, platform, posts in classify_jobs
                 }
                 for fut, key in futs.items():
@@ -441,9 +442,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         comparison = ""
         if input.analyze:
             try:
-                digest = {
-                    f"{s.keyword}/{s.platform}": s.category_ratio for s in surfaces
-                }
+                digest = {f"{s.keyword}/{s.platform}": s.category_ratio for s in surfaces}
                 resp = self._get_bedrock().converse(
                     messages=[
                         {
@@ -496,10 +495,8 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         )
         return out
 
-    def _slack_summary(
-        self, out: SearchSurfaceCheckOutput, input: SearchSurfaceCheckInput
-    ) -> str:
-        lines = [f"🗺️ *検索面チェック* 完了（{ '・'.join(out.keywords) }）"]
+    def _slack_summary(self, out: SearchSurfaceCheckOutput, input: SearchSurfaceCheckInput) -> str:
+        lines = [f"🗺️ *検索面チェック* 完了（{'・'.join(out.keywords)}）"]
         if out.comparison_summary:
             lines.append(out.comparison_summary)
         client_hits = [s for s in out.surfaces if s.client_ranks]

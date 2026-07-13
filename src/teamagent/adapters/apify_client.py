@@ -205,9 +205,9 @@ def _parse_ig_item(d: dict[str, Any], source_actor: str) -> IgPost | None:
         shortcode=shortcode,
         url=url,
         caption=str(_first(d, "caption", "text", "title", default="")),
-        author=str(
-            _first(d, "ownerUsername", "owner_username", "username", default="")
-        ).lstrip("@"),
+        author=str(_first(d, "ownerUsername", "owner_username", "username", default="")).lstrip(
+            "@"
+        ),
         like_count=_as_int(_first(d, "likesCount", "likeCount", "likes", default=0)),
         view_count=_as_int(
             _first(d, "videoViewCount", "videoPlayCount", "viewCount", "plays", default=0)
@@ -270,9 +270,7 @@ class ApifyClient:
     def _abort(self, run_id: str, request_id: str) -> None:
         """デッドライン超過時に run を止める（課金停止）。失敗しても本処理は継続。"""
         try:
-            self._http.post(
-                f"{_API_BASE}/actor-runs/{run_id}/abort", params={"token": self._token}
-            )
+            self._http.post(f"{_API_BASE}/actor-runs/{run_id}/abort", params={"token": self._token})
             logger.warning("apify_run_aborted", request_id=request_id, run_id=run_id)
         except Exception as e:
             logger.warning(
@@ -292,7 +290,7 @@ class ApifyClient:
         """actor run を起動し、完了までポーリングして dataset items を返す。
 
         deadline_s 超過時は abort を叩いて ApifyError(APIFY_TIMEOUT)。
-        ledger 注入時は run 前に check（予算超過= CostLimitExceeded 送出＝fail-close）、
+        ledger 注入時は run 前に check（予算超過= CostLimitExceededError 送出＝fail-close）、
         run 後に実件数ベースで record する。
         """
         unit_price = _ACTOR_PRICE_PER_ITEM.get(actor_id, 0.001)
@@ -310,8 +308,7 @@ class ApifyClient:
             resp = self._request("POST", f"/acts/{actor_id}/runs", json=run_input)
         except httpx.HTTPStatusError as e:
             raise ApifyError(
-                f"APIFY_HTTP: actor起動に失敗しました ({actor_id}, "
-                f"status={e.response.status_code})"
+                f"APIFY_HTTP: actor起動に失敗しました ({actor_id}, status={e.response.status_code})"
             ) from e
         except httpx.HTTPError as e:
             raise ApifyError(f"APIFY_HTTP: actor起動に失敗しました ({actor_id})") from e
@@ -575,9 +572,9 @@ class ApifyClient:
                 {
                     "text": text,
                     "likes": _as_int(_first(it, "diggCount", "likesCount", "likes", default=0)),
-                    "author": str(
-                        _first(it, "uniqueId", "username", "author", default="")
-                    ).lstrip("@"),
+                    "author": str(_first(it, "uniqueId", "username", "author", default="")).lstrip(
+                        "@"
+                    ),
                 }
             )
         return comments, res.estimated_cost_usd

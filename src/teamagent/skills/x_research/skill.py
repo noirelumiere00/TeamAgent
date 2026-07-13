@@ -26,7 +26,7 @@ import structlog
 from pydantic import BaseModel
 
 from teamagent.adapters.apify_client import ApifyClient, ApifyError, XPost
-from teamagent.adapters.cost_guard import CostGuard, CostLimitExceeded
+from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.adapters.x_task_store import XTaskStore, new_job_id
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
@@ -112,9 +112,7 @@ def _analysis_bedrock() -> Any:
     model_id = os.environ.get("X_ANALYSIS_MODEL_ID", "").strip()
     if not model_id:
         return BedrockClient.from_env()
-    return BedrockClient(
-        region=os.environ.get("AWS_REGION", "ap-northeast-1"), model_id=model_id
-    )
+    return BedrockClient(region=os.environ.get("AWS_REGION", "ap-northeast-1"), model_id=model_id)
 
 
 class _XSyncBase:
@@ -198,7 +196,7 @@ class _XSyncBase:
                     posts, c = fut.result()
                     results.extend(posts)
                     cost += c
-                except CostLimitExceeded:
+                except CostLimitExceededError:
                     raise
                 except ApifyError as e:
                     warnings.append(f"クエリ『{q}』の検索に失敗: {str(e)[:80]}")
@@ -227,7 +225,7 @@ class _XSyncBase:
                     request_id=request_id,
                     user_email=user,
                 )
-            except CostLimitExceeded:
+            except CostLimitExceededError:
                 raise
             except ApifyError as e:
                 warnings.append(f"実在検証に失敗（全件 要再確認扱い）: {str(e)[:80]}")
@@ -340,7 +338,7 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
                 warnings=warnings,
             )
             total_cost += cost
-        except CostLimitExceeded as e:
+        except CostLimitExceededError as e:
             return XVoiceSearchOutput(
                 product_name=input.product_name, slack_summary=str(e), warnings=[str(e)]
             )
@@ -357,9 +355,7 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             noise_note=noise_note,
             searched=len(posts),
         )
-        report_url = self._publish_html(
-            html, request_id=ctx.request_id, query=input.product_name
-        )
+        report_url = self._publish_html(html, request_id=ctx.request_id, query=input.product_name)
         verified_count = sum(1 for c in cards if c.verified)
         out = XVoiceSearchOutput(
             product_name=input.product_name,
@@ -506,7 +502,7 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
                 )
                 for c in clusters
             ]
-        except CostLimitExceeded as e:
+        except CostLimitExceededError as e:
             return XNeedsMiningOutput(theme=input.theme, slack_summary=str(e), warnings=[str(e)])
         except ApifyError as e:
             return XNeedsMiningOutput(
@@ -542,7 +538,10 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
         return out
 
     def _slack_summary(self, out: XNeedsMiningOutput) -> str:
-        lines = [f"💡 *ニーズ発掘* 完了「{out.theme}」（厳選{len(out.posts)}件・{len(out.clusters)}分類）"]
+        lines = [
+            f"💡 *ニーズ発掘* 完了「{out.theme}」"
+            f"（厳選{len(out.posts)}件・{len(out.clusters)}分類）"
+        ]
         if out.hypothesis_summary:
             lines.append(out.hypothesis_summary)
         top = max(out.posts, key=lambda p: p.like_count, default=None)
@@ -614,7 +613,9 @@ class XBuzzMeasureSkill(BaseSkill[XBuzzMeasureInput, XBuzzMeasureOutput]):
 
 
 @register
-class XBuzzMeasureStatusSkill(_XSyncBase, BaseSkill[XBuzzMeasureStatusInput, XBuzzMeasureStatusOutput]):
+class XBuzzMeasureStatusSkill(
+    _XSyncBase, BaseSkill[XBuzzMeasureStatusInput, XBuzzMeasureStatusOutput]
+):
     """④ 効果測定の状態照会。done 初回に山分析+HTMLレポートを生成しキャッシュする。"""
 
     name: ClassVar[str] = "x_buzz_measure_status"
@@ -684,9 +685,7 @@ class XBuzzMeasureStatusSkill(_XSyncBase, BaseSkill[XBuzzMeasureStatusInput, XBu
             if not spike:
                 try:
                     spike_days = sorted(daily, key=lambda d: int(d.get("count", 0)), reverse=True)
-                    sample = [
-                        p for p in results.get("top_posts", []) if isinstance(p, dict)
-                    ][:10]
+                    sample = [p for p in results.get("top_posts", []) if isinstance(p, dict)][:10]
                     prompt = load_prompt("x_research", "v1", "buzz").format(
                         keyword=str(spec.get("keyword", "")),
                         start_date=str(spec.get("start_date", "")),
@@ -724,9 +723,7 @@ class XBuzzMeasureStatusSkill(_XSyncBase, BaseSkill[XBuzzMeasureStatusInput, XBu
                 html, request_id=ctx.request_id, query=str(spec.get("keyword", ""))
             )
             if report_url:
-                self._store.cache_report(
-                    input.job_id, report_url=report_url, spike_analysis=spike
-                )
+                self._store.cache_report(input.job_id, report_url=report_url, spike_analysis=spike)
 
         total = sum(int(d.get("count", 0) or 0) for d in daily)
         report_line = f"\n📄 レポート（7日有効）: {report_url}" if report_url else ""
@@ -740,7 +737,5 @@ class XBuzzMeasureStatusSkill(_XSyncBase, BaseSkill[XBuzzMeasureStatusInput, XBu
             report_url=report_url,
             s3_prefix=s3_prefix,
             total_cost_usd=round(total_cost, 4),
-            message=(
-                f"完了しました（総発話 {total:,}件・{len(daily)}日分）。{spike}{report_line}"
-            ),
+            message=(f"完了しました（総発話 {total:,}件・{len(daily)}日分）。{spike}{report_line}"),
         )

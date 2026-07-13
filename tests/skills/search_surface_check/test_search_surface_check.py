@@ -56,9 +56,7 @@ class _FakeBedrock:
             n = text.count('"id"')
             cats = {str(i): ("news" if i % 2 == 0 else "ugc") for i in range(n)}
             body = json.dumps({"categories": cats, "note": ""})
-        return type(
-            "R", (), {"text": body, "usage": type("U", (), {"cost_usd": 0.001})()}
-        )()
+        return type("R", (), {"text": body, "usage": type("U", (), {"cost_usd": 0.001})()})()
 
 
 class _FakeSource:
@@ -138,10 +136,10 @@ def test_s3_path_with_ig_and_client_marking() -> None:
 
 
 def test_many_keywords_without_acquire_prefix_guides_to_acquire() -> None:
-    skill = SearchSurfaceCheckSkill(apify=_FakeApify(), bedrock=_FakeBedrock(), publisher=_publisher)  # type: ignore[arg-type]
-    out = skill.run(
-        SearchSurfaceCheckInput(keywords=["セブン", "ファミマ", "ローソン"]), _ctx()
-    )
+    skill = SearchSurfaceCheckSkill(
+        apify=_FakeApify(), bedrock=_FakeBedrock(), publisher=_publisher
+    )  # type: ignore[arg-type]
+    out = skill.run(SearchSurfaceCheckInput(keywords=["セブン", "ファミマ", "ローソン"]), _ctx())
     assert "tiktok_acquire" in out.slack_summary
     assert out.surfaces == []
 

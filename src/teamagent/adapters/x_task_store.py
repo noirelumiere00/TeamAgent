@@ -82,7 +82,9 @@ class XTaskStore:
             logger.info("x_buzz_submitted", job_id=spec["job_id"])
             return True
         except Exception as e:
-            logger.warning("x_buzz_submit_failed", job_id=spec.get("job_id"), error=type(e).__name__)
+            logger.warning(
+                "x_buzz_submit_failed", job_id=spec.get("job_id"), error=type(e).__name__
+            )
             return False
 
     # ---- status -------------------------------------------------------------

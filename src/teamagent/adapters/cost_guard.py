@@ -7,7 +7,7 @@
   - **外部SaaS（Apify/xAI等）の$** = 本モジュール（この空白だけが新規）
 
 設計は quota_store.py の裁定を踏襲:
-  - 予算超過 = fail-close（CostLimitExceeded 送出＝実行させない）
+  - 予算超過 = fail-close（CostLimitExceededError 送出＝実行させない）
   - 台帳インフラ障害 = fail-open（WARNログ＋実行は通す。コスト制御で業務を止めない）
   - env 未設定 = ガード無効（後方互換）
   - 月次リセット = JST 月初（quota_store.current_month_jst を共用）
@@ -41,7 +41,7 @@ _WARN_RATIO = 0.8  # 月次上限の80%超で警告（実行は許可）
 _MICRO = 1_000_000  # USD → マイクロUSD
 
 
-class CostLimitExceeded(RuntimeError):
+class CostLimitExceededError(RuntimeError):
     """予算超過（fail-close）。str() がそのままユーザー向けメッセージになる。"""
 
 
@@ -112,7 +112,7 @@ class CostGuard:
     ) -> list[str]:
         """実行前チェック。1回上限/月次全体/月次個人の3段。
 
-        超過は CostLimitExceeded（fail-close）。月次80%超は警告文字列を返して実行許可。
+        超過は CostLimitExceededError（fail-close）。月次80%超は警告文字列を返して実行許可。
         台帳読取の失敗は fail-open（空リストで許可・WARN）。
         """
         warnings: list[str] = []
@@ -121,7 +121,7 @@ class CostGuard:
 
         per_call = _envfloat(f"COST_{prov_env}_PER_CALL_USD")
         if per_call is not None and est_cost_usd > per_call:
-            raise CostLimitExceeded(
+            raise CostLimitExceededError(
                 f"1回の{prov}実行見積(${est_cost_usd:.2f})が上限(${per_call:.2f})を超えます。"
                 "件数を減らして再実行してください。"
             )
@@ -145,7 +145,7 @@ class CostGuard:
                         used_usd=round(used, 4),
                         limit_usd=monthly,
                     )
-                    raise CostLimitExceeded(
+                    raise CostLimitExceededError(
                         f"今月の{prov}利用枠(${monthly:.0f})を使い切りました"
                         f"（使用済み ${used:.2f}）。管理者(小俣)に連絡してください。"
                     )
@@ -165,11 +165,11 @@ class CostGuard:
                         used_usd=round(used_u, 4),
                         limit_usd=per_user,
                     )
-                    raise CostLimitExceeded(
+                    raise CostLimitExceededError(
                         f"あなたの今月の{prov}利用枠(${per_user:.0f})を使い切りました。"
                         "管理者(小俣)に連絡してください。"
                     )
-        except CostLimitExceeded:
+        except CostLimitExceededError:
             raise
         except Exception as e:
             # fail-open（quota_store 裁定と同じ）: 台帳障害でユーザー業務を止めない。
@@ -190,7 +190,7 @@ class CostGuard:
         prov = provider.strip().lower()
         month = current_month_jst()
         email = (user_email or "").strip().lower()
-        micro = int(round(cost_usd * _MICRO))
+        micro = round(cost_usd * _MICRO)
         try:
             self._add_micro(f"{prov}#{month}", micro, units)
             if email:
@@ -211,4 +211,4 @@ class CostGuard:
             )
 
 
-__all__ = ["CostGuard", "CostLimitExceeded"]
+__all__ = ["CostGuard", "CostLimitExceededError"]

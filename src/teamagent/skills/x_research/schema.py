@@ -39,7 +39,7 @@ class XVoiceSearchInput(BaseModel):
     queries: list[str] = Field(
         min_length=1,
         max_length=6,
-        description="検索クエリ群（同義語・文脈違いをAIが商材から立案。例:『白湯』『アサヒ 白湯』）",
+        description="検索クエリ群（同義語・文脈違いをAIが商材から立案。例: 白湯/アサヒ 白湯）",
     )
     search_type: Literal["top", "latest"] = "top"
     results_per_query: int = Field(default=20, ge=5, le=30)
@@ -130,7 +130,9 @@ class XBuzzMeasureInput(BaseModel):
 class XBuzzMeasureOutput(BaseModel):
     job_id: str
     status: str = Field(description="queued 等。実取得は日数分かかる(非同期)")
-    poll_after_s: int = Field(default=90, description="この秒数後に x_buzz_measure_status を呼ぶ目安")
+    poll_after_s: int = Field(
+        default=90, description="この秒数後に x_buzz_measure_status を呼ぶ目安"
+    )
     message: str = ""
 
 
