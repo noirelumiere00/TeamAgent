@@ -249,6 +249,8 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # (search:read 等) 設定＋対象ユーザーの Slack 連携（xoxp・search:read 込み）が前提。
       # 未連携ユーザーは fail-open で空＝段階ロールアウト可。
       { name = "MORNING_DIGEST_SLACK_UNREAD", value = var.morning_digest_slack_unread ? "true" : "false" },
+      # 密度優先描画（2026-07-13 パイロットFB「見づらい」対応・env のみで切替可）。
+      { name = "MORNING_DIGEST_COMPACT", value = var.morning_digest_compact ? "true" : "false" },
       # 📅カレンダー登録ボタン（v0.3 Task3・既定OFF）。押下先 calendar_event tool の有効化とセットで ON。
       { name = "MORNING_DIGEST_CALENDAR_BUTTON", value = var.morning_digest_calendar_button ? "true" : "false" },
       # 🗓日程候補提案ボタン（v0.3 Task4・既定OFF）。押下先 schedule_propose tool の有効化とセットで ON。
@@ -337,6 +339,12 @@ resource "aws_iam_role_policy" "events_morning_digest_run_task" {
 }
 
 # --- EventBridge rule: 平日 0:30 UTC = 9:30 JST ---
+variable "morning_digest_compact" {
+  description = "朝ダイジェストの密度優先描画（1件=1行・本文プレビュー廃止・〈他N件〉統一）。2026-07-13 パイロットFB対応。既定 false=旧描画。"
+  type        = bool
+  default     = false
+}
+
 variable "morning_digest_rule_enabled" {
   description = "朝ダイジェストの EventBridge ルールを ENABLED にするか。live は手動 DISABLED 運用のため既定 false（2026-07-11 監査: state 未指定だと provider 既定 ENABLED になり、apply のたびに手動 DISABLE が勝手に巻き戻る）。ロールアウト時はこの変数を true にして apply で点灯する（CLI enable-rule は次回 apply で戻るため使わない）。"
   type        = bool
