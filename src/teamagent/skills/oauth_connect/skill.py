@@ -31,7 +31,7 @@ from typing import Any, ClassVar
 import structlog
 from pydantic import BaseModel
 
-from teamagent.adapters.google_oauth_flow import OAuthConsentFlow
+from teamagent.adapters.google_oauth_flow import WORKSPACE_SCOPES, OAuthConsentFlow
 from teamagent.adapters.slack_oauth_flow import SlackOAuthConsentFlow
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.oauth_connect.schema import OAuthConnectInput, OAuthConnectOutput
@@ -78,9 +78,11 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
         "本人専用リンクを発行する。『連携』『連携したい』『Google連携』『Slack連携』"
         "『接続』『connect』等を言われたら呼ぶ。対象は常に話しかけている本人で、引数は不要"
         "（本人は MCP 境界が解決する）。**まだ連携していないサービスのリンクだけ**を返す"
-        "（両方連携済みなら『連携済み』と返る）。返した message を**一字一句そのまま**本人に"
-        "提示すること（message 内の [ラベル](URL) リンクを崩さない・URL を裸で貼り直さない・"
-        "コードブロックで包まない・URL 文字列に手を加えない）。"
+        "（両方連携済みなら『連携済み』と返る）。連携済みでも機能追加で必要な権限（スコープ）が"
+        "増えている場合は自動で*再連携*リンクを返す（『再連携』『連携し直す』と言われた場合もこれで足りる）。"
+        "返した message を**一字一句そのまま**本人に提示すること（message 内の [ラベル](URL) "
+        "リンクを崩さない・URL を裸で貼り直さない・コードブロックで包まない・URL 文字列に"
+        "手を加えない）。"
     )
     input_schema: ClassVar[type[BaseModel]] = OAuthConnectInput
     output_schema: ClassVar[type[BaseModel]] = OAuthConnectOutput
@@ -105,6 +107,37 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             log.warning("oauth_connect_conn_check_failed", kind=kind, error=type(e).__name__)
             return False
 
+    def _google_status(self, requester: str, log: Any) -> tuple[bool, bool]:
+        """Google の連携状態を (connected, scope_upgrade_needed) で返す。
+
+        v0.3 で WORKSPACE_SCOPES に calendar.events 等が追加されたが、既連携ユーザーの
+        stored scopes は旧のまま＝「連携済みだが機能が動かない」状態になる。従来の
+        has()（行の有無）では検知できず、しかも『連携済みはリンクを出さない』仕様のため
+        本人が再連携したくてもリンクを入手できなかった（2026-07-13 パイロットで実害）。
+        → stored scopes ⊇ WORKSPACE_SCOPES を要求し、不足なら再連携リンクを出す。
+        判定不能（store が scopes 未実装/例外）は従来どおり has() ベースへフォールバック。
+        """
+        try:
+            store = self._google_store if self._google_store is not None else _build_google_store()
+            scopes_fn = getattr(store, "scopes", None)
+            if not callable(scopes_fn):
+                return bool(store.has(requester)), False
+            stored = scopes_fn(requester)
+            if stored is None:
+                return False, False
+            missing = set(WORKSPACE_SCOPES) - set(stored)
+            if missing:
+                log.info(
+                    "oauth_connect_scope_upgrade_needed",
+                    missing_count=len(missing),
+                    stored_count=len(stored),
+                )
+                return False, True
+            return True, False
+        except Exception as e:  # fail-safe: 判定不能は未連携扱い（リンクを出す＝安全側）
+            log.warning("oauth_connect_conn_check_failed", kind="google", error=type(e).__name__)
+            return False, False
+
     def run(self, _input: OAuthConnectInput, ctx: SkillContext) -> OAuthConnectOutput:
         log = ctx.bind_logger(self.name)
 
@@ -117,10 +150,8 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             raise PermissionError("oauth_connect は本人 user_email が必須です（本人専用リンク）")
         requester = requester.strip()
 
-        # 連携状態（未連携のものだけ案内する）。
-        google_connected = self._is_connected(
-            requester, self._google_store, _build_google_store, log, "google"
-        )
+        # 連携状態（未連携のものだけ案内する）。Google はスコープ不足も「要再連携」として検知。
+        google_connected, google_scope_upgrade = self._google_status(requester, log)
         slack_configured = bool(os.environ.get("SLACK_OAUTH_REDIRECT_URI", "").strip())
         slack_connected = slack_configured and self._is_connected(
             requester, self._slack_store, _build_slack_store, log, "slack"
@@ -156,7 +187,14 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
                 slack_url = None
 
         masked = _mask_email(requester)
-        message = _compose_message(requester, url, slack_url, google_connected, slack_connected)
+        message = _compose_message(
+            requester,
+            url,
+            slack_url,
+            google_connected,
+            slack_connected,
+            google_scope_upgrade=google_scope_upgrade,
+        )
 
         log.info(
             "oauth_connect_url_issued",
@@ -165,6 +203,7 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             slack_included=bool(slack_url),
             google_connected=google_connected,
             slack_connected=slack_connected,
+            google_scope_upgrade=google_scope_upgrade,
         )
         return OAuthConnectOutput(
             url=url, slack_url=slack_url, user_email_masked=masked, message=message
@@ -177,6 +216,8 @@ def _compose_message(
     slack_url: str | None,
     google_connected: bool,
     slack_connected: bool,
+    *,
+    google_scope_upgrade: bool = False,
 ) -> str:
     """未連携サービスの案内文を組み立てる（連携済みは省略・両方済みは完了案内）。
 
@@ -193,7 +234,13 @@ def _compose_message(
     """
     targets: list[tuple[str, str]] = []  # (リンクラベル, URL)
     if url:
-        targets.append(("Google を連携する（メール・カレンダー等）", url))
+        # #188: v0.3 スコープ追加により既連携ユーザーは「連携済みだが権限不足」になる。
+        # その場合は連携リンク自体は出す（google_connected=False）が、ラベルで再連携である旨を示す。
+        if google_scope_upgrade:
+            g_label = "Google を再連携する（権限追加のため・カレンダー登録/日程提案等）"
+        else:
+            g_label = "Google を連携する（メール・カレンダー等）"
+        targets.append((g_label, url))
     if slack_url:
         targets.append(("Slack を連携する（本人としての検索・チャンネル巡回）", slack_url))
 

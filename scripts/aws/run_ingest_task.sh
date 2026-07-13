@@ -111,6 +111,7 @@ OVERRIDES=$(jq -nc \
     {name: "INGEST_SOURCES_S3_URI",       value: $uri},
     {name: "INGEST_SOURCES_SHA256",       value: $sha},
     {name: "USE_DOC_KIND_RULES",          value: "true"},
+    {name: "BEDROCK_MODEL_ID",            value: "jp.anthropic.claude-haiku-4-5-20251001-v1:0"},
     {name: "INGEST_MARK_STALE",           value: $ms},
     {name: "INGEST_STALE_ALLOW_MASS",     value: $am},
     {name: "INGEST_ROOT_CHECK_WARN_ONLY", value: $rw}

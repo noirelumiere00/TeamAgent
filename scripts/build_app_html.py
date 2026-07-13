@@ -521,7 +521,7 @@ HTML = r"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name
  --b00:#ffffff;--b05:#fcfcfc;--b10:#fafafa;--b20:#f6f6f6;--b25:#e3e3e3;--b30:#e0e0e0;--b35:#d4d4d4;--b40:#bdbdbd;--b50:#ababab;--b60:#707070;--b70:#5a5a5a;--b100:#222222;
  --bg-primary:#ffffff;--bg-sidebar:#f7f7f8;--bg-elev:#f1f1f3;--bg-float:#ffffff;
  --border:#e5e5e7;--border-focus:#d2d2d5;--hover:rgba(0,0,0,.045);--active:rgba(0,0,0,.075);
- --text:#22232a;--muted:#5c5d64;--faint:#9b9ca3;--on-accent:#fff;
+ --text:#22232a;--muted:#5c5d64;--faint:#71737b;--on-accent:#fff;
  --accent-h:254;--accent-s:70%;--accent-l:60%;
  --accent:hsl(254,72%,62%);--accent-2:hsl(254,55%,50%);--accent-hover:hsl(254,72%,55%);--accent-bg:hsla(254,72%,62%,.13);
  --ok:#2e9e63;--warn:#c98a12;--err:#d24a3f;--mark:#ffe08a;--mark-fg:#5a4600;
@@ -534,7 +534,7 @@ HTML = r"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name
  --b00:#1e1e1e;--b05:#212121;--b10:#242424;--b20:#262626;--b25:#2a2a2a;--b30:#363636;--b35:#3f3f3f;--b40:#555;--b50:#666;--b60:#999;--b70:#bababa;--b100:#dadada;
  --bg-primary:#1e1e1e;--bg-sidebar:#181818;--bg-elev:#262626;--bg-float:#2a2a2a;
  --border:#333;--border-focus:#484848;--hover:rgba(255,255,255,.05);--active:rgba(255,255,255,.085);
- --text:#dadada;--muted:#999;--faint:#6a6a6a;
+ --text:#dadada;--muted:#999;--faint:#8a8a8a;
  --accent:hsl(254,74%,70%);--accent-2:hsl(254,72%,78%);--accent-hover:hsl(254,74%,64%);--accent-bg:hsla(254,74%,70%,.2);
  --mark:#5a4a17;--mark-fg:#ffe08a;
 }
@@ -564,7 +564,8 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .sfield{margin:2px 10px 8px;position:relative;display:flex;align-items:center}
 .sfield svg{position:absolute;left:8px;color:var(--faint);width:14px;height:14px}
 .sfield input{width:100%;background:var(--b10);border:1px solid var(--border);border-radius:var(--r-s);color:var(--text);padding:6px 8px 6px 28px;font-size:var(--f-ui-smaller);font-family:inherit}
-.sfield input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-bg)}
+.sfield input:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-bg)}
+.sfield input:focus:not(:focus-visible){outline:none}   /* マウス時のみ抑止（キーボードの :focus-visible リングは殺さない） */
 /* ツリー */
 .tree{padding:0 6px}
 .trow{display:flex;align-items:center;gap:5px;padding:3px 6px;border-radius:var(--r-s);cursor:pointer;color:var(--muted);font-size:var(--f-ui-smaller);white-space:nowrap;overflow:hidden;user-select:none;position:relative}
@@ -572,8 +573,8 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .trow.active{background:var(--active);color:var(--text)}
 .tchildren{position:relative}
 .tchildren::before{content:"";position:absolute;left:19px;top:0;bottom:0;width:1px;background:var(--border)}
-.trow .tw{width:14px;height:14px;display:flex;align-items:center;justify-content:center;color:var(--faint);transition:transform .12s}
-.trow.closed .tw{transform:rotate(-90deg)}
+.trow .tw{width:14px;height:14px;display:flex;align-items:center;justify-content:center;color:var(--faint);transition:transform .12s;transform:rotate(90deg)}   /* 開=下向き（ベースicon chevは右向き） */
+.trow.closed .tw{transform:rotate(0)}   /* 閉=右向き（Obsidian慣習） */
 .trow .lbl{overflow:hidden;text-overflow:ellipsis}
 .trow .cnt{margin-left:auto;color:var(--faint);font-size:11px;font-variant-numeric:tabular-nums;padding-left:6px}
 .trow svg.ic{width:15px;height:15px}
@@ -591,7 +592,7 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .sr{padding:5px 8px;border-radius:var(--r-s);cursor:pointer;margin-bottom:1px}
 .sr:hover{background:var(--hover)}
 .sr .srt{font-size:var(--f-ui-smaller);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sr .srx{font-size:11px;color:var(--faint);line-height:1.5;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sr .srx{font-size:11px;color:var(--muted);line-height:1.5;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sr .srx mark{background:var(--mark);color:var(--mark-fg);border-radius:2px;padding:0 1px}
 .scount{padding:6px 12px;color:var(--faint);font-size:var(--f-ui-smaller);border-bottom:1px solid var(--border);margin-bottom:4px}
 .qhelp{padding:8px 12px;color:var(--faint);font-size:11px;line-height:1.7}
@@ -606,17 +607,17 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .chiprow{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .chiprow.tzrow{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}   /* テーザーは1行固定（はみ出しは横スクロール） */
 .tcmore{color:var(--faint);font-size:11px;padding:2px 4px;align-self:center}
-.qfn{color:var(--faint);font-variant-numeric:tabular-nums}
+.qfn{color:var(--muted);font-variant-numeric:tabular-nums}
 /* 検索ペイン: アクティブフィルタバー（scount 内） */
 .fbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 0 2px}
-.fchip .fx{margin-left:1px;padding:1px 4px;color:var(--faint);cursor:pointer;border-radius:3px;font-size:12px;line-height:14px}
+.fchip .fx{margin:-4px -4px -4px -3px;padding:5px 8px;color:var(--faint);cursor:pointer;border-radius:3px;font-size:12px;line-height:14px}   /* 実効ヒット領域24px（見た目は負marginで相殺） */
 .fchip .fx:hover{color:var(--err);background:var(--hover)}
 .fclear{color:var(--accent-2);cursor:pointer;font-size:11px;padding:2px 6px;border-radius:var(--r-s);white-space:nowrap}
 .fclear:hover{background:var(--hover)}
-.frec{padding-top:4px;color:var(--faint)}
+.frec{padding-top:4px;color:var(--muted)}
 .qex .tagchip{margin:2px 4px 2px 0}
 /* 検索結果行のタグチップ */
-.sr .srtags{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px}
+.sr .srtags{display:flex;flex-wrap:wrap;gap:6px;margin-top:3px}
 /* タグペイン（意味群見出し・畳み行）/ 右パネルタグ */
 .tghead{padding:8px 10px 3px;color:var(--faint);font-size:11px;font-weight:600;letter-spacing:.03em}
 .trow.tmore{color:var(--accent-2)}
@@ -633,8 +634,7 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tab.on{background:var(--bg-primary);color:var(--text)}
 .tab:not(.on):hover{background:var(--hover)}
 .tab .lbl{overflow:hidden;text-overflow:ellipsis}
-.tab .x{width:16px;height:16px;display:flex;align-items:center;justify-content:center;border-radius:3px;color:var(--faint);opacity:0}
-.tab:hover .x{opacity:1}
+.tab .x{width:24px;height:24px;margin:-4px;display:flex;align-items:center;justify-content:center;border-radius:3px;color:var(--faint)}   /* 常時表示（タッチでも見える）+24pxヒット領域 */
 .tab .x:hover{background:var(--active);color:var(--text)}
 .vhead{display:flex;align-items:center;height:36px;padding:0 12px;gap:2px;flex:none;color:var(--faint)}
 .vhead .nav{width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-s);cursor:pointer}
@@ -645,19 +645,15 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .doc{max-width:var(--line-w);margin:0 auto;padding:8px 40px 120px}
 .inline-title{font-size:1.9em;font-weight:800;letter-spacing:-.02em;line-height:1.25;margin:14px 0 2px;color:var(--text)}
 .note-tags{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px}
-.ntag{color:var(--accent-2);font-size:var(--f-ui-smaller);cursor:pointer;background:var(--accent-bg);padding:1px 8px;border-radius:9px}
-.ntag:hover{background:hsla(254,80%,68%,.28)}
 /* Properties(実Obsidian準拠: 生キー+値がありません+追加) */
 .props{margin:8px 0 24px;padding:0}
 .props-h{font-size:var(--f-ui-small);color:var(--muted);padding:4px 2px 6px}
 .prow{display:flex;align-items:center;gap:8px;padding:4px 6px;font-size:var(--f-ui-small);border-radius:var(--r-s)}
-.prow:hover{background:var(--hover)}
 .prow .pk{display:flex;align-items:center;gap:9px;color:var(--muted);width:180px;flex:none}
 .prow .pk svg{width:15px;height:15px;color:var(--faint)}
 .prow .pkn{overflow:hidden;text-overflow:ellipsis}
 .prow .pv{color:var(--text);flex:1;min-width:0}
 .pempty{color:var(--faint)}
-.prow.padd .pk{color:var(--faint)}
 /* リーディングビュー md */
 .md{font-size:var(--f-text);line-height:1.6;color:var(--text)}
 .md h1{font-size:1.9em;font-weight:700;margin:1.1em 0 .5em;line-height:1.3;color:var(--text)}
@@ -695,7 +691,7 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .callout .cot svg{color:var(--cc,#4f9df5)}
 .callout .cob{padding:2px 13px 10px;color:var(--muted);line-height:1.6}
 .callout.warning,.callout.warn{--cc:#e0b34c}.callout.danger,.callout.error,.callout.bug{--cc:#e0685f}.callout.tip,.callout.success{--cc:#54b981}.callout.note,.callout.info,.callout.quote{--cc:#4f9df5}
-.ri,.trow,.sr,.ment,.wcard,.card,.tab,.bl,.olink,.act,.qi,.side-h .act{transition:background .1s ease,color .1s ease,border-color .1s ease}
+.ri,.trow,.sr,.wcard,.tab,.bl,.olink,.act,.qi,.side-h .act,.tagchip,.fchip .fx,.fclear,.tlmorebtn,.tbv thead th{transition:background .1s ease,color .1s ease,border-color .1s ease}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 /* welcome */
 .welcome{max-width:var(--line-w);margin:0 auto;padding:40px}
@@ -732,17 +728,11 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .rsec{margin:2px 0}
 .rsec-h{display:flex;align-items:center;gap:6px;padding:6px 12px;color:var(--muted);font-size:var(--f-ui-smaller);font-weight:600;cursor:pointer}
 .rsec-h:hover{color:var(--text)}
-.rsec-h .tw{width:12px;height:12px;color:var(--faint);transition:transform .12s}
-.rsec-h.closed .tw{transform:rotate(-90deg)}
+.rsec-h .tw{width:12px;height:12px;color:var(--faint);transition:transform .12s;transform:rotate(90deg)}
+.rsec-h.closed .tw{transform:rotate(0)}
 .rsec-h .cnt{margin-left:auto;color:var(--faint)}
 .rsec.closed .rsec-body{display:none}
 .rsec-body{padding:2px 8px 8px}
-.ment{background:var(--b05);border:1px solid var(--border);border-radius:var(--r-s);padding:8px 10px;margin-bottom:6px;cursor:pointer}
-.ment:hover{border-color:var(--border-focus)}
-.ment .mt{font-size:var(--f-ui-smaller);color:var(--text);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ment .mx{font-size:11px;color:var(--faint);margin-top:3px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.ment .mctx{font-size:11.5px;color:var(--muted);margin-top:5px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
-.ment .wlx{background:var(--mark);color:var(--mark-fg);border-radius:2px;padding:0 2px}
 .olink{padding:4px 8px;font-size:var(--f-ui-smaller);color:var(--muted);cursor:pointer;border-radius:var(--r-s);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .olink:hover{background:var(--hover);color:var(--text)}
 /* グラフ */
@@ -755,7 +745,8 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .gpanel .grow{display:flex;align-items:center;gap:7px;padding:1px 0}
 .gpanel .dot{width:9px;height:9px;border-radius:50%;flex:none}
 .gpanel .gin{width:100%;background:var(--b10);border:1px solid var(--border);border-radius:var(--r-s);color:var(--text);padding:4px 7px;font-size:11px;font-family:inherit;margin-bottom:6px}
-.gpanel .gin:focus{outline:none;border-color:var(--accent)}
+.gpanel .gin:focus{border-color:var(--accent)}
+.gpanel .gin:focus:not(:focus-visible){outline:none}
 .gpanel .gck{display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer}
 .gpanel .gck input{accent-color:var(--accent);margin:0}
 .gpanel .gsl{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 0;font-size:11px}
@@ -770,6 +761,7 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .qs input{width:100%;background:transparent;border:0;border-bottom:1px solid var(--border);color:var(--text);padding:15px 18px;font-size:var(--f-ui-med);font-family:inherit;outline:none}
 .qs .list{max-height:52vh;overflow-y:auto;padding:6px}
 .qs .qi{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:var(--r-s);cursor:pointer;font-size:var(--f-ui-small);color:var(--text)}
+.qs .qi:hover{background:var(--hover)}
 .qs .qi svg{color:var(--faint);width:15px;height:15px}
 .qs .qi .pt{margin-left:auto;color:var(--faint);font-size:11px;white-space:nowrap}
 .qs .qi.sel{background:var(--accent-bg)}
@@ -780,7 +772,7 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .gpanel.hidden{display:none}
 .gph{display:flex;align-items:center;justify-content:space-between;padding:2px 2px 8px;margin-bottom:2px;border-bottom:1px solid var(--border)}
 .gph .gpt{color:var(--text);font-weight:600;font-size:var(--f-ui-smaller)}
-.gph .gpx{cursor:pointer;color:var(--faint);width:20px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:4px}
+.gph .gpx{cursor:pointer;color:var(--faint);width:24px;height:24px;margin:-2px;display:flex;align-items:center;justify-content:center;border-radius:4px}
 .gph .gpx:hover{background:var(--hover);color:var(--text)}
 .side,.right{position:relative}
 .rzh{position:absolute;top:0;width:7px;height:100%;cursor:col-resize;z-index:15}
@@ -796,7 +788,8 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tbv .sub{color:var(--muted);margin:0 0 14px;font-size:var(--f-ui-small)}
 .tbv .bar{display:flex;gap:8px;align-items:center;margin:10px 0 14px;flex-wrap:wrap}
 .tbv .bar input,.tbv .bar select{background:var(--b10);border:1px solid var(--border);border-radius:var(--r-s);color:var(--text);padding:6px 10px;font-size:var(--f-ui-smaller);font-family:inherit}
-.tbv .bar input:focus,.tbv .bar select:focus{outline:none;border-color:var(--accent)}
+.tbv .bar input:focus,.tbv .bar select:focus{border-color:var(--accent)}
+.tbv .bar input:focus:not(:focus-visible),.tbv .bar select:focus:not(:focus-visible){outline:none}
 .tbv .bar .n{color:var(--faint);font-size:var(--f-ui-smaller);margin-left:auto}
 .tblwrap{overflow:auto;border:1px solid var(--border);border-radius:var(--r-m);max-height:calc(100vh - 220px)}
 .tbv table{border-collapse:collapse;width:100%;font-size:var(--f-ui-small)}
@@ -804,12 +797,16 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tbv thead th:hover{color:var(--text)}
 .tbv thead th .ar{color:var(--accent-2);margin-left:5px;font-size:10px}
 .tbv td{padding:8px 12px;border-bottom:1px solid var(--b10);color:var(--muted);white-space:nowrap}
+/* 先頭列（取引先名）固定: 横スクロールしても常時可視。背景は不透明必須（hover 時も破綻させない） */
+.tbv td:first-child{position:sticky;left:0;background:var(--bg-primary);z-index:1}
+.tbv thead th:first-child{left:0;z-index:3}
+.tbv tbody tr:hover td:first-child{background:var(--bg-elev)}
 .tbv tbody tr{cursor:pointer}
 .tbv tbody tr:hover{background:var(--hover)}
 .tbv tbody td:first-child{color:var(--text);font-weight:500}
 .tbv .num{text-align:right;font-variant-numeric:tabular-nums}
-.tbv .bp{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px}
-.tbv .dotc{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.tbv .bp{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;color:var(--text)}
+.tbv .dotc{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}
 /* 施策タイムライン（カルテ内・縦タイムライン: 左=日付チップ+縦線 / 右=カード） */
 .tlwrap{margin:4px 0 26px}
 .tlh{display:flex;align-items:center;gap:7px;font-size:var(--f-ui-small);color:var(--muted);font-weight:600;padding:4px 0 9px;border-bottom:1px solid var(--border)}
@@ -821,12 +818,12 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tlrow:last-child::before{display:none}
 .tlrow::after{content:"";position:absolute;left:83px;top:6px;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 2px var(--bg-primary)}
 .tlrow.tldoc::after{background:var(--b40)}
-.tld{width:72px;flex:none;text-align:right;font-size:var(--f-ui-smaller);color:var(--faint);font-variant-numeric:tabular-nums;padding-top:1px}
+.tld{width:72px;flex:none;text-align:right;font-size:var(--f-ui-smaller);color:var(--muted);font-variant-numeric:tabular-nums;padding-top:1px}
 .tlcard{flex:1;min-width:0;background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--r-m);padding:8px 12px 9px;margin-left:26px}
-.tlbadge{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;font-weight:600;margin-right:6px;white-space:nowrap}
+.tlbadge{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;font-weight:600;margin-right:6px;white-space:nowrap;color:var(--text)}
 .tlbadge.tlfb{background:var(--accent-bg);color:var(--accent-2)}
 .tlchip{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;background:var(--hover);color:var(--muted);margin-right:4px;white-space:nowrap}
-.tlchip.tlby{color:var(--faint)}
+.tlchip.tlby{color:var(--muted)}
 .tlt{font-weight:600;font-size:var(--f-ui-small);color:var(--text);margin-top:5px;line-height:1.45;overflow-wrap:anywhere}
 .tlt .wl{color:var(--accent-2);cursor:pointer}
 .tlt .wl:hover{text-decoration:underline}
@@ -835,6 +832,22 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tlmorebtn{display:inline-block;margin:0 0 2px 98px;padding:4px 12px;font-size:var(--f-ui-smaller);color:var(--accent-2);cursor:pointer;border:1px solid var(--border);border-radius:var(--r-s)}
 .tlmorebtn:hover{background:var(--hover);border-color:var(--border-focus)}
 .tlwrap.folded .tlrow.tlhid{display:none}
+/* 商談ジャーニーバー（カルテ）+ ホームのパイプライン節。トークンは tagchip/tl 系流用・両テーマCSS変数のみ */
+.jbwrap{margin:4px 0 22px}
+.jbh{display:flex;align-items:center;gap:7px;font-size:var(--f-ui-small);color:var(--muted);font-weight:600;padding:4px 0 9px;border-bottom:1px solid var(--border)}
+.jbh svg.ic{color:var(--accent-2)}
+.jbbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:11px 0 2px}
+.jbstep{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);border-radius:9px;padding:2px 8px;font-size:11px;line-height:16px;white-space:nowrap;color:var(--faint)}
+.jbstep.past{background:var(--hover);color:var(--muted)}
+.jbstep.cur{background:var(--accent-bg);border-color:var(--accent);color:var(--text);font-weight:600}
+.jbstep.cur.jblost{background:transparent;border-color:var(--err);color:var(--err)}
+.jbstep.reg{border-style:dashed;border-color:var(--warn);color:var(--muted)}
+.jbstep .jbd{color:var(--faint);font-size:10px;font-weight:400;font-variant-numeric:tabular-nums}
+.jbsep,.plarr{color:var(--faint);font-size:11px;flex:none;user-select:none}
+.jbreg{color:var(--warn);font-size:11px;white-space:nowrap}
+.plun{color:var(--faint);font-size:11px;white-space:nowrap;margin-left:2px}
+.tagchip.pld{cursor:default;opacity:.55}
+.tagchip.pld:hover{border-color:var(--border)}
 kbd{background:var(--bg-float);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:11px;font-family:var(--mono)}
 ::selection{background:hsla(254,80%,68%,.35)}
 .tab.newtab{margin-top:8px;width:30px;justify-content:center;color:var(--faint)}
@@ -935,7 +948,7 @@ function catColor(t){return CATMETA[(t||"").split("/")[0]]||"var(--accent)";}
 /* 空白入りタグ値は tag:"値" で発行（parseQuery の引用符対応を利用。空白なしは従来と同一文字列） */
 function tagQ(t){return /\s/.test(t)?'tag:"'+t+'"':"tag:"+t;}
 function chipHtml(tag,mode){const p=tag.split("/"),cat=p[0],val=p.slice(1).join("/");
- return '<span class="tagchip" data-tag="'+esc(tag)+'" style="--cc2:'+catColor(tag)+'" title="'+(mode==="and"?"クリックで絞り込みに追加":"#"+esc(tag)+" で検索")+'"><span class="tcdot" style="background:'+catColor(tag)+'"></span>'
+ return '<span class="tagchip" tabindex="0" role="button" data-tag="'+esc(tag)+'" style="--cc2:'+catColor(tag)+'" title="'+(mode==="and"?"#"+esc(tag)+" — クリックで絞り込みに追加":"#"+esc(tag)+" で検索")+'"><span class="tcdot" style="background:'+catColor(tag)+'"></span>'
   +(val?'<span class="tck">'+esc(cat)+'</span><span class="tcv">'+esc(val)+'</span>':'<span class="tcv">'+esc(cat)+'</span>')+'</span>';}
 /* タグ/クエリ発行の単一路（従来4重複コードと同一手順: 検索ペインへ→input反映→__lastQ→再実行） */
 function runQuery(q){setPane("search");setTimeout(()=>{const i=$("#searchInput");i.value=q;window.__lastQ=q;runSearchPane(q,$("#searchOut"));},30);}
@@ -959,11 +972,10 @@ function saveBm(){localStorage.setItem("aila_bm",JSON.stringify([...bookmarks]))
 const RIBBON=[["vault","","top"],["files","ファイル","pane"],["search","検索","pane"],["tags","タグ","pane"],["bookmark","ブックマーク","pane"],["table","テーブル","view2"],["graph","グラフ","view"]];
 function renderRibbon(){
  const r=$("#ribbon");r.innerHTML="";
- RIBBON.forEach(([id,label,kind])=>{const el=document.createElement("div");el.className="ri";el.dataset.id=id;el.title=label||id;el.innerHTML=ic(id);
+ RIBBON.forEach(([id,label,kind])=>{const el=document.createElement("div");el.className="ri";el.dataset.id=id;el.title=label||id;el.innerHTML=ic(id);el.tabIndex=0;el.setAttribute("role","button");
   el.onclick=()=>{if(kind==="view")openGraph();else if(kind==="view2")tableView();else if(kind==="pane")setPane(id);else if(id==="vault")qsOpen();};r.appendChild(el);});
  const sp=document.createElement("div");sp.className="sp";r.appendChild(sp);
- const th=document.createElement("div");th.className="ri";th.id="themeBtn";th.title="テーマ切替（ライト/ダーク）";th.innerHTML=ic(document.documentElement.getAttribute("data-theme")==="dark"?"sun":"moon");th.onclick=toggleTheme;r.appendChild(th);
- [["help"],["settings"]].forEach(([id])=>{const el=document.createElement("div");el.className="ri";el.innerHTML=ic(id);el.title=id;r.appendChild(el);});
+ const th=document.createElement("div");th.className="ri";th.id="themeBtn";th.title="テーマ切替（ライト/ダーク）";th.innerHTML=ic(document.documentElement.getAttribute("data-theme")==="dark"?"sun":"moon");th.tabIndex=0;th.setAttribute("role","button");th.onclick=toggleTheme;r.appendChild(th);
 }
 function applyTheme(t,persist){document.documentElement.setAttribute("data-theme",t);if(persist){try{localStorage.setItem("aila_theme",t);}catch(e){}}
  const b=$("#themeBtn");if(b)b.innerHTML=ic(t==="dark"?"sun":"moon");if(G&&window.__gRedraw)window.__gRedraw();}
@@ -979,6 +991,7 @@ function renderPane(){
  const b=$("#sideBody");b.innerHTML="";
  $("#sideAct1").innerHTML="";$("#sideAct2").innerHTML="";
  $("#sideAct1").onclick=null;$("#sideAct2").onclick=null;   /* ペイン跨ぎのハンドラ残留防止（タグペインの並び順トグル等） */
+ $("#sideAct1").title="";$("#sideAct2").title="";   /* title 残留防止 */
  if(pane==="files")return renderFiles(b);
  if(pane==="search")return renderSearchPane(b);
  if(pane==="tags")return renderTags(b);
@@ -986,19 +999,18 @@ function renderPane(){
 }
 function treeRow(opts){// {chevron,icon,label,count,indent,active,onclick,onchev}
  const d=document.createElement("div");d.className="trow"+(opts.active?" active":"")+(opts.closed?" closed":"");
+ d.tabIndex=0;d.setAttribute("role","button");
  d.style.paddingLeft=(6+(opts.indent||0)*14)+"px";
  d.innerHTML=(opts.chevron?'<span class="tw">'+ic("chev")+'</span>':'<span class="tw"></span>')
   +(opts.icon?(opts.iconColor?'<span style="color:'+opts.iconColor+';opacity:.85;display:flex">'+ic(opts.icon)+'</span>':ic(opts.icon,opts.iconCls||"")):"")   /* iconColor 指定時は色クラスを外し系統色を効かせる */
   +(opts.dot?'<span class="tcdot" style="background:'+opts.dot+'"></span>':"")
-  +'<span class="lbl"'+(opts.bold?' style="color:var(--text)"':"")+'>'+esc(opts.label)+'</span>'
+  +'<span class="lbl"'+(opts.bold?' style="color:var(--text)"':"")+' title="'+esc(opts.label)+'">'+esc(opts.label)+'</span>'
   +(opts.count!=null?'<span class="cnt">'+opts.count+'</span>':"");
  if(opts.key){d.dataset.key=opts.key;d.classList.add("filerow");}
  if(opts.onclick)d.onclick=opts.onclick;return d;
 }
 const _grpState={_reports:true,clients:false,docs:false};   // フォルダ開閉状態を保持
 function renderFiles(b,revealKey){
- $("#sideAct1").innerHTML=ic("filetext");$("#sideAct1").title="新規ノート";
- $("#sideAct2").innerHTML=ic("folder");$("#sideAct2").title="新規フォルダ";
  const wrap=document.createElement("div");wrap.className="tree";b.appendChild(wrap);
  const revGrp=revealKey?({c:"clients",d:"docs",r:"_reports"}[revealKey[0]]):null;
  const groups=[...(DATA.reports.length?[["_reports",DATA.reports.map(r=>({name:r.name,stem:r.stem,k:"r"}))]]:[]),
@@ -1021,7 +1033,7 @@ function markActiveInTree(){const key=lastNote&&lastNote.key;const b=$("#sideBod
  if(!hit&&key&&/^[cdr]:/.test(key)){b.innerHTML="";renderFiles(b,key);   // 未展開グループ内 → 再描画して開く
   b.querySelectorAll(".trow.filerow").forEach(el=>{const on=el.dataset.key===key;el.classList.toggle("active",on);if(on)hit=el;});}
  if(hit)hit.scrollIntoView({block:"nearest"});}
-function openByK(k,stem){k==="c"?openClient(stem):k==="r"?openReport(stem):openDoc(stem);}
+function openByK(k,stem){k==="c"?openClient(stem):k==="r"?openReport(stem):k==="table"?tableView():openDoc(stem);}   /* table=疑似ビュー復元（tblFilter はモジュール変数で残存するので呼び直しで足りる） */
 
 /* ---- 検索ペイン(演算子対応) ---- */
 function parseQuery(q){const P={plain:[],neg:[],tag:[],path:[],file:[],ntag:[],npath:[],nfile:[],props:[],regex:[]};
@@ -1079,8 +1091,8 @@ function fbarHtml(q){const T=qTokens(q);if(!T.length)return "";
   if(tk.t==="tag")inner='<span class="tcdot" style="background:'+catColor(tk.v)+'"></span>'+(tk.neg?'<span class="tck">除外</span>':'')+'<span class="tcv'+(tk.neg?' tcneg':'')+'">'+esc(tk.v)+'</span>';
   else if(tk.t==="prop")inner='<span class="tck">'+esc(tk.k)+'</span><span class="tcv">'+esc(tk.v==="null"?"（値なし）":tk.v===""?"（値あり）":tk.v)+'</span>';
   else inner='<span class="tck">'+(tk.neg?"除外":TYPELBL[tk.t]||"")+'</span><span class="tcv'+(tk.neg?' tcneg':'')+'">'+esc(tk.v)+'</span>';
-  h+='<span class="tagchip fchip" data-rm="'+esc(tk.raw)+'"'+(tk.t==="tag"?' style="--cc2:'+catColor(tk.v)+'"':'')+'>'+inner+'<span class="fx" title="この条件を外す">×</span></span>';});
- if(T.length>=2)h+='<span class="fclear">すべて解除</span>';
+  h+='<span class="tagchip fchip" tabindex="0" role="button" data-rm="'+esc(tk.raw)+'"'+(tk.t==="tag"?' style="--cc2:'+catColor(tk.v)+'"':'')+'>'+inner+'<span class="fx" tabindex="0" role="button" title="この条件を外す">×</span></span>';});
+ if(T.length>=2)h+='<span class="fclear" tabindex="0" role="button">すべて解除</span>';
  return h+'</div>';}
 /* 空クエリ時ヘルプ: 実データ（tagTree/tagCount）由来のクリック実行例 + 構文リファレンス。
    例は matchItem で実件数を検証し 1件以上ヒットするものだけ載せる（件数併記は tag 例のみ） */
@@ -1114,7 +1126,7 @@ function runSearchPane(q,out){
   const arr=byFolder[fk];if(!arr.length)return;
   html+='<div class="sgroup"><div class="sg-h">'+ic("folder","folder-ico")+' '+label+'<span class="cnt">'+arr.length+'</span></div><div class="sres">';
   arr.slice(0,60).forEach(it=>{const tg=it.tags.slice(0,3).map(t=>chipHtml(t,"and")).join("")+(it.tags.length>3?'<span class="tcmore">+'+(it.tags.length-3)+'</span>':'');
-   html+='<div class="sr" data-k="'+it.kind[0]+'" data-s="'+esc(it.stem)+'"><div class="srt">'+esc(it.name)+'</div>'+(tg?'<div class="srtags">'+tg+'</div>':'')+(it.ex?'<div class="srx">'+hl(it.ex,P.plain)+'</div>':"")+'</div>';});
+   html+='<div class="sr" tabindex="0" role="button" data-k="'+it.kind[0]+'" data-s="'+esc(it.stem)+'"><div class="srt">'+esc(it.name)+'</div>'+(tg?'<div class="srtags">'+tg+'</div>':'')+(it.ex?'<div class="srx">'+hl(it.ex,P.plain)+'</div>':"")+'</div>';});
   if(arr.length>60)html+='<div class="scount">…他 '+(arr.length-60)+' 件</div>';
   html+='</div></div>';
  });
@@ -1138,6 +1150,8 @@ function renderTags(b){
  const wrap=document.createElement("div");wrap.className="tree";b.appendChild(wrap);
  const inp=f.querySelector("input");
  const openSet=new Set();if(window.__tagFocus){openSet.add(window.__tagFocus);delete window.__tagFocus;}   /* ホームのテーザー経由の初期展開 */
+ try{const act0=parseQuery(window.__lastQ||"").tag;   /* active タグの系統を初回のみ seed（再訪時に active 葉が見える。以後の手動畳みは既存トグルが優先） */
+  if(act0.length)Object.keys(tagTree).forEach(top=>{if(Object.keys(tagTree[top].children).some(full=>act0.some(a=>tagMatch([full],a))))openSet.add(top);});}catch(e){}
  const moreSet=new Set();
  function build(){
   wrap.innerHTML="";const q=(inp.value||"").trim().toLowerCase();
@@ -1145,6 +1159,7 @@ function renderTags(b){
   const isAct=t=>act.some(a=>tagMatch([t],a));   /* __lastQ 内のタグと tagMatch 照合 */
   const known=new Set(TAGORDER);
   const extra=Object.keys(tagTree).filter(t=>!known.has(t)).sort();   /* 未知系統は末尾へ（防御） */
+  let total=0;   /* 絞り込み0件の空状態表示用 */
   [["取引先のタグ",TAGORDER.slice(0,7)],["資料のタグ",TAGORDER.slice(7).concat(extra)]].forEach(([gl,cats])=>{
    const present=cats.filter(c=>tagTree[c]);if(!present.length)return;
    let ghead=null;
@@ -1169,7 +1184,9 @@ function renderTags(b){
     wrap.appendChild(fr);wrap.appendChild(ch);
    });
    if(!shown&&ghead)ghead.remove();
+   total+=shown;
   });
+  if(!total){const d=document.createElement("div");d.className="qhelp";d.textContent="『"+(inp.value||"").trim()+"』に一致するタグはありません";wrap.appendChild(d);}
  }
  let dt=null;inp.addEventListener("input",()=>{clearTimeout(dt);dt=setTimeout(build,80);});
  a1.onclick=()=>{tagSortAlpha=!tagSortAlpha;build();};
@@ -1186,18 +1203,18 @@ function renderBookmarks(b){
 /* ===== タブ・履歴 ===== */
 function renderTabs(){
  const tb=$("#tabbar");tb.innerHTML="";
- const home=document.createElement("div");home.className="tab"+(!lastNote?" on":"");home.innerHTML=ic("files")+'<span class="lbl">ホーム</span>';
- home.onclick=()=>{lastNote=null;showDoc();welcome();renderTabs();};tb.appendChild(home);
- if(lastNote){const t=document.createElement("div");t.className="tab on";
-  t.innerHTML=ic(lastNote.icon)+'<span class="lbl">'+esc(lastNote.title)+'</span><span class="x">'+ic("x")+'</span>';
-  t.querySelector(".x").onclick=e=>{e.stopPropagation();lastNote=null;welcome();renderTabs();};tb.appendChild(t);}
- const nt=document.createElement("div");nt.className="tab newtab";nt.title="新しいタブ (⌘O)";nt.innerHTML=ic("plus");nt.onclick=()=>qsOpen("nav");tb.appendChild(nt);
+ const home=document.createElement("div");home.className="tab"+(!lastNote?" on":"");home.tabIndex=0;home.setAttribute("role","button");home.innerHTML=ic("files")+'<span class="lbl">ホーム</span>';
+ home.onclick=()=>{lastNote=null;showDoc();welcome();renderTabs();renderVhead();};tb.appendChild(home);
+ if(lastNote){const t=document.createElement("div");t.className="tab on";t.tabIndex=0;t.setAttribute("role","button");t.title=lastNote.title;
+  t.innerHTML=ic(lastNote.icon)+'<span class="lbl">'+esc(lastNote.title)+'</span><span class="x" tabindex="0" role="button">'+ic("x")+'</span>';
+  t.querySelector(".x").onclick=e=>{e.stopPropagation();lastNote=null;welcome();renderTabs();renderVhead();};tb.appendChild(t);}
+ const nt=document.createElement("div");nt.className="tab newtab";nt.title="新しいタブ (⌘O)";nt.tabIndex=0;nt.setAttribute("role","button");nt.innerHTML=ic("plus");nt.onclick=()=>qsOpen("nav");tb.appendChild(nt);
 }
 function renderVhead(){
  const v=$("#vhead");
  v.innerHTML='<span class="nav" id="navBack" title="戻る">'+ic("back")+'</span>'+
   '<span class="crumb">'+(lastNote?esc((lastNote.folder||"")+" / "+lastNote.title):"ホーム")+'</span><span class="sp"></span>'+
-  (lastNote?'<span class="nav" id="bmBtn" title="ブックマーク">'+ic("bookmark")+'</span>':"");
+  (lastNote&&/^[cdr]:/.test(lastNote.key)?'<span class="nav" id="bmBtn" title="ブックマーク">'+ic("bookmark")+'</span>':"");   /* 実ノートのみ（table/graph 疑似ビューには出さない） */
  const back=v.querySelector("#navBack");if(back)back.onclick=()=>{history.pop();const p=history.pop();if(p)openByK(p[0],p[1]);else{lastNote=null;welcome();renderTabs();}};
  const bm=v.querySelector("#bmBtn");if(bm){const key=lastNote.key;bm.style.color=bookmarks.has(key)?"var(--accent-2)":"";
   bm.onclick=()=>{bookmarks.has(key)?bookmarks.delete(key):bookmarks.add(key);saveBm();renderVhead();if(pane==="bookmark")renderPane();};}
@@ -1211,20 +1228,35 @@ function showGraphView(){$("#graphWrap").style.display="block";$("#docPane").sty
    件数バッジ=tagCount は全プリセットが「1アイテム1タグ」の系統のみなので検索ヒット件数と一致 */
 const QF=[["宿題あり","宿題/あり"],["温度感ネガ優勢","温度感/ネガ優勢"],["温度感高","温度感/高"],["フォロー漏れ","最終接点/1年以上前"],["更新1ヶ月以内","更新/1ヶ月以内"],["横断ナレッジ","横断"],["ショート動画","動画形式/ショート"],["提案書","資料種別/提案書"]];
 function welcome(){
- showDoc();
+ showDoc();$("#docPane").scrollTop=0;   /* 前ノートの scrollTop 残留防止 */
  const notable=DATA.clients.filter(c=>c.fb>0).sort((a,b)=>(b.fb+b.doc)-(a.fb+a.doc)).slice(0,6);
  const cards=k=>k.map(c=>`<div class="wcard" data-k="c" data-s="${esc(c.stem)}">`+ic("building")+`<div><div class="wt">${esc(c.name)}</div><div class="wx">${esc(c.industry||"業界未設定")} ・ FB${c.fb} / 資料${c.doc}</div></div></div>`).join("");
  const rep=DATA.reports.map(r=>`<div class="wcard" data-k="r" data-s="${esc(r.stem)}">`+ic("report")+`<div><div class="wt">${esc(r.name)}</div><div class="wx">AI洗い出しレポート</div></div></div>`).join("");
- const qf=QF.filter(([l,t])=>tagCount[t]>0).slice(0,8).map(([l,t])=>'<span class="tagchip qfc" data-q="'+esc(tagQ(t))+'" style="--cc2:'+catColor(t)+'" title="#'+esc(t)+' で検索"><span class="tcdot" style="background:'+catColor(t)+'"></span><span class="tcv">'+esc(l)+'</span><span class="qfn">'+tagCount[t]+'</span></span>').join("");
- const tz=TAGORDER.filter(c=>tagTree[c]).map(c=>'<span class="tagchip tzc" data-c="'+esc(c)+'" style="--cc2:'+(CATMETA[c]||"var(--accent)")+'" title="タグペインで「'+esc(c)+'」を開く"><span class="tcdot" style="background:'+(CATMETA[c]||"var(--accent)")+'"></span><span class="tcv">'+esc(c)+'</span><span class="qfn">'+(tagCount[c]||0)+'</span></span>').join("");
+ const qf=QF.filter(([l,t])=>tagCount[t]>0).slice(0,8).map(([l,t])=>{const tb=l==="宿題あり";   /* 宿題triageだけ作業面=テーブル着地（次アクション/最終接点列でさばく）。他は従来どおり検索着地 */
+  return '<span class="tagchip '+(tb?"qft":"qfc")+'" tabindex="0" role="button" data-q="'+esc(tagQ(t))+'" style="--cc2:'+catColor(t)+'" title="'+(tb?"宿題ありのみで取引先テーブルを開く":"#"+esc(t)+" で検索")+'"><span class="tcdot" style="background:'+catColor(t)+'"></span><span class="tcv">'+esc(l)+'</span><span class="qfn">'+tagCount[t]+'</span></span>';}).join("");
+ /* パイプライン節: PHASESTEPS 順の分布チップ（クリック=テーブルにフェーズ絞り込み着地）。
+    集計は都度 reduce（860件で無視できる）。0社フェーズは非クリック（テーブル select に無い値を選択状態にしない）。
+    「未設定」は c.phase==="" でテーブルの phase フィルタが表現できないため muted 非クリック */
+ const pcnt={};DATA.clients.forEach(c=>{if(c.phase)pcnt[c.phase]=(pcnt[c.phase]||0)+1;});
+ const unset=DATA.clients.filter(c=>!c.phase).length;
+ const plChip=p=>{const n=pcnt[p]||0,col=PHASECOLOR[p]||"#8a8a8a";
+  return n?'<span class="tagchip plc" tabindex="0" role="button" data-p="'+esc(p)+'" style="--cc2:'+col+'" title="'+esc(p)+' の取引先をテーブルで開く"><span class="tcdot" style="background:'+col+'"></span><span class="tcv">'+esc(phShort(p))+'</span><span class="qfn">'+n+'</span></span>'
+   :'<span class="tagchip pld" title="'+esc(p)+'・該当なし"><span class="tcdot" style="background:'+col+'"></span><span class="tcv">'+esc(phShort(p))+'</span><span class="qfn">0</span></span>';};
+ const pl=PHASESTEPS.map(plChip).join('<span class="plarr">→</span>')
+  +(pcnt["失注"]?'<span class="plarr">・</span>'+plChip("失注"):"")
+  +'<span class="plun">未設定 '+unset+'</span>';
+ const tz=TAGORDER.filter(c=>tagTree[c]).map(c=>'<span class="tagchip tzc" tabindex="0" role="button" data-c="'+esc(c)+'" style="--cc2:'+(CATMETA[c]||"var(--accent)")+'" title="タグペインで「'+esc(c)+'」を開く"><span class="tcdot" style="background:'+(CATMETA[c]||"var(--accent)")+'"></span><span class="tcv">'+esc(c)+'</span><span class="qfn">'+(tagCount[c]||0)+'</span></span>').join("");
  $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} AiLaVault</h1>
   <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。取引先カルテには資料と商談FBを時系列で一望できる<b>施策タイムライン</b>付き。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
   ${qf?`<div class="wsec">クイックフィルタ</div><div class="chiprow">${qf}</div>`:""}
+  <div class="wsec">パイプライン</div><div class="chiprow plrow">${pl}</div>
   ${tz?`<div class="wsec">タグで探す</div><div class="chiprow tzrow">${tz}</div>`:""}
   ${DATA.reports.length?`<div class="wsec">AI洗い出しレポート</div><div class="wgrid">${rep}</div>`:""}
   <div class="wsec">主要な取引先</div><div class="wgrid">${cards(notable)}</div></div>`;
  $("#inner").querySelectorAll(".wcard").forEach(el=>el.onclick=()=>openByK(el.dataset.k,el.dataset.s));
  $("#inner").querySelectorAll(".qfc").forEach(el=>el.onclick=()=>runQuery(el.dataset.q));   /* 置換で検索ペインへ（チップバー付きで着地） */
+ $("#inner").querySelectorAll(".qft").forEach(el=>el.onclick=()=>{tblFilter={q:"",ind:"",phase:"",temp:"",hw:true};tableView();});   /* 宿題あり→テーブル（hwのみON・他条件リセット） */
+ $("#inner").querySelectorAll(".plc").forEach(el=>el.onclick=()=>{tblFilter={q:"",ind:"",phase:el.dataset.p,temp:"",hw:false};tableView();});   /* リセット着地=チップ社数と表示件数の一致を保証（select にも selected 復元） */
  $("#inner").querySelectorAll(".tzc").forEach(el=>el.onclick=()=>{window.__tagFocus=el.dataset.c;setPane("tags");});   /* 該当系統を初期展開 */
  renderRightTabs();renderRight();markActiveInTree();
  if(window.updateStatus)updateStatus(0,0);
@@ -1265,7 +1297,7 @@ function md(src){const L=src.split("\n");let h="",i=0,m;
  return h;}
 function propsPanel(rows){return '<div class="props"><div class="props-h">プロパティ</div>'
  +rows.map(([icn,key,val])=>'<div class="prow"><span class="pk">'+ic(icn)+'<span class="pkn">'+esc(key)+'</span></span><span class="pv">'+((val!==""&&val!=null)?esc(""+val):'<span class="pempty">値がありません</span>')+'</span></div>').join("")
- +'<div class="prow padd"><span class="pk">'+ic("plus")+'<span class="pkn">プロパティを追加</span></span></div></div>';}
+ +'</div>';}
 function navTarget(t){if(t.indexOf("clients/")===0)return openClient(t.slice(8));if(t.indexOf("docs/")===0)return openDoc(t.slice(5));if(cByStem[t])return openClient(t);if(dByStem[t])return openDoc(t);const c=cByNorm[nrm(t)];if(c)return openClient(c.stem);}
 function afterOpen(){
  $("#inner").querySelectorAll(".wl").forEach(el=>el.onclick=()=>navTarget(el.dataset.t));
@@ -1284,12 +1316,13 @@ function tlEvents(c){
  return ev;
 }
 function tlSection(c){
- const ev=tlEvents(c);if(!ev.length)return "";
+ const ev=tlEvents(c);
+ if(!ev.length)return '<div class="tlwrap"><div class="tlh">'+ic("cal")+'施策タイムライン<span class="cnt">0</span></div><div class="tlbody"><div class="qhelp">記録済みFB・資料なし</div></div></div>';   /* 0件でも見出しごと消さない */
  const rows=ev.map((x,i)=>{
   const cls="tlrow"+(x.kind==="doc"?" tldoc":"")+(i>=10?" tlhid":"");
   let card;
   if(x.kind==="doc"){const d=x.e,col=dtColor(d.doc_type);
-   card='<span class="tlbadge" style="background:'+col+'22;color:'+col+'">'+esc(d.doc_type||"資料")+'</span>'
+   card='<span class="tlbadge" style="background:'+col+'22">'+esc(d.doc_type||"資料")+'</span>'
     +'<div class="tlt"><span class="wl" data-t="docs/'+esc(d.stem)+'">'+esc(d.title)+'</span></div>';
   }else{const f=x.e;
    card='<span class="tlbadge tlfb">商談FB'+(f.src?"・"+esc(f.src):"")+'</span>'
@@ -1306,7 +1339,30 @@ function tlSection(c){
  return '<div class="tlwrap'+(ev.length>10?" folded":"")+'"><div class="tlh">'+ic("cal")+'施策タイムライン<span class="cnt">'+ev.length+'</span></div><div class="tlbody">'+rows+'</div>'+more+'</div>';
 }
 function bindTl(){const mb=$("#inner").querySelector(".tlmorebtn");
- if(mb)mb.onclick=()=>{const w=mb.closest(".tlwrap");if(w)w.classList.remove("folded");mb.remove();};}
+ if(mb){const lbl=mb.textContent;   /* 展開⇄再畳みの往復トグル（remove しない） */
+  mb.onclick=()=>{const w=mb.closest(".tlwrap");if(!w)return;const folded=w.classList.toggle("folded");mb.textContent=folded?lbl:"畳む";};}}
+/* ===== 商談ジャーニーバー（カルテ内: PHASESTEPS 順の現在地 + 到達日） =====
+   到達日 = tl の同フェーズ dated イベントの最小日（決定論・payload 増ゼロ・架空日付は出さない）。
+   既知の限界: FB_MAX_EVENTS=30 cap で FB30件超のクライアントは最古が切られ初出日が後ろにずれ得る */
+function phaseDates(c){const m={};(c.tl||[]).forEach(e=>{if(e.ph&&e.d&&(!m[e.ph]||e.d<m[e.ph]))m[e.ph]=e.d;});return m;}
+function jbSection(c){
+ const dates=phaseDates(c),lost=c.phase==="失注",idx=PHASESTEPS.indexOf(c.phase);
+ if(!lost&&idx<0&&!PHASESTEPS.some(p=>dates[p]))return "";   /* フェーズ未設定/その他かつ dated ph 無し → バー非表示（データが無い演出をしない） */
+ let reg=false;
+ const cells=PHASESTEPS.map((p,i)=>{
+  const fail=lost&&i===PHASESTEPS.length-1;                  /* 失注は終端を err 色で差し替え */
+  const name=fail?"失注":p,d=dates[name]||"";
+  let st="todo";
+  if(fail||i===idx)st="cur";
+  else if(lost||i<idx||(idx<0&&d))st="past";
+  else if(idx>=0&&d){st="reg";reg=true;}                     /* 現在地より後に到達日=後退（点線+日付・色のみに依存しない） */
+  return '<span class="jbstep '+st+(fail?" jblost":"")+'" title="'+esc(name)+(st==="cur"?"（現在地）":"")+(d?"・初出 "+esc(d):"")+'">'
+   +'<span class="tcdot" style="background:'+(PHASECOLOR[name]||"#8a8a8a")+'"></span><span class="jbl">'+esc(phShort(name))+'</span>'
+   +(d&&st!=="todo"?'<span class="jbd">'+esc(d)+'</span>':"")+'</span>';
+ }).join('<span class="jbsep">→</span>');
+ return '<div class="jbwrap"><div class="jbh">'+ic("trend")+'商談ジャーニー</div><div class="jbbar">'+cells
+  +(reg?'<span class="jbreg">↩ 後退あり</span>':"")+'</div></div>';
+}
 function openClient(stem){const c=cByStem[stem];if(!c)return;showDoc();pushHist("c",stem);
  lastNote={key:"c:"+stem,title:c.name,icon:"building",folder:"clients"};
  const bodyMd=c.md?md(c.md):"";
@@ -1314,6 +1370,7 @@ function openClient(stem){const c=cByStem[stem];if(!c)return;showDoc();pushHist(
  $("#inner").innerHTML='<div class="inline-title">'+esc(c.name)+'</div>'
   +(ctg.length?'<div class="note-tags">'+ctg.map(t=>chipHtml(t)).join("")+'</div>':'')
   +propsPanel([["list","client",c.name],["list","industry",c.industry],["list","deal_phase",c.phase],["list","bant_score",c.bant],["list","担当",(c.tans||[]).join("・")],["hash","fb_count",c.fb],["hash","doc_count",c.doc]])
+  +jbSection(c)
   +tlSection(c)
   +'<div class="md">'+bodyMd+'</div>';
  bindTl();
@@ -1347,7 +1404,7 @@ function keyExcerpt(sk){const m=keyMeta(sk);if(!m)return "";
  if(m.k==="c"){const c=cByStem[m.stem];return c?(c.industry?"業種: "+c.industry+" ・ FB"+c.fb+" / 資料"+c.doc:""):"";}return "";}
 function blItem(key,ctx,name){const meta=keyMeta(key);if(!meta)return "";
  let c="";if(ctx){c=esc(ctx);if(name&&name.length>1){try{const rx=new RegExp("("+name.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","i");c=c.replace(rx,'<span class="hlq">$1</span>');}catch(e){}}c='<div class="blc">'+c+'</div>';}
- return '<div class="bl" data-k="'+meta.k+'" data-s="'+esc(meta.stem)+'"><div class="blt">'+ic(meta.icon)+esc(meta.title)+'</div>'+c+'</div>';}
+ return '<div class="bl" tabindex="0" role="button" data-k="'+meta.k+'" data-s="'+esc(meta.stem)+'"><div class="blt">'+ic(meta.icon)+esc(meta.title)+'</div>'+c+'</div>';}
 function bindBL(b){b.querySelectorAll(".bl").forEach(el=>el.onclick=()=>openByK(el.dataset.k,el.dataset.s));}
 function unlinkedMentions(name,linkedSet){const nm=(name||"").toLowerCase();if(nm.length<2)return [];
  const res=[];for(const it of IDX){const ik=it.kind[0]+":"+it.stem;if(linkedSet.has(ik))continue;if(it.hay.includes(nm)){res.push(ik);if(res.length>=40)break;}}return res;}
@@ -1358,7 +1415,7 @@ function renderOutlineInto(b){const heads=[...$("#inner").querySelectorAll(".md 
  b.querySelectorAll(".olink[data-h]").forEach(el=>el.onclick=()=>{const t=document.getElementById(el.dataset.h);if(t)t.scrollIntoView({behavior:"smooth",block:"start"});});}
 function renderRight(){
  const b=$("#rightBody");if(!b)return;const n=lastNote;
- if(!n||!n.key||n.key==="table"){b.innerHTML='<div class="qhelp">ノートを開くと、ここに<b>バックリンク</b>・アウトゴーイングリンク・タグ・アウトラインが表示されます。<br><br>上部タブで切替できます。</div>';return;}
+ if(!n||!n.key||n.key==="table"||n.key==="graph"){b.innerHTML='<div class="qhelp">ノートを開くと、ここに<b>バックリンク</b>・アウトゴーイングリンク・タグ・アウトラインが表示されます。<br><br>上部タブで切替できます。</div>';return;}
  const key=n.key,name=n.title;
  if(rTab==="backlinks"){
   const back=(BACKL[key]||[]);const linkedSet=new Set(back.map(x=>x[0]));linkedSet.add(key);
@@ -1386,9 +1443,17 @@ const LASTDOC={};
 DATA.docs.forEach(d=>{if(d.cnorm&&d.modified&&(!(d.cnorm in LASTDOC)||d.modified>LASTDOC[d.cnorm]))LASTDOC[d.cnorm]=d.modified;});
 function lastOf(c){const a=c.lastfb||"",b=(c.cnorm&&LASTDOC[c.cnorm])||"";return a>b?a:b;}
 let tblSort={key:"act",dir:-1},tblFilter={q:"",ind:"",phase:"",temp:"",hw:false};   /* モジュール変数=テーブル⇄カルテ往復で選択状態維持 */
-const TCOLS=[["name","取引先",c=>c.name,0],["industry","業界",c=>c.industry,0],["phase","フェーズ",c=>c.phase,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1],["last","最終接点",c=>lastOf(c),0],["tans","担当",c=>(c.tans||[]).join("・"),0],["nx","次アクション",c=>c.nx||"",0]];
-const PHASECOLOR={"受注":"#54b981","1回目提案":"#4f9df5","2回目提案":"#4f9df5","ケイパ":"#e0b34c","ヒアリング":"#c98bdb","失注":"#e0685f"};
-function tableView(){showDoc();lastNote={key:"table",title:"取引先テーブル",icon:"table",folder:""};ribbonActive("table");
+/* 列順: 実務列（フェーズ/最終接点/担当/次アクション）を初期表示域へ。各エントリ定義は不変・順序のみ */
+const TCOLS=[["name","取引先",c=>c.name,0],["phase","フェーズ",c=>c.phase,0],["last","最終接点",c=>lastOf(c),0],["tans","担当",c=>(c.tans||[]).join("・"),0],["nx","次アクション",c=>c.nx||"",0],["industry","業界",c=>c.industry,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1]];
+/* 実Vaultの deal_phase/FB ph 実語彙（ケイパ/ヒアリング/1回目提案/2回目以降提案/最終交渉/成約/失注）。
+   「その他」等の未知値は辞書に載せず fallback グレー（テーブル #8a8a8a / グラフ #9a9a9a） */
+const PHASECOLOR={"ケイパ":"#e0b34c","ヒアリング":"#c98bdb","1回目提案":"#4f9df5","2回目以降提案":"#8a7cf5","最終交渉":"#d0912f","成約（口頭内示以上）":"#54b981","失注":"#e0685f"};
+/* 商談ジャーニーの順序定義はこの1定数のみ。文字列は PHASECOLOR のキーと完全一致（回帰テストで担保）。
+   実データの時系列遷移はケイパ→ヒアリング方向（ユーザー確認済み）のためケイパが先頭。失注は順序外の終端差し替え */
+const PHASESTEPS=["ケイパ","ヒアリング","1回目提案","2回目以降提案","最終交渉","成約（口頭内示以上）"];
+const PHASESHORT={"1回目提案":"提案①","2回目以降提案":"提案②","成約（口頭内示以上）":"成約"};   /* 短縮表示（title に正式名） */
+function phShort(p){return PHASESHORT[p]||p;}
+function tableView(){showDoc();$("#docPane").scrollTop=0;pushHist("table","");lastNote={key:"table",title:"取引先テーブル",icon:"table",folder:""};ribbonActive("table");   /* 履歴に積む=カルテから「戻る」でテーブル復帰（朝のtriageループ） */
  renderTableShell();renderTabs();renderVhead();
  $("#rightBody").innerHTML='<div class="qhelp">Obsidian <b>Bases</b> 風テーブル。列見出しでソート、上部で業界/フェーズ絞り込み、行クリックでカルテ。</div>';}
 function tblRows(){let rows=DATA.clients.slice();
@@ -1401,18 +1466,19 @@ function tblRows(){let rows=DATA.clients.slice();
  rows.sort((a,b)=>{let x=col[2](a),y=col[2](b);return col[3]?(x-y)*tblSort.dir:(""+x).localeCompare(""+y,"ja")*tblSort.dir;});return rows;}
 function tblBody(shown){return shown.map(c=>{const pc=PHASECOLOR[c.phase]||"#8a8a8a";
  return '<tr data-s="'+esc(c.stem)+'"><td>'+esc(c.name)+'</td>'
-  +'<td>'+(c.industry?'<span class="dotc" style="background:'+colorOf(c.industry)+'"></span>'+esc(c.industry):'<span style="color:var(--faint)">—</span>')+'</td>'
-  +'<td>'+(c.phase?'<span class="bp" style="background:'+pc+'22;color:'+pc+'">'+esc(c.phase)+'</span>':'<span style="color:var(--faint)">—</span>')+'</td>'
-  +'<td>'+esc(c.bant||"—")+'</td><td class="num">'+c.fb+'</td><td class="num">'+c.doc+'</td><td class="num">'+(c.fb+c.doc)+'</td>'
+  +'<td>'+(c.phase?'<span class="bp" style="background:'+pc+'22">'+esc(c.phase)+'</span>':'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+(lastOf(c)?esc(lastOf(c)):'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+((c.tans&&c.tans.length)?esc(c.tans.join("・")):'<span style="color:var(--faint)">—</span>')+'</td>'
-  +'<td>'+(c.nx?esc(c.nx):'<span style="color:var(--faint)">—</span>')+'</td></tr>';}).join("");}
+  +'<td>'+(c.nx?esc(c.nx):'<span style="color:var(--faint)">—</span>')+'</td>'
+  +'<td>'+(c.industry?'<span class="dotc" style="background:'+colorOf(c.industry)+'"></span>'+esc(c.industry):'<span style="color:var(--faint)">—</span>')+'</td>'
+  +'<td>'+esc(c.bant||"—")+'</td><td class="num">'+c.fb+'</td><td class="num">'+c.doc+'</td><td class="num">'+(c.fb+c.doc)+'</td></tr>';}).join("");}
 function updateTable(){const rows=tblRows();const tb=$("#inner").querySelector("tbody");if(!tb)return;
  tb.innerHTML=rows.length?tblBody(rows.slice(0,500)):'<tr><td colspan="'+TCOLS.length+'" style="color:var(--faint);cursor:default">条件に一致する取引先がありません — フィルタを1つ外してください</td></tr>';
  const act=$("#inner").querySelector("#tblact");   /* native select にドットが付かない補完: 適用中フィルタをチップで可視化 */
  if(act)act.innerHTML=(tblFilter.temp?chipHtml("温度感/"+tblFilter.temp):"")+(tblFilter.hw?chipHtml("宿題/あり"):"");
  $("#inner").querySelector(".bar .n").textContent=rows.length+" 件"+(rows.length>500?"（先頭500表示）":"");
- $("#inner").querySelectorAll("thead th").forEach(th=>{const a=th.querySelector(".ar");if(a)a.remove();if(th.dataset.k===tblSort.key)th.insertAdjacentHTML("beforeend",'<span class="ar">'+(tblSort.dir>0?"▲":"▼")+'</span>');});
+ $("#inner").querySelectorAll("thead th").forEach(th=>{const a=th.querySelector(".ar");if(a)a.remove();th.removeAttribute("aria-sort");
+  if(th.dataset.k===tblSort.key){th.insertAdjacentHTML("beforeend",'<span class="ar">'+(tblSort.dir>0?"▲":"▼")+'</span>');th.setAttribute("aria-sort",tblSort.dir>0?"ascending":"descending");}});
  tb.querySelectorAll("tr[data-s]").forEach(tr=>tr.onclick=()=>openClient(tr.dataset.s));}
 function renderTableShell(){
  const inds=[...new Set(DATA.clients.map(c=>c.industry).filter(Boolean))].sort();
@@ -1422,7 +1488,7 @@ function renderTableShell(){
  /* 温度感は実値集合から生成（ラベルはタグペインと同一文字列）。宿題はチェック1つの最小構成 */
  const temps=["高","ポジ優勢","拮抗","ネガ優勢"].filter(t=>DATA.clients.some(c=>c.temp===t));
  const optT='<option value="">温度感（すべて）</option>'+temps.map(t=>'<option'+(tblFilter.temp===t?" selected":"")+'>'+esc(t)+'</option>').join("");
- const head=TCOLS.map(c=>'<th data-k="'+c[0]+'"'+(c[3]?' class="num"':'')+'>'+c[1]+'</th>').join("");
+ const head=TCOLS.map(c=>'<th tabindex="0" role="button" data-k="'+c[0]+'"'+(c[3]?' class="num"':'')+'>'+c[1]+'</th>').join("");
  $("#inner").innerHTML='<div class="tbv"><div class="th1">'+ic("table")+'取引先テーブル</div>'
   +'<p class="sub">'+DATA.stats.clients+' 取引先を業界・フェーズ・BANT・FB数で分類。列見出しでソート、行クリックでカルテを開く（Bases風）。</p>'
   +'<div class="bar"><input id="tblq" placeholder="絞り込み…" value="'+esc(tblFilter.q)+'"><select id="tblind">'+optI+'</select><select id="tblph">'+optP+'</select><select id="tbltemp">'+optT+'</select><label class="hwck"><input type="checkbox" id="tblhw"'+(tblFilter.hw?" checked":"")+'> 宿題ありのみ</label><span class="tfl" id="tblact"></span><span class="n"></span></div>'
@@ -1437,7 +1503,9 @@ function renderTableShell(){
 
 /* ===== グラフ ===== */
 let G=null;
-function openGraph(){showGraphView();if(!G){G="init";setTimeout(initGraph,30);}}
+function openGraph(){showGraphView();lastNote={key:"graph",title:"グラフビュー",icon:"graph",folder:""};
+ renderTabs();renderVhead();updateStatus(0,0);renderRight();   /* タブ/パンくず/ステータスバー/右パネルを疑似ビューへ同期 */
+ if(!G){G="init";setTimeout(initGraph,30);}}
 function initGraph(){
  const cv=$("#graph"),ctx=cv.getContext("2d"),tip=$("#gtip");const dpr=window.devicePixelRatio||1;
  function resize(){cv.width=cv.clientWidth*dpr;cv.height=cv.clientHeight*dpr;}
@@ -1477,6 +1545,7 @@ function initGraph(){
  const S=n=>({x:cv.width/2+(n.x+view.x)*view.z*dpr,y:cv.height/2+(n.y+view.y)*view.z*dpr});
  function draw(){const DK=document.documentElement.getAttribute("data-theme")==="dark";ctx.clearRect(0,0,cv.width,cv.height);ctx.lineWidth=dpr*opt.linkW;
   const lNorm=DK?"rgba(255,255,255,.06)":"rgba(0,0,0,.085)",lHov=DK?"hsla(254,74%,74%,.6)":"hsla(254,60%,52%,.7)",lbl=DK?"#c8c9cf":"#33343a";
+  if(!N.some((n,i)=>vis(i))){ctx.fillStyle=lbl;ctx.font=(13*dpr)+"px InterVar,Inter,-apple-system,sans-serif";ctx.textAlign="center";ctx.fillText("一致するノードがありません",cv.width/2,cv.height/2);ctx.textAlign="left";return;}   /* 可視0件の空状態（白紙化防止） */
   L.forEach(l=>{if(!vis(l.s)||!vis(l.t))return;const A=S(N[l.s]),B=S(N[l.t]);const on=hover>=0&&(l.s===hover||l.t===hover);ctx.strokeStyle=on?lHov:lNorm;ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);ctx.stroke();});
   N.forEach((n,i)=>{if(!vis(i))return;const p=S(n);const dim=hover>=0&&i!==hover&&!(neigh[hover]&&neigh[hover].has(i));ctx.globalAlpha=dim?.2:1;
    const rr=Math.max(n.r*opt.nodeSize*view.z*dpr,.5*dpr);ctx.fillStyle=ncol(n);ctx.beginPath();ctx.arc(p.x,p.y,rr,0,7);ctx.fill();  /* 遠景でも点として残す下限 */
@@ -1497,9 +1566,14 @@ function initGraph(){
  cv.onwheel=e=>{e.preventDefault();view.z*=e.deltaY<0?1.1:.9;view.z=Math.max(.02,Math.min(6,view.z));draw();};  /* 下限0.02で本家並みに遠景まで引ける */
  // 対話コントロールパネル（Filters/Groups/Display/Forces）
  const inds=[...new Set(N.filter(n=>n.type==="client"&&n.industry).map(n=>n.industry))].slice(0,9);
- function legend(){const base=opt.groupBy==="industry"?inds.map(i=>'<div class="grow"><span class="dot" style="background:'+colorOf(i)+'"></span>'+esc(i)+'</div>').join(""):Object.keys(PHASECOLOR).map(p=>'<div class="grow"><span class="dot" style="background:'+PHASECOLOR[p]+'"></span>'+esc(p)+'</div>').join("");return base+'<div class="grow"><span class="dot" style="background:hsl(254,42%,72%)"></span>タグ</div><div class="grow"><span class="dot" style="background:rgba(150,150,156,.7)"></span>資料</div>';}
+ function legend(){let base;
+  if(opt.groupBy==="industry")base=inds.map(i=>'<div class="grow"><span class="dot" style="background:'+colorOf(i)+'"></span>'+esc(i)+'</div>').join("");
+  else{const ph=[...new Set(N.filter(n=>n.type==="client"&&n.phase).map(n=>n.phase))];  /* 実データに存在するフェーズのみ動的列挙 */
+   base=ph.filter(p=>PHASECOLOR[p]).map(p=>'<div class="grow"><span class="dot" style="background:'+PHASECOLOR[p]+'"></span>'+esc(p)+'</div>').join("");
+   if(ph.some(p=>!PHASECOLOR[p])||N.some(n=>n.type==="client"&&!n.phase))base+='<div class="grow"><span class="dot" style="background:#9a9a9a"></span>その他</div>';}   /* 未知/未設定はグレー1行に集約 */
+  return base+'<div class="grow"><span class="dot" style="background:hsl(254,42%,72%)"></span>タグ</div><div class="grow"><span class="dot" style="background:rgba(150,150,156,.7)"></span>資料</div>';}
  $("#gpanel").innerHTML=
-  '<div class="gph"><span class="gpt">グラフ設定</span><span class="gpx" id="gpClose">✕</span></div>'
+  '<div class="gph"><span class="gpt">グラフ設定</span><span class="gpx" id="gpClose">'+ic("x")+'</span></div>'
   +'<div class="gsec"><div class="gh">フィルター</div><input class="gin" id="gFilter" placeholder="ノードを検索…">'
   +'<label class="gck"><input type="checkbox" id="gTags" checked> タグを表示</label>'
   +'<label class="gck"><input type="checkbox" id="gDocs" checked> 資料ノードを表示</label>'
@@ -1546,16 +1620,21 @@ function qsClose(){$("#qsov").classList.remove("on");}
 function qsR(q){q=q.toLowerCase().trim();
  if(qMode==="cmd"){qItems=(q?CMDS.filter(c=>c[0].toLowerCase().includes(q)):CMDS).slice(0,20);qSel=0;
   $("#qslist").innerHTML=qItems.map((x,i)=>'<div class="qi'+(i===0?" sel":"")+'" data-i="'+i+'">'+ic(x[1])+'<span class="nm">'+esc(x[0])+'</span></div>').join("")||'<div class="qi">一致なし</div>';
-  $("#qslist").querySelectorAll(".qi[data-i]").forEach(el=>el.onclick=()=>qsP(+el.dataset.i));return;}
+  $("#qslist").querySelectorAll(".qi[data-i]").forEach(el=>el.onclick=()=>qsP(+el.dataset.i));qsHoverBind();return;}
  qItems=(q?QI.filter(x=>x.name&&x.name.toLowerCase().includes(q)):QI.filter(x=>x.k==="c")).slice(0,20);qSel=0;
  $("#qslist").innerHTML=qItems.map((x,i)=>'<div class="qi'+(i===0?" sel":"")+'" data-i="'+i+'">'+ic(x.ico)+'<span class="nm">'+esc(x.name.slice(0,56))+'</span><span class="pt">'+esc(x.pt)+'</span></div>').join("")||'<div class="qi">一致なし</div>';
- $("#qslist").querySelectorAll(".qi[data-i]").forEach(el=>el.onclick=()=>qsP(+el.dataset.i));}
+ $("#qslist").querySelectorAll(".qi[data-i]").forEach(el=>el.onclick=()=>qsP(+el.dataset.i));qsHoverBind();}
+/* hover=選択=Enter対象を常に一致させる（マウスとカーソル選択のズレ解消） */
+function qsHoverBind(){$("#qslist").querySelectorAll(".qi[data-i]").forEach(el=>el.onmousemove=()=>{const i=+el.dataset.i;if(qSel!==i){qSel=i;qsMove(0);}});}
 function qsMove(d){qSel=Math.max(0,Math.min(qItems.length-1,qSel+d));$("#qslist").querySelectorAll(".qi").forEach((el,i)=>el.classList.toggle("sel",i===qSel));const s=$("#qslist").querySelector(".qi.sel");if(s)s.scrollIntoView({block:"nearest"});}
 function qsP(i){const x=qItems[i];if(!x)return;qsClose();if(qMode==="cmd")x[2]();else openByK(x.k,x.stem);}
 $("#qsin").addEventListener("input",e=>qsR(e.target.value));
 $("#qsin").addEventListener("keydown",e=>{if(e.key==="ArrowDown"){e.preventDefault();qsMove(1);}else if(e.key==="ArrowUp"){e.preventDefault();qsMove(-1);}else if(e.key==="Enter"){e.preventDefault();qsP(qSel);}else if(e.key==="Escape")qsClose();});
 $("#qsov").addEventListener("click",e=>{if(e.target.id==="qsov")qsClose();});
 document.addEventListener("keydown",e=>{const k=e.key.toLowerCase();if((e.metaKey||e.ctrlKey)&&k==="o"){e.preventDefault();qsOpen("nav");}else if((e.metaKey||e.ctrlKey)&&k==="p"){e.preventDefault();qsOpen("cmd");}else if(e.key==="Escape")qsClose();});
+/* キーボード操作: role="button" 要素は Enter/Space でクリック相当（委譲1本・:focus-visible リングは既存定義） */
+document.addEventListener("keydown",e=>{if(e.key!=="Enter"&&e.key!==" ")return;if(e.metaKey||e.ctrlKey||e.altKey)return;
+ const t=e.target instanceof Element?e.target.closest('[role="button"]'):null;if(t){e.preventDefault();t.click();}});
 /* ホバープレビュー */
 const hpop=document.createElement("div");hpop.id="hoverpop";document.body.appendChild(hpop);let hpT=null;
 const HPSEL=".wl,.sr,.bl";
