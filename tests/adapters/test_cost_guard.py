@@ -31,14 +31,29 @@ class _FakeDdb:
         Key: dict[str, Any],  # noqa: N803
         UpdateExpression: str,  # noqa: N803
         ExpressionAttributeValues: dict[str, Any],  # noqa: N803
-    ) -> None:
+        ConditionExpression: str | None = None,  # noqa: N803
+        ReturnValues: str | None = None,  # noqa: N803
+    ) -> dict[str, Any]:
         if self.fail:
             raise RuntimeError("ddb down")
         key = Key["usage_key"]["S"]
         row = self.rows.setdefault(key, {"cost_micro": 0, "calls": 0, "units": 0})
+        if ConditionExpression is not None:
+            remaining = int(ExpressionAttributeValues[":remaining"]["N"])
+            if row["cost_micro"] > remaining:
+                error = RuntimeError("conditional failed")
+                error.response = {  # type: ignore[attr-defined]
+                    "Error": {"Code": "ConditionalCheckFailedException"}
+                }
+                raise error
         row["cost_micro"] += int(ExpressionAttributeValues[":c"]["N"])
-        row["calls"] += 1
-        row["units"] += int(ExpressionAttributeValues[":u"]["N"])
+        if ":one" in ExpressionAttributeValues:
+            row["calls"] += int(ExpressionAttributeValues[":one"]["N"])
+        if ":u" in ExpressionAttributeValues:
+            row["units"] += int(ExpressionAttributeValues[":u"]["N"])
+        if ReturnValues == "ALL_NEW":
+            return {"Attributes": {"cost_micro": {"N": str(row["cost_micro"])}}}
+        return {}
 
 
 def _guard(ddb: _FakeDdb | None = None) -> CostGuard:
@@ -118,3 +133,32 @@ def test_record_zero_cost_skipped() -> None:
 
 def test_record_failure_is_swallowed() -> None:
     _guard(_FakeDdb(fail=True)).record("apify", "a@x.jp", cost_usd=0.1, units=1, request_id="t")
+
+
+def test_atomic_reservation_blocks_concurrent_overshoot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COST_APIFY_MONTHLY_USD", "1")
+    monkeypatch.delenv("COST_PER_USER_MONTHLY_USD", raising=False)
+    ddb = _FakeDdb()
+    month = current_month_jst()
+    ddb.rows[f"apify#{month}"] = {"cost_micro": 700_000, "calls": 0, "units": 0}
+    guard = _guard(ddb)
+
+    _, reservation = guard.reserve("apify", "a@x.jp", est_cost_usd=0.2, request_id="r1")
+    assert reservation.global_reserved
+    with pytest.raises(CostLimitExceededError):
+        guard.reserve("apify", "b@x.jp", est_cost_usd=0.2, request_id="r2")
+    assert ddb.rows[f"apify#{month}"]["cost_micro"] == 900_000
+
+
+def test_settle_replaces_reservation_with_actual_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COST_APIFY_MONTHLY_USD", "10")
+    monkeypatch.delenv("COST_PER_USER_MONTHLY_USD", raising=False)
+    ddb = _FakeDdb()
+    guard = _guard(ddb)
+    _, reservation = guard.reserve("apify", "a@x.jp", est_cost_usd=1.0, request_id="r1")
+    guard.settle(reservation, cost_usd=0.4, units=4, request_id="r1")
+    month = current_month_jst()
+    assert ddb.rows[f"apify#{month}"]["cost_micro"] == 400_000
+    assert ddb.rows[f"apify#{month}#a@x.jp"]["cost_micro"] == 400_000

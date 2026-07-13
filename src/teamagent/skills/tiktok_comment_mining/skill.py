@@ -169,8 +169,10 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
         insight = VideoCommentInsight(video_url=video_url, total_comments=len(comments))
         if not comments:
             return insight, 0.0
+        indexed_comments = [(f"c{i}", c) for i, c in enumerate(comments) if str(c["text"]).strip()]
+        comments_by_id = {cid: c for cid, c in indexed_comments}
         comments_text = "\n".join(
-            f"- {c['text']} (いいね: {c['likes']})" for c in comments if str(c["text"]).strip()
+            f"[{cid}] {c['text']} (いいね: {c['likes']})" for cid, c in indexed_comments
         )
         try:
             prompt = load_prompt("tiktok_comment_mining", "v1", "classify").format(
@@ -187,15 +189,22 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             if parsed is None:
                 warnings.append("コメント分類の解析に失敗しました（件数のみ）")
                 return insight, float(resp.usage.cost_usd)
-            buckets = [
-                CommentBucket(
-                    category=str(b.get("category") or "その他"),
-                    count=int(b.get("count", 0) or 0),
-                    examples=_str_list(b.get("examples"), limit=3),
+            buckets: list[CommentBucket] = []
+            for b in parsed.get("buckets") or []:
+                if not isinstance(b, dict):
+                    continue
+                # LLMには原文を書き直させずIDだけ選ばせる。存在するIDをコード側で
+                # 原コメントへ戻すため、創作・改変された「代表コメント」は混入できない。
+                example_ids = _str_list(b.get("example_ids"), limit=3)
+                selected = [comments_by_id[cid] for cid in example_ids if cid in comments_by_id]
+                selected.sort(key=lambda c: int(c.get("likes", 0) or 0), reverse=True)
+                buckets.append(
+                    CommentBucket(
+                        category=str(b.get("category") or "その他"),
+                        count=max(0, int(b.get("count", 0) or 0)),
+                        examples=[str(c["text"]) for c in selected],
+                    )
                 )
-                for b in (parsed.get("buckets") or [])
-                if isinstance(b, dict)
-            ]
             insight = VideoCommentInsight(
                 video_url=video_url,
                 total_comments=len(comments),

@@ -114,9 +114,11 @@ def test_tier_error_surfaces_on_silent_zero() -> None:
 def test_deadline_aborts_run() -> None:
     fake = _FakeApify()
     fake.final_status = "RUNNING"  # 永遠に終わらない run
+    http = httpx.Client(transport=httpx.MockTransport(fake.handler))
+    client = ApifyClient("tok", http=http, poll_interval_s=0.01)
     with pytest.raises(ApifyError, match="APIFY_TIMEOUT"):
-        fake.client().run_actor_sync(
-            ACTOR_X_SEARCH, {"query": "x"}, max_items=5, deadline_s=0, request_id="t"
+        client.run_actor_sync(
+            ACTOR_X_SEARCH, {"query": "x"}, max_items=5, deadline_s=0.001, request_id="t"
         )
     assert fake.aborted  # 課金停止の abort が呼ばれている
 
@@ -201,6 +203,22 @@ class _OkLedger:
         self.recorded.append((provider, cost_usd, units))
 
 
+class _ReservationLedger:
+    def __init__(self) -> None:
+        self.reserved: list[float] = []
+        self.settled: list[tuple[object, float, int]] = []
+        self.token = object()
+
+    def reserve(
+        self, provider: str, user_email: str, *, est_cost_usd: float, request_id: str
+    ) -> tuple[list[str], object]:
+        self.reserved.append(est_cost_usd)
+        return [], self.token
+
+    def settle(self, reservation: object, *, cost_usd: float, units: int, request_id: str) -> None:
+        self.settled.append((reservation, cost_usd, units))
+
+
 def test_ledger_deny_blocks_before_run() -> None:
     fake = _FakeApify()
     http = httpx.Client(transport=httpx.MockTransport(fake.handler))
@@ -220,6 +238,17 @@ def test_ledger_check_and_record_flow() -> None:
     assert ledger.checked and ledger.checked[0][0] == "apify"
     assert ledger.recorded and ledger.recorded[0][2] == 1  # 実件数で記帳
     assert res.warnings == ["予算の80%を超えています"]
+
+
+def test_ledger_reservation_is_settled_with_actual_cost() -> None:
+    fake = _FakeApify()
+    fake.items_by_actor[ACTOR_X_SEARCH] = [_X_ITEM]
+    http = httpx.Client(transport=httpx.MockTransport(fake.handler))
+    ledger = _ReservationLedger()
+    client = ApifyClient("tok", ledger=ledger, http=http, poll_interval_s=0.0)
+    client.run_actor_sync(ACTOR_X_SEARCH, {"query": "x"}, max_items=5, request_id="t")
+    assert ledger.reserved
+    assert ledger.settled == [(ledger.token, 0.00025, 1)]
 
 
 def test_from_env_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -293,10 +322,14 @@ def test_timeout_records_partial_cost_and_no_token_in_error() -> None:
     fake.final_status = "RUNNING"
     ledger = _OkLedger()
     http = httpx.Client(transport=httpx.MockTransport(fake.handler))
-    client = ApifyClient("tok-secret", ledger=ledger, http=http, poll_interval_s=0.0)
+    client = ApifyClient("tok-secret", ledger=ledger, http=http, poll_interval_s=0.01)
     with pytest.raises(ApifyError) as ei:
         client.run_actor_sync(
-            ACTOR_X_SEARCH, {"query": "x"}, max_items=5, deadline_s=0, request_id="t"
+            ACTOR_X_SEARCH,
+            {"query": "x"},
+            max_items=5,
+            deadline_s=0.001,
+            request_id="t",
         )
     # timeout でも概算コストを記帳（台帳が実支出から乖離しない）
     assert ledger.recorded and ledger.recorded[0][0] == "apify"

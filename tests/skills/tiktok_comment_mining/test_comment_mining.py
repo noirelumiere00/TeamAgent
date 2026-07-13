@@ -49,8 +49,8 @@ class _FakeApify:
 _CLASSIFY_JSON = json.dumps(
     {
         "buckets": [
-            {"category": "推薦", "count": 1, "examples": ["メロンパンクッキー美味しすぎ"]},
-            {"category": "売切れ嘆き", "count": 1, "examples": ["もう売ってなかった…"]},
+            {"category": "推薦", "count": 1, "example_ids": ["c0"]},
+            {"category": "売切れ嘆き", "count": 1, "example_ids": ["c1"]},
         ],
         "consumer_vocabulary": ["爆食", "ちょい足し"],
         "common_questions": [],
@@ -89,6 +89,7 @@ def test_chromium_primary_path() -> None:
     ins = out.videos[0]
     assert ins.source == "chromium"
     assert [b.category for b in ins.buckets] == ["推薦", "売切れ嘆き"]
+    assert ins.buckets[0].examples == ["メロンパンクッキー美味しすぎ"]
     assert "爆食" in out.cross_vocabulary
     assert out.report_url == "https://s3.example/comments"
     assert "コメント欄マイニング" in out.slack_summary
@@ -131,6 +132,24 @@ def test_classify_failure_degrades_to_counts_only() -> None:
     out = skill.run(CommentMiningInput(video_urls=[_URL]), _ctx())
     assert out.videos[0].total_comments == 2 and out.videos[0].buckets == []
     assert any("分類" in w for w in out.warnings)
+
+
+def test_hallucinated_example_id_is_not_returned() -> None:
+    payload = json.dumps(
+        {
+            "buckets": [
+                {"category": "推薦", "count": 1, "example_ids": ["c999"]},
+            ]
+        }
+    )
+    skill = TikTokCommentMiningSkill(
+        apify=_FakeApify(),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(payload),
+        publisher=_publisher,
+        comments_fn=_chromium_ok,
+    )
+    out = skill.run(CommentMiningInput(video_urls=[_URL]), _ctx())
+    assert out.videos[0].buckets[0].examples == []
 
 
 def test_classify_false_skips_llm() -> None:

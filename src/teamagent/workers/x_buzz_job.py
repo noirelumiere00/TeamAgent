@@ -142,6 +142,38 @@ def run_job(spec: dict[str, Any], *, apify: ApifyClient | None = None) -> int:
         )
 
     top_posts = sorted(all_posts, key=lambda p: int(p.get("like_count", 0)), reverse=True)[:_TOP_N]
+    verification_warning = ""
+    verified_map: dict[str, Any] = {}
+    urls = [str(p.get("url") or "") for p in top_posts if p.get("url")]
+    if urls:
+        try:
+            verified_map, verify_cost = apify.verify_posts(
+                urls,
+                deadline_s=_PER_DAY_DEADLINE_S,
+                request_id=request_id,
+                user_email=requested_by,
+            )
+            total_cost += verify_cost
+        except CostLimitExceededError:
+            verification_warning = "TOP投稿の実在検証はコスト上限のため省略（要再確認）"
+        except ApifyError as e:
+            verification_warning = "TOP投稿の実在検証に失敗（要再確認）"
+            logger.warning(
+                "x_buzz_worker_verify_failed",
+                job_id=job_id,
+                error=str(e)[:120],
+            )
+    for post in top_posts:
+        url = str(post.get("url") or "")
+        verified = verified_map.get(url)
+        if verified is not None:
+            # 納品本文・指標も独立再取得した値を優先する。
+            post.update(asdict(verified))
+            post["verified"] = True
+            post["verify_note"] = ""
+        else:
+            post["verified"] = False
+            post["verify_note"] = "要再確認: xtractoで再取得できませんでした"
     # 欠測(-1)は 0 扱いでなく除外もせず、そのまま可視化側で扱えるよう 0 に落とし警告を残す
     clean_daily = [{"date": d["date"], "count": max(0, int(d["count"]))} for d in daily_counts]
     results = {
@@ -155,6 +187,7 @@ def run_job(spec: dict[str, Any], *, apify: ApifyClient | None = None) -> int:
         "daily_counts": clean_daily,
         "top_posts": top_posts,
         "failed_days": failed_days,
+        "verification_warning": verification_warning,
         "total_cost_usd": round(total_cost, 4),
         "elapsed_s": int(time.monotonic() - started),
     }
@@ -188,7 +221,10 @@ def run_job(spec: dict[str, Any], *, apify: ApifyClient | None = None) -> int:
             "progress": {"days_done": days_total, "days_total": days_total},
             "s3_prefix": s3_prefix,
             "total_cost_usd": round(total_cost, 4),
-            "warnings": [f"取得失敗日: {', '.join(failed_days)}"] if failed_days else [],
+            "warnings": (
+                ([f"取得失敗日: {', '.join(failed_days)}"] if failed_days else [])
+                + ([verification_warning] if verification_warning else [])
+            ),
         },
     )
     logger.info(

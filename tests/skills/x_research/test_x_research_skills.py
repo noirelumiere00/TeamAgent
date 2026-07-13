@@ -289,7 +289,11 @@ def test_buzz_status_unknown_and_running() -> None:
     assert skill.run(XBuzzMeasureStatusInput(job_id="xb_x"), _ctx()).status == "unknown"
 
     running = _FakeStore(
-        status={"status": "running", "progress": {"days_done": 3, "days_total": 14}}
+        status={
+            "status": "running",
+            "requested_by": "a@vectorinc.co.jp",
+            "progress": {"days_done": 3, "days_total": 14},
+        }
     )
     skill2 = XBuzzMeasureStatusSkill(store=running, publisher=_publisher)  # type: ignore[arg-type]
     out = skill2.run(XBuzzMeasureStatusInput(job_id="xb_x"), _ctx())
@@ -298,7 +302,12 @@ def test_buzz_status_unknown_and_running() -> None:
 
 def test_buzz_status_done_generates_and_caches_report() -> None:
     store = _FakeStore(
-        status={"status": "done", "s3_prefix": "x-research/xb_1/", "total_cost_usd": 0.05}
+        status={
+            "status": "done",
+            "requested_by": "a@vectorinc.co.jp",
+            "s3_prefix": "x-research/xb_1/",
+            "total_cost_usd": 0.05,
+        }
     )
     store.results = {
         "spec": {
@@ -315,6 +324,8 @@ def test_buzz_status_done_generates_and_caches_report() -> None:
                 "author_handle": "a",
                 "text": "新商品出てた",
                 "like_count": 120,
+                "verified": True,
+                "verify_note": "",
             }
         ],
         "total_cost_usd": 0.05,
@@ -334,6 +345,7 @@ def test_buzz_status_done_uses_cache_without_regeneration() -> None:
     store = _FakeStore(
         status={
             "status": "done",
+            "requested_by": "a@vectorinc.co.jp",
             "s3_prefix": "x-research/xb_1/",
             "report_url": "https://cached",
             "spike_analysis": "既に分析済み",
@@ -363,10 +375,29 @@ def test_buzz_status_rollout_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     assert store.results is None or out.daily_counts == []
 
 
+def test_buzz_status_owner_mismatch_denied() -> None:
+    store = _FakeStore(
+        status={
+            "status": "done",
+            "requested_by": "other@vectorinc.co.jp",
+            "s3_prefix": "x-research/xb_1/",
+        }
+    )
+    skill = XBuzzMeasureStatusSkill(store=store, publisher=_publisher)  # type: ignore[arg-type]
+    out = skill.run(XBuzzMeasureStatusInput(job_id="xb_1"), _ctx())
+    assert out.status == "denied" and "本人だけ" in out.message
+
+
 def test_buzz_status_caches_spike_even_without_report_url() -> None:
     # publisher が None を返す環境（VSEO_REPORT_BUCKET 未設定）でも spike をキャッシュし、
     # 再照会で Sonnet を再生成しない（二重課金防止）。
-    store = _FakeStore(status={"status": "done", "s3_prefix": "x-research/xb_1/"})
+    store = _FakeStore(
+        status={
+            "status": "done",
+            "requested_by": "a@vectorinc.co.jp",
+            "s3_prefix": "x-research/xb_1/",
+        }
+    )
     store.results = {
         "spec": {"keyword": "k", "start_date": "2026-07-01", "end_date": "2026-07-02"},
         "daily_counts": [{"date": "2026-07-01", "count": 5}],
@@ -404,6 +435,9 @@ def test_worker_run_job_writes_results(monkeypatch: pytest.MonkeyPatch) -> None:
             n = 3 if start == "2026-07-03" else 1
             return [replace(_post(f"{start}-{i}"), like_count=i * 10) for i in range(n)], 0.001
 
+        def verify_posts(self, urls: list[str], **kw: Any) -> Any:
+            return {url: _post(f"verified-{i}") for i, url in enumerate(urls)}, 0.001
+
     rc = x_buzz_job.run_job(
         {
             "job_id": "xb_t",
@@ -425,3 +459,38 @@ def test_worker_run_job_writes_results(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [d["count"] for d in results["daily_counts"]] == [1, 0, 3]
     assert results["failed_days"] == ["2026-07-02"]
     assert len(results["top_posts"]) <= 10
+    assert all(p["verified"] for p in results["top_posts"])
+
+
+def test_worker_marks_top_posts_unverified_when_verification_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teamagent.workers import x_buzz_job
+
+    s3_writes: dict[str, str] = {}
+    monkeypatch.setattr(x_buzz_job, "_update_status", lambda *args: None)
+    monkeypatch.setattr(
+        x_buzz_job, "_put_s3", lambda b, k, body, ct: s3_writes.__setitem__(k, body)
+    )
+
+    class _VerifyFailApify:
+        def search_posts_period(self, terms: list[str], **kw: Any) -> Any:
+            return [_post("1")], 0.001
+
+        def verify_posts(self, urls: list[str], **kw: Any) -> Any:
+            raise ApifyError("APIFY_RUN_FAILED")
+
+    rc = x_buzz_job.run_job(
+        {
+            "job_id": "xb_unverified",
+            "keyword": "k",
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-01",
+            "requested_by": "a@x.jp",
+        },
+        apify=_VerifyFailApify(),  # type: ignore[arg-type]
+    )
+    assert rc == 0
+    results = json.loads(s3_writes["x-research/xb_unverified/results.json"])
+    assert results["top_posts"][0]["verified"] is False
+    assert "要再確認" in results["top_posts"][0]["verify_note"]

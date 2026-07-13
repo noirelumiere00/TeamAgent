@@ -650,6 +650,18 @@ class XBuzzMeasureStatusSkill(
             return XBuzzMeasureStatusOutput(
                 job_id=input.job_id, status="unknown", message="そのjob_idは見つかりません。"
             )
+        requester = _user_of(ctx).strip().lower()
+        owner = str(st.get("requested_by") or "").strip().lower()
+        # job_id は Slack スレッドに平文で出るため認可トークンにはしない。DynamoDB に
+        # submit 時から保存している所有者と照合し、段階公開を全員へ広げた後も他人の
+        # リサーチ結果・Sonnet レポート生成を引けないよう fail-closed にする。
+        if not requester or not owner or requester != owner:
+            log.warning("x_buzz_status_owner_denied", job_id=input.job_id)
+            return XBuzzMeasureStatusOutput(
+                job_id=input.job_id,
+                status="denied",
+                message="このジョブの結果は依頼した本人だけが確認できます。",
+            )
         status = str(st.get("status", "unknown"))
         log.info("x_buzz_status", job_id=input.job_id, status=status)
         if status != "done":
@@ -678,7 +690,8 @@ class XBuzzMeasureStatusSkill(
                 like_count=int(p.get("like_count", 0) or 0),
                 retweet_count=int(p.get("retweet_count", 0) or 0),
                 created_at=str(p.get("created_at", "")),
-                verified=True,  # 期間取得の実測スクレイプ＝取得時実在
+                verified=bool(p.get("verified", False)),
+                verify_note=str(p.get("verify_note") or "要再確認: 実在検証記録なし"),
             )
             for p in results.get("top_posts", [])
             if isinstance(p, dict)

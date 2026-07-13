@@ -66,6 +66,10 @@ class ApifyError(RuntimeError):
     """Apify 呼び出しの失敗。メッセージは 'APIFY_<CODE>: 説明' 形式。"""
 
 
+class _DeadlineExceededError(TimeoutError):
+    """run_actor_sync の壁時計期限を使い切った（内部制御用）。"""
+
+
 @dataclass(frozen=True)
 class XPost:
     """X投稿の正規化型（actor 差を吸収した共通スキーマ）。"""
@@ -250,7 +254,9 @@ class ApifyClient:
 
     # ---- 低レベル: run 実行 -------------------------------------------------
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    def _request(
+        self, method: str, path: str, *, deadline_at: float | None = None, **kwargs: Any
+    ) -> httpx.Response:
         # トークンは Authorization ヘッダで送る（URLクエリに載せない）。
         # httpx の例外メッセージは "for url '{response.url}'" 形式で URL 全体を含むため、
         # クエリにトークンを載せると 4xx/5xx 例外経由で OC/Slack/ログへ平文漏えいする
@@ -258,15 +264,37 @@ class ApifyClient:
         headers = {**kwargs.pop("headers", {}), "Authorization": f"Bearer {self._token}"}
 
         def _call() -> httpx.Response:
-            resp = self._http.request(method, f"{_API_BASE}{path}", headers=headers, **kwargs)
+            call_kwargs = dict(kwargs)
+            if deadline_at is not None:
+                remaining = deadline_at - time.monotonic()
+                if remaining <= 0:
+                    raise _DeadlineExceededError
+                # 1回のHTTP待ちも残り壁時計予算を超えない。Client既定30秒より短い方。
+                call_kwargs["timeout"] = min(30.0, max(0.05, remaining))
+            resp = self._http.request(method, f"{_API_BASE}{path}", headers=headers, **call_kwargs)
             resp.raise_for_status()
             return resp
 
-        return call_with_retry(
-            _call,
-            is_retryable=_is_httpx_retryable,
-            policy=RetryPolicy(max_attempts=3, base_delay_s=1.0, max_delay_s=8.0),
-        )
+        def _sleep_with_deadline(delay: float) -> None:
+            if deadline_at is None:
+                time.sleep(delay)
+                return
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                raise _DeadlineExceededError
+            time.sleep(min(delay, remaining))
+
+        try:
+            return call_with_retry(
+                _call,
+                is_retryable=_is_httpx_retryable,
+                policy=RetryPolicy(max_attempts=3, base_delay_s=1.0, max_delay_s=8.0),
+                sleep=_sleep_with_deadline,
+            )
+        except httpx.HTTPError:
+            if deadline_at is not None and time.monotonic() >= deadline_at:
+                raise _DeadlineExceededError from None
+            raise
 
     def _abort(self, run_id: str, request_id: str) -> None:
         """デッドライン超過時に run を止める（課金停止）。失敗しても本処理は継続。"""
@@ -274,6 +302,7 @@ class ApifyClient:
             self._http.post(
                 f"{_API_BASE}/actor-runs/{run_id}/abort",
                 headers={"Authorization": f"Bearer {self._token}"},
+                timeout=5.0,
             )
             logger.warning("apify_run_aborted", request_id=request_id, run_id=run_id)
         except Exception as e:
@@ -281,15 +310,61 @@ class ApifyClient:
                 "apify_abort_failed", request_id=request_id, run_id=run_id, error=type(e).__name__
             )
 
-    def _record_partial(self, user_email: str, est_cost: float, request_id: str) -> None:
+    def _reserve_cost(
+        self, user_email: str, est_cost: float, request_id: str
+    ) -> tuple[list[str], Any | None]:
+        """CostGuard新APIで原子予約。テスト用の旧duck typeはcheckへ後方互換。"""
+        if self._ledger is None:
+            return [], None
+        reserve = getattr(self._ledger, "reserve", None)
+        if callable(reserve):
+            warnings, reservation = reserve(
+                "apify", user_email, est_cost_usd=est_cost, request_id=request_id
+            )
+            return list(warnings), reservation
+        warnings = self._ledger.check(
+            "apify", user_email, est_cost_usd=est_cost, request_id=request_id
+        )
+        return list(warnings), None
+
+    def _settle_cost(
+        self,
+        user_email: str,
+        *,
+        cost_usd: float,
+        units: int,
+        request_id: str,
+        reservation: Any | None,
+    ) -> None:
+        if self._ledger is None:
+            return
+        settle = getattr(self._ledger, "settle", None)
+        if reservation is not None and callable(settle):
+            settle(reservation, cost_usd=cost_usd, units=units, request_id=request_id)
+            return
+        self._ledger.record(
+            "apify", user_email, cost_usd=cost_usd, units=units, request_id=request_id
+        )
+
+    def _record_partial(
+        self,
+        user_email: str,
+        est_cost: float,
+        request_id: str,
+        reservation: Any | None,
+    ) -> None:
         """timeout/失敗時に概算コストを台帳へ記帳（run が課金済みのことがあるため上限で計上）。
 
         件数が確定しないため est_cost（max_items ベースの上振れ）を使う。予算ガードが
         実支出より遅れて発動するのを防ぐ（self-review 指摘）。ledger 未注入なら no-op。
         """
-        if self._ledger is not None and est_cost > 0:
-            self._ledger.record(
-                "apify", user_email, cost_usd=est_cost, units=0, request_id=request_id
+        if est_cost > 0:
+            self._settle_cost(
+                user_email,
+                cost_usd=est_cost,
+                units=0,
+                request_id=request_id,
+                reservation=reservation,
             )
 
     def run_actor_sync(
@@ -305,27 +380,49 @@ class ApifyClient:
         """actor run を起動し、完了までポーリングして dataset items を返す。
 
         deadline_s 超過時は abort を叩いて ApifyError(APIFY_TIMEOUT)。
-        ledger 注入時は run 前に check（予算超過= CostLimitExceededError 送出＝fail-close）、
-        run 後に実件数ベースで record する。
+        ledger 注入時は run 前に概算額を原子予約（予算超過=fail-close）、run 後に
+        実件数ベースの金額へ精算する。
         """
         unit_price = _ACTOR_PRICE_PER_ITEM.get(actor_id, 0.001)
         est_cost = round(unit_price * max_items, 6)
-        warnings: list[str] = []
-        if self._ledger is not None:
-            warnings.extend(
-                self._ledger.check(
-                    "apify", user_email, est_cost_usd=est_cost, request_id=request_id
-                )
-            )
+        warnings, reservation = self._reserve_cost(user_email, est_cost, request_id)
 
         start = time.monotonic()
+        deadline_at = start + max(0, deadline_s)
         try:
-            resp = self._request("POST", f"/acts/{actor_id}/runs", json=run_input)
+            resp = self._request(
+                "POST", f"/acts/{actor_id}/runs", json=run_input, deadline_at=deadline_at
+            )
+        except _DeadlineExceededError:
+            self._settle_cost(
+                user_email,
+                cost_usd=0.0,
+                units=0,
+                request_id=request_id,
+                reservation=reservation,
+            )
+            raise ApifyError(
+                f"APIFY_TIMEOUT: {actor_id} を {deadline_s}s 以内に開始できませんでした"
+            ) from None
         except httpx.HTTPStatusError as e:
+            self._settle_cost(
+                user_email,
+                cost_usd=0.0,
+                units=0,
+                request_id=request_id,
+                reservation=reservation,
+            )
             raise ApifyError(
                 f"APIFY_HTTP: actor起動に失敗しました ({actor_id}, status={e.response.status_code})"
             ) from e
         except httpx.HTTPError as e:
+            self._settle_cost(
+                user_email,
+                cost_usd=0.0,
+                units=0,
+                request_id=request_id,
+                reservation=reservation,
+            )
             raise ApifyError(f"APIFY_HTTP: actor起動に失敗しました ({actor_id})") from e
         run = resp.json().get("data", {})
         run_id = str(run.get("id", ""))
@@ -340,21 +437,21 @@ class ApifyClient:
         dataset_id = str(run.get("defaultDatasetId", ""))
         try:
             while status in ("", "READY", "RUNNING"):
-                if time.monotonic() - start > deadline_s:
-                    self._abort(run_id, request_id)
-                    self._record_partial(user_email, est_cost, request_id)
-                    raise ApifyError(
-                        f"APIFY_TIMEOUT: {actor_id} が {deadline_s}s 以内に完了しませんでした"
-                        "（runは中断済み）"
-                    )
-                time.sleep(self._poll_interval_s)
-                run = self._request("GET", f"/actor-runs/{run_id}").json().get("data", {})
+                remaining = deadline_at - time.monotonic()
+                if remaining <= 0:
+                    raise _DeadlineExceededError
+                time.sleep(min(self._poll_interval_s, remaining))
+                run = (
+                    self._request("GET", f"/actor-runs/{run_id}", deadline_at=deadline_at)
+                    .json()
+                    .get("data", {})
+                )
                 status = str(run.get("status", ""))
                 status_message = str(run.get("statusMessage") or "")
                 dataset_id = str(run.get("defaultDatasetId", "")) or dataset_id
 
             if status != "SUCCEEDED":
-                self._record_partial(user_email, est_cost, request_id)
+                self._record_partial(user_email, est_cost, request_id, reservation)
                 raise ApifyError(
                     f"APIFY_RUN_FAILED: {actor_id} status={status} {status_message}".strip()
                 )
@@ -362,10 +459,18 @@ class ApifyClient:
             items_resp = self._request(
                 "GET",
                 f"/datasets/{dataset_id}/items",
+                deadline_at=deadline_at,
                 params={"limit": max_items, "clean": "true"},
             )
+        except _DeadlineExceededError:
+            self._abort(run_id, request_id)
+            self._record_partial(user_email, est_cost, request_id, reservation)
+            raise ApifyError(
+                f"APIFY_TIMEOUT: {actor_id} が {deadline_s}s 以内に完了しませんでした"
+                "（runは中断済み）"
+            ) from None
         except httpx.HTTPError as e:
-            self._record_partial(user_email, est_cost, request_id)
+            self._record_partial(user_email, est_cost, request_id, reservation)
             raise ApifyError(
                 f"APIFY_HTTP: {actor_id} の実行中にHTTPエラーが発生しました "
                 f"(status={getattr(getattr(e, 'response', None), 'status_code', '?')})"
@@ -375,16 +480,26 @@ class ApifyClient:
 
         # FREE tier の沈黙0件を顕在化（SKILL.md 実測: プラン不足でも SUCCEEDED+0件になる）
         if not items and any(h in status_message.lower() for h in _TIER_HINTS):
+            self._settle_cost(
+                user_email,
+                cost_usd=0.0,
+                units=0,
+                request_id=request_id,
+                reservation=reservation,
+            )
             raise ApifyError(
                 f"APIFY_TIER: {actor_id} が0件を返しました。Apifyプラン起因の可能性があります"
                 f"（statusMessage: {status_message[:120]}）。BRONZE以上のプランが必要です。"
             )
 
         actual_cost = round(unit_price * len(items), 6)
-        if self._ledger is not None:
-            self._ledger.record(
-                "apify", user_email, cost_usd=actual_cost, units=len(items), request_id=request_id
-            )
+        self._settle_cost(
+            user_email,
+            cost_usd=actual_cost,
+            units=len(items),
+            request_id=request_id,
+            reservation=reservation,
+        )
         logger.info(
             "apify_run_done",
             request_id=request_id,

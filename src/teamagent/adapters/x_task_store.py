@@ -107,6 +107,7 @@ class XTaskStore:
             return {
                 "job_id": job_id,
                 "status": item.get("status", {}).get("S", "unknown"),
+                "requested_by": item.get("requested_by", {}).get("S", ""),
                 "progress": detail.get("progress"),
                 "error_code": detail.get("error_code"),
                 "s3_prefix": detail.get("s3_prefix"),
