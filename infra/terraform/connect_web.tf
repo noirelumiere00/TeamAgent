@@ -343,6 +343,9 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "OAUTH_KMS_KEY_ID", value = var.connect_oauth_kms_key_id != "" ? var.connect_oauth_kms_key_id : data.aws_kms_alias.connect_oauth[0].target_key_arn },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
+      # コスト方針(2026-06-29)=Haiku。未設定だと /search の要約合成がコード既定へ落ちる
+      # （2026-07-13 実測で Sonnet 呼び出しを確認）。品質を上げたい場合はこの値を明示変更する。
+      { name = "BEDROCK_MODEL_ID", value = var.mcp_model_id },
       # P4 検索 UI（/search・/api/v1/search）が SearchSkill を新スキーマで動かすための
       # フラグ。USE_NEW_SCHEMA を入れ忘れると factory が既定 false → RLS 未適用の旧
       # proposals_chunks を引いてしまい RLS スコープが no-op になる（セキュリティ上必須）。
