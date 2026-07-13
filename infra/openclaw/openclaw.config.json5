@@ -166,6 +166,19 @@
             // /search・/search/graph）の URL を返す。URL生成のみ（CONNECT_BASE_URL 未設定なら
             // 「未公開」を返し壊れたリンクは出さない）。USE_KNOWLEDGE_SEARCH_URL_TOOL=1 が必要。
             "knowledge_search_url",
+            // tiktok_acquire: TikTok取得の非同期ジョブ（SQS→使い捨てFargate）。search_surface_check
+            // と video_algorithm の取得段。USE_TIKTOK_ACQUIRE=1 + tiktok_acquire.tf apply が必要。
+            "tiktok_acquire", "tiktok_acquire_status",
+            // カタログ①②④: X(Twitter)リサーチ（声集め/ニーズ発掘/効果測定）。
+            // USE_X_RESEARCH_TOOLS=1 + APIFY_API_TOKEN + （④は x_research.tf apply）が必要。
+            // 段階公開は X_RESEARCH_ALLOWED_EMAILS（skill層 gate・空=全員）。
+            "x_voice_search", "x_needs_mining", "x_buzz_measure", "x_buzz_measure_status",
+            // カタログ③: 検索面チェック（TikTok×IG媒体比較・勢力図・在圏判定）。
+            // USE_SEARCH_SURFACE_TOOL=1 + APIFY_API_TOKEN が必要。
+            "search_surface_check",
+            // カタログ⑤: コメント欄マイニング（chromium一次→Apify縮退・Bedrock分類）。
+            // USE_TIKTOK_COMMENT_TOOLS=1 が必要。
+            "tiktok_comment_mining",
           ],
           // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
