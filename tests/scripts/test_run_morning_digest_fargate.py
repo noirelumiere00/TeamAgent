@@ -212,3 +212,46 @@ def test_block_kit_renders_display_fields() -> None:
     assert "江田 真希" in dump  # 実名（未マスク）
     assert "6/25まで" in dump and "サムネ案の確定" in dump
     assert "4通" in dump
+
+
+def test_fetch_connected_users_sets_admin_guc(monkeypatch: Any) -> None:
+    """動的抽出は SELECT 前に admin GUC を立てる（FORCE RLS で 0 行になる事故の再発防止）。
+
+    oauth_tokens は「本人 GUC or admin」の FORCE RLS。GUC 無し接続だと接続ロールに
+    よっては全行不可視＝自動モードで誰にも配信されない（2026-07-13 監査で検出）。
+    """
+    executed: list[str] = []
+
+    class _Cur:
+        def execute(self, sql: str, *a: Any) -> None:
+            executed.append(sql)
+
+        def fetchall(self) -> list[tuple[str]]:
+            return [("A@ex.com",), ("b@ex.com",)]
+
+        def __enter__(self) -> _Cur:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            return None
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def __enter__(self) -> _Conn:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            return None
+
+    import types
+
+    fake_psycopg = types.SimpleNamespace(connect=lambda dsn: _Conn())
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x@localhost/db")
+    users = mod._fetch_connected_users_from_rds()
+    assert users == ["a@ex.com", "b@ex.com"]  # 小文字正規化
+    set_idx = next(i for i, q in enumerate(executed) if "app.user_role" in q)
+    sel_idx = next(i for i, q in enumerate(executed) if q.strip().startswith("SELECT"))
+    assert set_idx < sel_idx, "admin GUC は SELECT より先に立てる"

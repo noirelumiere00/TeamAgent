@@ -78,6 +78,11 @@ def _fetch_connected_users_from_rds() -> list[str]:
     try:
         with psycopg.connect(dsn) as conn:
             with conn.cursor() as cur:
+                # oauth_tokens は FORCE RLS（本人 GUC or admin）。この一覧取得は「配信対象の
+                # 列挙」という管理系読み取りなので、policy に用意された admin 経路を明示する
+                # （GUC 無しだと接続ロールによっては 0 行になり「誰にも配信されない」事故に
+                # なる・2026-07-13 自動モード切替の事前監査で検出）。token 本体は読まない。
+                cur.execute("SET app.user_role = 'admin'")
                 cur.execute("SELECT user_email FROM oauth_tokens")
                 rows = cur.fetchall()
         return [str(r[0]).strip().lower() for r in rows if r and r[0]]
