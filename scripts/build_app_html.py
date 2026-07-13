@@ -490,6 +490,29 @@ def _strip_self_tags(text):
 JUNK_CLIENTS = {"テスト", "（テスト）松竹", "VECTOR INC", "vectorinc", "Vector", "Vector Group"}
 DOC_DROP: set[str] = set()        # dedup_drop_map.json の drop keys（main() で読み込み）
 TITLE_OVERRIDE: dict[str, str] = {}  # weird_rename_high.json（main() で読み込み）
+
+# === 表示名寄せ（任意適用・可逆）: tag_alias.json / client_alias.json（main() で読み込み） ===
+# 必須サイドカー(_read_sidecar)と扱いを分ける: 欠落/空/破損は空 dict＝素通り（fail-loud にしない）。
+# サイドカー削除で元挙動へ戻る可逆設計のため、名寄せは「載っている値だけ正本へ寄せる」。
+TAG_ALIAS: dict = {}       # {"industry":{variant:canonical,...},"solution":{...}}
+CLIENT_ALIAS: dict = {}    # client_alias.json の "client": {variant:canonical,...}
+
+
+def _canon_industry(v):
+    """業種の表示名寄せ: variant→canonical（未登録/空は素通り）。"""
+    return TAG_ALIAS.get("industry", {}).get(v, v)
+
+
+def _canon_solution(v):
+    """施策の表示名寄せ: variant→canonical（未登録/空は素通り）。"""
+    return TAG_ALIAS.get("solution", {}).get(v, v)
+
+
+def _canon_client(v):
+    """取引先名の表示名寄せ: variant→canonical（未登録/空は素通り）。"""
+    return CLIENT_ALIAS.get(v, v)
+
+
 _CHUNK_RE = re.compile(r"_\d{1,2}$")
 def _chunk_key(stem):
     k = stem
@@ -1719,6 +1742,25 @@ def _read_sidecar(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _load_alias_sidecar(name: str, subkey: str | None = None) -> dict:
+    """名寄せサイドカー（任意適用）を読む。_read_sidecar（必須・fail-loud）とは意図的に
+    扱いを分ける: 名寄せは削除で元挙動へ戻る可逆設計なので、欠落/空/破損/型不一致は
+    黙って空 dict＝素通り（fail-loud にしない）。subkey 指定時はその配下 dict を返す。"""
+    path = SIDECAR_DIR / name
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if subkey is not None:
+        sub = data.get(subkey, {})
+        return sub if isinstance(sub, dict) else {}
+    return data
+
+
 def _stats_path(out: Path) -> Path:
     return Path(str(out) + ".stats.json")
 
@@ -1784,7 +1826,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     global VAULT, CLIENTS, DOCS, REPORTS, EXCL, EXCL_N, DOC_DROP, TITLE_OVERRIDE, CHUNK_DROP
-    global INCLUDE_REPORTS
+    global INCLUDE_REPORTS, TAG_ALIAS, CLIENT_ALIAS
 
     args = _parse_args(argv)
     INCLUDE_REPORTS = args.include_reports
@@ -1814,6 +1856,10 @@ def main(argv: list[str] | None = None) -> int:
         _die(f"サイドカー inter-var.b64 が空です: {SIDECAR_DIR / 'inter-var.b64'}")
     CHUNK_DROP = _compute_chunk_drop()
 
+    # --- 表示名寄せサイドカー（任意適用・可逆）: 欠落は空 dict＝素通り（必須サイドカーと扱いを分ける） ---
+    TAG_ALIAS = _load_alias_sidecar("tag_alias.json")
+    CLIENT_ALIAS = _load_alias_sidecar("client_alias.json", "client")
+
     # --- 以下、元スクリプト L149-332 のパイプラインをそのまま実行（ロジック不変） ---
     clients = []
     for f in sorted(CLIENTS.glob("*.md")):
@@ -1823,10 +1869,10 @@ def main(argv: list[str] | None = None) -> int:
         fm = front(t)
         if _is_self_org(fm.get("client") or ""):
             continue
-        _cname = fm.get("client") or f.stem
+        _cname = _canon_client(fm.get("client") or f.stem)  # 取引先名寄せ: 正本化してから norm()/dedup へ
         clients.append({
             "stem": f.stem, "name": _cname, "cnorm": norm(_cname),
-            "industry": fm.get("industry", ""), "phase": fm.get("deal_phase", ""),
+            "industry": _canon_industry(fm.get("industry", "")), "phase": fm.get("deal_phase", ""),
             "bant": fm.get("bant_score", ""), "bantg": bant_short(fm.get("bant_score", "")),
             "fb": to_int(fm.get("fb_count", "0")), "doc": to_int(fm.get("doc_count", "0")),
             "md": client_md(t), "tl": parse_fb_events(body_of(t)),
@@ -1861,7 +1907,7 @@ def main(argv: list[str] | None = None) -> int:
             if ln.startswith("> "):
                 ex = _strip_self_tags(ln[2:].strip())[:220]
                 break
-        _dclient = fm.get("client", "")
+        _dclient = _canon_client(fm.get("client", ""))  # doc側 client も同じ正本化（doc→client リンク一致）
         if _is_self_org(_dclient):         # 自社は取引先に出さない（資料自体は残す）
             _dclient = ""
         _msrc = re.search(r"^- 出典: \[(\w+)\]", t, re.M)
@@ -1869,16 +1915,17 @@ def main(argv: list[str] | None = None) -> int:
             _msrc.group(1) if _msrc else "", ""
         )
         _dtitle = TITLE_OVERRIDE.get(f.stem) or fm.get("title", f.stem)
+        _dsol = fm.get("solution", "")  # 施策: 格納値/施策タグは正本化・vfmt 検出には生値（動画形式判定の回帰防止）
         docs.append({
             "stem": f.stem, "title": _dtitle,
             "client": _dclient, "cnorm": norm(_dclient),
-            "industry": fm.get("industry", ""), "solution": fm.get("solution", ""),
+            "industry": _canon_industry(fm.get("industry", "")), "solution": _canon_solution(_dsol),
             "doc_type": fm.get("doc_type", ""), "modified": fm.get("modified_at", ""),
             "src": _src,
             # タグ第1弾（資料側）: 媒体=title+excerpt / 動画形式=+solution / 形式=stem 末尾拡張子。
             # 横断/（xc）は実 wikilink 網の構築後に付与
             "media": media_tags(_dtitle + "\n" + ex),
-            "vfmt": video_format_tags(_dtitle + "\n" + ex + "\n" + fm.get("solution", "")),
+            "vfmt": video_format_tags(_dtitle + "\n" + ex + "\n" + _dsol),
             "fmt": file_format_tag(f.stem), "xc": "",
             "ex": ex, "md": doc_md(t), "_wl": parse_links(body_of(t)),
         })

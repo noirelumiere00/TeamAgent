@@ -1176,3 +1176,172 @@ def test_journey_flow_repairs_homework_and_back(ux_html: str) -> None:
     assert 'k==="table"?tableView():' in html
     # グラフ等他ビューの履歴挙動は変えない（openGraph は pushHist しない）
     assert 'pushHist("graph"' not in html
+
+
+# ---------------- 表示名寄せ（tag_alias / client_alias・任意適用・可逆） ----------------
+
+
+def _write_aliases(sidecar_dir: Path, *, tag: dict | None = None, client: dict | None = None) -> None:
+    """名寄せサイドカーを SIDECAR_DIR（monkeypatch 済 tmp）へ置く。既定 fixture には無い＝素通り。"""
+    if tag is not None:
+        (sidecar_dir / "tag_alias.json").write_text(
+            json.dumps(tag, ensure_ascii=False), encoding="utf-8"
+        )
+    if client is not None:
+        (sidecar_dir / "client_alias.json").write_text(
+            json.dumps(client, ensure_ascii=False), encoding="utf-8"
+        )
+
+
+def test_tag_alias_industry_applied_to_doc_and_client(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """業種 variant（メディア・エンタメ）が doc/client の industry で canonical（メディア）へ正規化される。"""
+    _write_aliases(sidecars, tag={"industry": {"メディア・エンタメ": "メディア"}, "solution": {}})
+    (vault / "docs" / "番組資料.md").write_text(
+        '---\ntitle: "番組資料"\nclient: "テレ朝"\nindustry: "メディア・エンタメ"\n'
+        'doc_type: "提案書"\nsolution: ""\nmodified_at: "2026-06-01"\n---\n\n> 抜粋\n',
+        encoding="utf-8",
+    )
+    (vault / "clients" / "テレ朝.md").write_text(
+        '---\nclient: "テレ朝"\nindustry: "メディア・エンタメ"\ndeal_phase: ""\nbant_score: ""\n'
+        "fb_count: 0\ndoc_count: 1\n---\n\n# テレ朝\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # doc 側・client 側とも industry が canonical（=props/テーブル/タグ/検索hay へ一貫適用される元）
+    assert _doc_field(html, "番組資料", "industry") == "メディア"
+    assert re.search(r'"name": "テレ朝", "cnorm": "テレ朝", "industry": "メディア"', html)
+    # variant 文字列は payload のどこにも残らない
+    assert '"industry": "メディア・エンタメ"' not in html
+
+
+def test_tag_alias_solution_applied_to_doc(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """施策 variant（動画制作）が doc の solution で canonical（動画広告）へ正規化される。"""
+    _write_aliases(sidecars, tag={"industry": {}, "solution": {"動画制作": "動画広告"}})
+    (vault / "docs" / "制作案.md").write_text(
+        '---\ntitle: "制作案"\nclient: "出光興産"\nindustry: ""\n'
+        'doc_type: "提案書"\nsolution: "動画制作"\nmodified_at: "2026-06-01"\n---\n\n> 抜粋\n',
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert _doc_field(html, "制作案", "solution") == "動画広告"
+    assert '"solution": "動画制作"' not in html
+
+
+def test_solution_alias_field_canonical_but_vfmt_uses_raw(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """施策フィールドは正本化しつつ、動画形式(vfmt)判定は生の solution を使う（回帰防止の配線検証）。"""
+    # 生 "縦型ショート企画" は VIDEO_FORMAT の「縦型」に一致→vfmt=ショート。canonical "動画広告" は非該当。
+    _write_aliases(sidecars, tag={"industry": {}, "solution": {"縦型ショート企画": "動画広告"}})
+    (vault / "docs" / "施策X案.md").write_text(  # title/excerpt は vfmt 非該当（solution 由来のみを見る）
+        '---\ntitle: "施策X案"\nclient: "出光興産"\nindustry: ""\n'
+        'doc_type: "提案書"\nsolution: "縦型ショート企画"\nmodified_at: "2026-06-01"\n---\n\n> 抜粋\n',
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert _doc_field(html, "施策X案", "solution") == "動画広告"  # 施策フィールドは正本
+    assert re.search(r'"stem": "施策X案".*?"vfmt": \["ショート"\]', html)  # vfmt は生値由来（正本では消える）
+
+
+def test_client_alias_folds_variants_and_sums_fb(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """取引先 variant（SBI証券/SBI生命保険）が canonical 1枚へ畳まれ FB/資料が合算される。"""
+    _write_aliases(
+        sidecars,
+        client={"client": {"SBI証券": "SBIホールディングス", "SBI生命保険": "SBIホールディングス"}},
+    )
+    for cname, fb, doc in (("SBI証券", 3, 2), ("SBI生命保険", 4, 1)):
+        (vault / "clients" / f"{cname}.md").write_text(
+            f'---\nclient: "{cname}"\nindustry: "金融"\ndeal_phase: ""\nbant_score: ""\n'
+            f"fb_count: {fb}\ndoc_count: {doc}\n---\n\n# {cname}\n",
+            encoding="utf-8",
+        )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["clients"] == 2  # 出光興産 + SBI（2変種が1枚に統合）
+    # 1枚のカードに fb=3+4=7 / doc=2+1=3 が合算・cnorm は canonical の norm
+    assert re.search(
+        r'"name": "SBIホールディングス", "cnorm": "sbiホールディングス"[^}]*"fb": 7, "doc": 3', html
+    )
+    assert '"name": "SBI証券"' not in html
+    assert '"name": "SBI生命保険"' not in html
+
+
+def test_client_alias_applied_to_doc_client_links_to_canonical(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """doc 側 client も正本化され cnorm が canonical と一致（doc→client リンク・関連資料の合流）。"""
+    _write_aliases(sidecars, client={"client": {"SBI証券": "SBIホールディングス"}})
+    (vault / "clients" / "SBIホールディングス.md").write_text(
+        '---\nclient: "SBIホールディングス"\nindustry: "金融"\ndeal_phase: ""\nbant_score: ""\n'
+        "fb_count: 0\ndoc_count: 1\n---\n\n# SBIホールディングス\n",
+        encoding="utf-8",
+    )
+    (vault / "docs" / "証券資料.md").write_text(
+        '---\ntitle: "証券資料"\nclient: "SBI証券"\nindustry: "金融"\n'
+        'doc_type: "提案書"\nsolution: ""\nmodified_at: "2026-06-01"\n---\n\n> 抜粋\n',
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert _doc_field(html, "証券資料", "client") == "SBIホールディングス"
+    assert _doc_field(html, "証券資料", "cnorm") == "sbiホールディングス"
+    assert '"client": "SBI証券"' not in html
+
+
+def test_alias_sidecars_absent_pass_through(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """名寄せサイドカー欠落（既定 fixture）は素通り＝variant 値がそのまま残る（可逆・fail-loud にしない）。"""
+    assert not (sidecars / "tag_alias.json").exists()
+    assert not (sidecars / "client_alias.json").exists()
+    (vault / "docs" / "番組資料.md").write_text(
+        '---\ntitle: "番組資料"\nclient: "テレ朝"\nindustry: "メディア・エンタメ"\n'
+        'doc_type: "提案書"\nsolution: "動画制作"\nmodified_at: "2026-06-01"\n---\n\n> 抜粋\n',
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert _doc_field(html, "番組資料", "industry") == "メディア・エンタメ"
+    assert _doc_field(html, "番組資料", "solution") == "動画制作"
+
+
+def test_alias_canonical_and_unmapped_values_unchanged(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """canonical 自身・マップ未登録の値・未登録の取引先名はいずれも正規化されず素通り。"""
+    _write_aliases(
+        sidecars,
+        tag={"industry": {"メディア・エンタメ": "メディア"}, "solution": {"動画制作": "動画広告"}},
+        client={"client": {"SBI証券": "SBIホールディングス"}},
+    )
+    (vault / "docs" / "正規資料.md").write_text(
+        '---\ntitle: "正規資料"\nclient: "自治体X"\nindustry: "メディア"\n'  # canonical 自身
+        'doc_type: "提案書"\nsolution: "調査"\nmodified_at: "2026-06-01"\n---\n\n> 抜粋\n',  # unmapped
+        encoding="utf-8",
+    )
+    (vault / "clients" / "自治体X.md").write_text(
+        '---\nclient: "自治体X"\nindustry: "宇宙開発"\ndeal_phase: ""\nbant_score: ""\n'  # unmapped industry / unmapped client
+        "fb_count: 1\ndoc_count: 1\n---\n\n# 自治体X\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert _doc_field(html, "正規資料", "industry") == "メディア"  # canonical 自身は不変
+    assert _doc_field(html, "正規資料", "solution") == "調査"  # unmapped solution は素通り
+    assert _doc_field(html, "正規資料", "client") == "自治体X"  # unmapped client は素通り
+    assert re.search(r'"name": "自治体X", "cnorm": "自治体x", "industry": "宇宙開発"', html)  # unmapped industry 不変
