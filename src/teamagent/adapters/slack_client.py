@@ -112,7 +112,14 @@ class SlackClient:
             blocks: Block Kit ブロック（リッチメッセージ）
         """
         start = time.perf_counter()
-        kwargs: dict[str, Any] = {"channel": channel, "text": text}
+        # unfurl 無効化: ダイジェストは permalink/会議URL を多数含むため、リンクプレビューが
+        # 展開されると DM が縦に伸びて可読性が崩れる（2026-07-13 compact 化と同時に恒久設定）。
+        kwargs: dict[str, Any] = {
+            "channel": channel,
+            "text": text,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
         if thread_ts is not None:
             kwargs["thread_ts"] = thread_ts
         if blocks is not None:

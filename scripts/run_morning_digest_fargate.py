@@ -19,6 +19,7 @@ import asyncio
 import datetime as _dt
 import json
 import os
+import re
 import sys
 import uuid
 from typing import Any
@@ -135,6 +136,48 @@ def _calendar_button_enabled() -> bool:
         "true",
         "yes",
     }
+
+
+def _compact_enabled() -> bool:
+    """MORNING_DIGEST_COMPACT=1 のときのみ密度優先描画（既定OFF・旧描画を完全温存）。
+
+    2026-07-13 パイロットFB「Slackとメールの部分が見づらい」対応。ON/OFF は env のみで
+    切替可能（taskdef 差し替えだけ・再ビルド不要）。"""
+    return os.environ.get("MORNING_DIGEST_COMPACT", "").strip().lower() in {"1", "true", "yes"}
+
+
+# --- 密度優先描画（MORNING_DIGEST_COMPACT）の表示上限と切り詰め ---
+_COMPACT_SUBJ_LEN = 60  # 件名/要約の切詰
+_COMPACT_EXCERPT_LEN = 60  # Slack本文抜粋の切詰
+_COMPACT_SECTION_CHARS = 2800  # Slack section text 上限3000字の保険
+_COMPACT_MAX_BLOCKS = 48  # Slack blocks 上限50個の保険
+
+_MENTION_RE = re.compile(r"<@[A-Z0-9]+\|([^>]+)>")
+_MENTION_BARE_RE = re.compile(r"<@[A-Z0-9]+>")
+_CHANNEL_TOKEN_RE = re.compile(r"<#[A-Z0-9]+\|([^>]*)>")
+_LINK_LABEL_RE = re.compile(r"<https?://[^|>]+\|([^>]+)>")
+_LINK_BARE_RE = re.compile(r"<https?://[^>]+>")
+
+
+def _truncate(s: str, limit: int) -> str:
+    """limit 超過時は末尾を「…」に置き換える（1件=1行原則のための単純字数切詰）。"""
+    s = s or ""
+    return s if len(s) <= limit else s[: max(0, limit - 1)] + "…"
+
+
+def _flatten_slack_text(raw: str) -> str:
+    """Slack 生本文の抜粋整形（compact 用）: メンション/リンク表記を可読化し空白を1つに畳む。
+
+    処理順は「正規化→切詰→escape」（escape は呼び出し側）。`<https://evil|クリック>` の
+    ような偽装リンクはラベル文字列だけが残り、リンクとしては絶対に描画されない。
+    """
+    s = raw or ""
+    s = _MENTION_RE.sub(r"@\1", s)
+    s = _MENTION_BARE_RE.sub("@メンバー", s)
+    s = _CHANNEL_TOKEN_RE.sub(r"#\1", s)
+    s = _LINK_LABEL_RE.sub(r"\1", s)
+    s = _LINK_BARE_RE.sub("(リンク)", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 _JST = _dt.timezone(_dt.timedelta(hours=9))
@@ -405,6 +448,216 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     return text, blocks
 
 
+def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
+    """密度優先の Block Kit（MORNING_DIGEST_COMPACT=1・2026-07-13 パイロットFB対応）。
+
+    設計原則: DM は「索引」・詳細は元アプリ（Gmail/Slack/Calendar）。1件=1行、
+    要約・本文プレビューは出さない（要返信のみ ⏰期限/📌依頼 の構造化1行を許可・
+    どちらも無ければ要約60字で代替）。全セクションで「見出し=全数・表示=上限・
+    超過=〈他N件〉+リンク」を統一。ボタン群（_reply_buttons）・脚注・PII 規約
+    （display は本人 DM のみ・ログ厳禁 G3/G7）は旧描画と共通。
+    """
+    mail_items = list(getattr(digest, "mail_digest", []) or [])
+
+    def _is_reply(m: Any) -> bool:
+        return m.importance == "high" and bool(getattr(m, "to_self", False))
+
+    high = [m for m in mail_items if _is_reply(m)]
+    unread = [m for m in mail_items if getattr(m, "is_unread", False) and not _is_reply(m)]
+    cal_items = list(getattr(digest, "calendar_events", []) or [])
+    slack_unread = list(getattr(digest, "slack_unread", []) or [])
+
+    now = _dt.datetime.now(_JST)
+    wd = "月火水木金土日"[now.weekday()]
+    # fallback text は通知プレビューに出るため件数のみ（PII ゼロ）。
+    text = (
+        f"朝ダイジェスト｜要返信{len(high)}・未確認{len(unread)}"
+        f"・Slack{len(slack_unread)}・予定{len(cal_items)}"
+    )
+    header = (
+        f"📬 *{now.month}/{now.day}({wd}) の朝ダイジェスト*"
+        f"｜🔴{len(high)}・📬{len(unread)}・💬{len(slack_unread)}・📅{len(cal_items)}"
+    )
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": header}},
+        {"type": "divider"},
+    ]
+
+    def _push_lines(lines: list[str]) -> None:
+        """行リストを 2800 字以内の section に分割して積む（3000 字上限の保険）。"""
+        buf: list[str] = []
+        size = 0
+        for ln in lines:
+            if buf and size + len(ln) + 1 > _COMPACT_SECTION_CHARS:
+                blocks.append(
+                    {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(buf)}}
+                )
+                buf, size = [], 0
+            buf.append(ln)
+            size += len(ln) + 1
+        if buf:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(buf)}})
+
+    def _subj_who(m: Any) -> tuple[str, str]:
+        subj = _slack_escape(
+            _truncate(
+                getattr(m, "subject_display", "") or m.subject_scrubbed or "(件名なし)",
+                _COMPACT_SUBJ_LEN,
+            )
+        )
+        who = _slack_escape(getattr(m, "counterpart_display", "") or m.counterpart_masked)
+        return subj, who
+
+    # --- 🔴 要返信（最大5件・各件にボタン）---
+    if high:
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"🔴 *要返信（{len(high)}件）*"}}
+        )
+        for m in high[:5]:
+            subj, who = _subj_who(m)
+            tag = f"`{m.sender_label}` " if getattr(m, "sender_label", "") else ""
+            thr = f"〔{m.thread_count}通〕" if getattr(m, "thread_count", 1) > 1 else ""
+            body = f"{tag}{who}: *{subj}*{thr}"
+            meta: list[str] = []
+            if getattr(m, "deadline", None):
+                meta.append(f"⏰ {_slack_escape(_truncate(str(m.deadline), 40))}")
+            if getattr(m, "ask", ""):
+                meta.append(f"📌 {_slack_escape(_truncate(m.ask, _COMPACT_SUBJ_LEN))}")
+            if meta:
+                body += "\n" + " ｜ ".join(meta)
+            elif m.summary:
+                body += f"\n_{_slack_escape(_truncate(m.summary, _COMPACT_SUBJ_LEN))}_"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
+            blocks.append({"type": "actions", "elements": _reply_buttons(m)})
+        rem = len(high) - 5
+        if rem > 0:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"〈他{rem}件〉 <{_GMAIL_INBOX_URL}|受信トレイで見る>",
+                    },
+                }
+            )
+        if any(getattr(m, "has_draft", False) for m in high):
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "📁 下書き一覧を開く",
+                                "emoji": True,
+                            },
+                            "url": _GMAIL_DRAFTS_URL,
+                        }
+                    ],
+                }
+            )
+        blocks.append({"type": "divider"})
+
+    # --- 📬 未確認（最大5件・1件=1行・要約なし）---
+    if unread:
+        lines = [f"📬 *未確認（{len(unread)}件）*"]
+        for m in unread[:5]:
+            subj, who = _subj_who(m)
+            lines.append(f"• {who}: *{subj}*")
+        rem = len(unread) - 5
+        if rem > 0:
+            lines.append(f"• 〈他{rem}件〉 <{_GMAIL_INBOX_URL}|受信トレイで見る>")
+        _push_lines(lines)
+        blocks.append({"type": "divider"})
+
+    if not high and not unread:
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": "📭 *メール*: 新着なし"}}
+        )
+        blocks.append({"type": "divider"})
+
+    # --- 💬 Slack 返信漏れ（最大5件・本文は正規化→60字切詰→escape）---
+    if slack_unread:
+        lines = [f"💬 *Slack 返信漏れ（{len(slack_unread)}件）*"]
+        for it in slack_unread[:5]:
+            ch = _slack_escape(
+                getattr(it, "channel_name_display", "") or getattr(it, "channel_name_masked", "")
+            )
+            raw = getattr(it, "excerpt_display", "") or getattr(it, "excerpt_scrubbed", "")
+            ex = _slack_escape(_truncate(_flatten_slack_text(raw), _COMPACT_EXCERPT_LEN))
+            line = f"• *#{ch or '(不明)'}*: {ex}" if ex else f"• *#{ch or '(不明)'}*"
+            link = getattr(it, "permalink", None)
+            if link:
+                line += f"  <{link}|開く>"  # permalink は実 URL なのでエスケープしない
+            lines.append(line)
+        rem = len(slack_unread) - 5
+        if rem > 0:
+            lines.append(f"• 〈他{rem}件〉")
+        _push_lines(lines)
+        blocks.append({"type": "divider"})
+
+    # --- 📅 今日の予定（最大10件・1行形式は旧描画と共通）---
+    if cal_items:
+        lines = [f"📅 *今日の予定（{len(cal_items)}件）*"]
+        for ev in cal_items[:10]:
+            when = _fmt_event_time(getattr(ev, "start_at", None), getattr(ev, "end_at", None))
+            title = _slack_escape(
+                getattr(ev, "summary_display", "")
+                or getattr(ev, "summary_scrubbed", "")
+                or "(無題)"
+            )
+            loc = getattr(ev, "location_display", "") or getattr(ev, "location_scrubbed", "")
+            line = f"• `{when}`  {title}"
+            if loc:
+                line += f"  〔{_slack_escape(loc)}〕"
+            url = getattr(ev, "meeting_url", "")
+            if url:
+                line += f"  <{url}|🔗参加>"  # 会議リンクは実 URL なのでエスケープしない
+            lines.append(line)
+        rem = len(cal_items) - 10
+        if rem > 0:
+            lines.append(f"• 〈他{rem}件〉 <{_CALENDAR_URL}|カレンダーを開く>")
+        _push_lines(lines)
+    else:
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": "📅 *今日の予定*: なし"}}
+        )
+
+    # --- 脚注（DLP 注記・旧描画と同一）---
+    blocks.append({"type": "divider"})
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        "_AiLa｜本人だけに届く DM です（件名・相手は実名表示／監査ログ側はマスク）。"
+                        "下書きはボタンを押した時に生成し、送信はされません（手動送信）。_"
+                    ),
+                }
+            ],
+        }
+    )
+
+    # blocks 50 個上限の保険（静的上限の積算では起きない想定の最終ガード）。
+    if len(blocks) > _COMPACT_MAX_BLOCKS:
+        blocks = blocks[: _COMPACT_MAX_BLOCKS - 1]
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "_表示しきれない項目があります。Gmail / カレンダーで確認してください。_",
+                    }
+                ],
+            }
+        )
+    return text, blocks
+
+
 def _reminders_enabled() -> bool:
     """MORNING_DIGEST_REMINDERS=1 のときのみ予定リマインドを登録（既定OFF・§10 E1-2）。"""
     return os.environ.get("MORNING_DIGEST_REMINDERS", "").strip().lower() in {"1", "true", "yes"}
@@ -567,7 +820,10 @@ def _process_user(skill: Any, skill_input: Any, email: str) -> str:
         return "error"
     # 配信(整形+Slack)も封じ込め（1 人の失敗で全体を落とさない）。
     try:
-        text, blocks = _format_block_kit(digest, email)
+        if _compact_enabled():
+            text, blocks = _format_block_kit_compact(digest, email)
+        else:
+            text, blocks = _format_block_kit(digest, email)
         delivered, im_channel = asyncio.run(_deliver_to_slack(email, text, blocks))
     except Exception as exc:
         print(
