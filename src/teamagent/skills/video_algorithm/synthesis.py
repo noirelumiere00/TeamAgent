@@ -165,14 +165,21 @@ def synthesize(
     request_id: str,
     prompt_version: str = "v1",
     stats: StatsAnalysis | None = None,
+    extra_context: str = "",
 ) -> tuple[CrossSynthesis | None, float]:
-    """横断シンセシスを生成。stats を渡すと統計を根拠に推論させる。失敗で (None, 0.0)。"""
+    """横断シンセシスを生成。stats を渡すと統計を根拠に推論させる。失敗で (None, 0.0)。
+
+    extra_context: 任意の追加文脈（カタログ⑥: 兄弟KW群・月間検索量）。prompt 末尾に足す。
+    """
     ok = [v for v in analyzed if v.analysis]
     if len(ok) < 2:  # 1本では「横断」概念にならない
         return None, 0.0
     try:
         system = load_prompt("video_algorithm", prompt_version, "synthesis")
-        resp = gemini.generate_text(build_prompt(ok, query, stats), request_id, system=system)
+        prompt = build_prompt(ok, query, stats)
+        if extra_context:
+            prompt = f"{prompt}\n\n# 追加コンテキスト\n{extra_context}"
+        resp = gemini.generate_text(prompt, request_id, system=system)
         syn = parse_synthesis(resp.text)
         cost = float(resp.cost_usd)
     except Exception as e:  # load/生成/パース/型 どこで失敗してもレポートは続行

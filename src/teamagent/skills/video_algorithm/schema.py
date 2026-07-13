@@ -462,6 +462,12 @@ class VideoAlgorithmInput(BaseModel):
     # その成果物(posts.normalized.json / videos/<pid>.mp4)から読む。未指定=従来どおり実スクレイプ。
     # OC は tiktok_acquire→status で得た s3_prefix を渡す(取得=隔離 / 分析=既存)。
     acquire_s3_prefix: str | None = None
+    # カタログ⑥(勝ちパターン×検索ボリューム掛け合わせ)用の任意コンテキスト。
+    # search_volume はユーザー/ラッコ手動実測の月間検索量（サーバ側の自動取得はしない＝
+    # rakko_scraper はログイン済み .userdata セッション前提のため）。
+    search_volume: int | None = Field(default=None, ge=0)
+    # 兄弟KW群（5KW比較の一部として呼ばれた場合）。synthesis が群内での位置づけに言及する。
+    kw_set: list[str] | None = None
 
 
 class VideoAlgorithmOutput(BaseModel):
@@ -481,3 +487,6 @@ class VideoAlgorithmOutput(BaseModel):
     slack_summary: str = ""
     total_cost_usd: float = Field(default=0.0, ge=0.0)
     model_id: str | None = None
+    # 入力の echo（⑥: OC が5KW分の結果からKW優先度を会話で合成する際に参照）
+    search_volume: int | None = None
+    kw_set: list[str] = Field(default_factory=list)

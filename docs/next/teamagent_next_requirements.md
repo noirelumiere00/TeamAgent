@@ -95,7 +95,7 @@
 - 重処理ガード（1リクエスト最大20件）
 
 **5. Trend & Market Discovery**
-- TikTok のKW/ハッシュタグ検索（Puppeteer実ブラウザ+内部API傍受、Apify不要・ローカル完結）
+- TikTok のKW/ハッシュタグ検索（Puppeteer実ブラウザ+内部API傍受を一次経路とする。Apify はクラウドIP遮断時のフォールバック、および X(Twitter)/Instagram 収集（カタログ組み込み 2026-07 決定）の主経路として採用＝『Apify不要』方針はこの範囲で改訂）
 - 上位動画メタ取得＋Gemini横断分析、伸びている勝ちパターン/フックの抽出
 - trigger=TikTok名AND検索動詞 or ハッシュタグ を宣言、cost_class=high
 

@@ -470,6 +470,75 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # カタログ①②④: X(Twitter)リサーチ群。**既定 OFF**（USE_X_RESEARCH_TOOLS=1 で opt-in）。
+    # Apify actor は Apify インフラで実行（MCP からは REST のみ）。コストは cost_guard の
+    # DynamoDB 月次台帳が check/record（COST_GUARD_TABLE / COST_APIFY_MONTHLY_USD）。
+    # ④は tiktok_acquire と同じ A′トポロジ（SQS投函のみ・RunTask/PassRole 非保有）。
+    # env: APIFY_API_TOKEN(secret) / X_TASK_QUEUE / X_JOBS_TABLE / X_S3_BUCKET /
+    #      X_ANALYSIS_MODEL_ID(分析はSonnet明示注入・未設定は既定Haiku) /
+    #      X_RESEARCH_ALLOWED_EMAILS(段階公開・空=全員)。
+    # OC 露出は openclaw.config.json5 の toolFilter.include 追加が別途必要（=人間ゲート）。
+    if _envflag("USE_X_RESEARCH_TOOLS"):
+        from teamagent.adapters.x_task_store import XTaskStore
+        from teamagent.skills.x_research.skill import (
+            XBuzzMeasureSkill,
+            XBuzzMeasureStatusSkill,
+            XNeedsMiningSkill,
+            XVoiceSearchSkill,
+        )
+
+        _x_store = XTaskStore()
+        specs.append(
+            ToolSpec(XVoiceSearchSkill.name, XVoiceSearchSkill.description, XVoiceSearchSkill)
+        )
+        specs.append(
+            ToolSpec(XNeedsMiningSkill.name, XNeedsMiningSkill.description, XNeedsMiningSkill)
+        )
+        specs.append(
+            ToolSpec(
+                XBuzzMeasureSkill.name,
+                XBuzzMeasureSkill.description,
+                XBuzzMeasureSkill,
+                factory=lambda: XBuzzMeasureSkill(store=_x_store),
+            )
+        )
+        specs.append(
+            ToolSpec(
+                XBuzzMeasureStatusSkill.name,
+                XBuzzMeasureStatusSkill.description,
+                XBuzzMeasureStatusSkill,
+                factory=lambda: XBuzzMeasureStatusSkill(store=_x_store),
+            )
+        )
+
+    # カタログ③: 検索面チェック（TikTok×IG媒体比較）。**既定 OFF**（USE_SEARCH_SURFACE_TOOL=1）。
+    # TikTok面は tiktok_acquire 成果物のS3読込が正（3KW以上は必須・descriptionで誘導）、
+    # IG面は Apify（APIFY_API_TOKEN）。IG_SURFACE_DEFAULT=search|hashtag で既定面を切替
+    # （日本語KWカバレッジの検証ゲート用）。
+    if _envflag("USE_SEARCH_SURFACE_TOOL"):
+        from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
+
+        specs.append(
+            ToolSpec(
+                SearchSurfaceCheckSkill.name,
+                SearchSurfaceCheckSkill.description,
+                SearchSurfaceCheckSkill,
+            )
+        )
+
+    # カタログ⑤: コメント欄マイニング。**既定 OFF**（USE_TIKTOK_COMMENT_TOOLS=1）。
+    # 取得は既存 chromium 一次（fatイメージ前提）→ Apify clockworks 縮退。分析は Bedrock。
+    if _envflag("USE_TIKTOK_COMMENT_TOOLS"):
+        from teamagent.skills.tiktok_comment_mining.skill import TikTokCommentMiningSkill
+
+        specs.append(
+            ToolSpec(
+                TikTokCommentMiningSkill.name,
+                TikTokCommentMiningSkill.description,
+                TikTokCommentMiningSkill,
+            )
+        )
+
     return specs
 
 

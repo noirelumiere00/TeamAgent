@@ -166,7 +166,10 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
       data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn,
       # §知識ベース: knowledge_deliver が共有 Drive(個人OAuth)で実ファイルを DL する token。
       data.aws_secretsmanager_secret.google_oauth[0].arn,
-    ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [])
+      ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [],
+      # カタログ①〜⑤: Apify トークン注入権限（tiktok/apify-token 共用）。
+      (var.enable_x_research && var.tiktok_apify_secret_arn != "") ? [var.tiktok_apify_secret_arn] : []
+    )
   }
 }
 
@@ -472,6 +475,25 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "TIKTOK_JOBS_TABLE", value = aws_dynamodb_table.tiktok_jobs[0].name },
       { name = "TIKTOK_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
       { name = "TIKTOK_TASK_QUEUE", value = aws_sqs_queue.tiktok_jobs[0].url },
+      ] : [], var.enable_x_research ? [
+      # カタログ①〜⑤: X(Twitter)リサーチ/検索面チェック/コメントマイニング（2026-07 組み込み）。
+      # Apify actor は Apify インフラで実行（MCP からは REST のみ）。VSEO_REPORT_BUCKET
+      # （レポート署名URL発行先）は enable_scrape_tools 側で定義済み＝両フラグ併用が前提。
+      { name = "USE_X_RESEARCH_TOOLS", value = "1" },
+      { name = "USE_SEARCH_SURFACE_TOOL", value = "1" },
+      { name = "USE_TIKTOK_COMMENT_TOOLS", value = "1" },
+      { name = "X_TASK_QUEUE", value = aws_sqs_queue.x_jobs[0].url },
+      { name = "X_JOBS_TABLE", value = aws_dynamodb_table.x_jobs[0].name },
+      { name = "X_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
+      # 分析(②分類/④山分析)は Sonnet を明示注入（暗黙昇格禁止＝既定 mcp_model_id は Haiku）。
+      { name = "X_ANALYSIS_MODEL_ID", value = var.x_analysis_model_id },
+      # SaaSコスト台帳（予算超過 fail-close・80%警告）。値変更は taskdef env 差し替えのみ。
+      { name = "COST_GUARD_TABLE", value = aws_dynamodb_table.cost_usage[0].name },
+      { name = "COST_APIFY_MONTHLY_USD", value = var.cost_apify_monthly_usd },
+      # 段階公開（skill層 gate・空=全員許可）。stage1=小俣のみ→数名→空。CLI taskdef 差替で遷移。
+      { name = "X_RESEARCH_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },
+      { name = "SEARCH_SURFACE_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },
+      { name = "COMMENT_MINING_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },
       ] : [], var.enable_scrape_tools ? [
       # §M: video_algorithm が VSEO レポートを発行する非公開S3 bucket（presigned URL を出力に載せる）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
@@ -508,6 +530,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "GOOGLE_OAUTH_REFRESH_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:refresh_token::" },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_JSON", valueFrom = data.aws_secretsmanager_secret.vertex_sa[0].arn },
+      ] : [], (var.enable_x_research && var.tiktok_apify_secret_arn != "") ? [
+      # カタログ①〜⑤: Apify トークン（tiktok/apify-token を共用＝新設しない・計画裁定）。
+      { name = "APIFY_API_TOKEN", valueFrom = var.tiktok_apify_secret_arn },
     ] : [])
     logConfiguration = {
       logDriver = "awslogs"

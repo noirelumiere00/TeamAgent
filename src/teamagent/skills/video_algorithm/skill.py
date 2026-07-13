@@ -466,6 +466,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 input.query,
                 request_id=ctx.request_id,
                 stats=cross.stats,
+                extra_context=self._kw_context(input),
             )
             cross.synthesis = syn
             total_cost = round(total_cost + syn_cost, 6)
@@ -478,6 +479,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             cross=cross,
             total_cost_usd=total_cost,
             model_id=model_id,
+            search_volume=input.search_volume,
+            kw_set=list(input.kw_set or []),
         )
         out.report_html_path = self._write_report(out, ctx.request_id)
         if out.report_html_path:
@@ -582,6 +585,22 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             logger.warning("video_algorithm_report_write_failed", request_id=request_id)
             return None
 
+    @staticmethod
+    def _kw_context(input: VideoAlgorithmInput) -> str:
+        """カタログ⑥: 兄弟KW群・月間検索量を synthesis の追加文脈にする（無ければ空）。"""
+        parts: list[str] = []
+        if input.kw_set:
+            parts.append(
+                f"このKW「{input.query}」は兄弟KW群（{'・'.join(input.kw_set)}）の比較分析の一部。"
+                "summary の中で、この群の中での本KWの位置づけ（面の空き/激戦度）に1文言及すること。"
+            )
+        if input.search_volume is not None:
+            parts.append(
+                f"本KWの月間検索量（ラッコキーワード手動実測）: {input.search_volume:,}。"
+                "検索量と面の状況を掛け合わせたKW優先度の示唆があれば含めること。"
+            )
+        return "\n".join(parts)
+
     def _slack_summary(self, out: VideoAlgorithmOutput, backfilled: int = 0) -> str:
         """Slack は『通知』だけ（詳細は添付 HTML レポートに全て埋め込む）。"""
         c = out.cross
@@ -598,10 +617,13 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             if out.report_url
             else "📄 詳細は添付の HTML レポートをご覧ください"
         )
+        volume_line = (
+            f"📈 月間検索量(手動実測): {out.search_volume:,}\n" if out.search_volume else ""
+        )
         return (
             f"🔎 *VSEO動画アルゴリズム分析* 完了「{out.query}」"
             f"（上位{len(out.videos)}本／分析成功{ok}本{bf}）\n"
-            f"{c.summary}{top}\n"
+            f"{c.summary}{top}\n{volume_line}"
             f"{report_line}（タイムライン/テロップ位置/ブランド検出/勝ち筋）。{proposal_lines}\n"
             f"_概算 ${out.total_cost_usd:.4f}・n={c.video_count} の観測仮説（相関≠因果）_"
         )

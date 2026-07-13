@@ -1,0 +1,58 @@
+{"id": "voice-01", "utterance": "アサヒ白湯の提案が来週ある。Xでの生活者の声（不満・欲求・使われ方）を集めて、提案書に貼れる形にしてほしい", "expect": "x_voice_search", "note": "カタログP.9テンプレそのまま"}
+{"id": "voice-02", "utterance": "『ザバス』がXでどう言われてるか、投稿の実物つき（全文とURL）で集めて", "expect": "x_voice_search"}
+{"id": "voice-03", "utterance": "この新商品、世の中でどう言われてるかXの実在投稿で見せて。いいね数も付けて", "expect": "x_voice_search"}
+{"id": "voice-04", "utterance": "オリエン前の初動リサーチで、うちの商材のXでの評判をカード集にしたい", "expect": "x_voice_search"}
+{"id": "voice-05", "utterance": "『明治プロビオヨーグルト』への不満とか要望、Xの投稿でどんなのがあるか集めて", "expect": "x_voice_search", "note": "商材名が主語＋不満＝voice（needsに盗まれない硬化の検証）"}
+{"id": "voice-06", "utterance": "うちのブランドがXで叩かれてないか、実際の投稿を全文で見せて", "expect": "x_voice_search"}
+{"id": "needs-01", "utterance": "コンビニ業界の提案をやるから、生活者の不満とか欲求をXから拾ってきて", "expect": "x_needs_mining", "note": "カタログP.9テンプレ"}
+{"id": "needs-02", "utterance": "『宅配クリーニング めんどくさい』みたいな本音投稿をXで集めて、ニーズを分類して", "expect": "x_needs_mining"}
+{"id": "needs-03", "utterance": "白湯まわりで『売ってほしい』『高い』系の声、Xにどんな潜在ニーズがあるか発掘して", "expect": "x_needs_mining"}
+{"id": "needs-04", "utterance": "提案の種を探したい。飲料カテゴリでバズってる不満をXの感情ワードで掘って", "expect": "x_needs_mining"}
+{"id": "needs-05", "utterance": "電動歯ブラシ市場全体で、生活者がどんな不満を持ってるかXで発掘してニーズ分類して", "expect": "x_needs_mining", "note": "市場全体＝needs（voiceに盗まれない）"}
+{"id": "buzz-01", "utterance": "6月のキャンペーンの前後でXの発話がどう変わったかレポートにして", "expect": "x_buzz_measure", "note": "カタログP.9テンプレ"}
+{"id": "buzz-02", "utterance": "『セブン 新商品』の発話量を7/1〜7/14で日別に測って、山が立った日の中身も見たい", "expect": "x_buzz_measure"}
+{"id": "buzz-03", "utterance": "施策の効果をXの発話ベースで前後2週間比較して、報告書に入れたい", "expect": "x_buzz_measure"}
+{"id": "buzz-04", "utterance": "先週投げた発話量のジョブ xb_9f3a、もう結果できてる？", "expect": "x_buzz_measure_status"}
+{"id": "surface-01", "utterance": "『セブン』『ファミマ』『ローソン』『コンビニ』で検索したとき、TikTokとインスタで誰が上位に出てるか比較してほしい", "expect": "search_surface_check", "note": "カタログP.9テンプレ"}
+{"id": "surface-02", "utterance": "コンビニのTikTokとIGの検索面、どんな勢力図か（ニュース系かグルメ系か一般か）出して。うちのアカウントが面に出てるかも見て", "expect": "search_surface_check"}
+{"id": "surface-03", "utterance": "『無添蔵』の検索面、TikTokとインスタで媒体比較の表にして", "expect": "search_surface_check"}
+{"id": "surface-04", "utterance": "この5KWで、TikTokとインスタの上位に出てる投稿者のタイプの割合を媒体ごとに比べたい", "expect": "search_surface_check"}
+{"id": "comment-01", "utterance": "このバズ動画、コメント欄で視聴者が何て言ってるか分析して https://www.tiktok.com/@mayo/video/123", "expect": "tiktok_comment_mining", "note": "カタログP.9テンプレ"}
+{"id": "comment-02", "utterance": "新商品の実食動画3本、コメント欄の反応（推薦とか売切れ嘆き）を分類して初速レポートにして", "expect": "tiktok_comment_mining"}
+{"id": "comment-03", "utterance": "この動画のコメント、生活者がどんな言葉で語ってるか語彙を抜き出して https://www.tiktok.com/@a/video/9", "expect": "tiktok_comment_mining"}
+{"id": "algo-01", "utterance": "この5つの検索KWで勝ってる動画、なんで勝ってるのか分析して提案書にして", "expect": "video_algorithm", "note": "カタログP.9⑥テンプレ・search_surfaceに盗まれてはいけない"}
+{"id": "algo-02", "utterance": "『新宿 ランチ』で上位の動画、冒頭フックとテロップの勝ち筋を読み解いて", "expect": "video_algorithm"}
+{"id": "algo-03", "utterance": "この検索KWの上位動画をAIに見せて、構成の共通項をタイムラインで出して", "expect": "video_algorithm"}
+{"id": "tsearch-01", "utterance": "TikTokで『まつ毛美容液』を検索して、上位動画の再生数といいねのデータを見せて", "expect": "tiktok_search", "note": "面の勢力図でなく上位動画データ取得・search_surfaceに盗まれてはいけない"}
+{"id": "tsearch-02", "utterance": "『#コンビニスイーツ』のハッシュタグで伸びてる動画のデータ、ざっと取って", "expect": "tiktok_search"}
+{"id": "acquire-01", "utterance": "コンビニスイーツ関連の5KWでTikTok動画を取得して、上位は動画本体もDLして分析素材にしといて", "expect": "tiktok_acquire", "note": "取得ジョブ・本体DL"}
+{"id": "acquire-02", "utterance": "さっきのTikTok取得ジョブ tk_1a2b、終わった？成果物のURLちょうだい", "expect": "tiktok_acquire_status"}
+{"id": "vanalysis-01", "utterance": "この競合のTikTok動画、構成とフックとCTAを分析して https://www.tiktok.com/@rival/video/5", "expect": "video_analysis", "note": "外部競合URL"}
+{"id": "vanalysis-02", "utterance": "他社のPRショート、この3本の作りを分析して比較して <url>×3", "expect": "video_analysis"}
+{"id": "vapproval-01", "utterance": "編集者から上がってきた納品動画、オリエンと照らして誤植と尺オーバーがないかチェックして <url>", "expect": "video_approval", "note": "自社納品物"}
+{"id": "vapproval-02", "utterance": "この動画チェックして。うちの編集の上がりです <url>", "expect": "video_approval", "note": "曖昧『チェックして』はvideo_approval既定"}
+{"id": "neg-search-01", "utterance": "アサヒの過去の提案書ってあったっけ？探して", "expect": "search", "note": "社内資料探索・新ツールに盗まれてはいけない"}
+{"id": "neg-search-02", "utterance": "コンビニ業界の提案事例、社内にどんなのがあるか見つけて", "expect": "search", "alt_ok": ["knowledge_deliver"]}
+{"id": "neg-deliver-01", "utterance": "ローソンへの提案資料、実ファイルそのものを出して", "expect": "knowledge_deliver"}
+{"id": "neg-karte-01", "utterance": "ファミマの温度感と次アクション、これまでの提案履歴でまとめて", "expect": "clientkarte"}
+{"id": "neg-preview-01", "utterance": "この提案テキスト、過去の勝ちパターンと失注理由に照らしてレビューして", "expect": "proposal_review"}
+{"id": "neg-draft-01", "utterance": "新規案件のブリーフから、似た過去提案を引いて提案ドラフトの骨子作って", "expect": "proposal_draft"}
+{"id": "neg-mail-01", "utterance": "セブンから来たメールで止まってる案件、放置日数つきで挙げて", "expect": "mail_followup"}
+{"id": "neg-mailsum-01", "utterance": "アサヒ案件の直近メール、論点と期限を横断で要約して", "expect": "mail_summary"}
+{"id": "neg-oauth-01", "utterance": "Google連携したいんだけどリンクちょうだい", "expect": "oauth_connect"}
+{"id": "neg-ksurl-01", "utterance": "ナレッジをブラウザで探せる検索ページのURL教えて", "expect": "knowledge_search_url"}
+{"id": "boundary-01", "utterance": "TikTokで『コンビニ』を検索して、ニュース系とグルメ系どっちが面を取ってるか教えて", "expect": "search_surface_check", "note": "面の性格＝surface（tiktok_searchでない）"}
+{"id": "boundary-02", "utterance": "『コンビニ』でTikTok調べて、伸びてる動画のフックの共通点を分析して", "expect": "video_algorithm", "note": "勝ち筋分析＝algorithm（surfaceでない）"}
+{"id": "boundary-03", "utterance": "Xでうちの商品がバズってるか、どれくらい話題になってるか件数で知りたい", "expect": "x_buzz_measure", "alt_ok": ["x_voice_search"], "note": "発話量寄り"}
+{"id": "boundary-04", "utterance": "この動画のコメント欄じゃなくて、動画そのものの構成を分析して <自社編集の上がり url>", "expect": "video_approval", "note": "コメントでなく映像・かつ自社納品"}
+{"id": "boundary-05", "utterance": "インスタで『セブン』のリール、上位に誰が出てるか面を見たい", "expect": "search_surface_check", "note": "IG面もsurface（TikTok限定でない）"}
+{"id": "adv-01", "utterance": "アサヒスーパードライがXでバカにされてないか、実際の投稿を見せて", "expect": "x_voice_search", "note": "R3敵対: 商材名+ネガでもvoice"}
+{"id": "adv-02", "utterance": "化粧品業界で『パケが可愛くない』みたいな不満、Xにどれくらいあるか掘ってニーズにして", "expect": "x_needs_mining", "note": "R3敵対: 業界全体=needs"}
+{"id": "adv-03", "utterance": "『ヤクルト1000』の睡眠効果、Xでみんな実際どう言ってる？投稿見せて", "expect": "x_voice_search"}
+{"id": "adv-05", "utterance": "TikTokで『プロテイン』検索したら、ニュース系とグルメ系どっちが面を握ってる？", "expect": "search_surface_check", "note": "R3敵対: 検索でも面=surface"}
+{"id": "adv-06", "utterance": "『プロテイン』のTikTok上位、なんでこの5本が伸びてるのか構成を分析して", "expect": "video_algorithm"}
+{"id": "adv-07", "utterance": "『プロテイン』でTikTok検索して上位動画のリスト（再生数つき）だけ先にちょうだい", "expect": "tiktok_search", "note": "R3敵対: 今すぐリスト=search（取得ジョブtiktok_acquireでない）"}
+{"id": "adv-07b", "utterance": "コンビニスイーツのTikTok動画を集めて、上位は本体もDLして分析素材にしといて", "expect": "tiktok_acquire", "note": "本体DL=非同期ジョブ"}
+{"id": "adv-11", "utterance": "インスタで『#韓国コスメ』の面、上位に出てるのがインフルばっかか一般人かの割合出して", "expect": "search_surface_check"}
+{"id": "adv-13", "utterance": "白湯のポジティブ/ネガティブの割合をXで、期間は今月1ヶ月分で日別に", "expect": "x_buzz_measure", "note": "期間+日別=buzz"}
+{"id": "adv-14", "utterance": "うちのブランドのXでの評判、いい声も悪い声も実物の投稿で全部見たい", "expect": "x_voice_search"}

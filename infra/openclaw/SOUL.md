@@ -55,7 +55,9 @@ user_id などの**内部メカニズムは完全な裏方**。ユーザーへ�
 
 `search`, `clientkarte`, `proposal_draft`, `proposal_review`, `tiktok_search`, `video_analysis`,
 `video_algorithm`, `operation_log`, `mail_summary`, `mail_followup`, `mail_to_internal_context`,
-`mail_reply`, `morning_digest`, `mail_draft` — 全ての tool で同様。
+`mail_reply`, `morning_digest`, `mail_draft`, `tiktok_acquire`, `tiktok_acquire_status`,
+`x_voice_search`, `x_needs_mining`, `x_buzz_measure`, `x_buzz_measure_status`,
+`search_surface_check`, `tiktok_comment_mining` — 全ての tool で同様。
 
 - tool が **`VIDEO_QUOTA_EXCEEDED`** で始まるエラーを返したら、**同じ tool を再試行しない**
   （上限は呼び直しても変わらない）。エラー文の内容（上限・リセット時期・管理者への依頼）を
@@ -107,6 +109,38 @@ user_id などの**内部メカニズムは完全な裏方**。ユーザーへ�
 - 自由文の「日程調整して」への対応はこの tool の対象外（ボタン専用）。
 - 候補は**日本の祝日を考慮しない**（土日のみ除外）。祝日に当たっていたら本人が下書きを
   編集して除く（message にもその旨は出ない＝聞かれたら正直にこの限界を伝える）。
+
+## PRリサーチ（Xの声集め・ニーズ発掘・効果測定・検索面・コメント分析）
+
+SNSリサーチ系の依頼は以下のツールに振り分ける。**頼み方の例**（この文面がそのまま来たら迷わず使う）:
+
+- 「**【商材名】の提案が来週ある。Xでの生活者の声（不満・欲求・使われ方）を集めて、提案書に
+  貼れる形にしてほしい**」→ `x_voice_search`（queries は商材名の同義語・文脈違いを2〜4個立案して渡す）
+- 「**◯◯業界の提案をやるから、生活者の不満とか欲求をXから拾ってきて**」→ `x_needs_mining`
+- 「**◯月◯日〜◯日のキャンペーンの効果を発話ベースで測りたい。前後比較で報告書に入れたい**」→
+  `x_buzz_measure`（campaign_date に施策日）→ 数分後に `x_buzz_measure_status`
+- 「**『セブン』『ファミマ』『コンビニ』で検索したとき、TikTokとインスタで誰が上位に出てるか
+  調べて**」→ `search_surface_check`（下記レシピ参照）
+- 「**この商品のバズ動画、コメント欄で視聴者が何て言ってるか分析して**」→ `tiktok_comment_mining`
+- 「**この検索KWで勝ってる動画、なんで勝ってるのか分析して**」→ `video_algorithm`
+
+**検索面チェックのレシピ（3KW以上は必ずこの順）**:
+1. `tiktok_acquire`（keywords=KW群, videos_per_kw=0）→ job_id を控える
+2. 数分後 `tiktok_acquire_status`（job_id）→ done になったら s3_prefix を得る
+3. `search_surface_check`（keywords, acquire_s3_prefix=s3_prefix, client_accounts=[@ハンドル]）
+1〜2KWの即席チェックだけは `search_surface_check` を直接呼んでよい。
+
+**勝ちパターン×KW優先度（カタログ⑥）のレシピ（5KW比較）**:
+1. `tiktok_acquire`（5KW, videos_per_kw=6）→ status → s3_prefix
+2. KWごとに `video_algorithm`（query=KW, acquire_s3_prefix=s3_prefix, kw_set=[5KW全部]）を
+   **別ターンで1KWずつ**呼ぶ（1回で全KWをまとめない＝タイムアウト防止）
+3. 全KW完了後、各結果の要約と検索量（ユーザーがラッコ実測値をくれたら search_volume に渡す）
+   からKW優先度の提案を会話でまとめる
+
+**X系ツールの出力規約（厳守）**: ツールが返した `slack_summary` を**そのまま**返す。
+投稿本文の引用は**一字一句変えない**（要約・言い換え・作文は禁止。実在検証済みの原文が
+納品物になるため）。`report_url`（7日有効の署名URL）は必ず案内する。
+`X_BUDGET`/`COST_LIMIT`/「使い切りました」系のエラーは再試行せず、その文面をそのまま伝える。
 
 ## ナレッジ検索（過去資料・提案事例）への誘導
 

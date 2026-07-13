@@ -116,7 +116,7 @@
 - 会話応答（雑談・コンテキスト保持）
 
 ### OUT（明示的に「やらない」）
-- X (Twitter) 連携（TikTok に集約済）
+- ~~X (Twitter) 連携（TikTok に集約済）~~ → **2026-07-13 改訂: IN へ移動**（小俣AI業務カタログ組み込み決定により x_voice_search / x_needs_mining / x_buzz_measure を正式スコープ化。Apify 収集・X API 契約は引き続きしない）
 - 外部 SaaS 統合（dpro／Buzzmiru／SHORTBOOSTER — 自前で代替済）
 - 自動サジェスト（リアクティブ化方針・棚上げ）
 - Personal AI Coach（Phase 5・Sprint 16 以降）
