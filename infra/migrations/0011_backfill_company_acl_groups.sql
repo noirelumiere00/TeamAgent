@@ -6,14 +6,18 @@
 -- GDrive shared-drive crawl は取込時に既に domain を持つため対象外で可。
 -- 新規取込は pipeline._company_acl_groups()（TEAMAGENT_SHARED_COMPANY_DOMAINS）が自動付与する＝本 migration は過去分のみ。
 --
--- ⚠️ 実RDS適用は P0（SSMトンネル・要承認）。適用前に <COMPANY_DOMAIN> を実値（例: vectorinc.co.jp）へ置換。
+-- ⚠️ 2026-07-13 置換済み: <COMPANY_DOMAIN> → vectorinc.co.jp（実値・TEAMAGENT_SHARED_COMPANY_DOMAINS と同値）。
+--    プレースホルダのまま migration 台帳管理に載っており、そのまま apply すると文字どおり
+--    '<COMPANY_DOMAIN>' が acl_groups に書き込まれる事故構成だった（適用前 dry-run 監査で検出）。
 --    （代替: 該当ソースを再 ingest しても同じ結果になる。backfill は再取込なしで反映する高速手段。）
 -- 冪等: 既に当該ドメインを含む行は変更しない。
+-- 適用前の実機調査（2026-07-13）: slack 205/205 件は ingest 時自動付与で共有済み（冪等スキップ対象）・
+--   gsheets 573/573 件が未共有＝本 backfill の実対象。
 --
--- 検証(適用後・P0): 会社メンバー identity（user_groups={<COMPANY_DOMAIN>}）で search/clientkarte が
---   slack 由来の営業FBを読めること / 会社ドメイン外 identity では読めないこと（2ユーザで相互確認）。
+-- 検証(適用後・P0): 会社メンバー identity（user_groups={vectorinc.co.jp}）で search/clientkarte が
+--   gsheets 由来の営業FBを読めること / 会社ドメイン外 identity では読めないこと（2ユーザで相互確認）。
 
 UPDATE documents
-SET acl_groups = array(SELECT DISTINCT unnest(acl_groups || ARRAY['<COMPANY_DOMAIN>']))
+SET acl_groups = array(SELECT DISTINCT unnest(acl_groups || ARRAY['vectorinc.co.jp']))
 WHERE source_type IN ('slack', 'gsheets')
-  AND NOT ('<COMPANY_DOMAIN>' = ANY(acl_groups));
+  AND NOT ('vectorinc.co.jp' = ANY(acl_groups));
