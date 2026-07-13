@@ -353,6 +353,37 @@ def test_buzz_status_done_uses_cache_without_regeneration() -> None:
     assert bedrock.calls == 0 and store.cached is None
 
 
+def test_buzz_status_rollout_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("X_RESEARCH_ALLOWED_EMAILS", "other@vectorinc.co.jp")
+    store = _FakeStore(status={"status": "done", "s3_prefix": "x-research/xb_1/"})
+    skill = XBuzzMeasureStatusSkill(store=store, publisher=_publisher)  # type: ignore[arg-type]
+    out = skill.run(XBuzzMeasureStatusInput(job_id="xb_1"), _ctx())
+    # allowlist 外は結果を返さない（他人の結果や Sonnet コストを引けない）
+    assert out.status == "denied" and "段階公開中" in out.message
+    assert store.results is None or out.daily_counts == []
+
+
+def test_buzz_status_caches_spike_even_without_report_url() -> None:
+    # publisher が None を返す環境（VSEO_REPORT_BUCKET 未設定）でも spike をキャッシュし、
+    # 再照会で Sonnet を再生成しない（二重課金防止）。
+    store = _FakeStore(status={"status": "done", "s3_prefix": "x-research/xb_1/"})
+    store.results = {
+        "spec": {"keyword": "k", "start_date": "2026-07-01", "end_date": "2026-07-02"},
+        "daily_counts": [{"date": "2026-07-01", "count": 5}],
+        "top_posts": [],
+    }
+    bedrock = _FakeBedrock("山の分析")
+    skill = XBuzzMeasureStatusSkill(
+        store=store,
+        analysis_bedrock=bedrock,
+        publisher=lambda p, *, request_id, query: None,  # URL発行不可を模擬
+    )  # type: ignore[arg-type]
+    out = skill.run(XBuzzMeasureStatusInput(job_id="xb_1"), _ctx())
+    assert out.report_url is None and out.spike_analysis == "山の分析"
+    assert bedrock.calls == 1
+    assert store.cached == {"report_url": "", "spike_analysis": "山の分析"}  # URL空でもcache
+
+
 # ---- ワーカー -------------------------------------------------------------------
 
 

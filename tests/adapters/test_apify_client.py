@@ -268,6 +268,63 @@ def test_parse_tolerates_alternate_field_names() -> None:
     assert posts[0].url == "https://x.com/alt_user/status/333"
 
 
+def test_token_sent_via_header_not_url() -> None:
+    # トークンはURLクエリに載せない（httpx例外メッセージ経由の漏えい防止）。
+    fake = _FakeApify()
+    seen_headers: list[str] = []
+    seen_query_has_token: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append(request.headers.get("Authorization", ""))
+        seen_query_has_token.append("token" in dict(request.url.params))
+        return fake.handler(request)
+
+    fake.items_by_actor[ACTOR_X_SEARCH] = [_X_ITEM]
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    ApifyClient("tok-secret", http=http, poll_interval_s=0.0).search_posts(
+        "q", count=5, request_id="t"
+    )
+    assert all(h == "Bearer tok-secret" for h in seen_headers)
+    assert not any(seen_query_has_token)  # URLクエリにトークンは絶対に載らない
+
+
+def test_timeout_records_partial_cost_and_no_token_in_error() -> None:
+    fake = _FakeApify()
+    fake.final_status = "RUNNING"
+    ledger = _OkLedger()
+    http = httpx.Client(transport=httpx.MockTransport(fake.handler))
+    client = ApifyClient("tok-secret", ledger=ledger, http=http, poll_interval_s=0.0)
+    with pytest.raises(ApifyError) as ei:
+        client.run_actor_sync(
+            ACTOR_X_SEARCH, {"query": "x"}, max_items=5, deadline_s=0, request_id="t"
+        )
+    # timeout でも概算コストを記帳（台帳が実支出から乖離しない）
+    assert ledger.recorded and ledger.recorded[0][0] == "apify"
+    # 例外文字列にトークンが混じらない
+    assert "tok-secret" not in str(ei.value)
+
+
+def test_search_posts_chain_shares_deadline_budget() -> None:
+    # 第一候補が timeout してもフォールバックに残予算しか渡らない（合計が deadline を超えない）。
+    fake = _FakeApify()
+    budgets: list[int] = []
+    orig = ApifyClient.run_actor_sync
+
+    def spy(self: ApifyClient, actor_id: str, run_input: Any, **kw: Any) -> Any:
+        budgets.append(kw.get("deadline_s"))
+        return orig(self, actor_id, run_input, **kw)
+
+    fake.items_by_actor[ACTOR_X_SEARCH_FALLBACK] = [_X_ITEM]  # 1本目は空→フォールバック
+    http = httpx.Client(transport=httpx.MockTransport(fake.handler))
+    client = ApifyClient("tok", http=http, poll_interval_s=0.0)
+    import types
+
+    client.run_actor_sync = types.MethodType(spy, client)  # type: ignore[method-assign]
+    client.search_posts("q", count=5, deadline_s=120, request_id="t")
+    assert budgets[0] <= 120
+    assert budgets[1] <= budgets[0]  # フォールバックは残予算のみ
+
+
 def test_search_posts_period_builds_apidojo_input() -> None:
     fake = _FakeApify()
     bodies: list[dict[str, Any]] = []

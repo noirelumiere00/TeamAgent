@@ -28,6 +28,7 @@ from teamagent.adapters.apify_client import ApifyClient, ApifyError
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
+from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search_surface_check.report import render_surface_report
 from teamagent.skills.search_surface_check.schema import (
@@ -498,7 +499,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
     def _slack_summary(self, out: SearchSurfaceCheckOutput, input: SearchSurfaceCheckInput) -> str:
         lines = [f"🗺️ *検索面チェック* 完了（{'・'.join(out.keywords)}）"]
         if out.comparison_summary:
-            lines.append(out.comparison_summary)
+            lines.append(sanitize_llm_text(out.comparison_summary))
         client_hits = [s for s in out.surfaces if s.client_ranks]
         if input.client_accounts:
             if client_hits:

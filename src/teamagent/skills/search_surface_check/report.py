@@ -9,6 +9,7 @@ import datetime as _dt
 import html as _html
 
 from teamagent.skills._html.theme import FONT_STACK_JP
+from teamagent.skills._shared.text_safety import safe_href, sanitize_llm_text
 from teamagent.skills.search_surface_check.schema import KwSurface, SurfacePost
 
 _CAT_LABEL = {
@@ -92,8 +93,9 @@ def _post_row(p: SurfacePost) -> str:
     )
     views = p.play_count or p.like_count
     author = _esc(p.author or "不明")
-    if p.url:
-        author = f"<a href='{_esc(p.url)}'>{author}</a>"
+    href = safe_href(p.url)
+    if href:
+        author = f"<a href='{_esc(href)}'>{author}</a>"
     extra = f"×{p.appearances}" if p.appearances > 1 else ""
     cls = " class='client'" if p.is_client else ""
     star = "⭐ " if p.is_client else ""
@@ -134,7 +136,8 @@ def render_surface_report(
     parts: list[str] = []
     if comparison_summary:
         parts.append(
-            f"<div class='summary'>📊 <b>面の性格比較</b><br>{_esc(comparison_summary)}</div>"
+            "<div class='summary'>📊 <b>面の性格比較</b><br>"
+            f"{_esc(sanitize_llm_text(comparison_summary))}</div>"
         )
     for kw in keywords:
         parts.append(f"<h2>「{_esc(kw)}」の検索面</h2><div class='grid'>")

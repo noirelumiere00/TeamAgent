@@ -9,6 +9,7 @@ import datetime as _dt
 import html as _html
 
 from teamagent.skills._html.theme import FONT_STACK_JP
+from teamagent.skills._shared.text_safety import safe_href
 from teamagent.skills.tiktok_comment_mining.schema import VideoCommentInsight
 
 _CSS = f"""
@@ -40,7 +41,9 @@ def _esc(s: str) -> str:
 
 
 def _video_section(ins: VideoCommentInsight) -> str:
-    parts = [f"<h2><a href='{_esc(ins.video_url)}'>{_esc(ins.video_url)}</a></h2>"]
+    _href = safe_href(ins.video_url)
+    _title = f"<a href='{_esc(_href)}'>{_esc(ins.video_url)}</a>" if _href else _esc(ins.video_url)
+    parts = [f"<h2>{_title}</h2>"]
     parts.append(
         f"<div class='meta'>コメント {ins.total_comments}件・"
         f"全体トーン: {_esc(ins.overall_sentiment or '不明')}・取得経路: {_esc(ins.source)}</div>"

@@ -30,6 +30,7 @@ from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.adapters.x_task_store import XTaskStore, new_job_id
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
+from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.x_research.report import (
     render_buzz_report,
@@ -388,7 +389,7 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             mark = "" if p.verified else "（⚠️要再確認）"
             lines.append(f"{i}. @{p.author_handle} ❤️{p.like_count:,}{mark}\n{p.text}")
         if out.noise_note:
-            lines.append(f"🔎 {out.noise_note}")
+            lines.append(f"🔎 {sanitize_llm_text(out.noise_note, max_len=200)}")
         if out.report_url:
             lines.append(f"📄 カード集・全{out.selected}件（7日有効）: {out.report_url}")
         if out.warnings:
@@ -543,7 +544,7 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
             f"（厳選{len(out.posts)}件・{len(out.clusters)}分類）"
         ]
         if out.hypothesis_summary:
-            lines.append(out.hypothesis_summary)
+            lines.append(sanitize_llm_text(out.hypothesis_summary))
         top = max(out.posts, key=lambda p: p.like_count, default=None)
         if top is not None:
             lines.append(f"最大共感: @{top.author_handle} ❤️{top.like_count:,}\n{top.text}")
@@ -637,6 +638,13 @@ class XBuzzMeasureStatusSkill(
 
     def run(self, input: XBuzzMeasureStatusInput, ctx: SkillContext) -> XBuzzMeasureStatusOutput:
         log = ctx.bind_logger(self.name)
+        # submit と同じ段階公開ゲートを status にも掛ける（job_id は共有スレッドに平文で
+        # 流れるため秘匿子にならない＝allowlist 外が他人の結果や Sonnet 生成コストを引ける
+        # 非対称を塞ぐ・self-review 指摘）。
+        if not rollout_allowed(_ALLOWLIST_ENV, _user_of(ctx)):
+            return XBuzzMeasureStatusOutput(
+                job_id=input.job_id, status="denied", message=ROLLOUT_DENIED_MESSAGE
+            )
         st = self._store.get_status(input.job_id)
         if st is None:
             return XBuzzMeasureStatusOutput(
@@ -722,8 +730,13 @@ class XBuzzMeasureStatusSkill(
             report_url = self._publish_html(
                 html, request_id=ctx.request_id, query=str(spec.get("keyword", ""))
             )
-            if report_url:
-                self._store.cache_report(input.job_id, report_url=report_url, spike_analysis=spike)
+            # spike は report_url の有無に関わらずキャッシュする。VSEO_REPORT_BUCKET 未設定
+            # (enable_scrape_tools OFF)環境では report_url=None になり、キャッシュしないと
+            # 再照会のたびに Sonnet 山分析を再生成して二重課金になる（self-review 指摘）。
+            if spike or report_url:
+                self._store.cache_report(
+                    input.job_id, report_url=report_url or "", spike_analysis=spike
+                )
 
         total = sum(int(d.get("count", 0) or 0) for d in daily)
         report_line = f"\n📄 レポート（7日有効）: {report_url}" if report_url else ""
@@ -737,5 +750,8 @@ class XBuzzMeasureStatusSkill(
             report_url=report_url,
             s3_prefix=s3_prefix,
             total_cost_usd=round(total_cost, 4),
-            message=(f"完了しました（総発話 {total:,}件・{len(daily)}日分）。{spike}{report_line}"),
+            message=(
+                f"完了しました（総発話 {total:,}件・{len(daily)}日分）。"
+                f"{sanitize_llm_text(spike, max_len=1500)}{report_line}"
+            ),
         )

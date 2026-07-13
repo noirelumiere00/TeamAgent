@@ -226,8 +226,25 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
         insights: list[VideoCommentInsight] = []
         scraped = 0
 
+        # SSRF/allowlist 検証を両経路の手前で1か所実施する。chromium 経路の url_guard 例外を
+        # _fetch_comments の except Exception が「縮退」と誤解釈し、拒否されたURLを Apify に
+        # そのまま渡す穴を塞ぐ（self-review 指摘）。不正URLは即エラーで返す。
+        from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
+
+        valid_urls: list[str] = []
+        for url in input.video_urls:
+            try:
+                valid_urls.append(validate_scrape_url(url, request_id=ctx.request_id))
+            except UrlGuardError:
+                return CommentMiningOutput(
+                    slack_summary=(
+                        f"不正なURLが含まれています（TikTok動画URLを指定してください）: {url[:60]}"
+                    ),
+                    warnings=[f"URL検証に失敗: {url[:60]}"],
+                )
+
         try:
-            for url in input.video_urls:
+            for url in valid_urls:
                 comments, source, cost = self._fetch_comments(
                     url,
                     input.max_comments_per_video,

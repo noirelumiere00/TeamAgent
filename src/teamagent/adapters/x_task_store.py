@@ -131,19 +131,25 @@ class XTaskStore:
             return None
 
     def cache_report(self, job_id: str, *, report_url: str, spike_analysis: str) -> None:
-        """status 初回照会で生成したレポートURL/山分析をキャッシュ（失敗はWARNのみ）。"""
+        """status 初回照会で生成した山分析/レポートURLをキャッシュ（失敗はWARNのみ）。
+
+        report_url が空でも spike_analysis はキャッシュする（VSEO_REPORT_BUCKET 未設定で
+        URL 発行できない環境でも Sonnet 山分析の再生成＝二重課金を防ぐ・self-review 指摘）。
+        """
         if not self._table:
             return
+        sets = ["spike_analysis = :a"]
+        vals: dict[str, Any] = {":a": {"S": spike_analysis[:20000]}}
+        if report_url:
+            sets.append("report_url = :u")
+            vals[":u"] = {"S": report_url}
         try:
             ddb = self._session().client("dynamodb", region_name=self._region)
             ddb.update_item(
                 TableName=self._table,
                 Key={"job_id": {"S": job_id}},
-                UpdateExpression="SET report_url = :u, spike_analysis = :a",
-                ExpressionAttributeValues={
-                    ":u": {"S": report_url},
-                    ":a": {"S": spike_analysis[:20000]},
-                },
+                UpdateExpression="SET " + ", ".join(sets),
+                ExpressionAttributeValues=vals,
             )
         except Exception as e:
             logger.warning("x_buzz_cache_report_failed", job_id=job_id, error=type(e).__name__)

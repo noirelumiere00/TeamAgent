@@ -251,13 +251,14 @@ class ApifyClient:
     # ---- 低レベル: run 実行 -------------------------------------------------
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        # トークンは Authorization ヘッダで送る（URLクエリに載せない）。
+        # httpx の例外メッセージは "for url '{response.url}'" 形式で URL 全体を含むため、
+        # クエリにトークンを載せると 4xx/5xx 例外経由で OC/Slack/ログへ平文漏えいする
+        # （self-review HIGH 指摘）。ヘッダ送信なら例外文字列にトークンは出ない。
+        headers = {**kwargs.pop("headers", {}), "Authorization": f"Bearer {self._token}"}
+
         def _call() -> httpx.Response:
-            resp = self._http.request(
-                method,
-                f"{_API_BASE}{path}",
-                params={**kwargs.pop("params", {}), "token": self._token},
-                **kwargs,
-            )
+            resp = self._http.request(method, f"{_API_BASE}{path}", headers=headers, **kwargs)
             resp.raise_for_status()
             return resp
 
@@ -270,11 +271,25 @@ class ApifyClient:
     def _abort(self, run_id: str, request_id: str) -> None:
         """デッドライン超過時に run を止める（課金停止）。失敗しても本処理は継続。"""
         try:
-            self._http.post(f"{_API_BASE}/actor-runs/{run_id}/abort", params={"token": self._token})
+            self._http.post(
+                f"{_API_BASE}/actor-runs/{run_id}/abort",
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
             logger.warning("apify_run_aborted", request_id=request_id, run_id=run_id)
         except Exception as e:
             logger.warning(
                 "apify_abort_failed", request_id=request_id, run_id=run_id, error=type(e).__name__
+            )
+
+    def _record_partial(self, user_email: str, est_cost: float, request_id: str) -> None:
+        """timeout/失敗時に概算コストを台帳へ記帳（run が課金済みのことがあるため上限で計上）。
+
+        件数が確定しないため est_cost（max_items ベースの上振れ）を使う。予算ガードが
+        実支出より遅れて発動するのを防ぐ（self-review 指摘）。ledger 未注入なら no-op。
+        """
+        if self._ledger is not None and est_cost > 0:
+            self._ledger.record(
+                "apify", user_email, cost_usd=est_cost, units=0, request_id=request_id
             )
 
     def run_actor_sync(
@@ -316,31 +331,45 @@ class ApifyClient:
         run_id = str(run.get("id", ""))
         logger.info("apify_run_started", request_id=request_id, actor=actor_id, run_id=run_id)
 
-        # ポーリング（READY/RUNNING の間は待つ）
+        # ポーリング（READY/RUNNING の間は待つ）。ポーリング/dataset の httpx 例外も
+        # ApifyError に変換する（起動POSTと同じ扱い＝URLを含む生の httpx 例外を skill 層へ
+        # 漏らさない・self-review HIGH 指摘の二重防御）。timeout/失敗時も概算コストを記帳して
+        # 台帳が実支出から乖離しないようにする（run は課金済みのことがあるため）。
         status = str(run.get("status", ""))
         status_message = ""
         dataset_id = str(run.get("defaultDatasetId", ""))
-        while status in ("", "READY", "RUNNING"):
-            if time.monotonic() - start > deadline_s:
-                self._abort(run_id, request_id)
+        try:
+            while status in ("", "READY", "RUNNING"):
+                if time.monotonic() - start > deadline_s:
+                    self._abort(run_id, request_id)
+                    self._record_partial(user_email, est_cost, request_id)
+                    raise ApifyError(
+                        f"APIFY_TIMEOUT: {actor_id} が {deadline_s}s 以内に完了しませんでした"
+                        "（runは中断済み）"
+                    )
+                time.sleep(self._poll_interval_s)
+                run = self._request("GET", f"/actor-runs/{run_id}").json().get("data", {})
+                status = str(run.get("status", ""))
+                status_message = str(run.get("statusMessage") or "")
+                dataset_id = str(run.get("defaultDatasetId", "")) or dataset_id
+
+            if status != "SUCCEEDED":
+                self._record_partial(user_email, est_cost, request_id)
                 raise ApifyError(
-                    f"APIFY_TIMEOUT: {actor_id} が {deadline_s}s 以内に完了しませんでした"
-                    "（runは中断済み）"
+                    f"APIFY_RUN_FAILED: {actor_id} status={status} {status_message}".strip()
                 )
-            time.sleep(self._poll_interval_s)
-            run = self._request("GET", f"/actor-runs/{run_id}").json().get("data", {})
-            status = str(run.get("status", ""))
-            status_message = str(run.get("statusMessage") or "")
-            dataset_id = str(run.get("defaultDatasetId", "")) or dataset_id
 
-        if status != "SUCCEEDED":
-            raise ApifyError(
-                f"APIFY_RUN_FAILED: {actor_id} status={status} {status_message}".strip()
+            items_resp = self._request(
+                "GET",
+                f"/datasets/{dataset_id}/items",
+                params={"limit": max_items, "clean": "true"},
             )
-
-        items_resp = self._request(
-            "GET", f"/datasets/{dataset_id}/items", params={"limit": max_items, "clean": "true"}
-        )
+        except httpx.HTTPError as e:
+            self._record_partial(user_email, est_cost, request_id)
+            raise ApifyError(
+                f"APIFY_HTTP: {actor_id} の実行中にHTTPエラーが発生しました "
+                f"(status={getattr(getattr(e, 'response', None), 'status_code', '?')})"
+            ) from None
         items_raw = items_resp.json()
         items: list[dict[str, Any]] = [it for it in items_raw if isinstance(it, dict)]
 
@@ -396,13 +425,18 @@ class ApifyClient:
         ]
         total_cost = 0.0
         last_err: ApifyError | None = None
+        # deadline_s はチェーン全体（第一候補＋フォールバック）の壁時計予算。各 actor に
+        # そのまま渡すと 1本目 timeout 後にフォールバックがさらに deadline_s 走れて合計が
+        # 倍になり MCP 300s 天井を破る（self-review HIGH 指摘）。経過分を差し引いて配る。
+        started = time.monotonic()
         for actor_id, run_input in chain:
+            budget = max(10, int(deadline_s - (time.monotonic() - started)))
             try:
                 res = self.run_actor_sync(
                     actor_id,
                     run_input,
                     max_items=count,
-                    deadline_s=deadline_s,
+                    deadline_s=budget,
                     request_id=request_id,
                     user_email=user_email,
                 )

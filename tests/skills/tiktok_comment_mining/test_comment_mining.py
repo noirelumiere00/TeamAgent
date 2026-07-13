@@ -153,3 +153,22 @@ def test_rollout_denied(monkeypatch: Any) -> None:
     skill = TikTokCommentMiningSkill(publisher=_publisher)
     out = skill.run(CommentMiningInput(video_urls=[_URL]), _ctx())
     assert "段階公開中" in out.slack_summary
+
+
+def test_invalid_url_rejected_before_any_fetch() -> None:
+    # url_guard で弾かれるURLは、chromium/Apify どちらにも渡さず即エラーで返す
+    # （縮退経路で未検証URLがApifyに漏れる穴を塞ぐ）。
+    apify = _FakeApify()
+
+    def _never(url: str, *, max_comments: int, request_id: str) -> Any:  # pragma: no cover
+        raise AssertionError("不正URLで取得を呼んではいけない")
+
+    skill = TikTokCommentMiningSkill(
+        apify=apify,  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(),
+        publisher=_publisher,
+        comments_fn=_never,
+    )
+    out = skill.run(CommentMiningInput(video_urls=["https://evil.example/x?u=tiktok.com"]), _ctx())
+    assert "不正なURL" in out.slack_summary
+    assert apify.calls == 0 and out.scraped_comments == 0

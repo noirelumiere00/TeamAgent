@@ -12,6 +12,7 @@ import html as _html
 from typing import Any
 
 from teamagent.skills._html.theme import FONT_STACK_JP
+from teamagent.skills._shared.text_safety import safe_href, sanitize_llm_text
 from teamagent.skills.x_research.schema import NeedCluster, XPostCard
 
 _CSS = f"""
@@ -67,12 +68,18 @@ def _card(p: XPostCard) -> str:
         else f"<span class='badge warn'>⚠️ {_esc(p.verify_note or '要再確認')}</span>"
     )
     note = f"<span class='note'>{_esc(p.author_note)}</span>" if p.author_note else ""
+    href = safe_href(p.url)
+    link = (
+        f"<a href='{_esc(href)}'>{_esc(p.url)}</a>"
+        if href
+        else f"<span class='rawurl'>{_esc(p.url)}</span>"
+    )
     return (
         "<div class='card'><div class='head'>"
         f"<span class='handle'>@{_esc(p.author_handle or '不明')}{note}</span>"
         f"<span class='likes'>❤️ {p.like_count:,}</span></div>"
         f"<div class='text'>{_esc(p.text)}</div>"
-        f"<div class='foot'><a href='{_esc(p.url)}'>{_esc(p.url)}</a>{badge}</div></div>"
+        f"<div class='foot'>{link}{badge}</div></div>"
     )
 
 
@@ -86,7 +93,9 @@ def render_voice_cards(
     """① 世の中の声集め: 1投稿1カードのHTMLカード集。"""
     body = "".join(_card(p) for p in posts)
     if noise_note:
-        body = f"<div class='notebox'>🔎 検索メモ: {_esc(noise_note)}</div>" + body
+        body = (
+            f"<div class='notebox'>🔎 検索メモ: {_esc(sanitize_llm_text(noise_note))}</div>" + body
+        )
     unverified = sum(1 for p in posts if not p.verified)
     sub = (
         f"取得 {searched}件 → 厳選 {len(posts)}件（実在検証済み {len(posts) - unverified}件"
@@ -114,11 +123,15 @@ def render_needs_report(
     parts: list[str] = []
     if hypothesis_summary:
         parts.append(
-            f"<div class='summary'>💡 <b>インサイト仮説</b><br>{_esc(hypothesis_summary)}</div>"
+            "<div class='summary'>💡 <b>インサイト仮説</b><br>"
+            f"{_esc(sanitize_llm_text(hypothesis_summary))}</div>"
         )
     used: set[str] = set()
     for c in clusters:
-        parts.append(f"<div class='cluster'><h2>{_esc(c.label)}</h2><p>{_esc(c.insight)}</p></div>")
+        parts.append(
+            f"<div class='cluster'><h2>{_esc(sanitize_llm_text(c.label, max_len=60))}</h2>"
+            f"<p>{_esc(sanitize_llm_text(c.insight))}</p></div>"
+        )
         for pid in c.post_ids:
             p = by_id.get(pid)
             if p is not None:
@@ -198,7 +211,10 @@ def render_buzz_report(
         f"<div class='card'>{_bar_chart_svg(daily_counts, campaign_date)}</div>",
     ]
     if spike_analysis:
-        parts.append(f"<div class='summary'>📖 <b>読み方</b><br>{_esc(spike_analysis)}</div>")
+        parts.append(
+            "<div class='summary'>📖 <b>読み方</b><br>"
+            f"{_esc(sanitize_llm_text(spike_analysis, max_len=2000))}</div>"
+        )
     if top_posts:
         parts.append("<div class='cluster'><h2>バズ投稿 TOP（全文）</h2><p></p></div>")
         parts.extend(_card(p) for p in top_posts)
