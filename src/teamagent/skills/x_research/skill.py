@@ -55,9 +55,9 @@ logger = structlog.get_logger(__name__)
 _ALLOWLIST_ENV = "X_RESEARCH_ALLOWED_EMAILS"  # 段階公開（空=全員許可）
 _MAX_PARALLEL_QUERIES = 4
 # 投稿再現カードの画像内包に使ってよい壁時計の**ハード上限**（秒）。残時間が幾らあっても
-# これ以上は使わない。画像は「あれば嬉しい」装飾で、遅延で openclaw ターン制限を超えて
-# 応答全損する方が損失が大きいため小さく固定（超過分はモノグラム/画像なしにフォールバック）。
-_IMG_EMBED_MAX_S = 12.0
+# これ以上は使わない。avatar 読込は確保しつつ、遅延で openclaw ターン制限を超えて応答全損
+# するのを防ぐ折衷値（超過分＝主に添付画像 はモノグラム/画像なしにフォールバック）。
+_IMG_EMBED_MAX_S = 22.0
 
 
 def _deadline_s() -> int:
