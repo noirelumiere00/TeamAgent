@@ -700,8 +700,9 @@ def test_timeline_undated_group(sidecars: Path, vault: Path, tmp_path: Path) -> 
     assert "tlundated" in html and "日付不明の記録" in html and "tluitem" in html
 
 
-def test_home_triage_section_and_hw_payload(sidecars: Path, vault: Path, tmp_path: Path) -> None:
-    """P4: ホーム「今日見るべき」＝宿題(hw)×放置上位。宿題クライアントが payload に載り節が配線される。"""
+def test_home_triage_section_removed(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """ホーム「今日見るべき」節は撤去済み（接点不明が上位を占め実用にならず・ユーザーFB 2026-07-14）。
+    宿題(hw)payload 自体は残る（テーブルの宿題フィルタ等で使うため）。"""
     (vault / "clients" / "帝人.md").write_text(
         '---\nclient: "帝人"\nindustry: "メーカー"\ndeal_phase: "ヒアリング"\n'
         'bant_score: "B（前向き）"\nfb_count: 1\ndoc_count: 0\n---\n\n# 帝人\n\n'
@@ -714,12 +715,12 @@ def test_home_triage_section_and_hw_payload(sidecars: Path, vault: Path, tmp_pat
     out = tmp_path / "o.html"
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
-    # 次アクションあり＋最終接点日付なし → 宿題（hw=1）が payload に載る
+    # 宿題 payload は残る（テーブルフィルタ等で使用）
     assert re.search(r'"stem": "帝人".*?"hw": 1', html)
-    # 節の見出し・順位付け・着地の配線
-    assert "今日見るべき" in html and "trirows" in html
-    assert "DATA.clients.filter(c=>c.hw)" in html
-    assert 'querySelectorAll(".tgrow")' in html
+    # 「今日見るべき」節の描画・配線は撤去済み
+    assert "今日見るべき" not in html
+    assert "trirows" not in html
+    assert 'querySelectorAll(".tgrow")' not in html
 
 
 def test_table_last_contact_age_badge(sidecars: Path, vault: Path, tmp_path: Path) -> None:

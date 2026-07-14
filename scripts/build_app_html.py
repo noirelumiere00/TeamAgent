@@ -742,18 +742,6 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .wcard svg{color:var(--accent-2);margin-top:1px}
 .wcard .wt{font-size:var(--f-ui-med);color:var(--text);font-weight:700;line-height:1.35}
 .wcard .wx{font-size:var(--f-ui-smaller);color:var(--faint);margin-top:3px}
-/* P4 今日見るべき（宿題×放置の順位付き短冊・クリックでカルテ直行） */
-.wsub{color:var(--faint);font-weight:400;text-transform:none;letter-spacing:0;font-size:var(--f-ui-smaller)}
-.trirows{display:flex;flex-direction:column;gap:6px}
-.tgrow{display:flex;align-items:baseline;gap:10px;padding:9px 12px;background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--r-m);cursor:pointer}
-.tgrow:hover{border-color:var(--border-focus);background:var(--hover)}
-.tgrow .tgn{font-weight:700;color:var(--text);font-size:var(--f-ui-small);flex:none;max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tgrow .tgd{font-size:var(--f-ui-smaller);font-weight:600;flex:none}
-.tgrow .tgd.ok{color:var(--ok)}
-.tgrow .tgd.warn{color:var(--warn)}
-.tgrow .tgd.err{color:var(--err)}
-.tgrow .tgx{font-size:var(--f-ui-smaller);color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tgrow .tgt{display:inline-flex;align-items:center;gap:5px;font-size:var(--f-ui-smaller);color:var(--faint);flex:none}
 /* 右サイドバー */
 .right{background:var(--bg-sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;min-width:0;min-height:0}
 .right .side-body{padding:4px 0 20px}
@@ -1004,7 +992,7 @@ DATA.docs.forEach(d=>dByStem[d.stem]=d);
 DATA.reports.forEach(r=>rByStem[r.stem]=r);
 /* 閲覧時点からの経過でバケット化（ビルド日でなく Date.now 基準 = 月次再生成の間も鮮度が生きる） */
 function ageBucket(ds){if(!ds)return"";const t=Date.parse(ds);if(isNaN(t))return"";const dd=(Date.now()-t)/864e5;return dd<=31?"1ヶ月以内":dd<=92?"3ヶ月以内":dd<=183?"半年以内":dd<=366?"1年以内":"1年以上前";}
-/* 経過日数の共通ヘルパ（P1 サマリーヘッダ / P4 今日見るべき / P5 テーブル で共用）。
+/* 経過日数の共通ヘルパ（P1 サマリーヘッダ / P5 テーブル経過日数バッジ で共用）。
    閾値 31/92 は ageBucket・HOMEWORK_STALE_DAYS と一致。日付なし/不正は null＝「出せない」を明示（捏造しない）。 */
 function daysAgo(ds){if(!ds)return null;const t=Date.parse(ds);if(isNaN(t))return null;return Math.floor((Date.now()-t)/864e5);}
 function ageSev(n){return n==null?"":n<=31?"ok":n<=92?"warn":"err";}
@@ -1333,27 +1321,14 @@ function welcome(){
   +(pcnt["失注"]?'<span class="plarr">・</span>'+plChip("失注"):"")
   +'<span class="plun">未設定 '+unset+'</span>';
  const tz=TAGORDER.filter(c=>tagTree[c]).map(c=>'<span class="tagchip tzc" tabindex="0" role="button" data-c="'+esc(c)+'" style="--cc2:'+(CATMETA[c]||"var(--accent)")+'" title="タグペインで「'+esc(c)+'」を開く"><span class="tcdot" style="background:'+(CATMETA[c]||"var(--accent)")+'"></span><span class="tcv">'+esc(c)+'</span><span class="qfn">'+(tagCount[c]||0)+'</span></span>').join("");
- /* P4 今日見るべき: 宿題(hw)×放置日数上位6件・同点は温度感ネガ優勢優先。着地は個別カルテ（QF宿題あり→テーブルとは役割分離） */
- const triage=DATA.clients.filter(c=>c.hw).map(c=>({c,n:daysAgo(c.last)}))
-  .sort((a,b)=>{const an=a.n==null?1e9:a.n,bn=b.n==null?1e9:b.n;if(bn!==an)return bn-an;
-   return (b.c.temp==="ネガ優勢"?1:0)-(a.c.temp==="ネガ優勢"?1:0);}).slice(0,6);
- const tri=triage.length?`<div class="wsec">今日見るべき <span class="wsub">宿題×放置</span></div><div class="trirows">`+triage.map(({c,n})=>{
-  const sev=n==null?"err":ageSev(n),lbl=n==null?"接点不明":n+"日放置";
-  return '<div class="tgrow" data-s="'+esc(c.stem)+'" role="button" tabindex="0"><span class="tgn">'+esc(c.name)+'</span>'
-   +'<span class="tgd '+sev+'">'+esc(lbl)+'</span>'
-   +(c.nx?'<span class="tgx">→ '+esc(c.nx)+'</span>':"")
-   +(c.temp?'<span class="tgt"><span class="khdot" style="background:'+(CATMETA["温度感"])+'"></span>'+esc(c.temp)+'</span>':"")+'</div>';
- }).join("")+`</div>`:"";
  $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} AiLaVault</h1>
   <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。取引先カルテには資料と商談FBを時系列で一望できる<b>施策タイムライン</b>付き。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
   ${qf?`<div class="wsec">クイックフィルタ</div><div class="chiprow">${qf}</div>`:""}
-  ${tri}
   <div class="wsec">パイプライン</div><div class="chiprow plrow">${pl}</div>
   ${tz?`<div class="wsec">タグで探す</div><div class="chiprow tzrow">${tz}</div>`:""}
   ${DATA.reports.length?`<div class="wsec">AI洗い出しレポート</div><div class="wgrid">${rep}</div>`:""}
   <div class="wsec">主要な取引先</div><div class="wgrid">${cards(notable)}</div></div>`;
  $("#inner").querySelectorAll(".wcard").forEach(el=>el.onclick=()=>openByK(el.dataset.k,el.dataset.s));
- $("#inner").querySelectorAll(".tgrow").forEach(el=>el.onclick=()=>openClient(el.dataset.s));   /* P4: 今日見るべき短冊→カルテ直行 */
  $("#inner").querySelectorAll(".qfc").forEach(el=>el.onclick=()=>runQuery(el.dataset.q));   /* 置換で検索ペインへ（チップバー付きで着地） */
  $("#inner").querySelectorAll(".qft").forEach(el=>el.onclick=()=>{tblFilter={q:"",ind:"",phase:"",temp:"",hw:true};tableView();});   /* 宿題あり→テーブル（hwのみON・他条件リセット） */
  $("#inner").querySelectorAll(".plc").forEach(el=>el.onclick=()=>{tblFilter={q:"",ind:"",phase:el.dataset.p,temp:"",hw:false};tableView();});   /* リセット着地=チップ社数と表示件数の一致を保証（select にも selected 復元） */
