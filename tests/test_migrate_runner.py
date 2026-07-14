@@ -41,6 +41,19 @@ def test_list_migrations_sorted_ascending() -> None:
     assert versions == sorted(versions), f"昇順でない: {versions}"
 
 
+def test_migration_versions_are_unique() -> None:
+    """version(4桁番号)に重複が無いこと。
+
+    schema_migrations.version は PRIMARY KEY で、同一 version の2ファイル目は
+    checksum 不一致 WARN で **無言 skip** される（例: 0016 に chunks と slack_oauth の
+    2本 → 後者が本番で永久未適用＝テーブル欠落で機能破損）。採番重複を出荷前に落とす。
+    """
+    mod = _load_migrate_module()
+    versions = [v for v, _ in mod._list_migrations()]
+    dupes = sorted({v for v in versions if versions.count(v) > 1})
+    assert not dupes, f"migration version が重複しています（要改番）: {dupes}"
+
+
 def test_sha256_deterministic() -> None:
     """同じ文字列に対して同じハッシュを返す。"""
     mod = _load_migrate_module()

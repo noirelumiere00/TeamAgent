@@ -20,6 +20,22 @@ from teamagent.ingest.loader import (
 from teamagent.ingest.pipeline import IngestResult, IngestRunner, IngestStats
 
 
+@pytest.fixture(autouse=True)
+def _disable_freshness_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """鮮度監視(#200)を本モジュールでは無効化する。
+
+    _maybe_check_freshness は env ゲート無しで run 毎に走る常時ONの安全網で、
+    自前の ``_ops_connection`` を1本開く。本ファイルの各テストは「対象機能（docdedup/
+    boilerplate）が余分な接続を開かない」ことを ``ops_conn_calls`` で検証するため、
+    無関係な freshness の +1 接続が混じると誤検知する。freshness 自体は専用の
+    tests/ingest/test_freshness.py で検証済みなので、ここでは no-op 化して分離する。
+    """
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.IngestRunner._maybe_check_freshness",
+        lambda self, *, request_id: None,
+    )
+
+
 class _FakeEmbedder:
     def embed(self, text: str) -> list[float]:
         return [0.1] * 1024

@@ -633,7 +633,9 @@ def test_timeline_fbcard_compression_wiring(sidecars: Path, vault: Path, tmp_pat
     assert "classList.toggle(" in html and 'querySelectorAll(".tlfbcard")' in html
 
 
-def test_timeline_fold_threshold_is_three_and_split(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+def test_timeline_fold_threshold_is_three_and_split(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
     """B+P3: 外側 fold は 3件目以降（dated 軸側のみ）・ev を dated/undated に分割。"""
     out = tmp_path / "o.html"
     assert _run(vault, out) == 0
@@ -1305,7 +1307,9 @@ def test_journey_flow_repairs_homework_and_back(ux_html: str) -> None:
 # ---------------- 表示名寄せ（tag_alias / client_alias・任意適用・可逆） ----------------
 
 
-def _write_aliases(sidecar_dir: Path, *, tag: dict | None = None, client: dict | None = None) -> None:
+def _write_aliases(
+    sidecar_dir: Path, *, tag: dict | None = None, client: dict | None = None
+) -> None:
     """名寄せサイドカーを SIDECAR_DIR（monkeypatch 済 tmp）へ置く。既定 fixture には無い＝素通り。"""
     if tag is not None:
         (sidecar_dir / "tag_alias.json").write_text(
@@ -1363,7 +1367,9 @@ def test_solution_alias_field_canonical_but_vfmt_uses_raw(
     """施策フィールドは正本化しつつ、動画形式(vfmt)判定は生の solution を使う（回帰防止の配線検証）。"""
     # 生 "縦型ショート企画" は VIDEO_FORMAT の「縦型」に一致→vfmt=ショート。canonical "動画広告" は非該当。
     _write_aliases(sidecars, tag={"industry": {}, "solution": {"縦型ショート企画": "動画広告"}})
-    (vault / "docs" / "施策X案.md").write_text(  # title/excerpt は vfmt 非該当（solution 由来のみを見る）
+    (
+        vault / "docs" / "施策X案.md"
+    ).write_text(  # title/excerpt は vfmt 非該当（solution 由来のみを見る）
         '---\ntitle: "施策X案"\nclient: "出光興産"\nindustry: ""\n'
         'doc_type: "提案書"\nsolution: "縦型ショート企画"\nmodified_at: "2026-06-01"\n---\n\n> 抜粋\n',
         encoding="utf-8",
@@ -1372,7 +1378,9 @@ def test_solution_alias_field_canonical_but_vfmt_uses_raw(
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
     assert _doc_field(html, "施策X案", "solution") == "動画広告"  # 施策フィールドは正本
-    assert re.search(r'"stem": "施策X案".*?"vfmt": \["ショート"\]', html)  # vfmt は生値由来（正本では消える）
+    assert re.search(
+        r'"stem": "施策X案".*?"vfmt": \["ショート"\]', html
+    )  # vfmt は生値由来（正本では消える）
 
 
 def test_client_alias_folds_variants_and_sums_fb(
@@ -1425,9 +1433,7 @@ def test_client_alias_applied_to_doc_client_links_to_canonical(
     assert '"client": "SBI証券"' not in html
 
 
-def test_alias_sidecars_absent_pass_through(
-    sidecars: Path, vault: Path, tmp_path: Path
-) -> None:
+def test_alias_sidecars_absent_pass_through(sidecars: Path, vault: Path, tmp_path: Path) -> None:
     """名寄せサイドカー欠落（既定 fixture）は素通り＝variant 値がそのまま残る（可逆・fail-loud にしない）。"""
     assert not (sidecars / "tag_alias.json").exists()
     assert not (sidecars / "client_alias.json").exists()
@@ -1468,4 +1474,6 @@ def test_alias_canonical_and_unmapped_values_unchanged(
     assert _doc_field(html, "正規資料", "industry") == "メディア"  # canonical 自身は不変
     assert _doc_field(html, "正規資料", "solution") == "調査"  # unmapped solution は素通り
     assert _doc_field(html, "正規資料", "client") == "自治体X"  # unmapped client は素通り
-    assert re.search(r'"name": "自治体X", "cnorm": "自治体x", "industry": "宇宙開発"', html)  # unmapped industry 不変
+    assert re.search(
+        r'"name": "自治体X", "cnorm": "自治体x", "industry": "宇宙開発"', html
+    )  # unmapped industry 不変

@@ -214,7 +214,8 @@ class IngestOpsAlerter:
                     "type": "mrkdwn",
                     "text": (
                         f"{lines}\n\n共有された資料が検索に載っていない可能性があります。"
-                        f"ingest の稼働状況（EventBridge ルール / 手動 run のソース指定）を確認してください。"
+                        "ingest の稼働状況（EventBridge ルール / 手動 run のソース指定）を"
+                        "確認してください。"
                     ),
                 },
             },
