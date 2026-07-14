@@ -123,9 +123,10 @@ def _fmt_date(raw: str) -> str:
 
 
 def _fmt_count(n: int) -> str:
-    """X風の数値略記: 1万未満は3桁カンマ、1万以上は「◯◯万」（末尾0は整数・他は小数1位）。
+    """X風の数値略記: 1万未満は3桁カンマ、1万以上は「◯◯万」、1億以上は「◯◯億」。
 
-    例: 8227→"8,227"、12000→"1.2万"、5180000→"518万"、10000→"1万"。負値は0扱い。
+    小数第1位まで（末尾0は整数）。丸めは**桁短縮の後**に行う（19990→"2万"、99999→"10万"、
+    12000→"1.2万"、5180000→"518万"、100000000→"1億"）。負値は0扱い。
     """
     try:
         v = int(n)
@@ -135,9 +136,10 @@ def _fmt_count(n: int) -> str:
         v = 0
     if v < 10_000:
         return f"{v:,}"
-    man = v / 10_000
-    body = f"{int(man)}" if man == int(man) else f"{man:.1f}"
-    return f"{body}万"
+    unit, div = ("億", 100_000_000) if v >= 100_000_000 else ("万", 10_000)
+    scaled = round(v / div, 1)  # 先に1桁へ丸める（"2.0万"化を防ぎ末尾0は整数へ）
+    body = f"{int(scaled)}" if scaled == int(scaled) else f"{scaled:.1f}"
+    return f"{body}{unit}"
 
 
 # 本物のX投稿UIのエンゲージアイコン（viewBox 0 0 24 24・fill で描画）。

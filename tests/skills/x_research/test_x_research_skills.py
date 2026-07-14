@@ -570,14 +570,18 @@ def test_fmt_count_man_notation() -> None:
     assert _fmt_count(12000) == "1.2万"  # 小数第1位
     assert _fmt_count(98000) == "9.8万"
     assert _fmt_count(5180000) == "518万"  # 実スクショの 518万
+    assert _fmt_count(19990) == "2万"  # 丸め上げ境界（"2.0万"にしない）
+    assert _fmt_count(99999) == "10万"  # 丸め上げで万→大台（"10.0万"にしない）
+    assert _fmt_count(100_000_000) == "1億"  # 億表記
+    assert _fmt_count(150_000_000) == "1.5億"
     assert _fmt_count(-5) == "0"  # 負値は0扱い（捏造しない）
 
 
 def test_publish_html_short_url_and_fallback(monkeypatch) -> None:
-    """_publish_html: CONNECT_BASE_URL 設定時は openclaw耐性の /r/<token> 短縮URL、
+    """_publish_html: 段階ゲート(USE_REPORT_SHORTURL)＋鍵＋CONNECT_BASE_URL が揃った時だけ
 
-    未設定時は従来 presigned へ graceful fallback。短縮URLはクエリを持たず、token を
-    decode すると元の bucket/key に戻る。
+    openclaw耐性の /r/<token> 短縮URL。いずれか欠けたら従来 presigned へ graceful fallback。
+    短縮URLはクエリを持たず、token を decode すると元の bucket/key に戻る。
     """
     import teamagent.adapters.report_publish as rp
     from teamagent.adapters.report_link_token import decode_report_token
@@ -593,17 +597,29 @@ def test_publish_html_short_url_and_fallback(monkeypatch) -> None:
     )
     monkeypatch.setenv("VSEO_REPORT_BUCKET", bucket)
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "sekret-xyz")
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.newstv.co.jp/")
     skill = XVoiceSearchSkill(publisher=None)
 
-    # CONNECT_BASE_URL あり → /r/<token>（クエリ無し）・decode で元の bucket/key
-    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.newstv.co.jp/")
-    url = skill._publish_html("<html>x</html>", request_id="rid", query="q")
-    assert url is not None
-    assert url.startswith("https://connect.newstv.co.jp/r/")
-    assert "?" not in url  # openclaw が削るクエリを持たない
-    token = url.rsplit("/r/", 1)[1]
-    assert decode_report_token(token) == (bucket, key)
+    def run() -> str | None:
+        return skill._publish_html("<html>x</html>", request_id="rid", query="q")
 
-    # CONNECT_BASE_URL 未設定 → 従来 presigned へ fallback（後方互換）
+    # 全条件そろう(フラグON) → /r/<token>（クエリ無し）・decode で元の bucket/key
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    url = run()
+    assert url is not None and url.startswith("https://connect.newstv.co.jp/r/")
+    assert "?" not in url  # openclaw が削るクエリを持たない
+    assert decode_report_token(url.rsplit("/r/", 1)[1]) == (bucket, key)
+
+    # フラグ OFF（既定）→ 従来 presigned（connect-web に /r が無い段階の安全側）
+    monkeypatch.delenv("USE_REPORT_SHORTURL", raising=False)
+    assert run() == presigned
+
+    # フラグ ON でも 署名鍵欠如 → presigned（鍵不一致による全件404を回避）
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET", raising=False)
+    assert run() == presigned
+
+    # フラグ ON・鍵あり でも CONNECT_BASE_URL 未設定 → presigned
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "sekret-xyz")
     monkeypatch.delenv("CONNECT_BASE_URL", raising=False)
-    assert skill._publish_html("<html>x</html>", request_id="rid", query="q") == presigned
+    assert run() == presigned

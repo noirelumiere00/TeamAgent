@@ -7,12 +7,16 @@ openclaw(@AiLa) の LLM が長い presigned URL のクエリ（``?X-Amz-Signatur
 毎回新鮮な presigned を生成し 302 する（S3 オブジェクトが生きていれば期限切れしない）。
 
 信頼境界は現行 presigned URL（＝リンクを知る人が時限で閲覧）と同一。発行側（mcp/skill）と
-復号側（connect-web）は同一イメージ・同一鍵（``MAIL_ACTION_HMAC_SECRET`` / fallback
-``SLACK_BOT_TOKEN``）を使う。鍵が無い環境では fail-closed（decode が常に None）。
+復号側（connect-web）は同一イメージ・**同一鍵 ``MAIL_ACTION_HMAC_SECRET``（=database_url
+secret）** を使う。draft_token と違い ``SLACK_BOT_TOKEN`` への fallback は**使わない**:
+connect-web は SLACK_BOT_TOKEN を持たないため、発行側だけが fallback すると鍵不一致で全件 404
+になる footgun を断つ（署名鍵を単一化）。鍵が無い環境では fail-closed（decode が常に None）。
+発行側は短縮URLを出す前に :func:`has_secret` で鍵存在を確認し、無ければ presigned へ落とす。
 
-多層防御: たとえ有効な署名でも、key が許可プレフィックス（``vseo-reports/`` /
-``vseo-proposals/``）以外・bucket が許可バケット以外なら decode は None を返す
-（任意 S3 オブジェクトの読み取り転用を封じる）。draft_token.py の作法を踏襲。
+多層防御: たとえ有効な署名でも、用途タグ ``typ`` 不一致・key が許可プレフィックス
+（``vseo-reports/`` / ``vseo-proposals/``）以外・bucket が許可バケット以外なら decode は None を
+返す（他用途トークン(draft/event)の転用・任意 S3 オブジェクトの読み取り転用を封じる）。
+draft_token.py の作法を踏襲。
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import json
 import os
 import time
 
+_TOKEN_TYPE = "r"  # 用途タグ（同一鍵の draft/event 等とドメイン分離＝クロス転用を封じる）
 _DEFAULT_BUCKET = "teamagent-dev-raw-files"  # report_publish._DEFAULT_BUCKET と一致
 _ALLOWED_KEY_PREFIXES = ("vseo-reports/", "vseo-proposals/")  # 発行しうる prefix のみ許可
 _DEFAULT_TTL_S = 60 * 60 * 24 * 30  # 30日（旧 presigned 7日より長い恒久寄りリンク）
@@ -31,8 +36,17 @@ _SIG_LEN = 16  # HMAC-SHA256 の先頭16バイト（トークンを短く保つ�
 
 
 def _secret() -> bytes:
-    s = os.environ.get("MAIL_ACTION_HMAC_SECRET") or os.environ.get("SLACK_BOT_TOKEN") or ""
-    return s.encode("utf-8")
+    # 発行(mcp)↔復号(connect-web)で同一値になる MAIL_ACTION_HMAC_SECRET のみ。SLACK_BOT_TOKEN
+    # への fallback はしない（connect-web が持たず鍵不一致→全件404 を招くため）。
+    return os.environ.get("MAIL_ACTION_HMAC_SECRET", "").encode("utf-8")
+
+
+def has_secret() -> bool:
+    """署名鍵(MAIL_ACTION_HMAC_SECRET)が設定済みか。短縮URL発行前のゲートに使う。
+
+    未設定なら発行側は短縮URL化せず従来 presigned へ落とす（鍵不一致による全件404の回避）。
+    """
+    return bool(os.environ.get("MAIL_ACTION_HMAC_SECRET", "").strip())
 
 
 def _allowed_bucket() -> str:
@@ -56,7 +70,7 @@ def encode_report_token(
 ) -> str:
     """S3 の bucket/key を失効付きで HMAC 署名し、``/r/<token>`` 用の不透明文字列にする。"""
     issued = int(now if now is not None else time.time())
-    payload = {"b": str(bucket), "k": str(key), "e": issued + int(ttl_s)}
+    payload = {"typ": _TOKEN_TYPE, "b": str(bucket), "k": str(key), "e": issued + int(ttl_s)}
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = hmac.new(_secret(), raw, hashlib.sha256).digest()[:_SIG_LEN]
     return _b64e(raw) + "." + _b64e(sig)
@@ -80,6 +94,8 @@ def decode_report_token(token: str, *, now: int | None = None) -> tuple[str, str
     except Exception:
         return None
     cur = int(now if now is not None else time.time())
+    if payload.get("typ") != _TOKEN_TYPE:
+        return None  # 他用途トークン(draft/event 等・同一鍵)の転用を封じる
     if int(payload.get("e", 0)) < cur:
         return None  # 失効
     bucket = str(payload.get("b", ""))

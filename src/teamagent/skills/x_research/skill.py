@@ -122,6 +122,15 @@ def _analysis_bedrock() -> Any:
     return BedrockClient(region=os.environ.get("AWS_REGION", "ap-northeast-1"), model_id=model_id)
 
 
+def _report_shorturl_enabled() -> bool:
+    """USE_REPORT_SHORTURL: レポートを短縮URL(/r)で配布する段階ゲート（既定 OFF）。
+
+    connect-web に /r ルート＋vseo-s3-read が揃い、実機で /r→302 を確認した後に ON にする
+    （揃う前に ON にすると受信者側で 404/403 に劣化するため）。OFF の間は従来 presigned を返す。
+    """
+    return os.environ.get("USE_REPORT_SHORTURL", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 class _XSyncBase:
     """①②共通の部品（Apify/Bedrock/publisher の遅延生成と注入可能化）。"""
 
@@ -173,15 +182,16 @@ class _XSyncBase:
         if result is None:
             return None
         # openclaw(@AiLa) が長い presigned URL のクエリ(?X-Amz-Signature…)を削って壊すため、
-        # CONNECT_BASE_URL があれば **クエリ無しの短縮URL** /r/<token> を返す（connect-web の
-        # /r が都度新鮮な presigned へ 302）。鍵/CONNECT未設定・失敗時は従来 presigned へ graceful。
+        # クエリ無しの短縮URL /r/<token> を返す（/r が都度新鮮な presigned へ 302）。ただし
+        # 段階ゲート: USE_REPORT_SHORTURL=on・署名鍵あり・CONNECT_BASE_URL あり の3条件が
+        # 揃った時だけ短縮URL化。揃う前（connect-web に /r+S3権限が無い/鍵不一致）に出すと
+        # 404/403 に劣化するため、既定は従来 presigned のまま（後方互換・安全側）。
+        from teamagent.adapters.report_link_token import encode_report_token, has_secret
         from teamagent.skills.knowledge_search_url.skill import connect_base_url
 
         base = connect_base_url()
-        if base:
+        if base and _report_shorturl_enabled() and has_secret():
             try:
-                from teamagent.adapters.report_link_token import encode_report_token
-
                 return f"{base}/r/{encode_report_token(result.bucket, result.key)}"
             except Exception:
                 logger.warning("x_research_short_url_failed", request_id=request_id)
