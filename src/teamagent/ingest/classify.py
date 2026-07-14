@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import structlog
@@ -252,6 +252,8 @@ class DocClassification:
     target: str = ""
     is_template: bool = False
     is_recurring: bool = False
+    # 名寄せタグ（2026-07-14・USE_ENTITY_TAGS）: 資料に登場する取引先/代理店/ブランド/コラボ名。
+    entities: tuple[str, ...] = field(default_factory=tuple)
 
     def is_empty(self) -> bool:
         return not (
@@ -264,6 +266,7 @@ class DocClassification:
             or self.target
             or self.is_template
             or self.is_recurring
+            or self.entities
         )
 
     def as_metadata(self) -> dict[str, str]:
@@ -291,6 +294,9 @@ class DocClassification:
             md["cls_is_template"] = "true"
         if self.is_recurring:
             md["cls_is_recurring"] = "true"
+        # 名寄せタグは CSV（他 cls_* と同じ flat-key・rerank は list/CSV 両対応・PR #204）。
+        if self.entities:
+            md["cls_entities"] = ",".join(self.entities)
         return md
 
 
@@ -377,6 +383,31 @@ class DocClassifier:
         return DocClassification(is_template=is_template, is_recurring=is_recurring)
 
     def classify(
+        self, *, title: str, text: str, request_id: str, folder_name: str = ""
+    ) -> DocClassification | None:
+        """分類（_classify_core）に名寄せタグ（cls_entities）を上乗せするラッパー。
+
+        USE_ENTITY_TAGS（既定 OFF）ON のとき、分類とは別の Haiku 呼び出しで関係者エンティティ
+        （取引先/代理店/ブランド/コラボ名）を抽出し、返す分類の entities に載せる。全取込経路が
+        classify() 経由なので、ここ 1 点で cls_entities が as_metadata に乗る。fail-open。
+        """
+        cls = self._classify_core(
+            title=title, text=text, request_id=request_id, folder_name=folder_name
+        )
+        if os.environ.get("USE_ENTITY_TAGS", "false").strip().lower() not in ("1", "true", "yes"):
+            return cls
+        from teamagent.ingest.entity_extract import extract_entities
+
+        ents = extract_entities(
+            title=title, text=text, bedrock=self._bedrock, request_id=request_id
+        )
+        if not ents:
+            return cls
+        if cls is None:
+            return DocClassification(entities=tuple(ents))
+        return replace(cls, entities=tuple(ents))
+
+    def _classify_core(
         self, *, title: str, text: str, request_id: str, folder_name: str = ""
     ) -> DocClassification | None:
         """folder_name（格納フォルダ名・任意）は 2 通りに効く（既定 "" ＝従来と完全一致）:

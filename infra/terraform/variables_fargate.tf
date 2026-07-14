@@ -69,6 +69,12 @@ variable "enable_progress_notify" {
   default     = false
 }
 
+variable "use_entity_tags" {
+  description = "名寄せタグ（cls_entities・v0.3.1）。ON で ingest 分類時に Haiku で取引先/代理店/ブランド/コラボ名を抽出し cls_entities に保持（親クライアント検索で子コラボが出る）。既定 false。既存分は scripts/backfill_entities.py で別途 backfill。"
+  type        = bool
+  default     = false
+}
+
 variable "use_ailavault_deeplinks" {
   description = "AiLaVault ディープリンク（v0.3 Task6）。ON で mcp が検索結果に /app#client:<名前> リンクを注入し、app.html の applyHashTarget が該当ノートを自動展開する。既定 false。⚠️ONの前提: connect-web が実 app.html を配信中であること（healthz app_html_source=s3。プレースホルダ配信中にONにすると飛べないリンクになる）。"
   type        = bool
