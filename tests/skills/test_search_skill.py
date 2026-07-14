@@ -1063,3 +1063,92 @@ def test_client_match_sort_default_off_keeps_dense_order(
     hits = skill.retrieve_hits("出光興産の提案資料", SkillContext(), top_k=5)
     assert [h.chunk_id for h in hits] == [1, 2]  # dense 順のまま
     fake_pgvector_new_schema.list_client_names.assert_not_called()  # 語彙取得もしない
+
+
+# ---- 資料リンク付与（_source_links_block / _doc_url） ----
+
+
+def test_doc_url_http_and_gdrive_and_slack() -> None:
+    assert (
+        SearchSkill._doc_url({"drive_url": "https://drive.google.com/file/d/ABC/view"})
+        == "https://drive.google.com/file/d/ABC/view"
+    )
+    assert (
+        SearchSkill._doc_url({"source_uri": "gdrive://XYZ123"})
+        == "https://drive.google.com/file/d/XYZ123/view"
+    )
+    # Slack 出典（非http）はリンク化しない
+    assert SearchSkill._doc_url({"source_uri": "slack://C1/1700.5"}) is None
+    assert SearchSkill._doc_url({}) is None
+
+
+def test_source_links_block_dedups_and_renders_markdown() -> None:
+    hits = [
+        SearchHit(
+            chunk_id=1,
+            content="c1",
+            score=0.9,
+            metadata={"title": "0115_祇園辻利プロモーション.pdf", "source_uri": "gdrive://F1"},
+        ),
+        # 同一資料の別チャンク → 畳む
+        SearchHit(
+            chunk_id=2,
+            content="c2",
+            score=0.8,
+            metadata={"title": "同上", "source_uri": "gdrive://F1"},
+        ),
+        SearchHit(
+            chunk_id=3,
+            content="c3",
+            score=0.5,
+            metadata={
+                "title": "0617詳細レポート.pdf",
+                "drive_url": "https://drive.google.com/file/d/F2/view",
+                "is_related_drive": True,
+            },
+        ),
+        # リンク不能（Slack）はスキップ
+        SearchHit(chunk_id=4, content="c4", score=0.4, metadata={"source_uri": "slack://C/1"}),
+    ]
+    block = SearchSkill._source_links_block(hits)
+    assert "📎" in block and "資料リンク" in block
+    assert "[0115_祇園辻利プロモーション.pdf](https://drive.google.com/file/d/F1/view)" in block
+    assert "[0617詳細レポート.pdf](https://drive.google.com/file/d/F2/view)（関連資料）" in block
+    assert block.count("drive.google.com/file/d/F1") == 1  # 重複資料は1回だけ
+
+
+def test_source_links_block_empty_when_no_links() -> None:
+    hits = [SearchHit(chunk_id=1, content="c", score=0.9, metadata={"source_uri": "slack://C/1"})]
+    assert SearchSkill._source_links_block(hits) == ""
+    assert SearchSkill._source_links_block([]) == ""
+
+
+def test_source_links_enabled_env_gate(monkeypatch: Any) -> None:
+    from teamagent.skills.search.skill import _source_links_enabled
+
+    monkeypatch.delenv("SEARCH_ANSWER_SOURCE_LINKS", raising=False)
+    assert _source_links_enabled() is False  # 既定OFF（/app を汚さない）
+    monkeypatch.setenv("SEARCH_ANSWER_SOURCE_LINKS", "1")
+    assert _source_links_enabled() is True
+    monkeypatch.setenv("SEARCH_ANSWER_SOURCE_LINKS", "false")
+    assert _source_links_enabled() is False
+
+
+def test_source_links_block_skips_url_with_markdown_breaking_chars() -> None:
+    hits = [
+        SearchHit(
+            chunk_id=1,
+            content="c",
+            score=0.9,
+            metadata={"title": "壊れURL", "source_uri": "https://drive.google.com/a)b"},
+        ),
+        SearchHit(
+            chunk_id=2,
+            content="c",
+            score=0.8,
+            metadata={"title": "正常", "source_uri": "gdrive://F9"},
+        ),
+    ]
+    block = SearchSkill._source_links_block(hits)
+    assert "a)b" not in block  # ')' を含む壊れURLは採用しない
+    assert "https://drive.google.com/file/d/F9/view" in block  # 正常な資料は出る

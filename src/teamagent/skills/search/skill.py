@@ -53,6 +53,16 @@ def _strip_internal_markers(text: str) -> str:
     return out.strip()
 
 
+# 回答末尾への「資料リンク」付与をサーフェス単位で制御する env（既定OFF）。
+# markdown リンクを装飾リンクへ変換する openclaw(@AiLa) を通す mcp では ON、
+# answer を textContent で生表示する connect-web(/app) では未設定＝OFF にする。
+_SOURCE_LINKS_ENV = "SEARCH_ANSWER_SOURCE_LINKS"
+
+
+def _source_links_enabled() -> bool:
+    return os.environ.get(_SOURCE_LINKS_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @register
 class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     """過去資料を pgvector で検索 → Claude で要約する Skill。"""
@@ -318,6 +328,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #    （フロントは include_answer=True の並行フェッチで従来文言を得る）。
         if input.include_answer:
             answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
+            # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
+            # markdown [label](url) は openclaw(@AiLa) が Slack 装飾リンクへ変換する。ただし
+            # connect-web(/app) は answer を textContent で生表示しリテラル化するため、env で
+            # サーフェス制御する（mcp=ON / connect-web=未設定 で /app を汚さない）。既定OFF。
+            if _source_links_enabled():
+                answer += self._source_links_block(hits)
         else:
             answer, cost_usd = "", 0.0
 
@@ -1090,3 +1106,47 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 return f"{file_name} (p.{page_num})"
             return str(file_name)
         return None
+
+    @staticmethod
+    def _doc_url(meta: dict[str, Any]) -> str | None:
+        """SearchHit の metadata から資料の開けるURL（Drive view 等）を1本組み立てる。
+
+        drive_url / source_uri を http はそのまま、`gdrive://FILE_ID` は Drive view URL へ整形。
+        Slack 出典（slack://）等の非http URIはリンク化しない（None）。
+        """
+        for v in (meta.get("drive_url"), meta.get("source_uri")):
+            if not v:
+                continue
+            s = str(v).strip()
+            if s.startswith(("http://", "https://")):
+                return s
+            if s.startswith("gdrive://"):
+                fid = s[len("gdrive://") :].split("/")[0].split("?")[0]
+                if fid:
+                    return f"https://drive.google.com/file/d/{fid}/view"
+        return None
+
+    @classmethod
+    def _source_links_block(cls, hits: list[SearchHit]) -> str:
+        """回答末尾に付ける『📎 資料リンク』の markdown ブロック（重複資料は畳む・最大6件）。"""
+        seen: set[str] = set()
+        lines: list[str] = []
+        for h in hits:
+            meta = h.metadata or {}
+            url = cls._doc_url(meta)
+            if not url or url in seen:
+                continue
+            # url に markdown を壊す文字（)・空白・制御）が混ざる資料は安全側でスキップ。
+            if any(c in url for c in ") \t\n\r") or "(" in url:
+                continue
+            seen.add(url)
+            raw = str(meta.get("title") or meta.get("file_name") or "資料")
+            # markdown リンクを壊す文字（[]()と改行）を除去。
+            title = re.sub(r"[\[\]()\n\r]+", " ", raw).strip() or "資料"
+            tag = "（関連資料）" if meta.get("is_related_drive") else ""
+            lines.append(f"- [{title}]({url}){tag}")
+            if len(lines) >= 6:
+                break
+        if not lines:
+            return ""
+        return "\n\n📎 *資料リンク*\n" + "\n".join(lines)
