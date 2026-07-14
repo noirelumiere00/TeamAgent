@@ -3317,6 +3317,33 @@ def create_app(
             return RedirectResponse("/search/login?next=%2Fapp", status_code=303)
         return HTMLResponse(_resolve_app_html()["html"])
 
+    @app.get("/r/{rid}")
+    def report_redirect(rid: str) -> Response:
+        """レポート短縮リンク: 署名トークンを検証し、都度新鮮な presigned S3 へ 302。
+
+        openclaw(@AiLa) が長い presigned URL のクエリ(?X-Amz-Signature…)を削って壊す問題の根治。
+        認証は掛けない（トークンが不透明・時限＝現行 presigned と同一の信頼境界。Slack 受信者は
+        ログイン不要）。token 不正/失効/prefix・bucket 外は 404（fail-closed）。presigned は毎回
+        再生成するため Cache-Control: no-store で中間キャッシュに期限切れURLを残さない。
+        """
+        from teamagent.adapters.report_link_token import decode_report_token
+        from teamagent.adapters.report_publish import presign_get
+
+        decoded = decode_report_token(rid)
+        if decoded is None:
+            return Response(
+                "リンクが無効か期限切れです。", status_code=404,
+                media_type="text/plain; charset=utf-8",
+            )
+        bucket, key = decoded
+        url = presign_get(bucket, key, region=os.environ.get("AWS_REGION"))
+        if not url:
+            return Response(
+                "レポートを取得できませんでした。", status_code=404,
+                media_type="text/plain; charset=utf-8",
+            )
+        return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
+
     @app.post("/api/v1/search")
     async def api_search(request: Request) -> JSONResponse:
         """検索クエリを SearchSkill に渡し、要約 + 結果カードを JSON で返す。"""

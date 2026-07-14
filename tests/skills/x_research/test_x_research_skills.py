@@ -525,7 +525,14 @@ def test_card_recreates_x_post_with_avatar_media_engagement() -> None:
     assert "data:image/png;base64,BBBB" in h  # media 内包
     assert "ユーザーU" in h and "@u" in h
     assert "<span class='bv'>✔</span>" in h  # 青バッジ（is_verified 時のみ）
-    assert "❤️ 10" in h and "🔁 3" in h and "💬 1" in h and "👁 500" in h
+    # エンゲージは本物X相当のインラインSVG＋略記数値（絵文字は廃止）。
+    assert "class='eng'" in h
+    assert h.count("class='ei'") == 4  # 返信/リポスト/いいね/ビューの4項目
+    assert "<span class='ec'>1</span>" in h  # 返信
+    assert "<span class='ec'>3</span>" in h  # リポスト
+    assert "<span class='ec'>10</span>" in h  # いいね
+    assert "<span class='ec'>500</span>" in h  # ビュー
+    assert "❤️" not in h and "🔁" not in h and "💬" not in h and "👁" not in h
     assert "✅ 実在検証済み" in h  # 検証チップは枠外ストリップ
     assert "不明" not in h
 
@@ -547,4 +554,56 @@ def test_card_falls_back_to_monogram_and_drops_fumei() -> None:
     assert "名無し太郎" in h
     assert "@不明" not in h and "投稿者不明" not in h  # @不明 は廃止・名前で埋まる
     assert "⚠️" in h  # 未検証チップ
-    assert "👁" not in h  # view0 は描かない（捏造しない）
+    assert "👁" not in h  # view_count=0 は描かない（捏造しない）
+    assert "class='ei'" not in h or h.count("class='ei'") == 1  # like のみ（他0）
+
+
+def test_fmt_count_man_notation() -> None:
+    """X風の数値略記: 1万未満はカンマ区切り、1万以上は「◯◯万」（境界を網羅）。"""
+    from teamagent.skills.x_research.report import _fmt_count
+
+    assert _fmt_count(0) == "0"
+    assert _fmt_count(395) == "395"
+    assert _fmt_count(8227) == "8,227"
+    assert _fmt_count(9999) == "9,999"  # 万未満の上限
+    assert _fmt_count(10000) == "1万"  # 万の下限（末尾0は整数）
+    assert _fmt_count(12000) == "1.2万"  # 小数第1位
+    assert _fmt_count(98000) == "9.8万"
+    assert _fmt_count(5180000) == "518万"  # 実スクショの 518万
+    assert _fmt_count(-5) == "0"  # 負値は0扱い（捏造しない）
+
+
+def test_publish_html_short_url_and_fallback(monkeypatch) -> None:
+    """_publish_html: CONNECT_BASE_URL 設定時は openclaw耐性の /r/<token> 短縮URL、
+
+    未設定時は従来 presigned へ graceful fallback。短縮URLはクエリを持たず、token を
+    decode すると元の bucket/key に戻る。
+    """
+    import teamagent.adapters.report_publish as rp
+    from teamagent.adapters.report_link_token import decode_report_token
+    from teamagent.adapters.report_publish import PublishedObject
+    from teamagent.skills.x_research.skill import XVoiceSearchSkill
+
+    bucket, key = "teamagent-dev-raw-files", "vseo-reports/deadbeef.html"
+    presigned = "https://s3.example/vseo-reports/deadbeef.html?X-Amz-Signature=abc123"
+    monkeypatch.setattr(
+        rp,
+        "publish_html_file_result",
+        lambda path, **kw: PublishedObject(url=presigned, bucket=bucket, key=key),
+    )
+    monkeypatch.setenv("VSEO_REPORT_BUCKET", bucket)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "sekret-xyz")
+    skill = XVoiceSearchSkill(publisher=None)
+
+    # CONNECT_BASE_URL あり → /r/<token>（クエリ無し）・decode で元の bucket/key
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.newstv.co.jp/")
+    url = skill._publish_html("<html>x</html>", request_id="rid", query="q")
+    assert url is not None
+    assert url.startswith("https://connect.newstv.co.jp/r/")
+    assert "?" not in url  # openclaw が削るクエリを持たない
+    token = url.rsplit("/r/", 1)[1]
+    assert decode_report_token(token) == (bucket, key)
+
+    # CONNECT_BASE_URL 未設定 → 従来 presigned へ fallback（後方互換）
+    monkeypatch.delenv("CONNECT_BASE_URL", raising=False)
+    assert skill._publish_html("<html>x</html>", request_id="rid", query="q") == presigned

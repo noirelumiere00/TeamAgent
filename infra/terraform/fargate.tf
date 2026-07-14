@@ -515,6 +515,11 @@ resource "aws_ecs_task_definition" "mcp" {
     secrets = concat([
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
+      # レポート短縮リンク(/r)の署名鍵。connect-web(connect_web.tf) と同一値=database_url を共用し
+      # 発行(mcp/x_research skill)↔復号(connect-web /r)で鍵一致させる。新規 secret 不要
+      # (database_url の GetSecretValue は mcp exec role に付与済み)。CONNECT 未配線環境では
+      # skill が presigned へ graceful fallback するため、未設定でも壊れない。
+      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       # §U ハイブリッド identity: mcp が slack_user_id → 会社メールを server-side 解決して
       # per-user OAuth(mail_*/morning_digest) の token を引くために必要（users:read.email scope）。
       # openclaw と同じ secret を共用。会社共有グループ(search)はこれ無しでも動く（graceful degrade）。

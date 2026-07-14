@@ -167,9 +167,25 @@ class _XSyncBase:
             return str(url) if url else None
         if not os.environ.get("VSEO_REPORT_BUCKET"):
             return None
-        from teamagent.adapters.report_publish import publish_html_file
+        from teamagent.adapters.report_publish import publish_html_file_result
 
-        return publish_html_file(path, request_id=request_id, query=query)
+        result = publish_html_file_result(path, request_id=request_id, query=query)
+        if result is None:
+            return None
+        # openclaw(@AiLa) が長い presigned URL のクエリ(?X-Amz-Signature…)を削って壊すため、
+        # CONNECT_BASE_URL があれば **クエリ無しの短縮URL** /r/<token> を返す（connect-web の
+        # /r が都度新鮮な presigned へ 302）。鍵/CONNECT未設定・失敗時は従来 presigned へ graceful。
+        from teamagent.skills.knowledge_search_url.skill import connect_base_url
+
+        base = connect_base_url()
+        if base:
+            try:
+                from teamagent.adapters.report_link_token import encode_report_token
+
+                return f"{base}/r/{encode_report_token(result.bucket, result.key)}"
+            except Exception:
+                logger.warning("x_research_short_url_failed", request_id=request_id)
+        return result.url
 
     def _search_parallel(
         self,
