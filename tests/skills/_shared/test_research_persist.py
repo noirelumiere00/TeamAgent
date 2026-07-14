@@ -1,0 +1,144 @@
+"""ResearchPersister（カタログ成果物の pgvector 永続化・Part1）の単体テスト。
+
+DocumentUpsert/ChunkUpsert の組成・external_id 冪等・no-op ガード（空商材/backend）を検証。
+DB は叩かず IngestRepository を monkeypatch で差し替える。
+"""
+
+from __future__ import annotations
+
+from typing import Any, ClassVar
+
+import pytest
+
+from teamagent.skills._shared.research_persist import ResearchPersister, _slug
+
+
+class _FakeEmbedder:
+    def embed_passage(self, text: str) -> list[float]:
+        return [0.01] * 1024
+
+
+class _CapatureRepo:
+    """upsert 引数を捕捉する fake IngestRepository。"""
+
+    captured: ClassVar[dict[str, Any]] = {}
+
+    def __init__(self, pgvector: Any) -> None:
+        pass
+
+    def upsert_document_with_chunks(self, doc: Any, chunks: list[Any], request_id: str) -> str:
+        _CapatureRepo.captured = {"doc": doc, "chunks": chunks, "request_id": request_id}
+        return "doc-id-1"
+
+
+class _RecordingExecutor:
+    """submit を記録するだけの fake executor（スレッドを起こさない）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def submit(self, fn: Any, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _local_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 既定の local/e5⇄embedding を明示（_backend_ok を通す）。
+    monkeypatch.delenv("EMBEDDER_BACKEND", raising=False)
+    monkeypatch.delenv("EMBEDDING_COLUMN", raising=False)
+
+
+def _persist_once(monkeypatch: pytest.MonkeyPatch, **over: Any) -> Any:
+    import teamagent.ingest.repository as repo_mod
+
+    monkeypatch.setattr(repo_mod, "IngestRepository", _CapatureRepo)
+    p = ResearchPersister(pgvector=object(), embedder=_FakeEmbedder())
+    kwargs = {
+        "tool": "x_voice",
+        "product_name": "辻利 抹茶",
+        "title": "辻利 抹茶 Xの声集め（X（旧Twitter））",
+        "body_md": "# 本文\n主要な声…",
+        "owner_email": "s-komata@vectorinc.co.jp",
+        "request_id": "rid-1",
+        "cls_solution": "Xリサーチ",
+        "cls_doc_type": "世の中の声",
+        "extra_metadata": {},
+    }
+    kwargs.update(over)
+    p._persist(**kwargs)
+    return _CapatureRepo.captured
+
+
+def test_persist_builds_document_for_vault(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _persist_once(monkeypatch)
+    doc = cap["doc"]
+    assert doc.source_type == "other"  # ENUM 新値不可
+    assert doc.metadata["cls_project"] == "辻利 抹茶"  # Vault クライアント anchor
+    assert doc.metadata["cls_solution"] == "Xリサーチ"
+    assert doc.metadata["cls_doc_type"] == "世の中の声"
+    assert doc.metadata["x_research_tool"] == "x_voice"
+    # export_vault の除外条件を踏まない（付けない）。
+    for k in ("is_sales_fb", "suppressed", "stale"):
+        assert k not in doc.metadata
+    assert doc.source_uri is None  # 失効する presigned を death-link にしない
+    assert "X（旧Twitter）" in doc.title  # 媒体/X タグの自動付与用
+    assert doc.acl_emails == ["s-komata@vectorinc.co.jp"]
+    assert doc.external_id.startswith("xresearch:x_voice:")
+    assert doc.external_id.endswith(cap["doc"].external_id.rsplit(":", 1)[-1])  # 末尾=JST日付
+    assert len(cap["chunks"]) == 1
+    assert len(cap["chunks"][0].embedding) == 1024
+
+
+def test_external_id_is_idempotent_per_tool_product_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    a = _persist_once(monkeypatch)["doc"].external_id
+    b = _persist_once(monkeypatch)["doc"].external_id
+    assert a == b  # 同日同商材同ツールは同一キー＝1件に集約(UPDATE)
+    c = _persist_once(monkeypatch, product_name="別商材")["doc"].external_id
+    assert c != a
+
+
+def test_schedule_noop_on_empty_product(monkeypatch: pytest.MonkeyPatch) -> None:
+    ex = _RecordingExecutor()
+    p = ResearchPersister(pgvector=object(), embedder=_FakeEmbedder(), executor=ex)
+    p.schedule(
+        tool="x_voice", product_name="  ", title="t", body_md="b",
+        owner_email="u", request_id="r", cls_solution="s", cls_doc_type="d",
+    )
+    assert ex.calls == []  # 商材空 → 記録しない（Vault で拾えないため）
+
+
+def test_schedule_noop_on_empty_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    ex = _RecordingExecutor()
+    p = ResearchPersister(pgvector=object(), embedder=_FakeEmbedder(), executor=ex)
+    p.schedule(
+        tool="x_voice", product_name="辻利", title="t", body_md="",
+        owner_email="u", request_id="r", cls_solution="s", cls_doc_type="d",
+    )
+    assert ex.calls == []
+
+
+def test_schedule_noop_on_non_local_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMBEDDER_BACKEND", "cohere")  # 別空間 → embedding 列を汚染しない
+    ex = _RecordingExecutor()
+    p = ResearchPersister(pgvector=object(), embedder=_FakeEmbedder(), executor=ex)
+    p.schedule(
+        tool="x_voice", product_name="辻利", title="t", body_md="b",
+        owner_email="u", request_id="r", cls_solution="s", cls_doc_type="d",
+    )
+    assert ex.calls == []
+
+
+def test_schedule_submits_when_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    ex = _RecordingExecutor()
+    p = ResearchPersister(pgvector=object(), embedder=_FakeEmbedder(), executor=ex)
+    p.schedule(
+        tool="x_voice", product_name="辻利", title="t", body_md="b",
+        owner_email="u", request_id="r", cls_solution="s", cls_doc_type="d",
+    )
+    assert len(ex.calls) == 1 and ex.calls[0]["product_name"] == "辻利"
+
+
+def test_slug_keeps_japanese_and_drops_symbols() -> None:
+    assert _slug("辻利 抹茶ミルク!!") == "辻利-抹茶ミルク"
+    assert _slug("  ") == "unknown"
+    assert ":" not in _slug("a:b/c")  # external_id 区切りの : を混入させない

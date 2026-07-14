@@ -121,6 +121,13 @@ def build_production_tools() -> list[ToolSpec]:
     from teamagent.skills.search.skill import SearchSkill
 
     search = _build_search_skill()  # 共有インスタンス
+    # カタログ成果物の永続化(Part1・外部脳化)。USE_RESEARCH_PERSIST=1 のときだけ有効化し、常駐
+    # embedder/pgvector を再利用（二重ロード回避）。None のとき各 skill は完全 no-op（後方互換）。
+    _research_persister = None
+    if _envflag("USE_RESEARCH_PERSIST"):
+        from teamagent.skills._shared.research_persist import ResearchPersister
+
+        _research_persister = ResearchPersister(pgvector=search.pgvector, embedder=search.embedder)
     specs = [
         ToolSpec(SearchSkill.name, SearchSkill.description, SearchSkill, factory=lambda: search),
         ToolSpec(ClientKarteSkill.name, ClientKarteSkill.description, ClientKarteSkill),
@@ -488,11 +495,22 @@ def build_production_tools() -> list[ToolSpec]:
         )
 
         _x_store = XTaskStore()
+        _persist = _research_persister  # lambda キャプチャ用（None なら skill は no-op）
         specs.append(
-            ToolSpec(XVoiceSearchSkill.name, XVoiceSearchSkill.description, XVoiceSearchSkill)
+            ToolSpec(
+                XVoiceSearchSkill.name,
+                XVoiceSearchSkill.description,
+                XVoiceSearchSkill,
+                factory=lambda: XVoiceSearchSkill(persister=_persist),
+            )
         )
         specs.append(
-            ToolSpec(XNeedsMiningSkill.name, XNeedsMiningSkill.description, XNeedsMiningSkill)
+            ToolSpec(
+                XNeedsMiningSkill.name,
+                XNeedsMiningSkill.description,
+                XNeedsMiningSkill,
+                factory=lambda: XNeedsMiningSkill(persister=_persist),
+            )
         )
         specs.append(
             ToolSpec(
@@ -507,7 +525,7 @@ def build_production_tools() -> list[ToolSpec]:
                 XBuzzMeasureStatusSkill.name,
                 XBuzzMeasureStatusSkill.description,
                 XBuzzMeasureStatusSkill,
-                factory=lambda: XBuzzMeasureStatusSkill(store=_x_store),
+                factory=lambda: XBuzzMeasureStatusSkill(store=_x_store, persister=_persist),
             )
         )
 
@@ -531,11 +549,13 @@ def build_production_tools() -> list[ToolSpec]:
     if _envflag("USE_TIKTOK_COMMENT_TOOLS"):
         from teamagent.skills.tiktok_comment_mining.skill import TikTokCommentMiningSkill
 
+        _persist_c = _research_persister  # lambda キャプチャ用（None なら no-op）
         specs.append(
             ToolSpec(
                 TikTokCommentMiningSkill.name,
                 TikTokCommentMiningSkill.description,
                 TikTokCommentMiningSkill,
+                factory=lambda: TikTokCommentMiningSkill(persister=_persist_c),
             )
         )
 

@@ -79,11 +79,13 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
         bedrock: Any | None = None,
         publisher: Any | None = None,
         comments_fn: Any | None = None,
+        persister: Any | None = None,
     ) -> None:
         self._apify = apify
         self._bedrock = bedrock
         self._publisher = publisher
         self._comments_fn = comments_fn  # chromium 一次経路（テスト注入用）
+        self._persister = persister  # ResearchPersister（Part1・None なら永続化 no-op）
 
     def _get_apify(self) -> ApifyClient:
         if self._apify is None:
@@ -321,6 +323,20 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             comments=scraped,
             cost_usd=out.total_cost_usd,
         )
+        # Part1: コメント分析を永続記録（client_name を商材扱い・空なら persister 側で no-op）。
+        if self._persister is not None and (input.client_name or "").strip():
+            from teamagent.skills.x_research.persist_body import build_comment_summary_md
+
+            self._persister.schedule(
+                tool="tiktok_comment",
+                product_name=input.client_name or "",
+                title=f"{input.client_name} コメント欄マイニング",
+                body_md=build_comment_summary_md(out, client_name=input.client_name or ""),
+                owner_email=user,
+                request_id=ctx.request_id,
+                cls_solution="SNSコメント分析",
+                cls_doc_type="コメント分析",
+            )
         return out
 
     def _slack_summary(self, out: CommentMiningOutput) -> str:

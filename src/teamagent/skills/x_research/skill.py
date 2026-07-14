@@ -32,6 +32,11 @@ from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.x_research.persist_body import (
+    build_buzz_summary_md,
+    build_needs_summary_md,
+    build_voice_summary_md,
+)
 from teamagent.skills.x_research.report import (
     render_buzz_report,
     render_needs_report,
@@ -131,11 +136,13 @@ class _XSyncBase:
         bedrock: Any | None = None,
         analysis_bedrock: Any | None = None,
         publisher: Any | None = None,
+        persister: Any | None = None,
     ) -> None:
         self._apify = apify
         self._bedrock = bedrock  # ノイズ除去（既定 Haiku）
         self._analysis = analysis_bedrock  # 分類/山分析（X_ANALYSIS_MODEL_ID）
         self._publisher = publisher  # callable(path, request_id, query) -> url | None
+        self._persister = persister  # ResearchPersister（Part1・None なら永続化 no-op）
 
     def _get_apify(self) -> ApifyClient:
         if self._apify is None:
@@ -450,6 +457,18 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             verified=out.verified_count,
             cost_usd=out.total_cost_usd,
         )
+        # Part1: 施策研究を永続記録（Obsidian/検索）。fire-and-forget・ホットパス外。
+        if self._persister is not None:
+            self._persister.schedule(
+                tool="x_voice",
+                product_name=input.product_name,
+                title=f"{input.product_name} Xの声集め（X（旧Twitter））",
+                body_md=build_voice_summary_md(out),
+                owner_email=user,
+                request_id=ctx.request_id,
+                cls_solution="Xリサーチ",
+                cls_doc_type="世の中の声",
+            )
         return out
 
     def _slack_summary(self, out: XVoiceSearchOutput) -> str:
@@ -609,6 +628,18 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
             clusters=len(clusters),
             cost_usd=out.total_cost_usd,
         )
+        # Part1: ニーズ研究を永続記録（テーマを商材扱い）。fire-and-forget・ホットパス外。
+        if self._persister is not None:
+            self._persister.schedule(
+                tool="x_needs",
+                product_name=input.theme,
+                title=f"{input.theme} ニーズ発掘（X（旧Twitter））",
+                body_md=build_needs_summary_md(out),
+                owner_email=user,
+                request_id=ctx.request_id,
+                cls_solution="Xリサーチ",
+                cls_doc_type="ニーズ発掘",
+            )
         return out
 
     def _slack_summary(self, out: XNeedsMiningOutput) -> str:
@@ -705,8 +736,11 @@ class XBuzzMeasureStatusSkill(
         store: XTaskStore | None = None,
         analysis_bedrock: Any | None = None,
         publisher: Any | None = None,
+        persister: Any | None = None,
     ) -> None:
-        super().__init__(analysis_bedrock=analysis_bedrock, publisher=publisher)
+        super().__init__(
+            analysis_bedrock=analysis_bedrock, publisher=publisher, persister=persister
+        )
         self._store = store or XTaskStore()
 
     def run(self, input: XBuzzMeasureStatusInput, ctx: SkillContext) -> XBuzzMeasureStatusOutput:
@@ -822,6 +856,26 @@ class XBuzzMeasureStatusSkill(
             if spike or report_url:
                 self._store.cache_report(
                     input.job_id, report_url=report_url or "", spike_analysis=spike
+                )
+            # Part1: done 初回のみ永続記録（再照会はキャッシュ済で本ブロック不到達）。
+            if self._persister is not None:
+                keyword = str(spec.get("keyword", ""))
+                self._persister.schedule(
+                    tool="x_buzz",
+                    product_name=keyword,
+                    title=f"{keyword} X発話量 効果測定（X（旧Twitter））",
+                    body_md=build_buzz_summary_md(
+                        keyword=keyword,
+                        start_date=str(spec.get("start_date", "")),
+                        end_date=str(spec.get("end_date", "")),
+                        daily_counts=daily,
+                        top_posts=top_posts,
+                        spike_analysis=spike,
+                    ),
+                    owner_email=_user_of(ctx),
+                    request_id=ctx.request_id,
+                    cls_solution="Xリサーチ",
+                    cls_doc_type="発話量測定",
                 )
 
         total = sum(int(d.get("count", 0) or 0) for d in daily)
