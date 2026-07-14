@@ -10,8 +10,11 @@
   - **決定的な schedule 名**＝同じ予定への再登録は ConflictException → 冪等成功扱い
     （朝バッチの再実行・リトライで二重リマインドを作らない）
   - **fail-open**: 登録失敗はダイジェスト配信を絶対に止めない（False を返すだけ）
-  - **payload に PII を載せない**: 予定タイトル・参加者は含めない（G3。通知文は
-    「まもなく予定があります（HH:MM〜）＋リンク」で成立する＝Lambda 側も PII 非接触）
+  - **payload の PII 方針（2026-07-14 改訂）**: 参加者は載せない。予定タイトルは
+    「本人の予定を本人 DM に出す」用途に限り short title（≤60字）を載せる。UX 上
+    「何の予定か分からない」を解消するための意図的な方針変更（ユーザー要望）。
+    緩和策: SQS は SSE 暗号化（reminders.tf）・Lambda はタイトルを CloudWatch に
+    出さない（handler は件数ログのみ）・title は 60 字で切り詰め。
 """
 
 from __future__ import annotations
@@ -78,10 +81,12 @@ class SchedulerClient:
         fire_at: _dt.datetime,
         url: str,
         request_id: str,
+        title: str = "",
     ) -> bool:
         """予定開始前リマインドのワンタイム schedule を登録する（冪等・fail-open）。
 
-        payload はタイトル等の PII を含まない（channel・開始時刻 HH:MM・リンクのみ）。
+        payload: channel・開始時刻 HH:MM・リンク・short title（≤60字・本人DM表示用）。
+        title は「本人の予定を本人 DM に出す」ためだけに載せる（2026-07-14・§docstring）。
         """
         name = reminder_schedule_name(channel, start_iso)
         fire_jst = fire_at.astimezone(_JST)
@@ -93,7 +98,10 @@ class SchedulerClient:
             start_hm = parsed.astimezone(_JST).strftime("%H:%M")
         except (ValueError, TypeError):
             pass
-        payload = {"v": 1, "channel": channel, "start_hm": start_hm, "url": url}
+        payload: dict[str, Any] = {"v": 1, "channel": channel, "start_hm": start_hm, "url": url}
+        short_title = (title or "").strip().replace("\n", " ")
+        if short_title:
+            payload["title"] = short_title[:60]
         started = time.perf_counter()
         try:
             self._ensure_client().create_schedule(
