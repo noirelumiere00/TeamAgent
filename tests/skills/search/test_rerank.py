@@ -178,3 +178,69 @@ def test_client_match_empty_client_is_noop() -> None:
 
 def test_client_match_empty_list() -> None:
     assert sort_by_client_match([], "A社") == []
+
+
+# ── C: 親クライアントで子コラボが出る（title/content/cls_entities も一致対象） ──
+
+
+def _chit_full(
+    chunk_id: int,
+    score: float,
+    *,
+    content: str = "x",
+    cls_project: str | None = None,
+    title: str | None = None,
+    cls_entities: object = None,
+) -> SearchHit:
+    meta: dict[str, object] = {}
+    if cls_project is not None:
+        meta["cls_project"] = cls_project
+    if title is not None:
+        meta["title"] = title
+    if cls_entities is not None:
+        meta["cls_entities"] = cls_entities
+    return SearchHit(chunk_id=chunk_id, content=content, score=score, metadata=meta)
+
+
+def test_client_match_by_content_promotes_collab_doc() -> None:
+    """本文に『サンマルクカフェ』が出る祇園辻利コラボ資料を、サンマルクカフェ検索で前出し。"""
+    intro = _chit_full(1, 0.9, content="会社紹介の一般的な導入")  # 高score・無関係
+    collab = _chit_full(
+        2, 0.3, content="サンマルクカフェ×祇園辻利コラボのPR施策", cls_project="祇園辻利コラボ"
+    )
+    out = sort_by_client_match([intro, collab], "サンマルクカフェ")
+    assert out[0].chunk_id == 2  # cls_project は祇園辻利でも、本文一致でブーストされる
+
+
+def test_client_match_by_title() -> None:
+    hits = [
+        _chit_full(1, 0.9),
+        _chit_full(2, 0.3, title="20260115_株式会社サンマルクカフェ_PR施策"),
+    ]
+    out = sort_by_client_match(hits, "サンマルクカフェ")
+    assert out[0].chunk_id == 2
+
+
+def test_client_match_by_cls_entities_list() -> None:
+    hits = [
+        _chit_full(1, 0.9),
+        _chit_full(
+            2, 0.3, cls_entities=["祇園辻利", "サンマルクカフェ", "株式会社サンマルクカフェ"]
+        ),
+    ]
+    out = sort_by_client_match(hits, "サンマルクカフェ")
+    assert out[0].chunk_id == 2
+
+
+def test_client_match_by_cls_entities_csv() -> None:
+    hits = [_chit_full(1, 0.9), _chit_full(2, 0.3, cls_entities="祇園辻利,サンマルクカフェ")]
+    out = sort_by_client_match(hits, "サンマルクカフェ")
+    assert out[0].chunk_id == 2
+
+
+def test_client_match_content_requires_two_chars() -> None:
+    # 1文字クエリは content 一致でノイズを出さない（メタ一致のみ）。
+    from teamagent.skills.search.rerank import _hit_matches_client
+
+    h = _chit_full(1, 0.5, content="Aを含む長文")
+    assert _hit_matches_client(h, "A") is False
