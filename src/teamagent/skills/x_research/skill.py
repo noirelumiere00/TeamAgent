@@ -2,7 +2,7 @@
 
 設計:
 - ①②は同期（Apify actor はApifyインフラで実行・MCPからはREST）。内部デッドライン
-  X_SYNC_DEADLINE_S(既定240s) で MCP 300s 天井の内側に収め、超過時は縮退
+  X_SYNC_DEADLINE_S(既定170s・openclawターン制限の内側)に収め、超過時は縮退
   （未検証分を「要再確認」で返す＝タイムアウト全損を構造的に排除）。
 - ④は非同期（A′トポロジ）。submit は SQS 投函のみ即return、実取得は使い捨てFargateの
   軽量ワーカー（teamagent.workers.x_buzz_job）。status が done 初回にSonnet山分析+HTMLを
@@ -54,13 +54,19 @@ logger = structlog.get_logger(__name__)
 
 _ALLOWLIST_ENV = "X_RESEARCH_ALLOWED_EMAILS"  # 段階公開（空=全員許可）
 _MAX_PARALLEL_QUERIES = 4
+# 投稿再現カードの画像内包に使ってよい壁時計の**ハード上限**（秒）。残時間が幾らあっても
+# これ以上は使わない。画像は「あれば嬉しい」装飾で、遅延で openclaw ターン制限を超えて
+# 応答全損する方が損失が大きいため小さく固定（超過分はモノグラム/画像なしにフォールバック）。
+_IMG_EMBED_MAX_S = 12.0
 
 
 def _deadline_s() -> int:
+    # 既定 170s: 実効の律速は MCP 300s 天井ではなく openclaw のターン制限（実測 ~181s で
+    # 「Agent couldn't generate a response」）。その内側に収め、遅い時は縮退で必ず返す。
     try:
-        return max(60, int(os.environ.get("X_SYNC_DEADLINE_S", "240")))
+        return max(60, int(os.environ.get("X_SYNC_DEADLINE_S", "170")))
     except ValueError:
-        return 240
+        return 170
 
 
 def _user_of(ctx: SkillContext) -> str:
@@ -261,13 +267,14 @@ class _XSyncBase:
             )
         # 投稿再現カード用に avatar/添付画像を base64 内包（実残時間に余裕がある時のみ・graceful）。
         # 総デッドライン = 残時間から検証経過と余白5sを引いた値。画像fetchはこの秒数で打ち切る。
-        img_budget = remaining_s - (time.monotonic() - t0) - 5
+        # 残時間から余白を引き、さらにハード上限で頭打ち（画像内包が応答時間を支配しない）。
+        img_budget = min(remaining_s - (time.monotonic() - t0) - 5, _IMG_EMBED_MAX_S)
         if img_budget >= 8:
             self._embed_card_images(cards, selected, request_id=request_id, deadline_s=img_budget)
         return cards, cost
 
     # 1リクエストで内包する画像URLの総数上限（レイテンシ/コスト有界化・許可CDNのみfetch）。
-    _MAX_EMBED_URLS: ClassVar[int] = 48
+    _MAX_EMBED_URLS: ClassVar[int] = 24
 
     @classmethod
     def _embed_card_images(
