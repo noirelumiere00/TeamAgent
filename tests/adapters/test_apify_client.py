@@ -11,6 +11,7 @@ import pytest
 from teamagent.adapters.apify_client import (
     ACTOR_IG_HASHTAG,
     ACTOR_IG_SEARCH,
+    ACTOR_X_PERIOD,
     ACTOR_X_SEARCH,
     ACTOR_X_SEARCH_FALLBACK,
     ApifyClient,
@@ -501,3 +502,55 @@ def test_search_posts_period_builds_apidojo_input() -> None:
     assert bodies[0]["start"] == "2026-07-01"
     assert bodies[0]["end"] == "2026-07-07"
     assert bodies[0]["minimumFavorites"] == 3
+
+
+_APIDOJO_ITEM = {
+    "id": "999",
+    "url": "https://x.com/foo/status/999",
+    "fullText": "apidojo経由のサンマルク投稿",
+    "text": "apidojo経由のサンマルク投稿",
+    "likeCount": 55,
+    "retweetCount": 3,
+    "createdAt": "Mon Jul 13 12:00:02 +0000 2026",
+    "author": {
+        "userName": "foo",
+        "name": "Foo",
+        "profilePicture": "https://pbs.twimg.com/profile_images/x_normal.jpg",
+        "isVerified": True,
+        "followers": 1000,
+        "description": "ニュースサイト公式",
+    },
+    "entities": {
+        "media": [{"media_url_https": "https://pbs.twimg.com/media/m.jpg", "type": "photo"}]
+    },
+}
+
+
+def test_search_posts_uses_apidojo_first_and_parses_rich_fields() -> None:
+    """第一候補を apidojo に切替。apidojo が返せば scraper_one/data-slayer は呼ばず、
+    再現カード用の avatar/verified/media も取れる（レイテンシ根治＋データ充実）。"""
+    fake = _FakeApify()
+    fake.items_by_actor[ACTOR_X_PERIOD] = [_APIDOJO_ITEM]
+    posts, cost = fake.client().search_posts("サンマルクカフェ", count=8, request_id="t")
+    assert len(posts) == 1
+    p = posts[0]
+    assert p.source_actor == ACTOR_X_PERIOD  # apidojo で完結
+    assert p.author_handle == "foo"
+    assert p.author_name == "Foo"
+    assert p.like_count == 55
+    assert p.author_avatar_url == "https://pbs.twimg.com/profile_images/x_normal.jpg"
+    assert p.is_verified is True
+    assert p.media_urls == ("https://pbs.twimg.com/media/m.jpg",)
+    assert cost > 0
+    # apidojo が返したのでフォールバック actor は呼ばれない
+    assert not any(f"/acts/{ACTOR_X_SEARCH}/" in c or ACTOR_X_SEARCH in c for c in fake.calls)
+
+
+def test_search_posts_falls_back_to_scraper_one_when_apidojo_empty() -> None:
+    """apidojo が 0 件なら scraper_one → data-slayer へ縮退する（後方互換）。"""
+    fake = _FakeApify()
+    fake.items_by_actor[ACTOR_X_PERIOD] = []
+    fake.items_by_actor[ACTOR_X_SEARCH] = [dict(_X_ITEM, id="777")]
+    posts, _ = fake.client().search_posts("q", count=8, request_id="t")
+    assert [p.post_id for p in posts] == ["777"]
+    assert posts[0].source_actor == ACTOR_X_SEARCH

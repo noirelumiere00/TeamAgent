@@ -622,14 +622,19 @@ class ApifyClient:
         request_id: str = "apify",
         user_email: str = "",
     ) -> tuple[list[XPost], float]:
-        """X投稿検索（第一候補 scraper_one → 0件/失敗で data-slayer 縮退）。
+        """X投稿検索（第一候補 apidojo → 0件/失敗で scraper_one → data-slayer 縮退）。
 
-        戻り値: (正規化済み投稿, 概算コストUSD)。
+        第一候補は apidojo/tweet-scraper（"Lightning-fast" 30-80 tweets/s・avatar/media/follower/
+        bio まで返す・実測で scraper_one の 10-96s 高分散より高速安定）。scraper_one/data-slayer は
+        フォールバックとして残す。戻り値: (正規化済み投稿, 概算コストUSD)。
         """
+        # apidojo の sort は Top/Latest（search_type=top/latest を写像）。
+        _sort = "Top" if search_type == "top" else "Latest"
         # data-slayer は maxItems を無視し maxPages（1ページ ~20件）で件数を決めるため、
         # maxPages も渡して要求件数を反映する（maxItems は他 actor 互換のため残置・無害）。
         _fb_pages = max(1, (count + 19) // 20)
         chain: list[tuple[str, dict[str, Any]]] = [
+            (ACTOR_X_PERIOD, {"searchTerms": [query], "sort": _sort, "maxItems": count}),
             (ACTOR_X_SEARCH, {"query": query, "resultsCount": count, "searchType": search_type}),
             (ACTOR_X_SEARCH_FALLBACK, {"query": query, "maxItems": count, "maxPages": _fb_pages}),
         ]
