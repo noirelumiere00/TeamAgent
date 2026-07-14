@@ -55,23 +55,41 @@ def sort_by_budget_proximity(hits: list[SearchHit], target_band: str) -> list[Se
 
 
 def _hit_matches_client(h: SearchHit, client: str) -> bool:
-    """hit の cls_project / client_name が client と双方向 substring 一致するか。
+    """hit が client（取引先/ブランド/コラボ名）に一致するかを広く判定する。
 
-    表記ゆれの完全吸収（alias 正規化）は別タスク。ここは「クエリ語が案件名/取引先名に
-    含まれる」または「案件名/取引先名がクエリ語に含まれる」の双方向部分一致で拾う。
-    cls_project は全資料に付く取引先、client_name は FB に付く取引先（pgvector が
-    SearchHit.metadata に露出済）。
+    2026-07-14 拡張（C・親クライアントで子コラボが出ない問題の即効対策）:
+    従来は cls_project / client_name の単一メタだけを見ていたため、「サンマルクカフェ×
+    祇園辻利コラボ」の資料が cls_project='祇園辻利' 側に分類されるとサンマルクカフェ検索で
+    ブーストされず沈んだ。以下も一致対象に加える:
+    - ``cls_entities``: Agent が抽出する取引先/代理店/ブランド/コラボ名の多値タグ（資料単位・
+      名寄せ本体。まだ無い資料もあるので存在時のみ・list/CSV 両対応）
+    - ``title``: 資料タイトル（DB フィルタ側は既に title を OR に含む・rerank と整合）
+    - ``content``: chunk 本文に取引先名が出現（例: 本文が「サンマルクカフェ×祇園辻利」）
+
+    メタ系は双方向部分一致、content は誤爆抑制のため片方向（needle in content）かつ 2 文字以上。
     """
     needle = client.strip()
     if not needle:
         return False
-    for k in ("cls_project", "client_name"):
-        v = h.metadata.get(k)
-        if not v:
-            continue
-        s = str(v).strip()
-        if s and (needle in s or s in needle):
+
+    def _bidi(s: str | None) -> bool:
+        s = str(s or "").strip()
+        return bool(s) and (needle in s or s in needle)
+
+    # 単値メタ + タイトル（双方向部分一致）
+    for k in ("cls_project", "client_name", "title"):
+        if _bidi(h.metadata.get(k)):
             return True
+    # 多値エンティティタグ（名寄せ本体・list または CSV）
+    ents = h.metadata.get("cls_entities")
+    if isinstance(ents, str):
+        ents = [e for e in ents.split(",")]
+    if isinstance(ents, list | tuple):
+        if any(_bidi(e) for e in ents):
+            return True
+    # 本文出現（片方向・2 文字以上でノイズ抑制）
+    if len(needle) >= 2 and needle in (h.content or ""):
+        return True
     return False
 
 
