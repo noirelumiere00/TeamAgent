@@ -260,18 +260,28 @@ class _XSyncBase:
                 )
             )
         # 投稿再現カード用に avatar/添付画像を base64 内包（実残時間に余裕がある時のみ・graceful）。
-        img_budget = int(remaining_s - (time.monotonic() - t0) - 5)
+        # 総デッドライン = 残時間から検証経過と余白5sを引いた値。画像fetchはこの秒数で打ち切る。
+        img_budget = remaining_s - (time.monotonic() - t0) - 5
         if img_budget >= 8:
-            self._embed_card_images(cards, selected, request_id=request_id)
+            self._embed_card_images(cards, selected, request_id=request_id, deadline_s=img_budget)
         return cards, cost
 
-    @staticmethod
-    def _embed_card_images(
-        cards: list[XPostCard], sources: list[XPost], *, request_id: str
-    ) -> None:
-        """カードの avatar/media を検索側 XPost のURLから DL→data URI 化（best-effort）。
+    # 1リクエストで内包する画像URLの総数上限（レイテンシ/コスト有界化・許可CDNのみfetch）。
+    _MAX_EMBED_URLS: ClassVar[int] = 48
 
-        全URLを1バッチで並列取得し、カードへ書き戻す（失敗分は空＝フォールバック描画）。
+    @classmethod
+    def _embed_card_images(
+        cls,
+        cards: list[XPostCard],
+        sources: list[XPost],
+        *,
+        request_id: str,
+        deadline_s: float,
+    ) -> None:
+        """カードの avatar/media を検索側 XPost のURLから DL→data URI 化（best-effort・締切付き）。
+
+        全URLを1バッチで並列取得し deadline_s で打ち切ってカードへ書き戻す（未取得は空＝
+        フォールバック描画）。総URL数は _MAX_EMBED_URLS で上限（超過分は素通し＝空）。
         """
         from teamagent.skills._shared.image_embed import fetch_data_uris
 
@@ -279,16 +289,21 @@ class _XSyncBase:
         spans: list[tuple[int, int, int]] = []  # (avatar_idx or -1, media_start, media_end)
         for src in sources:
             a_idx = -1
-            if src.author_avatar_url:
+            if src.author_avatar_url and len(flat) < cls._MAX_EMBED_URLS:
                 a_idx = len(flat)
                 flat.append(src.author_avatar_url)
             m_start = len(flat)
-            flat.extend(src.media_urls)
+            for m in src.media_urls:
+                if len(flat) >= cls._MAX_EMBED_URLS:
+                    break
+                flat.append(m)
             spans.append((a_idx, m_start, len(flat)))
         if not flat:
             return
         try:
-            uris = fetch_data_uris(flat, request_id=request_id, max_workers=8)
+            uris = fetch_data_uris(
+                flat, request_id=request_id, max_workers=8, deadline_s=deadline_s
+            )
         except Exception:
             logger.warning("x_card_image_embed_failed", request_id=request_id)
             return
