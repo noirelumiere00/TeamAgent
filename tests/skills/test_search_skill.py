@@ -1121,3 +1121,34 @@ def test_source_links_block_empty_when_no_links() -> None:
     hits = [SearchHit(chunk_id=1, content="c", score=0.9, metadata={"source_uri": "slack://C/1"})]
     assert SearchSkill._source_links_block(hits) == ""
     assert SearchSkill._source_links_block([]) == ""
+
+
+def test_source_links_enabled_env_gate(monkeypatch: Any) -> None:
+    from teamagent.skills.search.skill import _source_links_enabled
+
+    monkeypatch.delenv("SEARCH_ANSWER_SOURCE_LINKS", raising=False)
+    assert _source_links_enabled() is False  # 既定OFF（/app を汚さない）
+    monkeypatch.setenv("SEARCH_ANSWER_SOURCE_LINKS", "1")
+    assert _source_links_enabled() is True
+    monkeypatch.setenv("SEARCH_ANSWER_SOURCE_LINKS", "false")
+    assert _source_links_enabled() is False
+
+
+def test_source_links_block_skips_url_with_markdown_breaking_chars() -> None:
+    hits = [
+        SearchHit(
+            chunk_id=1,
+            content="c",
+            score=0.9,
+            metadata={"title": "壊れURL", "source_uri": "https://drive.google.com/a)b"},
+        ),
+        SearchHit(
+            chunk_id=2,
+            content="c",
+            score=0.8,
+            metadata={"title": "正常", "source_uri": "gdrive://F9"},
+        ),
+    ]
+    block = SearchSkill._source_links_block(hits)
+    assert "a)b" not in block  # ')' を含む壊れURLは採用しない
+    assert "https://drive.google.com/file/d/F9/view" in block  # 正常な資料は出る

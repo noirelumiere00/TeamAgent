@@ -53,6 +53,16 @@ def _strip_internal_markers(text: str) -> str:
     return out.strip()
 
 
+# 回答末尾への「資料リンク」付与をサーフェス単位で制御する env（既定OFF）。
+# markdown リンクを装飾リンクへ変換する openclaw(@AiLa) を通す mcp では ON、
+# answer を textContent で生表示する connect-web(/app) では未設定＝OFF にする。
+_SOURCE_LINKS_ENV = "SEARCH_ANSWER_SOURCE_LINKS"
+
+
+def _source_links_enabled() -> bool:
+    return os.environ.get(_SOURCE_LINKS_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @register
 class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     """過去資料を pgvector で検索 → Claude で要約する Skill。"""
@@ -319,8 +329,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if input.include_answer:
             answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
             # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
-            # openclaw が markdown [label](url) を Slack 装飾リンクへ変換（fast path は付けない）。
-            answer += self._source_links_block(hits)
+            # markdown [label](url) は openclaw(@AiLa) が Slack 装飾リンクへ変換する。ただし
+            # connect-web(/app) は answer を textContent で生表示しリテラル化するため、env で
+            # サーフェス制御する（mcp=ON / connect-web=未設定 で /app を汚さない）。既定OFF。
+            if _source_links_enabled():
+                answer += self._source_links_block(hits)
         else:
             answer, cost_usd = "", 0.0
 
@@ -1122,6 +1135,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             meta = h.metadata or {}
             url = cls._doc_url(meta)
             if not url or url in seen:
+                continue
+            # url に markdown を壊す文字（)・空白・制御）が混ざる資料は安全側でスキップ。
+            if any(c in url for c in ") \t\n\r") or "(" in url:
                 continue
             seen.add(url)
             raw = str(meta.get("title") or meta.get("file_name") or "資料")

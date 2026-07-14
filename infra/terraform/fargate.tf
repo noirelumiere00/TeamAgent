@@ -468,6 +468,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "BEDROCK_MODEL_ID", value = var.mcp_model_id },
       # pgvector HNSW の探索幅（検索品質/レイテンシのチューニング値・live=100）。
       { name = "SEARCH_HNSW_EF_SEARCH", value = "100" },
+      # ナレッジ回答の末尾に「資料リンク」を付与（@AiLa=openclaw が markdown を装飾リンクへ
+      # 変換する mcp のみ ON。connect-web(/app) は未設定＝生テキスト化しないため付けない）。
+      { name = "SEARCH_ANSWER_SOURCE_LINKS", value = "1" },
       ], var.enable_tiktok_acquire ? [
       # live パリティ: tiktok_acquire 連携のジョブ投入側。mcp が DynamoDB(状態)/SQS(キュー)/S3 を参照。
       # これらが無いと @AiLa の tiktok_acquire がジョブを投入できず取得パイプラインが停止する。
