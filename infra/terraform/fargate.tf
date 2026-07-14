@@ -379,6 +379,8 @@ resource "aws_ecs_task_definition" "mcp" {
       # 空 dict を返し web_url/app_url が一切載らない）。2026-07-10 の実機確認で live に
       # 無いことを確認済み＝この行が入って初めて Slack に検索 UI リンクが出る。
       { name = "CONNECT_BASE_URL", value = var.connect_base_url },
+      # レポート短縮リンク(/r)の段階ゲート。connect-web に /r+vseo-s3-read が揃うまで false=従来 presigned。
+      { name = "USE_REPORT_SHORTURL", value = var.enable_report_shorturl ? "1" : "0" },
       # §U: 5名運用の pgvector pool ウォームアップ。起動時に2接続確立し初回検索のレイテンシを下げる
       # （max=8 で5並行に余裕＝枯渇なし）。
       { name = "PGVECTOR_POOL_MIN", value = "2" },

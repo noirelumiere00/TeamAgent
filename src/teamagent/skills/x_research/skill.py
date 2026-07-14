@@ -186,13 +186,18 @@ class _XSyncBase:
         # 段階ゲート: USE_REPORT_SHORTURL=on・署名鍵あり・CONNECT_BASE_URL あり の3条件が
         # 揃った時だけ短縮URL化。揃う前（connect-web に /r+S3権限が無い/鍵不一致）に出すと
         # 404/403 に劣化するため、既定は従来 presigned のまま（後方互換・安全側）。
-        from teamagent.adapters.report_link_token import encode_report_token, has_secret
+        from teamagent.adapters.report_link_token import (
+            encode_report_token,
+            has_secret,
+            is_allowed_key,
+        )
         from teamagent.skills.knowledge_search_url.skill import connect_base_url
 
         base = connect_base_url()
-        if base and _report_shorturl_enabled() and has_secret():
+        if base and _report_shorturl_enabled() and has_secret() and is_allowed_key(result.key):
             try:
-                return f"{base}/r/{encode_report_token(result.bucket, result.key)}"
+                token = encode_report_token(result.bucket, result.key, region=result.region)
+                return f"{base}/r/{token}"
             except Exception:
                 logger.warning("x_research_short_url_failed", request_id=request_id)
         return result.url

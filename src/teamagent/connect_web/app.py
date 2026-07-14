@@ -3335,8 +3335,8 @@ def create_app(
                 "リンクが無効か期限切れです。", status_code=404,
                 media_type="text/plain; charset=utf-8",
             )
-        bucket, key = decoded
-        url = presign_get(bucket, key, region=os.environ.get("AWS_REGION"))
+        bucket, key, region = decoded
+        url = presign_get(bucket, key, region=region or os.environ.get("AWS_REGION"))
         if not url:
             return Response(
                 "レポートを取得できませんでした。", status_code=404,

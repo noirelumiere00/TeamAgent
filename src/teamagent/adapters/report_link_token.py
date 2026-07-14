@@ -49,6 +49,15 @@ def has_secret() -> bool:
     return bool(os.environ.get("MAIL_ACTION_HMAC_SECRET", "").strip())
 
 
+def is_allowed_key(key: str) -> bool:
+    """短縮リンクを発行してよい key か（decode と同一 allowlist）。
+
+    発行側の事前チェック用。カスタム VSEO_REPORT_PREFIX 等で許可外 prefix に置かれた成果物に
+    /r トークンを出すと decode が拒否して 404 になるため、発行前にここで弾き presigned へ落とす。
+    """
+    return bool(key) and str(key).startswith(_ALLOWED_KEY_PREFIXES)
+
+
 def _allowed_bucket() -> str:
     return os.environ.get("VSEO_REPORT_BUCKET") or _DEFAULT_BUCKET
 
@@ -65,21 +74,33 @@ def encode_report_token(
     bucket: str,
     key: str,
     *,
+    region: str = "",
     now: int | None = None,
     ttl_s: int = _DEFAULT_TTL_S,
 ) -> str:
-    """S3 の bucket/key を失効付きで HMAC 署名し、``/r/<token>`` 用の不透明文字列にする。"""
+    """S3 の bucket/key(+発行時 region) を失効付きで HMAC 署名し、``/r/<token>`` 用文字列にする。
+
+    region は発行側が把握しているバケットのリージョン。/r が presigned を再生成する際に使い、
+    バケットがサービスの AWS_REGION と別リージョンでも署名リージョン不一致(403)を避ける。空可。
+    """
     issued = int(now if now is not None else time.time())
-    payload = {"typ": _TOKEN_TYPE, "b": str(bucket), "k": str(key), "e": issued + int(ttl_s)}
+    payload = {
+        "typ": _TOKEN_TYPE,
+        "b": str(bucket),
+        "k": str(key),
+        "r": str(region or ""),
+        "e": issued + int(ttl_s),
+    }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = hmac.new(_secret(), raw, hashlib.sha256).digest()[:_SIG_LEN]
     return _b64e(raw) + "." + _b64e(sig)
 
 
-def decode_report_token(token: str, *, now: int | None = None) -> tuple[str, str] | None:
-    """検証して (bucket, key) を返す。以下はすべて None（fail-closed）:
+def decode_report_token(token: str, *, now: int | None = None) -> tuple[str, str, str] | None:
+    """検証して (bucket, key, region) を返す。以下はすべて None（fail-closed）:
 
-    鍵未設定 / 形式不正 / 署名不一致 / 失効 / key が許可プレフィックス外 / bucket が許可外。
+    鍵未設定 / 形式不正 / 署名不一致 / 失効 / typ 不一致 / key が許可 prefix 外 / bucket が許可外。
+    region は埋込が無ければ ""（/r 側で AWS_REGION にフォールバック）。
     """
     secret = _secret()
     if not secret:
@@ -106,4 +127,4 @@ def decode_report_token(token: str, *, now: int | None = None) -> tuple[str, str
         return None
     if not key.startswith(_ALLOWED_KEY_PREFIXES):  # 任意 key への転用を封じる
         return None
-    return bucket, key
+    return bucket, key, str(payload.get("r", ""))

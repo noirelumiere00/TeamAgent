@@ -14,6 +14,7 @@ from teamagent.adapters.report_link_token import (
     decode_report_token,
     encode_report_token,
     has_secret,
+    is_allowed_key,
 )
 
 _BUCKET = "teamagent-dev-raw-files"
@@ -29,14 +30,29 @@ def _key(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_round_trip() -> None:
     token = encode_report_token(_BUCKET, _KEY)
     assert "?" not in token and "/" not in token  # 短くクエリ/スラッシュ無し（openclaw耐性）
-    assert decode_report_token(token) == (_BUCKET, _KEY)
+    assert decode_report_token(token) == (_BUCKET, _KEY, "")  # region 未指定は ""
+
+
+def test_region_round_trip() -> None:
+    """発行時 region がトークンに埋まり decode で戻る（クロスリージョン bucket の 403 回避）。"""
+    token = encode_report_token(_BUCKET, _KEY, region="us-west-2")
+    assert decode_report_token(token) == (_BUCKET, _KEY, "us-west-2")
 
 
 def test_proposals_prefix_ok() -> None:
     assert decode_report_token(encode_report_token(_BUCKET, "vseo-proposals/d.pdf")) == (
         _BUCKET,
         "vseo-proposals/d.pdf",
+        "",
     )
+
+
+def test_is_allowed_key() -> None:
+    """発行側の事前 prefix チェック（カスタム VSEO_REPORT_PREFIX での 404 を防ぐ）。"""
+    assert is_allowed_key("vseo-reports/a.html")
+    assert is_allowed_key("vseo-proposals/d.pdf")
+    assert not is_allowed_key("custom-prefix/a.html")
+    assert not is_allowed_key("")
 
 
 def test_tamper_rejected() -> None:

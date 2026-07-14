@@ -608,7 +608,7 @@ def test_publish_html_short_url_and_fallback(monkeypatch) -> None:
     url = run()
     assert url is not None and url.startswith("https://connect.newstv.co.jp/r/")
     assert "?" not in url  # openclaw が削るクエリを持たない
-    assert decode_report_token(url.rsplit("/r/", 1)[1]) == (bucket, key)
+    assert decode_report_token(url.rsplit("/r/", 1)[1]) == (bucket, key, "")  # region 未指定
 
     # フラグ OFF（既定）→ 従来 presigned（connect-web に /r が無い段階の安全側）
     monkeypatch.delenv("USE_REPORT_SHORTURL", raising=False)
@@ -622,4 +622,14 @@ def test_publish_html_short_url_and_fallback(monkeypatch) -> None:
     # フラグ ON・鍵あり でも CONNECT_BASE_URL 未設定 → presigned
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "sekret-xyz")
     monkeypatch.delenv("CONNECT_BASE_URL", raising=False)
+    assert run() == presigned
+
+    # 全条件そろっても key が許可プレフィックス外(カスタム VSEO_REPORT_PREFIX) → presigned
+    # （短縮URLを出すと decode が prefix allowlist で拒否し 404 になるため事前に弾く・Codex 指摘）。
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.newstv.co.jp/")
+    monkeypatch.setattr(
+        rp,
+        "publish_html_file_result",
+        lambda path, **kw: PublishedObject(url=presigned, bucket=bucket, key="custom/x.html"),
+    )
     assert run() == presigned

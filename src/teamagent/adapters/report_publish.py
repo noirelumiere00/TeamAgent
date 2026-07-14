@@ -35,11 +35,12 @@ def _bucket_region(s3: Any, bucket: str) -> str:
 
 @dataclass(frozen=True)
 class PublishedObject:
-    """発行結果: presigned GET URL に加え bucket/key を返す（短縮URLトークン生成用）。"""
+    """発行結果: presigned GET URL に加え bucket/key/region を返す（短縮URLトークン生成用）。"""
 
     url: str
     bucket: str
     key: str
+    region: str = ""  # 発行時に解決したバケットリージョン（/r の presign 再生成で使う）
 
 
 def _put_and_presign(
@@ -86,7 +87,7 @@ def _put_and_presign(
             region=region,
             query=query[:60],
         )
-        return PublishedObject(url=url, bucket=bkt, key=key)
+        return PublishedObject(url=url, bucket=bkt, key=key, region=region)
     except Exception as e:
         logger.warning("report_publish_failed", request_id=request_id, error=type(e).__name__)
         return None
