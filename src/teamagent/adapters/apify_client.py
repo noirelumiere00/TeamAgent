@@ -85,6 +85,13 @@ class XPost:
     created_at: str
     lang: str
     source_actor: str
+    # 投稿再現カード用（P1）。取得できた actor でのみ非空。frozen のため tuple。
+    author_avatar_url: str = ""
+    media_urls: tuple[str, ...] = ()
+    media_types: tuple[str, ...] = ()  # media_urls と同順（photo|video|gif|animated_gif）
+    is_verified: bool = False
+    view_count: int = 0
+    quote_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -145,6 +152,43 @@ def _as_dict(v: Any) -> dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
+def _extract_x_media(d: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """添付メディアの (URL, type) を actor 差を吸収して抽出（最大4・順序保持・重複除去）。
+
+    scraper_one: media[].mediaUrlHttps / data-slayer,apidojo: entities|extendedEntities.media[]
+    ・data-slayer動画: media.video.media_url_https（media が dict のケース）。
+    """
+    buckets: list[dict[str, Any]] = []
+    top = d.get("media")
+    if isinstance(top, list):
+        buckets.extend(x for x in top if isinstance(x, dict))
+    elif isinstance(top, dict):
+        for v in top.values():  # data-slayer の media.video.* / media.photo.* 形
+            if isinstance(v, dict):
+                buckets.append(v)
+    for key in ("extendedEntities", "extended_entities", "entities"):
+        c = d.get(key)
+        if isinstance(c, dict):
+            cm = c.get("media")
+            if isinstance(cm, list):
+                buckets.extend(x for x in cm if isinstance(x, dict))
+    urls: list[str] = []
+    types: list[str] = []
+    seen: set[str] = set()
+    for it in buckets:
+        u = str(
+            _first(it, "mediaUrlHttps", "media_url_https", "mediaUrl", "media_url", "url") or ""
+        )
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        urls.append(u)
+        types.append(str(_first(it, "type", "mediaType", default="photo")) or "photo")
+        if len(urls) >= 4:
+            break
+    return tuple(urls), tuple(types)
+
+
 def _parse_x_item(d: dict[str, Any], source_actor: str) -> XPost | None:
     """X系actorの1件を寛容にパースする（不明形式は None＝呼び側でスキップ）。"""
     # author ネスト: scraper_one/apidojo=author, 一部=user, data-slayer=user_info。
@@ -168,6 +212,7 @@ def _parse_x_item(d: dict[str, Any], source_actor: str) -> XPost | None:
     text = str(_first(d, "text", "fullText", "full_text", "postText", "content", "tweet"))
     if not (post_id or url) or not text:
         return None
+    _media_urls, _media_types = _extract_x_media(d)
     return XPost(
         post_id=post_id,
         url=url,
@@ -195,6 +240,29 @@ def _parse_x_item(d: dict[str, Any], source_actor: str) -> XPost | None:
         created_at=str(_first(d, "createdAt", "created_at", "date", "timestamp")),
         lang=str(d.get("lang") or ""),
         source_actor=source_actor,
+        # 再現カード用（取得できた actor でのみ埋まる・無ければフォールバック描画）。
+        author_avatar_url=str(
+            _first(
+                author_raw,
+                "profileImageUrl",
+                "profilePicture",
+                "avatar",
+                "profile_image_url_https",
+                "profileImageUrlHttps",
+                "profile_image_url",
+            )
+            or ""
+        ),
+        media_urls=_media_urls,
+        media_types=_media_types,
+        is_verified=bool(
+            author_raw.get("isVerified")
+            or author_raw.get("is_blue_verified")
+            or author_raw.get("verified")
+            or d.get("isVerified")
+        ),
+        view_count=_as_int(_first(d, "viewCount", "views", "view_count", default=0)),
+        quote_count=_as_int(_first(d, "quoteCount", "quotes", "quote_count", default=0)),
     )
 
 

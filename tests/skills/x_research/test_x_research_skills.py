@@ -15,6 +15,7 @@ from teamagent.skills.x_research.schema import (
     XBuzzMeasureInput,
     XBuzzMeasureStatusInput,
     XNeedsMiningInput,
+    XPostCard,
     XVoiceSearchInput,
 )
 from teamagent.skills.x_research.skill import (
@@ -494,3 +495,56 @@ def test_worker_marks_top_posts_unverified_when_verification_fails(
     results = json.loads(s3_writes["x-research/xb_unverified/results.json"])
     assert results["top_posts"][0]["verified"] is False
     assert "要再確認" in results["top_posts"][0]["verify_note"]
+
+
+# ---- P1: X投稿再現カード（report._card） ----
+
+
+def test_card_recreates_x_post_with_avatar_media_engagement() -> None:
+    from teamagent.skills.x_research.report import _card
+
+    c = XPostCard(
+        post_id="1",
+        url="https://x.com/u/status/1",
+        author_handle="u",
+        author_name="ユーザーU",
+        text="濃厚で最高",
+        like_count=10,
+        retweet_count=3,
+        reply_count=1,
+        view_count=500,
+        is_verified=True,
+        avatar_data="data:image/png;base64,AAAA",
+        media_data=["data:image/png;base64,BBBB"],
+        created_at="1750000000000",
+        verified=True,
+    )
+    h = _card(c)
+    assert "class='xc'" in h  # 再現カード枠
+    assert "data:image/png;base64,AAAA" in h  # avatar 内包
+    assert "data:image/png;base64,BBBB" in h  # media 内包
+    assert "ユーザーU" in h and "@u" in h
+    assert "<span class='bv'>✔</span>" in h  # 青バッジ（is_verified 時のみ）
+    assert "❤️ 10" in h and "🔁 3" in h and "💬 1" in h and "👁 500" in h
+    assert "✅ 実在検証済み" in h  # 検証チップは枠外ストリップ
+    assert "不明" not in h
+
+
+def test_card_falls_back_to_monogram_and_drops_fumei() -> None:
+    from teamagent.skills.x_research.report import _card
+
+    c = XPostCard(
+        post_id="2",
+        url="",
+        author_handle="",
+        author_name="名無し太郎",
+        text="アイコン無し投稿",
+        like_count=0,
+        verified=False,
+    )
+    h = _card(c)
+    assert "class='mono'" in h  # avatar 無→モノグラム
+    assert "名無し太郎" in h
+    assert "@不明" not in h and "投稿者不明" not in h  # @不明 は廃止・名前で埋まる
+    assert "⚠️" in h  # 未検証チップ
+    assert "👁" not in h  # view0 は描かない（捏造しない）

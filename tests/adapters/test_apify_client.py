@@ -368,6 +368,53 @@ def test_parse_data_slayer_real_keys() -> None:
     assert p.url == "https://x.com/matcha_fan/status/666"  # handle+tweet_id からURL合成＝検証可能に
 
 
+def test_parse_extracts_avatar_media_verified_for_recreation_card() -> None:
+    """再現カード用に avatar/添付画像/青バッジ/view/quote を取得できる（P1）。"""
+    fake = _FakeApify()
+    fake.items_by_actor[ACTOR_X_SEARCH] = [
+        {
+            "postId": "777",
+            "postUrl": "https://x.com/u/status/777",
+            "postText": "写真つき投稿",
+            "author": {
+                "screenName": "u",
+                "name": "U",
+                "profileImageUrl": "https://pbs.example/av.jpg",
+                "isVerified": True,
+            },
+            "media": [
+                {"mediaUrlHttps": "https://pbs.example/m1.jpg", "type": "photo"},
+                {"mediaUrlHttps": "https://pbs.example/m2.jpg", "type": "photo"},
+            ],
+            "viewCount": 1000,
+            "quoteCount": 2,
+        }
+    ]
+    posts, _ = fake.client().search_posts("q", count=5, request_id="t")
+    p = posts[0]
+    assert p.author_avatar_url == "https://pbs.example/av.jpg"
+    assert p.media_urls == ("https://pbs.example/m1.jpg", "https://pbs.example/m2.jpg")
+    assert p.media_types == ("photo", "photo")
+    assert p.is_verified is True
+    assert p.view_count == 1000
+    assert p.quote_count == 2
+
+
+def test_parse_media_from_entities_nested_and_capped() -> None:
+    """entities.media 形（apidojo/data-slayer）も拾い、最大4枚で打ち切る。"""
+    from teamagent.adapters.apify_client import _extract_x_media
+
+    d = {
+        "entities": {
+            "media": [{"media_url_https": f"https://pbs/{i}.jpg"} for i in range(6)],
+        }
+    }
+    urls, types = _extract_x_media(d)
+    assert len(urls) == 4  # 4枚で打ち切り
+    assert urls[0] == "https://pbs/0.jpg"
+    assert all(t == "photo" for t in types)  # type 欠落は既定 photo
+
+
 def test_token_sent_via_header_not_url() -> None:
     # トークンはURLクエリに載せない（httpx例外メッセージ経由の漏えい防止）。
     fake = _FakeApify()
