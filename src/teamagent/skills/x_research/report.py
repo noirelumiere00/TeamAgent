@@ -179,7 +179,7 @@ def _card(p: XPostCard) -> str:
     card = (
         "<div class='xc'><div class='top'>"
         f"{avatar}<div class='id'>"
-        # sub は handle_txt（@{_esc(handle)}）と date（安全な『M月D日』）の連結＝既にエスケープ済み。
+        # sub は handle_txt(エスケープ済)＋date(安全)の連結なので再エスケープしない。
         f"<div class='nm'>{nm}{bv}</div><div class='hd'>{sub}</div></div></div>"
         f"<div class='bd'>{_esc(p.text)}</div>{media}{eng_html}</div>"
     )
