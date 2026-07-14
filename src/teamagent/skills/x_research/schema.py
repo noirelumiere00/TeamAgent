@@ -20,11 +20,23 @@ class XPostCard(BaseModel):
     post_id: str
     url: str
     author_handle: str = ""
+    author_name: str = Field(
+        default="", description="表示名（handle 空時のフォールバック表示に使う）"
+    )
     author_note: str = Field(default="", description="属性メモ（美容系/一般 等・LLM推定）")
     text: str
     like_count: int = 0
     retweet_count: int = 0
+    reply_count: int = 0
+    quote_count: int = 0
+    view_count: int = 0
     created_at: str = ""
+    is_verified: bool = Field(default=False, description="青バッジ（取得できた時のみ・捏造しない）")
+    # 投稿再現カード用（P1）: base64 data URI で内包（署名URLを出力に残さない）。空=フォールバック。
+    avatar_data: str = Field(default="", description="アイコン画像の data URI（空=モノグラム）")
+    media_data: list[str] = Field(
+        default_factory=list, description="添付画像の data URI 群（最大4）"
+    )
     verified: bool = Field(default=False, description="xtracto による投稿ID単位の実在検証済みか")
     verify_note: str = Field(default="", description="未検証時の注記（例: 要再確認: 取得不可）")
 

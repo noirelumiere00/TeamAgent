@@ -40,7 +40,41 @@ h1{{font-size:20px;margin:0 0 4px}}
 .notebox{{background:#fff8e6;border:1px solid #f0e2b6;border-radius:10px;padding:10px 14px;
   margin:12px 0;font-size:12px;color:#6b5b1e}}
 .footer{{color:#8a939c;font-size:11px;margin-top:22px;border-top:1px solid #e3e7ec;padding-top:8px}}
+/* X投稿再現カード（P1・提案書にスクショ貼付できる純正見た目）。純正配色をカード内で閉じる。 */
+.xc{{background:#fff;border:1px solid #cfd9de;border-radius:16px;padding:12px 16px;
+  margin:12px 0;max-width:600px}}
+.xc .top{{display:flex;align-items:flex-start;gap:10px}}
+.xc .av{{width:44px;height:44px;border-radius:50%;flex:none;object-fit:cover;background:#e1e8ed}}
+.xc .mono{{width:44px;height:44px;border-radius:50%;flex:none;display:flex;align-items:center;
+  justify-content:center;color:#fff;font-weight:700;font-size:18px}}
+.xc .id{{min-width:0;flex:1}}
+.xc .nm{{font-weight:700;font-size:15px;color:#0f1419;display:flex;align-items:center;
+  gap:3px;flex-wrap:wrap}}
+.xc .bv{{color:#1d9bf0;font-size:13px}}
+.xc .hd{{color:#536471;font-size:14px}}
+.xc .bd{{font-size:15px;line-height:1.5;color:#0f1419;white-space:pre-wrap;
+  word-break:break-word;margin:8px 0}}
+.xc .md{{display:grid;gap:2px;border-radius:14px;overflow:hidden;margin:8px 0;
+  border:1px solid #cfd9de}}
+.xc .md.n1{{grid-template-columns:1fr}}
+.xc .md.n2,.xc .md.n3,.xc .md.n4{{grid-template-columns:1fr 1fr}}
+.xc .md img{{width:100%;height:100%;object-fit:cover;display:block;max-height:280px}}
+.xc .eng{{display:flex;gap:22px;color:#536471;font-size:13px;margin-top:6px}}
+.xstrip{{display:flex;align-items:center;gap:8px;font-size:11px;color:#536471;
+  margin:-4px 0 12px 4px;flex-wrap:wrap}}
+.xstrip a{{color:#1d6fdc;text-decoration:none}}
 """
+
+_MONO_COLORS = (
+    "#1d9bf0",
+    "#e0245e",
+    "#17bf63",
+    "#f45d22",
+    "#794bc4",
+    "#f7b924",
+    "#ff6b6b",
+    "#00b894",
+)
 
 
 def _esc(s: str) -> str:
@@ -49,6 +83,47 @@ def _esc(s: str) -> str:
 
 def _today() -> str:
     return _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).strftime("%Y-%m-%d")
+
+
+_JST = _dt.timezone(_dt.timedelta(hours=9))
+
+
+def _fmt_date(raw: str) -> str:
+    """投稿日時（epoch ms/秒・ISO・Twitter形式）を JST『M月D日』へ。判定不能は空。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if s.isdigit():
+        try:
+            ts = int(s)
+            if ts > 10_000_000_000:  # ミリ秒
+                ts //= 1000
+            return _dt.datetime.fromtimestamp(ts, _JST).strftime("%-m月%-d日")
+        except (ValueError, OverflowError, OSError):
+            return ""
+    try:
+        d = _dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        d = d.replace(tzinfo=_dt.UTC) if d.tzinfo is None else d
+        return d.astimezone(_JST).strftime("%-m月%-d日")
+    except ValueError:
+        pass
+    try:  # Twitter "Wed Jul 01 12:00:00 +0000 2026"
+        return (
+            _dt.datetime.strptime(s, "%a %b %d %H:%M:%S %z %Y")
+            .astimezone(_JST)
+            .strftime("%-m月%-d日")
+        )
+    except ValueError:
+        return ""
+
+
+def _monogram(name: str, handle: str) -> str:
+    """アイコン未取得時のフォールバック丸（頭文字＋@ハッシュ由来の決定論色）。"""
+    base = (name or handle or "?").strip()
+    ch = base[0].upper() if base else "?"
+    key = handle or name or "?"
+    color = _MONO_COLORS[sum(ord(c) for c in key) % len(_MONO_COLORS)]
+    return f"<div class='mono' style='background:{color}'>{_esc(ch)}</div>"
 
 
 def _page(title: str, sub: str, body: str, footer_note: str) -> str:
@@ -62,6 +137,53 @@ def _page(title: str, sub: str, body: str, footer_note: str) -> str:
 
 
 def _card(p: XPostCard) -> str:
+    """1投稿を『X投稿画面そっくり』の再現カード＋枠外の検証ストリップで描く。
+
+    フレーム内は純正の見た目だけ（アイコン/名前/青✔/@/日時/本文/画像/💬🔁❤️👁）。
+    検証チップ・属性メモ・元投稿リンクは枠外(.xstrip)へ逃がしスクショ感を保つ。
+    """
+    # アイコン: 取得できていれば実画像、無ければモノグラム丸（@不明は出さない）。
+    avatar = (
+        f"<img class='av' src='{_esc(p.avatar_data)}' alt=''>"
+        if p.avatar_data
+        else _monogram(p.author_name, p.author_handle)
+    )
+    bv = "<span class='bv'>✔</span>" if p.is_verified else ""
+    handle_txt = f"@{_esc(p.author_handle)}" if p.author_handle else ""
+    date = _fmt_date(p.created_at)
+    # 表示名優先。名前が無ければ @handle を主に。どちらも無ければ「投稿者不明」。
+    if p.author_name:
+        nm = _esc(p.author_name)
+        sub = " · ".join(x for x in (handle_txt, date) if x)
+    elif p.author_handle:
+        nm = handle_txt
+        sub = date
+    else:
+        nm = "投稿者不明"
+        sub = date
+    # 添付画像（data URI 内包・最大4）。
+    imgs = [m for m in (p.media_data or []) if m][:4]
+    media = ""
+    if imgs:
+        tiles = "".join(f"<img src='{_esc(m)}' alt=''>" for m in imgs)
+        media = f"<div class='md n{len(imgs)}'>{tiles}</div>"
+    # エンゲージ行: いいねは常時、他は取得できた(>0)時のみ＝捏造しない。
+    eng = [f"❤️ {p.like_count:,}"]
+    if p.retweet_count:
+        eng.insert(0, f"🔁 {p.retweet_count:,}")
+    if p.reply_count:
+        eng.insert(0, f"💬 {p.reply_count:,}")
+    if p.view_count:
+        eng.append(f"👁 {p.view_count:,}")
+    eng_html = "<div class='eng'>" + "".join(f"<span>{e}</span>" for e in eng) + "</div>"
+    card = (
+        "<div class='xc'><div class='top'>"
+        f"{avatar}<div class='id'>"
+        # sub は handle_txt(エスケープ済)＋date(安全)の連結なので再エスケープしない。
+        f"<div class='nm'>{nm}{bv}</div><div class='hd'>{sub}</div></div></div>"
+        f"<div class='bd'>{_esc(p.text)}</div>{media}{eng_html}</div>"
+    )
+    # 枠外ストリップ: 検証チップ＋属性メモ＋元投稿リンク。
     badge = (
         "<span class='badge ok'>✅ 実在検証済み</span>"
         if p.verified
@@ -69,18 +191,8 @@ def _card(p: XPostCard) -> str:
     )
     note = f"<span class='note'>{_esc(p.author_note)}</span>" if p.author_note else ""
     href = safe_href(p.url)
-    link = (
-        f"<a href='{_esc(href)}'>{_esc(p.url)}</a>"
-        if href
-        else f"<span class='rawurl'>{_esc(p.url)}</span>"
-    )
-    return (
-        "<div class='card'><div class='head'>"
-        f"<span class='handle'>@{_esc(p.author_handle or '不明')}{note}</span>"
-        f"<span class='likes'>❤️ {p.like_count:,}</span></div>"
-        f"<div class='text'>{_esc(p.text)}</div>"
-        f"<div class='foot'>{link}{badge}</div></div>"
-    )
+    link = f"<a href='{_esc(href)}'>元投稿→</a>" if href else ""
+    return card + f"<div class='xstrip'>{badge}{note}{link}</div>"
 
 
 def render_voice_cards(

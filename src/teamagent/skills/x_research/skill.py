@@ -214,6 +214,7 @@ class _XSyncBase:
         warnings: list[str],
     ) -> tuple[list[XPostCard], float]:
         """厳選分だけ xtracto 実在検証し、カード化する（縮退時は全件 要再確認）。"""
+        t0 = time.monotonic()
         cost = 0.0
         verified_map: dict[str, XPost | None] = {}
         if remaining_s < 20:
@@ -237,17 +238,79 @@ class _XSyncBase:
                 XPostCard(
                     post_id=p.post_id,
                     url=p.url,
-                    author_handle=p.author_handle,
+                    # handle は検索側優先・空なら検証側で補完（どちらか取れれば「不明」を回避）。
+                    author_handle=(p.author_handle or (v.author_handle if v is not None else "")),
+                    # 表示名: 検証側優先で補完（handle 空でも実名でカードを埋められる）。
+                    author_name=(
+                        v.author_name if v is not None and v.author_name else p.author_name
+                    ),
                     author_note=author_notes.get(p.post_id, ""),
                     text=(v.text if v is not None and v.text else p.text),
                     like_count=(v.like_count if v is not None and v.like_count else p.like_count),
                     retweet_count=p.retweet_count,
+                    reply_count=p.reply_count,
+                    quote_count=(
+                        v.quote_count if v is not None and v.quote_count else p.quote_count
+                    ),
+                    view_count=(v.view_count if v is not None and v.view_count else p.view_count),
+                    is_verified=bool((v.is_verified if v is not None else False) or p.is_verified),
                     created_at=p.created_at,
                     verified=v is not None,
                     verify_note="" if v is not None else "要再確認: 再取得できませんでした",
                 )
             )
+        # 投稿再現カード用に avatar/添付画像を base64 内包（実残時間に余裕がある時のみ・graceful）。
+        # 総デッドライン = 残時間から検証経過と余白5sを引いた値。画像fetchはこの秒数で打ち切る。
+        img_budget = remaining_s - (time.monotonic() - t0) - 5
+        if img_budget >= 8:
+            self._embed_card_images(cards, selected, request_id=request_id, deadline_s=img_budget)
         return cards, cost
+
+    # 1リクエストで内包する画像URLの総数上限（レイテンシ/コスト有界化・許可CDNのみfetch）。
+    _MAX_EMBED_URLS: ClassVar[int] = 48
+
+    @classmethod
+    def _embed_card_images(
+        cls,
+        cards: list[XPostCard],
+        sources: list[XPost],
+        *,
+        request_id: str,
+        deadline_s: float,
+    ) -> None:
+        """カードの avatar/media を検索側 XPost のURLから DL→data URI 化（best-effort・締切付き）。
+
+        全URLを1バッチで並列取得し deadline_s で打ち切ってカードへ書き戻す（未取得は空＝
+        フォールバック描画）。総URL数は _MAX_EMBED_URLS で上限（超過分は素通し＝空）。
+        """
+        from teamagent.skills._shared.image_embed import fetch_data_uris
+
+        flat: list[str] = []
+        spans: list[tuple[int, int, int]] = []  # (avatar_idx or -1, media_start, media_end)
+        for src in sources:
+            a_idx = -1
+            if src.author_avatar_url and len(flat) < cls._MAX_EMBED_URLS:
+                a_idx = len(flat)
+                flat.append(src.author_avatar_url)
+            m_start = len(flat)
+            for m in src.media_urls:
+                if len(flat) >= cls._MAX_EMBED_URLS:
+                    break
+                flat.append(m)
+            spans.append((a_idx, m_start, len(flat)))
+        if not flat:
+            return
+        try:
+            uris = fetch_data_uris(
+                flat, request_id=request_id, max_workers=8, deadline_s=deadline_s
+            )
+        except Exception:
+            logger.warning("x_card_image_embed_failed", request_id=request_id)
+            return
+        for card, (a_idx, m_start, m_end) in zip(cards, spans, strict=True):
+            if a_idx >= 0 and uris[a_idx]:
+                card.avatar_data = uris[a_idx]
+            card.media_data = [u for u in uris[m_start:m_end] if u]
 
 
 @register
