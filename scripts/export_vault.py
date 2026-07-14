@@ -7,8 +7,9 @@ Obsidian で開ける Vault ミラーをローカルに生成する:
   frontmatter: client / industry / 最新 deal_phase / bant_score / fb_count / doc_count
   本文: FB 時系列（新しい順）+ 関連資料リスト（[[docs/...]] wikilink + Drive URL）
 - ``docs/<安全なファイル名>.md`` … 資料 note
-  frontmatter: doc_type / client / industry / solution / modified_at
-  本文: excerpt + 出典（Drive/Slack）リンク + タグ（#提案書 #出光興産 等）
+  frontmatter: doc_type / client / industry / solution / entities / modified_at
+  （entities=cls_entities の名寄せタグ CSV。/app の「関係先/」タグ・検索へ展開される）
+  本文: excerpt + 出典（Drive/Slack）リンク + タグ（#提案書 #出光興産 #祇園辻利 等）
   + [[clients/<client>]] wikilink
 - ``CLAUDE.md`` … Vault 使用ルール（読み取りミラー・正は pgvector・検索は connect-web）
 
@@ -239,12 +240,18 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
         f"client: {yaml_quote(client)}",
         f"industry: {yaml_quote(doc.get('cls_industry') or '')}",
         f"solution: {yaml_quote(doc.get('cls_solution') or '')}",
+        # 名寄せタグ（cls_entities）: この資料に登場する取引先/代理店/ブランド/コラボ相手を
+        # CSV で保持（build_app_html が front() で拾い、/app の「関係先/」タグ・検索に展開する）。
+        # 値は entity_extract 側で正規化済み＝カンマ非包含なので CSV が壊れない。
+        f"entities: {yaml_quote(doc.get('cls_entities') or '')}",
         f"modified_at: {yaml_quote(doc.get('modified_at') or '')}",
         "---",
         "",
         f"# {str(doc.get('title') or '(無題)').replace(chr(10), ' ')}",
         "",
     ]
+    # 名寄せタグ: 登場する取引先/ブランド名も Obsidian タグとして出す（グラフ/タグ検索用）。
+    entity_tags = [tag_token(e) for e in str(doc.get("cls_entities") or "").split(",") if e.strip()]
     tags = [
         t
         for t in (
@@ -252,6 +259,7 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
             tag_token(client),
             tag_token(doc.get("cls_industry")),
             tag_token(doc.get("cls_solution")),
+            *entity_tags,
         )
         if t
     ]
@@ -387,6 +395,7 @@ _DOCUMENTS_SQL_TEMPLATE = """
         d.metadata->>'cls_project' AS cls_project,
         d.metadata->>'cls_doc_type' AS cls_doc_type,
         d.metadata->>'cls_solution' AS cls_solution,
+        d.metadata->>'cls_entities' AS cls_entities,
         d.metadata->>'client_name' AS client_name,
         ex.excerpt AS excerpt
     FROM documents d
