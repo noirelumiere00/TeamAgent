@@ -147,12 +147,14 @@ def _as_dict(v: Any) -> dict[str, Any]:
 
 def _parse_x_item(d: dict[str, Any], source_actor: str) -> XPost | None:
     """X系actorの1件を寛容にパースする（不明形式は None＝呼び側でスキップ）。"""
-    author_raw = d.get("author") or d.get("user") or {}
+    # author ネスト: scraper_one/apidojo=author, 一部=user, data-slayer=user_info。
+    author_raw = d.get("author") or d.get("user") or d.get("user_info") or {}
     if not isinstance(author_raw, dict):
         author_raw = {}
     handle = str(
         _first(author_raw, "userName", "username", "screen_name", "screenName")
-        or _first(d, "authorUsername", "username", "screenName", "userName")
+        # top-level 候補: data-slayer は snake `screen_name` を top-level にも返す。
+        or _first(d, "authorUsername", "username", "screenName", "screen_name", "userName")
     ).lstrip("@")
     post_id = str(_first(d, "id", "id_str", "tweet_id", "tweetId", "postId"))
     url = str(_first(d, "url", "twitterUrl", "tweetUrl", "postUrl", "link"))
@@ -161,7 +163,9 @@ def _parse_x_item(d: dict[str, Any], source_actor: str) -> XPost | None:
     if not post_id and url:
         m = re.search(r"/status(?:es)?/(\d+)", url)
         post_id = m.group(1) if m else ""
-    text = str(_first(d, "text", "fullText", "full_text", "content", "tweet"))
+    # 本文キー: scraper_one(第一候補actor)は `postText`。これが候補に無いと第一候補の
+    # 全件が text="" → None ドロップ → 毎回 data-slayer へ縮退＋二重課金していた（根因A）。
+    text = str(_first(d, "text", "fullText", "full_text", "postText", "content", "tweet"))
     if not (post_id or url) or not text:
         return None
     return XPost(
@@ -178,11 +182,15 @@ def _parse_x_item(d: dict[str, Any], source_actor: str) -> XPost | None:
                 "favoriteCount",
                 "favorite_count",
                 "favourite_count",
+                "favorites",  # data-slayer の実キー（これが無いといいね常に0＝根因D）
                 "likes",
                 default=0,
             )
         ),
-        retweet_count=_as_int(_first(d, "retweetCount", "retweets", "retweet_count", default=0)),
+        # RT キー: scraper_one は `repostCount`（第一候補復旧時に顕在化）。
+        retweet_count=_as_int(
+            _first(d, "retweetCount", "repostCount", "retweets", "retweet_count", default=0)
+        ),
         reply_count=_as_int(_first(d, "replyCount", "replies", "reply_count", default=0)),
         created_at=str(_first(d, "createdAt", "created_at", "date", "timestamp")),
         lang=str(d.get("lang") or ""),
@@ -550,9 +558,12 @@ class ApifyClient:
 
         戻り値: (正規化済み投稿, 概算コストUSD)。
         """
+        # data-slayer は maxItems を無視し maxPages（1ページ ~20件）で件数を決めるため、
+        # maxPages も渡して要求件数を反映する（maxItems は他 actor 互換のため残置・無害）。
+        _fb_pages = max(1, (count + 19) // 20)
         chain: list[tuple[str, dict[str, Any]]] = [
             (ACTOR_X_SEARCH, {"query": query, "resultsCount": count, "searchType": search_type}),
-            (ACTOR_X_SEARCH_FALLBACK, {"query": query, "maxItems": count}),
+            (ACTOR_X_SEARCH_FALLBACK, {"query": query, "maxItems": count, "maxPages": _fb_pages}),
         ]
         total_cost = 0.0
         last_err: ApifyError | None = None

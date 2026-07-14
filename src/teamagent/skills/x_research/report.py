@@ -74,9 +74,18 @@ def _card(p: XPostCard) -> str:
         if href
         else f"<span class='rawurl'>{_esc(p.url)}</span>"
     )
+    # 投稿者表示: handle があれば @handle（表示名があれば前置）、handle 空でも表示名で埋める。
+    # どちらも無いときだけ「投稿者不明」（旧: 常に @不明 だった＝根因の表面症状）。
+    if p.author_handle:
+        name_prefix = f"<b>{_esc(p.author_name)}</b> " if p.author_name else ""
+        who = f"{name_prefix}@{_esc(p.author_handle)}"
+    elif p.author_name:
+        who = f"<b>{_esc(p.author_name)}</b>"
+    else:
+        who = "投稿者不明"
     return (
         "<div class='card'><div class='head'>"
-        f"<span class='handle'>@{_esc(p.author_handle or '不明')}{note}</span>"
+        f"<span class='handle'>{who}{note}</span>"
         f"<span class='likes'>❤️ {p.like_count:,}</span></div>"
         f"<div class='text'>{_esc(p.text)}</div>"
         f"<div class='foot'>{link}{badge}</div></div>"

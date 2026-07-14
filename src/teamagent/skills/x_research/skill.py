@@ -237,7 +237,12 @@ class _XSyncBase:
                 XPostCard(
                     post_id=p.post_id,
                     url=p.url,
-                    author_handle=p.author_handle,
+                    # handle は検索側優先・空なら検証側で補完（どちらか取れれば「不明」を回避）。
+                    author_handle=(p.author_handle or (v.author_handle if v is not None else "")),
+                    # 表示名: 検証側優先で補完（handle 空でも実名でカードを埋められる）。
+                    author_name=(
+                        v.author_name if v is not None and v.author_name else p.author_name
+                    ),
                     author_note=author_notes.get(p.post_id, ""),
                     text=(v.text if v is not None and v.text else p.text),
                     like_count=(v.like_count if v is not None and v.like_count else p.like_count),

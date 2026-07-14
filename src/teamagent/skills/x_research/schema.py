@@ -20,6 +20,9 @@ class XPostCard(BaseModel):
     post_id: str
     url: str
     author_handle: str = ""
+    author_name: str = Field(
+        default="", description="表示名（handle 空時のフォールバック表示に使う）"
+    )
     author_note: str = Field(default="", description="属性メモ（美容系/一般 等・LLM推定）")
     text: str
     like_count: int = 0

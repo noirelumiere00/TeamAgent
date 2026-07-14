@@ -317,6 +317,57 @@ def test_parse_tolerates_alternate_field_names() -> None:
     assert posts[0].url == "https://x.com/alt_user/status/333"
 
 
+def test_parse_scraper_one_real_keys_not_dropped() -> None:
+    """第一候補 scraper_one の実キー（postText/screenName/favouriteCount/repostCount/postUrl）を
+    取り落とさない＝全件 None ドロップ→毎回フォールバック の根因A回帰を防ぐ。"""
+    fake = _FakeApify()
+    fake.items_by_actor[ACTOR_X_SEARCH] = [
+        {
+            "postId": "555",
+            "postUrl": "https://x.com/coffee_lover/status/555",
+            "postText": "このコーヒー濃厚で最高",
+            "favouriteCount": 128,
+            "repostCount": 9,
+            "replyCount": 3,
+            "timestamp": 1750000000000,
+            "author": {"screenName": "coffee_lover", "name": "コーヒー好き"},
+        }
+    ]
+    posts, _ = fake.client().search_posts("コーヒー", count=5, request_id="t")
+    assert len(posts) == 1  # postText を拾えず None ドロップ、ではない
+    p = posts[0]
+    assert p.author_handle == "coffee_lover"  # 「不明」にならない
+    assert p.author_name == "コーヒー好き"
+    assert p.text == "このコーヒー濃厚で最高"
+    assert p.like_count == 128
+    assert p.retweet_count == 9
+    assert p.source_actor == ACTOR_X_SEARCH  # 第一候補で完結（フォールバックへ落ちない）
+
+
+def test_parse_data_slayer_real_keys() -> None:
+    """フォールバック data-slayer の実キー（top-level screen_name / favorites / user_info）で
+    handle・いいねが空/0にならない＝author不明＋いいね0＋URL合成不発（根因B/C/D）を防ぐ。"""
+    fake = _FakeApify()
+    fake.items_by_actor[ACTOR_X_SEARCH] = []  # 第一候補は0件でフォールバックへ
+    fake.items_by_actor[ACTOR_X_SEARCH_FALLBACK] = [
+        {
+            "tweet_id": "666",
+            "text": "抹茶ミルク濃くて好き",
+            "favorites": 42,
+            "retweets": 4,
+            "screen_name": "matcha_fan",
+            "user_info": {"name": "抹茶ファン", "screen_name": "matcha_fan"},
+            "created_at": "2026-07-10",
+        }
+    ]
+    posts, _ = fake.client().search_posts("抹茶", count=5, request_id="t")
+    assert len(posts) == 1
+    p = posts[0]
+    assert p.author_handle == "matcha_fan"  # top-level snake screen_name を拾う
+    assert p.like_count == 42  # favorites を拾う
+    assert p.url == "https://x.com/matcha_fan/status/666"  # handle+tweet_id からURL合成＝検証可能に
+
+
 def test_token_sent_via_header_not_url() -> None:
     # トークンはURLクエリに載せない（httpx例外メッセージ経由の漏えい防止）。
     fake = _FakeApify()
