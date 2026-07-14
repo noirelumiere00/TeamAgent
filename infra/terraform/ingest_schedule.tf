@@ -193,6 +193,9 @@ resource "aws_ecs_task_definition" "ingest" {
       # §知識ベース（2026-06-22）: Drive 取り込み時に Bedrock で資料を自動分類
       # （案件/業界/種別/フェーズ→documents.metadata）。ingest_task は bedrock:InvokeModel 保持済。
       { name = "USE_DOC_CLASSIFY", value = "true" },
+      # v0.3.1 名寄せ: 分類時に取引先/代理店/ブランド/コラボ名を Haiku 抽出し cls_entities に保持
+      # （親クライアント検索で子コラボが出る・既定 false）。既存分は backfill_entities.py で別途。
+      { name = "USE_ENTITY_TAGS", value = var.use_entity_tags ? "true" : "false" },
       # コスト方針(2026-06-29)=Haiku。未設定だとコード既定に落ちる（2026-07-13 実測: 週次分類が
       # Sonnet で 573回/週 走って月次課金の主因だった。CloudTrail で確定）。mcp と同一変数で管理。
       { name = "BEDROCK_MODEL_ID", value = var.mcp_model_id },
