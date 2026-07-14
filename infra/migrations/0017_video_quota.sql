@@ -10,8 +10,9 @@
 -- SELECT 不可（admin 専用設計）＝クォータ判定に使えない。本テーブルは
 -- 「本人行のみ SELECT/INSERT/UPDATE 可」の RLS で原子的 upsert を行う。
 --
--- ⚠️ 適用前に本番 RDS の 0016×2本（slack_oauth_tokens / chunks_embedding_cohere）の
---    適用状態を確認すること（採番重複の既知事故ポイント・監査指摘）。
+-- ℹ️ 採番重複（0016×2本）は解消済み: slack_oauth_tokens を 0018 へ改番（PR#202）。
+--    現在 0016 は chunks_embedding_cohere のみ。デプロイ時は本番 schema_migrations の
+--    '0016'=chunks を一応確認（本番=search-filters系＝chunks 適用済の前提）。
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS video_usage (
