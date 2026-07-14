@@ -318,6 +318,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #    （フロントは include_answer=True の並行フェッチで従来文言を得る）。
         if input.include_answer:
             answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
+            # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
+            # openclaw が markdown [label](url) を Slack 装飾リンクへ変換（fast path は付けない）。
+            answer += self._source_links_block(hits)
         else:
             answer, cost_usd = "", 0.0
 
@@ -1090,3 +1093,44 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 return f"{file_name} (p.{page_num})"
             return str(file_name)
         return None
+
+    @staticmethod
+    def _doc_url(meta: dict[str, Any]) -> str | None:
+        """SearchHit の metadata から資料の開けるURL（Drive view 等）を1本組み立てる。
+
+        drive_url / source_uri を http はそのまま、`gdrive://FILE_ID` は Drive view URL へ整形。
+        Slack 出典（slack://）等の非http URIはリンク化しない（None）。
+        """
+        for v in (meta.get("drive_url"), meta.get("source_uri")):
+            if not v:
+                continue
+            s = str(v).strip()
+            if s.startswith(("http://", "https://")):
+                return s
+            if s.startswith("gdrive://"):
+                fid = s[len("gdrive://") :].split("/")[0].split("?")[0]
+                if fid:
+                    return f"https://drive.google.com/file/d/{fid}/view"
+        return None
+
+    @classmethod
+    def _source_links_block(cls, hits: list[SearchHit]) -> str:
+        """回答末尾に付ける『📎 資料リンク』の markdown ブロック（重複資料は畳む・最大6件）。"""
+        seen: set[str] = set()
+        lines: list[str] = []
+        for h in hits:
+            meta = h.metadata or {}
+            url = cls._doc_url(meta)
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            raw = str(meta.get("title") or meta.get("file_name") or "資料")
+            # markdown リンクを壊す文字（[]()と改行）を除去。
+            title = re.sub(r"[\[\]()\n\r]+", " ", raw).strip() or "資料"
+            tag = "（関連資料）" if meta.get("is_related_drive") else ""
+            lines.append(f"- [{title}]({url}){tag}")
+            if len(lines) >= 6:
+                break
+        if not lines:
+            return ""
+        return "\n\n📎 *資料リンク*\n" + "\n".join(lines)
