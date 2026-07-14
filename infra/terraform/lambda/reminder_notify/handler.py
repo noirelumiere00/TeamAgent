@@ -3,15 +3,16 @@
 EventBridge Scheduler が「予定開始 N 分前」に SQS へ投げた payload を受け、
 本人の Slack DM へ chat.postMessage する。stdlib + boto3 のみ（依存パッケージ無し）。
 
-payload（PII なし・adapters/scheduler_client.py が唯一の生成元）:
-  {"v": 1, "channel": "D…", "start_hm": "14:00", "url": "https://…"}
+payload（adapters/scheduler_client.py が唯一の生成元）:
+  {"v": 1, "channel": "D…", "start_hm": "14:00", "url": "https://…", "title": "定例MTG"}
 
 設計:
   - batch_size=1（部分失敗の複雑さを持たない）。失敗は raise → SQS リトライ → DLQ
     （DLQ 滞留は CloudWatch Alarm → ops SNS へ・v0.3 §2.5）
   - Slack bot token は Secrets Manager から cold start 時に1回取得
     （env SLACK_BOT_TOKEN 直指定はローカルテスト用）
-  - 通知文に予定タイトルは含めない（G3: SQS/Lambda/CloudWatch に PII を流さない設計）
+  - title（≤60字・本人の予定を本人 DM に出す用途）は DM 本文に載せるが、
+    **CloudWatch には出さない**（print は件数のみ・PII をログに残さない）。2026-07-14 改訂。
 """
 
 from __future__ import annotations
@@ -71,14 +72,16 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             continue
         start_hm = str(body.get("start_hm") or "")
         url = str(body.get("url") or "")
-        text = (
-            f"🔔 まもなく予定があります（{start_hm}〜）"
-            if start_hm
-            else "🔔 まもなく予定があります"
-        )
+        # title は本人の予定（本人 DM 表示用）。60字で切り、山括弧はエスケープしてリンク偽装を防ぐ。
+        title = str(body.get("title") or "").replace("<", "＜").replace(">", "＞")[:60]
+        when = f"（{start_hm}〜）" if start_hm else ""
+        if title:
+            text = f"🔔 まもなく「{title}」があります{when}"
+        else:
+            text = f"🔔 まもなく予定があります{when}"
         if url:
             text += f"\n<{url}|開く>"
         _post_message(channel, text)
-        # channel は D で始まる DM id のみ（PII でない）。件数ログだけ出す。
-        print(json.dumps({"event": "reminder_sent"}))
+        # ⚠️ title（PII）はログに出さない。channel は D で始まる DM id のみ。件数だけ記録。
+        print(json.dumps({"event": "reminder_sent", "had_title": bool(title)}))
     return {"ok": True, "count": len(records)}

@@ -204,3 +204,103 @@ def test_lambda_handler_skips_invalid_payload(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(h, "_post_message", lambda *a: called.append(a))
     out = h.handler({"Records": [{"body": json.dumps({"v": 1})}]}, None)  # channel 無し
     assert out["ok"] and called == []  # リトライしても直らない payload は skip（DLQ を汚さない）
+
+
+# ---- 予定タイトルの付与（2026-07-14・本人の予定を本人DMに出す用途） ----
+
+
+def test_schedule_reminder_includes_short_title() -> None:
+    fake = _FakeBoto()
+    ok = _client(fake).schedule_reminder(
+        channel="D123",
+        start_iso="2026-07-15T14:00:00+09:00",
+        fire_at=_dt.datetime(2026, 7, 15, 13, 55, tzinfo=_JST),
+        url="https://meet/x",
+        request_id="r1",
+        title="週次営業定例",
+    )
+    assert ok
+    payload = json.loads(fake.calls[0]["Target"]["Input"])
+    assert payload["title"] == "週次営業定例"
+
+
+def test_schedule_reminder_truncates_title_to_60() -> None:
+    fake = _FakeBoto()
+    _client(fake).schedule_reminder(
+        channel="D1",
+        start_iso="2026-07-15T14:00:00+09:00",
+        fire_at=_dt.datetime(2026, 7, 15, 13, 55, tzinfo=_JST),
+        url="u",
+        request_id="r",
+        title="あ" * 100 + "\n改行も潰す",
+    )
+    payload = json.loads(fake.calls[0]["Target"]["Input"])
+    assert len(payload["title"]) == 60 and "\n" not in payload["title"]
+
+
+def test_schedule_reminder_empty_title_omits_key() -> None:
+    fake = _FakeBoto()
+    _client(fake).schedule_reminder(
+        channel="D1",
+        start_iso="2026-07-15T14:00:00+09:00",
+        fire_at=_dt.datetime(2026, 7, 15, 13, 55, tzinfo=_JST),
+        url="u",
+        request_id="r",
+        title="",
+    )
+    payload = json.loads(fake.calls[0]["Target"]["Input"])
+    assert "title" not in payload  # 空タイトルはキーごと省略（従来 payload と等価）
+
+
+def test_lambda_handler_renders_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    h = _load_handler()
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    posted: list[tuple[str, str]] = []
+    logged: list[str] = []
+    monkeypatch.setattr(h, "_post_message", lambda c, t: posted.append((c, t)))
+    monkeypatch.setattr("builtins.print", lambda *a, **k: logged.append(" ".join(map(str, a))))
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {
+                        "v": 1,
+                        "channel": "D1",
+                        "start_hm": "14:00",
+                        "url": "https://m",
+                        "title": "定例MTG",
+                    }
+                )
+            }
+        ]
+    }
+    out = h.handler(event, None)
+    assert out["ok"]
+    assert posted == [("D1", "🔔 まもなく「定例MTG」があります（14:00〜）\n<https://m|開く>")]
+    # ⚠️ タイトル（PII）が CloudWatch ログに出ていないこと。
+    assert all("定例MTG" not in line for line in logged)
+
+
+def test_lambda_handler_title_link_injection_escaped(monkeypatch: pytest.MonkeyPatch) -> None:
+    h = _load_handler()
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    posted: list[tuple[str, str]] = []
+    monkeypatch.setattr(h, "_post_message", lambda c, t: posted.append((c, t)))
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {
+                        "v": 1,
+                        "channel": "D1",
+                        "start_hm": "",
+                        "url": "",
+                        "title": "<https://evil|x>",
+                    }
+                )
+            }
+        ]
+    }
+    h.handler(event, None)
+    # 山括弧はエスケープされ、リンク偽装にならない。
+    assert "<https://evil" not in posted[0][1]

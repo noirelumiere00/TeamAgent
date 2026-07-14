@@ -673,8 +673,8 @@ def _schedule_event_reminders(digest: Any, im_channel: str) -> int:
 
     - 対象: start_at が「今から lead+1 分より先」の予定のみ（過ぎた/直近すぎる予定は skip）
     - 終日予定（date のみ）は対象外
-    - payload に予定タイトルは載せない（PII を SQS/Lambda に流さない・G3。通知文は
-      「まもなく予定があります（HH:MM〜）＋リンク」で成立する）
+    - payload に short title（≤60字）を載せる（2026-07-14・本人の予定を本人 DM に出す用途に
+      限定。「何の予定か分からない」の解消・ユーザー要望）。Lambda はタイトルをログに出さない
     - schedule 名は channel×開始時刻から決定的＝再実行でも二重登録しない（Conflict→成功扱い）
     """
     from teamagent.adapters.scheduler_client import SchedulerClient
@@ -706,12 +706,15 @@ def _schedule_event_reminders(digest: Any, im_channel: str) -> int:
         if fire_at <= now + _dt.timedelta(minutes=1):
             continue  # もう間に合わない/過去の予定
         url = str(getattr(ev, "meeting_url", "") or "") or _CALENDAR_URL
+        # 本人の予定タイトル（本人 DM 表示用の display）。空なら通知は従来どおり無題で成立。
+        title = str(getattr(ev, "summary_display", "") or getattr(ev, "summary_scrubbed", "") or "")
         ok = scheduler.schedule_reminder(
             channel=im_channel,
             start_iso=start_iso,
             fire_at=fire_at,
             url=url,
             request_id=f"reminder-{uuid.uuid4().hex[:8]}",
+            title=title,
         )
         if ok:
             count += 1
