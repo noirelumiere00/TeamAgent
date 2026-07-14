@@ -144,6 +144,34 @@ def test_seikyusho_stem_excluded_without_sidecar_listing(
     assert stats["docs"] == 3
 
 
+def test_entity_frontmatter_becomes_ents_and_kankeisaki_tag(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """frontmatter entities（名寄せ CSV）が DATA.docs.ents と「関係先/」タグに載る。
+
+    親クライアント名（サンマルクカフェ）で子コラボ資料（祇園辻利プロモ）を /app の
+    タグ・検索から辿れるようにする配線の回帰テスト。
+    """
+    (vault / "docs" / "0115_祇園辻利プロモーション.md").write_text(
+        '---\ntitle: "0115_祇園辻利プロモーション"\nclient: "祇園辻利"\n'
+        'industry: "飲食"\ndoc_type: "提案書"\nsolution: "動画広告"\n'
+        'entities: "サンマルクカフェ,祇園辻利"\nmodified_at: "2026-06-18"\n---\n\n'
+        "> サンマルクカフェ×祇園辻利のコラボ企画\n\n[[clients/祇園辻利]]\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # DATA.docs に ents としてコラボ相手が載る（検索 hay/タグの元データ）
+    assert '"ents"' in html and "サンマルクカフェ" in html
+    # 関係先/ タグ系統が有効化されている（CATMETA/TAGORDER）
+    assert "関係先" in html
+    # self-filter は両辺 JS nrm() で比較（Py norm() 由来 cnorm との『・』差で自クライアント重複を出さない）
+    assert "if(nrm(e)!==nrm(d.client))t.push" in html
+    # エンティティ内の / はタグ階層を汚さないよう無害化してから「関係先/」に付ける
+    assert 'e.split(/[\\/／]/).join("・")' in html
+
+
 # ---------------- fail-loud ----------------
 
 
@@ -1118,7 +1146,7 @@ def test_ux4_tag_pane_enhancements(ux_html: str) -> None:
     """機能4: 意味順+見出し・系統色・ペイン内絞り込み・件数/五十音トグル・12超畳み・active。"""
     html = ux_html
     assert (
-        'const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","施策","媒体","動画形式","形式","横断","更新","情報源"]'
+        'const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","施策","関係先","媒体","動画形式","形式","横断","更新","情報源"]'
         in html
     )
     assert "取引先のタグ" in html and "資料のタグ" in html

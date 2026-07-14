@@ -1011,12 +1011,12 @@ function ageSev(n){return n==null?"":n<=31?"ok":n<=92?"warn":"err";}
 function agoLabel(n){return n==null?"":n<=0?"今日":n+"日前";}
 function agoCoarse(ds){const n=daysAgo(ds);if(n==null)return"";if(n<=0)return"今日";if(n<7)return"約"+n+"日前";if(n<31)return"約"+Math.round(n/7)+"週前";if(n<365)return"約"+Math.round(n/30)+"ヶ月前";return"約"+Math.round(n/365)+"年前";}
 function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);t.push("最終接点/"+(ageBucket(c.last)||"記録なし"));if(c.temp)t.push("温度感/"+c.temp);if(c.hw)t.push("宿題/あり");(c.tans||[]).forEach(n=>t.push("担当/"+n));return t;}
-function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);(d.media||[]).forEach(m=>t.push("媒体/"+m));(d.vfmt||[]).forEach(v=>t.push("動画形式/"+v));if(d.fmt)t.push("形式/"+d.fmt);if(d.xc)t.push("横断/"+d.xc);return t;}
+function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);(d.media||[]).forEach(m=>t.push("媒体/"+m));(d.vfmt||[]).forEach(v=>t.push("動画形式/"+v));if(d.fmt)t.push("形式/"+d.fmt);if(d.xc)t.push("横断/"+d.xc);(d.ents||[]).forEach(e=>{if(nrm(e)!==nrm(d.client))t.push("関係先/"+e.split(/[\/／]/).join("・"));});return t;}
 const IDX=[];
 DATA.clients.forEach(c=>IDX.push({kind:"client",stem:c.stem,name:c.name,folder:"clients",tags:clientTags(c),
  props:{"業界":c.industry,"フェーズ":c.phase,"BANT":c.bant,"最終接点":c.last||"—"},hay:(c.name+" "+c.industry+" "+c.phase+" "+c.bant+" "+(c.md||"")).toLowerCase(),ex:c.industry?("業種: "+c.industry):"",obj:c}));
 DATA.docs.forEach(d=>IDX.push({kind:"doc",stem:d.stem,name:d.title,folder:"docs",tags:docTags(d),
- props:{"種別":d.doc_type,"取引先":d.client,"業界":d.industry,"施策":d.solution,"更新":d.modified||"—","情報源":d.src||"—"},hay:(d.title+" "+d.client+" "+d.industry+" "+d.solution+" "+d.doc_type+" "+d.src+" "+d.ex).toLowerCase(),ex:d.ex,obj:d}));
+ props:{"種別":d.doc_type,"取引先":d.client,"業界":d.industry,"施策":d.solution,"更新":d.modified||"—","情報源":d.src||"—"},hay:(d.title+" "+d.client+" "+d.industry+" "+d.solution+" "+d.doc_type+" "+d.src+" "+d.ex+" "+(d.ents||[]).join(" ")).toLowerCase(),ex:d.ex,obj:d}));
 DATA.reports.forEach(r=>IDX.push({kind:"report",stem:r.stem,name:r.name,folder:"_reports",tags:[],props:{},hay:(r.name+" "+r.md).toLowerCase(),ex:"AI洗い出しレポート",obj:r}));
 // タグ集計(親も加算)
 const tagCount={};
@@ -1028,9 +1028,9 @@ Object.keys(tagCount).forEach(t=>{const p=t.split("/");if(p.length===1){tagTree[
 /* ===== タグUX基盤: 系統色辞書(CATMETA) + 統一チップ部品(chipHtml) + runQuery 集約 ===== */
 /* 色は既存パレット（PHASECOLOR/DTCOLOR/INDUSTRY_COLORS の hex）流用・中間明度。
    意味は常にラベルが担い、色は7pxドットのみ（色非依存原則・両テーマ共通） */
-const CATMETA={"宿題":"#e0685f","温度感":"#e07a5f","担当":"#d0a24c","フェーズ":"#4f9df5","BANT":"#c98bdb","業種":"#54b981","最終接点":"#5fc9c9","資料種別":"#8a7cf5","施策":"#e05f8f","媒体":"#7f9cf5","動画形式":"#b5c94a","形式":"#d0a24c","横断":"#e0b34c","更新":"#d0912f","情報源":"#8a8a8a"};
+const CATMETA={"宿題":"#e0685f","温度感":"#e07a5f","担当":"#d0a24c","フェーズ":"#4f9df5","BANT":"#c98bdb","業種":"#54b981","最終接点":"#5fc9c9","資料種別":"#8a7cf5","施策":"#e05f8f","関係先":"#c98b6a","媒体":"#7f9cf5","動画形式":"#b5c94a","形式":"#d0a24c","横断":"#e0b34c","更新":"#d0912f","情報源":"#8a8a8a"};
 /* タグペイン/ホームの意味順: 先頭7=取引先のタグ（行動を促す軸を先頭に）・残り=資料のタグ */
-const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","施策","媒体","動画形式","形式","横断","更新","情報源"];
+const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","施策","関係先","媒体","動画形式","形式","横断","更新","情報源"];
 function catColor(t){return CATMETA[(t||"").split("/")[0]]||"var(--accent)";}
 /* 空白入りタグ値は tag:"値" で発行（parseQuery の引用符対応を利用。空白なしは従来と同一文字列） */
 function tagQ(t){return /\s/.test(t)?'tag:"'+t+'"':"tag:"+t;}
@@ -2047,6 +2047,9 @@ def main(argv: list[str] | None = None) -> int:
             "media": media_tags(_dtitle + "\n" + ex),
             "vfmt": video_format_tags(_dtitle + "\n" + ex + "\n" + _dsol),
             "fmt": file_format_tag(f.stem), "xc": "",
+            # 名寄せタグ（cls_entities）: export_vault が frontmatter entities に CSV で載せる。
+            # /app の「関係先/」タグ・検索へ展開（親クライアント名で子コラボ資料を出す）。
+            "ents": [e.strip() for e in fm.get("entities", "").split(",") if e.strip()],
             "ex": ex, "md": doc_md(t), "_wl": parse_links(body_of(t)),
         })
 

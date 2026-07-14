@@ -166,6 +166,30 @@ def test_render_doc_note_has_frontmatter_tags_and_client_link() -> None:
     assert "[[clients/出光興産]]" in note
     assert "https://drive.google.com/file/d/F1/view" in note
     assert "抜粋テキスト" in note
+    # 名寄せタグ未設定でも entities フィールド自体は必ず出す（build_app_html の front() が拾える）
+    assert 'entities: ""' in note
+
+
+def test_render_doc_note_emits_entities_field_and_tags() -> None:
+    # cls_entities（正規化済み CSV）は entities frontmatter とインラインタグ両方に出す。
+    note = render_doc_note(
+        _doc("0115_祇園辻利プロモーション", cls_entities="サンマルクカフェ,祇園辻利"),
+        "祇園辻利",
+        "clients/祇園辻利",
+    )
+    assert 'entities: "サンマルクカフェ,祇園辻利"' in note
+    assert "#サンマルクカフェ" in note and "#祇園辻利" in note
+
+
+def test_render_doc_note_ignores_blank_entity_segments() -> None:
+    # 空セグメント（",,"や前後空白）はタグ化しない（#空タグを出さない）。
+    note = render_doc_note(
+        _doc("t", cls_entities=" , サンマルクカフェ ,"),
+        "祇園辻利",
+        "clients/祇園辻利",
+    )
+    assert "#サンマルクカフェ" in note
+    assert "# \n" not in note and "#\n" not in note
 
 
 def test_render_client_note_header_and_desc_timeline() -> None:
