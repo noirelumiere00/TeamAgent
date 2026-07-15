@@ -33,6 +33,77 @@ def _bucket_region(s3: Any, bucket: str) -> str:
         return os.environ.get("AWS_DEFAULT_REGION") or "ap-northeast-1"
 
 
+@dataclass(frozen=True)
+class PublishedObject:
+    """発行結果: presigned GET URL に加え bucket/key/region を返す（短縮URLトークン生成用）。"""
+
+    url: str
+    bucket: str
+    key: str
+    region: str = ""  # 発行時に解決したバケットリージョン（/r の presign 再生成で使う）
+
+
+def _put_and_presign(
+    body: bytes,
+    *,
+    content_type: str,
+    ext: str,
+    prefix: str | None,
+    request_id: str,
+    query: str,
+    bucket: str | None = None,
+) -> PublishedObject | None:
+    """body を非公開S3へ置き、PublishedObject(url, bucket, key) を返す。失敗で None。
+
+    publish_file / *_result 系の共通コア（put_object + presign を1か所に集約）。
+    """
+    if not body:
+        return None
+    try:
+        import boto3
+
+        bkt = bucket or os.environ.get("VSEO_REPORT_BUCKET") or _DEFAULT_BUCKET
+        key_prefix = prefix or os.environ.get("VSEO_REPORT_PREFIX") or _DEFAULT_PREFIX
+        key = f"{key_prefix}{uuid.uuid4().hex}{ext}"
+        sess = boto3.session.Session()
+        region = _bucket_region(sess.client("s3"), bkt)
+        s3 = sess.client("s3", region_name=region)
+        # ContentType を付けてブラウザでインライン表示/正しいDLにする（octet-stream を避ける）
+        s3.put_object(
+            Bucket=bkt,
+            Key=key,
+            Body=body,
+            ContentType=content_type,
+            CacheControl="private, max-age=604800",
+        )
+        url: str = s3.generate_presigned_url(
+            "get_object", Params={"Bucket": bkt, "Key": key}, ExpiresIn=_EXPIRES_S
+        )
+        # query（商材/テーマ/keyword＝機密でありうる）は CloudWatch に残さない。key は uuid で
+        # 商材名を含まないため bucket/key/region のみ記録する（有無だけ has_query で可観測化）。
+        logger.info(
+            "report_published",
+            request_id=request_id,
+            bucket=bkt,
+            key=key,
+            region=region,
+            has_query=bool(query),
+        )
+        return PublishedObject(url=url, bucket=bkt, key=key, region=region)
+    except Exception as e:
+        logger.warning("report_publish_failed", request_id=request_id, error=type(e).__name__)
+        return None
+
+
+def _read_file(path: str, *, request_id: str) -> bytes | None:
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception as e:
+        logger.warning("report_publish_read_failed", request_id=request_id, error=type(e).__name__)
+        return None
+
+
 def publish_file(
     path: str,
     *,
@@ -45,47 +116,40 @@ def publish_file(
     """任意のローカルファイルを非公開S3に置き、署名付きGET URL（7日）を返す。失敗で None。
 
     HTML/PPTX 等を content_type/ext/prefix の差し替えで共通配布する（§Q-HTML→PPTX で流用）。
+    戻り値は従来どおり URL 文字列（bucket/key も要る場合は publish_file_result を使う）。
     """
-    try:
-        import boto3
+    result = publish_file_result(
+        path,
+        content_type=content_type,
+        ext=ext,
+        prefix=prefix,
+        request_id=request_id,
+        query=query,
+    )
+    return result.url if result else None
 
-        with open(path, "rb") as f:
-            body = f.read()
-    except Exception as e:
-        logger.warning("report_publish_read_failed", request_id=request_id, error=type(e).__name__)
+
+def publish_file_result(
+    path: str,
+    *,
+    content_type: str,
+    ext: str,
+    prefix: str | None = None,
+    request_id: str = "vseo",
+    query: str = "",
+) -> PublishedObject | None:
+    """publish_file と同じS3発行を行い、url に加え bucket/key を返す（短縮URL化用の純加算）。"""
+    body = _read_file(path, request_id=request_id)
+    if body is None:
         return None
-    if not body:
-        return None
-    bucket = os.environ.get("VSEO_REPORT_BUCKET") or _DEFAULT_BUCKET
-    key_prefix = prefix or os.environ.get("VSEO_REPORT_PREFIX") or _DEFAULT_PREFIX
-    key = f"{key_prefix}{uuid.uuid4().hex}{ext}"
-    try:
-        sess = boto3.session.Session()
-        region = _bucket_region(sess.client("s3"), bucket)
-        s3 = sess.client("s3", region_name=region)
-        # ContentType を付けてブラウザでインライン表示/正しいDLにする（octet-stream を避ける）
-        s3.put_object(
-            Bucket=bucket,
-            Key=key,
-            Body=body,
-            ContentType=content_type,
-            CacheControl="private, max-age=604800",
-        )
-        url: str = s3.generate_presigned_url(
-            "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=_EXPIRES_S
-        )
-        logger.info(
-            "report_published",
-            request_id=request_id,
-            bucket=bucket,
-            key=key,
-            region=region,
-            query=query[:60],
-        )
-        return url
-    except Exception as e:
-        logger.warning("report_publish_failed", request_id=request_id, error=type(e).__name__)
-        return None
+    return _put_and_presign(
+        body,
+        content_type=content_type,
+        ext=ext,
+        prefix=prefix,
+        request_id=request_id,
+        query=query,
+    )
 
 
 def publish_text(
@@ -139,6 +203,46 @@ def publish_html_file(path: str, *, request_id: str = "vseo", query: str = "") -
         request_id=request_id,
         query=query,
     )
+
+
+def publish_html_file_result(
+    path: str, *, request_id: str = "vseo", query: str = ""
+) -> PublishedObject | None:
+    """HTMLファイルを非公開S3に置き、PublishedObject(url, bucket, key) を返す（短縮URL化用）。"""
+    return publish_file_result(
+        path,
+        content_type="text/html; charset=utf-8",
+        ext=".html",
+        request_id=request_id,
+        query=query,
+    )
+
+
+def presign_get(
+    bucket: str, key: str, *, expires_s: int = _EXPIRES_S, region: str | None = None
+) -> str | None:
+    """既存S3オブジェクトの presigned GET URL を都度生成する（connect-web /r 用）。失敗で None。
+
+    region を明示（既定は AWS_REGION）することで get_bucket_location 呼び出しを避け、
+    connect-web タスクロールに GetBucketLocation 権限を不要化する（最小権限）。
+    """
+    try:
+        import boto3
+
+        rgn = (
+            region
+            or os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or "ap-northeast-1"
+        )
+        s3 = boto3.session.Session().client("s3", region_name=rgn)
+        url: str = s3.generate_presigned_url(
+            "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=int(expires_s)
+        )
+        return url
+    except Exception as e:
+        logger.warning("report_presign_failed", error=type(e).__name__)
+        return None
 
 
 # §Q-HTML→PPTX: 提案用 PPTX の配布（別 prefix・PPTX MIME）。

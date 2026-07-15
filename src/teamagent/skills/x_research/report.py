@@ -59,7 +59,12 @@ h1{{font-size:20px;margin:0 0 4px}}
 .xc .md.n1{{grid-template-columns:1fr}}
 .xc .md.n2,.xc .md.n3,.xc .md.n4{{grid-template-columns:1fr 1fr}}
 .xc .md img{{width:100%;height:100%;object-fit:cover;display:block;max-height:280px}}
-.xc .eng{{display:flex;gap:22px;color:#536471;font-size:13px;margin-top:6px}}
+/* エンゲージ行: 本物のX投稿バー相当（グレーのアウトラインSVG＋数値）。 */
+.xc .eng{{display:flex;gap:26px;color:#536471;font-size:13px;margin-top:10px;
+  align-items:center;flex-wrap:wrap}}
+.xc .ei{{display:flex;align-items:center;gap:6px;color:#536471}}
+.xc .ei svg{{width:18.75px;height:18.75px;fill:#536471;flex:none;display:block}}
+.xc .ec{{font-size:13px;color:#536471;line-height:1;font-variant-numeric:tabular-nums}}
 .xstrip{{display:flex;align-items:center;gap:8px;font-size:11px;color:#536471;
   margin:-4px 0 12px 4px;flex-wrap:wrap}}
 .xstrip a{{color:#1d6fdc;text-decoration:none}}
@@ -117,6 +122,71 @@ def _fmt_date(raw: str) -> str:
         return ""
 
 
+def _fmt_count(n: int) -> str:
+    """X風の数値略記: 1万未満は3桁カンマ、1万以上は「◯◯万」、1億以上は「◯◯億」。
+
+    小数第1位まで（末尾0は整数）。丸めは**桁短縮の後**に行う（19990→"2万"、99999→"10万"、
+    12000→"1.2万"、5180000→"518万"、100000000→"1億"）。負値は0扱い。
+    """
+    try:
+        v = int(n)
+    except (TypeError, ValueError):
+        return "0"
+    if v < 0:
+        v = 0
+    if v < 10_000:
+        return f"{v:,}"
+    # 単位は「丸めた後の値」で決める。99,999,999 は万で 10000.0万 に丸まるので億へ桁上げする。
+    man = round(v / 10_000, 1)
+    if man < 10_000:
+        body = f"{int(man)}" if man == int(man) else f"{man:.1f}"
+        return f"{body}万"
+    oku = round(v / 100_000_000, 1)
+    body = f"{int(oku)}" if oku == int(oku) else f"{oku:.1f}"
+    return f"{body}億"
+
+
+# 本物のX投稿UIのエンゲージアイコン（viewBox 0 0 24 24・fill で描画）。
+# 返信/いいねは react-tweet(Vercel/MIT・本番同等)の検証済みpath、リポスト/ビューはX正規path。
+# いずれも中抜き(アウトライン)形状の単一pathで、グレー #536471 塗りで純正の見た目になる。
+_ICON_REPLY = (
+    "M1.751 10c0-4.42 3.584-8 8.005-8h4.366c4.49 0 8.129 3.64 8.129 8.13 0 2.96-1.607 "
+    "5.68-4.196 7.11l-8.054 4.46v-3.69h-.067c-4.49.1-8.183-3.51-8.183-8.01zm8.005-6c-3.317 "
+    "0-6.005 2.69-6.005 6 0 3.37 2.77 6.08 6.138 6.01l.351-.01h1.505v2.3l5.03-2.78c1.952-1.08 "
+    "3.162-3.13 3.162-5.36 0-3.39-2.75-6.13-6.129-6.13H9.756z"
+)
+_ICON_RETWEET = (
+    "M4.75 3.79l4.603 4.3-1.706 1.82L6 8.38v7.37c0 .97.784 1.75 1.75 1.75H13V20H7.75c-2.347 "
+    "0-4.25-1.9-4.25-4.25V8.38L1.853 9.91.147 8.09l4.603-4.3zm11.5 2.71H11V4.5h5.25c2.347 0 "
+    "4.25 1.9 4.25 4.25v7.37l1.647-1.53 1.706 1.82-4.603 4.3-4.603-4.3 1.706-1.82L18 "
+    "15.62V8.75c0-.97-.784-1.75-1.75-1.75z"
+)
+_ICON_LIKE = (
+    "M16.697 5.5c-1.222-.06-2.679.51-3.89 2.16l-.805 1.09-.806-1.09C9.984 6.01 8.526 "
+    "5.44 7.304 5.5c-1.243.07-2.349.78-2.91 1.91-.552 1.12-.633 2.78.479 4.82 1.074 1.97 "
+    "3.257 4.27 7.129 6.61 3.87-2.34 6.052-4.64 7.126-6.61 1.111-2.04 1.030-3.7.478-4.82-.56-"
+    "1.13-1.666-1.84-2.909-1.91zm4.187 7.69c-1.351 2.48-4.001 5.12-8.379 7.67l-.503.3-.504-.3c"
+    "-4.379-2.55-7.029-5.19-8.382-7.67-1.36-2.5-1.41-4.86-.514-6.67.887-1.79 2.647-2.91 4.601-"
+    "3.01 1.651-.09 3.368.56 4.798 2.01 1.429-1.45 3.146-2.1 4.796-2.01 1.954.1 3.714 1.22 "
+    "4.601 3.01.896 1.81.846 4.17-.514 6.67z"
+)
+_ICON_VIEWS = "M8.75 21V3h2v18h-2zM18 21V8.5h2V21h-2zM4 21l.004-10h2L6 21H4zm9.248 0v-7h2v7h-2z"
+
+
+def _eng_item(path: str, count: int, label: str) -> str:
+    """エンゲージ1項目（アイコン＋略記数値）。件数は _fmt_count で万表記。
+
+    SVG はグレーの装飾なので aria-hidden にし、項目全体に role=img＋aria-label（例「返信 395」）
+    を付けて読み上げでも種別が分かるようにする（数字だけの読み上げを避ける）。
+    """
+    n = _fmt_count(count)
+    return (
+        f"<span class='ei' role='img' aria-label='{_esc(label)} {n}'>"
+        f"<svg viewBox='0 0 24 24' aria-hidden='true'><path d='{path}'></path></svg>"
+        f"<span class='ec'>{n}</span></span>"
+    )
+
+
 def _monogram(name: str, handle: str) -> str:
     """アイコン未取得時のフォールバック丸（頭文字＋@ハッシュ由来の決定論色）。"""
     base = (name or handle or "?").strip()
@@ -139,7 +209,7 @@ def _page(title: str, sub: str, body: str, footer_note: str) -> str:
 def _card(p: XPostCard) -> str:
     """1投稿を『X投稿画面そっくり』の再現カード＋枠外の検証ストリップで描く。
 
-    フレーム内は純正の見た目だけ（アイコン/名前/青✔/@/日時/本文/画像/💬🔁❤️👁）。
+    フレーム内は純正の見た目だけ（アイコン/名前/青✔/@/日時/本文/画像/エンゲージSVG）。
     検証チップ・属性メモ・元投稿リンクは枠外(.xstrip)へ逃がしスクショ感を保つ。
     """
     # アイコン: 取得できていれば実画像、無ければモノグラム丸（@不明は出さない）。
@@ -167,15 +237,17 @@ def _card(p: XPostCard) -> str:
     if imgs:
         tiles = "".join(f"<img src='{_esc(m)}' alt=''>" for m in imgs)
         media = f"<div class='md n{len(imgs)}'>{tiles}</div>"
-    # エンゲージ行: いいねは常時、他は取得できた(>0)時のみ＝捏造しない。
-    eng = [f"❤️ {p.like_count:,}"]
-    if p.retweet_count:
-        eng.insert(0, f"🔁 {p.retweet_count:,}")
+    # エンゲージ行: 本物のXバー順（返信→リポスト→いいね→ビュー）。いいねは常時、
+    # 他は取得できた(>0)時のみ＝捏造しない（現行踏襲）。数値は _fmt_count で万表記。
+    items: list[str] = []
     if p.reply_count:
-        eng.insert(0, f"💬 {p.reply_count:,}")
+        items.append(_eng_item(_ICON_REPLY, p.reply_count, "返信"))
+    if p.retweet_count:
+        items.append(_eng_item(_ICON_RETWEET, p.retweet_count, "リポスト"))
+    items.append(_eng_item(_ICON_LIKE, p.like_count, "いいね"))
     if p.view_count:
-        eng.append(f"👁 {p.view_count:,}")
-    eng_html = "<div class='eng'>" + "".join(f"<span>{e}</span>" for e in eng) + "</div>"
+        items.append(_eng_item(_ICON_VIEWS, p.view_count, "表示"))
+    eng_html = "<div class='eng'>" + "".join(items) + "</div>"
     card = (
         "<div class='xc'><div class='top'>"
         f"{avatar}<div class='id'>"

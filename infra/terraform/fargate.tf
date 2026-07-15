@@ -379,6 +379,8 @@ resource "aws_ecs_task_definition" "mcp" {
       # 空 dict を返し web_url/app_url が一切載らない）。2026-07-10 の実機確認で live に
       # 無いことを確認済み＝この行が入って初めて Slack に検索 UI リンクが出る。
       { name = "CONNECT_BASE_URL", value = var.connect_base_url },
+      # レポート短縮リンク(/r)の段階ゲート。connect-web に /r+vseo-s3-read が揃うまで false=従来 presigned。
+      { name = "USE_REPORT_SHORTURL", value = var.enable_report_shorturl ? "1" : "0" },
       # §U: 5名運用の pgvector pool ウォームアップ。起動時に2接続確立し初回検索のレイテンシを下げる
       # （max=8 で5並行に余裕＝枯渇なし）。
       { name = "PGVECTOR_POOL_MIN", value = "2" },
@@ -518,6 +520,13 @@ resource "aws_ecs_task_definition" "mcp" {
     secrets = concat([
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
+      # レポート短縮リンク(/r)の署名鍵。connect-web(connect_web.tf) と同一値=database_url を共用し
+      # 発行(mcp/x_research skill)↔復号(connect-web /r)で鍵一致させる。新規 secret 不要
+      # (database_url の GetSecretValue は mcp exec role に付与済み)。
+      # ※短縮URLの実発行は env USE_REPORT_SHORTURL(既定OFF)で段階ゲート。connect-web に /r ルート
+      #   ＋vseo-s3-read(bootstrap_vseo_s3_iam.sh)が揃い実機で /r→302 を確認した後に ON にする。
+      #   本鍵/フラグ未設定でも skill は従来 presigned を返すため既存挙動は壊れない。
+      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       # §U ハイブリッド identity: mcp が slack_user_id → 会社メールを server-side 解決して
       # per-user OAuth(mail_*/morning_digest) の token を引くために必要（users:read.email scope）。
       # openclaw と同じ secret を共用。会社共有グループ(search)はこれ無しでも動く（graceful degrade）。

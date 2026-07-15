@@ -81,6 +81,12 @@ variable "use_ailavault_deeplinks" {
   default     = false
 }
 
+variable "enable_report_shorturl" {
+  description = "レポート短縮リンク(/r)を発行するか（Part2 段階ゲート＝env USE_REPORT_SHORTURL）。既定 false＝従来 presigned。ON の前提: connect-web が同一新イメージ(/r ルート)＋vseo-s3-read(bootstrap_vseo_s3_iam.sh)を持ち、実機で /r→302 を確認済みであること。揃う前に true にすると受信者側で 404/403 に劣化する。"
+  type        = bool
+  default     = false
+}
+
 variable "video_quota_enabled" {
   description = "動画分析の月間クォータ（v0.3 Task10）。既定 false。有効化前に migration 0017 の本番適用が必須（未適用だと fail-open で素通り・WARN のみ）。"
   type        = bool
