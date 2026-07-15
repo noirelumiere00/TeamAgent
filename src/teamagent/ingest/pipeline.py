@@ -27,6 +27,7 @@ import structlog
 from teamagent.identity import shared_company_domains_from_env
 from teamagent.ingest.boilerplate import mark_boilerplate
 from teamagent.ingest.docdedup import mark_duplicate_documents
+from teamagent.ingest.form_mappings import _normalize_form_label
 from teamagent.ingest.loader import (
     GDriveFolderSpec,
     GSheetSpec,
@@ -146,24 +147,33 @@ def _drain_changes(
 # 判定規則そのものは gdrive 取込と同一の正本 regex（DEFAULT_EXCLUDE_FOLDER_NAME_RE）を
 # _ingest_gsheet 内で lazy import して再利用する（sheet 側で独自ルールを持たない）。
 _KNOWLEDGE_FOLDER_HINT_COLUMNS: tuple[str, ...] = (
+    "保管先フォルダ",  # ファイル記録の実列。値は "01_提案" 等の NN_ 付き
     "旧_保管先フォルダ",
-    "保管先フォルダ",  # 将来列（現行 dump には無い）
-    "保存ファイル（リンク付き）",
+    "保存ファイル(リンク付き)",
     "資料の概要_メイン",
 )
 # 本文(embedding/抜粋)に載せない運用列。人間の知見を含まないのに長大で、先頭に来ると
 # export_vault の 160 字抜粋を食い潰し、ポイント/なぜ/フリーコメント が抜粋から落ちる。
+# ※ヘッダは _normalize_form_label を通してから照合する（実シートは「保存ファイル(リンク付き)」が
+#   半角括弧・フォーム回答タブは全角と揺れるため、生文字列一致だと黙って外れる）。
 _KNOWLEDGE_OPS_COLUMNS: frozenset[str] = frozenset(
     {
         "ファイルをアップ",  # Slack file URL（長大・知見ゼロ）
         "タイムスタンプ",
         "連番",
-        "保存ファイル（リンク付き）",
-        "処理エラー",
+        "枝番",
+        "保存ファイルリンク",
+        "保存ファイル（リンク付き）",  # _normalize_form_label で半角→全角に寄る
+        "保管先フォルダ",
         "旧_保管先フォルダ",
-        "保管先フォルダID記録（GAS処理)",
+        "処理日時",
+        "処理エラー",
+        "保管先フォルダID記録（GAS処理）",
         "ドライブ格納",
     }
+)
+_KNOWLEDGE_OPS_NORM: frozenset[str] = frozenset(
+    _normalize_form_label(h) for h in _KNOWLEDGE_OPS_COLUMNS
 )
 
 
@@ -1800,6 +1810,9 @@ def _ingest_gsheet(
             # _ingest_slack_channel と同品質・同キー)。row が headers より短い分は
             # 空値扱い (format_row_as_document と同じ) なので strict=False で zip する。
             row_fields = dict(zip(tab_rows.headers, row, strict=False))
+            # 運用列の照合はヘッダ表記ゆれ（半角/全角括弧）を吸収した正規化キーで行う。
+            # 実シートは「保存ファイル(リンク付き)」が半角・フォーム回答タブは全角で揺れる。
+            norm_fields = {_normalize_form_label(k): v for k, v in row_fields.items()}
             fb_metadata = map_fb_fields(row_fields)
             fb_doc_metadata: dict[str, Any] = {}
             if fb_metadata:
@@ -1830,16 +1843,17 @@ def _ingest_gsheet(
                 #     gdrive 取込と同一の DEFAULT_EXCLUDE_FOLDER_NAME_RE に一本化する（独自の
                 #     startswith("99") を持たない）。実 dump では該当 0 件＝将来行への保険。
                 if any(
-                    excl_folder_re.search(str(row_fields.get(k, "") or ""))
+                    excl_folder_re.search(str(norm_fields.get(_normalize_form_label(k), "") or ""))
                     for k in _KNOWLEDGE_FOLDER_HINT_COLUMNS
                 ):
                     continue
                 # (b) 本文から運用列を外す。Slack file URL 等が先頭にあると export_vault の
                 #     160 字抜粋を食い潰し、知見が書かれた ポイント/なぜ/フリーコメント が
                 #     抜粋＝/app のタグ源から落ちる（実測: 施策手法 6→1）。ナレッジ行のみ再構成。
-                _body = format_row_as_document(
-                    tab_rows.headers, row, exclude_headers=_KNOWLEDGE_OPS_COLUMNS
+                _ops = frozenset(
+                    h for h in tab_rows.headers if _normalize_form_label(h) in _KNOWLEDGE_OPS_NORM
                 )
+                _body = format_row_as_document(tab_rows.headers, row, exclude_headers=_ops)
                 if _body.strip():
                     text = _body
                 # (c) title は "row N" でなく「正式社名 案件名」に（連番の有無に依らず）。
@@ -1851,13 +1865,16 @@ def _ingest_gsheet(
                 _title_parts = [x for x in (_company, _case) if x]
                 if _title_parts:
                     row_title = " ".join(_title_parts)
-                # (d) 安定 external_id: ファイル記録タブの「連番」(例 20250617-001) を identity に
-                #     する。実 dump で 142/142 ユニーク・重複 0 かつ行位置に依存しないため、
-                #     並べ替え/行挿入で上書き先がズレない。**連番を持たないシート（フォーム回答
-                #     タブ等）は従来の行番号 ID のまま**＝取り込み済 document を孤児化しない
+                # (d) 安定 external_id: ファイル記録タブの「連番＋枝番」を identity にする。
+                #     **連番は 1 投稿に 1 つで、中のファイルを枝番で束ねる**（GAS 設計資料 §5）。
+                #     実 342 行の実測: 連番のみだと 230 ユニーク（97 値が重複・最大 5 件/連番）
+                #     ＝112 行が潰れる。連番+枝番なら 342/342 ユニーク・重複 0。行位置に依存しない
+                #     ので並べ替え/行挿入でも上書き先がズレない。**連番を持たないシート（フォーム
+                #     回答タブ等）は従来の行番号 ID のまま**＝取り込み済 document を孤児化しない
                 #     （gsheets に stale 検出が無く、ID を変えると旧 doc が永久残存するため）。
-                _seq = str(row_fields.get("連番", "") or "").strip()
-                if not _seq and "連番" in row_fields:
+                _seq = str(norm_fields.get("連番", "") or "").strip()
+                _branch = str(norm_fields.get("枝番", "") or "").strip()
+                if not _seq and "連番" in norm_fields:
                     # 連番列は在るのに値が空（GAS 未処理）。行番号 ID のままなので、後で連番が
                     # 埋まる/行が動くと旧 ID の doc が孤児化する。運用で気付けるよう警告する。
                     logger.warning(
@@ -1867,7 +1884,9 @@ def _ingest_gsheet(
                         row_idx=row_idx,
                     )
                 if _seq:
-                    external_id = build_stable_external_id(spec.sheet_id, tab.gid, _seq)
+                    # 枝番が空でも連番単独へフォールバックしない（同一連番の別ファイルと衝突する）。
+                    _identity = f"{_seq}#{_branch}" if _branch else f"{_seq}#row{row_idx}"
+                    external_id = build_stable_external_id(spec.sheet_id, tab.gid, _identity)
                     # identity 衝突は黙って上書きせず可観測化（1行=1doc の前提が壊れた合図）。
                     _prev = seen_row_ids.get(external_id)
                     if _prev is not None:
