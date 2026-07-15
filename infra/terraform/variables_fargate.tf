@@ -99,6 +99,12 @@ variable "use_analysis_cache" {
   default     = false
 }
 
+variable "enable_kaiwai_classify" {
+  description = "X投稿者の界隈マルチラベル分類（Part4・env USE_KAIWAI_CLASSIFY）。既定 false＝bio を LLM へ送らず・界隈を尋ねず・カードにチップも出さない（完全 no-op・後方互換）。分類は LLM 推定でありカードには「推定界隈」と明示表示する。ON の前提: 第一候補 actor(apidojo) の本番 bio 取得率と分類品質を実データで確認済みであること。"
+  type        = bool
+  default     = false
+}
+
 variable "use_payload_offload" {
   description = "MCP 長文ペイロードの S3 退避（v0.3 Task8）。既定 false。対象は会社共有ナレッジ系 tool のみ（allowlist・per-user PII 系は対象外）。"
   type        = bool

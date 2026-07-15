@@ -121,8 +121,9 @@ def test_voice_search_happy_path() -> None:
     assert len(apify.verify_calls) == 1  # 厳選分のみ検証
 
 
-def test_voice_search_assigns_kaiwai_circles() -> None:
-    """LLM が返す author_circles が投稿カードに界隈タグとして配線される（Part4）。"""
+def test_voice_search_assigns_kaiwai_circles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """USE_KAIWAI_CLASSIFY=1 で LLM の author_circles がカードに界隈タグとして配線される（Part4）。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
     posts = [_post("1", likes=31), _post("2", likes=64)]
     noise_json = json.dumps(
         {
@@ -142,8 +143,9 @@ def test_voice_search_assigns_kaiwai_circles() -> None:
     assert by_id["2"].author_circles == ["ガジェット界隈"]
 
 
-def test_voice_search_bundles_circles_per_author() -> None:
+def test_voice_search_bundles_circles_per_author(monkeypatch: pytest.MonkeyPatch) -> None:
     """同一著者(handle)の複数投稿は界隈を union して両方に付ける（タグをブレさせない）。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
     p1 = replace(
         _post("1", "コスメ購入品", 50), author_handle="uX", url="https://x.com/uX/status/1"
     )
@@ -180,12 +182,29 @@ def test_card_renders_kaiwai_chips() -> None:
         )
     )
     assert "class='kaiwai'" in h and "#美容界隈" in h and "#淡色界隈" in h
+    assert "推定界隈" in h  # 事実でなく推定と明示（断定表示にしない）
     h2 = _card(XPostCard(post_id="2", url="", author_handle="u", text="x"))
-    assert "class='kaiwai'" not in h2  # 界隈なしなら出さない（捏造しない）
+    assert "class='kaiwai'" not in h2 and "推定界隈" not in h2  # 界隈なしなら出さない（捏造しない）
 
 
-def test_voice_search_drops_nonstring_circle_elements() -> None:
+def test_voice_search_kaiwai_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """USE_KAIWAI_CLASSIFY 未設定（既定OFF）なら LLM が界隈を返してもカードには付かない（no-op）。"""
+    monkeypatch.delenv("USE_KAIWAI_CLASSIFY", raising=False)
+    noise_json = json.dumps(
+        {"keep": ["1"], "author_circles": {"1": ["美容界隈"]}, "noise_note": ""}
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([_post("1")]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    assert out.posts[0].author_circles == []  # OFF なら配線しない
+
+
+def test_voice_search_drops_nonstring_circle_elements(monkeypatch: pytest.MonkeyPatch) -> None:
     """LLMが非文字列(null/dict)や過長文字列を界隈配列に混ぜても、文字列のみ・24字上限で採用。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
     noise_json = json.dumps(
         {"keep": ["1"], "author_circles": {"1": ["美容界隈", None, {"x": 1}, "あ" * 50]}}
     )

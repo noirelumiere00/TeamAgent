@@ -485,6 +485,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_X_RESEARCH_TOOLS", value = "1" },
       { name = "USE_SEARCH_SURFACE_TOOL", value = "1" },
       { name = "USE_TIKTOK_COMMENT_TOOLS", value = "1" },
+      # Part4 X投稿者の界隈マルチラベル分類。既定 false=bio送信も分類も表示もしない（完全no-op）。
+      # 分類品質を実データ(apidojo の bio 取得率含む)で検証してから true にする。
+      { name = "USE_KAIWAI_CLASSIFY", value = var.enable_kaiwai_classify ? "1" : "0" },
       { name = "X_TASK_QUEUE", value = aws_sqs_queue.x_jobs[0].url },
       { name = "X_JOBS_TABLE", value = aws_dynamodb_table.x_jobs[0].name },
       { name = "X_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
