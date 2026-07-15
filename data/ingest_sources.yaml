@@ -67,61 +67,31 @@ gdrive_folders:
       priority: "high"
 
   # ============================================================
-  # ルールブック再編フォルダ（資料整理ルールブック_2026-07-03・2026-07-10 追加）
+  # ルールブック再編フォルダ（01〜08）について — 個別エントリは**意図的に書かない**
   # ============================================================
-  # ナレッジ/ ルート直下の 01〜06 を個別に取り込む。folder_id は Drive 側で
-  # フォルダ作成後に実 ID へ貼り替える（REPLACE_WITH_ のままなら loader が
-  # WARNING 付きで skip するので、未確定のまま先行コミットしても既存 ingest は壊れない）。
-  # ⚠️ 99_一次倉庫（検索対象外）は**エントリを書かない**。書くとルート検査
-  #    （gdrive_rulebook_root_folder_id 設定時の preflight）が exit 1 で止める。
-  #    フォルダ名除外（gdrive_exclude_folder_name_re）でも二重にブロックされる。
-  - folder_id: "REPLACE_WITH_KNOWLEDGE_01"
-    folder_name: "01_提案事例"
-    description: "ルールブック 01: 過去の提案書・企画書（種別語「提案」）"
-    include_subfolders: true
-    mime_type_filter: null
-    extra_metadata:
-      rulebook_category: "提案事例"
-
-  - folder_id: "REPLACE_WITH_KNOWLEDGE_02"
-    folder_name: "02_テンプレ・雛形"
-    description: "ルールブック 02: 提案書テンプレ・フォーマット雛形（種別語「テンプレ」）"
-    include_subfolders: true
-    mime_type_filter: null
-    extra_metadata:
-      rulebook_category: "テンプレ・雛形"
-
-  - folder_id: "REPLACE_WITH_KNOWLEDGE_03"
-    folder_name: "03_定期報告・実績データ"
-    description: "ルールブック 03: 定期報告書・実績データ（種別語「報告」）"
-    include_subfolders: true
-    mime_type_filter: null
-    extra_metadata:
-      rulebook_category: "定期報告・実績データ"
-
-  - folder_id: "REPLACE_WITH_KNOWLEDGE_04"
-    folder_name: "04_会社紹介・ケイパ資料"
-    description: "ルールブック 04: 会社紹介・ケイパビリティ資料"
-    include_subfolders: true
-    mime_type_filter: null
-    extra_metadata:
-      rulebook_category: "会社紹介・ケイパ資料"
-
-  - folder_id: "REPLACE_WITH_KNOWLEDGE_05"
-    folder_name: "05_議事録・商談メモ"
-    description: "ルールブック 05: 議事録・商談メモ（種別語「議事録」）"
-    include_subfolders: true
-    mime_type_filter: null
-    extra_metadata:
-      rulebook_category: "議事録・商談メモ"
-
-  - folder_id: "REPLACE_WITH_KNOWLEDGE_06"
-    folder_name: "06_価格・契約"
-    description: "ルールブック 06: 価格表・契約書（種別語「価格」「契約」）"
-    include_subfolders: true
-    mime_type_filter: null
-    extra_metadata:
-      rulebook_category: "価格・契約"
+  # 2026-07-15 に実 Drive / 実コードで計測し、「01〜06 を個別に取り込む」計画は
+  # 不要かつ有害と確定したためプレースホルダ 6 エントリを撤去した。根拠:
+  #
+  #  1. 増えない: 01〜08 は上の "ショート動画資料全般"(14Wfp6…) の直下にあり、
+  #     include_subfolders: true の再帰 walk が既にカバーしている（打ち切りは
+  #     DEFAULT_WALK_MAX_FILES=5000・観測は truncated_walk_roots ログ）。個別
+  #     エントリを足しても取り込み対象は増えない。
+  #  2. 二重カバーは有害: 同一 file は external_id=file.id で 1 行に UPSERT されるが、
+  #     ON CONFLICT DO UPDATE は metadata = EXCLUDED.metadata の **全置換**
+  #     (repository._upsert_document)。しかも spec.folder_name は classify の Haiku
+  #     プロンプト（格納フォルダ行）に入る **live な分類入力** なので、二重カバー時は
+  #     「yaml で後に書いた spec の分類が勝つ」last-write-wins になり、**並び順を
+  #     変えるだけで cls_doc_type / cls_project ＝ /app の 資料種別・業種 タグが
+  #     黙って変わる**。このブロックの順序を触るときは必ずこれを意識すること。
+  #  3. 価値が無い: extra_metadata(rulebook_category 等) は export_vault の SELECT が
+  #     キー allowlist（cls_* / knowledge_kind / client_type / proposed_menu /
+  #     client_name）のため /app のタグには到達しない。DB には載るが読み手ゼロ。
+  #     タグ軸にしたいなら export_vault の SELECT + render_doc_note +
+  #     build_app_html の front()/docTags を同時に配線する必要がある。
+  #
+  # 99_一次倉庫（直接アップロード用の一時置き場。GAS が本番フォルダへ移動してから
+  # 記録するので恒久的な置き場ではない）は gdrive_exclude_folder_name_re の既定
+  # (^\s*99[_＿]|一次倉庫|検索対象外) で walk 側から除外済み。
 
 gsheets:
   # ---- ナレッジ共有フォーム回答 ----
@@ -173,15 +143,25 @@ shared_drives_crawl:
     use_case: "営業 RAG 検索の網羅性"
 
 # ============================================================
-# ルールブック運用のグローバル設定（2026-07-10 追加）
+# ルールブック運用のグローバル設定
 # ============================================================
-# gdrive_rulebook_root_folder_id: ナレッジ/ ルートの folder_id。実 ID を貼ると
-# ingest（gdrive kind）冒頭の preflight がルート直下フォルダと本ファイルの
-# gdrive_folders の整合を検査する（silent 未取込の防止・fail-loud）:
-#   - 99_ 系以外の NN_ フォルダが gdrive_folders に載っていない → exit 1（不足一覧を表示）
-#   - 99_ 系フォルダが gdrive_folders に載っている            → exit 1
-#   - env INGEST_ROOT_CHECK_WARN_ONLY=true で警告に降格可
-# REPLACE_WITH_ プレースホルダのままなら preflight は無効（未設定と同じ扱い）。
+# gdrive_rulebook_root_folder_id: ナレッジ/ ルートの folder_id。
+#
+# ⚠️⚠️ **実 ID を貼らないこと**（placeholder のままが現時点の正しい状態）。
+# 2026-07-15 実測: preflight (_check_rulebook_root) の不足判定は
+#     if folder.id not in yaml_folder_ids
+# で、**親フォルダの include_subfolders による再帰カバレッジを見ない**。実ルート
+# (14Wfp6…) を貼ると、既に再帰 walk で取り込めている 01〜08 の 8 フォルダが全て
+# 「未登録」と誤検知され _fail → SystemExit(1) になる。さらに、この検査は
+#   - slack の処理より **前** に走る（pipeline の kind ループ順）
+#   - 呼び出し側 scripts/ingest_sources.py に try/except が無い
+#   - 実行は SOURCES="slack,gdrive,gsheets" の**単一プロセス**（run_ingest_task.sh 既定）
+# のため、**gdrive の設定ミスだけで slack / gsheets ごと ingest が全断**する。
+#
+# 有効化するには yaml ではなく**コード修正が前提**:
+#   (1) 不足判定に「親の再帰カバレッジ」を考慮させる
+#   (2) fail-close を gdrive kind 内に封じ込め、他ソースを巻き添えにしない
+# それまでは placeholder のまま = preflight 無効（未設定と同じ扱い）が正。
 gdrive_rulebook_root_folder_id: "REPLACE_WITH_KNOWLEDGE_ROOT"
 
 # gdrive_exclude_folder_name_re: フォルダ名の除外 regex。gdrive_folders / 共有ドライブ

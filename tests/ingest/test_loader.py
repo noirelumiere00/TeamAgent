@@ -55,13 +55,21 @@ def test_load_real_yaml_has_all_sources() -> None:
     assert len(sources.gsheets) >= 1
 
 
-def test_load_real_yaml_strict_mode_raises_on_rulebook_placeholders() -> None:
-    """入れ込み v2（2026-07-10）でルールブック 01〜06 のプレースホルダエントリを
-    意図的に宣言したため、strict mode（skip_placeholder=False）は ValueError になる。
-    folder_id 確定後に実 ID を貼れば再び strict mode でも通る。
+def test_load_real_yaml_strict_mode_passes_after_rulebook_cleanup() -> None:
+    """strict mode（skip_placeholder=False）が通ること。
+
+    2026-07-10〜07-15: ルールブック 01〜06 のプレースホルダエントリを宣言していた間は
+    strict mode が必ず ValueError になり、この検証経路自体が使えなかった。実 Drive 計測で
+    当該エントリが不要（親の再帰 walk で既にカバー）と確定し撤去したため、strict mode が
+    再び使えるようになった＝プレースホルダの混入をこのテストで検知できる。
+
+    gdrive_rulebook_root_folder_id のプレースホルダは source ではなくグローバルキーなので、
+    _parse_rulebook_root_folder_id が warning + None に落として例外にしない（実 ID を貼ると
+    preflight が全断するため、placeholder のままが正しい状態）。
     """
-    with pytest.raises(ValueError, match="placeholder folder_id"):
-        load_ingest_sources(REAL_YAML, skip_placeholder=False)
+    sources = load_ingest_sources(REAL_YAML, skip_placeholder=False)
+    assert not any("REPLACE_WITH_" in f.folder_id for f in sources.gdrive_folders)
+    assert sources.gdrive_rulebook_root_folder_id is None  # placeholder → 無効（＝preflight OFF）
 
 
 # -----------------------------------------------------------

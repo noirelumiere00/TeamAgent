@@ -1,10 +1,12 @@
-"""data/ingest_sources.yaml のルールブック再編エントリ（入れ込み v2・C6）のテスト。
+"""data/ingest_sources.yaml の gdrive セクションの回帰テスト。
 
-2026-07-10 追加分の検証:
-- 01〜06 のプレースホルダエントリが宣言されていること（folder_id 未確定でも安全に skip）
-- 既存エントリ（実 ID の 2 フォルダ・Slack 2 ch・Sheets 2 件・crawl）が壊れていないこと
-- グローバルキー gdrive_rulebook_root_folder_id が存在すること
-- 99_ 系のエントリを書いていないこと（ルート検査 / 名前除外の前提）
+2026-07-15 更新: ルールブック 01〜06 のプレースホルダ 6 エントリを撤去した
+（実 Drive 計測で「親の再帰 walk が既にカバー＝足しても増えない」と確定）。
+そのため「宣言されていること」を固定していた旧テストは削除し、代わりに
+- プレースホルダを二度と足さないこと
+- gdrive_rulebook_root_folder_id に実 ID を貼らせないこと（貼ると preflight が
+  再帰カバレッジを見ずに誤検知 → SystemExit(1) で slack/gsheets ごと全断する）
+を守る回帰テストを置く。既存エントリ / 99_ 非宣言の検証は従来どおり。
 """
 
 from __future__ import annotations
@@ -19,36 +21,26 @@ from teamagent.ingest.loader import load_ingest_sources
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REAL_YAML = PROJECT_ROOT / "data" / "ingest_sources.yaml"
 
-_RULEBOOK_FOLDER_NAMES = (
-    "01_提案事例",
-    "02_テンプレ・雛形",
-    "03_定期報告・実績データ",
-    "04_会社紹介・ケイパ資料",
-    "05_議事録・商談メモ",
-    "06_価格・契約",
-)
-
 
 def _raw() -> dict[str, Any]:
     return yaml.safe_load(REAL_YAML.read_text(encoding="utf-8"))
 
 
-def test_rulebook_entries_declared_with_placeholders() -> None:
-    """01〜06 の 6 エントリが REPLACE_WITH_KNOWLEDGE_NN で宣言されている。"""
+def test_no_placeholder_gdrive_entries() -> None:
+    """gdrive_folders にプレースホルダ（REPLACE_WITH_）を残さない。
+
+    loader が skip するので無害に見えるが、「実 ID を貼れば有効になる」という誤解を生み、
+    貼った瞬間に preflight が全断する導線になっていた（2026-07-15 撤去）。
+    """
     raw = _raw()
-    by_name = {f["folder_name"]: f for f in raw["gdrive_folders"]}
-    for i, name in enumerate(_RULEBOOK_FOLDER_NAMES, start=1):
-        assert name in by_name, f"ルールブックフォルダが未宣言: {name}"
-        entry = by_name[name]
-        assert entry["folder_id"] == f"REPLACE_WITH_KNOWLEDGE_{i:02d}"
-        assert entry["include_subfolders"] is True
-        assert entry["extra_metadata"]["rulebook_category"], name
+    for f in raw["gdrive_folders"]:
+        assert "REPLACE_WITH_" not in str(f["folder_id"]), f["folder_name"]
 
 
-def test_rulebook_placeholders_are_skipped_by_loader() -> None:
-    """プレースホルダのままの 6 エントリは loader が skip し、既存 2 フォルダだけ残る。
+def test_gdrive_folders_are_the_two_real_ones() -> None:
+    """gdrive_folders は実 ID の 2 フォルダのみ（撤去前後で loader 結果が不変＝挙動差分ゼロ）。
 
-    ＝folder_id 未確定のまま merge/デプロイしても既存 ingest を壊さない。
+    14Wfp6… は 01〜08 の親で include_subfolders: true。再帰 walk が全カテゴリをカバーする。
     """
     sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
     folder_ids = [f.folder_id for f in sources.gdrive_folders]
@@ -69,7 +61,13 @@ def test_existing_sections_unchanged() -> None:
 
 
 def test_rulebook_root_folder_id_global_key() -> None:
-    """ルート検査用グローバルキーがプレースホルダで宣言されている。"""
+    """ルート検査キーは **プレースホルダのまま**（実 ID を貼らせない）。
+
+    _check_rulebook_root の不足判定は親の include_subfolders 再帰カバレッジを見ないため、
+    実ルート(14Wfp6…)を貼ると取り込み済みの 01〜08 が missing 誤検知 → SystemExit(1)。
+    検査は slack より前・try/except 無し・単一プロセスなので全ソースが巻き添えになる。
+    有効化にはコード修正（再帰カバレッジ考慮＋fail-close の gdrive 内封じ込め）が前提。
+    """
     raw = _raw()
     assert raw.get("gdrive_rulebook_root_folder_id") == "REPLACE_WITH_KNOWLEDGE_ROOT"
 
