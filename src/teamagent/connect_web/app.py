@@ -93,6 +93,12 @@ def build_uvicorn_log_config() -> dict[str, Any]:
     return cfg
 
 
+# /r が都度再発行する presigned の有効期限（秒）。302 後にブラウザが即取得する前提の短命値。
+# トークン TTL(7日)＋この値 が実効的な閲覧窓の上限＝旧 presigned(7日)と実質同等に抑える
+# （長命 presigned を毎回配ると窓が token TTL＋7日 に伸びるため）。
+_SHORTLINK_PRESIGN_TTL_S = 900
+
+
 _APP_HTML_MISSING = (
     "<!doctype html><meta charset=utf-8><title>準備中</title>"
     "<div style='font-family:system-ui,-apple-system,sans-serif;max-width:640px;"
@@ -3381,7 +3387,12 @@ def create_app(
                 media_type="text/plain; charset=utf-8",
             )
         bucket, key, region = decoded
-        url = presign_get(bucket, key, region=region or os.environ.get("AWS_REGION"))
+        url = presign_get(
+            bucket,
+            key,
+            region=region or os.environ.get("AWS_REGION"),
+            expires_s=_SHORTLINK_PRESIGN_TTL_S,  # 短命（実効閲覧窓を token TTL 内に抑える）
+        )
         if not url:
             return Response(
                 "レポートを取得できませんでした。",

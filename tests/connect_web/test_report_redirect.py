@@ -57,6 +57,24 @@ def test_no_login_required(client: TestClient, monkeypatch: pytest.MonkeyPatch) 
     assert r.status_code == 302
 
 
+def test_shortlink_presign_is_short_lived(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/r が再発行する presigned は短命（token TTL＋短命＝実効窓を旧 presigned と同等に抑える）。"""
+    import teamagent.adapters.report_publish as rp
+    from teamagent.adapters.report_link_token import encode_report_token
+
+    captured: dict[str, object] = {}
+
+    def _fake(bucket: str, key: str, **kw: object) -> str:
+        captured.update(kw)
+        return "https://example.test/presigned"
+
+    monkeypatch.setattr(rp, "presign_get", _fake)
+    client.get(f"/r/{encode_report_token(_BUCKET, _KEY)}", follow_redirects=False)
+    assert captured.get("expires_s") == 900  # 短命（7日 presigned を毎回配らない）
+
+
 def test_invalid_token_404(client: TestClient) -> None:
     r = client.get("/r/not-a-valid-token", follow_redirects=False)
     assert r.status_code == 404
