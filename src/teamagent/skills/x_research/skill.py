@@ -401,8 +401,12 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
                         author_notes = {str(k): str(v) for k, v in notes.items()}
                     circles = parsed.get("author_circles")
                     if isinstance(circles, dict):
+                        # 要素は文字列のみ採用（null/数値/dict を弾く＝ゴミ界隈タグの混入防止）＋
+                        # 1タグ24字上限（bio 由来の過長文字列でチップが崩れないように）。
                         author_circles = {
-                            str(k): [str(t).strip() for t in v if str(t).strip()][:3]
+                            str(k): [t.strip()[:24] for t in v if isinstance(t, str) and t.strip()][
+                                :3
+                            ]
                             for k, v in circles.items()
                             if isinstance(v, list)
                         }

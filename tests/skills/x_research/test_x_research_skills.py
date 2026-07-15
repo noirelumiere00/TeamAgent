@@ -184,6 +184,23 @@ def test_card_renders_kaiwai_chips() -> None:
     assert "class='kaiwai'" not in h2  # 界隈なしなら出さない（捏造しない）
 
 
+def test_voice_search_drops_nonstring_circle_elements() -> None:
+    """LLMが非文字列(null/dict)や過長文字列を界隈配列に混ぜても、文字列のみ・24字上限で採用。"""
+    noise_json = json.dumps(
+        {"keep": ["1"], "author_circles": {"1": ["美容界隈", None, {"x": 1}, "あ" * 50]}}
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([_post("1")]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    circles = out.posts[0].author_circles
+    assert "美容界隈" in circles
+    assert "None" not in circles and all("{" not in c for c in circles)  # null/dict は弾く
+    assert all(len(c) <= 24 for c in circles)  # 長さ上限（チップ崩れ防止）
+
+
 def test_voice_search_unverified_marked_not_dropped() -> None:
     posts = [_post("1"), _post("2")]
     apify = _FakeApify(posts, verify_missing={"2"})

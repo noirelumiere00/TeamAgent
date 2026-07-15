@@ -64,7 +64,8 @@ h1{{font-size:20px;margin:0 0 4px}}
   margin:-4px 0 12px 4px;flex-wrap:wrap}}
 .xstrip a{{color:#1d6fdc;text-decoration:none}}
 .kaiwai{{background:#eef4fb;color:#1d6fdc;border:1px solid #d4e2f4;border-radius:10px;
-  padding:0 6px;font-size:10px;font-weight:700}}
+  padding:0 6px;font-size:10px;font-weight:700;max-width:140px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}}
 """
 
 _MONO_COLORS = (
