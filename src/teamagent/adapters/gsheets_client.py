@@ -33,11 +33,9 @@ Usage:
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import time
-import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -402,19 +400,5 @@ def build_external_id(sheet_id: str, gid: int, row_idx: int) -> str:
     """documents.external_id を組み立てる（`<sheet_id>:<gid>:<row_idx>`）。
 
     row_idx は 1 始まり（spreadsheet と整合）、1 = headers なのでデータは 2 から。
-    ⚠️ row_idx は行位置なので並べ替え/行挿入で別行を指す。行内容で同定したいナレッジ台帳系は
-    build_stable_external_id を使う（Codex #215-4）。
     """
     return f"{sheet_id}:{gid}:{row_idx}"
-
-
-def build_stable_external_id(sheet_id: str, gid: int, identity: str) -> str:
-    """行位置でなく**行の内容identity**で external_id を組む（`<sheet_id>:<gid>:k<hash>`）。
-
-    identity（例: ドライブ格納名／正式社名+案件名）が同じなら並べ替え・行挿入をしても
-    同一 document を UPDATE する（上書き先が行番号でズレない）。`k` 接頭辞で行番号形式
-    (`:<row_idx>`) と衝突しない。identity は NFKC 正規化して表記ゆれを吸収する。
-    """
-    norm = unicodedata.normalize("NFKC", (identity or "").strip())
-    digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
-    return f"{sheet_id}:{gid}:k{digest}"

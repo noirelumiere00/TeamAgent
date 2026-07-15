@@ -61,6 +61,7 @@ class _FakeRepository:
         self.upsert_calls.append(
             {
                 "external_id": doc.external_id,
+                "title": doc.title,
                 "source_type": doc.source_type,
                 "acl_groups": list(doc.acl_groups),
                 "metadata": dict(doc.metadata),
@@ -766,6 +767,8 @@ def test_ingest_gsheet_knowledge_sheet_rows_get_structured_metadata(
     )
     assert docs_n == 2
 
+    assert repo.upsert_calls[0]["title"] == "デルタ製薬 新製品プロモーション"
+    assert repo.upsert_calls[1]["title"] == "ナレッジ共有 - フォーム回答 - フォーム回答 1 - row 3"
     md = repo.upsert_calls[0]["metadata"]
     assert md["is_knowledge_share"] is True
     assert md["client_company"] == "株式会社デルタ製薬様"  # 生値（監査用）
@@ -2597,10 +2600,10 @@ def test_ingest_gsheet_resolves_renamed_tab_by_gid(monkeypatch: pytest.MonkeyPat
     assert "537831563" in repo.upsert_calls[0]["external_id"]
 
 
-# 実「ファイル記録」タブ(gid 1962561294・342行)の実ヘッダ（2026-07-15 gviz で実測）。
-# 連番は1投稿に1つで、その中のファイルを枝番で束ねる（GAS設計資料§5）。実測: 連番のみだと
-# 230/342 ユニーク(97値が重複・最大5ファイル/連番)、連番+枝番なら 342/342 ユニーク。
-_FILEREC_HEADERS = (
+# 「フォーム形式の回答」タブ(gid 278789217)の**実ヘッダ17列**（2026-07-15 gviz 実測）。
+# ファイル記録タブ(gid 1962561294)は取り込まない（yaml のコメント参照）ので、
+# 本テストは実際に取り込む唯一のナレッジタブの形で固定する。
+_FORM_HEADERS = (
     "ファイルをアップ",
     "正式社名",
     "案件名",
@@ -2614,91 +2617,71 @@ _FILEREC_HEADERS = (
     "送信者",
     "タイムスタンプ",
     "連番",
-    "枝番",
-    "投稿種別",
-    "保存ファイルリンク",
-    "保存ファイル(リンク付き)",  # ← 実シートは**半角**括弧（フォーム回答タブは全角）
-    "保管先フォルダ",
-    "処理日時",
+    "保存ファイル（リンク付き）",
     "処理エラー",
+    "旧_保管先フォルダ",
+    "保管先フォルダID記録（GAS処理)",
 )
+_LONG_SLACK_URL = "https://vector-workspcae.slack.com/files/U08EX5P35Q9/F092L4X6UF8/" + "x" * 60
 
 
-def _rec(
-    *,
-    company="エスエス製薬",
-    case="エスタック",
-    cat="クロージング",
-    seq="20260714-001",
-    branch="1",
-    kind="親",
-    folder="02_クロージング",
-    point="施策設計",
-    upload="https://vector-workspcae.slack.com/files/U08/F09/x",
-):
+def _form_row(company="エスエス製薬", case="エスタック", point="UGCと切り抜きが刺さった"):
     return (
-        upload,
+        _LONG_SLACK_URL,
         company,
         case,
         "TOP500 or ベス10",
         "ショート動画提案（UGCや切り抜き、メディア）",
-        cat,
+        "クロージング",
         "",
         point,
         "TikTokとInstagramの棲み分け",
         "",
-        "望月すーみゃお s-mochizuki@vectorinc.co.jp",
+        "望月 s-mochizuki@vectorinc.co.jp",
         "2026/07/13 17:48:07",
-        seq,
-        branch,
-        kind,
-        "https://docs.google.com/document/d/x",
-        f"{cat}_{company}_{case}_元名.pdf",
-        folder,
-        "2026/07/13 18:42",
+        "20260714-001",
+        "クロージング_エスエス製薬_エスタック_提案書.pdf",
         "",
+        "20260714_ESS",
+        "1abc",
     )
 
 
-def _filerec_sheet(monkeypatch: pytest.MonkeyPatch, rows: tuple[tuple[str, ...], ...]) -> None:
+def _run_form(monkeypatch: pytest.MonkeyPatch, rows) -> _FakeRepository:
     from teamagent.adapters.gsheets_client import SheetMetadata, SheetTab, TabRows
+    from teamagent.ingest.pipeline import _ingest_gsheet
 
-    fake_client = MagicMock()
-    fake_client.get_sheet_metadata.return_value = SheetMetadata(
+    fake = MagicMock()
+    fake.get_sheet_metadata.return_value = SheetMetadata(
         sheet_id="1J",
         title="ナレッジ共有",
         tabs=(
             SheetTab(
                 sheet_id="1J",
-                gid=1962561294,
-                title="ファイル記録",
+                gid=278789217,
+                title="フォーム回答 1",
                 row_count=len(rows) + 1,
-                col_count=len(_FILEREC_HEADERS),
+                col_count=len(_FORM_HEADERS),
             ),
         ),
     )
-    fake_client.get_tab_rows.return_value = TabRows(
+    fake.get_tab_rows.return_value = TabRows(
         sheet_id="1J",
-        tab_name="ファイル記録",
-        headers=_FILEREC_HEADERS,
+        tab_name="フォーム回答 1",
+        headers=_FORM_HEADERS,
         rows=rows,
         row_count=len(rows),
     )
     monkeypatch.setattr(
         "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
-        classmethod(lambda cls, **kwargs: fake_client),
+        classmethod(lambda cls, **kw: fake),
     )
     monkeypatch.delenv("USE_DOC_CLASSIFY", raising=False)
-
-
-def _run_filerec() -> _FakeRepository:
-    from teamagent.ingest.pipeline import _ingest_gsheet
-
     spec = GSheetSpec(
         sheet_id="1J",
         sheet_name="ナレッジ共有",
         description="",
-        tabs=(GSheetsTabSpec(gid=1962561294, tab_name="ファイル記録"),),
+        tabs=(GSheetsTabSpec(gid=278789217, tab_name="フォーム回答 1"),),
     )
     repo = _FakeRepository()
     _ingest_gsheet(
@@ -2712,113 +2695,82 @@ def _run_filerec() -> _FakeRepository:
     return repo
 
 
-def test_ingest_gsheet_same_seq_different_branch_are_separate_docs(
+def test_ingest_gsheet_knowledge_row_keeps_row_number_external_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """同一連番・別枝番（＝1投稿に複数ファイル）は**別 document**（実測の 20260714-001/1,2）。
+    """ナレッジ行の external_id は **行番号 ID のまま**（形式を変えない）。
 
-    連番は1投稿に1つなので、連番単独を identity にすると実 342 行中 112 行が潰れる
-    （連番のみ 230 ユニーク / 連番+枝番 342 ユニーク）。
+    フォーム回答タブは連番を持つ(実測 234/237)が既に行番号 ID で取り込み済み。gsheets には
+    stale 検出が無いため、ID 形式を変えると旧 doc が永久残存＋全行が重複索引化する。
     """
-    _filerec_sheet(
-        monkeypatch,
-        (_rec(seq="20260714-001", branch="1"), _rec(seq="20260714-001", branch="2")),
-    )
-    repo = _run_filerec()
-    ids = [c["external_id"] for c in repo.upsert_calls]
-    assert len(repo.upsert_calls) == 2  # 1投稿2ファイル = 2 document（潰れない）
-    assert len(set(ids)) == 2
-    assert all(i.startswith("1J:1962561294:k") for i in ids)
+    repo = _run_form(monkeypatch, (_form_row(),))
+    assert repo.upsert_calls[0]["external_id"] == "1J:278789217:2"
 
 
-def test_ingest_gsheet_seq_branch_id_is_position_independent(
+def test_ingest_gsheet_knowledge_row_title_is_company_and_case(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """連番+枝番 identity は行位置に依存しない（並べ替え/行挿入で上書き先がズレない）。"""
-    a = _rec(seq="20260714-001", branch="1")
-    b = _rec(
-        seq="20250726-001",
-        branch="1",
-        company="ユニー",
-        case="施設PR",
-        cat="提案",
-        folder="01_提案",
-    )
-    _filerec_sheet(monkeypatch, (a, b))
-    first = {c["metadata"]["client_company"]: c["external_id"] for c in _run_filerec().upsert_calls}
-    _filerec_sheet(monkeypatch, (b, a))  # 行を入れ替え
-    second = {
-        c["metadata"]["client_company"]: c["external_id"] for c in _run_filerec().upsert_calls
-    }
-    assert first == second
+    """title は "row N" でなく「正式社名 案件名」（法人格は除去）。
 
-
-def test_ingest_gsheet_skips_ichiji_souko_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """99_一次倉庫系の行は取り込まない（保管先フォルダで判定・gdrive と同一 regex）。
-
-    実運用では GAS が本番フォルダへ移動してから記録するため 99_ は出ない（実測 0 件）＝将来行への保険。
+    title は Vault のファイル名(safe_filename)・H1・検索の d.title ILIKE・/app の表示名を
+    兼ねるため、退行すると社名検索が全滅する。完全一致で pin する。
     """
-    keep = _rec(seq="20260714-001", branch="1", folder="02_クロージング")
-    drop = _rec(seq="20260714-002", branch="1", company="ゼータ工業", folder="99_一次倉庫")
-    _filerec_sheet(monkeypatch, (keep, drop))
-    repo = _run_filerec()
-    assert len(repo.upsert_calls) == 1
-    assert repo.upsert_calls[0]["metadata"]["client_company"] == "エスエス製薬"
+    repo = _run_form(monkeypatch, (_form_row(company="株式会社エスエス製薬"),))
+    assert repo.upsert_calls[0]["title"] == "エスエス製薬 エスタック"
 
 
-def test_ingest_gsheet_body_drops_ops_columns_so_excerpt_keeps_knowledge(
+def test_ingest_gsheet_knowledge_row_title_falls_back_on_placeholder_company(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """本文から運用列(Slack URL/GAS列)を外す＝下流の 160 字抜粋に「知見の列」が載る。
+    """正式社名がプレースホルダ(なし/その他 等)かつ案件名が空なら従来タイトルを維持する。"""
+    repo = _run_form(monkeypatch, (_form_row(company="なし", case=""),))
+    assert repo.upsert_calls[0]["title"] == "ナレッジ共有 - フォーム回答 1 - row 2"
 
-    ヘッダは正規化して照合する（実シートの「保存ファイル(リンク付き)」は半角括弧）。
+
+def test_ingest_gsheet_body_drops_slack_url_so_excerpt_keeps_knowledge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本文から先頭の Slack file URL(運用列)を外し、知見が 160 字抜粋に載るようにする。
+
+    export_vault は left(content,160) を excerpt にし、それが /app のタグ源になる。
+    ファイル名(保存ファイル（リンク付き）)は各行唯一の検索キーなので**残す**。
     """
-    long_url = "https://vector-workspcae.slack.com/files/U08EX5P35Q9/F092L4X6UF8/" + "x" * 80
-    _filerec_sheet(monkeypatch, (_rec(upload=long_url, point="UGCと切り抜きが刺さった"),))
-    body = _run_filerec().upsert_calls[0]["chunks"][0].content
-    assert long_url not in body  # Slack file URL は載せない
-    assert "連番:" not in body and "枝番:" not in body and "処理日時:" not in body
-    assert "保存ファイル" not in body  # 半角括弧でも正規化して除外できている
+    repo = _run_form(monkeypatch, (_form_row(),))
+    body = repo.upsert_calls[0]["chunks"][0].content
+    assert _LONG_SLACK_URL not in body  # Slack URL は載せない
+    assert "連番:" not in body and "処理エラー:" not in body  # GAS 運用列も載せない
     assert "UGCと切り抜きが刺さった" in body[:160]  # 知見が抜粋窓に入る
-    assert "正式社名: エスエス製薬" in body
+    assert "保存ファイル（リンク付き）: クロージング_エスエス製薬_エスタック_提案書.pdf" in body
 
 
-def test_ingest_gsheet_without_seq_keeps_row_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """連番列を持たないシート（フォーム回答タブ等）は従来の行番号 ID のまま＝既存docを孤児化しない。"""
+def test_ingest_gsheet_non_knowledge_sheet_body_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非ナレッジシート(営業FB等)には一切影響しない（本文も title も従来どおり）。"""
     from teamagent.adapters.gsheets_client import SheetMetadata, SheetTab, TabRows
+    from teamagent.ingest.pipeline import _ingest_gsheet
 
-    headers = ("正式社名", "案件名", "クライアント種別", "提案プロダクト", "資料の概要", "送信者")
-    rows = (("株式会社デルタ製薬", "新製品PR", "メーカー", "タテガタ", "提案", "@yamada"),)
-    fake_client = MagicMock()
-    fake_client.get_sheet_metadata.return_value = SheetMetadata(
-        sheet_id="1J",
-        title="ナレッジ共有",
-        tabs=(
-            SheetTab(
-                sheet_id="1J",
-                gid=278789217,
-                title="フォーム回答",
-                row_count=2,
-                col_count=len(headers),
-            ),
-        ),
+    headers = ("タイムスタンプ", "商流", "顧客名", "商談フェーズ")
+    rows = (("2026/06/30 10:00", "代理店", "アルファ広告社", "ヒアリング"),)
+    fake = MagicMock()
+    fake.get_sheet_metadata.return_value = SheetMetadata(
+        sheet_id="1V",
+        title="FB",
+        tabs=(SheetTab(sheet_id="1V", gid=537831563, title="営業FB", row_count=2, col_count=4),),
     )
-    fake_client.get_tab_rows.return_value = TabRows(
-        sheet_id="1J", tab_name="フォーム回答", headers=headers, rows=rows, row_count=1
+    fake.get_tab_rows.return_value = TabRows(
+        sheet_id="1V", tab_name="営業FB", headers=headers, rows=rows, row_count=1
     )
     monkeypatch.setattr(
         "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
-        classmethod(lambda cls, **kwargs: fake_client),
+        classmethod(lambda cls, **kw: fake),
     )
     monkeypatch.delenv("USE_DOC_CLASSIFY", raising=False)
-
-    from teamagent.ingest.pipeline import _ingest_gsheet
-
     spec = GSheetSpec(
-        sheet_id="1J",
-        sheet_name="ナレッジ共有",
+        sheet_id="1V",
+        sheet_name="FB",
         description="",
-        tabs=(GSheetsTabSpec(gid=278789217, tab_name="フォーム回答"),),
+        tabs=(GSheetsTabSpec(gid=537831563, tab_name="営業FB"),),
     )
     repo = _FakeRepository()
     _ingest_gsheet(
@@ -2829,4 +2781,7 @@ def test_ingest_gsheet_without_seq_keeps_row_id(monkeypatch: pytest.MonkeyPatch)
         dry_run=False,
         request_id="r",
     )
-    assert repo.upsert_calls[0]["external_id"] == "1J:278789217:2"
+    call = repo.upsert_calls[0]
+    assert call["external_id"] == "1V:537831563:2"
+    assert call["title"] == "FB - 営業FB - row 2"  # title 上書きは効かない
+    assert "タイムスタンプ: 2026/06/30 10:00" in call["chunks"][0].content  # 運用列除外も効かない

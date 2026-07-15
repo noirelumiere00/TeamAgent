@@ -68,20 +68,23 @@ def test_existing_sections_unchanged() -> None:
     assert sources.shared_drives_crawl.max_files_per_drive == 3000
 
 
-def test_knowledge_sheet_has_filerecord_tab_added() -> None:
-    """ナレッジ共有シートに「ファイル記録」タブ (gid 1962561294) が純加算され、既存タブは残る。"""
+def test_knowledge_sheet_does_not_ingest_filerecord_tab() -> None:
+    """ナレッジ共有シートは「フォーム回答」タブのみ取り込む（ファイル記録タブは足さない）。
+
+    ファイル記録(gid 1962561294)は 1 ファイル 1 行だが、知見は投稿単位なので兄弟行の本文が
+    ほぼ同一になり、本番の DOC_DEDUP_DETECT=true（Jaccard 0.7）で suppressed される
+    （実測 Jaccard=0.8088）。残るのは連番ユニーク≒230 件でフォーム回答(237 投稿)と実質同じ＝
+    per-file 粒度は得られない。一方でこのタブは連番を持つため安定 ID を入れると、連番だけ持つ
+    フォーム回答タブまで external_id 形式が変わり既存 doc が孤児化する。＝便益ゼロ・リスク甚大。
+    新タグ(カテゴリ/クライアント種別/提案プロダクト)の原料はフォーム回答タブに全て揃っている。
+    """
     sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
     knowledge = next(
         s for s in sources.gsheets if s.sheet_id == "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
     )
     tabs_by_gid = {t.gid: t.tab_name for t in knowledge.tabs}
-    # 既存タブ（フォーム回答）は保持
-    assert tabs_by_gid.get(278789217) == "フォーム回答 1"
-    # ファイル記録タブが追加されている
-    assert tabs_by_gid.get(1962561294) == "ファイル記録"
-    assert len(knowledge.tabs) == 2
-    assert knowledge.row_unit is True  # 1 行 = 1 document は不変
-    # シート件数自体は 2 のまま（タブ加算はシート数を増やさない）
+    assert tabs_by_gid == {278789217: "フォーム回答 1"}  # ファイル記録(1962561294)は入れない
+    assert knowledge.row_unit is True
     assert len(sources.gsheets) == 2
 
 

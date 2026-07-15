@@ -235,20 +235,6 @@ def test_build_external_id_format() -> None:
     assert build_external_id("X", 0, 1) == "X:0:1"
 
 
-def test_build_stable_external_id_is_position_independent() -> None:
-    """内容 identity が同じなら行位置が変わっても同一 external_id（並べ替え/挿入で上書き先不変・#215-4）。"""
-    from teamagent.adapters.gsheets_client import build_stable_external_id
-
-    a = build_stable_external_id("S", 42, "20250617_デルタ製薬")
-    b = build_stable_external_id("S", 42, "20250617_デルタ製薬")  # 別の行位置でも identity 同一
-    assert a == b
-    assert a.startswith("S:42:k")  # 行番号形式(:<n>)と衝突しない k 接頭辞
-    # identity が違えば別 external_id（別 document）
-    assert build_stable_external_id("S", 42, "別ファイル") != a
-    # NFKC 正規化で全角/半角の表記ゆれを吸収（同一 document を指す）
-    assert build_stable_external_id("S", 42, "ＡＢ") == build_stable_external_id("S", 42, "AB")
-
-
 # -----------------------------------------------------------
 # scopes / from_env
 # -----------------------------------------------------------
