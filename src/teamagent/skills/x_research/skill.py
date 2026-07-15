@@ -13,11 +13,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import tempfile
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, ClassVar
@@ -121,6 +123,21 @@ def _analysis_bedrock() -> Any:
     if not model_id:
         return BedrockClient.from_env()
     return BedrockClient(region=os.environ.get("AWS_REGION", "ap-northeast-1"), model_id=model_id)
+
+
+def _voice_dedup_key(inp: XVoiceSearchInput) -> str:
+    """① 声集めの永続化 external_id 用 dedup キー（検索定義のハッシュ）。
+
+    キー = 商材名(NFKC正規化) + 検索種別 + クエリ集合(順不同)。同一検索の再実行は同一キー＝
+    1 doc に集約(UPDATE)、クエリを変えた別の声集めは別キー＝別 doc。これが無いと external_id が
+    「商材+owner+日付」までしか分岐せず、同じ営業が同日に別クエリで実行した別研究が
+    last-write-wins で潰れる（Codex FB P1）。max_selected 等の表示パラメータは研究の同一性に
+    影響しないためキーに含めない。
+    """
+    norm = unicodedata.normalize("NFKC", (inp.product_name or "").strip())
+    qs = "".join(sorted((q or "").strip() for q in (inp.queries or [])))
+    seed = f"{norm}{inp.search_type}{qs}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
 
 
 class _XSyncBase:
@@ -465,6 +482,8 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
                 cls_solution="Xリサーチ",
                 cls_doc_type="世の中の声",
                 source_uri=out.report_url,
+                # 検索定義ハッシュを dedup キーにする（同日別クエリの別研究を潰さない・P1）。
+                dedup_key=_voice_dedup_key(input),
             )
         return out
 

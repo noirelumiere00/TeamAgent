@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 from collections import Counter
@@ -115,6 +116,21 @@ def tag_token(value: Any) -> str:
 def wikilink(path: str) -> str:
     """``[[...]]`` wikilink を組む（path は safe_filename 由来＝``]``/``|`` を含まない）。"""
     return f"[[{path}]]"
+
+
+# タイトル等を本文へ逐語出力する際の Markdown インラインエスケープ（単行想定）。
+# frontmatter は yaml_quote が守るが、H1/見出し/リスト行に出す title は別途退避が要る。
+# リンク/画像/wikilink/HTML/コードを成立させる記号を CommonMark のバックスラッシュ退避で殺す
+# （描画上は元の文字＝可読性は不変）。バックスラッシュを最初に退避する。
+_MD_INLINE_DANGEROUS = ("\\", "`", "[", "]", "<", ">")
+
+
+def md_inline_escape(text: Any) -> str:
+    """title 等を Markdown 見出し/インライン行へ逐語出力する際の危険記号退避（改行は畳む）。"""
+    s = str(text if text is not None else "").replace("\n", " ").replace("\r", " ")
+    for ch in _MD_INLINE_DANGEROUS:
+        s = s.replace(ch, "\\" + ch)
+    return s
 
 
 def source_link(source_uri: str | None, source_type: str | None) -> str | None:
@@ -216,7 +232,7 @@ def render_client_note(
         lines.append("（関連資料はまだありません）")
         lines.append("")
     for doc, path in zip(documents, doc_paths, strict=True):
-        title = str(doc.get("title") or "(無題)").replace("\n", " ")
+        title = md_inline_escape(doc.get("title") or "(無題)")
         parts = [wikilink(path)]
         if doc.get("cls_doc_type"):
             parts.append(str(doc["cls_doc_type"]))
@@ -247,7 +263,8 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
         f"modified_at: {yaml_quote(doc.get('modified_at') or '')}",
         "---",
         "",
-        f"# {str(doc.get('title') or '(無題)').replace(chr(10), ' ')}",
+        # H1 は本文なので Markdown 記法を退避（研究ノート title 等の逐語出力での注入を防ぐ）。
+        f"# {md_inline_escape(doc.get('title') or '(無題)')}",
         "",
     ]
     # 名寄せタグ: 登場する取引先/ブランド名も Obsidian タグとして出す（グラフ/タグ検索用）。
@@ -322,7 +339,16 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
                 # 同一資料は既存 note を再利用（複数クライアントから wikilink される）
                 doc_paths.append(doc_path_by_uri[uri])
                 continue
-            doc_path = _claim("docs", safe_filename(doc.get("title"), fallback="document"))
+            base = safe_filename(doc.get("title"), fallback="document")
+            # 施策研究ノート(x_research_tool)は「商材名 Xの声集め」等でタイトルが衝突しやすく、
+            # 衝突すると _claim が `_2` を振る → build_app_html の _chunk_key が `_2` を分割断片と
+            # みなして /app から握り潰す（別owner/別研究が消える）。document ごとに一意な external_id
+            # 由来の短ハッシュを付けて衝突自体を無くす（`-` 区切りなので `_N` 束ねに当たらない）。
+            if doc.get("x_research_tool"):
+                seed = str(doc.get("external_id") or uri or doc.get("title") or "")
+                disc = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+                base = f"{base}-{disc}"
+            doc_path = _claim("docs", base)
             if uri:
                 doc_path_by_uri[uri] = doc_path
             files[f"{doc_path}.md"] = render_doc_note(doc, client, client_path)
@@ -362,6 +388,12 @@ _CLIENTS_SQL = """
         SELECT d.metadata->>'cls_project' AS name FROM documents d
         WHERE d.metadata->>'cls_project' IS NOT NULL
           AND d.metadata->>'cls_project' <> ''
+          -- 施策研究ノート(x_research_tool 付き)の cls_project は「商材/テーマ名」であって
+          -- 取引先ではない。取引先タクソノミー(名寄せ/facet/グラフ)を汚さないため client 一覧に
+          -- 昇格させない（needs/buzz を未永続化にしたのと同じ姿勢＝名寄せ前は取引先化しない）。
+          -- 商材名が既存取引先に substring 一致する場合は DOCUMENTS_SQL の cls_project ILIKE で
+          -- その取引先へ自然に紐づく（＝実在取引先へは載る／新規の偽取引先は作らない）。
+          AND d.metadata->>'x_research_tool' IS NULL
     ) AS names
     ORDER BY name
 """
@@ -404,6 +436,7 @@ _DOCUMENTS_SQL_TEMPLATE = """
         d.metadata->>'cls_entities' AS cls_entities,
         d.metadata->>'client_name' AS client_name,
         d.metadata->>'x_research_tool' AS x_research_tool,
+        d.external_id AS external_id,
         ex.excerpt AS excerpt
     FROM documents d
     LEFT JOIN LATERAL (

@@ -6,6 +6,8 @@ v1 は voice（声集め）と comment（コメント分析）のみ記録（nee
 
 from __future__ import annotations
 
+import re
+
 from teamagent.skills.x_research.persist_body import (
     build_comment_summary_md,
     build_voice_summary_md,
@@ -69,3 +71,53 @@ def test_persist_injected_only_to_voice_and_comment() -> None:
     sentinel = object()
     assert XVoiceSearchSkill(persister=sentinel)._persister is sentinel
     assert TikTokCommentMiningSkill(persister=sentinel)._persister is sentinel
+
+
+# 未エスケープの Markdown リンク/画像/wikilink/HTML/コードを成立させる素の記号が本文に残らない
+# こと（`\[` のように退避されていれば描画は文字＝記法は死ぬ）。ヘッダ/フッタ/テンプレは記号を
+# 持たないので、md 全体でこの不変条件が成り立つ。
+_UNESCAPED_MD = re.compile(r"(?<!\\)[\[\]<>`]")
+
+
+def test_voice_summary_neutralizes_stored_markdown_injection() -> None:
+    """投稿本文・表示名・商材名の Markdown 記法を無害化する（stored link injection 対策・P1）。"""
+    out = XVoiceSearchOutput(
+        product_name="[悪意](javascript:alert(1))",
+        posts=[
+            _post(
+                "釣り[ここ](javascript:steal())と![x](https://evil.example/a.png)"
+                "と[[clients/機密顧客]]と`code`と<b>tag</b>",
+                handle="ev`il]<script>",
+                likes=3,
+                verified=False,
+            ),
+        ],
+        searched=1,
+        selected=1,
+        verified_count=0,
+        unverified_count=1,
+    )
+    md = build_voice_summary_md(out)
+    assert not _UNESCAPED_MD.search(md), "未エスケープの [ ] < > ` が残っている（injection 面）"
+    assert "[[clients/" not in md  # Obsidian wikilink（偽バックリンク/グラフ汚染）を殺す
+    assert "<b>" not in md and "<script>" not in md  # 生 HTML を殺す
+    assert "javascript:" not in md or "\\[" in md  # リンク開き括弧が退避され記法が成立しない
+    assert "釣り" in md  # 可読テキスト自体は保持（黙って全消ししない）
+
+
+def test_comment_summary_neutralizes_stored_markdown_injection() -> None:
+    """コメント分析ノートも語彙/テーマ/client_name の Markdown 記法を無害化する。"""
+    from types import SimpleNamespace
+
+    v = SimpleNamespace(
+        key_themes=["[t](javascript:x)"],
+        pain_points=["<img src=x>"],
+        desires=["`rm -rf`"],
+        purchase_signals=[],
+    )
+    out = SimpleNamespace(cross_vocabulary=["[[secret]]"], videos=[v])
+    md = build_comment_summary_md(out, client_name="[client](evil)")
+    # 未エスケープの [ ] < > ` が残らない＝Markdown 記法として成立しない（描画上は元の文字）。
+    assert not _UNESCAPED_MD.search(md)
+    assert "\\[\\[secret\\]\\]" in md  # wikilink がバックスラッシュ退避されている
+    assert "\\<img" in md  # HTML 開き < が退避されている

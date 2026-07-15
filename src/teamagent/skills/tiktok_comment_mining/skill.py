@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import tempfile
+import unicodedata
 import uuid
 from typing import Any, ClassVar
 
@@ -56,6 +58,19 @@ def _str_list(v: Any, limit: int = 20) -> list[str]:
     if not isinstance(v, list):
         return []
     return [str(x) for x in v if str(x).strip()][:limit]
+
+
+def _comment_dedup_key(inp: CommentMiningInput) -> str:
+    """⑤ コメント分析の永続化 external_id 用 dedup キー（分析対象の定義ハッシュ）。
+
+    キー = client_name(NFKC正規化) + 動画URL集合(順不同)。同じ client を同日に別の動画バッチで
+    分析しても別 doc になり last-write-wins で潰れない（voice の _voice_dedup_key と対称）。同一
+    バッチの再実行は同一キー＝集約。これが無いと external_id が client+owner+日付までしか分岐せず、
+    同日別バッチの分析結果が UPDATE で上書き喪失する（Codex FB P1 と同型）。
+    """
+    norm = unicodedata.normalize("NFKC", (inp.client_name or "").strip())
+    urls = "".join(sorted((u or "").strip() for u in (inp.video_urls or [])))
+    return hashlib.sha256(f"{norm}{urls}".encode()).hexdigest()[:12]
 
 
 @register
@@ -347,6 +362,8 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
                 cls_solution="SNSコメント分析",
                 cls_doc_type="コメント分析",
                 source_uri=out.report_url,
+                # 分析対象(client+動画URL集合)ハッシュを dedup キーに（同日別バッチを潰さない）。
+                dedup_key=_comment_dedup_key(input),
             )
         return out
 

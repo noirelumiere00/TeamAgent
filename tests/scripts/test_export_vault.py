@@ -344,6 +344,70 @@ def test_plan_vault_reuses_note_for_same_source_uri() -> None:
     assert "[[docs/共通提案書]]" in files["clients/B社.md"]
 
 
+def test_plan_vault_research_docs_get_collision_proof_filenames() -> None:
+    """施策研究ノートは同一タイトルでも external_id 由来ハッシュで一意名になり、
+    別owner/別研究が /app から消えない（P1・#214-2/3）。
+
+    build_app_html の _chunk_key は `_\\d{1,2}$` を分割断片として束ね代表1件しか残さないため、
+    従来の `_2` 付番だと 2 件目の研究ノートが /app から握り潰されていた。`-<hash>` 分岐で回避する。
+    """
+    clients = {
+        "アサヒ飲料": {
+            "timeline": [],
+            "documents": [
+                # 同一商材・同一タイトル・report_url 無し（None）でも external_id が異なる別研究
+                _doc(
+                    "アサヒ白湯 Xの声集め",
+                    uri="",
+                    x_research_tool="x_voice",
+                    external_id="xresearch:x_voice:aaa:owner1:k1",
+                ),
+                _doc(
+                    "アサヒ白湯 Xの声集め",
+                    uri="",
+                    x_research_tool="x_voice",
+                    external_id="xresearch:x_voice:aaa:owner2:k2",
+                ),
+            ],
+        }
+    }
+    files = plan_vault(clients)
+    doc_notes = sorted(p for p in files if p.startswith("docs/"))
+    assert len(doc_notes) == 2  # 2 研究 = 2 note（サイレント消失しない）
+    # `_N` サフィックスではなく `-<hash8>` で分岐（_chunk_key の束ねに当たらない）
+    assert all(not re.search(r"_\d+\.md$", p) for p in doc_notes)
+    assert all(re.search(r"-[0-9a-f]{8}\.md$", p) for p in doc_notes)
+
+
+def test_clients_sql_excludes_research_products_from_client_union() -> None:
+    """施策研究の cls_project(商材名)は取引先一覧に昇格しない（取引先タクソノミー非汚染・#214-1）。"""
+    sql = _mod._CLIENTS_SQL
+    # コメント文字列ではなく実ガード句そのものを検証（"x_research_tool" はコメントにも出るため）。
+    assert "x_research_tool' IS NULL" in sql
+    # ガードは cls_project の UNION 枝側に入っている（client_name 枝ではない）
+    assert sql.index("x_research_tool' IS NULL") > sql.index("cls_project")
+
+
+def test_documents_sql_selects_external_id_for_research_filenames() -> None:
+    """研究ノートの一意ファイル名生成に external_id が要るため SELECT に含める（#214-2）。"""
+    assert "external_id" in _mod.documents_sql()
+
+
+_UNESCAPED_MD_TITLE = re.compile(r"(?<!\\)[\[\]<>`]")
+
+
+def test_render_doc_note_escapes_markdown_in_h1_title() -> None:
+    """H1 見出しへ逐語出力する title の Markdown 記法を退避する（stored injection・#214-4）。"""
+    note = render_doc_note(
+        _doc("[phish](javascript:alert(1)) <img src=x> [[secret]]"),
+        "出光興産",
+        "clients/出光興産",
+    )
+    h1 = next(ln for ln in note.splitlines() if ln.startswith("# "))
+    assert not _UNESCAPED_MD_TITLE.search(h1)  # 未エスケープの [ ] < > ` が無い＝記法が死ぬ
+    assert "phish" in h1  # 可読テキスト自体は残す
+
+
 # ---------------- write_vault ----------------
 
 

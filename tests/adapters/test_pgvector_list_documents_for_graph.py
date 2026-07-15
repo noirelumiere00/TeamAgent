@@ -37,6 +37,26 @@ def test_select_projects_new_classification_axes() -> None:
     assert "d.metadata->>'cls_project' AS cls_project" in sql
 
 
+def test_graph_excludes_research_docs() -> None:
+    """施策研究ノート(x_research_tool)は取引先×資料グラフのノードに載せない（#214-1）。"""
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn()
+    client.list_documents_for_graph(conn)
+    sql: str = cur.execute.call_args.args[0]
+    assert "x_research_tool' IS NULL" in sql
+
+
+def test_list_client_names_excludes_research_products() -> None:
+    """研究docの cls_project(商材名)はクライアント名語彙(boost/sort)に混ぜない（#214-1）。"""
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn()
+    client.list_client_names(conn)
+    sql: str = cur.execute.call_args.args[0]
+    assert "x_research_tool' IS NULL" in sql
+    # ガードは cls_project の UNION 枝側（client_name 枝ではない）
+    assert sql.index("x_research_tool' IS NULL") > sql.index("cls_project")
+
+
 def test_default_no_embedding_column_or_join() -> None:
     """既定（with_embeddings=False）では embedding 列も LATERAL も出さない（旧挙動）。"""
     client = PgVectorClient(dsn="postgresql://stub")
