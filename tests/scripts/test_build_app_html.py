@@ -1506,3 +1506,172 @@ def test_alias_canonical_and_unmapped_values_unchanged(
     assert re.search(
         r'"name": "自治体X", "cnorm": "自治体x", "industry": "宇宙開発"', html
     )  # unmapped industry 不変
+
+
+# ---------------- まとめる軸（clustering axis）: 参照Map方式（ノード加算ゼロ） + グラフ JS 配線 ----------------
+
+
+def _payload(html: str) -> dict:
+    """生成 HTML の `const DATA=...;` 行から DATA ペイロード全体を取り出す。
+
+    埋め込み時の < → \\u003c 等は JSON 合法な \\uXXXX エスケープなので json.loads で素直に読める。
+    """
+    line = next(ln for ln in html.splitlines() if ln.startswith("const DATA="))
+    return json.loads(line[len("const DATA=") :].rstrip().rstrip(";"))
+
+
+def _graph_nodes(html: str) -> list[dict]:
+    return _payload(html)["graph"]["nodes"]
+
+
+def test_graph_nodes_carry_no_cluster_fields(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """まとめ軸の値はノードへ再埋め込みしない＝どのグラフノードも last/doc_type/solution を持たない
+    （参照Map方式でペイロード増ゼロ・グラフノードは baseline と同形）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    nodes = _graph_nodes(out.read_text(encoding="utf-8"))
+    assert nodes and all(
+        "last" not in n and "doc_type" not in n and "solution" not in n for n in nodes
+    )
+
+
+def test_cluster_source_fields_live_in_payload_clients_docs(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """まとめ軸の元値は既存の DATA.clients/DATA.docs に載り、grpVal が stem で参照する。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    pl = _payload(out.read_text(encoding="utf-8"))
+    c = next(c for c in pl["clients"] if c["name"] == "出光興産")
+    assert c["stem"] and c["last"] == "2026-06-01"  # 最終接点=max(最終FB,資料 modified)
+    d = next(d for d in pl["docs"] if d["stem"] == "提案書A")
+    assert d["doc_type"] == "提案書" and d["solution"] == "動画広告"
+
+
+def test_cluster_reference_map_wiring_in_js(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """grpVal は既存索引 cByStem/dByStem を stem（n.id.slice(2)）で引く＝ノード再埋め込みしない。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "const cByStem={},dByStem={}" in html  # 既存の索引を流用（新規Mapは作らない）
+    assert "cByStem[n.id.slice(2)]" in html
+    assert "dByStem[n.id.slice(2)]" in html
+
+
+def test_graph_node_kinds_unchanged_by_cluster(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """ノード加算ゼロ＝ノード種は client/doc/tag のみ・件数は fixture 通り（新ノードを生まない）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    nodes = _graph_nodes(out.read_text(encoding="utf-8"))
+    assert {n["type"] for n in nodes} == {"client", "doc", "tag"}
+    assert sum(1 for n in nodes if n["type"] == "client") == 1
+    assert sum(1 for n in nodes if n["type"] == "doc") == 3
+
+
+def test_cluster_opt_default_null_and_grp_helper(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """opt.cluster 既定 null（＝取引先ごと・現状維持）と grp() の opt.cluster ガード。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "cluster:null" in html  # 既定=まとめOFF（開いた瞬間は現状不変）
+    assert "function grp(n){return opt.cluster?grpVal(n,opt.cluster):null;}" in html
+
+
+def test_grp_client_and_doc_basis_branches_in_js(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """grp 基準分岐: phase/last=client基準・doc_type/solution=doc基準、空は未設定/記録なしへ。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert 'return n.type==="client"?(n.phase||"未設定"):null;' in html  # phase はノード既存
+    assert (
+        'ageBucket((cByStem[n.id.slice(2)]||{}).last)||"記録なし"' in html
+    )  # last は DATA.clients 参照
+    assert '(dByStem[n.id.slice(2)]||{}).doc_type||"未設定"' in html  # doc_type は DATA.docs 参照
+    assert '(dByStem[n.id.slice(2)]||{}).solution||"未設定"' in html  # solution は DATA.docs 参照
+
+
+def test_build_centers_ring_placement_js(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """buildCenters: 実在値のみ列挙→リング配置（角度=i/総数*2π・半径=CLBASE*√N・未設定末尾）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "function buildCenters(ax)" in html
+    assert "i/tot*Math.PI*2" in html  # 角度 = index/総数 * 2π
+    assert "CLBASE*Math.sqrt(N.length)" in html  # 半径 = base*√(全ノード数)
+    assert "Object.keys(PHASECOLOR).filter" in html  # フェーズは PHASECOLOR キー順
+    assert 'ax==="last"' in html and "AGEBK.filter" in html  # 最終接点は新→旧順
+    assert '["未設定","記録なし"].forEach' in html  # 未設定/記録なし島は必ず末尾
+
+
+def test_cluster_force_replaces_origin_gravity_when_active(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """step(): cluster有効かつ所属ありは所属中心引力へ差し替え・未所属/既定は従来の原点重力を維持。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "const gk=grp(n),gc=gk!==null?cCenters[gk]:null;" in html
+    assert "if(gc){n.vx-=(n.x-gc.x)*opt.center*a;n.vy-=(n.y-gc.y)*opt.center*a;}" in html
+    assert "else{n.vx-=n.x*opt.center*a;n.vy-=n.y*opt.center*a;}" in html  # 既定/未所属=不変
+
+
+def test_gcluster_select_html_and_handler(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """まとめる（配置）UI: 5択セレクト・各option・onchange リヒート・1行ヘルパ・キャプション枠。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "まとめる（配置）" in html
+    assert '<select class="gin" id="gCluster">' in html
+    for val, label in [
+        ("", "取引先ごと（既定）"),
+        ("phase", "フェーズ（取引先を島に）"),
+        ("last", "最終接点（取引先を島に）"),
+        ("doc_type", "資料の種類（資料を島に）"),
+        ("solution", "施策（資料を島に）"),
+    ]:
+        assert f'<option value="{val}">{label}</option>' in html
+    assert '$("#gCluster").onchange=' in html
+    assert "buildCenters(opt.cluster)" in html
+    assert (
+        "alpha=Math.max(alpha,.5);fitPending=true;ensure();" in html
+    )  # 既存リヒート＋収束後に再フィット
+    assert "色分け＝何者か / まとめ＝どこに溜まるか" in html
+    assert 'id="gClusterCap"' in html
+
+
+def test_industry_not_offered_as_cluster_axis(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """色分けとの二重設定回避: まとめ軸セレクタに業種を入れない（業種＝色に一本化）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    m = re.search(r'<select class="gin" id="gCluster">(.*?)</select>', html, re.S)
+    assert m, "gCluster セレクトが見つからない"
+    assert 'value="industry"' not in m.group(1)
+    assert "業種" not in m.group(1)
+
+
+def test_cluster_island_labels_and_caption_js(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """島ラベル（値＋件数・ハロー付き）と cluster有効時キャプション（未設定件数＋doc基準の体験変化）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "for(const v in cCenters)" in html  # 各島中心にラベル
+    assert 'tx=v+" ("+c.n+")"' in html  # 値＋件数
+    assert "ctx.strokeText(tx" in html and "ctx.fillText(tx" in html  # ハロー付きで可読
+    assert "function clusterCap()" in html
+    assert "でまとめています" in html
+    assert "取引先は資料に引かれ周辺に配置" in html  # doc基準の体験変化を併記
+
+
+def test_cluster_does_not_touch_colorby(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """色分け（ncol/groupBy/legend）は不変＝まとめ軸は配置のみに作用（二重設定を作らない）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # ncol は従来通り groupBy 依存で cluster を参照しない
+    assert 'opt.groupBy==="phase"?(PHASECOLOR[n.phase]||"#9a9a9a"):colorOf(n.industry)' in html
+    assert 'groupBy:"industry"' in html  # 既定色分けは業種のまま
