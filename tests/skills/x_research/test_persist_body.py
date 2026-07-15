@@ -41,6 +41,7 @@ def test_voice_summary_has_product_media_and_voice() -> None:
     assert "辻利 抹茶ミルク" in md
     assert "X（旧Twitter）" in md  # 媒体/X タグの自動付与
     assert "濃厚で最高" in md and "8,227" in md
+    assert "https://x.com/u/1" in md  # 元投稿URL(provenance)を残す
     assert "⚠️" in md  # 未検証の声は注記付きで残す（黙って捨てない）
     assert "辻利=人名" in md  # 検索メモ
 

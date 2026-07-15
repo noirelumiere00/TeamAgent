@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from teamagent.skills._shared.research_persist import ResearchPersister, _slug
+from teamagent.skills._shared.research_persist import ResearchPersister, _product_key
 
 
 class _FakeEmbedder:
@@ -192,9 +192,10 @@ def test_schedule_submits_when_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(ex.calls) == 1 and ex.calls[0]["product_name"] == "辻利"
 
 
-def test_slug_keeps_japanese_disambiguates_and_drops_symbols() -> None:
-    s = _slug("辻利 抹茶ミルク!!")
-    assert s.startswith("辻利-抹茶ミルク-")  # 日本語保持・記号除去・末尾ハッシュ
-    assert ":" not in _slug("a:b/c")  # external_id 区切りの : を混入させない
-    assert _slug("a:b/c") != _slug("abc")  # lossy 衝突を回避
-    assert _slug("辻利 抹茶") == _slug("辻利 抹茶")  # 同一名は冪等
+def test_product_key_is_hash_without_plaintext_name() -> None:
+    k = _product_key("辻利 抹茶ミルク!!")
+    assert "辻利" not in k and "抹茶" not in k  # 商材名を平文で残さない（ログ露出防止）
+    assert ":" not in k  # external_id 区切りの : を混入させない
+    assert len(k) == 16 and all(c in "0123456789abcdef" for c in k)
+    assert _product_key("a:b/c") != _product_key("abc")  # lossy 衝突を回避
+    assert _product_key("辻利 抹茶") == _product_key("辻利 抹茶")  # 同一名は冪等

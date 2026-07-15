@@ -21,7 +21,6 @@ from __future__ import annotations
 import concurrent.futures
 import datetime as _dt
 import hashlib
-import re
 import unicodedata
 from typing import Any
 
@@ -41,19 +40,15 @@ def _jst_today() -> str:
     return _dt.datetime.now(_JST).strftime("%Y-%m-%d")
 
 
-def _slug(name: str) -> str:
-    """商材名を external_id 用の安全な slug へ（日本語は \\w で保持・記号/空白を畳む）。
+def _product_key(name: str) -> str:
+    """商材名の external_id 用識別キー（正規化名の sha256[:16]）。
 
-    末尾に正規化名のハッシュを付す。'a:b/c' と 'abc'、先頭80字が同じ別名などが同一 slug に潰れて
-    external_id が衝突し、別の研究を silently 上書きするのを防ぐ（Codex 指摘）。同一名は同一 slug
-    （冪等）を保つ。
+    可読 slug でなくハッシュにするのは、external_id が IngestRepository のログに出るため商材名
+    （機密でありうる）を平文で残さないため（通常資料の external_id も gdrive:// 等の ID で名前を
+    含まない＝同じ姿勢）。同一名は同一キー（冪等）・lossy 衝突無し（正規化名全体を hash）。
     """
     norm = unicodedata.normalize("NFKC", (name or "").strip())
-    s = re.sub(r"\s+", "-", norm)
-    s = re.sub(r"[^\w\-]", "", s, flags=re.UNICODE)  # \w は Unicode でかな/漢字も含む。: は除去
-    s = s[:64] or "x"
-    h = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:8]  # 正規化名で衝突回避
-    return f"{s}-{h}"
+    return hashlib.sha256(("product:" + norm).encode("utf-8")).hexdigest()[:16]
 
 
 def _owner_hash(email: str) -> str:
@@ -174,7 +169,7 @@ class ResearchPersister:
             # external_id にツール・商材・**owner**・日付/ジョブを含める。owner を入れることで
             # 同日同商材を別々の営業が実行しても互いの doc/owner/ACL を上書きしない（衝突回避）。
             key_id = dedup_key or _jst_today()
-            ext_id = f"xresearch:{tool}:{_slug(product_name)}:{_owner_hash(owner)}:{key_id}"
+            ext_id = f"xresearch:{tool}:{_product_key(product_name)}:{_owner_hash(owner)}:{key_id}"
             doc = DocumentUpsert(
                 source_type="other",  # document_source_type ENUM は新値不可
                 external_id=ext_id,

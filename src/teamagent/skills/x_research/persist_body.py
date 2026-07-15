@@ -38,7 +38,10 @@ def _post_line(p: Any) -> str:
     verify_note = str(getattr(p, "verify_note", "") or "")
     note = f" ⚠️{_clean(verify_note, max_len=40)}" if (not verified and verify_note) else ""
     likes = int(getattr(p, "like_count", 0) or 0)
-    return f"- 「{_clean(p.text)}」 — {who}（❤️{likes:,}）{note}"
+    # 元投稿 URL を provenance として残す（後から一次ソースに当たれるように）。
+    url = str(getattr(p, "url", "") or "").strip()
+    src = f" 〈{url}〉" if url.startswith(("http://", "https://")) else ""
+    return f"- 「{_clean(p.text)}」 — {who}（❤️{likes:,}）{note}{src}"
 
 
 def build_voice_summary_md(out: Any) -> str:
@@ -63,7 +66,7 @@ def build_voice_summary_md(out: Any) -> str:
 
 def build_comment_summary_md(out: Any, *, client_name: str) -> str:
     """⑤ コメント欄マイニング の要約 markdown（テーマ・語彙・ペイン/欲求）。"""
-    lines = [f"# {client_name} コメント欄マイニング", "", f"作成 {_today()}"]
+    lines = [f"# {client_name} TikTokコメント欄マイニング", "", f"作成 {_today()}"]
     if getattr(out, "cross_vocabulary", None):
         vocab = "・".join(_clean(v, max_len=30) for v in out.cross_vocabulary[:20])
         lines += ["", f"横断語彙: {vocab}"]

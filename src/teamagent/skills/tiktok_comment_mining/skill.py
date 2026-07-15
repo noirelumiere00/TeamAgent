@@ -339,7 +339,8 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             self._persister.schedule(
                 tool="tiktok_comment",
                 product_name=input.client_name or "",
-                title=f"{input.client_name} コメント欄マイニング",
+                # title に「TikTok」を含め build_app_html の 媒体/TikTok タグを付与する。
+                title=f"{input.client_name} TikTokコメント欄マイニング",
                 body_md=build_comment_summary_md(out, client_name=input.client_name or ""),
                 owner_email=user,
                 request_id=ctx.request_id,
