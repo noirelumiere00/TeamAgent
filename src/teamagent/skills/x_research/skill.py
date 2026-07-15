@@ -125,8 +125,12 @@ def _analysis_bedrock() -> Any:
 def _report_shorturl_enabled() -> bool:
     """USE_REPORT_SHORTURL: レポートを短縮URL(/r)で配布する段階ゲート（既定 OFF）。
 
-    connect-web に /r ルート＋vseo-s3-read が揃い、実機で /r→302 を確認した後に ON にする
-    （揃う前に ON にすると受信者側で 404/403 に劣化するため）。OFF の間は従来 presigned を返す。
+    connect-web に /r ルート＋vseo-s3-read が揃い、**実機 /r をリダイレクト追従して最終 200
+    （＝S3 GetObject が実際に成功する）**を確認した後に ON にする。302 だけでは不十分:
+    presign はローカル署名操作なので GetObject 権限が無くても 302 は返り、権限不足は 302 を
+    追った S3 取得時に 403 として初めて顕在化する（bootstrap_vseo_s3_iam.sh が IAM 認可を
+    simulate-principal-policy で実証する）。揃う前に ON にすると受信者側で 404/403 に劣化する
+    ため、OFF の間は従来 presigned を返す。
     """
     return os.environ.get("USE_REPORT_SHORTURL", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -698,7 +702,9 @@ class XBuzzMeasureSkill(BaseSkill[XBuzzMeasureInput, XBuzzMeasureOutput]):
             "request_id": ctx.request_id,
         }
         ok = self._store.submit(spec)
-        log.info("x_buzz_submitted", job_id=job_id, ok=ok, keyword=input.keyword)
+        # keyword（商材/施策名＝機密でありうる）は CloudWatch に残さない。job_id と成否のみ記録
+        # （done 系ログが product_name/theme を出さないのと同一姿勢）。
+        log.info("x_buzz_submitted", job_id=job_id, ok=ok)
         if not ok:
             return XBuzzMeasureOutput(
                 job_id=job_id,

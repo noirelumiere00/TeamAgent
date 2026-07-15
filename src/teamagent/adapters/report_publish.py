@@ -79,13 +79,15 @@ def _put_and_presign(
         url: str = s3.generate_presigned_url(
             "get_object", Params={"Bucket": bkt, "Key": key}, ExpiresIn=_EXPIRES_S
         )
+        # query（商材/テーマ/keyword＝機密でありうる）は CloudWatch に残さない。key は uuid で
+        # 商材名を含まないため bucket/key/region のみ記録する（有無だけ has_query で可観測化）。
         logger.info(
             "report_published",
             request_id=request_id,
             bucket=bkt,
             key=key,
             region=region,
-            query=query[:60],
+            has_query=bool(query),
         )
         return PublishedObject(url=url, bucket=bkt, key=key, region=region)
     except Exception as e:

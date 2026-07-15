@@ -268,6 +268,61 @@ def test_buzz_submit_spec() -> None:
     assert spec["requested_by"] == "a@vectorinc.co.jp"
 
 
+def test_buzz_submit_log_omits_keyword() -> None:
+    """x_buzz_submitted ログに keyword(商材/施策名＝機密でありうる)を残さない（#213-1）。"""
+    from structlog.testing import capture_logs
+
+    store = _FakeStore()
+    skill = XBuzzMeasureSkill(store=store)  # type: ignore[arg-type]
+    with capture_logs() as logs:
+        skill.run(
+            XBuzzMeasureInput(
+                keyword="極秘プロジェクトX 新商品",
+                start_date="2026-06-01",
+                end_date="2026-06-14",
+            ),
+            _ctx(),
+        )
+    submitted = [e for e in logs if e.get("event") == "x_buzz_submitted"]
+    assert submitted, "x_buzz_submitted ログが出ていない"
+    e = submitted[0]
+    assert "keyword" not in e
+    assert "極秘プロジェクトX" not in str(e)  # 値がどのフィールドにも漏れない
+    # ジョブ payload(spec) には keyword が要る（worker が使う）＝そちらには残る（漏洩ではない）
+    assert store.last_spec and store.last_spec["keyword"] == "極秘プロジェクトX 新商品"
+
+
+def test_report_published_log_omits_query() -> None:
+    """report_published ログに query(商材/テーマ/keyword)を残さない（#213-1）。"""
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    from structlog.testing import capture_logs
+
+    from teamagent.adapters import report_publish
+
+    fake_boto3 = MagicMock()
+    s3 = fake_boto3.session.Session.return_value.client.return_value
+    s3.get_bucket_location.return_value = {"LocationConstraint": "ap-northeast-1"}
+    s3.generate_presigned_url.return_value = "https://s3.example/signed"
+    with patch.dict(sys.modules, {"boto3": fake_boto3}), capture_logs() as logs:
+        result = report_publish._put_and_presign(
+            b"<html>x</html>",
+            content_type="text/html; charset=utf-8",
+            ext=".html",
+            prefix=None,
+            request_id="r",
+            query="極秘プロジェクトX まずい",
+        )
+    assert result is not None and result.url == "https://s3.example/signed"
+    pub = [e for e in logs if e.get("event") == "report_published"]
+    assert pub, "report_published ログが出ていない"
+    e = pub[0]
+    assert "query" not in e
+    assert "極秘プロジェクトX" not in str(e)
+    assert e.get("has_query") is True  # 有無だけは可観測
+
+
 def test_buzz_schema_rejects_long_period_and_outside_campaign() -> None:
     from pydantic import ValidationError
 
