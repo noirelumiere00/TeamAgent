@@ -1642,6 +1642,8 @@ function initGraph(){
  const AGEBK=["1ヶ月以内","3ヶ月以内","半年以内","1年以内","1年以上前"];   // 最終接点の新→旧順（ageBucket の返す値と一致）
  const CLBASE=30;                                        // リング半径係数 R=CLBASE*√(全ノード数)（≒自然スプレッドの約2倍で島を分離。切替時に再フィットで全島を画角内へ）
  const CLMAX=12;                                         // 自由記述軸(資料種類/施策)の島数上限。無制限だと表記ゆれで島とラベルが重なり判読不能になる（凡例の slice(0,9) と同趣旨）
+ const COTHER="その他";                                  // CLMAX で溢れた値の受け皿島（無言で消さず件数もラベルも出す）
+ let clOther=new Set();                                  // 「その他」島へ寄せる値の集合（buildCenters で確定）
  function grpVal(n,ax){   // 軸ごとの所属グループ。対象type以外/空はnull=グループ中心に引かず既存リンクばねに委ねる（空値は未設定/記録なし島へ）
   // last/doc_type/solution はノードに埋め込まず、既存の索引 cByStem/dByStem（DATA.clients/docs）から stem で引く（ペイロード増ゼロ）。phase はノードの既存フィールド。
   if(ax==="phase")   return n.type==="client"?(n.phase||"未設定"):null;
@@ -1655,20 +1657,30 @@ function initGraph(){
      島は動かない）。可視集合に連動させると 1 キーストロークごとに島が数百px移動して体験が壊れる。
      件数は recount() が可視基準で入れる。cnt/cCenters はプロトタイプ無しの辞書にする
      （"constructor" 等の値で cnt[g]==null が false になり島が壊れるのを防ぐ）。 */
-  const cnt=Object.create(null),seen=[];
+  const cnt=Object.create(null),seen=[];clOther=new Set();   // 軸ごとに「その他」集約をリセット
   for(let i=0;i<N.length;i++){const g=grpVal(N[i],ax);if(g===null)continue;if(cnt[g]==null){cnt[g]=0;seen.push(g);}cnt[g]++;}
   let vals;
   if(ax==="phase"){vals=Object.keys(PHASECOLOR).filter(p=>cnt[p]!=null);seen.forEach(g=>{if(g!=="未設定"&&vals.indexOf(g)<0)vals.push(g);});}
   else if(ax==="last"){vals=AGEBK.filter(p=>cnt[p]!=null);}
-  else vals=seen.filter(g=>g!=="未設定").sort((a,b)=>cnt[b]-cnt[a]).slice(0,CLMAX);   // 自由記述軸は件数降順の上位のみ（初出順より安定・島の無限増殖を防ぐ）
+  else{  /* 自由記述軸(資料種類/施策)は件数降順の上位 CLMAX-1 種＋あふれを「その他」島へ集約。
+            単純に slice で切ると、切られた値のノードは cCenters に無く grp()→gc=null で原点
+            （未所属と同じ場所）へ落ち、ラベルも件数も出ない＝**無言で消える**。実データの
+            solution は canonical がちょうど12種＋自由記述素通しで確実に溢れる。 */
+   const rest=seen.filter(g=>g!=="未設定").sort((a,b)=>cnt[b]-cnt[a]);
+   vals=rest.slice(0,CLMAX-1);
+   const over=rest.slice(CLMAX-1);
+   if(over.length){clOther=new Set(over);cnt[COTHER]=over.reduce((s,g)=>s+cnt[g],0);vals.push(COTHER);}
+  }
   ["未設定","記録なし"].forEach(u=>{if(cnt[u]!=null)vals.push(u);});   // 未設定/記録なし島は必ず末尾
   cCenters=Object.create(null);
   const tot=vals.length||1,R=CLBASE*Math.sqrt(N.length);
   vals.forEach((v,i)=>{const a=i/tot*Math.PI*2;cCenters[v]={x:Math.cos(a)*R,y:Math.sin(a)*R,n:0};});
   recount();}
+ function grpBin(n){  /* 島の割当先。CLMAX で溢れた値は「その他」島へ寄せる（無言で消さない） */
+  const g=grp(n);return (g!==null&&clOther.has(g))?COTHER:g;}
  function recount(){   // 件数だけ可視基準で更新（幾何は不変＝島は動かない・リヒート不要）
   for(const v in cCenters)cCenters[v].n=0;
-  for(let i=0;i<N.length;i++){if(!vis(i))continue;const g=grp(N[i]);if(g!==null&&cCenters[g])cCenters[g].n++;}}
+  for(let i=0;i<N.length;i++){if(!vis(i))continue;const g=grpBin(N[i]);if(g!==null&&cCenters[g])cCenters[g].n++;}}
  function clusterCap(){   // cluster有効時のみ: 軸名＋未設定件数を明示。doc基準は体験変化（取引先が資料に引かれ周辺配置）を併記
   if(!opt.cluster)return"";
   const LB={phase:"フェーズ",last:"最終接点",doc_type:"資料の種類",solution:"施策"},uk=opt.cluster==="last"?"記録なし":"未設定";
@@ -1677,6 +1689,7 @@ function initGraph(){
   if(!tot)return esc(LB[opt.cluster])+"でまとめています（表示中の対象がありません）";   /* 全島が空（対象typeを非表示にした等）で「まとめています」だけ出すと嘘になる */
   let s=esc(LB[opt.cluster])+"でまとめています";
   if(un)s+="（"+uk+" "+un+"件は"+uk+"島）";
+  if(cCenters[COTHER])s+="<br>種類が多いため上位"+(CLMAX-1)+"件のみ島にし、残り"+clOther.size+"種は「"+COTHER+"」島にまとめています";
   if(opt.cluster==="doc_type"||opt.cluster==="solution")s+="<br>資料でまとめています（取引先は資料に引かれ周辺に配置）";
   return s;}
  function ncol(n){if(n.type==="tag")return "hsl(254,42%,72%)";if(n.type==="doc")return "rgba(150,150,156,.6)";return opt.groupBy==="phase"?(PHASECOLOR[n.phase]||"#9a9a9a"):colorOf(n.industry);}
@@ -1699,7 +1712,7 @@ function initGraph(){
   for(let i=0;i<N.length;i++)if(vis(i))qForce(root,i,opt.repel,a,.49);
   for(let k=0;k<L.length;k++){const l=L[k];if(!vis(l.s)||!vis(l.t))continue;const A=N[l.s],B=N[l.t];let dx=B.x-A.x,dy=B.y-A.y,d=Math.sqrt(dx*dx+dy*dy)||1,f=(d-opt.linkDist)*.006*a;A.vx+=dx/d*f;A.vy+=dy/d*f;B.vx-=dx/d*f;B.vy-=dy/d*f;}
   for(let i=0;i<N.length;i++){if(!vis(i))continue;const n=N[i];
-   const gk=grp(n),gc=gk!==null?cCenters[gk]:null;   // まとめ軸ON かつ所属あり: 所属グループ中心への引力に差し替え（未所属=従来の弱い原点重力）
+   const gk=grpBin(n),gc=gk!==null?cCenters[gk]:null;   // まとめ軸ON かつ所属あり: 所属グループ中心への引力に差し替え（未所属=従来の弱い原点重力）。CLMAX 溢れは「その他」島へ
    if(gc){n.vx-=(n.x-gc.x)*opt.center*a;n.vy-=(n.y-gc.y)*opt.center*a;}
    else{n.vx-=n.x*opt.center*a;n.vy-=n.y*opt.center*a;}
    n.vx*=.82;n.vy*=.82;

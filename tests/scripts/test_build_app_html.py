@@ -1622,7 +1622,7 @@ def test_cluster_counts_use_visible_set_only(sidecars: Path, vault: Path, tmp_pa
     assert "for(let i=0;i<N.length;i++){const g=grpVal(N[i],ax);" in html
     # 件数だけ可視基準
     assert "function recount(){" in html
-    assert "for(let i=0;i<N.length;i++){if(!vis(i))continue;const g=grp(N[i]);" in html
+    assert "for(let i=0;i<N.length;i++){if(!vis(i))continue;const g=grpBin(N[i]);" in html
     assert "if(g!==null&&cCenters[g])cCenters[g].n++;" in html
     assert "recount();}" in html  # buildCenters の末尾で初回カウント
     # fit は可視のみの外接矩形。成功可否を返し、可視0件なら現画角維持
@@ -1654,7 +1654,10 @@ def test_cluster_island_count_is_capped(sidecars: Path, vault: Path, tmp_path: P
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
     assert "const CLMAX=12;" in html
-    assert 'vals=seen.filter(g=>g!=="未設定").sort((a,b)=>cnt[b]-cnt[a]).slice(0,CLMAX);' in html
+    assert 'const COTHER="その他";' in html
+    # 溢れは「その他」島へ集約（無言で消さない）。挙動の固定は test_graph_cluster_js.py が JS 実行で行う
+    assert "vals=rest.slice(0,CLMAX-1);" in html
+    assert "clOther=new Set(over);" in html
 
 
 def test_cluster_caption_admits_when_all_islands_empty(
@@ -1696,7 +1699,7 @@ def test_cluster_force_replaces_origin_gravity_when_active(
     out = tmp_path / "o.html"
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
-    assert "const gk=grp(n),gc=gk!==null?cCenters[gk]:null;" in html
+    assert "const gk=grpBin(n),gc=gk!==null?cCenters[gk]:null;" in html
     assert "if(gc){n.vx-=(n.x-gc.x)*opt.center*a;n.vy-=(n.y-gc.y)*opt.center*a;}" in html
     assert "else{n.vx-=n.x*opt.center*a;n.vy-=n.y*opt.center*a;}" in html  # 既定/未所属=不変
 
