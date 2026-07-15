@@ -740,6 +740,9 @@ class PgVectorClient:
                 LIMIT 1
             ) ex ON true{embedding_join}
             WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+              -- 施策研究ノート(x_research_tool)は取引先×資料の関係グラフには載せない
+              -- （商材名が cls_project=偽取引先ノード化するのを防ぐ。研究docは検索専用）。
+              AND d.metadata->>'x_research_tool' IS NULL
             ORDER BY d.modified_at DESC NULLS LAST
             LIMIT %s
         """  # nosec B608
@@ -878,6 +881,10 @@ class PgVectorClient:
                 SELECT d.metadata->>'cls_project' AS name FROM documents d
                 WHERE d.metadata->>'cls_project' IS NOT NULL
                   AND d.metadata->>'cls_project' <> ''
+                  -- 施策研究ノート(x_research_tool)の cls_project は商材/テーマ名であって取引先で
+                  -- ないため、クライアント名ブースト/sort の語彙に混ぜない（export_vault の
+                  -- _CLIENTS_SQL と同一条件。研究docは pgvector 検索専用・取引先語彙を汚さない）。
+                  AND d.metadata->>'x_research_tool' IS NULL
             ) AS names
             LIMIT %s
         """  # nosec B608

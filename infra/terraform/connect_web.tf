@@ -203,6 +203,18 @@ data "aws_iam_policy_document" "connect_web_task" {
     actions   = ["bedrock:Rerank"]
     resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/cohere.rerank-v3-5:0"]
   }
+  # レポート短縮リンク(/r)が presigned を再生成するため、署名プリンシパル(=connect-web task role)に
+  # 当該 prefix の GetObject が必要（無いとブラウザ取得時 403）。vseo-reports/=x_research 等、
+  # vseo-proposals/=提案 PPTX/PDF。バケット全体でなく2 prefix に限定（最小権限）。
+  # ※即時ロールアウトは bootstrap_vseo_s3_iam.sh の別名 inline policy で付与（apply で剥がれない）。
+  statement {
+    sid     = "VseoReportS3Read"
+    actions = ["s3:GetObject"]
+    resources = [
+      "${aws_s3_bucket.raw_files.arn}/vseo-reports/*",
+      "${aws_s3_bucket.raw_files.arn}/vseo-proposals/*",
+    ]
+  }
 }
 
 resource "aws_iam_role" "connect_web_task" {
@@ -331,6 +343,9 @@ resource "aws_ecs_task_definition" "connect_web" {
     ]
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
+      # レポート短縮リンク(/r)が presigned を再生成する対象バケット。decode_report_token の
+      # bucket allowlist にも使う（mcp 側 VSEO_REPORT_BUCKET と同一値＝トークンの bucket と一致）。
+      { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
       { name = "CONNECT_WEB_HOST", value = "0.0.0.0" },
       { name = "CONNECT_WEB_PORT", value = "8788" },
       { name = "OAUTH_REDIRECT_URI", value = var.connect_redirect_uri },

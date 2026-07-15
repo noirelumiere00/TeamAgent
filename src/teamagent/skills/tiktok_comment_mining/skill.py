@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import tempfile
+import unicodedata
 import uuid
 from typing import Any, ClassVar
 
@@ -58,6 +60,19 @@ def _str_list(v: Any, limit: int = 20) -> list[str]:
     return [str(x) for x in v if str(x).strip()][:limit]
 
 
+def _comment_dedup_key(inp: CommentMiningInput) -> str:
+    """⑤ コメント分析の永続化 external_id 用 dedup キー（分析対象の定義ハッシュ）。
+
+    キー = client_name(NFKC正規化) + 動画URL集合(順不同)。同じ client を同日に別の動画バッチで
+    分析しても別 doc になり last-write-wins で潰れない（voice の _voice_dedup_key と対称）。同一
+    バッチの再実行は同一キー＝集約。これが無いと external_id が client+owner+日付までしか分岐せず、
+    同日別バッチの分析結果が UPDATE で上書き喪失する（Codex FB P1 と同型）。
+    """
+    norm = unicodedata.normalize("NFKC", (inp.client_name or "").strip())
+    urls = "".join(sorted((u or "").strip() for u in (inp.video_urls or [])))
+    return hashlib.sha256(f"{norm}{urls}".encode()).hexdigest()[:12]
+
+
 @register
 class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput]):
     """⑤ コメント欄マイニング: バズ動画のコメントを分類し生活者の語彙を抽出する。"""
@@ -79,11 +94,13 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
         bedrock: Any | None = None,
         publisher: Any | None = None,
         comments_fn: Any | None = None,
+        persister: Any | None = None,
     ) -> None:
         self._apify = apify
         self._bedrock = bedrock
         self._publisher = publisher
         self._comments_fn = comments_fn  # chromium 一次経路（テスト注入用）
+        self._persister = persister  # ResearchPersister（Part1・None なら永続化 no-op）
 
     def _get_apify(self) -> ApifyClient:
         if self._apify is None:
@@ -321,6 +338,33 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             comments=scraped,
             cost_usd=out.total_cost_usd,
         )
+        # Part1: コメント分析を永続記録（client_name を商材扱い・空なら persister 側で no-op）。
+        # classify=False や Bedrock 失敗時は insight が URL/件数のみ＝要約が見出しだけの空ノートに
+        # なり、有用な同日記録を上書きしうる（Codex 指摘）。分析内容がある時だけ記録する。
+        has_analysis = bool(getattr(out, "cross_vocabulary", None)) or any(
+            getattr(v, "key_themes", None)
+            or getattr(v, "pain_points", None)
+            or getattr(v, "desires", None)
+            or getattr(v, "purchase_signals", None)
+            for v in (out.videos or [])
+        )
+        if self._persister is not None and (input.client_name or "").strip() and has_analysis:
+            from teamagent.skills.x_research.persist_body import build_comment_summary_md
+
+            self._persister.schedule(
+                tool="tiktok_comment",
+                product_name=input.client_name or "",
+                # title に「TikTok」を含め build_app_html の 媒体/TikTok タグを付与する。
+                title=f"{input.client_name} TikTokコメント欄マイニング",
+                body_md=build_comment_summary_md(out, client_name=input.client_name or ""),
+                owner_email=user,
+                request_id=ctx.request_id,
+                cls_solution="SNSコメント分析",
+                cls_doc_type="コメント分析",
+                source_uri=out.report_url,
+                # 分析対象(client+動画URL集合)ハッシュを dedup キーに（同日別バッチを潰さない）。
+                dedup_key=_comment_dedup_key(input),
+            )
         return out
 
     def _slack_summary(self, out: CommentMiningOutput) -> str:

@@ -12,7 +12,7 @@ import os
 
 import uvicorn
 
-from teamagent.connect_web.app import create_app
+from teamagent.connect_web.app import build_uvicorn_log_config, create_app
 
 app = create_app()
 
@@ -20,7 +20,8 @@ app = create_app()
 def main() -> None:
     host = os.environ.get("CONNECT_WEB_HOST", "127.0.0.1")
     port = int(os.environ.get("CONNECT_WEB_PORT", "8788"))
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # アクセスログの /r/<token> を伏せて配布（トークンの CloudWatch 流出を防ぐ）。
+    uvicorn.run(app, host=host, port=port, log_level="info", log_config=build_uvicorn_log_config())
 
 
 if __name__ == "__main__":

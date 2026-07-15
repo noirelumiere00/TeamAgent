@@ -95,6 +95,43 @@ def test_chromium_primary_path() -> None:
     assert "コメント欄マイニング" in out.slack_summary
 
 
+def test_comment_dedup_key_order_independent_and_batch_sensitive() -> None:
+    """⑤ の dedup キーは client+動画URL集合。順不同=同一、別バッチ=別（#214-3 対称）。"""
+    from teamagent.skills.tiktok_comment_mining.skill import _comment_dedup_key
+
+    a = CommentMiningInput(video_urls=["u1", "u2"], client_name="サンマルク")
+    b = CommentMiningInput(video_urls=["u2", "u1"], client_name="サンマルク")  # 順不同=同一
+    c = CommentMiningInput(video_urls=["u3"], client_name="サンマルク")  # 別バッチ=別
+    assert _comment_dedup_key(a) == _comment_dedup_key(b)
+    assert _comment_dedup_key(a) != _comment_dedup_key(c)
+
+
+def test_comment_persists_with_batch_dedup_key() -> None:
+    """永続化に検索定義ハッシュを dedup_key として渡す（同日別バッチを潰さない・#214-3）。"""
+    from teamagent.skills.tiktok_comment_mining.skill import _comment_dedup_key
+
+    class _Rec:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def schedule(self, **kw: Any) -> None:
+            self.calls.append(kw)
+
+    rec = _Rec()
+    skill = TikTokCommentMiningSkill(
+        apify=_FakeApify(),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(),
+        publisher=_publisher,
+        comments_fn=_chromium_ok,
+        persister=rec,  # type: ignore[arg-type]
+    )
+    inp = CommentMiningInput(video_urls=[_URL], client_name="サンマルク")
+    skill.run(inp, _ctx())
+    assert len(rec.calls) == 1
+    assert rec.calls[0]["tool"] == "tiktok_comment"
+    assert rec.calls[0]["dedup_key"] == _comment_dedup_key(inp)
+
+
 def test_apify_fallback_on_chromium_block() -> None:
     apify = _FakeApify()
     skill = TikTokCommentMiningSkill(
