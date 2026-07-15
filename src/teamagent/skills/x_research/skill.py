@@ -54,6 +54,11 @@ logger = structlog.get_logger(__name__)
 
 _ALLOWLIST_ENV = "X_RESEARCH_ALLOWED_EMAILS"  # 段階公開（空=全員許可）
 _MAX_PARALLEL_QUERIES = 4
+# ノイズ除去 LLM へ渡す投稿数の上限（likes 上位）。keep/author_notes/author_circles は入力
+# 投稿ごとに出力されるため、入力を絞らないと最大180件で出力が max_tokens を超えて切断され、
+# ノイズ除去ごと無音 fail-open で無効化される。選抜は元々 likes 上位 max_selected(≤30) なので、
+# 上限を 90（>3×max_selected）に置いても表示カードは変わらない（表示に載る投稿は必ず上位90内）。
+_NOISE_FILTER_MAX_POSTS = 90
 # 投稿再現カードの画像内包に使ってよい壁時計の**ハード上限**（秒）。残時間が幾らあっても
 # これ以上は使わない。avatar 読込は確保しつつ、遅延で openclaw ターン制限を超えて応答全損
 # するのを防ぐ折衷値（超過分＝主に添付画像 はモノグラム/画像なしにフォールバック）。
@@ -118,7 +123,10 @@ _KAIWAI_SECTION = """# 界隈（かいわい）分類
 
 """
 _KAIWAI_OUTPUT = (
-    '  "author_circles": {"post_id": ["界隈タグ"（1〜3個・根拠なければ空配列）], ...},\n'
+    # JSON 例に全角括弧の注釈を密着させない（小型モデルが verbatim コピーして壊れ JSON を出し、
+    # パース不能→全件 fail-open へ落ちるのを防ぐ）。個数(1〜3)/根拠なければ空 の指示は
+    # _KAIWAI_SECTION 側に明記済みなので、ここは妥当な JSON 配列の形だけ示す。
+    '  "author_circles": {"post_id": ["界隈タグ1", "界隈タグ2"], ...},\n'
 )
 
 
@@ -420,17 +428,24 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             noise_note = ""
             kaiwai_on = _kaiwai_enabled()  # 界隈分類(Part4)。OFF=bio送信も分類も表示もしない
             try:
+                # ノイズ除去へ渡すのは likes 上位 _NOISE_FILTER_MAX_POSTS 件に限定し、LLM 出力
+                # (keep/notes/circles は入力ごとに出る)を有界化する。keep_ids 初期値・kept・選抜は
+                # 全 posts 基準のまま（下記参照）＝表示カードは不変（選抜は上位 max_selected≤90）。
+                filter_posts = sorted(posts, key=lambda p: p.like_count, reverse=True)[
+                    :_NOISE_FILTER_MAX_POSTS
+                ]
                 prompt = load_prompt("x_research", "v1", "noise_filter").format(
                     product_name=input.product_name,
-                    posts_json=_posts_for_prompt(posts, with_bio=kaiwai_on),
+                    posts_json=_posts_for_prompt(filter_posts, with_bio=kaiwai_on),
                     kaiwai_section=(_KAIWAI_SECTION if kaiwai_on else ""),
                     kaiwai_output=(_KAIWAI_OUTPUT if kaiwai_on else ""),
                 )
                 resp = self._get_bedrock().converse(
                     messages=[{"role": "user", "content": [{"text": prompt}]}],
                     request_id=ctx.request_id,
-                    # 界隈分類ONは出力が増えるため上限を上げる（切断→無音 fail-open を避ける）。
-                    max_tokens=3584 if kaiwai_on else 2048,
+                    # 入力を上限件数に絞った上で ceiling も余裕を持たせる。max_tokens は実出力
+                    # 課金＝上げてもコスト増なし・切断のみ防ぐ。ON は界隈+bio で出力増ゆえ高く。
+                    max_tokens=8192 if kaiwai_on else 4096,
                 )
                 total_cost += resp.usage.cost_usd
                 parsed = _parse_json_block(resp.text)
@@ -465,7 +480,13 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             # のみ採用（未知キーを疑似 handle 化して他人へ誤付与しない）＋union 後も1著者3タグ上限
             # （API の author_circles と HTML 表示[:3]の件数を一致させる）。
             if author_circles:
-                pid_to_handle = {p.post_id: (p.author_handle or p.post_id) for p in posts}
+                # 束ねキー = handle。空 handle は post_id を \x00 名前空間化してフォールバック
+                # （handle は \x00 を含まないため実 handle と絶対に衝突しない＝空 handle 投稿の
+                # post_id が別投稿の handle 文字列と一致しても界隈が混ざらない）。
+                def _bundle_key(p: XPost) -> str:
+                    return p.author_handle or f"\x00pid:{p.post_id}"
+
+                pid_to_handle = {p.post_id: _bundle_key(p) for p in posts}
                 by_handle: dict[str, list[str]] = {}
                 for pid, tags in author_circles.items():
                     if pid not in pid_to_handle:
@@ -474,9 +495,7 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
                     for t in tags:
                         if t not in bucket:
                             bucket.append(t)
-                author_circles = {
-                    p.post_id: by_handle.get(p.author_handle or p.post_id, [])[:3] for p in posts
-                }
+                author_circles = {p.post_id: by_handle.get(_bundle_key(p), [])[:3] for p in posts}
 
             kept = [p for p in posts if p.post_id in keep_ids]
             selected = sorted(kept, key=lambda p: p.like_count, reverse=True)[: input.max_selected]

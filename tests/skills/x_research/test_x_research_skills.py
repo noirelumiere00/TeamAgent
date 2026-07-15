@@ -76,9 +76,16 @@ class _FakeBedrock:
     def __init__(self, text: str) -> None:
         self._text = text
         self.calls = 0
+        self.last_prompt = ""  # 直近 converse に渡ったプロンプト本文（入力cap検証用）
+        self.last_max_tokens = 0
 
     def converse(self, **kw: Any) -> _FakeResp:
         self.calls += 1
+        try:
+            self.last_prompt = kw["messages"][0]["content"][0]["text"]
+        except (KeyError, IndexError, TypeError):
+            self.last_prompt = ""
+        self.last_max_tokens = int(kw.get("max_tokens", 0))
         return _FakeResp(self._text)
 
 
@@ -218,6 +225,49 @@ def test_voice_search_drops_nonstring_circle_elements(monkeypatch: pytest.Monkey
     assert "美容界隈" in circles
     assert "None" not in circles and all("{" not in c for c in circles)  # null/dict は弾く
     assert all(len(c) <= 24 for c in circles)  # 長さ上限（チップ崩れ防止）
+
+
+def test_voice_search_caps_noise_filter_input_to_top_likes() -> None:
+    """ノイズ除去へ渡す投稿は likes 上位 _NOISE_FILTER_MAX_POSTS 件に有界化（切断→無音fail-open防止）。"""
+    from teamagent.skills.x_research.skill import _NOISE_FILTER_MAX_POSTS
+
+    n = _NOISE_FILTER_MAX_POSTS
+    # n+5 件を likes 昇順で作る（pid=0 が最小 likes・pid=n+4 が最大）。上位nに残るのは pid>=5。
+    posts = [_post(str(i), likes=i) for i in range(n + 5)]
+    bedrock = _FakeBedrock(json.dumps({"keep": [], "noise_note": ""}))
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify(posts),  # type: ignore[arg-type]
+        bedrock=bedrock,
+        publisher=_publisher,
+    )
+    skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    prompt = bedrock.last_prompt
+    # 最小likesの下位5件(pid 0..4)はプロンプトに載らない、上位は載る。
+    assert '"post_id": "0"' not in prompt and '"post_id": "4"' not in prompt
+    assert f'"post_id": "{n + 4}"' in prompt  # 最大likesは必ず載る
+    assert bedrock.last_max_tokens >= 4096  # ceiling を引き上げ済み（切断防止）
+
+
+def test_voice_search_empty_handle_no_circle_crosstalk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空handle投稿のpost_idが別投稿のhandle文字列と一致しても界隈が混ざらない（名前空間化）。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
+    # p1: post_id='uZ' かつ handle 空 / p2: handle='uZ'。旧実装だと両者が同一バケットを共有した。
+    p1 = replace(_post("uZ", "コスメ購入品", 50), author_handle="", url="https://x.com/_/status/uZ")
+    p2 = replace(
+        _post("p2", "淡色コーデ", 40), author_handle="uZ", url="https://x.com/uZ/status/p2"
+    )
+    noise_json = json.dumps(
+        {"keep": ["uZ", "p2"], "author_circles": {"uZ": ["美容界隈"], "p2": ["淡色界隈"]}}
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([p1, p2]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    by_id = {p.post_id: p for p in out.posts}
+    assert by_id["uZ"].author_circles == ["美容界隈"]  # 空handle投稿は自分の界隈のみ
+    assert by_id["p2"].author_circles == ["淡色界隈"]  # handle='uZ' の別人へ混入しない
 
 
 def test_voice_search_unverified_marked_not_dropped() -> None:
