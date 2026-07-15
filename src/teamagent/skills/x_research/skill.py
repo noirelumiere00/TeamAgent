@@ -122,6 +122,19 @@ def _analysis_bedrock() -> Any:
     return BedrockClient(region=os.environ.get("AWS_REGION", "ap-northeast-1"), model_id=model_id)
 
 
+def _report_shorturl_enabled() -> bool:
+    """USE_REPORT_SHORTURL: レポートを短縮URL(/r)で配布する段階ゲート（既定 OFF）。
+
+    connect-web に /r ルート＋vseo-s3-read が揃い、**実機 /r をリダイレクト追従して最終 200
+    （＝S3 GetObject が実際に成功する）**を確認した後に ON にする。302 だけでは不十分:
+    presign はローカル署名操作なので GetObject 権限が無くても 302 は返り、権限不足は 302 を
+    追った S3 取得時に 403 として初めて顕在化する（bootstrap_vseo_s3_iam.sh が IAM 認可を
+    simulate-principal-policy で実証する）。揃う前に ON にすると受信者側で 404/403 に劣化する
+    ため、OFF の間は従来 presigned を返す。
+    """
+    return os.environ.get("USE_REPORT_SHORTURL", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 class _XSyncBase:
     """①②共通の部品（Apify/Bedrock/publisher の遅延生成と注入可能化）。"""
 
@@ -167,9 +180,31 @@ class _XSyncBase:
             return str(url) if url else None
         if not os.environ.get("VSEO_REPORT_BUCKET"):
             return None
-        from teamagent.adapters.report_publish import publish_html_file
+        from teamagent.adapters.report_publish import publish_html_file_result
 
-        return publish_html_file(path, request_id=request_id, query=query)
+        result = publish_html_file_result(path, request_id=request_id, query=query)
+        if result is None:
+            return None
+        # openclaw(@AiLa) が長い presigned URL のクエリ(?X-Amz-Signature…)を削って壊すため、
+        # クエリ無しの短縮URL /r/<token> を返す（/r が都度新鮮な presigned へ 302）。ただし
+        # 段階ゲート: USE_REPORT_SHORTURL=on・署名鍵あり・CONNECT_BASE_URL あり の3条件が
+        # 揃った時だけ短縮URL化。揃う前（connect-web に /r+S3権限が無い/鍵不一致）に出すと
+        # 404/403 に劣化するため、既定は従来 presigned のまま（後方互換・安全側）。
+        from teamagent.adapters.report_link_token import (
+            encode_report_token,
+            has_secret,
+            is_allowed_key,
+        )
+        from teamagent.skills.knowledge_search_url.skill import connect_base_url
+
+        base = connect_base_url()
+        if base and _report_shorturl_enabled() and has_secret() and is_allowed_key(result.key):
+            try:
+                token = encode_report_token(result.bucket, result.key, region=result.region)
+                return f"{base}/r/{token}"
+            except Exception:
+                logger.warning("x_research_short_url_failed", request_id=request_id)
+        return result.url
 
     def _search_parallel(
         self,
@@ -667,7 +702,9 @@ class XBuzzMeasureSkill(BaseSkill[XBuzzMeasureInput, XBuzzMeasureOutput]):
             "request_id": ctx.request_id,
         }
         ok = self._store.submit(spec)
-        log.info("x_buzz_submitted", job_id=job_id, ok=ok, keyword=input.keyword)
+        # keyword（商材/施策名＝機密でありうる）は CloudWatch に残さない。job_id と成否のみ記録
+        # （done 系ログが product_name/theme を出さないのと同一姿勢）。
+        log.info("x_buzz_submitted", job_id=job_id, ok=ok)
         if not ok:
             return XBuzzMeasureOutput(
                 job_id=job_id,
