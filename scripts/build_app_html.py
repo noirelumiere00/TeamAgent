@@ -394,6 +394,19 @@ def product_tags(value):
     return out
 
 
+def category_tags(value):
+    """カテゴリ/ タグ（多値）。資料の概要は複数選択（提案,レポート 等）があるため分割・重複除去する。
+
+    ファイル記録の保管先フォルダミラー（01_提案 等・単値）はそのまま 1 要素になる（Codex #215-カテゴリ複数値）。
+    """
+    out = []
+    for v in _split_meta_multi(value):
+        if v in out:
+            continue
+        out.append(v)
+    return out
+
+
 # 施策手法/: title+excerpt+product+category(+本文) を対象に決定論キーワードで付与（複数可）。
 # 誤爆しにくい語に限定（分析準拠）。NFKC 正規化＋大文字化で全角/小文字ゆれを吸収してから包含判定。
 _METHOD_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
@@ -1067,8 +1080,8 @@ function agoLabel(n){return n==null?"":n<=0?"今日":n+"日前";}
 function agoCoarse(ds){const n=daysAgo(ds);if(n==null)return"";if(n<=0)return"今日";if(n<7)return"約"+n+"日前";if(n<31)return"約"+Math.round(n/7)+"週前";if(n<365)return"約"+Math.round(n/30)+"ヶ月前";return"約"+Math.round(n/365)+"年前";}
 function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);t.push("最終接点/"+(ageBucket(c.last)||"記録なし"));if(c.temp)t.push("温度感/"+c.temp);if(c.hw)t.push("宿題/あり");(c.tans||[]).forEach(n=>t.push("担当/"+n));return t;}
 function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);(d.media||[]).forEach(m=>t.push("媒体/"+m));(d.vfmt||[]).forEach(v=>t.push("動画形式/"+v));if(d.fmt)t.push("形式/"+d.fmt);if(d.xc)t.push("横断/"+d.xc);(d.ents||[]).forEach(e=>{if(nrm(e)!==nrm(d.client))t.push("関係先/"+e.split(/[\/／]/).join("・"));});
- /* ナレッジ共有メタ4軸（分割/正規化は Python 側で済・ここは配列を素通しでタグ化）: カテゴリ(単値)/クライアント種別(多値)/提案プロダクト(多値)/施策手法(多値)/代理店(bool) */
- if(d.category)t.push("カテゴリ/"+d.category);(d.client_tier||[]).forEach(v=>t.push("クライアント種別/"+v));(d.product||[]).forEach(v=>t.push("提案プロダクト/"+v));(d.method||[]).forEach(v=>t.push("施策手法/"+v));if(d.agency)t.push("代理店/あり");return t;}
+ /* ナレッジ共有メタ4軸（分割/正規化は Python 側で済・ここは配列を素通しでタグ化）: カテゴリ(多値)/クライアント種別(多値)/提案プロダクト(多値)/施策手法(多値)/代理店(bool) */
+ (d.category||[]).forEach(v=>t.push("カテゴリ/"+v));(d.client_tier||[]).forEach(v=>t.push("クライアント種別/"+v));(d.product||[]).forEach(v=>t.push("提案プロダクト/"+v));(d.method||[]).forEach(v=>t.push("施策手法/"+v));if(d.agency)t.push("代理店/あり");return t;}
 const IDX=[];
 DATA.clients.forEach(c=>IDX.push({kind:"client",stem:c.stem,name:c.name,folder:"clients",tags:clientTags(c),
  props:{"業界":c.industry,"フェーズ":c.phase,"BANT":c.bant,"最終接点":c.last||"—"},hay:(c.name+" "+c.industry+" "+c.phase+" "+c.bant+" "+(c.md||"")).toLowerCase(),ex:c.industry?("業種: "+c.industry):"",obj:c}));
@@ -2100,9 +2113,9 @@ def main(argv: list[str] | None = None) -> int:
             # 名寄せタグ（cls_entities）: export_vault が frontmatter entities に CSV で載せる。
             # /app の「関係先/」タグ・検索へ展開（親クライアント名で子コラボ資料を出す）。
             "ents": [e.strip() for e in fm.get("entities", "").split(",") if e.strip()],
-            # ナレッジ共有メタ4軸: カテゴリ(単値)/クライアント種別(多値)/提案プロダクト(多値)/
+            # ナレッジ共有メタ4軸: カテゴリ(多値)/クライアント種別(多値)/提案プロダクト(多値)/
             # 施策手法(title+excerpt+product+category+本文の決定論キーワード)/代理店(bool)。
-            "category": _dcategory,
+            "category": category_tags(_dcategory),
             "client_tier": client_tier_tags(_dtier_raw),
             "product": product_tags(_dprod_raw),
             "method": method_tags(

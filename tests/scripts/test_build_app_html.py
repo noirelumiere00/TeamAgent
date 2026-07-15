@@ -862,7 +862,11 @@ def test_client_tier_tags_splits_on_ascii_comma_not_toten() -> None:
         "メーカー",
     ]
     # 全角カンマ・前後スペースの trim
-    assert _mod.client_tier_tags("メーカー, その他， 上場企業") == ["メーカー", "その他", "上場企業"]
+    assert _mod.client_tier_tags("メーカー, その他， 上場企業") == [
+        "メーカー",
+        "その他",
+        "上場企業",
+    ]
     # 読点内包値とカンマ多選択の共存
     assert _mod.client_tier_tags("TOP500 or ベス10, 官公庁、自治体") == [
         "TOP500 or ベス10",
@@ -915,7 +919,9 @@ def test_agency_flag_boolean_only() -> None:
     assert _mod.agency_flag("") is False
 
 
-def _write_meta_doc(vault: Path, stem: str, category: str, tier: str, product: str, body: str) -> None:
+def _write_meta_doc(
+    vault: Path, stem: str, category: str, tier: str, product: str, body: str
+) -> None:
     """ナレッジ共有メタ frontmatter（category/client_tier/product）+ 本文を持つ資料 note。"""
     (vault / "docs" / f"{stem}.md").write_text(
         f'---\ntitle: "{stem}"\nclient: "出光興産"\nindustry: "エネルギー"\n'
@@ -933,7 +939,7 @@ def test_knowledge_meta_tags_payload_and_js_wiring(
     _write_meta_doc(
         vault,
         "エスタック_打ち返し資料",
-        category="クロージング",
+        category="提案,クロージング",  # カテゴリも複数選択があり得る（Codex #215-カテゴリ複数値）
         tier="TOP500 or ベス10,官公庁、自治体",  # 読点内包値の共存
         product="ショート動画提案（UGCや切り抜き、メディア）,InsigtFinder",  # 読点内包+タイポ
         body="TikTok向けUGCと切り抜き施策。代理店経由での実施を想定。",
@@ -942,14 +948,12 @@ def test_knowledge_meta_tags_payload_and_js_wiring(
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
 
-    # payload: 単値カテゴリ / 多値は Python 側で分割・正規化済み配列 / 施策手法キーワード / 代理店 bool
-    assert '"category": "クロージング"' in html
+    # payload: カテゴリも多値分割 / 多値は Python 側で分割・正規化済み配列 / 施策手法 / 代理店 bool
+    assert '"category": ["提案", "クロージング"]' in html
     # 読点で割らず 官公庁・自治体 を1値化（誤分割回帰の防止）
     assert '"client_tier": ["TOP500 or ベス10", "官公庁・自治体"]' in html
     # タイポ InsigtFinder→InsightFinder / 括弧内読点は値の一部
-    assert (
-        '"product": ["ショート動画提案（UGCや切り抜き、メディア）", "InsightFinder"]' in html
-    )
+    assert '"product": ["ショート動画提案（UGCや切り抜き、メディア）", "InsightFinder"]' in html
     # 施策手法は title+excerpt+product+category+本文 から決定論抽出（UGC・切り抜き）
     assert '"UGC"' in html and '"切り抜き・TTO"' in html
     assert '"agency": true' in html
@@ -958,7 +962,7 @@ def test_knowledge_meta_tags_payload_and_js_wiring(
     assert '(d.client_tier||[]).forEach(v=>t.push("クライアント種別/"+v))' in html
     assert '(d.product||[]).forEach(v=>t.push("提案プロダクト/"+v))' in html
     assert '(d.method||[]).forEach(v=>t.push("施策手法/"+v))' in html
-    assert 'if(d.category)t.push("カテゴリ/"+d.category)' in html
+    assert '(d.category||[]).forEach(v=>t.push("カテゴリ/"+v))' in html
     assert 'if(d.agency)t.push("代理店/あり")' in html
     # CATMETA 系統色 + TAGORDER（資料のタグ群・取引先群 slice(0,7) は不変）
     for cat in ("カテゴリ", "クライアント種別", "提案プロダクト", "施策手法", "代理店"):
@@ -1268,7 +1272,9 @@ def test_ux4_tag_pane_enhancements(ux_html: str) -> None:
         in html
     )
     # 先頭7=取引先のタグ（宿題〜最終接点）は不変・ナレッジ共有メタ4軸は資料のタグ群（index≥7）へ
-    assert '"最終接点","資料種別","カテゴリ"' in html  # 資料群の先頭に挿入（取引先群 slice(0,7) を侵さない）
+    assert (
+        '"最終接点","資料種別","カテゴリ"' in html
+    )  # 資料群の先頭に挿入（取引先群 slice(0,7) を侵さない）
     assert "取引先のタグ" in html and "資料のタグ" in html
     assert "タグを絞り込み…" in html
     assert "tagSortAlpha" in html and "件数順⇄五十音順" in html

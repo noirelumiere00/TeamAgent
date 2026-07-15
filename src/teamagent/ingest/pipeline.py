@@ -137,6 +137,36 @@ def _drain_changes(
     return changed, next_cursor
 
 
+# ナレッジ台帳行が「99_一次倉庫」系（検索対象外の生データ置き場）を指しているかを見る列。
+# 実シート dump(2026-07-15) のヘッダ準拠。フォルダ/ファイル名を持ちうる運用列だけを見る。
+# ⚠️ 現行 dump では **到達不能な保険**（旧_保管先フォルダ は date_client 形式・99_ は 0 件、
+# 資料の概要_メイン は 提案/レポート 等の素の値）。将来 99_ 系の列値が現れた時に備えた保険で、
+# 「今 99 を守れている」証明ではない。prod 稼働中のフォーム回答タブが持つ「ドライブ格納」を
+# あえて含めないのは、その行に安定 ID を与えると既存 document を孤児化するため（stale 検出なし）。
+# 判定規則そのものは gdrive 取込と同一の正本 regex（DEFAULT_EXCLUDE_FOLDER_NAME_RE）を
+# _ingest_gsheet 内で lazy import して再利用する（sheet 側で独自ルールを持たない）。
+_KNOWLEDGE_FOLDER_HINT_COLUMNS: tuple[str, ...] = (
+    "旧_保管先フォルダ",
+    "保管先フォルダ",  # 将来列（現行 dump には無い）
+    "保存ファイル（リンク付き）",
+    "資料の概要_メイン",
+)
+# 本文(embedding/抜粋)に載せない運用列。人間の知見を含まないのに長大で、先頭に来ると
+# export_vault の 160 字抜粋を食い潰し、ポイント/なぜ/フリーコメント が抜粋から落ちる。
+_KNOWLEDGE_OPS_COLUMNS: frozenset[str] = frozenset(
+    {
+        "ファイルをアップ",  # Slack file URL（長大・知見ゼロ）
+        "タイムスタンプ",
+        "連番",
+        "保存ファイル（リンク付き）",
+        "処理エラー",
+        "旧_保管先フォルダ",
+        "保管先フォルダID記録（GAS処理)",
+        "ドライブ格納",
+    }
+)
+
+
 def _company_acl_groups() -> list[str]:
     """§G 会社共有: ``TEAMAGENT_SHARED_COMPANY_DOMAINS`` を ``documents.acl_groups`` に付与する。
 
@@ -1701,9 +1731,11 @@ def _ingest_gsheet(
     request_id: str,
 ) -> tuple[int, int]:
     """1 Sheet を取り込む（row_unit=True で 1 行 = 1 document）。"""
+    from teamagent.adapters.gdrive_client import DEFAULT_EXCLUDE_FOLDER_NAME_RE
     from teamagent.adapters.gsheets_client import (
         GSheetsClient,
         build_external_id,
+        build_stable_external_id,
         format_row_as_document,
     )
     from teamagent.ingest.classify import build_classifier_from_env
@@ -1718,6 +1750,8 @@ def _ingest_gsheet(
     from teamagent.ingest.slack_fb_parser import extract_client_name, map_fb_fields
 
     client = GSheetsClient.from_env()
+    # 99_一次倉庫系の除外判定は gdrive と同一 regex（正本）を使う。
+    excl_folder_re = re.compile(DEFAULT_EXCLUDE_FOLDER_NAME_RE)
     # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。sheet 単位で 1 回構築）。
     # gsheet は row_unit=True（1 行 = 1 document = 1 chunk）なので contextualizer は付けない。
     classifier = build_classifier_from_env()
@@ -1753,6 +1787,8 @@ def _ingest_gsheet(
         )
         if not tab_rows.headers:
             continue
+        # 安定 external_id の衝突検知用（tab 単位）。identity → 最初に使った row_idx。
+        seen_row_ids: dict[str, int] = {}
         for row_idx, row in enumerate(tab_rows.rows, start=2):  # 1=headers, 2 から data
             text = format_row_as_document(tab_rows.headers, row)
             if not text.strip():
@@ -1787,6 +1823,63 @@ def _ingest_gsheet(
                 )
                 if derived_knowledge_client:
                     knowledge_doc_metadata["client_name"] = derived_knowledge_client
+
+            # ナレッジ台帳行(ファイル記録)の正規化（Codex #215-2/-4/-5・実シート dump 準拠）:
+            if knowledge_metadata:
+                # (a) 99_一次倉庫系（検索対象外の生データ置き場）は取り込まない。判定規則は
+                #     gdrive 取込と同一の DEFAULT_EXCLUDE_FOLDER_NAME_RE に一本化する（独自の
+                #     startswith("99") を持たない）。実 dump では該当 0 件＝将来行への保険。
+                if any(
+                    excl_folder_re.search(str(row_fields.get(k, "") or ""))
+                    for k in _KNOWLEDGE_FOLDER_HINT_COLUMNS
+                ):
+                    continue
+                # (b) 本文から運用列を外す。Slack file URL 等が先頭にあると export_vault の
+                #     160 字抜粋を食い潰し、知見が書かれた ポイント/なぜ/フリーコメント が
+                #     抜粋＝/app のタグ源から落ちる（実測: 施策手法 6→1）。ナレッジ行のみ再構成。
+                _body = format_row_as_document(
+                    tab_rows.headers, row, exclude_headers=_KNOWLEDGE_OPS_COLUMNS
+                )
+                if _body.strip():
+                    text = _body
+                # (c) title は "row N" でなく「正式社名 案件名」に（連番の有無に依らず）。
+                #     正式社名がプレースホルダ(なし/その他 等)の行は従来タイトルを維持する。
+                _company = derive_knowledge_client_name(
+                    knowledge_metadata.get("client_company", "")
+                )
+                _case = str(knowledge_metadata.get("client_case", "") or "").strip()
+                _title_parts = [x for x in (_company, _case) if x]
+                if _title_parts:
+                    row_title = " ".join(_title_parts)
+                # (d) 安定 external_id: ファイル記録タブの「連番」(例 20250617-001) を identity に
+                #     する。実 dump で 142/142 ユニーク・重複 0 かつ行位置に依存しないため、
+                #     並べ替え/行挿入で上書き先がズレない。**連番を持たないシート（フォーム回答
+                #     タブ等）は従来の行番号 ID のまま**＝取り込み済 document を孤児化しない
+                #     （gsheets に stale 検出が無く、ID を変えると旧 doc が永久残存するため）。
+                _seq = str(row_fields.get("連番", "") or "").strip()
+                if not _seq and "連番" in row_fields:
+                    # 連番列は在るのに値が空（GAS 未処理）。行番号 ID のままなので、後で連番が
+                    # 埋まる/行が動くと旧 ID の doc が孤児化する。運用で気付けるよう警告する。
+                    logger.warning(
+                        "gsheet_row_missing_seq",
+                        sheet_id=spec.sheet_id,
+                        gid=tab.gid,
+                        row_idx=row_idx,
+                    )
+                if _seq:
+                    external_id = build_stable_external_id(spec.sheet_id, tab.gid, _seq)
+                    # identity 衝突は黙って上書きせず可観測化（1行=1doc の前提が壊れた合図）。
+                    _prev = seen_row_ids.get(external_id)
+                    if _prev is not None:
+                        logger.error(
+                            "gsheet_row_identity_collision",
+                            sheet_id=spec.sheet_id,
+                            gid=tab.gid,
+                            first_row=_prev,
+                            dup_row=row_idx,
+                        )
+                    else:
+                        seen_row_ids[external_id] = row_idx
 
             # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
             # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
