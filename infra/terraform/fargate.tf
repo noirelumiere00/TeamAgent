@@ -487,6 +487,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_X_RESEARCH_TOOLS", value = "1" },
       { name = "USE_SEARCH_SURFACE_TOOL", value = "1" },
       { name = "USE_TIKTOK_COMMENT_TOOLS", value = "1" },
+      # Part4 X投稿者の界隈マルチラベル分類。既定 false=bio送信も分類も表示もしない（完全no-op）。
+      # 分類品質を実データ(apidojo の bio 取得率含む)で検証してから true にする。
+      { name = "USE_KAIWAI_CLASSIFY", value = var.enable_kaiwai_classify ? "1" : "0" },
       # Part1 施策研究の永続記録(pgvector→AiLaVault)。RLS admin INSERT を owner/別社員/社外の
       # 3者の通常検索で検証してから true にする（既定 false=完全 no-op・後方互換）。
       { name = "USE_RESEARCH_PERSIST", value = var.enable_research_persist ? "1" : "0" },

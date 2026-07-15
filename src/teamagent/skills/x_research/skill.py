@@ -57,6 +57,11 @@ logger = structlog.get_logger(__name__)
 
 _ALLOWLIST_ENV = "X_RESEARCH_ALLOWED_EMAILS"  # 段階公開（空=全員許可）
 _MAX_PARALLEL_QUERIES = 4
+# ノイズ除去 LLM へ渡す投稿数の上限（likes 上位）。keep/author_notes/author_circles は入力
+# 投稿ごとに出力されるため、入力を絞らないと最大180件で出力が max_tokens を超えて切断され、
+# ノイズ除去ごと無音 fail-open で無効化される。選抜は元々 likes 上位 max_selected(≤30) なので、
+# 上限を 90（>3×max_selected）に置いても表示カードは変わらない（表示に載る投稿は必ず上位90内）。
+_NOISE_FILTER_MAX_POSTS = 90
 # 投稿再現カードの画像内包に使ってよい壁時計の**ハード上限**（秒）。残時間が幾らあっても
 # これ以上は使わない。avatar 読込は確保しつつ、遅延で openclaw ターン制限を超えて応答全損
 # するのを防ぐ折衷値（超過分＝主に添付画像 はモノグラム/画像なしにフォールバック）。
@@ -89,12 +94,53 @@ def _parse_json_block(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _posts_for_prompt(posts: list[XPost], limit_chars: int = 280) -> str:
+def _kaiwai_enabled() -> bool:
+    """USE_KAIWAI_CLASSIFY: 投稿者の界隈マルチラベル分類（Part4）。
+
+    既定 OFF＝bio を LLM へ送らず・プロンプトで界隈を尋ねず・カードにも界隈チップを出さない
+    （完全 no-op・後方互換）。分類品質を実データで検証してから ON にする。
+    """
+    return os.environ.get("USE_KAIWAI_CLASSIFY", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# 界隈分類（Part4）のプロンプト差込。USE_KAIWAI_CLASSIFY=ON の時だけ noise_filter に注入する
+# （OFF 時は空文字＝LLM は界隈を生成しない＝出力肥大による切断リスクも増やさない）。
+_KAIWAI_SECTION = """# 界隈（かいわい）分類
+残す各投稿の投稿者を「界隈」に分類してください。界隈とは「好き」や興味関心を軸に\
+形成されるゆるい集団（コミュニティ）で、1人が複数の界隈に属します（例: 美容界隈 & 淡色界隈）。\
+**投稿者のbioと投稿内容から観測できる範囲で** 1〜3個の界隈タグを付けます。
+
+判定の手がかり（界隈言語＝その界隈特有の語彙。bio/本文にあれば強い根拠）:
+- 美容界隈: コスメ/スキンケア/垢抜け/購入品
+- 淡色界隈: 淡色/ニュアンス/くすみカラー
+- K-POP界隈: 推し/カムバ/스밍/ペン
+- 推し活界隈: 尊い/最推し/同担/遠征/オタ活
+- サウナ界隈: ととのう/サ活/オロポ
+- 量産界隈: 量産型/地雷/病みかわ
+- ストリート界隈: ストリート/古着/Y2K
+- ガジェット界隈: ガジェット/デスク環境/レビュー
+- 子育て界隈: 育児/ワンオペ/離乳食/ママ垢
+- カフェ/グルメ界隈: カフェ巡り/映えスイーツ/食べ歩き
+上記は例。他に妥当な界隈があれば命名してよい。ただし**bio/投稿に根拠が無ければ空配列**\
+（想定でよいが捏造しない）。
+
+"""
+_KAIWAI_OUTPUT = (
+    # JSON 例に全角括弧の注釈を密着させない（小型モデルが verbatim コピーして壊れ JSON を出し、
+    # パース不能→全件 fail-open へ落ちるのを防ぐ）。個数(1〜3)/根拠なければ空 の指示は
+    # _KAIWAI_SECTION 側に明記済みなので、ここは妥当な JSON 配列の形だけ示す。
+    '  "author_circles": {"post_id": ["界隈タグ1", "界隈タグ2"], ...},\n'
+)
+
+
+def _posts_for_prompt(posts: list[XPost], limit_chars: int = 280, *, with_bio: bool = False) -> str:
     return json.dumps(
         [
             {
                 "post_id": p.post_id,
                 "author": p.author_handle,
+                # bio は界隈分類(Part4)有効時だけ送る（OFF時へは送らない＝無用な送信を避ける）。
+                **({"bio": (p.author_bio or "")[:160]} if with_bio else {}),
                 "text": p.text[:limit_chars],
                 "likes": p.like_count,
             }
@@ -269,6 +315,7 @@ class _XSyncBase:
         selected: list[XPost],
         *,
         author_notes: dict[str, str],
+        author_circles: dict[str, list[str]] | None = None,
         remaining_s: int,
         request_id: str,
         user: str,
@@ -306,6 +353,7 @@ class _XSyncBase:
                         v.author_name if v is not None and v.author_name else p.author_name
                     ),
                     author_note=author_notes.get(p.post_id, ""),
+                    author_circles=(author_circles or {}).get(p.post_id, []),
                     text=(v.text if v is not None and v.text else p.text),
                     like_count=(v.like_count if v is not None and v.like_count else p.like_count),
                     retweet_count=p.retweet_count,
@@ -431,35 +479,85 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             # ノイズ除去+属性メモ（Haiku 1回・失敗は全残し=fail-open）
             keep_ids = {p.post_id for p in posts}
             author_notes: dict[str, str] = {}
+            author_circles: dict[str, list[str]] = {}  # post_id -> 界隈タグ（Part4）
             noise_note = ""
+            kaiwai_on = _kaiwai_enabled()  # 界隈分類(Part4)。OFF=bio送信も分類も表示もしない
             try:
+                # ノイズ除去へ渡すのは likes 上位 _NOISE_FILTER_MAX_POSTS 件に限定し、LLM 出力
+                # (keep/notes/circles は入力ごとに出る)を有界化する。keep_ids 初期値・kept・選抜は
+                # 全 posts 基準のまま（下記参照）＝表示カードは不変（選抜は上位 max_selected≤90）。
+                filter_posts = sorted(posts, key=lambda p: p.like_count, reverse=True)[
+                    :_NOISE_FILTER_MAX_POSTS
+                ]
                 prompt = load_prompt("x_research", "v1", "noise_filter").format(
-                    product_name=input.product_name, posts_json=_posts_for_prompt(posts)
+                    product_name=input.product_name,
+                    posts_json=_posts_for_prompt(filter_posts, with_bio=kaiwai_on),
+                    kaiwai_section=(_KAIWAI_SECTION if kaiwai_on else ""),
+                    kaiwai_output=(_KAIWAI_OUTPUT if kaiwai_on else ""),
                 )
                 resp = self._get_bedrock().converse(
                     messages=[{"role": "user", "content": [{"text": prompt}]}],
                     request_id=ctx.request_id,
-                    max_tokens=2048,
+                    # 入力を上限件数に絞った上で ceiling も余裕を持たせる。max_tokens は実出力
+                    # 課金＝上げてもコスト増なし・切断のみ防ぐ。ON は界隈+bio で出力増ゆえ高く。
+                    max_tokens=8192 if kaiwai_on else 4096,
                 )
                 total_cost += resp.usage.cost_usd
                 parsed = _parse_json_block(resp.text)
-                if parsed and isinstance(parsed.get("keep"), list):
+                if parsed is None:
+                    # 応答が壊れ/切断＝ノイズ除去も界隈も効かないので明示警告（無音の劣化を防ぐ）。
+                    warnings.append(
+                        "ノイズ除去の応答を解釈できませんでした（全件を候補に含めます）"
+                    )
+                    log.warning("x_voice_noise_filter_unparsable", request_id=ctx.request_id)
+                elif isinstance(parsed.get("keep"), list):
                     llm_keep = {str(i) for i in parsed["keep"]}
                     if llm_keep & keep_ids:
                         keep_ids = llm_keep & keep_ids
                     notes = parsed.get("author_notes")
                     if isinstance(notes, dict):
                         author_notes = {str(k): str(v) for k, v in notes.items()}
+                    if kaiwai_on and isinstance(parsed.get("author_circles"), dict):
+                        # 文字列のみ採用（null/数値/dict を弾く＝ゴミ界隈タグ防止）・1タグ24字上限。
+                        author_circles = {
+                            str(k): [t.strip()[:24] for t in v if isinstance(t, str) and t.strip()][
+                                :3
+                            ]
+                            for k, v in parsed["author_circles"].items()
+                            if isinstance(v, list)
+                        }
                     noise_note = str(parsed.get("noise_note") or "")
             except Exception as e:
                 warnings.append("ノイズ除去をスキップしました（全件を候補に含めます）")
                 log.warning("x_voice_noise_filter_failed", error=type(e).__name__)
+
+            # 同一著者は結果内で界隈を束ねてタグを一貫させる（複数投稿でブレさせない）。既知 post_id
+            # のみ採用（未知キーを疑似 handle 化して他人へ誤付与しない）＋union 後も1著者3タグ上限
+            # （API の author_circles と HTML 表示[:3]の件数を一致させる）。
+            if author_circles:
+                # 束ねキー = handle。空 handle は post_id を \x00 名前空間化してフォールバック
+                # （handle は \x00 を含まないため実 handle と絶対に衝突しない＝空 handle 投稿の
+                # post_id が別投稿の handle 文字列と一致しても界隈が混ざらない）。
+                def _bundle_key(p: XPost) -> str:
+                    return p.author_handle or f"\x00pid:{p.post_id}"
+
+                pid_to_handle = {p.post_id: _bundle_key(p) for p in posts}
+                by_handle: dict[str, list[str]] = {}
+                for pid, tags in author_circles.items():
+                    if pid not in pid_to_handle:
+                        continue  # 未知の post_id キーは捨てる（誤付与防止）
+                    bucket = by_handle.setdefault(pid_to_handle[pid], [])
+                    for t in tags:
+                        if t not in bucket:
+                            bucket.append(t)
+                author_circles = {p.post_id: by_handle.get(_bundle_key(p), [])[:3] for p in posts}
 
             kept = [p for p in posts if p.post_id in keep_ids]
             selected = sorted(kept, key=lambda p: p.like_count, reverse=True)[: input.max_selected]
             cards, cost = self._verify_selected(
                 selected,
                 author_notes=author_notes,
+                author_circles=author_circles,
                 remaining_s=remaining(),
                 request_id=ctx.request_id,
                 user=user,

@@ -76,9 +76,16 @@ class _FakeBedrock:
     def __init__(self, text: str) -> None:
         self._text = text
         self.calls = 0
+        self.last_prompt = ""  # 直近 converse に渡ったプロンプト本文（入力cap検証用）
+        self.last_max_tokens = 0
 
     def converse(self, **kw: Any) -> _FakeResp:
         self.calls += 1
+        try:
+            self.last_prompt = kw["messages"][0]["content"][0]["text"]
+        except (KeyError, IndexError, TypeError):
+            self.last_prompt = ""
+        self.last_max_tokens = int(kw.get("max_tokens", 0))
         return _FakeResp(self._text)
 
 
@@ -119,6 +126,148 @@ def test_voice_search_happy_path() -> None:
     assert out.report_url == "https://s3.example/signed"
     assert "白湯" in out.slack_summary and out.total_cost_usd > 0
     assert len(apify.verify_calls) == 1  # 厳選分のみ検証
+
+
+def test_voice_search_assigns_kaiwai_circles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """USE_KAIWAI_CLASSIFY=1 で LLM の author_circles がカードに界隈タグとして配線される（Part4）。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
+    posts = [_post("1", likes=31), _post("2", likes=64)]
+    noise_json = json.dumps(
+        {
+            "keep": ["1", "2"],
+            "author_circles": {"1": ["美容界隈", "淡色界隈"], "2": ["ガジェット界隈"]},
+            "noise_note": "",
+        }
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify(posts),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    by_id = {p.post_id: p for p in out.posts}
+    assert by_id["1"].author_circles == ["美容界隈", "淡色界隈"]  # マルチラベル
+    assert by_id["2"].author_circles == ["ガジェット界隈"]
+
+
+def test_voice_search_bundles_circles_per_author(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一著者(handle)の複数投稿は界隈を union して両方に付ける（タグをブレさせない）。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
+    p1 = replace(
+        _post("1", "コスメ購入品", 50), author_handle="uX", url="https://x.com/uX/status/1"
+    )
+    p2 = replace(_post("2", "淡色コーデ", 40), author_handle="uX", url="https://x.com/uX/status/2")
+    noise_json = json.dumps(
+        {
+            "keep": ["1", "2"],
+            "author_circles": {"1": ["美容界隈"], "2": ["淡色界隈"]},
+            "noise_note": "",
+        }
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([p1, p2]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    for c in out.posts:
+        assert set(c.author_circles) == {"美容界隈", "淡色界隈"}  # 同一著者は union
+
+
+def test_card_renders_kaiwai_chips() -> None:
+    """再現カード枠外に界隈チップを表示（空なら出さない）。"""
+    from teamagent.skills.x_research.report import _card
+
+    h = _card(
+        XPostCard(
+            post_id="1",
+            url="https://x.com/u/1",
+            author_handle="u",
+            author_name="U",
+            text="x",
+            author_circles=["美容界隈", "淡色界隈"],
+        )
+    )
+    assert "class='kaiwai'" in h and "#美容界隈" in h and "#淡色界隈" in h
+    assert "推定界隈" in h  # 事実でなく推定と明示（断定表示にしない）
+    h2 = _card(XPostCard(post_id="2", url="", author_handle="u", text="x"))
+    assert "class='kaiwai'" not in h2 and "推定界隈" not in h2  # 界隈なしなら出さない（捏造しない）
+
+
+def test_voice_search_kaiwai_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """USE_KAIWAI_CLASSIFY 未設定（既定OFF）なら LLM が界隈を返してもカードには付かない（no-op）。"""
+    monkeypatch.delenv("USE_KAIWAI_CLASSIFY", raising=False)
+    noise_json = json.dumps(
+        {"keep": ["1"], "author_circles": {"1": ["美容界隈"]}, "noise_note": ""}
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([_post("1")]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    assert out.posts[0].author_circles == []  # OFF なら配線しない
+
+
+def test_voice_search_drops_nonstring_circle_elements(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLMが非文字列(null/dict)や過長文字列を界隈配列に混ぜても、文字列のみ・24字上限で採用。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
+    noise_json = json.dumps(
+        {"keep": ["1"], "author_circles": {"1": ["美容界隈", None, {"x": 1}, "あ" * 50]}}
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([_post("1")]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    circles = out.posts[0].author_circles
+    assert "美容界隈" in circles
+    assert "None" not in circles and all("{" not in c for c in circles)  # null/dict は弾く
+    assert all(len(c) <= 24 for c in circles)  # 長さ上限（チップ崩れ防止）
+
+
+def test_voice_search_caps_noise_filter_input_to_top_likes() -> None:
+    """ノイズ除去へ渡す投稿は likes 上位 _NOISE_FILTER_MAX_POSTS 件に有界化（切断→無音fail-open防止）。"""
+    from teamagent.skills.x_research.skill import _NOISE_FILTER_MAX_POSTS
+
+    n = _NOISE_FILTER_MAX_POSTS
+    # n+5 件を likes 昇順で作る（pid=0 が最小 likes・pid=n+4 が最大）。上位nに残るのは pid>=5。
+    posts = [_post(str(i), likes=i) for i in range(n + 5)]
+    bedrock = _FakeBedrock(json.dumps({"keep": [], "noise_note": ""}))
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify(posts),  # type: ignore[arg-type]
+        bedrock=bedrock,
+        publisher=_publisher,
+    )
+    skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    prompt = bedrock.last_prompt
+    # 最小likesの下位5件(pid 0..4)はプロンプトに載らない、上位は載る。
+    assert '"post_id": "0"' not in prompt and '"post_id": "4"' not in prompt
+    assert f'"post_id": "{n + 4}"' in prompt  # 最大likesは必ず載る
+    assert bedrock.last_max_tokens >= 4096  # ceiling を引き上げ済み（切断防止）
+
+
+def test_voice_search_empty_handle_no_circle_crosstalk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空handle投稿のpost_idが別投稿のhandle文字列と一致しても界隈が混ざらない（名前空間化）。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
+    # p1: post_id='uZ' かつ handle 空 / p2: handle='uZ'。旧実装だと両者が同一バケットを共有した。
+    p1 = replace(_post("uZ", "コスメ購入品", 50), author_handle="", url="https://x.com/_/status/uZ")
+    p2 = replace(
+        _post("p2", "淡色コーデ", 40), author_handle="uZ", url="https://x.com/uZ/status/p2"
+    )
+    noise_json = json.dumps(
+        {"keep": ["uZ", "p2"], "author_circles": {"uZ": ["美容界隈"], "p2": ["淡色界隈"]}}
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([p1, p2]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    by_id = {p.post_id: p for p in out.posts}
+    assert by_id["uZ"].author_circles == ["美容界隈"]  # 空handle投稿は自分の界隈のみ
+    assert by_id["p2"].author_circles == ["淡色界隈"]  # handle='uZ' の別人へ混入しない
 
 
 def test_voice_search_unverified_marked_not_dropped() -> None:

@@ -105,6 +105,12 @@ variable "use_analysis_cache" {
   default     = false
 }
 
+variable "enable_kaiwai_classify" {
+  description = "X投稿者の界隈マルチラベル分類（Part4・env USE_KAIWAI_CLASSIFY）。既定 false＝bio を LLM へ送らず・界隈を尋ねず・カードにチップも出さない（完全 no-op・後方互換）。分類は LLM 推定でありカードには「推定界隈」と明示表示する。⚠️前提1: enable_x_research=true（false 時は USE_KAIWAI_CLASSIFY env 自体が taskdef に出力されず、本フラグ true でも黙って no-op）。⚠️前提2: 第一候補 actor(apidojo) の本番 bio 取得率と分類品質を実データで確認済みであること。"
+  type        = bool
+  default     = false
+}
+
 variable "enable_research_persist" {
   description = "施策研究(x_voice/コメント分析)を pgvector→AiLaVault へ永続記録するか（Part1・env USE_RESEARCH_PERSIST）。既定 false＝完全 no-op。ON の前提: ローカルRDS(SSMトンネル)で admin INSERT した doc を owner/別社員/社外の3者の**通常検索(member接続)**で引き、ACL(会社横断可視・社外不可)が正しいことを実証済みであること（export_vault は admin 接続なので dry-run では RLS 検証にならない）。"
   type        = bool

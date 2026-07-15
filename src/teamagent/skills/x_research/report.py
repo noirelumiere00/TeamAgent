@@ -68,6 +68,10 @@ h1{{font-size:20px;margin:0 0 4px}}
 .xstrip{{display:flex;align-items:center;gap:8px;font-size:11px;color:#536471;
   margin:-4px 0 12px 4px;flex-wrap:wrap}}
 .xstrip a{{color:#1d6fdc;text-decoration:none}}
+.kaiwai-label{{color:#8a939c;font-size:10px}}
+.kaiwai{{background:#eef4fb;color:#1d6fdc;border:1px solid #d4e2f4;border-radius:10px;
+  padding:0 6px;font-size:10px;font-weight:700;max-width:140px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}}
 """
 
 _MONO_COLORS = (
@@ -261,10 +265,17 @@ def _card(p: XPostCard) -> str:
         if p.verified
         else f"<span class='badge warn'>⚠️ {_esc(p.verify_note or '要再確認')}</span>"
     )
+    # 界隈タグ（Part4・マルチラベル・bio/投稿からのLLM推定）。事実でなく「推定」と明示し、
+    # 営業が「どの界隈の人か」の目安として使えるようにする（断定表示にしない）。
+    valid_circles = [c for c in (p.author_circles or [])[:3] if c]
+    circles = ""
+    if valid_circles:
+        chips = "".join(f"<span class='kaiwai'>#{_esc(c)}</span>" for c in valid_circles)
+        circles = f"<span class='kaiwai-label'>推定界隈</span>{chips}"
     note = f"<span class='note'>{_esc(p.author_note)}</span>" if p.author_note else ""
     href = safe_href(p.url)
     link = f"<a href='{_esc(href)}'>元投稿→</a>" if href else ""
-    return card + f"<div class='xstrip'>{badge}{note}{link}</div>"
+    return card + f"<div class='xstrip'>{badge}{circles}{note}{link}</div>"
 
 
 def render_voice_cards(
