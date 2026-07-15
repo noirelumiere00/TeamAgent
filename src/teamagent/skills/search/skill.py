@@ -257,6 +257,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self._embedding_column = resolve_embedding_column()
         validate_embedder_column_pair(resolve_embedder_backend(), self._embedding_column)
 
+    @property
+    def embedder(self) -> Any:
+        """常駐 embedder（LocalE5）。ResearchPersister が二重ロード回避のため再利用する。"""
+        return self._embedder
+
+    @property
+    def pgvector(self) -> Any:
+        """常駐 PgVectorClient。.connection() は毎回新規発行のため他用途からの共有も安全。"""
+        return self._pgvector
+
     @staticmethod
     def _envflag(name: str, default: str = "false") -> bool:
         return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")

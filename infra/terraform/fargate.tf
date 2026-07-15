@@ -487,6 +487,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_X_RESEARCH_TOOLS", value = "1" },
       { name = "USE_SEARCH_SURFACE_TOOL", value = "1" },
       { name = "USE_TIKTOK_COMMENT_TOOLS", value = "1" },
+      # Part1 施策研究の永続記録(pgvector→AiLaVault)。RLS admin INSERT を owner/別社員/社外の
+      # 3者の通常検索で検証してから true にする（既定 false=完全 no-op・後方互換）。
+      { name = "USE_RESEARCH_PERSIST", value = var.enable_research_persist ? "1" : "0" },
       { name = "X_TASK_QUEUE", value = aws_sqs_queue.x_jobs[0].url },
       { name = "X_JOBS_TABLE", value = aws_dynamodb_table.x_jobs[0].name },
       { name = "X_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },

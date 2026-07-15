@@ -176,6 +176,47 @@ def test_voice_search_rollout_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "段階公開中" in out.slack_summary
 
 
+# ---- ① 施策研究の永続化 dedup_key（#214-3: 同日別クエリの別研究を last-write-wins で潰さない）--
+
+
+class _RecordingPersister:
+    """schedule() の呼び出し kwargs を記録するだけの persister（永続化はしない）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def schedule(self, **kw: Any) -> None:
+        self.calls.append(kw)
+
+
+def test_voice_dedup_key_order_independent_and_query_sensitive() -> None:
+    from teamagent.skills.x_research.skill import _voice_dedup_key
+
+    a = XVoiceSearchInput(product_name="白湯", queries=["白湯", "アサヒ 白湯"])
+    b = XVoiceSearchInput(product_name="白湯", queries=["アサヒ 白湯", "白湯"])  # 順不同=同一検索
+    c = XVoiceSearchInput(product_name="白湯", queries=["白湯 まずい"])  # 別クエリ=別研究
+    assert _voice_dedup_key(a) == _voice_dedup_key(b)  # 再実行は 1 doc に集約
+    assert _voice_dedup_key(a) != _voice_dedup_key(c)  # 別研究は潰さず別 doc
+
+
+def test_voice_search_persists_with_query_dedup_key() -> None:
+    from teamagent.skills.x_research.skill import _voice_dedup_key
+
+    rec = _RecordingPersister()
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([_post("1", likes=31), _post("2", likes=64)]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(json.dumps({"keep": ["1", "2"]})),
+        publisher=_publisher,
+        persister=rec,  # type: ignore[arg-type]
+    )
+    inp = XVoiceSearchInput(product_name="白湯", queries=["白湯", "アサヒ 白湯"])
+    skill.run(inp, _ctx())
+    assert len(rec.calls) == 1
+    assert rec.calls[0]["tool"] == "x_voice"
+    # 日付ではなく検索定義ハッシュを dedup_key に渡す（同日別クエリでも別 external_id になる）
+    assert rec.calls[0]["dedup_key"] == _voice_dedup_key(inp)
+
+
 # ---- ② x_needs_mining --------------------------------------------------------
 
 

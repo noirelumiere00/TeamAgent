@@ -13,11 +13,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import tempfile
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, ClassVar
@@ -32,6 +34,7 @@ from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.x_research.persist_body import build_voice_summary_md
 from teamagent.skills.x_research.report import (
     render_buzz_report,
     render_needs_report,
@@ -122,6 +125,21 @@ def _analysis_bedrock() -> Any:
     return BedrockClient(region=os.environ.get("AWS_REGION", "ap-northeast-1"), model_id=model_id)
 
 
+def _voice_dedup_key(inp: XVoiceSearchInput) -> str:
+    """① 声集めの永続化 external_id 用 dedup キー（検索定義のハッシュ）。
+
+    キー = 商材名(NFKC正規化) + 検索種別 + クエリ集合(順不同)。同一検索の再実行は同一キー＝
+    1 doc に集約(UPDATE)、クエリを変えた別の声集めは別キー＝別 doc。これが無いと external_id が
+    「商材+owner+日付」までしか分岐せず、同じ営業が同日に別クエリで実行した別研究が
+    last-write-wins で潰れる（Codex FB P1）。max_selected 等の表示パラメータは研究の同一性に
+    影響しないためキーに含めない。
+    """
+    norm = unicodedata.normalize("NFKC", (inp.product_name or "").strip())
+    qs = "".join(sorted((q or "").strip() for q in (inp.queries or [])))
+    seed = f"{norm}{inp.search_type}{qs}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+
+
 def _report_shorturl_enabled() -> bool:
     """USE_REPORT_SHORTURL: レポートを短縮URL(/r)で配布する段階ゲート（既定 OFF）。
 
@@ -144,11 +162,13 @@ class _XSyncBase:
         bedrock: Any | None = None,
         analysis_bedrock: Any | None = None,
         publisher: Any | None = None,
+        persister: Any | None = None,
     ) -> None:
         self._apify = apify
         self._bedrock = bedrock  # ノイズ除去（既定 Haiku）
         self._analysis = analysis_bedrock  # 分類/山分析（X_ANALYSIS_MODEL_ID）
         self._publisher = publisher  # callable(path, request_id, query) -> url | None
+        self._persister = persister  # ResearchPersister（Part1・None なら永続化 no-op）
 
     def _get_apify(self) -> ApifyClient:
         if self._apify is None:
@@ -485,6 +505,21 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             verified=out.verified_count,
             cost_usd=out.total_cost_usd,
         )
+        # Part1: 施策研究を永続記録（Obsidian/検索）。fire-and-forget・ホットパス外。
+        if self._persister is not None:
+            self._persister.schedule(
+                tool="x_voice",
+                product_name=input.product_name,
+                title=f"{input.product_name} Xの声集め（X（旧Twitter））",
+                body_md=build_voice_summary_md(out),
+                owner_email=user,
+                request_id=ctx.request_id,
+                cls_solution="Xリサーチ",
+                cls_doc_type="世の中の声",
+                source_uri=out.report_url,
+                # 検索定義ハッシュを dedup キーにする（同日別クエリの別研究を潰さない・P1）。
+                dedup_key=_voice_dedup_key(input),
+            )
         return out
 
     def _slack_summary(self, out: XVoiceSearchOutput) -> str:
@@ -644,6 +679,8 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
             clusters=len(clusters),
             cost_usd=out.total_cost_usd,
         )
+        # 注: needs(テーマ)は取引先に不適な任意テーマで cls_project 肥大を招くため v1 は未永続化
+        # （voice=商材名・comment=client_name のみ）。theme→取引先の名寄せ後に再導入する。
         return out
 
     def _slack_summary(self, out: XNeedsMiningOutput) -> str:
@@ -860,6 +897,8 @@ class XBuzzMeasureStatusSkill(
                 self._store.cache_report(
                     input.job_id, report_url=report_url or "", spike_analysis=spike
                 )
+        # 注: buzz(keyword)も任意語で cls_project に不適＋非同期の再試行不能問題があるため v1 では
+        # 永続化しない（voice/comment のみ）。keyword→取引先の名寄せ・再試行設計後に再導入する。
 
         total = sum(int(d.get("count", 0) or 0) for d in daily)
         report_line = f"\n📄 レポート（7日有効）: {report_url}" if report_url else ""
