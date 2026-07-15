@@ -168,6 +168,27 @@ def test_render_doc_note_has_frontmatter_tags_and_client_link() -> None:
     assert "抜粋テキスト" in note
     # 名寄せタグ未設定でも entities フィールド自体は必ず出す（build_app_html の front() が拾える）
     assert 'entities: ""' in note
+    # 通常資料は従来どおり excerpt を折り畳み blockquote 表示（研究doc全文化の対象外）
+    assert "> 抜粋テキスト" in note
+
+
+def test_render_doc_note_research_doc_renders_full_body() -> None:
+    """施策研究ノート(x_research_tool)は要約全文を本文に出す（160字の折り畳み blockquote でない）。"""
+    full = "# 辻利 Xの声集め\n\n## 主要な声\n- 「濃厚で最高」 — @a（❤️8,227）\n- 「甘さ控えめ」 — @b"
+    note = render_doc_note(
+        _doc(
+            "辻利 Xの声集め（X（旧Twitter））",
+            uri="https://connect.newstv.co.jp/r/tok",
+            source_type="other",
+            x_research_tool="x_voice",
+            excerpt=full,
+        ),
+        "辻利",
+        "clients/辻利",
+    )
+    assert "## 主要な声" in note  # 構造（見出し/箇条書き）が保持される
+    assert "「濃厚で最高」" in note and "「甘さ控えめ」" in note
+    assert "> # 辻利" not in note  # collapsed blockquote 化されていない
 
 
 def test_render_doc_note_emits_entities_field_and_tags() -> None:

@@ -496,6 +496,7 @@ def build_production_tools() -> list[ToolSpec]:
 
         _x_store = XTaskStore()
         _persist = _research_persister  # lambda キャプチャ用（None なら skill は no-op）
+        # 永続化(Part1)は v1 では voice のみ注入（needs/buzz は任意テーマで取引先に不適・未記録）。
         specs.append(
             ToolSpec(
                 XVoiceSearchSkill.name,
@@ -505,12 +506,7 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
         specs.append(
-            ToolSpec(
-                XNeedsMiningSkill.name,
-                XNeedsMiningSkill.description,
-                XNeedsMiningSkill,
-                factory=lambda: XNeedsMiningSkill(persister=_persist),
-            )
+            ToolSpec(XNeedsMiningSkill.name, XNeedsMiningSkill.description, XNeedsMiningSkill)
         )
         specs.append(
             ToolSpec(
@@ -525,7 +521,7 @@ def build_production_tools() -> list[ToolSpec]:
                 XBuzzMeasureStatusSkill.name,
                 XBuzzMeasureStatusSkill.description,
                 XBuzzMeasureStatusSkill,
-                factory=lambda: XBuzzMeasureStatusSkill(store=_x_store, persister=_persist),
+                factory=lambda: XBuzzMeasureStatusSkill(store=_x_store),
             )
         )
 

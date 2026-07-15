@@ -34,10 +34,11 @@ def _post_line(p: Any) -> str:
         if getattr(p, "author_handle", "")
         else (getattr(p, "author_name", "") or "投稿者不明")
     )
-    note = ""
-    if not getattr(p, "verified", False) and getattr(p, "verify_note", ""):
-        note = f" ⚠️{_clean(p.verify_note, max_len=40)}"
-    return f"- 「{_clean(p.text)}」 — {who}（❤️{int(getattr(p, 'like_count', 0)):,}）{note}"
+    verified = bool(getattr(p, "verified", False))
+    verify_note = str(getattr(p, "verify_note", "") or "")
+    note = f" ⚠️{_clean(verify_note, max_len=40)}" if (not verified and verify_note) else ""
+    likes = int(getattr(p, "like_count", 0) or 0)
+    return f"- 「{_clean(p.text)}」 — {who}（❤️{likes:,}）{note}"
 
 
 def build_voice_summary_md(out: Any) -> str:
@@ -56,46 +57,8 @@ def build_voice_summary_md(out: Any) -> str:
     return "\n".join(lines)
 
 
-def build_needs_summary_md(out: Any) -> str:
-    """② ニーズ発掘 の要約 markdown（分類軸＋インサイト仮説＋代表投稿）。"""
-    lines = [f"# {out.theme} ニーズ発掘（X（旧Twitter））", "", f"作成 {_today()}"]
-    if getattr(out, "hypothesis_summary", ""):
-        lines += ["", "## インサイト仮説", _clean(out.hypothesis_summary, max_len=600)]
-    if getattr(out, "clusters", None):
-        lines += ["", "## ニーズ分類"]
-        for c in out.clusters:
-            lines.append(f"- **{_clean(c.label, max_len=60)}**: {_clean(c.insight, max_len=300)}")
-    posts = out.posts or []
-    if posts:
-        lines += ["", "## 代表投稿"]
-        lines += [_post_line(p) for p in posts[:_MAX_POSTS]]
-    lines.append(_FOOTER)
-    return "\n".join(lines)
-
-
-def build_buzz_summary_md(
-    *,
-    keyword: str,
-    start_date: str,
-    end_date: str,
-    daily_counts: list[dict[str, Any]],
-    top_posts: list[Any],
-    spike_analysis: str,
-) -> str:
-    """④ 効果測定 の要約 markdown（期間・総発話・山の読み方・バズ投稿TOP）。"""
-    total = sum(int(d.get("count", 0) or 0) for d in (daily_counts or []))
-    lines = [
-        f"# {keyword} X発話量 効果測定（X（旧Twitter））",
-        "",
-        f"{start_date} 〜 {end_date}・総発話 {total:,}件・作成 {_today()}",
-    ]
-    if spike_analysis:
-        lines += ["", "## 読み方", _clean(spike_analysis, max_len=800)]
-    if top_posts:
-        lines += ["", "## バズ投稿 TOP"]
-        lines += [_post_line(p) for p in top_posts[:_MAX_POSTS]]
-    lines.append(_FOOTER)
-    return "\n".join(lines)
+# 注: needs/buzz の要約ビルダーは v1 descope（任意テーマの cls_project 肥大回避）に伴い削除。
+# theme/keyword→取引先の名寄せ後に voice と同流儀で再導入する。
 
 
 def build_comment_summary_md(out: Any, *, client_name: str) -> str:
@@ -120,8 +83,6 @@ def build_comment_summary_md(out: Any, *, client_name: str) -> str:
 
 
 __all__ = [
-    "build_buzz_summary_md",
     "build_comment_summary_md",
-    "build_needs_summary_md",
     "build_voice_summary_md",
 ]

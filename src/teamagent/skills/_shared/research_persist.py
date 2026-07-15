@@ -56,6 +56,15 @@ def _slug(name: str) -> str:
     return f"{s}-{h}"
 
 
+def _owner_hash(email: str) -> str:
+    """owner_email の照合用短ハッシュ。external_id をユーザー別にして、同日同商材を別々の営業が
+
+    実行しても互いの本文/owner/ACL を上書きしないようにする（email は平文で持たない）。
+    """
+    norm = (email or "").strip().lower()
+    return hashlib.sha256(("owner:" + norm).encode("utf-8")).hexdigest()[:8]
+
+
 def _backend_ok() -> bool:
     """既存コーパスと同じ空間（local/e5 ⇄ embedding 列）でのみ永続化を許す。
 
@@ -95,6 +104,7 @@ class ResearchPersister:
         cls_solution: str,
         cls_doc_type: str,
         dedup_key: str | None = None,
+        source_uri: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
     ) -> None:
         """永続化を非同期に予約する（即 return・ユーザー応答を遅らせない）。
@@ -103,6 +113,8 @@ class ResearchPersister:
         商材名(cls_project)が空だと export_vault が拾えないため、空なら記録しない。
         dedup_key: external_id の識別子（未指定なら JST日付＝1日1件集約）。buzz は再ポーリングで
         日を跨いでも重複しないよう job_id を渡す（同一 job は同一 doc を UPDATE）。
+        source_uri: Vault ノートに載せる元レポートへのリンク（短縮URL 等）。本文全文がノートに
+        入る前提の**補助**リンク（失効しても本文は残る）。
         """
         if not (product_name or "").strip() or not (body_md or "").strip():
             return
@@ -121,6 +133,7 @@ class ResearchPersister:
                 cls_solution=cls_solution,
                 cls_doc_type=cls_doc_type,
                 dedup_key=dedup_key,
+                source_uri=source_uri,
                 extra_metadata=dict(extra_metadata or {}),
             )
         except Exception:  # executor shutdown 等でも本処理は落とさない
@@ -138,6 +151,7 @@ class ResearchPersister:
         cls_solution: str,
         cls_doc_type: str,
         dedup_key: str | None,
+        source_uri: str | None,
         extra_metadata: dict[str, Any],
     ) -> None:
         try:
@@ -157,26 +171,28 @@ class ResearchPersister:
                 "x_research_tool": tool,
             }
             metadata.update(extra_metadata)  # 界隈タグ等（Phase C）を後付けできる
+            # external_id にツール・商材・**owner**・日付/ジョブを含める。owner を入れることで
+            # 同日同商材を別々の営業が実行しても互いの doc/owner/ACL を上書きしない（衝突回避）。
+            key_id = dedup_key or _jst_today()
+            ext_id = f"xresearch:{tool}:{_slug(product_name)}:{_owner_hash(owner)}:{key_id}"
             doc = DocumentUpsert(
                 source_type="other",  # document_source_type ENUM は新値不可
-                external_id=f"xresearch:{tool}:{_slug(product_name)}:{dedup_key or _jst_today()}",
+                external_id=ext_id,
                 owner_email=owner,
                 acl_emails=[owner] if owner else [],
                 acl_groups=_company_acl_groups(),  # §G 会社横断（未設定なら []）
                 title=title,
-                source_uri=None,  # 7日 presigned は失効するので死リンクを持たない（本文が一次資産）
+                # 元レポートへの補助リンク（本文全文はノートに入るので失効しても記録は残る）。
+                source_uri=(source_uri or None),
                 metadata=metadata,
                 modified_at=_dt.datetime.now(_JST).isoformat(),
             )
             chunk = ChunkUpsert(chunk_idx=0, content=body_md, embedding=embedding)
             repo = IngestRepository(self._pgvector)
             doc_id = repo.upsert_document_with_chunks(doc, [chunk], request_id=request_id)
+            # 商材名(機密でありうる)は CloudWatch に残さない。tool と document_id のみ記録。
             logger.info(
-                "research_persist_done",
-                request_id=request_id,
-                tool=tool,
-                product=product_name,
-                document_id=doc_id,
+                "research_persist_done", request_id=request_id, tool=tool, document_id=doc_id
             )
         except Exception as e:  # fail-open: 記録失敗はユーザー応答に影響させない
             logger.warning(

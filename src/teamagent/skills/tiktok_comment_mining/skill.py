@@ -345,6 +345,7 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
                 request_id=ctx.request_id,
                 cls_solution="SNSコメント分析",
                 cls_doc_type="コメント分析",
+                source_uri=out.report_url,
             )
         return out
 

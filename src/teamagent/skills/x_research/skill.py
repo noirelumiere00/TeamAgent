@@ -32,11 +32,7 @@ from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.x_research.persist_body import (
-    build_buzz_summary_md,
-    build_needs_summary_md,
-    build_voice_summary_md,
-)
+from teamagent.skills.x_research.persist_body import build_voice_summary_md
 from teamagent.skills.x_research.report import (
     render_buzz_report,
     render_needs_report,
@@ -468,6 +464,7 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
                 request_id=ctx.request_id,
                 cls_solution="Xリサーチ",
                 cls_doc_type="世の中の声",
+                source_uri=out.report_url,
             )
         return out
 
@@ -628,18 +625,8 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
             clusters=len(clusters),
             cost_usd=out.total_cost_usd,
         )
-        # Part1: ニーズ研究を永続記録（テーマを商材扱い）。fire-and-forget・ホットパス外。
-        if self._persister is not None:
-            self._persister.schedule(
-                tool="x_needs",
-                product_name=input.theme,
-                title=f"{input.theme} ニーズ発掘（X（旧Twitter））",
-                body_md=build_needs_summary_md(out),
-                owner_email=user,
-                request_id=ctx.request_id,
-                cls_solution="Xリサーチ",
-                cls_doc_type="ニーズ発掘",
-            )
+        # 注: needs(テーマ)は取引先に不適な任意テーマで cls_project 肥大を招くため v1 は未永続化
+        # （voice=商材名・comment=client_name のみ）。theme→取引先の名寄せ後に再導入する。
         return out
 
     def _slack_summary(self, out: XNeedsMiningOutput) -> str:
@@ -736,11 +723,8 @@ class XBuzzMeasureStatusSkill(
         store: XTaskStore | None = None,
         analysis_bedrock: Any | None = None,
         publisher: Any | None = None,
-        persister: Any | None = None,
     ) -> None:
-        super().__init__(
-            analysis_bedrock=analysis_bedrock, publisher=publisher, persister=persister
-        )
+        super().__init__(analysis_bedrock=analysis_bedrock, publisher=publisher)
         self._store = store or XTaskStore()
 
     def run(self, input: XBuzzMeasureStatusInput, ctx: SkillContext) -> XBuzzMeasureStatusOutput:
@@ -857,27 +841,8 @@ class XBuzzMeasureStatusSkill(
                 self._store.cache_report(
                     input.job_id, report_url=report_url or "", spike_analysis=spike
                 )
-            # Part1: done 初回のみ永続記録（再照会はキャッシュ済で本ブロック不到達）。
-            if self._persister is not None:
-                keyword = str(spec.get("keyword", ""))
-                self._persister.schedule(
-                    tool="x_buzz",
-                    product_name=keyword,
-                    title=f"{keyword} X発話量 効果測定（X（旧Twitter））",
-                    body_md=build_buzz_summary_md(
-                        keyword=keyword,
-                        start_date=str(spec.get("start_date", "")),
-                        end_date=str(spec.get("end_date", "")),
-                        daily_counts=daily,
-                        top_posts=top_posts,
-                        spike_analysis=spike,
-                    ),
-                    owner_email=_user_of(ctx),
-                    request_id=ctx.request_id,
-                    cls_solution="Xリサーチ",
-                    cls_doc_type="発話量測定",
-                    dedup_key=input.job_id,  # 再ポーリングで日跨ぎ重複させない(job単位でUPDATE)
-                )
+        # 注: buzz(keyword)も任意語で cls_project に不適＋非同期の再試行不能問題があるため v1 では
+        # 永続化しない（voice/comment のみ）。keyword→取引先の名寄せ・再試行設計後に再導入する。
 
         total = sum(int(d.get("count", 0) or 0) for d in daily)
         report_line = f"\n📄 レポート（7日有効）: {report_url}" if report_url else ""

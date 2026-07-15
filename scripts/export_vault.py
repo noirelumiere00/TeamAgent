@@ -268,7 +268,13 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
         lines.append(" ".join(f"#{t}" for t in dict.fromkeys(tags)))
         lines.append("")
     excerpt = str(doc.get("excerpt") or "").strip()
-    if excerpt:
+    if doc.get("x_research_tool"):
+        # 施策研究ノートは要約 markdown を全文そのまま本文にする（構造保持・外部リンク非依存で
+        # Vault に残る。SQL 側で研究 doc は全文 excerpt を返している）。
+        if excerpt:
+            lines.append(excerpt)
+            lines.append("")
+    elif excerpt:
         lines.append("> " + excerpt.replace("\n", " "))
         lines.append("")
     link = source_link(doc.get("source_uri"), doc.get("source_type"))
@@ -397,10 +403,17 @@ _DOCUMENTS_SQL_TEMPLATE = """
         d.metadata->>'cls_solution' AS cls_solution,
         d.metadata->>'cls_entities' AS cls_entities,
         d.metadata->>'client_name' AS client_name,
+        d.metadata->>'x_research_tool' AS x_research_tool,
         ex.excerpt AS excerpt
     FROM documents d
     LEFT JOIN LATERAL (
-        SELECT left(COALESCE(c.contextualized, c.content), 160) AS excerpt
+        -- 施策研究ノート(x_research_tool 付き)は要約全文を Vault に残す（外部リンク非依存）。
+        -- 通常資料は従来どおり先頭160字の抜粋（Vault 肥大を避ける）。
+        SELECT CASE
+                 WHEN d.metadata->>'x_research_tool' IS NOT NULL
+                 THEN COALESCE(c.contextualized, c.content)
+                 ELSE left(COALESCE(c.contextualized, c.content), 160)
+               END AS excerpt
         FROM chunks c
         WHERE c.document_id = d.id
         ORDER BY (COALESCE((c.metadata->>'boilerplate')::bool, false)

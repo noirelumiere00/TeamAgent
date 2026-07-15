@@ -63,6 +63,7 @@ def _persist_once(monkeypatch: pytest.MonkeyPatch, **over: Any) -> Any:
         "cls_solution": "Xリサーチ",
         "cls_doc_type": "世の中の声",
         "dedup_key": None,
+        "source_uri": None,
         "extra_metadata": {},
     }
     kwargs.update(over)
@@ -103,6 +104,21 @@ def test_external_id_no_collision_on_lossy_names(monkeypatch: pytest.MonkeyPatch
     a = _persist_once(monkeypatch, product_name="a:b/c")["doc"].external_id
     b = _persist_once(monkeypatch, product_name="abc")["doc"].external_id
     assert a != b
+
+
+def test_external_id_is_per_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同日同商材でも別ユーザーは別 external_id（本文/owner/ACL の相互上書きを防ぐ）。"""
+    a = _persist_once(monkeypatch, owner_email="a@vectorinc.co.jp")["doc"].external_id
+    b = _persist_once(monkeypatch, owner_email="b@vectorinc.co.jp")["doc"].external_id
+    assert a != b
+    a2 = _persist_once(monkeypatch, owner_email="A@Vectorinc.co.jp")["doc"].external_id
+    assert a2 == a  # 同一 owner（大小/空白差）は同一キー＝冪等
+
+
+def test_source_uri_is_set_when_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    doc = _persist_once(monkeypatch, source_uri="https://connect.newstv.co.jp/r/tok")["doc"]
+    assert doc.source_uri == "https://connect.newstv.co.jp/r/tok"
+    assert _persist_once(monkeypatch, source_uri=None)["doc"].source_uri is None
 
 
 def test_dedup_key_overrides_date(monkeypatch: pytest.MonkeyPatch) -> None:
