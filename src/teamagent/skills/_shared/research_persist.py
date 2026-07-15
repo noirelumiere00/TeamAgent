@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime as _dt
+import hashlib
 import re
 import unicodedata
 from typing import Any
@@ -41,11 +42,18 @@ def _jst_today() -> str:
 
 
 def _slug(name: str) -> str:
-    """商材名を external_id 用の安全な slug へ（日本語は \\w で保持・記号/空白を畳む）。"""
-    s = unicodedata.normalize("NFKC", (name or "").strip())
-    s = re.sub(r"\s+", "-", s)
+    """商材名を external_id 用の安全な slug へ（日本語は \\w で保持・記号/空白を畳む）。
+
+    末尾に正規化名のハッシュを付す。'a:b/c' と 'abc'、先頭80字が同じ別名などが同一 slug に潰れて
+    external_id が衝突し、別の研究を silently 上書きするのを防ぐ（Codex 指摘）。同一名は同一 slug
+    （冪等）を保つ。
+    """
+    norm = unicodedata.normalize("NFKC", (name or "").strip())
+    s = re.sub(r"\s+", "-", norm)
     s = re.sub(r"[^\w\-]", "", s, flags=re.UNICODE)  # \w は Unicode でかな/漢字も含む。: は除去
-    return s[:80] or "unknown"
+    s = s[:64] or "x"
+    h = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:8]  # 正規化名で衝突回避
+    return f"{s}-{h}"
 
 
 def _backend_ok() -> bool:
@@ -86,12 +94,15 @@ class ResearchPersister:
         request_id: str,
         cls_solution: str,
         cls_doc_type: str,
+        dedup_key: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
     ) -> None:
         """永続化を非同期に予約する（即 return・ユーザー応答を遅らせない）。
 
         product_name/body_md が空、または backend が local/embedding でない場合は no-op。
         商材名(cls_project)が空だと export_vault が拾えないため、空なら記録しない。
+        dedup_key: external_id の識別子（未指定なら JST日付＝1日1件集約）。buzz は再ポーリングで
+        日を跨いでも重複しないよう job_id を渡す（同一 job は同一 doc を UPDATE）。
         """
         if not (product_name or "").strip() or not (body_md or "").strip():
             return
@@ -109,6 +120,7 @@ class ResearchPersister:
                 request_id=request_id,
                 cls_solution=cls_solution,
                 cls_doc_type=cls_doc_type,
+                dedup_key=dedup_key,
                 extra_metadata=dict(extra_metadata or {}),
             )
         except Exception:  # executor shutdown 等でも本処理は落とさない
@@ -125,6 +137,7 @@ class ResearchPersister:
         request_id: str,
         cls_solution: str,
         cls_doc_type: str,
+        dedup_key: str | None,
         extra_metadata: dict[str, Any],
     ) -> None:
         try:
@@ -146,7 +159,7 @@ class ResearchPersister:
             metadata.update(extra_metadata)  # 界隈タグ等（Phase C）を後付けできる
             doc = DocumentUpsert(
                 source_type="other",  # document_source_type ENUM は新値不可
-                external_id=f"xresearch:{tool}:{_slug(product_name)}:{_jst_today()}",
+                external_id=f"xresearch:{tool}:{_slug(product_name)}:{dedup_key or _jst_today()}",
                 owner_email=owner,
                 acl_emails=[owner] if owner else [],
                 acl_groups=_company_acl_groups(),  # §G 会社横断（未設定なら []）

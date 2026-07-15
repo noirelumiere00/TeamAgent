@@ -62,6 +62,7 @@ def _persist_once(monkeypatch: pytest.MonkeyPatch, **over: Any) -> Any:
         "request_id": "rid-1",
         "cls_solution": "Xリサーチ",
         "cls_doc_type": "世の中の声",
+        "dedup_key": None,
         "extra_metadata": {},
     }
     kwargs.update(over)
@@ -97,12 +98,31 @@ def test_external_id_is_idempotent_per_tool_product_day(monkeypatch: pytest.Monk
     assert c != a
 
 
+def test_external_id_no_collision_on_lossy_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """lossy slug で潰れる別名が別 external_id になる（別研究の silently 上書き防止・Codex）。"""
+    a = _persist_once(monkeypatch, product_name="a:b/c")["doc"].external_id
+    b = _persist_once(monkeypatch, product_name="abc")["doc"].external_id
+    assert a != b
+
+
+def test_dedup_key_overrides_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    """dedup_key(buzz の job_id)を渡すと日付でなくそれで一意化＝再ポーリング日跨ぎ重複を防ぐ。"""
+    eid = _persist_once(monkeypatch, dedup_key="job-abc123")["doc"].external_id
+    assert eid.endswith(":job-abc123")
+
+
 def test_schedule_noop_on_empty_product(monkeypatch: pytest.MonkeyPatch) -> None:
     ex = _RecordingExecutor()
     p = ResearchPersister(pgvector=object(), embedder=_FakeEmbedder(), executor=ex)
     p.schedule(
-        tool="x_voice", product_name="  ", title="t", body_md="b",
-        owner_email="u", request_id="r", cls_solution="s", cls_doc_type="d",
+        tool="x_voice",
+        product_name="  ",
+        title="t",
+        body_md="b",
+        owner_email="u",
+        request_id="r",
+        cls_solution="s",
+        cls_doc_type="d",
     )
     assert ex.calls == []  # 商材空 → 記録しない（Vault で拾えないため）
 
@@ -111,8 +131,14 @@ def test_schedule_noop_on_empty_body(monkeypatch: pytest.MonkeyPatch) -> None:
     ex = _RecordingExecutor()
     p = ResearchPersister(pgvector=object(), embedder=_FakeEmbedder(), executor=ex)
     p.schedule(
-        tool="x_voice", product_name="辻利", title="t", body_md="",
-        owner_email="u", request_id="r", cls_solution="s", cls_doc_type="d",
+        tool="x_voice",
+        product_name="辻利",
+        title="t",
+        body_md="",
+        owner_email="u",
+        request_id="r",
+        cls_solution="s",
+        cls_doc_type="d",
     )
     assert ex.calls == []
 
@@ -122,8 +148,14 @@ def test_schedule_noop_on_non_local_backend(monkeypatch: pytest.MonkeyPatch) -> 
     ex = _RecordingExecutor()
     p = ResearchPersister(pgvector=object(), embedder=_FakeEmbedder(), executor=ex)
     p.schedule(
-        tool="x_voice", product_name="辻利", title="t", body_md="b",
-        owner_email="u", request_id="r", cls_solution="s", cls_doc_type="d",
+        tool="x_voice",
+        product_name="辻利",
+        title="t",
+        body_md="b",
+        owner_email="u",
+        request_id="r",
+        cls_solution="s",
+        cls_doc_type="d",
     )
     assert ex.calls == []
 
@@ -132,13 +164,21 @@ def test_schedule_submits_when_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     ex = _RecordingExecutor()
     p = ResearchPersister(pgvector=object(), embedder=_FakeEmbedder(), executor=ex)
     p.schedule(
-        tool="x_voice", product_name="辻利", title="t", body_md="b",
-        owner_email="u", request_id="r", cls_solution="s", cls_doc_type="d",
+        tool="x_voice",
+        product_name="辻利",
+        title="t",
+        body_md="b",
+        owner_email="u",
+        request_id="r",
+        cls_solution="s",
+        cls_doc_type="d",
     )
     assert len(ex.calls) == 1 and ex.calls[0]["product_name"] == "辻利"
 
 
-def test_slug_keeps_japanese_and_drops_symbols() -> None:
-    assert _slug("辻利 抹茶ミルク!!") == "辻利-抹茶ミルク"
-    assert _slug("  ") == "unknown"
+def test_slug_keeps_japanese_disambiguates_and_drops_symbols() -> None:
+    s = _slug("辻利 抹茶ミルク!!")
+    assert s.startswith("辻利-抹茶ミルク-")  # 日本語保持・記号除去・末尾ハッシュ
     assert ":" not in _slug("a:b/c")  # external_id 区切りの : を混入させない
+    assert _slug("a:b/c") != _slug("abc")  # lossy 衝突を回避
+    assert _slug("辻利 抹茶") == _slug("辻利 抹茶")  # 同一名は冪等

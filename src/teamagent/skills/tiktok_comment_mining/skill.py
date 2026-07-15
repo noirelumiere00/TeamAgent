@@ -324,7 +324,16 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
             cost_usd=out.total_cost_usd,
         )
         # Part1: コメント分析を永続記録（client_name を商材扱い・空なら persister 側で no-op）。
-        if self._persister is not None and (input.client_name or "").strip():
+        # classify=False や Bedrock 失敗時は insight が URL/件数のみ＝要約が見出しだけの空ノートに
+        # なり、有用な同日記録を上書きしうる（Codex 指摘）。分析内容がある時だけ記録する。
+        has_analysis = bool(getattr(out, "cross_vocabulary", None)) or any(
+            getattr(v, "key_themes", None)
+            or getattr(v, "pain_points", None)
+            or getattr(v, "desires", None)
+            or getattr(v, "purchase_signals", None)
+            for v in (out.videos or [])
+        )
+        if self._persister is not None and (input.client_name or "").strip() and has_analysis:
             from teamagent.skills.x_research.persist_body import build_comment_summary_md
 
             self._persister.schedule(

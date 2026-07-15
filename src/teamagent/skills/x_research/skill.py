@@ -876,6 +876,7 @@ class XBuzzMeasureStatusSkill(
                     request_id=ctx.request_id,
                     cls_solution="Xリサーチ",
                     cls_doc_type="発話量測定",
+                    dedup_key=input.job_id,  # 再ポーリングで日跨ぎ重複させない(job単位でUPDATE)
                 )
 
         total = sum(int(d.get("count", 0) or 0) for d in daily)

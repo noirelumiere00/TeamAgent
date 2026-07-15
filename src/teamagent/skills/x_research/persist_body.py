@@ -29,8 +29,10 @@ def _clean(text: str, *, max_len: int = 280) -> str:
 
 def _post_line(p: Any) -> str:
     """1 投稿を『「本文」 — @handle（❤️数）⚠️注記』の1行に。"""
-    who = f"@{p.author_handle}" if getattr(p, "author_handle", "") else (
-        getattr(p, "author_name", "") or "投稿者不明"
+    who = (
+        f"@{p.author_handle}"
+        if getattr(p, "author_handle", "")
+        else (getattr(p, "author_name", "") or "投稿者不明")
     )
     note = ""
     if not getattr(p, "verified", False) and getattr(p, "verify_note", ""):

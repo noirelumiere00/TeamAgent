@@ -18,10 +18,16 @@ from teamagent.skills.x_research.schema import (
 )
 
 
-def _post(text: str, *, handle: str = "user_a", likes: int = 100, verified: bool = True) -> XPostCard:
+def _post(
+    text: str, *, handle: str = "user_a", likes: int = 100, verified: bool = True
+) -> XPostCard:
     return XPostCard(
-        post_id="1", url="https://x.com/u/1", author_handle=handle, text=text,
-        like_count=likes, verified=verified,
+        post_id="1",
+        url="https://x.com/u/1",
+        author_handle=handle,
+        text=text,
+        like_count=likes,
+        verified=verified,
         verify_note="" if verified else "要再確認: 取得不可",
     )
 
@@ -30,7 +36,10 @@ def test_voice_summary_has_product_media_and_voice() -> None:
     out = XVoiceSearchOutput(
         product_name="辻利 抹茶ミルク",
         posts=[_post("濃厚で最高", likes=8227), _post("甘さ控えめ", verified=False)],
-        searched=42, selected=2, verified_count=1, unverified_count=1,
+        searched=42,
+        selected=2,
+        verified_count=1,
+        unverified_count=1,
         noise_note="辻利=人名の可能性",
     )
     md = build_voice_summary_md(out)
@@ -58,9 +67,12 @@ def test_buzz_summary_has_period_and_total() -> None:
     from teamagent.skills.x_research.persist_body import build_buzz_summary_md
 
     md = build_buzz_summary_md(
-        keyword="セブン 新商品", start_date="2026-07-01", end_date="2026-07-07",
+        keyword="セブン 新商品",
+        start_date="2026-07-01",
+        end_date="2026-07-07",
         daily_counts=[{"date": "2026-07-03", "count": 120}, {"date": "2026-07-04", "count": 80}],
-        top_posts=[_post("バズった")], spike_analysis="7/3にキャンペーンで急増",
+        top_posts=[_post("バズった")],
+        spike_analysis="7/3にキャンペーンで急増",
     )
     assert "セブン 新商品" in md and "X（旧Twitter）" in md
     assert "200件" in md  # 総発話 120+80
