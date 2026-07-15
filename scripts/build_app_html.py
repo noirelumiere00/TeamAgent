@@ -986,7 +986,10 @@ const P={
 function ic(n,cls){return '<svg class="ic '+(cls||"")+'" viewBox="0 0 24 24">'+(P[n]||"")+'</svg>';}
 
 /* ===== 索引・タグ・プロパティ ===== */
-const cByStem={},dByStem={},rByStem={},cByNorm={};
+/* stem/名前をキーにする索引は Object.create(null)（プロトタイプ無し）で作る。素の {} だと
+   stem が "constructor"/"toString"/"__proto__" 等のとき Object.prototype のメンバが引けてしまい、
+   cByStem[stem] が関数を返す→ grpVal が別グループに誤配置する（まとめ軸の島が消える）。 */
+const cByStem=Object.create(null),dByStem=Object.create(null),rByStem=Object.create(null),cByNorm=Object.create(null);
 DATA.clients.forEach(c=>{cByStem[c.stem]=c;if(c.name)cByNorm[nrm(c.name)]=c;});
 DATA.docs.forEach(d=>dByStem[d.stem]=d);
 DATA.reports.forEach(r=>rByStem[r.stem]=r);
@@ -1635,9 +1638,10 @@ function initGraph(){
  const opt={nodeSize:1,linkW:1,textFade:1,repel:46,center:.011,linkDist:26,showDocs:true,showTags:true,hideOrphan:false,groupBy:"industry",cluster:null,filter:""};
  function vis(i){const n=N[i];if(!opt.showDocs&&n.type==="doc")return false;if(!opt.showTags&&n.type==="tag")return false;if(opt.hideOrphan&&!neigh[i])return false;if(opt.filter&&!n.label.toLowerCase().includes(opt.filter))return false;return true;}
  /* ===== まとめる軸（clustering axis）: 色分け(ncol)は不変・配置のみ島化。既定 opt.cluster=null＝取引先ごと（現状の単一原点重力） ===== */
- let cCenters={};                                       // 値→{x,y,n} のリング中心。cluster選択時に決定的に1回算出
+ let cCenters=Object.create(null);                      // 値→{x,y,n} のリング中心。可視集合から決定的に算出（プロトタイプ無し＝"constructor"等の値でも島が消えない）
  const AGEBK=["1ヶ月以内","3ヶ月以内","半年以内","1年以内","1年以上前"];   // 最終接点の新→旧順（ageBucket の返す値と一致）
  const CLBASE=30;                                        // リング半径係数 R=CLBASE*√(全ノード数)（≒自然スプレッドの約2倍で島を分離。切替時に再フィットで全島を画角内へ）
+ const CLMAX=12;                                         // 自由記述軸(資料種類/施策)の島数上限。無制限だと表記ゆれで島とラベルが重なり判読不能になる（凡例の slice(0,9) と同趣旨）
  function grpVal(n,ax){   // 軸ごとの所属グループ。対象type以外/空はnull=グループ中心に引かず既存リンクばねに委ねる（空値は未設定/記録なし島へ）
   // last/doc_type/solution はノードに埋め込まず、既存の索引 cByStem/dByStem（DATA.clients/docs）から stem で引く（ペイロード増ゼロ）。phase はノードの既存フィールド。
   if(ax==="phase")   return n.type==="client"?(n.phase||"未設定"):null;
@@ -1646,20 +1650,31 @@ function initGraph(){
   if(ax==="solution")return n.type==="doc"?((dByStem[n.id.slice(2)]||{}).solution||"未設定"):null;
   return null;}
  function grp(n){return opt.cluster?grpVal(n,opt.cluster):null;}
- function buildCenters(ax){   // 選択軸の実在値のみ列挙（フェーズ=PHASECOLORキー順/最終接点=新→旧/他=出現順・未設定は末尾）→リング状に決定的配置
-  cCenters={};const cnt={},seen=[];
-  for(const n of N){const g=grpVal(n,ax);if(g===null)continue;if(cnt[g]==null){cnt[g]=0;seen.push(g);}cnt[g]++;}
+ function buildCenters(ax){   // 選択軸の実在値のみ列挙（フェーズ=PHASECOLORキー順/最終接点=新→旧/他=件数降順・未設定は末尾）→リング状に決定的配置
+  /* 幾何（島の順序・角度・半径）は **全ノード** から軸切替時に1回だけ決める（＝絞り込みしても
+     島は動かない）。可視集合に連動させると 1 キーストロークごとに島が数百px移動して体験が壊れる。
+     件数は recount() が可視基準で入れる。cnt/cCenters はプロトタイプ無しの辞書にする
+     （"constructor" 等の値で cnt[g]==null が false になり島が壊れるのを防ぐ）。 */
+  const cnt=Object.create(null),seen=[];
+  for(let i=0;i<N.length;i++){const g=grpVal(N[i],ax);if(g===null)continue;if(cnt[g]==null){cnt[g]=0;seen.push(g);}cnt[g]++;}
   let vals;
   if(ax==="phase"){vals=Object.keys(PHASECOLOR).filter(p=>cnt[p]!=null);seen.forEach(g=>{if(g!=="未設定"&&vals.indexOf(g)<0)vals.push(g);});}
   else if(ax==="last"){vals=AGEBK.filter(p=>cnt[p]!=null);}
-  else vals=seen.filter(g=>g!=="未設定");
+  else vals=seen.filter(g=>g!=="未設定").sort((a,b)=>cnt[b]-cnt[a]).slice(0,CLMAX);   // 自由記述軸は件数降順の上位のみ（初出順より安定・島の無限増殖を防ぐ）
   ["未設定","記録なし"].forEach(u=>{if(cnt[u]!=null)vals.push(u);});   // 未設定/記録なし島は必ず末尾
+  cCenters=Object.create(null);
   const tot=vals.length||1,R=CLBASE*Math.sqrt(N.length);
-  vals.forEach((v,i)=>{const a=i/tot*Math.PI*2;cCenters[v]={x:Math.cos(a)*R,y:Math.sin(a)*R,n:cnt[v]};});}
+  vals.forEach((v,i)=>{const a=i/tot*Math.PI*2;cCenters[v]={x:Math.cos(a)*R,y:Math.sin(a)*R,n:0};});
+  recount();}
+ function recount(){   // 件数だけ可視基準で更新（幾何は不変＝島は動かない・リヒート不要）
+  for(const v in cCenters)cCenters[v].n=0;
+  for(let i=0;i<N.length;i++){if(!vis(i))continue;const g=grp(N[i]);if(g!==null&&cCenters[g])cCenters[g].n++;}}
  function clusterCap(){   // cluster有効時のみ: 軸名＋未設定件数を明示。doc基準は体験変化（取引先が資料に引かれ周辺配置）を併記
   if(!opt.cluster)return"";
   const LB={phase:"フェーズ",last:"最終接点",doc_type:"資料の種類",solution:"施策"},uk=opt.cluster==="last"?"記録なし":"未設定";
   const un=cCenters[uk]?cCenters[uk].n:0;
+  let tot=0;for(const v in cCenters)tot+=cCenters[v].n;
+  if(!tot)return esc(LB[opt.cluster])+"でまとめています（表示中の対象がありません）";   /* 全島が空（対象typeを非表示にした等）で「まとめています」だけ出すと嘘になる */
   let s=esc(LB[opt.cluster])+"でまとめています";
   if(un)s+="（"+uk+" "+un+"件は"+uk+"島）";
   if(opt.cluster==="doc_type"||opt.cluster==="solution")s+="<br>資料でまとめています（取引先は資料に引かれ周辺に配置）";
@@ -1692,7 +1707,9 @@ function initGraph(){
    n.x+=n.vx;n.y+=n.vy;
    if(!isFinite(n.x)||!isFinite(n.y)){n.x=(i%60-30)*8;n.y=(((i/60)|0)%60-30)*8;n.vx=n.vy=0;}}}
  for(let k=0;k<160;k++)step(1);
- function fit(){let a=1e9,b=1e9,c=-1e9,d=-1e9;N.forEach(n=>{a=Math.min(a,n.x);b=Math.min(b,n.y);c=Math.max(c,n.x);d=Math.max(d,n.y);});const w=cv.clientWidth,h=cv.clientHeight;view.z=Math.max(.25,Math.min(2.2,.82*Math.min(w/((c-a)||1),h/((d-b)||1))));view.x=-(a+c)/2;view.y=-(b+d)/2;}
+ /* フィットは **可視ノードのみ** の外接矩形に合わせる（非表示ノードの座標まで含めると、絞り込み後に
+    画角が無関係な余白へ引っ張られる）。可視0件なら現在の画角を維持（描画側が空状態を出す）。 */
+ function fit(){let a=1e9,b=1e9,c=-1e9,d=-1e9,any=false;N.forEach((n,i)=>{if(!vis(i))return;any=true;a=Math.min(a,n.x);b=Math.min(b,n.y);c=Math.max(c,n.x);d=Math.max(d,n.y);});if(!any)return false;const w=cv.clientWidth,h=cv.clientHeight;view.z=Math.max(.25,Math.min(2.2,.82*Math.min(w/((c-a)||1),h/((d-b)||1))));view.x=-(a+c)/2;view.y=-(b+d)/2;return true;}
  fit();
  const S=n=>({x:cv.width/2+(n.x+view.x)*view.z*dpr,y:cv.height/2+(n.y+view.y)*view.z*dpr});
  function draw(){const DK=document.documentElement.getAttribute("data-theme")==="dark";ctx.clearRect(0,0,cv.width,cv.height);ctx.lineWidth=dpr*opt.linkW;
@@ -1703,12 +1720,12 @@ function initGraph(){
    const rr=Math.max(n.r*opt.nodeSize*view.z*dpr,.5*dpr);ctx.fillStyle=ncol(n);ctx.beginPath();ctx.arc(p.x,p.y,rr,0,7);ctx.fill();  /* 遠景でも点として残す下限 */
    if((n.type==="client"&&rr>6.5/opt.textFade)||i===hover){ctx.globalAlpha=dim?.3:1;ctx.fillStyle=lbl;ctx.font=(11*dpr)+"px InterVar,Inter,-apple-system,sans-serif";ctx.fillText(n.label,p.x+rr+4,p.y+4*dpr);}});ctx.globalAlpha=1;
   if(opt.cluster){ctx.textAlign="center";ctx.font="600 "+(12*dpr)+"px InterVar,Inter,-apple-system,sans-serif";ctx.lineWidth=3*dpr;   /* まとめ軸: 各島の中心にラベル＋件数（未設定/記録なし島も明示）。ハロー付きでノード上でも可読 */
-   for(const v in cCenters){const c=cCenters[v],p=S(c),tx=v+" ("+c.n+")";ctx.strokeStyle=DK?"rgba(18,18,22,.85)":"rgba(255,255,255,.92)";ctx.fillStyle=DK?"rgba(232,232,238,.92)":"rgba(28,28,34,.9)";ctx.strokeText(tx,p.x,p.y-6*dpr);ctx.fillText(tx,p.x,p.y-6*dpr);}
+   for(const v in cCenters){const c=cCenters[v];if(!c.n)continue;const p=S(c),tx=v+" ("+c.n+")";ctx.strokeStyle=DK?"rgba(18,18,22,.85)":"rgba(255,255,255,.92)";ctx.fillStyle=DK?"rgba(232,232,238,.92)":"rgba(28,28,34,.9)";ctx.strokeText(tx,p.x,p.y-6*dpr);ctx.fillText(tx,p.x,p.y-6*dpr);}   /* 可視0件の島はラベルを出さない（絞り込みで空になった島の "(0)" を残さない） */
    ctx.textAlign="left";ctx.lineWidth=dpr*opt.linkW;}
  }
  function pick(mx,my){let best=-1,bd=15*dpr;N.forEach((n,i)=>{if(!vis(i))return;const p=S(n);const dd=Math.hypot(p.x-mx,p.y-my);if(dd<Math.max(n.r*opt.nodeSize*view.z*dpr+5*dpr,15*dpr)&&dd<bd){bd=dd;best=i;}});return best;}
  let run=false;function ensure(){if(!run){run=true;requestAnimationFrame(loop);}}
- function loop(){if(alpha>aMin){step(alpha);alpha*=aDec;draw();requestAnimationFrame(loop);}else if(drag>=0){step(.25);draw();requestAnimationFrame(loop);}else{if(fitPending){fitPending=false;fit();}draw();run=false;}}
+ function loop(){if(alpha>aMin){step(alpha);alpha*=aDec;draw();requestAnimationFrame(loop);}else if(drag>=0){step(.25);draw();requestAnimationFrame(loop);}else{if(fitPending&&fit())fitPending=false;draw();run=false;}}   /* 再フィットは成功時のみ消費（可視0件で空振りすると軸切替の再フィットが永久に来なくなる） */
  cv.onmousemove=e=>{const r=cv.getBoundingClientRect(),mx=(e.clientX-r.left)*dpr,my=(e.clientY-r.top)*dpr;
   if(drag>=0){N[drag].x=(mx-cv.width/2)/(view.z*dpr)-view.x;N[drag].y=(my-cv.height/2)/(view.z*dpr)-view.y;N[drag].vx=N[drag].vy=0;return;}
   if(pan){view.x+=(mx-px)/(view.z*dpr);view.y+=(my-py)/(view.z*dpr);px=mx;py=my;draw();return;}
@@ -1738,8 +1755,11 @@ function initGraph(){
   +'<label class="gck"><input type="radio" name="gb" id="gbInd" checked> 業種で色分け</label>'
   +'<label class="gck"><input type="radio" name="gb" id="gbPh"> フェーズで色分け</label>'
   +'<div class="gleg" id="gLeg">'+legend()+'</div></div>'
-  +'<div class="gsec"><div class="gh">まとめる（配置）</div>'
-  +'<select class="gin" id="gCluster">'
+  +'<div class="gsec"><div class="gh" id="gClusterLbl">まとめる（配置）</div>'
+  /* a11y: 見出しは div なので暗黙のラベル付けが効かない。aria-labelledby で見出しと結び、
+     aria-describedby で「何が起きるか」の補足文を読み上げに載せる（スクリーンリーダで
+     "まとめる（配置） コンボボックス" と読める）。 */
+  +'<select class="gin" id="gCluster" aria-labelledby="gClusterLbl" aria-describedby="gClusterCap">'
    +'<option value="">取引先ごと（既定）</option>'
    +'<option value="phase">フェーズ（取引先を島に）</option>'
    +'<option value="last">最終接点（取引先を島に）</option>'
@@ -1757,10 +1777,13 @@ function initGraph(){
   +'<div class="gsl"><span>中心力</span><input type="range" id="gCe" min="0" max="0.03" step="0.001" value="0.011"></div>'
   +'<div class="gsl"><span>リンク距離</span><input type="range" id="gLd" min="10" max="80" step="2" value="26"></div></div>';
  const dr=()=>draw(),rh=()=>{alpha=Math.max(alpha,.5);ensure();};
- $("#gFilter").oninput=e=>{opt.filter=e.target.value.toLowerCase();dr();};
- $("#gTags").onchange=e=>{opt.showTags=e.target.checked;dr();};
- $("#gDocs").onchange=e=>{opt.showDocs=e.target.checked;dr();};
- $("#gOrph").onchange=e=>{opt.hideOrphan=e.target.checked;dr();};
+ /* 可視集合が変わったら **件数だけ** 数え直す（島の位置は動かさない＝リヒート不要）。
+    これをしないと絞り込み後もラベルの件数が非表示分を含んだまま固まる。 */
+ const visChanged=()=>{if(opt.cluster){recount();$("#gClusterCap").innerHTML=clusterCap();}dr();};
+ $("#gFilter").oninput=e=>{opt.filter=e.target.value.toLowerCase();visChanged();};
+ $("#gTags").onchange=e=>{opt.showTags=e.target.checked;visChanged();};
+ $("#gDocs").onchange=e=>{opt.showDocs=e.target.checked;visChanged();};
+ $("#gOrph").onchange=e=>{opt.hideOrphan=e.target.checked;visChanged();};
  $("#gbInd").onchange=()=>{opt.groupBy="industry";$("#gLeg").innerHTML=legend();dr();};
  $("#gbPh").onchange=()=>{opt.groupBy="phase";$("#gLeg").innerHTML=legend();dr();};
  $("#gCluster").onchange=e=>{opt.cluster=e.target.value||null;if(opt.cluster)buildCenters(opt.cluster);$("#gClusterCap").innerHTML=clusterCap();alpha=Math.max(alpha,.5);fitPending=true;ensure();};   /* まとめ軸切替: 既存リヒートに乗せ島がふわっと再収束（160step同期再計算は使わない）→収束後に一度だけ再フィット */

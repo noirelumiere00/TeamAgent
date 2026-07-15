@@ -1553,7 +1553,9 @@ def test_cluster_reference_map_wiring_in_js(sidecars: Path, vault: Path, tmp_pat
     out = tmp_path / "o.html"
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
-    assert "const cByStem={},dByStem={}" in html  # 既存の索引を流用（新規Mapは作らない）
+    # 既存の索引を流用（新規Mapは作らない）。素の {} ではなくプロトタイプ無しで作る
+    # （stem="constructor" 等で Object.prototype のメンバを引かないため）。
+    assert "const cByStem=Object.create(null),dByStem=Object.create(null)" in html
     assert "cByStem[n.id.slice(2)]" in html
     assert "dByStem[n.id.slice(2)]" in html
 
@@ -1601,10 +1603,90 @@ def test_build_centers_ring_placement_js(sidecars: Path, vault: Path, tmp_path: 
     html = out.read_text(encoding="utf-8")
     assert "function buildCenters(ax)" in html
     assert "i/tot*Math.PI*2" in html  # 角度 = index/総数 * 2π
-    assert "CLBASE*Math.sqrt(N.length)" in html  # 半径 = base*√(全ノード数)
+    assert "CLBASE*Math.sqrt(N.length)" in html  # 半径 = base*√(全ノード数)＝絞り込みで島が動かない
     assert "Object.keys(PHASECOLOR).filter" in html  # フェーズは PHASECOLOR キー順
     assert 'ax==="last"' in html and "AGEBK.filter" in html  # 最終接点は新→旧順
     assert '["未設定","記録なし"].forEach' in html  # 未設定/記録なし島は必ず末尾
+
+
+def test_cluster_counts_use_visible_set_only(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """件数/ラベル/fit は可視ノードのみ。ただし**幾何は全ノードから1回**＝絞り込みで島が動かない。
+
+    Codex P2 の要求は「件数・ラベル・fit」。半径や島順まで可視連動にすると 1 キーストロークで
+    島が数百px移動する体験回帰になるため、幾何は固定し recount() で件数だけ更新する。
+    """
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    # 幾何は全ノード走査（vis で間引かない）＝島の順序/角度/半径が絞り込みで動かない
+    assert "for(let i=0;i<N.length;i++){const g=grpVal(N[i],ax);" in html
+    # 件数だけ可視基準
+    assert "function recount(){" in html
+    assert "for(let i=0;i<N.length;i++){if(!vis(i))continue;const g=grp(N[i]);" in html
+    assert "if(g!==null&&cCenters[g])cCenters[g].n++;" in html
+    assert "recount();}" in html  # buildCenters の末尾で初回カウント
+    # fit は可視のみの外接矩形。成功可否を返し、可視0件なら現画角維持
+    assert "function fit(){let a=1e9,b=1e9,c=-1e9,d=-1e9,any=false;" in html
+    assert "N.forEach((n,i)=>{if(!vis(i))return;any=true;" in html
+    assert "if(!any)return false;" in html and "return true;}" in html
+    assert "if(fitPending&&fit())fitPending=false;" in html  # 空振り fit で再フィットを消費しない
+    # 可視変化は件数のみ更新（リヒートしない＝島が飛ばない）
+    assert (
+        'const visChanged=()=>{if(opt.cluster){recount();$("#gClusterCap").innerHTML=clusterCap();}dr();};'
+        in html
+    )
+    # 可視を変える4コントロールが**実際に**visChanged を呼ぶ（"どこかに文字列がある"では
+    # gTags だけ dr() に戻す回帰を素通ししてしまうため、ハンドラ全文で固定する）
+    for ctl, ev, prop in (
+        ("gFilter", "oninput", "opt.filter=e.target.value.toLowerCase()"),
+        ("gTags", "onchange", "opt.showTags=e.target.checked"),
+        ("gDocs", "onchange", "opt.showDocs=e.target.checked"),
+        ("gOrph", "onchange", "opt.hideOrphan=e.target.checked"),
+    ):
+        assert f'$("#{ctl}").{ev}=e=>{{{prop};visChanged();}};' in html
+    # 可視0件の島はラベルを出さない
+    assert "for(const v in cCenters){const c=cCenters[v];if(!c.n)continue;" in html
+
+
+def test_cluster_island_count_is_capped(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """自由記述軸(資料種類/施策)の島数に上限（表記ゆれで島が無限増殖しラベルが重なるのを防ぐ）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "const CLMAX=12;" in html
+    assert 'vals=seen.filter(g=>g!=="未設定").sort((a,b)=>cnt[b]-cnt[a]).slice(0,CLMAX);' in html
+
+
+def test_cluster_caption_admits_when_all_islands_empty(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """全島が空（対象typeを非表示にした等）のとき「まとめています」だけ出さず正直に言う。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "let tot=0;for(const v in cCenters)tot+=cCenters[v].n;" in html
+    assert "（表示中の対象がありません）" in html
+
+
+def test_cluster_maps_are_prototype_free(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """島の辞書と stem 索引はプロトタイプ無し（"constructor" 等の値/stem で島が消えない・Codex）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "let cCenters=Object.create(null);" in html  # 初期化
+    assert "const cnt=Object.create(null),seen=[];" in html  # 集計辞書
+    assert "cCenters=Object.create(null);\n  const tot=vals.length||1" in html  # 軸切替時の作り直し
+    # grpVal が引く stem 索引も素の {} だと Object.prototype のメンバを拾う
+    assert "const cByStem=Object.create(null),dByStem=Object.create(null)" in html
+
+
+def test_cluster_select_has_accessible_name(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """まとめ軸 select に達成可能なアクセシブル名（見出しと aria-labelledby で結ぶ・Codex）。"""
+    out = tmp_path / "o.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert '<div class="gh" id="gClusterLbl">まとめる（配置）</div>' in html
+    assert 'id="gCluster" aria-labelledby="gClusterLbl" aria-describedby="gClusterCap"' in html
 
 
 def test_cluster_force_replaces_origin_gravity_when_active(
@@ -1625,7 +1707,8 @@ def test_gcluster_select_html_and_handler(sidecars: Path, vault: Path, tmp_path:
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
     assert "まとめる（配置）" in html
-    assert '<select class="gin" id="gCluster">' in html
+    # a11y: 見出し(div)と aria-labelledby で結んでアクセシブル名を与える
+    assert 'id="gCluster" aria-labelledby="gClusterLbl" aria-describedby="gClusterCap"' in html
     for val, label in [
         ("", "取引先ごと（既定）"),
         ("phase", "フェーズ（取引先を島に）"),
@@ -1648,7 +1731,7 @@ def test_industry_not_offered_as_cluster_axis(sidecars: Path, vault: Path, tmp_p
     out = tmp_path / "o.html"
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
-    m = re.search(r'<select class="gin" id="gCluster">(.*?)</select>', html, re.S)
+    m = re.search(r'<select class="gin" id="gCluster"[^>]*>(.*?)</select>', html, re.S)
     assert m, "gCluster セレクトが見つからない"
     assert 'value="industry"' not in m.group(1)
     assert "業種" not in m.group(1)
