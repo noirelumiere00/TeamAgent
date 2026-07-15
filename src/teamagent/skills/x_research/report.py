@@ -63,6 +63,8 @@ h1{{font-size:20px;margin:0 0 4px}}
 .xstrip{{display:flex;align-items:center;gap:8px;font-size:11px;color:#536471;
   margin:-4px 0 12px 4px;flex-wrap:wrap}}
 .xstrip a{{color:#1d6fdc;text-decoration:none}}
+.kaiwai{{background:#eef4fb;color:#1d6fdc;border:1px solid #d4e2f4;border-radius:10px;
+  padding:0 6px;font-size:10px;font-weight:700}}
 """
 
 _MONO_COLORS = (
@@ -189,10 +191,14 @@ def _card(p: XPostCard) -> str:
         if p.verified
         else f"<span class='badge warn'>⚠️ {_esc(p.verify_note or '要再確認')}</span>"
     )
+    # 界隈タグ（Part4・マルチラベル）。営業が「どの界隈の人か」を一目で判断できる。
+    circles = "".join(
+        f"<span class='kaiwai'>#{_esc(c)}</span>" for c in (p.author_circles or [])[:3] if c
+    )
     note = f"<span class='note'>{_esc(p.author_note)}</span>" if p.author_note else ""
     href = safe_href(p.url)
     link = f"<a href='{_esc(href)}'>元投稿→</a>" if href else ""
-    return card + f"<div class='xstrip'>{badge}{note}{link}</div>"
+    return card + f"<div class='xstrip'>{badge}{circles}{note}{link}</div>"
 
 
 def render_voice_cards(

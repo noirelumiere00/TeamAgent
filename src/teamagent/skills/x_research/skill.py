@@ -92,6 +92,7 @@ def _posts_for_prompt(posts: list[XPost], limit_chars: int = 280) -> str:
             {
                 "post_id": p.post_id,
                 "author": p.author_handle,
+                "bio": (p.author_bio or "")[:160],  # 界隈判定の主入力（取得できた時のみ）
                 "text": p.text[:limit_chars],
                 "likes": p.like_count,
             }
@@ -214,6 +215,7 @@ class _XSyncBase:
         selected: list[XPost],
         *,
         author_notes: dict[str, str],
+        author_circles: dict[str, list[str]] | None = None,
         remaining_s: int,
         request_id: str,
         user: str,
@@ -251,6 +253,7 @@ class _XSyncBase:
                         v.author_name if v is not None and v.author_name else p.author_name
                     ),
                     author_note=author_notes.get(p.post_id, ""),
+                    author_circles=(author_circles or {}).get(p.post_id, []),
                     text=(v.text if v is not None and v.text else p.text),
                     like_count=(v.like_count if v is not None and v.like_count else p.like_count),
                     retweet_count=p.retweet_count,
@@ -376,6 +379,7 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             # ノイズ除去+属性メモ（Haiku 1回・失敗は全残し=fail-open）
             keep_ids = {p.post_id for p in posts}
             author_notes: dict[str, str] = {}
+            author_circles: dict[str, list[str]] = {}  # post_id -> 界隈タグ（Part4）
             noise_note = ""
             try:
                 prompt = load_prompt("x_research", "v1", "noise_filter").format(
@@ -395,16 +399,37 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
                     notes = parsed.get("author_notes")
                     if isinstance(notes, dict):
                         author_notes = {str(k): str(v) for k, v in notes.items()}
+                    circles = parsed.get("author_circles")
+                    if isinstance(circles, dict):
+                        author_circles = {
+                            str(k): [str(t).strip() for t in v if str(t).strip()][:3]
+                            for k, v in circles.items()
+                            if isinstance(v, list)
+                        }
                     noise_note = str(parsed.get("noise_note") or "")
             except Exception as e:
                 warnings.append("ノイズ除去をスキップしました（全件を候補に含めます）")
                 log.warning("x_voice_noise_filter_failed", error=type(e).__name__)
+
+            # 同一著者は結果内で界隈を束ねてタグを一貫させる（複数投稿でブレさせない）。
+            if author_circles:
+                pid_to_handle = {p.post_id: (p.author_handle or p.post_id) for p in posts}
+                by_handle: dict[str, list[str]] = {}
+                for pid, tags in author_circles.items():
+                    bucket = by_handle.setdefault(pid_to_handle.get(pid, pid), [])
+                    for t in tags:
+                        if t not in bucket:
+                            bucket.append(t)
+                author_circles = {
+                    p.post_id: by_handle.get(p.author_handle or p.post_id, []) for p in posts
+                }
 
             kept = [p for p in posts if p.post_id in keep_ids]
             selected = sorted(kept, key=lambda p: p.like_count, reverse=True)[: input.max_selected]
             cards, cost = self._verify_selected(
                 selected,
                 author_notes=author_notes,
+                author_circles=author_circles,
                 remaining_s=remaining(),
                 request_id=ctx.request_id,
                 user=user,

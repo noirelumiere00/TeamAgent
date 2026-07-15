@@ -121,6 +121,69 @@ def test_voice_search_happy_path() -> None:
     assert len(apify.verify_calls) == 1  # 厳選分のみ検証
 
 
+def test_voice_search_assigns_kaiwai_circles() -> None:
+    """LLM が返す author_circles が投稿カードに界隈タグとして配線される（Part4）。"""
+    posts = [_post("1", likes=31), _post("2", likes=64)]
+    noise_json = json.dumps(
+        {
+            "keep": ["1", "2"],
+            "author_circles": {"1": ["美容界隈", "淡色界隈"], "2": ["ガジェット界隈"]},
+            "noise_note": "",
+        }
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify(posts),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    by_id = {p.post_id: p for p in out.posts}
+    assert by_id["1"].author_circles == ["美容界隈", "淡色界隈"]  # マルチラベル
+    assert by_id["2"].author_circles == ["ガジェット界隈"]
+
+
+def test_voice_search_bundles_circles_per_author() -> None:
+    """同一著者(handle)の複数投稿は界隈を union して両方に付ける（タグをブレさせない）。"""
+    p1 = replace(
+        _post("1", "コスメ購入品", 50), author_handle="uX", url="https://x.com/uX/status/1"
+    )
+    p2 = replace(_post("2", "淡色コーデ", 40), author_handle="uX", url="https://x.com/uX/status/2")
+    noise_json = json.dumps(
+        {
+            "keep": ["1", "2"],
+            "author_circles": {"1": ["美容界隈"], "2": ["淡色界隈"]},
+            "noise_note": "",
+        }
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([p1, p2]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    for c in out.posts:
+        assert set(c.author_circles) == {"美容界隈", "淡色界隈"}  # 同一著者は union
+
+
+def test_card_renders_kaiwai_chips() -> None:
+    """再現カード枠外に界隈チップを表示（空なら出さない）。"""
+    from teamagent.skills.x_research.report import _card
+
+    h = _card(
+        XPostCard(
+            post_id="1",
+            url="https://x.com/u/1",
+            author_handle="u",
+            author_name="U",
+            text="x",
+            author_circles=["美容界隈", "淡色界隈"],
+        )
+    )
+    assert "class='kaiwai'" in h and "#美容界隈" in h and "#淡色界隈" in h
+    h2 = _card(XPostCard(post_id="2", url="", author_handle="u", text="x"))
+    assert "class='kaiwai'" not in h2  # 界隈なしなら出さない（捏造しない）
+
+
 def test_voice_search_unverified_marked_not_dropped() -> None:
     posts = [_post("1"), _post("2")]
     apify = _FakeApify(posts, verify_missing={"2"})
