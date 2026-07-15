@@ -133,6 +133,10 @@ gsheets:
     tabs:
       - gid: 278789217
         tab_name: "フォーム回答 1"
+      # ファイル記録タブ (1 ファイル 1 行のナレッジ台帳・342 行)。form_mappings が
+      # 資料の概要_メイン→knowledge_kind / 保管先フォルダ→cls_category も写像する。
+      - gid: 1962561294
+        tab_name: "ファイル記録"
     row_unit: true            # 1 行 = 1 document として取り込み
     extra_metadata:
       topic: "提案ナレッジ"

@@ -68,6 +68,23 @@ def test_existing_sections_unchanged() -> None:
     assert sources.shared_drives_crawl.max_files_per_drive == 3000
 
 
+def test_knowledge_sheet_has_filerecord_tab_added() -> None:
+    """ナレッジ共有シートに「ファイル記録」タブ (gid 1962561294) が純加算され、既存タブは残る。"""
+    sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
+    knowledge = next(
+        s for s in sources.gsheets if s.sheet_id == "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
+    )
+    tabs_by_gid = {t.gid: t.tab_name for t in knowledge.tabs}
+    # 既存タブ（フォーム回答）は保持
+    assert tabs_by_gid.get(278789217) == "フォーム回答 1"
+    # ファイル記録タブが追加されている
+    assert tabs_by_gid.get(1962561294) == "ファイル記録"
+    assert len(knowledge.tabs) == 2
+    assert knowledge.row_unit is True  # 1 行 = 1 document は不変
+    # シート件数自体は 2 のまま（タブ加算はシート数を増やさない）
+    assert len(sources.gsheets) == 2
+
+
 def test_rulebook_root_folder_id_global_key() -> None:
     """ルート検査用グローバルキーがプレースホルダで宣言されている。"""
     raw = _raw()

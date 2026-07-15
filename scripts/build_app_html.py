@@ -351,6 +351,73 @@ def file_format_tag(stem):
     return FILE_FORMAT_LABEL[m.group(1).lower()] if m else ""
 
 
+# === ナレッジ共有メタ4軸: カテゴリ/クライアント種別/提案プロダクト/施策手法 + 代理店 ===
+# フォーム回答/ファイル記録シート由来（export_vault が frontmatter category/client_tier/
+# product に載せる）。クライアント種別・提案プロダクトは複数選択の ASCII/全角カンマ区切りで、
+# ents（frontmatter CSV を Python 側で split）と同じく **ここで分割して配列化** し、
+# docTags(JS) は media/vfmt/ents 同様に配列を素通しでタグ化する。
+# 読点「、」は正規値の内部（官公庁、自治体 / ショート動画提案（UGCや切り抜き、メディア））に
+# しか出ないため **ASCII/全角カンマのみで分割**（読点で割ると 官公庁 と 自治体 を誤分割する）。
+_META_SPLIT_RE = re.compile(r"[,，]")
+# クライアント種別の表記ゆれ→正規値（読点内包の 1 値を保持する）。
+_CLIENT_TIER_ALIAS = {"官公庁、自治体": "官公庁・自治体"}
+# 値として意味を成さないプレースホルダ（クライアント種別では付与しない）。
+_TIER_DROP = frozenset({"-", ""})
+# 提案プロダクトの表記ゆれ（タイポのみ修正・他は素通り。その他 も含めて付与する）。
+_PRODUCT_ALIAS = {"InsigtFinder": "InsightFinder"}
+
+
+def _split_meta_multi(value):
+    """ASCII/全角カンマのみで分割し trim（読点では割らない）。空要素は捨てる。"""
+    return [p.strip() for p in _META_SPLIT_RE.split(value or "") if p.strip()]
+
+
+def client_tier_tags(value):
+    """クライアント種別/ タグ（多値・非排他）。読点で割らず alias 正規化・順序保持で重複除去。"""
+    out = []
+    for v in _split_meta_multi(value):
+        v = _CLIENT_TIER_ALIAS.get(v, v)
+        if v in _TIER_DROP or v in out:
+            continue
+        out.append(v)
+    return out
+
+
+def product_tags(value):
+    """提案プロダクト/ タグ（多値）。タイポ InsigtFinder→InsightFinder のみ修正・順序保持で重複除去。"""
+    out = []
+    for v in _split_meta_multi(value):
+        v = _PRODUCT_ALIAS.get(v, v)
+        if v in out:
+            continue
+        out.append(v)
+    return out
+
+
+# 施策手法/: title+excerpt+product+category(+本文) を対象に決定論キーワードで付与（複数可）。
+# 誤爆しにくい語に限定（分析準拠）。NFKC 正規化＋大文字化で全角/小文字ゆれを吸収してから包含判定。
+_METHOD_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("切り抜き・TTO", ("切り抜き", "TTO")),
+    ("縦型・タテガタ", ("タテガタ", "縦型")),
+    ("インフルエンサー", ("インフルエンサー", "KOL", "キャスティング")),
+    ("UGC", ("UGC",)),
+    ("ビデオリリース", ("ビデオリリース",)),
+    ("VSEO", ("VSEO", "指名検索")),
+    ("ライブ配信", ("ライブ配信", "ライブコマース")),
+]
+
+
+def method_tags(text):
+    """施策手法/ タグ（多値・決定論キーワード）。NFKC+大文字化で全角/小文字ゆれを吸収。"""
+    t = unicodedata.normalize("NFKC", text or "").upper()
+    return [name for name, kws in _METHOD_KEYWORDS if any(k.upper() in t for k in kws)]
+
+
+def agency_flag(text):
+    """代理店/あり: 本文/コメントに「代理店」を含めば True（代理店名は取らない）。"""
+    return "代理店" in (text or "")
+
+
 # 温度感/: ネガ反応が実質空（「特になし」系）は 高。先頭の中黒・末尾の句点は許容
 TEMP_NEG_NONE_RE = re.compile(r"^[・\s]*(特になし|特に無し|なし|-)[。、.\s]*$")
 
@@ -999,7 +1066,9 @@ function ageSev(n){return n==null?"":n<=31?"ok":n<=92?"warn":"err";}
 function agoLabel(n){return n==null?"":n<=0?"今日":n+"日前";}
 function agoCoarse(ds){const n=daysAgo(ds);if(n==null)return"";if(n<=0)return"今日";if(n<7)return"約"+n+"日前";if(n<31)return"約"+Math.round(n/7)+"週前";if(n<365)return"約"+Math.round(n/30)+"ヶ月前";return"約"+Math.round(n/365)+"年前";}
 function clientTags(c){const t=[];if(c.industry)t.push("業種/"+c.industry);if(c.phase)t.push("フェーズ/"+c.phase);if(c.bantg)t.push("BANT/"+c.bantg);t.push("最終接点/"+(ageBucket(c.last)||"記録なし"));if(c.temp)t.push("温度感/"+c.temp);if(c.hw)t.push("宿題/あり");(c.tans||[]).forEach(n=>t.push("担当/"+n));return t;}
-function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);(d.media||[]).forEach(m=>t.push("媒体/"+m));(d.vfmt||[]).forEach(v=>t.push("動画形式/"+v));if(d.fmt)t.push("形式/"+d.fmt);if(d.xc)t.push("横断/"+d.xc);(d.ents||[]).forEach(e=>{if(nrm(e)!==nrm(d.client))t.push("関係先/"+e.split(/[\/／]/).join("・"));});return t;}
+function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);if(d.industry)t.push("業種/"+d.industry);if(d.solution)t.push("施策/"+d.solution);const a=ageBucket(d.modified);if(a)t.push("更新/"+a);if(d.src)t.push("情報源/"+d.src);(d.media||[]).forEach(m=>t.push("媒体/"+m));(d.vfmt||[]).forEach(v=>t.push("動画形式/"+v));if(d.fmt)t.push("形式/"+d.fmt);if(d.xc)t.push("横断/"+d.xc);(d.ents||[]).forEach(e=>{if(nrm(e)!==nrm(d.client))t.push("関係先/"+e.split(/[\/／]/).join("・"));});
+ /* ナレッジ共有メタ4軸（分割/正規化は Python 側で済・ここは配列を素通しでタグ化）: カテゴリ(単値)/クライアント種別(多値)/提案プロダクト(多値)/施策手法(多値)/代理店(bool) */
+ if(d.category)t.push("カテゴリ/"+d.category);(d.client_tier||[]).forEach(v=>t.push("クライアント種別/"+v));(d.product||[]).forEach(v=>t.push("提案プロダクト/"+v));(d.method||[]).forEach(v=>t.push("施策手法/"+v));if(d.agency)t.push("代理店/あり");return t;}
 const IDX=[];
 DATA.clients.forEach(c=>IDX.push({kind:"client",stem:c.stem,name:c.name,folder:"clients",tags:clientTags(c),
  props:{"業界":c.industry,"フェーズ":c.phase,"BANT":c.bant,"最終接点":c.last||"—"},hay:(c.name+" "+c.industry+" "+c.phase+" "+c.bant+" "+(c.md||"")).toLowerCase(),ex:c.industry?("業種: "+c.industry):"",obj:c}));
@@ -1016,9 +1085,9 @@ Object.keys(tagCount).forEach(t=>{const p=t.split("/");if(p.length===1){tagTree[
 /* ===== タグUX基盤: 系統色辞書(CATMETA) + 統一チップ部品(chipHtml) + runQuery 集約 ===== */
 /* 色は既存パレット（PHASECOLOR/DTCOLOR/INDUSTRY_COLORS の hex）流用・中間明度。
    意味は常にラベルが担い、色は7pxドットのみ（色非依存原則・両テーマ共通） */
-const CATMETA={"宿題":"#e0685f","温度感":"#e07a5f","担当":"#d0a24c","フェーズ":"#4f9df5","BANT":"#c98bdb","業種":"#54b981","最終接点":"#5fc9c9","資料種別":"#8a7cf5","施策":"#e05f8f","関係先":"#c98b6a","媒体":"#7f9cf5","動画形式":"#b5c94a","形式":"#d0a24c","横断":"#e0b34c","更新":"#d0912f","情報源":"#8a8a8a"};
+const CATMETA={"宿題":"#e0685f","温度感":"#e07a5f","担当":"#d0a24c","フェーズ":"#4f9df5","BANT":"#c98bdb","業種":"#54b981","最終接点":"#5fc9c9","資料種別":"#8a7cf5","カテゴリ":"#8a7cf5","クライアント種別":"#c98bdb","提案プロダクト":"#e05f8f","施策":"#e05f8f","施策手法":"#b5c94a","代理店":"#c98b6a","関係先":"#c98b6a","媒体":"#7f9cf5","動画形式":"#b5c94a","形式":"#d0a24c","横断":"#e0b34c","更新":"#d0912f","情報源":"#8a8a8a"};
 /* タグペイン/ホームの意味順: 先頭7=取引先のタグ（行動を促す軸を先頭に）・残り=資料のタグ */
-const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","施策","関係先","媒体","動画形式","形式","横断","更新","情報源"];
+const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","カテゴリ","クライアント種別","提案プロダクト","施策","施策手法","代理店","関係先","媒体","動画形式","形式","横断","更新","情報源"];
 function catColor(t){return CATMETA[(t||"").split("/")[0]]||"var(--accent)";}
 /* 空白入りタグ値は tag:"値" で発行（parseQuery の引用符対応を利用。空白なしは従来と同一文字列） */
 function tagQ(t){return /\s/.test(t)?'tag:"'+t+'"':"tag:"+t;}
@@ -2011,6 +2080,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         _dtitle = TITLE_OVERRIDE.get(f.stem) or fm.get("title", f.stem)
         _dsol = fm.get("solution", "")  # 施策: 格納値/施策タグは正本化・vfmt 検出には生値（動画形式判定の回帰防止）
+        _dbody = doc_md(t)
+        # ナレッジ共有メタ（フォーム回答/ファイル記録シート由来）。カテゴリは単値素通し、
+        # クライアント種別/提案プロダクトは ents 同様ここで分割・正規化して配列化する。
+        _dcategory = fm.get("category", "")
+        _dtier_raw = fm.get("client_tier", "")
+        _dprod_raw = fm.get("product", "")
         docs.append({
             "stem": f.stem, "title": _dtitle,
             "client": _dclient, "cnorm": norm(_dclient),
@@ -2025,7 +2100,16 @@ def main(argv: list[str] | None = None) -> int:
             # 名寄せタグ（cls_entities）: export_vault が frontmatter entities に CSV で載せる。
             # /app の「関係先/」タグ・検索へ展開（親クライアント名で子コラボ資料を出す）。
             "ents": [e.strip() for e in fm.get("entities", "").split(",") if e.strip()],
-            "ex": ex, "md": doc_md(t), "_wl": parse_links(body_of(t)),
+            # ナレッジ共有メタ4軸: カテゴリ(単値)/クライアント種別(多値)/提案プロダクト(多値)/
+            # 施策手法(title+excerpt+product+category+本文の決定論キーワード)/代理店(bool)。
+            "category": _dcategory,
+            "client_tier": client_tier_tags(_dtier_raw),
+            "product": product_tags(_dprod_raw),
+            "method": method_tags(
+                _dtitle + "\n" + ex + "\n" + _dprod_raw + "\n" + _dcategory + "\n" + _dbody
+            ),
+            "agency": agency_flag(_dbody + "\n" + ex),
+            "ex": ex, "md": _dbody, "_wl": parse_links(body_of(t)),
         })
 
     # 最終接点 = max(最終FB日, 関連資料の最新更新日)。タグ用に事前計算（JS テーブル列 lastOf と同式）

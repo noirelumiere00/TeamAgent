@@ -245,6 +245,18 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
         # 値は entity_extract 側で正規化済み＝カンマ非包含なので CSV が壊れない。
         f"entities: {yaml_quote(doc.get('cls_entities') or '')}",
         f"modified_at: {yaml_quote(doc.get('modified_at') or '')}",
+    ]
+    # ナレッジ共有メタ（カテゴリ/クライアント種別/提案プロダクト）は値があるときだけ出す。
+    # build_app_html が front() で拾い、docTags の カテゴリ/クライアント種別/提案プロダクト
+    # 軸へ展開する。空値の行は既存 note と同一出力を保つ（回帰なし）。
+    for _key, _val in (
+        ("category", doc.get("cls_category")),
+        ("client_tier", doc.get("cls_client_tier")),
+        ("product", doc.get("cls_product")),
+    ):
+        if _val:
+            lines.append(f"{_key}: {yaml_quote(_val)}")
+    lines += [
         "---",
         "",
         f"# {str(doc.get('title') or '(無題)').replace(chr(10), ' ')}",
@@ -396,6 +408,12 @@ _DOCUMENTS_SQL_TEMPLATE = """
         d.metadata->>'cls_doc_type' AS cls_doc_type,
         d.metadata->>'cls_solution' AS cls_solution,
         d.metadata->>'cls_entities' AS cls_entities,
+        -- ナレッジ共有メタ（フォーム回答/ファイル記録シート由来・人間入力）を射影する。
+        -- 出力列名は cls_* に倣うが読む metadata キーは人間入力側（knowledge_kind /
+        -- client_type / proposed_menu）で、Haiku の cls_* 名前空間とは交差しない。
+        d.metadata->>'knowledge_kind' AS cls_category,
+        d.metadata->>'client_type' AS cls_client_tier,
+        d.metadata->>'proposed_menu' AS cls_product,
         d.metadata->>'client_name' AS client_name,
         ex.excerpt AS excerpt
     FROM documents d

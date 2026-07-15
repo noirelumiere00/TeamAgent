@@ -124,6 +124,43 @@ def test_map_knowledge_fields_core_detection_is_header_based() -> None:
 
 
 # -----------------------------------------------------------
+# ファイル記録シート (gid 1962561294) 固有列: 資料の概要_メイン / 保管先フォルダ
+# -----------------------------------------------------------
+def test_map_knowledge_fields_shiryo_gaiyo_main_maps_to_knowledge_kind() -> None:
+    """ファイル記録の「資料の概要_メイン」は「資料の概要」と同じ knowledge_kind へ寄る。"""
+    out = map_knowledge_fields(
+        {
+            "正式社名": "エスエス製薬",
+            "案件名": "エスタック",
+            "クライアント種別": "TOP500 or ベス10",
+            "提案プロダクト": "ショート動画提案（UGCや切り抜き、メディア）",
+            "資料の概要_メイン": "クロージング",
+        }
+    )
+    assert out["knowledge_kind"] == "クロージング"
+
+
+def test_map_knowledge_fields_folder_column_not_mapped() -> None:
+    """保管先フォルダは 資料の概要_メイン と完全ミラーで冗長のため写像しない
+    （カテゴリの正本は knowledge_kind 1 本。cls_category を書くと export が読まず dead 配線になる）。"""
+    out = map_knowledge_fields(
+        {
+            "正式社名": "カゴメ",
+            "案件名": "新製品",
+            "クライアント種別": "メーカー",
+            "資料の概要_メイン": "提案",
+            "保管先フォルダ": "01_提案",
+        }
+    )
+    # カテゴリは knowledge_kind 側に載る。フォルダ列由来の cls_category は出さない
+    assert out["knowledge_kind"] == "提案"
+    assert "cls_category" not in out
+    # GAS 運用列も従来どおり無視
+    out2 = map_knowledge_fields(_fields(**{"保管先フォルダID記録（GAS処理)": "01_提案"}))
+    assert "cls_category" not in out2
+
+
+# -----------------------------------------------------------
 # derive_knowledge_client_name — 正式社名 → first-class client_name
 # -----------------------------------------------------------
 @pytest.mark.parametrize(

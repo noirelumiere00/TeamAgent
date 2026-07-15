@@ -849,6 +849,123 @@ def test_file_format_tag_from_stem_suffix() -> None:
     assert _mod.file_format_tag("") == ""
 
 
+# ---------------- ナレッジ共有メタ4軸: クライアント種別/提案プロダクト/施策手法/代理店 ----------------
+
+
+def test_client_tier_tags_splits_on_ascii_comma_not_toten() -> None:
+    """クライアント種別: ASCII/全角カンマで分割・読点「、」では割らない（官公庁、自治体は1値）。"""
+    # 読点で割ると 官公庁 と 自治体 に誤分割する回帰の防止 → alias で 官公庁・自治体 の1値
+    assert _mod.client_tier_tags("官公庁、自治体") == ["官公庁・自治体"]
+    assert _mod.client_tier_tags("TOP500 or ベス10,上場企業,メーカー") == [
+        "TOP500 or ベス10",
+        "上場企業",
+        "メーカー",
+    ]
+    # 全角カンマ・前後スペースの trim
+    assert _mod.client_tier_tags("メーカー, その他， 上場企業") == ["メーカー", "その他", "上場企業"]
+    # 読点内包値とカンマ多選択の共存
+    assert _mod.client_tier_tags("TOP500 or ベス10, 官公庁、自治体") == [
+        "TOP500 or ベス10",
+        "官公庁・自治体",
+    ]
+    # プレースホルダ '-' / 空は付与しない・順序保持で重複除去
+    assert _mod.client_tier_tags("-") == []
+    assert _mod.client_tier_tags("") == []
+    assert _mod.client_tier_tags("メーカー,メーカー") == ["メーカー"]
+
+
+def test_product_tags_splits_and_fixes_typo() -> None:
+    """提案プロダクト: ASCIIカンマ分割・InsigtFinder→InsightFinder のみ修正・読点は割らない。"""
+    assert _mod.product_tags("ビデオリリース,タテガタ") == ["ビデオリリース", "タテガタ"]
+    # 括弧内の読点は値の一部（割らない）
+    assert _mod.product_tags("ショート動画提案（UGCや切り抜き、メディア）") == [
+        "ショート動画提案（UGCや切り抜き、メディア）"
+    ]
+    # タイポ修正（他は素通り）・その他 も付与する
+    assert _mod.product_tags("InsigtFinder") == ["InsightFinder"]
+    assert _mod.product_tags("その他") == ["その他"]
+    assert _mod.product_tags("") == []
+    # 順序ゆれは集合として扱いたいが配列は入力順を保持（JS 側はタグ集計で吸収）
+    assert _mod.product_tags("タテガタ, ビデオリリース") == ["タテガタ", "ビデオリリース"]
+
+
+def test_method_tags_deterministic_keywords() -> None:
+    """施策手法: 誤爆しにくいキーワードで決定論付与・NFKC+大文字化で全角/小文字を吸収・複数可。"""
+    assert _mod.method_tags("切り抜き施策のご提案") == ["切り抜き・TTO"]
+    assert _mod.method_tags("TTOで二次利用") == ["切り抜き・TTO"]
+    assert _mod.method_tags("タテガタ縦型ショート") == ["縦型・タテガタ"]
+    assert _mod.method_tags("インフルエンサーキャスティング") == ["インフルエンサー"]
+    assert _mod.method_tags("KOL起用") == ["インフルエンサー"]
+    assert _mod.method_tags("UGC活用") == ["UGC"]  # 全角/小文字も NFKC+upper で吸収
+    assert _mod.method_tags("ｕｇｃ二次利用") == ["UGC"]
+    assert _mod.method_tags("ビデオリリース配信") == ["ビデオリリース"]
+    assert _mod.method_tags("VSEO・指名検索対策") == ["VSEO"]
+    assert _mod.method_tags("ライブコマース実施") == ["ライブ配信"]
+    # 複数付与（定義順）
+    assert _mod.method_tags("切り抜きとUGCの提案") == ["切り抜き・TTO", "UGC"]
+    # 非該当は空
+    assert _mod.method_tags("通常の提案書です") == []
+    assert _mod.method_tags("") == []
+
+
+def test_agency_flag_boolean_only() -> None:
+    """代理店/あり: 本文に「代理店」を含めば True（名前は取らない）。"""
+    assert _mod.agency_flag("代理店：博報堂 経由の案件") is True
+    assert _mod.agency_flag("エンド直販の提案") is False
+    assert _mod.agency_flag("") is False
+
+
+def _write_meta_doc(vault: Path, stem: str, category: str, tier: str, product: str, body: str) -> None:
+    """ナレッジ共有メタ frontmatter（category/client_tier/product）+ 本文を持つ資料 note。"""
+    (vault / "docs" / f"{stem}.md").write_text(
+        f'---\ntitle: "{stem}"\nclient: "出光興産"\nindustry: "エネルギー"\n'
+        f'doc_type: "提案書"\nsolution: ""\nmodified_at: "2026-06-01"\n'
+        f'category: "{category}"\nclient_tier: "{tier}"\nproduct: "{product}"\n---\n\n'
+        f"> {body}\n\n[[clients/出光興産]]\n",
+        encoding="utf-8",
+    )
+
+
+def test_knowledge_meta_tags_payload_and_js_wiring(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """カテゴリ/クライアント種別(多値・読点非分割)/提案プロダクト/施策手法/代理店 の payload と JS 配線。"""
+    _write_meta_doc(
+        vault,
+        "エスタック_打ち返し資料",
+        category="クロージング",
+        tier="TOP500 or ベス10,官公庁、自治体",  # 読点内包値の共存
+        product="ショート動画提案（UGCや切り抜き、メディア）,InsigtFinder",  # 読点内包+タイポ
+        body="TikTok向けUGCと切り抜き施策。代理店経由での実施を想定。",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+
+    # payload: 単値カテゴリ / 多値は Python 側で分割・正規化済み配列 / 施策手法キーワード / 代理店 bool
+    assert '"category": "クロージング"' in html
+    # 読点で割らず 官公庁・自治体 を1値化（誤分割回帰の防止）
+    assert '"client_tier": ["TOP500 or ベス10", "官公庁・自治体"]' in html
+    # タイポ InsigtFinder→InsightFinder / 括弧内読点は値の一部
+    assert (
+        '"product": ["ショート動画提案（UGCや切り抜き、メディア）", "InsightFinder"]' in html
+    )
+    # 施策手法は title+excerpt+product+category+本文 から決定論抽出（UGC・切り抜き）
+    assert '"UGC"' in html and '"切り抜き・TTO"' in html
+    assert '"agency": true' in html
+
+    # JS docTags 配線（配列を素通しでタグ化・分割は Python 側）
+    assert '(d.client_tier||[]).forEach(v=>t.push("クライアント種別/"+v))' in html
+    assert '(d.product||[]).forEach(v=>t.push("提案プロダクト/"+v))' in html
+    assert '(d.method||[]).forEach(v=>t.push("施策手法/"+v))' in html
+    assert 'if(d.category)t.push("カテゴリ/"+d.category)' in html
+    assert 'if(d.agency)t.push("代理店/あり")' in html
+    # CATMETA 系統色 + TAGORDER（資料のタグ群・取引先群 slice(0,7) は不変）
+    for cat in ("カテゴリ", "クライアント種別", "提案プロダクト", "施策手法", "代理店"):
+        assert f'"{cat}":"#' in html, cat
+    assert "TAGORDER.slice(0,7)" in html and "TAGORDER.slice(7)" in html
+
+
 # ---------------- タグ第1弾: 温度感/・宿題/（クライアント） ----------------
 
 
@@ -1147,9 +1264,11 @@ def test_ux4_tag_pane_enhancements(ux_html: str) -> None:
     """機能4: 意味順+見出し・系統色・ペイン内絞り込み・件数/五十音トグル・12超畳み・active。"""
     html = ux_html
     assert (
-        'const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","施策","関係先","媒体","動画形式","形式","横断","更新","情報源"]'
+        'const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","カテゴリ","クライアント種別","提案プロダクト","施策","施策手法","代理店","関係先","媒体","動画形式","形式","横断","更新","情報源"]'
         in html
     )
+    # 先頭7=取引先のタグ（宿題〜最終接点）は不変・ナレッジ共有メタ4軸は資料のタグ群（index≥7）へ
+    assert '"最終接点","資料種別","カテゴリ"' in html  # 資料群の先頭に挿入（取引先群 slice(0,7) を侵さない）
     assert "取引先のタグ" in html and "資料のタグ" in html
     assert "タグを絞り込み…" in html
     assert "tagSortAlpha" in html and "件数順⇄五十音順" in html

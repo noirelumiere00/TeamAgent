@@ -64,6 +64,13 @@ _KNOWLEDGE_LABEL_TO_METADATA_KEY: dict[str, str] = {
     "クライアント種別": "client_type",
     "提案プロダクト": "proposed_menu",
     "資料の概要": "knowledge_kind",
+    # ファイル記録シート (gid 1962561294) は同義の別ヘッダ「資料の概要_メイン」を使う。
+    # フォーム回答シートの「資料の概要」と同じ knowledge_kind へ寄せる。カテゴリの正本は
+    # この knowledge_kind の 1 本 (export_vault が knowledge_kind AS cls_category で射影)。
+    # 「保管先フォルダ」(01_提案 等) は 資料の概要_メイン と完全ミラー (2026-07-14 342 行分析)
+    # のため冗長として写像しない。99_一次倉庫 の検索除外は文書レベルの別フィルタで扱う
+    # (タグ抑止だけでは文書自体が残り "検索対象外" を満たさないため・別 PR)。
+    "資料の概要_メイン": "knowledge_kind",
     "このナレッジのポイントはここ！": "knowledge_point",
     "なぜそのナレッジ（資料）を共有したのか？": "share_reason",
     "送信者": "submitter",
