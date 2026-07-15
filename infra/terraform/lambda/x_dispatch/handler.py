@@ -4,6 +4,7 @@ SQS(x-buzz-jobs)からジョブJSONをデキューし、ECS RunTask(Fargate)を�
 RunTask/PassRole 権限はこのLambdaロールだけが持つ(=MCP/共有botから分離)。
 tiktok_dispatch/handler.py の複製（ジョブ仕様の必須キーと env 名だけが違う）。
 """
+
 import json
 import os
 

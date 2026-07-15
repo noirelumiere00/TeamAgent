@@ -31,7 +31,9 @@ import time
 _TOKEN_TYPE = "r"  # 用途タグ（同一鍵の draft/event 等とドメイン分離＝クロス転用を封じる）
 _DEFAULT_BUCKET = "teamagent-dev-raw-files"  # report_publish._DEFAULT_BUCKET と一致
 _ALLOWED_KEY_PREFIXES = ("vseo-reports/", "vseo-proposals/")  # 発行しうる prefix のみ許可
-_DEFAULT_TTL_S = 60 * 60 * 24 * 30  # 30日（旧 presigned 7日より長い恒久寄りリンク）
+# 既定 7日（旧 presigned と同等の露出窓）。トークンはアクセスログに残りうる capability なので
+# 恒久寿命にしない（過去施策の恒久記録は AiLaVault(Part1)側が担う）。REPORT_LINK_TTL_S で調整可。
+_DEFAULT_TTL_S = 60 * 60 * 24 * 7
 _SIG_LEN = 16  # HMAC-SHA256 の先頭16バイト（トークンを短く保つ・draft_token と同じ）
 
 
@@ -39,6 +41,12 @@ def _secret() -> bytes:
     # 発行(mcp)↔復号(connect-web)で同一値になる MAIL_ACTION_HMAC_SECRET のみ。SLACK_BOT_TOKEN
     # への fallback はしない（connect-web が持たず鍵不一致→全件404 を招くため）。
     return os.environ.get("MAIL_ACTION_HMAC_SECRET", "").encode("utf-8")
+
+
+def _default_ttl_s() -> int:
+    """トークン失効までの秒数。env REPORT_LINK_TTL_S(正整数)があれば優先、無ければ既定7日。"""
+    raw = os.environ.get("REPORT_LINK_TTL_S", "").strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else _DEFAULT_TTL_S
 
 
 def has_secret() -> bool:
@@ -76,7 +84,7 @@ def encode_report_token(
     *,
     region: str = "",
     now: int | None = None,
-    ttl_s: int = _DEFAULT_TTL_S,
+    ttl_s: int | None = None,
 ) -> str:
     """S3 の bucket/key(+発行時 region) を失効付きで HMAC 署名し、``/r/<token>`` 用文字列にする。
 
@@ -84,12 +92,13 @@ def encode_report_token(
     バケットがサービスの AWS_REGION と別リージョンでも署名リージョン不一致(403)を避ける。空可。
     """
     issued = int(now if now is not None else time.time())
+    ttl = int(ttl_s) if ttl_s is not None else _default_ttl_s()
     payload = {
         "typ": _TOKEN_TYPE,
         "b": str(bucket),
         "k": str(key),
         "r": str(region or ""),
-        "e": issued + int(ttl_s),
+        "e": issued + ttl,
     }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = hmac.new(_secret(), raw, hashlib.sha256).digest()[:_SIG_LEN]

@@ -104,3 +104,22 @@ def test_type_tag_blocks_cross_token_transfer() -> None:
 
     draft = encode_draft_token("thread-123", "someone@vectorinc.co.jp")
     assert decode_report_token(draft) is None  # typ 不一致 or フィールド不足で拒否
+
+
+def test_default_ttl_is_seven_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    """既定 TTL は 7日（旧 presigned と同等の露出窓。恒久記録は AiLaVault 側）。"""
+    from teamagent.adapters.report_link_token import _default_ttl_s
+
+    monkeypatch.delenv("REPORT_LINK_TTL_S", raising=False)
+    assert _default_ttl_s() == 60 * 60 * 24 * 7
+
+
+def test_ttl_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.adapters.report_link_token import _default_ttl_s
+
+    monkeypatch.setenv("REPORT_LINK_TTL_S", "3600")
+    assert _default_ttl_s() == 3600
+    monkeypatch.setenv("REPORT_LINK_TTL_S", "not-a-number")  # 不正値は既定へ
+    assert _default_ttl_s() == 60 * 60 * 24 * 7
+    monkeypatch.setenv("REPORT_LINK_TTL_S", "0")  # 0/負は既定へ
+    assert _default_ttl_s() == 60 * 60 * 24 * 7

@@ -11,9 +11,11 @@ AI 要約 + 結果カードを返す。👍/👎 は search_feedback テーブ�
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import html
 import json
+import logging
 import os
 import threading
 from collections import Counter
@@ -47,6 +49,48 @@ from teamagent.dashboard.auth import (
 from teamagent.dashboard.config import DashboardConfig
 
 logger = structlog.get_logger(__name__)
+
+
+class _RedactShortLinkAccessLog(logging.Filter):
+    """uvicorn アクセスログの ``/r/<token>`` パスを ``/r/<redacted>`` に伏せる。
+
+    短縮リンクのトークンは capability（＝リンクを知る人が時限で閲覧できる bearer 相当）なので、
+    CloudWatch のアクセスログに平文で残すとログ閲覧者が失効まで再利用できてしまう。パスだけ
+    伏せ、他ルートのアクセスログは通常どおり残す（観測性は維持）。uvicorn.access のレコードは
+    args=(client, method, full_path, http_version, status) 形式（args[2]=パス）。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if (
+            isinstance(args, tuple)
+            and len(args) >= 3
+            and isinstance(args[2], str)
+            and args[2].startswith("/r/")
+        ):
+            redacted = list(args)
+            redacted[2] = "/r/<redacted>"
+            record.args = tuple(redacted)
+        return True
+
+
+def build_uvicorn_log_config() -> dict[str, Any]:
+    """uvicorn の既定ログ設定に、/r/<token> をアクセスログで伏せるフィルタを足して返す。
+
+    __main__ が ``uvicorn.run(log_config=build_uvicorn_log_config())`` で使う。dictConfig が
+    確実にフィルタを登録するよう、uvicorn 起動時の設定として渡す（後付け addFilter は
+    uvicorn の dictConfig 適用で消えうるため）。
+    """
+    from uvicorn.config import LOGGING_CONFIG
+
+    cfg = copy.deepcopy(LOGGING_CONFIG)
+    cfg.setdefault("filters", {})["redact_shortlink"] = {
+        "()": f"{__name__}._RedactShortLinkAccessLog",
+    }
+    access = cfg.get("loggers", {}).get("uvicorn.access")
+    if access is not None:
+        access["filters"] = [*access.get("filters", []), "redact_shortlink"]
+    return cfg
 
 
 _APP_HTML_MISSING = (
@@ -3332,14 +3376,16 @@ def create_app(
         decoded = decode_report_token(rid)
         if decoded is None:
             return Response(
-                "リンクが無効か期限切れです。", status_code=404,
+                "リンクが無効か期限切れです。",
+                status_code=404,
                 media_type="text/plain; charset=utf-8",
             )
         bucket, key, region = decoded
         url = presign_get(bucket, key, region=region or os.environ.get("AWS_REGION"))
         if not url:
             return Response(
-                "レポートを取得できませんでした。", status_code=404,
+                "レポートを取得できませんでした。",
+                status_code=404,
                 media_type="text/plain; charset=utf-8",
             )
         return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})

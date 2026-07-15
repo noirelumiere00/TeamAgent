@@ -136,10 +136,14 @@ def _fmt_count(n: int) -> str:
         v = 0
     if v < 10_000:
         return f"{v:,}"
-    unit, div = ("億", 100_000_000) if v >= 100_000_000 else ("万", 10_000)
-    scaled = round(v / div, 1)  # 先に1桁へ丸める（"2.0万"化を防ぎ末尾0は整数へ）
-    body = f"{int(scaled)}" if scaled == int(scaled) else f"{scaled:.1f}"
-    return f"{body}{unit}"
+    # 単位は「丸めた後の値」で決める。99,999,999 は万で 10000.0万 に丸まるので億へ桁上げする。
+    man = round(v / 10_000, 1)
+    if man < 10_000:
+        body = f"{int(man)}" if man == int(man) else f"{man:.1f}"
+        return f"{body}万"
+    oku = round(v / 100_000_000, 1)
+    body = f"{int(oku)}" if oku == int(oku) else f"{oku:.1f}"
+    return f"{body}億"
 
 
 # 本物のX投稿UIのエンゲージアイコン（viewBox 0 0 24 24・fill で描画）。
@@ -169,12 +173,17 @@ _ICON_LIKE = (
 _ICON_VIEWS = "M8.75 21V3h2v18h-2zM18 21V8.5h2V21h-2zM4 21l.004-10h2L6 21H4zm9.248 0v-7h2v7h-2z"
 
 
-def _eng_item(path: str, count: int) -> str:
-    """エンゲージ1項目（アイコン＋略記数値）。件数は _fmt_count で万表記。"""
+def _eng_item(path: str, count: int, label: str) -> str:
+    """エンゲージ1項目（アイコン＋略記数値）。件数は _fmt_count で万表記。
+
+    SVG はグレーの装飾なので aria-hidden にし、項目全体に role=img＋aria-label（例「返信 395」）
+    を付けて読み上げでも種別が分かるようにする（数字だけの読み上げを避ける）。
+    """
+    n = _fmt_count(count)
     return (
-        "<span class='ei'>"
+        f"<span class='ei' role='img' aria-label='{_esc(label)} {n}'>"
         f"<svg viewBox='0 0 24 24' aria-hidden='true'><path d='{path}'></path></svg>"
-        f"<span class='ec'>{_fmt_count(count)}</span></span>"
+        f"<span class='ec'>{n}</span></span>"
     )
 
 
@@ -232,12 +241,12 @@ def _card(p: XPostCard) -> str:
     # 他は取得できた(>0)時のみ＝捏造しない（現行踏襲）。数値は _fmt_count で万表記。
     items: list[str] = []
     if p.reply_count:
-        items.append(_eng_item(_ICON_REPLY, p.reply_count))
+        items.append(_eng_item(_ICON_REPLY, p.reply_count, "返信"))
     if p.retweet_count:
-        items.append(_eng_item(_ICON_RETWEET, p.retweet_count))
-    items.append(_eng_item(_ICON_LIKE, p.like_count))
+        items.append(_eng_item(_ICON_RETWEET, p.retweet_count, "リポスト"))
+    items.append(_eng_item(_ICON_LIKE, p.like_count, "いいね"))
     if p.view_count:
-        items.append(_eng_item(_ICON_VIEWS, p.view_count))
+        items.append(_eng_item(_ICON_VIEWS, p.view_count, "表示"))
     eng_html = "<div class='eng'>" + "".join(items) + "</div>"
     card = (
         "<div class='xc'><div class='top'>"

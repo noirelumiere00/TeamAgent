@@ -533,6 +533,10 @@ def test_card_recreates_x_post_with_avatar_media_engagement() -> None:
     assert "<span class='ec'>10</span>" in h  # いいね
     assert "<span class='ec'>500</span>" in h  # ビュー
     assert "❤️" not in h and "🔁" not in h and "💬" not in h and "👁" not in h
+    # 読み上げラベル（数字だけの読み上げを避ける）
+    assert "aria-label='返信 1'" in h
+    assert "aria-label='いいね 10'" in h
+    assert "aria-label='表示 500'" in h
     assert "✅ 実在検証済み" in h  # 検証チップは枠外ストリップ
     assert "不明" not in h
 
@@ -574,6 +578,9 @@ def test_fmt_count_man_notation() -> None:
     assert _fmt_count(99999) == "10万"  # 丸め上げで万→大台（"10.0万"にしない）
     assert _fmt_count(100_000_000) == "1億"  # 億表記
     assert _fmt_count(150_000_000) == "1.5億"
+    assert (
+        _fmt_count(99_999_999) == "1億"
+    )  # 万で 10000.0万 に丸まる→億へ桁上げ（"10000万"にしない）
     assert _fmt_count(-5) == "0"  # 負値は0扱い（捏造しない）
 
 

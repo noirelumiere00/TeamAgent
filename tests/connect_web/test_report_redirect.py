@@ -86,3 +86,45 @@ def test_presign_failure_404(client: TestClient, monkeypatch: pytest.MonkeyPatch
     token = encode_report_token(_BUCKET, _KEY)
     r = client.get(f"/r/{token}", follow_redirects=False)
     assert r.status_code == 404
+
+
+def test_access_log_redacts_shortlink_token() -> None:
+    """アクセスログの /r/<token> がトークンごと伏せられ、他ルートは伏せない（CloudWatch 流出防止）。"""
+    import logging
+
+    from teamagent.connect_web.app import (
+        _RedactShortLinkAccessLog,
+        build_uvicorn_log_config,
+    )
+
+    fmt = '%s - "%s %s HTTP/%s" %d'
+    flt = _RedactShortLinkAccessLog()
+
+    rec = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        fmt,
+        ("1.2.3.4:5", "GET", "/r/SECRET.TOKEN", "1.1", 302),
+        None,
+    )
+    assert flt.filter(rec) is True
+    assert rec.args[2] == "/r/<redacted>"  # トークンは伏せる
+    assert "SECRET" not in (rec.getMessage())
+
+    rec2 = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        fmt,
+        ("1.2.3.4:5", "GET", "/app", "1.1", 200),
+        None,
+    )
+    flt.filter(rec2)
+    assert rec2.args[2] == "/app"  # 他ルートはそのまま（観測性維持）
+
+    cfg = build_uvicorn_log_config()  # log_config に filter が登録される
+    assert "redact_shortlink" in cfg.get("filters", {})
+    assert "redact_shortlink" in cfg["loggers"]["uvicorn.access"].get("filters", [])
