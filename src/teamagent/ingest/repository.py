@@ -97,6 +97,39 @@ class ConnectorState:
     last_error: str | None = None
 
 
+@dataclass(frozen=True)
+class GDriveAclSnapshot:
+    """ACL-only 同期対象となる non-stale Drive document の最小スナップショット。
+
+    ``row_version`` は PostgreSQL の ``xmin``。同期計画後に ingest 等が同じ行を更新した
+    場合を検出し、古い ACL 計画で上書きしないための楽観 lock token として使う。
+    本文・metadata・時刻は読み出さない。
+    """
+
+    document_id: str
+    external_id: str
+    owner_email: str
+    acl_emails: tuple[str, ...]
+    acl_groups: tuple[str, ...]
+    row_version: str
+
+
+@dataclass(frozen=True)
+class GDriveAclUpdate:
+    """ACL-only UPDATE 1 行分。expected_row_version は計画時の ``xmin``。"""
+
+    document_id: str
+    external_id: str
+    expected_row_version: str
+    owner_email: str
+    acl_emails: tuple[str, ...]
+    acl_groups: tuple[str, ...]
+
+
+class GDriveAclOptimisticLockError(RuntimeError):
+    """ACL 計画後に対象行が変化したため、全更新を中止した。"""
+
+
 # -----------------------------------------------------------
 # repository 本体
 # -----------------------------------------------------------
@@ -299,6 +332,118 @@ class IngestRepository:
         with self._ops_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
+
+    # -------------------------------------------------------
+    # Google Drive ACL-only 同期
+    # -------------------------------------------------------
+    def list_nonstale_gdrive_acl_snapshot(self) -> list[GDriveAclSnapshot]:
+        """non-stale gdrive documents の ACL と楽観 lock token だけを返す。
+
+        title / source_uri / client_code / metadata 本体 / modified_at / ingested_at / chunks は
+        射影しない。``metadata`` は stale 判定の WHERE 条件にだけ使う。
+        """
+        sql = """
+            SELECT id::text AS document_id,
+                   external_id,
+                   owner_email,
+                   acl_emails,
+                   acl_groups,
+                   xmin::text AS row_version
+            FROM documents
+            WHERE source_type = 'gdrive'::document_source_type
+              AND COALESCE(metadata->>'stale', '') <> 'true'
+            ORDER BY external_id, id
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [
+            GDriveAclSnapshot(
+                document_id=str(row["document_id"]),
+                external_id=str(row["external_id"]),
+                owner_email=str(row["owner_email"]),
+                acl_emails=tuple(str(value) for value in (row["acl_emails"] or ())),
+                acl_groups=tuple(str(value) for value in (row["acl_groups"] or ())),
+                row_version=str(row["row_version"]),
+            )
+            for row in rows
+        ]
+
+    def update_gdrive_acls(self, updates: list[GDriveAclUpdate]) -> int:
+        """ACL 3 列だけを 1 transaction で更新し、更新件数を返す。
+
+        書込み前に全対象を ``FOR UPDATE`` し、計画時の ``xmin`` と照合する。1 行でも
+        欠落・stale 化・更新済みなら、最初の UPDATE より前に例外を送出する。その後の
+        UPDATE も owner_email / acl_emails / acl_groups 以外を SET しない。途中 DB 失敗時は
+        PgVectorClient.connection の transaction rollback により全行 write 0 となる。
+        """
+        if not updates:
+            return 0
+
+        ordered = sorted(updates, key=lambda item: item.document_id)
+        document_ids = [item.document_id for item in ordered]
+        if len(set(document_ids)) != len(document_ids):
+            raise ValueError("duplicate document_id in gdrive ACL update plan")
+        if any(not item.owner_email.strip() for item in ordered):
+            raise ValueError("owner_email must not be empty in gdrive ACL update plan")
+
+        lock_sql = """
+            SELECT id::text AS document_id,
+                   external_id,
+                   xmin::text AS row_version
+            FROM documents
+            WHERE source_type = 'gdrive'::document_source_type
+              AND COALESCE(metadata->>'stale', '') <> 'true'
+              AND id = ANY(%s::uuid[])
+            ORDER BY id
+            FOR UPDATE
+        """
+        update_sql = """
+            UPDATE documents
+            SET owner_email = %s,
+                acl_emails = %s,
+                acl_groups = %s
+            WHERE id = %s::uuid
+              AND source_type = 'gdrive'::document_source_type
+              AND external_id = %s
+        """
+
+        expected = {
+            (item.document_id, item.external_id, item.expected_row_version) for item in ordered
+        }
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(lock_sql, (document_ids,))
+                locked_rows = cur.fetchall()
+            actual = {
+                (str(row["document_id"]), str(row["external_id"]), str(row["row_version"]))
+                for row in locked_rows
+            }
+            if actual != expected:
+                raise GDriveAclOptimisticLockError(
+                    "gdrive ACL snapshot changed before commit; no rows updated"
+                )
+
+            updated = 0
+            with conn.cursor() as cur:
+                for item in ordered:
+                    cur.execute(
+                        update_sql,
+                        (
+                            item.owner_email,
+                            list(item.acl_emails),
+                            list(item.acl_groups),
+                            item.document_id,
+                            item.external_id,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        raise GDriveAclOptimisticLockError(
+                            "gdrive ACL row changed during commit; transaction rolled back"
+                        )
+                    updated += 1
+        return updated
 
     # -------------------------------------------------------
     # stale soft-delete（入れ込み v2 2026-07-10・INGEST_MARK_STALE）

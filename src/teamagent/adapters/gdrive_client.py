@@ -57,6 +57,15 @@ DEFAULT_EXCLUDE_FOLDER_NAME_RE = r"^\s*99[_＿]|一次倉庫|検索対象外"
 # シグネチャに 5000 を直書きすると両者が乖離した時に打ち切りが無検知になる。
 DEFAULT_WALK_MAX_FILES = 5000
 
+# permissions.list は 1 ページ最大 100 件。ACL 同期で途中ページを「全件」と誤認すると
+# 権限を過小評価してしまうため、全ページを取得しつつ無限 token loop には上限で fail-closed。
+DEFAULT_PERMISSIONS_MAX_PAGES = 100
+DEFAULT_GOOGLE_API_RETRIES = 3
+
+
+class GDrivePermissionsPaginationError(RuntimeError):
+    """permissions.list を最後のページまで安全に列挙できなかった。"""
+
 
 # -----------------------------------------------------------
 # データ型
@@ -94,6 +103,8 @@ class DrivePermission:
     email_address: str | None = None  # user / group なら入る、anyone / domain は None
     domain: str | None = None  # domain / anyone-with-link は domain あり
     deleted: bool = False
+    # ``published`` / ``metadata`` は本文閲覧権ではない。ACL 同期では除外する。
+    view: str | None = None
 
 
 @dataclass(frozen=True)
@@ -288,25 +299,67 @@ class GDriveClient:
         request_id: str,
         *,
         include_shared_drives: bool = True,
+        page_size: int = 100,
+        max_pages: int = DEFAULT_PERMISSIONS_MAX_PAGES,
+        api_retries: int = DEFAULT_GOOGLE_API_RETRIES,
     ) -> list[DrivePermission]:
-        """ファイルの ACL を取得する。documents.acl_emails に写像するのが目的。
+        """ファイル ACL を最終ページまで取得する（打ち切り時は部分結果を返さない）。
 
-        Drive API 仕様で permissions.list は 100 件/ページなので、
-        100 件超のケースは pageToken 追加対応が必要（Sprint 4 で）。
+        ``max_pages`` 到達時に ``nextPageToken`` が残る、または token が循環する場合は
+        :class:`GDrivePermissionsPaginationError` を送出する。ACL の部分取得を完全取得として
+        扱うとアクセス権を誤って縮小するため、ここは fail-closed とする。
+
+        ``api_retries`` は googleapiclient の ``execute(num_retries=...)`` に渡し、429/5xx
+        など同ライブラリが一過性と判定する失敗をページ単位で再試行する。
         """
+        if not 1 <= page_size <= 100:
+            raise ValueError("permissions page_size must be between 1 and 100")
+        if max_pages < 1:
+            raise ValueError("permissions max_pages must be at least 1")
+        if api_retries < 0:
+            raise ValueError("permissions api_retries must be non-negative")
+
         service = self._ensure_service()
         start = time.perf_counter()
-        resp = (
-            service.permissions()
-            .list(
-                fileId=file_id,
-                fields="permissions(id, type, role, emailAddress, domain, deleted)",
-                supportsAllDrives=include_shared_drives,
+        raw_permissions: list[dict[str, Any]] = []
+        page_token: str | None = None
+        seen_tokens: set[str] = set()
+        pages = 0
+
+        for _ in range(max_pages):
+            kwargs: dict[str, Any] = {
+                "fileId": file_id,
+                "pageSize": page_size,
+                "fields": (
+                    "nextPageToken, permissions("
+                    "id, type, role, emailAddress, domain, deleted, view)"
+                ),
+                "supportsAllDrives": include_shared_drives,
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
+            resp = service.permissions().list(**kwargs).execute(num_retries=api_retries)
+            pages += 1
+            raw_permissions.extend(resp.get("permissions", []) or [])
+
+            next_token_raw = resp.get("nextPageToken")
+            next_token = str(next_token_raw) if next_token_raw else None
+            if not next_token:
+                page_token = None
+                break
+            if next_token in seen_tokens or next_token == page_token:
+                raise GDrivePermissionsPaginationError(
+                    "permissions pagination token did not advance"
+                )
+            seen_tokens.add(next_token)
+            page_token = next_token
+
+        if page_token:
+            raise GDrivePermissionsPaginationError(
+                "permissions pagination reached max_pages with a remaining token"
             )
-            .execute()
-        )
+
         latency_ms = int((time.perf_counter() - start) * 1000)
-        raw = resp.get("permissions", [])
         perms = [
             DrivePermission(
                 id=str(p.get("id", "")),
@@ -315,14 +368,15 @@ class GDriveClient:
                 email_address=p.get("emailAddress"),
                 domain=p.get("domain"),
                 deleted=bool(p.get("deleted", False)),
+                view=p.get("view"),
             )
-            for p in raw
+            for p in raw_permissions
         ]
         logger.info(
             "gdrive_list_permissions",
             request_id=request_id,
-            file_id=file_id,
             count=len(perms),
+            pages=pages,
             latency_ms=latency_ms,
         )
         return perms
@@ -646,7 +700,9 @@ class GDriveClient:
 # -----------------------------------------------------------
 # ヘルパー: permissions → acl_emails 抽出
 # -----------------------------------------------------------
-def extract_acl_emails(perms: list[DrivePermission]) -> tuple[list[str], list[str]]:
+def extract_acl_emails(
+    perms: list[DrivePermission], *, workspace_domain: str | None = None
+) -> tuple[list[str], list[str]]:
     """permissions.list の結果を documents.acl_emails / acl_groups に分解する。
 
     会社思想 (Day 7, 2026-05-27 ユーザー確認): 「資料は全て共有物」原則。
@@ -660,12 +716,14 @@ def extract_acl_emails(perms: list[DrivePermission]) -> tuple[list[str], list[st
         type='anyone'                                → acl_groups に WORKSPACE_DOMAIN 追加
         role='owner'                                 → 別途 documents.owner_email に
     """
-    workspace_domain = os.environ.get("WORKSPACE_DOMAIN", "vectorinc.co.jp")
+    workspace_domain = workspace_domain or os.environ.get("WORKSPACE_DOMAIN", "vectorinc.co.jp")
 
     emails: list[str] = []
     groups: list[str] = []
     for p in perms:
-        if p.deleted:
+        # Drive API の published / metadata view は、公開表示またはメタデータ
+        # 参照のための限定 permission。本文を閲覧できる ACL として扱わない。
+        if p.deleted or p.view in {"published", "metadata"}:
             continue
         if p.type == "user" and p.email_address:
             emails.append(p.email_address)

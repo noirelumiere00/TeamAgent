@@ -23,6 +23,7 @@ from teamagent.adapters.gdrive_client import (
     DriveFile,
     DrivePermission,
     GDriveClient,
+    GDrivePermissionsPaginationError,
     extract_acl_emails,
 )
 
@@ -35,7 +36,8 @@ class _FakeRequest:
         self._response = response
         self.call_kwargs: dict[str, Any] = {}
 
-    def execute(self) -> Any:
+    def execute(self, **kwargs: Any) -> Any:
+        self.call_kwargs = kwargs
         return self._response
 
 
@@ -56,12 +58,20 @@ class _FakeFiles:
 
 class _FakePermissions:
     def __init__(self, list_response: Any) -> None:
-        self._list_response = list_response
+        self._list_responses = list_response if isinstance(list_response, list) else [list_response]
         self.last_list_kwargs: dict[str, Any] = {}
+        self.list_kwargs: list[dict[str, Any]] = []
+        self.requests: list[_FakeRequest] = []
 
     def list(self, **kwargs: Any) -> _FakeRequest:
         self.last_list_kwargs = kwargs
-        return _FakeRequest(self._list_response)
+        self.list_kwargs.append(kwargs)
+        response_index = len(self.list_kwargs) - 1
+        if response_index >= len(self._list_responses):
+            raise AssertionError("unexpected permissions.list page request")
+        request = _FakeRequest(self._list_responses[response_index])
+        self.requests.append(request)
+        return request
 
 
 class _FakeChanges:
@@ -88,11 +98,16 @@ class FakeDriveService:
         *,
         files_list: Any | None = None,
         permissions_list: Any | None = None,
+        permissions_pages: list[Any] | None = None,
         changes_list: Any | None = None,
         start_page_token: str = "TOKEN-INIT",
     ) -> None:
         self._files = _FakeFiles(files_list or {"files": [], "nextPageToken": None})
-        self._permissions = _FakePermissions(permissions_list or {"permissions": []})
+        self._permissions = _FakePermissions(
+            permissions_pages
+            if permissions_pages is not None
+            else (permissions_list or {"permissions": []})
+        )
         self._changes = _FakeChanges(
             changes_list or {"changes": [], "newStartPageToken": start_page_token},
             {"startPageToken": start_page_token},
@@ -226,6 +241,75 @@ def test_list_permissions_maps_to_dataclass() -> None:
     assert perms[3].deleted is True
 
 
+def test_list_permissions_fetches_every_page_with_retries() -> None:
+    fake = FakeDriveService(
+        permissions_pages=[
+            {
+                "permissions": [
+                    {"id": "p1", "type": "user", "role": "owner", "emailAddress": "o@x.jp"}
+                ],
+                "nextPageToken": "PAGE2",
+            },
+            {
+                "permissions": [
+                    {"id": "p2", "type": "group", "role": "reader", "emailAddress": "g@x.jp"}
+                ]
+            },
+        ]
+    )
+    perms = GDriveClient(service=fake).list_permissions(file_id="F1", request_id="r", api_retries=4)
+
+    assert [permission.id for permission in perms] == ["p1", "p2"]
+    permission_api = fake.permissions()
+    assert permission_api.list_kwargs[0]["pageSize"] == 100
+    assert "nextPageToken" in permission_api.list_kwargs[0]["fields"]
+    assert "pageToken" not in permission_api.list_kwargs[0]
+    assert permission_api.list_kwargs[1]["pageToken"] == "PAGE2"
+    assert [request.call_kwargs for request in permission_api.requests] == [
+        {"num_retries": 4},
+        {"num_retries": 4},
+    ]
+
+
+def test_list_permissions_raises_when_page_limit_leaves_token() -> None:
+    fake = FakeDriveService(
+        permissions_pages=[
+            {"permissions": [{"id": "p1"}], "nextPageToken": "PAGE2"},
+        ]
+    )
+    with pytest.raises(GDrivePermissionsPaginationError, match="remaining token"):
+        GDriveClient(service=fake).list_permissions(file_id="F1", request_id="r", max_pages=1)
+
+
+def test_list_permissions_raises_on_repeated_page_token() -> None:
+    fake = FakeDriveService(
+        permissions_pages=[
+            {"permissions": [], "nextPageToken": "PAGE2"},
+            {"permissions": [], "nextPageToken": "PAGE2"},
+        ]
+    )
+    with pytest.raises(GDrivePermissionsPaginationError, match="did not advance"):
+        GDriveClient(service=fake).list_permissions(file_id="F1", request_id="r")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"page_size": 0}, "page_size"),
+        ({"page_size": 101}, "page_size"),
+        ({"max_pages": 0}, "max_pages"),
+        ({"api_retries": -1}, "api_retries"),
+    ],
+)
+def test_list_permissions_rejects_invalid_safety_limits(
+    kwargs: dict[str, int], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        GDriveClient(service=FakeDriveService()).list_permissions(
+            file_id="F1", request_id="r", **kwargs
+        )
+
+
 # -----------------------------------------------------------
 # extract_acl_emails
 # -----------------------------------------------------------
@@ -264,6 +348,35 @@ def test_extract_acl_emails_workspace_domain_env_override(monkeypatch: Any) -> N
     perms = [DrivePermission(id="1", type="anyone", role="reader")]
     _, groups = extract_acl_emails(perms)
     assert groups == ["example.co.jp"]
+
+
+def test_extract_acl_emails_ignores_limited_views() -> None:
+    perms = [
+        DrivePermission(
+            id="published",
+            type="anyone",
+            role="reader",
+            view="published",
+        ),
+        DrivePermission(
+            id="metadata",
+            type="domain",
+            role="reader",
+            domain="vectorinc.co.jp",
+            view="metadata",
+        ),
+        DrivePermission(
+            id="content",
+            type="domain",
+            role="reader",
+            domain="vectorinc.co.jp",
+        ),
+    ]
+
+    emails, groups = extract_acl_emails(perms)
+
+    assert emails == []
+    assert groups == ["vectorinc.co.jp"]
 
 
 def test_extract_acl_emails_dedup_groups(monkeypatch: Any) -> None:
