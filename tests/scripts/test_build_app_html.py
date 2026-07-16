@@ -81,10 +81,13 @@ def _write_doc(
     source_type: str = "",
     external_id: str = "",
     source_url: str = "",
+    generated_by: bool = False,
 ) -> None:
     display_title = title or stem
+    generator_line = 'generated_by: "scripts/export_vault.py"\n' if generated_by else ""
     (vault / "docs" / f"{stem}.md").write_text(
-        f'---\ntitle: "{display_title}"\nclient: "{client}"\nindustry: "エネルギー"\n'
+        f"---\n{generator_line}"
+        f'title: "{display_title}"\nclient: "{client}"\nindustry: "エネルギー"\n'
         f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "2026-06-01"\n'
         f'source_type: "{source_type}"\nexternal_id: "{external_id}"\n---\n\n'
         f"> {display_title} の抜粋\n\n"
@@ -195,6 +198,38 @@ def test_internal_source_identity_not_exposed_in_generated_html(
     assert '"source_type"' not in html
     # クリック用の出典 URL は既存の意図仕様。隠すのは frontmatter の複合安定IDそのもの。
     assert "docs.google.com/spreadsheets/d/DO-NOT-EXPOSE-SHEET/" in html
+
+
+def test_export_vault_generated_same_name_docs_are_not_folded_as_chunks(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """exporterの `_2` は別Drive資料であり、旧chunk規則でsilent dropしない。"""
+    _write_doc(vault, "同名提案", title="同名提案 A", generated_by=True)
+    _write_doc(vault, "同名提案_2", title="同名提案 B", generated_by=True)
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "同名提案 A" in html
+    assert "同名提案 B" in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 5
+
+
+def test_unmarked_legacy_chunk_notes_still_fold_to_one(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """marker導入前の意図的な `_2` 分割断片は従来どおり代表1件へ束ねる。"""
+    _write_doc(vault, "旧分割資料", title="旧分割資料")
+    _write_doc(vault, "旧分割資料_2", title="旧分割資料 2ページ目")
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "旧分割資料" in html
+    assert "旧分割資料 2ページ目" not in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 4
 
 
 def test_seikyusho_stem_excluded_without_sidecar_listing(

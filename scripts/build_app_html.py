@@ -623,17 +623,25 @@ def _canon_client(v):
 
 
 _CHUNK_RE = re.compile(r"_\d{1,2}$")
+_EXPORT_VAULT_GENERATOR = "scripts/export_vault.py"
+
+
 def _chunk_key(stem):
     k = stem
     while _CHUNK_RE.search(k):
         k = _CHUNK_RE.sub("", k)
     return k
 def _compute_chunk_drop():
-    # 分割断片(_2/_3…)は同一baseで束ね、代表1件(base優先/最短)のみ残す
+    # 旧Vaultの分割断片(_2/_3…)は同一baseで束ね、代表1件(base優先/最短)のみ残す。
+    # export_vault の note は1ファイル=1論理documentであり、同名衝突や元タイトル由来の
+    # `_2` は chunk ではない。generated_by marker がある生成noteはstemに関係なく保持する。
     groups = defaultdict(list)
     for f in DOCS.glob("*.md"):
         s = f.stem
         if _is_excluded(s):
+            continue
+        fm = front(f.read_text(errors="replace"))
+        if fm.get("generated_by") == _EXPORT_VAULT_GENERATOR:
             continue
         groups[_chunk_key(s)].append(s)
     drop = set()
