@@ -382,6 +382,7 @@ def test_parse_extracts_avatar_media_verified_for_recreation_card() -> None:
                 "name": "U",
                 "profileImageUrl": "https://pbs.example/av.jpg",
                 "isVerified": True,
+                "description": "コスメ好き｜淡色｜垢抜け",
             },
             "media": [
                 {"mediaUrlHttps": "https://pbs.example/m1.jpg", "type": "photo"},
@@ -399,6 +400,7 @@ def test_parse_extracts_avatar_media_verified_for_recreation_card() -> None:
     assert p.is_verified is True
     assert p.view_count == 1000
     assert p.quote_count == 2
+    assert p.author_bio == "コスメ好き｜淡色｜垢抜け"  # 界隈分類(Part4)の主入力
 
 
 def test_parse_media_from_entities_nested_and_capped() -> None:

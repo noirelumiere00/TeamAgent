@@ -23,7 +23,11 @@ class XPostCard(BaseModel):
     author_name: str = Field(
         default="", description="表示名（handle 空時のフォールバック表示に使う）"
     )
-    author_note: str = Field(default="", description="属性メモ（美容系/一般 等・LLM推定）")
+    author_note: str = Field(default="", description="属性メモ（美容系/一般 等・後方互換）")
+    author_circles: list[str] = Field(
+        default_factory=list,
+        description="界隈タグ（マルチラベル・bio+投稿からLLM推定・観測できなければ空＝捏造しない）",
+    )
     text: str
     like_count: int = 0
     retweet_count: int = 0

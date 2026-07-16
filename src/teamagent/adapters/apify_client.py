@@ -92,6 +92,8 @@ class XPost:
     is_verified: bool = False
     view_count: int = 0
     quote_count: int = 0
+    # 界隈分類(Part4)用: 著者プロフィール文。取得できた actor でのみ非空（捏造しない）。
+    author_bio: str = ""
 
 
 @dataclass(frozen=True)
@@ -263,6 +265,10 @@ def _parse_x_item(d: dict[str, Any], source_actor: str) -> XPost | None:
         ),
         view_count=_as_int(_first(d, "viewCount", "views", "view_count", default=0)),
         quote_count=_as_int(_first(d, "quoteCount", "quotes", "quote_count", default=0)),
+        author_bio=str(
+            _first(author_raw, "description", "bio", "rawDescription", "profile_bio", default="")
+            or ""
+        ),
     )
 
 

@@ -27,6 +27,7 @@ import structlog
 from teamagent.identity import shared_company_domains_from_env
 from teamagent.ingest.boilerplate import mark_boilerplate
 from teamagent.ingest.docdedup import mark_duplicate_documents
+from teamagent.ingest.form_mappings import _normalize_form_label
 from teamagent.ingest.loader import (
     GDriveFolderSpec,
     GSheetSpec,
@@ -135,6 +136,41 @@ def _drain_changes(
             next_cursor = batch.new_start_page_token
         token = batch.next_page_token
     return changed, next_cursor
+
+
+# ナレッジ台帳行が「99_一次倉庫」系（検索対象外の生データ置き場）を指しているかを見る列。
+# 実シート dump(2026-07-15) のヘッダ準拠。フォルダ/ファイル名を持ちうる運用列だけを見る。
+# ⚠️ 現行 dump では **到達不能な保険**（旧_保管先フォルダ は date_client 形式・99_ は 0 件、
+# 資料の概要_メイン は 提案/レポート 等の素の値）。将来 99_ 系の列値が現れた時に備えた保険で、
+# 「今 99 を守れている」証明ではない。prod 稼働中のフォーム回答タブが持つ「ドライブ格納」を
+# あえて含めないのは、その行に安定 ID を与えると既存 document を孤児化するため（stale 検出なし）。
+# 判定規則そのものは gdrive 取込と同一の正本 regex（DEFAULT_EXCLUDE_FOLDER_NAME_RE）を
+# _ingest_gsheet 内で lazy import して再利用する（sheet 側で独自ルールを持たない）。
+# 本文(embedding/抜粋)に載せない運用列。人間の知見を含まないのに長大で、先頭に来ると
+# export_vault の 160 字抜粋を食い潰し、ポイント/なぜ/フリーコメント が抜粋から落ちる。
+# ※ヘッダは _normalize_form_label を通してから照合する（実シートは「保存ファイル(リンク付き)」が
+#   半角括弧・フォーム回答タブは全角と揺れるため、生文字列一致だと黙って外れる）。
+#
+# ⚠️ **保存ファイル（リンク付き）は除外しない**。ファイル名は各行唯一の検索キー（資料名での
+# キーワード検索が当たる）で、160 字問題の主犯ではない。主犯は**先頭列**にある 100 字超の
+# Slack file URL（ファイルをアップ）。ファイル名は列順で ポイント/なぜ より後ろ＝抜粋窓を食わない。
+_KNOWLEDGE_OPS_COLUMNS: frozenset[str] = frozenset(
+    {
+        "ファイルをアップ",  # Slack file URL（長大・知見ゼロ・160字問題の主犯）
+        "タイムスタンプ",
+        "連番",
+        "保存ファイルリンク",  # Drive URL（長大）。ファイル名は 保存ファイル(リンク付き) に残す
+        "保管先フォルダ",  # 資料の概要_メイン と完全ミラー（NN_ 接頭の有無のみ）＝冗長
+        "旧_保管先フォルダ",
+        "処理日時",
+        "処理エラー",
+        "保管先フォルダID記録（GAS処理）",
+        "ドライブ格納",
+    }
+)
+_KNOWLEDGE_OPS_NORM: frozenset[str] = frozenset(
+    _normalize_form_label(h) for h in _KNOWLEDGE_OPS_COLUMNS
+)
 
 
 def _company_acl_groups() -> list[str]:
@@ -1787,6 +1823,29 @@ def _ingest_gsheet(
                 )
                 if derived_knowledge_client:
                     knowledge_doc_metadata["client_name"] = derived_knowledge_client
+
+            # ナレッジ共有シート行(フォーム回答)の本文/タイトル正規化:
+            if knowledge_metadata:
+                # (a) 本文から運用列を外す。先頭列の Slack file URL(100字超)が export_vault の
+                #     160 字抜粋を食い潰し、知見が書かれた ポイント/なぜ/フリーコメント が
+                #     抜粋＝/app のタグ源から落ちる（実測: 施策手法 6→1）。ファイル名を持つ
+                #     「保存ファイル（リンク付き）」は各行唯一の検索キーなので**残す**。
+                _ops = frozenset(
+                    h for h in tab_rows.headers if _normalize_form_label(h) in _KNOWLEDGE_OPS_NORM
+                )
+                _body = format_row_as_document(tab_rows.headers, row, exclude_headers=_ops)
+                if _body.strip():
+                    text = _body
+                # (b) title は "row N" でなく「正式社名 案件名」に。Vault のファイル名/H1/検索の
+                #     d.title ILIKE//app の表示名を兼ねるため意味のある値にする。正式社名が
+                #     プレースホルダ(なし/その他 等)の行は従来タイトルを維持する。
+                _company = derive_knowledge_client_name(
+                    knowledge_metadata.get("client_company", "")
+                )
+                _case = str(knowledge_metadata.get("client_case", "") or "").strip()
+                _title_parts = [x for x in (_company, _case) if x]
+                if _title_parts:
+                    row_title = " ".join(_title_parts)
 
             # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
             # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。

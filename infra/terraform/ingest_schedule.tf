@@ -189,6 +189,10 @@ resource "aws_ecs_task_definition" "ingest" {
       { name = "AWS_REGION", value = var.aws_region },
       { name = "INGEST_SOURCES", value = var.ingest_sources },
       { name = "INGEST_OWNER_EMAIL", value = var.ingest_owner_email },
+      # §G 会社共有: これが無いと pipeline._company_acl_groups() が [] を返し、取込 document の
+      # acl_groups が空＝owner しか RLS で見られない（管理画面では見えるが他社員の通常検索で不可視）。
+      # MCP task-def（fargate.tf）と同変数を ingest task にも渡し、会社メンバーへ横共有する（Codex #215-3）。
+      { name = "TEAMAGENT_SHARED_COMPANY_DOMAINS", value = var.shared_company_domains },
       { name = "STRUCTLOG_FORMAT", value = "json" },
       # §知識ベース（2026-06-22）: Drive 取り込み時に Bedrock で資料を自動分類
       # （案件/業界/種別/フェーズ→documents.metadata）。ingest_task は bedrock:InvokeModel 保持済。

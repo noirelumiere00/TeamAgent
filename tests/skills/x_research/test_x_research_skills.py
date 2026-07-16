@@ -76,9 +76,16 @@ class _FakeBedrock:
     def __init__(self, text: str) -> None:
         self._text = text
         self.calls = 0
+        self.last_prompt = ""  # 直近 converse に渡ったプロンプト本文（入力cap検証用）
+        self.last_max_tokens = 0
 
     def converse(self, **kw: Any) -> _FakeResp:
         self.calls += 1
+        try:
+            self.last_prompt = kw["messages"][0]["content"][0]["text"]
+        except (KeyError, IndexError, TypeError):
+            self.last_prompt = ""
+        self.last_max_tokens = int(kw.get("max_tokens", 0))
         return _FakeResp(self._text)
 
 
@@ -119,6 +126,148 @@ def test_voice_search_happy_path() -> None:
     assert out.report_url == "https://s3.example/signed"
     assert "白湯" in out.slack_summary and out.total_cost_usd > 0
     assert len(apify.verify_calls) == 1  # 厳選分のみ検証
+
+
+def test_voice_search_assigns_kaiwai_circles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """USE_KAIWAI_CLASSIFY=1 で LLM の author_circles がカードに界隈タグとして配線される（Part4）。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
+    posts = [_post("1", likes=31), _post("2", likes=64)]
+    noise_json = json.dumps(
+        {
+            "keep": ["1", "2"],
+            "author_circles": {"1": ["美容界隈", "淡色界隈"], "2": ["ガジェット界隈"]},
+            "noise_note": "",
+        }
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify(posts),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    by_id = {p.post_id: p for p in out.posts}
+    assert by_id["1"].author_circles == ["美容界隈", "淡色界隈"]  # マルチラベル
+    assert by_id["2"].author_circles == ["ガジェット界隈"]
+
+
+def test_voice_search_bundles_circles_per_author(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一著者(handle)の複数投稿は界隈を union して両方に付ける（タグをブレさせない）。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
+    p1 = replace(
+        _post("1", "コスメ購入品", 50), author_handle="uX", url="https://x.com/uX/status/1"
+    )
+    p2 = replace(_post("2", "淡色コーデ", 40), author_handle="uX", url="https://x.com/uX/status/2")
+    noise_json = json.dumps(
+        {
+            "keep": ["1", "2"],
+            "author_circles": {"1": ["美容界隈"], "2": ["淡色界隈"]},
+            "noise_note": "",
+        }
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([p1, p2]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    for c in out.posts:
+        assert set(c.author_circles) == {"美容界隈", "淡色界隈"}  # 同一著者は union
+
+
+def test_card_renders_kaiwai_chips() -> None:
+    """再現カード枠外に界隈チップを表示（空なら出さない）。"""
+    from teamagent.skills.x_research.report import _card
+
+    h = _card(
+        XPostCard(
+            post_id="1",
+            url="https://x.com/u/1",
+            author_handle="u",
+            author_name="U",
+            text="x",
+            author_circles=["美容界隈", "淡色界隈"],
+        )
+    )
+    assert "class='kaiwai'" in h and "#美容界隈" in h and "#淡色界隈" in h
+    assert "推定界隈" in h  # 事実でなく推定と明示（断定表示にしない）
+    h2 = _card(XPostCard(post_id="2", url="", author_handle="u", text="x"))
+    assert "class='kaiwai'" not in h2 and "推定界隈" not in h2  # 界隈なしなら出さない（捏造しない）
+
+
+def test_voice_search_kaiwai_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """USE_KAIWAI_CLASSIFY 未設定（既定OFF）なら LLM が界隈を返してもカードには付かない（no-op）。"""
+    monkeypatch.delenv("USE_KAIWAI_CLASSIFY", raising=False)
+    noise_json = json.dumps(
+        {"keep": ["1"], "author_circles": {"1": ["美容界隈"]}, "noise_note": ""}
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([_post("1")]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    assert out.posts[0].author_circles == []  # OFF なら配線しない
+
+
+def test_voice_search_drops_nonstring_circle_elements(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLMが非文字列(null/dict)や過長文字列を界隈配列に混ぜても、文字列のみ・24字上限で採用。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
+    noise_json = json.dumps(
+        {"keep": ["1"], "author_circles": {"1": ["美容界隈", None, {"x": 1}, "あ" * 50]}}
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([_post("1")]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    circles = out.posts[0].author_circles
+    assert "美容界隈" in circles
+    assert "None" not in circles and all("{" not in c for c in circles)  # null/dict は弾く
+    assert all(len(c) <= 24 for c in circles)  # 長さ上限（チップ崩れ防止）
+
+
+def test_voice_search_caps_noise_filter_input_to_top_likes() -> None:
+    """ノイズ除去へ渡す投稿は likes 上位 _NOISE_FILTER_MAX_POSTS 件に有界化（切断→無音fail-open防止）。"""
+    from teamagent.skills.x_research.skill import _NOISE_FILTER_MAX_POSTS
+
+    n = _NOISE_FILTER_MAX_POSTS
+    # n+5 件を likes 昇順で作る（pid=0 が最小 likes・pid=n+4 が最大）。上位nに残るのは pid>=5。
+    posts = [_post(str(i), likes=i) for i in range(n + 5)]
+    bedrock = _FakeBedrock(json.dumps({"keep": [], "noise_note": ""}))
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify(posts),  # type: ignore[arg-type]
+        bedrock=bedrock,
+        publisher=_publisher,
+    )
+    skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    prompt = bedrock.last_prompt
+    # 最小likesの下位5件(pid 0..4)はプロンプトに載らない、上位は載る。
+    assert '"post_id": "0"' not in prompt and '"post_id": "4"' not in prompt
+    assert f'"post_id": "{n + 4}"' in prompt  # 最大likesは必ず載る
+    assert bedrock.last_max_tokens >= 4096  # ceiling を引き上げ済み（切断防止）
+
+
+def test_voice_search_empty_handle_no_circle_crosstalk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空handle投稿のpost_idが別投稿のhandle文字列と一致しても界隈が混ざらない（名前空間化）。"""
+    monkeypatch.setenv("USE_KAIWAI_CLASSIFY", "1")
+    # p1: post_id='uZ' かつ handle 空 / p2: handle='uZ'。旧実装だと両者が同一バケットを共有した。
+    p1 = replace(_post("uZ", "コスメ購入品", 50), author_handle="", url="https://x.com/_/status/uZ")
+    p2 = replace(
+        _post("p2", "淡色コーデ", 40), author_handle="uZ", url="https://x.com/uZ/status/p2"
+    )
+    noise_json = json.dumps(
+        {"keep": ["uZ", "p2"], "author_circles": {"uZ": ["美容界隈"], "p2": ["淡色界隈"]}}
+    )
+    skill = XVoiceSearchSkill(
+        apify=_FakeApify([p1, p2]),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(noise_json),
+        publisher=_publisher,
+    )
+    out = skill.run(XVoiceSearchInput(product_name="白湯", queries=["白湯"]), _ctx())
+    by_id = {p.post_id: p for p in out.posts}
+    assert by_id["uZ"].author_circles == ["美容界隈"]  # 空handle投稿は自分の界隈のみ
+    assert by_id["p2"].author_circles == ["淡色界隈"]  # handle='uZ' の別人へ混入しない
 
 
 def test_voice_search_unverified_marked_not_dropped() -> None:
@@ -307,6 +456,61 @@ def test_buzz_submit_spec() -> None:
     assert spec["keyword"] == "セブン 新商品"
     assert spec["s3_prefix"] == f"x-research/{out.job_id}/"
     assert spec["requested_by"] == "a@vectorinc.co.jp"
+
+
+def test_buzz_submit_log_omits_keyword() -> None:
+    """x_buzz_submitted ログに keyword(商材/施策名＝機密でありうる)を残さない（#213-1）。"""
+    from structlog.testing import capture_logs
+
+    store = _FakeStore()
+    skill = XBuzzMeasureSkill(store=store)  # type: ignore[arg-type]
+    with capture_logs() as logs:
+        skill.run(
+            XBuzzMeasureInput(
+                keyword="極秘プロジェクトX 新商品",
+                start_date="2026-06-01",
+                end_date="2026-06-14",
+            ),
+            _ctx(),
+        )
+    submitted = [e for e in logs if e.get("event") == "x_buzz_submitted"]
+    assert submitted, "x_buzz_submitted ログが出ていない"
+    e = submitted[0]
+    assert "keyword" not in e
+    assert "極秘プロジェクトX" not in str(e)  # 値がどのフィールドにも漏れない
+    # ジョブ payload(spec) には keyword が要る（worker が使う）＝そちらには残る（漏洩ではない）
+    assert store.last_spec and store.last_spec["keyword"] == "極秘プロジェクトX 新商品"
+
+
+def test_report_published_log_omits_query() -> None:
+    """report_published ログに query(商材/テーマ/keyword)を残さない（#213-1）。"""
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    from structlog.testing import capture_logs
+
+    from teamagent.adapters import report_publish
+
+    fake_boto3 = MagicMock()
+    s3 = fake_boto3.session.Session.return_value.client.return_value
+    s3.get_bucket_location.return_value = {"LocationConstraint": "ap-northeast-1"}
+    s3.generate_presigned_url.return_value = "https://s3.example/signed"
+    with patch.dict(sys.modules, {"boto3": fake_boto3}), capture_logs() as logs:
+        result = report_publish._put_and_presign(
+            b"<html>x</html>",
+            content_type="text/html; charset=utf-8",
+            ext=".html",
+            prefix=None,
+            request_id="r",
+            query="極秘プロジェクトX まずい",
+        )
+    assert result is not None and result.url == "https://s3.example/signed"
+    pub = [e for e in logs if e.get("event") == "report_published"]
+    assert pub, "report_published ログが出ていない"
+    e = pub[0]
+    assert "query" not in e
+    assert "極秘プロジェクトX" not in str(e)
+    assert e.get("has_query") is True  # 有無だけは可観測
 
 
 def test_buzz_schema_rejects_long_period_and_outside_campaign() -> None:
@@ -566,7 +770,18 @@ def test_card_recreates_x_post_with_avatar_media_engagement() -> None:
     assert "data:image/png;base64,BBBB" in h  # media 内包
     assert "ユーザーU" in h and "@u" in h
     assert "<span class='bv'>✔</span>" in h  # 青バッジ（is_verified 時のみ）
-    assert "❤️ 10" in h and "🔁 3" in h and "💬 1" in h and "👁 500" in h
+    # エンゲージは本物X相当のインラインSVG＋略記数値（絵文字は廃止）。
+    assert "class='eng'" in h
+    assert h.count("class='ei'") == 4  # 返信/リポスト/いいね/ビューの4項目
+    assert "<span class='ec'>1</span>" in h  # 返信
+    assert "<span class='ec'>3</span>" in h  # リポスト
+    assert "<span class='ec'>10</span>" in h  # いいね
+    assert "<span class='ec'>500</span>" in h  # ビュー
+    assert "❤️" not in h and "🔁" not in h and "💬" not in h and "👁" not in h
+    # 読み上げラベル（数字だけの読み上げを避ける）
+    assert "aria-label='返信 1'" in h
+    assert "aria-label='いいね 10'" in h
+    assert "aria-label='表示 500'" in h
     assert "✅ 実在検証済み" in h  # 検証チップは枠外ストリップ
     assert "不明" not in h
 
@@ -588,4 +803,85 @@ def test_card_falls_back_to_monogram_and_drops_fumei() -> None:
     assert "名無し太郎" in h
     assert "@不明" not in h and "投稿者不明" not in h  # @不明 は廃止・名前で埋まる
     assert "⚠️" in h  # 未検証チップ
-    assert "👁" not in h  # view0 は描かない（捏造しない）
+    assert "👁" not in h  # view_count=0 は描かない（捏造しない）
+    assert "class='ei'" not in h or h.count("class='ei'") == 1  # like のみ（他0）
+
+
+def test_fmt_count_man_notation() -> None:
+    """X風の数値略記: 1万未満はカンマ区切り、1万以上は「◯◯万」（境界を網羅）。"""
+    from teamagent.skills.x_research.report import _fmt_count
+
+    assert _fmt_count(0) == "0"
+    assert _fmt_count(395) == "395"
+    assert _fmt_count(8227) == "8,227"
+    assert _fmt_count(9999) == "9,999"  # 万未満の上限
+    assert _fmt_count(10000) == "1万"  # 万の下限（末尾0は整数）
+    assert _fmt_count(12000) == "1.2万"  # 小数第1位
+    assert _fmt_count(98000) == "9.8万"
+    assert _fmt_count(5180000) == "518万"  # 実スクショの 518万
+    assert _fmt_count(19990) == "2万"  # 丸め上げ境界（"2.0万"にしない）
+    assert _fmt_count(99999) == "10万"  # 丸め上げで万→大台（"10.0万"にしない）
+    assert _fmt_count(100_000_000) == "1億"  # 億表記
+    assert _fmt_count(150_000_000) == "1.5億"
+    assert (
+        _fmt_count(99_999_999) == "1億"
+    )  # 万で 10000.0万 に丸まる→億へ桁上げ（"10000万"にしない）
+    assert _fmt_count(-5) == "0"  # 負値は0扱い（捏造しない）
+
+
+def test_publish_html_short_url_and_fallback(monkeypatch) -> None:
+    """_publish_html: 段階ゲート(USE_REPORT_SHORTURL)＋鍵＋CONNECT_BASE_URL が揃った時だけ
+
+    openclaw耐性の /r/<token> 短縮URL。いずれか欠けたら従来 presigned へ graceful fallback。
+    短縮URLはクエリを持たず、token を decode すると元の bucket/key に戻る。
+    """
+    import teamagent.adapters.report_publish as rp
+    from teamagent.adapters.report_link_token import decode_report_token
+    from teamagent.adapters.report_publish import PublishedObject
+    from teamagent.skills.x_research.skill import XVoiceSearchSkill
+
+    bucket, key = "teamagent-dev-raw-files", "vseo-reports/deadbeef.html"
+    presigned = "https://s3.example/vseo-reports/deadbeef.html?X-Amz-Signature=abc123"
+    monkeypatch.setattr(
+        rp,
+        "publish_html_file_result",
+        lambda path, **kw: PublishedObject(url=presigned, bucket=bucket, key=key),
+    )
+    monkeypatch.setenv("VSEO_REPORT_BUCKET", bucket)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "sekret-xyz")
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.newstv.co.jp/")
+    skill = XVoiceSearchSkill(publisher=None)
+
+    def run() -> str | None:
+        return skill._publish_html("<html>x</html>", request_id="rid", query="q")
+
+    # 全条件そろう(フラグON) → /r/<token>（クエリ無し）・decode で元の bucket/key
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    url = run()
+    assert url is not None and url.startswith("https://connect.newstv.co.jp/r/")
+    assert "?" not in url  # openclaw が削るクエリを持たない
+    assert decode_report_token(url.rsplit("/r/", 1)[1]) == (bucket, key, "")  # region 未指定
+
+    # フラグ OFF（既定）→ 従来 presigned（connect-web に /r が無い段階の安全側）
+    monkeypatch.delenv("USE_REPORT_SHORTURL", raising=False)
+    assert run() == presigned
+
+    # フラグ ON でも 署名鍵欠如 → presigned（鍵不一致による全件404を回避）
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET", raising=False)
+    assert run() == presigned
+
+    # フラグ ON・鍵あり でも CONNECT_BASE_URL 未設定 → presigned
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "sekret-xyz")
+    monkeypatch.delenv("CONNECT_BASE_URL", raising=False)
+    assert run() == presigned
+
+    # 全条件そろっても key が許可プレフィックス外(カスタム VSEO_REPORT_PREFIX) → presigned
+    # （短縮URLを出すと decode が prefix allowlist で拒否し 404 になるため事前に弾く・Codex 指摘）。
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.newstv.co.jp/")
+    monkeypatch.setattr(
+        rp,
+        "publish_html_file_result",
+        lambda path, **kw: PublishedObject(url=presigned, bucket=bucket, key="custom/x.html"),
+    )
+    assert run() == presigned

@@ -366,6 +366,7 @@ def format_row_as_document(
     row: tuple[str, ...] | list[str],
     *,
     skip_empty: bool = True,
+    exclude_headers: frozenset[str] | None = None,
 ) -> str:
     """1 行を `column: value` 形式の document テキストに整形する。
 
@@ -378,9 +379,16 @@ def format_row_as_document(
         自由記述: ...
 
     skip_empty=True なら空値の列は出さない（document の見やすさ重視）。
+    exclude_headers に運用列（Slack file URL・GAS 処理列等）を渡すと本文から外す。これらは
+    人間の知見を含まないのに長大で、先頭に来ると下流の抜粋（export_vault の 160 字）を食い潰し、
+    ポイント/なぜ/フリーコメント といった**実際に知見が書かれた列が抜粋から落ちる**（実測で
+    施策手法タグが 6→1 に激減した）。embedding 品質の面でもノイズなので外す。
     """
+    excl = exclude_headers or frozenset()
     lines: list[str] = []
     for i, h in enumerate(headers):
+        if h in excl:
+            continue
         val = row[i] if i < len(row) else ""
         if skip_empty and not val.strip():
             continue

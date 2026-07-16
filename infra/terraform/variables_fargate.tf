@@ -81,6 +81,12 @@ variable "use_ailavault_deeplinks" {
   default     = false
 }
 
+variable "enable_report_shorturl" {
+  description = "レポート短縮リンク(/r)を発行するか（Part2 段階ゲート＝env USE_REPORT_SHORTURL）。既定 false＝従来 presigned。ON の前提: connect-web が同一新イメージ(/r ルート)＋vseo-s3-read(bootstrap_vseo_s3_iam.sh)を持ち、実機で /r→302 を確認済みであること。揃う前に true にすると受信者側で 404/403 に劣化する。"
+  type        = bool
+  default     = false
+}
+
 variable "video_quota_enabled" {
   description = "動画分析の月間クォータ（v0.3 Task10）。既定 false。有効化前に migration 0017 の本番適用が必須（未適用だと fail-open で素通り・WARN のみ）。"
   type        = bool
@@ -95,6 +101,12 @@ variable "video_monthly_quota" {
 
 variable "use_analysis_cache" {
   description = "Gemini 動画分析結果の S3 キャッシュ（v0.3 Task10）。既定 false。同一動画×同一プロンプトの再分析を回避（Gemini=GCP課金の数少ないガード）。"
+  type        = bool
+  default     = false
+}
+
+variable "enable_kaiwai_classify" {
+  description = "X投稿者の界隈マルチラベル分類（Part4・env USE_KAIWAI_CLASSIFY）。既定 false＝bio を LLM へ送らず・界隈を尋ねず・カードにチップも出さない（完全 no-op・後方互換）。分類は LLM 推定でありカードには「推定界隈」と明示表示する。⚠️前提1: enable_x_research=true（false 時は USE_KAIWAI_CLASSIFY env 自体が taskdef に出力されず、本フラグ true でも黙って no-op）。⚠️前提2: 第一候補 actor(apidojo) の本番 bio 取得率と分類品質を実データで確認済みであること。"
   type        = bool
   default     = false
 }
