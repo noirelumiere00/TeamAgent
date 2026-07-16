@@ -64,6 +64,17 @@ _KNOWLEDGE_LABEL_TO_METADATA_KEY: dict[str, str] = {
     "クライアント種別": "client_type",
     "提案プロダクト": "proposed_menu",
     "資料の概要": "knowledge_kind",
+    # ファイル記録シート (gid 1962561294) は同義の別ヘッダ「資料の概要_メイン」を使う。
+    # フォーム回答シートの「資料の概要」と同じ knowledge_kind へ寄せる。カテゴリの正本は
+    # この knowledge_kind の 1 本 (export_vault が knowledge_kind AS cls_category で射影)。
+    # 実 dump (2026-07-15・ファイル記録 342 行) の値域は **素の値**:
+    #   提案254 / レポート46 / 社内共有情報28 / AI活用（プロンプト等）8 / クロージング4 /
+    #   オリエン資料1 / 競合資料1。GAS が保管先フォルダ(01_提案 等)へ振り分ける際の種別そのもの。
+    # 「保管先フォルダ」列(値は "01_提案" の NN_ 付き)とは **完全ミラー**（342 行で実測一致）。
+    # NN_ 接頭の有無だけが差なので冗長として写像しない。99_一次倉庫 の除外は
+    # pipeline._ingest_gsheet が gdrive と同一 regex で行ごと落とす（GAS は本番フォルダへ移動して
+    # から記録するため保管先フォルダに 99_ は出ない＝実測 0 件・将来行への保険）。
+    "資料の概要_メイン": "knowledge_kind",
     "このナレッジのポイントはここ！": "knowledge_point",
     "なぜそのナレッジ（資料）を共有したのか？": "share_reason",
     "送信者": "submitter",

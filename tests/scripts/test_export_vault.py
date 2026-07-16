@@ -213,6 +213,44 @@ def test_render_doc_note_ignores_blank_entity_segments() -> None:
     assert "# \n" not in note and "#\n" not in note
 
 
+def test_documents_sql_projects_knowledge_share_meta() -> None:
+    """ナレッジ共有メタを cls_* 列名で射影する（読む metadata キーは人間入力側）。"""
+    sql = _mod.documents_sql()
+    assert "d.metadata->>'knowledge_kind' AS cls_category" in sql
+    assert "d.metadata->>'client_type' AS cls_client_tier" in sql
+    assert "d.metadata->>'proposed_menu' AS cls_product" in sql
+    # stale 除外版でも同一（分岐は stale 節のみ）
+    assert "d.metadata->>'knowledge_kind' AS cls_category" in _mod.documents_sql(include_stale=True)
+
+
+def test_render_doc_note_emits_knowledge_meta_frontmatter_when_present() -> None:
+    """category/client_tier/product は値があるときだけ frontmatter に出す。"""
+    note = render_doc_note(
+        _doc(
+            "デルタ製薬様向け提案書",
+            cls_category="提案",
+            cls_client_tier="TOP500 or ベス10,メーカー",
+            cls_product="ビデオリリース,タテガタ",
+        ),
+        "デルタ製薬",
+        "clients/デルタ製薬",
+    )
+    # 多値の生文字列（カンマ/スペース内包）をそのまま double-quoted で載せる → build 側 front() が拾う
+    assert 'category: "提案"' in note
+    assert 'client_tier: "TOP500 or ベス10,メーカー"' in note
+    assert 'product: "ビデオリリース,タテガタ"' in note
+
+
+def test_render_doc_note_omits_knowledge_meta_when_absent() -> None:
+    """値がない資料は既存 note と同一（category/client_tier/product 行を出さない・回帰なし）。"""
+    note = render_doc_note(_doc("素の提案書"), "出光興産", "clients/出光興産")
+    assert "category:" not in note
+    assert "client_tier:" not in note
+    assert "product:" not in note
+    # 既存 frontmatter は不変
+    assert 'doc_type: "提案書"' in note and 'entities: ""' in note
+
+
 def test_render_client_note_header_and_desc_timeline() -> None:
     timeline = [
         _fb("2026-05-01", deal_phase="初回接触", bant_score="C（検討）"),
