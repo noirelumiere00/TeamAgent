@@ -18,6 +18,9 @@ Obsidian で開ける Vault ミラーをローカルに生成する:
 - DB は **SELECT のみ**（UPDATE/INSERT/DDL 一切なし）。書くのはローカル Vault ファイルだけ。
 - 既定 **dry-run**（生成予定ファイル一覧を表示するだけ）。``--commit`` で初めて書き出す。
 - 再実行は同パスへの上書き＝冪等（DB 側の更新が Vault に反映される）。
+- ``--prune`` は完全 export のときだけ有効。manifest で本スクリプトの生成物と確認できた
+  ``clients/*.md`` / ``docs/*.md`` の古い note だけを削除する（dry-run では予定表示のみ）。
+  ``--client`` / ``--limit`` との併用は拒否し、前回 manifest の半分未満に縮む計画も拒否する。
 - クライアント名/タイトル→ファイル名は ``safe_filename`` で必ずサニタイズ
   （パストラバーサル・OS 禁止文字・wikilink 破壊文字・長さ・予約名）。
 - frontmatter 値は YAML double-quoted スカラーへエスケープ（``yaml_quote``）。
@@ -29,6 +32,8 @@ Usage:
     python scripts/export_vault.py --dsn postgresql://user:pass@localhost:15432/db  # dry-run
     python scripts/export_vault.py --dsn ... --commit                    # ~/AiLaVault へ書き出し
     python scripts/export_vault.py --dsn ... --out ~/Vaults/aila --commit
+    python scripts/export_vault.py --dsn ... --prune                     # 削除予定も dry-run
+    python scripts/export_vault.py --dsn ... --commit --prune            # 完全 export + 古い生成物削除
     python scripts/export_vault.py --dsn ... --client 出光興産 --commit  # 1 クライアントだけ
     python scripts/export_vault.py --dsn ... --limit 5                   # 先頭 5 クライアントのみ
 """
@@ -37,10 +42,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import sys
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +60,12 @@ logger = structlog.get_logger(__name__)
 
 _DEFAULT_OUT = "~/AiLaVault"
 _SEARCH_URL = "https://connect.newstv.co.jp/search"
+_MANIFEST_NAME = ".export-vault-manifest.json"
+_MANIFEST_VERSION = 1
+_MANIFEST_GENERATOR = "scripts/export_vault.py"
+_GENERATED_BY_FIELD = f"generated_by: {json.dumps(_MANIFEST_GENERATOR)}"
+_MANAGED_DIRS = frozenset({"clients", "docs"})
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 # OS 禁止文字（Windows 含む）+ 制御文字 + Obsidian の wikilink/タグを壊す文字（[]#^|）。
 _FORBIDDEN_CHARS_RE = re.compile(r'[\\/:*?"<>|\[\]#^\x00-\x1f]+')
@@ -179,6 +191,7 @@ def render_client_note(
 
     lines: list[str] = [
         "---",
+        _GENERATED_BY_FIELD,
         f"client: {yaml_quote(client)}",
         f"industry: {yaml_quote(industry)}",
         f"deal_phase: {yaml_quote(latest.get('deal_phase') or '')}",
@@ -252,6 +265,7 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
     """資料 note を生成する（frontmatter + excerpt + 出典リンク + タグ + カルテへの wikilink）。"""
     lines: list[str] = [
         "---",
+        _GENERATED_BY_FIELD,
         f"title: {yaml_quote(doc.get('title') or '')}",
         f"doc_type: {yaml_quote(doc.get('cls_doc_type') or '')}",
         f"client: {yaml_quote(client)}",
@@ -379,21 +393,284 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     return files
 
 
-def write_vault(out_dir: Path, files: dict[str, str], *, commit: bool) -> dict[str, int]:
-    """計画された Vault ファイルを書き出す（既定 dry-run＝一覧表示のみ・commit で上書き）。"""
-    stats = {"planned": len(files), "written": 0}
+def _is_managed_markdown_path(rel: str) -> bool:
+    """manifest で所有管理できる、直下 1 階層の生成 Markdown パスか。"""
+    if not rel or "\\" in rel:
+        return False
+    path = PurePosixPath(rel)
+    return (
+        not path.is_absolute()
+        and path.as_posix() == rel
+        and len(path.parts) == 2
+        and path.parts[0] in _MANAGED_DIRS
+        and path.name != ".md"
+        and path.suffix == ".md"
+    )
+
+
+def _safe_target(out_dir: Path, rel: str) -> Path:
+    """書込対象が Vault root 内に留まり、既存 symlink でもないことを検証する。"""
     resolved_root = out_dir.resolve()
-    for rel in sorted(files):
-        target = (out_dir / rel).resolve()
-        # 二重防御: safe_filename 済でも out_dir 外への書き出しは拒否する。
-        if not target.is_relative_to(resolved_root):
-            raise ValueError(f"unsafe path escapes vault root: {rel}")
-        if commit:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(files[rel], encoding="utf-8")
-            stats["written"] += 1
-        else:
+    raw_target = out_dir / rel
+    target = raw_target.resolve()
+    if not target.is_relative_to(resolved_root):
+        raise ValueError(f"unsafe path escapes vault root: {rel}")
+    # write_text は symlink のリンク先を書き換えるため、root 内を指す symlink も拒否する。
+    if raw_target.is_symlink():
+        raise ValueError(f"unsafe symlink target in vault plan: {rel}")
+    return raw_target
+
+
+def _managed_target(out_dir: Path, rel: str) -> Path:
+    """削除可能な所有対象を厳格に解決する（clients/docs 直下・md・symlink 不可）。"""
+    if not _is_managed_markdown_path(rel):
+        raise ValueError(f"unsafe managed path in export manifest: {rel!r}")
+    prefix, name = PurePosixPath(rel).parts
+    resolved_root = out_dir.resolve()
+    raw_dir = out_dir / prefix
+    expected_dir = resolved_root / prefix
+    # clients/ や docs/ 自体が symlink の場合、別領域のファイルを消す恐れがあるので拒否する。
+    if raw_dir.is_symlink() or raw_dir.resolve() != expected_dir:
+        raise ValueError(f"unsafe managed directory in vault: {prefix}")
+    if raw_dir.exists() and not raw_dir.is_dir():
+        raise ValueError(f"managed directory is not a directory: {prefix}")
+    raw_target = raw_dir / name
+    if raw_target.is_symlink() or raw_target.resolve().parent != expected_dir:
+        raise ValueError(f"unsafe managed target in vault: {rel}")
+    return raw_target
+
+
+def _sha256_text(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_export_manifest(out_dir: Path) -> dict[str, str]:
+    """前回までに本スクリプトが生成した note と内容 hash を読む。"""
+    manifest = out_dir / _MANIFEST_NAME
+    resolved_root = out_dir.resolve()
+    if manifest.is_symlink() or manifest.resolve().parent != resolved_root:
+        raise ValueError("unsafe export manifest path")
+    if not manifest.exists():
+        return {}
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid export manifest: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("invalid export manifest: root must be an object")
+    if payload.get("version") != _MANIFEST_VERSION:
+        raise ValueError("invalid export manifest: unsupported version")
+    if payload.get("generator") != _MANIFEST_GENERATOR:
+        raise ValueError("invalid export manifest: unexpected generator")
+    raw_files = payload.get("files")
+    if not isinstance(raw_files, dict):
+        raise ValueError("invalid export manifest: files must be an object")
+
+    files: dict[str, str] = {}
+    for rel, digest in raw_files.items():
+        if not isinstance(rel, str) or not _is_managed_markdown_path(rel):
+            raise ValueError(f"unsafe managed path in export manifest: {rel!r}")
+        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+            raise ValueError(f"invalid content hash in export manifest: {rel}")
+        files[rel] = digest
+    return files
+
+
+def _write_export_manifest(out_dir: Path, files: dict[str, str]) -> None:
+    """manifest を同一ディレクトリの一時ファイルから atomic replace する。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = out_dir / _MANIFEST_NAME
+    tmp = out_dir / f"{_MANIFEST_NAME}.tmp"
+    resolved_root = out_dir.resolve()
+    for path in (manifest, tmp):
+        if path.is_symlink() or path.resolve().parent != resolved_root:
+            raise ValueError("unsafe export manifest path")
+    payload = {
+        "version": _MANIFEST_VERSION,
+        "generator": _MANIFEST_GENERATOR,
+        "files": dict(sorted(files.items())),
+    }
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(manifest)
+
+
+def _frontmatter_keys(text: str) -> set[str]:
+    """先頭 YAML frontmatter のキー名だけを依存ライブラリなしで読む。"""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return set()
+    keys: set[str] = set()
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return keys
+        match = re.match(r"^([a-z][a-z0-9_]*):", line)
+        if match:
+            keys.add(match.group(1))
+    return set()
+
+
+def _looks_like_generated_note(path: Path, prefix: str) -> bool:
+    """manifest 導入前の export_vault 生成 note を強い構造シグネチャで判定する。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    keys = _frontmatter_keys(text)
+    if prefix == "clients":
+        required = {"client", "industry", "deal_phase", "bant_score", "fb_count", "doc_count"}
+        return required <= keys and "## 営業FB時系列（新しい順）" in text and "## 関連資料" in text
+    required = {"title", "doc_type", "client", "industry", "solution", "entities", "modified_at"}
+    return required <= keys and "- 取引先: [[clients/" in text
+
+
+def _discover_generated_markdown(out_dir: Path) -> dict[str, str]:
+    """初回 prune 用に clients/docs 直下の旧 exporter 生成 Markdown だけを発見する。"""
+    resolved_root = out_dir.resolve()
+    found: dict[str, str] = {}
+    for prefix in sorted(_MANAGED_DIRS):
+        directory = out_dir / prefix
+        expected_dir = resolved_root / prefix
+        if not directory.exists():
+            continue
+        if directory.is_symlink() or directory.resolve() != expected_dir or not directory.is_dir():
+            raise ValueError(f"unsafe managed directory in vault: {prefix}")
+        for path in directory.iterdir():
+            # 非再帰・小文字 .md・regular file のみ。symlink はリンク先に関係なく対象外。
+            if path.is_symlink() or not path.is_file() or path.suffix != ".md":
+                continue
+            rel = f"{prefix}/{path.name}"
+            if _is_managed_markdown_path(rel) and _looks_like_generated_note(path, prefix):
+                found[rel] = _sha256_file(path)
+    return found
+
+
+def _plan_prune(
+    out_dir: Path,
+    previous: dict[str, str],
+    current: dict[str, str],
+) -> tuple[list[str], dict[str, str]]:
+    """削除可能な stale note と、変更済みのため保持する stale note を分ける。"""
+    stale = sorted(set(previous) - set(current))
+    if not stale:
+        return [], {}
+
+    # DB 障害や filter 誤りで空/激減した plan を「全削除」と解釈しない安全弁。
+    if not current:
+        raise ValueError("refusing prune: managed Markdown plan is empty")
+    if len(current) * 2 < len(previous):
+        raise ValueError(
+            "refusing prune: managed Markdown plan is less than 50% of the previous manifest "
+            f"({len(current)} < {len(previous)} / 2)"
+        )
+
+    deletions: list[str] = []
+    protected: dict[str, str] = {}
+    for rel in stale:
+        target = _managed_target(out_dir, rel)
+        if not target.exists():
+            # 既に無いものは manifest から自然に落とす。unlink は呼ばない。
+            continue
+        if not target.is_file():
+            protected[rel] = "not a regular file"
+            continue
+        if _sha256_file(target) != previous[rel]:
+            # 生成後に人が編集した note は所有物と断定せず、削除も manifest 忘却もしない。
+            protected[rel] = "content changed since export"
+            continue
+        deletions.append(rel)
+    return deletions, protected
+
+
+def write_vault(
+    out_dir: Path,
+    files: dict[str, str],
+    *,
+    commit: bool,
+    prune: bool = False,
+    complete_export: bool = False,
+) -> dict[str, int]:
+    """計画を Vault へ反映し、明示された完全 export だけ古い生成 note を削除する。
+
+    ``commit=False`` は書込・削除・manifest 更新を一切しない。manifest は生成 Markdown の
+    相対パスと内容 hash のみを持つため、未管理 note や人が編集した note は prune しない。
+    ``complete_export=False``（部分 export）で ``prune=True`` は常に拒否する。
+    """
+    if prune and not complete_export:
+        raise ValueError("refusing prune for partial export (--client/--limit)")
+
+    # 1 件でも危険な書込先があれば、何も変更する前に全 plan を拒否する。
+    targets = {rel: _safe_target(out_dir, rel) for rel in files}
+    current_manifest = {
+        rel: _sha256_text(content)
+        for rel, content in files.items()
+        if _is_managed_markdown_path(rel)
+    }
+    for rel in current_manifest:
+        _managed_target(out_dir, rel)
+
+    previous_manifest = _load_export_manifest(out_dir) if (commit or prune) else {}
+    if prune:
+        # manifest 導入前に残った stale/non-company note も、旧 exporter 固有の構造を
+        # 満たすものだけ初回所有候補へ加える。既存 manifest の hash を常に優先する。
+        for rel, digest in _discover_generated_markdown(out_dir).items():
+            previous_manifest.setdefault(rel, digest)
+    deletions: list[str] = []
+    protected: dict[str, str] = {}
+    if prune:
+        deletions, protected = _plan_prune(out_dir, previous_manifest, current_manifest)
+
+    stats = {
+        "planned": len(files),
+        "written": 0,
+        "delete_planned": len(deletions),
+        "deleted": 0,
+    }
+    if not commit:
+        for rel in sorted(files):
             print(f"  [dry-run] {rel}")
+        for rel in deletions:
+            print(f"  [dry-run] delete {rel}")
+        for rel, reason in sorted(protected.items()):
+            print(f"  [prune-skip] {rel}: {reason}")
+        return stats
+
+    for rel in sorted(files):
+        target = targets[rel]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(files[rel], encoding="utf-8")
+        stats["written"] += 1
+
+    # manifest の hash と今の内容が一致することを unlink 直前にも確認する（競合時 fail-safe）。
+    retained = dict(protected)
+    for rel in deletions:
+        target = _managed_target(out_dir, rel)
+        try:
+            if not target.is_file() or _sha256_file(target) != previous_manifest[rel]:
+                retained[rel] = "content changed before delete"
+                continue
+            target.unlink()
+        except FileNotFoundError:
+            continue
+        stats["deleted"] += 1
+        print(f"  [prune] deleted {rel}")
+
+    if prune:
+        next_manifest = dict(current_manifest)
+        for rel in retained:
+            next_manifest[rel] = previous_manifest[rel]
+    else:
+        # 部分 export や prune 無しの更新で、他 note の所有記録を縮めない。
+        next_manifest = dict(previous_manifest)
+        next_manifest.update(current_manifest)
+    _write_export_manifest(out_dir, next_manifest)
     return stats
 
 
@@ -567,6 +844,14 @@ def main() -> int:
         help=f"Vault 出力先ディレクトリ（既定 {_DEFAULT_OUT}）",
     )
     p.add_argument("--commit", action="store_true", help="既定 dry-run。指定時のみ書き出し")
+    p.add_argument(
+        "--prune",
+        action="store_true",
+        help=(
+            "完全 export で manifest 管理済みの古い clients/docs Markdown を削除。"
+            "dry-run は削除予定のみ表示（--client/--limit と併用不可）"
+        ),
+    )
     p.add_argument("--limit", type=int, default=None, help="先頭 N クライアントのみ（検証用）")
     p.add_argument("--client", default=None, help="クライアント名の部分一致で絞り込み")
     p.add_argument(
@@ -575,6 +860,11 @@ def main() -> int:
         help="metadata.stale='true' の資料も含める（既定は除外・従来挙動に戻すフラグ）",
     )
     args = p.parse_args()
+
+    partial_export = args.client is not None or args.limit is not None
+    if args.prune and partial_export:
+        print("[ERROR] --prune は --client/--limit と併用できません", file=sys.stderr)
+        return 2
 
     dsn = args.dsn or os.environ.get("DATABASE_URL")
     if not dsn:
@@ -587,7 +877,13 @@ def main() -> int:
             dsn, client=args.client, limit=args.limit, include_stale=args.include_stale
         )
         files = plan_vault(clients_data)
-        stats = write_vault(out_dir, files, commit=args.commit)
+        stats = write_vault(
+            out_dir,
+            files,
+            commit=args.commit,
+            prune=args.prune,
+            complete_export=not partial_export,
+        )
     except Exception as e:
         print(f"[ERROR] export failed: {e}", file=sys.stderr)
         return 2
@@ -595,7 +891,8 @@ def main() -> int:
     mode = "commit" if args.commit else "dry-run"
     print(
         f"clients={len(clients_data)} planned={stats['planned']} "
-        f"written={stats['written']} out={out_dir} mode={mode}"
+        f"written={stats['written']} delete_planned={stats['delete_planned']} "
+        f"deleted={stats['deleted']} out={out_dir} mode={mode}"
     )
     return 0
 

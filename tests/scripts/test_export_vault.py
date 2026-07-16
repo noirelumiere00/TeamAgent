@@ -7,12 +7,14 @@
 - plan_vault: CLAUDE.md + clients/*.md + docs/*.md を組み、同名資料は付番で衝突回避、
   同一 source_uri の資料は note を再利用する
 - write_vault: 既定 dry-run は 1 ファイルも書かない・--commit は上書き（冪等）・
-  Vault ルート外への書き出しは拒否する
+  Vault ルート外への書き出しは拒否する。完全 export + 明示 prune だけが manifest 管理済み
+  （または旧 exporter の強い構造シグネチャを持つ）clients/docs Markdown を削除できる
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -38,6 +40,13 @@ plan_vault = _mod.plan_vault
 write_vault = _mod.write_vault
 render_doc_note = _mod.render_doc_note
 render_client_note = _mod.render_client_note
+
+
+def _manifest_files(out: Path) -> dict[str, str]:
+    payload = json.loads((out / _mod._MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert payload["version"] == 1
+    assert payload["generator"] == "scripts/export_vault.py"
+    return payload["files"]
 
 
 def _doc(title: str, uri: str = "gdrive://F1", **over: Any) -> dict[str, Any]:
@@ -157,6 +166,7 @@ def test_source_link_shapes_gdrive_and_passes_slack() -> None:
 def test_render_doc_note_has_frontmatter_tags_and_client_link() -> None:
     note = render_doc_note(_doc("出光興産様向け提案書"), "出光興産", "clients/出光興産")
     assert note.startswith("---\n")
+    assert 'generated_by: "scripts/export_vault.py"' in note
     assert 'doc_type: "提案書"' in note
     assert 'client: "出光興産"' in note
     assert 'industry: "エネルギー"' in note
@@ -273,6 +283,7 @@ def test_render_client_note_header_and_desc_timeline() -> None:
     ]
     docs = [_doc("提案書A")]
     note = render_client_note("出光興産", timeline, docs, ["docs/提案書A"])
+    assert 'generated_by: "scripts/export_vault.py"' in note
     # frontmatter は最新（末尾）FB のフェーズ/BANT + 資料側の業界
     assert 'deal_phase: "提案"' in note
     assert 'bant_score: "B（前向き）"' in note
@@ -514,7 +525,7 @@ def test_render_doc_note_escapes_markdown_in_h1_title() -> None:
 def test_write_vault_dry_run_writes_nothing(tmp_path: Path) -> None:
     files = {"CLAUDE.md": "x", "clients/A.md": "y"}
     stats = write_vault(tmp_path / "vault", files, commit=False)
-    assert stats == {"planned": 2, "written": 0}
+    assert stats == {"planned": 2, "written": 0, "delete_planned": 0, "deleted": 0}
     assert not (tmp_path / "vault").exists()
 
 
@@ -522,8 +533,9 @@ def test_write_vault_commit_writes_and_is_idempotent(tmp_path: Path) -> None:
     out = tmp_path / "vault"
     files = {"CLAUDE.md": "v1", "clients/出光興産.md": "カルテ v1"}
     stats = write_vault(out, files, commit=True)
-    assert stats == {"planned": 2, "written": 2}
+    assert stats == {"planned": 2, "written": 2, "delete_planned": 0, "deleted": 0}
     assert (out / "clients" / "出光興産.md").read_text(encoding="utf-8") == "カルテ v1"
+    assert set(_manifest_files(out)) == {"clients/出光興産.md"}
     # 再実行は同パスへの上書き（冪等・更新が反映される）
     files2 = {"CLAUDE.md": "v1", "clients/出光興産.md": "カルテ v2"}
     write_vault(out, files2, commit=True)
@@ -542,6 +554,189 @@ def test_write_vault_rejects_escape_from_root(tmp_path: Path) -> None:
     else:  # pragma: no cover
         raise AssertionError("expected ValueError for path escape")
     assert not (tmp_path / "outside.md").exists()
+
+
+def test_write_vault_prune_dry_run_then_commit_reports_and_deletes_owned_notes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "vault"
+    old = {"CLAUDE.md": "old", "clients/Old.md": "old client", "docs/Old.md": "old doc"}
+    write_vault(out, old, commit=True)
+    manifest_before = (out / _mod._MANIFEST_NAME).read_text(encoding="utf-8")
+    capsys.readouterr()
+
+    current = {"CLAUDE.md": "new", "clients/New.md": "new client", "docs/New.md": "new doc"}
+    stats = write_vault(out, current, commit=False, prune=True, complete_export=True)
+    assert stats == {"planned": 3, "written": 0, "delete_planned": 2, "deleted": 0}
+    dry_run = capsys.readouterr().out
+    assert "[dry-run] delete clients/Old.md" in dry_run
+    assert "[dry-run] delete docs/Old.md" in dry_run
+    assert (out / "clients" / "Old.md").exists()
+    assert not (out / "clients" / "New.md").exists()
+    assert (out / _mod._MANIFEST_NAME).read_text(encoding="utf-8") == manifest_before
+
+    stats = write_vault(out, current, commit=True, prune=True, complete_export=True)
+    assert stats == {"planned": 3, "written": 3, "delete_planned": 2, "deleted": 2}
+    assert not (out / "clients" / "Old.md").exists()
+    assert not (out / "docs" / "Old.md").exists()
+    assert set(_manifest_files(out)) == {"clients/New.md", "docs/New.md"}
+
+
+def test_prune_preserves_unmanaged_markdown_other_dirs_non_md_and_outside_root(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "vault"
+    write_vault(
+        out,
+        {"clients/A.md": "owned client", "docs/A.md": "owned doc"},
+        commit=True,
+    )
+    untouched = {
+        out / "clients" / "manual.md": "personal client note",
+        out / "docs" / "manual.md": "personal doc note",
+        out / "docs" / "blob.txt": "not markdown",
+        out / "root-note.md": "root markdown",
+        out / "other" / "old.md": "different directory",
+        tmp_path / "outside.md": "outside vault",
+    }
+    for path, content in untouched.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    stats = write_vault(
+        out,
+        {"clients/B.md": "new client", "docs/B.md": "new doc"},
+        commit=True,
+        prune=True,
+        complete_export=True,
+    )
+    assert stats["delete_planned"] == 2
+    assert stats["deleted"] == 2
+    for path, content in untouched.items():
+        assert path.read_text(encoding="utf-8") == content
+
+
+def test_first_prune_discovers_and_deletes_legacy_generated_orphans(tmp_path: Path) -> None:
+    """manifest 導入前の non-company/stale note も exporter 固有構造なら初回に掃除できる。"""
+    out = tmp_path / "vault"
+    legacy_client = render_client_note("旧会社", [], [], [])
+    legacy_doc = render_doc_note(_doc("旧資料"), "旧会社", "clients/旧会社")
+    # generated_by marker 導入前の実ファイルを再現する。
+    legacy_client = legacy_client.replace(_mod._GENERATED_BY_FIELD + "\n", "", 1)
+    legacy_doc = legacy_doc.replace(_mod._GENERATED_BY_FIELD + "\n", "", 1)
+    (out / "clients").mkdir(parents=True)
+    (out / "docs").mkdir()
+    (out / "clients" / "旧会社.md").write_text(legacy_client, encoding="utf-8")
+    (out / "docs" / "旧資料.md").write_text(legacy_doc, encoding="utf-8")
+    assert not (out / _mod._MANIFEST_NAME).exists()
+
+    current = plan_vault({"新会社": {"timeline": [], "documents": [_doc("新資料")]}})
+    stats = write_vault(out, current, commit=True, prune=True, complete_export=True)
+    assert stats["delete_planned"] == 2
+    assert stats["deleted"] == 2
+    assert not (out / "clients" / "旧会社.md").exists()
+    assert not (out / "docs" / "旧資料.md").exists()
+
+
+def test_prune_skips_manifest_owned_note_modified_after_export(tmp_path: Path) -> None:
+    out = tmp_path / "vault"
+    write_vault(
+        out,
+        {"clients/A.md": "owned client", "docs/A.md": "owned doc"},
+        commit=True,
+    )
+    modified = out / "docs" / "A.md"
+    modified.write_text("human edit", encoding="utf-8")
+
+    stats = write_vault(
+        out,
+        {"clients/B.md": "new client", "docs/B.md": "new doc"},
+        commit=True,
+        prune=True,
+        complete_export=True,
+    )
+    assert stats["delete_planned"] == 1
+    assert stats["deleted"] == 1
+    assert not (out / "clients" / "A.md").exists()
+    assert modified.read_text(encoding="utf-8") == "human edit"
+    assert "docs/A.md" in _manifest_files(out)  # 次回も変更済みとして保護を継続
+
+
+def test_partial_export_never_prunes_or_shrinks_manifest(tmp_path: Path) -> None:
+    out = tmp_path / "vault"
+    initial = {
+        "clients/A.md": "client A",
+        "docs/A.md": "doc A",
+        "clients/B.md": "client B",
+        "docs/B.md": "doc B",
+    }
+    write_vault(out, initial, commit=True, complete_export=True)
+    partial = {"clients/A.md": "client A2", "docs/A.md": "doc A2"}
+    write_vault(out, partial, commit=True, complete_export=False)
+    assert set(_manifest_files(out)) == set(initial)
+    assert (out / "clients" / "B.md").read_text(encoding="utf-8") == "client B"
+
+    with pytest.raises(ValueError, match="partial export"):
+        write_vault(out, partial, commit=True, prune=True, complete_export=False)
+    assert (out / "docs" / "B.md").read_text(encoding="utf-8") == "doc B"
+
+
+@pytest.mark.parametrize("managed_count", [0, 2])
+def test_prune_refuses_empty_or_abnormally_small_plan_before_writing(
+    tmp_path: Path, managed_count: int
+) -> None:
+    out = tmp_path / "vault"
+    initial = {f"clients/C{i}.md": f"client {i}" for i in range(6)}
+    initial["CLAUDE.md"] = "unchanged"
+    write_vault(out, initial, commit=True, complete_export=True)
+    current = {"CLAUDE.md": "must not be written"}
+    current.update({f"clients/C{i}.md": f"new {i}" for i in range(managed_count)})
+
+    with pytest.raises(ValueError, match="refusing prune"):
+        write_vault(out, current, commit=True, prune=True, complete_export=True)
+    assert (out / "CLAUDE.md").read_text(encoding="utf-8") == "unchanged"
+    assert all((out / "clients" / f"C{i}.md").exists() for i in range(6))
+
+
+@pytest.mark.parametrize("unsafe_rel", ["../outside.md", "other/X.md", "docs/X.txt"])
+def test_prune_rejects_unsafe_manifest_entries_without_deleting(
+    tmp_path: Path, unsafe_rel: str
+) -> None:
+    out = tmp_path / "vault"
+    (out / "clients").mkdir(parents=True)
+    owned = out / "clients" / "A.md"
+    owned.write_text("owned", encoding="utf-8")
+    manifest = {
+        "version": 1,
+        "generator": "scripts/export_vault.py",
+        "files": {unsafe_rel: "0" * 64},
+    }
+    (out / _mod._MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsafe managed path"):
+        write_vault(
+            out,
+            {"clients/B.md": "new"},
+            commit=True,
+            prune=True,
+            complete_export=True,
+        )
+    assert owned.read_text(encoding="utf-8") == "owned"
+    assert not (out / "clients" / "B.md").exists()
+
+
+@pytest.mark.parametrize("filter_arg", [["--client", "A"], ["--limit", "1"]])
+def test_main_rejects_prune_with_partial_export_before_db_access(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    filter_arg: list[str],
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["export_vault.py", "--dsn", "postgresql://unused", "--prune", *filter_arg],
+    )
+    assert _mod.main() == 2
+    assert "併用できません" in capsys.readouterr().err
 
 
 # ---------------- timeline の「最新 N 件」契約 ----------------
