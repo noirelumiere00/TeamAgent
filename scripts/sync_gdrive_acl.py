@@ -255,7 +255,9 @@ def _unreachable_target_acl(
     """404 の項目を保存済み owner-only に縮小する。"""
     owner = _normalize_one(snapshot.owner_email)
     if not owner:
-        raise PermissionCollectionError("unreachable item has an empty stored owner; no rows updated")
+        raise PermissionCollectionError(
+            "unreachable item has an empty stored owner; no rows updated"
+        )
     return owner, (owner,), ()
 
 

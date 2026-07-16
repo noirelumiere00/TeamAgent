@@ -204,9 +204,7 @@ def test_http_404_becomes_pii_safe_owner_only_quarantine_dry_run_and_is_hashed()
     assert result.updated_count == 0
     assert repository.update_calls == []
     # 途中の 404 で止めず、後続も列挙して完全な plan を作る。
-    assert [call[0] for call in client.calls] == [
-        snapshot.external_id for snapshot in snapshots
-    ]
+    assert [call[0] for call in client.calls] == [snapshot.external_id for snapshot in snapshots]
     item = result.plan.items[1]
     assert item.unreachable is True
     assert item.after_owner == item.before_owner
