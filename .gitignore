@@ -116,6 +116,7 @@ Thumbs.db
 tfplan
 tfplan*
 *.tfplan
+*.plan
 .terragrunt-cache/
 crash.log
 crash.*.log
