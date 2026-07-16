@@ -8,6 +8,8 @@
 - サニティゲート: 取引先数/資料数/バイト数のいずれかが前回比 20% 超減なら exit 1 で
   既存 out を保持。--allow-shrink で明示的に通過し統計基準がリセットされる
 - exclude_stems.json のフィルタ配線: 除外 stem の資料が payload に載らない
+- exclude_source_keys.json のフィルタ配線: タイトル変更後も source identity で除外し、
+  source_type/external_id は payload/UI に載せない
 - PII 決定論除外: 請求書系 stem（正規化後に「請求」を含む）はサイドカー列挙なしで除外
   （個人名入り stem を repo に平文で持たない）
 - タグ第1弾: 媒体/動画形式/形式/横断（資料）・温度感/宿題（クライアント）の決定論判定と
@@ -49,6 +51,9 @@ def sidecars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (d / "exclude_stems.json").write_text(
         json.dumps(["除外対象資料"], ensure_ascii=False), encoding="utf-8"
     )
+    (d / "exclude_source_keys.json").write_text(
+        json.dumps(["gsheets:SHEET1:278789217:53"], ensure_ascii=False), encoding="utf-8"
+    )
     (d / "dedup_drop_map.json").write_text(
         json.dumps({"drop": {}, "keep_canonical": []}, ensure_ascii=False), encoding="utf-8"
     )
@@ -67,11 +72,21 @@ def _write_client(vault: Path, name: str) -> None:
     )
 
 
-def _write_doc(vault: Path, stem: str, client: str = "出光興産") -> None:
+def _write_doc(
+    vault: Path,
+    stem: str,
+    client: str = "出光興産",
+    *,
+    title: str | None = None,
+    source_type: str = "",
+    external_id: str = "",
+) -> None:
+    display_title = title or stem
     (vault / "docs" / f"{stem}.md").write_text(
-        f'---\ntitle: "{stem}"\nclient: "{client}"\nindustry: "エネルギー"\n'
-        f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "2026-06-01"\n---\n\n'
-        f"> {stem} の抜粋\n\n[[clients/{client}]]\n",
+        f'---\ntitle: "{display_title}"\nclient: "{client}"\nindustry: "エネルギー"\n'
+        f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "2026-06-01"\n'
+        f'source_type: "{source_type}"\nexternal_id: "{external_id}"\n---\n\n'
+        f"> {display_title} の抜粋\n\n[[clients/{client}]]\n",
         encoding="utf-8",
     )
 
@@ -122,6 +137,56 @@ def test_excluded_stem_not_in_payload(sidecars: Path, vault: Path, tmp_path: Pat
     out = tmp_path / "app.html"
     _run(vault, out)
     assert "除外対象資料" not in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("title", ["最初の表示タイトル", "あとから変更した表示タイトル"])
+def test_source_identity_excludes_doc_even_when_title_changes(
+    sidecars: Path, vault: Path, tmp_path: Path, title: str
+) -> None:
+    """除外は可変な title/stem でなく source_type:external_id に追従する。"""
+    stem = f"{title}-deadbeef"
+    _write_doc(
+        vault,
+        stem,
+        title=title,
+        source_type="gsheets",
+        external_id="SHEET1:278789217:53",
+    )
+    # client note 側の関連資料リンクも同じ source 判定で落ち、タイトルを UI へ残さない。
+    client_note = vault / "clients" / "出光興産.md"
+    client_note.write_text(
+        client_note.read_text(encoding="utf-8") + f"- [[docs/{stem}]]\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert title not in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 3
+
+
+def test_internal_source_identity_not_exposed_in_generated_html(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """非除外資料でも frontmatter の内部 source ID は DATA/UI へコピーしない。"""
+    external_id = "DO-NOT-EXPOSE-SHEET:999:777"
+    _write_doc(
+        vault,
+        "公開資料-feedface",
+        title="公開資料",
+        source_type="gsheets",
+        external_id=external_id,
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "公開資料" in html  # 資料そのものは payload に載る
+    assert external_id not in html
+    assert f"gsheets:{external_id}" not in html
+    assert '"external_id"' not in html
+    assert '"source_type"' not in html
 
 
 def test_seikyusho_stem_excluded_without_sidecar_listing(
@@ -192,6 +257,32 @@ def test_sidecar_missing_exits_1(
         _run(vault, tmp_path / "o.html")
     assert ei.value.code == 1
     assert "サイドカー欠落: exclude_stems.json" in capsys.readouterr().err
+
+
+def test_source_key_sidecar_missing_exits_1(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (sidecars / "exclude_source_keys.json").unlink()
+    with pytest.raises(SystemExit) as ei:
+        _run(vault, tmp_path / "o.html")
+    assert ei.value.code == 1
+    assert "サイドカー欠落: exclude_source_keys.json" in capsys.readouterr().err
+
+
+def test_repository_source_exclusions_preserve_legacy_stems() -> None:
+    """新 Vault はsource key、移行中の旧 Vault は従来stemの同じ6行を除外する。"""
+    sheet = "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
+    rows = {53, 61, 75, 84, 213, 214}
+    filters = _ROOT / "data" / "connect_web_filters"
+    source_keys = set(
+        json.loads((filters / "exclude_source_keys.json").read_text(encoding="utf-8"))
+    )
+    legacy_stems = set(json.loads((filters / "exclude_stems.json").read_text(encoding="utf-8")))
+
+    assert source_keys == {f"gsheets:{sheet}:278789217:{row}" for row in rows}
+    assert {
+        f"ナレッジ共有 - フォーム回答 - フォーム回答 1 - row {row}" for row in rows
+    } <= legacy_stems
 
 
 def test_empty_clients_exits_1(

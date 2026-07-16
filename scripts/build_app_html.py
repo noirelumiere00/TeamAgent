@@ -6,7 +6,8 @@
 ペイン化サイドバー(ファイル/検索(演算子)/タグ(ネスト)/ブックマーク) + Properties新UI +
 インラインタイトル + リーディングビュー + リンクされた言及 + グラフ。機密は端末外に出さない。
 
-フィルタ4機構（exclude_stems / dedup_drop_map / 分割断片折り畳み / weird_rename）と
+フィルタ5機構（source identity / exclude_stems / dedup_drop_map / 分割断片折り畳み /
+weird_rename）と
 HTML 生成ロジックは元スクリプトと同一。repo 版で加えたのは運用ガードのみ:
 
 - argparse: ``--vault`` / ``--out`` / ``--allow-shrink``
@@ -47,11 +48,12 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# --- repo 内サイドカー（フィルタ3ファイル + フォント）。欠落は即 exit 1（fallback 禁止） ---
+# --- repo 内サイドカー（フィルタ4ファイル + フォント）。欠落は即 exit 1（fallback 禁止） ---
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_DIR = _REPO_ROOT / "data" / "connect_web_filters"
 SIDECAR_FILES = (
     "exclude_stems.json",      # Agent 分類の非ナレッジ除外（タイトル stem のみ）
+    "exclude_source_keys.json",  # 不変な source_type:external_id による除外
     "dedup_drop_map.json",     # 別形式/旧版の非正本折り畳み（stem → 正本 stem）
     "weird_rename_high.json",  # 不明瞭命名 → 推奨タイトル（表示のみ・可逆）
     "inter-var.b64",           # InterVar フォント（woff2 base64）
@@ -548,15 +550,42 @@ def _quickfilter_counts(clients, docs, today):
 
 
 EXCL: set[str] = set()  # exclude_stems.json（main() で読み込み・欠落は exit 1）
+EXCL_SOURCE_KEYS: set[str] = set()  # exclude_source_keys.json（source_type:external_id）
+SOURCE_EXCLUDED_STEMS: set[str] = set()  # 現 Vault で source key に一致した stem（payload へ載せない）
 INCLUDE_REPORTS = False  # 管理用レポートの搭載可否（--include-reports で ON）
 _exn = lambda s: re.sub(r"[\s_]+", "", s).lower()
 EXCL_N: set[str] = set()
 
 
+def _source_key(fm):
+    """Vault frontmatter の内部メタから安定した source identity を作る。"""
+    source_type = str(fm.get("source_type") or "").strip().lower()
+    external_id = str(fm.get("external_id") or "").strip()
+    if not source_type or not external_id:
+        return ""
+    return f"{source_type}:{external_id}"
+
+
+def _source_excluded_stems():
+    """source key 除外に一致する現 Vault の stem を返す（旧 Vault は空＝stem 除外へ移行）。"""
+    excluded = set()
+    for f in DOCS.glob("*.md"):
+        fm = front(f.read_text(errors="replace"))
+        if _source_key(fm) in EXCL_SOURCE_KEYS:
+            excluded.add(f.stem)
+    return excluded
+
+
 def _is_excluded(stem):
-    # 除外判定: サイドカー列挙（EXCL/EXCL_N）に加え、正規化後 stem に「請求」を含む
+    # 除外判定: 不変 source identity / 旧Vault向けstem列挙（EXCL/EXCL_N）に加え、
+    # 正規化後 stem に「請求」を含む
     # 請求書/請求金額系タイトルは決定論で除外（個人名PIIの stem を repo に列挙しない）
-    return stem in EXCL or _exn(stem) in EXCL_N or "請求" in _exn(stem)
+    return (
+        stem in SOURCE_EXCLUDED_STEMS
+        or stem in EXCL
+        or _exn(stem) in EXCL_N
+        or "請求" in _exn(stem)
+    )
 
 # === 自社(NewsTV)除外: 自社部署を取引先/タグ扱いしない（実クライアントの資料自体は残す） ===
 SELF_ORG_RE = re.compile(r"news[\s_\-]*tv", re.I)          # NewsTV / news-tv / 株式会社NewsTV / Vector_NewsTV 等の全変種
@@ -2087,7 +2116,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global VAULT, CLIENTS, DOCS, REPORTS, EXCL, EXCL_N, DOC_DROP, TITLE_OVERRIDE, CHUNK_DROP
+    global VAULT, CLIENTS, DOCS, REPORTS, EXCL, EXCL_N, EXCL_SOURCE_KEYS
+    global SOURCE_EXCLUDED_STEMS, DOC_DROP, TITLE_OVERRIDE, CHUNK_DROP
     global INCLUDE_REPORTS, TAG_ALIAS, CLIENT_ALIAS
 
     args = _parse_args(argv)
@@ -2111,6 +2141,10 @@ def main(argv: list[str] | None = None) -> int:
     # --- サイドカー読み込み（元スクリプトの exists() フォールバックを全廃） ---
     EXCL = set(json.loads(_read_sidecar("exclude_stems.json")))
     EXCL_N = {_exn(s) for s in EXCL}
+    EXCL_SOURCE_KEYS = set(json.loads(_read_sidecar("exclude_source_keys.json")))
+    # client_md の関連資料リンク除去と chunk 折り畳みにも同じ判定を効かせるため、
+    # client/doc の payload 構築前に source key 一致 stem を確定する。
+    SOURCE_EXCLUDED_STEMS = _source_excluded_stems()
     DOC_DROP = set((json.loads(_read_sidecar("dedup_drop_map.json")) or {}).get("drop", {}).keys())
     TITLE_OVERRIDE = json.loads(_read_sidecar("weird_rename_high.json"))
     font_b64 = _read_sidecar("inter-var.b64").strip()

@@ -172,6 +172,21 @@ def test_render_doc_note_has_frontmatter_tags_and_client_link() -> None:
     assert "> 抜粋テキスト" in note
 
 
+def test_render_doc_note_emits_internal_source_identity_frontmatter() -> None:
+    """タイトル非依存の配信フィルタ用に source identity を Vault note へ残す。"""
+    note = render_doc_note(
+        _doc(
+            "変更後の表示タイトル",
+            source_type="gsheets",
+            external_id="SHEET1:278789217:53",
+        ),
+        "出光興産",
+        "clients/出光興産",
+    )
+    assert 'source_type: "gsheets"' in note
+    assert 'external_id: "SHEET1:278789217:53"' in note
+
+
 def test_render_doc_note_research_doc_renders_full_body() -> None:
     """施策研究ノート(x_research_tool)は要約全文を本文に出す（160字の折り畳み blockquote でない）。"""
     full = "# 辻利 Xの声集め\n\n## 主要な声\n- 「濃厚で最高」 — @a（❤️8,227）\n- 「甘さ控えめ」 — @b"

@@ -60,10 +60,11 @@ Claude Code セッションで依頼する内容（そのまま貼れる指示�
    python scripts/export_vault.py --dsn postgresql://...@localhost:15432/... --commit
    # 移行検証等で stale も見たい時だけ --include-stale
    ```
-3. **サイドカーレビュー**: `data/connect_web_filters/` の 4 点
-   （exclude_stems.json / dedup_drop_map.json / weird_rename_high.json / inter-var.b64）を
+3. **サイドカーレビュー**: `data/connect_web_filters/` の 5 点
+   （exclude_stems.json / exclude_source_keys.json / dedup_drop_map.json /
+   weird_rename_high.json / inter-var.b64）を
    新規取込資料に対して見直す。新たな重複・変名・ジャンクがあれば JSON を更新
-   （タイトル stem・表示名のみ。本文/BANT/温度感を入れない）
+   （タイトル stem・安定 source key・表示名のみ。本文/BANT/温度感を入れない）
 4. **HTML 生成**（サイドカー欠落・Vault 不在・0件・前回比20%超減は exit 1）:
    ```bash
    python scripts/build_app_html.py

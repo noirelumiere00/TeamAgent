@@ -8,6 +8,7 @@ Obsidian で開ける Vault ミラーをローカルに生成する:
   本文: FB 時系列（新しい順）+ 関連資料リスト（[[docs/...]] wikilink + Drive URL）
 - ``docs/<安全なファイル名>.md`` … 資料 note
   frontmatter: doc_type / client / industry / solution / entities / modified_at
+  + source_type / external_id（配信フィルタ専用の内部メタ。UI には出さない）
   （entities=cls_entities の名寄せタグ CSV。/app の「関係先/」タグ・検索へ展開される）
   本文: excerpt + 出典（Drive/Slack）リンク + タグ（#提案書 #出光興産 #祇園辻利 等）
   + [[clients/<client>]] wikilink
@@ -261,6 +262,10 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
         # 値は entity_extract 側で正規化済み＝カンマ非包含なので CSV が壊れない。
         f"entities: {yaml_quote(doc.get('cls_entities') or '')}",
         f"modified_at: {yaml_quote(doc.get('modified_at') or '')}",
+        # connect-web の除外はタイトル変更で外れない source identity を使う。
+        # build_app_html は除外判定にだけ利用し、HTML payload へは載せない内部メタ。
+        f"source_type: {yaml_quote(doc.get('source_type') or '')}",
+        f"external_id: {yaml_quote(doc.get('external_id') or '')}",
     ]
     # ナレッジ共有メタ（カテゴリ/クライアント種別/提案プロダクト）は値があるときだけ出す。
     # build_app_html が front() で拾い、docTags の カテゴリ/クライアント種別/提案プロダクト
