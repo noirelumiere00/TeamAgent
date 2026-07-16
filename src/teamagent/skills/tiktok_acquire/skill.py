@@ -43,9 +43,12 @@ class TikTokAcquireSkill(BaseSkill[TikTokAcquireInput, TikTokAcquireOutput]):
 
     name: ClassVar[str] = "tiktok_acquire"
     description: ClassVar[str] = (
-        "TikTokを指定KW群で取得する非同期ジョブを開始する。各KW最大30本の指標+サムネ、"
-        "上位N本(既定6)は動画本体(mp4)も保存しマルチモーダル分析の素材にする。"
-        "即座にjob_idを返すので、数分後に tiktok_acquire_status をjob_idで呼んで結果を取得する。"
+        "商材名/KW群のTikTok上位動画を、動画本体(mp4)込みで一括取得し、提案・"
+        "マルチモーダル分析の素材としてストックする。各KW最大30本の指標+サムネを集め、"
+        "上位N本(既定6)はmp4本体もS3に保存する。トリガー=「TikTok取得して/動画も保存して/"
+        "保存率上位の動画も/素材集めて/ストックして/提案用に集めて」。分析や要約はせず素材を"
+        "貯めるだけ（構造分析レポートは video_algorithm、その場で見る軽い検索・横断分析は"
+        " tiktok_search）。非同期で即job_idを返し、結果は tiktok_acquire_status で受け取る。"
     )
     input_schema: ClassVar[type[BaseModel]] = TikTokAcquireInput
     output_schema: ClassVar[type[BaseModel]] = TikTokAcquireOutput
@@ -92,8 +95,9 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
 
     name: ClassVar[str] = "tiktok_acquire_status"
     description: ClassVar[str] = (
-        "tiktok_acquire が返した job_id の進行状況を照会する。done なら posts/サムネ/動画(mp4)を"
-        "署名URLとS3キーで返す(動画はs3_key=機械処理用 と url=人向け の2系統)。"
+        "tiktok_acquire が返した job_id の取得結果をポーリング照会する（tiktok_acquire専用の"
+        "後工程で、単独の入口にはしない）。doneならposts/サムネ/動画(mp4)を署名URLとS3キーで"
+        "返す（url=人向け / s3_key=機械処理用）。"
     )
     input_schema: ClassVar[type[BaseModel]] = TikTokAcquireStatusInput
     output_schema: ClassVar[type[BaseModel]] = TikTokAcquireStatusOutput
