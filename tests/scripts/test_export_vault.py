@@ -31,6 +31,7 @@ _spec.loader.exec_module(_mod)
 
 safe_filename = _mod.safe_filename
 yaml_quote = _mod.yaml_quote
+md_inline_escape = _mod.md_inline_escape
 tag_token = _mod.tag_token
 wikilink = _mod.wikilink
 source_link = _mod.source_link
@@ -274,6 +275,49 @@ def test_render_client_note_empty_sections() -> None:
     assert "fb_count: 0" in note
     assert "FB の記録はまだありません" in note
     assert "関連資料はまだありません" in note
+
+
+def test_render_client_note_escapes_markdown_injection() -> None:
+    """FB 由来テキスト（client 名/見出し/pair 値/blockquote 本文）の Markdown 記法を退避する。
+
+    Slack FB 本文や LLM 分類値に混ざった [x](javascript:…) / <img> / `code` / [[wikilink]] が
+    AiLaVault(Obsidian) で装飾リンク・HTML・埋め込みとして描画されないよう、逐語出力箇所を
+    md_inline_escape 済みで出す（frontmatter は yaml_quote が守るため対象外）。
+    """
+    fb = _fb(
+        "2026-06-15",
+        title="<img src=x onerror=alert(1)>",
+        deal_phase="[phase](javascript:alert(1))",
+        content="漏洩 [click](javascript:alert(1)) <script>x</script> [[secret]] `code`",
+    )
+    note = render_client_note("Evil <b>Co</b> [x]", [fb], [], [])
+
+    # 逐語出力される FB 由来テキストはすべてバックスラッシュ退避された形で出る
+    assert md_inline_escape("Evil <b>Co</b> [x]") in note  # H1 の client 名
+    assert md_inline_escape("<img src=x onerror=alert(1)>") in note  # ### 見出しの title
+    assert md_inline_escape("[phase](javascript:alert(1))") in note  # - フェーズ: の value
+    assert (
+        md_inline_escape("漏洩 [click](javascript:alert(1)) <script>x</script> [[secret]] `code`")
+        in note
+    )  # blockquote 本文
+    # title は frontmatter に出ないので、生の HTML タグ記法は note のどこにも残らない
+    assert "<img src=x onerror=alert(1)>" not in note
+
+    # blockquote 本文行（"> " マーカーを除く）に未退避の [ ] < > ` が残っていないこと。
+    # 直前が \ でない危険記号にマッチする正規表現でゼロを確認する。
+    quote_body = next(ln for ln in note.splitlines() if ln.startswith("> "))[2:]
+    assert not re.search(r"(?<!\\)[\[\]<>`]", quote_body)
+
+
+def test_render_client_note_plain_fb_unescaped_noop() -> None:
+    """通常の FB（危険記号なし）はエスケープが no-op で、従来どおり素の文字列で出る。"""
+    fb = _fb("2026-06-15", title="営業FB", deal_phase="提案", content="商談メモ")
+    note = render_client_note("出光興産", [fb], [], [])
+    assert "# 出光興産" in note
+    assert "### 2026-06-15 営業FB" in note
+    assert "- フェーズ: 提案" in note
+    assert "> 商談メモ" in note
+    assert "\\" not in note.split("## 営業FB時系列")[1]  # FB 本文側にバックスラッシュ混入なし
 
 
 # ---------------- plan_vault ----------------
