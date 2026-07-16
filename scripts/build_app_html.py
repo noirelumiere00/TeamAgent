@@ -1066,7 +1066,10 @@ const P={
 function ic(n,cls){return '<svg class="ic '+(cls||"")+'" viewBox="0 0 24 24">'+(P[n]||"")+'</svg>';}
 
 /* ===== 索引・タグ・プロパティ ===== */
-const cByStem={},dByStem={},rByStem={},cByNorm={};
+/* stem/名前をキーにする索引は Object.create(null)（プロトタイプ無し）で作る。素の {} だと
+   stem が "constructor"/"toString"/"__proto__" 等のとき Object.prototype のメンバが引けてしまい、
+   cByStem[stem] が関数を返す→ grpVal が別グループに誤配置する（まとめ軸の島が消える）。 */
+const cByStem=Object.create(null),dByStem=Object.create(null),rByStem=Object.create(null),cByNorm=Object.create(null);
 DATA.clients.forEach(c=>{cByStem[c.stem]=c;if(c.name)cByNorm[nrm(c.name)]=c;});
 DATA.docs.forEach(d=>dByStem[d.stem]=d);
 DATA.reports.forEach(r=>rByStem[r.stem]=r);
@@ -1714,10 +1717,65 @@ function initGraph(){
  const L=DATA.graph.links.map(p=>({s:p[0],t:p[1]}));
  N.forEach(n=>n.r=n.type==="doc"?2.2:Math.min(3+Math.sqrt(n.deg)*1.5,n.type==="tag"?20:14));
  const neigh={};L.forEach(l=>{(neigh[l.s]=neigh[l.s]||new Set()).add(l.t);(neigh[l.t]=neigh[l.t]||new Set()).add(l.s);});
- const opt={nodeSize:1,linkW:1,textFade:1,repel:46,center:.011,linkDist:26,showDocs:true,showTags:true,hideOrphan:false,groupBy:"industry",filter:""};
+ const opt={nodeSize:1,linkW:1,textFade:1,repel:46,center:.011,linkDist:26,showDocs:true,showTags:true,hideOrphan:false,groupBy:"industry",cluster:null,filter:""};
  function vis(i){const n=N[i];if(!opt.showDocs&&n.type==="doc")return false;if(!opt.showTags&&n.type==="tag")return false;if(opt.hideOrphan&&!neigh[i])return false;if(opt.filter&&!n.label.toLowerCase().includes(opt.filter))return false;return true;}
+ /* ===== まとめる軸（clustering axis）: 色分け(ncol)は不変・配置のみ島化。既定 opt.cluster=null＝取引先ごと（現状の単一原点重力） ===== */
+ let cCenters=Object.create(null);                      // 値→{x,y,n} のリング中心。可視集合から決定的に算出（プロトタイプ無し＝"constructor"等の値でも島が消えない）
+ const AGEBK=["1ヶ月以内","3ヶ月以内","半年以内","1年以内","1年以上前"];   // 最終接点の新→旧順（ageBucket の返す値と一致）
+ const CLBASE=30;                                        // リング半径係数 R=CLBASE*√(全ノード数)（≒自然スプレッドの約2倍で島を分離。切替時に再フィットで全島を画角内へ）
+ const CLMAX=12;                                         // 自由記述軸(資料種類/施策)の島数上限。無制限だと表記ゆれで島とラベルが重なり判読不能になる（凡例の slice(0,9) と同趣旨）
+ const COTHER="その他";                                  // CLMAX で溢れた値の受け皿島（無言で消さず件数もラベルも出す）
+ let clOther=new Set();                                  // 「その他」島へ寄せる値の集合（buildCenters で確定）
+ function grpVal(n,ax){   // 軸ごとの所属グループ。対象type以外/空はnull=グループ中心に引かず既存リンクばねに委ねる（空値は未設定/記録なし島へ）
+  // last/doc_type/solution はノードに埋め込まず、既存の索引 cByStem/dByStem（DATA.clients/docs）から stem で引く（ペイロード増ゼロ）。phase はノードの既存フィールド。
+  if(ax==="phase")   return n.type==="client"?(n.phase||"未設定"):null;
+  if(ax==="last")    return n.type==="client"?(ageBucket((cByStem[n.id.slice(2)]||{}).last)||"記録なし"):null;
+  if(ax==="doc_type")return n.type==="doc"?((dByStem[n.id.slice(2)]||{}).doc_type||"未設定"):null;
+  if(ax==="solution")return n.type==="doc"?((dByStem[n.id.slice(2)]||{}).solution||"未設定"):null;
+  return null;}
+ function grp(n){return opt.cluster?grpVal(n,opt.cluster):null;}
+ function buildCenters(ax){   // 選択軸の実在値のみ列挙（フェーズ=PHASECOLORキー順/最終接点=新→旧/他=件数降順・未設定は末尾）→リング状に決定的配置
+  /* 幾何（島の順序・角度・半径）は **全ノード** から軸切替時に1回だけ決める（＝絞り込みしても
+     島は動かない）。可視集合に連動させると 1 キーストロークごとに島が数百px移動して体験が壊れる。
+     件数は recount() が可視基準で入れる。cnt/cCenters はプロトタイプ無しの辞書にする
+     （"constructor" 等の値で cnt[g]==null が false になり島が壊れるのを防ぐ）。 */
+  const cnt=Object.create(null),seen=[];clOther=new Set();   // 軸ごとに「その他」集約をリセット
+  for(let i=0;i<N.length;i++){const g=grpVal(N[i],ax);if(g===null)continue;if(cnt[g]==null){cnt[g]=0;seen.push(g);}cnt[g]++;}
+  let vals;
+  if(ax==="phase"){vals=Object.keys(PHASECOLOR).filter(p=>cnt[p]!=null);seen.forEach(g=>{if(g!=="未設定"&&vals.indexOf(g)<0)vals.push(g);});}
+  else if(ax==="last"){vals=AGEBK.filter(p=>cnt[p]!=null);}
+  else{  /* 自由記述軸(資料種類/施策)は件数降順の上位 CLMAX-1 種＋あふれを「その他」島へ集約。
+            単純に slice で切ると、切られた値のノードは cCenters に無く grp()→gc=null で原点
+            （未所属と同じ場所）へ落ち、ラベルも件数も出ない＝**無言で消える**。実データの
+            solution は canonical がちょうど12種＋自由記述素通しで確実に溢れる。 */
+   const rest=seen.filter(g=>g!=="未設定").sort((a,b)=>cnt[b]-cnt[a]);
+   vals=rest.slice(0,CLMAX-1);
+   const over=rest.slice(CLMAX-1);
+   if(over.length){clOther=new Set(over);cnt[COTHER]=over.reduce((s,g)=>s+cnt[g],0);vals.push(COTHER);}
+  }
+  ["未設定","記録なし"].forEach(u=>{if(cnt[u]!=null)vals.push(u);});   // 未設定/記録なし島は必ず末尾
+  cCenters=Object.create(null);
+  const tot=vals.length||1,R=CLBASE*Math.sqrt(N.length);
+  vals.forEach((v,i)=>{const a=i/tot*Math.PI*2;cCenters[v]={x:Math.cos(a)*R,y:Math.sin(a)*R,n:0};});
+  recount();}
+ function grpBin(n){  /* 島の割当先。CLMAX で溢れた値は「その他」島へ寄せる（無言で消さない） */
+  const g=grp(n);return (g!==null&&clOther.has(g))?COTHER:g;}
+ function recount(){   // 件数だけ可視基準で更新（幾何は不変＝島は動かない・リヒート不要）
+  for(const v in cCenters)cCenters[v].n=0;
+  for(let i=0;i<N.length;i++){if(!vis(i))continue;const g=grpBin(N[i]);if(g!==null&&cCenters[g])cCenters[g].n++;}}
+ function clusterCap(){   // cluster有効時のみ: 軸名＋未設定件数を明示。doc基準は体験変化（取引先が資料に引かれ周辺配置）を併記
+  if(!opt.cluster)return"";
+  const LB={phase:"フェーズ",last:"最終接点",doc_type:"資料の種類",solution:"施策"},uk=opt.cluster==="last"?"記録なし":"未設定";
+  const un=cCenters[uk]?cCenters[uk].n:0;
+  let tot=0;for(const v in cCenters)tot+=cCenters[v].n;
+  if(!tot)return esc(LB[opt.cluster])+"でまとめています（表示中の対象がありません）";   /* 全島が空（対象typeを非表示にした等）で「まとめています」だけ出すと嘘になる */
+  let s=esc(LB[opt.cluster])+"でまとめています";
+  if(un)s+="（"+uk+" "+un+"件は"+uk+"島）";
+  if(cCenters[COTHER])s+="<br>種類が多いため上位"+(CLMAX-1)+"件のみ島にし、残り"+clOther.size+"種は「"+COTHER+"」島にまとめています";
+  if(opt.cluster==="doc_type"||opt.cluster==="solution")s+="<br>資料でまとめています（取引先は資料に引かれ周辺に配置）";
+  return s;}
  function ncol(n){if(n.type==="tag")return "hsl(254,42%,72%)";if(n.type==="doc")return "rgba(150,150,156,.6)";return opt.groupBy==="phase"?(PHASECOLOR[n.phase]||"#9a9a9a"):colorOf(n.industry);}
- let view={x:0,y:0,z:1},hover=-1,drag=-1,pan=false,px=0,py=0,alpha=1;const aMin=.02,aDec=.977;
+ let view={x:0,y:0,z:1},hover=-1,drag=-1,pan=false,px=0,py=0,alpha=1,fitPending=false;const aMin=.02,aDec=.977;   // fitPending: まとめ軸切替後に収束したら一度だけ再フィット（全島を画角に収める）
  function mk(x,y,w){return {x:x,y:y,w:w,m:0,sx:0,sy:0,body:-1,kids:null};}
  function qPlace(cell,i,depth){const n=N[i],hw=cell.w/2,q=(n.x>=cell.x+hw?1:0)+(n.y>=cell.y+hw?2:0);qInsert(cell.kids[q],i,depth+1);}
  function qInsert(cell,i,depth){const n=N[i];cell.m++;cell.sx+=n.x;cell.sy+=n.y;
@@ -1735,12 +1793,18 @@ function initGraph(){
   for(let i=0;i<N.length;i++)if(vis(i))qInsert(root,i,0);
   for(let i=0;i<N.length;i++)if(vis(i))qForce(root,i,opt.repel,a,.49);
   for(let k=0;k<L.length;k++){const l=L[k];if(!vis(l.s)||!vis(l.t))continue;const A=N[l.s],B=N[l.t];let dx=B.x-A.x,dy=B.y-A.y,d=Math.sqrt(dx*dx+dy*dy)||1,f=(d-opt.linkDist)*.006*a;A.vx+=dx/d*f;A.vy+=dy/d*f;B.vx-=dx/d*f;B.vy-=dy/d*f;}
-  for(let i=0;i<N.length;i++){if(!vis(i))continue;const n=N[i];n.vx-=n.x*opt.center*a;n.vy-=n.y*opt.center*a;n.vx*=.82;n.vy*=.82;
+  for(let i=0;i<N.length;i++){if(!vis(i))continue;const n=N[i];
+   const gk=grpBin(n),gc=gk!==null?cCenters[gk]:null;   // まとめ軸ON かつ所属あり: 所属グループ中心への引力に差し替え（未所属=従来の弱い原点重力）。CLMAX 溢れは「その他」島へ
+   if(gc){n.vx-=(n.x-gc.x)*opt.center*a;n.vy-=(n.y-gc.y)*opt.center*a;}
+   else{n.vx-=n.x*opt.center*a;n.vy-=n.y*opt.center*a;}
+   n.vx*=.82;n.vy*=.82;
    const sp=n.vx*n.vx+n.vy*n.vy;if(sp>2500){const s=50/Math.sqrt(sp);n.vx*=s;n.vy*=s;}
    n.x+=n.vx;n.y+=n.vy;
    if(!isFinite(n.x)||!isFinite(n.y)){n.x=(i%60-30)*8;n.y=(((i/60)|0)%60-30)*8;n.vx=n.vy=0;}}}
  for(let k=0;k<160;k++)step(1);
- function fit(){let a=1e9,b=1e9,c=-1e9,d=-1e9;N.forEach(n=>{a=Math.min(a,n.x);b=Math.min(b,n.y);c=Math.max(c,n.x);d=Math.max(d,n.y);});const w=cv.clientWidth,h=cv.clientHeight;view.z=Math.max(.25,Math.min(2.2,.82*Math.min(w/((c-a)||1),h/((d-b)||1))));view.x=-(a+c)/2;view.y=-(b+d)/2;}
+ /* フィットは **可視ノードのみ** の外接矩形に合わせる（非表示ノードの座標まで含めると、絞り込み後に
+    画角が無関係な余白へ引っ張られる）。可視0件なら現在の画角を維持（描画側が空状態を出す）。 */
+ function fit(){let a=1e9,b=1e9,c=-1e9,d=-1e9,any=false;N.forEach((n,i)=>{if(!vis(i))return;any=true;a=Math.min(a,n.x);b=Math.min(b,n.y);c=Math.max(c,n.x);d=Math.max(d,n.y);});if(!any)return false;const w=cv.clientWidth,h=cv.clientHeight;view.z=Math.max(.25,Math.min(2.2,.82*Math.min(w/((c-a)||1),h/((d-b)||1))));view.x=-(a+c)/2;view.y=-(b+d)/2;return true;}
  fit();
  const S=n=>({x:cv.width/2+(n.x+view.x)*view.z*dpr,y:cv.height/2+(n.y+view.y)*view.z*dpr});
  function draw(){const DK=document.documentElement.getAttribute("data-theme")==="dark";ctx.clearRect(0,0,cv.width,cv.height);ctx.lineWidth=dpr*opt.linkW;
@@ -1749,10 +1813,14 @@ function initGraph(){
   L.forEach(l=>{if(!vis(l.s)||!vis(l.t))return;const A=S(N[l.s]),B=S(N[l.t]);const on=hover>=0&&(l.s===hover||l.t===hover);ctx.strokeStyle=on?lHov:lNorm;ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);ctx.stroke();});
   N.forEach((n,i)=>{if(!vis(i))return;const p=S(n);const dim=hover>=0&&i!==hover&&!(neigh[hover]&&neigh[hover].has(i));ctx.globalAlpha=dim?.2:1;
    const rr=Math.max(n.r*opt.nodeSize*view.z*dpr,.5*dpr);ctx.fillStyle=ncol(n);ctx.beginPath();ctx.arc(p.x,p.y,rr,0,7);ctx.fill();  /* 遠景でも点として残す下限 */
-   if((n.type==="client"&&rr>6.5/opt.textFade)||i===hover){ctx.globalAlpha=dim?.3:1;ctx.fillStyle=lbl;ctx.font=(11*dpr)+"px InterVar,Inter,-apple-system,sans-serif";ctx.fillText(n.label,p.x+rr+4,p.y+4*dpr);}});ctx.globalAlpha=1;}
+   if((n.type==="client"&&rr>6.5/opt.textFade)||i===hover){ctx.globalAlpha=dim?.3:1;ctx.fillStyle=lbl;ctx.font=(11*dpr)+"px InterVar,Inter,-apple-system,sans-serif";ctx.fillText(n.label,p.x+rr+4,p.y+4*dpr);}});ctx.globalAlpha=1;
+  if(opt.cluster){ctx.textAlign="center";ctx.font="600 "+(12*dpr)+"px InterVar,Inter,-apple-system,sans-serif";ctx.lineWidth=3*dpr;   /* まとめ軸: 各島の中心にラベル＋件数（未設定/記録なし島も明示）。ハロー付きでノード上でも可読 */
+   for(const v in cCenters){const c=cCenters[v];if(!c.n)continue;const p=S(c),tx=v+" ("+c.n+")";ctx.strokeStyle=DK?"rgba(18,18,22,.85)":"rgba(255,255,255,.92)";ctx.fillStyle=DK?"rgba(232,232,238,.92)":"rgba(28,28,34,.9)";ctx.strokeText(tx,p.x,p.y-6*dpr);ctx.fillText(tx,p.x,p.y-6*dpr);}   /* 可視0件の島はラベルを出さない（絞り込みで空になった島の "(0)" を残さない） */
+   ctx.textAlign="left";ctx.lineWidth=dpr*opt.linkW;}
+ }
  function pick(mx,my){let best=-1,bd=15*dpr;N.forEach((n,i)=>{if(!vis(i))return;const p=S(n);const dd=Math.hypot(p.x-mx,p.y-my);if(dd<Math.max(n.r*opt.nodeSize*view.z*dpr+5*dpr,15*dpr)&&dd<bd){bd=dd;best=i;}});return best;}
  let run=false;function ensure(){if(!run){run=true;requestAnimationFrame(loop);}}
- function loop(){if(alpha>aMin){step(alpha);alpha*=aDec;draw();requestAnimationFrame(loop);}else if(drag>=0){step(.25);draw();requestAnimationFrame(loop);}else{draw();run=false;}}
+ function loop(){if(alpha>aMin){step(alpha);alpha*=aDec;draw();requestAnimationFrame(loop);}else if(drag>=0){step(.25);draw();requestAnimationFrame(loop);}else{if(fitPending&&fit())fitPending=false;draw();run=false;}}   /* 再フィットは成功時のみ消費（可視0件で空振りすると軸切替の再フィットが永久に来なくなる） */
  cv.onmousemove=e=>{const r=cv.getBoundingClientRect(),mx=(e.clientX-r.left)*dpr,my=(e.clientY-r.top)*dpr;
   if(drag>=0){N[drag].x=(mx-cv.width/2)/(view.z*dpr)-view.x;N[drag].y=(my-cv.height/2)/(view.z*dpr)-view.y;N[drag].vx=N[drag].vy=0;return;}
   if(pan){view.x+=(mx-px)/(view.z*dpr);view.y+=(my-py)/(view.z*dpr);px=mx;py=my;draw();return;}
@@ -1782,6 +1850,19 @@ function initGraph(){
   +'<label class="gck"><input type="radio" name="gb" id="gbInd" checked> 業種で色分け</label>'
   +'<label class="gck"><input type="radio" name="gb" id="gbPh"> フェーズで色分け</label>'
   +'<div class="gleg" id="gLeg">'+legend()+'</div></div>'
+  +'<div class="gsec"><div class="gh" id="gClusterLbl">まとめる（配置）</div>'
+  /* a11y: 見出しは div なので暗黙のラベル付けが効かない。aria-labelledby で見出しと結び、
+     aria-describedby で「何が起きるか」の補足文を読み上げに載せる（スクリーンリーダで
+     "まとめる（配置） コンボボックス" と読める）。 */
+  +'<select class="gin" id="gCluster" aria-labelledby="gClusterLbl" aria-describedby="gClusterCap">'
+   +'<option value="">取引先ごと（既定）</option>'
+   +'<option value="phase">フェーズ（取引先を島に）</option>'
+   +'<option value="last">最終接点（取引先を島に）</option>'
+   +'<option value="doc_type">資料の種類（資料を島に）</option>'
+   +'<option value="solution">施策（資料を島に）</option>'
+  +'</select>'
+  +'<div style="color:var(--faint);font-size:10px;line-height:1.45">色分け＝何者か / まとめ＝どこに溜まるか</div>'
+  +'<div id="gClusterCap" style="color:var(--muted);font-size:10px;line-height:1.45;margin-top:5px"></div></div>'
   +'<div class="gsec"><div class="gh">表示</div>'
   +'<div class="gsl"><span>ノード径</span><input type="range" id="gNs" min="0.5" max="2.5" step="0.1" value="1"></div>'
   +'<div class="gsl"><span>リンク太さ</span><input type="range" id="gLw" min="0.5" max="3" step="0.1" value="1"></div>'
@@ -1791,12 +1872,16 @@ function initGraph(){
   +'<div class="gsl"><span>中心力</span><input type="range" id="gCe" min="0" max="0.03" step="0.001" value="0.011"></div>'
   +'<div class="gsl"><span>リンク距離</span><input type="range" id="gLd" min="10" max="80" step="2" value="26"></div></div>';
  const dr=()=>draw(),rh=()=>{alpha=Math.max(alpha,.5);ensure();};
- $("#gFilter").oninput=e=>{opt.filter=e.target.value.toLowerCase();dr();};
- $("#gTags").onchange=e=>{opt.showTags=e.target.checked;dr();};
- $("#gDocs").onchange=e=>{opt.showDocs=e.target.checked;dr();};
- $("#gOrph").onchange=e=>{opt.hideOrphan=e.target.checked;dr();};
+ /* 可視集合が変わったら **件数だけ** 数え直す（島の位置は動かさない＝リヒート不要）。
+    これをしないと絞り込み後もラベルの件数が非表示分を含んだまま固まる。 */
+ const visChanged=()=>{if(opt.cluster){recount();$("#gClusterCap").innerHTML=clusterCap();}dr();};
+ $("#gFilter").oninput=e=>{opt.filter=e.target.value.toLowerCase();visChanged();};
+ $("#gTags").onchange=e=>{opt.showTags=e.target.checked;visChanged();};
+ $("#gDocs").onchange=e=>{opt.showDocs=e.target.checked;visChanged();};
+ $("#gOrph").onchange=e=>{opt.hideOrphan=e.target.checked;visChanged();};
  $("#gbInd").onchange=()=>{opt.groupBy="industry";$("#gLeg").innerHTML=legend();dr();};
  $("#gbPh").onchange=()=>{opt.groupBy="phase";$("#gLeg").innerHTML=legend();dr();};
+ $("#gCluster").onchange=e=>{opt.cluster=e.target.value||null;if(opt.cluster)buildCenters(opt.cluster);$("#gClusterCap").innerHTML=clusterCap();alpha=Math.max(alpha,.5);fitPending=true;ensure();};   /* まとめ軸切替: 既存リヒートに乗せ島がふわっと再収束（160step同期再計算は使わない）→収束後に一度だけ再フィット */
  $("#gNs").oninput=e=>{opt.nodeSize=+e.target.value;dr();};
  $("#gLw").oninput=e=>{opt.linkW=+e.target.value;dr();};
  $("#gTf").oninput=e=>{opt.textFade=+e.target.value;dr();};
@@ -2193,6 +2278,9 @@ def main(argv: list[str] | None = None) -> int:
         gnodes[b]["deg"] += 1
 
 
+    # まとめ軸(client基準=最終接点/doc基準=資料の種類・施策)の値はノードへ再埋め込みせず、
+    # 既に payload に載る DATA.clients/DATA.docs を stem で引く（JS grpVal・ペイロード増ゼロ・可逆）。
+    # phase/industry はノードの既存フィールドをそのまま流用。ノード数・エッジ・タグは baseline と完全不変。
     _cidx = {}
     for c in clients:
         i = _node("c:" + c["stem"], c["name"], "client", c["industry"], c["phase"], fb=c["fb"], doc=c["doc"])
