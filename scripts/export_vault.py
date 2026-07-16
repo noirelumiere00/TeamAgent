@@ -533,14 +533,16 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _load_export_manifest(out_dir: Path) -> dict[str, str]:
-    """前回までに本スクリプトが生成した note と内容 hash を読む。"""
+def _load_export_manifest_state(
+    out_dir: Path,
+) -> tuple[dict[str, str], set[str], bool]:
+    """生成物hash、直近の公開対象、完全export済みかをmanifestから読む。"""
     manifest = out_dir / _MANIFEST_NAME
     resolved_root = out_dir.resolve()
     if manifest.is_symlink() or manifest.resolve().parent != resolved_root:
         raise ValueError("unsafe export manifest path")
     if not manifest.exists():
-        return {}
+        return {}, set(), False
     try:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -562,10 +564,37 @@ def _load_export_manifest(out_dir: Path) -> dict[str, str]:
         if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
             raise ValueError(f"invalid content hash in export manifest: {rel}")
         files[rel] = digest
+
+    # active_files/complete_export は ACL-aware manifest 導入前には無い。旧manifestは
+    # ownership/prune用として読めるが、build公開集合としては fail-closed（complete=False）。
+    raw_active = payload.get("active_files", [])
+    complete_export = payload.get("complete_export", False)
+    if not isinstance(raw_active, list) or not all(isinstance(rel, str) for rel in raw_active):
+        raise ValueError("invalid export manifest: active_files must be a string array")
+    if len(raw_active) != len(set(raw_active)):
+        raise ValueError("invalid export manifest: duplicate active_files entry")
+    if not isinstance(complete_export, bool):
+        raise ValueError("invalid export manifest: complete_export must be boolean")
+    active_files = set(raw_active)
+    for rel in active_files:
+        if not _is_managed_markdown_path(rel) or rel not in files:
+            raise ValueError(f"invalid active path in export manifest: {rel!r}")
+    return files, active_files, complete_export
+
+
+def _load_export_manifest(out_dir: Path) -> dict[str, str]:
+    """前回までに本スクリプトが生成した note と内容 hash を読む。"""
+    files, _, _ = _load_export_manifest_state(out_dir)
     return files
 
 
-def _write_export_manifest(out_dir: Path, files: dict[str, str]) -> None:
+def _write_export_manifest(
+    out_dir: Path,
+    files: dict[str, str],
+    *,
+    active_files: set[str],
+    complete_export: bool,
+) -> None:
     """manifest を同一ディレクトリの一時ファイルから atomic replace する。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = out_dir / _MANIFEST_NAME
@@ -574,9 +603,13 @@ def _write_export_manifest(out_dir: Path, files: dict[str, str]) -> None:
     for path in (manifest, tmp):
         if path.is_symlink() or path.resolve().parent != resolved_root:
             raise ValueError("unsafe export manifest path")
+    if not active_files <= files.keys():
+        raise ValueError("active export paths must be present in manifest files")
     payload = {
         "version": _MANIFEST_VERSION,
         "generator": _MANIFEST_GENERATOR,
+        "complete_export": complete_export,
+        "active_files": sorted(active_files),
         "files": dict(sorted(files.items())),
     }
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -692,7 +725,8 @@ def write_vault(
     """計画を Vault へ反映し、明示された完全 export だけ古い生成 note を削除する。
 
     ``commit=False`` は書込・削除・manifest 更新を一切しない。manifest は生成 Markdown の
-    相対パスと内容 hash のみを持つため、未管理 note や人が編集した note は prune しない。
+    相対パス/content hashに加え、直近の完全exportでACLを通ったactive集合を持つ。
+    未管理 note や人が編集した note はpruneせずローカル保護するが、active公開集合には入れない。
     ``complete_export=False``（部分 export）で ``prune=True`` は常に拒否する。
     """
     if prune and not complete_export:
@@ -710,7 +744,10 @@ def write_vault(
     for rel in current_manifest:
         _managed_target(out_dir, rel)
 
-    previous_manifest = _load_export_manifest(out_dir) if (commit or prune) else {}
+    if commit or prune:
+        previous_manifest, previous_active, _ = _load_export_manifest_state(out_dir)
+    else:
+        previous_manifest, previous_active = {}, set()
     if prune:
         # manifest 導入前に残った stale/non-company note も、旧 exporter 固有の構造を
         # 満たすものだけ初回所有候補へ加える。既存 manifest の hash を常に優先する。
@@ -769,7 +806,23 @@ def write_vault(
         # 部分 export や prune 無しの更新で、他 note の所有記録を縮めない。
         next_manifest = dict(previous_manifest)
         next_manifest.update(current_manifest)
-    _write_export_manifest(out_dir, next_manifest)
+    if complete_export:
+        # 公開対象は「今回のACL付き完全SELECTから生成した集合」だけ。prune-skipで
+        # ローカル保護した旧/手編集noteはownership filesに残してもactiveへ戻さない。
+        next_active = set(current_manifest)
+        next_complete = True
+    else:
+        # partial は以前の完全snapshotに別時点/別shared-groupの一部を混ぜ得る。
+        # active hashはownership継続用に保持するが、必ずcomplete=Falseへ落として
+        # build_app_htmlに次の完全exportを要求する。
+        next_active = (set(previous_active) | set(current_manifest)) & set(next_manifest)
+        next_complete = False
+    _write_export_manifest(
+        out_dir,
+        next_manifest,
+        active_files=next_active,
+        complete_export=next_complete,
+    )
     return stats
 
 

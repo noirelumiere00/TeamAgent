@@ -50,6 +50,11 @@ def _manifest_files(out: Path) -> dict[str, str]:
     return payload["files"]
 
 
+def _manifest_active(out: Path) -> tuple[set[str], bool]:
+    payload = json.loads((out / _mod._MANIFEST_NAME).read_text(encoding="utf-8"))
+    return set(payload["active_files"]), payload["complete_export"]
+
+
 def _doc(title: str, uri: str = "gdrive://F1", **over: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
         "title": title,
@@ -768,6 +773,7 @@ def test_write_vault_prune_dry_run_then_commit_reports_and_deletes_owned_notes(
     assert not (out / "clients" / "Old.md").exists()
     assert not (out / "docs" / "Old.md").exists()
     assert set(_manifest_files(out)) == {"clients/New.md", "docs/New.md"}
+    assert _manifest_active(out) == ({"clients/New.md", "docs/New.md"}, True)
 
 
 def test_prune_preserves_unmanaged_markdown_other_dirs_non_md_and_outside_root(
@@ -802,6 +808,14 @@ def test_prune_preserves_unmanaged_markdown_other_dirs_non_md_and_outside_root(
     assert stats["deleted"] == 2
     for path, content in untouched.items():
         assert path.read_text(encoding="utf-8") == content
+    active, complete = _manifest_active(out)
+    assert active == {"clients/B.md", "docs/B.md"}
+    assert complete is True
+    assert all(
+        path.relative_to(out).as_posix() not in active
+        for path in untouched
+        if path.is_relative_to(out)
+    )
 
 
 def test_first_prune_discovers_and_deletes_legacy_generated_orphans(tmp_path: Path) -> None:
@@ -889,6 +903,10 @@ def test_prune_skips_manifest_owned_note_modified_after_export(tmp_path: Path) -
     assert not (out / "clients" / "A.md").exists()
     assert modified.read_text(encoding="utf-8") == "human edit"
     assert "docs/A.md" in _manifest_files(out)  # 次回も変更済みとして保護を継続
+    active, complete = _manifest_active(out)
+    assert active == {"clients/B.md", "docs/B.md"}
+    assert complete is True
+    assert "docs/A.md" not in active  # ローカル保護しても静的/appの公開集合へ戻さない
 
 
 def test_partial_export_never_prunes_or_shrinks_manifest(tmp_path: Path) -> None:
@@ -903,11 +921,24 @@ def test_partial_export_never_prunes_or_shrinks_manifest(tmp_path: Path) -> None
     partial = {"clients/A.md": "client A2", "docs/A.md": "doc A2"}
     write_vault(out, partial, commit=True, complete_export=False)
     assert set(_manifest_files(out)) == set(initial)
+    assert _manifest_active(out) == (set(initial), False)
     assert (out / "clients" / "B.md").read_text(encoding="utf-8") == "client B"
 
     with pytest.raises(ValueError, match="partial export"):
         write_vault(out, partial, commit=True, prune=True, complete_export=False)
     assert (out / "docs" / "B.md").read_text(encoding="utf-8") == "doc B"
+
+
+def test_first_partial_export_cannot_claim_complete_publication_set(tmp_path: Path) -> None:
+    """完全snapshot前のpartial commitはactive hashを持っても公開可能とは名乗らない。"""
+    out = tmp_path / "vault"
+    write_vault(
+        out,
+        {"clients/A.md": "client A", "docs/A.md": "doc A"},
+        commit=True,
+        complete_export=False,
+    )
+    assert _manifest_active(out) == ({"clients/A.md", "docs/A.md"}, False)
 
 
 @pytest.mark.parametrize("managed_count", [0, 2])

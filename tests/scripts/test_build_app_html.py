@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
@@ -110,7 +111,34 @@ def vault(tmp_path: Path) -> Path:
     return v
 
 
-def _run(vault: Path, out: Path, *extra: str) -> int:
+def _write_test_export_manifest(
+    vault: Path,
+    *,
+    active_paths: set[str] | None = None,
+    complete_export: bool = True,
+) -> None:
+    """テストVaultをexporterのactive/hash manifest契約へ合わせる。"""
+    managed = {
+        f"{prefix}/{path.name}": hashlib.sha256(path.read_bytes()).hexdigest()
+        for prefix in ("clients", "docs")
+        for path in (vault / prefix).glob("*.md")
+    }
+    active = set(managed) if active_paths is None else set(active_paths)
+    payload = {
+        "version": 1,
+        "generator": "scripts/export_vault.py",
+        "complete_export": complete_export,
+        "active_files": sorted(active),
+        "files": managed,
+    }
+    (vault / ".export-vault-manifest.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _run(vault: Path, out: Path, *extra: str, refresh_manifest: bool = True) -> int:
+    if refresh_manifest and (vault / "clients").is_dir() and (vault / "docs").is_dir():
+        _write_test_export_manifest(vault)
     rc = _mod.main(["--vault", str(vault), "--out", str(out), *extra])
     assert isinstance(rc, int)
     return rc
@@ -230,6 +258,113 @@ def test_unmarked_legacy_chunk_notes_still_fold_to_one(
     assert "旧分割資料 2ページ目" not in html
     stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
     assert stats["docs"] == 4
+
+
+def test_unmanaged_and_inactive_notes_never_enter_html(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """手作業noteやACL解除後の保護noteはVault/ownershipに残っても公開しない。"""
+    _write_doc(vault, "手作業の非共有資料", title="絶対に公開しない手作業資料")
+    active_paths = {
+        f"{prefix}/{path.name}"
+        for prefix in ("clients", "docs")
+        for path in (vault / prefix).glob("*.md")
+        if path.stem != "手作業の非共有資料"
+    }
+    # files(hash ownership)には残すがactiveから外す = prune-skip保護noteを再現。
+    _write_test_export_manifest(vault, active_paths=active_paths)
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out, refresh_manifest=False) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "絶対に公開しない手作業資料" not in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 3
+
+
+def test_active_note_modified_after_export_fails_loud(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """manifest上activeでもhashが変わったnoteを静的HTMLへ流さない。"""
+    _write_test_export_manifest(vault)
+    target = vault / "docs" / "提案書A.md"
+    target.write_text(target.read_text(encoding="utf-8") + "\n手作業追記", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+    assert "export後に変更" in capsys.readouterr().err
+
+
+def test_partial_or_legacy_manifest_cannot_build_public_html(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """完全exportの証明がないmanifestはcompany-shared公開に使わない。"""
+    _write_test_export_manifest(vault, complete_export=False)
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+    assert "完全exportではありません" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "manifest_case",
+    ["empty", "duplicate", "traversal", "dot_md", "missing", "bad_hash"],
+)
+def test_malformed_active_manifest_fails_closed(
+    manifest_case: str,
+    sidecars: Path,
+    vault: Path,
+    tmp_path: Path,
+) -> None:
+    """公開境界の空/重複/逸脱path/欠損/hash不正を直接回帰固定する。"""
+    _write_test_export_manifest(vault)
+    manifest = vault / ".export-vault-manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    first = payload["active_files"][0]
+    if manifest_case == "empty":
+        payload["active_files"] = []
+    elif manifest_case == "duplicate":
+        payload["active_files"] = [first, first]
+    elif manifest_case == "traversal":
+        payload["active_files"] = ["docs/../outside.md"]
+        payload["files"]["docs/../outside.md"] = "0" * 64
+    elif manifest_case == "dot_md":
+        payload["active_files"] = ["docs/.md"]
+        payload["files"]["docs/.md"] = "0" * 64
+    elif manifest_case == "missing":
+        payload["active_files"] = ["docs/missing.md"]
+        payload["files"]["docs/missing.md"] = "0" * 64
+    else:
+        payload["files"][first] = "not-a-sha256"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+
+
+def test_active_note_symlink_fails_closed(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """active pathをsymlinkへ差し替えてもリンク先を公開しない。"""
+    _write_test_export_manifest(vault)
+    active = vault / "docs" / "提案書A.md"
+    outside = tmp_path / "outside.md"
+    outside.write_text("秘密", encoding="utf-8")
+    active.unlink()
+    active.symlink_to(outside)
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+
+
+def test_export_manifest_symlink_fails_closed(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """manifest自体をsymlinkへ差し替えても信頼しない。"""
+    _write_test_export_manifest(vault)
+    manifest = vault / ".export-vault-manifest.json"
+    external_manifest = tmp_path / "external-manifest.json"
+    external_manifest.write_text(manifest.read_text(encoding="utf-8"), encoding="utf-8")
+    manifest.unlink()
+    manifest.symlink_to(external_manifest)
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
 
 
 def test_seikyusho_stem_excluded_without_sidecar_listing(
@@ -1288,15 +1423,21 @@ def test_reports_excluded_by_default(sidecars: Path, vault: Path, tmp_path: Path
     assert '"stem": "followup_gaps"' not in html
 
 
-def test_reports_included_with_flag(sidecars: Path, vault: Path, tmp_path: Path) -> None:
-    """--include-reports 指定時のみ従来どおり搭載（管理セッション用）。"""
+def test_include_reports_is_rejected_for_public_build(
+    sidecars: Path,
+    vault: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """manifest管理外の内部reportを明示flagでも公開HTMLへ混ぜない。"""
     rdir = vault / "_reports"
     rdir.mkdir()
     (rdir / "followup_gaps.md").write_text("# レポート\n\n中身", encoding="utf-8")
     out = tmp_path / "o.html"
-    assert _run(vault, out, "--include-reports") == 0
-    html = out.read_text(encoding="utf-8")
-    assert '"stem": "followup_gaps"' in html
+    with pytest.raises(SystemExit):
+        _run(vault, out, "--include-reports")
+    assert "ACL manifest外" in capsys.readouterr().err
+    assert not out.exists()
 
 
 # ---------------- タグUX改善（審査済み6機能）: 生成 HTML への配線 ----------------

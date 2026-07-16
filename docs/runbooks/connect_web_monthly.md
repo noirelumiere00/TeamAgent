@@ -102,6 +102,9 @@ Claude Code セッションで依頼する内容（そのまま貼れる指示�
    python scripts/build_app_html.py
    # 意図的な縮小（大量 stale 掃除後など）のときだけ --allow-shrink
    ```
+   - build は直近の**完全 export manifest**にある active path だけを読み、各 note の
+     SHA-256 一致も確認する。手作業 note、prune で保護した旧 note、partial export だけの
+     manifest、export 後に編集された note は `/app` へ載せず、契約不明なら exit 1 で止まる。
 5. **QA diff**: 生成 HTML のフッタ統計（`更新: YYYY-MM-DD JST・取引先N・資料M`）と
    `<out>.stats.json` の前回比を確認。新規取込がフッタ数字に反映されているか、
    意図しない激減が無いかを確認して報告
