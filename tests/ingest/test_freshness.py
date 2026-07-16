@@ -21,13 +21,13 @@ from teamagent.ingest.ops_alert import IngestOpsAlerter
 class _FakeCursor:
     """execute/fetchall だけを持つ DBAPI カーソルのダブル。"""
 
-    def __init__(self, rows: list[tuple[str, dt.datetime | None]]) -> None:
+    def __init__(self, rows: list[Any]) -> None:
         self._rows = rows
 
     def execute(self, sql: str) -> None:
         assert "max(ingested_at)" in sql and "documents" in sql
 
-    def fetchall(self) -> list[tuple[str, dt.datetime | None]]:
+    def fetchall(self) -> list[Any]:
         return self._rows
 
 
@@ -73,6 +73,17 @@ def test_naive_timestamp_treated_as_utc() -> None:
         ("slack", dt.datetime(2026, 5, 28)),  # tz-naive
         ("gdrive", dt.datetime(2026, 7, 12, tzinfo=dt.UTC)),
         ("gsheets", dt.datetime(2026, 7, 12, tzinfo=dt.UTC)),
+    ]
+    stale = find_stale_sources(_FakeCursor(rows), now=_NOW, max_age_days=8)
+    assert [s.source_type for s in stale] == ["slack"]
+
+
+def test_dict_rows_from_psycopg_dict_row_are_supported() -> None:
+    """本番 ``dict_row`` は整数indexを持たないため、列名で安全に読む。"""
+    rows = [
+        {"source_type": "slack", "newest": dt.datetime(2026, 5, 28, tzinfo=dt.UTC)},
+        {"source_type": "gdrive", "newest": dt.datetime(2026, 7, 12, tzinfo=dt.UTC)},
+        {"source_type": "gsheets", "newest": dt.datetime(2026, 7, 13, tzinfo=dt.UTC)},
     ]
     stale = find_stale_sources(_FakeCursor(rows), now=_NOW, max_age_days=8)
     assert [s.source_type for s in stale] == ["slack"]

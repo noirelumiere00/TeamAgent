@@ -23,6 +23,7 @@ from teamagent.adapters.gdrive_client import (
     DriveFile,
     DrivePermission,
     GDriveClient,
+    GDriveDownloadContentError,
     GDrivePermissionsPaginationError,
     extract_acl_emails,
 )
@@ -45,6 +46,7 @@ class _FakeFiles:
     def __init__(self, list_response: Any) -> None:
         self._list_response = list_response
         self.last_list_kwargs: dict[str, Any] = {}
+        self.last_get_media_kwargs: dict[str, Any] = {}
 
     def list(self, **kwargs: Any) -> _FakeRequest:
         self.last_list_kwargs = kwargs
@@ -53,6 +55,7 @@ class _FakeFiles:
     def get_media(self, **kwargs: Any) -> Any:
         # download 系は内部で MediaIoBaseDownload を介して chunk loop するので
         # ここでは適当な request object を返す（download テストは別途モック）
+        self.last_get_media_kwargs = kwargs
         return _FakeRequest(None)
 
 
@@ -308,6 +311,44 @@ def test_list_permissions_rejects_invalid_safety_limits(
         GDriveClient(service=FakeDriveService()).list_permissions(
             file_id="F1", request_id="r", **kwargs
         )
+
+
+# -----------------------------------------------------------
+# download_file_bytes
+# -----------------------------------------------------------
+def test_download_file_bytes_classifies_html_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive確認画面は分類例外にし、payload先頭を例外/ログへ露出しない。"""
+    html = b"\xef\xbb\xbf  <!doctype html><html><body>error</body></html>"
+
+    class _FakeDownloader:
+        def __init__(self, stream: Any, request: Any, *, chunksize: int) -> None:
+            self._stream = stream
+            self._done = False
+
+        def next_chunk(self, *, num_retries: int) -> tuple[None, bool]:
+            assert num_retries == 3
+            if not self._done:
+                self._stream.write(html)
+                self._done = True
+            return None, True
+
+    monkeypatch.setattr("googleapiclient.http.MediaIoBaseDownload", _FakeDownloader)
+    fake = FakeDriveService()
+    client = GDriveClient(service=fake)
+
+    with pytest.raises(GDriveDownloadContentError) as raised:
+        client.download_file_bytes(file_id="F1", request_id="r")
+
+    assert raised.value.category == "html_response"
+    assert raised.value.actual_bytes == len(html)
+    assert "<!doctype" not in str(raised.value)
+    assert fake.files().last_get_media_kwargs == {
+        "fileId": "F1",
+        "supportsAllDrives": True,
+        "acknowledgeAbuse": True,
+    }
 
 
 # -----------------------------------------------------------

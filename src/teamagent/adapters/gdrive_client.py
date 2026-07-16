@@ -67,6 +67,15 @@ class GDrivePermissionsPaginationError(RuntimeError):
     """permissions.list を最後のページまで安全に列挙できなかった。"""
 
 
+class GDriveDownloadContentError(RuntimeError):
+    """Drive API がファイル本体以外の内容を返したときの分類可能な例外。"""
+
+    def __init__(self, category: str, *, actual_bytes: int) -> None:
+        self.category = category
+        self.actual_bytes = actual_bytes
+        super().__init__(f"gdrive download returned invalid content: {category}")
+
+
 # -----------------------------------------------------------
 # データ型
 # -----------------------------------------------------------
@@ -408,18 +417,25 @@ class GDriveClient:
         data = buf.getvalue()
         latency_ms = int((time.perf_counter() - start) * 1000)
         # office(PK..)/pdf(%PDF) は決して HTML で始まらない。先頭が HTML マーカーなら本体取得に
-        # 失敗して確認/エラーページが降ってきた証拠 → 無音 BadZipFile より前に fail-loud にして
-        # 原因を可視化（呼び出し側は download_failed として skip＝fail-open は維持）。
-        head = data[:64].lstrip()[:15].lower()
-        if head.startswith(b"<!doctype") or head.startswith(b"<html"):
+        # 失敗して確認/エラーページが降ってきた証拠 → 無音 BadZipFile より前に分類例外にして
+        # 原因を可視化（呼び出し側は既存documentを保持してskip＝fail-openは維持）。
+        head = data[:512].lstrip()
+        if head.startswith(b"\xef\xbb\xbf"):
+            head = head[3:].lstrip()
+        lowered = head.lower()
+        if (
+            lowered.startswith(b"<!doctype html")
+            or lowered.startswith(b"<html")
+            or (lowered.startswith(b"<?xml") and b"<html" in lowered)
+        ):
             logger.warning(
                 "gdrive_download_not_binary",
                 request_id=request_id,
                 file_id=file_id,
                 bytes=len(data),
-                head=data[:48].decode("latin-1", "replace"),
+                category="html_response",
             )
-            raise RuntimeError(f"gdrive download returned non-binary content for {file_id}")
+            raise GDriveDownloadContentError("html_response", actual_bytes=len(data))
         logger.info(
             "gdrive_download_file",
             request_id=request_id,

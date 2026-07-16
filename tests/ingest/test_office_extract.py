@@ -16,6 +16,7 @@ from teamagent.ingest.office_extract import (
     OFFICE_BINARY_MIMES,
     PPTX_MIME,
     XLSX_MIME,
+    OfficePayloadError,
     _normalize_text,
     extract_docx_text,
     extract_office_pages,
@@ -177,6 +178,45 @@ def test_extract_office_pages_dispatches_xlsx() -> None:
 def test_extract_office_pages_unsupported_mime_raises() -> None:
     with pytest.raises(ValueError, match="Unsupported office mime type"):
         extract_office_pages(b"", mime_type="application/octet-stream")
+
+
+def test_office_payload_classifies_html_response_before_size_mismatch() -> None:
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(
+            b"\xef\xbb\xbf  <!DOCTYPE html><html><body>Drive error</body></html>",
+            mime_type=PPTX_MIME,
+            expected_size=999,
+        )
+    assert raised.value.category == "html_response"
+    assert raised.value.expected_bytes == 999
+
+
+def test_office_payload_classifies_truncated_download_from_drive_size() -> None:
+    data = _build_sample_pptx()
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME, expected_size=len(data) + 1)
+    assert raised.value.category == "truncated_download"
+    assert raised.value.actual_bytes == len(data)
+
+
+def test_office_payload_classifies_zip_without_central_directory_as_corrupt() -> None:
+    data = b"PK\x03\x04" + (b"x" * 64)
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME, expected_size=len(data))
+    assert raised.value.category == "corrupt_zip"
+
+
+def test_office_payload_classifies_ooxml_mime_mismatch() -> None:
+    data = _build_sample_docx()
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME, expected_size=len(data))
+    assert raised.value.category == "format_mismatch"
+
+
+def test_office_payload_accepts_exact_drive_size() -> None:
+    data = _build_sample_pptx()
+    pages = extract_office_pages(data, mime_type=PPTX_MIME, expected_size=len(data))
+    assert len(pages) == 2
 
 
 def test_office_binary_mimes_constant_matches_individual() -> None:
