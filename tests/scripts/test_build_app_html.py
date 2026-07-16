@@ -8,6 +8,8 @@
 - サニティゲート: 取引先数/資料数/バイト数のいずれかが前回比 20% 超減なら exit 1 で
   既存 out を保持。--allow-shrink で明示的に通過し統計基準がリセットされる
 - exclude_stems.json のフィルタ配線: 除外 stem の資料が payload に載らない
+- exclude_source_keys.json のフィルタ配線: タイトル変更後も source identity で除外し、
+  source_type/external_id は payload/UI に載せない
 - PII 決定論除外: 請求書系 stem（正規化後に「請求」を含む）はサイドカー列挙なしで除外
   （個人名入り stem を repo に平文で持たない）
 - タグ第1弾: 媒体/動画形式/形式/横断（資料）・温度感/宿題（クライアント）の決定論判定と
@@ -19,6 +21,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
@@ -49,6 +52,9 @@ def sidecars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (d / "exclude_stems.json").write_text(
         json.dumps(["除外対象資料"], ensure_ascii=False), encoding="utf-8"
     )
+    (d / "exclude_source_keys.json").write_text(
+        json.dumps(["gsheets:SHEET1:278789217:53"], ensure_ascii=False), encoding="utf-8"
+    )
     (d / "dedup_drop_map.json").write_text(
         json.dumps({"drop": {}, "keep_canonical": []}, ensure_ascii=False), encoding="utf-8"
     )
@@ -67,11 +73,27 @@ def _write_client(vault: Path, name: str) -> None:
     )
 
 
-def _write_doc(vault: Path, stem: str, client: str = "出光興産") -> None:
+def _write_doc(
+    vault: Path,
+    stem: str,
+    client: str = "出光興産",
+    *,
+    title: str | None = None,
+    source_type: str = "",
+    external_id: str = "",
+    source_url: str = "",
+    generated_by: bool = False,
+) -> None:
+    display_title = title or stem
+    generator_line = 'generated_by: "scripts/export_vault.py"\n' if generated_by else ""
     (vault / "docs" / f"{stem}.md").write_text(
-        f'---\ntitle: "{stem}"\nclient: "{client}"\nindustry: "エネルギー"\n'
-        f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "2026-06-01"\n---\n\n'
-        f"> {stem} の抜粋\n\n[[clients/{client}]]\n",
+        f"---\n{generator_line}"
+        f'title: "{display_title}"\nclient: "{client}"\nindustry: "エネルギー"\n'
+        f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "2026-06-01"\n'
+        f'source_type: "{source_type}"\nexternal_id: "{external_id}"\n---\n\n'
+        f"> {display_title} の抜粋\n\n"
+        + (f"- 出典: [{source_type or 'source'}]({source_url})\n" if source_url else "")
+        + f"\n[[clients/{client}]]\n",
         encoding="utf-8",
     )
 
@@ -89,7 +111,34 @@ def vault(tmp_path: Path) -> Path:
     return v
 
 
-def _run(vault: Path, out: Path, *extra: str) -> int:
+def _write_test_export_manifest(
+    vault: Path,
+    *,
+    active_paths: set[str] | None = None,
+    complete_export: bool = True,
+) -> None:
+    """テストVaultをexporterのactive/hash manifest契約へ合わせる。"""
+    managed = {
+        f"{prefix}/{path.name}": hashlib.sha256(path.read_bytes()).hexdigest()
+        for prefix in ("clients", "docs")
+        for path in (vault / prefix).glob("*.md")
+    }
+    active = set(managed) if active_paths is None else set(active_paths)
+    payload = {
+        "version": 1,
+        "generator": "scripts/export_vault.py",
+        "complete_export": complete_export,
+        "active_files": sorted(active),
+        "files": managed,
+    }
+    (vault / ".export-vault-manifest.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _run(vault: Path, out: Path, *extra: str, refresh_manifest: bool = True) -> int:
+    if refresh_manifest and (vault / "clients").is_dir() and (vault / "docs").is_dir():
+        _write_test_export_manifest(vault)
     rc = _mod.main(["--vault", str(vault), "--out", str(out), *extra])
     assert isinstance(rc, int)
     return rc
@@ -122,6 +171,200 @@ def test_excluded_stem_not_in_payload(sidecars: Path, vault: Path, tmp_path: Pat
     out = tmp_path / "app.html"
     _run(vault, out)
     assert "除外対象資料" not in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("title", ["最初の表示タイトル", "あとから変更した表示タイトル"])
+def test_source_identity_excludes_doc_even_when_title_changes(
+    sidecars: Path, vault: Path, tmp_path: Path, title: str
+) -> None:
+    """除外は可変な title/stem でなく source_type:external_id に追従する。"""
+    stem = f"{title}-deadbeef"
+    _write_doc(
+        vault,
+        stem,
+        title=title,
+        source_type="gsheets",
+        external_id="SHEET1:278789217:53",
+    )
+    # client note 側の関連資料リンクも同じ source 判定で落ち、タイトルを UI へ残さない。
+    client_note = vault / "clients" / "出光興産.md"
+    client_note.write_text(
+        client_note.read_text(encoding="utf-8") + f"- [[docs/{stem}]]\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert title not in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 3
+
+
+def test_internal_source_identity_not_exposed_in_generated_html(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """非除外資料でも frontmatter の内部 source ID は DATA/UI へコピーしない。"""
+    external_id = "DO-NOT-EXPOSE-SHEET:999:777"
+    _write_doc(
+        vault,
+        "公開資料-feedface",
+        title="公開資料",
+        source_type="gsheets",
+        external_id=external_id,
+        source_url=(
+            "https://docs.google.com/spreadsheets/d/DO-NOT-EXPOSE-SHEET/edit#gid=999&range=777:777"
+        ),
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "公開資料" in html  # 資料そのものは payload に載る
+    assert external_id not in html
+    assert f"gsheets:{external_id}" not in html
+    assert '"external_id"' not in html
+    assert '"source_type"' not in html
+    # クリック用の出典 URL は既存の意図仕様。隠すのは frontmatter の複合安定IDそのもの。
+    assert "docs.google.com/spreadsheets/d/DO-NOT-EXPOSE-SHEET/" in html
+
+
+def test_export_vault_generated_same_name_docs_are_not_folded_as_chunks(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """exporterの `_2` は別Drive資料であり、旧chunk規則でsilent dropしない。"""
+    _write_doc(vault, "同名提案", title="同名提案 A", generated_by=True)
+    _write_doc(vault, "同名提案_2", title="同名提案 B", generated_by=True)
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "同名提案 A" in html
+    assert "同名提案 B" in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 5
+
+
+def test_unmarked_legacy_chunk_notes_still_fold_to_one(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """marker導入前の意図的な `_2` 分割断片は従来どおり代表1件へ束ねる。"""
+    _write_doc(vault, "旧分割資料", title="旧分割資料")
+    _write_doc(vault, "旧分割資料_2", title="旧分割資料 2ページ目")
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "旧分割資料" in html
+    assert "旧分割資料 2ページ目" not in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 4
+
+
+def test_unmanaged_and_inactive_notes_never_enter_html(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """手作業noteやACL解除後の保護noteはVault/ownershipに残っても公開しない。"""
+    _write_doc(vault, "手作業の非共有資料", title="絶対に公開しない手作業資料")
+    active_paths = {
+        f"{prefix}/{path.name}"
+        for prefix in ("clients", "docs")
+        for path in (vault / prefix).glob("*.md")
+        if path.stem != "手作業の非共有資料"
+    }
+    # files(hash ownership)には残すがactiveから外す = prune-skip保護noteを再現。
+    _write_test_export_manifest(vault, active_paths=active_paths)
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out, refresh_manifest=False) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "絶対に公開しない手作業資料" not in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 3
+
+
+def test_active_note_modified_after_export_fails_loud(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """manifest上activeでもhashが変わったnoteを静的HTMLへ流さない。"""
+    _write_test_export_manifest(vault)
+    target = vault / "docs" / "提案書A.md"
+    target.write_text(target.read_text(encoding="utf-8") + "\n手作業追記", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+    assert "export後に変更" in capsys.readouterr().err
+
+
+def test_partial_or_legacy_manifest_cannot_build_public_html(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """完全exportの証明がないmanifestはcompany-shared公開に使わない。"""
+    _write_test_export_manifest(vault, complete_export=False)
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+    assert "完全exportではありません" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "manifest_case",
+    ["empty", "duplicate", "traversal", "dot_md", "missing", "bad_hash"],
+)
+def test_malformed_active_manifest_fails_closed(
+    manifest_case: str,
+    sidecars: Path,
+    vault: Path,
+    tmp_path: Path,
+) -> None:
+    """公開境界の空/重複/逸脱path/欠損/hash不正を直接回帰固定する。"""
+    _write_test_export_manifest(vault)
+    manifest = vault / ".export-vault-manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    first = payload["active_files"][0]
+    if manifest_case == "empty":
+        payload["active_files"] = []
+    elif manifest_case == "duplicate":
+        payload["active_files"] = [first, first]
+    elif manifest_case == "traversal":
+        payload["active_files"] = ["docs/../outside.md"]
+        payload["files"]["docs/../outside.md"] = "0" * 64
+    elif manifest_case == "dot_md":
+        payload["active_files"] = ["docs/.md"]
+        payload["files"]["docs/.md"] = "0" * 64
+    elif manifest_case == "missing":
+        payload["active_files"] = ["docs/missing.md"]
+        payload["files"]["docs/missing.md"] = "0" * 64
+    else:
+        payload["files"][first] = "not-a-sha256"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+
+
+def test_active_note_symlink_fails_closed(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """active pathをsymlinkへ差し替えてもリンク先を公開しない。"""
+    _write_test_export_manifest(vault)
+    active = vault / "docs" / "提案書A.md"
+    outside = tmp_path / "outside.md"
+    outside.write_text("秘密", encoding="utf-8")
+    active.unlink()
+    active.symlink_to(outside)
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+
+
+def test_export_manifest_symlink_fails_closed(sidecars: Path, vault: Path, tmp_path: Path) -> None:
+    """manifest自体をsymlinkへ差し替えても信頼しない。"""
+    _write_test_export_manifest(vault)
+    manifest = vault / ".export-vault-manifest.json"
+    external_manifest = tmp_path / "external-manifest.json"
+    external_manifest.write_text(manifest.read_text(encoding="utf-8"), encoding="utf-8")
+    manifest.unlink()
+    manifest.symlink_to(external_manifest)
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
 
 
 def test_seikyusho_stem_excluded_without_sidecar_listing(
@@ -192,6 +435,32 @@ def test_sidecar_missing_exits_1(
         _run(vault, tmp_path / "o.html")
     assert ei.value.code == 1
     assert "サイドカー欠落: exclude_stems.json" in capsys.readouterr().err
+
+
+def test_source_key_sidecar_missing_exits_1(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (sidecars / "exclude_source_keys.json").unlink()
+    with pytest.raises(SystemExit) as ei:
+        _run(vault, tmp_path / "o.html")
+    assert ei.value.code == 1
+    assert "サイドカー欠落: exclude_source_keys.json" in capsys.readouterr().err
+
+
+def test_repository_source_exclusions_preserve_legacy_stems() -> None:
+    """新 Vault はsource key、移行中の旧 Vault は従来stemの同じ6行を除外する。"""
+    sheet = "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
+    rows = {53, 61, 75, 84, 213, 214}
+    filters = _ROOT / "data" / "connect_web_filters"
+    source_keys = set(
+        json.loads((filters / "exclude_source_keys.json").read_text(encoding="utf-8"))
+    )
+    legacy_stems = set(json.loads((filters / "exclude_stems.json").read_text(encoding="utf-8")))
+
+    assert source_keys == {f"gsheets:{sheet}:278789217:{row}" for row in rows}
+    assert {
+        f"ナレッジ共有 - フォーム回答 - フォーム回答 1 - row {row}" for row in rows
+    } <= legacy_stems
 
 
 def test_empty_clients_exits_1(
@@ -1154,15 +1423,21 @@ def test_reports_excluded_by_default(sidecars: Path, vault: Path, tmp_path: Path
     assert '"stem": "followup_gaps"' not in html
 
 
-def test_reports_included_with_flag(sidecars: Path, vault: Path, tmp_path: Path) -> None:
-    """--include-reports 指定時のみ従来どおり搭載（管理セッション用）。"""
+def test_include_reports_is_rejected_for_public_build(
+    sidecars: Path,
+    vault: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """manifest管理外の内部reportを明示flagでも公開HTMLへ混ぜない。"""
     rdir = vault / "_reports"
     rdir.mkdir()
     (rdir / "followup_gaps.md").write_text("# レポート\n\n中身", encoding="utf-8")
     out = tmp_path / "o.html"
-    assert _run(vault, out, "--include-reports") == 0
-    html = out.read_text(encoding="utf-8")
-    assert '"stem": "followup_gaps"' in html
+    with pytest.raises(SystemExit):
+        _run(vault, out, "--include-reports")
+    assert "ACL manifest外" in capsys.readouterr().err
+    assert not out.exists()
 
 
 # ---------------- タグUX改善（審査済み6機能）: 生成 HTML への配線 ----------------

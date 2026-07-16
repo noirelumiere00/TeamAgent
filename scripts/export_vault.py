@@ -8,6 +8,7 @@ Obsidian で開ける Vault ミラーをローカルに生成する:
   本文: FB 時系列（新しい順）+ 関連資料リスト（[[docs/...]] wikilink + Drive URL）
 - ``docs/<安全なファイル名>.md`` … 資料 note
   frontmatter: doc_type / client / industry / solution / entities / modified_at
+  + source_type / external_id（配信フィルタ専用の内部メタ。UI には出さない）
   （entities=cls_entities の名寄せタグ CSV。/app の「関係先/」タグ・検索へ展開される）
   本文: excerpt + 出典（Drive/Slack）リンク + タグ（#提案書 #出光興産 #祇園辻利 等）
   + [[clients/<client>]] wikilink
@@ -17,29 +18,47 @@ Obsidian で開ける Vault ミラーをローカルに生成する:
 - DB は **SELECT のみ**（UPDATE/INSERT/DDL 一切なし）。書くのはローカル Vault ファイルだけ。
 - 既定 **dry-run**（生成予定ファイル一覧を表示するだけ）。``--commit`` で初めて書き出す。
 - 再実行は同パスへの上書き＝冪等（DB 側の更新が Vault に反映される）。
+- ``--prune`` は完全 export のときだけ有効。manifest で本スクリプトの生成物と確認できた
+  ``clients/*.md`` / ``docs/*.md`` の古い note だけを削除する（dry-run では予定表示のみ）。
+  ``--client`` / ``--limit`` との併用は拒否し、前回 manifest の半分未満に縮む計画も拒否する。
 - クライアント名/タイトル→ファイル名は ``safe_filename`` で必ずサニタイズ
   （パストラバーサル・OS 禁止文字・wikilink 破壊文字・長さ・予約名）。
 - frontmatter 値は YAML double-quoted スカラーへエスケープ（``yaml_quote``）。
 - DB 接続は SSM ポートフォワード前提の --dsn 引数（無ければ DATABASE_URL）。
   実行は人間ゲート（本スクリプトを自動実行しない）。
+- admin DSN は RLS を bypass するため、``--shared-group`` で明示した単一の会社
+  共有ドメインを ``documents.acl_groups`` に持つ行だけを SQL で選ぶ。
+  owner-only / acl_emails-only / acl_groups 空の資料は Vault や静的 ``/app`` に出さない。
+- 静的 ``/app`` は per-user 表示ではなく、指定会社の共有集合ミラー。
+  raw ACL は Vault/frontmatter/HTML へ書き出さない。
 
 Usage:
     # SSM ポートフォワードを張ってから（例: localhost:15432 → RDS）
-    python scripts/export_vault.py --dsn postgresql://user:pass@localhost:15432/db  # dry-run
-    python scripts/export_vault.py --dsn ... --commit                    # ~/AiLaVault へ書き出し
-    python scripts/export_vault.py --dsn ... --out ~/Vaults/aila --commit
-    python scripts/export_vault.py --dsn ... --client 出光興産 --commit  # 1 クライアントだけ
-    python scripts/export_vault.py --dsn ... --limit 5                   # 先頭 5 クライアントのみ
+    python scripts/export_vault.py --dsn postgresql://user:pass@localhost:15432/db \
+        --shared-group vectorinc.co.jp --prune                 # 完全 export + 削除予定の dry-run
+    python scripts/export_vault.py --dsn ... --shared-group vectorinc.co.jp \
+        --commit --prune                                       # 書き出し + 古い生成物削除
+    # ACL 初回移行で 50% 超縮小が確認済みの場合だけ、dry-run/commit の両方へ追加:
+    #   --allow-prune-shrink
+    python scripts/export_vault.py --dsn ... --shared-group vectorinc.co.jp \
+        --out ~/Vaults/aila --commit --prune
+    python scripts/export_vault.py --dsn ... --shared-group vectorinc.co.jp \
+        --client 出光興産 --commit                             # 1 クライアントだけ（prune 不可）
+    python scripts/export_vault.py --dsn ... --shared-group vectorinc.co.jp --limit 5
+
+``--shared-group`` 省略時は ``TEAMAGENT_SHARED_COMPANY_DOMAINS`` の単一値を使える。
+未設定・空・カンマ区切り・不正ドメインは DB を読まず exit 2。
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import sys
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +72,17 @@ logger = structlog.get_logger(__name__)
 
 _DEFAULT_OUT = "~/AiLaVault"
 _SEARCH_URL = "https://connect.newstv.co.jp/search"
+_MANIFEST_NAME = ".export-vault-manifest.json"
+_MANIFEST_VERSION = 1
+_MANIFEST_GENERATOR = "scripts/export_vault.py"
+_GENERATED_BY_FIELD = f"generated_by: {json.dumps(_MANIFEST_GENERATOR)}"
+_MANAGED_DIRS = frozenset({"clients", "docs"})
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+# export は会社共有の「単一 DNS ドメイン」だけを受け取る。複数値の解釈を
+# 呼び出し側ごとに変えないため、カンマ区切りは明示的に拒否する。
+_DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_SHARED_GROUP_RE = re.compile(rf"{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})+")
 
 # OS 禁止文字（Windows 含む）+ 制御文字 + Obsidian の wikilink/タグを壊す文字（[]#^|）。
 _FORBIDDEN_CHARS_RE = re.compile(r'[\\/:*?"<>|\[\]#^\x00-\x1f]+')
@@ -118,6 +148,34 @@ def wikilink(path: str) -> str:
     return f"[[{path}]]"
 
 
+def source_discriminator(external_id: str) -> str:
+    """安定 source ID を filename 用 64-bit hex discriminator へ変換する。"""
+    return hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:16]
+
+
+def normalize_shared_group(raw: str | None) -> str:
+    """会社共有 group を SQL パラメータ用の単一 DNS ドメインへ正規化する。
+
+    空、カンマ区切り、内部空白、非 ASCII、DNS ドメインでない値は
+    ``ValueError`` にし、admin DSN 上で意図せず広い集合を出力しない。
+    """
+    if not isinstance(raw, str):
+        raise ValueError("shared group must be a single DNS domain")
+    value = raw.strip().lower()
+    if (
+        not value
+        or "," in value
+        or not value.isascii()
+        or any(ch.isspace() for ch in value)
+        or len(value) > 253
+        or _SHARED_GROUP_RE.fullmatch(value) is None
+    ):
+        raise ValueError(
+            "shared group must be a single valid DNS domain (comma-separated values forbidden)"
+        )
+    return value
+
+
 # タイトル等を本文へ逐語出力する際の Markdown インラインエスケープ（単行想定）。
 # frontmatter は yaml_quote が守るが、H1/見出し/リスト行に出す title は別途退避が要る。
 # リンク/画像/wikilink/HTML/コードを成立させる記号を CommonMark のバックスラッシュ退避で殺す
@@ -153,8 +211,11 @@ def render_claude_md() -> str:
         "- この Vault は **読み取りミラー** です。正（source of truth）は pgvector"
         "（RDS）で、ここでの編集は元データに反映されません。\n"
         f"- 最新の検索は {_SEARCH_URL} を使ってください（RLS 適用・常に最新）。\n"
+        "- この静的ミラーは per-user 表示ではなく、指定会社の共有 group 付き"
+        "資料だけを含みます。owner-only 資料は含みません。\n"
         "- 再生成（上書き更新）: SSM トンネルを張ってから\n"
-        "  `python scripts/export_vault.py --dsn postgresql://...@localhost:15432/... --commit`\n"
+        "  `python scripts/export_vault.py --dsn postgresql://...@localhost:15432/... "
+        "--shared-group <company.example> --commit --prune`\n"
         "- `clients/` はクライアントカルテ（FB 時系列 + 関連資料）、`docs/` は資料 note。\n"
         "- 機密資料を含むため、この Vault を共有フォルダ/リポジトリへ置かないでください。\n"
     )
@@ -178,6 +239,7 @@ def render_client_note(
 
     lines: list[str] = [
         "---",
+        _GENERATED_BY_FIELD,
         f"client: {yaml_quote(client)}",
         f"industry: {yaml_quote(industry)}",
         f"deal_phase: {yaml_quote(latest.get('deal_phase') or '')}",
@@ -256,6 +318,7 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
     """資料 note を生成する（frontmatter + excerpt + 出典リンク + タグ + カルテへの wikilink）。"""
     lines: list[str] = [
         "---",
+        _GENERATED_BY_FIELD,
         f"title: {yaml_quote(doc.get('title') or '')}",
         f"doc_type: {yaml_quote(doc.get('cls_doc_type') or '')}",
         f"client: {yaml_quote(client)}",
@@ -266,6 +329,10 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
         # 値は entity_extract 側で正規化済み＝カンマ非包含なので CSV が壊れない。
         f"entities: {yaml_quote(doc.get('cls_entities') or '')}",
         f"modified_at: {yaml_quote(doc.get('modified_at') or '')}",
+        # connect-web の除外はタイトル変更で外れない source identity を使う。
+        # build_app_html は除外判定にだけ利用し、HTML payload へは載せない内部メタ。
+        f"source_type: {yaml_quote(doc.get('source_type') or '')}",
+        f"external_id: {yaml_quote(doc.get('external_id') or '')}",
     ]
     # ナレッジ共有メタ（カテゴリ/クライアント種別/提案プロダクト）は値があるときだけ出す。
     # build_app_html が front() で拾い、docTags の カテゴリ/クライアント種別/提案プロダクト
@@ -331,14 +398,15 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     """
     files: dict[str, str] = {"CLAUDE.md": render_claude_md()}
     doc_path_by_uri: dict[str, str] = {}
+    doc_path_by_source_key: dict[tuple[str, str], str] = {}
 
-    def _claim(prefix: str, base: str) -> str:
+    def _claim(prefix: str, base: str, *, duplicate_separator: str = "_") -> str:
         """files に無い ``{prefix}/{base}`` 系の空きパス（拡張子なし）を返す。"""
         candidate = base
         i = 1
         while f"{prefix}/{candidate}.md" in files:
             i += 1
-            candidate = f"{base}_{i}"
+            candidate = f"{base}{duplicate_separator}{i}"
         return f"{prefix}/{candidate}"
 
     for client, data in sorted(clients.items()):
@@ -352,20 +420,56 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
         doc_paths: list[str] = []
         for doc in documents:
             uri = str(doc.get("source_uri") or "")
+            source_type = str(doc.get("source_type") or "")
+            external_id = str(doc.get("external_id") or "").strip()
+            source_key = (source_type, external_id) if source_type and external_id else None
+            if source_key and source_key in doc_path_by_source_key:
+                # URL が空/変更済みでも同じ stable identity は同一論理資料として再利用する。
+                reused_path = doc_path_by_source_key[source_key]
+                if uri:
+                    doc_path_by_uri[uri] = reused_path
+                doc_paths.append(reused_path)
+                continue
             if uri and uri in doc_path_by_uri:
                 # 同一資料は既存 note を再利用（複数クライアントから wikilink される）
-                doc_paths.append(doc_path_by_uri[uri])
+                reused_path = doc_path_by_uri[uri]
+                if source_key:
+                    doc_path_by_source_key[source_key] = reused_path
+                doc_paths.append(reused_path)
                 continue
-            base = safe_filename(doc.get("title"), fallback="document")
-            # 施策研究ノート(x_research_tool)は「商材名 Xの声集め」等でタイトルが衝突しやすく、
-            # 衝突すると _claim が `_2` を振る → build_app_html の _chunk_key が `_2` を分割断片と
-            # みなして /app から握り潰す（別owner/別研究が消える）。document ごとに一意な external_id
-            # 由来の短ハッシュを付けて衝突自体を無くす（`-` 区切りなので `_N` 束ねに当たらない）。
-            if doc.get("x_research_tool"):
-                seed = str(doc.get("external_id") or uri or doc.get("title") or "")
-                disc = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+            needs_discriminator = bool(doc.get("x_research_tool") or source_type == "gsheets")
+            # discriminator 付きは UTF-8 4 byte/文字でも一般的な 255-byte の
+            # filename 上限内に収める（55*4 + '-' + 16hex + '.md' = 240 bytes）。
+            base = safe_filename(
+                doc.get("title"),
+                fallback="document",
+                max_len=55 if needs_discriminator else 80,
+            )
+            # タイトルが行ごとに一意でない経路は、衝突すると _claim が `_2` を振る →
+            # build_app_html の _chunk_key が `_2` を分割断片とみなして /app から握り潰す。
+            # document ごとに一意な external_id 由来の 64-bit discriminator を付けて
+            # 衝突自体を無くす（8 hex/32-bit は実際に衝突する入力があるため使わない）。
+            # (`-` 区切りなので `_N` 束ねに当たらない)。stem は内部キーで、UI は title を出す
+            # (build_app_html の IDX/dByStem) ため表示は汚れない。対象:
+            #   - x_research_tool: 「商材名 Xの声集め」等で別owner/別研究が衝突
+            #   - gsheets: ナレッジ共有の title は「正式社名 案件名」で行ごとに一意ではない
+            #     (実測 142 行中 8 stem が衝突。案件名が空の行は社名だけに潰れて更に衝突する)
+            if needs_discriminator:
+                if not external_id:
+                    raise ValueError(
+                        "external_id is required for gsheets/x_research document filenames"
+                    )
+                disc = source_discriminator(external_id)
                 base = f"{base}-{disc}"
-            doc_path = _claim("docs", base)
+            # 異なる external_id で 64-bit hash の二次衝突が起きても、``_2`` にして
+            # build_app_html の chunk 結合へ誤認させない。両方を見える形で保持する。
+            doc_path = _claim(
+                "docs",
+                base,
+                duplicate_separator="-dup-" if needs_discriminator else "_",
+            )
+            if source_key:
+                doc_path_by_source_key[source_key] = doc_path
             if uri:
                 doc_path_by_uri[uri] = doc_path
             files[f"{doc_path}.md"] = render_doc_note(doc, client, client_path)
@@ -375,36 +479,381 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     return files
 
 
-def write_vault(out_dir: Path, files: dict[str, str], *, commit: bool) -> dict[str, int]:
-    """計画された Vault ファイルを書き出す（既定 dry-run＝一覧表示のみ・commit で上書き）。"""
-    stats = {"planned": len(files), "written": 0}
+def _is_managed_markdown_path(rel: str) -> bool:
+    """manifest で所有管理できる、直下 1 階層の生成 Markdown パスか。"""
+    if not rel or "\\" in rel:
+        return False
+    path = PurePosixPath(rel)
+    return (
+        not path.is_absolute()
+        and path.as_posix() == rel
+        and len(path.parts) == 2
+        and path.parts[0] in _MANAGED_DIRS
+        and path.name != ".md"
+        and path.suffix == ".md"
+    )
+
+
+def _safe_target(out_dir: Path, rel: str) -> Path:
+    """書込対象が Vault root 内に留まり、既存 symlink でもないことを検証する。"""
     resolved_root = out_dir.resolve()
-    for rel in sorted(files):
-        target = (out_dir / rel).resolve()
-        # 二重防御: safe_filename 済でも out_dir 外への書き出しは拒否する。
-        if not target.is_relative_to(resolved_root):
-            raise ValueError(f"unsafe path escapes vault root: {rel}")
-        if commit:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(files[rel], encoding="utf-8")
-            stats["written"] += 1
-        else:
+    raw_target = out_dir / rel
+    target = raw_target.resolve()
+    if not target.is_relative_to(resolved_root):
+        raise ValueError(f"unsafe path escapes vault root: {rel}")
+    # write_text は symlink のリンク先を書き換えるため、root 内を指す symlink も拒否する。
+    if raw_target.is_symlink():
+        raise ValueError(f"unsafe symlink target in vault plan: {rel}")
+    return raw_target
+
+
+def _managed_target(out_dir: Path, rel: str) -> Path:
+    """削除可能な所有対象を厳格に解決する（clients/docs 直下・md・symlink 不可）。"""
+    if not _is_managed_markdown_path(rel):
+        raise ValueError(f"unsafe managed path in export manifest: {rel!r}")
+    prefix, name = PurePosixPath(rel).parts
+    resolved_root = out_dir.resolve()
+    raw_dir = out_dir / prefix
+    expected_dir = resolved_root / prefix
+    # clients/ や docs/ 自体が symlink の場合、別領域のファイルを消す恐れがあるので拒否する。
+    if raw_dir.is_symlink() or raw_dir.resolve() != expected_dir:
+        raise ValueError(f"unsafe managed directory in vault: {prefix}")
+    if raw_dir.exists() and not raw_dir.is_dir():
+        raise ValueError(f"managed directory is not a directory: {prefix}")
+    raw_target = raw_dir / name
+    if raw_target.is_symlink() or raw_target.resolve().parent != expected_dir:
+        raise ValueError(f"unsafe managed target in vault: {rel}")
+    return raw_target
+
+
+def _sha256_text(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_export_manifest_state(
+    out_dir: Path,
+) -> tuple[dict[str, str], set[str], bool]:
+    """生成物hash、直近の公開対象、完全export済みかをmanifestから読む。"""
+    manifest = out_dir / _MANIFEST_NAME
+    resolved_root = out_dir.resolve()
+    if manifest.is_symlink() or manifest.resolve().parent != resolved_root:
+        raise ValueError("unsafe export manifest path")
+    if not manifest.exists():
+        return {}, set(), False
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid export manifest: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("invalid export manifest: root must be an object")
+    if payload.get("version") != _MANIFEST_VERSION:
+        raise ValueError("invalid export manifest: unsupported version")
+    if payload.get("generator") != _MANIFEST_GENERATOR:
+        raise ValueError("invalid export manifest: unexpected generator")
+    raw_files = payload.get("files")
+    if not isinstance(raw_files, dict):
+        raise ValueError("invalid export manifest: files must be an object")
+
+    files: dict[str, str] = {}
+    for rel, digest in raw_files.items():
+        if not isinstance(rel, str) or not _is_managed_markdown_path(rel):
+            raise ValueError(f"unsafe managed path in export manifest: {rel!r}")
+        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+            raise ValueError(f"invalid content hash in export manifest: {rel}")
+        files[rel] = digest
+
+    # active_files/complete_export は ACL-aware manifest 導入前には無い。旧manifestは
+    # ownership/prune用として読めるが、build公開集合としては fail-closed（complete=False）。
+    raw_active = payload.get("active_files", [])
+    complete_export = payload.get("complete_export", False)
+    if not isinstance(raw_active, list) or not all(isinstance(rel, str) for rel in raw_active):
+        raise ValueError("invalid export manifest: active_files must be a string array")
+    if len(raw_active) != len(set(raw_active)):
+        raise ValueError("invalid export manifest: duplicate active_files entry")
+    if not isinstance(complete_export, bool):
+        raise ValueError("invalid export manifest: complete_export must be boolean")
+    active_files = set(raw_active)
+    for rel in active_files:
+        if not _is_managed_markdown_path(rel) or rel not in files:
+            raise ValueError(f"invalid active path in export manifest: {rel!r}")
+    return files, active_files, complete_export
+
+
+def _load_export_manifest(out_dir: Path) -> dict[str, str]:
+    """前回までに本スクリプトが生成した note と内容 hash を読む。"""
+    files, _, _ = _load_export_manifest_state(out_dir)
+    return files
+
+
+def _write_export_manifest(
+    out_dir: Path,
+    files: dict[str, str],
+    *,
+    active_files: set[str],
+    complete_export: bool,
+) -> None:
+    """manifest を同一ディレクトリの一時ファイルから atomic replace する。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = out_dir / _MANIFEST_NAME
+    tmp = out_dir / f"{_MANIFEST_NAME}.tmp"
+    resolved_root = out_dir.resolve()
+    for path in (manifest, tmp):
+        if path.is_symlink() or path.resolve().parent != resolved_root:
+            raise ValueError("unsafe export manifest path")
+    if not active_files <= files.keys():
+        raise ValueError("active export paths must be present in manifest files")
+    payload = {
+        "version": _MANIFEST_VERSION,
+        "generator": _MANIFEST_GENERATOR,
+        "complete_export": complete_export,
+        "active_files": sorted(active_files),
+        "files": dict(sorted(files.items())),
+    }
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(manifest)
+
+
+def _frontmatter_keys(text: str) -> set[str]:
+    """先頭 YAML frontmatter のキー名だけを依存ライブラリなしで読む。"""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return set()
+    keys: set[str] = set()
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return keys
+        match = re.match(r"^([a-z][a-z0-9_]*):", line)
+        if match:
+            keys.add(match.group(1))
+    return set()
+
+
+def _looks_like_generated_note(path: Path, prefix: str) -> bool:
+    """manifest 導入前の export_vault 生成 note を強い構造シグネチャで判定する。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    keys = _frontmatter_keys(text)
+    if prefix == "clients":
+        required = {"client", "industry", "deal_phase", "bant_score", "fb_count", "doc_count"}
+        return required <= keys and "## 営業FB時系列（新しい順）" in text and "## 関連資料" in text
+    # entities は名寄せ導入前の旧 gsheets note（row 53 等）には無いため必須にしない。
+    # その代わり exporter 固有の本文構造も全て要求し、一般 Markdown の誤採用を避ける。
+    required = {"title", "doc_type", "client", "industry", "solution", "modified_at"}
+    return (
+        required <= keys
+        and re.search(r"(?m)^# \S", text) is not None
+        and "- 出典:" in text
+        and "- 取引先: [[clients/" in text
+    )
+
+
+def _discover_generated_markdown(out_dir: Path) -> dict[str, str]:
+    """初回 prune 用に clients/docs 直下の旧 exporter 生成 Markdown だけを発見する。"""
+    resolved_root = out_dir.resolve()
+    found: dict[str, str] = {}
+    for prefix in sorted(_MANAGED_DIRS):
+        directory = out_dir / prefix
+        expected_dir = resolved_root / prefix
+        if not directory.exists():
+            continue
+        if directory.is_symlink() or directory.resolve() != expected_dir or not directory.is_dir():
+            raise ValueError(f"unsafe managed directory in vault: {prefix}")
+        for path in directory.iterdir():
+            # 非再帰・小文字 .md・regular file のみ。symlink はリンク先に関係なく対象外。
+            if path.is_symlink() or not path.is_file() or path.suffix != ".md":
+                continue
+            rel = f"{prefix}/{path.name}"
+            if _is_managed_markdown_path(rel) and _looks_like_generated_note(path, prefix):
+                found[rel] = _sha256_file(path)
+    return found
+
+
+def _plan_prune(
+    out_dir: Path,
+    previous: dict[str, str],
+    current: dict[str, str],
+    *,
+    allow_shrink: bool = False,
+) -> tuple[list[str], dict[str, str]]:
+    """削除可能な stale note と、変更済みのため保持する stale note を分ける。"""
+    # DB 障害や filter 誤りで空/激減した plan を「全削除」と解釈しない安全弁。
+    # fresh Vault（previous も空）でも prune 付きの空 export は成功扱いにしない。
+    if not current:
+        raise ValueError("refusing prune: managed Markdown plan is empty")
+    if len(current) * 2 < len(previous) and not allow_shrink:
+        raise ValueError(
+            "refusing prune: managed Markdown plan is less than 50% of the previous manifest "
+            f"({len(current)} < {len(previous)} / 2)"
+        )
+
+    stale = sorted(set(previous) - set(current))
+    if not stale:
+        return [], {}
+
+    deletions: list[str] = []
+    protected: dict[str, str] = {}
+    for rel in stale:
+        target = _managed_target(out_dir, rel)
+        if not target.exists():
+            # 既に無いものは manifest から自然に落とす。unlink は呼ばない。
+            continue
+        if not target.is_file():
+            protected[rel] = "not a regular file"
+            continue
+        if _sha256_file(target) != previous[rel]:
+            # 生成後に人が編集した note は所有物と断定せず、削除も manifest 忘却もしない。
+            protected[rel] = "content changed since export"
+            continue
+        deletions.append(rel)
+    return deletions, protected
+
+
+def write_vault(
+    out_dir: Path,
+    files: dict[str, str],
+    *,
+    commit: bool,
+    prune: bool = False,
+    complete_export: bool = False,
+    allow_prune_shrink: bool = False,
+) -> dict[str, int]:
+    """計画を Vault へ反映し、明示された完全 export だけ古い生成 note を削除する。
+
+    ``commit=False`` は書込・削除・manifest 更新を一切しない。manifest は生成 Markdown の
+    相対パス/content hashに加え、直近の完全exportでACLを通ったactive集合を持つ。
+    未管理 note や人が編集した note はpruneせずローカル保護するが、active公開集合には入れない。
+    ``complete_export=False``（部分 export）で ``prune=True`` は常に拒否する。
+    """
+    if prune and not complete_export:
+        raise ValueError("refusing prune for partial export (--client/--limit)")
+    if allow_prune_shrink and not prune:
+        raise ValueError("--allow-prune-shrink requires --prune")
+
+    # 1 件でも危険な書込先があれば、何も変更する前に全 plan を拒否する。
+    targets = {rel: _safe_target(out_dir, rel) for rel in files}
+    current_manifest = {
+        rel: _sha256_text(content)
+        for rel, content in files.items()
+        if _is_managed_markdown_path(rel)
+    }
+    for rel in current_manifest:
+        _managed_target(out_dir, rel)
+
+    if commit or prune:
+        previous_manifest, previous_active, _ = _load_export_manifest_state(out_dir)
+    else:
+        previous_manifest, previous_active = {}, set()
+    if prune:
+        # manifest 導入前に残った stale/non-company note も、旧 exporter 固有の構造を
+        # 満たすものだけ初回所有候補へ加える。既存 manifest の hash を常に優先する。
+        for rel, digest in _discover_generated_markdown(out_dir).items():
+            previous_manifest.setdefault(rel, digest)
+    deletions: list[str] = []
+    protected: dict[str, str] = {}
+    if prune:
+        deletions, protected = _plan_prune(
+            out_dir,
+            previous_manifest,
+            current_manifest,
+            allow_shrink=allow_prune_shrink,
+        )
+
+    stats = {
+        "planned": len(files),
+        "written": 0,
+        "delete_planned": len(deletions),
+        "deleted": 0,
+    }
+    if not commit:
+        for rel in sorted(files):
             print(f"  [dry-run] {rel}")
+        for rel in deletions:
+            print(f"  [dry-run] delete {rel}")
+        for rel, reason in sorted(protected.items()):
+            print(f"  [prune-skip] {rel}: {reason}")
+        return stats
+
+    for rel in sorted(files):
+        target = targets[rel]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(files[rel], encoding="utf-8")
+        stats["written"] += 1
+
+    # manifest の hash と今の内容が一致することを unlink 直前にも確認する（競合時 fail-safe）。
+    retained = dict(protected)
+    for rel in deletions:
+        target = _managed_target(out_dir, rel)
+        try:
+            if not target.is_file() or _sha256_file(target) != previous_manifest[rel]:
+                retained[rel] = "content changed before delete"
+                continue
+            target.unlink()
+        except FileNotFoundError:
+            continue
+        stats["deleted"] += 1
+        print(f"  [prune] deleted {rel}")
+
+    if prune:
+        next_manifest = dict(current_manifest)
+        for rel in retained:
+            next_manifest[rel] = previous_manifest[rel]
+    else:
+        # 部分 export や prune 無しの更新で、他 note の所有記録を縮めない。
+        next_manifest = dict(previous_manifest)
+        next_manifest.update(current_manifest)
+    if complete_export:
+        # 公開対象は「今回のACL付き完全SELECTから生成した集合」だけ。prune-skipで
+        # ローカル保護した旧/手編集noteはownership filesに残してもactiveへ戻さない。
+        next_active = set(current_manifest)
+        next_complete = True
+    else:
+        # partial は以前の完全snapshotに別時点/別shared-groupの一部を混ぜ得る。
+        # active hashはownership継続用に保持するが、必ずcomplete=Falseへ落として
+        # build_app_htmlに次の完全exportを要求する。
+        next_active = (set(previous_active) | set(current_manifest)) & set(next_manifest)
+        next_complete = False
+    _write_export_manifest(
+        out_dir,
+        next_manifest,
+        active_files=next_active,
+        complete_export=next_complete,
+    )
     return stats
 
 
 # -----------------------------------------------------------
 # DB 読み取り部（SELECT のみ・SSM トンネル越し admin DSN 直結）
 # -----------------------------------------------------------
-_CLIENTS_SQL = """
+_SHARED_ACL_SQL = """EXISTS (
+        SELECT 1
+        FROM unnest(d.acl_groups) AS shared_acl(group_name)
+        WHERE lower(btrim(shared_acl.group_name)) = lower(btrim(%s::text))
+    )"""
+# admin DSN は RLS を bypass する。そのため全 SELECT にこの必須謂語を埋め込む。
+# unnest('{}') に行はないので、acl_groups 空や owner/acl_emails だけの document は
+# EXISTS=false の fail-closed になる。ACL 値そのものは SELECT 列に含めない。
+
+_CLIENTS_SQL = f"""
     SELECT DISTINCT name FROM (
         SELECT d.metadata->>'client_name' AS name FROM documents d
         WHERE d.metadata->>'client_name' IS NOT NULL
           AND d.metadata->>'client_name' <> ''
+          AND {_SHARED_ACL_SQL}
         UNION
         SELECT d.metadata->>'cls_project' AS name FROM documents d
         WHERE d.metadata->>'cls_project' IS NOT NULL
           AND d.metadata->>'cls_project' <> ''
+          AND {_SHARED_ACL_SQL}
           -- 施策研究ノート(x_research_tool 付き)の cls_project は「商材/テーマ名」であって
           -- 取引先ではない。取引先タクソノミー(名寄せ/facet/グラフ)を汚さないため client 一覧に
           -- 昇格させない（needs/buzz を未永続化にしたのと同じ姿勢＝名寄せ前は取引先化しない）。
@@ -415,7 +864,7 @@ _CLIENTS_SQL = """
     ORDER BY name
 """
 
-_TIMELINE_SQL = """
+_TIMELINE_SQL = f"""
     SELECT
         COALESCE(c.contextualized, c.content) AS content,
         to_char(d.modified_at, 'YYYY-MM-DD') AS occurred_at,
@@ -431,7 +880,8 @@ _TIMELINE_SQL = """
         d.metadata->>'proposed_menu' AS proposed_menu
     FROM chunks c
     JOIN documents d ON d.id = c.document_id
-    WHERE d.metadata->>'is_sales_fb' = 'true'
+    WHERE {_SHARED_ACL_SQL}
+      AND d.metadata->>'is_sales_fb' = 'true'
       AND d.metadata->>'client_name' LIKE %s
     ORDER BY d.modified_at DESC NULLS LAST, c.chunk_idx DESC
     LIMIT %s
@@ -440,7 +890,7 @@ _TIMELINE_SQL = """
 #   ASC LIMIT だと FB が per_client_limit を超えるクライアントで「最古の N 件」になり、
 #   カルテ frontmatter（最新 deal_phase/bant_score）と時系列が古い値で誤るため。
 
-_DOCUMENTS_SQL_TEMPLATE = """
+_DOCUMENTS_SQL_TEMPLATE = f"""
     SELECT
         d.title,
         d.source_uri,
@@ -477,9 +927,10 @@ _DOCUMENTS_SQL_TEMPLATE = """
                  c.chunk_idx ASC
         LIMIT 1
     ) ex ON true
-    WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+    WHERE {_SHARED_ACL_SQL}
+      AND d.metadata->>'suppressed' IS DISTINCT FROM 'true'
       AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
-      {stale_clause}
+      {{stale_clause}}
       AND (d.metadata->>'cls_project' ILIKE %s
            OR d.metadata->>'client_name' ILIKE %s
            OR d.title ILIKE %s)
@@ -506,6 +957,7 @@ def documents_sql(*, include_stale: bool = False) -> str:
 def load_clients_data(
     dsn: str,
     *,
+    shared_group: str,
     client: str | None = None,
     limit: int | None = None,
     per_client_limit: int = 100,
@@ -513,10 +965,16 @@ def load_clients_data(
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
     """クライアント一覧（client_name ∪ cls_project）→ 各クライアントの FB/資料を読む。
 
-    SELECT のみ（read-only）。--client 指定時はその部分一致 1 件系に絞り、--limit は
-    クライアント数の先頭 N 件キャップ（検証用）。include_stale=False（既定）で
-    metadata.stale='true' の資料を除外する（--include-stale で従来挙動）。
+    SELECT のみ（read-only）。admin DSN が RLS を bypass しても、必須の
+    ``shared_group`` を acl_groups に持つ company-shared document だけを全 3 経路で
+    読む。空/複数/不正 group は DB 接続前に fail-closed。
+
+    --client 指定時はその部分一致 1 件系に絞り、--limit はクライアント数の先頭
+    N 件キャップ（検証用）。include_stale=False（既定）で metadata.stale='true'
+    の資料を除外する（--include-stale で従来挙動）。
     """
+    normalized_group = normalize_shared_group(shared_group)
+
     import psycopg
     from psycopg.rows import dict_row
 
@@ -525,7 +983,8 @@ def load_clients_data(
     clients_data: dict[str, dict[str, list[dict[str, Any]]]] = {}
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(_CLIENTS_SQL)
+            # UNION の 2 枝に同じ shared group パラメータを個別に配線。
+            cur.execute(_CLIENTS_SQL, (normalized_group, normalized_group))
             names = [str(r["name"]) for r in cur.fetchall() if r.get("name")]
         if client:
             needle = client.strip().lower()
@@ -535,12 +994,15 @@ def load_clients_data(
         for name in names:
             like = f"%{name}%"
             with conn.cursor() as cur:
-                cur.execute(_TIMELINE_SQL, [like, per_client_limit])
+                cur.execute(_TIMELINE_SQL, (normalized_group, like, per_client_limit))
                 # DESC で取った最新 N 件を古い順へ戻す（render_client_note の
                 # 「timeline は古い順・末尾＝最新」契約を保つ）
                 timeline = [dict(r) for r in reversed(cur.fetchall())]
             with conn.cursor() as cur:
-                cur.execute(docs_sql, [like, like, like, per_client_limit])
+                cur.execute(
+                    docs_sql,
+                    (normalized_group, like, like, like, per_client_limit),
+                )
                 documents = [dict(r) for r in cur.fetchall()]
             if timeline or documents:
                 clients_data[name] = {"timeline": timeline, "documents": documents}
@@ -563,14 +1025,61 @@ def main() -> int:
         help=f"Vault 出力先ディレクトリ（既定 {_DEFAULT_OUT}）",
     )
     p.add_argument("--commit", action="store_true", help="既定 dry-run。指定時のみ書き出し")
+    p.add_argument(
+        "--prune",
+        action="store_true",
+        help=(
+            "完全 export で manifest 管理済みの古い clients/docs Markdown を削除。"
+            "dry-run は削除予定のみ表示（--client/--limit と併用不可）"
+        ),
+    )
+    p.add_argument(
+        "--allow-prune-shrink",
+        action="store_true",
+        help=(
+            "明示確認済みの大規模移行だけ、prune の前回比50%%ブレーキを解除。"
+            "空 plan は解除不可（--prune 必須）"
+        ),
+    )
     p.add_argument("--limit", type=int, default=None, help="先頭 N クライアントのみ（検証用）")
     p.add_argument("--client", default=None, help="クライアント名の部分一致で絞り込み")
+    p.add_argument(
+        "--shared-group",
+        default=None,
+        help=(
+            "必須: export 対象の単一会社共有ドメイン。省略時は "
+            "TEAMAGENT_SHARED_COMPANY_DOMAINS の単一値"
+        ),
+    )
     p.add_argument(
         "--include-stale",
         action="store_true",
         help="metadata.stale='true' の資料も含める（既定は除外・従来挙動に戻すフラグ）",
     )
     args = p.parse_args()
+
+    partial_export = args.client is not None or args.limit is not None
+    if args.prune and partial_export:
+        print("[ERROR] --prune は --client/--limit と併用できません", file=sys.stderr)
+        return 2
+    if args.allow_prune_shrink and not args.prune:
+        print("[ERROR] --allow-prune-shrink は --prune と併用してください", file=sys.stderr)
+        return 2
+
+    shared_group_raw = (
+        args.shared_group
+        if args.shared_group is not None
+        else os.environ.get("TEAMAGENT_SHARED_COMPANY_DOMAINS")
+    )
+    try:
+        shared_group = normalize_shared_group(shared_group_raw)
+    except ValueError as exc:
+        print(
+            "[ERROR] --shared-group に単一の有効な会社ドメインを指定するか、"
+            f"TEAMAGENT_SHARED_COMPANY_DOMAINS を単一値にしてください: {exc}",
+            file=sys.stderr,
+        )
+        return 2
 
     dsn = args.dsn or os.environ.get("DATABASE_URL")
     if not dsn:
@@ -580,10 +1089,21 @@ def main() -> int:
     out_dir = Path(args.out).expanduser()
     try:
         clients_data = load_clients_data(
-            dsn, client=args.client, limit=args.limit, include_stale=args.include_stale
+            dsn,
+            shared_group=shared_group,
+            client=args.client,
+            limit=args.limit,
+            include_stale=args.include_stale,
         )
         files = plan_vault(clients_data)
-        stats = write_vault(out_dir, files, commit=args.commit)
+        stats = write_vault(
+            out_dir,
+            files,
+            commit=args.commit,
+            prune=args.prune,
+            complete_export=not partial_export,
+            allow_prune_shrink=args.allow_prune_shrink,
+        )
     except Exception as e:
         print(f"[ERROR] export failed: {e}", file=sys.stderr)
         return 2
@@ -591,7 +1111,8 @@ def main() -> int:
     mode = "commit" if args.commit else "dry-run"
     print(
         f"clients={len(clients_data)} planned={stats['planned']} "
-        f"written={stats['written']} out={out_dir} mode={mode}"
+        f"written={stats['written']} delete_planned={stats['delete_planned']} "
+        f"deleted={stats['deleted']} out={out_dir} mode={mode}"
     )
     return 0
 

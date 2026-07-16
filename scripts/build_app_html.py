@@ -6,7 +6,8 @@
 ペイン化サイドバー(ファイル/検索(演算子)/タグ(ネスト)/ブックマーク) + Properties新UI +
 インラインタイトル + リーディングビュー + リンクされた言及 + グラフ。機密は端末外に出さない。
 
-フィルタ4機構（exclude_stems / dedup_drop_map / 分割断片折り畳み / weird_rename）と
+フィルタ5機構（source identity / exclude_stems / dedup_drop_map / 分割断片折り畳み /
+weird_rename）と
 HTML 生成ロジックは元スクリプトと同一。repo 版で加えたのは運用ガードのみ:
 
 - argparse: ``--vault`` / ``--out`` / ``--allow-shrink``
@@ -15,6 +16,8 @@ HTML 生成ロジックは元スクリプトと同一。repo 版で加えたの�
   理由を明示して exit 1（「黙って劣化」を作らない）
 - サニティゲート: 統計を ``<out>.stats.json`` に保存し、取引先数/資料数/バイト数の
   いずれかが前回比 20% 超減なら ``--allow-shrink`` 無しで exit 1（既存 out は上書きしない）
+- ACL公開境界: 完全export manifestのactive pathだけを読み、全noteのSHA-256一致を要求する。
+  未管理/手編集/prune保護note、partial/旧manifest、export後に変わったnoteは公開せずfail-closed。
 - フッタ焼き込み: ステータスバー末尾に「更新: YYYY-MM-DD JST・取引先N・資料M」を表示
   （利用 16 名にデータ鮮度が見える）
 - PII 決定論除外: 正規化後 stem に「請求」を含む資料（請求書/請求金額系）はサイドカーに
@@ -39,6 +42,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -47,11 +51,12 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# --- repo 内サイドカー（フィルタ3ファイル + フォント）。欠落は即 exit 1（fallback 禁止） ---
+# --- repo 内サイドカー（フィルタ4ファイル + フォント）。欠落は即 exit 1（fallback 禁止） ---
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_DIR = _REPO_ROOT / "data" / "connect_web_filters"
 SIDECAR_FILES = (
     "exclude_stems.json",      # Agent 分類の非ナレッジ除外（タイトル stem のみ）
+    "exclude_source_keys.json",  # 不変な source_type:external_id による除外
     "dedup_drop_map.json",     # 別形式/旧版の非正本折り畳み（stem → 正本 stem）
     "weird_rename_high.json",  # 不明瞭命名 → 推奨タイトル（表示のみ・可逆）
     "inter-var.b64",           # InterVar フォント（woff2 base64）
@@ -67,6 +72,9 @@ SHRINK_LIMIT = 0.20  # サニティゲート: 前回比これを超える減少�
 # （client_md/_compute_chunk_drop 等の helper が参照するため module scope に置く）
 VAULT = DEFAULT_VAULT
 CLIENTS, DOCS, REPORTS = VAULT / "clients", VAULT / "docs", VAULT / "_reports"
+ACTIVE_MANAGED_PATHS: set[str] = set()
+_EXPORT_MANIFEST_NAME = ".export-vault-manifest.json"
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 CORP = ["一般社団法人", "公益社団法人", "株式会社", "株式會社", "有限会社", "合同会社", "合資会社"]
 CORP_S = ["(株)", "（株）", "㈱", "(有)", "（有）", "㈲"]
@@ -548,15 +556,43 @@ def _quickfilter_counts(clients, docs, today):
 
 
 EXCL: set[str] = set()  # exclude_stems.json（main() で読み込み・欠落は exit 1）
-INCLUDE_REPORTS = False  # 管理用レポートの搭載可否（--include-reports で ON）
+EXCL_SOURCE_KEYS: set[str] = set()  # exclude_source_keys.json（source_type:external_id）
+SOURCE_EXCLUDED_STEMS: set[str] = set()  # 現 Vault で source key に一致した stem（payload へ載せない）
 _exn = lambda s: re.sub(r"[\s_]+", "", s).lower()
 EXCL_N: set[str] = set()
 
 
+def _source_key(fm):
+    """Vault frontmatter の内部メタから安定した source identity を作る。"""
+    source_type = str(fm.get("source_type") or "").strip().lower()
+    external_id = str(fm.get("external_id") or "").strip()
+    if not source_type or not external_id:
+        return ""
+    return f"{source_type}:{external_id}"
+
+
+def _source_excluded_stems():
+    """source key 除外に一致する現 Vault の stem を返す（旧 Vault は空＝stem 除外へ移行）。"""
+    excluded = set()
+    for f in DOCS.glob("*.md"):
+        if f"docs/{f.name}" not in ACTIVE_MANAGED_PATHS:
+            continue
+        fm = front(f.read_text(errors="replace"))
+        if _source_key(fm) in EXCL_SOURCE_KEYS:
+            excluded.add(f.stem)
+    return excluded
+
+
 def _is_excluded(stem):
-    # 除外判定: サイドカー列挙（EXCL/EXCL_N）に加え、正規化後 stem に「請求」を含む
+    # 除外判定: 不変 source identity / 旧Vault向けstem列挙（EXCL/EXCL_N）に加え、
+    # 正規化後 stem に「請求」を含む
     # 請求書/請求金額系タイトルは決定論で除外（個人名PIIの stem を repo に列挙しない）
-    return stem in EXCL or _exn(stem) in EXCL_N or "請求" in _exn(stem)
+    return (
+        stem in SOURCE_EXCLUDED_STEMS
+        or stem in EXCL
+        or _exn(stem) in EXCL_N
+        or "請求" in _exn(stem)
+    )
 
 # === 自社(NewsTV)除外: 自社部署を取引先/タグ扱いしない（実クライアントの資料自体は残す） ===
 SELF_ORG_RE = re.compile(r"news[\s_\-]*tv", re.I)          # NewsTV / news-tv / 株式会社NewsTV / Vector_NewsTV 等の全変種
@@ -594,17 +630,27 @@ def _canon_client(v):
 
 
 _CHUNK_RE = re.compile(r"_\d{1,2}$")
+_EXPORT_VAULT_GENERATOR = "scripts/export_vault.py"
+
+
 def _chunk_key(stem):
     k = stem
     while _CHUNK_RE.search(k):
         k = _CHUNK_RE.sub("", k)
     return k
 def _compute_chunk_drop():
-    # 分割断片(_2/_3…)は同一baseで束ね、代表1件(base優先/最短)のみ残す
+    # 旧Vaultの分割断片(_2/_3…)は同一baseで束ね、代表1件(base優先/最短)のみ残す。
+    # export_vault の note は1ファイル=1論理documentであり、同名衝突や元タイトル由来の
+    # `_2` は chunk ではない。generated_by marker がある生成noteはstemに関係なく保持する。
     groups = defaultdict(list)
     for f in DOCS.glob("*.md"):
         s = f.stem
+        if f"docs/{f.name}" not in ACTIVE_MANAGED_PATHS:
+            continue
         if _is_excluded(s):
+            continue
+        fm = front(f.read_text(errors="replace"))
+        if fm.get("generated_by") == _EXPORT_VAULT_GENERATOR:
             continue
         groups[_chunk_key(s)].append(s)
     drop = set()
@@ -2023,6 +2069,70 @@ def _load_alias_sidecar(name: str, subkey: str | None = None) -> dict:
     return data
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_active_export_paths(vault: Path) -> set[str]:
+    """直近のACL付き完全exportで生成され、hash一致する公開対象だけを返す。"""
+    manifest = vault / _EXPORT_MANIFEST_NAME
+    resolved_vault = vault.resolve()
+    if manifest.is_symlink() or manifest.resolve().parent != resolved_vault or not manifest.is_file():
+        _die(
+            f"完全export manifestがありません: {manifest}。"
+            "export_vault.py を --commit（完全export）で実行してください"
+        )
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _die(f"export manifestが読めません: {manifest}: {exc}")
+    if not isinstance(payload, dict):
+        _die("export manifestのrootがobjectではありません")
+    if payload.get("version") != 1 or payload.get("generator") != _EXPORT_VAULT_GENERATOR:
+        _die("export manifestのversion/generatorが不正です")
+    if payload.get("complete_export") is not True:
+        _die("直近manifestは完全exportではありません。--client/--limitなしで再exportしてください")
+    files = payload.get("files")
+    active_raw = payload.get("active_files")
+    if not isinstance(files, dict) or not isinstance(active_raw, list):
+        _die("export manifestのfiles/active_files形式が不正です")
+    if not active_raw or len(active_raw) != len(set(active_raw)):
+        _die("export manifestのactive_filesが空または重複しています")
+
+    active: set[str] = set()
+    for rel in active_raw:
+        if not isinstance(rel, str) or "\\" in rel:
+            _die(f"export manifestのactive pathが不正です: {rel!r}")
+        parts = rel.split("/")
+        if (
+            len(parts) != 2
+            or parts[0] not in {"clients", "docs"}
+            or not parts[1]
+            or parts[1] == ".md"
+            or not parts[1].endswith(".md")
+        ):
+            _die(f"export manifestのactive pathが管理範囲外です: {rel!r}")
+        expected_hash = files.get(rel)
+        if not isinstance(expected_hash, str) or _SHA256_RE.fullmatch(expected_hash) is None:
+            _die(f"export manifestのactive hashが不正です: {rel}")
+        target = vault / rel
+        expected_parent = resolved_vault / parts[0]
+        if (
+            target.is_symlink()
+            or not target.is_file()
+            or target.resolve().parent != expected_parent
+        ):
+            _die(f"公開対象noteが無いか安全なregular fileではありません: {rel}")
+        if _file_sha256(target) != expected_hash:
+            _die(f"公開対象noteがexport後に変更されています: {rel}。完全exportを再実行してください")
+        active.add(rel)
+    return active
+
+
 def _stats_path(out: Path) -> Path:
     return Path(str(out) + ".stats.json")
 
@@ -2081,17 +2191,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--include-reports",
         action="store_true",
-        help="AI洗い出しレポート（_reports/・管理用）を搭載する。既定は非搭載（16名向けには意味不明のため）",
+        help="廃止済み。_reports はACL manifest外のため公開HTMLへ搭載不可",
     )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    global VAULT, CLIENTS, DOCS, REPORTS, EXCL, EXCL_N, DOC_DROP, TITLE_OVERRIDE, CHUNK_DROP
-    global INCLUDE_REPORTS, TAG_ALIAS, CLIENT_ALIAS
+    global VAULT, CLIENTS, DOCS, REPORTS, EXCL, EXCL_N, EXCL_SOURCE_KEYS
+    global SOURCE_EXCLUDED_STEMS, DOC_DROP, TITLE_OVERRIDE, CHUNK_DROP
+    global TAG_ALIAS, CLIENT_ALIAS, ACTIVE_MANAGED_PATHS
 
     args = _parse_args(argv)
-    INCLUDE_REPORTS = args.include_reports
+    if args.include_reports:
+        _die("--include-reports はACL manifest外の資料を公開し得るため廃止しました")
     VAULT = Path(args.vault).expanduser()
     CLIENTS, DOCS, REPORTS = VAULT / "clients", VAULT / "docs", VAULT / "_reports"
     out = Path(args.out).expanduser()
@@ -2103,6 +2215,10 @@ def main(argv: list[str] | None = None) -> int:
         if not sub.is_dir():
             _die(f"Vault 構造が不正です: {sub} がありません（export_vault.py の出力形式を確認）")
 
+    # Vaultに残す手作業noteやprune保護noteを、ACL済み公開集合と混同しない。
+    # hash不一致もfail-loudにして、export後のローカル編集を静的/appへ流さない。
+    ACTIVE_MANAGED_PATHS = _load_active_export_paths(VAULT)
+
     # --- fail-loud: サイドカー欠落は一括検知 ---
     missing = [name for name in SIDECAR_FILES if not (SIDECAR_DIR / name).is_file()]
     if missing:
@@ -2111,6 +2227,10 @@ def main(argv: list[str] | None = None) -> int:
     # --- サイドカー読み込み（元スクリプトの exists() フォールバックを全廃） ---
     EXCL = set(json.loads(_read_sidecar("exclude_stems.json")))
     EXCL_N = {_exn(s) for s in EXCL}
+    EXCL_SOURCE_KEYS = set(json.loads(_read_sidecar("exclude_source_keys.json")))
+    # client_md の関連資料リンク除去と chunk 折り畳みにも同じ判定を効かせるため、
+    # client/doc の payload 構築前に source key 一致 stem を確定する。
+    SOURCE_EXCLUDED_STEMS = _source_excluded_stems()
     DOC_DROP = set((json.loads(_read_sidecar("dedup_drop_map.json")) or {}).get("drop", {}).keys())
     TITLE_OVERRIDE = json.loads(_read_sidecar("weird_rename_high.json"))
     font_b64 = _read_sidecar("inter-var.b64").strip()
@@ -2125,6 +2245,8 @@ def main(argv: list[str] | None = None) -> int:
     # --- 以下、元スクリプト L149-332 のパイプラインをそのまま実行（ロジック不変） ---
     clients = []
     for f in sorted(CLIENTS.glob("*.md")):
+        if f"clients/{f.name}" not in ACTIVE_MANAGED_PATHS:
+            continue
         if _is_self_org(f.stem) or f.stem in JUNK_CLIENTS:   # 自社(NewsTV)/テスト・ダミーカルテは取引先化しない
             continue
         t = f.read_text(errors="replace")
@@ -2158,6 +2280,8 @@ def main(argv: list[str] | None = None) -> int:
 
     docs = []
     for f in sorted(DOCS.glob("*.md")):
+        if f"docs/{f.name}" not in ACTIVE_MANAGED_PATHS:
+            continue
         if _is_excluded(f.stem):  # Agent分類の非ナレッジ+請求書系を除外（空白/_差異も吸収・表示のみ）
             continue
         if f.stem in CHUNK_DROP or f.stem in DOC_DROP:  # 分割断片の非代表 / 重複(別形式・旧版)の非正本を折り畳む
@@ -2228,15 +2352,9 @@ def main(argv: list[str] | None = None) -> int:
         _c["hw"] = 1 if homework_flag(_c["nx"], _c["last"], _today) else 0
         _c["tans"] = tans_of(_c["tl"])
 
-    # AI洗い出しレポート（_reports/）は管理用の内部成果物で、営業16名には
-    # snake_case 名の生 markdown が意味不明（ユーザーFB 2026-07-12）。既定で非搭載とし、
-    # 品質整備セッション用に --include-reports で復元可能にする。
+    # AI洗い出しレポート（_reports/）はACL付きactive/hash manifestの管理外なので搭載しない。
     # followup_gaps の実用価値は 宿題/あり タグ＋次アクション列が置き換え済み。
     reports = []
-    if INCLUDE_REPORTS and REPORTS.exists():
-        for f in sorted(REPORTS.glob("*.md")):
-            _rt = f.read_text(errors="replace")
-            reports.append({"stem": f.stem, "name": f.stem, "md": _strip_self_tags(body_of(_rt).strip())[:20000], "_wl": parse_links(body_of(_rt))})
 
     INDUSTRY_COLORS = {"食品": "#54b981", "日用品": "#e0b34c", "金融": "#4f9df5", "IT": "#8a7cf5",
         "メーカー": "#e07a5f", "エネルギー": "#c98bdb", "エンタメ・スポーツ": "#e05f8f",

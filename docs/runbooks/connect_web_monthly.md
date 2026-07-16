@@ -3,6 +3,11 @@
 作成: 2026-07-10（入れ込み v2）。対象: Drive/Slack の営業ナレッジを pgvector に取り込み、
 No-AI 静的 HTML（/app）として 16 名へ配信する月次サイクルの全手順＋フォルダ再編の移行手順。
 
+> **公開範囲の契約**: 静的 `/app` は per-user ACL 表示ではなく、
+> `--shared-group` で指定した会社共有集合のミラー。`owner_email` だけ、
+> `acl_emails` だけ、`acl_groups` 空の資料は配信しない。raw ACL や安定 source key は
+> HTML へ表示しない。ユーザーごとの RLS 検索は `/search` 側の責務。
+
 ## 前提・役割分担
 
 | 主体 | やること | 理由 |
@@ -19,6 +24,8 @@ service=`teamagent-dev-connect-web` / ingest td family=`teamagent-dev-ingest`。
 - ingest の yaml は S3 オーバーライド（`INGEST_SOURCES_S3_URI`）。取得失敗・sha256 不一致は
   即 exit 1（同梱 yaml への silent fallback 禁止）
 - stale は soft-delete（`metadata.stale`）＋量的ブレーキ。物理 DELETE はしない
+- export は RLS を bypass できる admin DSN を使うため、全 SELECT で単一の会社共有
+  group を `documents.acl_groups` に持つ行だけに明示絞り込む
 - すべて fail-loud。「黙って劣化」を検知したら止まる
 
 ---
@@ -43,7 +50,8 @@ bash scripts/aws/run_ingest_task.sh --mark-stale
 
 Claude Code セッションで依頼する内容（そのまま貼れる指示例）:
 
-> connect-web 月次更新の②をやって。SSM トンネル → export_vault --commit →
+> connect-web 月次更新の②をやって。SSM トンネル → export_vault の prune dry-run →
+> export_vault --commit --prune →
 > サイドカーレビュー → build_app_html.py → QA diff まで。Runbook は
 > docs/runbooks/connect_web_monthly.md。
 
@@ -55,20 +63,48 @@ Claude Code セッションで依頼する内容（そのまま貼れる指示�
      --document-name AWS-StartPortForwardingSessionToRemoteHost \
      --parameters "host=<RDSエンドポイント>,portNumber=5432,localPortNumber=15432" &
    ```
-2. **Vault エクスポート**（DB は SELECT のみ・stale は既定で除外される）:
+2. **Vault エクスポート**（DB は SELECT のみ、company-shared ACL 必須、
+   stale は既定で除外される）:
    ```bash
-   python scripts/export_vault.py --dsn postgresql://...@localhost:15432/... --commit
+   python scripts/export_vault.py \
+     --dsn postgresql://...@localhost:15432/... \
+     --shared-group vectorinc.co.jp \
+     --prune
+   # 上の一覧で生成・削除予定と件数を確認してから確定
+   python scripts/export_vault.py \
+     --dsn postgresql://...@localhost:15432/... \
+     --shared-group vectorinc.co.jp \
+     --commit --prune
    # 移行検証等で stale も見たい時だけ --include-stale
    ```
-3. **サイドカーレビュー**: `data/connect_web_filters/` の 4 点
-   （exclude_stems.json / dedup_drop_map.json / weird_rename_high.json / inter-var.b64）を
+   - `--shared-group` は単一 DNS ドメインのみ。省略時は
+     `TEAMAGENT_SHARED_COMPANY_DOMAINS` が単一値の場合だけ使う。未設定、空、
+     カンマ区切り、不正値は DB 接続前に exit 2。
+   - この絞り込みは admin DSN で RLS が bypass されることを前提にした必須防御。
+     ドライランでも per-user RLS 検証の代わりにはならない。
+   - 月次の完全 export は `--prune` を常用する。これにより、stale 化・共有解除・名称変更で
+     現行計画から外れた「この exporter の生成物」だけを削除する。初回は旧形式 note も
+     exporter 固有の構造で認識する。人が編集した note、別フォルダ、非 Markdown は削除しない。
+   - `--prune` は空または前回 manifest の半分未満に減る計画を拒否し、`--client` / `--limit`
+     との併用も拒否する。通常の月次運用ではこのブレーキを解除しない。
+   - **ACL 初回移行で半分未満になる場合だけ**、まず `--prune` なしの dry-run で現行の
+     `planned` 件数を確認し、通常の `--prune` が表示する前回件数との差が ACL 共有解除分として
+     妥当かレビューする。承認後、上の dry-run と commit の両方へ
+     `--allow-prune-shrink` を追加する。これは 50% ブレーキだけを解除し、空 plan は拒否する。
+     続く HTML build も前回比20%超減なら止まるため、QA後に限り `--allow-shrink` を使う。
+3. **サイドカーレビュー**: `data/connect_web_filters/` の 5 点
+   （exclude_stems.json / exclude_source_keys.json / dedup_drop_map.json /
+   weird_rename_high.json / inter-var.b64）を
    新規取込資料に対して見直す。新たな重複・変名・ジャンクがあれば JSON を更新
-   （タイトル stem・表示名のみ。本文/BANT/温度感を入れない）
+   （タイトル stem・安定 source key・表示名のみ。本文/BANT/温度感を入れない）
 4. **HTML 生成**（サイドカー欠落・Vault 不在・0件・前回比20%超減は exit 1）:
    ```bash
    python scripts/build_app_html.py
    # 意図的な縮小（大量 stale 掃除後など）のときだけ --allow-shrink
    ```
+   - build は直近の**完全 export manifest**にある active path だけを読み、各 note の
+     SHA-256 一致も確認する。手作業 note、prune で保護した旧 note、partial export だけの
+     manifest、export 後に編集された note は `/app` へ載せず、契約不明なら exit 1 で止まる。
 5. **QA diff**: 生成 HTML のフッタ統計（`更新: YYYY-MM-DD JST・取引先N・資料M`）と
    `<out>.stats.json` の前回比を確認。新規取込がフッタ数字に反映されているか、
    意図しない激減が無いかを確認して報告
