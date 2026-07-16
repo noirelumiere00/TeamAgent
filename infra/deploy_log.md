@@ -8,6 +8,21 @@
 
 ---
 
+## 2026-07-16 🚑 /app の Drive 共有範囲を本番へ再同期
+- source=`dev`@`ad39f501`（#222）＋ローカル未マージの Unicode パス別名保護。RDS の会社共有 ACL を正として Vault を全量再生成し、旧管理 note 1,902件を prune。生成物は `clients=518 / docs=659 / sha256=772c7e1609ad...`。
+- 反映前に検出した「`acl_groups` に `vectorinc.co.jp` が無い Drive 文書」の `/app` 混入は116件。反映候補の抽出可能な Drive file ID 302/302件を会社共有と照合し、未許可0件を確認。S3 配信物を再取得して候補と byte-for-byte 一致も確認。
+- S3 `codebuild/connect-web-app.html` VersionId=`R2Q2X4WgaIwccMEmg2SUorr3swNClh9U`、connect-web=`:48` を force deploy。`/healthz` は source=`s3` / sha=`772c7e1609ad`、rollout COMPLETED・1/1 healthy、反映後 ERROR/Exception/Traceback 0。未ログイン `/app` は `/search/login?next=%2Fapp` へ303。
+- rollback=S3 VersionId=`aW0hB4FZP7VL.G7aHlLsT4mThMOOD8Xl` を復元後、connect-webを force deploy。実行者=Codex（s-komata AWSアカウント）。
+
+---
+
+## 2026-07-16 🚀 dev 全8本（#213〜#221）を本番で有効化＋/app更新
+- source=`dev`@`7ecf725bd19750001ae878877220b11bf1bb7a66` / image tag=`dev-7ecf725` / digest=`sha256:fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5`。mcp=`:55`、connect-web=`:48`、ingest=`:41`、morning-digest=`:44`、canary=`:13` を同digestへ統一。openclaw=`:25` は変更なし。
+- #213/#220/#221 の短縮URL・研究成果配信、#214/#215 のRLS/共有ACL、#216界隈分類、#217グラフまとめ軸、#218 Markdown injection、#219ルールブック修正を反映。`/r` 302→S3 200、RLSは社員から可・社外0、主要サービスhealthy・重大ログ0を確認。
+- rollback=mcp`:54` / connect-web`:47` / ingest`:40` / morning`:43` / canary`:12`、appは当時の直前S3 VersionId=`ejA5axqKaKNCU7hf61Gis6vPxOLv6oms`。実行者=Codex（s-komata AWSアカウント）。
+
+---
+
 ## ⚠️ いま本番で起きている重要な不整合（初版で判明）
 1. **Python サービス群が 3 つの別 image ビルドで動いている**（下表）。`teamagent-mcp` image を connect-web/ingest/canary も共用するが、**サービスごとに別バージョン**になっている。
 2. **mcp は dev でなく feature 枝から焼かれている**（タグが `search-*` / `mailrich-*` / `nlk-*`＝feature 名）。`dev-*` タグの mcp は存在しない＝**dev は本番の正ではない**。
