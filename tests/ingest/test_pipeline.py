@@ -887,6 +887,7 @@ def _make_drive_file(
     name: str = "test.pdf",
     mime: str = "application/pdf",
     owners: tuple[str, ...] = (),
+    size: int | None = 1234,
 ) -> Any:
     from teamagent.adapters.gdrive_client import DriveFile
 
@@ -895,7 +896,7 @@ def _make_drive_file(
         name=name,
         mime_type=mime,
         modified_time="2026-05-26T16:00:00Z",
-        size=1234,
+        size=size,
         parents=(),
         web_view_link=f"https://drive.google.com/file/d/{id}/view",
         owners_email=owners,
@@ -1130,7 +1131,15 @@ def test_ingest_gdrive_folder_docx_extracts_chunks(
 
     fake_client = MagicMock()
     fake_client.list_files.return_value = (
-        [_make_drive_file(id="DOCX1", name="提案書.docx", mime=DOCX_MIME, owners=("a@x.jp",))],
+        [
+            _make_drive_file(
+                id="DOCX1",
+                name="提案書.docx",
+                mime=DOCX_MIME,
+                owners=("a@x.jp",),
+                size=len(docx_bytes),
+            )
+        ],
         None,
     )
     fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
@@ -1180,7 +1189,15 @@ def test_ingest_gdrive_folder_pptx_extracts_per_slide(
 
     fake_client = MagicMock()
     fake_client.list_files.return_value = (
-        [_make_drive_file(id="P1", name="deck.pptx", mime=PPTX_MIME, owners=("a@x.jp",))],
+        [
+            _make_drive_file(
+                id="P1",
+                name="deck.pptx",
+                mime=PPTX_MIME,
+                owners=("a@x.jp",),
+                size=len(pptx_bytes),
+            )
+        ],
         None,
     )
     fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
@@ -1206,6 +1223,105 @@ def test_ingest_gdrive_folder_pptx_extracts_per_slide(
     assert chunks_n == 2  # 2 slides → 2 chunks（小さいので分割なし）
 
 
+def test_ingest_gdrive_folder_corrupt_pptx_is_classified_without_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """破損OfficeはWARN分類し、DB無変更＋observed維持で既存検索結果を守る。"""
+    from structlog.testing import capture_logs
+
+    from teamagent.ingest.office_extract import PPTX_MIME
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    # ZIP local header はあるが中央directoryが無い＝実機4件と同型の途中切れ/破損。
+    broken_pptx = b"PK\x03\x04" + (b"x" * 64)
+    fake_client = MagicMock()
+    fake_client.list_files.return_value = (
+        [
+            _make_drive_file(
+                id="BROKEN",
+                name="broken.pptx",
+                mime=PPTX_MIME,
+                owners=("a@x.jp",),
+                size=len(broken_pptx),
+            )
+        ],
+        None,
+    )
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
+    fake_client.download_file_bytes.return_value = broken_pptx
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+
+    repo = _FakeRepository()
+    observed: set[str] = set()
+    spec = GDriveFolderSpec(folder_id="F", folder_name="x", description="", mime_type_filter=None)
+    with capture_logs() as logs:
+        docs_n, chunks_n = _ingest_gdrive_folder(
+            spec,
+            embedder=_FakeEmbedder(),
+            repository=repo,  # type: ignore[arg-type]
+            owner_email="bot@x.jp",
+            dry_run=False,
+            request_id="r-corrupt-office",
+            observed_gdrive_ids=observed,
+        )
+
+    assert (docs_n, chunks_n) == (0, 0)
+    assert repo.upsert_calls == []  # 既存document/chunksをtitle-only等で上書きしない
+    assert observed == {"BROKEN"}  # 存在中fileなのでstaleにはしない
+    warnings = [log for log in logs if log.get("event") == "gdrive_office_payload_invalid"]
+    assert len(warnings) == 1
+    assert warnings[0]["category"] == "corrupt_zip"
+    assert warnings[0]["existing_document_preserved"] is True
+
+
+def test_process_gdrive_office_html_download_is_classified_without_error() -> None:
+    """adapterがHTMLを検出した場合もERROR化せず、既存documentを書き換えない。"""
+    from structlog.testing import capture_logs
+
+    from teamagent.adapters.gdrive_client import GDriveDownloadContentError
+    from teamagent.ingest.office_extract import PPTX_MIME
+    from teamagent.ingest.pipeline import _process_one_gdrive_file
+
+    fake_client = MagicMock()
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
+    fake_client.download_file_bytes.side_effect = GDriveDownloadContentError(
+        "html_response", actual_bytes=128
+    )
+    spec = GDriveFolderSpec(folder_id="F", folder_name="x", description="", mime_type_filter=None)
+    repo = _FakeRepository()
+    skipped: list[str] = []
+
+    with capture_logs() as logs:
+        result = _process_one_gdrive_file(
+            _make_drive_file(
+                id="HTML",
+                name="response.pptx",
+                mime=PPTX_MIME,
+                owners=("a@x.jp",),
+                size=1024,
+            ),
+            spec,
+            client=fake_client,
+            embedder=_FakeEmbedder(),
+            repository=repo,  # type: ignore[arg-type]
+            owner_email="bot@x.jp",
+            dry_run=False,
+            request_id="r-html-office",
+            skipped=skipped,
+        )
+
+    assert result == (0, 0)
+    assert skipped == ["HTML"]
+    assert repo.upsert_calls == []
+    warnings = [log for log in logs if log.get("event") == "gdrive_office_payload_invalid"]
+    assert len(warnings) == 1
+    assert warnings[0]["category"] == "html_response"
+    assert not any(log.get("event") == "gdrive_office_download_failed" for log in logs)
+
+
 def test_ingest_gdrive_folder_xlsx_extracts_per_sheet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1227,7 +1343,15 @@ def test_ingest_gdrive_folder_xlsx_extracts_per_sheet(
 
     fake_client = MagicMock()
     fake_client.list_files.return_value = (
-        [_make_drive_file(id="X1", name="売上.xlsx", mime=XLSX_MIME, owners=("a@x.jp",))],
+        [
+            _make_drive_file(
+                id="X1",
+                name="売上.xlsx",
+                mime=XLSX_MIME,
+                owners=("a@x.jp",),
+                size=len(xlsx_bytes),
+            )
+        ],
         None,
     )
     fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "a@x.jp")]
@@ -2008,7 +2132,13 @@ def test_ingest_shared_drives_crawl_pptx_extracts_content_chunks(
     fake_client = MagicMock()
     fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
     fake_client.walk_files_recursive.return_value = [
-        _make_drive_file(id="P1", name="提案.pptx", mime=PPTX_MIME, owners=("alice@x.jp",))
+        _make_drive_file(
+            id="P1",
+            name="提案.pptx",
+            mime=PPTX_MIME,
+            owners=("alice@x.jp",),
+            size=len(pptx_bytes),
+        )
     ]
     fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
     fake_client.download_file_bytes.return_value = pptx_bytes
@@ -2048,31 +2178,34 @@ def test_ingest_shared_drives_crawl_pptx_extracts_content_chunks(
 def test_ingest_shared_drives_crawl_office_badzip_is_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """壊れた pptx (BadZipFile) は fail-open で skip され、crawl は他ファイルを処理し続ける。"""
-    import zipfile
+    """壊れたpptxは分類WARN＋DB無変更で、crawlは他fileを処理し続ける。"""
+    from structlog.testing import capture_logs
 
     from teamagent.adapters.gdrive_client import SharedDrive
     from teamagent.ingest.office_extract import PPTX_MIME
 
+    broken_pptx = b"PK\x03\x04" + (b"x" * 64)
     fake_client = MagicMock()
     fake_client.list_shared_drives.return_value = [SharedDrive(id="D1", name="営業ナレッジ")]
     # 1 件目: 壊れた pptx（skip される）、2 件目: 正常 PDF（処理される）
     fake_client.walk_files_recursive.return_value = [
-        _make_drive_file(id="BAD", name="corrupt.pptx", mime=PPTX_MIME, owners=("alice@x.jp",)),
+        _make_drive_file(
+            id="BAD",
+            name="corrupt.pptx",
+            mime=PPTX_MIME,
+            owners=("alice@x.jp",),
+            size=len(broken_pptx),
+        ),
         _make_drive_file(id="OK", name="ok.pdf", owners=("alice@x.jp",)),
     ]
     fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
-    fake_client.download_file_bytes.return_value = b"<bytes>"
+    fake_client.download_file_bytes.side_effect = lambda file_id, request_id: (
+        broken_pptx if file_id == "BAD" else b"<pdf-bytes>"
+    )
     monkeypatch.setattr(
         "teamagent.adapters.gdrive_client.GDriveClient.from_env",
         classmethod(lambda cls, **kwargs: fake_client),
     )
-
-    # extract_office_pages は pipeline 内で lazy import されるので、元モジュールを差し替える。
-    def _boom(_data: bytes, *, mime_type: str) -> list[tuple[int, str]]:
-        raise zipfile.BadZipFile("File is not a zip file")
-
-    monkeypatch.setattr("teamagent.ingest.office_extract.extract_office_pages", _boom)
 
     # 正常 PDF 側の pypdf を擬似
     fake_reader = MagicMock()
@@ -2090,24 +2223,29 @@ def test_ingest_shared_drives_crawl_office_badzip_is_skipped(
         sales_relevance_filter=False,
     )
     repo = _FakeRepository()
-    docs_n, _ = _ingest_shared_drives_crawl(
-        spec,
-        embedder=_FakeEmbedder(),
-        repository=repo,  # type: ignore[arg-type]
-        owner_email="bot@x.jp",
-        dry_run=False,
-        request_id="r-crawl-badzip",
-    )
+    with capture_logs() as logs:
+        docs_n, _ = _ingest_shared_drives_crawl(
+            spec,
+            embedder=_FakeEmbedder(),
+            repository=repo,  # type: ignore[arg-type]
+            owner_email="bot@x.jp",
+            dry_run=False,
+            request_id="r-crawl-badzip",
+        )
     # 壊れた pptx は skip、正常 PDF だけが doc 化されて crawl は止まらない
     assert docs_n == 1
     assert repo.upsert_calls[0]["external_id"] == "OK"
+    warnings = [log for log in logs if log.get("event") == "shared_drive_office_payload_invalid"]
+    assert len(warnings) == 1
+    assert warnings[0]["category"] == "corrupt_zip"
+    assert not any(log.get("event") == "shared_drive_office_extract_failed" for log in logs)
 
 
 # -----------------------------------------------------------
 # テンプレ検出（boilerplate）配線: env ゲートで mark_boilerplate を呼ぶ／呼ばない
 # -----------------------------------------------------------
 class _NoopOpsCursor:
-    """_disable_statement_timeout が ``SET LOCAL statement_timeout`` を発行できるよう、
+    """timeout helper が2本の ``SET LOCAL`` を発行できるよう、
     cursor の context manager を最小実装した fake（実行内容は記録するだけ）。"""
 
     def __init__(self, executed: list[str]) -> None:
@@ -2126,7 +2264,7 @@ class _NoopOpsCursor:
 class _FakeOpsConn:
     """``_ops_connection()`` が返す接続本体の fake。``cursor()`` で no-op cursor を返す。
 
-    H1 の ``_disable_statement_timeout(conn)`` が ``conn.cursor()`` を呼ぶため、
+    ``_disable_corpus_scan_timeouts(conn)`` が ``conn.cursor()`` を呼ぶため、
     plain ``object()`` では落ちる。実 SQL は走らせないが、発行された SQL は
     ``executed`` に記録して検証可能にする。"""
 
@@ -2210,11 +2348,17 @@ def test_boilerplate_called_when_env_on(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("BOILERPLATE_DETECT", "1")
     monkeypatch.delenv("BOILERPLATE_MIN_DOCS", raising=False)
     seen: list[tuple[object, int]] = []
-    monkeypatch.setattr(
-        "teamagent.ingest.pipeline.mark_boilerplate",
-        lambda conn, *, min_docs, **_: seen.append((conn, min_docs)) or 7,
-    )
     repo = _RepoWithOpsConn()
+
+    def _mark(conn: object, *, min_docs: int, **_: object) -> int:
+        assert repo.ops_conn.executed == [
+            "SET LOCAL statement_timeout = '0'",
+            "SET LOCAL idle_in_transaction_session_timeout = '0'",
+        ]
+        seen.append((conn, min_docs))
+        return 7
+
+    monkeypatch.setattr("teamagent.ingest.pipeline.mark_boilerplate", _mark)
     runner = IngestRunner(
         repository=repo,  # type: ignore[arg-type]
         embedder=_FakeEmbedder(),
@@ -2227,8 +2371,9 @@ def test_boilerplate_called_when_env_on(monkeypatch: pytest.MonkeyPatch) -> None
     assert conn is repo.ops_conn  # 既存の admin role 接続を再利用
     assert min_docs == 3  # 既定値
     assert repo.ops_conn_calls == 1
-    # H1: mark 実行前に当該 tx 内で statement_timeout を無制限にしている。
+    # コーパス走査前に当該tx内だけSQL実行/idle-in-tx双方のtimeoutを無制限にする。
     assert any("SET LOCAL statement_timeout" in s for s in repo.ops_conn.executed)
+    assert any("SET LOCAL idle_in_transaction_session_timeout" in s for s in repo.ops_conn.executed)
 
 
 def test_boilerplate_min_docs_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2317,11 +2462,17 @@ def test_docdedup_called_when_env_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DOC_DEDUP_JACCARD", raising=False)
     monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
     seen: list[tuple[object, float]] = []
-    monkeypatch.setattr(
-        "teamagent.ingest.pipeline.mark_duplicate_documents",
-        lambda conn, *, jaccard_threshold, **_: seen.append((conn, jaccard_threshold)) or 4,
-    )
     repo = _RepoWithOpsConn()
+
+    def _mark(conn: object, *, jaccard_threshold: float, **_: object) -> int:
+        assert repo.ops_conn.executed == [
+            "SET LOCAL statement_timeout = '0'",
+            "SET LOCAL idle_in_transaction_session_timeout = '0'",
+        ]
+        seen.append((conn, jaccard_threshold))
+        return 4
+
+    monkeypatch.setattr("teamagent.ingest.pipeline.mark_duplicate_documents", _mark)
     runner = IngestRunner(
         repository=repo,  # type: ignore[arg-type]
         embedder=_FakeEmbedder(),
@@ -2334,8 +2485,9 @@ def test_docdedup_called_when_env_on(monkeypatch: pytest.MonkeyPatch) -> None:
     assert conn is repo.ops_conn  # 既存の admin role 接続を再利用
     assert jaccard_threshold == 0.7  # 既定値
     assert repo.ops_conn_calls == 1
-    # H1: mark 実行前に当該 tx 内で statement_timeout を無制限にしている。
+    # docdedupのPython比較中も接続が30秒で切れないようidle-in-txもtransaction限定で解除。
     assert any("SET LOCAL statement_timeout" in s for s in repo.ops_conn.executed)
+    assert any("SET LOCAL idle_in_transaction_session_timeout" in s for s in repo.ops_conn.executed)
 
 
 def test_docdedup_jaccard_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

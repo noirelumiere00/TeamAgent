@@ -25,24 +25,6 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-
-def _diagnose_non_zip(data: bytes, *, fmt: str) -> None:
-    """OOXML(pptx/docx/xlsx=zip) を開く前の健全性診断。
-
-    zip でないバイト列（DL途中切れで中央ディレクトリ欠落 / 確認 HTML 混入 / 真の破損）が
-    後段で無音の ``BadZipFile`` になる前に、先頭バイトと実サイズを WARN に出して原因を切り分け
-    可能にする。修復はせず、判定が False のときだけログる（呼び出し側の例外処理は不変）。
-    """
-    if zipfile.is_zipfile(BytesIO(data)):
-        return
-    logger.warning(
-        "office_not_zip",
-        fmt=fmt,
-        bytes=len(data),
-        head=data[:16].decode("latin-1", "replace"),
-    )
-
-
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -50,6 +32,111 @@ GDOC_NATIVE_MIME = "application/vnd.google-apps.document"
 
 # pipeline 側の mime_type 判定用にひとまとめで export。
 OFFICE_BINARY_MIMES = frozenset({DOCX_MIME, PPTX_MIME, XLSX_MIME})
+
+_OOXML_REQUIRED_PART = {
+    DOCX_MIME: "word/document.xml",
+    PPTX_MIME: "ppt/presentation.xml",
+    XLSX_MIME: "xl/workbook.xml",
+}
+_ZIP_PREFIXES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+
+class OfficePayloadError(zipfile.BadZipFile):
+    """抽出前に判別できる Office payload 不正。
+
+    ``category`` は運用ログで機械集計する安定値:
+
+    - ``html_response``: Drive 本体ではなく HTML 応答
+    - ``truncated_download`` / ``size_mismatch``: Drive metadata の size と不一致
+    - ``corrupt_zip``: ZIP シグネチャはあるが中央ディレクトリ等が壊れている
+    - ``format_mismatch``: Office MIME と実体の OOXML package が一致しない
+
+    ``BadZipFile`` の subclass にして、既存の fail-open 呼び出し側との互換性を保つ。
+    """
+
+    def __init__(
+        self,
+        category: str,
+        *,
+        mime_type: str,
+        actual_bytes: int,
+        expected_bytes: int | None = None,
+    ) -> None:
+        self.category = category
+        self.mime_type = mime_type
+        self.actual_bytes = actual_bytes
+        self.expected_bytes = expected_bytes
+        super().__init__(f"invalid Office payload: {category}")
+
+
+def _looks_like_html(data: bytes) -> bool:
+    """BOM/空白付きも含め、確認画面・エラーページの HTML 応答を判定する。"""
+    head = data[:512].lstrip()
+    if head.startswith(b"\xef\xbb\xbf"):
+        head = head[3:].lstrip()
+    lowered = head.lower()
+    return (
+        lowered.startswith(b"<!doctype html")
+        or lowered.startswith(b"<html")
+        or (lowered.startswith(b"<?xml") and b"<html" in lowered)
+    )
+
+
+def _validate_office_payload(
+    data: bytes,
+    *,
+    mime_type: str,
+    expected_size: int | None,
+) -> None:
+    """OOXML を開く前に、既知の非抽出 payload を安全な分類例外へ変換する。"""
+    actual_size = len(data)
+
+    if _looks_like_html(data):
+        raise OfficePayloadError(
+            "html_response",
+            mime_type=mime_type,
+            actual_bytes=actual_size,
+            expected_bytes=expected_size,
+        )
+
+    if expected_size is not None and actual_size != expected_size:
+        category = "truncated_download" if actual_size < expected_size else "size_mismatch"
+        raise OfficePayloadError(
+            category,
+            mime_type=mime_type,
+            actual_bytes=actual_size,
+            expected_bytes=expected_size,
+        )
+
+    stream = BytesIO(data)
+    if not zipfile.is_zipfile(stream):
+        category = "corrupt_zip" if data.startswith(_ZIP_PREFIXES) else "format_mismatch"
+        raise OfficePayloadError(
+            category,
+            mime_type=mime_type,
+            actual_bytes=actual_size,
+            expected_bytes=expected_size,
+        )
+
+    required_part = _OOXML_REQUIRED_PART[mime_type]
+    try:
+        with zipfile.ZipFile(stream) as package:
+            has_required_part = required_part in package.namelist()
+    except zipfile.BadZipFile as exc:
+        raise OfficePayloadError(
+            "corrupt_zip",
+            mime_type=mime_type,
+            actual_bytes=actual_size,
+            expected_bytes=expected_size,
+        ) from exc
+    if not has_required_part:
+        raise OfficePayloadError(
+            "format_mismatch",
+            mime_type=mime_type,
+            actual_bytes=actual_size,
+            expected_bytes=expected_size,
+        )
+
 
 # xlsx 抽出時に拾うセル数の上限ガード（極端に大きい sheet で OOM 防止）。
 _XLSX_MAX_CELLS_PER_SHEET = 10000
@@ -147,7 +234,6 @@ def extract_pptx_pages(
     # 拡張要求があるときだけ group を再帰（既定は従来の非再帰挙動を維持）
     recurse_groups = include_notes or include_tables
 
-    _diagnose_non_zip(data, fmt="pptx")  # 非zipなら原因(HTML/途中切れ/破損)を WARN（修復はしない）
     prs = Presentation(BytesIO(data))
     out: list[tuple[int, str]] = []
     for i, slide in enumerate(prs.slides, start=1):
@@ -252,6 +338,7 @@ def extract_office_pages(
     data: bytes,
     mime_type: str,
     *,
+    expected_size: int | None = None,
     include_notes: bool = False,
     include_tables: bool = False,
     formula_fallback: bool = False,
@@ -267,6 +354,7 @@ def extract_office_pages(
 
     すべての追加 kwarg は後方互換（既定値は現行挙動と完全一致）:
 
+    * ``expected_size`` — Drive metadata の size。実バイト数との差を途中切れとして分類する。
     * ``include_notes`` / ``include_tables`` — pptx のノート・表セルも拾う
       （mime が pptx 以外なら無視）。
     * ``formula_fallback`` — xlsx でキャッシュ値が無い式 sheet の式文字列を拾う
@@ -276,6 +364,11 @@ def extract_office_pages(
 
     例外は現行同様にそのまま上位へ伝播（pipeline 側で fail-open）。
     """
+    if mime_type not in OFFICE_BINARY_MIMES:
+        raise ValueError(f"Unsupported office mime type: {mime_type}")
+
+    _validate_office_payload(data, mime_type=mime_type, expected_size=expected_size)
+
     if mime_type == DOCX_MIME:
         text = extract_docx_text(data)
         pages = [(1, text)] if text else []
@@ -287,9 +380,6 @@ def extract_office_pages(
         )
     elif mime_type == XLSX_MIME:
         pages = extract_xlsx_pages(data, formula_fallback=formula_fallback)
-    else:
-        raise ValueError(f"Unsupported office mime type: {mime_type}")
-
     if min_chars > 0:
         pages = [(num, text) for num, text in pages if len(text) >= min_chars]
     return pages
@@ -301,6 +391,7 @@ __all__ = [
     "OFFICE_BINARY_MIMES",
     "PPTX_MIME",
     "XLSX_MIME",
+    "OfficePayloadError",
     "extract_docx_text",
     "extract_office_pages",
     "extract_pptx_pages",

@@ -87,17 +87,18 @@ def _envfloat(name: str, default: float) -> float:
         return default
 
 
-def _disable_statement_timeout(conn: Any) -> None:
-    """当該トランザクション内だけ ``statement_timeout`` を無制限（0）にする（H1）。
+def _disable_corpus_scan_timeouts(conn: Any) -> None:
+    """コーパス横断処理の2 timeoutを当該transaction内だけ無制限（0）にする。
 
     コーパス横断の印付け（boilerplate / docdedup）は全 chunk / 全 doc を走査する重い
-    UPDATE で、既定の ``statement_timeout``（本番は 30s）では途中で打ち切られて例外になり、
-    呼び出し側の fail-open で無音 no-op に倒れる（印が一切付かない）。``SET LOCAL`` は
-    現在のトランザクション内でのみ有効でコミット/ロールバックで自動失効するため、検索系の
-    別接続（30s 既定）には一切影響しない。本関数は文字列リテラルのみで動的値を埋めない。
+    UPDATE。SQL実行中は ``statement_timeout``、Pythonで比較している間は接続がidle-in-txに
+    なるため ``idle_in_transaction_session_timeout`` の双方を解除しないと、本番30秒設定で
+    fail-openの無音no-opになる。``SET LOCAL`` はcommit/rollbackで自動失効するため、検索系の
+    別接続や次transactionには影響しない。SQLは固定リテラルのみで動的値を埋めない。
     """
     with conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = '0'")  # nosec B608  # 固定リテラル・動的値なし
+        cur.execute("SET LOCAL idle_in_transaction_session_timeout = '0'")  # nosec B608  # 固定リテラル・動的値なし
 
 
 def _spec_source_id(spec: Any) -> str | None:
@@ -1072,9 +1073,11 @@ def _process_one_gdrive_file(
     full_text に各 chunk へ文脈前置詞を付与し contextualized + embedding を差し替える
     （fail-open）。None（既定）なら chunks はそのまま＝従来挙動・完全後方互換。
     """
+    from teamagent.adapters.gdrive_client import GDriveDownloadContentError
     from teamagent.ingest.office_extract import (
         GDOC_NATIVE_MIME,
         OFFICE_BINARY_MIMES,
+        OfficePayloadError,
         extract_office_pages,
     )
     from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
@@ -1146,6 +1149,19 @@ def _process_one_gdrive_file(
         # docx / pptx / xlsx: download → extract → chunk_pages（PDF と同じ I/F）
         try:
             data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+        except GDriveDownloadContentError as exc:
+            logger.warning(
+                "gdrive_office_payload_invalid",
+                request_id=request_id,
+                file_id=f.id,
+                mime_type=f.mime_type,
+                category=exc.category,
+                actual_bytes=exc.actual_bytes,
+                expected_bytes=f.size,
+                existing_document_preserved=True,
+            )
+            skipped.append(f.id)
+            return 0, 0
         except Exception:
             logger.exception(
                 "gdrive_office_download_failed",
@@ -1156,7 +1172,27 @@ def _process_one_gdrive_file(
             skipped.append(f.id)
             return 0, 0
         try:
-            pages = extract_office_pages(data, mime_type=f.mime_type, **office_kwargs)
+            pages = extract_office_pages(
+                data,
+                mime_type=f.mime_type,
+                expected_size=f.size,
+                **office_kwargs,
+            )
+        except OfficePayloadError as exc:
+            # invalid payloadではDBを書かない。既存document/chunksがあればそのまま保持され、
+            # observed_gdrive_idsには列挙時点で入るためstale誤判定もしない。
+            logger.warning(
+                "gdrive_office_payload_invalid",
+                request_id=request_id,
+                file_id=f.id,
+                mime_type=f.mime_type,
+                category=exc.category,
+                actual_bytes=exc.actual_bytes,
+                expected_bytes=exc.expected_bytes,
+                existing_document_preserved=True,
+            )
+            skipped.append(f.id)
+            return 0, 0
         except Exception:
             logger.exception(
                 "gdrive_office_extract_failed",
@@ -1363,12 +1399,14 @@ def _ingest_shared_drives_crawl(
     from teamagent.adapters.gdrive_client import (
         DEFAULT_EXCLUDE_FOLDER_NAME_RE,
         GDriveClient,
+        GDriveDownloadContentError,
     )
     from teamagent.ingest.classify import build_classifier_from_env
     from teamagent.ingest.contextualize import build_contextualizer_from_env
     from teamagent.ingest.office_extract import (
         GDOC_NATIVE_MIME,
         OFFICE_BINARY_MIMES,
+        OfficePayloadError,
         extract_office_pages,
     )
     from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
@@ -1517,6 +1555,20 @@ def _ingest_shared_drives_crawl(
                     # fail-open でその 1 ファイルを skip して crawl は継続する。
                     try:
                         data = client.download_file_bytes(file_id=f.id, request_id=request_id)
+                    except GDriveDownloadContentError as exc:
+                        logger.warning(
+                            "shared_drive_office_payload_invalid",
+                            request_id=request_id,
+                            file_id=f.id,
+                            mime_type=f.mime_type,
+                            drive_id=drive.id,
+                            category=exc.category,
+                            actual_bytes=exc.actual_bytes,
+                            expected_bytes=f.size,
+                            existing_document_preserved=True,
+                        )
+                        skipped_count += 1
+                        continue
                     except Exception:
                         logger.exception(
                             "shared_drive_office_download_failed",
@@ -1528,7 +1580,28 @@ def _ingest_shared_drives_crawl(
                         skipped_count += 1
                         continue
                     try:
-                        pages = extract_office_pages(data, mime_type=f.mime_type, **office_kwargs)
+                        pages = extract_office_pages(
+                            data,
+                            mime_type=f.mime_type,
+                            expected_size=f.size,
+                            **office_kwargs,
+                        )
+                    except OfficePayloadError as exc:
+                        # invalid payloadは既存document/chunksを上書きせず保持する。file自体は
+                        # observed済みなのでstaleにも落とさず、category付きWARNで運用検知する。
+                        logger.warning(
+                            "shared_drive_office_payload_invalid",
+                            request_id=request_id,
+                            file_id=f.id,
+                            mime_type=f.mime_type,
+                            drive_id=drive.id,
+                            category=exc.category,
+                            actual_bytes=exc.actual_bytes,
+                            expected_bytes=exc.expected_bytes,
+                            existing_document_preserved=True,
+                        )
+                        skipped_count += 1
+                        continue
                     except Exception:
                         logger.exception(
                             "shared_drive_office_extract_failed",
@@ -2200,11 +2273,9 @@ class IngestRunner:
             # repository が ingest_jobs / connector_state 用に持つ admin role 接続を再利用。
             # chunks の UPDATE policy（migration 0003）は user_role='admin' で bypass される。
             with self._repo._ops_connection() as conn:
-                # H1: 印付け SQL（コーパス全 chunk 走査）は既定 statement_timeout=30s では
-                # 途中で打ち切られ、fail-open で無音 no-op になる。当該 tx 内だけ timeout を
-                # 無制限にする（検索系の 30s 既定は別接続なので不変）。SET LOCAL は tx 終了で
-                # 自動失効するので他クエリに漏れない。
-                _disable_statement_timeout(conn)
+                # SQL走査中とPython比較中（idle-in-tx）の双方を守る。SET LOCALなので
+                # transaction終了時に自動失効し、検索接続や次transactionへ漏れない。
+                _disable_corpus_scan_timeouts(conn)
                 affected = mark_boilerplate(conn, min_docs=min_docs, min_chars=min_chars)
             logger.info(
                 "ingest_boilerplate_done",
@@ -2274,9 +2345,9 @@ class IngestRunner:
             # repository が ingest_jobs / connector_state 用に持つ admin role 接続を再利用。
             # documents の UPDATE policy は user_role='admin' で bypass される（boilerplate 同様）。
             with self._repo._ops_connection() as conn:
-                # H1: docdedup は全 doc 全文ロード＋全ペア比較＋UPDATE で長時間化し得るため、
-                # boilerplate と同様に当該 tx 内だけ statement_timeout を無制限にする。
-                _disable_statement_timeout(conn)
+                # 全文ロード後のPython比較中は接続がidle-in-txになるため、boilerplateと同じ
+                # transaction限定helperでstatement/idle-in-txの双方を無制限にする。
+                _disable_corpus_scan_timeouts(conn)
                 affected = mark_duplicate_documents(
                     conn,
                     jaccard_threshold=jaccard_threshold,

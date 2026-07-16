@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,11 +63,19 @@ def find_stale_sources(
     - monitored のうち閾値超過のもの、および 1 件も無いものを StaleSource で返す。
     - cursor は execute/fetchall を持つ DBAPI カーソル（本番は admin role 接続）。
     """
-    cursor.execute("SELECT source_type, max(ingested_at) FROM documents GROUP BY source_type")
+    cursor.execute(
+        "SELECT source_type, max(ingested_at) AS newest FROM documents GROUP BY source_type"
+    )
     newest_by_source: dict[str, _dt.datetime | None] = {}
     for row in cursor.fetchall():
-        src = str(row[0]) if row[0] is not None else ""
-        newest_by_source[src] = row[1]
+        if isinstance(row, Mapping):
+            source_value = row.get("source_type")
+            newest = row.get("newest", row.get("max"))
+        else:
+            source_value = row[0]
+            newest = row[1]
+        src = str(source_value) if source_value is not None else ""
+        newest_by_source[src] = newest
 
     stale: list[StaleSource] = []
     for src in monitored:
