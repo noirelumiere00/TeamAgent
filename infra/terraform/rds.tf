@@ -113,7 +113,9 @@ resource "aws_db_instance" "main" {
   multi_az                = var.db_multi_az
   backup_retention_period = 7
   skip_final_snapshot     = var.environment != "prod"
-  deletion_protection     = var.environment == "prod"
+  # このstackはAWS上の名前こそ dev だが、社内ユーザーが使う唯一のlive DB。
+  # environment名に連動させると誤操作で即時削除できてしまうため、全環境で保護する。
+  deletion_protection = true
 
   # IAM database authentication を有効化（Sprint 2 / 2.7 セキュリティ）
   # 本番運用は IAM 認証トークンに移行予定（Sprint 4）
