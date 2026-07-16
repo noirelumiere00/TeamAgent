@@ -26,16 +26,28 @@ Obsidian で開ける Vault ミラーをローカルに生成する:
 - frontmatter 値は YAML double-quoted スカラーへエスケープ（``yaml_quote``）。
 - DB 接続は SSM ポートフォワード前提の --dsn 引数（無ければ DATABASE_URL）。
   実行は人間ゲート（本スクリプトを自動実行しない）。
+- admin DSN は RLS を bypass するため、``--shared-group`` で明示した単一の会社
+  共有ドメインを ``documents.acl_groups`` に持つ行だけを SQL で選ぶ。
+  owner-only / acl_emails-only / acl_groups 空の資料は Vault や静的 ``/app`` に出さない。
+- 静的 ``/app`` は per-user 表示ではなく、指定会社の共有集合ミラー。
+  raw ACL は Vault/frontmatter/HTML へ書き出さない。
 
 Usage:
     # SSM ポートフォワードを張ってから（例: localhost:15432 → RDS）
-    python scripts/export_vault.py --dsn postgresql://user:pass@localhost:15432/db  # dry-run
-    python scripts/export_vault.py --dsn ... --commit                    # ~/AiLaVault へ書き出し
-    python scripts/export_vault.py --dsn ... --out ~/Vaults/aila --commit
-    python scripts/export_vault.py --dsn ... --prune                     # 削除予定も dry-run
-    python scripts/export_vault.py --dsn ... --commit --prune            # 完全 export + 古い生成物削除
-    python scripts/export_vault.py --dsn ... --client 出光興産 --commit  # 1 クライアントだけ
-    python scripts/export_vault.py --dsn ... --limit 5                   # 先頭 5 クライアントのみ
+    python scripts/export_vault.py --dsn postgresql://user:pass@localhost:15432/db \
+        --shared-group vectorinc.co.jp --prune                 # 完全 export + 削除予定の dry-run
+    python scripts/export_vault.py --dsn ... --shared-group vectorinc.co.jp \
+        --commit --prune                                       # 書き出し + 古い生成物削除
+    # ACL 初回移行で 50% 超縮小が確認済みの場合だけ、dry-run/commit の両方へ追加:
+    #   --allow-prune-shrink
+    python scripts/export_vault.py --dsn ... --shared-group vectorinc.co.jp \
+        --out ~/Vaults/aila --commit --prune
+    python scripts/export_vault.py --dsn ... --shared-group vectorinc.co.jp \
+        --client 出光興産 --commit                             # 1 クライアントだけ（prune 不可）
+    python scripts/export_vault.py --dsn ... --shared-group vectorinc.co.jp --limit 5
+
+``--shared-group`` 省略時は ``TEAMAGENT_SHARED_COMPANY_DOMAINS`` の単一値を使える。
+未設定・空・カンマ区切り・不正ドメインは DB を読まず exit 2。
 """
 
 from __future__ import annotations
@@ -66,6 +78,11 @@ _MANIFEST_GENERATOR = "scripts/export_vault.py"
 _GENERATED_BY_FIELD = f"generated_by: {json.dumps(_MANIFEST_GENERATOR)}"
 _MANAGED_DIRS = frozenset({"clients", "docs"})
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+# export は会社共有の「単一 DNS ドメイン」だけを受け取る。複数値の解釈を
+# 呼び出し側ごとに変えないため、カンマ区切りは明示的に拒否する。
+_DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_SHARED_GROUP_RE = re.compile(rf"{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})+")
 
 # OS 禁止文字（Windows 含む）+ 制御文字 + Obsidian の wikilink/タグを壊す文字（[]#^|）。
 _FORBIDDEN_CHARS_RE = re.compile(r'[\\/:*?"<>|\[\]#^\x00-\x1f]+')
@@ -131,6 +148,29 @@ def wikilink(path: str) -> str:
     return f"[[{path}]]"
 
 
+def normalize_shared_group(raw: str | None) -> str:
+    """会社共有 group を SQL パラメータ用の単一 DNS ドメインへ正規化する。
+
+    空、カンマ区切り、内部空白、非 ASCII、DNS ドメインでない値は
+    ``ValueError`` にし、admin DSN 上で意図せず広い集合を出力しない。
+    """
+    if not isinstance(raw, str):
+        raise ValueError("shared group must be a single DNS domain")
+    value = raw.strip().lower()
+    if (
+        not value
+        or "," in value
+        or not value.isascii()
+        or any(ch.isspace() for ch in value)
+        or len(value) > 253
+        or _SHARED_GROUP_RE.fullmatch(value) is None
+    ):
+        raise ValueError(
+            "shared group must be a single valid DNS domain (comma-separated values forbidden)"
+        )
+    return value
+
+
 # タイトル等を本文へ逐語出力する際の Markdown インラインエスケープ（単行想定）。
 # frontmatter は yaml_quote が守るが、H1/見出し/リスト行に出す title は別途退避が要る。
 # リンク/画像/wikilink/HTML/コードを成立させる記号を CommonMark のバックスラッシュ退避で殺す
@@ -166,8 +206,11 @@ def render_claude_md() -> str:
         "- この Vault は **読み取りミラー** です。正（source of truth）は pgvector"
         "（RDS）で、ここでの編集は元データに反映されません。\n"
         f"- 最新の検索は {_SEARCH_URL} を使ってください（RLS 適用・常に最新）。\n"
+        "- この静的ミラーは per-user 表示ではなく、指定会社の共有 group 付き"
+        "資料だけを含みます。owner-only 資料は含みません。\n"
         "- 再生成（上書き更新）: SSM トンネルを張ってから\n"
-        "  `python scripts/export_vault.py --dsn postgresql://...@localhost:15432/... --commit`\n"
+        "  `python scripts/export_vault.py --dsn postgresql://...@localhost:15432/... "
+        "--shared-group <company.example> --commit --prune`\n"
         "- `clients/` はクライアントカルテ（FB 時系列 + 関連資料）、`docs/` は資料 note。\n"
         "- 機密資料を含むため、この Vault を共有フォルダ/リポジトリへ置かないでください。\n"
     )
@@ -346,13 +389,13 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     files: dict[str, str] = {"CLAUDE.md": render_claude_md()}
     doc_path_by_uri: dict[str, str] = {}
 
-    def _claim(prefix: str, base: str) -> str:
+    def _claim(prefix: str, base: str, *, duplicate_separator: str = "_") -> str:
         """files に無い ``{prefix}/{base}`` 系の空きパス（拡張子なし）を返す。"""
         candidate = base
         i = 1
         while f"{prefix}/{candidate}.md" in files:
             i += 1
-            candidate = f"{base}_{i}"
+            candidate = f"{base}{duplicate_separator}{i}"
         return f"{prefix}/{candidate}"
 
     for client, data in sorted(clients.items()):
@@ -390,10 +433,20 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
             #   - gsheets: ナレッジ共有の title は「正式社名 案件名」で行ごとに一意ではない
             #     (実測 142 行中 8 stem が衝突。案件名が空の行は社名だけに潰れて更に衝突する)
             if needs_discriminator:
-                seed = str(doc.get("external_id") or uri or doc.get("title") or "")
-                disc = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+                external_id = str(doc.get("external_id") or "").strip()
+                if not external_id:
+                    raise ValueError(
+                        "external_id is required for gsheets/x_research document filenames"
+                    )
+                disc = hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:16]
                 base = f"{base}-{disc}"
-            doc_path = _claim("docs", base)
+            # 64-bit hash の二次衝突や同じ external_id の重複が起きても、``_2`` にして
+            # build_app_html の chunk 結合へ誤認させない。重複自体は見える形で保持する。
+            doc_path = _claim(
+                "docs",
+                base,
+                duplicate_separator="-dup-" if needs_discriminator else "_",
+            )
             if uri:
                 doc_path_by_uri[uri] = doc_path
             files[f"{doc_path}.md"] = render_doc_note(doc, client, client_path)
@@ -573,20 +626,23 @@ def _plan_prune(
     out_dir: Path,
     previous: dict[str, str],
     current: dict[str, str],
+    *,
+    allow_shrink: bool = False,
 ) -> tuple[list[str], dict[str, str]]:
     """削除可能な stale note と、変更済みのため保持する stale note を分ける。"""
-    stale = sorted(set(previous) - set(current))
-    if not stale:
-        return [], {}
-
     # DB 障害や filter 誤りで空/激減した plan を「全削除」と解釈しない安全弁。
+    # fresh Vault（previous も空）でも prune 付きの空 export は成功扱いにしない。
     if not current:
         raise ValueError("refusing prune: managed Markdown plan is empty")
-    if len(current) * 2 < len(previous):
+    if len(current) * 2 < len(previous) and not allow_shrink:
         raise ValueError(
             "refusing prune: managed Markdown plan is less than 50% of the previous manifest "
             f"({len(current)} < {len(previous)} / 2)"
         )
+
+    stale = sorted(set(previous) - set(current))
+    if not stale:
+        return [], {}
 
     deletions: list[str] = []
     protected: dict[str, str] = {}
@@ -613,6 +669,7 @@ def write_vault(
     commit: bool,
     prune: bool = False,
     complete_export: bool = False,
+    allow_prune_shrink: bool = False,
 ) -> dict[str, int]:
     """計画を Vault へ反映し、明示された完全 export だけ古い生成 note を削除する。
 
@@ -622,6 +679,8 @@ def write_vault(
     """
     if prune and not complete_export:
         raise ValueError("refusing prune for partial export (--client/--limit)")
+    if allow_prune_shrink and not prune:
+        raise ValueError("--allow-prune-shrink requires --prune")
 
     # 1 件でも危険な書込先があれば、何も変更する前に全 plan を拒否する。
     targets = {rel: _safe_target(out_dir, rel) for rel in files}
@@ -642,7 +701,12 @@ def write_vault(
     deletions: list[str] = []
     protected: dict[str, str] = {}
     if prune:
-        deletions, protected = _plan_prune(out_dir, previous_manifest, current_manifest)
+        deletions, protected = _plan_prune(
+            out_dir,
+            previous_manifest,
+            current_manifest,
+            allow_shrink=allow_prune_shrink,
+        )
 
     stats = {
         "planned": len(files),
@@ -694,15 +758,26 @@ def write_vault(
 # -----------------------------------------------------------
 # DB 読み取り部（SELECT のみ・SSM トンネル越し admin DSN 直結）
 # -----------------------------------------------------------
-_CLIENTS_SQL = """
+_SHARED_ACL_SQL = """EXISTS (
+        SELECT 1
+        FROM unnest(d.acl_groups) AS shared_acl(group_name)
+        WHERE lower(btrim(shared_acl.group_name)) = lower(btrim(%s::text))
+    )"""
+# admin DSN は RLS を bypass する。そのため全 SELECT にこの必須謂語を埋め込む。
+# unnest('{}') に行はないので、acl_groups 空や owner/acl_emails だけの document は
+# EXISTS=false の fail-closed になる。ACL 値そのものは SELECT 列に含めない。
+
+_CLIENTS_SQL = f"""
     SELECT DISTINCT name FROM (
         SELECT d.metadata->>'client_name' AS name FROM documents d
         WHERE d.metadata->>'client_name' IS NOT NULL
           AND d.metadata->>'client_name' <> ''
+          AND {_SHARED_ACL_SQL}
         UNION
         SELECT d.metadata->>'cls_project' AS name FROM documents d
         WHERE d.metadata->>'cls_project' IS NOT NULL
           AND d.metadata->>'cls_project' <> ''
+          AND {_SHARED_ACL_SQL}
           -- 施策研究ノート(x_research_tool 付き)の cls_project は「商材/テーマ名」であって
           -- 取引先ではない。取引先タクソノミー(名寄せ/facet/グラフ)を汚さないため client 一覧に
           -- 昇格させない（needs/buzz を未永続化にしたのと同じ姿勢＝名寄せ前は取引先化しない）。
@@ -713,7 +788,7 @@ _CLIENTS_SQL = """
     ORDER BY name
 """
 
-_TIMELINE_SQL = """
+_TIMELINE_SQL = f"""
     SELECT
         COALESCE(c.contextualized, c.content) AS content,
         to_char(d.modified_at, 'YYYY-MM-DD') AS occurred_at,
@@ -729,7 +804,8 @@ _TIMELINE_SQL = """
         d.metadata->>'proposed_menu' AS proposed_menu
     FROM chunks c
     JOIN documents d ON d.id = c.document_id
-    WHERE d.metadata->>'is_sales_fb' = 'true'
+    WHERE {_SHARED_ACL_SQL}
+      AND d.metadata->>'is_sales_fb' = 'true'
       AND d.metadata->>'client_name' LIKE %s
     ORDER BY d.modified_at DESC NULLS LAST, c.chunk_idx DESC
     LIMIT %s
@@ -738,7 +814,7 @@ _TIMELINE_SQL = """
 #   ASC LIMIT だと FB が per_client_limit を超えるクライアントで「最古の N 件」になり、
 #   カルテ frontmatter（最新 deal_phase/bant_score）と時系列が古い値で誤るため。
 
-_DOCUMENTS_SQL_TEMPLATE = """
+_DOCUMENTS_SQL_TEMPLATE = f"""
     SELECT
         d.title,
         d.source_uri,
@@ -775,9 +851,10 @@ _DOCUMENTS_SQL_TEMPLATE = """
                  c.chunk_idx ASC
         LIMIT 1
     ) ex ON true
-    WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+    WHERE {_SHARED_ACL_SQL}
+      AND d.metadata->>'suppressed' IS DISTINCT FROM 'true'
       AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
-      {stale_clause}
+      {{stale_clause}}
       AND (d.metadata->>'cls_project' ILIKE %s
            OR d.metadata->>'client_name' ILIKE %s
            OR d.title ILIKE %s)
@@ -804,6 +881,7 @@ def documents_sql(*, include_stale: bool = False) -> str:
 def load_clients_data(
     dsn: str,
     *,
+    shared_group: str,
     client: str | None = None,
     limit: int | None = None,
     per_client_limit: int = 100,
@@ -811,10 +889,16 @@ def load_clients_data(
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
     """クライアント一覧（client_name ∪ cls_project）→ 各クライアントの FB/資料を読む。
 
-    SELECT のみ（read-only）。--client 指定時はその部分一致 1 件系に絞り、--limit は
-    クライアント数の先頭 N 件キャップ（検証用）。include_stale=False（既定）で
-    metadata.stale='true' の資料を除外する（--include-stale で従来挙動）。
+    SELECT のみ（read-only）。admin DSN が RLS を bypass しても、必須の
+    ``shared_group`` を acl_groups に持つ company-shared document だけを全 3 経路で
+    読む。空/複数/不正 group は DB 接続前に fail-closed。
+
+    --client 指定時はその部分一致 1 件系に絞り、--limit はクライアント数の先頭
+    N 件キャップ（検証用）。include_stale=False（既定）で metadata.stale='true'
+    の資料を除外する（--include-stale で従来挙動）。
     """
+    normalized_group = normalize_shared_group(shared_group)
+
     import psycopg
     from psycopg.rows import dict_row
 
@@ -823,7 +907,8 @@ def load_clients_data(
     clients_data: dict[str, dict[str, list[dict[str, Any]]]] = {}
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(_CLIENTS_SQL)
+            # UNION の 2 枝に同じ shared group パラメータを個別に配線。
+            cur.execute(_CLIENTS_SQL, (normalized_group, normalized_group))
             names = [str(r["name"]) for r in cur.fetchall() if r.get("name")]
         if client:
             needle = client.strip().lower()
@@ -833,12 +918,15 @@ def load_clients_data(
         for name in names:
             like = f"%{name}%"
             with conn.cursor() as cur:
-                cur.execute(_TIMELINE_SQL, [like, per_client_limit])
+                cur.execute(_TIMELINE_SQL, (normalized_group, like, per_client_limit))
                 # DESC で取った最新 N 件を古い順へ戻す（render_client_note の
                 # 「timeline は古い順・末尾＝最新」契約を保つ）
                 timeline = [dict(r) for r in reversed(cur.fetchall())]
             with conn.cursor() as cur:
-                cur.execute(docs_sql, [like, like, like, per_client_limit])
+                cur.execute(
+                    docs_sql,
+                    (normalized_group, like, like, like, per_client_limit),
+                )
                 documents = [dict(r) for r in cur.fetchall()]
             if timeline or documents:
                 clients_data[name] = {"timeline": timeline, "documents": documents}
@@ -869,8 +957,24 @@ def main() -> int:
             "dry-run は削除予定のみ表示（--client/--limit と併用不可）"
         ),
     )
+    p.add_argument(
+        "--allow-prune-shrink",
+        action="store_true",
+        help=(
+            "明示確認済みの大規模移行だけ、prune の前回比50%%ブレーキを解除。"
+            "空 plan は解除不可（--prune 必須）"
+        ),
+    )
     p.add_argument("--limit", type=int, default=None, help="先頭 N クライアントのみ（検証用）")
     p.add_argument("--client", default=None, help="クライアント名の部分一致で絞り込み")
+    p.add_argument(
+        "--shared-group",
+        default=None,
+        help=(
+            "必須: export 対象の単一会社共有ドメイン。省略時は "
+            "TEAMAGENT_SHARED_COMPANY_DOMAINS の単一値"
+        ),
+    )
     p.add_argument(
         "--include-stale",
         action="store_true",
@@ -882,6 +986,24 @@ def main() -> int:
     if args.prune and partial_export:
         print("[ERROR] --prune は --client/--limit と併用できません", file=sys.stderr)
         return 2
+    if args.allow_prune_shrink and not args.prune:
+        print("[ERROR] --allow-prune-shrink は --prune と併用してください", file=sys.stderr)
+        return 2
+
+    shared_group_raw = (
+        args.shared_group
+        if args.shared_group is not None
+        else os.environ.get("TEAMAGENT_SHARED_COMPANY_DOMAINS")
+    )
+    try:
+        shared_group = normalize_shared_group(shared_group_raw)
+    except ValueError as exc:
+        print(
+            "[ERROR] --shared-group に単一の有効な会社ドメインを指定するか、"
+            f"TEAMAGENT_SHARED_COMPANY_DOMAINS を単一値にしてください: {exc}",
+            file=sys.stderr,
+        )
+        return 2
 
     dsn = args.dsn or os.environ.get("DATABASE_URL")
     if not dsn:
@@ -891,7 +1013,11 @@ def main() -> int:
     out_dir = Path(args.out).expanduser()
     try:
         clients_data = load_clients_data(
-            dsn, client=args.client, limit=args.limit, include_stale=args.include_stale
+            dsn,
+            shared_group=shared_group,
+            client=args.client,
+            limit=args.limit,
+            include_stale=args.include_stale,
         )
         files = plan_vault(clients_data)
         stats = write_vault(
@@ -900,6 +1026,7 @@ def main() -> int:
             commit=args.commit,
             prune=args.prune,
             complete_export=not partial_export,
+            allow_prune_shrink=args.allow_prune_shrink,
         )
     except Exception as e:
         print(f"[ERROR] export failed: {e}", file=sys.stderr)

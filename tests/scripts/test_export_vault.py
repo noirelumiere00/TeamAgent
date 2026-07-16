@@ -40,6 +40,7 @@ plan_vault = _mod.plan_vault
 write_vault = _mod.write_vault
 render_doc_note = _mod.render_doc_note
 render_client_note = _mod.render_client_note
+normalize_shared_group = _mod.normalize_shared_group
 
 
 def _manifest_files(out: Path) -> dict[str, str]:
@@ -129,6 +130,41 @@ def test_safe_filename_windows_reserved_names() -> None:
 def test_safe_filename_keeps_japanese() -> None:
     assert safe_filename("出光興産") == "出光興産"
     assert safe_filename("NGK（日本ガイシ）") == "NGK（日本ガイシ）"
+
+
+# ---------------- company-shared ACL input ----------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("vectorinc.co.jp", "vectorinc.co.jp"),
+        ("  VectorInc.CO.JP  ", "vectorinc.co.jp"),
+        ("company.example", "company.example"),
+    ],
+)
+def test_normalize_shared_group_accepts_one_dns_domain(raw: str, expected: str) -> None:
+    assert normalize_shared_group(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "",
+        "   ",
+        "vectorinc.co.jp,other.example",
+        "vectorinc.co.jp,",
+        "vectorinc co.jp",
+        "vectorinc",
+        "https://vectorinc.co.jp",
+        "-bad.example",
+        "会社.example",
+    ],
+)
+def test_normalize_shared_group_rejects_empty_multiple_and_invalid(raw: str | None) -> None:
+    with pytest.raises(ValueError, match="single"):
+        normalize_shared_group(raw)
 
 
 # ---------------- frontmatter / wikilink / tags ----------------
@@ -527,6 +563,50 @@ def test_plan_vault_hashed_multibyte_filename_stays_below_255_bytes() -> None:
     assert len(Path(doc_path).name.encode("utf-8")) <= 255
 
 
+@pytest.mark.parametrize(
+    ("source_type", "extra"),
+    [("gsheets", {}), ("gdrive", {"x_research_tool": "x_voice"})],
+)
+def test_plan_vault_discriminator_sources_require_external_id(
+    source_type: str, extra: dict[str, str]
+) -> None:
+    """安定IDなしでタイトル/URLへ黙って退行せず、欠損データを明示的に止める。"""
+    clients = {
+        "A社": {
+            "timeline": [],
+            "documents": [
+                _doc(
+                    "同名資料",
+                    uri="https://example.invalid/source",
+                    source_type=source_type,
+                    external_id="",
+                    **extra,
+                )
+            ],
+        }
+    }
+    with pytest.raises(ValueError, match="external_id is required"):
+        plan_vault(clients)
+
+
+def test_plan_vault_secondary_discriminator_collision_is_not_chunk_suffix() -> None:
+    """同じ安定IDが重複しても `_2` にせず、HTML の chunk 結合から2件を守る。"""
+    docs = [
+        _doc(
+            "同名資料",
+            uri="",
+            source_type="gsheets",
+            external_id="SHEET:1:2",
+        )
+        for _ in range(2)
+    ]
+    files = plan_vault({"A社": {"timeline": [], "documents": docs}})
+    doc_notes = sorted(p for p in files if p.startswith("docs/"))
+    assert len(doc_notes) == 2
+    assert any("-dup-2.md" in p for p in doc_notes)
+    assert all(not re.search(r"_\d+\.md$", p) for p in doc_notes)
+
+
 def test_plan_vault_gdrive_docs_keep_plain_filenames() -> None:
     """gdrive 等 title が資料名で一意な経路にはハッシュを付けない（既存の見た目を壊さない）。"""
     clients = {
@@ -546,6 +626,43 @@ def test_clients_sql_excludes_research_products_from_client_union() -> None:
     assert "x_research_tool' IS NULL" in sql
     # ガードは cls_project の UNION 枝側に入っている（client_name 枝ではない）
     assert sql.index("x_research_tool' IS NULL") > sql.index("cls_project")
+
+
+def test_all_admin_dsn_select_paths_require_the_same_company_shared_acl() -> None:
+    """client列挙/FB/資料のどの経路も company-shared ACL 謂語を外せない。"""
+    predicate = _mod._SHARED_ACL_SQL
+
+    # client 列挙は UNION 2 枝の両方、timeline/documents は各 1 箇所に必須。
+    assert _mod._CLIENTS_SQL.count(predicate) == 2
+    assert _mod._TIMELINE_SQL.count(predicate) == 1
+    assert _mod._DOCUMENTS_SQL_TEMPLATE.count(predicate) == 1
+    assert _mod._CLIENTS_SQL.count("%s") == 2
+    assert _mod._TIMELINE_SQL.count("%s") == 3
+    assert _mod._DOCUMENTS_SQL_TEMPLATE.count("%s") == 5
+
+    # DB 側値とパラメータの両方で case/周辺空白を無視する。
+    assert "lower(btrim(shared_acl.group_name))" in predicate
+    assert "lower(btrim(%s::text))" in predicate
+
+
+def test_shared_acl_sql_is_fail_closed_for_owner_only_or_empty_acl() -> None:
+    """owner/email の迂回を持たず、空 array は unnest の EXISTS=false になる契約。"""
+    predicate = _mod._SHARED_ACL_SQL
+    assert "EXISTS (" in predicate
+    assert "FROM unnest(d.acl_groups)" in predicate
+    assert "owner_email" not in predicate
+    assert "acl_emails" not in predicate
+    assert " OR " not in predicate.upper()
+    for sql in (_mod._CLIENTS_SQL, _mod._TIMELINE_SQL, _mod._DOCUMENTS_SQL_TEMPLATE):
+        assert "owner_email" not in sql
+        assert "acl_emails" not in sql
+
+
+def test_acl_is_filter_only_and_not_exported_as_raw_data() -> None:
+    """raw ACL は SELECT 列ではなく WHERE 謂語のみ（Vault/HTML へ流さない）。"""
+    for sql in (_mod._TIMELINE_SQL, _mod._DOCUMENTS_SQL_TEMPLATE):
+        select_list = sql.split("FROM", 1)[0]
+        assert "acl_groups" not in select_list
 
 
 def test_documents_sql_selects_external_id_for_research_filenames() -> None:
@@ -788,6 +905,56 @@ def test_prune_refuses_empty_or_abnormally_small_plan_before_writing(
     assert all((out / "clients" / f"C{i}.md").exists() for i in range(6))
 
 
+def test_prune_refuses_empty_managed_plan_on_fresh_vault(tmp_path: Path) -> None:
+    """前回 manifest が無くても空の完全 export を成功扱いにしない。"""
+    out = tmp_path / "vault"
+    with pytest.raises(ValueError, match="managed Markdown plan is empty"):
+        write_vault(
+            out,
+            {"CLAUDE.md": "rules only"},
+            commit=False,
+            prune=True,
+            complete_export=True,
+        )
+    assert not out.exists()
+
+
+def test_explicit_prune_shrink_override_allows_reviewed_large_migration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ACL初回移行は明示override付きdry-runで削除一覧をレビューできる。"""
+    out = tmp_path / "vault"
+    initial = {f"clients/C{i}.md": f"client {i}" for i in range(6)}
+    write_vault(out, initial, commit=True, complete_export=True)
+    capsys.readouterr()
+
+    stats = write_vault(
+        out,
+        {"clients/C0.md": "new 0"},
+        commit=False,
+        prune=True,
+        complete_export=True,
+        allow_prune_shrink=True,
+    )
+    assert stats["delete_planned"] == 5
+    assert stats["deleted"] == 0
+    assert capsys.readouterr().out.count("[dry-run] delete clients/") == 5
+    assert all((out / "clients" / f"C{i}.md").exists() for i in range(6))
+
+
+def test_prune_shrink_override_never_allows_empty_plan(tmp_path: Path) -> None:
+    """override は『空を全削除』まで許可しない。"""
+    with pytest.raises(ValueError, match="managed Markdown plan is empty"):
+        write_vault(
+            tmp_path / "vault",
+            {"CLAUDE.md": "rules only"},
+            commit=False,
+            prune=True,
+            complete_export=True,
+            allow_prune_shrink=True,
+        )
+
+
 @pytest.mark.parametrize("unsafe_rel", ["../outside.md", "other/X.md", "docs/X.txt"])
 def test_prune_rejects_unsafe_manifest_entries_without_deleting(
     tmp_path: Path, unsafe_rel: str
@@ -829,6 +996,18 @@ def test_main_rejects_prune_with_partial_export_before_db_access(
     assert "併用できません" in capsys.readouterr().err
 
 
+def test_main_rejects_prune_shrink_override_without_prune_before_db_access(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["export_vault.py", "--dsn", "postgresql://unused", "--allow-prune-shrink"],
+    )
+    assert _mod.main() == 2
+    assert "--prune と併用" in capsys.readouterr().err
+
+
 # ---------------- timeline の「最新 N 件」契約 ----------------
 
 
@@ -845,13 +1024,14 @@ def test_timeline_sql_fetches_latest_n_desc() -> None:
 def test_load_clients_data_returns_timeline_oldest_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """DESC で届いた最新 N 件を Python 反転で古い順へ戻す（末尾＝最新の契約を保つ）。"""
+    """3 SQL の ACL パラメータ配線と timeline の古い順契約をフェイク DB で固定。"""
     import psycopg
 
     desc_rows = [
         {"occurred_at": "2026-06-15", "deal_phase": "提案"},
         {"occurred_at": "2026-05-01", "deal_phase": "初回接触"},
     ]
+    executions: list[tuple[str, tuple[Any, ...]]] = []
 
     class _Cursor:
         def __init__(self) -> None:
@@ -864,6 +1044,7 @@ def test_load_clients_data_returns_timeline_oldest_first(
             return None
 
         def execute(self, sql: str, params: Any = None) -> None:
+            executions.append((sql, tuple(params or ())))
             if "DISTINCT name" in sql:
                 self._rows = [{"name": "出光興産"}]
             elif "is_sales_fb' = 'true'" in sql:  # _TIMELINE_SQL（DB は新しい順で返す）
@@ -885,7 +1066,92 @@ def test_load_clients_data_returns_timeline_oldest_first(
             return _Cursor()
 
     monkeypatch.setattr(psycopg, "connect", lambda dsn, row_factory=None: _Conn())
-    data = _mod.load_clients_data("postgresql://stub")
+    data = _mod.load_clients_data(
+        "postgresql://stub",
+        shared_group="  VectorInc.CO.JP  ",
+    )
     timeline = data["出光興産"]["timeline"]
     assert [r["occurred_at"] for r in timeline] == ["2026-05-01", "2026-06-15"]  # 古い順
     assert timeline[-1]["deal_phase"] == "提案"  # 末尾＝最新（frontmatter が最新値になる）
+
+    # shared_group は文字列補間せず、正規化した bind parameter で全経路へ渡す。
+    assert [params for _, params in executions] == [
+        ("vectorinc.co.jp", "vectorinc.co.jp"),  # _CLIENTS_SQL UNION 2 枝
+        ("vectorinc.co.jp", "%出光興産%", 100),  # _TIMELINE_SQL
+        ("vectorinc.co.jp", "%出光興産%", "%出光興産%", "%出光興産%", 100),
+    ]
+    assert all("vectorinc.co.jp" not in sql.lower() for sql, _ in executions)
+
+
+@pytest.mark.parametrize("shared_group", ["", " ", "a.example,b.example", "not-a-domain"])
+def test_load_clients_data_rejects_invalid_group_before_db_connect(
+    monkeypatch: pytest.MonkeyPatch,
+    shared_group: str,
+) -> None:
+    """load_clients_data 直呼びでも invalid group を DB に渡さない。"""
+    import psycopg
+
+    def _unexpected_connect(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("invalid shared_group must fail before DB connect")
+
+    monkeypatch.setattr(psycopg, "connect", _unexpected_connect)
+    with pytest.raises(ValueError, match="single"):
+        _mod.load_clients_data("postgresql://stub", shared_group=shared_group)
+
+
+def test_main_missing_shared_group_exits_2_before_db(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", raising=False)
+    monkeypatch.setattr(sys, "argv", ["export_vault.py", "--dsn", "postgresql://stub"])
+    monkeypatch.setattr(
+        _mod,
+        "load_clients_data",
+        lambda *args, **kwargs: pytest.fail("missing shared group must not read DB"),
+    )
+
+    assert _mod.main() == 2
+    assert "--shared-group" in capsys.readouterr().err
+
+
+def test_main_rejects_comma_separated_env_group_before_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", "a.example,b.example")
+    monkeypatch.setattr(sys, "argv", ["export_vault.py", "--dsn", "postgresql://stub"])
+    monkeypatch.setattr(
+        _mod,
+        "load_clients_data",
+        lambda *args, **kwargs: pytest.fail("multiple env groups must not read DB"),
+    )
+
+    assert _mod.main() == 2
+
+
+def test_main_uses_single_env_group_as_safe_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _load(dsn: str, **kwargs: Any) -> dict[str, Any]:
+        captured.update(dsn=dsn, **kwargs)
+        return {}
+
+    monkeypatch.setenv("TEAMAGENT_SHARED_COMPANY_DOMAINS", " VectorInc.CO.JP ")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_vault.py",
+            "--dsn",
+            "postgresql://stub",
+            "--out",
+            str(tmp_path / "vault"),
+        ],
+    )
+    monkeypatch.setattr(_mod, "load_clients_data", _load)
+
+    assert _mod.main() == 0
+    assert captured["shared_group"] == "vectorinc.co.jp"

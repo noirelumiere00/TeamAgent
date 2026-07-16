@@ -80,13 +80,16 @@ def _write_doc(
     title: str | None = None,
     source_type: str = "",
     external_id: str = "",
+    source_url: str = "",
 ) -> None:
     display_title = title or stem
     (vault / "docs" / f"{stem}.md").write_text(
         f'---\ntitle: "{display_title}"\nclient: "{client}"\nindustry: "エネルギー"\n'
         f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "2026-06-01"\n'
         f'source_type: "{source_type}"\nexternal_id: "{external_id}"\n---\n\n'
-        f"> {display_title} の抜粋\n\n[[clients/{client}]]\n",
+        f"> {display_title} の抜粋\n\n"
+        + (f"- 出典: [{source_type or 'source'}]({source_url})\n" if source_url else "")
+        + f"\n[[clients/{client}]]\n",
         encoding="utf-8",
     )
 
@@ -178,6 +181,9 @@ def test_internal_source_identity_not_exposed_in_generated_html(
         title="公開資料",
         source_type="gsheets",
         external_id=external_id,
+        source_url=(
+            "https://docs.google.com/spreadsheets/d/DO-NOT-EXPOSE-SHEET/edit#gid=999&range=777:777"
+        ),
     )
     out = tmp_path / "app.html"
     assert _run(vault, out) == 0
@@ -187,6 +193,8 @@ def test_internal_source_identity_not_exposed_in_generated_html(
     assert f"gsheets:{external_id}" not in html
     assert '"external_id"' not in html
     assert '"source_type"' not in html
+    # クリック用の出典 URL は既存の意図仕様。隠すのは frontmatter の複合安定IDそのもの。
+    assert "docs.google.com/spreadsheets/d/DO-NOT-EXPOSE-SHEET/" in html
 
 
 def test_seikyusho_stem_excluded_without_sidecar_listing(

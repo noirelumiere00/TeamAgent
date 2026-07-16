@@ -756,8 +756,10 @@ def test_export_documents_sql_include_stale_restores_legacy() -> None:
 
 
 def test_export_load_clients_data_defaults_to_exclude_stale() -> None:
-    """load_clients_data の既定は include_stale=False（--include-stale 指定時のみ含める）。"""
+    """stale は既定除外、shared_group は省略不可。"""
     import inspect
 
     sig = inspect.signature(_export_vault.load_clients_data)
     assert sig.parameters["include_stale"].default is False
+    assert sig.parameters["shared_group"].annotation == "str"
+    assert sig.parameters["shared_group"].default is inspect.Parameter.empty
