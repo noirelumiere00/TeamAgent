@@ -5,8 +5,10 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from googleapiclient.errors import HttpError
 
 from teamagent.adapters.gdrive_client import DrivePermission
 from teamagent.ingest.repository import GDriveAclSnapshot, GDriveAclUpdate
@@ -43,9 +45,11 @@ class _FakeClient:
         permissions: dict[str, list[DrivePermission]],
         *,
         fail_on: str | None = None,
+        fail_status: int | None = None,
     ) -> None:
         self.permissions = permissions
         self.fail_on = fail_on
+        self.fail_status = fail_status
         self.calls: list[tuple[str, int, int]] = []
 
     def list_permissions(
@@ -58,17 +62,30 @@ class _FakeClient:
     ) -> list[DrivePermission]:
         self.calls.append((file_id, max_pages, api_retries))
         if file_id == self.fail_on:
+            if self.fail_status is not None:
+                response = SimpleNamespace(status=self.fail_status, reason="sensitive reason")
+                raise HttpError(
+                    response,
+                    b'{"error":{"message":"sensitive permission failure"}}',
+                    uri=f"https://sensitive.example/files/{file_id}",
+                )
             raise RuntimeError(f"sensitive URL for {file_id}")
         return self.permissions[file_id]
 
 
-def _snapshot(index: int, *, company: bool = False) -> GDriveAclSnapshot:
+def _snapshot(
+    index: int,
+    *,
+    company: bool = False,
+    extra_reader: bool = False,
+) -> GDriveAclSnapshot:
     owner = f"person{index}@secret.example"
+    acl_emails = (owner, f"reader{index}@secret.example") if extra_reader else (owner,)
     return GDriveAclSnapshot(
         document_id=f"00000000-0000-0000-0000-{index:012d}",
         external_id=f"drive-secret-{index}",
         owner_email=owner,
-        acl_emails=(owner,),
+        acl_emails=acl_emails,
         acl_groups=(COMPANY,) if company else (),
         row_version=str(1000 + index),
     )
@@ -163,6 +180,159 @@ def test_api_failure_after_partial_collection_is_write_zero_and_pii_safe() -> No
     assert repository.update_calls == []
     assert "drive-secret" not in str(caught.value)
     assert "secret.example" not in str(caught.value)
+
+
+def test_http_404_becomes_pii_safe_owner_only_quarantine_dry_run_and_is_hashed() -> None:
+    snapshots = [
+        _snapshot(1),
+        _snapshot(2, company=True, extra_reader=True),
+        _snapshot(3),
+    ]
+    repository = _FakeRepository(snapshots)
+    client = _client_for(snapshots)
+    client.fail_on = snapshots[1].external_id
+    client.fail_status = 404
+
+    result = _mod.synchronize_gdrive_acl(
+        repository,
+        client,
+        company_domain=COMPANY,
+        request_id="test-request",
+    )
+
+    assert result.committed is False
+    assert result.updated_count == 0
+    assert repository.update_calls == []
+    # 途中の 404 で止めず、後続も列挙して完全な plan を作る。
+    assert [call[0] for call in client.calls] == [snapshot.external_id for snapshot in snapshots]
+    item = result.plan.items[1]
+    assert item.unreachable is True
+    assert item.after_owner == item.before_owner
+    assert item.after_emails == (item.before_owner,)
+    assert item.after_groups == ()
+    assert result.plan.unreachable_count == 1
+    assert result.plan.requires_unreachable_override is True
+
+    summary = _mod.summary_line(result)
+    warnings = "\n".join(_mod.warning_lines(result.plan))
+    assert "unreachable=1" in summary
+    assert "requires_unreachable_override=true" in summary
+    assert "unreachable=1" in warnings
+    for text in (summary, warnings):
+        assert "secret.example" not in text
+        assert "drive-secret" not in text
+
+    # before/after が同じ plan でも unreachable 判定そのものが SHA に束縛される。
+    reachable = _mod.synchronize_gdrive_acl(
+        _FakeRepository(snapshots),
+        _client_for(snapshots),
+        company_domain=COMPANY,
+        request_id="test-request",
+    )
+    assert reachable.plan.items[1].after_emails == item.after_emails
+    assert reachable.plan.items[1].after_groups == item.after_groups
+    assert reachable.plan.plan_sha256 != result.plan.plan_sha256
+
+
+def test_http_404_commit_without_unreachable_override_is_write_zero() -> None:
+    snapshots = [_snapshot(1, extra_reader=True), _snapshot(2), _snapshot(3)]
+    repository = _FakeRepository(snapshots)
+    client = _client_for(snapshots)
+    client.fail_on = snapshots[0].external_id
+    client.fail_status = 404
+    dry_run = _mod.synchronize_gdrive_acl(
+        repository,
+        client,
+        company_domain=COMPANY,
+        request_id="test-request",
+    )
+
+    with pytest.raises(_mod.AclSafetyGuardError, match="allow-unreachable-revoke"):
+        _mod.synchronize_gdrive_acl(
+            repository,
+            client,
+            company_domain=COMPANY,
+            commit=True,
+            expect_plan_sha=dry_run.plan.plan_sha256,
+            allow_company_access_loss=True,
+            allow_mass_acl_change=True,
+            request_id="test-request",
+        )
+
+    assert repository.update_calls == []
+
+
+def test_http_404_commit_requires_unreachable_and_existing_guards_then_quarantines() -> None:
+    snapshots = [_snapshot(1, company=True, extra_reader=True)]
+    repository = _FakeRepository(snapshots)
+    client = _client_for(snapshots)
+    client.fail_on = snapshots[0].external_id
+    client.fail_status = 404
+    dry_run = _mod.synchronize_gdrive_acl(
+        repository,
+        client,
+        company_domain=COMPANY,
+        request_id="test-request",
+    )
+
+    with pytest.raises(_mod.AclSafetyGuardError) as caught:
+        _mod.synchronize_gdrive_acl(
+            repository,
+            client,
+            company_domain=COMPANY,
+            commit=True,
+            expect_plan_sha=dry_run.plan.plan_sha256,
+            allow_unreachable_revoke=True,
+            request_id="test-request",
+        )
+    assert "--allow-company-access-loss" in str(caught.value)
+    assert "--allow-mass-acl-change" in str(caught.value)
+    assert repository.update_calls == []
+
+    committed = _mod.synchronize_gdrive_acl(
+        repository,
+        client,
+        company_domain=COMPANY,
+        commit=True,
+        expect_plan_sha=dry_run.plan.plan_sha256,
+        allow_company_access_loss=True,
+        allow_mass_acl_change=True,
+        allow_unreachable_revoke=True,
+        request_id="test-request",
+    )
+
+    assert committed.updated_count == 1
+    assert len(repository.update_calls) == 1
+    update = repository.update_calls[0][0]
+    assert update.owner_email == snapshots[0].owner_email
+    assert update.acl_emails == (snapshots[0].owner_email,)
+    assert update.acl_groups == ()
+
+
+@pytest.mark.parametrize("status", [403, 429, 500])
+def test_non_404_http_errors_are_write_zero_even_with_all_overrides(status: int) -> None:
+    snapshots = [_snapshot(1, company=True, extra_reader=True)]
+    repository = _FakeRepository(snapshots)
+    client = _client_for(snapshots)
+    client.fail_on = snapshots[0].external_id
+    client.fail_status = status
+
+    with pytest.raises(_mod.PermissionCollectionError) as caught:
+        _mod.synchronize_gdrive_acl(
+            repository,
+            client,
+            company_domain=COMPANY,
+            commit=True,
+            expect_plan_sha="0" * 64,
+            allow_company_access_loss=True,
+            allow_mass_acl_change=True,
+            allow_unreachable_revoke=True,
+            request_id="test-request",
+        )
+
+    assert repository.update_calls == []
+    assert "secret.example" not in str(caught.value)
+    assert "drive-secret" not in str(caught.value)
 
 
 def test_empty_target_cannot_be_overridden() -> None:

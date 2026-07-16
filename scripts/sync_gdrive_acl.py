@@ -4,7 +4,10 @@
 ``owner_email`` / ``acl_emails`` / ``acl_groups`` だけを更新する。本番用の安全契約:
 
 - 既定 dry-run。書込みには ``--commit --expect-plan-sha <dry-runのSHA>`` が必須。
-- API 失敗・permissions ページ打切り・対象 0 件・plan SHA 不一致は override 不可で write 0。
+- permissions.list の HTTP 404 は、保存済み owner だけに ACL を縮小する隔離候補として
+  plan に残す。commit には ``--allow-unreachable-revoke`` が必須。
+- 404 以外の API 失敗・permissions ページ打切り・対象 0 件・plan SHA 不一致は
+  override 不可で write 0。
 - company-domain access loss は ``--allow-company-access-loss`` が無い限り commit を拒否。
 - ACL 変更率 >50% は ``--allow-mass-acl-change`` が無い限り commit を拒否（>30% は警告）。
 - company 共有行が >20% 減る場合は上記 2 override の両方が必要。
@@ -32,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from googleapiclient.errors import HttpError
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
@@ -51,7 +56,7 @@ from teamagent.ingest.repository import (  # noqa: E402
 MASS_CHANGE_WARNING_RATIO = 0.30
 MASS_CHANGE_BLOCK_RATIO = 0.50
 COMPANY_SHARED_DECREASE_BLOCK_RATIO = 0.20
-_PLAN_SCHEMA = "teamagent-gdrive-acl-plan-v1"
+_PLAN_SCHEMA = "teamagent-gdrive-acl-plan-v2"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -101,6 +106,9 @@ class AclPlanItem:
     after_owner: str
     after_emails: tuple[str, ...]
     after_groups: tuple[str, ...]
+    # permissions.list が HTTP 404。削除済み/アクセス剥奪のどちらかは
+    # 区別できないため、識別子を出さず owner-only 隔離候補として扱う。
+    unreachable: bool = False
 
     @property
     def changed(self) -> bool:
@@ -128,6 +136,10 @@ class AclSyncPlan:
     @property
     def changed_count(self) -> int:
         return sum(item.changed for item in self.items)
+
+    @property
+    def unreachable_count(self) -> int:
+        return sum(item.unreachable for item in self.items)
 
     @property
     def change_ratio(self) -> float:
@@ -169,6 +181,10 @@ class AclSyncPlan:
             self.change_ratio > MASS_CHANGE_BLOCK_RATIO
             or self.company_decrease_ratio > COMPANY_SHARED_DECREASE_BLOCK_RATIO
         )
+
+    @property
+    def requires_unreachable_override(self) -> bool:
+        return self.unreachable_count > 0
 
     def updates(self) -> list[GDriveAclUpdate]:
         return [
@@ -225,6 +241,26 @@ def _target_acl(
     return owner, after_emails, after_groups
 
 
+def _is_http_not_found(exc: Exception) -> bool:
+    """Google API の本物の HTTP 404 だけを隔離候補として識別する。"""
+    if not isinstance(exc, HttpError):
+        return False
+    status: object = getattr(exc.resp, "status", None)
+    return status in (404, "404")
+
+
+def _unreachable_target_acl(
+    snapshot: GDriveAclSnapshot,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """404 の項目を保存済み owner-only に縮小する。"""
+    owner = _normalize_one(snapshot.owner_email)
+    if not owner:
+        raise PermissionCollectionError(
+            "unreachable item has an empty stored owner; no rows updated"
+        )
+    return owner, (owner,), ()
+
+
 def _plan_digest(items: list[AclPlanItem], *, company_domain: str) -> str:
     """対象・xmin・before/after ACL を束ねた再現可能 SHA（中身は出力しない）。"""
     payload = {
@@ -235,6 +271,7 @@ def _plan_digest(items: list[AclPlanItem], *, company_domain: str) -> str:
                 "document_id": item.snapshot.document_id,
                 "external_id": item.snapshot.external_id,
                 "row_version": item.snapshot.row_version,
+                "unreachable": item.unreachable,
                 "before": {
                     "owner_email": item.before_owner,
                     "acl_emails": item.before_emails,
@@ -262,7 +299,7 @@ def build_acl_plan(
     max_permission_pages: int = DEFAULT_PERMISSIONS_MAX_PAGES,
     api_retries: int = DEFAULT_GOOGLE_API_RETRIES,
 ) -> AclSyncPlan:
-    """全対象の permissions が揃った場合だけ ACL 計画を返す。"""
+    """permissions が揃うか HTTP 404 を隔離候補化できた場合だけ計画を返す。"""
     normalized_domain = _normalize_one(company_domain)
     if not normalized_domain:
         raise ValueError("company_domain must not be empty")
@@ -271,6 +308,7 @@ def build_acl_plan(
 
     items: list[AclPlanItem] = []
     for snapshot in snapshots:
+        unreachable = False
         try:
             permissions = client.list_permissions(
                 file_id=snapshot.external_id,
@@ -279,17 +317,21 @@ def build_acl_plan(
                 api_retries=api_retries,
             )
         except Exception as exc:
-            # Google の例外文字列には URL/file ID が入ることがあるため連鎖だけ保持し、
-            # 利用者向け message は件数のみの固定文言にする。
-            raise PermissionCollectionError(
-                "permissions enumeration was incomplete; no rows updated"
-            ) from exc
-
-        after_owner, after_emails, after_groups = _target_acl(
-            snapshot,
-            permissions,
-            company_domain=normalized_domain,
-        )
+            if _is_http_not_found(exc):
+                after_owner, after_emails, after_groups = _unreachable_target_acl(snapshot)
+                unreachable = True
+            else:
+                # Google の例外文字列には URL/file ID が入ることがあるため連鎖だけ保持し、
+                # 利用者向け message は件数のみの固定文言にする。
+                raise PermissionCollectionError(
+                    "permissions enumeration was incomplete; no rows updated"
+                ) from exc
+        else:
+            after_owner, after_emails, after_groups = _target_acl(
+                snapshot,
+                permissions,
+                company_domain=normalized_domain,
+            )
         items.append(
             AclPlanItem(
                 snapshot=snapshot,
@@ -299,6 +341,7 @@ def build_acl_plan(
                 after_owner=after_owner,
                 after_emails=after_emails,
                 after_groups=after_groups,
+                unreachable=unreachable,
             )
         )
 
@@ -312,6 +355,7 @@ def validate_commit(
     expect_plan_sha: str | None,
     allow_company_access_loss: bool,
     allow_mass_acl_change: bool,
+    allow_unreachable_revoke: bool = False,
 ) -> None:
     """commit の SHA と安全 override を検証する（DB 書込み前にのみ呼ぶ）。"""
     expected = (expect_plan_sha or "").strip().lower()
@@ -325,6 +369,8 @@ def validate_commit(
         missing.append("--allow-company-access-loss")
     if plan.requires_mass_override and not allow_mass_acl_change:
         missing.append("--allow-mass-acl-change")
+    if plan.requires_unreachable_override and not allow_unreachable_revoke:
+        missing.append("--allow-unreachable-revoke")
     if missing:
         raise AclSafetyGuardError(
             "ACL safety guard blocked commit; required_overrides=" + ",".join(missing)
@@ -340,6 +386,7 @@ def synchronize_gdrive_acl(
     expect_plan_sha: str | None = None,
     allow_company_access_loss: bool = False,
     allow_mass_acl_change: bool = False,
+    allow_unreachable_revoke: bool = False,
     max_permission_pages: int = DEFAULT_PERMISSIONS_MAX_PAGES,
     api_retries: int = DEFAULT_GOOGLE_API_RETRIES,
     request_id: str | None = None,
@@ -362,6 +409,7 @@ def synchronize_gdrive_acl(
         expect_plan_sha=expect_plan_sha,
         allow_company_access_loss=allow_company_access_loss,
         allow_mass_acl_change=allow_mass_acl_change,
+        allow_unreachable_revoke=allow_unreachable_revoke,
     )
     updated = repository.update_gdrive_acls(plan.updates())
     return AclSyncResult(plan=plan, updated_count=updated, committed=True)
@@ -373,12 +421,14 @@ def summary_line(result: AclSyncResult) -> str:
     mode = "commit" if result.committed else "dry-run"
     return (
         f"mode={mode} target={plan.target_count} changed={plan.changed_count} "
-        f"unchanged={plan.target_count - plan.changed_count} updated={result.updated_count} "
+        f"unchanged={plan.target_count - plan.changed_count} unreachable={plan.unreachable_count} "
+        f"updated={result.updated_count} "
         f"change_pct={plan.change_ratio:.2%} company_before={plan.company_before_count} "
         f"company_after={plan.company_after_count} company_loss={plan.company_loss_count} "
         f"company_decrease_pct={plan.company_decrease_ratio:.2%} "
         f"requires_company_override={str(plan.requires_company_override).lower()} "
         f"requires_mass_override={str(plan.requires_mass_override).lower()} "
+        f"requires_unreachable_override={str(plan.requires_unreachable_override).lower()} "
         f"plan_sha256={plan.plan_sha256}"
     )
 
@@ -386,6 +436,11 @@ def summary_line(result: AclSyncResult) -> str:
 def warning_lines(plan: AclSyncPlan) -> list[str]:
     """dry-run 監査で見る件数ベース warning（識別子・email は出さない）。"""
     warnings: list[str] = []
+    if plan.unreachable_count:
+        warnings.append(
+            "[WARN] unreachable Drive items require owner-only ACL quarantine: "
+            f"unreachable={plan.unreachable_count}"
+        )
     if plan.change_ratio > MASS_CHANGE_WARNING_RATIO:
         warnings.append(
             f"[WARN] ACL change ratio exceeds 30%: changed={plan.changed_count} "
@@ -425,6 +480,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--allow-mass-acl-change",
         action="store_true",
         help="対象の 50%% 超が変わる計画をレビュー済みの場合だけ指定",
+    )
+    parser.add_argument(
+        "--allow-unreachable-revoke",
+        action="store_true",
+        help="HTTP 404 の Drive 項目を owner-only ACL に縮小する計画をレビュー済みの場合だけ指定",
     )
     parser.add_argument(
         "--max-permission-pages",
@@ -479,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
             expect_plan_sha=args.expect_plan_sha,
             allow_company_access_loss=args.allow_company_access_loss,
             allow_mass_acl_change=args.allow_mass_acl_change,
+            allow_unreachable_revoke=args.allow_unreachable_revoke,
             max_permission_pages=args.max_permission_pages,
             api_retries=args.api_retries,
         )
