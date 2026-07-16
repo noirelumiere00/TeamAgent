@@ -17,6 +17,7 @@ import importlib.util
 import json
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +137,14 @@ def test_safe_filename_windows_reserved_names() -> None:
 def test_safe_filename_keeps_japanese() -> None:
     assert safe_filename("出光興産") == "出光興産"
     assert safe_filename("NGK（日本ガイシ）") == "NGK（日本ガイシ）"
+
+
+def test_safe_filename_normalizes_unicode_to_nfc() -> None:
+    nfc = "【ベクトル】PR×ショート動画のご提案"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    assert safe_filename(nfd) == nfc
+    assert unicodedata.is_normalized("NFC", safe_filename(nfd))
 
 
 # ---------------- company-shared ACL input ----------------
@@ -433,6 +442,38 @@ def test_plan_vault_dedupes_same_title_different_docs() -> None:
     files = plan_vault(clients)
     assert "docs/提案書.md" in files
     assert "docs/提案書_2.md" in files
+
+
+def test_plan_vault_dedupes_canonically_equivalent_unicode_paths() -> None:
+    """macOS が同一視する NFC/NFD タイトルを別資料として安全に付番する。"""
+    nfc = "【ベクトル】PR×ショート動画のご提案_ANA様"
+    nfd = unicodedata.normalize("NFD", nfc)
+    files = plan_vault(
+        {
+            "ANA": {
+                "timeline": [],
+                "documents": [
+                    _doc(nfd, uri="gdrive://NFD"),
+                    _doc(nfc, uri="gdrive://NFC"),
+                ],
+            }
+        }
+    )
+    doc_notes = sorted(path for path in files if path.startswith("docs/"))
+    assert doc_notes == [f"docs/{nfc}.md", f"docs/{nfc}_2.md"]
+    assert all(unicodedata.is_normalized("NFC", path) for path in doc_notes)
+
+
+def test_plan_vault_dedupes_case_insensitive_paths() -> None:
+    files = plan_vault(
+        {
+            "A社": {"timeline": [], "documents": [_doc("Report", uri="gdrive://UPPER")]},
+            "B社": {"timeline": [], "documents": [_doc("report", uri="gdrive://LOWER")]},
+        }
+    )
+    doc_notes = sorted(path for path in files if path.startswith("docs/"))
+    assert len(doc_notes) == 2
+    assert len({unicodedata.normalize("NFC", path).casefold() for path in doc_notes}) == 2
 
 
 def test_plan_vault_doc_numbering_survives_natural_suffix_names() -> None:
@@ -860,6 +901,28 @@ def test_prune_preserves_unmanaged_markdown_other_dirs_non_md_and_outside_root(
         for path in untouched
         if path.is_relative_to(out)
     )
+
+
+def test_prune_never_unlinks_unicode_alias_of_current_path(tmp_path: Path) -> None:
+    """旧NFD manifestをNFCへ移行しても、macOSで同一inodeの現行noteを消さない。"""
+    out = tmp_path / "vault"
+    nfc = "docs/【ベクトル】提案.md"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    write_vault(out, {nfd: "same content"}, commit=True)
+
+    stats = write_vault(
+        out,
+        {nfc: "same content"},
+        commit=True,
+        prune=True,
+        complete_export=True,
+    )
+
+    assert stats["delete_planned"] == 0
+    assert stats["deleted"] == 0
+    assert (out / nfc).read_text(encoding="utf-8") == "same content"
+    assert set(_manifest_files(out)) == {nfc}
 
 
 def test_first_prune_discovers_and_deletes_legacy_generated_orphans(tmp_path: Path) -> None:

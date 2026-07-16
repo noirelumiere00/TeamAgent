@@ -57,6 +57,7 @@ import hashlib
 import json
 import re
 import sys
+import unicodedata
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -102,12 +103,13 @@ def safe_filename(name: str | None, *, fallback: str = "untitled", max_len: int 
 
     - パストラバーサル対策: ``/`` ``\\`` を ``_`` 化し、先頭/末尾のドットを除去
       （``../etc/passwd`` → ``_etc_passwd``、``..`` → fallback）
+    - Unicode を NFC へ正規化し、macOS で NFC/NFD の別名が同一 inode に潰れるのを防ぐ
     - OS 禁止文字（Windows 含む）・制御文字・wikilink/タグ破壊文字（``[]#^|``）を ``_`` 化
     - 連続空白を 1 個に圧縮・前後空白除去・max_len 文字で切り詰め
     - Windows 予約名（CON/NUL/COM1 等）は末尾 ``_`` を付けて回避
     - 空になったら fallback
     """
-    base = str(name or "").strip()
+    base = unicodedata.normalize("NFC", str(name or "")).strip()
     base = _FORBIDDEN_CHARS_RE.sub("_", base)
     # '..' はセパレータ除去後も念のため残さない（`../../x` → `.._.._x` 対策の二重防御）。
     base = re.sub(r"\.{2,}", "_", base)
@@ -151,6 +153,11 @@ def wikilink(path: str) -> str:
 def source_discriminator(external_id: str) -> str:
     """安定 source ID を filename 用 64-bit hex discriminator へ変換する。"""
     return hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _portable_path_key(path: str) -> str:
+    """macOS/Windows が同一視する Unicode・大文字小文字差を衝突キーへ畳む。"""
+    return unicodedata.normalize("NFC", path).casefold()
 
 
 def normalize_shared_group(raw: str | None) -> str:
@@ -397,17 +404,21 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     ような天然の ``_2`` 名と衝突し、note が黙って上書き消失し wikilink が別資料を指す）。
     """
     files: dict[str, str] = {"CLAUDE.md": render_claude_md()}
+    claimed_path_keys = {_portable_path_key(path) for path in files}
     doc_path_by_uri: dict[str, str] = {}
     doc_path_by_source_key: dict[tuple[str, str], str] = {}
 
     def _claim(prefix: str, base: str, *, duplicate_separator: str = "_") -> str:
-        """files に無い ``{prefix}/{base}`` 系の空きパス（拡張子なし）を返す。"""
+        """portable filesystem 上で未使用の ``{prefix}/{base}`` 系パスを予約して返す。"""
         candidate = base
         i = 1
-        while f"{prefix}/{candidate}.md" in files:
+        path = f"{prefix}/{candidate}"
+        while _portable_path_key(f"{path}.md") in claimed_path_keys:
             i += 1
             candidate = f"{base}{duplicate_separator}{i}"
-        return f"{prefix}/{candidate}"
+            path = f"{prefix}/{candidate}"
+        claimed_path_keys.add(_portable_path_key(f"{path}.md"))
+        return path
 
     for client, data in sorted(clients.items()):
         timeline = list(data.get("timeline") or [])
@@ -696,7 +707,15 @@ def _plan_prune(
             f"({len(current)} < {len(previous)} / 2)"
         )
 
-    stale = sorted(set(previous) - set(current))
+    current_path_keys = {_portable_path_key(rel) for rel in current}
+    # APFS/HFS+ の既定設定では NFC/NFD や大文字小文字だけが異なるパスは同一 inode を
+    # 指し得る。旧manifestの別名を stale として unlink すると、直前に書いた current 側まで
+    # 消してしまうため、portable key が現行集合にある alias は manifest から忘れるだけにする。
+    stale = sorted(
+        rel
+        for rel in set(previous) - set(current)
+        if _portable_path_key(rel) not in current_path_keys
+    )
     if not stale:
         return [], {}
 
