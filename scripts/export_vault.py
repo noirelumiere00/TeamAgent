@@ -248,7 +248,8 @@ def render_client_note(
         f"doc_count: {len(documents)}",
         "---",
         "",
-        f"# {client}",
+        # H1 は本文なので Markdown 記法を退避（client 名の逐語出力での注入を防ぐ）。
+        f"# {md_inline_escape(client)}",
         "",
     ]
     tags = [t for t in (tag_token(client), tag_token(industry)) if t]
@@ -262,8 +263,10 @@ def render_client_note(
         lines.append("（FB の記録はまだありません）")
         lines.append("")
     for row in reversed(timeline):
-        occurred = row.get("occurred_at") or "----"
-        title = str(row.get("title") or "(無題)").replace("\n", " ")
+        # 見出し/リスト/blockquote へ逐語出力する FB 由来テキスト（Slack 本文・LLM 分類）は
+        # md_inline_escape で退避する。frontmatter は yaml_quote が守るためここは本文のみ。
+        occurred = md_inline_escape(row.get("occurred_at") or "----")
+        title = md_inline_escape(row.get("title") or "(無題)")
         lines.append(f"### {occurred} {title}")
         lines.append("")
         pairs = [
@@ -277,11 +280,13 @@ def render_client_note(
         ]
         for label, value in pairs:
             if value:
-                lines.append(f"- {label}: {str(value).replace(chr(10), ' ')}")
+                # label は固定文字列。value（deal_phase/BANT 等＝LLM 分類由来）のみ退避。
+                lines.append(f"- {label}: {md_inline_escape(value)}")
         content = str(row.get("content") or "").strip()
         if content:
             lines.append("")
-            lines.append("> " + content[:300].replace("\n", " "))
+            # blockquote 本文＝Slack メッセージ原文（最も攻撃者到達しやすい）。300字に切ってから退避。
+            lines.append("> " + md_inline_escape(content[:300]))
         link = source_link(row.get("source_uri"), "slack")
         if link:
             lines.append("")
