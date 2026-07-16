@@ -575,7 +575,7 @@ def _source_excluded_stems():
     """source key 除外に一致する現 Vault の stem を返す（旧 Vault は空＝stem 除外へ移行）。"""
     excluded = set()
     for f in DOCS.glob("*.md"):
-        if f"docs/{f.name}" not in ACTIVE_MANAGED_PATHS:
+        if _portable_path_key(f"docs/{f.name}") not in ACTIVE_MANAGED_PATHS:
             continue
         fm = front(f.read_text(errors="replace"))
         if _source_key(fm) in EXCL_SOURCE_KEYS:
@@ -645,7 +645,7 @@ def _compute_chunk_drop():
     groups = defaultdict(list)
     for f in DOCS.glob("*.md"):
         s = f.stem
-        if f"docs/{f.name}" not in ACTIVE_MANAGED_PATHS:
+        if _portable_path_key(f"docs/{f.name}") not in ACTIVE_MANAGED_PATHS:
             continue
         if _is_excluded(s):
             continue
@@ -2077,8 +2077,13 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _portable_path_key(path: str) -> str:
+    """exporter と同じ NFC + casefold で manifest/実ファイルの別名を照合する。"""
+    return unicodedata.normalize("NFC", path).casefold()
+
+
 def _load_active_export_paths(vault: Path) -> set[str]:
-    """直近のACL付き完全exportで生成され、hash一致する公開対象だけを返す。"""
+    """直近のACL付き完全exportで生成され、hash一致する公開対象のportable keyを返す。"""
     manifest = vault / _EXPORT_MANIFEST_NAME
     resolved_vault = vault.resolve()
     if manifest.is_symlink() or manifest.resolve().parent != resolved_vault or not manifest.is_file():
@@ -2100,10 +2105,36 @@ def _load_active_export_paths(vault: Path) -> set[str]:
     active_raw = payload.get("active_files")
     if not isinstance(files, dict) or not isinstance(active_raw, list):
         _die("export manifestのfiles/active_files形式が不正です")
-    if not active_raw or len(active_raw) != len(set(active_raw)):
-        _die("export manifestのactive_filesが空または重複しています")
 
+    manifest_hashes: dict[str, str] = {}
+    manifest_paths: dict[str, str] = {}
+    for rel, expected_hash in files.items():
+        if not isinstance(rel, str) or "\\" in rel:
+            _die(f"export manifestのfiles pathが不正です: {rel!r}")
+        parts = rel.split("/")
+        if (
+            len(parts) != 2
+            or parts[0] not in {"clients", "docs"}
+            or not parts[1]
+            or parts[1] == ".md"
+            or not parts[1].endswith(".md")
+        ):
+            _die(f"export manifestのfiles pathが管理範囲外です: {rel!r}")
+        if not isinstance(expected_hash, str) or _SHA256_RE.fullmatch(expected_hash) is None:
+            _die(f"export manifestのactive hashが不正です: {rel}")
+        key = _portable_path_key(rel)
+        if key in manifest_hashes:
+            _die(
+                "export manifestのfilesにUnicode正規化または大文字小文字の衝突があります: "
+                f"{manifest_paths[key]!r} / {rel!r}"
+            )
+        manifest_hashes[key] = expected_hash
+        manifest_paths[key] = rel
+
+    if not active_raw:
+        _die("export manifestのactive_filesが空または重複しています")
     active: set[str] = set()
+    active_paths: dict[str, str] = {}
     for rel in active_raw:
         if not isinstance(rel, str) or "\\" in rel:
             _die(f"export manifestのactive pathが不正です: {rel!r}")
@@ -2116,10 +2147,37 @@ def _load_active_export_paths(vault: Path) -> set[str]:
             or not parts[1].endswith(".md")
         ):
             _die(f"export manifestのactive pathが管理範囲外です: {rel!r}")
-        expected_hash = files.get(rel)
-        if not isinstance(expected_hash, str) or _SHA256_RE.fullmatch(expected_hash) is None:
+        key = _portable_path_key(rel)
+        if key in active:
+            _die(
+                "export manifestのactive_filesにUnicode正規化または大文字小文字の衝突があります: "
+                f"{active_paths[key]!r} / {rel!r}"
+            )
+        if key not in manifest_hashes:
             _die(f"export manifestのactive hashが不正です: {rel}")
-        target = vault / rel
+        active.add(key)
+        active_paths[key] = rel
+
+    physical_paths: dict[str, Path] = {}
+    physical_relpaths: dict[str, str] = {}
+    for prefix in ("clients", "docs"):
+        for target in (vault / prefix).glob("*.md"):
+            rel = f"{prefix}/{target.name}"
+            key = _portable_path_key(rel)
+            if key in physical_paths:
+                _die(
+                    "Vault内のMarkdownにUnicode正規化または大文字小文字の衝突があります: "
+                    f"{physical_relpaths[key]!r} / {rel!r}"
+                )
+            physical_paths[key] = target
+            physical_relpaths[key] = rel
+
+    for key in active:
+        rel = active_paths[key]
+        target = physical_paths.get(key)
+        if target is None:
+            _die(f"公開対象noteが無いか安全なregular fileではありません: {rel}")
+        parts = rel.split("/")
         expected_parent = resolved_vault / parts[0]
         if (
             target.is_symlink()
@@ -2127,9 +2185,8 @@ def _load_active_export_paths(vault: Path) -> set[str]:
             or target.resolve().parent != expected_parent
         ):
             _die(f"公開対象noteが無いか安全なregular fileではありません: {rel}")
-        if _file_sha256(target) != expected_hash:
+        if _file_sha256(target) != manifest_hashes[key]:
             _die(f"公開対象noteがexport後に変更されています: {rel}。完全exportを再実行してください")
-        active.add(rel)
     return active
 
 
@@ -2245,7 +2302,7 @@ def main(argv: list[str] | None = None) -> int:
     # --- 以下、元スクリプト L149-332 のパイプラインをそのまま実行（ロジック不変） ---
     clients = []
     for f in sorted(CLIENTS.glob("*.md")):
-        if f"clients/{f.name}" not in ACTIVE_MANAGED_PATHS:
+        if _portable_path_key(f"clients/{f.name}") not in ACTIVE_MANAGED_PATHS:
             continue
         if _is_self_org(f.stem) or f.stem in JUNK_CLIENTS:   # 自社(NewsTV)/テスト・ダミーカルテは取引先化しない
             continue
@@ -2280,7 +2337,7 @@ def main(argv: list[str] | None = None) -> int:
 
     docs = []
     for f in sorted(DOCS.glob("*.md")):
-        if f"docs/{f.name}" not in ACTIVE_MANAGED_PATHS:
+        if _portable_path_key(f"docs/{f.name}") not in ACTIVE_MANAGED_PATHS:
             continue
         if _is_excluded(f.stem):  # Agent分類の非ナレッジ+請求書系を除外（空白/_差異も吸収・表示のみ）
             continue
