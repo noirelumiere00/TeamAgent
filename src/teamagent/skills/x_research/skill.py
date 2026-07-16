@@ -33,7 +33,7 @@ from teamagent.adapters.x_task_store import XTaskStore, new_job_id
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.report_delivery import delivery_url
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
-from teamagent.skills._shared.text_safety import sanitize_llm_text
+from teamagent.skills._shared.text_safety import safe_href, sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.x_research.persist_body import build_voice_summary_md
 from teamagent.skills.x_research.report import (
@@ -149,6 +149,22 @@ def _posts_for_prompt(posts: list[XPost], limit_chars: int = 280, *, with_bio: b
         ],
         ensure_ascii=False,
     )
+
+
+def _strip_card_images(cards: list[XPostCard]) -> None:
+    """MCP応答に載せる前にカードから base64 画像を落とす（**HTML生成後に呼ぶこと**）。
+
+    avatar_data/media_data は report.py がサーバ側で HTML を組むためだけの入力で、openclaw の
+    LLM には一切用が無い。載せたままだと応答が 4MB 級になり（実測 4,093,882 bytes）、openclaw が
+    ツール結果を約64KBで打ち切るため **98.4% が黙って捨てられ posts[1:] の url が文脈から消える**。
+    その結果 LLM は handle だけ知っていて status ID を知らない状態になり、実在しない URL を捏造する
+    （2026-07-15 実機事故: `https://x.com/ogu_gourmet/status/[該当投稿]` を営業に提示）。
+
+    画像は S3 のレポートHTML側に残るので、営業が見る成果物の見た目は一切変わらない。
+    """
+    for c in cards:
+        c.avatar_data = ""
+        c.media_data = []
 
 
 def _dedup(posts: list[XPost]) -> list[XPost]:
@@ -553,6 +569,8 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
             searched=len(posts),
         )
         report_url = self._publish_html(html, request_id=ctx.request_id, query=input.product_name)
+        # HTML へ焼き込んだ後に応答から base64 を落とす（切り詰めで url が消えるのを防ぐ）
+        _strip_card_images(cards)
         verified_count = sum(1 for c in cards if c.verified)
         out = XVoiceSearchOutput(
             product_name=input.product_name,
@@ -598,7 +616,15 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
         ]
         for i, p in enumerate(out.posts[:3], 1):
             mark = "" if p.verified else "（⚠️要再確認）"
-            lines.append(f"{i}. @{p.author_handle} ❤️{p.like_count:,}{mark}\n{p.text}")
+            # 投稿URLを必ず添える。handle と本文だけだと、LLM が「表にして」等で本文を書き直す際に
+            # status ID を知らないまま URL 雛形を埋めようとして実在しない URL を捏造する
+            # （2026-07-15 実機事故: `https://x.com/<handle>/status/[該当投稿]`）。
+            # url は Apify actor の生JSON由来なので safe_href（https＋既知SNSホストのみ）を通す。
+            # Slack は http(s) を自動リンク化する＝納品HTMLより配信力が強い面なので、
+            # report.py と同じガードを必ず適用する（素通しすると偽ログインURL等を配信しうる）。
+            safe = safe_href(p.url)
+            url_line = f"\n{safe}" if safe else ""
+            lines.append(f"{i}. @{p.author_handle} ❤️{p.like_count:,}{mark}\n{p.text}{url_line}")
         if out.noise_note:
             lines.append(f"🔎 {sanitize_llm_text(out.noise_note, max_len=200)}")
         if out.report_url:
@@ -732,6 +758,8 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
             searched=len(posts),
         )
         report_url = self._publish_html(html, request_id=ctx.request_id, query=input.theme)
+        # HTML へ焼き込んだ後に応答から base64 を落とす（切り詰めで url が消えるのを防ぐ）
+        _strip_card_images(cards)
         out = XNeedsMiningOutput(
             theme=input.theme,
             posts=cards,
@@ -761,7 +789,12 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
             lines.append(sanitize_llm_text(out.hypothesis_summary))
         top = max(out.posts, key=lambda p: p.like_count, default=None)
         if top is not None:
-            lines.append(f"最大共感: @{top.author_handle} ❤️{top.like_count:,}\n{top.text}")
+            # voice と同じ理由でURLを添える（handle と本文だけだと LLM が status ID を捏造する）。
+            safe = safe_href(top.url)
+            url_line = f"\n{safe}" if safe else ""
+            lines.append(
+                f"最大共感: @{top.author_handle} ❤️{top.like_count:,}\n{top.text}{url_line}"
+            )
         if out.report_url:
             lines.append(f"📄 分類レポート（7日有効）: {out.report_url}")
         if out.warnings:
