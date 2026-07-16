@@ -370,18 +370,28 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
                 # 同一資料は既存 note を再利用（複数クライアントから wikilink される）
                 doc_paths.append(doc_path_by_uri[uri])
                 continue
-            base = safe_filename(doc.get("title"), fallback="document")
+            needs_discriminator = bool(
+                doc.get("x_research_tool") or doc.get("source_type") == "gsheets"
+            )
+            # discriminator 付きは UTF-8 4 byte/文字でも一般的な 255-byte の
+            # filename 上限内に収める（55*4 + '-' + 16hex + '.md' = 240 bytes）。
+            base = safe_filename(
+                doc.get("title"),
+                fallback="document",
+                max_len=55 if needs_discriminator else 80,
+            )
             # タイトルが行ごとに一意でない経路は、衝突すると _claim が `_2` を振る →
             # build_app_html の _chunk_key が `_2` を分割断片とみなして /app から握り潰す。
-            # document ごとに一意な external_id 由来の短ハッシュを付けて衝突自体を無くす
+            # document ごとに一意な external_id 由来の 64-bit discriminator を付けて
+            # 衝突自体を無くす（8 hex/32-bit は実際に衝突する入力があるため使わない）。
             # (`-` 区切りなので `_N` 束ねに当たらない)。stem は内部キーで、UI は title を出す
             # (build_app_html の IDX/dByStem) ため表示は汚れない。対象:
             #   - x_research_tool: 「商材名 Xの声集め」等で別owner/別研究が衝突
             #   - gsheets: ナレッジ共有の title は「正式社名 案件名」で行ごとに一意ではない
             #     (実測 142 行中 8 stem が衝突。案件名が空の行は社名だけに潰れて更に衝突する)
-            if doc.get("x_research_tool") or doc.get("source_type") == "gsheets":
+            if needs_discriminator:
                 seed = str(doc.get("external_id") or uri or doc.get("title") or "")
-                disc = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+                disc = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
                 base = f"{base}-{disc}"
             doc_path = _claim("docs", base)
             if uri:

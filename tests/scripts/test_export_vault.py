@@ -438,9 +438,9 @@ def test_plan_vault_research_docs_get_collision_proof_filenames() -> None:
     files = plan_vault(clients)
     doc_notes = sorted(p for p in files if p.startswith("docs/"))
     assert len(doc_notes) == 2  # 2 研究 = 2 note（サイレント消失しない）
-    # `_N` サフィックスではなく `-<hash8>` で分岐（_chunk_key の束ねに当たらない）
+    # `_N` サフィックスではなく `-<hash16>` で分岐（_chunk_key の束ねに当たらない）
     assert all(not re.search(r"_\d+\.md$", p) for p in doc_notes)
-    assert all(re.search(r"-[0-9a-f]{8}\.md$", p) for p in doc_notes)
+    assert all(re.search(r"-[0-9a-f]{16}\.md$", p) for p in doc_notes)
 
 
 def test_plan_vault_gsheets_knowledge_rows_get_collision_proof_filenames() -> None:
@@ -449,7 +449,7 @@ def test_plan_vault_gsheets_knowledge_rows_get_collision_proof_filenames() -> No
     #215 で title を「row N」から「正式社名 案件名」へ変えた結果、同一クライアントの同一案件で
     複数回共有された行 (この運用では常態) が同名になる。実シート 142 行の実測で 8 stem が衝突し、
     案件名が空の行は社名だけに潰れて更に衝突していた。`_2` が振られると _chunk_key の束ねで
-    2 件目以降が /app から無言で消えるため、x_research と同じ `-<hash8>` 分岐で回避する。
+    2 件目以降が /app から無言で消えるため、x_research と同じ `-<hash16>` 分岐で回避する。
     """
     clients = {
         "小林製薬": {
@@ -475,7 +475,56 @@ def test_plan_vault_gsheets_knowledge_rows_get_collision_proof_filenames() -> No
     doc_notes = sorted(p for p in files if p.startswith("docs/"))
     assert len(doc_notes) == 2  # 2 行 = 2 note（サイレント消失しない）
     assert all(not re.search(r"_\d+\.md$", p) for p in doc_notes)
-    assert all(re.search(r"-[0-9a-f]{8}\.md$", p) for p in doc_notes)
+    assert all(re.search(r"-[0-9a-f]{16}\.md$", p) for p in doc_notes)
+
+
+def test_plan_vault_uses_more_than_32_bits_for_known_hash8_collision() -> None:
+    """同じ8hexになる実入力でも別stemになり、`_2` へ退行しない。"""
+    clients = {
+        "A社": {
+            "timeline": [],
+            "documents": [
+                _doc(
+                    "同名資料",
+                    uri="",
+                    source_type="gsheets",
+                    external_id="SHEET:278789217:91713",
+                ),
+                _doc(
+                    "同名資料",
+                    uri="",
+                    source_type="gsheets",
+                    external_id="SHEET:278789217:98197",
+                ),
+            ],
+        }
+    }
+    files = plan_vault(clients)
+    doc_notes = sorted(p for p in files if p.startswith("docs/"))
+    assert len(doc_notes) == 2
+    assert all(re.search(r"-[0-9a-f]{16}\.md$", p) for p in doc_notes)
+    assert {p.rsplit("-", 1)[-1][:8] for p in doc_notes} == {"24899ad1"}
+    assert len({p.rsplit("-", 1)[-1][:16] for p in doc_notes}) == 2
+
+
+def test_plan_vault_hashed_multibyte_filename_stays_below_255_bytes() -> None:
+    files = plan_vault(
+        {
+            "A社": {
+                "timeline": [],
+                "documents": [
+                    _doc(
+                        "😀" * 80,
+                        uri="",
+                        source_type="gsheets",
+                        external_id="SHEET:1:2",
+                    )
+                ],
+            }
+        }
+    )
+    [doc_path] = [p for p in files if p.startswith("docs/")]
+    assert len(Path(doc_path).name.encode("utf-8")) <= 255
 
 
 def test_plan_vault_gdrive_docs_keep_plain_filenames() -> None:
