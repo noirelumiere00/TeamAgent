@@ -118,9 +118,15 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             return str(url) if url else None
         if not os.environ.get("VSEO_REPORT_BUCKET"):
             return None
-        from teamagent.adapters.report_publish import publish_html_file
+        from teamagent.adapters.report_publish import publish_html_file_result
+        from teamagent.skills._shared.report_delivery import delivery_url
 
-        return publish_html_file(path, request_id=request_id, query=query)
+        result = publish_html_file_result(path, request_id=request_id, query=query)
+        if result is None:
+            return None
+        # 配信URLの判断は全 skill 共通のチョークポイントへ（openclaw が presigned のクエリを
+        # 落として壊す事象は本 skill のレポートでも同じく起きるため x_research と同じ扱いにする）。
+        return delivery_url(result, request_id=request_id)
 
     # ---- TikTok面 --------------------------------------------------------------
 

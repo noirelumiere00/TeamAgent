@@ -514,9 +514,15 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             return self._publisher(path, request_id=request_id, query=query)
         if not os.environ.get("VSEO_REPORT_BUCKET"):
             return None
-        from teamagent.adapters.report_publish import publish_html_file
+        from teamagent.adapters.report_publish import publish_html_file_result
+        from teamagent.skills._shared.report_delivery import delivery_url
 
-        return publish_html_file(path, request_id=request_id, query=query)
+        result = publish_html_file_result(path, request_id=request_id, query=query)
+        if result is None:
+            return None
+        # 配信URLの判断は全 HTML レポート共通のチョークポイントへ（openclaw が presigned の
+        # クエリを落として壊す事象は本 skill のレポートでも同じく起きる）。
+        return delivery_url(result, request_id=request_id)
 
     def _build_proposal_outputs(
         self, out: VideoAlgorithmOutput, input: VideoAlgorithmInput, request_id: str

@@ -31,6 +31,7 @@ from teamagent.adapters.apify_client import ApifyClient, ApifyError, XPost
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
 from teamagent.adapters.x_task_store import XTaskStore, new_job_id
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.report_delivery import delivery_url
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -186,19 +187,6 @@ def _voice_dedup_key(inp: XVoiceSearchInput) -> str:
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
 
 
-def _report_shorturl_enabled() -> bool:
-    """USE_REPORT_SHORTURL: レポートを短縮URL(/r)で配布する段階ゲート（既定 OFF）。
-
-    connect-web に /r ルート＋vseo-s3-read が揃い、**実機 /r をリダイレクト追従して最終 200
-    （＝S3 GetObject が実際に成功する）**を確認した後に ON にする。302 だけでは不十分:
-    presign はローカル署名操作なので GetObject 権限が無くても 302 は返り、権限不足は 302 を
-    追った S3 取得時に 403 として初めて顕在化する（bootstrap_vseo_s3_iam.sh が IAM 認可を
-    simulate-principal-policy で実証する）。揃う前に ON にすると受信者側で 404/403 に劣化する
-    ため、OFF の間は従来 presigned を返す。
-    """
-    return os.environ.get("USE_REPORT_SHORTURL", "").strip().lower() in ("1", "true", "yes", "on")
-
-
 class _XSyncBase:
     """①②共通の部品（Apify/Bedrock/publisher の遅延生成と注入可能化）。"""
 
@@ -251,26 +239,9 @@ class _XSyncBase:
         result = publish_html_file_result(path, request_id=request_id, query=query)
         if result is None:
             return None
-        # openclaw(@AiLa) が長い presigned URL のクエリ(?X-Amz-Signature…)を削って壊すため、
-        # クエリ無しの短縮URL /r/<token> を返す（/r が都度新鮮な presigned へ 302）。ただし
-        # 段階ゲート: USE_REPORT_SHORTURL=on・署名鍵あり・CONNECT_BASE_URL あり の3条件が
-        # 揃った時だけ短縮URL化。揃う前（connect-web に /r+S3権限が無い/鍵不一致）に出すと
-        # 404/403 に劣化するため、既定は従来 presigned のまま（後方互換・安全側）。
-        from teamagent.adapters.report_link_token import (
-            encode_report_token,
-            has_secret,
-            is_allowed_key,
-        )
-        from teamagent.skills.knowledge_search_url.skill import connect_base_url
-
-        base = connect_base_url()
-        if base and _report_shorturl_enabled() and has_secret() and is_allowed_key(result.key):
-            try:
-                token = encode_report_token(result.bucket, result.key, region=result.region)
-                return f"{base}/r/{token}"
-            except Exception:
-                logger.warning("x_research_short_url_failed", request_id=request_id)
-        return result.url
+        # 配信URLの判断（短縮URL /r か presigned か）は全 skill 共通のチョークポイントへ委譲。
+        # 前提が欠けた時に「名指しで警告してから presigned へ落とす」のもそちら側の責務。
+        return delivery_url(result, request_id=request_id)
 
     def _search_parallel(
         self,
