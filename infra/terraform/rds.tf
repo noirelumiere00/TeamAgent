@@ -39,8 +39,9 @@ resource "aws_db_parameter_group" "main" {
   # SSL 接続を強制（Sprint 2 / 2.7 セキュリティ）
   # rds.force_ssl=1 で TLS 必須化。接続側は sslmode=require 以上
   parameter {
-    name  = "rds.force_ssl"
-    value = "1"
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
   }
 }
 
