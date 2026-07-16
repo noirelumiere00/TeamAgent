@@ -26,6 +26,7 @@ import importlib.util
 import json
 import re
 import sys
+import unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -134,6 +135,25 @@ def _write_test_export_manifest(
     (vault / ".export-vault-manifest.json").write_text(
         json.dumps(payload, ensure_ascii=False), encoding="utf-8"
     )
+
+
+def _rewrite_manifest_path_spelling(vault: Path, desired_rel: str) -> None:
+    """portable aliasが同じ1 entryを、manifest上だけ指定の表記へ置き換える。"""
+    manifest = vault / ".export-vault-manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    alias_key = unicodedata.normalize("NFC", desired_rel).casefold()
+    aliases = [
+        rel for rel in payload["files"] if unicodedata.normalize("NFC", rel).casefold() == alias_key
+    ]
+    assert len(aliases) == 1
+    digest = payload["files"].pop(aliases[0])
+    payload["files"][desired_rel] = digest
+    payload["active_files"] = [
+        rel
+        for rel in payload["active_files"]
+        if unicodedata.normalize("NFC", rel).casefold() != alias_key
+    ] + [desired_rel]
+    manifest.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def _run(vault: Path, out: Path, *extra: str, refresh_manifest: bool = True) -> int:
@@ -280,6 +300,155 @@ def test_unmanaged_and_inactive_notes_never_enter_html(
     assert "絶対に公開しない手作業資料" not in html
     stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
     assert stats["docs"] == 3
+
+
+def test_manifest_membership_matches_nfc_to_nfd_filesystem_name(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """manifestのNFC pathとreaddirで得るNFD名を同じ公開対象として照合する。"""
+    nfc_stem = "Café提案"
+    nfd_stem = unicodedata.normalize("NFD", nfc_stem)
+    assert nfc_stem != nfd_stem
+    _write_doc(vault, nfc_stem, title="Unicode正規化対象資料")
+    source = vault / "docs" / f"{nfc_stem}.md"
+    physical = vault / "docs" / f"{nfd_stem}.md"
+    if not physical.exists():
+        source.rename(physical)
+
+    _write_test_export_manifest(vault)
+    nfc_rel = f"docs/{nfc_stem}.md"
+    _rewrite_manifest_path_spelling(vault, nfc_rel)
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out, refresh_manifest=False) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "Unicode正規化対象資料" in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 4
+
+
+def test_nfd_filesystem_name_still_uses_source_identity_exclusion(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """NFD名でもactive判定を通し、source key除外を取りこぼさない。"""
+    nfc_stem = "Café除外"
+    nfd_stem = unicodedata.normalize("NFD", nfc_stem)
+    _write_doc(
+        vault,
+        nfc_stem,
+        title="非公開のUnicode資料",
+        source_type="gsheets",
+        external_id="SHEET1:278789217:53",
+    )
+    source = vault / "docs" / f"{nfc_stem}.md"
+    physical = vault / "docs" / f"{nfd_stem}.md"
+    if not physical.exists():
+        source.rename(physical)
+    _write_test_export_manifest(vault)
+    _rewrite_manifest_path_spelling(vault, f"docs/{nfc_stem}.md")
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out, refresh_manifest=False) == 0
+    assert "非公開のUnicode資料" not in out.read_text(encoding="utf-8")
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 3
+
+
+def test_nfd_filesystem_names_still_fold_legacy_chunks(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """NFD名でもactive判定を通し、旧 `_2` 分割断片を二重公開しない。"""
+    nfc_base = "Café分割"
+    stems_and_titles = (
+        (nfc_base, "Unicode分割の先頭"),
+        (f"{nfc_base}_2", "Unicode分割の後続"),
+    )
+    for nfc_stem, title in stems_and_titles:
+        _write_doc(vault, nfc_stem, title=title)
+        nfd_stem = unicodedata.normalize("NFD", nfc_stem)
+        source = vault / "docs" / f"{nfc_stem}.md"
+        physical = vault / "docs" / f"{nfd_stem}.md"
+        if not physical.exists():
+            source.rename(physical)
+    _write_test_export_manifest(vault)
+    for nfc_stem, _ in stems_and_titles:
+        _rewrite_manifest_path_spelling(vault, f"docs/{nfc_stem}.md")
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out, refresh_manifest=False) == 0
+    html = out.read_text(encoding="utf-8")
+    assert "Unicode分割の先頭" in html
+    assert "Unicode分割の後続" not in html
+    stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
+    assert stats["docs"] == 4
+
+
+@pytest.mark.parametrize(
+    ("manifest_stem", "alias_stem"),
+    [
+        ("Café提案", unicodedata.normalize("NFD", "Café提案")),
+        ("Report", "report"),
+    ],
+)
+def test_manifest_portable_alias_collision_fails_closed(
+    manifest_stem: str,
+    alias_stem: str,
+    sidecars: Path,
+    vault: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """NFC/NFD・大小文字aliasを持つ曖昧なmanifestは公開前に拒否する。"""
+    _write_doc(vault, manifest_stem)
+    _write_test_export_manifest(vault)
+    manifest = vault / ".export-vault-manifest.json"
+    manifest_rel = f"docs/{manifest_stem}.md"
+    alias_rel = f"docs/{alias_stem}.md"
+    _rewrite_manifest_path_spelling(vault, manifest_rel)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    digest = payload["files"][manifest_rel]
+    payload["files"][alias_rel] = digest
+    payload["active_files"].append(alias_rel)
+    manifest.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+    assert "衝突" in capsys.readouterr().err
+
+
+def test_physical_unicode_alias_collision_fails_closed(
+    sidecars: Path,
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """readdirがNFC/NFDの2名を返しても二重公開しない。"""
+    nfc_stem = "Café提案"
+    nfd_stem = unicodedata.normalize("NFD", nfc_stem)
+    _write_doc(vault, nfc_stem)
+    _write_test_export_manifest(vault)
+
+    original_glob = Path.glob
+    actual = next(
+        path
+        for path in original_glob(vault / "docs", "*.md")
+        if unicodedata.normalize("NFC", path.name).casefold()
+        == unicodedata.normalize("NFC", f"{nfc_stem}.md").casefold()
+    )
+    injected_name = f"{nfd_stem}.md" if actual.name == f"{nfc_stem}.md" else f"{nfc_stem}.md"
+
+    def _glob_with_unicode_alias(path: Path, pattern: str):
+        found = list(original_glob(path, pattern))
+        if path == vault / "docs" and pattern == "*.md":
+            found.append(path / injected_name)
+        return iter(found)
+
+    monkeypatch.setattr(Path, "glob", _glob_with_unicode_alias)
+
+    with pytest.raises(SystemExit):
+        _run(vault, tmp_path / "app.html", refresh_manifest=False)
+    assert "Vault内のMarkdown" in capsys.readouterr().err
 
 
 def test_active_note_modified_after_export_fails_loud(
