@@ -1,35 +1,79 @@
-# CodeBuild buildspec（teamagent-mcp イメージ）。
-# codebuild.tf のインライン buildspec を git 管理下に出したもの＋機密 app.html の S3 注入。
-# 使い方: aws codebuild start-build --buildspec-override infra/codebuild/buildspec.yml
+# CodeBuild buildspec for the teamagent-mcp candidate image.
+# Terraform reads this file directly; do not duplicate it inline.
 #
-# 【なぜ S3 注入か】connect-web の /app 用 app.html は機密（BANT/営業FB/カルテ埋め込み）で
-#   git 管理外（.gitignore）。git 由来のどのビルドでも /app が実 UI を出せるよう、ビルド時に
-#   private S3(codebuild/ プレフィックス=既存 CodeBuild ロールの s3:GetObject 範囲・新規IAM不要)
-#   から取得してビルドコンテキストへ置く。→ どのイメージにも /app が焼き込まれる。
-#
-# 【堅牢性(H3)】S3 優先で取得。S3 に無ければ source.zip 同梱の app.html を使う（統合デプロイ
-#   スクリプトは zip に手元 html を含める belt-and-suspenders）。S3 にも zip にも無い時だけ
-#   fail-loud（exit 1）。無言で「準備中」プレースホルダに劣化させない。
+# app.html remains a private S3 hot-swap input. S3 is preferred, with the
+# archive copy as a fail-loud fallback for the existing deployment contract.
 version: 0.2
 phases:
   pre_build:
     commands:
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+      - |
+        set -euo pipefail
+        : "${GIT_COMMIT:?GIT_COMMIT must be explicitly provided}"
+        : "${GIT_BRANCH:?GIT_BRANCH must be explicitly provided}"
+        : "${IMAGE_TAG:?IMAGE_TAG must be explicitly provided}"
+        : "${WITH_SCRAPE_TOOLS:?WITH_SCRAPE_TOOLS must be explicitly provided}"
+        [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: invalid GIT_COMMIT"; exit 1; }
+        [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "FATAL: unsafe IMAGE_TAG"; exit 1; }
+        [[ "$WITH_SCRAPE_TOOLS" == "true" || "$WITH_SCRAPE_TOOLS" == "false" ]] || { echo "FATAL: WITH_SCRAPE_TOOLS must be true or false"; exit 1; }
+        python3 infra/codebuild/source_provenance.py verify-source \
+          --source-root "$CODEBUILD_SRC_DIR" \
+          --manifest "$CODEBUILD_SRC_DIR/.teamagent-source-manifest.json" \
+          --expected-commit "$GIT_COMMIT" \
+          --expected-branch "$GIT_BRANCH" \
+          --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS"
+        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+          | docker login --username AWS --password-stdin "$ECR_REGISTRY"
   build:
     commands:
-      - mkdir -p src/teamagent/connect_web/static
       - |
+        set -euo pipefail
+        mkdir -p src/teamagent/connect_web/static
         if aws s3 cp s3://teamagent-dev-raw-files/codebuild/connect-web-app.html src/teamagent/connect_web/static/app.html; then
           echo "app.html <- S3 ($(du -h src/teamagent/connect_web/static/app.html | cut -f1))"
         elif [ -s src/teamagent/connect_web/static/app.html ]; then
-          echo "S3 miss -> source.zip 同梱の app.html を使用 ($(du -h src/teamagent/connect_web/static/app.html | cut -f1))"
+          echo "S3 miss -> source archive app.html ($(du -h src/teamagent/connect_web/static/app.html | cut -f1))"
         else
-          echo "FATAL: app.html が S3 にも source にも無い（S3へ配置するか統合スクリプトでzip同梱せよ）"; exit 1
+          echo "FATAL: app.html is absent from both S3 and the source archive"
+          exit 1
         fi
-      - echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m)"
-      - docker build -f infra/docker/Dockerfile.teamagent-mcp --build-arg WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS --build-arg GIT_COMMIT="$GIT_COMMIT" --build-arg GIT_BRANCH="$GIT_BRANCH" -t $MCP_REPO:$IMAGE_TAG .
+        echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m), WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS"
+        docker build \
+          -f infra/docker/Dockerfile.teamagent-mcp \
+          --build-arg "WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS" \
+          --build-arg "GIT_COMMIT=$GIT_COMMIT" \
+          --build-arg "GIT_BRANCH=$GIT_BRANCH" \
+          -t "$MCP_REPO:$IMAGE_TAG" \
+          .
+        BUILT_REVISION="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$MCP_REPO:$IMAGE_TAG")"
+        [ "$BUILT_REVISION" = "$GIT_COMMIT" ] || { echo "FATAL: local OCI revision label mismatch"; exit 1; }
+        BUILT_SCRAPE_TOOLS="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.with-scrape-tools" }}' "$MCP_REPO:$IMAGE_TAG")"
+        [ "$BUILT_SCRAPE_TOOLS" = "$WITH_SCRAPE_TOOLS" ] || { echo "FATAL: local OCI scrape-tools label mismatch"; exit 1; }
   post_build:
     commands:
-      - docker push $MCP_REPO:$IMAGE_TAG
-      - aws ecr describe-images --repository-name teamagent-mcp --image-ids imageTag=$IMAGE_TAG --query 'imageDetails[0].imageDigest' --output text | tee /tmp/digest.txt
-      - echo "MCP_DIGEST=$(cat /tmp/digest.txt)"
+      - |
+        set -euo pipefail
+        docker push "$MCP_REPO:$IMAGE_TAG"
+        ECR_REPOSITORY="${MCP_REPO##*/}"
+        DIGEST="$(aws ecr describe-images \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-ids "imageTag=$IMAGE_TAG" \
+          --query 'imageDetails[0].imageDigest' \
+          --output text)"
+        [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid ECR digest"; exit 1; }
+        aws ecr wait image-scan-complete \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-id "imageDigest=$DIGEST"
+        aws ecr describe-image-scan-findings \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-id "imageDigest=$DIGEST" \
+          --output json > /tmp/teamagent-ecr-scan.json
+        python3 infra/codebuild/verify_ecr_scan.py \
+          --scan /tmp/teamagent-ecr-scan.json \
+          --exceptions infra/codebuild/ecr_scan_exceptions.json \
+          --expected-image-digest "$DIGEST" \
+          --expected-repository "$ECR_REPOSITORY"
+        echo "MCP_DIGEST=$DIGEST"

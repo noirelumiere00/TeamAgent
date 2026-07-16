@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "stale_exception_policy": "fail",
+  "exceptions": [
+    {
+      "cve": "CVE-2026-5450",
+      "severity": "CRITICAL",
+      "package": "glibc",
+      "version": "2.41-12+deb13u3",
+      "owner": "teamagent-maintainers",
+      "reason": "Debian stable未修正。到達に必要な任意コード・ローカルファイル注入を許可せず非root実行を維持し、修正版公開後にbase imageを更新する。",
+      "expires_on": "2026-08-16"
+    },
+    {
+      "cve": "CVE-2026-5928",
+      "severity": "HIGH",
+      "package": "glibc",
+      "version": "2.41-12+deb13u3",
+      "owner": "teamagent-maintainers",
+      "reason": "Debian stable未修正。到達に必要な任意コード・ローカルファイル注入を許可せず非root実行を維持し、修正版公開後にbase imageを更新する。",
+      "expires_on": "2026-08-16"
+    },
+    {
+      "cve": "CVE-2026-11824",
+      "severity": "HIGH",
+      "package": "sqlite3",
+      "version": "3.46.1-7+deb13u1",
+      "owner": "teamagent-maintainers",
+      "reason": "Debian stable未修正。攻撃者提供のSQLite DBファイルを実行時に受け取らず非root実行を維持し、修正版公開後にbase imageを更新する。",
+      "expires_on": "2026-08-16"
+    },
+    {
+      "cve": "CVE-2026-11822",
+      "severity": "HIGH",
+      "package": "sqlite3",
+      "version": "3.46.1-7+deb13u1",
+      "owner": "teamagent-maintainers",
+      "reason": "Debian stable未修正。攻撃者提供のSQLite DBファイルを実行時に受け取らず非root実行を維持し、修正版公開後にbase imageを更新する。",
+      "expires_on": "2026-08-16"
+    }
+  ]
+}
