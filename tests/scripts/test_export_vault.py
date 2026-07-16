@@ -638,6 +638,47 @@ def test_first_prune_discovers_and_deletes_legacy_generated_orphans(tmp_path: Pa
     assert not (out / "docs" / "旧資料.md").exists()
 
 
+def test_first_prune_discovers_legacy_gsheets_note_without_entities(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """実Vaultの旧 row note（entities 導入前）も強い本文構造で生成物と判定する。"""
+    out = tmp_path / "vault"
+    legacy_path = out / "docs" / "小林製薬 熱さまシート row 53.md"
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        """---
+title: "小林製薬 熱さまシート"
+doc_type: "提案書"
+client: "小林製薬"
+industry: "製薬"
+solution: "タテガタ"
+modified_at: "2026-06-01"
+---
+
+# 小林製薬 熱さまシート
+
+> 旧ファイル記録シート row 53 の抜粋
+
+- 出典: [gsheets](https://docs.google.com/spreadsheets/d/S1/edit#gid=1&range=53:53)
+- 取引先: [[clients/小林製薬]]
+""",
+        encoding="utf-8",
+    )
+    assert "entities:" not in legacy_path.read_text(encoding="utf-8")
+    current = plan_vault({"新会社": {"timeline": [], "documents": [_doc("新資料")]}})
+
+    stats = write_vault(out, current, commit=False, prune=True, complete_export=True)
+    assert stats["delete_planned"] == 1
+    assert stats["deleted"] == 0
+    assert "[dry-run] delete docs/小林製薬 熱さまシート row 53.md" in capsys.readouterr().out
+    assert legacy_path.exists()
+
+    stats = write_vault(out, current, commit=True, prune=True, complete_export=True)
+    assert stats["delete_planned"] == 1
+    assert stats["deleted"] == 1
+    assert not legacy_path.exists()
+
+
 def test_prune_skips_manifest_owned_note_modified_after_export(tmp_path: Path) -> None:
     out = tmp_path / "vault"
     write_vault(

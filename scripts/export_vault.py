@@ -527,8 +527,15 @@ def _looks_like_generated_note(path: Path, prefix: str) -> bool:
     if prefix == "clients":
         required = {"client", "industry", "deal_phase", "bant_score", "fb_count", "doc_count"}
         return required <= keys and "## 営業FB時系列（新しい順）" in text and "## 関連資料" in text
-    required = {"title", "doc_type", "client", "industry", "solution", "entities", "modified_at"}
-    return required <= keys and "- 取引先: [[clients/" in text
+    # entities は名寄せ導入前の旧 gsheets note（row 53 等）には無いため必須にしない。
+    # その代わり exporter 固有の本文構造も全て要求し、一般 Markdown の誤採用を避ける。
+    required = {"title", "doc_type", "client", "industry", "solution", "modified_at"}
+    return (
+        required <= keys
+        and re.search(r"(?m)^# \S", text) is not None
+        and "- 出典:" in text
+        and "- 取引先: [[clients/" in text
+    )
 
 
 def _discover_generated_markdown(out_dir: Path) -> dict[str, str]:
