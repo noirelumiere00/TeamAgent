@@ -148,6 +148,11 @@ def wikilink(path: str) -> str:
     return f"[[{path}]]"
 
 
+def source_discriminator(external_id: str) -> str:
+    """安定 source ID を filename 用 64-bit hex discriminator へ変換する。"""
+    return hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:16]
+
+
 def normalize_shared_group(raw: str | None) -> str:
     """会社共有 group を SQL パラメータ用の単一 DNS ドメインへ正規化する。
 
@@ -388,6 +393,7 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     """
     files: dict[str, str] = {"CLAUDE.md": render_claude_md()}
     doc_path_by_uri: dict[str, str] = {}
+    doc_path_by_source_key: dict[tuple[str, str], str] = {}
 
     def _claim(prefix: str, base: str, *, duplicate_separator: str = "_") -> str:
         """files に無い ``{prefix}/{base}`` 系の空きパス（拡張子なし）を返す。"""
@@ -409,13 +415,24 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
         doc_paths: list[str] = []
         for doc in documents:
             uri = str(doc.get("source_uri") or "")
+            source_type = str(doc.get("source_type") or "")
+            external_id = str(doc.get("external_id") or "").strip()
+            source_key = (source_type, external_id) if source_type and external_id else None
+            if source_key and source_key in doc_path_by_source_key:
+                # URL が空/変更済みでも同じ stable identity は同一論理資料として再利用する。
+                reused_path = doc_path_by_source_key[source_key]
+                if uri:
+                    doc_path_by_uri[uri] = reused_path
+                doc_paths.append(reused_path)
+                continue
             if uri and uri in doc_path_by_uri:
                 # 同一資料は既存 note を再利用（複数クライアントから wikilink される）
-                doc_paths.append(doc_path_by_uri[uri])
+                reused_path = doc_path_by_uri[uri]
+                if source_key:
+                    doc_path_by_source_key[source_key] = reused_path
+                doc_paths.append(reused_path)
                 continue
-            needs_discriminator = bool(
-                doc.get("x_research_tool") or doc.get("source_type") == "gsheets"
-            )
+            needs_discriminator = bool(doc.get("x_research_tool") or source_type == "gsheets")
             # discriminator 付きは UTF-8 4 byte/文字でも一般的な 255-byte の
             # filename 上限内に収める（55*4 + '-' + 16hex + '.md' = 240 bytes）。
             base = safe_filename(
@@ -433,20 +450,21 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
             #   - gsheets: ナレッジ共有の title は「正式社名 案件名」で行ごとに一意ではない
             #     (実測 142 行中 8 stem が衝突。案件名が空の行は社名だけに潰れて更に衝突する)
             if needs_discriminator:
-                external_id = str(doc.get("external_id") or "").strip()
                 if not external_id:
                     raise ValueError(
                         "external_id is required for gsheets/x_research document filenames"
                     )
-                disc = hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:16]
+                disc = source_discriminator(external_id)
                 base = f"{base}-{disc}"
-            # 64-bit hash の二次衝突や同じ external_id の重複が起きても、``_2`` にして
-            # build_app_html の chunk 結合へ誤認させない。重複自体は見える形で保持する。
+            # 異なる external_id で 64-bit hash の二次衝突が起きても、``_2`` にして
+            # build_app_html の chunk 結合へ誤認させない。両方を見える形で保持する。
             doc_path = _claim(
                 "docs",
                 base,
                 duplicate_separator="-dup-" if needs_discriminator else "_",
             )
+            if source_key:
+                doc_path_by_source_key[source_key] = doc_path
             if uri:
                 doc_path_by_uri[uri] = doc_path
             files[f"{doc_path}.md"] = render_doc_note(doc, client, client_path)

@@ -589,16 +589,38 @@ def test_plan_vault_discriminator_sources_require_external_id(
         plan_vault(clients)
 
 
-def test_plan_vault_secondary_discriminator_collision_is_not_chunk_suffix() -> None:
-    """同じ安定IDが重複しても `_2` にせず、HTML の chunk 結合から2件を守る。"""
+def test_plan_vault_reuses_note_for_same_source_identity_without_uri() -> None:
+    """URLなし/変化後でも同じ安定IDは二重noteにせず再利用する。"""
     docs = [
         _doc(
             "同名資料",
             uri="",
             source_type="gsheets",
             external_id="SHEET:1:2",
-        )
-        for _ in range(2)
+        ),
+        _doc(
+            "タイトル変更後",
+            uri="https://example.invalid/changed",
+            source_type="gsheets",
+            external_id="SHEET:1:2",
+        ),
+    ]
+    files = plan_vault({"A社": {"timeline": [], "documents": docs}})
+    doc_notes = [p for p in files if p.startswith("docs/")]
+    assert len(doc_notes) == 1
+    # カルテ側の2行も同じnoteを参照する。
+    stem = doc_notes[0].removeprefix("docs/").removesuffix(".md")
+    assert files["clients/A社.md"].count(f"[[docs/{stem}]]") == 2
+
+
+def test_plan_vault_true_discriminator_collision_is_not_chunk_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """異なる安定IDの64-bit衝突でも `_2` にせず、HTML の chunk 結合から2件を守る。"""
+    monkeypatch.setattr(_mod, "source_discriminator", lambda external_id: "0" * 16)
+    docs = [
+        _doc("同名資料", uri="", source_type="gsheets", external_id=f"SHEET:1:{row}")
+        for row in (2, 3)
     ]
     files = plan_vault({"A社": {"timeline": [], "documents": docs}})
     doc_notes = sorted(p for p in files if p.startswith("docs/"))
