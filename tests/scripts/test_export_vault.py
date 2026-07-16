@@ -417,6 +417,53 @@ def test_plan_vault_research_docs_get_collision_proof_filenames() -> None:
     assert all(re.search(r"-[0-9a-f]{8}\.md$", p) for p in doc_notes)
 
 
+def test_plan_vault_gsheets_knowledge_rows_get_collision_proof_filenames() -> None:
+    """ナレッジ共有行(gsheets)も external_id 由来ハッシュで一意名になり /app から消えない。
+
+    #215 で title を「row N」から「正式社名 案件名」へ変えた結果、同一クライアントの同一案件で
+    複数回共有された行 (この運用では常態) が同名になる。実シート 142 行の実測で 8 stem が衝突し、
+    案件名が空の行は社名だけに潰れて更に衝突していた。`_2` が振られると _chunk_key の束ねで
+    2 件目以降が /app から無言で消えるため、x_research と同じ `-<hash8>` 分岐で回避する。
+    """
+    clients = {
+        "小林製薬": {
+            "timeline": [],
+            "documents": [
+                # 同一「正式社名 案件名」= 同一 title。source_uri は行ごとに異なる(&range=N:N)。
+                _doc(
+                    "小林製薬 熱さまシート",
+                    uri="https://docs.google.com/spreadsheets/d/S1/edit#gid=1&range=12:12",
+                    source_type="gsheets",
+                    external_id="S1:278789217:12",
+                ),
+                _doc(
+                    "小林製薬 熱さまシート",
+                    uri="https://docs.google.com/spreadsheets/d/S1/edit#gid=1&range=87:87",
+                    source_type="gsheets",
+                    external_id="S1:278789217:87",
+                ),
+            ],
+        }
+    }
+    files = plan_vault(clients)
+    doc_notes = sorted(p for p in files if p.startswith("docs/"))
+    assert len(doc_notes) == 2  # 2 行 = 2 note（サイレント消失しない）
+    assert all(not re.search(r"_\d+\.md$", p) for p in doc_notes)
+    assert all(re.search(r"-[0-9a-f]{8}\.md$", p) for p in doc_notes)
+
+
+def test_plan_vault_gdrive_docs_keep_plain_filenames() -> None:
+    """gdrive 等 title が資料名で一意な経路にはハッシュを付けない（既存の見た目を壊さない）。"""
+    clients = {
+        "A社": {
+            "timeline": [],
+            "documents": [_doc("提案書A", uri="gdrive://F1", source_type="gdrive")],
+        }
+    }
+    files = plan_vault(clients)
+    assert "docs/提案書A.md" in files
+
+
 def test_clients_sql_excludes_research_products_from_client_union() -> None:
     """施策研究の cls_project(商材名)は取引先一覧に昇格しない（取引先タクソノミー非汚染・#214-1）。"""
     sql = _mod._CLIENTS_SQL
