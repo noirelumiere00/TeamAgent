@@ -61,6 +61,7 @@ SIDECAR_FILES = (
     "weird_rename_high.json",  # 不明瞭命名 → 推奨タイトル（表示のみ・可逆）
     "inter-var.b64",           # InterVar フォント（woff2 base64）
 )
+OPTIONAL_SIDECAR_FILES = ("tag_alias.json", "client_alias.json")
 
 DEFAULT_VAULT = Path.home() / "AiLaVault"
 DEFAULT_OUT = Path.home() / "Documents" / "Claude" / "Artifacts" / "connect-web-obsidian-preview.html"
@@ -73,6 +74,9 @@ SHRINK_LIMIT = 0.20  # サニティゲート: 前回比これを超える減少�
 VAULT = DEFAULT_VAULT
 CLIENTS, DOCS, REPORTS = VAULT / "clients", VAULT / "docs", VAULT / "_reports"
 ACTIVE_MANAGED_PATHS: set[str] = set()
+EXPORT_MANIFEST_SHA256 = ""
+BUILD_INPUTS_SHA256 = ""
+SIDECAR_SNAPSHOTS: dict[str, bytes | None] = {}
 _EXPORT_MANIFEST_NAME = ".export-vault-manifest.json"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -605,7 +609,7 @@ def _strip_self_tags(text):
 # === データ品質: junk除外 / 重複折り畳み / 分割断片集約 / 不明瞭命名リネーム（表示のみ・元Vault不変・可逆） ===
 JUNK_CLIENTS = {"テスト", "（テスト）松竹", "VECTOR INC", "vectorinc", "Vector", "Vector Group"}
 DOC_DROP: set[str] = set()        # dedup_drop_map.json の drop keys（main() で読み込み）
-TITLE_OVERRIDE: dict[str, str] = {}  # weird_rename_high.json（main() で読み込み）
+TITLE_OVERRIDE: dict[str, str] = {}  # weird_rename_high.json（portable stem key、main() で読み込み）
 
 # === 表示名寄せ（任意適用・可逆）: tag_alias.json / client_alias.json（main() で読み込み） ===
 # 必須サイドカー(_read_sidecar)と扱いを分ける: 欠落/空/破損は空 dict＝素通り（fail-loud にしない）。
@@ -2039,27 +2043,71 @@ def _die(msg: str) -> None:
 
 
 def _read_sidecar(name: str) -> str:
-    """repo 同梱サイドカーを読む。欠落は即 exit 1（exists() フォールバック全廃）。"""
-    path = SIDECAR_DIR / name
-    if not path.is_file():
-        _die(
-            f"サイドカー {name} がありません: {path}。"
-            "フィルタ無しで生成すると非ナレッジ混入/重複表示で黙って劣化するため中止。"
-            "git checkout で data/connect_web_filters/ を復元してから再実行してください"
-        )
-    return path.read_text(encoding="utf-8")
+    """main冒頭で固定した同一bytes snapshotを読む（途中変更の新旧混在を作らない）。"""
+    raw = SIDECAR_SNAPSHOTS.get(name)
+    if raw is None:
+        _die(f"必須サイドカー {name} のsnapshotがありません")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _die(f"必須サイドカー {name} がUTF-8ではありません")
+
+
+def _build_inputs_bundle_sha256(
+    manifest_sha256: str,
+    snapshots: dict[str, bytes | None],
+) -> str:
+    """manifest + 全sidecar/font bytesを決定論bundle SHAへ畳み込む。"""
+    digest = hashlib.sha256(b"connect-web-build-inputs-v1\0")
+    digest.update(b"manifest\0sha256:")
+    digest.update(manifest_sha256.encode("ascii"))
+    digest.update(b"\0")
+    for name in sorted((*SIDECAR_FILES, *OPTIONAL_SIDECAR_FILES)):
+        raw = snapshots.get(name)
+        marker = "missing" if raw is None else f"sha256:{hashlib.sha256(raw).hexdigest()}"
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(marker.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _snapshot_sidecars() -> tuple[dict[str, bytes | None], str]:
+    """required/optional sidecarを1回だけreadし、bundle SHAと共に返す。"""
+    resolved_dir = SIDECAR_DIR.resolve()
+    snapshots: dict[str, bytes | None] = {}
+    for name in (*SIDECAR_FILES, *OPTIONAL_SIDECAR_FILES):
+        path = SIDECAR_DIR / name
+        required = name in SIDECAR_FILES
+        if path.is_symlink():
+            _die(f"サイドカー {name} はsymlink不可です")
+        if not path.is_file():
+            if required:
+                _die(
+                    f"サイドカー欠落: {name}（{SIDECAR_DIR}）。"
+                    "git checkout で復元してください"
+                )
+            snapshots[name] = None
+            continue
+        try:
+            if path.resolve().parent != resolved_dir:
+                _die(f"サイドカー {name} のpathが安全ではありません")
+            snapshots[name] = path.read_bytes()
+        except OSError:
+            _die(f"サイドカー {name} が読めません")
+    return snapshots, _build_inputs_bundle_sha256(EXPORT_MANIFEST_SHA256, snapshots)
 
 
 def _load_alias_sidecar(name: str, subkey: str | None = None) -> dict:
     """名寄せサイドカー（任意適用）を読む。_read_sidecar（必須・fail-loud）とは意図的に
     扱いを分ける: 名寄せは削除で元挙動へ戻る可逆設計なので、欠落/空/破損/型不一致は
     黙って空 dict＝素通り（fail-loud にしない）。subkey 指定時はその配下 dict を返す。"""
-    path = SIDECAR_DIR / name
-    if not path.is_file():
+    raw = SIDECAR_SNAPSHOTS.get(name)
+    if raw is None:
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return {}
     if not isinstance(data, dict):
         return {}
@@ -2082,8 +2130,29 @@ def _portable_path_key(path: str) -> str:
     return unicodedata.normalize("NFC", path).casefold()
 
 
+def _portable_title_overrides(value: object) -> dict[str, str]:
+    """表示名sidecarをbuilderとQA共通のNFC+casefold stem lookupへ固定する。"""
+    if not isinstance(value, dict):
+        _die("サイドカー weird_rename_high.json のrootがobjectではありません")
+    result: dict[str, str] = {}
+    for stem, title in value.items():
+        if (
+            not isinstance(stem, str)
+            or not stem.strip()
+            or not isinstance(title, str)
+            or not title.strip()
+        ):
+            _die("サイドカー weird_rename_high.json のkey/value形式が不正です")
+        key = _portable_path_key(stem)
+        if key in result:
+            _die("サイドカー weird_rename_high.json にportable stem衝突があります")
+        result[key] = title
+    return result
+
+
 def _load_active_export_paths(vault: Path) -> set[str]:
     """直近のACL付き完全exportで生成され、hash一致する公開対象のportable keyを返す。"""
+    global EXPORT_MANIFEST_SHA256
     manifest = vault / _EXPORT_MANIFEST_NAME
     resolved_vault = vault.resolve()
     if manifest.is_symlink() or manifest.resolve().parent != resolved_vault or not manifest.is_file():
@@ -2092,9 +2161,11 @@ def _load_active_export_paths(vault: Path) -> set[str]:
             "export_vault.py を --commit（完全export）で実行してください"
         )
     try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest_bytes = manifest.read_bytes()
+        payload = json.loads(manifest_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         _die(f"export manifestが読めません: {manifest}: {exc}")
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     if not isinstance(payload, dict):
         _die("export manifestのrootがobjectではありません")
     if payload.get("version") != 1 or payload.get("generator") != _EXPORT_VAULT_GENERATOR:
@@ -2187,6 +2258,7 @@ def _load_active_export_paths(vault: Path) -> set[str]:
             _die(f"公開対象noteが無いか安全なregular fileではありません: {rel}")
         if _file_sha256(target) != manifest_hashes[key]:
             _die(f"公開対象noteがexport後に変更されています: {rel}。完全exportを再実行してください")
+    EXPORT_MANIFEST_SHA256 = manifest_sha256
     return active
 
 
@@ -2256,7 +2328,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     global VAULT, CLIENTS, DOCS, REPORTS, EXCL, EXCL_N, EXCL_SOURCE_KEYS
     global SOURCE_EXCLUDED_STEMS, DOC_DROP, TITLE_OVERRIDE, CHUNK_DROP
-    global TAG_ALIAS, CLIENT_ALIAS, ACTIVE_MANAGED_PATHS
+    global TAG_ALIAS, CLIENT_ALIAS, ACTIVE_MANAGED_PATHS, EXPORT_MANIFEST_SHA256
+    global BUILD_INPUTS_SHA256, SIDECAR_SNAPSHOTS
 
     args = _parse_args(argv)
     if args.include_reports:
@@ -2276,10 +2349,8 @@ def main(argv: list[str] | None = None) -> int:
     # hash不一致もfail-loudにして、export後のローカル編集を静的/appへ流さない。
     ACTIVE_MANAGED_PATHS = _load_active_export_paths(VAULT)
 
-    # --- fail-loud: サイドカー欠落は一括検知 ---
-    missing = [name for name in SIDECAR_FILES if not (SIDECAR_DIR / name).is_file()]
-    if missing:
-        _die(f"サイドカー欠落: {', '.join(missing)}（{SIDECAR_DIR}）。git checkout で復元してください")
+    # manifestと同様、全sidecar/fontを同一bytes snapshotへ固定してHTML/statsへbindする。
+    SIDECAR_SNAPSHOTS, BUILD_INPUTS_SHA256 = _snapshot_sidecars()
 
     # --- サイドカー読み込み（元スクリプトの exists() フォールバックを全廃） ---
     EXCL = set(json.loads(_read_sidecar("exclude_stems.json")))
@@ -2289,8 +2360,8 @@ def main(argv: list[str] | None = None) -> int:
     # client/doc の payload 構築前に source key 一致 stem を確定する。
     SOURCE_EXCLUDED_STEMS = _source_excluded_stems()
     DOC_DROP = set((json.loads(_read_sidecar("dedup_drop_map.json")) or {}).get("drop", {}).keys())
-    TITLE_OVERRIDE = json.loads(_read_sidecar("weird_rename_high.json"))
-    font_b64 = _read_sidecar("inter-var.b64").strip()
+    TITLE_OVERRIDE = _portable_title_overrides(json.loads(_read_sidecar("weird_rename_high.json")))
+    font_b64 = "".join(_read_sidecar("inter-var.b64").split())
     if not font_b64:
         _die(f"サイドカー inter-var.b64 が空です: {SIDECAR_DIR / 'inter-var.b64'}")
     CHUNK_DROP = _compute_chunk_drop()
@@ -2357,7 +2428,7 @@ def main(argv: list[str] | None = None) -> int:
         _src = {"gdrive": "Drive", "gsheets": "フォーム", "slack": "Slack"}.get(
             _msrc.group(1) if _msrc else "", ""
         )
-        _dtitle = TITLE_OVERRIDE.get(f.stem) or fm.get("title", f.stem)
+        _dtitle = TITLE_OVERRIDE.get(_portable_path_key(f.stem)) or fm.get("title", f.stem)
         _dsol = fm.get("solution", "")  # 施策: 格納値/施策タグは正本化・vfmt 検出には生値（動画形式判定の回帰防止）
         _dbody = doc_md(t)
         # ナレッジ共有メタ（フォーム回答/ファイル記録シート由来）。カテゴリは単値素通し、
@@ -2546,13 +2617,18 @@ def main(argv: list[str] | None = None) -> int:
         for _n in _coll:
             _n.pop("_wl", None)
 
-    payload = {"clients": clients, "docs": docs, "reports": reports, "links": links,
+    payload = {"manifest_sha256": EXPORT_MANIFEST_SHA256,
+               "build_inputs_sha256": BUILD_INPUTS_SHA256,
+               "clients": clients, "docs": docs, "reports": reports, "links": links,
                "graph": {"nodes": gnodes, "links": glinks}, "colors": INDUSTRY_COLORS,
-               "stats": {"clients": len(clients), "docs": len(docs), "reports": len(reports)}}
+               "stats": {"clients": len(clients), "docs": len(docs), "reports": len(reports),
+                         "manifest_sha256": EXPORT_MANIFEST_SHA256,
+                         "build_inputs_sha256": BUILD_INPUTS_SHA256}}
     DATA = json.dumps(payload, ensure_ascii=False)
     # インライン<script>内へ安全に埋め込む: </script> ブレイクアウトと行区切り文字を無害化
     DATA = (DATA.replace("<", "\\u003c").replace(">", "\\u003e")
                 .replace(" ", "\\u2028").replace(" ", "\\u2029"))
+    data_sha256 = hashlib.sha256(DATA.encode("utf-8")).hexdigest()
 
     # --- fail-loud: 空生成の禁止（空の app.html を 16 名へ配るくらいなら止める） ---
     if not clients:
@@ -2582,6 +2658,9 @@ def main(argv: list[str] | None = None) -> int:
         "clients": len(clients),
         "docs": len(docs),
         "bytes": len(html_bytes),
+        "manifest_sha256": EXPORT_MANIFEST_SHA256,
+        "build_inputs_sha256": BUILD_INPUTS_SHA256,
+        "data_sha256": data_sha256,
         "built_at": datetime.now(JST).isoformat(),
         "qf": qf_counts,
     }
