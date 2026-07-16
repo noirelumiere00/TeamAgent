@@ -95,7 +95,7 @@ def test_posts_to_metas_mapping() -> None:
     assert m.follower_count == 100
     assert m.collect_count == 50  # saves
     assert m.play_count == 1000
-    assert abs(m.engagement_rate - 0.065) < 1e-9  # eg_rate(%) / 100
+    assert abs(m.engagement_rate - 6.5) < 1e-9  # eg_rate は百分率ポイント
     assert abs(m.save_rate() - 5.0) < 1e-9  # 50/1000*100
 
 

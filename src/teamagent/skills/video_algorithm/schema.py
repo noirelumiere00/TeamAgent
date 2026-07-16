@@ -10,10 +10,14 @@ Gemini 出力は欠落しうるので、全フィールドに default を与え�
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Literal
 
-from pydantic import BaseModel, Field
+import structlog
+from pydantic import BaseModel, Field, field_validator
+
+logger = structlog.get_logger(__name__)
 
 Position = Literal["top", "center", "bottom", "full", "unknown"]
 Prominence = Literal["hero", "prominent", "incidental", "background"]
@@ -221,8 +225,26 @@ class VideoMeta(BaseModel):
     comment_count: int = 0
     share_count: int = 0
     collect_count: int = 0  # 保存
-    engagement_rate: float = 0.0
+    engagement_rate: float = 0.0  # 百分率ポイント（2.9% は 2.9）
     cover_url: str | None = None
+
+    @field_validator("engagement_rate")
+    @classmethod
+    def _engagement_rate_is_percent(cls, value: float) -> float:
+        """百分率として不正な値を正規化し、100超は観測値のまま警告する。
+
+        分子はいいね・コメント・共有・保存の合計なので、正常値でも100%を
+        超え得る。上限へ丸めると実績を過小評価するため、有限な正値は保持する。
+        """
+        if not math.isfinite(value):
+            logger.warning("video_meta_engagement_rate_clamped", value=str(value), clamped=0.0)
+            return 0.0
+        if value < 0.0:
+            logger.warning("video_meta_engagement_rate_clamped", value=value, clamped=0.0)
+            return 0.0
+        if value > 100.0:
+            logger.warning("video_meta_engagement_rate_above_100", value=value)
+        return value
 
     def save_rate(self) -> float:
         return (self.collect_count / self.play_count * 100) if self.play_count else 0.0

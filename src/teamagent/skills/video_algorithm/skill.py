@@ -189,7 +189,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     comment_count=int(p.get("comments", 0) or 0),
                     share_count=int(p.get("shares", 0) or 0),
                     collect_count=int(p.get("saves", 0) or 0),
-                    engagement_rate=float(p.get("eg_rate", 0.0) or 0.0) / 100.0,
+                    # eg_rate は既に百分率ポイント。/100 は二重換算になる。
+                    engagement_rate=float(p.get("eg_rate", 0.0) or 0.0),
                     cover_url=None,
                 )
             )
@@ -222,7 +223,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     comment_count=getattr(v, "comment_count", 0) or 0,
                     share_count=getattr(v, "share_count", 0) or 0,
                     collect_count=getattr(v, "collect_count", 0) or 0,
-                    engagement_rate=float(getattr(v, "engagement_rate", 0.0) or 0.0),
+                    # scraper は比率（0.029）を返すため、百分率ポイントへ揃える。
+                    engagement_rate=float(getattr(v, "engagement_rate", 0.0) or 0.0) * 100.0,
                     cover_url=getattr(v, "cover_url", None),
                 )
             )
@@ -454,7 +456,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         analyzed.sort(key=lambda v: v.meta.rank)
         backfilled = sum(1 for v in analyzed if v.analysis and v.meta.rank > target)
 
-        cross = cross_analyze(analyzed, input.query)
+        cross = cross_analyze(analyzed, input.query, board=pool)
         total_cost = round(sum(v.cost_usd for v in results), 6)  # 全試行の課金を計上
         # 横断シンセシス（Gemini 2nd pass・概念の関連性）。≥2本でのみ実行
         if sum(1 for v in analyzed if v.analysis) >= 2:

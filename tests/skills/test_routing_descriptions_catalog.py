@@ -16,6 +16,7 @@ from pathlib import Path
 
 from teamagent.skills.base import SkillRegistry
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
+from teamagent.skills.tiktok_acquire.skill import TikTokAcquireSkill, TikTokAcquireStatusSkill
 from teamagent.skills.tiktok_comment_mining.skill import TikTokCommentMiningSkill
 from teamagent.skills.tiktok_search.skill import TikTokSearchSkill
 from teamagent.skills.x_research.skill import (
@@ -74,6 +75,18 @@ def test_tiktok_search_points_to_new_tools() -> None:
     assert "video_algorithm" in d  # 勝ち筋タイムラインは algorithm
     assert "tiktok_acquire" in d  # 本体DL/大量取得の非同期ジョブは acquire（R3敵対で解消）
     assert "今すぐ" in d or "即時" in d  # 同期/即時の性格を明示
+
+
+def test_tiktok_acquire_and_status_boundaries_are_explicit() -> None:
+    acquire = TikTokAcquireSkill.description
+    assert "トリガー=" in acquire
+    assert "動画本体(mp4)" in acquire
+    assert "tiktok_search" in acquire
+    assert "video_algorithm" in acquire
+
+    status = TikTokAcquireStatusSkill.description
+    assert "tiktok_acquire" in status
+    assert "単独の入口にはしない" in status
 
 
 def _all_registered_skills() -> set[str]:
