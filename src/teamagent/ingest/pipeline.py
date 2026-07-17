@@ -46,6 +46,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# 対象2フォームの実セルは ja_JP の業務時刻で、ファイル記録の同一連番および Slack
+# 投稿epochとの突合でも JST wall time と確認済み。Spreadsheet property の timeZone は
+# Etc/GMT だが、FORMATTED_VALUE 自体を運用上の投稿時刻として扱う契約に固定する。
+# 汎用シートへは使わず、下の fb/knowledge 判定を通った行だけに適用する。
 _JST = _dt.timezone(_dt.timedelta(hours=9))
 _GSHEET_TIMESTAMP_FORMATS = (
     "%Y/%m/%d %H:%M:%S",
