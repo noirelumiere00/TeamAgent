@@ -16,6 +16,14 @@
 
 ---
 
+## 2026-07-17 🚀 `/app` クライアント所属・監査済み属性の補正を本番反映
+- source=`dev`@`5bfdab620844fc84b0876701cd9f41f34f1f5f87`（#245/#246、CI全緑）。DB由来のクライアント所属を優先し、タイトルだけ一致した別案件を活動件数・時系列・最終接点へ混ぜない境界判定と、監査済み28社の業種マスターを反映。SBI証券/SBI生命保険を分離し、検証済みのi-ne/泉屋表記だけを統合。
+- 現行Vaultから生成したHTMLは sha256=`03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c`、manifest=`aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e`、build inputs=`6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf`。clients=516 / docs=662 / timeline=447（全件日付あり）/ payload FB=677 / activity doc pair=575 / FBありかつtimelineなし=0 / source ownership mismatch=0 / document・FB日付欠落=0 / internal source exposure=0。artifact QAは violations={}。
+- 画面QAで、ポート株式会社=人材・資料2件・最終接点2025-10-02、SBI2社の分離、花王の担当者と日付時系列、グラフ「まとめる（配置）」を確認し、ブラウザログエラー0。S3 `codebuild/connect-web-app.html` VersionId=`FTXbcN70D0DCN90TI_hRK1IdQK_HhLee`、connect-web=`:50` を force deploy。`/healthz` は source=`s3` / sha=`03f8e8cc0adb`、rollout COMPLETED・1/1 healthy・pending=0・直近30分の ERROR/Exception/Traceback 0。未ログイン `/app` はログイン画面へ303。
+- rollback=S3 VersionId=`OLMDBO1l.ibKH8700v.ckAEk.5klK7h3`（sha=`5b1026c60d07...`）を復元後、connect-webを force deploy。実行者=Codex（s-komata AWSアカウント）。
+
+---
+
 ## 2026-07-17 🚀 `/app` 営業FB時系列の欠落防止を本番反映
 - source=`dev`@`da4f8facae541dcb205890713f52c9db894e9e1f`（#242、CI全緑）。日付見出しへ移行した営業FBを正しく時系列へ取り込み、FBがあるのに時系列が空になる生成物をQAで拒否。グラフの「その他」表示と担当者名の切れた接尾辞も修正。
 - 現行Vaultから生成したHTMLは sha256=`5b1026c60d07e12ae7d2d11afa135b8e275524a2c10f60adda590b4859484a2e`、manifest=`f78c318279540bec0ef19236b20d775e9d56e677a2aaee9836fb8a2afaddadb1`、build inputs=`f3eba1edeadb6be7127b7fea81e369a40a9e40d9ae34aba8c078224a89c10e92`。clients=518 / docs=662 / timeline=448（全件日付あり）/ payload FB=679 / FBありかつtimelineなし=0 / schema error=0 / internal source exposure=0。全3,057テスト＋環境依存skip 10、生成・QAの集中テスト162件、画面確認を通過。
