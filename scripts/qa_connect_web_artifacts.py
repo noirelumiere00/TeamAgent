@@ -93,6 +93,11 @@ _EMBEDDED_FONT_RE = re.compile(
     r"font-display:swap;src:url\(data:font/woff2;base64,([A-Za-z0-9+/=]+)\) "
     r'format\("woff2"\)\}'
 )
+_FB_SECTION_RE = re.compile(
+    r"^##\s+営業FB時系列（新しい順）\s*$([\s\S]*?)(?=^##\s|\Z)", re.MULTILINE
+)
+_FB_HEADING_RE = re.compile(r"^###\s+(?:-{2,}.*|\d{4}-\d{2}-\d{2}(?=[T\s]|$).*)$", re.MULTILINE)
+_FB_EVENT_KEYS = frozenset({"d", "src", "by", "ph", "bant", "menu", "pos", "neg", "next"})
 
 
 @dataclass(frozen=True)
@@ -171,6 +176,11 @@ class ContentState:
     chunk_fold_applied_count: int = 0
     invoice_rule_applied_count: int = 0
     alias_applied_count: int = 0
+    client_declared_fb_count: int = 0
+    client_timeline_heading_count: int = 0
+    client_timeline_count_mismatch: int = 0
+    client_timeline_section_missing: int = 0
+    client_fb_count_invalid: int = 0
 
 
 @dataclass
@@ -190,6 +200,10 @@ class HtmlState:
     data_bound: bool = False
     font_bound: bool = False
     payload_rename_applied_count: int = 0
+    client_fb_count: int = 0
+    timeline_event_count: int = 0
+    client_timeline_missing_count: int = 0
+    client_timeline_schema_invalid_count: int = 0
 
 
 @dataclass
@@ -928,6 +942,24 @@ def _analyze_content(
             state.alias_applied_count += 1
         if fm.get("client", "") in sidecars.client_alias:
             state.alias_applied_count += 1
+        if note.kind == "clients":
+            raw_fb_count = fm.get("fb_count", "").strip()
+            if re.fullmatch(r"\d+", raw_fb_count) is None:
+                state.client_fb_count_invalid += 1
+                declared_fb_count: int | None = None
+            else:
+                declared_fb_count = int(raw_fb_count)
+                state.client_declared_fb_count += declared_fb_count
+
+            section = _FB_SECTION_RE.search(_body(note.text))
+            if section is None:
+                state.client_timeline_section_missing += 1
+                heading_count = 0
+            else:
+                heading_count = len(_FB_HEADING_RE.findall(section.group(1)))
+            state.client_timeline_heading_count += heading_count
+            if declared_fb_count is not None and declared_fb_count != heading_count:
+                state.client_timeline_count_mismatch += 1
         if note.kind != "docs":
             continue
 
@@ -1019,6 +1051,17 @@ def _analyze_content(
     _add(violations, "gsheets_fingerprint_duplicate", state.duplicate_fingerprint_count)
     _add(violations, "gsheets_junk_unexcluded", state.junk_unexcluded_count)
     _add(violations, "gsheets_rename_missing", state.rename_missing_count)
+    _add(violations, "client_fb_count_invalid", state.client_fb_count_invalid)
+    _add(
+        violations,
+        "client_timeline_section_missing",
+        state.client_timeline_section_missing,
+    )
+    _add(
+        violations,
+        "client_timeline_count_mismatch",
+        state.client_timeline_count_mismatch,
+    )
     return state
 
 
@@ -1199,6 +1242,42 @@ def _analyze_html(
             violations,
             "html_data_item_schema_invalid",
             client_item_errors + doc_item_errors,
+        )
+
+        for client in clients:
+            fb_count = client.get("fb")
+            timeline = client.get("tl")
+            schema_invalid = False
+            if not _is_int(fb_count) or cast(int, fb_count) < 0:
+                schema_invalid = True
+            else:
+                state.client_fb_count += cast(int, fb_count)
+            if not isinstance(timeline, list) or len(timeline) > 30:
+                schema_invalid = True
+                timeline_events: list[object] = []
+            else:
+                timeline_events = timeline
+                state.timeline_event_count += len(timeline_events)
+                for event in timeline_events:
+                    if (
+                        not isinstance(event, dict)
+                        or not _FB_EVENT_KEYS.issubset(event)
+                        or not all(isinstance(event.get(key), str) for key in _FB_EVENT_KEYS)
+                    ):
+                        schema_invalid = True
+            if _is_int(fb_count) and cast(int, fb_count) > 0 and not timeline_events:
+                state.client_timeline_missing_count += 1
+            if schema_invalid:
+                state.client_timeline_schema_invalid_count += 1
+        _add(
+            violations,
+            "html_client_timeline_missing",
+            state.client_timeline_missing_count,
+        )
+        _add(
+            violations,
+            "html_client_timeline_schema_invalid",
+            state.client_timeline_schema_invalid_count,
         )
 
         links = payload.get("links")
@@ -1580,6 +1659,20 @@ def _safe_result(
             "ambiguous_title_count": content.ambiguous_title_count,
             "rename_applied_count": content.gsheets_rename_applied_count,
             "rename_missing_count": content.rename_missing_count,
+        },
+        "client_timelines": {
+            "ok": not any(
+                key.startswith(("client_", "html_client_timeline_")) for key in clean_violations
+            ),
+            "declared_fb_count": content.client_declared_fb_count,
+            "source_heading_count": content.client_timeline_heading_count,
+            "source_count_mismatch": content.client_timeline_count_mismatch,
+            "source_section_missing": content.client_timeline_section_missing,
+            "source_fb_count_invalid": content.client_fb_count_invalid,
+            "payload_fb_count": html.client_fb_count,
+            "payload_event_count": html.timeline_event_count,
+            "payload_missing_count": html.client_timeline_missing_count,
+            "payload_schema_invalid_count": html.client_timeline_schema_invalid_count,
         },
         "html": {
             "ok": not any(key.startswith(("html_", "stats_")) for key in clean_violations),
