@@ -12,36 +12,150 @@ phases:
         umask 077
         export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
         unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR
-        unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO IMAGE_TAG
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
         EXPECTED_ACCOUNT_ID="718959508629"
         EXPECTED_REGION="ap-northeast-1"
+        EXPECTED_APP_HTML_VERSION_ID="I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY"
+        EXPECTED_APP_HTML_SHA256="46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067"
+        EXPECTED_VAULT_MANIFEST_SHA256="15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2"
+        EXPECTED_BUILD_INPUTS_SHA256="1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2"
+        EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
+        SOURCE_SIGNING_KEY_ARN="__SOURCE_PUBLISHER_SIGNING_KEY_ARN__"
+        EVIDENCE_KMS_KEY_ARN="__RELEASE_EVIDENCE_KMS_KEY_ARN__"
         export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
         ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
         MCP_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-mcp-quarantine"
-        MCP_RELEASE_REPO="$ECR_REGISTRY/teamagent-mcp"
+        readonly EVIDENCE_BUCKET SOURCE_SIGNING_KEY_ARN EVIDENCE_KMS_KEY_ARN
         [ "$ECR_REGISTRY" = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com" ] || { echo "FATAL: unexpected ECR registry"; exit 1; }
         [ "$MCP_QUARANTINE_REPO" = "$ECR_REGISTRY/teamagent-mcp-quarantine" ] || { echo "FATAL: unexpected MCP quarantine repository"; exit 1; }
-        [ "$MCP_RELEASE_REPO" = "$ECR_REGISTRY/teamagent-mcp" ] || { echo "FATAL: unexpected MCP release repository"; exit 1; }
         ACTUAL_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
         [ "$ACTUAL_ACCOUNT_ID" = "$EXPECTED_ACCOUNT_ID" ] || { echo "FATAL: unexpected AWS account"; exit 1; }
         [ "$AWS_DEFAULT_REGION" = "$EXPECTED_REGION" ] || { echo "FATAL: unexpected AWS region"; exit 1; }
         printf '%s  %s\n' '__SOURCE_PROVENANCE_SHA256__' infra/codebuild/source_provenance.py | sha256sum -c -
+        printf '%s  %s\n' '__RELEASE_EVIDENCE_SHA256__' infra/codebuild/release_evidence.py | sha256sum -c -
         printf '%s  %s\n' '__ECR_IMAGE_RESOLVER_SHA256__' infra/codebuild/resolve_ecr_image.py | sha256sum -c -
         printf '%s  %s\n' '__ECR_SCAN_GATE_SHA256__' infra/codebuild/verify_ecr_scan.py | sha256sum -c -
         : "${GIT_COMMIT:?GIT_COMMIT must be explicitly provided}"
         : "${GIT_BRANCH:?GIT_BRANCH must be explicitly provided}"
-        : "${IMAGE_TAG:?IMAGE_TAG must be explicitly provided}"
         : "${WITH_SCRAPE_TOOLS:?WITH_SCRAPE_TOOLS must be explicitly provided}"
         : "${APP_HTML_VERSION_ID:?APP_HTML_VERSION_ID must be explicitly provided}"
         : "${APP_HTML_SHA256:?APP_HTML_SHA256 must be explicitly provided}"
+        : "${VAULT_MANIFEST_SHA256:?VAULT_MANIFEST_SHA256 must be explicitly provided}"
+        : "${BUILD_INPUTS_SHA256:?BUILD_INPUTS_SHA256 must be explicitly provided}"
         : "${RUNTIME_CONTRACT_SHA256:?RUNTIME_CONTRACT_SHA256 must be explicitly provided}"
+        : "${SOURCE_DECLARATION_KEY:?SOURCE_DECLARATION_KEY must be explicitly provided}"
+        : "${SOURCE_DECLARATION_VERSION_ID:?SOURCE_DECLARATION_VERSION_ID must be explicitly provided}"
+        : "${SOURCE_DECLARATION_SHA256:?SOURCE_DECLARATION_SHA256 must be explicitly provided}"
+        : "${SOURCE_DECLARATION_SIGNATURE_KEY:?SOURCE_DECLARATION_SIGNATURE_KEY must be explicitly provided}"
+        : "${SOURCE_DECLARATION_SIGNATURE_VERSION_ID:?SOURCE_DECLARATION_SIGNATURE_VERSION_ID must be explicitly provided}"
+        : "${SOURCE_ARCHIVE_VERSION_ID:?SOURCE_ARCHIVE_VERSION_ID must be explicitly provided}"
         [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: invalid GIT_COMMIT"; exit 1; }
-        [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "FATAL: unsafe IMAGE_TAG"; exit 1; }
+        IMAGE_TAG="candidate-$GIT_COMMIT"
         [ "$WITH_SCRAPE_TOOLS" = "true" ] || { echo "FATAL: WITH_SCRAPE_TOOLS must be explicitly true for production candidates"; exit 1; }
         case "$APP_HTML_VERSION_ID" in ""|None|null|*[!A-Za-z0-9._~+/=-]*) echo "FATAL: invalid APP_HTML_VERSION_ID"; exit 1 ;; esac
         [ "${#APP_HTML_VERSION_ID}" -le 1024 ] || { echo "FATAL: invalid APP_HTML_VERSION_ID"; exit 1; }
         [[ "$APP_HTML_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid APP_HTML_SHA256"; exit 1; }
+        [ "$APP_HTML_VERSION_ID" = "$EXPECTED_APP_HTML_VERSION_ID" ] || { echo "FATAL: app HTML VersionId is not production canonical"; exit 1; }
+        [ "$APP_HTML_SHA256" = "$EXPECTED_APP_HTML_SHA256" ] || { echo "FATAL: app HTML SHA-256 is not production canonical"; exit 1; }
+        [ "$VAULT_MANIFEST_SHA256" = "$EXPECTED_VAULT_MANIFEST_SHA256" ] || { echo "FATAL: Vault manifest SHA-256 is not production canonical"; exit 1; }
+        [ "$BUILD_INPUTS_SHA256" = "$EXPECTED_BUILD_INPUTS_SHA256" ] || { echo "FATAL: build_inputs SHA-256 is not production canonical"; exit 1; }
         [[ "$RUNTIME_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid RUNTIME_CONTRACT_SHA256"; exit 1; }
+        [[ "$SOURCE_DECLARATION_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid source declaration SHA-256"; exit 1; }
+        EXPECTED_DECLARATION_PREFIX="source-declarations/mcp/$GIT_COMMIT/"
+        [[ "$SOURCE_DECLARATION_KEY" == "$EXPECTED_DECLARATION_PREFIX"*".json" ]] || { echo "FATAL: source declaration key is outside the fixed prefix"; exit 1; }
+        [ "$SOURCE_DECLARATION_SIGNATURE_KEY" = "$SOURCE_DECLARATION_KEY.sig" ] || { echo "FATAL: source signature key mismatch"; exit 1; }
+        [ "$CODEBUILD_SOURCE_VERSION" = "$SOURCE_ARCHIVE_VERSION_ID" ] || { echo "FATAL: CodeBuild did not use the declared source VersionId"; exit 1; }
+        for object in declaration signature; do
+          case "$object" in
+            declaration)
+              KEY="$SOURCE_DECLARATION_KEY"
+              VERSION_ID="$SOURCE_DECLARATION_VERSION_ID"
+              DESTINATION="/tmp/source-declaration.json"
+              ;;
+            signature)
+              KEY="$SOURCE_DECLARATION_SIGNATURE_KEY"
+              VERSION_ID="$SOURCE_DECLARATION_SIGNATURE_VERSION_ID"
+              DESTINATION="/tmp/source-declaration.sig"
+              ;;
+          esac
+          aws s3api head-object \
+            --region "$EXPECTED_REGION" \
+            --bucket "$EVIDENCE_BUCKET" \
+            --key "$KEY" \
+            --version-id "$VERSION_ID" \
+            --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+            --output json >"/tmp/source-$object-head.json"
+          jq -e \
+            --arg version "$VERSION_ID" \
+            --arg kms "$EVIDENCE_KMS_KEY_ARN" '
+              .VersionId == $version and
+              .ObjectLockMode == "COMPLIANCE" and
+              .ServerSideEncryption == "aws:kms" and
+              .SSEKMSKeyId == $kms
+            ' "/tmp/source-$object-head.json" >/dev/null \
+            || { echo "FATAL: signed source $object is not immutable exact evidence"; exit 1; }
+          python3 - "/tmp/source-$object-head.json" <<'PY'
+        import datetime
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            retained = json.load(handle).get("ObjectLockRetainUntilDate", "")
+        try:
+            timestamp = datetime.datetime.fromisoformat(retained.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise SystemExit("FATAL: source evidence retention timestamp is invalid") from exc
+        if timestamp <= datetime.datetime.now(datetime.UTC):
+            raise SystemExit("FATAL: source evidence immutable retention has expired")
+        PY
+          DOWNLOADED_VERSION="$(
+            aws s3api get-object \
+              --region "$EXPECTED_REGION" \
+              --bucket "$EVIDENCE_BUCKET" \
+              --key "$KEY" \
+              --version-id "$VERSION_ID" \
+              --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+              --query VersionId \
+              --output text \
+              "$DESTINATION"
+          )"
+          [ "$DOWNLOADED_VERSION" = "$VERSION_ID" ] || { echo "FATAL: source $object VersionId mismatch"; exit 1; }
+        done
+        [ "$(sha256sum /tmp/source-declaration.json | awk '{print $1}')" = "$SOURCE_DECLARATION_SHA256" ] || { echo "FATAL: source declaration SHA-256 mismatch"; exit 1; }
+        python3 - /tmp/source-declaration.json /tmp/source-declaration.sha256 <<'PY'
+        import hashlib
+        import sys
+        with open(sys.argv[1], "rb") as source:
+            digest = hashlib.sha256(source.read()).digest()
+        with open(sys.argv[2], "wb") as output:
+            output.write(digest)
+        PY
+        aws kms verify \
+          --region "$EXPECTED_REGION" \
+          --key-id "$SOURCE_SIGNING_KEY_ARN" \
+          --message-type DIGEST \
+          --message fileb:///tmp/source-declaration.sha256 \
+          --signature fileb:///tmp/source-declaration.sig \
+          --signing-algorithm RSASSA_PSS_SHA_256 \
+          --output json > /tmp/source-declaration-kms-verify.json
+        [ "$(jq -er '.SignatureValid' /tmp/source-declaration-kms-verify.json)" = "true" ] || { echo "FATAL: independent source publisher signature is invalid"; exit 1; }
+        python3 infra/codebuild/release_evidence.py verify-source-declaration \
+          --declaration /tmp/source-declaration.json \
+          --expected-commit "$GIT_COMMIT" \
+          --expected-source-version "$SOURCE_ARCHIVE_VERSION_ID" \
+          --expected-app-version "$APP_HTML_VERSION_ID" \
+          --expected-app-sha256 "$APP_HTML_SHA256" \
+          --expected-vault-manifest-sha256 "$VAULT_MANIFEST_SHA256" \
+          --expected-build-inputs-sha256 "$BUILD_INPUTS_SHA256" \
+          --expected-contract-sha256 "$RUNTIME_CONTRACT_SHA256"
         python3 infra/codebuild/source_provenance.py verify-source \
           --source-root "$CODEBUILD_SRC_DIR" \
           --manifest "$CODEBUILD_SRC_DIR/.teamagent-source-manifest.json" \
@@ -64,13 +178,21 @@ phases:
         set -euo pipefail
         export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
         unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR
-        unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO IMAGE_TAG
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
         EXPECTED_ACCOUNT_ID="718959508629"
         EXPECTED_REGION="ap-northeast-1"
         export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
         ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
         MCP_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-mcp-quarantine"
-        MCP_RELEASE_REPO="$ECR_REGISTRY/teamagent-mcp"
+        IMAGE_TAG="candidate-$GIT_COMMIT"
         mkdir -p src/teamagent/connect_web/static
         APP_HTML_PATH="src/teamagent/connect_web/static/app.html"
         DOWNLOADED_APP_HTML_VERSION_ID="$(aws s3api get-object \
@@ -94,13 +216,20 @@ phases:
         mapfile -t RUNTIME_BUILD_ARGUMENTS < /tmp/teamagent-runtime-build-arguments
         [ "${#RUNTIME_BUILD_ARGUMENTS[@]}" -gt 3 ] || { echo "FATAL: runtime build arguments are incomplete"; exit 1; }
         DOCKER_RUNTIME_BUILD_ARGS=()
+        NODE_IMAGE_DIGEST=""
         for RUNTIME_BUILD_ARGUMENT in "${RUNTIME_BUILD_ARGUMENTS[@]}"; do
           [[ "$RUNTIME_BUILD_ARGUMENT" =~ ^[A-Z][A-Z0-9_]+=.+$ ]] || { echo "FATAL: invalid runtime build argument"; exit 1; }
-          DOCKER_RUNTIME_BUILD_ARGS+=(--build-arg "$RUNTIME_BUILD_ARGUMENT")
+          if [[ "$RUNTIME_BUILD_ARGUMENT" == NODE_IMAGE_DIGEST=* ]]; then
+            NODE_IMAGE_DIGEST="${RUNTIME_BUILD_ARGUMENT#NODE_IMAGE_DIGEST=}"
+          else
+            DOCKER_RUNTIME_BUILD_ARGS+=(--build-arg "$RUNTIME_BUILD_ARGUMENT")
+          fi
         done
+        [[ "$NODE_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: contract did not provide the pinned arm64 NODE_IMAGE_DIGEST"; exit 1; }
         echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m), WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS"
         DOCKER_BUILDKIT=1 docker build \
           -f infra/docker/Dockerfile.teamagent-mcp \
+          --build-arg "NODE_IMAGE_DIGEST=$NODE_IMAGE_DIGEST" \
           --build-arg "WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS" \
           --build-arg "GIT_COMMIT=$GIT_COMMIT" \
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \
@@ -134,15 +263,22 @@ phases:
         [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: MCP build failed before quarantine gate"; exit 1; }
         export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
         unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR
-        unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO IMAGE_TAG
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
         EXPECTED_ACCOUNT_ID="718959508629"
         EXPECTED_REGION="ap-northeast-1"
         export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
         ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
         MCP_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-mcp-quarantine"
-        MCP_RELEASE_REPO="$ECR_REGISTRY/teamagent-mcp"
+        IMAGE_TAG="candidate-$GIT_COMMIT"
         QUARANTINE_REPOSITORY="${MCP_QUARANTINE_REPO##*/}"
-        RELEASE_REPOSITORY="${MCP_RELEASE_REPO##*/}"
         docker push "$MCP_QUARANTINE_REPO:$IMAGE_TAG"
         TAG_DIGEST="$(aws ecr describe-images \
           --region "$EXPECTED_REGION" \
@@ -219,20 +355,7 @@ phases:
           --expected-image-digest "$ARM64_DIGEST" \
           --expected-repository "$QUARANTINE_REPOSITORY"
         VERIFIED_QUARANTINE_DIGEST="$ARM64_DIGEST"
-        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: MCP gate failed before release promotion"; exit 1; }
-        docker pull "$MCP_QUARANTINE_REPO@$VERIFIED_QUARANTINE_DIGEST"
-        docker tag \
-          "$MCP_QUARANTINE_REPO@$VERIFIED_QUARANTINE_DIGEST" \
-          "$MCP_RELEASE_REPO:$IMAGE_TAG"
-        docker push "$MCP_RELEASE_REPO:$IMAGE_TAG"
-        RELEASE_DIGEST="$(aws ecr describe-images \
-          --region "$EXPECTED_REGION" \
-          --registry-id "$EXPECTED_ACCOUNT_ID" \
-          --repository-name "$RELEASE_REPOSITORY" \
-          --image-ids "imageTag=$IMAGE_TAG" \
-          --query 'imageDetails[0].imageDigest' \
-          --output text)"
-        [ "$RELEASE_DIGEST" = "$VERIFIED_QUARANTINE_DIGEST" ] || { echo "FATAL: release digest differs from verified quarantine digest"; exit 1; }
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: MCP quarantine verification failed"; exit 1; }
         echo "MCP_TAG_DIGEST=$TAG_DIGEST"
         echo "MCP_ARM64_DIGEST=$ARM64_DIGEST"
-        echo "MCP_RELEASE_DIGEST=$RELEASE_DIGEST"
+        echo "MCP_QUARANTINE_VERIFIED=true"

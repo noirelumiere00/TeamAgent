@@ -449,6 +449,38 @@ def runtime_expected_labels(contract: dict[str, Any], contract_sha256: str) -> d
     return labels
 
 
+def runtime_binary_probes(contract: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return the exact in-image paths and hashes declared by binary evidence."""
+
+    validated = validate_runtime_contract(contract)
+    require_release_ready(validated)
+    probes: list[tuple[str, str]] = []
+    seen_paths: set[str] = set()
+    for entry in validated["receipt"]["entries"]:
+        if entry["evidence"] != "binary_sha256":
+            continue
+        matches: list[str] = []
+        for use in entry["dockerfile_uses"]:
+            if "sha256sum -c -" not in use:
+                continue
+            matches.extend(
+                re.findall(r"(?:^|\s)(/[A-Za-z0-9][A-Za-z0-9_./+-]{0,511})(?:\s|[\"'])", use)
+            )
+        unique_matches = sorted(set(matches))
+        if len(unique_matches) != 1:
+            raise ProvenanceError(
+                f"binary evidence {entry['key']} must bind one canonical runtime path"
+            )
+        path = unique_matches[0]
+        if ".." in PurePosixPath(path).parts or path in seen_paths:
+            raise ProvenanceError(f"binary evidence path is unsafe or duplicate: {path}")
+        seen_paths.add(path)
+        probes.append((path, entry["value"]))
+    if not probes:
+        raise ProvenanceError("runtime contract has no actual binary hash probes")
+    return sorted(probes)
+
+
 def _runtime_contract_at_commit(repo_root: Path, commit: str) -> tuple[dict[str, Any], str]:
     raw = _git(repo_root, "show", f"{commit}:{RUNTIME_CONTRACT_PATH}")
     try:
@@ -1214,6 +1246,9 @@ def _parser() -> argparse.ArgumentParser:
     expected_labels.add_argument("--contract", type=Path, required=True)
     expected_labels.add_argument("--expected-contract-sha256", required=True)
 
+    binary_probes = subparsers.add_parser("runtime-binary-probes")
+    binary_probes.add_argument("--contract", type=Path, required=True)
+
     dockerfile_contract = subparsers.add_parser("verify-dockerfile-contract")
     dockerfile_contract.add_argument("--contract", type=Path, required=True)
     dockerfile_contract.add_argument("--dockerfile", type=Path, required=True)
@@ -1285,6 +1320,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.expected_contract_sha256,
             ).items():
                 print(f"{name}\t{value}")
+        elif args.command == "runtime-binary-probes":
+            for path, digest in runtime_binary_probes(load_runtime_contract(args.contract)):
+                print(f"{path}\t{digest}")
         elif args.command == "verify-dockerfile-contract":
             verify_dockerfile_contract(args.contract, args.dockerfile)
             print("Dockerfile implements the complete runtime contract")

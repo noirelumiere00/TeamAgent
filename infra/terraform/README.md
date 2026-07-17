@@ -40,89 +40,193 @@ terraform apply
 - Lambda 実行 IAM Role（Bedrock / Secrets / S3 アクセス権）
 - CloudWatch Logs Group
 
-## Guarded image build and deployment
+## Guarded image provenance and deployment
 
-Image build and deployment are deliberately separate:
+No build launcher deploys anything. The enforced flow is:
 
-1. Run `infra/deploy/build_teamagent_image.sh` from a clean local `dev` branch
-   whose HEAD is the freshly fetched `origin/dev`. The launcher assumes
-   `teamagent-dev-codebuild-launcher`, uploads only the fixed versioned source
-   key, and returns a digest from the release repository after quarantine
-   provenance and scan gates pass.
-2. Review a Terraform plan that sets `mcp_image` (or
-   `tiktok_acquire_image`) to that exact **release repository digest**. A task
-   definition must never reference a repository whose name ends in
-   `-quarantine`.
-3. Apply the reviewed plan as a separate, explicitly authorized deployment.
-   The build launcher itself never calls ECS or EventBridge.
-
-The inline deny on the `AIIAdev` IAM user blocks direct `StartBuild`; operators
-must assume the dedicated launcher role. Any AWS root access keys remain an
-external account-level blocker because IAM policies cannot restrict the root
-principal. Rotate/delete root keys and retain only the normal break-glass root
-login before treating the launcher boundary as complete.
-
-### P1 activation and merge order
-
-The provenance/IAM/quarantine remediation must merge before either image
-implementation. Both checked-in contracts intentionally have `release.ready =
-false`, so this ordering cannot publish a partial cross-branch implementation.
-
-For the main MCP image:
-
-1. Merge this provenance change without the Boyle-owned Dockerfile, Python lock
-   files, TikTok package files, or core/media image implementation.
-2. Merge Boyle's Wolfi/Chainguard arm64 Dockerfile. It must implement every
-   build argument, meaningful use, OCI label, and canonical receipt declared by
-   `teamagent_runtime_contract.json`; all external images must be child-digest
-   pinned, never mutable tags.
-3. In a reviewed follow-up, complete the allowlist with measured builder/runtime
-   child digests, exact Wolfi package versions, installed binary SHA-256 values,
-   app HTML identity, model revision, and commit binding. Set `release.ready`
-   only after the actual candidate passes the zero-exception C/H=0 scan. The
-   checked-in Dockerfile contract test becomes mandatory as soon as the flag is
-   enabled.
-
-For OpenClaw:
-
-1. Merge this isolated project/role, signed-source, quarantine, scan, referrer,
-   and evidence boundary while `openclaw_bundle_contract.json` remains blocked.
-2. Merge Boyle's core/media builder, evidence verifier, and recursive
-   digest-preserving promoter at the three fixed contract interfaces. Each
-   arm64 child needs signed provenance and SBOM referrers and must pass C/H=0.
-3. Set the OpenClaw contract ready only after those interfaces and signatures
-   are independently verified. Complete the GitHub CodeConnections handshake
-   and any Terraform apply later as separately authorized infrastructure work.
-
-OpenClaw uses CodeConnections with one full `dev` commit SHA; it does not use a
-shared or legacy S3 source ZIP. S3 stores only KMS-signed, versioned,
-COMPLIANCE-locked source manifests and release evidence under content-addressed
-keys. The currently deployed `9cde4c...` OpenClaw digest is an OCI image index
-and ECR basic scan reports `UnsupportedImageType`; it is therefore ineligible
-for this path. New release subjects must be a single OCI image manifest whose
-config is exactly `linux/arm64`, whose revision is the full source commit, and
-whose verified quarantine digest passes ECR C/H=0 before promotion.
-
-Neither safe launcher updates ECS, EventBridge, task definitions, services, or
-schedules. Deployment remains a separate guarded and explicitly authorized
-operation.
-
-### Existing CodeBuild log groups
-
-CodeBuild log groups are Terraform-managed with 30-day retention. Before the
-first separately authorized apply of this change, import the two groups found
-by the audit so Terraform changes retention in place instead of attempting to
-create existing names:
-
-```bash
-terraform import aws_cloudwatch_log_group.codebuild_image /aws/codebuild/teamagent-dev-image-builder
-terraform import aws_cloudwatch_log_group.codebuild_aiia_image_legacy /aws/codebuild/aiia-image-builder
+```text
+independent signed source
+  -> builder writes quarantine only
+  -> source-free attestor verifies the exact linux/arm64 digest
+  -> source-free promoter copies quarantine -> verified-candidates
+  -> guarded release authorization revalidates candidate + signatures
+  -> source-free promoter copies verified-candidates -> release
+  -> Terraform accepts release-repository @sha256 only with fresh signed evidence
 ```
 
-The second resource manages retention only and does not recreate the retired
-AI-IA CodeBuild project. Buildspecs and launchers keep shell tracing disabled,
-pipe ECR credentials only to fixed-registry `docker login --password-stdin`,
-and never print temporary AWS credentials or KMS signature material.
+The attestor requires exact OCI labels, full commit, contract hash, installed
+binary hashes, Trivy actual-image CRITICAL=0/HIGH=0/secret=0, one exact SPDX
+SBOM referrer, one exact in-toto provenance referrer, and cryptographic
+signatures over the image and both referrers. ECR referrer reads use
+`max-results=50` and reject any remaining pagination token. An OCI index is not
+a release subject.
+
+The production application source allowlist is:
+
+| Evidence | Canonical value |
+|---|---|
+| app HTML S3 VersionId | `I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY` |
+| app HTML SHA-256 | `46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067` |
+| Vault manifest SHA-256 | `15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2` |
+| build_inputs SHA-256 | `1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2` |
+
+The old `ec1b…`, `7a13…`, and `716ac…` values are rollback/test evidence only;
+they must not be restored as the production canonical source.
+
+### Activation and merge order
+
+1. Merge this CodeBuild/provenance/IAM/ECR change first. Keep all three
+   contracts at `release.ready=false`.
+2. Merge Boyle's Docker/core/media implementation separately. Do not copy its
+   Dockerfile or lock/package changes into this commit. The MCP Dockerfile must
+   implement every machine-readable contract build argument, meaningful use,
+   OCI label, and receipt entry. Builder and runtime images must use exact
+   arm64 child digests; Wolfi package versions and installed binary hashes must
+   be exact. Mutable tags are never evidence.
+3. Run the full contract and actual-image tests. Only after the actual
+   Chainguard/Wolfi candidate is CRITICAL=0/HIGH=0 and all binary/app/model/
+   commit evidence matches may a reviewed follow-up set `release.ready=true`.
+4. Keep Aristotle-owned task definitions unchanged until a fresh active or
+   rollback receipt exists for the exact release digest.
+
+This ordering is fail closed: the publisher, builders, attestor, release
+launcher, and Terraform hard precondition all reject `release.ready=false`.
+
+OpenClaw uses a dedicated full-40-character-`dev`-SHA project/role and never an
+MCP repository or legacy/shared image-only path. Its build role cannot write or
+sign S3 evidence. The publisher writes KMS-signed, versioned,
+COMPLIANCE-locked source statements before the build; the build role verifies
+them. The deployed `9cde4c…` object is an OCI image index and ECR basic scan
+returns `UnsupportedImageType`, so it is ineligible. The promoted subject must
+be a single ECR-scan-capable `linux/arm64` manifest, or carry the stronger
+signed Trivy actual-image C/H/secret=0 evidence enforced here.
+
+### One-time Terraform migration while release.ready is false
+
+These are future, separately authorized AWS steps. They were not run as part
+of this remediation.
+
+1. Rotate/delete root keys first. Any AWS root access keys are an
+   external account-level blocker because IAM cannot constrain the root principal. Keep
+   only the normal break-glass root login.
+2. Start from a clean reviewed `origin/dev`, back up state, and inspect existing
+   ownership before import:
+
+   ```bash
+   cd infra/terraform
+   terraform init
+   terraform state pull > /secure/local/path/teamagent-before-provenance.tfstate
+   terraform state list
+   ```
+
+   Do not print or commit state. Import only addresses absent from state.
+   Existing release repositories and the existing main builder must be adopted,
+   never recreated:
+
+   ```bash
+   terraform import aws_cloudwatch_log_group.codebuild_image /aws/codebuild/teamagent-dev-image-builder
+   terraform import aws_cloudwatch_log_group.codebuild_aiia_image_legacy /aws/codebuild/aiia-image-builder
+   terraform import aws_ecr_repository.mcp teamagent-mcp
+   terraform import aws_ecr_repository.openclaw teamagent-openclaw
+   terraform import aws_ecr_repository.openclaw_media teamagent-openclaw-media
+   terraform import 'aws_ecr_repository.tiktok_acquire[0]' teamagent-dev-tiktok-acquire
+   terraform import aws_codebuild_project.image teamagent-dev-image-builder
+   terraform import aws_iam_role.codebuild teamagent-dev-codebuild-image
+   terraform import aws_iam_role_policy.codebuild teamagent-dev-codebuild-image:teamagent-dev-codebuild-image
+   ```
+
+3. A normal full plan is expected to fail while live image variables are set
+   and `release.ready=false`. Do not bypass the gate by clearing live image
+   variables or by changing `release.ready`. For the one-time infrastructure
+   bootstrap only, build a saved targeted plan from the audited address file.
+   Exclude lifecycle policies on the first pass:
+
+   ```bash
+   target_args=()
+   while IFS= read -r address; do target_args+=("-target=$address"); done \
+     < <(sed '/^#/d;/^$/d;/^aws_ecr_lifecycle_policy\\./d' codebuild_provenance_bootstrap_targets.txt)
+   terraform plan "${target_args[@]}" -out=provenance-bootstrap.tfplan
+   terraform show provenance-bootstrap.tfplan
+   terraform apply provenance-bootstrap.tfplan
+   ```
+
+   The saved plan must contain no ECS task definition, ECS service,
+   EventBridge rule/target, schedule, production image variable change, delete,
+   or replacement. Apply only that reviewed saved plan. The target file
+   intentionally excludes `terraform_data.production_image_release_gate`;
+   this is a one-time migration exception for provenance infrastructure, not a
+   deployment exception.
+
+4. The two GitHub CodeConnections are created in `PENDING`. Complete the GitHub
+   App handshake for `teamagent-dev-openclaw-codebuild` and
+   `teamagent-dev-tiktok-codebuild`, then verify both are `AVAILABLE`.
+   The MCP publisher reuses the TeamAgent/OpenClaw connection. Do not start a
+   build before this manual handshake.
+5. Preview lifecycle deletion before applying lifecycle resources. Obtain all
+   current `active-*` and `rollback-*` release digests without logging image
+   contents, run ECR lifecycle preview for each release repository, then run:
+
+   ```bash
+   python3 ../codebuild/release_evidence.py verify-lifecycle-preview \
+     --preview /secure/local/path/release-lifecycle-preview.json \
+     --protected-digest sha256:<active-or-rollback-digest>
+   ```
+
+   The verifier rejects truncated previews and any protected digest selected
+   for expiry. Then create and review a second saved plan containing only the
+   `aws_ecr_lifecycle_policy.*` addresses from the target file. Quarantine
+   expires after 2 days, verified candidates after 30 days, and release
+   repositories expire only untagged artifacts after 365 days; active/rollback
+   tags live only in release repositories:
+
+   ```bash
+   lifecycle_args=()
+   while IFS= read -r address; do lifecycle_args+=("-target=$address"); done \
+     < <(sed -n '/^aws_ecr_lifecycle_policy\\./p' codebuild_provenance_bootstrap_targets.txt)
+   terraform plan "${lifecycle_args[@]}" -out=provenance-lifecycle.tfplan
+   terraform show provenance-lifecycle.tfplan
+   terraform apply provenance-lifecycle.tfplan
+   ```
+
+### Build, release authorization, and signed-digest deploy
+
+After contracts are ready and both connections are available:
+
+1. Run exactly one build-only launcher from clean remote HEAD:
+   `build_teamagent_image.sh`, `build_openclaw_image.sh`, or
+   `build_tiktok_image.sh`. Each assumes its dedicated role once, pins that
+   session, and ends at a verified-candidate digest plus immutable receipt.
+2. Use `authorize_image_release.sh` with the exact candidate receipt key and
+   both S3 VersionIds before the signed 30-day candidate window expires. It
+   rechecks the candidate manifest/referrers and all cosign signatures, issues
+   a fresh short-lived active/rollback receipt, and invokes the source-free
+   promoter. It does not run Terraform.
+3. Set the applicable production image variable to the fixed release
+   repository `@sha256:<digest>` and set `image_release_evidence` to the exact
+   receipt/signature keys and VersionIds. A full `terraform plan` invokes the
+   hard precondition, re-downloads those exact COMPLIANCE-locked versions,
+   verifies the KMS signature, freshness, contract hash, channel, repository,
+   digest, single-manifest release presence, and exact SBOM/provenance/signature
+   referrers for every receipt subject. It fails on any tag/string, partial
+   bundle promotion, pagination token, or mismatch.
+4. Review the full plan and apply that saved plan as a separate deployment
+   authorization. None of the build/release launchers updates ECS,
+   EventBridge, task definitions, services, or schedules.
+
+Do not use `-target` for a task definition, service, schedule, or other runtime
+resource. Terraform resource targeting can omit the standalone
+`terraform_data.production_image_release_gate` from the selected graph. Until
+the Aristotle-owned production task definitions directly depend on that gate,
+or an enforced Terraform policy rejects every runtime-targeted plan, any such
+targeted plan/apply is a deployment NO-GO. The one-time target list above is
+limited to provenance infrastructure and is not authorization to target a
+runtime resource.
+
+CodeBuild log groups, including the legacy `aiia-image-builder` group, use
+30-day retention. The legacy resource is retention-only and does not recreate
+its retired project. Shell tracing stays disabled; ECR tokens go only to
+fixed-registry `--password-stdin` logins, and temporary AWS credentials,
+signature bytes, and secret values are never printed.
 
 ## Lambda 本体について
 

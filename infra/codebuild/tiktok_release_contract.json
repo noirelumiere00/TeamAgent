@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "release": {
+    "ready": false,
+    "blocked_reason": "The TikTok arm64 image has not yet produced the signed actual-image binary, label, secret-scan, SBOM, provenance, and image-signature receipt required by the isolated attestor."
+  },
+  "source": {
+    "repository": "https://github.com/noirelumiere00/tiktok-data-service.git",
+    "branch": "main"
+  },
+  "image": {
+    "subject_name": "tiktok",
+    "quarantine_repository": "teamagent-dev-tiktok-acquire-quarantine",
+    "candidate_repository": "teamagent-dev-tiktok-acquire-verified-candidates",
+    "release_repository": "teamagent-dev-tiktok-acquire",
+    "media_type_allowlist": [
+      "application/vnd.docker.distribution.manifest.v2+json",
+      "application/vnd.oci.image.manifest.v1+json"
+    ],
+    "platform": {
+      "os": "linux",
+      "architecture": "arm64"
+    },
+    "required_labels": [
+      "org.opencontainers.image.revision",
+      "io.teamagent.build.contract-sha256"
+    ],
+    "binary_probes": []
+  },
+  "evidence": {
+    "critical": 0,
+    "high": 0,
+    "secrets": 0,
+    "required_referrers": [
+      {
+        "name": "provenance",
+        "artifact_type": "application/vnd.in-toto+json",
+        "minimum": 1,
+        "signature_required": true
+      },
+      {
+        "name": "sbom",
+        "artifact_type": "application/spdx+json",
+        "minimum": 1,
+        "signature_required": true
+      }
+    ],
+    "image_signature_required": true
+  }
+}

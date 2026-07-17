@@ -1,0 +1,216 @@
+# Independent trusted publisher for the MCP S3 source archive.
+version: 0.2
+env:
+  exported-variables:
+    - PUBLISHED_SOURCE_VERSION_ID
+    - SOURCE_DECLARATION_KEY
+    - SOURCE_DECLARATION_VERSION_ID
+    - SOURCE_DECLARATION_SHA256
+    - SOURCE_DECLARATION_SIGNATURE_KEY
+    - SOURCE_DECLARATION_SIGNATURE_VERSION_ID
+phases:
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        umask 077
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_KMS AWS_ENDPOINT_URL_ECR
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        EXPECTED_REPOSITORY="https://github.com/noirelumiere00/TeamAgent.git"
+        SOURCE_BUCKET="teamagent-dev-raw-files"
+        SOURCE_KEY="codebuild/source.zip"
+        APP_KEY="codebuild/connect-web-app.html"
+        APP_HTML_VERSION_ID="I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY"
+        APP_HTML_SHA256="46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067"
+        VAULT_MANIFEST_SHA256="15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2"
+        BUILD_INPUTS_SHA256="1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2"
+        EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
+        SIGNING_KEY_ARN="__SOURCE_PUBLISHER_SIGNING_KEY_ARN__"
+        EVIDENCE_KMS_KEY_ARN="__RELEASE_EVIDENCE_KMS_KEY_ARN__"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        readonly EXPECTED_ACCOUNT_ID EXPECTED_REGION EXPECTED_REPOSITORY
+        readonly SOURCE_BUCKET SOURCE_KEY APP_KEY APP_HTML_VERSION_ID APP_HTML_SHA256
+        readonly VAULT_MANIFEST_SHA256 BUILD_INPUTS_SHA256 EVIDENCE_BUCKET
+        readonly SIGNING_KEY_ARN EVIDENCE_KMS_KEY_ARN
+        [ "$(aws sts get-caller-identity --query Account --output text)" = "$EXPECTED_ACCOUNT_ID" ] || { echo "FATAL: wrong AWS account"; exit 1; }
+        [ "$CODEBUILD_SOURCE_REPO_URL" = "$EXPECTED_REPOSITORY" ] || { echo "FATAL: wrong source repository"; exit 1; }
+        : "${EXPECTED_COMMIT:?EXPECTED_COMMIT is required}"
+        : "${RUNTIME_CONTRACT_SHA256:?RUNTIME_CONTRACT_SHA256 is required}"
+        [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: expected commit must be a full SHA"; exit 1; }
+        [[ "$CODEBUILD_SOURCE_VERSION" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: source-version must be a full SHA"; exit 1; }
+        [ "$CODEBUILD_SOURCE_VERSION" = "$EXPECTED_COMMIT" ] || { echo "FATAL: source-version differs from expected commit"; exit 1; }
+        [ "$CODEBUILD_RESOLVED_SOURCE_VERSION" = "$EXPECTED_COMMIT" ] || { echo "FATAL: resolved source commit mismatch"; exit 1; }
+        [ "$(git rev-parse --verify HEAD^{commit})" = "$EXPECTED_COMMIT" ] || { echo "FATAL: checkout HEAD mismatch"; exit 1; }
+        [ "$(git remote get-url origin)" = "$EXPECTED_REPOSITORY" ] || { echo "FATAL: unexpected origin URL"; exit 1; }
+        git fetch --no-tags --force origin refs/heads/dev:refs/remotes/origin/dev
+        [ "$(git rev-parse --verify refs/remotes/origin/dev^{commit})" = "$EXPECTED_COMMIT" ] || { echo "FATAL: independent publisher did not resolve expected commit at origin/dev"; exit 1; }
+        [ -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] || { echo "FATAL: publisher checkout is dirty"; exit 1; }
+        [ "$(aws s3api get-bucket-versioning \
+          --region "$EXPECTED_REGION" \
+          --bucket "$SOURCE_BUCKET" \
+          --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+          --query Status \
+          --output text)" = "Enabled" ] \
+          || { echo "FATAL: source bucket versioning is not enabled"; exit 1; }
+        [[ "$RUNTIME_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid contract SHA-256"; exit 1; }
+        printf '%s' '__SOURCE_PROVENANCE_BASE64__' | base64 --decode > /tmp/source_provenance.py
+        printf '%s' '__RELEASE_EVIDENCE_BASE64__' | base64 --decode > /tmp/release_evidence.py
+        printf '%s' '__MCP_CONTRACT_BASE64__' | base64 --decode > /tmp/teamagent_runtime_contract.json
+        [ "$(sha256sum /tmp/teamagent_runtime_contract.json | awk '{print $1}')" = "$RUNTIME_CONTRACT_SHA256" ] || { echo "FATAL: embedded contract hash mismatch"; exit 1; }
+        [ "$(git show "$EXPECTED_COMMIT:infra/codebuild/teamagent_runtime_contract.json" | sha256sum | awk '{print $1}')" = "$RUNTIME_CONTRACT_SHA256" ] || { echo "FATAL: source commit contract differs from trusted contract"; exit 1; }
+        python3 /tmp/source_provenance.py assert-release-ready \
+          --contract /tmp/teamagent_runtime_contract.json
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        umask 077
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_KMS AWS_ENDPOINT_URL_ECR
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        export AWS_DEFAULT_REGION="ap-northeast-1" AWS_REGION="ap-northeast-1"
+        TMP_DIR="$(mktemp -d /tmp/teamagent-source-publisher.XXXXXXXX)"
+        trap 'rm -rf -- "$TMP_DIR"' EXIT
+        MANIFEST="$TMP_DIR/.teamagent-source-manifest.json"
+        SOURCE_ZIP="$TMP_DIR/source.zip"
+        APP_HTML="$TMP_DIR/connect-web-app.html"
+        DOWNLOADED_APP_VERSION="$(
+          aws s3api get-object \
+            --region ap-northeast-1 \
+            --bucket teamagent-dev-raw-files \
+            --key codebuild/connect-web-app.html \
+            --version-id "$APP_HTML_VERSION_ID" \
+            --expected-bucket-owner 718959508629 \
+            --query VersionId \
+            --output text \
+            "$APP_HTML"
+        )"
+        [ "$DOWNLOADED_APP_VERSION" = "$APP_HTML_VERSION_ID" ] || { echo "FATAL: app HTML VersionId mismatch"; exit 1; }
+        [ "$(sha256sum "$APP_HTML" | awk '{print $1}')" = "$APP_HTML_SHA256" ] || { echo "FATAL: app HTML hash mismatch"; exit 1; }
+        python3 /tmp/source_provenance.py create-manifest \
+          --repo-root "$CODEBUILD_SRC_DIR" \
+          --commit "$EXPECTED_COMMIT" \
+          --branch dev \
+          --with-scrape-tools true \
+          --app-html-version-id "$APP_HTML_VERSION_ID" \
+          --app-html-sha256 "$APP_HTML_SHA256" \
+          --output "$MANIFEST"
+        MANIFEST_SHA256="$(sha256sum "$MANIFEST" | awk '{print $1}')"
+        git -C "$CODEBUILD_SRC_DIR" archive \
+          --format=zip \
+          --output="$SOURCE_ZIP" \
+          --add-file="$MANIFEST" \
+          "$EXPECTED_COMMIT"
+        SOURCE_SHA256="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
+        EXTRACTED="$TMP_DIR/extracted"
+        mkdir -p "$EXTRACTED"
+        python3 -m zipfile -e "$SOURCE_ZIP" "$EXTRACTED"
+        python3 /tmp/source_provenance.py verify-source \
+          --source-root "$EXTRACTED" \
+          --manifest "$EXTRACTED/.teamagent-source-manifest.json" \
+          --expected-commit "$EXPECTED_COMMIT" \
+          --expected-branch dev \
+          --expected-with-scrape-tools true \
+          --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
+          --expected-app-html-sha256 "$APP_HTML_SHA256" \
+          --expected-runtime-contract-sha256 "$RUNTIME_CONTRACT_SHA256"
+        [ "$(git rev-parse --verify HEAD^{commit})" = "$EXPECTED_COMMIT" ] || { echo "FATAL: checkout changed during archive creation"; exit 1; }
+        [ -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] || { echo "FATAL: checkout changed during archive creation"; exit 1; }
+        PUBLISHED_SOURCE_VERSION_ID="$(
+          aws s3api put-object \
+            --region ap-northeast-1 \
+            --bucket teamagent-dev-raw-files \
+            --key codebuild/source.zip \
+            --body "$SOURCE_ZIP" \
+            --expected-bucket-owner 718959508629 \
+            --content-type application/zip \
+            --server-side-encryption AES256 \
+            --query VersionId \
+            --output text
+        )"
+        case "$PUBLISHED_SOURCE_VERSION_ID" in ""|None|null|*[!A-Za-z0-9._~+/=-]*) echo "FATAL: source archive VersionId is invalid"; exit 1 ;; esac
+        PUBLISHER_PROJECT_ARN="arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-mcp-source-publisher"
+        python3 /tmp/release_evidence.py create-source-declaration \
+          --project-arn "$PUBLISHER_PROJECT_ARN" \
+          --build-id "$CODEBUILD_BUILD_ID" \
+          --commit "$EXPECTED_COMMIT" \
+          --source-version "$PUBLISHED_SOURCE_VERSION_ID" \
+          --source-sha256 "$SOURCE_SHA256" \
+          --manifest-sha256 "$MANIFEST_SHA256" \
+          --app-version "$APP_HTML_VERSION_ID" \
+          --app-sha256 "$APP_HTML_SHA256" \
+          --vault-manifest-sha256 "$VAULT_MANIFEST_SHA256" \
+          --build-inputs-sha256 "$BUILD_INPUTS_SHA256" \
+          --contract-sha256 "$RUNTIME_CONTRACT_SHA256" \
+          --output "$TMP_DIR/source-declaration.json"
+        SOURCE_DECLARATION_SHA256="$(sha256sum "$TMP_DIR/source-declaration.json" | awk '{print $1}')"
+        SOURCE_DECLARATION_KEY="source-declarations/mcp/$EXPECTED_COMMIT/$SOURCE_SHA256/$PUBLISHED_SOURCE_VERSION_ID.json"
+        SOURCE_DECLARATION_SIGNATURE_KEY="$SOURCE_DECLARATION_KEY.sig"
+        python3 - "$TMP_DIR/source-declaration.json" "$TMP_DIR/source-declaration.sha256" <<'PY'
+        import hashlib
+        import sys
+        with open(sys.argv[1], "rb") as source:
+            digest = hashlib.sha256(source.read()).digest()
+        with open(sys.argv[2], "wb") as output:
+            output.write(digest)
+        PY
+        aws kms sign \
+          --region ap-northeast-1 \
+          --key-id "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__" \
+          --message-type DIGEST \
+          --message "fileb://$TMP_DIR/source-declaration.sha256" \
+          --signing-algorithm RSASSA_PSS_SHA_256 \
+          --query Signature \
+          --output text | base64 --decode >"$TMP_DIR/source-declaration.sig"
+        RETAIN_UNTIL="$(date -u -d '+30 days' '+%Y-%m-%dT%H:%M:%SZ')"
+        SOURCE_DECLARATION_VERSION_ID="$(
+          aws s3api put-object \
+            --region ap-northeast-1 \
+            --bucket teamagent-dev-image-release-evidence \
+            --key "$SOURCE_DECLARATION_KEY" \
+            --body "$TMP_DIR/source-declaration.json" \
+            --expected-bucket-owner 718959508629 \
+            --content-type application/json \
+            --server-side-encryption aws:kms \
+            --ssekms-key-id "__RELEASE_EVIDENCE_KMS_KEY_ARN__" \
+            --object-lock-mode COMPLIANCE \
+            --object-lock-retain-until-date "$RETAIN_UNTIL" \
+            --if-none-match '*' \
+            --query VersionId \
+            --output text
+        )"
+        SOURCE_DECLARATION_SIGNATURE_VERSION_ID="$(
+          aws s3api put-object \
+            --region ap-northeast-1 \
+            --bucket teamagent-dev-image-release-evidence \
+            --key "$SOURCE_DECLARATION_SIGNATURE_KEY" \
+            --body "$TMP_DIR/source-declaration.sig" \
+            --expected-bucket-owner 718959508629 \
+            --content-type application/octet-stream \
+            --server-side-encryption aws:kms \
+            --ssekms-key-id "__RELEASE_EVIDENCE_KMS_KEY_ARN__" \
+            --object-lock-mode COMPLIANCE \
+            --object-lock-retain-until-date "$RETAIN_UNTIL" \
+            --if-none-match '*' \
+            --query VersionId \
+            --output text
+        )"
+        case "$SOURCE_DECLARATION_VERSION_ID:$SOURCE_DECLARATION_SIGNATURE_VERSION_ID" in *None*|*null*|:*) echo "FATAL: source declaration VersionId is missing"; exit 1 ;; esac
+        export PUBLISHED_SOURCE_VERSION_ID SOURCE_DECLARATION_KEY
+        export SOURCE_DECLARATION_VERSION_ID SOURCE_DECLARATION_SHA256
+        export SOURCE_DECLARATION_SIGNATURE_KEY SOURCE_DECLARATION_SIGNATURE_VERSION_ID
+  post_build:
+    commands:
+      - |
+        set -euo pipefail
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: independent source publication failed"; exit 1; }
+        echo "Signed immutable source declaration published for commit=$EXPECTED_COMMIT"

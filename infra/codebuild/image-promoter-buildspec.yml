@@ -1,0 +1,263 @@
+# Fixed NO_SOURCE promoter. This is the only CodeBuild role allowed to write release ECR.
+version: 0.2
+phases:
+  install:
+    commands:
+      - |
+        set -euo pipefail
+        umask 077
+        ORAS_VERSION="1.3.3"
+        ORAS_ARCHIVE="oras_${ORAS_VERSION}_linux_arm64.tar.gz"
+        ORAS_SHA256="ac7156f93a21e903f7ad606c792f3560f17e0cd0e36365634701b1e7cc4e4eca"
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+          --output "/tmp/$ORAS_ARCHIVE" \
+          "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${ORAS_ARCHIVE}"
+        printf '%s  %s\n' "$ORAS_SHA256" "/tmp/$ORAS_ARCHIVE" | sha256sum -c -
+        tar -xzf "/tmp/$ORAS_ARCHIVE" -C /tmp oras
+        install -m 0755 /tmp/oras /usr/local/bin/oras
+        oras version | grep -F "$ORAS_VERSION"
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        umask 077
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_ECR AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_KMS
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset ECR_REGISTRY MCP_REPO TIKTOK_REPO OPENCLAW_REPO OPENCLAW_MEDIA_REPO
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
+        EVIDENCE_KMS_KEY_ARN="__RELEASE_EVIDENCE_KMS_KEY_ARN__"
+        SIGNING_KEY_ARN="__ATTESTOR_SIGNING_KEY_ARN__"
+        REGISTRY="718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        readonly EXPECTED_ACCOUNT_ID EXPECTED_REGION EVIDENCE_BUCKET
+        readonly EVIDENCE_KMS_KEY_ARN SIGNING_KEY_ARN REGISTRY
+        [ "$(uname -m)" = "aarch64" ] || { echo "FATAL: promoter must be native arm64"; exit 1; }
+        [ "$(aws sts get-caller-identity --query Account --output text)" = "$EXPECTED_ACCOUNT_ID" ] || { echo "FATAL: wrong AWS account"; exit 1; }
+        : "${PIPELINE:?PIPELINE is required}"
+        : "${PROMOTION_CHANNEL:?PROMOTION_CHANNEL is required}"
+        : "${SOURCE_COMMIT:?SOURCE_COMMIT is required}"
+        : "${CONTRACT_SHA256:?CONTRACT_SHA256 is required}"
+        : "${RECEIPT_KEY:?RECEIPT_KEY is required}"
+        : "${RECEIPT_VERSION_ID:?RECEIPT_VERSION_ID is required}"
+        : "${RECEIPT_SIGNATURE_KEY:?RECEIPT_SIGNATURE_KEY is required}"
+        : "${RECEIPT_SIGNATURE_VERSION_ID:?RECEIPT_SIGNATURE_VERSION_ID is required}"
+        case "$PIPELINE" in mcp|tiktok|openclaw) ;; *) echo "FATAL: pipeline is not allowlisted"; exit 1 ;; esac
+        case "$PROMOTION_CHANNEL" in verified-candidate|active|rollback) ;; *) echo "FATAL: promotion channel is not allowlisted"; exit 1 ;; esac
+        [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: source commit must be a full SHA"; exit 1; }
+        [[ "$CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid contract SHA-256"; exit 1; }
+        EXPECTED_PREFIX="release-receipts/$PIPELINE/$SOURCE_COMMIT/"
+        [[ "$RECEIPT_KEY" == "$EXPECTED_PREFIX"*".json" ]] || { echo "FATAL: receipt key is outside the content-addressed prefix"; exit 1; }
+        [ "$RECEIPT_SIGNATURE_KEY" = "$RECEIPT_KEY.sig" ] || { echo "FATAL: receipt signature key mismatch"; exit 1; }
+        case "$RECEIPT_VERSION_ID:$RECEIPT_SIGNATURE_VERSION_ID" in *None*|*null*|*[!A-Za-z0-9._~+/=:-]*) echo "FATAL: invalid evidence VersionId"; exit 1 ;; esac
+        printf '%s' '__RELEASE_EVIDENCE_BASE64__' | base64 --decode > /tmp/release_evidence.py
+        for object in receipt signature; do
+          case "$object" in
+            receipt)
+              KEY="$RECEIPT_KEY"
+              VERSION_ID="$RECEIPT_VERSION_ID"
+              DESTINATION="/tmp/release-receipt.json"
+              ;;
+            signature)
+              KEY="$RECEIPT_SIGNATURE_KEY"
+              VERSION_ID="$RECEIPT_SIGNATURE_VERSION_ID"
+              DESTINATION="/tmp/release-receipt.sig"
+              ;;
+          esac
+          aws s3api head-object \
+            --region "$EXPECTED_REGION" \
+            --bucket "$EVIDENCE_BUCKET" \
+            --key "$KEY" \
+            --version-id "$VERSION_ID" \
+            --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+            --output json >"/tmp/$object-head.json"
+          jq -e \
+            --arg version "$VERSION_ID" \
+            --arg kms "$EVIDENCE_KMS_KEY_ARN" '
+              .VersionId == $version and
+              .ObjectLockMode == "COMPLIANCE" and
+              .ServerSideEncryption == "aws:kms" and
+              .SSEKMSKeyId == $kms
+            ' "/tmp/$object-head.json" >/dev/null \
+            || { echo "FATAL: $object is not exact immutable evidence"; exit 1; }
+          python3 - "/tmp/$object-head.json" <<'PY'
+        import datetime
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            retained = json.load(handle).get("ObjectLockRetainUntilDate", "")
+        try:
+            timestamp = datetime.datetime.fromisoformat(retained.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise SystemExit("FATAL: receipt retention timestamp is invalid") from exc
+        if timestamp <= datetime.datetime.now(datetime.UTC):
+            raise SystemExit("FATAL: receipt immutable retention has expired")
+        PY
+          DOWNLOADED_VERSION="$(
+            aws s3api get-object \
+              --region "$EXPECTED_REGION" \
+              --bucket "$EVIDENCE_BUCKET" \
+              --key "$KEY" \
+              --version-id "$VERSION_ID" \
+              --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+              --query VersionId \
+              --output text \
+              "$DESTINATION"
+          )"
+          [ "$DOWNLOADED_VERSION" = "$VERSION_ID" ] || { echo "FATAL: $object VersionId mismatch"; exit 1; }
+        done
+        RECEIPT_KEY_SHA256="${RECEIPT_KEY%.json}"
+        RECEIPT_KEY_SHA256="${RECEIPT_KEY_SHA256##*/}"
+        [ "$(sha256sum /tmp/release-receipt.json | awk '{print $1}')" = "$RECEIPT_KEY_SHA256" ] \
+          || { echo "FATAL: receipt key does not bind the exact receipt bytes"; exit 1; }
+        python3 - /tmp/release-receipt.json /tmp/release-receipt.sha256 <<'PY'
+        import hashlib
+        import sys
+        with open(sys.argv[1], "rb") as source:
+            digest = hashlib.sha256(source.read()).digest()
+        with open(sys.argv[2], "wb") as output:
+            output.write(digest)
+        PY
+        aws kms verify \
+          --region "$EXPECTED_REGION" \
+          --key-id "$SIGNING_KEY_ARN" \
+          --message-type DIGEST \
+          --message fileb:///tmp/release-receipt.sha256 \
+          --signature fileb:///tmp/release-receipt.sig \
+          --signing-algorithm RSASSA_PSS_SHA_256 \
+          --output json > /tmp/release-receipt-kms-verify.json
+        [ "$(jq -er '.SignatureValid' /tmp/release-receipt-kms-verify.json)" = "true" ] \
+          || { echo "FATAL: release receipt signature is invalid"; exit 1; }
+        python3 /tmp/release_evidence.py verify-release-receipt \
+          --receipt /tmp/release-receipt.json \
+          --expected-pipeline "$PIPELINE" \
+          --expected-commit "$SOURCE_COMMIT" \
+          --expected-contract-sha256 "$CONTRACT_SHA256" \
+          --allowed-channel "$PROMOTION_CHANNEL"
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: promoter preconditions failed"; exit 1; }
+        aws ecr get-login-password --region "$EXPECTED_REGION" \
+          | oras login --username AWS --password-stdin "$REGISTRY" >/dev/null
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: promoter gate failed before release write"; exit 1; }
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_ECR AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_KMS
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        export AWS_DEFAULT_REGION="ap-northeast-1" AWS_REGION="ap-northeast-1"
+        REGISTRY="718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
+        while IFS= read -r SUBJECT; do
+          QUARANTINE_REPOSITORY="$(jq -er '.quarantine_repository' <<<"$SUBJECT")"
+          CANDIDATE_REPOSITORY="$(jq -er '.candidate_repository' <<<"$SUBJECT")"
+          RELEASE_REPOSITORY="$(jq -er '.release_repository' <<<"$SUBJECT")"
+          RELEASE_TAG="$(jq -er '.release_tag' <<<"$SUBJECT")"
+          DIGEST="$(jq -er '.digest' <<<"$SUBJECT")"
+          SBOM_DIGEST="$(jq -er '.sbom.digest' <<<"$SUBJECT")"
+          SBOM_PAYLOAD_SHA256="$(jq -er '.sbom.payload_sha256' <<<"$SUBJECT")"
+          SBOM_SIGNATURE_DIGEST="$(jq -er '.sbom.signature.referrer_digest' <<<"$SUBJECT")"
+          PROVENANCE_DIGEST="$(jq -er '.provenance.digest' <<<"$SUBJECT")"
+          PROVENANCE_PAYLOAD_SHA256="$(jq -er '.provenance.payload_sha256' <<<"$SUBJECT")"
+          PROVENANCE_SIGNATURE_DIGEST="$(jq -er '.provenance.signature.referrer_digest' <<<"$SUBJECT")"
+          IMAGE_SIGNATURE_DIGEST="$(jq -er '.image_signature.referrer_digest' <<<"$SUBJECT")"
+          case "$PIPELINE:$QUARANTINE_REPOSITORY:$CANDIDATE_REPOSITORY:$RELEASE_REPOSITORY" in
+            mcp:teamagent-mcp-quarantine:teamagent-mcp-verified-candidates:teamagent-mcp) ;;
+            tiktok:teamagent-dev-tiktok-acquire-quarantine:teamagent-dev-tiktok-acquire-verified-candidates:teamagent-dev-tiktok-acquire) ;;
+            openclaw:teamagent-openclaw-quarantine:teamagent-openclaw-verified-candidates:teamagent-openclaw) ;;
+            openclaw:teamagent-openclaw-media-quarantine:teamagent-openclaw-media-verified-candidates:teamagent-openclaw-media) ;;
+            *) echo "FATAL: receipt repository mapping is not allowlisted"; exit 1 ;;
+          esac
+          if [ "$PROMOTION_CHANNEL" = "verified-candidate" ]; then
+            SOURCE_REPOSITORY="$QUARANTINE_REPOSITORY"
+            DESTINATION_REPOSITORY="$CANDIDATE_REPOSITORY"
+          else
+            SOURCE_REPOSITORY="$CANDIDATE_REPOSITORY"
+            DESTINATION_REPOSITORY="$RELEASE_REPOSITORY"
+          fi
+          oras cp --recursive \
+            "$REGISTRY/$SOURCE_REPOSITORY@$DIGEST" \
+            "$REGISTRY/$DESTINATION_REPOSITORY:$RELEASE_TAG"
+          DESTINATION_DIGEST="$(
+            aws ecr describe-images \
+              --region ap-northeast-1 \
+              --registry-id 718959508629 \
+              --repository-name "$DESTINATION_REPOSITORY" \
+              --image-ids "imageTag=$RELEASE_TAG" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text
+          )"
+          [ "$DESTINATION_DIGEST" = "$DIGEST" ] || { echo "FATAL: promoted digest differs from signed quarantine digest"; exit 1; }
+          aws ecr list-image-referrers \
+            --region ap-northeast-1 \
+            --registry-id 718959508629 \
+            --repository-name "$DESTINATION_REPOSITORY" \
+            --subject-id "imageDigest=$DESTINATION_DIGEST" \
+            --max-results 50 \
+            --output json >/tmp/promoted-subject-referrers.json
+          jq -e \
+            --arg sbom "$SBOM_DIGEST" \
+            --arg sbom_payload "$SBOM_PAYLOAD_SHA256" \
+            --arg provenance "$PROVENANCE_DIGEST" \
+            --arg provenance_payload "$PROVENANCE_PAYLOAD_SHA256" \
+            --arg image_signature "$IMAGE_SIGNATURE_DIGEST" '
+              (.nextToken == null) and
+              any(.referrers[];
+                .digest == $sbom and
+                .artifactType == "application/spdx+json" and
+                .artifactStatus == "ACTIVE" and
+                .annotations["io.teamagent.build.payload-sha256"] == $sbom_payload
+              ) and
+              any(.referrers[];
+                .digest == $provenance and
+                .artifactType == "application/vnd.in-toto+json" and
+                .artifactStatus == "ACTIVE" and
+                .annotations["io.teamagent.build.payload-sha256"] == $provenance_payload
+              ) and
+              ([.referrers[] | select(
+                .digest == $image_signature and
+                (.artifactType == "application/vnd.dev.cosign.simplesigning.v1+json" or
+                 .artifactType == "application/vnd.dsse.envelope.v1+json") and
+                .artifactStatus == "ACTIVE"
+              )] | length) == 1
+            ' /tmp/promoted-subject-referrers.json >/dev/null \
+            || { echo "FATAL: promoted image referrers are missing, inactive, or truncated"; exit 1; }
+          for ARTIFACT_DIGEST in "$SBOM_DIGEST" "$PROVENANCE_DIGEST"; do
+            if [ "$ARTIFACT_DIGEST" = "$SBOM_DIGEST" ]; then
+              ARTIFACT_SIGNATURE_DIGEST="$SBOM_SIGNATURE_DIGEST"
+            else
+              ARTIFACT_SIGNATURE_DIGEST="$PROVENANCE_SIGNATURE_DIGEST"
+            fi
+            aws ecr list-image-referrers \
+              --region ap-northeast-1 \
+              --registry-id 718959508629 \
+              --repository-name "$DESTINATION_REPOSITORY" \
+              --subject-id "imageDigest=$ARTIFACT_DIGEST" \
+              --max-results 50 \
+              --output json >/tmp/promoted-artifact-signatures.json
+            jq -e --arg signature "$ARTIFACT_SIGNATURE_DIGEST" '
+              (.nextToken == null) and
+              ([.referrers[] | select(
+                .digest == $signature and
+                (.artifactType == "application/vnd.dev.cosign.simplesigning.v1+json" or
+                 .artifactType == "application/vnd.dsse.envelope.v1+json") and
+                .artifactStatus == "ACTIVE"
+              )] | length) == 1
+            ' /tmp/promoted-artifact-signatures.json >/dev/null \
+              || { echo "FATAL: exact promoted artifact signature is missing, ambiguous, or truncated"; exit 1; }
+          done
+        done < <(jq -c '.subjects[]' /tmp/release-receipt.json)
+  post_build:
+    commands:
+      - |
+        set -euo pipefail
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: release promotion failed"; exit 1; }
+        echo "Digest-preserving signed promotion completed for pipeline=$PIPELINE channel=$PROMOTION_CHANNEL"

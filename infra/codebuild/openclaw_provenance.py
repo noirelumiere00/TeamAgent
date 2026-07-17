@@ -155,6 +155,7 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
         {
             "schema_version",
             "interfaces",
+            "contract_oci_label",
             "arm64_subject_media_type",
             "subjects",
             "required_referrers",
@@ -199,30 +200,69 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
         raise ContractError(f"{label} bundle schema must be 1")
     expected_interfaces = {
         "build": "infra/openclaw/build-image.sh",
-        "verify_evidence": "infra/openclaw/verify-bundle-evidence.sh",
-        "promote": "infra/openclaw/promote-bundle.sh",
+        "attest": "infra/codebuild/verify_actual_image.sh",
+        "promote": "infra/codebuild/image-promoter-buildspec.yml",
     }
     if bundle["interfaces"] != expected_interfaces:
         raise ContractError(f"{label} core/media helper interfaces are not fixed")
+    if bundle["contract_oci_label"] != "io.teamagent.build.contract-sha256":
+        raise ContractError(f"{label} contract OCI label is not fixed")
     if bundle["arm64_subject_media_type"] != "application/vnd.oci.image.manifest.v1+json":
         raise ContractError(f"{label} arm64 subject must be a single OCI image manifest")
     subjects = bundle["subjects"]
     if not isinstance(subjects, list) or len(subjects) != 2:
         raise ContractError(f"{label} bundle must declare exactly core and media")
-    normalized_subjects: list[dict[str, str]] = []
+    normalized_subjects: list[dict[str, Any]] = []
     for index, subject in enumerate(subjects):
         subject_label = f"{label} bundle.subjects[{index}]"
         if not isinstance(subject, dict):
             raise ContractError(f"{subject_label} must be an object")
         _exact_keys(
             subject,
-            {"name", "quarantine_repository", "release_repository"},
+            {
+                "name",
+                "quarantine_repository",
+                "candidate_repository",
+                "release_repository",
+                "binary_probes",
+            },
             label=subject_label,
         )
         normalized = {
             key: _text(subject[key], label=f"{subject_label}.{key}")
-            for key in ("name", "quarantine_repository", "release_repository")
+            for key in (
+                "name",
+                "quarantine_repository",
+                "candidate_repository",
+                "release_repository",
+            )
         }
+        probes = subject["binary_probes"]
+        if not isinstance(probes, list):
+            raise ContractError(f"{subject_label}.binary_probes must be an array")
+        normalized_probes: list[dict[str, str]] = []
+        seen_paths: set[str] = set()
+        for probe_index, probe in enumerate(probes):
+            probe_label = f"{subject_label}.binary_probes[{probe_index}]"
+            if not isinstance(probe, dict):
+                raise ContractError(f"{probe_label} must be an object")
+            _exact_keys(probe, {"path", "sha256"}, label=probe_label)
+            path = _text(probe["path"], label=f"{probe_label}.path")
+            sha256 = _text(probe["sha256"], label=f"{probe_label}.sha256")
+            if (
+                not path.startswith("/")
+                or ".." in path.split("/")
+                or path in seen_paths
+                or not _SHA256_RE.fullmatch(sha256)
+            ):
+                raise ContractError(f"{probe_label} is unsafe or invalid")
+            seen_paths.add(path)
+            normalized_probes.append({"path": path, "sha256": sha256})
+        if normalized_probes != sorted(normalized_probes, key=lambda item: item["path"]):
+            raise ContractError(f"{subject_label}.binary_probes must be sorted by path")
+        if release["ready"] and not normalized_probes:
+            raise ContractError(f"{subject_label}.binary_probes is required for release")
+        normalized["binary_probes"] = normalized_probes
         for repository_name in (
             normalized["quarantine_repository"],
             normalized["release_repository"],
@@ -234,15 +274,29 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
         {
             "name": "core",
             "quarantine_repository": "teamagent-openclaw-quarantine",
+            "candidate_repository": "teamagent-openclaw-verified-candidates",
             "release_repository": "teamagent-openclaw",
         },
         {
             "name": "media",
             "quarantine_repository": "teamagent-openclaw-media-quarantine",
+            "candidate_repository": "teamagent-openclaw-media-verified-candidates",
             "release_repository": "teamagent-openclaw-media",
         },
     ]
-    if normalized_subjects != expected_subjects:
+    repository_mappings = [
+        {
+            key: subject[key]
+            for key in (
+                "name",
+                "quarantine_repository",
+                "candidate_repository",
+                "release_repository",
+            )
+        }
+        for subject in normalized_subjects
+    ]
+    if repository_mappings != expected_subjects:
         raise ContractError(f"{label} core/media repository mapping is not exact")
 
     required_referrers = bundle["required_referrers"]
@@ -310,6 +364,7 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
         "bundle": {
             "schema_version": 1,
             "interfaces": dict(bundle["interfaces"]),
+            "contract_oci_label": bundle["contract_oci_label"],
             "arm64_subject_media_type": bundle["arm64_subject_media_type"],
             "subjects": normalized_subjects,
             "required_referrers": normalized_referrers,
@@ -548,6 +603,37 @@ def verify_source_manifest(
         raise ContractError("signed source manifest commit proof does not hash to the commit")
 
 
+def validate_signed_source_manifest(
+    manifest_path: Path,
+    contract_path: Path,
+    expected_commit: str,
+    expected_manifest_sha256: str,
+) -> None:
+    """Validate immutable publisher evidence without trusting a source checkout."""
+
+    expected_commit = _sha1(expected_commit, label="expected signed source commit")
+    expected_manifest_sha256 = _sha256(
+        expected_manifest_sha256,
+        label="expected source manifest SHA-256",
+    )
+    try:
+        raw = manifest_path.read_bytes()
+    except OSError as exc:
+        raise ContractError(f"cannot read signed source manifest: {exc}") from exc
+    if hashlib.sha256(raw).hexdigest() != expected_manifest_sha256:
+        raise ContractError("signed source manifest SHA-256 mismatch")
+    manifest = _loads(raw.decode("utf-8"), label="signed source manifest")
+    contract = load_contract(contract_path)
+    validated = validate_source_manifest(
+        manifest,
+        contract,
+        contract_sha256(contract_path),
+    )
+    source = validated["source"]
+    if source["commit"] != expected_commit:
+        raise ContractError("signed source manifest commit mismatch")
+
+
 def _referrers(path: Path) -> list[dict[str, Any]]:
     response = _load(path, label="ECR ListImageReferrers response")
     if not isinstance(response, dict):
@@ -630,9 +716,7 @@ def arm64_config_digest(
         expected_image_digest, label="expected OpenClaw arm64 image digest"
     )
     allowed_repositories = {
-        subject[key]
-        for subject in contract["bundle"]["subjects"]
-        for key in ("quarantine_repository", "release_repository")
+        subject["quarantine_repository"] for subject in contract["bundle"]["subjects"]
     }
     if expected_repository not in allowed_repositories:
         raise ContractError("expected OpenClaw repository is invalid")
@@ -792,7 +876,7 @@ def verify_bundle_receipt(
         for key in ("name", "quarantine_repository", "release_repository"):
             if subject[key] != expected[key]:
                 raise ContractError(f"OpenClaw build receipt {expected['name']} {key} mismatch")
-        expected_tag = f"git-{expected_commit[:12]}-{expected['name']}"
+        expected_tag = f"candidate-{expected_commit}-{expected['name']}"
         if subject["tag"] != expected_tag:
             raise ContractError(f"OpenClaw build receipt {expected['name']} tag mismatch")
         for key in ("index_digest", "arm64_digest"):
@@ -997,7 +1081,7 @@ def validate_release_evidence(
         for key in ("name", "quarantine_repository", "release_repository"):
             if subject[key] != expected[key]:
                 raise ContractError(f"OpenClaw release evidence {expected['name']} {key} mismatch")
-        expected_tag = f"git-{commit[:12]}-{expected['name']}"
+        expected_tag = f"candidate-{commit}-{expected['name']}"
         if subject["tag"] != expected_tag:
             raise ContractError(f"OpenClaw release evidence {expected['name']} tag mismatch")
         quarantine_digest = _digest(
@@ -1124,7 +1208,7 @@ def create_release_evidence(
                 "quarantine_digest": quarantine_digest,
                 "release_repository": subject["release_repository"],
                 "release_digest": release_digest,
-                "tag": f"git-{commit[:12]}-{name}",
+                "tag": f"candidate-{commit}-{name}",
                 "referrers": _release_referrer_evidence(
                     name,
                     response_path,
@@ -1217,12 +1301,12 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--contract", type=Path, required=True)
     verify.add_argument("--expected-commit", required=True)
     verify.add_argument("--expected-manifest-sha256", required=True)
-    subject = commands.add_parser("verify-subject-referrers")
-    subject.add_argument("--response", type=Path, required=True)
-    subject.add_argument("--contract", type=Path, required=True)
-    signatures = commands.add_parser("verify-signature-referrers")
-    signatures.add_argument("--response", type=Path, required=True)
-    signatures.add_argument("--contract", type=Path, required=True)
+
+    validate_signed = commands.add_parser("validate-signed-source-manifest")
+    validate_signed.add_argument("--manifest", type=Path, required=True)
+    validate_signed.add_argument("--contract", type=Path, required=True)
+    validate_signed.add_argument("--expected-commit", required=True)
+    validate_signed.add_argument("--expected-manifest-sha256", required=True)
     arm64_manifest = commands.add_parser("arm64-config-digest")
     arm64_manifest.add_argument("--response", type=Path, required=True)
     arm64_manifest.add_argument("--contract", type=Path, required=True)
@@ -1238,24 +1322,6 @@ def _parser() -> argparse.ArgumentParser:
     receipt.add_argument("--contract", type=Path, required=True)
     receipt.add_argument("--expected-commit", required=True)
     receipt.add_argument("--expected-contract-sha256", required=True)
-    evidence = commands.add_parser("create-release-evidence")
-    evidence.add_argument("--contract", type=Path, required=True)
-    evidence.add_argument("--source-manifest", type=Path, required=True)
-    evidence.add_argument("--source-manifest-key", required=True)
-    evidence.add_argument("--source-manifest-version-id", required=True)
-    evidence.add_argument("--source-signature-key", required=True)
-    evidence.add_argument("--source-signature-version-id", required=True)
-    evidence.add_argument("--build-id", required=True)
-    evidence.add_argument("--commit", required=True)
-    evidence.add_argument("--subject-digest", action="append", required=True)
-    evidence.add_argument("--referrer-directory", type=Path, required=True)
-    evidence.add_argument("--output", type=Path, required=True)
-    verify_evidence = commands.add_parser("verify-release-evidence")
-    verify_evidence.add_argument("--evidence", type=Path, required=True)
-    verify_evidence.add_argument("--contract", type=Path, required=True)
-    verify_evidence.add_argument("--expected-build-id", required=True)
-    verify_evidence.add_argument("--expected-commit", required=True)
-    verify_evidence.add_argument("--expected-evidence-sha256", required=True)
     return parser
 
 
@@ -1278,12 +1344,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.expected_commit,
                 args.expected_manifest_sha256,
             )
+        elif args.command == "validate-signed-source-manifest":
+            validate_signed_source_manifest(
+                args.manifest,
+                args.contract,
+                args.expected_commit,
+                args.expected_manifest_sha256,
+            )
             print(f"OpenClaw signed source manifest verified: {args.expected_commit}")
-        elif args.command == "verify-subject-referrers":
-            print("\n".join(verify_subject_referrers(args.response, args.contract)))
-        elif args.command == "verify-signature-referrers":
-            verify_signature_referrers(args.response, args.contract)
-            print("OpenClaw attestation signature referrers verified")
         elif args.command == "arm64-config-digest":
             print(
                 arm64_config_digest(
@@ -1321,30 +1389,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     )
                 )
-        elif args.command == "create-release-evidence":
-            create_release_evidence(
-                args.contract,
-                args.source_manifest,
-                args.source_manifest_key,
-                args.source_manifest_version_id,
-                args.source_signature_key,
-                args.source_signature_version_id,
-                args.build_id,
-                args.commit,
-                args.subject_digest,
-                args.referrer_directory,
-                args.output,
-            )
-            print(f"OpenClaw release evidence created: {args.build_id}")
-        elif args.command == "verify-release-evidence":
-            verify_release_evidence(
-                args.evidence,
-                args.contract,
-                args.expected_build_id,
-                args.expected_commit,
-                args.expected_evidence_sha256,
-            )
-            print(f"OpenClaw immutable release evidence verified: {args.expected_build_id}")
         else:  # pragma: no cover
             raise ContractError(f"unsupported command: {args.command}")
     except (ContractError, UnicodeDecodeError) as exc:

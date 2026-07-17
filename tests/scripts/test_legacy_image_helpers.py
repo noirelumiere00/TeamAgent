@@ -46,9 +46,10 @@ def test_mcp_helper_only_delegates_to_the_safe_launcher() -> None:
 
     assert "infra/deploy/build_teamagent_image.sh" in body
     assert 'exec "$SAFE_LAUNCHER" "$@"' in body
-    completed = _run(MCP_HELPER)
-    assert completed.returncode != 0
-    assert "--image-tag is required" in completed.stderr
+    completed = _run(MCP_HELPER, "--help")
+    assert completed.returncode == 0
+    assert "does not" in completed.stdout
+    assert "accept an image tag or source path" in completed.stdout
 
 
 @pytest.mark.parametrize(
@@ -106,10 +107,11 @@ def test_unsafe_combined_deployers_are_fail_loud_stubs(path: Path) -> None:
 
 def test_all_shell_start_build_and_source_zip_paths_are_allowlisted() -> None:
     safe_launchers = {
+        ROOT / "infra" / "deploy" / "authorize_image_release.sh",
         ROOT / "infra" / "deploy" / "build_teamagent_image.sh",
         ROOT / "infra" / "deploy" / "build_openclaw_image.sh",
+        ROOT / "infra" / "deploy" / "build_tiktok_image.sh",
     }
-    source_archive_launcher = ROOT / "infra" / "deploy" / "build_teamagent_image.sh"
     shell_files = sorted(
         path
         for path in ROOT.rglob("*.sh")
@@ -121,7 +123,7 @@ def test_all_shell_start_build_and_source_zip_paths_are_allowlisted() -> None:
         if "start-build" in body:
             assert path in safe_launchers, f"unapproved StartBuild path: {path}"
         if "source.zip" in body:
-            assert path == source_archive_launcher, f"unapproved source.zip path: {path}"
+            pytest.fail(f"shell launchers must not create source.zip: {path}")
 
 
 def test_openclaw_safe_launcher_is_not_reachable_through_legacy_helper() -> None:

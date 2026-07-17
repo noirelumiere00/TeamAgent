@@ -10,6 +10,6 @@ if [ ! -x "$SAFE_LAUNCHER" ]; then
   exit 1
 fi
 
-# The target requires --image-tag and an explicit --with-scrape-tools true.
-# An old argument-free invocation therefore stops before any AWS operation.
+# The target accepts no mutable image tag, source path, project, repository, or
+# endpoint override. It performs the complete build-only signed candidate flow.
 exec "$SAFE_LAUNCHER" "$@"

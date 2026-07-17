@@ -29,6 +29,18 @@ resource "aws_ecr_repository" "openclaw_quarantine" {
   }
 }
 
+resource "aws_ecr_repository" "openclaw_verified_candidates" {
+  name                 = "${var.project_name}-openclaw-verified-candidates"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
 resource "aws_ecr_repository" "openclaw_media" {
   name                 = "${var.project_name}-openclaw-media"
   image_tag_mutability = "IMMUTABLE"
@@ -43,6 +55,18 @@ resource "aws_ecr_repository" "openclaw_media" {
 
 resource "aws_ecr_repository" "openclaw_media_quarantine" {
   name                 = "${var.project_name}-openclaw-media-quarantine"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
+resource "aws_ecr_repository" "openclaw_media_verified_candidates" {
+  name                 = "${var.project_name}-openclaw-media-verified-candidates"
   image_tag_mutability = "IMMUTABLE"
 
   image_scanning_configuration {
@@ -79,6 +103,18 @@ resource "aws_ecr_repository" "mcp_quarantine" {
   }
 }
 
+resource "aws_ecr_repository" "mcp_verified_candidates" {
+  name                 = "${var.project_name}-mcp-verified-candidates"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
 # TikTok release ECR remains declared with its task stack, but candidate
 # storage and both lifecycle policies stay in this ECR-only file.
 resource "aws_ecr_repository" "tiktok_acquire_quarantine" {
@@ -94,16 +130,46 @@ resource "aws_ecr_repository" "tiktok_acquire_quarantine" {
   }
 }
 
+resource "aws_ecr_repository" "tiktok_acquire_verified_candidates" {
+  count                = local.tk_enabled
+  name                 = "${local.tk_name}-verified-candidates"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
 locals {
-  ecr_lifecycle_policy = jsonencode({
+  # Existing production release repositories receive only active-/rollback-
+  # tags. Verified candidates live in physically separate repositories so a
+  # lifecycle rule can never expire a digest that also carries a protected
+  # production tag.
+  ecr_release_lifecycle_policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "expire untagged images after 14 days"
+      description  = "expire only untagged release artifacts after 365 days"
       selection = {
         tagStatus   = "untagged"
         countType   = "sinceImagePushed"
         countUnit   = "days"
-        countNumber = 14
+        countNumber = 365
+      }
+      action = { type = "expire" }
+    }]
+  })
+  ecr_verified_candidate_lifecycle_policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "expire verified candidates after 30 days"
+      selection = {
+        tagStatus   = "any"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = 30
       }
       action = { type = "expire" }
     }]
@@ -121,24 +187,11 @@ locals {
       action = { type = "expire" }
     }]
   })
-  openclaw_ecr_lifecycle_policy = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "retain untagged OpenClaw referrers for the 365-day evidence window"
-      selection = {
-        tagStatus   = "untagged"
-        countType   = "sinceImagePushed"
-        countUnit   = "days"
-        countNumber = 365
-      }
-      action = { type = "expire" }
-    }]
-  })
 }
 
 resource "aws_ecr_lifecycle_policy" "openclaw" {
   repository = aws_ecr_repository.openclaw.name
-  policy     = local.openclaw_ecr_lifecycle_policy
+  policy     = local.ecr_release_lifecycle_policy
 }
 
 resource "aws_ecr_lifecycle_policy" "openclaw_quarantine" {
@@ -146,9 +199,14 @@ resource "aws_ecr_lifecycle_policy" "openclaw_quarantine" {
   policy     = local.ecr_quarantine_lifecycle_policy
 }
 
+resource "aws_ecr_lifecycle_policy" "openclaw_verified_candidates" {
+  repository = aws_ecr_repository.openclaw_verified_candidates.name
+  policy     = local.ecr_verified_candidate_lifecycle_policy
+}
+
 resource "aws_ecr_lifecycle_policy" "openclaw_media" {
   repository = aws_ecr_repository.openclaw_media.name
-  policy     = local.openclaw_ecr_lifecycle_policy
+  policy     = local.ecr_release_lifecycle_policy
 }
 
 resource "aws_ecr_lifecycle_policy" "openclaw_media_quarantine" {
@@ -156,9 +214,14 @@ resource "aws_ecr_lifecycle_policy" "openclaw_media_quarantine" {
   policy     = local.ecr_quarantine_lifecycle_policy
 }
 
+resource "aws_ecr_lifecycle_policy" "openclaw_media_verified_candidates" {
+  repository = aws_ecr_repository.openclaw_media_verified_candidates.name
+  policy     = local.ecr_verified_candidate_lifecycle_policy
+}
+
 resource "aws_ecr_lifecycle_policy" "mcp" {
   repository = aws_ecr_repository.mcp.name
-  policy     = local.ecr_lifecycle_policy
+  policy     = local.ecr_release_lifecycle_policy
 }
 
 resource "aws_ecr_lifecycle_policy" "mcp_quarantine" {
@@ -166,16 +229,27 @@ resource "aws_ecr_lifecycle_policy" "mcp_quarantine" {
   policy     = local.ecr_quarantine_lifecycle_policy
 }
 
+resource "aws_ecr_lifecycle_policy" "mcp_verified_candidates" {
+  repository = aws_ecr_repository.mcp_verified_candidates.name
+  policy     = local.ecr_verified_candidate_lifecycle_policy
+}
+
 resource "aws_ecr_lifecycle_policy" "tiktok_acquire" {
   count      = local.tk_enabled
   repository = aws_ecr_repository.tiktok_acquire[0].name
-  policy     = local.ecr_lifecycle_policy
+  policy     = local.ecr_release_lifecycle_policy
 }
 
 resource "aws_ecr_lifecycle_policy" "tiktok_acquire_quarantine" {
   count      = local.tk_enabled
   repository = aws_ecr_repository.tiktok_acquire_quarantine[0].name
   policy     = local.ecr_quarantine_lifecycle_policy
+}
+
+resource "aws_ecr_lifecycle_policy" "tiktok_acquire_verified_candidates" {
+  count      = local.tk_enabled
+  repository = aws_ecr_repository.tiktok_acquire_verified_candidates[0].name
+  policy     = local.ecr_verified_candidate_lifecycle_policy
 }
 
 # The AWS-managed ECS execution policy permits pulling from any ECR repository.
@@ -192,9 +266,13 @@ data "aws_iam_policy_document" "deny_quarantine_runtime_pull" {
     ]
     resources = [
       aws_ecr_repository.mcp_quarantine.arn,
+      aws_ecr_repository.mcp_verified_candidates.arn,
       aws_ecr_repository.openclaw_quarantine.arn,
+      aws_ecr_repository.openclaw_verified_candidates.arn,
       aws_ecr_repository.openclaw_media_quarantine.arn,
+      aws_ecr_repository.openclaw_media_verified_candidates.arn,
       "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-dev-tiktok-acquire-quarantine",
+      "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-dev-tiktok-acquire-verified-candidates",
     ]
   }
 }
@@ -260,6 +338,11 @@ output "ecr_openclaw_quarantine_url" {
   value       = aws_ecr_repository.openclaw_quarantine.repository_url
 }
 
+output "ecr_openclaw_verified_candidates_url" {
+  description = "OpenClaw verified candidates; never reference from a task definition"
+  value       = aws_ecr_repository.openclaw_verified_candidates.repository_url
+}
+
 output "ecr_openclaw_media_url" {
   description = "OpenClaw media release repository"
   value       = aws_ecr_repository.openclaw_media.repository_url
@@ -268,6 +351,11 @@ output "ecr_openclaw_media_url" {
 output "ecr_openclaw_media_quarantine_url" {
   description = "OpenClaw media build/scan quarantine; never reference from a task definition"
   value       = aws_ecr_repository.openclaw_media_quarantine.repository_url
+}
+
+output "ecr_openclaw_media_verified_candidates_url" {
+  description = "OpenClaw media verified candidates; never reference from a task definition"
+  value       = aws_ecr_repository.openclaw_media_verified_candidates.repository_url
 }
 
 output "ecr_mcp_url" {
@@ -280,9 +368,23 @@ output "ecr_mcp_quarantine_url" {
   value       = aws_ecr_repository.mcp_quarantine.repository_url
 }
 
+output "ecr_mcp_verified_candidates_url" {
+  description = "TeamAgent MCP verified candidates; never reference from a task definition"
+  value       = aws_ecr_repository.mcp_verified_candidates.repository_url
+}
+
 output "ecr_tiktok_acquire_quarantine_url" {
   description = "TikTok build/scan quarantine; never reference from a task definition"
   value = (
     local.tk_enabled == 1 ? aws_ecr_repository.tiktok_acquire_quarantine[0].repository_url : null
+  )
+}
+
+output "ecr_tiktok_acquire_verified_candidates_url" {
+  description = "TikTok verified candidates; never reference from a task definition"
+  value = (
+    local.tk_enabled == 1
+    ? aws_ecr_repository.tiktok_acquire_verified_candidates[0].repository_url
+    : null
   )
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build-only trusted publisher for the isolated OpenClaw core/media project.
 # It publishes immutable signed evidence, starts one fixed CodeBuild project,
-# verifies the promoted release digests/referrers, and never mutates deployment.
+# verifies isolated candidate digests/referrers, and never mutates deployment.
 set -euo pipefail
 umask 077
 
@@ -14,12 +14,16 @@ EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-openc
 EXPECTED_BRANCH="dev"
 EXPECTED_ORIGIN_URL="git@github.com:noirelumiere00/TeamAgent.git"
 CODEBUILD_PROJECT="teamagent-dev-openclaw-provenance-builder"
+ATTESTOR_PROJECT="teamagent-dev-image-attestor"
+PROMOTER_PROJECT="teamagent-dev-image-promoter"
 EVIDENCE_BUCKET="teamagent-dev-openclaw-build-evidence"
 SIGNING_KMS_KEY_ALIAS="alias/teamagent-dev-openclaw-build-publisher"
 EVIDENCE_KMS_KEY_ALIAS="alias/teamagent-dev-openclaw-build-evidence"
 CORE_QUARANTINE_REPOSITORY="teamagent-openclaw-quarantine"
+CORE_VERIFIED_CANDIDATE_REPOSITORY="teamagent-openclaw-verified-candidates"
 CORE_RELEASE_REPOSITORY="teamagent-openclaw"
 MEDIA_QUARANTINE_REPOSITORY="teamagent-openclaw-media-quarantine"
+MEDIA_VERIFIED_CANDIDATE_REPOSITORY="teamagent-openclaw-media-verified-candidates"
 MEDIA_RELEASE_REPOSITORY="teamagent-openclaw-media"
 POLL_SECONDS=15
 TIMEOUT_SECONDS=7200
@@ -82,14 +86,20 @@ done
 
 export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
 unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR AWS_ENDPOINT_URL_KMS
+while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+  unset "$AWS_ENDPOINT_VARIABLE"
+done < <(compgen -A variable AWS_ENDPOINT_URL)
+unset AWS_ENDPOINT_VARIABLE
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" \
   || die "script is not inside a Git worktree"
 PROVENANCE="$REPO_ROOT/infra/codebuild/openclaw_provenance.py"
 BUNDLE_CONTRACT="$REPO_ROOT/infra/codebuild/openclaw_bundle_contract.json"
+IMAGE_RESOLVER="$REPO_ROOT/infra/codebuild/resolve_ecr_image.py"
 [ -f "$PROVENANCE" ] || die "OpenClaw provenance verifier is missing"
 [ -f "$BUNDLE_CONTRACT" ] || die "OpenClaw bundle contract is missing"
+[ -f "$IMAGE_RESOLVER" ] || die "OpenClaw image resolver is missing"
 
 if [ -n "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ]; then
   die "Git worktree is dirty (tracked or untracked changes); commit or remove them first"
@@ -452,19 +462,86 @@ done
 [ "$BUILD_RESOLVED_SOURCE_VERSION" = "$COMMIT" ] \
   || die "CodeBuild did not resolve the exact signed commit"
 
-REFERRER_DIR="$TMP_DIR/release-referrers"
-mkdir -p "$REFERRER_DIR"
-SUBJECT_DIGEST_ARGUMENTS=()
+environment_json() {
+  local output="$1"
+  shift
+  python3 - "$output" "$@" <<'PY'
+import json
+import sys
+
+output, *pairs = sys.argv[1:]
+values = []
+for pair in pairs:
+    if "=" not in pair:
+        raise SystemExit("invalid environment pair")
+    name, value = pair.split("=", 1)
+    values.append({"name": name, "value": value, "type": "PLAINTEXT"})
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(values, handle, sort_keys=True, separators=(",", ":"))
+PY
+}
+
+start_source_free_build() {
+  local project="$1"
+  local environment_file="$2"
+  AWS_PAGER="" aws codebuild start-build \
+    --region "$REGION" \
+    --project-name "$project" \
+    --environment-variables-override "file://$environment_file" \
+    --query build.id \
+    --output text
+}
+
+wait_source_free_build() {
+  local build_id="$1"
+  local deadline=$((SECONDS + TIMEOUT_SECONDS))
+  local status
+  while :; do
+    status="$(
+      AWS_PAGER="" aws codebuild batch-get-builds \
+        --region "$REGION" \
+        --ids "$build_id" \
+        --query 'builds[0].buildStatus' \
+        --output text
+    )"
+    case "$status" in
+      IN_PROGRESS)
+        [ "$SECONDS" -lt "$deadline" ] || die "timed out waiting for $build_id"
+        sleep "$POLL_SECONDS"
+        ;;
+      SUCCEEDED) return 0 ;;
+      FAILED|FAULT|STOPPED|TIMED_OUT) die "build failed: $build_id ($status)" ;;
+      *) die "unexpected build state: $status" ;;
+    esac
+  done
+}
+
+exported_build_value() {
+  local build_id="$1"
+  local name="$2"
+  AWS_PAGER="" aws codebuild batch-get-builds \
+    --region "$REGION" \
+    --ids "$build_id" \
+    --output json \
+    | jq -er --arg name "$name" '
+        [.builds[0].exportedEnvironmentVariables[] | select(.name == $name) | .value] |
+        if length == 1 then .[0] else error("missing or duplicate export") end
+      '
+}
+
+SUBJECTS_JSON="[]"
 for SUBJECT in core media; do
   if [ "$SUBJECT" = "core" ]; then
     QUARANTINE_REPOSITORY="$CORE_QUARANTINE_REPOSITORY"
+    VERIFIED_CANDIDATE_REPOSITORY="$CORE_VERIFIED_CANDIDATE_REPOSITORY"
     RELEASE_REPOSITORY="$CORE_RELEASE_REPOSITORY"
   else
     QUARANTINE_REPOSITORY="$MEDIA_QUARANTINE_REPOSITORY"
+    VERIFIED_CANDIDATE_REPOSITORY="$MEDIA_VERIFIED_CANDIDATE_REPOSITORY"
     RELEASE_REPOSITORY="$MEDIA_RELEASE_REPOSITORY"
   fi
-  TAG="git-${COMMIT:0:12}-$SUBJECT"
-  QUARANTINE_DIGEST="$(
+  TAG="candidate-$COMMIT-$SUBJECT"
+  QUARANTINE_TAG_DIGEST="$(
     AWS_PAGER="" aws ecr describe-images \
       --region "$REGION" \
       --registry-id "$EXPECTED_ACCOUNT_ID" \
@@ -473,120 +550,111 @@ for SUBJECT in core media; do
       --query 'imageDetails[0].imageDigest' \
       --output text
   )"
-  RELEASE_DIGEST="$(
-    AWS_PAGER="" aws ecr describe-images \
-      --region "$REGION" \
-      --registry-id "$EXPECTED_ACCOUNT_ID" \
-      --repository-name "$RELEASE_REPOSITORY" \
-      --image-ids "imageTag=$TAG" \
-      --query 'imageDetails[0].imageDigest' \
-      --output text
-  )"
-  [[ "$QUARANTINE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
-    || die "$SUBJECT quarantine digest is invalid"
-  [ "$RELEASE_DIGEST" = "$QUARANTINE_DIGEST" ] \
-    || die "$SUBJECT release digest differs from verified quarantine"
-  MANIFEST_RESPONSE="$TMP_DIR/$SUBJECT-release-arm64-manifest.json"
+  [[ "$QUARANTINE_TAG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || die "$SUBJECT quarantine tag digest is invalid"
   AWS_PAGER="" aws ecr batch-get-image \
     --region "$REGION" \
     --registry-id "$EXPECTED_ACCOUNT_ID" \
-    --repository-name "$RELEASE_REPOSITORY" \
-    --image-ids "imageDigest=$RELEASE_DIGEST" \
-    --accepted-media-types application/vnd.oci.image.manifest.v1+json \
-    --output json > "$MANIFEST_RESPONSE"
-  CONFIG_DIGEST="$(python3 "$PROVENANCE" arm64-config-digest \
-    --response "$MANIFEST_RESPONSE" \
-    --contract "$BUNDLE_CONTRACT" \
-    --expected-image-digest "$RELEASE_DIGEST" \
-    --expected-repository "$RELEASE_REPOSITORY" \
-    --expected-registry-id "$EXPECTED_ACCOUNT_ID")"
-  CONFIG_URL="$(
-    AWS_PAGER="" aws ecr get-download-url-for-layer \
-      --region "$REGION" \
-      --registry-id "$EXPECTED_ACCOUNT_ID" \
-      --repository-name "$RELEASE_REPOSITORY" \
-      --layer-digest "$CONFIG_DIGEST" \
-      --query downloadUrl \
-      --output text
+    --repository-name "$QUARANTINE_REPOSITORY" \
+    --image-ids "imageDigest=$QUARANTINE_TAG_DIGEST" \
+    --accepted-media-types \
+      application/vnd.docker.distribution.manifest.list.v2+json \
+      application/vnd.oci.image.index.v1+json \
+      application/vnd.docker.distribution.manifest.v2+json \
+      application/vnd.oci.image.manifest.v1+json \
+    --output json >"$TMP_DIR/openclaw-$SUBJECT-parent.json"
+  QUARANTINE_DIGEST="$(
+    python3 "$IMAGE_RESOLVER" resolve-platform \
+      --batch-response "$TMP_DIR/openclaw-$SUBJECT-parent.json" \
+      --expected-image-digest "$QUARANTINE_TAG_DIGEST" \
+      --os linux \
+      --architecture arm64
   )"
-  [[ "$CONFIG_URL" == https://* ]] || die "$SUBJECT release OCI config URL is invalid"
-  CONFIG_FILE="$TMP_DIR/$SUBJECT-release-arm64-config.json"
-  curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
-    --output "$CONFIG_FILE" "$CONFIG_URL"
-  unset CONFIG_URL
-  python3 "$PROVENANCE" verify-arm64-config \
-    --config "$CONFIG_FILE" \
-    --expected-config-digest "$CONFIG_DIGEST" \
-    --expected-commit "$COMMIT"
-  SUBJECT_RESPONSE="$REFERRER_DIR/$SUBJECT-subject-referrers.json"
-  AWS_PAGER="" aws ecr list-image-referrers \
-    --region "$REGION" \
-    --registry-id "$EXPECTED_ACCOUNT_ID" \
-    --repository-name "$RELEASE_REPOSITORY" \
-    --subject-id "imageDigest=$RELEASE_DIGEST" \
-    --max-results 100 \
-    --output json > "$SUBJECT_RESPONSE"
-  python3 "$PROVENANCE" verify-subject-referrers \
-    --response "$SUBJECT_RESPONSE" \
-    --contract "$BUNDLE_CONTRACT" \
-    > "$TMP_DIR/$SUBJECT-attestation-digests"
-  while IFS= read -r ATTESTATION_DIGEST; do
-    SIGNATURE_RESPONSE="$REFERRER_DIR/$SUBJECT-${ATTESTATION_DIGEST#sha256:}-signature-referrers.json"
-    AWS_PAGER="" aws ecr list-image-referrers \
-      --region "$REGION" \
-      --registry-id "$EXPECTED_ACCOUNT_ID" \
-      --repository-name "$RELEASE_REPOSITORY" \
-      --subject-id "imageDigest=$ATTESTATION_DIGEST" \
-      --max-results 100 \
-      --output json > "$SIGNATURE_RESPONSE"
-    python3 "$PROVENANCE" verify-signature-referrers \
-      --response "$SIGNATURE_RESPONSE" \
-      --contract "$BUNDLE_CONTRACT"
-  done < "$TMP_DIR/$SUBJECT-attestation-digests"
-  SUBJECT_DIGEST_ARGUMENTS+=(
-    --subject-digest "$SUBJECT=$QUARANTINE_DIGEST=$RELEASE_DIGEST"
-  )
+  [[ "$QUARANTINE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || die "$SUBJECT resolved arm64 quarantine digest is invalid"
+  SUBJECTS_JSON="$(
+    jq -cn \
+      --argjson current "$SUBJECTS_JSON" \
+      --arg name "$SUBJECT" \
+      --arg quarantine "$QUARANTINE_REPOSITORY" \
+      --arg candidate "$VERIFIED_CANDIDATE_REPOSITORY" \
+      --arg release "$RELEASE_REPOSITORY" \
+      --arg digest "$QUARANTINE_DIGEST" \
+      '$current + [{
+        name: $name,
+        quarantine_repository: $quarantine,
+        candidate_repository: $candidate,
+        release_repository: $release,
+        digest: $digest
+      }]'
+  )"
 done
 
-RELEASE_EVIDENCE="$TMP_DIR/openclaw-release-evidence.json"
-python3 "$PROVENANCE" create-release-evidence \
-  --contract "$BUNDLE_CONTRACT" \
-  --source-manifest "$SOURCE_MANIFEST" \
-  --source-manifest-key "$SOURCE_MANIFEST_KEY" \
-  --source-manifest-version-id "$SOURCE_MANIFEST_VERSION" \
-  --source-signature-key "$SOURCE_SIGNATURE_KEY" \
-  --source-signature-version-id "$SOURCE_SIGNATURE_VERSION" \
-  --build-id "$BUILD_ID" \
-  --commit "$COMMIT" \
-  "${SUBJECT_DIGEST_ARGUMENTS[@]}" \
-  --referrer-directory "$REFERRER_DIR" \
-  --output "$RELEASE_EVIDENCE"
-RELEASE_EVIDENCE_SHA256="$(file_sha256 "$RELEASE_EVIDENCE")"
-BUILD_UUID="${BUILD_ID#*:}"
-RELEASE_EVIDENCE_KEY="release-evidence/$COMMIT/$BUILD_UUID/$RELEASE_EVIDENCE_SHA256.json"
-RELEASE_SIGNATURE_KEY="$RELEASE_EVIDENCE_KEY.sig"
-RELEASE_SIGNATURE="$TMP_DIR/openclaw-release-evidence.sig"
-sign_file "$RELEASE_EVIDENCE" "$RELEASE_SIGNATURE"
-verify_signature "$RELEASE_EVIDENCE" "$RELEASE_SIGNATURE"
-RELEASE_SIGNATURE_VERSION="$(
-  publish_or_verify_object "$RELEASE_SIGNATURE" "$RELEASE_SIGNATURE_KEY" application/octet-stream
+ATTESTOR_ENV="$TMP_DIR/attestor-env.json"
+environment_json "$ATTESTOR_ENV" \
+  "PIPELINE=openclaw" \
+  "PROMOTION_CHANNEL=verified-candidate" \
+  "SOURCE_COMMIT=$COMMIT" \
+  "CONTRACT_SHA256=$BUNDLE_CONTRACT_SHA256" \
+  "SOURCE_EVIDENCE_BUCKET=$EVIDENCE_BUCKET" \
+  "SOURCE_EVIDENCE_KEY=$SOURCE_MANIFEST_KEY" \
+  "SOURCE_EVIDENCE_VERSION_ID=$SOURCE_MANIFEST_VERSION" \
+  "SOURCE_EVIDENCE_SHA256=$SOURCE_MANIFEST_SHA256" \
+  "SOURCE_EVIDENCE_SIGNATURE_KEY=$SOURCE_SIGNATURE_KEY" \
+  "SOURCE_EVIDENCE_SIGNATURE_VERSION_ID=$SOURCE_SIGNATURE_VERSION" \
+  "BUILD_ID=$BUILD_ID" \
+  "SUBJECTS_JSON=$SUBJECTS_JSON"
+ATTESTOR_BUILD_ID="$(start_source_free_build "$ATTESTOR_PROJECT" "$ATTESTOR_ENV")"
+[[ "$ATTESTOR_BUILD_ID" == "$ATTESTOR_PROJECT:"* ]] || die "invalid attestor build ID"
+wait_source_free_build "$ATTESTOR_BUILD_ID"
+RECEIPT_KEY="$(exported_build_value "$ATTESTOR_BUILD_ID" RECEIPT_KEY)"
+RECEIPT_VERSION="$(exported_build_value "$ATTESTOR_BUILD_ID" RECEIPT_VERSION_ID)"
+RECEIPT_SIGNATURE_KEY="$(exported_build_value "$ATTESTOR_BUILD_ID" RECEIPT_SIGNATURE_KEY)"
+RECEIPT_SIGNATURE_VERSION="$(
+  exported_build_value "$ATTESTOR_BUILD_ID" RECEIPT_SIGNATURE_VERSION_ID
 )"
-RELEASE_EVIDENCE_VERSION="$(
-  publish_or_verify_object "$RELEASE_EVIDENCE" "$RELEASE_EVIDENCE_KEY" application/json
-)"
-python3 "$PROVENANCE" verify-release-evidence \
-  --evidence "$RELEASE_EVIDENCE" \
-  --contract "$BUNDLE_CONTRACT" \
-  --expected-build-id "$BUILD_ID" \
-  --expected-commit "$COMMIT" \
-  --expected-evidence-sha256 "$RELEASE_EVIDENCE_SHA256"
+[ "$RECEIPT_SIGNATURE_KEY" = "$RECEIPT_KEY.sig" ] || die "receipt signature key mismatch"
+
+PROMOTER_ENV="$TMP_DIR/promoter-env.json"
+environment_json "$PROMOTER_ENV" \
+  "PIPELINE=openclaw" \
+  "PROMOTION_CHANNEL=verified-candidate" \
+  "SOURCE_COMMIT=$COMMIT" \
+  "CONTRACT_SHA256=$BUNDLE_CONTRACT_SHA256" \
+  "RECEIPT_KEY=$RECEIPT_KEY" \
+  "RECEIPT_VERSION_ID=$RECEIPT_VERSION" \
+  "RECEIPT_SIGNATURE_KEY=$RECEIPT_SIGNATURE_KEY" \
+  "RECEIPT_SIGNATURE_VERSION_ID=$RECEIPT_SIGNATURE_VERSION"
+PROMOTER_BUILD_ID="$(start_source_free_build "$PROMOTER_PROJECT" "$PROMOTER_ENV")"
+[[ "$PROMOTER_BUILD_ID" == "$PROMOTER_PROJECT:"* ]] || die "invalid promoter build ID"
+wait_source_free_build "$PROMOTER_BUILD_ID"
+
+while IFS= read -r SUBJECT; do
+  NAME="$(jq -er '.name' <<<"$SUBJECT")"
+  VERIFIED_CANDIDATE_REPOSITORY="$(jq -er '.candidate_repository' <<<"$SUBJECT")"
+  VERIFIED_DIGEST="$(jq -er '.digest' <<<"$SUBJECT")"
+  VERIFIED_CANDIDATE_DIGEST="$(
+    AWS_PAGER="" aws ecr describe-images \
+      --region "$REGION" \
+      --registry-id "$EXPECTED_ACCOUNT_ID" \
+      --repository-name "$VERIFIED_CANDIDATE_REPOSITORY" \
+      --image-ids "imageTag=verified-$COMMIT-$NAME" \
+      --query 'imageDetails[0].imageDigest' \
+      --output text
+  )"
+  [ "$VERIFIED_CANDIDATE_DIGEST" = "$VERIFIED_DIGEST" ] \
+    || die "$NAME verified-candidate digest differs from the signed quarantine digest"
+done < <(jq -c '.[]' <<<"$SUBJECTS_JSON")
 
 echo "OpenClaw core/media build verified (build only; no deployment performed):"
 echo "  build_id=$BUILD_ID"
 echo "  commit=$COMMIT"
 echo "  source_manifest_key=$SOURCE_MANIFEST_KEY"
 echo "  source_manifest_version_id=$SOURCE_MANIFEST_VERSION"
+echo "  source_signature_key=$SOURCE_SIGNATURE_KEY"
 echo "  source_signature_version_id=$SOURCE_SIGNATURE_VERSION"
-echo "  release_evidence_key=$RELEASE_EVIDENCE_KEY"
-echo "  release_evidence_version_id=$RELEASE_EVIDENCE_VERSION"
-echo "  release_signature_version_id=$RELEASE_SIGNATURE_VERSION"
+echo "  release_receipt_key=$RECEIPT_KEY"
+echo "  release_receipt_version_id=$RECEIPT_VERSION"
+echo "  release_signature_key=$RECEIPT_SIGNATURE_KEY"
+echo "  release_signature_version_id=$RECEIPT_SIGNATURE_VERSION"
+echo "No ECS, EventBridge, task definition, service, schedule, or Terraform change was made."

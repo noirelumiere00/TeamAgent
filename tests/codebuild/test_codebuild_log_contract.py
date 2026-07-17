@@ -9,8 +9,22 @@ LOG_PRODUCERS = (
     ROOT / "infra" / "codebuild" / "buildspec.yml",
     ROOT / "infra" / "codebuild" / "tiktok-buildspec.yml",
     ROOT / "infra" / "codebuild" / "openclaw-provenance-buildspec.yml",
+    ROOT / "infra" / "codebuild" / "mcp-source-publisher-buildspec.yml",
+    ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml",
+    ROOT / "infra" / "codebuild" / "image-promoter-buildspec.yml",
+    ROOT / "infra" / "codebuild" / "verify_actual_image.sh",
     ROOT / "infra" / "deploy" / "build_teamagent_image.sh",
     ROOT / "infra" / "deploy" / "build_openclaw_image.sh",
+    ROOT / "infra" / "deploy" / "build_tiktok_image.sh",
+    ROOT / "infra" / "deploy" / "authorize_image_release.sh",
+)
+ECR_LOGIN_PRODUCERS = (
+    ROOT / "infra" / "codebuild" / "buildspec.yml",
+    ROOT / "infra" / "codebuild" / "tiktok-buildspec.yml",
+    ROOT / "infra" / "codebuild" / "openclaw-provenance-buildspec.yml",
+    ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml",
+    ROOT / "infra" / "codebuild" / "image-promoter-buildspec.yml",
+    ROOT / "infra" / "codebuild" / "verify_actual_image.sh",
 )
 
 
@@ -31,6 +45,11 @@ def test_all_codebuild_log_groups_have_explicit_thirty_day_retention() -> None:
         "codebuild_openclaw_provenance": (
             "/aws/codebuild/${local.openclaw_codebuild_project_name}"
         ),
+        "codebuild_mcp_source_publisher": (
+            "/aws/codebuild/${local.mcp_source_publisher_project_name}"
+        ),
+        "codebuild_image_attestor": "/aws/codebuild/${local.image_attestor_project_name}",
+        "codebuild_image_promoter": "/aws/codebuild/${local.image_promoter_project_name}",
         "codebuild_aiia_image_legacy": "/aws/codebuild/aiia-image-builder",
     }
     for resource_name, log_group_name in expected.items():
@@ -45,6 +64,12 @@ def test_all_codebuild_log_groups_have_explicit_thirty_day_retention() -> None:
             "openclaw_provenance",
             "aws_cloudwatch_log_group.codebuild_openclaw_provenance.name",
         ),
+        (
+            "mcp_source_publisher",
+            "aws_cloudwatch_log_group.codebuild_mcp_source_publisher.name",
+        ),
+        ("image_attestor", "aws_cloudwatch_log_group.codebuild_image_attestor.name"),
+        ("image_promoter", "aws_cloudwatch_log_group.codebuild_image_promoter.name"),
     ):
         project_body = _resource(body, "aws_codebuild_project", project)
         assert f"group_name = {log_group}" in project_body
@@ -71,8 +96,17 @@ def test_codebuild_paths_do_not_enable_trace_or_print_credentials() -> None:
             )
 
 
+def test_all_aws_paths_clear_every_service_endpoint_override() -> None:
+    for path in LOG_PRODUCERS:
+        body = path.read_text(encoding="utf-8")
+        ignore_count = body.count("export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true")
+        clear_all_count = body.count("compgen -A variable AWS_ENDPOINT_URL")
+        assert ignore_count > 0, path
+        assert clear_all_count == ignore_count, path
+
+
 def test_ecr_passwords_are_piped_only_to_fixed_password_stdin_logins() -> None:
-    for path in LOG_PRODUCERS[:3]:
+    for path in ECR_LOGIN_PRODUCERS:
         body = path.read_text(encoding="utf-8")
         assert body.count("ecr get-login-password") == 1
         login = body.split("ecr get-login-password", maxsplit=1)[1].split("\n", maxsplit=2)

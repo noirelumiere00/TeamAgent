@@ -64,6 +64,8 @@ def test_generic_contract_passes_every_arg_including_node_image_digest() -> None
 
     assert "NODE_IMAGE_DIGEST" in arguments
     assert "docker-build-arguments" in body
+    assert '[[ "$RUNTIME_BUILD_ARGUMENT" == NODE_IMAGE_DIGEST=* ]]' in body
+    assert '--build-arg "NODE_IMAGE_DIGEST=$NODE_IMAGE_DIGEST"' in body
     assert 'DOCKER_RUNTIME_BUILD_ARGS+=(--build-arg "$RUNTIME_BUILD_ARGUMENT")' in body
     assert '"${DOCKER_RUNTIME_BUILD_ARGS[@]}"' in body
     assert "expected-runtime-labels" in body
@@ -99,19 +101,20 @@ def test_scrape_tools_has_no_implicit_buildspec_default() -> None:
 def test_app_html_uses_only_pinned_version_and_verified_bytes() -> None:
     body = BUILDSPEC.read_text(encoding="utf-8")
 
-    get_object = body.split("aws s3api get-object", maxsplit=1)[1].split(')"', maxsplit=1)[0]
-    assert "--bucket teamagent-dev-raw-files" in get_object
-    assert "--key codebuild/connect-web-app.html" in get_object
-    assert '--version-id "$APP_HTML_VERSION_ID"' in get_object
-    assert '--expected-bucket-owner "$EXPECTED_ACCOUNT_ID"' in get_object
+    assert "--bucket teamagent-dev-raw-files" in body
+    assert "--key codebuild/connect-web-app.html" in body
+    assert '--version-id "$APP_HTML_VERSION_ID"' in body
+    assert '--expected-bucket-owner "$EXPECTED_ACCOUNT_ID"' in body
     assert '[ "$ACTUAL_APP_HTML_SHA256" = "$APP_HTML_SHA256" ]' in body
     assert '--build-arg "APP_HTML_SHA256=$APP_HTML_SHA256"' in body
     assert '--build-arg "APP_HTML_VERSION_ID=$APP_HTML_VERSION_ID"' in body
     assert "aws s3 cp" not in body
 
 
-def test_quarantine_gates_precede_digest_preserving_release_promotion() -> None:
+def test_builder_stops_at_quarantine_and_source_free_projects_own_promotion() -> None:
     body = BUILDSPEC.read_text(encoding="utf-8")
+    attestor = (ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml").read_text()
+    promoter = (ROOT / "infra" / "codebuild" / "image-promoter-buildspec.yml").read_text()
 
     first_guard = body.index("CODEBUILD_BUILD_SUCCEEDING")
     push = body.index('docker push "$MCP_QUARANTINE_REPO:$IMAGE_TAG"')
@@ -120,9 +123,6 @@ def test_quarantine_gates_precede_digest_preserving_release_promotion() -> None:
     wait = body.index("aws ecr wait image-scan-complete")
     scan = body.index("python3 infra/codebuild/verify_ecr_scan.py")
     second_guard = body.index("CODEBUILD_BUILD_SUCCEEDING", first_guard + 1)
-    pull = body.index('docker pull "$MCP_QUARANTINE_REPO@$VERIFIED_QUARANTINE_DIGEST"')
-    release_push = body.index('docker push "$MCP_RELEASE_REPO:$IMAGE_TAG"')
-    equality = body.index('[ "$RELEASE_DIGEST" = "$VERIFIED_QUARANTINE_DIGEST" ]')
     assert (
         first_guard
         < push
@@ -131,13 +131,19 @@ def test_quarantine_gates_precede_digest_preserving_release_promotion() -> None:
         < wait
         < scan
         < second_guard
-        < pull
-        < release_push
-        < equality
     )
     assert "--deny-all" in body
     assert "ecr_scan_exceptions.json" not in body
     assert "BatchDeleteImage" not in body
+    assert "teamagent-mcp-verified-candidates" not in body
+    assert "teamagent-mcp\"" not in body
+    assert "verify_actual_image.sh" in attestor
+    assert 'PROMOTION_CHANNEL" = "verified-candidate"' in promoter
+    assert 'SOURCE_REPOSITORY="$QUARANTINE_REPOSITORY"' in promoter
+    assert 'DESTINATION_REPOSITORY="$CANDIDATE_REPOSITORY"' in promoter
+    assert 'SOURCE_REPOSITORY="$CANDIDATE_REPOSITORY"' in promoter
+    assert 'DESTINATION_REPOSITORY="$RELEASE_REPOSITORY"' in promoter
+    assert "oras cp --recursive" in promoter
 
 
 def test_registry_and_s3_destinations_ignore_hostile_overrides() -> None:
@@ -147,10 +153,36 @@ def test_registry_and_s3_destinations_ignore_hostile_overrides() -> None:
     assert body.count('EXPECTED_ACCOUNT_ID="718959508629"') == 3
     assert body.count('EXPECTED_REGION="ap-northeast-1"') == 3
     assert 'MCP_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-mcp-quarantine"' in body
-    assert 'MCP_RELEASE_REPO="$ECR_REGISTRY/teamagent-mcp"' in body
     assert body.count("unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO") == 3
-    assert body.count('--registry-id "$EXPECTED_ACCOUNT_ID"') >= 7
+    assert body.count("unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY") == 3
+    assert body.count(
+        'TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"'
+    ) == 3
+    assert body.count('--registry-id "$EXPECTED_ACCOUNT_ID"') >= 5
+    assert "$ECR_REGISTRY/teamagent-mcp\"" not in body
     assert "attacker" not in body
+
+
+def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app() -> None:
+    body = (
+        ROOT / "infra" / "codebuild" / "mcp-source-publisher-buildspec.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "git fetch --no-tags --force origin refs/heads/dev:refs/remotes/origin/dev" in body
+    assert 'refs/remotes/origin/dev^{commit})" = "$EXPECTED_COMMIT"' in body
+    assert "get-bucket-versioning" in body
+    assert "--expected-bucket-owner 718959508629" in body
+    assert "git -C \"$CODEBUILD_SRC_DIR\" archive" in body
+    assert 'SOURCE_DECLARATION_KEY="source-declarations/mcp/$EXPECTED_COMMIT/$SOURCE_SHA256/$PUBLISHED_SOURCE_VERSION_ID.json"' in body
+    assert "--object-lock-mode COMPLIANCE" in body
+    assert "aws kms sign" in body
+    for value in (
+        "I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY",
+        "46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067",
+        "15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2",
+        "1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2",
+    ):
+        assert value in body
 
 
 def test_terraform_embeds_all_verifier_and_contract_hashes() -> None:

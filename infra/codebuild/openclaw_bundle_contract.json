@@ -21,20 +21,25 @@
     "schema_version": 1,
     "interfaces": {
       "build": "infra/openclaw/build-image.sh",
-      "verify_evidence": "infra/openclaw/verify-bundle-evidence.sh",
-      "promote": "infra/openclaw/promote-bundle.sh"
+      "attest": "infra/codebuild/verify_actual_image.sh",
+      "promote": "infra/codebuild/image-promoter-buildspec.yml"
     },
+    "contract_oci_label": "io.teamagent.build.contract-sha256",
     "arm64_subject_media_type": "application/vnd.oci.image.manifest.v1+json",
     "subjects": [
       {
         "name": "core",
         "quarantine_repository": "teamagent-openclaw-quarantine",
-        "release_repository": "teamagent-openclaw"
+        "candidate_repository": "teamagent-openclaw-verified-candidates",
+        "release_repository": "teamagent-openclaw",
+        "binary_probes": []
       },
       {
         "name": "media",
         "quarantine_repository": "teamagent-openclaw-media-quarantine",
-        "release_repository": "teamagent-openclaw-media"
+        "candidate_repository": "teamagent-openclaw-media-verified-candidates",
+        "release_repository": "teamagent-openclaw-media",
+        "binary_probes": []
       }
     ],
     "required_referrers": [
