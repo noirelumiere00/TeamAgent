@@ -1826,7 +1826,9 @@ function initGraph(){
   if(!tot)return esc(LB[opt.cluster])+"でまとめています（表示中の対象がありません）";   /* 全島が空（対象typeを非表示にした等）で「まとめています」だけ出すと嘘になる */
   let s=esc(LB[opt.cluster])+"でまとめています";
   if(un)s+="（"+uk+" "+un+"件は"+uk+"島）";
-  if(cCenters[COTHER])s+="<br>種類が多いため上位"+(CLMAX-1)+"件のみ島にし、残り"+clOther.size+"種は「"+COTHER+"」島にまとめています";
+  /* cCenters["その他"] は phase の実在値でも成立する。溢れ説明の判定に使うと
+     「残り0種はその他島」と虚偽表示するため、実際の溢れ集合だけを正にする。 */
+  if(clOther.size)s+="<br>種類が多いため上位"+(CLMAX-1)+"件のみ島にし、残り"+clOther.size+"種は「"+COTHER+"」島にまとめています";
   if(opt.cluster==="doc_type"||opt.cluster==="solution")s+="<br>資料でまとめています（取引先は資料に引かれ周辺に配置）";
   return s;}
  function ncol(n){if(n.type==="tag")return "hsl(254,42%,72%)";if(n.type==="doc")return "rgba(150,150,156,.6)";return opt.groupBy==="phase"?(PHASECOLOR[n.phase]||"#9a9a9a"):colorOf(n.industry);}

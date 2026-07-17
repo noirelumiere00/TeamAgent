@@ -2567,6 +2567,9 @@ def test_cluster_island_count_is_capped(sidecars: Path, vault: Path, tmp_path: P
     # 溢れは「その他」島へ集約（無言で消さない）。挙動の固定は test_graph_cluster_js.py が JS 実行で行う
     assert "vals=rest.slice(0,CLMAX-1);" in html
     assert "clOther=new Set(over);" in html
+    # phase の実在値「その他」と、自由記述軸の溢れ集約を区別する。
+    assert "if(clOther.size)s+=" in html
+    assert 'if(cCenters[COTHER])s+="<br>種類が多いため' not in html
 
 
 def test_cluster_caption_admits_when_all_islands_empty(
