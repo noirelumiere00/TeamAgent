@@ -16,9 +16,11 @@ Usage (CLI):
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -28,6 +30,9 @@ from teamagent.identity import shared_company_domains_from_env
 from teamagent.ingest.boilerplate import mark_boilerplate
 from teamagent.ingest.docdedup import mark_duplicate_documents
 from teamagent.ingest.form_mappings import _normalize_form_label
+from teamagent.ingest.gsheet_classification_overrides import (
+    apply_gsheet_industry_override,
+)
 from teamagent.ingest.loader import (
     GDriveFolderSpec,
     GSheetSpec,
@@ -43,6 +48,45 @@ if TYPE_CHECKING:
     from teamagent.ingest.contextualize import ChunkContextualizer
 
 logger = structlog.get_logger(__name__)
+
+# 対象2フォームの実セルは ja_JP の業務時刻で、ファイル記録の同一連番および Slack
+# 投稿epochとの突合でも JST wall time と確認済み。Spreadsheet property の timeZone は
+# Etc/GMT だが、FORMATTED_VALUE 自体を運用上の投稿時刻として扱う契約に固定する。
+# 汎用シートへは使わず、下の fb/knowledge 判定を通った行だけに適用する。
+_JST = _dt.timezone(_dt.timedelta(hours=9))
+_GSHEET_TIMESTAMP_FORMATS = (
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+)
+
+
+def _slack_message_modified_at(ts: str | None) -> str | None:
+    """Slack の epoch 秒を DB 用 ISO8601 (UTC) にする。壊れた値は日付なしで継続。"""
+    try:
+        return _dt.datetime.fromtimestamp(float(ts or ""), tz=_dt.UTC).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _gsheet_row_modified_at(fields: Mapping[str, str]) -> str | None:
+    """Google Form の日本時間タイムスタンプを timezone 付き ISO8601 にする。
+
+    Sheets API の FORMATTED_VALUE は実データで ``YYYY/MM/DD H:MM:SS``。秒なし・
+    日付のみも既存/将来行のため受ける。正本の ``タイムスタンプ`` を優先し、空/不正時
+    だけファイル記録の ``処理日時`` へ倒す。推測せず、両方を解釈できなければ None。
+    """
+    normalized = {_normalize_form_label(k): v for k, v in fields.items()}
+    for label in ("タイムスタンプ", "処理日時"):
+        raw = str(normalized.get(label) or "").strip()
+        if not raw:
+            continue
+        for fmt in _GSHEET_TIMESTAMP_FORMATS:
+            try:
+                return _dt.datetime.strptime(raw, fmt).replace(tzinfo=_JST).isoformat()
+            except ValueError:
+                continue
+    return None
 
 
 def _envflag(name: str, default: str = "false") -> bool:
@@ -458,7 +502,9 @@ def _ingest_slack_channel(
             acl_emails=acl_emails,
             acl_groups=_company_acl_groups(),  # §G 会社共有（未設定なら []）
             metadata=doc_metadata,
-            modified_at=None,
+            # Slack ts は投稿時刻そのもの。従来 None だったため /app で全投稿が
+            # 「日付不明」になっていた。外部 API や LLM で推測せず、元 epoch を正本にする。
+            modified_at=_slack_message_modified_at(parent.thread_ts or parent.ts),
         )
         chunks = [
             ChunkUpsert(
@@ -1888,6 +1934,7 @@ def _ingest_gsheet(
             # client_name は 正式社名 から FB と同品質 (法人格/敬称/注記なし) で導出する。
             knowledge_metadata = map_knowledge_fields(row_fields)
             knowledge_doc_metadata: dict[str, Any] = {}
+            derived_knowledge_client: str | None = None
             if knowledge_metadata:
                 knowledge_doc_metadata["is_knowledge_share"] = True
                 knowledge_doc_metadata.update(knowledge_metadata)
@@ -1896,6 +1943,14 @@ def _ingest_gsheet(
                 )
                 if derived_knowledge_client:
                     knowledge_doc_metadata["client_name"] = derived_knowledge_client
+
+            # 営業FB/ナレッジ共有フォームは実列「タイムスタンプ」を持つ。従来は本文から
+            # 運用列として外したうえ modified_at=None にしていたため、正しい日時が DB へ
+            # 一度も届かなかった。対象フォームと判定できた行だけを決定論的に採用し、
+            # 無関係な任意シートの同名列には意味を与えない。
+            row_modified_at = (
+                _gsheet_row_modified_at(row_fields) if fb_metadata or knowledge_metadata else None
+            )
 
             # ナレッジ共有シート行(フォーム回答)の本文/タイトル正規化:
             if knowledge_metadata:
@@ -1939,6 +1994,14 @@ def _ingest_gsheet(
                     classification = None
                 if classification is not None:
                     cls_metadata = classification.as_metadata()
+                # Haiku の再分類で監査済みの公開業種が揺れないよう、exact external_id と
+                # 人間入力由来 client_name の二重一致で 3 行だけ決定論的に固定する。
+                # classifier 無効時は従来どおり cls_* を付けない（feature gate を維持）。
+                cls_metadata = apply_gsheet_industry_override(
+                    external_id,
+                    client_name=derived_knowledge_client,
+                    classification_metadata=cls_metadata,
+                )
 
             doc = DocumentUpsert(
                 source_type="gsheets",  # migration 0004 で ENUM に追加済
@@ -1962,7 +2025,7 @@ def _ingest_gsheet(
                     **knowledge_doc_metadata,
                     **cls_metadata,
                 },
-                modified_at=None,
+                modified_at=row_modified_at,
             )
             chunks = [
                 ChunkUpsert(
