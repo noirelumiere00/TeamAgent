@@ -69,7 +69,7 @@ def _doc(title: str, uri: str = "gdrive://F1", **over: Any) -> dict[str, Any]:
         "cls_project": "出光興産",
         "cls_doc_type": "提案書",
         "cls_solution": "動画広告",
-        "client_name": None,
+        "client_name": "出光興産",
         "excerpt": "抜粋テキスト",
     }
     row.update(over)
@@ -217,7 +217,7 @@ def test_source_link_shapes_gdrive_and_passes_slack() -> None:
 
 
 def test_render_doc_note_has_frontmatter_tags_and_client_link() -> None:
-    note = render_doc_note(_doc("出光興産様向け提案書"), "出光興産", "clients/出光興産")
+    note = render_doc_note(_doc("出光興産様向け提案書"), "clients/出光興産")
     assert note.startswith("---\n")
     assert 'generated_by: "scripts/export_vault.py"' in note
     assert 'doc_type: "提案書"' in note
@@ -243,7 +243,6 @@ def test_render_doc_note_emits_internal_source_identity_frontmatter() -> None:
             source_type="gsheets",
             external_id="SHEET1:278789217:53",
         ),
-        "出光興産",
         "clients/出光興産",
     )
     assert 'source_type: "gsheets"' in note
@@ -260,8 +259,9 @@ def test_render_doc_note_research_doc_renders_full_body() -> None:
             source_type="other",
             x_research_tool="x_voice",
             excerpt=full,
+            client_name="辻利",
+            cls_project="辻利",
         ),
-        "辻利",
         "clients/辻利",
     )
     assert "## 主要な声" in note  # 構造（見出し/箇条書き）が保持される
@@ -272,8 +272,12 @@ def test_render_doc_note_research_doc_renders_full_body() -> None:
 def test_render_doc_note_emits_entities_field_and_tags() -> None:
     # cls_entities（正規化済み CSV）は entities frontmatter とインラインタグ両方に出す。
     note = render_doc_note(
-        _doc("0115_祇園辻利プロモーション", cls_entities="サンマルクカフェ,祇園辻利"),
-        "祇園辻利",
+        _doc(
+            "0115_祇園辻利プロモーション",
+            cls_entities="サンマルクカフェ,祇園辻利",
+            client_name="祇園辻利",
+            cls_project="祇園辻利",
+        ),
         "clients/祇園辻利",
     )
     assert 'entities: "サンマルクカフェ,祇園辻利"' in note
@@ -283,8 +287,12 @@ def test_render_doc_note_emits_entities_field_and_tags() -> None:
 def test_render_doc_note_ignores_blank_entity_segments() -> None:
     # 空セグメント（",,"や前後空白）はタグ化しない（#空タグを出さない）。
     note = render_doc_note(
-        _doc("t", cls_entities=" , サンマルクカフェ ,"),
-        "祇園辻利",
+        _doc(
+            "t",
+            cls_entities=" , サンマルクカフェ ,",
+            client_name="祇園辻利",
+            cls_project="祇園辻利",
+        ),
         "clients/祇園辻利",
     )
     assert "#サンマルクカフェ" in note
@@ -309,8 +317,9 @@ def test_render_doc_note_emits_knowledge_meta_frontmatter_when_present() -> None
             cls_category="提案",
             cls_client_tier="TOP500 or ベス10,メーカー",
             cls_product="ビデオリリース,タテガタ",
+            client_name="デルタ製薬",
+            cls_project="デルタ製薬",
         ),
-        "デルタ製薬",
         "clients/デルタ製薬",
     )
     # 多値の生文字列（カンマ/スペース内包）をそのまま double-quoted で載せる → build 側 front() が拾う
@@ -321,7 +330,7 @@ def test_render_doc_note_emits_knowledge_meta_frontmatter_when_present() -> None
 
 def test_render_doc_note_omits_knowledge_meta_when_absent() -> None:
     """値がない資料は既存 note と同一（category/client_tier/product 行を出さない・回帰なし）。"""
-    note = render_doc_note(_doc("素の提案書"), "出光興産", "clients/出光興産")
+    note = render_doc_note(_doc("素の提案書"), "clients/出光興産")
     assert "category:" not in note
     assert "client_tier:" not in note
     assert "product:" not in note
@@ -396,6 +405,37 @@ def test_render_client_note_plain_fb_unescaped_noop() -> None:
     assert "- フェーズ: 提案" in note
     assert "> 商談メモ" in note
     assert "\\" not in note.split("## 営業FB時系列")[1]  # FB 本文側にバックスラッシュ混入なし
+
+
+def test_render_client_industry_prefers_primary_over_project_and_title_matches() -> None:
+    """主担当資料を案件一致・title-only関連資料より優先してclient業界を決める。"""
+    docs = [
+        _doc(
+            "NewsTV御中 ポート株式会社御中 ご提案資料",
+            uri="gdrive://PROJECT",
+            client_name=None,
+            cls_project="ポート株式会社",
+            cls_industry="広告・マーケティング",
+        ),
+        _doc(
+            "ポート キャリアパーク",
+            uri="gsheets://ROW44",
+            client_name="ポート",
+            cls_project="ポート株式会社",
+            cls_industry="人材",
+        ),
+        _doc(
+            "レポート資料",
+            uri="gdrive://TITLE-ONLY",
+            client_name=None,
+            cls_project=None,
+            cls_industry="IT",
+        ),
+    ]
+    note = render_client_note(
+        "ポート株式会社", [], docs, ["docs/project", "docs/row44", "docs/title-only"]
+    )
+    assert 'industry: "人材"' in note
 
 
 # ---------------- plan_vault ----------------
@@ -534,6 +574,45 @@ def test_plan_vault_reuses_note_for_same_source_uri() -> None:
     # 両クライアントのカルテから同じ note へ wikilink される
     assert "[[docs/共通提案書]]" in files["clients/A社.md"]
     assert "[[docs/共通提案書]]" in files["clients/B社.md"]
+
+
+def test_plan_vault_shared_doc_uses_db_ownership_not_first_matching_client() -> None:
+    """NewsTVが先にtitle一致しても、共有noteの主担当/案件/backlinkはDB値で固定する。"""
+    shared = _doc(
+        "【NewsTV御中】ポート株式会社御中_ご提案資料.pdf",
+        uri="gdrive://PORT-PDF",
+        client_name=None,
+        cls_project="ポート株式会社",
+        cls_industry="広告・マーケティング",
+    )
+    clients = {
+        "NewsTV": {"timeline": [], "documents": [dict(shared)]},
+        "ポート株式会社": {"timeline": [], "documents": [dict(shared)]},
+    }
+    files = plan_vault(clients)
+    doc_path = next(path for path in files if path.startswith("docs/"))
+    note = files[doc_path]
+    assert 'client: ""' in note
+    assert 'project: "ポート株式会社"' in note
+    assert "- 案件: [[clients/ポート株式会社]]" in note
+    assert "- 取引先: [[clients/NewsTV]]" not in note
+    # 入力dictの挿入順に依存せずbyte-identical。
+    assert plan_vault(dict(reversed(list(clients.items())))) == files
+
+
+def test_plan_vault_rejects_conflicting_ownership_for_same_source() -> None:
+    """同じsourceのDB owner/projectが呼出し間で食い違えばfirst-winsせず停止する。"""
+    shared_a = _doc(
+        "共通資料", uri="gdrive://OWNER-CONFLICT", client_name="A社", cls_project="案件X"
+    )
+    shared_b = dict(shared_a, client_name="B社")
+    with pytest.raises(ValueError, match="conflicting client ownership"):
+        plan_vault(
+            {
+                "A社": {"timeline": [], "documents": [shared_a]},
+                "B社": {"timeline": [], "documents": [shared_b]},
+            }
+        )
 
 
 def test_plan_vault_research_docs_get_collision_proof_filenames() -> None:
@@ -928,7 +1007,6 @@ def test_render_doc_note_escapes_markdown_in_h1_title() -> None:
     """H1 見出しへ逐語出力する title の Markdown 記法を退避する（stored injection・#214-4）。"""
     note = render_doc_note(
         _doc("[phish](javascript:alert(1)) <img src=x> [[secret]]"),
-        "出光興産",
         "clients/出光興産",
     )
     h1 = next(ln for ln in note.splitlines() if ln.startswith("# "))
@@ -1068,7 +1146,10 @@ def test_first_prune_discovers_and_deletes_legacy_generated_orphans(tmp_path: Pa
     """manifest 導入前の non-company/stale note も exporter 固有構造なら初回に掃除できる。"""
     out = tmp_path / "vault"
     legacy_client = render_client_note("旧会社", [], [], [])
-    legacy_doc = render_doc_note(_doc("旧資料"), "旧会社", "clients/旧会社")
+    legacy_doc = render_doc_note(
+        _doc("旧資料", client_name="旧会社", cls_project="旧会社"),
+        "clients/旧会社",
+    )
     # generated_by marker 導入前の実ファイルを再現する。
     legacy_client = legacy_client.replace(_mod._GENERATED_BY_FIELD + "\n", "", 1)
     legacy_doc = legacy_doc.replace(_mod._GENERATED_BY_FIELD + "\n", "", 1)

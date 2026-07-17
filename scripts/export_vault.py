@@ -67,6 +67,10 @@ sys.path.insert(0, str(_ROOT / "src"))
 
 import structlog  # noqa: E402
 
+from teamagent.client_identity import (  # noqa: E402
+    CLIENT_LEGAL_FORMS,
+    client_identity_key,
+)
 from teamagent.skills.knowledge_deliver.skill import extract_drive_file_id  # noqa: E402
 
 logger = structlog.get_logger(__name__)
@@ -237,11 +241,28 @@ def render_client_note(
     """クライアントカルテ note を生成する。
 
     timeline は list_client_timeline 相当の行 dict（**古い順**）。表示は新しい順へ反転。
-    最新フェーズ/BANT は末尾（最新）の行から取り、業界は資料側 cls_industry の最頻値。
+    最新フェーズ/BANT は末尾（最新）の行から取る。業界は DB の主担当 client_name が
+    この取引先と一致する資料を優先し、無ければ cls_project 一致資料の最頻値を使う。
+    title だけが一致した汎用事例は取引先プロパティへ混ぜない。
     doc_paths は documents と同順の Vault 相対パス（拡張子なし・wikilink 用）。
     """
     latest = timeline[-1] if timeline else {}
-    industries = [str(d["cls_industry"]) for d in documents if d.get("cls_industry")]
+    client_key = client_identity_key(client)
+    primary_industries = [
+        str(d["cls_industry"])
+        for d in documents
+        if d.get("cls_industry")
+        and client_key
+        and client_identity_key(d.get("client_name")) == client_key
+    ]
+    project_industries = [
+        str(d["cls_industry"])
+        for d in documents
+        if d.get("cls_industry")
+        and client_key
+        and client_identity_key(d.get("cls_project")) == client_key
+    ]
+    industries = primary_industries or project_industries
     industry = Counter(industries).most_common(1)[0][0] if industries else ""
 
     lines: list[str] = [
@@ -321,14 +342,18 @@ def render_client_note(
     return "\n".join(lines)
 
 
-def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
-    """資料 note を生成する（frontmatter + excerpt + 出典リンク + タグ + カルテへの wikilink）。"""
+def render_doc_note(doc: dict[str, Any], client_path: str = "", project_path: str = "") -> str:
+    """資料noteをDBの主担当/案件プロパティと対応するbacklink付きで生成する。"""
+    primary_client = unicodedata.normalize("NFC", str(doc.get("client_name") or "")).strip()
+    project = unicodedata.normalize("NFC", str(doc.get("cls_project") or "")).strip()
     lines: list[str] = [
         "---",
         _GENERATED_BY_FIELD,
         f"title: {yaml_quote(doc.get('title') or '')}",
         f"doc_type: {yaml_quote(doc.get('cls_doc_type') or '')}",
-        f"client: {yaml_quote(client)}",
+        # ループ中のtitle-match clientではなくDB source truthをそのまま保持する。
+        f"client: {yaml_quote(primary_client)}",
+        f"project: {yaml_quote(project)}",
         f"industry: {yaml_quote(doc.get('cls_industry') or '')}",
         f"solution: {yaml_quote(doc.get('cls_solution') or '')}",
         # 名寄せタグ（cls_entities）: この資料に登場する取引先/代理店/ブランド/コラボ相手を
@@ -364,7 +389,8 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
         t
         for t in (
             tag_token(doc.get("cls_doc_type")),
-            tag_token(client),
+            tag_token(primary_client),
+            tag_token(project),
             tag_token(doc.get("cls_industry")),
             tag_token(doc.get("cls_solution")),
             *entity_tags,
@@ -388,7 +414,10 @@ def render_doc_note(doc: dict[str, Any], client: str, client_path: str) -> str:
     link = source_link(doc.get("source_uri"), doc.get("source_type"))
     if link:
         lines.append(f"- 出典: [{doc.get('source_type') or 'source'}]({link})")
-    lines.append(f"- 取引先: {wikilink(client_path)}")
+    if client_path:
+        lines.append(f"- 取引先: {wikilink(client_path)}")
+    if project_path and project_path != client_path:
+        lines.append(f"- 案件: {wikilink(project_path)}")
     lines.append("")
     return "\n".join(lines)
 
@@ -399,7 +428,8 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     clients: {client_name: {"timeline": FB 行 dict list（古い順）,
                             "documents": 資料行 dict list（新しい順）}}
     返り値のキーは Vault 相対パス（例 "clients/出光興産.md"）。同一資料（source_uri 一致）
-    は最初のクライアントの note を再利用し、名前衝突は ``_2`` ``_3`` … を付番して回避する。
+    は1つのnoteを再利用するが、client/projectはDB値で固定し、検索順へ依存させない。
+    名前衝突は ``_2`` ``_3`` … を付番して回避する。
     付番は **files への実在チェック** で空きを探す（出現回数カウントだと「提案書_2」の
     ような天然の ``_2`` 名と衝突し、note が黙って上書き消失し wikilink が別資料を指す）。
     """
@@ -407,6 +437,7 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
     claimed_path_keys = {_portable_path_key(path) for path in files}
     doc_path_by_uri: dict[str, str] = {}
     doc_path_by_source_key: dict[tuple[str, str], str] = {}
+    doc_ownership_by_path: dict[str, tuple[str, str]] = {}
 
     def _claim(prefix: str, base: str, *, duplicate_separator: str = "_") -> str:
         """portable filesystem 上で未使用の ``{prefix}/{base}`` 系パスを予約して返す。"""
@@ -420,16 +451,28 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
         claimed_path_keys.add(_portable_path_key(f"{path}.md"))
         return path
 
-    for client, data in sorted(clients.items()):
+    # 先に全client pathを予約し、共有資料のnoteが「最初にtitle一致したclient」ではなく
+    # DB client_name / cls_project の正しいcardへbacklinkできるようにする。
+    client_items = sorted(clients.items())
+    client_path_by_name: dict[str, str] = {}
+    client_path_by_identity: dict[str, str] = {}
+    for client, _data in client_items:
+        client_path = _claim("clients", safe_filename(client, fallback="client"))
+        client_path_by_name[client] = client_path
+        identity = client_identity_key(client)
+        if identity:
+            client_path_by_identity.setdefault(identity, client_path)
+
+    for client, data in client_items:
         timeline = list(data.get("timeline") or [])
         documents = list(data.get("documents") or [])
-
-        # クライアント note は各イテレーション末尾で必ず files へ入り、docs/ 側が
-        # clients/ を占有することは無いので、この実在チェックが予約を兼ねる。
-        client_path = _claim("clients", safe_filename(client, fallback="client"))
+        client_path = client_path_by_name[client]
 
         doc_paths: list[str] = []
         for doc in documents:
+            primary_client = unicodedata.normalize("NFC", str(doc.get("client_name") or "")).strip()
+            project = unicodedata.normalize("NFC", str(doc.get("cls_project") or "")).strip()
+            ownership = (primary_client, project)
             uri = str(doc.get("source_uri") or "")
             source_type = str(doc.get("source_type") or "")
             external_id = str(doc.get("external_id") or "").strip()
@@ -437,6 +480,11 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
             if source_key and source_key in doc_path_by_source_key:
                 # URL が空/変更済みでも同じ stable identity は同一論理資料として再利用する。
                 reused_path = doc_path_by_source_key[source_key]
+                if doc_ownership_by_path[reused_path] != ownership:
+                    raise ValueError(
+                        "same source identity has conflicting client ownership: "
+                        f"{source_key[0]}:{source_key[1]}"
+                    )
                 if uri:
                     doc_path_by_uri[uri] = reused_path
                 doc_paths.append(reused_path)
@@ -444,6 +492,8 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
             if uri and uri in doc_path_by_uri:
                 # 同一資料は既存 note を再利用（複数クライアントから wikilink される）
                 reused_path = doc_path_by_uri[uri]
+                if doc_ownership_by_path[reused_path] != ownership:
+                    raise ValueError(f"same source URI has conflicting client ownership: {uri}")
                 if source_key:
                     doc_path_by_source_key[source_key] = reused_path
                 doc_paths.append(reused_path)
@@ -483,7 +533,18 @@ def plan_vault(clients: dict[str, dict[str, list[dict[str, Any]]]]) -> dict[str,
                 doc_path_by_source_key[source_key] = doc_path
             if uri:
                 doc_path_by_uri[uri] = doc_path
-            files[f"{doc_path}.md"] = render_doc_note(doc, client, client_path)
+            doc_ownership_by_path[doc_path] = ownership
+            primary_path = (
+                client_path_by_name.get(primary_client)
+                or client_path_by_identity.get(client_identity_key(primary_client))
+                or ""
+            )
+            project_path = (
+                client_path_by_name.get(project)
+                or client_path_by_identity.get(client_identity_key(project))
+                or ""
+            )
+            files[f"{doc_path}.md"] = render_doc_note(doc, primary_path, project_path)
             doc_paths.append(doc_path)
 
         files[f"{client_path}.md"] = render_client_note(client, timeline, documents, doc_paths)
@@ -870,36 +931,9 @@ _SHARED_ACL_SQL = """EXISTS (
 _CLIENT_WORD_CHARS = (
     "[:alnum:]_Ａ-Ｚａ-ｚ０-９一-鿿々〆〇ぁ-ゖゝ-ゟァ-ヺーヽ-ヿｦ-ﾟ\u0300-\u036f\u3099-\u309a"
 )
-_CLIENT_LEGAL_PREFIXES = (
-    "株式会社",
-    "有限会社",
-    "合同会社",
-    "合名会社",
-    "合資会社",
-    "一般社団法人",
-    "公益社団法人",
-    "一般財団法人",
-    "公益財団法人",
-    "特定非営利活動法人",
-    "社会福祉法人",
-    "医療法人",
-    "学校法人",
-    "宗教法人",
-    "独立行政法人",
-    "国立大学法人",
-    "地方独立行政法人",
-    "弁護士法人",
-    "税理士法人",
-    "監査法人",
-    "行政書士法人",
-    "司法書士法人",
-    "社会保険労務士法人",
-    "農事組合法人",
-)
-_CLIENT_LEFT_BOUNDARY = rf"(^|[^{_CLIENT_WORD_CHARS}]|{'|'.join(_CLIENT_LEGAL_PREFIXES)})"
-_CLIENT_LEFT_BOUNDARY_JAPANESE = (
-    rf"(^|[^{_CLIENT_WORD_CHARS}]|_|{'|'.join(_CLIENT_LEGAL_PREFIXES)})"
-)
+_CLIENT_LEGAL_PREFIX_PATTERN = "|".join(re.escape(form) for form in CLIENT_LEGAL_FORMS)
+_CLIENT_LEFT_BOUNDARY = rf"(^|[^{_CLIENT_WORD_CHARS}]|{_CLIENT_LEGAL_PREFIX_PATTERN})"
+_CLIENT_LEFT_BOUNDARY_JAPANESE = rf"(^|[^{_CLIENT_WORD_CHARS}]|_|{_CLIENT_LEGAL_PREFIX_PATTERN})"
 _JAPANESE_CLIENT_RE = re.compile(r"[一-鿿々〆〇ぁ-ゖゝ-ゟァ-ヺーヽ-ヿｦ-ﾟ]")
 _CLIENT_ASCII_DATE_PREFIX = r"^[0-9]{8}_?"
 _CLIENT_ASCII_RIGHT_BOUNDARY = r"($|[^A-Za-z0-9])"

@@ -87,13 +87,17 @@ def _write_doc(
     external_id: str = "",
     source_url: str = "",
     generated_by: bool = False,
+    project: str | None = None,
+    modified_at: str = "2026-06-01",
 ) -> None:
     display_title = title or stem
     generator_line = 'generated_by: "scripts/export_vault.py"\n' if generated_by else ""
+    project_line = f'project: "{project}"\n' if project is not None else ""
     (vault / "docs" / f"{stem}.md").write_text(
         f"---\n{generator_line}"
         f'title: "{display_title}"\nclient: "{client}"\nindustry: "{industry}"\n'
-        f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "2026-06-01"\n'
+        f"{project_line}"
+        f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "{modified_at}"\n'
         f'source_type: "{source_type}"\nexternal_id: "{external_id}"\n---\n\n'
         f"> {display_title} の抜粋\n\n"
         + (f"- 出典: [{source_type or 'source'}]({source_url})\n" if source_url else "")
@@ -1179,6 +1183,9 @@ def test_timeline_payload_and_dom_in_html(sidecars: Path, vault: Path, tmp_path:
     assert '"lastfb": "2026-05-18"' in html
     assert '"pos": "・保証型がよい"' in html
     assert '"cnorm": "帝人"' in html
+    assert "(c.ds||[]).forEach" in html
+    assert 'function lastOf(c){return c.last||c.lastfb||"";}' in html
+    assert "const LASTDOC=" not in html
 
 
 def test_date_prefixed_timeline_survives_full_build(
@@ -2228,6 +2235,82 @@ def test_port_alias_dedupes_same_three_visible_docs(
     assert not (
         {"_raw_name", "_tl_raw", "_is_multi_client_group", "_dedupe_doc_count"} & port.keys()
     )
+
+
+def test_port_activity_uses_explicit_link_and_db_primary_or_project_identity(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """Portの正しい2資料だけを活動化し、title-only/unlinked資料と業界誤集約を防ぐ。"""
+    _write_aliases(
+        sidecars,
+        tag={"industry": {"人材": "人材派遣"}, "solution": {}},
+        client={"client": {"ポート": "ポート株式会社"}},
+    )
+    _write_doc(
+        vault,
+        "port-row44",
+        client="ポート",
+        project="ポート株式会社",
+        industry="人材",
+        title="ポート キャリアパークの就活アドバイザー",
+        modified_at="2025-09-19",
+    )
+    _write_doc(
+        vault,
+        "port-drive-proposal",
+        client="",
+        project="ポート株式会社",
+        industry="広告・マーケティング",
+        title="【NewsTV御中】ポート株式会社御中_ご提案資料.pdf",
+        modified_at="2025-10-02",
+    )
+    _write_doc(
+        vault,
+        "report-title-only",
+        client="",
+        project="",
+        industry="IT",
+        title="他社向け施策レポート・株主パスポート",
+        modified_at="2026-07-01",
+    )
+    _write_doc(
+        vault,
+        "port-unlinked",
+        client="",
+        project="ポート株式会社",
+        industry="広告・マーケティング",
+        title="ポート株式会社 別資料",
+        modified_at="2026-07-02",
+    )
+    _write_client_links(
+        vault,
+        "ポート株式会社",
+        ["port-row44", "port-drive-proposal", "report-title-only"],
+    )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    payload = _payload(html)
+    [port] = [c for c in payload["clients"] if c["name"] == "ポート株式会社"]
+
+    assert port["ds"] == ["port-row44", "port-drive-proposal"]
+    assert port["doc"] == 2
+    assert port["last"] == "2025-10-02"
+    assert port["industry"] == "人材派遣"  # primary row44をproject-only資料より優先
+    assert _doc_field(html, "port-drive-proposal", "client") == "ポート株式会社"
+    assert _doc_field(html, "report-title-only", "client") == ""
+    # title-only関連資料は本文/graph linkには残るが、活動資料へは入らない。
+    outgoing = {
+        target[2:]
+        for source, target, _ctx in payload["links"]
+        if source == f"c:{port['stem']}" and target.startswith("d:")
+    }
+    assert {"port-row44", "port-drive-proposal", "report-title-only"} <= outgoing
+    assert set(port["ds"]) < outgoing
+    assert "port-unlinked" not in port["ds"]
+    assert '"_primary_owner_key"' not in html
+    assert '"_project_owner_key"' not in html
 
 
 def test_client_alias_unions_variant_links_and_keeps_first_context(
