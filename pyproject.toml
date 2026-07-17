@@ -82,7 +82,7 @@ dev = [
 ]
 mcp = [
     # MCP SDK（外部 SaaS の MCP 化を実装するとき用）
-    "mcp>=0.9.0",
+    "mcp>=1.28.1,<2",
 ]
 embeddings = [
     # SearchSkill の LocalE5Embedder（multilingual-e5-large）。重い(torch)ため optional。

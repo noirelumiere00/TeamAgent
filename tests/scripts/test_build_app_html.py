@@ -185,9 +185,7 @@ def test_build_success_writes_html_stats_and_stamp(
     assert stats["clients"] == 1
     assert stats["docs"] == 3
     assert stats["bytes"] == len(out.read_bytes())
-    manifest_sha = hashlib.sha256(
-        (vault / ".export-vault-manifest.json").read_bytes()
-    ).hexdigest()
+    manifest_sha = hashlib.sha256((vault / ".export-vault-manifest.json").read_bytes()).hexdigest()
     payload = _payload(html)
     assert payload["manifest_sha256"] == manifest_sha
     assert payload["stats"]["manifest_sha256"] == manifest_sha
