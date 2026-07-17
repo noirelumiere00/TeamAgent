@@ -44,6 +44,7 @@ render_doc_note = _mod.render_doc_note
 render_client_note = _mod.render_client_note
 normalize_shared_group = _mod.normalize_shared_group
 client_match_pattern = _mod.client_match_pattern
+client_title_match_pattern = _mod.client_title_match_pattern
 
 
 def _manifest_files(out: Path) -> dict[str, str]:
@@ -773,9 +774,23 @@ def _pg_pattern_matches(pattern: str, value: str) -> bool:
         ("PORT Inc. proposal", "port", True),
         ("Q3 (Port) review", "port", True),
         ("合同会社PORT", "port", True),
+        # date fallback は title 専用。metadata/timeline の strict pattern では拾わない。
+        ("20251113_PIVOT媒体資料", "PIVOT", False),
+        ("20260127_TORRAS/代理店ADEX", "TORRAS", False),
+        ("20250116_NewsTVサービス資料", "NewsTV", False),
+        ("20260514NewsTV", "NewsTV", False),
+        ("20250101_port_campaign", "port", False),
+        ("20250101_Ine_案件", "Ine", False),
         ("annual report", "port", False),
         ("airport campaign", "port", False),
         ("other_port campaign", "port", False),
+        ("20250101_other_port", "port", False),
+        ("20250101_portfolio", "port", False),
+        ("20250101_airport", "port", False),
+        ("20250101_GUIDELINE", "Ine", False),
+        ("20250101_LINE", "Ine", False),
+        # date fallback は非日本語名だけ。日本語は実運用の ``日付_社名`` 区切りを要求する。
+        ("20250919ポート株式会社", "ポート", False),
         ("LINEプロモーション", "Ine", False),
         ("GUIDELINE策定", "Ine", False),
         ("Ine 新規案件", "Ine", True),
@@ -787,6 +802,32 @@ def test_client_match_pattern_requires_unicode_aware_left_boundary(
     value: str, client: str, expected: bool
 ) -> None:
     assert _pg_pattern_matches(client_match_pattern(client), value) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "client", "expected"),
+    [
+        ("20251113_PIVOT媒体資料", "PIVOT", True),
+        ("20260127_TORRAS/代理店ADEX", "TORRAS", True),
+        ("20250116_NewsTVサービス資料", "NewsTV", True),
+        ("20260514NewsTV", "NewsTV", True),
+        ("20250101_port_campaign", "port", True),
+        ("20250101_Ine_案件", "Ine", True),
+        ("20250101_other_port", "port", False),
+        ("20250101_portfolio", "port", False),
+        ("20250101_airport", "port", False),
+        ("20250101_GUIDELINE", "Ine", False),
+        ("20250101_LINE", "Ine", False),
+        ("20250919ポート株式会社", "ポート", False),
+        # 通常境界は title 専用 pattern にもそのまま含まれる。
+        ("PORT Inc. proposal", "port", True),
+        ("annual report", "port", False),
+    ],
+)
+def test_client_title_match_pattern_adds_only_anchored_ascii_date_fallback(
+    value: str, client: str, expected: bool
+) -> None:
+    assert _pg_pattern_matches(client_title_match_pattern(client), value) is expected
 
 
 @pytest.mark.parametrize(
@@ -804,6 +845,9 @@ def test_client_match_pattern_treats_like_and_regex_metacharacters_as_literals(
     pattern = client_match_pattern(client)
     assert _pg_pattern_matches(pattern, literal_value)
     assert not _pg_pattern_matches(pattern, near_miss)
+    title_pattern = client_title_match_pattern(client)
+    assert _pg_pattern_matches(title_pattern, f"20250101_{literal_value}")
+    assert not _pg_pattern_matches(title_pattern, f"20250101_{near_miss}")
 
 
 def test_client_match_pattern_normalizes_nfc_and_rejects_blank() -> None:
@@ -811,12 +855,15 @@ def test_client_match_pattern_normalizes_nfc_and_rejects_blank() -> None:
     nfd = unicodedata.normalize("NFD", nfc)
     assert nfc != nfd
     assert client_match_pattern(f"  {nfd}  ") == client_match_pattern(nfc)
+    assert client_title_match_pattern(f"  {nfd}  ") == client_title_match_pattern(nfc)
     with pytest.raises(ValueError, match="must not be blank"):
         client_match_pattern("  ")
+    with pytest.raises(ValueError, match="must not be blank"):
+        client_title_match_pattern("  ")
 
 
-def test_timeline_and_documents_use_the_same_bound_regex_not_like() -> None:
-    """timeline/client_name/cls_project/title の4経路を同じ安全な境界照合へ固定。"""
+def test_timeline_and_documents_use_bound_regex_not_like() -> None:
+    """timeline/metadata は strict、title は専用 fallback を bind する SQL 形へ固定。"""
     assert _mod._TIMELINE_SQL.count("~* %s") == 1
     assert _mod._DOCUMENTS_SQL_TEMPLATE.count("~* %s") == 3
     assert " LIKE %s" not in _mod._TIMELINE_SQL
@@ -1291,7 +1338,7 @@ def test_load_clients_data_returns_timeline_oldest_first(
         def execute(self, sql: str, params: Any = None) -> None:
             executions.append((sql, tuple(params or ())))
             if "DISTINCT name" in sql:
-                self._rows = [{"name": "出光興産"}]
+                self._rows = [{"name": "PIVOT"}]
             elif "is_sales_fb' = 'true'" in sql:  # _TIMELINE_SQL（DB は新しい順で返す）
                 self._rows = list(desc_rows)
             else:  # _DOCUMENTS_SQL
@@ -1315,22 +1362,23 @@ def test_load_clients_data_returns_timeline_oldest_first(
         "postgresql://stub",
         shared_group="  VectorInc.CO.JP  ",
     )
-    timeline = data["出光興産"]["timeline"]
+    timeline = data["PIVOT"]["timeline"]
     assert [r["occurred_at"] for r in timeline] == ["2026-05-01", "2026-06-15"]  # 古い順
     assert timeline[-1]["deal_phase"] == "提案"  # 末尾＝最新（frontmatter が最新値になる）
 
     # shared_group は文字列補間せず、正規化した bind parameter で全経路へ渡す。
     assert [params for _, params in executions] == [
         ("vectorinc.co.jp", "vectorinc.co.jp"),  # _CLIENTS_SQL UNION 2 枝
-        ("vectorinc.co.jp", client_match_pattern("出光興産"), 100),  # _TIMELINE_SQL
+        ("vectorinc.co.jp", client_match_pattern("PIVOT"), 100),  # _TIMELINE_SQL
         (
             "vectorinc.co.jp",
-            client_match_pattern("出光興産"),
-            client_match_pattern("出光興産"),
-            client_match_pattern("出光興産"),
+            client_match_pattern("PIVOT"),
+            client_match_pattern("PIVOT"),
+            client_title_match_pattern("PIVOT"),
             100,
         ),
     ]
+    assert client_title_match_pattern("PIVOT") != client_match_pattern("PIVOT")
     assert all("vectorinc.co.jp" not in sql.lower() for sql, _ in executions)
 
 
