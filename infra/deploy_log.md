@@ -8,6 +8,14 @@
 
 ---
 
+## 2026-07-17 🛡️ Slack本人確認のワークスペース固定／カナリア経路を復旧
+- source=`dev`@`e20411ccf39d5266127f19bc5e2295ebcd4a678f`（#250、CI全緑・独立レビュー済み）。既にMCPへ設定済みだった `SLACK_TEAM_ID=T07MU5P2PBR` をconnect-webのSlack OAuth callbackとcanaryのidentity resolverにも配線し、外部ワークスペースをfail-closedで拒否する経路を統一。
+- 手動canary初回 `11f326fcf61d4dd69dfcc23c61a41026` は、private DNS先のVPC endpoint SGにcanary SGからの許可がliveだけ欠けていたため、Secrets Manager接続timeoutで起動失敗。Terraformソースは既に正しかったため、VPCE SG `sg-0284281974da41b4b` にcanary SG `sg-089cfd348666b628c` からTCP/443だけを許可する `sgr-049e09d6f939cdb84` を反映。再試行 `9fb54edd695c432086603c3dfd36b55b` はexit=0 / `overall=True`。
+- connect-webは現行image digest `sha256:0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144`のまま、task definition `:50`→`:53`へ環境変数1件だけを追加。登録結果を環境変数順序だけ正規化して旧定義と完全比較後に切替。rollout COMPLETED・1/1 healthy・failed=0・直近ログの ERROR/Exception/Traceback 0。`/healthz`はsource=`s3` / sha=`03f8e8cc0adb`。
+- canaryはtask definition `:13`→`:14`へ同変数だけを追加し、EventBridge targetも`:14`へ更新。ruleは`DISABLED`のまま。実機 `0234047ff84f4581b196b46c1a0c86fd` はexit=0、`check_identity_resolve=True / overall=True`、未設定警告0。rollbackはconnect-web`:50`、canary`:13`（VPCE許可はTerraform正本と同一なので維持）。実行者=Codex（s-komata AWSアカウント）。
+
+---
+
 ## 2026-07-17 🚀 `/app` の日付・取引先所有者・業種名寄せを本番反映
 - source=`dev`@`6872880b69a0e8b252e56ebdc4b585e38b7681e3`（#245、CI全緑）。資料の `client_name` / `cls_project` をVaultへ保持し、取引先カードの活動資料を「明示リンクかつ完全一致する所有者」に限定。Portと「レポート／パスポート／portfolio」の部分一致を禁止し、SBI生命保険・SBI証券を分離、i-ne・泉屋の正式表記を安全に名寄せ。監査済み28社の業種マスターと、非マスター企業も所有資料から独立再計算するQAを追加。
 - RDSからVaultを全量再生成し `clients=714 / docs=878 / manifest=aa451e744d26...`。公開HTMLは `clients=516 / docs=662 / activity=575 / FB timeline=447 / sha256=03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c`。資料・FBの日付欠損0、QA違反0、内部source露出0。全3,079テスト＋環境依存skip 10、Ruff、mypy、独立artifact監査を通過。
