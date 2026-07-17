@@ -862,6 +862,70 @@ _SHARED_ACL_SQL = """EXISTS (
 # unnest('{}') に行はないので、acl_groups 空や owner/acl_emails だけの document は
 # EXISTS=false の fail-closed になる。ACL 値そのものは SELECT 列に含めない。
 
+# 短い取引先名をタイトル/metadata の単語途中へ誤爆させないための「左境界」。
+# POSIX alnum は DB locale によって非 ASCII の扱いが変わるため、日本語・全角英数・
+# 結合文字を明示して、C locale でも「レポート」「株主パスポート」内の「ポート」を
+# 境界開始とみなさない。一方、右境界は課さず「ポート株式会社」のような正式社名を、
+# 法人格 alternative で「株式会社ポート」のような前置正式社名も引き続き拾う。
+_CLIENT_WORD_CHARS = (
+    "[:alnum:]_Ａ-Ｚａ-ｚ０-９一-鿿々〆〇ぁ-ゖゝ-ゟァ-ヺーヽ-ヿｦ-ﾟ\u0300-\u036f\u3099-\u309a"
+)
+_CLIENT_LEGAL_PREFIXES = (
+    "株式会社",
+    "有限会社",
+    "合同会社",
+    "合名会社",
+    "合資会社",
+    "一般社団法人",
+    "公益社団法人",
+    "一般財団法人",
+    "公益財団法人",
+    "特定非営利活動法人",
+    "社会福祉法人",
+    "医療法人",
+    "学校法人",
+    "宗教法人",
+    "独立行政法人",
+    "国立大学法人",
+    "地方独立行政法人",
+    "弁護士法人",
+    "税理士法人",
+    "監査法人",
+    "行政書士法人",
+    "司法書士法人",
+    "社会保険労務士法人",
+    "農事組合法人",
+)
+_CLIENT_LEFT_BOUNDARY = rf"(^|[^{_CLIENT_WORD_CHARS}]|{'|'.join(_CLIENT_LEGAL_PREFIXES)})"
+_CLIENT_LEFT_BOUNDARY_JAPANESE = (
+    rf"(^|[^{_CLIENT_WORD_CHARS}]|_|{'|'.join(_CLIENT_LEGAL_PREFIXES)})"
+)
+_JAPANESE_CLIENT_RE = re.compile(r"[一-鿿々〆〇ぁ-ゖゝ-ゟァ-ヺーヽ-ヿｦ-ﾟ]")
+_PG_REGEX_META_RE = re.compile(r"([\\.^$|?*+()\[\]{}])")
+
+
+def client_match_pattern(name: str) -> str:
+    """取引先名の左境界付き PostgreSQL regex を安全に組む。
+
+    値は呼び出し側で必ず bind parameter のまま渡す。ここでは PostgreSQL ARE の
+    metacharacter を literal escape し、LIKE の ``%`` / ``_`` も通常文字として扱う。
+    NFC 化は SQL 側の ``normalize(..., NFC)`` と対になり、表記の合成差を吸収する。
+    """
+    normalized = unicodedata.normalize("NFC", str(name)).strip()
+    if not normalized:
+        raise ValueError("client name must not be blank")
+    literal = _PG_REGEX_META_RE.sub(r"\\\1", normalized)
+    # Drive/Sheets の実タイトルは ``20250919_ポート株式会社`` のように ``_`` を
+    # 区切りへ使う。日本語名に限って左 ``_`` を許可し、ASCII名の ``other_port`` は
+    # 識別子途中として引き続き拒否する。
+    boundary = (
+        _CLIENT_LEFT_BOUNDARY_JAPANESE
+        if _JAPANESE_CLIENT_RE.search(normalized)
+        else _CLIENT_LEFT_BOUNDARY
+    )
+    return f"{boundary}{literal}"
+
+
 _CLIENTS_SQL = f"""
     SELECT DISTINCT name FROM (
         SELECT d.metadata->>'client_name' AS name FROM documents d
@@ -876,7 +940,7 @@ _CLIENTS_SQL = f"""
           -- 施策研究ノート(x_research_tool 付き)の cls_project は「商材/テーマ名」であって
           -- 取引先ではない。取引先タクソノミー(名寄せ/facet/グラフ)を汚さないため client 一覧に
           -- 昇格させない（needs/buzz を未永続化にしたのと同じ姿勢＝名寄せ前は取引先化しない）。
-          -- 商材名が既存取引先に substring 一致する場合は DOCUMENTS_SQL の cls_project ILIKE で
+          -- 商材名が既存取引先に左境界付き一致する場合は DOCUMENTS_SQL の cls_project regex で
           -- その取引先へ自然に紐づく（＝実在取引先へは載る／新規の偽取引先は作らない）。
           AND d.metadata->>'x_research_tool' IS NULL
     ) AS names
@@ -901,7 +965,7 @@ _TIMELINE_SQL = f"""
     JOIN documents d ON d.id = c.document_id
     WHERE {_SHARED_ACL_SQL}
       AND d.metadata->>'is_sales_fb' = 'true'
-      AND d.metadata->>'client_name' LIKE %s
+      AND normalize(COALESCE(d.metadata->>'client_name', ''), NFC) ~* %s
     ORDER BY d.modified_at DESC NULLS LAST, c.chunk_idx DESC
     LIMIT %s
 """
@@ -950,9 +1014,9 @@ _DOCUMENTS_SQL_TEMPLATE = f"""
       AND d.metadata->>'suppressed' IS DISTINCT FROM 'true'
       AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
       {{stale_clause}}
-      AND (d.metadata->>'cls_project' ILIKE %s
-           OR d.metadata->>'client_name' ILIKE %s
-           OR d.title ILIKE %s)
+      AND (normalize(COALESCE(d.metadata->>'cls_project', ''), NFC) ~* %s
+           OR normalize(COALESCE(d.metadata->>'client_name', ''), NFC) ~* %s
+           OR normalize(COALESCE(d.title, ''), NFC) ~* %s)
     ORDER BY d.modified_at DESC NULLS LAST
     LIMIT %s
 """
@@ -1004,23 +1068,41 @@ def load_clients_data(
         with conn.cursor() as cur:
             # UNION の 2 枝に同じ shared group パラメータを個別に配線。
             cur.execute(_CLIENTS_SQL, (normalized_group, normalized_group))
-            names = [str(r["name"]) for r in cur.fetchall() if r.get("name")]
+            # SQL DISTINCT では NFC/NFD が別値になり得る。照合・出力名と同じ NFC/strip へ
+            # 揃え、空白だけの値を除きつつ先勝ちで重複を落とす。
+            names = list(
+                dict.fromkeys(
+                    normalized
+                    for row in cur.fetchall()
+                    if row.get("name")
+                    and (normalized := unicodedata.normalize("NFC", str(row["name"])).strip())
+                )
+            )
         if client:
             needle = client.strip().lower()
             names = [n for n in names if needle in n.lower()]
         if limit:
             names = names[: int(limit)]
         for name in names:
-            like = f"%{name}%"
+            match_pattern = client_match_pattern(name)
             with conn.cursor() as cur:
-                cur.execute(_TIMELINE_SQL, (normalized_group, like, per_client_limit))
+                cur.execute(
+                    _TIMELINE_SQL,
+                    (normalized_group, match_pattern, per_client_limit),
+                )
                 # DESC で取った最新 N 件を古い順へ戻す（render_client_note の
                 # 「timeline は古い順・末尾＝最新」契約を保つ）
                 timeline = [dict(r) for r in reversed(cur.fetchall())]
             with conn.cursor() as cur:
                 cur.execute(
                     docs_sql,
-                    (normalized_group, like, like, like, per_client_limit),
+                    (
+                        normalized_group,
+                        match_pattern,
+                        match_pattern,
+                        match_pattern,
+                        per_client_limit,
+                    ),
                 )
                 documents = [dict(r) for r in cur.fetchall()]
             if timeline or documents:
