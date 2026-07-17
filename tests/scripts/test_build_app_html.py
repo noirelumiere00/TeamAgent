@@ -185,6 +185,17 @@ def test_build_success_writes_html_stats_and_stamp(
     assert stats["clients"] == 1
     assert stats["docs"] == 3
     assert stats["bytes"] == len(out.read_bytes())
+    manifest_sha = hashlib.sha256((vault / ".export-vault-manifest.json").read_bytes()).hexdigest()
+    payload = _payload(html)
+    assert payload["manifest_sha256"] == manifest_sha
+    assert payload["stats"]["manifest_sha256"] == manifest_sha
+    assert stats["manifest_sha256"] == manifest_sha
+    assert payload["build_inputs_sha256"] == _mod.BUILD_INPUTS_SHA256
+    assert payload["stats"]["build_inputs_sha256"] == _mod.BUILD_INPUTS_SHA256
+    assert stats["build_inputs_sha256"] == _mod.BUILD_INPUTS_SHA256
+    data_line = next(line for line in html.splitlines() if line.startswith("const DATA="))
+    raw_data = data_line.removeprefix("const DATA=").removesuffix(";")
+    assert stats["data_sha256"] == hashlib.sha256(raw_data.encode("utf-8")).hexdigest()
 
 
 def test_excluded_stem_not_in_payload(sidecars: Path, vault: Path, tmp_path: Path) -> None:
