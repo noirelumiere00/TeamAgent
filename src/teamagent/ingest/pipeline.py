@@ -16,9 +16,11 @@ Usage (CLI):
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -43,6 +45,41 @@ if TYPE_CHECKING:
     from teamagent.ingest.contextualize import ChunkContextualizer
 
 logger = structlog.get_logger(__name__)
+
+_JST = _dt.timezone(_dt.timedelta(hours=9))
+_GSHEET_TIMESTAMP_FORMATS = (
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+)
+
+
+def _slack_message_modified_at(ts: str | None) -> str | None:
+    """Slack の epoch 秒を DB 用 ISO8601 (UTC) にする。壊れた値は日付なしで継続。"""
+    try:
+        return _dt.datetime.fromtimestamp(float(ts or ""), tz=_dt.UTC).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _gsheet_row_modified_at(fields: Mapping[str, str]) -> str | None:
+    """Google Form の日本時間タイムスタンプを timezone 付き ISO8601 にする。
+
+    Sheets API の FORMATTED_VALUE は実データで ``YYYY/MM/DD H:MM:SS``。秒なし・
+    日付のみも既存/将来行のため受ける。正本の ``タイムスタンプ`` を優先し、空/不正時
+    だけファイル記録の ``処理日時`` へ倒す。推測せず、両方を解釈できなければ None。
+    """
+    normalized = {_normalize_form_label(k): v for k, v in fields.items()}
+    for label in ("タイムスタンプ", "処理日時"):
+        raw = str(normalized.get(label) or "").strip()
+        if not raw:
+            continue
+        for fmt in _GSHEET_TIMESTAMP_FORMATS:
+            try:
+                return _dt.datetime.strptime(raw, fmt).replace(tzinfo=_JST).isoformat()
+            except ValueError:
+                continue
+    return None
 
 
 def _envflag(name: str, default: str = "false") -> bool:
@@ -458,7 +495,9 @@ def _ingest_slack_channel(
             acl_emails=acl_emails,
             acl_groups=_company_acl_groups(),  # §G 会社共有（未設定なら []）
             metadata=doc_metadata,
-            modified_at=None,
+            # Slack ts は投稿時刻そのもの。従来 None だったため /app で全投稿が
+            # 「日付不明」になっていた。外部 API や LLM で推測せず、元 epoch を正本にする。
+            modified_at=_slack_message_modified_at(parent.thread_ts or parent.ts),
         )
         chunks = [
             ChunkUpsert(
@@ -1897,6 +1936,14 @@ def _ingest_gsheet(
                 if derived_knowledge_client:
                     knowledge_doc_metadata["client_name"] = derived_knowledge_client
 
+            # 営業FB/ナレッジ共有フォームは実列「タイムスタンプ」を持つ。従来は本文から
+            # 運用列として外したうえ modified_at=None にしていたため、正しい日時が DB へ
+            # 一度も届かなかった。対象フォームと判定できた行だけを決定論的に採用し、
+            # 無関係な任意シートの同名列には意味を与えない。
+            row_modified_at = (
+                _gsheet_row_modified_at(row_fields) if fb_metadata or knowledge_metadata else None
+            )
+
             # ナレッジ共有シート行(フォーム回答)の本文/タイトル正規化:
             if knowledge_metadata:
                 # (a) 本文から運用列を外す。先頭列の Slack file URL(100字超)が export_vault の
@@ -1962,7 +2009,7 @@ def _ingest_gsheet(
                     **knowledge_doc_metadata,
                     **cls_metadata,
                 },
-                modified_at=None,
+                modified_at=row_modified_at,
             )
             chunks = [
                 ChunkUpsert(

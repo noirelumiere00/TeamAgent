@@ -64,7 +64,7 @@ def test_projects_same_columns_as_list_client_timeline() -> None:
     client.list_client_timeline_recent(conn, "出光興産")
     sql: str = cur.execute.call_args.args[0]
     for col in (
-        "to_char(d.modified_at, 'YYYY-MM-DD') AS occurred_at",
+        "to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS occurred_at",
         "d.metadata->>'deal_phase' AS deal_phase",
         "d.metadata->>'bant_score' AS bant_score",
         "d.metadata->>'channel_type' AS channel_type",

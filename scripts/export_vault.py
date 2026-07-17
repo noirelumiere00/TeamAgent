@@ -967,7 +967,7 @@ _CLIENTS_SQL = f"""
 _TIMELINE_SQL = f"""
     SELECT
         COALESCE(c.contextualized, c.content) AS content,
-        to_char(d.modified_at, 'YYYY-MM-DD') AS occurred_at,
+        to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS occurred_at,
         d.source_uri,
         d.title,
         d.metadata->>'client_name' AS client_name,
@@ -995,7 +995,7 @@ _DOCUMENTS_SQL_TEMPLATE = f"""
         d.title,
         d.source_uri,
         d.source_type::text AS source_type,
-        to_char(d.modified_at, 'YYYY-MM-DD') AS modified_at,
+        to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS modified_at,
         d.metadata->>'cls_industry' AS cls_industry,
         d.metadata->>'cls_project' AS cls_project,
         d.metadata->>'cls_doc_type' AS cls_doc_type,

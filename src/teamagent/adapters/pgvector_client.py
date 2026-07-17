@@ -916,7 +916,7 @@ class PgVectorClient:
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
                 COALESCE(c.contextualized, c.content) AS content,
-                to_char(d.modified_at, 'YYYY-MM-DD') AS occurred_at,
+                to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS occurred_at,
                 d.source_uri,
                 d.title,
                 d.metadata->>'client_name' AS client_name,
@@ -1006,7 +1006,7 @@ class PgVectorClient:
             SELECT
                 abs(hashtext(c.id::text)::bigint) AS chunk_id,
                 COALESCE(c.contextualized, c.content) AS content,
-                to_char(d.modified_at, 'YYYY-MM-DD') AS occurred_at,
+                to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS occurred_at,
                 d.source_uri,
                 d.title,
                 d.metadata->>'client_name' AS client_name,
@@ -1200,7 +1200,7 @@ class PgVectorClient:
                 d.title,
                 d.source_uri,
                 d.source_type::text AS source_type,
-                to_char(d.modified_at, 'YYYY-MM-DD') AS modified_at,
+                to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS modified_at,
                 d.metadata->>'cls_industry' AS cls_industry,
                 d.metadata->>'cls_project' AS cls_project,
                 d.metadata->>'cls_doc_type' AS cls_doc_type,

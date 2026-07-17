@@ -33,7 +33,7 @@ def test_projects_modified_at_and_classification_axes() -> None:
     conn, cur = _mock_conn()
     client.list_documents_for_client(conn, "出光興産")
     sql: str = cur.execute.call_args.args[0]
-    assert "to_char(d.modified_at, 'YYYY-MM-DD') AS modified_at" in sql
+    assert "to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS modified_at" in sql
     assert "d.metadata->>'cls_industry' AS cls_industry" in sql
     assert "d.metadata->>'cls_doc_type' AS cls_doc_type" in sql
     assert "d.metadata->>'cls_solution' AS cls_solution" in sql

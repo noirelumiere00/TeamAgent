@@ -872,6 +872,13 @@ def test_timeline_and_documents_use_bound_regex_not_like() -> None:
         assert "normalize(COALESCE(" in sql
 
 
+def test_export_dates_are_rendered_in_japan_timezone() -> None:
+    """timestamptz をRDS既定UTCのまま日付化して前日表示にしない。"""
+    jst_date = "to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD')"
+    assert f"{jst_date} AS occurred_at" in _mod._TIMELINE_SQL
+    assert f"{jst_date} AS modified_at" in _mod._DOCUMENTS_SQL_TEMPLATE
+
+
 def test_all_admin_dsn_select_paths_require_the_same_company_shared_acl() -> None:
     """client列挙/FB/資料のどの経路も company-shared ACL 謂語を外せない。"""
     predicate = _mod._SHARED_ACL_SQL
