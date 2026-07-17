@@ -141,6 +141,7 @@ resource "aws_ecs_task_definition" "canary" {
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
+      { name = "SLACK_TEAM_ID", value = var.slack_team_id },
       { name = "CANARY_SLACK_USER_ID", value = var.canary_slack_user_id },
     ]
     secrets = [
