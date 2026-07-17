@@ -72,6 +72,13 @@ doc_count: "1"
 
 # 顧客会社
 
+## 営業FB時系列（新しい順）
+
+### 2026-07-16 初回提案
+
+- フェーズ: 提案
+- ポジ反応: 導入意向あり
+
 ## 関連資料
 - [[docs/公開資料-a1b2c3d4]]
 """,
@@ -835,6 +842,45 @@ def test_raw_data_hash_and_nonempty_fields_reject_payload_tampering(
     violations = cast_dict(result["violations"])
     assert violations["html_data_item_schema_invalid"] == 2
     assert violations["stats_data_hash_mismatch"] == 1
+
+
+def test_client_timeline_gate_rejects_fb_count_without_payload_events(
+    artifacts: tuple[Path, Path, Path, str],
+) -> None:
+    vault, html, sidecars, _ = artifacts
+
+    def erase_timeline(payload: dict[str, object]) -> None:
+        clients = payload["clients"]
+        assert isinstance(clients, list) and isinstance(clients[0], dict)
+        clients[0]["fb"] = 1
+        clients[0]["tl"] = []
+
+    _rewrite_html_payload(html, erase_timeline)
+    result = qa.run_qa(qa.QAConfig(vault=vault, html=html, sidecar_dir=sidecars))
+
+    assert result["ok"] is False
+    timelines = cast_dict(result["client_timelines"])
+    assert timelines["payload_missing_count"] == 1
+    assert cast_dict(result["violations"])["html_client_timeline_missing"] == 1
+
+
+def test_client_timeline_gate_rejects_source_heading_count_mismatch(
+    artifacts: tuple[Path, Path, Path, str],
+) -> None:
+    vault, html, sidecars, _ = artifacts
+    client = vault / "clients" / "顧客会社.md"
+    client.write_text(
+        client.read_text(encoding="utf-8").replace('fb_count: "1"', 'fb_count: "2"'),
+        encoding="utf-8",
+    )
+    _write_manifest(vault)
+
+    result = qa.run_qa(qa.QAConfig(vault=vault, html=html, sidecar_dir=sidecars))
+
+    assert result["ok"] is False
+    timelines = cast_dict(result["client_timelines"])
+    assert timelines["source_count_mismatch"] == 1
+    assert cast_dict(result["violations"])["client_timeline_count_mismatch"] == 1
 
 
 def test_graph_link_endpoint_bounds_reject_runtime_breakage(

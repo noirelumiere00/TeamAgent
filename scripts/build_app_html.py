@@ -164,8 +164,16 @@ def bant_short(b):
     return m.group(1) if m else b[:1]
 
 
-# === 施策タイムライン: 営業FB時系列（### ---- 見出し区切り）のパース ===
-FB_HEAD_RE = re.compile(r"^###\s*-{2,}\s*(.*)$", re.M)
+# === 施策タイムライン: 営業FB時系列（### 日付/旧---- 見出し）のパース ===
+# exporter は occurred_at があれば `### 2026-07-17 ...`、無ければ旧互換の
+# `### ---- ...` を出す。日付backfill後も両方を読むが、通常のH3はFBにしない。
+FB_SECTION_RE = re.compile(
+    r"^##\s+営業FB時系列（新しい順）\s*$([\s\S]*?)(?=^##\s|\Z)", re.M
+)
+FB_HEAD_RE = re.compile(
+    r"^###\s+((?:-{2,}.*|\d{4}-\d{2}-\d{2}(?=[T\s]|$).*))$", re.M
+)
+FB_HEAD_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?=[T\s]|$)")
 FB_EPOCH_RE = re.compile(r"(1[0-9]{9})(?:\.\d+)?\s*$")
 FB_DATE_RE = re.compile(r"^>\s*\[(\d{4}-\d{2}-\d{2})[^\]]*\]", re.M)
 FB_FIELD_RE = re.compile(
@@ -250,7 +258,7 @@ def _sort_fb_events(events):
 def _parse_fb_events_raw(body: str) -> list[dict]:
     """クライアント md 本文の営業FB時系列を未dedup・未capでパースする（fail-open）。
 
-    見出し `### ---- <ソース名> <slack ts epoch|row N>` で区切り、
+    見出し `### <occurred_at|----> <タイトル>` で区切り、
     各 FB の `- フェーズ:` 等のフィールド行と日付（`> [YYYY-MM-DD HH:MM]` 行
     → 見出し末尾の epoch 秒 → UTC+9 → 引用の「タイムスタンプ: YYYY/MM/DD」の3段
     フォールバック）を拾う。担当タグ用に引用の「送信者:」も抽出する（ev["by"]・
@@ -259,13 +267,18 @@ def _parse_fb_events_raw(body: str) -> list[dict]:
     （このパースの失敗で build を止めない）。
     """
     try:
-        heads = list(FB_HEAD_RE.finditer(body or ""))
+        raw_body = body or ""
+        section = FB_SECTION_RE.search(raw_body)
+        # 実カルテでは必ず専用section内だけを読む。純関数test/旧呼出しの
+        # heading fragmentはsectionなしでも互換維持する（FB_HEAD_REが通常H3を除外）。
+        timeline_body = section.group(1) if section else raw_body
+        heads = list(FB_HEAD_RE.finditer(timeline_body))
         events = []
         for i, m in enumerate(heads):
             try:
                 head = m.group(1).strip()
-                end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
-                sec = body[m.end():end]
+                end = heads[i + 1].start() if i + 1 < len(heads) else len(timeline_body)
+                sec = timeline_body[m.end():end]
                 nx = re.search(r"^#{1,6}\s", sec, re.M)  # 次の見出し（## 関連資料 / 非FBのh3 等）で打ち切り
                 if nx:
                     sec = sec[:nx.start()]
@@ -279,8 +292,13 @@ def _parse_fb_events_raw(body: str) -> list[dict]:
                 if dm:
                     ev["d"] = dm.group(1)
                 else:
-                    tsm = FB_EPOCH_RE.search(head)
-                    if tsm:
+                    hdm = FB_HEAD_DATE_RE.match(head)
+                    tsm = None
+                    if hdm:
+                        ev["d"] = hdm.group(1)
+                    else:
+                        tsm = FB_EPOCH_RE.search(head)
+                    if not ev["d"] and tsm:
                         try:
                             ev["d"] = datetime.fromtimestamp(int(tsm.group(1)), JST).strftime("%Y-%m-%d")
                         except (ValueError, OverflowError, OSError):
