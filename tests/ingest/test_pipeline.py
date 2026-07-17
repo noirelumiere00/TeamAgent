@@ -63,6 +63,7 @@ class _FakeRepository:
                 "external_id": doc.external_id,
                 "title": doc.title,
                 "source_type": doc.source_type,
+                "modified_at": doc.modified_at,
                 "acl_groups": list(doc.acl_groups),
                 "metadata": dict(doc.metadata),
                 "chunk_count": len(chunks),
@@ -71,6 +72,34 @@ class _FakeRepository:
             }
         )
         return "fake-doc-id"
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({"タイムスタンプ": "2026/3/11 0:58:09"}, "2026-03-11T00:58:09+09:00"),
+        ({"タイムスタンプ": "2026/07/16 19:05"}, "2026-07-16T19:05:00+09:00"),
+        ({"タイムスタンプ": "2026/07/16"}, "2026-07-16T00:00:00+09:00"),
+        (
+            {"タイムスタンプ": "2025/06/17 13:14:45", "処理日時": "2026/07/14 10:35"},
+            "2025-06-17T13:14:45+09:00",
+        ),
+        (
+            {"タイムスタンプ": "", "処理日時": "2026/07/17 03:43"},
+            "2026-07-17T03:43:00+09:00",
+        ),
+        (
+            {"タイムスタンプ": "不正", "処理日時": "2026/07/17 03:43"},
+            "2026-07-17T03:43:00+09:00",
+        ),
+        ({"タイムスタンプ": "2026/13/40 25:61:00", "処理日時": ""}, None),
+        ({}, None),
+    ],
+)
+def test_gsheet_row_modified_at(fields: dict[str, str], expected: str | None) -> None:
+    from teamagent.ingest.pipeline import _gsheet_row_modified_at
+
+    assert _gsheet_row_modified_at(fields) == expected
 
 
 # -----------------------------------------------------------
@@ -287,6 +316,7 @@ def test_ingest_slack_channel_handler_calls_repository(
     call = repo.upsert_calls[0]
     assert call["external_id"] == "C0XYZ:1700000001.000001"
     assert call["source_type"] == "slack"
+    assert call["modified_at"] == "2023-11-14T22:13:21.000001+00:00"
     assert call["acl_groups"] == []  # §G env 未設定なら従来どおり空（後方互換）
 
 
@@ -611,12 +641,14 @@ def test_ingest_gsheet_fb_sheet_rows_get_structured_metadata(
     assert md["row_idx"] == 2
     assert md["topic"] == "営業 FB"
     assert md["priority"] == "high"
+    assert repo.upsert_calls[0]["modified_at"] == "2026-06-30T10:00:00+09:00"
 
     # コア列が全部空の行には FB メタを付けない
     md_empty = repo.upsert_calls[1]["metadata"]
     assert "is_sales_fb" not in md_empty
     assert "client_name" not in md_empty
     assert "deal_phase" not in md_empty
+    assert repo.upsert_calls[1]["modified_at"] is None
 
     # FB シートにはナレッジ共有メタは付かない（コアヘッダが交差しない・相互排他）
     assert "is_knowledge_share" not in md
@@ -667,6 +699,7 @@ def test_ingest_gsheet_non_fb_sheet_metadata_unchanged(
     assert set(md) == {"topic", "tab_name", "row_idx"}
     assert "is_sales_fb" not in md
     assert "is_knowledge_share" not in md
+    assert repo.upsert_calls[0]["modified_at"] is None
 
 
 # -----------------------------------------------------------
@@ -778,7 +811,8 @@ def test_ingest_gsheet_knowledge_sheet_rows_get_structured_metadata(
     assert md["proposed_menu"] == "ビデオリリース,タテガタ"
     assert md["knowledge_kind"] == "提案"
     assert md["submitter"] == "@山田太郎"
-    # FB フラグは立てない・運用列（URL/フリーコメント/タイムスタンプ/GAS 列）は写像しない
+    # FB フラグは立てない・運用列は metadata JSONB へ写像しない
+    # （タイムスタンプは別途 documents.modified_at に使う）。
     assert "is_sales_fb" not in md
     assert set(md) == {
         "topic",
@@ -797,6 +831,7 @@ def test_ingest_gsheet_knowledge_sheet_rows_get_structured_metadata(
     assert md["tab_name"] == "フォーム回答 1"
     assert md["row_idx"] == 2
     assert md["topic"] == "提案ナレッジ"
+    assert repo.upsert_calls[0]["modified_at"] == "2025-06-17T13:14:45+09:00"
 
     # プレースホルダ社名（なし）の行: 写像は付くが client_name は導出されない
     md2 = repo.upsert_calls[1]["metadata"]
@@ -804,6 +839,7 @@ def test_ingest_gsheet_knowledge_sheet_rows_get_structured_metadata(
     assert md2["client_company"] == "なし"
     assert "client_name" not in md2
     assert "client_case" not in md2  # 空値は drop
+    assert repo.upsert_calls[1]["modified_at"] == "2025-07-01T09:00:00+09:00"
 
 
 def test_ingest_gsheet_knowledge_metadata_coexists_with_classification(
