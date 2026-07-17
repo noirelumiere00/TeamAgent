@@ -8,11 +8,27 @@
 
 ---
 
+## 2026-07-17 🚀 `/app` の日付・取引先所有者・業種名寄せを本番反映
+- source=`dev`@`6872880b69a0e8b252e56ebdc4b585e38b7681e3`（#245、CI全緑）。資料の `client_name` / `cls_project` をVaultへ保持し、取引先カードの活動資料を「明示リンクかつ完全一致する所有者」に限定。Portと「レポート／パスポート／portfolio」の部分一致を禁止し、SBI生命保険・SBI証券を分離、i-ne・泉屋の正式表記を安全に名寄せ。監査済み28社の業種マスターと、非マスター企業も所有資料から独立再計算するQAを追加。
+- RDSからVaultを全量再生成し `clients=714 / docs=878 / manifest=aa451e744d26...`。公開HTMLは `clients=516 / docs=662 / activity=575 / FB timeline=447 / sha256=03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c`。資料・FBの日付欠損0、QA違反0、内部source露出0。全3,079テスト＋環境依存skip 10、Ruff、mypy、独立artifact監査を通過。
+- 個別確認はPort=1カード・業種「人材」・正しい資料2件・最終接点2025-10-02・誤結合0、SBI生命保険/SBI証券=別カード、i-ne/泉屋=各1カード。配信物と同一bytesの画面で「日付不明」表示0・ブラウザエラー0を確認。未ログイン本番 `/app` は認証画面へ遷移し、`/healthz` は source=`s3` / sha=`03f8e8cc0adb`。
+- S3 `codebuild/connect-web-app.html` VersionId=`6M_3Szuv8TdWiEcnBdvm1cHofvVAERJw`、connect-web=`:50` を force deploy。rollout COMPLETED・1/1 healthy・pending=0・直近ログの ERROR/Exception/Traceback 0。rollback=S3 VersionId=`OLMDBO1l.ibKH8700v.ckAEk.5klK7h3`（sha=`5b1026c60d07...`）を復元後、connect-webを force deploy。実行者=Codex（s-komata AWSアカウント）。
+
+---
+
 ## 2026-07-16 🚑 /app の Drive 共有範囲を本番へ再同期
 - source=`dev`@`ad39f501`（#222）＋ローカル未マージの Unicode パス別名保護。RDS の会社共有 ACL を正として Vault を全量再生成し、旧管理 note 1,902件を prune。生成物は `clients=518 / docs=659 / sha256=772c7e1609ad...`。
 - 反映前に検出した「`acl_groups` に `vectorinc.co.jp` が無い Drive 文書」の `/app` 混入は116件。反映候補の抽出可能な Drive file ID 302/302件を会社共有と照合し、未許可0件を確認。S3 配信物を再取得して候補と byte-for-byte 一致も確認。
 - S3 `codebuild/connect-web-app.html` VersionId=`R2Q2X4WgaIwccMEmg2SUorr3swNClh9U`、connect-web=`:48` を force deploy。`/healthz` は source=`s3` / sha=`772c7e1609ad`、rollout COMPLETED・1/1 healthy、反映後 ERROR/Exception/Traceback 0。未ログイン `/app` は `/search/login?next=%2Fapp` へ303。
 - rollback=S3 VersionId=`aW0hB4FZP7VL.G7aHlLsT4mThMOOD8Xl` を復元後、connect-webを force deploy。実行者=Codex（s-komata AWSアカウント）。
+
+---
+
+## 2026-07-17 🚀 `/app` 営業FB時系列の欠落防止を本番反映
+- source=`dev`@`da4f8facae541dcb205890713f52c9db894e9e1f`（#242、CI全緑）。日付見出しへ移行した営業FBを正しく時系列へ取り込み、FBがあるのに時系列が空になる生成物をQAで拒否。グラフの「その他」表示と担当者名の切れた接尾辞も修正。
+- 現行Vaultから生成したHTMLは sha256=`5b1026c60d07e12ae7d2d11afa135b8e275524a2c10f60adda590b4859484a2e`、manifest=`f78c318279540bec0ef19236b20d775e9d56e677a2aaee9836fb8a2afaddadb1`、build inputs=`f3eba1edeadb6be7127b7fea81e369a40a9e40d9ae34aba8c078224a89c10e92`。clients=518 / docs=662 / timeline=448（全件日付あり）/ payload FB=679 / FBありかつtimelineなし=0 / schema error=0 / internal source exposure=0。全3,057テスト＋環境依存skip 10、生成・QAの集中テスト162件、画面確認を通過。
+- S3 `codebuild/connect-web-app.html` VersionId=`OLMDBO1l.ibKH8700v.ckAEk.5klK7h3`、connect-web=`:50` を force deploy。`/healthz` は source=`s3` / sha=`5b1026c60d07`、rollout COMPLETED・1/1 healthy・pending=0・直近30分の ERROR/Exception/Traceback 0。未ログイン `/app` は `/search/login?next=%2Fapp` へ303、ログイン画面とsecurity headersを再確認。
+- rollback=S3 VersionId=`I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY`（sha=`46f0079783cd...`）を復元後、connect-webを force deploy。実行者=Codex（s-komata AWSアカウント）。
 
 ---
 

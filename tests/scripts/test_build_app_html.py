@@ -5,7 +5,7 @@
   フッタ焼き込み（更新: YYYY-MM-DD JST・取引先N・資料M）が入る
 - fail-loud: Vault 不在 / サイドカー欠落 / clients==0 / docs==0 は exit 1
   （silent fallback・空 HTML の配信を作らない）
-- サニティゲート: 取引先数/資料数/バイト数のいずれかが前回比 20% 超減なら exit 1 で
+- サニティゲート: 取引先数/資料数/FB件数/バイト数のいずれかが前回比 20% 超減なら exit 1 で
   既存 out を保持。--allow-shrink で明示的に通過し統計基準がリセットされる
 - exclude_stems.json のフィルタ配線: 除外 stem の資料が payload に載らない
 - exclude_source_keys.json のフィルタ配線: タイトル変更後も source identity で除外し、
@@ -25,12 +25,15 @@ import hashlib
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 import unicodedata
 from datetime import date
 from pathlib import Path
 
 import pytest
+
+from scripts.export_vault import render_client_note
 
 _ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
@@ -40,6 +43,20 @@ assert _spec is not None and _spec.loader is not None
 _mod = importlib.util.module_from_spec(_spec)
 sys.modules["build_app_html"] = _mod
 _spec.loader.exec_module(_mod)
+
+
+def test_script_help_runs_without_installed_package(tmp_path: Path) -> None:
+    """文書どおりの直接実行でも、repo内srcから共通名寄せ処理を読み込める。"""
+    result = subprocess.run(
+        [sys.executable, "-I", str(_ROOT / "scripts" / "build_app_html.py"), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--vault" in result.stdout
 
 
 # ---------------- fixtures ----------------
@@ -60,6 +77,9 @@ def sidecars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         json.dumps({"drop": {}, "keep_canonical": []}, ensure_ascii=False), encoding="utf-8"
     )
     (d / "weird_rename_high.json").write_text("{}", encoding="utf-8")
+    (d / "client_industry.json").write_text(
+        json.dumps({"_note": "test", "industry": {}}), encoding="utf-8"
+    )
     (d / "inter-var.b64").write_text("QUFBQQ==", encoding="utf-8")  # ダミー base64
     monkeypatch.setattr(_mod, "SIDECAR_DIR", d)
     return d
@@ -85,13 +105,17 @@ def _write_doc(
     external_id: str = "",
     source_url: str = "",
     generated_by: bool = False,
+    project: str | None = None,
+    modified_at: str = "2026-06-01",
 ) -> None:
     display_title = title or stem
     generator_line = 'generated_by: "scripts/export_vault.py"\n' if generated_by else ""
+    project_line = f'project: "{project}"\n' if project is not None else ""
     (vault / "docs" / f"{stem}.md").write_text(
         f"---\n{generator_line}"
         f'title: "{display_title}"\nclient: "{client}"\nindustry: "{industry}"\n'
-        f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "2026-06-01"\n'
+        f"{project_line}"
+        f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "{modified_at}"\n'
         f'source_type: "{source_type}"\nexternal_id: "{external_id}"\n---\n\n'
         f"> {display_title} の抜粋\n\n"
         + (f"- 出典: [{source_type or 'source'}]({source_url})\n" if source_url else "")
@@ -187,6 +211,8 @@ def test_build_success_writes_html_stats_and_stamp(
     stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
     assert stats["clients"] == 1
     assert stats["docs"] == 3
+    assert stats["timeline_events"] == 0
+    assert stats["timeline_events_dated"] == 0
     assert stats["bytes"] == len(out.read_bytes())
     manifest_sha = hashlib.sha256((vault / ".export-vault-manifest.json").read_bytes()).hexdigest()
     payload = _payload(html)
@@ -630,6 +656,16 @@ def test_source_key_sidecar_missing_exits_1(
     assert "サイドカー欠落: exclude_source_keys.json" in capsys.readouterr().err
 
 
+def test_client_industry_sidecar_missing_exits_1(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (sidecars / "client_industry.json").unlink()
+    with pytest.raises(SystemExit) as exc_info:
+        _run(vault, tmp_path / "o.html")
+    assert exc_info.value.code == 1
+    assert "サイドカー欠落: client_industry.json" in capsys.readouterr().err
+
+
 def test_repository_source_exclusions_preserve_legacy_stems() -> None:
     """新 Vault はsource key、移行中の旧 Vault は従来stemの同じ6行を除外する。"""
     sheet = "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
@@ -715,6 +751,42 @@ def test_no_shrink_passes_without_flag(sidecars: Path, vault: Path, tmp_path: Pa
     assert _run(vault, out) == 0  # 同一 Vault の再生成はゲートを通る
 
 
+def test_timeline_shrink_to_zero_exits_1_and_keeps_previous_out(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """exporter/parser の契約ずれで営業FBだけ全消失しても公開物を上書きしない。"""
+    client = vault / "clients" / "出光興産.md"
+    client.write_text(
+        client.read_text(encoding="utf-8")
+        + "\n### 2026-06-01 #proj-営業FB 1780272000.123456\n\n- ポジ反応: 前向き\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    first_bytes = out.read_bytes()
+    assert (
+        json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))["timeline_events"]
+        == 1
+    )
+
+    client.write_text(
+        client.read_text(encoding="utf-8").replace(
+            "### 2026-06-01 #proj-営業FB 1780272000.123456",
+            "### 通常のh3見出し",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as ei:
+        _run(vault, out)
+    assert ei.value.code == 1
+    assert "営業FB件数: 1 → 0" in capsys.readouterr().err
+    assert out.read_bytes() == first_bytes
+    assert (
+        json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))["timeline_events"]
+        == 1
+    )
+
+
 def test_corrupt_stats_exits_1(
     sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -727,6 +799,82 @@ def test_corrupt_stats_exits_1(
 
 
 # ---------------- parse_fb_events（施策タイムライン） ----------------
+
+
+def test_parse_fb_date_from_dated_heading() -> None:
+    """現行 Vault 形式: 見出しの日付を拾い、通常の h3 は FB と誤検知しない。"""
+    body = (
+        "## 営業FB時系列（新しい順）\n\n"
+        "### 2026-07-07 #proj-ショート動画_営業フィードバック情報 1783382400.123456\n\n"
+        "- フェーズ: 提案\n"
+        "- ポジ反応: 日付つき見出しを読み取れる\n\n"
+        "> \\[2026-07-06 15:00\\] <B0AK>: 引用側とは別日\n\n"
+        "### 通常のh3見出し（FBではない）\n\n"
+        "- ポジ反応: 誤検知しない\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert len(evs) == 1
+    assert evs[0]["d"] == "2026-07-07"  # 現行形式の見出し日付が最優先
+    assert evs[0]["src"] == "Slack"
+    assert evs[0]["ph"] == "提案"
+    assert evs[0]["pos"] == "日付つき見出しを読み取れる"
+
+
+def test_parse_fb_dated_form_heading_and_sender() -> None:
+    """現行フォーム形式: 日付・由来・送信者を同時に復元する。"""
+    body = (
+        "### 2026-06-17 ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 285\n\n"
+        "- ポジ反応: 前向き\n\n"
+        "> 送信者: 山本四郎 タイムスタンプ: 2026/06/17 17:38:30 連携ステータス: 連携済み\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert evs == [
+        {
+            "d": "2026-06-17",
+            "src": "フォーム",
+            "by": "山本四郎",
+            "ph": "",
+            "bant": "",
+            "menu": "",
+            "pos": "前向き",
+            "neg": "",
+            "next": "",
+        }
+    ]
+
+
+def test_parse_fb_escaped_quote_date_for_legacy_undated_heading() -> None:
+    """旧 `----` 見出しでも、現行 exporter が退避した引用日付を読める。"""
+    body = (
+        "### ---- #proj-ch\n\n"
+        "- ポジ反応: 旧形式も維持\n\n"
+        "> \\[2026-05-11 08:45\\] <B0AK>: 本文抜粋\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert len(evs) == 1
+    assert evs[0]["d"] == "2026-05-11"
+
+
+def test_exported_client_note_heading_is_accepted_by_build_parser() -> None:
+    """exporter→builder の実契約を直結し、見出し形式の再乖離を検知する。"""
+    note = render_client_note(
+        "テスト取引先",
+        [
+            {
+                "occurred_at": "2026-07-07",
+                "title": "#proj-ショート動画_営業フィードバック情報 1783382400.123456",
+                "deal_phase": "提案",
+                "positive_reaction": "連携テスト",
+            }
+        ],
+        [],
+        [],
+    )
+    evs = _mod.parse_fb_events(_mod.body_of(note))
+    assert len(evs) == 1
+    assert evs[0]["d"] == "2026-07-07"
+    assert evs[0]["ph"] == "提案"
+    assert evs[0]["pos"] == "連携テスト"
 
 
 def test_parse_fb_date_from_quote_line_and_fields() -> None:
@@ -756,6 +904,24 @@ def test_parse_fb_date_from_quote_line_and_fields() -> None:
     assert ev["pos"] == "・企業ブランディングの相談は多い。"
     assert ev["neg"] == "・PIVOTの問い合わせは多い。"
     assert ev["next"] == "全社に展開"
+
+
+def test_parse_fb_date_prefixed_heading_is_scoped_to_timeline_section() -> None:
+    """exporterの日付見出しを読み、関連資料側の日付H3はFBとして扱わない。"""
+    body = (
+        "## 営業FB時系列（新しい順）\n\n"
+        "### 2026-07-17 初回提案\n\n"
+        "- フェーズ: 提案\n- ポジ反応: 導入意向あり\n\n"
+        "## 関連資料\n\n"
+        "### 2026-07-18 定例会議資料\n\n- ポジ反応: 誤検知してはいけない\n"
+    )
+
+    events = _mod.parse_fb_events(body)
+
+    assert len(events) == 1
+    assert events[0]["d"] == "2026-07-17"
+    assert events[0]["ph"] == "提案"
+    assert events[0]["pos"] == "導入意向あり"
 
 
 def test_parse_fb_epoch_converts_to_jst_date() -> None:
@@ -877,6 +1043,7 @@ def test_parse_fb_sender_extraction_and_normalization() -> None:
             "送信者: 村山 五郎 タイムスタンプ: 2026/05/21 19:25:37 連携ステータス: 連携済み",
             "村山五郎",
         ),
+        ("送信者: 上條はるかタイムスタ", "上條はるか"),  # 300字capが次フィールド名の途中で切断
     ]
     for i, (quote, expected) in enumerate(cases):
         evs = _mod.parse_fb_events(_form_fb(f"商流: 直販 {quote}", pos=f"内容{i}", row=i + 1))
@@ -1044,6 +1211,34 @@ def test_timeline_payload_and_dom_in_html(sidecars: Path, vault: Path, tmp_path:
     assert '"lastfb": "2026-05-18"' in html
     assert '"pos": "・保証型がよい"' in html
     assert '"cnorm": "帝人"' in html
+    assert "(c.ds||[]).forEach" in html
+    assert 'function lastOf(c){return c.last||c.lastfb||"";}' in html
+    assert "const LASTDOC=" not in html
+
+
+def test_date_prefixed_timeline_survives_full_build(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """source-date backfill後のexporter形式でもfb>0のpayloadが空timelineにならない。"""
+    (vault / "clients" / "日付見出し商事.md").write_text(
+        '---\nclient: "日付見出し商事"\nindustry: "IT"\ndeal_phase: "提案"\n'
+        'bant_score: "B"\nfb_count: 1\ndoc_count: 0\n---\n\n# 日付見出し商事\n\n'
+        "## 営業FB時系列（新しい順）\n\n"
+        "### 2026-07-17 初回提案\n\n"
+        "- フェーズ: 提案\n- ポジ反応: 導入意向あり\n\n"
+        "## 関連資料\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+
+    _run(vault, out)
+
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [client] = [c for c in payload["clients"] if c["name"] == "日付見出し商事"]
+    assert client["fb"] == 1
+    assert len(client["tl"]) == 1
+    assert client["tl"][0]["d"] == "2026-07-17"
+    assert client["tl"][0]["pos"] == "導入意向あり"
 
 
 def test_timeline_merged_on_name_dedup(sidecars: Path, vault: Path, tmp_path: Path) -> None:
@@ -1920,7 +2115,11 @@ def test_journey_flow_repairs_homework_and_back(ux_html: str) -> None:
 
 
 def _write_aliases(
-    sidecar_dir: Path, *, tag: dict | None = None, client: dict | None = None
+    sidecar_dir: Path,
+    *,
+    tag: dict | None = None,
+    client: dict | None = None,
+    client_industry: dict[str, str] | None = None,
 ) -> None:
     """名寄せサイドカーを SIDECAR_DIR（monkeypatch 済 tmp）へ置く。既定 fixture には無い＝素通り。"""
     if tag is not None:
@@ -1930,6 +2129,14 @@ def _write_aliases(
     if client is not None:
         (sidecar_dir / "client_alias.json").write_text(
             json.dumps(client, ensure_ascii=False), encoding="utf-8"
+        )
+    if client_industry is not None:
+        (sidecar_dir / "client_industry.json").write_text(
+            json.dumps(
+                {"_note": "test", "industry": client_industry},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
         )
 
 
@@ -2070,6 +2277,83 @@ def test_port_alias_dedupes_same_three_visible_docs(
     )
 
 
+def test_port_activity_uses_explicit_link_and_db_primary_or_project_identity(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """Portの正しい2資料だけを活動化し、title-only/unlinked資料と業界誤集約を防ぐ。"""
+    _write_aliases(
+        sidecars,
+        tag={"industry": {"人材": "人材派遣"}, "solution": {}},
+        client={"client": {"ポート": "ポート株式会社"}},
+        client_industry={"ポート株式会社": "人材"},
+    )
+    _write_doc(
+        vault,
+        "port-row44",
+        client="ポート",
+        project="ポート株式会社",
+        industry="人材",
+        title="ポート キャリアパークの就活アドバイザー",
+        modified_at="2025-09-19",
+    )
+    _write_doc(
+        vault,
+        "port-drive-proposal",
+        client="",
+        project="ポート株式会社",
+        industry="広告・マーケティング",
+        title="【NewsTV御中】ポート株式会社御中_ご提案資料.pdf",
+        modified_at="2025-10-02",
+    )
+    _write_doc(
+        vault,
+        "report-title-only",
+        client="",
+        project="",
+        industry="IT",
+        title="他社向け施策レポート・株主パスポート",
+        modified_at="2026-07-01",
+    )
+    _write_doc(
+        vault,
+        "port-unlinked",
+        client="",
+        project="ポート株式会社",
+        industry="広告・マーケティング",
+        title="ポート株式会社 別資料",
+        modified_at="2026-07-02",
+    )
+    _write_client_links(
+        vault,
+        "ポート株式会社",
+        ["port-row44", "port-drive-proposal", "report-title-only"],
+    )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    html = out.read_text(encoding="utf-8")
+    payload = _payload(html)
+    [port] = [c for c in payload["clients"] if c["name"] == "ポート株式会社"]
+
+    assert port["ds"] == ["port-row44", "port-drive-proposal"]
+    assert port["doc"] == 2
+    assert port["last"] == "2025-10-02"
+    assert port["industry"] == "人材"  # 監査済み企業masterは資料側tag aliasを通さない
+    assert _doc_field(html, "port-drive-proposal", "client") == "ポート株式会社"
+    assert _doc_field(html, "report-title-only", "client") == ""
+    # title-only関連資料は本文/graph linkには残るが、活動資料へは入らない。
+    outgoing = {
+        target[2:]
+        for source, target, _ctx in payload["links"]
+        if source == f"c:{port['stem']}" and target.startswith("d:")
+    }
+    assert {"port-row44", "port-drive-proposal", "report-title-only"} <= outgoing
+    assert set(port["ds"]) < outgoing
+    assert "port-unlinked" not in port["ds"]
+    assert '"_primary_owner_key"' not in html
+    assert '"_project_owner_key"' not in html
+
+
 def test_client_alias_unions_variant_links_and_keeps_first_context(
     sidecars: Path, vault: Path, tmp_path: Path
 ) -> None:
@@ -2145,7 +2429,7 @@ def test_client_alias_keeps_legacy_stem_but_uses_explicit_target_properties(
 def test_client_alias_recomputes_conflicting_properties_from_merged_sources(
     sidecars: Path, vault: Path, tmp_path: Path
 ) -> None:
-    """multi groupのphase/BANTは最新FB、industryはvisible linked docsの最頻値。"""
+    """multi groupのphase/BANTは最新FB、industry競合は多数決せず空欄へ倒す。"""
     _write_aliases(sidecars, client={"client": {"ポート": "ポート株式会社"}})
     doc_industries = {
         "Port金融資料": "金融",
@@ -2211,7 +2495,7 @@ def test_client_alias_recomputes_conflicting_properties_from_merged_sources(
     assert port["phase"] == "最終交渉"
     assert port["bant"] == "A（最新）"
     assert port["bantg"] == "A"
-    assert port["industry"] == "小売"
+    assert port["industry"] == ""
     assert port["doc"] == 3
     assert port["tl"][0]["d"] == "2026-06-20"
 
@@ -2371,6 +2655,44 @@ def test_client_alias_applied_to_doc_client_links_to_canonical(
     assert '"client": "SBI証券"' not in html
 
 
+def test_client_identity_grouping_keeps_middle_honorific_and_merges_legal_prefix(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    _write_aliases(
+        sidecars,
+        client={"client": {"泉屋博古館": "公益財団法人泉屋博古館"}},
+    )
+    for name in ("熱さまシート", "熱シート", "公益財団法人泉屋博古館", "泉屋博古館"):
+        (vault / "clients" / f"{name}.md").write_text(
+            f'---\nclient: "{name}"\nindustry: ""\ndeal_phase: ""\nbant_score: ""\n'
+            f"fb_count: 0\ndoc_count: 0\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    names = [client["name"] for client in payload["clients"]]
+
+    assert "熱さまシート" in names
+    assert "熱シート" in names
+    assert names.count("公益財団法人泉屋博古館") == 1
+    assert "泉屋博古館" not in names
+
+
+def test_repository_aliases_do_not_merge_sbi_subsidiaries() -> None:
+    aliases = json.loads(
+        (_ROOT / "data" / "connect_web_filters" / "client_alias.json").read_text(encoding="utf-8")
+    )["client"]
+
+    assert aliases["SBI SECURITIES"] == "SBI証券"
+    assert "SBI証券" not in aliases
+    assert "SBI生命保険" not in aliases
+    assert aliases["Ine"] == "i-ne"
+    assert aliases["I-ne（SKN REMED / スキンリメド）"] == "i-ne"
+    assert aliases["泉屋博古館"] == "公益財団法人泉屋博古館"
+
+
 def test_alias_sidecars_absent_pass_through(sidecars: Path, vault: Path, tmp_path: Path) -> None:
     """名寄せサイドカー欠落（既定 fixture）は素通り＝variant 値がそのまま残る（可逆・fail-loud にしない）。"""
     assert not (sidecars / "tag_alias.json").exists()
@@ -2415,6 +2737,39 @@ def test_alias_canonical_and_unmapped_values_unchanged(
     assert re.search(
         r'"name": "自治体X", "cnorm": "自治体x", "industry": "宇宙開発"', html
     )  # unmapped industry 不変
+
+
+def test_generated_client_industry_requires_auditable_source(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    path = vault / "clients" / "出光興産.md"
+    original = path.read_text(encoding="utf-8")
+    generated = original.replace(
+        'client: "出光興産"',
+        'generated_by: "scripts/export_vault.py"\nclient: "出光興産"',
+        1,
+    ).replace("- [[docs/提案書A]]", "")
+    path.write_text(generated, encoding="utf-8")
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [client] = [item for item in payload["clients"] if item["name"] == "出光興産"]
+
+    assert client["industry"] == ""  # generated noteの根拠不明な旧値は再利用しない
+
+    path.write_text(
+        generated.replace(
+            'industry: "エネルギー"',
+            'industry: "エネルギー"\nindustry_source: "exact_consensus"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [client] = [item for item in payload["clients"] if item["name"] == "出光興産"]
+    assert client["industry"] == "エネルギー"
 
 
 # ---------------- まとめる軸（clustering axis）: 参照Map方式（ノード加算ゼロ） + グラフ JS 配線 ----------------
@@ -2567,6 +2922,9 @@ def test_cluster_island_count_is_capped(sidecars: Path, vault: Path, tmp_path: P
     # 溢れは「その他」島へ集約（無言で消さない）。挙動の固定は test_graph_cluster_js.py が JS 実行で行う
     assert "vals=rest.slice(0,CLMAX-1);" in html
     assert "clOther=new Set(over);" in html
+    # phase の実在値「その他」と、自由記述軸の溢れ集約を区別する。
+    assert "if(clOther.size)s+=" in html
+    assert 'if(cCenters[COTHER])s+="<br>種類が多いため' not in html
 
 
 def test_cluster_caption_admits_when_all_islands_empty(
