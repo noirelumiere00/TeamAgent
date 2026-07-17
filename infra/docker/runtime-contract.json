@@ -1,0 +1,192 @@
+{
+  "schema_version": "1",
+  "architecture": "linux/arm64",
+  "security_gates": {
+    "trivy": {
+      "critical_vulnerabilities": 0,
+      "high_vulnerabilities": 0,
+      "secrets": 0,
+      "allow_suppressions": false,
+      "ignore_unfixed": false
+    },
+    "ecr_basic_scan": {
+      "critical_vulnerabilities": 0,
+      "high_vulnerabilities": 0,
+      "required_after_authorized_push": true,
+      "fail_closed_until_complete": true
+    }
+  },
+  "tasks": {
+    "teamagent-mcp-core": {
+      "runtime_kind": "core",
+      "image_dockerfile": "infra/docker/Dockerfile.teamagent-mcp",
+      "uid": 10001,
+      "gid": 10001,
+      "read_only_root_filesystem": true,
+      "memory_limit_mib": 4096,
+      "capabilities_drop": [
+        "ALL"
+      ],
+      "no_new_privileges": true,
+      "writable_mounts": [
+        {
+          "path": "/tmp",
+          "kind": "fresh-named-volume",
+          "mode": "1777"
+        }
+      ],
+      "healthcheck": {
+        "executable": "/app/.venv/bin/python",
+        "implementation": "urllib.request",
+        "url": "http://127.0.0.1:8787/healthz"
+      },
+      "app_html_contract": {
+        "production_source": "s3",
+        "production_sha256": "46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067",
+        "production_s3_version_id": "I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY",
+        "production_manifest_sha256": "15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2",
+        "production_build_inputs_sha256": "1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2",
+        "baked_fallback_sha256": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
+      },
+      "required_content": [
+        "python",
+        "teamagent-core",
+        "multilingual-e5-large",
+        "mcp",
+        "database-clients",
+        "aws-clients",
+        "connect-web-app-html"
+      ],
+      "forbidden_binaries": [
+        "node",
+        "npm",
+        "npx",
+        "bun",
+        "chromium",
+        "chromium-browser",
+        "ffmpeg",
+        "ffprobe",
+        "yt-dlp"
+      ],
+      "forbidden_python_modules": [
+        "claude_agent_sdk",
+        "playwright",
+        "yt_dlp",
+        "weasyprint",
+        "pptx"
+      ]
+    },
+    "teamagent-media-worker": {
+      "runtime_kind": "media-worker",
+      "image_dockerfile": "infra/docker/Dockerfile.teamagent-media-worker",
+      "uid": 10001,
+      "gid": 10001,
+      "read_only_root_filesystem": true,
+      "memory_limit_mib": 4096,
+      "capabilities_drop": [
+        "AUDIT_WRITE",
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "FSETID",
+        "KILL",
+        "MKNOD",
+        "NET_BIND_SERVICE",
+        "NET_RAW",
+        "SETFCAP",
+        "SETGID",
+        "SETPCAP",
+        "SETUID"
+      ],
+      "capabilities_retain": [
+        "SYS_CHROOT"
+      ],
+      "capabilities_add": [],
+      "no_new_privileges": false,
+      "chromium_sandbox": {
+        "required": true,
+        "no_sandbox_flag_forbidden": true,
+        "seccomp_profile": "infra/docker/playwright-seccomp-1.60.0.json",
+        "seccomp_profile_source": "https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json",
+        "seccomp_profile_sha256": "cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849",
+        "additional_allowed_syscalls": [
+          "clone",
+          "setns",
+          "unshare"
+        ],
+        "required_capability": "SYS_CHROOT",
+        "requires_setuid_sandbox": true,
+        "fargate_actual_smoke_required": true,
+        "fargate_fail_closed_until_verified": true
+      },
+      "writable_mounts": [
+        {
+          "path": "/tmp",
+          "kind": "fresh-named-volume",
+          "mode": "1777"
+        }
+      ],
+      "required_content": [
+        "python",
+        "node",
+        "python-playwright",
+        "javascript-playwright",
+        "chromium",
+        "ffmpeg",
+        "sanitized-yt-dlp",
+        "fonts",
+        "teamagent-media-only"
+      ],
+      "forbidden_python_modules": [
+        "psycopg",
+        "sqlalchemy",
+        "slack_sdk",
+        "google_auth_oauthlib",
+        "mcp",
+        "sentence_transformers"
+      ],
+      "forbidden_environment": [
+        "DATABASE_URL",
+        "SLACK_BOT_TOKEN",
+        "TEAMAGENT_MCP_BEARER",
+        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "VERTEX_CREDENTIALS",
+        "ANTHROPIC_API_KEY"
+      ],
+      "worker_role": {
+        "aws_clients": [
+          "s3",
+          "dynamodb"
+        ],
+        "required_actions": [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+          "dynamodb:UpdateItem"
+        ],
+        "conditional_kms_actions": [
+          "kms:Decrypt",
+          "kms:Encrypt",
+          "kms:GenerateDataKey"
+        ],
+        "forbidden_actions": [
+          "bedrock:*",
+          "rds:*",
+          "rds-db:*",
+          "secretsmanager:*",
+          "ssm:*"
+        ],
+        "forbidden_secret_domains": [
+          "database",
+          "slack",
+          "oauth",
+          "mcp-bearer",
+          "vertex",
+          "e5"
+        ]
+      }
+    }
+  }
+}

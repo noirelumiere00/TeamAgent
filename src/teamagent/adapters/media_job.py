@@ -126,7 +126,7 @@ class MediaJobClient:
             raise MediaJobError("MEDIA_INPUT_NAME_INVALID")
         if not 1 <= len(content_type) <= 128 or "\r" in content_type or "\n" in content_type:
             raise MediaJobError("MEDIA_INPUT_CONTENT_TYPE_INVALID")
-        if ttl_s < 60 or ttl_s > _ARTIFACT_TTL_DEFAULT_S:
+        if ttl_s < 300 or ttl_s > _ARTIFACT_TTL_DEFAULT_S:
             raise MediaJobError("MEDIA_INPUT_TTL_INVALID")
         _sqs, _ddb, s3 = self._clients()
         digest = hashlib.sha256(body).hexdigest()

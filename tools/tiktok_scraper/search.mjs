@@ -272,8 +272,6 @@ async function searchOnce(browser, query, type, maxVideos) {
   const MAX_SCROLL = 20;
 
   try {
-    await assertPublicHttps(videoUrl, { tiktokOnly: true });
-    await installPageNetworkGuard(page);
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent(USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]);
     await page.setExtraHTTPHeaders({ "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7" });
@@ -408,6 +406,8 @@ async function scrapeComments(browser, videoUrl, maxComments) {
   const seen = new Set();
 
   try {
+    await assertPublicHttps(videoUrl, { tiktokOnly: true });
+    await installPageNetworkGuard(page);
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent(USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]);
     await page.setExtraHTTPHeaders({ "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.7" });

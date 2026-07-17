@@ -288,14 +288,18 @@ def run_job(
     except MediaOperationError as exc:
         logger.warning("media job failed: job_id=%s code=%s", request.job_id, exc.code)
         result = _failed_result(request, exc.code)
-        backend.store_result(request, result)
-        backend.cleanup_all_artifacts(request)
+        try:
+            backend.store_result(request, result)
+        finally:
+            backend.cleanup_all_artifacts(request)
         return result
     except Exception:
         logger.exception("media worker failed: job_id=%s", request.job_id)
         result = _failed_result(request, "MEDIA_WORKER_FAILED")
-        backend.store_result(request, result)
-        backend.cleanup_all_artifacts(request)
+        try:
+            backend.store_result(request, result)
+        finally:
+            backend.cleanup_all_artifacts(request)
         return result
     finally:
         backend.cleanup_inputs(request)

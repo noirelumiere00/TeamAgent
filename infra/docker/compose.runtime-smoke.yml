@@ -1,0 +1,112 @@
+name: teamagent-runtime-smoke
+
+x-runtime-security: &runtime-security
+  platform: linux/arm64
+  user: "10001:10001"
+  read_only: true
+  mem_limit: 4096m
+  pids_limit: 512
+  init: true
+
+x-core-environment: &core-environment
+  USER: teamagent
+  LOGNAME: teamagent
+  TEAMAGENT_MCP_BEARER: runtime-smoke-only
+  TEAMAGENT_SHARED_COMPANY_DOMAINS: example.com
+  DATABASE_URL: postgresql://smoke:smoke@127.0.0.1:1/smoke
+  PGVECTOR_POOL_MAX: "0"
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_REGION: ap-northeast-1
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+
+services:
+  core-health:
+    <<: *runtime-security
+    profiles:
+      - core-health
+    image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
+    environment: *core-environment
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - core_health_tmp:/tmp
+    networks:
+      - runtime_internal
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  core-smoke:
+    <<: *runtime-security
+    profiles:
+      - core
+    image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
+    environment: *core-environment
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    command:
+      - /smoke/smoke_core.py
+    volumes:
+      - core_smoke_tmp:/tmp
+      - ./smoke_core.py:/smoke/smoke_core.py:ro
+
+  media-smoke:
+    <<: *runtime-security
+    profiles:
+      - media
+    image: ${TEAMAGENT_MEDIA_IMAGE:?set TEAMAGENT_MEDIA_IMAGE}
+    # Chromium's setuid sandbox needs only the default SYS_CHROOT capability.
+    # Fargate cannot add it back after `ALL`, so retain it and explicitly drop
+    # every other Docker/ECS default capability.
+    cap_drop:
+      - AUDIT_WRITE
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - FSETID
+      - KILL
+      - MKNOD
+      - NET_BIND_SERVICE
+      - NET_RAW
+      - SETFCAP
+      - SETGID
+      - SETPCAP
+      - SETUID
+    security_opt:
+      - seccomp=./playwright-seccomp-1.60.0.json
+    environment:
+      USER: teamagent
+      LOGNAME: teamagent
+      TEAMAGENT_RUNTIME_KIND: media-worker
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REGION: ap-northeast-1
+    network_mode: none
+    entrypoint:
+      - /app/.venv/bin/python
+      - /smoke/smoke_media.py
+    volumes:
+      - media_smoke_tmp:/tmp
+      - ./smoke_media.py:/smoke/smoke_media.py:ro
+      - ./smoke_media_node.mjs:/smoke/smoke_media_node.mjs:ro
+
+networks:
+  runtime_internal:
+    internal: true
+
+volumes:
+  core_health_tmp:
+  core_smoke_tmp:
+  media_smoke_tmp:

@@ -121,3 +121,25 @@ def test_worker_failure_cleans_remote_artifacts_and_local_request_dir(
     assert backend.all_cleaned == 1
     assert backend.inputs_cleaned == 1
     assert list(tmp_path.iterdir()) == []
+
+
+def test_worker_failure_cleanup_survives_result_store_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _Backend()
+
+    def fail_operation(*_args: object, **_kwargs: object) -> OperationOutput:
+        raise MediaOperationError("MEDIA_TEST_FAILED", "test")
+
+    def fail_store(_request: MediaJobRequest, _result: Any) -> None:
+        raise RuntimeError("DynamoDB unavailable")
+
+    monkeypatch.setattr("teamagent.media.worker.execute_operation", fail_operation)
+    monkeypatch.setattr(backend, "store_result", fail_store)
+
+    with pytest.raises(RuntimeError, match="DynamoDB unavailable"):
+        run_job(_request(), backend, temp_root=tmp_path, now_epoch_s=101)
+
+    assert backend.all_cleaned == 1
+    assert backend.inputs_cleaned == 1
+    assert list(tmp_path.iterdir()) == []

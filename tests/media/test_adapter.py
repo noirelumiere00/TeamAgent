@@ -225,5 +225,5 @@ def test_stage_rejects_scope_content_type_and_ttl_before_aws_write() -> None:
             name="source.bin",
             body=b"x",
             content_type="video/mp4",
-            ttl_s=59,
+            ttl_s=299,
         )

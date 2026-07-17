@@ -113,6 +113,8 @@ def test_ytdlp_is_source_and_wheel_hashed_then_shahid_is_removed() -> None:
 
 
 def test_media_image_copies_only_worker_media_code_and_no_core_secrets_stack() -> None:
+    assert "FROM scratch AS final" in TEXT
+    assert "COPY --from=runtime-packages / /" in TEXT
     assert "COPY --chown=10001:10001 src/teamagent/media/" in TEXT
     assert "COPY src/" not in TEXT
     assert "test ! -e /app/src/teamagent/mcp_gateway" in TEXT
@@ -131,6 +133,8 @@ def test_media_image_copies_only_worker_media_code_and_no_core_secrets_stack() -
 def test_media_runtime_is_uid_10001_read_only_ready_and_sandboxed() -> None:
     assert "USER 10001:10001" in TEXT
     assert 'VOLUME ["/tmp"]' in TEXT
+    assert "USER=teamagent" in TEXT
+    assert "LOGNAME=teamagent" in TEXT
     assert "HOME=/tmp/teamagent/home" in TEXT
     assert "TMPDIR=/tmp/teamagent/tmp" in TEXT
     assert "TEAMAGENT_RUNTIME_KIND=media-worker" in TEXT
@@ -141,11 +145,29 @@ def test_media_runtime_is_uid_10001_read_only_ready_and_sandboxed() -> None:
     )
 
 
+def test_tiktok_network_guard_is_attached_to_the_correct_browser_paths() -> None:
+    scraper = SCRAPER.read_text(encoding="utf-8")
+    search = scraper.split("async function searchOnce", 1)[1].split(
+        "async function scrapeComments", 1
+    )[0]
+    comments = scraper.split("async function scrapeComments", 1)[1].split(
+        "async function downloadVideoFromUrl", 1
+    )[0]
+    download = scraper.split("async function downloadVideoFromUrl", 1)[1].split(
+        "function buildChromeArgs", 1
+    )[0]
+    assert "videoUrl" not in search
+    assert "installPageNetworkGuard(page, { blockHeavy: true })" in search
+    for path in (comments, download):
+        assert "assertPublicHttps(videoUrl, { tiktokOnly: true })" in path
+        assert "installPageNetworkGuard(page)" in path
+
+
 def test_media_sources_and_js_lock_are_content_addressed() -> None:
     expected = {
         PACKAGE: "ac94f38cd5fe53ccd5af27ced2d887cf8ddfe3fdff19f73a3320f61fedc94cca",
         PACKAGE_LOCK: "b01b09c4da500d95d636c60da6ebd59f7da7322bdc7aa0c4900acf49df7c2b43",
-        SCRAPER: "85b1b25a8d297411a58ec4882e47927b069fa7f83df121fa20e06876c05e5a22",
+        SCRAPER: "98f0bfb220b59ed4932de8346f9a55a0cd4a96adfff18d35780a7e3cfd73d70d",
     }
     for path, digest in expected.items():
         assert _sha256(path) == digest

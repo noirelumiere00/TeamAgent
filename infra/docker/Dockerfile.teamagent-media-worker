@@ -207,7 +207,10 @@ RUN set -eu; \
       > /usr/share/teamagent/provenance/python-packages.txt; \
     rm /tmp/sanitize_ytdlp.py /usr/bin/uv
 
-FROM runtime-packages AS final
+# Start from scratch so runtime filesystem bytes are retained while inherited
+# image configuration (notably the upstream writable VOLUME /data) is not.
+FROM scratch AS final
+COPY --from=runtime-packages / /
 USER 0
 WORKDIR /app
 
@@ -239,7 +242,7 @@ ARG YTDLP_SANITIZER_SHA256=dbf4ec0f50823e87d6f511dce51073f446c37e7a237f670c0203c
 ARG MEDIA_APK_LOCK_SHA256=d3a888e3bfa7e75d2c4c7b6b6dca2a7e0812c1231fdb342e96bb79af9166cca8
 ARG TIKTOK_PACKAGE_JSON_SHA256=ac94f38cd5fe53ccd5af27ced2d887cf8ddfe3fdff19f73a3320f61fedc94cca
 ARG TIKTOK_PACKAGE_LOCK_SHA256=b01b09c4da500d95d636c60da6ebd59f7da7322bdc7aa0c4900acf49df7c2b43
-ARG TIKTOK_SCRAPER_SHA256=85b1b25a8d297411a58ec4882e47927b069fa7f83df121fa20e06876c05e5a22
+ARG TIKTOK_SCRAPER_SHA256=98f0bfb220b59ed4932de8346f9a55a0cd4a96adfff18d35780a7e3cfd73d70d
 
 COPY infra/docker/media-apk.lock /tmp/media-apk.lock
 RUN set -eu; \
@@ -279,7 +282,9 @@ RUN set -eu; \
     test -s /lib/apk/db/installed; \
     chown -R 10001:10001 /app /usr/share/teamagent/provenance
 
-ENV HOME=/tmp/teamagent/home \
+ENV USER=teamagent \
+    LOGNAME=teamagent \
+    HOME=/tmp/teamagent/home \
     TMPDIR=/tmp/teamagent/tmp \
     XDG_CACHE_HOME=/tmp/teamagent/cache \
     XDG_CONFIG_HOME=/tmp/teamagent/config \

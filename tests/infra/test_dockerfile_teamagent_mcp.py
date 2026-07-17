@@ -20,6 +20,11 @@ PYTHON_BINARY_SHA256 = "0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc
 UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
 TORCH_WHEEL_SHA256 = "797c066367792c92eb97cafba7fd0caa8d7455e6078a4ee880630077378dc372"
 E5_MODEL_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
+BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
+APP_HTML_SHA256 = "46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067"
+APP_HTML_VERSION_ID = "I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY"
+APP_HTML_MANIFEST_SHA256 = "15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2"
+APP_HTML_BUILD_INPUTS_SHA256 = "1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2"
 
 
 def _stage(name: str, next_name: str | None = None) -> str:
@@ -70,23 +75,42 @@ def test_core_model_torch_and_app_html_are_content_addressed() -> None:
     assert TEXT.count("local_files_only=True") >= 2
     assert "HF_HUB_OFFLINE=1" in TEXT
     assert "TRANSFORMERS_OFFLINE=1" in TEXT
-    assert re.search(r"^ARG APP_HTML_SHA256$", TEXT, re.MULTILINE)
-    assert re.search(r"^ARG APP_HTML_VERSION_ID$", TEXT, re.MULTILINE)
+    for name, value in {
+        "BAKED_APP_HTML_SHA256": BAKED_APP_HTML_SHA256,
+        "APP_HTML_SHA256": APP_HTML_SHA256,
+        "APP_HTML_VERSION_ID": APP_HTML_VERSION_ID,
+        "APP_HTML_MANIFEST_SHA256": APP_HTML_MANIFEST_SHA256,
+        "APP_HTML_BUILD_INPUTS_SHA256": APP_HTML_BUILD_INPUTS_SHA256,
+    }.items():
+        assert f"ARG {name}={value}" in TEXT
+    assert "ARG APP_HTML_SOURCE=s3" in TEXT
     assert "/app/src/teamagent/connect_web/static/app.html" in TEXT
+    assert 'io.teamagent.contract.baked-app-html-sha256="$BAKED_APP_HTML_SHA256"' in TEXT
+    assert 'io.teamagent.contract.app-html-source="$APP_HTML_SOURCE"' in TEXT
     assert 'io.teamagent.contract.app-html-sha256="$APP_HTML_SHA256"' in TEXT
+    assert 'io.teamagent.contract.app-html-version-id="$APP_HTML_VERSION_ID"' in TEXT
+    assert 'io.teamagent.contract.app-html-manifest-sha256="$APP_HTML_MANIFEST_SHA256"' in TEXT
+    assert (
+        'io.teamagent.contract.app-html-build-inputs-sha256="$APP_HTML_BUILD_INPUTS_SHA256"' in TEXT
+    )
     assert 'org.opencontainers.image.revision="$GIT_COMMIT"' in TEXT
 
 
 def test_core_runtime_is_uid_10001_read_only_ready_and_python_health_checked() -> None:
     final = _stage("final")
     assert "USER 10001:10001" in final
+    assert "COPY --from=builder /runtime-etc/passwd /etc/passwd" in final
+    assert "teamagent:x:10001:10001:" in TEXT
+    assert "USER=teamagent" in final
+    assert "LOGNAME=teamagent" in final
     assert 'VOLUME ["/tmp"]' in final
     assert "HOME=/tmp/teamagent/home" in final
     assert "TMPDIR=/tmp/teamagent/tmp" in final
     assert "XDG_CACHE_HOME=/tmp/teamagent/cache" in final
     assert "VIDEO_APPROVAL_STATE_PATH=/tmp/teamagent/state/video_approval_processed.json" in final
     assert "TEAMAGENT_RUNTIME_KIND=core" in final
-    assert 'CMD ["/app/.venv/bin/python", "scripts/run_mcp_http_server.py"]' in final
+    assert 'ENTRYPOINT ["/app/.venv/bin/python"]' in final
+    assert 'CMD ["scripts/run_mcp_http_server.py"]' in final
     assert "urllib.request.urlopen('http://127.0.0.1:8787/healthz'" in final
     assert "curl" not in final
 
