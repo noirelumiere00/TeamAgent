@@ -80,6 +80,7 @@ def _write_doc(
     client: str = "出光興産",
     *,
     title: str | None = None,
+    industry: str = "エネルギー",
     source_type: str = "",
     external_id: str = "",
     source_url: str = "",
@@ -89,7 +90,7 @@ def _write_doc(
     generator_line = 'generated_by: "scripts/export_vault.py"\n' if generated_by else ""
     (vault / "docs" / f"{stem}.md").write_text(
         f"---\n{generator_line}"
-        f'title: "{display_title}"\nclient: "{client}"\nindustry: "エネルギー"\n'
+        f'title: "{display_title}"\nclient: "{client}"\nindustry: "{industry}"\n'
         f'doc_type: "提案書"\nsolution: "動画広告"\nmodified_at: "2026-06-01"\n'
         f'source_type: "{source_type}"\nexternal_id: "{external_id}"\n---\n\n'
         f"> {display_title} の抜粋\n\n"
@@ -175,6 +176,8 @@ def test_build_success_writes_html_stats_and_stamp(
 
     html = out.read_text(encoding="utf-8")
     assert "出光興産" in html
+    [idemitsu] = [c for c in _payload(html)["clients"] if c["name"] == "出光興産"]
+    assert idemitsu["doc"] == 1  # frontmatter=3でも、visible wikilinkは提案書Aの1件
     # フッタ焼き込み（statusbar 内・プレースホルダは残っていない）
     assert "__BUILDSTAMP__" not in html
     assert "更新: " in html and "・取引先1・資料3" in html
@@ -185,6 +188,17 @@ def test_build_success_writes_html_stats_and_stamp(
     assert stats["clients"] == 1
     assert stats["docs"] == 3
     assert stats["bytes"] == len(out.read_bytes())
+    manifest_sha = hashlib.sha256((vault / ".export-vault-manifest.json").read_bytes()).hexdigest()
+    payload = _payload(html)
+    assert payload["manifest_sha256"] == manifest_sha
+    assert payload["stats"]["manifest_sha256"] == manifest_sha
+    assert stats["manifest_sha256"] == manifest_sha
+    assert payload["build_inputs_sha256"] == _mod.BUILD_INPUTS_SHA256
+    assert payload["stats"]["build_inputs_sha256"] == _mod.BUILD_INPUTS_SHA256
+    assert stats["build_inputs_sha256"] == _mod.BUILD_INPUTS_SHA256
+    data_line = next(line for line in html.splitlines() if line.startswith("const DATA="))
+    raw_data = data_line.removeprefix("const DATA=").removesuffix(";")
+    assert stats["data_sha256"] == hashlib.sha256(raw_data.encode("utf-8")).hexdigest()
 
 
 def test_excluded_stem_not_in_payload(sidecars: Path, vault: Path, tmp_path: Path) -> None:
@@ -1984,15 +1998,24 @@ def test_solution_alias_field_canonical_but_vfmt_uses_raw(
 def test_client_alias_folds_variants_and_sums_fb(
     sidecars: Path, vault: Path, tmp_path: Path
 ) -> None:
-    """取引先 variant（SBI証券/SBI生命保険）が canonical 1枚へ畳まれ FB/資料が合算される。"""
+    """取引先 variantを canonical 1枚へ畳み、FBとvisible資料集合を反映する。"""
     _write_aliases(
         sidecars,
         client={"client": {"SBI証券": "SBIホールディングス", "SBI生命保険": "SBIホールディングス"}},
     )
-    for cname, fb, doc in (("SBI証券", 3, 2), ("SBI生命保険", 4, 1)):
+    member_docs = {
+        "SBI証券": ["SBI資料1", "SBI資料2"],
+        "SBI生命保険": ["SBI資料3"],
+    }
+    for cname, stems in member_docs.items():
+        for stem in stems:
+            _write_doc(vault, stem, client=cname, industry="金融")
+    for cname, fb in (("SBI証券", 3), ("SBI生命保険", 4)):
+        links = "\n".join(f"- [[docs/{stem}]]" for stem in member_docs[cname])
         (vault / "clients" / f"{cname}.md").write_text(
             f'---\nclient: "{cname}"\nindustry: "金融"\ndeal_phase: ""\nbant_score: ""\n'
-            f"fb_count: {fb}\ndoc_count: {doc}\n---\n\n# {cname}\n",
+            f"fb_count: {fb}\ndoc_count: {len(member_docs[cname])}\n---\n\n# {cname}\n\n"
+            f"## 関連資料\n{links}\n",
             encoding="utf-8",
         )
     out = tmp_path / "app.html"
@@ -2006,6 +2029,323 @@ def test_client_alias_folds_variants_and_sums_fb(
     )
     assert '"name": "SBI証券"' not in html
     assert '"name": "SBI生命保険"' not in html
+
+
+def test_port_alias_dedupes_same_three_visible_docs(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """真3資料のうち除外1件を落とし、canonical cardの資料propertyはvisible 2。"""
+    _write_aliases(
+        sidecars,
+        client={"client": {"ポート": "ポート株式会社"}},
+    )
+    stems = ["ポート採用提案", "ポート定例資料", "除外対象資料"]
+    for stem in stems:
+        _write_doc(vault, stem, client="ポート")
+    _write_client_links(vault, "ポート", stems)
+    _write_client_links(vault, "ポート株式会社", stems)
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+
+    [port] = [c for c in payload["clients"] if c["name"] == "ポート株式会社"]
+    assert port["stem"] == "ポート"  # 従来ID/bookmark c:ポート を維持
+    visible_stems = set(stems) - {"除外対象資料"}
+    assert port["doc"] == 2
+    assert {d["stem"] for d in payload["docs"] if d["stem"] in stems} == visible_stems
+    assert all(d["client"] == "ポート株式会社" for d in payload["docs"] if d["stem"] in stems)
+    assert {
+        target
+        for source, target, _ctx in payload["links"]
+        if source == f"c:{port['stem']}" and target.startswith("d:ポート")
+    } == {f"d:{stem}" for stem in visible_stems}
+    assert port["fb"] == 0
+    assert port["phase"] == ""
+    assert port["bant"] == ""
+    assert payload["stats"]["clients"] == 2  # 既存出光 + canonical Port
+    assert payload["stats"]["docs"] == 5  # 既存3 + Port visible2（真3件中1件は除外）
+    assert not (
+        {"_raw_name", "_tl_raw", "_is_multi_client_group", "_dedupe_doc_count"} & port.keys()
+    )
+
+
+def test_client_alias_unions_variant_links_and_keeps_first_context(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """canonical以外にだけあるlinkも残し、重複contextは正式note先勝ち。"""
+    _write_aliases(
+        sidecars,
+        client={"client": {"ポート": "ポート株式会社"}},
+    )
+    for stem in ("Port資料A", "Port資料B", "Port資料C"):
+        _write_doc(vault, stem, client="ポート")
+
+    def _write_variant(name: str, entries: list[tuple[str, str]]) -> None:
+        links = "\n".join(f"- [[docs/{stem}]] {context}" for stem, context in entries)
+        (vault / "clients" / f"{name}.md").write_text(
+            f'---\nclient: "{name}"\nindustry: "IT"\ndeal_phase: ""\nbant_score: ""\n'
+            f"fb_count: 0\ndoc_count: {len(entries)}\n---\n\n# {name}\n\n## 関連資料\n{links}\n",
+            encoding="utf-8",
+        )
+
+    _write_variant("ポート", [("Port資料A", "short-A"), ("Port資料B", "short-B")])
+    _write_variant(
+        "ポート株式会社",
+        [("Port資料B", "long-B"), ("Port資料C", "long-C")],
+    )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [port] = [c for c in payload["clients"] if c["name"] == "ポート株式会社"]
+    port_links = {
+        target: context
+        for source, target, context in payload["links"]
+        if source == f"c:{port['stem']}" and target.startswith("d:Port資料")
+    }
+
+    assert port["doc"] == 3  # 2+2でなく、visibleなA/B/Cの集合
+    assert port["stem"] == "ポート"
+    assert set(port_links) == {"d:Port資料A", "d:Port資料B", "d:Port資料C"}
+    assert "long-B" in port_links["d:Port資料B"]
+    assert "short-B" not in port_links["d:Port資料B"]
+
+
+def test_client_alias_keeps_legacy_stem_but_uses_explicit_target_properties(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """既存bookmarkのstemは維持し、timeline/docsが無いpropertyは正式noteを使う。"""
+    _write_aliases(sidecars, client={"client": {"ポート": "ポート株式会社"}})
+    variants = {
+        "ポート": ("短名業界", "短名フェーズ", "D（短名）", "short-note-marker"),
+        "ポート株式会社": ("正式業界", "正式フェーズ", "A（正式）", "canonical-note-marker"),
+    }
+    for name, (industry, phase, bant, marker) in variants.items():
+        (vault / "clients" / f"{name}.md").write_text(
+            f'---\nclient: "{name}"\nindustry: "{industry}"\ndeal_phase: "{phase}"\n'
+            f'bant_score: "{bant}"\nfb_count: 0\ndoc_count: 0\n---\n\n# {name}\n\n{marker}\n',
+            encoding="utf-8",
+        )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [port] = [c for c in payload["clients"] if c["name"] == "ポート株式会社"]
+
+    assert port["stem"] == "ポート"
+    assert port["industry"] == "正式業界"
+    assert port["phase"] == "正式フェーズ"
+    assert port["bant"] == "A（正式）"
+    assert port["bantg"] == "A"
+    assert "canonical-note-marker" in port["md"]
+    assert "short-note-marker" not in port["md"]
+
+
+def test_client_alias_recomputes_conflicting_properties_from_merged_sources(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """multi groupのphase/BANTは最新FB、industryはvisible linked docsの最頻値。"""
+    _write_aliases(sidecars, client={"client": {"ポート": "ポート株式会社"}})
+    doc_industries = {
+        "Port金融資料": "金融",
+        "Port小売資料1": "小売",
+        "Port小売資料2": "小売",
+    }
+    for stem, industry in doc_industries.items():
+        _write_doc(vault, stem, client="ポート", industry=industry)
+
+    def _write_variant(
+        name: str,
+        *,
+        fm_phase: str,
+        fm_bant: str,
+        event_date: str,
+        event_phase: str,
+        event_bant: str,
+        pos: str,
+        stems: list[str],
+    ) -> None:
+        links = "\n".join(f"- [[docs/{stem}]]" for stem in stems)
+        event = (
+            "### ---- 営業FB 1750000000\n\n"
+            f"- フェーズ: {event_phase}\n"
+            f"- BANT: {event_bant}\n"
+            f"- ポジ反応: {pos}\n\n"
+            f"> [{event_date} 10:00] {pos}\n"
+        )
+        (vault / "clients" / f"{name}.md").write_text(
+            f'---\nclient: "{name}"\nindustry: "frontmatter業界"\n'
+            f'deal_phase: "{fm_phase}"\nbant_score: "{fm_bant}"\nfb_count: 1\n'
+            f"doc_count: {len(stems)}\n---\n\n# {name}\n\n{event}\n## 関連資料\n{links}\n",
+            encoding="utf-8",
+        )
+
+    _write_variant(
+        "ポート株式会社",
+        fm_phase="成約",
+        fm_bant="D（frontmatter）",
+        event_date="2026-06-10",
+        event_phase="ヒアリング",
+        event_bant="C（過去）",
+        pos="過去の反応",
+        stems=["Port金融資料"],
+    )
+    _write_variant(
+        "ポート",
+        fm_phase="1回目提案",
+        fm_bant="B（短名frontmatter）",
+        event_date="2026-06-20",
+        event_phase="最終交渉",
+        event_bant="A（最新）",
+        pos="最新の反応",
+        stems=["Port小売資料1", "Port小売資料2"],
+    )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [port] = [c for c in payload["clients"] if c["name"] == "ポート株式会社"]
+
+    assert port["stem"] == "ポート"
+    assert port["phase"] == "最終交渉"
+    assert port["bant"] == "A（最新）"
+    assert port["bantg"] == "A"
+    assert port["industry"] == "小売"
+    assert port["doc"] == 3
+    assert port["tl"][0]["d"] == "2026-06-20"
+
+
+def test_client_alias_dedupes_same_fb_before_count_and_timeline_cap(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """同一FBを持つ短名/正式名cardはfb=1・timeline=1（1+1=2にしない）。"""
+    _write_aliases(sidecars, client={"client": {"ポート": "ポート株式会社"}})
+    event = (
+        "### ---- 営業FB 1750000000\n\n"
+        "- フェーズ: 提案\n"
+        "- ポジ反応: 採用支援に前向き\n\n"
+        "> [2026-06-15 10:00] 同一の商談メモ\n"
+    )
+    for name in ("ポート", "ポート株式会社"):
+        (vault / "clients" / f"{name}.md").write_text(
+            f'---\nclient: "{name}"\nindustry: "IT"\ndeal_phase: "提案"\n'
+            f'bant_score: "B"\nfb_count: 1\ndoc_count: 0\n---\n\n# {name}\n\n{event}',
+            encoding="utf-8",
+        )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [port] = [c for c in payload["clients"] if c["name"] == "ポート株式会社"]
+    assert port["fb"] == 1
+    assert len(port["tl"]) == 1
+
+
+def test_client_alias_fb_overlap_preserves_per_note_raw_multiplicity(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """各note raw2（Slack+Sheets）×2 variantsはfb=2へ戻し、timelineはunique1。"""
+    _write_aliases(sidecars, client={"client": {"ポート": "ポート株式会社"}})
+    two_source_event = (
+        "### ---- Slack営業FB 1750000000\n\n"
+        "- ポジ反応: 採用支援に前向き\n\n"
+        "> [2026-06-15 10:00] 同一の商談メモ\n\n"
+        "### ---- フォーム営業FB row 20\n\n"
+        "- ポジ反応: 採用支援に前向き\n\n"
+        "> [2026-06-15 10:00] 同一の商談メモ\n"
+    )
+    for name in ("ポート", "ポート株式会社"):
+        (vault / "clients" / f"{name}.md").write_text(
+            f'---\nclient: "{name}"\nindustry: "IT"\ndeal_phase: "提案"\n'
+            f'bant_score: "B"\nfb_count: 2\ndoc_count: 0\n---\n\n# {name}\n\n{two_source_event}',
+            encoding="utf-8",
+        )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [port] = [c for c in payload["clients"] if c["name"] == "ポート株式会社"]
+    assert port["fb"] == 2
+    assert len(port["tl"]) == 1
+
+
+def test_singleton_client_doc_count_uses_only_visible_linked_docs(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """単独clientもexclude後のvisible資料だけをpropertyに数える。"""
+    _write_doc(vault, "単独表示資料", client="単独商事")
+    _write_client_links(vault, "単独商事", ["単独表示資料", "除外対象資料"])
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [client] = [c for c in payload["clients"] if c["name"] == "単独商事"]
+    assert client["doc"] == 1
+
+
+def test_doc_link_resolver_accepts_nfc_targets_for_nfd_visible_stems(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """macOSのNFD filenameへのNFC wikilinkをdocs/付き・bareの両方で解決する。"""
+    prefixed_nfc = "【ベクトル】提案.pdf"
+    bare_nfc = "【ベクトル】議事録.pdf"
+    prefixed_nfd = unicodedata.normalize("NFD", prefixed_nfc)
+    bare_nfd = unicodedata.normalize("NFD", bare_nfc)
+    assert prefixed_nfd != prefixed_nfc
+    assert bare_nfd != bare_nfc
+    _write_doc(vault, prefixed_nfd, client="NFD照合会社")
+    _write_doc(vault, bare_nfd, client="NFD照合会社")
+    (vault / "clients" / "NFD照合会社.md").write_text(
+        '---\nclient: "NFD照合会社"\nindustry: "IT"\ndeal_phase: ""\n'
+        'bant_score: ""\nfb_count: 0\ndoc_count: 1\n---\n\n# NFD照合会社\n\n'
+        f"- [[docs/{prefixed_nfc}]]\n- [[{bare_nfc}]]\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [client] = [c for c in payload["clients"] if c["name"] == "NFD照合会社"]
+    expected_stems = {
+        d["stem"]
+        for d in payload["docs"]
+        if _mod._portable_path_key(d["stem"])
+        in {_mod._portable_path_key(prefixed_nfc), _mod._portable_path_key(bare_nfc)}
+    }
+    outgoing = {
+        target[2:]
+        for source, target, _ctx in payload["links"]
+        if source == f"c:{client['stem']}" and target.startswith("d:")
+    }
+    assert expected_stems <= outgoing
+    assert client["doc"] == 2  # graphで開けるvisible outgoing docと同じ定義
+
+
+def test_bare_link_prefers_client_when_client_and_doc_share_a_name(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """bare targetがclient/doc同名なら従来resolverどおりclientを優先する。"""
+    _write_doc(vault, "同名対象", client="同名対象")
+    _write_client_links(vault, "同名対象", [])
+    (vault / "clients" / "参照元.md").write_text(
+        '---\nclient: "参照元"\nindustry: "IT"\ndeal_phase: ""\nbant_score: ""\n'
+        "fb_count: 0\ndoc_count: 0\n---\n\n# 参照元\n\n- [[同名対象]]\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [source_client] = [c for c in payload["clients"] if c["name"] == "参照元"]
+    outgoing = {
+        target
+        for source, target, _ctx in payload["links"]
+        if source == f"c:{source_client['stem']}"
+    }
+    assert "c:同名対象" in outgoing
+    assert "d:同名対象" not in outgoing
+    assert source_client["doc"] == 0
 
 
 def test_client_alias_applied_to_doc_client_links_to_canonical(

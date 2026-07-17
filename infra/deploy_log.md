@@ -16,6 +16,12 @@
 
 ---
 
+## 2026-07-17 🚀 connect-web 最新 dev 統合／`/app` QA署名不一致を解消
+- connect-web: source=`dev`@`e4daa71986f544d66e0563879b7a4808b4e7b674`（#240まで、post-merge CI全緑）/ image tag=`connect-unified-20260717-141242` / digest=`sha256:0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144` / task definition=`teamagent-dev-connect-web:50`。固定S3 `codebuild/source.zip` VersionId=`ln59hKGu176f1SfoRYUHao0W7wPtbKqd`の全tracked fileがclean worktree `e4daa719...`とbyte-for-byte一致、`:49`→`:50`はtask definitionがimage以外完全一致。rollout COMPLETED・1/1 healthy・failed=0・直近logエラー0。ただし旧CodeBuild経路のためOCI revisionは`unknown`、ECR scanは従来同値（Critical 4 / High 8 / Medium 3）。署名付きdigest gateへの移行完了まで追加image deployは停止。
+- `/app`: 旧配信sha=`ec1b5917474b...`が現行Vault manifestとは一致する一方、最新の除外／名寄せsidecarと`build_inputs_sha256`が不一致でread-only QA gate不合格だった。`e4daa719...`＋現行Vaultから再生成し、153件の生成／QAテストと実artifact QAを全緑で通過。S3 VersionId=`I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY`、sha256=`46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067`、manifest=`15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2`、build inputs=`1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2`。clients=518 / docs=659 / internal source exposure=0 / duplicate ID・重複fingerprint・空title・空excerpt=0。#215メタタグと#217「まとめる軸」も再検証済み。`/healthz`=source=s3 / sha=`46f0079783cd`、ログイン画面のGoogleボタン表示・CSP/HSTS他security headersをブラウザ再確認。rollbackは直前VersionId=`yMIrK11unxaEJZHhQ8Qk4Ucb1ZW14yhi`（sha=`ec1b5917474b...`）。
+- gsheets手動ingest: task=`483d74dfc6f448bdb72738b51bf77cf6` / td=`teamagent-dev-ingest:42` は627文書（ナレッジ239＋営業FB388）をerror=0 / exit=0で完了。DB実測は全3,994文書でexternal ID重複0・孤立chunk 0・chunk欠落0・RLS ENABLE+FORCE。社外identityのgsheets可視0 / `vectorinc.co.jp`グループは627。#240監査対象3行の業種も期待値と一致。EventBridgeは morning-digest=ENABLED / ingest週次=DISABLED / canary=DISABLEDを維持。
+- 実行者=Codex（s-komata AWSアカウント）。
+
 ## 2026-07-16 🚀 dev 全8本（#213〜#221）を本番で有効化＋/app更新
 - source=`dev`@`7ecf725bd19750001ae878877220b11bf1bb7a66` / image tag=`dev-7ecf725` / digest=`sha256:fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5`。mcp=`:55`、connect-web=`:48`、ingest=`:41`、morning-digest=`:44`、canary=`:13` を同digestへ統一。openclaw=`:25` は変更なし。
 - #213/#220/#221 の短縮URL・研究成果配信、#214/#215 のRLS/共有ACL、#216界隈分類、#217グラフまとめ軸、#218 Markdown injection、#219ルールブック修正を反映。`/r` 302→S3 200、RLSは社員から可・社外0、主要サービスhealthy・重大ログ0を確認。

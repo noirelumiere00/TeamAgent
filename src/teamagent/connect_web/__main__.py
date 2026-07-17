@@ -21,7 +21,14 @@ def main() -> None:
     host = os.environ.get("CONNECT_WEB_HOST", "127.0.0.1")
     port = int(os.environ.get("CONNECT_WEB_PORT", "8788"))
     # アクセスログの /r/<token> を伏せて配布（トークンの CloudWatch 流出を防ぐ）。
-    uvicorn.run(app, host=host, port=port, log_level="info", log_config=build_uvicorn_log_config())
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        log_config=build_uvicorn_log_config(),
+        server_header=False,
+    )
 
 
 if __name__ == "__main__":
