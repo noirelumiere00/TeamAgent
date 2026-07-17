@@ -13,9 +13,10 @@ Buildx deployment paths.
 - [ ] Dedicated `teamagent-<env>-openclaw-image-builder` CodeBuild run succeeds.
 - [ ] Downloaded production manifest checksum passes.
 - [ ] Registry attestation checks are all true: subject, source, and builder.
-- [ ] Runtime contract, browser reachability, `jiti`/dev/test absence,
-      Slack/Bedrock plugin inventory, Critical/High/Secrets zero, CycloneDX
-      format, npm path/name/version multiset, and `bom-ref` integrity all pass.
+- [ ] Runtime contract, browser reachability, Control UI import/HTTP asset
+      closure, `jiti`/dev/test absence, Slack/Bedrock plugin inventory,
+      Critical/High/Secrets zero, CycloneDX format, npm path/name/version
+      multiset, and `bom-ref` integrity all pass.
 - [ ] The exact ECR linux/arm64 child digest in `.image.runtimeRef` is the
       deployment subject.
 
@@ -38,7 +39,9 @@ Buildx deployment paths.
 
 ## Live smoke
 
-- [ ] ECS `/readyz` is healthy; MCP `/healthz` is separately healthy.
+- [ ] ECS `/readyz` is healthy; the Control UI root and its recorded module
+      closure are served without a 404/hash mismatch; MCP `/healthz` is
+      separately healthy.
 - [ ] CloudWatch shows gateway loopback listener without config repair,
       browser activation, or secret values.
 - [ ] Slack Socket Mode is connected and a real mention receives a response.

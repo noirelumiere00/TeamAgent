@@ -83,6 +83,8 @@ jq -e --arg commit "$SOURCE_COMMIT" '
   .runtime.uid == 65532 and .runtime.gid == 65532 and
   .runtime.actualImageContractPassed == true and
   .runtime.browserReachabilityValidated == true and
+  .runtime.controlUiImportClosureValidated == true and
+  .runtime.controlUiHttpAssetClosureValidated == true and
   .runtime.forbiddenPackageOrPluginArtifacts == 0 and
   .runtime.developmentPayloadArtifacts == 0 and
   .scan.critical == 0 and .scan.high == 0 and .scan.secrets == 0 and
@@ -97,7 +99,8 @@ jq -e --arg commit "$SOURCE_COMMIT" '
 
 The evidence bundle includes the actual-image contract, physical runtime
 inventory, CycloneDX SBOM and npm multiset, vulnerability/secret scans,
-Slack/Bedrock plugin inventory, gateway log, and parsed registry
+Slack/Bedrock plugin inventory, gateway log, Control UI static-import and
+HTTP asset-closure results, and parsed registry
 provenance/SPDX documents. Every manifest evidence path is relative to the
 manifest directory and remains valid after artifact extraction. Verify every
 recorded SHA-256 before archiving:

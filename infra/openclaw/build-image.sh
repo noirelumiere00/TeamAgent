@@ -413,7 +413,9 @@ function inventory(root){
       if(
         source.includes("//#region extensions/browser/")||
         source.includes("function registerBrowserPlugin(")||
-        source.includes("registerBrowserCli(program")
+        source.includes("registerBrowserCli(program")||
+        source.includes("createBrowserPluginService(")||
+        /(?:from\s*|import\s*\(\s*|require\(\s*)["'"'"'][^"'"'"']*(?:playwright|pw-ai|chrome-mcp)[^"'"'"']*["'"'"']/iu.test(source)
       ) browserImplementationArtifacts.push(root);
     }
     return;
@@ -470,6 +472,19 @@ const pruneReportValid=
   pruneReport.schemaVersion===1&&
   pruneReport.browser.residualUnreachableBrowserCandidates===0&&
   pruneReport.browser.reachableRegistrationChunks===0&&
+  pruneReport.browser.controlUiMissingLocalImports===0&&
+  Array.isArray(pruneReport.browser.controlUiReachableAssets)&&
+  pruneReport.browser.controlUiReachableAssets.length>0&&
+  pruneReport.browser.controlUiReachableAssets.length===
+    pruneReport.browser.controlUiReachableModuleCount&&
+  Array.isArray(pruneReport.browser.preservedControlUiBrowserChunks)&&
+  pruneReport.browser.preservedControlUiBrowserChunks.length>0&&
+  pruneReport.browser.preservedControlUiBrowserChunks.every(candidate=>
+    candidate.path.startsWith("/app/dist/control-ui/")&&
+    /^[0-9a-f]{64}$/u.test(candidate.sha256)&&
+    Array.isArray(candidate.implementationSignals)&&
+    candidate.implementationSignals.length===0
+  )&&
   pruneReport.browser.cliHelpMetadataRemoved===true&&
   pruneReport.packages.residualForbidden===0&&
   pruneReport.packages.residualNonRootBinDeclarations===0&&
@@ -862,6 +877,8 @@ jq -n \
       packageInstanceCount:$runtimePackageInstanceCount,
       forbiddenPackageOrPluginArtifacts:0,danglingSymlinks:0,
       developmentPayloadArtifacts:0,browserReachabilityValidated:true,
+      controlUiImportClosureValidated:true,
+      controlUiHttpAssetClosureValidated:true,
       actualImageContractPassed:true,privilegedPathInventory:true,
       localDockerReadOnlySmoke:true,localDockerCapDropAllSmoke:true,
       localDockerNoNewPrivilegesSmoke:true,

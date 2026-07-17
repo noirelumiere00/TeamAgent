@@ -10,17 +10,24 @@ The final image contains no shell, package manager, browser executable,
 Playwright, Codex CLI, `jiti`, TypeScript/tsx, Vite/Vitest, build compiler, or
 test/fixture/type/source-map payload. `prune-runtime.mjs` resolves the actual
 production dependency closure and performs a static ESM reachability analysis
-from `dist/entry.js` and `dist/index.js`. Unreachable browser registration and
-CLI chunks are deleted independent of their generated hash names.
+from `dist/entry.js`, `dist/index.js`, and the module scripts referenced by
+`dist/control-ui/index.html`. Vite preload-map chunks are included in the
+Control UI closure. Unreachable browser registration and CLI chunks are
+deleted independent of their generated hash names.
 
 Some browser-named SDK/doctor helper chunks remain because non-browser core
-code statically imports them. The retained
+code statically imports them. Browser-named Control UI chunks may also remain
+when the UI closure requires them; these are browser-side navigation or
+terminal support, not the OpenClaw browser automation extension. The retained
 `/opt/teamagent/runtime-prune-report.json` records those reachable shared
-chunks and proves that:
+chunks, their SHA-256 values and implementation-signal classifications, and
+proves that:
 
 - the browser plugin registration, CLI registration, executable browser
   extension, and fast-path browser help payload are absent;
 - no unreachable browser implementation candidate remains;
+- every local import in the executable Control UI closure resolves, and the
+  actual gateway serves every recorded module with the recorded SHA-256;
 - the only `dist/extensions/browser/runtime-api.js` text is data in the
   updater's reviewed sidecar-path inventory, not an import or registration.
 
@@ -68,7 +75,8 @@ covers:
 
 - actual ARM64 image config, nonroot UID/GID, read-only writes, writable
   `/tmp`, capability bounds, secret fail-closed behavior, child exit code,
-  `/readyz`, SIGTERM, Slack and Bedrock plugin loading, and browser CLI absence;
+  `/readyz`, Control UI module delivery, SIGTERM, Slack and Bedrock plugin
+  loading, and browser CLI absence;
 - the static browser reachability report and physical absence of `jiti`,
   forbidden tooling, tests, fixtures, source types/maps, and non-root package
   bin declarations;

@@ -218,6 +218,12 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     assert "delete metadata.scripts" in pruner
     assert "markProductionPackage" in pruner
     assert "collectModuleGraph" in pruner
+    assert "controlUiModuleRoots" in pruner
+    assert "Vite's preload dependency map" in pruner
+    assert "controlUiReachableAssets" in pruner
+    assert "controlUiMissingLocalImports" in pruner
+    assert "preservedControlUiBrowserChunks" in pruner
+    assert "browserImplementationSignals" in pruner
     assert 'const SKILLS_ROOT = path.join(APP_ROOT, "skills")' in pruner
     assert pruner.count("SKILLS_ROOT,") == 2
     assert "bench(?:marks?)?" in pruner
@@ -383,6 +389,11 @@ def test_dedicated_builder_is_fail_closed_and_scans_child() -> None:
         "forbiddenPackageOrPluginArtifacts:0",
         "developmentPayloadArtifacts:0",
         "browserReachabilityValidated:true",
+        "controlUiImportClosureValidated:true",
+        "controlUiHttpAssetClosureValidated:true",
+        "controlUiMissingLocalImports",
+        "controlUiReachableAssets",
+        "preservedControlUiBrowserChunks",
         "fargateNoNewPrivilegesEnforced:false",
         "schemaVersion:3",
         "MANIFEST_SHA256",
@@ -746,6 +757,10 @@ def test_actual_image_test_is_executable_and_checks_kernel_and_payload() -> None
         "gatewayIsPid1",
         "gatewaySigtermExitZero",
         "gatewayRuntimeSecretLeakAbsent",
+        "CONTROL_UI_HTTP_PROBE",
+        "controlUiAssetClosureServed",
+        "controlUiRuntimeSecretLeakAbsent",
+        "servedModuleInventorySha256",
         "browser",
         "--help",
         "browserBridgeFacadeFailClosed",

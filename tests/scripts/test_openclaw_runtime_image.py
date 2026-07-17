@@ -57,6 +57,133 @@ process.execve(
   process.env
 );
 """
+CONTROL_UI_HTTP_PROBE = r"""
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+
+(async () => {
+const report = JSON.parse(
+  fs.readFileSync("/opt/teamagent/runtime-prune-report.json", "utf8")
+);
+const browser = report.browser;
+const assetPrefix = "/app/dist/control-ui";
+const base = new URL("http://127.0.0.1:18789/");
+const sha256 = value =>
+  crypto.createHash("sha256").update(value).digest("hex");
+const toHttpPath = candidate => {
+  if (!candidate.startsWith(`${assetPrefix}/`)) {
+    throw new Error(`Control UI asset escapes its root: ${candidate}`);
+  }
+  return candidate.slice(assetPrefix.length);
+};
+
+if (
+  !Array.isArray(browser.controlUiReachableAssets) ||
+  browser.controlUiReachableAssets.length === 0 ||
+  browser.controlUiReachableAssets.length !==
+    browser.controlUiReachableModuleCount
+) {
+  throw new Error("invalid Control UI asset inventory");
+}
+const expectedRoots = browser.controlUiGraphRoots.map(toHttpPath).sort();
+const rootResponse = await fetch(base);
+const rootBody = Buffer.from(await rootResponse.arrayBuffer());
+if (rootResponse.status !== 200) {
+  throw new Error(`Control UI root returned ${rootResponse.status}`);
+}
+const html = rootBody.toString("utf8");
+const moduleRoots = [];
+for (const tag of html.match(/<script\b[^>]*>/giu) || []) {
+  if (!/\btype\s*=\s*["']module["']/iu.test(tag)) continue;
+  const source = tag.match(/\bsrc\s*=\s*["']([^"']+)["']/iu)?.[1];
+  if (!source) throw new Error("Control UI module script has no src");
+  moduleRoots.push(new URL(source, base).pathname);
+}
+moduleRoots.sort();
+if (JSON.stringify(moduleRoots) !== JSON.stringify(expectedRoots)) {
+  throw new Error(
+    `served Control UI roots differ from prune report: ${JSON.stringify({
+      expectedRoots,
+      moduleRoots
+    })}`
+  );
+}
+
+const failures = [];
+const served = [];
+const secretValues = [
+  process.env.SLACK_BOT_TOKEN,
+  process.env.SLACK_APP_TOKEN,
+  process.env.OPENCLAW_GATEWAY_TOKEN,
+  process.env.TEAMAGENT_MCP_BEARER
+].filter(Boolean);
+for (const asset of browser.controlUiReachableAssets) {
+  const httpPath = toHttpPath(asset.path);
+  const response = await fetch(new URL(httpPath, base));
+  const body = Buffer.from(await response.arrayBuffer());
+  const actualSha256 = sha256(body);
+  const leaksSecret = secretValues.some(secret =>
+    body.includes(Buffer.from(secret))
+  );
+  if (
+    response.status !== 200 ||
+    actualSha256 !== asset.sha256 ||
+    leaksSecret
+  ) {
+    failures.push({
+      path: httpPath,
+      status: response.status,
+      expectedSha256: asset.sha256,
+      actualSha256,
+      leaksSecret
+    });
+  }
+  served.push({path: httpPath, sha256: actualSha256});
+}
+
+const staticReferences = [
+  ...html.matchAll(/\b(?:href|src)\s*=\s*["']([^"'#]+)["']/giu)
+]
+  .map(match => match[1])
+  .filter(reference => !/^(?:[a-z]+:)?\/\//iu.test(reference));
+const staticFailures = [];
+for (const reference of [...new Set(staticReferences)].sort()) {
+  const response = await fetch(new URL(reference, base));
+  if (response.status !== 200) {
+    staticFailures.push({reference, status: response.status});
+  }
+}
+if (secretValues.some(secret => rootBody.includes(Buffer.from(secret)))) {
+  failures.push({path: "/", status: 200, leaksSecret: true});
+}
+if (failures.length > 0 || staticFailures.length > 0) {
+  throw new Error(
+    `Control UI HTTP closure failed: ${JSON.stringify({
+      failures,
+      staticFailures
+    })}`
+  );
+}
+
+served.sort((left, right) => left.path.localeCompare(right.path));
+process.stdout.write(JSON.stringify({
+  rootStatus: rootResponse.status,
+  rootSha256: sha256(rootBody),
+  moduleRoots,
+  reachableModuleCount: browser.controlUiReachableModuleCount,
+  servedModuleCount: served.length,
+  servedModuleInventorySha256: sha256(
+    Buffer.from(JSON.stringify(served))
+  ),
+  staticReferenceCount: new Set(staticReferences).size,
+  missingOrMismatchedAssets: 0,
+  runtimeSecretLeak: false
+}) + "\n");
+})().catch(error => {
+  console.error(error instanceof Error ? error.stack : String(error));
+  process.exit(1);
+});
+"""
 
 
 def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -170,6 +297,26 @@ def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
         startup_output = startup_logs.stdout + startup_logs.stderr
         assert ready, startup_output
 
+        control_ui_result = _run(
+            [
+                "docker",
+                "exec",
+                container_id,
+                "/nodejs/bin/node",
+                "-e",
+                CONTROL_UI_HTTP_PROBE,
+            ],
+            check=False,
+        )
+        assert control_ui_result.returncode == 0, (
+            control_ui_result.stdout + control_ui_result.stderr
+        )
+        control_ui = json.loads(control_ui_result.stdout)
+        assert control_ui["rootStatus"] == 200
+        assert control_ui["servedModuleCount"] == control_ui["reachableModuleCount"]
+        assert control_ui["missingOrMismatchedAssets"] == 0
+        assert control_ui["runtimeSecretLeak"] is False
+
         children = _run(
             [
                 "docker",
@@ -219,6 +366,7 @@ def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
             "oomKilled": state["OOMKilled"],
             "runtimeSecretLeak": False,
             "logSha256": hashlib.sha256(log_output.encode()).hexdigest(),
+            "controlUi": control_ui,
         }
     finally:
         _run(["docker", "rm", "-f", container_id], check=False)
@@ -310,6 +458,19 @@ console.log(JSON.stringify(result));
     assert process_contract["browserHelpMetadata"] is False
     assert process_contract["prune"]["browser"]["reachableRegistrationChunks"] == 0
     assert process_contract["prune"]["browser"]["residualUnreachableBrowserCandidates"] == 0
+    assert process_contract["prune"]["browser"]["controlUiMissingLocalImports"] == 0
+    assert process_contract["prune"]["browser"]["controlUiReachableModuleCount"] == len(
+        process_contract["prune"]["browser"]["controlUiReachableAssets"]
+    )
+    preserved_control_ui_browser_chunks = process_contract["prune"]["browser"][
+        "preservedControlUiBrowserChunks"
+    ]
+    assert preserved_control_ui_browser_chunks
+    assert all(
+        candidate["path"].startswith("/app/dist/control-ui/")
+        and candidate["implementationSignals"] == []
+        for candidate in preserved_control_ui_browser_chunks
+    )
     assert process_contract["prune"]["packages"]["residualForbidden"] == 0
     assert process_contract["prune"]["developmentPayload"]["residualPathCount"] == 0
 
@@ -463,6 +624,12 @@ fs.writeFileSync(1, JSON.stringify({
             "gatewayReady": gateway_lifecycle["ready"],
             "gatewaySigtermExitZero": gateway_lifecycle["exitCode"] == 0,
             "gatewayRuntimeSecretLeakAbsent": (gateway_lifecycle["runtimeSecretLeak"] is False),
+            "controlUiAssetClosureServed": (
+                gateway_lifecycle["controlUi"]["missingOrMismatchedAssets"] == 0
+            ),
+            "controlUiRuntimeSecretLeakAbsent": (
+                gateway_lifecycle["controlUi"]["runtimeSecretLeak"] is False
+            ),
         },
         "process": process_contract,
         "browserBridge": browser_bridge_contract,

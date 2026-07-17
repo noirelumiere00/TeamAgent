@@ -2,12 +2,15 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 const APP_ROOT = process.env.OPENCLAW_PRUNE_APP_ROOT || "/app";
 const TEAMAGENT_ROOT =
   process.env.OPENCLAW_PRUNE_TEAMAGENT_ROOT || "/opt/teamagent";
 const DIST_ROOT = path.join(APP_ROOT, "dist");
+const CONTROL_UI_ROOT = path.join(DIST_ROOT, "control-ui");
+const CONTROL_UI_INDEX = path.join(CONTROL_UI_ROOT, "index.html");
 const SKILLS_ROOT = path.join(APP_ROOT, "skills");
 const PLUGIN_ROOTS = [
   path.join(TEAMAGENT_ROOT, "plugins", "slack"),
@@ -78,40 +81,7 @@ for (const target of [
   fs.rmSync(target, { recursive: true, force: true });
 }
 
-function collectModuleGraph() {
-  const moduleFiles = listFiles(
-    DIST_ROOT,
-    (candidate) => /\.(?:c|m)?js$/u.test(candidate),
-  );
-  const moduleSet = new Set(moduleFiles);
-  const dependencies = new Map();
-
-  for (const modulePath of moduleFiles) {
-    const source = fs.readFileSync(modulePath, "utf8");
-    const resolvedImports = [];
-    for (const record of parse(source)[0]) {
-      if (!record.n?.startsWith(".")) continue;
-      const cleanSpecifier = record.n.replace(/[?#].*$/u, "");
-      const unresolved = path.resolve(path.dirname(modulePath), cleanSpecifier);
-      const resolved = [
-        unresolved,
-        `${unresolved}.js`,
-        `${unresolved}.mjs`,
-        `${unresolved}.cjs`,
-        path.join(unresolved, "index.js"),
-      ].find((candidate) => moduleSet.has(candidate));
-      if (resolved) resolvedImports.push(resolved);
-    }
-    dependencies.set(modulePath, resolvedImports);
-  }
-
-  const roots = ["entry.js", "index.js"]
-    .map((name) => path.join(DIST_ROOT, name))
-    .filter((candidate) => moduleSet.has(candidate));
-  if (roots.length !== 2) {
-    throw new Error("expected both dist/entry.js and dist/index.js");
-  }
-
+function collectReachable(dependencies, roots) {
   const reachable = new Set();
   const pending = [...roots];
   while (pending.length > 0) {
@@ -120,14 +90,171 @@ function collectModuleGraph() {
     reachable.add(current);
     pending.push(...(dependencies.get(current) || []));
   }
-  return { moduleFiles, dependencies, reachable, roots };
+  return reachable;
+}
+
+function controlUiModuleRoots(moduleSet) {
+  const html = fs.readFileSync(CONTROL_UI_INDEX, "utf8");
+  const roots = [];
+  for (const tag of html.match(/<script\b[^>]*>/giu) || []) {
+    if (!/\btype\s*=\s*["']module["']/iu.test(tag)) continue;
+    const source = tag.match(/\bsrc\s*=\s*["']([^"']+)["']/iu)?.[1];
+    if (!source) throw new Error("Control UI module script has no src");
+    if (/^(?:[a-z]+:)?\/\//iu.test(source)) {
+      throw new Error(`external Control UI module root is forbidden: ${source}`);
+    }
+    const cleanSource = source.replace(/[?#].*$/u, "");
+    const candidate = source.startsWith("/")
+      ? path.join(CONTROL_UI_ROOT, cleanSource.replace(/^\/+/u, ""))
+      : path.resolve(path.dirname(CONTROL_UI_INDEX), cleanSource);
+    if (
+      candidate !== CONTROL_UI_ROOT &&
+      !candidate.startsWith(`${CONTROL_UI_ROOT}${path.sep}`)
+    ) {
+      throw new Error(`Control UI module root escapes its asset tree: ${source}`);
+    }
+    if (!moduleSet.has(candidate)) {
+      throw new Error(`Control UI module root is missing: ${source}`);
+    }
+    roots.push(candidate);
+  }
+  if (roots.length === 0) {
+    throw new Error("expected at least one Control UI module root");
+  }
+  return [...new Set(roots)];
+}
+
+function collectModuleGraph() {
+  const distFiles = listFiles(DIST_ROOT);
+  const distFileSet = new Set(distFiles);
+  const moduleFiles = listFiles(
+    DIST_ROOT,
+    (candidate) => /\.(?:c|m)?js$/u.test(candidate),
+  );
+  const moduleSet = new Set(moduleFiles);
+  const dependencies = new Map();
+  const unresolvedImports = new Map();
+
+  for (const modulePath of moduleFiles) {
+    const source = fs.readFileSync(modulePath, "utf8");
+    const resolvedImports = [];
+    const localSpecifiers = new Set(
+      parse(source)[0]
+        .map((record) => record.n)
+        .filter((specifier) => specifier?.startsWith(".")),
+    );
+    if (modulePath.startsWith(`${CONTROL_UI_ROOT}${path.sep}`)) {
+      // Vite's preload dependency map stores local chunks as string literals
+      // rather than ESM import records. They are still fetched at runtime and
+      // therefore belong to the Control UI asset closure.
+      for (const match of source.matchAll(
+        /["'`](\.\/[^"'`?#]+?\.(?:c|m)?js(?:[?#][^"'`]*)?)["'`]/gu,
+      )) {
+        localSpecifiers.add(match[1]);
+      }
+    }
+    const missing = [];
+    for (const specifier of localSpecifiers) {
+      const cleanSpecifier = specifier.replace(/[?#].*$/u, "");
+      const unresolved = path.resolve(path.dirname(modulePath), cleanSpecifier);
+      const resolved = [
+        unresolved,
+        `${unresolved}.js`,
+        `${unresolved}.mjs`,
+        `${unresolved}.cjs`,
+        path.join(unresolved, "index.js"),
+      ].find((candidate) => distFileSet.has(candidate));
+      if (!resolved) {
+        missing.push(specifier);
+      } else if (moduleSet.has(resolved)) {
+        resolvedImports.push(resolved);
+      }
+    }
+    dependencies.set(modulePath, [...new Set(resolvedImports)]);
+    unresolvedImports.set(modulePath, missing.toSorted());
+  }
+
+  const runtimeRoots = ["entry.js", "index.js"]
+    .map((name) => path.join(DIST_ROOT, name))
+    .filter((candidate) => moduleSet.has(candidate));
+  if (runtimeRoots.length !== 2) {
+    throw new Error("expected both dist/entry.js and dist/index.js");
+  }
+  const controlUiRoots = controlUiModuleRoots(moduleSet);
+  const runtimeReachable = collectReachable(dependencies, runtimeRoots);
+  const controlUiReachable = collectReachable(dependencies, controlUiRoots);
+  const reachable = new Set([...runtimeReachable, ...controlUiReachable]);
+  const reachableUnresolvedImports = [];
+  for (const modulePath of reachable) {
+    for (const specifier of unresolvedImports.get(modulePath) || []) {
+      reachableUnresolvedImports.push({
+        importer: toContainerPath(modulePath),
+        specifier,
+      });
+    }
+  }
+  return {
+    moduleFiles,
+    dependencies,
+    unresolvedImports,
+    reachable,
+    reachableUnresolvedImports,
+    runtimeReachable,
+    runtimeRoots,
+    controlUiReachable,
+    controlUiRoots,
+  };
 }
 
 const browserNamePattern = /(?:browser|playwright|chrome-mcp)/iu;
-const browserImplementationPattern =
-  /(?:\/\/#region extensions\/browser\/|function registerBrowserPlugin\(|registerBrowserCli\(program|createBrowserPluginService\()/u;
+const browserImplementationSignalPatterns = new Map([
+  ["browserExtensionSource", /\/\/#region extensions\/browser\//u],
+  ["browserPluginRegistration", /function registerBrowserPlugin\(/u],
+  ["browserCliRegistration", /registerBrowserCli\(program/u],
+  ["browserService", /createBrowserPluginService\(/u],
+  [
+    "playwrightImport",
+    /(?:from\s*|import\s*\(\s*|require\(\s*)["'][^"']*(?:playwright|pw-ai)[^"']*["']/iu,
+  ],
+  [
+    "chromeMcpImport",
+    /(?:from\s*|import\s*\(\s*|require\(\s*)["'][^"']*chrome-mcp[^"']*["']/iu,
+  ],
+]);
+
+function browserImplementationSignals(source) {
+  return [...browserImplementationSignalPatterns.entries()]
+    .filter(([, pattern]) => pattern.test(source))
+    .map(([name]) => name);
+}
+
+function sha256File(candidate) {
+  const digest = createHash("sha256");
+  digest.update(fs.readFileSync(candidate));
+  return digest.digest("hex");
+}
 
 const initialGraph = collectModuleGraph();
+const reachableBrowserImplementations = [];
+for (const modulePath of initialGraph.reachable) {
+  const signals = browserImplementationSignals(
+    fs.readFileSync(modulePath, "utf8"),
+  );
+  if (signals.length > 0) {
+    reachableBrowserImplementations.push({
+      path: toContainerPath(modulePath),
+      signals,
+    });
+  }
+}
+if (reachableBrowserImplementations.length > 0) {
+  throw new Error(
+    `browser implementation is reachable from a runtime root: ${JSON.stringify(
+      reachableBrowserImplementations,
+    )}`,
+  );
+}
+
 const removedBrowserChunks = [];
 for (const modulePath of initialGraph.moduleFiles) {
   const source = fs.readFileSync(modulePath, "utf8");
@@ -141,6 +268,34 @@ for (const modulePath of initialGraph.moduleFiles) {
 }
 removedBrowserChunks.sort();
 
+const removedBrowserSet = new Set(removedBrowserChunks);
+const removedBrowserDependentChunks = [];
+for (const modulePath of initialGraph.moduleFiles) {
+  const containerPath = toContainerPath(modulePath);
+  if (
+    removedBrowserSet.has(containerPath) ||
+    initialGraph.reachable.has(modulePath)
+  ) {
+    continue;
+  }
+  const importsRemovedBrowserChunk = (
+    initialGraph.dependencies.get(modulePath) || []
+  ).some((dependency) =>
+    removedBrowserSet.has(toContainerPath(dependency)),
+  );
+  if (!importsRemovedBrowserChunk) continue;
+  const source = fs.readFileSync(modulePath, "utf8");
+  const isEmptySideEffectImportStub =
+    /^(?:\s*import\s*["'][^"']+["'];?)+\s*export\s*\{\s*\};?\s*$/u.test(
+      source,
+    );
+  if (!isEmptySideEffectImportStub) continue;
+  fs.rmSync(modulePath, { force: true });
+  removedBrowserSet.add(containerPath);
+  removedBrowserDependentChunks.push(containerPath);
+}
+removedBrowserDependentChunks.sort();
+
 const cliMetadataPath = path.join(DIST_ROOT, "cli-startup-metadata.json");
 const cliMetadata = readJson(cliMetadataPath);
 delete cliMetadata.browserHelpSourceSignature;
@@ -151,6 +306,7 @@ const finalGraph = collectModuleGraph();
 const residualDeadBrowserChunks = [];
 const browserRegistrationChunks = [];
 const sharedBrowserChunks = [];
+const preservedControlUiBrowserChunks = [];
 const residualBrowserSidecarMarkers = [];
 for (const modulePath of finalGraph.moduleFiles) {
   const source = fs.readFileSync(modulePath, "utf8");
@@ -165,10 +321,17 @@ for (const modulePath of finalGraph.moduleFiles) {
     browserNamePattern.test(path.basename(modulePath))
   ) {
     sharedBrowserChunks.push(toContainerPath(modulePath));
+    if (finalGraph.controlUiReachable.has(modulePath)) {
+      preservedControlUiBrowserChunks.push({
+        path: toContainerPath(modulePath),
+        sha256: sha256File(modulePath),
+        implementationSignals: browserImplementationSignals(source),
+      });
+    }
   }
   if (
     finalGraph.reachable.has(modulePath) &&
-    browserImplementationPattern.test(source)
+    browserImplementationSignals(source).length > 0
   ) {
     browserRegistrationChunks.push(toContainerPath(modulePath));
   }
@@ -177,7 +340,7 @@ for (const modulePath of finalGraph.moduleFiles) {
       finalGraph.reachable.has(modulePath) &&
       source.includes("//#region scripts/lib/bundled-runtime-sidecar-paths.json") &&
       source.includes('"dist/extensions/browser/runtime-api.js"') &&
-      !browserImplementationPattern.test(source);
+      browserImplementationSignals(source).length === 0;
     if (!allowedSidecarMarker) {
       residualBrowserSidecarMarkers.push(toContainerPath(modulePath));
     }
@@ -197,13 +360,20 @@ if (
 if (
   residualDeadBrowserChunks.length > 0 ||
   browserRegistrationChunks.length > 0 ||
-  residualBrowserSidecarMarkers.length > 0
+  residualBrowserSidecarMarkers.length > 0 ||
+  finalGraph.reachableUnresolvedImports.length > 0 ||
+  preservedControlUiBrowserChunks.length === 0 ||
+  preservedControlUiBrowserChunks.some(
+    (candidate) => candidate.implementationSignals.length > 0,
+  )
 ) {
   throw new Error(
     `browser reachability contract failed: ${JSON.stringify({
       residualDeadBrowserChunks,
       browserRegistrationChunks,
       residualBrowserSidecarMarkers,
+      reachableUnresolvedImports: finalGraph.reachableUnresolvedImports,
+      preservedControlUiBrowserChunks,
     })}`,
   );
 }
@@ -568,13 +738,31 @@ if (
 writeJson(REPORT_PATH, {
   schemaVersion: 1,
   browser: {
-    graphRoots: finalGraph.roots.map(toContainerPath).toSorted(),
+    graphRoots: finalGraph.runtimeRoots.map(toContainerPath).toSorted(),
     totalModuleCount: finalGraph.moduleFiles.length,
-    reachableModuleCount: finalGraph.reachable.size,
+    reachableModuleCount: finalGraph.runtimeReachable.size,
     removedImplementationChunks: removedBrowserChunks,
+    removedDependentChunks: removedBrowserDependentChunks,
     residualUnreachableBrowserCandidates: 0,
     reachableRegistrationChunks: 0,
     sharedReachableChunks: sharedBrowserChunks.toSorted(),
+    controlUiGraphRoots: finalGraph.controlUiRoots
+      .map(toContainerPath)
+      .toSorted(),
+    controlUiReachableModuleCount: finalGraph.controlUiReachable.size,
+    controlUiReachableChunks: [...finalGraph.controlUiReachable]
+      .map(toContainerPath)
+      .toSorted(),
+    controlUiReachableAssets: [...finalGraph.controlUiReachable]
+      .map((candidate) => ({
+        path: toContainerPath(candidate),
+        sha256: sha256File(candidate),
+      }))
+      .toSorted((left, right) => left.path.localeCompare(right.path)),
+    controlUiMissingLocalImports: 0,
+    preservedControlUiBrowserChunks: preservedControlUiBrowserChunks.toSorted(
+      (left, right) => left.path.localeCompare(right.path),
+    ),
     sidecarPathMarkersValidatedAsDataOnly: 1,
     cliHelpMetadataRemoved: true,
   },
