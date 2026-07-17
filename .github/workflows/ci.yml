@@ -43,6 +43,7 @@ jobs:
             'sentry-sdk[asyncio]>=2.18.0' \
             claude-agent-sdk==0.2.87 \
             pyyaml pypdf python-pptx pillow python-docx openpyxl \
+            'fonttools[woff]>=4.63.0' \
             google-auth google-api-python-client google-auth-oauthlib \
             pytest pytest-asyncio pytest-cov mypy ruff bandit import-linter
 
