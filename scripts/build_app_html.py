@@ -14,7 +14,7 @@ HTML 生成ロジックは元スクリプトと同一。repo 版で加えたの�
 - サイドカーは repo の ``data/connect_web_filters/`` から読む（``__file__`` 相対）。
   exists() フォールバックは全廃: サイドカー欠落・Vault 不在・clients==0・docs==0 は
   理由を明示して exit 1（「黙って劣化」を作らない）
-- サニティゲート: 統計を ``<out>.stats.json`` に保存し、取引先数/資料数/バイト数の
+- サニティゲート: 統計を ``<out>.stats.json`` に保存し、取引先数/資料数/FB件数/バイト数の
   いずれかが前回比 20% 超減なら ``--allow-shrink`` 無しで exit 1（既存 out は上書きしない）
 - ACL公開境界: 完全export manifestのactive pathだけを読み、全noteのSHA-256一致を要求する。
   未管理/手編集/prune保護note、partial/旧manifest、export後に変わったnoteは公開せずfail-closed。
@@ -51,14 +51,23 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# --- repo 内サイドカー（フィルタ4ファイル + フォント）。欠落は即 exit 1（fallback 禁止） ---
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from teamagent.client_identity import client_identity_key  # noqa: E402
+from teamagent.client_properties import (  # noqa: E402
+    identity_value_map,
+    resolve_client_industry,
+)
+
+# --- repo 内サイドカー（フィルタ4ファイル + フォント）。欠落は即 exit 1（fallback 禁止） ---
 SIDECAR_DIR = _REPO_ROOT / "data" / "connect_web_filters"
 SIDECAR_FILES = (
     "exclude_stems.json",      # Agent 分類の非ナレッジ除外（タイトル stem のみ）
     "exclude_source_keys.json",  # 不変な source_type:external_id による除外
     "dedup_drop_map.json",     # 別形式/旧版の非正本折り畳み（stem → 正本 stem）
     "weird_rename_high.json",  # 不明瞭命名 → 推奨タイトル（表示のみ・可逆）
+    "client_industry.json",   # 監査済み企業業種（資料/商品側のAI分類より優先）
     "inter-var.b64",           # InterVar フォント（woff2 base64）
 )
 OPTIONAL_SIDECAR_FILES = ("tag_alias.json", "client_alias.json")
@@ -164,10 +173,20 @@ def bant_short(b):
     return m.group(1) if m else b[:1]
 
 
-# === 施策タイムライン: 営業FB時系列（### ---- 見出し区切り）のパース ===
-FB_HEAD_RE = re.compile(r"^###\s*-{2,}\s*(.*)$", re.M)
+# === 施策タイムライン: 営業FB時系列（### <日付|----> 見出し区切り）のパース ===
+# exporter は occurred_at があれば `### YYYY-MM-DD <ソース名>`、無ければ旧互換の
+# `### ---- <ソース名>` を出す。専用section内で両形式だけを読み、通常のH3はFBにしない。
+FB_SECTION_RE = re.compile(
+    r"^##\s+営業FB時系列（新しい順）\s*$([\s\S]*?)(?=^##\s|\Z)", re.M
+)
+FB_HEAD_RE = re.compile(
+    r"^###[ \t]+(?:(?P<date>\d{4}-\d{2}-\d{2})|(?P<undated>-{2,}))[ \t]*(?P<head>.*)$",
+    re.M,
+)
 FB_EPOCH_RE = re.compile(r"(1[0-9]{9})(?:\.\d+)?\s*$")
-FB_DATE_RE = re.compile(r"^>\s*\[(\d{4}-\d{2}-\d{2})[^\]]*\]", re.M)
+# 現行 exporter は Markdown 注入対策で角括弧を `\[` / `\]` に退避するため、
+# 退避前後の引用日付をどちらも後方互換で読めるようにする。
+FB_DATE_RE = re.compile(r"^>\s*\\?\[(\d{4}-\d{2}-\d{2})[^\]]*\\?\]", re.M)
 FB_FIELD_RE = re.compile(
     r"^-\s*(フェーズ|BANT|ポジ反応|ネガ反応|次アクション|提案メニュー)\s*[:：]\s*(.*)$"
 )
@@ -187,17 +206,23 @@ FB_MAX_EVENTS = 30
 FB_SENDER_RE = re.compile(
     r"送信者[ \t　]*[:：][ \t　]*([^\n]*?)(?=[ \t　]*(?:タイムスタンプ|連携ステータス)[ \t　]*[:：]|\n|$)"
 )
+# 300字capが次フィールド名の途中で切れる実データ（例: `送信者: 氏名タイムスタ`）を
+# 担当者名へ混ぜない。短い一般語まで削らないよう、十分に固有なprefix以降だけを対象にする。
+FB_SENDER_TRUNCATED_FIELD_RE = re.compile(
+    r"[ \t　]*(?:タイムス(?:タ(?:ン(?:プ)?)?)?|連携ステ(?:ー(?:タ(?:ス)?)?)?)$"
+)
 FB_TS_RE = re.compile(r"タイムスタンプ[ \t　]*[:：][ \t　]*(\d{4})/(\d{1,2})/(\d{1,2})(?=[^\d\n])")
 TANS_MAX = 5  # カルテ/テーブルに出す担当者数の上限
 
 
 def _norm_sender(raw):
-    """送信者名の正規化: （/(/_ 以降を切除 → 全半角スペース除去 → 先頭20字。
+    """送信者名の正規化: 切れた次フィールド名と（/(/_ 以降を切除 → 空白除去 → 20字。
 
     実データの表記ゆれ（「佐藤杏香(Sato」「川上壮汰_KawakamiSota」「小倉　岳之（ogura…」）を
     同一人物へ寄せる決定論ルール。取れなければ空文字。
     """
-    s = re.split(r"[（(_]", raw, maxsplit=1)[0]
+    s = FB_SENDER_TRUNCATED_FIELD_RE.sub("", raw.rstrip())
+    s = re.split(r"[（(_]", s, maxsplit=1)[0]
     return s.replace(" ", "").replace("　", "").strip()[:20]
 
 
@@ -250,22 +275,28 @@ def _sort_fb_events(events):
 def _parse_fb_events_raw(body: str) -> list[dict]:
     """クライアント md 本文の営業FB時系列を未dedup・未capでパースする（fail-open）。
 
-    見出し `### ---- <ソース名> <slack ts epoch|row N>` で区切り、
-    各 FB の `- フェーズ:` 等のフィールド行と日付（`> [YYYY-MM-DD HH:MM]` 行
-    → 見出し末尾の epoch 秒 → UTC+9 → 引用の「タイムスタンプ: YYYY/MM/DD」の3段
-    フォールバック）を拾う。担当タグ用に引用の「送信者:」も抽出する（ev["by"]・
+    見出し `### <YYYY-MM-DD|----> <ソース名> <slack ts epoch|row N>` で区切り、
+    各 FB の `- フェーズ:` 等のフィールド行と日付（見出しの日付
+    → `> [YYYY-MM-DD HH:MM]` 行 → 見出し末尾の epoch 秒 → UTC+9
+    → 引用の「タイムスタンプ: YYYY/MM/DD」の4段フォールバック）を拾う。
+    担当タグ用に引用の「送信者:」も抽出する（ev["by"]・
     フォーム由来のみ実名が入る。Slack直投稿は <@UID> のみ → 空文字）。
     壊れた見出し/欠損フィールドは空文字で許容し、例外は漏らさない
     （このパースの失敗で build を止めない）。
     """
     try:
-        heads = list(FB_HEAD_RE.finditer(body or ""))
+        raw_body = body or ""
+        section = FB_SECTION_RE.search(raw_body)
+        # 実カルテでは必ず専用section内だけを読む。純関数test/旧呼出しの
+        # heading fragmentはsectionなしでも互換維持する（FB_HEAD_REが通常H3を除外）。
+        timeline_body = section.group(1) if section else raw_body
+        heads = list(FB_HEAD_RE.finditer(timeline_body))
         events = []
         for i, m in enumerate(heads):
             try:
-                head = m.group(1).strip()
-                end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
-                sec = body[m.end():end]
+                head = m.group("head").strip()
+                end = heads[i + 1].start() if i + 1 < len(heads) else len(timeline_body)
+                sec = timeline_body[m.end():end]
                 nx = re.search(r"^#{1,6}\s", sec, re.M)  # 次の見出し（## 関連資料 / 非FBのh3 等）で打ち切り
                 if nx:
                     sec = sec[:nx.start()]
@@ -275,10 +306,12 @@ def _parse_fb_events_raw(body: str) -> list[dict]:
                 sm = FB_SENDER_RE.search(quote)
                 if sm:
                     ev["by"] = _norm_sender(sm.group(1))
+                if m.group("date"):
+                    ev["d"] = m.group("date")
                 dm = FB_DATE_RE.search(sec)
-                if dm:
+                if not ev["d"] and dm:
                     ev["d"] = dm.group(1)
-                else:
+                elif not ev["d"]:
                     tsm = FB_EPOCH_RE.search(head)
                     if tsm:
                         try:
@@ -621,6 +654,7 @@ TITLE_OVERRIDE: dict[str, str] = {}  # weird_rename_high.json（portable stem ke
 # サイドカー削除で元挙動へ戻る可逆設計のため、名寄せは「載っている値だけ正本へ寄せる」。
 TAG_ALIAS: dict = {}       # {"industry":{variant:canonical,...},"solution":{...}}
 CLIENT_ALIAS: dict = {}    # client_alias.json の "client": {variant:canonical,...}
+CLIENT_INDUSTRY_BY_IDENTITY: dict = {}  # client_industry.json の監査済み企業業種
 
 
 def _canon_industry(v):
@@ -1526,7 +1560,7 @@ const DTCOLOR={"提案書":"#8a7cf5","報告書":"#54b981","議事録":"#4f9df5"
 function dtColor(t){t=t||"";if(DTCOLOR[t])return DTCOLOR[t];if(/価格|契約/.test(t))return "#d0912f";return "#8a8a8a";}
 function tlEvents(c){
  const ev=(c.tl||[]).map(e=>({d:e.d||"",kind:"fb",e}));
- if(c.cnorm)DATA.docs.forEach(d=>{if(d.cnorm&&d.cnorm===c.cnorm)ev.push({d:d.modified||"",kind:"doc",e:d});});
+ (c.ds||[]).forEach(s=>{const d=dByStem[s];if(d)ev.push({d:d.modified||"",kind:"doc",e:d});});
  ev.sort((a,b)=>(b.d||"").localeCompare(a.d||""));  /* 日付降順・日付なしは末尾 */
  return ev;
 }
@@ -1696,10 +1730,8 @@ function renderRight(){
 function tagJump(t){runQuery(tagQ(t));}
 
 /* ===== Bases風テーブル ===== */
-/* 最終接点 = max(最終FB日, 関連docsの最新modified)。cnorm単位で事前集計 */
-const LASTDOC={};
-DATA.docs.forEach(d=>{if(d.cnorm&&d.modified&&(!(d.cnorm in LASTDOC)||d.modified>LASTDOC[d.cnorm]))LASTDOC[d.cnorm]=d.modified;});
-function lastOf(c){const a=c.lastfb||"",b=(c.cnorm&&LASTDOC[c.cnorm])||"";return a>b?a:b;}
+/* 最終接点 = max(最終FB日, 安全な活動資料の最新modified)。build時に確定済み。 */
+function lastOf(c){return c.last||c.lastfb||"";}
 let tblSort={key:"act",dir:-1},tblFilter={q:"",ind:"",phase:"",temp:"",hw:false};   /* モジュール変数=テーブル⇄カルテ往復で選択状態維持 */
 /* 列順: 実務列（フェーズ/最終接点/担当/次アクション）を初期表示域へ。各エントリ定義は不変・順序のみ */
 const TCOLS=[["name","取引先",c=>c.name,0],["phase","フェーズ",c=>c.phase,0],["last","最終接点",c=>lastOf(c),0],["tans","担当",c=>(c.tans||[]).join("・"),0],["nx","次アクション",c=>c.nx||"",0],["industry","業界",c=>c.industry,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1]];
@@ -1826,7 +1858,9 @@ function initGraph(){
   if(!tot)return esc(LB[opt.cluster])+"でまとめています（表示中の対象がありません）";   /* 全島が空（対象typeを非表示にした等）で「まとめています」だけ出すと嘘になる */
   let s=esc(LB[opt.cluster])+"でまとめています";
   if(un)s+="（"+uk+" "+un+"件は"+uk+"島）";
-  if(cCenters[COTHER])s+="<br>種類が多いため上位"+(CLMAX-1)+"件のみ島にし、残り"+clOther.size+"種は「"+COTHER+"」島にまとめています";
+  /* cCenters["その他"] は phase の実在値でも成立する。溢れ説明の判定に使うと
+     「残り0種はその他島」と虚偽表示するため、実際の溢れ集合だけを正にする。 */
+  if(clOther.size)s+="<br>種類が多いため上位"+(CLMAX-1)+"件のみ島にし、残り"+clOther.size+"種は「"+COTHER+"」島にまとめています";
   if(opt.cluster==="doc_type"||opt.cluster==="solution")s+="<br>資料でまとめています（取引先は資料に引かれ周辺に配置）";
   return s;}
  function ncol(n){if(n.type==="tag")return "hsl(254,42%,72%)";if(n.type==="doc")return "rgba(150,150,156,.6)";return opt.groupBy==="phase"?(PHASECOLOR[n.phase]||"#9a9a9a"):colorOf(n.industry);}
@@ -2122,6 +2156,21 @@ def _load_alias_sidecar(name: str, subkey: str | None = None) -> dict:
     return data
 
 
+def _load_required_string_map(name: str, subkey: str) -> dict[str, str]:
+    """必須property sidecarを厳格に読み、破損時は空fallbackせず停止する。"""
+    try:
+        data = json.loads(_read_sidecar(name))
+        values = data[subkey]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        _die(f"必須サイドカー {name} の形式が不正です")
+    if not isinstance(values, dict) or not all(
+        isinstance(key, str) and key.strip() and isinstance(value, str) and value.strip()
+        for key, value in values.items()
+    ):
+        _die(f"必須サイドカー {name} の形式が不正です")
+    return values
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -2272,7 +2321,7 @@ def _stats_path(out: Path) -> Path:
 
 
 def _sanity_gate(stats_path: Path, new_stats: dict[str, int], allow_shrink: bool) -> None:
-    """前回統計との比較。取引先数/資料数/バイト数のいずれかが 20% 超減なら exit 1。
+    """前回統計との比較。取引先数/資料数/FB件数/バイト数のいずれかが 20% 超減なら exit 1。
 
     典型事故: Vault の部分 export・サイドカーの過剰除外・ingest の取りこぼしで
     データが痩せたまま 16 名へ配信してしまうこと。意図した縮小は --allow-shrink で明示。
@@ -2290,7 +2339,12 @@ def _sanity_gate(stats_path: Path, new_stats: dict[str, int], allow_shrink: bool
     if not isinstance(prev, dict):
         _die(f"前回統計 {stats_path} の形式が不正です（dict でない）。確認のうえ削除して再実行してください")
     shrunk: list[str] = []
-    for key, label in (("clients", "取引先数"), ("docs", "資料数"), ("bytes", "バイト数")):
+    for key, label in (
+        ("clients", "取引先数"),
+        ("docs", "資料数"),
+        ("timeline_events", "営業FB件数"),
+        ("bytes", "バイト数"),
+    ):
         prev_v = prev.get(key)
         if not isinstance(prev_v, (int, float)) or isinstance(prev_v, bool) or prev_v <= 0:
             continue  # 旧形式や欠損キーは比較対象外（新統計の保存で次回から効く）
@@ -2333,7 +2387,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     global VAULT, CLIENTS, DOCS, REPORTS, EXCL, EXCL_N, EXCL_SOURCE_KEYS
     global SOURCE_EXCLUDED_STEMS, DOC_DROP, TITLE_OVERRIDE, CHUNK_DROP
-    global TAG_ALIAS, CLIENT_ALIAS, ACTIVE_MANAGED_PATHS, EXPORT_MANIFEST_SHA256
+    global TAG_ALIAS, CLIENT_ALIAS, CLIENT_INDUSTRY_BY_IDENTITY
+    global ACTIVE_MANAGED_PATHS, EXPORT_MANIFEST_SHA256
     global BUILD_INPUTS_SHA256, SIDECAR_SNAPSHOTS
 
     args = _parse_args(argv)
@@ -2374,6 +2429,12 @@ def main(argv: list[str] | None = None) -> int:
     # --- 表示名寄せサイドカー（任意適用・可逆）: 欠落は空 dict＝素通り（必須サイドカーと扱いを分ける） ---
     TAG_ALIAS = _load_alias_sidecar("tag_alias.json")
     CLIENT_ALIAS = _load_alias_sidecar("client_alias.json", "client")
+    try:
+        CLIENT_INDUSTRY_BY_IDENTITY = identity_value_map(
+            _load_required_string_map("client_industry.json", "industry")
+        )
+    except ValueError:
+        _die("必須サイドカー client_industry.json の企業名が衝突しています")
 
     # --- 以下、元スクリプト L149-332 のパイプラインをそのまま実行（ロジック不変） ---
     clients = []
@@ -2390,20 +2451,23 @@ def main(argv: list[str] | None = None) -> int:
         _cname = _canon_client(_raw_cname)  # 取引先名寄せ: 正本化してから norm()/dedup へ
         _client_body = body_of(t)
         _tl_raw = _parse_fb_events_raw(_client_body)
+        _generated_client = fm.get("generated_by") == _EXPORT_VAULT_GENERATOR
         clients.append({
             "stem": f.stem, "name": _cname, "cnorm": norm(_cname),
             "industry": _canon_industry(fm.get("industry", "")), "phase": fm.get("deal_phase", ""),
             "bant": fm.get("bant_score", ""), "bantg": bant_short(fm.get("bant_score", "")),
             "fb": to_int(fm.get("fb_count", "0")), "doc": to_int(fm.get("doc_count", "0")),
             "md": client_md(t), "tl": _sort_fb_events(dedup_fb_events(list(_tl_raw))),
+            "_industry_source": fm.get("industry_source", "") if _generated_client else "legacy",
             "_raw_name": _raw_cname, "_tl_raw": _tl_raw, "_wl": parse_links(_client_body),
         })
 
-    # 取引先名寄せ(Tier1): 正規化が一致する表記ゆれ(法人格/敬称/空白/中黒)を統合。
+    # 取引先名寄せ(Tier1): ownership判定と同じ保守的identityで、名前境界にある
+    # 法人格/敬称と空白/中黒だけを吸収する。語中の「さま」等は削らない。
     # 既存bookmark用stemは従来代表のまま保ち、表示property/リンク/FBだけを合流する（元Vault不変）。
     _cgroups = defaultdict(list)
     for _c in clients:
-        _cgroups[norm(_c["name"])].append(_c)
+        _cgroups[client_identity_key(_c["name"]) or norm(_c["name"])].append(_c)
     clients = []
     _explicit_canonical_names = {
         unicodedata.normalize("NFC", value) for value in CLIENT_ALIAS.values()
@@ -2424,7 +2488,7 @@ def main(argv: list[str] | None = None) -> int:
             _canon,
         )
         if _property_source is not _canon:
-            for _field in ("md", "industry", "phase", "bant", "bantg"):
+            for _field in ("md", "industry", "phase", "bant", "bantg", "_industry_source"):
                 _canon[_field] = _property_source[_field]
         _raw_fb_count = sum(c["fb"] for c in _grp)
         _member_raw_tl = [c.pop("_tl_raw", []) for c in _grp]
@@ -2459,6 +2523,24 @@ def main(argv: list[str] | None = None) -> int:
                 _merged_wl.setdefault(_target_key, (_target, _ctx))
         _canon["_wl"] = list(_merged_wl.values())
         _canon["_is_multi_client_group"] = len(_grp) > 1
+        _canon["_identity_variants"] = sorted(
+            {
+                value
+                for _member in _grp
+                for value in (
+                    _member["name"],
+                    _member["stem"],
+                    _member.get("_raw_name", ""),
+                )
+                if value
+            }
+        )
+        _canon["_industry_fallbacks"] = [
+            _member["industry"]
+            for _member in _grp
+            if _member["industry"]
+            and _member.get("_industry_source") in {"master", "exact_consensus", "legacy"}
+        ]
         _canon.pop("_raw_name", None)
         # unique化してから日付順・30件cap（cap前の件数をfb propertyへ使う）。
         _canon["tl"] = _sort_fb_events(_unique_tl)
@@ -2488,9 +2570,20 @@ def main(argv: list[str] | None = None) -> int:
             if ln.startswith("> "):
                 ex = _strip_self_tags(ln[2:].strip())[:220]
                 break
-        _dclient = _canon_client(fm.get("client", ""))  # doc側 client も同じ正本化（doc→client リンク一致）
-        if _is_self_org(_dclient):         # 自社は取引先に出さない（資料自体は残す）
-            _dclient = ""
+        # 現行exporterのclient/projectはDB source truth。旧manifestではprojectが無く、
+        # clientだけをprimaryとして扱うため既存Vaultも後方互換で読める。
+        _dprimary = _canon_client(fm.get("client", ""))
+        # projectは親会社aliasへロールアップせず、source truthとの厳密identityだけを使う。
+        _dproject = fm.get("project", "")
+        if _is_self_org(_dprimary):
+            _dprimary = ""
+        if _is_self_org(_dproject):
+            _dproject = ""
+        _dclient = _canon_client(fm.get("client", ""))
+        if _is_self_org(_dclient):
+            _dclient = _dproject
+        if not _dclient:
+            _dclient = _dprimary or _dproject
         _msrc = re.search(r"^- 出典: \[(\w+)\]", t, re.M)
         _src = {"gdrive": "Drive", "gsheets": "フォーム", "slack": "Slack"}.get(
             _msrc.group(1) if _msrc else "", ""
@@ -2506,6 +2599,9 @@ def main(argv: list[str] | None = None) -> int:
         docs.append({
             "stem": f.stem, "title": _dtitle,
             "client": _dclient, "cnorm": norm(_dclient),
+            # HTMLへは出さず、client noteの明示linkとの積集合を作るためだけに使う。
+            "_primary_owner_key": client_identity_key(_dprimary),
+            "_project_owner_key": client_identity_key(_dproject),
             "industry": _canon_industry(fm.get("industry", "")), "solution": _canon_solution(_dsol),
             "doc_type": fm.get("doc_type", ""), "modified": fm.get("modified_at", ""),
             "src": _src,
@@ -2533,12 +2629,16 @@ def main(argv: list[str] | None = None) -> int:
     _c_stems = {c["stem"] for c in clients}
     _c_norm = {}
     for _client in clients:
-        _c_norm[norm(_client["name"])] = _client["stem"]
-        _c_norm.setdefault(norm(_client["stem"]), _client["stem"])
+        for _variant in _client.pop("_identity_variants", []):
+            _variant_key = client_identity_key(_variant)
+            if _variant_key:
+                _c_norm[_variant_key] = _client["stem"]
+        _c_norm[client_identity_key(_client["name"])] = _client["stem"]
+        _c_norm.setdefault(client_identity_key(_client["stem"]), _client["stem"])
     for _variant, _canonical_name in CLIENT_ALIAS.items():
-        _canonical_stem = _c_norm.get(norm(_canonical_name))
+        _canonical_stem = _c_norm.get(client_identity_key(_canonical_name))
         if _canonical_stem:
-            _c_norm[norm(_variant)] = _canonical_stem
+            _c_norm[client_identity_key(_variant)] = _canonical_stem
     _d_stems = {d["stem"] for d in docs}
     _d_portable = {}
     for _stem in sorted(_d_stems):
@@ -2559,12 +2659,12 @@ def main(argv: list[str] | None = None) -> int:
             stem = target[5:]
             return stem if stem in _d_stems else _d_portable.get(_portable_path_key(stem))
         # bare targetがclient/docの両方に一致する場合は、従来resolverどおりclient優先。
-        if target in _c_stems or norm(target) in _c_norm:
+        if target in _c_stems or client_identity_key(target) in _c_norm:
             return None
         return target if target in _d_stems else _d_portable.get(_portable_path_key(target))
 
-    # 全client cardの資料数を、最終的に公開される資料（active manifest適合かつ
-    # exclude/dedup後）へ解決できるoutgoing wikilinkのdistinct数で再計数する。
+    # 全client cardについて、最終的に公開される資料（active manifest適合かつ
+    # exclude/dedup後）へ解決できるoutgoing wikilink集合を確定する。
     for _client in clients:
         _linked_doc_stems = []
         _seen_doc_stems = set()
@@ -2573,25 +2673,54 @@ def main(argv: list[str] | None = None) -> int:
             if _resolved_stem and _resolved_stem not in _seen_doc_stems:
                 _seen_doc_stems.add(_resolved_stem)
                 _linked_doc_stems.append(_resolved_stem)
-        _client["doc"] = len(_linked_doc_stems)
-        if _client.pop("_is_multi_client_group", False):
-            # exporterのindustry契約と同様に、merged visible linked docsの最頻値を使う。
-            # link順は正式note先頭なので、同数時のCounter先勝ちも決定的。
-            _linked_industries = [
-                _docs_by_stem[_stem]["industry"]
-                for _stem in _linked_doc_stems
-                if _docs_by_stem[_stem]["industry"]
-            ]
-            if _linked_industries:
-                _client["industry"] = Counter(_linked_industries).most_common(1)[0][0]
+        _client.pop("_is_multi_client_group", False)
 
-    # 最終接点 = max(最終FB日, 関連資料の最新更新日)。タグ用に事前計算（JS テーブル列 lastOf と同式）
-    _lastdoc: dict[str, str] = {}
-    for _d in docs:
-        if _d["cnorm"] and _d["modified"] and _d["modified"] > _lastdoc.get(_d["cnorm"], ""):
-            _lastdoc[_d["cnorm"]] = _d["modified"]
+        # 活動資料は「client noteからの明示link」と「DB primary client または
+        # cls_project のexact identity」の積集合。title-onlyで関連する汎用事例は
+        # Markdown/graphには残すが、資料数・timeline・最終接点へ誤昇格させない。
+        _client_owner_key = client_identity_key(_client["name"])
+        _safe_doc_stems = []
+        _primary_industries = []
+        _project_industries = []
+        for _stem in _linked_doc_stems:
+            _linked_doc = _docs_by_stem[_stem]
+            _primary_match = bool(
+                _client_owner_key
+                and _linked_doc["_primary_owner_key"] == _client_owner_key
+            )
+            _project_match = bool(
+                _client_owner_key
+                and _linked_doc["_project_owner_key"] == _client_owner_key
+            )
+            if not (_primary_match or _project_match):
+                continue
+            _safe_doc_stems.append(_stem)
+            if _primary_match and _linked_doc["industry"]:
+                _primary_industries.append(_linked_doc["industry"])
+            elif _project_match and _linked_doc["industry"]:
+                _project_industries.append(_linked_doc["industry"])
+        _client["ds"] = _safe_doc_stems
+        _client["doc"] = len(_safe_doc_stems)
+        # company業種は資料の多数決にしない。監査済みmasterを優先し、visibleな
+        # exact-owner資料同士が食い違えば空欄へ倒す。visible資料が無い場合だけ、
+        # exporterが同じ規則で確定したfrontmatter値を保持する。
+        if not _primary_industries and not _project_industries:
+            _primary_industries = _client.get("_industry_fallbacks", [])
+        _client["industry"] = resolve_client_industry(
+            _client["name"],
+            _primary_industries,
+            _project_industries,
+            CLIENT_INDUSTRY_BY_IDENTITY,
+        )
+
+    # 最終接点 = max(最終FB日, 安全な活動資料の最新更新日)。タグ/JS共通の確定値。
     for _c in clients:
-        _c["last"] = max(_c["lastfb"], _lastdoc.get(_c["cnorm"], ""))
+        _safe_doc_dates = [
+            _docs_by_stem[_stem]["modified"]
+            for _stem in _c["ds"]
+            if _docs_by_stem[_stem]["modified"]
+        ]
+        _c["last"] = max([_c["lastfb"], *_safe_doc_dates])
 
     # タグ第1弾（クライアント側）: 温度感/（最新FBのポジネガ比）・テーブル「次アクション」列・
     # 宿題/あり（次アクションが残っているのに最終接点が31日超過去 or 日付なし）
@@ -2674,14 +2803,14 @@ def main(argv: list[str] | None = None) -> int:
             s = tgt[8:]
             if s in _c_stems:
                 return "c:" + s
-            st = _c_norm.get(norm(s))
+            st = _c_norm.get(client_identity_key(s))
             return "c:" + st if st else None
         if tgt.startswith("docs/"):
             stem = _resolve_visible_doc_stem(tgt)
             return "d:" + stem if stem else None
         if tgt in _c_stems:
             return "c:" + tgt
-        st = _c_norm.get(norm(tgt))
+        st = _c_norm.get(client_identity_key(tgt))
         if st:
             return "c:" + st
         resolved_doc = _resolve_visible_doc_stem(tgt)
@@ -2736,6 +2865,10 @@ def main(argv: list[str] | None = None) -> int:
     for _coll in (clients, docs, reports):   # 生ターゲットは payload に載せない
         for _n in _coll:
             _n.pop("_wl", None)
+            _n.pop("_primary_owner_key", None)
+            _n.pop("_project_owner_key", None)
+            _n.pop("_industry_source", None)
+            _n.pop("_industry_fallbacks", None)
 
     payload = {"manifest_sha256": EXPORT_MANIFEST_SHA256,
                "build_inputs_sha256": BUILD_INPUTS_SHA256,
@@ -2774,9 +2907,14 @@ def main(argv: list[str] | None = None) -> int:
     # --- サニティゲート（out を上書きする前に判定） ---
     stats_path = _stats_path(out)
     qf_counts = _quickfilter_counts(clients, docs, _today)   # 横断/（xc）確定後に算出
+    _tl_events = sum(len(c.get("tl") or []) for c in clients)
+    _dated_fb = sum(1 for c in clients for ev in c.get("tl") or [] if ev.get("d"))
     new_stats = {
         "clients": len(clients),
         "docs": len(docs),
+        # parser/exporter の見出し契約がずれて FB が全消失した事故を次回生成時に fail-loud。
+        "timeline_events": _tl_events,
+        "timeline_events_dated": _dated_fb,
         "bytes": len(html_bytes),
         "manifest_sha256": EXPORT_MANIFEST_SHA256,
         "build_inputs_sha256": BUILD_INPUTS_SHA256,
@@ -2794,8 +2932,6 @@ def main(argv: list[str] | None = None) -> int:
     _tl_bytes = sum(
         len(json.dumps(c["tl"], ensure_ascii=False).encode("utf-8")) for c in clients if c.get("tl")
     )
-    _tl_events = sum(len(c.get("tl") or []) for c in clients)
-
     print(f"✅ 生成: {out}")
     print(
         f"   サイズ: {len(html_bytes) // 1024} KB / clients={len(clients)} docs={len(docs)} "
@@ -2805,7 +2941,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"   施策タイムライン: FBイベント{_tl_events}件 / tlペイロード {_tl_bytes // 1024} KB")
     _tans_clients = sum(1 for c in clients if c.get("tans"))
     _tans_names = {n for c in clients for n in c.get("tans") or []}
-    _dated_fb = sum(1 for c in clients for ev in c.get("tl") or [] if ev.get("d"))
     print(
         f"   担当タグ: {_tans_clients} クライアント / 担当名 {len(_tans_names)} 種 / "
         f"日付ありFB {_dated_fb}/{_tl_events} 件"
