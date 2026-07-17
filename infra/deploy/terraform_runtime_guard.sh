@@ -12,7 +12,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="9"
+GUARD_VERSION="10"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -2719,6 +2719,60 @@ validate_external_hardening_plan() {
     die "API Gateway origin/loggingまたはLambda log retention hardening planがexact契約を満たしません"
 }
 
+validate_auto_created_log_retention_plan() {
+  local plan_json="$1"
+  jq -e '
+    def change($address):
+      [.resource_changes[] | select(.address == $address)] |
+      if length == 1 then .[0].change else error("required log group change missing") end;
+    def tags_are_managed($after):
+      ($after.tags // {}) == {
+        Environment: "dev",
+        ManagedBy: "Terraform",
+        Project: "TeamAgent",
+        Version: "v3.0"
+      } and
+      ($after.tags_all // {}) == {
+        Environment: "dev",
+        ManagedBy: "Terraform",
+        Project: "TeamAgent",
+        Version: "v3.0"
+      };
+    def retention_adoption($address; $name):
+      change($address) as $log |
+      $log.actions == ["update"] and
+      ($log.importing // null) == {id: $name} and
+      $log.before.name == $name and
+      $log.before.retention_in_days == 0 and
+      $log.after.name == $name and
+      $log.after.retention_in_days == 30 and
+      (($log.before.kms_key_id // null) == ($log.after.kms_key_id // null)) and
+      tags_are_managed($log.after) and
+      (($log.before | del(.retention_in_days, .tags, .tags_all)) ==
+       ($log.after | del(.retention_in_days, .tags, .tags_all)));
+    . as $plan |
+    [
+      [
+        "aws_cloudwatch_log_group.codebuild_aiia_image_builder",
+        "/aws/codebuild/teamagent-dev-aiia-image-builder"
+      ],
+      [
+        "aws_cloudwatch_log_group.codebuild_image_builder",
+        "/aws/codebuild/teamagent-dev-image-builder"
+      ],
+      [
+        "aws_cloudwatch_log_group.reminder_notify",
+        "/aws/lambda/teamagent-dev-reminders-notify"
+      ],
+      [
+        "aws_cloudwatch_log_group.tiktok_dispatch",
+        "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch"
+      ]
+    ] | all(. as $spec | $plan | retention_adoption($spec[0]; $spec[1]))
+  ' "$plan_json" >/dev/null ||
+    die "auto-created CodeBuild/Lambda log groupはexact import・30日・KMS不変のin-place更新だけを許可します"
+}
+
 validate_runtime_monitoring_plan() {
   local plan_json="$1"
   jq -e '
@@ -2925,6 +2979,133 @@ validate_alarm_delivery_plan() {
     ] | all)
   ' "$plan_json" >/dev/null ||
     die "alarm delivery planがcanonical topic/configured destination/legacy排除契約を満たしません"
+}
+
+validate_log_bucket_hardening_plan() {
+  local plan_json="$1"
+  jq -e \
+    --arg account "$EXPECTED_ACCOUNT_ID" \
+    --arg region "$REGION" \
+    --arg project "$PROJECT" \
+    --arg environment "$ENVIRONMENT" '
+    def resource($address):
+      [.resource_changes[] | select(.address == $address)] |
+      if length == 1 then .[0] else error("required log bucket resource missing") end;
+    def creates_unmanaged_address($resource):
+      $resource.change.actions == ["create"] and
+      $resource.change.before == null;
+    def array:
+      if type == "array" then . else [.] end;
+    def statement($document; $sid):
+      [$document.Statement[] | select(.Sid == $sid)] |
+      if length == 1 then .[0] else error("required bucket policy statement missing") end;
+    def tls_deny($document; $bucket_arn):
+      statement($document; "DenyInsecureTransport") as $deny |
+      $deny.Effect == "Deny" and
+      $deny.Principal == "*" and
+      ($deny.Action | array) == ["s3:*"] and
+      ($deny.Resource | array | sort) ==
+        ([$bucket_arn, ($bucket_arn + "/*")] | sort) and
+      $deny.Condition == {
+        Bool: {"aws:SecureTransport": "false"}
+      };
+    ("arn:aws:s3:::" + $project + "-" + $environment +
+      "-cloudtrail-" + $account) as $cloudtrail_bucket |
+    ("arn:aws:s3:::" + $project + "-" + $environment +
+      "-bedrock-logs-" + $account) as $bedrock_bucket |
+    ("arn:aws:cloudtrail:" + $region + ":" + $account + ":trail/" +
+      $project + "-" + $environment + "-trail") as $trail_arn |
+    resource("aws_s3_bucket_versioning.cloudtrail[0]") as $cloudtrail_versioning |
+    resource("aws_s3_bucket_versioning.bedrock_logs[0]") as $bedrock_versioning |
+    resource("aws_s3_bucket_policy.cloudtrail[0]") as $cloudtrail_policy |
+    resource("aws_s3_bucket_policy.bedrock_logs[0]") as $bedrock_policy |
+    ($cloudtrail_policy.change.before.policy | fromjson) as $cloudtrail_before |
+    ($bedrock_policy.change.before.policy | fromjson) as $bedrock_before |
+    ($cloudtrail_policy.change.after.policy | fromjson) as $cloudtrail_document |
+    ($bedrock_policy.change.after.policy | fromjson) as $bedrock_document |
+    creates_unmanaged_address($cloudtrail_versioning) and
+    $cloudtrail_versioning.change.after.bucket ==
+      ($project + "-" + $environment + "-cloudtrail-" + $account) and
+    ($cloudtrail_versioning.change.after.versioning_configuration | length) == 1 and
+    $cloudtrail_versioning.change.after.versioning_configuration[0].status == "Enabled" and
+    ($cloudtrail_versioning.change.after.versioning_configuration[0].mfa_delete //
+      "Disabled") != "Enabled" and
+    creates_unmanaged_address($bedrock_versioning) and
+    $bedrock_versioning.change.after.bucket ==
+      ($project + "-" + $environment + "-bedrock-logs-" + $account) and
+    ($bedrock_versioning.change.after.versioning_configuration | length) == 1 and
+    $bedrock_versioning.change.after.versioning_configuration[0].status == "Enabled" and
+    ($bedrock_versioning.change.after.versioning_configuration[0].mfa_delete //
+      "Disabled") != "Enabled" and
+    $cloudtrail_policy.change.actions == ["update"] and
+    (($cloudtrail_policy.change.before | del(.policy)) ==
+     ($cloudtrail_policy.change.after | del(.policy))) and
+    ($cloudtrail_before | del(.Statement)) ==
+      ($cloudtrail_document | del(.Statement)) and
+    ($cloudtrail_before.Statement | length) == 2 and
+    ($cloudtrail_before.Statement | map(.Sid) | sort) ==
+      (["AWSCloudTrailAclCheck", "AWSCloudTrailWrite"] | sort) and
+    ($cloudtrail_document.Statement | length) == 3 and
+    ($cloudtrail_document.Statement | map(.Sid) | sort) ==
+      (["AWSCloudTrailAclCheck", "AWSCloudTrailWrite", "DenyInsecureTransport"] | sort) and
+    ($cloudtrail_before.Statement | sort_by(.Sid)) ==
+      ([$cloudtrail_document.Statement[] |
+        select(.Sid != "DenyInsecureTransport")] | sort_by(.Sid)) and
+    (
+      statement($cloudtrail_document; "AWSCloudTrailAclCheck") as $acl |
+      $acl.Effect == "Allow" and
+      $acl.Principal == {Service: "cloudtrail.amazonaws.com"} and
+      ($acl.Action | array) == ["s3:GetBucketAcl"] and
+      ($acl.Resource | array) == [$cloudtrail_bucket] and
+      $acl.Condition == {
+        StringEquals: {"aws:SourceArn": $trail_arn}
+      }
+    ) and
+    (
+      statement($cloudtrail_document; "AWSCloudTrailWrite") as $write |
+      $write.Effect == "Allow" and
+      $write.Principal == {Service: "cloudtrail.amazonaws.com"} and
+      ($write.Action | array) == ["s3:PutObject"] and
+      ($write.Resource | array) ==
+        [($cloudtrail_bucket + "/AWSLogs/" + $account + "/*")] and
+      $write.Condition == {
+        StringEquals: {
+          "s3:x-amz-acl": "bucket-owner-full-control",
+          "aws:SourceArn": $trail_arn
+        }
+      }
+    ) and
+    tls_deny($cloudtrail_document; $cloudtrail_bucket) and
+    $bedrock_policy.change.actions == ["update"] and
+    (($bedrock_policy.change.before | del(.policy)) ==
+     ($bedrock_policy.change.after | del(.policy))) and
+    ($bedrock_before | del(.Statement)) ==
+      ($bedrock_document | del(.Statement)) and
+    ($bedrock_before.Statement | length) == 1 and
+    ($bedrock_before.Statement | map(.Sid)) == ["AllowBedrockPut"] and
+    ($bedrock_document.Statement | length) == 2 and
+    ($bedrock_document.Statement | map(.Sid) | sort) ==
+      (["AllowBedrockPut", "DenyInsecureTransport"] | sort) and
+    ($bedrock_before.Statement | sort_by(.Sid)) ==
+      ([$bedrock_document.Statement[] |
+        select(.Sid != "DenyInsecureTransport")] | sort_by(.Sid)) and
+    (
+      statement($bedrock_document; "AllowBedrockPut") as $write |
+      $write.Effect == "Allow" and
+      $write.Principal == {Service: "bedrock.amazonaws.com"} and
+      ($write.Action | array) == ["s3:PutObject"] and
+      ($write.Resource | array) ==
+        [($bedrock_bucket + "/AWSLogs/" + $account + "/*")] and
+      $write.Condition == {
+        StringEquals: {
+          "s3:x-amz-acl": "bucket-owner-full-control",
+          "aws:SourceAccount": $account
+        }
+      }
+    ) and
+    tls_deny($bedrock_document; $bedrock_bucket)
+  ' "$plan_json" >/dev/null ||
+    die "CloudTrail/Bedrock log bucketがversioning/TLS/service delivery契約を満たしません"
 }
 
 validate_retired_builder_and_deployment_boundary_plan() {
@@ -3255,7 +3436,9 @@ validate_runtime_migration_plan() {
   validate_runtime_rule_staging "$plan_json" "$snapshot"
   validate_canary_vpce_plan "$plan_json" "$snapshot"
   validate_external_hardening_plan "$plan_json"
+  validate_auto_created_log_retention_plan "$plan_json"
   validate_alarm_delivery_plan "$plan_json"
+  validate_log_bucket_hardening_plan "$plan_json"
   validate_runtime_monitoring_plan "$plan_json"
   validate_retired_builder_and_deployment_boundary_plan "$plan_json"
   validate_exact_runtime_iam_plan "$plan_json"

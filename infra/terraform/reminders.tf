@@ -43,6 +43,9 @@ resource "aws_cloudwatch_log_group" "reminder_notify" {
 
   lifecycle {
     prevent_destroy = true
+    # Retention adoption must not associate or disassociate a pre-existing KMS
+    # key. Encryption changes require a separately reviewed key-policy rollout.
+    ignore_changes = [kms_key_id]
   }
 }
 
@@ -150,10 +153,9 @@ resource "aws_iam_role_policy" "morning_digest_reminders" {
 data "archive_file" "reminder_notify" {
   count            = local.rem_enabled
   type             = "zip"
-  source_dir       = "${path.module}/lambda/reminder_notify"
+  source_file      = "${path.module}/lambda/reminder_notify/handler.py"
   output_path      = "${path.module}/build/reminder_notify.zip"
   output_file_mode = "0644"
-  excludes         = ["__pycache__", "**/__pycache__/**"]
 }
 
 resource "aws_iam_role" "reminder_notify" {

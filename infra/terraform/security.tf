@@ -81,6 +81,15 @@ resource "aws_s3_bucket" "cloudtrail" {
   force_destroy = false
 }
 
+resource "aws_s3_bucket_versioning" "cloudtrail" {
+  count  = var.enable_cloudtrail ? 1 : 0
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "cloudtrail" {
   count                   = var.enable_cloudtrail ? 1 : 0
   bucket                  = aws_s3_bucket.cloudtrail[0].id
@@ -132,12 +141,27 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
           }
         }
       },
+      {
+        Sid       = "DenyInsecureTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.cloudtrail[0].arn,
+          "${aws_s3_bucket.cloudtrail[0].arn}/*",
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      },
     ]
   })
 }
 
 resource "aws_cloudtrail" "main" {
-  count = var.enable_cloudtrail ? 1 : 0
+  count = var.enable_cloudtrail && var.enable_cloudtrail_log_delivery ? 1 : 0
 
   name                          = "${var.project_name}-${var.environment}-trail"
   s3_bucket_name                = aws_s3_bucket.cloudtrail[0].id
@@ -156,7 +180,14 @@ resource "aws_cloudtrail" "main" {
     }
   }
 
-  depends_on = [aws_s3_bucket_policy.cloudtrail]
+  # AWS documents that first-time S3 versioning enablement can take up to
+  # 15 minutes to propagate. For a new bucket, apply with
+  # enable_cloudtrail_log_delivery=false, wait 15 minutes without object
+  # PUT/DELETE, then enable delivery in a second reviewed rollout.
+  depends_on = [
+    aws_s3_bucket_policy.cloudtrail,
+    aws_s3_bucket_versioning.cloudtrail,
+  ]
 }
 
 # ---------- IAM Access Analyzer ----------
@@ -174,6 +205,22 @@ resource "aws_s3_bucket" "bedrock_logs" {
   count         = var.enable_bedrock_invocation_logging ? 1 : 0
   bucket        = "${var.project_name}-${var.environment}-bedrock-logs-${data.aws_caller_identity.current.account_id}"
   force_destroy = false
+
+  lifecycle {
+    precondition {
+      condition     = var.bedrock_logs_retention_mode == "INDEFINITE"
+      error_message = "Bedrock invocation logsは明示承認なしに自動削除できません。"
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "bedrock_logs" {
+  count  = var.enable_bedrock_invocation_logging ? 1 : 0
+  bucket = aws_s3_bucket.bedrock_logs[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "bedrock_logs" {
@@ -216,6 +263,21 @@ resource "aws_s3_bucket_policy" "bedrock_logs" {
           }
         }
       },
+      {
+        Sid       = "DenyInsecureTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.bedrock_logs[0].arn,
+          "${aws_s3_bucket.bedrock_logs[0].arn}/*",
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      },
     ]
   })
 }
@@ -223,7 +285,7 @@ resource "aws_s3_bucket_policy" "bedrock_logs" {
 # Bedrock invocation logging 設定本体
 # 注：terraform-provider-aws では aws_bedrock_model_invocation_logging_configuration を利用
 resource "aws_bedrock_model_invocation_logging_configuration" "main" {
-  count = var.enable_bedrock_invocation_logging ? 1 : 0
+  count = var.enable_bedrock_invocation_logging && var.enable_bedrock_invocation_log_delivery ? 1 : 0
 
   logging_config {
     embedding_data_delivery_enabled = true
@@ -237,7 +299,10 @@ resource "aws_bedrock_model_invocation_logging_configuration" "main" {
     }
   }
 
-  depends_on = [aws_s3_bucket_policy.bedrock_logs]
+  depends_on = [
+    aws_s3_bucket_policy.bedrock_logs,
+    aws_s3_bucket_versioning.bedrock_logs,
+  ]
 }
 
 # ---------- Secrets Manager rotation ポリシードキュメント参照 ----------

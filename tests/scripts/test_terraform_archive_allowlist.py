@@ -1,4 +1,4 @@
-"""Lambda archive allowlistとpycache非依存hash契約を固定する。"""
+"""Lambda archiveをhandler.pyだけへ固定し、worktreeノイズをhashから除外する。"""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ import os
 import re
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-EXCLUDES = 'excludes         = ["__pycache__", "**/__pycache__/**"]'
 
 
 def _archive_block(path: Path, name: str) -> str:
@@ -27,69 +27,75 @@ def _archive_block(path: Path, name: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ("relative_path", "name", "source_attribute", "source", "has_excludes"),
+    ("relative_path", "name", "source"),
     [
         (
             "infra/terraform/reminders.tf",
             "reminder_notify",
-            "source_dir",
-            "${path.module}/lambda/reminder_notify",
-            True,
+            "${path.module}/lambda/reminder_notify/handler.py",
         ),
         (
             "infra/terraform/tiktok_acquire.tf",
             "tiktok_dispatch",
-            "source_dir",
-            "${path.module}/lambda/tiktok_dispatch",
-            True,
+            "${path.module}/lambda/tiktok_dispatch/handler.py",
         ),
         (
             "infra/terraform/x_research.tf",
             "x_dispatch",
-            "source_file",
             "${path.module}/lambda/x_dispatch/handler.py",
-            False,
         ),
     ],
 )
 def test_lambda_archives_are_explicit_allowlists(
     relative_path: str,
     name: str,
-    source_attribute: str,
     source: str,
-    has_excludes: bool,
 ) -> None:
     block = _archive_block(PROJECT_ROOT / relative_path, name)
     assert re.search(
-        rf"(?m)^\s*{re.escape(source_attribute)}\s*=\s*{re.escape(json.dumps(source))}\s*$",
+        rf"(?m)^\s*source_file\s*=\s*{re.escape(json.dumps(source))}\s*$",
         block,
     )
     assert re.search(r'(?m)^\s*output_file_mode\s*=\s*"0644"\s*$', block)
-    if has_excludes:
-        assert EXCLUDES in block
-        assert "source_file" not in block
-    else:
-        assert "source_dir" not in block
+    assert "source_dir" not in block
+    assert "excludes" not in block
+    assert "source {" not in block
 
 
-@pytest.mark.parametrize(
-    "relative_dir",
-    [
-        "infra/terraform/lambda/reminder_notify",
-        "infra/terraform/lambda/tiktok_dispatch",
-    ],
-)
-def test_directory_archives_contain_only_handler_and_ignored_pycache(
-    relative_dir: str,
-) -> None:
-    root = PROJECT_ROOT / relative_dir
-    unexpected = [
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.relative_to(root).as_posix() != "handler.py"
-        and "__pycache__" not in path.relative_to(root).parts
-    ]
-    assert unexpected == []
+def test_archive_provider_is_exactly_pinned_and_lock_is_tracked() -> None:
+    main = (PROJECT_ROOT / "infra/terraform/main.tf").read_text(encoding="utf-8")
+    lock_path = PROJECT_ROOT / "infra/terraform/.terraform.lock.hcl"
+    lock = lock_path.read_text(encoding="utf-8")
+    archive = re.search(
+        r"archive = \{(?P<body>.*?)\n\s*\}",
+        main,
+        flags=re.DOTALL,
+    )
+    assert archive is not None
+    assert 'source  = "hashicorp/archive"' in archive.group("body")
+    assert 'version = "= 2.8.0"' in archive.group("body")
+    provider = re.search(
+        r'provider "registry\.terraform\.io/hashicorp/archive" \{(?P<body>.*?)\n\}',
+        lock,
+        flags=re.DOTALL,
+    )
+    assert provider is not None
+    assert 'version     = "2.8.0"' in provider.group("body")
+    assert 'constraints = "2.8.0"' in provider.group("body")
+    tracked = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(PROJECT_ROOT),
+            "ls-files",
+            "--error-unmatch",
+            "infra/terraform/.terraform.lock.hcl",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.returncode == 0, tracked.stderr
 
 
 def _archive_provider_binary() -> Path | None:
@@ -102,10 +108,10 @@ def _archive_provider_binary() -> Path | None:
     return candidates[-1] if candidates else None
 
 
-def test_archive_provider_hash_is_stable_with_or_without_pycache(
+def test_archive_entry_set_and_hash_ignore_all_unlisted_worktree_files(
     tmp_path: Path,
 ) -> None:
-    """Provider実物でexcludesがZIP/hashを安定化することを確認する。"""
+    """Provider実物でsource_fileのZIPがhandler.py一件だけになることを確認する。"""
 
     terraform = shutil.which("terraform")
     provider = _archive_provider_binary()
@@ -125,6 +131,9 @@ def test_archive_provider_hash_is_stable_with_or_without_pycache(
     pycache = dirty / "__pycache__"
     pycache.mkdir()
     (pycache / "handler.cpython-314.pyc").write_bytes(b"worktree-specific-cache")
+    (dirty / ".DS_Store").write_bytes(b"finder-metadata")
+    (dirty / "handler.pyc").write_bytes(b"root-bytecode")
+    (dirty / ".handler.py.swp").write_bytes(b"editor-state")
 
     module = tmp_path / "module"
     module.mkdir()
@@ -141,18 +150,16 @@ terraform {{
 
 data "archive_file" "clean" {{
   type             = "zip"
-  source_dir       = {json.dumps(str(clean))}
+  source_file      = {json.dumps(str(clean / "handler.py"))}
   output_path      = {json.dumps(str(module / "clean.zip"))}
   output_file_mode = "0644"
-  excludes         = ["__pycache__", "**/__pycache__/**"]
 }}
 
 data "archive_file" "dirty" {{
   type             = "zip"
-  source_dir       = {json.dumps(str(dirty))}
+  source_file      = {json.dumps(str(dirty / "handler.py"))}
   output_path      = {json.dumps(str(module / "dirty.zip"))}
   output_file_mode = "0644"
-  excludes         = ["__pycache__", "**/__pycache__/**"]
 }}
 
 output "clean_hash" {{
@@ -206,3 +213,6 @@ output "dirty_hash" {{
     values = json.loads(shown.stdout)["planned_values"]["outputs"]
     assert values["clean_hash"]["value"] == values["dirty_hash"]["value"]
     assert (module / "clean.zip").read_bytes() == (module / "dirty.zip").read_bytes()
+    for archive_path in (module / "clean.zip", module / "dirty.zip"):
+        with zipfile.ZipFile(archive_path) as archive:
+            assert archive.namelist() == ["handler.py"]

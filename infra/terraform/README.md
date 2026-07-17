@@ -37,6 +37,59 @@ runtimeを含む plain Terraform、targeted apply、旧image-only script、可�
   topicへ接続済みのexact ARNだけをplan前snapshotで受け付けます。未確認email、未接続chat、
   endpoint 0件はいずれもruntime変更前に停止します。
 
+## CloudTrail / Bedrock log bucket hardening
+
+CloudTrailとBedrock invocation logsの既存bucketは、保持中のobjectを変更せずにS3
+versioningを有効化し、bucket policyへTLS未使用通信の明示Denyを追加します。既存の
+CloudTrail/Bedrock service principal、SourceArn/SourceAccount、KMS、public access blockは
+維持します。Object Lock、MFA Delete、CloudTrail lifecycleは設定しません。
+
+Bedrock保持契約は `bedrock_logs_retention_mode = "INDEFINITE"` だけを許可します。
+削除lifecycleは存在せず、保持期間を設定するにはユーザー承認を伴う別変更が必要です。
+
+S3公式仕様では、bucketで初めてversioningを有効にした後は伝播に最大15分かかるため、
+その間のobject PUT/DELETEを避けます。
+https://docs.aws.amazon.com/AmazonS3/latest/userguide/manage-versioning-examples.html
+
+新規bucketの初回rolloutは次の2段階です。
+
+1. `enable_cloudtrail_log_delivery=false`（Bedrockは
+   `enable_bedrock_invocation_log_delivery=false`）でbucket、KMS、policy、versioningだけを
+   guarded planへ含める。
+2. versioning成功から15分待ち、bucket状態を再確認してからproducer flagをtrueにし、
+   次のreview済みplanでCloudTrail/Bedrock loggingを作成する。
+
+現liveは両producerが既に正常配信中のため、自動停止しません。versioning/TLS変更は
+第1段階runtime migrationのexact allowlistに含め、適用後15分待ってCloudTrailの最新
+log/digestとBedrock invocation deliveryを再確認してから第2段階へ進みます。これだけを
+先行適用する場合もplain/targeted Terraformは使わず、専用の一度限りmigration allowlistを
+別reviewで追加します。既存producerの停止が必要と判断された場合は、別途明示承認が必要です。
+
+## Auto-created CodeBuild / Lambda log retention
+
+次の既存log groupは削除・再作成せず、固定Terraform addressへimportして
+`retention_in_days = 30`だけをin-place更新します。
+
+- `/aws/codebuild/teamagent-dev-aiia-image-builder` →
+  `aws_cloudwatch_log_group.codebuild_aiia_image_builder`
+- `/aws/codebuild/teamagent-dev-image-builder` →
+  `aws_cloudwatch_log_group.codebuild_image_builder`
+- `/aws/lambda/teamagent-dev-reminders-notify` →
+  `aws_cloudwatch_log_group.reminder_notify`
+- `/aws/lambda/teamagent-dev-tiktok-acquire-dispatch` →
+  `aws_cloudwatch_log_group.tiktok_dispatch`
+
+各resourceは`prevent_destroy`で保護し、`kms_key_id`をignoreするため、既存のKMS関連付けを
+追加・解除しません。migration guardはimport ID、現在のNever Expire、30日への更新、
+KMS不変、その他属性不変をexactに検証します。既に別state/addressで管理されている場合は
+applyせず、state所有者を確認して専用の`moved`/state migrationを先にレビューしてください。
+
+この変更はlog groupを再作成しませんが、30日より古い既存eventはretention適用後に削除対象と
+なり、AWS公式仕様では通常最大72時間で削除されます。最古eventが30日以内であること、または
+30日超の履歴をexportしてchecksum付きで保全したこと（もしくは明示的な廃棄承認）をreview
+evidenceへ残すまではruntime migrationを有効化しません。
+https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups-and-streams.html
+
 ## 必須入力
 
 第1段階を有効化するreview commitで、次を全てexact値で埋めます。

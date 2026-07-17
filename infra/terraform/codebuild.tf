@@ -26,6 +26,44 @@ locals {
   EOT
 }
 
+# These groups were created implicitly by historical CodeBuild projects and
+# already contain production audit data. Adopt them in-place: only retention is
+# managed here, destruction is blocked, and any existing KMS association is
+# deliberately preserved for a separately reviewed encryption migration.
+resource "aws_cloudwatch_log_group" "codebuild_aiia_image_builder" {
+  name              = "/aws/codebuild/${var.project_name}-${var.environment}-aiia-image-builder"
+  retention_in_days = 30
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [kms_key_id]
+  }
+}
+
+import {
+  to = aws_cloudwatch_log_group.codebuild_aiia_image_builder
+  id = "/aws/codebuild/teamagent-dev-aiia-image-builder"
+}
+
+resource "aws_cloudwatch_log_group" "codebuild_image_builder" {
+  name              = "/aws/codebuild/${local.retired_codebuild_project_name}"
+  retention_in_days = 30
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [kms_key_id]
+  }
+}
+
+import {
+  to = aws_cloudwatch_log_group.codebuild_image_builder
+  id = "/aws/codebuild/teamagent-dev-image-builder"
+}
+
 data "aws_iam_policy_document" "codebuild_assume" {
   statement {
     actions = ["sts:AssumeRole"]

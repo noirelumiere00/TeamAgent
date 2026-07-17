@@ -166,6 +166,9 @@ resource "aws_cloudwatch_log_group" "tiktok_dispatch" {
 
   lifecycle {
     prevent_destroy = true
+    # Retention adoption must not associate or disassociate a pre-existing KMS
+    # key. Encryption changes require a separately reviewed key-policy rollout.
+    ignore_changes = [kms_key_id]
   }
 }
 
@@ -404,10 +407,9 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
 data "archive_file" "tiktok_dispatch" {
   count            = local.tk_enabled
   type             = "zip"
-  source_dir       = "${path.module}/lambda/tiktok_dispatch"
+  source_file      = "${path.module}/lambda/tiktok_dispatch/handler.py"
   output_path      = "${path.module}/build/tiktok_dispatch.zip"
   output_file_mode = "0644"
-  excludes         = ["__pycache__", "**/__pycache__/**"]
 }
 
 data "aws_iam_policy_document" "tiktok_dispatch_assume" {

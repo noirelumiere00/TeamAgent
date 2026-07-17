@@ -182,7 +182,13 @@ variable "error_count_threshold" {
 
 # ---------- セキュリティ（Sprint 2 / 2.7）----------
 variable "enable_cloudtrail" {
-  description = "CloudTrail multi-region trail を作成する（既存があるなら false）"
+  description = "CloudTrail用S3 bucket/policy/versioningとmulti-region trailを管理する"
+  type        = bool
+  default     = true
+}
+
+variable "enable_cloudtrail_log_delivery" {
+  description = "CloudTrail producerを有効にする。新規bucketで初めてversioningを有効化する場合はfalseで基盤だけを先に適用し、15分の伝播待ち後にtrueへ変更する"
   type        = bool
   default     = true
 }
@@ -194,7 +200,24 @@ variable "enable_iam_access_analyzer" {
 }
 
 variable "enable_bedrock_invocation_logging" {
-  description = "Bedrock invocation logging を S3 + KMS で有効化する（コンソール / Terraform で 1 アカウント 1 設定）"
+  description = "Bedrock invocation logging用S3 bucket/policy/versioningとリージョン×アカウント設定を管理する"
   type        = bool
   default     = true
+}
+
+variable "enable_bedrock_invocation_log_delivery" {
+  description = "Bedrock invocation log producerを有効にする。新規bucketではversioning伝播待ち完了後にtrueへ変更する"
+  type        = bool
+  default     = true
+}
+
+variable "bedrock_logs_retention_mode" {
+  description = "Bedrock invocation logsの保持契約。削除retentionは明示承認と別変更が必要なため、現在はINDEFINITEのみ許可する"
+  type        = string
+  default     = "INDEFINITE"
+
+  validation {
+    condition     = var.bedrock_logs_retention_mode == "INDEFINITE"
+    error_message = "Bedrock logsの自動削除は未承認です。bedrock_logs_retention_modeはINDEFINITEのみ指定できます。"
+  }
 }
