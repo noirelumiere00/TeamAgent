@@ -45,6 +45,7 @@ def _extract_js() -> str:
         r"^ function buildCenters\(ax\)\{[\s\S]*?\n  recount\(\);\}$",
         r"^ function grpBin\(n\)\{[\s\S]*?\n  const g=grp\(n\);return \(g!==null&&clOther\.has\(g\)\)\?COTHER:g;\}$",
         r"^ function recount\(\)\{[\s\S]*?cCenters\[g\]\)cCenters\[g\]\.n\+\+;\}\}$",
+        r"^ function clusterCap\(\)\{[\s\S]*?\n  return s;\}$",
     )
     out = ["let cCenters=Object.create(null);"]
     for pat in wanted:
@@ -62,6 +63,7 @@ let N = [], neigh = [];
 const cByStem = Object.create(null), dByStem = Object.create(null);
 function ageBucket(){ return ""; }
 function vis(i){const n=N[i];if(!opt.showDocs&&n.type==="doc")return false;if(!opt.showTags&&n.type==="tag")return false;if(opt.filter&&!n.label.toLowerCase().includes(opt.filter))return false;return true;}
+function esc(value){ return String(value); }
 __IMPL__
 // --- シナリオ ---
 function mkDocs(specs){ // specs: [[solution, label], ...]
@@ -81,6 +83,7 @@ out.islandKeys = Object.keys(cCenters);
 out.islandCount = out.islandKeys.length;
 out.sumIslandCounts = Object.values(cCenters).reduce((s,c)=>s+c.n,0);
 out.otherCount = cCenters["その他"] ? cCenters["その他"].n : 0;
+out.solutionOverflowCaption = clOther.size > 0 && clusterCap().includes("残り"+clOther.size+"種");
 // 幾何スナップショット（絞り込み前）
 const geomBefore = Object.fromEntries(Object.entries(cCenters).map(([k,c])=>[k,[c.x,c.y]]));
 // 絞り込み → recount のみ
@@ -101,6 +104,17 @@ mkDocs([["constructor","a"],["__proto__","b"],["toString","c"],["施策X","d"]])
 buildCenters("solution");
 out.protoIslands = Object.keys(cCenters).sort();
 out.protoSum = Object.values(cCenters).reduce((s,c)=>s+(typeof c.n==="number"?c.n:-999),0);
+// phase の正式値「その他」は overflow 用の同名島ではない。
+N = [
+  {id:"c:0",type:"client",label:"a",phase:"その他",x:0,y:0,vx:0,vy:0,r:2},
+  {id:"c:1",type:"client",label:"b",phase:"ケイパ",x:0,y:0,vx:0,vy:0,r:2},
+];
+neigh = N.map(()=>new Set());
+opt.cluster = "phase";
+buildCenters("phase");
+out.phaseOtherCount = cCenters["その他"] ? cCenters["その他"].n : 0;
+out.phaseOverflowSize = clOther.size;
+out.phaseCaptionMentionsOverflow = clusterCap().includes("種類が多いため");
 console.log(JSON.stringify(out));
 """
 
@@ -123,8 +137,17 @@ def test_clmax_overflow_goes_to_other_island_not_silently_dropped() -> None:
     assert o["islandCount"] <= 12  # CLMAX
     assert "その他" in o["islandKeys"]
     assert o["otherCount"] > 0
+    assert o["solutionOverflowCaption"] is True
     # 全ノードがいずれかの島に属する＝取りこぼしゼロ
     assert o["sumIslandCounts"] == o["totalDocs"]
+
+
+def test_legitimate_phase_named_other_does_not_claim_overflow() -> None:
+    """フェーズの正式値「その他」を、自由記述軸の溢れ集約と誤認しない。"""
+    o = _run_js()
+    assert o["phaseOtherCount"] == 1
+    assert o["phaseOverflowSize"] == 0
+    assert o["phaseCaptionMentionsOverflow"] is False
 
 
 def test_geometry_is_stable_under_filtering_and_counts_follow() -> None:

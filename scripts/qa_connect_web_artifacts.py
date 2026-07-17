@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Read-only, PII-safe QA gate for connect-web Vault/build artifacts.
 
 The command emits exactly one JSON object.  Values are counts, booleans, or
@@ -28,6 +29,7 @@ import binascii
 import hashlib
 import json
 import re
+import sys
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -37,6 +39,15 @@ from pathlib import Path
 from typing import NoReturn, cast
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from teamagent.client_identity import (
+    client_identity_key,
+)
+from teamagent.client_properties import (
+    identity_value_map,
+)
+
 _DEFAULT_VAULT = Path.home() / "AiLaVault"
 _DEFAULT_HTML = (
     Path.home() / "Documents" / "Claude" / "Artifacts" / "connect-web-obsidian-preview.html"
@@ -60,12 +71,24 @@ _FRONT_LINE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*):\s*"?(.*?)"?\s*$')
 _DATA_ASSIGNMENT_RE = re.compile(r"<script>\s*const DATA=")
 _FOOTER_RE = re.compile(r"更新: (\d{4}-\d{2}-\d{2}) JST・取引先(\d+)・資料(\d+)")
 _STATUS_FUNCTION_RE = re.compile(r"function updateStatus\(bl,chars\)\{([^\n]*)\}")
-_INTERNAL_PAYLOAD_KEYS = frozenset({"external_id", "source_type", "source_key"})
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_INTERNAL_PAYLOAD_KEYS = frozenset(
+    {
+        "external_id",
+        "source_type",
+        "source_key",
+        "_primary_owner_key",
+        "_project_owner_key",
+        "_industry_source",
+        "_industry_fallbacks",
+    }
+)
 _REQUIRED_JSON_SIDECARS = (
     "exclude_stems.json",
     "exclude_source_keys.json",
     "dedup_drop_map.json",
     "weird_rename_high.json",
+    "client_industry.json",
 )
 _OPTIONAL_JSON_SIDECARS = ("tag_alias.json", "client_alias.json")
 _FONT_SIDECAR = "inter-var.b64"
@@ -93,6 +116,11 @@ _EMBEDDED_FONT_RE = re.compile(
     r"font-display:swap;src:url\(data:font/woff2;base64,([A-Za-z0-9+/=]+)\) "
     r'format\("woff2"\)\}'
 )
+_FB_SECTION_RE = re.compile(
+    r"^##\s+営業FB時系列（新しい順）\s*$([\s\S]*?)(?=^##\s|\Z)", re.MULTILINE
+)
+_FB_HEADING_RE = re.compile(r"^###\s+(?:-{2,}.*|\d{4}-\d{2}-\d{2}(?=[T\s]|$).*)$", re.MULTILINE)
+_FB_EVENT_KEYS = frozenset({"d", "src", "by", "ph", "bant", "menu", "pos", "neg", "next"})
 
 
 @dataclass(frozen=True)
@@ -136,6 +164,7 @@ class SidecarState:
     rename: dict[str, str] = field(default_factory=dict)
     tag_alias: dict[str, dict[str, str]] = field(default_factory=dict)
     client_alias: dict[str, str] = field(default_factory=dict)
+    client_industry_by_identity: dict[str, str] = field(default_factory=dict)
     font_valid: bool = False
     font_bytes: int = 0
     font_sha256: str = _ZERO_SHA256
@@ -148,6 +177,11 @@ class SidecarState:
 class ContentState:
     expected_doc_stems: set[str] = field(default_factory=set)
     expected_doc_titles: dict[str, str] = field(default_factory=dict)
+    expected_doc_owner_keys: dict[str, frozenset[str]] = field(default_factory=dict)
+    expected_doc_primary_owner_keys: dict[str, str] = field(default_factory=dict)
+    expected_doc_project_owner_keys: dict[str, str] = field(default_factory=dict)
+    expected_doc_industries: dict[str, str] = field(default_factory=dict)
+    expected_client_industry_fallbacks: dict[str, set[str]] = field(default_factory=dict)
     expected_renamed_stems: set[str] = field(default_factory=set)
     expected_gsheets_renamed_stems: set[str] = field(default_factory=set)
     sensitive_source_tokens: set[str] = field(default_factory=set)
@@ -171,6 +205,13 @@ class ContentState:
     chunk_fold_applied_count: int = 0
     invoice_rule_applied_count: int = 0
     alias_applied_count: int = 0
+    client_declared_fb_count: int = 0
+    client_timeline_heading_count: int = 0
+    client_timeline_count_mismatch: int = 0
+    client_timeline_section_missing: int = 0
+    client_fb_count_invalid: int = 0
+    client_industry_source_count: int = 0
+    client_industry_source_invalid_count: int = 0
 
 
 @dataclass
@@ -190,6 +231,13 @@ class HtmlState:
     data_bound: bool = False
     font_bound: bool = False
     payload_rename_applied_count: int = 0
+    client_fb_count: int = 0
+    timeline_event_count: int = 0
+    client_timeline_missing_count: int = 0
+    client_timeline_schema_invalid_count: int = 0
+    activity_doc_pair_count: int = 0
+    missing_doc_date_count: int = 0
+    missing_fb_date_count: int = 0
 
 
 @dataclass
@@ -291,6 +339,16 @@ def _add(violations: Counter[str], kind: str, count: int = 1) -> None:
 
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_iso_date(value: object) -> bool:
+    if not isinstance(value, str) or _DATE_RE.fullmatch(value) is None:
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
 
 
 def _nfc(value: str) -> str:
@@ -590,6 +648,21 @@ def _load_sidecars(
         "sidecar_rename_noop",
         sum(key == target for key, target in state.rename.items()),
     )
+
+    client_industry = loaded["client_industry.json"]
+    if isinstance(client_industry, dict):
+        unknown = set(client_industry) - {"_note", "industry"}
+        _add(violations, "sidecar_schema_invalid", len(unknown))
+        industry_values = _string_map(client_industry.get("industry"), violations)
+        try:
+            state.client_industry_by_identity = identity_value_map(industry_values)
+        except ValueError:
+            _add(violations, "sidecar_client_identity_collision")
+        note = client_industry.get("_note", "")
+        if not isinstance(note, str):
+            _add(violations, "sidecar_type_invalid")
+    else:
+        _add(violations, "sidecar_type_invalid")
 
     tag_alias = loaded.get("tag_alias.json")
     if tag_alias is not None:
@@ -928,6 +1001,68 @@ def _analyze_content(
             state.alias_applied_count += 1
         if fm.get("client", "") in sidecars.client_alias:
             state.alias_applied_count += 1
+        if note.kind == "clients":
+            raw_fb_count = fm.get("fb_count", "").strip()
+            if re.fullmatch(r"\d+", raw_fb_count) is None:
+                state.client_fb_count_invalid += 1
+                declared_fb_count: int | None = None
+            else:
+                declared_fb_count = int(raw_fb_count)
+                state.client_declared_fb_count += declared_fb_count
+
+            section = _FB_SECTION_RE.search(_body(note.text))
+            if section is None:
+                state.client_timeline_section_missing += 1
+                heading_count = 0
+            else:
+                heading_count = len(_FB_HEADING_RE.findall(section.group(1)))
+            state.client_timeline_heading_count += heading_count
+            if declared_fb_count is not None and declared_fb_count != heading_count:
+                state.client_timeline_count_mismatch += 1
+            if fm.get("generated_by") == _GENERATED_BY:
+                state.client_industry_source_count += 1
+                client_name = fm.get("client", "")
+                industry = fm.get("industry", "")
+                source = fm.get("industry_source", "")
+                expected_master = sidecars.client_industry_by_identity.get(
+                    client_identity_key(client_name)
+                )
+                invalid_source = source not in {
+                    "master",
+                    "exact_consensus",
+                    "conflict",
+                    "none",
+                }
+                invalid_value = (
+                    (source in {"master", "exact_consensus"} and not industry)
+                    or (source in {"conflict", "none"} and bool(industry))
+                    or (
+                        expected_master is not None
+                        and (source != "master" or industry != expected_master)
+                    )
+                    or (expected_master is None and source == "master")
+                )
+                state.client_industry_source_invalid_count += int(invalid_source or invalid_value)
+            else:
+                source = "legacy"
+                industry = fm.get("industry", "")
+
+            canonical_client = sidecars.client_alias.get(fm.get("client", ""), fm.get("client", ""))
+            client_key = client_identity_key(canonical_client)
+            canonical_industry = tag_industry.get(industry, industry)
+            if (
+                client_key
+                and canonical_industry
+                and source
+                in {
+                    "master",
+                    "exact_consensus",
+                    "legacy",
+                }
+            ):
+                state.expected_client_industry_fallbacks.setdefault(client_key, set()).add(
+                    canonical_industry
+                )
         if note.kind != "docs":
             continue
 
@@ -954,6 +1089,19 @@ def _analyze_content(
             state.expected_doc_stems.add(stem_portable)
             state.expected_doc_titles[stem_portable] = rename_portable.get(stem_portable) or fm.get(
                 "title", note.stem
+            )
+            primary = fm.get("client", "")
+            primary = sidecars.client_alias.get(primary, primary)
+            primary_key = client_identity_key(primary)
+            project_key = client_identity_key(fm.get("project", ""))
+            state.expected_doc_owner_keys[stem_portable] = frozenset(
+                filter(None, (primary_key, project_key))
+            )
+            state.expected_doc_primary_owner_keys[stem_portable] = primary_key
+            state.expected_doc_project_owner_keys[stem_portable] = project_key
+            raw_industry = fm.get("industry", "")
+            state.expected_doc_industries[stem_portable] = tag_industry.get(
+                raw_industry, raw_industry
             )
             if renamed:
                 state.expected_renamed_stems.add(stem_portable)
@@ -1019,6 +1167,22 @@ def _analyze_content(
     _add(violations, "gsheets_fingerprint_duplicate", state.duplicate_fingerprint_count)
     _add(violations, "gsheets_junk_unexcluded", state.junk_unexcluded_count)
     _add(violations, "gsheets_rename_missing", state.rename_missing_count)
+    _add(violations, "client_fb_count_invalid", state.client_fb_count_invalid)
+    _add(
+        violations,
+        "client_timeline_section_missing",
+        state.client_timeline_section_missing,
+    )
+    _add(
+        violations,
+        "client_timeline_count_mismatch",
+        state.client_timeline_count_mismatch,
+    )
+    _add(
+        violations,
+        "html_client_industry_source_invalid",
+        state.client_industry_source_invalid_count,
+    )
     return state
 
 
@@ -1201,20 +1365,59 @@ def _analyze_html(
             client_item_errors + doc_item_errors,
         )
 
+        for client in clients:
+            fb_count = client.get("fb")
+            timeline = client.get("tl")
+            schema_invalid = False
+            if not _is_int(fb_count) or cast(int, fb_count) < 0:
+                schema_invalid = True
+            else:
+                state.client_fb_count += cast(int, fb_count)
+            if not isinstance(timeline, list) or len(timeline) > 30:
+                schema_invalid = True
+                timeline_events: list[object] = []
+            else:
+                timeline_events = timeline
+                state.timeline_event_count += len(timeline_events)
+                for event in timeline_events:
+                    if (
+                        not isinstance(event, dict)
+                        or not _FB_EVENT_KEYS.issubset(event)
+                        or not all(isinstance(event.get(key), str) for key in _FB_EVENT_KEYS)
+                    ):
+                        schema_invalid = True
+            if _is_int(fb_count) and cast(int, fb_count) > 0 and not timeline_events:
+                state.client_timeline_missing_count += 1
+            if schema_invalid:
+                state.client_timeline_schema_invalid_count += 1
+        _add(
+            violations,
+            "html_client_timeline_missing",
+            state.client_timeline_missing_count,
+        )
+        _add(
+            violations,
+            "html_client_timeline_schema_invalid",
+            state.client_timeline_schema_invalid_count,
+        )
+
         links = payload.get("links")
+        valid_links: set[tuple[str, str]] = set()
         if not isinstance(links, list):
             _add(violations, "html_links_schema_invalid")
         else:
-            _add(
-                violations,
-                "html_links_schema_invalid",
-                sum(
+            invalid_links = 0
+            for link in links:
+                if (
                     not isinstance(link, list)
                     or len(link) != 3
                     or not all(isinstance(item, str) for item in link)
-                    for link in links
-                ),
-            )
+                ):
+                    invalid_links += 1
+                    continue
+                link_source, link_target, _context = cast(list[str], link)
+                valid_links.add((link_source, link_target))
+            _add(violations, "html_links_schema_invalid", invalid_links)
 
         colors = payload.get("colors")
         if not isinstance(colors, dict) or not colors:
@@ -1356,6 +1559,123 @@ def _analyze_html(
             if stem in payload_doc_titles
         )
         _add(violations, "html_doc_title_mismatch", title_mismatches)
+
+        # Activity history is intentionally narrower than the related-document graph:
+        # every activity document must be explicitly linked from the client card, exist
+        # in the payload, and have a usable date.  This keeps title-only coincidences
+        # (for example Port/report) out of the timeline and prevents "date unknown".
+        docs_by_stem = {
+            cast(str, doc["stem"]): doc for doc in docs if isinstance(doc.get("stem"), str)
+        }
+        missing_doc_dates = sum(not _is_iso_date(doc.get("modified")) for doc in docs)
+        state.missing_doc_date_count = missing_doc_dates
+        _add(violations, "html_doc_date_missing", missing_doc_dates)
+
+        activity_schema_errors = 0
+        activity_duplicates = 0
+        activity_docs_missing = 0
+        activity_not_explicit = 0
+        activity_doc_count_mismatches = 0
+        activity_owner_mismatches = 0
+        industry_override_mismatches = 0
+        last_contact_mismatches = 0
+        missing_fb_dates = 0
+        activity_pairs = 0
+        for client in clients:
+            client_stem = client.get("stem")
+            activity = client.get("ds")
+            timeline = client.get("tl")
+            if not isinstance(client_stem, str) or not isinstance(activity, list):
+                activity_schema_errors += 1
+                continue
+            if not isinstance(timeline, list):
+                activity_schema_errors += 1
+                timeline = []
+
+            activity_stems: list[str] = []
+            for stem in activity:
+                if not isinstance(stem, str) or not stem:
+                    activity_schema_errors += 1
+                    continue
+                activity_stems.append(stem)
+            activity_duplicates += len(activity_stems) - len(set(activity_stems))
+            activity_pairs += len(activity_stems)
+            activity_docs_missing += sum(stem not in docs_by_stem for stem in activity_stems)
+            activity_not_explicit += sum(
+                (f"c:{client_stem}", f"d:{stem}") not in valid_links for stem in activity_stems
+            )
+            client_owner_key = client_identity_key(client.get("name"))
+            expected_industry = sidecars.client_industry_by_identity.get(client_owner_key)
+            if expected_industry is None:
+                primary_industries: list[str] = []
+                project_industries: list[str] = []
+                for stem in activity_stems:
+                    portable_stem = _portable_key(stem)
+                    industry = content.expected_doc_industries.get(portable_stem, "")
+                    if not industry:
+                        continue
+                    if (
+                        content.expected_doc_primary_owner_keys.get(portable_stem)
+                        == client_owner_key
+                    ):
+                        primary_industries.append(industry)
+                    elif (
+                        content.expected_doc_project_owner_keys.get(portable_stem)
+                        == client_owner_key
+                    ):
+                        project_industries.append(industry)
+                candidates = {
+                    unicodedata.normalize("NFC", value).strip()
+                    for value in (*primary_industries, *project_industries)
+                    if value.strip()
+                }
+                if not candidates:
+                    candidates = content.expected_client_industry_fallbacks.get(
+                        client_owner_key, set()
+                    )
+                expected_industry = next(iter(candidates)) if len(candidates) == 1 else ""
+            if client.get("industry") != expected_industry:
+                industry_override_mismatches += 1
+            activity_owner_mismatches += sum(
+                not client_owner_key
+                or client_owner_key
+                not in content.expected_doc_owner_keys.get(_portable_key(stem), frozenset())
+                for stem in activity_stems
+            )
+            doc_count = client.get("doc")
+            if not _is_int(doc_count) or cast(int, doc_count) != len(activity_stems):
+                activity_doc_count_mismatches += 1
+
+            fb_dates: list[str] = []
+            for event in timeline:
+                if not isinstance(event, dict):
+                    activity_schema_errors += 1
+                    continue
+                date_value = event.get("d")
+                if not _is_iso_date(date_value):
+                    missing_fb_dates += 1
+                    continue
+                fb_dates.append(cast(str, date_value))
+            doc_dates = [
+                cast(str, docs_by_stem[stem]["modified"])
+                for stem in activity_stems
+                if stem in docs_by_stem and _is_iso_date(docs_by_stem[stem].get("modified"))
+            ]
+            expected_last = max([*fb_dates, *doc_dates], default="")
+            if client.get("last") != expected_last:
+                last_contact_mismatches += 1
+
+        state.activity_doc_pair_count = activity_pairs
+        state.missing_fb_date_count = missing_fb_dates
+        _add(violations, "html_client_activity_schema_invalid", activity_schema_errors)
+        _add(violations, "html_client_activity_duplicate", activity_duplicates)
+        _add(violations, "html_client_activity_doc_missing", activity_docs_missing)
+        _add(violations, "html_client_activity_not_explicit", activity_not_explicit)
+        _add(violations, "html_client_activity_owner_mismatch", activity_owner_mismatches)
+        _add(violations, "html_client_industry_override_mismatch", industry_override_mismatches)
+        _add(violations, "html_client_doc_count_mismatch", activity_doc_count_mismatches)
+        _add(violations, "html_client_last_contact_mismatch", last_contact_mismatches)
+        _add(violations, "html_fb_date_missing", missing_fb_dates)
         actual_renamed = {
             stem
             for stem in content.expected_renamed_stems
@@ -1564,6 +1884,8 @@ def _safe_result(
             "invoice_rule_applied_count": content.invoice_rule_applied_count,
             "rename_applied_count": content.rename_applied_count,
             "alias_applied_count": content.alias_applied_count,
+            "client_industry_override_count": len(sidecars.client_industry_by_identity),
+            "client_industry_source_count": content.client_industry_source_count,
         },
         "gsheets": {
             "ok": not any(key.startswith("gsheets_") for key in clean_violations),
@@ -1580,6 +1902,20 @@ def _safe_result(
             "ambiguous_title_count": content.ambiguous_title_count,
             "rename_applied_count": content.gsheets_rename_applied_count,
             "rename_missing_count": content.rename_missing_count,
+        },
+        "client_timelines": {
+            "ok": not any(
+                key.startswith(("client_", "html_client_timeline_")) for key in clean_violations
+            ),
+            "declared_fb_count": content.client_declared_fb_count,
+            "source_heading_count": content.client_timeline_heading_count,
+            "source_count_mismatch": content.client_timeline_count_mismatch,
+            "source_section_missing": content.client_timeline_section_missing,
+            "source_fb_count_invalid": content.client_fb_count_invalid,
+            "payload_fb_count": html.client_fb_count,
+            "payload_event_count": html.timeline_event_count,
+            "payload_missing_count": html.client_timeline_missing_count,
+            "payload_schema_invalid_count": html.client_timeline_schema_invalid_count,
         },
         "html": {
             "ok": not any(key.startswith(("html_", "stats_")) for key in clean_violations),
@@ -1598,6 +1934,9 @@ def _safe_result(
             "font_bound": html.font_bound,
             "rename_applied_count": html.payload_rename_applied_count,
             "internal_source_exposure_count": html.internal_source_exposure_count,
+            "activity_doc_pair_count": html.activity_doc_pair_count,
+            "missing_doc_date_count": html.missing_doc_date_count,
+            "missing_fb_date_count": html.missing_fb_date_count,
         },
         "violations": clean_violations,
     }

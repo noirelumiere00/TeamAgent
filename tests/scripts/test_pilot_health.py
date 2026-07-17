@@ -35,15 +35,24 @@ def _row(**kv: str) -> list[dict[str, str]]:
     return [{"field": k, "value": v} for k, v in kv.items()]
 
 
-# Part B 実測を模した fixture（bedrock_converse p95=10.6s / cache_read=0 / gemini 18s）
+# イベント別診断 fixture。bedrock_converse は mail_summary 等も含むため検索 SLI には使わない。
 _LATENCY = [
-    _row(event="bedrock_converse", n="3", p50="10400", p95="10600", p99="10600", max_ms="10601"),
+    _row(event="bedrock_converse", n="3", p50="18400", p95="20600", p99="20600", max_ms="20601"),
     _row(event="embedder_embed", n="3", p50="500", p95="500", p99="500", max_ms="535"),
     _row(
         event="gemini_analyze_video", n="1", p50="18045", p95="18045", p99="18045", max_ms="18045"
     ),
 ]
-_COST = [_row(n="3", cost_sum="0.0359", cost_p50="0.0125", cache_read_sum="0", cache_hit_n="0")]
+_SEARCH = [
+    _row(
+        n="3",
+        p95="10600",
+        cost_sum="0.0359",
+        cost_p50="0.0125",
+        cache_read_sum="0",
+        cache_hit_n="0",
+    )
+]
 _ERRORS = [_row(n="0")]
 
 
@@ -51,7 +60,7 @@ def test_build_readout_parses_three_queries() -> None:
     r = ph.build_readout(
         window_label="過去14日",
         latency_results=_LATENCY,
-        cost_results=_COST,
+        search_results=_SEARCH,
         error_results=_ERRORS,
     )
     assert r.search_count == 3
@@ -59,13 +68,15 @@ def test_build_readout_parses_three_queries() -> None:
     assert r.search_p95_ms == 10600.0
     assert r.latency_by_event["gemini_analyze_video"]["max_ms"] == 18045.0
     assert r.search_cost_p50_usd == 0.0125
-    # Part B: cache_read=0 → ヒット率 0%
+    # unrelated な bedrock_converse p95=20.6s ではなく、search 帰属済み p95 を使う。
+    assert r.search_p95_ms != r.latency_by_event["bedrock_converse"]["p95"]
+    # cache_read=0 → ヒット率 0%
     assert r.cache_hit_ratio == 0.0
 
 
 def test_evaluate_go_when_within_slo() -> None:
     r = ph.build_readout(
-        window_label="w", latency_results=_LATENCY, cost_results=_COST, error_results=_ERRORS
+        window_label="w", latency_results=_LATENCY, search_results=_SEARCH, error_results=_ERRORS
     )
     verdicts = {v.name: v for v in ph.evaluate(r)}
     # 10.6s < 15s SLO
@@ -75,27 +86,28 @@ def test_evaluate_go_when_within_slo() -> None:
 
 
 def test_evaluate_no_go_when_p95_exceeds_slo() -> None:
-    slow = [
-        _row(
-            event="bedrock_converse", n="50", p50="16000", p95="20000", p99="25000", max_ms="30000"
-        )
-    ]
-    cost = [_row(n="50", cost_sum="1.0", cost_p50="0.015", cache_read_sum="0", cache_hit_n="0")]
+    slow = [_row(n="50", p95="20000", cost_sum="1.0", cost_p50="0.015")]
     r = ph.build_readout(
-        window_label="w", latency_results=slow, cost_results=cost, error_results=[_row(n="0")]
+        window_label="w", latency_results=_LATENCY, search_results=slow, error_results=[_row(n="0")]
     )
     verdicts = {v.name: v for v in ph.evaluate(r)}
     assert verdicts["search_p95"].ok is False  # 20s > 15s
 
 
 def test_evaluate_no_go_when_error_rate_high() -> None:
-    lat = [
-        _row(event="bedrock_converse", n="90", p50="5000", p95="9000", p99="11000", max_ms="12000")
+    search = [
+        _row(
+            n="90",
+            p95="9000",
+            cost_sum="0.5",
+            cost_p50="0.005",
+            cache_read_sum="100",
+            cache_hit_n="40",
+        )
     ]
-    cost = [_row(n="90", cost_sum="0.5", cost_p50="0.005", cache_read_sum="100", cache_hit_n="40")]
     errors = [_row(n="10")]  # 10 / (90+10) = 10% > 1%
     r = ph.build_readout(
-        window_label="w", latency_results=lat, cost_results=cost, error_results=errors
+        window_label="w", latency_results=_LATENCY, search_results=search, error_results=errors
     )
     verdicts = {v.name: v for v in ph.evaluate(r)}
     assert verdicts["error_rate"].ok is False
@@ -103,12 +115,21 @@ def test_evaluate_no_go_when_error_rate_high() -> None:
 
 
 def test_evaluate_no_go_when_cost_p50_exceeds() -> None:
-    lat = [
-        _row(event="bedrock_converse", n="20", p50="5000", p95="9000", p99="11000", max_ms="12000")
+    search = [
+        _row(
+            n="20",
+            p95="9000",
+            cost_sum="2.0",
+            cost_p50="0.05",
+            cache_read_sum="0",
+            cache_hit_n="0",
+        )
     ]
-    cost = [_row(n="20", cost_sum="2.0", cost_p50="0.05", cache_read_sum="0", cache_hit_n="0")]
     r = ph.build_readout(
-        window_label="w", latency_results=lat, cost_results=cost, error_results=[_row(n="0")]
+        window_label="w",
+        latency_results=_LATENCY,
+        search_results=search,
+        error_results=[_row(n="0")],
     )
     verdicts = {v.name: v for v in ph.evaluate(r)}
     assert verdicts["search_cost_p50"].ok is False  # $0.05 > $0.02
@@ -119,7 +140,7 @@ def test_evaluate_zero_traffic_is_not_nogo() -> None:
     r = ph.build_readout(
         window_label="w",
         latency_results=[],
-        cost_results=[_row(n="0")],
+        search_results=[],
         error_results=[_row(n="0")],
     )
     verdicts = ph.evaluate(r)
@@ -130,11 +151,21 @@ def test_evaluate_zero_traffic_is_not_nogo() -> None:
 
 
 def test_cache_hit_ratio_when_caching_works() -> None:
-    cost = [
-        _row(n="100", cost_sum="1.0", cost_p50="0.008", cache_read_sum="50000", cache_hit_n="80")
+    search = [
+        _row(
+            n="100",
+            p95="9000",
+            cost_sum="1.0",
+            cost_p50="0.008",
+            cache_read_sum="50000",
+            cache_hit_n="80",
+        )
     ]
     r = ph.build_readout(
-        window_label="w", latency_results=_LATENCY, cost_results=cost, error_results=[_row(n="0")]
+        window_label="w",
+        latency_results=_LATENCY,
+        search_results=search,
+        error_results=[_row(n="0")],
     )
     assert r.cache_hit_ratio == 0.8
 
@@ -143,10 +174,17 @@ def test_render_text_contains_overall_verdict() -> None:
     r = ph.build_readout(
         window_label="過去24時間",
         latency_results=_LATENCY,
-        cost_results=_COST,
+        search_results=_SEARCH,
         error_results=_ERRORS,
     )
     text = ph.render_text(r, ph.evaluate(r))
     assert "Pilot Health Readout" in text
     assert "OVERALL" in text
-    assert "bedrock_converse" in text
+    assert "search(mcp_tool_usage)" in text
+
+
+def test_queries_attribute_only_search_tool() -> None:
+    """共有 Bedrock の別ツール実行を検索 SLI に混ぜない query 契約。"""
+    assert 'attributed_tool="search"' in ph._Q_SEARCH
+    assert 'event="mcp_tool_usage"' in ph._Q_SEARCH
+    assert 'event="mcp_tool_error" and tool="search"' in ph._Q_ERRORS
