@@ -45,6 +45,13 @@ RUN set -eux; \
     node -e 'const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync("/opt/teamagent/state-seed/openclaw.sqlite");db.exec("DELETE FROM config_health_entries");db.close()'; \
     rm -rf /tmp/teamagent-openclaw; \
     rm -f /tmp/openclaw-slack.tgz /tmp/openclaw-bedrock.tgz; \
+    rm -rf /app/node_modules/playwright /app/node_modules/playwright-core; \
+    rm -f /app/node_modules/.bin/playwright; \
+    rm -rf /root/.cache/ms-playwright /home/node/.cache/ms-playwright /ms-playwright; \
+    node -e 'const fs=require("fs");const p="/app/package.json";const x=JSON.parse(fs.readFileSync(p,"utf8"));for(const section of ["dependencies","optionalDependencies","devDependencies"]){for(const name of ["playwright","playwright-core"])delete x[section]?.[name]}fs.writeFileSync(p,JSON.stringify(x,null,2)+"\n")'; \
+    test ! -e /app/node_modules/playwright; \
+    test ! -e /app/node_modules/playwright-core; \
+    test ! -e /app/node_modules/.bin/playwright; \
     chmod -R a-w /opt/teamagent
 
 FROM gcr.io/distroless/nodejs24-debian13:nonroot@${DISTROLESS_ARM64_DIGEST} AS runtime

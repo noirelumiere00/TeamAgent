@@ -170,10 +170,45 @@ jq -e \
   <<<"$inspect_json" >/dev/null || fail "runtime image metadata contract failed"
 
 runtime_probe=$(docker run --rm --entrypoint /nodejs/bin/node "$RUNTIME_REF" -e '
-const fs=require("fs");
-const forbidden=["/bin/sh","/bin/bash","/usr/bin/npm","/usr/local/bin/npm","/usr/local/lib/node_modules/npm","/app/node_modules/npm","/app/node_modules/corepack","/app/node_modules/.bin/npm","/usr/bin/curl","/usr/bin/git","/usr/bin/python3"].filter(fs.existsSync);
-console.log(JSON.stringify({node:process.version,uid:process.getuid(),gid:process.getgid(),forbidden}));
-process.exit(forbidden.length===0&&process.getuid()===65532?0:1);') || fail "distroless/nonroot contract failed"
+const fs=require("fs"),path=require("path");
+const forbiddenPaths=[
+  "/bin/sh","/bin/bash","/usr/bin/npm","/usr/local/bin/npm",
+  "/usr/local/lib/node_modules/npm","/app/node_modules/npm",
+  "/app/node_modules/corepack","/app/node_modules/.bin/npm",
+  "/app/node_modules/playwright","/app/node_modules/playwright-core",
+  "/app/node_modules/.bin/playwright","/ms-playwright",
+  "/root/.cache/ms-playwright","/home/node/.cache/ms-playwright",
+  "/usr/bin/chromium","/usr/bin/chromium-browser","/usr/bin/google-chrome",
+  "/usr/bin/firefox","/usr/bin/curl","/usr/bin/git","/usr/bin/python3",
+];
+const forbidden=forbiddenPaths.filter(fs.existsSync);
+function inventoryPlaywright(root){
+  if(!fs.existsSync(root))return;
+  for(const entry of fs.readdirSync(root,{withFileTypes:true})){
+    const candidate=path.join(root,entry.name);
+    if(entry.isDirectory()){
+      if(["playwright","playwright-core"].includes(entry.name)&&path.basename(root)==="node_modules"){
+        forbidden.push(candidate);
+      }else inventoryPlaywright(candidate);
+    }else if(entry.name==="playwright"&&path.basename(root)===".bin"){
+      forbidden.push(candidate);
+    }
+  }
+}
+inventoryPlaywright("/app/node_modules");
+inventoryPlaywright("/opt/teamagent/plugins");
+const pkg=JSON.parse(fs.readFileSync("/app/package.json","utf8"));
+const declared=["dependencies","optionalDependencies","devDependencies"]
+  .flatMap(section=>["playwright","playwright-core"].filter(name=>pkg[section]?.[name]));
+console.log(JSON.stringify({
+  node:process.version,uid:process.getuid(),gid:process.getgid(),
+  execve:typeof process.execve,forbidden,declared,
+}));
+process.exit(
+  forbidden.length===0&&declared.length===0&&
+  process.getuid()===65532&&process.getgid()===65532&&
+  typeof process.execve==="function"?0:1
+);') || fail "distroless/nonroot/runtime inventory contract failed"
 
 run_args=(--rm --network none --read-only --cap-drop ALL --tmpfs /tmp:rw,noexec,nosuid,size=512m
   -e SLACK_BOT_TOKEN=xoxb-offline-smoke
@@ -182,6 +217,66 @@ run_args=(--rm --network none --read-only --cap-drop ALL --tmpfs /tmp:rw,noexec,
   -e TEAMAGENT_MCP_BEARER=offline-mcp-smoke
   -e 'SLACK_DM_ALLOWLIST=*'
   -e AWS_EC2_METADATA_DISABLED=true)
+
+docker run "${run_args[@]}" \
+  -e UNEXPECTED_SECRET=must-not-cross-entrypoint \
+  -e AWS_ACCESS_KEY_ID=must-not-cross-entrypoint \
+  -e AWS_SECRET_ACCESS_KEY=must-not-cross-entrypoint \
+  -e NODE_OPTIONS=--no-warnings \
+  -e NODE_PATH=/tmp/must-not-cross-entrypoint \
+  -e OPENCLAW_SKIP_CHANNELS=1 \
+  -e HTTPS_PROXY=http://127.0.0.1:9 \
+  -e NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
+  -e ECS_CONTAINER_METADATA_URI_V4=http://169.254.170.2/v4/test \
+  -e AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/v2/credentials/test \
+  "$RUNTIME_REF" /nodejs/bin/node -e 'console.log(JSON.stringify(process.env))' \
+  >"$tmp_dir/child-env.json"
+jq -e '
+  def allowed: [
+    "ALL_PROXY","AWS_CA_BUNDLE","AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI","AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_DEFAULT_REGION","AWS_EC2_METADATA_DISABLED","AWS_EXECUTION_ENV","AWS_REGION",
+    "ECS_AGENT_URI","ECS_CONTAINER_METADATA_URI","ECS_CONTAINER_METADATA_URI_V4",
+    "HOME","HTTPS_PROXY","HTTP_PROXY","NODE_COMPILE_CACHE","NODE_ENV",
+    "NODE_EXTRA_CA_CERTS","NODE_USE_ENV_PROXY","NO_PROXY","OPENCLAW_CONFIG_PATH",
+    "OPENCLAW_GATEWAY_TOKEN","OPENCLAW_RUNTIME_DIR","OPENCLAW_STATE_DIR",
+    "OPENCLAW_WORKSPACE_DIR","PATH","SLACK_APP_TOKEN","SLACK_BOT_TOKEN",
+    "SLACK_DM_ALLOWLIST","SSL_CERT_DIR","SSL_CERT_FILE","TEAMAGENT_MCP_BEARER",
+    "TMPDIR","XDG_CACHE_HOME","all_proxy","http_proxy","https_proxy","no_proxy"
+  ];
+  ([keys[] as $key | select((allowed | index($key)) == null) | $key] | length) == 0 and
+  has("UNEXPECTED_SECRET") == false and
+  has("AWS_ACCESS_KEY_ID") == false and
+  has("AWS_SECRET_ACCESS_KEY") == false and
+  has("NODE_OPTIONS") == false and
+  has("NODE_PATH") == false and
+  has("LD_PRELOAD") == false and
+  has("OPENCLAW_SKIP_CHANNELS") == false and
+  .NODE_ENV == "production" and
+  .AWS_DEFAULT_REGION == .AWS_REGION and
+  .OPENCLAW_RUNTIME_DIR == "/tmp/teamagent-openclaw" and
+  .HTTPS_PROXY == "http://127.0.0.1:9" and
+  .ECS_CONTAINER_METADATA_URI_V4 == "http://169.254.170.2/v4/test" and
+  .AWS_CONTAINER_CREDENTIALS_RELATIVE_URI == "/v2/credentials/test"
+' "$tmp_dir/child-env.json" >/dev/null || fail "child environment allowlist failed"
+
+if docker run "${run_args[@]}" "$RUNTIME_REF" /nodejs/bin/node -e 'process.exit(42)' \
+  >"$tmp_dir/exit-42.log" 2>&1; then
+  fail "entrypoint unexpectedly converted child exit 42 to success"
+else
+  child_exit=$?
+fi
+[[ "$child_exit" == 42 ]] || fail "entrypoint did not preserve child exit 42 (got $child_exit)"
+
+if docker run --rm --network none --read-only --cap-drop ALL \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m "$RUNTIME_REF" \
+  >"$tmp_dir/missing-secrets.log" 2>&1; then
+  fail "entrypoint unexpectedly started without required secrets"
+else
+  missing_secret_exit=$?
+fi
+[[ "$missing_secret_exit" == 78 ]] || \
+  fail "missing runtime secrets must exit 78 (got $missing_secret_exit)"
 
 docker run "${run_args[@]}" "$RUNTIME_REF" /app/openclaw.mjs config validate --json \
   >"$tmp_dir/config.json"
@@ -202,12 +297,24 @@ gateway_args=(-d --network none --read-only --cap-drop ALL --tmpfs /tmp:rw,noexe
   -e OPENCLAW_GATEWAY_TOKEN=offline-gateway-smoke
   -e TEAMAGENT_MCP_BEARER=offline-mcp-smoke
   -e 'SLACK_DM_ALLOWLIST=*'
-  -e AWS_EC2_METADATA_DISABLED=true
-  -e OPENCLAW_SKIP_CHANNELS=1)
-gateway_container=$(docker run "${gateway_args[@]}" "$RUNTIME_REF")
+  -e AWS_EC2_METADATA_DISABLED=true)
+# Network-none cannot exercise Slack authentication. Plugin loading is verified
+# above; disable the channel only in this generated throwaway config so readyz
+# and graceful SIGTERM test the gateway itself without a guaranteed Slack error.
+gateway_launcher='
+const fs=require("fs");
+const configPath=process.env.OPENCLAW_CONFIG_PATH;
+const config=JSON.parse(fs.readFileSync(configPath,"utf8"));
+config.channels.slack.enabled=false;
+fs.writeFileSync(configPath,JSON.stringify(config,null,2)+"\n",{mode:0o600});
+process.execve(process.execPath,[
+  process.execPath,"/app/openclaw.mjs","gateway","--bind","loopback","--port","18789"
+],process.env);'
+gateway_container=$(docker run "${gateway_args[@]}" "$RUNTIME_REF" \
+  /nodejs/bin/node -e "$gateway_launcher")
 gateway_ok=0
 for _ in $(seq 1 45); do
-  if docker exec "$gateway_container" node -e "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
+  if docker exec "$gateway_container" node -e "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
     gateway_ok=1
     break
   fi
@@ -215,13 +322,16 @@ for _ in $(seq 1 45); do
   sleep 1
 done
 docker logs "$gateway_container" >"$tmp_dir/gateway.log" 2>&1 || true
-((gateway_ok)) || { tail -120 "$tmp_dir/gateway.log" >&2; fail "offline gateway health smoke failed"; }
+((gateway_ok)) || { tail -120 "$tmp_dir/gateway.log" >&2; fail "offline gateway readiness smoke failed"; }
 if grep -E 'spawn npm|Config observe anomaly|auto-enabled plugins|browser configured' "$tmp_dir/gateway.log" >/dev/null || \
    grep -F -e xoxb-offline-smoke -e xapp-offline-smoke -e offline-gateway-smoke -e offline-mcp-smoke "$tmp_dir/gateway.log" >/dev/null; then
   tail -120 "$tmp_dir/gateway.log" >&2
   fail "gateway attempted package repair or enabled the browser plugin"
 fi
-docker rm -f "$gateway_container" >/dev/null
+docker stop --time 30 "$gateway_container" >/dev/null
+gateway_exit=$(docker inspect -f '{{.State.ExitCode}}' "$gateway_container")
+[[ "$gateway_exit" == 0 ]] || fail "gateway SIGTERM shutdown must exit 0 (got $gateway_exit)"
+docker rm "$gateway_container" >/dev/null
 gateway_container=""
 
 trivy --cache-dir "$TRIVY_CACHE_DIR" image --quiet --scanners vuln --severity CRITICAL,HIGH --format json \

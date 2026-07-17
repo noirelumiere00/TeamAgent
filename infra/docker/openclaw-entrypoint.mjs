@@ -9,6 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
 const REQUIRED_SECRETS = [
@@ -25,6 +26,33 @@ const REQUIRED_PLUGINS = new Map([
   ],
 ]);
 const OPENCLAW_VERSION = "2026.7.1";
+const FIXED_PATH = "/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const PASSTHROUGH_ENV = [
+  // ECS task-role credentials and container/task metadata.
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+  "AWS_EC2_METADATA_DISABLED",
+  "AWS_EXECUTION_ENV",
+  "ECS_AGENT_URI",
+  "ECS_CONTAINER_METADATA_URI",
+  "ECS_CONTAINER_METADATA_URI_V4",
+  // Explicit trust-store controls.
+  "AWS_CA_BUNDLE",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  // Explicit proxy controls. NODE_OPTIONS is deliberately not accepted.
+  "ALL_PROXY",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY",
+  "NODE_USE_ENV_PROXY",
+  "all_proxy",
+  "https_proxy",
+  "http_proxy",
+  "no_proxy",
+];
 
 function fail(message) {
   process.stderr.write(
@@ -67,6 +95,45 @@ function assertConfig(config) {
       throw new Error(`required plugin is not pinned and enabled: ${id}`);
     }
   }
+}
+
+function copyDefined(source, target, names) {
+  for (const name of names) {
+    if (source[name] !== undefined) target[name] = source[name];
+  }
+}
+
+function buildChildEnvironment({
+  runtimeRoot,
+  stateDir,
+  workspaceDir,
+  homeDir,
+  cacheDir,
+  configPath,
+}) {
+  const region = process.env.AWS_REGION || "ap-northeast-1";
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+){2,4}$/.test(region)) {
+    throw new Error("AWS_REGION has an invalid format");
+  }
+
+  const childEnv = {
+    PATH: FIXED_PATH,
+    NODE_ENV: "production",
+    HOME: homeDir,
+    TMPDIR: "/tmp",
+    XDG_CACHE_HOME: cacheDir,
+    NODE_COMPILE_CACHE: join(runtimeRoot, "node-compile-cache"),
+    OPENCLAW_RUNTIME_DIR: runtimeRoot,
+    OPENCLAW_STATE_DIR: stateDir,
+    OPENCLAW_WORKSPACE_DIR: workspaceDir,
+    OPENCLAW_CONFIG_PATH: configPath,
+    AWS_REGION: region,
+    AWS_DEFAULT_REGION: region,
+  };
+  copyDefined(process.env, childEnv, REQUIRED_SECRETS);
+  copyDefined(process.env, childEnv, ["SLACK_DM_ALLOWLIST"]);
+  copyDefined(process.env, childEnv, PASSTHROUGH_ENV);
+  return childEnv;
 }
 
 async function rejectSymlink(path) {
@@ -163,13 +230,6 @@ async function prepareRuntime() {
     }
   }
 
-  process.env.HOME = homeDir;
-  process.env.XDG_CACHE_HOME = cacheDir;
-  process.env.NODE_COMPILE_CACHE = join(runtimeRoot, "node-compile-cache");
-  process.env.OPENCLAW_STATE_DIR = stateDir;
-  process.env.OPENCLAW_WORKSPACE_DIR = workspaceDir;
-  process.env.OPENCLAW_CONFIG_PATH = configPath;
-
   process.stderr.write(
     `${JSON.stringify({
       event: "openclaw_runtime_ready",
@@ -180,6 +240,14 @@ async function prepareRuntime() {
       uid: process.getuid?.(),
     })}\n`,
   );
+  return buildChildEnvironment({
+    runtimeRoot,
+    stateDir,
+    workspaceDir,
+    homeDir,
+    cacheDir,
+    configPath,
+  });
 }
 
 function normalizeCommand(rawArgs) {
@@ -200,27 +268,41 @@ function normalizeCommand(rawArgs) {
   return args;
 }
 
-async function run() {
-  await prepareRuntime();
-  const command = normalizeCommand(process.argv.slice(2));
+async function runFallback(command, childEnv) {
   const child = spawn(process.execPath, command, {
     cwd: "/app",
-    env: process.env,
+    env: childEnv,
     stdio: "inherit",
   });
 
+  const handlers = new Map();
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
-    process.on(signal, () => {
+    const handler = () => {
       if (!child.killed) child.kill(signal);
-    });
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
   }
 
   const exit = await new Promise((resolveExit, reject) => {
     child.once("error", reject);
     child.once("exit", (code, signal) => resolveExit({ code, signal }));
   });
-  if (exit.signal) process.kill(process.pid, exit.signal);
-  process.exit(exit.code ?? 1);
+  for (const [signal, handler] of handlers) process.off(signal, handler);
+  if (exit.code !== null) process.exit(exit.code);
+  const signalNumber = osConstants.signals[exit.signal] ?? 1;
+  process.exit(128 + signalNumber);
+}
+
+async function run() {
+  const childEnv = await prepareRuntime();
+  const command = normalizeCommand(process.argv.slice(2));
+  if (typeof process.execve === "function") {
+    process.chdir("/app");
+    process.execve(process.execPath, [process.execPath, ...command], childEnv);
+    throw new Error("process.execve returned unexpectedly");
+  }
+  await runFallback(command, childEnv);
 }
 
 run().catch((error) => fail(error instanceof Error ? error.message : String(error)));
