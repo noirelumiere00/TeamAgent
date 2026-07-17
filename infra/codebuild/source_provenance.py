@@ -28,10 +28,72 @@ from typing import Any
 
 MANIFEST_NAME = ".teamagent-source-manifest.json"
 SOURCE_KEY = "codebuild/source.zip"
-SCHEMA_VERSION = 1
+APP_HTML_BUCKET = "teamagent-dev-raw-files"
+APP_HTML_KEY = "codebuild/connect-web-app.html"
+SCHEMA_VERSION = 2
+RUNTIME_CONTRACT_PATH = "infra/codebuild/teamagent_runtime_contract.json"
+RUNTIME_CONTRACT_SCHEMA_VERSION = 1
 SCRAPE_TOOLS_LABEL = "io.teamagent.build.with-scrape-tools"
+APP_HTML_SHA256_LABEL = "io.teamagent.build.app-html-sha256"
+APP_HTML_VERSION_ID_LABEL = "io.teamagent.build.app-html-version-id"
+RUNTIME_FIELDS = (
+    (
+        "E5_MODEL_REVISION",
+        "model",
+        "e5_revision",
+        "io.teamagent.build.e5-model-revision",
+    ),
+    (
+        "NODE_IMAGE_DIGEST",
+        "node",
+        "image_digest",
+        "io.teamagent.build.node-image-digest",
+    ),
+    ("NODE_VERSION", "node", "version", "io.teamagent.build.node-version"),
+    (
+        "NODE_BINARY_SHA256",
+        "node",
+        "binary_sha256",
+        "io.teamagent.build.node-binary-sha256",
+    ),
+    (
+        "PLAYWRIGHT_VERSION",
+        "playwright",
+        "version",
+        "io.teamagent.build.playwright-version",
+    ),
+    (
+        "PLAYWRIGHT_CHROMIUM_REVISION",
+        "chromium",
+        "revision",
+        "io.teamagent.build.chromium-revision",
+    ),
+    (
+        "PLAYWRIGHT_CHROMIUM_VERSION",
+        "chromium",
+        "version",
+        "io.teamagent.build.chromium-version",
+    ),
+    (
+        "PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256",
+        "chromium",
+        "archive_sha256",
+        "io.teamagent.build.chromium-archive-sha256",
+    ),
+    (
+        "PLAYWRIGHT_CHROMIUM_SHA256",
+        "chromium",
+        "binary_sha256",
+        "io.teamagent.build.chromium-sha256",
+    ),
+)
 _SHA1_RE = re.compile(r"[0-9a-f]{40}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _SHA256_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_S3_VERSION_ID_RE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1024}")
+_THREE_PART_VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+){2}")
+_FOUR_PART_VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+){3}")
+_DECIMAL_RE = re.compile(r"[1-9][0-9]*")
 _SUPPORTED_IMAGE_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.v2+json",
     "application/vnd.oci.image.manifest.v1+json",
@@ -110,6 +172,157 @@ def _validate_archive_path(path: str, *, label: str) -> None:
         raise ProvenanceError(f"unsafe {label} path: {path!r}")
 
 
+def _validate_s3_version_id(version_id: Any, *, label: str) -> str:
+    if (
+        not isinstance(version_id, str)
+        or version_id in {"None", "null"}
+        or not _S3_VERSION_ID_RE.fullmatch(version_id)
+    ):
+        raise ProvenanceError(f"{label} must be a usable S3 VersionId")
+    return version_id
+
+
+def _validate_sha256(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+        raise ProvenanceError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def validate_runtime_contract(value: Any, *, label: str = "runtime contract") -> dict[str, Any]:
+    """Validate and normalize the exact model, Node, Playwright, and Chromium contract."""
+
+    if not isinstance(value, dict):
+        raise ProvenanceError(f"{label} must be a JSON object")
+    _require_exact_keys(
+        value,
+        {"schema_version", "model", "node", "playwright", "chromium"},
+        label=label,
+    )
+    if value["schema_version"] != RUNTIME_CONTRACT_SCHEMA_VERSION:
+        raise ProvenanceError(f"unsupported {label} schema: {value['schema_version']!r}")
+
+    model = value["model"]
+    node = value["node"]
+    playwright = value["playwright"]
+    chromium = value["chromium"]
+    if not isinstance(model, dict):
+        raise ProvenanceError(f"{label} model must be an object")
+    if not isinstance(node, dict):
+        raise ProvenanceError(f"{label} node must be an object")
+    if not isinstance(playwright, dict):
+        raise ProvenanceError(f"{label} playwright must be an object")
+    if not isinstance(chromium, dict):
+        raise ProvenanceError(f"{label} chromium must be an object")
+    _require_exact_keys(model, {"e5_revision"}, label=f"{label} model")
+    _require_exact_keys(
+        node,
+        {"image_digest", "version", "binary_sha256"},
+        label=f"{label} node",
+    )
+    _require_exact_keys(playwright, {"version"}, label=f"{label} playwright")
+    _require_exact_keys(
+        chromium,
+        {"revision", "version", "archive_sha256", "binary_sha256"},
+        label=f"{label} chromium",
+    )
+
+    e5_revision = model["e5_revision"]
+    if not isinstance(e5_revision, str) or not _SHA1_RE.fullmatch(e5_revision):
+        raise ProvenanceError(f"{label} model e5_revision must be a full lowercase SHA-1")
+    node_image_digest = node["image_digest"]
+    if not isinstance(node_image_digest, str) or not _SHA256_DIGEST_RE.fullmatch(node_image_digest):
+        raise ProvenanceError(f"{label} node image_digest must be a sha256 digest")
+    node_version = node["version"]
+    if not isinstance(node_version, str) or not _THREE_PART_VERSION_RE.fullmatch(node_version):
+        raise ProvenanceError(f"{label} node version must have three numeric components")
+    playwright_version = playwright["version"]
+    if not isinstance(playwright_version, str) or not _THREE_PART_VERSION_RE.fullmatch(
+        playwright_version
+    ):
+        raise ProvenanceError(f"{label} playwright version must have three numeric components")
+    chromium_revision = chromium["revision"]
+    if not isinstance(chromium_revision, str) or not _DECIMAL_RE.fullmatch(chromium_revision):
+        raise ProvenanceError(f"{label} chromium revision must be a positive decimal string")
+    chromium_version = chromium["version"]
+    if not isinstance(chromium_version, str) or not _FOUR_PART_VERSION_RE.fullmatch(
+        chromium_version
+    ):
+        raise ProvenanceError(f"{label} chromium version must have four numeric components")
+
+    return {
+        "schema_version": RUNTIME_CONTRACT_SCHEMA_VERSION,
+        "model": {"e5_revision": e5_revision},
+        "node": {
+            "image_digest": node_image_digest,
+            "version": node_version,
+            "binary_sha256": _validate_sha256(
+                node["binary_sha256"], label=f"{label} node binary_sha256"
+            ),
+        },
+        "playwright": {"version": playwright_version},
+        "chromium": {
+            "revision": chromium_revision,
+            "version": chromium_version,
+            "archive_sha256": _validate_sha256(
+                chromium["archive_sha256"], label=f"{label} chromium archive_sha256"
+            ),
+            "binary_sha256": _validate_sha256(
+                chromium["binary_sha256"], label=f"{label} chromium binary_sha256"
+            ),
+        },
+    }
+
+
+def load_runtime_contract(path: Path) -> dict[str, Any]:
+    return validate_runtime_contract(_load_json(path, label="runtime contract"))
+
+
+def runtime_environment(contract: dict[str, Any]) -> dict[str, str]:
+    validated = validate_runtime_contract(contract)
+    return {
+        environment_name: validated[section][field]
+        for environment_name, section, field, _label_name in RUNTIME_FIELDS
+    }
+
+
+def _runtime_contract_from_environment(expected: dict[str, str]) -> dict[str, Any]:
+    if not isinstance(expected, dict):
+        raise ProvenanceError("expected runtime environment must be an object")
+    expected_keys = {field[0] for field in RUNTIME_FIELDS}
+    _require_exact_keys(expected, expected_keys, label="expected runtime environment")
+    return validate_runtime_contract(
+        {
+            "schema_version": RUNTIME_CONTRACT_SCHEMA_VERSION,
+            "model": {"e5_revision": expected["E5_MODEL_REVISION"]},
+            "node": {
+                "image_digest": expected["NODE_IMAGE_DIGEST"],
+                "version": expected["NODE_VERSION"],
+                "binary_sha256": expected["NODE_BINARY_SHA256"],
+            },
+            "playwright": {"version": expected["PLAYWRIGHT_VERSION"]},
+            "chromium": {
+                "revision": expected["PLAYWRIGHT_CHROMIUM_REVISION"],
+                "version": expected["PLAYWRIGHT_CHROMIUM_VERSION"],
+                "archive_sha256": expected["PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256"],
+                "binary_sha256": expected["PLAYWRIGHT_CHROMIUM_SHA256"],
+            },
+        },
+        label="expected runtime environment",
+    )
+
+
+def _runtime_contract_at_commit(repo_root: Path, commit: str) -> dict[str, Any]:
+    raw = _git(repo_root, "show", f"{commit}:{RUNTIME_CONTRACT_PATH}")
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProvenanceError("runtime contract in Git commit is not UTF-8") from exc
+    return validate_runtime_contract(
+        _loads_strict(decoded, label="runtime contract in Git commit"),
+        label="runtime contract in Git commit",
+    )
+
+
 def _decode_ls_tree(raw: bytes) -> tuple[int, list[str]]:
     file_count = 0
     executable_paths: list[str] = []
@@ -141,6 +354,8 @@ def create_manifest(
     commit: str,
     branch: str,
     with_scrape_tools: str,
+    app_html_version_id: str,
+    app_html_sha256: str,
     output: Path,
 ) -> dict[str, Any]:
     """Write a manifest tied to a full SHA-1 commit and its source tree."""
@@ -152,6 +367,8 @@ def create_manifest(
         raise ProvenanceError("branch must be a non-empty single-line name")
     if with_scrape_tools not in {"true", "false"}:
         raise ProvenanceError("with_scrape_tools must be exactly 'true' or 'false'")
+    _validate_s3_version_id(app_html_version_id, label="app_html_version_id")
+    _validate_sha256(app_html_sha256, label="app_html_sha256")
 
     object_format = _git(repo_root, "rev-parse", "--show-object-format").decode().strip()
     if object_format != "sha1":
@@ -159,6 +376,7 @@ def create_manifest(
     resolved = _git(repo_root, "rev-parse", "--verify", f"{commit}^{{commit}}").decode().strip()
     if resolved != commit:
         raise ProvenanceError(f"commit did not resolve exactly: expected {commit}, got {resolved}")
+    _runtime_contract_at_commit(repo_root, commit)
 
     tracked_manifest = subprocess.run(
         ["git", "-C", str(repo_root), "cat-file", "-e", f"{commit}:{MANIFEST_NAME}"],
@@ -185,6 +403,12 @@ def create_manifest(
         "branch": branch,
         "build_parameters": {
             "with_scrape_tools": with_scrape_tools == "true",
+            "app_html": {
+                "bucket": APP_HTML_BUCKET,
+                "key": APP_HTML_KEY,
+                "version_id": app_html_version_id,
+                "sha256": app_html_sha256,
+            },
         },
         "archive": {
             "format": "zip",
@@ -209,7 +433,7 @@ def create_manifest(
 
 def _validate_manifest_schema(
     manifest: Any,
-) -> tuple[str, str, str, dict[str, Any], bytes]:
+) -> tuple[str, str, str, str, str, dict[str, Any], bytes]:
     if not isinstance(manifest, dict):
         raise ProvenanceError("source manifest must be a JSON object")
     _require_exact_keys(
@@ -240,12 +464,26 @@ def _validate_manifest_schema(
         raise ProvenanceError("manifest build_parameters must be an object")
     _require_exact_keys(
         build_parameters,
-        {"with_scrape_tools"},
+        {"with_scrape_tools", "app_html"},
         label="source manifest build_parameters",
     )
     if not isinstance(build_parameters["with_scrape_tools"], bool):
         raise ProvenanceError("manifest with_scrape_tools must be a JSON boolean")
     with_scrape_tools = "true" if build_parameters["with_scrape_tools"] else "false"
+    app_html = build_parameters["app_html"]
+    if not isinstance(app_html, dict):
+        raise ProvenanceError("manifest app_html contract must be an object")
+    _require_exact_keys(
+        app_html,
+        {"bucket", "key", "version_id", "sha256"},
+        label="source manifest app_html",
+    )
+    if app_html["bucket"] != APP_HTML_BUCKET or app_html["key"] != APP_HTML_KEY:
+        raise ProvenanceError("manifest app_html S3 object does not match the fixed contract")
+    app_html_version_id = _validate_s3_version_id(
+        app_html["version_id"], label="manifest app_html version_id"
+    )
+    app_html_sha256 = _validate_sha256(app_html["sha256"], label="manifest app_html sha256")
     if not isinstance(archive, dict):
         raise ProvenanceError("manifest archive contract must be an object")
     _require_exact_keys(
@@ -300,7 +538,15 @@ def _validate_manifest_schema(
         commit_object = base64.b64decode(encoded_commit, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ProvenanceError("manifest commit_object_base64 is invalid") from exc
-    return commit, branch, with_scrape_tools, archive, commit_object
+    return (
+        commit,
+        branch,
+        with_scrape_tools,
+        app_html_version_id,
+        app_html_sha256,
+        archive,
+        commit_object,
+    )
 
 
 def _commit_tree(commit_object: bytes) -> str:
@@ -378,6 +624,9 @@ def verify_source(
     expected_commit: str,
     expected_branch: str,
     expected_with_scrape_tools: str,
+    expected_app_html_version_id: str,
+    expected_app_html_sha256: str,
+    expected_runtime: dict[str, str],
 ) -> None:
     """Verify env values, commit proof, and every extracted source byte."""
 
@@ -388,7 +637,15 @@ def verify_source(
     if not source_root.is_dir() or not manifest_path.is_file():
         raise ProvenanceError("source root or generated manifest is missing")
     manifest = _load_json(manifest_path, label="source manifest")
-    commit, branch, with_scrape_tools, archive, commit_object = _validate_manifest_schema(manifest)
+    (
+        commit,
+        branch,
+        with_scrape_tools,
+        app_html_version_id,
+        app_html_sha256,
+        archive,
+        commit_object,
+    ) = _validate_manifest_schema(manifest)
     if expected_commit != commit:
         raise ProvenanceError(
             f"GIT_COMMIT mismatch: environment={expected_commit!r}, manifest={commit!r}"
@@ -402,6 +659,27 @@ def verify_source(
             "WITH_SCRAPE_TOOLS mismatch: "
             f"environment={expected_with_scrape_tools!r}, manifest={with_scrape_tools!r}"
         )
+    if expected_app_html_version_id != app_html_version_id:
+        raise ProvenanceError(
+            "APP_HTML_VERSION_ID mismatch: "
+            f"environment={expected_app_html_version_id!r}, manifest={app_html_version_id!r}"
+        )
+    if expected_app_html_sha256 != app_html_sha256:
+        raise ProvenanceError(
+            "APP_HTML_SHA256 mismatch: "
+            f"environment={expected_app_html_sha256!r}, manifest={app_html_sha256!r}"
+        )
+    source_runtime_contract = load_runtime_contract(source_root / RUNTIME_CONTRACT_PATH)
+    expected_runtime_contract = _runtime_contract_from_environment(expected_runtime)
+    source_runtime_environment = runtime_environment(source_runtime_contract)
+    expected_runtime_environment = runtime_environment(expected_runtime_contract)
+    for environment_name, expected_value in expected_runtime_environment.items():
+        source_value = source_runtime_environment[environment_name]
+        if expected_value != source_value:
+            raise ProvenanceError(
+                f"{environment_name} mismatch: "
+                f"environment={expected_value!r}, source contract={source_value!r}"
+            )
     if _git_object_id("commit", commit_object) != commit:
         raise ProvenanceError("commit proof does not hash to manifest commit")
     proof_tree = _commit_tree(commit_object)
@@ -466,10 +744,10 @@ def ecr_config_digest(batch_response_path: Path, expected_image_digest: str) -> 
     if media_type not in _SUPPORTED_IMAGE_MEDIA_TYPES:
         raise ProvenanceError(f"unsupported OCI image manifest media type: {media_type!r}")
     config = image_manifest.get("config")
-    if not isinstance(config, dict) or not isinstance(config.get("digest"), str):
+    if not isinstance(config, dict):
         raise ProvenanceError("OCI image manifest config descriptor is missing")
-    digest = config["digest"]
-    if not _SHA256_DIGEST_RE.fullmatch(digest):
+    digest = config.get("digest")
+    if not isinstance(digest, str) or not _SHA256_DIGEST_RE.fullmatch(digest):
         raise ProvenanceError("OCI config digest is invalid")
     return digest
 
@@ -479,8 +757,13 @@ def verify_oci_revision(
     expected_config_digest: str,
     expected_commit: str,
     expected_with_scrape_tools: str,
+    expected_app_html_version_id: str,
+    expected_app_html_sha256: str,
+    expected_runtime: dict[str, str],
+    expected_os: str = "linux",
+    expected_architecture: str = "arm64",
 ) -> None:
-    """Verify downloaded OCI config bytes, revision, and build-profile labels."""
+    """Verify downloaded OCI config bytes and all provenance labels."""
 
     if not _SHA256_DIGEST_RE.fullmatch(expected_config_digest):
         raise ProvenanceError("expected OCI config digest is invalid")
@@ -488,6 +771,11 @@ def verify_oci_revision(
         raise ProvenanceError("expected OCI revision must be a full lowercase SHA-1")
     if expected_with_scrape_tools not in {"true", "false"}:
         raise ProvenanceError("expected OCI scrape-tools label must be 'true' or 'false'")
+    _validate_s3_version_id(expected_app_html_version_id, label="expected OCI app HTML VersionId")
+    _validate_sha256(expected_app_html_sha256, label="expected OCI app HTML SHA-256")
+    expected_runtime_environment = runtime_environment(
+        _runtime_contract_from_environment(expected_runtime)
+    )
     try:
         raw = config_path.read_bytes()
     except OSError as exc:
@@ -503,6 +791,15 @@ def verify_oci_revision(
         raise ProvenanceError("OCI config is not UTF-8") from exc
     if not isinstance(config, dict) or not isinstance(config.get("config"), dict):
         raise ProvenanceError("OCI config object is missing config")
+    if config.get("os") != expected_os or config.get("architecture") != expected_architecture:
+        raise ProvenanceError(
+            "OCI platform mismatch: "
+            f"expected={expected_os}/{expected_architecture}, "
+            f"actual={config.get('os')!r}/{config.get('architecture')!r}"
+        )
+    variant = config.get("variant")
+    if expected_architecture == "arm64" and variant not in {None, "", "v8"}:
+        raise ProvenanceError(f"OCI arm64 variant is unsupported: {variant!r}")
     labels = config["config"].get("Labels")
     if not isinstance(labels, dict):
         raise ProvenanceError("OCI config labels are missing")
@@ -517,6 +814,41 @@ def verify_oci_revision(
             f"OCI {SCRAPE_TOOLS_LABEL} mismatch: "
             f"expected={expected_with_scrape_tools!r}, actual={scrape_tools!r}"
         )
+    app_html_version_id = labels.get(APP_HTML_VERSION_ID_LABEL)
+    if app_html_version_id != expected_app_html_version_id:
+        raise ProvenanceError(
+            f"OCI {APP_HTML_VERSION_ID_LABEL} mismatch: "
+            f"expected={expected_app_html_version_id!r}, actual={app_html_version_id!r}"
+        )
+    app_html_sha256 = labels.get(APP_HTML_SHA256_LABEL)
+    if app_html_sha256 != expected_app_html_sha256:
+        raise ProvenanceError(
+            f"OCI {APP_HTML_SHA256_LABEL} mismatch: "
+            f"expected={expected_app_html_sha256!r}, actual={app_html_sha256!r}"
+        )
+    runtime_labels = {environment_name: label for environment_name, _, _, label in RUNTIME_FIELDS}
+    for environment_name, expected_value in expected_runtime_environment.items():
+        label = runtime_labels[environment_name]
+        actual_value = labels.get(label)
+        if actual_value != expected_value:
+            raise ProvenanceError(
+                f"OCI {label} mismatch: expected={expected_value!r}, actual={actual_value!r}"
+            )
+
+
+def _add_expected_runtime_arguments(parser: argparse.ArgumentParser) -> None:
+    for environment_name, _section, _field, _label_name in RUNTIME_FIELDS:
+        parser.add_argument(
+            "--expected-" + environment_name.lower().replace("_", "-"),
+            required=True,
+        )
+
+
+def _runtime_environment_from_arguments(args: argparse.Namespace) -> dict[str, str]:
+    return {
+        environment_name: getattr(args, "expected_" + environment_name.lower())
+        for environment_name, _section, _field, _label_name in RUNTIME_FIELDS
+    }
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -528,6 +860,8 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--commit", required=True)
     create.add_argument("--branch", required=True)
     create.add_argument("--with-scrape-tools", choices=("true", "false"), required=True)
+    create.add_argument("--app-html-version-id", required=True)
+    create.add_argument("--app-html-sha256", required=True)
     create.add_argument("--output", type=Path, required=True)
 
     verify = subparsers.add_parser("verify-source")
@@ -536,6 +870,12 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--expected-commit", required=True)
     verify.add_argument("--expected-branch", required=True)
     verify.add_argument("--expected-with-scrape-tools", choices=("true", "false"), required=True)
+    verify.add_argument("--expected-app-html-version-id", required=True)
+    verify.add_argument("--expected-app-html-sha256", required=True)
+    _add_expected_runtime_arguments(verify)
+
+    runtime_values = subparsers.add_parser("runtime-values")
+    runtime_values.add_argument("--contract", type=Path, required=True)
 
     config_digest = subparsers.add_parser("ecr-config-digest")
     config_digest.add_argument("--batch-response", type=Path, required=True)
@@ -546,6 +886,9 @@ def _parser() -> argparse.ArgumentParser:
     revision.add_argument("--expected-config-digest", required=True)
     revision.add_argument("--expected-commit", required=True)
     revision.add_argument("--expected-with-scrape-tools", choices=("true", "false"), required=True)
+    revision.add_argument("--expected-app-html-version-id", required=True)
+    revision.add_argument("--expected-app-html-sha256", required=True)
+    _add_expected_runtime_arguments(revision)
     return parser
 
 
@@ -558,6 +901,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.commit,
                 args.branch,
                 args.with_scrape_tools,
+                args.app_html_version_id,
+                args.app_html_sha256,
                 args.output,
             )
             print(f"source manifest created for {args.commit}")
@@ -568,8 +913,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.expected_commit,
                 args.expected_branch,
                 args.expected_with_scrape_tools,
+                args.expected_app_html_version_id,
+                args.expected_app_html_sha256,
+                _runtime_environment_from_arguments(args),
             )
             print(f"source provenance verified: {args.expected_commit} ({args.expected_branch})")
+        elif args.command == "runtime-values":
+            values = runtime_environment(load_runtime_contract(args.contract))
+            print("\t".join(values[field[0]] for field in RUNTIME_FIELDS))
         elif args.command == "ecr-config-digest":
             print(ecr_config_digest(args.batch_response, args.expected_image_digest))
         elif args.command == "verify-oci-revision":
@@ -578,6 +929,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.expected_config_digest,
                 args.expected_commit,
                 args.expected_with_scrape_tools,
+                args.expected_app_html_version_id,
+                args.expected_app_html_sha256,
+                _runtime_environment_from_arguments(args),
             )
             print(f"OCI revision verified: {args.expected_commit}")
         else:  # pragma: no cover - argparse enforces a known command.

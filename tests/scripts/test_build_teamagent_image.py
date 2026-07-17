@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -15,6 +16,22 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "infra" / "deploy" / "build_teamagent_image.sh"
 PROVENANCE = ROOT / "infra" / "codebuild" / "source_provenance.py"
+IMAGE_RESOLVER = ROOT / "infra" / "codebuild" / "resolve_ecr_image.py"
+RUNTIME_CONTRACT_PATH = ROOT / "infra" / "codebuild" / "teamagent_runtime_contract.json"
+RUNTIME_CONTRACT = json.loads(RUNTIME_CONTRACT_PATH.read_text(encoding="utf-8"))
+RUNTIME_ENV = {
+    "E5_MODEL_REVISION": RUNTIME_CONTRACT["model"]["e5_revision"],
+    "NODE_IMAGE_DIGEST": RUNTIME_CONTRACT["node"]["image_digest"],
+    "NODE_VERSION": RUNTIME_CONTRACT["node"]["version"],
+    "NODE_BINARY_SHA256": RUNTIME_CONTRACT["node"]["binary_sha256"],
+    "PLAYWRIGHT_VERSION": RUNTIME_CONTRACT["playwright"]["version"],
+    "PLAYWRIGHT_CHROMIUM_REVISION": RUNTIME_CONTRACT["chromium"]["revision"],
+    "PLAYWRIGHT_CHROMIUM_VERSION": RUNTIME_CONTRACT["chromium"]["version"],
+    "PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256": RUNTIME_CONTRACT["chromium"]["archive_sha256"],
+    "PLAYWRIGHT_CHROMIUM_SHA256": RUNTIME_CONTRACT["chromium"]["binary_sha256"],
+}
+APP_HTML_BYTES = b"<!doctype html><title>versioned fixture</title>\n"
+APP_HTML_SHA256 = hashlib.sha256(APP_HTML_BYTES).hexdigest()
 
 FAKE_AWS = r"""#!/usr/bin/env python3
 import hashlib
@@ -56,13 +73,23 @@ if args[:2] == ["codebuild", "start-build"]:
 with Path(os.environ["FAKE_AWS_LOG"]).open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
 
-if args[:2] == ["s3api", "put-object"]:
+if args[:2] == ["s3api", "get-bucket-versioning"]:
+    print(os.environ.get("FAKE_APP_BUCKET_VERSIONING", "Enabled"))
+elif args[:2] == ["s3api", "head-object"]:
+    print(os.environ.get("FAKE_APP_VERSION", "app-version-456"))
+elif args[:2] == ["s3api", "get-object"]:
+    shutil.copyfile(os.environ["FAKE_APP_HTML"], args[-1])
+    print(os.environ.get("FAKE_DOWNLOADED_APP_VERSION", os.environ["FAKE_APP_VERSION"]))
+elif args[:2] == ["s3api", "put-object"]:
     shutil.copyfile(value("--body"), os.environ["CAPTURE_ZIP"])
-    print(os.environ.get("FAKE_VERSION", "version-123"))
+    print(os.environ.get("FAKE_SOURCE_VERSION", "source-version-123"))
 elif args[:2] == ["codebuild", "start-build"]:
     print("fixture-project:11111111-2222-3333-4444-555555555555")
 elif args[:2] == ["codebuild", "batch-get-builds"]:
-    resolved = os.environ.get("FAKE_RESOLVED_VERSION", os.environ.get("FAKE_VERSION", "version-123"))
+    resolved = os.environ.get(
+        "FAKE_RESOLVED_VERSION",
+        os.environ.get("FAKE_SOURCE_VERSION", "source-version-123"),
+    )
     print(f"SUCCEEDED\t{resolved}")
 elif args[:2] == ["ecr", "describe-images"]:
     _config_digest, _manifest_raw, image_digest = image_values()
@@ -110,12 +137,19 @@ def _fixture(
     tmp_path: Path,
     *,
     profile_label: str = "true",
+    app_sha_label: str = APP_HTML_SHA256,
+    app_version_label: str = "app-version-456",
 ) -> tuple[Path, str, dict[str, str], Path, Path]:
     repo = tmp_path / "repo"
     (repo / "infra" / "deploy").mkdir(parents=True)
     (repo / "infra" / "codebuild").mkdir(parents=True)
     shutil.copy2(SCRIPT, repo / "infra" / "deploy" / SCRIPT.name)
     shutil.copy2(PROVENANCE, repo / "infra" / "codebuild" / PROVENANCE.name)
+    shutil.copy2(IMAGE_RESOLVER, repo / "infra" / "codebuild" / IMAGE_RESOLVER.name)
+    shutil.copy2(
+        RUNTIME_CONTRACT_PATH,
+        repo / "infra" / "codebuild" / RUNTIME_CONTRACT_PATH.name,
+    )
     (repo / ".gitignore").write_text("ignored-secret.env\n", encoding="utf-8")
     (repo / "tracked.txt").write_text("archive me\n", encoding="utf-8")
     _run_git(repo, "init", "-b", "fixture-branch")
@@ -132,14 +166,34 @@ def _fixture(
     _write_executable(fake_bin / "curl", FAKE_CURL)
     log_path = tmp_path / "aws.jsonl"
     captured_zip = tmp_path / "captured-source.zip"
+    app_html_path = tmp_path / "versioned-app.html"
+    app_html_path.write_bytes(APP_HTML_BYTES)
     config_path = tmp_path / "config.json"
+    runtime_labels = {
+        "io.teamagent.build.e5-model-revision": RUNTIME_ENV["E5_MODEL_REVISION"],
+        "io.teamagent.build.node-image-digest": RUNTIME_ENV["NODE_IMAGE_DIGEST"],
+        "io.teamagent.build.node-version": RUNTIME_ENV["NODE_VERSION"],
+        "io.teamagent.build.node-binary-sha256": RUNTIME_ENV["NODE_BINARY_SHA256"],
+        "io.teamagent.build.playwright-version": RUNTIME_ENV["PLAYWRIGHT_VERSION"],
+        "io.teamagent.build.chromium-revision": RUNTIME_ENV["PLAYWRIGHT_CHROMIUM_REVISION"],
+        "io.teamagent.build.chromium-version": RUNTIME_ENV["PLAYWRIGHT_CHROMIUM_VERSION"],
+        "io.teamagent.build.chromium-archive-sha256": RUNTIME_ENV[
+            "PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256"
+        ],
+        "io.teamagent.build.chromium-sha256": RUNTIME_ENV["PLAYWRIGHT_CHROMIUM_SHA256"],
+    }
     config = {
+        "architecture": "arm64",
+        "os": "linux",
         "config": {
             "Labels": {
                 "org.opencontainers.image.revision": commit,
                 "io.teamagent.build.with-scrape-tools": profile_label,
+                "io.teamagent.build.app-html-sha256": app_sha_label,
+                "io.teamagent.build.app-html-version-id": app_version_label,
+                **runtime_labels,
             }
-        }
+        },
     }
     config_path.write_text(
         json.dumps(config, sort_keys=True, separators=(",", ":")), encoding="utf-8"
@@ -150,8 +204,10 @@ def _fixture(
             "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
             "FAKE_AWS_LOG": str(log_path),
             "FAKE_CONFIG": str(config_path),
+            "FAKE_APP_HTML": str(app_html_path),
             "CAPTURE_ZIP": str(captured_zip),
-            "FAKE_VERSION": "version-123",
+            "FAKE_APP_VERSION": "app-version-456",
+            "FAKE_SOURCE_VERSION": "source-version-123",
         }
     )
     return repo, commit, env, log_path, captured_zip
@@ -165,12 +221,6 @@ def _args(repo: Path, *, tag: str = "candidate-123", profile: str = "true") -> l
         tag,
         "--with-scrape-tools",
         profile,
-        "--source-bucket",
-        "fixture-source-bucket",
-        "--project-name",
-        "fixture-project",
-        "--repository-name",
-        "fixture-repo",
         "--poll-seconds",
         "1",
         "--timeout-seconds",
@@ -213,7 +263,47 @@ def test_scrape_profile_is_required_and_has_no_default() -> None:
     completed = _run(["bash", str(SCRIPT), "--image-tag", "candidate-1"], cwd=ROOT)
 
     assert completed.returncode != 0
-    assert "--with-scrape-tools true|false is required" in completed.stderr
+    assert "--with-scrape-tools true is required" in completed.stderr
+
+
+def test_thin_profile_is_rejected_before_any_aws_call() -> None:
+    completed = _run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--image-tag",
+            "candidate-1",
+            "--with-scrape-tools",
+            "false",
+        ],
+        cwd=ROOT,
+    )
+
+    assert completed.returncode != 0
+    assert "must be explicitly set to true" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "option",
+    ("--region", "--source-bucket", "--project-name", "--repository-name"),
+)
+def test_production_endpoints_cannot_be_overridden(option: str) -> None:
+    completed = _run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--image-tag",
+            "candidate-1",
+            "--with-scrape-tools",
+            "true",
+            option,
+            "attacker-controlled",
+        ],
+        cwd=ROOT,
+    )
+
+    assert completed.returncode != 0
+    assert f"unknown argument: {option}" in completed.stderr
 
 
 @pytest.mark.parametrize("tag", ["bad/tag", "-leading-dash", "space tag", "x" * 129])
@@ -252,19 +342,34 @@ def test_git_archive_version_pin_env_binding_and_remote_labels(tmp_path: Path) -
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     records = _records(log_path)
+    versioning = _record(records, ["s3api", "get-bucket-versioning"])
+    assert versioning["args"][versioning["args"].index("--bucket") + 1] == (
+        "teamagent-dev-raw-files"
+    )
+    head = _record(records, ["s3api", "head-object"])
+    assert head["args"][head["args"].index("--key") + 1] == ("codebuild/connect-web-app.html")
+    get = _record(records, ["s3api", "get-object"])
+    assert get["args"][get["args"].index("--version-id") + 1] == "app-version-456"
     put = _record(records, ["s3api", "put-object"])
     assert put["args"][put["args"].index("--key") + 1] == "codebuild/source.zip"
+    assert put["args"][put["args"].index("--content-type") + 1] == "application/zip"
+    assert put["args"][put["args"].index("--server-side-encryption") + 1] == "AES256"
     start = _record(records, ["codebuild", "start-build"])
-    assert start["args"][start["args"].index("--source-version") + 1] == "version-123"
-    assert start["args"][start["args"].index("--buildspec-override") + 1] == (
-        "infra/codebuild/buildspec.yml"
-    )
+    assert start["args"][start["args"].index("--source-version") + 1] == ("source-version-123")
+    assert "--buildspec-override" not in start["args"]
+    poll = _record(records, ["codebuild", "batch-get-builds"])
+    query = poll["args"][poll["args"].index("--query") + 1]
+    assert "sourceVersion" in query
+    assert "resolvedSourceVersion" not in query
     overrides = {item["name"]: item["value"] for item in start["environment"]}
     assert overrides == {
         "GIT_COMMIT": commit,
         "GIT_BRANCH": "fixture-branch",
         "IMAGE_TAG": "candidate-123",
         "WITH_SCRAPE_TOOLS": "true",
+        "APP_HTML_VERSION_ID": "app-version-456",
+        "APP_HTML_SHA256": APP_HTML_SHA256,
+        **RUNTIME_ENV,
     }
     assert all(item["type"] == "PLAINTEXT" for item in start["environment"])
 
@@ -274,17 +379,27 @@ def test_git_archive_version_pin_env_binding_and_remote_labels(tmp_path: Path) -
     assert "tracked.txt" in names
     assert "ignored-secret.env" not in names
     assert not any(name == ".git" or name.startswith(".git/") for name in names)
+    assert manifest["schema_version"] == 2
     assert manifest["commit"] == commit
     assert manifest["branch"] == "fixture-branch"
-    assert manifest["build_parameters"] == {"with_scrape_tools": True}
+    assert manifest["build_parameters"] == {
+        "with_scrape_tools": True,
+        "app_html": {
+            "bucket": "teamagent-dev-raw-files",
+            "key": "codebuild/connect-web-app.html",
+            "version_id": "app-version-456",
+            "sha256": APP_HTML_SHA256,
+        },
+    }
     assert "private-oci-config" not in completed.stdout + completed.stderr
+    assert "arm64_digest=sha256:" in completed.stdout
     assert "no deployment performed" in completed.stdout
     assert not any(record["args"][0] in {"ecs", "events"} for record in records)
 
 
 def test_missing_s3_version_id_fails_before_start_build(tmp_path: Path) -> None:
     repo, _commit, env, log_path, _captured_zip = _fixture(tmp_path)
-    env["FAKE_VERSION"] = "None"
+    env["FAKE_SOURCE_VERSION"] = "None"
 
     completed = _run(_args(repo), cwd=repo, env=env)
 
@@ -295,14 +410,54 @@ def test_missing_s3_version_id_fails_before_start_build(tmp_path: Path) -> None:
     )
 
 
-def test_resolved_source_version_mismatch_fails_before_ecr_lookup(tmp_path: Path) -> None:
+def test_source_bucket_without_enabled_versioning_fails_before_object_lookup(
+    tmp_path: Path,
+) -> None:
+    repo, _commit, env, log_path, _captured_zip = _fixture(tmp_path)
+    env["FAKE_APP_BUCKET_VERSIONING"] = "Suspended"
+
+    completed = _run(_args(repo), cwd=repo, env=env)
+
+    assert completed.returncode != 0
+    assert "source/app S3 bucket versioning must be Enabled" in completed.stderr
+    records = _records(log_path)
+    assert not any(record["args"][:2] == ["s3api", "head-object"] for record in records)
+    assert not any(record["args"][:2] == ["s3api", "put-object"] for record in records)
+
+
+def test_app_object_without_version_id_fails_before_source_upload(tmp_path: Path) -> None:
+    repo, _commit, env, log_path, _captured_zip = _fixture(tmp_path)
+    env["FAKE_APP_VERSION"] = "None"
+
+    completed = _run(_args(repo), cwd=repo, env=env)
+
+    assert completed.returncode != 0
+    assert "app.html S3 object did not return a usable VersionId" in completed.stderr
+    assert not any(
+        record["args"][:2] in (["s3api", "get-object"], ["s3api", "put-object"])
+        for record in _records(log_path)
+    )
+
+
+def test_app_downloaded_version_mismatch_fails_before_source_upload(tmp_path: Path) -> None:
+    repo, _commit, env, log_path, _captured_zip = _fixture(tmp_path)
+    env["FAKE_DOWNLOADED_APP_VERSION"] = "different-app-version"
+
+    completed = _run(_args(repo), cwd=repo, env=env)
+
+    assert completed.returncode != 0
+    assert "downloaded app.html VersionId does not match" in completed.stderr
+    assert not any(record["args"][:2] == ["s3api", "put-object"] for record in _records(log_path))
+
+
+def test_build_source_version_mismatch_fails_before_ecr_lookup(tmp_path: Path) -> None:
     repo, _commit, env, log_path, _captured_zip = _fixture(tmp_path)
     env["FAKE_RESOLVED_VERSION"] = "different-version"
 
     completed = _run(_args(repo), cwd=repo, env=env)
 
     assert completed.returncode != 0
-    assert "resolvedSourceVersion does not match" in completed.stderr
+    assert "sourceVersion does not match" in completed.stderr
     assert not any(record["args"][0] == "ecr" for record in _records(log_path))
 
 
@@ -313,3 +468,27 @@ def test_remote_candidate_scrape_label_mismatch_fails_closed(tmp_path: Path) -> 
 
     assert completed.returncode != 0
     assert "io.teamagent.build.with-scrape-tools mismatch" in completed.stderr
+
+
+def test_remote_candidate_app_sha_label_mismatch_fails_closed(tmp_path: Path) -> None:
+    repo, _commit, env, _log_path, _captured_zip = _fixture(
+        tmp_path,
+        app_sha_label="f" * 64,
+    )
+
+    completed = _run(_args(repo), cwd=repo, env=env)
+
+    assert completed.returncode != 0
+    assert "io.teamagent.build.app-html-sha256 mismatch" in completed.stderr
+
+
+def test_remote_candidate_app_version_label_mismatch_fails_closed(tmp_path: Path) -> None:
+    repo, _commit, env, _log_path, _captured_zip = _fixture(
+        tmp_path,
+        app_version_label="different-app-version",
+    )
+
+    completed = _run(_args(repo), cwd=repo, env=env)
+
+    assert completed.returncode != 0
+    assert "io.teamagent.build.app-html-version-id mismatch" in completed.stderr

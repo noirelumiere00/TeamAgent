@@ -13,6 +13,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "infra" / "codebuild" / "source_provenance.py"
+APP_HTML_VERSION_ID = "app-version-fixture"
+APP_HTML_SHA256 = hashlib.sha256(b"versioned app fixture\n").hexdigest()
+RUNTIME_CONTRACT = json.loads(
+    (ROOT / "infra" / "codebuild" / "teamagent_runtime_contract.json").read_text(encoding="utf-8")
+)
 
 
 def _load_module() -> object:
@@ -25,6 +30,7 @@ def _load_module() -> object:
 
 
 provenance = _load_module()
+RUNTIME_ENV = provenance.runtime_environment(RUNTIME_CONTRACT)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -48,13 +54,27 @@ def _source_archive(tmp_path: Path) -> tuple[Path, str, str]:
     script.parent.mkdir()
     script.write_text("#!/usr/bin/env bash\necho verified\n", encoding="utf-8")
     os.chmod(script, 0o755)
+    runtime_contract = repo / provenance.RUNTIME_CONTRACT_PATH
+    runtime_contract.parent.mkdir(parents=True)
+    runtime_contract.write_text(
+        json.dumps(RUNTIME_CONTRACT, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "fixture")
     commit = _git(repo, "rev-parse", "HEAD")
     branch = _git(repo, "branch", "--show-current")
 
     manifest = tmp_path / provenance.MANIFEST_NAME
-    provenance.create_manifest(repo, commit, branch, "true", manifest)
+    provenance.create_manifest(
+        repo,
+        commit,
+        branch,
+        "true",
+        APP_HTML_VERSION_ID,
+        APP_HTML_SHA256,
+        manifest,
+    )
     archive = tmp_path / "source.zip"
     _git(
         repo,
@@ -79,6 +99,9 @@ def test_git_archive_source_and_manifest_verify_exactly(tmp_path: Path) -> None:
         commit,
         branch,
         "true",
+        APP_HTML_VERSION_ID,
+        APP_HTML_SHA256,
+        RUNTIME_ENV,
     )
 
 
@@ -93,6 +116,9 @@ def test_source_byte_tampering_is_rejected(tmp_path: Path) -> None:
             commit,
             branch,
             "true",
+            APP_HTML_VERSION_ID,
+            APP_HTML_SHA256,
+            RUNTIME_ENV,
         )
 
 
@@ -122,17 +148,81 @@ def test_environment_must_match_manifest(
             expected_commit,
             branch or expected_branch,
             with_scrape_tools,
+            APP_HTML_VERSION_ID,
+            APP_HTML_SHA256,
+            RUNTIME_ENV,
         )
 
 
-def _oci_fixture(tmp_path: Path, commit: str, profile: str) -> tuple[Path, str, Path, str]:
+@pytest.mark.parametrize(
+    ("version_id", "sha256", "message"),
+    [
+        ("different-version", APP_HTML_SHA256, "APP_HTML_VERSION_ID mismatch"),
+        (APP_HTML_VERSION_ID, "f" * 64, "APP_HTML_SHA256 mismatch"),
+    ],
+)
+def test_app_html_environment_must_match_manifest(
+    tmp_path: Path,
+    version_id: str,
+    sha256: str,
+    message: str,
+) -> None:
+    extracted, commit, branch = _source_archive(tmp_path)
+
+    with pytest.raises(provenance.ProvenanceError, match=message):
+        provenance.verify_source(
+            extracted,
+            extracted / provenance.MANIFEST_NAME,
+            commit,
+            branch,
+            "true",
+            version_id,
+            sha256,
+            RUNTIME_ENV,
+        )
+
+
+def test_runtime_environment_must_match_committed_contract(tmp_path: Path) -> None:
+    extracted, commit, branch = _source_archive(tmp_path)
+    changed_runtime = dict(RUNTIME_ENV)
+    changed_runtime["NODE_VERSION"] = "99.99.99"
+
+    with pytest.raises(provenance.ProvenanceError, match="NODE_VERSION mismatch"):
+        provenance.verify_source(
+            extracted,
+            extracted / provenance.MANIFEST_NAME,
+            commit,
+            branch,
+            "true",
+            APP_HTML_VERSION_ID,
+            APP_HTML_SHA256,
+            changed_runtime,
+        )
+
+
+def _oci_fixture(
+    tmp_path: Path,
+    commit: str,
+    profile: str,
+    app_html_sha256: str = APP_HTML_SHA256,
+    app_html_version_id: str = APP_HTML_VERSION_ID,
+) -> tuple[Path, str, Path, str]:
+    runtime_labels = {
+        label: RUNTIME_ENV[environment_name]
+        for environment_name, _section, _field, label in provenance.RUNTIME_FIELDS
+    }
     config = {
+        "architecture": "arm64",
+        "os": "linux",
         "config": {
             "Labels": {
                 "org.opencontainers.image.revision": commit,
                 provenance.SCRAPE_TOOLS_LABEL: profile,
+                provenance.APP_HTML_VERSION_ID_LABEL: app_html_version_id,
+                provenance.APP_HTML_SHA256_LABEL: app_html_sha256,
+                **runtime_labels,
             }
-        }
+        },
     }
     config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
     config_path = tmp_path / "config.json"
@@ -164,7 +254,15 @@ def test_remote_oci_revision_and_scrape_profile_are_digest_bound(tmp_path: Path)
     config_path, config_digest, response_path, image_digest = _oci_fixture(tmp_path, commit, "true")
 
     assert provenance.ecr_config_digest(response_path, image_digest) == config_digest
-    provenance.verify_oci_revision(config_path, config_digest, commit, "true")
+    provenance.verify_oci_revision(
+        config_path,
+        config_digest,
+        commit,
+        "true",
+        APP_HTML_VERSION_ID,
+        APP_HTML_SHA256,
+        RUNTIME_ENV,
+    )
 
 
 def test_remote_oci_scrape_profile_mismatch_is_separate_failure(tmp_path: Path) -> None:
@@ -174,7 +272,57 @@ def test_remote_oci_scrape_profile_mismatch_is_separate_failure(tmp_path: Path) 
     )
 
     with pytest.raises(provenance.ProvenanceError, match="with-scrape-tools mismatch"):
-        provenance.verify_oci_revision(config_path, config_digest, commit, "true")
+        provenance.verify_oci_revision(
+            config_path,
+            config_digest,
+            commit,
+            "true",
+            APP_HTML_VERSION_ID,
+            APP_HTML_SHA256,
+            RUNTIME_ENV,
+        )
+
+
+def test_remote_oci_app_html_sha_mismatch_fails_closed(tmp_path: Path) -> None:
+    commit = "d" * 40
+    config_path, config_digest, _response_path, _image_digest = _oci_fixture(
+        tmp_path,
+        commit,
+        "true",
+        "e" * 64,
+    )
+
+    with pytest.raises(provenance.ProvenanceError, match="app-html-sha256 mismatch"):
+        provenance.verify_oci_revision(
+            config_path,
+            config_digest,
+            commit,
+            "true",
+            APP_HTML_VERSION_ID,
+            APP_HTML_SHA256,
+            RUNTIME_ENV,
+        )
+
+
+def test_remote_oci_app_html_version_mismatch_fails_closed(tmp_path: Path) -> None:
+    commit = "e" * 40
+    config_path, config_digest, _response_path, _image_digest = _oci_fixture(
+        tmp_path,
+        commit,
+        "true",
+        app_html_version_id="different-app-version",
+    )
+
+    with pytest.raises(provenance.ProvenanceError, match="app-html-version-id mismatch"):
+        provenance.verify_oci_revision(
+            config_path,
+            config_digest,
+            commit,
+            "true",
+            APP_HTML_VERSION_ID,
+            APP_HTML_SHA256,
+            RUNTIME_ENV,
+        )
 
 
 def test_remote_oci_config_bytes_cannot_change_after_digest_resolution(tmp_path: Path) -> None:
@@ -185,4 +333,35 @@ def test_remote_oci_config_bytes_cannot_change_after_digest_resolution(tmp_path:
     config_path.write_text("{}", encoding="utf-8")
 
     with pytest.raises(provenance.ProvenanceError, match="OCI config digest mismatch"):
-        provenance.verify_oci_revision(config_path, config_digest, commit, "true")
+        provenance.verify_oci_revision(
+            config_path,
+            config_digest,
+            commit,
+            "true",
+            APP_HTML_VERSION_ID,
+            APP_HTML_SHA256,
+            RUNTIME_ENV,
+        )
+
+
+def test_remote_oci_platform_mismatch_fails_closed(tmp_path: Path) -> None:
+    commit = "f" * 40
+    config_path, _config_digest, _response_path, _image_digest = _oci_fixture(
+        tmp_path, commit, "true"
+    )
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["architecture"] = "amd64"
+    config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    config_path.write_bytes(config_bytes)
+    changed_digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+
+    with pytest.raises(provenance.ProvenanceError, match="OCI platform mismatch"):
+        provenance.verify_oci_revision(
+            config_path,
+            changed_digest,
+            commit,
+            "true",
+            APP_HTML_VERSION_ID,
+            APP_HTML_SHA256,
+            RUNTIME_ENV,
+        )

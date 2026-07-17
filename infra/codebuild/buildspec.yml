@@ -1,27 +1,57 @@
 # CodeBuild buildspec for the teamagent-mcp candidate image.
 # Terraform reads this file directly; do not duplicate it inline.
 #
-# app.html remains a private S3 hot-swap input. S3 is preferred, with the
-# archive copy as a fail-loud fallback for the existing deployment contract.
+# app.html remains a private S3 hot-swap input, but each build is pinned to one
+# exact S3 VersionId and SHA-256 selected by build_teamagent_image.sh.
 version: 0.2
 phases:
   pre_build:
     commands:
       - |
         set -euo pipefail
+        umask 077
+        printf '%s  %s\n' '__SOURCE_PROVENANCE_SHA256__' infra/codebuild/source_provenance.py | sha256sum -c -
+        printf '%s  %s\n' '__ECR_IMAGE_RESOLVER_SHA256__' infra/codebuild/resolve_ecr_image.py | sha256sum -c -
+        printf '%s  %s\n' '__ECR_SCAN_GATE_SHA256__' infra/codebuild/verify_ecr_scan.py | sha256sum -c -
+        printf '%s  %s\n' '__ECR_SCAN_EXCEPTIONS_SHA256__' infra/codebuild/ecr_scan_exceptions.json | sha256sum -c -
         : "${GIT_COMMIT:?GIT_COMMIT must be explicitly provided}"
         : "${GIT_BRANCH:?GIT_BRANCH must be explicitly provided}"
         : "${IMAGE_TAG:?IMAGE_TAG must be explicitly provided}"
         : "${WITH_SCRAPE_TOOLS:?WITH_SCRAPE_TOOLS must be explicitly provided}"
+        : "${APP_HTML_VERSION_ID:?APP_HTML_VERSION_ID must be explicitly provided}"
+        : "${APP_HTML_SHA256:?APP_HTML_SHA256 must be explicitly provided}"
+        : "${E5_MODEL_REVISION:?E5_MODEL_REVISION must be explicitly provided}"
+        : "${NODE_IMAGE_DIGEST:?NODE_IMAGE_DIGEST must be explicitly provided}"
+        : "${NODE_VERSION:?NODE_VERSION must be explicitly provided}"
+        : "${NODE_BINARY_SHA256:?NODE_BINARY_SHA256 must be explicitly provided}"
+        : "${PLAYWRIGHT_VERSION:?PLAYWRIGHT_VERSION must be explicitly provided}"
+        : "${PLAYWRIGHT_CHROMIUM_REVISION:?PLAYWRIGHT_CHROMIUM_REVISION must be explicitly provided}"
+        : "${PLAYWRIGHT_CHROMIUM_VERSION:?PLAYWRIGHT_CHROMIUM_VERSION must be explicitly provided}"
+        : "${PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256:?PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256 must be explicitly provided}"
+        : "${PLAYWRIGHT_CHROMIUM_SHA256:?PLAYWRIGHT_CHROMIUM_SHA256 must be explicitly provided}"
         [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: invalid GIT_COMMIT"; exit 1; }
         [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "FATAL: unsafe IMAGE_TAG"; exit 1; }
-        [[ "$WITH_SCRAPE_TOOLS" == "true" || "$WITH_SCRAPE_TOOLS" == "false" ]] || { echo "FATAL: WITH_SCRAPE_TOOLS must be true or false"; exit 1; }
+        [ "$WITH_SCRAPE_TOOLS" = "true" ] || { echo "FATAL: WITH_SCRAPE_TOOLS must be explicitly true for production candidates"; exit 1; }
+        case "$APP_HTML_VERSION_ID" in ""|None|null|*[!A-Za-z0-9._~+/=-]*) echo "FATAL: invalid APP_HTML_VERSION_ID"; exit 1 ;; esac
+        [ "${#APP_HTML_VERSION_ID}" -le 1024 ] || { echo "FATAL: invalid APP_HTML_VERSION_ID"; exit 1; }
+        [[ "$APP_HTML_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid APP_HTML_SHA256"; exit 1; }
         python3 infra/codebuild/source_provenance.py verify-source \
           --source-root "$CODEBUILD_SRC_DIR" \
           --manifest "$CODEBUILD_SRC_DIR/.teamagent-source-manifest.json" \
           --expected-commit "$GIT_COMMIT" \
           --expected-branch "$GIT_BRANCH" \
-          --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS"
+          --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS" \
+          --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
+          --expected-app-html-sha256 "$APP_HTML_SHA256" \
+          --expected-e5-model-revision "$E5_MODEL_REVISION" \
+          --expected-node-image-digest "$NODE_IMAGE_DIGEST" \
+          --expected-node-version "$NODE_VERSION" \
+          --expected-node-binary-sha256 "$NODE_BINARY_SHA256" \
+          --expected-playwright-version "$PLAYWRIGHT_VERSION" \
+          --expected-playwright-chromium-revision "$PLAYWRIGHT_CHROMIUM_REVISION" \
+          --expected-playwright-chromium-version "$PLAYWRIGHT_CHROMIUM_VERSION" \
+          --expected-playwright-chromium-archive-sha256 "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
+          --expected-playwright-chromium-sha256 "$PLAYWRIGHT_CHROMIUM_SHA256"
         aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
   build:
@@ -29,51 +59,142 @@ phases:
       - |
         set -euo pipefail
         mkdir -p src/teamagent/connect_web/static
-        if aws s3 cp s3://teamagent-dev-raw-files/codebuild/connect-web-app.html src/teamagent/connect_web/static/app.html; then
-          echo "app.html <- S3 ($(du -h src/teamagent/connect_web/static/app.html | cut -f1))"
-        elif [ -s src/teamagent/connect_web/static/app.html ]; then
-          echo "S3 miss -> source archive app.html ($(du -h src/teamagent/connect_web/static/app.html | cut -f1))"
-        else
-          echo "FATAL: app.html is absent from both S3 and the source archive"
-          exit 1
-        fi
+        APP_HTML_PATH="src/teamagent/connect_web/static/app.html"
+        DOWNLOADED_APP_HTML_VERSION_ID="$(aws s3api get-object \
+          --region "$AWS_DEFAULT_REGION" \
+          --bucket teamagent-dev-raw-files \
+          --key codebuild/connect-web-app.html \
+          --version-id "$APP_HTML_VERSION_ID" \
+          --query VersionId \
+          --output text \
+          "$APP_HTML_PATH")"
+        [ "$DOWNLOADED_APP_HTML_VERSION_ID" = "$APP_HTML_VERSION_ID" ] || { echo "FATAL: app.html VersionId mismatch"; exit 1; }
+        [ -s "$APP_HTML_PATH" ] || { echo "FATAL: versioned app.html is empty"; exit 1; }
+        ACTUAL_APP_HTML_SHA256="$(sha256sum "$APP_HTML_PATH" | awk '{print $1}')"
+        [ "$ACTUAL_APP_HTML_SHA256" = "$APP_HTML_SHA256" ] || { echo "FATAL: app.html SHA-256 mismatch"; exit 1; }
+        echo "Verified pinned app.html SHA-256: $APP_HTML_SHA256"
         echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m), WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS"
-        docker build \
+        DOCKER_BUILDKIT=1 docker build \
           -f infra/docker/Dockerfile.teamagent-mcp \
           --build-arg "WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS" \
           --build-arg "GIT_COMMIT=$GIT_COMMIT" \
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \
+          --build-arg "APP_HTML_SHA256=$APP_HTML_SHA256" \
+          --build-arg "APP_HTML_VERSION_ID=$APP_HTML_VERSION_ID" \
+          --build-arg "E5_MODEL_REVISION=$E5_MODEL_REVISION" \
+          --build-arg "NODE_VERSION=$NODE_VERSION" \
+          --build-arg "NODE_BINARY_SHA256=$NODE_BINARY_SHA256" \
+          --build-arg "PLAYWRIGHT_VERSION=$PLAYWRIGHT_VERSION" \
+          --build-arg "PLAYWRIGHT_CHROMIUM_REVISION=$PLAYWRIGHT_CHROMIUM_REVISION" \
+          --build-arg "PLAYWRIGHT_CHROMIUM_VERSION=$PLAYWRIGHT_CHROMIUM_VERSION" \
+          --build-arg "PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256=$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
+          --build-arg "PLAYWRIGHT_CHROMIUM_SHA256=$PLAYWRIGHT_CHROMIUM_SHA256" \
           -t "$MCP_REPO:$IMAGE_TAG" \
           .
+        BUILT_PLATFORM="$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "$MCP_REPO:$IMAGE_TAG")"
+        [ "$BUILT_PLATFORM" = "linux/arm64" ] || { echo "FATAL: local image platform is not linux/arm64"; exit 1; }
         BUILT_REVISION="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$MCP_REPO:$IMAGE_TAG")"
         [ "$BUILT_REVISION" = "$GIT_COMMIT" ] || { echo "FATAL: local OCI revision label mismatch"; exit 1; }
         BUILT_SCRAPE_TOOLS="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.with-scrape-tools" }}' "$MCP_REPO:$IMAGE_TAG")"
         [ "$BUILT_SCRAPE_TOOLS" = "$WITH_SCRAPE_TOOLS" ] || { echo "FATAL: local OCI scrape-tools label mismatch"; exit 1; }
+        BUILT_APP_HTML_SHA256="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.app-html-sha256" }}' "$MCP_REPO:$IMAGE_TAG")"
+        [ "$BUILT_APP_HTML_SHA256" = "$APP_HTML_SHA256" ] || { echo "FATAL: local OCI app HTML SHA-256 label mismatch"; exit 1; }
+        BUILT_APP_HTML_VERSION_ID="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.app-html-version-id" }}' "$MCP_REPO:$IMAGE_TAG")"
+        [ "$BUILT_APP_HTML_VERSION_ID" = "$APP_HTML_VERSION_ID" ] || { echo "FATAL: local OCI app HTML VersionId label mismatch"; exit 1; }
+        while IFS=$'\t' read -r EXPECTED_VALUE LABEL_NAME; do
+          ACTUAL_VALUE="$(docker image inspect --format "{{ index .Config.Labels \"$LABEL_NAME\" }}" "$MCP_REPO:$IMAGE_TAG")"
+          [ "$ACTUAL_VALUE" = "$EXPECTED_VALUE" ] || { echo "FATAL: local OCI runtime label mismatch: $LABEL_NAME"; exit 1; }
+        done <<EOF
+        ${E5_MODEL_REVISION}	io.teamagent.build.e5-model-revision
+        ${NODE_IMAGE_DIGEST}	io.teamagent.build.node-image-digest
+        ${NODE_VERSION}	io.teamagent.build.node-version
+        ${NODE_BINARY_SHA256}	io.teamagent.build.node-binary-sha256
+        ${PLAYWRIGHT_VERSION}	io.teamagent.build.playwright-version
+        ${PLAYWRIGHT_CHROMIUM_REVISION}	io.teamagent.build.chromium-revision
+        ${PLAYWRIGHT_CHROMIUM_VERSION}	io.teamagent.build.chromium-version
+        ${PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256}	io.teamagent.build.chromium-archive-sha256
+        ${PLAYWRIGHT_CHROMIUM_SHA256}	io.teamagent.build.chromium-sha256
+        EOF
   post_build:
     commands:
       - |
         set -euo pipefail
         docker push "$MCP_REPO:$IMAGE_TAG"
         ECR_REPOSITORY="${MCP_REPO##*/}"
-        DIGEST="$(aws ecr describe-images \
+        TAG_DIGEST="$(aws ecr describe-images \
           --region "$AWS_DEFAULT_REGION" \
           --repository-name "$ECR_REPOSITORY" \
           --image-ids "imageTag=$IMAGE_TAG" \
           --query 'imageDetails[0].imageDigest' \
           --output text)"
-        [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid ECR digest"; exit 1; }
+        [[ "$TAG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid ECR tag digest"; exit 1; }
+        aws ecr batch-get-image \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-ids "imageDigest=$TAG_DIGEST" \
+          --accepted-media-types \
+            application/vnd.docker.distribution.manifest.list.v2+json \
+            application/vnd.oci.image.index.v1+json \
+            application/vnd.docker.distribution.manifest.v2+json \
+            application/vnd.oci.image.manifest.v1+json \
+          --output json > /tmp/teamagent-ecr-parent.json
+        ARM64_DIGEST="$(python3 infra/codebuild/resolve_ecr_image.py resolve-platform \
+          --batch-response /tmp/teamagent-ecr-parent.json \
+          --expected-image-digest "$TAG_DIGEST" \
+          --os linux \
+          --architecture arm64)"
+        [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid arm64 child digest"; exit 1; }
+        aws ecr batch-get-image \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-ids "imageDigest=$ARM64_DIGEST" \
+          --accepted-media-types \
+            application/vnd.docker.distribution.manifest.v2+json \
+            application/vnd.oci.image.manifest.v1+json \
+          --output json > /tmp/teamagent-ecr-child.json
+        CONFIG_DIGEST="$(python3 infra/codebuild/source_provenance.py ecr-config-digest \
+          --batch-response /tmp/teamagent-ecr-child.json \
+          --expected-image-digest "$ARM64_DIGEST")"
+        [[ "$CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid OCI config digest"; exit 1; }
+        CONFIG_URL="$(aws ecr get-download-url-for-layer \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --layer-digest "$CONFIG_DIGEST" \
+          --query downloadUrl \
+          --output text)"
+        [[ "$CONFIG_URL" == https://* ]] || { echo "FATAL: invalid OCI config URL"; exit 1; }
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+          --output /tmp/teamagent-oci-config.json "$CONFIG_URL"
+        unset CONFIG_URL
+        python3 infra/codebuild/source_provenance.py verify-oci-revision \
+          --config /tmp/teamagent-oci-config.json \
+          --expected-config-digest "$CONFIG_DIGEST" \
+          --expected-commit "$GIT_COMMIT" \
+          --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS" \
+          --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
+          --expected-app-html-sha256 "$APP_HTML_SHA256" \
+          --expected-e5-model-revision "$E5_MODEL_REVISION" \
+          --expected-node-image-digest "$NODE_IMAGE_DIGEST" \
+          --expected-node-version "$NODE_VERSION" \
+          --expected-node-binary-sha256 "$NODE_BINARY_SHA256" \
+          --expected-playwright-version "$PLAYWRIGHT_VERSION" \
+          --expected-playwright-chromium-revision "$PLAYWRIGHT_CHROMIUM_REVISION" \
+          --expected-playwright-chromium-version "$PLAYWRIGHT_CHROMIUM_VERSION" \
+          --expected-playwright-chromium-archive-sha256 "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
+          --expected-playwright-chromium-sha256 "$PLAYWRIGHT_CHROMIUM_SHA256"
         aws ecr wait image-scan-complete \
           --region "$AWS_DEFAULT_REGION" \
           --repository-name "$ECR_REPOSITORY" \
-          --image-id "imageDigest=$DIGEST"
+          --image-id "imageDigest=$ARM64_DIGEST"
         aws ecr describe-image-scan-findings \
           --region "$AWS_DEFAULT_REGION" \
           --repository-name "$ECR_REPOSITORY" \
-          --image-id "imageDigest=$DIGEST" \
+          --image-id "imageDigest=$ARM64_DIGEST" \
           --output json > /tmp/teamagent-ecr-scan.json
         python3 infra/codebuild/verify_ecr_scan.py \
           --scan /tmp/teamagent-ecr-scan.json \
           --exceptions infra/codebuild/ecr_scan_exceptions.json \
-          --expected-image-digest "$DIGEST" \
+          --expected-image-digest "$ARM64_DIGEST" \
           --expected-repository "$ECR_REPOSITORY"
-        echo "MCP_DIGEST=$DIGEST"
+        echo "MCP_TAG_DIGEST=$TAG_DIGEST"
+        echo "MCP_ARM64_DIGEST=$ARM64_DIGEST"

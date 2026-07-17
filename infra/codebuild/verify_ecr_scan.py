@@ -357,7 +357,13 @@ def evaluate_gate(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scan", type=Path, required=True)
-    parser.add_argument("--exceptions", type=Path, required=True)
+    policy = parser.add_mutually_exclusive_group(required=True)
+    policy.add_argument("--exceptions", type=Path)
+    policy.add_argument(
+        "--deny-all",
+        action="store_true",
+        help="Reject every CRITICAL/HIGH finding; no exception registry is loaded",
+    )
     parser.add_argument("--expected-image-digest", required=True)
     parser.add_argument("--expected-repository", required=True)
     parser.add_argument(
@@ -372,7 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     policy_date = args.today or datetime.now(UTC).date()
     try:
-        exceptions = load_exceptions(args.exceptions, today=policy_date)
+        exceptions = {} if args.deny_all else load_exceptions(args.exceptions, today=policy_date)
         findings = parse_scan(
             args.scan,
             expected_image_digest=args.expected_image_digest,
@@ -382,10 +388,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except GateError as exc:
         print(f"FATAL ECR vulnerability gate failed: {exc}", file=sys.stderr)
         return 1
-    print(
-        "ECR vulnerability gate passed: "
-        f"{len(findings)} CRITICAL/HIGH finding(s), all exactly excepted; 0 stale"
-    )
+    if args.deny_all:
+        print("ECR vulnerability gate passed: 0 CRITICAL/HIGH findings; exceptions disabled")
+    else:
+        print(
+            "ECR vulnerability gate passed: "
+            f"{len(findings)} CRITICAL/HIGH finding(s), all exactly excepted; 0 stale"
+        )
     return 0
 
 

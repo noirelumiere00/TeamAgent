@@ -10,6 +10,8 @@ umask 077
 REGION="ap-northeast-1"
 SOURCE_BUCKET="teamagent-dev-raw-files"
 SOURCE_KEY="codebuild/source.zip"
+APP_HTML_BUCKET="teamagent-dev-raw-files"
+APP_HTML_KEY="codebuild/connect-web-app.html"
 CODEBUILD_PROJECT="teamagent-dev-image-builder"
 ECR_REPOSITORY="teamagent-mcp"
 IMAGE_TAG=""
@@ -19,17 +21,13 @@ TIMEOUT_SECONDS=7200
 
 usage() {
   cat <<'EOF'
-usage: build_teamagent_image.sh --image-tag <tag> --with-scrape-tools true|false [options]
+usage: build_teamagent_image.sh --image-tag <tag> --with-scrape-tools true [options]
 
 Required:
   --image-tag <tag>                 Immutable candidate tag (safe ECR characters only)
-  --with-scrape-tools true|false    Explicit image profile; there is no implicit default
+  --with-scrape-tools true          Required production profile; there is no implicit default
 
 Options:
-  --region <region>                 AWS region (default: ap-northeast-1)
-  --source-bucket <bucket>          Versioned S3 source bucket
-  --project-name <name>             CodeBuild project name
-  --repository-name <name>          ECR repository name
   --poll-seconds <seconds>          Build status polling interval (default: 15)
   --timeout-seconds <seconds>       Overall CodeBuild wait timeout (default: 7200)
   -h, --help                        Show this help
@@ -62,26 +60,6 @@ while [ "$#" -gt 0 ]; do
       WITH_SCRAPE_TOOLS="$2"
       shift 2
       ;;
-    --region)
-      require_value "$1" "${2-}"
-      REGION="$2"
-      shift 2
-      ;;
-    --source-bucket)
-      require_value "$1" "${2-}"
-      SOURCE_BUCKET="$2"
-      shift 2
-      ;;
-    --project-name)
-      require_value "$1" "${2-}"
-      CODEBUILD_PROJECT="$2"
-      shift 2
-      ;;
-    --repository-name)
-      require_value "$1" "${2-}"
-      ECR_REPOSITORY="$2"
-      shift 2
-      ;;
     --poll-seconds)
       require_value "$1" "${2-}"
       POLL_SECONDS="$2"
@@ -104,17 +82,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$IMAGE_TAG" ] || die "--image-tag is required"
-[ -n "$WITH_SCRAPE_TOOLS" ] || die "--with-scrape-tools true|false is required"
+[ -n "$WITH_SCRAPE_TOOLS" ] || die "--with-scrape-tools true is required"
 [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
   || die "unsafe image tag; use 1-128 characters from [A-Za-z0-9._-] and start alphanumeric"
-[[ "$WITH_SCRAPE_TOOLS" == "true" || "$WITH_SCRAPE_TOOLS" == "false" ]] \
-  || die "--with-scrape-tools must be exactly true or false"
-[[ "$REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]] || die "invalid AWS region"
-[[ "$SOURCE_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || die "invalid S3 bucket"
-[[ "$CODEBUILD_PROJECT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{1,254}$ ]] \
-  || die "invalid CodeBuild project name"
-[[ "$ECR_REPOSITORY" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]] \
-  || die "invalid ECR repository name"
+[ "$WITH_SCRAPE_TOOLS" = "true" ] \
+  || die "--with-scrape-tools must be explicitly set to true for production candidate builds"
 [[ "$POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "--poll-seconds must be a positive integer"
 [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "--timeout-seconds must be positive"
 [ "$TIMEOUT_SECONDS" -ge "$POLL_SECONDS" ] || die "timeout must be at least one poll interval"
@@ -127,7 +99,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" \
   || die "script is not inside a Git worktree"
 PROVENANCE="$REPO_ROOT/infra/codebuild/source_provenance.py"
+IMAGE_RESOLVER="$REPO_ROOT/infra/codebuild/resolve_ecr_image.py"
+RUNTIME_CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_runtime_contract.json"
 [ -f "$PROVENANCE" ] || die "source provenance verifier is missing"
+[ -f "$IMAGE_RESOLVER" ] || die "ECR image resolver is missing"
+[ -f "$RUNTIME_CONTRACT" ] || die "TeamAgent runtime contract is missing"
 
 if [ -n "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ]; then
   die "Git worktree is dirty (tracked or untracked changes); commit or remove them first"
@@ -137,6 +113,48 @@ COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})"
 BRANCH="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD)" \
   || die "detached HEAD is not allowed; check out the branch being built"
 [ -n "$BRANCH" ] || die "current Git branch is empty"
+
+RUNTIME_VALUES="$(python3 "$PROVENANCE" runtime-values --contract "$RUNTIME_CONTRACT")" \
+  || die "TeamAgent runtime contract is invalid"
+[[ "$RUNTIME_VALUES" != *$'\n'* && "$RUNTIME_VALUES" != *$'\r'* ]] \
+  || die "TeamAgent runtime contract returned multiple lines"
+IFS=$'\t' read -r \
+  E5_MODEL_REVISION \
+  NODE_IMAGE_DIGEST \
+  NODE_VERSION \
+  NODE_BINARY_SHA256 \
+  PLAYWRIGHT_VERSION \
+  PLAYWRIGHT_CHROMIUM_REVISION \
+  PLAYWRIGHT_CHROMIUM_VERSION \
+  PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256 \
+  PLAYWRIGHT_CHROMIUM_SHA256 \
+  EXTRA_RUNTIME_VALUE <<<"$RUNTIME_VALUES"
+[ -z "${EXTRA_RUNTIME_VALUE:-}" ] || die "TeamAgent runtime contract returned extra values"
+for runtime_value in \
+  "$E5_MODEL_REVISION" \
+  "$NODE_IMAGE_DIGEST" \
+  "$NODE_VERSION" \
+  "$NODE_BINARY_SHA256" \
+  "$PLAYWRIGHT_VERSION" \
+  "$PLAYWRIGHT_CHROMIUM_REVISION" \
+  "$PLAYWRIGHT_CHROMIUM_VERSION" \
+  "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
+  "$PLAYWRIGHT_CHROMIUM_SHA256"; do
+  [ -n "$runtime_value" ] || die "TeamAgent runtime contract returned an empty value"
+done
+unset RUNTIME_VALUES runtime_value
+
+RUNTIME_EXPECTED_ARGS=(
+  --expected-e5-model-revision "$E5_MODEL_REVISION"
+  --expected-node-image-digest "$NODE_IMAGE_DIGEST"
+  --expected-node-version "$NODE_VERSION"
+  --expected-node-binary-sha256 "$NODE_BINARY_SHA256"
+  --expected-playwright-version "$PLAYWRIGHT_VERSION"
+  --expected-playwright-chromium-revision "$PLAYWRIGHT_CHROMIUM_REVISION"
+  --expected-playwright-chromium-version "$PLAYWRIGHT_CHROMIUM_VERSION"
+  --expected-playwright-chromium-archive-sha256 "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256"
+  --expected-playwright-chromium-sha256 "$PLAYWRIGHT_CHROMIUM_SHA256"
+)
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/teamagent-codebuild.XXXXXXXX")"
 cleanup() {
@@ -148,8 +166,62 @@ MANIFEST="$TMP_DIR/.teamagent-source-manifest.json"
 SOURCE_ZIP="$TMP_DIR/source.zip"
 EXTRACTED="$TMP_DIR/extracted"
 ENV_OVERRIDES="$TMP_DIR/codebuild-env.json"
-BATCH_RESPONSE="$TMP_DIR/ecr-batch-get-image.json"
+PARENT_BATCH_RESPONSE="$TMP_DIR/ecr-parent-batch-get-image.json"
+CHILD_BATCH_RESPONSE="$TMP_DIR/ecr-child-batch-get-image.json"
 OCI_CONFIG="$TMP_DIR/oci-config.json"
+APP_HTML_FILE="$TMP_DIR/connect-web-app.html"
+
+[ "$SOURCE_BUCKET" = "$APP_HTML_BUCKET" ] \
+  || die "source and app.html must use the same fixed versioned bucket"
+BUCKET_VERSIONING="$(
+  AWS_PAGER="" aws s3api get-bucket-versioning \
+    --region "$REGION" \
+    --bucket "$SOURCE_BUCKET" \
+    --query Status \
+    --output text
+)"
+[ "$BUCKET_VERSIONING" = "Enabled" ] \
+  || die "source/app S3 bucket versioning must be Enabled"
+APP_HTML_VERSION_ID="$(
+  AWS_PAGER="" aws s3api head-object \
+    --region "$REGION" \
+    --bucket "$APP_HTML_BUCKET" \
+    --key "$APP_HTML_KEY" \
+    --query VersionId \
+    --output text
+)"
+case "$APP_HTML_VERSION_ID" in
+  ""|None|null|*[!A-Za-z0-9._~+/=-]*) \
+    die "app.html S3 object did not return a usable VersionId" ;;
+esac
+[ "${#APP_HTML_VERSION_ID}" -le 1024 ] \
+  || die "app.html S3 object did not return a usable VersionId"
+DOWNLOADED_APP_HTML_VERSION_ID="$(
+  AWS_PAGER="" aws s3api get-object \
+    --region "$REGION" \
+    --bucket "$APP_HTML_BUCKET" \
+    --key "$APP_HTML_KEY" \
+    --version-id "$APP_HTML_VERSION_ID" \
+    --query VersionId \
+    --output text \
+    "$APP_HTML_FILE"
+)"
+[ "$DOWNLOADED_APP_HTML_VERSION_ID" = "$APP_HTML_VERSION_ID" ] \
+  || die "downloaded app.html VersionId does not match the resolved version"
+[ -s "$APP_HTML_FILE" ] || die "versioned app.html object is empty"
+APP_HTML_SHA256="$(
+  python3 - "$APP_HTML_FILE" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+)"
+[[ "$APP_HTML_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "could not hash versioned app.html"
 
 echo "Preparing Git archive for $COMMIT ($BRANCH), WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS"
 python3 "$PROVENANCE" create-manifest \
@@ -157,6 +229,8 @@ python3 "$PROVENANCE" create-manifest \
   --commit "$COMMIT" \
   --branch "$BRANCH" \
   --with-scrape-tools "$WITH_SCRAPE_TOOLS" \
+  --app-html-version-id "$APP_HTML_VERSION_ID" \
+  --app-html-sha256 "$APP_HTML_SHA256" \
   --output "$MANIFEST"
 git -C "$REPO_ROOT" archive \
   --format=zip \
@@ -170,7 +244,10 @@ python3 "$PROVENANCE" verify-source \
   --manifest "$EXTRACTED/.teamagent-source-manifest.json" \
   --expected-commit "$COMMIT" \
   --expected-branch "$BRANCH" \
-  --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS"
+  --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS" \
+  --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
+  --expected-app-html-sha256 "$APP_HTML_SHA256" \
+  "${RUNTIME_EXPECTED_ARGS[@]}"
 
 if [ "$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})" != "$COMMIT" ] \
   || [ -n "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ]; then
@@ -184,6 +261,8 @@ VERSION_ID="$(
     --bucket "$SOURCE_BUCKET" \
     --key "$SOURCE_KEY" \
     --body "$SOURCE_ZIP" \
+    --content-type application/zip \
+    --server-side-encryption AES256 \
     --query VersionId \
     --output text
 )"
@@ -192,17 +271,45 @@ if [ -z "$VERSION_ID" ] || [ "$VERSION_ID" = "None" ] || [ "$VERSION_ID" = "null
   die "S3 did not return a usable VersionId; bucket versioning is required"
 fi
 
-python3 - "$ENV_OVERRIDES" "$COMMIT" "$BRANCH" "$IMAGE_TAG" "$WITH_SCRAPE_TOOLS" <<'PY'
+GIT_COMMIT="$COMMIT" \
+GIT_BRANCH="$BRANCH" \
+IMAGE_TAG="$IMAGE_TAG" \
+WITH_SCRAPE_TOOLS="$WITH_SCRAPE_TOOLS" \
+APP_HTML_VERSION_ID="$APP_HTML_VERSION_ID" \
+APP_HTML_SHA256="$APP_HTML_SHA256" \
+E5_MODEL_REVISION="$E5_MODEL_REVISION" \
+NODE_IMAGE_DIGEST="$NODE_IMAGE_DIGEST" \
+NODE_VERSION="$NODE_VERSION" \
+NODE_BINARY_SHA256="$NODE_BINARY_SHA256" \
+PLAYWRIGHT_VERSION="$PLAYWRIGHT_VERSION" \
+PLAYWRIGHT_CHROMIUM_REVISION="$PLAYWRIGHT_CHROMIUM_REVISION" \
+PLAYWRIGHT_CHROMIUM_VERSION="$PLAYWRIGHT_CHROMIUM_VERSION" \
+PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256="$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
+PLAYWRIGHT_CHROMIUM_SHA256="$PLAYWRIGHT_CHROMIUM_SHA256" \
+python3 - "$ENV_OVERRIDES" <<'PY'
 import json
+import os
 import sys
 
-path, commit, branch, image_tag, with_scrape_tools = sys.argv[1:]
-values = {
-    "GIT_COMMIT": commit,
-    "GIT_BRANCH": branch,
-    "IMAGE_TAG": image_tag,
-    "WITH_SCRAPE_TOOLS": with_scrape_tools,
-}
+path = sys.argv[1]
+names = (
+    "GIT_COMMIT",
+    "GIT_BRANCH",
+    "IMAGE_TAG",
+    "WITH_SCRAPE_TOOLS",
+    "APP_HTML_VERSION_ID",
+    "APP_HTML_SHA256",
+    "E5_MODEL_REVISION",
+    "NODE_IMAGE_DIGEST",
+    "NODE_VERSION",
+    "NODE_BINARY_SHA256",
+    "PLAYWRIGHT_VERSION",
+    "PLAYWRIGHT_CHROMIUM_REVISION",
+    "PLAYWRIGHT_CHROMIUM_VERSION",
+    "PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256",
+    "PLAYWRIGHT_CHROMIUM_SHA256",
+)
+values = {name: os.environ[name] for name in names}
 payload = [{"name": name, "value": value, "type": "PLAINTEXT"} for name, value in values.items()]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle, separators=(",", ":"))
@@ -214,7 +321,6 @@ BUILD_ID="$(
     --region "$REGION" \
     --project-name "$CODEBUILD_PROJECT" \
     --source-version "$VERSION_ID" \
-    --buildspec-override infra/codebuild/buildspec.yml \
     --environment-variables-override "file://$ENV_OVERRIDES" \
     --query build.id \
     --output text
@@ -225,24 +331,24 @@ BUILD_ID="$(
 
 DEADLINE=$((SECONDS + TIMEOUT_SECONDS))
 BUILD_STATUS=""
-RESOLVED_SOURCE_VERSION=""
+BUILD_SOURCE_VERSION=""
 while :; do
   BUILD_STATE="$(
     AWS_PAGER="" aws codebuild batch-get-builds \
       --region "$REGION" \
       --ids "$BUILD_ID" \
-      --query 'builds[0].[buildStatus,resolvedSourceVersion]' \
+      --query 'builds[0].[buildStatus,sourceVersion]' \
       --output text
   )"
   [[ "$BUILD_STATE" != *$'\n'* && "$BUILD_STATE" != *$'\r'* ]] \
     || die "CodeBuild returned a multi-line build state"
-  IFS=$'\t' read -r BUILD_STATUS RESOLVED_SOURCE_VERSION EXTRA_STATE <<<"$BUILD_STATE"
+  IFS=$'\t' read -r BUILD_STATUS BUILD_SOURCE_VERSION EXTRA_STATE <<<"$BUILD_STATE"
   [ -z "${EXTRA_STATE:-}" ] || die "CodeBuild returned an unexpected build state"
   [ -n "$BUILD_STATUS" ] && [ "$BUILD_STATUS" != "None" ] \
     || die "CodeBuild build state is missing"
-  if [ -n "${RESOLVED_SOURCE_VERSION:-}" ] && [ "$RESOLVED_SOURCE_VERSION" != "None" ] \
-    && [ "$RESOLVED_SOURCE_VERSION" != "$VERSION_ID" ]; then
-    die "CodeBuild resolvedSourceVersion does not match the uploaded S3 VersionId"
+  if [ -n "${BUILD_SOURCE_VERSION:-}" ] && [ "$BUILD_SOURCE_VERSION" != "None" ] \
+    && [ "$BUILD_SOURCE_VERSION" != "$VERSION_ID" ]; then
+    die "CodeBuild sourceVersion does not match the uploaded S3 VersionId"
   fi
   case "$BUILD_STATUS" in
     IN_PROGRESS)
@@ -258,12 +364,12 @@ while :; do
   esac
 done
 
-[ "$RESOLVED_SOURCE_VERSION" = "$VERSION_ID" ] \
-  || die "CodeBuild did not resolve the exact uploaded S3 VersionId"
+[ "$BUILD_SOURCE_VERSION" = "$VERSION_ID" ] \
+  || die "CodeBuild did not use the exact uploaded S3 VersionId"
 [ "$BUILD_STATUS" = "SUCCEEDED" ] \
   || die "CodeBuild candidate failed with status $BUILD_STATUS (build ID: $BUILD_ID)"
 
-DIGEST="$(
+TAG_DIGEST="$(
   AWS_PAGER="" aws ecr describe-images \
     --region "$REGION" \
     --repository-name "$ECR_REPOSITORY" \
@@ -271,20 +377,41 @@ DIGEST="$(
     --query 'imageDetails[0].imageDigest' \
     --output text
 )"
-[[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "ECR returned an invalid image digest"
+[[ "$TAG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+  || die "ECR returned an invalid tag digest"
 
 AWS_PAGER="" aws ecr batch-get-image \
   --region "$REGION" \
   --repository-name "$ECR_REPOSITORY" \
-  --image-ids "imageDigest=$DIGEST" \
+  --image-ids "imageDigest=$TAG_DIGEST" \
+  --accepted-media-types \
+    application/vnd.docker.distribution.manifest.list.v2+json \
+    application/vnd.oci.image.index.v1+json \
+    application/vnd.docker.distribution.manifest.v2+json \
+    application/vnd.oci.image.manifest.v1+json \
+  --output json >"$PARENT_BATCH_RESPONSE"
+ARM64_DIGEST="$(
+  python3 "$IMAGE_RESOLVER" resolve-platform \
+    --batch-response "$PARENT_BATCH_RESPONSE" \
+    --expected-image-digest "$TAG_DIGEST" \
+    --os linux \
+    --architecture arm64
+)"
+[[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+  || die "ECR image resolver returned an invalid arm64 child digest"
+
+AWS_PAGER="" aws ecr batch-get-image \
+  --region "$REGION" \
+  --repository-name "$ECR_REPOSITORY" \
+  --image-ids "imageDigest=$ARM64_DIGEST" \
   --accepted-media-types \
     application/vnd.docker.distribution.manifest.v2+json \
     application/vnd.oci.image.manifest.v1+json \
-  --output json >"$BATCH_RESPONSE"
+  --output json >"$CHILD_BATCH_RESPONSE"
 CONFIG_DIGEST="$(
   python3 "$PROVENANCE" ecr-config-digest \
-    --batch-response "$BATCH_RESPONSE" \
-    --expected-image-digest "$DIGEST"
+    --batch-response "$CHILD_BATCH_RESPONSE" \
+    --expected-image-digest "$ARM64_DIGEST"
 )"
 [[ "$CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "ECR returned an invalid OCI config digest"
 
@@ -304,12 +431,18 @@ python3 "$PROVENANCE" verify-oci-revision \
   --config "$OCI_CONFIG" \
   --expected-config-digest "$CONFIG_DIGEST" \
   --expected-commit "$COMMIT" \
-  --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS"
+  --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS" \
+  --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
+  --expected-app-html-sha256 "$APP_HTML_SHA256" \
+  "${RUNTIME_EXPECTED_ARGS[@]}"
 
 echo "Candidate verified (build only; no deployment performed):"
 echo "  repository=$ECR_REPOSITORY"
 echo "  tag=$IMAGE_TAG"
-echo "  digest=$DIGEST"
+echo "  tag_digest=$TAG_DIGEST"
+echo "  arm64_digest=$ARM64_DIGEST"
 echo "  commit=$COMMIT"
 echo "  branch=$BRANCH"
 echo "  with_scrape_tools=$WITH_SCRAPE_TOOLS"
+echo "  app_html_sha256=$APP_HTML_SHA256"
+echo "  app_html_version_id=$APP_HTML_VERSION_ID"

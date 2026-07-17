@@ -1,0 +1,122 @@
+# Dedicated buildspec for the separate tiktok-data-service repository.
+# Terraform embeds verify_ecr_scan.py at the placeholder below. The project has
+# no usable default source version; callers must pin a full main-branch commit.
+version: 0.2
+phases:
+  install:
+    commands:
+      - |
+        set -euo pipefail
+        TRIVY_VERSION="0.70.0"
+        TRIVY_ARCHIVE="trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz"
+        TRIVY_SHA256="2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d"
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+          --output "/tmp/$TRIVY_ARCHIVE" \
+          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${TRIVY_ARCHIVE}"
+        printf '%s  %s\n' "$TRIVY_SHA256" "/tmp/$TRIVY_ARCHIVE" | sha256sum -c -
+        tar -xzf "/tmp/$TRIVY_ARCHIVE" -C /tmp trivy
+        install -m 0755 /tmp/trivy /usr/local/bin/trivy
+        trivy --version | grep -F "Version: $TRIVY_VERSION"
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        : "${GIT_COMMIT:?GIT_COMMIT must be explicitly provided}"
+        : "${GIT_BRANCH:?GIT_BRANCH must be explicitly provided}"
+        : "${CODEBUILD_RESOLVED_SOURCE_VERSION:?resolved source version is missing}"
+        [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: invalid GIT_COMMIT"; exit 1; }
+        [ "$GIT_BRANCH" = "main" ] || { echo "FATAL: TikTok production builds must come from main"; exit 1; }
+        [ "$CODEBUILD_RESOLVED_SOURCE_VERSION" = "$GIT_COMMIT" ] || { echo "FATAL: resolved source version mismatch"; exit 1; }
+        [ "$(git rev-parse --verify HEAD^{commit})" = "$GIT_COMMIT" ] || { echo "FATAL: Git HEAD mismatch"; exit 1; }
+        [ "$(git rev-parse --verify refs/remotes/origin/main^{commit})" = "$GIT_COMMIT" ] || { echo "FATAL: pinned commit is not the fetched main head"; exit 1; }
+        [ -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] || { echo "FATAL: CodeBuild source is dirty"; exit 1; }
+        [ "$(git remote get-url origin)" = "https://github.com/noirelumiere00/tiktok-data-service.git" ] || { echo "FATAL: unexpected TikTok source origin"; exit 1; }
+        [ -x scripts/build_acquire_image.sh ] || { echo "FATAL: safe TikTok builder is missing"; exit 1; }
+        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+          | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        EXPECTED_SOURCE_REVISION="$GIT_COMMIT" \
+          scripts/build_acquire_image.sh \
+            --push \
+            --repository "$TIKTOK_REPO"
+  post_build:
+    commands:
+      - |
+        set -euo pipefail
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: TikTok build failed before scan gate"; exit 1; }
+        ECR_REPOSITORY="${TIKTOK_REPO##*/}"
+        aws ecr wait image-exists \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-ids "imageTag=$GIT_COMMIT"
+        TAG_DIGEST="$(aws ecr describe-images \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-ids "imageTag=$GIT_COMMIT" \
+          --query 'imageDetails[0].imageDigest' \
+          --output text)"
+        [[ "$TAG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid TikTok tag digest"; exit 1; }
+        printf '%s' '__ECR_IMAGE_RESOLVER_BASE64__' | base64 --decode > /tmp/resolve-ecr-image.py
+        aws ecr batch-get-image \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-ids "imageDigest=$TAG_DIGEST" \
+          --accepted-media-types \
+            application/vnd.docker.distribution.manifest.list.v2+json \
+            application/vnd.oci.image.index.v1+json \
+            application/vnd.docker.distribution.manifest.v2+json \
+            application/vnd.oci.image.manifest.v1+json \
+          --output json > /tmp/tiktok-ecr-parent.json
+        ARM64_DIGEST="$(python3 /tmp/resolve-ecr-image.py resolve-platform \
+          --batch-response /tmp/tiktok-ecr-parent.json \
+          --expected-image-digest "$TAG_DIGEST" \
+          --os linux \
+          --architecture arm64)"
+        [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid TikTok arm64 child digest"; exit 1; }
+        aws ecr batch-get-image \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-ids "imageDigest=$ARM64_DIGEST" \
+          --accepted-media-types \
+            application/vnd.docker.distribution.manifest.v2+json \
+            application/vnd.oci.image.manifest.v1+json \
+          --output json > /tmp/tiktok-ecr-child.json
+        CONFIG_DIGEST="$(python3 /tmp/resolve-ecr-image.py config-digest \
+          --batch-response /tmp/tiktok-ecr-child.json \
+          --expected-image-digest "$ARM64_DIGEST")"
+        [[ "$CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid TikTok OCI config digest"; exit 1; }
+        CONFIG_URL="$(aws ecr get-download-url-for-layer \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --layer-digest "$CONFIG_DIGEST" \
+          --query downloadUrl \
+          --output text)"
+        [[ "$CONFIG_URL" == https://* ]] || { echo "FATAL: invalid TikTok OCI config URL"; exit 1; }
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+          --output /tmp/tiktok-oci-config.json "$CONFIG_URL"
+        unset CONFIG_URL
+        python3 /tmp/resolve-ecr-image.py verify-config-platform \
+          --config /tmp/tiktok-oci-config.json \
+          --expected-config-digest "$CONFIG_DIGEST" \
+          --os linux \
+          --architecture arm64
+        aws ecr wait image-scan-complete \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-id "imageDigest=$ARM64_DIGEST"
+        aws ecr describe-image-scan-findings \
+          --region "$AWS_DEFAULT_REGION" \
+          --repository-name "$ECR_REPOSITORY" \
+          --image-id "imageDigest=$ARM64_DIGEST" \
+          --output json > /tmp/tiktok-ecr-scan.json
+        printf '%s' '__ECR_SCAN_GATE_BASE64__' | base64 --decode > /tmp/verify-ecr-scan.py
+        python3 /tmp/verify-ecr-scan.py \
+          --scan /tmp/tiktok-ecr-scan.json \
+          --deny-all \
+          --expected-image-digest "$ARM64_DIGEST" \
+          --expected-repository "$ECR_REPOSITORY"
+        echo "TIKTOK_TAG_DIGEST=$TAG_DIGEST"
+        echo "TIKTOK_ARM64_DIGEST=$ARM64_DIGEST"

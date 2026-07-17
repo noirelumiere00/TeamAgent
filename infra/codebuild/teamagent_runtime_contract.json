@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "model": {
+    "e5_revision": "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
+  },
+  "node": {
+    "image_digest": "sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c",
+    "version": "24.18.0",
+    "binary_sha256": "6bf69d0eda41a12030d5f28d958cd09ce323bc0c13f1ab4d8bb426933aa08812"
+  },
+  "playwright": {
+    "version": "1.61.1"
+  },
+  "chromium": {
+    "revision": "1228",
+    "version": "149.0.7827.0",
+    "archive_sha256": "ec044b50ed065adeb4c5ffdb42d1529901cbaf897cdf542bfef8af01d6e0cc79",
+    "binary_sha256": "c1aa0fb5b6c60eb093df69d9e40dd50ab2039d3ccba8836ef21880340a77af64"
+  }
+}
