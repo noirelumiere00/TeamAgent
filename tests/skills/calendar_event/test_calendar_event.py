@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 
 from teamagent.adapters.gcalendar_client import DuplicateEventError, InsertedEvent
-from teamagent.hmac_keyring import HmacKeyConfigurationError
 from teamagent.skills.base import SkillContext
 from teamagent.skills.calendar_event.schema import CalendarEventInput
 from teamagent.skills.calendar_event.skill import CalendarEventSkill
@@ -31,17 +30,30 @@ _ROTATION_NOW = 2_000_000_000
 
 @pytest.fixture(autouse=True)
 def _hmac_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+        "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+        "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
+        "MAIL_ACTION_TTL_S",
+        "REPORT_LINK_HMAC_SECRET",
+        "DATABASE_URL",
+        "SLACK_BOT_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
 
 
 def _token(**kw: Any) -> str:
-    return encode_event_token(
+    token = encode_event_token(
         start_iso=kw.get("start", "2026-07-15T14:00:00+09:00"),
         end_iso=kw.get("end", "2026-07-15T15:00:00+09:00"),
         title=kw.get("title", "◯◯様 定例"),
         owner_email=kw.get("owner", ME),
         now=kw.get("now"),
+        ttl_s=kw.get("ttl_s"),
     )
+    assert token is not None
+    return token
 
 
 # ── event_token 単体 ────────────────────────────────────────────────────────
@@ -66,13 +78,53 @@ def test_token_rejects_other_owner_and_tamper_and_expiry() -> None:
     assert decode_event_token(old, ME) is None
 
 
+def test_event_token_expiry_is_exclusive_and_ttl_is_bounded() -> None:
+    token = _token(now=1000, ttl_s=60)
+    assert decode_event_token(token, ME, now=1059) is not None
+    assert decode_event_token(token, ME, now=1060) is None
+    assert (
+        encode_event_token(
+            start_iso="2026-07-15T14:00:00+09:00",
+            end_iso="2026-07-15T15:00:00+09:00",
+            title="meeting",
+            owner_email=ME,
+            now=1000,
+            ttl_s=60 * 60 * 24 + 1,
+        )
+        is None
+    )
+
+
+def test_invalid_configured_mail_ttl_suppresses_event_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAIL_ACTION_TTL_S", " 3600")
+    assert (
+        encode_event_token(
+            start_iso="2026-07-15T14:00:00+09:00",
+            end_iso="2026-07-15T15:00:00+09:00",
+            title="meeting",
+            owner_email=ME,
+            ttl_s=60,
+        )
+        is None
+    )
+
+
 def test_token_fail_closed_without_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     t = _token()
     monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET", raising=False)
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     assert decode_event_token(t, ME) is None
-    with pytest.raises(HmacKeyConfigurationError):
-        _token()
+    assert (
+        encode_event_token(
+            start_iso="2026-07-15T14:00:00+09:00",
+            end_iso="2026-07-15T15:00:00+09:00",
+            title="meeting",
+            owner_email=ME,
+        )
+        is None
+    )
 
 
 def test_event_token_accepts_previous_only_during_rotation(
@@ -81,15 +133,13 @@ def test_event_token_accepts_previous_only_during_rotation(
     old = _token(now=_ROTATION_NOW)
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_NEXT_SECRET)
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _MAIL_SECRET)
-    monkeypatch.setenv(
-        "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL", str(_ROTATION_NOW + 60 * 60 * 24)
-    )
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
     assert decode_event_token(old, ME, now=_ROTATION_NOW) is not None
 
     new = _token(now=_ROTATION_NOW)
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
     monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET")
-    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL")
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT")
     assert decode_event_token(new, ME, now=_ROTATION_NOW) is None
 
 
@@ -300,6 +350,18 @@ def test_triage_to_event_token_integration(monkeypatch: pytest.MonkeyPatch) -> N
     assert item.event_token  # To 本人×日時確定 → token 発行
     p = decode_event_token(item.event_token, ME)
     assert p is not None and p.start_iso == future
+
+    def _event_token_boom(**kw: Any) -> str:
+        raise RuntimeError("event token helper failed")
+
+    monkeypatch.setattr(
+        "teamagent.skills.morning_digest.skill.encode_event_token", _event_token_boom
+    )
+    contained = skill.run(
+        MorningDigestInput(max_drafts=0),
+        SkillContext(request_id="r-token-exception", metadata={"user_email": ME}),
+    ).mail_digest[0]
+    assert contained.event_token == ""  # digest survives and the unsafe action is omitted
 
     # 現Terraformのように DB URL が主鍵へ誤配線されても、呼出元は action token/button を出さない。
     legacy_db = "postgresql://teamagent:do-not-sign@db.internal:5432/teamagent"

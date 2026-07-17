@@ -728,12 +728,18 @@ def test_E38_generate_draft_for_thread_rejects_cc_only():
     assert len(g.created) == 0
 
 
-def test_E40_draft_button_only_for_to_self():
+def test_E40_draft_button_only_for_to_self(monkeypatch):
     """要返信(high)でも、To に本人がいない(CCのみ)メールには下書きトークンを出さない。
 
     2026-06-25 ユーザー指摘：To に自分がいないのに下書きボタンが出ていた。
     下書きボタン(draft_token)は To自分宛のときだけ発行する。確認するリンクは別途。
     """
+    # Positive behavior uses a dedicated, isolated HMAC value; CI must not depend on ambient secrets.
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "mail-edge-test-primary-" + "m" * 32)
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", raising=False)
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", raising=False)
+    monkeypatch.delenv("MAIL_ACTION_TTL_S", raising=False)
+    monkeypatch.delenv("REPORT_LINK_HMAC_SECRET", raising=False)
     to_self = _to_me(thread="tT", subj="To自分")  # To=ME
     cc_only = _Msg(
         headers={"From": "a@x.com", "To": "boss@x.com", "Cc": ME, "Subject": "CCのみ"},
@@ -746,6 +752,32 @@ def test_E40_draft_button_only_for_to_self():
     by = {i.subject_display: i for i in out.mail_digest}
     assert by["To自分"].draft_token != ""  # To自分宛 → 下書きボタンが出る
     assert by["CCのみ"].draft_token == ""  # CC のみ → 下書きボタンは出さない（確認するのみ）
+
+
+def test_E40b_invalid_mail_hmac_suppresses_action_tokens(monkeypatch):
+    """Missing/credential-reused mail keys omit buttons instead of signing with a fallback."""
+    legacy_db = "postgresql://user:password@db.internal:5432/teamagent"
+    monkeypatch.setenv("DATABASE_URL", legacy_db)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", legacy_db)
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", raising=False)
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", raising=False)
+    monkeypatch.delenv("MAIL_ACTION_TTL_S", raising=False)
+    out = _run(_skill(_Gmail([_to_me(thread="tT", subj="To自分")])), max_drafts=0)
+    assert out.mail_digest[0].draft_token == ""
+    assert out.mail_digest[0].event_token == ""
+
+
+def test_E40c_draft_token_exception_is_contained(monkeypatch):
+    """A helper regression cannot abort the digest; the affected action is simply omitted."""
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "mail-edge-test-primary-" + "m" * 32)
+    monkeypatch.delenv("MAIL_ACTION_TTL_S", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("token helper failed")
+
+    monkeypatch.setattr("teamagent.skills.morning_digest.skill.encode_draft_token", _boom)
+    out = _run(_skill(_Gmail([_to_me(thread="tT", subj="To自分")])), max_drafts=0)
+    assert out.mail_digest[0].draft_token == ""
 
 
 def test_E41_non_to_self_high_goes_to_unread_not_reply():

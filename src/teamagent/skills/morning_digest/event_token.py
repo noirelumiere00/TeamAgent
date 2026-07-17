@@ -3,7 +3,7 @@
 draft_token.py と同じ方式（鍵・署名・base64url・fail-closed）で、確定 MTG の
 日時・タイトルを Slack button value に載せる。HMAC は **改竄・鋳造・他人使用の防止**
 （完全性と所有者束縛）であり **秘匿ではない**（base64 なので読める。本人 DM 内にのみ
-置かれる前提）＋24h 失効。
+置かれる前提）。発行TTLは draft_token と共有し、未設定時24h・設定時は1..24hに限定する。
 
 Fargate（digest 描画）が encode、calendar_event skill（押下処理）が decode する。
 """
@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from dataclasses import dataclass
 
 from teamagent.hmac_keyring import (
+    add_token_ttl,
+    coerce_epoch_seconds,
     load_mail_action_hmac_keyring,
-    require_mail_action_hmac_keyring,
+    load_mail_action_token_ttl_s,
+    validate_epoch_seconds,
 )
 from teamagent.skills.morning_digest.draft_token import (
     _SIG_LEN,
@@ -25,8 +27,6 @@ from teamagent.skills.morning_digest.draft_token import (
     _b64e,
     _owner_hash,
 )
-
-_DEFAULT_TTL_S = 60 * 60 * 24  # 24h（draft_token と同一の運用境界）
 
 
 @dataclass(frozen=True)
@@ -45,27 +45,39 @@ def encode_event_token(
     title: str,
     owner_email: str,
     now: int | None = None,
-    ttl_s: int = _DEFAULT_TTL_S,
-) -> str:
+    ttl_s: int | None = None,
+) -> str | None:
     """確定 MTG の日時/タイトルを所有者・失効付きで署名し button value 用文字列にする。"""
-    issued = int(now if now is not None else time.time())
-    payload = {
-        "s": str(start_iso),
-        "n": str(end_iso),
-        "l": str(title)[:60],
-        "o": _owner_hash(owner_email),
-        "e": issued + int(ttl_s),
-    }
-    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    sig = require_mail_action_hmac_keyring(now=issued).sign(raw, digest_bytes=_SIG_LEN)
-    return _b64e(raw) + "." + _b64e(sig)
+    try:
+        issued = coerce_epoch_seconds(now)
+        ttl = load_mail_action_token_ttl_s(explicit_ttl_s=ttl_s)
+        if issued is None or ttl is None:
+            return None
+        expires = add_token_ttl(issued, ttl)
+        keyring = load_mail_action_hmac_keyring(now=issued)
+        if expires is None or keyring is None:
+            return None
+        payload = {
+            "s": str(start_iso),
+            "n": str(end_iso),
+            "l": str(title)[:60],
+            "o": _owner_hash(owner_email),
+            "e": expires,
+        }
+        raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        sig = keyring.sign(raw, digest_bytes=_SIG_LEN)
+        return _b64e(raw) + "." + _b64e(sig)
+    except Exception:
+        return None
 
 
 def decode_event_token(
     token: str, owner_email: str, *, now: int | None = None
 ) -> MeetingEventPayload | None:
     """検証して予定情報を返す。署名不一致/失効/所有者不一致/形式不正は None（fail-closed）。"""
-    cur = int(now if now is not None else time.time())
+    cur = coerce_epoch_seconds(now)
+    if cur is None:
+        return None
     keyring = load_mail_action_hmac_keyring(now=cur)
     if keyring is None:
         return None
@@ -77,18 +89,21 @@ def decode_event_token(
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             return None
-        expires = int(payload.get("e", 0))
+        expires = validate_epoch_seconds(payload.get("e"))
     except Exception:
         return None
-    if expires < cur:
+    if expires is None or expires <= cur:
         return None
-    if payload.get("o") != _owner_hash(owner_email):
+    try:
+        if payload.get("o") != _owner_hash(owner_email):
+            return None
+        start = str(payload.get("s") or "")
+        end = str(payload.get("n") or "")
+        if not start or not end:
+            return None
+        return MeetingEventPayload(start_iso=start, end_iso=end, title=str(payload.get("l") or ""))
+    except Exception:
         return None
-    start = str(payload.get("s") or "")
-    end = str(payload.get("n") or "")
-    if not start or not end:
-        return None
-    return MeetingEventPayload(start_iso=start, end_iso=end, title=str(payload.get("l") or ""))
 
 
 def stable_event_id(

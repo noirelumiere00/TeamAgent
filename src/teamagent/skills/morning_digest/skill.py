@@ -354,6 +354,18 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             # 下書きボタンは「本人が To に直接いる」場合だけ出す（CC のみ/メーリス宛は対象外）。
             # ※ 表示は high なら出るが、下書きトークンが空＝作成ボタンは出ない（確認するのみ）。
             addressed = _is_addressed_to(anchor.headers, requester)
+            draft_action_token = ""
+            if tid and addressed and mail_action_hmac_ready:
+                try:
+                    draft_action_token = encode_draft_token(tid, requester) or ""
+                except Exception:
+                    # Token helpers are fail-closed too; this boundary keeps the digest available
+                    # if configuration changes between the readiness check and issuance.
+                    logger.warning(
+                        "mail_action_token_encode_failed",
+                        request_id=ctx.request_id,
+                        token_type="draft",
+                    )
             items.append(
                 MailDigestItem(
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
@@ -367,11 +379,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     counterpart_display=_display_counterpart(anchor.headers, requester),
                     subject_display=str(anchor.headers.get("Subject", ""))[:160],
                     # ボタン用：生 thread_id は出さず HMAC 署名トークン化（G3）。To 自分宛のみ発行。
-                    draft_token=(
-                        encode_draft_token(tid, requester)
-                        if (tid and addressed and mail_action_hmac_ready)
-                        else ""
-                    ),
+                    draft_token=draft_action_token,
                     thread_gmail_url=_gmail_thread_url(tid),
                 )
             )
@@ -417,12 +425,22 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                         item.meeting_title = str(t.get("meeting_title") or "")[:60]
                         # 📅ボタン用トークン（To 本人のみ・LLM 由来の日時は encode 前に検証済み）。
                         if item.to_self and mail_action_hmac_ready:
-                            item.event_token = encode_event_token(
-                                start_iso=item.meeting_start,
-                                end_iso=item.meeting_end,
-                                title=item.meeting_title or item.subject_display[:60],
-                                owner_email=requester,
-                            )
+                            try:
+                                item.event_token = (
+                                    encode_event_token(
+                                        start_iso=item.meeting_start,
+                                        end_iso=item.meeting_end,
+                                        title=item.meeting_title or item.subject_display[:60],
+                                        owner_email=requester,
+                                    )
+                                    or ""
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "mail_action_token_encode_failed",
+                                    request_id=ctx.request_id,
+                                    token_type="event",
+                                )
                     item.scheduling_request = bool(t.get("scheduling_request", False))
 
         # importance 順に items と full_msgs をペアで安定ソート（index 対応を維持）。

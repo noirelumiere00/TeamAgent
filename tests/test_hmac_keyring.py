@@ -1,4 +1,4 @@
-"""共有 HMAC keyring の秘密非露出・constant-time 検証テスト。"""
+"""Shared HMAC keyring rotation, parsing, credential, and timing tests."""
 
 from __future__ import annotations
 
@@ -9,10 +9,50 @@ from collections.abc import Callable
 import pytest
 
 from teamagent.hmac_keyring import (
+    HMAC_MAX_ROLLOUT_OVERLAP_S,
+    MAIL_ACTION_MAX_TOKEN_TTL_S,
+    REPORT_LINK_MAX_TOKEN_TTL_S,
     HmacKeyring,
     load_mail_action_hmac_keyring,
+    load_mail_action_token_ttl_s,
     load_report_link_hmac_keyring,
+    load_report_link_token_ttl_s,
 )
+
+_NOW = 2_000_000_000
+_MAIL_PRIMARY = "mail-primary-" + "m" * 32
+_MAIL_PREVIOUS = "mail-previous-" + "p" * 32
+_REPORT_PRIMARY = "report-primary-" + "r" * 32
+_REPORT_PREVIOUS = "report-previous-" + "q" * 32
+
+_TEST_ENVS = (
+    "MAIL_ACTION_HMAC_SECRET",
+    "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+    "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+    "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
+    "MAIL_ACTION_TTL_S",
+    "REPORT_LINK_HMAC_SECRET",
+    "REPORT_LINK_HMAC_PREVIOUS_SECRET",
+    "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+    "REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
+    "REPORT_LINK_TTL_S",
+    "DATABASE_URL",
+    "SLACK_BOT_TOKEN",
+    "PAYMENTS_API_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "REDIS_URL",
+    "SENTRY_DSN",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_hmac_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _TEST_ENVS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _signature(secret: str, payload: bytes) -> bytes:
+    return hmac.new(secret.encode(), payload, hashlib.sha256).digest()[:16]
 
 
 def test_repr_never_contains_keys() -> None:
@@ -45,7 +85,24 @@ def test_verify_compares_every_key_without_early_exit(
 
     monkeypatch.setattr("teamagent.hmac_keyring.hmac.compare_digest", _record)
     assert keyring.verify(payload, signature, digest_bytes=16) is True
-    assert len(calls) == 2  # primary 一致でも previous まで必ず比較する
+    assert len(calls) == 2
+
+
+def test_verify_wrong_length_still_compares_every_eligible_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keyring = HmacKeyring(b"p" * 32, (b"p" * 32, b"v" * 32))
+    original: Callable[[bytes, bytes], bool] = hmac.compare_digest
+    calls = 0
+
+    def _record(left: bytes, right: bytes) -> bool:
+        nonlocal calls
+        calls += 1
+        return original(left, right)
+
+    monkeypatch.setattr("teamagent.hmac_keyring.hmac.compare_digest", _record)
+    assert keyring.verify(b"payload", b"short", digest_bytes=16) is False
+    assert calls == 2
 
 
 def test_sign_uses_primary_only() -> None:
@@ -60,19 +117,247 @@ def test_sign_uses_primary_only() -> None:
     )
 
 
-def test_both_domains_can_temporarily_share_only_the_legacy_previous(
+@pytest.mark.parametrize(
+    ("primary_env", "previous_env", "started_env", "primary", "previous", "loader", "max_ttl"),
+    [
+        (
+            "MAIL_ACTION_HMAC_SECRET",
+            "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+            "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+            _MAIL_PRIMARY,
+            _MAIL_PREVIOUS,
+            load_mail_action_hmac_keyring,
+            MAIL_ACTION_MAX_TOKEN_TTL_S,
+        ),
+        (
+            "REPORT_LINK_HMAC_SECRET",
+            "REPORT_LINK_HMAC_PREVIOUS_SECRET",
+            "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+            _REPORT_PRIMARY,
+            _REPORT_PREVIOUS,
+            load_report_link_hmac_keyring,
+            REPORT_LINK_MAX_TOKEN_TTL_S,
+        ),
+    ],
+)
+def test_verifier_first_timeline_is_restart_stable_and_deadline_exclusive(
+    monkeypatch: pytest.MonkeyPatch,
+    primary_env: str,
+    previous_env: str,
+    started_env: str,
+    primary: str,
+    previous: str,
+    loader: Callable[..., HmacKeyring | None],
+    max_ttl: int,
+) -> None:
+    """T0 verifier deploy, issuer cutover minutes later, and deterministic prior-key removal."""
+    monkeypatch.setenv(primary_env, primary)
+    monkeypatch.setenv(previous_env, previous)
+    monkeypatch.setenv(started_env, str(_NOW))
+    payload = b"last-token-from-old-issuer"
+    old_signature = _signature(previous, payload)
+    deadline = _NOW + HMAC_MAX_ROLLOUT_OVERLAP_S + max_ttl
+
+    # Each call constructs a fresh keyring, modelling restarts throughout the rollout.
+    for current in (_NOW, _NOW + 5 * 60, _NOW + HMAC_MAX_ROLLOUT_OVERLAP_S, deadline - 1):
+        keyring = loader(now=current)
+        assert keyring is not None
+        assert keyring.verify(payload, old_signature, digest_bytes=16)
+
+    at_deadline = loader(now=deadline)
+    after_restart = loader(now=deadline + 10_000)
+    assert at_deadline is not None and after_restart is not None
+    assert not at_deadline.verify(payload, old_signature, digest_bytes=16)
+    assert not after_restart.verify(payload, old_signature, digest_bytes=16)
+
+
+def test_future_rotation_start_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_PRIMARY)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _MAIL_PREVIOUS)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_NOW + 1))
+    assert load_mail_action_hmac_keyring(now=_NOW) is None
+
+
+def test_old_valid_until_does_not_substitute_for_fixed_rotation_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """現本番の旧DB鍵は両用途の previous に置けるが、新主鍵同士は必ず分離する。"""
-    now = 2_000_000_000
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_PRIMARY)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _MAIL_PREVIOUS)
+    monkeypatch.setenv(
+        "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
+        str(_NOW + MAIL_ACTION_MAX_TOKEN_TTL_S),
+    )
+    assert load_mail_action_hmac_keyring(now=_NOW) is None
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "",
+        " 1",
+        "1 ",
+        "+1",
+        "-1",
+        "１２３",
+        "١٢٣",
+        "9" * 10_000,
+        "18446744073709551616",
+    ],
+)
+def test_rotation_timestamp_parser_never_raises_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, malformed: str
+) -> None:
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_PRIMARY)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _MAIL_PREVIOUS)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", malformed)
+    assert load_mail_action_hmac_keyring(now=_NOW) is None
+
+
+@pytest.mark.parametrize("malformed_now", [True, 1.5, "2000000000", 10**100])
+def test_load_helpers_return_none_for_malformed_now(
+    monkeypatch: pytest.MonkeyPatch, malformed_now: object
+) -> None:
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_PRIMARY)
+    os_now = malformed_now  # keep the intentionally invalid runtime value visible in the test
+    # type: ignore[arg-type] -- adversarial runtime inputs intentionally violate the annotation.
+    assert load_mail_action_hmac_keyring(now=os_now) is None
+
+
+def test_clock_exception_is_contained(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_PRIMARY)
+
+    def _boom() -> float:
+        raise RuntimeError("clock unavailable")
+
+    monkeypatch.setattr("teamagent.hmac_keyring.time.time", _boom)
+    assert load_mail_action_hmac_keyring() is None
+
+
+@pytest.mark.parametrize(
+    ("env_name", "loader", "maximum"),
+    [
+        ("MAIL_ACTION_TTL_S", load_mail_action_token_ttl_s, MAIL_ACTION_MAX_TOKEN_TTL_S),
+        ("REPORT_LINK_TTL_S", load_report_link_token_ttl_s, REPORT_LINK_MAX_TOKEN_TTL_S),
+    ],
+)
+def test_ttl_loader_defaults_and_accepts_exact_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    loader: Callable[..., int | None],
+    maximum: int,
+) -> None:
+    assert loader() == maximum
+    monkeypatch.setenv(env_name, "1")
+    assert loader() == 1
+    monkeypatch.setenv(env_name, str(maximum))
+    assert loader() == maximum
+    assert loader(explicit_ttl_s=1) == 1
+    assert loader(explicit_ttl_s=maximum) == maximum
+
+
+@pytest.mark.parametrize("malformed", ["", " 1", "1 ", "+1", "-1", "0", "１２", "١٢", "9" * 10_000])
+@pytest.mark.parametrize(
+    ("env_name", "loader"),
+    [
+        ("MAIL_ACTION_TTL_S", load_mail_action_token_ttl_s),
+        ("REPORT_LINK_TTL_S", load_report_link_token_ttl_s),
+    ],
+)
+def test_present_invalid_ttl_never_silently_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    loader: Callable[..., int | None],
+    malformed: str,
+) -> None:
+    monkeypatch.setenv(env_name, malformed)
+    assert loader() is None
+    assert loader(explicit_ttl_s=1) is None
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.0, "1", 10**100])
+@pytest.mark.parametrize(
+    ("loader", "maximum"),
+    [
+        (load_mail_action_token_ttl_s, MAIL_ACTION_MAX_TOKEN_TTL_S),
+        (load_report_link_token_ttl_s, REPORT_LINK_MAX_TOKEN_TTL_S),
+    ],
+)
+def test_explicit_ttl_rejects_non_integer_or_out_of_range(
+    loader: Callable[..., int | None], maximum: int, invalid: object
+) -> None:
+    assert loader(explicit_ttl_s=invalid) is None
+    assert loader(explicit_ttl_s=maximum + 1) is None
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        "jdbc:postgresql://user:password@db.internal:5432/teamagent",
+        "mysql+pymysql://user:password@db.internal/teamagent",
+        "mongodb+srv://user:password@cluster.example/teamagent",
+        "redis://:a-very-long-password-value@cache.internal:6379/0",
+        "rediss://user:a-very-long-password@cache.internal:6380/0",
+        "xoxa-" + "a" * 40,
+        "xoxr-" + "r" * 40,
+        "xoxe-" + "e" * 40,
+        "xapp-" + "x" * 40,
+    ],
+)
+def test_primary_rejects_common_credential_shapes(
+    monkeypatch: pytest.MonkeyPatch, credential: str
+) -> None:
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", credential)
+    assert load_mail_action_hmac_keyring(now=_NOW) is None
+
+
+@pytest.mark.parametrize(
+    "credential_env",
+    [
+        "DATABASE_URL",
+        "PAYMENTS_API_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "SENTRY_DSN",
+        "PGPASSWORD",
+        "MYSQL_PWD",
+        "REDISCLI_AUTH",
+        "BASIC_AUTH",
+    ],
+)
+def test_primary_rejects_equality_with_any_visible_credential_env(
+    monkeypatch: pytest.MonkeyPatch, credential_env: str
+) -> None:
+    random_hmac_value = "otherwise-valid-random-hmac-value-" + "z" * 32
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", random_hmac_value)
+    monkeypatch.setenv(credential_env, random_hmac_value)
+    assert load_mail_action_hmac_keyring(now=_NOW) is None
+
+
+def test_both_domains_can_share_only_a_bounded_legacy_previous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     legacy_db = "postgresql://user:legacy-password@db.internal:5432/teamagent?sslmode=require"
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "mail-primary-" + "m" * 32)
-    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", "report-primary-" + "r" * 32)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_PRIMARY)
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_PRIMARY)
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", legacy_db)
     monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_SECRET", legacy_db)
-    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL", str(now + 60 * 60 * 24))
-    monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL", str(now + 60 * 60 * 24 * 7))
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_NOW))
+    monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_NOW))
     monkeypatch.setenv("DATABASE_URL", legacy_db)
 
-    assert load_mail_action_hmac_keyring(now=now) is not None
-    assert load_report_link_hmac_keyring(now=now) is not None
+    assert load_mail_action_hmac_keyring(now=_NOW) is not None
+    assert load_report_link_hmac_keyring(now=_NOW) is not None
+
+
+def test_primary_keys_remain_purpose_separated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_PRIMARY)
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _MAIL_PRIMARY)
+    assert load_mail_action_hmac_keyring(now=_NOW) is None
+    assert load_report_link_hmac_keyring(now=_NOW) is None
+
+
+def test_previous_cannot_equal_other_purpose_primary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_PRIMARY)
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_PRIMARY)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _REPORT_PRIMARY)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_NOW))
+    assert load_mail_action_hmac_keyring(now=_NOW) is None

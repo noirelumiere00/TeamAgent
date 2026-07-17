@@ -1,4 +1,4 @@
-"""メール action 用 HMAC token の分離・ローテーション・fail-closed テスト。"""
+"""Mail-action HMAC token separation, rotation, TTL, and fail-closed tests."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from teamagent.hmac_keyring import HmacKeyConfigurationError
+from teamagent.hmac_keyring import HMAC_MAX_ROLLOUT_OVERLAP_S
 from teamagent.skills.morning_digest.draft_token import (
     _owner_hash,
     decode_draft_token,
@@ -29,10 +29,14 @@ _MAIL_TTL_S = 60 * 60 * 24
 _HMAC_ENVS = (
     "MAIL_ACTION_HMAC_SECRET",
     "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+    "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
     "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
+    "MAIL_ACTION_TTL_S",
     "REPORT_LINK_HMAC_SECRET",
     "REPORT_LINK_HMAC_PREVIOUS_SECRET",
+    "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT",
     "REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
+    "REPORT_LINK_TTL_S",
     "DATABASE_URL",
     "SLACK_BOT_TOKEN",
 )
@@ -56,6 +60,11 @@ def _signed_draft_token(secret: str, *, expires: object, thread_id: str = "legac
     return f"{b64(raw)}.{b64(sig)}"
 
 
+def _require_token(token: str | None) -> str:
+    assert token is not None
+    return token
+
+
 def _signature(token: str) -> tuple[bytes, bytes]:
     body_b64, sig_b64 = token.split(".", 1)
 
@@ -65,49 +74,87 @@ def _signature(token: str) -> tuple[bytes, bytes]:
     return decode(body_b64), decode(sig_b64)
 
 
+def _payload(token: str) -> dict[str, object]:
+    raw, _signature_bytes = _signature(token)
+    payload = json.loads(raw)
+    assert isinstance(payload, dict)
+    return payload
+
+
 def test_roundtrip_returns_thread_id() -> None:
-    token = encode_draft_token("thread-123", ME, now=1000)
+    token = _require_token(encode_draft_token("thread-123", ME, now=1000))
     assert decode_draft_token(token, ME, now=1000) == "thread-123"
 
 
-def test_expired_token_rejected() -> None:
-    token = encode_draft_token("t1", ME, now=1000, ttl_s=60)
-    assert decode_draft_token(token, ME, now=1061) is None
+def test_token_expiry_is_exclusive_at_exact_boundary() -> None:
+    token = _require_token(encode_draft_token("t1", ME, now=1000, ttl_s=60))
+    assert decode_draft_token(token, ME, now=1059) == "t1"
+    assert decode_draft_token(token, ME, now=1060) is None
+
+
+@pytest.mark.parametrize("ttl_s", [1, _MAIL_TTL_S])
+def test_explicit_ttl_accepts_inclusive_bounds(ttl_s: int) -> None:
+    token = _require_token(encode_draft_token("t1", ME, now=1000, ttl_s=ttl_s))
+    assert _payload(token)["e"] == 1000 + ttl_s
+
+
+@pytest.mark.parametrize("ttl_s", [0, -1, _MAIL_TTL_S + 1, True, 1.0, "60", 10**100])
+def test_explicit_ttl_outside_strict_integer_bounds_returns_none(ttl_s: object) -> None:
+    # type: ignore[arg-type] -- adversarial runtime inputs intentionally violate the annotation.
+    assert encode_draft_token("t1", ME, now=1000, ttl_s=ttl_s) is None
+
+
+def test_configured_mail_ttl_is_shared_by_draft_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAIL_ACTION_TTL_S", "3600")
+    token = _require_token(encode_draft_token("t1", ME, now=1000))
+    assert _payload(token)["e"] == 4600
+
+
+@pytest.mark.parametrize(
+    "invalid", ["", " 60", "60 ", "+60", "0", "86401", "１２", "١٢", "9" * 10_000]
+)
+def test_present_invalid_mail_ttl_suppresses_issuance(
+    monkeypatch: pytest.MonkeyPatch, invalid: str
+) -> None:
+    monkeypatch.setenv("MAIL_ACTION_TTL_S", invalid)
+    assert has_secret() is False
+    assert encode_draft_token("t1", ME, now=1000) is None
+    assert encode_draft_token("t1", ME, now=1000, ttl_s=60) is None
 
 
 def test_owner_mismatch_rejected() -> None:
-    token = encode_draft_token("t1", ME, now=1000)
+    token = _require_token(encode_draft_token("t1", ME, now=1000))
     assert decode_draft_token(token, "attacker@evil.com", now=1000) is None
 
 
 def test_tampered_payload_rejected() -> None:
-    token = encode_draft_token("t1", ME, now=1000)
+    token = _require_token(encode_draft_token("t1", ME, now=1000))
     _body, signature = token.split(".", 1)
-    forged = encode_draft_token("t999", ME, now=1000).split(".", 1)[0] + "." + signature
-    assert decode_draft_token(forged, ME, now=1000) is None
+    forged_body = _require_token(encode_draft_token("t999", ME, now=1000)).split(".", 1)[0]
+    assert decode_draft_token(forged_body + "." + signature, ME, now=1000) is None
 
 
 def test_wrong_secret_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    token = encode_draft_token("t1", ME, now=1000)
+    token = _require_token(encode_draft_token("t1", ME, now=1000))
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_NEXT)
     assert decode_draft_token(token, ME, now=1000) is None
 
 
 def test_no_secret_fails_closed_for_issue_and_verify(monkeypatch: pytest.MonkeyPatch) -> None:
-    token = encode_draft_token("t1", ME, now=1000)
+    token = _require_token(encode_draft_token("t1", ME, now=1000))
     monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET")
     assert has_secret() is False
     assert decode_draft_token(token, ME, now=1000) is None
-    with pytest.raises(HmacKeyConfigurationError):
-        encode_draft_token("t2", ME, now=1000)
+    assert encode_draft_token("t2", ME, now=1000) is None
 
 
 @pytest.mark.parametrize("invalid", ["", "   ", "too-short"])
 def test_empty_or_short_primary_fails_closed(monkeypatch: pytest.MonkeyPatch, invalid: str) -> None:
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", invalid)
     assert has_secret() is False
-    with pytest.raises(HmacKeyConfigurationError):
-        encode_draft_token("t1", ME, now=1000)
+    assert encode_draft_token("t1", ME, now=1000) is None
 
 
 def test_garbage_token_rejected() -> None:
@@ -116,8 +163,12 @@ def test_garbage_token_rejected() -> None:
     assert decode_draft_token("a.b.c", ME, now=1000) is None
 
 
-def test_signed_malformed_expiry_is_fail_closed() -> None:
-    token = _signed_draft_token(_MAIL_PRIMARY, expires="not-an-integer")
+@pytest.mark.parametrize(
+    "malformed_expiry",
+    ["not-an-integer", " 2000000001", "+2000000001", "２００００００００１", True, 1.5, 10**100],
+)
+def test_signed_malformed_expiry_is_fail_closed(malformed_expiry: object) -> None:
+    token = _signed_draft_token(_MAIL_PRIMARY, expires=malformed_expiry)
     assert decode_draft_token(token, ME, now=_ROTATION_NOW) is None
 
 
@@ -126,11 +177,10 @@ def test_does_not_fall_back_to_slack_or_database(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-" + "s" * 40)
     monkeypatch.setenv("DATABASE_URL", _LEGACY_DATABASE_URL)
     assert has_secret() is False
-    with pytest.raises(HmacKeyConfigurationError):
-        encode_draft_token("t1", ME, now=_ROTATION_NOW)
+    assert encode_draft_token("t1", ME, now=_ROTATION_NOW) is None
 
 
-def test_legacy_database_key_is_explicit_previous_verification_only(
+def test_legacy_database_key_is_bounded_previous_verification_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     legacy = _signed_draft_token(
@@ -140,13 +190,11 @@ def test_legacy_database_key_is_explicit_previous_verification_only(
     assert decode_draft_token(legacy, ME, now=_ROTATION_NOW) is None
 
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
-    assert decode_draft_token(legacy, ME, now=_ROTATION_NOW) is None  # 期限なしは不正
-    monkeypatch.setenv(
-        "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL", str(_ROTATION_NOW + _MAIL_TTL_S)
-    )
+    assert decode_draft_token(legacy, ME, now=_ROTATION_NOW) is None
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
     assert decode_draft_token(legacy, ME, now=_ROTATION_NOW) == "legacy-thread"
 
-    issued = encode_draft_token("new-thread", ME, now=_ROTATION_NOW)
+    issued = _require_token(encode_draft_token("new-thread", ME, now=_ROTATION_NOW))
     raw, signature = _signature(issued)
     primary_sig = hmac.new(_MAIL_PRIMARY.encode(), raw, hashlib.sha256).digest()[:16]
     previous_sig = hmac.new(_LEGACY_DATABASE_URL.encode(), raw, hashlib.sha256).digest()[:16]
@@ -154,56 +202,60 @@ def test_legacy_database_key_is_explicit_previous_verification_only(
     assert not hmac.compare_digest(signature, previous_sig)
 
 
-def test_previous_stops_verifying_after_explicit_deadline(
+def test_verifier_first_rollout_covers_last_old_issuer_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    cutover = _ROTATION_NOW + HMAC_MAX_ROLLOUT_OVERLAP_S
+    last_old_issue = cutover - 1
+    expires = last_old_issue + _MAIL_TTL_S
     legacy = _signed_draft_token(
-        _LEGACY_DATABASE_URL, expires=_ROTATION_NOW + _MAIL_TTL_S, thread_id="legacy-thread"
+        _LEGACY_DATABASE_URL,
+        expires=expires,
+        thread_id="last-old-issuer-token",
     )
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
-    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL", str(_ROTATION_NOW + 30))
-    assert decode_draft_token(legacy, ME, now=_ROTATION_NOW) == "legacy-thread"
-    assert decode_draft_token(legacy, ME, now=_ROTATION_NOW + 31) is None
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+
+    assert decode_draft_token(legacy, ME, now=last_old_issue) == "last-old-issuer-token"
+    assert decode_draft_token(legacy, ME, now=expires - 1) == "last-old-issuer-token"
+    assert decode_draft_token(legacy, ME, now=expires) is None
+
+
+def test_previous_key_deadline_is_exclusive(monkeypatch: pytest.MonkeyPatch) -> None:
+    deadline = _ROTATION_NOW + HMAC_MAX_ROLLOUT_OVERLAP_S + _MAIL_TTL_S
+    legacy = _signed_draft_token(
+        _LEGACY_DATABASE_URL,
+        expires=deadline + 60,
+        thread_id="deadline-probe",
+    )
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    assert decode_draft_token(legacy, ME, now=deadline - 1) == "deadline-probe"
+    assert decode_draft_token(legacy, ME, now=deadline) is None
 
 
 def test_same_primary_and_previous_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    token = encode_draft_token("t1", ME, now=_ROTATION_NOW)
+    token = _require_token(encode_draft_token("t1", ME, now=_ROTATION_NOW))
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _MAIL_PRIMARY)
-    monkeypatch.setenv(
-        "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL", str(_ROTATION_NOW + _MAIL_TTL_S)
-    )
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
     assert has_secret() is False
     assert decode_draft_token(token, ME, now=_ROTATION_NOW) is None
-    with pytest.raises(HmacKeyConfigurationError):
-        encode_draft_token("t2", ME, now=_ROTATION_NOW)
+    assert encode_draft_token("t2", ME, now=_ROTATION_NOW) is None
 
 
-def test_previous_deadline_cannot_be_permanent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
-    monkeypatch.setenv(
-        "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
-        str(_ROTATION_NOW + _MAIL_TTL_S + 301),
-    )
-    with pytest.raises(HmacKeyConfigurationError):
-        encode_draft_token("t1", ME, now=_ROTATION_NOW)
-
-
-def test_database_primary_rejected_without_leaking_value(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_database_primary_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _LEGACY_DATABASE_URL)
     monkeypatch.setenv("DATABASE_URL", _LEGACY_DATABASE_URL)
-    with pytest.raises(HmacKeyConfigurationError) as caught:
-        encode_draft_token("t1", ME)
-    assert _LEGACY_DATABASE_URL not in str(caught.value)
-    assert "legacy-db-password" not in repr(caught.value)
+    assert has_secret() is False
+    assert encode_draft_token("t1", ME) is None
 
 
 def test_mail_and_report_primary_must_be_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _MAIL_PRIMARY)
     assert has_secret() is False
-    with pytest.raises(HmacKeyConfigurationError):
-        encode_draft_token("t1", ME)
+    assert encode_draft_token("t1", ME) is None
 
 
 def test_raw_thread_id_not_in_token() -> None:
-    token = encode_draft_token("RAW_THREAD_SECRET_ID", ME, now=1000)
+    token = _require_token(encode_draft_token("RAW_THREAD_SECRET_ID", ME, now=1000))
     assert "RAW_THREAD_SECRET_ID" not in token

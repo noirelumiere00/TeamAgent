@@ -59,9 +59,9 @@ def _missing_prereqs(base: str, key: str) -> list[str]:
         # mcp taskdef の CONNECT_BASE_URL 未設定。
         missing.append("CONNECT_BASE_URL")
     if not has_secret():
-        # REPORT_LINK_HMAC_SECRET 未注入または keyring 不正。メール action 鍵・DB URL へは
-        # fallback しないため、発行側と connect-web の両方へ同じ専用主鍵を明示注入する。
-        missing.append("REPORT_LINK_HMAC_SECRET")
+        # REPORT_LINK_HMAC_SECRET / rotation / TTL のいずれかが未注入・不正。メール action 鍵・
+        # DB URL へは fallback しないため、発行側と connect-web へ同じ契約を明示注入する。
+        missing.append("REPORT_LINK_HMAC_CONFIG")
     if not is_allowed_key(key):
         # allowlist 外 prefix の成果物にトークンを出すと decode 側が拒否して 404 になる。
         # 空 key もここで弾く（`key and ...` で条件化すると空 key が allowlist を素通りして
@@ -100,6 +100,9 @@ def delivery_url(result: PublishedObject, *, request_id: str) -> str:
     try:
         token = encode_report_token(result.bucket, result.key, region=result.region)
     except Exception:
+        logger.warning("report_short_url_encode_failed", request_id=request_id)
+        return result.url
+    if token is None:
         logger.warning("report_short_url_encode_failed", request_id=request_id)
         return result.url
     return f"{base}/r/{token}"

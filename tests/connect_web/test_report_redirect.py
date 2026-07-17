@@ -26,7 +26,9 @@ _FAKE_PRESIGNED = (
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_SECRET", raising=False)
+    monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT", raising=False)
     monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL", raising=False)
+    monkeypatch.delenv("REPORT_LINK_TTL_S", raising=False)
     monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
     monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET", raising=False)
     monkeypatch.setenv("VSEO_REPORT_BUCKET", _BUCKET)
@@ -70,9 +72,7 @@ def test_previous_key_redirects_only_when_explicitly_configured(
     token = encode_report_token(_BUCKET, _KEY)
     monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_NEXT_SECRET)
     monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_SECRET", _REPORT_SECRET)
-    monkeypatch.setenv(
-        "REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL", str(int(time.time()) + 60 * 60 * 24 * 7)
-    )
+    monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(int(time.time())))
     _patch_presign(monkeypatch, _FAKE_PRESIGNED)
     r = client.get(f"/r/{token}", follow_redirects=False)
     assert r.status_code == 302
