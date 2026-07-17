@@ -40,8 +40,8 @@ def test_slack_external_id_datetime(external_id: str, expected: str) -> None:
         "C123:1783932899:extra",
         "C 123:1783932899",
         "CZZZZZZZZZZ:1783932899",  # 形式が正しくても設定外channelは拒否
-        "C123:1234.1",  # 2010より前を含む短い/古いepochは拒否
-        "C123:9999999999",  # 現在より未来
+        "C091ZSVTKF1:1000000000",  # 許可channelでも2010より前は拒否
+        "C0A1207GYHZ:9999999999",  # 許可channelでも現在より未来は拒否
     ],
 )
 def test_slack_external_id_datetime_rejects_untrusted_shapes(external_id: str) -> None:
