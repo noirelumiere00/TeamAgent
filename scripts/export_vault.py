@@ -263,9 +263,10 @@ def render_client_note(
     """クライアントカルテ note を生成する。
 
     timeline は list_client_timeline 相当の行 dict（**古い順**）。表示は新しい順へ反転。
-    最新フェーズ/BANT は末尾（最新）の行から取る。業界は DB の主担当 client_name が
-    この取引先と一致する資料を優先し、無ければ cls_project 一致資料の最頻値を使う。
-    title だけが一致した汎用事例は取引先プロパティへ混ぜない。
+    最新フェーズ/BANT は末尾（最新）の行から取る。業界は監査済みマスターを優先し、
+    マスターが無い場合は DB の主担当 client_name / cls_project がこの取引先と完全一致する
+    全資料の業界が1種類に合意したときだけ採用する。不一致は推測せず空欄へ倒し、title
+    だけが一致した汎用事例は取引先プロパティへ混ぜない。
     doc_paths は documents と同順の Vault 相対パス（拡張子なし・wikilink 用）。
     """
     latest = timeline[-1] if timeline else {}

@@ -178,6 +178,10 @@ class ContentState:
     expected_doc_stems: set[str] = field(default_factory=set)
     expected_doc_titles: dict[str, str] = field(default_factory=dict)
     expected_doc_owner_keys: dict[str, frozenset[str]] = field(default_factory=dict)
+    expected_doc_primary_owner_keys: dict[str, str] = field(default_factory=dict)
+    expected_doc_project_owner_keys: dict[str, str] = field(default_factory=dict)
+    expected_doc_industries: dict[str, str] = field(default_factory=dict)
+    expected_client_industry_fallbacks: dict[str, set[str]] = field(default_factory=dict)
     expected_renamed_stems: set[str] = field(default_factory=set)
     expected_gsheets_renamed_stems: set[str] = field(default_factory=set)
     sensitive_source_tokens: set[str] = field(default_factory=set)
@@ -1038,8 +1042,26 @@ def _analyze_content(
                     )
                     or (expected_master is None and source == "master")
                 )
-                state.client_industry_source_invalid_count += int(
-                    invalid_source or invalid_value
+                state.client_industry_source_invalid_count += int(invalid_source or invalid_value)
+            else:
+                source = "legacy"
+                industry = fm.get("industry", "")
+
+            canonical_client = sidecars.client_alias.get(fm.get("client", ""), fm.get("client", ""))
+            client_key = client_identity_key(canonical_client)
+            canonical_industry = tag_industry.get(industry, industry)
+            if (
+                client_key
+                and canonical_industry
+                and source
+                in {
+                    "master",
+                    "exact_consensus",
+                    "legacy",
+                }
+            ):
+                state.expected_client_industry_fallbacks.setdefault(client_key, set()).add(
+                    canonical_industry
                 )
         if note.kind != "docs":
             continue
@@ -1070,14 +1092,16 @@ def _analyze_content(
             )
             primary = fm.get("client", "")
             primary = sidecars.client_alias.get(primary, primary)
+            primary_key = client_identity_key(primary)
+            project_key = client_identity_key(fm.get("project", ""))
             state.expected_doc_owner_keys[stem_portable] = frozenset(
-                filter(
-                    None,
-                    (
-                        client_identity_key(primary),
-                        client_identity_key(fm.get("project", "")),
-                    ),
-                )
+                filter(None, (primary_key, project_key))
+            )
+            state.expected_doc_primary_owner_keys[stem_portable] = primary_key
+            state.expected_doc_project_owner_keys[stem_portable] = project_key
+            raw_industry = fm.get("industry", "")
+            state.expected_doc_industries[stem_portable] = tag_industry.get(
+                raw_industry, raw_industry
             )
             if renamed:
                 state.expected_renamed_stems.add(stem_portable)
@@ -1541,14 +1565,9 @@ def _analyze_html(
         # in the payload, and have a usable date.  This keeps title-only coincidences
         # (for example Port/report) out of the timeline and prevents "date unknown".
         docs_by_stem = {
-            cast(str, doc["stem"]): doc
-            for doc in docs
-            if isinstance(doc.get("stem"), str)
+            cast(str, doc["stem"]): doc for doc in docs if isinstance(doc.get("stem"), str)
         }
-        missing_doc_dates = sum(
-            not _is_iso_date(doc.get("modified"))
-            for doc in docs
-        )
+        missing_doc_dates = sum(not _is_iso_date(doc.get("modified")) for doc in docs)
         state.missing_doc_date_count = missing_doc_dates
         _add(violations, "html_doc_date_missing", missing_doc_dates)
 
@@ -1583,12 +1602,39 @@ def _analyze_html(
             activity_pairs += len(activity_stems)
             activity_docs_missing += sum(stem not in docs_by_stem for stem in activity_stems)
             activity_not_explicit += sum(
-                (f"c:{client_stem}", f"d:{stem}") not in valid_links
-                for stem in activity_stems
+                (f"c:{client_stem}", f"d:{stem}") not in valid_links for stem in activity_stems
             )
             client_owner_key = client_identity_key(client.get("name"))
             expected_industry = sidecars.client_industry_by_identity.get(client_owner_key)
-            if expected_industry is not None and client.get("industry") != expected_industry:
+            if expected_industry is None:
+                primary_industries: list[str] = []
+                project_industries: list[str] = []
+                for stem in activity_stems:
+                    portable_stem = _portable_key(stem)
+                    industry = content.expected_doc_industries.get(portable_stem, "")
+                    if not industry:
+                        continue
+                    if (
+                        content.expected_doc_primary_owner_keys.get(portable_stem)
+                        == client_owner_key
+                    ):
+                        primary_industries.append(industry)
+                    elif (
+                        content.expected_doc_project_owner_keys.get(portable_stem)
+                        == client_owner_key
+                    ):
+                        project_industries.append(industry)
+                candidates = {
+                    unicodedata.normalize("NFC", value).strip()
+                    for value in (*primary_industries, *project_industries)
+                    if value.strip()
+                }
+                if not candidates:
+                    candidates = content.expected_client_industry_fallbacks.get(
+                        client_owner_key, set()
+                    )
+                expected_industry = next(iter(candidates)) if len(candidates) == 1 else ""
+            if client.get("industry") != expected_industry:
                 industry_override_mismatches += 1
             activity_owner_mismatches += sum(
                 not client_owner_key
@@ -1613,8 +1659,7 @@ def _analyze_html(
             doc_dates = [
                 cast(str, docs_by_stem[stem]["modified"])
                 for stem in activity_stems
-                if stem in docs_by_stem
-                and _is_iso_date(docs_by_stem[stem].get("modified"))
+                if stem in docs_by_stem and _is_iso_date(docs_by_stem[stem].get("modified"))
             ]
             expected_last = max([*fb_dates, *doc_dates], default="")
             if client.get("last") != expected_last:

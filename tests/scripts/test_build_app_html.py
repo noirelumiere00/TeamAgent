@@ -2682,9 +2682,7 @@ def test_client_identity_grouping_keeps_middle_honorific_and_merges_legal_prefix
 
 def test_repository_aliases_do_not_merge_sbi_subsidiaries() -> None:
     aliases = json.loads(
-        (_ROOT / "data" / "connect_web_filters" / "client_alias.json").read_text(
-            encoding="utf-8"
-        )
+        (_ROOT / "data" / "connect_web_filters" / "client_alias.json").read_text(encoding="utf-8")
     )["client"]
 
     assert aliases["SBI SECURITIES"] == "SBI証券"

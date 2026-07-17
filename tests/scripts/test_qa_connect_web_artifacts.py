@@ -987,6 +987,22 @@ def test_client_industry_master_is_enforced_in_public_payload(
     assert cast_dict(result["violations"])["html_client_industry_override_mismatch"] == 1
 
 
+def test_non_master_client_industry_is_recomputed_from_owned_documents(
+    artifacts: tuple[Path, Path, Path, str],
+) -> None:
+    vault, html, sidecars, _ = artifacts
+
+    def corrupt_client_industry(payload: dict[str, object]) -> None:
+        clients = payload["clients"]
+        assert isinstance(clients, list) and isinstance(clients[0], dict)
+        clients[0]["industry"] = "所有資料と一致しない業界"
+
+    _rewrite_html_payload(html, corrupt_client_industry)
+    result = qa.run_qa(qa.QAConfig(vault=vault, html=html, sidecar_dir=sidecars))
+
+    assert cast_dict(result["violations"])["html_client_industry_override_mismatch"] == 1
+
+
 def test_generated_client_industry_requires_source_provenance(
     artifacts: tuple[Path, Path, Path, str],
 ) -> None:
