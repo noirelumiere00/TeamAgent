@@ -14,7 +14,7 @@ HTML 生成ロジックは元スクリプトと同一。repo 版で加えたの�
 - サイドカーは repo の ``data/connect_web_filters/`` から読む（``__file__`` 相対）。
   exists() フォールバックは全廃: サイドカー欠落・Vault 不在・clients==0・docs==0 は
   理由を明示して exit 1（「黙って劣化」を作らない）
-- サニティゲート: 統計を ``<out>.stats.json`` に保存し、取引先数/資料数/バイト数の
+- サニティゲート: 統計を ``<out>.stats.json`` に保存し、取引先数/資料数/FB件数/バイト数の
   いずれかが前回比 20% 超減なら ``--allow-shrink`` 無しで exit 1（既存 out は上書きしない）
 - ACL公開境界: 完全export manifestのactive pathだけを読み、全noteのSHA-256一致を要求する。
   未管理/手編集/prune保護note、partial/旧manifest、export後に変わったnoteは公開せずfail-closed。
@@ -164,18 +164,20 @@ def bant_short(b):
     return m.group(1) if m else b[:1]
 
 
-# === 施策タイムライン: 営業FB時系列（### 日付/旧---- 見出し）のパース ===
-# exporter は occurred_at があれば `### 2026-07-17 ...`、無ければ旧互換の
-# `### ---- ...` を出す。日付backfill後も両方を読むが、通常のH3はFBにしない。
+# === 施策タイムライン: 営業FB時系列（### <日付|----> 見出し区切り）のパース ===
+# exporter は occurred_at があれば `### YYYY-MM-DD <ソース名>`、無ければ旧互換の
+# `### ---- <ソース名>` を出す。専用section内で両形式だけを読み、通常のH3はFBにしない。
 FB_SECTION_RE = re.compile(
     r"^##\s+営業FB時系列（新しい順）\s*$([\s\S]*?)(?=^##\s|\Z)", re.M
 )
 FB_HEAD_RE = re.compile(
-    r"^###\s+((?:-{2,}.*|\d{4}-\d{2}-\d{2}(?=[T\s]|$).*))$", re.M
+    r"^###[ \t]+(?:(?P<date>\d{4}-\d{2}-\d{2})|(?P<undated>-{2,}))[ \t]*(?P<head>.*)$",
+    re.M,
 )
-FB_HEAD_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?=[T\s]|$)")
 FB_EPOCH_RE = re.compile(r"(1[0-9]{9})(?:\.\d+)?\s*$")
-FB_DATE_RE = re.compile(r"^>\s*\[(\d{4}-\d{2}-\d{2})[^\]]*\]", re.M)
+# 現行 exporter は Markdown 注入対策で角括弧を `\[` / `\]` に退避するため、
+# 退避前後の引用日付をどちらも後方互換で読めるようにする。
+FB_DATE_RE = re.compile(r"^>\s*\\?\[(\d{4}-\d{2}-\d{2})[^\]]*\\?\]", re.M)
 FB_FIELD_RE = re.compile(
     r"^-\s*(フェーズ|BANT|ポジ反応|ネガ反応|次アクション|提案メニュー)\s*[:：]\s*(.*)$"
 )
@@ -264,10 +266,11 @@ def _sort_fb_events(events):
 def _parse_fb_events_raw(body: str) -> list[dict]:
     """クライアント md 本文の営業FB時系列を未dedup・未capでパースする（fail-open）。
 
-    見出し `### <occurred_at|----> <タイトル>` で区切り、
-    各 FB の `- フェーズ:` 等のフィールド行と日付（`> [YYYY-MM-DD HH:MM]` 行
-    → 見出し末尾の epoch 秒 → UTC+9 → 引用の「タイムスタンプ: YYYY/MM/DD」の3段
-    フォールバック）を拾う。担当タグ用に引用の「送信者:」も抽出する（ev["by"]・
+    見出し `### <YYYY-MM-DD|----> <ソース名> <slack ts epoch|row N>` で区切り、
+    各 FB の `- フェーズ:` 等のフィールド行と日付（見出しの日付
+    → `> [YYYY-MM-DD HH:MM]` 行 → 見出し末尾の epoch 秒 → UTC+9
+    → 引用の「タイムスタンプ: YYYY/MM/DD」の4段フォールバック）を拾う。
+    担当タグ用に引用の「送信者:」も抽出する（ev["by"]・
     フォーム由来のみ実名が入る。Slack直投稿は <@UID> のみ → 空文字）。
     壊れた見出し/欠損フィールドは空文字で許容し、例外は漏らさない
     （このパースの失敗で build を止めない）。
@@ -282,7 +285,7 @@ def _parse_fb_events_raw(body: str) -> list[dict]:
         events = []
         for i, m in enumerate(heads):
             try:
-                head = m.group(1).strip()
+                head = m.group("head").strip()
                 end = heads[i + 1].start() if i + 1 < len(heads) else len(timeline_body)
                 sec = timeline_body[m.end():end]
                 nx = re.search(r"^#{1,6}\s", sec, re.M)  # 次の見出し（## 関連資料 / 非FBのh3 等）で打ち切り
@@ -294,17 +297,14 @@ def _parse_fb_events_raw(body: str) -> list[dict]:
                 sm = FB_SENDER_RE.search(quote)
                 if sm:
                     ev["by"] = _norm_sender(sm.group(1))
+                if m.group("date"):
+                    ev["d"] = m.group("date")
                 dm = FB_DATE_RE.search(sec)
-                if dm:
+                if not ev["d"] and dm:
                     ev["d"] = dm.group(1)
-                else:
-                    hdm = FB_HEAD_DATE_RE.match(head)
-                    tsm = None
-                    if hdm:
-                        ev["d"] = hdm.group(1)
-                    else:
-                        tsm = FB_EPOCH_RE.search(head)
-                    if not ev["d"] and tsm:
+                elif not ev["d"]:
+                    tsm = FB_EPOCH_RE.search(head)
+                    if tsm:
                         try:
                             ev["d"] = datetime.fromtimestamp(int(tsm.group(1)), JST).strftime("%Y-%m-%d")
                         except (ValueError, OverflowError, OSError):
@@ -2298,7 +2298,7 @@ def _stats_path(out: Path) -> Path:
 
 
 def _sanity_gate(stats_path: Path, new_stats: dict[str, int], allow_shrink: bool) -> None:
-    """前回統計との比較。取引先数/資料数/バイト数のいずれかが 20% 超減なら exit 1。
+    """前回統計との比較。取引先数/資料数/FB件数/バイト数のいずれかが 20% 超減なら exit 1。
 
     典型事故: Vault の部分 export・サイドカーの過剰除外・ingest の取りこぼしで
     データが痩せたまま 16 名へ配信してしまうこと。意図した縮小は --allow-shrink で明示。
@@ -2316,7 +2316,12 @@ def _sanity_gate(stats_path: Path, new_stats: dict[str, int], allow_shrink: bool
     if not isinstance(prev, dict):
         _die(f"前回統計 {stats_path} の形式が不正です（dict でない）。確認のうえ削除して再実行してください")
     shrunk: list[str] = []
-    for key, label in (("clients", "取引先数"), ("docs", "資料数"), ("bytes", "バイト数")):
+    for key, label in (
+        ("clients", "取引先数"),
+        ("docs", "資料数"),
+        ("timeline_events", "営業FB件数"),
+        ("bytes", "バイト数"),
+    ):
         prev_v = prev.get(key)
         if not isinstance(prev_v, (int, float)) or isinstance(prev_v, bool) or prev_v <= 0:
             continue  # 旧形式や欠損キーは比較対象外（新統計の保存で次回から効く）
@@ -2800,9 +2805,14 @@ def main(argv: list[str] | None = None) -> int:
     # --- サニティゲート（out を上書きする前に判定） ---
     stats_path = _stats_path(out)
     qf_counts = _quickfilter_counts(clients, docs, _today)   # 横断/（xc）確定後に算出
+    _tl_events = sum(len(c.get("tl") or []) for c in clients)
+    _dated_fb = sum(1 for c in clients for ev in c.get("tl") or [] if ev.get("d"))
     new_stats = {
         "clients": len(clients),
         "docs": len(docs),
+        # parser/exporter の見出し契約がずれて FB が全消失した事故を次回生成時に fail-loud。
+        "timeline_events": _tl_events,
+        "timeline_events_dated": _dated_fb,
         "bytes": len(html_bytes),
         "manifest_sha256": EXPORT_MANIFEST_SHA256,
         "build_inputs_sha256": BUILD_INPUTS_SHA256,
@@ -2820,8 +2830,6 @@ def main(argv: list[str] | None = None) -> int:
     _tl_bytes = sum(
         len(json.dumps(c["tl"], ensure_ascii=False).encode("utf-8")) for c in clients if c.get("tl")
     )
-    _tl_events = sum(len(c.get("tl") or []) for c in clients)
-
     print(f"✅ 生成: {out}")
     print(
         f"   サイズ: {len(html_bytes) // 1024} KB / clients={len(clients)} docs={len(docs)} "
@@ -2831,7 +2839,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"   施策タイムライン: FBイベント{_tl_events}件 / tlペイロード {_tl_bytes // 1024} KB")
     _tans_clients = sum(1 for c in clients if c.get("tans"))
     _tans_names = {n for c in clients for n in c.get("tans") or []}
-    _dated_fb = sum(1 for c in clients for ev in c.get("tl") or [] if ev.get("d"))
     print(
         f"   担当タグ: {_tans_clients} クライアント / 担当名 {len(_tans_names)} 種 / "
         f"日付ありFB {_dated_fb}/{_tl_events} 件"
