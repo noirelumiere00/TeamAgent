@@ -8,6 +8,14 @@
 
 ---
 
+## 2026-07-17 🚀 `/app` の日付・取引先所有者・業種名寄せを本番反映
+- source=`dev`@`6872880b69a0e8b252e56ebdc4b585e38b7681e3`（#245、CI全緑）。資料の `client_name` / `cls_project` をVaultへ保持し、取引先カードの活動資料を「明示リンクかつ完全一致する所有者」に限定。Portと「レポート／パスポート／portfolio」の部分一致を禁止し、SBI生命保険・SBI証券を分離、i-ne・泉屋の正式表記を安全に名寄せ。監査済み28社の業種マスターと、非マスター企業も所有資料から独立再計算するQAを追加。
+- RDSからVaultを全量再生成し `clients=714 / docs=878 / manifest=aa451e744d26...`。公開HTMLは `clients=516 / docs=662 / activity=575 / FB timeline=447 / sha256=03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c`。資料・FBの日付欠損0、QA違反0、内部source露出0。全3,079テスト＋環境依存skip 10、Ruff、mypy、独立artifact監査を通過。
+- 個別確認はPort=1カード・業種「人材」・正しい資料2件・最終接点2025-10-02・誤結合0、SBI生命保険/SBI証券=別カード、i-ne/泉屋=各1カード。配信物と同一bytesの画面で「日付不明」表示0・ブラウザエラー0を確認。未ログイン本番 `/app` は認証画面へ遷移し、`/healthz` は source=`s3` / sha=`03f8e8cc0adb`。
+- S3 `codebuild/connect-web-app.html` VersionId=`6M_3Szuv8TdWiEcnBdvm1cHofvVAERJw`、connect-web=`:50` を force deploy。rollout COMPLETED・1/1 healthy・pending=0・直近ログの ERROR/Exception/Traceback 0。rollback=S3 VersionId=`OLMDBO1l.ibKH8700v.ckAEk.5klK7h3`（sha=`5b1026c60d07...`）を復元後、connect-webを force deploy。実行者=Codex（s-komata AWSアカウント）。
+
+---
+
 ## 2026-07-16 🚑 /app の Drive 共有範囲を本番へ再同期
 - source=`dev`@`ad39f501`（#222）＋ローカル未マージの Unicode パス別名保護。RDS の会社共有 ACL を正として Vault を全量再生成し、旧管理 note 1,902件を prune。生成物は `clients=518 / docs=659 / sha256=772c7e1609ad...`。
 - 反映前に検出した「`acl_groups` に `vectorinc.co.jp` が無い Drive 文書」の `/app` 混入は116件。反映候補の抽出可能な Drive file ID 302/302件を会社共有と照合し、未許可0件を確認。S3 配信物を再取得して候補と byte-for-byte 一致も確認。
