@@ -43,6 +43,7 @@ write_vault = _mod.write_vault
 render_doc_note = _mod.render_doc_note
 render_client_note = _mod.render_client_note
 normalize_shared_group = _mod.normalize_shared_group
+client_match_pattern = _mod.client_match_pattern
 
 
 def _manifest_files(out: Path) -> dict[str, str]:
@@ -740,6 +741,86 @@ def test_clients_sql_excludes_research_products_from_client_union() -> None:
     assert sql.index("x_research_tool' IS NULL") > sql.index("cls_project")
 
 
+def _pg_pattern_matches(pattern: str, value: str) -> bool:
+    """本件の文字集合を Python re で回帰確認するための PostgreSQL ARE 縮約。"""
+    python_pattern = pattern.replace("[:alnum:]", "A-Za-z0-9")
+    return (
+        re.search(
+            python_pattern,
+            unicodedata.normalize("NFC", value),
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "client", "expected"),
+    [
+        # 日本語短名: 先頭/空白/括弧の後は拾い、別単語の途中は拾わない。
+        ("ポート株式会社 採用支援のご提案", "ポート", True),
+        ("ポート キャリアパーク案件", "ポート", True),
+        ("2026年（ポート株式会社）定例", "ポート", True),
+        ("【ポート】営業資料", "ポート", True),
+        ("株式会社ポート 採用支援のご提案", "ポート", True),
+        ("有限会社ポート", "ポート", True),
+        ("一般社団法人ポート", "ポート", True),
+        ("市場調査レポート", "ポート", False),
+        ("三井住友信託銀行株式会社 株主パスポート", "ポート", False),
+        ("株式会社株主パスポート", "ポート", False),
+        # ASCII も大文字小文字を無視するが、英単語/underscore の途中へは誤爆しない。
+        ("PORT Inc. proposal", "port", True),
+        ("Q3 (Port) review", "port", True),
+        ("合同会社PORT", "port", True),
+        ("annual report", "port", False),
+        ("airport campaign", "port", False),
+        ("other_port campaign", "port", False),
+        # 左に句読点がある正式名は保持する。
+        ("既存案件・ポート株式会社", "ポート", True),
+    ],
+)
+def test_client_match_pattern_requires_unicode_aware_left_boundary(
+    value: str, client: str, expected: bool
+) -> None:
+    assert _pg_pattern_matches(client_match_pattern(client), value) is expected
+
+
+@pytest.mark.parametrize(
+    ("client", "literal_value", "near_miss"),
+    [
+        ("100%_企画", "（100%_企画株式会社）", "100xx企画株式会社"),
+        ("A[1](東)", "A[1](東)株式会社", "A1東株式会社"),
+        (r"A.B+{C}\\D", r"A.B+{C}\\D 提案", "AxBBBCDD 提案"),
+        ("^PORT$|.*", "^PORT$|.*株式会社", "anything株式会社"),
+    ],
+)
+def test_client_match_pattern_treats_like_and_regex_metacharacters_as_literals(
+    client: str, literal_value: str, near_miss: str
+) -> None:
+    pattern = client_match_pattern(client)
+    assert _pg_pattern_matches(pattern, literal_value)
+    assert not _pg_pattern_matches(pattern, near_miss)
+
+
+def test_client_match_pattern_normalizes_nfc_and_rejects_blank() -> None:
+    nfc = "ポートガレージ"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    assert client_match_pattern(f"  {nfd}  ") == client_match_pattern(nfc)
+    with pytest.raises(ValueError, match="must not be blank"):
+        client_match_pattern("  ")
+
+
+def test_timeline_and_documents_use_the_same_bound_regex_not_like() -> None:
+    """timeline/client_name/cls_project/title の4経路を同じ安全な境界照合へ固定。"""
+    assert _mod._TIMELINE_SQL.count("~* %s") == 1
+    assert _mod._DOCUMENTS_SQL_TEMPLATE.count("~* %s") == 3
+    assert " LIKE %s" not in _mod._TIMELINE_SQL
+    assert " ILIKE %s" not in _mod._DOCUMENTS_SQL_TEMPLATE
+    for sql in (_mod._TIMELINE_SQL, _mod._DOCUMENTS_SQL_TEMPLATE):
+        assert "normalize(COALESCE(" in sql
+
+
 def test_all_admin_dsn_select_paths_require_the_same_company_shared_acl() -> None:
     """client列挙/FB/資料のどの経路も company-shared ACL 謂語を外せない。"""
     predicate = _mod._SHARED_ACL_SQL
@@ -1237,10 +1318,70 @@ def test_load_clients_data_returns_timeline_oldest_first(
     # shared_group は文字列補間せず、正規化した bind parameter で全経路へ渡す。
     assert [params for _, params in executions] == [
         ("vectorinc.co.jp", "vectorinc.co.jp"),  # _CLIENTS_SQL UNION 2 枝
-        ("vectorinc.co.jp", "%出光興産%", 100),  # _TIMELINE_SQL
-        ("vectorinc.co.jp", "%出光興産%", "%出光興産%", "%出光興産%", 100),
+        ("vectorinc.co.jp", client_match_pattern("出光興産"), 100),  # _TIMELINE_SQL
+        (
+            "vectorinc.co.jp",
+            client_match_pattern("出光興産"),
+            client_match_pattern("出光興産"),
+            client_match_pattern("出光興産"),
+            100,
+        ),
     ]
     assert all("vectorinc.co.jp" not in sql.lower() for sql, _ in executions)
+
+
+def test_load_clients_data_normalizes_and_dedupes_unicode_client_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NFC/NFD alias と空白だけの metadata から重複/空 client card を作らない。"""
+    import psycopg
+
+    nfc = "ポート"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    executed_sql: list[str] = []
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self._rows: list[dict[str, Any]] = []
+
+        def __enter__(self) -> _Cursor:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            executed_sql.append(sql)
+            if "DISTINCT name" in sql:
+                self._rows = [{"name": nfd}, {"name": nfc}, {"name": "   "}]
+            elif "is_sales_fb' = 'true'" in sql:
+                self._rows = []
+            else:
+                self._rows = [{"title": "ポート株式会社 提案"}]
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self._rows
+
+    class _Conn:
+        def __enter__(self) -> _Conn:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def cursor(self) -> _Cursor:
+            return _Cursor()
+
+    monkeypatch.setattr(psycopg, "connect", lambda dsn, row_factory=None: _Conn())
+    data = _mod.load_clients_data(
+        "postgresql://stub",
+        shared_group="vectorinc.co.jp",
+    )
+
+    assert list(data) == [nfc]
+    assert len(data[nfc]["documents"]) == 1
+    assert len(executed_sql) == 3  # client列挙 + 1 client分の timeline/documents
 
 
 @pytest.mark.parametrize("shared_group", ["", " ", "a.example,b.example", "not-a-domain"])
