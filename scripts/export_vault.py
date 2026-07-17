@@ -58,7 +58,6 @@ import json
 import re
 import sys
 import unicodedata
-from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -70,6 +69,10 @@ import structlog  # noqa: E402
 from teamagent.client_identity import (  # noqa: E402
     CLIENT_LEGAL_FORMS,
     client_identity_key,
+)
+from teamagent.client_properties import (  # noqa: E402
+    identity_value_map,
+    resolve_client_industry_with_source,
 )
 from teamagent.skills.knowledge_deliver.skill import extract_drive_file_id  # noqa: E402
 
@@ -83,6 +86,25 @@ _MANIFEST_GENERATOR = "scripts/export_vault.py"
 _GENERATED_BY_FIELD = f"generated_by: {json.dumps(_MANIFEST_GENERATOR)}"
 _MANAGED_DIRS = frozenset({"clients", "docs"})
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_CLIENT_INDUSTRY_PATH = _ROOT / "data" / "connect_web_filters" / "client_industry.json"
+
+
+def _load_client_industry_master() -> dict[str, str]:
+    """Load the reviewed company-industry map and fail before any export if invalid."""
+
+    try:
+        payload = json.loads(_CLIENT_INDUSTRY_PATH.read_text(encoding="utf-8"))
+        values = payload["industry"]
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise RuntimeError("invalid client industry master") from exc
+    if not isinstance(values, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in values.items()
+    ):
+        raise RuntimeError("invalid client industry master")
+    return identity_value_map(values)
+
+
+CLIENT_INDUSTRY_BY_IDENTITY = _load_client_industry_master()
 
 # export は会社共有の「単一 DNS ドメイン」だけを受け取る。複数値の解釈を
 # 呼び出し側ごとに変えないため、カンマ区切りは明示的に拒否する。
@@ -262,14 +284,19 @@ def render_client_note(
         and client_key
         and client_identity_key(d.get("cls_project")) == client_key
     ]
-    industries = primary_industries or project_industries
-    industry = Counter(industries).most_common(1)[0][0] if industries else ""
+    industry, industry_source = resolve_client_industry_with_source(
+        client,
+        primary_industries,
+        project_industries,
+        CLIENT_INDUSTRY_BY_IDENTITY,
+    )
 
     lines: list[str] = [
         "---",
         _GENERATED_BY_FIELD,
         f"client: {yaml_quote(client)}",
         f"industry: {yaml_quote(industry)}",
+        f"industry_source: {yaml_quote(industry_source)}",
         f"deal_phase: {yaml_quote(latest.get('deal_phase') or '')}",
         f"bant_score: {yaml_quote(latest.get('bant_score') or '')}",
         f"fb_count: {len(timeline)}",

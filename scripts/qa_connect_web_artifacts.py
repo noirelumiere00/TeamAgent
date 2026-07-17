@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Read-only, PII-safe QA gate for connect-web Vault/build artifacts.
 
 The command emits exactly one JSON object.  Values are counts, booleans, or
@@ -28,6 +29,7 @@ import binascii
 import hashlib
 import json
 import re
+import sys
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -37,6 +39,15 @@ from pathlib import Path
 from typing import NoReturn, cast
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from teamagent.client_identity import (
+    client_identity_key,
+)
+from teamagent.client_properties import (
+    identity_value_map,
+)
+
 _DEFAULT_VAULT = Path.home() / "AiLaVault"
 _DEFAULT_HTML = (
     Path.home() / "Documents" / "Claude" / "Artifacts" / "connect-web-obsidian-preview.html"
@@ -68,6 +79,8 @@ _INTERNAL_PAYLOAD_KEYS = frozenset(
         "source_key",
         "_primary_owner_key",
         "_project_owner_key",
+        "_industry_source",
+        "_industry_fallbacks",
     }
 )
 _REQUIRED_JSON_SIDECARS = (
@@ -75,6 +88,7 @@ _REQUIRED_JSON_SIDECARS = (
     "exclude_source_keys.json",
     "dedup_drop_map.json",
     "weird_rename_high.json",
+    "client_industry.json",
 )
 _OPTIONAL_JSON_SIDECARS = ("tag_alias.json", "client_alias.json")
 _FONT_SIDECAR = "inter-var.b64"
@@ -150,6 +164,7 @@ class SidecarState:
     rename: dict[str, str] = field(default_factory=dict)
     tag_alias: dict[str, dict[str, str]] = field(default_factory=dict)
     client_alias: dict[str, str] = field(default_factory=dict)
+    client_industry_by_identity: dict[str, str] = field(default_factory=dict)
     font_valid: bool = False
     font_bytes: int = 0
     font_sha256: str = _ZERO_SHA256
@@ -162,6 +177,7 @@ class SidecarState:
 class ContentState:
     expected_doc_stems: set[str] = field(default_factory=set)
     expected_doc_titles: dict[str, str] = field(default_factory=dict)
+    expected_doc_owner_keys: dict[str, frozenset[str]] = field(default_factory=dict)
     expected_renamed_stems: set[str] = field(default_factory=set)
     expected_gsheets_renamed_stems: set[str] = field(default_factory=set)
     sensitive_source_tokens: set[str] = field(default_factory=set)
@@ -190,6 +206,8 @@ class ContentState:
     client_timeline_count_mismatch: int = 0
     client_timeline_section_missing: int = 0
     client_fb_count_invalid: int = 0
+    client_industry_source_count: int = 0
+    client_industry_source_invalid_count: int = 0
 
 
 @dataclass
@@ -317,6 +335,16 @@ def _add(violations: Counter[str], kind: str, count: int = 1) -> None:
 
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_iso_date(value: object) -> bool:
+    if not isinstance(value, str) or _DATE_RE.fullmatch(value) is None:
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
 
 
 def _nfc(value: str) -> str:
@@ -616,6 +644,21 @@ def _load_sidecars(
         "sidecar_rename_noop",
         sum(key == target for key, target in state.rename.items()),
     )
+
+    client_industry = loaded["client_industry.json"]
+    if isinstance(client_industry, dict):
+        unknown = set(client_industry) - {"_note", "industry"}
+        _add(violations, "sidecar_schema_invalid", len(unknown))
+        industry_values = _string_map(client_industry.get("industry"), violations)
+        try:
+            state.client_industry_by_identity = identity_value_map(industry_values)
+        except ValueError:
+            _add(violations, "sidecar_client_identity_collision")
+        note = client_industry.get("_note", "")
+        if not isinstance(note, str):
+            _add(violations, "sidecar_type_invalid")
+    else:
+        _add(violations, "sidecar_type_invalid")
 
     tag_alias = loaded.get("tag_alias.json")
     if tag_alias is not None:
@@ -972,6 +1015,32 @@ def _analyze_content(
             state.client_timeline_heading_count += heading_count
             if declared_fb_count is not None and declared_fb_count != heading_count:
                 state.client_timeline_count_mismatch += 1
+            if fm.get("generated_by") == _GENERATED_BY:
+                state.client_industry_source_count += 1
+                client_name = fm.get("client", "")
+                industry = fm.get("industry", "")
+                source = fm.get("industry_source", "")
+                expected_master = sidecars.client_industry_by_identity.get(
+                    client_identity_key(client_name)
+                )
+                invalid_source = source not in {
+                    "master",
+                    "exact_consensus",
+                    "conflict",
+                    "none",
+                }
+                invalid_value = (
+                    (source in {"master", "exact_consensus"} and not industry)
+                    or (source in {"conflict", "none"} and bool(industry))
+                    or (
+                        expected_master is not None
+                        and (source != "master" or industry != expected_master)
+                    )
+                    or (expected_master is None and source == "master")
+                )
+                state.client_industry_source_invalid_count += int(
+                    invalid_source or invalid_value
+                )
         if note.kind != "docs":
             continue
 
@@ -998,6 +1067,17 @@ def _analyze_content(
             state.expected_doc_stems.add(stem_portable)
             state.expected_doc_titles[stem_portable] = rename_portable.get(stem_portable) or fm.get(
                 "title", note.stem
+            )
+            primary = fm.get("client", "")
+            primary = sidecars.client_alias.get(primary, primary)
+            state.expected_doc_owner_keys[stem_portable] = frozenset(
+                filter(
+                    None,
+                    (
+                        client_identity_key(primary),
+                        client_identity_key(fm.get("project", "")),
+                    ),
+                )
             )
             if renamed:
                 state.expected_renamed_stems.add(stem_portable)
@@ -1073,6 +1153,11 @@ def _analyze_content(
         violations,
         "client_timeline_count_mismatch",
         state.client_timeline_count_mismatch,
+    )
+    _add(
+        violations,
+        "html_client_industry_source_invalid",
+        state.client_industry_source_invalid_count,
     )
     return state
 
@@ -1461,8 +1546,7 @@ def _analyze_html(
             if isinstance(doc.get("stem"), str)
         }
         missing_doc_dates = sum(
-            not isinstance(doc.get("modified"), str)
-            or _DATE_RE.fullmatch(cast(str, doc.get("modified", ""))) is None
+            not _is_iso_date(doc.get("modified"))
             for doc in docs
         )
         state.missing_doc_date_count = missing_doc_dates
@@ -1473,6 +1557,8 @@ def _analyze_html(
         activity_docs_missing = 0
         activity_not_explicit = 0
         activity_doc_count_mismatches = 0
+        activity_owner_mismatches = 0
+        industry_override_mismatches = 0
         last_contact_mismatches = 0
         missing_fb_dates = 0
         activity_pairs = 0
@@ -1500,6 +1586,16 @@ def _analyze_html(
                 (f"c:{client_stem}", f"d:{stem}") not in valid_links
                 for stem in activity_stems
             )
+            client_owner_key = client_identity_key(client.get("name"))
+            expected_industry = sidecars.client_industry_by_identity.get(client_owner_key)
+            if expected_industry is not None and client.get("industry") != expected_industry:
+                industry_override_mismatches += 1
+            activity_owner_mismatches += sum(
+                not client_owner_key
+                or client_owner_key
+                not in content.expected_doc_owner_keys.get(_portable_key(stem), frozenset())
+                for stem in activity_stems
+            )
             doc_count = client.get("doc")
             if not _is_int(doc_count) or cast(int, doc_count) != len(activity_stems):
                 activity_doc_count_mismatches += 1
@@ -1510,16 +1606,15 @@ def _analyze_html(
                     activity_schema_errors += 1
                     continue
                 date_value = event.get("d")
-                if not isinstance(date_value, str) or _DATE_RE.fullmatch(date_value) is None:
+                if not _is_iso_date(date_value):
                     missing_fb_dates += 1
                     continue
-                fb_dates.append(date_value)
+                fb_dates.append(cast(str, date_value))
             doc_dates = [
                 cast(str, docs_by_stem[stem]["modified"])
                 for stem in activity_stems
                 if stem in docs_by_stem
-                and isinstance(docs_by_stem[stem].get("modified"), str)
-                and _DATE_RE.fullmatch(cast(str, docs_by_stem[stem]["modified"])) is not None
+                and _is_iso_date(docs_by_stem[stem].get("modified"))
             ]
             expected_last = max([*fb_dates, *doc_dates], default="")
             if client.get("last") != expected_last:
@@ -1531,6 +1626,8 @@ def _analyze_html(
         _add(violations, "html_client_activity_duplicate", activity_duplicates)
         _add(violations, "html_client_activity_doc_missing", activity_docs_missing)
         _add(violations, "html_client_activity_not_explicit", activity_not_explicit)
+        _add(violations, "html_client_activity_owner_mismatch", activity_owner_mismatches)
+        _add(violations, "html_client_industry_override_mismatch", industry_override_mismatches)
         _add(violations, "html_client_doc_count_mismatch", activity_doc_count_mismatches)
         _add(violations, "html_client_last_contact_mismatch", last_contact_mismatches)
         _add(violations, "html_fb_date_missing", missing_fb_dates)
@@ -1742,6 +1839,8 @@ def _safe_result(
             "invoice_rule_applied_count": content.invoice_rule_applied_count,
             "rename_applied_count": content.rename_applied_count,
             "alias_applied_count": content.alias_applied_count,
+            "client_industry_override_count": len(sidecars.client_industry_by_identity),
+            "client_industry_source_count": content.client_industry_source_count,
         },
         "gsheets": {
             "ok": not any(key.startswith("gsheets_") for key in clean_violations),

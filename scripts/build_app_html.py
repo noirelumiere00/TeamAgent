@@ -51,16 +51,23 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from teamagent.client_identity import client_identity_key
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from teamagent.client_identity import client_identity_key  # noqa: E402
+from teamagent.client_properties import (  # noqa: E402
+    identity_value_map,
+    resolve_client_industry,
+)
 
 # --- repo 内サイドカー（フィルタ4ファイル + フォント）。欠落は即 exit 1（fallback 禁止） ---
-_REPO_ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_DIR = _REPO_ROOT / "data" / "connect_web_filters"
 SIDECAR_FILES = (
     "exclude_stems.json",      # Agent 分類の非ナレッジ除外（タイトル stem のみ）
     "exclude_source_keys.json",  # 不変な source_type:external_id による除外
     "dedup_drop_map.json",     # 別形式/旧版の非正本折り畳み（stem → 正本 stem）
     "weird_rename_high.json",  # 不明瞭命名 → 推奨タイトル（表示のみ・可逆）
+    "client_industry.json",   # 監査済み企業業種（資料/商品側のAI分類より優先）
     "inter-var.b64",           # InterVar フォント（woff2 base64）
 )
 OPTIONAL_SIDECAR_FILES = ("tag_alias.json", "client_alias.json")
@@ -647,6 +654,7 @@ TITLE_OVERRIDE: dict[str, str] = {}  # weird_rename_high.json（portable stem ke
 # サイドカー削除で元挙動へ戻る可逆設計のため、名寄せは「載っている値だけ正本へ寄せる」。
 TAG_ALIAS: dict = {}       # {"industry":{variant:canonical,...},"solution":{...}}
 CLIENT_ALIAS: dict = {}    # client_alias.json の "client": {variant:canonical,...}
+CLIENT_INDUSTRY_BY_IDENTITY: dict = {}  # client_industry.json の監査済み企業業種
 
 
 def _canon_industry(v):
@@ -2148,6 +2156,21 @@ def _load_alias_sidecar(name: str, subkey: str | None = None) -> dict:
     return data
 
 
+def _load_required_string_map(name: str, subkey: str) -> dict[str, str]:
+    """必須property sidecarを厳格に読み、破損時は空fallbackせず停止する。"""
+    try:
+        data = json.loads(_read_sidecar(name))
+        values = data[subkey]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        _die(f"必須サイドカー {name} の形式が不正です")
+    if not isinstance(values, dict) or not all(
+        isinstance(key, str) and key.strip() and isinstance(value, str) and value.strip()
+        for key, value in values.items()
+    ):
+        _die(f"必須サイドカー {name} の形式が不正です")
+    return values
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -2364,7 +2387,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     global VAULT, CLIENTS, DOCS, REPORTS, EXCL, EXCL_N, EXCL_SOURCE_KEYS
     global SOURCE_EXCLUDED_STEMS, DOC_DROP, TITLE_OVERRIDE, CHUNK_DROP
-    global TAG_ALIAS, CLIENT_ALIAS, ACTIVE_MANAGED_PATHS, EXPORT_MANIFEST_SHA256
+    global TAG_ALIAS, CLIENT_ALIAS, CLIENT_INDUSTRY_BY_IDENTITY
+    global ACTIVE_MANAGED_PATHS, EXPORT_MANIFEST_SHA256
     global BUILD_INPUTS_SHA256, SIDECAR_SNAPSHOTS
 
     args = _parse_args(argv)
@@ -2405,6 +2429,12 @@ def main(argv: list[str] | None = None) -> int:
     # --- 表示名寄せサイドカー（任意適用・可逆）: 欠落は空 dict＝素通り（必須サイドカーと扱いを分ける） ---
     TAG_ALIAS = _load_alias_sidecar("tag_alias.json")
     CLIENT_ALIAS = _load_alias_sidecar("client_alias.json", "client")
+    try:
+        CLIENT_INDUSTRY_BY_IDENTITY = identity_value_map(
+            _load_required_string_map("client_industry.json", "industry")
+        )
+    except ValueError:
+        _die("必須サイドカー client_industry.json の企業名が衝突しています")
 
     # --- 以下、元スクリプト L149-332 のパイプラインをそのまま実行（ロジック不変） ---
     clients = []
@@ -2421,20 +2451,23 @@ def main(argv: list[str] | None = None) -> int:
         _cname = _canon_client(_raw_cname)  # 取引先名寄せ: 正本化してから norm()/dedup へ
         _client_body = body_of(t)
         _tl_raw = _parse_fb_events_raw(_client_body)
+        _generated_client = fm.get("generated_by") == _EXPORT_VAULT_GENERATOR
         clients.append({
             "stem": f.stem, "name": _cname, "cnorm": norm(_cname),
             "industry": _canon_industry(fm.get("industry", "")), "phase": fm.get("deal_phase", ""),
             "bant": fm.get("bant_score", ""), "bantg": bant_short(fm.get("bant_score", "")),
             "fb": to_int(fm.get("fb_count", "0")), "doc": to_int(fm.get("doc_count", "0")),
             "md": client_md(t), "tl": _sort_fb_events(dedup_fb_events(list(_tl_raw))),
+            "_industry_source": fm.get("industry_source", "") if _generated_client else "legacy",
             "_raw_name": _raw_cname, "_tl_raw": _tl_raw, "_wl": parse_links(_client_body),
         })
 
-    # 取引先名寄せ(Tier1): 正規化が一致する表記ゆれ(法人格/敬称/空白/中黒)を統合。
+    # 取引先名寄せ(Tier1): ownership判定と同じ保守的identityで、名前境界にある
+    # 法人格/敬称と空白/中黒だけを吸収する。語中の「さま」等は削らない。
     # 既存bookmark用stemは従来代表のまま保ち、表示property/リンク/FBだけを合流する（元Vault不変）。
     _cgroups = defaultdict(list)
     for _c in clients:
-        _cgroups[norm(_c["name"])].append(_c)
+        _cgroups[client_identity_key(_c["name"]) or norm(_c["name"])].append(_c)
     clients = []
     _explicit_canonical_names = {
         unicodedata.normalize("NFC", value) for value in CLIENT_ALIAS.values()
@@ -2455,7 +2488,7 @@ def main(argv: list[str] | None = None) -> int:
             _canon,
         )
         if _property_source is not _canon:
-            for _field in ("md", "industry", "phase", "bant", "bantg"):
+            for _field in ("md", "industry", "phase", "bant", "bantg", "_industry_source"):
                 _canon[_field] = _property_source[_field]
         _raw_fb_count = sum(c["fb"] for c in _grp)
         _member_raw_tl = [c.pop("_tl_raw", []) for c in _grp]
@@ -2490,6 +2523,24 @@ def main(argv: list[str] | None = None) -> int:
                 _merged_wl.setdefault(_target_key, (_target, _ctx))
         _canon["_wl"] = list(_merged_wl.values())
         _canon["_is_multi_client_group"] = len(_grp) > 1
+        _canon["_identity_variants"] = sorted(
+            {
+                value
+                for _member in _grp
+                for value in (
+                    _member["name"],
+                    _member["stem"],
+                    _member.get("_raw_name", ""),
+                )
+                if value
+            }
+        )
+        _canon["_industry_fallbacks"] = [
+            _member["industry"]
+            for _member in _grp
+            if _member["industry"]
+            and _member.get("_industry_source") in {"master", "exact_consensus", "legacy"}
+        ]
         _canon.pop("_raw_name", None)
         # unique化してから日付順・30件cap（cap前の件数をfb propertyへ使う）。
         _canon["tl"] = _sort_fb_events(_unique_tl)
@@ -2578,12 +2629,16 @@ def main(argv: list[str] | None = None) -> int:
     _c_stems = {c["stem"] for c in clients}
     _c_norm = {}
     for _client in clients:
-        _c_norm[norm(_client["name"])] = _client["stem"]
-        _c_norm.setdefault(norm(_client["stem"]), _client["stem"])
+        for _variant in _client.pop("_identity_variants", []):
+            _variant_key = client_identity_key(_variant)
+            if _variant_key:
+                _c_norm[_variant_key] = _client["stem"]
+        _c_norm[client_identity_key(_client["name"])] = _client["stem"]
+        _c_norm.setdefault(client_identity_key(_client["stem"]), _client["stem"])
     for _variant, _canonical_name in CLIENT_ALIAS.items():
-        _canonical_stem = _c_norm.get(norm(_canonical_name))
+        _canonical_stem = _c_norm.get(client_identity_key(_canonical_name))
         if _canonical_stem:
-            _c_norm[norm(_variant)] = _canonical_stem
+            _c_norm[client_identity_key(_variant)] = _canonical_stem
     _d_stems = {d["stem"] for d in docs}
     _d_portable = {}
     for _stem in sorted(_d_stems):
@@ -2604,7 +2659,7 @@ def main(argv: list[str] | None = None) -> int:
             stem = target[5:]
             return stem if stem in _d_stems else _d_portable.get(_portable_path_key(stem))
         # bare targetがclient/docの両方に一致する場合は、従来resolverどおりclient優先。
-        if target in _c_stems or norm(target) in _c_norm:
+        if target in _c_stems or client_identity_key(target) in _c_norm:
             return None
         return target if target in _d_stems else _d_portable.get(_portable_path_key(target))
 
@@ -2646,9 +2701,17 @@ def main(argv: list[str] | None = None) -> int:
                 _project_industries.append(_linked_doc["industry"])
         _client["ds"] = _safe_doc_stems
         _client["doc"] = len(_safe_doc_stems)
-        _owner_industries = _primary_industries or _project_industries
-        if _owner_industries:
-            _client["industry"] = Counter(_owner_industries).most_common(1)[0][0]
+        # company業種は資料の多数決にしない。監査済みmasterを優先し、visibleな
+        # exact-owner資料同士が食い違えば空欄へ倒す。visible資料が無い場合だけ、
+        # exporterが同じ規則で確定したfrontmatter値を保持する。
+        if not _primary_industries and not _project_industries:
+            _primary_industries = _client.get("_industry_fallbacks", [])
+        _client["industry"] = resolve_client_industry(
+            _client["name"],
+            _primary_industries,
+            _project_industries,
+            CLIENT_INDUSTRY_BY_IDENTITY,
+        )
 
     # 最終接点 = max(最終FB日, 安全な活動資料の最新更新日)。タグ/JS共通の確定値。
     for _c in clients:
@@ -2740,14 +2803,14 @@ def main(argv: list[str] | None = None) -> int:
             s = tgt[8:]
             if s in _c_stems:
                 return "c:" + s
-            st = _c_norm.get(norm(s))
+            st = _c_norm.get(client_identity_key(s))
             return "c:" + st if st else None
         if tgt.startswith("docs/"):
             stem = _resolve_visible_doc_stem(tgt)
             return "d:" + stem if stem else None
         if tgt in _c_stems:
             return "c:" + tgt
-        st = _c_norm.get(norm(tgt))
+        st = _c_norm.get(client_identity_key(tgt))
         if st:
             return "c:" + st
         resolved_doc = _resolve_visible_doc_stem(tgt)
@@ -2804,6 +2867,8 @@ def main(argv: list[str] | None = None) -> int:
             _n.pop("_wl", None)
             _n.pop("_primary_owner_key", None)
             _n.pop("_project_owner_key", None)
+            _n.pop("_industry_source", None)
+            _n.pop("_industry_fallbacks", None)
 
     payload = {"manifest_sha256": EXPORT_MANIFEST_SHA256,
                "build_inputs_sha256": BUILD_INPUTS_SHA256,

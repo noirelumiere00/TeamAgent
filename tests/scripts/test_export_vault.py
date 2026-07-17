@@ -407,8 +407,8 @@ def test_render_client_note_plain_fb_unescaped_noop() -> None:
     assert "\\" not in note.split("## 営業FB時系列")[1]  # FB 本文側にバックスラッシュ混入なし
 
 
-def test_render_client_industry_prefers_primary_over_project_and_title_matches() -> None:
-    """主担当資料を案件一致・title-only関連資料より優先してclient業界を決める。"""
+def test_render_client_industry_uses_audited_override_over_conflicting_docs() -> None:
+    """監査済み企業業界を資料/商品側の競合分類より優先する。"""
     docs = [
         _doc(
             "NewsTV御中 ポート株式会社御中 ご提案資料",
@@ -436,6 +436,29 @@ def test_render_client_industry_prefers_primary_over_project_and_title_matches()
         "ポート株式会社", [], docs, ["docs/project", "docs/row44", "docs/title-only"]
     )
     assert 'industry: "人材"' in note
+    assert 'industry_source: "master"' in note
+
+
+def test_render_client_industry_is_blank_when_exact_owner_sources_disagree() -> None:
+    docs = [
+        _doc(
+            "主担当資料",
+            client_name="架空会社",
+            cls_project="架空会社",
+            cls_industry="食品",
+        ),
+        _doc(
+            "案件資料",
+            client_name=None,
+            cls_project="架空会社",
+            cls_industry="小売",
+        ),
+    ]
+
+    note = render_client_note("架空会社", [], docs, ["docs/primary", "docs/project"])
+
+    assert 'industry: ""' in note
+    assert 'industry_source: "conflict"' in note
 
 
 # ---------------- plan_vault ----------------

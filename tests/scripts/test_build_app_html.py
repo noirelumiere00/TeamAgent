@@ -25,6 +25,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 import unicodedata
 from datetime import date
@@ -42,6 +43,20 @@ assert _spec is not None and _spec.loader is not None
 _mod = importlib.util.module_from_spec(_spec)
 sys.modules["build_app_html"] = _mod
 _spec.loader.exec_module(_mod)
+
+
+def test_script_help_runs_without_installed_package(tmp_path: Path) -> None:
+    """文書どおりの直接実行でも、repo内srcから共通名寄せ処理を読み込める。"""
+    result = subprocess.run(
+        [sys.executable, "-I", str(_ROOT / "scripts" / "build_app_html.py"), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--vault" in result.stdout
 
 
 # ---------------- fixtures ----------------
@@ -62,6 +77,9 @@ def sidecars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         json.dumps({"drop": {}, "keep_canonical": []}, ensure_ascii=False), encoding="utf-8"
     )
     (d / "weird_rename_high.json").write_text("{}", encoding="utf-8")
+    (d / "client_industry.json").write_text(
+        json.dumps({"_note": "test", "industry": {}}), encoding="utf-8"
+    )
     (d / "inter-var.b64").write_text("QUFBQQ==", encoding="utf-8")  # ダミー base64
     monkeypatch.setattr(_mod, "SIDECAR_DIR", d)
     return d
@@ -636,6 +654,16 @@ def test_source_key_sidecar_missing_exits_1(
         _run(vault, tmp_path / "o.html")
     assert ei.value.code == 1
     assert "サイドカー欠落: exclude_source_keys.json" in capsys.readouterr().err
+
+
+def test_client_industry_sidecar_missing_exits_1(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (sidecars / "client_industry.json").unlink()
+    with pytest.raises(SystemExit) as exc_info:
+        _run(vault, tmp_path / "o.html")
+    assert exc_info.value.code == 1
+    assert "サイドカー欠落: client_industry.json" in capsys.readouterr().err
 
 
 def test_repository_source_exclusions_preserve_legacy_stems() -> None:
@@ -2087,7 +2115,11 @@ def test_journey_flow_repairs_homework_and_back(ux_html: str) -> None:
 
 
 def _write_aliases(
-    sidecar_dir: Path, *, tag: dict | None = None, client: dict | None = None
+    sidecar_dir: Path,
+    *,
+    tag: dict | None = None,
+    client: dict | None = None,
+    client_industry: dict[str, str] | None = None,
 ) -> None:
     """名寄せサイドカーを SIDECAR_DIR（monkeypatch 済 tmp）へ置く。既定 fixture には無い＝素通り。"""
     if tag is not None:
@@ -2097,6 +2129,14 @@ def _write_aliases(
     if client is not None:
         (sidecar_dir / "client_alias.json").write_text(
             json.dumps(client, ensure_ascii=False), encoding="utf-8"
+        )
+    if client_industry is not None:
+        (sidecar_dir / "client_industry.json").write_text(
+            json.dumps(
+                {"_note": "test", "industry": client_industry},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
         )
 
 
@@ -2245,6 +2285,7 @@ def test_port_activity_uses_explicit_link_and_db_primary_or_project_identity(
         sidecars,
         tag={"industry": {"人材": "人材派遣"}, "solution": {}},
         client={"client": {"ポート": "ポート株式会社"}},
+        client_industry={"ポート株式会社": "人材"},
     )
     _write_doc(
         vault,
@@ -2297,7 +2338,7 @@ def test_port_activity_uses_explicit_link_and_db_primary_or_project_identity(
     assert port["ds"] == ["port-row44", "port-drive-proposal"]
     assert port["doc"] == 2
     assert port["last"] == "2025-10-02"
-    assert port["industry"] == "人材派遣"  # primary row44をproject-only資料より優先
+    assert port["industry"] == "人材"  # 監査済み企業masterは資料側tag aliasを通さない
     assert _doc_field(html, "port-drive-proposal", "client") == "ポート株式会社"
     assert _doc_field(html, "report-title-only", "client") == ""
     # title-only関連資料は本文/graph linkには残るが、活動資料へは入らない。
@@ -2388,7 +2429,7 @@ def test_client_alias_keeps_legacy_stem_but_uses_explicit_target_properties(
 def test_client_alias_recomputes_conflicting_properties_from_merged_sources(
     sidecars: Path, vault: Path, tmp_path: Path
 ) -> None:
-    """multi groupのphase/BANTは最新FB、industryはvisible linked docsの最頻値。"""
+    """multi groupのphase/BANTは最新FB、industry競合は多数決せず空欄へ倒す。"""
     _write_aliases(sidecars, client={"client": {"ポート": "ポート株式会社"}})
     doc_industries = {
         "Port金融資料": "金融",
@@ -2454,7 +2495,7 @@ def test_client_alias_recomputes_conflicting_properties_from_merged_sources(
     assert port["phase"] == "最終交渉"
     assert port["bant"] == "A（最新）"
     assert port["bantg"] == "A"
-    assert port["industry"] == "小売"
+    assert port["industry"] == ""
     assert port["doc"] == 3
     assert port["tl"][0]["d"] == "2026-06-20"
 
@@ -2614,6 +2655,46 @@ def test_client_alias_applied_to_doc_client_links_to_canonical(
     assert '"client": "SBI証券"' not in html
 
 
+def test_client_identity_grouping_keeps_middle_honorific_and_merges_legal_prefix(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    _write_aliases(
+        sidecars,
+        client={"client": {"泉屋博古館": "公益財団法人泉屋博古館"}},
+    )
+    for name in ("熱さまシート", "熱シート", "公益財団法人泉屋博古館", "泉屋博古館"):
+        (vault / "clients" / f"{name}.md").write_text(
+            f'---\nclient: "{name}"\nindustry: ""\ndeal_phase: ""\nbant_score: ""\n'
+            f"fb_count: 0\ndoc_count: 0\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    names = [client["name"] for client in payload["clients"]]
+
+    assert "熱さまシート" in names
+    assert "熱シート" in names
+    assert names.count("公益財団法人泉屋博古館") == 1
+    assert "泉屋博古館" not in names
+
+
+def test_repository_aliases_do_not_merge_sbi_subsidiaries() -> None:
+    aliases = json.loads(
+        (_ROOT / "data" / "connect_web_filters" / "client_alias.json").read_text(
+            encoding="utf-8"
+        )
+    )["client"]
+
+    assert aliases["SBI SECURITIES"] == "SBI証券"
+    assert "SBI証券" not in aliases
+    assert "SBI生命保険" not in aliases
+    assert aliases["Ine"] == "i-ne"
+    assert aliases["I-ne（SKN REMED / スキンリメド）"] == "i-ne"
+    assert aliases["泉屋博古館"] == "公益財団法人泉屋博古館"
+
+
 def test_alias_sidecars_absent_pass_through(sidecars: Path, vault: Path, tmp_path: Path) -> None:
     """名寄せサイドカー欠落（既定 fixture）は素通り＝variant 値がそのまま残る（可逆・fail-loud にしない）。"""
     assert not (sidecars / "tag_alias.json").exists()
@@ -2658,6 +2739,39 @@ def test_alias_canonical_and_unmapped_values_unchanged(
     assert re.search(
         r'"name": "自治体X", "cnorm": "自治体x", "industry": "宇宙開発"', html
     )  # unmapped industry 不変
+
+
+def test_generated_client_industry_requires_auditable_source(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    path = vault / "clients" / "出光興産.md"
+    original = path.read_text(encoding="utf-8")
+    generated = original.replace(
+        'client: "出光興産"',
+        'generated_by: "scripts/export_vault.py"\nclient: "出光興産"',
+        1,
+    ).replace("- [[docs/提案書A]]", "")
+    path.write_text(generated, encoding="utf-8")
+
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [client] = [item for item in payload["clients"] if item["name"] == "出光興産"]
+
+    assert client["industry"] == ""  # generated noteの根拠不明な旧値は再利用しない
+
+    path.write_text(
+        generated.replace(
+            'industry: "エネルギー"',
+            'industry: "エネルギー"\nindustry_source: "exact_consensus"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    assert _run(vault, out) == 0
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [client] = [item for item in payload["clients"] if item["name"] == "出光興産"]
+    assert client["industry"] == "エネルギー"
 
 
 # ---------------- まとめる軸（clustering axis）: 参照Map方式（ノード加算ゼロ） + グラフ JS 配線 ----------------

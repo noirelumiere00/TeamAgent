@@ -47,6 +47,9 @@ def _write_sidecars(directory: Path) -> None:
         json.dumps({"drop": {}, "keep_canonical": []}), encoding="utf-8"
     )
     (directory / "weird_rename_high.json").write_text("{}", encoding="utf-8")
+    (directory / "client_industry.json").write_text(
+        json.dumps({"_note": "test", "industry": {}}), encoding="utf-8"
+    )
     (directory / "tag_alias.json").write_text(
         json.dumps({"_note": "test", "industry": {}, "solution": {}}),
         encoding="utf-8",
@@ -897,11 +900,11 @@ def test_activity_dates_and_explicit_client_links_are_enforced(
         assert isinstance(client, dict) and isinstance(doc, dict)
         stem = doc["stem"]
         assert isinstance(stem, str)
-        doc["modified"] = ""
+        doc["modified"] = "2026-99-99"
         doc["_primary_owner_key"] = "must-not-be-public"
         client["ds"] = [stem, stem, "missing-doc"]
         client["doc"] = 1
-        client["tl"] = [{"d": ""}]
+        client["tl"] = [{"d": "2026-02-30"}]
         client["last"] = "2099-01-01"
         payload["links"] = []
 
@@ -918,6 +921,91 @@ def test_activity_dates_and_explicit_client_links_are_enforced(
     assert violations["html_client_activity_not_explicit"] == 3
     assert violations["html_client_doc_count_mismatch"] == 1
     assert violations["html_client_last_contact_mismatch"] == 1
+
+
+def test_activity_owner_must_match_vault_primary_or_project(
+    artifacts: tuple[Path, Path, Path, str],
+) -> None:
+    vault, html, sidecars, _ = artifacts
+    note = vault / "docs" / "公開資料-a1b2c3d4.md"
+    note.write_text(
+        note.read_text(encoding="utf-8").replace(
+            'client: "顧客会社"',
+            'client: "別会社"\nproject: "別案件"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    _write_manifest(vault)
+    assert build.main(["--vault", str(vault), "--out", str(html)]) == 0
+
+    def forge_owned_activity(payload: dict[str, object]) -> None:
+        clients = payload["clients"]
+        docs = payload["docs"]
+        assert isinstance(clients, list) and isinstance(docs, list)
+        client = clients[0]
+        doc = docs[0]
+        assert isinstance(client, dict) and isinstance(doc, dict)
+        stem = doc["stem"]
+        modified = doc["modified"]
+        assert isinstance(stem, str) and isinstance(modified, str)
+        client["ds"] = [stem]
+        client["doc"] = 1
+        client["last"] = modified
+
+    _rewrite_html_payload(html, forge_owned_activity)
+    result = qa.run_qa(qa.QAConfig(vault=vault, html=html, sidecar_dir=sidecars))
+    violations = cast_dict(result["violations"])
+
+    assert violations["html_client_activity_owner_mismatch"] == 1
+    assert "html_client_activity_not_explicit" not in violations
+    assert "html_client_doc_count_mismatch" not in violations
+    assert "html_client_last_contact_mismatch" not in violations
+
+
+def test_client_industry_master_is_enforced_in_public_payload(
+    artifacts: tuple[Path, Path, Path, str],
+) -> None:
+    vault, html, sidecars, _ = artifacts
+    (sidecars / "client_industry.json").write_text(
+        json.dumps(
+            {"_note": "audited", "industry": {"顧客会社株式会社": "監査済み業界"}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    assert build.main(["--vault", str(vault), "--out", str(html)]) == 0
+
+    def corrupt_client_industry(payload: dict[str, object]) -> None:
+        clients = payload["clients"]
+        assert isinstance(clients, list) and isinstance(clients[0], dict)
+        clients[0]["industry"] = "資料商品の業界"
+
+    _rewrite_html_payload(html, corrupt_client_industry)
+    result = qa.run_qa(qa.QAConfig(vault=vault, html=html, sidecar_dir=sidecars))
+
+    assert cast_dict(result["violations"])["html_client_industry_override_mismatch"] == 1
+
+
+def test_generated_client_industry_requires_source_provenance(
+    artifacts: tuple[Path, Path, Path, str],
+) -> None:
+    vault, html, sidecars, _ = artifacts
+    client = vault / "clients" / "顧客会社.md"
+    client.write_text(
+        client.read_text(encoding="utf-8").replace(
+            'client: "顧客会社"',
+            'generated_by: "scripts/export_vault.py"\nclient: "顧客会社"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    _write_manifest(vault)
+    assert build.main(["--vault", str(vault), "--out", str(html)]) == 0
+
+    result = qa.run_qa(qa.QAConfig(vault=vault, html=html, sidecar_dir=sidecars))
+
+    assert cast_dict(result["violations"])["html_client_industry_source_invalid"] == 1
 
 
 def test_graph_link_endpoint_bounds_reject_runtime_breakage(
