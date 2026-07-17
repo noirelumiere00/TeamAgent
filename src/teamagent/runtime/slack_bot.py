@@ -2713,7 +2713,8 @@ def _maybe_start_video_approval_poller(app: AsyncApp, loop: asyncio.AbstractEven
     store = ProcessedStore(
         os.environ.get(
             "VIDEO_APPROVAL_STATE_PATH",
-            "/tmp/teamagent/state/video_approval_processed.json",
+            # Fargate task-scoped /tmp; the container runs as non-root.
+            "/tmp/teamagent/state/video_approval_processed.json",  # nosec B108
         )
     )
     interval = int(os.environ.get("VIDEO_APPROVAL_POLL_INTERVAL_SEC", "300"))

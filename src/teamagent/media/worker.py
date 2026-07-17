@@ -250,7 +250,13 @@ def run_job(
 ) -> MediaJobResult:
     """jobをbounded request dirで実行し、local/input cleanupを必ず行う。"""
 
-    root = temp_root or Path(os.environ.get("MEDIA_JOB_TMP_ROOT", "/tmp/teamagent/jobs"))
+    root = temp_root or Path(
+        os.environ.get(
+            "MEDIA_JOB_TMP_ROOT",
+            # Fargate task-scoped /tmp; each job still uses TemporaryDirectory.
+            "/tmp/teamagent/jobs",  # nosec B108
+        )
+    )
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     backend.assert_request_scope(request)
     try:
@@ -307,7 +313,8 @@ def run_job(
 
 def main() -> int:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    runtime_root = Path("/tmp/teamagent")
+    # Fargate task-scoped /tmp, owned by the non-root runtime user.
+    runtime_root = Path("/tmp/teamagent")  # nosec B108
     for name in _RUNTIME_DIRECTORIES:
         (runtime_root / name).mkdir(mode=0o700, parents=True, exist_ok=True)
     body = os.environ.get("MEDIA_JOB_JSON") or os.environ.get("TIKTOK_JOB_JSON", "")
