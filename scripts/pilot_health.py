@@ -4,9 +4,13 @@
 本番 SLI の一次ソースは CloudWatch Logs `/teamagent/dev/teamagent-mcp` の構造化ログ。
 
 MCP は `STRUCTLOG_FORMAT=json`（observability/logging_config.py）で **JSON ログ**を出す。
-よって `event` / `latency_ms` / `cost_usd` / `cache_read_input_tokens` / `level` は
-Logs Insights のトップレベルフィールドとして自動抽出され、regex parse なしで集計できる。
+よって `event` / `tool` / `request_id` / `latency_ms` / `tool_cost_usd` 等は Logs Insights
+のトップレベルフィールドとして自動抽出され、regex parse なしで集計できる。
 （同じ JSON 化で terraform の metric filter `{ $.cost_usd = * }` 等も発火するようになる）
+
+検索 SLI は、同じ ``request_id`` の ``bedrock_converse`` と ``mcp_tool_usage`` を集約して
+``tool="search"`` に帰属できた実行だけを数える。Bedrock はメール要約など複数ツールが共有する
+ため、``bedrock_converse`` 全件を検索として数えてはいけない。
 
 1週間 P1 パイロットの日次ゲート確認（p95≤15s / エラー<1% / コスト許容）の一次ソースに使う。
 
@@ -45,11 +49,8 @@ SLO_SEARCH_COST_P50_USD = 0.02  # 1 検索コスト p50 ≤ $0.02
 DEFAULT_LOG_GROUP = "/teamagent/dev/teamagent-mcp"
 DEFAULT_REGION = "ap-northeast-1"
 
-# 検索 L2 合成（中量レイテンシ/コストの一次イベント）。検索 1 回 ≒ bedrock_converse 1 回。
-SEARCH_EVENT = "bedrock_converse"
-
 # Logs Insights クエリ（JSON ログ向け＝STRUCTLOG_FORMAT=json 後）。
-# JSON ログでは `event`/`latency_ms`/`cost_usd`/`cache_read_input_tokens`/`level` が
+# JSON ログでは `event`/`tool`/`request_id`/`latency_ms` 等が
 # トップレベルフィールドとして自動抽出されるので、regex parse なしで集計できる。
 # 1) イベント別 latency 分布
 _Q_LATENCY = (
@@ -57,15 +58,25 @@ _Q_LATENCY = (
     "| stats count(*) as n, pct(latency_ms,50) as p50, pct(latency_ms,95) as p95, "
     "pct(latency_ms,99) as p99, max(latency_ms) as max_ms by event"
 )
-# 2) コスト & キャッシュ（bedrock_converse 限定）
-_Q_COST_CACHE = (
-    'filter event="bedrock_converse" '
-    "| stats count(*) as n, sum(cost_usd) as cost_sum, pct(cost_usd,50) as cost_p50, "
-    "sum(cache_read_input_tokens) as cache_read_sum, "
-    "sum(cache_read_input_tokens > 0) as cache_hit_n"
+# 2) 検索の latency / 総コスト / Bedrock cache（request_id で tool に帰属）
+#
+# mcp_tool_usage は成功した tool 全体の latency / cost、bedrock_converse は cache usage を持つ。
+# 先に request_id 単位へ畳んでから tool="search" を選ぶことで、mail_summary 等が同じ
+# BedrockClient を使っても検索 SLI へ混入しない。検索失敗は _Q_ERRORS で別に数える。
+_Q_SEARCH = (
+    'filter ispresent(request_id) and (event="bedrock_converse" or event="mcp_tool_usage") '
+    "| stats latest(tool) as attributed_tool, max(tool_cost_usd) as attributed_cost, "
+    "max(latency_ms) as attributed_latency_ms, "
+    "sum(cache_read_input_tokens) as request_cache_read, "
+    "sum(cache_read_input_tokens > 0) as request_cache_hits by request_id "
+    '| filter attributed_tool="search" '
+    "| stats count(*) as n, sum(attributed_cost) as cost_sum, "
+    "pct(attributed_cost,50) as cost_p50, pct(attributed_latency_ms,95) as p95, "
+    "sum(request_cache_read) as cache_read_sum, "
+    "sum(request_cache_hits > 0) as cache_hit_n"
 )
-# 3) エラー件数（level=error or *_failed イベント）
-_Q_ERRORS = 'filter level="error" or event like /_failed/ | stats count(*) as n'
+# 3) 検索実行エラー件数。別ツールや基盤の unrelated error を混ぜない。
+_Q_ERRORS = 'filter event="mcp_tool_error" and tool="search" | stats count(*) as n'
 
 
 @dataclass
@@ -76,6 +87,7 @@ class Readout:
     latency_by_event: dict[str, dict[str, float]] = field(default_factory=dict)
     search_count: int = 0
     error_count: int = 0
+    search_latency_p95_ms: float = 0.0
     cost_sum_usd: float = 0.0
     search_cost_p50_usd: float = 0.0
     cache_hit_count: int = 0
@@ -92,7 +104,7 @@ class Readout:
 
     @property
     def search_p95_ms(self) -> float:
-        return self.latency_by_event.get(SEARCH_EVENT, {}).get("p95", 0.0)
+        return self.search_latency_p95_ms
 
 
 # -----------------------------------------------------------
@@ -114,7 +126,7 @@ def build_readout(
     *,
     window_label: str,
     latency_results: list[list[dict[str, str]]],
-    cost_results: list[list[dict[str, str]]],
+    search_results: list[list[dict[str, str]]],
     error_results: list[list[dict[str, str]]],
 ) -> Readout:
     """3 クエリの生 results から Readout を組み立てる（純関数）。"""
@@ -132,14 +144,15 @@ def build_readout(
             "max_ms": _f(d, "max_ms"),
         }
 
-    cost_rows = _rows_to_dicts(cost_results)
-    if cost_rows:
-        c = cost_rows[0]
-        r.search_count = int(_f(c, "n"))
-        r.cost_sum_usd = _f(c, "cost_sum")
-        r.search_cost_p50_usd = _f(c, "cost_p50")
-        r.cache_read_tokens_sum = int(_f(c, "cache_read_sum"))
-        r.cache_hit_count = int(_f(c, "cache_hit_n"))
+    search_rows = _rows_to_dicts(search_results)
+    if search_rows:
+        search = search_rows[0]
+        r.search_count = int(_f(search, "n"))
+        r.search_latency_p95_ms = _f(search, "p95")
+        r.cost_sum_usd = _f(search, "cost_sum")
+        r.search_cost_p50_usd = _f(search, "cost_p50")
+        r.cache_read_tokens_sum = int(_f(search, "cache_read_sum"))
+        r.cache_hit_count = int(_f(search, "cache_hit_n"))
 
     err_rows = _rows_to_dicts(error_results)
     if err_rows:
@@ -215,7 +228,7 @@ def render_text(r: Readout, verdicts: list[Verdict]) -> str:
     lines.append("")
     lines.append("-- cost / cache --")
     lines.append(
-        f"  search(bedrock_converse) n={r.search_count}  "
+        f"  search(mcp_tool_usage) n={r.search_count}  "
         f"cost_sum=${r.cost_sum_usd:.4f}  cost_p50=${r.search_cost_p50_usd:.4f}  "
         f"cache_hit_ratio={r.cache_hit_ratio * 100:.0f}% "
         f"(cache_read_tokens={r.cache_read_tokens_sum})"
@@ -254,12 +267,12 @@ def _run_query(client: Any, log_group: str, query: str, start_ts: int, end_ts: i
 def collect(log_group: str, region: str, start_ts: int, end_ts: int, label: str) -> Readout:
     client = boto3.client("logs", region_name=region)
     latency = _run_query(client, log_group, _Q_LATENCY, start_ts, end_ts)
-    cost = _run_query(client, log_group, _Q_COST_CACHE, start_ts, end_ts)
+    search = _run_query(client, log_group, _Q_SEARCH, start_ts, end_ts)
     errors = _run_query(client, log_group, _Q_ERRORS, start_ts, end_ts)
     return build_readout(
         window_label=label,
         latency_results=latency,
-        cost_results=cost,
+        search_results=search,
         error_results=errors,
     )
 
