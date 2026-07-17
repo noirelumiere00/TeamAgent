@@ -40,6 +40,7 @@ jobs:
             pydantic structlog psycopg pgvector \
             boto3 slack-sdk slack-bolt aiohttp httpx \
             anthropic \
+            'mcp>=1.28.1,<2' \
             fastapi uvicorn \
             'sentry-sdk[asyncio]>=2.18.0' \
             pyyaml pypdf python-pptx pillow python-docx openpyxl \
