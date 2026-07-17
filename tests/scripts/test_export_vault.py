@@ -761,6 +761,7 @@ def _pg_pattern_matches(pattern: str, value: str) -> bool:
         ("ポート株式会社 採用支援のご提案", "ポート", True),
         ("ポート キャリアパーク案件", "ポート", True),
         ("2026年（ポート株式会社）定例", "ポート", True),
+        ("20250919_ポート株式会社 採用支援", "ポート", True),
         ("【ポート】営業資料", "ポート", True),
         ("株式会社ポート 採用支援のご提案", "ポート", True),
         ("有限会社ポート", "ポート", True),
@@ -775,6 +776,9 @@ def _pg_pattern_matches(pattern: str, value: str) -> bool:
         ("annual report", "port", False),
         ("airport campaign", "port", False),
         ("other_port campaign", "port", False),
+        ("LINEプロモーション", "Ine", False),
+        ("GUIDELINE策定", "Ine", False),
+        ("Ine 新規案件", "Ine", True),
         # 左に句読点がある正式名は保持する。
         ("既存案件・ポート株式会社", "ポート", True),
     ],

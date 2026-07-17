@@ -897,6 +897,10 @@ _CLIENT_LEGAL_PREFIXES = (
     "農事組合法人",
 )
 _CLIENT_LEFT_BOUNDARY = rf"(^|[^{_CLIENT_WORD_CHARS}]|{'|'.join(_CLIENT_LEGAL_PREFIXES)})"
+_CLIENT_LEFT_BOUNDARY_JAPANESE = (
+    rf"(^|[^{_CLIENT_WORD_CHARS}]|_|{'|'.join(_CLIENT_LEGAL_PREFIXES)})"
+)
+_JAPANESE_CLIENT_RE = re.compile(r"[一-鿿々〆〇ぁ-ゖゝ-ゟァ-ヺーヽ-ヿｦ-ﾟ]")
 _PG_REGEX_META_RE = re.compile(r"([\\.^$|?*+()\[\]{}])")
 
 
@@ -911,7 +915,15 @@ def client_match_pattern(name: str) -> str:
     if not normalized:
         raise ValueError("client name must not be blank")
     literal = _PG_REGEX_META_RE.sub(r"\\\1", normalized)
-    return f"{_CLIENT_LEFT_BOUNDARY}{literal}"
+    # Drive/Sheets の実タイトルは ``20250919_ポート株式会社`` のように ``_`` を
+    # 区切りへ使う。日本語名に限って左 ``_`` を許可し、ASCII名の ``other_port`` は
+    # 識別子途中として引き続き拒否する。
+    boundary = (
+        _CLIENT_LEFT_BOUNDARY_JAPANESE
+        if _JAPANESE_CLIENT_RE.search(normalized)
+        else _CLIENT_LEFT_BOUNDARY
+    )
+    return f"{boundary}{literal}"
 
 
 _CLIENTS_SQL = f"""

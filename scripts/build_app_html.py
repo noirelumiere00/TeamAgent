@@ -47,7 +47,7 @@ import json
 import re
 import sys
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -247,8 +247,8 @@ def _sort_fb_events(events):
     return events[:FB_MAX_EVENTS]
 
 
-def parse_fb_events(body: str) -> list[dict]:
-    """クライアント md 本文の営業FB時系列をイベント列にパースする（fail-open）。
+def _parse_fb_events_raw(body: str) -> list[dict]:
+    """クライアント md 本文の営業FB時系列を未dedup・未capでパースする（fail-open）。
 
     見出し `### ---- <ソース名> <slack ts epoch|row N>` で区切り、
     各 FB の `- フェーズ:` 等のフィールド行と日付（`> [YYYY-MM-DD HH:MM]` 行
@@ -301,9 +301,14 @@ def parse_fb_events(body: str) -> list[dict]:
                 events.append(ev)
             except Exception:  # 個別 FB の破損は握り潰して次へ（fail-open）
                 continue
-        return _sort_fb_events(dedup_fb_events(events))
+        return events
     except Exception:  # タイムラインはベストエフォート（このパースで build を止めない）
         return []
+
+
+def parse_fb_events(body: str) -> list[dict]:
+    """営業FBをパースし、重複排除・日付降順・表示件数capを適用する。"""
+    return _sort_fb_events(dedup_fb_events(_parse_fb_events_raw(body)))
 
 
 # === タグ第1弾: 資料タグ4軸（媒体/動画形式/形式/横断）＋クライアントタグ（温度感/宿題） ===
@@ -2381,27 +2386,89 @@ def main(argv: list[str] | None = None) -> int:
         fm = front(t)
         if _is_self_org(fm.get("client") or ""):
             continue
-        _cname = _canon_client(fm.get("client") or f.stem)  # 取引先名寄せ: 正本化してから norm()/dedup へ
+        _raw_cname = fm.get("client") or f.stem
+        _cname = _canon_client(_raw_cname)  # 取引先名寄せ: 正本化してから norm()/dedup へ
+        _client_body = body_of(t)
+        _tl_raw = _parse_fb_events_raw(_client_body)
         clients.append({
             "stem": f.stem, "name": _cname, "cnorm": norm(_cname),
             "industry": _canon_industry(fm.get("industry", "")), "phase": fm.get("deal_phase", ""),
             "bant": fm.get("bant_score", ""), "bantg": bant_short(fm.get("bant_score", "")),
             "fb": to_int(fm.get("fb_count", "0")), "doc": to_int(fm.get("doc_count", "0")),
-            "md": client_md(t), "tl": parse_fb_events(body_of(t)),
-            "_wl": parse_links(body_of(t)),
+            "md": client_md(t), "tl": _sort_fb_events(dedup_fb_events(list(_tl_raw))),
+            "_raw_name": _raw_cname, "_tl_raw": _tl_raw, "_wl": parse_links(_client_body),
         })
 
-    # 取引先名寄せ(Tier1): 正規化が一致する表記ゆれ(法人格/敬称/空白/中黒)を正本(最短名)へ統合。件数合算・元Vault不変
+    # 取引先名寄せ(Tier1): 正規化が一致する表記ゆれ(法人格/敬称/空白/中黒)を統合。
+    # 既存bookmark用stemは従来代表のまま保ち、表示property/リンク/FBだけを合流する（元Vault不変）。
     _cgroups = defaultdict(list)
     for _c in clients:
         _cgroups[norm(_c["name"])].append(_c)
     clients = []
+    _explicit_canonical_names = {
+        unicodedata.normalize("NFC", value) for value in CLIENT_ALIAS.values()
+    }
     for _grp in _cgroups.values():
+        # stem/idは従来ロジックを固定し、localStorage bookmarkの c:<stem> を壊さない。
         _canon = min(_grp, key=lambda c: (len(c["name"]), c["name"]))
-        _canon["fb"] = sum(c["fb"] for c in _grp)
-        _canon["doc"] = sum(c["doc"] for c in _grp)
-        # 施策タイムライン: グループ全員の FB を結合 → dedup → 日付降順 → 30件cap
-        _canon["tl"] = _sort_fb_events(dedup_fb_events([ev for c in _grp for ev in c["tl"]]))
+        # explicit aliasのcanonical target noteが実在する場合、stemは変えずに
+        # md/industry/phase/BANTのみ正式noteをfallback sourceにする。
+        _property_source = next(
+            (
+                c
+                for c in _grp
+                if unicodedata.normalize("NFC", c["name"]) in _explicit_canonical_names
+                and unicodedata.normalize("NFC", c["_raw_name"])
+                == unicodedata.normalize("NFC", c["name"])
+            ),
+            _canon,
+        )
+        if _property_source is not _canon:
+            for _field in ("md", "industry", "phase", "bant", "bantg"):
+                _canon[_field] = _property_source[_field]
+        _raw_fb_count = sum(c["fb"] for c in _grp)
+        _member_raw_tl = [c.pop("_tl_raw", []) for c in _grp]
+        _flat_tl = [event for events in _member_raw_tl for event in events]
+        _unique_tl = dedup_fb_events(_flat_tl)
+        # 同一note内のSlack+Sheets二重登録は元fb_countの尺度として維持し、variantを跨ぐ
+        # コピーだけ減算する。key別に「全member合計 - 1 member内の最大多重度」を取ると、
+        # 各note raw2×2 variantsは overlap2 となり、4→2へ正しく戻る。空keyは同定不能。
+        _key_total: Counter[str] = Counter()
+        _key_member_max: Counter[str] = Counter()
+        for _events in _member_raw_tl:
+            _member_counts = Counter(filter(None, (_fb_dedup_key(event) for event in _events)))
+            _key_total.update(_member_counts)
+            for _key, _count in _member_counts.items():
+                _key_member_max[_key] = max(_key_member_max[_key], _count)
+        _cross_variant_overlap = sum(
+            _key_total[key] - _key_member_max[key] for key in _key_total
+        )
+        # frontmatter はparserが拾えない旧形式も含むためrawを基準にする。event無しはraw維持。
+        _canon["fb"] = (
+            max(len(_unique_tl), _raw_fb_count - _cross_variant_overlap)
+            if _flat_tl
+            else _raw_fb_count
+        )
+        # 全variantのwikilinkをtargetごと先勝ちで集合和する。正式noteを先に
+        # 読むため、同targetのcontextとindustry同数tieも決定的になる。
+        _merged_wl = {}
+        _members_for_union = [_property_source] + [c for c in _grp if c is not _property_source]
+        for _member in _members_for_union:
+            for _target, _ctx in _member.get("_wl", []):
+                _target_key = _portable_path_key(_target)
+                _merged_wl.setdefault(_target_key, (_target, _ctx))
+        _canon["_wl"] = list(_merged_wl.values())
+        _canon["_is_multi_client_group"] = len(_grp) > 1
+        _canon.pop("_raw_name", None)
+        # unique化してから日付順・30件cap（cap前の件数をfb propertyへ使う）。
+        _canon["tl"] = _sort_fb_events(_unique_tl)
+        if len(_grp) > 1 and _canon["tl"]:
+            # exporterの本来契約に合わせ、multi groupの商談propertyはmerged最新FBから復元。
+            # timelineが無い場合だけ、上で選んだ正式note/従来代表のfrontmatterを保つ。
+            _latest_event = _canon["tl"][0]
+            _canon["phase"] = _latest_event.get("ph", "")
+            _canon["bant"] = _latest_event.get("bant", "")
+            _canon["bantg"] = bant_short(_canon["bant"])
         # 最終FB日（日付降順ソート済なので先頭が最新。全件日付なしなら ""）
         _canon["lastfb"] = _canon["tl"][0]["d"] if _canon["tl"] else ""
         clients.append(_canon)
@@ -2461,6 +2528,62 @@ def main(argv: list[str] | None = None) -> int:
             "agency": agency_flag(_dbody + "\n" + ex),
             "ex": ex, "md": _dbody, "_wl": parse_links(body_of(t)),
         })
+
+    # graphとpropertyが同じ優先順位で解決するため、client/doc lookupをここで共通化する。
+    _c_stems = {c["stem"] for c in clients}
+    _c_norm = {}
+    for _client in clients:
+        _c_norm[norm(_client["name"])] = _client["stem"]
+        _c_norm.setdefault(norm(_client["stem"]), _client["stem"])
+    for _variant, _canonical_name in CLIENT_ALIAS.items():
+        _canonical_stem = _c_norm.get(norm(_canonical_name))
+        if _canonical_stem:
+            _c_norm[norm(_variant)] = _canonical_stem
+    _d_stems = {d["stem"] for d in docs}
+    _d_portable = {}
+    for _stem in sorted(_d_stems):
+        _portable_key = _portable_path_key(_stem)
+        if _portable_key in _d_portable and _d_portable[_portable_key] != _stem:
+            _die(
+                "表示資料のstemがNFC/casefold後に衝突しています: "
+                f"{_d_portable[_portable_key]} / {_stem}"
+            )
+        _d_portable[_portable_key] = _stem
+    _docs_by_stem = {d["stem"]: d for d in docs}
+
+    def _resolve_visible_doc_stem(target: str) -> str | None:
+        """graph resolverと同じ優先順位で、visible docだけを解決する。"""
+        if target.startswith("clients/"):
+            return None
+        if target.startswith("docs/"):
+            stem = target[5:]
+            return stem if stem in _d_stems else _d_portable.get(_portable_path_key(stem))
+        # bare targetがclient/docの両方に一致する場合は、従来resolverどおりclient優先。
+        if target in _c_stems or norm(target) in _c_norm:
+            return None
+        return target if target in _d_stems else _d_portable.get(_portable_path_key(target))
+
+    # 全client cardの資料数を、最終的に公開される資料（active manifest適合かつ
+    # exclude/dedup後）へ解決できるoutgoing wikilinkのdistinct数で再計数する。
+    for _client in clients:
+        _linked_doc_stems = []
+        _seen_doc_stems = set()
+        for _target, _ctx in _client.get("_wl", []):
+            _resolved_stem = _resolve_visible_doc_stem(_target)
+            if _resolved_stem and _resolved_stem not in _seen_doc_stems:
+                _seen_doc_stems.add(_resolved_stem)
+                _linked_doc_stems.append(_resolved_stem)
+        _client["doc"] = len(_linked_doc_stems)
+        if _client.pop("_is_multi_client_group", False):
+            # exporterのindustry契約と同様に、merged visible linked docsの最頻値を使う。
+            # link順は正式note先頭なので、同数時のCounter先勝ちも決定的。
+            _linked_industries = [
+                _docs_by_stem[_stem]["industry"]
+                for _stem in _linked_doc_stems
+                if _docs_by_stem[_stem]["industry"]
+            ]
+            if _linked_industries:
+                _client["industry"] = Counter(_linked_industries).most_common(1)[0][0]
 
     # 最終接点 = max(最終FB日, 関連資料の最新更新日)。タグ用に事前計算（JS テーブル列 lastOf と同式）
     _lastdoc: dict[str, str] = {}
@@ -2525,8 +2648,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
     # まとめ軸(client基準=最終接点/doc基準=資料の種類・施策)の値はノードへ再埋め込みせず、
-    # 既に payload に載る DATA.clients/DATA.docs を stem で引く（JS grpVal・ペイロード増ゼロ・可逆）。
-    # phase/industry はノードの既存フィールドをそのまま流用。ノード数・エッジ・タグは baseline と完全不変。
+    # 既に payload に載る DATA.clients/DATA.docs を stem で引く（JS grpVal・軸用の追加埋め込みなし）。
+    # phase/industry はノードの既存フィールドをそのまま流用する。
     _cidx = {}
     for c in clients:
         i = _node("c:" + c["stem"], c["name"], "client", c["industry"], c["phase"], fb=c["fb"], doc=c["doc"])
@@ -2541,12 +2664,8 @@ def main(argv: list[str] | None = None) -> int:
             _link(di, _node("t:" + tg, "#" + tg, "tag"))
 
     # === 実wikilinkリンク網（バックリンク/アウトゴーイング/ローカルグラフ用） ===
-    _c_stems = {c["stem"] for c in clients}
-    _c_norm = {}
-    for c in clients:
-        _c_norm[norm(c["name"])] = c["stem"]
-        _c_norm.setdefault(norm(c["stem"]), c["stem"])
-    _d_stems = {d["stem"] for d in docs}      # 表示中(ナレッジ)のdocのみ = 非ナレッジ宛リンクは自動で落ちる
+    # 表示中(ナレッジ)のdocのみ = 非ナレッジ宛リンクは自動で落ちる。
+    # _c_stems/_c_norm/_d_stems/_d_portableはproperty再計数と共通。
     _r_stems = {r["stem"] for r in reports}
 
 
@@ -2558,15 +2677,16 @@ def main(argv: list[str] | None = None) -> int:
             st = _c_norm.get(norm(s))
             return "c:" + st if st else None
         if tgt.startswith("docs/"):
-            s = tgt[5:]
-            return "d:" + s if s in _d_stems else None
+            stem = _resolve_visible_doc_stem(tgt)
+            return "d:" + stem if stem else None
         if tgt in _c_stems:
             return "c:" + tgt
         st = _c_norm.get(norm(tgt))
         if st:
             return "c:" + st
-        if tgt in _d_stems:
-            return "d:" + tgt
+        resolved_doc = _resolve_visible_doc_stem(tgt)
+        if resolved_doc:
+            return "d:" + resolved_doc
         if tgt in _r_stems:
             return "r:" + tgt
         return None
