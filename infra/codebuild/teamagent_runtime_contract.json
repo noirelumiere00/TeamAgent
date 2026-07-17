@@ -1,20 +1,85 @@
 {
-  "schema_version": 1,
-  "model": {
-    "e5_revision": "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
+  "schema_version": 3,
+  "release": {
+    "ready": false,
+    "blocked_reason": "Debian 13 arm64 candidate was rejected at Trivy CRITICAL=4/HIGH=49; keep release promotion disabled until Boyle supplies the exact Chainguard builder child digest, all runtime binary hashes, and an actual CRITICAL=0/HIGH=0 scan receipt."
   },
-  "node": {
-    "image_digest": "sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c",
-    "version": "24.18.0",
-    "binary_sha256": "6bf69d0eda41a12030d5f28d958cd09ce323bc0c13f1ab4d8bb426933aa08812"
-  },
-  "playwright": {
-    "version": "1.61.1"
-  },
-  "chromium": {
-    "revision": "1228",
-    "version": "149.0.7827.0",
-    "archive_sha256": "ec044b50ed065adeb4c5ffdb42d1529901cbaf897cdf542bfef8af01d6e0cc79",
-    "binary_sha256": "c1aa0fb5b6c60eb093df69d9e40dd50ab2039d3ccba8836ef21880340a77af64"
+  "receipt": {
+    "schema_version": 1,
+    "entries": [
+      {
+        "key": "base.runtime.arm64.digest",
+        "component": "runtime-base",
+        "evidence": "base_image_digest",
+        "value_kind": "sha256_digest",
+        "value": "sha256:5cfa49866436cde0d861a6fb680b712fddb53333ac0abb78b8cffcddaa9b2b77",
+        "build_arg": "WOLFI_RUNTIME_IMAGE_DIGEST",
+        "oci_label": "io.teamagent.build.base-runtime-arm64-digest",
+        "dockerfile_uses": [
+          "wolfi-base@${WOLFI_RUNTIME_IMAGE_DIGEST}"
+        ]
+      },
+      {
+        "key": "model.e5.revision",
+        "component": "e5",
+        "evidence": "model_revision",
+        "value_kind": "git_sha1",
+        "value": "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3",
+        "build_arg": "E5_MODEL_REVISION",
+        "oci_label": "io.teamagent.build.e5-model-revision",
+        "dockerfile_uses": [
+          "revision=os.environ['TEAMAGENT_E5_MODEL_REVISION']",
+          "printf '%s' \"$E5_MODEL_REVISION\" > \"$MODEL_CACHE/refs/main\""
+        ]
+      },
+      {
+        "key": "package.chromium.version",
+        "component": "chromium",
+        "evidence": "package_version",
+        "value_kind": "package_version",
+        "value": "149.0.7827.53-r0",
+        "build_arg": "WOLFI_CHROMIUM_VERSION",
+        "oci_label": "io.teamagent.build.package-chromium-version",
+        "dockerfile_uses": [
+          "chromium=${WOLFI_CHROMIUM_VERSION}"
+        ]
+      },
+      {
+        "key": "package.ffmpeg.version",
+        "component": "ffmpeg",
+        "evidence": "package_version",
+        "value_kind": "package_version",
+        "value": "8.1.2-r2",
+        "build_arg": "WOLFI_FFMPEG_VERSION",
+        "oci_label": "io.teamagent.build.package-ffmpeg-version",
+        "dockerfile_uses": [
+          "ffmpeg-8.1=${WOLFI_FFMPEG_VERSION}"
+        ]
+      },
+      {
+        "key": "package.node.version",
+        "component": "node",
+        "evidence": "package_version",
+        "value_kind": "package_version",
+        "value": "24.18.0-r2",
+        "build_arg": "WOLFI_NODE_VERSION",
+        "oci_label": "io.teamagent.build.package-node-version",
+        "dockerfile_uses": [
+          "nodejs-24=${WOLFI_NODE_VERSION}"
+        ]
+      },
+      {
+        "key": "package.python.version",
+        "component": "python",
+        "evidence": "package_version",
+        "value_kind": "package_version",
+        "value": "3.14.6-r3",
+        "build_arg": "WOLFI_PYTHON_VERSION",
+        "oci_label": "io.teamagent.build.package-python-version",
+        "dockerfile_uses": [
+          "python-3.14=${WOLFI_PYTHON_VERSION}"
+        ]
+      }
+    ]
   }
 }

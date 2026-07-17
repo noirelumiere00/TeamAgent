@@ -10,31 +10,38 @@ phases:
       - |
         set -euo pipefail
         umask 077
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR
+        unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
+        MCP_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-mcp-quarantine"
+        MCP_RELEASE_REPO="$ECR_REGISTRY/teamagent-mcp"
+        [ "$ECR_REGISTRY" = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com" ] || { echo "FATAL: unexpected ECR registry"; exit 1; }
+        [ "$MCP_QUARANTINE_REPO" = "$ECR_REGISTRY/teamagent-mcp-quarantine" ] || { echo "FATAL: unexpected MCP quarantine repository"; exit 1; }
+        [ "$MCP_RELEASE_REPO" = "$ECR_REGISTRY/teamagent-mcp" ] || { echo "FATAL: unexpected MCP release repository"; exit 1; }
+        ACTUAL_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+        [ "$ACTUAL_ACCOUNT_ID" = "$EXPECTED_ACCOUNT_ID" ] || { echo "FATAL: unexpected AWS account"; exit 1; }
+        [ "$AWS_DEFAULT_REGION" = "$EXPECTED_REGION" ] || { echo "FATAL: unexpected AWS region"; exit 1; }
         printf '%s  %s\n' '__SOURCE_PROVENANCE_SHA256__' infra/codebuild/source_provenance.py | sha256sum -c -
         printf '%s  %s\n' '__ECR_IMAGE_RESOLVER_SHA256__' infra/codebuild/resolve_ecr_image.py | sha256sum -c -
         printf '%s  %s\n' '__ECR_SCAN_GATE_SHA256__' infra/codebuild/verify_ecr_scan.py | sha256sum -c -
-        printf '%s  %s\n' '__ECR_SCAN_EXCEPTIONS_SHA256__' infra/codebuild/ecr_scan_exceptions.json | sha256sum -c -
         : "${GIT_COMMIT:?GIT_COMMIT must be explicitly provided}"
         : "${GIT_BRANCH:?GIT_BRANCH must be explicitly provided}"
         : "${IMAGE_TAG:?IMAGE_TAG must be explicitly provided}"
         : "${WITH_SCRAPE_TOOLS:?WITH_SCRAPE_TOOLS must be explicitly provided}"
         : "${APP_HTML_VERSION_ID:?APP_HTML_VERSION_ID must be explicitly provided}"
         : "${APP_HTML_SHA256:?APP_HTML_SHA256 must be explicitly provided}"
-        : "${E5_MODEL_REVISION:?E5_MODEL_REVISION must be explicitly provided}"
-        : "${NODE_IMAGE_DIGEST:?NODE_IMAGE_DIGEST must be explicitly provided}"
-        : "${NODE_VERSION:?NODE_VERSION must be explicitly provided}"
-        : "${NODE_BINARY_SHA256:?NODE_BINARY_SHA256 must be explicitly provided}"
-        : "${PLAYWRIGHT_VERSION:?PLAYWRIGHT_VERSION must be explicitly provided}"
-        : "${PLAYWRIGHT_CHROMIUM_REVISION:?PLAYWRIGHT_CHROMIUM_REVISION must be explicitly provided}"
-        : "${PLAYWRIGHT_CHROMIUM_VERSION:?PLAYWRIGHT_CHROMIUM_VERSION must be explicitly provided}"
-        : "${PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256:?PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256 must be explicitly provided}"
-        : "${PLAYWRIGHT_CHROMIUM_SHA256:?PLAYWRIGHT_CHROMIUM_SHA256 must be explicitly provided}"
+        : "${RUNTIME_CONTRACT_SHA256:?RUNTIME_CONTRACT_SHA256 must be explicitly provided}"
         [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: invalid GIT_COMMIT"; exit 1; }
         [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "FATAL: unsafe IMAGE_TAG"; exit 1; }
         [ "$WITH_SCRAPE_TOOLS" = "true" ] || { echo "FATAL: WITH_SCRAPE_TOOLS must be explicitly true for production candidates"; exit 1; }
         case "$APP_HTML_VERSION_ID" in ""|None|null|*[!A-Za-z0-9._~+/=-]*) echo "FATAL: invalid APP_HTML_VERSION_ID"; exit 1 ;; esac
         [ "${#APP_HTML_VERSION_ID}" -le 1024 ] || { echo "FATAL: invalid APP_HTML_VERSION_ID"; exit 1; }
         [[ "$APP_HTML_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid APP_HTML_SHA256"; exit 1; }
+        [[ "$RUNTIME_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid RUNTIME_CONTRACT_SHA256"; exit 1; }
         python3 infra/codebuild/source_provenance.py verify-source \
           --source-root "$CODEBUILD_SRC_DIR" \
           --manifest "$CODEBUILD_SRC_DIR/.teamagent-source-manifest.json" \
@@ -43,28 +50,35 @@ phases:
           --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS" \
           --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
           --expected-app-html-sha256 "$APP_HTML_SHA256" \
-          --expected-e5-model-revision "$E5_MODEL_REVISION" \
-          --expected-node-image-digest "$NODE_IMAGE_DIGEST" \
-          --expected-node-version "$NODE_VERSION" \
-          --expected-node-binary-sha256 "$NODE_BINARY_SHA256" \
-          --expected-playwright-version "$PLAYWRIGHT_VERSION" \
-          --expected-playwright-chromium-revision "$PLAYWRIGHT_CHROMIUM_REVISION" \
-          --expected-playwright-chromium-version "$PLAYWRIGHT_CHROMIUM_VERSION" \
-          --expected-playwright-chromium-archive-sha256 "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
-          --expected-playwright-chromium-sha256 "$PLAYWRIGHT_CHROMIUM_SHA256"
-        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+          --expected-runtime-contract-sha256 "$RUNTIME_CONTRACT_SHA256"
+        python3 infra/codebuild/source_provenance.py assert-release-ready \
+          --contract infra/codebuild/teamagent_runtime_contract.json
+        python3 infra/codebuild/source_provenance.py verify-dockerfile-contract \
+          --contract infra/codebuild/teamagent_runtime_contract.json \
+          --dockerfile infra/docker/Dockerfile.teamagent-mcp
+        aws ecr get-login-password --region "$EXPECTED_REGION" \
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
   build:
     commands:
       - |
         set -euo pipefail
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR
+        unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
+        MCP_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-mcp-quarantine"
+        MCP_RELEASE_REPO="$ECR_REGISTRY/teamagent-mcp"
         mkdir -p src/teamagent/connect_web/static
         APP_HTML_PATH="src/teamagent/connect_web/static/app.html"
         DOWNLOADED_APP_HTML_VERSION_ID="$(aws s3api get-object \
-          --region "$AWS_DEFAULT_REGION" \
+          --region "$EXPECTED_REGION" \
           --bucket teamagent-dev-raw-files \
           --key codebuild/connect-web-app.html \
           --version-id "$APP_HTML_VERSION_ID" \
+          --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
           --query VersionId \
           --output text \
           "$APP_HTML_PATH")"
@@ -73,6 +87,17 @@ phases:
         ACTUAL_APP_HTML_SHA256="$(sha256sum "$APP_HTML_PATH" | awk '{print $1}')"
         [ "$ACTUAL_APP_HTML_SHA256" = "$APP_HTML_SHA256" ] || { echo "FATAL: app.html SHA-256 mismatch"; exit 1; }
         echo "Verified pinned app.html SHA-256: $APP_HTML_SHA256"
+        python3 infra/codebuild/source_provenance.py docker-build-arguments \
+          --contract infra/codebuild/teamagent_runtime_contract.json \
+          --expected-contract-sha256 "$RUNTIME_CONTRACT_SHA256" \
+          > /tmp/teamagent-runtime-build-arguments
+        mapfile -t RUNTIME_BUILD_ARGUMENTS < /tmp/teamagent-runtime-build-arguments
+        [ "${#RUNTIME_BUILD_ARGUMENTS[@]}" -gt 3 ] || { echo "FATAL: runtime build arguments are incomplete"; exit 1; }
+        DOCKER_RUNTIME_BUILD_ARGS=()
+        for RUNTIME_BUILD_ARGUMENT in "${RUNTIME_BUILD_ARGUMENTS[@]}"; do
+          [[ "$RUNTIME_BUILD_ARGUMENT" =~ ^[A-Z][A-Z0-9_]+=.+$ ]] || { echo "FATAL: invalid runtime build argument"; exit 1; }
+          DOCKER_RUNTIME_BUILD_ARGS+=(--build-arg "$RUNTIME_BUILD_ARGUMENT")
+        done
         echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m), WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS"
         DOCKER_BUILDKIT=1 docker build \
           -f infra/docker/Dockerfile.teamagent-mcp \
@@ -81,56 +106,56 @@ phases:
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \
           --build-arg "APP_HTML_SHA256=$APP_HTML_SHA256" \
           --build-arg "APP_HTML_VERSION_ID=$APP_HTML_VERSION_ID" \
-          --build-arg "E5_MODEL_REVISION=$E5_MODEL_REVISION" \
-          --build-arg "NODE_VERSION=$NODE_VERSION" \
-          --build-arg "NODE_BINARY_SHA256=$NODE_BINARY_SHA256" \
-          --build-arg "PLAYWRIGHT_VERSION=$PLAYWRIGHT_VERSION" \
-          --build-arg "PLAYWRIGHT_CHROMIUM_REVISION=$PLAYWRIGHT_CHROMIUM_REVISION" \
-          --build-arg "PLAYWRIGHT_CHROMIUM_VERSION=$PLAYWRIGHT_CHROMIUM_VERSION" \
-          --build-arg "PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256=$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
-          --build-arg "PLAYWRIGHT_CHROMIUM_SHA256=$PLAYWRIGHT_CHROMIUM_SHA256" \
-          -t "$MCP_REPO:$IMAGE_TAG" \
+          "${DOCKER_RUNTIME_BUILD_ARGS[@]}" \
+          -t "$MCP_QUARANTINE_REPO:$IMAGE_TAG" \
           .
-        BUILT_PLATFORM="$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "$MCP_REPO:$IMAGE_TAG")"
+        BUILT_PLATFORM="$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "$MCP_QUARANTINE_REPO:$IMAGE_TAG")"
         [ "$BUILT_PLATFORM" = "linux/arm64" ] || { echo "FATAL: local image platform is not linux/arm64"; exit 1; }
-        BUILT_REVISION="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$MCP_REPO:$IMAGE_TAG")"
+        BUILT_REVISION="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$MCP_QUARANTINE_REPO:$IMAGE_TAG")"
         [ "$BUILT_REVISION" = "$GIT_COMMIT" ] || { echo "FATAL: local OCI revision label mismatch"; exit 1; }
-        BUILT_SCRAPE_TOOLS="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.with-scrape-tools" }}' "$MCP_REPO:$IMAGE_TAG")"
+        BUILT_SCRAPE_TOOLS="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.with-scrape-tools" }}' "$MCP_QUARANTINE_REPO:$IMAGE_TAG")"
         [ "$BUILT_SCRAPE_TOOLS" = "$WITH_SCRAPE_TOOLS" ] || { echo "FATAL: local OCI scrape-tools label mismatch"; exit 1; }
-        BUILT_APP_HTML_SHA256="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.app-html-sha256" }}' "$MCP_REPO:$IMAGE_TAG")"
+        BUILT_APP_HTML_SHA256="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.app-html-sha256" }}' "$MCP_QUARANTINE_REPO:$IMAGE_TAG")"
         [ "$BUILT_APP_HTML_SHA256" = "$APP_HTML_SHA256" ] || { echo "FATAL: local OCI app HTML SHA-256 label mismatch"; exit 1; }
-        BUILT_APP_HTML_VERSION_ID="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.app-html-version-id" }}' "$MCP_REPO:$IMAGE_TAG")"
+        BUILT_APP_HTML_VERSION_ID="$(docker image inspect --format '{{ index .Config.Labels "io.teamagent.build.app-html-version-id" }}' "$MCP_QUARANTINE_REPO:$IMAGE_TAG")"
         [ "$BUILT_APP_HTML_VERSION_ID" = "$APP_HTML_VERSION_ID" ] || { echo "FATAL: local OCI app HTML VersionId label mismatch"; exit 1; }
-        while IFS=$'\t' read -r EXPECTED_VALUE LABEL_NAME; do
-          ACTUAL_VALUE="$(docker image inspect --format "{{ index .Config.Labels \"$LABEL_NAME\" }}" "$MCP_REPO:$IMAGE_TAG")"
+        python3 infra/codebuild/source_provenance.py expected-runtime-labels \
+          --contract infra/codebuild/teamagent_runtime_contract.json \
+          --expected-contract-sha256 "$RUNTIME_CONTRACT_SHA256" \
+          > /tmp/teamagent-expected-runtime-labels
+        while IFS=$'\t' read -r LABEL_NAME EXPECTED_VALUE; do
+          ACTUAL_VALUE="$(docker image inspect --format "{{ index .Config.Labels \"$LABEL_NAME\" }}" "$MCP_QUARANTINE_REPO:$IMAGE_TAG")"
           [ "$ACTUAL_VALUE" = "$EXPECTED_VALUE" ] || { echo "FATAL: local OCI runtime label mismatch: $LABEL_NAME"; exit 1; }
-        done <<EOF
-        ${E5_MODEL_REVISION}	io.teamagent.build.e5-model-revision
-        ${NODE_IMAGE_DIGEST}	io.teamagent.build.node-image-digest
-        ${NODE_VERSION}	io.teamagent.build.node-version
-        ${NODE_BINARY_SHA256}	io.teamagent.build.node-binary-sha256
-        ${PLAYWRIGHT_VERSION}	io.teamagent.build.playwright-version
-        ${PLAYWRIGHT_CHROMIUM_REVISION}	io.teamagent.build.chromium-revision
-        ${PLAYWRIGHT_CHROMIUM_VERSION}	io.teamagent.build.chromium-version
-        ${PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256}	io.teamagent.build.chromium-archive-sha256
-        ${PLAYWRIGHT_CHROMIUM_SHA256}	io.teamagent.build.chromium-sha256
-        EOF
+        done < /tmp/teamagent-expected-runtime-labels
   post_build:
     commands:
       - |
         set -euo pipefail
-        docker push "$MCP_REPO:$IMAGE_TAG"
-        ECR_REPOSITORY="${MCP_REPO##*/}"
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: MCP build failed before quarantine gate"; exit 1; }
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR
+        unset ECR_REGISTRY MCP_REPO MCP_QUARANTINE_REPO MCP_RELEASE_REPO
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
+        MCP_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-mcp-quarantine"
+        MCP_RELEASE_REPO="$ECR_REGISTRY/teamagent-mcp"
+        QUARANTINE_REPOSITORY="${MCP_QUARANTINE_REPO##*/}"
+        RELEASE_REPOSITORY="${MCP_RELEASE_REPO##*/}"
+        docker push "$MCP_QUARANTINE_REPO:$IMAGE_TAG"
         TAG_DIGEST="$(aws ecr describe-images \
-          --region "$AWS_DEFAULT_REGION" \
-          --repository-name "$ECR_REPOSITORY" \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
           --image-ids "imageTag=$IMAGE_TAG" \
           --query 'imageDetails[0].imageDigest' \
           --output text)"
         [[ "$TAG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid ECR tag digest"; exit 1; }
         aws ecr batch-get-image \
-          --region "$AWS_DEFAULT_REGION" \
-          --repository-name "$ECR_REPOSITORY" \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
           --image-ids "imageDigest=$TAG_DIGEST" \
           --accepted-media-types \
             application/vnd.docker.distribution.manifest.list.v2+json \
@@ -145,8 +170,9 @@ phases:
           --architecture arm64)"
         [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid arm64 child digest"; exit 1; }
         aws ecr batch-get-image \
-          --region "$AWS_DEFAULT_REGION" \
-          --repository-name "$ECR_REPOSITORY" \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
           --image-ids "imageDigest=$ARM64_DIGEST" \
           --accepted-media-types \
             application/vnd.docker.distribution.manifest.v2+json \
@@ -157,8 +183,9 @@ phases:
           --expected-image-digest "$ARM64_DIGEST")"
         [[ "$CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid OCI config digest"; exit 1; }
         CONFIG_URL="$(aws ecr get-download-url-for-layer \
-          --region "$AWS_DEFAULT_REGION" \
-          --repository-name "$ECR_REPOSITORY" \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
           --layer-digest "$CONFIG_DIGEST" \
           --query downloadUrl \
           --output text)"
@@ -173,28 +200,39 @@ phases:
           --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS" \
           --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
           --expected-app-html-sha256 "$APP_HTML_SHA256" \
-          --expected-e5-model-revision "$E5_MODEL_REVISION" \
-          --expected-node-image-digest "$NODE_IMAGE_DIGEST" \
-          --expected-node-version "$NODE_VERSION" \
-          --expected-node-binary-sha256 "$NODE_BINARY_SHA256" \
-          --expected-playwright-version "$PLAYWRIGHT_VERSION" \
-          --expected-playwright-chromium-revision "$PLAYWRIGHT_CHROMIUM_REVISION" \
-          --expected-playwright-chromium-version "$PLAYWRIGHT_CHROMIUM_VERSION" \
-          --expected-playwright-chromium-archive-sha256 "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
-          --expected-playwright-chromium-sha256 "$PLAYWRIGHT_CHROMIUM_SHA256"
+          --contract infra/codebuild/teamagent_runtime_contract.json \
+          --expected-runtime-contract-sha256 "$RUNTIME_CONTRACT_SHA256"
         aws ecr wait image-scan-complete \
-          --region "$AWS_DEFAULT_REGION" \
-          --repository-name "$ECR_REPOSITORY" \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
           --image-id "imageDigest=$ARM64_DIGEST"
         aws ecr describe-image-scan-findings \
-          --region "$AWS_DEFAULT_REGION" \
-          --repository-name "$ECR_REPOSITORY" \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
           --image-id "imageDigest=$ARM64_DIGEST" \
           --output json > /tmp/teamagent-ecr-scan.json
         python3 infra/codebuild/verify_ecr_scan.py \
           --scan /tmp/teamagent-ecr-scan.json \
-          --exceptions infra/codebuild/ecr_scan_exceptions.json \
+          --deny-all \
           --expected-image-digest "$ARM64_DIGEST" \
-          --expected-repository "$ECR_REPOSITORY"
+          --expected-repository "$QUARANTINE_REPOSITORY"
+        VERIFIED_QUARANTINE_DIGEST="$ARM64_DIGEST"
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: MCP gate failed before release promotion"; exit 1; }
+        docker pull "$MCP_QUARANTINE_REPO@$VERIFIED_QUARANTINE_DIGEST"
+        docker tag \
+          "$MCP_QUARANTINE_REPO@$VERIFIED_QUARANTINE_DIGEST" \
+          "$MCP_RELEASE_REPO:$IMAGE_TAG"
+        docker push "$MCP_RELEASE_REPO:$IMAGE_TAG"
+        RELEASE_DIGEST="$(aws ecr describe-images \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$RELEASE_REPOSITORY" \
+          --image-ids "imageTag=$IMAGE_TAG" \
+          --query 'imageDetails[0].imageDigest' \
+          --output text)"
+        [ "$RELEASE_DIGEST" = "$VERIFIED_QUARANTINE_DIGEST" ] || { echo "FATAL: release digest differs from verified quarantine digest"; exit 1; }
         echo "MCP_TAG_DIGEST=$TAG_DIGEST"
         echo "MCP_ARM64_DIGEST=$ARM64_DIGEST"
+        echo "MCP_RELEASE_DIGEST=$RELEASE_DIGEST"

@@ -4,9 +4,9 @@ set -euo pipefail
 
 cat >&2 <<'EOF'
 FATAL: build_openclaw_image.sh is disabled.
-No provenance-pinned, vulnerability-gated OpenClaw builder exists yet.
-Use the dedicated version-pinned OpenClaw launcher under infra/deploy only after
-that successor is implemented and reviewed. Inline buildspec/source overrides
-and mutable source archives are forbidden.
+Shared/legacy image-only OpenClaw builds are forbidden.
+Use infra/deploy/build_openclaw_image.sh only after its checked-in core/media
+contract reports release.ready=true. The dedicated launcher pins remote dev,
+publishes signed immutable evidence, and invokes a fixed CodeBuild project.
 EOF
 exit 64

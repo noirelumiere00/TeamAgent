@@ -147,7 +147,12 @@ def test_manifest_bytes_must_hash_to_ecr_digest(tmp_path: Path) -> None:
 
 
 def test_config_bytes_and_platform_are_both_verified(tmp_path: Path) -> None:
-    config = {"architecture": "arm64", "os": "linux", "config": {"Labels": {}}}
+    revision = "a" * 40
+    config = {
+        "architecture": "arm64",
+        "os": "linux",
+        "config": {"Labels": {"org.opencontainers.image.revision": revision}},
+    }
     raw = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
     path = tmp_path / "config.json"
     path.write_bytes(raw)
@@ -157,6 +162,7 @@ def test_config_bytes_and_platform_are_both_verified(tmp_path: Path) -> None:
         _digest(raw),
         os_name="linux",
         architecture="arm64",
+        expected_revision=revision,
     )
 
     with pytest.raises(resolver.ImageContractError, match="platform mismatch"):
@@ -173,4 +179,13 @@ def test_config_bytes_and_platform_are_both_verified(tmp_path: Path) -> None:
             "sha256:" + "f" * 64,
             os_name="linux",
             architecture="arm64",
+        )
+
+    with pytest.raises(resolver.ImageContractError, match="revision label mismatch"):
+        resolver.verify_config_platform(
+            path,
+            _digest(raw),
+            os_name="linux",
+            architecture="arm64",
+            expected_revision="b" * 40,
         )

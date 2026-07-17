@@ -8,12 +8,20 @@ set -euo pipefail
 umask 077
 
 REGION="ap-northeast-1"
+EXPECTED_ACCOUNT_ID="718959508629"
+EXPECTED_CALLER_ARN="arn:aws:iam::718959508629:user/AIIAdev"
+LAUNCHER_ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-codebuild-launcher"
+LAUNCHER_SESSION_NAME="teamagent-build-launcher"
+EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-codebuild-launcher/teamagent-build-launcher"
+EXPECTED_BRANCH="dev"
+EXPECTED_ORIGIN_URL="git@github.com:noirelumiere00/TeamAgent.git"
 SOURCE_BUCKET="teamagent-dev-raw-files"
 SOURCE_KEY="codebuild/source.zip"
 APP_HTML_BUCKET="teamagent-dev-raw-files"
 APP_HTML_KEY="codebuild/connect-web-app.html"
 CODEBUILD_PROJECT="teamagent-dev-image-builder"
 ECR_REPOSITORY="teamagent-mcp"
+ECR_QUARANTINE_REPOSITORY="teamagent-mcp-quarantine"
 IMAGE_TAG=""
 WITH_SCRAPE_TOOLS=""
 POLL_SECONDS=15
@@ -95,6 +103,11 @@ for tool in git python3 aws curl; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
 
+# Refuse configured or environment-provided service endpoints before the first
+# identity call. Fixed account/region/resource values below are not CLI inputs.
+export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" \
   || die "script is not inside a Git worktree"
@@ -113,48 +126,89 @@ COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})"
 BRANCH="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD)" \
   || die "detached HEAD is not allowed; check out the branch being built"
 [ -n "$BRANCH" ] || die "current Git branch is empty"
+[ "$BRANCH" = "$EXPECTED_BRANCH" ] \
+  || die "builds must run from the local dev branch"
+ORIGIN_URL="$(git -C "$REPO_ROOT" config --get remote.origin.url)" \
+  || die "Git remote origin is missing"
+[ "$ORIGIN_URL" = "$EXPECTED_ORIGIN_URL" ] \
+  || die "unexpected Git origin URL"
+git -C "$REPO_ROOT" fetch --quiet --no-tags origin \
+  "refs/heads/dev:refs/remotes/origin/dev" \
+  || die "could not refresh origin/dev"
+REMOTE_DEV_COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify refs/remotes/origin/dev^{commit})" \
+  || die "origin/dev is missing"
+[ "$COMMIT" = "$REMOTE_DEV_COMMIT" ] \
+  || die "local dev HEAD must exactly equal remote origin/dev"
+unset ORIGIN_URL REMOTE_DEV_COMMIT
 
-RUNTIME_VALUES="$(python3 "$PROVENANCE" runtime-values --contract "$RUNTIME_CONTRACT")" \
-  || die "TeamAgent runtime contract is invalid"
-[[ "$RUNTIME_VALUES" != *$'\n'* && "$RUNTIME_VALUES" != *$'\r'* ]] \
-  || die "TeamAgent runtime contract returned multiple lines"
+RUNTIME_CONTRACT_SHA256="$(
+  python3 "$PROVENANCE" contract-sha256 --contract "$RUNTIME_CONTRACT"
+)" || die "TeamAgent runtime contract is invalid"
+[[ "$RUNTIME_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || die "TeamAgent runtime contract returned an invalid SHA-256"
+python3 "$PROVENANCE" assert-release-ready --contract "$RUNTIME_CONTRACT" \
+  || die "TeamAgent runtime contract is not approved for release"
+
+INITIAL_IDENTITY="$(
+  AWS_PAGER="" aws sts get-caller-identity \
+    --query '[Account,Arn]' \
+    --output text
+)"
+[[ "$INITIAL_IDENTITY" != *$'\n'* && "$INITIAL_IDENTITY" != *$'\r'* ]] \
+  || die "AWS returned a malformed initial identity"
+IFS=$'\t' read -r ACTUAL_ACCOUNT_ID ACTUAL_CALLER_ARN EXTRA_IDENTITY <<<"$INITIAL_IDENTITY"
+[ -z "${EXTRA_IDENTITY:-}" ] || die "AWS returned a malformed initial identity"
+[ "$ACTUAL_ACCOUNT_ID" = "$EXPECTED_ACCOUNT_ID" ] \
+  || die "refusing to build in AWS account ${ACTUAL_ACCOUNT_ID:-unknown}; expected $EXPECTED_ACCOUNT_ID"
+[ "$ACTUAL_CALLER_ARN" = "$EXPECTED_CALLER_ARN" ] \
+  || die "launcher must start as $EXPECTED_CALLER_ARN"
+unset INITIAL_IDENTITY ACTUAL_ACCOUNT_ID ACTUAL_CALLER_ARN EXTRA_IDENTITY
+
+SESSION_CREDENTIALS="$(
+  AWS_PAGER="" aws sts assume-role \
+    --region "$REGION" \
+    --role-arn "$LAUNCHER_ROLE_ARN" \
+    --role-session-name "$LAUNCHER_SESSION_NAME" \
+    --duration-seconds 10800 \
+    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
+    --output text
+)" || die "could not assume the dedicated CodeBuild launcher role"
+[[ "$SESSION_CREDENTIALS" != *$'\n'* && "$SESSION_CREDENTIALS" != *$'\r'* ]] \
+  || die "STS returned malformed launcher credentials"
 IFS=$'\t' read -r \
-  E5_MODEL_REVISION \
-  NODE_IMAGE_DIGEST \
-  NODE_VERSION \
-  NODE_BINARY_SHA256 \
-  PLAYWRIGHT_VERSION \
-  PLAYWRIGHT_CHROMIUM_REVISION \
-  PLAYWRIGHT_CHROMIUM_VERSION \
-  PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256 \
-  PLAYWRIGHT_CHROMIUM_SHA256 \
-  EXTRA_RUNTIME_VALUE <<<"$RUNTIME_VALUES"
-[ -z "${EXTRA_RUNTIME_VALUE:-}" ] || die "TeamAgent runtime contract returned extra values"
-for runtime_value in \
-  "$E5_MODEL_REVISION" \
-  "$NODE_IMAGE_DIGEST" \
-  "$NODE_VERSION" \
-  "$NODE_BINARY_SHA256" \
-  "$PLAYWRIGHT_VERSION" \
-  "$PLAYWRIGHT_CHROMIUM_REVISION" \
-  "$PLAYWRIGHT_CHROMIUM_VERSION" \
-  "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
-  "$PLAYWRIGHT_CHROMIUM_SHA256"; do
-  [ -n "$runtime_value" ] || die "TeamAgent runtime contract returned an empty value"
+  AWS_ACCESS_KEY_ID \
+  AWS_SECRET_ACCESS_KEY \
+  AWS_SESSION_TOKEN \
+  AWS_CREDENTIAL_EXPIRATION \
+  EXTRA_CREDENTIAL <<<"$SESSION_CREDENTIALS"
+[ -z "${EXTRA_CREDENTIAL:-}" ] || die "STS returned malformed launcher credentials"
+for credential in \
+  "$AWS_ACCESS_KEY_ID" \
+  "$AWS_SECRET_ACCESS_KEY" \
+  "$AWS_SESSION_TOKEN" \
+  "$AWS_CREDENTIAL_EXPIRATION"; do
+  [ -n "$credential" ] && [ "$credential" != "None" ] \
+    || die "STS returned incomplete launcher credentials"
 done
-unset RUNTIME_VALUES runtime_value
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
+export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
+unset AWS_PROFILE AWS_DEFAULT_PROFILE SESSION_CREDENTIALS EXTRA_CREDENTIAL credential
 
-RUNTIME_EXPECTED_ARGS=(
-  --expected-e5-model-revision "$E5_MODEL_REVISION"
-  --expected-node-image-digest "$NODE_IMAGE_DIGEST"
-  --expected-node-version "$NODE_VERSION"
-  --expected-node-binary-sha256 "$NODE_BINARY_SHA256"
-  --expected-playwright-version "$PLAYWRIGHT_VERSION"
-  --expected-playwright-chromium-revision "$PLAYWRIGHT_CHROMIUM_REVISION"
-  --expected-playwright-chromium-version "$PLAYWRIGHT_CHROMIUM_VERSION"
-  --expected-playwright-chromium-archive-sha256 "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256"
-  --expected-playwright-chromium-sha256 "$PLAYWRIGHT_CHROMIUM_SHA256"
-)
+SESSION_IDENTITY="$(
+  AWS_PAGER="" aws sts get-caller-identity \
+    --query '[Account,Arn]' \
+    --output text
+)"
+[[ "$SESSION_IDENTITY" != *$'\n'* && "$SESSION_IDENTITY" != *$'\r'* ]] \
+  || die "AWS returned a malformed launcher role identity"
+IFS=$'\t' read -r SESSION_ACCOUNT_ID SESSION_ARN EXTRA_SESSION_IDENTITY <<<"$SESSION_IDENTITY"
+[ -z "${EXTRA_SESSION_IDENTITY:-}" ] || die "AWS returned a malformed launcher role identity"
+[ "$SESSION_ACCOUNT_ID" = "$EXPECTED_ACCOUNT_ID" ] \
+  || die "launcher role session is in the wrong AWS account"
+[ "$SESSION_ARN" = "$EXPECTED_SESSION_ARN" ] \
+  || die "unexpected launcher role session ARN"
+unset SESSION_IDENTITY SESSION_ACCOUNT_ID SESSION_ARN EXTRA_SESSION_IDENTITY
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/teamagent-codebuild.XXXXXXXX")"
 cleanup() {
@@ -166,8 +220,8 @@ MANIFEST="$TMP_DIR/.teamagent-source-manifest.json"
 SOURCE_ZIP="$TMP_DIR/source.zip"
 EXTRACTED="$TMP_DIR/extracted"
 ENV_OVERRIDES="$TMP_DIR/codebuild-env.json"
-PARENT_BATCH_RESPONSE="$TMP_DIR/ecr-parent-batch-get-image.json"
-CHILD_BATCH_RESPONSE="$TMP_DIR/ecr-child-batch-get-image.json"
+QUARANTINE_PARENT_BATCH_RESPONSE="$TMP_DIR/ecr-quarantine-parent-batch-get-image.json"
+RELEASE_BATCH_RESPONSE="$TMP_DIR/ecr-release-batch-get-image.json"
 OCI_CONFIG="$TMP_DIR/oci-config.json"
 APP_HTML_FILE="$TMP_DIR/connect-web-app.html"
 
@@ -177,6 +231,7 @@ BUCKET_VERSIONING="$(
   AWS_PAGER="" aws s3api get-bucket-versioning \
     --region "$REGION" \
     --bucket "$SOURCE_BUCKET" \
+    --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
     --query Status \
     --output text
 )"
@@ -187,6 +242,7 @@ APP_HTML_VERSION_ID="$(
     --region "$REGION" \
     --bucket "$APP_HTML_BUCKET" \
     --key "$APP_HTML_KEY" \
+    --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
     --query VersionId \
     --output text
 )"
@@ -202,6 +258,7 @@ DOWNLOADED_APP_HTML_VERSION_ID="$(
     --bucket "$APP_HTML_BUCKET" \
     --key "$APP_HTML_KEY" \
     --version-id "$APP_HTML_VERSION_ID" \
+    --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
     --query VersionId \
     --output text \
     "$APP_HTML_FILE"
@@ -247,7 +304,7 @@ python3 "$PROVENANCE" verify-source \
   --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS" \
   --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
   --expected-app-html-sha256 "$APP_HTML_SHA256" \
-  "${RUNTIME_EXPECTED_ARGS[@]}"
+  --expected-runtime-contract-sha256 "$RUNTIME_CONTRACT_SHA256"
 
 if [ "$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})" != "$COMMIT" ] \
   || [ -n "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ]; then
@@ -261,6 +318,7 @@ VERSION_ID="$(
     --bucket "$SOURCE_BUCKET" \
     --key "$SOURCE_KEY" \
     --body "$SOURCE_ZIP" \
+    --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
     --content-type application/zip \
     --server-side-encryption AES256 \
     --query VersionId \
@@ -277,15 +335,7 @@ IMAGE_TAG="$IMAGE_TAG" \
 WITH_SCRAPE_TOOLS="$WITH_SCRAPE_TOOLS" \
 APP_HTML_VERSION_ID="$APP_HTML_VERSION_ID" \
 APP_HTML_SHA256="$APP_HTML_SHA256" \
-E5_MODEL_REVISION="$E5_MODEL_REVISION" \
-NODE_IMAGE_DIGEST="$NODE_IMAGE_DIGEST" \
-NODE_VERSION="$NODE_VERSION" \
-NODE_BINARY_SHA256="$NODE_BINARY_SHA256" \
-PLAYWRIGHT_VERSION="$PLAYWRIGHT_VERSION" \
-PLAYWRIGHT_CHROMIUM_REVISION="$PLAYWRIGHT_CHROMIUM_REVISION" \
-PLAYWRIGHT_CHROMIUM_VERSION="$PLAYWRIGHT_CHROMIUM_VERSION" \
-PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256="$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
-PLAYWRIGHT_CHROMIUM_SHA256="$PLAYWRIGHT_CHROMIUM_SHA256" \
+RUNTIME_CONTRACT_SHA256="$RUNTIME_CONTRACT_SHA256" \
 python3 - "$ENV_OVERRIDES" <<'PY'
 import json
 import os
@@ -299,15 +349,7 @@ names = (
     "WITH_SCRAPE_TOOLS",
     "APP_HTML_VERSION_ID",
     "APP_HTML_SHA256",
-    "E5_MODEL_REVISION",
-    "NODE_IMAGE_DIGEST",
-    "NODE_VERSION",
-    "NODE_BINARY_SHA256",
-    "PLAYWRIGHT_VERSION",
-    "PLAYWRIGHT_CHROMIUM_REVISION",
-    "PLAYWRIGHT_CHROMIUM_VERSION",
-    "PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256",
-    "PLAYWRIGHT_CHROMIUM_SHA256",
+    "RUNTIME_CONTRACT_SHA256",
 )
 values = {name: os.environ[name] for name in names}
 payload = [{"name": name, "value": value, "type": "PLAINTEXT"} for name, value in values.items()]
@@ -369,55 +411,71 @@ done
 [ "$BUILD_STATUS" = "SUCCEEDED" ] \
   || die "CodeBuild candidate failed with status $BUILD_STATUS (build ID: $BUILD_ID)"
 
-TAG_DIGEST="$(
+QUARANTINE_TAG_DIGEST="$(
   AWS_PAGER="" aws ecr describe-images \
     --region "$REGION" \
-    --repository-name "$ECR_REPOSITORY" \
+    --registry-id "$EXPECTED_ACCOUNT_ID" \
+    --repository-name "$ECR_QUARANTINE_REPOSITORY" \
     --image-ids "imageTag=$IMAGE_TAG" \
     --query 'imageDetails[0].imageDigest' \
     --output text
 )"
-[[ "$TAG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
-  || die "ECR returned an invalid tag digest"
+[[ "$QUARANTINE_TAG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+  || die "ECR returned an invalid quarantine tag digest"
 
 AWS_PAGER="" aws ecr batch-get-image \
   --region "$REGION" \
-  --repository-name "$ECR_REPOSITORY" \
-  --image-ids "imageDigest=$TAG_DIGEST" \
+  --registry-id "$EXPECTED_ACCOUNT_ID" \
+  --repository-name "$ECR_QUARANTINE_REPOSITORY" \
+  --image-ids "imageDigest=$QUARANTINE_TAG_DIGEST" \
   --accepted-media-types \
     application/vnd.docker.distribution.manifest.list.v2+json \
     application/vnd.oci.image.index.v1+json \
     application/vnd.docker.distribution.manifest.v2+json \
     application/vnd.oci.image.manifest.v1+json \
-  --output json >"$PARENT_BATCH_RESPONSE"
-ARM64_DIGEST="$(
+  --output json >"$QUARANTINE_PARENT_BATCH_RESPONSE"
+VERIFIED_QUARANTINE_DIGEST="$(
   python3 "$IMAGE_RESOLVER" resolve-platform \
-    --batch-response "$PARENT_BATCH_RESPONSE" \
-    --expected-image-digest "$TAG_DIGEST" \
+    --batch-response "$QUARANTINE_PARENT_BATCH_RESPONSE" \
+    --expected-image-digest "$QUARANTINE_TAG_DIGEST" \
     --os linux \
     --architecture arm64
 )"
-[[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
-  || die "ECR image resolver returned an invalid arm64 child digest"
+[[ "$VERIFIED_QUARANTINE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+  || die "ECR image resolver returned an invalid quarantine arm64 digest"
+
+RELEASE_DIGEST="$(
+  AWS_PAGER="" aws ecr describe-images \
+    --region "$REGION" \
+    --registry-id "$EXPECTED_ACCOUNT_ID" \
+    --repository-name "$ECR_REPOSITORY" \
+    --image-ids "imageTag=$IMAGE_TAG" \
+    --query 'imageDetails[0].imageDigest' \
+    --output text
+)"
+[ "$RELEASE_DIGEST" = "$VERIFIED_QUARANTINE_DIGEST" ] \
+  || die "release digest does not equal the verified quarantine digest"
 
 AWS_PAGER="" aws ecr batch-get-image \
   --region "$REGION" \
+  --registry-id "$EXPECTED_ACCOUNT_ID" \
   --repository-name "$ECR_REPOSITORY" \
-  --image-ids "imageDigest=$ARM64_DIGEST" \
+  --image-ids "imageDigest=$RELEASE_DIGEST" \
   --accepted-media-types \
     application/vnd.docker.distribution.manifest.v2+json \
     application/vnd.oci.image.manifest.v1+json \
-  --output json >"$CHILD_BATCH_RESPONSE"
+  --output json >"$RELEASE_BATCH_RESPONSE"
 CONFIG_DIGEST="$(
   python3 "$PROVENANCE" ecr-config-digest \
-    --batch-response "$CHILD_BATCH_RESPONSE" \
-    --expected-image-digest "$ARM64_DIGEST"
+    --batch-response "$RELEASE_BATCH_RESPONSE" \
+    --expected-image-digest "$RELEASE_DIGEST"
 )"
 [[ "$CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "ECR returned an invalid OCI config digest"
 
 DOWNLOAD_URL="$(
   AWS_PAGER="" aws ecr get-download-url-for-layer \
     --region "$REGION" \
+    --registry-id "$EXPECTED_ACCOUNT_ID" \
     --repository-name "$ECR_REPOSITORY" \
     --layer-digest "$CONFIG_DIGEST" \
     --query downloadUrl \
@@ -434,13 +492,16 @@ python3 "$PROVENANCE" verify-oci-revision \
   --expected-with-scrape-tools "$WITH_SCRAPE_TOOLS" \
   --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
   --expected-app-html-sha256 "$APP_HTML_SHA256" \
-  "${RUNTIME_EXPECTED_ARGS[@]}"
+  --contract "$RUNTIME_CONTRACT" \
+  --expected-runtime-contract-sha256 "$RUNTIME_CONTRACT_SHA256"
 
 echo "Candidate verified (build only; no deployment performed):"
 echo "  repository=$ECR_REPOSITORY"
+echo "  quarantine_repository=$ECR_QUARANTINE_REPOSITORY"
 echo "  tag=$IMAGE_TAG"
-echo "  tag_digest=$TAG_DIGEST"
-echo "  arm64_digest=$ARM64_DIGEST"
+echo "  quarantine_tag_digest=$QUARANTINE_TAG_DIGEST"
+echo "  verified_quarantine_digest=$VERIFIED_QUARANTINE_DIGEST"
+echo "  release_digest=$RELEASE_DIGEST"
 echo "  commit=$COMMIT"
 echo "  branch=$BRANCH"
 echo "  with_scrape_tools=$WITH_SCRAPE_TOOLS"

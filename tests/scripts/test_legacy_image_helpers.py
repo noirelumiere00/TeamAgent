@@ -12,6 +12,10 @@ MCP_HELPER = ROOT / "build_mcp_image.sh"
 OPENCLAW_HELPER = ROOT / "build_openclaw_image.sh"
 TIKTOK_HELPER = ROOT / "build_tiktok_image.sh"
 HELPERS = (MCP_HELPER, OPENCLAW_HELPER, TIKTOK_HELPER)
+RETIRED_DEPLOYERS = (
+    ROOT / "infra" / "deploy" / "deploy_connectweb_unified.sh",
+    ROOT / "deploy_digest_test.sh",
+)
 
 
 def _run(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -50,7 +54,7 @@ def test_mcp_helper_only_delegates_to_the_safe_launcher() -> None:
 @pytest.mark.parametrize(
     ("path", "message"),
     [
-        (OPENCLAW_HELPER, "No provenance-pinned, vulnerability-gated OpenClaw builder"),
+        (OPENCLAW_HELPER, "Shared/legacy image-only OpenClaw builds are forbidden"),
         (TIKTOK_HELPER, "tiktok-data-service/scripts/build_acquire_image.sh"),
     ],
 )
@@ -78,3 +82,50 @@ def test_no_legacy_helper_contains_an_unsafe_build_path() -> None:
     for name, body in bodies.items():
         for pattern in forbidden:
             assert pattern not in body, f"{name} still contains {pattern!r}"
+
+
+@pytest.mark.parametrize("path", RETIRED_DEPLOYERS, ids=lambda path: path.name)
+def test_unsafe_combined_deployers_are_fail_loud_stubs(path: Path) -> None:
+    body = path.read_text(encoding="utf-8")
+    completed = _run(path)
+
+    assert completed.returncode == 64
+    assert "permanently disabled" in completed.stderr
+    assert "build_teamagent_image.sh" in completed.stderr
+    assert "terraform/README.md" in completed.stderr
+    for forbidden in (
+        "aws ",
+        "start-build",
+        "source.zip",
+        "register-task-definition",
+        "update-service",
+        "put-targets",
+    ):
+        assert forbidden not in body.lower()
+
+
+def test_all_shell_start_build_and_source_zip_paths_are_allowlisted() -> None:
+    safe_launchers = {
+        ROOT / "infra" / "deploy" / "build_teamagent_image.sh",
+        ROOT / "infra" / "deploy" / "build_openclaw_image.sh",
+    }
+    source_archive_launcher = ROOT / "infra" / "deploy" / "build_teamagent_image.sh"
+    shell_files = sorted(
+        path
+        for path in ROOT.rglob("*.sh")
+        if ".git" not in path.parts and ".venv" not in path.parts
+    )
+
+    for path in shell_files:
+        body = path.read_text(encoding="utf-8").lower()
+        if "start-build" in body:
+            assert path in safe_launchers, f"unapproved StartBuild path: {path}"
+        if "source.zip" in body:
+            assert path == source_archive_launcher, f"unapproved source.zip path: {path}"
+
+
+def test_openclaw_safe_launcher_is_not_reachable_through_legacy_helper() -> None:
+    body = OPENCLAW_HELPER.read_text(encoding="utf-8")
+
+    assert "infra/deploy/build_openclaw_image.sh" in body
+    assert "exec " not in body

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_REVISION_RE = re.compile(r"[0-9a-f]{40}")
 _IMAGE_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.v2+json",
     "application/vnd.oci.image.manifest.v1+json",
@@ -178,8 +179,9 @@ def verify_config_platform(
     *,
     os_name: str,
     architecture: str,
+    expected_revision: str | None = None,
 ) -> None:
-    """Verify config bytes and the platform encoded in those exact bytes."""
+    """Verify config bytes, platform, and optionally the exact source revision."""
 
     expected_config_digest = _validate_digest(
         expected_config_digest, label="expected config digest"
@@ -212,6 +214,21 @@ def verify_config_platform(
             f"actual={config.get('os')!r}/{config.get('architecture')!r}, "
             f"variant={config.get('variant')!r}"
         )
+    if expected_revision is not None:
+        if not _REVISION_RE.fullmatch(expected_revision):
+            raise ImageContractError("expected revision must be a full lowercase Git SHA-1")
+        image_config = config.get("config")
+        if not isinstance(image_config, dict):
+            raise ImageContractError("OCI image config section is missing")
+        labels = image_config.get("Labels")
+        if not isinstance(labels, dict):
+            raise ImageContractError("OCI image labels are missing")
+        actual_revision = labels.get("org.opencontainers.image.revision")
+        if actual_revision != expected_revision:
+            raise ImageContractError(
+                "OCI revision label mismatch: "
+                f"expected={expected_revision!r}, actual={actual_revision!r}"
+            )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -233,6 +250,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--expected-config-digest", required=True)
     verify.add_argument("--os", dest="os_name", required=True)
     verify.add_argument("--architecture", required=True)
+    verify.add_argument("--expected-revision")
     return parser
 
 
@@ -256,6 +274,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.expected_config_digest,
                 os_name=args.os_name,
                 architecture=args.architecture,
+                expected_revision=args.expected_revision,
             )
             print(f"OCI config platform verified: {args.os_name}/{args.architecture}")
         else:  # pragma: no cover - argparse enforces a known command.

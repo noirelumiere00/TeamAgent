@@ -74,23 +74,18 @@ def test_publish_contract_strings() -> None:
 
 
 def test_unified_deploy_contract_strings() -> None:
-    """unified bake が td へ宣言的に固定する env と image tag 表示の契約。
-
-    - CONNECT_APP_HTML_S3_URI: publish_app_html.sh ホットスワップの受け口
-      （これが無いと publish が preflight で恒久 exit 1）
-    - USE_QUERY_PLANNER / USE_COHERE_RERANK: T1 No-AI 化の恒久化（bake での巻き戻り防止）
-    - image tag 表示: register_ingest_td.sh --image-tag へ渡すタグの唯一の出所
-    """
+    """旧 build+deploy 混在経路は fail-loud stub のまま固定する。"""
     body = UNIFIED.read_text(encoding="utf-8")
     for needle in (
-        "CONNECT_APP_HTML_S3_URI",
-        "USE_QUERY_PLANNER",
-        "USE_COHERE_RERANK",
-        "codebuild/connect-web-app.html",  # publish_app_html.sh の配置先と同一定数
-        "image tag: ${TAG}",
-        "register_ingest_td.sh --image-tag ${TAG}",
+        "permanently disabled",
+        "build_teamagent_image.sh",
+        "../terraform/README.md",
+        "never uploads source",
+        "never uploads source, starts CodeBuild, or changes",
     ):
         assert needle in body, f"契約文字列が欠落: {needle}"
+    r = _run(str(UNIFIED))
+    assert r.returncode == 64
 
 
 def test_bootstrap_contract_strings() -> None:

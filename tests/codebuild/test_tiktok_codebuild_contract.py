@@ -11,6 +11,10 @@ def _terraform_sections() -> tuple[str, str]:
     body = TERRAFORM.read_text(encoding="utf-8")
     marker = "# TikTok worker: separate repository, project, role, and ECR boundary"
     mcp, tiktok = body.split(marker, maxsplit=1)
+    tiktok = tiktok.split(
+        "# OpenClaw core/media: isolated source publisher + build boundary",
+        maxsplit=1,
+    )[0]
     return mcp, tiktok
 
 
@@ -20,13 +24,15 @@ def test_mcp_and_tiktok_repository_permissions_are_separate() -> None:
     assert "aws_ecr_repository.tiktok_acquire" not in mcp
     assert "aws_ecr_repository.mcp" not in tiktok
     assert "aws_ecr_repository.openclaw" not in tiktok
+    assert "resources = [aws_ecr_repository.tiktok_acquire_quarantine[0].arn]" in tiktok
     assert "resources = [aws_ecr_repository.tiktok_acquire[0].arn]" in tiktok
-    assert 'sid       = "TiktokEcrScanGate"' in tiktok
-    assert 'actions   = ["ecr:DescribeImageScanFindings"]' in tiktok
-    assert 'sid = "TiktokEcrRemoteVerification"' in tiktok
+    assert 'sid = "TiktokEcrQuarantineWrite"' in tiktok
+    assert 'sid = "TiktokEcrReleasePromotion"' in tiktok
     assert '"ecr:BatchGetImage"' in tiktok
     assert '"ecr:GetDownloadUrlForLayer"' in tiktok
+    assert '"ecr:DescribeImageScanFindings"' in tiktok
     assert "ecr:StartImageScan" not in tiktok
+    assert "ecr:BatchDeleteImage" not in tiktok
 
 
 def test_tiktok_project_has_dedicated_git_source_and_no_latest_default() -> None:
@@ -60,7 +66,7 @@ def test_tiktok_buildspec_binds_commit_and_calls_only_safe_builder() -> None:
     assert "https://github.com/noirelumiere00/tiktok-data-service.git" in body
     assert 'EXPECTED_SOURCE_REVISION="$GIT_COMMIT"' in body
     assert "scripts/build_acquire_image.sh" in body
-    assert '--repository "$TIKTOK_REPO"' in body
+    assert '--repository "$TIKTOK_QUARANTINE_REPO"' in body
     assert "aws s3" not in body
     assert "source.zip" not in body
     assert "buildspec-override" not in body
@@ -76,10 +82,39 @@ def test_tiktok_buildspec_has_pinned_trivy_and_zero_exception_ecr_gate() -> None
     assert body.count("__ECR_IMAGE_RESOLVER_BASE64__") == 1
     assert "resolve-platform" in body
     assert "verify-config-platform" in body
+    assert '--expected-revision "$GIT_COMMIT"' in body
     assert body.count('--image-id "imageDigest=$ARM64_DIGEST"') == 2
     assert '--expected-image-digest "$ARM64_DIGEST"' in body
     assert "aws ecr wait image-scan-complete" in body
     assert "aws ecr describe-image-scan-findings" in body
     assert "--deny-all" in body
     assert "--exceptions" not in body
+    guard = body.index("CODEBUILD_BUILD_SUCCEEDING")
+    gate = body.index("python3 /tmp/verify-ecr-scan.py")
+    second_guard = body.index("CODEBUILD_BUILD_SUCCEEDING", guard + 1)
+    promote = body.index('docker push "$TIKTOK_RELEASE_REPO:$GIT_COMMIT"')
+    equality = body.index('[ "$RELEASE_DIGEST" = "$VERIFIED_QUARANTINE_DIGEST" ]')
+    assert guard < gate < second_guard < promote < equality
+    assert '--expected-repository "$QUARANTINE_REPOSITORY"' in body
+    assert "BatchDeleteImage" not in body
     assert not any(token in body for token in ("aws ecs", "update-service", "register-task"))
+
+
+def test_tiktok_registry_values_are_derived_and_hostile_overrides_are_ignored() -> None:
+    body = BUILDSPEC.read_text(encoding="utf-8")
+
+    assert body.count("export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true") == 3
+    assert body.count('EXPECTED_ACCOUNT_ID="718959508629"') == 3
+    assert body.count('EXPECTED_REGION="ap-northeast-1"') == 3
+    assert (
+        body.count("unset ECR_REGISTRY TIKTOK_REPO TIKTOK_QUARANTINE_REPO TIKTOK_RELEASE_REPO") == 3
+    )
+    assert 'TIKTOK_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-dev-tiktok-acquire-quarantine"' in body
+    assert 'TIKTOK_RELEASE_REPO="$ECR_REGISTRY/teamagent-dev-tiktok-acquire"' in body
+    assert body.count('--registry-id "$EXPECTED_ACCOUNT_ID"') >= 7
+    assert (
+        "docker login --username AWS --password-stdin "
+        '"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"'
+    ) in body
+    assert body.count("unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY") == 4
+    assert body.count('export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"') == 4

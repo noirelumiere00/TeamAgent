@@ -1,0 +1,145 @@
+{
+  "schema_version": 3,
+  "release": {
+    "ready": true,
+    "blocked_reason": ""
+  },
+  "receipt": {
+    "schema_version": 1,
+    "entries": [
+      {
+        "key": "base.builder.arm64.digest",
+        "component": "builder-base",
+        "evidence": "base_image_digest",
+        "value_kind": "sha256_digest",
+        "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "build_arg": "NODE_IMAGE_DIGEST",
+        "oci_label": "io.teamagent.build.base-builder-arm64-digest",
+        "dockerfile_uses": [
+          "cgr.dev/chainguard/python@${NODE_IMAGE_DIGEST}"
+        ]
+      },
+      {
+        "key": "base.runtime.arm64.digest",
+        "component": "runtime-base",
+        "evidence": "base_image_digest",
+        "value_kind": "sha256_digest",
+        "value": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "build_arg": "WOLFI_RUNTIME_IMAGE_DIGEST",
+        "oci_label": "io.teamagent.build.base-runtime-arm64-digest",
+        "dockerfile_uses": [
+          "cgr.dev/chainguard/wolfi-base@${WOLFI_RUNTIME_IMAGE_DIGEST}"
+        ]
+      },
+      {
+        "key": "binary.chromium.sha256",
+        "component": "chromium",
+        "evidence": "binary_sha256",
+        "value_kind": "sha256",
+        "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "build_arg": "CHROMIUM_BINARY_SHA256",
+        "oci_label": "io.teamagent.build.binary-chromium-sha256",
+        "dockerfile_uses": [
+          "echo \"${CHROMIUM_BINARY_SHA256}  /usr/bin/chromium\" | sha256sum -c -"
+        ]
+      },
+      {
+        "key": "binary.ffmpeg.sha256",
+        "component": "ffmpeg",
+        "evidence": "binary_sha256",
+        "value_kind": "sha256",
+        "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "build_arg": "FFMPEG_BINARY_SHA256",
+        "oci_label": "io.teamagent.build.binary-ffmpeg-sha256",
+        "dockerfile_uses": [
+          "echo \"${FFMPEG_BINARY_SHA256}  /usr/bin/ffmpeg\" | sha256sum -c -"
+        ]
+      },
+      {
+        "key": "binary.node.sha256",
+        "component": "node",
+        "evidence": "binary_sha256",
+        "value_kind": "sha256",
+        "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "build_arg": "NODE_BINARY_SHA256",
+        "oci_label": "io.teamagent.build.binary-node-sha256",
+        "dockerfile_uses": [
+          "echo \"${NODE_BINARY_SHA256}  /usr/bin/node\" | sha256sum -c -"
+        ]
+      },
+      {
+        "key": "binary.python.sha256",
+        "component": "python",
+        "evidence": "binary_sha256",
+        "value_kind": "sha256",
+        "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "build_arg": "PYTHON_BINARY_SHA256",
+        "oci_label": "io.teamagent.build.binary-python-sha256",
+        "dockerfile_uses": [
+          "echo \"${PYTHON_BINARY_SHA256}  /usr/bin/python3.14\" | sha256sum -c -"
+        ]
+      },
+      {
+        "key": "model.e5.revision",
+        "component": "e5",
+        "evidence": "model_revision",
+        "value_kind": "git_sha1",
+        "value": "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3",
+        "build_arg": "E5_MODEL_REVISION",
+        "oci_label": "io.teamagent.build.e5-model-revision",
+        "dockerfile_uses": [
+          "revision=os.environ['TEAMAGENT_E5_MODEL_REVISION']",
+          "printf '%s' \"$E5_MODEL_REVISION\" > \"$MODEL_CACHE/refs/main\""
+        ]
+      },
+      {
+        "key": "package.chromium.version",
+        "component": "chromium",
+        "evidence": "package_version",
+        "value_kind": "package_version",
+        "value": "149.0.7827.53-r0",
+        "build_arg": "WOLFI_CHROMIUM_VERSION",
+        "oci_label": "io.teamagent.build.package-chromium-version",
+        "dockerfile_uses": [
+          "chromium=${WOLFI_CHROMIUM_VERSION}"
+        ]
+      },
+      {
+        "key": "package.ffmpeg.version",
+        "component": "ffmpeg",
+        "evidence": "package_version",
+        "value_kind": "package_version",
+        "value": "8.1.2-r2",
+        "build_arg": "WOLFI_FFMPEG_VERSION",
+        "oci_label": "io.teamagent.build.package-ffmpeg-version",
+        "dockerfile_uses": [
+          "ffmpeg-8.1=${WOLFI_FFMPEG_VERSION}"
+        ]
+      },
+      {
+        "key": "package.node.version",
+        "component": "node",
+        "evidence": "package_version",
+        "value_kind": "package_version",
+        "value": "24.18.0-r2",
+        "build_arg": "WOLFI_NODE_VERSION",
+        "oci_label": "io.teamagent.build.package-node-version",
+        "dockerfile_uses": [
+          "nodejs-24=${WOLFI_NODE_VERSION}"
+        ]
+      },
+      {
+        "key": "package.python.version",
+        "component": "python",
+        "evidence": "package_version",
+        "value_kind": "package_version",
+        "value": "3.14.6-r3",
+        "build_arg": "WOLFI_PYTHON_VERSION",
+        "oci_label": "io.teamagent.build.package-python-version",
+        "dockerfile_uses": [
+          "python-3.14=${WOLFI_PYTHON_VERSION}"
+        ]
+      }
+    ]
+  }
+}
