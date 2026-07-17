@@ -29,7 +29,9 @@ DATABASE_URL=... TEAMAGENT_SHARED_COMPANY_DOMAINS=vectorinc.co.jp \
 TEAMAGENT_MCP_BEARER=... TEAMAGENT_SHARED_COMPANY_DOMAINS=vectorinc.co.jp \
   uv run python scripts/smoke_mcp.py --base-url http://127.0.0.1:8787 --full
 ```
-期待: healthz=200 / bearer無=401 / tools=会社ナレッジ4のみ / search 200。
+期待: healthz=200 / bearer無=401 / search 200。`tools/list` は
+`infra/openclaw/effective-tool-scope.json` のうち現在の Terraform gate が有効な集合と一致し、
+余分・不足がないこと（「会社ナレッジ4のみ」という旧前提は廃止）。
 
 ## 手順3: 敵対ハーネス（詐称→無効化）
 ```sh

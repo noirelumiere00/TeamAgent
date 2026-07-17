@@ -1,0 +1,179 @@
+{
+  "schemaVersion": 1,
+  "authority": {
+    "openclawAllowlist": "infra/openclaw/openclaw.config.json5:mcp.servers.teamagent.toolFilter",
+    "backendRegistration": "src/teamagent/orchestrator/factory.py:build_production_tools",
+    "deploymentGates": "infra/terraform/fargate.tf:aws_ecs_task_definition.mcp",
+    "effectiveRule": "A tool is callable only when it is in the OpenClaw include list and the MCP backend registered it for the deployed task."
+  },
+  "tools": [
+    {
+      "name": "search",
+      "effect": "company-data-read",
+      "terraformGate": "always",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "clientkarte",
+      "effect": "company-data-read-analysis",
+      "terraformGate": "always",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "proposal_draft",
+      "effect": "company-data-read-generated-content",
+      "terraformGate": "always",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "proposal_review",
+      "effect": "company-data-read-analysis",
+      "terraformGate": "always",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "tiktok_search",
+      "effect": "external-read-scrape",
+      "terraformGate": "enable_scrape_tools",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "video_analysis",
+      "effect": "external-read-analysis",
+      "terraformGate": "enable_scrape_tools",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "video_algorithm",
+      "effect": "external-read-analysis-report-write",
+      "terraformGate": "enable_scrape_tools",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "video_approval",
+      "effect": "drive-read-analysis",
+      "terraformGate": "not-wired-in-authoritative-task",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "operation_log",
+      "effect": "slack-read-generated-content",
+      "terraformGate": "not-wired-in-authoritative-task",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "mail_summary",
+      "effect": "gmail-read",
+      "terraformGate": "USE_MAIL_SUMMARY_TOOL=true",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "mail_followup",
+      "effect": "gmail-read-analysis",
+      "terraformGate": "USE_FOLLOWUP_TOOL=true",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "mail_to_internal_context",
+      "effect": "gmail-read-company-data-read",
+      "terraformGate": "USE_MAIL_LINK_TOOL=true",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "mail_reply",
+      "effect": "gmail-draft-write-no-send",
+      "terraformGate": "USE_MAIL_REPLY_TOOL=true",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "mail_draft",
+      "effect": "gmail-draft-write-no-send",
+      "terraformGate": "USE_MAIL_DRAFT_TOOL=true",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "calendar_event",
+      "effect": "calendar-write-no-invite",
+      "terraformGate": "use_calendar_event_tool",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "schedule_propose",
+      "effect": "gmail-draft-write-calendar-tentative-write-no-send",
+      "terraformGate": "use_schedule_propose_tool",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "morning_digest",
+      "effect": "gmail-calendar-slack-read-analysis",
+      "terraformGate": "USE_MORNING_DIGEST_TOOL=true",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "oauth_connect",
+      "effect": "oauth-url-generation-no-token-write",
+      "terraformGate": "USE_OAUTH_CONNECT_TOOL=true",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "knowledge_deliver",
+      "effect": "drive-read-slack-file-delivery",
+      "terraformGate": "USE_KNOWLEDGE_DELIVER=true",
+      "defaultEnabledByTerraform": true
+    },
+    {
+      "name": "knowledge_search_url",
+      "effect": "url-generation",
+      "terraformGate": "not-wired-in-authoritative-task",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "tiktok_acquire",
+      "effect": "external-job-submit-s3-write",
+      "terraformGate": "enable_tiktok_acquire",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "tiktok_acquire_status",
+      "effect": "job-status-read",
+      "terraformGate": "enable_tiktok_acquire",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "x_voice_search",
+      "effect": "external-read-scrape",
+      "terraformGate": "enable_x_research",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "x_needs_mining",
+      "effect": "external-read-analysis",
+      "terraformGate": "enable_x_research",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "x_buzz_measure",
+      "effect": "external-job-submit-s3-write",
+      "terraformGate": "enable_x_research",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "x_buzz_measure_status",
+      "effect": "job-status-read",
+      "terraformGate": "enable_x_research",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "search_surface_check",
+      "effect": "external-read-analysis",
+      "terraformGate": "enable_x_research",
+      "defaultEnabledByTerraform": false
+    },
+    {
+      "name": "tiktok_comment_mining",
+      "effect": "external-read-scrape-analysis",
+      "terraformGate": "enable_x_research",
+      "defaultEnabledByTerraform": false
+    }
+  ]
+}

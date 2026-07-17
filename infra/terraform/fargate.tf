@@ -590,21 +590,36 @@ resource "aws_ecs_task_definition" "openclaw" {
   execution_role_arn = aws_iam_role.ecs_execution_openclaw.arn
   task_role_arn      = aws_iam_role.openclaw_task.arn
 
-  # §R(go-live): Fargate の空ボリュームは root 所有で、公式OpenClawイメージは非root(node uid1000)。
-  # readonly rootfs＋root所有volume だと node が /home/node/.openclaw に書けず crash（実測）。
-  # P1 は readonly rootfs と volume を外し、node が自分の HOME(書込み可ephemeral層)に state を持つ。
-  # ＝会話メモリはタスク再起動で揮発（既知のP1制限どおり）。readonly rootfs と state永続化は
-  # P2 で EFS access point(uid/gid 1000) で両立する（要 EFS 作成）。
+  # Fargate は linuxParameters.tmpfs をサポートしないため、task-scoped empty volume
+  # を /tmp にだけ mount する。イメージ側 /tmp は 01777、OpenClaw の可変 state/config
+  # は entrypoint が全て /tmp/teamagent-openclaw 配下に作る。root filesystem は read-only。
+  volume {
+    name = "openclaw-tmp"
+  }
+
   container_definitions = jsonencode([{
-    name      = "openclaw"
-    image     = var.openclaw_image
-    essential = true
-    # §S診断: Slack@mention無反応の切り分け用に debug ログを有効化（ソケット接続/イベント受信を可視化）。
-    # CMD(Dockerfile)に --log-level debug を前置（グローバルフラグはsubcommand前）。安定後は外す。
-    command = ["node", "dist/index.js", "--log-level", "debug", "gateway", "--bind", "loopback", "--port", "18789"]
+    name                   = "openclaw"
+    image                  = var.openclaw_image
+    essential              = true
+    readonlyRootFilesystem = true
+    user                   = "65532:65532"
+    privileged             = false
+    stopTimeout            = 30
+    # Fargate は dockerSecurityOptions/no-new-privileges を受理しない。虚偽の
+    # production 強制主張はせず、read-only rootfs + nonroot + cap drop で強制する。
+    linuxParameters = {
+      capabilities = {
+        drop = ["ALL"]
+      }
+    }
+    mountPoints = [{
+      sourceVolume  = "openclaw-tmp"
+      containerPath = "/tmp"
+      readOnly      = false
+    }]
+    # command/entryPoint は上書きせず、検証済み image の canonical CMD/ENTRYPOINT を使う。
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
-      { name = "OPENCLAW_CONFIG_PATH", value = "/opt/teamagent/openclaw.json" },
       # §U: DM 許可リスト（カンマ区切り Slack user_id）。entrypoint が起動時に allowFrom へ注入。
       # メンバー追加は本 var を編集 + apply（task 再デプロイ）だけ＝image rebuild 不要・15名まで可動。
       { name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist },
@@ -615,13 +630,13 @@ resource "aws_ecs_task_definition" "openclaw" {
       { name = "SLACK_APP_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_app.arn },
       { name = "OPENCLAW_GATEWAY_TOKEN", valueFrom = data.aws_secretsmanager_secret.gateway_token.arn },
     ]
-    # §O: gateway healthz（loopback:18789）。docker-compose.yml:77-86 と同形（curl 非同梱のため node fetch）。
+    # canonical readiness endpoint。curl 非同梱のため distroless Node で確認する。
     healthCheck = {
       command = [
         "CMD",
         "node",
         "-e",
-        "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
       ]
       interval    = 30
       timeout     = 5

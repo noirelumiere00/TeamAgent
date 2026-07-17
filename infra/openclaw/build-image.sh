@@ -62,11 +62,27 @@ image_repository=${IMAGE_REF%:*}
 EVIDENCE_DIR=${EVIDENCE_DIR:-"${MANIFEST_PATH%.json}.evidence"}
 [[ "$EVIDENCE_DIR" != "$MANIFEST_PATH" ]] || fail "evidence directory must differ from manifest path"
 
-for command in docker jq sha256sum trivy; do
+for command in docker jq python3 sha256sum trivy; do
   command -v "$command" >/dev/null || fail "required command not found: $command"
 done
+MANIFEST_PATH=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$MANIFEST_PATH")
+EVIDENCE_DIR=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$EVIDENCE_DIR")
+[[ "$EVIDENCE_DIR" != "$MANIFEST_PATH" ]] || fail "evidence directory must differ from manifest path"
+[[ ! -L "$MANIFEST_PATH" && ! -L "$MANIFEST_PATH.sha256" ]] || \
+  fail "manifest output path must not be a symlink"
+[[ "$(dirname -- "$MANIFEST_PATH")" == "$(dirname -- "$EVIDENCE_DIR")" ]] || \
+  fail "evidence directory must be a sibling of the release manifest"
+EVIDENCE_MANIFEST_PREFIX=$(basename -- "$EVIDENCE_DIR")
+[[ "$EVIDENCE_MANIFEST_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]] || \
+  fail "evidence directory basename contains unsafe characters"
 docker buildx version >/dev/null 2>&1 || fail "docker buildx is unavailable"
 jq -e '.schemaVersion == 1' "$LOCK_FILE" >/dev/null || fail "invalid plugins lock"
+EXPECTED_BUILDX_VERSION=$(jq -r '.tooling.buildx.version' "$LOCK_FILE")
+BUILDX_VERSION=$(docker buildx version | awk '{print $2}')
+if [[ "$BUILDX_VERSION" != "v$EXPECTED_BUILDX_VERSION" &&
+      "$BUILDX_VERSION" != "v$EXPECTED_BUILDX_VERSION-"* ]]; then
+  fail "Docker Buildx v$EXPECTED_BUILDX_VERSION is required (found $BUILDX_VERSION)"
+fi
 EXPECTED_TRIVY_VERSION=$(jq -r '.tooling.trivy.version' "$LOCK_FILE")
 TRIVY_VERSION=$(trivy --version --format json | jq -er '.Version')
 [[ "$TRIVY_VERSION" == "$EXPECTED_TRIVY_VERSION" ]] || \
@@ -74,8 +90,10 @@ TRIVY_VERSION=$(trivy --version --format json | jq -er '.Version')
 
 SOURCE_COMMIT=${SOURCE_COMMIT:-}
 SOURCE_BRANCH=${SOURCE_BRANCH:-}
+SOURCE_URI=${SOURCE_URI:-https://github.com/noirelumiere00/teamagent}
 SOURCE_ARCHIVE_SHA256=${SOURCE_ARCHIVE_SHA256:-}
 SOURCE_ARTIFACT_VERSION=${SOURCE_ARTIFACT_VERSION:-}
+ATTESTATION_BUILDER_ID=${ATTESTATION_BUILDER_ID:-}
 if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]] || \
     fail "refusing to build a dirty or untracked source tree"
@@ -95,6 +113,8 @@ fi
 
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_COMMIT must be a full lowercase Git SHA"
 [[ "$SOURCE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "SOURCE_BRANCH contains unsafe characters"
+[[ "$SOURCE_URI" == "https://github.com/noirelumiere00/teamagent" ]] || \
+  fail "SOURCE_URI must identify the reviewed repository"
 [[ "$SOURCE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
   fail "SOURCE_ARCHIVE_SHA256 must be a lowercase SHA-256"
 [[ -n "$SOURCE_ARTIFACT_VERSION" && ${#SOURCE_ARTIFACT_VERSION} -le 1024 ]] || \
@@ -103,6 +123,10 @@ fi
   fail "SOURCE_ARTIFACT_VERSION contains unsafe characters"
 expected_tag="git-${SOURCE_COMMIT:0:12}"
 [[ "$image_tag" == "$expected_tag" ]] || fail "image tag must be $expected_tag"
+if ((PUSH)); then
+  [[ "$ATTESTATION_BUILDER_ID" =~ ^https://[^[:space:]]+$ ]] || \
+    fail "ATTESTATION_BUILDER_ID must be an explicit https URI for --push"
+fi
 
 OPENCLAW_VERSION=$(jq -r '.openclaw.version' "$LOCK_FILE")
 OPENCLAW_ARM64_DIGEST=$(jq -r '.openclaw.linuxArm64Digest' "$LOCK_FILE")
@@ -111,6 +135,12 @@ DOCKERFILE_FRONTEND_DIGEST=$(jq -r '.tooling.dockerfileFrontend.digest' "$LOCK_F
 SBOM_ATTESTATION_GENERATOR=$(jq -r '.tooling.sbomGenerator | .image + "@" + .linuxArm64Digest' "$LOCK_FILE")
 PLUGINS_LOCK_SHA256=$(sha256sum "$LOCK_FILE" | cut -d' ' -f1)
 DOCKERFILE_SHA256=$(sha256sum "$DOCKERFILE" | cut -d' ' -f1)
+EXPECTED_MATERIAL_DIGESTS=$(jq -c '[
+  (.tooling.dockerfileFrontend.digest | sub("^sha256:"; "")),
+  (.runtime.linuxArm64Digest | sub("^sha256:"; "")),
+  (.openclaw.linuxArm64Digest | sub("^sha256:"; "")),
+  (.plugins[].sha256)
+] | unique | sort' "$LOCK_FILE")
 for pin in "$OPENCLAW_VERSION" "$OPENCLAW_ARM64_DIGEST" "$DISTROLESS_ARM64_DIGEST" "$DOCKERFILE_FRONTEND_DIGEST"; do
   grep -F -- "$pin" "$DOCKERFILE" >/dev/null || fail "Dockerfile does not contain lock pin: $pin"
 done
@@ -121,6 +151,7 @@ build=(docker buildx build --platform linux/arm64 --pull -f "$DOCKERFILE"
   --build-arg "DISTROLESS_ARM64_DIGEST=$DISTROLESS_ARM64_DIGEST"
   --build-arg "GIT_COMMIT=$SOURCE_COMMIT"
   --build-arg "GIT_BRANCH=$SOURCE_BRANCH"
+  --build-arg "SOURCE_URI=$SOURCE_URI"
   --build-arg "SOURCE_ARCHIVE_SHA256=$SOURCE_ARCHIVE_SHA256"
   --build-arg "SOURCE_ARTIFACT_VERSION=$SOURCE_ARTIFACT_VERSION"
   --build-arg "PLUGINS_LOCK_SHA256=$PLUGINS_LOCK_SHA256"
@@ -139,9 +170,13 @@ export TRIVY_DB_REPOSITORY=${TRIVY_DB_REPOSITORY:-public.ecr.aws/aquasecurity/tr
 
 INDEX_DIGEST=""
 ATTESTATION_DIGEST=""
+REGISTRY_PROVENANCE_PATH=""
+REGISTRY_SBOM_PATH=""
 if ((PUSH)); then
   "${build[@]}" --metadata-file "$tmp_dir/build-metadata.json" \
-    --provenance=mode=max --sbom="generator=$SBOM_ATTESTATION_GENERATOR" --push "$REPO_ROOT"
+    --attest "type=provenance,mode=max,builder-id=$ATTESTATION_BUILDER_ID" \
+    --attest "type=sbom,generator=$SBOM_ATTESTATION_GENERATOR" \
+    --push "$REPO_ROOT"
   INDEX_DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" | awk '$1 == "Digest:" {print $2; exit}')
   [[ "$INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "could not resolve pushed OCI index digest"
   raw_index=$(docker buildx imagetools inspect "$IMAGE_REF" --raw)
@@ -161,6 +196,54 @@ if ((PUSH)); then
       startswith("https://slsa.dev/provenance/")
     ))
   ' <<<"$raw_attestation" >/dev/null || fail "pushed SBOM/provenance attestations are missing"
+
+  REGISTRY_PROVENANCE_PATH="$tmp_dir/registry-provenance.json"
+  REGISTRY_SBOM_PATH="$tmp_dir/registry-sbom.spdx.json"
+  docker buildx imagetools inspect "$IMAGE_REF" \
+    --format '{{ json .Provenance }}' >"$REGISTRY_PROVENANCE_PATH"
+  docker buildx imagetools inspect "$IMAGE_REF" \
+    --format '{{ json .SBOM }}' >"$REGISTRY_SBOM_PATH"
+  jq -e \
+    --arg builder "$ATTESTATION_BUILDER_ID" \
+    --arg commit "$SOURCE_COMMIT" \
+    --arg branch "$SOURCE_BRANCH" \
+    --arg sourceUri "$SOURCE_URI" \
+    --arg archive "$SOURCE_ARCHIVE_SHA256" \
+    --arg artifactVersion "$SOURCE_ARTIFACT_VERSION" \
+    --arg frontendDigest "$DOCKERFILE_FRONTEND_DIGEST" \
+    --arg lock "$PLUGINS_LOCK_SHA256" \
+    --argjson expectedMaterials "$EXPECTED_MATERIAL_DIGESTS" '
+    [.. | objects |
+      select(
+        .buildType? == "https://mobyproject.org/buildkit@v1" and
+        (.builder? | type) == "object" and
+        (.invocation? | type) == "object"
+      )
+    ] as $predicates |
+    ($predicates | length) == 1 and
+    ($predicates[0] as $p |
+      $p.builder.id == $builder and
+      $p.invocation.configSource.entryPoint == "Dockerfile.openclaw" and
+      $p.invocation.environment.platform == "linux/arm64" and
+      $p.invocation.parameters.args["build-arg:GIT_COMMIT"] == $commit and
+      $p.invocation.parameters.args["build-arg:GIT_BRANCH"] == $branch and
+      $p.invocation.parameters.args["build-arg:SOURCE_URI"] == $sourceUri and
+      $p.invocation.parameters.args["build-arg:SOURCE_ARCHIVE_SHA256"] == $archive and
+      $p.invocation.parameters.args["build-arg:SOURCE_ARTIFACT_VERSION"] == $artifactVersion and
+      $p.invocation.parameters.args["build-arg:PLUGINS_LOCK_SHA256"] == $lock and
+      $p.invocation.parameters.args.source == ("docker/dockerfile:1.7@" + $frontendDigest) and
+      ([ $p.materials[]?.digest.sha256 ] | unique) as $actualMaterials |
+      ($expectedMaterials - $actualMaterials | length) == 0
+    )
+  ' "$REGISTRY_PROVENANCE_PATH" >/dev/null || \
+    fail "registry provenance source/builder/material validation failed"
+  jq -e '
+    [.. | objects | select(.spdxVersion? and (.packages? | type) == "array")] as $documents |
+    ($documents | length) == 1 and
+    ($documents[0].spdxVersion | startswith("SPDX-2.")) and
+    ($documents[0].packages | length) > 0 and
+    ($documents[0].documentDescribes | length) > 0
+  ' "$REGISTRY_SBOM_PATH" >/dev/null || fail "registry SPDX attestation payload validation failed"
   RUNTIME_REF="$image_repository@$ARM64_DIGEST"
   docker pull "$RUNTIME_REF" >/dev/null
 else
@@ -173,10 +256,38 @@ else
   RUNTIME_REF=$IMAGE_REF
 fi
 
+jq -e \
+  --arg builder "$ATTESTATION_BUILDER_ID" \
+  --arg commit "$SOURCE_COMMIT" \
+  --arg branch "$SOURCE_BRANCH" \
+  --arg sourceUri "$SOURCE_URI" \
+  --arg archive "$SOURCE_ARCHIVE_SHA256" \
+  --arg artifactVersion "$SOURCE_ARTIFACT_VERSION" \
+  --arg frontendDigest "$DOCKERFILE_FRONTEND_DIGEST" \
+  --arg lock "$PLUGINS_LOCK_SHA256" \
+  --argjson expectedMaterials "$EXPECTED_MATERIAL_DIGESTS" \
+  --argjson pushed "$PUSH" '
+  ."buildx.build.provenance" as $p |
+  $p.buildType == "https://mobyproject.org/buildkit@v1" and
+  (if $pushed == 1 then $p.builder.id == $builder else true end) and
+  $p.invocation.configSource.entryPoint == "Dockerfile.openclaw" and
+  $p.invocation.environment.platform == "linux/arm64" and
+  $p.invocation.parameters.args["build-arg:GIT_COMMIT"] == $commit and
+  $p.invocation.parameters.args["build-arg:GIT_BRANCH"] == $branch and
+  $p.invocation.parameters.args["build-arg:SOURCE_URI"] == $sourceUri and
+  $p.invocation.parameters.args["build-arg:SOURCE_ARCHIVE_SHA256"] == $archive and
+  $p.invocation.parameters.args["build-arg:SOURCE_ARTIFACT_VERSION"] == $artifactVersion and
+  $p.invocation.parameters.args["build-arg:PLUGINS_LOCK_SHA256"] == $lock and
+  $p.invocation.parameters.args.source == ("docker/dockerfile:1.7@" + $frontendDigest) and
+  ([ $p.materials[]?.digest.sha256 ] | unique) as $actualMaterials |
+  ($expectedMaterials - $actualMaterials | length) == 0
+' "$tmp_dir/build-metadata.json" >/dev/null || fail "build metadata source/material validation failed"
+
 inspect_json=$(docker image inspect "$RUNTIME_REF")
 jq -e \
   --arg commit "$SOURCE_COMMIT" \
   --arg branch "$SOURCE_BRANCH" \
+  --arg sourceUri "$SOURCE_URI" \
   --arg archive "$SOURCE_ARCHIVE_SHA256" \
   --arg artifactVersion "$SOURCE_ARTIFACT_VERSION" \
   --arg lock "$PLUGINS_LOCK_SHA256" \
@@ -185,6 +296,7 @@ jq -e \
    .[0].Config.User == "65532:65532" and
    .[0].Config.Volumes["/tmp"] == {} and
    ([.[0].Config.Env[] | select(test("^(SLACK_BOT_TOKEN|SLACK_APP_TOKEN|OPENCLAW_GATEWAY_TOKEN|TEAMAGENT_MCP_BEARER)="))] | length) == 0 and
+   .[0].Config.Labels["org.opencontainers.image.source"] == $sourceUri and
    .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
    .[0].Config.Labels["io.teamagent.source.branch"] == $branch and
    .[0].Config.Labels["io.teamagent.source.archive.sha256"] == $archive and
@@ -231,17 +343,20 @@ docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges --entrypoint /nodejs/bin/node "$RUNTIME_REF" -e '
 const fs=require("fs"),path=require("path");
 const forbiddenNames=new Set([
-  "@openclaw/browser-plugin","@typescript/native-preview","esbuild","jscpd",
+  "@openclaw/browser-plugin","@typescript/native-preview","esbuild","jiti","jscpd",
   "oxfmt","oxlint","oxlint-tsgolint","playwright","playwright-core",
   "rolldown","rollup","ts-node","tsdown","tsx","typescript","vite","vitest",
 ]);
-const forbiddenPrefixes=["@esbuild/","@openai/codex","@rolldown/","@rollup/","@vitest/"];
+const forbiddenPrefixes=[
+  "@esbuild/","@openai/codex","@rolldown/","@rollup/","@types/","@vitest/",
+];
 const isForbidden=name=>
   forbiddenNames.has(name)||forbiddenPrefixes.some(prefix=>name.startsWith(prefix));
 const forbiddenPaths=[
   "/bin/sh","/bin/bash","/usr/bin/npm","/usr/local/bin/npm",
   "/usr/local/lib/node_modules/npm","/app/node_modules/npm",
   "/app/node_modules/corepack","/app/node_modules/.bin","/app/node_modules/.pnpm",
+  "/app/node_modules/jiti","/app/node_modules/@types",
   "/app/node_modules/playwright","/app/node_modules/playwright-core",
   "/app/dist/extensions/browser","/app/dist/extensions/codex",
   "/app/dist/extensions/codex-supervisor","/ms-playwright",
@@ -255,9 +370,23 @@ const presentPaths=forbiddenPaths.filter(candidate=>{
   }
 });
 const packages=[];
+const packageInstances=[];
 const forbiddenPackages=[];
 const forbiddenDeclarations=[];
+const nonRootBinDeclarations=[];
 const danglingSymlinks=[];
+const developmentPayload=[];
+const browserImplementationArtifacts=[];
+const developmentDirectoryPattern=/^(?:__fixtures__|__snapshots__|__tests__|bench(?:marks?)?|coverage|examples?|fixtures?|specs?|tests?)$/iu;
+const developmentFilePatterns=[
+  /\.(?:d\.)?(?:cts|mts|ts|tsx)$/iu,
+  /\.map$/iu,
+  /\.(?:bench|benchmark|test|spec)\.(?:cjs|js|jsx|mjs|ts|tsx)$/iu,
+  /^(?:bench|benchmark|test|tests|spec)\.(?:cjs|js|jsx|mjs|ts|tsx)$/iu,
+  /\.snap$/iu,
+  /\.flow$/iu,
+  /^(?:tsconfig(?:\.[^.]+)?\.json|vite\.config\..+|vitest\.config\..+)$/iu,
+];
 function inventory(root){
   let stat;
   try{stat=fs.lstatSync(root)}catch(error){
@@ -271,13 +400,45 @@ function inventory(root){
     }
     return;
   }
+  if(stat.isFile()){
+    const basename=path.basename(root);
+    if(developmentFilePatterns.some(pattern=>pattern.test(basename))){
+      developmentPayload.push(root);
+    }
+    if(
+      root.startsWith("/app/dist/")&&
+      /\.(?:c|m)?js$/u.test(root)
+    ){
+      const source=fs.readFileSync(root,"utf8");
+      if(
+        source.includes("//#region extensions/browser/")||
+        source.includes("function registerBrowserPlugin(")||
+        source.includes("registerBrowserCli(program")
+      ) browserImplementationArtifacts.push(root);
+    }
+    return;
+  }
   if(!stat.isDirectory())return;
+  if(developmentDirectoryPattern.test(path.basename(root))){
+    developmentPayload.push(`${root}/`);
+    return;
+  }
   try{
     const packagePath=path.join(root,"package.json");
     const metadata=JSON.parse(fs.readFileSync(packagePath,"utf8"));
-    if(metadata.name&&metadata.version)packages.push(`${metadata.name}@${metadata.version}`);
+    if(metadata.name&&metadata.version){
+      packages.push(`${metadata.name}@${metadata.version}`);
+      packageInstances.push({
+        path:packagePath.replace(/^\/+/u,""),
+        name:metadata.name,
+        version:metadata.version,
+      });
+    }
     if(isForbidden(metadata.name||"")){
       forbiddenPackages.push({path:root,name:metadata.name,version:metadata.version||null});
+    }
+    if(metadata.bin&&packagePath!=="/app/package.json"){
+      nonRootBinDeclarations.push({path:packagePath,name:metadata.name||null,bin:metadata.bin});
     }
     for(const section of [
       "dependencies","optionalDependencies","devDependencies",
@@ -294,14 +455,44 @@ function inventory(root){
 }
 inventory("/app");
 inventory("/opt/teamagent");
-console.log(JSON.stringify({
+let jitiResolvable=false;
+try{require.resolve("jiti",{paths:["/app"]});jitiResolvable=true}catch(error){
+  if(error.code!=="MODULE_NOT_FOUND")throw error;
+}
+const cliMetadata=JSON.parse(fs.readFileSync("/app/dist/cli-startup-metadata.json","utf8"));
+const browserHelpMetadataPresent=
+  Object.hasOwn(cliMetadata,"browserHelpText")||
+  Object.hasOwn(cliMetadata,"browserHelpSourceSignature");
+const pruneReport=JSON.parse(
+  fs.readFileSync("/opt/teamagent/runtime-prune-report.json","utf8"),
+);
+const pruneReportValid=
+  pruneReport.schemaVersion===1&&
+  pruneReport.browser.residualUnreachableBrowserCandidates===0&&
+  pruneReport.browser.reachableRegistrationChunks===0&&
+  pruneReport.browser.cliHelpMetadataRemoved===true&&
+  pruneReport.packages.residualForbidden===0&&
+  pruneReport.packages.residualNonRootBinDeclarations===0&&
+  pruneReport.developmentPayload.residualPathCount===0;
+packageInstances.sort((left,right)=>
+  left.path.localeCompare(right.path)||
+  left.name.localeCompare(right.name)||
+  left.version.localeCompare(right.version)
+);
+fs.writeFileSync(1,JSON.stringify({
   node:process.version,uid:process.getuid(),gid:process.getgid(),
   execve:typeof process.execve,packages:[...new Set(packages)].sort(),
-  presentPaths,forbiddenPackages,forbiddenDeclarations,danglingSymlinks,
-}));
+  packageInstances,presentPaths,forbiddenPackages,forbiddenDeclarations,
+  nonRootBinDeclarations,danglingSymlinks,developmentPayload,
+  browserImplementationArtifacts,browserHelpMetadataPresent,jitiResolvable,
+  pruneReport,
+})+"\n");
 process.exit(
   presentPaths.length===0&&forbiddenPackages.length===0&&
-  forbiddenDeclarations.length===0&&danglingSymlinks.length===0&&
+  forbiddenDeclarations.length===0&&nonRootBinDeclarations.length===0&&
+  danglingSymlinks.length===0&&developmentPayload.length===0&&
+  browserImplementationArtifacts.length===0&&!browserHelpMetadataPresent&&
+  !jitiResolvable&&pruneReportValid&&
   process.getuid()===65532&&process.getgid()===65532&&
   typeof process.execve==="function"?0:1
 );' >"$tmp_dir/runtime-probe.json" || fail "distroless/nonroot/runtime inventory contract failed"
@@ -316,6 +507,16 @@ jq -n \
   --slurpfile probe "$tmp_dir/runtime-probe.json" \
   '{schemaVersion:1,subject:{platform:"linux/arm64",manifestDigest:$manifestDigest,imageId:$imageId,configDigest:$configDigest,rootfs:{diffIds:$diffIds,sha256:$rootfsSha256}},runtime:$probe[0]}' \
   >"$EVIDENCE_DIR/runtime-inventory.json"
+
+python3 "$REPO_ROOT/tests/scripts/test_openclaw_runtime_image.py" \
+  --image "$RUNTIME_REF" \
+  --output "$EVIDENCE_DIR/actual-image-contract.json"
+jq -e --arg imageId "$IMAGE_ID" '
+  .schemaVersion == 1 and
+  .imageId == $imageId and
+  ([.checks[] | select(. != true)] | length) == 0
+' "$EVIDENCE_DIR/actual-image-contract.json" >/dev/null || \
+  fail "dedicated actual-image contract report failed"
 
 run_args=(--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges
   --tmpfs /tmp:rw,noexec,nosuid,size=512m
@@ -400,6 +601,19 @@ jq -e --arg version "$OPENCLAW_VERSION" '
   ([.plugins[] | select(.id == "browser" and .status == "loaded")] | length) == 0' \
   "$tmp_dir/plugins.json" >/dev/null || fail "Slack/Bedrock plugin compatibility smoke failed"
 
+if docker run "${run_args[@]}" "$RUNTIME_REF" /app/openclaw.mjs browser --help \
+  >"$tmp_dir/browser-help.log" 2>&1; then
+  fail "browser CLI help unexpectedly succeeded"
+else
+  browser_help_exit=$?
+fi
+[[ "$browser_help_exit" != 0 ]] || fail "browser CLI must be unavailable"
+if grep -E -i 'Manage OpenClaw.s dedicated browser|Playwright|browser (status|start|tabs|snapshot)' \
+  "$tmp_dir/browser-help.log" >/dev/null; then
+  cat "$tmp_dir/browser-help.log" >&2
+  fail "browser fast-path help payload remains executable"
+fi
+
 gateway_args=(-d --network none --read-only --cap-drop ALL --security-opt no-new-privileges
   --tmpfs /tmp:rw,noexec,nosuid,size=512m
   -e SLACK_BOT_TOKEN=xoxb-offline-smoke
@@ -464,16 +678,44 @@ jq -e \
   ([.metadata.component.properties[] |
     select(.name == "aquasecurity:trivy:ImageID") | .value] == [$imageId]) and
   (([.metadata.component.properties[] |
-    select(.name == "aquasecurity:trivy:DiffID") | .value] | sort) == ($diffIds | sort))
+    select(.name == "aquasecurity:trivy:DiffID") | .value] | sort) == ($diffIds | sort)) and
+  .bomFormat == "CycloneDX" and
+  (.specVersion | test("^1\\.[0-9]+$")) and
+  ([.components[]?."bom-ref"] as $refs |
+    ($refs | length) == ($refs | unique | length)) and
+  (
+    ([.components[]?."bom-ref", .metadata.component."bom-ref"] |
+      map(select(. != null)) | unique) as $knownRefs |
+    ([.dependencies[]? | .ref, .dependsOn[]?] |
+      map(select(. != null)) - $knownRefs | length) == 0
+  )
 ' "$EVIDENCE_DIR/sbom.cdx.json" >/dev/null || fail "SBOM subject/generator does not match runtime image"
 jq '[
   .components[] |
   select((.purl? != null) and (.purl | startswith("pkg:npm/"))) |
-  (((if (.group // "") == "" then "" else (.group + "/") end) + .name) + "@" + .version)
-] | unique | sort' "$EVIDENCE_DIR/sbom.cdx.json" >"$tmp_dir/sbom-packages.json"
-jq -e --slurpfile sbom "$tmp_dir/sbom-packages.json" \
-  '.runtime.packages == $sbom[0]' "$EVIDENCE_DIR/runtime-inventory.json" >/dev/null || \
-  fail "SBOM npm inventory does not exactly match physical runtime packages"
+  {
+    path: (
+      [.properties[]? |
+        select(.name == "aquasecurity:trivy:FilePath") |
+        .value
+      ] |
+      if length == 1 then .[0] else
+        error("npm component must have exactly one Trivy FilePath")
+      end
+    ),
+    name: (
+      (if (.group // "") == "" then "" else (.group + "/") end) + .name
+    ),
+    version: .version
+  }
+] | sort_by(.path, .name, .version)' \
+  "$EVIDENCE_DIR/sbom.cdx.json" >"$EVIDENCE_DIR/sbom-npm-inventory.json"
+jq -e --slurpfile sbom "$EVIDENCE_DIR/sbom-npm-inventory.json" '
+  (.runtime.packageInstances | sort_by(.path, .name, .version)) ==
+    ($sbom[0] | sort_by(.path, .name, .version)) and
+  (.runtime.packageInstances | length) == ($sbom[0] | length)
+' "$EVIDENCE_DIR/runtime-inventory.json" >/dev/null || \
+  fail "SBOM npm path/name/version multiset does not exactly match the physical runtime"
 
 trivy --cache-dir "$TRIVY_CACHE_DIR" image --quiet --scanners vuln \
   --severity CRITICAL,HIGH --format json \
@@ -502,20 +744,37 @@ jq -S . "$tmp_dir/build-metadata.json" >"$EVIDENCE_DIR/build-metadata.json"
 jq -S . "$tmp_dir/config.json" >"$EVIDENCE_DIR/config-validation.json"
 jq -S . "$tmp_dir/plugins.json" >"$EVIDENCE_DIR/plugins.json"
 cp "$tmp_dir/gateway.log" "$EVIDENCE_DIR/gateway.log"
+cp "$tmp_dir/browser-help.log" "$EVIDENCE_DIR/browser-help.log"
+if ((PUSH)); then
+  jq -S . "$REGISTRY_PROVENANCE_PATH" >"$EVIDENCE_DIR/registry-provenance.json"
+  jq -S . "$REGISTRY_SBOM_PATH" >"$EVIDENCE_DIR/registry-sbom.spdx.json"
+fi
 
 RUNTIME_NODE=$(jq -er '.runtime.node' "$EVIDENCE_DIR/runtime-inventory.json")
 RUNTIME_UID=$(jq -er '.runtime.uid' "$EVIDENCE_DIR/runtime-inventory.json")
 RUNTIME_GID=$(jq -er '.runtime.gid' "$EVIDENCE_DIR/runtime-inventory.json")
 RUNTIME_PACKAGE_COUNT=$(jq -er '.runtime.packages | length' "$EVIDENCE_DIR/runtime-inventory.json")
+RUNTIME_PACKAGE_INSTANCE_COUNT=$(jq -er '.runtime.packageInstances | length' "$EVIDENCE_DIR/runtime-inventory.json")
 SBOM_COMPONENT_COUNT=$(jq -er '.components | length' "$EVIDENCE_DIR/sbom.cdx.json")
+SBOM_NPM_INSTANCE_COUNT=$(jq -er 'length' "$EVIDENCE_DIR/sbom-npm-inventory.json")
+SBOM_FORMAT=$(jq -er '.bomFormat + " " + .specVersion' "$EVIDENCE_DIR/sbom.cdx.json")
 INVENTORY_SHA256=$(sha256sum "$EVIDENCE_DIR/runtime-inventory.json" | cut -d' ' -f1)
 SBOM_SHA256=$(sha256sum "$EVIDENCE_DIR/sbom.cdx.json" | cut -d' ' -f1)
+SBOM_NPM_INVENTORY_SHA256=$(sha256sum "$EVIDENCE_DIR/sbom-npm-inventory.json" | cut -d' ' -f1)
 VULNERABILITY_SCAN_SHA256=$(sha256sum "$EVIDENCE_DIR/vulnerabilities.json" | cut -d' ' -f1)
 SECRET_SCAN_SHA256=$(sha256sum "$EVIDENCE_DIR/secrets.json" | cut -d' ' -f1)
 BUILD_METADATA_SHA256=$(sha256sum "$EVIDENCE_DIR/build-metadata.json" | cut -d' ' -f1)
 CONFIG_VALIDATION_SHA256=$(sha256sum "$EVIDENCE_DIR/config-validation.json" | cut -d' ' -f1)
 PLUGINS_SHA256=$(sha256sum "$EVIDENCE_DIR/plugins.json" | cut -d' ' -f1)
 GATEWAY_LOG_SHA256=$(sha256sum "$EVIDENCE_DIR/gateway.log" | cut -d' ' -f1)
+BROWSER_HELP_LOG_SHA256=$(sha256sum "$EVIDENCE_DIR/browser-help.log" | cut -d' ' -f1)
+ACTUAL_IMAGE_CONTRACT_SHA256=$(sha256sum "$EVIDENCE_DIR/actual-image-contract.json" | cut -d' ' -f1)
+REGISTRY_PROVENANCE_SHA256=""
+REGISTRY_SBOM_SHA256=""
+if ((PUSH)); then
+  REGISTRY_PROVENANCE_SHA256=$(sha256sum "$EVIDENCE_DIR/registry-provenance.json" | cut -d' ' -f1)
+  REGISTRY_SBOM_SHA256=$(sha256sum "$EVIDENCE_DIR/registry-sbom.spdx.json" | cut -d' ' -f1)
+fi
 
 mkdir -p "$(dirname -- "$MANIFEST_PATH")"
 jq -n \
@@ -530,6 +789,7 @@ jq -n \
   --argjson rootfsDiffIds "$ROOTFS_DIFF_IDS" \
   --arg sourceCommit "$SOURCE_COMMIT" \
   --arg sourceBranch "$SOURCE_BRANCH" \
+  --arg sourceUri "$SOURCE_URI" \
   --arg sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" \
   --arg sourceArtifactVersion "$SOURCE_ARTIFACT_VERSION" \
   --arg dockerfileSha256 "$DOCKERFILE_SHA256" \
@@ -538,30 +798,45 @@ jq -n \
   --arg trivyVersion "$TRIVY_VERSION" \
   --arg sbomAttestationGenerator "$SBOM_ATTESTATION_GENERATOR" \
   --arg attestationDigest "$ATTESTATION_DIGEST" \
+  --arg attestationBuilderId "$ATTESTATION_BUILDER_ID" \
+  --arg buildxVersion "$BUILDX_VERSION" \
   --arg runtimeNode "$RUNTIME_NODE" \
   --argjson runtimeUid "$RUNTIME_UID" \
   --argjson runtimeGid "$RUNTIME_GID" \
   --argjson runtimePackageCount "$RUNTIME_PACKAGE_COUNT" \
+  --argjson runtimePackageInstanceCount "$RUNTIME_PACKAGE_INSTANCE_COUNT" \
   --argjson sbomComponentCount "$SBOM_COMPONENT_COUNT" \
-  --arg inventoryPath "$EVIDENCE_DIR/runtime-inventory.json" \
+  --argjson sbomNpmInstanceCount "$SBOM_NPM_INSTANCE_COUNT" \
+  --arg sbomFormat "$SBOM_FORMAT" \
+  --arg inventoryPath "$EVIDENCE_MANIFEST_PREFIX/runtime-inventory.json" \
   --arg inventorySha256 "$INVENTORY_SHA256" \
-  --arg sbomPath "$EVIDENCE_DIR/sbom.cdx.json" \
+  --arg sbomPath "$EVIDENCE_MANIFEST_PREFIX/sbom.cdx.json" \
   --arg sbomSha256 "$SBOM_SHA256" \
-  --arg vulnerabilityPath "$EVIDENCE_DIR/vulnerabilities.json" \
+  --arg sbomNpmInventoryPath "$EVIDENCE_MANIFEST_PREFIX/sbom-npm-inventory.json" \
+  --arg sbomNpmInventorySha256 "$SBOM_NPM_INVENTORY_SHA256" \
+  --arg vulnerabilityPath "$EVIDENCE_MANIFEST_PREFIX/vulnerabilities.json" \
   --arg vulnerabilitySha256 "$VULNERABILITY_SCAN_SHA256" \
-  --arg secretPath "$EVIDENCE_DIR/secrets.json" \
+  --arg secretPath "$EVIDENCE_MANIFEST_PREFIX/secrets.json" \
   --arg secretSha256 "$SECRET_SCAN_SHA256" \
-  --arg buildMetadataPath "$EVIDENCE_DIR/build-metadata.json" \
+  --arg buildMetadataPath "$EVIDENCE_MANIFEST_PREFIX/build-metadata.json" \
   --arg buildMetadataSha256 "$BUILD_METADATA_SHA256" \
-  --arg configValidationPath "$EVIDENCE_DIR/config-validation.json" \
+  --arg configValidationPath "$EVIDENCE_MANIFEST_PREFIX/config-validation.json" \
   --arg configValidationSha256 "$CONFIG_VALIDATION_SHA256" \
-  --arg pluginsPath "$EVIDENCE_DIR/plugins.json" \
+  --arg pluginsPath "$EVIDENCE_MANIFEST_PREFIX/plugins.json" \
   --arg pluginsSha256 "$PLUGINS_SHA256" \
-  --arg gatewayLogPath "$EVIDENCE_DIR/gateway.log" \
+  --arg gatewayLogPath "$EVIDENCE_MANIFEST_PREFIX/gateway.log" \
   --arg gatewayLogSha256 "$GATEWAY_LOG_SHA256" \
+  --arg browserHelpLogPath "$EVIDENCE_MANIFEST_PREFIX/browser-help.log" \
+  --arg browserHelpLogSha256 "$BROWSER_HELP_LOG_SHA256" \
+  --arg actualImageContractPath "$EVIDENCE_MANIFEST_PREFIX/actual-image-contract.json" \
+  --arg actualImageContractSha256 "$ACTUAL_IMAGE_CONTRACT_SHA256" \
+  --arg registryProvenancePath "$EVIDENCE_MANIFEST_PREFIX/registry-provenance.json" \
+  --arg registryProvenanceSha256 "$REGISTRY_PROVENANCE_SHA256" \
+  --arg registrySbomPath "$EVIDENCE_MANIFEST_PREFIX/registry-sbom.spdx.json" \
+  --arg registrySbomSha256 "$REGISTRY_SBOM_SHA256" \
   --argjson pushed "$PUSH" \
   '{
-    schemaVersion:2,
+    schemaVersion:3,
     createdAt:$createdAt,
     image:{
       requested:$image,runtimeRef:$runtimeRef,indexDigest:$indexDigest,
@@ -569,29 +844,53 @@ jq -n \
       rootfs:{diffIds:$rootfsDiffIds,sha256:$rootfsSha256}
     },
     source:{
-      commit:$sourceCommit,branch:$sourceBranch,archiveSha256:$sourceArchiveSha256,
+      uri:$sourceUri,commit:$sourceCommit,branch:$sourceBranch,archiveSha256:$sourceArchiveSha256,
       artifactVersion:$sourceArtifactVersion,dockerfileSha256:$dockerfileSha256,
       pluginsLockSha256:$pluginsLockSha256
     },
     runtime:{
       platform:"linux/arm64",openclawVersion:$openclawVersion,node:$runtimeNode,
       uid:$runtimeUid,gid:$runtimeGid,packageCount:$runtimePackageCount,
+      packageInstanceCount:$runtimePackageInstanceCount,
       forbiddenPackageOrPluginArtifacts:0,danglingSymlinks:0,
-      privilegedPathInventory:true,readOnlySmoke:true,
-      capDropAllSmoke:true,noNewPrivilegesSmoke:true,offlineGatewaySmoke:true,
+      developmentPayloadArtifacts:0,browserReachabilityValidated:true,
+      actualImageContractPassed:true,privilegedPathInventory:true,
+      localDockerReadOnlySmoke:true,localDockerCapDropAllSmoke:true,
+      localDockerNoNewPrivilegesSmoke:true,
+      fargateNoNewPrivilegesEnforced:false,
+      fargateWritablePaths:["/tmp"],offlineGatewaySmoke:true,
       readyzSmoke:true,sigtermExitPropagationSmoke:true
     },
     buildAttestations:{
+      registryPublished:($pushed == 1),
       provenance:($pushed == 1),sbom:($pushed == 1),
+      subjectValidated:($pushed == 1),
+      sourceValidated:($pushed == 1),
+      builderValidated:($pushed == 1),
+      builderId:(if $pushed == 1 then $attestationBuilderId else null end),
       manifestDigest:(if $pushed == 1 then $attestationDigest else null end),
-      sbomGenerator:(if $pushed == 1 then $sbomAttestationGenerator else null end)
+      sbomGenerator:(if $pushed == 1 then $sbomAttestationGenerator else null end),
+      signature:false,
+      buildxVersion:$buildxVersion,
+      localBuildMetadataSourceValidated:true,
+      provenanceEvidence:(if $pushed == 1 then
+        {path:$registryProvenancePath,sha256:$registryProvenanceSha256}
+      else null end),
+      sbomEvidence:(if $pushed == 1 then
+        {path:$registrySbomPath,sha256:$registrySbomSha256}
+      else null end)
     },
     sbom:{
-      format:"CycloneDX 1.6",generator:{name:"trivy",version:$trivyVersion},
+      format:$sbomFormat,generator:{name:"trivy",version:$trivyVersion},
       subjectImageId:$imageId,subjectConfigDigest:$configDigest,
       subjectManifestDigest:$arm64Digest,
       componentCount:$sbomComponentCount,
-      physicalNpmInventoryExactMatch:true,path:$sbomPath,sha256:$sbomSha256
+      npmPackageInstanceCount:$sbomNpmInstanceCount,
+      physicalNpmMultisetExactMatch:true,bomRefIntegrity:true,
+      path:$sbomPath,sha256:$sbomSha256,
+      npmInventoryEvidence:{
+        path:$sbomNpmInventoryPath,sha256:$sbomNpmInventorySha256
+      }
     },
     scan:{
       trivyVersion:$trivyVersion,subjectImageId:$imageId,subjectConfigDigest:$configDigest,
@@ -604,11 +903,16 @@ jq -n \
       buildMetadata:{path:$buildMetadataPath,sha256:$buildMetadataSha256},
       configValidation:{path:$configValidationPath,sha256:$configValidationSha256},
       plugins:{path:$pluginsPath,sha256:$pluginsSha256},
-      gatewayLog:{path:$gatewayLogPath,sha256:$gatewayLogSha256}
+      gatewayLog:{path:$gatewayLogPath,sha256:$gatewayLogSha256},
+      browserHelp:{path:$browserHelpLogPath,sha256:$browserHelpLogSha256},
+      actualImageContract:{
+        path:$actualImageContractPath,sha256:$actualImageContractSha256
+      }
     }
   }' \
   >"$MANIFEST_PATH"
 
 MANIFEST_SHA256=$(sha256sum "$MANIFEST_PATH" | cut -d' ' -f1)
-sha256sum "$MANIFEST_PATH" >"$MANIFEST_PATH.sha256"
+printf '%s  %s\n' "$MANIFEST_SHA256" "$(basename -- "$MANIFEST_PATH")" \
+  >"$MANIFEST_PATH.sha256"
 echo "[openclaw-build] PASS image=$RUNTIME_REF manifest=$MANIFEST_PATH manifest_sha256=$MANIFEST_SHA256"

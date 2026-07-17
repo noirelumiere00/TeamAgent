@@ -29,6 +29,10 @@
       "imageIndexDigest": "sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68",
       "linuxArm64Digest": "sha256:860305b3d1667c35142f11f6e9485e322c1c6173702a0831dc68739a34847f2d"
     },
+    "buildx": {
+      "version": "0.33.0",
+      "linuxArm64BinarySha256": "204dc28447d3bb48f42ed1ce5747e0885cd57e306506a39029311becdb1ef786"
+    },
     "trivy": {
       "version": "0.72.0",
       "linuxArm64ArchiveSha256": "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"

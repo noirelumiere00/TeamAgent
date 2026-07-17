@@ -4,7 +4,7 @@
 # 値は terraform.tfvars / 環境で上書き。秘密「値」はここに書かない（secret 名のみ）。
 
 variable "openclaw_image" {
-  description = "OpenClaw外殻イメージ（ECR・digest pin推奨。例: <url>@sha256:...）。空ならservice未作成相当"
+  description = "初回bootstrap専用のOpenClaw digest image。既存serviceはapply_openclaw.shによるCLI管理のため通常は空のままにする"
   type        = string
   default     = ""
 }

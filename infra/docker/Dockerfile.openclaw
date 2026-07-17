@@ -15,6 +15,7 @@ USER root
 
 COPY infra/openclaw/openclaw.config.json5 /opt/teamagent/openclaw.source.json5
 COPY infra/openclaw/SOUL.md infra/openclaw/HEARTBEAT.md /opt/teamagent/workspace-seed/
+COPY infra/openclaw/prune-runtime.mjs /tmp/prune-runtime.mjs
 
 # Convert the reviewed JSON5 source into immutable canonical JSON. Runtime
 # mutations happen only on a fresh copy under /tmp.
@@ -48,136 +49,12 @@ RUN set -eux; \
     rm -rf /root/.cache/ms-playwright /home/node/.cache/ms-playwright /ms-playwright; \
     chmod -R a-w /opt/teamagent
 
-# The upstream release contains its complete development workspace. Keep only
-# the precompiled runtime: remove the browser/Codex extensions, Playwright,
-# test/build/compiler packages, pnpm's duplicate store, and every .bin shim.
-# Package metadata is production-normalized so removed tools cannot be
-# rediscovered as install/peer/dev declarations at runtime.
-RUN node <<'NODE'
-const fs = require("fs");
-const path = require("path");
-
-const forbiddenNames = new Set([
-  "@openclaw/browser-plugin",
-  "@typescript/native-preview",
-  "esbuild",
-  "jscpd",
-  "oxfmt",
-  "oxlint",
-  "oxlint-tsgolint",
-  "playwright",
-  "playwright-core",
-  "rolldown",
-  "rollup",
-  "ts-node",
-  "tsdown",
-  "tsx",
-  "typescript",
-  "vite",
-  "vitest",
-]);
-const forbiddenPrefixes = [
-  "@esbuild/",
-  "@openai/codex",
-  "@rolldown/",
-  "@rollup/",
-  "@vitest/",
-];
-const isForbidden = (name) =>
-  forbiddenNames.has(name) || forbiddenPrefixes.some((prefix) => name.startsWith(prefix));
-
-for (const target of [
-  "/app/dist/extensions/browser",
-  "/app/dist/extensions/codex",
-  "/app/dist/extensions/codex-supervisor",
-  "/app/extensions",
-  "/app/pnpm-workspace.yaml",
-  "/app/src",
-  "/app/node_modules/.bin",
-  "/app/node_modules/.modules.yaml",
-  "/app/node_modules/.pnpm",
-  "/app/node_modules/.pnpm-workspace-state-v1.json",
-  "/app/node_modules/.tmp",
-  "/app/node_modules/.unrun",
-]) {
-  fs.rmSync(target, { recursive: true, force: true });
-}
-
-function pruneAndNormalize(root) {
-  let entries;
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch (error) {
-    if (error.code === "ENOENT") return;
-    throw error;
-  }
-  for (const entry of entries) {
-    const candidate = path.join(root, entry.name);
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-    const packagePath = path.join(candidate, "package.json");
-    let metadata;
-    try {
-      metadata = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-    if (metadata && isForbidden(metadata.name || "")) {
-      fs.rmSync(candidate, { recursive: true, force: true });
-      continue;
-    }
-    pruneAndNormalize(candidate);
-    if (metadata) {
-      delete metadata.devDependencies;
-      delete metadata.scripts;
-      for (const section of [
-        "dependencies",
-        "optionalDependencies",
-        "peerDependencies",
-        "peerDependenciesMeta",
-      ]) {
-        for (const name of Object.keys(metadata[section] || {})) {
-          if (isForbidden(name)) delete metadata[section][name];
-        }
-        if (metadata[section] && Object.keys(metadata[section]).length === 0) {
-          delete metadata[section];
-        }
-      }
-      fs.writeFileSync(packagePath, `${JSON.stringify(metadata, null, 2)}\n`);
-    }
-  }
-}
-
-for (const root of [
-  "/app/node_modules",
-  "/opt/teamagent/plugins/slack/node_modules",
-  "/opt/teamagent/plugins/amazon-bedrock/node_modules",
-]) {
-  pruneAndNormalize(root);
-}
-for (const packagePath of [
-  "/app/package.json",
-  "/opt/teamagent/plugins/slack/package.json",
-  "/opt/teamagent/plugins/amazon-bedrock/package.json",
-]) {
-  const metadata = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-  delete metadata.devDependencies;
-  delete metadata.scripts;
-  for (const section of [
-    "dependencies",
-    "optionalDependencies",
-    "peerDependencies",
-    "peerDependenciesMeta",
-  ]) {
-    for (const name of Object.keys(metadata[section] || {})) {
-      if (isForbidden(name)) delete metadata[section][name];
-    }
-    if (metadata[section] && Object.keys(metadata[section]).length === 0) {
-      delete metadata[section];
-    }
-  }
-  fs.writeFileSync(packagePath, `${JSON.stringify(metadata, null, 2)}\n`);
-}
-NODE
+# The upstream release contains its complete development workspace. Resolve the
+# production dependency closure, prune browser registration/CLI chunks that are
+# unreachable from the real entry points, and physically remove source
+# compilers, tests, fixtures, type sources, source maps, and package CLIs.
+# A machine-readable reachability/pruning report is retained in the image.
+RUN node /tmp/prune-runtime.mjs && rm -f /tmp/prune-runtime.mjs
 
 # Rebuild the persisted plugin registry after pruning so its source hashes and
 # extension inventory describe the final runtime, not the upstream workspace.
@@ -205,6 +82,7 @@ ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632a
 ARG DISTROLESS_ARM64_DIGEST=sha256:c6465a8fcd268010c53e6e33e58d479dd232aa34f2312500afad8f605caffdc3
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
+ARG SOURCE_URI=https://github.com/noirelumiere00/teamagent
 ARG SOURCE_ARCHIVE_SHA256=unknown
 ARG SOURCE_ARTIFACT_VERSION=unknown
 ARG PLUGINS_LOCK_SHA256=unknown
@@ -232,7 +110,7 @@ ENV NODE_ENV=production \
     TEAMAGENT_BUILD_BRANCH=${GIT_BRANCH}
 
 LABEL org.opencontainers.image.title="TeamAgent OpenClaw Gateway" \
-      org.opencontainers.image.source="https://github.com/noirelumiere00/teamagent" \
+      org.opencontainers.image.source="${SOURCE_URI}" \
       org.opencontainers.image.version="${OPENCLAW_VERSION}" \
       org.opencontainers.image.revision="${GIT_COMMIT}" \
       org.opencontainers.image.base.name="gcr.io/distroless/nodejs24-debian13:nonroot" \

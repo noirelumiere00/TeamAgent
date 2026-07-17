@@ -9,7 +9,7 @@ phases:
   pre_build:
     commands:
       - test "$(uname -m)" = "aarch64"
-      - test -n "$SOURCE_COMMIT" && test -n "$SOURCE_BRANCH" && test -n "$SOURCE_ARCHIVE_SHA256" && test -n "$OC_REPO"
+      - test -n "$SOURCE_COMMIT" && test -n "$SOURCE_BRANCH" && test -n "$SOURCE_ARCHIVE_SHA256" && test -n "$OC_REPO" && test -n "$CODEBUILD_BUILD_ID"
       - test -n "$CODEBUILD_SOURCE_VERSION" && test "$CODEBUILD_SOURCE_VERSION" != "null"
       - case "$CODEBUILD_SOURCE_REPO_URL" in s3://*) ;; *) echo "S3 source is required" >&2; exit 1 ;; esac
       - SOURCE_S3_PATH=${CODEBUILD_SOURCE_REPO_URL#s3://}; SOURCE_BUCKET=${SOURCE_S3_PATH%%/*}; SOURCE_KEY=${SOURCE_S3_PATH#*/}; test -n "$SOURCE_BUCKET" && test -n "$SOURCE_KEY" && test "$SOURCE_KEY" != "$SOURCE_S3_PATH"
@@ -19,6 +19,13 @@ phases:
       - test "$(jq -r '.Metadata["source-sha256"] // empty' /tmp/codebuild-source.json)" = "$SOURCE_ARCHIVE_SHA256"
       - echo "$SOURCE_ARCHIVE_SHA256  /tmp/codebuild-source.zip" | sha256sum -c -
       - export SOURCE_ARTIFACT_VERSION="$CODEBUILD_SOURCE_VERSION"
+      - export SOURCE_URI="https://github.com/noirelumiere00/teamagent"
+      - export ATTESTATION_BUILDER_ID="https://codebuild.${AWS_DEFAULT_REGION}.amazonaws.com/builds/${CODEBUILD_BUILD_ID}"
+      - mkdir -p /root/.docker/cli-plugins
+      - curl -fsSLo /root/.docker/cli-plugins/docker-buildx https://github.com/docker/buildx/releases/download/v0.33.0/buildx-v0.33.0.linux-arm64
+      - echo "204dc28447d3bb48f42ed1ce5747e0885cd57e306506a39029311becdb1ef786  /root/.docker/cli-plugins/docker-buildx" | sha256sum -c -
+      - chmod 0755 /root/.docker/cli-plugins/docker-buildx
+      - test "$(docker buildx version | awk '{print $2}')" = "v0.33.0"
       - curl -fsSLo /tmp/trivy.tar.gz https://github.com/aquasecurity/trivy/releases/download/v0.72.0/trivy_0.72.0_Linux-ARM64.tar.gz
       - echo "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467  /tmp/trivy.tar.gz" | sha256sum -c -
       - tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy
@@ -28,7 +35,17 @@ phases:
   build:
     commands:
       - IMAGE_REF="${OC_REPO}:git-${SOURCE_COMMIT:0:12}"
-      - bash infra/openclaw/build-image.sh --image "$IMAGE_REF" --push --manifest /tmp/openclaw-build-manifest.json
+      - bash infra/openclaw/build-image.sh --image "$IMAGE_REF" --push --manifest /tmp/openclaw-build-manifest.json --evidence-dir /tmp/openclaw-build-evidence
   post_build:
     commands:
+      - jq -e --arg builder "$ATTESTATION_BUILDER_ID" '.schemaVersion == 3 and .buildAttestations.registryPublished == true and .buildAttestations.subjectValidated == true and .buildAttestations.sourceValidated == true and .buildAttestations.builderValidated == true and .buildAttestations.builderId == $builder and .buildAttestations.buildxVersion == "v0.33.0" and .sbom.physicalNpmMultisetExactMatch == true and .runtime.actualImageContractPassed == true' /tmp/openclaw-build-manifest.json
+      - mkdir -p openclaw-release/openclaw-build-evidence
+      - cp /tmp/openclaw-build-manifest.json /tmp/openclaw-build-manifest.json.sha256 openclaw-release/
+      - cp -a /tmp/openclaw-build-evidence/. openclaw-release/openclaw-build-evidence/
       - jq -c . /tmp/openclaw-build-manifest.json
+
+artifacts:
+  files:
+    - "**/*"
+  base-directory: openclaw-release
+  name: openclaw-$SOURCE_COMMIT

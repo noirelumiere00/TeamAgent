@@ -60,6 +60,16 @@ data "aws_iam_policy_document" "codebuild" {
     actions   = ["s3:GetObject", "s3:GetObjectVersion"]
     resources = ["${aws_s3_bucket.raw_files.arn}/codebuild/*"]
   }
+  statement {
+    sid       = "OpenClawEvidenceWrite"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.raw_files.arn}/codebuild/openclaw-evidence/*"]
+  }
+  statement {
+    sid       = "OpenClawEvidenceBucketMetadata"
+    actions   = ["s3:GetBucketAcl", "s3:GetBucketLocation"]
+    resources = [aws_s3_bucket.raw_files.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "codebuild" {
@@ -71,7 +81,7 @@ resource "aws_iam_role_policy" "codebuild" {
 # --- CodeBuild プロジェクト（arm64・docker・S3 zip source・inline buildspec） ---
 resource "aws_codebuild_project" "image" {
   name         = "${var.project_name}-${var.environment}-image-builder"
-  description  = "Build teamagent-mcp/openclaw images inside AWS (proxy-free) and push to ECR"
+  description  = "Build the TeamAgent MCP image inside AWS (proxy-free) and push to ECR"
   service_role = aws_iam_role.codebuild.arn
 
   artifacts { type = "NO_ARTIFACTS" }
@@ -145,4 +155,66 @@ resource "aws_codebuild_project" "image" {
 
 output "codebuild_project" {
   value = aws_codebuild_project.image.name
+}
+
+# OpenClaw is deliberately separate from the legacy MCP inline buildspec. It
+# consumes the provenance-bound buildspec, emits registry attestations, and
+# stores the release manifest plus evidence as a versioned CodeBuild artifact.
+resource "aws_codebuild_project" "openclaw_image" {
+  name         = "${var.project_name}-${var.environment}-openclaw-image-builder"
+  description  = "Build, attest, verify, and publish the OpenClaw linux/arm64 release image"
+  service_role = aws_iam_role.codebuild.arn
+
+  artifacts {
+    type                   = "S3"
+    location               = aws_s3_bucket.raw_files.id
+    path                   = "codebuild/openclaw-evidence"
+    namespace_type         = "BUILD_ID"
+    packaging              = "ZIP"
+    name                   = "openclaw-release"
+    override_artifact_name = true
+    encryption_disabled    = false
+  }
+
+  environment {
+    compute_type    = "BUILD_GENERAL1_LARGE"
+    image           = "aws/codebuild/amazonlinux-aarch64-standard:3.0"
+    type            = "ARM_CONTAINER"
+    privileged_mode = true
+
+    environment_variable {
+      name  = "OC_REPO"
+      value = aws_ecr_repository.openclaw.repository_url
+    }
+    # All three source values are mandatory start-build overrides. "unknown"
+    # is intentionally rejected by buildspec.openclaw.yml.
+    environment_variable {
+      name  = "SOURCE_COMMIT"
+      value = "unknown"
+    }
+    environment_variable {
+      name  = "SOURCE_BRANCH"
+      value = "unknown"
+    }
+    environment_variable {
+      name  = "SOURCE_ARCHIVE_SHA256"
+      value = "unknown"
+    }
+  }
+
+  source {
+    type      = "S3"
+    location  = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"
+    buildspec = "infra/codebuild/buildspec.openclaw.yml"
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name = "/aws/codebuild/${var.project_name}-${var.environment}-openclaw-image-builder"
+    }
+  }
+}
+
+output "openclaw_codebuild_project" {
+  value = aws_codebuild_project.openclaw_image.name
 }

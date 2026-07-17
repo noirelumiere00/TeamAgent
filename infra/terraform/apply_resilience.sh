@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# resilience 4本柱 + 新イメージ を targeted apply（bastion/worker/reminder_scan 等の巻き添えを避ける）。
+# resilience 4本柱 + MCP image を targeted apply（OpenClaw service は
+# infra/terraform/apply_openclaw.sh の CLI 管理であり Terraform 対象外）。
 # 使い方:  bash apply_resilience.sh          # plan 確認付き apply
 #          bash apply_resilience.sh plan      # plan のみ（read-only）
 set -euo pipefail
 cd "$(dirname "$0")"
 
 TARGETS=(
-  # --- 新イメージ（柱1 entrypoint検証・柱2 emit・柱3 canaryスクリプト・柱4 commit label）---
+  # --- MCP 新イメージ（OpenClaw は release manifest 経由の専用 helper）---
   -target=aws_ecs_task_definition.mcp
   -target='aws_ecs_service.mcp[0]'
-  -target=aws_ecs_task_definition.openclaw
-  -target='aws_ecs_service.openclaw[0]'
   # --- 柱2 観測性（連携/設定違反 alarm）---
   -target=aws_cloudwatch_log_metric_filter.openclaw_config_violation
   -target=aws_cloudwatch_log_metric_filter.oauth_connect_failed
