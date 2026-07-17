@@ -39,6 +39,7 @@ assert_container_security() {
     docker inspect \
       --format '{{range .Mounts}}{{if .RW}}{{println .Destination}}{{end}}{{end}}' \
       "$container_id" |
+      sed '/^[[:space:]]*$/d' |
       LC_ALL=C sort
   )
   test "$writable_mounts" = "/tmp"
@@ -57,9 +58,9 @@ assert_container_security() {
   security_opt=$(docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id")
   test "$cap_add" = null
   if test "$kind" = core; then
-    test "$cap_drop" = '["CAP_ALL"]'
+    test "$cap_drop" = '["ALL"]'
     case "$security_opt" in
-      *no-new-privileges=true*) ;;
+      *no-new-privileges:true*) ;;
       *) return 1 ;;
     esac
   else

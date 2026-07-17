@@ -163,6 +163,11 @@ def test_compose_smokes_enforce_runtime_controls_and_urllib_health() -> None:
     assert 'user: "10001:10001"' in COMPOSE
     assert "mem_limit: 4096m" in COMPOSE
     assert COMPOSE.count("cap_drop:\n      - ALL") == 2
+    assert """test "$cap_drop" = '["ALL"]'""" in RUN_SMOKES
+    assert "CAP_ALL" not in RUN_SMOKES
+    assert "*no-new-privileges:true*" in RUN_SMOKES
+    assert "no-new-privileges=true" not in RUN_SMOKES
+    assert "sed '/^[[:space:]]*$/d'" in RUN_SMOKES
     assert "      - SYS_CHROOT" not in COMPOSE
     for capability in (
         "AUDIT_WRITE",
