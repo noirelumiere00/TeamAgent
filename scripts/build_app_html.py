@@ -195,17 +195,23 @@ FB_MAX_EVENTS = 30
 FB_SENDER_RE = re.compile(
     r"送信者[ \t　]*[:：][ \t　]*([^\n]*?)(?=[ \t　]*(?:タイムスタンプ|連携ステータス)[ \t　]*[:：]|\n|$)"
 )
+# 300字capが次フィールド名の途中で切れる実データ（例: `送信者: 氏名タイムスタ`）を
+# 担当者名へ混ぜない。短い一般語まで削らないよう、十分に固有なprefix以降だけを対象にする。
+FB_SENDER_TRUNCATED_FIELD_RE = re.compile(
+    r"[ \t　]*(?:タイムス(?:タ(?:ン(?:プ)?)?)?|連携ステ(?:ー(?:タ(?:ス)?)?)?)$"
+)
 FB_TS_RE = re.compile(r"タイムスタンプ[ \t　]*[:：][ \t　]*(\d{4})/(\d{1,2})/(\d{1,2})(?=[^\d\n])")
 TANS_MAX = 5  # カルテ/テーブルに出す担当者数の上限
 
 
 def _norm_sender(raw):
-    """送信者名の正規化: （/(/_ 以降を切除 → 全半角スペース除去 → 先頭20字。
+    """送信者名の正規化: 切れた次フィールド名と（/(/_ 以降を切除 → 空白除去 → 20字。
 
     実データの表記ゆれ（「佐藤杏香(Sato」「川上壮汰_KawakamiSota」「小倉　岳之（ogura…」）を
     同一人物へ寄せる決定論ルール。取れなければ空文字。
     """
-    s = re.split(r"[（(_]", raw, maxsplit=1)[0]
+    s = FB_SENDER_TRUNCATED_FIELD_RE.sub("", raw.rstrip())
+    s = re.split(r"[（(_]", s, maxsplit=1)[0]
     return s.replace(" ", "").replace("　", "").strip()[:20]
 
 

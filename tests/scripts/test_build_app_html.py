@@ -895,6 +895,7 @@ def test_parse_fb_sender_extraction_and_normalization() -> None:
             "送信者: 村山 五郎 タイムスタンプ: 2026/05/21 19:25:37 連携ステータス: 連携済み",
             "村山五郎",
         ),
+        ("送信者: 上條はるかタイムスタ", "上條はるか"),  # 300字capが次フィールド名の途中で切断
     ]
     for i, (quote, expected) in enumerate(cases):
         evs = _mod.parse_fb_events(_form_fb(f"商流: 直販 {quote}", pos=f"内容{i}", row=i + 1))
