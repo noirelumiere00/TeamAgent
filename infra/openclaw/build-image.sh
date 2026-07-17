@@ -8,7 +8,7 @@ DOCKERFILE="$REPO_ROOT/infra/docker/Dockerfile.openclaw"
 LOCK_FILE="$REPO_ROOT/infra/openclaw/plugins-lock.json"
 
 usage() {
-  echo "usage: $0 --image <repository:git-COMMIT12> [--push] [--manifest <path>]" >&2
+  echo "usage: $0 --image <repository:git-COMMIT12> [--push] [--manifest <path>] [--evidence-dir <path>]" >&2
 }
 
 fail() {
@@ -19,6 +19,7 @@ fail() {
 IMAGE_REF=""
 PUSH=0
 MANIFEST_PATH=/tmp/openclaw-build-manifest.json
+EVIDENCE_DIR=""
 while (($#)); do
   case "$1" in
     --image)
@@ -33,6 +34,11 @@ while (($#)); do
     --manifest)
       (($# >= 2)) || { usage; exit 2; }
       MANIFEST_PATH=$2
+      shift 2
+      ;;
+    --evidence-dir)
+      (($# >= 2)) || { usage; exit 2; }
+      EVIDENCE_DIR=$2
       shift 2
       ;;
     -h|--help)
@@ -53,6 +59,8 @@ last_component=${IMAGE_REF##*/}
 image_tag=${last_component##*:}
 image_repository=${IMAGE_REF%:*}
 [[ "$image_tag" != latest ]] || fail "mutable latest tag is forbidden"
+EVIDENCE_DIR=${EVIDENCE_DIR:-"${MANIFEST_PATH%.json}.evidence"}
+[[ "$EVIDENCE_DIR" != "$MANIFEST_PATH" ]] || fail "evidence directory must differ from manifest path"
 
 for command in docker jq sha256sum trivy; do
   command -v "$command" >/dev/null || fail "required command not found: $command"
@@ -100,7 +108,7 @@ OPENCLAW_VERSION=$(jq -r '.openclaw.version' "$LOCK_FILE")
 OPENCLAW_ARM64_DIGEST=$(jq -r '.openclaw.linuxArm64Digest' "$LOCK_FILE")
 DISTROLESS_ARM64_DIGEST=$(jq -r '.runtime.linuxArm64Digest' "$LOCK_FILE")
 DOCKERFILE_FRONTEND_DIGEST=$(jq -r '.tooling.dockerfileFrontend.digest' "$LOCK_FILE")
-SBOM_GENERATOR=$(jq -r '.tooling.sbomGenerator | .image + "@" + .linuxArm64Digest' "$LOCK_FILE")
+SBOM_ATTESTATION_GENERATOR=$(jq -r '.tooling.sbomGenerator | .image + "@" + .linuxArm64Digest' "$LOCK_FILE")
 PLUGINS_LOCK_SHA256=$(sha256sum "$LOCK_FILE" | cut -d' ' -f1)
 DOCKERFILE_SHA256=$(sha256sum "$DOCKERFILE" | cut -d' ' -f1)
 for pin in "$OPENCLAW_VERSION" "$OPENCLAW_ARM64_DIGEST" "$DISTROLESS_ARM64_DIGEST" "$DOCKERFILE_FRONTEND_DIGEST"; do
@@ -130,18 +138,34 @@ mkdir -p "$TRIVY_CACHE_DIR"
 export TRIVY_DB_REPOSITORY=${TRIVY_DB_REPOSITORY:-public.ecr.aws/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2}
 
 INDEX_DIGEST=""
+ATTESTATION_DIGEST=""
 if ((PUSH)); then
   "${build[@]}" --metadata-file "$tmp_dir/build-metadata.json" \
-    --provenance=mode=max --sbom="generator=$SBOM_GENERATOR" --push "$REPO_ROOT"
+    --provenance=mode=max --sbom="generator=$SBOM_ATTESTATION_GENERATOR" --push "$REPO_ROOT"
   INDEX_DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" | awk '$1 == "Digest:" {print $2; exit}')
   [[ "$INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "could not resolve pushed OCI index digest"
   raw_index=$(docker buildx imagetools inspect "$IMAGE_REF" --raw)
   ARM64_DIGEST=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | if length == 1 then .[0].digest else error("expected exactly one linux/arm64 child") end' <<<"$raw_index")
+  ATTESTATION_DIGEST=$(jq -er --arg subject "$ARM64_DIGEST" '
+    [.manifests[] | select(
+      .annotations["vnd.docker.reference.type"] == "attestation-manifest" and
+      .annotations["vnd.docker.reference.digest"] == $subject
+    )] | if length == 1 then .[0].digest else error("expected exactly one arm64 attestation manifest") end
+  ' <<<"$raw_index")
+  raw_attestation=$(docker buildx imagetools inspect "$image_repository@$ATTESTATION_DIGEST" --raw)
+  jq -e '
+    ([.layers[]?.annotations["in-toto.io/predicate-type"]] | any(
+      . == "https://spdx.dev/Document"
+    )) and
+    ([.layers[]?.annotations["in-toto.io/predicate-type"]] | any(
+      startswith("https://slsa.dev/provenance/")
+    ))
+  ' <<<"$raw_attestation" >/dev/null || fail "pushed SBOM/provenance attestations are missing"
   RUNTIME_REF="$image_repository@$ARM64_DIGEST"
   docker pull "$RUNTIME_REF" >/dev/null
 else
   "${build[@]}" --metadata-file "$tmp_dir/build-metadata.json" \
-    --provenance=false --sbom=false --load "$REPO_ROOT"
+    --provenance=false --load "$REPO_ROOT"
   # For a single-platform build this is the actual OCI image manifest digest,
   # not Docker's config/image ID. The scan below runs against this arm64 image.
   ARM64_DIGEST=$(jq -er '."containerimage.digest"' "$tmp_dir/build-metadata.json")
@@ -169,48 +193,132 @@ jq -e \
    .[0].Config.Labels["io.teamagent.runtime.readonly-rootfs-required"] == "true"' \
   <<<"$inspect_json" >/dev/null || fail "runtime image metadata contract failed"
 
-runtime_probe=$(docker run --rm --entrypoint /nodejs/bin/node "$RUNTIME_REF" -e '
+IMAGE_ID=$(jq -er '.[0].Id' <<<"$inspect_json")
+CONFIG_DIGEST=$(jq -er '.[0].Descriptor.annotations["config.digest"] // .[0].Id' <<<"$inspect_json")
+INSPECT_MANIFEST_DIGEST=$(jq -r '.[0].Descriptor.digest // empty' <<<"$inspect_json")
+ROOTFS_DIFF_IDS=$(jq -c '.[0].RootFS.Layers' <<<"$inspect_json")
+ROOTFS_SHA256=$(jq -c '.[0].RootFS.Layers' <<<"$inspect_json" | sha256sum | cut -d' ' -f1)
+[[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid local image identifier"
+[[ "$CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid image config digest"
+if [[ -n "$INSPECT_MANIFEST_DIGEST" && "$INSPECT_MANIFEST_DIGEST" != "$ARM64_DIGEST" ]]; then
+  fail "loaded manifest digest does not match build metadata"
+fi
+[[ "$ROOTFS_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "invalid rootfs inventory hash"
+
+[[ ! -L "$EVIDENCE_DIR" ]] || fail "evidence directory must not be a symlink"
+mkdir -p "$EVIDENCE_DIR"
+[[ -z "$(find "$EVIDENCE_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]] || \
+  fail "evidence directory must be empty: $EVIDENCE_DIR"
+
+docker run --rm --user 0:0 --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --entrypoint /nodejs/bin/node "$RUNTIME_REF" -e '
+const fs=require("fs");
+const forbidden=[
+  "/root/.cache/ms-playwright",
+  "/home/node/.cache/ms-playwright",
+];
+const present=forbidden.filter(candidate=>{
+  try{fs.lstatSync(candidate);return true}catch(error){
+    if(error.code==="ENOENT")return false;
+    throw error;
+  }
+});
+if(present.length)console.error(JSON.stringify({present}));
+process.exit(present.length?1:0);
+' || fail "privileged-path browser cache inventory failed"
+
+docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --entrypoint /nodejs/bin/node "$RUNTIME_REF" -e '
 const fs=require("fs"),path=require("path");
+const forbiddenNames=new Set([
+  "@openclaw/browser-plugin","@typescript/native-preview","esbuild","jscpd",
+  "oxfmt","oxlint","oxlint-tsgolint","playwright","playwright-core",
+  "rolldown","rollup","ts-node","tsdown","tsx","typescript","vite","vitest",
+]);
+const forbiddenPrefixes=["@esbuild/","@openai/codex","@rolldown/","@rollup/","@vitest/"];
+const isForbidden=name=>
+  forbiddenNames.has(name)||forbiddenPrefixes.some(prefix=>name.startsWith(prefix));
 const forbiddenPaths=[
   "/bin/sh","/bin/bash","/usr/bin/npm","/usr/local/bin/npm",
   "/usr/local/lib/node_modules/npm","/app/node_modules/npm",
-  "/app/node_modules/corepack","/app/node_modules/.bin/npm",
+  "/app/node_modules/corepack","/app/node_modules/.bin","/app/node_modules/.pnpm",
   "/app/node_modules/playwright","/app/node_modules/playwright-core",
-  "/app/node_modules/.bin/playwright","/ms-playwright",
-  "/root/.cache/ms-playwright","/home/node/.cache/ms-playwright",
+  "/app/dist/extensions/browser","/app/dist/extensions/codex",
+  "/app/dist/extensions/codex-supervisor","/ms-playwright",
   "/usr/bin/chromium","/usr/bin/chromium-browser","/usr/bin/google-chrome",
   "/usr/bin/firefox","/usr/bin/curl","/usr/bin/git","/usr/bin/python3",
 ];
-const forbidden=forbiddenPaths.filter(fs.existsSync);
-function inventoryPlaywright(root){
-  if(!fs.existsSync(root))return;
-  for(const entry of fs.readdirSync(root,{withFileTypes:true})){
-    const candidate=path.join(root,entry.name);
-    if(entry.isDirectory()){
-      if(["playwright","playwright-core"].includes(entry.name)&&path.basename(root)==="node_modules"){
-        forbidden.push(candidate);
-      }else inventoryPlaywright(candidate);
-    }else if(entry.name==="playwright"&&path.basename(root)===".bin"){
-      forbidden.push(candidate);
-    }
+const presentPaths=forbiddenPaths.filter(candidate=>{
+  try{fs.lstatSync(candidate);return true}catch(error){
+    if(error.code==="ENOENT")return false;
+    throw error;
   }
+});
+const packages=[];
+const forbiddenPackages=[];
+const forbiddenDeclarations=[];
+const danglingSymlinks=[];
+function inventory(root){
+  let stat;
+  try{stat=fs.lstatSync(root)}catch(error){
+    if(error.code==="ENOENT")return;
+    throw error;
+  }
+  if(stat.isSymbolicLink()){
+    try{fs.statSync(root)}catch(error){
+      if(error.code==="ENOENT")danglingSymlinks.push(root);
+      else throw error;
+    }
+    return;
+  }
+  if(!stat.isDirectory())return;
+  try{
+    const packagePath=path.join(root,"package.json");
+    const metadata=JSON.parse(fs.readFileSync(packagePath,"utf8"));
+    if(metadata.name&&metadata.version)packages.push(`${metadata.name}@${metadata.version}`);
+    if(isForbidden(metadata.name||"")){
+      forbiddenPackages.push({path:root,name:metadata.name,version:metadata.version||null});
+    }
+    for(const section of [
+      "dependencies","optionalDependencies","devDependencies",
+      "peerDependencies","peerDependenciesMeta",
+    ]){
+      for(const name of Object.keys(metadata[section]||{})){
+        if(isForbidden(name))forbiddenDeclarations.push({path:packagePath,section,name});
+      }
+    }
+  }catch(error){
+    if(error.code!=="ENOENT")throw error;
+  }
+  for(const entry of fs.readdirSync(root))inventory(path.join(root,entry));
 }
-inventoryPlaywright("/app/node_modules");
-inventoryPlaywright("/opt/teamagent/plugins");
-const pkg=JSON.parse(fs.readFileSync("/app/package.json","utf8"));
-const declared=["dependencies","optionalDependencies","devDependencies"]
-  .flatMap(section=>["playwright","playwright-core"].filter(name=>pkg[section]?.[name]));
+inventory("/app");
+inventory("/opt/teamagent");
 console.log(JSON.stringify({
   node:process.version,uid:process.getuid(),gid:process.getgid(),
-  execve:typeof process.execve,forbidden,declared,
+  execve:typeof process.execve,packages:[...new Set(packages)].sort(),
+  presentPaths,forbiddenPackages,forbiddenDeclarations,danglingSymlinks,
 }));
 process.exit(
-  forbidden.length===0&&declared.length===0&&
+  presentPaths.length===0&&forbiddenPackages.length===0&&
+  forbiddenDeclarations.length===0&&danglingSymlinks.length===0&&
   process.getuid()===65532&&process.getgid()===65532&&
   typeof process.execve==="function"?0:1
-);') || fail "distroless/nonroot/runtime inventory contract failed"
+);' >"$tmp_dir/runtime-probe.json" || fail "distroless/nonroot/runtime inventory contract failed"
 
-run_args=(--rm --network none --read-only --cap-drop ALL --tmpfs /tmp:rw,noexec,nosuid,size=512m
+jq -e . "$tmp_dir/runtime-probe.json" >/dev/null || fail "runtime inventory is not valid JSON"
+jq -n \
+  --arg manifestDigest "$ARM64_DIGEST" \
+  --arg imageId "$IMAGE_ID" \
+  --arg configDigest "$CONFIG_DIGEST" \
+  --arg rootfsSha256 "$ROOTFS_SHA256" \
+  --argjson diffIds "$ROOTFS_DIFF_IDS" \
+  --slurpfile probe "$tmp_dir/runtime-probe.json" \
+  '{schemaVersion:1,subject:{platform:"linux/arm64",manifestDigest:$manifestDigest,imageId:$imageId,configDigest:$configDigest,rootfs:{diffIds:$diffIds,sha256:$rootfsSha256}},runtime:$probe[0]}' \
+  >"$EVIDENCE_DIR/runtime-inventory.json"
+
+run_args=(--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges
+  --tmpfs /tmp:rw,noexec,nosuid,size=512m
   -e SLACK_BOT_TOKEN=xoxb-offline-smoke
   -e SLACK_APP_TOKEN=xapp-offline-smoke
   -e OPENCLAW_GATEWAY_TOKEN=offline-gateway-smoke
@@ -269,6 +377,7 @@ fi
 [[ "$child_exit" == 42 ]] || fail "entrypoint did not preserve child exit 42 (got $child_exit)"
 
 if docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m "$RUNTIME_REF" \
   >"$tmp_dir/missing-secrets.log" 2>&1; then
   fail "entrypoint unexpectedly started without required secrets"
@@ -291,7 +400,8 @@ jq -e --arg version "$OPENCLAW_VERSION" '
   ([.plugins[] | select(.id == "browser" and .status == "loaded")] | length) == 0' \
   "$tmp_dir/plugins.json" >/dev/null || fail "Slack/Bedrock plugin compatibility smoke failed"
 
-gateway_args=(-d --network none --read-only --cap-drop ALL --tmpfs /tmp:rw,noexec,nosuid,size=512m
+gateway_args=(-d --network none --read-only --cap-drop ALL --security-opt no-new-privileges
+  --tmpfs /tmp:rw,noexec,nosuid,size=512m
   -e SLACK_BOT_TOKEN=xoxb-offline-smoke
   -e SLACK_APP_TOKEN=xapp-offline-smoke
   -e OPENCLAW_GATEWAY_TOKEN=offline-gateway-smoke
@@ -312,6 +422,14 @@ process.execve(process.execPath,[
 ],process.env);'
 gateway_container=$(docker run "${gateway_args[@]}" "$RUNTIME_REF" \
   /nodejs/bin/node -e "$gateway_launcher")
+docker inspect "$gateway_container" | jq -e '
+  .[0].HostConfig.ReadonlyRootfs == true and
+  (.[0].HostConfig.CapDrop | index("ALL")) != null and
+  (.[0].HostConfig.SecurityOpt | index("no-new-privileges")) != null and
+  .[0].HostConfig.NetworkMode == "none" and
+  (.[0].HostConfig.Tmpfs["/tmp"] | contains("noexec")) and
+  (.[0].HostConfig.Tmpfs["/tmp"] | contains("nosuid"))
+' >/dev/null || fail "gateway container isolation contract failed"
 gateway_ok=0
 for _ in $(seq 1 45); do
   if docker exec "$gateway_container" node -e "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
@@ -334,20 +452,70 @@ gateway_exit=$(docker inspect -f '{{.State.ExitCode}}' "$gateway_container")
 docker rm "$gateway_container" >/dev/null
 gateway_container=""
 
-trivy --cache-dir "$TRIVY_CACHE_DIR" image --quiet --scanners vuln --severity CRITICAL,HIGH --format json \
-  --output "$tmp_dir/vulnerabilities.json" "$RUNTIME_REF"
-vulnerability_count=$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$tmp_dir/vulnerabilities.json")
+trivy --cache-dir "$TRIVY_CACHE_DIR" image --quiet --scanners vuln --format cyclonedx \
+  --output "$EVIDENCE_DIR/sbom.cdx.json" "$RUNTIME_REF"
+jq -e \
+  --arg imageId "$IMAGE_ID" \
+  --arg trivyVersion "$TRIVY_VERSION" \
+  --argjson diffIds "$ROOTFS_DIFF_IDS" '
+  (.metadata.tools.components | any(
+    .group == "aquasecurity" and .name == "trivy" and .version == $trivyVersion
+  )) and
+  ([.metadata.component.properties[] |
+    select(.name == "aquasecurity:trivy:ImageID") | .value] == [$imageId]) and
+  (([.metadata.component.properties[] |
+    select(.name == "aquasecurity:trivy:DiffID") | .value] | sort) == ($diffIds | sort))
+' "$EVIDENCE_DIR/sbom.cdx.json" >/dev/null || fail "SBOM subject/generator does not match runtime image"
+jq '[
+  .components[] |
+  select((.purl? != null) and (.purl | startswith("pkg:npm/"))) |
+  (((if (.group // "") == "" then "" else (.group + "/") end) + .name) + "@" + .version)
+] | unique | sort' "$EVIDENCE_DIR/sbom.cdx.json" >"$tmp_dir/sbom-packages.json"
+jq -e --slurpfile sbom "$tmp_dir/sbom-packages.json" \
+  '.runtime.packages == $sbom[0]' "$EVIDENCE_DIR/runtime-inventory.json" >/dev/null || \
+  fail "SBOM npm inventory does not exactly match physical runtime packages"
+
+trivy --cache-dir "$TRIVY_CACHE_DIR" image --quiet --scanners vuln \
+  --severity CRITICAL,HIGH --format json \
+  --output "$EVIDENCE_DIR/vulnerabilities.json" "$RUNTIME_REF"
+jq -e --arg imageId "$IMAGE_ID" --argjson diffIds "$ROOTFS_DIFF_IDS" \
+  '.Metadata.ImageID == $imageId and .Metadata.DiffIDs == $diffIds' \
+  "$EVIDENCE_DIR/vulnerabilities.json" >/dev/null || fail "vulnerability scan subject mismatch"
+vulnerability_count=$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$EVIDENCE_DIR/vulnerabilities.json")
 if ((vulnerability_count)); then
-  jq -r '.Results[]? as $r | $r.Vulnerabilities[]? | "\(.Severity) \(.VulnerabilityID) \(.PkgName) \($r.Target)"' "$tmp_dir/vulnerabilities.json" >&2
+  jq -r '.Results[]? as $r | $r.Vulnerabilities[]? | "\(.Severity) \(.VulnerabilityID) \(.PkgName) \($r.Target)"' "$EVIDENCE_DIR/vulnerabilities.json" >&2
   fail "Critical/High vulnerability gate failed ($vulnerability_count findings)"
 fi
 
-trivy --cache-dir "$TRIVY_CACHE_DIR" image --quiet --scanners secret --format json --output "$tmp_dir/secrets.json" "$RUNTIME_REF"
-secret_count=$(jq '[.Results[]?.Secrets[]?] | length' "$tmp_dir/secrets.json")
+trivy --cache-dir "$TRIVY_CACHE_DIR" image --quiet --scanners secret --format json \
+  --output "$EVIDENCE_DIR/secrets.json" "$RUNTIME_REF"
+jq -e --arg imageId "$IMAGE_ID" --argjson diffIds "$ROOTFS_DIFF_IDS" \
+  '.Metadata.ImageID == $imageId and .Metadata.DiffIDs == $diffIds' \
+  "$EVIDENCE_DIR/secrets.json" >/dev/null || fail "secret scan subject mismatch"
+secret_count=$(jq '[.Results[]?.Secrets[]?] | length' "$EVIDENCE_DIR/secrets.json")
 if ((secret_count)); then
-  jq -r '.Results[]? as $r | $r.Secrets[]? | "\(.RuleID) \($r.Target)"' "$tmp_dir/secrets.json" >&2
+  jq -r '.Results[]? as $r | $r.Secrets[]? | "\(.RuleID) \($r.Target)"' "$EVIDENCE_DIR/secrets.json" >&2
   fail "embedded secret gate failed ($secret_count findings)"
 fi
+
+jq -S . "$tmp_dir/build-metadata.json" >"$EVIDENCE_DIR/build-metadata.json"
+jq -S . "$tmp_dir/config.json" >"$EVIDENCE_DIR/config-validation.json"
+jq -S . "$tmp_dir/plugins.json" >"$EVIDENCE_DIR/plugins.json"
+cp "$tmp_dir/gateway.log" "$EVIDENCE_DIR/gateway.log"
+
+RUNTIME_NODE=$(jq -er '.runtime.node' "$EVIDENCE_DIR/runtime-inventory.json")
+RUNTIME_UID=$(jq -er '.runtime.uid' "$EVIDENCE_DIR/runtime-inventory.json")
+RUNTIME_GID=$(jq -er '.runtime.gid' "$EVIDENCE_DIR/runtime-inventory.json")
+RUNTIME_PACKAGE_COUNT=$(jq -er '.runtime.packages | length' "$EVIDENCE_DIR/runtime-inventory.json")
+SBOM_COMPONENT_COUNT=$(jq -er '.components | length' "$EVIDENCE_DIR/sbom.cdx.json")
+INVENTORY_SHA256=$(sha256sum "$EVIDENCE_DIR/runtime-inventory.json" | cut -d' ' -f1)
+SBOM_SHA256=$(sha256sum "$EVIDENCE_DIR/sbom.cdx.json" | cut -d' ' -f1)
+VULNERABILITY_SCAN_SHA256=$(sha256sum "$EVIDENCE_DIR/vulnerabilities.json" | cut -d' ' -f1)
+SECRET_SCAN_SHA256=$(sha256sum "$EVIDENCE_DIR/secrets.json" | cut -d' ' -f1)
+BUILD_METADATA_SHA256=$(sha256sum "$EVIDENCE_DIR/build-metadata.json" | cut -d' ' -f1)
+CONFIG_VALIDATION_SHA256=$(sha256sum "$EVIDENCE_DIR/config-validation.json" | cut -d' ' -f1)
+PLUGINS_SHA256=$(sha256sum "$EVIDENCE_DIR/plugins.json" | cut -d' ' -f1)
+GATEWAY_LOG_SHA256=$(sha256sum "$EVIDENCE_DIR/gateway.log" | cut -d' ' -f1)
 
 mkdir -p "$(dirname -- "$MANIFEST_PATH")"
 jq -n \
@@ -356,6 +524,10 @@ jq -n \
   --arg runtimeRef "$RUNTIME_REF" \
   --arg indexDigest "$INDEX_DIGEST" \
   --arg arm64Digest "$ARM64_DIGEST" \
+  --arg imageId "$IMAGE_ID" \
+  --arg configDigest "$CONFIG_DIGEST" \
+  --arg rootfsSha256 "$ROOTFS_SHA256" \
+  --argjson rootfsDiffIds "$ROOTFS_DIFF_IDS" \
   --arg sourceCommit "$SOURCE_COMMIT" \
   --arg sourceBranch "$SOURCE_BRANCH" \
   --arg sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" \
@@ -364,9 +536,79 @@ jq -n \
   --arg pluginsLockSha256 "$PLUGINS_LOCK_SHA256" \
   --arg openclawVersion "$OPENCLAW_VERSION" \
   --arg trivyVersion "$TRIVY_VERSION" \
-  --arg sbomGenerator "$SBOM_GENERATOR" \
-  --argjson runtime "$runtime_probe" \
-  '{schemaVersion:1,createdAt:$createdAt,image:$image,runtimeRef:$runtimeRef,indexDigest:$indexDigest,arm64Digest:$arm64Digest,source:{commit:$sourceCommit,branch:$sourceBranch,archiveSha256:$sourceArchiveSha256,artifactVersion:$sourceArtifactVersion,dockerfileSha256:$dockerfileSha256,pluginsLockSha256:$pluginsLockSha256},runtime:{platform:"linux/arm64",openclawVersion:$openclawVersion,node:$runtime.node,uid:$runtime.uid,gid:$runtime.gid,readOnlySmoke:true,offlineGatewaySmoke:true},scan:{trivyVersion:$trivyVersion,sbomGenerator:$sbomGenerator,critical:0,high:0,secrets:0}}' \
+  --arg sbomAttestationGenerator "$SBOM_ATTESTATION_GENERATOR" \
+  --arg attestationDigest "$ATTESTATION_DIGEST" \
+  --arg runtimeNode "$RUNTIME_NODE" \
+  --argjson runtimeUid "$RUNTIME_UID" \
+  --argjson runtimeGid "$RUNTIME_GID" \
+  --argjson runtimePackageCount "$RUNTIME_PACKAGE_COUNT" \
+  --argjson sbomComponentCount "$SBOM_COMPONENT_COUNT" \
+  --arg inventoryPath "$EVIDENCE_DIR/runtime-inventory.json" \
+  --arg inventorySha256 "$INVENTORY_SHA256" \
+  --arg sbomPath "$EVIDENCE_DIR/sbom.cdx.json" \
+  --arg sbomSha256 "$SBOM_SHA256" \
+  --arg vulnerabilityPath "$EVIDENCE_DIR/vulnerabilities.json" \
+  --arg vulnerabilitySha256 "$VULNERABILITY_SCAN_SHA256" \
+  --arg secretPath "$EVIDENCE_DIR/secrets.json" \
+  --arg secretSha256 "$SECRET_SCAN_SHA256" \
+  --arg buildMetadataPath "$EVIDENCE_DIR/build-metadata.json" \
+  --arg buildMetadataSha256 "$BUILD_METADATA_SHA256" \
+  --arg configValidationPath "$EVIDENCE_DIR/config-validation.json" \
+  --arg configValidationSha256 "$CONFIG_VALIDATION_SHA256" \
+  --arg pluginsPath "$EVIDENCE_DIR/plugins.json" \
+  --arg pluginsSha256 "$PLUGINS_SHA256" \
+  --arg gatewayLogPath "$EVIDENCE_DIR/gateway.log" \
+  --arg gatewayLogSha256 "$GATEWAY_LOG_SHA256" \
+  --argjson pushed "$PUSH" \
+  '{
+    schemaVersion:2,
+    createdAt:$createdAt,
+    image:{
+      requested:$image,runtimeRef:$runtimeRef,indexDigest:$indexDigest,
+      manifestDigest:$arm64Digest,imageId:$imageId,configDigest:$configDigest,
+      rootfs:{diffIds:$rootfsDiffIds,sha256:$rootfsSha256}
+    },
+    source:{
+      commit:$sourceCommit,branch:$sourceBranch,archiveSha256:$sourceArchiveSha256,
+      artifactVersion:$sourceArtifactVersion,dockerfileSha256:$dockerfileSha256,
+      pluginsLockSha256:$pluginsLockSha256
+    },
+    runtime:{
+      platform:"linux/arm64",openclawVersion:$openclawVersion,node:$runtimeNode,
+      uid:$runtimeUid,gid:$runtimeGid,packageCount:$runtimePackageCount,
+      forbiddenPackageOrPluginArtifacts:0,danglingSymlinks:0,
+      privilegedPathInventory:true,readOnlySmoke:true,
+      capDropAllSmoke:true,noNewPrivilegesSmoke:true,offlineGatewaySmoke:true,
+      readyzSmoke:true,sigtermExitPropagationSmoke:true
+    },
+    buildAttestations:{
+      provenance:($pushed == 1),sbom:($pushed == 1),
+      manifestDigest:(if $pushed == 1 then $attestationDigest else null end),
+      sbomGenerator:(if $pushed == 1 then $sbomAttestationGenerator else null end)
+    },
+    sbom:{
+      format:"CycloneDX 1.6",generator:{name:"trivy",version:$trivyVersion},
+      subjectImageId:$imageId,subjectConfigDigest:$configDigest,
+      subjectManifestDigest:$arm64Digest,
+      componentCount:$sbomComponentCount,
+      physicalNpmInventoryExactMatch:true,path:$sbomPath,sha256:$sbomSha256
+    },
+    scan:{
+      trivyVersion:$trivyVersion,subjectImageId:$imageId,subjectConfigDigest:$configDigest,
+      subjectManifestDigest:$arm64Digest,critical:0,high:0,secrets:0,
+      vulnerabilityEvidence:{path:$vulnerabilityPath,sha256:$vulnerabilitySha256},
+      secretEvidence:{path:$secretPath,sha256:$secretSha256}
+    },
+    evidence:{
+      runtimeInventory:{path:$inventoryPath,sha256:$inventorySha256},
+      buildMetadata:{path:$buildMetadataPath,sha256:$buildMetadataSha256},
+      configValidation:{path:$configValidationPath,sha256:$configValidationSha256},
+      plugins:{path:$pluginsPath,sha256:$pluginsSha256},
+      gatewayLog:{path:$gatewayLogPath,sha256:$gatewayLogSha256}
+    }
+  }' \
   >"$MANIFEST_PATH"
 
-echo "[openclaw-build] PASS image=$RUNTIME_REF manifest=$MANIFEST_PATH"
+MANIFEST_SHA256=$(sha256sum "$MANIFEST_PATH" | cut -d' ' -f1)
+sha256sum "$MANIFEST_PATH" >"$MANIFEST_PATH.sha256"
+echo "[openclaw-build] PASS image=$RUNTIME_REF manifest=$MANIFEST_PATH manifest_sha256=$MANIFEST_SHA256"

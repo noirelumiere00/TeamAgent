@@ -12,6 +12,9 @@ CONFIG = ROOT / "infra/openclaw/openclaw.config.json5"
 LOCK = ROOT / "infra/openclaw/plugins-lock.json"
 HELPER = ROOT / "infra/openclaw/build-image.sh"
 BUILDSPEC = ROOT / "infra/codebuild/buildspec.openclaw.yml"
+COMPOSE = ROOT / "infra/openclaw/docker-compose.yml"
+README = ROOT / "infra/openclaw/README.md"
+RUNBOOK = ROOT / "docs/openclaw/deploy_runbook.md"
 
 
 def _strip_json5_comments(source: str) -> str:
@@ -99,6 +102,11 @@ def test_release_runtime_and_plugin_pins_are_aligned() -> None:
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", lock["runtime"]["imageIndexDigest"])
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", lock["runtime"]["linuxArm64Digest"])
     assert lock["tooling"]["trivy"]["version"] == "0.72.0"
+    assert lock["tooling"]["sbomGenerator"]["image"] == ("docker.io/docker/buildkit-syft-scanner")
+    assert re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        lock["tooling"]["sbomGenerator"]["linuxArm64Digest"],
+    )
     assert {plugin["id"] for plugin in lock["plugins"]} == {"slack", "amazon-bedrock"}
     assert {plugin["version"] for plugin in lock["plugins"]} == {lock["openclaw"]["version"]}
     assert {plugin["gitHead"] for plugin in lock["plugins"]} == {lock["openclaw"]["releaseCommit"]}
@@ -162,8 +170,24 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
         dockerfile,
         flags=re.MULTILINE,
     )
-    assert "rm -rf /app/node_modules/playwright /app/node_modules/playwright-core" in dockerfile
-    assert 'for(const name of ["playwright","playwright-core"])' in dockerfile
+    for forbidden_artifact in (
+        '"@openclaw/browser-plugin"',
+        '"@openai/codex"',
+        '"@vitest/"',
+        '"playwright-core"',
+        '"typescript"',
+        '"vite"',
+        '"vitest"',
+        '"/app/dist/extensions/browser"',
+        '"/app/pnpm-workspace.yaml"',
+        '"/app/src"',
+        '"/app/node_modules/.bin"',
+        '"/app/node_modules/.pnpm"',
+    ):
+        assert forbidden_artifact in dockerfile
+    assert "delete metadata.devDependencies" in dockerfile
+    assert "delete metadata.scripts" in dockerfile
+    assert "plugins registry --refresh" in dockerfile
     assert "npm install" not in dockerfile
     assert not re.search(r"\b(?:apt|apk|dnf|yum)\b.*install", dockerfile)
     for secret in (
@@ -268,22 +292,45 @@ def test_dedicated_builder_is_fail_closed_and_scans_child() -> None:
         "SOURCE_ARTIFACT_VERSION",
         "--platform linux/arm64",
         "--provenance=mode=max",
-        '--sbom="generator=$SBOM_GENERATOR"',
+        '--sbom="generator=$SBOM_ATTESTATION_GENERATOR"',
+        "expected exactly one arm64 attestation manifest",
+        "pushed SBOM/provenance attestations are missing",
         "expected exactly one linux/arm64 child",
         '"containerimage.digest"',
+        "--format cyclonedx",
+        'generator:{name:"trivy",version:$trivyVersion}',
+        "physicalNpmInventoryExactMatch:true",
+        "SBOM npm inventory does not exactly match physical runtime packages",
         "--scanners vuln",
         "--scanners secret",
         "TRIVY_CACHE_DIR",
         'TRIVY_VERSION" == "$EXPECTED_TRIVY_VERSION',
         "--read-only",
         "--cap-drop ALL",
+        "--security-opt no-new-privileges",
+        "--user 0:0",
+        "privileged-path browser cache inventory failed",
         "gateway_args=(",
         "/readyz",
         "child environment allowlist failed",
+        "gateway container isolation contract failed",
         "gateway SIGTERM shutdown must exit 0",
-        "/app/node_modules/playwright-core",
+        "fs.lstatSync",
+        "danglingSymlinks",
+        '"@openclaw/browser-plugin"',
+        '"@openai/codex"',
+        '"@vitest/"',
+        "/app/dist/extensions/browser",
+        "/app/node_modules/.bin",
+        "/app/node_modules/.pnpm",
+        "runtime-inventory.json",
+        "sbom.cdx.json",
+        "forbiddenPackageOrPluginArtifacts:0",
+        "MANIFEST_SHA256",
     ):
         assert required in helper
+    assert "--sbom=false" not in helper
+    assert "sbomGenerator:$sbomAttestationGenerator" not in helper
     gateway_args = re.search(
         r"gateway_args=\((?P<body>.*?)gateway_launcher=",
         helper,
@@ -292,6 +339,44 @@ def test_dedicated_builder_is_fail_closed_and_scans_child() -> None:
     assert gateway_args
     assert "OPENCLAW_SKIP_CHANNELS" not in gateway_args.group("body")
     assert "config.channels.slack.enabled=false" in helper
+
+
+def test_legacy_compose_path_is_formally_decommissioned() -> None:
+    compose = COMPOSE.read_text()
+    assert "services: {}" in compose
+    assert "intentionally decommissioned" in compose
+    assert "build-image.sh" in compose
+    for stale in (
+        "2026" + ".6.1",
+        "1000" + ":1000",
+        "/healthz",
+        "SLACK_BOT_TOKEN:",
+        "SLACK_APP_TOKEN:",
+    ):
+        assert stale not in compose
+
+
+def test_docs_require_verified_runtime_and_provenance_path() -> None:
+    readme = README.read_text()
+    runbook = RUNBOOK.read_text()
+    combined = f"{readme}\n{runbook}"
+    for required in (
+        "2026.7.1",
+        "65532",
+        "/readyz",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "TEAMAGENT_MCP_BEARER",
+        "build-image.sh",
+        "--evidence-dir",
+        "Critical=0",
+        "High=0",
+        "Secrets=0",
+    ):
+        assert required in combined
+    assert "Dockerfile.openclaw       -t" not in runbook
+    assert "docker-compose.yml up" not in combined
+    assert "2026" + ".6.1" not in combined
+    assert "1000" + ":1000" not in combined
 
 
 def test_codebuild_uses_pinned_trivy_and_dedicated_helper() -> None:

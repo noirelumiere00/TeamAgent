@@ -27,7 +27,7 @@ aws secretsmanager create-secret --region $R --name teamagent/dev/openclaw/gatew
 - `teamagent/dev/mcp/bearer` と `gateway-token` は新規ランダム。`database-url` は既存 RDS（password は `teamagent/dev/*` の DB secret 参照可）。
 - ⚠️ `fargate.tf` は **secret 実在を前提**（`data.aws_secretsmanager_secret`）＝この手順を terraform plan より先に。
 
-## 2. イメージ build & ECR push（2つ）
+## 2. イメージ build & ECR push（OpenClaw は検証 helper 限定）
 ```sh
 # ECR repo だけ先に作る（targeted）
 cd infra/terraform && terraform plan -target=aws_ecr_repository.mcp -target=aws_ecr_repository.openclaw
@@ -35,13 +35,44 @@ terraform apply -target=aws_ecr_repository.mcp -target=aws_ecr_repository.opencl
 MCP_URL=$(terraform output -raw ecr_mcp_url); OC_URL=$(terraform output -raw ecr_openclaw_url); cd ../..
 aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin "${MCP_URL%/*}"
 
-# arm64 でビルド（Fargate=ARM）。BuildKit 前提。
+# MCP はそのリリース手順で arm64 build/push し、digest を固定する。
 docker buildx build --platform linux/arm64 -f infra/docker/Dockerfile.teamagent-mcp -t "$MCP_URL:p1" --push .
-docker buildx build --platform linux/arm64 -f infra/docker/Dockerfile.openclaw       -t "$OC_URL:p1"  --push .
-# digest を控える（IMMUTABLE pin 推奨）
+
+# OpenClaw は直接 build/push 禁止。clean な exact HEAD を専用 helper で
+# build・契約試験・SBOM・Trivy scan・provenance/SBOM attestation 後に push する。
+test -z "$(git status --porcelain --untracked-files=all)"
+SOURCE_COMMIT=$(git rev-parse HEAD)
+OC_TAG="git-${SOURCE_COMMIT:0:12}"
+OC_MANIFEST="/tmp/openclaw-${OC_TAG}-manifest.json"
+OC_EVIDENCE="/tmp/openclaw-${OC_TAG}-evidence"
+bash infra/openclaw/build-image.sh \
+  --image "$OC_URL:$OC_TAG" \
+  --push \
+  --manifest "$OC_MANIFEST" \
+  --evidence-dir "$OC_EVIDENCE"
+
+# manifest/source/hash/scan を確認し、実際の linux/arm64 child digest を使う。
+jq -e --arg commit "$SOURCE_COMMIT" '
+  .schemaVersion == 2 and
+  .source.commit == $commit and
+  .runtime.platform == "linux/arm64" and
+  .runtime.uid == 65532 and .runtime.gid == 65532 and
+  .runtime.forbiddenPackageOrPluginArtifacts == 0 and
+  .runtime.danglingSymlinks == 0 and
+  .scan.critical == 0 and .scan.high == 0 and .scan.secrets == 0 and
+  .sbom.physicalNpmInventoryExactMatch == true and
+  .buildAttestations.provenance == true and .buildAttestations.sbom == true
+' "$OC_MANIFEST"
+sha256sum -c "$OC_MANIFEST.sha256"
+
+# digest を控える。OpenClaw は helper manifest の検証済み child digestだけを採用する。
 MCP_DIGEST=$(aws ecr describe-images --repository-name teamagent-mcp     --image-ids imageTag=p1 --query 'imageDetails[0].imageDigest' --output text)
-OC_DIGEST=$(aws ecr describe-images  --repository-name teamagent-openclaw --image-ids imageTag=p1 --query 'imageDetails[0].imageDigest' --output text)
+OC_DIGEST=$(jq -er '.image.manifestDigest' "$OC_MANIFEST")
 ```
+
+Dockerfile を直接指定する Buildx publication、standalone image publication、
+Compose publication は正式なリリース経路ではない。OpenClaw の production push は
+上記 helper（または同じ helper を呼ぶ provenance-bound CodeBuild job）だけを使う。
 
 ## 3. Terraform apply（targeted・順序厳守）
 `infra/terraform/terraform.tfvars`（git管理外）に:
@@ -95,7 +126,7 @@ CloudWatch `/teamagent/dev`（stream prefix `openclaw`）で以下を確認:
 
 ## 6. 起動確認 & smoke
 ```sh
-# タスクが RUNNING / healthz green を確認
+# タスクが RUNNING、MCP `/healthz` と OpenClaw `/readyz` が green を確認
 aws ecs describe-services --cluster $(terraform -chdir=infra/terraform output -raw ecs_cluster_name) \
   --services $(terraform -chdir=infra/terraform output -raw ecs_service_mcp) --query 'services[0].deployments'
 # MCP へ（SSM トンネルで 8787 を localhost へ転送して）smoke

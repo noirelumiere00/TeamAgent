@@ -45,13 +45,157 @@ RUN set -eux; \
     node -e 'const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync("/opt/teamagent/state-seed/openclaw.sqlite");db.exec("DELETE FROM config_health_entries");db.close()'; \
     rm -rf /tmp/teamagent-openclaw; \
     rm -f /tmp/openclaw-slack.tgz /tmp/openclaw-bedrock.tgz; \
-    rm -rf /app/node_modules/playwright /app/node_modules/playwright-core; \
-    rm -f /app/node_modules/.bin/playwright; \
     rm -rf /root/.cache/ms-playwright /home/node/.cache/ms-playwright /ms-playwright; \
-    node -e 'const fs=require("fs");const p="/app/package.json";const x=JSON.parse(fs.readFileSync(p,"utf8"));for(const section of ["dependencies","optionalDependencies","devDependencies"]){for(const name of ["playwright","playwright-core"])delete x[section]?.[name]}fs.writeFileSync(p,JSON.stringify(x,null,2)+"\n")'; \
-    test ! -e /app/node_modules/playwright; \
-    test ! -e /app/node_modules/playwright-core; \
-    test ! -e /app/node_modules/.bin/playwright; \
+    chmod -R a-w /opt/teamagent
+
+# The upstream release contains its complete development workspace. Keep only
+# the precompiled runtime: remove the browser/Codex extensions, Playwright,
+# test/build/compiler packages, pnpm's duplicate store, and every .bin shim.
+# Package metadata is production-normalized so removed tools cannot be
+# rediscovered as install/peer/dev declarations at runtime.
+RUN node <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const forbiddenNames = new Set([
+  "@openclaw/browser-plugin",
+  "@typescript/native-preview",
+  "esbuild",
+  "jscpd",
+  "oxfmt",
+  "oxlint",
+  "oxlint-tsgolint",
+  "playwright",
+  "playwright-core",
+  "rolldown",
+  "rollup",
+  "ts-node",
+  "tsdown",
+  "tsx",
+  "typescript",
+  "vite",
+  "vitest",
+]);
+const forbiddenPrefixes = [
+  "@esbuild/",
+  "@openai/codex",
+  "@rolldown/",
+  "@rollup/",
+  "@vitest/",
+];
+const isForbidden = (name) =>
+  forbiddenNames.has(name) || forbiddenPrefixes.some((prefix) => name.startsWith(prefix));
+
+for (const target of [
+  "/app/dist/extensions/browser",
+  "/app/dist/extensions/codex",
+  "/app/dist/extensions/codex-supervisor",
+  "/app/extensions",
+  "/app/pnpm-workspace.yaml",
+  "/app/src",
+  "/app/node_modules/.bin",
+  "/app/node_modules/.modules.yaml",
+  "/app/node_modules/.pnpm",
+  "/app/node_modules/.pnpm-workspace-state-v1.json",
+  "/app/node_modules/.tmp",
+  "/app/node_modules/.unrun",
+]) {
+  fs.rmSync(target, { recursive: true, force: true });
+}
+
+function pruneAndNormalize(root) {
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  for (const entry of entries) {
+    const candidate = path.join(root, entry.name);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const packagePath = path.join(candidate, "package.json");
+    let metadata;
+    try {
+      metadata = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (metadata && isForbidden(metadata.name || "")) {
+      fs.rmSync(candidate, { recursive: true, force: true });
+      continue;
+    }
+    pruneAndNormalize(candidate);
+    if (metadata) {
+      delete metadata.devDependencies;
+      delete metadata.scripts;
+      for (const section of [
+        "dependencies",
+        "optionalDependencies",
+        "peerDependencies",
+        "peerDependenciesMeta",
+      ]) {
+        for (const name of Object.keys(metadata[section] || {})) {
+          if (isForbidden(name)) delete metadata[section][name];
+        }
+        if (metadata[section] && Object.keys(metadata[section]).length === 0) {
+          delete metadata[section];
+        }
+      }
+      fs.writeFileSync(packagePath, `${JSON.stringify(metadata, null, 2)}\n`);
+    }
+  }
+}
+
+for (const root of [
+  "/app/node_modules",
+  "/opt/teamagent/plugins/slack/node_modules",
+  "/opt/teamagent/plugins/amazon-bedrock/node_modules",
+]) {
+  pruneAndNormalize(root);
+}
+for (const packagePath of [
+  "/app/package.json",
+  "/opt/teamagent/plugins/slack/package.json",
+  "/opt/teamagent/plugins/amazon-bedrock/package.json",
+]) {
+  const metadata = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+  delete metadata.devDependencies;
+  delete metadata.scripts;
+  for (const section of [
+    "dependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    "peerDependenciesMeta",
+  ]) {
+    for (const name of Object.keys(metadata[section] || {})) {
+      if (isForbidden(name)) delete metadata[section][name];
+    }
+    if (metadata[section] && Object.keys(metadata[section]).length === 0) {
+      delete metadata[section];
+    }
+  }
+  fs.writeFileSync(packagePath, `${JSON.stringify(metadata, null, 2)}\n`);
+}
+NODE
+
+# Rebuild the persisted plugin registry after pruning so its source hashes and
+# extension inventory describe the final runtime, not the upstream workspace.
+RUN set -eux; \
+    mkdir -p /tmp/teamagent-openclaw/config /tmp/teamagent-openclaw/state/state /tmp/teamagent-openclaw/home; \
+    cp /opt/teamagent/openclaw.template.json /tmp/teamagent-openclaw/config/openclaw.json; \
+    cp /opt/teamagent/state-seed/openclaw.sqlite /tmp/teamagent-openclaw/state/state/openclaw.sqlite; \
+    HOME=/tmp/teamagent-openclaw/home \
+      OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state \
+      OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json \
+      SLACK_BOT_TOKEN=build-placeholder \
+      SLACK_APP_TOKEN=build-placeholder \
+      OPENCLAW_GATEWAY_TOKEN=build-placeholder \
+      TEAMAGENT_MCP_BEARER=build-placeholder \
+      node /app/openclaw.mjs plugins registry --refresh >/dev/null; \
+    node -e 'const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync("/tmp/teamagent-openclaw/state/state/openclaw.sqlite");db.exec("DELETE FROM config_health_entries");db.close()'; \
+    cp /tmp/teamagent-openclaw/state/state/openclaw.sqlite /opt/teamagent/state-seed/openclaw.sqlite; \
+    rm -rf /tmp/teamagent-openclaw; \
     chmod -R a-w /opt/teamagent
 
 FROM gcr.io/distroless/nodejs24-debian13:nonroot@${DISTROLESS_ARM64_DIGEST} AS runtime
