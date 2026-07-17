@@ -165,9 +165,11 @@ def bant_short(b):
 
 
 # === 施策タイムライン: 営業FB時系列（### <日付|----> 見出し区切り）のパース ===
-# export_vault.py は occurred_at が判明している FB を `### YYYY-MM-DD <ソース名>`、
-# 不明な旧データを `### ---- <ソース名>` として出力する。両形式を明示的に受け付け、
-# 通常の h3 見出しを FB として誤検知しない。
+# exporter は occurred_at があれば `### YYYY-MM-DD <ソース名>`、無ければ旧互換の
+# `### ---- <ソース名>` を出す。専用section内で両形式だけを読み、通常のH3はFBにしない。
+FB_SECTION_RE = re.compile(
+    r"^##\s+営業FB時系列（新しい順）\s*$([\s\S]*?)(?=^##\s|\Z)", re.M
+)
 FB_HEAD_RE = re.compile(
     r"^###[ \t]+(?:(?P<date>\d{4}-\d{2}-\d{2})|(?P<undated>-{2,}))[ \t]*(?P<head>.*)$",
     re.M,
@@ -195,17 +197,23 @@ FB_MAX_EVENTS = 30
 FB_SENDER_RE = re.compile(
     r"送信者[ \t　]*[:：][ \t　]*([^\n]*?)(?=[ \t　]*(?:タイムスタンプ|連携ステータス)[ \t　]*[:：]|\n|$)"
 )
+# 300字capが次フィールド名の途中で切れる実データ（例: `送信者: 氏名タイムスタ`）を
+# 担当者名へ混ぜない。短い一般語まで削らないよう、十分に固有なprefix以降だけを対象にする。
+FB_SENDER_TRUNCATED_FIELD_RE = re.compile(
+    r"[ \t　]*(?:タイムス(?:タ(?:ン(?:プ)?)?)?|連携ステ(?:ー(?:タ(?:ス)?)?)?)$"
+)
 FB_TS_RE = re.compile(r"タイムスタンプ[ \t　]*[:：][ \t　]*(\d{4})/(\d{1,2})/(\d{1,2})(?=[^\d\n])")
 TANS_MAX = 5  # カルテ/テーブルに出す担当者数の上限
 
 
 def _norm_sender(raw):
-    """送信者名の正規化: （/(/_ 以降を切除 → 全半角スペース除去 → 先頭20字。
+    """送信者名の正規化: 切れた次フィールド名と（/(/_ 以降を切除 → 空白除去 → 20字。
 
     実データの表記ゆれ（「佐藤杏香(Sato」「川上壮汰_KawakamiSota」「小倉　岳之（ogura…」）を
     同一人物へ寄せる決定論ルール。取れなければ空文字。
     """
-    s = re.split(r"[（(_]", raw, maxsplit=1)[0]
+    s = FB_SENDER_TRUNCATED_FIELD_RE.sub("", raw.rstrip())
+    s = re.split(r"[（(_]", s, maxsplit=1)[0]
     return s.replace(" ", "").replace("　", "").strip()[:20]
 
 
@@ -268,13 +276,18 @@ def _parse_fb_events_raw(body: str) -> list[dict]:
     （このパースの失敗で build を止めない）。
     """
     try:
-        heads = list(FB_HEAD_RE.finditer(body or ""))
+        raw_body = body or ""
+        section = FB_SECTION_RE.search(raw_body)
+        # 実カルテでは必ず専用section内だけを読む。純関数test/旧呼出しの
+        # heading fragmentはsectionなしでも互換維持する（FB_HEAD_REが通常H3を除外）。
+        timeline_body = section.group(1) if section else raw_body
+        heads = list(FB_HEAD_RE.finditer(timeline_body))
         events = []
         for i, m in enumerate(heads):
             try:
                 head = m.group("head").strip()
-                end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
-                sec = body[m.end():end]
+                end = heads[i + 1].start() if i + 1 < len(heads) else len(timeline_body)
+                sec = timeline_body[m.end():end]
                 nx = re.search(r"^#{1,6}\s", sec, re.M)  # 次の見出し（## 関連資料 / 非FBのh3 等）で打ち切り
                 if nx:
                     sec = sec[:nx.start()]
@@ -1837,7 +1850,9 @@ function initGraph(){
   if(!tot)return esc(LB[opt.cluster])+"でまとめています（表示中の対象がありません）";   /* 全島が空（対象typeを非表示にした等）で「まとめています」だけ出すと嘘になる */
   let s=esc(LB[opt.cluster])+"でまとめています";
   if(un)s+="（"+uk+" "+un+"件は"+uk+"島）";
-  if(cCenters[COTHER])s+="<br>種類が多いため上位"+(CLMAX-1)+"件のみ島にし、残り"+clOther.size+"種は「"+COTHER+"」島にまとめています";
+  /* cCenters["その他"] は phase の実在値でも成立する。溢れ説明の判定に使うと
+     「残り0種はその他島」と虚偽表示するため、実際の溢れ集合だけを正にする。 */
+  if(clOther.size)s+="<br>種類が多いため上位"+(CLMAX-1)+"件のみ島にし、残り"+clOther.size+"種は「"+COTHER+"」島にまとめています";
   if(opt.cluster==="doc_type"||opt.cluster==="solution")s+="<br>資料でまとめています（取引先は資料に引かれ周辺に配置）";
   return s;}
  function ncol(n){if(n.type==="tag")return "hsl(254,42%,72%)";if(n.type==="doc")return "rgba(150,150,156,.6)";return opt.groupBy==="phase"?(PHASECOLOR[n.phase]||"#9a9a9a"):colorOf(n.industry);}

@@ -874,6 +874,24 @@ def test_parse_fb_date_from_quote_line_and_fields() -> None:
     assert ev["next"] == "全社に展開"
 
 
+def test_parse_fb_date_prefixed_heading_is_scoped_to_timeline_section() -> None:
+    """exporterの日付見出しを読み、関連資料側の日付H3はFBとして扱わない。"""
+    body = (
+        "## 営業FB時系列（新しい順）\n\n"
+        "### 2026-07-17 初回提案\n\n"
+        "- フェーズ: 提案\n- ポジ反応: 導入意向あり\n\n"
+        "## 関連資料\n\n"
+        "### 2026-07-18 定例会議資料\n\n- ポジ反応: 誤検知してはいけない\n"
+    )
+
+    events = _mod.parse_fb_events(body)
+
+    assert len(events) == 1
+    assert events[0]["d"] == "2026-07-17"
+    assert events[0]["ph"] == "提案"
+    assert events[0]["pos"] == "導入意向あり"
+
+
 def test_parse_fb_epoch_converts_to_jst_date() -> None:
     """epoch → UTC+9 で日付化(UTC のままだと前日になる境界 epoch で検証)。"""
     # 1779120000 = 2026-05-19 01:00 JST（UTC では 2026-05-18 16:00）
@@ -993,6 +1011,7 @@ def test_parse_fb_sender_extraction_and_normalization() -> None:
             "送信者: 村山 五郎 タイムスタンプ: 2026/05/21 19:25:37 連携ステータス: 連携済み",
             "村山五郎",
         ),
+        ("送信者: 上條はるかタイムスタ", "上條はるか"),  # 300字capが次フィールド名の途中で切断
     ]
     for i, (quote, expected) in enumerate(cases):
         evs = _mod.parse_fb_events(_form_fb(f"商流: 直販 {quote}", pos=f"内容{i}", row=i + 1))
@@ -1160,6 +1179,31 @@ def test_timeline_payload_and_dom_in_html(sidecars: Path, vault: Path, tmp_path:
     assert '"lastfb": "2026-05-18"' in html
     assert '"pos": "・保証型がよい"' in html
     assert '"cnorm": "帝人"' in html
+
+
+def test_date_prefixed_timeline_survives_full_build(
+    sidecars: Path, vault: Path, tmp_path: Path
+) -> None:
+    """source-date backfill後のexporter形式でもfb>0のpayloadが空timelineにならない。"""
+    (vault / "clients" / "日付見出し商事.md").write_text(
+        '---\nclient: "日付見出し商事"\nindustry: "IT"\ndeal_phase: "提案"\n'
+        'bant_score: "B"\nfb_count: 1\ndoc_count: 0\n---\n\n# 日付見出し商事\n\n'
+        "## 営業FB時系列（新しい順）\n\n"
+        "### 2026-07-17 初回提案\n\n"
+        "- フェーズ: 提案\n- ポジ反応: 導入意向あり\n\n"
+        "## 関連資料\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+
+    _run(vault, out)
+
+    payload = _payload(out.read_text(encoding="utf-8"))
+    [client] = [c for c in payload["clients"] if c["name"] == "日付見出し商事"]
+    assert client["fb"] == 1
+    assert len(client["tl"]) == 1
+    assert client["tl"][0]["d"] == "2026-07-17"
+    assert client["tl"][0]["pos"] == "導入意向あり"
 
 
 def test_timeline_merged_on_name_dedup(sidecars: Path, vault: Path, tmp_path: Path) -> None:
@@ -2683,6 +2727,9 @@ def test_cluster_island_count_is_capped(sidecars: Path, vault: Path, tmp_path: P
     # 溢れは「その他」島へ集約（無言で消さない）。挙動の固定は test_graph_cluster_js.py が JS 実行で行う
     assert "vals=rest.slice(0,CLMAX-1);" in html
     assert "clOther=new Set(over);" in html
+    # phase の実在値「その他」と、自由記述軸の溢れ集約を区別する。
+    assert "if(clOther.size)s+=" in html
+    assert 'if(cCenters[COTHER])s+="<br>種類が多いため' not in html
 
 
 def test_cluster_caption_admits_when_all_islands_empty(
