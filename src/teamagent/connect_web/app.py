@@ -28,6 +28,8 @@ from typing import Any
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from teamagent.adapters.google_oauth_flow import OAuthConsentFlow, verify_state
 from teamagent.adapters.oauth_token_store import (
@@ -50,6 +52,79 @@ from teamagent.dashboard.auth import (
 from teamagent.dashboard.config import DashboardConfig
 
 logger = structlog.get_logger(__name__)
+
+
+# Every route carries the same browser-facing baseline.  The application serves a large,
+# self-contained HTML artifact and Google Identity Services, so inline script/style support and
+# the Google origins are intentional.  Everything else remains default-deny, and framing this
+# app is never required.
+_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'self'",
+        "base-uri 'none'",
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+        "script-src 'self' 'unsafe-inline' https://accounts.google.com",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob: https:",
+        "font-src 'self' data:",
+        "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com",
+        "frame-src https://accounts.google.com",
+        "worker-src 'self' blob:",
+        "media-src 'self' data: blob: https:",
+        "manifest-src 'self'",
+        "upgrade-insecure-requests",
+    )
+)
+
+_SECURITY_HEADERS = {
+    "Cache-Control": "no-store, max-age=0",
+    "Pragma": "no-cache",
+    "Content-Security-Policy": _CONTENT_SECURITY_POLICY,
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()"
+    ),
+    # Google Sign-In can use a popup, hence same-origin-allow-popups rather than same-origin.
+    "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+    "Cross-Origin-Resource-Policy": "same-site",
+    "X-Permitted-Cross-Domain-Policies": "none",
+    "X-DNS-Prefetch-Control": "off",
+    "Origin-Agent-Cluster": "?1",
+}
+
+
+class _SecurityHeadersMiddleware:
+    """Pure ASGI response middleware that does not consume or buffer the request body.
+
+    Starlette's decorator middleware is based on ``BaseHTTPMiddleware``.  Wrapping the request in
+    that layer can hide an already-delivered ``http.disconnect`` message from the search route,
+    which would let an abandoned request start costly embedding/model work.  Editing only the
+    ``http.response.start`` message preserves the original receive channel exactly.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def _send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in _SECURITY_HEADERS.items():
+                    # Route-specific policy may be stricter (for example /r already sets no-store).
+                    if name not in headers:
+                        headers[name] = value
+            await send(message)
+
+        await self.app(scope, receive, _send)
 
 
 class _RedactShortLinkAccessLog(logging.Filter):
@@ -2949,6 +3024,8 @@ def create_app(
     redirect = redirect_uri or os.environ.get("OAUTH_REDIRECT_URI", "")
     slack_redirect = slack_redirect_uri or os.environ.get("SLACK_OAUTH_REDIRECT_URI", "")
     app = FastAPI(title="TeamAgent Connect", docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(_SecurityHeadersMiddleware)
+
     search_cfg = search_config or _load_search_config()
     # SearchSkill は embedder が重いのでプロセス内 lazy-singleton（初回検索時に1度だけ生成）。
     # api_search が run() を to_thread へオフロードするため、初回検索が同時に来ると複数の
