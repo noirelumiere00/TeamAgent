@@ -7,9 +7,15 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
 from structlog.testing import capture_logs
 
-from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepository
+from teamagent.ingest.repository import (
+    ChunkUpsert,
+    DocumentUpsert,
+    IngestRepository,
+    SourceRetryUnavailableError,
+)
 
 
 class _Cursor:
@@ -269,6 +275,26 @@ def test_claim_due_retries_uses_skip_locked_and_maps_dict_rows() -> None:
     assert pgvector.connection_calls[0]["user_role"] == "admin"
 
 
+def test_claim_failure_is_not_indistinguishable_from_an_empty_retry_queue() -> None:
+    conn = _Connection(raise_table="ingest_source_retries")
+    repo, _ = _repo(conn)
+
+    with pytest.raises(SourceRetryUnavailableError):
+        repo.claim_due_source_retries(
+            source_kind="gdrive",
+            source_id="FOLDER1",
+            request_id="req",
+        )
+    with pytest.raises(SourceRetryUnavailableError):
+        repo.claim_due_source_retries(
+            source_kind="gdrive",
+            source_id="FOLDER1",
+            request_id="req-2",
+        )
+
+    assert len(conn.executed) == 1
+
+
 def test_record_retry_is_request_idempotent_and_has_exponential_backoff() -> None:
     conn = _Connection()
     repo, _ = _repo(conn)
@@ -305,6 +331,26 @@ def test_record_retry_is_request_idempotent_and_has_exponential_backoff() -> Non
         "office_download_failed",
         "req",
     )
+
+
+def test_retry_lease_renewal_requires_current_owner_and_pending_status() -> None:
+    conn = _Connection(rowcount=1)
+    repo, _ = _repo(conn)
+
+    assert repo.renew_source_retry_lease(
+        source_kind="gdrive",
+        source_id="FOLDER1",
+        source_type="gdrive",
+        external_id="FILE1",
+        request_id="lease-owner",
+        lease_seconds=321,
+    )
+
+    sql, params, _ = conn.executed[0]
+    assert "lease_expires_at = now()" in sql
+    assert "status = 'pending'" in sql
+    assert "lease_owner = %s" in sql
+    assert params == (321, "gdrive", "FOLDER1", "gdrive", "FILE1", "lease-owner")
 
 
 def test_resolve_retry_updates_status_without_delete() -> None:
@@ -445,26 +491,28 @@ def test_normal_content_upsert_takes_same_source_lock_before_replace() -> None:
     assert "INSERT INTO documents" in statements[1]
 
 
-def test_migration_is_additive_and_has_explicit_rollback() -> None:
+def test_original_0019_is_fully_restored_and_upgrade_stays_in_0020() -> None:
     root = Path(__file__).resolve().parents[2]
-    sql = (root / "infra/migrations/0019_ingest_source_health.sql").read_text(encoding="utf-8")
-    assert "CREATE TABLE IF NOT EXISTS ingest_source_health" in sql
-    assert "CREATE TABLE IF NOT EXISTS ingest_connector_runs" in sql
-    assert "CREATE TABLE IF NOT EXISTS ingest_source_retries" in sql
-    assert "CREATE TABLE IF NOT EXISTS ingest_reconciliation_gaps" in sql
-    assert "success_with_warnings" in sql
-    assert "ingest_source_health FORCE ROW LEVEL SECURITY" in sql
-    assert "ingest_connector_runs FORCE ROW LEVEL SECURITY" in sql
-    assert "app.user_role" in sql
-    assert "DROP TABLE IF EXISTS ingest_source_health" in sql
-    assert "REVOKE DELETE" in sql
-    assert "validator_schema_version" in sql
-    assert "mime_type, validator_schema_version" in sql
-    assert "FOR UPDATE SKIP LOCKED" not in sql
-    assert "ALTER TYPE" not in sql
-    assert sql.count("'audit-20260717-unindexed-pdf-") == 3
-    assert sql.count("'audit-20260717-source-original-missing-") == 9
-    assert len(re.findall(r"'[0-9a-f]{64}'", sql)) == 19
+    sql_0019 = (root / "infra/migrations/0019_ingest_source_health.sql").read_text(
+        encoding="utf-8"
+    )
+    sql_0020 = (root / "infra/migrations/0020_ingest_source_retry_upgrade.sql").read_text(
+        encoding="utf-8"
+    )
+    assert hashlib.sha256(sql_0019.encode()).hexdigest() == (
+        "fcbd206703afe955f17c8c7b951e3bb0fc0be698e4a179e19e065c7a144a2afd"
+    )
+    assert "CREATE TABLE IF NOT EXISTS ingest_source_health" in sql_0019
+    assert "CREATE TABLE IF NOT EXISTS ingest_connector_runs" in sql_0019
+    assert "CREATE TABLE IF NOT EXISTS ingest_source_retries" not in sql_0019
+    assert "validator_schema_version" not in sql_0019
+    assert "CREATE TABLE IF NOT EXISTS ingest_source_retries" in sql_0020
+    assert "CREATE TABLE IF NOT EXISTS ingest_reconciliation_gaps" in sql_0020
+    assert "REVOKE DELETE" in sql_0020
+    assert "validator_schema_version" in sql_0020
+    assert sql_0020.count("'audit-20260717-unindexed-pdf-") == 3
+    assert sql_0020.count("'audit-20260717-source-original-missing-") == 9
+    assert len(re.findall(r"'[0-9a-f]{64}'", sql_0020)) == 19
 
 
 def test_upgrade_migration_preserves_legacy_rows_and_forces_revalidation() -> None:
@@ -479,3 +527,16 @@ def test_upgrade_migration_preserves_legacy_rows_and_forces_revalidation() -> No
     assert "ON CONFLICT (gap_key) DO NOTHING" in sql
     assert sql.count("'audit-20260717-unindexed-pdf-") == 3
     assert sql.count("'audit-20260717-source-original-missing-") == 9
+
+
+def test_runbook_defines_warning_exit_monitoring_and_admin_only_cleanup() -> None:
+    root = Path(__file__).resolve().parents[2]
+    runbook = (root / "docs/runbooks/ingest_invalid_office.md").read_text(encoding="utf-8")
+
+    assert "`2`: completed with warnings" in runbook
+    assert "Pending retries and unresolved reconciliation" in runbook
+    assert "completed operational" in runbook
+    assert "older than 90 days" in runbook
+    assert "older than 180 days" in runbook
+    assert "SET LOCAL app.user_role = 'admin'" in runbook
+    assert "ROLLBACK" in runbook

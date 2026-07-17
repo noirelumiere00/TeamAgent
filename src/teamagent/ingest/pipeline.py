@@ -20,8 +20,9 @@ import datetime as _dt
 import hashlib
 import os
 import re
+import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -49,6 +50,92 @@ if TYPE_CHECKING:
     from teamagent.ingest.contextualize import ChunkContextualizer
 
 logger = structlog.get_logger(__name__)
+
+MAX_INGEST_CHUNKS_PER_FILE = 2_000
+MAX_INGEST_EMBEDDINGS_PER_FILE = 2_000
+MAX_INGEST_EXTRACTED_CHARACTERS = 2_000_000
+_SOURCE_RETRY_LEASE_SECONDS = 600
+_SOURCE_RETRY_HEARTBEAT_SECONDS = 120.0
+_CONNECTOR_VALIDATOR_METADATA_KEY = "office_validator_schema_version"
+
+
+class GDrivePaginationIncompleteError(RuntimeError):
+    """Drive paginationがloopまたは安全ページ上限で完走できなかった。"""
+
+
+class IngestDurabilityError(RuntimeError):
+    """cursorを進める前提となるdurable stateを確立できなかった。"""
+
+
+class _RetryLeaseLostError(IngestDurabilityError):
+    """処理中retryのleaseを更新できず、owner継続を証明できない。"""
+
+
+class _IngestContentVolumeError(ValueError):
+    """chunk/embeddingのファイル単位hard capを超えた。"""
+
+    def __init__(self, category: str) -> None:
+        self.category = category
+        super().__init__(category)
+
+
+@dataclass
+class _DurabilityTracker:
+    failures: dict[str, int] = field(default_factory=dict)
+
+    def add(self, reason: str) -> None:
+        self.failures[reason] = self.failures.get(reason, 0) + 1
+
+    @property
+    def failed(self) -> bool:
+        return bool(self.failures)
+
+
+@dataclass
+class _RetryLeaseHeartbeat:
+    repository: IngestRepository
+    source_kind: str
+    source_id: str
+    external_id: str
+    request_id: str
+    durability_tracker: _DurabilityTracker
+    last_renewed_monotonic: float = 0.0
+
+    def __call__(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if (
+            not force
+            and self.last_renewed_monotonic > 0
+            and now - self.last_renewed_monotonic < _SOURCE_RETRY_HEARTBEAT_SECONDS
+        ):
+            return
+        renewer = getattr(self.repository, "renew_source_retry_lease", None)
+        renewed = False
+        if callable(renewer):
+            try:
+                renewed = bool(
+                    renewer(
+                        source_kind=self.source_kind,
+                        source_id=self.source_id,
+                        source_type="gdrive",
+                        external_id=self.external_id,
+                        request_id=self.request_id,
+                        lease_seconds=_SOURCE_RETRY_LEASE_SECONDS,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ingest_source_retry_lease_renew_failed",
+                    request_id=self.request_id,
+                    source_kind=self.source_kind,
+                    source_id_ref=_external_id_ref(self.source_id),
+                    external_id_ref=_external_id_ref(self.external_id),
+                    error_type=type(exc).__name__,
+                )
+        if not renewed:
+            self.durability_tracker.add("retry_lease_renew_failed")
+            raise _RetryLeaseLostError("retry lease ownership could not be renewed")
+        self.last_renewed_monotonic = now
 
 # 対象2フォームの実セルは ja_JP の業務時刻で、ファイル記録の同一連番および Slack
 # 投稿epochとの突合でも JST wall time と確認済み。Spreadsheet property の timeZone は
@@ -173,12 +260,18 @@ def _drain_changes(
     new_start_page_token（無ければ最後に使った token を保つ）。
     removed=True の変更は再取り込み対象外なので除外する。
     """
+    if max_pages < 1:
+        raise ValueError("max_pages must be positive")
     changed: set[str] = set()
     token: str | None = start_token
     next_cursor: str | None = start_token
+    seen_tokens: set[str] = set()
     for _ in range(max_pages):
         if token is None:
             break
+        if token in seen_tokens:
+            raise GDrivePaginationIncompleteError("Drive changes pagination token loop")
+        seen_tokens.add(token)
         batch = client.get_changes(page_token=token, request_id=request_id)
         for change in batch.changes:
             if change.file_id and not change.removed:
@@ -186,6 +279,10 @@ def _drain_changes(
         if batch.new_start_page_token:
             next_cursor = batch.new_start_page_token
         token = batch.next_page_token
+    if token is not None:
+        raise GDrivePaginationIncompleteError(
+            f"Drive changes pagination exceeded {max_pages} pages"
+        )
     return changed, next_cursor
 
 
@@ -367,12 +464,26 @@ _OFFICE_WARNING_REASONS = frozenset(
         "office_download_failed",
         "office_extract_failed",
         "office_empty_text",
+        "unsafe_content_volume",
     }
 )
 _PERSISTENT_OFFICE_INVALID_REASONS = frozenset(
-    {"corrupt_zip", "format_mismatch", "unsafe_archive", "encrypted_office"}
+    {
+        "corrupt_zip",
+        "format_mismatch",
+        "unsafe_archive",
+        "unsafe_content_volume",
+        "encrypted_office",
+    }
 )
-_PDF_WARNING_REASONS = frozenset({"pdf_download_failed", "pdf_extract_failed", "pdf_empty_text"})
+_PDF_WARNING_REASONS = frozenset(
+    {
+        "pdf_download_failed",
+        "pdf_extract_failed",
+        "pdf_empty_text",
+        "pdf_content_too_large",
+    }
+)
 _PDF_VALIDATOR_SCHEMA_VERSION = "pdf-extract-v1"
 _GENERIC_DRIVE_VALIDATOR_SCHEMA_VERSION = "gdrive-content-v1"
 
@@ -510,26 +621,31 @@ def _record_source_retry(
     request_id: str,
     dry_run: bool,
     enabled: bool,
-) -> None:
+    durability_tracker: _DurabilityTracker | None = None,
+) -> bool:
     """incremental transient失敗をcursorと独立したdurable queueへ残す。"""
     if dry_run or not enabled:
-        return
+        return True
     recorder = getattr(repository, "record_source_retry", None)
     if not callable(recorder):
-        return
+        if durability_tracker is not None:
+            durability_tracker.add("retry_recorder_unavailable")
+        return False
     try:
-        recorder(
-            source_kind=source_kind,
-            source_id=source_id,
-            source_type="gdrive",
-            external_id=f.id,
-            md5_checksum=getattr(f, "md5_checksum", None),
-            size_bytes=getattr(f, "size", None),
-            mime_type=f.mime_type,
-            validator_schema_version=_validator_schema_for_drive_file(f),
-            reason=reason,
-            request_id=request_id,
-            metadata={"retry_class": "transient"},
+        persisted = bool(
+            recorder(
+                source_kind=source_kind,
+                source_id=source_id,
+                source_type="gdrive",
+                external_id=f.id,
+                md5_checksum=getattr(f, "md5_checksum", None),
+                size_bytes=getattr(f, "size", None),
+                mime_type=f.mime_type,
+                validator_schema_version=_validator_schema_for_drive_file(f),
+                reason=reason,
+                request_id=request_id,
+                metadata={"retry_class": "transient"},
+            )
         )
     except Exception as exc:
         logger.warning(
@@ -540,6 +656,19 @@ def _record_source_retry(
             file_ref=_external_id_ref(f.id),
             error_type=type(exc).__name__,
         )
+        persisted = False
+    if not persisted:
+        if durability_tracker is not None:
+            durability_tracker.add("retry_persistence_failed")
+        logger.error(
+            "ingest_source_retry_not_durable",
+            request_id=request_id,
+            source_kind=source_kind,
+            source_id_ref=_external_id_ref(source_id),
+            file_ref=_external_id_ref(f.id),
+            reason=reason,
+        )
+    return persisted
 
 
 def _resolve_source_retry(
@@ -710,6 +839,79 @@ class _EmbedderProto(Protocol):
     def embed(self, text: str) -> list[float]: ...
     # 取り込みは passage 側プレフィックスで埋め込む（e5 非対称・embeddings_client 参照）。
     def embed_passage(self, text: str) -> list[float]: ...
+
+
+def _bounded_chunk_pages(pages: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """chunk listを構築中からhard capし、巨大本文での一時メモリ膨張を防ぐ。"""
+    from teamagent.ingest.pdf_extract import ChunkLimitExceededError, chunk_pages
+
+    extracted_chars = 0
+    for _, text in pages:
+        extracted_chars += len(text)
+        if extracted_chars > MAX_INGEST_EXTRACTED_CHARACTERS:
+            raise _IngestContentVolumeError("extracted_text_limit")
+    try:
+        return chunk_pages(
+            pages,
+            size=500,
+            overlap=100,
+            max_chunks=MAX_INGEST_CHUNKS_PER_FILE,
+        )
+    except ChunkLimitExceededError as exc:
+        raise _IngestContentVolumeError("chunk_limit") from exc
+
+
+def _embed_page_chunks(
+    page_chunks: list[tuple[int, str]],
+    *,
+    embedder: _EmbedderProto,
+    lease_heartbeat: Callable[[bool], None] | None = None,
+) -> list[ChunkUpsert]:
+    """embedding件数をhard capし、retry leaseを処理中も定期更新する。"""
+    if len(page_chunks) > MAX_INGEST_EMBEDDINGS_PER_FILE:
+        raise _IngestContentVolumeError("embedding_limit")
+    chunks: list[ChunkUpsert] = []
+    for idx, (page_num, text) in enumerate(page_chunks):
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
+        chunks.append(
+            ChunkUpsert(
+                chunk_idx=idx,
+                content=text,
+                embedding=embedder.embed_passage(text),
+                metadata={"page_num": page_num},
+            )
+        )
+    return chunks
+
+
+def _record_generic_drive_warning(
+    *,
+    f: Any,
+    category: str,
+    request_id: str,
+    warning_collector: _IngestWarningCollector | None,
+    warning_source_kind: str,
+    warning_source_id: str,
+    event: str,
+    error_type: str | None = None,
+) -> None:
+    """Google native/plain textの失敗を本文・名前・raw IDなしで集計する。"""
+    if warning_collector is not None:
+        warning_collector.add(
+            warning_source_kind,
+            warning_source_id,
+            category,
+        )
+    logger.warning(
+        event,
+        request_id=request_id,
+        file_ref=_external_id_ref(f.id),
+        mime_type=f.mime_type,
+        category=category,
+        error_type=error_type,
+        existing_document_preserved=True,
+    )
 
 
 # -----------------------------------------------------------
@@ -1008,9 +1210,15 @@ def _list_all_gdrive_files(
     max_pages: int = 100,
 ) -> list[Any]:
     """folder 内 file を pagination を回して全件取得する（max_pages で防壁）。"""
+    if max_pages < 1:
+        raise ValueError("max_pages must be positive")
     out: list[Any] = []
     token: str | None = None
+    seen_tokens: set[str | None] = set()
     for _ in range(max_pages):
+        if token in seen_tokens:
+            raise GDrivePaginationIncompleteError("Drive files pagination token loop")
+        seen_tokens.add(token)
         files, token = client.list_files(
             folder_id=folder_id,
             request_id=request_id,
@@ -1021,6 +1229,10 @@ def _list_all_gdrive_files(
         out.extend(files)
         if not token:
             break
+    if token:
+        raise GDrivePaginationIncompleteError(
+            f"Drive files pagination exceeded {max_pages} pages"
+        )
     return out
 
 
@@ -1101,8 +1313,8 @@ def _decode_text_bytes(data: bytes) -> str:
 def _extract_gslide_pages(file_id: str, request_id: str) -> list[tuple[int, str]] | None:
     """gslide 本文＋ノートを取得して [(1, text)] を返す（fail-open: 失敗時 None）。
 
-    None を返すと呼び出し側は title_only にフォールバックする。lazy import で
-    adapter 依存をこの分岐内に閉じる。
+    None を返すと呼び出し側はwarningとしてskipする。lazy importでadapter依存を
+    この分岐内に閉じる。
     """
     try:
         from teamagent.adapters.gslides_client import GSlidesClient
@@ -1112,11 +1324,18 @@ def _extract_gslide_pages(file_id: str, request_id: str) -> list[tuple[int, str]
         text = (content.text or "").strip()
     except Exception:
         logger.warning(
-            "gdrive_gslide_extract_failed", file_id=file_id, request_id=request_id, exc_info=True
+            "gdrive_gslide_extract_failed",
+            file_ref=_external_id_ref(file_id),
+            request_id=request_id,
+            exc_info=True,
         )
         return None
     if not text:
-        logger.warning("gdrive_gslide_empty_text", file_id=file_id, request_id=request_id)
+        logger.warning(
+            "gdrive_gslide_empty_text",
+            file_ref=_external_id_ref(file_id),
+            request_id=request_id,
+        )
         return None
     return [(1, text)]
 
@@ -1126,7 +1345,7 @@ def _extract_gsheet_native_pages(file_id: str, request_id: str) -> list[tuple[in
 
     get_sheet_metadata でタブを列挙 → 各タブ get_tab_rows → format_row_as_document。
     xlsx と同様にセル/行の上限ガードを入れ、暴走を防ぐ。タブ＝page_num（1 始まり）。
-    None を返すと呼び出し側は title_only にフォールバックする。
+    None を返すと呼び出し側はwarningとしてskipする。
     """
     try:
         from teamagent.adapters.gsheets_client import (
@@ -1146,36 +1365,33 @@ def _extract_gsheet_native_pages(file_id: str, request_id: str) -> list[tuple[in
                 continue
             lines: list[str] = []
             for row in tab_rows.rows:
-                if total_rows >= _GSHEET_MAX_ROWS_PER_SHEET:
-                    logger.warning(
-                        "gsheet_native_sheet_truncated",
-                        file_id=file_id,
-                        max_rows=_GSHEET_MAX_ROWS_PER_SHEET,
-                    )
-                    break
-                if len(lines) >= _GSHEET_MAX_ROWS_PER_TAB:
-                    logger.warning(
-                        "gsheet_native_tab_truncated",
-                        file_id=file_id,
-                        tab_name=tab.title,
-                        max_rows=_GSHEET_MAX_ROWS_PER_TAB,
-                    )
-                    break
                 doc_text = format_row_as_document(tab_rows.headers, row)
                 if doc_text.strip():
+                    if (
+                        total_rows >= _GSHEET_MAX_ROWS_PER_SHEET
+                        or len(lines) >= _GSHEET_MAX_ROWS_PER_TAB
+                    ):
+                        raise _IngestContentVolumeError("native_sheet_row_limit")
                     lines.append(doc_text)
                     total_rows += 1
             if lines:
                 pages.append((tab_idx, "\n\n".join(lines)))
-            if total_rows >= _GSHEET_MAX_ROWS_PER_SHEET:
-                break
+    except _IngestContentVolumeError:
+        raise
     except Exception:
         logger.warning(
-            "gdrive_gsheet_extract_failed", file_id=file_id, request_id=request_id, exc_info=True
+            "gdrive_gsheet_extract_failed",
+            file_ref=_external_id_ref(file_id),
+            request_id=request_id,
+            exc_info=True,
         )
         return None
     if not pages:
-        logger.warning("gdrive_gsheet_empty_text", file_id=file_id, request_id=request_id)
+        logger.warning(
+            "gdrive_gsheet_empty_text",
+            file_ref=_external_id_ref(file_id),
+            request_id=request_id,
+        )
         return None
     return pages
 
@@ -1190,13 +1406,17 @@ def _extract_plaintext_pages(
     except Exception:
         logger.warning(
             "gdrive_plaintext_extract_failed",
-            file_id=file_id,
+            file_ref=_external_id_ref(file_id),
             request_id=request_id,
             exc_info=True,
         )
         return None
     if not text:
-        logger.warning("gdrive_plaintext_empty_text", file_id=file_id, request_id=request_id)
+        logger.warning(
+            "gdrive_plaintext_empty_text",
+            file_ref=_external_id_ref(file_id),
+            request_id=request_id,
+        )
         return None
     return [(1, text)]
 
@@ -1205,7 +1425,7 @@ def _rich_native_pages(f: Any, *, client: Any, request_id: str) -> list[tuple[in
     """rich モードで gdoc/gslide/gsheet/plain-text を本文ページ化する。
 
     対象 mime でないか、抽出に失敗（fail-open）した場合は ``None`` を返し、
-    呼び出し側は既存ロジック（title_only など）にフォールバックする。
+    呼び出し側はwarningとしてskipする。
     呼び出し側は ``INGEST_RICH_EXTRACT`` が ON のときだけ本関数を呼ぶこと。
     """
     from teamagent.ingest.office_extract import GDOC_NATIVE_MIME
@@ -1235,11 +1455,18 @@ def _extract_gdoc_pages(file_id: str, request_id: str) -> list[tuple[int, str]] 
         text = (doc_content.text or "").strip()
     except Exception:
         logger.warning(
-            "gdrive_gdoc_extract_failed", file_id=file_id, request_id=request_id, exc_info=True
+            "gdrive_gdoc_extract_failed",
+            file_ref=_external_id_ref(file_id),
+            request_id=request_id,
+            exc_info=True,
         )
         return None
     if not text:
-        logger.warning("gdrive_gdoc_empty_text", file_id=file_id, request_id=request_id)
+        logger.warning(
+            "gdrive_gdoc_empty_text",
+            file_ref=_external_id_ref(file_id),
+            request_id=request_id,
+        )
         return None
     return [(1, text)]
 
@@ -1379,6 +1606,7 @@ def _ingest_gdrive_folder(
     )
     from teamagent.ingest.classify import build_classifier_from_env
     from teamagent.ingest.contextualize import build_contextualizer_from_env
+    from teamagent.ingest.office_extract import OFFICE_VALIDATOR_SCHEMA_VERSION
 
     # yaml キー未記載（None）→ コード既定の 99_一次倉庫系除外。空文字 "" → 除外なし。
     effective_exclude_re = (
@@ -1405,6 +1633,7 @@ def _ingest_gdrive_folder(
         if warning_collector is not None
         else _WarningSnapshot(reasons={}, suppressed=0)
     )
+    durability_tracker = _DurabilityTracker()
 
     # 増分同期（USE_INCREMENTAL_SYNC=1 で opt-in・既定 OFF＝従来フル走査で完全後方互換）。
     # connector_state の前回 cursor から Drive changes.list の差分（変更 file のみ）に絞り込む。
@@ -1415,6 +1644,7 @@ def _ingest_gdrive_folder(
     retry_ids: set[str] = set()
     if incremental:
         prior_cursor: str | None = None
+        state: Any | None = None
         try:
             state = repository.load_connector_state("gdrive", spec.folder_id)
             prior_cursor = state.cursor if state else None
@@ -1422,7 +1652,24 @@ def _ingest_gdrive_folder(
             logger.exception(
                 "connector_state_load_failed", source_kind="gdrive", source_id=spec.folder_id
             )
-        if prior_cursor:
+        prior_validator_version = (
+            str((getattr(state, "metadata", {}) or {}).get(_CONNECTOR_VALIDATOR_METADATA_KEY) or "")
+            if state is not None
+            else ""
+        )
+        validator_generation_changed = bool(prior_cursor) and (
+            prior_validator_version != OFFICE_VALIDATOR_SCHEMA_VERSION
+        )
+        if validator_generation_changed:
+            logger.warning(
+                "gdrive_validator_generation_changed",
+                request_id=request_id,
+                folder_ref=_external_id_ref(spec.folder_id),
+                previous_validator=prior_validator_version or "unrecorded",
+                current_validator=OFFICE_VALIDATOR_SCHEMA_VERSION,
+                action="full_revalidation",
+            )
+        if prior_cursor and not validator_generation_changed:
             try:
                 changed_ids, next_cursor = _drain_changes(client, prior_cursor, request_id)
                 logger.info(
@@ -1434,7 +1681,7 @@ def _ingest_gdrive_folder(
                 logger.exception("gdrive_get_changes_failed", folder_id=spec.folder_id)
                 changed_ids = None  # 差分取得失敗 → フル走査にフォールバック
         if changed_ids is None:
-            # 初回（cursor 無し）または差分取得失敗: 次回用の start token を取得（今回はフル走査）。
+            # 初回・validator世代変更・差分取得失敗はフル走査。走査開始前のtokenを次回基点にする。
             try:
                 next_cursor = client.get_start_page_token(request_id)
             except Exception:
@@ -1452,6 +1699,7 @@ def _ingest_gdrive_folder(
                     )
                     retry_ids = {str(retry.external_id) for retry in retry_claims}
                 except Exception as exc:
+                    durability_tracker.add("retry_claim_failed")
                     logger.warning(
                         "ingest_source_retry_claim_failed",
                         request_id=request_id,
@@ -1459,6 +1707,8 @@ def _ingest_gdrive_folder(
                         source_id_ref=_external_id_ref(spec.folder_id),
                         error_type=type(exc).__name__,
                     )
+            else:
+                durability_tracker.add("retry_claimer_unavailable")
 
     if spec.include_subfolders:
         # Day 7 (2026-05-27): walk_files_recursive はサブフォルダを BFS する。
@@ -1469,10 +1719,14 @@ def _ingest_gdrive_folder(
             exclude_folder_name_re=effective_exclude_re,
         )
         # stale 堅牢化: walk が max_files（既定値）で打ち切られた可能性がある場合は
-        # run 単位フラグに集約する（打ち切り run では mark を skip）。len >= 上限は
-        # 打ち切りの必要条件で、丁度一致の偽陽性は mark skip 側＝安全側に倒れる。
-        if truncated_walk_roots is not None and len(all_files) >= DEFAULT_WALK_MAX_FILES:
-            truncated_walk_roots.add(spec.folder_id)
+        # run 単位フラグに集約し、partial setでcursor/staleを進めないようsourceを失敗させる。
+        # len == 上限の完走との区別がadapter I/F上つかないため、安全側にfail-closedする。
+        if len(all_files) >= DEFAULT_WALK_MAX_FILES:
+            if truncated_walk_roots is not None:
+                truncated_walk_roots.add(spec.folder_id)
+            raise GDrivePaginationIncompleteError(
+                f"Drive recursive listing reached {DEFAULT_WALK_MAX_FILES} file safety limit"
+            )
         # stale 差集合用: mime post-filter の**前**（Drive 上に存在が確認できた全 file）で
         # 観測済みを記録する（設定の絞り込みで存在中の file が stale 誤爆しないよう安全側）。
         if observed_gdrive_ids is not None:
@@ -1506,25 +1760,30 @@ def _ingest_gdrive_folder(
                 len(missing_retry_ids),
             )
         retry_recorder = getattr(repository, "record_source_retry", None)
-        if callable(retry_recorder) and not dry_run:
+        if not dry_run and not callable(retry_recorder):
+            durability_tracker.add("retry_recorder_unavailable")
+        elif callable(retry_recorder) and not dry_run:
             for retry in retry_claims:
                 if retry.external_id not in missing_retry_ids:
                     continue
                 try:
-                    retry_recorder(
-                        source_kind="gdrive",
-                        source_id=spec.folder_id,
-                        source_type="gdrive",
-                        external_id=retry.external_id,
-                        md5_checksum=retry.md5_checksum,
-                        size_bytes=retry.size_bytes,
-                        mime_type=retry.mime_type,
-                        validator_schema_version=retry.validator_schema_version,
-                        reason="retry_source_missing",
-                        request_id=request_id,
-                        metadata={"retry_class": "source_not_listed"},
+                    persisted = bool(
+                        retry_recorder(
+                            source_kind="gdrive",
+                            source_id=spec.folder_id,
+                            source_type="gdrive",
+                            external_id=retry.external_id,
+                            md5_checksum=retry.md5_checksum,
+                            size_bytes=retry.size_bytes,
+                            mime_type=retry.mime_type,
+                            validator_schema_version=retry.validator_schema_version,
+                            reason="retry_source_missing",
+                            request_id=request_id,
+                            metadata={"retry_class": "source_not_listed"},
+                        )
                     )
                 except Exception as exc:
+                    persisted = False
                     logger.warning(
                         "ingest_source_retry_missing_record_failed",
                         request_id=request_id,
@@ -1532,6 +1791,8 @@ def _ingest_gdrive_folder(
                         external_id_ref=_external_id_ref(retry.external_id),
                         error_type=type(exc).__name__,
                     )
+                if not persisted:
+                    durability_tracker.add("retry_persistence_failed")
 
     # 増分: 新規変更または期限到来retryだけに絞る（changed_ids=Noneならフル走査）。
     if changed_ids is not None:
@@ -1541,6 +1802,16 @@ def _ingest_gdrive_folder(
     for f in files:
         # Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないよう全体を try/except でラップ。
         # 既存の細かい try/except (download/extract) はそのまま生かす。
+        lease_heartbeat: Callable[[bool], None] | None = None
+        if incremental and not dry_run and f.id in retry_ids:
+            lease_heartbeat = _RetryLeaseHeartbeat(
+                repository=repository,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                external_id=f.id,
+                request_id=request_id,
+                durability_tracker=durability_tracker,
+            )
         try:
             docs_added, chunks_added = _process_one_gdrive_file(
                 f=f,
@@ -1559,11 +1830,30 @@ def _ingest_gdrive_folder(
                 warning_source_kind=warning_source_kind,
                 warning_source_id=warning_source_id,
                 durable_retry=incremental,
+                durability_tracker=durability_tracker,
+                lease_heartbeat=lease_heartbeat,
             )
             docs_n += docs_added
             chunks_n += chunks_added
             if incremental and not dry_run and docs_added > 0:
                 _safe_record_job(repository, "gdrive", f.id, success=True, request_id=request_id)
+        except _RetryLeaseLostError:
+            logger.warning(
+                "gdrive_retry_lease_lost",
+                request_id=request_id,
+                file_ref=_external_id_ref(f.id),
+                folder_ref=_external_id_ref(spec.folder_id),
+            )
+            skipped.append(f.id)
+            _safe_record_job(
+                repository,
+                "gdrive",
+                f.id,
+                success=False,
+                error="retry_lease_lost",
+                request_id=request_id,
+            )
+            continue
         except Exception:
             logger.exception(
                 "gdrive_file_unexpected_error",
@@ -1581,6 +1871,7 @@ def _ingest_gdrive_folder(
                     request_id=request_id,
                     dry_run=dry_run,
                     enabled=True,
+                    durability_tracker=durability_tracker,
                 )
                 _safe_record_job(
                     repository,
@@ -1598,6 +1889,16 @@ def _ingest_gdrive_folder(
         else _WarningSnapshot(reasons={}, suppressed=0)
     )
 
+    if incremental and not dry_run and durability_tracker.failed:
+        logger.error(
+            "gdrive_cursor_blocked_by_durability_failure",
+            request_id=request_id,
+            folder_ref=_external_id_ref(spec.folder_id),
+            failures=durability_tracker.failures,
+            next_cursor_present=bool(next_cursor),
+        )
+        raise IngestDurabilityError("durable retry state was not established; cursor not advanced")
+
     # 成功時に cursor を前進保存（次回はこの cursor 以降の差分だけ取る）。
     if incremental and not dry_run:
         try:
@@ -1611,10 +1912,12 @@ def _ingest_gdrive_folder(
                     "warning_count": sum(warning_delta.reasons.values()),
                     "warning_reasons": warning_delta.reasons,
                     "known_invalid_suppressed": warning_delta.suppressed,
+                    _CONNECTOR_VALIDATOR_METADATA_KEY: OFFICE_VALIDATOR_SCHEMA_VERSION,
                 },
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("connector_state_save_failed", folder_id=spec.folder_id)
+            raise IngestDurabilityError("connector cursor state could not be saved") from exc
 
     logger.info(
         "ingest_gdrive_folder_done",
@@ -1677,6 +1980,8 @@ def _process_one_gdrive_file(
     warning_source_kind: str = "gdrive",
     warning_source_id: str = "gdrive",
     durable_retry: bool = False,
+    durability_tracker: _DurabilityTracker | None = None,
+    lease_heartbeat: Callable[[bool], None] | None = None,
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
@@ -1697,7 +2002,10 @@ def _process_one_gdrive_file(
         OfficePayloadError,
         extract_office_pages,
     )
-    from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
+    from teamagent.ingest.pdf_extract import extract_pdf_pages
+
+    if lease_heartbeat is not None:
+        lease_heartbeat(True)
 
     # INGEST_RICH_EXTRACT=1 のときだけ rich 抽出（gslide/gsheet/plain-text 本文化・抽出器の
     # rich 引数）を有効化。OFF（既定）は現行と 1 バイトも挙動を変えない（後方互換）。
@@ -1778,11 +2086,46 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 enabled=durable_retry,
+                durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
             return 0, 0
         try:
             pages = extract_pdf_pages(data, **pdf_kwargs)
+            page_chunks = _bounded_chunk_pages(pages)
+            if page_chunks:
+                chunks.extend(
+                    _embed_page_chunks(
+                        page_chunks,
+                        embedder=embedder,
+                        lease_heartbeat=lease_heartbeat,
+                    )
+                )
+        except _RetryLeaseLostError:
+            raise
+        except _IngestContentVolumeError:
+            _record_pdf_warning(
+                f=f,
+                category="pdf_content_too_large",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_pdf_content_too_large",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="pdf_content_too_large",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+            )
+            skipped.append(f.id)
+            return 0, 0
         except Exception as exc:
             _record_pdf_warning(
                 f=f,
@@ -1803,10 +2146,10 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 enabled=durable_retry,
+                durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
             return 0, 0
-        page_chunks = chunk_pages(pages, size=500, overlap=100)
         if not page_chunks:
             _record_pdf_warning(
                 f=f,
@@ -1826,18 +2169,10 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 enabled=durable_retry,
+                durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
             return 0, 0
-        for idx, (page_num, text) in enumerate(page_chunks):
-            chunks.append(
-                ChunkUpsert(
-                    chunk_idx=idx,
-                    content=text,
-                    embedding=embedder.embed_passage(text),
-                    metadata={"page_num": page_num},
-                )
-            )
     elif f.mime_type in OFFICE_BINARY_MIMES:
         # docx / pptx / xlsx: download → extract → chunk_pages（PDF と同じ I/F）
         try:
@@ -1865,6 +2200,7 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 enabled=durable_retry,
+                durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
             return 0, 0
@@ -1892,6 +2228,7 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 enabled=durable_retry,
+                durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
             return 0, 0
@@ -1901,8 +2238,46 @@ def _process_one_gdrive_file(
                 mime_type=f.mime_type,
                 expected_size=f.size,
                 expected_md5=getattr(f, "md5_checksum", None),
+                progress_callback=(
+                    (lambda: lease_heartbeat(False)) if lease_heartbeat is not None else None
+                ),
                 **office_kwargs,
             )
+            page_chunks = _bounded_chunk_pages(pages)
+            if page_chunks:
+                chunks.extend(
+                    _embed_page_chunks(
+                        page_chunks,
+                        embedder=embedder,
+                        lease_heartbeat=lease_heartbeat,
+                    )
+                )
+        except _RetryLeaseLostError:
+            raise
+        except _IngestContentVolumeError:
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category="unsafe_content_volume",
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_payload_invalid",
+                actual_bytes=len(data),
+                expected_bytes=f.size,
+            )
+            _resolve_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                request_id=request_id,
+                dry_run=dry_run,
+            )
+            skipped.append(f.id)
+            return 0, 0
         except OfficePayloadError as exc:
             # invalid payloadではDBを書かない。既存document/chunksがあればそのまま保持され、
             # observed_gdrive_idsには列挙時点で入るためstale誤判定もしない。
@@ -1938,6 +2313,7 @@ def _process_one_gdrive_file(
                     request_id=request_id,
                     dry_run=dry_run,
                     enabled=durable_retry,
+                    durability_tracker=durability_tracker,
                 )
             skipped.append(f.id)
             return 0, 0
@@ -1965,10 +2341,10 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 enabled=durable_retry,
+                durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
             return 0, 0
-        page_chunks = chunk_pages(pages, size=500, overlap=100)
         if not page_chunks:
             _record_office_warning(
                 repository=repository,
@@ -1992,18 +2368,10 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 enabled=durable_retry,
+                durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
             return 0, 0
-        for idx, (page_num, text) in enumerate(page_chunks):
-            chunks.append(
-                ChunkUpsert(
-                    chunk_idx=idx,
-                    content=text,
-                    embedding=embedder.embed_passage(text),
-                    metadata={"page_num": page_num},
-                )
-            )
     elif f.mime_type == GDOC_NATIVE_MIME:
         # Google native gdoc: Docs API で plain text 抽出（download_file_bytes は使えない）
         try:
@@ -2012,78 +2380,212 @@ def _process_one_gdrive_file(
             gdocs = GDocsClient.from_env()
             doc_content = gdocs.get_document_text(document_id=f.id, request_id=request_id)
             text = doc_content.text or ""
-        except Exception:
-            logger.exception(
-                "gdrive_gdoc_extract_failed",
-                file_id=f.id,
-                file_name=f.name,
-            )
-            skipped.append(f.id)
-            return 0, 0
-        if not text.strip():
-            logger.warning("gdrive_gdoc_empty_text", file_id=f.id, file_name=f.name)
-            skipped.append(f.id)
-            return 0, 0
-        page_chunks = chunk_pages([(1, text)], size=500, overlap=100)
-        for idx, (page_num, content) in enumerate(page_chunks):
-            chunks.append(
-                ChunkUpsert(
-                    chunk_idx=idx,
-                    content=content,
-                    embedding=embedder.embed_passage(content),
-                    metadata={"page_num": page_num},
+            page_chunks = _bounded_chunk_pages([(1, text)]) if text.strip() else []
+            if page_chunks:
+                chunks.extend(
+                    _embed_page_chunks(
+                        page_chunks,
+                        embedder=embedder,
+                        lease_heartbeat=lease_heartbeat,
+                    )
                 )
+        except _RetryLeaseLostError:
+            raise
+        except _IngestContentVolumeError:
+            _record_generic_drive_warning(
+                f=f,
+                category="native_content_too_large",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_native_content_too_large",
             )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="native_content_too_large",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        except Exception as exc:
+            _record_generic_drive_warning(
+                f=f,
+                category="gdoc_extract_failed",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_gdoc_extract_failed",
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="gdoc_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        if not page_chunks:
+            _record_generic_drive_warning(
+                f=f,
+                category="gdoc_empty_text",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_gdoc_empty_text",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="gdoc_empty_text",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+            )
+            skipped.append(f.id)
+            return 0, 0
     elif rich and (
         f.mime_type in (_GSLIDE_NATIVE_MIME, _GSHEET_NATIVE_MIME)
         or f.mime_type in _PLAIN_TEXT_MIMES
     ):
         # INGEST_RICH_EXTRACT=1: gslide/gsheet/plain-text を本文 chunk 化（gdoc は上で処理済）。
-        # 失敗（fail-open）時は native_pages が None → 下の title_only にフォールバックする。
-        native_pages = _rich_native_pages(f, client=client, request_id=request_id)
-        if native_pages is None:
-            # fail-open: 抽出失敗 → title_only（検索ヒットだけは可能にする）。
-            text = f"{f.name} ({f.mime_type})"
-            chunks.append(
-                ChunkUpsert(
-                    chunk_idx=0,
-                    content=text,
-                    embedding=embedder.embed_passage(text),
-                    metadata={"mime_type": f.mime_type, "title_only": True},
+        # 抽出失敗を title-only で成功扱いすると、既存本文の退行とcursor取りこぼしを招く。
+        # warning + durable retry として保持し、既存document/chunksには触れない。
+        try:
+            native_pages = _rich_native_pages(f, client=client, request_id=request_id)
+            if native_pages is None:
+                _record_generic_drive_warning(
+                    f=f,
+                    category="native_extract_failed_or_empty",
+                    request_id=request_id,
+                    warning_collector=warning_collector,
+                    warning_source_kind=warning_source_kind,
+                    warning_source_id=warning_source_id,
+                    event="gdrive_native_extract_failed_or_empty",
                 )
-            )
-        else:
-            page_chunks = chunk_pages(native_pages, size=500, overlap=100)
-            if not page_chunks:
-                logger.warning(
-                    "gdrive_native_empty_text",
-                    file_id=f.id,
-                    file_name=f.name,
-                    mime_type=f.mime_type,
+                _record_source_retry(
+                    repository=repository,
+                    f=f,
+                    source_kind=warning_source_kind,
+                    source_id=warning_source_id,
+                    reason="native_extract_failed_or_empty",
+                    request_id=request_id,
+                    dry_run=dry_run,
+                    enabled=durable_retry,
+                    durability_tracker=durability_tracker,
                 )
                 skipped.append(f.id)
                 return 0, 0
-            for idx, (page_num, content) in enumerate(page_chunks):
-                chunks.append(
-                    ChunkUpsert(
-                        chunk_idx=idx,
-                        content=content,
-                        embedding=embedder.embed_passage(content),
-                        metadata={"page_num": page_num},
-                    )
+            page_chunks = _bounded_chunk_pages(native_pages)
+            if not page_chunks:
+                _record_generic_drive_warning(
+                    f=f,
+                    category="native_empty_text",
+                    request_id=request_id,
+                    warning_collector=warning_collector,
+                    warning_source_kind=warning_source_kind,
+                    warning_source_id=warning_source_id,
+                    event="gdrive_native_empty_text",
                 )
+                _record_source_retry(
+                    repository=repository,
+                    f=f,
+                    source_kind=warning_source_kind,
+                    source_id=warning_source_id,
+                    reason="native_empty_text",
+                    request_id=request_id,
+                    dry_run=dry_run,
+                    enabled=durable_retry,
+                    durability_tracker=durability_tracker,
+                )
+                skipped.append(f.id)
+                return 0, 0
+            chunks.extend(
+                _embed_page_chunks(
+                    page_chunks,
+                    embedder=embedder,
+                    lease_heartbeat=lease_heartbeat,
+                )
+            )
+        except _RetryLeaseLostError:
+            raise
+        except _IngestContentVolumeError:
+            _record_generic_drive_warning(
+                f=f,
+                category="native_content_too_large",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_native_content_too_large",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="native_content_too_large",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        except Exception as exc:
+            _record_generic_drive_warning(
+                f=f,
+                category="native_extract_failed",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_native_extract_failed",
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="native_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+            )
+            skipped.append(f.id)
+            return 0, 0
     else:
         # 未対応 mime_type: title + mime のフォールバック（検索ヒットだけは可能にする）。
         # §M: 個人ドライブ folder 経路でも title-only に落ちたことを可視化する
         # （crawl 経路 shared_drive_title_only と対称・無音落ちを防ぐ）。
         logger.info(
             "gdrive_folder_title_only",
-            file_id=f.id,
-            file_name=f.name,
+            file_ref=_external_id_ref(f.id),
             mime_type=f.mime_type,
-            folder_id=spec.folder_id,
+            folder_ref=_external_id_ref(spec.folder_id),
         )
         text = f"{f.name} ({f.mime_type})"
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
         chunks.append(
             ChunkUpsert(
                 chunk_idx=0,
@@ -2097,6 +2599,8 @@ def _process_one_gdrive_file(
     # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。失敗しても取り込みは継続（fail-open）。
     cls_metadata: dict[str, str] = {}
     if classifier is not None and chunks:
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
         sample = "\n".join(c.content for c in chunks[:8])
         try:
             # 2026-07-06: フォルダ置き位置を分類に注入する。gdrive_folders 経路で確実に
@@ -2117,12 +2621,41 @@ def _process_one_gdrive_file(
             classification = None
         if classification is not None:
             cls_metadata = classification.as_metadata()
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
 
     # Contextual Retrieval: 抽出ページを結合した全文を full_text に文脈前置詞を付与する。
     # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換（fail-open）。
     if contextualizer is not None and chunks:
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
         full_text = "\n\n".join(c.content for c in chunks)
         chunks = contextualizer.contextualize_chunks(f.name or f.id, full_text, chunks, request_id)
+        if len(chunks) > MAX_INGEST_EMBEDDINGS_PER_FILE:
+            _record_generic_drive_warning(
+                f=f,
+                category="contextualized_content_too_large",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_contextualized_content_too_large",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="contextualized_content_too_large",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+                durability_tracker=durability_tracker,
+            )
+            skipped.append(f.id)
+            return 0, 0
+        if lease_heartbeat is not None:
+            lease_heartbeat(False)
 
     doc = DocumentUpsert(
         source_type="gdrive",
@@ -2144,6 +2677,8 @@ def _process_one_gdrive_file(
         modified_at=f.modified_time,
     )
     if not dry_run:
+        if lease_heartbeat is not None:
+            lease_heartbeat(True)
         # §2 ガード: 本文版を title_only 版で上書きしない（folder→crawl 順の退行を塞ぐ）。
         wrote = _guarded_upsert(
             repository, doc, chunks, request_id=request_id, content_registry=content_registry
@@ -2223,7 +2758,7 @@ def _ingest_shared_drives_crawl(
         OfficePayloadError,
         extract_office_pages,
     )
-    from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
+    from teamagent.ingest.pdf_extract import extract_pdf_pages
 
     client = GDriveClient.from_env(readonly=True)
     # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。crawl 単位で 1 回構築）。
@@ -2286,10 +2821,14 @@ def _ingest_shared_drives_crawl(
             max_files=spec.max_files_per_drive,
             exclude_folder_name_re=effective_exclude_re,
         )
-        # stale 堅牢化: walk が max_files_per_drive で打ち切られた可能性がある場合は
-        # run 単位フラグに集約する（打ち切り run では mark を skip・folder 経路と同義）。
-        if truncated_walk_roots is not None and len(files) >= spec.max_files_per_drive:
-            truncated_walk_roots.add(drive.id)
+        # stale/cursor堅牢化: max_files到達は完走と区別できないためfail-closedする。
+        if len(files) >= spec.max_files_per_drive:
+            if truncated_walk_roots is not None:
+                truncated_walk_roots.add(drive.id)
+            raise GDrivePaginationIncompleteError(
+                "Shared Drive recursive listing reached "
+                f"{spec.max_files_per_drive} file safety limit"
+            )
         # stale 差集合用: 営業価値フィルタの**前**（Drive 上に存在が確認できた全 file）で
         # 観測済みを記録する（フィルタ落ちした存在中の file が stale 誤爆しないよう安全側）。
         if observed_gdrive_ids is not None:
@@ -2364,6 +2903,26 @@ def _ingest_shared_drives_crawl(
                         continue
                     try:
                         pages = extract_pdf_pages(data, **pdf_kwargs)
+                        page_chunks = _bounded_chunk_pages(pages)
+                        if page_chunks:
+                            chunks.extend(
+                                _embed_page_chunks(
+                                    page_chunks,
+                                    embedder=embedder,
+                                )
+                            )
+                    except _IngestContentVolumeError:
+                        _record_pdf_warning(
+                            f=f,
+                            category="pdf_content_too_large",
+                            request_id=request_id,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_pdf_content_too_large",
+                        )
+                        skipped_count += 1
+                        continue
                     except Exception as exc:
                         _record_pdf_warning(
                             f=f,
@@ -2377,7 +2936,6 @@ def _ingest_shared_drives_crawl(
                         )
                         skipped_count += 1
                         continue
-                    page_chunks = chunk_pages(pages, size=500, overlap=100)
                     if not page_chunks:
                         _record_pdf_warning(
                             f=f,
@@ -2390,15 +2948,6 @@ def _ingest_shared_drives_crawl(
                         )
                         skipped_count += 1
                         continue
-                    for idx, (page_num, text) in enumerate(page_chunks):
-                        chunks.append(
-                            ChunkUpsert(
-                                chunk_idx=idx,
-                                content=text,
-                                embedding=embedder.embed_passage(text),
-                                metadata={"page_num": page_num},
-                            )
-                        )
                 elif f.mime_type in OFFICE_BINARY_MIMES:
                     # docx / pptx / xlsx: download → extract → chunk_pages（PDF と同じ I/F）。
                     # 営業提案書は大半が pptx なので、ここで本文を index 化することが肝。
@@ -2447,6 +2996,30 @@ def _ingest_shared_drives_crawl(
                             expected_md5=getattr(f, "md5_checksum", None),
                             **office_kwargs,
                         )
+                        page_chunks = _bounded_chunk_pages(pages)
+                        if page_chunks:
+                            chunks.extend(
+                                _embed_page_chunks(
+                                    page_chunks,
+                                    embedder=embedder,
+                                )
+                            )
+                    except _IngestContentVolumeError:
+                        _record_office_warning(
+                            repository=repository,
+                            f=f,
+                            category="unsafe_content_volume",
+                            request_id=request_id,
+                            dry_run=dry_run,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_office_payload_invalid",
+                            actual_bytes=len(data),
+                            expected_bytes=f.size,
+                        )
+                        skipped_count += 1
+                        continue
                     except OfficePayloadError as exc:
                         # invalid payloadは既存document/chunksを上書きせず保持する。file自体は
                         # observed済みなのでstaleにも落とさず、category付きWARNで運用検知する。
@@ -2482,7 +3055,6 @@ def _ingest_shared_drives_crawl(
                         )
                         skipped_count += 1
                         continue
-                    page_chunks = chunk_pages(pages, size=500, overlap=100)
                     if not page_chunks:
                         # 抽出 0 も分類warningとして可視化し、connectorを完全successにしない。
                         _record_office_warning(
@@ -2500,15 +3072,6 @@ def _ingest_shared_drives_crawl(
                         )
                         skipped_count += 1
                         continue
-                    for idx, (page_num, text) in enumerate(page_chunks):
-                        chunks.append(
-                            ChunkUpsert(
-                                chunk_idx=idx,
-                                content=text,
-                                embedding=embedder.embed_passage(text),
-                                metadata={"page_num": page_num},
-                            )
-                        )
                 elif rich and (
                     f.mime_type in (_GSLIDE_NATIVE_MIME, _GSHEET_NATIVE_MIME)
                     or f.mime_type == GDOC_NATIVE_MIME
@@ -2516,48 +3079,65 @@ def _ingest_shared_drives_crawl(
                 ):
                     # INGEST_RICH_EXTRACT=1: crawl 経路でも gdoc/gslide/gsheet/plain-text を
                     # 本文 chunk 化（folder 経路の gdoc 実装と同作法・gslide/gsheet/plain を追加）。
-                    # 失敗時は native_pages=None → title_only にフォールバック（fail-open）。
-                    native_pages = _rich_native_pages(f, client=client, request_id=request_id)
-                    if native_pages is None:
-                        logger.info(
-                            "shared_drive_title_only",
-                            request_id=request_id,
-                            file_id=f.id,
-                            file_name=f.name,
-                            mime_type=f.mime_type,
-                            drive_id=drive.id,
-                        )
-                        text = f"{f.name} ({f.mime_type})"
-                        chunks.append(
-                            ChunkUpsert(
-                                chunk_idx=0,
-                                content=text,
-                                embedding=embedder.embed_passage(text),
-                                metadata={"mime_type": f.mime_type, "title_only": True},
-                            )
-                        )
-                    else:
-                        page_chunks = chunk_pages(native_pages, size=500, overlap=100)
-                        if not page_chunks:
-                            logger.warning(
-                                "shared_drive_native_empty_text",
+                    # 抽出失敗時は既存本文をtitle-onlyへ格下げせず、warningとしてskipする。
+                    try:
+                        native_pages = _rich_native_pages(f, client=client, request_id=request_id)
+                        if native_pages is None:
+                            _record_generic_drive_warning(
+                                f=f,
+                                category="native_extract_failed_or_empty",
                                 request_id=request_id,
-                                file_id=f.id,
-                                file_name=f.name,
-                                mime_type=f.mime_type,
-                                drive_id=drive.id,
+                                warning_collector=warning_collector,
+                                warning_source_kind=warning_source_kind,
+                                warning_source_id=warning_source_id,
+                                event="shared_drive_native_extract_failed_or_empty",
                             )
                             skipped_count += 1
                             continue
-                        for idx, (page_num, text) in enumerate(page_chunks):
-                            chunks.append(
-                                ChunkUpsert(
-                                    chunk_idx=idx,
-                                    content=text,
-                                    embedding=embedder.embed_passage(text),
-                                    metadata={"page_num": page_num},
-                                )
+                        page_chunks = _bounded_chunk_pages(native_pages)
+                        if not page_chunks:
+                            _record_generic_drive_warning(
+                                f=f,
+                                category="native_empty_text",
+                                request_id=request_id,
+                                warning_collector=warning_collector,
+                                warning_source_kind=warning_source_kind,
+                                warning_source_id=warning_source_id,
+                                event="shared_drive_native_empty_text",
                             )
+                            skipped_count += 1
+                            continue
+                        chunks.extend(
+                            _embed_page_chunks(
+                                page_chunks,
+                                embedder=embedder,
+                            )
+                        )
+                    except _IngestContentVolumeError:
+                        _record_generic_drive_warning(
+                            f=f,
+                            category="native_content_too_large",
+                            request_id=request_id,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_native_content_too_large",
+                        )
+                        skipped_count += 1
+                        continue
+                    except Exception as exc:
+                        _record_generic_drive_warning(
+                            f=f,
+                            category="native_extract_failed",
+                            request_id=request_id,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_native_extract_failed",
+                            error_type=type(exc).__name__,
+                        )
+                        skipped_count += 1
+                        continue
                 else:
                     # 未対応 mime: title + mime のみ。レガシー Office(.ppt/.doc/.xls＝旧バイナリ)や
                     # Google native はここに来る（標準ライブラリが旧形式を読めず本文抽出不可）。
@@ -2614,6 +3194,18 @@ def _ingest_shared_drives_crawl(
                     chunks = contextualizer.contextualize_chunks(
                         f.name or f.id, full_text, chunks, request_id
                     )
+                    if len(chunks) > MAX_INGEST_EMBEDDINGS_PER_FILE:
+                        _record_generic_drive_warning(
+                            f=f,
+                            category="contextualized_content_too_large",
+                            request_id=request_id,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_contextualized_content_too_large",
+                        )
+                        skipped_count += 1
+                        continue
 
                 # 6. DocumentUpsert 組み立て
                 doc = DocumentUpsert(

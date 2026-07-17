@@ -268,6 +268,111 @@ def test_office_payload_parses_required_ooxml_part_before_extract() -> None:
     assert raised.value.category == "corrupt_zip"
 
 
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        '<!DOCTYPE p:presentation [<!ENTITY payload "expanded">]>',
+        (
+            '<!DOCTYPE p:presentation ['
+            '<!ENTITY payload SYSTEM "file:///definitely-not-readable">'
+            "]>"
+        ),
+    ],
+)
+def test_office_payload_rejects_dtd_and_entities_even_in_utf16(
+    declaration: str,
+) -> None:
+    required_xml = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        f"{declaration}"
+        '<p:presentation xmlns:p="http://schemas.openxmlformats.org/'
+        'presentationml/2006/main">&payload;</p:presentation>'
+    ).encode("utf-16")
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as package:
+        package.writestr("ppt/presentation.xml", required_xml)
+        package.writestr("[Content_Types].xml", _PPTX_CONTENT_TYPES)
+    data = buf.getvalue()
+
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME, expected_size=len(data))
+
+    assert raised.value.category == "unsafe_archive"
+
+
+def test_office_payload_rejects_dtd_in_non_required_slide_xml() -> None:
+    original = _build_sample_pptx()
+    source = zipfile.ZipFile(BytesIO(original))
+    buf = BytesIO()
+    malicious_slide = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<!DOCTYPE p:sld [<!ENTITY payload "expanded">]>'
+        b'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+        b"&payload;</p:sld>"
+    )
+    with source, zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as package:
+        for info in source.infolist():
+            payload = source.read(info)
+            if info.filename == "ppt/slides/slide1.xml":
+                payload = malicious_slide
+            package.writestr(info, payload)
+    data = buf.getvalue()
+
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME, expected_size=len(data))
+
+    assert raised.value.category == "unsafe_archive"
+
+
+def test_office_extracted_text_hard_cap_is_classified() -> None:
+    data = _build_sample_docx()
+
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(
+            data,
+            mime_type=DOCX_MIME,
+            max_extracted_chars=8,
+        )
+
+    assert raised.value.category == "unsafe_content_volume"
+
+
+def test_xlsx_cell_limit_fails_instead_of_returning_partial_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(office_extract, "_XLSX_MAX_CELLS_PER_SHEET", 2)
+
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(
+            _build_sample_xlsx(),
+            mime_type=XLSX_MIME,
+        )
+
+    assert raised.value.category == "unsafe_content_volume"
+
+
+def test_office_progress_callback_runs_and_its_error_is_not_payload_corruption() -> None:
+    class LeaseLostError(RuntimeError):
+        pass
+
+    calls = 0
+
+    def heartbeat() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise LeaseLostError("lease lost")
+
+    with pytest.raises(LeaseLostError, match="lease lost"):
+        extract_office_pages(
+            _build_sample_pptx(),
+            mime_type=PPTX_MIME,
+            progress_callback=heartbeat,
+        )
+
+    assert calls == 2
+
+
 def test_office_payload_rejects_16kb_to_16mb_zip_bomb_by_ratio() -> None:
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as package:
@@ -307,6 +412,24 @@ def test_office_payload_rejects_required_xml_over_parse_limit(
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as package:
         package.writestr("ppt/presentation.xml", oversized_xml)
         package.writestr("[Content_Types].xml", _PPTX_CONTENT_TYPES)
+    data = buf.getvalue()
+
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME, expected_size=len(data))
+
+    assert raised.value.category == "unsafe_archive"
+
+
+def test_office_payload_rejects_oversized_non_required_xml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(office_extract, "MAX_OFFICE_XML_MEMBER_BYTES", 256)
+    oversized_xml = b"<root>" + (b" " * 512) + b"</root>"
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as package:
+        package.writestr("ppt/presentation.xml", _PPTX_ROOT)
+        package.writestr("[Content_Types].xml", _PPTX_CONTENT_TYPES)
+        package.writestr("ppt/slides/slide1.xml", oversized_xml)
     data = buf.getvalue()
 
     with pytest.raises(OfficePayloadError) as raised:

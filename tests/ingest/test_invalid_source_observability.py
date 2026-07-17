@@ -19,6 +19,7 @@ from teamagent.ingest.loader import (
 )
 from teamagent.ingest.office_extract import (
     DOCX_MIME,
+    GDOC_NATIVE_MIME,
     OFFICE_VALIDATOR_SCHEMA_VERSION,
     PPTX_MIME,
 )
@@ -26,6 +27,7 @@ from teamagent.ingest.ops_alert import IngestOpsAlerter
 from teamagent.ingest.pipeline import (
     ChunkUpsert,
     DocumentUpsert,
+    IngestDurabilityError,
     IngestRunner,
     _guarded_upsert,
     _ingest_gdrive_folder,
@@ -61,6 +63,9 @@ class _Repository:
         self.retry_records: list[dict[str, Any]] = []
         self.retry_resolutions: list[dict[str, Any]] = []
         self.retry_claims: list[SourceRetry] = []
+        self.retry_record_success = True
+        self.retry_lease_success = True
+        self.retry_lease_renewals: list[dict[str, Any]] = []
         self.connector_state: ConnectorState | None = None
         self.reconciliation_counts: dict[str, int] = {}
         self.reconciliation_resolutions: list[str] = []
@@ -127,6 +132,7 @@ class _Repository:
                 source_kind=source_kind,
                 source_id=source_id,
                 cursor=str(kwargs["cursor"]),
+                metadata=dict(kwargs.get("metadata") or {}),
             )
 
     def record_ingest_job(self, *args: Any, **kwargs: Any) -> None:
@@ -143,6 +149,8 @@ class _Repository:
 
     def record_source_retry(self, **kwargs: Any) -> bool:
         self.retry_records.append(kwargs)
+        if not self.retry_record_success:
+            return False
         self.retry_claims = [
             SourceRetry(
                 external_id=str(kwargs["external_id"]),
@@ -155,6 +163,10 @@ class _Repository:
             )
         ]
         return True
+
+    def renew_source_retry_lease(self, **kwargs: Any) -> bool:
+        self.retry_lease_renewals.append(kwargs)
+        return self.retry_lease_success
 
     def resolve_source_retry(self, **kwargs: Any) -> bool:
         self.retry_resolutions.append(kwargs)
@@ -498,6 +510,312 @@ def test_incremental_transient_failure_is_retried_next_run_after_cursor_advance(
     assert repo.retry_resolutions[-1]["external_id"] == drive_file.id
     assert client.download_file_bytes.call_count == 2
     assert len(repo.upserts) == 1
+    # quick retryはclaim直後とupsert直前だけ。progress callbackは120秒throttleでDBを叩かない。
+    assert len(repo.retry_lease_renewals) == 2
+
+
+def test_validator_generation_change_forces_incremental_full_revalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    data = _pptx_bytes()
+    drive_file = _file("REVALIDATE", data)
+    client = MagicMock()
+    client.list_files.return_value = ([drive_file], None)
+    client.list_permissions.return_value = [_owner_permission()]
+    client.download_file_bytes.return_value = data
+    client.get_start_page_token.return_value = "CURSOR-AFTER-REVALIDATION"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    repo = _Repository()
+    repo.connector_state = ConnectorState(
+        source_kind="gdrive",
+        source_id="FOLDER",
+        cursor="OLD-CURSOR",
+        metadata={"office_validator_schema_version": "ooxml-safe-v2"},
+    )
+
+    result = _ingest_gdrive_folder(
+        _folder_spec(),
+        embedder=_Embedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="revalidate",
+        warning_collector=_IngestWarningCollector(),
+    )
+
+    assert result[0] == 1
+    client.get_changes.assert_not_called()
+    client.get_start_page_token.assert_called_once_with("revalidate")
+    client.download_file_bytes.assert_called_once()
+    assert repo.saved_states[-1]["cursor"] == "CURSOR-AFTER-REVALIDATION"
+    assert (
+        repo.saved_states[-1]["metadata"]["office_validator_schema_version"]
+        == OFFICE_VALIDATOR_SCHEMA_VERSION
+    )
+
+
+def test_retry_persistence_false_blocks_incremental_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    data = _pptx_bytes()
+    drive_file = _file("RETRY-NOT-DURABLE", data)
+    client = MagicMock()
+    client.list_files.return_value = ([drive_file], None)
+    client.list_permissions.return_value = [_owner_permission()]
+    client.get_start_page_token.return_value = "MUST-NOT-SAVE"
+    client.download_file_bytes.side_effect = TimeoutError("temporary")
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    repo = _Repository()
+    repo.retry_record_success = False
+
+    with pytest.raises(IngestDurabilityError, match="cursor not advanced"):
+        _ingest_gdrive_folder(
+            _folder_spec(),
+            embedder=_Embedder(),
+            repository=repo,  # type: ignore[arg-type]
+            owner_email="bot@example.jp",
+            dry_run=False,
+            request_id="retry-false",
+            warning_collector=_IngestWarningCollector(),
+        )
+
+    assert repo.retry_records[-1]["reason"] == "office_download_failed"
+    assert repo.saved_states == []
+    assert repo.upserts == []
+
+
+def test_retry_claim_failure_blocks_incremental_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ClaimFailureRepository(_Repository):
+        def claim_due_source_retries(self, **kwargs: Any) -> list[SourceRetry]:
+            raise RuntimeError("retry table unavailable")
+
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    client = MagicMock()
+    client.list_files.return_value = ([], None)
+    client.get_start_page_token.return_value = "MUST-NOT-SAVE"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    repo = _ClaimFailureRepository()
+
+    with pytest.raises(IngestDurabilityError, match="cursor not advanced"):
+        _ingest_gdrive_folder(
+            _folder_spec(),
+            embedder=_Embedder(),
+            repository=repo,  # type: ignore[arg-type]
+            owner_email="bot@example.jp",
+            dry_run=False,
+            request_id="claim-failed",
+            warning_collector=_IngestWarningCollector(),
+        )
+
+    assert repo.saved_states == []
+
+
+def test_native_gdoc_failure_requires_durable_retry_before_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    data = b"native-placeholder"
+    drive_file = replace(
+        _file("GDOC-FAIL", data),
+        name="confidential-native",
+        mime_type=GDOC_NATIVE_MIME,
+    )
+    client = MagicMock()
+    client.list_files.return_value = ([drive_file], None)
+    client.list_permissions.return_value = [_owner_permission()]
+    client.get_start_page_token.return_value = "MUST-NOT-SAVE"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    gdocs = MagicMock()
+    gdocs.get_document_text.side_effect = TimeoutError("temporary")
+    monkeypatch.setattr(
+        "teamagent.adapters.gdocs_client.GDocsClient.from_env",
+        classmethod(lambda cls, **kwargs: gdocs),
+    )
+    repo = _Repository()
+    repo.retry_record_success = False
+
+    with pytest.raises(IngestDurabilityError, match="cursor not advanced"):
+        _ingest_gdrive_folder(
+            _folder_spec(),
+            embedder=_Embedder(),
+            repository=repo,  # type: ignore[arg-type]
+            owner_email="bot@example.jp",
+            dry_run=False,
+            request_id="gdoc-false",
+            warning_collector=_IngestWarningCollector(),
+        )
+
+    assert repo.retry_records[-1]["reason"] == "gdoc_extract_failed"
+    assert repo.saved_states == []
+    assert repo.upserts == []
+
+
+@pytest.mark.parametrize(
+    "limit_name",
+    [
+        "MAX_INGEST_EXTRACTED_CHARACTERS",
+        "MAX_INGEST_CHUNKS_PER_FILE",
+        "MAX_INGEST_EMBEDDINGS_PER_FILE",
+    ],
+)
+def test_office_chunk_and_embedding_limits_preserve_existing_document(
+    monkeypatch: pytest.MonkeyPatch,
+    limit_name: str,
+) -> None:
+    import teamagent.ingest.office_extract as office_extract
+    import teamagent.ingest.pipeline as pipeline
+
+    data = _pptx_bytes()
+    drive_file = _file(f"LIMIT-{limit_name}", data)
+    client = MagicMock()
+    client.list_permissions.return_value = [_owner_permission()]
+    client.download_file_bytes.return_value = data
+    monkeypatch.setattr(
+        office_extract,
+        "extract_office_pages",
+        lambda *args, **kwargs: [(1, "x" * 1200)],
+    )
+    monkeypatch.setattr(pipeline, limit_name, 1)
+    repo = _Repository()
+    collector = _IngestWarningCollector()
+
+    result = _process_one_gdrive_file(
+        drive_file,
+        _folder_spec(),
+        client=client,
+        embedder=_Embedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="bounded",
+        skipped=[],
+        warning_collector=collector,
+        warning_source_id="FOLDER",
+    )
+
+    assert result == (0, 0)
+    assert repo.upserts == []
+    assert repo.invalid_records[-1]["reason"] == "unsafe_content_volume"
+    assert collector.snapshot("gdrive", "FOLDER").reasons == {"unsafe_content_volume": 1}
+
+
+def test_contextualizer_cannot_expand_past_per_file_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import teamagent.ingest.pipeline as pipeline
+
+    class _ExpandingContextualizer:
+        def contextualize_chunks(
+            self,
+            title: str,
+            full_text: str,
+            chunks: list[ChunkUpsert],
+            request_id: str,
+        ) -> list[ChunkUpsert]:
+            return [*chunks, replace(chunks[0], chunk_idx=1)]
+
+    data = _pptx_bytes()
+    drive_file = _file("CONTEXT-LIMIT", data)
+    client = MagicMock()
+    client.list_permissions.return_value = [_owner_permission()]
+    client.download_file_bytes.return_value = data
+    monkeypatch.setattr(pipeline, "MAX_INGEST_EMBEDDINGS_PER_FILE", 1)
+    repo = _Repository()
+    collector = _IngestWarningCollector()
+
+    result = _process_one_gdrive_file(
+        drive_file,
+        _folder_spec(),
+        client=client,
+        embedder=_Embedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="context-limit",
+        skipped=[],
+        contextualizer=_ExpandingContextualizer(),  # type: ignore[arg-type]
+        warning_collector=collector,
+        warning_source_id="FOLDER",
+        durable_retry=True,
+    )
+
+    assert result == (0, 0)
+    assert repo.upserts == []
+    assert repo.retry_records[-1]["reason"] == "contextualized_content_too_large"
+    assert collector.snapshot("gdrive", "FOLDER").reasons == {
+        "contextualized_content_too_large": 1
+    }
+
+
+def test_retry_lease_loss_stops_upsert_and_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teamagent.adapters.gdrive_client import ChangeBatch
+
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    data = _pptx_bytes()
+    drive_file = _file("LEASE-LOST", data)
+    client = MagicMock()
+    client.list_files.return_value = ([drive_file], None)
+    client.get_changes.return_value = ChangeBatch(
+        changes=(),
+        next_page_token=None,
+        new_start_page_token="MUST-NOT-SAVE",
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    repo = _Repository()
+    repo.connector_state = ConnectorState(
+        source_kind="gdrive",
+        source_id="FOLDER",
+        cursor="OLD-CURSOR",
+        metadata={"office_validator_schema_version": OFFICE_VALIDATOR_SCHEMA_VERSION},
+    )
+    repo.retry_claims = [
+        SourceRetry(
+            external_id=drive_file.id,
+            md5_checksum=drive_file.md5_checksum,
+            size_bytes=drive_file.size,
+            mime_type=drive_file.mime_type,
+            validator_schema_version=OFFICE_VALIDATOR_SCHEMA_VERSION,
+            attempt_count=2,
+            reason="office_download_failed",
+        )
+    ]
+    repo.retry_lease_success = False
+
+    with pytest.raises(IngestDurabilityError, match="cursor not advanced"):
+        _ingest_gdrive_folder(
+            _folder_spec(),
+            embedder=_Embedder(),
+            repository=repo,  # type: ignore[arg-type]
+            owner_email="bot@example.jp",
+            dry_run=False,
+            request_id="lease-lost",
+            warning_collector=_IngestWarningCollector(),
+        )
+
+    assert repo.retry_lease_renewals
+    assert repo.upserts == []
+    assert repo.saved_states == []
 
 
 def test_pdf_download_failure_is_warning_and_durable_retry() -> None:
@@ -684,6 +1002,41 @@ def test_shared_drive_known_invalid_is_observed_and_suppressed_before_acl(
     client.list_permissions.assert_not_called()
     client.download_file_bytes.assert_not_called()
     assert repo.upserts == []
+
+
+def test_shared_drive_walk_saturation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drive_file = _file("SHARED-SATURATED", _pptx_bytes())
+    client = MagicMock()
+    client.list_shared_drives.return_value = [SharedDrive(id="DRIVE", name="drive")]
+    client.walk_files_recursive.return_value = [drive_file]
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    truncated: set[str] = set()
+
+    from teamagent.ingest.pipeline import GDrivePaginationIncompleteError
+
+    with pytest.raises(GDrivePaginationIncompleteError, match="safety limit"):
+        _ingest_shared_drives_crawl(
+            SharedDriveCrawlSpec(
+                enabled=True,
+                sales_relevance_filter=False,
+                max_files_per_drive=1,
+            ),
+            embedder=_Embedder(),
+            repository=_Repository(),  # type: ignore[arg-type]
+            owner_email="bot@example.jp",
+            dry_run=False,
+            request_id="req",
+            truncated_walk_roots=truncated,
+            warning_collector=_IngestWarningCollector(),
+        )
+
+    assert truncated == {"DRIVE"}
+    client.list_permissions.assert_not_called()
 
 
 def test_incremental_cursor_records_success_with_warnings_metadata(

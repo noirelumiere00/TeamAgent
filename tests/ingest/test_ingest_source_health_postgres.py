@@ -56,7 +56,8 @@ def test_fresh_migrations_enforce_rls_and_revoke_destructive_privileges() -> Non
         try:
             with conn.cursor() as cur:
                 cur.execute(_MIGRATION_0019.read_text(encoding="utf-8"))
-                # A fresh database runs 0020 too; it must remain idempotent after the new 0019.
+                # Fresh/upgrade DB both run 0020; a retry after uncertain migration status is safe.
+                cur.execute(_MIGRATION_0020.read_text(encoding="utf-8"))
                 cur.execute(_MIGRATION_0020.read_text(encoding="utf-8"))
 
                 for table in (
@@ -66,6 +67,15 @@ def test_fresh_migrations_enforce_rls_and_revoke_destructive_privileges() -> Non
                     "ingest_connector_runs",
                 ):
                     qualified = f"{schema}.{table}"
+                    cur.execute(
+                        """
+                        SELECT relrowsecurity, relforcerowsecurity
+                        FROM pg_class
+                        WHERE oid = %s::regclass
+                        """,
+                        (qualified,),
+                    )
+                    assert cur.fetchone() == (True, True)
                     for privilege in ("SELECT", "INSERT", "UPDATE"):
                         cur.execute(
                             "SELECT has_table_privilege('teamagent_app', %s, %s)",
@@ -202,6 +212,7 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
         try:
             with conn.cursor() as cur:
                 cur.execute(_MIGRATION_0019.read_text(encoding="utf-8"))
+                cur.execute(_MIGRATION_0020.read_text(encoding="utf-8"))
             repository = IngestRepository(  # type: ignore[arg-type]
                 _TransactionPgVector(conn),
                 app_role=None,
@@ -249,6 +260,22 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
                 request_id="request-2",
             )
             assert [claim.external_id for claim in claims] == ["opaque-retry-id"]
+            assert repository.renew_source_retry_lease(
+                source_kind="gdrive",
+                source_id="folder",
+                source_type="gdrive",
+                external_id="opaque-retry-id",
+                request_id="request-2",
+                lease_seconds=900,
+            )
+            assert not repository.renew_source_retry_lease(
+                source_kind="gdrive",
+                source_id="folder",
+                source_type="gdrive",
+                external_id="opaque-retry-id",
+                request_id="wrong-owner",
+                lease_seconds=900,
+            )
             assert (
                 repository.claim_due_source_retries(
                     source_kind="gdrive",

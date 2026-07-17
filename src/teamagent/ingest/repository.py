@@ -116,6 +116,7 @@ class ConnectorState:
     revision: int | None = None
     attempt_count: int = 0
     last_error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,10 @@ class GDriveAclUpdate:
 
 class GDriveAclOptimisticLockError(RuntimeError):
     """ACL 計画後に対象行が変化したため、全更新を中止した。"""
+
+
+class SourceRetryUnavailableError(RuntimeError):
+    """durable retry queueを確認できず、空queueと区別できない。"""
 
 
 # -----------------------------------------------------------
@@ -545,7 +550,7 @@ class IngestRepository:
         if lease_seconds < 1:
             raise ValueError("retry lease_seconds must be positive")
         if not self._schema_probe_allowed("source_retries"):
-            return []
+            raise SourceRetryUnavailableError("durable retry queue is temporarily unavailable")
         sql = """
             WITH due AS (
                 SELECT id
@@ -610,7 +615,65 @@ class IngestRepository:
                 source_id_ref=_external_id_ref(source_id),
                 error_type=type(exc).__name__,
             )
-            return []
+            raise SourceRetryUnavailableError("durable retry queue could not be claimed") from exc
+
+    def renew_source_retry_lease(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        source_type: str,
+        external_id: str,
+        request_id: str,
+        lease_seconds: int = _SOURCE_RETRY_LEASE_SECONDS,
+    ) -> bool:
+        """現在のownerだけが処理中retryのleaseを延長する。
+
+        lease期限後に別workerがclaim済みなら``lease_owner``が変わるため更新しない。
+        長い抽出・embedding中のheartbeatから呼び、二重処理を防ぐ。
+        """
+        if lease_seconds < 1:
+            raise ValueError("retry lease_seconds must be positive")
+        if not self._schema_probe_allowed("source_retries"):
+            return False
+        sql = """
+            UPDATE ingest_source_retries
+            SET lease_expires_at = now() + (%s * interval '1 second')
+            WHERE source_kind = %s
+              AND source_id = %s
+              AND source_type = %s
+              AND external_id = %s
+              AND status = 'pending'
+              AND lease_owner = %s
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            lease_seconds,
+                            source_kind,
+                            _strip_nul(source_id),
+                            source_type,
+                            _strip_nul(external_id),
+                            _strip_nul(request_id),
+                        ),
+                    )
+                    renewed = int(cur.rowcount or 0) > 0
+            self._schema_probe_succeeded("source_retries")
+            return renewed
+        except Exception as exc:
+            self._schema_probe_failed("source_retries")
+            logger.warning(
+                "ingest_source_retry_lease_renew_unavailable",
+                request_id=request_id,
+                source_kind=source_kind,
+                source_id_ref=_external_id_ref(source_id),
+                external_id_ref=_external_id_ref(external_id),
+                error_type=type(exc).__name__,
+            )
+            return False
 
     def record_source_retry(
         self,
@@ -915,7 +978,7 @@ class IngestRepository:
         """(source_kind, source_id) の前回状態を 1 行ロードする。未登録なら None。"""
         sql = """
             SELECT source_kind, source_id, cursor, oldest, revision,
-                   attempt_count, last_error
+                   attempt_count, last_error, metadata
             FROM connector_state
             WHERE source_kind = %s AND source_id = %s
         """
@@ -933,6 +996,7 @@ class IngestRepository:
             revision=row["revision"],
             attempt_count=row["attempt_count"],
             last_error=row["last_error"],
+            metadata=dict(row.get("metadata") or {}),
         )
 
     def save_connector_state(
