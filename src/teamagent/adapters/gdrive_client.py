@@ -26,10 +26,12 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import socket
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any
 
 import structlog
@@ -61,6 +63,12 @@ DEFAULT_WALK_MAX_FILES = 5000
 # 権限を過小評価してしまうため、全ページを取得しつつ無限 token loop には上限で fail-closed。
 DEFAULT_PERMISSIONS_MAX_PAGES = 100
 DEFAULT_GOOGLE_API_RETRIES = 3
+DEFAULT_GDRIVE_DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024
+
+
+def _file_ref(file_id: str) -> str:
+    """ログ用の非可逆な短いDrive参照。"""
+    return hashlib.sha256(file_id.encode("utf-8")).hexdigest()[:12]
 
 
 class GDrivePermissionsPaginationError(RuntimeError):
@@ -74,6 +82,28 @@ class GDriveDownloadContentError(RuntimeError):
         self.category = category
         self.actual_bytes = actual_bytes
         super().__init__(f"gdrive download returned invalid content: {category}")
+
+
+class _BoundedBytesIO(BytesIO):
+    """MediaIoBaseDownloadがhard capを越えてbufferを拡張する前に中断する。"""
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__()
+        self._max_bytes = max_bytes
+
+    def write(self, data: Any) -> int:
+        view = self.getbuffer()
+        try:
+            current_size = view.nbytes
+        finally:
+            view.release()
+        projected_size = max(current_size, self.tell() + len(data))
+        if projected_size > self._max_bytes:
+            raise GDriveDownloadContentError(
+                "download_too_large",
+                actual_bytes=projected_size,
+            )
+        return super().write(data)
 
 
 # -----------------------------------------------------------
@@ -393,15 +423,22 @@ class GDriveClient:
         )
         return perms
 
-    def download_file_bytes(self, file_id: str, request_id: str) -> bytes:
+    def download_file_bytes(
+        self,
+        file_id: str,
+        request_id: str,
+        *,
+        max_bytes: int = DEFAULT_GDRIVE_DOWNLOAD_MAX_BYTES,
+    ) -> bytes:
         """ファイル本体をバイナリで取得する（PDF / バイナリファイル用）。
 
         Google Doc / Sheet / Slide は `export_file()` を使う必要がある（別メソッド予定）。
+        ``max_bytes``を越える応答はbuffer拡張前に分類例外で中断する。
         """
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be at least 1")
         service = self._ensure_service()
         # 遅延 import: googleapiclient.http が大きい
-        from io import BytesIO
-
         from googleapiclient.http import MediaIoBaseDownload
 
         start = time.perf_counter()
@@ -412,7 +449,7 @@ class GDriveClient:
         request = service.files().get_media(
             fileId=file_id, supportsAllDrives=True, acknowledgeAbuse=True
         )
-        buf = BytesIO()
+        buf = _BoundedBytesIO(max_bytes)
         downloader = MediaIoBaseDownload(buf, request, chunksize=1024 * 1024)
         done = False
         while not done:
@@ -434,7 +471,7 @@ class GDriveClient:
             logger.warning(
                 "gdrive_download_not_binary",
                 request_id=request_id,
-                file_id=file_id,
+                file_ref=_file_ref(file_id),
                 bytes=len(data),
                 category="html_response",
             )
@@ -442,7 +479,7 @@ class GDriveClient:
         logger.info(
             "gdrive_download_file",
             request_id=request_id,
-            file_id=file_id,
+            file_ref=_file_ref(file_id),
             bytes=len(data),
             latency_ms=latency_ms,
         )

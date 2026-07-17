@@ -12,6 +12,7 @@ Sprint 3 / PR-6。pipeline.py から呼ばれて、ON CONFLICT で idempotent IN
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,10 +24,19 @@ from teamagent.adapters.pgvector_client import PgVectorClient
 
 logger = structlog.get_logger(__name__)
 
+_SCHEMA_REPROBE_SECONDS = 60.0
+_SOURCE_RETRY_LEASE_SECONDS = 600
+_SOURCE_RETRY_LIMIT = 1000
+
 
 def _external_id_ref(external_id: str) -> str:
     """ログ用の非可逆な短い参照。Drive ID 等の完全値をログへ出さない。"""
     return hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:12]
+
+
+def _external_id_hash(external_id: str) -> str:
+    """reconciliation照合用の完全SHA-256。raw IDはDB/ログへ出さない。"""
+    return hashlib.sha256(external_id.encode("utf-8")).hexdigest()
 
 
 def _is_md5(value: str) -> bool:
@@ -109,6 +119,19 @@ class ConnectorState:
 
 
 @dataclass(frozen=True)
+class SourceRetry:
+    """増分cursorを越えて持ち越す、lease取得済みsource retry。"""
+
+    external_id: str
+    md5_checksum: str | None
+    size_bytes: int | None
+    mime_type: str
+    validator_schema_version: str
+    attempt_count: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class GDriveAclSnapshot:
     """ACL-only 同期対象となる non-stale Drive document の最小スナップショット。
 
@@ -169,6 +192,29 @@ class IngestRepository:
         # Rolling deploy で additive table が未適用なら、同一process中の反復SQL/警告を抑える。
         self._source_health_available: bool | None = None
         self._connector_runs_available: bool | None = None
+        self._source_retries_available: bool | None = None
+        self._reconciliation_available: bool | None = None
+        self._source_health_retry_after = 0.0
+        self._connector_runs_retry_after = 0.0
+        self._source_retries_retry_after = 0.0
+        self._reconciliation_retry_after = 0.0
+
+    def _schema_probe_allowed(self, schema_key: str) -> bool:
+        available = getattr(self, f"_{schema_key}_available")
+        retry_after = float(getattr(self, f"_{schema_key}_retry_after"))
+        return available is not False or time.monotonic() >= retry_after
+
+    def _schema_probe_succeeded(self, schema_key: str) -> None:
+        setattr(self, f"_{schema_key}_available", True)
+        setattr(self, f"_{schema_key}_retry_after", 0.0)
+
+    def _schema_probe_failed(self, schema_key: str) -> None:
+        setattr(self, f"_{schema_key}_available", False)
+        setattr(
+            self,
+            f"_{schema_key}_retry_after",
+            time.monotonic() + _SCHEMA_REPROBE_SECONDS,
+        )
 
     def upsert_document_with_chunks(
         self,
@@ -284,11 +330,13 @@ class IngestRepository:
         external_id: str,
         md5_checksum: str | None,
         size_bytes: int | None,
+        mime_type: str | None = None,
+        validator_schema_version: str | None = None,
     ) -> str | None:
         """完全一致する既知 invalid payload の reason を返す。旧schema時は fail-open。"""
-        if not md5_checksum or size_bytes is None:
+        if not md5_checksum or size_bytes is None or not mime_type or not validator_schema_version:
             return None
-        if self._source_health_available is False:
+        if not self._schema_probe_allowed("source_health"):
             return None
         sql = """
             SELECT reason
@@ -297,6 +345,8 @@ class IngestRepository:
               AND external_id = %s
               AND md5_checksum = %s
               AND size_bytes = %s
+              AND mime_type = %s
+              AND validator_schema_version = %s
               AND status = 'invalid_source'
         """
         try:
@@ -309,13 +359,15 @@ class IngestRepository:
                             _strip_nul(external_id),
                             md5_checksum.lower(),
                             size_bytes,
+                            mime_type,
+                            validator_schema_version,
                         ),
                     )
                     row = cur.fetchone()
-            self._source_health_available = True
+            self._schema_probe_succeeded("source_health")
             return str(row["reason"]) if row is not None else None
         except Exception as exc:
-            self._source_health_available = False
+            self._schema_probe_failed("source_health")
             # Rolling deploy 中に migration 未適用でも ingest を止めない。ID/SQL引数はログしない。
             logger.warning(
                 "ingest_source_health_lookup_unavailable",
@@ -334,15 +386,22 @@ class IngestRepository:
         size_bytes: int | None,
         reason: str,
         mime_type: str | None,
+        validator_schema_version: str,
         request_id: str,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
         """invalid Office payload を fingerprint 単位で upsert。旧schema時は best-effort。"""
         import json
 
-        if not md5_checksum or size_bytes is None or not reason:
+        if (
+            not md5_checksum
+            or size_bytes is None
+            or not reason
+            or not mime_type
+            or not validator_schema_version
+        ):
             return False
-        if self._source_health_available is False:
+        if not self._schema_probe_allowed("source_health"):
             return False
         normalized_md5 = md5_checksum.lower()
         if not _is_md5(normalized_md5) or size_bytes < 0:
@@ -350,15 +409,18 @@ class IngestRepository:
         sql = """
             INSERT INTO ingest_source_health
                 (source_type, external_id, md5_checksum, size_bytes, status, reason,
-                 mime_type, first_seen_at, last_seen_at, observation_count,
+                 mime_type, validator_schema_version,
+                 first_seen_at, last_seen_at, observation_count,
                  last_request_id, metadata)
-            VALUES (%s, %s, %s, %s, 'invalid_source', %s, %s,
+            VALUES (%s, %s, %s, %s, 'invalid_source', %s, %s, %s,
                     now(), now(), 1, %s, %s::jsonb)
-            ON CONFLICT (source_type, external_id, md5_checksum, size_bytes)
+            ON CONFLICT (
+                source_type, external_id, md5_checksum, size_bytes,
+                mime_type, validator_schema_version
+            )
             DO UPDATE SET
                 status = 'invalid_source',
                 reason = EXCLUDED.reason,
-                mime_type = COALESCE(EXCLUDED.mime_type, ingest_source_health.mime_type),
                 last_seen_at = now(),
                 observation_count = ingest_source_health.observation_count + 1,
                 last_request_id = EXCLUDED.last_request_id,
@@ -376,14 +438,15 @@ class IngestRepository:
                             size_bytes,
                             _strip_nul(reason),
                             _strip_nul(mime_type),
+                            _strip_nul(validator_schema_version),
                             _strip_nul(request_id),
                             json.dumps(_sanitize_metadata(metadata or {}), ensure_ascii=False),
                         ),
                     )
-            self._source_health_available = True
+            self._schema_probe_succeeded("source_health")
             return True
         except Exception as exc:
-            self._source_health_available = False
+            self._schema_probe_failed("source_health")
             logger.warning(
                 "ingest_source_health_record_unavailable",
                 source_type=source_type,
@@ -411,7 +474,7 @@ class IngestRepository:
 
         if outcome not in {"success", "success_with_warnings", "failed"}:
             raise ValueError(f"unsupported connector outcome: {outcome}")
-        if self._connector_runs_available is False:
+        if not self._schema_probe_allowed("connector_runs"):
             return False
         reasons = {
             str(reason): int(count)
@@ -453,10 +516,10 @@ class IngestRepository:
                             _strip_nul(error),
                         ),
                     )
-            self._connector_runs_available = True
+            self._schema_probe_succeeded("connector_runs")
             return True
         except Exception as exc:
-            self._connector_runs_available = False
+            self._schema_probe_failed("connector_runs")
             logger.warning(
                 "ingest_connector_run_record_unavailable",
                 request_id=request_id,
@@ -466,6 +529,387 @@ class IngestRepository:
                 error_type=type(exc).__name__,
             )
             return False
+
+    def claim_due_source_retries(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        request_id: str,
+        limit: int = _SOURCE_RETRY_LIMIT,
+        lease_seconds: int = _SOURCE_RETRY_LEASE_SECONDS,
+    ) -> list[SourceRetry]:
+        """期限到来retryをleaseする。並行workerは``SKIP LOCKED``で同じrowを取らない。"""
+        if limit < 1 or limit > _SOURCE_RETRY_LIMIT:
+            raise ValueError(f"retry claim limit must be between 1 and {_SOURCE_RETRY_LIMIT}")
+        if lease_seconds < 1:
+            raise ValueError("retry lease_seconds must be positive")
+        if not self._schema_probe_allowed("source_retries"):
+            return []
+        sql = """
+            WITH due AS (
+                SELECT id
+                FROM ingest_source_retries
+                WHERE source_kind = %s
+                  AND source_id = %s
+                  AND status = 'pending'
+                  AND next_attempt_at <= now()
+                  AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+                ORDER BY next_attempt_at, id
+                FOR UPDATE SKIP LOCKED
+                LIMIT %s
+            )
+            UPDATE ingest_source_retries AS retry
+            SET lease_owner = %s,
+                lease_expires_at = now() + (%s * interval '1 second')
+            FROM due
+            WHERE retry.id = due.id
+            RETURNING retry.external_id,
+                      retry.md5_checksum,
+                      retry.size_bytes,
+                      retry.mime_type,
+                      retry.validator_schema_version,
+                      retry.attempt_count,
+                      retry.reason
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            source_kind,
+                            _strip_nul(source_id),
+                            limit,
+                            _strip_nul(request_id),
+                            lease_seconds,
+                        ),
+                    )
+                    rows = cur.fetchall()
+            self._schema_probe_succeeded("source_retries")
+            return [
+                SourceRetry(
+                    external_id=str(row["external_id"]),
+                    md5_checksum=(
+                        str(row["md5_checksum"]) if row["md5_checksum"] is not None else None
+                    ),
+                    size_bytes=(int(row["size_bytes"]) if row["size_bytes"] is not None else None),
+                    mime_type=str(row["mime_type"]),
+                    validator_schema_version=str(row["validator_schema_version"]),
+                    attempt_count=int(row["attempt_count"]),
+                    reason=str(row["reason"]),
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            self._schema_probe_failed("source_retries")
+            logger.warning(
+                "ingest_source_retry_claim_unavailable",
+                request_id=request_id,
+                source_kind=source_kind,
+                source_id_ref=_external_id_ref(source_id),
+                error_type=type(exc).__name__,
+            )
+            return []
+
+    def record_source_retry(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        source_type: str,
+        external_id: str,
+        md5_checksum: str | None,
+        size_bytes: int | None,
+        mime_type: str,
+        validator_schema_version: str,
+        reason: str,
+        request_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """transient失敗をfingerprint付きでupsertし、指数backoffを設定する。
+
+        同一request_id・同一fingerprintの再記録はattemptを増やさず冪等。payloadが変われば
+        attemptを1へ戻す。leaseは失敗確定時に解放し、次runの期限到来まで再claimしない。
+        """
+        import json
+
+        normalized_md5 = md5_checksum.lower() if md5_checksum else None
+        if normalized_md5 is not None and not _is_md5(normalized_md5):
+            return False
+        if size_bytes is not None and size_bytes < 0:
+            return False
+        if not mime_type or not validator_schema_version or not reason:
+            return False
+        if not self._schema_probe_allowed("source_retries"):
+            return False
+        sql = """
+            INSERT INTO ingest_source_retries
+                (source_kind, source_id, source_type, external_id,
+                 md5_checksum, size_bytes, mime_type, validator_schema_version,
+                 status, reason, attempt_count, next_attempt_at,
+                 first_failed_at, last_failed_at, last_request_id, metadata)
+            VALUES
+                (%s, %s, %s, %s, %s, %s, %s, %s,
+                 'pending', %s, 1, now() + interval '60 seconds',
+                 now(), now(), %s, %s::jsonb)
+            ON CONFLICT (source_kind, source_id, source_type, external_id)
+            DO UPDATE SET
+                md5_checksum = EXCLUDED.md5_checksum,
+                size_bytes = EXCLUDED.size_bytes,
+                mime_type = EXCLUDED.mime_type,
+                validator_schema_version = EXCLUDED.validator_schema_version,
+                status = 'pending',
+                reason = EXCLUDED.reason,
+                attempt_count = CASE
+                    WHEN ingest_source_retries.status = 'resolved'
+                    THEN 1
+                    WHEN ingest_source_retries.last_request_id = EXCLUDED.last_request_id
+                         AND ingest_source_retries.md5_checksum
+                             IS NOT DISTINCT FROM EXCLUDED.md5_checksum
+                         AND ingest_source_retries.size_bytes
+                             IS NOT DISTINCT FROM EXCLUDED.size_bytes
+                         AND ingest_source_retries.mime_type = EXCLUDED.mime_type
+                         AND ingest_source_retries.validator_schema_version
+                             = EXCLUDED.validator_schema_version
+                    THEN ingest_source_retries.attempt_count
+                    WHEN ingest_source_retries.md5_checksum
+                             IS NOT DISTINCT FROM EXCLUDED.md5_checksum
+                         AND ingest_source_retries.size_bytes
+                             IS NOT DISTINCT FROM EXCLUDED.size_bytes
+                         AND ingest_source_retries.mime_type = EXCLUDED.mime_type
+                         AND ingest_source_retries.validator_schema_version
+                             = EXCLUDED.validator_schema_version
+                    THEN ingest_source_retries.attempt_count + 1
+                    ELSE 1
+                END,
+                next_attempt_at = CASE
+                    WHEN ingest_source_retries.status = 'resolved'
+                    THEN now() + interval '60 seconds'
+                    WHEN ingest_source_retries.last_request_id = EXCLUDED.last_request_id
+                         AND ingest_source_retries.md5_checksum
+                             IS NOT DISTINCT FROM EXCLUDED.md5_checksum
+                         AND ingest_source_retries.size_bytes
+                             IS NOT DISTINCT FROM EXCLUDED.size_bytes
+                         AND ingest_source_retries.mime_type = EXCLUDED.mime_type
+                         AND ingest_source_retries.validator_schema_version
+                             = EXCLUDED.validator_schema_version
+                    THEN ingest_source_retries.next_attempt_at
+                    WHEN ingest_source_retries.md5_checksum
+                             IS NOT DISTINCT FROM EXCLUDED.md5_checksum
+                         AND ingest_source_retries.size_bytes
+                             IS NOT DISTINCT FROM EXCLUDED.size_bytes
+                         AND ingest_source_retries.mime_type = EXCLUDED.mime_type
+                         AND ingest_source_retries.validator_schema_version
+                             = EXCLUDED.validator_schema_version
+                    THEN now() + (
+                        LEAST(
+                            21600,
+                            (60 * power(
+                                2,
+                                LEAST(ingest_source_retries.attempt_count, 8)
+                            ))::integer
+                        ) * interval '1 second'
+                    )
+                    ELSE now() + interval '60 seconds'
+                END,
+                first_failed_at = CASE
+                    WHEN ingest_source_retries.status = 'resolved'
+                    THEN now()
+                    WHEN ingest_source_retries.md5_checksum
+                             IS NOT DISTINCT FROM EXCLUDED.md5_checksum
+                         AND ingest_source_retries.size_bytes
+                             IS NOT DISTINCT FROM EXCLUDED.size_bytes
+                         AND ingest_source_retries.mime_type = EXCLUDED.mime_type
+                         AND ingest_source_retries.validator_schema_version
+                             = EXCLUDED.validator_schema_version
+                    THEN ingest_source_retries.first_failed_at
+                    ELSE now()
+                END,
+                last_failed_at = now(),
+                resolved_at = NULL,
+                last_request_id = EXCLUDED.last_request_id,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                metadata = ingest_source_retries.metadata || EXCLUDED.metadata
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            source_kind,
+                            _strip_nul(source_id),
+                            source_type,
+                            _strip_nul(external_id),
+                            normalized_md5,
+                            size_bytes,
+                            _strip_nul(mime_type),
+                            _strip_nul(validator_schema_version),
+                            _strip_nul(reason),
+                            _strip_nul(request_id),
+                            json.dumps(_sanitize_metadata(metadata or {}), ensure_ascii=False),
+                        ),
+                    )
+            self._schema_probe_succeeded("source_retries")
+            return True
+        except Exception as exc:
+            self._schema_probe_failed("source_retries")
+            logger.warning(
+                "ingest_source_retry_record_unavailable",
+                request_id=request_id,
+                source_kind=source_kind,
+                source_id_ref=_external_id_ref(source_id),
+                external_id_ref=_external_id_ref(external_id),
+                error_type=type(exc).__name__,
+            )
+            return False
+
+    def resolve_source_retry(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        source_type: str,
+        external_id: str,
+        md5_checksum: str | None,
+        size_bytes: int | None,
+        mime_type: str,
+        validator_schema_version: str,
+        request_id: str,
+    ) -> bool:
+        """成功/永久invalidでpending retryを解消する。DELETE権限は不要。"""
+        if not self._schema_probe_allowed("source_retries"):
+            return False
+        normalized_md5 = md5_checksum.lower() if md5_checksum else None
+        sql = """
+            UPDATE ingest_source_retries
+            SET status = 'resolved',
+                resolved_at = now(),
+                last_request_id = %s,
+                lease_owner = NULL,
+                lease_expires_at = NULL
+            WHERE source_kind = %s
+              AND source_id = %s
+              AND source_type = %s
+              AND external_id = %s
+              AND status = 'pending'
+              AND (
+                  lease_owner = %s
+                  OR (
+                      md5_checksum IS NOT DISTINCT FROM %s
+                      AND size_bytes IS NOT DISTINCT FROM %s
+                      AND mime_type = %s
+                      AND validator_schema_version = %s
+                  )
+              )
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            _strip_nul(request_id),
+                            source_kind,
+                            _strip_nul(source_id),
+                            source_type,
+                            _strip_nul(external_id),
+                            _strip_nul(request_id),
+                            normalized_md5,
+                            size_bytes,
+                            _strip_nul(mime_type),
+                            _strip_nul(validator_schema_version),
+                        ),
+                    )
+                    resolved = int(cur.rowcount) > 0
+            self._schema_probe_succeeded("source_retries")
+            return resolved
+        except Exception as exc:
+            self._schema_probe_failed("source_retries")
+            logger.warning(
+                "ingest_source_retry_resolve_unavailable",
+                request_id=request_id,
+                source_kind=source_kind,
+                source_id_ref=_external_id_ref(source_id),
+                external_id_ref=_external_id_ref(external_id),
+                error_type=type(exc).__name__,
+            )
+            return False
+
+    def unresolved_reconciliation_counts(self, source_kind: str) -> dict[str, int]:
+        """未解消coverage gapを理由別件数だけ返す。ID/title/contentは射影しない。"""
+        if not self._schema_probe_allowed("reconciliation"):
+            return {"reconciliation_unavailable": 1}
+        sql = """
+            SELECT gap_kind, count(*)::bigint AS gap_count
+            FROM ingest_reconciliation_gaps
+            WHERE source_kind = %s
+              AND status = 'unresolved'
+            GROUP BY gap_kind
+            ORDER BY gap_kind
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(sql, (source_kind,))
+                    rows = cur.fetchall()
+            self._schema_probe_succeeded("reconciliation")
+            return {str(row["gap_kind"]): int(row["gap_count"]) for row in rows}
+        except Exception as exc:
+            self._schema_probe_failed("reconciliation")
+            logger.warning(
+                "ingest_reconciliation_lookup_unavailable",
+                source_kind=source_kind,
+                error_type=type(exc).__name__,
+            )
+            return {"reconciliation_unavailable": 1}
+
+    def resolve_reconciliation_gaps(
+        self,
+        *,
+        source_kind: str,
+        external_id: str,
+        request_id: str,
+    ) -> int:
+        """本文upsert成功時、raw IDを保存せずhash一致する既知gapだけ解消する。"""
+        if not self._schema_probe_allowed("reconciliation"):
+            return 0
+        sql = """
+            UPDATE ingest_reconciliation_gaps
+            SET status = 'resolved',
+                resolved_at = now(),
+                last_observed_at = now(),
+                last_request_id = %s
+            WHERE source_kind = %s
+              AND status = 'unresolved'
+              AND %s = ANY(source_ref_hashes)
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            _strip_nul(request_id),
+                            source_kind,
+                            _external_id_hash(external_id),
+                        ),
+                    )
+                    resolved = cur.rowcount
+            self._schema_probe_succeeded("reconciliation")
+            return int(resolved)
+        except Exception as exc:
+            self._schema_probe_failed("reconciliation")
+            logger.warning(
+                "ingest_reconciliation_resolve_unavailable",
+                request_id=request_id,
+                source_kind=source_kind,
+                external_id_ref=_external_id_ref(external_id),
+                error_type=type(exc).__name__,
+            )
+            return 0
 
     def load_connector_state(self, source_kind: str, source_id: str) -> ConnectorState | None:
         """(source_kind, source_id) の前回状態を 1 行ロードする。未登録なら None。"""

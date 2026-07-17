@@ -35,12 +35,48 @@ GDOC_NATIVE_MIME = "application/vnd.google-apps.document"
 # pipeline 側の mime_type 判定用にひとまとめで export。
 OFFICE_BINARY_MIMES = frozenset({DOCX_MIME, PPTX_MIME, XLSX_MIME})
 
+# known-invalid fingerprint の validator 世代。検証規則・上限・必須partの解釈を変えたら
+# 必ず値を更新し、同じ Drive payload でも新規規則で再検証させる。
+OFFICE_VALIDATOR_SCHEMA_VERSION = "ooxml-safe-v2"
+
+# ZIP/OOXML の有界検証。Drive download の hard cap と同じ compressed input 上限を持ち、
+# metadata 上限を通った member だけを chunk 単位で読み、CRC を確認する。
+MAX_OFFICE_COMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_OFFICE_ZIP_MEMBERS = 20_000
+MAX_OFFICE_TOTAL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_OFFICE_MEMBER_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+MAX_OFFICE_COMPRESSION_RATIO = 500.0
+MAX_OFFICE_REQUIRED_XML_BYTES = 16 * 1024 * 1024
+MAX_OFFICE_CONTENT_TYPES_XML_BYTES = 2 * 1024 * 1024
+_RATIO_CHECK_MIN_BYTES = 1024 * 1024
+_ZIP_READ_CHUNK_BYTES = 1024 * 1024
+
 _OOXML_REQUIRED_PART = {
     DOCX_MIME: "word/document.xml",
     PPTX_MIME: "ppt/presentation.xml",
     XLSX_MIME: "xl/workbook.xml",
 }
+_OOXML_REQUIRED_ROOT = {
+    DOCX_MIME: "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}document",
+    PPTX_MIME: ("{http://schemas.openxmlformats.org/presentationml/2006/main}presentation"),
+    XLSX_MIME: "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}workbook",
+}
+_OOXML_REQUIRED_CONTENT_TYPE = {
+    DOCX_MIME: ("application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"),
+    PPTX_MIME: (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+    ),
+    XLSX_MIME: ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"),
+}
+_CONTENT_TYPES_PART = "[Content_Types].xml"
+_CONTENT_TYPES_ROOT = "{http://schemas.openxmlformats.org/package/2006/content-types}Types"
+_CONTENT_TYPES_OVERRIDE = "{http://schemas.openxmlformats.org/package/2006/content-types}Override"
 _ZIP_PREFIXES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+_COMPOUND_FILE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_ENCRYPTED_COMPOUND_MARKERS = (
+    "EncryptedPackage".encode("utf-16le"),
+    "EncryptionInfo".encode("utf-16le"),
+)
 
 
 class OfficePayloadError(zipfile.BadZipFile):
@@ -53,6 +89,8 @@ class OfficePayloadError(zipfile.BadZipFile):
     - ``checksum_mismatch``: Drive metadata の MD5 と実バイト列が不一致
     - ``corrupt_zip``: ZIP シグネチャはあるが中央ディレクトリ等が壊れている
     - ``format_mismatch``: Office MIME と実体の OOXML package が一致しない
+    - ``unsafe_archive``: 展開量・member数・圧縮率・XML量が安全上限を超える
+    - ``encrypted_office``: password 保護された OOXML / encrypted compound file
 
     ``BadZipFile`` の subclass にして、既存の fail-open 呼び出し側との互換性を保つ。
     """
@@ -85,6 +123,50 @@ def _looks_like_html(data: bytes) -> bool:
     )
 
 
+def _looks_like_encrypted_compound_office(data: bytes) -> bool:
+    """OOXML password保護で使われるOLE compound containerを識別する。"""
+    return data.startswith(_COMPOUND_FILE_MAGIC) and all(
+        marker in data for marker in _ENCRYPTED_COMPOUND_MARKERS
+    )
+
+
+def _read_zip_member_bounded(
+    package: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    *,
+    capture_limit: int | None = None,
+) -> bytes | None:
+    """1 memberを有界chunkで最後まで読み、CRCを検証する。
+
+    ``ZipExtFile`` は EOF まで読むとCRCを検査する。``testzip``のような無制限展開はせず、
+    metadataで保証した上限内だけを読み、必要XML以外はメモリへ保持しない。
+    """
+    captured = bytearray() if capture_limit is not None else None
+    read_bytes = 0
+    with package.open(info, "r") as member:
+        while True:
+            chunk = member.read(_ZIP_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            read_bytes += len(chunk)
+            if read_bytes > info.file_size or read_bytes > MAX_OFFICE_MEMBER_UNCOMPRESSED_BYTES:
+                raise ValueError("zip member exceeded declared safety bound")
+            if captured is not None and capture_limit is not None:
+                if len(captured) + len(chunk) > capture_limit:
+                    raise ValueError("required XML exceeded safety bound")
+                captured.extend(chunk)
+    if read_bytes != info.file_size:
+        raise zipfile.BadZipFile("zip member size did not match central directory")
+    return bytes(captured) if captured is not None else None
+
+
+def _parse_bounded_xml(data: bytes) -> ElementTree.Element:
+    """DTD/entity展開を許さず、上限確認済みXMLをparseする。"""
+    if b"<!DOCTYPE" in data.upper():
+        raise ValueError("DTD is not permitted in OOXML validation")
+    return ElementTree.fromstring(data)
+
+
 def _validate_office_payload(
     data: bytes,
     *,
@@ -92,16 +174,20 @@ def _validate_office_payload(
     expected_size: int | None,
     expected_md5: str | None,
 ) -> None:
-    """OOXML を開く前に、既知の非抽出 payload を安全な分類例外へ変換する。
-
-    ``zipfile.ZipFile`` に標準 EOCD / ZIP64 EOCD の解釈を委ね、``testzip`` で全memberを
-    展開してCRCまで検証する。
-    """
+    """OOXMLを開く前に、payload同一性・ZIP integrity・必須構造を有界検証する。"""
     actual_size = len(data)
 
     if _looks_like_html(data):
         raise OfficePayloadError(
             "html_response",
+            mime_type=mime_type,
+            actual_bytes=actual_size,
+            expected_bytes=expected_size,
+        )
+
+    if actual_size > MAX_OFFICE_COMPRESSED_BYTES:
+        raise OfficePayloadError(
+            "unsafe_archive",
             mime_type=mime_type,
             actual_bytes=actual_size,
             expected_bytes=expected_size,
@@ -126,6 +212,14 @@ def _validate_office_payload(
                 expected_bytes=expected_size,
             )
 
+    if _looks_like_encrypted_compound_office(data):
+        raise OfficePayloadError(
+            "encrypted_office",
+            mime_type=mime_type,
+            actual_bytes=actual_size,
+            expected_bytes=expected_size,
+        )
+
     if not zipfile.is_zipfile(BytesIO(data)):
         category = "corrupt_zip" if data.startswith(_ZIP_PREFIXES) else "format_mismatch"
         raise OfficePayloadError(
@@ -138,26 +232,163 @@ def _validate_office_payload(
     required_part = _OOXML_REQUIRED_PART[mime_type]
     try:
         with zipfile.ZipFile(BytesIO(data)) as package:
-            bad_member = package.testzip()
-            if bad_member is not None:
+            infos = package.infolist()
+            if len(infos) > MAX_OFFICE_ZIP_MEMBERS:
                 raise OfficePayloadError(
-                    "corrupt_zip",
+                    "unsafe_archive",
                     mime_type=mime_type,
                     actual_bytes=actual_size,
                     expected_bytes=expected_size,
                 )
-            if required_part not in package.namelist():
+
+            names = [info.filename for info in infos]
+            if len(set(names)) != len(names):
+                raise OfficePayloadError(
+                    "unsafe_archive",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                )
+            info_by_name = {info.filename: info for info in infos}
+
+            total_uncompressed = 0
+            total_compressed = 0
+            for info in infos:
+                if info.flag_bits & 0x1:
+                    raise OfficePayloadError(
+                        "encrypted_office",
+                        mime_type=mime_type,
+                        actual_bytes=actual_size,
+                        expected_bytes=expected_size,
+                    )
+                if info.file_size < 0 or info.compress_size < 0:
+                    raise OfficePayloadError(
+                        "corrupt_zip",
+                        mime_type=mime_type,
+                        actual_bytes=actual_size,
+                        expected_bytes=expected_size,
+                    )
+                if info.file_size > MAX_OFFICE_MEMBER_UNCOMPRESSED_BYTES:
+                    raise OfficePayloadError(
+                        "unsafe_archive",
+                        mime_type=mime_type,
+                        actual_bytes=actual_size,
+                        expected_bytes=expected_size,
+                    )
+                if info.file_size >= _RATIO_CHECK_MIN_BYTES:
+                    ratio = info.file_size / max(1, info.compress_size)
+                    if ratio > MAX_OFFICE_COMPRESSION_RATIO:
+                        raise OfficePayloadError(
+                            "unsafe_archive",
+                            mime_type=mime_type,
+                            actual_bytes=actual_size,
+                            expected_bytes=expected_size,
+                        )
+                total_uncompressed += info.file_size
+                total_compressed += info.compress_size
+
+            if total_uncompressed > MAX_OFFICE_TOTAL_UNCOMPRESSED_BYTES:
+                raise OfficePayloadError(
+                    "unsafe_archive",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                )
+            if (
+                total_uncompressed >= _RATIO_CHECK_MIN_BYTES
+                and total_uncompressed / max(1, total_compressed) > MAX_OFFICE_COMPRESSION_RATIO
+            ):
+                raise OfficePayloadError(
+                    "unsafe_archive",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                )
+            if required_part not in info_by_name or _CONTENT_TYPES_PART not in info_by_name:
+                # CRCは先に全memberで確認済み。構造だけが不足しているpackageを区別する。
+                for info in infos:
+                    _read_zip_member_bounded(package, info)
                 raise OfficePayloadError(
                     "format_mismatch",
                     mime_type=mime_type,
                     actual_bytes=actual_size,
                     expected_bytes=expected_size,
                 )
-            with package.open(required_part) as xml_part:
-                ElementTree.parse(xml_part)
+            if info_by_name[required_part].file_size > MAX_OFFICE_REQUIRED_XML_BYTES:
+                raise OfficePayloadError(
+                    "unsafe_archive",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                )
+            if info_by_name[_CONTENT_TYPES_PART].file_size > MAX_OFFICE_CONTENT_TYPES_XML_BYTES:
+                raise OfficePayloadError(
+                    "unsafe_archive",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                )
+
+            retained: dict[str, bytes] = {}
+            for info in infos:
+                capture_limit: int | None = None
+                if info.filename == required_part:
+                    capture_limit = MAX_OFFICE_REQUIRED_XML_BYTES
+                elif info.filename == _CONTENT_TYPES_PART:
+                    capture_limit = MAX_OFFICE_CONTENT_TYPES_XML_BYTES
+                captured = _read_zip_member_bounded(
+                    package,
+                    info,
+                    capture_limit=capture_limit,
+                )
+                if captured is not None:
+                    retained[info.filename] = captured
+
+            try:
+                required_root = _parse_bounded_xml(retained[required_part])
+                content_types_root = _parse_bounded_xml(retained[_CONTENT_TYPES_PART])
+            except ElementTree.ParseError as exc:
+                raise OfficePayloadError(
+                    "corrupt_zip",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                ) from exc
+            except ValueError as exc:
+                raise OfficePayloadError(
+                    "unsafe_archive",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                ) from exc
+
+            if (
+                required_root.tag != _OOXML_REQUIRED_ROOT[mime_type]
+                or content_types_root.tag != _CONTENT_TYPES_ROOT
+            ):
+                raise OfficePayloadError(
+                    "format_mismatch",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                )
+            expected_part_name = f"/{required_part}"
+            expected_content_type = _OOXML_REQUIRED_CONTENT_TYPE[mime_type]
+            if not any(
+                element.tag == _CONTENT_TYPES_OVERRIDE
+                and element.attrib.get("PartName") == expected_part_name
+                and element.attrib.get("ContentType") == expected_content_type
+                for element in content_types_root
+            ):
+                raise OfficePayloadError(
+                    "format_mismatch",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                )
     except OfficePayloadError:
         raise
-    except (zipfile.BadZipFile, OSError, RuntimeError, ElementTree.ParseError) as exc:
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, RuntimeError, ValueError) as exc:
         raise OfficePayloadError(
             "corrupt_zip",
             mime_type=mime_type,
@@ -423,7 +654,9 @@ def extract_office_pages(
 __all__ = [
     "DOCX_MIME",
     "GDOC_NATIVE_MIME",
+    "MAX_OFFICE_COMPRESSED_BYTES",
     "OFFICE_BINARY_MIMES",
+    "OFFICE_VALIDATOR_SCHEMA_VERSION",
     "PPTX_MIME",
     "XLSX_MIME",
     "OfficePayloadError",

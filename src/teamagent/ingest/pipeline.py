@@ -311,6 +311,20 @@ class _IngestWarningCollector:
         if suppressed:
             self._suppressed_counts[key] = self._suppressed_counts.get(key, 0) + 1
 
+    def add_count(
+        self,
+        source_kind: str,
+        source_id: str,
+        reason: str,
+        count: int,
+    ) -> None:
+        """reconciliation等の既集計件数をID非依存で加算する。"""
+        if count < 1:
+            return
+        key = (source_kind, source_id)
+        counts = self._reason_counts.setdefault(key, {})
+        counts[reason] = counts.get(reason, 0) + count
+
     def snapshot(self, source_kind: str, source_id: str) -> _WarningSnapshot:
         key = (source_kind, source_id)
         return _WarningSnapshot(
@@ -344,12 +358,20 @@ _OFFICE_WARNING_REASONS = frozenset(
         "checksum_mismatch",
         "corrupt_zip",
         "format_mismatch",
+        "unsafe_archive",
+        "encrypted_office",
+        "download_too_large",
         "office_download_failed",
         "office_extract_failed",
         "office_empty_text",
     }
 )
-_PERSISTENT_OFFICE_INVALID_REASONS = frozenset({"corrupt_zip", "format_mismatch"})
+_PERSISTENT_OFFICE_INVALID_REASONS = frozenset(
+    {"corrupt_zip", "format_mismatch", "unsafe_archive", "encrypted_office"}
+)
+_PDF_WARNING_REASONS = frozenset({"pdf_download_failed", "pdf_extract_failed", "pdf_empty_text"})
+_PDF_VALIDATOR_SCHEMA_VERSION = "pdf-extract-v1"
+_GENERIC_DRIVE_VALIDATOR_SCHEMA_VERSION = "gdrive-content-v1"
 
 
 def _normalized_office_warning_reason(reason: str) -> str:
@@ -360,7 +382,9 @@ def _known_invalid_office_reason(
     repository: IngestRepository,
     f: Any,
 ) -> str | None:
-    """同一 Drive ID+MD5+size の既知 invalid を検索。旧repo/schemaでは再検証へ倒す。"""
+    """ID+MD5+size+MIME+validator世代が一致する既知invalidだけを抑止する。"""
+    from teamagent.ingest.office_extract import OFFICE_VALIDATOR_SCHEMA_VERSION
+
     md5_checksum = getattr(f, "md5_checksum", None)
     size_bytes = getattr(f, "size", None)
     if not md5_checksum or size_bytes is None:
@@ -369,7 +393,14 @@ def _known_invalid_office_reason(
     if not callable(lookup):
         return None
     try:
-        reason = lookup("gdrive", f.id, md5_checksum, size_bytes)
+        reason = lookup(
+            "gdrive",
+            f.id,
+            md5_checksum,
+            size_bytes,
+            f.mime_type,
+            OFFICE_VALIDATOR_SCHEMA_VERSION,
+        )
         return str(reason) if reason is not None else None
     except Exception as exc:
         logger.warning(
@@ -397,6 +428,8 @@ def _record_office_warning(
     error_type: str | None = None,
 ) -> None:
     """Office skipを集計し、確定的invalid payloadだけ fingerprint 単位で永続化する。"""
+    from teamagent.ingest.office_extract import OFFICE_VALIDATOR_SCHEMA_VERSION
+
     reason = _normalized_office_warning_reason(category)
     if warning_collector is not None:
         warning_collector.add(
@@ -420,8 +453,12 @@ def _record_office_warning(
                     size_bytes=size_bytes,
                     reason=reason,
                     mime_type=f.mime_type,
+                    validator_schema_version=OFFICE_VALIDATOR_SCHEMA_VERSION,
                     request_id=request_id,
-                    metadata={"validation": "ooxml_pre_upsert"},
+                    metadata={
+                        "validation": "ooxml_pre_upsert",
+                        "validator_schema_version": OFFICE_VALIDATOR_SCHEMA_VERSION,
+                    },
                 )
             except Exception as exc:
                 logger.warning(
@@ -442,6 +479,148 @@ def _record_office_warning(
         expected_bytes=expected_bytes,
         known_invalid=known_invalid,
         retry_suppressed=known_invalid,
+        error_type=error_type,
+        existing_document_preserved=True,
+    )
+
+
+def _validator_schema_for_drive_file(f: Any) -> str:
+    from teamagent.ingest.office_extract import (
+        OFFICE_BINARY_MIMES,
+        OFFICE_VALIDATOR_SCHEMA_VERSION,
+    )
+
+    if f.mime_type in OFFICE_BINARY_MIMES:
+        return OFFICE_VALIDATOR_SCHEMA_VERSION
+    if f.mime_type in _PDF_MIME_TYPES:
+        return _PDF_VALIDATOR_SCHEMA_VERSION
+    return _GENERIC_DRIVE_VALIDATOR_SCHEMA_VERSION
+
+
+def _record_source_retry(
+    *,
+    repository: IngestRepository,
+    f: Any,
+    source_kind: str,
+    source_id: str,
+    reason: str,
+    request_id: str,
+    dry_run: bool,
+    enabled: bool,
+) -> None:
+    """incremental transient失敗をcursorと独立したdurable queueへ残す。"""
+    if dry_run or not enabled:
+        return
+    recorder = getattr(repository, "record_source_retry", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(
+            source_kind=source_kind,
+            source_id=source_id,
+            source_type="gdrive",
+            external_id=f.id,
+            md5_checksum=getattr(f, "md5_checksum", None),
+            size_bytes=getattr(f, "size", None),
+            mime_type=f.mime_type,
+            validator_schema_version=_validator_schema_for_drive_file(f),
+            reason=reason,
+            request_id=request_id,
+            metadata={"retry_class": "transient"},
+        )
+    except Exception as exc:
+        logger.warning(
+            "ingest_source_retry_record_failed",
+            request_id=request_id,
+            source_kind=source_kind,
+            source_id_ref=_external_id_ref(source_id),
+            file_ref=_external_id_ref(f.id),
+            error_type=type(exc).__name__,
+        )
+
+
+def _resolve_source_retry(
+    *,
+    repository: IngestRepository,
+    f: Any,
+    source_kind: str,
+    source_id: str,
+    request_id: str,
+    dry_run: bool,
+) -> None:
+    """成功または永久invalidで、claim済み/同一fingerprint retryを解消する。"""
+    if dry_run:
+        return
+    resolver = getattr(repository, "resolve_source_retry", None)
+    if not callable(resolver):
+        return
+    try:
+        resolver(
+            source_kind=source_kind,
+            source_id=source_id,
+            source_type="gdrive",
+            external_id=f.id,
+            md5_checksum=getattr(f, "md5_checksum", None),
+            size_bytes=getattr(f, "size", None),
+            mime_type=f.mime_type,
+            validator_schema_version=_validator_schema_for_drive_file(f),
+            request_id=request_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "ingest_source_retry_resolve_failed",
+            request_id=request_id,
+            source_kind=source_kind,
+            source_id_ref=_external_id_ref(source_id),
+            file_ref=_external_id_ref(f.id),
+            error_type=type(exc).__name__,
+        )
+
+
+def _resolve_reconciliation_gap(
+    *,
+    repository: IngestRepository,
+    f: Any,
+    request_id: str,
+    dry_run: bool,
+) -> None:
+    """本文upsert成功時だけ、監査baselineのhashed source refを解消する。"""
+    if dry_run:
+        return
+    resolver = getattr(repository, "resolve_reconciliation_gaps", None)
+    if not callable(resolver):
+        return
+    try:
+        resolver(source_kind="gdrive", external_id=f.id, request_id=request_id)
+    except Exception as exc:
+        logger.warning(
+            "ingest_reconciliation_resolve_failed",
+            request_id=request_id,
+            file_ref=_external_id_ref(f.id),
+            error_type=type(exc).__name__,
+        )
+
+
+def _record_pdf_warning(
+    *,
+    f: Any,
+    category: str,
+    request_id: str,
+    warning_collector: _IngestWarningCollector | None,
+    warning_source_kind: str,
+    warning_source_id: str,
+    event: str,
+    error_type: str | None = None,
+) -> None:
+    reason = category if category in _PDF_WARNING_REASONS else "pdf_extract_failed"
+    if warning_collector is not None:
+        warning_collector.add(warning_source_kind, warning_source_id, reason)
+    logger.warning(
+        event,
+        request_id=request_id,
+        file_ref=_external_id_ref(f.id),
+        mime_type=f.mime_type,
+        category=reason,
         error_type=error_type,
         existing_document_preserved=True,
     )
@@ -1229,6 +1408,8 @@ def _ingest_gdrive_folder(
     incremental = _envflag("USE_INCREMENTAL_SYNC")
     changed_ids: set[str] | None = None
     next_cursor: str | None = None
+    retry_claims: list[Any] = []
+    retry_ids: set[str] = set()
     if incremental:
         prior_cursor: str | None = None
         try:
@@ -1255,6 +1436,26 @@ def _ingest_gdrive_folder(
                 next_cursor = client.get_start_page_token(request_id)
             except Exception:
                 logger.exception("gdrive_start_page_token_failed", folder_id=spec.folder_id)
+        if not dry_run:
+            claimer = getattr(repository, "claim_due_source_retries", None)
+            if callable(claimer):
+                try:
+                    retry_claims = list(
+                        claimer(
+                            source_kind="gdrive",
+                            source_id=spec.folder_id,
+                            request_id=request_id,
+                        )
+                    )
+                    retry_ids = {str(retry.external_id) for retry in retry_claims}
+                except Exception as exc:
+                    logger.warning(
+                        "ingest_source_retry_claim_failed",
+                        request_id=request_id,
+                        source_kind="gdrive",
+                        source_id_ref=_external_id_ref(spec.folder_id),
+                        error_type=type(exc).__name__,
+                    )
 
     if spec.include_subfolders:
         # Day 7 (2026-05-27): walk_files_recursive はサブフォルダを BFS する。
@@ -1291,9 +1492,48 @@ def _ingest_gdrive_folder(
     # 増分絞り込みの**前**に観測を取る理由: 増分 run でも列挙自体はフル走査なので、
     # 「変更が無かっただけの file」が stale 扱いになる誤爆を防げる。
 
-    # 増分: 変更があった file だけに絞る（changed_ids が None ＝フル走査）。
+    listed_ids = {f.id for f in files}
+    missing_retry_ids = retry_ids - listed_ids
+    if missing_retry_ids:
+        if warning_collector is not None:
+            warning_collector.add_count(
+                warning_source_kind,
+                warning_source_id,
+                "retry_source_missing",
+                len(missing_retry_ids),
+            )
+        retry_recorder = getattr(repository, "record_source_retry", None)
+        if callable(retry_recorder) and not dry_run:
+            for retry in retry_claims:
+                if retry.external_id not in missing_retry_ids:
+                    continue
+                try:
+                    retry_recorder(
+                        source_kind="gdrive",
+                        source_id=spec.folder_id,
+                        source_type="gdrive",
+                        external_id=retry.external_id,
+                        md5_checksum=retry.md5_checksum,
+                        size_bytes=retry.size_bytes,
+                        mime_type=retry.mime_type,
+                        validator_schema_version=retry.validator_schema_version,
+                        reason="retry_source_missing",
+                        request_id=request_id,
+                        metadata={"retry_class": "source_not_listed"},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "ingest_source_retry_missing_record_failed",
+                        request_id=request_id,
+                        source_id_ref=_external_id_ref(spec.folder_id),
+                        external_id_ref=_external_id_ref(retry.external_id),
+                        error_type=type(exc).__name__,
+                    )
+
+    # 増分: 新規変更または期限到来retryだけに絞る（changed_ids=Noneならフル走査）。
     if changed_ids is not None:
-        files = [f for f in files if f.id in changed_ids]
+        selected_ids = changed_ids | retry_ids
+        files = [f for f in files if f.id in selected_ids]
 
     for f in files:
         # Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないよう全体を try/except でラップ。
@@ -1315,6 +1555,7 @@ def _ingest_gdrive_folder(
                 warning_collector=warning_collector,
                 warning_source_kind=warning_source_kind,
                 warning_source_id=warning_source_id,
+                durable_retry=incremental,
             )
             docs_n += docs_added
             chunks_n += chunks_added
@@ -1328,6 +1569,16 @@ def _ingest_gdrive_folder(
             )
             skipped.append(f.id)
             if incremental and not dry_run:
+                _record_source_retry(
+                    repository=repository,
+                    f=f,
+                    source_kind=warning_source_kind,
+                    source_id=warning_source_id,
+                    reason="gdrive_file_unexpected_error",
+                    request_id=request_id,
+                    dry_run=dry_run,
+                    enabled=True,
+                )
                 _safe_record_job(
                     repository,
                     "gdrive",
@@ -1422,6 +1673,7 @@ def _process_one_gdrive_file(
     warning_collector: _IngestWarningCollector | None = None,
     warning_source_kind: str = "gdrive",
     warning_source_id: str = "gdrive",
+    durable_retry: bool = False,
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
@@ -1479,6 +1731,14 @@ def _process_one_gdrive_file(
                 expected_bytes=f.size,
                 known_invalid=True,
             )
+            _resolve_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                request_id=request_id,
+                dry_run=dry_run,
+            )
             skipped.append(f.id)
             return 0, 0
 
@@ -1495,27 +1755,75 @@ def _process_one_gdrive_file(
     if f.mime_type in _PDF_MIME_TYPES:
         try:
             data = client.download_file_bytes(file_id=f.id, request_id=request_id)
-        except Exception:
-            logger.exception(
-                "gdrive_pdf_download_failed",
-                file_id=f.id,
-                file_name=f.name,
+        except Exception as exc:
+            _record_pdf_warning(
+                f=f,
+                category="pdf_download_failed",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_pdf_download_failed",
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="pdf_download_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
             )
             skipped.append(f.id)
             return 0, 0
         try:
             pages = extract_pdf_pages(data, **pdf_kwargs)
-        except Exception:
-            logger.exception(
-                "gdrive_pdf_extract_failed",
-                file_id=f.id,
-                file_name=f.name,
+        except Exception as exc:
+            _record_pdf_warning(
+                f=f,
+                category="pdf_extract_failed",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_pdf_extract_failed",
+                error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="pdf_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
             )
             skipped.append(f.id)
             return 0, 0
         page_chunks = chunk_pages(pages, size=500, overlap=100)
         if not page_chunks:
-            logger.warning("gdrive_pdf_empty_text", file_id=f.id, file_name=f.name)
+            _record_pdf_warning(
+                f=f,
+                category="pdf_empty_text",
+                request_id=request_id,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_pdf_empty_text",
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="pdf_empty_text",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+            )
             skipped.append(f.id)
             return 0, 0
         for idx, (page_num, text) in enumerate(page_chunks):
@@ -1545,6 +1853,16 @@ def _process_one_gdrive_file(
                 actual_bytes=exc.actual_bytes,
                 expected_bytes=f.size,
             )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason=exc.category,
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+            )
             skipped.append(f.id)
             return 0, 0
         except Exception as exc:
@@ -1561,6 +1879,16 @@ def _process_one_gdrive_file(
                 actual_bytes=None,
                 expected_bytes=f.size,
                 error_type=type(exc).__name__,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="office_download_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
             )
             skipped.append(f.id)
             return 0, 0
@@ -1588,6 +1916,26 @@ def _process_one_gdrive_file(
                 actual_bytes=exc.actual_bytes,
                 expected_bytes=exc.expected_bytes,
             )
+            if exc.category in _PERSISTENT_OFFICE_INVALID_REASONS:
+                _resolve_source_retry(
+                    repository=repository,
+                    f=f,
+                    source_kind=warning_source_kind,
+                    source_id=warning_source_id,
+                    request_id=request_id,
+                    dry_run=dry_run,
+                )
+            else:
+                _record_source_retry(
+                    repository=repository,
+                    f=f,
+                    source_kind=warning_source_kind,
+                    source_id=warning_source_id,
+                    reason=exc.category,
+                    request_id=request_id,
+                    dry_run=dry_run,
+                    enabled=durable_retry,
+                )
             skipped.append(f.id)
             return 0, 0
         except Exception as exc:
@@ -1605,6 +1953,16 @@ def _process_one_gdrive_file(
                 expected_bytes=f.size,
                 error_type=type(exc).__name__,
             )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="office_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
+            )
             skipped.append(f.id)
             return 0, 0
         page_chunks = chunk_pages(pages, size=500, overlap=100)
@@ -1621,6 +1979,16 @@ def _process_one_gdrive_file(
                 event="gdrive_office_empty_text",
                 actual_bytes=len(data),
                 expected_bytes=f.size,
+            )
+            _record_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                reason="office_empty_text",
+                request_id=request_id,
+                dry_run=dry_run,
+                enabled=durable_retry,
             )
             skipped.append(f.id)
             return 0, 0
@@ -1778,7 +2146,36 @@ def _process_one_gdrive_file(
             repository, doc, chunks, request_id=request_id, content_registry=content_registry
         )
         if not wrote:
+            _resolve_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                request_id=request_id,
+                dry_run=dry_run,
+            )
+            _resolve_reconciliation_gap(
+                repository=repository,
+                f=f,
+                request_id=request_id,
+                dry_run=dry_run,
+            )
             return 0, 0
+        _resolve_source_retry(
+            repository=repository,
+            f=f,
+            source_kind=warning_source_kind,
+            source_id=warning_source_id,
+            request_id=request_id,
+            dry_run=dry_run,
+        )
+        if any(chunk.content.strip() and not chunk.metadata.get("title_only") for chunk in chunks):
+            _resolve_reconciliation_gap(
+                repository=repository,
+                f=f,
+                request_id=request_id,
+                dry_run=dry_run,
+            )
     return 1, len(chunks)
 
 
@@ -1949,34 +2346,44 @@ def _ingest_shared_drives_crawl(
                 if f.mime_type in _PDF_MIME_TYPES:
                     try:
                         data = client.download_file_bytes(file_id=f.id, request_id=request_id)
-                    except Exception:
-                        logger.exception(
-                            "shared_drive_pdf_download_failed",
-                            file_id=f.id,
-                            file_name=f.name,
-                            drive_id=drive.id,
+                    except Exception as exc:
+                        _record_pdf_warning(
+                            f=f,
+                            category="pdf_download_failed",
+                            request_id=request_id,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_pdf_download_failed",
+                            error_type=type(exc).__name__,
                         )
                         skipped_count += 1
                         continue
                     try:
                         pages = extract_pdf_pages(data, **pdf_kwargs)
-                    except Exception:
-                        logger.exception(
-                            "shared_drive_pdf_extract_failed",
-                            file_id=f.id,
-                            file_name=f.name,
+                    except Exception as exc:
+                        _record_pdf_warning(
+                            f=f,
+                            category="pdf_extract_failed",
+                            request_id=request_id,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_pdf_extract_failed",
+                            error_type=type(exc).__name__,
                         )
                         skipped_count += 1
                         continue
                     page_chunks = chunk_pages(pages, size=500, overlap=100)
                     if not page_chunks:
-                        # 抽出 0 も分類warningとして可視化し、connectorを完全successにしない。
-                        logger.warning(
-                            "shared_drive_pdf_empty_text",
+                        _record_pdf_warning(
+                            f=f,
+                            category="pdf_empty_text",
                             request_id=request_id,
-                            file_id=f.id,
-                            file_name=f.name,
-                            drive_id=drive.id,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_pdf_empty_text",
                         )
                         skipped_count += 1
                         continue
@@ -2238,6 +2645,16 @@ def _ingest_shared_drives_crawl(
                     if not wrote:
                         skipped_count += 1
                         continue
+                    if any(
+                        chunk.content.strip() and not chunk.metadata.get("title_only")
+                        for chunk in chunks
+                    ):
+                        _resolve_reconciliation_gap(
+                            repository=repository,
+                            f=f,
+                            request_id=request_id,
+                            dry_run=dry_run,
+                        )
                 docs_n += 1
                 chunks_n += len(chunks)
             except Exception:
@@ -2698,6 +3115,13 @@ class IngestRunner:
                 )
                 result.by_kind["shared_drives"] = IngestStats(source_kind="shared_drives")
 
+        self._apply_reconciliation_warnings(
+            result,
+            warning_collector=warning_collector,
+            kinds=kinds,
+            request_id=request_id,
+        )
+
         # M3: 実行順は dedup（docdedup）→ boilerplate。boilerplate の指紋集計は
         # suppressed（非正本）doc を除外して数えるため、同一 run 内で先に docdedup が
         # 確定させた suppressed 印を参照できるよう、docdedup を先に走らせる。
@@ -2738,6 +3162,77 @@ class IngestRunner:
             dry_run=self._dry_run,
         )
         return result
+
+    def _apply_reconciliation_warnings(
+        self,
+        result: IngestResult,
+        *,
+        warning_collector: _IngestWarningCollector,
+        kinds: list[str],
+        request_id: str,
+    ) -> None:
+        """未解消の監査coverage gapを件数だけrun結果・connector run・opsへ反映する。"""
+        if "gdrive" not in kinds and "shared_drives" not in kinds:
+            return
+        loader = getattr(self._repo, "unresolved_reconciliation_counts", None)
+        if not callable(loader):
+            return
+        try:
+            counts = {
+                str(reason): int(count)
+                for reason, count in loader("gdrive").items()
+                if int(count) > 0
+            }
+        except Exception as exc:
+            logger.warning(
+                "ingest_reconciliation_count_failed",
+                request_id=request_id,
+                error_type=type(exc).__name__,
+            )
+            return
+        if not counts:
+            return
+
+        target_kind = "gdrive" if "gdrive" in kinds else "shared_drives"
+        stats = result.by_kind.setdefault(target_kind, IngestStats(source_kind=target_kind))
+        for reason, count in counts.items():
+            warning_collector.add_count(
+                target_kind,
+                "__reconciliation__",
+                reason,
+                count,
+            )
+            stats.warning_reasons[reason] = stats.warning_reasons.get(reason, 0) + count
+
+        if not self._dry_run:
+            recorder = getattr(self._repo, "record_connector_run", None)
+            if callable(recorder):
+                try:
+                    recorder(
+                        request_id=request_id,
+                        source_kind=target_kind,
+                        source_id="__reconciliation__",
+                        outcome="success_with_warnings",
+                        documents_upserted=0,
+                        chunks_inserted=0,
+                        warning_reasons=counts,
+                        suppressed_retry_count=0,
+                        error=None,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "ingest_reconciliation_connector_run_failed",
+                        request_id=request_id,
+                        error_type=type(exc).__name__,
+                    )
+        _send_ops_warning_summary(
+            self._alerter,
+            kind=target_kind,
+            warning_reasons=counts,
+            suppressed_retry_count=0,
+            request_id=request_id,
+            dry_run=self._dry_run,
+        )
 
     def _maybe_mark_boilerplate(self, *, request_id: str) -> None:
         """全 upsert 完了後、env ゲートが ON ならコーパス横断でテンプレ印を付け直す。

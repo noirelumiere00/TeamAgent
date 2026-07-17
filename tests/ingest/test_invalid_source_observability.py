@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from io import BytesIO
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -16,7 +17,11 @@ from teamagent.ingest.loader import (
     IngestSources,
     SharedDriveCrawlSpec,
 )
-from teamagent.ingest.office_extract import PPTX_MIME
+from teamagent.ingest.office_extract import (
+    DOCX_MIME,
+    OFFICE_VALIDATOR_SCHEMA_VERSION,
+    PPTX_MIME,
+)
 from teamagent.ingest.ops_alert import IngestOpsAlerter
 from teamagent.ingest.pipeline import (
     ChunkUpsert,
@@ -29,6 +34,7 @@ from teamagent.ingest.pipeline import (
     _process_one_gdrive_file,
     _send_ops_warning_summary,
 )
+from teamagent.ingest.repository import ConnectorState, SourceRetry
 
 
 class _Embedder:
@@ -42,14 +48,22 @@ class _Embedder:
 class _Repository:
     def __init__(
         self,
-        known: set[tuple[str, str, int]] | None = None,
+        known: set[tuple[str, str, int, str, str]] | None = None,
     ) -> None:
         self.known = known or set()
-        self.lookup_calls: list[tuple[str, str, str | None, int | None]] = []
+        self.lookup_calls: list[
+            tuple[str, str, str | None, int | None, str | None, str | None]
+        ] = []
         self.invalid_records: list[dict[str, Any]] = []
         self.upserts: list[tuple[Any, list[Any]]] = []
         self.saved_states: list[dict[str, Any]] = []
         self.connector_runs: list[dict[str, Any]] = []
+        self.retry_records: list[dict[str, Any]] = []
+        self.retry_resolutions: list[dict[str, Any]] = []
+        self.retry_claims: list[SourceRetry] = []
+        self.connector_state: ConnectorState | None = None
+        self.reconciliation_counts: dict[str, int] = {}
+        self.reconciliation_resolutions: list[str] = []
 
     def find_invalid_source_reason(
         self,
@@ -57,10 +71,27 @@ class _Repository:
         external_id: str,
         md5_checksum: str | None,
         size_bytes: int | None,
+        mime_type: str | None = None,
+        validator_schema_version: str | None = None,
     ) -> str | None:
-        self.lookup_calls.append((source_type, external_id, md5_checksum, size_bytes))
+        self.lookup_calls.append(
+            (
+                source_type,
+                external_id,
+                md5_checksum,
+                size_bytes,
+                mime_type,
+                validator_schema_version,
+            )
+        )
         if md5_checksum is not None and size_bytes is not None:
-            if (external_id, md5_checksum, size_bytes) in self.known:
+            if (
+                external_id,
+                md5_checksum,
+                size_bytes,
+                str(mime_type),
+                str(validator_schema_version),
+            ) in self.known:
                 return "corrupt_zip"
         return None
 
@@ -86,11 +117,17 @@ class _Repository:
         self.upserts.append((doc, list(chunks)))
         return "doc-id"
 
-    def load_connector_state(self, source_kind: str, source_id: str) -> None:
-        return None
+    def load_connector_state(self, source_kind: str, source_id: str) -> ConnectorState | None:
+        return self.connector_state
 
     def save_connector_state(self, source_kind: str, source_id: str, **kwargs: Any) -> None:
         self.saved_states.append({"source_kind": source_kind, "source_id": source_id, **kwargs})
+        if kwargs.get("cursor"):
+            self.connector_state = ConnectorState(
+                source_kind=source_kind,
+                source_id=source_id,
+                cursor=str(kwargs["cursor"]),
+            )
 
     def record_ingest_job(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -98,6 +135,40 @@ class _Repository:
     def record_connector_run(self, **kwargs: Any) -> bool:
         self.connector_runs.append(kwargs)
         return True
+
+    def claim_due_source_retries(self, **kwargs: Any) -> list[SourceRetry]:
+        claimed = list(self.retry_claims)
+        self.retry_claims.clear()
+        return claimed
+
+    def record_source_retry(self, **kwargs: Any) -> bool:
+        self.retry_records.append(kwargs)
+        self.retry_claims = [
+            SourceRetry(
+                external_id=str(kwargs["external_id"]),
+                md5_checksum=kwargs.get("md5_checksum"),
+                size_bytes=kwargs.get("size_bytes"),
+                mime_type=str(kwargs["mime_type"]),
+                validator_schema_version=str(kwargs["validator_schema_version"]),
+                attempt_count=len(self.retry_records),
+                reason=str(kwargs["reason"]),
+            )
+        ]
+        return True
+
+    def resolve_source_retry(self, **kwargs: Any) -> bool:
+        self.retry_resolutions.append(kwargs)
+        self.retry_claims.clear()
+        return True
+
+    def unresolved_reconciliation_counts(self, source_kind: str) -> dict[str, int]:
+        return dict(self.reconciliation_counts)
+
+    def resolve_reconciliation_gaps(
+        self, *, source_kind: str, external_id: str, request_id: str
+    ) -> int:
+        self.reconciliation_resolutions.append(external_id)
+        return 1
 
 
 def _pptx_bytes() -> bytes:
@@ -108,6 +179,16 @@ def _pptx_bytes() -> bytes:
     slide.shapes.title.text = "safe content"
     buffer = BytesIO()
     presentation.save(buffer)
+    return buffer.getvalue()
+
+
+def _docx_bytes() -> bytes:
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("safe document content")
+    buffer = BytesIO()
+    document.save(buffer)
     return buffer.getvalue()
 
 
@@ -189,7 +270,17 @@ def test_corrupt_payload_is_persisted_without_document_mutation_or_identifier_lo
 def test_known_invalid_suppresses_acl_and_body_download_and_touches_observation() -> None:
     broken = b"PK\x03\x04" + (b"x" * 64)
     drive_file = _file("KNOWN", broken)
-    repo = _Repository(known={("KNOWN", str(drive_file.md5_checksum), len(broken))})
+    repo = _Repository(
+        known={
+            (
+                "KNOWN",
+                str(drive_file.md5_checksum),
+                len(broken),
+                drive_file.mime_type,
+                OFFICE_VALIDATOR_SCHEMA_VERSION,
+            )
+        }
+    )
     client = MagicMock()
     collector = _IngestWarningCollector()
 
@@ -223,7 +314,17 @@ def test_fingerprint_change_forces_revalidation(change: str) -> None:
     current_md5 = str(drive_file.md5_checksum)
     known_md5 = "0" * 32 if change == "md5" else current_md5
     known_size = len(data) if change == "md5" else len(data) - 1
-    repo = _Repository(known={("RECOVERED", known_md5, known_size)})
+    repo = _Repository(
+        known={
+            (
+                "RECOVERED",
+                known_md5,
+                known_size,
+                drive_file.mime_type,
+                OFFICE_VALIDATOR_SCHEMA_VERSION,
+            )
+        }
+    )
     client = MagicMock()
     client.list_permissions.return_value = [_owner_permission()]
     client.download_file_bytes.return_value = data
@@ -243,7 +344,57 @@ def test_fingerprint_change_forces_revalidation(change: str) -> None:
     assert result[0] == 1
     client.download_file_bytes.assert_called_once()
     assert len(repo.upserts) == 1
-    assert repo.lookup_calls[-1][2:] == (current_md5, len(data))
+    assert repo.lookup_calls[-1][2:] == (
+        current_md5,
+        len(data),
+        drive_file.mime_type,
+        OFFICE_VALIDATOR_SCHEMA_VERSION,
+    )
+
+
+@pytest.mark.parametrize("change", ["mime", "validator"])
+def test_mime_or_validator_schema_change_forces_revalidation(change: str) -> None:
+    data = _docx_bytes()
+    drive_file = replace(
+        _file("MIME-RECOVERED", data),
+        name="confidential.docx",
+        mime_type=DOCX_MIME,
+    )
+    known_mime = PPTX_MIME if change == "mime" else DOCX_MIME
+    known_validator = OFFICE_VALIDATOR_SCHEMA_VERSION if change == "mime" else "ooxml-safe-v1"
+    repo = _Repository(
+        known={
+            (
+                drive_file.id,
+                str(drive_file.md5_checksum),
+                len(data),
+                known_mime,
+                known_validator,
+            )
+        }
+    )
+    client = MagicMock()
+    client.list_permissions.return_value = [_owner_permission()]
+    client.download_file_bytes.return_value = data
+
+    result = _process_one_gdrive_file(
+        drive_file,
+        _folder_spec(),
+        client=client,
+        embedder=_Embedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="req",
+        skipped=[],
+    )
+
+    assert result[0] == 1
+    client.download_file_bytes.assert_called_once()
+    assert repo.lookup_calls[-1][-2:] == (
+        DOCX_MIME,
+        OFFICE_VALIDATOR_SCHEMA_VERSION,
+    )
 
 
 def test_checksum_mismatch_is_warning_but_not_cached_as_known_invalid() -> None:
@@ -297,12 +448,217 @@ def test_office_download_failure_is_nonpersistent_connector_warning() -> None:
     assert collector.snapshot("gdrive", "FOLDER").reasons == {"office_download_failed": 1}
 
 
+def test_incremental_transient_failure_is_retried_next_run_after_cursor_advance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teamagent.adapters.gdrive_client import ChangeBatch
+
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    data = _pptx_bytes()
+    drive_file = _file("RETRY-AFTER-CURSOR", data)
+    client = MagicMock()
+    client.list_files.return_value = ([drive_file], None)
+    client.list_permissions.return_value = [_owner_permission()]
+    client.get_start_page_token.return_value = "CURSOR-1"
+    client.get_changes.return_value = ChangeBatch(
+        changes=(),
+        next_page_token=None,
+        new_start_page_token="CURSOR-2",
+    )
+    client.download_file_bytes.side_effect = [TimeoutError("temporary"), data]
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    repo = _Repository()
+
+    first = _ingest_gdrive_folder(
+        _folder_spec(),
+        embedder=_Embedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="run-1",
+        warning_collector=_IngestWarningCollector(),
+    )
+    second = _ingest_gdrive_folder(
+        _folder_spec(),
+        embedder=_Embedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="run-2",
+        warning_collector=_IngestWarningCollector(),
+    )
+
+    assert first == (0, 0)
+    assert second[0] == 1
+    assert [state["cursor"] for state in repo.saved_states] == ["CURSOR-1", "CURSOR-2"]
+    assert repo.retry_records[0]["reason"] == "office_download_failed"
+    assert repo.retry_resolutions[-1]["external_id"] == drive_file.id
+    assert client.download_file_bytes.call_count == 2
+    assert len(repo.upserts) == 1
+
+
+def test_pdf_download_failure_is_warning_and_durable_retry() -> None:
+    drive_file = replace(
+        _file("PDF-FAIL", b"%PDF-fake"),
+        name="confidential.pdf",
+        mime_type="application/pdf",
+    )
+    repo = _Repository()
+    client = MagicMock()
+    client.list_permissions.return_value = [_owner_permission()]
+    client.download_file_bytes.side_effect = TimeoutError("temporary")
+    collector = _IngestWarningCollector()
+
+    result = _process_one_gdrive_file(
+        drive_file,
+        _folder_spec(),
+        client=client,
+        embedder=_Embedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="req",
+        skipped=[],
+        warning_collector=collector,
+        warning_source_id="FOLDER",
+        durable_retry=True,
+    )
+
+    assert result == (0, 0)
+    assert collector.snapshot("gdrive", "FOLDER").reasons == {"pdf_download_failed": 1}
+    assert repo.retry_records[0]["reason"] == "pdf_download_failed"
+    assert repo.upserts == []
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_reason"),
+    [
+        ("extract", "pdf_extract_failed"),
+        ("empty", "pdf_empty_text"),
+    ],
+)
+def test_pdf_extract_and_empty_text_are_warnings_and_durable_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+    expected_reason: str,
+) -> None:
+    import teamagent.ingest.pdf_extract as pdf_extract
+
+    drive_file = replace(
+        _file("PDF-CONTENT-FAIL", b"%PDF-fake"),
+        name="confidential.pdf",
+        mime_type="application/pdf",
+    )
+    repo = _Repository()
+    client = MagicMock()
+    client.list_permissions.return_value = [_owner_permission()]
+    client.download_file_bytes.return_value = b"%PDF-fake"
+    if failure_mode == "extract":
+
+        def _raise_extract_error(data: bytes, **kwargs: Any) -> list[tuple[int, str]]:
+            raise ValueError("malformed PDF")
+
+        monkeypatch.setattr(pdf_extract, "extract_pdf_pages", _raise_extract_error)
+    else:
+        monkeypatch.setattr(pdf_extract, "extract_pdf_pages", lambda data, **kwargs: [])
+    collector = _IngestWarningCollector()
+
+    result = _process_one_gdrive_file(
+        drive_file,
+        _folder_spec(),
+        client=client,
+        embedder=_Embedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="req",
+        skipped=[],
+        warning_collector=collector,
+        warning_source_id="FOLDER",
+        durable_retry=True,
+    )
+
+    assert result == (0, 0)
+    assert collector.snapshot("gdrive", "FOLDER").reasons == {expected_reason: 1}
+    assert repo.retry_records[0]["reason"] == expected_reason
+    assert repo.upserts == []
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_reason"),
+    [
+        ("download", "pdf_download_failed"),
+        ("extract", "pdf_extract_failed"),
+        ("empty", "pdf_empty_text"),
+    ],
+)
+def test_shared_drive_pdf_failures_are_connector_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+    expected_reason: str,
+) -> None:
+    import teamagent.ingest.pdf_extract as pdf_extract
+
+    drive_file = replace(
+        _file("SHARED-PDF-FAIL", b"%PDF-fake"),
+        name="confidential.pdf",
+        mime_type="application/pdf",
+    )
+    client = MagicMock()
+    client.list_shared_drives.return_value = [SharedDrive(id="DRIVE", name="drive")]
+    client.walk_files_recursive.return_value = [drive_file]
+    client.list_permissions.return_value = [_owner_permission()]
+    if failure_mode == "download":
+        client.download_file_bytes.side_effect = TimeoutError("temporary")
+    else:
+        client.download_file_bytes.return_value = b"%PDF-fake"
+        if failure_mode == "extract":
+
+            def _raise_extract_error(data: bytes, **kwargs: Any) -> list[tuple[int, str]]:
+                raise ValueError("malformed PDF")
+
+            monkeypatch.setattr(pdf_extract, "extract_pdf_pages", _raise_extract_error)
+        else:
+            monkeypatch.setattr(pdf_extract, "extract_pdf_pages", lambda data, **kwargs: [])
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    collector = _IngestWarningCollector()
+
+    result = _ingest_shared_drives_crawl(
+        SharedDriveCrawlSpec(enabled=True, sales_relevance_filter=False),
+        embedder=_Embedder(),
+        repository=_Repository(),  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="req",
+        warning_collector=collector,
+    )
+
+    assert result == (0, 0)
+    assert collector.snapshot("shared_drives", "shared_drives").reasons == {expected_reason: 1}
+
+
 def test_shared_drive_known_invalid_is_observed_and_suppressed_before_acl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broken = b"PK\x03\x04" + (b"x" * 64)
     drive_file = _file("SHARED-KNOWN", broken)
-    repo = _Repository(known={("SHARED-KNOWN", str(drive_file.md5_checksum), len(broken))})
+    repo = _Repository(
+        known={
+            (
+                "SHARED-KNOWN",
+                str(drive_file.md5_checksum),
+                len(broken),
+                drive_file.mime_type,
+                OFFICE_VALIDATOR_SCHEMA_VERSION,
+            )
+        }
+    )
     client = MagicMock()
     client.list_shared_drives.return_value = [SharedDrive(id="DRIVE", name="drive")]
     client.walk_files_recursive.return_value = [drive_file]
@@ -336,7 +692,17 @@ def test_incremental_cursor_records_success_with_warnings_metadata(
     monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
     broken = b"PK\x03\x04" + (b"x" * 64)
     drive_file = _file("INCREMENTAL-KNOWN", broken)
-    repo = _Repository(known={("INCREMENTAL-KNOWN", str(drive_file.md5_checksum), len(broken))})
+    repo = _Repository(
+        known={
+            (
+                "INCREMENTAL-KNOWN",
+                str(drive_file.md5_checksum),
+                len(broken),
+                drive_file.mime_type,
+                OFFICE_VALIDATOR_SCHEMA_VERSION,
+            )
+        }
+    )
     client = MagicMock()
     client.list_files.return_value = ([drive_file], None)
     client.get_start_page_token.return_value = "NEXT"
@@ -408,6 +774,100 @@ def test_runner_records_connector_warning_outcome_and_notifies_ops(
     assert "corrupt_zip" in rendered_notification
     assert "file_id" not in rendered_notification
     assert "file_name" not in rendered_notification
+
+
+def test_reconciliation_keeps_three_pdfs_and_nine_missing_originals_as_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.IngestRunner._maybe_check_freshness",
+        lambda self, *, request_id: None,
+    )
+    repo = _Repository()
+    repo.reconciliation_counts = {
+        "unindexed_pdf": 3,
+        "source_original_missing": 9,
+    }
+    alerter = IngestOpsAlerter(webhook_url="https://hooks.slack.test/ingest")
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_Embedder(),
+        owner_email="bot@example.jp",
+        dry_run=False,
+        alerter=alerter,
+    )
+    sources = IngestSources(
+        version=1,
+        slack_channels=(),
+        gdrive_folders=(),
+        gsheets=(),
+    )
+
+    with patch("httpx.post") as mock_post:
+        mock_post.return_value.status_code = 200
+        result = runner.run(sources, kinds=["gdrive"])
+
+    assert result.outcome == "success_with_warnings"
+    assert result.by_kind["gdrive"].warning_reasons == {
+        "unindexed_pdf": 3,
+        "source_original_missing": 9,
+    }
+    assert repo.connector_runs == [
+        {
+            "request_id": repo.connector_runs[0]["request_id"],
+            "source_kind": "gdrive",
+            "source_id": "__reconciliation__",
+            "outcome": "success_with_warnings",
+            "documents_upserted": 0,
+            "chunks_inserted": 0,
+            "warning_reasons": {
+                "unindexed_pdf": 3,
+                "source_original_missing": 9,
+            },
+            "suppressed_retry_count": 0,
+            "error": None,
+        }
+    ]
+    notification = str(mock_post.call_args.kwargs["json"])
+    assert "unindexed_pdf" in notification
+    assert "source_original_missing" in notification
+    assert "file_id" not in notification
+    assert "title" not in notification.lower()
+    assert "customer" not in notification.lower()
+
+
+def test_normal_no_change_run_remains_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_change_handler(spec: Any, **kwargs: Any) -> tuple[int, int]:
+        return 0, 0
+
+    monkeypatch.setattr("teamagent.ingest.pipeline._ingest_gdrive_folder", no_change_handler)
+    monkeypatch.setattr(
+        "teamagent.ingest.pipeline.IngestRunner._maybe_check_freshness",
+        lambda self, *, request_id: None,
+    )
+    repo = _Repository()
+    runner = IngestRunner(
+        repository=repo,  # type: ignore[arg-type]
+        embedder=_Embedder(),
+        owner_email="bot@example.jp",
+        dry_run=False,
+        alerter=IngestOpsAlerter(webhook_url=None),
+    )
+    sources = IngestSources(
+        version=1,
+        slack_channels=(),
+        gdrive_folders=(_folder_spec(),),
+        gsheets=(),
+    )
+
+    result = runner.run(sources, kinds=["gdrive"])
+
+    assert result.outcome == "success"
+    assert result.by_kind["gdrive"].warning_reasons == {}
+    assert repo.connector_runs[0]["outcome"] == "success"
+    assert repo.connector_runs[0]["warning_reasons"] == {}
 
 
 def test_warning_notification_failure_is_fail_open_and_dry_run_is_noop() -> None:

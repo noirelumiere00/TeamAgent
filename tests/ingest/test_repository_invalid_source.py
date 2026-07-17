@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ class _Cursor:
         self._conn = conn
         self._row_factory = row_factory
         self._last_sql = ""
+        self.rowcount = 0
 
     def __enter__(self) -> _Cursor:
         return self
@@ -27,6 +30,7 @@ class _Cursor:
         self._conn.executed.append((sql, params, self._row_factory))
         if self._conn.raise_table and self._conn.raise_table in sql:
             raise RuntimeError("relation unavailable")
+        self.rowcount = self._conn.rowcount
 
     def fetchone(self) -> Any:
         if "FROM ingest_source_health" in self._last_sql:
@@ -41,6 +45,13 @@ class _Cursor:
             return {"id": "document-uuid"}
         return None
 
+    def fetchall(self) -> list[dict[str, Any]]:
+        if "UPDATE ingest_source_retries AS retry" in self._last_sql:
+            return list(self._conn.retry_rows)
+        if "FROM ingest_reconciliation_gaps" in self._last_sql:
+            return list(self._conn.reconciliation_rows)
+        return []
+
 
 class _Connection:
     def __init__(
@@ -49,10 +60,16 @@ class _Connection:
         invalid_reason: str | None = None,
         has_content: bool = False,
         raise_table: str | None = None,
+        retry_rows: list[dict[str, Any]] | None = None,
+        reconciliation_rows: list[dict[str, Any]] | None = None,
+        rowcount: int = 1,
     ) -> None:
         self.invalid_reason = invalid_reason
         self.has_content = has_content
         self.raise_table = raise_table
+        self.retry_rows = retry_rows or []
+        self.reconciliation_rows = reconciliation_rows or []
+        self.rowcount = rowcount
         self.executed: list[tuple[str, Any, Any]] = []
 
     def cursor(self, *, row_factory: Any = None) -> _Cursor:
@@ -110,10 +127,27 @@ def test_find_invalid_source_uses_exact_fingerprint_and_dict_row() -> None:
     repo, pgvector = _repo(conn)
     md5 = "0123456789abcdef0123456789abcdef"
 
-    assert repo.find_invalid_source_reason("gdrive", "FILE1", md5, 52_427_482) == "corrupt_zip"
+    assert (
+        repo.find_invalid_source_reason(
+            "gdrive",
+            "FILE1",
+            md5,
+            52_427_482,
+            "application/test",
+            "ooxml-safe-v2",
+        )
+        == "corrupt_zip"
+    )
     sql, params, row_factory = conn.executed[0]
     assert "status = 'invalid_source'" in sql
-    assert params == ("gdrive", "FILE1", md5, 52_427_482)
+    assert params == (
+        "gdrive",
+        "FILE1",
+        md5,
+        52_427_482,
+        "application/test",
+        "ooxml-safe-v2",
+    )
     assert row_factory is not None
     assert pgvector.connection_calls[0]["user_role"] == "admin"
 
@@ -125,7 +159,17 @@ def test_source_health_old_schema_fails_open_without_logging_full_id() -> None:
     md5 = "0123456789abcdef0123456789abcdef"
 
     with capture_logs() as logs:
-        assert repo.find_invalid_source_reason("gdrive", external_id, md5, 10) is None
+        assert (
+            repo.find_invalid_source_reason(
+                "gdrive",
+                external_id,
+                md5,
+                10,
+                "application/test",
+                "ooxml-safe-v2",
+            )
+            is None
+        )
         assert (
             repo.record_invalid_source(
                 "gdrive",
@@ -134,6 +178,7 @@ def test_source_health_old_schema_fails_open_without_logging_full_id() -> None:
                 size_bytes=10,
                 reason="corrupt_zip",
                 mime_type="application/test",
+                validator_schema_version="ooxml-safe-v2",
                 request_id="req",
             )
             is False
@@ -155,6 +200,7 @@ def test_record_invalid_source_upserts_observation_count() -> None:
             size_bytes=123,
             reason="corrupt_zip",
             mime_type="application/test",
+            validator_schema_version="ooxml-safe-v2",
             request_id="req",
         )
         is True
@@ -162,7 +208,169 @@ def test_record_invalid_source_upserts_observation_count() -> None:
     sql, params, _ = conn.executed[0]
     assert "INSERT INTO ingest_source_health" in sql
     assert "observation_count = ingest_source_health.observation_count + 1" in sql
-    assert params[:6] == ("gdrive", "FILE1", md5, 123, "corrupt_zip", "application/test")
+    assert params[:7] == (
+        "gdrive",
+        "FILE1",
+        md5,
+        123,
+        "corrupt_zip",
+        "application/test",
+        "ooxml-safe-v2",
+    )
+
+
+def test_source_health_unavailable_cache_reprobes_after_backoff() -> None:
+    conn = _Connection(raise_table="ingest_source_health", invalid_reason="corrupt_zip")
+    repo, _ = _repo(conn)
+    md5 = "0123456789abcdef0123456789abcdef"
+    args = ("gdrive", "FILE1", md5, 123, "application/test", "ooxml-safe-v2")
+
+    assert repo.find_invalid_source_reason(*args) is None
+    assert len(conn.executed) == 1
+    conn.raise_table = None
+    assert repo.find_invalid_source_reason(*args) is None
+    assert len(conn.executed) == 1
+
+    repo._source_health_retry_after = 0.0
+    assert repo.find_invalid_source_reason(*args) == "corrupt_zip"
+    assert len(conn.executed) == 2
+
+
+def test_claim_due_retries_uses_skip_locked_and_maps_dict_rows() -> None:
+    conn = _Connection(
+        retry_rows=[
+            {
+                "external_id": "FILE1",
+                "md5_checksum": "0123456789abcdef0123456789abcdef",
+                "size_bytes": 123,
+                "mime_type": "application/test",
+                "validator_schema_version": "ooxml-safe-v2",
+                "attempt_count": 2,
+                "reason": "office_download_failed",
+            }
+        ]
+    )
+    repo, pgvector = _repo(conn)
+
+    retries = repo.claim_due_source_retries(
+        source_kind="gdrive",
+        source_id="FOLDER1",
+        request_id="req-2",
+    )
+
+    assert len(retries) == 1
+    assert retries[0].external_id == "FILE1"
+    assert retries[0].attempt_count == 2
+    sql, params, row_factory = conn.executed[0]
+    assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "lease_expires_at" in sql
+    assert params[:4] == ("gdrive", "FOLDER1", 1000, "req-2")
+    assert row_factory is not None
+    assert pgvector.connection_calls[0]["user_role"] == "admin"
+
+
+def test_record_retry_is_request_idempotent_and_has_exponential_backoff() -> None:
+    conn = _Connection()
+    repo, _ = _repo(conn)
+    md5 = "0123456789abcdef0123456789abcdef"
+
+    assert repo.record_source_retry(
+        source_kind="gdrive",
+        source_id="FOLDER1",
+        source_type="gdrive",
+        external_id="FILE1",
+        md5_checksum=md5,
+        size_bytes=123,
+        mime_type="application/test",
+        validator_schema_version="ooxml-safe-v2",
+        reason="office_download_failed",
+        request_id="req",
+    )
+
+    sql, params, _ = conn.executed[0]
+    assert "last_request_id = EXCLUDED.last_request_id" in sql
+    assert "ingest_source_retries.status = 'resolved'" in sql
+    assert "IS NOT DISTINCT FROM EXCLUDED.md5_checksum" in sql
+    assert "power(" in sql
+    assert "lease_owner = NULL" in sql
+    assert params[:10] == (
+        "gdrive",
+        "FOLDER1",
+        "gdrive",
+        "FILE1",
+        md5,
+        123,
+        "application/test",
+        "ooxml-safe-v2",
+        "office_download_failed",
+        "req",
+    )
+
+
+def test_resolve_retry_updates_status_without_delete() -> None:
+    conn = _Connection(rowcount=1)
+    repo, _ = _repo(conn)
+    md5 = "0123456789abcdef0123456789abcdef"
+
+    assert repo.resolve_source_retry(
+        source_kind="gdrive",
+        source_id="FOLDER1",
+        source_type="gdrive",
+        external_id="FILE1",
+        md5_checksum=md5,
+        size_bytes=123,
+        mime_type="application/test",
+        validator_schema_version="ooxml-safe-v2",
+        request_id="req",
+    )
+    sql, _, _ = conn.executed[0]
+    assert "UPDATE ingest_source_retries" in sql
+    assert "status = 'resolved'" in sql
+    assert "DELETE" not in sql
+
+
+def test_reconciliation_returns_counts_only_and_resolves_by_sha256_ref() -> None:
+    conn = _Connection(
+        reconciliation_rows=[
+            {"gap_kind": "unindexed_pdf", "gap_count": 3},
+            {"gap_kind": "source_original_missing", "gap_count": 9},
+        ],
+        rowcount=1,
+    )
+    repo, _ = _repo(conn)
+
+    assert repo.unresolved_reconciliation_counts("gdrive") == {
+        "unindexed_pdf": 3,
+        "source_original_missing": 9,
+    }
+    assert (
+        repo.resolve_reconciliation_gaps(
+            source_kind="gdrive",
+            external_id="SENSITIVE-DRIVE-ID",
+            request_id="req",
+        )
+        == 1
+    )
+    count_sql, _, _ = conn.executed[0]
+    resolve_sql, resolve_params, _ = conn.executed[1]
+    assert "external_id" not in count_sql
+    assert "source_ref_hashes" in resolve_sql
+    assert "SENSITIVE-DRIVE-ID" not in resolve_params
+    assert resolve_params[-1] == hashlib.sha256(b"SENSITIVE-DRIVE-ID").hexdigest()
+
+
+def test_reconciliation_unavailable_is_warning_and_reprobes() -> None:
+    conn = _Connection(raise_table="ingest_reconciliation_gaps")
+    repo, _ = _repo(conn)
+
+    assert repo.unresolved_reconciliation_counts("gdrive") == {"reconciliation_unavailable": 1}
+    assert repo.unresolved_reconciliation_counts("gdrive") == {"reconciliation_unavailable": 1}
+    assert len(conn.executed) == 1
+
+    conn.raise_table = None
+    conn.reconciliation_rows = [{"gap_kind": "unindexed_pdf", "gap_count": 3}]
+    repo._reconciliation_retry_after = 0.0
+    assert repo.unresolved_reconciliation_counts("gdrive") == {"unindexed_pdf": 3}
 
 
 def test_record_connector_run_supports_success_with_warnings_and_old_schema() -> None:
@@ -242,9 +450,32 @@ def test_migration_is_additive_and_has_explicit_rollback() -> None:
     sql = (root / "infra/migrations/0019_ingest_source_health.sql").read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS ingest_source_health" in sql
     assert "CREATE TABLE IF NOT EXISTS ingest_connector_runs" in sql
+    assert "CREATE TABLE IF NOT EXISTS ingest_source_retries" in sql
+    assert "CREATE TABLE IF NOT EXISTS ingest_reconciliation_gaps" in sql
     assert "success_with_warnings" in sql
     assert "ingest_source_health FORCE ROW LEVEL SECURITY" in sql
     assert "ingest_connector_runs FORCE ROW LEVEL SECURITY" in sql
     assert "app.user_role" in sql
     assert "DROP TABLE IF EXISTS ingest_source_health" in sql
+    assert "REVOKE DELETE" in sql
+    assert "validator_schema_version" in sql
+    assert "mime_type, validator_schema_version" in sql
+    assert "FOR UPDATE SKIP LOCKED" not in sql
     assert "ALTER TYPE" not in sql
+    assert sql.count("'audit-20260717-unindexed-pdf-") == 3
+    assert sql.count("'audit-20260717-source-original-missing-") == 9
+    assert len(re.findall(r"'[0-9a-f]{64}'", sql)) == 19
+
+
+def test_upgrade_migration_preserves_legacy_rows_and_forces_revalidation() -> None:
+    root = Path(__file__).resolve().parents[2]
+    sql = (root / "infra/migrations/0020_ingest_source_retry_upgrade.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "ooxml-legacy-v1" in sql
+    assert "DROP CONSTRAINT IF EXISTS ingest_source_health_payload_unique" in sql
+    assert "ingest_source_health_fingerprint_unique" in sql
+    assert "REVOKE DELETE" in sql
+    assert "ON CONFLICT (gap_key) DO NOTHING" in sql
+    assert sql.count("'audit-20260717-unindexed-pdf-") == 3
+    assert sql.count("'audit-20260717-source-original-missing-") == 9

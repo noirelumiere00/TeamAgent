@@ -1,42 +1,67 @@
--- 0019 invalid source observability / durable retry / reconciliation outcomes
+-- 0020 upgrade path for databases that already applied the original 0019 checksum.
 --
--- Additive-only migration. Existing enums and tables are not changed so old readers keep
--- working during a rolling deploy. Rollback (observation/retry data loss only):
+-- This migration is intentionally idempotent. Existing 0019 fingerprints are assigned the
+-- legacy validator generation, so the current validator re-checks them instead of suppressing.
+-- Rollback (new retry/reconciliation data loss only):
 --   DROP TABLE IF EXISTS ingest_reconciliation_gaps;
 --   DROP TABLE IF EXISTS ingest_source_retries;
---   DROP TABLE IF EXISTS ingest_connector_runs;
---   DROP TABLE IF EXISTS ingest_source_health;
+-- The fingerprint columns/constraint should remain on rollback because dropping them would
+-- collapse distinct validator observations and cannot be losslessly reversed.
 
-CREATE TABLE IF NOT EXISTS ingest_source_health (
-    id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source_type               TEXT NOT NULL,
-    external_id               TEXT NOT NULL,
-    md5_checksum              TEXT NOT NULL
-                              CHECK (md5_checksum ~ '^[0-9a-f]{32}$'),
-    size_bytes                BIGINT NOT NULL CHECK (size_bytes >= 0),
-    mime_type                 TEXT NOT NULL,
-    validator_schema_version  TEXT NOT NULL,
-    status                    TEXT NOT NULL DEFAULT 'invalid_source'
-                              CHECK (status IN ('invalid_source')),
-    reason                    TEXT NOT NULL CHECK (reason <> ''),
-    first_seen_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_seen_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-    observation_count         BIGINT NOT NULL DEFAULT 1 CHECK (observation_count >= 1),
-    last_request_id           TEXT,
-    metadata                  JSONB NOT NULL DEFAULT '{}'::jsonb,
-    CONSTRAINT ingest_source_health_mime_type_nonempty
-        CHECK (mime_type <> ''),
-    CONSTRAINT ingest_source_health_validator_schema_nonempty
-        CHECK (validator_schema_version <> ''),
-    CONSTRAINT ingest_source_health_fingerprint_unique
-        UNIQUE (
-            source_type, external_id, md5_checksum, size_bytes,
-            mime_type, validator_schema_version
-        )
-);
+ALTER TABLE ingest_source_health
+    ADD COLUMN IF NOT EXISTS validator_schema_version TEXT;
 
-CREATE INDEX IF NOT EXISTS ingest_source_health_status_seen_idx
-    ON ingest_source_health (status, last_seen_at DESC);
+UPDATE ingest_source_health
+SET validator_schema_version = 'ooxml-legacy-v1'
+WHERE validator_schema_version IS NULL OR validator_schema_version = '';
+
+UPDATE ingest_source_health
+SET mime_type = 'application/octet-stream'
+WHERE mime_type IS NULL OR mime_type = '';
+
+ALTER TABLE ingest_source_health
+    ALTER COLUMN mime_type SET NOT NULL,
+    ALTER COLUMN validator_schema_version SET NOT NULL;
+
+ALTER TABLE ingest_source_health
+    DROP CONSTRAINT IF EXISTS ingest_source_health_payload_unique,
+    DROP CONSTRAINT IF EXISTS ingest_source_health_fingerprint_unique;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'ingest_source_health'::regclass
+          AND conname = 'ingest_source_health_mime_type_nonempty'
+    ) THEN
+        ALTER TABLE ingest_source_health
+            ADD CONSTRAINT ingest_source_health_mime_type_nonempty
+            CHECK (mime_type <> '') NOT VALID;
+        ALTER TABLE ingest_source_health
+            VALIDATE CONSTRAINT ingest_source_health_mime_type_nonempty;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'ingest_source_health'::regclass
+          AND conname = 'ingest_source_health_validator_schema_nonempty'
+    ) THEN
+        ALTER TABLE ingest_source_health
+            ADD CONSTRAINT ingest_source_health_validator_schema_nonempty
+            CHECK (validator_schema_version <> '') NOT VALID;
+        ALTER TABLE ingest_source_health
+            VALIDATE CONSTRAINT ingest_source_health_validator_schema_nonempty;
+    END IF;
+END
+$$;
+
+ALTER TABLE ingest_source_health
+    ADD CONSTRAINT ingest_source_health_fingerprint_unique
+    UNIQUE (
+        source_type, external_id, md5_checksum, size_bytes,
+        mime_type, validator_schema_version
+    );
 
 CREATE TABLE IF NOT EXISTS ingest_source_retries (
     id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -91,38 +116,6 @@ CREATE TABLE IF NOT EXISTS ingest_reconciliation_gaps (
 CREATE INDEX IF NOT EXISTS ingest_reconciliation_gaps_status_kind_idx
     ON ingest_reconciliation_gaps (source_kind, status, gap_kind);
 
-CREATE TABLE IF NOT EXISTS ingest_connector_runs (
-    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    request_id              TEXT NOT NULL,
-    source_kind             TEXT NOT NULL,
-    source_id               TEXT NOT NULL,
-    outcome                 TEXT NOT NULL
-                            CHECK (outcome IN ('success', 'success_with_warnings', 'failed')),
-    documents_upserted      BIGINT NOT NULL DEFAULT 0 CHECK (documents_upserted >= 0),
-    chunks_inserted         BIGINT NOT NULL DEFAULT 0 CHECK (chunks_inserted >= 0),
-    warning_count           BIGINT NOT NULL DEFAULT 0 CHECK (warning_count >= 0),
-    warning_reasons         JSONB NOT NULL DEFAULT '{}'::jsonb,
-    suppressed_retry_count  BIGINT NOT NULL DEFAULT 0 CHECK (suppressed_retry_count >= 0),
-    last_error              TEXT,
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT ingest_connector_runs_request_source_unique
-        UNIQUE (request_id, source_kind, source_id)
-);
-
-CREATE INDEX IF NOT EXISTS ingest_connector_runs_outcome_completed_idx
-    ON ingest_connector_runs (outcome, completed_at DESC);
-
--- Operational fingerprints/source IDs are available only on an admin-GUC connection.
--- IngestRepository._ops_connection() always sets app.user_role='admin'.
-ALTER TABLE ingest_source_health ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ingest_source_health FORCE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS ingest_source_health_admin ON ingest_source_health;
-CREATE POLICY ingest_source_health_admin ON ingest_source_health
-    FOR ALL
-    USING (current_setting('app.user_role', true) = 'admin')
-    WITH CHECK (current_setting('app.user_role', true) = 'admin');
-
 ALTER TABLE ingest_source_retries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ingest_source_retries FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS ingest_source_retries_admin ON ingest_source_retries;
@@ -139,28 +132,15 @@ CREATE POLICY ingest_reconciliation_gaps_admin ON ingest_reconciliation_gaps
     USING (current_setting('app.user_role', true) = 'admin')
     WITH CHECK (current_setting('app.user_role', true) = 'admin');
 
-ALTER TABLE ingest_connector_runs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ingest_connector_runs FORCE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS ingest_connector_runs_admin ON ingest_connector_runs;
-CREATE POLICY ingest_connector_runs_admin ON ingest_connector_runs
-    FOR ALL
-    USING (current_setting('app.user_role', true) = 'admin')
-    WITH CHECK (current_setting('app.user_role', true) = 'admin');
-
--- migration 0002 grants broad default table privileges. Revoke destructive privileges
--- explicitly before restoring the minimal DML set used by the worker.
 REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON ingest_source_health FROM teamagent_app;
+REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON ingest_connector_runs FROM teamagent_app;
 REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON ingest_source_retries FROM teamagent_app;
 REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON ingest_reconciliation_gaps FROM teamagent_app;
-REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON ingest_connector_runs FROM teamagent_app;
 GRANT SELECT, INSERT, UPDATE ON ingest_source_health TO teamagent_app;
+GRANT SELECT, INSERT, UPDATE ON ingest_connector_runs TO teamagent_app;
 GRANT SELECT, INSERT, UPDATE ON ingest_source_retries TO teamagent_app;
 GRANT SELECT, INSERT, UPDATE ON ingest_reconciliation_gaps TO teamagent_app;
-GRANT SELECT, INSERT, UPDATE ON ingest_connector_runs TO teamagent_app;
 
--- Read-only audit baseline, represented only by non-reversible Drive-ID hashes. No title,
--- customer name, raw Drive ID, or content is stored here. A successful ingest of a matching
--- source resolves its row; missing originals stay unresolved until an operator verifies repair.
 INSERT INTO ingest_reconciliation_gaps
     (gap_key, source_kind, gap_kind, source_ref_hashes, metadata)
 VALUES
@@ -255,12 +235,3 @@ VALUES
         '{"audit_date":"2026-07-17"}'::jsonb
     )
 ON CONFLICT (gap_key) DO NOTHING;
-
-COMMENT ON TABLE ingest_source_health IS
-    'Invalid source fingerprints; Office invalid payloads never replace documents/chunks.';
-COMMENT ON TABLE ingest_source_retries IS
-    'Leased per-source durable retries that survive incremental cursor advancement.';
-COMMENT ON TABLE ingest_reconciliation_gaps IS
-    'Unresolved coverage gaps keyed only by non-reversible source references.';
-COMMENT ON TABLE ingest_connector_runs IS
-    'Per-source ingest result including success_with_warnings for legacy-reader compatibility.';

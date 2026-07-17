@@ -355,6 +355,34 @@ def test_download_file_bytes_classifies_html_response(
     }
 
 
+def test_download_file_bytes_enforces_hard_cap_before_buffer_growth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeDownloader:
+        def __init__(self, stream: Any, request: Any, *, chunksize: int) -> None:
+            self._stream = stream
+
+        def next_chunk(self, *, num_retries: int) -> tuple[None, bool]:
+            self._stream.write(b"123456")
+            return None, True
+
+    monkeypatch.setattr("googleapiclient.http.MediaIoBaseDownload", _FakeDownloader)
+    client = GDriveClient(service=FakeDriveService())
+
+    with pytest.raises(GDriveDownloadContentError) as raised:
+        client.download_file_bytes(file_id="F1", request_id="r", max_bytes=5)
+
+    assert raised.value.category == "download_too_large"
+    assert raised.value.actual_bytes == 6
+
+
+def test_download_file_bytes_rejects_nonpositive_hard_cap() -> None:
+    with pytest.raises(ValueError, match="max_bytes"):
+        GDriveClient(service=FakeDriveService()).download_file_bytes(
+            file_id="F1", request_id="r", max_bytes=0
+        )
+
+
 # -----------------------------------------------------------
 # extract_acl_emails
 # -----------------------------------------------------------
