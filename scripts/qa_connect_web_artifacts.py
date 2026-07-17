@@ -96,9 +96,7 @@ _EMBEDDED_FONT_RE = re.compile(
 _FB_SECTION_RE = re.compile(
     r"^##\s+営業FB時系列（新しい順）\s*$([\s\S]*?)(?=^##\s|\Z)", re.MULTILINE
 )
-_FB_HEADING_RE = re.compile(
-    r"^###\s+(?:-{2,}.*|\d{4}-\d{2}-\d{2}(?=[T\s]|$).*)$", re.MULTILINE
-)
+_FB_HEADING_RE = re.compile(r"^###\s+(?:-{2,}.*|\d{4}-\d{2}-\d{2}(?=[T\s]|$).*)$", re.MULTILINE)
 _FB_EVENT_KEYS = frozenset({"d", "src", "by", "ph", "bant", "menu", "pos", "neg", "next"})
 
 
@@ -1664,8 +1662,7 @@ def _safe_result(
         },
         "client_timelines": {
             "ok": not any(
-                key.startswith(("client_", "html_client_timeline_"))
-                for key in clean_violations
+                key.startswith(("client_", "html_client_timeline_")) for key in clean_violations
             ),
             "declared_fb_count": content.client_declared_fb_count,
             "source_heading_count": content.client_timeline_heading_count,
