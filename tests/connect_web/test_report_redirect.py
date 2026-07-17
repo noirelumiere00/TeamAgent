@@ -11,7 +11,11 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from teamagent.connect_web.app import create_app
+from teamagent.connect_web.app import (
+    _MAX_SHORTLINK_TOKEN_CHARS,
+    _verify_report_token_with_remaining_ttl,
+    create_app,
+)
 
 _BUCKET = "teamagent-dev-raw-files"
 _KEY = "vseo-reports/abc123.html"
@@ -95,6 +99,67 @@ def test_shortlink_presign_is_short_lived(
     monkeypatch.setattr(rp, "presign_get", _fake)
     client.get(f"/r/{encode_report_token(_BUCKET, _KEY)}", follow_redirects=False)
     assert captured.get("expires_s") == 900  # 短命（7日 presigned を毎回配らない）
+
+
+def test_report_verifier_returns_positive_remaining_ttl_with_exclusive_expiry(
+    client: TestClient,
+) -> None:
+    from teamagent.adapters.report_link_token import encode_report_token
+
+    issued_at = 2_000_000_000
+    token = encode_report_token(_BUCKET, _KEY, now=issued_at, ttl_s=2)
+    assert token is not None
+    assert _verify_report_token_with_remaining_ttl(token, now=issued_at + 1) == (
+        _BUCKET,
+        _KEY,
+        "",
+        1,
+    )
+    assert _verify_report_token_with_remaining_ttl(token, now=issued_at + 2) is None
+
+
+def test_near_expiry_presign_is_capped_to_token_remaining_seconds(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import teamagent.adapters.report_publish as rp
+    import teamagent.connect_web.app as connect_web_app
+    from teamagent.adapters.report_link_token import encode_report_token
+
+    issued_at = 2_000_000_000
+    token = encode_report_token(_BUCKET, _KEY, now=issued_at, ttl_s=2)
+    assert token is not None
+    captured: dict[str, object] = {}
+
+    def _fake_presign(bucket: str, key: str, **kwargs: object) -> str:
+        captured.update(kwargs)
+        return "https://example.test/presigned"
+
+    original_verify = connect_web_app._verify_report_token_with_remaining_ttl
+    monkeypatch.setattr(
+        connect_web_app,
+        "_verify_report_token_with_remaining_ttl",
+        lambda rid: original_verify(rid, now=issued_at + 1),
+    )
+    monkeypatch.setattr(rp, "presign_get", _fake_presign)
+
+    response = client.get(f"/r/{token}", follow_redirects=False)
+    assert response.status_code == 302
+    assert captured.get("expires_s") == 1
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "A" * (_MAX_SHORTLINK_TOKEN_CHARS + 1),
+        "日本語.署名",
+        "not-base64.***",
+    ],
+)
+def test_report_verifier_rejects_huge_or_malformed_tokens_without_raising(
+    malformed: str,
+) -> None:
+    assert _verify_report_token_with_remaining_ttl(malformed, now=2_000_000_000) is None
 
 
 def test_invalid_token_404(client: TestClient) -> None:

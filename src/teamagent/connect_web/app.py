@@ -11,6 +11,7 @@ AI 要約 + 結果カードを返す。👍/👎 は search_feedback テーブ�
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import hashlib
 import html
@@ -97,6 +98,58 @@ def build_uvicorn_log_config() -> dict[str, Any]:
 # トークン TTL(7日)＋この値 が実効的な閲覧窓の上限＝旧 presigned(7日)と実質同等に抑える
 # （長命 presigned を毎回配ると窓が token TTL＋7日 に伸びるため）。
 _SHORTLINK_PRESIGN_TTL_S = 900
+_MAX_SHORTLINK_TOKEN_CHARS = 16_384
+
+
+def _strict_urlsafe_b64decode(value: str) -> bytes | None:
+    try:
+        encoded = value.encode("ascii")
+        padding = b"=" * (-len(encoded) % 4)
+        return base64.b64decode(encoded + padding, altchars=b"-_", validate=True)
+    except (UnicodeError, ValueError):
+        return None
+
+
+def _verify_report_token_with_remaining_ttl(
+    rid: str,
+    *,
+    now: int | None = None,
+) -> tuple[str, str, str, int] | None:
+    """Verify a report token and return bucket/key/region plus positive remaining seconds.
+
+    The existing report-token verifier remains the sole signature/allowlist authority. Only after
+    it succeeds do we read the expiry from the same authenticated body. Bounding the token before
+    either decode prevents malformed oversized paths from causing unbounded work here.
+    """
+    if type(rid) is not str or not rid or len(rid) > _MAX_SHORTLINK_TOKEN_CHARS:
+        return None
+
+    from teamagent.adapters.report_link_token import decode_report_token
+    from teamagent.hmac_keyring import coerce_epoch_seconds, validate_epoch_seconds
+
+    current = coerce_epoch_seconds(now)
+    if current is None:
+        return None
+    decoded = decode_report_token(rid, now=current)
+    if decoded is None:
+        return None
+    try:
+        body_b64, separator, _signature_b64 = rid.partition(".")
+        if not separator:
+            return None
+        raw = _strict_urlsafe_b64decode(body_b64)
+        if raw is None:
+            return None
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return None
+        expires = validate_epoch_seconds(payload.get("e"))
+    except Exception:
+        return None
+    if expires is None or expires <= current:
+        return None
+    bucket, key, region = decoded
+    return bucket, key, region, expires - current
 
 
 _APP_HTML_MISSING = (
@@ -3376,22 +3429,23 @@ def create_app(
         ログイン不要）。token 不正/失効/prefix・bucket 外は 404（fail-closed）。presigned は毎回
         再生成するため Cache-Control: no-store で中間キャッシュに期限切れURLを残さない。
         """
-        from teamagent.adapters.report_link_token import decode_report_token
         from teamagent.adapters.report_publish import presign_get
 
-        decoded = decode_report_token(rid)
+        decoded = _verify_report_token_with_remaining_ttl(rid)
         if decoded is None:
             return Response(
                 "リンクが無効か期限切れです。",
                 status_code=404,
                 media_type="text/plain; charset=utf-8",
             )
-        bucket, key, region = decoded
+        bucket, key, region, remaining_seconds = decoded
         url = presign_get(
             bucket,
             key,
             region=region or os.environ.get("AWS_REGION"),
-            expires_s=_SHORTLINK_PRESIGN_TTL_S,  # 短命（実効閲覧窓を token TTL 内に抑える）
+            # Presigned URL must never survive the capability token that authorized its creation.
+            # Token expiry is exclusive, and the verifier guarantees remaining_seconds >= 1.
+            expires_s=min(_SHORTLINK_PRESIGN_TTL_S, remaining_seconds),
         )
         if not url:
             return Response(

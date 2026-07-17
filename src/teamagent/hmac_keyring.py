@@ -27,13 +27,17 @@ then cut over to the new primary. The previous key is eligible exactly while::
 Thus an old token issued immediately before the allowed issuer cutover remains verifiable for its
 full bounded lifetime. The fixed ``T0`` survives process restarts, and the previous key is removed
 at the deterministic exclusive deadline even if its environment variables remain deployed. A
-future ``T0`` is invalid. The former deploy-time ``...PREVIOUS_SECRET_VALID_UNTIL`` variables are
-not part of this contract and are not used.
+future ``T0`` is accepted only within ``HMAC_MAX_FUTURE_T0_SKEW_S`` of the process clock. A
+process-local high-water mark prevents clock rollback or a ``T0`` reset from re-enabling an expired
+previous key. IaC must persist ``T0`` immutably and atomically remove the previous-key/T0 pair;
+``validate_hmac_rotation_transition`` is the secret-free preflight contract for that boundary. The
+former deploy-time ``...PREVIOUS_SECRET_VALID_UNTIL`` variables are not part of this contract.
 
 Primary keys that look like datastore DSNs or Slack credentials, equal any credential environment
-variable visible to the process, or overlap another HMAC purpose are rejected. A credential-derived
-legacy value is allowed only as the explicitly bounded previous verification key so old tokens can
-migrate; it is never an issuance fallback. In particular, there is no ``DATABASE_URL`` fallback.
+variable (or any sufficiently long non-HMAC environment value) visible to the process, or overlap
+another HMAC purpose are rejected. A legacy value is accepted byte-for-byte only by the explicitly
+bounded previous verification path so old tokens can migrate; it is never an issuance fallback or
+subject to primary-key validation. In particular, there is no ``DATABASE_URL`` fallback.
 """
 
 from __future__ import annotations
@@ -41,8 +45,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass
+from typing import Any, SupportsIndex, TypedDict
 
 MAIL_ACTION_HMAC_SECRET = "MAIL_ACTION_HMAC_SECRET"
 MAIL_ACTION_HMAC_PREVIOUS_SECRET = "MAIL_ACTION_HMAC_PREVIOUS_SECRET"
@@ -57,9 +63,13 @@ REPORT_LINK_TTL_S = "REPORT_LINK_TTL_S"
 MAIL_ACTION_MAX_TOKEN_TTL_S = 60 * 60 * 24
 REPORT_LINK_MAX_TOKEN_TTL_S = 60 * 60 * 24 * 7
 HMAC_MAX_ROLLOUT_OVERLAP_S = 15 * 60
+# A verifier may observe IaC's T0 slightly before its local wall clock reaches T0. Keep this much
+# smaller than the rollout overlap: it is an explicit upper bound, not an unbounded grace period.
+HMAC_MAX_FUTURE_T0_SKEW_S = 5 * 60
 
 _MAX_UNIX_TIMESTAMP_S = 9_999_999_999
 _MIN_SECRET_BYTES = hashlib.sha256().digest_size
+_MAX_SECRET_BYTES = 4096
 _HMAC_CONFIGURATION_ENVS = frozenset(
     {
         MAIL_ACTION_HMAC_SECRET,
@@ -121,6 +131,15 @@ _DATASTORE_ENV_WORDS = frozenset(
         "SQLSERVER",
     }
 )
+_CREDENTIAL_RESOURCE_ENV_WORDS = frozenset(
+    {
+        "BROKER",
+        "CACHE",
+        "DATASOURCE",
+        "JDBC",
+        "WEBHOOK",
+    }
+)
 _DIRECT_CREDENTIAL_ENV_WORDS = frozenset(
     {
         "AUTH",
@@ -137,21 +156,28 @@ _DIRECT_CREDENTIAL_ENV_WORDS = frozenset(
         "TOKEN",
     }
 )
+_SLACK_CREDENTIAL_PREFIXES = (
+    "xoxb-",
+    "xoxp-",
+    "xoxs-",
+    "xoxa-",
+    "xoxr-",
+    "xoxe-",
+    "xapp-",
+)
 
 
 class HmacKeyConfigurationError(RuntimeError):
     """No safe purpose-specific primary key is available for issuance."""
 
 
-@dataclass(frozen=True, repr=False)
-class HmacKeyring:
-    """Hold one issuance key and all currently eligible verification keys."""
+class _HmacKeyringSecretSlots:
+    """Non-dataclass storage keeps key material out of dataclass serializers."""
 
-    _primary: bytes = field(repr=False)
-    _verification_keys: tuple[bytes, ...] = field(repr=False)
+    __slots__ = ("_primary", "_verification_keys")
 
-    def __repr__(self) -> str:
-        return "HmacKeyring(<redacted>)"
+    _primary: bytes
+    _verification_keys: tuple[bytes, ...]
 
     def sign(self, payload: bytes, *, digest_bytes: int) -> bytes:
         """Sign with the primary key only."""
@@ -168,6 +194,69 @@ class HmacKeyring:
             expected = hmac.new(key, payload, hashlib.sha256).digest()[:digest_bytes]
             matched |= int(hmac.compare_digest(expected, signature))
         return len(signature) == digest_bytes and bool(matched)
+
+
+@dataclass(frozen=True, repr=False, eq=False, slots=True)
+class HmacKeyring(_HmacKeyringSecretSlots):
+    """Hold one issuance key and all currently eligible verification keys.
+
+    Key material enters as ``InitVar`` values and is stored only in inherited slots. Consequently,
+    dataclass equality/hash generation never touches secrets and ``dataclasses.asdict`` has no
+    serializable fields. Equality and hashing retain object identity semantics.
+    """
+
+    _primary: InitVar[bytes]
+    _verification_keys: InitVar[tuple[bytes, ...]]
+
+    def __post_init__(self, _primary: bytes, _verification_keys: tuple[bytes, ...]) -> None:
+        object.__setattr__(self, "_primary", _primary)
+        object.__setattr__(self, "_verification_keys", _verification_keys)
+
+    def __repr__(self) -> str:
+        return "HmacKeyring(<redacted>)"
+
+    def __str__(self) -> str:
+        return "HmacKeyring(<redacted>)"
+
+    def __reduce_ex__(
+        self,
+        protocol: SupportsIndex,
+        /,
+    ) -> str | tuple[Any, ...]:
+        """Reject generic serialization rather than copying key material into a payload."""
+        del protocol
+        raise TypeError("HmacKeyring serialization is disabled")
+
+
+class HmacRotationContractResult(TypedDict):
+    """Secret-free, machine-readable IaC transition validation result."""
+
+    ok: bool
+    code: str
+    previous_deadline: int | None
+
+
+class _RotationRuntimeState:
+    """Process-local monotonic state for one purpose/previous-key generation."""
+
+    __slots__ = ("deadline", "expired", "high_water", "started_at")
+
+    def __init__(self, *, started_at: int, deadline: int, high_water: int) -> None:
+        self.started_at = started_at
+        self.deadline = deadline
+        self.high_water = high_water
+        self.expired = high_water >= deadline
+
+    def __repr__(self) -> str:
+        return "_RotationRuntimeState(<redacted>)"
+
+
+# A process-random keyed fingerprint lets the runtime recognize a previous-key generation without
+# retaining a dictionary key that is brute-forceable when the legacy value itself was short.
+_RUNTIME_FINGERPRINT_KEY = os.urandom(hashlib.sha256().digest_size)
+_rotation_runtime_states: dict[tuple[str, bytes], _RotationRuntimeState] = {}
+_purpose_clock_high_water: dict[str, int] = {}
+_rotation_runtime_lock = threading.Lock()
 
 
 def _parse_bounded_ascii_decimal(raw: object, *, minimum: int, maximum: int) -> int | None:
@@ -188,6 +277,122 @@ def _bounded_int(value: object, *, minimum: int, maximum: int) -> int | None:
     if type(value) is not int or value < minimum or value > maximum:
         return None
     return value
+
+
+def hmac_previous_key_deadline(rotation_started_at: object, max_token_ttl_s: object) -> int | None:
+    """Return the exclusive previous-key deadline for validated bounded inputs."""
+    started_at = _bounded_int(
+        rotation_started_at,
+        minimum=0,
+        maximum=_MAX_UNIX_TIMESTAMP_S,
+    )
+    max_ttl = _bounded_int(
+        max_token_ttl_s,
+        minimum=1,
+        maximum=REPORT_LINK_MAX_TOKEN_TTL_S,
+    )
+    if started_at is None or max_ttl is None:
+        return None
+    window = HMAC_MAX_ROLLOUT_OVERLAP_S + max_ttl
+    if started_at > _MAX_UNIX_TIMESTAMP_S - window:
+        return None
+    return started_at + window
+
+
+def _contract_result(
+    ok: bool,
+    code: str,
+    previous_deadline: int | None = None,
+) -> HmacRotationContractResult:
+    return {
+        "ok": ok,
+        "code": code,
+        "previous_deadline": previous_deadline,
+    }
+
+
+def validate_hmac_rotation_transition(
+    *,
+    deployed_previous_present: object,
+    deployed_rotation_started_at: object | None,
+    proposed_previous_present: object,
+    proposed_rotation_started_at: object | None,
+    now: object,
+    max_token_ttl_s: object,
+) -> HmacRotationContractResult:
+    """Validate IaC's persisted previous-key/T0 transition without accepting secrets.
+
+    Callers pass only presence booleans, timestamps, and the purpose's exported maximum token TTL.
+    ``code == "ok"`` is the sole passing result. The transition enforces:
+
+    * previous-key and T0 presence are atomic;
+    * a deployed T0 cannot change while the previous key remains configured;
+    * a new T0 is at most ``HMAC_MAX_FUTURE_T0_SKEW_S`` in the future; and
+    * removal occurs at or after the deterministic exclusive deadline.
+
+    This helper cannot persist history itself. IaC must feed the deployed state (not freshly
+    generated values) into every preflight so immutability survives process restarts.
+    """
+    current = _bounded_int(now, minimum=0, maximum=_MAX_UNIX_TIMESTAMP_S)
+    max_ttl = _bounded_int(
+        max_token_ttl_s,
+        minimum=1,
+        maximum=REPORT_LINK_MAX_TOKEN_TTL_S,
+    )
+    if current is None:
+        return _contract_result(False, "invalid_now")
+    if max_ttl not in (MAIL_ACTION_MAX_TOKEN_TTL_S, REPORT_LINK_MAX_TOKEN_TTL_S):
+        return _contract_result(False, "invalid_max_token_ttl")
+    if type(deployed_previous_present) is not bool:
+        return _contract_result(False, "invalid_deployed_presence")
+    if type(proposed_previous_present) is not bool:
+        return _contract_result(False, "invalid_proposed_presence")
+    if deployed_previous_present != (deployed_rotation_started_at is not None):
+        return _contract_result(False, "deployed_pair_mismatch")
+    if proposed_previous_present != (proposed_rotation_started_at is not None):
+        return _contract_result(False, "proposed_pair_mismatch")
+
+    deployed_t0: int | None = None
+    proposed_t0: int | None = None
+    deployed_deadline: int | None = None
+    proposed_deadline: int | None = None
+    if deployed_previous_present:
+        deployed_t0 = _bounded_int(
+            deployed_rotation_started_at,
+            minimum=0,
+            maximum=_MAX_UNIX_TIMESTAMP_S,
+        )
+        deployed_deadline = hmac_previous_key_deadline(deployed_t0, max_ttl)
+        if deployed_t0 is None or deployed_deadline is None:
+            return _contract_result(False, "invalid_deployed_t0")
+    if proposed_previous_present:
+        proposed_t0 = _bounded_int(
+            proposed_rotation_started_at,
+            minimum=0,
+            maximum=_MAX_UNIX_TIMESTAMP_S,
+        )
+        proposed_deadline = hmac_previous_key_deadline(proposed_t0, max_ttl)
+        if proposed_t0 is None or proposed_deadline is None:
+            return _contract_result(False, "invalid_proposed_t0")
+
+    if deployed_previous_present and proposed_previous_present and deployed_t0 != proposed_t0:
+        return _contract_result(False, "t0_changed", deployed_deadline)
+
+    if deployed_previous_present and not proposed_previous_present:
+        if deployed_deadline is None or current < deployed_deadline:
+            return _contract_result(False, "removal_before_deadline", deployed_deadline)
+        return _contract_result(True, "ok", deployed_deadline)
+
+    if proposed_previous_present:
+        if proposed_t0 is None or proposed_deadline is None:
+            return _contract_result(False, "invalid_proposed_t0")
+        if proposed_t0 - current > HMAC_MAX_FUTURE_T0_SKEW_S:
+            return _contract_result(False, "future_t0", proposed_deadline)
+        if current >= proposed_deadline:
+            return _contract_result(False, "expired_previous_not_removed", proposed_deadline)
+        return _contract_result(True, "ok", proposed_deadline)
+
+    return _contract_result(True, "ok")
 
 
 def coerce_epoch_seconds(now: int | None) -> int | None:
@@ -262,13 +467,34 @@ def load_report_link_token_ttl_s(*, explicit_ttl_s: object | None = None) -> int
 
 
 def _secret_bytes(raw: object) -> bytes | None:
+    """Validate a new issuance primary; never use this for migration previous keys."""
     if type(raw) is not str or not raw or raw != raw.strip():
         return None
     try:
         encoded = raw.encode("utf-8")
     except UnicodeError:
         return None
-    return encoded if len(encoded) >= _MIN_SECRET_BYTES else None
+    if len(encoded) < _MIN_SECRET_BYTES or len(encoded) > _MAX_SECRET_BYTES:
+        return None
+    return encoded
+
+
+def _migration_previous_secret_bytes(raw: object) -> bytes | None:
+    """Encode an explicitly configured legacy previous key byte-for-byte.
+
+    Old token code used the environment string exactly as UTF-8, including short values and
+    surrounding whitespace/newlines. Reproducing those bytes is permitted only on the bounded
+    verification-only path. Empty, malformed-Unicode, and unreasonably large values remain invalid.
+    """
+    if type(raw) is not str or not raw:
+        return None
+    try:
+        encoded = raw.encode("utf-8")
+    except UnicodeError:
+        return None
+    if not encoded or len(encoded) > _MAX_SECRET_BYTES:
+        return None
+    return encoded
 
 
 def _same_secret(left: bytes, right_raw: object) -> bool:
@@ -282,10 +508,11 @@ def _same_secret(left: bytes, right_raw: object) -> bool:
 
 def _looks_like_credential(raw: str) -> bool:
     lowered = raw.casefold()
-    if lowered.startswith("xox") or lowered.startswith("xapp-"):
+    if lowered.startswith("jdbc:"):
         return True
-    dsn = lowered[5:] if lowered.startswith("jdbc:") else lowered
-    scheme, separator, _rest = dsn.partition(":")
+    if lowered.startswith(_SLACK_CREDENTIAL_PREFIXES) or lowered.startswith("xox"):
+        return True
+    scheme, separator, _rest = lowered.partition(":")
     base_scheme = scheme.split("+", 1)[0]
     return bool(separator) and base_scheme in _DATASTORE_SCHEMES
 
@@ -293,8 +520,13 @@ def _looks_like_credential(raw: str) -> bool:
 def _is_credential_env_name(name: str) -> bool:
     if name in _HMAC_CONFIGURATION_ENVS:
         return False
-    words = frozenset(part for part in name.upper().split("_") if part)
+    normalized = "".join(
+        char if "A" <= char <= "Z" or "0" <= char <= "9" else "_" for char in name.upper()
+    )
+    words = frozenset(part for part in normalized.split("_") if part)
     if words & _DIRECT_CREDENTIAL_ENV_WORDS:
+        return True
+    if words & _CREDENTIAL_RESOURCE_ENV_WORDS:
         return True
     if name.upper().endswith(("AUTH", "PASS", "PASSWD", "PASSWORD", "SECRET", "TOKEN")):
         return True
@@ -302,14 +534,23 @@ def _is_credential_env_name(name: str) -> bool:
         return True
     if "KEY" in words and words & {"ACCESS", "API", "PRIVATE", "SECRET", "SIGNING"}:
         return True
-    if "URL" in words and "WEBHOOK" in words:
-        return True
     return bool(words & {"URI", "URL"}) and bool(words & _DATASTORE_ENV_WORDS)
 
 
 def _reuses_process_credential(secret: bytes) -> bool:
     for name, raw in os.environ.items():
-        if _is_credential_env_name(name) and _same_secret(secret, raw):
+        if name in _HMAC_CONFIGURATION_ENVS:
+            continue
+        try:
+            candidate = raw.encode("utf-8")
+        except UnicodeError:
+            continue
+        # Named credential variables are always compared. Unknown variables are compared once their
+        # value is long enough to plausibly be a generated secret. The only exemptions are the
+        # explicit HMAC configuration variables, whose cross-purpose checks are handled separately.
+        if (
+            _is_credential_env_name(name) or len(candidate) >= _MIN_SECRET_BYTES
+        ) and hmac.compare_digest(secret, candidate):
             return True
     return False
 
@@ -317,6 +558,73 @@ def _reuses_process_credential(secret: bytes) -> bool:
 def _unsafe_primary_credential(raw: str, secret: bytes) -> bool:
     """Central credential shape/reuse gate for every issuance primary."""
     return _looks_like_credential(raw) or _reuses_process_credential(secret)
+
+
+def _previous_key_runtime_fingerprint(purpose: str, previous: bytes) -> bytes:
+    fingerprint = hmac.new(_RUNTIME_FINGERPRINT_KEY, digestmod=hashlib.sha256)
+    purpose_bytes = purpose.encode("ascii")
+    fingerprint.update(len(purpose_bytes).to_bytes(2, "big"))
+    fingerprint.update(purpose_bytes)
+    fingerprint.update(len(previous).to_bytes(4, "big"))
+    fingerprint.update(previous)
+    return fingerprint.digest()
+
+
+def _advance_rotation_high_water(*, purpose: str, current: int) -> int:
+    """Advance and return the process-local effective clock for this purpose.
+
+    This runs before any configuration validation and while the previous-key/T0 pair is absent.
+    Thus a stale deployment cannot introduce or reintroduce a key against a rolled-back wall clock
+    after this process already observed a later timestamp.
+    """
+    with _rotation_runtime_lock:
+        effective_current = max(current, _purpose_clock_high_water.get(purpose, current))
+        _purpose_clock_high_water[purpose] = effective_current
+        for (state_purpose, _fingerprint), state in _rotation_runtime_states.items():
+            if state_purpose != purpose:
+                continue
+            if effective_current > state.high_water:
+                state.high_water = effective_current
+            if state.high_water >= state.deadline:
+                state.expired = True
+        return effective_current
+
+
+def _previous_key_runtime_eligible(
+    *,
+    purpose: str,
+    previous: bytes,
+    started_at: int,
+    deadline: int,
+    current: int,
+) -> bool | None:
+    """Apply bounded future skew, immutable T0, and a process-local clock high-water mark.
+
+    ``None`` means the rotation configuration changed incompatibly and the whole keyring must fail
+    closed. ``False`` means the configuration is well formed but this previous key has expired.
+    """
+    runtime_key = (purpose, _previous_key_runtime_fingerprint(purpose, previous))
+    with _rotation_runtime_lock:
+        state = _rotation_runtime_states.get(runtime_key)
+        if state is None:
+            if started_at - current > HMAC_MAX_FUTURE_T0_SKEW_S:
+                return None
+            state = _RotationRuntimeState(
+                started_at=started_at,
+                deadline=deadline,
+                high_water=current,
+            )
+            _rotation_runtime_states[runtime_key] = state
+        else:
+            # The same purpose/previous key defines one immutable rotation generation. Changing T0
+            # (or its derived deadline) must never buy that key a fresh verification window.
+            if state.started_at != started_at or state.deadline != deadline:
+                return None
+            if current > state.high_water:
+                state.high_water = current
+            if state.high_water >= state.deadline:
+                state.expired = True
+        return not state.expired
 
 
 def _load_keyring(
@@ -332,6 +640,7 @@ def _load_keyring(
     current = coerce_epoch_seconds(now)
     if current is None:
         return None
+    current = _advance_rotation_high_water(purpose=primary_env, current=current)
 
     primary_raw = os.environ.get(primary_env)
     primary = _secret_bytes(primary_raw)
@@ -352,7 +661,7 @@ def _load_keyring(
     if previous_raw is None or started_at_raw is None:
         return None
 
-    previous = _secret_bytes(previous_raw)
+    previous = _migration_previous_secret_bytes(previous_raw)
     if previous is None or hmac.compare_digest(primary, previous):
         return None
     # Shared legacy previous keys are allowed, but a previous key may never be another purpose's
@@ -366,11 +675,22 @@ def _load_keyring(
         minimum=0,
         maximum=latest_start,
     )
-    if started_at is None or started_at > current:
+    if started_at is None:
         return None
 
-    previous_deadline = started_at + HMAC_MAX_ROLLOUT_OVERLAP_S + max_token_ttl_s
-    verification_keys = (primary, previous) if current < previous_deadline else (primary,)
+    previous_deadline = hmac_previous_key_deadline(started_at, max_token_ttl_s)
+    if previous_deadline is None:
+        return None
+    previous_eligible = _previous_key_runtime_eligible(
+        purpose=primary_env,
+        previous=previous,
+        started_at=started_at,
+        deadline=previous_deadline,
+        current=current,
+    )
+    if previous_eligible is None:
+        return None
+    verification_keys = (primary, previous) if previous_eligible else (primary,)
     return HmacKeyring(primary, verification_keys)
 
 
@@ -421,6 +741,7 @@ def require_report_link_hmac_keyring(*, now: int | None = None) -> HmacKeyring:
 
 
 __all__ = [
+    "HMAC_MAX_FUTURE_T0_SKEW_S",
     "HMAC_MAX_ROLLOUT_OVERLAP_S",
     "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
     "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
@@ -434,8 +755,10 @@ __all__ = [
     "REPORT_LINK_TTL_S",
     "HmacKeyConfigurationError",
     "HmacKeyring",
+    "HmacRotationContractResult",
     "add_token_ttl",
     "coerce_epoch_seconds",
+    "hmac_previous_key_deadline",
     "load_mail_action_hmac_keyring",
     "load_mail_action_token_ttl_s",
     "load_report_link_hmac_keyring",
@@ -443,4 +766,5 @@ __all__ = [
     "require_mail_action_hmac_keyring",
     "require_report_link_hmac_keyring",
     "validate_epoch_seconds",
+    "validate_hmac_rotation_transition",
 ]
