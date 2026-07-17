@@ -137,6 +137,7 @@ class _RetryLeaseHeartbeat:
             raise _RetryLeaseLostError("retry lease ownership could not be renewed")
         self.last_renewed_monotonic = now
 
+
 # 対象2フォームの実セルは ja_JP の業務時刻で、ファイル記録の同一連番および Slack
 # 投稿epochとの突合でも JST wall time と確認済み。Spreadsheet property の timeZone は
 # Etc/GMT だが、FORMATTED_VALUE 自体を運用上の投稿時刻として扱う契約に固定する。
@@ -622,6 +623,7 @@ def _record_source_retry(
     dry_run: bool,
     enabled: bool,
     durability_tracker: _DurabilityTracker | None = None,
+    expected_lease_owner: str | None = None,
 ) -> bool:
     """incremental transient失敗をcursorと独立したdurable queueへ残す。"""
     if dry_run or not enabled:
@@ -645,6 +647,7 @@ def _record_source_retry(
                 reason=reason,
                 request_id=request_id,
                 metadata={"retry_class": "transient"},
+                expected_lease_owner=expected_lease_owner,
             )
         )
     except Exception as exc:
@@ -1230,9 +1233,7 @@ def _list_all_gdrive_files(
         if not token:
             break
     if token:
-        raise GDrivePaginationIncompleteError(
-            f"Drive files pagination exceeded {max_pages} pages"
-        )
+        raise GDrivePaginationIncompleteError(f"Drive files pagination exceeded {max_pages} pages")
     return out
 
 
@@ -1642,6 +1643,7 @@ def _ingest_gdrive_folder(
     next_cursor: str | None = None
     retry_claims: list[Any] = []
     retry_ids: set[str] = set()
+    retry_lease_owners: dict[str, str] = {}
     if incremental:
         prior_cursor: str | None = None
         state: Any | None = None
@@ -1698,6 +1700,12 @@ def _ingest_gdrive_folder(
                         )
                     )
                     retry_ids = {str(retry.external_id) for retry in retry_claims}
+                    retry_lease_owners = {
+                        str(retry.external_id): str(
+                            getattr(retry, "lease_owner", None) or request_id
+                        )
+                        for retry in retry_claims
+                    }
                 except Exception as exc:
                     durability_tracker.add("retry_claim_failed")
                     logger.warning(
@@ -1780,6 +1788,7 @@ def _ingest_gdrive_folder(
                             reason="retry_source_missing",
                             request_id=request_id,
                             metadata={"retry_class": "source_not_listed"},
+                            expected_lease_owner=retry_lease_owners[retry.external_id],
                         )
                     )
                 except Exception as exc:
@@ -1832,6 +1841,7 @@ def _ingest_gdrive_folder(
                 durable_retry=incremental,
                 durability_tracker=durability_tracker,
                 lease_heartbeat=lease_heartbeat,
+                retry_lease_owner=retry_lease_owners.get(f.id),
             )
             docs_n += docs_added
             chunks_n += chunks_added
@@ -1872,6 +1882,7 @@ def _ingest_gdrive_folder(
                     dry_run=dry_run,
                     enabled=True,
                     durability_tracker=durability_tracker,
+                    expected_lease_owner=retry_lease_owners.get(f.id),
                 )
                 _safe_record_job(
                     repository,
@@ -1982,6 +1993,7 @@ def _process_one_gdrive_file(
     durable_retry: bool = False,
     durability_tracker: _DurabilityTracker | None = None,
     lease_heartbeat: Callable[[bool], None] | None = None,
+    retry_lease_owner: str | None = None,
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
@@ -2087,6 +2099,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2123,6 +2136,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2147,6 +2161,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2170,6 +2185,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2201,6 +2217,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2229,6 +2246,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2314,6 +2332,7 @@ def _process_one_gdrive_file(
                     dry_run=dry_run,
                     enabled=durable_retry,
                     durability_tracker=durability_tracker,
+                    expected_lease_owner=retry_lease_owner,
                 )
             skipped.append(f.id)
             return 0, 0
@@ -2342,6 +2361,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2369,6 +2389,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2411,6 +2432,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2435,6 +2457,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2458,6 +2481,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2490,6 +2514,7 @@ def _process_one_gdrive_file(
                     dry_run=dry_run,
                     enabled=durable_retry,
                     durability_tracker=durability_tracker,
+                    expected_lease_owner=retry_lease_owner,
                 )
                 skipped.append(f.id)
                 return 0, 0
@@ -2514,6 +2539,7 @@ def _process_one_gdrive_file(
                     dry_run=dry_run,
                     enabled=durable_retry,
                     durability_tracker=durability_tracker,
+                    expected_lease_owner=retry_lease_owner,
                 )
                 skipped.append(f.id)
                 return 0, 0
@@ -2546,6 +2572,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2570,6 +2597,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2651,6 +2679,7 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
+                expected_lease_owner=retry_lease_owner,
             )
             skipped.append(f.id)
             return 0, 0
@@ -3976,8 +4005,9 @@ class IngestRunner:
           sources_skipped > 0（＝walk 例外等で source ごと fail-open skip）がある run、
         - または ``truncated_walk_roots`` 非空（＝walk の max_files 打ち切り）の run では、
           失敗フォルダ/上限超過分の生存 file が「未観測」に見えて誤 stale されるため
-          **mark を skip** して WARNING（``ingest_mark_stale_skipped``・reason で区別）を出す。
-          clear（観測できた doc の stale 解除）は観測済み id のみ対象で安全なので続行する。
+          **mark/clear の両方を skip** して WARNING
+          （``ingest_mark_stale_skipped``・reason で区別）を出す。
+          incomplete traversal と同じ run では stale cleanup を一切 commit しない。
           どちらの引数も None（旧呼び出し）ならガード無し＝従来挙動。
 
         量的ブレーキ:
@@ -4021,19 +4051,16 @@ class IngestRunner:
         if truncated_walk_roots:
             incomplete_reasons.append("walk_truncated（max_files 打ち切りで列挙が不完全）")
         if incomplete_reasons:
-            # clear は観測できた doc の stale 解除のみ＝安全なのでガード外扱いで続行する。
-            cleared = self._repo.clear_documents_stale(sorted(observed_gdrive_ids))
             logger.warning(
                 "ingest_mark_stale_skipped",
                 request_id=request_id,
                 reason=(
-                    "観測集合が不完全なため stale mark を skip（誤 stale 防止・"
-                    "観測分の clear のみ実行）: " + " / ".join(incomplete_reasons)
+                    "観測集合が不完全なため stale cleanup（mark/clear）を skip: "
+                    + " / ".join(incomplete_reasons)
                 ),
                 failed_kinds=failed_kinds,
                 truncated_walk_roots=sorted(truncated_walk_roots or set()),
                 observed=len(observed_gdrive_ids),
-                cleared=cleared,
             )
             return
 

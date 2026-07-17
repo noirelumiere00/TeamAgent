@@ -75,6 +75,18 @@ class GDrivePermissionsPaginationError(RuntimeError):
     """permissions.list を最後のページまで安全に列挙できなかった。"""
 
 
+class GDriveTraversalIncompleteError(RuntimeError):
+    """Drive traversal が安全上限・pagination異常により完走できなかった。"""
+
+    def __init__(self, operation: str, reason: str, **diagnostics: Any) -> None:
+        self.operation = operation
+        self.reason = reason
+        self.diagnostics = diagnostics
+        details = ", ".join(f"{key}={value}" for key, value in sorted(diagnostics.items()))
+        suffix = f" ({details})" if details else ""
+        super().__init__(f"{operation} incomplete: {reason}{suffix}")
+
+
 class GDriveDownloadContentError(RuntimeError):
     """Drive API がファイル本体以外の内容を返したときの分類可能な例外。"""
 
@@ -497,9 +509,14 @@ class GDriveClient:
         Day 7 (2026-05-27) で追加: 共有ドライブ全自動 crawl 用の起点 API。
         マイドライブ や「Shared with me」 は含まれない。
         """
+        if page_size < 1 or page_size > 100:
+            raise ValueError("shared drives page_size must be between 1 and 100")
+        if max_pages < 1:
+            raise ValueError("shared drives max_pages must be at least 1")
         service = self._ensure_service()
         out: list[SharedDrive] = []
         page_token: str | None = None
+        seen_tokens: set[str] = set()
         for _ in range(max_pages):
             kwargs: dict[str, Any] = {
                 "pageSize": page_size,
@@ -516,9 +533,40 @@ class GDriveClient:
                         created_time=d.get("createdTime"),
                     )
                 )
-            page_token = resp.get("nextPageToken")
-            if not page_token:
+            next_token = resp.get("nextPageToken")
+            if not next_token:
+                page_token = None
                 break
+            if next_token == page_token or next_token in seen_tokens:
+                logger.error(
+                    "gdrive_list_shared_drives_incomplete",
+                    request_id=request_id,
+                    reason="pagination_token_cycle",
+                    drives_collected=len(out),
+                    max_pages=max_pages,
+                )
+                raise GDriveTraversalIncompleteError(
+                    "list_shared_drives",
+                    "pagination token cycle",
+                    drives_collected=len(out),
+                    max_pages=max_pages,
+                )
+            seen_tokens.add(next_token)
+            page_token = next_token
+        if page_token:
+            logger.error(
+                "gdrive_list_shared_drives_incomplete",
+                request_id=request_id,
+                reason="page_limit_with_remaining_token",
+                drives_collected=len(out),
+                max_pages=max_pages,
+            )
+            raise GDriveTraversalIncompleteError(
+                "list_shared_drives",
+                "page limit reached with remaining token",
+                drives_collected=len(out),
+                max_pages=max_pages,
+            )
         logger.info("gdrive_list_shared_drives", request_id=request_id, count=len(out))
         return out
 
@@ -552,6 +600,11 @@ class GDriveClient:
         """
         import re as _re
 
+        if max_files < 1:
+            raise ValueError("walk max_files must be at least 1")
+        if max_depth < 0:
+            raise ValueError("walk max_depth must be non-negative")
+
         folder_mime = "application/vnd.google-apps.folder"
         service = self._ensure_service()
         # 除外 regex は fail-loud: 不正な regex は即 re.error で落とす（黙って全取込しない）。
@@ -562,12 +615,13 @@ class GDriveClient:
 
         while queue and len(out) < max_files:
             folder_id, depth = queue.pop(0)
-            if folder_id in visited or depth > max_depth:
+            if folder_id in visited:
                 continue
             visited.add(folder_id)
 
             # この folder 直下の files / sub-folders を取得（全 page）
             page_token: str | None = None
+            seen_page_tokens: set[str] = set()
             for _ in range(20):  # 1 folder の最大ページ数（page_size=1000 × 20 = 20k 上限）
                 kwargs: dict[str, Any] = {
                     "q": f"'{folder_id}' in parents and trashed = false",
@@ -602,6 +656,25 @@ class GDriveClient:
                                 pattern=exclude_folder_name_re,
                             )
                             continue
+                        if depth >= max_depth:
+                            logger.error(
+                                "gdrive_walk_files_recursive_incomplete",
+                                request_id=request_id,
+                                root_id=root_id,
+                                drive_id=drive_id,
+                                reason="max_depth_with_child_folder",
+                                max_depth=max_depth,
+                                folders_visited=len(visited),
+                                files_collected=len(out),
+                            )
+                            raise GDriveTraversalIncompleteError(
+                                "walk_files_recursive",
+                                "max depth reached with child folders remaining",
+                                root_id=root_id,
+                                max_depth=max_depth,
+                                folders_visited=len(visited),
+                                files_collected=len(out),
+                            )
                         # sub-folder → queue に追加
                         queue.append((str(f.get("id", "")), depth + 1))
                     else:
@@ -626,9 +699,55 @@ class GDriveClient:
                         )
                         if len(out) >= max_files:
                             break
-                page_token = resp.get("nextPageToken")
-                if not page_token or len(out) >= max_files:
+                next_token = resp.get("nextPageToken")
+                if len(out) >= max_files:
+                    page_token = next_token
                     break
+                if not next_token:
+                    page_token = None
+                    break
+                if next_token == page_token or next_token in seen_page_tokens:
+                    logger.error(
+                        "gdrive_walk_files_recursive_incomplete",
+                        request_id=request_id,
+                        root_id=root_id,
+                        drive_id=drive_id,
+                        folder_id=folder_id,
+                        reason="pagination_token_cycle",
+                        folders_visited=len(visited),
+                        files_collected=len(out),
+                    )
+                    raise GDriveTraversalIncompleteError(
+                        "walk_files_recursive",
+                        "pagination token cycle",
+                        root_id=root_id,
+                        folder_id=folder_id,
+                        folders_visited=len(visited),
+                        files_collected=len(out),
+                    )
+                seen_page_tokens.add(next_token)
+                page_token = next_token
+            if page_token and len(out) < max_files:
+                logger.error(
+                    "gdrive_walk_files_recursive_incomplete",
+                    request_id=request_id,
+                    root_id=root_id,
+                    drive_id=drive_id,
+                    folder_id=folder_id,
+                    reason="page_limit_with_remaining_token",
+                    max_pages=20,
+                    folders_visited=len(visited),
+                    files_collected=len(out),
+                )
+                raise GDriveTraversalIncompleteError(
+                    "walk_files_recursive",
+                    "page limit reached with remaining token",
+                    root_id=root_id,
+                    folder_id=folder_id,
+                    max_pages=20,
+                    folders_visited=len(visited),
+                    files_collected=len(out),
+                )
 
         hit_max = len(out) >= max_files
         # stale 堅牢化 (2026-07-10): max_files 打ち切りは列挙の不完全＝INGEST_MARK_STALE の

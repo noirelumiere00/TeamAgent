@@ -25,6 +25,7 @@ from teamagent.adapters.gdrive_client import (
     GDriveClient,
     GDriveDownloadContentError,
     GDrivePermissionsPaginationError,
+    GDriveTraversalIncompleteError,
     extract_acl_emails,
 )
 
@@ -126,6 +127,36 @@ class FakeDriveService:
         return self._changes
 
 
+class _PagedListResource:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self._responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    def list(self, **kwargs: Any) -> _FakeRequest:
+        index = len(self.calls)
+        self.calls.append(kwargs)
+        if index >= len(self._responses):
+            raise AssertionError("unexpected pagination request")
+        return _FakeRequest(self._responses[index])
+
+
+class _TraversalService:
+    def __init__(
+        self,
+        *,
+        file_pages: list[dict[str, Any]] | None = None,
+        drive_pages: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self._file_pages = _PagedListResource(file_pages or [{"files": []}])
+        self._drive_pages = _PagedListResource(drive_pages or [{"drives": []}])
+
+    def files(self) -> _PagedListResource:
+        return self._file_pages
+
+    def drives(self) -> _PagedListResource:
+        return self._drive_pages
+
+
 # -----------------------------------------------------------
 # list_files
 # -----------------------------------------------------------
@@ -202,6 +233,77 @@ def test_list_files_handles_missing_optional_fields() -> None:
     assert files[0].parents == ()
     assert files[0].owners_email == ()
     assert files[0].web_view_link is None
+
+
+# -----------------------------------------------------------
+# complete traversal contracts
+# -----------------------------------------------------------
+def test_walk_raises_when_twenty_page_cap_leaves_token() -> None:
+    pages = [{"files": [], "nextPageToken": f"PAGE-{index + 1}"} for index in range(20)]
+    client = GDriveClient(service=_TraversalService(file_pages=pages))
+
+    with pytest.raises(
+        GDriveTraversalIncompleteError,
+        match="page limit reached with remaining token",
+    ) as exc_info:
+        client.walk_files_recursive(root_id="ROOT", request_id="r")
+
+    assert exc_info.value.reason == "page limit reached with remaining token"
+    assert exc_info.value.diagnostics["max_pages"] == 20
+
+
+def test_walk_raises_on_pagination_token_cycle() -> None:
+    client = GDriveClient(
+        service=_TraversalService(
+            file_pages=[
+                {"files": [], "nextPageToken": "LOOP"},
+                {"files": [], "nextPageToken": "LOOP"},
+            ]
+        )
+    )
+
+    with pytest.raises(GDriveTraversalIncompleteError, match="pagination token cycle"):
+        client.walk_files_recursive(root_id="ROOT", request_id="r")
+
+
+def test_walk_raises_when_max_depth_has_child_folders() -> None:
+    client = GDriveClient(
+        service=_TraversalService(
+            file_pages=[
+                {
+                    "files": [
+                        {
+                            "id": "CHILD",
+                            "name": "child",
+                            "mimeType": "application/vnd.google-apps.folder",
+                        }
+                    ]
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(GDriveTraversalIncompleteError, match="max depth reached"):
+        client.walk_files_recursive(root_id="ROOT", request_id="r", max_depth=0)
+
+
+def test_list_shared_drives_raises_when_page_cap_leaves_token() -> None:
+    client = GDriveClient(
+        service=_TraversalService(
+            drive_pages=[
+                {
+                    "drives": [{"id": "D1", "name": "Drive 1"}],
+                    "nextPageToken": "PAGE-2",
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(
+        GDriveTraversalIncompleteError,
+        match="page limit reached with remaining token",
+    ):
+        client.list_shared_drives(request_id="r", max_pages=1)
 
 
 # -----------------------------------------------------------

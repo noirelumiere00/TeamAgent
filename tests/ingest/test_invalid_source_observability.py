@@ -11,7 +11,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
-from teamagent.adapters.gdrive_client import DriveFile, DrivePermission, SharedDrive
+from teamagent.adapters.gdrive_client import (
+    DriveFile,
+    DrivePermission,
+    GDriveTraversalIncompleteError,
+    SharedDrive,
+)
 from teamagent.ingest.loader import (
     GDriveFolderSpec,
     IngestSources,
@@ -758,9 +763,7 @@ def test_contextualizer_cannot_expand_past_per_file_limit(
     assert result == (0, 0)
     assert repo.upserts == []
     assert repo.retry_records[-1]["reason"] == "contextualized_content_too_large"
-    assert collector.snapshot("gdrive", "FOLDER").reasons == {
-        "contextualized_content_too_large": 1
-    }
+    assert collector.snapshot("gdrive", "FOLDER").reasons == {"contextualized_content_too_large": 1}
 
 
 def test_retry_lease_loss_stops_upsert_and_cursor(
@@ -818,6 +821,74 @@ def test_retry_lease_loss_stops_upsert_and_cursor(
     assert repo.saved_states == []
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "page limit reached with remaining token",
+        "pagination token cycle",
+        "max depth reached with child folders remaining",
+        "shared drive page limit reached with remaining token",
+    ],
+)
+def test_incomplete_traversal_commits_neither_cursor_nor_stale_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    monkeypatch.setenv("INGEST_MARK_STALE", "true")
+    monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
+    monkeypatch.delenv("DOC_DEDUP_DETECT", raising=False)
+
+    client = MagicMock()
+    client.get_start_page_token.return_value = "MUST-NOT-SAVE"
+    client.walk_files_recursive.side_effect = GDriveTraversalIncompleteError(
+        "walk_files_recursive",
+        reason,
+        root_id="FOLDER",
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+
+    class _TraversalRepository(_Repository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stale_cleanup_calls: list[str] = []
+
+        def clear_documents_stale(self, external_ids: list[str]) -> int:
+            self.stale_cleanup_calls.append("clear")
+            return 0
+
+        def list_gdrive_external_ids_with_stale(self) -> list[tuple[str, bool]]:
+            self.stale_cleanup_calls.append("list")
+            return [("existing", False)]
+
+        def mark_documents_stale(self, external_ids: list[str]) -> int:
+            self.stale_cleanup_calls.append("mark")
+            return 0
+
+    repo = _TraversalRepository()
+    sources = IngestSources(
+        version=1,
+        slack_channels=(),
+        gdrive_folders=(replace(_folder_spec(), include_subfolders=True),),
+        gsheets=(),
+    )
+    result = IngestRunner(
+        repo,  # type: ignore[arg-type]
+        _Embedder(),
+        owner_email="bot@example.jp",
+        dry_run=False,
+        alerter=IngestOpsAlerter(webhook_url=None),
+    ).run(sources, kinds=["gdrive"])
+
+    assert result.by_kind["gdrive"].errors
+    assert not any(state.get("success") is True for state in repo.saved_states)
+    assert not any(state.get("cursor") for state in repo.saved_states)
+    assert repo.stale_cleanup_calls == []
+
+
 def test_pdf_download_failure_is_warning_and_durable_retry() -> None:
     drive_file = replace(
         _file("PDF-FAIL", b"%PDF-fake"),
@@ -843,12 +914,59 @@ def test_pdf_download_failure_is_warning_and_durable_retry() -> None:
         warning_collector=collector,
         warning_source_id="FOLDER",
         durable_retry=True,
+        retry_lease_owner="claim-token",
     )
 
     assert result == (0, 0)
     assert collector.snapshot("gdrive", "FOLDER").reasons == {"pdf_download_failed": 1}
     assert repo.retry_records[0]["reason"] == "pdf_download_failed"
+    assert repo.retry_records[0]["expected_lease_owner"] == "claim-token"
     assert repo.upserts == []
+
+
+def test_claimed_file_failure_threads_lease_owner_to_retry_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    drive_file = replace(
+        _file("CLAIMED-PDF-FAIL", b"%PDF-fake"),
+        name="confidential.pdf",
+        mime_type="application/pdf",
+    )
+    client = MagicMock()
+    client.get_start_page_token.return_value = "NEXT"
+    client.list_files.return_value = ([drive_file], None)
+    client.list_permissions.return_value = [_owner_permission()]
+    client.download_file_bytes.side_effect = TimeoutError("temporary")
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+    repo = _Repository()
+    repo.retry_claims = [
+        SourceRetry(
+            external_id=drive_file.id,
+            md5_checksum=drive_file.md5_checksum,
+            size_bytes=drive_file.size,
+            mime_type=drive_file.mime_type,
+            validator_schema_version="pdf-safe-v1",
+            attempt_count=1,
+            reason="pdf_download_failed",
+            lease_owner="worker-a",
+        )
+    ]
+
+    _ingest_gdrive_folder(
+        _folder_spec(),
+        embedder=_Embedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="worker-a",
+        warning_collector=_IngestWarningCollector(),
+    )
+
+    assert repo.retry_records[-1]["expected_lease_owner"] == "worker-a"
 
 
 @pytest.mark.parametrize(

@@ -253,6 +253,7 @@ def test_claim_due_retries_uses_skip_locked_and_maps_dict_rows() -> None:
                 "validator_schema_version": "ooxml-safe-v2",
                 "attempt_count": 2,
                 "reason": "office_download_failed",
+                "lease_owner": "req-2",
             }
         ]
     )
@@ -267,6 +268,7 @@ def test_claim_due_retries_uses_skip_locked_and_maps_dict_rows() -> None:
     assert len(retries) == 1
     assert retries[0].external_id == "FILE1"
     assert retries[0].attempt_count == 2
+    assert retries[0].lease_owner == "req-2"
     sql, params, row_factory = conn.executed[0]
     assert "FOR UPDATE SKIP LOCKED" in sql
     assert "lease_expires_at" in sql
@@ -319,6 +321,8 @@ def test_record_retry_is_request_idempotent_and_has_exponential_backoff() -> Non
     assert "IS NOT DISTINCT FROM EXCLUDED.md5_checksum" in sql
     assert "power(" in sql
     assert "lease_owner = NULL" in sql
+    assert "ingest_source_retries.lease_owner IS NULL" in sql
+    assert "ingest_source_retries.lease_expires_at <= now()" in sql
     assert params[:10] == (
         "gdrive",
         "FOLDER1",
@@ -330,6 +334,54 @@ def test_record_retry_is_request_idempotent_and_has_exponential_backoff() -> Non
         "ooxml-safe-v2",
         "office_download_failed",
         "req",
+    )
+    assert params[11] is None
+
+
+def test_record_retry_from_claim_requires_exact_active_lease_owner() -> None:
+    conn = _Connection(rowcount=1)
+    repo, _ = _repo(conn)
+
+    assert repo.record_source_retry(
+        source_kind="gdrive",
+        source_id="FOLDER1",
+        source_type="gdrive",
+        external_id="FILE1",
+        md5_checksum="0123456789abcdef0123456789abcdef",
+        size_bytes=123,
+        mime_type="application/test",
+        validator_schema_version="ooxml-safe-v2",
+        reason="office_download_failed",
+        request_id="worker-a",
+        expected_lease_owner="claim-a",
+    )
+
+    sql, params, _ = conn.executed[0]
+    assert "claimed.lease_owner = %s" in sql
+    assert "claimed.lease_expires_at > now()" in sql
+    assert "ingest_source_retries.status = 'pending'" in sql
+    assert "ingest_source_retries.lease_owner = %s" in sql
+    assert "ingest_source_retries.lease_expires_at > now()" in sql
+    assert params[11] == "claim-a"
+    assert params[-3:] == ("claim-a", "claim-a", "claim-a")
+
+
+def test_record_retry_returns_false_when_fence_rejects_write() -> None:
+    conn = _Connection(rowcount=0)
+    repo, _ = _repo(conn)
+
+    assert not repo.record_source_retry(
+        source_kind="gdrive",
+        source_id="FOLDER1",
+        source_type="gdrive",
+        external_id="FILE1",
+        md5_checksum="0123456789abcdef0123456789abcdef",
+        size_bytes=123,
+        mime_type="application/test",
+        validator_schema_version="ooxml-safe-v2",
+        reason="office_download_failed",
+        request_id="worker-a",
+        expected_lease_owner="claim-a",
     )
 
 
@@ -350,6 +402,7 @@ def test_retry_lease_renewal_requires_current_owner_and_pending_status() -> None
     assert "lease_expires_at = now()" in sql
     assert "status = 'pending'" in sql
     assert "lease_owner = %s" in sql
+    assert "lease_expires_at > now()" in sql
     assert params == (321, "gdrive", "FOLDER1", "gdrive", "FILE1", "lease-owner")
 
 
@@ -493,9 +546,7 @@ def test_normal_content_upsert_takes_same_source_lock_before_replace() -> None:
 
 def test_original_0019_is_fully_restored_and_upgrade_stays_in_0020() -> None:
     root = Path(__file__).resolve().parents[2]
-    sql_0019 = (root / "infra/migrations/0019_ingest_source_health.sql").read_text(
-        encoding="utf-8"
-    )
+    sql_0019 = (root / "infra/migrations/0019_ingest_source_health.sql").read_text(encoding="utf-8")
     sql_0020 = (root / "infra/migrations/0020_ingest_source_retry_upgrade.sql").read_text(
         encoding="utf-8"
     )

@@ -288,10 +288,12 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
             assert repository.record_source_retry(
                 **fingerprint,
                 request_id="request-2",
+                expected_lease_owner="request-2",
             )
-            assert repository.record_source_retry(
+            assert not repository.record_source_retry(
                 **fingerprint,
                 request_id="request-2",
+                expected_lease_owner="request-2",
             )
             with conn.cursor() as cur:
                 cur.execute(
@@ -364,5 +366,144 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
                     "abcdef0123456789abcdef0123456789",
                     11,
                 )
+        finally:
+            conn.rollback()
+
+
+def test_retry_fence_blocks_stale_worker_after_takeover_and_resolution() -> None:
+    """A expiry → B takeover/resolve 後の stale A failure は B の状態を変更できない。"""
+    import psycopg
+
+    class _TransactionPgVector:
+        def __init__(self, conn: Any) -> None:
+            self._conn = conn
+
+        @contextmanager
+        def connection(self, **kwargs: Any) -> Iterator[Any]:
+            yield self._conn
+
+    assert _DB_DSN is not None
+    with psycopg.connect(_DB_DSN) as conn:
+        _prepare_schema(conn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_MIGRATION_0019.read_text(encoding="utf-8"))
+                cur.execute(_MIGRATION_0020.read_text(encoding="utf-8"))
+            repository = IngestRepository(  # type: ignore[arg-type]
+                _TransactionPgVector(conn),
+                app_role=None,
+            )
+            retry = {
+                "source_kind": "gdrive",
+                "source_id": "folder-fence",
+                "source_type": "gdrive",
+                "external_id": "opaque-fenced-retry",
+                "md5_checksum": "0123456789abcdef0123456789abcdef",
+                "size_bytes": 10,
+                "mime_type": "application/test",
+                "validator_schema_version": "ooxml-safe-v2",
+                "reason": "office_download_failed",
+            }
+
+            assert repository.record_source_retry(**retry, request_id="seed")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE ingest_source_retries
+                    SET next_attempt_at = now()
+                    WHERE external_id = 'opaque-fenced-retry'
+                    """
+                )
+            assert [
+                claim.lease_owner
+                for claim in repository.claim_due_source_retries(
+                    source_kind="gdrive",
+                    source_id="folder-fence",
+                    request_id="worker-a",
+                    lease_seconds=60,
+                )
+            ] == ["worker-a"]
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE ingest_source_retries
+                    SET lease_expires_at = now() - interval '1 second'
+                    WHERE external_id = 'opaque-fenced-retry'
+                    """
+                )
+            assert [
+                claim.lease_owner
+                for claim in repository.claim_due_source_retries(
+                    source_kind="gdrive",
+                    source_id="folder-fence",
+                    request_id="worker-b",
+                    lease_seconds=60,
+                )
+            ] == ["worker-b"]
+
+            # B の active lease 中に届いた stale A failure は successor lease を触れない。
+            assert not repository.record_source_retry(
+                **retry,
+                request_id="worker-a",
+                expected_lease_owner="worker-a",
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status, lease_owner, lease_expires_at > now()
+                    FROM ingest_source_retries
+                    WHERE external_id = 'opaque-fenced-retry'
+                    """
+                )
+                assert cur.fetchone() == ("pending", "worker-b", True)
+
+            # Current owner B の通常 retry は成功し lease を解放する。
+            assert repository.record_source_retry(
+                **retry,
+                request_id="worker-b",
+                expected_lease_owner="worker-b",
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE ingest_source_retries
+                    SET next_attempt_at = now()
+                    WHERE external_id = 'opaque-fenced-retry'
+                    """
+                )
+            assert repository.claim_due_source_retries(
+                source_kind="gdrive",
+                source_id="folder-fence",
+                request_id="worker-b-resolve",
+                lease_seconds=60,
+            )
+            assert repository.resolve_source_retry(
+                source_kind="gdrive",
+                source_id="folder-fence",
+                source_type="gdrive",
+                external_id="opaque-fenced-retry",
+                md5_checksum=str(retry["md5_checksum"]),
+                size_bytes=10,
+                mime_type="application/test",
+                validator_schema_version="ooxml-safe-v2",
+                request_id="worker-b-resolve",
+            )
+
+            # B resolve 後に届いた stale A failure cannot resurrect the row.
+            assert not repository.record_source_retry(
+                **retry,
+                request_id="worker-a",
+                expected_lease_owner="worker-a",
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status, lease_owner, lease_expires_at, last_request_id
+                    FROM ingest_source_retries
+                    WHERE external_id = 'opaque-fenced-retry'
+                    """
+                )
+                assert cur.fetchone() == ("resolved", None, None, "worker-b-resolve")
         finally:
             conn.rollback()

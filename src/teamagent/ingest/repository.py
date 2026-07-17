@@ -130,6 +130,7 @@ class SourceRetry:
     validator_schema_version: str
     attempt_count: int
     reason: str
+    lease_owner: str | None = None
 
 
 @dataclass(frozen=True)
@@ -575,7 +576,8 @@ class IngestRepository:
                       retry.mime_type,
                       retry.validator_schema_version,
                       retry.attempt_count,
-                      retry.reason
+                      retry.reason,
+                      retry.lease_owner
         """
         try:
             with self._ops_connection() as conn:
@@ -603,6 +605,9 @@ class IngestRepository:
                     validator_schema_version=str(row["validator_schema_version"]),
                     attempt_count=int(row["attempt_count"]),
                     reason=str(row["reason"]),
+                    lease_owner=(
+                        str(row["lease_owner"]) if row.get("lease_owner") is not None else None
+                    ),
                 )
                 for row in rows
             ]
@@ -645,6 +650,7 @@ class IngestRepository:
               AND external_id = %s
               AND status = 'pending'
               AND lease_owner = %s
+              AND lease_expires_at > now()
         """
         try:
             with self._ops_connection() as conn:
@@ -689,11 +695,17 @@ class IngestRepository:
         reason: str,
         request_id: str,
         metadata: dict[str, Any] | None = None,
+        expected_lease_owner: str | None = None,
     ) -> bool:
         """transient失敗をfingerprint付きでupsertし、指数backoffを設定する。
 
         同一request_id・同一fingerprintの再記録はattemptを増やさず冪等。payloadが変われば
         attemptを1へ戻す。leaseは失敗確定時に解放し、次runの期限到来まで再claimしない。
+
+        ``expected_lease_owner`` がある claimed-worker 経路は、同じ owner の未期限切れ
+        pending lease が現在も存在するときだけ更新する。これにより lease takeover 後の
+        stale worker は successor lease を解放できず、resolved row も復活できない。
+        ``None`` は初回または未claimの scheduling 経路で、active lease とは競合しない。
         """
         import json
 
@@ -706,16 +718,31 @@ class IngestRepository:
             return False
         if not self._schema_probe_allowed("source_retries"):
             return False
+        normalized_expected_lease_owner = (
+            _strip_nul(expected_lease_owner) if expected_lease_owner is not None else None
+        )
         sql = """
             INSERT INTO ingest_source_retries
                 (source_kind, source_id, source_type, external_id,
                  md5_checksum, size_bytes, mime_type, validator_schema_version,
                  status, reason, attempt_count, next_attempt_at,
                  first_failed_at, last_failed_at, last_request_id, metadata)
-            VALUES
-                (%s, %s, %s, %s, %s, %s, %s, %s,
-                 'pending', %s, 1, now() + interval '60 seconds',
-                 now(), now(), %s, %s::jsonb)
+            SELECT
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                'pending', %s, 1, now() + interval '60 seconds',
+                now(), now(), %s, %s::jsonb
+            WHERE %s::text IS NULL
+               OR EXISTS (
+                    SELECT 1
+                    FROM ingest_source_retries AS claimed
+                    WHERE claimed.source_kind = %s
+                      AND claimed.source_id = %s
+                      AND claimed.source_type = %s
+                      AND claimed.external_id = %s
+                      AND claimed.status = 'pending'
+                      AND claimed.lease_owner = %s
+                      AND claimed.lease_expires_at > now()
+               )
             ON CONFLICT (source_kind, source_id, source_type, external_id)
             DO UPDATE SET
                 md5_checksum = EXCLUDED.md5_checksum,
@@ -795,6 +822,25 @@ class IngestRepository:
                 lease_owner = NULL,
                 lease_expires_at = NULL,
                 metadata = ingest_source_retries.metadata || EXCLUDED.metadata
+            WHERE (
+                %s::text IS NULL
+                AND (
+                    ingest_source_retries.status = 'resolved'
+                    OR (
+                        ingest_source_retries.status = 'pending'
+                        AND (
+                            ingest_source_retries.lease_owner IS NULL
+                            OR ingest_source_retries.lease_expires_at <= now()
+                        )
+                    )
+                )
+            )
+            OR (
+                %s::text IS NOT NULL
+                AND ingest_source_retries.status = 'pending'
+                AND ingest_source_retries.lease_owner = %s
+                AND ingest_source_retries.lease_expires_at > now()
+            )
         """
         try:
             with self._ops_connection() as conn:
@@ -813,10 +859,20 @@ class IngestRepository:
                             _strip_nul(reason),
                             _strip_nul(request_id),
                             json.dumps(_sanitize_metadata(metadata or {}), ensure_ascii=False),
+                            normalized_expected_lease_owner,
+                            source_kind,
+                            _strip_nul(source_id),
+                            source_type,
+                            _strip_nul(external_id),
+                            normalized_expected_lease_owner,
+                            normalized_expected_lease_owner,
+                            normalized_expected_lease_owner,
+                            normalized_expected_lease_owner,
                         ),
                     )
+                    recorded = int(cur.rowcount or 0) > 0
             self._schema_probe_succeeded("source_retries")
-            return True
+            return recorded
         except Exception as exc:
             self._schema_probe_failed("source_retries")
             logger.warning(
