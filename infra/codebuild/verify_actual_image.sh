@@ -164,7 +164,7 @@ case "$PIPELINE" in
       --contract "$CONTRACT" >"$BINARY_EXPECTED"
     printf '%s\t%s\n' \
       "/app/src/teamagent/connect_web/static/app.html" \
-      "46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067" \
+      "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c" \
       >>"$BINARY_EXPECTED"
     ;;
   tiktok)

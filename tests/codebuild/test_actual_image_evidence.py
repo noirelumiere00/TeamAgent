@@ -311,7 +311,7 @@ def test_actual_image_verifier_scans_before_signing_and_never_accepts_indexes() 
     assert body.count("aws ecr list-image-referrers") == body.count("--max-results 50")
     assert "/app/src/teamagent/connect_web/static/app.html" in body
     assert (
-        "46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067"
+        "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
         in body
     )
     assert 'KMS_URI="awskms:///$SIGNING_KEY_ARN"' in body

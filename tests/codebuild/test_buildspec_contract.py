@@ -177,10 +177,10 @@ def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app(
     assert "--object-lock-mode COMPLIANCE" in body
     assert "aws kms sign" in body
     for value in (
-        "I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY",
-        "46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067",
-        "15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2",
-        "1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2",
+        "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
+        "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
+        "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
+        "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf",
     ):
         assert value in body
 

@@ -65,13 +65,14 @@ The production application source allowlist is:
 
 | Evidence | Canonical value |
 |---|---|
-| app HTML S3 VersionId | `I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY` |
-| app HTML SHA-256 | `46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067` |
-| Vault manifest SHA-256 | `15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2` |
-| build_inputs SHA-256 | `1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2` |
+| app HTML S3 VersionId | `FTXbcN70D0DCN90TI_hRK1IdQK_HhLee` |
+| app HTML SHA-256 | `03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c` |
+| Vault manifest SHA-256 | `aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e` |
+| build_inputs SHA-256 | `6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf` |
 
-The old `ec1b…`, `7a13…`, and `716ac…` values are rollback/test evidence only;
-they must not be restored as the production canonical source.
+The old `46f007…` / `I1qOb7…` set, along with `ec1b…`, `7a13…`, and
+`716ac…`, is rollback/test evidence only; none may be restored as the
+production canonical source.
 
 ### Activation and merge order
 

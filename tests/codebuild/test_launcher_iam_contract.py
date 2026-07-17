@@ -73,8 +73,8 @@ def test_start_build_environment_is_allowlisted_and_fixed_values_are_pinned() ->
     assert 'variable = "codebuild:environment.environmentVariables.name"' in policy
     assert 'GIT_BRANCH              = "dev"' in body
     assert 'WITH_SCRAPE_TOOLS       = "true"' in body
-    assert "I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY" in body
-    assert "46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067" in body
+    assert "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee" in body
+    assert "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c" in body
 
 
 def test_official_dangerous_override_condition_keys_are_explicit_denies() -> None:

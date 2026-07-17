@@ -33,15 +33,15 @@ locals {
   )
   launcher_role_name            = "teamagent-dev-codebuild-launcher"
   launcher_project_arn          = "arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-image-builder"
-  canonical_app_html_version_id = "I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY"
+  canonical_app_html_version_id = "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
   canonical_app_html_sha256 = (
-    "46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067"
+    "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
   )
   canonical_vault_manifest_sha256 = (
-    "15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2"
+    "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
   )
   canonical_build_inputs_sha256 = (
-    "1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2"
+    "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
   )
   launcher_environment_names = [
     "GIT_COMMIT",
