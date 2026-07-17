@@ -2025,6 +2025,127 @@ def test_ingest_gsheet_applies_classification(monkeypatch: pytest.MonkeyPatch) -
     assert md["row_idx"] == 2
 
 
+@pytest.mark.parametrize(
+    ("row_idx", "company", "case", "expected_client", "expected_industry"),
+    [
+        (44, "ポート株式会社", "キャリアパークの就活アドバイザー", "ポート", "人材"),
+        (63, "アイホン株式会社", "アイホン_Pabbit", "アイホン", "電子機器"),
+        (123, "東京ドーム株式会社様", "", "東京ドーム", "エンタテインメント"),
+    ],
+)
+def test_ingest_gsheet_applies_audited_industry_after_classifier(
+    monkeypatch: pytest.MonkeyPatch,
+    row_idx: int,
+    company: str,
+    case: str,
+    expected_client: str,
+    expected_industry: str,
+) -> None:
+    """Haiku の業種だけを exact-ID override し、他分類・人間入力は保持する。"""
+    from teamagent.adapters.gsheets_client import TabRows
+
+    headers = ("正式社名", "案件名", "クライアント種別", "提案プロダクト", "資料の概要")
+    empty_row = ("", "", "", "", "")
+    target_row = (company, case, "上場企業", "その他", "提案")
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo",
+        tab_name="フォーム回答 1",
+        headers=headers,
+        rows=(empty_row,) * (row_idx - 2) + (target_row,),
+        row_count=row_idx - 1,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    stub = _StubClassifier()  # 業種=日用品。対象3行では監査済み値へ置換される。
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: stub)
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo",
+        sheet_name="ナレッジ共有",
+        description="",
+        tabs=(GSheetsTabSpec(gid=278789217, tab_name="フォーム回答 1"),),
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-industry-override",
+    )
+
+    assert docs_n == 1
+    [call] = repo.upsert_calls
+    assert call["external_id"].endswith(f":278789217:{row_idx}")
+    md = call["metadata"]
+    assert md["cls_industry"] == expected_industry
+    assert md["industry"] == expected_industry
+    # 業種以外の Haiku 分類はそのまま。
+    assert md["cls_project"] == "アース製薬"
+    assert md["cls_doc_type"] == "提案書"
+    assert md["cls_phase"] == "提案"
+    # 人間入力由来 metadata もそのまま。
+    assert md["client_name"] == expected_client
+    assert md["client_company"] == company
+    assert md["client_type"] == "上場企業"
+    assert md["proposed_menu"] == "その他"
+    assert md["knowledge_kind"] == "提案"
+
+
+def test_ingest_gsheet_audited_industry_respects_disabled_classifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """分類 feature gate が OFF なら監査行にも cls_* を新規付与しない。"""
+    from teamagent.adapters.gsheets_client import TabRows
+
+    headers = ("正式社名", "案件名", "資料の概要")
+    fake_client = MagicMock()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo",
+        tab_name="フォーム回答 1",
+        headers=headers,
+        rows=(("", "", ""),) * 42
+        + (("ポート株式会社", "キャリアパークの就活アドバイザー", "提案"),),
+        row_count=43,
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: None)
+
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    spec = GSheetSpec(
+        sheet_id="1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo",
+        sheet_name="ナレッジ共有",
+        description="",
+        tabs=(GSheetsTabSpec(gid=278789217, tab_name="フォーム回答 1"),),
+    )
+    repo = _FakeRepository()
+    docs_n, _ = _ingest_gsheet(
+        spec,
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-gsheet-industry-override-disabled",
+    )
+
+    assert docs_n == 1
+    md = repo.upsert_calls[0]["metadata"]
+    assert md["client_name"] == "ポート"
+    assert "cls_industry" not in md
+    assert "industry" not in md
+    assert not any(key.startswith("cls_") for key in md)
+
+
 def test_ingest_gsheet_fb_metadata_coexists_with_classification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

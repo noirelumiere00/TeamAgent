@@ -31,6 +31,9 @@ from teamagent.identity import shared_company_domains_from_env
 from teamagent.ingest.boilerplate import mark_boilerplate
 from teamagent.ingest.docdedup import mark_duplicate_documents
 from teamagent.ingest.form_mappings import _normalize_form_label
+from teamagent.ingest.gsheet_classification_overrides import (
+    apply_gsheet_industry_override,
+)
 from teamagent.ingest.loader import (
     GDriveFolderSpec,
     GSheetSpec,
@@ -2779,6 +2782,7 @@ def _ingest_gsheet(
             # client_name は 正式社名 から FB と同品質 (法人格/敬称/注記なし) で導出する。
             knowledge_metadata = map_knowledge_fields(row_fields)
             knowledge_doc_metadata: dict[str, Any] = {}
+            derived_knowledge_client: str | None = None
             if knowledge_metadata:
                 knowledge_doc_metadata["is_knowledge_share"] = True
                 knowledge_doc_metadata.update(knowledge_metadata)
@@ -2838,6 +2842,14 @@ def _ingest_gsheet(
                     classification = None
                 if classification is not None:
                     cls_metadata = classification.as_metadata()
+                # Haiku の再分類で監査済みの公開業種が揺れないよう、exact external_id と
+                # 人間入力由来 client_name の二重一致で 3 行だけ決定論的に固定する。
+                # classifier 無効時は従来どおり cls_* を付けない（feature gate を維持）。
+                cls_metadata = apply_gsheet_industry_override(
+                    external_id,
+                    client_name=derived_knowledge_client,
+                    classification_metadata=cls_metadata,
+                )
 
             doc = DocumentUpsert(
                 source_type="gsheets",  # migration 0004 で ENUM に追加済
