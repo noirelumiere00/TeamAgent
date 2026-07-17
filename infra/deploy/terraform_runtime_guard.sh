@@ -12,7 +12,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="8"
+GUARD_VERSION="9"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -330,7 +330,7 @@ migration_to_file() {
           test("^[0-9a-f]{40}$")) and
         .migrations[$id].to.main_signature == {
           minimum_source_commit:
-            "e4daa71986f544d66e0563879b7a4808b4e7b674",
+            "e20411ccf39d5266127f19bc5e2295ebcd4a678f",
           required_hmac_contract_commit:
             "2de3b15632bb2d671a4836d5cf3f252dd9b25727",
           kms_key_arn: .migrations[$id].to.main_signature.kms_key_arn,
@@ -343,9 +343,17 @@ migration_to_file() {
           "teamagent-dev-raw-files" and
         .migrations[$id].from.connect_app_html.key ==
           "codebuild/connect-web-app.html" and
+        (.migrations[$id].from.connect_app_html | keys | sort) == [
+          "bucket", "build_inputs_sha256", "key", "sha256",
+          "vault_manifest_sha256", "version_id"
+        ] and
         (.migrations[$id].from.connect_app_html.version_id |
           test("^[A-Za-z0-9._-]{1,1024}$")) and
         (.migrations[$id].from.connect_app_html.sha256 |
+          test("^[0-9a-f]{64}$")) and
+        (.migrations[$id].from.connect_app_html.vault_manifest_sha256 |
+          test("^[0-9a-f]{64}$")) and
+        (.migrations[$id].from.connect_app_html.build_inputs_sha256 |
           test("^[0-9a-f]{64}$")) and
         .migrations[$id].to.connect_app_html ==
           .migrations[$id].from.connect_app_html and
@@ -488,9 +496,17 @@ migration_to_file() {
           "teamagent-dev-raw-files" and
         .migrations[$id].from.connect_app_html.key ==
           "codebuild/connect-web-app.html" and
+        (.migrations[$id].from.connect_app_html | keys | sort) == [
+          "bucket", "build_inputs_sha256", "key", "sha256",
+          "vault_manifest_sha256", "version_id"
+        ] and
         (.migrations[$id].from.connect_app_html.version_id |
           test("^[A-Za-z0-9._-]{1,1024}$")) and
         (.migrations[$id].from.connect_app_html.sha256 |
+          test("^[0-9a-f]{64}$")) and
+        (.migrations[$id].from.connect_app_html.vault_manifest_sha256 |
+          test("^[0-9a-f]{64}$")) and
+        (.migrations[$id].from.connect_app_html.build_inputs_sha256 |
           test("^[0-9a-f]{64}$")) and
         (.migrations[$id].required_preflight_profiles | sort) ==
           ["activation-canary", "activation-ingest-acl-quarantine"] and
@@ -719,7 +735,7 @@ validate_signed_main_image() {
   local annotation_name="$6" output="$7"
   [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] ||
     die "main source commitは完全40桁SHAが必要です"
-  [ "$minimum_source_commit" = "e4daa71986f544d66e0563879b7a4808b4e7b674" ] ||
+  [ "$minimum_source_commit" = "e20411ccf39d5266127f19bc5e2295ebcd4a678f" ] ||
     die "main signed imageのminimum source commitが固定値と一致しません"
   [ "$required_hmac_commit" = "2de3b15632bb2d671a4836d5cf3f252dd9b25727" ] ||
     die "main signed imageのHMAC contract commitが固定値と一致しません"
@@ -731,7 +747,7 @@ validate_signed_main_image() {
     die "main image source commitがローカルGit objectにありません"
   git -C "$REPO_ROOT" merge-base --is-ancestor \
     "$minimum_source_commit" "$source_commit" ||
-    die "main image source commitが監査済みorigin/dev e4daa719以降ではありません"
+    die "main image source commitが監査済みorigin/dev e20411cc以降ではありません"
   git -C "$REPO_ROOT" merge-base --is-ancestor \
     "$required_hmac_commit" "$source_commit" ||
     die "main image source commitにHMAC separation 2de3b156が含まれません"
@@ -908,12 +924,40 @@ snapshot_live() {
   connect_app_sha256="$(sha256_file "$dir/connect-app.html")"
   [[ "$connect_app_sha256" =~ ^[0-9a-f]{64}$ ]] ||
     die "connect /app SHA-256を計算できません"
+  jq -Rse '
+    [
+      split("\n")[] |
+      select(startswith("const DATA=") and endswith(";")) |
+      ltrimstr("const DATA=") |
+      rtrimstr(";") |
+      fromjson
+    ] |
+    select(length == 1) |
+    .[0] |
+    {
+      vault_manifest_sha256: .manifest_sha256,
+      build_inputs_sha256: .build_inputs_sha256
+    } |
+    select(
+      (.vault_manifest_sha256 | type) == "string" and
+      (.vault_manifest_sha256 | test("^[0-9a-f]{64}$")) and
+      (.build_inputs_sha256 | type) == "string" and
+      (.build_inputs_sha256 | test("^[0-9a-f]{64}$"))
+    )
+  ' "$dir/connect-app.html" > "$dir/connect-app-provenance.json" ||
+    die "connect /appのVault manifest/build inputs provenanceが不正です"
   jq -n -S -c \
     --arg bucket "$connect_app_bucket" \
     --arg key "$connect_app_key" \
     --arg version_id "$connect_app_version" \
     --arg sha256 "$connect_app_sha256" \
-    '{bucket:$bucket,key:$key,version_id:$version_id,sha256:$sha256}' \
+    --slurpfile provenance "$dir/connect-app-provenance.json" \
+    '{
+      bucket:$bucket,
+      key:$key,
+      version_id:$version_id,
+      sha256:$sha256
+    } + $provenance[0]' \
     > "$dir/connect-app-contract.json"
 
   aws_cli ecs describe-services --cluster "$cluster" \

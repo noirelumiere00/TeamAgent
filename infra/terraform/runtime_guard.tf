@@ -89,10 +89,12 @@ variable "runtime_guard_live" {
       }))
     })
     connect_app_html = object({
-      bucket     = string
-      key        = string
-      version_id = string
-      sha256     = string
+      bucket                = string
+      key                   = string
+      version_id            = string
+      sha256                = string
+      vault_manifest_sha256 = string
+      build_inputs_sha256   = string
     })
     hmac_transition_epoch = number
     deployed_hmac = object({
@@ -287,6 +289,14 @@ locals {
       var.runtime_guard_live.connect_app_html.version_id,
     )) &&
     can(regex("^[0-9a-f]{64}$", var.runtime_guard_live.connect_app_html.sha256)) &&
+    can(regex(
+      "^[0-9a-f]{64}$",
+      var.runtime_guard_live.connect_app_html.vault_manifest_sha256,
+    )) &&
+    can(regex(
+      "^[0-9a-f]{64}$",
+      var.runtime_guard_live.connect_app_html.build_inputs_sha256,
+    )) &&
     (
       var.runtime_guard_live.mode == "migration" ?
       (

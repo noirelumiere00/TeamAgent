@@ -172,7 +172,8 @@ def test_divergent_live_allowlist_and_signed_core_gate_are_fail_closed() -> None
         "2026-07-wolfi-runtime-v1"
     ]
     assert migration["enabled"] is False
-    assert migration["from"]["task_definition_arns"]["connect_web"].endswith(":50")
+    assert migration["from"]["task_definition_arns"]["connect_web"].endswith(":53")
+    assert migration["from"]["task_definition_arns"]["canary"].endswith(":14")
     assert migration["from"]["task_definition_arns"]["ingest"].endswith(":42")
     assert migration["from"]["active_task_counts"] == {
         "ingest_active": 0,
@@ -187,11 +188,20 @@ def test_divergent_live_allowlist_and_signed_core_gate_are_fail_closed() -> None
         "x_buzz",
         "tiktok",
     }
+    assert migration["from"]["images"]["connect_web"] == (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+        "teamagent-mcp@sha256:"
+        "0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144"
+    )
+    assert migration["from"]["images"]["canary"] == (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+        "teamagent-mcp@sha256:"
+        "fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5"
+    )
     # Prefix-only observations must never be promoted into an invented full digest.
-    assert migration["from"]["images"]["connect_web"] == ""
     assert migration["from"]["images"]["ingest"] == ""
     assert migration["to"]["main_signature"] == {
-        "minimum_source_commit": "e4daa71986f544d66e0563879b7a4808b4e7b674",
+        "minimum_source_commit": "e20411ccf39d5266127f19bc5e2295ebcd4a678f",
         "required_hmac_contract_commit": ("2de3b15632bb2d671a4836d5cf3f252dd9b25727"),
         "kms_key_arn": "",
         "annotation_name": "org.opencontainers.image.revision",
@@ -235,8 +245,12 @@ def test_connect_app_html_uses_current_exact_version_and_sha_contract() -> None:
     exact = {
         "bucket": "teamagent-dev-raw-files",
         "key": "codebuild/connect-web-app.html",
-        "version_id": "I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY",
-        "sha256": ("46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067"),
+        "version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
+        "sha256": ("03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"),
+        "vault_manifest_sha256": (
+            "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
+        ),
+        "build_inputs_sha256": ("6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"),
     }
     manifest = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"]
     runtime = manifest["2026-07-wolfi-runtime-v1"]
@@ -251,6 +265,8 @@ def test_connect_app_html_uses_current_exact_version_and_sha_contract() -> None:
         "s3api get-object",
         "--version-id",
         "connect_app_sha256",
+        "vault_manifest_sha256",
+        "build_inputs_sha256",
         "$live.connect_app_html == $m.from.connect_app_html",
     ):
         assert expected in guard

@@ -24,6 +24,19 @@ TIKTOK_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-dev-tik
 TIKTOK_IMAGE = f"{TIKTOK_REPOSITORY}@sha256:{'e' * 64}"
 OPENCLAW_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-openclaw"
 OPENCLAW_IMAGE = f"{OPENCLAW_REPOSITORY}@sha256:{'c' * 64}"
+APP_VAULT_MANIFEST_SHA256 = "a" * 64
+APP_BUILD_INPUTS_SHA256 = "b" * 64
+APP_HTML = (
+    "<!doctype html>\n<script>\nconst DATA="
+    + json.dumps(
+        {
+            "manifest_sha256": APP_VAULT_MANIFEST_SHA256,
+            "build_inputs_sha256": APP_BUILD_INPUTS_SHA256,
+        },
+        separators=(",", ":"),
+    )
+    + ";\n</script>\n"
+).encode()
 MAIL_HMAC_SECRET = (
     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:teamagent/dev/hmac/mail-action-AbC123"
 )
@@ -34,10 +47,10 @@ REPORT_HMAC_SECRET = (
 COMPONENTS = {
     "openclaw": ("openclaw", "teamagent-dev-openclaw", 25),
     "mcp": ("teamagent-mcp", "teamagent-dev-mcp", 55),
-    "connect_web": ("connect-web", "teamagent-dev-connect-web", 50),
+    "connect_web": ("connect-web", "teamagent-dev-connect-web", 53),
     "ingest": ("ingest", "teamagent-dev-ingest", 42),
     "morning": ("morning-digest", "teamagent-dev-morning-digest", 44),
-    "canary": ("canary", "teamagent-dev-canary", 13),
+    "canary": ("canary", "teamagent-dev-canary", 14),
     "tiktok": ("acquire", "teamagent-dev-tiktok-acquire", 25),
     "x_buzz": ("worker", "teamagent-dev-x-buzz-worker", 19),
 }
@@ -810,6 +823,7 @@ def _fake_aws(path: Path) -> None:
         ACCOUNT = {ACCOUNT!r}
         REGION = {REGION!r}
         LIVE_IMAGE = {LIVE_IMAGE!r}
+        APP_HTML = {APP_HTML!r}
         components = {json.dumps(COMPONENTS)!r}
         components = json.loads(components)
         rules = {json.dumps(RULES)!r}
@@ -952,13 +966,23 @@ def _fake_aws(path: Path) -> None:
                 }}],
             }}))
         elif args[:2] == ["s3api", "head-object"]:
+            app_html = (
+                b"fake current app html\\n"
+                if os.environ.get("AWS_FAKE_APP_PROVENANCE_MISSING")
+                else APP_HTML
+            )
             print(json.dumps({{
-                "ContentLength": len(b"fake current app html\\n"),
+                "ContentLength": len(app_html),
                 "VersionId": "fake-current-version-1",
             }}))
         elif args[:2] == ["s3api", "get-object"]:
             version = args[args.index("--version-id") + 1]
-            pathlib.Path(args[-1]).write_bytes(b"fake current app html\\n")
+            app_html = (
+                b"fake current app html\\n"
+                if os.environ.get("AWS_FAKE_APP_PROVENANCE_MISSING")
+                else APP_HTML
+            )
+            pathlib.Path(args[-1]).write_bytes(app_html)
             print(json.dumps({{"VersionId": version}}))
         elif args[:2] == ["apigatewayv2", "get-api"]:
             print(json.dumps({{
@@ -1494,6 +1518,19 @@ def test_live_change_during_plan_is_never_published(tmp_path: Path) -> None:
     plan = tmp_path / "unsafe.tfplan"
     result = _run(_plan_command(var_file, plan), env)
     assert result.returncode == 1
+    assert not plan.exists()
+
+
+def test_connect_app_without_bound_provenance_fails_before_plan(tmp_path: Path) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    env["AWS_FAKE_APP_PROVENANCE_MISSING"] = "1"
+    plan = tmp_path / "missing-app-provenance.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 1
+    assert "Vault manifest/build inputs provenance" in result.stdout + result.stderr
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
     assert not plan.exists()
 
 

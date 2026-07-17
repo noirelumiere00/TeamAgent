@@ -13,16 +13,22 @@ runtimeを含む plain Terraform、targeted apply、旧image-only script、可�
 
 現liveの既知差分は次のとおりです。
 
-- connect-web は task definition `:50`。`source.zip` のtracked sourceは
+- connect-web は task definition `:53`、canaryは `:14`。connect-web imageは
+  `teamagent-mcp@sha256:0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144`。
+  canary imageは環境変数だけを変えた`:13`から不変の
+  `teamagent-mcp@sha256:fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5`。
+  image内sourceの基点は
   `e4daa71986f544d66e0563879b7a4808b4e7b674` と一致する一方、OCI revisionは
   `unknown` のため、新coreの署名済みdigestとは扱いません。
-- 手動gsheets ingestは旧 task definition `:42` で実行中です。runtime migration前に
-  完了を確認し、新規実行を止めた状態にします。
+- 手動gsheets ingest `:42` は完了済みです。runtime migration直前にもactive taskが
+  0であることを再確認し、新規実行を止めた状態にします。
 - `/app` のreview済みS3 objectは
-  VersionId `I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY`、
-  SHA-256 `46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067`
-  です。guardはlatest objectをexact versionで再取得してhash照合するため、旧版や
-  別publishへ暗黙に移行しません。
+  VersionId `FTXbcN70D0DCN90TI_hRK1IdQK_HhLee`、
+  SHA-256 `03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c`、
+  Vault manifest `aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e`、
+  build inputs `6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf`
+  です。guardはlatest objectをexact versionで再取得し、HTML bytesと埋込みprovenanceを
+  照合するため、旧版や別publishへ暗黙に移行しません。
 - ingest-weeklyとcanary-hourlyは無効、morning-digestは有効のまま第1段階を行います。
 - alarm SNSには確認済み配送先がありません。email endpointまたは既存chat integrationの
   どちらか一方を指定しない限りplanは生成されません。AWS providerはemail確認を待てない
@@ -36,7 +42,7 @@ runtimeを含む plain Terraform、targeted apply、旧image-only script、可�
 第1段階を有効化するreview commitで、次を全てexact値で埋めます。
 
 1. connect/ingest/morning/canaryを含む全live task definition ARNと完全image digest。
-2. `e4daa719…` とHMAC契約 `2de3b156…` の両方を含むWolfi coreの完全digest、
+2. `e20411cc…` とHMAC契約 `2de3b156…` の両方を含むWolfi coreの完全digest、
    40桁source commit、固定KMS key ARN。
 3. 独立したOpenClaw、TikTok、x-buzzの完全digest。
 4. dispatcher code hash、legacy alarm参照数、確認済みalarm配送先。
