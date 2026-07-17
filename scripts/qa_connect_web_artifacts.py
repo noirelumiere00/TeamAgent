@@ -60,7 +60,16 @@ _FRONT_LINE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*):\s*"?(.*?)"?\s*$')
 _DATA_ASSIGNMENT_RE = re.compile(r"<script>\s*const DATA=")
 _FOOTER_RE = re.compile(r"更新: (\d{4}-\d{2}-\d{2}) JST・取引先(\d+)・資料(\d+)")
 _STATUS_FUNCTION_RE = re.compile(r"function updateStatus\(bl,chars\)\{([^\n]*)\}")
-_INTERNAL_PAYLOAD_KEYS = frozenset({"external_id", "source_type", "source_key"})
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_INTERNAL_PAYLOAD_KEYS = frozenset(
+    {
+        "external_id",
+        "source_type",
+        "source_key",
+        "_primary_owner_key",
+        "_project_owner_key",
+    }
+)
 _REQUIRED_JSON_SIDECARS = (
     "exclude_stems.json",
     "exclude_source_keys.json",
@@ -204,6 +213,9 @@ class HtmlState:
     timeline_event_count: int = 0
     client_timeline_missing_count: int = 0
     client_timeline_schema_invalid_count: int = 0
+    activity_doc_pair_count: int = 0
+    missing_doc_date_count: int = 0
+    missing_fb_date_count: int = 0
 
 
 @dataclass
@@ -1281,19 +1293,22 @@ def _analyze_html(
         )
 
         links = payload.get("links")
+        valid_links: set[tuple[str, str]] = set()
         if not isinstance(links, list):
             _add(violations, "html_links_schema_invalid")
         else:
-            _add(
-                violations,
-                "html_links_schema_invalid",
-                sum(
+            invalid_links = 0
+            for link in links:
+                if (
                     not isinstance(link, list)
                     or len(link) != 3
                     or not all(isinstance(item, str) for item in link)
-                    for link in links
-                ),
-            )
+                ):
+                    invalid_links += 1
+                    continue
+                link_source, link_target, _context = cast(list[str], link)
+                valid_links.add((link_source, link_target))
+            _add(violations, "html_links_schema_invalid", invalid_links)
 
         colors = payload.get("colors")
         if not isinstance(colors, dict) or not colors:
@@ -1435,6 +1450,90 @@ def _analyze_html(
             if stem in payload_doc_titles
         )
         _add(violations, "html_doc_title_mismatch", title_mismatches)
+
+        # Activity history is intentionally narrower than the related-document graph:
+        # every activity document must be explicitly linked from the client card, exist
+        # in the payload, and have a usable date.  This keeps title-only coincidences
+        # (for example Port/report) out of the timeline and prevents "date unknown".
+        docs_by_stem = {
+            cast(str, doc["stem"]): doc
+            for doc in docs
+            if isinstance(doc.get("stem"), str)
+        }
+        missing_doc_dates = sum(
+            not isinstance(doc.get("modified"), str)
+            or _DATE_RE.fullmatch(cast(str, doc.get("modified", ""))) is None
+            for doc in docs
+        )
+        state.missing_doc_date_count = missing_doc_dates
+        _add(violations, "html_doc_date_missing", missing_doc_dates)
+
+        activity_schema_errors = 0
+        activity_duplicates = 0
+        activity_docs_missing = 0
+        activity_not_explicit = 0
+        activity_doc_count_mismatches = 0
+        last_contact_mismatches = 0
+        missing_fb_dates = 0
+        activity_pairs = 0
+        for client in clients:
+            client_stem = client.get("stem")
+            activity = client.get("ds")
+            timeline = client.get("tl")
+            if not isinstance(client_stem, str) or not isinstance(activity, list):
+                activity_schema_errors += 1
+                continue
+            if not isinstance(timeline, list):
+                activity_schema_errors += 1
+                timeline = []
+
+            activity_stems: list[str] = []
+            for stem in activity:
+                if not isinstance(stem, str) or not stem:
+                    activity_schema_errors += 1
+                    continue
+                activity_stems.append(stem)
+            activity_duplicates += len(activity_stems) - len(set(activity_stems))
+            activity_pairs += len(activity_stems)
+            activity_docs_missing += sum(stem not in docs_by_stem for stem in activity_stems)
+            activity_not_explicit += sum(
+                (f"c:{client_stem}", f"d:{stem}") not in valid_links
+                for stem in activity_stems
+            )
+            doc_count = client.get("doc")
+            if not _is_int(doc_count) or cast(int, doc_count) != len(activity_stems):
+                activity_doc_count_mismatches += 1
+
+            fb_dates: list[str] = []
+            for event in timeline:
+                if not isinstance(event, dict):
+                    activity_schema_errors += 1
+                    continue
+                date_value = event.get("d")
+                if not isinstance(date_value, str) or _DATE_RE.fullmatch(date_value) is None:
+                    missing_fb_dates += 1
+                    continue
+                fb_dates.append(date_value)
+            doc_dates = [
+                cast(str, docs_by_stem[stem]["modified"])
+                for stem in activity_stems
+                if stem in docs_by_stem
+                and isinstance(docs_by_stem[stem].get("modified"), str)
+                and _DATE_RE.fullmatch(cast(str, docs_by_stem[stem]["modified"])) is not None
+            ]
+            expected_last = max([*fb_dates, *doc_dates], default="")
+            if client.get("last") != expected_last:
+                last_contact_mismatches += 1
+
+        state.activity_doc_pair_count = activity_pairs
+        state.missing_fb_date_count = missing_fb_dates
+        _add(violations, "html_client_activity_schema_invalid", activity_schema_errors)
+        _add(violations, "html_client_activity_duplicate", activity_duplicates)
+        _add(violations, "html_client_activity_doc_missing", activity_docs_missing)
+        _add(violations, "html_client_activity_not_explicit", activity_not_explicit)
+        _add(violations, "html_client_doc_count_mismatch", activity_doc_count_mismatches)
+        _add(violations, "html_client_last_contact_mismatch", last_contact_mismatches)
+        _add(violations, "html_fb_date_missing", missing_fb_dates)
         actual_renamed = {
             stem
             for stem in content.expected_renamed_stems
@@ -1691,6 +1790,9 @@ def _safe_result(
             "font_bound": html.font_bound,
             "rename_applied_count": html.payload_rename_applied_count,
             "internal_source_exposure_count": html.internal_source_exposure_count,
+            "activity_doc_pair_count": html.activity_doc_pair_count,
+            "missing_doc_date_count": html.missing_doc_date_count,
+            "missing_fb_date_count": html.missing_fb_date_count,
         },
         "violations": clean_violations,
     }

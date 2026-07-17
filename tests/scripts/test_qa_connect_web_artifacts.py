@@ -883,6 +883,43 @@ def test_client_timeline_gate_rejects_source_heading_count_mismatch(
     assert cast_dict(result["violations"])["client_timeline_count_mismatch"] == 1
 
 
+def test_activity_dates_and_explicit_client_links_are_enforced(
+    artifacts: tuple[Path, Path, Path, str],
+) -> None:
+    vault, html, sidecars, _ = artifacts
+
+    def corrupt_activity_contract(payload: dict[str, object]) -> None:
+        clients = payload["clients"]
+        docs = payload["docs"]
+        assert isinstance(clients, list) and isinstance(docs, list)
+        client = clients[0]
+        doc = docs[0]
+        assert isinstance(client, dict) and isinstance(doc, dict)
+        stem = doc["stem"]
+        assert isinstance(stem, str)
+        doc["modified"] = ""
+        doc["_primary_owner_key"] = "must-not-be-public"
+        client["ds"] = [stem, stem, "missing-doc"]
+        client["doc"] = 1
+        client["tl"] = [{"d": ""}]
+        client["last"] = "2099-01-01"
+        payload["links"] = []
+
+    _rewrite_html_payload(html, corrupt_activity_contract)
+    result = qa.run_qa(qa.QAConfig(vault=vault, html=html, sidecar_dir=sidecars))
+    violations = cast_dict(result["violations"])
+
+    assert result["ok"] is False
+    assert violations["html_internal_source_key_exposed"] == 1
+    assert violations["html_doc_date_missing"] == 1
+    assert violations["html_fb_date_missing"] == 1
+    assert violations["html_client_activity_duplicate"] == 1
+    assert violations["html_client_activity_doc_missing"] == 1
+    assert violations["html_client_activity_not_explicit"] == 3
+    assert violations["html_client_doc_count_mismatch"] == 1
+    assert violations["html_client_last_contact_mismatch"] == 1
+
+
 def test_graph_link_endpoint_bounds_reject_runtime_breakage(
     artifacts: tuple[Path, Path, Path, str],
 ) -> None:
