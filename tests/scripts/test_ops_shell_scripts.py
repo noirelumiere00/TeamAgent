@@ -1,4 +1,4 @@
-"""運用スクリプト5本（入れ込み v2・C6）の静的検証＋引数パス実行テスト。
+"""運用スクリプトの静的検証＋引数パス実行テスト。
 
 AWS を呼ばない範囲で検証する:
 - bash -n（構文）と set -euo pipefail（共通規約）
@@ -20,7 +20,17 @@ PUBLISH = PROJECT_ROOT / "infra" / "deploy" / "publish_app_html.sh"
 BOOTSTRAP = PROJECT_ROOT / "infra" / "deploy" / "bootstrap_apphtml_s3_iam.sh"
 REGISTER = PROJECT_ROOT / "infra" / "deploy" / "register_ingest_td.sh"
 UNIFIED = PROJECT_ROOT / "infra" / "deploy" / "deploy_connectweb_unified.sh"
-ALL_SCRIPTS = [RUN_INGEST, PUBLISH, BOOTSTRAP, REGISTER, UNIFIED]
+TERRAFORM_GUARD = PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
+APPLY_RESILIENCE = PROJECT_ROOT / "infra" / "terraform" / "apply_resilience.sh"
+ALL_SCRIPTS = [
+    RUN_INGEST,
+    PUBLISH,
+    BOOTSTRAP,
+    REGISTER,
+    UNIFIED,
+    TERRAFORM_GUARD,
+    APPLY_RESILIENCE,
+]
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -101,7 +111,7 @@ def test_bootstrap_contract_strings() -> None:
 
 
 def test_help_exits_zero_without_aws() -> None:
-    for script in (RUN_INGEST, PUBLISH, REGISTER):
+    for script in (RUN_INGEST, PUBLISH, REGISTER, TERRAFORM_GUARD):
         r = _run(str(script), "--help")
         assert r.returncode == 0, f"{script.name} --help が exit {r.returncode}: {r.stderr}"
         assert "usage" in r.stdout.lower()
@@ -113,8 +123,164 @@ def test_unknown_arg_exits_nonzero() -> None:
         assert r.returncode == 1, f"{script.name} が不明引数で exit {r.returncode}"
         assert "不明な引数" in r.stdout + r.stderr
 
+    r = _run(str(TERRAFORM_GUARD), "snapshot", "--no-such-flag")
+    assert r.returncode == 1
+    assert "不明な引数" in r.stdout + r.stderr
+
 
 def test_register_requires_image_tag() -> None:
     r = _run(str(REGISTER))
     assert r.returncode == 1
     assert "--image-tag" in r.stdout + r.stderr
+
+
+def test_terraform_guard_requires_saved_targeted_plan() -> None:
+    """AWS CLI を呼ぶ前にplain plan/applyを拒否する。"""
+    r = _run(str(TERRAFORM_GUARD), "plan")
+    assert r.returncode == 1
+    assert "--var-file" in r.stdout + r.stderr
+
+    r = _run(
+        str(TERRAFORM_GUARD),
+        "plan",
+        "--var-file",
+        str(PROJECT_ROOT / "infra" / "terraform" / "terraform.tfvars.example"),
+        "--out",
+        "/tmp/should-not-exist.tfplan",
+    )
+    assert r.returncode == 1
+    assert "--runtime-sync" in r.stdout + r.stderr
+
+    r = _run(str(TERRAFORM_GUARD), "apply")
+    assert r.returncode == 1
+    assert "不明な command" in r.stdout + r.stderr
+
+
+def test_terraform_guard_contract_strings() -> None:
+    body = TERRAFORM_GUARD.read_text(encoding="utf-8")
+    for needle in (
+        "runtime_guard_live",
+        "live_fingerprint_sha256",
+        "runtime_guard_sha256",
+        "plan_sha256",
+        "--runtime-sync",
+        "--runtime-rollout-image",
+        "非許可の destroy/replace",
+        "env/secretsがliveと完全一致",
+        "plan 作成中に live runtime が変化",
+        "read-only検証完了",
+        "umask 077",
+    ):
+        assert needle in body, f"Terraform guard契約が欠落: {needle}"
+    assert "-auto-approve" not in body
+    assert 'terraform -chdir="$TF_DIR" apply' not in body
+    assert "--confirm-plan-sha" not in body
+    assert "--target)" not in body
+    assert "--allow-runtime" not in body
+
+
+def test_terraform_runtime_preconditions_cover_all_managed_runtimes() -> None:
+    tf_dir = PROJECT_ROOT / "infra" / "terraform"
+    runtime_guard = (tf_dir / "runtime_guard.tf").read_text(encoding="utf-8")
+    assert "runtime_guard_verified" in runtime_guard
+    assert "default  = null" in runtime_guard
+
+    for filename in ("fargate.tf", "connect_web.tf"):
+        body = (tf_dir / filename).read_text(encoding="utf-8")
+        assert body.count("local.runtime_guard_verified") >= 2, (
+            f"task/service precondition欠落: {filename}"
+        )
+        assert "create_before_destroy = true" in body, (
+            f"安全なtask definition置換順が欠落: {filename}"
+        )
+
+    for filename in ("tiktok_acquire.tf", "x_research.tf"):
+        body = (tf_dir / filename).read_text(encoding="utf-8")
+        assert "create_before_destroy = true" in body
+        assert body.count("local.runtime_guard_verified") >= 3
+
+
+def test_resilience_helper_is_plan_only_and_excludes_runtime_targets() -> None:
+    body = APPLY_RESILIENCE.read_text(encoding="utf-8")
+    assert "terraform apply" not in body
+    assert "-auto-approve" not in body
+    targets = [line.strip() for line in body.splitlines() if line.strip().startswith("-target=")]
+    assert targets
+    for target in targets:
+        assert "aws_ecs_" not in target
+        assert "aws_cloudwatch_event_target" not in target
+        assert "aws_iam_" not in target
+        assert "aws_security_group" not in target
+
+    result = _run(str(APPLY_RESILIENCE), "apply")
+    assert result.returncode == 2
+    assert "usage" in result.stderr.lower()
+
+
+def test_worker_runtime_and_iam_hardening_contracts() -> None:
+    tf_dir = PROJECT_ROOT / "infra" / "terraform"
+    tiktok = (tf_dir / "tiktok_acquire.tf").read_text(encoding="utf-8")
+    x_buzz = (tf_dir / "x_research.tf").read_text(encoding="utf-8")
+
+    for body in (tiktok, x_buzz):
+        for needle in (
+            "@sha256:[0-9a-f]{64}",
+            'user                   = "10001"',
+            "readonlyRootFilesystem = true",
+            "initProcessEnabled = true",
+            'drop = ["ALL"]',
+            'name = "tmp"',
+            'containerPath = "/tmp"',
+            "ephemeral_storage",
+            "size_in_gib",
+        ):
+            assert needle in body
+
+    tiktok_task_policy = tiktok.split('data "aws_iam_policy_document" "tiktok_task_app"', 1)[
+        1
+    ].split('resource "aws_iam_role_policy" "tiktok_task_app"', 1)[0]
+    assert 'actions   = ["dynamodb:UpdateItem", "dynamodb:GetItem"]' in (tiktok_task_policy)
+    assert "dynamodb:PutItem" not in tiktok_task_policy
+    assert "logs:PutLogEvents" not in tiktok_task_policy
+
+    tiktok_mcp_policy = tiktok.split('data "aws_iam_policy_document" "tiktok_mcp_policy"', 1)[
+        1
+    ].split('resource "aws_iam_role_policy" "tiktok_mcp_policy"', 1)[0]
+    assert 'actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]' in (tiktok_mcp_policy)
+
+    x_worker_policy = x_buzz.split('data "aws_iam_policy_document" "x_buzz_task_app"', 1)[1].split(
+        'resource "aws_iam_role_policy" "x_buzz_task_app"', 1
+    )[0]
+    assert 'actions   = ["dynamodb:UpdateItem", "dynamodb:GetItem"]' in (x_worker_policy)
+    assert "logs:PutLogEvents" not in x_worker_policy
+
+
+def test_worker_vpc_endpoint_and_python_healthcheck_contracts() -> None:
+    tf_dir = PROJECT_ROOT / "infra" / "terraform"
+    endpoints = (tf_dir / "vpc_endpoints.tf").read_text(encoding="utf-8")
+    assert "aws_security_group.tiktok_tasks[0].id" in endpoints
+    assert "aws_security_group.x_buzz_tasks[0].id" in endpoints
+
+    for filename, port in (("fargate.tf", "8787"), ("connect_web.tf", "8788")):
+        body = (tf_dir / filename).read_text(encoding="utf-8")
+        assert "urllib.request.urlopen" in body
+        assert f"127.0.0.1:{port}/healthz" in body
+        assert "curl -fsS" not in body
+
+
+def test_x_research_disabled_path_has_counted_policy_documents() -> None:
+    """enable_x_research=falseでもcount=0 resourceを[0]参照してplan評価エラーにしない。"""
+    body = (PROJECT_ROOT / "infra" / "terraform" / "x_research.tf").read_text(encoding="utf-8")
+    guard_body = TERRAFORM_GUARD.read_text(encoding="utf-8")
+    for name in (
+        "x_buzz_exec_secrets",
+        "x_buzz_task_app",
+        "x_dispatch_policy",
+        "x_mcp_policy",
+    ):
+        declaration = f'data "aws_iam_policy_document" "{name}" {{\n  count = local.xr_enabled'
+        assert declaration in body, f"count gate欠落: {name}"
+        assert f"data.aws_iam_policy_document.{name}[0].json" in body
+        assert f"from = data.aws_iam_policy_document.{name}" in body
+        assert f"to   = data.aws_iam_policy_document.{name}[0]" in body
+        assert f"data.aws_iam_policy_document.{name}" in guard_body

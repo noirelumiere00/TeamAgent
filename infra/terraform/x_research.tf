@@ -34,6 +34,21 @@ variable "pr_research_allowed_emails" {
   default     = ""
 }
 
+variable "x_buzz_ephemeral_gib" {
+  description = "x-buzz workerの一時ストレージ(GiB)。readonly root上の/tmp作業領域。"
+  type        = number
+  default     = 40
+
+  validation {
+    condition = (
+      var.x_buzz_ephemeral_gib >= 21 &&
+      var.x_buzz_ephemeral_gib <= 200 &&
+      floor(var.x_buzz_ephemeral_gib) == var.x_buzz_ephemeral_gib
+    )
+    error_message = "x_buzz_ephemeral_gibはFargateで指定可能な21〜200GiBの整数にしてください。"
+  }
+}
+
 locals {
   xr_enabled = var.enable_x_research ? 1 : 0
   # ワーカーは mcp image 流用(command上書き)のため、taskdef は mcp_image が要る。
@@ -41,6 +56,34 @@ locals {
   xr_name     = "${var.project_name}-${var.environment}-x-buzz"
   xr_acct     = data.aws_caller_identity.current.account_id
   xr_loggroup = "/teamagent/${var.environment}/x-buzz"
+  xr_dispatch_static_environment = {
+    CLUSTER_ARN = aws_ecs_cluster.main.arn
+    SUBNETS     = join(",", data.aws_subnets.default.ids)
+    SG_ID       = aws_security_group.x_buzz_tasks[0].id
+    CONTAINER   = "worker"
+  }
+}
+
+# policy document data source に count gate を追加した際のstate address移行。
+# 明示しないと targeted runtime plan が「moved instances excluded」で停止する。
+moved {
+  from = data.aws_iam_policy_document.x_buzz_exec_secrets
+  to   = data.aws_iam_policy_document.x_buzz_exec_secrets[0]
+}
+
+moved {
+  from = data.aws_iam_policy_document.x_buzz_task_app
+  to   = data.aws_iam_policy_document.x_buzz_task_app[0]
+}
+
+moved {
+  from = data.aws_iam_policy_document.x_dispatch_policy
+  to   = data.aws_iam_policy_document.x_dispatch_policy[0]
+}
+
+moved {
+  from = data.aws_iam_policy_document.x_mcp_policy
+  to   = data.aws_iam_policy_document.x_mcp_policy[0]
 }
 
 # ---------- CloudWatch Logs ----------
@@ -133,6 +176,8 @@ resource "aws_iam_role_policy_attachment" "x_buzz_exec_managed" {
 
 # Apify トークンは tiktok/ 名前空間の既存 secret を共用（teamagent/<env>/tiktok/apify-token）。
 data "aws_iam_policy_document" "x_buzz_exec_secrets" {
+  count = local.xr_enabled
+
   statement {
     actions   = ["secretsmanager:GetSecretValue"]
     resources = ["arn:aws:secretsmanager:${var.aws_region}:${local.xr_acct}:secret:${var.project_name}/${var.environment}/tiktok/*"]
@@ -143,10 +188,10 @@ resource "aws_iam_role_policy" "x_buzz_exec_secrets" {
   count  = local.xr_enabled
   name   = "${local.xr_name}-exec-secrets"
   role   = aws_iam_role.x_buzz_exec[0].id
-  policy = data.aws_iam_policy_document.x_buzz_exec_secrets.json
+  policy = data.aws_iam_policy_document.x_buzz_exec_secrets[0].json
 }
 
-# ---------- IAM: タスクロール(S3 put / Dynamo更新 / コスト台帳 / ログ) ----------
+# ---------- IAM: タスクロール(S3 put / Dynamo更新 / コスト台帳) ----------
 resource "aws_iam_role" "x_buzz_task" {
   count              = local.xr_enabled
   name               = "${local.xr_name}-task"
@@ -154,6 +199,8 @@ resource "aws_iam_role" "x_buzz_task" {
 }
 
 data "aws_iam_policy_document" "x_buzz_task_app" {
+  count = local.xr_enabled
+
   statement {
     sid       = "S3PutPrefix"
     actions   = ["s3:PutObject"]
@@ -169,18 +216,13 @@ data "aws_iam_policy_document" "x_buzz_task_app" {
     actions   = ["dynamodb:UpdateItem", "dynamodb:GetItem"]
     resources = [aws_dynamodb_table.cost_usage[0].arn]
   }
-  statement {
-    sid       = "Logs"
-    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["${aws_cloudwatch_log_group.x_buzz[0].arn}:*"]
-  }
 }
 
 resource "aws_iam_role_policy" "x_buzz_task_app" {
   count  = local.xr_enabled
   name   = "${local.xr_name}-task-app"
   role   = aws_iam_role.x_buzz_task[0].id
-  policy = data.aws_iam_policy_document.x_buzz_task_app.json
+  policy = data.aws_iam_policy_document.x_buzz_task_app[0].json
 }
 
 # ---------- ECS Task Definition(軽量・mcp image流用・chromium不要) ----------
@@ -201,22 +243,44 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
     operating_system_family = "LINUX"
   }
 
+  ephemeral_storage {
+    size_in_gib = var.x_buzz_ephemeral_gib
+  }
+
+  volume {
+    name = "tmp"
+  }
+
   container_definitions = jsonencode([
     {
-      name      = "worker"
-      image     = var.mcp_image
-      essential = true
-      command   = ["python", "-m", "teamagent.workers.x_buzz_job"]
+      name                   = "worker"
+      image                  = var.mcp_image
+      essential              = true
+      user                   = "10001"
+      readonlyRootFilesystem = true
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities = {
+          drop = ["ALL"]
+        }
+      }
+      command = ["python", "-m", "teamagent.workers.x_buzz_job"]
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
         { name = "X_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
         { name = "X_JOBS_TABLE", value = aws_dynamodb_table.x_jobs[0].name },
         { name = "COST_GUARD_TABLE", value = aws_dynamodb_table.cost_usage[0].name },
         { name = "COST_APIFY_MONTHLY_USD", value = var.cost_apify_monthly_usd },
+        { name = "TMPDIR", value = "/tmp" },
+        { name = "HOME", value = "/tmp" },
+        { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
       ]
       secrets = var.tiktok_apify_secret_arn != "" ? [
         { name = "APIFY_API_TOKEN", valueFrom = var.tiktok_apify_secret_arn }
       ] : []
+      mountPoints = [
+        { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
+      ]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -227,6 +291,23 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
       }
     }
   ])
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition = can(regex(
+        "^${local.xr_acct}\\.dkr\\.ecr\\.${var.aws_region}\\.amazonaws\\.com/teamagent-mcp@sha256:[0-9a-f]{64}$",
+        var.mcp_image,
+      ))
+      error_message = "x-buzz workerには同一account/regionのteamagent-mcp完全digest URIが必須です。"
+    }
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 # ---------- SQS → Lambda dispatcher → ECS RunTask (★RunTask/PassRoleはここだけ) ----------
@@ -235,6 +316,7 @@ data "archive_file" "x_dispatch" {
   type        = "zip"
   source_dir  = "${path.module}/lambda/x_dispatch"
   output_path = "${path.module}/build/x_dispatch.zip"
+  excludes    = ["__pycache__", "**/__pycache__/**"]
 }
 
 resource "aws_iam_role" "x_dispatch" {
@@ -244,6 +326,8 @@ resource "aws_iam_role" "x_dispatch" {
 }
 
 data "aws_iam_policy_document" "x_dispatch_policy" {
+  count = local.xr_enabled
+
   statement {
     sid       = "SqsConsume"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
@@ -275,7 +359,7 @@ resource "aws_iam_role_policy" "x_dispatch_policy" {
   count  = local.xr_enabled
   name   = "${local.xr_name}-dispatch-policy"
   role   = aws_iam_role.x_dispatch[0].id
-  policy = data.aws_iam_policy_document.x_dispatch_policy.json
+  policy = data.aws_iam_policy_document.x_dispatch_policy[0].json
 }
 
 resource "aws_lambda_function" "x_dispatch" {
@@ -289,12 +373,15 @@ resource "aws_lambda_function" "x_dispatch" {
   source_code_hash = data.archive_file.x_dispatch[0].output_base64sha256
   timeout          = 30
   environment {
-    variables = {
-      CLUSTER_ARN = aws_ecs_cluster.main.arn
+    variables = merge(local.xr_dispatch_static_environment, {
       TASKDEF_ARN = aws_ecs_task_definition.x_buzz_worker[0].arn
-      SUBNETS     = join(",", data.aws_subnets.default.ids)
-      SG_ID       = aws_security_group.x_buzz_tasks[0].id
-      CONTAINER   = "worker"
+    })
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
     }
   }
 }
@@ -304,12 +391,21 @@ resource "aws_lambda_event_source_mapping" "x_dispatch" {
   event_source_arn = aws_sqs_queue.x_jobs[0].arn
   function_name    = aws_lambda_function.x_dispatch[0].arn
   batch_size       = 1
+
+  lifecycle {
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 # ---------- IAM: MCPタスクロールに付ける権限 ----------
 # submit(SQS/Dynamo put) / status(Dynamo get+update=report_urlキャッシュ) / 結果読込(S3 get)
 # / コスト台帳(check/record)。★RunTask/PassRole は絶対に含めない(tiktok と同じ権限分離)。
 data "aws_iam_policy_document" "x_mcp_policy" {
+  count = local.xr_enabled
+
   statement {
     sid       = "SqsSend"
     actions   = ["sqs:SendMessage"]
@@ -336,7 +432,7 @@ resource "aws_iam_role_policy" "x_mcp_policy" {
   count  = local.xr_enabled
   name   = "${local.xr_name}-mcp-access"
   role   = aws_iam_role.mcp_task.id
-  policy = data.aws_iam_policy_document.x_mcp_policy.json
+  policy = data.aws_iam_policy_document.x_mcp_policy[0].json
 }
 
 # ---------- CloudWatch: DLQ 深度アラーム（既存SNSへ） ----------

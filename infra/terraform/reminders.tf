@@ -134,6 +134,8 @@ data "archive_file" "reminder_notify" {
   type        = "zip"
   source_dir  = "${path.module}/lambda/reminder_notify"
   output_path = "${path.module}/build/reminder_notify.zip"
+  # ローカル実行で生成された.pycを除外し、source_code_hashをworktree非依存にする。
+  excludes = ["__pycache__", "**/__pycache__/**"]
 }
 
 resource "aws_iam_role" "reminder_notify" {

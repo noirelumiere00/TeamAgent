@@ -15,9 +15,17 @@ variable "enable_tiktok_acquire" {
 }
 
 variable "tiktok_acquire_image" {
-  description = "ECRのイメージURI(immutable tag)。例 718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-dev-tiktok-acquire:<sha>"
+  description = "tiktok-acquireのECR完全digest URI。例 718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-dev-tiktok-acquire@sha256:<64hex>。tagは禁止。"
   type        = string
   default     = ""
+
+  validation {
+    condition = var.tiktok_acquire_image == "" || can(regex(
+      "^[0-9]+\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}$",
+      var.tiktok_acquire_image,
+    ))
+    error_message = "tiktok_acquire_imageはECRの完全digest URI（...@sha256:<64hex>）で指定してください。tagは禁止です。"
+  }
 }
 
 variable "tiktok_task_cpu" {
@@ -36,6 +44,15 @@ variable "tiktok_ephemeral_gib" {
   description = "一時ストレージ(GiB)。動画数百MB向けに30〜50。"
   type        = number
   default     = 40
+
+  validation {
+    condition = (
+      var.tiktok_ephemeral_gib >= 21 &&
+      var.tiktok_ephemeral_gib <= 200 &&
+      floor(var.tiktok_ephemeral_gib) == var.tiktok_ephemeral_gib
+    )
+    error_message = "tiktok_ephemeral_gibはFargateで指定可能な21〜200GiBの整数にしてください。"
+  }
 }
 
 variable "tiktok_proxy_secret_arn" {
@@ -66,6 +83,29 @@ locals {
     var.tiktok_proxy_secret_arn != "" ? [{ name = "PROXY_SERVER", valueFrom = var.tiktok_proxy_secret_arn }] : [],
     var.tiktok_apify_secret_arn != "" ? [{ name = "APIFY_API_TOKEN", valueFrom = var.tiktok_apify_secret_arn }] : [],
   )
+  tk_dispatch_static_environment = {
+    CLUSTER_ARN = aws_ecs_cluster.tiktok[0].arn
+    SUBNETS     = join(",", data.aws_subnets.default.ids)
+    SG_ID       = aws_security_group.tiktok_tasks[0].id
+    CONTAINER   = "acquire"
+  }
+}
+
+# Keep count-gated policy document address migrations explicit so targeted
+# read-only runtime plans include the prior state instances deterministically.
+moved {
+  from = data.aws_iam_policy_document.tiktok_task_app
+  to   = data.aws_iam_policy_document.tiktok_task_app[0]
+}
+
+moved {
+  from = data.aws_iam_policy_document.tiktok_dispatch_policy
+  to   = data.aws_iam_policy_document.tiktok_dispatch_policy[0]
+}
+
+moved {
+  from = data.aws_iam_policy_document.tiktok_mcp_policy
+  to   = data.aws_iam_policy_document.tiktok_mcp_policy[0]
 }
 
 # ---------- ECR ----------
@@ -179,7 +219,7 @@ resource "aws_iam_role_policy" "tiktok_exec_secrets" {
   policy = data.aws_iam_policy_document.tiktok_exec_secrets.json
 }
 
-# ---------- IAM: タスクロール(S3 prefix put / Dynamo更新 / ログ) ----------
+# ---------- IAM: タスクロール(S3 prefix put / Dynamo更新) ----------
 data "aws_iam_policy_document" "tiktok_task_assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -197,6 +237,8 @@ resource "aws_iam_role" "tiktok_task" {
 }
 
 data "aws_iam_policy_document" "tiktok_task_app" {
+  count = local.tk_enabled
+
   statement {
     sid       = "S3PutPrefix"
     actions   = ["s3:PutObject"]
@@ -204,13 +246,8 @@ data "aws_iam_policy_document" "tiktok_task_app" {
   }
   statement {
     sid       = "DynamoStatus"
-    actions   = ["dynamodb:UpdateItem", "dynamodb:GetItem", "dynamodb:PutItem"]
+    actions   = ["dynamodb:UpdateItem", "dynamodb:GetItem"]
     resources = [aws_dynamodb_table.tiktok_jobs[0].arn]
-  }
-  statement {
-    sid       = "Logs"
-    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["${aws_cloudwatch_log_group.tiktok_acquire[0].arn}:*"]
   }
 }
 
@@ -218,7 +255,7 @@ resource "aws_iam_role_policy" "tiktok_task_app" {
   count  = local.tk_enabled
   name   = "${local.tk_name}-task-app"
   role   = aws_iam_role.tiktok_task[0].id
-  policy = data.aws_iam_policy_document.tiktok_task_app.json
+  policy = data.aws_iam_policy_document.tiktok_task_app[0].json
 }
 
 # ---------- ECS Task Definition(arm64) ----------
@@ -240,18 +277,38 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
     size_in_gib = var.tiktok_ephemeral_gib
   }
 
+  # chromium/yt-dlp/ffmpegは一時ファイルを必要とする。readonly rootを維持し、
+  # Fargate ephemeral storageの/tmpだけを書込み可能にする。
+  volume {
+    name = "tmp"
+  }
+
   container_definitions = jsonencode([
     {
-      name      = "acquire"
-      image     = var.tiktok_acquire_image
-      essential = true
+      name                   = "acquire"
+      image                  = var.tiktok_acquire_image
+      essential              = true
+      user                   = "10001"
+      readonlyRootFilesystem = true
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities = {
+          drop = ["ALL"]
+        }
+      }
       # command はイメージのCMD(npx tsx src/job.ts)を使用。Pipeが env TIKTOK_JOB_JSON を上書き注入。
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
         { name = "TIKTOK_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
         { name = "TIKTOK_JOBS_TABLE", value = aws_dynamodb_table.tiktok_jobs[0].name },
+        { name = "TMPDIR", value = "/tmp" },
+        { name = "HOME", value = "/tmp" },
+        { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
       ]
       secrets = local.tk_secrets
+      mountPoints = [
+        { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
+      ]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -262,6 +319,23 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
       }
     }
   ])
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition = can(regex(
+        "^${local.tk_acct}\\.dkr\\.ecr\\.${var.aws_region}\\.amazonaws\\.com/${local.tk_name}@sha256:[0-9a-f]{64}$",
+        var.tiktok_acquire_image,
+      ))
+      error_message = "enable_tiktok_acquire=trueでは同一account/regionの専用ECR完全digest URIが必須です。"
+    }
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 # ---------- SQS → Lambda dispatcher → ECS RunTask (★RunTask/PassRoleはここだけ) ----------
@@ -272,6 +346,8 @@ data "archive_file" "tiktok_dispatch" {
   type        = "zip"
   source_dir  = "${path.module}/lambda/tiktok_dispatch"
   output_path = "${path.module}/build/tiktok_dispatch.zip"
+  # reminder_notifyと同様、.pyc混入によるsource_code_hashドリフトを防止する。
+  excludes = ["__pycache__", "**/__pycache__/**"]
 }
 
 data "aws_iam_policy_document" "tiktok_dispatch_assume" {
@@ -291,6 +367,8 @@ resource "aws_iam_role" "tiktok_dispatch" {
 }
 
 data "aws_iam_policy_document" "tiktok_dispatch_policy" {
+  count = local.tk_enabled
+
   statement {
     sid       = "SqsConsume"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
@@ -322,7 +400,7 @@ resource "aws_iam_role_policy" "tiktok_dispatch_policy" {
   count  = local.tk_enabled
   name   = "${local.tk_name}-dispatch-policy"
   role   = aws_iam_role.tiktok_dispatch[0].id
-  policy = data.aws_iam_policy_document.tiktok_dispatch_policy.json
+  policy = data.aws_iam_policy_document.tiktok_dispatch_policy[0].json
 }
 
 resource "aws_lambda_function" "tiktok_dispatch" {
@@ -336,12 +414,15 @@ resource "aws_lambda_function" "tiktok_dispatch" {
   source_code_hash = data.archive_file.tiktok_dispatch[0].output_base64sha256
   timeout          = 30
   environment {
-    variables = {
-      CLUSTER_ARN = aws_ecs_cluster.tiktok[0].arn
+    variables = merge(local.tk_dispatch_static_environment, {
       TASKDEF_ARN = aws_ecs_task_definition.tiktok_acquire[0].arn
-      SUBNETS     = join(",", data.aws_subnets.default.ids)
-      SG_ID       = aws_security_group.tiktok_tasks[0].id
-      CONTAINER   = "acquire"
+    })
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
     }
   }
 }
@@ -351,19 +432,30 @@ resource "aws_lambda_event_source_mapping" "tiktok_dispatch" {
   event_source_arn = aws_sqs_queue.tiktok_jobs[0].arn
   function_name    = aws_lambda_function.tiktok_dispatch[0].arn
   batch_size       = 1
+
+  lifecycle {
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 # ---------- IAM: OC/AiLa(MCP)ロールに付ける権限(SQS送信/Dynamo参照/S3署名) ----------
 # ★RunTask/PassRoleは絶対に含めない(権限分離=敵対レビューhigh対応)
 data "aws_iam_policy_document" "tiktok_mcp_policy" {
+  count = local.tk_enabled
+
   statement {
     sid       = "SqsSend"
     actions   = ["sqs:SendMessage"]
     resources = [aws_sqs_queue.tiktok_jobs[0].arn]
   }
   statement {
-    sid       = "DynamoRead"
-    actions   = ["dynamodb:GetItem"]
+    # submit() creates the initial job record with PutItem; status polling uses
+    # GetItem. UpdateItem remains confined to the acquire worker task role.
+    sid       = "DynamoStatusSubmit"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
     resources = [aws_dynamodb_table.tiktok_jobs[0].arn]
   }
   statement {
@@ -378,7 +470,7 @@ resource "aws_iam_role_policy" "tiktok_mcp_policy" {
   count  = (local.tk_enabled == 1 && var.tiktok_mcp_task_role_name != "") ? 1 : 0
   name   = "${local.tk_name}-mcp-access"
   role   = var.tiktok_mcp_task_role_name
-  policy = data.aws_iam_policy_document.tiktok_mcp_policy.json
+  policy = data.aws_iam_policy_document.tiktok_mcp_policy[0].json
 }
 
 # ---------- S3 ライフサイクル(tiktok-acquire/ を30日でexpire) ----------

@@ -29,6 +29,11 @@ resource "aws_security_group" "vpce" {
       # §U-Part3-Step C: morning_digest Scheduled Task も VPC endpoint 経由（PR #131）。
       # 追加忘れると private_dns_enabled=true のため 443 が落ち provisioning ループになる必須配線。
       var.enable_morning_digest ? [aws_security_group.morning_digest[0].id] : [],
+      # Worker tasks also need the shared private-DNS endpoints (ECR API/DKR,
+      # Secrets Manager and Logs). Conditional expressions prevent an index
+      # lookup when the corresponding count-gated stack is disabled.
+      var.enable_tiktok_acquire ? [aws_security_group.tiktok_tasks[0].id] : [],
+      var.enable_x_research ? [aws_security_group.x_buzz_tasks[0].id] : [],
     )
   }
   egress {

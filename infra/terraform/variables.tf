@@ -2,18 +2,33 @@ variable "aws_region" {
   description = "AWS リージョン"
   type        = string
   default     = "ap-northeast-1"
+
+  validation {
+    condition     = var.aws_region == "ap-northeast-1"
+    error_message = "このS3 backend/stateはTeamAgent dev東京リージョン専用です。"
+  }
 }
 
 variable "environment" {
   description = "環境名 (dev / staging / prod)"
   type        = string
   default     = "dev"
+
+  validation {
+    condition     = var.environment == "dev"
+    error_message = "このS3 backend/stateはTeamAgent dev環境専用です。"
+  }
 }
 
 variable "project_name" {
   description = "プロジェクトプレフィックス"
   type        = string
   default     = "teamagent"
+
+  validation {
+    condition     = var.project_name == "teamagent"
+    error_message = "このS3 backend/stateはTeamAgent dev project専用です。"
+  }
 }
 
 # ---------- RDS / pgvector ----------

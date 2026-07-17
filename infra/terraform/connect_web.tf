@@ -433,13 +433,22 @@ resource "aws_ecs_task_definition" "connect_web" {
       }
     }
     healthCheck = {
-      command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:8788/healthz || exit 1"]
+      command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).read()\""]
       interval    = 30
       timeout     = 5
       retries     = 5
       startPeriod = 30
     }
   }])
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 # --- ECS Service ---
@@ -474,6 +483,13 @@ resource "aws_ecs_service" "connect_web" {
   depends_on = [
     aws_lb_target_group.connect_web_fargate,
   ]
+
+  lifecycle {
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 # ---------- Outputs ----------

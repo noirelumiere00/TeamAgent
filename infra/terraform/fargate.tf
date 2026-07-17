@@ -561,7 +561,7 @@ resource "aws_ecs_task_definition" "mcp" {
       }
     }
     healthCheck = {
-      command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:8787/healthz || exit 1"]
+      command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).read()\""]
       interval    = 30
       timeout     = 5
       retries     = 5
@@ -571,6 +571,15 @@ resource "aws_ecs_task_definition" "mcp" {
     # §M改: 拡張版のみ SA JSON ファイル化ラッパで起動（既定はイメージの CMD のまま＝挙動不変）。
     command = ["sh", "scripts/run_mcp_vertex_entrypoint.sh"]
   } : {})])
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 resource "aws_ecs_task_definition" "openclaw" {
@@ -657,6 +666,13 @@ resource "aws_ecs_service" "mcp" {
   }
   service_registries {
     registry_arn = aws_service_discovery_service.mcp.arn
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
   }
 }
 
