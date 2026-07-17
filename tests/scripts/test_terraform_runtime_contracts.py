@@ -103,6 +103,26 @@ def test_main_tiktok_and_x_writable_cache_contracts_are_exact() -> None:
     assert 'PYTHONPYCACHEPREFIX", value = "/tmp/.pycache"' in x_buzz
 
 
+@pytest.mark.parametrize(
+    ("filename", "task_definition"),
+    [
+        ("connect_web.tf", "connect_web"),
+        ("canary_schedule.tf", "canary"),
+    ],
+)
+def test_slack_identity_consumers_receive_exact_team_id(
+    filename: str,
+    task_definition: str,
+) -> None:
+    block = _block(
+        TF_ROOT / filename,
+        "aws_ecs_task_definition",
+        task_definition,
+    )
+    exact_environment = '{ name = "SLACK_TEAM_ID", value = var.slack_team_id },'
+    assert block.count(exact_environment) == 1
+
+
 def test_fargate_preflight_executes_every_distinct_image_contract() -> None:
     body = GUARD.read_text(encoding="utf-8")
     migration = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"][

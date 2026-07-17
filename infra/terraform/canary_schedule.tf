@@ -220,6 +220,7 @@ resource "aws_ecs_task_definition" "canary" {
       { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
       { name = "PYTHONPYCACHEPREFIX", value = "/tmp/.pycache" },
       { name = "STRUCTLOG_FORMAT", value = "json" },
+      { name = "SLACK_TEAM_ID", value = var.slack_team_id },
       { name = "CANARY_SLACK_USER_ID", value = var.canary_slack_user_id },
     ]
     secrets = [
