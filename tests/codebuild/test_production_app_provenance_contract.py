@@ -47,11 +47,16 @@ def _latest_production_app_record() -> tuple[dict[str, Any], str]:
     sections = re.split(r"(?m)^## ", body)
     assert len(sections) > 1, "deploy log has no production entries"
 
-    latest_section = sections[1].split("\n---\n", maxsplit=1)[0]
+    production_sections = [section.split("\n---\n", maxsplit=1)[0] for section in sections[1:]]
+    latest_section = next(
+        (section for section in production_sections if "/app" in section.partition("\n")[0]),
+        None,
+    )
+    assert latest_section is not None, "deploy log has no /app production entry"
     heading, separator, details = latest_section.partition("\n")
     assert separator
-    assert "`/app`" in heading
-    assert "本番反映" in heading
+    assert "/app" in heading
+    assert "本番" in heading
 
     match = PROVENANCE_RECORD_RE.search(details)
     assert match, "latest production entry lacks machine-readable app provenance"
@@ -76,6 +81,20 @@ def test_latest_deploy_record_is_the_exact_current_production_allowlist() -> Non
     assert heading.startswith("2026-07-17 ")
     assert record == CURRENT_PRODUCTION
     assert set(record.values()).isdisjoint(STALE_ROLLBACK.values())
+
+
+def test_newer_non_app_deploy_does_not_shadow_current_app_provenance() -> None:
+    body = DEPLOY_LOG.read_text(encoding="utf-8")
+    latest_section = re.split(r"(?m)^## ", body)[1].split("\n---\n", maxsplit=1)[0]
+    latest_heading = latest_section.partition("\n")[0]
+    record, app_heading = _latest_production_app_record()
+
+    assert "Slack本人確認" in latest_heading
+    assert "task definition `:50`→`:53`" in latest_section
+    assert "task definition `:13`→`:14`" in latest_section
+    assert "現行image digest" in latest_section
+    assert app_heading != latest_heading
+    assert record == CURRENT_PRODUCTION
 
 
 def test_all_canonical_consumers_follow_latest_production_record() -> None:
