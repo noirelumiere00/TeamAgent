@@ -17,9 +17,11 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import re
 import zipfile
 from io import BytesIO
+from xml.etree import ElementTree
 
 import structlog
 
@@ -48,6 +50,7 @@ class OfficePayloadError(zipfile.BadZipFile):
 
     - ``html_response``: Drive 本体ではなく HTML 応答
     - ``truncated_download`` / ``size_mismatch``: Drive metadata の size と不一致
+    - ``checksum_mismatch``: Drive metadata の MD5 と実バイト列が不一致
     - ``corrupt_zip``: ZIP シグネチャはあるが中央ディレクトリ等が壊れている
     - ``format_mismatch``: Office MIME と実体の OOXML package が一致しない
 
@@ -87,8 +90,13 @@ def _validate_office_payload(
     *,
     mime_type: str,
     expected_size: int | None,
+    expected_md5: str | None,
 ) -> None:
-    """OOXML を開く前に、既知の非抽出 payload を安全な分類例外へ変換する。"""
+    """OOXML を開く前に、既知の非抽出 payload を安全な分類例外へ変換する。
+
+    ``zipfile.ZipFile`` に標準 EOCD / ZIP64 EOCD の解釈を委ね、``testzip`` で全memberを
+    展開してCRCまで検証する。
+    """
     actual_size = len(data)
 
     if _looks_like_html(data):
@@ -108,8 +116,17 @@ def _validate_office_payload(
             expected_bytes=expected_size,
         )
 
-    stream = BytesIO(data)
-    if not zipfile.is_zipfile(stream):
+    if expected_md5:
+        actual_md5 = hashlib.md5(data, usedforsecurity=False).hexdigest()
+        if actual_md5 != expected_md5.lower():
+            raise OfficePayloadError(
+                "checksum_mismatch",
+                mime_type=mime_type,
+                actual_bytes=actual_size,
+                expected_bytes=expected_size,
+            )
+
+    if not zipfile.is_zipfile(BytesIO(data)):
         category = "corrupt_zip" if data.startswith(_ZIP_PREFIXES) else "format_mismatch"
         raise OfficePayloadError(
             category,
@@ -120,22 +137,33 @@ def _validate_office_payload(
 
     required_part = _OOXML_REQUIRED_PART[mime_type]
     try:
-        with zipfile.ZipFile(stream) as package:
-            has_required_part = required_part in package.namelist()
-    except zipfile.BadZipFile as exc:
+        with zipfile.ZipFile(BytesIO(data)) as package:
+            bad_member = package.testzip()
+            if bad_member is not None:
+                raise OfficePayloadError(
+                    "corrupt_zip",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                )
+            if required_part not in package.namelist():
+                raise OfficePayloadError(
+                    "format_mismatch",
+                    mime_type=mime_type,
+                    actual_bytes=actual_size,
+                    expected_bytes=expected_size,
+                )
+            with package.open(required_part) as xml_part:
+                ElementTree.parse(xml_part)
+    except OfficePayloadError:
+        raise
+    except (zipfile.BadZipFile, OSError, RuntimeError, ElementTree.ParseError) as exc:
         raise OfficePayloadError(
             "corrupt_zip",
             mime_type=mime_type,
             actual_bytes=actual_size,
             expected_bytes=expected_size,
         ) from exc
-    if not has_required_part:
-        raise OfficePayloadError(
-            "format_mismatch",
-            mime_type=mime_type,
-            actual_bytes=actual_size,
-            expected_bytes=expected_size,
-        )
 
 
 # xlsx 抽出時に拾うセル数の上限ガード（極端に大きい sheet で OOM 防止）。
@@ -339,6 +367,7 @@ def extract_office_pages(
     mime_type: str,
     *,
     expected_size: int | None = None,
+    expected_md5: str | None = None,
     include_notes: bool = False,
     include_tables: bool = False,
     formula_fallback: bool = False,
@@ -355,6 +384,7 @@ def extract_office_pages(
     すべての追加 kwarg は後方互換（既定値は現行挙動と完全一致）:
 
     * ``expected_size`` — Drive metadata の size。実バイト数との差を途中切れとして分類する。
+    * ``expected_md5`` — Drive metadata の MD5。本文が metadata と同一 payload か検証する。
     * ``include_notes`` / ``include_tables`` — pptx のノート・表セルも拾う
       （mime が pptx 以外なら無視）。
     * ``formula_fallback`` — xlsx でキャッシュ値が無い式 sheet の式文字列を拾う
@@ -367,7 +397,12 @@ def extract_office_pages(
     if mime_type not in OFFICE_BINARY_MIMES:
         raise ValueError(f"Unsupported office mime type: {mime_type}")
 
-    _validate_office_payload(data, mime_type=mime_type, expected_size=expected_size)
+    _validate_office_payload(
+        data,
+        mime_type=mime_type,
+        expected_size=expected_size,
+        expected_md5=expected_md5,
+    )
 
     if mime_type == DOCX_MIME:
         text = extract_docx_text(data)

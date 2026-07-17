@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import zipfile
 from io import BytesIO
 
 import pytest
@@ -213,9 +215,54 @@ def test_office_payload_classifies_ooxml_mime_mismatch() -> None:
     assert raised.value.category == "format_mismatch"
 
 
+def test_office_payload_classifies_drive_md5_mismatch() -> None:
+    data = _build_sample_pptx()
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(
+            data,
+            mime_type=PPTX_MIME,
+            expected_size=len(data),
+            expected_md5="0" * 32,
+        )
+    assert raised.value.category == "checksum_mismatch"
+
+
+def test_office_payload_runs_zip_crc_integrity_before_extract() -> None:
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as package:
+        package.writestr(
+            "ppt/presentation.xml",
+            '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
+        )
+        package.writestr("payload.bin", b"CRC-CONTENT")
+    data = bytearray(buf.getvalue())
+    payload_at = data.index(b"CRC-CONTENT")
+    data[payload_at] ^= 0x01
+
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(bytes(data), mime_type=PPTX_MIME, expected_size=len(data))
+    assert raised.value.category == "corrupt_zip"
+
+
+def test_office_payload_parses_required_ooxml_part_before_extract() -> None:
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w") as package:
+        package.writestr("ppt/presentation.xml", b"<p:presentation")
+    data = buf.getvalue()
+
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME, expected_size=len(data))
+    assert raised.value.category == "corrupt_zip"
+
+
 def test_office_payload_accepts_exact_drive_size() -> None:
     data = _build_sample_pptx()
-    pages = extract_office_pages(data, mime_type=PPTX_MIME, expected_size=len(data))
+    pages = extract_office_pages(
+        data,
+        mime_type=PPTX_MIME,
+        expected_size=len(data),
+        expected_md5=hashlib.md5(data, usedforsecurity=False).hexdigest(),
+    )
     assert len(pages) == 2
 
 

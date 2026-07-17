@@ -17,6 +17,7 @@ Usage (CLI):
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import os
 import re
 import uuid
@@ -151,6 +152,11 @@ def _spec_source_id(spec: Any) -> str | None:
     return None
 
 
+def _external_id_ref(external_id: str) -> str:
+    """ログ用の非可逆な短い参照。Drive ID/完全名をログへ出さず相関だけ可能にする。"""
+    return hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:12]
+
+
 def _drain_changes(
     client: Any,
     start_token: str,
@@ -238,6 +244,20 @@ class IngestStats:
     sources_processed: int = 0
     sources_skipped: int = 0
     errors: list[str] = field(default_factory=list)
+    warning_reasons: dict[str, int] = field(default_factory=dict)
+    known_invalid_suppressed: int = 0
+
+    @property
+    def warning_count(self) -> int:
+        return sum(self.warning_reasons.values())
+
+    @property
+    def outcome(self) -> str:
+        if self.errors:
+            return "failed"
+        if self.warning_count:
+            return "success_with_warnings"
+        return "success"
 
 
 @dataclass
@@ -251,6 +271,254 @@ class IngestResult:
 
     def total_errors(self) -> int:
         return sum(len(s.errors) for s in self.by_kind.values())
+
+    def total_warnings(self) -> int:
+        return sum(s.warning_count for s in self.by_kind.values())
+
+    @property
+    def outcome(self) -> str:
+        if self.total_errors():
+            return "failed"
+        if self.total_warnings():
+            return "success_with_warnings"
+        return "success"
+
+
+@dataclass(frozen=True)
+class _WarningSnapshot:
+    reasons: dict[str, int]
+    suppressed: int
+
+
+@dataclass
+class _IngestWarningCollector:
+    """source単位の分類済みwarningを、本文/完全IDなしで集計する。"""
+
+    _reason_counts: dict[tuple[str, str], dict[str, int]] = field(default_factory=dict)
+    _suppressed_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+
+    def add(
+        self,
+        source_kind: str,
+        source_id: str,
+        reason: str,
+        *,
+        suppressed: bool = False,
+    ) -> None:
+        key = (source_kind, source_id)
+        counts = self._reason_counts.setdefault(key, {})
+        counts[reason] = counts.get(reason, 0) + 1
+        if suppressed:
+            self._suppressed_counts[key] = self._suppressed_counts.get(key, 0) + 1
+
+    def snapshot(self, source_kind: str, source_id: str) -> _WarningSnapshot:
+        key = (source_kind, source_id)
+        return _WarningSnapshot(
+            reasons=dict(self._reason_counts.get(key, {})),
+            suppressed=self._suppressed_counts.get(key, 0),
+        )
+
+    def delta(
+        self,
+        source_kind: str,
+        source_id: str,
+        before: _WarningSnapshot,
+    ) -> _WarningSnapshot:
+        after = self.snapshot(source_kind, source_id)
+        reasons = {
+            reason: count - before.reasons.get(reason, 0)
+            for reason, count in after.reasons.items()
+            if count - before.reasons.get(reason, 0) > 0
+        }
+        return _WarningSnapshot(
+            reasons=reasons,
+            suppressed=max(0, after.suppressed - before.suppressed),
+        )
+
+
+_OFFICE_WARNING_REASONS = frozenset(
+    {
+        "html_response",
+        "truncated_download",
+        "size_mismatch",
+        "checksum_mismatch",
+        "corrupt_zip",
+        "format_mismatch",
+        "office_download_failed",
+        "office_extract_failed",
+        "office_empty_text",
+    }
+)
+_PERSISTENT_OFFICE_INVALID_REASONS = frozenset({"corrupt_zip", "format_mismatch"})
+
+
+def _normalized_office_warning_reason(reason: str) -> str:
+    return reason if reason in _OFFICE_WARNING_REASONS else "invalid_source"
+
+
+def _known_invalid_office_reason(
+    repository: IngestRepository,
+    f: Any,
+) -> str | None:
+    """同一 Drive ID+MD5+size の既知 invalid を検索。旧repo/schemaでは再検証へ倒す。"""
+    md5_checksum = getattr(f, "md5_checksum", None)
+    size_bytes = getattr(f, "size", None)
+    if not md5_checksum or size_bytes is None:
+        return None
+    lookup = getattr(repository, "find_invalid_source_reason", None)
+    if not callable(lookup):
+        return None
+    try:
+        reason = lookup("gdrive", f.id, md5_checksum, size_bytes)
+        return str(reason) if reason is not None else None
+    except Exception as exc:
+        logger.warning(
+            "ingest_source_health_lookup_failed",
+            file_ref=_external_id_ref(f.id),
+            error_type=type(exc).__name__,
+        )
+        return None
+
+
+def _record_office_warning(
+    *,
+    repository: IngestRepository,
+    f: Any,
+    category: str,
+    request_id: str,
+    dry_run: bool,
+    warning_collector: _IngestWarningCollector | None,
+    warning_source_kind: str,
+    warning_source_id: str,
+    event: str,
+    actual_bytes: int | None,
+    expected_bytes: int | None,
+    known_invalid: bool = False,
+    error_type: str | None = None,
+) -> None:
+    """Office skipを集計し、確定的invalid payloadだけ fingerprint 単位で永続化する。"""
+    reason = _normalized_office_warning_reason(category)
+    if warning_collector is not None:
+        warning_collector.add(
+            warning_source_kind,
+            warning_source_id,
+            reason,
+            suppressed=known_invalid,
+        )
+
+    md5_checksum = getattr(f, "md5_checksum", None)
+    size_bytes = getattr(f, "size", None)
+    should_record = known_invalid or reason in _PERSISTENT_OFFICE_INVALID_REASONS
+    if not dry_run and should_record and md5_checksum and size_bytes is not None:
+        recorder = getattr(repository, "record_invalid_source", None)
+        if callable(recorder):
+            try:
+                recorder(
+                    "gdrive",
+                    f.id,
+                    md5_checksum=md5_checksum,
+                    size_bytes=size_bytes,
+                    reason=reason,
+                    mime_type=f.mime_type,
+                    request_id=request_id,
+                    metadata={"validation": "ooxml_pre_upsert"},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ingest_source_health_record_failed",
+                    request_id=request_id,
+                    file_ref=_external_id_ref(f.id),
+                    category=reason,
+                    error_type=type(exc).__name__,
+                )
+
+    logger.warning(
+        event,
+        request_id=request_id,
+        file_ref=_external_id_ref(f.id),
+        mime_type=f.mime_type,
+        category=reason,
+        actual_bytes=actual_bytes,
+        expected_bytes=expected_bytes,
+        known_invalid=known_invalid,
+        retry_suppressed=known_invalid,
+        error_type=error_type,
+        existing_document_preserved=True,
+    )
+
+
+def _send_ops_warning_summary(
+    alerter: IngestOpsAlerter,
+    *,
+    kind: str,
+    warning_reasons: dict[str, int],
+    suppressed_retry_count: int,
+    request_id: str,
+    dry_run: bool,
+) -> bool:
+    """分類済みwarning集計だけを既存ops webhookへ送る。ID・名前・本文は含めない。"""
+    reasons = {
+        str(reason)[:80]: int(count)
+        for reason, count in sorted(warning_reasons.items())
+        if int(count) > 0
+    }
+    if dry_run or not alerter.enabled or not reasons:
+        return False
+
+    import httpx
+
+    warning_count = sum(reasons.values())
+    title = f":warning: Ingest {kind} completed with {warning_count} warning(s)"
+    reason_lines = "\n".join(f"• `{reason}`: {count}" for reason, count in reasons.items())
+    blocks: list[dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": title}},
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Kind*\n{kind}"},
+                {"type": "mrkdwn", "text": "*Outcome*\nsuccess_with_warnings"},
+                {"type": "mrkdwn", "text": f"*Warnings*\n{warning_count}"},
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Known retries suppressed*\n{suppressed_retry_count}",
+                },
+            ],
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Reasons*\n{reason_lines}"},
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"*Request ID* `{request_id}`"}],
+        },
+    ]
+    try:
+        response = httpx.post(
+            str(alerter.webhook_url),
+            json={"blocks": blocks, "text": title},
+            timeout=alerter.timeout_s,
+        )
+        ok = response.status_code == 200
+        logger.info(
+            "ops_ingest_warning_sent",
+            request_id=request_id,
+            kind=kind,
+            warning_count=warning_count,
+            suppressed_retry_count=suppressed_retry_count,
+            status=response.status_code,
+            ok=ok,
+        )
+        return ok
+    except Exception as exc:
+        logger.warning(
+            "ops_ingest_warning_send_failed",
+            request_id=request_id,
+            kind=kind,
+            warning_count=warning_count,
+            error_type=type(exc).__name__,
+        )
+        return False
 
 
 # -----------------------------------------------------------
@@ -309,9 +577,9 @@ def _guarded_upsert(
 ) -> bool:
     """§2 ガード付き upsert。本文版を書いた key を title_only 版で上書きしない。
 
-    dedup は repository.py:319 の ``ON CONFLICT (source_type, external_id)`` last-writer
-    方式なので、folder 経路→crawl 経路の実行順で同一 file が本文版→title_only 版の順に
-    書かれると本文が title_only に上書きされ得る。本ガードで退行を塞ぐ。
+    ``content_registry`` の process-local guard に加え、実 repository では同一 source key の
+    transaction advisory lock と既存 content chunk の DB 確認を行う。別 run / 別 process
+    から title-only が到来しても本文を上書きしない。
 
     ``content_registry`` は (source_type, external_id) → 本文版を書いたか、を記録する set。
     None なら呼び出し 1 回かぎりの空 set ＝ ガードは（同一呼び出し内でしか効かないが）安全側。
@@ -321,16 +589,32 @@ def _guarded_upsert(
     """
     registry = content_registry if content_registry is not None else set()
     key = (doc.source_type, doc.external_id)
-    if _is_title_only(chunks) and key in registry:
+    title_only = _is_title_only(chunks)
+    if title_only and key in registry:
         logger.info(
             "ingest_skip_title_only_over_content",
             source_type=doc.source_type,
-            external_id=doc.external_id,
+            external_id_ref=_external_id_ref(doc.external_id),
             request_id=request_id,
+            guard="process_registry",
         )
         return False
+    if title_only:
+        guarded_upsert = getattr(repository, "upsert_title_only_if_no_content", None)
+        if callable(guarded_upsert):
+            document_id = guarded_upsert(doc, chunks, request_id=request_id)
+            if document_id is None:
+                logger.info(
+                    "ingest_skip_title_only_over_content",
+                    source_type=doc.source_type,
+                    external_id_ref=_external_id_ref(doc.external_id),
+                    request_id=request_id,
+                    guard="database",
+                )
+                return False
+            return True
     repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
-    if not _is_title_only(chunks):
+    if not title_only:
         registry.add(key)
     return True
 
@@ -888,6 +1172,7 @@ def _ingest_gdrive_folder(
     exclude_folder_name_re: str | None = None,
     observed_gdrive_ids: set[str] | None = None,
     truncated_walk_roots: set[str] | None = None,
+    warning_collector: _IngestWarningCollector | None = None,
 ) -> tuple[int, int]:
     """1 Drive folder を取り込む。
 
@@ -931,6 +1216,13 @@ def _ingest_gdrive_folder(
     docs_n = 0
     chunks_n = 0
     skipped: list[str] = []
+    warning_source_kind = "gdrive"
+    warning_source_id = spec.folder_id
+    warning_before = (
+        warning_collector.snapshot(warning_source_kind, warning_source_id)
+        if warning_collector is not None
+        else _WarningSnapshot(reasons={}, suppressed=0)
+    )
 
     # 増分同期（USE_INCREMENTAL_SYNC=1 で opt-in・既定 OFF＝従来フル走査で完全後方互換）。
     # connector_state の前回 cursor から Drive changes.list の差分（変更 file のみ）に絞り込む。
@@ -1020,6 +1312,9 @@ def _ingest_gdrive_folder(
                 classifier=classifier,
                 contextualizer=contextualizer,
                 content_registry=content_registry,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
             )
             docs_n += docs_added
             chunks_n += chunks_added
@@ -1028,9 +1323,8 @@ def _ingest_gdrive_folder(
         except Exception:
             logger.exception(
                 "gdrive_file_unexpected_error",
-                file_id=f.id,
-                file_name=f.name,
-                folder_id=spec.folder_id,
+                file_ref=_external_id_ref(f.id),
+                folder_ref=_external_id_ref(spec.folder_id),
             )
             skipped.append(f.id)
             if incremental and not dry_run:
@@ -1044,11 +1338,26 @@ def _ingest_gdrive_folder(
                 )
             continue
 
+    warning_delta = (
+        warning_collector.delta(warning_source_kind, warning_source_id, warning_before)
+        if warning_collector is not None
+        else _WarningSnapshot(reasons={}, suppressed=0)
+    )
+
     # 成功時に cursor を前進保存（次回はこの cursor 以降の差分だけ取る）。
     if incremental and not dry_run:
         try:
             repository.save_connector_state(
-                "gdrive", spec.folder_id, cursor=next_cursor, success=True
+                "gdrive",
+                spec.folder_id,
+                cursor=next_cursor,
+                success=True,
+                metadata={
+                    "outcome": ("success_with_warnings" if warning_delta.reasons else "success"),
+                    "warning_count": sum(warning_delta.reasons.values()),
+                    "warning_reasons": warning_delta.reasons,
+                    "known_invalid_suppressed": warning_delta.suppressed,
+                },
             )
         except Exception:
             logger.exception("connector_state_save_failed", folder_id=spec.folder_id)
@@ -1060,6 +1369,10 @@ def _ingest_gdrive_folder(
         documents=docs_n,
         chunks=chunks_n,
         skipped=len(skipped),
+        warning_count=sum(warning_delta.reasons.values()),
+        warning_reasons=warning_delta.reasons,
+        known_invalid_suppressed=warning_delta.suppressed,
+        outcome="success_with_warnings" if warning_delta.reasons else "success",
         incremental=incremental,
         dry_run=dry_run,
     )
@@ -1086,7 +1399,10 @@ def _safe_record_job(
             error=error,
         )
     except Exception:
-        logger.exception("ingest_job_record_failed", external_id=external_id)
+        logger.exception(
+            "ingest_job_record_failed",
+            external_id_ref=_external_id_ref(external_id),
+        )
 
 
 def _process_one_gdrive_file(
@@ -1103,6 +1419,9 @@ def _process_one_gdrive_file(
     classifier: DocClassifier | None = None,
     contextualizer: ChunkContextualizer | None = None,
     content_registry: set[tuple[str, str]] | None = None,
+    warning_collector: _IngestWarningCollector | None = None,
+    warning_source_kind: str = "gdrive",
+    warning_source_id: str = "gdrive",
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
@@ -1142,6 +1461,26 @@ def _process_one_gdrive_file(
         if rich
         else {}
     )
+
+    if f.mime_type in OFFICE_BINARY_MIMES:
+        known_reason = _known_invalid_office_reason(repository, f)
+        if known_reason is not None:
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category=known_reason,
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_payload_invalid",
+                actual_bytes=None,
+                expected_bytes=f.size,
+                known_invalid=True,
+            )
+            skipped.append(f.id)
+            return 0, 0
 
     # ACL を permissions.list で解決
     file_owner_email, acl_emails, acl_groups = _resolve_drive_file_acl(
@@ -1193,24 +1532,35 @@ def _process_one_gdrive_file(
         try:
             data = client.download_file_bytes(file_id=f.id, request_id=request_id)
         except GDriveDownloadContentError as exc:
-            logger.warning(
-                "gdrive_office_payload_invalid",
-                request_id=request_id,
-                file_id=f.id,
-                mime_type=f.mime_type,
+            _record_office_warning(
+                repository=repository,
+                f=f,
                 category=exc.category,
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_payload_invalid",
                 actual_bytes=exc.actual_bytes,
                 expected_bytes=f.size,
-                existing_document_preserved=True,
             )
             skipped.append(f.id)
             return 0, 0
-        except Exception:
-            logger.exception(
-                "gdrive_office_download_failed",
-                file_id=f.id,
-                file_name=f.name,
-                mime_type=f.mime_type,
+        except Exception as exc:
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category="office_download_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_download_failed",
+                actual_bytes=None,
+                expected_bytes=f.size,
+                error_type=type(exc).__name__,
             )
             skipped.append(f.id)
             return 0, 0
@@ -1219,39 +1569,58 @@ def _process_one_gdrive_file(
                 data,
                 mime_type=f.mime_type,
                 expected_size=f.size,
+                expected_md5=getattr(f, "md5_checksum", None),
                 **office_kwargs,
             )
         except OfficePayloadError as exc:
             # invalid payloadではDBを書かない。既存document/chunksがあればそのまま保持され、
             # observed_gdrive_idsには列挙時点で入るためstale誤判定もしない。
-            logger.warning(
-                "gdrive_office_payload_invalid",
-                request_id=request_id,
-                file_id=f.id,
-                mime_type=f.mime_type,
+            _record_office_warning(
+                repository=repository,
+                f=f,
                 category=exc.category,
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_payload_invalid",
                 actual_bytes=exc.actual_bytes,
                 expected_bytes=exc.expected_bytes,
-                existing_document_preserved=True,
             )
             skipped.append(f.id)
             return 0, 0
-        except Exception:
-            logger.exception(
-                "gdrive_office_extract_failed",
-                file_id=f.id,
-                file_name=f.name,
-                mime_type=f.mime_type,
+        except Exception as exc:
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category="office_extract_failed",
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_extract_failed",
+                actual_bytes=len(data),
+                expected_bytes=f.size,
+                error_type=type(exc).__name__,
             )
             skipped.append(f.id)
             return 0, 0
         page_chunks = chunk_pages(pages, size=500, overlap=100)
         if not page_chunks:
-            logger.warning(
-                "gdrive_office_empty_text",
-                file_id=f.id,
-                file_name=f.name,
-                mime_type=f.mime_type,
+            _record_office_warning(
+                repository=repository,
+                f=f,
+                category="office_empty_text",
+                request_id=request_id,
+                dry_run=dry_run,
+                warning_collector=warning_collector,
+                warning_source_kind=warning_source_kind,
+                warning_source_id=warning_source_id,
+                event="gdrive_office_empty_text",
+                actual_bytes=len(data),
+                expected_bytes=f.size,
             )
             skipped.append(f.id)
             return 0, 0
@@ -1396,6 +1765,7 @@ def _process_one_gdrive_file(
             **spec.extra_metadata,
             "mime_type": f.mime_type,
             "size": f.size,
+            "md5_checksum": getattr(f, "md5_checksum", None),
             "drive_folder_id": spec.folder_id,
             "drive_folder_name": spec.folder_name,
             **cls_metadata,
@@ -1424,6 +1794,7 @@ def _ingest_shared_drives_crawl(
     exclude_folder_name_re: str | None = None,
     observed_gdrive_ids: set[str] | None = None,
     truncated_walk_roots: set[str] | None = None,
+    warning_collector: _IngestWarningCollector | None = None,
 ) -> tuple[int, int]:
     """共有ドライブ全件 crawl + 営業資料フィルタで取り込む (Day 7, 2026-05-27)。
 
@@ -1477,6 +1848,13 @@ def _ingest_shared_drives_crawl(
     chunks_n = 0
     skipped_count = 0
     filtered_count = 0
+    warning_source_kind = "shared_drives"
+    warning_source_id = "shared_drives"
+    warning_before = (
+        warning_collector.snapshot(warning_source_kind, warning_source_id)
+        if warning_collector is not None
+        else _WarningSnapshot(reasons={}, suppressed=0)
+    )
 
     # 1. 共有ドライブ列挙
     all_drives = client.list_shared_drives(request_id=request_id)
@@ -1538,6 +1916,26 @@ def _ingest_shared_drives_crawl(
                         filtered_count += 1
                         continue
 
+                if f.mime_type in OFFICE_BINARY_MIMES:
+                    known_reason = _known_invalid_office_reason(repository, f)
+                    if known_reason is not None:
+                        _record_office_warning(
+                            repository=repository,
+                            f=f,
+                            category=known_reason,
+                            request_id=request_id,
+                            dry_run=dry_run,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_office_payload_invalid",
+                            actual_bytes=None,
+                            expected_bytes=f.size,
+                            known_invalid=True,
+                        )
+                        skipped_count += 1
+                        continue
+
                 # 4. ACL 解決
                 file_owner_email, acl_emails, acl_groups = _resolve_drive_file_acl(
                     client=client,
@@ -1572,7 +1970,7 @@ def _ingest_shared_drives_crawl(
                         continue
                     page_chunks = chunk_pages(pages, size=500, overlap=100)
                     if not page_chunks:
-                        # §E: 抽出 0 で skip を file_id/name 付きで可視化（my_drive 側と対称）。
+                        # 抽出 0 も分類warningとして可視化し、connectorを完全successにしない。
                         logger.warning(
                             "shared_drive_pdf_empty_text",
                             request_id=request_id,
@@ -1599,26 +1997,35 @@ def _ingest_shared_drives_crawl(
                     try:
                         data = client.download_file_bytes(file_id=f.id, request_id=request_id)
                     except GDriveDownloadContentError as exc:
-                        logger.warning(
-                            "shared_drive_office_payload_invalid",
-                            request_id=request_id,
-                            file_id=f.id,
-                            mime_type=f.mime_type,
-                            drive_id=drive.id,
+                        _record_office_warning(
+                            repository=repository,
+                            f=f,
                             category=exc.category,
+                            request_id=request_id,
+                            dry_run=dry_run,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_office_payload_invalid",
                             actual_bytes=exc.actual_bytes,
                             expected_bytes=f.size,
-                            existing_document_preserved=True,
                         )
                         skipped_count += 1
                         continue
-                    except Exception:
-                        logger.exception(
-                            "shared_drive_office_download_failed",
-                            file_id=f.id,
-                            file_name=f.name,
-                            mime_type=f.mime_type,
-                            drive_id=drive.id,
+                    except Exception as exc:
+                        _record_office_warning(
+                            repository=repository,
+                            f=f,
+                            category="office_download_failed",
+                            request_id=request_id,
+                            dry_run=dry_run,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_office_download_failed",
+                            actual_bytes=None,
+                            expected_bytes=f.size,
+                            error_type=type(exc).__name__,
                         )
                         skipped_count += 1
                         continue
@@ -1627,44 +2034,59 @@ def _ingest_shared_drives_crawl(
                             data,
                             mime_type=f.mime_type,
                             expected_size=f.size,
+                            expected_md5=getattr(f, "md5_checksum", None),
                             **office_kwargs,
                         )
                     except OfficePayloadError as exc:
                         # invalid payloadは既存document/chunksを上書きせず保持する。file自体は
                         # observed済みなのでstaleにも落とさず、category付きWARNで運用検知する。
-                        logger.warning(
-                            "shared_drive_office_payload_invalid",
-                            request_id=request_id,
-                            file_id=f.id,
-                            mime_type=f.mime_type,
-                            drive_id=drive.id,
+                        _record_office_warning(
+                            repository=repository,
+                            f=f,
                             category=exc.category,
+                            request_id=request_id,
+                            dry_run=dry_run,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_office_payload_invalid",
                             actual_bytes=exc.actual_bytes,
                             expected_bytes=exc.expected_bytes,
-                            existing_document_preserved=True,
                         )
                         skipped_count += 1
                         continue
-                    except Exception:
-                        logger.exception(
-                            "shared_drive_office_extract_failed",
-                            file_id=f.id,
-                            file_name=f.name,
-                            mime_type=f.mime_type,
-                            drive_id=drive.id,
+                    except Exception as exc:
+                        _record_office_warning(
+                            repository=repository,
+                            f=f,
+                            category="office_extract_failed",
+                            request_id=request_id,
+                            dry_run=dry_run,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_office_extract_failed",
+                            actual_bytes=len(data),
+                            expected_bytes=f.size,
+                            error_type=type(exc).__name__,
                         )
                         skipped_count += 1
                         continue
                     page_chunks = chunk_pages(pages, size=500, overlap=100)
                     if not page_chunks:
-                        # §E: 抽出 0 で skip を file_id/name 付きで可視化（my_drive 側と対称）。
-                        logger.warning(
-                            "shared_drive_office_empty_text",
+                        # 抽出 0 も分類warningとして可視化し、connectorを完全successにしない。
+                        _record_office_warning(
+                            repository=repository,
+                            f=f,
+                            category="office_empty_text",
                             request_id=request_id,
-                            file_id=f.id,
-                            file_name=f.name,
-                            mime_type=f.mime_type,
-                            drive_id=drive.id,
+                            dry_run=dry_run,
+                            warning_collector=warning_collector,
+                            warning_source_kind=warning_source_kind,
+                            warning_source_id=warning_source_id,
+                            event="shared_drive_office_empty_text",
+                            actual_bytes=len(data),
+                            expected_bytes=f.size,
                         )
                         skipped_count += 1
                         continue
@@ -1796,6 +2218,7 @@ def _ingest_shared_drives_crawl(
                         **spec.extra_metadata,
                         "mime_type": f.mime_type,
                         "size": f.size,
+                        "md5_checksum": getattr(f, "md5_checksum", None),
                         "shared_drive_id": drive.id,
                         "shared_drive_name": drive.name,
                         "via": "shared_drive_crawl",
@@ -1823,13 +2246,17 @@ def _ingest_shared_drives_crawl(
                 logger.exception(
                     "shared_drive_file_unexpected_error",
                     request_id=request_id,
-                    file_id=f.id,
-                    file_name=f.name,
-                    drive_id=drive.id,
+                    file_ref=_external_id_ref(f.id),
+                    drive_ref=_external_id_ref(drive.id),
                 )
                 skipped_count += 1
                 continue
 
+    warning_delta = (
+        warning_collector.delta(warning_source_kind, warning_source_id, warning_before)
+        if warning_collector is not None
+        else _WarningSnapshot(reasons={}, suppressed=0)
+    )
     logger.info(
         "ingest_shared_drives_crawl_done",
         request_id=request_id,
@@ -1838,6 +2265,10 @@ def _ingest_shared_drives_crawl(
         chunks=chunks_n,
         skipped=skipped_count,
         filtered_out=filtered_count,
+        warning_count=sum(warning_delta.reasons.values()),
+        warning_reasons=warning_delta.reasons,
+        known_invalid_suppressed=warning_delta.suppressed,
+        outcome="success_with_warnings" if warning_delta.reasons else "success",
         dry_run=dry_run,
     )
     return docs_n, chunks_n
@@ -2206,12 +2637,14 @@ class IngestRunner:
         # stale 堅牢化: walk が max_files 上限で打ち切られた root（folder/drive の ID）集合。
         # 打ち切りがあった run は観測集合が不完全＝mark を skip する（両経路で 1 個を共有）。
         truncated_walk_roots: set[str] = set()
+        warning_collector = _IngestWarningCollector()
         # フォルダ名除外 regex（yaml グローバルキー。None ならコード既定を handler 側で解決）。
         gdrive_extra_kwargs: dict[str, Any] = {
             "content_registry": content_registry,
             "exclude_folder_name_re": sources.gdrive_exclude_folder_name_re,
             "observed_gdrive_ids": observed_gdrive_ids,
             "truncated_walk_roots": truncated_walk_roots,
+            "warning_collector": warning_collector,
         }
 
         logger.info(
@@ -2300,6 +2733,8 @@ class IngestRunner:
             request_id=request_id,
             total_documents=result.total_documents(),
             total_errors=result.total_errors(),
+            total_warnings=result.total_warnings(),
+            outcome=result.outcome,
             dry_run=self._dry_run,
         )
         return result
@@ -2576,8 +3011,23 @@ class IngestRunner:
         # gdrive / shared_drives 経路にだけ §2 dedup ガード用レジストリを渡す
         # （folder→crawl で本文版を title_only 版が上書きしないよう、run 内で 1 個共有）。
         handler_kwargs = extra_kwargs or {}
+        warning_collector_obj = handler_kwargs.get("warning_collector")
+        warning_collector = (
+            warning_collector_obj
+            if isinstance(warning_collector_obj, _IngestWarningCollector)
+            else None
+        )
         stats = IngestStats(source_kind=kind)
         for spec in specs:
+            source_id = _spec_source_id(spec) or kind
+            warning_before = (
+                warning_collector.snapshot(kind, source_id)
+                if warning_collector is not None
+                else _WarningSnapshot(reasons={}, suppressed=0)
+            )
+            docs_n = 0
+            chunks_n = 0
+            error_message: str | None = None
             try:
                 docs_n, chunks_n = handler(
                     spec,
@@ -2592,39 +3042,91 @@ class IngestRunner:
                 stats.chunks_inserted += chunks_n
                 stats.sources_processed += 1
             except Exception as e:
+                error_message = f"{type(e).__name__}: {e}"
                 logger.exception(
                     "ingest_source_failed",
                     request_id=request_id,
                     kind=kind,
-                    spec=str(spec)[:200],
+                    source_id_ref=_external_id_ref(source_id),
                 )
                 stats.sources_skipped += 1
-                stats.errors.append(f"{type(e).__name__}: {e}")
+                stats.errors.append(error_message)
                 # #ops 通知（webhook 未設定 / dry-run なら no-op・失敗しても続行）。
                 self._alerter.send_ingest_failure(
                     kind=kind,
                     exc=e,
                     request_id=request_id,
-                    spec_repr=str(spec)[:200],
+                    spec_repr="",
                     dry_run=self._dry_run,
                 )
                 # 増分同期 ON のとき source 単位の連続失敗を connector_state に刻む
                 # （attempt_count++・last_error＝backoff/#ops しきい値判断の根拠）。
                 # 既定 OFF なので従来挙動・既存テストの fake repo には影響しない。
                 if not self._dry_run and _envflag("USE_INCREMENTAL_SYNC"):
-                    source_id = _spec_source_id(spec)
-                    if source_id is not None:
+                    incremental_source_id = _spec_source_id(spec)
+                    if incremental_source_id is not None:
                         try:
                             self._repo.save_connector_state(
                                 kind,
-                                source_id,
+                                incremental_source_id,
                                 success=False,
-                                error=f"{type(e).__name__}: {e}",
+                                error=error_message,
                             )
-                        except Exception:
-                            logger.exception(
+                        except Exception as state_exc:
+                            logger.warning(
                                 "connector_state_failure_record_failed",
                                 kind=kind,
-                                source_id=source_id,
+                                source_id_ref=_external_id_ref(incremental_source_id),
+                                error_type=type(state_exc).__name__,
                             )
+            warning_delta = (
+                warning_collector.delta(kind, source_id, warning_before)
+                if warning_collector is not None
+                else _WarningSnapshot(reasons={}, suppressed=0)
+            )
+            for reason, count in warning_delta.reasons.items():
+                stats.warning_reasons[reason] = stats.warning_reasons.get(reason, 0) + count
+            stats.known_invalid_suppressed += warning_delta.suppressed
+
+            outcome = (
+                "failed"
+                if error_message is not None
+                else ("success_with_warnings" if warning_delta.reasons else "success")
+            )
+            if not self._dry_run:
+                recorder = getattr(self._repo, "record_connector_run", None)
+                if callable(recorder):
+                    try:
+                        recorder(
+                            request_id=request_id,
+                            source_kind=kind,
+                            source_id=source_id,
+                            outcome=outcome,
+                            documents_upserted=docs_n,
+                            chunks_inserted=chunks_n,
+                            warning_reasons=warning_delta.reasons,
+                            suppressed_retry_count=warning_delta.suppressed,
+                            error=(
+                                error_message.split(":", 1)[0]
+                                if error_message is not None
+                                else None
+                            ),
+                        )
+                    except Exception as record_exc:
+                        logger.warning(
+                            "ingest_connector_run_record_failed",
+                            request_id=request_id,
+                            kind=kind,
+                            source_id_ref=_external_id_ref(source_id),
+                            error_type=type(record_exc).__name__,
+                        )
+            if error_message is None and warning_delta.reasons:
+                _send_ops_warning_summary(
+                    self._alerter,
+                    kind=kind,
+                    warning_reasons=warning_delta.reasons,
+                    suppressed_retry_count=warning_delta.suppressed,
+                    request_id=request_id,
+                    dry_run=self._dry_run,
+                )
         return stats

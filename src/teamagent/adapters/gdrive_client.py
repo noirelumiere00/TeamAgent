@@ -95,6 +95,7 @@ class DriveFile:
     parents: tuple[str, ...] = ()
     web_view_link: str | None = None  # documents.source_uri / Drive ボタン URL
     owners_email: tuple[str, ...] = ()  # documents.owner_email 候補
+    md5_checksum: str | None = None  # binary file の Drive advertised MD5
 
 
 @dataclass(frozen=True)
@@ -261,7 +262,8 @@ class GDriveClient:
             "pageSize": page_size,
             "fields": (
                 "nextPageToken, files("
-                "id, name, mimeType, modifiedTime, size, parents, webViewLink, owners(emailAddress)"
+                "id, name, mimeType, modifiedTime, size, md5Checksum, parents, "
+                "webViewLink, owners(emailAddress)"
                 ")"
             ),
             "supportsAllDrives": include_shared_drives,
@@ -282,6 +284,7 @@ class GDriveClient:
                 mime_type=str(f.get("mimeType", "")),
                 modified_time=f.get("modifiedTime"),
                 size=int(f["size"]) if f.get("size") else None,
+                md5_checksum=str(f["md5Checksum"]).lower() if f.get("md5Checksum") else None,
                 parents=tuple(f.get("parents", ()) or ()),
                 web_view_link=f.get("webViewLink"),
                 owners_email=tuple(
@@ -534,7 +537,7 @@ class GDriveClient:
                     "pageSize": 1000,
                     "fields": (
                         "nextPageToken, files("
-                        "id, name, mimeType, modifiedTime, size, parents, "
+                        "id, name, mimeType, modifiedTime, size, md5Checksum, parents, "
                         "webViewLink, owners(emailAddress))"
                     ),
                     "supportsAllDrives": True,
@@ -572,6 +575,9 @@ class GDriveClient:
                                 mime_type=mime,
                                 modified_time=f.get("modifiedTime"),
                                 size=int(f["size"]) if f.get("size") else None,
+                                md5_checksum=(
+                                    str(f["md5Checksum"]).lower() if f.get("md5Checksum") else None
+                                ),
                                 parents=tuple(f.get("parents", ()) or ()),
                                 web_view_link=f.get("webViewLink"),
                                 owners_email=tuple(

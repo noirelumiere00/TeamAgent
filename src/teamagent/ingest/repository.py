@@ -11,6 +11,7 @@ Sprint 3 / PR-6。pipeline.py から呼ばれて、ON CONFLICT で idempotent IN
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,16 @@ from psycopg.rows import dict_row
 from teamagent.adapters.pgvector_client import PgVectorClient
 
 logger = structlog.get_logger(__name__)
+
+
+def _external_id_ref(external_id: str) -> str:
+    """ログ用の非可逆な短い参照。Drive ID 等の完全値をログへ出さない。"""
+    return hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:12]
+
+
+def _is_md5(value: str) -> bool:
+    """lowercase hexadecimal MD5 の表現だけを受ける。"""
+    return len(value) == 32 and all(char in "0123456789abcdef" for char in value)
 
 
 # Day 7 (2026-05-27): PDF / Doc 抽出時に NUL バイト (0x00) が混入することがあり、
@@ -155,6 +166,9 @@ class IngestRepository:
         self._pgvector = pgvector
         self._app_role = app_role
         self._owner_email = owner_email
+        # Rolling deploy で additive table が未適用なら、同一process中の反復SQL/警告を抑える。
+        self._source_health_available: bool | None = None
+        self._connector_runs_available: bool | None = None
 
     def upsert_document_with_chunks(
         self,
@@ -175,6 +189,7 @@ class IngestRepository:
             user_email=self._owner_email or doc.owner_email,
             user_role="admin",
         ) as conn:
+            self._lock_source(conn, doc.source_type, doc.external_id)
             document_id = self._upsert_document(conn, doc)
             if replace_existing_chunks:
                 self._delete_chunks(conn, document_id)
@@ -184,9 +199,66 @@ class IngestRepository:
             "ingest_repository_upsert_done",
             request_id=request_id,
             source_type=doc.source_type,
-            external_id=doc.external_id,
+            external_id_ref=_external_id_ref(doc.external_id),
             document_id=document_id,
             chunk_count=len(chunks),
+        )
+        return document_id
+
+    def upsert_title_only_if_no_content(
+        self,
+        doc: DocumentUpsert,
+        chunks: list[ChunkUpsert],
+        request_id: str,
+    ) -> str | None:
+        """既存本文 chunk が無い場合だけ title-only fallback を原子的に upsert する。
+
+        通常 upsert と同じ transaction advisory lock を取り、既存本文の確認から
+        document/chunk 置換までを 1 transaction に閉じる。別 run / 別 process と競合しても、
+        title-only が既存の正常本文を削除することはない。
+        """
+        if not chunks or not all(chunk.metadata.get("title_only") for chunk in chunks):
+            raise ValueError("upsert_title_only_if_no_content requires title-only chunks")
+
+        with self._pgvector.connection(
+            app_role=self._app_role,
+            user_email=self._owner_email or doc.owner_email,
+            user_role="admin",
+        ) as conn:
+            self._lock_source(conn, doc.source_type, doc.external_id)
+            sql = """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM documents AS d
+                    JOIN chunks AS c ON c.document_id = d.id
+                    WHERE d.source_type = %s::document_source_type
+                      AND d.external_id = %s
+                      AND COALESCE(c.metadata->>'title_only', 'false') <> 'true'
+                      AND btrim(c.content) <> ''
+                ) AS has_content
+            """
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, (doc.source_type, _strip_nul(doc.external_id)))
+                row = cur.fetchone()
+            if row is not None and bool(row["has_content"]):
+                logger.info(
+                    "ingest_repository_title_only_suppressed",
+                    request_id=request_id,
+                    source_type=doc.source_type,
+                    external_id_ref=_external_id_ref(doc.external_id),
+                )
+                return None
+
+            document_id = self._upsert_document(conn, doc)
+            self._delete_chunks(conn, document_id)
+            self._insert_chunks(conn, document_id, chunks)
+
+        logger.info(
+            "ingest_repository_title_only_upsert_done",
+            request_id=request_id,
+            source_type=doc.source_type,
+            external_id_ref=_external_id_ref(doc.external_id),
+            document_id=document_id,
         )
         return document_id
 
@@ -205,6 +277,195 @@ class IngestRepository:
             user_email=self._owner_email,
             user_role="admin",
         )
+
+    def find_invalid_source_reason(
+        self,
+        source_type: str,
+        external_id: str,
+        md5_checksum: str | None,
+        size_bytes: int | None,
+    ) -> str | None:
+        """完全一致する既知 invalid payload の reason を返す。旧schema時は fail-open。"""
+        if not md5_checksum or size_bytes is None:
+            return None
+        if self._source_health_available is False:
+            return None
+        sql = """
+            SELECT reason
+            FROM ingest_source_health
+            WHERE source_type = %s
+              AND external_id = %s
+              AND md5_checksum = %s
+              AND size_bytes = %s
+              AND status = 'invalid_source'
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            source_type,
+                            _strip_nul(external_id),
+                            md5_checksum.lower(),
+                            size_bytes,
+                        ),
+                    )
+                    row = cur.fetchone()
+            self._source_health_available = True
+            return str(row["reason"]) if row is not None else None
+        except Exception as exc:
+            self._source_health_available = False
+            # Rolling deploy 中に migration 未適用でも ingest を止めない。ID/SQL引数はログしない。
+            logger.warning(
+                "ingest_source_health_lookup_unavailable",
+                source_type=source_type,
+                external_id_ref=_external_id_ref(external_id),
+                error_type=type(exc).__name__,
+            )
+            return None
+
+    def record_invalid_source(
+        self,
+        source_type: str,
+        external_id: str,
+        *,
+        md5_checksum: str | None,
+        size_bytes: int | None,
+        reason: str,
+        mime_type: str | None,
+        request_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """invalid Office payload を fingerprint 単位で upsert。旧schema時は best-effort。"""
+        import json
+
+        if not md5_checksum or size_bytes is None or not reason:
+            return False
+        if self._source_health_available is False:
+            return False
+        normalized_md5 = md5_checksum.lower()
+        if not _is_md5(normalized_md5) or size_bytes < 0:
+            return False
+        sql = """
+            INSERT INTO ingest_source_health
+                (source_type, external_id, md5_checksum, size_bytes, status, reason,
+                 mime_type, first_seen_at, last_seen_at, observation_count,
+                 last_request_id, metadata)
+            VALUES (%s, %s, %s, %s, 'invalid_source', %s, %s,
+                    now(), now(), 1, %s, %s::jsonb)
+            ON CONFLICT (source_type, external_id, md5_checksum, size_bytes)
+            DO UPDATE SET
+                status = 'invalid_source',
+                reason = EXCLUDED.reason,
+                mime_type = COALESCE(EXCLUDED.mime_type, ingest_source_health.mime_type),
+                last_seen_at = now(),
+                observation_count = ingest_source_health.observation_count + 1,
+                last_request_id = EXCLUDED.last_request_id,
+                metadata = ingest_source_health.metadata || EXCLUDED.metadata
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            source_type,
+                            _strip_nul(external_id),
+                            normalized_md5,
+                            size_bytes,
+                            _strip_nul(reason),
+                            _strip_nul(mime_type),
+                            _strip_nul(request_id),
+                            json.dumps(_sanitize_metadata(metadata or {}), ensure_ascii=False),
+                        ),
+                    )
+            self._source_health_available = True
+            return True
+        except Exception as exc:
+            self._source_health_available = False
+            logger.warning(
+                "ingest_source_health_record_unavailable",
+                source_type=source_type,
+                external_id_ref=_external_id_ref(external_id),
+                reason=reason,
+                error_type=type(exc).__name__,
+            )
+            return False
+
+    def record_connector_run(
+        self,
+        *,
+        request_id: str,
+        source_kind: str,
+        source_id: str,
+        outcome: str,
+        documents_upserted: int,
+        chunks_inserted: int,
+        warning_reasons: dict[str, int] | None = None,
+        suppressed_retry_count: int = 0,
+        error: str | None = None,
+    ) -> bool:
+        """source単位の success/success_with_warnings/failed を記録。旧schema時は継続。"""
+        import json
+
+        if outcome not in {"success", "success_with_warnings", "failed"}:
+            raise ValueError(f"unsupported connector outcome: {outcome}")
+        if self._connector_runs_available is False:
+            return False
+        reasons = {
+            str(reason): int(count)
+            for reason, count in sorted((warning_reasons or {}).items())
+            if int(count) > 0
+        }
+        sql = """
+            INSERT INTO ingest_connector_runs
+                (request_id, source_kind, source_id, outcome,
+                 documents_upserted, chunks_inserted, warning_count,
+                 warning_reasons, suppressed_retry_count, last_error, completed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, now())
+            ON CONFLICT (request_id, source_kind, source_id)
+            DO UPDATE SET
+                outcome = EXCLUDED.outcome,
+                documents_upserted = EXCLUDED.documents_upserted,
+                chunks_inserted = EXCLUDED.chunks_inserted,
+                warning_count = EXCLUDED.warning_count,
+                warning_reasons = EXCLUDED.warning_reasons,
+                suppressed_retry_count = EXCLUDED.suppressed_retry_count,
+                last_error = EXCLUDED.last_error,
+                completed_at = now()
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            _strip_nul(request_id),
+                            source_kind,
+                            _strip_nul(source_id),
+                            outcome,
+                            documents_upserted,
+                            chunks_inserted,
+                            sum(reasons.values()),
+                            json.dumps(reasons, ensure_ascii=True),
+                            suppressed_retry_count,
+                            _strip_nul(error),
+                        ),
+                    )
+            self._connector_runs_available = True
+            return True
+        except Exception as exc:
+            self._connector_runs_available = False
+            logger.warning(
+                "ingest_connector_run_record_unavailable",
+                request_id=request_id,
+                source_kind=source_kind,
+                source_id_ref=_external_id_ref(source_id),
+                outcome=outcome,
+                error_type=type(exc).__name__,
+            )
+            return False
 
     def load_connector_state(self, source_kind: str, source_id: str) -> ConnectorState | None:
         """(source_kind, source_id) の前回状態を 1 行ロードする。未登録なら None。"""
@@ -519,6 +780,19 @@ class IngestRepository:
     # -------------------------------------------------------
     # 内部
     # -------------------------------------------------------
+    @staticmethod
+    def _lock_source(
+        conn: psycopg.Connection[dict[str, Any]],
+        source_type: str,
+        external_id: str,
+    ) -> None:
+        """同一 document key の置換を transaction 内で直列化する。"""
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"{source_type}\x00{external_id}",),
+            )
+
     @staticmethod
     def _upsert_document(
         conn: psycopg.Connection[dict[str, Any]],

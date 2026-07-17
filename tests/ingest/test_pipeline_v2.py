@@ -202,11 +202,13 @@ class _FakeWalkService:
 
     def __init__(self, tree: dict[str, list[dict[str, Any]]]) -> None:
         self._tree = tree
+        self.list_kwargs: list[dict[str, Any]] = []
 
     def files(self) -> _FakeWalkService:
         return self
 
     def list(self, **kwargs: Any) -> _FakeWalkRequest:
+        self.list_kwargs.append(kwargs)
         folder_id = str(kwargs["q"]).split("'")[1]  # "'FID' in parents and trashed = false"
         return _FakeWalkRequest({"files": self._tree.get(folder_id, []), "nextPageToken": None})
 
@@ -242,6 +244,17 @@ def test_walk_without_exclude_regex_keeps_all() -> None:
     client = GDriveClient(service=_FakeWalkService(_walk_tree()))
     files = client.walk_files_recursive(root_id="ROOT", request_id="req-t")
     assert {f.id for f in files} == {"A", "B", "C"}
+
+
+def test_walk_maps_drive_md5_checksum() -> None:
+    tree = _walk_tree()
+    tree["ROOT"][2]["md5Checksum"] = "ABCDEF0123456789ABCDEF0123456789"
+    service = _FakeWalkService(tree)
+    client = GDriveClient(service=service)
+    files = client.walk_files_recursive(root_id="ROOT", request_id="req-md5", max_depth=0)
+    assert len(files) == 1
+    assert files[0].md5_checksum == "abcdef0123456789abcdef0123456789"
+    assert "md5Checksum" in service.list_kwargs[0]["fields"]
 
 
 def test_walk_with_custom_regex_overrides_default() -> None:

@@ -139,6 +139,7 @@ def test_list_files_returns_drive_file_objects() -> None:
                     "mimeType": "application/pdf",
                     "modifiedTime": "2026-05-20T01:23:45.000Z",
                     "size": "12345",
+                    "md5Checksum": "ABCDEF0123456789ABCDEF0123456789",
                     "parents": ["0XYZ"],
                     "webViewLink": "https://drive.google.com/file/d/1ABC/view",
                     "owners": [{"emailAddress": "taro@vectorinc.co.jp"}],
@@ -155,10 +156,12 @@ def test_list_files_returns_drive_file_objects() -> None:
     assert f.id == "1ABC"
     assert f.name == "proposal.pdf"
     assert f.size == 12345
+    assert f.md5_checksum == "abcdef0123456789abcdef0123456789"
     assert f.parents == ("0XYZ",)
     assert f.web_view_link == "https://drive.google.com/file/d/1ABC/view"
     assert f.owners_email == ("taro@vectorinc.co.jp",)
     assert next_token == "PAGE2"
+    assert "md5Checksum" in fake.files().last_list_kwargs["fields"]
 
 
 def test_list_files_builds_query_with_folder_and_mime() -> None:
@@ -195,6 +198,7 @@ def test_list_files_handles_missing_optional_fields() -> None:
     client = GDriveClient(service=fake)
     files, _ = client.list_files(folder_id="F", request_id="r")
     assert files[0].size is None
+    assert files[0].md5_checksum is None
     assert files[0].parents == ()
     assert files[0].owners_email == ()
     assert files[0].web_view_link is None
