@@ -128,8 +128,9 @@ ARG PLAYWRIGHT_PYTHON_ARM64_WHEEL_URL=https://files.pythonhosted.org/packages/84
 ARG PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256=43e66564125ee31b07a58cefb21e256d62d67d8d1713e6858df7a3019d8ed353
 ARG YTDLP_VERSION=2026.6.9
 ARG YTDLP_SHAHID_SOURCE_SHA256=f82c1f065f6aa3dd5ce8ee3491d4c49f245d1e7ba921b8cc0cc9c8658a634fbd
-ARG YTDLP_SANITIZED_TREE_SHA256=3b58dd489c9372b1cdfd1eb3b11e74634d2aeaf6e40c841a96d253c61388d626
-ARG YTDLP_SANITIZER_SHA256=dbf4ec0f50823e87d6f511dce51073f446c37e7a237f670c0203ca73948457fc
+ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b
+ARG YTDLP_SANITIZED_TREE_SHA256=638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b
+ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db
 
 COPY --from=uv /uv /usr/bin/uv
 RUN set -eu; \
@@ -199,9 +200,13 @@ RUN set -eu; \
       --package-root "$package_root" \
       --expected-shahid-sha256 "$YTDLP_SHAHID_SOURCE_SHA256" \
       --manifest /usr/share/teamagent/provenance/yt-dlp-sanitization.json; \
+    test "$(python3 -c "import json; print(json.load(open('/usr/share/teamagent/provenance/yt-dlp-sanitization.json'))['removed_extractor_set_sha256'])")" = "$YTDLP_REMOVED_EXTRACTOR_SET_SHA256"; \
     test "$(python3 -c "import json; print(json.load(open('/usr/share/teamagent/provenance/yt-dlp-sanitization.json'))['sanitized_source_tree_sha256'])")" = "$YTDLP_SANITIZED_TREE_SHA256"; \
-    test ! -e "$package_root/extractor/shahid.py"; \
-    test -z "$(find "$package_root" -type f -iname 'shahid*.pyc' -print -quit)"; \
+    for name in adultswim aenetworks blackboardcollaborate cloudflarestream \
+      espn go nbc shahid tbs vice; do \
+      test ! -e "$package_root/extractor/$name.py"; \
+      test -z "$(find "$package_root" -type f -iname "$name*.pyc" -print -quit)"; \
+    done; \
     /app/.venv/bin/python -c "from yt_dlp.extractor import list_extractor_classes; names={cls.IE_NAME for cls in list_extractor_classes()}; assert not any('shahid' in name.lower() for name in names); assert {'youtube','TikTok','Instagram'} <= names"; \
     uv pip freeze --python /app/.venv/bin/python \
       > /usr/share/teamagent/provenance/python-packages.txt; \
@@ -237,8 +242,9 @@ ARG PLAYWRIGHT_CORE_NPM_INTEGRITY=sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2ir
 ARG YTDLP_VERSION=2026.6.9
 ARG YTDLP_WHEEL_SHA256=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
 ARG YTDLP_SDIST_SHA256=d50fcb95f48d61bedde33e408c1881d4c279e51c31354a599ce09e96ba0f4b86
-ARG YTDLP_SANITIZED_TREE_SHA256=3b58dd489c9372b1cdfd1eb3b11e74634d2aeaf6e40c841a96d253c61388d626
-ARG YTDLP_SANITIZER_SHA256=dbf4ec0f50823e87d6f511dce51073f446c37e7a237f670c0203ca73948457fc
+ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b
+ARG YTDLP_SANITIZED_TREE_SHA256=638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b
+ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db
 ARG MEDIA_APK_LOCK_SHA256=d3a888e3bfa7e75d2c4c7b6b6dca2a7e0812c1231fdb342e96bb79af9166cca8
 ARG TIKTOK_PACKAGE_JSON_SHA256=ac94f38cd5fe53ccd5af27ced2d887cf8ddfe3fdff19f73a3320f61fedc94cca
 ARG TIKTOK_PACKAGE_LOCK_SHA256=b01b09c4da500d95d636c60da6ebd59f7da7322bdc7aa0c4900acf49df7c2b43
@@ -265,6 +271,7 @@ COPY --chown=10001:10001 src/teamagent/media/ /app/src/teamagent/media/
 
 RUN set -eu; \
     printf '%s  %s\n' "$TIKTOK_SCRAPER_SHA256" /app/tools/tiktok_scraper/search.mjs | sha256sum -c -; \
+    test "$(python3 -c "import json; print(json.load(open('/usr/share/teamagent/provenance/yt-dlp-sanitization.json'))['removed_extractor_set_sha256'])")" = "$YTDLP_REMOVED_EXTRACTOR_SET_SHA256"; \
     install -d -m 0755 -o 10001 -g 10001 /app/src/teamagent; \
     printf '%s\n' "$CHROMIUM_BASE_ARM64_DIGEST" \
       > /usr/share/teamagent/provenance/chromium-base-arm64.digest; \
@@ -325,6 +332,7 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       io.teamagent.contract.yt-dlp-wheel-sha256="$YTDLP_WHEEL_SHA256" \
       io.teamagent.contract.yt-dlp-sdist-sha256="$YTDLP_SDIST_SHA256" \
       io.teamagent.contract.yt-dlp-sanitizer-sha256="$YTDLP_SANITIZER_SHA256" \
+      io.teamagent.contract.yt-dlp-removed-extractor-set-sha256="$YTDLP_REMOVED_EXTRACTOR_SET_SHA256" \
       io.teamagent.contract.yt-dlp-sanitized-tree-sha256="$YTDLP_SANITIZED_TREE_SHA256" \
       io.teamagent.contract.apk-lock-sha256="$MEDIA_APK_LOCK_SHA256" \
       io.teamagent.contract.tiktok-package-json-sha256="$TIKTOK_PACKAGE_JSON_SHA256" \

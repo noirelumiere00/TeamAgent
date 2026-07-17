@@ -36,6 +36,21 @@ EXPECTED_BINARY_HASHES = {
         "13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79"
     ),
 }
+REMOVED_YTDLP_EXTRACTORS = (
+    "adultswim",
+    "aenetworks",
+    "blackboardcollaborate",
+    "cloudflarestream",
+    "espn",
+    "go",
+    "nbc",
+    "shahid",
+    "tbs",
+    "vice",
+)
+EXPECTED_REMOVED_EXTRACTOR_SET_SHA256 = (
+    "ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b"
+)
 JOB_ID = "mj_000000000000000000000001"
 BUCKET = "teamagent-smoke-artifacts"
 
@@ -175,8 +190,16 @@ def _assert_ytdlp_sanitized_and_allowed(work_root: Path) -> None:
     from yt_dlp.extractor import list_extractor_classes
 
     package_root = Path(yt_dlp.__file__).resolve().parent
-    assert not (package_root / "extractor/shahid.py").exists()
-    assert not list(package_root.rglob("shahid*.pyc"))
+    extractor_root = package_root / "extractor"
+    for name in REMOVED_YTDLP_EXTRACTORS:
+        assert not (extractor_root / f"{name}.py").exists()
+        assert not list(extractor_root.rglob(f"{name}*.pyc"))
+    manifest = json.loads(
+        Path("/usr/share/teamagent/provenance/yt-dlp-sanitization.json").read_text(encoding="utf-8")
+    )
+    assert manifest["removed_extractor_set_sha256"] == EXPECTED_REMOVED_EXTRACTOR_SET_SHA256
+    assert set(manifest["allowlisted_extractors"]) == {"youtube", "tiktok", "instagram"}
+    assert len(manifest["removed"]) == len(REMOVED_YTDLP_EXTRACTORS)
     classes = list(list_extractor_classes())
     names = {cls.IE_NAME for cls in classes}
     assert {"youtube", "TikTok", "Instagram"} <= names

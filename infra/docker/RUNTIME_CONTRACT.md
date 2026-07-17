@@ -62,8 +62,11 @@ Media:
 - upstream Chromium imageのfilesystemを`scratch`最終stageへbyte copyし、親imageの
   writable `VOLUME /data` metadataを継承しない。最終imageの`Config.Volumes`は`/tmp`だけとする
 - yt-dlp `2026.6.9` はwheel/sdist/sanitizer/source-tree hashをOCI labelへ記録する。
-  Shahid extractor sourceと該当pycを削除し、lazy extractor一覧で
-  YouTube/TikTok/Instagramが残ることをbuildとsmokeの両方で検証する。
+  Shahidを含む、actual Trivyでsecret検出された許可外10 extractorのsourceと該当pycを、
+  各元source SHA-256を照合して削除する。removed set自体も
+  `ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b`
+  で固定する。lazy extractor一覧でYouTube/TikTok/Instagramが残ることをbuildとsmokeの
+  両方で検証する。
 
 Dockerfileの値と異なるoverrideを本番buildへ渡してはならない。すべての外部imageはtagだけでなく
 arm64 child digestを指定する。

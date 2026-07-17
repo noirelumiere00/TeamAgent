@@ -76,6 +76,34 @@ def test_media_worker_role_explicitly_excludes_core_authority_and_secrets() -> N
     } <= set(media["forbidden_environment"])
 
 
+def test_ytdlp_sanitization_is_hash_fixed_to_the_three_site_allowlist() -> None:
+    sanitation = CONTRACT["tasks"]["teamagent-media-worker"]["yt_dlp_sanitization"]
+    assert sanitation["version"] == "2026.6.9"
+    assert sanitation["allowlisted_sites"] == ["youtube", "tiktok", "instagram"]
+    assert sanitation["removed_secret_bearing_extractors"] == [
+        "adultswim",
+        "aenetworks",
+        "blackboardcollaborate",
+        "cloudflarestream",
+        "espn",
+        "go",
+        "nbc",
+        "shahid",
+        "tbs",
+        "vice",
+    ]
+    assert sanitation["removed_extractor_set_sha256"] == (
+        "ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b"
+    )
+    assert (
+        sanitation["sanitizer_sha256"]
+        == hashlib.sha256((DOCKER / "sanitize_ytdlp.py").read_bytes()).hexdigest()
+    )
+    assert sanitation["sanitized_source_tree_sha256"] == (
+        "638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b"
+    )
+
+
 def test_core_separates_baked_fallback_from_qa_s3_app_contract() -> None:
     app = CONTRACT["tasks"]["teamagent-mcp-core"]["app_html_contract"]
     assert app == {
@@ -219,7 +247,7 @@ def test_media_smoke_covers_browser_transform_download_and_cleanup() -> None:
         "Presentation",
         "AcquireOperation",
         "list_extractor_classes",
-        "shahid*.pyc",
+        "REMOVED_YTDLP_EXTRACTORS",
         "assert list(jobs.iterdir()) == []",
     ):
         assert token in text

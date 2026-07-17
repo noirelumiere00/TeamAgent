@@ -137,6 +137,29 @@
         "fonts",
         "teamagent-media-only"
       ],
+      "yt_dlp_sanitization": {
+        "version": "2026.6.9",
+        "allowlisted_sites": [
+          "youtube",
+          "tiktok",
+          "instagram"
+        ],
+        "removed_secret_bearing_extractors": [
+          "adultswim",
+          "aenetworks",
+          "blackboardcollaborate",
+          "cloudflarestream",
+          "espn",
+          "go",
+          "nbc",
+          "shahid",
+          "tbs",
+          "vice"
+        ],
+        "removed_extractor_set_sha256": "ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b",
+        "sanitizer_sha256": "4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db",
+        "sanitized_source_tree_sha256": "638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b"
+      },
       "forbidden_python_modules": [
         "psycopg",
         "sqlalchemy",

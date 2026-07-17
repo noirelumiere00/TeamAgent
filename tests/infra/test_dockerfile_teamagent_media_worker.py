@@ -94,20 +94,36 @@ def test_python_and_js_playwright_are_same_exact_version_and_hashed() -> None:
     assert "ln -s /usr/bin/node" in TEXT
 
 
-def test_ytdlp_is_source_and_wheel_hashed_then_shahid_is_removed() -> None:
+def test_ytdlp_sources_are_hash_verified_then_secret_bearing_extractors_are_removed() -> None:
     assert _sha256(SANITIZER) == (
-        "dbf4ec0f50823e87d6f511dce51073f446c37e7a237f670c0203ca73948457fc"
+        "4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db"
     )
     for digest in (
         "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",
         "d50fcb95f48d61bedde33e408c1881d4c279e51c31354a599ce09e96ba0f4b86",
         "f82c1f065f6aa3dd5ce8ee3491d4c49f245d1e7ba921b8cc0cc9c8658a634fbd",
-        "3b58dd489c9372b1cdfd1eb3b11e74634d2aeaf6e40c841a96d253c61388d626",
+        "ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b",
+        "638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b",
     ):
         assert digest in TEXT
-    assert 'test ! -e "$package_root/extractor/shahid.py"' in TEXT
-    assert "shahid*.pyc" in TEXT
+    sanitizer = SANITIZER.read_text(encoding="utf-8")
+    for name in (
+        "adultswim",
+        "aenetworks",
+        "blackboardcollaborate",
+        "cloudflarestream",
+        "espn",
+        "go",
+        "nbc",
+        "shahid",
+        "tbs",
+        "vice",
+    ):
+        assert f'"{name}"' in sanitizer
+    assert 'test ! -e "$package_root/extractor/$name.py"' in TEXT
+    assert '"$name*.pyc"' in TEXT
     assert "{'youtube','TikTok','Instagram'} <= names" in TEXT
+    assert "io.teamagent.contract.yt-dlp-removed-extractor-set-sha256" in TEXT
     assert ".trivyignore" not in TEXT
     assert "vex" not in TEXT.lower()
 

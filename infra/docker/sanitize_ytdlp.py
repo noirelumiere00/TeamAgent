@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministically remove the out-of-scope Shahid extractor from yt-dlp."""
+"""Remove signed, out-of-scope secret-bearing extractors from vendored yt-dlp."""
 
 from __future__ import annotations
 
@@ -8,6 +8,24 @@ import hashlib
 import json
 import re
 from pathlib import Path
+
+REMOVED_EXTRACTORS = {
+    "adultswim": "69f8279b21e2e697f277a2ffb6c2e8f42e2e7a520ab5441c699d1e674254be90",
+    "aenetworks": "2c16a7a383d41edb7c5b5278971425729b213ace213e0761a44ae360fe5a2e2c",
+    "blackboardcollaborate": ("c16d92311be21faf5a23cec365c942e1acdda5ac4afa14406d4b772f79ffa607"),
+    "cloudflarestream": ("261f2f26747d181c2fee01a5f065b12d02b055828c99dbdd8261b67193c29a81"),
+    "espn": "c5fd3174b057e8471c9df4cd674c9a69658870a70ddcae35a29dc3c7a5486f77",
+    "go": "f6dd8e584fd33a3412854fc0288513e21e8079071e77bd97031d2a1635b1c917",
+    "nbc": "830344cb2e2e7c05eb0ea1d07f60118f2c672a99f35036109e0ca36c6d3b3fc1",
+    "shahid": "f82c1f065f6aa3dd5ce8ee3491d4c49f245d1e7ba921b8cc0cc9c8658a634fbd",
+    "tbs": "4008e7a3576cde5ce3bfc453ac2286816ab10ac3abc5f43823a59396730259b7",
+    "vice": "d43235315b016e81161ba1a4132c3d84358c905482307c325837c6ec9ec58246",
+}
+ALLOWLISTED_EXTRACTORS = {
+    "youtube": "extractor/youtube/__init__.py",
+    "tiktok": "extractor/tiktok.py",
+    "instagram": "extractor/instagram.py",
+}
 
 
 def digest(path: Path) -> str:
@@ -42,14 +60,17 @@ def main() -> int:
     args = parser.parse_args()
 
     extractor = args.package_root / "extractor"
-    shahid = extractor / "shahid.py"
     lazy = extractor / "lazy_extractors.py"
     registry = extractor / "_extractors.py"
     expected = args.expected_shahid_sha256
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise RuntimeError("expected Shahid hash must be lowercase SHA-256")
-    if digest(shahid) != expected:
-        raise RuntimeError("yt-dlp Shahid source hash does not match the signed contract")
+    if expected != REMOVED_EXTRACTORS["shahid"]:
+        raise RuntimeError("Docker Shahid hash and sanitizer contract disagree")
+    for name, expected_hash in REMOVED_EXTRACTORS.items():
+        source = extractor / f"{name}.py"
+        if not source.is_file() or digest(source) != expected_hash:
+            raise RuntimeError(f"yt-dlp {name} source hash does not match the signed contract")
 
     registry_text = replace_once(
         registry.read_text(encoding="utf-8"),
@@ -78,17 +99,35 @@ def main() -> int:
         )
     lazy.write_text(lazy_text, encoding="utf-8")
 
-    shahid.unlink()
-    for compiled in extractor.rglob("shahid*.pyc"):
-        compiled.unlink()
-    if any(extractor.rglob("shahid*.pyc")):
-        raise RuntimeError("compiled Shahid extractor remains")
+    removed_compiled: dict[str, str] = {}
+    for name in REMOVED_EXTRACTORS:
+        (extractor / f"{name}.py").unlink()
+        for compiled in extractor.rglob(f"{name}*.pyc"):
+            relative = compiled.relative_to(args.package_root).as_posix()
+            removed_compiled[relative] = digest(compiled)
+            compiled.unlink()
+        if (extractor / f"{name}.py").exists() or any(extractor.rglob(f"{name}*.pyc")):
+            raise RuntimeError(f"source or compiled {name} extractor remains")
+    for name, relative_path in ALLOWLISTED_EXTRACTORS.items():
+        if not (args.package_root / relative_path).is_file():
+            raise RuntimeError(f"allowlisted {name} extractor was removed")
 
     manifest = {
         "schema_version": 1,
-        "action": "remove-out-of-scope-extractor",
-        "removed": "yt_dlp/extractor/shahid.py",
-        "removed_sha256": expected,
+        "action": "remove-out-of-scope-secret-bearing-extractors",
+        "allowlisted_extractors": sorted(ALLOWLISTED_EXTRACTORS),
+        "removed": {
+            f"yt_dlp/extractor/{name}.py": expected_hash
+            for name, expected_hash in REMOVED_EXTRACTORS.items()
+        },
+        "removed_compiled": removed_compiled,
+        "removed_extractor_set_sha256": hashlib.sha256(
+            json.dumps(
+                REMOVED_EXTRACTORS,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
         "modified": {
             "yt_dlp/extractor/_extractors.py": digest(registry),
             "yt_dlp/extractor/lazy_extractors.py": digest(lazy),
