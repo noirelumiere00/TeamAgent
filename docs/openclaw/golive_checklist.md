@@ -26,7 +26,8 @@ Buildx deployment paths.
 - [ ] `apply_openclaw.sh --render-only` output was reviewed.
 - [ ] Rendered OpenClaw container uses UID/GID 65532, read-only rootfs,
       `privileged=false`, capability drop `ALL`, writable `/tmp` empty volume,
-      canonical image ENTRYPOINT/CMD, `/readyz`, and `stopTimeout=30`.
+      canonical image ENTRYPOINT/CMD, gateway PID 1, clean SIGTERM exit 0,
+      `/readyz`, and `stopTimeout=30`.
 - [ ] IAM roles, four Secrets Manager bindings, CloudWatch logs,
       `AWS_REGION`, and `SLACK_DM_ALLOWLIST` are preserved.
 - [ ] No plaintext secret exists in image env or task `environment`.

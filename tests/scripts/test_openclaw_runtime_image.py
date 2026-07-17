@@ -8,15 +8,16 @@ the image test is skipped instead of silently testing source text.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
-
 EXPECTED_CMD = [
-    "/app/openclaw.mjs",
+    "/opt/teamagent/gateway-runtime.mjs",
     "gateway",
     "--bind",
     "loopback",
@@ -32,17 +33,38 @@ PLACEHOLDER_ENV = [
     "SLACK_DM_ALLOWLIST=*",
     "AWS_EC2_METADATA_DISABLED=true",
 ]
+GATEWAY_LAUNCHER = r"""
+const fs = require("node:fs");
+const configPath = process.env.OPENCLAW_CONFIG_PATH;
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+config.channels.slack.enabled = false;
+fs.writeFileSync(
+  configPath,
+  JSON.stringify(config, null, 2) + "\n",
+  {mode: 0o600}
+);
+process.execve(
+  process.execPath,
+  [
+    process.execPath,
+    "/opt/teamagent/gateway-runtime.mjs",
+    "gateway",
+    "--bind",
+    "loopback",
+    "--port",
+    "18789"
+  ],
+  process.env
+);
+"""
 
 
-def _run(
-    command: list[str], *, check: bool = True
-) -> subprocess.CompletedProcess[str]:
+def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         check=check,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
 
 
@@ -69,6 +91,139 @@ def _isolated_run_args(image: str) -> list[str]:
     return args
 
 
+def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
+    run_args = [
+        "docker",
+        "run",
+        "-d",
+        "--platform",
+        "linux/arm64",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=512m",
+    ]
+    for assignment in PLACEHOLDER_ENV:
+        run_args.extend(["-e", assignment])
+    run_args.extend(
+        [
+            image,
+            "/nodejs/bin/node",
+            "-e",
+            GATEWAY_LAUNCHER,
+        ]
+    )
+    container_id = _run(run_args).stdout.strip()
+    assert container_id
+
+    try:
+        container = json.loads(_run(["docker", "inspect", container_id]).stdout)[0]
+        host = container["HostConfig"]
+        tmpfs = host["Tmpfs"]["/tmp"]
+        assert host["ReadonlyRootfs"] is True
+        assert "ALL" in host["CapDrop"]
+        assert "no-new-privileges" in host["SecurityOpt"]
+        assert host["NetworkMode"] == "none"
+        assert "noexec" in tmpfs
+        assert "nosuid" in tmpfs
+
+        ready = False
+        for _ in range(45):
+            ready_probe = _run(
+                [
+                    "docker",
+                    "exec",
+                    container_id,
+                    "/nodejs/bin/node",
+                    "-e",
+                    (
+                        "fetch('http://127.0.0.1:18789/readyz')"
+                        ".then(r=>process.exit(r.ok?0:1))"
+                        ".catch(()=>process.exit(1))"
+                    ),
+                ],
+                check=False,
+            )
+            if ready_probe.returncode == 0:
+                ready = True
+                break
+            running = _run(
+                [
+                    "docker",
+                    "inspect",
+                    "-f",
+                    "{{.State.Running}}",
+                    container_id,
+                ],
+                check=False,
+            )
+            if running.returncode != 0 or running.stdout.strip() != "true":
+                break
+            time.sleep(1)
+
+        startup_logs = _run(["docker", "logs", container_id], check=False)
+        startup_output = startup_logs.stdout + startup_logs.stderr
+        assert ready, startup_output
+
+        children = _run(
+            [
+                "docker",
+                "exec",
+                container_id,
+                "/nodejs/bin/node",
+                "-e",
+                (
+                    "process.stdout.write("
+                    "require('node:fs').readFileSync("
+                    "'/proc/1/task/1/children','utf8').trim())"
+                ),
+            ]
+        ).stdout.strip()
+        assert children == ""
+
+        stopped = _run(
+            ["docker", "stop", "--time", "30", container_id],
+            check=False,
+        )
+        assert stopped.returncode == 0, stopped.stderr
+
+        final_inspect = json.loads(_run(["docker", "inspect", container_id]).stdout)[0]
+        state = final_inspect["State"]
+        final_logs = _run(["docker", "logs", container_id], check=False)
+        log_output = final_logs.stdout + final_logs.stderr
+        secret_values = [assignment.split("=", 1)[1] for assignment in PLACEHOLDER_ENV[:4]]
+        assert not any(value in log_output for value in secret_values)
+        assert not any(
+            marker in log_output
+            for marker in (
+                "spawn npm",
+                "Config observe anomaly",
+                "auto-enabled plugins",
+                "browser configured",
+            )
+        )
+        assert state["ExitCode"] == 0, log_output
+        assert state["OOMKilled"] is False
+        assert state["Error"] == ""
+
+        return {
+            "ready": True,
+            "pid1Children": children,
+            "signal": "SIGTERM",
+            "exitCode": state["ExitCode"],
+            "oomKilled": state["OOMKilled"],
+            "runtimeSecretLeak": False,
+            "logSha256": hashlib.sha256(log_output.encode()).hexdigest(),
+        }
+    finally:
+        _run(["docker", "rm", "-f", container_id], check=False)
+
+
 def verify_runtime_image(image: str) -> dict[str, Any]:
     inspect = json.loads(_run(["docker", "image", "inspect", image]).stdout)[0]
     config = inspect["Config"]
@@ -84,10 +239,7 @@ def verify_runtime_image(image: str) -> dict[str, Any]:
         "OPENCLAW_GATEWAY_TOKEN",
         "TEAMAGENT_MCP_BEARER",
     }
-    assert not (
-        forbidden_env
-        & {entry.split("=", 1)[0] for entry in config.get("Env", [])}
-    )
+    assert not (forbidden_env & {entry.split("=", 1)[0] for entry in config.get("Env", [])})
 
     node_probe = r"""
 const fs = require("node:fs");
@@ -138,10 +290,7 @@ const result = {
 };
 console.log(JSON.stringify(result));
 """
-    probe_result = _run(
-        _isolated_run_args(image)
-        + ["/nodejs/bin/node", "-e", node_probe]
-    )
+    probe_result = _run([*_isolated_run_args(image), "/nodejs/bin/node", "-e", node_probe])
     process_contract = json.loads(probe_result.stdout)
     assert process_contract["uid"] == 65532
     assert process_contract["gid"] == 65532
@@ -159,21 +308,10 @@ console.log(JSON.stringify(result));
     assert process_contract["tmpWrite"]["writable"] is True
     assert process_contract["jitiResolvable"] is False
     assert process_contract["browserHelpMetadata"] is False
-    assert (
-        process_contract["prune"]["browser"]["reachableRegistrationChunks"]
-        == 0
-    )
-    assert (
-        process_contract["prune"]["browser"][
-            "residualUnreachableBrowserCandidates"
-        ]
-        == 0
-    )
+    assert process_contract["prune"]["browser"]["reachableRegistrationChunks"] == 0
+    assert process_contract["prune"]["browser"]["residualUnreachableBrowserCandidates"] == 0
     assert process_contract["prune"]["packages"]["residualForbidden"] == 0
-    assert (
-        process_contract["prune"]["developmentPayload"]["residualPathCount"]
-        == 0
-    )
+    assert process_contract["prune"]["developmentPayload"]["residualPathCount"] == 0
 
     missing_secrets = _run(
         [
@@ -196,15 +334,23 @@ console.log(JSON.stringify(result));
     assert missing_secrets.returncode == 78
 
     exit_42 = _run(
-        _isolated_run_args(image)
-        + ["/nodejs/bin/node", "-e", "process.exit(42)"],
+        [
+            *_isolated_run_args(image),
+            "/nodejs/bin/node",
+            "-e",
+            "process.exit(42)",
+        ],
         check=False,
     )
     assert exit_42.returncode == 42
 
     browser_help = _run(
-        _isolated_run_args(image)
-        + ["/app/openclaw.mjs", "browser", "--help"],
+        [
+            *_isolated_run_args(image),
+            "/app/openclaw.mjs",
+            "browser",
+            "--help",
+        ],
         check=False,
     )
     browser_output = f"{browser_help.stdout}\n{browser_help.stderr}"
@@ -291,10 +437,8 @@ fs.writeFileSync(1, JSON.stringify({
     assert not any(browser_bridge_contract["implementationSignals"].values())
     assert browser_bridge_contract["failClosed"] is True
     assert "public surface access blocked" in browser_bridge_contract["error"]
-    assert (
-        "no bundled plugin manifest found for browser"
-        in browser_bridge_contract["error"]
-    )
+    assert "no bundled plugin manifest found for browser" in browser_bridge_contract["error"]
+    gateway_lifecycle = _gateway_lifecycle_contract(image)
 
     return {
         "schemaVersion": 1,
@@ -315,9 +459,14 @@ fs.writeFileSync(1, JSON.stringify({
             "browserReachabilityReport": True,
             "jitiUnavailable": True,
             "developmentPayloadAbsent": True,
+            "gatewayIsPid1": gateway_lifecycle["pid1Children"] == "",
+            "gatewayReady": gateway_lifecycle["ready"],
+            "gatewaySigtermExitZero": gateway_lifecycle["exitCode"] == 0,
+            "gatewayRuntimeSecretLeakAbsent": (gateway_lifecycle["runtimeSecretLeak"] is False),
         },
         "process": process_contract,
         "browserBridge": browser_bridge_contract,
+        "gatewayLifecycle": gateway_lifecycle,
     }
 
 
@@ -340,9 +489,7 @@ def main() -> int:
     args = parser.parse_args()
     report = verify_runtime_image(args.image)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n"
-    )
+    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return 0
 
 

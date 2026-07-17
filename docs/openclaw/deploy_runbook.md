@@ -143,6 +143,7 @@ Confirm the `openclaw` container has:
 - only `/tmp` mounted from `openclaw-tmp` as writable;
 - no task `entryPoint` or `command` override;
 - `/readyz` health check and `stopTimeout=30`;
+- the canonical gateway remains PID 1 and exits 0 after clean SIGTERM;
 - the same IAM roles, Secrets Manager bindings, logging, AWS region, and
   `SLACK_DM_ALLOWLIST` as the current revision.
 

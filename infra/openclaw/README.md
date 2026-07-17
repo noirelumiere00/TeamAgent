@@ -32,6 +32,13 @@ Production ECS revisions are rendered by
 - one writable task-scoped empty volume mounted only at `/tmp`;
 - the image's canonical ENTRYPOINT/CMD and `/readyz` health check.
 
+The canonical CMD enters `gateway-runtime.mjs`, disables the optional packaged
+Node compile-cache respawn, and then `execve`s the official OpenClaw launcher.
+This keeps the gateway as PID 1. It avoids the upstream respawn supervisor's
+one-second signal escalation turning a clean but slightly slower SIGTERM
+shutdown into exit 1; the build gate also rejects a gateway PID 1 that still
+has a supervised child process.
+
 AWS Fargate does not accept Docker `no-new-privileges` security options or
 `linuxParameters.tmpfs`. Therefore production does **not** claim to enforce
 `no-new-privileges`; local Docker contract tests use it as an additional

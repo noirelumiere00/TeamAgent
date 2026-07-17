@@ -632,7 +632,8 @@ const config=JSON.parse(fs.readFileSync(configPath,"utf8"));
 config.channels.slack.enabled=false;
 fs.writeFileSync(configPath,JSON.stringify(config,null,2)+"\n",{mode:0o600});
 process.execve(process.execPath,[
-  process.execPath,"/app/openclaw.mjs","gateway","--bind","loopback","--port","18789"
+  process.execPath,"/opt/teamagent/gateway-runtime.mjs",
+  "gateway","--bind","loopback","--port","18789"
 ],process.env);'
 gateway_container=$(docker run "${gateway_args[@]}" "$RUNTIME_REF" \
   /nodejs/bin/node -e "$gateway_launcher")
@@ -655,6 +656,13 @@ for _ in $(seq 1 45); do
 done
 docker logs "$gateway_container" >"$tmp_dir/gateway.log" 2>&1 || true
 ((gateway_ok)) || { tail -120 "$tmp_dir/gateway.log" >&2; fail "offline gateway readiness smoke failed"; }
+docker exec "$gateway_container" node -e '
+const fs=require("fs");
+const children=fs.readFileSync("/proc/1/task/1/children","utf8").trim();
+if(children){
+  console.error(`gateway PID 1 unexpectedly supervises child processes: ${children}`);
+  process.exit(1);
+}' >/dev/null || fail "gateway PID 1 child-process contract failed"
 if grep -E 'spawn npm|Config observe anomaly|auto-enabled plugins|browser configured' "$tmp_dir/gateway.log" >/dev/null || \
    grep -F -e xoxb-offline-smoke -e xapp-offline-smoke -e offline-gateway-smoke -e offline-mcp-smoke "$tmp_dir/gateway.log" >/dev/null; then
   tail -120 "$tmp_dir/gateway.log" >&2

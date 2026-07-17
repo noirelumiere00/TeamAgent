@@ -14,6 +14,7 @@ CONFIG = ROOT / "infra/openclaw/openclaw.config.json5"
 LOCK = ROOT / "infra/openclaw/plugins-lock.json"
 HELPER = ROOT / "infra/openclaw/build-image.sh"
 PRUNER = ROOT / "infra/openclaw/prune-runtime.mjs"
+GATEWAY_RUNTIME = ROOT / "infra/openclaw/gateway-runtime.mjs"
 BUILDSPEC = ROOT / "infra/codebuild/buildspec.openclaw.yml"
 CODEBUILD_TF = ROOT / "infra/terraform/codebuild.tf"
 COMPOSE = ROOT / "infra/openclaw/docker-compose.yml"
@@ -135,6 +136,7 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     lock = json.loads(LOCK.read_text())
     dockerfile = DOCKERFILE.read_text()
     pruner = PRUNER.read_text()
+    gateway_runtime = GATEWAY_RUNTIME.read_text()
     assert dockerfile.splitlines()[0] == (
         f"# syntax=docker/dockerfile:1.7@{lock['tooling']['dockerfileFrontend']['digest']}"
     )
@@ -181,10 +183,15 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
         flags=re.MULTILINE,
     )
     assert re.search(
-        r'^CMD \["/app/openclaw.mjs", "gateway", "--bind", "loopback", "--port", "18789"\]$',
+        r'^CMD \["/opt/teamagent/gateway-runtime.mjs", "gateway", "--bind", "loopback", "--port", "18789"\]$',
         dockerfile,
         flags=re.MULTILINE,
     )
+    assert ("infra/openclaw/gateway-runtime.mjs /opt/teamagent/gateway-runtime.mjs") in dockerfile
+    assert 'NODE_DISABLE_COMPILE_CACHE: "1"' in gateway_runtime
+    assert "delete gatewayEnv.NODE_COMPILE_CACHE" in gateway_runtime
+    assert '"/app/openclaw.mjs", ...expectedArgs' in gateway_runtime
+    assert 'typeof process.execve !== "function"' in gateway_runtime
     assert "COPY infra/openclaw/prune-runtime.mjs /tmp/prune-runtime.mjs" in dockerfile
     assert "node /tmp/prune-runtime.mjs" in dockerfile
     for forbidden_artifact in (
@@ -218,7 +225,7 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     assert "registerBrowserPlugin" in pruner
     assert "browserHelpSourceSignature" in pruner
     assert "runtime-prune-report.json" in pruner
-    assert 'fs.writeFileSync(1,JSON.stringify({' in HELPER.read_text()
+    assert "fs.writeFileSync(1,JSON.stringify({" in HELPER.read_text()
     assert "plugins registry --refresh" in dockerfile
     assert "npm install" not in dockerfile
     assert not re.search(r"\b(?:apt|apk|dnf|yum)\b.*install", dockerfile)
@@ -356,6 +363,7 @@ def test_dedicated_builder_is_fail_closed_and_scans_child() -> None:
         "/readyz",
         "child environment allowlist failed",
         "gateway container isolation contract failed",
+        "gateway PID 1 child-process contract failed",
         "gateway SIGTERM shutdown must exit 0",
         "fs.lstatSync",
         "danglingSymlinks",
@@ -464,18 +472,13 @@ def test_codebuild_uses_pinned_trivy_and_dedicated_helper() -> None:
     assert 'resource "aws_codebuild_project" "openclaw_image"' in terraform
     assert 'buildspec = "infra/codebuild/buildspec.openclaw.yml"' in terraform
     assert '"codebuild/openclaw-evidence"' in terraform
-    legacy_project = terraform.split(
-        'resource "aws_codebuild_project" "openclaw_image"', 1
-    )[0]
+    legacy_project = terraform.split('resource "aws_codebuild_project" "openclaw_image"', 1)[0]
     assert "buildspec.openclaw.yml" not in legacy_project
     assert "openclaw-release/openclaw-build-evidence" in buildspec
 
 
 def _deployable_manifest() -> dict[str, Any]:
-    repository = (
-        "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/"
-        "teamagent-openclaw"
-    )
+    repository = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw"
     digest = "sha256:" + "a" * 64
     return {
         "schemaVersion": 3,
@@ -586,8 +589,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
         ],
         check=True,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     rendered = json.loads(rendered_process.stdout)
     assert rendered["runtimePlatform"] == {
@@ -600,9 +602,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
         "openclaw-tmp",
     }
     container = next(
-        item
-        for item in rendered["containerDefinitions"]
-        if item["name"] == "openclaw"
+        item for item in rendered["containerDefinitions"] if item["name"] == "openclaw"
     )
     assert container["image"] == _deployable_manifest()["image"]["runtimeRef"]
     assert container["readonlyRootFilesystem"] is True
@@ -624,8 +624,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
     assert container["stopTimeout"] == 30
     assert container["secrets"] == current_task["containerDefinitions"][0]["secrets"]
     assert (
-        container["logConfiguration"]
-        == current_task["containerDefinitions"][0]["logConfiguration"]
+        container["logConfiguration"] == current_task["containerDefinitions"][0]["logConfiguration"]
     )
     assert {entry["name"] for entry in container["environment"]} == {
         "AWS_REGION",
@@ -645,8 +644,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
         ],
         check=False,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     assert rejected.returncode != 0
     assert "release manifest is not deployable" in rejected.stderr
@@ -688,11 +686,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     assert scope["schemaVersion"] == 1
     assert len(inventory_names) == len(set(inventory_names)) == 28
     assert set(inventory_names) == set(included)
-    default_enabled = {
-        tool["name"]
-        for tool in scope["tools"]
-        if tool["defaultEnabledByTerraform"]
-    }
+    default_enabled = {tool["name"] for tool in scope["tools"] if tool["defaultEnabledByTerraform"]}
     assert default_enabled == {
         "search",
         "clientkarte",
@@ -748,6 +742,10 @@ def test_actual_image_test_is_executable_and_checks_kernel_and_payload() -> None
         "jitiResolvable",
         "browserHelpMetadata",
         "process.exit(42)",
+        "/proc/1/task/1/children",
+        "gatewayIsPid1",
+        "gatewaySigtermExitZero",
+        "gatewayRuntimeSecretLeakAbsent",
         "browser",
         "--help",
         "browserBridgeFacadeFailClosed",

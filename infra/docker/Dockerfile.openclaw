@@ -94,6 +94,7 @@ COPY --from=upstream --chown=65532:65532 /app/package.json /app/package.json
 COPY --from=upstream --chown=65532:65532 /app/skills /app/skills
 COPY --from=upstream --chown=65532:65532 /opt/teamagent /opt/teamagent
 COPY --chown=65532:65532 --chmod=0555 infra/docker/openclaw-entrypoint.mjs /opt/teamagent/entrypoint.mjs
+COPY --chown=65532:65532 --chmod=0555 infra/openclaw/gateway-runtime.mjs /opt/teamagent/gateway-runtime.mjs
 
 ENV NODE_ENV=production \
     PATH=/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -130,4 +131,4 @@ USER 65532:65532
 # distroless base, so uid 65532 can write while the root filesystem stays RO.
 VOLUME ["/tmp"]
 ENTRYPOINT ["/nodejs/bin/node", "/opt/teamagent/entrypoint.mjs"]
-CMD ["/app/openclaw.mjs", "gateway", "--bind", "loopback", "--port", "18789"]
+CMD ["/opt/teamagent/gateway-runtime.mjs", "gateway", "--bind", "loopback", "--port", "18789"]
