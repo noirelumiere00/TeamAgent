@@ -113,8 +113,7 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     lock = json.loads(LOCK.read_text())
     dockerfile = DOCKERFILE.read_text()
     assert dockerfile.splitlines()[0] == (
-        "# syntax=docker/dockerfile:1.7@"
-        f"{lock['tooling']['dockerfileFrontend']['digest']}"
+        f"# syntax=docker/dockerfile:1.7@{lock['tooling']['dockerfileFrontend']['digest']}"
     )
     assert _docker_arg_values(dockerfile, "OPENCLAW_VERSION") == [
         lock["openclaw"]["version"],
@@ -146,7 +145,7 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     }
     for plugin in lock["plugins"]:
         assert (
-            f'sha256sum /opt/teamagent/plugins/{plugin["id"]}/npm-shrinkwrap.json'
+            f"sha256sum /opt/teamagent/plugins/{plugin['id']}/npm-shrinkwrap.json"
             if plugin["id"] == "slack"
             else "sha256sum /opt/teamagent/plugins/amazon-bedrock/npm-shrinkwrap.json"
         ) in dockerfile
@@ -253,8 +252,10 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
     assert "env: process.env" not in entrypoint
     assert "env: childEnv" in entrypoint
     assert 'NODE_ENV: "production"' in entrypoint
-    assert 'AWS_DEFAULT_REGION: region' in entrypoint
-    assert 'process.execve(process.execPath, [process.execPath, ...command], childEnv)' in entrypoint
+    assert "AWS_DEFAULT_REGION: region" in entrypoint
+    assert (
+        "process.execve(process.execPath, [process.execPath, ...command], childEnv)" in entrypoint
+    )
     assert "process.exit(128 + signalNumber)" in entrypoint
     assert "writeFile(templatePath" not in entrypoint
 
