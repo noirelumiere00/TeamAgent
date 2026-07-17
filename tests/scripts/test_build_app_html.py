@@ -5,7 +5,7 @@
   フッタ焼き込み（更新: YYYY-MM-DD JST・取引先N・資料M）が入る
 - fail-loud: Vault 不在 / サイドカー欠落 / clients==0 / docs==0 は exit 1
   （silent fallback・空 HTML の配信を作らない）
-- サニティゲート: 取引先数/資料数/バイト数のいずれかが前回比 20% 超減なら exit 1 で
+- サニティゲート: 取引先数/資料数/FB件数/バイト数のいずれかが前回比 20% 超減なら exit 1 で
   既存 out を保持。--allow-shrink で明示的に通過し統計基準がリセットされる
 - exclude_stems.json のフィルタ配線: 除外 stem の資料が payload に載らない
 - exclude_source_keys.json のフィルタ配線: タイトル変更後も source identity で除外し、
@@ -31,6 +31,8 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+
+from scripts.export_vault import render_client_note
 
 _ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
@@ -187,6 +189,8 @@ def test_build_success_writes_html_stats_and_stamp(
     stats = json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))
     assert stats["clients"] == 1
     assert stats["docs"] == 3
+    assert stats["timeline_events"] == 0
+    assert stats["timeline_events_dated"] == 0
     assert stats["bytes"] == len(out.read_bytes())
     manifest_sha = hashlib.sha256((vault / ".export-vault-manifest.json").read_bytes()).hexdigest()
     payload = _payload(html)
@@ -715,6 +719,42 @@ def test_no_shrink_passes_without_flag(sidecars: Path, vault: Path, tmp_path: Pa
     assert _run(vault, out) == 0  # 同一 Vault の再生成はゲートを通る
 
 
+def test_timeline_shrink_to_zero_exits_1_and_keeps_previous_out(
+    sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """exporter/parser の契約ずれで営業FBだけ全消失しても公開物を上書きしない。"""
+    client = vault / "clients" / "出光興産.md"
+    client.write_text(
+        client.read_text(encoding="utf-8")
+        + "\n### 2026-06-01 #proj-営業FB 1780272000.123456\n\n- ポジ反応: 前向き\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "app.html"
+    assert _run(vault, out) == 0
+    first_bytes = out.read_bytes()
+    assert (
+        json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))["timeline_events"]
+        == 1
+    )
+
+    client.write_text(
+        client.read_text(encoding="utf-8").replace(
+            "### 2026-06-01 #proj-営業FB 1780272000.123456",
+            "### 通常のh3見出し",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as ei:
+        _run(vault, out)
+    assert ei.value.code == 1
+    assert "営業FB件数: 1 → 0" in capsys.readouterr().err
+    assert out.read_bytes() == first_bytes
+    assert (
+        json.loads(Path(str(out) + ".stats.json").read_text(encoding="utf-8"))["timeline_events"]
+        == 1
+    )
+
+
 def test_corrupt_stats_exits_1(
     sidecars: Path, vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -727,6 +767,82 @@ def test_corrupt_stats_exits_1(
 
 
 # ---------------- parse_fb_events（施策タイムライン） ----------------
+
+
+def test_parse_fb_date_from_dated_heading() -> None:
+    """現行 Vault 形式: 見出しの日付を拾い、通常の h3 は FB と誤検知しない。"""
+    body = (
+        "## 営業FB時系列（新しい順）\n\n"
+        "### 2026-07-07 #proj-ショート動画_営業フィードバック情報 1783382400.123456\n\n"
+        "- フェーズ: 提案\n"
+        "- ポジ反応: 日付つき見出しを読み取れる\n\n"
+        "> \\[2026-07-06 15:00\\] <B0AK>: 引用側とは別日\n\n"
+        "### 通常のh3見出し（FBではない）\n\n"
+        "- ポジ反応: 誤検知しない\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert len(evs) == 1
+    assert evs[0]["d"] == "2026-07-07"  # 現行形式の見出し日付が最優先
+    assert evs[0]["src"] == "Slack"
+    assert evs[0]["ph"] == "提案"
+    assert evs[0]["pos"] == "日付つき見出しを読み取れる"
+
+
+def test_parse_fb_dated_form_heading_and_sender() -> None:
+    """現行フォーム形式: 日付・由来・送信者を同時に復元する。"""
+    body = (
+        "### 2026-06-17 ショート動画営業 FB - フォーム回答 - フォーム回答 1 - row 285\n\n"
+        "- ポジ反応: 前向き\n\n"
+        "> 送信者: 山本四郎 タイムスタンプ: 2026/06/17 17:38:30 連携ステータス: 連携済み\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert evs == [
+        {
+            "d": "2026-06-17",
+            "src": "フォーム",
+            "by": "山本四郎",
+            "ph": "",
+            "bant": "",
+            "menu": "",
+            "pos": "前向き",
+            "neg": "",
+            "next": "",
+        }
+    ]
+
+
+def test_parse_fb_escaped_quote_date_for_legacy_undated_heading() -> None:
+    """旧 `----` 見出しでも、現行 exporter が退避した引用日付を読める。"""
+    body = (
+        "### ---- #proj-ch\n\n"
+        "- ポジ反応: 旧形式も維持\n\n"
+        "> \\[2026-05-11 08:45\\] <B0AK>: 本文抜粋\n"
+    )
+    evs = _mod.parse_fb_events(body)
+    assert len(evs) == 1
+    assert evs[0]["d"] == "2026-05-11"
+
+
+def test_exported_client_note_heading_is_accepted_by_build_parser() -> None:
+    """exporter→builder の実契約を直結し、見出し形式の再乖離を検知する。"""
+    note = render_client_note(
+        "テスト取引先",
+        [
+            {
+                "occurred_at": "2026-07-07",
+                "title": "#proj-ショート動画_営業フィードバック情報 1783382400.123456",
+                "deal_phase": "提案",
+                "positive_reaction": "連携テスト",
+            }
+        ],
+        [],
+        [],
+    )
+    evs = _mod.parse_fb_events(_mod.body_of(note))
+    assert len(evs) == 1
+    assert evs[0]["d"] == "2026-07-07"
+    assert evs[0]["ph"] == "提案"
+    assert evs[0]["pos"] == "連携テスト"
 
 
 def test_parse_fb_date_from_quote_line_and_fields() -> None:
