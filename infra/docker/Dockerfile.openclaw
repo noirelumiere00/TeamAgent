@@ -1,65 +1,104 @@
-# syntax=docker/dockerfile:1
-# ============================================================
-# OpenClaw 外殻（版pin）+ レビュー済み設定/ペルソナを焼いた薄い overlay — ECS Fargate
-# ============================================================
-# 役割: 自律外殻(L0)。creds/RDS到達なし。MCP境界(streamable-http)越しにしかドメインに触れない。
-# 設定は Git レビュー済みを image に焼く＝immutable・監査可能。**秘密値は焼かない**（ECS secrets で注入）。
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+# OpenClaw gateway for ECS/Fargate (linux/arm64 only).
 #
-# 注意（config と state の分離）:
-#   - OpenClaw は ~/.openclaw に「状態」も書く。read-only/ephemeral 前提では config を別パスに置き
-#     OPENCLAW_CONFIG_PATH で参照、state/workspace は書込み可能な tmpfs/volume にする（task def 側で指定）。
-#   - workspace の SOUL.md/HEARTBEAT.md は起動時に seed（entrypoint で書込み可能 workspace へコピー）。
-#   ⚠️ deploy 時に「config 読込・workspace seed・gateway 起動」の実動作を必ず確認（環境依存が残る箇所）。
-#
-# build:  docker build -f infra/docker/Dockerfile.openclaw -t teamagent-openclaw:local .
-# ============================================================
+# The official image is used only as a content source. The runtime is a pinned
+# distroless Node 24 image: no shell, package manager, curl, npm, or compiler.
+# Secrets are injected by ECS at runtime and are never accepted as build args.
 
-# 版pin: stable v2026.6.5（§S3: @openclaw/amazon-bedrock-provider が openclaw>=2026.6.5 を要求するため
-# 2026.6.1 から版上げ。min-safe >= 2026.5.26 充足・新規high/critical GHSA無しを2026-06-12に再確認）。
-# digest は manifest list（multi-arch）。
-FROM ghcr.io/openclaw/openclaw:2026.6.5@sha256:037f49ba1595be9502fb345138d727cd0cfaecf1392cbe0cfe053fb4681386cd
+ARG OPENCLAW_VERSION=2026.7.1
+ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
+ARG DISTROLESS_ARM64_DIGEST=sha256:c6465a8fcd268010c53e6e33e58d479dd232aa34f2312500afad8f605caffdc3
 
-# 柱4(2026-06-22): ビルド出所追跡（image↔commit）。build時 --build-arg GIT_COMMIT/GIT_BRANCH で注入。
-# entrypoint が起動時に commit をログ出力＝本番で動く image の出所が CloudWatch から追える。
+FROM ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}@${OPENCLAW_ARM64_DIGEST} AS upstream
+
+USER root
+
+COPY infra/openclaw/openclaw.config.json5 /opt/teamagent/openclaw.source.json5
+COPY infra/openclaw/SOUL.md infra/openclaw/HEARTBEAT.md /opt/teamagent/workspace-seed/
+
+# Convert the reviewed JSON5 source into immutable canonical JSON. Runtime
+# mutations happen only on a fresh copy under /tmp.
+RUN node -e 'const fs=require("fs");const JSON5=require("/app/node_modules/json5");const src="/opt/teamagent/openclaw.source.json5";const out="/opt/teamagent/openclaw.template.json";fs.writeFileSync(out,JSON.stringify(JSON5.parse(fs.readFileSync(src,"utf8")),null,2)+"\n",{mode:0o444});fs.unlinkSync(src)'
+
+# Official plugin artifacts are content-addressed here and also recorded in
+# infra/openclaw/plugins-lock.json. Both packages ship npm-shrinkwrap.json and
+# their complete production node_modules tree; no mutable npm resolution runs.
+ADD --checksum=sha256:d6ae8745867d812560e917707e633c8b66b36f7270124a8cca9602c6dc98ef46 \
+    https://registry.npmjs.org/@openclaw/slack/-/slack-2026.7.1.tgz /tmp/openclaw-slack.tgz
+ADD --checksum=sha256:4b34630d0a0f715fc9e9cf17166a701c16318abf4b8d04eac1be6455bc917691 \
+    https://registry.npmjs.org/@openclaw/amazon-bedrock-provider/-/amazon-bedrock-provider-2026.7.1.tgz /tmp/openclaw-bedrock.tgz
+
+RUN set -eux; \
+    mkdir -p /opt/teamagent/plugins/slack /opt/teamagent/plugins/amazon-bedrock; \
+    tar -xzf /tmp/openclaw-slack.tgz --strip-components=1 -C /opt/teamagent/plugins/slack; \
+    tar -xzf /tmp/openclaw-bedrock.tgz --strip-components=1 -C /opt/teamagent/plugins/amazon-bedrock; \
+    test "$(sha256sum /opt/teamagent/plugins/slack/npm-shrinkwrap.json | cut -d' ' -f1)" = "79f3179b6163c1878bef8820673419a0547027c536666e482b02bd8ae5a7980c"; \
+    test "$(sha256sum /opt/teamagent/plugins/amazon-bedrock/npm-shrinkwrap.json | cut -d' ' -f1)" = "1580dc988ec8ef3e430a166274062ddde547a75f9e338d00905021ebb283f31e"; \
+    node -e 'const fs=require("fs");const checks=[["/opt/teamagent/plugins/slack/package.json","@openclaw/slack"],["/opt/teamagent/plugins/amazon-bedrock/package.json","@openclaw/amazon-bedrock-provider"]];for(const [p,n] of checks){const x=JSON.parse(fs.readFileSync(p));if(x.name!==n||x.version!=="2026.7.1"||x.peerDependencies?.openclaw!==">=2026.7.1")throw new Error(`plugin contract mismatch: ${n}`)}'; \
+    ln -s /app /opt/teamagent/plugins/slack/node_modules/openclaw; \
+    ln -s /app /opt/teamagent/plugins/amazon-bedrock/node_modules/openclaw; \
+    mkdir -p /tmp/teamagent-openclaw/config /tmp/teamagent-openclaw/state /tmp/teamagent-openclaw/home /opt/teamagent/state-seed; \
+    cp /opt/teamagent/openclaw.template.json /tmp/teamagent-openclaw/config/openclaw.json; \
+    HOME=/tmp/teamagent-openclaw/home OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json node /app/openclaw.mjs plugins install --link /opt/teamagent/plugins/slack >/dev/null; \
+    HOME=/tmp/teamagent-openclaw/home OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json node /app/openclaw.mjs plugins install --link /opt/teamagent/plugins/amazon-bedrock >/dev/null; \
+    cp /tmp/teamagent-openclaw/state/state/openclaw.sqlite /opt/teamagent/state-seed/openclaw.sqlite; \
+    node -e 'const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync("/opt/teamagent/state-seed/openclaw.sqlite");db.exec("DELETE FROM config_health_entries");db.close()'; \
+    rm -rf /tmp/teamagent-openclaw; \
+    rm -f /tmp/openclaw-slack.tgz /tmp/openclaw-bedrock.tgz; \
+    chmod -R a-w /opt/teamagent
+
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@${DISTROLESS_ARM64_DIGEST} AS runtime
+
+ARG OPENCLAW_VERSION=2026.7.1
+ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
+ARG DISTROLESS_ARM64_DIGEST=sha256:c6465a8fcd268010c53e6e33e58d479dd232aa34f2312500afad8f605caffdc3
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
-ENV TEAMAGENT_BUILD_COMMIT=$GIT_COMMIT TEAMAGENT_BUILD_BRANCH=$GIT_BRANCH
-LABEL org.opencontainers.image.revision=$GIT_COMMIT
+ARG SOURCE_ARCHIVE_SHA256=unknown
+ARG SOURCE_ARTIFACT_VERSION=unknown
+ARG PLUGINS_LOCK_SHA256=unknown
 
-# レビュー済み設定（read-only パスに焼く。state は書かない）
-COPY infra/openclaw/openclaw.config.json5 /opt/teamagent/openclaw.json
-# workspace に seed するペルソナ（起動時に書込み可能 workspace へコピー）
-COPY infra/openclaw/SOUL.md infra/openclaw/HEARTBEAT.md /opt/teamagent/workspace-seed/
-COPY infra/docker/openclaw-entrypoint.sh /opt/teamagent/entrypoint.sh
+COPY --from=upstream --chown=65532:65532 /app/dist /app/dist
+COPY --from=upstream --chown=65532:65532 /app/node_modules /app/node_modules
+COPY --from=upstream --chown=65532:65532 /app/openclaw.mjs /app/openclaw.mjs
+COPY --from=upstream --chown=65532:65532 /app/package.json /app/package.json
+COPY --from=upstream --chown=65532:65532 /app/skills /app/skills
+COPY --from=upstream --chown=65532:65532 /opt/teamagent /opt/teamagent
+COPY --chown=65532:65532 --chmod=0555 infra/docker/openclaw-entrypoint.mjs /opt/teamagent/entrypoint.mjs
 
-# config は別パス参照（~/.openclaw は state 用に書込み可能のまま）
-ENV OPENCLAW_CONFIG_PATH=/opt/teamagent/openclaw.json \
-    OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace \
-    AWS_REGION=ap-northeast-1
+ENV NODE_ENV=production \
+    PATH=/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/tmp/teamagent-openclaw/home \
+    TMPDIR=/tmp \
+    XDG_CACHE_HOME=/tmp/teamagent-openclaw/cache \
+    NODE_COMPILE_CACHE=/tmp/teamagent-openclaw/node-compile-cache \
+    OPENCLAW_RUNTIME_DIR=/tmp/teamagent-openclaw \
+    OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state \
+    OPENCLAW_WORKSPACE_DIR=/tmp/teamagent-openclaw/state/workspace \
+    OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json \
+    AWS_REGION=ap-northeast-1 \
+    TEAMAGENT_BUILD_COMMIT=${GIT_COMMIT} \
+    TEAMAGENT_BUILD_BRANCH=${GIT_BRANCH}
 
-# §S2: /opt/teamagent を node 所有に（COPY は root 所有＝公式 non-root が書けない）。
-# これで (1) plugins install 先 /opt/teamagent/npm が書ける (2) 起動時の
-# openclaw.json.last-good バックアップ書込み(EACCES)も解消。
-# base は USER node なので chown のため一時的に root へ。
-USER root
-RUN chown -R node:node /opt/teamagent
-USER node
+LABEL org.opencontainers.image.title="TeamAgent OpenClaw Gateway" \
+      org.opencontainers.image.source="https://github.com/noirelumiere00/teamagent" \
+      org.opencontainers.image.version="${OPENCLAW_VERSION}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.base.name="gcr.io/distroless/nodejs24-debian13:nonroot" \
+      org.opencontainers.image.base.digest="${DISTROLESS_ARM64_DIGEST}" \
+      io.teamagent.source.branch="${GIT_BRANCH}" \
+      io.teamagent.source.archive.sha256="${SOURCE_ARCHIVE_SHA256}" \
+      io.teamagent.source.artifact.version="${SOURCE_ARTIFACT_VERSION}" \
+      io.teamagent.openclaw.upstream.digest="${OPENCLAW_ARM64_DIGEST}" \
+      io.teamagent.openclaw.plugins-lock.sha256="${PLUGINS_LOCK_SHA256}" \
+      io.teamagent.runtime.architecture="linux/arm64" \
+      io.teamagent.runtime.readonly-rootfs-required="true"
 
-# §S2: install は config にプラグイン登録を書き込むが、comment付きjson5(大)→canonical(小)の縮小を
-# OpenClawのsize-dropガードが拒否する（実測:8217->2907)。先に canonical JSON へ正規化しておけば、
-# install の書込みは「プラグイン追記＝微増」になりガードを通過＝登録成功→gatewayがslackチャンネルを起動。
-# （comment付き源泉は git の .json5 が保持。eval は build時の信頼済みファイルのみ）
-RUN node -e "const fs=require('fs');const p='/opt/teamagent/openclaw.json';const o=(0,eval)('('+fs.readFileSync(p,'utf8')+')');fs.writeFileSync(p,JSON.stringify(o,null,2));"
-
-# §S2: Slack はバンドルされず別プラグイン。build時に npm から焼き込む（runtime は ephemeral state ＝
-# /opt/teamagent/npm=config dir配下に入るので image 層に残る）。npm は社内proxyを通る（実測）。
-# 互換版を自動選択（base 2026.6.5 → slack 2026.6.5）。--pin で解決版を固定。
-RUN node /app/dist/index.js plugins install @openclaw/slack --pin
-
-# §S3: Bedrock の api アダプタ(bedrock-converse-stream)もコア非同梱＝別プラグイン。無いと実行時に
-# `No API provider registered for api: bedrock-converse-stream`（go-live実測・LLM request failed の正体）。
-RUN node /app/dist/index.js plugins install @openclaw/amazon-bedrock-provider --pin
-
-# 公式は非root node(uid1000)。entrypoint は seed → 公式 gateway 起動。
-ENTRYPOINT ["/opt/teamagent/entrypoint.sh"]
-CMD ["node", "dist/index.js", "gateway", "--bind", "loopback", "--port", "18789"]
+WORKDIR /app
+USER 65532:65532
+# ECS/Fargate copies this path's image ownership/mode into a task-scoped bind
+# volume when the task mounts the same containerPath. /tmp is 01777 in the
+# distroless base, so uid 65532 can write while the root filesystem stays RO.
+VOLUME ["/tmp"]
+ENTRYPOINT ["/nodejs/bin/node", "/opt/teamagent/entrypoint.mjs"]
+CMD ["/app/openclaw.mjs", "gateway", "--bind", "loopback", "--port", "18789"]

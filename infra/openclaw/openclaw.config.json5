@@ -33,6 +33,23 @@
     ],
   },
 
+  // ── 外部プラグイン（公式同版・image内のread-only固定パスのみ） ──────────
+  // allow を明示して、バンドル済みでも不要なプラグインはロードしない。
+  // パスの実体・版・tarball/shrinkwrap hash は Dockerfile と plugins-lock.json で固定する。
+  plugins: {
+    allow: ["slack", "amazon-bedrock"],
+    load: {
+      paths: [
+        "/opt/teamagent/plugins/slack",
+        "/opt/teamagent/plugins/amazon-bedrock",
+      ],
+    },
+    entries: {
+      slack: { enabled: true },
+      "amazon-bedrock": { enabled: true },
+    },
+  },
+
   // ── Slack 接続（§O: channels.slack の config 宣言が必須＝公式。env 注入だけでは立ち上がらない） ──
   // トークン値は書かない: ${VAR} は ECS secrets（fargate.tf の SLACK_BOT_TOKEN/SLACK_APP_TOKEN）で注入。
   channels: {
@@ -104,11 +121,6 @@
     bind: "loopback", // 0.0.0.0 へは絶対に出さない。管理は SSH/Tailscale。
     // 共有 gateway secret は full operator scope 相当＝root 級。値は注入し、loopback+ファイル perm で守る。
     auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" },
-  },
-
-  // ── ブラウザ（SSRF 既定の厳格を維持・私設網へ出さない） ───────────────────
-  browser: {
-    // dangerouslyAllowPrivateNetwork は設定しない（=private/internal 宛は遮断のまま）。
   },
 
   // ── MCP（外部 stdio ではなく streamable-http で creds 分離） ─────────────────
