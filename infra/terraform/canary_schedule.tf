@@ -31,6 +31,12 @@ variable "canary_slack_user_id" {
 resource "aws_cloudwatch_log_group" "canary" {
   name              = "/${var.project_name}/${var.environment}/canary-health"
   retention_in_days = 30
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------- カナリア失敗 alarm（ゲート外・データが無ければ notBreaching） ----------
@@ -45,6 +51,31 @@ resource "aws_cloudwatch_log_metric_filter" "canary_unhealthy" {
     value         = "1"
     default_value = "0"
     unit          = "Count"
+  }
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "canary_heartbeat" {
+  name           = "${var.project_name}-${var.environment}-canary-heartbeat"
+  log_group_name = aws_cloudwatch_log_group.canary.name
+  pattern        = "{ $.event = \"canary_health_result\" }"
+
+  metric_transformation {
+    name      = "CanaryHeartbeat"
+    namespace = local.metric_namespace
+    value     = "1"
+    unit      = "Count"
+  }
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 
@@ -61,6 +92,35 @@ resource "aws_cloudwatch_metric_alarm" "canary_unhealthy" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alarms.arn]
   ok_actions          = [aws_sns_topic.alarms.arn]
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "canary_heartbeat_missing" {
+  count               = var.enable_canary_health && var.canary_rule_enabled ? 1 : 0
+  alarm_name          = "${var.project_name}-${var.environment}-canary-heartbeat-missing"
+  alarm_description   = "Hourly production canary emitted no heartbeat for two consecutive periods"
+  namespace           = local.metric_namespace
+  metric_name         = "CanaryHeartbeat"
+  statistic           = "Sum"
+  period              = 3600
+  evaluation_periods  = 2
+  datapoints_to_alarm = 2
+  threshold           = 1
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "breaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------- 以降は enable_canary_health ゲート ----------
@@ -127,6 +187,13 @@ resource "aws_ecs_task_definition" "canary" {
   memory                   = 512
   execution_role_arn       = aws_iam_role.ecs_execution_canary[0].arn
   task_role_arn            = aws_iam_role.canary_task[0].arn
+  skip_destroy             = true
+
+  depends_on = [terraform_data.runtime_guard]
+
+  volume {
+    name = "tmp"
+  }
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -134,17 +201,32 @@ resource "aws_ecs_task_definition" "canary" {
   }
 
   container_definitions = jsonencode([{
-    name      = "canary"
-    image     = var.mcp_image
-    essential = true
-    command   = ["python", "scripts/run_canary_health.py"]
+    name                   = "canary"
+    image                  = var.mcp_image
+    essential              = true
+    user                   = "10001:10001"
+    readonlyRootFilesystem = true
+    linuxParameters = {
+      initProcessEnabled = true
+      capabilities = {
+        drop = ["ALL"]
+      }
+    }
+    command = ["python", "scripts/run_canary_health.py"]
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
+      { name = "HOME", value = "/tmp/home" },
+      { name = "TMPDIR", value = "/tmp" },
+      { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
+      { name = "PYTHONPYCACHEPREFIX", value = "/tmp/.pycache" },
       { name = "STRUCTLOG_FORMAT", value = "json" },
       { name = "CANARY_SLACK_USER_ID", value = var.canary_slack_user_id },
     ]
     secrets = [
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
+    ]
+    mountPoints = [
+      { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -156,6 +238,10 @@ resource "aws_ecs_task_definition" "canary" {
     }
     # Scheduled Task なので healthCheck 不要（exit code が成否を語る）
   }])
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # EventBridge → ECS RunTask の IAM role ---
@@ -195,6 +281,11 @@ data "aws_iam_policy_document" "events_canary_run_task" {
       aws_iam_role.ecs_execution_canary[0].arn,
       aws_iam_role.canary_task[0].arn,
     ]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
   }
 }
 
@@ -218,6 +309,15 @@ resource "aws_cloudwatch_event_rule" "canary_hourly" {
   description         = "1時間ごとの AiLa 合成カナリア Fargate 起動トリガ"
   schedule_expression = var.canary_schedule_expression
   state               = var.canary_rule_enabled ? "ENABLED" : "DISABLED"
+
+  depends_on = [
+    aws_cloudwatch_metric_alarm.canary_heartbeat_missing,
+    terraform_data.runtime_guard,
+  ]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_cloudwatch_event_target" "canary_run_task" {
@@ -225,6 +325,8 @@ resource "aws_cloudwatch_event_target" "canary_run_task" {
   rule     = aws_cloudwatch_event_rule.canary_hourly[0].name
   arn      = aws_ecs_cluster.main.arn
   role_arn = aws_iam_role.events_canary_invoke[0].arn
+
+  depends_on = [terraform_data.runtime_guard]
 
   ecs_target {
     task_definition_arn = aws_ecs_task_definition.canary[0].arn
@@ -242,6 +344,10 @@ resource "aws_cloudwatch_event_target" "canary_run_task" {
   retry_policy {
     maximum_event_age_in_seconds = 3600
     maximum_retry_attempts       = 1
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 

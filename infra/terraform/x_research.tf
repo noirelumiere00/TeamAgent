@@ -16,10 +16,29 @@ variable "enable_x_research" {
   default     = false
 }
 
+variable "x_buzz_image" {
+  description = "x-buzz worker専用のteamagent-mcp repository完全digest URI。main runtimeとは独立してlive digestを固定する。"
+  type        = string
+  default     = ""
+
+  validation {
+    condition = var.x_buzz_image == "" || can(regex(
+      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-mcp@sha256:[0-9a-f]{64}$",
+      var.x_buzz_image,
+    ))
+    error_message = "x_buzz_imageはTeamAgent dev account/東京regionのteamagent-mcp完全digest URIに限定します。"
+  }
+}
+
 variable "x_analysis_model_id" {
   description = "X系の分析(ニーズ分類/山分析)用 Bedrock モデルID。未指定は mcp 既定(Haiku)に落ちる。"
   type        = string
   default     = "jp.anthropic.claude-sonnet-4-6"
+
+  validation {
+    condition     = var.x_analysis_model_id == "jp.anthropic.claude-sonnet-4-6"
+    error_message = "X分析は監査済みJP Claude Sonnet 4.6 inference profileだけを使用できます。"
+  }
 }
 
 variable "cost_apify_monthly_usd" {
@@ -51,16 +70,19 @@ variable "x_buzz_ephemeral_gib" {
 
 locals {
   xr_enabled = var.enable_x_research ? 1 : 0
-  # ワーカーは mcp image 流用(command上書き)のため、taskdef は mcp_image が要る。
-  xr_task_on  = (var.enable_x_research && var.mcp_image != "") ? 1 : 0
+  # repositoryは共有してもdigestの更新周期はmain runtimeから分離する。
+  xr_task_on  = (var.enable_x_research && var.x_buzz_image != "") ? 1 : 0
   xr_name     = "${var.project_name}-${var.environment}-x-buzz"
   xr_acct     = data.aws_caller_identity.current.account_id
   xr_loggroup = "/teamagent/${var.environment}/x-buzz"
   xr_dispatch_static_environment = {
-    CLUSTER_ARN = aws_ecs_cluster.main.arn
+    # Construct the exact ARN to keep the always-present runtime guard from
+    # depending back on the guarded cluster resource.
+    CLUSTER_ARN = "arn:aws:ecs:${var.aws_region}:${local.xr_acct}:cluster/${var.project_name}-${var.environment}"
     SUBNETS     = join(",", data.aws_subnets.default.ids)
     SG_ID       = aws_security_group.x_buzz_tasks[0].id
     CONTAINER   = "worker"
+    JOBS_TABLE  = aws_dynamodb_table.x_jobs[0].name
   }
 }
 
@@ -93,22 +115,50 @@ resource "aws_cloudwatch_log_group" "x_buzz" {
   retention_in_days = 30
 }
 
+# Lambda-created groups otherwise retain logs forever. Keep the dispatcher
+# group present even while the optional X route is retired, matching the
+# reminders/TikTok ownership contract.
+resource "aws_cloudwatch_log_group" "x_dispatch" {
+  name              = "/aws/lambda/${local.xr_name}-dispatch"
+  retention_in_days = 30
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+import {
+  to = aws_cloudwatch_log_group.x_dispatch
+  id = "/aws/lambda/teamagent-dev-x-buzz-dispatch"
+}
+
 # ---------- SQS(jobs) + DLQ ----------
 resource "aws_sqs_queue" "x_jobs_dlq" {
   count                     = local.xr_enabled
   name                      = "${local.xr_name}-dlq"
   message_retention_seconds = 1209600 # 14日
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_sqs_queue" "x_jobs" {
   count                      = local.xr_enabled
   name                       = "${local.xr_name}-jobs"
   visibility_timeout_seconds = 1800
-  message_retention_seconds  = 86400
+  message_retention_seconds  = 1209600
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.x_jobs_dlq[0].arn
-    maxReceiveCount     = 3
+    # 62日検索は最大約2.5h。dispatcherは完了までackしないため12時間保持する。
+    maxReceiveCount = 24
   })
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------- DynamoDB(jobs 状態) ----------
@@ -176,16 +226,16 @@ resource "aws_iam_role_policy_attachment" "x_buzz_exec_managed" {
 
 # Apify トークンは tiktok/ 名前空間の既存 secret を共用（teamagent/<env>/tiktok/apify-token）。
 data "aws_iam_policy_document" "x_buzz_exec_secrets" {
-  count = local.xr_enabled
+  count = local.xr_enabled == 1 && var.tiktok_apify_secret_arn != "" ? 1 : 0
 
   statement {
     actions   = ["secretsmanager:GetSecretValue"]
-    resources = ["arn:aws:secretsmanager:${var.aws_region}:${local.xr_acct}:secret:${var.project_name}/${var.environment}/tiktok/*"]
+    resources = [var.tiktok_apify_secret_arn]
   }
 }
 
 resource "aws_iam_role_policy" "x_buzz_exec_secrets" {
-  count  = local.xr_enabled
+  count  = local.xr_enabled == 1 && var.tiktok_apify_secret_arn != "" ? 1 : 0
   name   = "${local.xr_name}-exec-secrets"
   role   = aws_iam_role.x_buzz_exec[0].id
   policy = data.aws_iam_policy_document.x_buzz_exec_secrets[0].json
@@ -237,6 +287,9 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
   memory                   = "1024"
   execution_role_arn       = aws_iam_role.x_buzz_exec[0].arn
   task_role_arn            = aws_iam_role.x_buzz_task[0].arn
+  skip_destroy             = true
+
+  depends_on = [terraform_data.runtime_guard]
 
   runtime_platform {
     cpu_architecture        = "ARM64"
@@ -254,9 +307,9 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
   container_definitions = jsonencode([
     {
       name                   = "worker"
-      image                  = var.mcp_image
+      image                  = var.x_buzz_image
       essential              = true
-      user                   = "10001"
+      user                   = "10001:10001"
       readonlyRootFilesystem = true
       linuxParameters = {
         initProcessEnabled = true
@@ -272,8 +325,9 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
         { name = "COST_GUARD_TABLE", value = aws_dynamodb_table.cost_usage[0].name },
         { name = "COST_APIFY_MONTHLY_USD", value = var.cost_apify_monthly_usd },
         { name = "TMPDIR", value = "/tmp" },
-        { name = "HOME", value = "/tmp" },
+        { name = "HOME", value = "/tmp/home" },
         { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
+        { name = "PYTHONPYCACHEPREFIX", value = "/tmp/.pycache" },
       ]
       secrets = var.tiktok_apify_secret_arn != "" ? [
         { name = "APIFY_API_TOKEN", valueFrom = var.tiktok_apify_secret_arn }
@@ -298,7 +352,7 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
     precondition {
       condition = can(regex(
         "^${local.xr_acct}\\.dkr\\.ecr\\.${var.aws_region}\\.amazonaws\\.com/teamagent-mcp@sha256:[0-9a-f]{64}$",
-        var.mcp_image,
+        var.x_buzz_image,
       ))
       error_message = "x-buzz workerには同一account/regionのteamagent-mcp完全digest URIが必須です。"
     }
@@ -312,11 +366,11 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
 
 # ---------- SQS → Lambda dispatcher → ECS RunTask (★RunTask/PassRoleはここだけ) ----------
 data "archive_file" "x_dispatch" {
-  count       = local.xr_enabled
-  type        = "zip"
-  source_dir  = "${path.module}/lambda/x_dispatch"
-  output_path = "${path.module}/build/x_dispatch.zip"
-  excludes    = ["__pycache__", "**/__pycache__/**"]
+  count            = local.xr_enabled
+  type             = "zip"
+  source_file      = "${path.module}/lambda/x_dispatch/handler.py"
+  output_path      = "${path.module}/build/x_dispatch.zip"
+  output_file_mode = "0644"
 }
 
 resource "aws_iam_role" "x_dispatch" {
@@ -347,11 +401,21 @@ data "aws_iam_policy_document" "x_dispatch_policy" {
     sid       = "PassRole"
     actions   = ["iam:PassRole"]
     resources = [aws_iam_role.x_buzz_exec[0].arn, aws_iam_role.x_buzz_task[0].arn]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+  statement {
+    sid       = "JobDispatchState"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.x_jobs[0].arn]
   }
   statement {
     sid       = "Logs"
-    actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["arn:aws:logs:${var.aws_region}:${local.xr_acct}:*"]
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.x_dispatch.arn}:*"]
   }
 }
 
@@ -372,6 +436,8 @@ resource "aws_lambda_function" "x_dispatch" {
   filename         = data.archive_file.x_dispatch[0].output_path
   source_code_hash = data.archive_file.x_dispatch[0].output_base64sha256
   timeout          = 30
+
+  depends_on = [terraform_data.runtime_guard]
   environment {
     variables = merge(local.xr_dispatch_static_environment, {
       TASKDEF_ARN = aws_ecs_task_definition.x_buzz_worker[0].arn
@@ -379,6 +445,8 @@ resource "aws_lambda_function" "x_dispatch" {
   }
 
   lifecycle {
+    prevent_destroy = true
+
     precondition {
       condition     = local.runtime_guard_verified
       error_message = local.runtime_guard_error
@@ -391,8 +459,15 @@ resource "aws_lambda_event_source_mapping" "x_dispatch" {
   event_source_arn = aws_sqs_queue.x_jobs[0].arn
   function_name    = aws_lambda_function.x_dispatch[0].arn
   batch_size       = 1
+  function_response_types = [
+    "ReportBatchItemFailures",
+  ]
+
+  depends_on = [terraform_data.runtime_guard]
 
   lifecycle {
+    prevent_destroy = true
+
     precondition {
       condition     = local.runtime_guard_verified
       error_message = local.runtime_guard_error
@@ -450,7 +525,15 @@ resource "aws_cloudwatch_metric_alarm" "x_jobs_dlq_depth" {
   dimensions = {
     QueueName = aws_sqs_queue.x_jobs_dlq[0].name
   }
-  alarm_actions = [aws_sns_topic.alarms.arn]
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alarms.arn]
+  ok_actions         = [aws_sns_topic.alarms.arn]
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------- S3 ライフサイクル ----------

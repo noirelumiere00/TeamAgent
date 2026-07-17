@@ -10,12 +10,9 @@
 #   - CloudWatch Logs
 #   - IAM Role（Lambda 用）
 #
-# 利用例:
-#   cp terraform.tfvars.example terraform.tfvars
-#   # 編集
-#   terraform init
-#   terraform plan
-#   terraform apply
+# 操作入口:
+#   infra/deploy/terraform_runtime_guard.sh
+# plain terraform plan/apply と旧image-only deploy scriptは禁止。詳細はREADME参照。
 # ============================================================
 
 terraform {

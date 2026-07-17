@@ -281,7 +281,10 @@ def guard_task_from_tf:
       map(guard_norm_container) | sort_by(.name)),
     enable_fault_injection: ($task.enable_fault_injection // false),
     track_latest: ($task.track_latest // false),
-    skip_destroy: ($task.skip_destroy // false),
+    # Provider retention metadata is not part of an ECS task definition and
+    # cannot be observed through describe-task-definition. Terraform enforces
+    # it separately; canonical runtime parity therefore normalizes it away.
+    skip_destroy: false,
     tags: (($task.tags_all // {}) + ($task.tags // {}))
   };
 

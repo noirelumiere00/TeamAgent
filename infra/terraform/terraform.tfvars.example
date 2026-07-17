@@ -2,7 +2,7 @@
 # TeamAgent v3.0 — Terraform 変数値テンプレート
 # ============================================================
 # cp terraform.tfvars.example terraform.tfvars
-# して値を埋めてから terraform plan / apply
+# して値を埋め、infra/deploy/terraform_runtime_guard.sh にだけ渡す。
 # ============================================================
 
 aws_region   = "ap-northeast-1"
@@ -18,7 +18,7 @@ db_name              = "teamagent"
 db_multi_az          = false             # 本番 = true 推奨
 
 # ---- 本番化（インフラ#1,#8・コスト承認＝人手ゲート後に切替）----
-# ⚠️ 月額が増えるため apply は別途承認後。承認されたら上の3行を以下へ差し替えて targeted apply。
+# ⚠️ 月額が増えるため別途承認後。承認済みmigrationで上の3行を以下へ差し替える。
 # db_instance_class    = "db.r7g.large"  # pgvector 検索の安定レイテンシ用（メモリ大）
 # db_multi_az          = true            # フェイルオーバー（概ね月額 2 倍）
 # db_allocated_storage = 100             # 取り込み量に応じて拡張

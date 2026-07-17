@@ -154,14 +154,14 @@ data "aws_iam_policy_document" "ecs_execution_connect_web_secrets" {
   statement {
     sid     = "ReadConnectWebSecrets"
     actions = ["secretsmanager:GetSecretValue"]
-    resources = [
+    resources = concat([
       data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
       data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
       data.aws_secretsmanager_secret.connect_slack_client_id[0].arn,
       data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn,
       data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn,
       data.aws_secretsmanager_secret.database_url.arn,
-    ]
+    ], local.hmac_secret_iam_arns)
   }
 }
 
@@ -191,8 +191,6 @@ data "aws_iam_policy_document" "connect_web_task" {
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
-      "bedrock:Converse",
-      "bedrock:ConverseStream",
     ]
     resources = local.bedrock_resources
   }
@@ -327,6 +325,13 @@ resource "aws_ecs_task_definition" "connect_web" {
   memory                   = var.fargate_connect_memory
   execution_role_arn       = aws_iam_role.ecs_execution_connect_web[0].arn
   task_role_arn            = aws_iam_role.connect_web_task[0].arn
+  skip_destroy             = true
+
+  depends_on = [terraform_data.runtime_guard]
+
+  volume {
+    name = "tmp"
+  }
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -334,15 +339,27 @@ resource "aws_ecs_task_definition" "connect_web" {
   }
 
   container_definitions = jsonencode([{
-    name      = "connect-web"
-    image     = var.mcp_image
-    essential = true
-    command   = ["python", "-m", "teamagent.connect_web"]
+    name                   = "connect-web"
+    image                  = var.mcp_image
+    essential              = true
+    user                   = "10001:10001"
+    readonlyRootFilesystem = true
+    linuxParameters = {
+      initProcessEnabled = true
+      capabilities = {
+        drop = ["ALL"]
+      }
+    }
+    command = ["python", "-m", "teamagent.connect_web"]
     portMappings = [
       { containerPort = 8788, protocol = "tcp" },
     ]
-    environment = [
+    environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
+      { name = "HOME", value = "/tmp/home" },
+      { name = "TMPDIR", value = "/tmp" },
+      { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
+      { name = "PYTHONPYCACHEPREFIX", value = "/tmp/.pycache" },
       # レポート短縮リンク(/r)が presigned を再生成する対象バケット。decode_report_token の
       # bucket allowlist にも使う（mcp 側 VSEO_REPORT_BUCKET と同一値＝トークンの bucket と一致）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
@@ -411,18 +428,17 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "USE_QUERY_PLANNER", value = "false" },
       # ナレッジフィルタ UI（種別/期間などの絞り込み）。
       { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
-    ]
-    secrets = [
+    ], local.hmac_connect_environment)
+    secrets = concat([
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
       { name = "CONNECT_SLACK_CLIENT_ID", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_id[0].arn },
       { name = "CONNECT_SLACK_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn },
       { name = "SLACK_OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-      # live パリティ（2026-07-11 監査）: メールアクションリンクの HMAC 検証鍵。morning-digest が署名し
-      # connect-web が検証する対の鍵で、剥がれると ✏️/📅 等のアクション URL が全て検証不能になる。
-      # live は database-url の secret 文字列を鍵として共用している（rev39 実機と同値・意図的な既存設計）。
-      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
+    ], local.hmac_connect_secrets)
+    mountPoints = [
+      { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -460,6 +476,13 @@ resource "aws_ecs_service" "connect_web" {
   desired_count   = 1
   launch_type     = "FARGATE"
 
+  availability_zone_rebalancing = "ENABLED"
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.connect_web[0].id]
@@ -482,9 +505,12 @@ resource "aws_ecs_service" "connect_web" {
 
   depends_on = [
     aws_lb_target_group.connect_web_fargate,
+    terraform_data.runtime_guard,
   ]
 
   lifecycle {
+    prevent_destroy = true
+
     precondition {
       condition     = local.runtime_guard_verified
       error_message = local.runtime_guard_error

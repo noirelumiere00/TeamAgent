@@ -21,10 +21,10 @@ variable "tiktok_acquire_image" {
 
   validation {
     condition = var.tiktok_acquire_image == "" || can(regex(
-      "^[0-9]+\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}$",
+      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$",
       var.tiktok_acquire_image,
     ))
-    error_message = "tiktok_acquire_imageはECRの完全digest URI（...@sha256:<64hex>）で指定してください。tagは禁止です。"
+    error_message = "tiktok_acquire_imageはTeamAgent dev account/東京regionの専用repository完全digest URIに限定します。"
   }
 }
 
@@ -59,12 +59,28 @@ variable "tiktok_proxy_secret_arn" {
   description = "プロキシ資格情報のSecrets Manager ARN(任意)。空なら直結(WAFリスク上昇)。"
   type        = string
   default     = ""
+
+  validation {
+    condition = var.tiktok_proxy_secret_arn == "" || can(regex(
+      "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/tiktok/proxy-[A-Za-z0-9]{6}$",
+      var.tiktok_proxy_secret_arn,
+    ))
+    error_message = "tiktok_proxy_secret_arnは東京region・TeamAgent dev accountのteamagent/dev/tiktok/proxy exact ARNに限定します。"
+  }
 }
 
 variable "tiktok_apify_secret_arn" {
   description = "Apifyトークンの Secrets Manager ARN(任意・会社管理キー)。"
   type        = string
   default     = ""
+
+  validation {
+    condition = var.tiktok_apify_secret_arn == "" || can(regex(
+      "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/tiktok/apify-token-[A-Za-z0-9]{6}$",
+      var.tiktok_apify_secret_arn,
+    ))
+    error_message = "tiktok_apify_secret_arnは東京region・TeamAgent dev accountのteamagent/dev/tiktok/apify-token exact ARNに限定します。"
+  }
 }
 
 variable "tiktok_mcp_task_role_name" {
@@ -74,10 +90,11 @@ variable "tiktok_mcp_task_role_name" {
 }
 
 locals {
-  tk_enabled  = var.enable_tiktok_acquire ? 1 : 0
-  tk_name     = "${var.project_name}-${var.environment}-tiktok-acquire"
-  tk_acct     = data.aws_caller_identity.current.account_id
-  tk_loggroup = "/teamagent/${var.environment}/tiktok-acquire"
+  tk_enabled     = var.enable_tiktok_acquire ? 1 : 0
+  tk_name        = "${var.project_name}-${var.environment}-tiktok-acquire"
+  tk_acct        = data.aws_caller_identity.current.account_id
+  tk_loggroup    = "/teamagent/${var.environment}/tiktok-acquire"
+  tk_secret_arns = compact([var.tiktok_proxy_secret_arn, var.tiktok_apify_secret_arn])
   # コンテナに渡す secrets(ARNが与えられた時だけ)
   tk_secrets = concat(
     var.tiktok_proxy_secret_arn != "" ? [{ name = "PROXY_SERVER", valueFrom = var.tiktok_proxy_secret_arn }] : [],
@@ -88,6 +105,7 @@ locals {
     SUBNETS     = join(",", data.aws_subnets.default.ids)
     SG_ID       = aws_security_group.tiktok_tasks[0].id
     CONTAINER   = "acquire"
+    JOBS_TABLE  = aws_dynamodb_table.tiktok_jobs[0].name
   }
 }
 
@@ -96,6 +114,11 @@ locals {
 moved {
   from = data.aws_iam_policy_document.tiktok_task_app
   to   = data.aws_iam_policy_document.tiktok_task_app[0]
+}
+
+moved {
+  from = data.aws_iam_policy_document.tiktok_exec_secrets
+  to   = data.aws_iam_policy_document.tiktok_exec_secrets[0]
 }
 
 moved {
@@ -133,22 +156,50 @@ resource "aws_cloudwatch_log_group" "tiktok_acquire" {
   retention_in_days = 30
 }
 
+# Dispatcher logs are separate from the worker task log group. Keep this
+# always-present so disabling the optional worker cannot restore Never Expire.
+resource "aws_cloudwatch_log_group" "tiktok_dispatch" {
+  name              = "/aws/lambda/${local.tk_name}-dispatch"
+  retention_in_days = 30
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+import {
+  to = aws_cloudwatch_log_group.tiktok_dispatch
+  id = "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch"
+}
+
 # ---------- SQS(jobs) + DLQ ----------
 resource "aws_sqs_queue" "tiktok_jobs_dlq" {
   count                     = local.tk_enabled
   name                      = "${local.tk_name}-dlq"
   message_retention_seconds = 1209600 # 14日
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_sqs_queue" "tiktok_jobs" {
   count                      = local.tk_enabled
   name                       = "${local.tk_name}-jobs"
   visibility_timeout_seconds = 1800 # ジョブ最長(分単位)に合わせる
-  message_retention_seconds  = 86400
+  message_retention_seconds  = 1209600
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.tiktok_jobs_dlq[0].arn
-    maxReceiveCount     = 3
+    # dispatcherはworker完了までpartial batch failureを返す。30分visibilityでも
+    # 最大12時間はsource queueに保持し、その後もDLQへ14日保存する。
+    maxReceiveCount = 24
   })
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------- DynamoDB(jobs 状態) ----------
@@ -206,17 +257,19 @@ resource "aws_iam_role_policy_attachment" "tiktok_exec_managed" {
 
 # 実行ロールが Secrets を注入できるように(tiktok配下のみ)
 data "aws_iam_policy_document" "tiktok_exec_secrets" {
+  count = length(local.tk_secret_arns) > 0 ? 1 : 0
+
   statement {
     actions   = ["secretsmanager:GetSecretValue"]
-    resources = ["arn:aws:secretsmanager:${var.aws_region}:${local.tk_acct}:secret:${var.project_name}/${var.environment}/tiktok/*"]
+    resources = local.tk_secret_arns
   }
 }
 
 resource "aws_iam_role_policy" "tiktok_exec_secrets" {
-  count  = local.tk_enabled
+  count  = local.tk_enabled == 1 && length(local.tk_secret_arns) > 0 ? 1 : 0
   name   = "${local.tk_name}-exec-secrets"
   role   = aws_iam_role.tiktok_exec[0].id
-  policy = data.aws_iam_policy_document.tiktok_exec_secrets.json
+  policy = data.aws_iam_policy_document.tiktok_exec_secrets[0].json
 }
 
 # ---------- IAM: タスクロール(S3 prefix put / Dynamo更新) ----------
@@ -268,6 +321,9 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
   memory                   = var.tiktok_task_memory
   execution_role_arn       = aws_iam_role.tiktok_exec[0].arn
   task_role_arn            = aws_iam_role.tiktok_task[0].arn
+  skip_destroy             = true
+
+  depends_on = [terraform_data.runtime_guard]
 
   runtime_platform {
     cpu_architecture        = "ARM64"
@@ -277,18 +333,18 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
     size_in_gib = var.tiktok_ephemeral_gib
   }
 
-  # chromium/yt-dlp/ffmpegは一時ファイルを必要とする。readonly rootを維持し、
-  # Fargate ephemeral storageの/tmpだけを書込み可能にする。
   volume {
     name = "tmp"
   }
 
   container_definitions = jsonencode([
     {
-      name                   = "acquire"
-      image                  = var.tiktok_acquire_image
-      essential              = true
-      user                   = "10001"
+      name      = "acquire"
+      image     = var.tiktok_acquire_image
+      essential = true
+      # migration先image contract。fresh Fargate volumeの実所有権/書込みは
+      # terraform_runtime_guard.sh preflightの実task成功receiptを必須にする。
+      user                   = "10001:10001"
       readonlyRootFilesystem = true
       linuxParameters = {
         initProcessEnabled = true
@@ -296,14 +352,18 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
           drop = ["ALL"]
         }
       }
-      # command はイメージのCMD(npx tsx src/job.ts)を使用。Pipeが env TIKTOK_JOB_JSON を上書き注入。
+      command = ["npx", "tsx", "src/job.ts"]
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
         { name = "TIKTOK_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
         { name = "TIKTOK_JOBS_TABLE", value = aws_dynamodb_table.tiktok_jobs[0].name },
         { name = "TMPDIR", value = "/tmp" },
-        { name = "HOME", value = "/tmp" },
+        { name = "HOME", value = "/tmp/home" },
         { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
+        { name = "npm_config_cache", value = "/tmp/.npm" },
+        { name = "PUPPETEER_CACHE_DIR", value = "/tmp/.cache/puppeteer" },
+        { name = "PLAYWRIGHT_BROWSERS_PATH", value = "/opt/pw" },
+        { name = "CHROMIUM_PATH", value = "/usr/bin/chromium" },
       ]
       secrets = local.tk_secrets
       mountPoints = [
@@ -342,12 +402,12 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
 # EventBridge Pipes のECS動的override注入は壊れやすいため、前例(lambda_iam.tf)準拠の
 # 薄いLambdaでSQSをデキューし ecs.run_task(containerOverrides=TIKTOK_JOB_JSON) を呼ぶ。
 data "archive_file" "tiktok_dispatch" {
-  count       = local.tk_enabled
-  type        = "zip"
-  source_dir  = "${path.module}/lambda/tiktok_dispatch"
-  output_path = "${path.module}/build/tiktok_dispatch.zip"
-  # reminder_notifyと同様、.pyc混入によるsource_code_hashドリフトを防止する。
-  excludes = ["__pycache__", "**/__pycache__/**"]
+  count            = local.tk_enabled
+  type             = "zip"
+  source_dir       = "${path.module}/lambda/tiktok_dispatch"
+  output_path      = "${path.module}/build/tiktok_dispatch.zip"
+  output_file_mode = "0644"
+  excludes         = ["__pycache__", "**/__pycache__/**"]
 }
 
 data "aws_iam_policy_document" "tiktok_dispatch_assume" {
@@ -388,11 +448,21 @@ data "aws_iam_policy_document" "tiktok_dispatch_policy" {
     sid       = "PassRole"
     actions   = ["iam:PassRole"]
     resources = [aws_iam_role.tiktok_exec[0].arn, aws_iam_role.tiktok_task[0].arn]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+  statement {
+    sid       = "JobDispatchState"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.tiktok_jobs[0].arn]
   }
   statement {
     sid       = "Logs"
-    actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["arn:aws:logs:${var.aws_region}:${local.tk_acct}:*"]
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.tiktok_dispatch.arn}:*"]
   }
 }
 
@@ -413,6 +483,11 @@ resource "aws_lambda_function" "tiktok_dispatch" {
   filename         = data.archive_file.tiktok_dispatch[0].output_path
   source_code_hash = data.archive_file.tiktok_dispatch[0].output_base64sha256
   timeout          = 30
+
+  depends_on = [
+    aws_cloudwatch_log_group.tiktok_dispatch,
+    terraform_data.runtime_guard,
+  ]
   environment {
     variables = merge(local.tk_dispatch_static_environment, {
       TASKDEF_ARN = aws_ecs_task_definition.tiktok_acquire[0].arn
@@ -420,6 +495,8 @@ resource "aws_lambda_function" "tiktok_dispatch" {
   }
 
   lifecycle {
+    prevent_destroy = true
+
     precondition {
       condition     = local.runtime_guard_verified
       error_message = local.runtime_guard_error
@@ -432,12 +509,46 @@ resource "aws_lambda_event_source_mapping" "tiktok_dispatch" {
   event_source_arn = aws_sqs_queue.tiktok_jobs[0].arn
   function_name    = aws_lambda_function.tiktok_dispatch[0].arn
   batch_size       = 1
+  function_response_types = [
+    "ReportBatchItemFailures",
+  ]
+
+  depends_on = [terraform_data.runtime_guard]
 
   lifecycle {
+    prevent_destroy = true
+
     precondition {
       condition     = local.runtime_guard_verified
       error_message = local.runtime_guard_error
     }
+  }
+}
+
+# ---------- CloudWatch: dispatcher DLQ depth ----------
+resource "aws_cloudwatch_metric_alarm" "tiktok_jobs_dlq_depth" {
+  count               = local.tk_enabled
+  alarm_name          = "${local.tk_name}-dlq-depth"
+  alarm_description   = "TikTok acquire job is retained in the DLQ and requires operator review"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+
+  dimensions = {
+    QueueName = aws_sqs_queue.tiktok_jobs_dlq[0].name
+  }
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 

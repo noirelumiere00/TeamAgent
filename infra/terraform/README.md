@@ -1,156 +1,131 @@
-# Terraform — TeamAgent v3.0 AWS インフラ
+# TeamAgent Terraform runtime operations
 
-## ファイル構成
+このstateは TeamAgent dev、AWS account `718959508629`、`ap-northeast-1` 専用です。
+runtimeを含む plain Terraform、targeted apply、旧image-only script、可変
+`codebuild/source.zip` builderは使用しません。操作入口は
+`infra/deploy/terraform_runtime_guard.sh` だけです。このscriptは保存planを作成・再検証
+しますが、apply機能は意図的に持ちません。
 
-| ファイル | 中身 |
-|---|---|
-| `main.tf` | プロバイダ・バックエンド定義 |
-| `variables.tf` | 入力変数の定義 |
-| `rds.tf` | PostgreSQL 16 + pgvector / Secrets / Subnet / SG |
-| `lambda_iam.tf` | Lambda 実行ロール + S3 バケット + CloudWatch Logs |
-| `outputs.tf` | 出力値 |
-| `terraform.tfvars.example` | 変数値テンプレート |
+## 現在のfail-closed状態
 
-## 使い方
+`infra/deploy/terraform_runtime_migrations.json` の2 migrationは、rollout入力が全て確定する
+まで `enabled=false` です。空欄やdigest prefixから値を推測してはいけません。
 
-### 初期化
+現liveの既知差分は次のとおりです。
+
+- connect-web は task definition `:50`。`source.zip` のtracked sourceは
+  `e4daa71986f544d66e0563879b7a4808b4e7b674` と一致する一方、OCI revisionは
+  `unknown` のため、新coreの署名済みdigestとは扱いません。
+- 手動gsheets ingestは旧 task definition `:42` で実行中です。runtime migration前に
+  完了を確認し、新規実行を止めた状態にします。
+- `/app` のreview済みS3 objectは
+  VersionId `I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY`、
+  SHA-256 `46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067`
+  です。guardはlatest objectをexact versionで再取得してhash照合するため、旧版や
+  別publishへ暗黙に移行しません。
+- ingest-weeklyとcanary-hourlyは無効、morning-digestは有効のまま第1段階を行います。
+- alarm SNSには確認済み配送先がありません。email endpointまたは既存chat integrationの
+  どちらか一方を指定しない限りplanは生成されません。AWS providerはemail確認を待てない
+  ため、このmigrationはsubscriptionを作りません。emailは先にcanonical topic上で確認を
+  完了し、そのlive endpoint hashをmanifestへ記録してから指定します。chat経路もcanonical
+  topicへ接続済みのexact ARNだけをplan前snapshotで受け付けます。未確認email、未接続chat、
+  endpoint 0件はいずれもruntime変更前に停止します。
+
+## 必須入力
+
+第1段階を有効化するreview commitで、次を全てexact値で埋めます。
+
+1. connect/ingest/morning/canaryを含む全live task definition ARNと完全image digest。
+2. `e4daa719…` とHMAC契約 `2de3b156…` の両方を含むWolfi coreの完全digest、
+   40桁source commit、固定KMS key ARN。
+3. 独立したOpenClaw、TikTok、x-buzzの完全digest。
+4. dispatcher code hash、legacy alarm参照数、確認済みalarm配送先。
+5. migration期限とallowlistがreview時点のliveに一致すること。
+
+新coreは `cosign verify` で固定KMS key、Rekor、exact
+`org.opencontainers.image.revision` annotationを検証します。さらにECR OCI configの
+ARM64、UID/GID、`VOLUME /tmp`、契約labelを照合します。digestだけの差替えや
+`revision=unknown` は通りません。
+
+## 第1段階: runtime収束
+
+作業用 `terraform.tfvars` と出力directoryは所有者限定にし、既存ファイルへ上書き
+しません。
 
 ```bash
 cd infra/terraform
-
-# 1. AWS 認証
-aws configure  # or export AWS_PROFILE=...
-
-# 2. 変数ファイル準備
-cp terraform.tfvars.example terraform.tfvars
-vi terraform.tfvars
-
-# 3. 初期化
-terraform init
-```
-
-### 稼働中runtimeの変更・state同期
-
-MCP / connect-web / ingest / morning-digest / canary / TikTok worker / x-buzz worker と
-両workerのLambda dispatcherは、CLI直デプロイ後に
-Terraform state・`terraform.tfvars` がliveより古くなることがある。runtimeを含む
-plain `terraform plan` / `terraform apply` は禁止する。次のvalidatorはTeamAgent dev
-（AWS account `718959508629`、東京リージョン、固定S3 backend）専用で、検証済みの
-saved planを作るところまでを担当する。**apply機能はない。**
-
-```bash
-# 1. live由来のnon-secret値を表示する（AWS read-only）
-bash ../deploy/terraform_runtime_guard.sh snapshot
-
-# 2. 表示値をgitignored terraform.tfvarsへ反映する。ファイルは所有者限定にする
-vi terraform.tfvars
 chmod 600 terraform.tfvars
-
-# 3. 保存先も所有者限定かつ空にする（既存plan/receiptへの上書きは禁止）
 ARTIFACT_DIR="$(mktemp -d /tmp/teamagent-runtime.XXXXXX)"
 chmod 700 "$ARTIFACT_DIR"
 
-# 4a. state/configを現在のlive imageへ同期する候補plan
+bash ../deploy/terraform_runtime_guard.sh preflight \
+  --migration 2026-07-wolfi-runtime-v1 \
+  --out "$ARTIFACT_DIR/preflight.json"
+
 bash ../deploy/terraform_runtime_guard.sh plan \
   --var-file "$PWD/terraform.tfvars" \
   --out "$ARTIFACT_DIR/runtime.tfplan" \
-  --runtime-sync
+  --runtime-migration 2026-07-wolfi-runtime-v1 \
+  --preflight-receipt "$ARTIFACT_DIR/preflight.json"
 
-# 4b. または、同じECR repositoryに実在する別の完全digestを明示したrollout候補plan
-bash ../deploy/terraform_runtime_guard.sh plan \
-  --var-file "$PWD/terraform.tfvars" \
-  --out "$ARTIFACT_DIR/runtime.tfplan" \
-  --runtime-rollout-image \
-  '718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:<64hex>'
-
-# 5. 人間が差分を確認
-terraform show "$ARTIFACT_DIR/runtime.tfplan"
-
-# 6. read-only再検証。plan/receipt/var-file改ざんとlive変更を検出する
 bash ../deploy/terraform_runtime_guard.sh verify \
   --plan "$ARTIFACT_DIR/runtime.tfplan"
-
-# 7. 検証器はここで終了する。適用は行わない。中止時はdirectoryごと削除する
-rm -rf "$ARTIFACT_DIR"
 ```
 
-guardは次をfail-closedで検査する。
+preflightはcandidate task definitionを実際に登録し、fresh Fargate volume上でUID 10001の
+`/tmp` write、browser/cache/npx/yt-dlp、OpenClaw UID 65532と暗号化EFS writeを検証して
+必ず後始末します。task definitionの設定だけを根拠に成功扱いしません。
 
-- 主要5＋TikTok/x-buzz task definitionの期待container名が一意で、syncならlive digest、
-  rolloutなら主要5＋x-buzzが同一account/region/repositoryにECR実在する別digestになること
-- environment/secretsを順序無視でliveと完全一致させ、追加・変更・削除・重複を拒否すること
-- task roles/cpu/memory/runtime platform/network/command/health/log/ports/volumes等を
-  canonical比較し、image以外のcritical構成を保持すること
-- ECS serviceのdesired count/network/LB/deployment/role/tags等、EventBridge targetの
-  role/cluster/network/retry/input等、ruleのstate/schedule/description等をliveと比較し、
-  task definition参照以外の差分を拒否すること
-- TikTok/x-buzz dispatcherのrole/runtime/code hash/static env等をliveと比較し、所定task
-  definition revision参照以外の変更を拒否すること。SQS event source mappingはqueue、
-  function、有効状態、batch/retry/filter/concurrency/tagsを含め完全不変にすること
-- ECS serviceが単一PRIMARYかつrollout `COMPLETED`であること
-- resource/action/schema/check/deferred action/action invocation/unknown値とresource driftを
-  allowlistで検証し、対象task definitionのcreate-before-destroy以外のdelete/createと
-  runtime外変更を拒否すること
-- 0700 private stagingでplanを生成し、SHA→`terraform show`→検証→SHA再照合後に
-  0600でatomic publishすること。receiptはplan/var-file path・各SHA・live fingerprint・
-  desired image・runtime guardに束縛すること
-- verify中もprivate copyを使い、前後のlive snapshotと全SHAを再照合すること
+保存planはexact allowlist、create-before-destroy、env/secrets/roles/network/healthの
+live parity、dispatcher completion ack、API/SNS/monitoring/retention、legacy builder退役、
+IAM direct-mutation boundaryを全て満たす場合だけ残ります。ingest/canary ruleはこの段階では
+無効のままです。
 
-`runtime_guard_live` はscriptがliveから一時注入する値であり、tfvarsへ書かない。
-Terraform resource precondition、provider `allowed_account_ids`、dev/region/project validationも
-誤操作を止める補助線だが、`runtime_guard_live`は自己申告値でありIAM境界ではない。
+適用は、このrepositoryの保存planとreceiptを検証する承認済みautomation roleだけが行う
+前提です。長期IAM user `AIIAdev` にはmigrationの最後にservice promotion、schedule変更、
+dispatcher更新、CodeBuild起動、API endpoint再有効化の明示Denyを付けます。AWS account
+rootはIAM identity policyの対象外なので、root credential統制とOrganizations SCPは
+account管理側の必須条件です。
 
-#### 脅威モデルと限界
+## 第2段階: schedule有効化
 
-このvalidatorの目的は、善意の運用者による古いtfvars/state、対象指定ミス、plan取り違え、
-通常のファイル差替えを検出すること。管理者・同一OSユーザー・リポジトリやscript自体を
-変更できる攻撃者への強制力、AWS IAMによるdeploy権限制御、デプロイ承認を提供しない。
+第1段階のservice rollout、health、log、alarm配送を確認後、activation manifestへ
+post-runtimeのexact ingest/canary task definition ARNとdigestを記録します。
 
-全デプロイ経路が共通のdeployment lockをverify開始からapply終了まで保持していないため、
-verify後に別経路がliveを変更するTOCTOUは閉じられない。このためapply subcommandを意図的に
-削除した。既存の直接Terraform/CLI/CodeBuild deployは本validatorの観点ではunsafe/deprecatedで、
-receiptを「適用してよい」という承認に使ってはならない。共有lock導入までは、validatorが
-通ったことと安全にapplyできることを同義にしない。
+activation preflightはACL quarantineとcanary heartbeatを先に検証します。その後の
+allowlistはheartbeat alarm作成と ingest/canary ruleの
+`DISABLED` → `ENABLED` だけです。targetやtask definitionを同時変更しないため、apply途中に
+旧taskが先行発火しません。
 
-また、既存の主要5 runtime＋TikTok/x-buzz worker＋dispatcherを同期/rolloutする用途だけを扱う。
-resourceの初回作成、機能disable、destroy、bootstrap/create-onlyはfail-closedで対象外。
-これらは別の設計・レビュー・共有lockが必要。
+```bash
+bash ../deploy/terraform_runtime_guard.sh preflight \
+  --migration 2026-07-enable-ingest-canary-v1 \
+  --out "$ARTIFACT_DIR/activation-preflight.json"
 
-source/tfvarsとliveのenv/secretsが1件でも違えば、差分を黙認せずplanを残さない。承認済みの
-ECS/EventBridge deploy経路でliveを意図どおりに先に整合させるか、不要なdesired設定を明示的に
-source/tfvarsから除く変更を別レビューし、その後 `snapshot` → tfvars更新 → planをやり直す。
-保存plan/receiptはstate由来の機微情報を含み得るためGitへ追加しない。
+bash ../deploy/terraform_runtime_guard.sh plan \
+  --var-file "$PWD/terraform.tfvars" \
+  --out "$ARTIFACT_DIR/activation.tfplan" \
+  --runtime-migration 2026-07-enable-ingest-canary-v1 \
+  --preflight-receipt "$ARTIFACT_DIR/activation-preflight.json"
 
-### runtime以外
-
-runtimeを含まない変更もplain applyは避け、対象を限定した保存planをレビューしてから
-適用する。runtime resourceが依存に入る場合は上記guardを使う。
-
-## 構築されるリソース
-
-- RDS PostgreSQL 16 (`db.t4g.medium` 〜 `db.r7g.large`)
-- DB パラメータグループ（pgvector 用）
-- Secrets Manager（DB パスワード）
-- S3 バケット（生ファイル保存）
-- Lambda 実行 IAM Role（Bedrock / Secrets / S3 アクセス権）
-- CloudWatch Logs Group
-
-## Lambda 本体について
-
-Lambda 関数本体は **コード zip / コンテナイメージが必要**なので、コード実装が進んでから有効化する想定で、現状はコメントアウトしています（`lambda_iam.tf` 末尾）。
-
-## pgvector の有効化
-
-RDS 作成後、初回接続時に SQL を流す必要があります：
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
+bash ../deploy/terraform_runtime_guard.sh verify \
+  --plan "$ARTIFACT_DIR/activation.tfplan"
 ```
 
-Alembic マイグレーション初回で実行する設計。
+完了後はmigrationを再び `enabled=false` に戻し、strict syncだけを許可します。strict syncは
+mcp/connect/ingest/morning/canaryのdigest完全一致、確認済みalarm配送、legacy SNS退役、
+API custom-domain mapping、S3 `/app` exact metadataをliveから再取得して照合します。
 
-## 注意
+## HMAC rotation
 
-- 現状の SG はデフォルト VPC 全範囲を許可しています。本番は Lambda SG → DB SG に絞り込みが必要。
-- 本番運用時は backend "s3" を有効化して、tfstate を S3 + DynamoDB ロックで管理してください。
-- 削除保護は `environment = "prod"` のとき自動で有効化されます。
+MAILとREPORTは別secretです。primary、`*_PREVIOUS`、
+`*_PREVIOUS_ROTATION_STARTED_AT` はsecret値ではなく実デプロイmetadataだけを検証します。
+previousとT0は同一revisionで追加・削除し、同じprevious中のT0変更を拒否します。
+issuer切替はT0+900秒以内、previous削除はmailがT0+87300秒以後、reportが
+T0+605700秒以後です。secret値はplan、log、receiptへ出しません。
+
+## ローカル検証
+
+format、offline validate、shell/JQ syntax、runtime contract tests、dispatcher tests、
+archive reproducibility testsを実行します。real planはAWSのread-only refreshとstate lockを
+伴うため、外部変更停止中には実行しません。

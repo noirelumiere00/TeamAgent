@@ -19,20 +19,30 @@ ACCOUNT = "718959508629"
 REGION = "ap-northeast-1"
 REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-mcp"
 LIVE_IMAGE = f"{REPOSITORY}@sha256:{'f' * 64}"
-ROLLOUT_IMAGE = f"{REPOSITORY}@sha256:{'a' * 64}"
+X_IMAGE = f"{REPOSITORY}@sha256:{'d' * 64}"
 TIKTOK_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-dev-tiktok-acquire"
 TIKTOK_IMAGE = f"{TIKTOK_REPOSITORY}@sha256:{'e' * 64}"
+OPENCLAW_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-openclaw"
+OPENCLAW_IMAGE = f"{OPENCLAW_REPOSITORY}@sha256:{'c' * 64}"
+MAIL_HMAC_SECRET = (
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:teamagent/dev/hmac/mail-action-AbC123"
+)
+REPORT_HMAC_SECRET = (
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:teamagent/dev/hmac/report-link-XyZ789"
+)
 
 COMPONENTS = {
+    "openclaw": ("openclaw", "teamagent-dev-openclaw", 25),
     "mcp": ("teamagent-mcp", "teamagent-dev-mcp", 55),
-    "connect_web": ("connect-web", "teamagent-dev-connect-web", 48),
-    "ingest": ("ingest", "teamagent-dev-ingest", 41),
+    "connect_web": ("connect-web", "teamagent-dev-connect-web", 50),
+    "ingest": ("ingest", "teamagent-dev-ingest", 42),
     "morning": ("morning-digest", "teamagent-dev-morning-digest", 44),
     "canary": ("canary", "teamagent-dev-canary", 13),
     "tiktok": ("acquire", "teamagent-dev-tiktok-acquire", 25),
     "x_buzz": ("worker", "teamagent-dev-x-buzz-worker", 19),
 }
 TASK_ADDRESSES = {
+    "openclaw": "aws_ecs_task_definition.openclaw[0]",
     "mcp": "aws_ecs_task_definition.mcp",
     "connect_web": "aws_ecs_task_definition.connect_web[0]",
     "ingest": "aws_ecs_task_definition.ingest[0]",
@@ -103,8 +113,12 @@ def _environment() -> list[dict[str, str]]:
 
 def _container(component: str, image: str = LIVE_IMAGE) -> dict[str, Any]:
     name, _, _ = COMPONENTS[component]
-    if component == "tiktok":
+    if component == "openclaw":
+        image = OPENCLAW_IMAGE
+    elif component == "tiktok":
         image = TIKTOK_IMAGE
+    elif component == "x_buzz":
+        image = X_IMAGE
     container: dict[str, Any] = {
         "name": name,
         "image": image,
@@ -159,6 +173,21 @@ def _container(component: str, image: str = LIVE_IMAGE) -> dict[str, Any]:
                 ],
             }
         )
+    elif component in {"mcp", "connect_web", "morning"}:
+        container["secrets"].append(
+            {"name": "MAIL_ACTION_HMAC_SECRET", "valueFrom": MAIL_HMAC_SECRET}
+        )
+        if component in {"mcp", "connect_web"}:
+            container["secrets"].append(
+                {"name": "REPORT_LINK_HMAC_SECRET", "valueFrom": REPORT_HMAC_SECRET}
+            )
+        if component == "connect_web":
+            container["environment"].append(
+                {
+                    "name": "CONNECT_APP_HTML_S3_URI",
+                    "value": ("s3://teamagent-dev-raw-files/codebuild/connect-web-app.html"),
+                }
+            )
     return container
 
 
@@ -173,6 +202,7 @@ def _task_after(component: str) -> dict[str, Any]:
         "memory": "1024",
         "network_mode": "awsvpc",
         "requires_compatibilities": ["FARGATE"],
+        "skip_destroy": True,
         "runtime_platform": [
             {
                 "cpu_architecture": "ARM64" if is_worker else "X86_64",
@@ -304,8 +334,12 @@ def _mapping_tf(component: str) -> dict[str, Any]:
 
 
 def _service_tf(component: str) -> dict[str, Any]:
-    name = f"teamagent-dev-{'connect-web' if component == 'connect_web' else 'mcp'}"
-    security_group = "sg-connect" if component == "connect_web" else "sg-mcp"
+    suffix = {"connect_web": "connect-web", "openclaw": "openclaw"}.get(component, "mcp")
+    name = f"teamagent-dev-{suffix}"
+    security_group = {
+        "connect_web": "sg-connect",
+        "openclaw": "sg-openclaw",
+    }.get(component, "sg-mcp")
     load_balancer = []
     if component == "connect_web":
         load_balancer = [
@@ -323,10 +357,15 @@ def _service_tf(component: str) -> dict[str, Any]:
         "launch_type": "FARGATE",
         "capacity_provider_strategy": [],
         "platform_version": "LATEST",
-        "availability_zone_rebalancing": "DISABLED",
-        "deployment_maximum_percent": 200,
-        "deployment_minimum_healthy_percent": 100,
-        "deployment_circuit_breaker": [{"enable": False, "rollback": False}],
+        "availability_zone_rebalancing": "ENABLED",
+        "deployment_maximum_percent": 100 if component == "openclaw" else 200,
+        "deployment_minimum_healthy_percent": 0 if component == "openclaw" else 100,
+        "deployment_circuit_breaker": [
+            {
+                "enable": True,
+                "rollback": True,
+            }
+        ],
         "deployment_controller": [{"type": "ECS"}],
         "alarms": [],
         "network_configuration": [
@@ -450,6 +489,7 @@ def _safe_plan() -> dict[str, Any]:
 
     configurations: list[dict[str, Any]] = []
     for component, address in (
+        ("openclaw", "aws_ecs_service.openclaw[0]"),
         ("mcp", "aws_ecs_service.mcp[0]"),
         ("connect_web", "aws_ecs_service.connect_web[0]"),
     ):
@@ -545,6 +585,40 @@ def _safe_plan() -> dict[str, Any]:
     policy_read["mode"] = "data"
     changes.append(policy_read)
 
+    exact_policy = json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": ["logs:PutLogEvents"],
+                    "Resource": (
+                        f"arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/teamagent/dev/exact:*"
+                    ),
+                }
+            ],
+        },
+        separators=(",", ":"),
+    )
+    for address in (
+        "aws_iam_role_policy.worker_app",
+        "aws_iam_role_policy.lambda_app",
+        "aws_iam_role_policy.mcp_task",
+        "aws_iam_role_policy.connect_web_task[0]",
+        "aws_iam_role_policy.ingest_task[0]",
+        "aws_iam_role_policy.morning_digest_task[0]",
+    ):
+        value = {"policy": exact_policy}
+        changes.append(
+            _change(
+                address,
+                "aws_iam_role_policy",
+                ["no-op"],
+                copy.deepcopy(value),
+                value,
+            )
+        )
+
     return {
         "format_version": "1.2",
         "terraform_version": "1.12.2",
@@ -620,7 +694,7 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
     elif scenario == "task_track_latest":
         task["change"]["after"]["track_latest"] = True
     elif scenario == "task_skip_destroy":
-        task["change"]["after"]["skip_destroy"] = True
+        task["change"]["after"]["skip_destroy"] = False
     elif scenario == "task_fault_injection":
         task["change"]["after"]["enable_fault_injection"] = True
     elif scenario == "task_restart_policy":
@@ -730,6 +804,7 @@ def _fake_aws(path: Path) -> None:
         import copy
         import json
         import os
+        import pathlib
         import sys
 
         ACCOUNT = {ACCOUNT!r}
@@ -748,7 +823,11 @@ def _fake_aws(path: Path) -> None:
         mappings = {json.dumps({key: _mapping_aws(key) for key in DISPATCHERS})!r}
         mappings = json.loads(mappings)
         args = sys.argv[1:]
-        if args[:2] == ["--region", REGION]:
+        if (
+            len(args) >= 2
+            and args[0] == "--region"
+            and args[1] in (REGION, "us-east-1")
+        ):
             args = args[2:]
 
         def task_arn(component):
@@ -770,11 +849,167 @@ def _fake_aws(path: Path) -> None:
         if args[:2] == ["sts", "get-caller-identity"]:
             account = os.environ.get("AWS_FAKE_ACCOUNT", ACCOUNT)
             print(json.dumps({{"Account": account}}))
+        elif args[:2] == ["sns", "list-topics"]:
+            topics = [{{
+                "TopicArn": (
+                    "arn:aws:sns:ap-northeast-1:718959508629:"
+                    "teamagent-dev-openclaw-alarms"
+                )
+            }}]
+            if os.environ.get("AWS_FAKE_LEGACY_ALARM_TOPIC"):
+                topics.append({{
+                    "TopicArn": (
+                        "arn:aws:sns:ap-northeast-1:718959508629:"
+                        "teamagent-dev-alarms"
+                    )
+                }})
+            print(json.dumps({{"Topics": topics}}))
+        elif args[:2] == ["sns", "list-subscriptions-by-topic"]:
+            subscriptions = []
+            if not os.environ.get("AWS_FAKE_NO_ALARM_DELIVERY"):
+                subscriptions.append({{
+                    "SubscriptionArn": (
+                        "arn:aws:sns:ap-northeast-1:718959508629:"
+                        "teamagent-dev-openclaw-alarms:confirmed"
+                    ),
+                    "Owner": ACCOUNT,
+                    "Protocol": "email",
+                    "Endpoint": "alerts@example.com",
+                    "TopicArn": (
+                        "arn:aws:sns:ap-northeast-1:718959508629:"
+                        "teamagent-dev-openclaw-alarms"
+                    ),
+                }})
+            print(json.dumps({{"Subscriptions": subscriptions}}))
+        elif args[:2] == ["chatbot", "describe-slack-channel-configurations"]:
+            print(json.dumps({{"SlackChannelConfigurations": []}}))
+        elif args[:2] == ["chatbot", "list-microsoft-teams-channel-configurations"]:
+            print(json.dumps({{"TeamChannelConfigurations": []}}))
+        elif args[:2] == ["cloudwatch", "describe-alarms"]:
+            actions = []
+            if os.environ.get("AWS_FAKE_LEGACY_ALARM_ACTION"):
+                actions = [
+                    "arn:aws:sns:ap-northeast-1:718959508629:"
+                    "teamagent-dev-alarms"
+                ]
+            print(json.dumps({{
+                "MetricAlarms": [{{"AlarmActions": actions}}],
+                "CompositeAlarms": [],
+            }}))
+        elif args[:2] == ["budgets", "describe-budgets"]:
+            print(json.dumps({{
+                "Budgets": [{{"BudgetName": "teamagent-dev-monthly-cost"}}],
+            }}))
+        elif args[:2] == ["budgets", "describe-notifications-for-budget"]:
+            print(json.dumps({{
+                "Notifications": [{{
+                    "NotificationType": "ACTUAL",
+                    "ComparisonOperator": "GREATER_THAN",
+                    "Threshold": 80,
+                    "ThresholdType": "PERCENTAGE",
+                    "NotificationState": "OK",
+                }}],
+            }}))
+        elif args[:2] == [
+            "budgets",
+            "describe-subscribers-for-notification",
+        ]:
+            address = (
+                "arn:aws:sns:ap-northeast-1:718959508629:"
+                "teamagent-dev-openclaw-alarms"
+            )
+            if os.environ.get("AWS_FAKE_LEGACY_BUDGET_ACTION"):
+                address = (
+                    "arn:aws:sns:ap-northeast-1:718959508629:"
+                    "teamagent-dev-alarms"
+                )
+            print(json.dumps({{
+                "Subscribers": [{{
+                    "SubscriptionType": "SNS",
+                    "Address": address,
+                }}],
+            }}))
+        elif args[:2] == ["ce", "get-anomaly-subscriptions"]:
+            address = (
+                "arn:aws:sns:ap-northeast-1:718959508629:"
+                "teamagent-dev-openclaw-alarms"
+            )
+            if os.environ.get("AWS_FAKE_LEGACY_ANOMALY_ACTION"):
+                address = (
+                    "arn:aws:sns:ap-northeast-1:718959508629:"
+                    "teamagent-dev-alarms"
+                )
+            print(json.dumps({{
+                "AnomalySubscriptions": [{{
+                    "SubscriptionArn": (
+                        "arn:aws:ce::718959508629:"
+                        "anomalysubscription/fake"
+                    ),
+                    "Subscribers": [{{
+                        "Type": "SNS",
+                        "Address": address,
+                    }}],
+                }}],
+            }}))
+        elif args[:2] == ["s3api", "head-object"]:
+            print(json.dumps({{
+                "ContentLength": len(b"fake current app html\\n"),
+                "VersionId": "fake-current-version-1",
+            }}))
+        elif args[:2] == ["s3api", "get-object"]:
+            version = args[args.index("--version-id") + 1]
+            pathlib.Path(args[-1]).write_bytes(b"fake current app html\\n")
+            print(json.dumps({{"VersionId": version}}))
+        elif args[:2] == ["apigatewayv2", "get-api"]:
+            print(json.dumps({{
+                "ApiId": "esk97z9grh",
+                "Name": "teamagent-connectweb-api",
+                "ProtocolType": "HTTP",
+                "DisableExecuteApiEndpoint": True,
+                "ApiEndpoint": (
+                    "https://esk97z9grh.execute-api."
+                    "ap-northeast-1.amazonaws.com"
+                ),
+            }}))
+        elif args[:2] == ["apigatewayv2", "get-stage"]:
+            print(json.dumps({{
+                "StageName": "$default",
+                "AutoDeploy": True,
+                "AccessLogSettings": {{
+                    "DestinationArn": (
+                        "arn:aws:logs:ap-northeast-1:718959508629:"
+                        "log-group:/aws/apigateway/teamagent-dev-connect-web"
+                    ),
+                    "Format": json.dumps({{
+                        "requestId": "$context.requestId",
+                        "routeKey": "$context.routeKey",
+                        "status": "$context.status",
+                        "responseLength": "$context.responseLength",
+                        "integrationStatus": "$context.integration.status",
+                        "integrationLatency": "$context.integrationLatency",
+                        "responseType": "$context.error.responseType",
+                    }}),
+                }},
+                "DefaultRouteSettings": {{"DetailedMetricsEnabled": False}},
+            }}))
+        elif args[:2] == ["apigatewayv2", "get-api-mappings"]:
+            print(json.dumps({{
+                "Items": [{{
+                    "ApiId": "esk97z9grh",
+                    "Stage": "$default",
+                    "ApiMappingKey": "",
+                }}]
+            }}))
         elif args[:2] == ["ecs", "describe-services"]:
             state = os.environ.get("AWS_FAKE_SERVICE_STATE", "stable")
             services = []
-            for component in ("mcp", "connect_web"):
-                name = "teamagent-dev-mcp" if component == "mcp" else "teamagent-dev-connect-web"
+            for component in ("openclaw", "mcp", "connect_web"):
+                suffix = {{
+                    "openclaw": "openclaw",
+                    "mcp": "mcp",
+                    "connect_web": "connect-web",
+                }}[component]
+                name = f"teamagent-dev-{{suffix}}"
                 td = task_arn(component)
                 deployments = [{{
                     "status": "PRIMARY",
@@ -783,8 +1018,12 @@ def _fake_aws(path: Path) -> None:
                 }}]
                 if state == "two_primary":
                     deployments.append(dict(deployments[0]))
-                sg = "sg-mcp" if component == "mcp" else "sg-connect"
-                lbs = [] if component == "mcp" else [{{
+                sg = {{
+                    "openclaw": "sg-openclaw",
+                    "mcp": "sg-mcp",
+                    "connect_web": "sg-connect",
+                }}[component]
+                lbs = [] if component != "connect_web" else [{{
                     "targetGroupArn": "arn:aws:elasticloadbalancing:test:targetgroup/web",
                     "containerName": "connect-web",
                     "containerPort": 8788,
@@ -800,11 +1039,14 @@ def _fake_aws(path: Path) -> None:
                     "deployments": deployments,
                     "launchType": "FARGATE",
                     "platformVersion": "LATEST",
-                    "availabilityZoneRebalancing": "DISABLED",
+                    "availabilityZoneRebalancing": "ENABLED",
                     "deploymentConfiguration": {{
-                        "maximumPercent": 200,
-                        "minimumHealthyPercent": 100,
-                        "deploymentCircuitBreaker": {{"enable": False, "rollback": False}},
+                        "maximumPercent": 100 if component == "openclaw" else 200,
+                        "minimumHealthyPercent": 0 if component == "openclaw" else 100,
+                        "deploymentCircuitBreaker": {{
+                            "enable": True,
+                            "rollback": True,
+                        }},
                         "strategy": "ROLLING",
                         "bakeTimeInMinutes": 0,
                     }},
@@ -827,6 +1069,42 @@ def _fake_aws(path: Path) -> None:
                     "tags": [],
                 }})
             print(json.dumps({{"failures": [], "services": services}}))
+        elif args[:2] == ["ecs", "list-tasks"]:
+            task_arns = []
+            if os.environ.get("AWS_FAKE_ACTIVE_INGEST_TASK"):
+                task_arns = [
+                    (
+                        f"arn:aws:ecs:{{REGION}}:{{ACCOUNT}}:"
+                        "task/teamagent-dev/active-ingest"
+                    )
+                ]
+            print(json.dumps({{"taskArns": task_arns}}))
+        elif args[:2] == ["ecs", "describe-tasks"]:
+            requested = args[
+                args.index("--tasks") + 1 : args.index("--output")
+            ]
+            print(json.dumps({{
+                "failures": [],
+                "tasks": [
+                    {{
+                        "taskArn": arn,
+                        "desiredStatus": "RUNNING",
+                        "lastStatus": "RUNNING",
+                    }}
+                    for arn in requested
+                ],
+            }}))
+        elif args[:2] == ["ecs", "describe-clusters"]:
+            print(json.dumps({{
+                "failures": [],
+                "clusters": [{{
+                    "clusterName": "teamagent-dev",
+                    "settings": [
+                        {{"name": "containerInsights", "value": "enabled"}}
+                    ],
+                    "tags": [],
+                }}],
+            }}))
         elif args[:2] == ["events", "describe-rule"]:
             name = args[args.index("--name") + 1]
             component = next(key for key, value in rules.items() if value[1] == name)
@@ -869,8 +1147,25 @@ def _fake_aws(path: Path) -> None:
             component = next(key for key in components if components[key][1] in arn)
             task = copy.deepcopy(tasks[component])
             task["taskDefinitionArn"] = arn
+            image_override = os.environ.get(
+                {{
+                    "connect_web": "AWS_FAKE_CONNECT_IMAGE",
+                    "ingest": "AWS_FAKE_INGEST_IMAGE",
+                }}.get(component, "")
+            )
+            if image_override:
+                task["containerDefinitions"][0]["image"] = image_override
             if component not in ("tiktok", "x_buzz"):
-                task["containerDefinitions"][0]["environment"] = environment()
+                task_environment = environment()
+                if component == "connect_web":
+                    task_environment.append({{
+                        "name": "CONNECT_APP_HTML_S3_URI",
+                        "value": (
+                            "s3://teamagent-dev-raw-files/"
+                            "codebuild/connect-web-app.html"
+                        ),
+                    }})
+                task["containerDefinitions"][0]["environment"] = task_environment
             print(json.dumps({{"taskDefinition": task}}))
         elif args[:2] == ["lambda", "get-function-configuration"]:
             name = args[args.index("--function-name") + 1]
@@ -890,6 +1185,19 @@ def _fake_aws(path: Path) -> None:
                 if value["function_name"] == name
             )
             print(json.dumps({{"EventSourceMappings": [mappings[component]]}}))
+        elif args[:2] == ["secretsmanager", "describe-secret"]:
+            secret_id = args[args.index("--secret-id") + 1]
+            print(json.dumps({{
+                "ARN": secret_id,
+                "Name": secret_id.split(":secret:", 1)[1],
+            }}))
+        elif args[:2] == ["secretsmanager", "list-secret-version-ids"]:
+            print(json.dumps({{
+                "Versions": [{{
+                    "VersionId": "01234567-89ab-cdef-0123-456789abcdef",
+                    "VersionStages": ["AWSCURRENT"],
+                }}]
+            }}))
         elif args[:2] == ["ecr", "describe-images"]:
             if os.environ.get("AWS_FAKE_ECR_MISSING"):
                 raise SystemExit(44)
@@ -924,18 +1232,45 @@ def _fake_terraform(path: Path) -> None:
             desired = core["desired_mcp_image"]
             plan = json.loads(pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text())
             plan["variables"] = {
+                "openclaw_image": {"value": core["desired_openclaw_image"]},
                 "mcp_image": {"value": desired},
+                "x_buzz_image": {"value": core["desired_x_image"]},
                 "tiktok_acquire_image": {"value": core["desired_tiktok_image"]},
+                "ingest_rule_enabled": {"value": core["ingest_rule_enabled"]},
+                "morning_digest_rule_enabled": {
+                    "value": core["morning_digest_rule_enabled"]
+                },
+                "canary_rule_enabled": {"value": core["canary_rule_enabled"]},
+                "require_alarm_delivery": {"value": True},
+                "mail_action_hmac_secret_arn": {
+                    "value": "arn:aws:secretsmanager:ap-northeast-1:718959508629:"
+                    "secret:teamagent/dev/hmac/mail-action-AbC123"
+                },
+                "mail_action_hmac_previous_secret_arn": {"value": ""},
+                "mail_action_hmac_previous_rotation_started_at": {"value": None},
+                "report_link_hmac_secret_arn": {
+                    "value": "arn:aws:secretsmanager:ap-northeast-1:718959508629:"
+                    "secret:teamagent/dev/hmac/report-link-XyZ789"
+                },
+                "report_link_hmac_previous_secret_arn": {"value": ""},
+                "report_link_hmac_previous_rotation_started_at": {"value": None},
                 "runtime_guard_live": {"value": core},
             }
             for change in plan["resource_changes"]:
                 if change["type"] == "aws_ecs_task_definition":
                     containers = json.loads(change["change"]["after"]["container_definitions"])
-                    containers[0]["image"] = (
-                        core["desired_tiktok_image"]
-                        if change["address"] == "aws_ecs_task_definition.tiktok_acquire[0]"
-                        else desired
-                    )
+                    image_by_address = {
+                        "aws_ecs_task_definition.openclaw[0]": core[
+                            "desired_openclaw_image"
+                        ],
+                        "aws_ecs_task_definition.tiktok_acquire[0]": core[
+                            "desired_tiktok_image"
+                        ],
+                        "aws_ecs_task_definition.x_buzz_worker[0]": core[
+                            "desired_x_image"
+                        ],
+                    }
+                    containers[0]["image"] = image_by_address.get(change["address"], desired)
                     change["change"]["after"]["container_definitions"] = json.dumps(containers)
             pathlib.Path(out).write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
         elif args[0] == "show":
@@ -973,7 +1308,10 @@ def _harness(tmp_path: Path, scenario: str = "safe") -> tuple[dict[str, str], Pa
     template.write_text(json.dumps(plan_data), encoding="utf-8")
     template.chmod(0o600)
     var_file = tmp_path / "terraform.tfvars"
-    var_file.write_text("# fake private tfvars\n", encoding="utf-8")
+    var_file.write_text(
+        'alarm_email_endpoints = ["alerts@example.com"]\n',
+        encoding="utf-8",
+    )
     var_file.chmod(0o600)
     tf_log = tmp_path / "terraform.log"
     tf_log.write_text("", encoding="utf-8")
@@ -989,8 +1327,8 @@ def _harness(tmp_path: Path, scenario: str = "safe") -> tuple[dict[str, str], Pa
     return env, var_file, tf_log
 
 
-def _plan_command(var_file: Path, output: Path, rollout: bool = False) -> list[str]:
-    command = [
+def _plan_command(var_file: Path, output: Path) -> list[str]:
+    return [
         "bash",
         str(GUARD),
         "plan",
@@ -998,12 +1336,8 @@ def _plan_command(var_file: Path, output: Path, rollout: bool = False) -> list[s
         str(var_file),
         "--out",
         str(output),
+        "--runtime-sync",
     ]
-    if rollout:
-        command.extend(["--runtime-rollout-image", ROLLOUT_IMAGE])
-    else:
-        command.append("--runtime-sync")
-    return command
 
 
 def _run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -1011,18 +1345,15 @@ def _run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess
         command,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         env=env,
     )
 
 
-@pytest.mark.parametrize("rollout", [False, True], ids=["sync", "rollout"])
-def test_safe_sync_and_rollout_publish_private_bound_artifacts(
-    tmp_path: Path, rollout: bool
-) -> None:
+def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> None:
     env, var_file, tf_log = _harness(tmp_path)
     plan = tmp_path / "runtime.tfplan"
-    result = _run(_plan_command(var_file, plan, rollout), env)
+    result = _run(_plan_command(var_file, plan), env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     receipt = Path(f"{plan}.runtime-guard.json")
@@ -1033,8 +1364,24 @@ def test_safe_sync_and_rollout_publish_private_bound_artifacts(
     assert data["plan_path"] == str(plan)
     assert data["receipt_path"] == str(receipt)
     assert data["var_file"] == str(var_file)
-    assert data["desired_image"] == (ROLLOUT_IMAGE if rollout else LIVE_IMAGE)
-    assert data["mode"] == ("rollout" if rollout else "sync")
+    assert data["images"]["desired"] == {
+        "openclaw": OPENCLAW_IMAGE,
+        "mcp": LIVE_IMAGE,
+        "x_buzz": X_IMAGE,
+        "tiktok": TIKTOK_IMAGE,
+    }
+    assert data["rule_states"]["desired"] == {
+        "ingest": False,
+        "morning": True,
+        "canary": False,
+    }
+    assert data["mode"] == "sync"
+    assert data["migration_id"] == ""
+    assert data["preflight_receipt_sha256"] == ""
+    assert len(data["guard_script_sha256"]) == 64
+    assert len(data["guard_jq_sha256"]) == 64
+    assert len(data["config_manifest_sha256"]) == 64
+    assert len(data["hmac_transition_sha256"]) == 64
     assert "apply" not in tf_log.read_text(encoding="utf-8")
 
     verify = _run(["bash", str(GUARD), "verify", "--plan", str(plan)], env)
@@ -1163,6 +1510,44 @@ def test_wrong_account_and_unstable_service_fail_before_plan(tmp_path: Path) -> 
     assert result.returncode == 1
 
 
+def test_divergent_live_core_images_require_exact_migration_without_rollback(
+    tmp_path: Path,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    env["AWS_FAKE_CONNECT_IMAGE"] = f"{REPOSITORY}@sha256:{'a' * 64}"
+    env["AWS_FAKE_INGEST_IMAGE"] = f"{REPOSITORY}@sha256:{'b' * 64}"
+
+    result = _run(_plan_command(var_file, tmp_path / "divergent.tfplan"), env)
+
+    assert result.returncode == 1
+    assert "divergent live" in result.stdout + result.stderr
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "AWS_FAKE_NO_ALARM_DELIVERY",
+        "AWS_FAKE_LEGACY_ALARM_TOPIC",
+        "AWS_FAKE_LEGACY_ALARM_ACTION",
+        "AWS_FAKE_LEGACY_BUDGET_ACTION",
+        "AWS_FAKE_LEGACY_ANOMALY_ACTION",
+    ],
+)
+def test_alarm_delivery_and_legacy_topic_contract_fail_before_plan(
+    tmp_path: Path,
+    marker: str,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    env[marker] = "1"
+
+    result = _run(_plan_command(var_file, tmp_path / "alarm.tfplan"), env)
+
+    assert result.returncode == 1
+    assert "alarm delivery" in result.stdout + result.stderr
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+
 def test_invalid_bool_value_is_not_echoed(tmp_path: Path) -> None:
     env, var_file, _ = _harness(tmp_path)
     secret_value = "DO_NOT_LOG_THIS_VALUE"
@@ -1172,18 +1557,21 @@ def test_invalid_bool_value_is_not_echoed(tmp_path: Path) -> None:
     assert secret_value not in result.stdout + result.stderr
 
 
-def test_rollout_repository_digest_and_ecr_existence_are_fail_closed(
+def test_ad_hoc_rollout_is_rejected_and_migration_requires_preflight(
     tmp_path: Path,
 ) -> None:
     env, var_file, _ = _harness(tmp_path)
-    bad = f"000000000000.dkr.ecr.{REGION}.amazonaws.com/teamagent-mcp@sha256:{'a' * 64}"
-    command = _plan_command(var_file, tmp_path / "bad.tfplan", rollout=True)
-    command[-1] = bad
-    assert _run(command, env).returncode == 1
+    command = _plan_command(var_file, tmp_path / "bad.tfplan")
+    command[-1:] = ["--runtime-rollout-image", LIVE_IMAGE]
+    result = _run(command, env)
+    assert result.returncode == 1
+    assert "不明な引数" in result.stdout + result.stderr
 
-    env["AWS_FAKE_ECR_MISSING"] = "1"
-    command = _plan_command(var_file, tmp_path / "missing.tfplan", rollout=True)
-    assert _run(command, env).returncode == 1
+    command = _plan_command(var_file, tmp_path / "migration.tfplan")
+    command[-1:] = ["--runtime-migration", "2026-07-wolfi-runtime-v1"]
+    result = _run(command, env)
+    assert result.returncode == 1
+    assert "--preflight-receipt" in result.stdout + result.stderr
 
 
 def test_private_permissions_symlinks_existing_paths_and_arbitrary_target(

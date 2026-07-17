@@ -4,15 +4,31 @@
 # 値は terraform.tfvars / 環境で上書き。秘密「値」はここに書かない（secret 名のみ）。
 
 variable "openclaw_image" {
-  description = "OpenClaw外殻イメージ（ECR・digest pin推奨。例: <url>@sha256:...）。空ならservice未作成相当"
+  description = "OpenClaw外殻の同一account/region ECR完全digest URI。tagは禁止。"
   type        = string
   default     = ""
+
+  validation {
+    condition = var.openclaw_image == "" || can(regex(
+      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-openclaw@sha256:[0-9a-f]{64}$",
+      var.openclaw_image,
+    ))
+    error_message = "openclaw_imageはTeamAgent dev account/東京regionのteamagent-openclaw完全digest URIに限定します。"
+  }
 }
 
 variable "mcp_image" {
-  description = "TeamAgent-MCP バックエンドイメージ（ECR・digest pin推奨）"
+  description = "TeamAgent-MCPの同一account/region ECR完全digest URI。tag・別repositoryは禁止。"
   type        = string
   default     = ""
+
+  validation {
+    condition = var.mcp_image == "" || can(regex(
+      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-mcp@sha256:[0-9a-f]{64}$",
+      var.mcp_image,
+    ))
+    error_message = "mcp_imageはTeamAgent dev account/東京regionのteamagent-mcp完全digest URIに限定します。"
+  }
 }
 
 variable "fargate_mcp_cpu" {
@@ -49,6 +65,11 @@ variable "mcp_model_id" {
   description = "mcp（スキル/オーケストレーター）の Bedrock モデル ID。コスト方針(2026-06-29)により Haiku 4.5 既定・live rev40 と同値。var.bedrock_model_id を流用しない（あちらは Lambda 用で tfvars が Sonnet を指定しており、共有すると apply で mcp が Sonnet 化する＝2026-07-11 反対尋問レビューで検出）。"
   type        = string
   default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+  validation {
+    condition     = var.mcp_model_id == "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+    error_message = "MCPは監査済みJP Claude Haiku 4.5 inference profileだけを使用できます。"
+  }
 }
 
 variable "use_calendar_event_tool" {
@@ -141,6 +162,11 @@ variable "openclaw_model_id" {
   description = "OpenClaw外側モデル（Haiku4.5・東京推論プロファイル実ID）。権威=openclaw.config.json5"
   type        = string
   default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+  validation {
+    condition     = var.openclaw_model_id == "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+    error_message = "OpenClawは監査済みJP Claude Haiku 4.5 inference profileだけを使用できます。"
+  }
 }
 
 # ---------- 秘密値の secret 名（本人が Secrets Manager に作成。値は注入のみ） ----------

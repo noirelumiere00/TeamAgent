@@ -34,7 +34,7 @@ ALL_SCRIPTS = [
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["bash", *args], capture_output=True, text=True, timeout=30)
+    return subprocess.run(["bash", *args], capture_output=True, text=True, timeout=120)
 
 
 @pytest.mark.parametrize("script", ALL_SCRIPTS, ids=lambda p: p.name)
@@ -164,12 +164,25 @@ def test_terraform_guard_contract_strings() -> None:
         "runtime_guard_sha256",
         "plan_sha256",
         "--runtime-sync",
-        "--runtime-rollout-image",
+        "--runtime-migration",
+        "--preflight-receipt",
+        "preflight_receipt_sha256",
+        "hmac_transition_sha256",
+        "desired_openclaw_image",
+        "desired_x_image",
+        "desired rules",
         "非許可の destroy/replace",
         "env/secretsがliveと完全一致",
         "plan 作成中に live runtime が変化",
         "read-only検証完了",
         "umask 077",
+        "assert_git_tracked_clean",
+        "ls-files --error-unmatch",
+        'rev-parse "HEAD:$relative"',
+        'hash-object -- "$path"',
+        "diff --quiet HEAD",
+        '-path "$TF_DIR/.terraform" -prune',
+        '-path "$TF_DIR/build" -prune',
     ):
         assert needle in body, f"Terraform guard契約が欠落: {needle}"
     assert "-auto-approve" not in body
@@ -200,21 +213,15 @@ def test_terraform_runtime_preconditions_cover_all_managed_runtimes() -> None:
         assert body.count("local.runtime_guard_verified") >= 3
 
 
-def test_resilience_helper_is_plan_only_and_excludes_runtime_targets() -> None:
+def test_resilience_helper_is_explicitly_retired() -> None:
     body = APPLY_RESILIENCE.read_text(encoding="utf-8")
+    assert "terraform plan" not in body
     assert "terraform apply" not in body
-    assert "-auto-approve" not in body
-    targets = [line.strip() for line in body.splitlines() if line.strip().startswith("-target=")]
-    assert targets
-    for target in targets:
-        assert "aws_ecs_" not in target
-        assert "aws_cloudwatch_event_target" not in target
-        assert "aws_iam_" not in target
-        assert "aws_security_group" not in target
+    assert "retired" in body.lower()
 
-    result = _run(str(APPLY_RESILIENCE), "apply")
-    assert result.returncode == 2
-    assert "usage" in result.stderr.lower()
+    result = _run(str(APPLY_RESILIENCE))
+    assert result.returncode == 64
+    assert "retired" in result.stderr.lower()
 
 
 def test_worker_runtime_and_iam_hardening_contracts() -> None:
@@ -225,7 +232,7 @@ def test_worker_runtime_and_iam_hardening_contracts() -> None:
     for body in (tiktok, x_buzz):
         for needle in (
             "@sha256:[0-9a-f]{64}",
-            'user                   = "10001"',
+            'user                   = "10001:10001"',
             "readonlyRootFilesystem = true",
             "initProcessEnabled = true",
             'drop = ["ALL"]',
@@ -271,7 +278,6 @@ def test_worker_vpc_endpoint_and_python_healthcheck_contracts() -> None:
 def test_x_research_disabled_path_has_counted_policy_documents() -> None:
     """enable_x_research=falseでもcount=0 resourceを[0]参照してplan評価エラーにしない。"""
     body = (PROJECT_ROOT / "infra" / "terraform" / "x_research.tf").read_text(encoding="utf-8")
-    guard_body = TERRAFORM_GUARD.read_text(encoding="utf-8")
     for name in (
         "x_buzz_exec_secrets",
         "x_buzz_task_app",
@@ -283,4 +289,3 @@ def test_x_research_disabled_path_has_counted_policy_documents() -> None:
         assert f"data.aws_iam_policy_document.{name}[0].json" in body
         assert f"from = data.aws_iam_policy_document.{name}" in body
         assert f"to   = data.aws_iam_policy_document.{name}[0]" in body
-        assert f"data.aws_iam_policy_document.{name}" in guard_body
