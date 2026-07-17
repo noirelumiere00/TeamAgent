@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from teamagent.adapters.gcalendar_client import DuplicateEventError, InsertedEvent
+from teamagent.hmac_keyring import HmacKeyConfigurationError
 from teamagent.skills.base import SkillContext
 from teamagent.skills.calendar_event.schema import CalendarEventInput
 from teamagent.skills.calendar_event.skill import CalendarEventSkill
@@ -23,11 +24,14 @@ from teamagent.skills.morning_digest.event_token import (
 
 ME = "me@vectorinc.co.jp"
 _CAL_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+_MAIL_SECRET = "calendar-action-test-secret-" + "m" * 32
+_MAIL_NEXT_SECRET = "calendar-action-next-secret-" + "n" * 32
+_ROTATION_NOW = 2_000_000_000
 
 
 @pytest.fixture(autouse=True)
 def _hmac_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
 
 
 def _token(**kw: Any) -> str:
@@ -67,6 +71,26 @@ def test_token_fail_closed_without_secret(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET", raising=False)
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     assert decode_event_token(t, ME) is None
+    with pytest.raises(HmacKeyConfigurationError):
+        _token()
+
+
+def test_event_token_accepts_previous_only_during_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = _token(now=_ROTATION_NOW)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_NEXT_SECRET)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _MAIL_SECRET)
+    monkeypatch.setenv(
+        "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL", str(_ROTATION_NOW + 60 * 60 * 24)
+    )
+    assert decode_event_token(old, ME, now=_ROTATION_NOW) is not None
+
+    new = _token(now=_ROTATION_NOW)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET")
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL")
+    assert decode_event_token(new, ME, now=_ROTATION_NOW) is None
 
 
 def test_stable_event_id_is_base32hex_and_deterministic() -> None:
@@ -204,7 +228,7 @@ def test_triage_to_event_token_integration(monkeypatch: pytest.MonkeyPatch) -> N
     from teamagent.skills.morning_digest.schema import MorningDigestInput
     from teamagent.skills.morning_digest.skill import MorningDigestSkill
 
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
     future = (
         (_dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))) + _dt.timedelta(days=2))
         .replace(minute=0, second=0, microsecond=0)
@@ -276,6 +300,17 @@ def test_triage_to_event_token_integration(monkeypatch: pytest.MonkeyPatch) -> N
     assert item.event_token  # To 本人×日時確定 → token 発行
     p = decode_event_token(item.event_token, ME)
     assert p is not None and p.start_iso == future
+
+    # 現Terraformのように DB URL が主鍵へ誤配線されても、呼出元は action token/button を出さない。
+    legacy_db = "postgresql://teamagent:do-not-sign@db.internal:5432/teamagent"
+    monkeypatch.setenv("DATABASE_URL", legacy_db)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", legacy_db)
+    invalid = skill.run(
+        MorningDigestInput(max_drafts=0),
+        SkillContext(request_id="r-invalid-key", metadata={"user_email": ME}),
+    ).mail_digest[0]
+    assert invalid.draft_token == ""
+    assert invalid.event_token == ""
 
 
 def test_meeting_iso_rejects_date_only_and_past() -> None:

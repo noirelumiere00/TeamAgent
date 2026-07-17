@@ -15,6 +15,8 @@ from teamagent.connect_web.app import create_app
 
 _BUCKET = "teamagent-dev-raw-files"
 _KEY = "vseo-reports/abc123.html"
+_REPORT_SECRET = "report-test-secret-" + "r" * 32
+_REPORT_NEXT_SECRET = "report-next-secret-" + "n" * 32
 _FAKE_PRESIGNED = (
     "https://s3.ap-northeast-1.amazonaws.com/teamagent-dev-raw-files/"
     "vseo-reports/abc123.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef"
@@ -23,7 +25,10 @@ _FAKE_PRESIGNED = (
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret-xyz")
+    monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_SECRET", raising=False)
+    monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL", raising=False)
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
+    monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET", raising=False)
     monkeypatch.setenv("VSEO_REPORT_BUCKET", _BUCKET)
     return TestClient(create_app())
 
@@ -55,6 +60,23 @@ def test_no_login_required(client: TestClient, monkeypatch: pytest.MonkeyPatch) 
     token = encode_report_token(_BUCKET, "vseo-proposals/deck.pdf")
     r = client.get(f"/r/{token}", follow_redirects=False)
     assert r.status_code == 302
+
+
+def test_previous_key_redirects_only_when_explicitly_configured(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teamagent.adapters.report_link_token import encode_report_token
+
+    token = encode_report_token(_BUCKET, _KEY)
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_NEXT_SECRET)
+    monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_SECRET", _REPORT_SECRET)
+    monkeypatch.setenv(
+        "REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL", str(int(time.time()) + 60 * 60 * 24 * 7)
+    )
+    _patch_presign(monkeypatch, _FAKE_PRESIGNED)
+    r = client.get(f"/r/{token}", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == _FAKE_PRESIGNED
 
 
 def test_shortlink_presign_is_short_lived(

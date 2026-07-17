@@ -33,11 +33,12 @@ _JST = _dt.timezone(_dt.timedelta(hours=9))
 # 2026-07-10 は金曜（翌営業日=7/13 月曜）。
 _NOW = _dt.datetime(2026, 7, 10, 9, 0, tzinfo=_JST)
 _CAL_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+_MAIL_SECRET = "schedule-action-test-secret-" + "m" * 32
 
 
 @pytest.fixture(autouse=True)
 def _hmac_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
 
 
 # ── slot_finder ─────────────────────────────────────────────────────────────

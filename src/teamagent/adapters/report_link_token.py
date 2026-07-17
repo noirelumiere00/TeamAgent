@@ -7,11 +7,12 @@ openclaw(@AiLa) の LLM が長い presigned URL のクエリ（``?X-Amz-Signatur
 毎回新鮮な presigned を生成し 302 する（S3 オブジェクトが生きていれば期限切れしない）。
 
 信頼境界は現行 presigned URL（＝リンクを知る人が時限で閲覧）と同一。発行側（mcp/skill）と
-復号側（connect-web）は同一イメージ・**同一鍵 ``MAIL_ACTION_HMAC_SECRET``（=database_url
-secret）** を使う。draft_token と違い ``SLACK_BOT_TOKEN`` への fallback は**使わない**:
-connect-web は SLACK_BOT_TOKEN を持たないため、発行側だけが fallback すると鍵不一致で全件 404
-になる footgun を断つ（署名鍵を単一化）。鍵が無い環境では fail-closed（decode が常に None）。
-発行側は短縮URLを出す前に :func:`has_secret` で鍵存在を確認し、無ければ presigned へ落とす。
+復号側（connect-web）はレポート専用主鍵 ``REPORT_LINK_HMAC_SECRET`` を共有する。新規発行は
+必ず主鍵だけを使い、移行前 token は ``REPORT_LINK_HMAC_PREVIOUS_SECRET`` と明示的な
+``..._VALID_UNTIL``（最大7日）を設定した期間だけ検証する。``MAIL_ACTION_HMAC_SECRET`` /
+``DATABASE_URL`` / ``SLACK_BOT_TOKEN`` への fallback は一切しない。鍵が無い・空・短すぎる・
+他資格情報/用途と同じ・previous 設定不正の環境では fail-closed。発行側は短縮URLを出す前に
+:func:`has_secret` で有効な keyring を確認し、無ければ presigned へ落とす。
 
 多層防御: たとえ有効な署名でも、用途タグ ``typ`` 不一致・key が許可プレフィックス
 （``vseo-reports/`` / ``vseo-proposals/``）以外・bucket が許可バケット以外なら decode は None を
@@ -22,11 +23,14 @@ draft_token.py の作法を踏襲。
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
 import json
 import os
 import time
+
+from teamagent.hmac_keyring import (
+    load_report_link_hmac_keyring,
+    require_report_link_hmac_keyring,
+)
 
 _TOKEN_TYPE = "r"  # 用途タグ（同一鍵の draft/event 等とドメイン分離＝クロス転用を封じる）
 _DEFAULT_BUCKET = "teamagent-dev-raw-files"  # report_publish._DEFAULT_BUCKET と一致
@@ -37,12 +41,6 @@ _DEFAULT_TTL_S = 60 * 60 * 24 * 7
 _SIG_LEN = 16  # HMAC-SHA256 の先頭16バイト（トークンを短く保つ・draft_token と同じ）
 
 
-def _secret() -> bytes:
-    # 発行(mcp)↔復号(connect-web)で同一値になる MAIL_ACTION_HMAC_SECRET のみ。SLACK_BOT_TOKEN
-    # への fallback はしない（connect-web が持たず鍵不一致→全件404 を招くため）。
-    return os.environ.get("MAIL_ACTION_HMAC_SECRET", "").encode("utf-8")
-
-
 def _default_ttl_s() -> int:
     """トークン失効までの秒数。env REPORT_LINK_TTL_S(正整数)があれば優先、無ければ既定7日。"""
     raw = os.environ.get("REPORT_LINK_TTL_S", "").strip()
@@ -50,11 +48,11 @@ def _default_ttl_s() -> int:
 
 
 def has_secret() -> bool:
-    """署名鍵(MAIL_ACTION_HMAC_SECRET)が設定済みか。短縮URL発行前のゲートに使う。
+    """有効なレポート専用 keyring が設定済みか。短縮URL発行前のゲートに使う。
 
-    未設定なら発行側は短縮URL化せず従来 presigned へ落とす（鍵不一致による全件404の回避）。
+    未設定・不正なら発行側は短縮URL化せず従来 presigned へ落とす（不正署名の発行を防止）。
     """
-    return bool(os.environ.get("MAIL_ACTION_HMAC_SECRET", "").strip())
+    return load_report_link_hmac_keyring() is not None
 
 
 def is_allowed_key(key: str) -> bool:
@@ -101,7 +99,8 @@ def encode_report_token(
         "e": issued + ttl,
     }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    sig = hmac.new(_secret(), raw, hashlib.sha256).digest()[:_SIG_LEN]
+    # require は秘密を含まない固定例外を投げる。空鍵で token を発行する旧挙動は許可しない。
+    sig = require_report_link_hmac_keyring(now=issued).sign(raw, digest_bytes=_SIG_LEN)
     return _b64e(raw) + "." + _b64e(sig)
 
 
@@ -111,22 +110,24 @@ def decode_report_token(token: str, *, now: int | None = None) -> tuple[str, str
     鍵未設定 / 形式不正 / 署名不一致 / 失効 / typ 不一致 / key が許可 prefix 外 / bucket が許可外。
     region は埋込が無ければ ""（/r 側で AWS_REGION にフォールバック）。
     """
-    secret = _secret()
-    if not secret:
-        return None  # 鍵が無ければ何も信用しない
+    cur = int(now if now is not None else time.time())
+    keyring = load_report_link_hmac_keyring(now=cur)
+    if keyring is None:
+        return None  # 鍵が無い/設定不正なら何も信用しない
     try:
         body_b64, sig_b64 = (token or "").split(".", 1)
         raw = _b64d(body_b64)
-        expected = hmac.new(secret, raw, hashlib.sha256).digest()[:_SIG_LEN]
-        if not hmac.compare_digest(expected, _b64d(sig_b64)):
+        if not keyring.verify(raw, _b64d(sig_b64), digest_bytes=_SIG_LEN):
             return None
         payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return None
+        expires = int(payload.get("e", 0))
     except Exception:
         return None
-    cur = int(now if now is not None else time.time())
     if payload.get("typ") != _TOKEN_TYPE:
         return None  # 他用途トークン(draft/event 等・同一鍵)の転用を封じる
-    if int(payload.get("e", 0)) < cur:
+    if expires < cur:
         return None  # 失効
     bucket = str(payload.get("b", ""))
     key = str(payload.get("k", ""))
