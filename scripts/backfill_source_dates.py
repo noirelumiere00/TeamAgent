@@ -20,7 +20,12 @@ from typing import Any
 
 import psycopg
 
-_SLACK_EXTERNAL_ID_RE = re.compile(r"^[^:\s]+:(?P<epoch>[0-9]{10}(?:\.[0-9]{1,6})?)$")
+_SLACK_EXTERNAL_ID_RE = re.compile(
+    r"^(?P<channel>C[A-Z0-9]{10}):(?P<epoch>[0-9]{10}(?:\.[0-9]{1,6})?)$"
+)
+# data/ingest_sources.yaml の取り込み対象2チャネルと同じ fail-closed allowlist。
+# 本番NULL 373件の prefix もこの2値だけ（153件 + 220件）とread-only監査済み。
+_ALLOWED_SLACK_CHANNEL_IDS = frozenset({"C091ZSVTKF1", "C0A1207GYHZ"})
 _EARLIEST_ALLOWED = dt.datetime(2010, 1, 1, tzinfo=dt.UTC)
 
 _SELECT_NULL_SLACK = """
@@ -53,6 +58,8 @@ def slack_external_id_datetime(
     """厳密な ``channel:epoch`` だけを UTC datetime にする（推測しない）。"""
     match = _SLACK_EXTERNAL_ID_RE.fullmatch(str(external_id or ""))
     if match is None:
+        return None
+    if match.group("channel") not in _ALLOWED_SLACK_CHANNEL_IDS:
         return None
     try:
         epoch = Decimal(match.group("epoch"))
@@ -93,6 +100,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.commit and args.expected_count is None:
+        raise SystemExit("--commit には --expected-count が必須です")
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("TEAMAGENT_DB_DSN")
     if not dsn:
         raise SystemExit("DATABASE_URL または TEAMAGENT_DB_DSN が必要です")
@@ -135,7 +144,10 @@ def main(argv: list[str] | None = None) -> int:
 
         with conn.cursor() as cur:
             cur.execute(_COUNT_REMAINING)
-            remaining = int(cur.fetchone()[0])
+            remaining_row = cur.fetchone()
+        if remaining_row is None:
+            raise RuntimeError("Slack modified_at NULL の残件数を取得できませんでした")
+        remaining = int(remaining_row[0])
         if remaining:
             raise RuntimeError(f"Slack modified_at NULL が {remaining} 件残りました")
 

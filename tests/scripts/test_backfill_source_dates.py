@@ -39,6 +39,7 @@ def test_slack_external_id_datetime(external_id: str, expected: str) -> None:
         "C123:1783932899.1234567",
         "C123:1783932899:extra",
         "C 123:1783932899",
+        "CZZZZZZZZZZ:1783932899",  # 形式が正しくても設定外channelは拒否
         "C123:1234.1",  # 2010より前を含む短い/古いepochは拒否
         "C123:9999999999",  # 現在より未来
     ],
@@ -61,6 +62,12 @@ def test_main_requires_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
         _mod.main([])
 
 
+def test_commit_requires_expected_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://redacted")
+    with pytest.raises(SystemExit, match="--expected-count"):
+        _mod.main(["--commit"])
+
+
 def _fake_connection() -> MagicMock:
     conn = MagicMock()
     conn.__enter__.return_value = conn
@@ -78,8 +85,8 @@ def test_dry_run_reports_counts_without_update(
         _mod,
         "_read_candidates",
         lambda _conn, *, lock: [
-            ("id-1", "C1:1783932899.654649"),
-            ("id-2", "C2:1779101519"),
+            ("id-1", "C091ZSVTKF1:1783932899.654649"),
+            ("id-2", "C0A1207GYHZ:1779101519"),
         ],
     )
 
@@ -130,7 +137,7 @@ def test_commit_updates_all_and_requires_zero_remaining(
     monkeypatch.setattr(
         _mod,
         "_read_candidates",
-        lambda _conn, *, lock: [("id-1", "C1:1783932899.654649")],
+        lambda _conn, *, lock: [("id-1", "C091ZSVTKF1:1783932899.654649")],
     )
 
     assert _mod.main(["--commit", "--expected-count", "1"]) == 0
