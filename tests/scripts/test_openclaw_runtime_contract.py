@@ -506,6 +506,8 @@ def _deployable_manifest() -> dict[str, Any]:
             "forbiddenPackageOrPluginArtifacts": 0,
             "developmentPayloadArtifacts": 0,
             "browserReachabilityValidated": True,
+            "controlUiImportClosureValidated": True,
+            "controlUiHttpAssetClosureValidated": True,
         },
         "scan": {"critical": 0, "high": 0, "secrets": 0},
         "sbom": {
@@ -660,6 +662,24 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
     assert rejected.returncode != 0
     assert "release manifest is not deployable" in rejected.stderr
 
+    rejected_manifest = _deployable_manifest()
+    rejected_manifest["runtime"]["controlUiHttpAssetClosureValidated"] = False
+    _write_manifest_with_checksum(manifest_path, rejected_manifest)
+    rejected = subprocess.run(
+        [
+            "bash",
+            str(DEPLOY_HELPER),
+            "--render-only",
+            str(task_path),
+            str(manifest_path),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert rejected.returncode != 0
+    assert "release manifest is not deployable" in rejected.stderr
+
 
 def test_terraform_bootstrap_task_matches_cli_hardening_contract() -> None:
     source = FARGATE.read_text()
@@ -780,6 +800,8 @@ def test_task_hardening_filter_and_deploy_helper_do_not_claim_fargate_nnp() -> N
     assert "dockerSecurityOptions" in task_filter
     assert "del(.entryPoint, .command, .dockerSecurityOptions)" in task_filter
     assert "release manifest is not deployable" in deploy
+    assert ".runtime.controlUiImportClosureValidated == true" in deploy
+    assert ".runtime.controlUiHttpAssetClosureValidated == true" in deploy
     assert "--render-only" in deploy
     assert "register-task-definition" in deploy
     assert "terraform apply" not in deploy

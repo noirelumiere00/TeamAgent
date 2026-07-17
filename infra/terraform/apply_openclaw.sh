@@ -67,6 +67,8 @@ jq -e '
   .runtime.forbiddenPackageOrPluginArtifacts == 0 and
   .runtime.developmentPayloadArtifacts == 0 and
   .runtime.browserReachabilityValidated == true and
+  .runtime.controlUiImportClosureValidated == true and
+  .runtime.controlUiHttpAssetClosureValidated == true and
   .scan.critical == 0 and .scan.high == 0 and .scan.secrets == 0 and
   .sbom.physicalNpmMultisetExactMatch == true and
   (.sbom.format | test("^CycloneDX 1\\.[0-9]+$")) and
