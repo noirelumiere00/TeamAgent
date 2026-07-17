@@ -16,6 +16,14 @@
 
 ---
 
+## 2026-07-17 🚀 `/app` 営業FB時系列の欠落防止を本番反映
+- source=`dev`@`da4f8facae541dcb205890713f52c9db894e9e1f`（#242、CI全緑）。日付見出しへ移行した営業FBを正しく時系列へ取り込み、FBがあるのに時系列が空になる生成物をQAで拒否。グラフの「その他」表示と担当者名の切れた接尾辞も修正。
+- 現行Vaultから生成したHTMLは sha256=`5b1026c60d07e12ae7d2d11afa135b8e275524a2c10f60adda590b4859484a2e`、manifest=`f78c318279540bec0ef19236b20d775e9d56e677a2aaee9836fb8a2afaddadb1`、build inputs=`f3eba1edeadb6be7127b7fea81e369a40a9e40d9ae34aba8c078224a89c10e92`。clients=518 / docs=662 / timeline=448（全件日付あり）/ payload FB=679 / FBありかつtimelineなし=0 / schema error=0 / internal source exposure=0。全3,057テスト＋環境依存skip 10、生成・QAの集中テスト162件、画面確認を通過。
+- S3 `codebuild/connect-web-app.html` VersionId=`OLMDBO1l.ibKH8700v.ckAEk.5klK7h3`、connect-web=`:50` を force deploy。`/healthz` は source=`s3` / sha=`5b1026c60d07`、rollout COMPLETED・1/1 healthy・pending=0・直近30分の ERROR/Exception/Traceback 0。未ログイン `/app` は `/search/login?next=%2Fapp` へ303、ログイン画面とsecurity headersを再確認。
+- rollback=S3 VersionId=`I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY`（sha=`46f0079783cd...`）を復元後、connect-webを force deploy。実行者=Codex（s-komata AWSアカウント）。
+
+---
+
 ## 2026-07-17 🚀 connect-web 最新 dev 統合／`/app` QA署名不一致を解消
 - connect-web: source=`dev`@`e4daa71986f544d66e0563879b7a4808b4e7b674`（#240まで、post-merge CI全緑）/ image tag=`connect-unified-20260717-141242` / digest=`sha256:0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144` / task definition=`teamagent-dev-connect-web:50`。固定S3 `codebuild/source.zip` VersionId=`ln59hKGu176f1SfoRYUHao0W7wPtbKqd`の全tracked fileがclean worktree `e4daa719...`とbyte-for-byte一致、`:49`→`:50`はtask definitionがimage以外完全一致。rollout COMPLETED・1/1 healthy・failed=0・直近logエラー0。ただし旧CodeBuild経路のためOCI revisionは`unknown`、ECR scanは従来同値（Critical 4 / High 8 / Medium 3）。署名付きdigest gateへの移行完了まで追加image deployは停止。
 - `/app`: 旧配信sha=`ec1b5917474b...`が現行Vault manifestとは一致する一方、最新の除外／名寄せsidecarと`build_inputs_sha256`が不一致でread-only QA gate不合格だった。`e4daa719...`＋現行Vaultから再生成し、153件の生成／QAテストと実artifact QAを全緑で通過。S3 VersionId=`I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY`、sha256=`46f0079783cde24b066c7823b7d6672bad12b33debf933a4d7a7ff04b7a3b067`、manifest=`15663a838b1bd648443949244c02e66ccfd6cb7b684390baeb1a86efcdd6d4a2`、build inputs=`1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2`。clients=518 / docs=659 / internal source exposure=0 / duplicate ID・重複fingerprint・空title・空excerpt=0。#215メタタグと#217「まとめる軸」も再検証済み。`/healthz`=source=s3 / sha=`46f0079783cd`、ログイン画面のGoogleボタン表示・CSP/HSTS他security headersをブラウザ再確認。rollbackは直前VersionId=`yMIrK11unxaEJZHhQ8Qk4Ucb1ZW14yhi`（sha=`ec1b5917474b...`）。
