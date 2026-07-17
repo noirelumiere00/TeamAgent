@@ -901,6 +901,8 @@ _CLIENT_LEFT_BOUNDARY_JAPANESE = (
     rf"(^|[^{_CLIENT_WORD_CHARS}]|_|{'|'.join(_CLIENT_LEGAL_PREFIXES)})"
 )
 _JAPANESE_CLIENT_RE = re.compile(r"[一-鿿々〆〇ぁ-ゖゝ-ゟァ-ヺーヽ-ヿｦ-ﾟ]")
+_CLIENT_ASCII_DATE_PREFIX = r"^[0-9]{8}_?"
+_CLIENT_ASCII_RIGHT_BOUNDARY = r"($|[^A-Za-z0-9])"
 _PG_REGEX_META_RE = re.compile(r"([\\.^$|?*+()\[\]{}])")
 
 
@@ -915,15 +917,30 @@ def client_match_pattern(name: str) -> str:
     if not normalized:
         raise ValueError("client name must not be blank")
     literal = _PG_REGEX_META_RE.sub(r"\\\1", normalized)
-    # Drive/Sheets の実タイトルは ``20250919_ポート株式会社`` のように ``_`` を
-    # 区切りへ使う。日本語名に限って左 ``_`` を許可し、ASCII名の ``other_port`` は
-    # 識別子途中として引き続き拒否する。
-    boundary = (
-        _CLIENT_LEFT_BOUNDARY_JAPANESE
-        if _JAPANESE_CLIENT_RE.search(normalized)
-        else _CLIENT_LEFT_BOUNDARY
-    )
-    return f"{boundary}{literal}"
+    if _JAPANESE_CLIENT_RE.search(normalized):
+        # Drive/Sheets の実タイトルは ``20250919_ポート株式会社`` のように ``_`` を
+        # 区切りへ使う。日本語名に限って左 ``_`` を許可する。
+        return f"{_CLIENT_LEFT_BOUNDARY_JAPANESE}{literal}"
+    return f"{_CLIENT_LEFT_BOUNDARY}{literal}"
+
+
+def client_title_match_pattern(name: str) -> str:
+    """資料 title 専用の境界付き PostgreSQL regex を組む。
+
+    metadata/timeline は :func:`client_match_pattern` の strict 境界だけを使う。英字名の
+    title に限り、実ファイル名の先頭8桁日付を安全な区切りとして追加で許可する。
+    """
+    strict = client_match_pattern(name)
+    normalized = unicodedata.normalize("NFC", str(name)).strip()
+    if _JAPANESE_CLIENT_RE.search(normalized):
+        return strict
+
+    literal = _PG_REGEX_META_RE.sub(r"\\\1", normalized)
+    # ``20251113_PIVOT媒体資料`` / ``20260514NewsTV`` のtitle-only正資料を復元する。
+    # literal直後のASCII英数字を拒否し、portfolio等のprefix誤爆を防ぐ
+    # （日本語説明・``_``・``/``・末尾は正しいファイル名の続きとして許可）。
+    dated_filename = f"{_CLIENT_ASCII_DATE_PREFIX}{literal}{_CLIENT_ASCII_RIGHT_BOUNDARY}"
+    return f"({strict}|{dated_filename})"
 
 
 _CLIENTS_SQL = f"""
@@ -1085,6 +1102,7 @@ def load_clients_data(
             names = names[: int(limit)]
         for name in names:
             match_pattern = client_match_pattern(name)
+            title_match_pattern = client_title_match_pattern(name)
             with conn.cursor() as cur:
                 cur.execute(
                     _TIMELINE_SQL,
@@ -1100,7 +1118,7 @@ def load_clients_data(
                         normalized_group,
                         match_pattern,
                         match_pattern,
-                        match_pattern,
+                        title_match_pattern,
                         per_client_limit,
                     ),
                 )
