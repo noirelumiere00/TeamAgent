@@ -210,7 +210,13 @@ class _FakeWalkService:
     def list(self, **kwargs: Any) -> _FakeWalkRequest:
         self.list_kwargs.append(kwargs)
         folder_id = str(kwargs["q"]).split("'")[1]  # "'FID' in parents and trashed = false"
-        return _FakeWalkRequest({"files": self._tree.get(folder_id, []), "nextPageToken": None})
+        return _FakeWalkRequest(
+            {
+                "files": self._tree.get(folder_id, []),
+                "nextPageToken": None,
+                "incompleteSearch": False,
+            }
+        )
 
 
 _FOLDER_MIME = "application/vnd.google-apps.folder"

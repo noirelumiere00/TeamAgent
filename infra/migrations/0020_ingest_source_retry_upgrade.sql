@@ -2,11 +2,10 @@
 --
 -- This migration is intentionally idempotent. Existing 0019 fingerprints are assigned the
 -- legacy validator generation, so the current validator re-checks them instead of suppressing.
--- Rollback (new retry/reconciliation data loss only):
---   DROP TABLE IF EXISTS ingest_reconciliation_gaps;
---   DROP TABLE IF EXISTS ingest_source_retries;
--- The fingerprint columns/constraint should remain on rollback because dropping them would
--- collapse distinct validator observations and cannot be losslessly reversed.
+-- This is a forward-only migration: scripts/migrate.py owns its transaction and rolls back the
+-- whole file on failure. After commit, keep this additive schema during an application rollback;
+-- correct any schema defect with a separately reviewed 0021+ migration. Destructive table or
+-- constraint removal would lose operational state and is not a supported recovery path.
 
 ALTER TABLE ingest_source_health
     ADD COLUMN IF NOT EXISTS validator_schema_version TEXT;

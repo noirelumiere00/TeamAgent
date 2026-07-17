@@ -26,6 +26,7 @@ from teamagent.adapters.gdrive_client import (
     GDriveDownloadContentError,
     GDrivePermissionsPaginationError,
     GDriveTraversalIncompleteError,
+    IncompleteDriveTraversal,
     extract_acl_emails,
 )
 
@@ -45,7 +46,10 @@ class _FakeRequest:
 
 class _FakeFiles:
     def __init__(self, list_response: Any) -> None:
-        self._list_response = list_response
+        self._list_response = {
+            "incompleteSearch": False,
+            **list_response,
+        }
         self.last_list_kwargs: dict[str, Any] = {}
         self.last_get_media_kwargs: dict[str, Any] = {}
 
@@ -147,7 +151,9 @@ class _TraversalService:
         file_pages: list[dict[str, Any]] | None = None,
         drive_pages: list[dict[str, Any]] | None = None,
     ) -> None:
-        self._file_pages = _PagedListResource(file_pages or [{"files": []}])
+        self._file_pages = _PagedListResource(
+            [{"incompleteSearch": False, **page} for page in (file_pages or [{"files": []}])]
+        )
         self._drive_pages = _PagedListResource(drive_pages or [{"drives": []}])
 
     def files(self) -> _PagedListResource:
@@ -235,6 +241,28 @@ def test_list_files_handles_missing_optional_fields() -> None:
     assert files[0].web_view_link is None
 
 
+def test_list_files_raises_on_incomplete_search_true() -> None:
+    client = GDriveClient(
+        service=FakeDriveService(
+            files_list={
+                "files": [],
+                "incompleteSearch": True,
+            }
+        )
+    )
+
+    with pytest.raises(IncompleteDriveTraversal, match="incompleteSearch=true"):
+        client.list_files(folder_id="F", request_id="r")
+
+
+def test_list_files_raises_on_missing_incomplete_search_signal() -> None:
+    service = FakeDriveService()
+    service.files()._list_response.pop("incompleteSearch")
+
+    with pytest.raises(IncompleteDriveTraversal, match="missing or invalid"):
+        GDriveClient(service=service).list_files(folder_id="F", request_id="r")
+
+
 # -----------------------------------------------------------
 # complete traversal contracts
 # -----------------------------------------------------------
@@ -285,6 +313,26 @@ def test_walk_raises_when_max_depth_has_child_folders() -> None:
 
     with pytest.raises(GDriveTraversalIncompleteError, match="max depth reached"):
         client.walk_files_recursive(root_id="ROOT", request_id="r", max_depth=0)
+
+
+def test_shared_drive_walk_raises_on_incomplete_search_true() -> None:
+    client = GDriveClient(
+        service=_TraversalService(
+            file_pages=[
+                {
+                    "files": [],
+                    "incompleteSearch": True,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(IncompleteDriveTraversal, match="incompleteSearch=true"):
+        client.walk_files_recursive(
+            root_id="DRIVE",
+            drive_id="DRIVE",
+            request_id="r",
+        )
 
 
 def test_list_shared_drives_raises_when_page_cap_leaves_token() -> None:

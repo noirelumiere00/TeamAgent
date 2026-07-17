@@ -313,6 +313,7 @@ def test_record_retry_is_request_idempotent_and_has_exponential_backoff() -> Non
         validator_schema_version="ooxml-safe-v2",
         reason="office_download_failed",
         request_id="req",
+        allow_unclaimed=True,
     )
 
     sql, params, _ = conn.executed[0]
@@ -366,6 +367,31 @@ def test_record_retry_from_claim_requires_exact_active_lease_owner() -> None:
     assert params[-3:] == ("claim-a", "claim-a", "claim-a")
 
 
+def test_record_retry_rejects_implicit_or_conflicting_unclaimed_path() -> None:
+    conn = _Connection(rowcount=1)
+    repo, _ = _repo(conn)
+    kwargs = {
+        "source_kind": "gdrive",
+        "source_id": "FOLDER1",
+        "source_type": "gdrive",
+        "external_id": "FILE1",
+        "md5_checksum": "0123456789abcdef0123456789abcdef",
+        "size_bytes": 123,
+        "mime_type": "application/test",
+        "validator_schema_version": "ooxml-safe-v2",
+        "reason": "office_download_failed",
+        "request_id": "worker-a",
+    }
+
+    assert not repo.record_source_retry(**kwargs)
+    assert not repo.record_source_retry(
+        **kwargs,
+        expected_lease_owner="claim-a",
+        allow_unclaimed=True,
+    )
+    assert conn.executed == []
+
+
 def test_record_retry_returns_false_when_fence_rejects_write() -> None:
     conn = _Connection(rowcount=0)
     repo, _ = _repo(conn)
@@ -406,7 +432,7 @@ def test_retry_lease_renewal_requires_current_owner_and_pending_status() -> None
     assert params == (321, "gdrive", "FOLDER1", "gdrive", "FILE1", "lease-owner")
 
 
-def test_resolve_retry_updates_status_without_delete() -> None:
+def test_resolve_claimed_retry_requires_exact_active_owner_without_delete() -> None:
     conn = _Connection(rowcount=1)
     repo, _ = _repo(conn)
     md5 = "0123456789abcdef0123456789abcdef"
@@ -421,11 +447,65 @@ def test_resolve_retry_updates_status_without_delete() -> None:
         mime_type="application/test",
         validator_schema_version="ooxml-safe-v2",
         request_id="req",
+        expected_lease_owner="claim-owner",
     )
-    sql, _, _ = conn.executed[0]
+    sql, params, _ = conn.executed[0]
     assert "UPDATE ingest_source_retries" in sql
     assert "status = 'resolved'" in sql
+    assert "%s::text IS NOT NULL" in sql
+    assert "lease_owner = %s" in sql
+    assert "lease_expires_at > now()" in sql
+    assert params[5:8] == ("claim-owner", "claim-owner", "claim-owner")
     assert "DELETE" not in sql
+
+
+def test_resolve_unclaimed_retry_requires_empty_lease_and_exact_fingerprint() -> None:
+    conn = _Connection(rowcount=1)
+    repo, _ = _repo(conn)
+
+    assert repo.resolve_source_retry(
+        source_kind="gdrive",
+        source_id="FOLDER1",
+        source_type="gdrive",
+        external_id="FILE1",
+        md5_checksum="0123456789abcdef0123456789abcdef",
+        size_bytes=123,
+        mime_type="application/test",
+        validator_schema_version="ooxml-safe-v2",
+        request_id="unclaimed-observer",
+        allow_unclaimed=True,
+    )
+
+    sql, params, _ = conn.executed[0]
+    assert "%s::text IS NULL" in sql
+    assert "lease_owner IS NULL" in sql
+    assert "lease_expires_at IS NULL" in sql
+    assert "md5_checksum IS NOT DISTINCT FROM %s" in sql
+    assert params[5:8] == (None, None, None)
+
+
+def test_resolve_retry_rejects_implicit_or_conflicting_unclaimed_path() -> None:
+    conn = _Connection(rowcount=1)
+    repo, _ = _repo(conn)
+    kwargs = {
+        "source_kind": "gdrive",
+        "source_id": "FOLDER1",
+        "source_type": "gdrive",
+        "external_id": "FILE1",
+        "md5_checksum": "0123456789abcdef0123456789abcdef",
+        "size_bytes": 123,
+        "mime_type": "application/test",
+        "validator_schema_version": "ooxml-safe-v2",
+        "request_id": "worker-a",
+    }
+
+    assert not repo.resolve_source_retry(**kwargs)
+    assert not repo.resolve_source_retry(
+        **kwargs,
+        expected_lease_owner="claim-a",
+        allow_unclaimed=True,
+    )
+    assert conn.executed == []
 
 
 def test_reconciliation_returns_counts_only_and_resolves_by_sha256_ref() -> None:

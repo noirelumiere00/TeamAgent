@@ -272,11 +272,7 @@ def test_office_payload_parses_required_ooxml_part_before_extract() -> None:
     "declaration",
     [
         '<!DOCTYPE p:presentation [<!ENTITY payload "expanded">]>',
-        (
-            '<!DOCTYPE p:presentation ['
-            '<!ENTITY payload SYSTEM "file:///definitely-not-readable">'
-            "]>"
-        ),
+        ('<!DOCTYPE p:presentation [<!ENTITY payload SYSTEM "file:///definitely-not-readable">]>'),
     ],
 )
 def test_office_payload_rejects_dtd_and_entities_even_in_utf16(

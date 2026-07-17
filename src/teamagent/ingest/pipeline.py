@@ -71,6 +71,10 @@ class _RetryLeaseLostError(IngestDurabilityError):
     """処理中retryのleaseを更新できず、owner継続を証明できない。"""
 
 
+class _RetryResolutionDurabilityError(IngestDurabilityError):
+    """claim済みretryを確実にresolvedへ遷移できなかった。"""
+
+
 class _IngestContentVolumeError(ValueError):
     """chunk/embeddingのファイル単位hard capを超えた。"""
 
@@ -97,7 +101,8 @@ class _RetryLeaseHeartbeat:
     source_kind: str
     source_id: str
     external_id: str
-    request_id: str
+    trace_request_id: str
+    lease_owner: str
     durability_tracker: _DurabilityTracker
     last_renewed_monotonic: float = 0.0
 
@@ -119,14 +124,14 @@ class _RetryLeaseHeartbeat:
                         source_id=self.source_id,
                         source_type="gdrive",
                         external_id=self.external_id,
-                        request_id=self.request_id,
+                        request_id=self.lease_owner,
                         lease_seconds=_SOURCE_RETRY_LEASE_SECONDS,
                     )
                 )
             except Exception as exc:
                 logger.warning(
                     "ingest_source_retry_lease_renew_failed",
-                    request_id=self.request_id,
+                    request_id=self.trace_request_id,
                     source_kind=self.source_kind,
                     source_id_ref=_external_id_ref(self.source_id),
                     external_id_ref=_external_id_ref(self.external_id),
@@ -648,6 +653,7 @@ def _record_source_retry(
                 request_id=request_id,
                 metadata={"retry_class": "transient"},
                 expected_lease_owner=expected_lease_owner,
+                allow_unclaimed=expected_lease_owner is None,
             )
         )
     except Exception as exc:
@@ -682,24 +688,35 @@ def _resolve_source_retry(
     source_id: str,
     request_id: str,
     dry_run: bool,
-) -> None:
-    """成功または永久invalidで、claim済み/同一fingerprint retryを解消する。"""
+    expected_lease_owner: str | None = None,
+    durability_tracker: _DurabilityTracker | None = None,
+) -> bool:
+    """成功/永久invalidでretryを解消し、claim済みなら失敗をdurability errorにする。"""
     if dry_run:
-        return
+        return True
+    resolution_required = expected_lease_owner is not None
     resolver = getattr(repository, "resolve_source_retry", None)
     if not callable(resolver):
-        return
+        if resolution_required:
+            if durability_tracker is not None:
+                durability_tracker.add("retry_resolver_unavailable")
+            raise _RetryResolutionDurabilityError("retry resolver is unavailable")
+        return False
     try:
-        resolver(
-            source_kind=source_kind,
-            source_id=source_id,
-            source_type="gdrive",
-            external_id=f.id,
-            md5_checksum=getattr(f, "md5_checksum", None),
-            size_bytes=getattr(f, "size", None),
-            mime_type=f.mime_type,
-            validator_schema_version=_validator_schema_for_drive_file(f),
-            request_id=request_id,
+        resolved = bool(
+            resolver(
+                source_kind=source_kind,
+                source_id=source_id,
+                source_type="gdrive",
+                external_id=f.id,
+                md5_checksum=getattr(f, "md5_checksum", None),
+                size_bytes=getattr(f, "size", None),
+                mime_type=f.mime_type,
+                validator_schema_version=_validator_schema_for_drive_file(f),
+                request_id=request_id,
+                expected_lease_owner=expected_lease_owner,
+                allow_unclaimed=expected_lease_owner is None,
+            )
         )
     except Exception as exc:
         logger.warning(
@@ -710,6 +727,23 @@ def _resolve_source_retry(
             file_ref=_external_id_ref(f.id),
             error_type=type(exc).__name__,
         )
+        if resolution_required:
+            if durability_tracker is not None:
+                durability_tracker.add("retry_resolution_failed")
+            raise _RetryResolutionDurabilityError("claimed retry could not be resolved") from exc
+        return False
+    if resolution_required and not resolved:
+        if durability_tracker is not None:
+            durability_tracker.add("retry_resolution_rejected")
+        logger.error(
+            "ingest_source_retry_resolution_not_durable",
+            request_id=request_id,
+            source_kind=source_kind,
+            source_id_ref=_external_id_ref(source_id),
+            file_ref=_external_id_ref(f.id),
+        )
+        raise _RetryResolutionDurabilityError("claimed retry resolution was rejected")
+    return resolved
 
 
 def _resolve_reconciliation_gap(
@@ -1818,7 +1852,8 @@ def _ingest_gdrive_folder(
                 source_kind=warning_source_kind,
                 source_id=warning_source_id,
                 external_id=f.id,
-                request_id=request_id,
+                trace_request_id=request_id,
+                lease_owner=retry_lease_owners[f.id],
                 durability_tracker=durability_tracker,
             )
         try:
@@ -1861,6 +1896,23 @@ def _ingest_gdrive_folder(
                 f.id,
                 success=False,
                 error="retry_lease_lost",
+                request_id=request_id,
+            )
+            continue
+        except _RetryResolutionDurabilityError:
+            logger.warning(
+                "gdrive_retry_resolution_failed",
+                request_id=request_id,
+                file_ref=_external_id_ref(f.id),
+                folder_ref=_external_id_ref(spec.folder_id),
+            )
+            skipped.append(f.id)
+            _safe_record_job(
+                repository,
+                "gdrive",
+                f.id,
+                success=False,
+                error="retry_resolution_failed",
                 request_id=request_id,
             )
             continue
@@ -2061,6 +2113,8 @@ def _process_one_gdrive_file(
                 source_id=warning_source_id,
                 request_id=request_id,
                 dry_run=dry_run,
+                expected_lease_owner=retry_lease_owner,
+                durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2293,6 +2347,8 @@ def _process_one_gdrive_file(
                 source_id=warning_source_id,
                 request_id=request_id,
                 dry_run=dry_run,
+                expected_lease_owner=retry_lease_owner,
+                durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2320,6 +2376,8 @@ def _process_one_gdrive_file(
                     source_id=warning_source_id,
                     request_id=request_id,
                     dry_run=dry_run,
+                    expected_lease_owner=retry_lease_owner,
+                    durability_tracker=durability_tracker,
                 )
             else:
                 _record_source_retry(
@@ -2720,6 +2778,8 @@ def _process_one_gdrive_file(
                 source_id=warning_source_id,
                 request_id=request_id,
                 dry_run=dry_run,
+                expected_lease_owner=retry_lease_owner,
+                durability_tracker=durability_tracker,
             )
             _resolve_reconciliation_gap(
                 repository=repository,
@@ -2735,6 +2795,8 @@ def _process_one_gdrive_file(
             source_id=warning_source_id,
             request_id=request_id,
             dry_run=dry_run,
+            expected_lease_owner=retry_lease_owner,
+            durability_tracker=durability_tracker,
         )
         if any(chunk.content.strip() and not chunk.metadata.get("title_only") for chunk in chunks):
             _resolve_reconciliation_gap(

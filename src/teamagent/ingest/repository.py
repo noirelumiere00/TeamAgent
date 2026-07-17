@@ -696,6 +696,7 @@ class IngestRepository:
         request_id: str,
         metadata: dict[str, Any] | None = None,
         expected_lease_owner: str | None = None,
+        allow_unclaimed: bool = False,
     ) -> bool:
         """transient失敗をfingerprint付きでupsertし、指数backoffを設定する。
 
@@ -705,7 +706,9 @@ class IngestRepository:
         ``expected_lease_owner`` がある claimed-worker 経路は、同じ owner の未期限切れ
         pending lease が現在も存在するときだけ更新する。これにより lease takeover 後の
         stale worker は successor lease を解放できず、resolved row も復活できない。
-        ``None`` は初回または未claimの scheduling 経路で、active lease とは競合しない。
+        初回または未claimの scheduling 経路は ``allow_unclaimed=True`` を明示した場合
+        だけ許可し、active lease とは競合しない。owner と unclaimed opt-in の併用、および
+        owner なしの暗黙経路は拒否する。
         """
         import json
 
@@ -721,6 +724,11 @@ class IngestRepository:
         normalized_expected_lease_owner = (
             _strip_nul(expected_lease_owner) if expected_lease_owner is not None else None
         )
+        if normalized_expected_lease_owner is None:
+            if not allow_unclaimed:
+                return False
+        elif not normalized_expected_lease_owner or allow_unclaimed:
+            return False
         sql = """
             INSERT INTO ingest_source_retries
                 (source_kind, source_id, source_type, external_id,
@@ -897,11 +905,28 @@ class IngestRepository:
         mime_type: str,
         validator_schema_version: str,
         request_id: str,
+        expected_lease_owner: str | None = None,
+        allow_unclaimed: bool = False,
     ) -> bool:
-        """成功/永久invalidでpending retryを解消する。DELETE権限は不要。"""
+        """成功/永久invalidでpending retryを解消する。DELETE権限は不要。
+
+        claimed worker は ``expected_lease_owner`` と一致する未期限切れ lease のみ解消
+        できる。fingerprint は owner/期限を迂回しない。unclaimed 経路は
+        ``allow_unclaimed=True`` を明示した場合だけ選べ、lease 情報が完全に空かつ
+        fingerprint が一致する pending row に限定する。owner と unclaimed opt-in の
+        併用、および owner なしの暗黙経路は拒否する。
+        """
         if not self._schema_probe_allowed("source_retries"):
             return False
         normalized_md5 = md5_checksum.lower() if md5_checksum else None
+        normalized_expected_lease_owner = (
+            _strip_nul(expected_lease_owner) if expected_lease_owner is not None else None
+        )
+        if normalized_expected_lease_owner is None:
+            if not allow_unclaimed:
+                return False
+        elif not normalized_expected_lease_owner or allow_unclaimed:
+            return False
         sql = """
             UPDATE ingest_source_retries
             SET status = 'resolved',
@@ -915,9 +940,16 @@ class IngestRepository:
               AND external_id = %s
               AND status = 'pending'
               AND (
-                  lease_owner = %s
+                  (
+                      %s::text IS NOT NULL
+                      AND lease_owner = %s
+                      AND lease_expires_at > now()
+                  )
                   OR (
-                      md5_checksum IS NOT DISTINCT FROM %s
+                      %s::text IS NULL
+                      AND lease_owner IS NULL
+                      AND lease_expires_at IS NULL
+                      AND md5_checksum IS NOT DISTINCT FROM %s
                       AND size_bytes IS NOT DISTINCT FROM %s
                       AND mime_type = %s
                       AND validator_schema_version = %s
@@ -935,7 +967,9 @@ class IngestRepository:
                             _strip_nul(source_id),
                             source_type,
                             _strip_nul(external_id),
-                            _strip_nul(request_id),
+                            normalized_expected_lease_owner,
+                            normalized_expected_lease_owner,
+                            normalized_expected_lease_owner,
                             normalized_md5,
                             size_bytes,
                             _strip_nul(mime_type),

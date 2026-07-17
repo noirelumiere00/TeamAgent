@@ -75,7 +75,7 @@ class GDrivePermissionsPaginationError(RuntimeError):
     """permissions.list を最後のページまで安全に列挙できなかった。"""
 
 
-class GDriveTraversalIncompleteError(RuntimeError):
+class IncompleteDriveTraversal(RuntimeError):  # noqa: N818 - required public contract name
     """Drive traversal が安全上限・pagination異常により完走できなかった。"""
 
     def __init__(self, operation: str, reason: str, **diagnostics: Any) -> None:
@@ -85,6 +85,40 @@ class GDriveTraversalIncompleteError(RuntimeError):
         details = ", ".join(f"{key}={value}" for key, value in sorted(diagnostics.items()))
         suffix = f" ({details})" if details else ""
         super().__init__(f"{operation} incomplete: {reason}{suffix}")
+
+
+# Backward-compatible name for callers introduced before the explicit contract name.
+GDriveTraversalIncompleteError = IncompleteDriveTraversal
+
+
+def _require_complete_file_search(
+    response: dict[str, Any],
+    *,
+    operation: str,
+    request_id: str,
+    **diagnostics: Any,
+) -> None:
+    """files.list の completeness signal が明示的な false の場合だけ続行する。"""
+    incomplete_search = response.get("incompleteSearch")
+    if incomplete_search is False:
+        return
+    reason = (
+        "incompleteSearch=true"
+        if incomplete_search is True
+        else "incompleteSearch missing or invalid"
+    )
+    logger.error(
+        "gdrive_files_search_incomplete",
+        request_id=request_id,
+        operation=operation,
+        reason=reason,
+        **diagnostics,
+    )
+    raise IncompleteDriveTraversal(
+        operation,
+        reason,
+        **diagnostics,
+    )
 
 
 class GDriveDownloadContentError(RuntimeError):
@@ -303,7 +337,7 @@ class GDriveClient:
             "q": q,
             "pageSize": page_size,
             "fields": (
-                "nextPageToken, files("
+                "incompleteSearch, nextPageToken, files("
                 "id, name, mimeType, modifiedTime, size, md5Checksum, parents, "
                 "webViewLink, owners(emailAddress)"
                 ")"
@@ -317,6 +351,12 @@ class GDriveClient:
         start = time.perf_counter()
         resp = service.files().list(**kwargs).execute()
         latency_ms = int((time.perf_counter() - start) * 1000)
+        _require_complete_file_search(
+            resp,
+            operation="list_files",
+            request_id=request_id,
+            folder_id=folder_id,
+        )
 
         raw_files = resp.get("files", [])
         files = [
@@ -627,7 +667,7 @@ class GDriveClient:
                     "q": f"'{folder_id}' in parents and trashed = false",
                     "pageSize": 1000,
                     "fields": (
-                        "nextPageToken, files("
+                        "incompleteSearch, nextPageToken, files("
                         "id, name, mimeType, modifiedTime, size, md5Checksum, parents, "
                         "webViewLink, owners(emailAddress))"
                     ),
@@ -641,6 +681,14 @@ class GDriveClient:
                     kwargs["pageToken"] = page_token
 
                 resp = service.files().list(**kwargs).execute()
+                _require_complete_file_search(
+                    resp,
+                    operation="walk_files_recursive",
+                    request_id=request_id,
+                    root_id=root_id,
+                    folder_id=folder_id,
+                    drive_id=drive_id,
+                )
                 for f in resp.get("files", []):
                     mime = str(f.get("mimeType", ""))
                     if mime == folder_mime:

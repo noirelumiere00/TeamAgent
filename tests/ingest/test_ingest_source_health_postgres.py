@@ -1,7 +1,8 @@
 """0019/0020 migration の実 PostgreSQL 回帰テスト。
 
 ``TEAMAGENT_TEST_DB_DSN`` が明示された disposable PostgreSQL だけで実行する。
-各テストは専用 schema を transaction 内に作り、最後に rollback する。
+各テストは専用 schema を使う。並行性テストは worker ごとに独立した接続/transactionを
+commitし、最後に schema を CASCADE cleanup する。
 """
 
 from __future__ import annotations
@@ -45,6 +46,94 @@ def _prepare_schema(conn: object) -> str:
             sql.SQL("GRANT USAGE ON SCHEMA {} TO teamagent_app").format(sql.Identifier(schema))
         )
     return schema
+
+
+def _set_retry_test_session(conn: Any, schema: str) -> None:
+    from psycopg import sql
+
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SET LOCAL search_path TO {}, public").format(sql.Identifier(schema)))
+        cur.execute("SELECT set_config('app.user_role', 'admin', true)")
+        cur.execute("SET LOCAL statement_timeout = '5s'")
+
+
+@contextmanager
+def _committed_retry_schema() -> Iterator[str]:
+    import psycopg
+    from psycopg import sql
+
+    assert _DB_DSN is not None
+    schema = f"ingest_source_concurrent_{uuid.uuid4().hex}"
+    with psycopg.connect(_DB_DSN, autocommit=True) as admin:
+        with admin.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = 'teamagent_app'")
+            if cur.fetchone() is None:
+                pytest.skip("teamagent_app role is required")
+            cur.execute("SELECT pg_has_role(current_user, 'teamagent_app', 'MEMBER')")
+            if not bool(cur.fetchone()[0]):
+                pytest.skip("test role cannot SET ROLE teamagent_app")
+            cur.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            cur.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA {} TO teamagent_app").format(sql.Identifier(schema))
+            )
+    try:
+        with psycopg.connect(_DB_DSN) as conn:
+            _set_retry_test_session(conn, schema)
+            with conn.cursor() as cur:
+                cur.execute(_MIGRATION_0019.read_text(encoding="utf-8"))
+                cur.execute(_MIGRATION_0020.read_text(encoding="utf-8"))
+        yield schema
+    finally:
+        with psycopg.connect(_DB_DSN, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
+            )
+
+
+class _CommittedPgVector:
+    """Repository operation ごとに独立接続を開き、成功時だけ commit する test vector。"""
+
+    def __init__(self, dsn: str, schema: str) -> None:
+        self._dsn = dsn
+        self._schema = schema
+        self.transactions = 0
+
+    @contextmanager
+    def connection(self, **kwargs: Any) -> Iterator[Any]:
+        import psycopg
+
+        with psycopg.connect(self._dsn) as conn:
+            _set_retry_test_session(conn, self._schema)
+            self.transactions += 1
+            yield conn
+
+
+def _execute_committed(schema: str, statement: str, params: tuple[Any, ...] = ()) -> None:
+    import psycopg
+
+    assert _DB_DSN is not None
+    with psycopg.connect(_DB_DSN) as conn:
+        _set_retry_test_session(conn, schema)
+        conn.execute(statement, params)
+
+
+def _retry_state(schema: str, external_id: str) -> tuple[Any, ...]:
+    import psycopg
+
+    assert _DB_DSN is not None
+    with psycopg.connect(_DB_DSN) as conn:
+        _set_retry_test_session(conn, schema)
+        row = conn.execute(
+            """
+            SELECT status, lease_owner, lease_expires_at > now(),
+                   resolved_at IS NOT NULL, last_request_id
+            FROM ingest_source_retries
+            WHERE external_id = %s
+            """,
+            (external_id,),
+        ).fetchone()
+    assert row is not None
+    return tuple(row)
 
 
 def test_fresh_migrations_enforce_rls_and_revoke_destructive_privileges() -> None:
@@ -232,10 +321,12 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
             assert repository.record_source_retry(
                 **fingerprint,
                 request_id="request-1",
+                allow_unclaimed=True,
             )
             assert repository.record_source_retry(
                 **fingerprint,
                 request_id="request-1",
+                allow_unclaimed=True,
             )
             with conn.cursor() as cur:
                 cur.execute(
@@ -316,11 +407,13 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
                 mime_type="application/test",
                 validator_schema_version="ooxml-safe-v2",
                 request_id="request-2",
+                allow_unclaimed=True,
             )
 
             assert repository.record_source_retry(
                 **fingerprint,
                 request_id="request-3",
+                allow_unclaimed=True,
             )
             with conn.cursor() as cur:
                 cur.execute(
@@ -341,6 +434,7 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
                 mime_type="application/test",
                 validator_schema_version="ooxml-safe-v2",
                 request_id="request-3",
+                allow_unclaimed=True,
             )
 
             changed = {
@@ -351,6 +445,7 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
             assert repository.record_source_retry(
                 **changed,
                 request_id="request-4",
+                allow_unclaimed=True,
             )
             with conn.cursor() as cur:
                 cur.execute(
@@ -370,140 +465,280 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
             conn.rollback()
 
 
-def test_retry_fence_blocks_stale_worker_after_takeover_and_resolution() -> None:
-    """A expiry → B takeover/resolve 後の stale A failure は B の状態を変更できない。"""
+def test_retry_fence_across_committed_workers_blocks_every_stale_write() -> None:
+    """A expiry → B takeover/resolve の前後で stale A は一切の状態を変更できない。"""
+    assert _DB_DSN is not None
+    with _committed_retry_schema() as schema:
+        seed_vector = _CommittedPgVector(_DB_DSN, schema)
+        worker_a_vector = _CommittedPgVector(_DB_DSN, schema)
+        worker_b_vector = _CommittedPgVector(_DB_DSN, schema)
+        seed_repository = IngestRepository(seed_vector, app_role=None)  # type: ignore[arg-type]
+        worker_a = IngestRepository(worker_a_vector, app_role=None)  # type: ignore[arg-type]
+        worker_b = IngestRepository(worker_b_vector, app_role=None)  # type: ignore[arg-type]
+        retry = {
+            "source_kind": "gdrive",
+            "source_id": "folder-fence",
+            "source_type": "gdrive",
+            "external_id": "opaque-fenced-retry",
+            "md5_checksum": "0123456789abcdef0123456789abcdef",
+            "size_bytes": 10,
+            "mime_type": "application/test",
+            "validator_schema_version": "ooxml-safe-v2",
+            "reason": "office_download_failed",
+        }
+        resolve = {key: value for key, value in retry.items() if key != "reason"}
+
+        assert seed_repository.record_source_retry(
+            **retry,
+            request_id="seed",
+            allow_unclaimed=True,
+        )
+        _execute_committed(
+            schema,
+            """
+            UPDATE ingest_source_retries
+            SET next_attempt_at = now()
+            WHERE external_id = %s
+            """,
+            (retry["external_id"],),
+        )
+        claims_a = worker_a.claim_due_source_retries(
+            source_kind="gdrive",
+            source_id="folder-fence",
+            request_id="worker-a",
+            lease_seconds=60,
+        )
+        assert [claim.lease_owner for claim in claims_a] == ["worker-a"]
+
+        _execute_committed(
+            schema,
+            """
+            UPDATE ingest_source_retries
+            SET lease_expires_at = now() - interval '1 second'
+            WHERE external_id = %s
+            """,
+            (retry["external_id"],),
+        )
+
+        # Expired A cannot resolve, renew, or record even before B takes over.
+        assert not worker_a.resolve_source_retry(
+            **resolve,
+            request_id="worker-a-expired",
+            expected_lease_owner="worker-a",
+        )
+        assert not worker_a.renew_source_retry_lease(
+            source_kind="gdrive",
+            source_id="folder-fence",
+            source_type="gdrive",
+            external_id=str(retry["external_id"]),
+            request_id="worker-a",
+            lease_seconds=60,
+        )
+        assert not worker_a.record_source_retry(
+            **retry,
+            request_id="worker-a-expired",
+            expected_lease_owner="worker-a",
+        )
+        assert _retry_state(schema, str(retry["external_id"])) == (
+            "pending",
+            "worker-a",
+            False,
+            False,
+            "seed",
+        )
+
+        claims_b = worker_b.claim_due_source_retries(
+            source_kind="gdrive",
+            source_id="folder-fence",
+            request_id="worker-b",
+            lease_seconds=60,
+        )
+        assert [claim.lease_owner for claim in claims_b] == ["worker-b"]
+
+        # B's active lease cannot be resolved, renewed, or cleared by stale A.
+        assert not worker_a.resolve_source_retry(
+            **resolve,
+            request_id="worker-a-stale",
+            expected_lease_owner="worker-a",
+        )
+        assert not worker_a.renew_source_retry_lease(
+            source_kind="gdrive",
+            source_id="folder-fence",
+            source_type="gdrive",
+            external_id=str(retry["external_id"]),
+            request_id="worker-a",
+            lease_seconds=60,
+        )
+        assert not worker_a.record_source_retry(
+            **retry,
+            request_id="worker-a-stale",
+            expected_lease_owner="worker-a",
+        )
+        assert _retry_state(schema, str(retry["external_id"])) == (
+            "pending",
+            "worker-b",
+            True,
+            False,
+            "seed",
+        )
+
+        assert worker_b.renew_source_retry_lease(
+            source_kind="gdrive",
+            source_id="folder-fence",
+            source_type="gdrive",
+            external_id=str(retry["external_id"]),
+            request_id="worker-b",
+            lease_seconds=60,
+        )
+        assert worker_b.resolve_source_retry(
+            **resolve,
+            request_id="worker-b-resolved",
+            expected_lease_owner="worker-b",
+        )
+        resolved_state = (
+            "resolved",
+            None,
+            None,
+            True,
+            "worker-b-resolved",
+        )
+        assert _retry_state(schema, str(retry["external_id"])) == resolved_state
+
+        # B resolve後も stale A cannot reopen/close the row or alter last_request_id.
+        assert not worker_a.resolve_source_retry(
+            **resolve,
+            request_id="worker-a-after-resolve",
+            expected_lease_owner="worker-a",
+        )
+        assert not worker_a.renew_source_retry_lease(
+            source_kind="gdrive",
+            source_id="folder-fence",
+            source_type="gdrive",
+            external_id=str(retry["external_id"]),
+            request_id="worker-a",
+            lease_seconds=60,
+        )
+        assert not worker_a.record_source_retry(
+            **retry,
+            request_id="worker-a-after-resolve",
+            expected_lease_owner="worker-a",
+        )
+        assert _retry_state(schema, str(retry["external_id"])) == resolved_state
+
+        # A current owner can still record an ordinary retry and release its own lease.
+        same_owner_retry = {
+            **retry,
+            "external_id": "ordinary-same-owner-retry",
+        }
+        assert seed_repository.record_source_retry(
+            **same_owner_retry,
+            request_id="same-owner-seed",
+            allow_unclaimed=True,
+        )
+        _execute_committed(
+            schema,
+            """
+            UPDATE ingest_source_retries
+            SET next_attempt_at = now()
+            WHERE external_id = %s
+            """,
+            (same_owner_retry["external_id"],),
+        )
+        assert worker_a.claim_due_source_retries(
+            source_kind="gdrive",
+            source_id="folder-fence",
+            request_id="current-owner",
+            lease_seconds=60,
+        )
+        assert worker_a.record_source_retry(
+            **same_owner_retry,
+            request_id="current-owner",
+            expected_lease_owner="current-owner",
+        )
+        assert _retry_state(schema, str(same_owner_retry["external_id"])) == (
+            "pending",
+            None,
+            None,
+            False,
+            "current-owner",
+        )
+
+        assert worker_a_vector.transactions >= 10
+        assert worker_b_vector.transactions >= 3
+
+
+def test_retry_claim_uses_skip_locked_across_overlapping_transactions() -> None:
     import psycopg
 
-    class _TransactionPgVector:
-        def __init__(self, conn: Any) -> None:
-            self._conn = conn
-
-        @contextmanager
-        def connection(self, **kwargs: Any) -> Iterator[Any]:
-            yield self._conn
-
     assert _DB_DSN is not None
-    with psycopg.connect(_DB_DSN) as conn:
-        _prepare_schema(conn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(_MIGRATION_0019.read_text(encoding="utf-8"))
-                cur.execute(_MIGRATION_0020.read_text(encoding="utf-8"))
-            repository = IngestRepository(  # type: ignore[arg-type]
-                _TransactionPgVector(conn),
-                app_role=None,
+    with _committed_retry_schema() as schema:
+        seed_repository = IngestRepository(  # type: ignore[arg-type]
+            _CommittedPgVector(_DB_DSN, schema),
+            app_role=None,
+        )
+        worker_a = IngestRepository(  # type: ignore[arg-type]
+            _CommittedPgVector(_DB_DSN, schema),
+            app_role=None,
+        )
+        worker_b = IngestRepository(  # type: ignore[arg-type]
+            _CommittedPgVector(_DB_DSN, schema),
+            app_role=None,
+        )
+        base_retry = {
+            "source_kind": "gdrive",
+            "source_id": "folder-skip-locked",
+            "source_type": "gdrive",
+            "md5_checksum": "0123456789abcdef0123456789abcdef",
+            "size_bytes": 10,
+            "mime_type": "application/test",
+            "validator_schema_version": "ooxml-safe-v2",
+            "reason": "office_download_failed",
+        }
+        for external_id in ("locked-row", "free-row"):
+            assert seed_repository.record_source_retry(
+                **base_retry,
+                external_id=external_id,
+                request_id=f"seed-{external_id}",
+                allow_unclaimed=True,
             )
-            retry = {
-                "source_kind": "gdrive",
-                "source_id": "folder-fence",
-                "source_type": "gdrive",
-                "external_id": "opaque-fenced-retry",
-                "md5_checksum": "0123456789abcdef0123456789abcdef",
-                "size_bytes": 10,
-                "mime_type": "application/test",
-                "validator_schema_version": "ooxml-safe-v2",
-                "reason": "office_download_failed",
-            }
+        _execute_committed(
+            schema,
+            """
+            UPDATE ingest_source_retries
+            SET next_attempt_at = now()
+            WHERE source_id = 'folder-skip-locked'
+            """,
+        )
 
-            assert repository.record_source_retry(**retry, request_id="seed")
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE ingest_source_retries
-                    SET next_attempt_at = now()
-                    WHERE external_id = 'opaque-fenced-retry'
-                    """
-                )
-            assert [
-                claim.lease_owner
-                for claim in repository.claim_due_source_retries(
-                    source_kind="gdrive",
-                    source_id="folder-fence",
-                    request_id="worker-a",
-                    lease_seconds=60,
-                )
-            ] == ["worker-a"]
+        # Keep the first row locked while B's separate committed transaction claims.
+        with psycopg.connect(_DB_DSN) as lock_conn:
+            _set_retry_test_session(lock_conn, schema)
+            locked = lock_conn.execute(
+                """
+                SELECT external_id
+                FROM ingest_source_retries
+                WHERE external_id = 'locked-row'
+                FOR UPDATE
+                """
+            ).fetchone()
+            assert locked == ("locked-row",)
 
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE ingest_source_retries
-                    SET lease_expires_at = now() - interval '1 second'
-                    WHERE external_id = 'opaque-fenced-retry'
-                    """
-                )
-            assert [
-                claim.lease_owner
-                for claim in repository.claim_due_source_retries(
-                    source_kind="gdrive",
-                    source_id="folder-fence",
-                    request_id="worker-b",
-                    lease_seconds=60,
-                )
-            ] == ["worker-b"]
-
-            # B の active lease 中に届いた stale A failure は successor lease を触れない。
-            assert not repository.record_source_retry(
-                **retry,
-                request_id="worker-a",
-                expected_lease_owner="worker-a",
-            )
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT status, lease_owner, lease_expires_at > now()
-                    FROM ingest_source_retries
-                    WHERE external_id = 'opaque-fenced-retry'
-                    """
-                )
-                assert cur.fetchone() == ("pending", "worker-b", True)
-
-            # Current owner B の通常 retry は成功し lease を解放する。
-            assert repository.record_source_retry(
-                **retry,
-                request_id="worker-b",
-                expected_lease_owner="worker-b",
-            )
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE ingest_source_retries
-                    SET next_attempt_at = now()
-                    WHERE external_id = 'opaque-fenced-retry'
-                    """
-                )
-            assert repository.claim_due_source_retries(
+            claims_b = worker_b.claim_due_source_retries(
                 source_kind="gdrive",
-                source_id="folder-fence",
-                request_id="worker-b-resolve",
+                source_id="folder-skip-locked",
+                request_id="worker-b",
+                limit=2,
                 lease_seconds=60,
             )
-            assert repository.resolve_source_retry(
-                source_kind="gdrive",
-                source_id="folder-fence",
-                source_type="gdrive",
-                external_id="opaque-fenced-retry",
-                md5_checksum=str(retry["md5_checksum"]),
-                size_bytes=10,
-                mime_type="application/test",
-                validator_schema_version="ooxml-safe-v2",
-                request_id="worker-b-resolve",
-            )
+            assert [claim.external_id for claim in claims_b] == ["free-row"]
 
-            # B resolve 後に届いた stale A failure cannot resurrect the row.
-            assert not repository.record_source_retry(
-                **retry,
-                request_id="worker-a",
-                expected_lease_owner="worker-a",
-            )
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT status, lease_owner, lease_expires_at, last_request_id
-                    FROM ingest_source_retries
-                    WHERE external_id = 'opaque-fenced-retry'
-                    """
-                )
-                assert cur.fetchone() == ("resolved", None, None, "worker-b-resolve")
-        finally:
-            conn.rollback()
+        claims_a = worker_a.claim_due_source_retries(
+            source_kind="gdrive",
+            source_id="folder-skip-locked",
+            request_id="worker-a",
+            limit=2,
+            lease_seconds=60,
+        )
+        assert [claim.external_id for claim in claims_a] == ["locked-row"]
+        assert _retry_state(schema, "free-row")[1] == "worker-b"
+        assert _retry_state(schema, "locked-row")[1] == "worker-a"

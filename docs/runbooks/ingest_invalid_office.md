@@ -62,13 +62,18 @@ Cursor advancement is conditional on durable retry state. A missing retry API, c
 the connector run fail and leaves the old cursor in place. A claimed row renews its lease during
 bounded ZIP reads, Office text traversal, chunk embedding, classification/contextualization
 boundaries, and immediately before upsert. Renewal verifies both request ownership and pending
-status; loss stops that file before an upsert.
+status against an unexpired lease; loss stops that file before an upsert. Resolution uses the same
+exact owner-and-unexpired-lease fence. Fingerprint equality never overrides a claimed lease. If
+resolution is unavailable, raises, or rejects the write after document upsert, the source is failed,
+the cursor and stale cleanup remain blocked, and the retry remains recoverable.
 
 Drive changes and file listings reject repeated pagination tokens and a still-present token at the
 safety page limit. Incomplete changes pagination falls back to a full listing. An incomplete full
 listing fails the source, so neither cursor advancement nor stale marking can use a partial set.
 Recursive folder/shared-drive walk saturation likewise fails the source and disables stale
-marking for the affected root.
+marking for the affected root. Every `files.list` requests `incompleteSearch`; only an explicit
+`false` is accepted. `true`, a missing field, or an invalid value raises
+`IncompleteDriveTraversal`.
 
 PDF download, extraction, and empty-text failures join the same warning collector. Connector runs
 are recorded as `success`, `success_with_warnings`, or `failed`, with reason counts suitable for an
@@ -97,19 +102,136 @@ All operational tables use forced RLS with the admin GUC and grant `SELECT`, `IN
 
 ## Rollout order
 
-Run database migrations through `0020_ingest_source_retry_upgrade.sql` before rolling out or
-restarting ingest workers:
+Production is **NO-GO** until every gate below has named evidence in the change ticket and an
+independent reviewer has approved it. Never infer snapshot, scheduler, or drain state from an old
+ticket.
 
-1. Pause new scheduled worker starts and let an in-flight run finish.
-2. Apply migrations through 0020.
-3. Verify the four operational tables, forced RLS policies, and minimal privileges.
-4. Roll out and restart workers with the new validator.
-5. Confirm the first run reports expected `success_with_warnings` counts and drains due retries.
+### Before the maintenance window
 
-0020 replaces the legacy unique constraint and therefore needs a normal migration maintenance
-window; inspect `ingest_source_health` row count and lock activity first. The first worker run after
-the validator bump intentionally does a full Drive listing/revalidation, so stagger connectors
-instead of starting every folder simultaneously.
+1. Record the approved maintenance window, operator, independent reviewer, application commit,
+   target database identifier, and expected migration checksum.
+2. Pause both the scheduler rule and every manual/ad-hoc ingest launch path. Record evidence for
+   each pause separately; disabling only the scheduler is insufficient.
+3. Drain every in-flight ingest worker. Confirm there are no running tasks/processes and no ingest
+   database sessions before migration. If a worker does not drain naturally, abort the window
+   rather than migrating underneath it.
+4. Create or verify a **fresh RDS snapshot or restore point** after the drain and final pre-window
+   write. Record its identifier, creation timestamp, database identifier, and a successful
+   restorable status check. A snapshot request that is still creating, belongs to another database,
+   or predates the final write does not satisfy this gate. Keep all writer launch paths paused while
+   the snapshot completes.
+5. Capture pre-migration row counts and lock state with an operator connection:
+
+```sql
+SELECT count(*) AS source_health_rows FROM ingest_source_health;
+SELECT count(*) AS connector_run_rows FROM ingest_connector_runs;
+
+SELECT pid, locktype, mode, granted
+FROM pg_locks
+WHERE relation = 'ingest_source_health'::regclass
+ORDER BY pid, locktype, mode;
+
+SELECT pid, application_name, state, wait_event_type, wait_event
+FROM pg_stat_activity
+WHERE datname = current_database()
+  AND application_name ILIKE '%ingest%';
+```
+
+Any unexpected writer, ungranted lock, or unexplained count change makes the window NO-GO.
+
+### Transactional migration gate
+
+The only supported production path is `scripts/migrate.py` with `autocommit=False`. Do not paste
+0020 into an autocommit SQL console, do not use `psql -f`, and do not use `--rerun` in production.
+The runner owns the transaction, rejects migration files containing transaction-control commands,
+atomically writes `schema_migrations`, and treats checksum drift as a hard failure.
+
+```bash
+DATABASE_URL='postgresql://operator@db.example.invalid/teamagent?sslmode=require' \
+  python scripts/migrate.py --dry-run
+
+DATABASE_URL='postgresql://operator@db.example.invalid/teamagent?sslmode=require' \
+  python scripts/migrate.py
+```
+
+The dry run must list 0020 as pending (or show its exact checksum as already applied) and must not
+write database state. During the real run, monitor `pg_locks` and abort on an unexpected blocker.
+Do not resume any writer until all post-migration checks pass.
+
+### Mandatory post-migration validation
+
+Run these checks in the same maintenance window and attach their output with identifiers redacted:
+
+```sql
+SELECT version, filename, checksum_sha, applied_at
+FROM schema_migrations
+WHERE version IN ('0019', '0020')
+ORDER BY version;
+
+SELECT
+    (SELECT count(*) FROM ingest_source_health) AS source_health_rows,
+    (SELECT count(*) FROM ingest_connector_runs) AS connector_run_rows,
+    (SELECT count(*) FROM ingest_source_retries) AS retry_rows,
+    (SELECT count(*) FROM ingest_reconciliation_gaps) AS reconciliation_rows;
+
+SELECT conname, contype, convalidated
+FROM pg_constraint
+WHERE conrelid IN (
+    'ingest_source_health'::regclass,
+    'ingest_connector_runs'::regclass,
+    'ingest_source_retries'::regclass,
+    'ingest_reconciliation_gaps'::regclass
+)
+ORDER BY conrelid::regclass::text, conname;
+
+SELECT relname, relrowsecurity, relforcerowsecurity
+FROM pg_class
+WHERE oid IN (
+    'ingest_source_health'::regclass,
+    'ingest_connector_runs'::regclass,
+    'ingest_source_retries'::regclass,
+    'ingest_reconciliation_gaps'::regclass
+)
+ORDER BY relname;
+
+SELECT table_name, privilege_type
+FROM information_schema.role_table_grants
+WHERE grantee = 'teamagent_app'
+  AND table_name IN (
+      'ingest_source_health',
+      'ingest_connector_runs',
+      'ingest_source_retries',
+      'ingest_reconciliation_gaps'
+  )
+ORDER BY table_name, privilege_type;
+
+SELECT
+    has_table_privilege('teamagent_app', 'ingest_source_health', 'SELECT')
+        AND has_table_privilege('teamagent_app', 'ingest_source_health', 'INSERT')
+        AND has_table_privilege('teamagent_app', 'ingest_source_health', 'UPDATE')
+        AS source_health_write_ok,
+    NOT has_table_privilege('teamagent_app', 'ingest_source_health', 'DELETE')
+        AND NOT has_table_privilege('teamagent_app', 'ingest_source_health', 'TRUNCATE')
+        AS source_health_destructive_forbidden,
+    has_table_privilege('teamagent_app', 'ingest_source_retries', 'SELECT')
+        AND has_table_privilege('teamagent_app', 'ingest_source_retries', 'INSERT')
+        AND has_table_privilege('teamagent_app', 'ingest_source_retries', 'UPDATE')
+        AS retry_write_ok,
+    NOT has_table_privilege('teamagent_app', 'ingest_source_retries', 'DELETE')
+        AND NOT has_table_privilege('teamagent_app', 'ingest_source_retries', 'TRUNCATE')
+        AS retry_destructive_forbidden;
+```
+
+The 0019/0020 checksum rows must be present; pre-existing table counts must not decrease; the
+fingerprint unique constraint and all check constraints must be validated; all four tables must
+have both RLS flags true; `teamagent_app` must have only `SELECT`, `INSERT`, and `UPDATE`, while
+destructive privilege checks must be false.
+
+Resume one connector first and perform a staggered first full revalidation. Verify its connector
+outcome, cursor behavior, retry lease/resolve behavior, warnings, database load, and row-count
+deltas before enabling the next connector. Do not start every folder or shared-drive crawl
+simultaneously. Resume manual launches only after the staged run is accepted; resume the scheduler
+last.
 
 Migration 0019 is byte-for-byte the originally released migration and must never be edited.
 Migration 0020 is the forward-only upgrade: it labels old observations `ooxml-legacy-v1`, fills
@@ -192,19 +314,24 @@ ROLLBACK;  -- replace with COMMIT only in the separately approved cleanup window
 
 ## Rollback
 
-Rolling application code back does not require dropping tables. Keep the additive schema during an
-application rollback; the old worker fails open if it cannot use a newer observation constraint,
-while indexed documents and chunks remain untouched.
+0020 is forward-only. There is no routine destructive down migration.
 
-Only after all writers are rolled back, and only if losing operational history is explicitly
-accepted, the new tables can be removed in dependency-safe order:
+- If `scripts/migrate.py` fails before commit, its transaction rolls back both 0020 DDL/data changes
+  and the `schema_migrations` marker. Keep all writers paused, capture the error and lock state,
+  correct the cause, and rerun the unchanged migration through `scripts/migrate.py`.
+- If 0020 committed but the new application is unhealthy, roll back the application while keeping
+  the additive 0020 schema. Do not clear retry rows, drop constraints, edit 0019/0020, or use
+  `--rerun`.
+- If a committed schema defect is found, add a separately reviewed forward recovery migration
+  (0021 or later), validate it against a restored copy of the recorded snapshot, then run it through
+  `scripts/migrate.py` in a new maintenance window.
+- Restoring the verified snapshot is the last-resort recovery path because it discards every
+  post-snapshot write. It requires a new incident decision, confirmed writer pause/drain, explicit
+  data-loss acceptance, and independent approval.
 
-```sql
-DROP TABLE IF EXISTS ingest_reconciliation_gaps;
-DROP TABLE IF EXISTS ingest_source_retries;
-DROP TABLE IF EXISTS ingest_connector_runs;
-DROP TABLE IF EXISTS ingest_source_health;
-```
+After either application rollback or forward recovery, repeat the constraint, RLS, grant,
+row-count, retry-state, and connector-cursor validation above before staggered restart. Production
+remains NO-GO until the post-recovery evidence is independently reviewed.
 
 Replacing a source Office file or ingesting a missing PDF remains a separately reviewed operator
 action. This implementation does not mutate Drive or perform those recovery ingests.

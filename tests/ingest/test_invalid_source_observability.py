@@ -14,6 +14,7 @@ from structlog.testing import capture_logs
 from teamagent.adapters.gdrive_client import (
     DriveFile,
     DrivePermission,
+    GDriveClient,
     GDriveTraversalIncompleteError,
     SharedDrive,
 )
@@ -70,7 +71,10 @@ class _Repository:
         self.retry_claims: list[SourceRetry] = []
         self.retry_record_success = True
         self.retry_lease_success = True
+        self.retry_resolve_success = True
+        self.retry_resolve_error: Exception | None = None
         self.retry_lease_renewals: list[dict[str, Any]] = []
+        self.ingest_jobs: list[dict[str, Any]] = []
         self.connector_state: ConnectorState | None = None
         self.reconciliation_counts: dict[str, int] = {}
         self.reconciliation_resolutions: list[str] = []
@@ -141,7 +145,7 @@ class _Repository:
             )
 
     def record_ingest_job(self, *args: Any, **kwargs: Any) -> None:
-        return None
+        self.ingest_jobs.append({"args": args, **kwargs})
 
     def record_connector_run(self, **kwargs: Any) -> bool:
         self.connector_runs.append(kwargs)
@@ -175,6 +179,10 @@ class _Repository:
 
     def resolve_source_retry(self, **kwargs: Any) -> bool:
         self.retry_resolutions.append(kwargs)
+        if self.retry_resolve_error is not None:
+            raise self.retry_resolve_error
+        if not self.retry_resolve_success:
+            return False
         self.retry_claims.clear()
         return True
 
@@ -513,6 +521,7 @@ def test_incremental_transient_failure_is_retried_next_run_after_cursor_advance(
     assert [state["cursor"] for state in repo.saved_states] == ["CURSOR-1", "CURSOR-2"]
     assert repo.retry_records[0]["reason"] == "office_download_failed"
     assert repo.retry_resolutions[-1]["external_id"] == drive_file.id
+    assert repo.retry_resolutions[-1]["expected_lease_owner"] == "run-2"
     assert client.download_file_bytes.call_count == 2
     assert len(repo.upserts) == 1
     # quick retryはclaim直後とupsert直前だけ。progress callbackは120秒throttleでDBを叩かない。
@@ -822,17 +831,18 @@ def test_retry_lease_loss_stops_upsert_and_cursor(
 
 
 @pytest.mark.parametrize(
-    "reason",
+    ("reason", "source_kind"),
     [
-        "page limit reached with remaining token",
-        "pagination token cycle",
-        "max depth reached with child folders remaining",
-        "shared drive page limit reached with remaining token",
+        ("page limit reached with remaining token", "gdrive"),
+        ("pagination token cycle", "gdrive"),
+        ("max depth reached with child folders remaining", "gdrive"),
+        ("shared drive page limit reached with remaining token", "shared_drives"),
     ],
 )
 def test_incomplete_traversal_commits_neither_cursor_nor_stale_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     reason: str,
+    source_kind: str,
 ) -> None:
     monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
     monkeypatch.setenv("INGEST_MARK_STALE", "true")
@@ -841,11 +851,15 @@ def test_incomplete_traversal_commits_neither_cursor_nor_stale_cleanup(
 
     client = MagicMock()
     client.get_start_page_token.return_value = "MUST-NOT-SAVE"
-    client.walk_files_recursive.side_effect = GDriveTraversalIncompleteError(
-        "walk_files_recursive",
+    incomplete = GDriveTraversalIncompleteError(
+        "list_shared_drives" if source_kind == "shared_drives" else "walk_files_recursive",
         reason,
         root_id="FOLDER",
     )
+    if source_kind == "shared_drives":
+        client.list_shared_drives.side_effect = incomplete
+    else:
+        client.walk_files_recursive.side_effect = incomplete
     monkeypatch.setattr(
         "teamagent.adapters.gdrive_client.GDriveClient.from_env",
         classmethod(lambda cls, **kwargs: client),
@@ -872,7 +886,79 @@ def test_incomplete_traversal_commits_neither_cursor_nor_stale_cleanup(
     sources = IngestSources(
         version=1,
         slack_channels=(),
-        gdrive_folders=(replace(_folder_spec(), include_subfolders=True),),
+        gdrive_folders=(
+            (replace(_folder_spec(), include_subfolders=True),) if source_kind == "gdrive" else ()
+        ),
+        gsheets=(),
+        shared_drives_crawl=(
+            SharedDriveCrawlSpec(enabled=True, sales_relevance_filter=False)
+            if source_kind == "shared_drives"
+            else None
+        ),
+    )
+    result = IngestRunner(
+        repo,  # type: ignore[arg-type]
+        _Embedder(),
+        owner_email="bot@example.jp",
+        dry_run=False,
+        alerter=IngestOpsAlerter(webhook_url=None),
+    ).run(sources, kinds=[source_kind])
+
+    assert result.by_kind[source_kind].errors
+    assert not any(state.get("success") is True for state in repo.saved_states)
+    assert not any(state.get("cursor") for state in repo.saved_states)
+    assert repo.stale_cleanup_calls == []
+
+
+def test_incomplete_search_payload_blocks_pipeline_cursor_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    monkeypatch.setenv("INGEST_MARK_STALE", "true")
+    monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
+    monkeypatch.delenv("DOC_DEDUP_DETECT", raising=False)
+
+    class _Request:
+        def execute(self) -> dict[str, Any]:
+            return {"files": [], "incompleteSearch": True}
+
+    class _FilesService:
+        def files(self) -> _FilesService:
+            return self
+
+        def list(self, **kwargs: Any) -> _Request:
+            assert "incompleteSearch" in kwargs["fields"]
+            return _Request()
+
+    client = GDriveClient(service=_FilesService())
+    client.get_start_page_token = MagicMock(return_value="MUST-NOT-SAVE")  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+
+    class _IncompleteRepository(_Repository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stale_cleanup_calls: list[str] = []
+
+        def clear_documents_stale(self, external_ids: list[str]) -> int:
+            self.stale_cleanup_calls.append("clear")
+            return 0
+
+        def list_gdrive_external_ids_with_stale(self) -> list[tuple[str, bool]]:
+            self.stale_cleanup_calls.append("list")
+            return [("existing", False)]
+
+        def mark_documents_stale(self, external_ids: list[str]) -> int:
+            self.stale_cleanup_calls.append("mark")
+            return 0
+
+    repo = _IncompleteRepository()
+    sources = IngestSources(
+        version=1,
+        slack_channels=(),
+        gdrive_folders=(_folder_spec(),),
         gsheets=(),
     )
     result = IngestRunner(
@@ -883,7 +969,7 @@ def test_incomplete_traversal_commits_neither_cursor_nor_stale_cleanup(
         alerter=IngestOpsAlerter(webhook_url=None),
     ).run(sources, kinds=["gdrive"])
 
-    assert result.by_kind["gdrive"].errors
+    assert any("IncompleteDriveTraversal" in error for error in result.by_kind["gdrive"].errors)
     assert not any(state.get("success") is True for state in repo.saved_states)
     assert not any(state.get("cursor") for state in repo.saved_states)
     assert repo.stale_cleanup_calls == []
@@ -967,6 +1053,98 @@ def test_claimed_file_failure_threads_lease_owner_to_retry_write(
     )
 
     assert repo.retry_records[-1]["expected_lease_owner"] == "worker-a"
+
+
+@pytest.mark.parametrize("resolver_mode", ["false", "exception", "unavailable"])
+def test_claimed_success_resolution_failure_blocks_cursor_cleanup_and_success_reporting(
+    monkeypatch: pytest.MonkeyPatch,
+    resolver_mode: str,
+) -> None:
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    monkeypatch.setenv("INGEST_MARK_STALE", "true")
+    monkeypatch.delenv("BOILERPLATE_DETECT", raising=False)
+    monkeypatch.delenv("DOC_DEDUP_DETECT", raising=False)
+    data = _pptx_bytes()
+    drive_file = _file("RESOLVE-FAIL", data)
+    client = MagicMock()
+    client.get_start_page_token.return_value = "MUST-NOT-SAVE"
+    client.list_files.return_value = ([drive_file], None)
+    client.list_permissions.return_value = [_owner_permission()]
+    client.download_file_bytes.return_value = data
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+
+    class _ResolutionRepository(_Repository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stale_cleanup_calls: list[str] = []
+
+        def clear_documents_stale(self, external_ids: list[str]) -> int:
+            self.stale_cleanup_calls.append("clear")
+            return 0
+
+        def list_gdrive_external_ids_with_stale(self) -> list[tuple[str, bool]]:
+            self.stale_cleanup_calls.append("list")
+            return [("existing", False)]
+
+        def mark_documents_stale(self, external_ids: list[str]) -> int:
+            self.stale_cleanup_calls.append("mark")
+            return 0
+
+    repo = _ResolutionRepository()
+    repo.retry_claims = [
+        SourceRetry(
+            external_id=drive_file.id,
+            md5_checksum=drive_file.md5_checksum,
+            size_bytes=drive_file.size,
+            mime_type=drive_file.mime_type,
+            validator_schema_version=OFFICE_VALIDATOR_SCHEMA_VERSION,
+            attempt_count=1,
+            reason="office_download_failed",
+            lease_owner="claim-token",
+        )
+    ]
+    if resolver_mode == "false":
+        repo.retry_resolve_success = False
+    elif resolver_mode == "exception":
+        repo.retry_resolve_error = RuntimeError("temporary resolver failure")
+    else:
+        repo.resolve_source_retry = None  # type: ignore[method-assign]
+
+    sources = IngestSources(
+        version=1,
+        slack_channels=(),
+        gdrive_folders=(_folder_spec(),),
+        gsheets=(),
+    )
+    result = IngestRunner(
+        repo,  # type: ignore[arg-type]
+        _Embedder(),
+        owner_email="bot@example.jp",
+        dry_run=False,
+        alerter=IngestOpsAlerter(webhook_url=None),
+    ).run(sources, kinds=["gdrive"])
+
+    stats = result.by_kind["gdrive"]
+    assert stats.sources_skipped == 1
+    assert stats.documents_upserted == 0
+    assert any("IngestDurabilityError" in error for error in stats.errors)
+    assert len(repo.upserts) == 1  # document transaction committed before resolve was rejected
+    assert not any(state.get("success") is True for state in repo.saved_states)
+    assert not any(state.get("cursor") for state in repo.saved_states)
+    assert not any(job.get("state") == "COMMITTED" for job in repo.ingest_jobs)
+    assert repo.ingest_jobs[-1]["state"] == "FAILED_TRANSIENT"
+    assert repo.retry_records == []
+    assert repo.stale_cleanup_calls == []
+    assert {renewal["request_id"] for renewal in repo.retry_lease_renewals} == {"claim-token"}
+    if resolver_mode != "unavailable":
+        assert repo.retry_resolutions[-1]["expected_lease_owner"] == "claim-token"
+        assert repo.retry_resolutions[-1]["allow_unclaimed"] is False
+    folder_run = next(run for run in repo.connector_runs if run["source_id"] == "FOLDER")
+    assert folder_run["outcome"] == "failed"
+    assert folder_run["documents_upserted"] == 0
 
 
 @pytest.mark.parametrize(
