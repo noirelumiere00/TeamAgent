@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
@@ -90,6 +91,22 @@ class _StrictSkill(BaseSkill[_StrictIn, _Out]):
         return _Out()
 
 
+class _CleanupSkill(BaseSkill[_In, _Out]):
+    name = "cleanup"
+    description = "一時成果物cleanup hook確認"
+    input_schema = _In
+    output_schema = _Out
+    cleaned: ClassVar[int] = 0
+
+    def run(self, input: _In, ctx: SkillContext) -> _Out:
+        del input, ctx
+        return _Out()
+
+    def cleanup_output(self, output: _Out) -> None:
+        del output
+        type(self).cleaned += 1
+
+
 def _handler(skill_cls: type[BaseSkill[Any, Any]], **kw: Any) -> Any:
     spec = ToolSpec(skill_cls.name, skill_cls.description, skill_cls)
     opts: dict[str, Any] = {
@@ -155,6 +172,13 @@ def test_invalid_input_returns_structured_error() -> None:
     assert out.get("is_error") is True
 
 
+def test_handler_cleans_request_scoped_output_after_json_serialization() -> None:
+    _CleanupSkill.cleaned = 0
+    out = asyncio.run(_handler(_CleanupSkill)({"x": "v"}))
+    assert "is_error" not in out
+    assert _CleanupSkill.cleaned == 1
+
+
 def test_require_rls_fail_closed() -> None:
     # require_rls=True かつ user_email 無し → Bedrock を呼ぶ前に OrchestratorError（越権防止）.
     with pytest.raises(OrchestratorError):
@@ -169,3 +193,121 @@ def test_require_rls_fail_closed() -> None:
                 ctx_metadata={},
             )
         )
+
+
+class _Block:
+    def __init__(
+        self,
+        block_type: str,
+        *,
+        text: str | None = None,
+        name: str | None = None,
+        input_value: dict[str, Any] | None = None,
+        block_id: str | None = None,
+    ) -> None:
+        self.type = block_type
+        self.text = text
+        self.name = name
+        self.input = input_value
+        self.id = block_id
+
+    def model_dump(self, *, exclude_none: bool = True) -> dict[str, Any]:
+        del exclude_none
+        values = {
+            "type": self.type,
+            "text": self.text,
+            "name": self.name,
+            "input": self.input,
+            "id": self.id,
+        }
+        return {key: value for key, value in values.items() if value is not None}
+
+
+class _Usage:
+    def __init__(self, input_tokens: int, output_tokens: int) -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+    def model_dump(self, *, exclude_none: bool = True) -> dict[str, int]:
+        del exclude_none
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+        }
+
+
+class _FakeMessages:
+    def __init__(self, responses: list[Any]) -> None:
+        self.responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
+
+
+class _FakeBedrock:
+    def __init__(self, responses: list[Any]) -> None:
+        self.messages = _FakeMessages(responses)
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_python_bedrock_loop_executes_tools_without_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _CaptureSkill.captured.clear()
+    first = SimpleNamespace(
+        content=[
+            _Block(
+                "tool_use",
+                name="capture",
+                input_value={"x": "from-model"},
+                block_id="tool-1",
+            )
+        ],
+        usage=_Usage(100, 10),
+        model="model-test",
+        stop_reason="tool_use",
+    )
+    second = SimpleNamespace(
+        content=[_Block("text", text="完了しました")],
+        usage=_Usage(120, 20),
+        model="model-test",
+        stop_reason="end_turn",
+    )
+    client = _FakeBedrock([first, second])
+    monkeypatch.setattr(
+        "teamagent.orchestrator.sdk_runner.AsyncAnthropicBedrock",
+        lambda: client,
+    )
+    spec = ToolSpec(_CaptureSkill.name, _CaptureSkill.description, _CaptureSkill)
+
+    result = asyncio.run(
+        run_sdk_agent(
+            goal="調べて",
+            request_id="req-python-only",
+            specs=[spec],
+            model="model-test",
+            system_prompt="system",
+            max_turns=3,
+            cost_cap_usd=1.0,
+        )
+    )
+
+    assert result.ok
+    assert result.answer == "完了しました"
+    assert result.tool_calls == ["capture"]
+    assert result.num_turns == 2
+    assert len(result.cost_records) == 2
+    assert client.closed
+    assert len(client.messages.calls) == 2
+    final_messages = client.messages.calls[-1]["messages"]
+    assert any(
+        message["role"] == "user"
+        and isinstance(message["content"], list)
+        and message["content"][0]["type"] == "tool_result"
+        for message in final_messages
+    )

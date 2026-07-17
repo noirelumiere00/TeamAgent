@@ -155,6 +155,31 @@ def _parse_video(d: dict[str, Any]) -> TikTokVideo:
     )
 
 
+def _parse_media_post(post: dict[str, Any]) -> TikTokVideo:
+    """generic media workerの正規化postを既存public schemaへ写像する。"""
+
+    return TikTokVideo(
+        id=str(post.get("pid") or ""),
+        url=str(post.get("url") or ""),
+        desc=str(post.get("title") or ""),
+        create_time=int(post.get("create_time") or 0),
+        duration=0,
+        cover_url=str(post.get("cover_url") or ""),
+        author=TikTokAuthor(
+            unique_id=str(post.get("account_id") or ""),
+            nickname=str(post.get("account_name") or ""),
+            follower_count=int(post.get("followers") or 0),
+        ),
+        play_count=int(post.get("plays") or 0),
+        digg_count=int(post.get("likes") or 0),
+        comment_count=int(post.get("comments") or 0),
+        share_count=int(post.get("shares") or 0),
+        collect_count=int(post.get("saves") or 0),
+        hashtags=(),
+        music_title="",
+    )
+
+
 def search_tiktok(
     query: str,
     *,
@@ -179,6 +204,32 @@ def search_tiktok(
     """
     if not query.strip():
         raise TikTokScrapeError("TIKTOK_EMPTY_QUERY: 検索語が空です")
+    from teamagent.adapters.media_job import MediaJobClient
+
+    if MediaJobClient.is_configured():
+        import hashlib
+
+        normalized_query = query.strip()
+        fingerprint = hashlib.sha256(
+            (f"{request_id or 'no-request'}:{search_type}:{normalized_query}:{max_videos}").encode()
+        ).hexdigest()
+        try:
+            posts = MediaJobClient().search_tiktok(
+                normalized_query,
+                request_fingerprint=f"tiktok-search:{fingerprint}",
+                max_videos=max_videos,
+                timeout_s=min(timeout_s, 15 * 60),
+            )
+        except Exception as exc:
+            raise TikTokScrapeError(f"TIKTOK_MEDIA_JOB_FAILED: {type(exc).__name__}") from exc
+        videos = tuple(_parse_media_post(post) for post in posts[:max_videos])
+        if not videos:
+            raise TikTokScrapeError("TIKTOK_EMPTY_RESULT: media worker returned no posts")
+        return TikTokSearchResult(
+            query=normalized_query,
+            search_type=search_type,
+            videos=videos,
+        )
     if not _SCRAPER_SCRIPT.exists():
         raise TikTokScrapeError(
             f"TIKTOK_SCRAPER_MISSING: {_SCRAPER_SCRIPT} がありません。"
@@ -398,6 +449,20 @@ def download_tiktok_video(
     Raises:
         TikTokScrapeError: URL不正(SSRF) / node不在 / スクリプト不在 / タイムアウト / 取得失敗。
     """
+    from teamagent.adapters.media_job import MediaJobClient
+
+    if MediaJobClient.is_configured():
+        import hashlib
+
+        fingerprint = hashlib.sha256(video_url.encode("utf-8")).hexdigest()
+        try:
+            return MediaJobClient().acquire_video(
+                video_url,
+                request_fingerprint=f"{request_id or 'no-request'}:download:{fingerprint}",
+                timeout_s=min(timeout_s, 15 * 60),
+            )
+        except Exception as exc:
+            raise TikTokScrapeError(f"TIKTOK_MEDIA_JOB_FAILED: {type(exc).__name__}") from exc
     if not _skip_url_guard:
         from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
 

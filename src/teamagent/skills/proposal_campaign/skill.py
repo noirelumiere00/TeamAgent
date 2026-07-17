@@ -191,7 +191,32 @@ class ProposalCampaignSkill(BaseSkill[ProposalCampaignInput, ProposalCampaignOut
             return None
         out_base = Path(out_dir or tempfile.gettempdir())
         out_path = out_base / f"{ctx.request_id}_campaign.pptx"
-        rendered = render_deck(
-            composer, Path(raw_tpl), out_path, fail_if_missing=False, enable_images=True
-        )
+        from teamagent.adapters.media_job import MediaJobClient
+
+        if MediaJobClient.is_configured():
+            staged_images: list[tuple[int, int, bytes, str]] = []
+            for placeholder_id, images in evidence_images.items():
+                for image in images:
+                    if not image.image_path:
+                        continue
+                    try:
+                        body = Path(image.image_path).read_bytes()
+                    except OSError:
+                        continue
+                    mime = "image/png" if body.startswith(b"\x89PNG\r\n\x1a\n") else "image/jpeg"
+                    staged_images.append((placeholder_id, image.rank, body, mime))
+            pptx = MediaJobClient().render_proposal_pptx(
+                Path(raw_tpl).read_bytes(),
+                composer.model_dump_json().encode("utf-8"),
+                request_fingerprint=f"{ctx.request_id}:campaign-pptx",
+                evidence_images=staged_images,
+                fail_if_missing=False,
+            )
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(pptx)
+            rendered = out_path
+        else:
+            rendered = render_deck(
+                composer, Path(raw_tpl), out_path, fail_if_missing=False, enable_images=True
+            )
         return str(rendered)

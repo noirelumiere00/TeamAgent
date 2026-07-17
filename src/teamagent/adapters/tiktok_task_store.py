@@ -1,52 +1,69 @@
-"""tiktok-acquire の投函/照会アダプタ（3層: Adapter層）。
+"""Legacy TikTok tool UX backed by the generic strict media-job contract.
 
-OC(AiLa)の MCPツール(tiktok_acquire / tiktok_acquire_status)から呼ばれ、
-  - submit: DynamoDBに queued を記録し、SQSにジョブJSONを送る（重処理ゼロ・即return）
-  - get_status: DynamoDBの状態を読み、done なら S3 の成果物を署名付きURL化して返す
-を行う。RunTask/PassRole は一切持たない（権限分離＝Lambda dispatcher 側）。
-boto3 は遅延import・失敗は graceful（report_publish.py と同方針）。
-
-env:
-  TIKTOK_TASK_QUEUE   SQSキューURL（submit先）
-  TIKTOK_JOBS_TABLE   DynamoDBテーブル名（状態）
-  TIKTOK_S3_BUCKET    成果物バケット（既定 teamagent-dev-raw-files）
-  AWS_REGION          既定 ap-northeast-1
+The public skill still returns ``tk_*`` IDs and the existing output schema.  The
+wire payload, idempotency, deadlines, storage integrity and short-lived
+artifacts are shared with every other media operation.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import time
 import uuid
 from typing import Any
 
 import structlog
 
+from teamagent.adapters.media_job import MediaJobClient, MediaJobError
+from teamagent.media.contracts import (
+    MediaJobResult,
+    TikTokAcquireOperation,
+    TikTokClientConfig,
+    make_job_request,
+)
+
 logger = structlog.get_logger(__name__)
 
 _DEFAULT_BUCKET = "teamagent-dev-raw-files"
-_PRESIGN_S = 604800  # 7日（SigV4上限）
-_TTL_S = 2592000  # 30日（DynamoDB項目のTTL）
+_PRESIGN_S = 300
+_ARTIFACT_TTL_S = 3600
+_DEADLINE_S = 15 * 60
 
 
 class TikTokTaskStore:
-    """SQS(送信) + DynamoDB(状態) + S3(署名URL) の薄いラッパ。"""
+    """Compatibility adapter over the generic SQS/DynamoDB/S3 media boundary."""
 
     def __init__(self) -> None:
         self._region = os.environ.get("AWS_REGION") or "ap-northeast-1"
-        self._queue_url = os.environ.get("TIKTOK_TASK_QUEUE", "")
-        self._table = os.environ.get("TIKTOK_JOBS_TABLE", "")
-        self._bucket = os.environ.get("TIKTOK_S3_BUCKET") or _DEFAULT_BUCKET
+        self._queue_url = os.environ.get("MEDIA_TASK_QUEUE") or os.environ.get(
+            "TIKTOK_TASK_QUEUE", ""
+        )
+        self._table = os.environ.get("MEDIA_JOBS_TABLE") or os.environ.get("TIKTOK_JOBS_TABLE", "")
+        self._bucket = (
+            os.environ.get("MEDIA_JOB_BUCKET")
+            or os.environ.get("TIKTOK_S3_BUCKET")
+            or _DEFAULT_BUCKET
+        )
+        self._kms_key_id = os.environ.get("MEDIA_JOB_KMS_KEY_ID", "")
 
     def _session(self) -> Any:
         import boto3
 
         return boto3.session.Session()
 
-    # ---- submit -------------------------------------------------------------
+    def _client(self, session: Any) -> MediaJobClient:
+        return MediaJobClient(
+            session=session,
+            queue_url=self._queue_url,
+            table=self._table,
+            bucket=self._bucket,
+            kms_key_id=self._kms_key_id,
+        )
+
     def submit(self, spec: dict[str, Any]) -> bool:
-        """DynamoDBに queued を記録し、SQSにジョブJSONを送る。成功で True。"""
+        """Validate and submit one bounded, content-hashed media request."""
+
         if not self._queue_url or not self._table:
             logger.warning(
                 "tiktok_submit_misconfigured",
@@ -54,78 +71,101 @@ class TikTokTaskStore:
                 has_table=bool(self._table),
             )
             return False
-        body = json.dumps(spec, ensure_ascii=False)
-        now = int(time.time())
         try:
-            sess = self._session()
-            ddb = sess.client("dynamodb", region_name=self._region)
-            ddb.put_item(
-                TableName=self._table,
-                Item={
-                    "job_id": {"S": spec["job_id"]},
-                    "status": {"S": "queued"},
-                    "created_at": {"N": str(now)},
-                    "ttl": {"N": str(now + _TTL_S)},
-                    "requested_by": {"S": str(spec.get("requested_by") or "unknown")},
-                    "detail": {
-                        "S": json.dumps(
-                            {"status": "queued", "keywords": spec.get("keywords", [])},
-                            ensure_ascii=False,
-                        )
-                    },
-                },
+            raw_client = spec.get("client") or {}
+            if not isinstance(raw_client, dict):
+                raise ValueError("client config must be an object")
+            operation = TikTokAcquireOperation(
+                kind="tiktok_acquire",
+                keywords=tuple(spec["keywords"]),
+                n_per_kw=spec["n_per_kw"],
+                videos_per_kw=spec["videos_per_kw"],
+                sort=spec["sort"],
+                max_video_bytes=spec.get("max_video_bytes", 30 * 1024 * 1024),
+                client=TikTokClientConfig(
+                    client=raw_client.get("client"),
+                    client_short=raw_client.get("client_short"),
+                    competitors=tuple(raw_client.get("competitors") or ()),
+                    industry=raw_client.get("industry"),
+                ),
             )
-            sqs = sess.client("sqs", region_name=self._region)
-            sqs.send_message(QueueUrl=self._queue_url, MessageBody=body)
-            logger.info("tiktok_submitted", job_id=spec["job_id"], kw=len(spec.get("keywords", [])))
+            job_id = str(spec["job_id"])
+            request_fingerprint = str(spec["request_fingerprint"])
+            request = make_job_request(
+                operation=operation,
+                output_bucket=self._bucket,
+                request_fingerprint=request_fingerprint,
+                timeout_s=_DEADLINE_S,
+                artifact_ttl_s=_ARTIFACT_TTL_S,
+                job_id=job_id,
+                output_prefix=f"tiktok-acquire/{job_id}/",
+                audit_principal_hash=spec.get("audit_principal_hash"),
+            )
+            self._client(self._session()).submit(request)
+            logger.info("tiktok_submitted", job_id=job_id, kw=len(operation.keywords))
             return True
-        except Exception as e:
+        except (KeyError, TypeError, ValueError, MediaJobError) as exc:
             logger.warning(
-                "tiktok_submit_failed", job_id=spec.get("job_id"), error=type(e).__name__
+                "tiktok_submit_failed",
+                job_id=spec.get("job_id"),
+                error=type(exc).__name__,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "tiktok_submit_failed",
+                job_id=spec.get("job_id"),
+                error=type(exc).__name__,
             )
             return False
 
-    # ---- status -------------------------------------------------------------
     def get_status(self, job_id: str) -> dict[str, Any] | None:
-        """DynamoDBの状態を読み、done なら S3 成果物を署名URL化して返す。未登録は None。"""
+        """Read generic status and map done artifacts to the legacy schema."""
+
         if not self._table:
             return None
         try:
-            sess = self._session()
-            ddb = sess.client("dynamodb", region_name=self._region)
-            resp = ddb.get_item(TableName=self._table, Key={"job_id": {"S": job_id}})
-            item = resp.get("Item")
-            if not item:
+            session = self._session()
+            client = self._client(session)
+            result = client.get_result(job_id)
+            if result is None:
                 return None
-            status = item.get("status", {}).get("S", "unknown")
-            detail: dict[str, Any] = {}
-            try:
-                detail = json.loads(item.get("detail", {}).get("S", "{}"))
-            except Exception:
-                detail = {}
-            out: dict[str, Any] = {
+            output: dict[str, Any] = {
                 "job_id": job_id,
-                "status": status,
-                "progress": detail.get("progress"),
-                "counts": detail.get("counts"),
-                "error_code": detail.get("error_code"),
-                "stop_reason": detail.get("stop_reason"),
-                "warnings": detail.get("warnings") or [],
+                "status": result.status,
+                "progress": result.metadata.get("progress"),
+                "counts": result.metadata.get("counts"),
+                "error_code": result.error_code,
+                "stop_reason": result.metadata.get("stop_reason"),
+                "warnings": result.metadata.get("warnings") or [],
             }
-            if status == "done":
-                prefix = detail.get("s3_prefix") or f"tiktok-acquire/{job_id}/"
-                out.update(self._presign_outputs(sess, prefix))
-            return out
-        except Exception as e:
-            logger.warning("tiktok_status_failed", job_id=job_id, error=type(e).__name__)
-            return {"job_id": job_id, "status": "unknown", "error_code": "STATUS_READ_FAILED"}
+            if result.status == "done":
+                output.update(self._presign_outputs(session, client, result))
+            return output
+        except Exception as exc:
+            logger.warning("tiktok_status_failed", job_id=job_id, error=type(exc).__name__)
+            return {
+                "job_id": job_id,
+                "status": "unknown",
+                "error_code": "STATUS_READ_FAILED",
+            }
 
-    def _presign_outputs(self, sess: Any, prefix: str) -> dict[str, Any]:
-        """成果物(manifest/posts/動画/サムネ)を署名付きURL化する。"""
-        s3 = sess.client("s3", region_name=self._region)
-        prefix = prefix if prefix.endswith("/") else prefix + "/"
+    def _presign_outputs(
+        self,
+        session: Any,
+        client: MediaJobClient,
+        result: MediaJobResult,
+    ) -> dict[str, Any]:
+        """Presign verified, worker-produced artifacts for five minutes."""
+
+        s3 = session.client("s3", region_name=self._region)
+        artifacts = {artifact.name: artifact.object for artifact in result.artifacts}
+        prefix = str(result.metadata.get("s3_prefix") or f"tiktok-acquire/{result.job_id}/")
+        prefix = prefix if prefix.endswith("/") else f"{prefix}/"
 
         def presign(key: str) -> str | None:
+            if not key.startswith(prefix):
+                return None
             try:
                 return str(
                     s3.generate_presigned_url(
@@ -137,38 +177,52 @@ class TikTokTaskStore:
             except Exception:
                 return None
 
-        result: dict[str, Any] = {
+        def artifact_url(name: str) -> str | None:
+            ref = artifacts.get(name)
+            return presign(ref.key) if ref is not None else None
+
+        output: dict[str, Any] = {
             "s3_bucket": self._bucket,
             "s3_prefix": prefix,
-            "posts_json_url": presign(f"{prefix}posts.normalized.json"),
-            "config_json_url": presign(f"{prefix}config.json"),
-            "manifest_url": presign(f"{prefix}videos/manifest.json"),
+            "posts_json_url": artifact_url("posts.json"),
+            "config_json_url": artifact_url("config.json"),
+            "manifest_url": artifact_url("manifest.json"),
             "videos": [],
         }
-        # manifest を読んで動画/サムネを s3_key + 署名URL の2系統で返す
+        manifest_ref = artifacts.get("manifest.json")
+        if manifest_ref is None:
+            return output
         try:
-            obj = s3.get_object(Bucket=self._bucket, Key=f"{prefix}videos/manifest.json")
-            manifest = json.loads(obj["Body"].read().decode("utf-8"))
-            vids: list[dict[str, Any]] = []
-            for it in manifest.get("items", []):
-                vkey = f"{prefix}{it.get('video_path')}"
-                tkey = f"{prefix}{it.get('thumb_path')}"
-                vids.append(
+            manifest = json.loads(client.download(manifest_ref).decode("utf-8"))
+            videos: list[dict[str, Any]] = []
+            for item in manifest.get("items", []):
+                if not isinstance(item, dict):
+                    continue
+                pid = str(item.get("pid") or "")
+                video_ref = artifacts.get(f"video-{pid}")
+                thumb_ref = artifacts.get(f"thumb-{pid}")
+                videos.append(
                     {
-                        "pid": it.get("pid"),
-                        "kw": it.get("kw"),
-                        "downloaded": it.get("downloaded", False),
-                        "s3_key": vkey,  # 機械処理(動画分析)用＝直渡し
-                        "url": presign(vkey) if it.get("downloaded") else None,  # 人向け
-                        "thumb_url": presign(tkey),
-                        "tiktok_url": it.get("tiktok_url"),
+                        "pid": pid,
+                        "kw": item.get("kw"),
+                        "downloaded": video_ref is not None,
+                        "s3_key": video_ref.key if video_ref is not None else None,
+                        "url": presign(video_ref.key) if video_ref is not None else None,
+                        "thumb_url": presign(thumb_ref.key) if thumb_ref is not None else None,
+                        "tiktok_url": item.get("tiktok_url"),
                     }
                 )
-            result["videos"] = vids
-        except Exception as e:
-            logger.info("tiktok_manifest_read_skipped", error=type(e).__name__)
-        return result
+            output["videos"] = videos
+        except Exception as exc:
+            logger.info("tiktok_manifest_read_skipped", error=type(exc).__name__)
+        return output
 
 
-def new_job_id() -> str:
+def new_job_id(request_fingerprint: str | None = None) -> str:
+    if request_fingerprint:
+        digest = hashlib.sha256(request_fingerprint.encode("utf-8")).hexdigest()
+        return f"tk_{digest[:12]}"
     return f"tk_{uuid.uuid4().hex[:12]}"
+
+
+__all__ = ["TikTokTaskStore", "new_job_id"]

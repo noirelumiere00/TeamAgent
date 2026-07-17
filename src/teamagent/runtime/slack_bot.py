@@ -1350,38 +1350,41 @@ class SkillDispatcher:
                 return "🔎 動画分析は Gemini の認証設定後に有効化されます（Vertex/APIキー）。"
             raise
 
-        # レポートを非公開S3に公開し署名付きURL(7日)を通知に添える（URL形式配信）。
-        # §M: skill が既に発行済み(out.report_url)ならそれを再利用（二重publish回避）。
-        report_url: str | None = out.report_url
-        if report_url is None and out.report_html_path:
-            from teamagent.adapters.report_publish import publish_html_file
+        try:
+            # レポートを非公開S3に公開し署名付きURL(7日)を通知に添える（URL形式配信）。
+            # §M: skill が既に発行済み(out.report_url)ならそれを再利用（二重publish回避）。
+            report_url: str | None = out.report_url
+            if report_url is None and out.report_html_path:
+                from teamagent.adapters.report_publish import publish_html_file
 
-            path = out.report_html_path
-            report_url = await loop.run_in_executor(
-                None,
-                lambda: publish_html_file(path, request_id=request_id, query=query or ""),
-            )
-
-        # HTML レポートを Slack にも添付（オフライン閲覧用・通知文は dispatch 経由で別途投稿）
-        if out.report_html_path and reply_channel:
-            try:
-                from teamagent.adapters.slack_client import SlackClient
-
-                slack = SlackClient(bot_token=os.environ.get("SLACK_BOT_TOKEN", ""))
-                await slack.upload_file(
-                    reply_channel,
-                    out.report_html_path,
-                    request_id,
-                    title=f"VSEO分析レポート_{query}.html",
-                    thread_ts=reply_thread_ts,
+                path = out.report_html_path
+                report_url = await loop.run_in_executor(
+                    None,
+                    lambda: publish_html_file(path, request_id=request_id, query=query or ""),
                 )
-            except Exception:
-                logger.warning("video_algorithm_report_upload_failed", request_id=request_id)
 
-        summary = out.slack_summary
-        if report_url:
-            summary += f"\n🔗 *レポートURL*（7日間有効・ブラウザで開けます）: {report_url}"
-        return summary
+            # HTML レポートを Slack にも添付（オフライン閲覧用・通知文は dispatch 経由で別途投稿）
+            if out.report_html_path and reply_channel:
+                try:
+                    from teamagent.adapters.slack_client import SlackClient
+
+                    slack = SlackClient(bot_token=os.environ.get("SLACK_BOT_TOKEN", ""))
+                    await slack.upload_file(
+                        reply_channel,
+                        out.report_html_path,
+                        request_id,
+                        title=f"VSEO分析レポート_{query}.html",
+                        thread_ts=reply_thread_ts,
+                    )
+                except Exception:
+                    logger.warning("video_algorithm_report_upload_failed", request_id=request_id)
+
+            summary = out.slack_summary
+            if report_url:
+                summary += f"\n🔗 *レポートURL*（7日間有効・ブラウザで開けます）: {report_url}"
+            return summary
+        finally:
+            skill.cleanup_output(out)
 
     async def dispatch_auto(
         self,
@@ -2708,7 +2711,10 @@ def _maybe_start_video_approval_poller(app: AsyncApp, loop: asyncio.AbstractEven
 
     dispatcher = SkillDispatcher()
     store = ProcessedStore(
-        os.environ.get("VIDEO_APPROVAL_STATE_PATH", ".local_state/video_approval_processed.json")
+        os.environ.get(
+            "VIDEO_APPROVAL_STATE_PATH",
+            "/tmp/teamagent/state/video_approval_processed.json",
+        )
     )
     interval = int(os.environ.get("VIDEO_APPROVAL_POLL_INTERVAL_SEC", "300"))
 

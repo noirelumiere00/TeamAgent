@@ -100,6 +100,15 @@ class BaseSkill(ABC, Generic[TInput, TOutput]):
         """
         ...
 
+    def cleanup_output(self, output: TOutput) -> None:
+        """配送・JSON化後に request-scoped 一時成果物を破棄する任意hook。
+
+        永続化が必要な出力先を明示指定した Skill は何もしない。runtime/orchestrator は
+        ``run`` の戻り値を必要な形式へ変換した直後、必ずこのhookを呼ぶ。
+        """
+
+        del output
+
 
 class SkillRegistry:
     """Skill のレジストリ。インポート時に @register デコレータで自動登録される。"""

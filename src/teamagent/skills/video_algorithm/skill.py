@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import tempfile
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -45,6 +47,26 @@ Proxy = Callable[[bytes, str], tuple[bytes, str]]
 _MAX_FIELD_RESETS = 8  # 寛容パース: 最大何フィールドまで default に戻して動画を救済するか
 _OVERFETCH_BUFFER = 4  # over-fetch: 目標+この本数を検索し DL/分析失敗を後続候補でバックフィル
 _MAX_POOL = 30  # 検索の絶対上限（スクレイパ実証済み。レート制限/遮断を踏み抜かない）
+
+
+def _default_report_dir() -> str:
+    """Return the writable runtime directory for generated VSEO artifacts.
+
+    Fargate runs with a read-only root filesystem, so the historical
+    ``<cwd>/.local_out`` default silently disabled reports and proposal files.
+    ``/tmp`` is the task's bounded writable volume; operators may override the
+    directory explicitly for local development and tests.
+    """
+
+    configured = os.environ.get("TEAMAGENT_VSEO_REPORT_DIR", "").strip()
+    if configured:
+        return configured
+    return os.path.join(tempfile.gettempdir(), "teamagent", "vseo_reports")
+
+
+def _request_report_dir(request_id: str) -> str:
+    safe_request_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", request_id).strip("-")[:64] or "request"
+    return os.path.join(_default_report_dir(), f"{safe_request_id}-{uuid.uuid4().hex[:12]}")
 
 
 def _reset_field(data: Any, loc: tuple[int | str, ...]) -> bool:
@@ -236,6 +258,16 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         d = downloader or self._downloader
         if d is not None:
             return d(url)
+        from teamagent.adapters.media_job import MediaJobClient
+
+        if MediaJobClient.is_configured():
+            import hashlib
+
+            fingerprint = hashlib.sha256(url.encode("utf-8")).hexdigest()
+            return MediaJobClient().acquire_video(
+                url,
+                request_fingerprint=f"{request_id}:acquire:{fingerprint}",
+            )
         # 3層DLチェーン（ブラウザ内DL→yt-dlp→…）。全滅時は _analyze_one が cover-only へ縮退。
         from teamagent.adapters.video_download import download_video_chained
 
@@ -244,6 +276,17 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
     def _shrink(self, data: bytes, mime: str, request_id: str) -> tuple[bytes, str]:
         if self._proxy is not None:
             return self._proxy(data, mime)
+        from teamagent.adapters.media_job import MediaJobClient
+
+        if MediaJobClient.is_configured():
+            import hashlib
+
+            fingerprint = hashlib.sha256(data).hexdigest()
+            return MediaJobClient().proxy_video(
+                data,
+                mime,
+                request_fingerprint=f"{request_id}:proxy:{fingerprint}",
+            )
         from teamagent.adapters.video_proxy import ensure_under_limit
 
         return ensure_under_limit(data, mime, request_id=request_id)
@@ -292,9 +335,39 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             tcs = pick_timecodes(analysis, max_frames=6)
             if tcs:
                 cap_by_sec = {round(s, 1): c for s, c in tcs}
-                shots = extract_frames(
-                    data, mime, [s for s, _ in tcs], width=320, request_id=request_id
-                )
+                from teamagent.adapters.media_job import MediaJobClient
+
+                if MediaJobClient.is_configured():
+                    import base64
+                    import hashlib
+
+                    fingerprint = hashlib.sha256(data).hexdigest()
+                    try:
+                        media_shots = MediaJobClient().extract_frames(
+                            data,
+                            mime,
+                            [s for s, _ in tcs],
+                            width=320,
+                            request_fingerprint=f"{request_id}:frames:{fingerprint}",
+                        )
+                        shots = [
+                            (
+                                second,
+                                "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii"),
+                            )
+                            for second, image in media_shots
+                        ]
+                    except Exception as exc:
+                        logger.warning(
+                            "video_algorithm_frames_failed",
+                            rank=meta.rank,
+                            error=type(exc).__name__,
+                        )
+                        shots = []
+                else:
+                    shots = extract_frames(
+                        data, mime, [s for s, _ in tcs], width=320, request_id=request_id
+                    )
                 frames = [
                     FrameShot(sec=s, caption=cap_by_sec.get(round(s, 1), f"{s:.0f}s"), data_uri=uri)
                     for s, uri in shots
@@ -304,9 +377,32 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         # タイムラインで実再生する軽量Webプレビュー動画（~480p・graceful。失敗時は静止フレーム）
         video_uri = ""
         if analysis is not None:
-            from teamagent.adapters.video_proxy import make_web_preview
+            from teamagent.adapters.media_job import MediaJobClient
 
-            video_uri = make_web_preview(data, mime, request_id=request_id)
+            if MediaJobClient.is_configured():
+                import base64
+                import hashlib
+
+                fingerprint = hashlib.sha256(data).hexdigest()
+                try:
+                    preview, _preview_mime = MediaJobClient().proxy_video(
+                        data,
+                        mime,
+                        request_fingerprint=f"{request_id}:preview:{fingerprint}",
+                        limit_bytes=6 * 1024 * 1024,
+                        preview=True,
+                    )
+                    video_uri = "data:video/mp4;base64," + base64.b64encode(preview).decode("ascii")
+                except Exception as exc:
+                    logger.warning(
+                        "video_algorithm_preview_failed",
+                        rank=meta.rank,
+                        error=type(exc).__name__,
+                    )
+            else:
+                from teamagent.adapters.video_proxy import make_web_preview
+
+                video_uri = make_web_preview(data, mime, request_id=request_id)
         return AnalyzedVideo(
             meta=meta,
             analysis=analysis,
@@ -328,9 +424,21 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         フィールド（テロップ遷移秒/CTA秒/シーン分割）は観測不可＝プロンプトで空/既定に倒させる。
         cover は小サイズ画像なので _shrink（動画 transcode 経路）は通さず素通しする。
         """
-        from teamagent.skills.video_algorithm.thumbnails import fetch_cover
+        from teamagent.adapters.media_job import MediaJobClient
 
-        cover = fetch_cover(meta.cover_url, request_id=request_id)
+        if MediaJobClient.is_configured() and meta.cover_url:
+            try:
+                cover, _metadata = MediaJobClient().make_thumbnail_from_url(
+                    meta.cover_url,
+                    request_fingerprint=f"{request_id}:cover-analysis:{meta.rank}",
+                    width=1280,
+                )
+            except Exception:
+                cover = None
+        else:
+            from teamagent.skills.video_algorithm.thumbnails import fetch_cover
+
+            cover = fetch_cover(meta.cover_url, request_id=request_id)
         if not cover:
             return AnalyzedVideo(meta=meta, error=f"取得失敗: {cause}")
         user_prompt = (
@@ -370,7 +478,52 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         self, cover_url: str | None, frames: list[FrameShot], request_id: str
     ) -> tuple[str, ThumbColor | None]:
         """サムネ色を算出。cover_url 取得失敗時は抽出済みフレーム先頭で代替（graceful）。"""
-        from teamagent.skills.video_algorithm.thumbnails import analyze_cover, build_thumb
+        from teamagent.adapters.media_job import MediaJobClient
+        from teamagent.skills.video_algorithm.thumbnails import (
+            analyze_cover,
+            build_thumb,
+        )
+
+        if MediaJobClient.is_configured():
+            import base64
+            import hashlib
+
+            source: bytes | None = None
+            if frames:
+                head = frames[0].data_uri
+                if head.startswith("data:image/jpeg;base64,"):
+                    try:
+                        source = base64.b64decode(head.split(",", 1)[1], validate=True)
+                    except Exception:
+                        source = None
+            try:
+                if source is not None:
+                    fingerprint = hashlib.sha256(source).hexdigest()
+                    image, metadata = MediaJobClient().make_thumbnail(
+                        source,
+                        _sniff_image_mime(source),
+                        request_fingerprint=f"{request_id}:thumbnail:{fingerprint}",
+                        width=240,
+                    )
+                elif cover_url:
+                    fingerprint = hashlib.sha256(cover_url.encode("utf-8")).hexdigest()
+                    image, metadata = MediaJobClient().make_thumbnail_from_url(
+                        cover_url,
+                        request_fingerprint=f"{request_id}:thumbnail-url:{fingerprint}",
+                        width=240,
+                    )
+                else:
+                    return "", None
+            except Exception as exc:
+                logger.warning(
+                    "video_algorithm_thumbnail_failed",
+                    error=type(exc).__name__,
+                )
+                return "", None
+            return (
+                "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii"),
+                ThumbColor.model_validate(metadata),
+            )
 
         res = build_thumb(cover_url, request_id=request_id)
         if res is None and frames:
@@ -484,14 +637,22 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             search_volume=input.search_volume,
             kw_set=list(input.kw_set or []),
         )
-        out.report_html_path = self._write_report(out, ctx.request_id)
+        report_dir = self._report_dir or _request_report_dir(ctx.request_id)
+        out.report_html_path = self._write_report(out, ctx.request_id, report_dir)
         if out.report_html_path:
             # §M: 金庫外の OpenClaw 等が読めるよう、非公開S3へ発行して署名URLを出力に載せる。
             out.report_url = self._publish(out.report_html_path, ctx.request_id, input.query)
         # §Q-HTML→PPTX: 提案資料組み込み用の追加成果物（要求時のみ・graceful＝本体分析は壊さない）。
         if "slides" in input.outputs or "pptx" in input.outputs:
-            self._build_proposal_outputs(out, input, ctx.request_id)
+            self._build_proposal_outputs(out, input, ctx.request_id, report_dir)
         out.slack_summary = self._slack_summary(out, backfilled)
+        if (
+            out.report_html_path is None
+            and self._report_dir is None
+            and not os.environ.get("TEAMAGENT_VSEO_REPORT_DIR", "").strip()
+        ):
+            # report生成失敗後にslides/PPTXだけが残っても、配送済みならここで回収する。
+            shutil.rmtree(report_dir, ignore_errors=True)
         log.info(
             "video_algorithm_done",
             requested=input.max_videos,
@@ -527,7 +688,11 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         return delivery_url(result, request_id=request_id)
 
     def _build_proposal_outputs(
-        self, out: VideoAlgorithmOutput, input: VideoAlgorithmInput, request_id: str
+        self,
+        out: VideoAlgorithmOutput,
+        input: VideoAlgorithmInput,
+        request_id: str,
+        report_dir: str | None = None,
     ) -> None:
         """提案資料向け slides(HTML)/pptx を生成しS3署名URLを out に載せる（全工程graceful）。
 
@@ -535,14 +700,17 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         - pptx:   slides を playwright で要素スクショ→python-pptx→S3（拡張版イメージの chromium）。
         どの段が失敗しても本体分析(out)は壊さない＝報告だけ残して None のまま進む。
         """
-        report_dir = self._report_dir or os.path.join(os.getcwd(), ".local_out", "vseo_reports")
+        resolved_report_dir = report_dir or self._report_dir or _request_report_dir(request_id)
         safe = re.sub(r"[^\w]+", "_", out.query).strip("_")[:40] or "kw"
         if "slides" in input.outputs or "pptx" in input.outputs:
             try:
                 from teamagent.skills.video_algorithm.slides import render_slides
 
-                os.makedirs(report_dir, exist_ok=True)
-                spath = os.path.join(report_dir, f"vseo_slides_{safe}_{uuid.uuid4().hex[:8]}.html")
+                os.makedirs(resolved_report_dir, exist_ok=True)
+                spath = os.path.join(
+                    resolved_report_dir,
+                    f"vseo_slides_{safe}_{uuid.uuid4().hex[:8]}.html",
+                )
                 with open(spath, "w", encoding="utf-8") as f:
                     f.write(render_slides(out))
                 if "slides" in input.outputs:
@@ -550,7 +718,12 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                         spath, request_id, out.query, kind="slides"
                     )
                 if "pptx" in input.outputs:
-                    out.pptx_url = self._build_pptx(out, report_dir, safe, request_id)
+                    out.pptx_url = self._build_pptx(
+                        out,
+                        resolved_report_dir,
+                        safe,
+                        request_id,
+                    )
             except Exception:
                 logger.warning("vseo_proposal_outputs_failed", request_id=request_id)
 
@@ -558,11 +731,23 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         self, out: VideoAlgorithmOutput, report_dir: str, safe: str, request_id: str
     ) -> str | None:
         try:
-            from teamagent.skills.video_algorithm.pptx_export import render_pptx
-
             ppath = os.path.join(report_dir, f"vseo_proposal_{safe}_{uuid.uuid4().hex[:8]}.pptx")
-            if render_pptx(out, ppath) is None:
-                return None
+            from teamagent.adapters.media_job import MediaJobClient
+
+            if MediaJobClient.is_configured():
+                from teamagent.skills.video_algorithm.slides import render_slides
+
+                pptx = MediaJobClient().slides_to_pptx(
+                    render_slides(out),
+                    request_fingerprint=f"{request_id}:slides-pptx",
+                )
+                with open(ppath, "wb") as file:
+                    file.write(pptx)
+            else:
+                from teamagent.skills.video_algorithm.pptx_export import render_pptx
+
+                if render_pptx(out, ppath) is None:
+                    return None
             return self._publish_artifact(ppath, request_id, out.query, kind="pptx")
         except Exception:
             logger.warning("vseo_pptx_build_failed", request_id=request_id)
@@ -579,12 +764,20 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         fn = publish_pptx_file if kind == "pptx" else publish_html_file
         return fn(path, request_id=request_id, query=query)
 
-    def _write_report(self, out: VideoAlgorithmOutput, request_id: str) -> str | None:
+    def _write_report(
+        self,
+        out: VideoAlgorithmOutput,
+        request_id: str,
+        report_dir: str | None = None,
+    ) -> str | None:
         try:
-            report_dir = self._report_dir or os.path.join(os.getcwd(), ".local_out", "vseo_reports")
-            os.makedirs(report_dir, exist_ok=True)
+            resolved_report_dir = report_dir or self._report_dir or _request_report_dir(request_id)
+            os.makedirs(resolved_report_dir, exist_ok=True)
             safe = re.sub(r"[^\w]+", "_", out.query).strip("_")[:40] or "kw"
-            path = os.path.join(report_dir, f"vseo_{safe}_{uuid.uuid4().hex[:8]}.html")
+            path = os.path.join(
+                resolved_report_dir,
+                f"vseo_{safe}_{uuid.uuid4().hex[:8]}.html",
+            )
             html = render_report(out)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(html)
@@ -592,6 +785,20 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         except Exception:
             logger.warning("video_algorithm_report_write_failed", request_id=request_id)
             return None
+
+    def cleanup_output(self, out: VideoAlgorithmOutput) -> None:
+        """配送/JSON化後にreport・slides・PPTXを含むrequest dirを削除する。"""
+
+        if self._report_dir is not None or os.environ.get("TEAMAGENT_VSEO_REPORT_DIR", "").strip():
+            return
+        if not out.report_html_path:
+            return
+        request_dir = os.path.dirname(os.path.abspath(out.report_html_path))
+        root = os.path.abspath(_default_report_dir())
+        if request_dir == root or not os.path.commonpath((root, request_dir)) == root:
+            logger.warning("video_algorithm_cleanup_scope_rejected", path=request_dir)
+            return
+        shutil.rmtree(request_dir, ignore_errors=True)
 
     @staticmethod
     def _kw_context(input: VideoAlgorithmInput) -> str:

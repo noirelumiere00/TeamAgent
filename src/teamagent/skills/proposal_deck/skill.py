@@ -94,7 +94,12 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         )
         safe = _SAFE_NAME.sub("_", input.product_name).strip("_") or "deck"
         out_path = out_dir / f"{ctx.request_id}_{safe}.pptx"
-        rendered = render_deck(composer_out, template, out_path)
+        rendered = self._render_pptx(
+            composer_out,
+            template,
+            out_path,
+            request_id=ctx.request_id,
+        )
 
         # Wave3-⑨: 既定 OFF。USE_PROPOSAL_DECK_PUBLISH=1 のとき VSEO と同じ非公開 S3
         # presigned URL (7d) で publish して Slack から開ける状態にする。
@@ -132,6 +137,28 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             total_cost_usd=cost_usd,
         )
 
+    @staticmethod
+    def _render_pptx(
+        composer_out: ComposerOutput,
+        template: Path,
+        out_path: Path,
+        *,
+        request_id: str,
+    ) -> Path:
+        """media job設定時はworkerへ委譲し、ローカル開発だけ従来rendererを使う。"""
+        from teamagent.adapters.media_job import MediaJobClient
+
+        if not MediaJobClient.is_configured():
+            return render_deck(composer_out, template, out_path)
+        pptx = MediaJobClient().render_proposal_pptx(
+            template.read_bytes(),
+            composer_out.model_dump_json().encode("utf-8"),
+            request_fingerprint=f"{request_id}:proposal-pptx",
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(pptx)
+        return out_path
+
     def _emit_pdf_if_enabled(
         self,
         composer_out: ComposerOutput,
@@ -146,15 +173,32 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         if not (input.emit_pdf or _envflag("USE_PROPOSAL_DECK_PDF")):
             return None, None
         try:
-            from teamagent.skills.proposal_deck.pdf_export import render_proposal_pdf
-
             pdf_out = out_dir / f"{ctx.request_id}_{safe}.pdf"
-            rendered_pdf = render_proposal_pdf(
-                composer_out,
-                product_name=input.product_name,
-                version_id=version_id,
-                out_path=pdf_out,
-            )
+            from teamagent.adapters.media_job import MediaJobClient
+
+            if MediaJobClient.is_configured():
+                from teamagent.skills.proposal_deck.pdf_export import build_proposal_html
+
+                rendered = MediaJobClient().html_to_pdf(
+                    build_proposal_html(
+                        composer_out,
+                        product_name=input.product_name,
+                        version_id=version_id,
+                    ),
+                    request_fingerprint=f"{ctx.request_id}:proposal-pdf",
+                )
+                pdf_out.parent.mkdir(parents=True, exist_ok=True)
+                pdf_out.write_bytes(rendered)
+                rendered_pdf = pdf_out
+            else:
+                from teamagent.skills.proposal_deck.pdf_export import render_proposal_pdf
+
+                rendered_pdf = render_proposal_pdf(
+                    composer_out,
+                    product_name=input.product_name,
+                    version_id=version_id,
+                    out_path=pdf_out,
+                )
         except Exception:
             logger.exception("proposal_deck_pdf_failed", product=input.product_name)
             return None, None

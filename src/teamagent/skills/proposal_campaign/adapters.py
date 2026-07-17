@@ -31,6 +31,18 @@ def default_searcher(query: str, max_videos: int, request_id: str) -> list[TikTo
 
 def default_fetcher(cover_url: str | None, request_id: str) -> bytes | None:
     """fetch_cover の薄 wrapper（生 JPEG バイト | None・graceful）。"""
+    from teamagent.adapters.media_job import MediaJobClient
+
+    if cover_url and MediaJobClient.is_configured():
+        try:
+            body, _metadata = MediaJobClient().make_thumbnail_from_url(
+                cover_url,
+                request_fingerprint=f"{request_id}:proposal-cover",
+                width=480,
+            )
+            return body
+        except Exception:
+            return None
     return fetch_cover(cover_url, request_id=request_id)
 
 

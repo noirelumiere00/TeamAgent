@@ -7,6 +7,8 @@ AWSアクセスは adapters/tiktok_task_store.py に委譲(3層分離)。RunTask
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import ClassVar
 
 import structlog
@@ -58,19 +60,29 @@ class TikTokAcquireSkill(BaseSkill[TikTokAcquireInput, TikTokAcquireOutput]):
 
     def run(self, input: TikTokAcquireInput, ctx: SkillContext) -> TikTokAcquireOutput:
         log = ctx.bind_logger(self.name)
-        job_id = new_job_id()
         requested_by = ctx.metadata.get("user_email") or ctx.user_id or "unknown"
+        request_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "request_id": ctx.request_id,
+                    "input": input.model_dump(mode="json"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        job_id = new_job_id(request_fingerprint)
         spec = {
             "job_id": job_id,
             "keywords": input.keywords,
             "n_per_kw": input.n_per_kw,
             "videos_per_kw": input.videos_per_kw,
             "sort": input.sort,
-            "max_video_mb": 30,
+            "max_video_bytes": 30 * 1024 * 1024,
             "client": _build_client_config(input),
-            "s3_prefix": f"tiktok-acquire/{job_id}/",
-            "requested_by": requested_by,
-            "request_id": ctx.request_id,
+            "audit_principal_hash": hashlib.sha256(str(requested_by).encode("utf-8")).hexdigest(),
+            "request_fingerprint": request_fingerprint,
         }
         ok = self._store.submit(spec)
         log.info("tiktok_acquire_submitted", job_id=job_id, kw=len(input.keywords), ok=ok)

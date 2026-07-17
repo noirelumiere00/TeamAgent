@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.13"]
+        python-version: ["3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
 
@@ -39,9 +39,9 @@ jobs:
           pip install \
             pydantic structlog psycopg pgvector \
             boto3 slack-sdk slack-bolt aiohttp httpx \
+            anthropic \
             fastapi uvicorn \
             'sentry-sdk[asyncio]>=2.18.0' \
-            claude-agent-sdk==0.2.87 \
             pyyaml pypdf python-pptx pillow python-docx openpyxl \
             'fonttools[woff]>=4.63.0' \
             google-auth google-api-python-client google-auth-oauthlib \

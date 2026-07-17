@@ -1,425 +1,213 @@
 # syntax=docker/dockerfile:1
-# go-live: base は ECR Public ミラー（Docker Hub の匿名 pull rate limit 429 を回避・CodeBuild共有IP対策）。
-# ============================================================
-# TeamAgent-MCP バックエンド（streamable-http・会社共有RLS境界） — ECS Fargate(arm64)
-# ============================================================
-# 役割: OpenClaw外殻から MCP(streamable-http/bearer) でしか触れない「信頼境界の内側」。
-#   creds(Secrets/RDS/Bedrock) を持つのはこのコンテナだけ。scripts/run_mcp_http_server.py を起動。
-# 会社共有モデル(§G): TEAMAGENT_SHARED_COMPANY_DOMAINS 設定で会社メンバーidentity・本人識別不要。
-# 秘密値は焼かない（ECS task の secrets valueFrom で注入）。
-#
-# build:  docker build --platform linux/arm64 \
-#           --build-arg APP_HTML_SHA256=<64桁lower hex> \
-#           --build-arg APP_HTML_VERSION_ID=<S3 VersionId> \
-#           -f infra/docker/Dockerfile.teamagent-mcp -t teamagent-mcp:local .
-# TLS inspection環境では `--secret id=teamagent_ca,src=/path/to/ca_bundle.pem` を追加する。
-# secretはbuilderの一時mountだけで参照し、layerや最終imageには残さない。
-# 配布元が組織ポリシーで遮断されるローカル検証に限り、BuildKit cache
-# `teamagent-torch-wheels` にuv.lock記載SHAと一致するwheelを事前投入できる。
-# §L: スクレイプ系(tiktok/動画)ツールを使う“拡張版”は --build-arg WITH_SCRAPE_TOOLS=true で
-#     node/chromium/ffmpeg を載せる（既定 false＝P1薄殻イメージは軽量のまま）。
-#
-# Base digest 更新手順（必ず linux/arm64 manifest の完全digestを固定する）:
-#   docker buildx imagetools inspect docker.io/library/python:3.11-slim
-#   docker pull --platform linux/arm64 \
-#     public.ecr.aws/docker/library/python:3.11-slim@sha256:<arm64-manifest>
-# uv digest 更新手順:
-#   docker buildx imagetools inspect ghcr.io/astral-sh/uv:latest
-#   docker pull --platform linux/arm64 ghcr.io/astral-sh/uv:latest@sha256:<arm64-manifest>
-# Node更新手順（linux/arm64 child manifestとnode実体を両方固定する）:
-#   docker buildx imagetools inspect --raw public.ecr.aws/docker/library/node:24-bookworm-slim
-#   docker run --rm --platform linux/arm64 --entrypoint /bin/sh \
-#     public.ecr.aws/docker/library/node:24-bookworm-slim@sha256:<arm64-manifest> \
-#     -c 'node --version; sha256sum /usr/local/bin/node; ldd /usr/local/bin/node'
-# E5はHugging Faceの40桁commit SHA、ChromiumはPlaywright公式arm64 archiveと実行ファイルの
-# SHA256を二重固定する。更新時は `npx -y playwright@<version> install chromium` のURL/revisionを
-# 実測し、archive hash・実行ファイルhash/version・headless smoke後にlabelを同時更新する。
-# 現在値は 2026-07-16 に pull/inspect 済み。タグは可読性のみで、取得物はdigestが決定する。
-# ============================================================
+# TeamAgent core runtime. This image intentionally has no media/browser toolchain.
 
-ARG WITH_SCRAPE_TOOLS=false
+ARG PYTHON_BUILDER_ARM64_DIGEST=sha256:2eac0b3ef42685b2d45d57633364aaa87ec54bf29960dcf7ecd0eed20e14d124
+ARG PYTHON_RUNTIME_ARM64_DIGEST=sha256:b7fda4f2d99284fe078f751034a0c858676f3456c4d75f1e935527c1951b5ba9
+ARG UV_ARM64_DIGEST=sha256:9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4
+ARG UV_VERSION=0.11.29
+ARG UV_BINARY_SHA256=f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e
+ARG PYTHON_VERSION=3.14.6
+ARG PYTHON_BINARY_SHA256=0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8
+ARG E5_MODEL_REVISION=3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3
+ARG TORCH_VERSION=2.12.0+cpu
+ARG TORCH_ARM64_WHEEL_URL=https://pytorch.s3.amazonaws.com/whl/cpu/torch-2.12.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl
+ARG TORCH_ARM64_WHEEL_SHA256=797c066367792c92eb97cafba7fd0caa8d7455e6078a4ee880630077378dc372
+
+FROM ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST} AS uv
+
+FROM cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST} AS builder
+USER 0
+WORKDIR /app
+
+ARG PYTHON_BUILDER_ARM64_DIGEST
+ARG PYTHON_RUNTIME_ARM64_DIGEST
+ARG UV_ARM64_DIGEST
+ARG UV_VERSION
+ARG UV_BINARY_SHA256
+ARG PYTHON_VERSION
+ARG PYTHON_BINARY_SHA256
+ARG E5_MODEL_REVISION
+ARG TORCH_VERSION
+ARG TORCH_ARM64_WHEEL_URL
+ARG TORCH_ARM64_WHEEL_SHA256
 ARG APP_HTML_SHA256
 ARG APP_HTML_VERSION_ID
-ARG E5_MODEL_REVISION=3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3
-ARG NODE_VERSION=24.18.0
-ARG NODE_BINARY_SHA256=6bf69d0eda41a12030d5f28d958cd09ce323bc0c13f1ab4d8bb426933aa08812
-ARG PLAYWRIGHT_VERSION=1.61.1
-ARG PLAYWRIGHT_CORE_ARCHIVE_SHA256=3740bba3a3e93b4c7bd7c0f6e3c0e5f8cdce498bef13511e4d534cc99a8ce198
-ARG PLAYWRIGHT_CHROMIUM_REVISION=1228
-ARG PLAYWRIGHT_CHROMIUM_BROWSER_VERSION=149.0.7827.55
-ARG PLAYWRIGHT_CHROMIUM_VERSION=149.0.7827.0
-ARG PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256=ec044b50ed065adeb4c5ffdb42d1529901cbaf897cdf542bfef8af01d6e0cc79
-ARG PLAYWRIGHT_CHROMIUM_SHA256=c1aa0fb5b6c60eb093df69d9e40dd50ab2039d3ccba8836ef21880340a77af64
 
-# Node/npmは公式Node imageの固定arm64 childから供給する。npm/corepackはこのstageだけで使い、
-# runtimeへはhash検証済みnode実体だけをcopyする。
-FROM public.ecr.aws/docker/library/node:24-bookworm-slim@sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c AS node-toolchain
-ARG NODE_VERSION
-ARG NODE_BINARY_SHA256
-WORKDIR /tiktok
-RUN set -eux; \
-    test "$(node --version)" = "v${NODE_VERSION}"; \
-    test "$(npm --version)" = "11.16.0"; \
-    printf '%s  %s\n' "$NODE_BINARY_SHA256" /usr/local/bin/node | sha256sum -c -
-COPY tools/tiktok_scraper/package.json tools/tiktok_scraper/package-lock.json ./
-RUN --mount=type=secret,id=teamagent_ca,required=false \
-    if [ -f /run/secrets/teamagent_ca ]; then \
-      export NODE_EXTRA_CA_CERTS=/run/secrets/teamagent_ca; \
-    fi; \
-    npm ci --omit=dev --ignore-scripts
+COPY --from=uv /uv /usr/bin/uv
+RUN set -eu; \
+    test "$(uv --version)" = "uv ${UV_VERSION} (aarch64-unknown-linux-musl)"; \
+    printf '%s  %s\n' "$UV_BINARY_SHA256" /usr/bin/uv | sha256sum -c -; \
+    test "$(python --version)" = "Python ${PYTHON_VERSION}"; \
+    printf '%s  %s\n' "$PYTHON_BINARY_SHA256" /usr/bin/python3.14 | sha256sum -c -
 
-# build-essential と uv はbuilderにだけ置く。最終runtimeへroot filesystemをコピーしない。
-FROM public.ecr.aws/docker/library/python:3.11-slim@sha256:4fcdc7a15c936b4ffb35dac253215a8e679ea4d25d5e0ffa025fca0d6a702448 AS builder-common
-COPY --from=ghcr.io/astral-sh/uv:latest@sha256:9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4 /uv /usr/local/bin/uv
-WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
     UV_SYSTEM_CERTS=true \
     HF_HOME=/app/.hf-cache
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# 1) 依存だけ先に解決（lock 駆動・layer cache）。MCP は extra。dev(ruff/mypy/pytest)は除外。
-COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,id=teamagent-torch-wheels,target=/var/cache/teamagent-wheels \
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,id=teamagent-core-torch-arm64,target=/var/cache/teamagent,sharing=locked \
     --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
     if [ -f /run/secrets/teamagent_ca ]; then \
-      export SSL_CERT_FILE=/run/secrets/teamagent_ca REQUESTS_CA_BUNDLE=/run/secrets/teamagent_ca; \
+      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/teamagent_ca \
+        > /tmp/teamagent-build-ca.pem; \
+      export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
+      export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
     fi; \
-    if [ -f /var/cache/teamagent-wheels/torch-2.12.0+cpu-cp311-cp311-manylinux_2_28_aarch64.whl ]; then \
-      echo "4ecd8ecdb9ea1affa5f35d10501809d62dc713f7de9635e8098e760ddbeb852c  /var/cache/teamagent-wheels/torch-2.12.0+cpu-cp311-cp311-manylinux_2_28_aarch64.whl" | sha256sum -c -; \
-      uv sync --frozen --no-dev --no-install-project --extra mcp --extra embeddings --no-install-package torch; \
-      uv pip install --python /app/.venv/bin/python --no-deps /var/cache/teamagent-wheels/torch-2.12.0+cpu-cp311-cp311-manylinux_2_28_aarch64.whl; \
-    else \
-      uv sync --frozen --no-dev --no-install-project --extra mcp --extra embeddings; \
-    fi
+    uv sync --frozen --no-dev --no-editable --no-install-project \
+      --extra mcp --extra embeddings --no-install-package torch; \
+    wheel=/var/cache/teamagent/torch-${TORCH_VERSION}-cp314-cp314-manylinux_2_28_aarch64.whl; \
+    if [ ! -s "$wheel" ] || ! printf '%s  %s\n' \
+      "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; then \
+      rm -f "$wheel"; \
+      TORCH_WHEEL_URL="$TORCH_ARM64_WHEEL_URL" TORCH_WHEEL="$wheel" \
+        python -c "import os, urllib.request; urllib.request.urlretrieve(os.environ['TORCH_WHEEL_URL'], os.environ['TORCH_WHEEL'])"; \
+    fi; \
+    printf '%s  %s\n' "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; \
+    uv pip install --python /app/.venv/bin/python --no-deps "$wheel"; \
+    test "$(/app/.venv/bin/python -c 'import torch; print(torch.__version__)')" = "$TORCH_VERSION"; \
+    rm -f /tmp/teamagent-build-ca.pem
 
-# 2) アプリ本体（src/scripts/migrations のみ。.env や secrets は含めない）
-# README.md は hatchling のプロジェクトbuild（editable install）が必須要求（pyproject:8 readme）。
-COPY README.md ./
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY infra/migrations/ ./infra/migrations/
-# ingest が読む data/ingest_sources.yaml（＋eval gold set）。これが無いと Fargate ingest が
-# "ingest sources yaml not found" で exit 2（従来 data/ は COPY されておらず Scheduled ingest は不発だった）。
 COPY data/ ./data/
-COPY tools/ ./tools/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,id=teamagent-torch-wheels,target=/var/cache/teamagent-wheels \
+RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,id=teamagent-core-torch-arm64,target=/var/cache/teamagent,sharing=locked \
     --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
     if [ -f /run/secrets/teamagent_ca ]; then \
-      export SSL_CERT_FILE=/run/secrets/teamagent_ca REQUESTS_CA_BUNDLE=/run/secrets/teamagent_ca; \
+      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/teamagent_ca \
+        > /tmp/teamagent-build-ca.pem; \
+      export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
+      export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
     fi; \
-    if [ -f /var/cache/teamagent-wheels/torch-2.12.0+cpu-cp311-cp311-manylinux_2_28_aarch64.whl ]; then \
-      uv sync --frozen --no-dev --extra mcp --extra embeddings --no-install-package torch; \
-      echo "4ecd8ecdb9ea1affa5f35d10501809d62dc713f7de9635e8098e760ddbeb852c  /var/cache/teamagent-wheels/torch-2.12.0+cpu-cp311-cp311-manylinux_2_28_aarch64.whl" | sha256sum -c -; \
-      uv pip install --python /app/.venv/bin/python --no-deps /var/cache/teamagent-wheels/torch-2.12.0+cpu-cp311-cp311-manylinux_2_28_aarch64.whl; \
-    else \
-      uv sync --frozen --no-dev --extra mcp --extra embeddings; \
-    fi
+    uv sync --frozen --no-dev --no-editable --extra mcp --extra embeddings \
+      --no-install-package torch; \
+    wheel=/var/cache/teamagent/torch-${TORCH_VERSION}-cp314-cp314-manylinux_2_28_aarch64.whl; \
+    printf '%s  %s\n' "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; \
+    uv pip install --python /app/.venv/bin/python --no-deps "$wheel"; \
+    test "$(/app/.venv/bin/python -c 'import torch; print(torch.__version__)')" = "$TORCH_VERSION"; \
+    rm -f /tmp/teamagent-build-ca.pem
 
-# E5埋め込みモデル(multilingual-e5-large ~2.2GB)を完全commit SHAで焼き込む。
-# refs/mainも固定SHAへ向け、既存アプリのrevision省略loadをruntime offlineで同snapshotへ解決する。
-ARG E5_MODEL_REVISION
-RUN --mount=type=secret,id=teamagent_ca,required=false \
-    set -eux; \
-    mkdir -p /app/.local_out /app/.hf-cache; \
-    if [ -f /run/secrets/teamagent_ca ]; then \
-      export SSL_CERT_FILE=/run/secrets/teamagent_ca REQUESTS_CA_BUNDLE=/run/secrets/teamagent_ca; \
-    fi; \
+# E5 is content-addressed by its upstream 40-hex commit. Both explicit and
+# revision-less offline loads are checked before the runtime layer is produced.
+RUN --mount=type=cache,id=teamagent-huggingface-arm64,target=/root/.cache/huggingface,sharing=locked \
+    --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
     case "$E5_MODEL_REVISION" in *[!0-9a-f]*) exit 1 ;; esac; \
     test "${#E5_MODEL_REVISION}" -eq 40; \
-    TEAMAGENT_E5_MODEL_REVISION="$E5_MODEL_REVISION" /app/.venv/bin/python -c "import os; from huggingface_hub import snapshot_download; snapshot_download(repo_id='intfloat/multilingual-e5-large', revision=os.environ['TEAMAGENT_E5_MODEL_REVISION'], allow_patterns=['1_Pooling/config.json', 'config.json', 'model.safetensors', 'modules.json', 'sentence_bert_config.json', 'sentencepiece.bpe.model', 'special_tokens_map.json', 'tokenizer.json', 'tokenizer_config.json'])"; \
-    MODEL_CACHE=/app/.hf-cache/hub/models--intfloat--multilingual-e5-large; \
-    SNAPSHOT_PATH="$MODEL_CACHE/snapshots/$E5_MODEL_REVISION"; \
-    for file in 1_Pooling/config.json config.json model.safetensors modules.json sentence_bert_config.json sentencepiece.bpe.model special_tokens_map.json tokenizer.json tokenizer_config.json; do \
-      test -s "$SNAPSHOT_PATH/$file"; \
-    done; \
-    mkdir -p "$MODEL_CACHE/refs"; \
-    printf '%s' "$E5_MODEL_REVISION" > "$MODEL_CACHE/refs/main"; \
-    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 SNAPSHOT_PATH="$SNAPSHOT_PATH" TEAMAGENT_E5_MODEL_REVISION="$E5_MODEL_REVISION" /app/.venv/bin/python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ['SNAPSHOT_PATH'], local_files_only=True); SentenceTransformer('intfloat/multilingual-e5-large', revision=os.environ['TEAMAGENT_E5_MODEL_REVISION'], local_files_only=True); SentenceTransformer('intfloat/multilingual-e5-large', local_files_only=True)"
-
-FROM builder-common AS builder-false
-# 薄殻にはbrowserが無く、Playwright経路もtool registryで露出しない。Python wheelに同梱された
-# 約120MBのNode driverを含む未使用packageをbuilder側で除き、runtime layerへ持ち込まない。
-RUN uv pip uninstall --python /app/.venv/bin/python playwright \
-    && /app/.venv/bin/python -c "import importlib.util; assert importlib.util.find_spec('playwright') is None"
-
-# §L 拡張版。Playwright公式browser archiveの取得・展開処理は最終runtimeへ持ち込まない。
-FROM builder-common AS builder-true
-ARG PLAYWRIGHT_VERSION
-ARG PLAYWRIGHT_CORE_ARCHIVE_SHA256
-ARG PLAYWRIGHT_CHROMIUM_REVISION
-ARG PLAYWRIGHT_CHROMIUM_BROWSER_VERSION
-ARG PLAYWRIGHT_CHROMIUM_VERSION
-ARG PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256
-ARG PLAYWRIGHT_CHROMIUM_SHA256
-# Playwright 1.61.1がlinux/arm64へ解決するrevision 1228の公式artifactを直接取得する。
-# CDN payload差替えをarchive SHAで拒否し、展開後も実行ファイルSHAを再検証する。
-# artifact metadataは149.0.7827.55、実行バイナリの`--version`は149.0.7827.0。
-# Debian apt chromiumはarm64 FargateでSIGTRAPした既知回帰があるため使用しない。
-RUN --mount=type=secret,id=teamagent_ca,required=false \
-    set -eux; \
-    test "$PLAYWRIGHT_VERSION" = "1.61.1"; \
-    case "$PLAYWRIGHT_CORE_ARCHIVE_SHA256" in ""|*[!0-9a-f]*) exit 1 ;; esac; \
-    case "$PLAYWRIGHT_CHROMIUM_REVISION" in ""|*[!0-9]*) exit 1 ;; esac; \
-    case "$PLAYWRIGHT_CHROMIUM_BROWSER_VERSION" in ""|*[!0-9.]*) exit 1 ;; esac; \
-    case "$PLAYWRIGHT_CHROMIUM_VERSION" in ""|*[!0-9.]*) exit 1 ;; esac; \
-    case "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" in ""|*[!0-9a-f]*) exit 1 ;; esac; \
-    case "$PLAYWRIGHT_CHROMIUM_SHA256" in ""|*[!0-9a-f]*) exit 1 ;; esac; \
-    test "${#PLAYWRIGHT_CORE_ARCHIVE_SHA256}" -eq 64; \
-    test "${#PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256}" -eq 64; \
-    test "${#PLAYWRIGHT_CHROMIUM_SHA256}" -eq 64; \
     if [ -f /run/secrets/teamagent_ca ]; then \
-      export SSL_CERT_FILE=/run/secrets/teamagent_ca; \
+      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/teamagent_ca \
+        > /tmp/teamagent-build-ca.pem; \
+      export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
+      export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
     fi; \
-    PLAYWRIGHT_CORE_ARCHIVE=/tmp/playwright-core.tgz; \
-    PLAYWRIGHT_CORE_URL="https://registry.npmjs.org/playwright-core/-/playwright-core-${PLAYWRIGHT_VERSION}.tgz"; \
-    PLAYWRIGHT_CORE_ARCHIVE="$PLAYWRIGHT_CORE_ARCHIVE" PLAYWRIGHT_CORE_URL="$PLAYWRIGHT_CORE_URL" python -c 'import os, urllib.request; urllib.request.urlretrieve(os.environ["PLAYWRIGHT_CORE_URL"], os.environ["PLAYWRIGHT_CORE_ARCHIVE"])'; \
-    printf '%s  %s\n' "$PLAYWRIGHT_CORE_ARCHIVE_SHA256" "$PLAYWRIGHT_CORE_ARCHIVE" | sha256sum -c -; \
-    PLAYWRIGHT_CORE_ARCHIVE="$PLAYWRIGHT_CORE_ARCHIVE" PLAYWRIGHT_CHROMIUM_REVISION="$PLAYWRIGHT_CHROMIUM_REVISION" PLAYWRIGHT_CHROMIUM_BROWSER_VERSION="$PLAYWRIGHT_CHROMIUM_BROWSER_VERSION" python -c 'import json, os, tarfile; archive=tarfile.open(os.environ["PLAYWRIGHT_CORE_ARCHIVE"], "r:gz"); metadata=json.load(archive.extractfile("package/browsers.json")); archive.close(); chromium=next(item for item in metadata["browsers"] if item["name"] == "chromium"); assert chromium["revision"] == os.environ["PLAYWRIGHT_CHROMIUM_REVISION"], chromium; assert chromium["browserVersion"] == os.environ["PLAYWRIGHT_CHROMIUM_BROWSER_VERSION"], chromium'; \
-    rm "$PLAYWRIGHT_CORE_ARCHIVE"; \
-    CHROMIUM_ARCHIVE=/tmp/chromium-linux-arm64.zip; \
-    CHROMIUM_URL="https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/${PLAYWRIGHT_CHROMIUM_REVISION}/chromium-linux-arm64.zip"; \
-    CHROMIUM_ARCHIVE="$CHROMIUM_ARCHIVE" CHROMIUM_URL="$CHROMIUM_URL" python -c 'import os, urllib.request; urllib.request.urlretrieve(os.environ["CHROMIUM_URL"], os.environ["CHROMIUM_ARCHIVE"])'; \
-    printf '%s  %s\n' "$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" "$CHROMIUM_ARCHIVE" | sha256sum -c -; \
-    CHROMIUM_DIR="/opt/pw/chromium-${PLAYWRIGHT_CHROMIUM_REVISION}"; \
-    mkdir -p "$CHROMIUM_DIR"; \
-    python -m zipfile -e "$CHROMIUM_ARCHIVE" "$CHROMIUM_DIR"; \
-    rm "$CHROMIUM_ARCHIVE"; \
-    CHROME_DIR="$CHROMIUM_DIR/chrome-linux"; \
-    CHROME_BIN="$CHROME_DIR/chrome"; \
-    find "$CHROME_DIR" -type f -name '*.info' -delete; \
-    test -z "$(find "$CHROME_DIR" -type f -name '*.info' -print -quit)"; \
-    test -s "$CHROME_DIR/locales/en-US.pak"; \
-    test -s "$CHROME_DIR/locales/ja.pak"; \
-    chmod 0755 "$CHROME_BIN" "$CHROME_DIR/chrome-wrapper" "$CHROME_DIR/chrome_crashpad_handler" "$CHROME_DIR/chrome_sandbox"; \
-    chmod -R a+rX /opt/pw; \
-    test -x "$CHROME_BIN"; \
-    printf '%s  %s\n' "$PLAYWRIGHT_CHROMIUM_SHA256" "$CHROME_BIN" | sha256sum -c -
-COPY --from=node-toolchain /tiktok/node_modules/ /app/tools/tiktok_scraper/node_modules/
-# Python Playwright wheel同梱の別Node実体は不要。固定済みNode 24へ向け、PPTX経路はruntimeで
-# Python Playwrightから実Chromiumを起動して互換性を検証する。
-RUN set -eux; \
-    PLAYWRIGHT_DRIVER_NODE=/app/.venv/lib/python3.11/site-packages/playwright/driver/node; \
-    test -x "$PLAYWRIGHT_DRIVER_NODE"; \
-    rm "$PLAYWRIGHT_DRIVER_NODE"; \
-    ln -s /usr/local/bin/node "$PLAYWRIGHT_DRIVER_NODE"; \
-    test "$(readlink "$PLAYWRIGHT_DRIVER_NODE")" = /usr/local/bin/node
+    TEAMAGENT_E5_MODEL_REVISION="$E5_MODEL_REVISION" \
+      /app/.venv/bin/python -c "import os; from huggingface_hub import snapshot_download; snapshot_download(repo_id='intfloat/multilingual-e5-large', revision=os.environ['TEAMAGENT_E5_MODEL_REVISION'], allow_patterns=['1_Pooling/config.json', 'config.json', 'model.safetensors', 'modules.json', 'sentence_bert_config.json', 'sentencepiece.bpe.model', 'special_tokens_map.json', 'tokenizer.json', 'tokenizer_config.json'])"; \
+    model_cache=/app/.hf-cache/hub/models--intfloat--multilingual-e5-large; \
+    snapshot="$model_cache/snapshots/$E5_MODEL_REVISION"; \
+    test -s "$snapshot/model.safetensors"; \
+    mkdir -p "$model_cache/refs"; \
+    printf '%s' "$E5_MODEL_REVISION" > "$model_cache/refs/main"; \
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+      /app/.venv/bin/python -c "import os; from sentence_transformers import SentenceTransformer; revision=os.environ['E5_MODEL_REVISION']; SentenceTransformer('intfloat/multilingual-e5-large', revision=revision, local_files_only=True); SentenceTransformer('intfloat/multilingual-e5-large', local_files_only=True)"; \
+    rm -f /tmp/teamagent-build-ca.pem
 
-# runtimeは同一arm64 Python baseから作り、builderの/appだけを移送する。
-FROM public.ecr.aws/docker/library/python:3.11-slim@sha256:4fcdc7a15c936b4ffb35dac253215a8e679ea4d25d5e0ffa025fca0d6a702448 AS runtime-common
+# Keep only the shared wire contract on core; operation and worker
+# implementations are copied solely into the media image.
+RUN set -eu; \
+    rm -f /app/src/teamagent/media/operations.py /app/src/teamagent/media/worker.py; \
+    site=/app/.venv/lib/python3.14/site-packages/teamagent/media; \
+    rm -f "$site/operations.py" "$site/worker.py"; \
+    rm -rf "$site/__pycache__"; \
+    /app/.venv/bin/python -c "import importlib.util as i; blocked=('claude_agent_sdk','playwright','yt_dlp','weasyprint','pptx'); assert all(i.find_spec(name) is None for name in blocked); import anthropic, boto3, psycopg, sentence_transformers, teamagent.media.contracts"; \
+    test ! -e /app/tools; \
+    test ! -e /app/.venv/lib/python3.14/site-packages/claude_agent_sdk/_bundled/claude; \
+    test -z "$(find /app -type f \( -name node -o -name bun -o -name npm -o -name npx -o -name chromium -o -name ffmpeg -o -name yt-dlp \) -print -quit)"; \
+    case "$APP_HTML_SHA256" in ""|*[!0-9a-f]*) exit 1 ;; esac; \
+    test "${#APP_HTML_SHA256}" -eq 64; \
+    printf '%s  %s\n' "$APP_HTML_SHA256" /app/src/teamagent/connect_web/static/app.html \
+      | sha256sum -c -; \
+    case "$APP_HTML_VERSION_ID" in ""|*[!A-Za-z0-9._~+/=-]*) exit 1 ;; esac; \
+    install -d -m 0755 /app/provenance; \
+    uv pip freeze --python /app/.venv/bin/python > /app/provenance/python-packages.txt; \
+    printf '%s\n' "$PYTHON_BUILDER_ARM64_DIGEST" > /app/provenance/python-builder-arm64.digest; \
+    printf '%s\n' "$PYTHON_RUNTIME_ARM64_DIGEST" > /app/provenance/python-runtime-arm64.digest; \
+    printf '%s\n' "$UV_ARM64_DIGEST" > /app/provenance/uv-arm64.digest; \
+    install -d -m 0700 -o 10001 -g 10001 \
+      /runtime-tmp/teamagent/home /runtime-tmp/teamagent/tmp \
+      /runtime-tmp/teamagent/cache /runtime-tmp/teamagent/config \
+      /runtime-tmp/teamagent/data /runtime-tmp/teamagent/state \
+      /runtime-tmp/teamagent/jobs
+
+FROM cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST} AS final
 WORKDIR /app
 
-# 柱4(2026-06-22): ビルド出所追跡（image↔commit）。build時 --build-arg GIT_COMMIT/GIT_BRANCH で注入。
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
-ARG WITH_SCRAPE_TOOLS
+ARG APP_HTML_SHA256
+ARG APP_HTML_VERSION_ID
+ARG PYTHON_BUILDER_ARM64_DIGEST
+ARG PYTHON_RUNTIME_ARM64_DIGEST
+ARG UV_ARM64_DIGEST
+ARG UV_VERSION
+ARG UV_BINARY_SHA256
+ARG PYTHON_VERSION
+ARG PYTHON_BINARY_SHA256
 ARG E5_MODEL_REVISION
-ARG NODE_VERSION
-ARG NODE_BINARY_SHA256
-ARG PLAYWRIGHT_VERSION
-ARG PLAYWRIGHT_CHROMIUM_REVISION
-ARG PLAYWRIGHT_CHROMIUM_VERSION
-ARG PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256
-ARG PLAYWRIGHT_CHROMIUM_SHA256
-ENV TEAMAGENT_BUILD_COMMIT=$GIT_COMMIT \
-    TEAMAGENT_BUILD_BRANCH=$GIT_BRANCH \
-    TEAMAGENT_WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS \
-    TEAMAGENT_E5_MODEL_REVISION=$E5_MODEL_REVISION \
-    TEAMAGENT_NODE_VERSION=$NODE_VERSION \
-    TEAMAGENT_NODE_BINARY_SHA256=$NODE_BINARY_SHA256 \
-    TEAMAGENT_PLAYWRIGHT_VERSION=$PLAYWRIGHT_VERSION \
-    TEAMAGENT_CHROMIUM_REVISION=$PLAYWRIGHT_CHROMIUM_REVISION \
-    TEAMAGENT_CHROMIUM_VERSION=$PLAYWRIGHT_CHROMIUM_VERSION \
-    TEAMAGENT_CHROMIUM_ARCHIVE_SHA256=$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256 \
-    TEAMAGENT_CHROMIUM_SHA256=$PLAYWRIGHT_CHROMIUM_SHA256 \
+ARG TORCH_VERSION
+ARG TORCH_ARM64_WHEEL_SHA256
+
+COPY --from=builder --chown=10001:10001 /app/ /app/
+COPY --from=builder --chown=10001:10001 /runtime-tmp/teamagent/ /tmp/teamagent/
+
+ENV HOME=/tmp/teamagent/home \
+    TMPDIR=/tmp/teamagent/tmp \
+    XDG_CACHE_HOME=/tmp/teamagent/cache \
+    XDG_CONFIG_HOME=/tmp/teamagent/config \
+    XDG_DATA_HOME=/tmp/teamagent/data \
+    XDG_STATE_HOME=/tmp/teamagent/state \
+    VIDEO_APPROVAL_STATE_PATH=/tmp/teamagent/state/video_approval_processed.json \
+    MEDIA_JOB_TMP_ROOT=/tmp/teamagent/jobs \
+    PATH=/app/.venv/bin:/usr/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    HF_HOME=/app/.hf-cache \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
-    HF_HOME=/app/.hf-cache \
-    PATH="/app/.venv/bin:${PATH}" \
+    TOKENIZERS_PARALLELISM=false \
+    TEAMAGENT_E5_MODEL_REVISION=$E5_MODEL_REVISION \
+    TEAMAGENT_RUNTIME_KIND=core \
     TEAMAGENT_MCP_HOST=0.0.0.0 \
     TEAMAGENT_MCP_PORT=8787 \
     TEAMAGENT_MCP_PATH=/mcp \
-    AWS_REGION=ap-northeast-1 \
-    TIKTOK_NODE_BIN=node \
-    CHROMIUM_PATH=/usr/bin/chromium
-LABEL org.opencontainers.image.revision=$GIT_COMMIT \
-      io.teamagent.build.with-scrape-tools=$WITH_SCRAPE_TOOLS
+    AWS_REGION=ap-northeast-1
 
-# 非root。COPY --chownで巨大な/appを追加レイヤなしにmcp所有へする。
-RUN useradd -m -u 10001 mcp \
-    && mkdir -p /app/.local_out /app/.hf-cache \
-    && chown mcp:mcp /app/.local_out /app/.hf-cache
+LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
+      org.opencontainers.image.ref.name="$GIT_BRANCH" \
+      io.teamagent.runtime.kind="core" \
+      io.teamagent.contract.python-version="$PYTHON_VERSION" \
+      io.teamagent.contract.python-binary-sha256="$PYTHON_BINARY_SHA256" \
+      io.teamagent.contract.python-builder-arm64-digest="$PYTHON_BUILDER_ARM64_DIGEST" \
+      io.teamagent.contract.python-runtime-arm64-digest="$PYTHON_RUNTIME_ARM64_DIGEST" \
+      io.teamagent.contract.uv-arm64-digest="$UV_ARM64_DIGEST" \
+      io.teamagent.contract.uv-version="$UV_VERSION" \
+      io.teamagent.contract.uv-binary-sha256="$UV_BINARY_SHA256" \
+      io.teamagent.contract.e5-model-revision="$E5_MODEL_REVISION" \
+      io.teamagent.contract.torch-version="$TORCH_VERSION" \
+      io.teamagent.contract.torch-arm64-wheel-sha256="$TORCH_ARM64_WHEEL_SHA256" \
+      io.teamagent.contract.app-html-sha256="$APP_HTML_SHA256" \
+      io.teamagent.contract.app-html-version-id="$APP_HTML_VERSION_ID"
 
-# S3から配置されたapp.htmlとimageの対応をbuild時に固定する。contextの実体はmountするだけで
-# layerへコピーしない。SHAは必須、VersionIdはlabelへ安全に格納できる文字だけを許可する。
-FROM runtime-common AS app-html-provenance
-ARG APP_HTML_SHA256
-ARG APP_HTML_VERSION_ID
-RUN --mount=type=bind,source=src/teamagent/connect_web/static/app.html,target=/tmp/app.html \
-    set -eu; \
-    case "$APP_HTML_SHA256" in \
-      ""|*[!0-9a-f]*) echo "APP_HTML_SHA256 must be 64 lowercase hex characters" >&2; exit 1 ;; \
-    esac; \
-    test "${#APP_HTML_SHA256}" -eq 64; \
-    printf '%s  %s\n' "$APP_HTML_SHA256" /tmp/app.html | sha256sum -c -; \
-    case "$APP_HTML_VERSION_ID" in \
-      ""|*[!A-Za-z0-9._~+/=-]*) echo "unsafe APP_HTML_VERSION_ID" >&2; exit 1 ;; \
-    esac; \
-    test "${#APP_HTML_VERSION_ID}" -le 1024; \
-    mkdir /app-html-provenance; \
-    printf '%s\n' "$APP_HTML_SHA256" > /app-html-provenance/sha256
-
-FROM runtime-common AS runtime-false
-COPY --from=builder-false --chown=10001:10001 /app/ /app/
-RUN set -eux; \
-    /usr/local/bin/python -m pip uninstall -y pip setuptools wheel packaging; \
-    rm -rf /root/.cache/pip; \
-    ! /usr/local/bin/python -m pip --version >/dev/null 2>&1; \
-    apt-get purge -y --allow-remove-essential perl-base; \
-    rm -rf /var/cache/apt /var/lib/apt/lists; \
-    test "$TEAMAGENT_WITH_SCRAPE_TOOLS" = "false"; \
-    for binary in node chromium ffmpeg npm corepack uv gcc g++ make curl; do \
-      if command -v "$binary" >/dev/null 2>&1; then echo "unexpected binary: $binary" >&2; exit 1; fi; \
-    done; \
-    ! command -v perl; \
-    ! dpkg-query -W perl-base; \
-    test ! -e /var/cache/apt; \
-    test ! -e /var/lib/apt/lists; \
-    test ! -d /app/tools/tiktok_scraper/node_modules; \
-    /app/.venv/bin/python -c "import importlib.util; assert importlib.util.find_spec('playwright') is None"; \
-    test "$(cat /app/.hf-cache/hub/models--intfloat--multilingual-e5-large/refs/main)" = "$TEAMAGENT_E5_MODEL_REVISION"; \
-    /app/.venv/bin/python -c "import os, psycopg, torch; from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-large', revision=os.environ['TEAMAGENT_E5_MODEL_REVISION'], local_files_only=True); SentenceTransformer('intfloat/multilingual-e5-large', local_files_only=True)"; \
-    for package in build-essential dpkg-dev perl perl-base libpq5 curl npm; do \
-      if dpkg-query -W -f='${db:Status-Status}\n' "$package" 2>/dev/null | grep -qx installed; then \
-        echo "unexpected package: $package" >&2; exit 1; \
-      fi; \
-    done; \
-    if dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 'perl-modules-*' 2>/dev/null | grep -q ' installed$'; then \
-      echo "unexpected package: perl-modules" >&2; exit 1; \
-    fi
-
-FROM runtime-common AS runtime-true
-# Playwright 1.61.1 Chromium 149のruntime共有ライブラリにffmpeg/CJK fontを加える。
-# nodeは公式Node 24 arm64 imageから実体だけをcopyし、npm/corepackはbuilder限定。
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ffmpeg \
-      fonts-noto-cjk \
-      libasound2t64 \
-      libatk-bridge2.0-0t64 \
-      libatk1.0-0t64 \
-      libatspi2.0-0t64 \
-      libcairo2 \
-      libcups2t64 \
-      libdbus-1-3 \
-      libdrm2 \
-      libgbm1 \
-      libglib2.0-0t64 \
-      libnspr4 \
-      libnss3 \
-      libpango-1.0-0 \
-      libx11-6 \
-      libxcb1 \
-      libxcomposite1 \
-      libxdamage1 \
-      libxext6 \
-      libxfixes3 \
-      libxkbcommon0 \
-      libxrandr2 \
-      fonts-noto-color-emoji \
-      libfontconfig1 \
-      libfreetype6 \
-      fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=builder-true --chown=10001:10001 /app/ /app/
-COPY --from=builder-true /opt/pw/ /opt/pw/
-COPY --from=node-toolchain /usr/local/bin/node /usr/local/bin/node
-RUN CHROME_BIN="/opt/pw/chromium-${TEAMAGENT_CHROMIUM_REVISION}/chrome-linux/chrome" \
-    && test -x "$CHROME_BIN" \
-    && ln -sf "$CHROME_BIN" /usr/bin/chromium
-RUN set -eux; \
-    /usr/local/bin/python -m pip uninstall -y pip setuptools wheel packaging; \
-    rm -rf /root/.cache/pip; \
-    ! /usr/local/bin/python -m pip --version >/dev/null 2>&1; \
-    apt-get purge -y --allow-remove-essential perl-base; \
-    rm -rf /var/cache/apt /var/lib/apt/lists; \
-    test "$TEAMAGENT_WITH_SCRAPE_TOOLS" = "true"; \
-    command -v node; \
-    command -v chromium; \
-    command -v ffmpeg; \
-    test "$(node --version)" = "v${TEAMAGENT_NODE_VERSION}"; \
-    printf '%s  %s\n' "$TEAMAGENT_NODE_BINARY_SHA256" "$(command -v node)" | sha256sum -c -; \
-    printf '%s  %s\n' "$TEAMAGENT_CHROMIUM_SHA256" "$(readlink -f /usr/bin/chromium)" | sha256sum -c -; \
-    test "$(chromium --version | tr -d '[:space:]')" = "Chromium${TEAMAGENT_CHROMIUM_VERSION}"; \
-    node -e "require.resolve('puppeteer-core', {paths: ['/app/tools/tiktok_scraper']})"; \
-    node --check /app/tools/tiktok_scraper/search.mjs; \
-    PLAYWRIGHT_DRIVER_NODE=/app/.venv/lib/python3.11/site-packages/playwright/driver/node; \
-    test "$(readlink "$PLAYWRIGHT_DRIVER_NODE")" = /usr/local/bin/node; \
-    test "$("$PLAYWRIGHT_DRIVER_NODE" --version)" = "v${TEAMAGENT_NODE_VERSION}"; \
-    chromium --headless --no-sandbox --disable-gpu --dump-dom about:blank >/dev/null; \
-    (cd /app/tools/tiktok_scraper && node --input-type=module -e "import puppeteer from 'puppeteer-core'; const browser = await puppeteer.launch({executablePath: process.env.CHROMIUM_PATH, headless: true, args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']}); try { const page = await browser.newPage(); await page.setContent('<title>teamagent-puppeteer-smoke</title>'); if (await page.title() !== 'teamagent-puppeteer-smoke') throw new Error('Puppeteer DOM smoke failed'); } finally { await browser.close(); }"); \
-    /app/.venv/bin/python -c "import os; from playwright.sync_api import sync_playwright; runtime=sync_playwright().start(); browser=runtime.chromium.launch(executable_path=os.environ['CHROMIUM_PATH'], args=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']); page=browser.new_page(); page.set_content('<title>teamagent-python-playwright-smoke</title>'); assert page.title() == 'teamagent-python-playwright-smoke'; browser.close(); runtime.stop()"; \
-    ffmpeg -v error -f lavfi -i color=c=black:s=16x16:d=0.04 -frames:v 1 -f null -; \
-    ! command -v perl; \
-    ! dpkg-query -W perl-base; \
-    test ! -e /var/cache/apt; \
-    test ! -e /var/lib/apt/lists; \
-    test -z "$(find /opt/pw -type f -name '*.info' -print -quit)"; \
-    test "$(cat /app/.hf-cache/hub/models--intfloat--multilingual-e5-large/refs/main)" = "$TEAMAGENT_E5_MODEL_REVISION"; \
-    /app/.venv/bin/python -c "import os, psycopg, torch; from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-large', revision=os.environ['TEAMAGENT_E5_MODEL_REVISION'], local_files_only=True); SentenceTransformer('intfloat/multilingual-e5-large', local_files_only=True)"; \
-    for binary in npm corepack uv gcc g++ make curl; do \
-      if command -v "$binary" >/dev/null 2>&1; then echo "unexpected binary: $binary" >&2; exit 1; fi; \
-    done; \
-    for package in build-essential dpkg-dev perl perl-base libpq5 curl npm; do \
-      if dpkg-query -W -f='${db:Status-Status}\n' "$package" 2>/dev/null | grep -qx installed; then \
-        echo "unexpected package: $package" >&2; exit 1; \
-      fi; \
-    done; \
-    if dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 'perl-modules-*' 2>/dev/null | grep -q ' installed$'; then \
-      echo "unexpected package: perl-modules" >&2; exit 1; \
-    fi
-
-# true/falseをstage選択に使うため、薄殻へbrowser layerが混入しない。
-FROM runtime-${WITH_SCRAPE_TOOLS} AS final
-ARG APP_HTML_SHA256
-ARG APP_HTML_VERSION_ID
-ARG E5_MODEL_REVISION
-ARG NODE_VERSION
-ARG NODE_BINARY_SHA256
-ARG PLAYWRIGHT_VERSION
-ARG PLAYWRIGHT_CORE_ARCHIVE_SHA256
-ARG PLAYWRIGHT_CHROMIUM_REVISION
-ARG PLAYWRIGHT_CHROMIUM_BROWSER_VERSION
-ARG PLAYWRIGHT_CHROMIUM_VERSION
-ARG PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256
-ARG PLAYWRIGHT_CHROMIUM_SHA256
-# app-html-provenanceを最終stageの依存にし、未検証のmutable app.htmlではbuildを完了させない。
-RUN --mount=type=bind,from=app-html-provenance,source=/app-html-provenance,target=/tmp/app-html-provenance \
-    test "$(cat /tmp/app-html-provenance/sha256)" = "$APP_HTML_SHA256" \
-    && printf '%s  %s\n' "$APP_HTML_SHA256" /app/src/teamagent/connect_web/static/app.html | sha256sum -c -
-LABEL io.teamagent.build.app-html-sha256="$APP_HTML_SHA256" \
-      io.teamagent.build.app-html-version-id="$APP_HTML_VERSION_ID" \
-      io.teamagent.build.e5-model-revision="$E5_MODEL_REVISION" \
-      io.teamagent.build.node-image-digest="sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c" \
-      io.teamagent.build.node-version="$NODE_VERSION" \
-      io.teamagent.build.node-binary-sha256="$NODE_BINARY_SHA256" \
-      io.teamagent.build.playwright-version="$PLAYWRIGHT_VERSION" \
-      io.teamagent.build.playwright-core-archive-sha256="$PLAYWRIGHT_CORE_ARCHIVE_SHA256" \
-      io.teamagent.build.chromium-revision="$PLAYWRIGHT_CHROMIUM_REVISION" \
-      io.teamagent.build.chromium-browser-version="$PLAYWRIGHT_CHROMIUM_BROWSER_VERSION" \
-      io.teamagent.build.chromium-version="$PLAYWRIGHT_CHROMIUM_VERSION" \
-      io.teamagent.build.chromium-archive-sha256="$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" \
-      io.teamagent.build.chromium-sha256="$PLAYWRIGHT_CHROMIUM_SHA256"
-USER mcp
+USER 10001:10001
+VOLUME ["/tmp"]
 EXPOSE 8787
 
-# /healthz は bearer 不要。Python stdlibだけで確認する。
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 --start-period=40s \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"]
+  CMD ["/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"]
 
-CMD ["python", "scripts/run_mcp_http_server.py"]
+CMD ["/app/.venv/bin/python", "scripts/run_mcp_http_server.py"]

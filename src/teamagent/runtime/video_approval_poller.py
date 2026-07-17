@@ -4,7 +4,8 @@
 安全第一の設計（ライブ 16 名環境を勝手に荒らさない）:
 - 既定 OFF。`USE_VIDEO_APPROVAL_POLLING=true` かつ `VIDEO_APPROVAL_POLL_CHANNEL`/
   `VIDEO_APPROVAL_SHEET_ID` が揃ったときだけ起動（配線は slack_bot._run）。
-- 冪等性: 処理済み management_no をローカル JSON に永続化（再起動耐性）。
+- 冪等性: 処理済み management_no を JSON に保存。既定の /tmp は task 内のみ保持し、
+  再起動をまたぐ必要がある環境は VIDEO_APPROVAL_STATE_PATH を永続 volume に向ける。
 - 初回ベースライン: 既存の納品済みは「処理せず既読化」のみ（バックログの一斉投稿を防ぐ）。
 - 投稿のみ。**シート書込はしない**（spreadsheets 再認証までは Phase1 同様 Slack 通知に留める）。
 - per-item / per-tick の例外を隔離し、loop は決して落とさない（成功時のみ既読化＝失敗は再試行）。

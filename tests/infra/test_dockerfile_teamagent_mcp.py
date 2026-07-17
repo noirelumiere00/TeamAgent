@@ -1,271 +1,129 @@
-"""TeamAgent MCP final imageのruntime境界を静的に固定する回帰テスト。"""
+"""teamagent-mcp-core の再現可能なruntime分離契約。"""
 
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DOCKERFILE = ROOT / "infra" / "docker" / "Dockerfile.teamagent-mcp"
+DOCKERFILE = ROOT / "infra/docker/Dockerfile.teamagent-mcp"
+DOCKERIGNORE = ROOT / "infra/docker/Dockerfile.teamagent-mcp.dockerignore"
+PYPROJECT = ROOT / "pyproject.toml"
+LOCK = ROOT / "uv.lock"
 TEXT = DOCKERFILE.read_text(encoding="utf-8")
-TIKTOK_PACKAGE = ROOT / "tools" / "tiktok_scraper" / "package.json"
-TIKTOK_LOCK = ROOT / "tools" / "tiktok_scraper" / "package-lock.json"
 
-PYTHON_ARM64_DIGEST = "4fcdc7a15c936b4ffb35dac253215a8e679ea4d25d5e0ffa025fca0d6a702448"
-UV_ARM64_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-NODE_ARM64_DIGEST = "af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c"
-NODE_BINARY_SHA256 = "6bf69d0eda41a12030d5f28d958cd09ce323bc0c13f1ab4d8bb426933aa08812"
-PLAYWRIGHT_CORE_ARCHIVE_SHA256 = "3740bba3a3e93b4c7bd7c0f6e3c0e5f8cdce498bef13511e4d534cc99a8ce198"
-TORCH_ARM64_WHEEL_SHA256 = "4ecd8ecdb9ea1affa5f35d10501809d62dc713f7de9635e8098e760ddbeb852c"
+PYTHON_BUILDER_DIGEST = "2eac0b3ef42685b2d45d57633364aaa87ec54bf29960dcf7ecd0eed20e14d124"
+PYTHON_RUNTIME_DIGEST = "b7fda4f2d99284fe078f751034a0c858676f3456c4d75f1e935527c1951b5ba9"
+UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
+PYTHON_BINARY_SHA256 = "0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8"
+UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
+TORCH_WHEEL_SHA256 = "797c066367792c92eb97cafba7fd0caa8d7455e6078a4ee880630077378dc372"
 E5_MODEL_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
-CHROMIUM_ARCHIVE_SHA256 = "ec044b50ed065adeb4c5ffdb42d1529901cbaf897cdf542bfef8af01d6e0cc79"
-CHROMIUM_ARM64_SHA256 = "c1aa0fb5b6c60eb093df69d9e40dd50ab2039d3ccba8836ef21880340a77af64"
 
 
 def _stage(name: str, next_name: str | None = None) -> str:
-    """Dockerfileからname stageだけを返す。"""
-
     start = re.search(rf"^FROM .+ AS {re.escape(name)}$", TEXT, re.MULTILINE)
     assert start is not None, f"missing Docker stage: {name}"
     if next_name is None:
         return TEXT[start.start() :]
-    end = re.search(rf"^FROM .+ AS {re.escape(next_name)}$", TEXT[start.end() :], re.MULTILINE)
+    tail = TEXT[start.end() :]
+    end = re.search(rf"^FROM .+ AS {re.escape(next_name)}$", tail, re.MULTILINE)
     assert end is not None, f"missing Docker stage after {name}: {next_name}"
     return TEXT[start.start() : start.end() + end.start()]
 
 
-def test_external_images_are_pinned_to_verified_arm64_manifests() -> None:
-    python_refs = re.findall(
-        r"^FROM public\.ecr\.aws/docker/library/python:3\.11-slim@sha256:([0-9a-f]+)",
-        TEXT,
-        re.MULTILINE,
-    )
-    assert python_refs == [PYTHON_ARM64_DIGEST, PYTHON_ARM64_DIGEST]
-    assert len(PYTHON_ARM64_DIGEST) == 64
-
-    uv_refs = re.findall(
-        r"^COPY --from=ghcr\.io/astral-sh/uv:latest@sha256:([0-9a-f]+)",
-        TEXT,
-        re.MULTILINE,
-    )
-    assert uv_refs == [UV_ARM64_DIGEST]
-    assert len(UV_ARM64_DIGEST) == 64
-
-    node_refs = re.findall(
-        r"^FROM public\.ecr\.aws/docker/library/node:24-bookworm-slim@sha256:([0-9a-f]+)",
-        TEXT,
-        re.MULTILINE,
-    )
-    assert node_refs == [NODE_ARM64_DIGEST]
-    assert len(NODE_ARM64_DIGEST) == 64
+def test_core_uses_exact_arm64_child_digests_and_binary_hashes() -> None:
+    assert f"ARG PYTHON_BUILDER_ARM64_DIGEST=sha256:{PYTHON_BUILDER_DIGEST}" in TEXT
+    assert f"ARG PYTHON_RUNTIME_ARM64_DIGEST=sha256:{PYTHON_RUNTIME_DIGEST}" in TEXT
+    assert f"ARG UV_ARM64_DIGEST=sha256:{UV_DIGEST}" in TEXT
+    assert f"ARG PYTHON_BINARY_SHA256={PYTHON_BINARY_SHA256}" in TEXT
+    assert f"ARG UV_BINARY_SHA256={UV_BINARY_SHA256}" in TEXT
+    assert "ARG PYTHON_VERSION=3.14.6" in TEXT
+    assert "cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST}" in TEXT
+    assert "cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST}" in TEXT
+    assert "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}" in TEXT
+    assert TEXT.count("sha256sum -c -") >= 6
 
 
-def test_builder_tools_do_not_cross_the_runtime_boundary() -> None:
-    builder = _stage("builder-common", "builder-false")
-    runtime = _stage("runtime-common")
-
-    assert "build-essential" in builder
-    assert "/usr/local/bin/uv" in builder
-    assert "/usr/local/bin/uv" not in runtime
-
-    forbidden_runtime_packages = {
-        "build-essential",
-        "curl",
-        "dpkg-dev",
-        "g++",
-        "gcc",
-        "libpq5",
-        "make",
-        "npm",
-        "perl",
-    }
-    runtime_packages = set(re.findall(r"^\s{6}([a-z0-9][a-z0-9+.-]*) \\$", runtime, re.MULTILINE))
-    assert runtime_packages.isdisjoint(forbidden_runtime_packages)
-    assert not any(package.startswith("perl-modules") for package in runtime_packages)
+def test_core_contains_e5_mcp_db_aws_but_no_media_or_js_runtime() -> None:
+    builder = _stage("builder", "final")
+    assert "--extra mcp --extra embeddings" in builder
+    for required in ("anthropic", "boto3", "psycopg", "sentence_transformers"):
+        assert required in builder
+    assert "teamagent.media.contracts" in builder
+    for blocked in ("playwright", "yt_dlp", "weasyprint", "pptx", "claude_agent_sdk"):
+        assert f"'{blocked}'" in builder
+    for binary in ("node", "bun", "npm", "npx", "chromium", "ffmpeg", "yt-dlp"):
+        assert f"-name {binary}" in builder
+    assert "claude_agent_sdk/_bundled/claude" in builder
+    assert "COPY tools/" not in TEXT
+    assert "apt-get" not in TEXT
+    assert "apk add" not in TEXT
 
 
-def test_optional_build_ca_is_secret_mounted_and_never_copied() -> None:
-    builder = _stage("builder-common", "builder-false")
-    runtime = _stage("runtime-common")
+def test_core_model_torch_and_app_html_are_content_addressed() -> None:
+    assert f"ARG E5_MODEL_REVISION={E5_MODEL_REVISION}" in TEXT
+    assert f"ARG TORCH_ARM64_WHEEL_SHA256={TORCH_WHEEL_SHA256}" in TEXT
+    assert "torch-2.12.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl" in TEXT
+    assert "revision=os.environ['TEAMAGENT_E5_MODEL_REVISION']" in TEXT
+    assert TEXT.count("local_files_only=True") >= 2
+    assert "HF_HUB_OFFLINE=1" in TEXT
+    assert "TRANSFORMERS_OFFLINE=1" in TEXT
+    assert re.search(r"^ARG APP_HTML_SHA256$", TEXT, re.MULTILINE)
+    assert re.search(r"^ARG APP_HTML_VERSION_ID$", TEXT, re.MULTILINE)
+    assert "/app/src/teamagent/connect_web/static/app.html" in TEXT
+    assert 'io.teamagent.contract.app-html-sha256="$APP_HTML_SHA256"' in TEXT
+    assert 'org.opencontainers.image.revision="$GIT_COMMIT"' in TEXT
 
+
+def test_core_runtime_is_uid_10001_read_only_ready_and_python_health_checked() -> None:
+    final = _stage("final")
+    assert "USER 10001:10001" in final
+    assert 'VOLUME ["/tmp"]' in final
+    assert "HOME=/tmp/teamagent/home" in final
+    assert "TMPDIR=/tmp/teamagent/tmp" in final
+    assert "XDG_CACHE_HOME=/tmp/teamagent/cache" in final
+    assert "VIDEO_APPROVAL_STATE_PATH=/tmp/teamagent/state/video_approval_processed.json" in final
+    assert "TEAMAGENT_RUNTIME_KIND=core" in final
+    assert 'CMD ["/app/.venv/bin/python", "scripts/run_mcp_http_server.py"]' in final
+    assert "urllib.request.urlopen('http://127.0.0.1:8787/healthz'" in final
+    assert "curl" not in final
+
+
+def test_core_build_ca_is_secret_mounted_and_package_provenance_is_retained() -> None:
+    builder = _stage("builder", "final")
     assert "--mount=type=secret,id=teamagent_ca,required=false" in builder
     assert "COPY /run/secrets" not in TEXT
-    assert "/run/secrets/teamagent_ca" not in runtime
+    assert "uv pip freeze" in builder
+    assert "python-builder-arm64.digest" in builder
+    assert "python-runtime-arm64.digest" in builder
+    assert "uv-arm64.digest" in builder
 
 
-def test_optional_torch_wheel_cache_is_hash_checked_and_builder_only() -> None:
-    builder = _stage("builder-common", "builder-false")
-    runtime = _stage("runtime-common")
-
-    assert "--mount=type=cache,id=teamagent-torch-wheels" in builder
-    assert TORCH_ARM64_WHEEL_SHA256 in builder
-    assert "sha256sum -c -" in builder
-    assert "/var/cache/teamagent-wheels" not in runtime
-
-
-def test_scrape_flag_selects_separate_builder_and_runtime_stages() -> None:
-    for stage in ("builder-false", "builder-true", "runtime-false", "runtime-true"):
-        assert re.search(rf"^FROM .+ AS {stage}$", TEXT, re.MULTILINE)
-
-    assert "FROM runtime-${WITH_SCRAPE_TOOLS} AS final" in TEXT
-    runtime_false = _stage("runtime-false", "runtime-true")
-    runtime_true = _stage("runtime-true", "final")
-    assert "/opt/pw" not in runtime_false
-    assert "apt-get install" not in runtime_false
-    assert 'test "$TEAMAGENT_WITH_SCRAPE_TOOLS" = "false"' in runtime_false
-    assert "local_files_only=True" in runtime_false
-    assert "uv pip uninstall --python /app/.venv/bin/python playwright" in _stage(
-        "builder-false", "builder-true"
-    )
-    assert "COPY --from=builder-true /opt/pw/ /opt/pw/" in runtime_true
-    assert (
-        'CHROME_BIN="/opt/pw/chromium-${TEAMAGENT_CHROMIUM_REVISION}/chrome-linux/chrome"'
-        in runtime_true
-    )
-    assert 'ln -sf "$CHROME_BIN" /usr/bin/chromium' in runtime_true
-    assert 'test "$TEAMAGENT_WITH_SCRAPE_TOOLS" = "true"' in runtime_true
-    assert "COPY --from=node-toolchain /usr/local/bin/node /usr/local/bin/node" in runtime_true
-    assert "ffmpeg" in runtime_true
-    assert "fonts-noto-cjk" in runtime_true
-    assert "node -e \"require.resolve('puppeteer-core'" in runtime_true
-    assert "puppeteer.launch" in runtime_true
-    assert "teamagent-python-playwright-smoke" in runtime_true
-    assert "chromium --headless" in runtime_true
-    assert "local_files_only=True" in runtime_true
+def test_core_dockerignore_is_deny_by_default_and_excludes_sensitive_state() -> None:
+    text = DOCKERIGNORE.read_text(encoding="utf-8")
+    assert text.startswith("**\n")
+    for allowed in ("!pyproject.toml", "!uv.lock", "!src/**", "!scripts/**"):
+        assert allowed in text
+    for blocked in (
+        "**/.env",
+        "**/*.pem",
+        "**/*.key",
+        "**/*.tfstate",
+        "**/__pycache__/",
+        "**/node_modules/",
+        "**/*.sqlite",
+    ):
+        assert blocked in text
 
 
-def test_scrape_toolchain_versions_are_pinned_and_smoke_tested() -> None:
-    builder_true = _stage("builder-true", "runtime-common")
-    node_toolchain = _stage("node-toolchain", "builder-common")
-    runtime_true = _stage("runtime-true", "final")
-
-    assert f"@sha256:{NODE_ARM64_DIGEST} AS node-toolchain" in node_toolchain
-    assert "ARG NODE_VERSION=24.18.0" in TEXT
-    assert f"ARG NODE_BINARY_SHA256={NODE_BINARY_SHA256}" in TEXT
-    assert 'test "$(node --version)" = "v${NODE_VERSION}"' in node_toolchain
-    assert f"ARG PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256={CHROMIUM_ARCHIVE_SHA256}" in TEXT
-    assert f"ARG PLAYWRIGHT_CHROMIUM_SHA256={CHROMIUM_ARM64_SHA256}" in TEXT
-    assert "ARG PLAYWRIGHT_VERSION=1.61.1" in TEXT
-    assert 'test "$PLAYWRIGHT_VERSION" = "1.61.1"' in builder_true
-    assert f"ARG PLAYWRIGHT_CORE_ARCHIVE_SHA256={PLAYWRIGHT_CORE_ARCHIVE_SHA256}" in TEXT
-    assert "playwright-core-${PLAYWRIGHT_VERSION}.tgz" in builder_true
-    assert 'archive.extractfile("package/browsers.json")' in builder_true
-    assert "ARG PLAYWRIGHT_CHROMIUM_REVISION=1228" in TEXT
-    assert "ARG PLAYWRIGHT_CHROMIUM_BROWSER_VERSION=149.0.7827.55" in TEXT
-    assert "ARG PLAYWRIGHT_CHROMIUM_VERSION=149.0.7827.0" in TEXT
-    assert "chromium/${PLAYWRIGHT_CHROMIUM_REVISION}/chromium-linux-arm64.zip" in builder_true
-    assert "npx" not in builder_true
-    assert '"$PLAYWRIGHT_CHROMIUM_ARCHIVE_SHA256" "$CHROMIUM_ARCHIVE"' in builder_true
-    assert '"$PLAYWRIGHT_CHROMIUM_SHA256" "$CHROME_BIN"' in builder_true
-    assert "sha256sum -c -" in builder_true
-    assert "nodejs=" not in runtime_true
-    assert "npm=" not in runtime_true
-    assert 'test "$(node --version)" = "v${TEAMAGENT_NODE_VERSION}"' in runtime_true
-    assert 'test "$(chromium --version' in runtime_true
-    assert "chromium --headless" in runtime_true
-    assert "puppeteer.launch" in runtime_true
-    assert "playwright.sync_api" in runtime_true
-    assert "node --check /app/tools/tiktok_scraper/search.mjs" in runtime_true
-    assert "ffmpeg -v error -f lavfi" in runtime_true
-    assert "playwright/driver/node" in builder_true
-    assert "ln -s /usr/local/bin/node" in builder_true
-    assert "find \"$CHROME_DIR\" -type f -name '*.info' -delete" in builder_true
-    assert NODE_BINARY_SHA256 in TEXT
-    assert CHROMIUM_ARCHIVE_SHA256 in TEXT
-    assert CHROMIUM_ARM64_SHA256 in TEXT
-
-
-def test_tiktok_scraper_puppeteer_is_exactly_locked_for_node_24() -> None:
-    package = TIKTOK_PACKAGE.read_text(encoding="utf-8")
-    lock = TIKTOK_LOCK.read_text(encoding="utf-8")
-
-    assert '"puppeteer-core": "25.3.0"' in package
-    assert lock.count('"puppeteer-core": "25.3.0"') == 1
-    assert '"node_modules/puppeteer-core": {' in lock
-    assert '"version": "25.3.0"' in lock
-    assert (
-        '"resolved": "https://registry.npmjs.org/puppeteer-core/-/puppeteer-core-25.3.0.tgz"'
-        in lock
-    )
-
-
-def test_e5_model_is_commit_pinned_and_runtime_offline() -> None:
-    builder = _stage("builder-common", "builder-false")
-    runtime = _stage("runtime-common")
-    final = _stage("final")
-
-    assert len(E5_MODEL_REVISION) == 40
-    assert f"ARG E5_MODEL_REVISION={E5_MODEL_REVISION}" in TEXT
-    assert "revision=os.environ['TEAMAGENT_E5_MODEL_REVISION']" in builder
-    assert 'printf \'%s\' "$E5_MODEL_REVISION" > "$MODEL_CACHE/refs/main"' in builder
-    assert "HF_HUB_OFFLINE=1" in runtime
-    assert "TRANSFORMERS_OFFLINE=1" in runtime
-    assert "local_files_only=True" in builder
-    assert "io.teamagent.build.e5-model-revision" in final
-
-
-def test_scrape_build_arg_is_recorded_in_runtime_env_and_oci_label() -> None:
-    runtime_common = _stage("runtime-common", "runtime-false")
-
-    assert "TEAMAGENT_WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS" in runtime_common
-    assert "org.opencontainers.image.revision=$GIT_COMMIT" in runtime_common
-    assert "io.teamagent.build.with-scrape-tools=$WITH_SCRAPE_TOOLS" in runtime_common
-
-
-def test_app_html_provenance_is_required_verified_and_labeled() -> None:
-    provenance = _stage("app-html-provenance", "runtime-false")
-    final = _stage("final")
-
-    assert re.search(r"^ARG APP_HTML_SHA256$", TEXT, re.MULTILINE)
-    assert not re.search(r"^ARG APP_HTML_VERSION_ID=", TEXT, re.MULTILINE)
-    assert (
-        "--mount=type=bind,source=src/teamagent/connect_web/static/app.html,target=/tmp/app.html"
-        in provenance
-    )
-    assert "*[!0-9a-f]*" in provenance
-    assert 'test "${#APP_HTML_SHA256}" -eq 64' in provenance
-    assert "sha256sum -c -" in provenance
-    assert "*[!A-Za-z0-9._~+/=-]*" in provenance
-    assert 'test "${#APP_HTML_VERSION_ID}" -le 1024' in provenance
-    assert "from=app-html-provenance" in final
-    assert "/app/src/teamagent/connect_web/static/app.html | sha256sum -c -" in final
-    assert 'io.teamagent.build.app-html-sha256="$APP_HTML_SHA256"' in final
-    assert 'io.teamagent.build.app-html-version-id="$APP_HTML_VERSION_ID"' in final
-    assert 'io.teamagent.build.chromium-sha256="$PLAYWRIGHT_CHROMIUM_SHA256"' in final
-    assert "io.teamagent.build.playwright-core-archive-sha256" in final
-    assert "io.teamagent.build.chromium-browser-version" in final
-
-
-def test_runtime_contract_stays_non_root_and_uses_python_healthcheck() -> None:
-    final = _stage("final")
-    assert "USER mcp" in final
-    assert 'CMD ["python", "scripts/run_mcp_http_server.py"]' in final
-    assert "HEALTHCHECK --interval=30s --timeout=5s --retries=5 --start-period=40s" in final
-    assert "urllib.request.urlopen" in final
-    assert "curl" not in final
-    assert "ENTRYPOINT" not in TEXT
-
-
-def test_runtime_removes_perl_and_other_unneeded_tools() -> None:
-    runtime_false = _stage("runtime-false", "runtime-true")
-    runtime_true = _stage("runtime-true", "final")
-
-    for runtime in (runtime_false, runtime_true):
-        assert "apt-get purge -y --allow-remove-essential perl-base" in runtime
-        assert "! command -v perl" in runtime
-        assert "! dpkg-query -W perl-base" in runtime
-        assert "for package in build-essential dpkg-dev perl perl-base libpq5 curl npm" in runtime
-        assert "unexpected package: perl-modules" in runtime
-        assert "rm -rf /var/cache/apt /var/lib/apt/lists" in runtime
-        assert "test ! -e /var/cache/apt" in runtime
-        assert "test ! -e /var/lib/apt/lists" in runtime
-
-
-def test_runtime_removes_global_python_packagers() -> None:
-    runtime_false = _stage("runtime-false", "runtime-true")
-    runtime_true = _stage("runtime-true", "final")
-
-    for runtime in (runtime_false, runtime_true):
-        assert "/usr/local/bin/python -m pip uninstall -y pip setuptools wheel packaging" in runtime
-        assert "rm -rf /root/.cache/pip" in runtime
-        assert "! /usr/local/bin/python -m pip --version" in runtime
+def test_core_lock_has_no_bundled_agent_or_media_runtime_dependencies() -> None:
+    pyproject = PYPROJECT.read_text(encoding="utf-8")
+    lock = LOCK.read_text(encoding="utf-8")
+    base = tomllib.loads(pyproject)["project"]["dependencies"]
+    for dependency in ("claude-agent-sdk", "yt-dlp", "playwright", "weasyprint", "python-pptx"):
+        assert not any(item.startswith(dependency) for item in base)
+    assert 'name = "claude-agent-sdk"' not in lock
+    assert '"playwright==1.60.0"' in pyproject
+    assert '"yt-dlp==2026.6.9"' in pyproject

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,7 +21,11 @@ from teamagent.skills.video_algorithm.schema import (
     VideoMeta,
     VideoVSEOAnalysis,
 )
-from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill, parse_analysis
+from teamagent.skills.video_algorithm.skill import (
+    VideoAlgorithmSkill,
+    _default_report_dir,
+    parse_analysis,
+)
 
 
 def _json_block(*, kw_telop: bool, cta: bool, brand: bool, dur: float) -> str:
@@ -221,6 +227,51 @@ def test_skill_run_full_pipeline(tmp_path: object) -> None:
     with open(out.report_html_path, encoding="utf-8") as f:
         html = f.read()
     assert "ユニクロ" in html and 'class="nle"' in html
+
+
+def test_default_report_dir_uses_writable_temp_volume(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TEAMAGENT_VSEO_REPORT_DIR", raising=False)
+    monkeypatch.setattr(
+        "teamagent.skills.video_algorithm.skill.tempfile.gettempdir",
+        lambda: str(tmp_path),
+    )
+
+    expected = os.path.join(str(tmp_path), "teamagent", "vseo_reports")
+    assert _default_report_dir() == expected
+
+    path = VideoAlgorithmSkill()._write_report(VideoAlgorithmOutput(query="x"), "req")
+    assert path is not None
+    assert os.path.commonpath([path, expected]) == expected
+    assert os.path.isfile(path)
+
+
+def test_report_dir_env_override_is_explicit(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = os.path.join(str(tmp_path), "custom-vseo")
+    monkeypatch.setenv("TEAMAGENT_VSEO_REPORT_DIR", f"  {configured}  ")
+    assert _default_report_dir() == configured
+
+
+def test_default_request_reports_are_empty_after_repeated_cleanup(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TEAMAGENT_VSEO_REPORT_DIR", raising=False)
+    monkeypatch.setattr(
+        "teamagent.skills.video_algorithm.skill.tempfile.gettempdir",
+        lambda: str(tmp_path),
+    )
+    skill = VideoAlgorithmSkill()
+    root = Path(_default_report_dir())
+
+    for index in range(3):
+        out = VideoAlgorithmOutput(query=f"q-{index}")
+        out.report_html_path = skill._write_report(out, f"req-{index}")
+        assert out.report_html_path is not None
+        skill.cleanup_output(out)
+        assert not root.exists() or list(root.iterdir()) == []
 
 
 def test_board_decoupled_from_deep_analysis(tmp_path: object) -> None:
