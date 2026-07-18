@@ -667,10 +667,11 @@ def _load_sidecars(
     tag_alias = loaded.get("tag_alias.json")
     if tag_alias is not None:
         if isinstance(tag_alias, dict):
-            unknown = set(tag_alias) - {"_note", "industry", "solution"}
+            unknown = set(tag_alias) - {"_note", "industry", "solution", "tans"}
             _add(violations, "sidecar_schema_invalid", len(unknown))
-            for key in ("industry", "solution"):
-                state.tag_alias[key] = _string_map(tag_alias.get(key), violations)
+            for key in ("industry", "solution", "tans"):
+                # 旧形式の任意サイドカーは tans を持たない。builder と同じく空mapとして扱う。
+                state.tag_alias[key] = _string_map(tag_alias.get(key, {}), violations)
             note = tag_alias.get("_note", "")
             if not isinstance(note, str):
                 _add(violations, "sidecar_type_invalid")
@@ -993,12 +994,16 @@ def _analyze_content(
 
     tag_industry = sidecars.tag_alias.get("industry", {})
     tag_solution = sidecars.tag_alias.get("solution", {})
+    tag_tans = sidecars.tag_alias.get("tans", {})
     for note in manifest.notes:
         fm = note.frontmatter
         if fm.get("industry", "") in tag_industry:
             state.alias_applied_count += 1
         if fm.get("solution", "") in tag_solution:
             state.alias_applied_count += 1
+        # 担当名はフォーム引用にしか現れない。値を出力しないQA原則を守りながら、
+        # builderと同じ tans family が適用対象として読まれていることを数で検証する。
+        state.alias_applied_count += sum(1 for value in tag_tans if value in note.text)
         if fm.get("client", "") in sidecars.client_alias:
             state.alias_applied_count += 1
         if note.kind == "clients":
