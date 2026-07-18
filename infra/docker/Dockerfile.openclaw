@@ -82,10 +82,12 @@ ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632a
 ARG DISTROLESS_ARM64_DIGEST=sha256:c6465a8fcd268010c53e6e33e58d479dd232aa34f2312500afad8f605caffdc3
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
-ARG SOURCE_URI=https://github.com/noirelumiere00/teamagent
+ARG SOURCE_TREE=unknown
+ARG SOURCE_URI=https://github.com/noirelumiere00/TeamAgent.git
 ARG SOURCE_ARCHIVE_SHA256=unknown
 ARG SOURCE_ARTIFACT_VERSION=unknown
 ARG PLUGINS_LOCK_SHA256=unknown
+ARG RELEASE_CONTRACT_SHA256=unknown
 
 COPY --from=upstream --chown=65532:65532 /app/dist /app/dist
 COPY --from=upstream --chown=65532:65532 /app/node_modules /app/node_modules
@@ -119,10 +121,13 @@ LABEL org.opencontainers.image.title="TeamAgent OpenClaw Gateway" \
       org.opencontainers.image.base.name="gcr.io/distroless/nodejs24-debian13:nonroot" \
       org.opencontainers.image.base.digest="${DISTROLESS_ARM64_DIGEST}" \
       io.teamagent.source.branch="${GIT_BRANCH}" \
+      io.teamagent.source.tree="${SOURCE_TREE}" \
       io.teamagent.source.archive.sha256="${SOURCE_ARCHIVE_SHA256}" \
       io.teamagent.source.artifact.version="${SOURCE_ARTIFACT_VERSION}" \
       io.teamagent.openclaw.upstream.digest="${OPENCLAW_ARM64_DIGEST}" \
       io.teamagent.openclaw.plugins-lock.sha256="${PLUGINS_LOCK_SHA256}" \
+      io.teamagent.build.contract-sha256="${RELEASE_CONTRACT_SHA256}" \
+      io.teamagent.runtime.kind="core" \
       io.teamagent.runtime.architecture="linux/arm64" \
       io.teamagent.runtime.readonly-rootfs-required="true"
 

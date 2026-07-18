@@ -6,12 +6,11 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
 DOCKERFILE="$REPO_ROOT/infra/docker/Dockerfile.openclaw"
 LOCK_FILE="$REPO_ROOT/infra/openclaw/plugins-lock.json"
-LOCAL_TRUST_CONTRACT="$REPO_ROOT/infra/openclaw/trusted-release-contract.json"
-SHARED_TRUST_CONTRACT=/opt/teamagent/trusted-release/contracts/teamagent-openclaw-production-v1.json
-TRUSTED_RELEASE_CLI=/opt/teamagent/trusted-release/bin/trusted-release
+BUNDLE_CONTRACT="$REPO_ROOT/infra/codebuild/openclaw_bundle_contract.json"
+PROVENANCE_HELPER="$REPO_ROOT/infra/codebuild/openclaw_provenance.py"
 
 usage() {
-  echo "usage: $0 --image <local-image:tag> [--trusted-source <verified-source.json>] [--manifest <path>] [--evidence-dir <path>]" >&2
+  echo "usage: $0 --image <local-image:tag> [--manifest <path>] [--evidence-dir <path>]" >&2
 }
 
 fail() {
@@ -20,7 +19,6 @@ fail() {
 }
 
 IMAGE_REF=""
-TRUSTED_SOURCE_PATH=""
 MANIFEST_PATH=/tmp/openclaw-build-manifest.json
 EVIDENCE_DIR=""
 while (($#)); do
@@ -28,11 +26,6 @@ while (($#)); do
     --image)
       (($# >= 2)) || { usage; exit 2; }
       IMAGE_REF=$2
-      shift 2
-      ;;
-    --trusted-source)
-      (($# >= 2)) || { usage; exit 2; }
-      TRUSTED_SOURCE_PATH=$2
       shift 2
       ;;
     --manifest)
@@ -76,9 +69,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in cmp docker jq python3 sha256sum trivy; do
+for command in docker git jq python3 sha256sum trivy; do
   command -v "$command" >/dev/null || fail "required command not found: $command"
 done
+[[ -f "$BUNDLE_CONTRACT" && ! -L "$BUNDLE_CONTRACT" ]] || \
+  fail "OpenClaw bundle contract is missing or a symlink"
+[[ -f "$PROVENANCE_HELPER" && ! -L "$PROVENANCE_HELPER" ]] || \
+  fail "OpenClaw provenance helper is missing or a symlink"
+BUNDLE_CONTRACT_SHA256=$(
+  python3 "$PROVENANCE_HELPER" contract-sha256 --contract "$BUNDLE_CONTRACT"
+) || fail "OpenClaw bundle contract is invalid"
+[[ "$BUNDLE_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
+  fail "OpenClaw bundle contract returned an invalid SHA-256"
 MANIFEST_PATH=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$MANIFEST_PATH")
 EVIDENCE_DIR=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$EVIDENCE_DIR")
 [[ "$EVIDENCE_DIR" != "$MANIFEST_PATH" ]] || fail "evidence directory must differ from manifest path"
@@ -102,71 +104,43 @@ TRIVY_VERSION=$(trivy --version --format json | jq -er '.Version')
 [[ "$TRIVY_VERSION" == "$EXPECTED_TRIVY_VERSION" ]] || \
   fail "Trivy $EXPECTED_TRIVY_VERSION is required (found $TRIVY_VERSION)"
 
-SOURCE_URI=https://github.com/noirelumiere00/teamagent
-SOURCE_COMMIT=""
-SOURCE_BRANCH=""
-SOURCE_ARCHIVE_SHA256=""
-SOURCE_ARTIFACT_VERSION=""
+SOURCE_URI=https://github.com/noirelumiere00/TeamAgent.git
+SOURCE_COMMIT=$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit}) || \
+  fail "OpenClaw evidence build requires a Git commit"
+SOURCE_TREE=$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{tree}) || \
+  fail "OpenClaw evidence build requires a Git tree"
+SOURCE_ARCHIVE_SHA256=$(
+  git -C "$REPO_ROOT" archive --format=tar "$SOURCE_COMMIT" |
+    sha256sum |
+    cut -d' ' -f1
+) || fail "could not hash the exact Git archive"
+SOURCE_ARTIFACT_VERSION=git-$SOURCE_COMMIT
 BUILD_IDENTITY=local-git-worktree
-if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  [[ -z "$TRUSTED_SOURCE_PATH" ]] || \
-    fail "--trusted-source is only valid for the signed CodeBuild archive path"
-  [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]] || \
-    fail "refusing to build a dirty or untracked source tree"
-  SOURCE_COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD)
-  SOURCE_BRANCH=$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD) || \
-    fail "local evidence build requires an attached reviewed branch"
-  SOURCE_ARCHIVE_SHA256=$(git -C "$REPO_ROOT" archive --format=tar HEAD | sha256sum | cut -d' ' -f1)
-  SOURCE_ARTIFACT_VERSION=git-$SOURCE_COMMIT
+[[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ]] || \
+  fail "refusing to build a dirty or untracked source tree"
+if SOURCE_BRANCH=$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD); then
+  [[ "$SOURCE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || \
+    fail "SOURCE_BRANCH contains unsafe characters"
 else
-  [[ -n "$TRUSTED_SOURCE_PATH" ]] || \
-    fail "a KMS-signed trusted source publisher statement is required when .git is absent"
-  [[ -f "$TRUSTED_SOURCE_PATH" && ! -L "$TRUSTED_SOURCE_PATH" ]] || \
-    fail "trusted-source statement is missing or a symlink"
-  [[ -x "$TRUSTED_RELEASE_CLI" && ! -L "$TRUSTED_RELEASE_CLI" ]] || \
-    fail "shared trusted-release source verifier is absent; archive build is blocked"
-  [[ -f "$SHARED_TRUST_CONTRACT" && ! -L "$SHARED_TRUST_CONTRACT" ]] || \
-    fail "shared trusted-release contract is absent; archive build is blocked"
-  cmp -s "$LOCAL_TRUST_CONTRACT" "$SHARED_TRUST_CONTRACT" || \
-    fail "repository integration contract differs from the shared trusted contract"
-  [[ -n "${CODEBUILD_BUILD_ARN:-}" && -n "${CODEBUILD_SOURCE_VERSION:-}" ]] || \
-    fail "trusted archive builds require the fixed CodeBuild identity and transport version"
-  [[ "$CODEBUILD_BUILD_ARN" == \
-    arn:aws:codebuild:ap-northeast-1:718959508629:build/teamagent-dev-openclaw-image-builder:* ]] || \
-    fail "unexpected CodeBuild build identity"
-  "$TRUSTED_RELEASE_CLI" verify-source \
-    --profile teamagent-openclaw-production-v1 \
-    --contract "$SHARED_TRUST_CONTRACT" \
-    --statement "$TRUSTED_SOURCE_PATH" \
-    --source-root "$REPO_ROOT" \
-    --transport-version "$CODEBUILD_SOURCE_VERSION" \
-    --build-arn "$CODEBUILD_BUILD_ARN" \
-    --output "$tmp_dir/trusted-source.json"
-  jq -e --arg builder "$CODEBUILD_BUILD_ARN" '
-    .schemaVersion == 1 and
-    .verified == true and
-    .kmsSignatureVerified == true and
-    .publisherTrusted == true and
-    .commitArchiveExact == true and
-    .transportMetadataTrusted == false and
-    .source.repositoryUri == "https://github.com/noirelumiere00/teamagent" and
-    (.source.commit | test("^[0-9a-f]{40}$")) and
-    (.source.branch | test("^[A-Za-z0-9._/-]+$")) and
-    (.source.archiveSha256 | test("^[0-9a-f]{64}$")) and
-    (.source.artifactVersion | type == "string" and length > 0) and
-    .buildIdentity == $builder
-  ' "$tmp_dir/trusted-source.json" >/dev/null || \
-    fail "shared source verifier returned an incomplete or retargeted assertion"
-  SOURCE_COMMIT=$(jq -er '.source.commit' "$tmp_dir/trusted-source.json")
-  SOURCE_BRANCH=$(jq -er '.source.branch' "$tmp_dir/trusted-source.json")
-  SOURCE_ARCHIVE_SHA256=$(jq -er '.source.archiveSha256' "$tmp_dir/trusted-source.json")
-  SOURCE_ARTIFACT_VERSION=$(jq -er '.source.artifactVersion' "$tmp_dir/trusted-source.json")
+  [[ "${CODEBUILD_RESOLVED_SOURCE_VERSION:-}" == "$SOURCE_COMMIT" &&
+      "${CODEBUILD_SOURCE_VERSION:-}" == "$SOURCE_COMMIT" ]] || \
+    fail "detached builds require exact CodeBuild source identity"
+  [[ "${CODEBUILD_BUILD_ARN:-}" == \
+    arn:aws:codebuild:ap-northeast-1:718959508629:build/teamagent-dev-openclaw-provenance-builder:* ]] || \
+    fail "detached build has an unexpected CodeBuild identity"
+  [[ "$(git -C "$REPO_ROOT" remote get-url origin)" == \
+    "https://github.com/noirelumiere00/TeamAgent.git" ]] || \
+    fail "detached build has an unexpected Git origin"
+  [[ "$(git -C "$REPO_ROOT" rev-parse --verify refs/remotes/origin/dev^{commit})" == \
+    "$SOURCE_COMMIT" ]] || fail "detached build is not exact origin/dev"
+  SOURCE_BRANCH=dev
   BUILD_IDENTITY=$CODEBUILD_BUILD_ARN
 fi
 
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_COMMIT must be a full lowercase Git SHA"
+[[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_TREE must be a full lowercase Git SHA"
 [[ "$SOURCE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "SOURCE_BRANCH contains unsafe characters"
-[[ "$SOURCE_URI" == "https://github.com/noirelumiere00/teamagent" ]] || \
+[[ "$SOURCE_URI" == "https://github.com/noirelumiere00/TeamAgent.git" ]] || \
   fail "SOURCE_URI must identify the reviewed repository"
 [[ "$SOURCE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
   fail "SOURCE_ARCHIVE_SHA256 must be a lowercase SHA-256"
@@ -237,10 +211,12 @@ build=(docker buildx build --platform linux/arm64 --pull -f "$DOCKERFILE"
   --build-arg "DISTROLESS_ARM64_DIGEST=$DISTROLESS_ARM64_DIGEST"
   --build-arg "GIT_COMMIT=$SOURCE_COMMIT"
   --build-arg "GIT_BRANCH=$SOURCE_BRANCH"
+  --build-arg "SOURCE_TREE=$SOURCE_TREE"
   --build-arg "SOURCE_URI=$SOURCE_URI"
   --build-arg "SOURCE_ARCHIVE_SHA256=$SOURCE_ARCHIVE_SHA256"
   --build-arg "SOURCE_ARTIFACT_VERSION=$SOURCE_ARTIFACT_VERSION"
   --build-arg "PLUGINS_LOCK_SHA256=$PLUGINS_LOCK_SHA256"
+  --build-arg "RELEASE_CONTRACT_SHA256=$BUNDLE_CONTRACT_SHA256"
   -t "$IMAGE_REF")
 
 TRIVY_CACHE_DIR=${TRIVY_CACHE_DIR:-$tmp_dir/trivy-cache}
@@ -258,12 +234,14 @@ RUNTIME_REF=$IMAGE_REF
 
 jq -e \
   --arg commit "$SOURCE_COMMIT" \
+  --arg tree "$SOURCE_TREE" \
   --arg branch "$SOURCE_BRANCH" \
   --arg sourceUri "$SOURCE_URI" \
   --arg archive "$SOURCE_ARCHIVE_SHA256" \
   --arg artifactVersion "$SOURCE_ARTIFACT_VERSION" \
   --arg frontendDigest "$DOCKERFILE_FRONTEND_DIGEST" \
   --arg lock "$PLUGINS_LOCK_SHA256" \
+  --arg releaseContract "$BUNDLE_CONTRACT_SHA256" \
   --arg openclawVersion "$OPENCLAW_VERSION" \
   --arg openclawDigest "$OPENCLAW_ARM64_DIGEST" \
   --arg distrolessDigest "$DISTROLESS_ARM64_DIGEST" \
@@ -279,14 +257,17 @@ jq -e \
     "build-arg:OPENCLAW_ARM64_DIGEST",
     "build-arg:OPENCLAW_VERSION",
     "build-arg:PLUGINS_LOCK_SHA256",
+    "build-arg:RELEASE_CONTRACT_SHA256",
     "build-arg:SOURCE_ARCHIVE_SHA256",
     "build-arg:SOURCE_ARTIFACT_VERSION",
+    "build-arg:SOURCE_TREE",
     "build-arg:SOURCE_URI",
     "cmdline",
     "source"
   ] | sort) and
   $p.invocation.parameters.args["build-arg:GIT_COMMIT"] == $commit and
   $p.invocation.parameters.args["build-arg:GIT_BRANCH"] == $branch and
+  $p.invocation.parameters.args["build-arg:SOURCE_TREE"] == $tree and
   $p.invocation.parameters.args["build-arg:OPENCLAW_VERSION"] == $openclawVersion and
   $p.invocation.parameters.args["build-arg:OPENCLAW_ARM64_DIGEST"] == $openclawDigest and
   $p.invocation.parameters.args["build-arg:DISTROLESS_ARM64_DIGEST"] == $distrolessDigest and
@@ -294,6 +275,7 @@ jq -e \
   $p.invocation.parameters.args["build-arg:SOURCE_ARCHIVE_SHA256"] == $archive and
   $p.invocation.parameters.args["build-arg:SOURCE_ARTIFACT_VERSION"] == $artifactVersion and
   $p.invocation.parameters.args["build-arg:PLUGINS_LOCK_SHA256"] == $lock and
+  $p.invocation.parameters.args["build-arg:RELEASE_CONTRACT_SHA256"] == $releaseContract and
   $p.invocation.parameters.args.source == ("docker/dockerfile:1.7@" + $frontendDigest) and
   ([ $p.materials[] | {uri:.uri,sha256:.digest.sha256} ] |
     sort_by(.uri, .sha256)) == $expectedMaterials
@@ -321,11 +303,13 @@ jq -n \
 inspect_json=$(docker image inspect "$RUNTIME_REF")
 jq -e \
   --arg commit "$SOURCE_COMMIT" \
+  --arg tree "$SOURCE_TREE" \
   --arg branch "$SOURCE_BRANCH" \
   --arg sourceUri "$SOURCE_URI" \
   --arg archive "$SOURCE_ARCHIVE_SHA256" \
   --arg artifactVersion "$SOURCE_ARTIFACT_VERSION" \
   --arg lock "$PLUGINS_LOCK_SHA256" \
+  --arg releaseContract "$BUNDLE_CONTRACT_SHA256" \
   '.[0].Architecture == "arm64" and
    .[0].Os == "linux" and
    .[0].Config.User == "65532:65532" and
@@ -334,9 +318,12 @@ jq -e \
    .[0].Config.Labels["org.opencontainers.image.source"] == $sourceUri and
    .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
    .[0].Config.Labels["io.teamagent.source.branch"] == $branch and
+   .[0].Config.Labels["io.teamagent.source.tree"] == $tree and
    .[0].Config.Labels["io.teamagent.source.archive.sha256"] == $archive and
    .[0].Config.Labels["io.teamagent.source.artifact.version"] == $artifactVersion and
    .[0].Config.Labels["io.teamagent.openclaw.plugins-lock.sha256"] == $lock and
+   .[0].Config.Labels["io.teamagent.build.contract-sha256"] == $releaseContract and
+   .[0].Config.Labels["io.teamagent.runtime.kind"] == "core" and
    .[0].Config.Labels["io.teamagent.runtime.readonly-rootfs-required"] == "true"' \
   <<<"$inspect_json" >/dev/null || fail "runtime image metadata contract failed"
 
@@ -974,36 +961,35 @@ cp "$tmp_dir/gateway.log" "$EVIDENCE_DIR/gateway.log"
 cp "$tmp_dir/browser-help.log" "$EVIDENCE_DIR/browser-help.log"
 
 SOURCE_TRUST_MODE=local-git
-SOURCE_SHARED_VERIFIED=false
-if [[ -f "$tmp_dir/trusted-source.json" ]]; then
-  SOURCE_TRUST_MODE=shared-kms-publisher
-  SOURCE_SHARED_VERIFIED=true
-  jq -S . "$tmp_dir/trusted-source.json" >"$EVIDENCE_DIR/source-verifier-assertion.json"
-  cp "$TRUSTED_SOURCE_PATH" "$EVIDENCE_DIR/source-publisher-statement.json"
+if [[ "$BUILD_IDENTITY" == arn:aws:codebuild:* ]]; then
+  SOURCE_TRUST_MODE=codebuild-exact-origin-dev
 fi
 jq -n \
   --arg mode "$SOURCE_TRUST_MODE" \
   --arg uri "$SOURCE_URI" \
   --arg commit "$SOURCE_COMMIT" \
+  --arg tree "$SOURCE_TREE" \
   --arg branch "$SOURCE_BRANCH" \
   --arg archiveSha256 "$SOURCE_ARCHIVE_SHA256" \
   --arg artifactVersion "$SOURCE_ARTIFACT_VERSION" \
   --arg buildIdentity "$BUILD_IDENTITY" \
-  --argjson sharedVerified "$SOURCE_SHARED_VERIFIED" \
+  --arg releaseContractSha256 "$BUNDLE_CONTRACT_SHA256" \
   '{
     schemaVersion:1,
     mode:$mode,
     source:{
       repositoryUri:$uri,
       commit:$commit,
+      tree:$tree,
       branch:$branch,
       archiveSha256:$archiveSha256,
       artifactVersion:$artifactVersion
     },
     buildIdentity:$buildIdentity,
-    sharedSourceVerifierPassed:$sharedVerified,
+    releaseContractSha256:$releaseContractSha256,
+    signedSourceManifestRequiredBeforeRegistryPromotion:true,
     transportMetadataTrusted:false,
-    promotionMustReverifySignedPublisherStatementAndSourceRoot:true,
+    promotionMustReverifySignedSourceManifestAndSourceRoot:true,
     selfCertificationAccepted:false
   }' >"$EVIDENCE_DIR/source-binding.json"
 
@@ -1034,6 +1020,7 @@ jq -n \
   --arg rootfsInventorySha256 "$ROOTFS_INVENTORY_SHA256" \
   --argjson rootfsEntryCount "$ROOTFS_ENTRY_COUNT" \
   --arg sourceCommit "$SOURCE_COMMIT" \
+  --arg sourceTree "$SOURCE_TREE" \
   --arg sourceBranch "$SOURCE_BRANCH" \
   --arg sourceUri "$SOURCE_URI" \
   --arg sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" \
@@ -1042,6 +1029,7 @@ jq -n \
   --arg buildIdentity "$BUILD_IDENTITY" \
   --arg dockerfileSha256 "$DOCKERFILE_SHA256" \
   --arg pluginsLockSha256 "$PLUGINS_LOCK_SHA256" \
+  --arg releaseContractSha256 "$BUNDLE_CONTRACT_SHA256" \
   --arg openclawVersion "$OPENCLAW_VERSION" \
   --arg trivyVersion "$TRIVY_VERSION" \
   --arg buildxVersion "$BUILDX_VERSION" \
@@ -1077,6 +1065,7 @@ jq -n \
     source:{
       uri:$sourceUri,
       commit:$sourceCommit,
+      tree:$sourceTree,
       branch:$sourceBranch,
       archiveSha256:$sourceArchiveSha256,
       artifactVersion:$sourceArtifactVersion,
@@ -1084,6 +1073,7 @@ jq -n \
       buildIdentity:$buildIdentity,
       dockerfileSha256:$dockerfileSha256,
       pluginsLockSha256:$pluginsLockSha256,
+      releaseContractSha256:$releaseContractSha256,
       transportMetadataTrusted:false,
       promotionReverificationRequired:true,
       evidence:{path:($evidencePrefix + "/source-binding.json")}
@@ -1231,11 +1221,17 @@ jq -n \
 jq -e \
   --arg imageId "$IMAGE_ID" \
   --arg manifestDigest "$ARM64_DIGEST" \
+  --arg sourceCommit "$SOURCE_COMMIT" \
+  --arg sourceTree "$SOURCE_TREE" \
+  --arg releaseContractSha256 "$BUNDLE_CONTRACT_SHA256" \
   --arg evidenceIndexSha256 "$EVIDENCE_INDEX_SHA256" '
   .schemaVersion == 4 and
   .deploymentCredential == false and
   .image.imageId == $imageId and
   .image.manifestDigest == $manifestDigest and
+  .source.commit == $sourceCommit and
+  .source.tree == $sourceTree and
+  .source.releaseContractSha256 == $releaseContractSha256 and
   .promotion == {
     status:"LOCAL_GATES_PASSED",
     registryPublished:false,

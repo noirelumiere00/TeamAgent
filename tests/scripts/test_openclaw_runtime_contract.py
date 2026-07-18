@@ -16,9 +16,10 @@ ENTRYPOINT = ROOT / "infra/docker/openclaw-entrypoint.mjs"
 CONFIG = ROOT / "infra/openclaw/openclaw.config.json5"
 LOCK = ROOT / "infra/openclaw/plugins-lock.json"
 HELPER = ROOT / "infra/openclaw/build-image.sh"
+BUNDLE_HELPER = ROOT / "infra/openclaw/build-bundle.sh"
 PRUNER = ROOT / "infra/openclaw/prune-runtime.mjs"
 GATEWAY_RUNTIME = ROOT / "infra/openclaw/gateway-runtime.mjs"
-BUILDSPEC = ROOT / "infra/codebuild/buildspec.openclaw.yml"
+BUILDSPEC = ROOT / "infra/codebuild/openclaw-provenance-buildspec.yml"
 CODEBUILD_TF = ROOT / "infra/terraform/codebuild.tf"
 COMPOSE = ROOT / "infra/openclaw/docker-compose.yml"
 README = ROOT / "infra/openclaw/README.md"
@@ -28,7 +29,7 @@ FARGATE = ROOT / "infra/terraform/fargate.tf"
 TASK_FILTER = ROOT / "infra/openclaw/harden-task-definition.jq"
 DEPLOY_HELPER = ROOT / "infra/terraform/apply_openclaw.sh"
 ACTUAL_IMAGE_TEST = ROOT / "tests/scripts/test_openclaw_runtime_image.py"
-TRUST_CONTRACT = ROOT / "infra/openclaw/trusted-release-contract.json"
+TRUST_CONTRACT = ROOT / "infra/codebuild/openclaw_bundle_contract.json"
 FILESYSTEM_SBOM = ROOT / "infra/openclaw/generate-filesystem-sbom.py"
 EVIDENCE_INDEXER = ROOT / "infra/openclaw/index-evidence.py"
 PLUGIN_OPERATION_SMOKE = ROOT / "infra/openclaw/plugin-operation-smoke.mjs"
@@ -264,12 +265,10 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     assert "browserHelpSourceSignature" in pruner
     assert "runtime-prune-report.json" in pruner
     assert (
-        "infra/openclaw/rollout-task-canary.mjs "
-        "/opt/teamagent/rollout-task-canary.mjs"
+        "infra/openclaw/rollout-task-canary.mjs /opt/teamagent/rollout-task-canary.mjs"
     ) in dockerfile
     assert (
-        "infra/openclaw/effective-tool-scope.json "
-        "/opt/teamagent/effective-tool-scope.json"
+        "infra/openclaw/effective-tool-scope.json /opt/teamagent/effective-tool-scope.json"
     ) in dockerfile
     assert "fs.writeFileSync(1,JSON.stringify({" in HELPER.read_text()
     assert "plugins registry --refresh" in dockerfile
@@ -374,11 +373,14 @@ def test_dedicated_builder_is_fail_closed_and_scans_child() -> None:
     helper = HELPER.read_text()
     for required in (
         "refusing to build a dirty or untracked source tree",
-        "shared trusted-release source verifier is absent",
-        "repository integration contract differs from the shared trusted contract",
+        "detached builds require exact CodeBuild source identity",
+        "detached build is not exact origin/dev",
+        "SOURCE_TREE",
         "SOURCE_ARCHIVE_SHA256",
         "SOURCE_ARTIFACT_VERSION",
         "SOURCE_URI",
+        "BUNDLE_CONTRACT_SHA256",
+        "RELEASE_CONTRACT_SHA256",
         "BUILD_IDENTITY",
         "BUILDX_VERSION",
         "--platform linux/arm64",
@@ -507,7 +509,8 @@ def test_docs_require_verified_runtime_and_provenance_path() -> None:
         "Critical=0",
         "High=0",
         "Secrets=0",
-        "apply_openclaw.sh",
+        "plan_image_release.sh",
+        "apply_image_release_plan.sh",
         "effective-tool-scope.json",
         "physical npm package instance",
     ):
@@ -516,70 +519,66 @@ def test_docs_require_verified_runtime_and_provenance_path() -> None:
     assert "docker-compose.yml up" not in combined
     assert "2026" + ".6.1" not in combined
     assert "1000" + ":1000" not in combined
-    assert 'openclaw_image=""' in runbook
-    assert "Fargate does not support Docker `no-new-privileges`" in runbook
-    assert "This is **not read-only**" in runbook
+    assert "release.ready=false" in runbook
+    assert "Fargate は Docker `no-new-privileges` を強制できません" in runbook
+    assert "scope is not read-only" in readme
     assert "tools=会社ナレッジ4のみ" not in runbook
 
 
-def test_codebuild_uses_pinned_trivy_and_dedicated_helper() -> None:
+def test_codebuild_and_local_runtime_have_one_fail_closed_release_boundary() -> None:
     buildspec = BUILDSPEC.read_text()
     terraform = CODEBUILD_TF.read_text()
-    assert "v0.72.0" in buildspec
-    assert "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467" in buildspec
-    assert "buildx-v0.33.0.linux-arm64" in buildspec
-    assert "204dc28447d3bb48f42ed1ce5747e0885cd57e306506a39029311becdb1ef786" in buildspec
-    assert "infra/openclaw/build-image.sh" in buildspec
-    assert "SOURCE_ARCHIVE_SHA256" in buildspec
-    assert "CODEBUILD_SOURCE_VERSION" in buildspec
-    assert "SOURCE_ARTIFACT_VERSION" in buildspec
-    assert "git-${SOURCE_COMMIT:0:12}" in buildspec
-    assert "/opt/teamagent/trusted-release/bin/trusted-release" in buildspec
-    assert (
-        "/opt/teamagent/trusted-release/contracts/"
-        "teamagent-openclaw-production-v1.json"
-    ) in buildspec
-    assert "verify-source" in buildspec
-    assert "--source-statement" in buildspec
-    assert "--source-root" in buildspec
-    assert "--transport-version" in buildspec
-    assert "sourceRootReverified" in buildspec
-    assert "exactMaterialSetVerified" in buildspec
-    assert "wholeFilesystemSbomExact" in buildspec
-    assert "allEvidenceFilesBound" in buildspec
-    assert ".scan.critical == 0" in buildspec
-    assert ".scan.high == 0" in buildspec
-    assert ".scan.secrets == 0" in buildspec
-    assert ".scan.exactSingleLinuxArm64Subject == true" in buildspec
-    assert ".scan.allKnownLiveFindingsAbsent == true" in buildspec
-    assert "CODEBUILD_BUILD_ID" in buildspec
-    assert buildspec.index("build-image.sh") < buildspec.index("promote-openclaw")
-    assert "openclaw-build-evidence" in buildspec
-    assert 'resource "aws_codebuild_project" "openclaw_image"' in terraform
-    assert (
-        'buildspec = file("${path.module}/../codebuild/buildspec.openclaw.yml")'
-        in terraform
+    contract = json.loads(TRUST_CONTRACT.read_text())
+    bundle_helper = BUNDLE_HELPER.read_text()
+
+    assert contract["release"]["ready"] is False
+    assert contract["bundle"]["interfaces"]["build"] == "infra/openclaw/build-bundle.sh"
+    assert buildspec.index("assert-release-ready") < buildspec.index(
+        "bash infra/openclaw/build-bundle.sh"
     )
-    assert 'resource "aws_iam_role" "codebuild_openclaw"' in terraform
-    assert "service_role = aws_iam_role.codebuild_openclaw.arn" in terraform
-    openclaw_policy = terraform.split(
-        'data "aws_iam_policy_document" "codebuild_openclaw"',
-        1,
-    )[1].split('resource "aws_iam_role_policy" "codebuild_openclaw"', 1)[0]
-    for forbidden_permission in (
-        "ecr:GetAuthorizationToken",
-        "ecr:PutImage",
-        "ecr:InitiateLayerUpload",
-        "sts:AssumeRole",
-    ):
-        assert forbidden_permission not in openclaw_policy
-    assert "aws_ecr_repository.openclaw.arn" not in terraform
-    assert '"codebuild/openclaw-evidence"' in terraform
-    legacy_project = terraform.split('resource "aws_codebuild_project" "openclaw_image"', 1)[0]
-    assert "buildspec.openclaw.yml" not in legacy_project
-    assert "openclaw-release/openclaw-build-evidence" in buildspec
-    for forbidden in ("docker push", "docker login", "aws ecr", "Metadata["):
-        assert forbidden not in buildspec
+    assert "create-source-manifest" in buildspec
+    assert "verify-source-manifest" in buildspec
+    assert "aws kms verify" in buildspec
+    assert "teamagent-openclaw-quarantine:candidate-${SOURCE_COMMIT}-core" in buildspec
+    assert "teamagent-openclaw-media-quarantine:candidate-${SOURCE_COMMIT}-media" in buildspec
+    assert 'resource "aws_codebuild_project" "openclaw_provenance"' in terraform
+    assert "service_role = aws_iam_role.openclaw_codebuild.arn" in terraform
+    assert 'resource "aws_codebuild_project" "openclaw_image"' not in terraform
+    assert not (ROOT / "infra/codebuild/buildspec.openclaw.yml").exists()
+    assert bundle_helper.index("assert-release-ready") < bundle_helper.index(
+        "media subject and exact two-subject receipt emitter are not implemented"
+    )
+    assert "docker " not in bundle_helper
+    assert "aws " not in bundle_helper
+
+
+def test_blocked_bundle_interface_stops_before_output_or_external_work(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "bundle.json"
+    completed = subprocess.run(
+        [
+            "bash",
+            str(BUNDLE_HELPER),
+            "--bundle-contract",
+            str(TRUST_CONTRACT),
+            "--core-image",
+            "example.invalid/core:candidate",
+            "--media-image",
+            "example.invalid/media:candidate",
+            "--push",
+            "--manifest",
+            str(manifest),
+        ],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    assert "OpenClaw core/media release is blocked" in completed.stderr
+    assert "OpenClaw core/media release contract is not active" in completed.stderr
+    assert not manifest.exists()
 
 
 def _render_task(task: dict[str, Any], image: str) -> subprocess.CompletedProcess[str]:
@@ -597,8 +596,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
 ) -> None:
     current_task = json.loads(TASK_FIXTURE.read_text())
     image = (
-        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-        f"teamagent-openclaw@sha256:{'b' * 64}"
+        f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:{'b' * 64}"
     )
     rendered_process = _render_task(current_task, image)
     assert rendered_process.returncode == 0, rendered_process.stderr
@@ -641,9 +639,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
     adversarial: list[tuple[str, dict[str, Any]]] = []
 
     mutated = copy.deepcopy(current_task)
-    mutated["containerDefinitions"].append(
-        copy.deepcopy(mutated["containerDefinitions"][0])
-    )
+    mutated["containerDefinitions"].append(copy.deepcopy(mutated["containerDefinitions"][0]))
     mutated["containerDefinitions"][1]["name"] = "sidecar"
     adversarial.append(("sidecar", mutated))
 
@@ -697,8 +693,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
 
     mutated = copy.deepcopy(current_task)
     mutated["taskDefinitionArn"] = (
-        "arn:aws:ecs:ap-northeast-1:718959508629:"
-        "task-definition/attacker-family:53"
+        "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/attacker-family:53"
     )
     adversarial.append(("task ARN retarget", mutated))
 
@@ -718,24 +713,24 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
     assert wrong_image.returncode != 0
     assert "fixed OpenClaw repository" in wrong_image.stderr
 
-    shared_cli = Path("/opt/teamagent/trusted-release/bin/trusted-release")
-    if not shared_cli.exists():
-        receipt_path = tmp_path / "untrusted-manifest.json"
-        receipt_path.write_text("{}\n")
-        fail_closed = subprocess.run(
-            [
-                "bash",
-                str(DEPLOY_HELPER),
-                "--render-only",
-                str(TASK_FIXTURE),
-                str(receipt_path),
-            ],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert fail_closed.returncode != 0
-        assert "shared trusted-release verifier is absent" in fail_closed.stderr
+    receipt_path = tmp_path / "untrusted-manifest.json"
+    receipt_path.write_text("{}\n")
+    fail_closed = subprocess.run(
+        [
+            "bash",
+            str(DEPLOY_HELPER),
+            "--render-only",
+            str(TASK_FIXTURE),
+            str(receipt_path),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert fail_closed.returncode == 64
+    assert "apply_openclaw.sh is permanently disabled" in fail_closed.stderr
+    assert "plan_image_release.sh" in fail_closed.stderr
+    assert "apply_image_release_plan.sh" in fail_closed.stderr
 
 
 def test_terraform_bootstrap_task_matches_cli_hardening_contract() -> None:
@@ -862,9 +857,10 @@ def test_actual_image_test_is_executable_and_checks_kernel_and_payload() -> None
         assert required in source
 
 
-def test_task_hardening_filter_and_deploy_helper_do_not_claim_fargate_nnp() -> None:
+def test_task_hardening_filter_and_release_boundary_do_not_claim_fargate_nnp() -> None:
     task_filter = TASK_FILTER.read_text()
     deploy = DEPLOY_HELPER.read_text()
+    bundle_helper = BUNDLE_HELPER.read_text()
     contract = json.loads(TRUST_CONTRACT.read_text())
     assert "readonlyRootFilesystem" in task_filter
     assert 'drop: ["ALL"]' in task_filter
@@ -874,57 +870,31 @@ def test_task_hardening_filter_and_deploy_helper_do_not_claim_fargate_nnp() -> N
     assert "expected exactly one container named openclaw; sidecars are forbidden" in task_filter
     assert "only the task-scoped empty openclaw-tmp volume is allowed" in task_filter
     assert "environment contains an unapproved name or value" in task_filter
-    assert "This script never decides deployability from a release manifest" in deploy
-    assert "shared trusted-release verifier is absent; render/deploy is blocked" in deploy
-    assert "inspect-deployment-receipt" in deploy
-    assert "verify-deployment-plan" in deploy
-    assert "consume-deployment-receipt" in deploy
-    assert "record-deployment-result" in deploy
-    assert ".verification.kmsSignatureVerified == true" in deploy
-    assert ".verification.fresh == true" in deploy
-    assert ".verification.oneTime == true" in deploy
-    assert ".verification.unconsumed == true" in deploy
-    assert ".release.exactMaterialsVerified == true" in deploy
-    assert ".release.wholeFilesystemSbomExact == true" in deploy
-    assert ".release.allEvidenceFilesBound == true" in deploy
-    assert ".release.canonicalPromotionVerified == true" in deploy
-    assert ".release.platformManifestCount == 1" in deploy
-    assert "CVE-2026-34182" in deploy
-    assert "CVE-2026-55200" in deploy
-    assert ".deployment.previousTaskDefinitionArn == $currentArn" in deploy
-    assert "--render-only" in deploy
-    assert "register-task-definition" in deploy
-    assert "deploymentCircuitBreaker={enable=true,rollback=true}" in deploy
-    assert "alarm_and_restore" in deploy
-    assert "run-live-rollout-gates.mjs" in deploy
-    assert "OpenClawRolloutGateFailure" in deploy
+    assert "apply_openclaw.sh is permanently disabled" in deploy
+    assert "plan_image_release.sh" in deploy
+    assert "apply_image_release_plan.sh" in deploy
+    assert "register-task-definition" not in deploy
+    assert "update-service" not in deploy
     assert "terraform apply" not in deploy
-    assert "OC_REPO" not in deploy
-    assert "ECS_SERVICE=${" not in deploy
-    assert "ECS_FAMILY=${" not in deploy
-    assert "no-new-privileges" not in task_filter
-    assert contract["source"]["allowArbitraryS3Zip"] is False
-    assert contract["source"]["allowBuilderProducedVerificationBooleans"] is False
-    assert contract["promotion"]["builderRoleMayAuthenticateOrWriteRegistry"] is False
-    assert contract["promotion"]["requiredPlatformManifestCount"] == 1
-    assert contract["deploymentReceipt"]["oneTime"] is True
-    assert contract["deploymentReceipt"]["requireAtomicConsume"] is True
-    assert (
-        len(
-            contract["deploymentReceipt"]["requiredScanStatus"][
-                "knownLiveFindingIdsAbsent"
-            ]
-        )
-        == 8
+    assert contract["release"]["ready"] is False
+    assert contract["bundle"]["interfaces"]["build"] == "infra/openclaw/build-bundle.sh"
+    assert [subject["name"] for subject in contract["bundle"]["subjects"]] == [
+        "core",
+        "media",
+    ]
+    assert contract["bundle"]["contract_oci_label"] == ("io.teamagent.build.contract-sha256")
+    assert bundle_helper.index("assert-release-ready") < bundle_helper.index(
+        "media subject and exact two-subject receipt emitter are not implemented"
     )
+    assert "docker " not in bundle_helper
+    assert "aws " not in bundle_helper
+    assert "no-new-privileges" not in task_filter
 
 
 def test_openclaw_startup_alarm_matches_both_exact_log_fixtures() -> None:
     terraform = CLOUDWATCH_FARGATE.read_text()
     events = [
-        json.loads(line)
-        for line in STARTUP_LOG_FIXTURE.read_text().splitlines()
-        if line.strip()
+        json.loads(line) for line in STARTUP_LOG_FIXTURE.read_text().splitlines() if line.strip()
     ]
     assert [event["event"] for event in events] == [
         "openclaw_entrypoint_error",
@@ -947,7 +917,7 @@ def test_openclaw_startup_alarm_matches_both_exact_log_fixtures() -> None:
     ) in terraform
     assert 'name          = "OpenClawStartupFailure"' in terraform
     assert 'metric_name         = "OpenClawStartupFailure"' in terraform
-    assert 'metric_name         = "OpenClawRolloutGateFailure"' in terraform
+    assert 'metric_name         = "OpenClawRolloutGateFailure"' not in terraform
     assert '"openclaw_entrypoint_error"' in ENTRYPOINT.read_text()
 
 
@@ -969,14 +939,12 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     changed["consumption"]["atomic"] = False
     mutations.append(("replay/consume", changed))
     changed = copy.deepcopy(fixture)
-    changed["service"]["services"][0]["deploymentConfiguration"][
-        "deploymentCircuitBreaker"
-    ]["rollback"] = False
+    changed["service"]["services"][0]["deploymentConfiguration"]["deploymentCircuitBreaker"][
+        "rollback"
+    ] = False
     mutations.append(("circuit breaker", changed))
     changed = copy.deepcopy(fixture)
-    changed["task"]["tasks"][0]["taskDefinitionArn"] = fixture["expected"][
-        "previousTaskDefinition"
-    ]
+    changed["task"]["tasks"][0]["taskDefinitionArn"] = fixture["expected"]["previousTaskDefinition"]
     mutations.append(("wrong task", changed))
     changed = copy.deepcopy(fixture)
     changed["taskEvent"]["mcp"]["toolNamesSha256"] = "0" * 64
@@ -1035,9 +1003,7 @@ def _minimal_trivy_sbom(image_id: str) -> dict[str, Any]:
                 "type": "container",
                 "name": "fixture",
                 "bom-ref": "urn:fixture:image",
-                "properties": [
-                    {"name": "aquasecurity:trivy:ImageID", "value": image_id}
-                ],
+                "properties": [{"name": "aquasecurity:trivy:ImageID", "value": image_id}],
             },
             "tools": {
                 "components": [
@@ -1120,9 +1086,7 @@ def test_whole_filesystem_sbom_and_evidence_index_are_exact(tmp_path: Path) -> N
     inventory_json = json.loads(inventory.read_text())
     equivalence_json = json.loads(equivalence.read_text())
     assert inventory_json["entryCount"] == 3
-    assert {
-        (entry["path"], entry["type"]) for entry in inventory_json["entries"]
-    } == {
+    assert {(entry["path"], entry["type"]) for entry in inventory_json["entries"]} == {
         ("app", "directory"),
         ("app/current.js", "symlink"),
         ("app/index.js", "file"),
@@ -1132,9 +1096,7 @@ def test_whole_filesystem_sbom_and_evidence_index_are_exact(tmp_path: Path) -> N
     )
     assert file_entry["contentSha256"] == hashlib.sha256(b"runtime\n").hexdigest()
     assert equivalence_json["wholeFilesystemExactMatch"] is True
-    assert (
-        equivalence_json["pathTypeModeOwnerSizeLinkContentMultisetExact"] is True
-    )
+    assert equivalence_json["pathTypeModeOwnerSizeLinkContentMultisetExact"] is True
 
     index_path = evidence_dir / "evidence-index.json"
     indexed = subprocess.run(

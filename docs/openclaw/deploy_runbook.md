@@ -1,50 +1,35 @@
 # OpenClaw trusted release and deployment Runbook
 
-This is the only supported OpenClaw production path. It deliberately fails
-closed while the separately owned trusted source/promotion/receipt framework
-is unavailable. Do not substitute an ad-hoc Buildx push, arbitrary S3 ZIP
-metadata, a local manifest checksum, direct ECR tagging, direct ECS update, or
-Terraform target apply.
+本書と `infra/terraform/README.md` が OpenClaw 本番変更の正準手順です。
+`infra/codebuild/openclaw_bundle_contract.json` は現在
+`release.ready=false` であり、OpenClaw の build、promotion、Terraform image
+変更は意図的に fail closed です。ローカル検証に合格しても本番デプロイ資格には
+なりません。
 
-Normal Terraform operation keeps `openclaw_image=""`; the existing service is
-updated only through the receipt-gated helper.
+禁止経路は、ローカル `docker push`、mutable tag、direct ECR copy/tag、
+direct ECS task-definition registration/update、`terraform -target`、
+旧 `apply_openclaw.sh`、S3 metadata や隣接 checksum だけを根拠にした公開です。
 
-All account, region, repository, cluster, service, task family, IAM role, app
-artifact, and canary identities are fixed in
-`infra/openclaw/trusted-release-contract.json`; operator environment variables
-cannot retarget them.
+## 1. 現在の判定
 
-## 1. Required trust boundary
+- OpenClaw core runtime: ローカル検証可能
+- OpenClaw media subject: 未統合
+- exact core/media bundle receipt: 未実装
+- signed final-HEAD registry evidence: 未取得
+- guarded post-apply functional rollback gate: 未統合
+- production: **NO-GO**
 
-The shared framework must install both of these immutable, non-symlink files:
+上記の不足が解消され、独立レビュー後に contract を別変更で
+`release.ready=true` にするまでは AWS build も Terraform image plan も停止します。
 
-```text
-/opt/teamagent/trusted-release/bin/trusted-release
-/opt/teamagent/trusted-release/contracts/teamagent-openclaw-production-v1.json
-```
+## 2. 最終HEADのローカル ARM64 検証
 
-The installed contract must be byte-identical to the repository copy. The
-shared framework, not the OpenClaw builder, owns:
-
-- KMS verification of a trusted publisher statement;
-- exact Git commit archive/build-context binding;
-- quarantine publication and immutable canonical promotion;
-- image, provenance, SBOM, evidence-index signatures and exact referrer set;
-- fresh, one-time deployment-receipt issuance and atomic consumption;
-- durable previous-task and signed rollout-result records.
-
-The S3 source ZIP and all object metadata are untrusted transport. `.git`
-absence is not an exception. If the shared verifier, contract, publisher
-statement, or exact commit proof is missing, CodeBuild must stop before
-executing a repository script.
-
-## 2. Local ARM64 verification
-
-Run only from a clean attached commit:
+clean で attached な reviewed commit からだけ実行します。
 
 ```sh
-test -z "$(git status --porcelain --untracked-files=all)"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
 COMMIT=$(git rev-parse HEAD)
+TREE=$(git rev-parse HEAD^{tree})
 SHORT=${COMMIT:0:12}
 bash infra/openclaw/build-image.sh \
   --image "teamagent-openclaw:git-$SHORT" \
@@ -53,12 +38,16 @@ bash infra/openclaw/build-image.sh \
 (cd /tmp && sha256sum -c "openclaw-$SHORT-manifest.json.sha256")
 ```
 
-The local manifest must satisfy:
+manifest は schema 4 で、次を満たす必要があります。
 
 ```sh
-jq -e '
+jq -e --arg commit "$COMMIT" --arg tree "$TREE" '
   .schemaVersion == 4 and
   .deploymentCredential == false and
+  .source.commit == $commit and
+  .source.tree == $tree and
+  (.source.archiveSha256 | test("^[0-9a-f]{64}$")) and
+  (.source.releaseContractSha256 | test("^[0-9a-f]{64}$")) and
   .promotion.status == "LOCAL_GATES_PASSED" and
   .promotion.registryPublished == false and
   .promotion.canonicalTagPublished == false and
@@ -69,175 +58,153 @@ jq -e '
   .sbom.wholeFilesystemExactMatch == true and
   .sbom.physicalNpmMultisetExactMatch == true and
   .scan.exactSingleLinuxArm64Subject == true and
-  .scan.critical == 0 and .scan.high == 0 and .scan.secrets == 0 and
-  .scan.allKnownLiveFindingsAbsent == true and
-  (.scan.knownLiveFindingIdsAbsent | length) == 8
+  .scan.critical == 0 and
+  .scan.high == 0 and
+  .scan.secrets == 0 and
+  .scan.allKnownLiveFindingsAbsent == true
 ' "/tmp/openclaw-$SHORT-manifest.json"
 ```
 
-The latest observed live ARM64 image is C8/H22 and contains OpenSSL
-`CVE-2026-34182`, Perl `CVE-2026-12087`/`13221`/`57433`, Python 3.11
-`CVE-2026-6100`, GnuTLS `CVE-2026-33845`/`42010`, and libssh2
-`CVE-2026-55200`. The candidate is blocked unless its exact single ARM64
-subject is C0/H0 and all eight IDs are absent.
+基準は Critical=0、High=0、Secrets=0 です。最新 live で観測された
+`CVE-2026-12087`、`13221`、`33845`、`34182`、`42010`、`55200`、
+`57433`、`6100` の8件が候補に存在しないことも必須です。
 
-The evidence directory includes merged-rootfs inventory, whole-filesystem
-CycloneDX SBOM and equivalence result, npm multiset, exact materials,
-vulnerability/secret scans, runtime inventory, actual-image contract,
-UI 142-file source/HTTP closure, plugin operation smoke, gateway lifecycle,
-and an index hashing every evidence file.
+この helper は registry credential、push、promotion、ECS/Terraform 操作を
+持ちません。出力 manifest も `deploymentCredential=false` です。
 
-## 3. Trusted source and canonical promotion
+## 3. 署名済み build と promotion
 
-The trusted source publisher supplies a KMS-signed statement at the fixed
-archive path `.trusted-release/source-statement.json`. Operators must not
-construct or override source commit/branch/archive claims in `start-build`.
-The OpenClaw CodeBuild project uses the Terraform-embedded buildspec and a role
-that can read the fixed transport object and write evidence, but cannot call
-ECR authentication/write APIs or assume a promoter role.
+contract が独立承認で active になった後だけ、次の固定経路を使用します。
 
-The shared promoter performs this sequence:
+1. publisher が exact remote `dev` の full 40-character commit、Git tree、
+   commit object、実行ファイル一覧、contract hash を source manifest に束縛する。
+2. source manifest と署名を KMS、S3 VersionId、COMPLIANCE Object Lock で固定する。
+3. 専用 OpenClaw CodeBuild が source を再取得して署名と exact `origin/dev`
+   を確認する。
+4. `infra/openclaw/build-bundle.sh` が core/media の2 subject を quarantine
+   repository だけへ出力する。
+5. source-free attestor が actual single `linux/arm64` image、OCI labels、
+   installed binary probes、Trivy、SPDX SBOM、in-toto provenance、署名と
+   referrer set を検証する。
+6. source-free promoter が exact subject と referrer を
+   verified-candidate、承認後に release repository へ immutable copy する。
 
-1. Reverify publisher signature, commit archive, source root, build identity,
-   and exact build context.
-2. Build/test/scan locally; no canonical tag exists yet.
-3. Transfer the exact locally gated subject to quarantine.
-4. Reverify the exact material set, whole-filesystem SBOM equivalence, all
-   evidence hashes, C0/H0/S0, and all eight live-CVE absences.
-5. Sign the image, provenance, whole-filesystem SBOM, and evidence index.
-6. Atomically promote the exact subject and exact referrer set to immutable
-   `git-$SHA`.
+build role は candidate/release repository、publisher evidence、deployment
+resource を変更できません。publisher/launcher も ECS、EventBridge、
+task definition、service を変更できません。
 
-Retries must be idempotent and may not delete an approved release. A subject,
-source, builder, material, referrer, signature, or scan mismatch is NO-GO.
-
-The resulting trusted promotion record must identify one `linux/arm64`
-manifest and include verified digests for the subject, provenance,
-whole-filesystem SBOM, image signature, evidence-index signature, and exact
-referrer set. Builder-produced booleans are not trust evidence.
-
-## 4. Trusted deployment receipt
-
-A release manifest is not deployable. Ask the shared framework to issue a
-KMS-signed deployment receipt no more than 900 seconds before use. The receipt
-must be one-time and bind:
-
-- fixed account/repository/cluster/service/family;
-- exact immutable image manifest digest and single ARM64 platform;
-- source commit/archive and CodeBuild identity;
-- whole-filesystem SBOM, provenance, image signature, evidence index, and
-  referrer-set digests;
-- C0/H0/S0 and all eight live-CVE absences;
-- Connect Web `codebuild/connect-web-app.html` S3 VersionId plus
-  `appHtmlSha256`, `manifestSha256`, `buildInputsSha256`, and `dataSha256`;
-- current and previous task-definition ARN, canonical current-task hash,
-  exact rendered registration-payload hash, deployment intent/plan digest,
-  circuit-breaker rollback intent, and post-stable canary intent.
-
-The four app anchors preserve the corrected current application provenance;
-an OpenClaw rollout cannot silently select a different app artifact.
-
-## 5. Render without AWS mutation
-
-`--render-only` still requires the shared verifier and a fresh, valid,
-unconsumed receipt:
+通常の build-only launcher は次です。現在は `release.ready=false` で AWS call
+より前に停止することが正しい動作です。
 
 ```sh
-bash infra/terraform/apply_openclaw.sh \
-  --render-only /path/to/current-task-definition.json \
-  /path/to/trusted-deployment-receipt.json \
-  > /tmp/openclaw-rendered-task.json
+bash infra/deploy/build_openclaw_image.sh
 ```
 
-The current-task fixture must come from the exact fixed family represented in
-the receipt. Review that the rendered payload has exactly:
+## 4. Release authorization
 
-- one container named `openclaw`, no sidecars;
-- one `openclaw-tmp` volume mounted writable only at `/tmp`;
-- no other volume/mount, including writable `/data`;
-- ARM64/Fargate/awsvpc and the fixed task/execution roles;
-- immutable ECR digest in the fixed OpenClaw repository;
-- UID/GID 65532, read-only rootfs, nonprivileged, capability drop `ALL`;
-- canonical image ENTRYPOINT/CMD, `/readyz`, stop timeout, logs, environment,
-  and four Secrets Manager bindings.
-
-Any extra field or retargeted family/role/repository/environment is rejected.
-
-## 6. Deploy and automatic rollback
-
-Deployment is:
+actual-image evidence と独立レビューが揃った後、exact candidate receipt key と
+manifest/signature の S3 VersionId を使って active または rollback authorization
+を作ります。
 
 ```sh
-bash infra/terraform/apply_openclaw.sh \
-  /path/to/trusted-deployment-receipt.json
+bash infra/deploy/authorize_image_release.sh --help
 ```
 
-The helper:
+candidate receipt、signature、release digest のいずれかが曖昧、期限切れ、
+mutable、別contract、別source、別platformなら停止します。authorization は
+Terraform を実行しません。
 
-1. Re-reads the fixed service/current task and verifies the signed plan.
-2. Registers the exact reviewed task payload.
-3. Re-reads the service immediately before mutation.
-4. Atomically consumes the receipt while durably recording previous/new task
-   ARNs.
-5. Calls `update-service` with ECS circuit breaker and rollback enabled.
-6. Waits for `services-stable`.
-7. Runs a one-off task using the exact new revision and service network.
-8. Proves ECS task-role Bedrock `Converse`, exact MCP `tools/list`, and the
-   reviewed 28-entry maximum scope.
-9. Proves Slack connection and an exact canary mention/reply, then cleans the
-   canary message.
-10. Requires the shared framework to sign and durably store the rollout
-    result.
+## 5. One-time full saved plan
 
-On update, stability, one-off task, Slack, Bedrock, MCP, or durable-record
-failure, the helper emits `OpenClawRolloutGateFailure`, restores the durable
-previous task ARN, waits stable, and exits nonzero.
+`terraform.tfvars` には release repository の digest と exact evidence
+VersionId を設定します。
 
-Do not manually bypass receipt consumption or the automatic gates. A consumed
-receipt cannot be replayed.
-
-## 7. Alarms and health
-
-The OpenClaw startup metric filter matches both structured events:
-
-```text
-openclaw_config_invariant_violation
-openclaw_entrypoint_error
+```hcl
+openclaw_image = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:<RELEASE_DIGEST>"
+image_release_evidence = {
+  openclaw = {
+    bucket               = "teamagent-dev-image-release-evidence"
+    key                  = "<exact receipt key>"
+    version_id           = "<exact receipt VersionId>"
+    signature_key        = "<exact signature key>"
+    signature_version_id = "<exact signature VersionId>"
+  }
+}
 ```
 
-The startup-failure alarm and rollout-gate-failure alarm must be active.
-ECS uses `/readyz`; MCP uses `/healthz`. Gateway health alone is not rollout
-success.
+`image_deployment_intent_id` は手入力しません。plan は worktree 外へ作成し、
+全差分をレビューして同じ opaque saved plan を一度だけ apply します。
 
-## 8. Tool scope
-
-`infra/openclaw/effective-tool-scope.json` is the machine-readable authority.
-The reviewed OpenClaw include list has 28 entries; the default Terraform MCP
-task registers 12:
-
-```text
-search, clientkarte, proposal_draft, proposal_review,
-mail_summary, mail_followup, mail_to_internal_context,
-mail_reply, mail_draft, morning_digest, oauth_connect, knowledge_deliver
+```sh
+bash infra/terraform/plan_image_release.sh \
+  /secure/local/path/openclaw-release.tfplan
+terraform show /secure/local/path/openclaw-release.tfplan
+bash infra/terraform/apply_image_release_plan.sh \
+  /secure/local/path/openclaw-release.tfplan
 ```
 
-The exact deployed `tools/list` must equal the enabled set. This is **not read-only**:
-Gmail draft creation and Slack file delivery are enabled, and
-optional gates can add calendar writes, jobs, reports, and S3 writes.
+planner/apply launcher は clean exact `origin/dev`、固定 automation role、
+backend/workspace/state lineage/serial、resource ownership、contract、
+receipt/signature VersionId、release graph、one-time intent と receipt claims を
+再検証します。plan の apply attempt を開始した後は、成功・失敗にかかわらず
+同じ plan を再実行しません。曖昧な失敗は reconcile し、fresh receipt、
+new intent、new plan で roll-forward または rollback します。
 
-## 9. Residual risks and production gate
+詳細は `infra/terraform/README.md` を参照してください。
 
-- Fargate does not support Docker `no-new-privileges`; production does not
-  claim it. Local tests do.
-- Fargate has no task `tmpfs`; `/tmp` is a task-scoped ephemeral volume.
-- Browser-named shared payload and generic child-process primitives remain,
-  although executable browser control paths are removed and the bridge facade
-  fails closed.
-- The shared trusted-release implementation is outside this change and must
-  receive its own review.
-- Local provider-stubbed tests cannot establish real ECR referrers, Fargate
-  behavior, Slack auth/reply, Bedrock task-role access, or live MCP scope.
+## 6. Runtime/Fargate contract
 
-Production is NO-GO until the shared framework is present and independently
-reviewed, the final OpenClaw commit is independently reviewed, and the real
-CodeBuild/ECR/Fargate/Slack/Bedrock/tools-list gates all pass.
+本番 task definition は次を同時に満たします。
+
+- exact release repository `@sha256`、ARM64 Fargate
+- UID/GID `65532:65532`
+- read-only root filesystem
+- writable path は task-scoped `openclaw-tmp` を mount した `/tmp` のみ
+- capability drop `ALL`、`privileged=false`
+- image の canonical ENTRYPOINT/CMD を上書きしない
+- `/readyz` health check
+- sidecar、追加 volume/mount、環境 retarget、role retarget を禁止
+- ECS deployment circuit breaker と rollback を有効化
+
+Fargate は Docker `no-new-privileges` を強制できません。これは隠さず残余リスク
+として扱い、nonroot、read-only rootfs、capability drop、固定IAM/SGで補償します。
+
+## 7. Post-apply functional gates
+
+本番 GO には、exact new task revision に対して以下を自動実行し、失敗時に
+durable previous task revision へ復旧する統合が必要です。
+
+- ECS `services-stable`
+- 同一network/task revisionの one-off canary exit 0
+- ECS task-role credential による Bedrock `Converse`
+- MCP `tools/list` が既定12件かつ reviewed 28件の範囲内
+- Slack Socket Mode 接続と exact mention/reply
+- rollout結果の署名・耐久記録
+
+`run-live-rollout-gates.mjs` は検証ロジックのローカル実装ですが、現在の
+one-time Terraform apply と rollback ledger には未統合です。そのため
+contract は closed のままです。手動実行を production evidence として代用しません。
+
+## 8. Alarms and operational checks
+
+- `openclaw_config_invariant_violation` と `openclaw_entrypoint_error` は
+  `OpenClawStartupFailure` に集約する。
+- log group、metric filter、alarm、SNS subscription を plan で確認する。
+- startup failure、ECS circuit-breaker rollback、task exit、Slack/Bedrock/MCP
+  gate失敗を監視する。
+- OpenClaw の通常運用ログ保持は30日。AI入出力ログは60日。audit は別方針で
+  自動削除しない。
+
+## 9. Production GO条件
+
+次のすべてが揃うまで production は **NO-GO** です。
+
+- media subject と exact core/media receipt emitter が実装・レビュー済み
+- `release.ready=true` の別変更が全CI・独立レビュー済み
+- final `origin/dev` の signed source、actual-image C0/H0/S0、SBOM、
+  provenance、signature、immutable receipt が揃う
+- full saved plan と live state が一致する
+- post-apply functional rollback gate が one-time apply と統合済み
+- 実環境の CodeBuild/ECR/ECS/Slack/Bedrock/MCP/CloudWatch 検証が全緑
+
+ローカル合格、merge、CI全緑のいずれも単独では production GO ではありません。

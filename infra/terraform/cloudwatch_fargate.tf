@@ -131,23 +131,6 @@ resource "aws_cloudwatch_metric_alarm" "openclaw_config_violation" {
   ok_actions          = [aws_sns_topic.alarms.arn]
 }
 
-# apply_openclaw.sh はpost-stable Slack/Bedrock/MCP gate失敗時にこのmetricを
-# emitしてからdurable previous task ARNへ自動復旧する。
-resource "aws_cloudwatch_metric_alarm" "openclaw_rollout_gate_failure" {
-  alarm_name          = "${var.project_name}-${var.environment}-openclaw-rollout-gate-failure"
-  alarm_description   = "OpenClaw post-stable functional gate失敗。自動rollback結果を確認"
-  namespace           = local.metric_namespace
-  metric_name         = "OpenClawRolloutGateFailure"
-  statistic           = "Sum"
-  period              = 300
-  evaluation_periods  = 1
-  threshold           = 1
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  treat_missing_data  = "notBreaching"
-  alarm_actions       = [aws_sns_topic.alarms.arn]
-  ok_actions          = [aws_sns_topic.alarms.arn]
-}
-
 # 連携失敗は「営業がAiLaを使い始められない」直結 シグナル＝5分窓で1件でも通知。
 resource "aws_cloudwatch_metric_alarm" "oauth_connect_failed" {
   alarm_name          = "${var.project_name}-${var.environment}-oauth-connect-failed"

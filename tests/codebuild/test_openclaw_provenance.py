@@ -109,7 +109,7 @@ def test_active_contract_is_fail_closed_and_names_all_three_repository_stages() 
     with pytest.raises(provenance.ContractError, match="release is blocked"):
         provenance.require_release_ready(contract)
     assert contract["bundle"]["interfaces"] == {
-        "build": "infra/openclaw/build-image.sh",
+        "build": "infra/openclaw/build-bundle.sh",
         "attest": "infra/codebuild/verify_actual_image.sh",
         "promote": "infra/codebuild/image-promoter-buildspec.yml",
     }

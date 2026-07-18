@@ -1,10 +1,15 @@
 # OpenClaw release boundary
 
-This directory defines the reviewed TeamAgent OpenClaw runtime and its
-fail-closed integration with the shared trusted-release framework. The only
-supported runtime is OpenClaw `2026.7.1` on a single `linux/arm64` manifest,
-rebuilt onto the digest-pinned distroless Node 24 base and run as
-UID/GID `65532`.
+This directory defines the reviewed TeamAgent OpenClaw core runtime and its
+fail-closed integration with the repository's canonical provenance and
+one-time Terraform release gate. The only locally supported runtime is
+OpenClaw `2026.7.1` on a single `linux/arm64` manifest, rebuilt onto the
+digest-pinned distroless Node 24 base and run as UID/GID `65532`.
+
+The production bundle contract remains `release.ready=false`. The separate
+media subject, exact two-subject receipt emitter, signed final-HEAD registry
+evidence, and guarded post-apply functional rollback integration are not
+complete. A local PASS is therefore not production authorization.
 
 ## Runtime contract
 
@@ -58,8 +63,10 @@ disabled in `openclaw.config.json5`.
 
 ## Fargate contract
 
-`harden-task-definition.jq` accepts only the fixed production family, roles,
-service provenance, one `openclaw` container, and one task-scoped
+The Terraform task definition is authoritative. `harden-task-definition.jq`
+is its adversarially tested offline mirror: it accepts only the fixed
+production family, roles, service provenance, one `openclaw` container, and
+one task-scoped
 `openclaw-tmp` volume mounted writable at `/tmp`. It rejects sidecars,
 additional volumes or mounts, writable `/data` or other paths, task/container
 field additions, environment retargeting, role changes, and image repository
@@ -97,6 +104,8 @@ bash infra/openclaw/build-image.sh \
 The schema-4 output is explicitly `deploymentCredential=false` and
 `promotion.status=LOCAL_GATES_PASSED`. It binds:
 
+- the exact Git commit, tree, deterministic archive hash, and active blocked
+  bundle-contract hash;
 - the exact single ARM64 image/config/rootfs subject;
 - exact BuildKit material set, with extra or missing material rejected;
 - runtime inventory and actual-image contract;
@@ -118,51 +127,49 @@ signature, release receipt, or deployment credential.
 
 ## Trusted source and promotion integration
 
-The S3 ZIP and its metadata are untrusted transport. The dedicated OpenClaw
-CodeBuild role has no ECR authentication/write permission and cannot assume a
-promotion role. Its Terraform-embedded buildspec requires the out-of-source
-shared executable and byte-identical contract at:
+The dedicated OpenClaw project uses a full 40-character `dev` SHA from the
+fixed GitHub CodeConnection. Before any repository build interface executes,
+the embedded buildspec independently fetches `origin/dev` and verifies a
+KMS-signed source manifest. That manifest binds the commit object, exact tree,
+executable inventory, and bundle-contract hash to immutable S3 VersionIds
+under COMPLIANCE Object Lock.
 
-```text
-/opt/teamagent/trusted-release/bin/trusted-release
-/opt/teamagent/trusted-release/contracts/teamagent-openclaw-production-v1.json
-```
+The build role can write only the two quarantine repositories. It cannot
+write/sign source evidence, candidate or release repositories, or deployment
+resources. The source-free attestor owns actual-image verification and signed
+SPDX/in-toto/image evidence. The source-free promoter alone can copy exact
+subjects and referrers through verified-candidate to release repositories.
 
-Before any repository script executes, that framework must verify a
-KMS-signed trusted publisher statement bound to the exact commit archive and
-build context. After all local tests and scans pass, only the separate trusted
-promoter may publish a quarantine subject and atomically promote that exact
-subject plus the exact signed referrer set to immutable `git-$SHA`.
-Canonical tags must not exist before gates pass; approved retry is idempotent
-and must not delete an existing release.
-
-The shared worker is owned outside this OpenClaw change. Until it provides the
-required executable and matching contract, CodeBuild, render, and deploy all
-fail closed. That is intentional.
+`build-bundle.sh` is the canonical core/media interface and deliberately
+stops before Docker or registry work while `release.ready=false`. The local
+core-only verifier remains `build-image.sh`.
 
 ## Deployment and rollout
 
-`apply_openclaw.sh` accepts only a fresh KMS-signed one-time deployment
-receipt. It does not accept a build manifest, adjacent checksum, builder
-booleans, or environment overrides for account/repository/family/service.
-The receipt binds the exact image, source archive, builder, signatures,
-referrers, whole-filesystem SBOM, evidence index, C0/H0/S0 scan status, eight
-live-CVE absences, Connect Web S3 VersionId and four app provenance anchors,
-current/previous task ARN and hash, rendered registration payload, and rollout
-intent.
+Direct task-definition registration and the legacy `apply_openclaw.sh` path
+are permanently disabled. Production image changes require:
 
-Immediately before `update-service`, the helper rechecks the service task ARN
-and asks the shared framework to atomically consume the receipt while
-durably recording the previous task ARN. ECS deployment circuit breaker and
-rollback are enabled. After `services-stable`, an isolated one-off task and
-Slack canary must prove:
+1. a verified-candidate receipt and immutable signature VersionIds;
+2. guarded active/rollback release authorization;
+3. a fixed release repository `@sha256` plus exact
+   `image_release_evidence.openclaw`;
+4. one full saved plan created by `plan_image_release.sh`;
+5. one-time application of that exact plan by
+   `apply_image_release_plan.sh`.
 
-- task-role Bedrock `Converse`;
-- exact MCP `tools/list` and reviewed tool scope;
-- Slack connection and exact mention/reply behavior.
+The planner and apply supervisor bind clean exact `origin/dev`, backend,
+workspace, state lineage/serial and ownership, contract hash, complete signed
+release graph, one-time intent, and receipt claims. A started plan is never
+retried; an ambiguous failure requires reconciliation and fresh authorization.
+See `infra/terraform/README.md`.
 
-Any update, stability, canary, or durable-result failure emits the rollout
-failure metric and restores the recorded previous task definition.
+After apply, production GO additionally requires automated checks for exact
+ECS revision stability, an isolated one-off task, task-role Bedrock
+`Converse`, exact MCP tool inventory, Slack connection/mention/reply, signed
+durable result, and automatic rollback to the durable previous task.
+`run-live-rollout-gates.mjs` contains the validation logic but is not yet
+wired to the one-time Terraform flow. The release contract stays closed until
+that integration is independently reviewed.
 
 The effective MCP authority is `effective-tool-scope.json`. The default
 Terraform task currently exposes 12 tools; the reviewed OpenClaw include list
@@ -174,5 +181,6 @@ The four required runtime secrets are `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
 task role; static AWS credentials are forbidden.
 
 See `docs/openclaw/deploy_runbook.md`. Production remains NO-GO until the
-shared trusted framework is present, an independent review approves the final
-commit, and real CodeBuild/ECR/Fargate/Slack/Bedrock/tools-list gates pass.
+media/bundle and post-apply rollback integrations are complete, an independent
+review approves the final commit, and real signed
+CodeBuild/ECR/Fargate/Slack/Bedrock/tools-list evidence passes.

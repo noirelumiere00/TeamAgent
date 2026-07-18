@@ -2,7 +2,7 @@
   "schema_version": 1,
   "release": {
     "ready": false,
-    "blocked_reason": "Boyle-owned OpenClaw core/media image implementation has not yet emitted and signed the complete bundle receipt; keep this project unable to publish release images until that cross-branch contract lands."
+    "blocked_reason": "The hardened OpenClaw core runtime is locally testable, but the separate media subject, exact two-subject bundle emitter, signed final-HEAD registry evidence, and guarded post-apply functional rollback gate are not integrated. Keep every build, promotion, and Terraform image gate closed."
   },
   "source": {
     "repository": "https://github.com/noirelumiere00/TeamAgent.git",
@@ -20,7 +20,7 @@
   "bundle": {
     "schema_version": 1,
     "interfaces": {
-      "build": "infra/openclaw/build-image.sh",
+      "build": "infra/openclaw/build-bundle.sh",
       "attest": "infra/codebuild/verify_actual_image.sh",
       "promote": "infra/codebuild/image-promoter-buildspec.yml"
     },
