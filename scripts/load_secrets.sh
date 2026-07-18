@@ -41,6 +41,7 @@ _prepare_hmac_loader() {
     for runtime_var in \
         MAIL_ACTION_HMAC_SECRET \
         MAIL_ACTION_HMAC_PREVIOUS_SECRET \
+        MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET \
         REPORT_LINK_HMAC_SECRET \
         REPORT_LINK_HMAC_PREVIOUS_SECRET; do
         if declare -p "$runtime_var" >/dev/null 2>&1; then
@@ -116,6 +117,9 @@ _load_hmac_keyring() {
     local previous_generation_var="${prefix}_HMAC_PREVIOUS_GENERATION"
     local previous_t0_var="${prefix}_HMAC_PREVIOUS_ROTATION_STARTED_AT"
     local previous_legacy_var="${prefix}_HMAC_PREVIOUS_IS_LEGACY"
+    local legacy_worker_name_var="${prefix}_HMAC_LEGACY_WORKER_SECRET_NAME"
+    local legacy_worker_version_var="${prefix}_HMAC_LEGACY_WORKER_VERSION_ID"
+    local legacy_worker_generation_var="${prefix}_HMAC_LEGACY_WORKER_GENERATION"
 
     _require_env "$primary_name_var" || return 1
     _require_env "$primary_version_var" || return 1
@@ -206,6 +210,49 @@ _load_hmac_keyring() {
         unset "$previous_t0_var"
         unset "$previous_legacy_var"
         _log "OK: $prefix HMAC keyring loaded (primary only)"
+    fi
+
+    if [[ "$prefix" == "MAIL_ACTION" ]]; then
+        local legacy_worker_name="${!legacy_worker_name_var:-}"
+        local legacy_worker_version="${!legacy_worker_version_var:-}"
+        local legacy_worker_generation="${!legacy_worker_generation_var:-}"
+        if [[ -n "$legacy_worker_name$legacy_worker_version$legacy_worker_generation" ]]; then
+            if [[ "$previous_legacy" != "1" ]]; then
+                _log "ERROR: legacy worker verification key is valid only for MAIL_ACTION migration"
+                return 1
+            fi
+            if [[ -z "$legacy_worker_name" || -z "$legacy_worker_version" || -z "$legacy_worker_generation" ]]; then
+                _log "ERROR: legacy worker generation metadata must be configured atomically"
+                return 1
+            fi
+            if [[ "$legacy_worker_name" != "${SLACK_BOT_TOKEN_SECRET_NAME:-}" || "$legacy_worker_name" != *slack* ]]; then
+                _log "ERROR: legacy worker key must be the pinned Slack bot secret"
+                return 1
+            fi
+            if [[ ! "$legacy_worker_version" =~ ^[A-Za-z0-9_-]{32,64}$ ]]; then
+                _log "ERROR: legacy worker VersionId is invalid"
+                return 1
+            fi
+            if [[ "$legacy_worker_generation" =~ [[:space:]] || "$legacy_worker_generation" != *"@$legacy_worker_version" || "$legacy_worker_generation" == "$primary_generation" || "$legacy_worker_generation" == "$previous_generation" ]]; then
+                _log "ERROR: legacy worker generation metadata is invalid"
+                return 1
+            fi
+            local legacy_worker_value
+            legacy_worker_value="$(_get_secret_version "$legacy_worker_name" "$legacy_worker_version")"
+            if [[ -z "$legacy_worker_value" || "$legacy_worker_value" == "None" ]]; then
+                _log "ERROR: legacy worker version could not be loaded"
+                return 1
+            fi
+            printf -v MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET '%s' "$legacy_worker_value"
+            export MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET
+            unset legacy_worker_value
+            _log "OK: MAIL_ACTION legacy worker compatibility loaded (bounded=true)"
+        else
+            unset MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET
+            unset "$legacy_worker_name_var"
+            unset "$legacy_worker_version_var"
+            unset "$legacy_worker_generation_var"
+        fi
     fi
 }
 

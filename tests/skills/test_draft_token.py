@@ -41,6 +41,8 @@ _HMAC_ENVS = (
     "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY",
     "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
     "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
+    "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET",
+    "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION",
     "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
     "MAIL_ACTION_TTL_S",
     "REPORT_LINK_HMAC_SECRET",
@@ -65,6 +67,23 @@ def _set_secret(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _signed_draft_token(secret: str, *, expires: object, thread_id: str = "legacy-thread") -> str:
     payload = {"t": thread_id, "o": _owner_hash(ME), "e": expires}
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    sig = hmac.new(secret.encode(), raw, hashlib.sha256).digest()[:16]
+
+    def b64(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
+    return f"{b64(raw)}.{b64(sig)}"
+
+
+def _signed_event_token(secret: str, *, expires: int) -> str:
+    payload = {
+        "s": "2026-07-15T14:00:00+09:00",
+        "n": "2026-07-15T15:00:00+09:00",
+        "l": "legacy meeting",
+        "o": _owner_hash(ME),
+        "e": expires,
+    }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     sig = hmac.new(secret.encode(), raw, hashlib.sha256).digest()[:16]
 
@@ -240,6 +259,48 @@ def test_legacy_database_key_is_bounded_previous_verification_only(
     previous_sig = hmac.new(_LEGACY_DATABASE_URL.encode(), raw, hashlib.sha256).digest()[:16]
     assert hmac.compare_digest(signature, primary_sig)
     assert not hmac.compare_digest(signature, previous_sig)
+
+
+def test_slack_fallback_worker_tokens_are_v1_only_bounded_and_purpose_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slack_fallback = "xoxb-legacy-worker-" + "s" * 40
+    deadline = _ROTATION_NOW + HMAC_MAX_ROLLOUT_OVERLAP_S + _MAIL_TTL_S
+    draft = _signed_draft_token(
+        slack_fallback,
+        expires=deadline + 60,
+        thread_id="slack-worker-draft",
+    )
+    event = _signed_event_token(slack_fallback, expires=deadline + 60)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY", "1")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET", slack_fallback)
+    monkeypatch.setenv(
+        "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION",
+        "arn:aws:secretsmanager:ap-northeast-1:123456789012:"
+        "secret:teamagent/dev/slack/bot-token@legacy-worker-version",
+    )
+
+    assert decode_draft_token(draft, ME, now=deadline - 1) == "slack-worker-draft"
+    assert decode_event_token(event, ME, now=deadline - 1) is not None
+    assert decode_event_token(draft, ME, now=deadline - 1) is None
+    assert decode_draft_token(event, ME, now=deadline - 1) is None
+    assert decode_draft_token(draft, ME, now=deadline) is None
+    assert decode_event_token(event, ME, now=deadline) is None
+
+    new_token = _require_token(encode_draft_token("new", ME, now=_ROTATION_NOW))
+    raw, signature = _signature(new_token)
+    fallback_signature = hmac.new(
+        slack_fallback.encode(),
+        raw,
+        hashlib.sha256,
+    ).digest()[:16]
+    assert not hmac.compare_digest(signature, fallback_signature)
+    forged_v2 = ".".join(
+        base64.urlsafe_b64encode(value).decode().rstrip("=") for value in (raw, fallback_signature)
+    )
+    assert decode_draft_token(forged_v2, ME, now=_ROTATION_NOW) is None
 
 
 def test_verifier_first_rollout_covers_last_old_issuer_token(

@@ -108,6 +108,7 @@ class AwsClientFactory(Protocol):
 class WorkloadControl:
     cluster: str
     service: str
+    legacy_task_definition: str
     provenance: str
     rollback_provenance: str
     rollback_task_definition: str
@@ -118,6 +119,7 @@ class WorkloadControl:
 class ScheduledControl:
     rule: str
     target_id: str
+    legacy_task_definition: str
     provenance: str
     rollback_provenance: str
     rollback_task_definition: str
@@ -214,6 +216,7 @@ def _workload_control(value: object) -> WorkloadControl:
             {
                 "cluster",
                 "service",
+                "legacy_task_definition",
                 "provenance",
                 "rollback_provenance",
                 "rollback_task_definition",
@@ -224,6 +227,7 @@ def _workload_control(value: object) -> WorkloadControl:
     return WorkloadControl(
         cluster=_bounded_text(item["cluster"]),
         service=_bounded_text(item["service"]),
+        legacy_task_definition=_task_definition(item["legacy_task_definition"]),
         provenance=_provenance(item["provenance"]),
         rollback_provenance=_provenance(item["rollback_provenance"]),
         rollback_task_definition=_task_definition(item["rollback_task_definition"]),
@@ -239,6 +243,7 @@ def _scheduled_control(value: object) -> ScheduledControl:
             {
                 "rule",
                 "target_id",
+                "legacy_task_definition",
                 "provenance",
                 "rollback_provenance",
                 "rollback_task_definition",
@@ -249,6 +254,7 @@ def _scheduled_control(value: object) -> ScheduledControl:
     return ScheduledControl(
         rule=_bounded_text(item["rule"]),
         target_id=_bounded_text(item["target_id"]),
+        legacy_task_definition=_task_definition(item["legacy_task_definition"]),
         provenance=_provenance(item["provenance"]),
         rollback_provenance=_provenance(item["rollback_provenance"]),
         rollback_task_definition=_task_definition(item["rollback_task_definition"]),
@@ -334,7 +340,7 @@ def load_control(value: object) -> RolloutControl:
     forbidden_set = frozenset(_task_definition(value) for value in forbidden)
     if not any(value.endswith(":53") for value in forbidden_set):
         raise RolloutGateError("td53_contract_missing", scope="connect_web")
-    return RolloutControl(
+    control = RolloutControl(
         region=region,
         scope=scope,
         state_table=table,
@@ -346,6 +352,19 @@ def load_control(value: object) -> RolloutControl:
         canary=_canary_control(item["canary"]),
         forbidden_signing_task_definitions=forbidden_set,
     )
+    rollback_tasks = {
+        control.mcp.rollback_task_definition,
+        control.connect_web.rollback_task_definition,
+        control.morning_digest.rollback_task_definition,
+    }
+    legacy_tasks = {
+        control.mcp.legacy_task_definition,
+        control.connect_web.legacy_task_definition,
+        control.morning_digest.legacy_task_definition,
+    }
+    if rollback_tasks & forbidden_set or rollback_tasks & legacy_tasks:
+        raise RolloutGateError("invalid_control")
+    return control
 
 
 def _trusted_epoch(response: object) -> int:
@@ -438,6 +457,8 @@ class LiveRolloutGate:
 
     def _version_for_reference(self, reference: str) -> tuple[str, str]:
         resource, pinned = _secret_reference(reference)
+        if pinned is None:
+            raise RolloutGateError("secret_reference_unpinned")
         response = self.secrets.list_secret_version_ids(
             SecretId=resource,
             IncludeDeprecated=True,
@@ -446,20 +467,11 @@ class LiveRolloutGate:
         versions = response.get("Versions") if type(response) is dict else None
         if type(versions) is not list:
             raise RolloutGateError("secret_generation_unavailable")
-        if pinned is not None:
-            matches = [
-                version
-                for version in versions
-                if type(version) is dict and version.get("VersionId") == pinned
-            ]
-        else:
-            matches = [
-                version
-                for version in versions
-                if type(version) is dict
-                and type(version.get("VersionStages")) is list
-                and "AWSCURRENT" in version["VersionStages"]
-            ]
+        matches = [
+            version
+            for version in versions
+            if type(version) is dict and version.get("VersionId") == pinned
+        ]
         if len(matches) != 1:
             raise RolloutGateError("secret_generation_unavailable")
         version_id = matches[0].get("VersionId")
@@ -650,9 +662,66 @@ class LiveRolloutGate:
             primary_resources.append(resource)
         if len(set(primary_resources)) != len(primary_resources):
             raise RolloutGateError("purpose_generation_reuse")
+        legacy_worker = self.manifest.get("legacy_worker_generation")
+        if proposed["mail_action"].get("previous_generation") == legacy:
+            if type(legacy_worker) is not str:
+                raise RolloutGateError(
+                    "invalid_legacy_worker_generation",
+                    scope="mail_action",
+                )
+            worker_resource, worker_separator, _worker_version = legacy_worker.rpartition("@")
+            if (
+                not worker_separator
+                or "slack" not in worker_resource.casefold()
+                or legacy_worker
+                in {
+                    legacy,
+                    proposed["mail_action"].get("primary_generation"),
+                    proposed["report_link"].get("primary_generation"),
+                }
+            ):
+                raise RolloutGateError(
+                    "invalid_legacy_worker_generation",
+                    scope="mail_action",
+                )
+        elif legacy_worker is not None:
+            raise RolloutGateError(
+                "unexpected_legacy_worker_generation",
+                scope="mail_action",
+            )
         return proposed
 
-    def _domain_item(self, domain: str, config: dict[str, Any], now: int) -> dict[str, Any]:
+    def _assert_proposed_generations_exist(self, proposed: dict[str, Any]) -> None:
+        generations: set[str] = set()
+        for config in proposed.values():
+            for name in ("primary_generation", "previous_generation"):
+                generation = config.get(name)
+                if type(generation) is str:
+                    generations.add(generation)
+        legacy_worker = self.manifest.get("legacy_worker_generation")
+        if type(legacy_worker) is str:
+            generations.add(legacy_worker)
+        for generation in generations:
+            resource, separator, version = generation.rpartition("@")
+            if not separator:
+                raise RolloutGateError("secret_generation_unavailable")
+            observed_resource, observed_version = self._version_for_reference(
+                f"{resource}:::{version}"
+            )
+            if f"{observed_resource}@{observed_version}" != generation:
+                raise RolloutGateError("secret_generation_unavailable")
+
+    def _domain_item(
+        self,
+        domain: str,
+        config: dict[str, Any],
+        now: int,
+        *,
+        revision: int = 1,
+        high_water: int | None = None,
+        retired_generations: frozenset[str] = frozenset(),
+        retired_provenances: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
         maximum_ttl = _DOMAIN_MAX_TTL[domain]
         t0 = config.get("rotation_started_at")
         previous = config.get("previous_generation")
@@ -660,10 +729,10 @@ class LiveRolloutGate:
             "scope": {"S": self.control.scope},
             "record": {"S": f"DOMAIN#{domain}"},
             "domain": {"S": domain},
-            "revision": {"N": "1"},
+            "revision": {"N": str(revision)},
             "primary_generation": {"S": config["primary_generation"]},
             "rotation_epoch": {"S": self.control.rotation_epoch},
-            "high_water": {"N": str(now)},
+            "high_water": {"N": str(max(now, high_water if high_water is not None else now))},
             "previous_retired": {"BOOL": False},
             "stage": {"S": "preload"},
         }
@@ -675,27 +744,250 @@ class LiveRolloutGate:
                     "deadline": {"N": str(t0 + _ISSUER_CUTOVER_S + maximum_ttl)},
                 }
             )
+            legacy_worker = self.manifest.get("legacy_worker_generation")
+            if domain == "mail_action" and type(legacy_worker) is str:
+                item.update(
+                    {
+                        "legacy_worker_generation": {"S": legacy_worker},
+                        "legacy_worker_deadline": {"N": str(t0 + _ISSUER_CUTOVER_S + maximum_ttl)},
+                    }
+                )
+        if retired_generations:
+            item["retired_generations"] = {"SS": sorted(retired_generations)}
+        if retired_provenances:
+            item["retired_provenances"] = {"SS": sorted(retired_provenances)}
         return item
 
-    def initialize(self) -> None:
-        """CAS-create domain records and the durable stage ledger from live observations."""
+    @staticmethod
+    def _ddb_string(item: dict[str, Any], name: str, *, optional: bool = False) -> str | None:
+        raw = item.get(name)
+        if raw is None and optional:
+            return None
+        if type(raw) is not dict or type(raw.get("S")) is not str:
+            raise RolloutGateError("durable_state_invalid")
+        return raw["S"]
 
-        _arns, definitions = self._live_tasks()
+    @staticmethod
+    def _ddb_number(item: dict[str, Any], name: str, *, optional: bool = False) -> int | None:
+        raw = item.get(name)
+        if raw is None and optional:
+            return None
+        value = raw.get("N") if type(raw) is dict else None
+        if type(value) is not str or not value.isascii() or not value.isdecimal():
+            raise RolloutGateError("durable_state_invalid")
+        return int(value)
+
+    @staticmethod
+    def _ddb_string_set(item: dict[str, Any], name: str) -> frozenset[str]:
+        raw = item.get(name)
+        if raw is None:
+            return frozenset()
+        values = raw.get("SS") if type(raw) is dict else None
+        if type(values) is not list or any(type(value) is not str for value in values):
+            raise RolloutGateError("durable_state_invalid")
+        return frozenset(values)
+
+    def _read_item_optional(self, record: str) -> dict[str, Any] | None:
+        response = self.ddb.get_item(
+            TableName=self.control.state_table,
+            Key={"scope": {"S": self.control.scope}, "record": {"S": record}},
+            ConsistentRead=True,
+        )
+        self._observe(response)
+        item = response.get("Item") if type(response) is dict else None
+        if item is None:
+            return None
+        return _mapping(item)
+
+    def _domain_config_from_item(self, item: dict[str, Any]) -> dict[str, object]:
+        previous = self._ddb_string(item, "previous_generation", optional=True)
+        t0 = self._ddb_number(item, "rotation_started_at", optional=True)
+        if (previous is None) != (t0 is None):
+            raise RolloutGateError("durable_state_invalid")
+        return {
+            "primary_generation": self._ddb_string(item, "primary_generation"),
+            "previous_generation": previous,
+            "rotation_started_at": t0,
+        }
+
+    def _legacy_bindings_drained(
+        self,
+        arns: dict[str, str],
+        definitions: dict[str, dict[str, Any]],
+    ) -> None:
+        expected = {
+            "mcp": self.control.mcp.legacy_task_definition,
+            "connect_web": self.control.connect_web.legacy_task_definition,
+            "morning_digest": self.control.morning_digest.legacy_task_definition,
+        }
+        if arns != expected:
+            raise RolloutGateError("pinned_legacy_revision_required")
+        # Parsing every HMAC reference proves each observed legacy generation is version pinned.
+        self._observed_deployed(definitions)
+        self._service_stable_and_drained(self.control.mcp, arns["mcp"])
+        self._service_stable_and_drained(self.control.connect_web, arns["connect_web"])
+
+    def initialize(self) -> None:
+        """CAS-create the first epoch or advance a completed primary-only epoch."""
+
+        arns, definitions = self._live_tasks()
+        existing = {
+            domain: self._read_item_optional(f"DOMAIN#{domain}") for domain in _DOMAIN_MAX_TTL
+        }
+        if any(item is None for item in existing.values()) and any(
+            item is not None for item in existing.values()
+        ):
+            raise RolloutGateError("durable_state_partial")
+        first_epoch = all(item is None for item in existing.values())
+        if first_epoch:
+            self._legacy_bindings_drained(arns, definitions)
+        else:
+            self._service_stable_and_drained(self.control.mcp, arns["mcp"])
+            self._service_stable_and_drained(
+                self.control.connect_web,
+                arns["connect_web"],
+            )
+
         deployed = self._observed_deployed(definitions)
         proposed = self._assert_transition(deployed)
+        self._assert_proposed_generations_exist(proposed)
         now = self._now()
         transaction: list[dict[str, Any]] = []
-        for domain in _DOMAIN_MAX_TTL:
-            transaction.append(
-                {
-                    "Put": {
-                        "TableName": self.control.state_table,
-                        "Item": self._domain_item(domain, proposed[domain], now),
-                        "ConditionExpression": "attribute_not_exists(#record)",
-                        "ExpressionAttributeNames": {"#record": "record"},
+        prior_epoch: str | None = None
+        ledger_updated_at = now
+
+        if first_epoch:
+            for domain in _DOMAIN_MAX_TTL:
+                transaction.append(
+                    {
+                        "Put": {
+                            "TableName": self.control.state_table,
+                            "Item": self._domain_item(domain, proposed[domain], now),
+                            "ConditionExpression": "attribute_not_exists(#record)",
+                            "ExpressionAttributeNames": {"#record": "record"},
+                        }
                     }
-                }
+                )
+        else:
+            prior_epochs: set[str] = set()
+            for domain, raw_item in existing.items():
+                if raw_item is None:
+                    raise RolloutGateError("durable_state_partial")
+                epoch = self._ddb_string(raw_item, "rotation_epoch")
+                stage = self._ddb_string(raw_item, "stage")
+                revision = self._ddb_number(raw_item, "revision")
+                if (
+                    type(epoch) is not str
+                    or epoch == self.control.rotation_epoch
+                    or stage != "complete"
+                    or revision is None
+                    or self._domain_config_from_item(raw_item) != deployed[domain]
+                    or self._ddb_string(raw_item, "previous_generation", optional=True) is not None
+                    or self._ddb_string(
+                        raw_item,
+                        "legacy_worker_generation",
+                        optional=True,
+                    )
+                    is not None
+                ):
+                    raise RolloutGateError("next_epoch_not_ready", scope=domain)
+                prior_high_water = self._ddb_number(raw_item, "high_water")
+                retired_generations = self._ddb_string_set(
+                    raw_item,
+                    "retired_generations",
+                )
+                retired_provenances = self._ddb_string_set(
+                    raw_item,
+                    "retired_provenances",
+                )
+                if (
+                    prior_high_water is None
+                    or proposed[domain].get("primary_generation") in retired_generations
+                ):
+                    raise RolloutGateError("next_epoch_not_ready", scope=domain)
+                ledger_updated_at = max(ledger_updated_at, prior_high_water)
+                prior_epochs.add(epoch)
+                history_record = f"EPOCH_HISTORY#{domain}#{epoch}"
+                transaction.append(
+                    {
+                        "Put": {
+                            "TableName": self.control.state_table,
+                            "Item": {
+                                "scope": {"S": self.control.scope},
+                                "record": {"S": history_record},
+                                "domain": {"S": domain},
+                                "rotation_epoch": {"S": epoch},
+                                "primary_generation": {
+                                    "S": str(deployed[domain]["primary_generation"])
+                                },
+                                "closed_at": {"N": str(max(now, prior_high_water))},
+                                "revision": {"N": str(revision)},
+                                "high_water": {"N": str(prior_high_water)},
+                                **(
+                                    {"retired_generations": {"SS": sorted(retired_generations)}}
+                                    if retired_generations
+                                    else {}
+                                ),
+                                **(
+                                    {"retired_provenances": {"SS": sorted(retired_provenances)}}
+                                    if retired_provenances
+                                    else {}
+                                ),
+                            },
+                            "ConditionExpression": "attribute_not_exists(#record)",
+                            "ExpressionAttributeNames": {"#record": "record"},
+                        }
+                    }
+                )
+                next_item = self._domain_item(
+                    domain,
+                    proposed[domain],
+                    now,
+                    revision=revision + 1,
+                    high_water=prior_high_water,
+                    retired_generations=retired_generations,
+                    retired_provenances=retired_provenances,
+                )
+                transaction.append(
+                    {
+                        "Put": {
+                            "TableName": self.control.state_table,
+                            "Item": next_item,
+                            "ConditionExpression": (
+                                "revision = :revision AND rotation_epoch = :old_epoch"
+                                " AND #stage = :complete"
+                            ),
+                            "ExpressionAttributeNames": {"#stage": "stage"},
+                            "ExpressionAttributeValues": {
+                                ":revision": {"N": str(revision)},
+                                ":old_epoch": {"S": epoch},
+                                ":complete": {"S": "complete"},
+                            },
+                        }
+                    }
+                )
+            if len(prior_epochs) != 1:
+                raise RolloutGateError("next_epoch_not_ready")
+            prior_epoch = next(iter(prior_epochs))
+            prior_ledger = self._read_item_optional(f"LEDGER#{prior_epoch}")
+            if prior_ledger is None or self._ddb_string(prior_ledger, "stage") != "complete":
+                raise RolloutGateError("next_epoch_not_ready")
+            transaction.insert(
+                0,
+                {
+                    "ConditionCheck": {
+                        "TableName": self.control.state_table,
+                        "Key": {
+                            "scope": {"S": self.control.scope},
+                            "record": {"S": f"LEDGER#{prior_epoch}"},
+                        },
+                        "ConditionExpression": "#stage = :complete",
+                        "ExpressionAttributeNames": {"#stage": "stage"},
+                        "ExpressionAttributeValues": {":complete": {"S": "complete"}},
+                    }
+                },
             )
+
         transaction.append(
             {
                 "Put": {
@@ -706,7 +998,12 @@ class LiveRolloutGate:
                         "rotation_epoch": {"S": self.control.rotation_epoch},
                         "stage": {"S": "initialized"},
                         "revision": {"N": "1"},
-                        "updated_at": {"N": str(now)},
+                        "updated_at": {"N": str(ledger_updated_at)},
+                        **(
+                            {"previous_rotation_epoch": {"S": prior_epoch}}
+                            if prior_epoch is not None
+                            else {}
+                        ),
                     },
                     "ConditionExpression": "attribute_not_exists(#record)",
                     "ExpressionAttributeNames": {"#record": "record"},
@@ -769,6 +1066,14 @@ class LiveRolloutGate:
             }
         return proposed
 
+    def _durable_legacy_worker_generation(self) -> str | None:
+        item = self._read_item("DOMAIN#mail_action")
+        return self._ddb_string(
+            item,
+            "legacy_worker_generation",
+            optional=True,
+        )
+
     def _assert_manifest_matches_durable(self) -> dict[str, dict[str, object]]:
         durable = self._durable_proposed()
         domains = _mapping(self.manifest.get("domains"))
@@ -776,6 +1081,12 @@ class LiveRolloutGate:
             proposed = _mapping(_mapping(domains.get(domain)).get("proposed"))
             if proposed != durable[domain]:
                 raise RolloutGateError("manifest_durable_drift", scope=domain)
+        if (
+            self.manifest.get("legacy_worker_generation")
+            != self._durable_legacy_worker_generation()
+        ):
+            raise RolloutGateError("manifest_durable_drift", scope="mail_action")
+        self._assert_proposed_generations_exist(durable)
         self._now()
         return durable
 
@@ -798,6 +1109,30 @@ class LiveRolloutGate:
         if any(environment.get(name) != value for name, value in expected.items()):
             raise RolloutGateError("runtime_metadata_drift", scope=task)
 
+    def _validate_legacy_worker_reference(
+        self,
+        *,
+        task: str,
+        definition: dict[str, Any],
+    ) -> None:
+        if "mail_action" not in _TASK_DOMAINS[task]:
+            return
+        container = _one_container(definition)
+        environment = _named(container.get("environment", []), "value")
+        secrets = _named(container.get("secrets", []), "valueFrom")
+        expected = self._durable_legacy_worker_generation()
+        generation = environment.get("MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION")
+        reference = secrets.get("MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET")
+        if expected is None:
+            if generation is not None or reference is not None:
+                raise RolloutGateError("legacy_worker_reference_drift", scope=task)
+            return
+        if generation != expected or reference is None:
+            raise RolloutGateError("legacy_worker_reference_drift", scope=task)
+        resource, version = self._version_for_reference(reference)
+        if f"{resource}@{version}" != expected:
+            raise RolloutGateError("legacy_worker_reference_drift", scope=task)
+
     def _expected_provenance(
         self,
         *,
@@ -806,6 +1141,7 @@ class LiveRolloutGate:
         artifact_sha256: str | None = None,
     ) -> str:
         durable = self._durable_proposed()
+        legacy_worker = self._durable_legacy_worker_generation() or ""
         if task == "mcp":
             if image is None or _IMAGE_DIGEST_RE.fullmatch(image) is None:
                 raise RolloutGateError("image_not_digest", scope=task)
@@ -813,6 +1149,7 @@ class LiveRolloutGate:
                 "image": image,
                 "mail": str(durable["mail_action"]["primary_generation"]),
                 "report": str(durable["report_link"]["primary_generation"]),
+                "legacy_worker": legacy_worker,
                 "rotation_epoch": self.control.rotation_epoch,
                 "workload": "mcp",
             }
@@ -831,6 +1168,7 @@ class LiveRolloutGate:
             values = {
                 "image": image,
                 "mail": str(durable["mail_action"]["primary_generation"]),
+                "legacy_worker": legacy_worker,
                 "rotation_epoch": self.control.rotation_epoch,
                 "workload": "morning_digest",
             }
@@ -841,6 +1179,7 @@ class LiveRolloutGate:
                 "artifact": artifact_sha256,
                 "mail": str(durable["mail_action"]["primary_generation"]),
                 "report": str(durable["report_link"]["primary_generation"]),
+                "legacy_worker": legacy_worker,
                 "rotation_epoch": self.control.rotation_epoch,
                 "workload": "worker",
             }
@@ -880,14 +1219,15 @@ class LiveRolloutGate:
             definition=definition,
             provenance=provenance,
         )
+        self._validate_legacy_worker_reference(task=task, definition=definition)
 
     def terraform_pre_register(self, *, task: str, definition: dict[str, Any]) -> None:
         """Gate Terraform task registration and make broad/targeted apply stage-aware."""
 
         expected_stages = {
-            "connect_web": frozenset({"initialized", "mcp_stable_and_old_drained"}),
-            "mcp": frozenset({"worker_verified"}),
-            "morning_digest": frozenset({"mcp_stable_and_old_drained"}),
+            "connect_web": frozenset({"initialized", "mcp_stable_and_old_drained", "complete"}),
+            "mcp": frozenset({"worker_verified", "complete"}),
+            "morning_digest": frozenset({"mcp_stable_and_old_drained", "complete"}),
         }
         if task not in expected_stages:
             raise RolloutGateError("unknown_task")
@@ -927,6 +1267,7 @@ class LiveRolloutGate:
             definition=definition,
             provenance=rollback_provenance,
         )
+        self._validate_legacy_worker_reference(task=task, definition=definition)
 
     def _validate_all_rollbacks(self) -> None:
         self._validate_rollback_task(
@@ -945,6 +1286,32 @@ class LiveRolloutGate:
             image=self.control.morning_digest.rollback_image,
         )
 
+    def _validate_live_compatible_task(
+        self,
+        *,
+        task: str,
+        task_definition: str,
+        definition: dict[str, Any],
+    ) -> None:
+        rollback_task = {
+            "mcp": self.control.mcp.rollback_task_definition,
+            "connect_web": self.control.connect_web.rollback_task_definition,
+            "morning_digest": self.control.morning_digest.rollback_task_definition,
+        }[task]
+        if task_definition == rollback_task:
+            rollback_image = {
+                "mcp": self.control.mcp.rollback_image,
+                "connect_web": self.control.connect_web.rollback_image,
+                "morning_digest": self.control.morning_digest.rollback_image,
+            }[task]
+            self._validate_rollback_task(
+                task=task,
+                task_definition=task_definition,
+                image=rollback_image,
+            )
+            return
+        self.validate_candidate(task=task, definition=definition)
+
     def _assert_cutover_open(self, task: str) -> None:
         domains: tuple[str, ...]
         if task == "connect_web":
@@ -962,29 +1329,82 @@ class LiveRolloutGate:
             if type(t0) is int and now >= t0 + _ISSUER_CUTOVER_S:
                 raise RolloutGateError("issuer_cutover_deadline", scope=domain)
 
-    def pre_update(self, *, task: str, task_definition: str) -> None:
+    def pre_update(
+        self,
+        *,
+        task: str,
+        task_definition: str,
+        mode: str = "candidate",
+    ) -> None:
         """Re-fetch and validate a registered candidate immediately before service update."""
 
-        expected_stages = {
+        candidate_stages = {
             "connect_web": frozenset({"initialized", "mcp_stable_and_old_drained", "complete"}),
             "mcp": frozenset({"worker_verified", "mcp_stable_and_old_drained", "complete"}),
             "morning_digest": frozenset({"mcp_stable_and_old_drained", "complete"}),
         }
-        if task not in expected_stages:
+        rollback_stages = {
+            "connect_web": frozenset(_LEDGER_STAGES),
+            "mcp": frozenset({"worker_verified", "mcp_stable_and_old_drained", "complete"}),
+            "morning_digest": frozenset({"mcp_stable_and_old_drained", "complete"}),
+        }
+        if task not in candidate_stages or mode not in {"candidate", "rollback"}:
             raise RolloutGateError("unknown_task")
-        if self._ledger().stage not in expected_stages[task]:
+        allowed_stages = candidate_stages if mode == "candidate" else rollback_stages
+        ledger = self._ledger()
+        if ledger.stage not in allowed_stages[task]:
             raise RolloutGateError("stage_order_violation", scope=task)
         if task_definition in self.control.forbidden_signing_task_definitions:
             raise RolloutGateError("forbidden_signing_revision", scope=task)
-        definition = self._describe_task(task_definition)
-        self.validate_candidate(task=task, definition=definition)
+        if mode == "rollback":
+            approved = {
+                "mcp": self.control.mcp.rollback_task_definition,
+                "connect_web": self.control.connect_web.rollback_task_definition,
+                "morning_digest": self.control.morning_digest.rollback_task_definition,
+            }[task]
+            if task_definition != approved:
+                raise RolloutGateError("rollback_task_not_approved", scope=task)
+            image = {
+                "mcp": self.control.mcp.rollback_image,
+                "connect_web": self.control.connect_web.rollback_image,
+                "morning_digest": self.control.morning_digest.rollback_image,
+            }[task]
+            self._validate_rollback_task(
+                task=task,
+                task_definition=task_definition,
+                image=image,
+            )
+        else:
+            definition = self._describe_task(task_definition)
+            self.validate_candidate(task=task, definition=definition)
         self._validate_all_rollbacks()
-        self._assert_cutover_open(task)
-        ledger = self._ledger()
+        if mode == "candidate":
+            self._assert_cutover_open(task)
         if ledger.stage in {"mcp_stable_and_old_drained", "complete"} and task_definition.endswith(
             ":53"
         ):
             raise RolloutGateError("td53_after_issuer_cutover", scope="connect_web")
+
+    def post_update(
+        self,
+        *,
+        task: str,
+        task_definition: str,
+        mode: str = "candidate",
+    ) -> None:
+        """Validate the exact promoted artifact and prove all old service tasks drained."""
+
+        self.pre_update(task=task, task_definition=task_definition, mode=mode)
+        if task == "morning_digest":
+            live_arn, _definition = self._scheduled_task()
+            if live_arn != task_definition:
+                raise RolloutGateError("scheduled_target_not_updated", scope=task)
+            return
+        workload = self.control.mcp if task == "mcp" else self.control.connect_web
+        live_arn, _definition = self._service_task(workload)
+        if live_arn != task_definition:
+            raise RolloutGateError("service_not_stable", scope=task)
+        self._service_stable_and_drained(workload, task_definition)
 
     def pre_connect_change(self, *, final: bool) -> None:
         """Read-only gate before connect-web build/upload work begins."""
@@ -998,9 +1418,19 @@ class LiveRolloutGate:
         self._validate_all_rollbacks()
         self._assert_cutover_open("connect_web")
 
-    def _worker_attested(self, *, after: int | None = None) -> None:
+    def _worker_attested(
+        self,
+        *,
+        after: int | None = None,
+        mode: str = "candidate",
+    ) -> None:
         worker = self.control.worker
-        item = self._read_item(f"WORKER#{worker.provenance}")
+        if mode not in {"candidate", "rollback"}:
+            raise RolloutGateError("worker_mode_invalid", scope="worker")
+        expected_provenance = (
+            worker.provenance if mode == "candidate" else worker.rollback_provenance
+        )
+        item = self._read_item(f"WORKER#{expected_provenance}")
         try:
             provenance = item["provenance"]["S"]
             worker_id = item["worker_id"]["S"]
@@ -1012,10 +1442,10 @@ class LiveRolloutGate:
         except (KeyError, TypeError, ValueError) as exc:
             raise RolloutGateError("worker_attestation_invalid", scope="worker") from exc
         if (
-            provenance != worker.provenance
+            provenance != expected_provenance
             or worker_id != worker.instance_id
             or epoch != self.control.rotation_epoch
-            or config_digest != self._worker_config_digest()
+            or config_digest != self._worker_config_digest(provenance=expected_provenance)
             or loaded != frozenset(_DOMAIN_MAX_TTL)
             or (after is not None and checked_at <= after)
             or self._now() - checked_at > 120
@@ -1024,8 +1454,10 @@ class LiveRolloutGate:
         ):
             raise RolloutGateError("worker_attestation_invalid", scope="worker")
 
-    def _worker_config_digest(self) -> str:
+    def _worker_config_digest(self, *, provenance: str | None = None) -> str:
         durable = self._durable_proposed()
+        expected_provenance = provenance or self.control.worker.provenance
+        legacy_worker = self._durable_legacy_worker_generation()
         expectations: list[HmacRuntimeExpectation] = []
         for domain, maximum_ttl in _DOMAIN_MAX_TTL.items():
             config = durable[domain]
@@ -1043,7 +1475,11 @@ class LiveRolloutGate:
                     rotation_started_at=t0 if type(t0) is int else None,
                     deadline=deadline,
                     rotation_epoch=self.control.rotation_epoch,
-                    provenance=self.control.worker.provenance,
+                    provenance=expected_provenance,
+                    legacy_worker_generation=(legacy_worker if domain == "mail_action" else None),
+                    legacy_worker_deadline=(
+                        deadline if domain == "mail_action" and legacy_worker is not None else None
+                    ),
                 )
             )
         digest = runtime_expectations_digest(tuple(expectations))
@@ -1081,7 +1517,12 @@ class LiveRolloutGate:
         ):
             raise RolloutGateError("worker_provenance_binding_drift", scope="worker")
 
-    def pre_restart(self, *, rollback_artifact: Path) -> None:
+    def pre_restart(
+        self,
+        *,
+        rollback_artifact: Path,
+        mode: str = "candidate",
+    ) -> None:
         """Revalidate worker attestation and immutable metadata immediately before restart."""
 
         if self._ledger().stage not in {
@@ -1090,22 +1531,40 @@ class LiveRolloutGate:
             "complete",
         }:
             raise RolloutGateError("stage_order_violation", scope="worker")
-        self._worker_attested()
+        self._worker_attested(mode=mode)
         self.verify_worker_rollback_artifact(rollback_artifact)
         self._validate_all_rollbacks()
-        self._assert_cutover_open("worker")
+        if mode == "candidate":
+            self._assert_cutover_open("worker")
 
-    def pre_worker_upload(self, *, artifact: Path, rollback_artifact: Path) -> None:
+    def pre_worker_upload(
+        self,
+        *,
+        artifact: Path,
+        rollback_artifact: Path,
+        mode: str = "candidate",
+    ) -> None:
         """Gate worker artifact upload before the remote readiness attestation exists."""
 
         ledger = self._ledger()
-        if ledger.stage != "connect_web_preloaded":
+        if mode not in {"candidate", "rollback"}:
+            raise RolloutGateError("worker_mode_invalid", scope="worker")
+        if ledger.stage not in {
+            "connect_web_preloaded",
+            "worker_verified",
+            "mcp_stable_and_old_drained",
+            "complete",
+        }:
             raise RolloutGateError("stage_order_violation", scope="worker")
         self._assert_manifest_matches_durable()
-        self.verify_worker_artifact(artifact)
+        if mode == "candidate":
+            self.verify_worker_artifact(artifact)
+        else:
+            self.verify_worker_rollback_artifact(artifact)
         self.verify_worker_rollback_artifact(rollback_artifact)
         self._validate_all_rollbacks()
-        self._assert_cutover_open("worker")
+        if mode == "candidate":
+            self._assert_cutover_open("worker")
 
     def _service_stable_and_drained(
         self,
@@ -1139,7 +1598,11 @@ class LiveRolloutGate:
         )
         self._observe(listed)
         task_arns = listed.get("taskArns") if type(listed) is dict else None
-        if type(task_arns) is not list or not task_arns:
+        if (
+            type(task_arns) is not list
+            or not task_arns
+            or (type(listed) is dict and listed.get("nextToken") is not None)
+        ):
             raise RolloutGateError("old_tasks_not_drained")
         described = self.ecs.describe_tasks(cluster=workload.cluster, tasks=task_arns)
         self._observe(described)
@@ -1231,6 +1694,10 @@ class LiveRolloutGate:
         if task_definition in self.control.forbidden_signing_task_definitions:
             raise RolloutGateError("connect_verifier_not_preloaded")
         self.validate_candidate(task="connect_web", definition=definition)
+        self._service_stable_and_drained(
+            self.control.connect_web,
+            task_definition,
+        )
         self._assert_cutover_open("connect_web")
         self._transition_ledger(
             expected_stage="initialized",
@@ -1239,8 +1706,11 @@ class LiveRolloutGate:
         )
 
     def worker_verified(self, *, rollback_artifact: Path) -> None:
+        ledger = self._ledger()
         self._worker_attested()
         self.verify_worker_rollback_artifact(rollback_artifact)
+        if ledger.stage == "complete":
+            return
         self._assert_cutover_open("worker")
         self._transition_ledger(
             expected_stage="connect_web_preloaded",
@@ -1278,16 +1748,34 @@ class LiveRolloutGate:
         )
 
     def complete(self) -> None:
+        mcp_arn, mcp = self._service_task(self.control.mcp)
         connect_arn, connect = self._service_task(self.control.connect_web)
         morning_arn, morning = self._scheduled_task()
         if (
-            connect_arn in self.control.forbidden_signing_task_definitions
+            mcp_arn in self.control.forbidden_signing_task_definitions
+            or connect_arn in self.control.forbidden_signing_task_definitions
             or connect_arn.endswith(":53")
             or morning_arn in self.control.forbidden_signing_task_definitions
         ):
             raise RolloutGateError("forbidden_signing_revision")
-        self.validate_candidate(task="connect_web", definition=connect)
-        self.validate_candidate(task="morning_digest", definition=morning)
+        self._validate_live_compatible_task(
+            task="mcp",
+            task_definition=mcp_arn,
+            definition=mcp,
+        )
+        self._validate_live_compatible_task(
+            task="connect_web",
+            task_definition=connect_arn,
+            definition=connect,
+        )
+        self._validate_live_compatible_task(
+            task="morning_digest",
+            task_definition=morning_arn,
+            definition=morning,
+        )
+        self._validate_all_rollbacks()
+        self._service_stable_and_drained(self.control.mcp, mcp_arn)
+        self._service_stable_and_drained(self.control.connect_web, connect_arn)
         self._assert_cutover_open("mcp")
         shared = frozenset(
             {
@@ -1308,6 +1796,138 @@ class LiveRolloutGate:
             },
             report_issuers=shared,
         )
+
+    def retire_previous(self, *, domain: str) -> None:
+        """CAS-remove one expired previous generation while preserving immutable history."""
+
+        if domain not in _DOMAIN_MAX_TTL:
+            raise RolloutGateError("unknown_domain")
+        if self._ledger().stage != "complete":
+            raise RolloutGateError("stage_order_violation", scope=domain)
+        arns, definitions = self._live_tasks()
+        self._service_stable_and_drained(self.control.mcp, arns["mcp"])
+        self._service_stable_and_drained(
+            self.control.connect_web,
+            arns["connect_web"],
+        )
+        deployed = self._observed_deployed(definitions)
+        proposed = self._assert_transition(deployed)
+        candidate = proposed[domain]
+        if (
+            candidate.get("primary_generation") != deployed[domain]["primary_generation"]
+            or candidate.get("previous_generation") is not None
+            or candidate.get("rotation_started_at") is not None
+        ):
+            raise RolloutGateError("retirement_manifest_invalid", scope=domain)
+
+        domain_items = {
+            item_domain: self._read_item(f"DOMAIN#{item_domain}") for item_domain in _DOMAIN_MAX_TTL
+        }
+        for item_domain, domain_item in domain_items.items():
+            if self._domain_config_from_item(domain_item) != deployed[item_domain]:
+                raise RolloutGateError(
+                    "manifest_durable_drift",
+                    scope=item_domain,
+                )
+        item = domain_items[domain]
+        epoch = self._ddb_string(item, "rotation_epoch")
+        revision = self._ddb_number(item, "revision")
+        high_water = self._ddb_number(item, "high_water")
+        previous = self._ddb_string(item, "previous_generation", optional=True)
+        t0 = self._ddb_number(item, "rotation_started_at", optional=True)
+        deadline = self._ddb_number(item, "deadline", optional=True)
+        legacy_worker = self._ddb_string(
+            item,
+            "legacy_worker_generation",
+            optional=True,
+        )
+        legacy_worker_deadline = self._ddb_number(
+            item,
+            "legacy_worker_deadline",
+            optional=True,
+        )
+        if (
+            epoch != self.control.rotation_epoch
+            or revision is None
+            or high_water is None
+            or previous is None
+            or t0 is None
+            or deadline is None
+            or ((legacy_worker is None) != (legacy_worker_deadline is None))
+            or (legacy_worker_deadline is not None and legacy_worker_deadline != deadline)
+        ):
+            raise RolloutGateError("retirement_state_invalid", scope=domain)
+        now = self._now()
+        if now < deadline:
+            raise RolloutGateError("previous_window_active", scope=domain)
+        effective_now = max(now, high_water)
+
+        retired = [previous]
+        if legacy_worker is not None:
+            retired.append(legacy_worker)
+        history_item: dict[str, Any] = {
+            "scope": {"S": self.control.scope},
+            "record": {"S": f"RETIREMENT#{domain}#{epoch}"},
+            "domain": {"S": domain},
+            "rotation_epoch": {"S": epoch},
+            "primary_generation": {"S": str(deployed[domain]["primary_generation"])},
+            "previous_generation": {"S": previous},
+            "rotation_started_at": {"N": str(t0)},
+            "deadline": {"N": str(deadline)},
+            "retired_at": {"N": str(effective_now)},
+            "source_revision": {"N": str(revision)},
+        }
+        if legacy_worker is not None:
+            history_item["legacy_worker_generation"] = {"S": legacy_worker}
+        transaction = [
+            {
+                "Put": {
+                    "TableName": self.control.state_table,
+                    "Item": history_item,
+                    "ConditionExpression": "attribute_not_exists(#record)",
+                    "ExpressionAttributeNames": {"#record": "record"},
+                }
+            },
+            {
+                "Update": {
+                    "TableName": self.control.state_table,
+                    "Key": {
+                        "scope": {"S": self.control.scope},
+                        "record": {"S": f"DOMAIN#{domain}"},
+                    },
+                    "UpdateExpression": (
+                        "SET previous_retired = :true, high_water = :now,"
+                        " revision = revision + :one"
+                        " REMOVE previous_generation, rotation_started_at, deadline,"
+                        " legacy_worker_generation, legacy_worker_deadline"
+                        " ADD retired_generations :retired"
+                    ),
+                    "ConditionExpression": (
+                        "revision = :revision AND rotation_epoch = :epoch"
+                        " AND high_water = :high_water AND previous_generation = :previous"
+                        " AND deadline = :deadline AND #stage = :complete"
+                    ),
+                    "ExpressionAttributeNames": {"#stage": "stage"},
+                    "ExpressionAttributeValues": {
+                        ":true": {"BOOL": True},
+                        ":now": {"N": str(effective_now)},
+                        ":one": {"N": "1"},
+                        ":revision": {"N": str(revision)},
+                        ":epoch": {"S": epoch},
+                        ":high_water": {"N": str(high_water)},
+                        ":previous": {"S": previous},
+                        ":deadline": {"N": str(deadline)},
+                        ":complete": {"S": "complete"},
+                        ":retired": {"SS": retired},
+                    },
+                }
+            },
+        ]
+        try:
+            response = self.ddb.transact_write_items(TransactItems=transaction)
+            self._observe(response)
+        except Exception as exc:
+            raise RolloutGateError("retirement_cas_failed", scope=domain) from exc
 
     def inspect(self) -> None:
         """Read-only parity check for current task metadata, worker attestation, and anchors."""
@@ -1363,9 +1983,11 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
         required=True,
         choices=(
             "initialize",
+            "legacy-bindings-drained",
             "inspect",
             "pre-register",
             "pre-update",
+            "post-update",
             "pre-connect-preload",
             "pre-connect-final",
             "pre-worker-upload",
@@ -1374,9 +1996,12 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
             "worker-verified",
             "mcp-stable-and-old-drained",
             "complete",
+            "retire-previous",
         ),
     )
     parser.add_argument("--task", choices=tuple(_TASK_DOMAINS))
+    parser.add_argument("--domain", choices=tuple(_DOMAIN_MAX_TTL))
+    parser.add_argument("--mode", choices=("candidate", "rollback"), default="candidate")
     parser.add_argument("--task-definition-json")
     parser.add_argument("--task-definition-arn")
     parser.add_argument("--worker-rollback-artifact")
@@ -1399,6 +2024,9 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
         )
         if args.action == "initialize":
             gate.initialize()
+        elif args.action == "legacy-bindings-drained":
+            arns, definitions = gate._live_tasks()
+            gate._legacy_bindings_drained(arns, definitions)
         elif args.action == "inspect":
             gate.inspect()
         elif args.action == "pre-register":
@@ -1411,7 +2039,19 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
         elif args.action == "pre-update":
             if args.task is None or args.task_definition_arn is None:
                 raise RolloutGateError("missing_action_argument")
-            gate.pre_update(task=args.task, task_definition=args.task_definition_arn)
+            gate.pre_update(
+                task=args.task,
+                task_definition=args.task_definition_arn,
+                mode=args.mode,
+            )
+        elif args.action == "post-update":
+            if args.task is None or args.task_definition_arn is None:
+                raise RolloutGateError("missing_action_argument")
+            gate.post_update(
+                task=args.task,
+                task_definition=args.task_definition_arn,
+                mode=args.mode,
+            )
         elif args.action == "pre-connect-preload":
             gate.pre_connect_change(final=False)
         elif args.action == "pre-connect-final":
@@ -1422,11 +2062,15 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
             gate.pre_worker_upload(
                 artifact=Path(args.worker_artifact),
                 rollback_artifact=Path(args.worker_rollback_artifact),
+                mode=args.mode,
             )
         elif args.action == "pre-restart":
             if args.worker_rollback_artifact is None:
                 raise RolloutGateError("missing_action_argument")
-            gate.pre_restart(rollback_artifact=Path(args.worker_rollback_artifact))
+            gate.pre_restart(
+                rollback_artifact=Path(args.worker_rollback_artifact),
+                mode=args.mode,
+            )
         elif args.action == "connect-web-preloaded":
             gate.connect_web_preloaded()
         elif args.action == "worker-verified":
@@ -1437,6 +2081,10 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
             gate.mcp_stable_and_old_drained()
         elif args.action == "complete":
             gate.complete()
+        elif args.action == "retire-previous":
+            if args.domain is None:
+                raise RolloutGateError("missing_action_argument")
+            gate.retire_previous(domain=args.domain)
         else:
             raise RolloutGateError("unknown_action")
         result = _result()

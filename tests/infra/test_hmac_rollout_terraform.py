@@ -131,6 +131,10 @@ def test_hmac_secrets_are_dedicated_version_pinned_and_never_stored_in_state() -
     assert 'name      = "REPORT_LINK_HMAC_SECRET"' in hmac_tf
     assert 'name  = "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY"' in hmac_tf
     assert 'name  = "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY"' in hmac_tf
+    assert 'variable "hmac_legacy_slack_bot_version_id"' in hmac_tf
+    assert 'name  = "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION"' in hmac_tf
+    assert 'name      = "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET"' in hmac_tf
+    assert ":::${var.hmac_legacy_slack_bot_version_id}" in hmac_tf
     assert hmac_tf.count('== "legacy_migration" ? [') >= 2
     assert ":::${var.mail_action_hmac_primary_version_id}" in hmac_tf
     assert ":::${var.report_link_hmac_primary_version_id}" in hmac_tf
@@ -214,6 +218,7 @@ def test_execution_roles_have_only_the_hmac_domains_their_tasks_need() -> None:
     assert "aws_secretsmanager_secret.mail_action_hmac.arn" in worker_policy
     assert "aws_secretsmanager_secret.report_link_hmac.arn" in worker_policy
     assert "data.aws_secretsmanager_secret.database_url.arn" in worker_policy
+    assert "data.aws_secretsmanager_secret.slack_bot.arn" in worker_policy
     assert "${var.project_name}/${var.environment}/*" not in worker_policy
     for policy in runtime_policies:
         assert "aws_dynamodb_table.hmac_state.arn" in policy
@@ -246,7 +251,11 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert "TEAMAGENT_HMAC_REQUIRED_DOMAINS" in loader
     assert "primary cannot be a database credential secret" in loader
     assert "legacy previous must be the pinned database-url secret" in loader
+    assert "legacy worker key must be the pinned Slack bot secret" in loader
     assert "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY" in worker
+    assert "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET_NAME" in worker
+    assert "MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID" in worker
+    assert "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION" in worker
     assert "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY" in worker
     assert '"worker": frozenset({"mail_action", "report_link"})' in preflight
 
@@ -266,6 +275,9 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert connect_deploy.index("--action pre-update") < connect_deploy.index(
         "aws ecs update-service"
     )
+    assert "--action post-update" in connect_deploy
+    assert "--mode rollback" in connect_deploy
+    assert "HMAC_REGISTERED_TASK_ARN" in connect_deploy
     assert "aws_ecs_task_definition.mcp" not in resilience
     assert "aws_ecs_task_definition.canary" not in resilience
     assert "canary:14" in resilience
@@ -280,11 +292,28 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert worker_deploy.index("--action pre-restart") < worker_deploy.index(
         'RESTART_CID="$(aws ssm send-command'
     )
+    assert "HMAC_WORKER_MODE" in worker_deploy
+    assert "HMAC_WORKER_ROLLBACK_ENV" in worker_deploy
+    rollback_branch = worker_deploy[
+        worker_deploy.index('if [[ "$HMAC_WORKER_MODE" == "rollback" ]]') : worker_deploy.index(
+            'echo "   size:'
+        )
+    ]
+    assert 'cp "$HMAC_WORKER_ROLLBACK_ARTIFACT"' in rollback_branch
+    assert "git archive" in rollback_branch
+    assert rollback_branch.index('cp "$HMAC_WORKER_ROLLBACK_ARTIFACT"') < rollback_branch.index(
+        "git archive"
+    )
     assert "StandardOutputContent" not in worker_deploy
     assert "StandardErrorContent" not in worker_deploy
     assert "list_secret_version_ids" in live_gate
     assert "get_secret_value" not in live_gate.casefold()
     assert "transact_write_items" in live_gate
+    assert "secret_reference_unpinned" in live_gate
+    assert "legacy_task_definition" in live_gate
+    assert "def retire_previous(" in live_gate
+    assert '"post-update"' in live_gate
+    assert live_gate.count("_service_stable_and_drained(") >= 7
     assert "gate.terraform_pre_register(" in live_gate
     assert "config_digest" in live_gate
     assert promote.index("--action pre-update") < promote.index("aws ecs update-service")
@@ -292,6 +321,8 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
         "--action mcp-stable-and-old-drained"
     )
     assert "force-new-deployment" not in promote
+    assert '--mode "$HMAC_PROMOTION_MODE"' in promote
+    assert "--action post-update" in promote
 
 
 def test_live_connect_and_canary_anchors_remain_documented_and_canary_unmodified() -> None:
@@ -312,4 +343,10 @@ def test_live_connect_and_canary_anchors_remain_documented_and_canary_unmodified
         "Register one MCP revision containing both complete keyrings"
     )
     assert "every old MCP task is drained" in runbook
+    assert "Do not infer it from the secret's current `AWSCURRENT`" in runbook
+    assert "run `hmac_rollout_gate.py --action" in runbook
+    assert "retire-previous --domain mail_action`" in runbook
+    assert "repeat the CAS first for `report_link`" in runbook
+    assert "HMAC_WORKER_MODE=rollback" in runbook
+    assert "exact approved rollback artifact" in runbook
     assert "canary `:14`" in runbook

@@ -2,8 +2,8 @@
 
 This contract applies independently to the mail-action and report-link keyrings. Within those
 keyrings, draft, calendar-event, and report-link tokens use distinct framed HMAC purposes. It is
-the boundary that Terraform/deployment code must preserve; application code cannot persist
-rotation history across process restarts.
+the boundary that Terraform, deployment gates, and the shared durable runtime state must preserve
+across process restarts.
 
 ## Key invariants
 
@@ -24,6 +24,11 @@ rotation history across process restarts.
   verification excludes the primary and accepts only the exact old payload shapes; it disappears
   with the bounded previous generation. Dedicated-to-dedicated rotations never enable unframed
   verification. Primary validation is never relaxed.
+- A legacy worker that historically used the Slack bot token as its draft/event fallback may add
+  one separately pinned `MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET` only during the same bounded mail
+  legacy window. It is verification-only, accepts version-1 payloads only, shares the immutable
+  mail T0/deadline, and is purpose-framed by the exact legacy payload decoder. It cannot sign,
+  verify version 2, or cross-verify draft and event tokens.
 - Each secret reference is pinned to one Secrets Manager VersionId. Terraform and preflight carry
   stable non-secret generation identifiers (`secret ARN@VersionId`) for primary and previous.
   Secret names without VersionIds, `AWSCURRENT`, and plaintext secret values are not generations.
@@ -55,15 +60,22 @@ previous key. This also prevents wall-clock rollback from introducing or re-enab
 the previous-key/T0 pair is temporarily absent. The first observed `T0` for that generation is
 immutable in the process; any change fails closed.
 
-That high-water mark is intentionally not claimed to survive a restart. Deployment state must
-provide the durable guarantee:
+The process-local lock is only the first layer. The runtime and rollout gate bind every epoch to a
+shared DynamoDB CAS record containing primary/previous generations, legacy worker generation,
+fixed T0/deadline, trusted-time high-water, retirement state, and provenance. Startup and issuance
+fail closed when the task's generation is stale or retired. Deployment state must:
 
-1. Persist `T0` once when the verifier-first rotation begins.
-2. Never recompute, reset, or update `T0` while that previous key remains configured.
-3. At or after the exclusive deadline, remove `..._HMAC_PREVIOUS_SECRET`,
-   `..._HMAC_PREVIOUS_GENERATION`, `..._HMAC_PREVIOUS_ROTATION_STARTED_AT`, and any
-   `..._HMAC_PREVIOUS_IS_LEGACY` marker atomically in the same deployment revision.
-4. Do not begin the next generation until the prior pair is absent.
+1. Prove each live ECS service is on an approved legacy task definition whose secret references
+   are pinned to exact VersionIds and fully drain every older task before durable initialization.
+   Never infer an already-running task's loaded VersionId from `AWSCURRENT`.
+2. Persist `T0` once when the verifier-first rotation begins.
+3. Never recompute, reset, or update `T0` while that previous key remains configured.
+4. At or after the exclusive deadline, CAS the active snapshot to primary-only and preserve
+   retired generations plus trusted-time high-water in immutable retirement history.
+5. Immediately deploy a primary-only revision that removes `..._HMAC_PREVIOUS_SECRET`,
+   `..._HMAC_PREVIOUS_GENERATION`, `..._HMAC_PREVIOUS_ROTATION_STARTED_AT`, and every
+   legacy-worker secret/generation or `..._HMAC_PREVIOUS_IS_LEGACY` marker atomically. Initialize
+   the next epoch only after the prior ledger is complete.
 
 ## Machine-readable IaC preflight
 

@@ -45,6 +45,7 @@ _DOMAIN_ENV = {
         "primary": "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
         "previous": "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
         "t0": "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+        "legacy_worker": "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION",
     },
     "report_link": {
         "primary": "REPORT_LINK_HMAC_PRIMARY_GENERATION",
@@ -70,6 +71,8 @@ class HmacRuntimeExpectation:
     deadline: int | None
     rotation_epoch: str
     provenance: str
+    legacy_worker_generation: str | None = None
+    legacy_worker_deadline: int | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,8 @@ class HmacDurableSnapshot:
     retired_generations: frozenset[str]
     retired_provenances: frozenset[str]
     trusted_now: int
+    legacy_worker_generation: str | None = None
+    legacy_worker_deadline: int | None = None
 
 
 @dataclass(frozen=True)
@@ -173,7 +178,10 @@ def load_runtime_expectation(
 
     previous_raw = os.environ.get(names["previous"])
     t0_raw = os.environ.get(names["t0"])
+    legacy_worker_raw = os.environ.get(names["legacy_worker"]) if domain == "mail_action" else None
     if previous_raw is None and t0_raw is None:
+        if legacy_worker_raw is not None:
+            return None
         return HmacRuntimeExpectation(
             domain=domain,
             primary_generation=primary,
@@ -190,6 +198,11 @@ def load_runtime_expectation(
     deadline = t0 + _ROLLOUT_OVERLAP_S + max_token_ttl_s
     if deadline > _MAX_EPOCH:
         return None
+    legacy_worker = _stable_generation(legacy_worker_raw) if legacy_worker_raw is not None else None
+    if legacy_worker_raw is not None and (
+        legacy_worker is None or legacy_worker in {primary, previous}
+    ):
+        return None
     return HmacRuntimeExpectation(
         domain=domain,
         primary_generation=primary,
@@ -198,6 +211,8 @@ def load_runtime_expectation(
         deadline=deadline,
         rotation_epoch=rotation_epoch,
         provenance=provenance,
+        legacy_worker_generation=legacy_worker,
+        legacy_worker_deadline=deadline if legacy_worker is not None else None,
     )
 
 
@@ -280,6 +295,8 @@ def _matches(snapshot: HmacDurableSnapshot, expected: HmacRuntimeExpectation) ->
         and snapshot.previous_generation == expected.previous_generation
         and snapshot.rotation_started_at == expected.rotation_started_at
         and snapshot.deadline == expected.deadline
+        and snapshot.legacy_worker_generation == expected.legacy_worker_generation
+        and snapshot.legacy_worker_deadline == expected.legacy_worker_deadline
         and snapshot.rotation_epoch == expected.rotation_epoch
         and snapshot.stage in _RUNTIME_STAGES
         and expected.primary_generation not in snapshot.retired_generations
@@ -327,6 +344,8 @@ def runtime_expectations_digest(
                 "domain": item.domain,
                 "previous_generation": item.previous_generation,
                 "primary_generation": item.primary_generation,
+                "legacy_worker_deadline": item.legacy_worker_deadline,
+                "legacy_worker_generation": item.legacy_worker_generation,
                 "rotation_epoch": item.rotation_epoch,
                 "rotation_started_at": item.rotation_started_at,
             }
@@ -397,6 +416,19 @@ class DynamoDbHmacStateStore:
             high_water = _item_number(item, "high_water")
             t0 = _item_number(item, "rotation_started_at", optional=True)
             deadline = _item_number(item, "deadline", optional=True)
+            legacy_worker_raw = _item_string(
+                item,
+                "legacy_worker_generation",
+                optional=True,
+            )
+            legacy_worker = (
+                _stable_generation(legacy_worker_raw) if legacy_worker_raw is not None else None
+            )
+            legacy_worker_deadline = _item_number(
+                item,
+                "legacy_worker_deadline",
+                optional=True,
+            )
             if (
                 record_domain != domain
                 or primary is None
@@ -408,6 +440,17 @@ class DynamoDbHmacStateStore:
                 or high_water is None
                 or ((previous is None) != (t0 is None))
                 or ((previous is None) != (deadline is None))
+                or (legacy_worker_raw is not None and legacy_worker is None)
+                or ((legacy_worker is None) != (legacy_worker_deadline is None))
+                or (
+                    legacy_worker is not None
+                    and (
+                        domain != "mail_action"
+                        or previous is None
+                        or legacy_worker in {primary, previous}
+                        or legacy_worker_deadline != deadline
+                    )
+                )
             ):
                 return None
             return HmacDurableSnapshot(
@@ -425,6 +468,8 @@ class DynamoDbHmacStateStore:
                 retired_generations=_item_string_set(item, "retired_generations"),
                 retired_provenances=_item_string_set(item, "retired_provenances"),
                 trusted_now=trusted_now,
+                legacy_worker_generation=legacy_worker,
+                legacy_worker_deadline=legacy_worker_deadline,
             )
         except (HmacDurableStateError, KeyError):
             return None
@@ -468,7 +513,10 @@ class DynamoDbHmacStateStore:
         }
         if should_retire and expected.previous_generation is not None:
             expression += " ADD retired_generations :retired_generation"
-            values[":retired_generation"] = {"SS": [expected.previous_generation]}
+            retired_now = [expected.previous_generation]
+            if expected.legacy_worker_generation is not None:
+                retired_now.append(expected.legacy_worker_generation)
+            values[":retired_generation"] = {"SS": retired_now}
         try:
             self._client().update_item(
                 TableName=self._table_name,
@@ -483,7 +531,10 @@ class DynamoDbHmacStateStore:
             raise HmacDurableStateError("durable HMAC state update failed") from exc
         retired_generations = snapshot.retired_generations
         if should_retire and expected.previous_generation is not None:
-            retired_generations = retired_generations | {expected.previous_generation}
+            newly_retired = {expected.previous_generation}
+            if expected.legacy_worker_generation is not None:
+                newly_retired.add(expected.legacy_worker_generation)
+            retired_generations = retired_generations | newly_retired
         return replace(
             snapshot,
             revision=snapshot.revision + 1,

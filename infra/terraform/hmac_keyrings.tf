@@ -70,6 +70,12 @@ variable "hmac_legacy_database_url_version_id" {
   default     = ""
 }
 
+variable "hmac_legacy_slack_bot_version_id" {
+  description = "Pinned non-secret VersionId of the historical Slack fallback key, used only for bounded MAIL_ACTION v1 verification."
+  type        = string
+  default     = ""
+}
+
 variable "mail_action_hmac_rotation_started_at" {
   description = "Fixed Unix T0 for the proposed MAIL_ACTION previous generation; never recompute on restart."
   type        = string
@@ -285,6 +291,7 @@ data "aws_iam_policy_document" "hmac_rollout_gate" {
     actions = ["secretsmanager:ListSecretVersionIds"]
     resources = [
       data.aws_secretsmanager_secret.database_url.arn,
+      data.aws_secretsmanager_secret.slack_bot.arn,
       aws_secretsmanager_secret.mail_action_hmac.arn,
       aws_secretsmanager_secret.report_link_hmac.arn,
     ]
@@ -337,6 +344,16 @@ locals {
   hmac_legacy_database_value_from = (
     can(regex(local.hmac_version_id_pattern, var.hmac_legacy_database_url_version_id))
     ? "${data.aws_secretsmanager_secret.database_url.arn}:::${var.hmac_legacy_database_url_version_id}"
+    : ""
+  )
+  hmac_legacy_worker_generation = (
+    can(regex(local.hmac_version_id_pattern, var.hmac_legacy_slack_bot_version_id))
+    ? "${data.aws_secretsmanager_secret.slack_bot.arn}@${var.hmac_legacy_slack_bot_version_id}"
+    : ""
+  )
+  hmac_legacy_worker_value_from = (
+    can(regex(local.hmac_version_id_pattern, var.hmac_legacy_slack_bot_version_id))
+    ? "${data.aws_secretsmanager_secret.slack_bot.arn}:::${var.hmac_legacy_slack_bot_version_id}"
     : ""
   )
 
@@ -542,7 +559,11 @@ locals {
     && local.mail_action_hmac_proposed_t0_valid
     && (
       var.mail_action_hmac_rollout_phase == "legacy_migration"
-      ? var.mail_action_hmac_previous_version_id == ""
+      ? (
+        var.mail_action_hmac_previous_version_id == ""
+        && local.hmac_legacy_worker_generation != ""
+        && local.hmac_legacy_worker_value_from != ""
+      )
       : (
         var.mail_action_hmac_rollout_phase == "dedicated_rotation"
         ? can(regex(
@@ -738,6 +759,7 @@ locals {
     rotation_epoch = var.hmac_rotation_epoch
     mail           = local.mail_action_hmac_primary_generation
     report         = local.report_link_hmac_primary_generation
+    legacy_worker  = var.mail_action_hmac_rollout_phase == "legacy_migration" ? local.hmac_legacy_worker_generation : ""
   }))
   connect_web_hmac_provenance = sha256(jsonencode({
     workload       = "connect_web"
@@ -750,6 +772,7 @@ locals {
     image          = var.mcp_image
     rotation_epoch = var.hmac_rotation_epoch
     mail           = local.mail_action_hmac_primary_generation
+    legacy_worker  = var.mail_action_hmac_rollout_phase == "legacy_migration" ? local.hmac_legacy_worker_generation : ""
   }))
   worker_hmac_provenance = sha256(jsonencode({
     workload       = "worker"
@@ -757,6 +780,7 @@ locals {
     rotation_epoch = var.hmac_rotation_epoch
     mail           = local.mail_action_hmac_primary_generation
     report         = local.report_link_hmac_primary_generation
+    legacy_worker  = var.mail_action_hmac_rollout_phase == "legacy_migration" ? local.hmac_legacy_worker_generation : ""
   }))
   mcp_hmac_runtime_environment = concat(local.hmac_runtime_base_environment, [
     {
@@ -803,6 +827,10 @@ locals {
         name  = "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY"
         value = "1"
       },
+      {
+        name  = "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION"
+        value = local.hmac_legacy_worker_generation
+      },
     ] : [],
   )
   report_link_hmac_environment = concat(
@@ -844,6 +872,12 @@ locals {
       {
         name      = "MAIL_ACTION_HMAC_PREVIOUS_SECRET"
         valueFrom = local.mail_action_hmac_previous_value_from
+      },
+    ] : [],
+    var.mail_action_hmac_rollout_phase == "legacy_migration" ? [
+      {
+        name      = "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET"
+        valueFrom = local.hmac_legacy_worker_value_from
       },
     ] : [],
   )

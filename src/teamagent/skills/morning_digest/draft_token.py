@@ -7,6 +7,8 @@ Fargate（digest 描画）が encode、worker（押下処理）が decode する
 新規署名は専用主鍵 ``MAIL_ACTION_HMAC_SECRET`` だけを使う。移行前 token は
 ``MAIL_ACTION_HMAC_PREVIOUS_SECRET`` と固定した ``..._PREVIOUS_ROTATION_STARTED_AT`` を設定した
 上で ``MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY=1`` とした verifier-first 移行期間だけ検証する。
+旧workerのSlack fallback署名は、同じ固定期限内の
+``MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET`` でversion 1検証だけを行う。
 新規tokenは目的分離したversion 2である。``MAIL_ACTION_TTL_S`` は未設定時24h、設定時は ASCII
 10進数の1..24hのみ。TTL設定不正や明示TTLの範囲外では encode は None を返し、呼出元はボタンを
 発行しない。鍵設定不正・token形式不正なら decode は常に None。``SLACK_BOT_TOKEN`` /

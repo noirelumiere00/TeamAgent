@@ -29,13 +29,20 @@ from teamagent.hmac_keyring import (
 
 _PRIMARY = "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mail@primary-version"
 _PREVIOUS = "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:db@legacy-version"
+_LEGACY_WORKER = (
+    "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:slack/bot-token@legacy-version"
+)
 _PROVENANCE = "a" * 64
 _STALE_PROVENANCE = "b" * 64
 _T0 = 2_000_000_000
 _DEADLINE = _T0 + 900 + 86_400
 
 
-def _expectation(*, provenance: str = _PROVENANCE) -> HmacRuntimeExpectation:
+def _expectation(
+    *,
+    provenance: str = _PROVENANCE,
+    legacy_worker: bool = False,
+) -> HmacRuntimeExpectation:
     return HmacRuntimeExpectation(
         domain="mail_action",
         primary_generation=_PRIMARY,
@@ -44,6 +51,8 @@ def _expectation(*, provenance: str = _PROVENANCE) -> HmacRuntimeExpectation:
         deadline=_DEADLINE,
         rotation_epoch="rotation-2026-07-18",
         provenance=provenance,
+        legacy_worker_generation=_LEGACY_WORKER if legacy_worker else None,
+        legacy_worker_deadline=_DEADLINE if legacy_worker else None,
     )
 
 
@@ -53,6 +62,7 @@ def _snapshot(
     high_water: int | None = None,
     previous_retired: bool = False,
     provenance: str = _PROVENANCE,
+    legacy_worker: bool = False,
 ) -> HmacDurableSnapshot:
     return HmacDurableSnapshot(
         domain="mail_action",
@@ -69,6 +79,8 @@ def _snapshot(
         retired_generations=frozenset({_PREVIOUS}) if previous_retired else frozenset(),
         retired_provenances=frozenset({_STALE_PROVENANCE}),
         trusted_now=now,
+        legacy_worker_generation=_LEGACY_WORKER if legacy_worker else None,
+        legacy_worker_deadline=_DEADLINE if legacy_worker else None,
     )
 
 
@@ -91,6 +103,10 @@ def _ddb_item(snapshot: HmacDurableSnapshot) -> dict[str, dict[str, object]]:
         item["rotation_started_at"] = {"N": str(snapshot.rotation_started_at)}
     if snapshot.deadline is not None:
         item["deadline"] = {"N": str(snapshot.deadline)}
+    if snapshot.legacy_worker_generation is not None:
+        item["legacy_worker_generation"] = {"S": snapshot.legacy_worker_generation}
+    if snapshot.legacy_worker_deadline is not None:
+        item["legacy_worker_deadline"] = {"N": str(snapshot.legacy_worker_deadline)}
     if snapshot.retired_generations:
         item["retired_generations"] = {"SS": sorted(snapshot.retired_generations)}
     if snapshot.retired_provenances:
@@ -246,6 +262,57 @@ def test_stale_generation_and_provenance_replay_fail_closed() -> None:
     stale_generation = replace(_expectation(), primary_generation=f"{_PRIMARY}-stale")
     assert decision_from_snapshot(current, stale_generation) is None
     assert decision_from_snapshot(current, _expectation(provenance=_STALE_PROVENANCE)) is None
+
+
+def test_primary_only_runtime_succeeds_after_durable_retirement_cleanup() -> None:
+    expectation = replace(
+        _expectation(),
+        previous_generation=None,
+        rotation_started_at=None,
+        deadline=None,
+    )
+    snapshot = replace(
+        _snapshot(now=_DEADLINE + 1, previous_retired=True),
+        previous_generation=None,
+        rotation_started_at=None,
+        deadline=None,
+        stage="complete",
+        retired_generations=frozenset({_PREVIOUS}),
+    )
+
+    decision = decision_from_snapshot(snapshot, expectation)
+
+    assert decision is not None
+    assert not decision.previous_eligible
+    assert decision.issuance_allowed
+
+
+def test_legacy_worker_generation_is_durable_and_retires_with_previous() -> None:
+    expectation = _expectation(legacy_worker=True)
+    fake = _FakeDynamoDb(_snapshot(now=_DEADLINE, legacy_worker=True))
+    store = DynamoDbHmacStateStore(
+        table_name="teamagent-dev-hmac-state",
+        scope="teamagent/dev",
+        region="ap-northeast-1",
+        client=fake,
+    )
+
+    decision = store.evaluate(expectation)
+
+    assert decision is not None and not decision.previous_eligible
+    assert set(fake.item["retired_generations"]["SS"]) == {
+        _PREVIOUS,
+        _LEGACY_WORKER,
+    }
+    assert (
+        store.evaluate(
+            replace(
+                expectation,
+                legacy_worker_generation=f"{_LEGACY_WORKER}-stale",
+            )
+        )
+        is None
+    )
 
 
 def _process_decision(

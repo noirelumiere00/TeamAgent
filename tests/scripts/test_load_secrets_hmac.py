@@ -15,6 +15,7 @@ _LEGACY_DATABASE_URL = (
 )
 _PRIMARY_VERSION = "b" * 32
 _PREVIOUS_VERSION = "a" * 32
+_SLACK_VERSION = "s" * 32
 _SLACK_BOT = "xoxb-sensitive-bot-fragment-123456789"
 _SLACK_APP = "xapp-sensitive-app-fragment-123456789"
 _GOOGLE_CLIENT = "sensitive-client-id.apps.googleusercontent.com"
@@ -115,6 +116,12 @@ def _mail_migration_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
             ),
             "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT": "2000000000",
             "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY": "1",
+            "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET_NAME": ("teamagent/dev/slack/bot_token"),
+            "MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID": _SLACK_VERSION,
+            "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION": (
+                "arn:aws:secretsmanager:ap-northeast-1:123456789012:"
+                f"secret:teamagent/dev/slack/bot_token-worker@{_SLACK_VERSION}"
+            ),
         }
     )
     return env, log_path
@@ -148,6 +155,7 @@ def test_loader_fetches_exact_versions_and_never_logs_hmac_values(tmp_path: Path
             '[[ "$MAIL_ACTION_HMAC_SECRET" == "$FAKE_MAIL_PRIMARY" ]] && '
             '[[ "$MAIL_ACTION_HMAC_PREVIOUS_SECRET" == "$FAKE_LEGACY_DATABASE_URL" ]] && '
             '[[ "$MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY" == "1" ]] && '
+            '[[ "$MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET" == "$FAKE_SLACK_BOT" ]] && '
             '[[ -z "${REPORT_LINK_HMAC_SECRET+x}" ]]'
         ),
         domains="MAIL_ACTION",
@@ -157,6 +165,7 @@ def test_loader_fetches_exact_versions_and_never_logs_hmac_values(tmp_path: Path
     calls = log_path.read_text(encoding="utf-8")
     assert f"teamagent/dev/hmac/mail-action|{_PRIMARY_VERSION}" in calls
     assert f"teamagent/dev/database-url|{_PREVIOUS_VERSION}" in calls
+    assert f"teamagent/dev/slack/bot_token|{_SLACK_VERSION}" in calls
     assert _MAIL_PRIMARY not in result.stdout + result.stderr
     assert _LEGACY_DATABASE_URL not in result.stdout + result.stderr
     assert _SLACK_BOT not in result.stdout + result.stderr
@@ -174,6 +183,7 @@ def test_loader_fetches_exact_versions_and_never_logs_hmac_values(tmp_path: Path
             "secret:teamagent/dev/hmac/mail-action-mail00@" + "c" * 32,
         ),
         ("TEAMAGENT_HMAC_REQUIRED_DOMAINS", "MAIL_ACTION,UNKNOWN"),
+        ("MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID", "x" * 32),
     ],
 )
 def test_loader_fails_closed_on_marker_generation_or_domain_drift(
@@ -203,6 +213,7 @@ def test_shared_loader_skips_hmac_for_non_token_ingest_process(tmp_path: Path) -
         "TEAMAGENT_HMAC_REQUIRED_DOMAINS",
         "MAIL_ACTION_HMAC_SECRET",
         "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+        "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET",
         "REPORT_LINK_HMAC_SECRET",
         "REPORT_LINK_HMAC_PREVIOUS_SECRET",
     ],

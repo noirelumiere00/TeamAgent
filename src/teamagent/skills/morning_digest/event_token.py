@@ -7,7 +7,7 @@ draft_token.py と同じ方式（鍵・署名・base64url・fail-closed）で、
 
 Fargate（digest 描画）が encode、calendar_event skill（押下処理）が decode する。
 新規tokenは draft と別のHMAC目的を持つversion 2で、旧形式は明示されたbounded legacy
-previousだけが検証する。
+previous（旧workerの別途pinされたSlack fallbackを含む）だけが検証する。
 """
 
 from __future__ import annotations

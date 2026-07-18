@@ -11,6 +11,7 @@ HMAC_ROLLOUT_CONTROL="${HMAC_ROLLOUT_CONTROL:-}"
 HMAC_PROMOTION_TASK="${HMAC_PROMOTION_TASK:-}"
 HMAC_REGISTERED_TASK_ARN="${HMAC_REGISTERED_TASK_ARN:-}"
 HMAC_MORNING_TARGET_JSON="${HMAC_MORNING_TARGET_JSON:-}"
+HMAC_PROMOTION_MODE="${HMAC_PROMOTION_MODE:-candidate}"
 
 [[ -f "$HMAC_PREFLIGHT_MANIFEST" && -f "$HMAC_ROLLOUT_CONTROL" ]] || {
   echo "ERROR: reviewed HMAC manifest/control files are required" >&2
@@ -18,6 +19,10 @@ HMAC_MORNING_TARGET_JSON="${HMAC_MORNING_TARGET_JSON:-}"
 }
 [[ "$HMAC_REGISTERED_TASK_ARN" =~ :task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$ ]] || {
   echo "ERROR: exact registered task definition ARN is required" >&2
+  exit 2
+}
+[[ "$HMAC_PROMOTION_MODE" == "candidate" || "$HMAC_PROMOTION_MODE" == "rollback" ]] || {
+  echo "ERROR: HMAC_PROMOTION_MODE must be candidate or rollback" >&2
   exit 2
 }
 
@@ -30,16 +35,28 @@ case "$HMAC_PROMOTION_TASK" in
       --refresh-manifest-now \
       --control "$HMAC_ROLLOUT_CONTROL" \
       --action pre-update \
+      --mode "$HMAC_PROMOTION_MODE" \
       --task mcp \
       --task-definition-arn "$HMAC_REGISTERED_TASK_ARN"
     aws ecs update-service --region "$REGION" --cluster "$CLUSTER" --service "$SERVICE" \
       --task-definition "$HMAC_REGISTERED_TASK_ARN" >/dev/null
     aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services "$SERVICE"
-    "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
-      --manifest "$HMAC_PREFLIGHT_MANIFEST" \
-      --refresh-manifest-now \
-      --control "$HMAC_ROLLOUT_CONTROL" \
-      --action mcp-stable-and-old-drained
+    if [[ "$HMAC_PROMOTION_MODE" == "candidate" ]]; then
+      "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
+        --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+        --refresh-manifest-now \
+        --control "$HMAC_ROLLOUT_CONTROL" \
+        --action mcp-stable-and-old-drained
+    else
+      "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
+        --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+        --refresh-manifest-now \
+        --control "$HMAC_ROLLOUT_CONTROL" \
+        --action post-update \
+        --mode rollback \
+        --task mcp \
+        --task-definition-arn "$HMAC_REGISTERED_TASK_ARN"
+    fi
     ;;
   morning_digest)
     RULE="${HMAC_MORNING_RULE:-teamagent-dev-morning-digest-weekday}"
@@ -61,10 +78,19 @@ case "$HMAC_PROMOTION_TASK" in
       --refresh-manifest-now \
       --control "$HMAC_ROLLOUT_CONTROL" \
       --action pre-update \
+      --mode "$HMAC_PROMOTION_MODE" \
       --task morning_digest \
       --task-definition-arn "$HMAC_REGISTERED_TASK_ARN"
     aws events put-targets --region "$REGION" --rule "$RULE" \
       --targets "file://$HMAC_MORNING_TARGET_JSON" >/dev/null
+    "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
+      --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+      --refresh-manifest-now \
+      --control "$HMAC_ROLLOUT_CONTROL" \
+      --action post-update \
+      --mode "$HMAC_PROMOTION_MODE" \
+      --task morning_digest \
+      --task-definition-arn "$HMAC_REGISTERED_TASK_ARN"
     echo "morning_digest_target_updated=true schedule_enabled=false"
     ;;
   *)

@@ -33,6 +33,9 @@ HMAC_PREFLIGHT_MANIFEST="${HMAC_PREFLIGHT_MANIFEST:-}"
 HMAC_ROLLOUT_CONTROL="${HMAC_ROLLOUT_CONTROL:-}"
 HMAC_WORKER_ENV="${HMAC_WORKER_ENV:-}"
 HMAC_WORKER_ROLLBACK_ARTIFACT="${HMAC_WORKER_ROLLBACK_ARTIFACT:-}"
+HMAC_WORKER_ROLLBACK_ENV="${HMAC_WORKER_ROLLBACK_ENV:-}"
+HMAC_WORKER_MODE="${HMAC_WORKER_MODE:-candidate}"
+HMAC_WORKER_ADVANCE_STAGE="${HMAC_WORKER_ADVANCE_STAGE:-1}"
 GO=0
 [[ "${1:-}" == "--go" ]] && GO=1
 
@@ -46,10 +49,6 @@ PREFLIGHT_PY="${PREFLIGHT_PY:-$ROOT/.venv/bin/python}"
   echo "ERROR: HMAC_PREFLIGHT_MANIFEST（secret-free reviewed JSON）が必須" >&2
   exit 2
 }
-[[ -n "$HMAC_WORKER_ENV" && -f "$HMAC_WORKER_ENV" ]] || {
-  echo "ERROR: HMAC_WORKER_ENV（secret-free rendered hmac.env）が必須" >&2
-  exit 2
-}
 [[ -n "$HMAC_ROLLOUT_CONTROL" && -f "$HMAC_ROLLOUT_CONTROL" ]] || {
   echo "ERROR: HMAC_ROLLOUT_CONTROL（secret-free live control JSON）が必須" >&2
   exit 2
@@ -58,15 +57,47 @@ PREFLIGHT_PY="${PREFLIGHT_PY:-$ROOT/.venv/bin/python}"
   echo "ERROR: HMAC_WORKER_ROLLBACK_ARTIFACT（prebuilt rollback）が必須" >&2
   exit 2
 }
+case "$HMAC_WORKER_MODE" in
+  candidate)
+    [[ -n "$HMAC_WORKER_ENV" && -f "$HMAC_WORKER_ENV" ]] || {
+      echo "ERROR: HMAC_WORKER_ENV（secret-free rendered hmac.env）が必須" >&2
+      exit 2
+    }
+    SELECTED_WORKER_ENV="$HMAC_WORKER_ENV"
+    ;;
+  rollback)
+    [[ -n "$HMAC_WORKER_ROLLBACK_ENV" && -f "$HMAC_WORKER_ROLLBACK_ENV" ]] || {
+      echo "ERROR: rollback mode requires the exact prebuilt HMAC_WORKER_ROLLBACK_ENV" >&2
+      exit 2
+    }
+    [[ "$HMAC_WORKER_ADVANCE_STAGE" == "0" ]] || {
+      echo "ERROR: rollback mode may not advance the rollout ledger" >&2
+      exit 2
+    }
+    SELECTED_WORKER_ENV="$HMAC_WORKER_ROLLBACK_ENV"
+    ;;
+  *)
+    echo "ERROR: HMAC_WORKER_MODE must be candidate or rollback" >&2
+    exit 2
+    ;;
+esac
+[[ "$HMAC_WORKER_ADVANCE_STAGE" == "0" || "$HMAC_WORKER_ADVANCE_STAGE" == "1" ]] || {
+  echo "ERROR: HMAC_WORKER_ADVANCE_STAGE must be 0 or 1" >&2
+  exit 2
+}
 [[ -x "$PREFLIGHT_PY" ]] || { echo "ERROR: preflight Python が実行できない" >&2; exit 2; }
 "$PREFLIGHT_PY" scripts/preflight_hmac_rotation.py \
   --manifest "$HMAC_PREFLIGHT_MANIFEST" \
   --refresh-manifest-now \
-  --worker-env "$HMAC_WORKER_ENV"
-cp "$HMAC_WORKER_ENV" "$WORK/hmac.env"
+  --worker-env "$SELECTED_WORKER_ENV"
+cp "$SELECTED_WORKER_ENV" "$WORK/hmac.env"
 
-echo "== 1. コード tarball（git archive HEAD = 追跡ファイルのみ→秘密/.env/node_modules は非同梱）=="
-git archive --format=tar.gz -o "$WORK/teamagent-bot.tar.gz" HEAD
+echo "== 1. コード tarball（review済みartifactのみ）=="
+if [[ "$HMAC_WORKER_MODE" == "rollback" ]]; then
+  cp "$HMAC_WORKER_ROLLBACK_ARTIFACT" "$WORK/teamagent-bot.tar.gz"
+else
+  git archive --format=tar.gz -o "$WORK/teamagent-bot.tar.gz" HEAD
+fi
 echo "   size: $(du -h "$WORK/teamagent-bot.tar.gz" | cut -f1)"
 
 echo "== 2. teamagent.env.base 生成（.env.production + infra/deploy/ec2.overrides.env）=="
@@ -85,7 +116,7 @@ if grep -Eiq 'xoxb-|xapp-|AKIA[0-9A-Z]{15}|-----BEGIN|PRIVATE KEY' \
   exit 1
 fi
 if grep -Eq \
-  '^[[:space:]]*(export[[:space:]]+)?(TEAMAGENT_HMAC_REQUIRED_DOMAINS|MAIL_ACTION_HMAC_(PREVIOUS_)?SECRET|REPORT_LINK_HMAC_(PREVIOUS_)?SECRET)=' \
+  '^[[:space:]]*(export[[:space:]]+)?(TEAMAGENT_HMAC_REQUIRED_DOMAINS|MAIL_ACTION_HMAC_(PREVIOUS_|LEGACY_WORKER_)?SECRET|REPORT_LINK_HMAC_(PREVIOUS_)?SECRET)=' \
   "$WORK/teamagent.env.base"; then
   echo "ERROR: env.base に禁止された HMAC runtime 値/required domains を検出。中止。" >&2
   exit 1
@@ -120,6 +151,7 @@ echo "== 3c. live HMAC gate（upload直前）=="
   --refresh-manifest-now \
   --control "$HMAC_ROLLOUT_CONTROL" \
   --action pre-worker-upload \
+  --mode "$HMAC_WORKER_MODE" \
   --worker-artifact "$WORK/teamagent-bot.tar.gz" \
   --worker-rollback-artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT"
 
@@ -239,17 +271,20 @@ done
 }
 echo "   worker_prepare=true readiness=true output_redacted=true"
 
-"$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
-  --manifest "$HMAC_PREFLIGHT_MANIFEST" \
-  --refresh-manifest-now \
-  --control "$HMAC_ROLLOUT_CONTROL" \
-  --action worker-verified \
-  --worker-rollback-artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT"
+if [[ "$HMAC_WORKER_ADVANCE_STAGE" == "1" ]]; then
+  "$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
+    --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+    --refresh-manifest-now \
+    --control "$HMAC_ROLLOUT_CONTROL" \
+    --action worker-verified \
+    --worker-rollback-artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT"
+fi
 "$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
   --manifest "$HMAC_PREFLIGHT_MANIFEST" \
   --refresh-manifest-now \
   --control "$HMAC_ROLLOUT_CONTROL" \
   --action pre-restart \
+  --mode "$HMAC_WORKER_MODE" \
   --worker-rollback-artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT"
 
 RESTART_REMOTE='set -euo pipefail; systemctl stop teamagent-connect 2>/dev/null || true; ( command -v fuser >/dev/null && fuser -k 8788/tcp ) 2>/dev/null || pkill -f teamagent.connect_web 2>/dev/null || true; sleep 2; systemctl restart teamagent-bot teamagent-connect'

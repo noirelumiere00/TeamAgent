@@ -27,6 +27,8 @@ HMAC_ROLLOUT_CONTROL="${HMAC_ROLLOUT_CONTROL:-}"
 HMAC_CONNECT_TASK_TEMPLATE="${HMAC_CONNECT_TASK_TEMPLATE:-}"
 HMAC_CONNECT_PHASE="${HMAC_CONNECT_PHASE:-}"
 HMAC_CONNECT_IMAGE="${HMAC_CONNECT_IMAGE:-}"
+HMAC_CONNECT_MODE="${HMAC_CONNECT_MODE:-candidate}"
+HMAC_REGISTERED_TASK_ARN="${HMAC_REGISTERED_TASK_ARN:-}"
 PREFLIGHT_PY="${PREFLIGHT_PY:-$REPO_ROOT/.venv/bin/python}"
 
 command -v jq >/dev/null || { echo "jq が必要"; exit 1; }
@@ -39,23 +41,60 @@ test -n "$HMAC_ROLLOUT_CONTROL" && test -f "$HMAC_ROLLOUT_CONTROL" || {
   echo "★ HMAC_ROLLOUT_CONTROL（secret-free live control JSON）が必須" >&2
   exit 2
 }
-test -n "$HMAC_CONNECT_TASK_TEMPLATE" && test -f "$HMAC_CONNECT_TASK_TEMPLATE" || {
-  echo "★ HMAC_CONNECT_TASK_TEMPLATE（reviewed full task JSON）が必須" >&2
-  exit 2
-}
-[[ "$HMAC_CONNECT_IMAGE" =~ ^[^[:space:]@]+@sha256:[a-f0-9]{64}$ ]] || {
-  echo "★ HMAC_CONNECT_IMAGE は事前ビルド・review済みのdigest固定URIが必須" >&2
-  exit 2
-}
-case "$HMAC_CONNECT_PHASE" in
-  preload) LIVE_GATE_ACTION=pre-connect-preload ;;
-  final) LIVE_GATE_ACTION=pre-connect-final ;;
-  *) echo "★ HMAC_CONNECT_PHASE は preload または final が必須" >&2; exit 2 ;;
+case "$HMAC_CONNECT_MODE" in
+  candidate)
+    test -n "$HMAC_CONNECT_TASK_TEMPLATE" && test -f "$HMAC_CONNECT_TASK_TEMPLATE" || {
+      echo "★ HMAC_CONNECT_TASK_TEMPLATE（reviewed full task JSON）が必須" >&2
+      exit 2
+    }
+    [[ "$HMAC_CONNECT_IMAGE" =~ ^[^[:space:]@]+@sha256:[a-f0-9]{64}$ ]] || {
+      echo "★ HMAC_CONNECT_IMAGE は事前ビルド・review済みのdigest固定URIが必須" >&2
+      exit 2
+    }
+    case "$HMAC_CONNECT_PHASE" in
+      preload) LIVE_GATE_ACTION=pre-connect-preload ;;
+      final) LIVE_GATE_ACTION=pre-connect-final ;;
+      *) echo "★ HMAC_CONNECT_PHASE は preload または final が必須" >&2; exit 2 ;;
+    esac
+    ;;
+  rollback)
+    [[ "$HMAC_REGISTERED_TASK_ARN" =~ :task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$ ]] || {
+      echo "★ rollback mode requires the exact approved task definition ARN" >&2
+      exit 2
+    }
+    ;;
+  *)
+    echo "★ HMAC_CONNECT_MODE は candidate または rollback が必須" >&2
+    exit 2
+    ;;
 esac
 test -x "$PREFLIGHT_PY" || { echo "★ preflight Python が実行できない: $PREFLIGHT_PY" >&2; exit 2; }
 "$PREFLIGHT_PY" "$REPO_ROOT/scripts/preflight_hmac_rotation.py" \
   --manifest "$HMAC_PREFLIGHT_MANIFEST" \
   --refresh-manifest-now
+if [[ "$HMAC_CONNECT_MODE" == "rollback" ]]; then
+  "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
+    --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+    --refresh-manifest-now \
+    --control "$HMAC_ROLLOUT_CONTROL" \
+    --action pre-update \
+    --mode rollback \
+    --task connect_web \
+    --task-definition-arn "$HMAC_REGISTERED_TASK_ARN"
+  aws ecs update-service --region "$R" --cluster "$CLUSTER" --service "$SVC" \
+    --task-definition "$HMAC_REGISTERED_TASK_ARN" >/dev/null
+  aws ecs wait services-stable --region "$R" --cluster "$CLUSTER" --services "$SVC"
+  "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
+    --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+    --refresh-manifest-now \
+    --control "$HMAC_ROLLOUT_CONTROL" \
+    --action post-update \
+    --mode rollback \
+    --task connect_web \
+    --task-definition-arn "$HMAC_REGISTERED_TASK_ARN"
+  echo "hmac_connect_rollback=true exact_artifact=true"
+  exit 0
+fi
 "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
   --manifest "$HMAC_PREFLIGHT_MANIFEST" \
   --refresh-manifest-now \

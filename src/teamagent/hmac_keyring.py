@@ -7,6 +7,8 @@ Exact environment contract (secret values must never be logged or included in er
   ``MAIL_ACTION_HMAC_PREVIOUS_SECRET`` (optional verification-only key),
   ``MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT`` (required with ``PREVIOUS_SECRET``),
   ``MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY=1`` (only for the one-time unframed migration),
+  optional pinned ``MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET`` and generation metadata for old
+  draft/event v1 tokens that were signed with the historical Slack-token fallback,
   non-secret generation identifiers for the primary and previous secret versions,
   and ``MAIL_ACTION_TTL_S`` (optional issuance TTL, ASCII decimal ``1..86400``).
 * Report-link tokens:
@@ -69,6 +71,8 @@ MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT = "MAIL_ACTION_HMAC_PREVIOUS_ROTAT
 MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY = "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY"
 MAIL_ACTION_HMAC_PRIMARY_GENERATION = "MAIL_ACTION_HMAC_PRIMARY_GENERATION"
 MAIL_ACTION_HMAC_PREVIOUS_GENERATION = "MAIL_ACTION_HMAC_PREVIOUS_GENERATION"
+MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET = "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET"
+MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION = "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION"
 MAIL_ACTION_TTL_S = "MAIL_ACTION_TTL_S"
 
 REPORT_LINK_HMAC_SECRET = "REPORT_LINK_HMAC_SECRET"
@@ -101,6 +105,8 @@ _HMAC_CONFIGURATION_ENVS = frozenset(
         MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY,
         MAIL_ACTION_HMAC_PRIMARY_GENERATION,
         MAIL_ACTION_HMAC_PREVIOUS_GENERATION,
+        MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET,
+        MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION,
         MAIL_ACTION_TTL_S,
         REPORT_LINK_HMAC_SECRET,
         REPORT_LINK_HMAC_PREVIOUS_SECRET,
@@ -637,6 +643,19 @@ def _migration_previous_secret_bytes(raw: object) -> bytes | None:
     return encoded
 
 
+def _stable_generation_identifier(raw: object) -> str | None:
+    if (
+        type(raw) is not str
+        or not raw
+        or len(raw) > 2048
+        or raw != raw.strip()
+        or "@" not in raw
+        or any(ord(char) < 0x21 or ord(char) > 0x7E for char in raw)
+    ):
+        return None
+    return raw
+
+
 def _same_secret(left: bytes, right_raw: object) -> bool:
     if type(right_raw) is not str or not right_raw:
         return False
@@ -783,6 +802,8 @@ def _load_keyring(
     previous_env: str,
     rotation_started_at_env: str,
     previous_is_legacy_env: str,
+    legacy_worker_env: str | None,
+    legacy_worker_generation_env: str | None,
     other_primary_env: str,
     other_previous_env: str,
     max_token_ttl_s: int,
@@ -819,8 +840,18 @@ def _load_keyring(
     previous_raw = os.environ.get(previous_env)
     started_at_raw = os.environ.get(rotation_started_at_env)
     previous_is_legacy_raw = os.environ.get(previous_is_legacy_env)
+    legacy_worker_raw = os.environ.get(legacy_worker_env) if legacy_worker_env is not None else None
+    legacy_worker_generation_raw = (
+        os.environ.get(legacy_worker_generation_env)
+        if legacy_worker_generation_env is not None
+        else None
+    )
     if previous_raw is None and started_at_raw is None:
-        if previous_is_legacy_raw is not None:
+        if (
+            previous_is_legacy_raw is not None
+            or legacy_worker_raw is not None
+            or legacy_worker_generation_raw is not None
+        ):
             return None
         return HmacKeyring(
             primary,
@@ -832,6 +863,10 @@ def _load_keyring(
     if previous_raw is None or started_at_raw is None:
         return None
     if previous_is_legacy_raw not in (None, "1"):
+        return None
+    if (legacy_worker_raw is None) != (legacy_worker_generation_raw is None):
+        return None
+    if legacy_worker_raw is not None and previous_is_legacy_raw != "1":
         return None
 
     if previous_is_legacy_raw == "1":
@@ -846,6 +881,18 @@ def _load_keyring(
             return None
     if previous is None or hmac.compare_digest(primary, previous):
         return None
+    legacy_worker: bytes | None = None
+    legacy_worker_generation: str | None = None
+    if legacy_worker_raw is not None:
+        legacy_worker = _migration_previous_secret_bytes(legacy_worker_raw)
+        legacy_worker_generation = _stable_generation_identifier(legacy_worker_generation_raw)
+        if (
+            legacy_worker is None
+            or legacy_worker_generation is None
+            or hmac.compare_digest(primary, legacy_worker)
+            or hmac.compare_digest(previous, legacy_worker)
+        ):
+            return None
     # Shared legacy previous keys are allowed, but a previous key may never be another purpose's
     # current issuance key.
     if _same_secret(previous, os.environ.get(other_primary_env)):
@@ -871,6 +918,9 @@ def _load_keyring(
         if (
             runtime_decision.expectation.rotation_started_at != started_at
             or runtime_decision.expectation.deadline != previous_deadline
+            or runtime_decision.expectation.legacy_worker_generation != legacy_worker_generation
+            or runtime_decision.expectation.legacy_worker_deadline
+            != (previous_deadline if legacy_worker_generation is not None else None)
         ):
             return None
         previous_eligible = runtime_decision.previous_eligible
@@ -891,9 +941,11 @@ def _load_keyring(
     verification_keys = (
         (primary, previous) if previous_eligible and previous_is_legacy_raw is None else (primary,)
     )
-    legacy_verification_keys = (
-        (previous,) if previous_eligible and previous_is_legacy_raw == "1" else ()
-    )
+    legacy_verification_keys: tuple[bytes, ...] = ()
+    if previous_eligible and previous_is_legacy_raw == "1":
+        legacy_verification_keys = (previous,)
+        if legacy_worker is not None:
+            legacy_verification_keys += (legacy_worker,)
     return HmacKeyring(
         primary,
         verification_keys,
@@ -911,6 +963,8 @@ def load_mail_action_hmac_keyring(*, now: int | None = None) -> HmacKeyring | No
             previous_env=MAIL_ACTION_HMAC_PREVIOUS_SECRET,
             rotation_started_at_env=MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT,
             previous_is_legacy_env=MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY,
+            legacy_worker_env=MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET,
+            legacy_worker_generation_env=MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION,
             other_primary_env=REPORT_LINK_HMAC_SECRET,
             other_previous_env=REPORT_LINK_HMAC_PREVIOUS_SECRET,
             max_token_ttl_s=MAIL_ACTION_MAX_TOKEN_TTL_S,
@@ -936,6 +990,8 @@ def load_report_link_hmac_keyring(*, now: int | None = None) -> HmacKeyring | No
             previous_env=REPORT_LINK_HMAC_PREVIOUS_SECRET,
             rotation_started_at_env=REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT,
             previous_is_legacy_env=REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY,
+            legacy_worker_env=None,
+            legacy_worker_generation_env=None,
             other_primary_env=MAIL_ACTION_HMAC_SECRET,
             other_previous_env=MAIL_ACTION_HMAC_PREVIOUS_SECRET,
             max_token_ttl_s=REPORT_LINK_MAX_TOKEN_TTL_S,
@@ -958,6 +1014,8 @@ __all__ = [
     "HMAC_PURPOSE_CALENDAR_EVENT",
     "HMAC_PURPOSE_MAIL_DRAFT",
     "HMAC_PURPOSE_REPORT_LINK",
+    "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION",
+    "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET",
     "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
     "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY",
     "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",

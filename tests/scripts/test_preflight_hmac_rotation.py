@@ -31,6 +31,10 @@ _WRONG = (
     "arn:aws:secretsmanager:ap-northeast-1:123456789012:"
     "secret:teamagent/dev/hmac/wrong-wrong0@" + "d" * 32
 )
+_SLACK = (
+    "arn:aws:secretsmanager:ap-northeast-1:123456789012:"
+    "secret:teamagent/dev/slack/bot-token-worker@" + "s" * 32
+)
 
 
 def _config(
@@ -51,6 +55,7 @@ def _manifest() -> dict[str, object]:
     return {
         "now": _NOW,
         "legacy_database_generation": _LEGACY,
+        "legacy_worker_generation": _SLACK,
         "domains": {
             "mail_action": {
                 "deployed": _config(_LEGACY, None, None),
@@ -125,6 +130,19 @@ def _rendered_task(*domains: tuple[str, dict[str, object]]) -> dict[str, object]
                         "value": "1",
                     }
                 )
+                if domain == "mail_action":
+                    environment.append(
+                        {
+                            "name": "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION",
+                            "value": _SLACK,
+                        }
+                    )
+                    secrets.append(
+                        {
+                            "name": "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET",
+                            "valueFrom": _reference(_SLACK),
+                        }
+                    )
     return {
         "containerDefinitions": [
             {
@@ -185,11 +203,41 @@ def _worker_env(manifest: dict[str, object]) -> str:
                 f"export {prefix}_TTL_S='{ttls[domain]}'",
             ]
         )
+    legacy_worker = str(manifest["legacy_worker_generation"] or "")
+    _resource, _separator, legacy_worker_version = legacy_worker.rpartition("@")
+    lines.extend(
+        [
+            (
+                "export MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET_NAME="
+                f"'{'teamagent/dev/slack/bot-token' if legacy_worker else ''}'"
+            ),
+            f"export MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID='{legacy_worker_version}'",
+            f"export MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION='{legacy_worker}'",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
 def test_valid_manifest_covers_every_issuer_and_verifier_task() -> None:
     assert validate_manifest(_manifest()) == {"ok": True, "code": "ok"}
+
+
+def test_legacy_worker_generation_is_mandatory_and_slack_scoped() -> None:
+    missing = _manifest()
+    missing["legacy_worker_generation"] = None
+    assert validate_manifest(missing) == {
+        "ok": False,
+        "code": "invalid_legacy_worker_generation",
+        "scope": "mail_action",
+    }
+
+    wrong = _manifest()
+    wrong["legacy_worker_generation"] = _WRONG
+    assert validate_manifest(wrong) == {
+        "ok": False,
+        "code": "invalid_legacy_worker_generation",
+        "scope": "mail_action",
+    }
 
 
 def test_direct_cutover_and_wrong_previous_fail_closed() -> None:
@@ -296,6 +344,17 @@ def test_rendered_task_requires_version_pins_and_manifest_parity() -> None:
         "ok": False,
         "code": "rendered_task_drift",
         "scope": "connect_web",
+    }
+
+    mcp_secrets = rendered["mcp"]["containerDefinitions"][0]["secrets"]  # type: ignore[index]
+    legacy_worker = next(
+        entry for entry in mcp_secrets if entry["name"] == "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET"
+    )
+    legacy_worker["valueFrom"] = _SLACK.rpartition("@")[0]
+    assert validate_rendered_tasks(manifest, {"mcp": rendered["mcp"]}) == {
+        "ok": False,
+        "code": "rendered_task_drift",
+        "scope": "mcp",
     }
 
 
@@ -405,6 +464,17 @@ def test_worker_env_requires_exact_generations_version_pins_and_legacy_marker() 
     assert validate_worker_env(
         manifest,
         worker_env.replace("MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY='1'", ""),
+    ) == {
+        "ok": False,
+        "code": "worker_env_drift",
+        "scope": "worker",
+    }
+    assert validate_worker_env(
+        manifest,
+        worker_env.replace(
+            f"MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID='{'s' * 32}'",
+            f"MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID='{'x' * 32}'",
+        ),
     ) == {
         "ok": False,
         "code": "worker_env_drift",

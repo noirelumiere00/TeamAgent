@@ -50,6 +50,8 @@ _DOMAIN_ENV_NAMES = {
         "ttl": "MAIL_ACTION_TTL_S",
         "primary_secret": "MAIL_ACTION_HMAC_SECRET",
         "previous_secret": "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+        "legacy_worker_generation": "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION",
+        "legacy_worker_secret": "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET",
     },
     "report_link": {
         "primary_generation": "REPORT_LINK_HMAC_PRIMARY_GENERATION",
@@ -80,6 +82,11 @@ _WORKER_SCOPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 _WORKER_EPOCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _WORKER_PROVENANCE_RE = re.compile(r"^[a-f0-9]{64}$")
 _WORKER_ID_RE = re.compile(r"^i-[a-f0-9]{8,32}$")
+_WORKER_LEGACY_NAMES = {
+    "secret_name": "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET_NAME",
+    "version": "MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID",
+    "generation": "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION",
+}
 
 
 def _result(ok: bool, code: str, *, scope: str | None = None) -> dict[str, object]:
@@ -124,7 +131,13 @@ def validate_manifest(manifest: object) -> dict[str, object]:
     """Validate one secret-free transition manifest without exposing its identifiers."""
     root = _mapping(manifest)
     if root is None or frozenset(root) != frozenset(
-        {"now", "legacy_database_generation", "domains", "tasks"}
+        {
+            "now",
+            "legacy_database_generation",
+            "legacy_worker_generation",
+            "domains",
+            "tasks",
+        }
     ):
         return _result(False, "invalid_manifest")
 
@@ -164,6 +177,26 @@ def validate_manifest(manifest: object) -> dict[str, object]:
         if not transition["ok"]:
             return _result(False, transition["code"], scope=domain)
         proposed_configs[domain] = proposed
+
+    legacy_worker_generation = root["legacy_worker_generation"]
+    mail_legacy_migration = (
+        proposed_configs["mail_action"]["previous_generation"] == legacy_database_generation
+    )
+    if mail_legacy_migration:
+        legacy_worker_resource = _generation_resource(legacy_worker_generation)
+        if (
+            legacy_worker_resource is None
+            or "slack" not in legacy_worker_resource.casefold()
+            or legacy_worker_generation
+            in {
+                legacy_database_generation,
+                proposed_configs["mail_action"]["primary_generation"],
+                proposed_configs["report_link"]["primary_generation"],
+            }
+        ):
+            return _result(False, "invalid_legacy_worker_generation", scope="mail_action")
+    elif legacy_worker_generation is not None:
+        return _result(False, "unexpected_legacy_worker_generation", scope="mail_action")
 
     mail_primary_resource = _generation_resource(
         proposed_configs["mail_action"]["primary_generation"]
@@ -215,6 +248,7 @@ def _expected_rendered_hmac_names(
     task: str,
     expected_task: dict[str, Any],
     legacy_database_generation: str,
+    legacy_worker_generation: str | None,
 ) -> tuple[frozenset[str], frozenset[str]] | None:
     environment: set[str] = set()
     secrets: set[str] = set()
@@ -237,6 +271,9 @@ def _expected_rendered_hmac_names(
         secrets.add(names["previous_secret"])
         if previous_generation == legacy_database_generation:
             environment.add(names["legacy_marker"])
+            if domain == "mail_action" and legacy_worker_generation is not None:
+                environment.add(names["legacy_worker_generation"])
+                secrets.add(names["legacy_worker_secret"])
     return frozenset(environment), frozenset(secrets)
 
 
@@ -325,6 +362,23 @@ def _rendered_domain_config(
     }
 
 
+def _rendered_legacy_worker_matches(
+    *,
+    environment: dict[str, object],
+    secrets: dict[str, object],
+    expected_generation: object,
+) -> bool:
+    names = _DOMAIN_ENV_NAMES["mail_action"]
+    generation = environment.get(names["legacy_worker_generation"])
+    reference = secrets.get(names["legacy_worker_secret"])
+    if expected_generation is None:
+        return generation is None and reference is None
+    return generation == expected_generation and _pinned_reference_matches_generation(
+        reference,
+        generation,
+    )
+
+
 def validate_rendered_tasks(
     manifest: object,
     rendered_tasks: dict[str, object],
@@ -340,6 +394,7 @@ def validate_rendered_tasks(
     if expected_tasks is None:
         return _result(False, "invalid_tasks")
     legacy_database_generation = root["legacy_database_generation"]
+    legacy_worker_generation = root["legacy_worker_generation"]
     if type(legacy_database_generation) is not str:
         return _result(False, "invalid_legacy_generation")
 
@@ -368,6 +423,9 @@ def validate_rendered_tasks(
             task=task,
             expected_task=expected_task,
             legacy_database_generation=legacy_database_generation,
+            legacy_worker_generation=(
+                legacy_worker_generation if "mail_action" in _TASK_DOMAINS[task] else None
+            ),
         )
         if expected_names is None:
             return _result(False, "invalid_rendered_task", scope=task)
@@ -388,6 +446,12 @@ def validate_rendered_tasks(
             )
             if rendered is None or rendered != expected_task[domain]:
                 return _result(False, "rendered_task_drift", scope=task)
+        if "mail_action" in _TASK_DOMAINS[task] and not _rendered_legacy_worker_matches(
+            environment=environment,
+            secrets=secrets,
+            expected_generation=legacy_worker_generation,
+        ):
+            return _result(False, "rendered_task_drift", scope=task)
     return _result(True, "ok")
 
 
@@ -409,9 +473,11 @@ def _worker_env_names(domain: str) -> dict[str, str]:
 def _parse_worker_env(text: object) -> dict[str, str] | None:
     if type(text) is not str or len(text) > 65_536:
         return None
-    expected_names = {
-        name for domain in _DOMAIN_MAX_TTLS for name in _worker_env_names(domain).values()
-    } | set(_WORKER_RUNTIME_NAMES)
+    expected_names = (
+        {name for domain in _DOMAIN_MAX_TTLS for name in _worker_env_names(domain).values()}
+        | set(_WORKER_RUNTIME_NAMES)
+        | set(_WORKER_LEGACY_NAMES.values())
+    )
     values: dict[str, str] = {}
     for line in text.splitlines():
         match = _WORKER_EXPORT_RE.fullmatch(line)
@@ -468,6 +534,7 @@ def validate_worker_env(manifest: object, worker_env_text: object) -> dict[str, 
         return _result(False, "invalid_tasks")
     worker = _mapping(tasks["worker"])
     legacy_generation = root["legacy_database_generation"]
+    legacy_worker_generation = root["legacy_worker_generation"]
     if worker is None or type(legacy_generation) is not str:
         return _result(False, "invalid_task_domains", scope="worker")
 
@@ -532,6 +599,25 @@ def validate_worker_env(manifest: object, worker_env_text: object) -> dict[str, 
             return _result(False, "worker_env_drift", scope="worker")
 
     if len(set(primary_names)) != len(primary_names):
+        return _result(False, "worker_env_drift", scope="worker")
+    legacy_values = (
+        values[_WORKER_LEGACY_NAMES["secret_name"]],
+        values[_WORKER_LEGACY_NAMES["version"]],
+        values[_WORKER_LEGACY_NAMES["generation"]],
+    )
+    if legacy_worker_generation is None:
+        if any(legacy_values):
+            return _result(False, "worker_env_drift", scope="worker")
+    elif (
+        any(not value for value in legacy_values)
+        or values[_WORKER_LEGACY_NAMES["generation"]] != legacy_worker_generation
+        or "slack" not in values[_WORKER_LEGACY_NAMES["secret_name"]].casefold()
+        or not _worker_secret_ref_matches_generation(
+            secret_name=values[_WORKER_LEGACY_NAMES["secret_name"]],
+            version_id=values[_WORKER_LEGACY_NAMES["version"]],
+            generation=legacy_worker_generation,
+        )
+    ):
         return _result(False, "worker_env_drift", scope="worker")
     return _result(True, "ok")
 
