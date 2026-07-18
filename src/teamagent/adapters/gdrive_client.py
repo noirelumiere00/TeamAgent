@@ -26,10 +26,12 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import socket
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any
 
 import structlog
@@ -61,10 +63,62 @@ DEFAULT_WALK_MAX_FILES = 5000
 # 権限を過小評価してしまうため、全ページを取得しつつ無限 token loop には上限で fail-closed。
 DEFAULT_PERMISSIONS_MAX_PAGES = 100
 DEFAULT_GOOGLE_API_RETRIES = 3
+DEFAULT_GDRIVE_DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024
+
+
+def _file_ref(file_id: str) -> str:
+    """ログ用の非可逆な短いDrive参照。"""
+    return hashlib.sha256(file_id.encode("utf-8")).hexdigest()[:12]
 
 
 class GDrivePermissionsPaginationError(RuntimeError):
     """permissions.list を最後のページまで安全に列挙できなかった。"""
+
+
+class IncompleteDriveTraversal(RuntimeError):  # noqa: N818 - required public contract name
+    """Drive traversal が安全上限・pagination異常により完走できなかった。"""
+
+    def __init__(self, operation: str, reason: str, **diagnostics: Any) -> None:
+        self.operation = operation
+        self.reason = reason
+        self.diagnostics = diagnostics
+        details = ", ".join(f"{key}={value}" for key, value in sorted(diagnostics.items()))
+        suffix = f" ({details})" if details else ""
+        super().__init__(f"{operation} incomplete: {reason}{suffix}")
+
+
+# Backward-compatible name for callers introduced before the explicit contract name.
+GDriveTraversalIncompleteError = IncompleteDriveTraversal
+
+
+def _require_complete_file_search(
+    response: dict[str, Any],
+    *,
+    operation: str,
+    request_id: str,
+    **diagnostics: Any,
+) -> None:
+    """files.list の completeness signal が明示的な false の場合だけ続行する。"""
+    incomplete_search = response.get("incompleteSearch")
+    if incomplete_search is False:
+        return
+    reason = (
+        "incompleteSearch=true"
+        if incomplete_search is True
+        else "incompleteSearch missing or invalid"
+    )
+    logger.error(
+        "gdrive_files_search_incomplete",
+        request_id=request_id,
+        operation=operation,
+        reason=reason,
+        **diagnostics,
+    )
+    raise IncompleteDriveTraversal(
+        operation,
+        reason,
+        **diagnostics,
+    )
 
 
 class GDriveDownloadContentError(RuntimeError):
@@ -74,6 +128,28 @@ class GDriveDownloadContentError(RuntimeError):
         self.category = category
         self.actual_bytes = actual_bytes
         super().__init__(f"gdrive download returned invalid content: {category}")
+
+
+class _BoundedBytesIO(BytesIO):
+    """MediaIoBaseDownloadがhard capを越えてbufferを拡張する前に中断する。"""
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__()
+        self._max_bytes = max_bytes
+
+    def write(self, data: Any) -> int:
+        view = self.getbuffer()
+        try:
+            current_size = view.nbytes
+        finally:
+            view.release()
+        projected_size = max(current_size, self.tell() + len(data))
+        if projected_size > self._max_bytes:
+            raise GDriveDownloadContentError(
+                "download_too_large",
+                actual_bytes=projected_size,
+            )
+        return super().write(data)
 
 
 # -----------------------------------------------------------
@@ -95,6 +171,7 @@ class DriveFile:
     parents: tuple[str, ...] = ()
     web_view_link: str | None = None  # documents.source_uri / Drive ボタン URL
     owners_email: tuple[str, ...] = ()  # documents.owner_email 候補
+    md5_checksum: str | None = None  # binary file の Drive advertised MD5
 
 
 @dataclass(frozen=True)
@@ -260,8 +337,9 @@ class GDriveClient:
             "q": q,
             "pageSize": page_size,
             "fields": (
-                "nextPageToken, files("
-                "id, name, mimeType, modifiedTime, size, parents, webViewLink, owners(emailAddress)"
+                "incompleteSearch, nextPageToken, files("
+                "id, name, mimeType, modifiedTime, size, md5Checksum, parents, "
+                "webViewLink, owners(emailAddress)"
                 ")"
             ),
             "supportsAllDrives": include_shared_drives,
@@ -273,6 +351,12 @@ class GDriveClient:
         start = time.perf_counter()
         resp = service.files().list(**kwargs).execute()
         latency_ms = int((time.perf_counter() - start) * 1000)
+        _require_complete_file_search(
+            resp,
+            operation="list_files",
+            request_id=request_id,
+            folder_id=folder_id,
+        )
 
         raw_files = resp.get("files", [])
         files = [
@@ -282,6 +366,7 @@ class GDriveClient:
                 mime_type=str(f.get("mimeType", "")),
                 modified_time=f.get("modifiedTime"),
                 size=int(f["size"]) if f.get("size") else None,
+                md5_checksum=str(f["md5Checksum"]).lower() if f.get("md5Checksum") else None,
                 parents=tuple(f.get("parents", ()) or ()),
                 web_view_link=f.get("webViewLink"),
                 owners_email=tuple(
@@ -390,15 +475,22 @@ class GDriveClient:
         )
         return perms
 
-    def download_file_bytes(self, file_id: str, request_id: str) -> bytes:
+    def download_file_bytes(
+        self,
+        file_id: str,
+        request_id: str,
+        *,
+        max_bytes: int = DEFAULT_GDRIVE_DOWNLOAD_MAX_BYTES,
+    ) -> bytes:
         """ファイル本体をバイナリで取得する（PDF / バイナリファイル用）。
 
         Google Doc / Sheet / Slide は `export_file()` を使う必要がある（別メソッド予定）。
+        ``max_bytes``を越える応答はbuffer拡張前に分類例外で中断する。
         """
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be at least 1")
         service = self._ensure_service()
         # 遅延 import: googleapiclient.http が大きい
-        from io import BytesIO
-
         from googleapiclient.http import MediaIoBaseDownload
 
         start = time.perf_counter()
@@ -409,7 +501,7 @@ class GDriveClient:
         request = service.files().get_media(
             fileId=file_id, supportsAllDrives=True, acknowledgeAbuse=True
         )
-        buf = BytesIO()
+        buf = _BoundedBytesIO(max_bytes)
         downloader = MediaIoBaseDownload(buf, request, chunksize=1024 * 1024)
         done = False
         while not done:
@@ -431,7 +523,7 @@ class GDriveClient:
             logger.warning(
                 "gdrive_download_not_binary",
                 request_id=request_id,
-                file_id=file_id,
+                file_ref=_file_ref(file_id),
                 bytes=len(data),
                 category="html_response",
             )
@@ -439,7 +531,7 @@ class GDriveClient:
         logger.info(
             "gdrive_download_file",
             request_id=request_id,
-            file_id=file_id,
+            file_ref=_file_ref(file_id),
             bytes=len(data),
             latency_ms=latency_ms,
         )
@@ -457,9 +549,14 @@ class GDriveClient:
         Day 7 (2026-05-27) で追加: 共有ドライブ全自動 crawl 用の起点 API。
         マイドライブ や「Shared with me」 は含まれない。
         """
+        if page_size < 1 or page_size > 100:
+            raise ValueError("shared drives page_size must be between 1 and 100")
+        if max_pages < 1:
+            raise ValueError("shared drives max_pages must be at least 1")
         service = self._ensure_service()
         out: list[SharedDrive] = []
         page_token: str | None = None
+        seen_tokens: set[str] = set()
         for _ in range(max_pages):
             kwargs: dict[str, Any] = {
                 "pageSize": page_size,
@@ -476,9 +573,40 @@ class GDriveClient:
                         created_time=d.get("createdTime"),
                     )
                 )
-            page_token = resp.get("nextPageToken")
-            if not page_token:
+            next_token = resp.get("nextPageToken")
+            if not next_token:
+                page_token = None
                 break
+            if next_token == page_token or next_token in seen_tokens:
+                logger.error(
+                    "gdrive_list_shared_drives_incomplete",
+                    request_id=request_id,
+                    reason="pagination_token_cycle",
+                    drives_collected=len(out),
+                    max_pages=max_pages,
+                )
+                raise GDriveTraversalIncompleteError(
+                    "list_shared_drives",
+                    "pagination token cycle",
+                    drives_collected=len(out),
+                    max_pages=max_pages,
+                )
+            seen_tokens.add(next_token)
+            page_token = next_token
+        if page_token:
+            logger.error(
+                "gdrive_list_shared_drives_incomplete",
+                request_id=request_id,
+                reason="page_limit_with_remaining_token",
+                drives_collected=len(out),
+                max_pages=max_pages,
+            )
+            raise GDriveTraversalIncompleteError(
+                "list_shared_drives",
+                "page limit reached with remaining token",
+                drives_collected=len(out),
+                max_pages=max_pages,
+            )
         logger.info("gdrive_list_shared_drives", request_id=request_id, count=len(out))
         return out
 
@@ -512,6 +640,11 @@ class GDriveClient:
         """
         import re as _re
 
+        if max_files < 1:
+            raise ValueError("walk max_files must be at least 1")
+        if max_depth < 0:
+            raise ValueError("walk max_depth must be non-negative")
+
         folder_mime = "application/vnd.google-apps.folder"
         service = self._ensure_service()
         # 除外 regex は fail-loud: 不正な regex は即 re.error で落とす（黙って全取込しない）。
@@ -522,19 +655,20 @@ class GDriveClient:
 
         while queue and len(out) < max_files:
             folder_id, depth = queue.pop(0)
-            if folder_id in visited or depth > max_depth:
+            if folder_id in visited:
                 continue
             visited.add(folder_id)
 
             # この folder 直下の files / sub-folders を取得（全 page）
             page_token: str | None = None
+            seen_page_tokens: set[str] = set()
             for _ in range(20):  # 1 folder の最大ページ数（page_size=1000 × 20 = 20k 上限）
                 kwargs: dict[str, Any] = {
                     "q": f"'{folder_id}' in parents and trashed = false",
                     "pageSize": 1000,
                     "fields": (
-                        "nextPageToken, files("
-                        "id, name, mimeType, modifiedTime, size, parents, "
+                        "incompleteSearch, nextPageToken, files("
+                        "id, name, mimeType, modifiedTime, size, md5Checksum, parents, "
                         "webViewLink, owners(emailAddress))"
                     ),
                     "supportsAllDrives": True,
@@ -547,6 +681,14 @@ class GDriveClient:
                     kwargs["pageToken"] = page_token
 
                 resp = service.files().list(**kwargs).execute()
+                _require_complete_file_search(
+                    resp,
+                    operation="walk_files_recursive",
+                    request_id=request_id,
+                    root_id=root_id,
+                    folder_id=folder_id,
+                    drive_id=drive_id,
+                )
                 for f in resp.get("files", []):
                     mime = str(f.get("mimeType", ""))
                     if mime == folder_mime:
@@ -562,6 +704,25 @@ class GDriveClient:
                                 pattern=exclude_folder_name_re,
                             )
                             continue
+                        if depth >= max_depth:
+                            logger.error(
+                                "gdrive_walk_files_recursive_incomplete",
+                                request_id=request_id,
+                                root_id=root_id,
+                                drive_id=drive_id,
+                                reason="max_depth_with_child_folder",
+                                max_depth=max_depth,
+                                folders_visited=len(visited),
+                                files_collected=len(out),
+                            )
+                            raise GDriveTraversalIncompleteError(
+                                "walk_files_recursive",
+                                "max depth reached with child folders remaining",
+                                root_id=root_id,
+                                max_depth=max_depth,
+                                folders_visited=len(visited),
+                                files_collected=len(out),
+                            )
                         # sub-folder → queue に追加
                         queue.append((str(f.get("id", "")), depth + 1))
                     else:
@@ -572,6 +733,9 @@ class GDriveClient:
                                 mime_type=mime,
                                 modified_time=f.get("modifiedTime"),
                                 size=int(f["size"]) if f.get("size") else None,
+                                md5_checksum=(
+                                    str(f["md5Checksum"]).lower() if f.get("md5Checksum") else None
+                                ),
                                 parents=tuple(f.get("parents", ()) or ()),
                                 web_view_link=f.get("webViewLink"),
                                 owners_email=tuple(
@@ -583,9 +747,55 @@ class GDriveClient:
                         )
                         if len(out) >= max_files:
                             break
-                page_token = resp.get("nextPageToken")
-                if not page_token or len(out) >= max_files:
+                next_token = resp.get("nextPageToken")
+                if len(out) >= max_files:
+                    page_token = next_token
                     break
+                if not next_token:
+                    page_token = None
+                    break
+                if next_token == page_token or next_token in seen_page_tokens:
+                    logger.error(
+                        "gdrive_walk_files_recursive_incomplete",
+                        request_id=request_id,
+                        root_id=root_id,
+                        drive_id=drive_id,
+                        folder_id=folder_id,
+                        reason="pagination_token_cycle",
+                        folders_visited=len(visited),
+                        files_collected=len(out),
+                    )
+                    raise GDriveTraversalIncompleteError(
+                        "walk_files_recursive",
+                        "pagination token cycle",
+                        root_id=root_id,
+                        folder_id=folder_id,
+                        folders_visited=len(visited),
+                        files_collected=len(out),
+                    )
+                seen_page_tokens.add(next_token)
+                page_token = next_token
+            if page_token and len(out) < max_files:
+                logger.error(
+                    "gdrive_walk_files_recursive_incomplete",
+                    request_id=request_id,
+                    root_id=root_id,
+                    drive_id=drive_id,
+                    folder_id=folder_id,
+                    reason="page_limit_with_remaining_token",
+                    max_pages=20,
+                    folders_visited=len(visited),
+                    files_collected=len(out),
+                )
+                raise GDriveTraversalIncompleteError(
+                    "walk_files_recursive",
+                    "page limit reached with remaining token",
+                    root_id=root_id,
+                    folder_id=folder_id,
+                    max_pages=20,
+                    folders_visited=len(visited),
+                    files_collected=len(out),
+                )
 
         hit_max = len(out) >= max_files
         # stale 堅牢化 (2026-07-10): max_files 打ち切りは列挙の不完全＝INGEST_MARK_STALE の

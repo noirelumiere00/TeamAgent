@@ -17,7 +17,7 @@
    - ゲート: INGEST_MARK_STALE 未設定 / dry_run / kinds に gdrive 無し → 何もしない
    - 観測完全性ガード（stale 堅牢化）: gdrive/shared_drives の列挙部分失敗
      （errors>0 / sources_skipped>0）または walk の max_files 打ち切りがあった run は
-     mark 不発（WARNING skip）・観測分の clear だけ実行。正常 run は従来どおり
+     mark/clear とも不発（WARNING skip）。正常 run は従来どおり
 4. プレースホルダ skip（loader）: folder_id が REPLACE_ 始まりのエントリを WARNING skip
 5. ルート検査（pipeline._check_rulebook_root）:
    - NN_ フォルダの yaml 不足 → exit 1 / 99_ 系の yaml 誤登録 → exit 1 /
@@ -202,13 +202,21 @@ class _FakeWalkService:
 
     def __init__(self, tree: dict[str, list[dict[str, Any]]]) -> None:
         self._tree = tree
+        self.list_kwargs: list[dict[str, Any]] = []
 
     def files(self) -> _FakeWalkService:
         return self
 
     def list(self, **kwargs: Any) -> _FakeWalkRequest:
+        self.list_kwargs.append(kwargs)
         folder_id = str(kwargs["q"]).split("'")[1]  # "'FID' in parents and trashed = false"
-        return _FakeWalkRequest({"files": self._tree.get(folder_id, []), "nextPageToken": None})
+        return _FakeWalkRequest(
+            {
+                "files": self._tree.get(folder_id, []),
+                "nextPageToken": None,
+                "incompleteSearch": False,
+            }
+        )
 
 
 _FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -242,6 +250,18 @@ def test_walk_without_exclude_regex_keeps_all() -> None:
     client = GDriveClient(service=_FakeWalkService(_walk_tree()))
     files = client.walk_files_recursive(root_id="ROOT", request_id="req-t")
     assert {f.id for f in files} == {"A", "B", "C"}
+
+
+def test_walk_maps_drive_md5_checksum() -> None:
+    tree = _walk_tree()
+    tree["ROOT"] = [tree["ROOT"][2]]
+    tree["ROOT"][0]["md5Checksum"] = "ABCDEF0123456789ABCDEF0123456789"
+    service = _FakeWalkService(tree)
+    client = GDriveClient(service=service)
+    files = client.walk_files_recursive(root_id="ROOT", request_id="req-md5", max_depth=0)
+    assert len(files) == 1
+    assert files[0].md5_checksum == "abcdef0123456789abcdef0123456789"
+    assert "md5Checksum" in service.list_kwargs[0]["fields"]
 
 
 def test_walk_with_custom_regex_overrides_default() -> None:
@@ -450,10 +470,10 @@ def _result_with_stats(
     return result
 
 
-def test_mark_stale_skipped_on_gdrive_enumeration_errors_but_clears(
+def test_mark_stale_cleanup_skipped_on_gdrive_enumeration_errors(
     _stale_env: pytest.MonkeyPatch,
 ) -> None:
-    """gdrive 列挙に部分失敗（errors>0）→ mark 不発。観測分の clear だけは実行される。"""
+    """gdrive 列挙に部分失敗（errors>0）→ mark/clear とも commit しない。"""
     _stale_env.setenv("INGEST_MARK_STALE", "true")
     repo = _FakeStaleRepo([("a", False), ("b", False)])
     result = _result_with_stats("gdrive", errors=["RuntimeError: walk failed"], sources_skipped=1)
@@ -461,7 +481,7 @@ def test_mark_stale_skipped_on_gdrive_enumeration_errors_but_clears(
         {"a"}, kinds=["gdrive"], request_id="req-t", result=result
     )
     assert repo.marked is None  # b は未観測だが誤 stale しない
-    assert repo.cleared == ["a"]  # 観測できた doc の復活対応は安全なので続行
+    assert repo.cleared is None
 
 
 def test_mark_stale_skipped_on_shared_drives_sources_skipped(
@@ -476,13 +496,13 @@ def test_mark_stale_skipped_on_shared_drives_sources_skipped(
         {"a"}, kinds=["gdrive", "shared_drives"], request_id="req-t", result=result
     )
     assert repo.marked is None
-    assert repo.cleared == ["a"]
+    assert repo.cleared is None
 
 
 def test_mark_stale_skipped_on_truncated_walk_run(
     _stale_env: pytest.MonkeyPatch,
 ) -> None:
-    """walk が max_files 打ち切りされた run → mark 不発（reason は打ち切り区別）・clear は実行。"""
+    """walk が max_files 打ち切りされた run → cleanup 不発（reason は打ち切り区別）。"""
     from structlog.testing import capture_logs
 
     _stale_env.setenv("INGEST_MARK_STALE", "true")
@@ -496,7 +516,7 @@ def test_mark_stale_skipped_on_truncated_walk_run(
             truncated_walk_roots={"DRIVE1"},
         )
     assert repo.marked is None
-    assert repo.cleared == ["a"]
+    assert repo.cleared is None
     skipped = [e for e in logs if e["event"] == "ingest_mark_stale_skipped"]
     assert len(skipped) == 1
     assert "walk_truncated" in skipped[0]["reason"]  # source_failure と区別できる
@@ -574,13 +594,13 @@ def test_run_wires_source_failure_into_stale_guard(
     result = _wired_runner(repo).run(_sources_one_gdrive_folder(), kinds=["gdrive"])
     assert result.by_kind["gdrive"].errors  # 失敗は従来どおり集計される（exit 1 判定用）
     assert repo.marked is None  # 部分失敗 run では mark 不発
-    assert repo.cleared == []  # clear は実行される（観測ゼロなので空）
+    assert repo.cleared is None
 
 
 def test_run_wires_walk_truncation_into_stale_guard(
     _stale_env: pytest.MonkeyPatch,
 ) -> None:
-    """run() 配線: handler が立てた打ち切りフラグが stale ガードへ届き mark 不発・clear 実行。"""
+    """run() 配線: handler の打ち切りフラグで stale mark/clear とも不発。"""
     _stale_env.setenv("INGEST_MARK_STALE", "true")
     _isolate_run_gates(_stale_env)
 
@@ -599,7 +619,7 @@ def test_run_wires_walk_truncation_into_stale_guard(
     repo = _FakeStaleRepo([("a", False), ("b", False)])
     _wired_runner(repo).run(_sources_one_gdrive_folder(), kinds=["gdrive"])
     assert repo.marked is None  # 打ち切り run では b を誤 stale しない
-    assert repo.cleared == ["a"]  # 観測できた a の stale 解除は続行
+    assert repo.cleared is None
 
 
 # -----------------------------------------------------------

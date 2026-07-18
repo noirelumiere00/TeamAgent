@@ -5,7 +5,7 @@
 検証観点:
 - OFF（既定）で挙動が変わらない（gdoc/gslide/gsheet/plain-text の本文化が起きない）。
 - ON で gdoc/gslide/gsheet/plain-text が title_only でなく本文 chunk になる。
-- ON の fail-open（adapter 例外 → WARN + title_only フォールバック）。
+- ON の fail-open（adapter 例外 → WARN + skip、既存本文を維持）。
 - §2 dedup ガード（本文 chunk を title_only が上書きしない）。
 """
 
@@ -344,12 +344,12 @@ def test_folder_gslide_on_extracts_body(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 # -----------------------------------------------------------
-# fail-open: adapter 例外 → WARN + title_only フォールバック（crawl は止まらない）
+# fail-open: adapter 例外 → WARN + skip（既存本文は維持し、crawl は止まらない）
 # -----------------------------------------------------------
-def test_crawl_gslide_failopen_falls_back_to_title_only(
+def test_crawl_gslide_failopen_skips_without_title_only_upsert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ON: GSlidesClient が例外 → fail-open で title_only にフォールバックし doc は作られる。"""
+    """ON: GSlidesClient が例外 → 既存本文を格下げせず、そのfileだけskipする。"""
     monkeypatch.setenv("INGEST_RICH_EXTRACT", "1")
     _fake_gdrive_crawl(monkeypatch, [_make_drive_file("GS1", "deck", GSLIDE_MIME, size=None)])
 
@@ -362,11 +362,9 @@ def test_crawl_gslide_failopen_falls_back_to_title_only(
 
     repo = _FakeRepository()
     docs_n, chunks_n = _run_crawl(repo)
-    # fail-open: 1 件 skip ではなく title_only で doc 化される
-    assert docs_n == 1
-    assert chunks_n == 1
-    chunks = repo.upsert_calls[0]["chunks"]
-    assert chunks[0].metadata.get("title_only") is True
+    assert docs_n == 0
+    assert chunks_n == 0
+    assert repo.upsert_calls == []
 
 
 def test_crawl_failopen_one_file_does_not_kill_source(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -390,10 +388,10 @@ def test_crawl_failopen_one_file_does_not_kill_source(monkeypatch: pytest.Monkey
 
     repo = _FakeRepository()
     docs_n, _ = _run_crawl(repo)
-    # BAD は title_only、OKTXT は本文 → どちらも doc 化（2 件）
-    assert docs_n == 2
+    # BAD は既存本文維持のためskip、OKTXTだけ本文化する。
+    assert docs_n == 1
     ext_ids = {c["external_id"] for c in repo.upsert_calls}
-    assert ext_ids == {"BAD", "OKTXT"}
+    assert ext_ids == {"OKTXT"}
 
 
 # -----------------------------------------------------------

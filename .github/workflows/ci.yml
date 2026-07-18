@@ -17,6 +17,22 @@ jobs:
   lint-and-test:
     name: lint + mypy + pytest
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          POSTGRES_DB: teamagent_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teamagent_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      TEAMAGENT_TEST_DB_DSN: postgresql://postgres:postgres@127.0.0.1:5432/teamagent_test
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +62,33 @@ jobs:
             'fonttools[woff]>=4.63.0' \
             google-auth google-api-python-client google-auth-oauthlib \
             pytest pytest-asyncio pytest-cov mypy ruff bandit import-linter
+
+      - name: Prepare disposable PostgreSQL test role
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+
+          with psycopg.connect(os.environ["TEAMAGENT_TEST_DB_DSN"], autocommit=True) as conn:
+              conn.execute(
+                  """
+                  DO $$
+                  BEGIN
+                      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'teamagent_app') THEN
+                          CREATE ROLE teamagent_app;
+                      END IF;
+                  END
+                  $$;
+                  """
+              )
+              conn.execute(
+                  """
+                  ALTER ROLE teamagent_app
+                      NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOLOGIN INHERIT
+                  """
+              )
+              conn.execute("GRANT teamagent_app TO postgres")
+          PY
 
       - name: Ruff (lint)
         run: ruff check src/ tests/ scripts/
