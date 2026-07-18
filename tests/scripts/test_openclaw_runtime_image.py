@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_OPERATION_SMOKE = ROOT / "infra/openclaw/plugin-operation-smoke.mjs"
 EXPECTED_CMD = [
     "/opt/teamagent/gateway-runtime.mjs",
     "gateway",
@@ -70,7 +72,7 @@ const assetPrefix = "/app/dist/control-ui";
 const base = new URL("http://127.0.0.1:18789/");
 const sha256 = value =>
   crypto.createHash("sha256").update(value).digest("hex");
-const toHttpPath = candidate => {
+const toModuleHttpPath = candidate => {
   if (!candidate.startsWith(`${assetPrefix}/`)) {
     throw new Error(`Control UI asset escapes its root: ${candidate}`);
   }
@@ -78,14 +80,17 @@ const toHttpPath = candidate => {
 };
 
 if (
-  !Array.isArray(browser.controlUiReachableAssets) ||
-  browser.controlUiReachableAssets.length === 0 ||
-  browser.controlUiReachableAssets.length !==
-    browser.controlUiReachableModuleCount
+  !Array.isArray(browser.controlUiReachableModuleAssets) ||
+  browser.controlUiReachableModuleAssets.length === 0 ||
+  browser.controlUiReachableModuleAssets.length !==
+    browser.controlUiReachableModuleCount ||
+  !Array.isArray(browser.controlUiServedAssets) ||
+  browser.controlUiServedAssets.length === 0 ||
+  browser.controlUiServedAssets.length !== browser.controlUiServedAssetCount
 ) {
   throw new Error("invalid Control UI asset inventory");
 }
-const expectedRoots = browser.controlUiGraphRoots.map(toHttpPath).sort();
+const expectedRoots = browser.controlUiGraphRoots.map(toModuleHttpPath).sort();
 const rootResponse = await fetch(base);
 const rootBody = Buffer.from(await rootResponse.arrayBuffer());
 if (rootResponse.status !== 200) {
@@ -111,14 +116,54 @@ if (JSON.stringify(moduleRoots) !== JSON.stringify(expectedRoots)) {
 
 const failures = [];
 const served = [];
+const diskAssets = [];
 const secretValues = [
   process.env.SLACK_BOT_TOKEN,
   process.env.SLACK_APP_TOKEN,
   process.env.OPENCLAW_GATEWAY_TOKEN,
   process.env.TEAMAGENT_MCP_BEARER
 ].filter(Boolean);
-for (const asset of browser.controlUiReachableAssets) {
-  const httpPath = toHttpPath(asset.path);
+const expectedHttpPaths = new Set();
+for (const asset of browser.controlUiServedAssets) {
+  if (
+    !asset.path.startsWith(`${assetPrefix}/`) ||
+    !asset.httpPath.startsWith("/") ||
+    expectedHttpPaths.has(asset.httpPath)
+  ) {
+    throw new Error(`invalid or duplicate Control UI HTTP path: ${asset.httpPath}`);
+  }
+  expectedHttpPaths.add(asset.httpPath);
+  const diskBody = fs.readFileSync(asset.path);
+  const diskSha256 = sha256(diskBody);
+  const diskLeaksSecret = secretValues.some(secret =>
+    diskBody.includes(Buffer.from(secret))
+  );
+  if (
+    diskSha256 !== asset.sha256 ||
+    diskBody.length !== asset.size ||
+    diskLeaksSecret
+  ) {
+    failures.push({
+      path: asset.path,
+      stage: "on-disk",
+      expectedSha256: asset.sha256,
+      actualSha256: diskSha256,
+      expectedSize: asset.size,
+      actualSize: diskBody.length,
+      leaksSecret: diskLeaksSecret
+    });
+  }
+  if (
+    !/^[0-9a-f]{64}$/u.test(asset.servedSha256) ||
+    !Number.isSafeInteger(asset.servedSize) ||
+    asset.servedSize < 0 ||
+    !["identity", 'insert data-openclaw-terminal-enabled="false" after <html']
+      .includes(asset.httpTransform)
+  ) {
+    throw new Error(`invalid Control UI HTTP transform: ${asset.httpPath}`);
+  }
+  diskAssets.push({path: asset.path, sha256: diskSha256});
+  const httpPath = asset.httpPath;
   const response = await fetch(new URL(httpPath, base));
   const body = Buffer.from(await response.arrayBuffer());
   const actualSha256 = sha256(body);
@@ -127,18 +172,79 @@ for (const asset of browser.controlUiReachableAssets) {
   );
   if (
     response.status !== 200 ||
-    actualSha256 !== asset.sha256 ||
+    actualSha256 !== asset.servedSha256 ||
+    body.length !== asset.servedSize ||
     leaksSecret
   ) {
     failures.push({
       path: httpPath,
       status: response.status,
-      expectedSha256: asset.sha256,
+      expectedSha256: asset.servedSha256,
       actualSha256,
+      expectedSize: asset.servedSize,
+      actualSize: body.length,
       leaksSecret
     });
   }
   served.push({path: httpPath, sha256: actualSha256});
+}
+
+const dynamicConfigPath = "/control-ui-config.json";
+const unauthenticatedConfig = await fetch(new URL(dynamicConfigPath, base));
+const unauthenticatedConfigBody = Buffer.from(
+  await unauthenticatedConfig.arrayBuffer()
+);
+const unauthenticatedConfigJson = JSON.parse(
+  unauthenticatedConfigBody.toString("utf8")
+);
+if (
+  unauthenticatedConfig.status !== 401 ||
+  JSON.stringify(unauthenticatedConfigJson) !==
+    JSON.stringify({error: {message: "Unauthorized", type: "unauthorized"}}) ||
+  secretValues.some(secret =>
+    unauthenticatedConfigBody.includes(Buffer.from(secret))
+  )
+) {
+  throw new Error("Control UI bootstrap config did not fail closed without auth");
+}
+const authenticatedConfig = await fetch(new URL(dynamicConfigPath, base), {
+  headers: {Authorization: `Bearer ${process.env.OPENCLAW_GATEWAY_TOKEN}`}
+});
+const authenticatedConfigBody = Buffer.from(
+  await authenticatedConfig.arrayBuffer()
+);
+const authenticatedConfigJson = JSON.parse(
+  authenticatedConfigBody.toString("utf8")
+);
+const expectedAuthenticatedConfig = {
+  basePath: "",
+  assistantName: "TeamAgent",
+  assistantAvatar: "🧭",
+  assistantAvatarSource: null,
+  assistantAvatarStatus: "none",
+  assistantAvatarReason: "missing",
+  assistantAgentId: "teamagent",
+  serverVersion: "2026.7.1",
+  localMediaPreviewRoots: [
+    "/tmp/openclaw",
+    "/tmp/teamagent-openclaw/state/media",
+    "/tmp/teamagent-openclaw/state/canvas",
+    "/tmp/teamagent-openclaw/state/workspace",
+    "/tmp/teamagent-openclaw/state/sandboxes"
+  ],
+  embedSandbox: "scripts",
+  allowExternalEmbedUrls: false,
+  terminalEnabled: false
+};
+if (
+  authenticatedConfig.status !== 200 ||
+  JSON.stringify(authenticatedConfigJson) !==
+    JSON.stringify(expectedAuthenticatedConfig) ||
+  secretValues.some(secret =>
+    authenticatedConfigBody.includes(Buffer.from(secret))
+  )
+) {
+  throw new Error("Control UI authenticated bootstrap config contract failed");
 }
 
 const staticReferences = [
@@ -166,16 +272,30 @@ if (failures.length > 0 || staticFailures.length > 0) {
 }
 
 served.sort((left, right) => left.path.localeCompare(right.path));
+diskAssets.sort((left, right) => left.path.localeCompare(right.path));
 process.stdout.write(JSON.stringify({
   rootStatus: rootResponse.status,
   rootSha256: sha256(rootBody),
   moduleRoots,
   reachableModuleCount: browser.controlUiReachableModuleCount,
-  servedModuleCount: served.length,
-  servedModuleInventorySha256: sha256(
+  reachableModuleAssetCount: browser.controlUiReachableModuleAssets.length,
+  expectedServedAssetCount: browser.controlUiServedAssetCount,
+  servedAssetCount: served.length,
+  servedAssetInventorySha256: sha256(
     Buffer.from(JSON.stringify(served))
   ),
+  onDiskAssetInventorySha256: sha256(
+    Buffer.from(JSON.stringify(diskAssets))
+  ),
   staticReferenceCount: new Set(staticReferences).size,
+  dynamicRegistrations: [{
+    path: dynamicConfigPath,
+    unauthenticatedStatus: unauthenticatedConfig.status,
+    authenticatedStatus: authenticatedConfig.status,
+    authenticatedSha256: sha256(authenticatedConfigBody),
+    authenticatedSize: authenticatedConfigBody.length,
+    terminalEnabled: authenticatedConfigJson.terminalEnabled
+  }],
   missingOrMismatchedAssets: 0,
   runtimeSecretLeak: false
 }) + "\n");
@@ -313,7 +433,24 @@ def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
         )
         control_ui = json.loads(control_ui_result.stdout)
         assert control_ui["rootStatus"] == 200
-        assert control_ui["servedModuleCount"] == control_ui["reachableModuleCount"]
+        assert (
+            control_ui["reachableModuleAssetCount"]
+            == control_ui["reachableModuleCount"]
+        )
+        assert (
+            control_ui["servedAssetCount"]
+            == control_ui["expectedServedAssetCount"]
+        )
+        assert len(control_ui["dynamicRegistrations"]) == 1
+        assert control_ui["dynamicRegistrations"][0]["path"] == (
+            "/control-ui-config.json"
+        )
+        assert control_ui["dynamicRegistrations"][0]["unauthenticatedStatus"] == 401
+        assert control_ui["dynamicRegistrations"][0]["authenticatedStatus"] == 200
+        assert control_ui["dynamicRegistrations"][0]["terminalEnabled"] is False
+        assert len(control_ui["dynamicRegistrations"][0]["authenticatedSha256"]) == 64
+        assert len(control_ui["onDiskAssetInventorySha256"]) == 64
+        assert len(control_ui["servedAssetInventorySha256"]) == 64
         assert control_ui["missingOrMismatchedAssets"] == 0
         assert control_ui["runtimeSecretLeak"] is False
 
@@ -370,6 +507,54 @@ def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
         }
     finally:
         _run(["docker", "rm", "-f", container_id], check=False)
+
+
+def _plugin_operation_contract(image: str) -> dict[str, Any]:
+    result = _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--platform",
+            "linux/arm64",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--mount",
+            (
+                f"type=bind,src={PLUGIN_OPERATION_SMOKE},"
+                "dst=/opt/openclaw-plugin-operation-smoke.mjs,readonly"
+            ),
+            "--entrypoint",
+            "/nodejs/bin/node",
+            image,
+            "/opt/openclaw-plugin-operation-smoke.mjs",
+        ]
+    )
+    contract = json.loads(result.stdout)
+    assert contract["schemaVersion"] == 1
+    assert contract["network"] == "disabled-by-container"
+    assert contract["passed"] is True
+    assert contract["slack"] == {
+        "module": "/opt/teamagent/plugins/slack/dist/api.js",
+        "operations": ["conversations.history", "chat.update"],
+        "providerCallsStubbed": True,
+    }
+    assert contract["bedrock"] == {
+        "module": "/opt/teamagent/plugins/amazon-bedrock/dist/api.js",
+        "operations": [
+            "ListFoundationModelsCommand",
+            "ListInferenceProfilesCommand",
+        ],
+        "providerCallsStubbed": True,
+    }
+    return contract
 
 
 def verify_runtime_image(image: str) -> dict[str, Any]:
@@ -456,12 +641,67 @@ console.log(JSON.stringify(result));
     assert process_contract["tmpWrite"]["writable"] is True
     assert process_contract["jitiResolvable"] is False
     assert process_contract["browserHelpMetadata"] is False
+    assert process_contract["prune"]["schemaVersion"] == 2
     assert process_contract["prune"]["browser"]["reachableRegistrationChunks"] == 0
     assert process_contract["prune"]["browser"]["residualUnreachableBrowserCandidates"] == 0
+    assert (
+        process_contract["prune"]["browser"]["reachableBrowserNamedPayloadCount"] > 0
+    )
+    assert process_contract["prune"]["browser"]["reachableBrowserPayloadZero"] is False
+    assert (
+        process_contract["prune"]["browser"]["reachableBrowserImplementationModules"] == 0
+    )
+    assert process_contract["prune"]["browser"]["browserCliCommandRegistered"] is False
+    assert process_contract["prune"]["browser"]["genericOpenClawCliRetained"] is True
+    assert (
+        process_contract["prune"]["browser"]["browserExecutableOrPlaywrightPresent"]
+        is False
+    )
+    assert process_contract["prune"]["browser"]["usableBrowserControlPath"] is False
+    assert len(process_contract["prune"]["browser"]["retainedFailClosedFacade"]) == 1
     assert process_contract["prune"]["browser"]["controlUiMissingLocalImports"] == 0
     assert process_contract["prune"]["browser"]["controlUiReachableModuleCount"] == len(
-        process_contract["prune"]["browser"]["controlUiReachableAssets"]
+        process_contract["prune"]["browser"]["controlUiReachableModuleAssets"]
     )
+    assert process_contract["prune"]["browser"]["controlUiServedAssetCount"] == len(
+        process_contract["prune"]["browser"]["controlUiServedAssets"]
+    )
+    assert process_contract["prune"]["browser"]["controlUiServedAssetCount"] > (
+        process_contract["prune"]["browser"]["controlUiReachableModuleCount"]
+    )
+    root_assets = [
+        asset
+        for asset in process_contract["prune"]["browser"]["controlUiServedAssets"]
+        if asset["httpPath"] == "/"
+    ]
+    assert len(root_assets) == 1
+    assert root_assets[0]["httpTransform"] == (
+        'insert data-openclaw-terminal-enabled="false" after <html'
+    )
+    assert root_assets[0]["servedSize"] > root_assets[0]["size"]
+    assert root_assets[0]["servedSha256"] != root_assets[0]["sha256"]
+    assert all(
+        len(asset["sha256"]) == 64
+        and len(asset["servedSha256"]) == 64
+        and asset["servedSize"] >= 0
+        for asset in process_contract["prune"]["browser"]["controlUiServedAssets"]
+    )
+    control_ui_http_paths = {
+        asset["httpPath"]
+        for asset in process_contract["prune"]["browser"]["controlUiServedAssets"]
+    }
+    assert control_ui_http_paths >= {
+        "/",
+        "/sw.js",
+        "/manifest.webmanifest",
+        "/favicon.ico",
+        "/favicon.svg",
+        "/favicon-32.png",
+        "/apple-touch-icon.png",
+        "/provider-icons/ProviderIcon-bedrock.svg",
+    }
+    assert any(path.startswith("/assets/") and path.endswith(".css") for path in control_ui_http_paths)
+    assert any(path.startswith("/provider-icons/") and path.endswith(".svg") for path in control_ui_http_paths)
     preserved_control_ui_browser_chunks = process_contract["prune"]["browser"][
         "preservedControlUiBrowserChunks"
     ]
@@ -472,6 +712,43 @@ console.log(JSON.stringify(result));
         for candidate in preserved_control_ui_browser_chunks
     )
     assert process_contract["prune"]["packages"]["residualForbidden"] == 0
+    assert (
+        process_contract["prune"]["packages"][
+            "closureComputedBeforeMetadataRewrite"
+        ]
+        is True
+    )
+    assert process_contract["prune"]["packages"]["prePruneProductionClosure"]
+    assert (
+        process_contract["prune"]["packages"][
+            "jitiExtensionSourceTransformFacade"
+        ]["sourceTransformLoaderFailClosed"]
+        is True
+    )
+    assert (
+        process_contract["prune"]["packages"]["typeScriptCodeModeCompilerFacade"][
+            "compilerLoaderFailClosed"
+        ]
+        is True
+    )
+    assert process_contract["prune"]["packages"][
+        "typeScriptCodeModeCompilerFacade"
+    ]["advertisedLanguages"] == ["javascript"]
+    assert (
+        process_contract["prune"]["pluginOperations"][
+            "closureComputedBeforeMetadataRewrite"
+        ]
+        is True
+    )
+    assert (
+        process_contract["prune"]["pluginOperations"]["postPruneClosureExactMatch"]
+        is True
+    )
+    assert process_contract["prune"]["pluginOperations"]["unresolvedImports"] == []
+    assert (
+        process_contract["prune"]["pluginOperations"]["unresolvedComputedImports"]
+        == []
+    )
     assert process_contract["prune"]["developmentPayload"]["residualPathCount"] == 0
 
     missing_secrets = _run(
@@ -519,6 +796,19 @@ console.log(JSON.stringify(result));
     assert "Manage OpenClaw's dedicated browser" not in browser_output
     assert "Playwright" not in browser_output
 
+    generic_cli_help = _run(
+        [
+            *_isolated_run_args(image),
+            "/app/openclaw.mjs",
+            "--help",
+        ],
+        check=False,
+    )
+    generic_cli_output = f"{generic_cli_help.stdout}\n{generic_cli_help.stderr}"
+    assert generic_cli_help.returncode == 0, generic_cli_output
+    assert "OpenClaw" in generic_cli_output
+    assert "Manage OpenClaw's dedicated browser" not in generic_cli_output
+
     browser_bridge_probe = r"""
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -549,6 +839,10 @@ const implementationSignals = {
   chromeMcp: /chrome-mcp/iu.test(source),
   cdpControl: /cdp-target|cdp\.helpers|CDPSession/iu.test(source)
 };
+const genericChildProcessPrimitives = (
+  source.includes('from "node:child_process"') &&
+  /\bspawn\s*\(/u.test(source)
+);
 const namespace = await import(pathToFileURL(sharedPath).href);
 if (typeof namespace[alias] !== "function") {
   throw new Error("startBrowserBridgeServer export is not callable");
@@ -567,6 +861,7 @@ fs.writeFileSync(1, JSON.stringify({
   sharedPath,
   exportAlias: alias,
   implementationSignals,
+  genericChildProcessPrimitives,
   ...result
 }) + "\n");
 """
@@ -596,9 +891,11 @@ fs.writeFileSync(1, JSON.stringify({
     )
     browser_bridge_contract = json.loads(browser_bridge_result.stdout)
     assert not any(browser_bridge_contract["implementationSignals"].values())
+    assert browser_bridge_contract["genericChildProcessPrimitives"] is True
     assert browser_bridge_contract["failClosed"] is True
     assert "public surface access blocked" in browser_bridge_contract["error"]
     assert "no bundled plugin manifest found for browser" in browser_bridge_contract["error"]
+    plugin_operation_contract = _plugin_operation_contract(image)
     gateway_lifecycle = _gateway_lifecycle_contract(image)
 
     return {
@@ -616,10 +913,15 @@ fs.writeFileSync(1, JSON.stringify({
             "requiredSecretsFailClosed": True,
             "childExitCodePropagation": True,
             "browserCliUnavailable": True,
+            "genericOpenClawCliRetained": True,
             "browserBridgeFacadeFailClosed": True,
+            "browserNamedSharedPayloadHonestlyReported": True,
             "browserReachabilityReport": True,
             "jitiUnavailable": True,
             "developmentPayloadAbsent": True,
+            "pluginOperationModulesLoadWithStubbedProviders": (
+                plugin_operation_contract["passed"] is True
+            ),
             "gatewayIsPid1": gateway_lifecycle["pid1Children"] == "",
             "gatewayReady": gateway_lifecycle["ready"],
             "gatewaySigtermExitZero": gateway_lifecycle["exitCode"] == 0,
@@ -627,12 +929,19 @@ fs.writeFileSync(1, JSON.stringify({
             "controlUiAssetClosureServed": (
                 gateway_lifecycle["controlUi"]["missingOrMismatchedAssets"] == 0
             ),
+            "controlUiDynamicRegistrationAuthenticatedAndHashed": (
+                gateway_lifecycle["controlUi"]["dynamicRegistrations"][0][
+                    "authenticatedStatus"
+                ]
+                == 200
+            ),
             "controlUiRuntimeSecretLeakAbsent": (
                 gateway_lifecycle["controlUi"]["runtimeSecretLeak"] is False
             ),
         },
         "process": process_contract,
         "browserBridge": browser_bridge_contract,
+        "pluginOperations": plugin_operation_contract,
         "gatewayLifecycle": gateway_lifecycle,
     }
 

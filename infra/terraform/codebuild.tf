@@ -53,22 +53,12 @@ data "aws_iam_policy_document" "codebuild" {
       "ecr:GetDownloadUrlForLayer",
       "ecr:DescribeImages", # buildspec post_build の digest 取得（無いと tee が空のまま SUCCEEDED）
     ]
-    resources = [aws_ecr_repository.mcp.arn, aws_ecr_repository.openclaw.arn]
+    resources = [aws_ecr_repository.mcp.arn]
   }
   statement {
     sid       = "S3Source"
     actions   = ["s3:GetObject", "s3:GetObjectVersion"]
     resources = ["${aws_s3_bucket.raw_files.arn}/codebuild/*"]
-  }
-  statement {
-    sid       = "OpenClawEvidenceWrite"
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.raw_files.arn}/codebuild/openclaw-evidence/*"]
-  }
-  statement {
-    sid       = "OpenClawEvidenceBucketMetadata"
-    actions   = ["s3:GetBucketAcl", "s3:GetBucketLocation"]
-    resources = [aws_s3_bucket.raw_files.arn]
   }
 }
 
@@ -157,13 +147,53 @@ output "codebuild_project" {
   value = aws_codebuild_project.image.name
 }
 
-# OpenClaw is deliberately separate from the legacy MCP inline buildspec. It
-# consumes the provenance-bound buildspec, emits registry attestations, and
-# stores the release manifest plus evidence as a versioned CodeBuild artifact.
+# OpenClaw builder is deliberately unable to authenticate to or write ECR.
+# Canonical promotion belongs to the out-of-process shared trusted-release
+# worker. The source ZIP therefore cannot bypass gates by invoking PutImage
+# directly, even if it contains hostile repository scripts.
+resource "aws_iam_role" "codebuild_openclaw" {
+  name               = "${var.project_name}-${var.environment}-codebuild-openclaw"
+  assume_role_policy = data.aws_iam_policy_document.codebuild_assume.json
+}
+
+data "aws_iam_policy_document" "codebuild_openclaw" {
+  statement {
+    sid     = "Logs"
+    actions = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = [
+      "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.cb.account_id}:log-group:/aws/codebuild/${var.project_name}-${var.environment}-openclaw-image-builder",
+      "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.cb.account_id}:log-group:/aws/codebuild/${var.project_name}-${var.environment}-openclaw-image-builder:*",
+    ]
+  }
+  statement {
+    sid       = "TrustedSourceTransportRead"
+    actions   = ["s3:GetObject", "s3:GetObjectVersion"]
+    resources = ["${aws_s3_bucket.raw_files.arn}/codebuild/source.zip"]
+  }
+  statement {
+    sid       = "EvidenceArtifactWrite"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.raw_files.arn}/codebuild/openclaw-evidence/*"]
+  }
+  statement {
+    sid       = "EvidenceBucketMetadata"
+    actions   = ["s3:GetBucketAcl", "s3:GetBucketLocation"]
+    resources = [aws_s3_bucket.raw_files.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "codebuild_openclaw" {
+  name   = "${var.project_name}-${var.environment}-codebuild-openclaw"
+  role   = aws_iam_role.codebuild_openclaw.id
+  policy = data.aws_iam_policy_document.codebuild_openclaw.json
+}
+
+# The project consumes a Terraform-embedded buildspec. It must never execute a
+# buildspec supplied by the untrusted S3 ZIP before source verification.
 resource "aws_codebuild_project" "openclaw_image" {
   name         = "${var.project_name}-${var.environment}-openclaw-image-builder"
-  description  = "Build, attest, verify, and publish the OpenClaw linux/arm64 release image"
-  service_role = aws_iam_role.codebuild.arn
+  description  = "Verify trusted source, locally gate, and request trusted promotion of OpenClaw linux/arm64"
+  service_role = aws_iam_role.codebuild_openclaw.arn
 
   artifacts {
     type                   = "S3"
@@ -182,30 +212,17 @@ resource "aws_codebuild_project" "openclaw_image" {
     type            = "ARM_CONTAINER"
     privileged_mode = true
 
-    environment_variable {
-      name  = "OC_REPO"
-      value = aws_ecr_repository.openclaw.repository_url
-    }
-    # All three source values are mandatory start-build overrides. "unknown"
-    # is intentionally rejected by buildspec.openclaw.yml.
-    environment_variable {
-      name  = "SOURCE_COMMIT"
-      value = "unknown"
-    }
-    environment_variable {
-      name  = "SOURCE_BRANCH"
-      value = "unknown"
-    }
-    environment_variable {
-      name  = "SOURCE_ARCHIVE_SHA256"
-      value = "unknown"
-    }
+    # No start-build override may select source identity or repository. The
+    # out-of-source /opt/teamagent/trusted-release CLI supplies source claims
+    # from a KMS-signed publisher statement and owns quarantine/promotion.
+    # Until the shared worker provides that executable in the build image, the
+    # buildspec fails before executing any file from the S3 transport ZIP.
   }
 
   source {
     type      = "S3"
     location  = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"
-    buildspec = "infra/codebuild/buildspec.openclaw.yml"
+    buildspec = file("${path.module}/../codebuild/buildspec.openclaw.yml")
   }
 
   logs_config {

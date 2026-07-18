@@ -1,201 +1,219 @@
-# OpenClaw production release and deployment Runbook
+# OpenClaw trusted release and deployment Runbook
 
-This is the authoritative OpenClaw path. Production image publication uses the
-dedicated provenance-bound CodeBuild project. Deployment of the existing ECS
-service uses `infra/terraform/apply_openclaw.sh`. Do not publish with ad-hoc
-Buildx, Compose, or the legacy MCP CodeBuild project, and do not update the
-existing OpenClaw service through Terraform.
+This is the only supported OpenClaw production path. It deliberately fails
+closed while the separately owned trusted source/promotion/receipt framework
+is unavailable. Do not substitute an ad-hoc Buildx push, arbitrary S3 ZIP
+metadata, a local manifest checksum, direct ECR tagging, direct ECS update, or
+Terraform target apply.
 
-AWS commands below are operator actions. Review their output and account/region
-before execution. Never paste secret values into chat, logs, or Git.
+Normal Terraform operation keeps `openclaw_image=""`; the existing service is
+updated only through the receipt-gated helper.
 
-## 1. Preconditions
+All account, region, repository, cluster, service, task family, IAM role, app
+artifact, and canary identities are fixed in
+`infra/openclaw/trusted-release-contract.json`; operator environment variables
+cannot retarget them.
 
-- Source is an exact clean commit on the reviewed repository.
-- The versioned S3 source object carries metadata `git-commit` and
-  `source-sha256`; the latter is the SHA-256 of that exact ZIP object.
-- ECR and the dedicated
-  `teamagent-<env>-openclaw-image-builder` CodeBuild project exist.
-- The existing ECS task has the four Secrets Manager bindings:
-  `TEAMAGENT_MCP_BEARER`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and
-  `OPENCLAW_GATEWAY_TOKEN`.
-- Bedrock access comes from the OpenClaw task role. Do not inject static AWS
-  access keys.
+## 1. Required trust boundary
 
-## 2. Local pre-publication verification
+The shared framework must install both of these immutable, non-symlink files:
 
-This builds and tests ARM64 locally but does not push:
+```text
+/opt/teamagent/trusted-release/bin/trusted-release
+/opt/teamagent/trusted-release/contracts/teamagent-openclaw-production-v1.json
+```
+
+The installed contract must be byte-identical to the repository copy. The
+shared framework, not the OpenClaw builder, owns:
+
+- KMS verification of a trusted publisher statement;
+- exact Git commit archive/build-context binding;
+- quarantine publication and immutable canonical promotion;
+- image, provenance, SBOM, evidence-index signatures and exact referrer set;
+- fresh, one-time deployment-receipt issuance and atomic consumption;
+- durable previous-task and signed rollout-result records.
+
+The S3 source ZIP and all object metadata are untrusted transport. `.git`
+absence is not an exception. If the shared verifier, contract, publisher
+statement, or exact commit proof is missing, CodeBuild must stop before
+executing a repository script.
+
+## 2. Local ARM64 verification
+
+Run only from a clean attached commit:
 
 ```sh
 test -z "$(git status --porcelain --untracked-files=all)"
-SOURCE_COMMIT=$(git rev-parse HEAD)
-OC_TAG="git-${SOURCE_COMMIT:0:12}"
+COMMIT=$(git rev-parse HEAD)
+SHORT=${COMMIT:0:12}
 bash infra/openclaw/build-image.sh \
-  --image "teamagent-openclaw:$OC_TAG" \
-  --manifest "/tmp/openclaw-$OC_TAG-manifest.json" \
-  --evidence-dir "/tmp/openclaw-$OC_TAG-evidence"
-(cd /tmp && sha256sum -c "openclaw-$OC_TAG-manifest.json.sha256")
+  --image "teamagent-openclaw:git-$SHORT" \
+  --manifest "/tmp/openclaw-$SHORT-manifest.json" \
+  --evidence-dir "/tmp/openclaw-$SHORT-evidence"
+(cd /tmp && sha256sum -c "openclaw-$SHORT-manifest.json.sha256")
 ```
 
-The local manifest must say `buildAttestations.registryPublished=false`; it is
-test evidence and is deliberately not deployable.
-
-## 3. Production build and registry attestation
-
-Start only the dedicated OpenClaw CodeBuild project. Supply the exact S3 object
-version and override all three source identity values:
+The local manifest must satisfy:
 
 ```sh
-R=ap-northeast-1
-PROJECT=teamagent-dev-openclaw-image-builder
-SOURCE_COMMIT=<40-lowercase-hex>
-SOURCE_BRANCH=<reviewed-branch>
-SOURCE_ARCHIVE_SHA256=<sha256-of-versioned-source.zip>
-SOURCE_VERSION=<s3-object-version-id>
-
-BUILD_ID=$(aws codebuild start-build \
-  --region "$R" \
-  --project-name "$PROJECT" \
-  --source-version "$SOURCE_VERSION" \
-  --environment-variables-override \
-    "name=SOURCE_COMMIT,value=$SOURCE_COMMIT,type=PLAINTEXT" \
-    "name=SOURCE_BRANCH,value=$SOURCE_BRANCH,type=PLAINTEXT" \
-    "name=SOURCE_ARCHIVE_SHA256,value=$SOURCE_ARCHIVE_SHA256,type=PLAINTEXT" \
-  --query 'build.id' --output text)
-aws codebuild batch-get-builds --region "$R" --ids "$BUILD_ID"
-```
-
-The build must finish `SUCCEEDED`. Download its
-`openclaw-$SOURCE_COMMIT` artifact from the returned S3 artifact location and
-extract it locally. Let `OC_MANIFEST` point at
-`openclaw-build-manifest.json` in that bundle.
-
-Validate before deployment:
-
-```sh
-(cd "$(dirname "$OC_MANIFEST")" && \
-  sha256sum -c "$(basename "$OC_MANIFEST").sha256")
-jq -e --arg commit "$SOURCE_COMMIT" '
-  .schemaVersion == 3 and
-  .source.uri == "https://github.com/noirelumiere00/teamagent" and
-  .source.commit == $commit and
+jq -e '
+  .schemaVersion == 4 and
+  .deploymentCredential == false and
+  .promotion.status == "LOCAL_GATES_PASSED" and
+  .promotion.registryPublished == false and
+  .promotion.canonicalTagPublished == false and
   .runtime.platform == "linux/arm64" and
-  .runtime.uid == 65532 and .runtime.gid == 65532 and
   .runtime.actualImageContractPassed == true and
-  .runtime.browserReachabilityValidated == true and
-  .runtime.controlUiImportClosureValidated == true and
-  .runtime.controlUiHttpAssetClosureValidated == true and
-  .runtime.forbiddenPackageOrPluginArtifacts == 0 and
-  .runtime.developmentPayloadArtifacts == 0 and
-  .scan.critical == 0 and .scan.high == 0 and .scan.secrets == 0 and
+  .runtime.controlUiFullAssetClosureValidated == true and
+  .materials.exactSetMatch == true and
+  .sbom.wholeFilesystemExactMatch == true and
   .sbom.physicalNpmMultisetExactMatch == true and
-  .sbom.bomRefIntegrity == true and
-  .buildAttestations.registryPublished == true and
-  .buildAttestations.subjectValidated == true and
-  .buildAttestations.sourceValidated == true and
-  .buildAttestations.builderValidated == true
-' "$OC_MANIFEST"
+  .scan.exactSingleLinuxArm64Subject == true and
+  .scan.critical == 0 and .scan.high == 0 and .scan.secrets == 0 and
+  .scan.allKnownLiveFindingsAbsent == true and
+  (.scan.knownLiveFindingIdsAbsent | length) == 8
+' "/tmp/openclaw-$SHORT-manifest.json"
 ```
 
-The evidence bundle includes the actual-image contract, physical runtime
-inventory, CycloneDX SBOM and npm multiset, vulnerability/secret scans,
-Slack/Bedrock plugin inventory, gateway log, Control UI static-import and
-HTTP asset-closure results, and parsed registry
-provenance/SPDX documents. Every manifest evidence path is relative to the
-manifest directory and remains valid after artifact extraction. Verify every
-recorded SHA-256 before archiving:
+The latest observed live ARM64 image is C8/H22 and contains OpenSSL
+`CVE-2026-34182`, Perl `CVE-2026-12087`/`13221`/`57433`, Python 3.11
+`CVE-2026-6100`, GnuTLS `CVE-2026-33845`/`42010`, and libssh2
+`CVE-2026-55200`. The candidate is blocked unless its exact single ARM64
+subject is C0/H0 and all eight IDs are absent.
+
+The evidence directory includes merged-rootfs inventory, whole-filesystem
+CycloneDX SBOM and equivalence result, npm multiset, exact materials,
+vulnerability/secret scans, runtime inventory, actual-image contract,
+UI 142-file source/HTTP closure, plugin operation smoke, gateway lifecycle,
+and an index hashing every evidence file.
+
+## 3. Trusted source and canonical promotion
+
+The trusted source publisher supplies a KMS-signed statement at the fixed
+archive path `.trusted-release/source-statement.json`. Operators must not
+construct or override source commit/branch/archive claims in `start-build`.
+The OpenClaw CodeBuild project uses the Terraform-embedded buildspec and a role
+that can read the fixed transport object and write evidence, but cannot call
+ECR authentication/write APIs or assume a promoter role.
+
+The shared promoter performs this sequence:
+
+1. Reverify publisher signature, commit archive, source root, build identity,
+   and exact build context.
+2. Build/test/scan locally; no canonical tag exists yet.
+3. Transfer the exact locally gated subject to quarantine.
+4. Reverify the exact material set, whole-filesystem SBOM equivalence, all
+   evidence hashes, C0/H0/S0, and all eight live-CVE absences.
+5. Sign the image, provenance, whole-filesystem SBOM, and evidence index.
+6. Atomically promote the exact subject and exact referrer set to immutable
+   `git-$SHA`.
+
+Retries must be idempotent and may not delete an approved release. A subject,
+source, builder, material, referrer, signature, or scan mismatch is NO-GO.
+
+The resulting trusted promotion record must identify one `linux/arm64`
+manifest and include verified digests for the subject, provenance,
+whole-filesystem SBOM, image signature, evidence-index signature, and exact
+referrer set. Builder-produced booleans are not trust evidence.
+
+## 4. Trusted deployment receipt
+
+A release manifest is not deployable. Ask the shared framework to issue a
+KMS-signed deployment receipt no more than 900 seconds before use. The receipt
+must be one-time and bind:
+
+- fixed account/repository/cluster/service/family;
+- exact immutable image manifest digest and single ARM64 platform;
+- source commit/archive and CodeBuild identity;
+- whole-filesystem SBOM, provenance, image signature, evidence index, and
+  referrer-set digests;
+- C0/H0/S0 and all eight live-CVE absences;
+- Connect Web `codebuild/connect-web-app.html` S3 VersionId plus
+  `appHtmlSha256`, `manifestSha256`, `buildInputsSha256`, and `dataSha256`;
+- current and previous task-definition ARN, canonical current-task hash,
+  exact rendered registration-payload hash, deployment intent/plan digest,
+  circuit-breaker rollback intent, and post-stable canary intent.
+
+The four app anchors preserve the corrected current application provenance;
+an OpenClaw rollout cannot silently select a different app artifact.
+
+## 5. Render without AWS mutation
+
+`--render-only` still requires the shared verifier and a fresh, valid,
+unconsumed receipt:
 
 ```sh
-MANIFEST_DIR=$(cd -- "$(dirname -- "$OC_MANIFEST")" && pwd -P)
-jq -r '
-  [
-    .evidence[]?,
-    {path:.sbom.path, sha256:.sbom.sha256},
-    .sbom.npmInventoryEvidence,
-    .scan.vulnerabilityEvidence,
-    .scan.secretEvidence,
-    .buildAttestations.provenanceEvidence?,
-    .buildAttestations.sbomEvidence?
-  ] |
-  .[] | select(. != null) | "\(.sha256)  \(.path)"
-' "$OC_MANIFEST" | (cd "$MANIFEST_DIR" && sha256sum -c -)
-```
-
-## 4. Deploy the existing ECS service
-
-OpenClaw is CLI-managed because a previous count-gated Terraform apply deleted
-the service. Keep `openclaw_image=""` in normal Terraform operation.
-
-First render the exact registration payload without AWS mutation:
-
-```sh
-aws ecs describe-task-definition \
-  --region ap-northeast-1 \
-  --task-definition teamagent-dev-openclaw \
-  --query taskDefinition --output json > /tmp/openclaw-current-task.json
 bash infra/terraform/apply_openclaw.sh \
-  --render-only /tmp/openclaw-current-task.json "$OC_MANIFEST" \
-  | jq '{family,runtimePlatform,volumes,containerDefinitions}'
+  --render-only /path/to/current-task-definition.json \
+  /path/to/trusted-deployment-receipt.json \
+  > /tmp/openclaw-rendered-task.json
 ```
 
-Confirm the `openclaw` container has:
+The current-task fixture must come from the exact fixed family represented in
+the receipt. Review that the rendered payload has exactly:
 
-- the manifest's ECR `@sha256:` runtime reference;
-- `readonlyRootFilesystem=true`, `user="65532:65532"`,
-  `privileged=false`, and `linuxParameters.capabilities.drop=["ALL"]`;
-- only `/tmp` mounted from `openclaw-tmp` as writable;
-- no task `entryPoint` or `command` override;
-- `/readyz` health check and `stopTimeout=30`;
-- the canonical gateway remains PID 1 and exits 0 after clean SIGTERM;
-- the same IAM roles, Secrets Manager bindings, logging, AWS region, and
-  `SLACK_DM_ALLOWLIST` as the current revision.
+- one container named `openclaw`, no sidecars;
+- one `openclaw-tmp` volume mounted writable only at `/tmp`;
+- no other volume/mount, including writable `/data`;
+- ARM64/Fargate/awsvpc and the fixed task/execution roles;
+- immutable ECR digest in the fixed OpenClaw repository;
+- UID/GID 65532, read-only rootfs, nonprivileged, capability drop `ALL`;
+- canonical image ENTRYPOINT/CMD, `/readyz`, stop timeout, logs, environment,
+  and four Secrets Manager bindings.
 
-Then perform the rolling update:
+Any extra field or retargeted family/role/repository/environment is rejected.
+
+## 6. Deploy and automatic rollback
+
+Deployment is:
 
 ```sh
-bash infra/terraform/apply_openclaw.sh "$OC_MANIFEST"
+bash infra/terraform/apply_openclaw.sh \
+  /path/to/trusted-deployment-receipt.json
 ```
 
-The helper registers one hardened revision, updates the existing service, and
-waits for `services-stable`. It does not create a service and does not run
-Terraform.
+The helper:
 
-## 5. Runtime verification
+1. Re-reads the fixed service/current task and verifies the signed plan.
+2. Registers the exact reviewed task payload.
+3. Re-reads the service immediately before mutation.
+4. Atomically consumes the receipt while durably recording previous/new task
+   ARNs.
+5. Calls `update-service` with ECS circuit breaker and rollback enabled.
+6. Waits for `services-stable`.
+7. Runs a one-off task using the exact new revision and service network.
+8. Proves ECS task-role Bedrock `Converse`, exact MCP `tools/list`, and the
+   reviewed 28-entry maximum scope.
+9. Proves Slack connection and an exact canary mention/reply, then cleans the
+   canary message.
+10. Requires the shared framework to sign and durably store the rollout
+    result.
 
-Inspect the deployed task definition and task:
+On update, stability, one-off task, Slack, Bedrock, MCP, or durable-record
+failure, the helper emits `OpenClawRolloutGateFailure`, restores the durable
+previous task ARN, waits stable, and exits nonzero.
 
-```sh
-aws ecs describe-services \
-  --region ap-northeast-1 \
-  --cluster teamagent-dev \
-  --services teamagent-dev-openclaw
-aws ecs describe-task-definition \
-  --region ap-northeast-1 \
-  --task-definition teamagent-dev-openclaw
+Do not manually bypass receipt consumption or the automatic gates. A consumed
+receipt cannot be replayed.
+
+## 7. Alarms and health
+
+The OpenClaw startup metric filter matches both structured events:
+
+```text
+openclaw_config_invariant_violation
+openclaw_entrypoint_error
 ```
 
-Required observations:
+The startup-failure alarm and rollout-gate-failure alarm must be active.
+ECS uses `/readyz`; MCP uses `/healthz`. Gateway health alone is not rollout
+success.
 
-- ECS health is green on OpenClaw `/readyz`; MCP separately uses `/healthz`.
-- CloudWatch shows the canonical gateway listening on loopback `18789`.
-- Slack Socket Mode connects and an actual mention receives a reply.
-- The Slack and Amazon Bedrock plugins are loaded; browser is not loaded.
-- Bedrock requests use the task role.
-- Task-definition hardening exactly matches section 4.
+## 8. Tool scope
 
-Local `--network none` tests prove plugin loading and gateway lifecycle but
-cannot prove Slack DNS/authentication. Slack connected plus an actual mention
-is therefore a production gate, not merely an informational check.
-
-## 6. Effective MCP tool scope
-
-The scope authority is
-`infra/openclaw/effective-tool-scope.json`, checked against
-`openclaw.config.json5` by tests. The maximum OpenClaw allowlist is 28 tools,
-but the effective set is its intersection with tools registered by the current
-MCP task.
-
-Default Terraform enables these twelve:
+`infra/openclaw/effective-tool-scope.json` is the machine-readable authority.
+The reviewed OpenClaw include list has 28 entries; the default Terraform MCP
+task registers 12:
 
 ```text
 search, clientkarte, proposal_draft, proposal_review,
@@ -203,47 +221,23 @@ mail_summary, mail_followup, mail_to_internal_context,
 mail_reply, mail_draft, morning_digest, oauth_connect, knowledge_deliver
 ```
 
-This is **not read-only**:
+The exact deployed `tools/list` must equal the enabled set. This is **not read-only**:
+Gmail draft creation and Slack file delivery are enabled, and
+optional gates can add calendar writes, jobs, reports, and S3 writes.
 
-- `mail_reply` and `mail_draft` create Gmail drafts but never send;
-- `knowledge_deliver` reads Drive and delivers a file through Slack;
-- optional `calendar_event` and `schedule_propose` write calendar/draft state;
-- optional scrape/research/acquire tools can submit jobs and write reports/S3.
-
-`video_approval`, `operation_log`, and `knowledge_search_url` are in the
-OpenClaw allowlist but are not wired by the authoritative Terraform task and
-therefore are disabled. Before release, compare live MCP `tools/list` with the
-expected enabled entries from the JSON inventory; any extra or missing tool is
-a deployment NO-GO.
-
-## 7. Rollback
-
-Rollback to the prior known-good task definition revision:
-
-```sh
-aws ecs update-service \
-  --region ap-northeast-1 \
-  --cluster teamagent-dev \
-  --service teamagent-dev-openclaw \
-  --task-definition <previous-known-good-arn>
-aws ecs wait services-stable \
-  --region ap-northeast-1 \
-  --cluster teamagent-dev \
-  --services teamagent-dev-openclaw
-```
-
-Stopping the pilot entirely remains available with `--desired-count 0`.
-
-## 8. Explicit residual risks
+## 9. Residual risks and production gate
 
 - Fargate does not support Docker `no-new-privileges`; production does not
-  claim it. Nonroot UID, all-capability drop, read-only rootfs, IAM, and network
-  isolation are the compensating controls.
-- Fargate does not support task `tmpfs`; `/tmp` is a writable, task-scoped
-  empty volume. It is ephemeral, may contain transient state, and must not
-  contain long-lived secrets.
-- BuildKit provenance/SBOM attestations are parsed and subject-bound but are
-  not cryptographic image signatures. ECR IAM and immutable digests remain in
-  the trust boundary.
-- Local offline tests cannot validate Slack connectivity or a real Bedrock
-  invocation; both are production smoke gates.
+  claim it. Local tests do.
+- Fargate has no task `tmpfs`; `/tmp` is a task-scoped ephemeral volume.
+- Browser-named shared payload and generic child-process primitives remain,
+  although executable browser control paths are removed and the bridge facade
+  fails closed.
+- The shared trusted-release implementation is outside this change and must
+  receive its own review.
+- Local provider-stubbed tests cannot establish real ECR referrers, Fargate
+  behavior, Slack auth/reply, Bedrock task-role access, or live MCP scope.
+
+Production is NO-GO until the shared framework is present and independently
+reviewed, the final OpenClaw commit is independently reviewed, and the real
+CodeBuild/ECR/Fargate/Slack/Bedrock/tools-list gates all pass.

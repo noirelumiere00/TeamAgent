@@ -47,8 +47,7 @@
       "tarball": "https://registry.npmjs.org/@openclaw/slack/-/slack-2026.7.1.tgz",
       "integrity": "sha512-dwVGEVCmoTQrOIeZaSCIOPg8pT7hB883QQEXdp9EZUDzTGuvSc+KxH2iERSOV/59hROQctYdcobGn/vdB1H4XA==",
       "sha256": "d6ae8745867d812560e917707e633c8b66b36f7270124a8cca9602c6dc98ef46",
-      "shrinkwrapSha256": "79f3179b6163c1878bef8820673419a0547027c536666e482b02bd8ae5a7980c",
-      "gitHead": "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4"
+      "shrinkwrapSha256": "79f3179b6163c1878bef8820673419a0547027c536666e482b02bd8ae5a7980c"
     },
     {
       "id": "amazon-bedrock",
@@ -58,8 +57,7 @@
       "tarball": "https://registry.npmjs.org/@openclaw/amazon-bedrock-provider/-/amazon-bedrock-provider-2026.7.1.tgz",
       "integrity": "sha512-Y7x24MlFCATCVI6C043ikZ/HC8iTvZ3vDd18bhYwlsXUphGRtcOzQALgOQDhd9nYV1s8konjG0CoyB5v+RA9hw==",
       "sha256": "4b34630d0a0f715fc9e9cf17166a701c16318abf4b8d04eac1be6455bc917691",
-      "shrinkwrapSha256": "1580dc988ec8ef3e430a166274062ddde547a75f9e338d00905021ebb283f31e",
-      "gitHead": "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4"
+      "shrinkwrapSha256": "1580dc988ec8ef3e430a166274062ddde547a75f9e338d00905021ebb283f31e"
     }
   ]
 }

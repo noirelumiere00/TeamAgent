@@ -6,9 +6,12 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
 DOCKERFILE="$REPO_ROOT/infra/docker/Dockerfile.openclaw"
 LOCK_FILE="$REPO_ROOT/infra/openclaw/plugins-lock.json"
+LOCAL_TRUST_CONTRACT="$REPO_ROOT/infra/openclaw/trusted-release-contract.json"
+SHARED_TRUST_CONTRACT=/opt/teamagent/trusted-release/contracts/teamagent-openclaw-production-v1.json
+TRUSTED_RELEASE_CLI=/opt/teamagent/trusted-release/bin/trusted-release
 
 usage() {
-  echo "usage: $0 --image <repository:git-COMMIT12> [--push] [--manifest <path>] [--evidence-dir <path>]" >&2
+  echo "usage: $0 --image <local-image:tag> [--trusted-source <verified-source.json>] [--manifest <path>] [--evidence-dir <path>]" >&2
 }
 
 fail() {
@@ -17,7 +20,7 @@ fail() {
 }
 
 IMAGE_REF=""
-PUSH=0
+TRUSTED_SOURCE_PATH=""
 MANIFEST_PATH=/tmp/openclaw-build-manifest.json
 EVIDENCE_DIR=""
 while (($#)); do
@@ -27,9 +30,10 @@ while (($#)); do
       IMAGE_REF=$2
       shift 2
       ;;
-    --push)
-      PUSH=1
-      shift
+    --trusted-source)
+      (($# >= 2)) || { usage; exit 2; }
+      TRUSTED_SOURCE_PATH=$2
+      shift 2
       ;;
     --manifest)
       (($# >= 2)) || { usage; exit 2; }
@@ -62,7 +66,17 @@ image_repository=${IMAGE_REF%:*}
 EVIDENCE_DIR=${EVIDENCE_DIR:-"${MANIFEST_PATH%.json}.evidence"}
 [[ "$EVIDENCE_DIR" != "$MANIFEST_PATH" ]] || fail "evidence directory must differ from manifest path"
 
-for command in docker jq python3 sha256sum trivy; do
+tmp_dir=$(mktemp -d /tmp/openclaw-build.XXXXXX)
+gateway_container=""
+export_container=""
+cleanup() {
+  if [[ -n "$gateway_container" ]]; then docker rm -f "$gateway_container" >/dev/null 2>&1 || true; fi
+  if [[ -n "$export_container" ]]; then docker rm -f "$export_container" >/dev/null 2>&1 || true; fi
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
+
+for command in cmp docker jq python3 sha256sum trivy; do
   command -v "$command" >/dev/null || fail "required command not found: $command"
 done
 MANIFEST_PATH=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$MANIFEST_PATH")
@@ -88,27 +102,66 @@ TRIVY_VERSION=$(trivy --version --format json | jq -er '.Version')
 [[ "$TRIVY_VERSION" == "$EXPECTED_TRIVY_VERSION" ]] || \
   fail "Trivy $EXPECTED_TRIVY_VERSION is required (found $TRIVY_VERSION)"
 
-SOURCE_COMMIT=${SOURCE_COMMIT:-}
-SOURCE_BRANCH=${SOURCE_BRANCH:-}
-SOURCE_URI=${SOURCE_URI:-https://github.com/noirelumiere00/teamagent}
-SOURCE_ARCHIVE_SHA256=${SOURCE_ARCHIVE_SHA256:-}
-SOURCE_ARTIFACT_VERSION=${SOURCE_ARTIFACT_VERSION:-}
-ATTESTATION_BUILDER_ID=${ATTESTATION_BUILDER_ID:-}
+SOURCE_URI=https://github.com/noirelumiere00/teamagent
+SOURCE_COMMIT=""
+SOURCE_BRANCH=""
+SOURCE_ARCHIVE_SHA256=""
+SOURCE_ARTIFACT_VERSION=""
+BUILD_IDENTITY=local-git-worktree
 if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  [[ -z "$TRUSTED_SOURCE_PATH" ]] || \
+    fail "--trusted-source is only valid for the signed CodeBuild archive path"
   [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]] || \
     fail "refusing to build a dirty or untracked source tree"
-  actual_commit=$(git -C "$REPO_ROOT" rev-parse HEAD)
-  [[ -z "$SOURCE_COMMIT" || "$SOURCE_COMMIT" == "$actual_commit" ]] || \
-    fail "SOURCE_COMMIT does not match checked-out HEAD"
-  SOURCE_COMMIT=$actual_commit
-  if [[ -z "$SOURCE_BRANCH" ]]; then
-    SOURCE_BRANCH=$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD) || \
-      fail "SOURCE_BRANCH is required for detached HEAD"
-  fi
-  if [[ -z "$SOURCE_ARCHIVE_SHA256" ]]; then
-    SOURCE_ARCHIVE_SHA256=$(git -C "$REPO_ROOT" archive --format=tar HEAD | sha256sum | cut -d' ' -f1)
-  fi
-  SOURCE_ARTIFACT_VERSION=${SOURCE_ARTIFACT_VERSION:-git-$actual_commit}
+  SOURCE_COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD)
+  SOURCE_BRANCH=$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD) || \
+    fail "local evidence build requires an attached reviewed branch"
+  SOURCE_ARCHIVE_SHA256=$(git -C "$REPO_ROOT" archive --format=tar HEAD | sha256sum | cut -d' ' -f1)
+  SOURCE_ARTIFACT_VERSION=git-$SOURCE_COMMIT
+else
+  [[ -n "$TRUSTED_SOURCE_PATH" ]] || \
+    fail "a KMS-signed trusted source publisher statement is required when .git is absent"
+  [[ -f "$TRUSTED_SOURCE_PATH" && ! -L "$TRUSTED_SOURCE_PATH" ]] || \
+    fail "trusted-source statement is missing or a symlink"
+  [[ -x "$TRUSTED_RELEASE_CLI" && ! -L "$TRUSTED_RELEASE_CLI" ]] || \
+    fail "shared trusted-release source verifier is absent; archive build is blocked"
+  [[ -f "$SHARED_TRUST_CONTRACT" && ! -L "$SHARED_TRUST_CONTRACT" ]] || \
+    fail "shared trusted-release contract is absent; archive build is blocked"
+  cmp -s "$LOCAL_TRUST_CONTRACT" "$SHARED_TRUST_CONTRACT" || \
+    fail "repository integration contract differs from the shared trusted contract"
+  [[ -n "${CODEBUILD_BUILD_ARN:-}" && -n "${CODEBUILD_SOURCE_VERSION:-}" ]] || \
+    fail "trusted archive builds require the fixed CodeBuild identity and transport version"
+  [[ "$CODEBUILD_BUILD_ARN" == \
+    arn:aws:codebuild:ap-northeast-1:718959508629:build/teamagent-dev-openclaw-image-builder:* ]] || \
+    fail "unexpected CodeBuild build identity"
+  "$TRUSTED_RELEASE_CLI" verify-source \
+    --profile teamagent-openclaw-production-v1 \
+    --contract "$SHARED_TRUST_CONTRACT" \
+    --statement "$TRUSTED_SOURCE_PATH" \
+    --source-root "$REPO_ROOT" \
+    --transport-version "$CODEBUILD_SOURCE_VERSION" \
+    --build-arn "$CODEBUILD_BUILD_ARN" \
+    --output "$tmp_dir/trusted-source.json"
+  jq -e --arg builder "$CODEBUILD_BUILD_ARN" '
+    .schemaVersion == 1 and
+    .verified == true and
+    .kmsSignatureVerified == true and
+    .publisherTrusted == true and
+    .commitArchiveExact == true and
+    .transportMetadataTrusted == false and
+    .source.repositoryUri == "https://github.com/noirelumiere00/teamagent" and
+    (.source.commit | test("^[0-9a-f]{40}$")) and
+    (.source.branch | test("^[A-Za-z0-9._/-]+$")) and
+    (.source.archiveSha256 | test("^[0-9a-f]{64}$")) and
+    (.source.artifactVersion | type == "string" and length > 0) and
+    .buildIdentity == $builder
+  ' "$tmp_dir/trusted-source.json" >/dev/null || \
+    fail "shared source verifier returned an incomplete or retargeted assertion"
+  SOURCE_COMMIT=$(jq -er '.source.commit' "$tmp_dir/trusted-source.json")
+  SOURCE_BRANCH=$(jq -er '.source.branch' "$tmp_dir/trusted-source.json")
+  SOURCE_ARCHIVE_SHA256=$(jq -er '.source.archiveSha256' "$tmp_dir/trusted-source.json")
+  SOURCE_ARTIFACT_VERSION=$(jq -er '.source.artifactVersion' "$tmp_dir/trusted-source.json")
+  BUILD_IDENTITY=$CODEBUILD_BUILD_ARN
 fi
 
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_COMMIT must be a full lowercase Git SHA"
@@ -122,25 +175,58 @@ fi
 [[ "$SOURCE_ARTIFACT_VERSION" =~ ^[A-Za-z0-9._+/=-]+$ ]] || \
   fail "SOURCE_ARTIFACT_VERSION contains unsafe characters"
 expected_tag="git-${SOURCE_COMMIT:0:12}"
-[[ "$image_tag" == "$expected_tag" ]] || fail "image tag must be $expected_tag"
-if ((PUSH)); then
-  [[ "$ATTESTATION_BUILDER_ID" =~ ^https://[^[:space:]]+$ ]] || \
-    fail "ATTESTATION_BUILDER_ID must be an explicit https URI for --push"
+validation_tag_pattern="^git-${SOURCE_COMMIT:0:12}-build-[1-9][0-9]*$"
+if [[ "$image_tag" != "$expected_tag" && ! "$image_tag" =~ $validation_tag_pattern ]]; then
+  fail "local image tag must be $expected_tag or git-${SOURCE_COMMIT:0:12}-build-N"
 fi
 
 OPENCLAW_VERSION=$(jq -r '.openclaw.version' "$LOCK_FILE")
 OPENCLAW_ARM64_DIGEST=$(jq -r '.openclaw.linuxArm64Digest' "$LOCK_FILE")
 DISTROLESS_ARM64_DIGEST=$(jq -r '.runtime.linuxArm64Digest' "$LOCK_FILE")
 DOCKERFILE_FRONTEND_DIGEST=$(jq -r '.tooling.dockerfileFrontend.digest' "$LOCK_FILE")
-SBOM_ATTESTATION_GENERATOR=$(jq -r '.tooling.sbomGenerator | .image + "@" + .linuxArm64Digest' "$LOCK_FILE")
 PLUGINS_LOCK_SHA256=$(sha256sum "$LOCK_FILE" | cut -d' ' -f1)
 DOCKERFILE_SHA256=$(sha256sum "$DOCKERFILE" | cut -d' ' -f1)
-EXPECTED_MATERIAL_DIGESTS=$(jq -c '[
-  (.tooling.dockerfileFrontend.digest | sub("^sha256:"; "")),
-  (.runtime.linuxArm64Digest | sub("^sha256:"; "")),
-  (.openclaw.linuxArm64Digest | sub("^sha256:"; "")),
-  (.plugins[].sha256)
-] | unique | sort' "$LOCK_FILE")
+EXPECTED_MATERIALS=$(jq -c '
+  [
+    {
+      uri: (
+        "pkg:docker/docker/dockerfile@1.7?digest=" +
+        .tooling.dockerfileFrontend.digest +
+        "&platform=linux%2Farm64"
+      ),
+      sha256: (.tooling.dockerfileFrontend.digest | sub("^sha256:"; ""))
+    },
+    {
+      uri: (
+        "pkg:docker/docker/dockerfile@1.7?digest=" +
+        .tooling.dockerfileFrontend.digest
+      ),
+      sha256: (.tooling.dockerfileFrontend.digest | sub("^sha256:"; ""))
+    },
+    {
+      uri: (
+        "pkg:docker/gcr.io/distroless/nodejs24-debian13@nonroot?digest=" +
+        .runtime.linuxArm64Digest +
+        "&platform=linux%2Farm64"
+      ),
+      sha256: (.runtime.linuxArm64Digest | sub("^sha256:"; ""))
+    },
+    {
+      uri: (
+        "pkg:docker/ghcr.io/openclaw/openclaw@" +
+        .openclaw.version +
+        "?digest=" +
+        .openclaw.linuxArm64Digest +
+        "&platform=linux%2Farm64"
+      ),
+      sha256: (.openclaw.linuxArm64Digest | sub("^sha256:"; ""))
+    },
+    (
+      .plugins[] |
+      {uri:.tarball,sha256:.sha256}
+    )
+  ] | sort_by(.uri, .sha256)
+' "$LOCK_FILE")
 for pin in "$OPENCLAW_VERSION" "$OPENCLAW_ARM64_DIGEST" "$DISTROLESS_ARM64_DIGEST" "$DOCKERFILE_FRONTEND_DIGEST"; do
   grep -F -- "$pin" "$DOCKERFILE" >/dev/null || fail "Dockerfile does not contain lock pin: $pin"
 done
@@ -157,107 +243,20 @@ build=(docker buildx build --platform linux/arm64 --pull -f "$DOCKERFILE"
   --build-arg "PLUGINS_LOCK_SHA256=$PLUGINS_LOCK_SHA256"
   -t "$IMAGE_REF")
 
-tmp_dir=$(mktemp -d /tmp/openclaw-build.XXXXXX)
-gateway_container=""
-cleanup() {
-  if [[ -n "$gateway_container" ]]; then docker rm -f "$gateway_container" >/dev/null 2>&1 || true; fi
-  rm -rf "$tmp_dir"
-}
-trap cleanup EXIT
 TRIVY_CACHE_DIR=${TRIVY_CACHE_DIR:-$tmp_dir/trivy-cache}
 mkdir -p "$TRIVY_CACHE_DIR"
 export TRIVY_DB_REPOSITORY=${TRIVY_DB_REPOSITORY:-public.ecr.aws/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2}
 
-INDEX_DIGEST=""
-ATTESTATION_DIGEST=""
-REGISTRY_PROVENANCE_PATH=""
-REGISTRY_SBOM_PATH=""
-if ((PUSH)); then
-  "${build[@]}" --metadata-file "$tmp_dir/build-metadata.json" \
-    --attest "type=provenance,mode=max,builder-id=$ATTESTATION_BUILDER_ID" \
-    --attest "type=sbom,generator=$SBOM_ATTESTATION_GENERATOR" \
-    --push "$REPO_ROOT"
-  INDEX_DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" | awk '$1 == "Digest:" {print $2; exit}')
-  [[ "$INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "could not resolve pushed OCI index digest"
-  raw_index=$(docker buildx imagetools inspect "$IMAGE_REF" --raw)
-  ARM64_DIGEST=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | if length == 1 then .[0].digest else error("expected exactly one linux/arm64 child") end' <<<"$raw_index")
-  ATTESTATION_DIGEST=$(jq -er --arg subject "$ARM64_DIGEST" '
-    [.manifests[] | select(
-      .annotations["vnd.docker.reference.type"] == "attestation-manifest" and
-      .annotations["vnd.docker.reference.digest"] == $subject
-    )] | if length == 1 then .[0].digest else error("expected exactly one arm64 attestation manifest") end
-  ' <<<"$raw_index")
-  raw_attestation=$(docker buildx imagetools inspect "$image_repository@$ATTESTATION_DIGEST" --raw)
-  jq -e '
-    ([.layers[]?.annotations["in-toto.io/predicate-type"]] | any(
-      . == "https://spdx.dev/Document"
-    )) and
-    ([.layers[]?.annotations["in-toto.io/predicate-type"]] | any(
-      startswith("https://slsa.dev/provenance/")
-    ))
-  ' <<<"$raw_attestation" >/dev/null || fail "pushed SBOM/provenance attestations are missing"
-
-  REGISTRY_PROVENANCE_PATH="$tmp_dir/registry-provenance.json"
-  REGISTRY_SBOM_PATH="$tmp_dir/registry-sbom.spdx.json"
-  docker buildx imagetools inspect "$IMAGE_REF" \
-    --format '{{ json .Provenance }}' >"$REGISTRY_PROVENANCE_PATH"
-  docker buildx imagetools inspect "$IMAGE_REF" \
-    --format '{{ json .SBOM }}' >"$REGISTRY_SBOM_PATH"
-  jq -e \
-    --arg builder "$ATTESTATION_BUILDER_ID" \
-    --arg commit "$SOURCE_COMMIT" \
-    --arg branch "$SOURCE_BRANCH" \
-    --arg sourceUri "$SOURCE_URI" \
-    --arg archive "$SOURCE_ARCHIVE_SHA256" \
-    --arg artifactVersion "$SOURCE_ARTIFACT_VERSION" \
-    --arg frontendDigest "$DOCKERFILE_FRONTEND_DIGEST" \
-    --arg lock "$PLUGINS_LOCK_SHA256" \
-    --argjson expectedMaterials "$EXPECTED_MATERIAL_DIGESTS" '
-    [.. | objects |
-      select(
-        .buildType? == "https://mobyproject.org/buildkit@v1" and
-        (.builder? | type) == "object" and
-        (.invocation? | type) == "object"
-      )
-    ] as $predicates |
-    ($predicates | length) == 1 and
-    ($predicates[0] as $p |
-      $p.builder.id == $builder and
-      $p.invocation.configSource.entryPoint == "Dockerfile.openclaw" and
-      $p.invocation.environment.platform == "linux/arm64" and
-      $p.invocation.parameters.args["build-arg:GIT_COMMIT"] == $commit and
-      $p.invocation.parameters.args["build-arg:GIT_BRANCH"] == $branch and
-      $p.invocation.parameters.args["build-arg:SOURCE_URI"] == $sourceUri and
-      $p.invocation.parameters.args["build-arg:SOURCE_ARCHIVE_SHA256"] == $archive and
-      $p.invocation.parameters.args["build-arg:SOURCE_ARTIFACT_VERSION"] == $artifactVersion and
-      $p.invocation.parameters.args["build-arg:PLUGINS_LOCK_SHA256"] == $lock and
-      $p.invocation.parameters.args.source == ("docker/dockerfile:1.7@" + $frontendDigest) and
-      ([ $p.materials[]?.digest.sha256 ] | unique) as $actualMaterials |
-      ($expectedMaterials - $actualMaterials | length) == 0
-    )
-  ' "$REGISTRY_PROVENANCE_PATH" >/dev/null || \
-    fail "registry provenance source/builder/material validation failed"
-  jq -e '
-    [.. | objects | select(.spdxVersion? and (.packages? | type) == "array")] as $documents |
-    ($documents | length) == 1 and
-    ($documents[0].spdxVersion | startswith("SPDX-2.")) and
-    ($documents[0].packages | length) > 0 and
-    ($documents[0].documentDescribes | length) > 0
-  ' "$REGISTRY_SBOM_PATH" >/dev/null || fail "registry SPDX attestation payload validation failed"
-  RUNTIME_REF="$image_repository@$ARM64_DIGEST"
-  docker pull "$RUNTIME_REF" >/dev/null
-else
-  "${build[@]}" --metadata-file "$tmp_dir/build-metadata.json" \
-    --provenance=false --load "$REPO_ROOT"
-  # For a single-platform build this is the actual OCI image manifest digest,
-  # not Docker's config/image ID. The scan below runs against this arm64 image.
-  ARM64_DIGEST=$(jq -er '."containerimage.digest"' "$tmp_dir/build-metadata.json")
-  [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "could not resolve local arm64 OCI child digest"
-  RUNTIME_REF=$IMAGE_REF
-fi
+"${build[@]}" --metadata-file "$tmp_dir/build-metadata.json" \
+  --provenance=false --load "$REPO_ROOT"
+# The shared promoter receives this already-gated local image.  This helper has
+# no registry push path, so a canonical git-$SHA cannot appear before scans.
+ARM64_DIGEST=$(jq -er '."containerimage.digest"' "$tmp_dir/build-metadata.json")
+[[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || \
+  fail "could not resolve local arm64 OCI child digest"
+RUNTIME_REF=$IMAGE_REF
 
 jq -e \
-  --arg builder "$ATTESTATION_BUILDER_ID" \
   --arg commit "$SOURCE_COMMIT" \
   --arg branch "$SOURCE_BRANCH" \
   --arg sourceUri "$SOURCE_URI" \
@@ -265,23 +264,59 @@ jq -e \
   --arg artifactVersion "$SOURCE_ARTIFACT_VERSION" \
   --arg frontendDigest "$DOCKERFILE_FRONTEND_DIGEST" \
   --arg lock "$PLUGINS_LOCK_SHA256" \
-  --argjson expectedMaterials "$EXPECTED_MATERIAL_DIGESTS" \
-  --argjson pushed "$PUSH" '
+  --arg openclawVersion "$OPENCLAW_VERSION" \
+  --arg openclawDigest "$OPENCLAW_ARM64_DIGEST" \
+  --arg distrolessDigest "$DISTROLESS_ARM64_DIGEST" \
+  --argjson expectedMaterials "$EXPECTED_MATERIALS" '
   ."buildx.build.provenance" as $p |
   $p.buildType == "https://mobyproject.org/buildkit@v1" and
-  (if $pushed == 1 then $p.builder.id == $builder else true end) and
   $p.invocation.configSource.entryPoint == "Dockerfile.openclaw" and
   $p.invocation.environment.platform == "linux/arm64" and
+  ($p.invocation.parameters.args | keys | sort) == ([
+    "build-arg:DISTROLESS_ARM64_DIGEST",
+    "build-arg:GIT_BRANCH",
+    "build-arg:GIT_COMMIT",
+    "build-arg:OPENCLAW_ARM64_DIGEST",
+    "build-arg:OPENCLAW_VERSION",
+    "build-arg:PLUGINS_LOCK_SHA256",
+    "build-arg:SOURCE_ARCHIVE_SHA256",
+    "build-arg:SOURCE_ARTIFACT_VERSION",
+    "build-arg:SOURCE_URI",
+    "cmdline",
+    "source"
+  ] | sort) and
   $p.invocation.parameters.args["build-arg:GIT_COMMIT"] == $commit and
   $p.invocation.parameters.args["build-arg:GIT_BRANCH"] == $branch and
+  $p.invocation.parameters.args["build-arg:OPENCLAW_VERSION"] == $openclawVersion and
+  $p.invocation.parameters.args["build-arg:OPENCLAW_ARM64_DIGEST"] == $openclawDigest and
+  $p.invocation.parameters.args["build-arg:DISTROLESS_ARM64_DIGEST"] == $distrolessDigest and
   $p.invocation.parameters.args["build-arg:SOURCE_URI"] == $sourceUri and
   $p.invocation.parameters.args["build-arg:SOURCE_ARCHIVE_SHA256"] == $archive and
   $p.invocation.parameters.args["build-arg:SOURCE_ARTIFACT_VERSION"] == $artifactVersion and
   $p.invocation.parameters.args["build-arg:PLUGINS_LOCK_SHA256"] == $lock and
   $p.invocation.parameters.args.source == ("docker/dockerfile:1.7@" + $frontendDigest) and
-  ([ $p.materials[]?.digest.sha256 ] | unique) as $actualMaterials |
-  ($expectedMaterials - $actualMaterials | length) == 0
+  ([ $p.materials[] | {uri:.uri,sha256:.digest.sha256} ] |
+    sort_by(.uri, .sha256)) == $expectedMaterials
 ' "$tmp_dir/build-metadata.json" >/dev/null || fail "build metadata source/material validation failed"
+
+jq -n \
+  --argjson expected "$EXPECTED_MATERIALS" \
+  --slurpfile metadata "$tmp_dir/build-metadata.json" '
+  ($metadata[0]."buildx.build.provenance".materials |
+    map({uri:.uri,sha256:.digest.sha256}) |
+    sort_by(.uri, .sha256)) as $actual |
+  {
+    schemaVersion:1,
+    expected:$expected,
+    actual:$actual,
+    expectedCount:($expected | length),
+    actualCount:($actual | length),
+    extra:($actual - $expected),
+    missing:($expected - $actual),
+    exactSetMatch:($actual == $expected),
+    extraExecutableOrRemoteMaterialDetected:($actual != $expected)
+  }
+' >"$tmp_dir/materials.json"
 
 inspect_json=$(docker image inspect "$RUNTIME_REF")
 jq -e \
@@ -309,13 +344,13 @@ IMAGE_ID=$(jq -er '.[0].Id' <<<"$inspect_json")
 CONFIG_DIGEST=$(jq -er '.[0].Descriptor.annotations["config.digest"] // .[0].Id' <<<"$inspect_json")
 INSPECT_MANIFEST_DIGEST=$(jq -r '.[0].Descriptor.digest // empty' <<<"$inspect_json")
 ROOTFS_DIFF_IDS=$(jq -c '.[0].RootFS.Layers' <<<"$inspect_json")
-ROOTFS_SHA256=$(jq -c '.[0].RootFS.Layers' <<<"$inspect_json" | sha256sum | cut -d' ' -f1)
+ROOTFS_DIFF_IDS_SHA256=$(jq -c '.[0].RootFS.Layers' <<<"$inspect_json" | sha256sum | cut -d' ' -f1)
 [[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid local image identifier"
 [[ "$CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid image config digest"
 if [[ -n "$INSPECT_MANIFEST_DIGEST" && "$INSPECT_MANIFEST_DIGEST" != "$ARM64_DIGEST" ]]; then
   fail "loaded manifest digest does not match build metadata"
 fi
-[[ "$ROOTFS_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "invalid rootfs inventory hash"
+[[ "$ROOTFS_DIFF_IDS_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "invalid rootfs diff-id set hash"
 
 [[ ! -L "$EVIDENCE_DIR" ]] || fail "evidence directory must not be a symlink"
 mkdir -p "$EVIDENCE_DIR"
@@ -469,14 +504,47 @@ const pruneReport=JSON.parse(
   fs.readFileSync("/opt/teamagent/runtime-prune-report.json","utf8"),
 );
 const pruneReportValid=
-  pruneReport.schemaVersion===1&&
+  pruneReport.schemaVersion===2&&
   pruneReport.browser.residualUnreachableBrowserCandidates===0&&
   pruneReport.browser.reachableRegistrationChunks===0&&
+  pruneReport.browser.reachableBrowserNamedPayloadCount>0&&
+  pruneReport.browser.reachableBrowserPayloadZero===false&&
+  pruneReport.browser.reachableBrowserImplementationModules===0&&
+  pruneReport.browser.browserCliCommandRegistered===false&&
+  pruneReport.browser.genericOpenClawCliRetained===true&&
+  pruneReport.browser.browserExecutableOrPlaywrightPresent===false&&
+  pruneReport.browser.usableBrowserControlPath===false&&
+  Array.isArray(pruneReport.browser.retainedFailClosedFacade)&&
+  pruneReport.browser.retainedFailClosedFacade.length===1&&
+  pruneReport.browser.retainedFailClosedFacade.every(candidate=>
+    candidate.publicFacade===true&&
+    Array.isArray(candidate.implementationSignals)&&
+    candidate.implementationSignals.length===0
+  )&&
   pruneReport.browser.controlUiMissingLocalImports===0&&
-  Array.isArray(pruneReport.browser.controlUiReachableAssets)&&
-  pruneReport.browser.controlUiReachableAssets.length>0&&
-  pruneReport.browser.controlUiReachableAssets.length===
+  Array.isArray(pruneReport.browser.controlUiReachableModuleAssets)&&
+  pruneReport.browser.controlUiReachableModuleAssets.length>0&&
+  pruneReport.browser.controlUiReachableModuleAssets.length===
     pruneReport.browser.controlUiReachableModuleCount&&
+  Array.isArray(pruneReport.browser.controlUiServedAssets)&&
+  pruneReport.browser.controlUiServedAssets.length>0&&
+  pruneReport.browser.controlUiServedAssets.length===
+    pruneReport.browser.controlUiServedAssetCount&&
+  pruneReport.browser.controlUiServedAssets.some(candidate=>
+    candidate.httpPath==="/"&&candidate.path.endsWith("/index.html")
+  )&&
+  pruneReport.browser.controlUiServedAssets.every(candidate=>
+    candidate.path.startsWith("/app/dist/control-ui/")&&
+    candidate.httpPath.startsWith("/")&&
+    Number.isSafeInteger(candidate.size)&&candidate.size>=0&&
+    /^[0-9a-f]{64}$/u.test(candidate.sha256)&&
+    Number.isSafeInteger(candidate.servedSize)&&candidate.servedSize>=0&&
+    /^[0-9a-f]{64}$/u.test(candidate.servedSha256)&&
+    ["identity",'insert data-openclaw-terminal-enabled="false" after <html']
+      .includes(candidate.httpTransform)
+  )&&
+  pruneReport.browser.controlUiDynamicAssetRegistrationsCoveredByWholeTree===true&&
+  pruneReport.browser.controlUiBootstrapConfigRuntimeContractRequired===true&&
   Array.isArray(pruneReport.browser.preservedControlUiBrowserChunks)&&
   pruneReport.browser.preservedControlUiBrowserChunks.length>0&&
   pruneReport.browser.preservedControlUiBrowserChunks.every(candidate=>
@@ -486,6 +554,15 @@ const pruneReportValid=
     candidate.implementationSignals.length===0
   )&&
   pruneReport.browser.cliHelpMetadataRemoved===true&&
+  pruneReport.pluginOperations.closureComputedBeforeMetadataRewrite===true&&
+  pruneReport.pluginOperations.postPruneClosureExactMatch===true&&
+  pruneReport.pluginOperations.moduleCount>0&&
+  pruneReport.pluginOperations.moduleCount===
+    pruneReport.pluginOperations.modules.length&&
+  pruneReport.pluginOperations.unresolvedImports.length===0&&
+  pruneReport.pluginOperations.unresolvedComputedImports.length===0&&
+  pruneReport.packages.closureComputedBeforeMetadataRewrite===true&&
+  pruneReport.packages.prePruneProductionClosure.length>0&&
   pruneReport.packages.residualForbidden===0&&
   pruneReport.packages.residualNonRootBinDeclarations===0&&
   pruneReport.developmentPayload.residualPathCount===0;
@@ -517,10 +594,10 @@ jq -n \
   --arg manifestDigest "$ARM64_DIGEST" \
   --arg imageId "$IMAGE_ID" \
   --arg configDigest "$CONFIG_DIGEST" \
-  --arg rootfsSha256 "$ROOTFS_SHA256" \
+  --arg rootfsDiffIdsSha256 "$ROOTFS_DIFF_IDS_SHA256" \
   --argjson diffIds "$ROOTFS_DIFF_IDS" \
   --slurpfile probe "$tmp_dir/runtime-probe.json" \
-  '{schemaVersion:1,subject:{platform:"linux/arm64",manifestDigest:$manifestDigest,imageId:$imageId,configDigest:$configDigest,rootfs:{diffIds:$diffIds,sha256:$rootfsSha256}},runtime:$probe[0]}' \
+  '{schemaVersion:1,subject:{platform:"linux/arm64",manifestDigest:$manifestDigest,imageId:$imageId,configDigest:$configDigest,rootfs:{diffIds:$diffIds,diffIdsSha256:$rootfsDiffIdsSha256}},runtime:$probe[0]}' \
   >"$EVIDENCE_DIR/runtime-inventory.json"
 
 python3 "$REPO_ROOT/tests/scripts/test_openclaw_runtime_image.py" \
@@ -532,6 +609,27 @@ jq -e --arg imageId "$IMAGE_ID" '
   ([.checks[] | select(. != true)] | length) == 0
 ' "$EVIDENCE_DIR/actual-image-contract.json" >/dev/null || \
   fail "dedicated actual-image contract report failed"
+
+docker run --rm --platform linux/arm64 --network none --read-only \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --mount "type=bind,src=$REPO_ROOT/infra/openclaw/plugin-operation-smoke.mjs,dst=/opt/openclaw-plugin-operation-smoke.mjs,readonly" \
+  --entrypoint /nodejs/bin/node "$RUNTIME_REF" \
+  /opt/openclaw-plugin-operation-smoke.mjs \
+  >"$EVIDENCE_DIR/plugin-operation-smoke.json" || \
+  fail "representative Slack/Bedrock operation module smoke failed"
+jq -e '
+  .schemaVersion == 1 and .passed == true and
+  .network == "disabled-by-container" and
+  .slack.providerCallsStubbed == true and
+  .slack.operations == ["conversations.history","chat.update"] and
+  .bedrock.providerCallsStubbed == true and
+  .bedrock.operations == [
+    "ListFoundationModelsCommand",
+    "ListInferenceProfilesCommand"
+  ]
+' "$EVIDENCE_DIR/plugin-operation-smoke.json" >/dev/null || \
+  fail "Slack/Bedrock operation smoke evidence is incomplete"
 
 run_args=(--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges
   --tmpfs /tmp:rw,noexec,nosuid,size=512m
@@ -689,10 +787,44 @@ gateway_exit=$(docker inspect -f '{{.State.ExitCode}}' "$gateway_container")
 docker rm "$gateway_container" >/dev/null
 gateway_container=""
 
+export_container=$(docker create --platform linux/arm64 "$RUNTIME_REF")
+docker export --output "$tmp_dir/rootfs.tar" "$export_container"
+docker rm "$export_container" >/dev/null
+export_container=""
+[[ -s "$tmp_dir/rootfs.tar" ]] || fail "merged rootfs export is empty"
+
 trivy --cache-dir "$TRIVY_CACHE_DIR" image --quiet --scanners vuln --format cyclonedx \
-  --output "$EVIDENCE_DIR/sbom.cdx.json" "$RUNTIME_REF"
+  --output "$EVIDENCE_DIR/trivy-package-sbom.cdx.json" "$RUNTIME_REF"
+python3 "$REPO_ROOT/infra/openclaw/generate-filesystem-sbom.py" \
+  --rootfs-tar "$tmp_dir/rootfs.tar" \
+  --trivy-sbom "$EVIDENCE_DIR/trivy-package-sbom.cdx.json" \
+  --inventory-output "$EVIDENCE_DIR/rootfs-inventory.json" \
+  --sbom-output "$EVIDENCE_DIR/sbom.cdx.json" \
+  --equivalence-output "$EVIDENCE_DIR/sbom-equivalence.json" \
+  --image-id "$IMAGE_ID" \
+  --manifest-digest "$ARM64_DIGEST" \
+  --config-digest "$CONFIG_DIGEST"
 jq -e \
   --arg imageId "$IMAGE_ID" \
+  --arg manifestDigest "$ARM64_DIGEST" \
+  --arg configDigest "$CONFIG_DIGEST" '
+  .schemaVersion == 1 and
+  .subject.imageId == $imageId and
+  .subject.manifestDigest == $manifestDigest and
+  .subject.configDigest == $configDigest and
+  .inventory.entryCount > 0 and
+  .inventory.entryCount == .sbom.filesystemComponentCount and
+  (.inventory.sha256 | test("^[0-9a-f]{64}$")) and
+  (.sbom.sha256 | test("^[0-9a-f]{64}$")) and
+  .sbom.bomRefsUnique == true and
+  .sbom.danglingDependencyRefs == 0 and
+  .pathTypeModeOwnerSizeLinkContentMultisetExact == true and
+  .wholeFilesystemExactMatch == true
+' "$EVIDENCE_DIR/sbom-equivalence.json" >/dev/null || \
+  fail "whole-filesystem SBOM is not exactly equivalent to the merged rootfs export"
+jq -e \
+  --arg imageId "$IMAGE_ID" \
+  --arg manifestDigest "$ARM64_DIGEST" \
   --arg trivyVersion "$TRIVY_VERSION" \
   --argjson diffIds "$ROOTFS_DIFF_IDS" '
   (.metadata.tools.components | any(
@@ -704,6 +836,15 @@ jq -e \
     select(.name == "aquasecurity:trivy:DiffID") | .value] | sort) == ($diffIds | sort)) and
   .bomFormat == "CycloneDX" and
   (.specVersion | test("^1\\.[0-9]+$")) and
+  ([.metadata.properties[] |
+    select(.name == "io.teamagent.openclaw.subjectManifestDigest") |
+    .value] == [$manifestDigest]) and
+  ([.metadata.properties[] |
+    select(.name == "io.teamagent.openclaw.wholeFilesystemEntryCount") |
+    .value | tonumber] | length) == 1 and
+  ([.compositions[]? |
+    select(.aggregate == "complete") |
+    .assemblies | length] | length) >= 1 and
   ([.components[]?."bom-ref"] as $refs |
     ($refs | length) == ($refs | unique | length)) and
   (
@@ -763,181 +904,373 @@ if ((secret_count)); then
   fail "embedded secret gate failed ($secret_count findings)"
 fi
 
+KNOWN_LIVE_FINDINGS='[
+  {"id":"CVE-2026-34182","packageFamily":"openssl"},
+  {"id":"CVE-2026-12087","packageFamily":"perl"},
+  {"id":"CVE-2026-13221","packageFamily":"perl"},
+  {"id":"CVE-2026-57433","packageFamily":"perl"},
+  {"id":"CVE-2026-6100","packageFamily":"python3.11"},
+  {"id":"CVE-2026-33845","packageFamily":"gnutls28"},
+  {"id":"CVE-2026-42010","packageFamily":"gnutls28"},
+  {"id":"CVE-2026-55200","packageFamily":"libssh2"}
+]'
+jq -n \
+  --arg imageId "$IMAGE_ID" \
+  --arg manifestDigest "$ARM64_DIGEST" \
+  --arg configDigest "$CONFIG_DIGEST" \
+  --argjson known "$KNOWN_LIVE_FINDINGS" \
+  --slurpfile scan "$EVIDENCE_DIR/vulnerabilities.json" '
+  ([ $scan[0].Results[]?.Vulnerabilities[]? ] // []) as $findings |
+  ([ $findings[]?.VulnerabilityID ] | unique | sort) as $candidateIds |
+  ($known | map(.id) | unique | sort) as $knownIds |
+  {
+    schemaVersion:1,
+    subject:{
+      platform:"linux/arm64",
+      manifestCount:1,
+      manifestDigest:$manifestDigest,
+      imageId:$imageId,
+      configDigest:$configDigest
+    },
+    latestLiveObservedBaseline:{
+      criticalFindingCount:8,
+      highFindingCount:22,
+      knownFindings:$known
+    },
+    candidate:{
+      criticalFindingCount:(
+        [$findings[] | select(.Severity == "CRITICAL")] | length
+      ),
+      highFindingCount:(
+        [$findings[] | select(.Severity == "HIGH")] | length
+      ),
+      knownLiveFindingIdsPresent:($candidateIds - ($candidateIds - $knownIds)),
+      knownLiveFindingIdsAbsent:($knownIds - $candidateIds),
+      allKnownLiveFindingsAbsent:
+        (($candidateIds - ($candidateIds - $knownIds)) == []),
+      totalCriticalHighZero:($findings == [])
+    }
+  }' >"$EVIDENCE_DIR/live-vulnerability-baseline.json"
+jq -e --argjson known "$KNOWN_LIVE_FINDINGS" '
+  .schemaVersion == 1 and
+  .subject.platform == "linux/arm64" and
+  .subject.manifestCount == 1 and
+  .latestLiveObservedBaseline.criticalFindingCount == 8 and
+  .latestLiveObservedBaseline.highFindingCount == 22 and
+  .candidate.criticalFindingCount == 0 and
+  .candidate.highFindingCount == 0 and
+  .candidate.knownLiveFindingIdsPresent == [] and
+  .candidate.knownLiveFindingIdsAbsent == ($known | map(.id) | unique | sort) and
+  .candidate.allKnownLiveFindingsAbsent == true and
+  .candidate.totalCriticalHighZero == true
+' "$EVIDENCE_DIR/live-vulnerability-baseline.json" >/dev/null || \
+  fail "candidate does not eliminate the observed live C8/H22 findings"
+
 jq -S . "$tmp_dir/build-metadata.json" >"$EVIDENCE_DIR/build-metadata.json"
+jq -S . "$tmp_dir/materials.json" >"$EVIDENCE_DIR/materials.json"
 jq -S . "$tmp_dir/config.json" >"$EVIDENCE_DIR/config-validation.json"
 jq -S . "$tmp_dir/plugins.json" >"$EVIDENCE_DIR/plugins.json"
 cp "$tmp_dir/gateway.log" "$EVIDENCE_DIR/gateway.log"
 cp "$tmp_dir/browser-help.log" "$EVIDENCE_DIR/browser-help.log"
-if ((PUSH)); then
-  jq -S . "$REGISTRY_PROVENANCE_PATH" >"$EVIDENCE_DIR/registry-provenance.json"
-  jq -S . "$REGISTRY_SBOM_PATH" >"$EVIDENCE_DIR/registry-sbom.spdx.json"
-fi
 
-RUNTIME_NODE=$(jq -er '.runtime.node' "$EVIDENCE_DIR/runtime-inventory.json")
-RUNTIME_UID=$(jq -er '.runtime.uid' "$EVIDENCE_DIR/runtime-inventory.json")
-RUNTIME_GID=$(jq -er '.runtime.gid' "$EVIDENCE_DIR/runtime-inventory.json")
-RUNTIME_PACKAGE_COUNT=$(jq -er '.runtime.packages | length' "$EVIDENCE_DIR/runtime-inventory.json")
-RUNTIME_PACKAGE_INSTANCE_COUNT=$(jq -er '.runtime.packageInstances | length' "$EVIDENCE_DIR/runtime-inventory.json")
-SBOM_COMPONENT_COUNT=$(jq -er '.components | length' "$EVIDENCE_DIR/sbom.cdx.json")
-SBOM_NPM_INSTANCE_COUNT=$(jq -er 'length' "$EVIDENCE_DIR/sbom-npm-inventory.json")
-SBOM_FORMAT=$(jq -er '.bomFormat + " " + .specVersion' "$EVIDENCE_DIR/sbom.cdx.json")
-INVENTORY_SHA256=$(sha256sum "$EVIDENCE_DIR/runtime-inventory.json" | cut -d' ' -f1)
-SBOM_SHA256=$(sha256sum "$EVIDENCE_DIR/sbom.cdx.json" | cut -d' ' -f1)
-SBOM_NPM_INVENTORY_SHA256=$(sha256sum "$EVIDENCE_DIR/sbom-npm-inventory.json" | cut -d' ' -f1)
-VULNERABILITY_SCAN_SHA256=$(sha256sum "$EVIDENCE_DIR/vulnerabilities.json" | cut -d' ' -f1)
-SECRET_SCAN_SHA256=$(sha256sum "$EVIDENCE_DIR/secrets.json" | cut -d' ' -f1)
-BUILD_METADATA_SHA256=$(sha256sum "$EVIDENCE_DIR/build-metadata.json" | cut -d' ' -f1)
-CONFIG_VALIDATION_SHA256=$(sha256sum "$EVIDENCE_DIR/config-validation.json" | cut -d' ' -f1)
-PLUGINS_SHA256=$(sha256sum "$EVIDENCE_DIR/plugins.json" | cut -d' ' -f1)
-GATEWAY_LOG_SHA256=$(sha256sum "$EVIDENCE_DIR/gateway.log" | cut -d' ' -f1)
-BROWSER_HELP_LOG_SHA256=$(sha256sum "$EVIDENCE_DIR/browser-help.log" | cut -d' ' -f1)
-ACTUAL_IMAGE_CONTRACT_SHA256=$(sha256sum "$EVIDENCE_DIR/actual-image-contract.json" | cut -d' ' -f1)
-REGISTRY_PROVENANCE_SHA256=""
-REGISTRY_SBOM_SHA256=""
-if ((PUSH)); then
-  REGISTRY_PROVENANCE_SHA256=$(sha256sum "$EVIDENCE_DIR/registry-provenance.json" | cut -d' ' -f1)
-  REGISTRY_SBOM_SHA256=$(sha256sum "$EVIDENCE_DIR/registry-sbom.spdx.json" | cut -d' ' -f1)
+SOURCE_TRUST_MODE=local-git
+SOURCE_SHARED_VERIFIED=false
+if [[ -f "$tmp_dir/trusted-source.json" ]]; then
+  SOURCE_TRUST_MODE=shared-kms-publisher
+  SOURCE_SHARED_VERIFIED=true
+  jq -S . "$tmp_dir/trusted-source.json" >"$EVIDENCE_DIR/source-verifier-assertion.json"
+  cp "$TRUSTED_SOURCE_PATH" "$EVIDENCE_DIR/source-publisher-statement.json"
 fi
+jq -n \
+  --arg mode "$SOURCE_TRUST_MODE" \
+  --arg uri "$SOURCE_URI" \
+  --arg commit "$SOURCE_COMMIT" \
+  --arg branch "$SOURCE_BRANCH" \
+  --arg archiveSha256 "$SOURCE_ARCHIVE_SHA256" \
+  --arg artifactVersion "$SOURCE_ARTIFACT_VERSION" \
+  --arg buildIdentity "$BUILD_IDENTITY" \
+  --argjson sharedVerified "$SOURCE_SHARED_VERIFIED" \
+  '{
+    schemaVersion:1,
+    mode:$mode,
+    source:{
+      repositoryUri:$uri,
+      commit:$commit,
+      branch:$branch,
+      archiveSha256:$archiveSha256,
+      artifactVersion:$artifactVersion
+    },
+    buildIdentity:$buildIdentity,
+    sharedSourceVerifierPassed:$sharedVerified,
+    transportMetadataTrusted:false,
+    promotionMustReverifySignedPublisherStatementAndSourceRoot:true,
+    selfCertificationAccepted:false
+  }' >"$EVIDENCE_DIR/source-binding.json"
+
+RUNTIME_INVENTORY_SHA256=$(sha256sum "$EVIDENCE_DIR/runtime-inventory.json" | cut -d' ' -f1)
+ROOTFS_INVENTORY_SHA256=$(sha256sum "$EVIDENCE_DIR/rootfs-inventory.json" | cut -d' ' -f1)
+ROOTFS_TAR_SHA256=$(jq -er '.subject.rootfsTarSha256' "$EVIDENCE_DIR/rootfs-inventory.json")
+ROOTFS_ENTRY_COUNT=$(jq -er '.entryCount' "$EVIDENCE_DIR/rootfs-inventory.json")
+
+python3 "$REPO_ROOT/infra/openclaw/index-evidence.py" \
+  --evidence-dir "$EVIDENCE_DIR" \
+  --output "$EVIDENCE_DIR/evidence-index.json" \
+  --image-id "$IMAGE_ID" \
+  --manifest-digest "$ARM64_DIGEST" \
+  --config-digest "$CONFIG_DIGEST" \
+  --rootfs-inventory-sha256 "$ROOTFS_INVENTORY_SHA256"
+EVIDENCE_INDEX_SHA256=$(sha256sum "$EVIDENCE_DIR/evidence-index.json" | cut -d' ' -f1)
 
 mkdir -p "$(dirname -- "$MANIFEST_PATH")"
 jq -n \
   --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg image "$IMAGE_REF" \
-  --arg runtimeRef "$RUNTIME_REF" \
-  --arg indexDigest "$INDEX_DIGEST" \
   --arg arm64Digest "$ARM64_DIGEST" \
   --arg imageId "$IMAGE_ID" \
   --arg configDigest "$CONFIG_DIGEST" \
-  --arg rootfsSha256 "$ROOTFS_SHA256" \
   --argjson rootfsDiffIds "$ROOTFS_DIFF_IDS" \
+  --arg rootfsDiffIdsSha256 "$ROOTFS_DIFF_IDS_SHA256" \
+  --arg rootfsTarSha256 "$ROOTFS_TAR_SHA256" \
+  --arg rootfsInventorySha256 "$ROOTFS_INVENTORY_SHA256" \
+  --argjson rootfsEntryCount "$ROOTFS_ENTRY_COUNT" \
   --arg sourceCommit "$SOURCE_COMMIT" \
   --arg sourceBranch "$SOURCE_BRANCH" \
   --arg sourceUri "$SOURCE_URI" \
   --arg sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" \
   --arg sourceArtifactVersion "$SOURCE_ARTIFACT_VERSION" \
+  --arg sourceTrustMode "$SOURCE_TRUST_MODE" \
+  --arg buildIdentity "$BUILD_IDENTITY" \
   --arg dockerfileSha256 "$DOCKERFILE_SHA256" \
   --arg pluginsLockSha256 "$PLUGINS_LOCK_SHA256" \
   --arg openclawVersion "$OPENCLAW_VERSION" \
   --arg trivyVersion "$TRIVY_VERSION" \
-  --arg sbomAttestationGenerator "$SBOM_ATTESTATION_GENERATOR" \
-  --arg attestationDigest "$ATTESTATION_DIGEST" \
-  --arg attestationBuilderId "$ATTESTATION_BUILDER_ID" \
   --arg buildxVersion "$BUILDX_VERSION" \
-  --arg runtimeNode "$RUNTIME_NODE" \
-  --argjson runtimeUid "$RUNTIME_UID" \
-  --argjson runtimeGid "$RUNTIME_GID" \
-  --argjson runtimePackageCount "$RUNTIME_PACKAGE_COUNT" \
-  --argjson runtimePackageInstanceCount "$RUNTIME_PACKAGE_INSTANCE_COUNT" \
-  --argjson sbomComponentCount "$SBOM_COMPONENT_COUNT" \
-  --argjson sbomNpmInstanceCount "$SBOM_NPM_INSTANCE_COUNT" \
-  --arg sbomFormat "$SBOM_FORMAT" \
-  --arg inventoryPath "$EVIDENCE_MANIFEST_PREFIX/runtime-inventory.json" \
-  --arg inventorySha256 "$INVENTORY_SHA256" \
-  --arg sbomPath "$EVIDENCE_MANIFEST_PREFIX/sbom.cdx.json" \
-  --arg sbomSha256 "$SBOM_SHA256" \
-  --arg sbomNpmInventoryPath "$EVIDENCE_MANIFEST_PREFIX/sbom-npm-inventory.json" \
-  --arg sbomNpmInventorySha256 "$SBOM_NPM_INVENTORY_SHA256" \
-  --arg vulnerabilityPath "$EVIDENCE_MANIFEST_PREFIX/vulnerabilities.json" \
-  --arg vulnerabilitySha256 "$VULNERABILITY_SCAN_SHA256" \
-  --arg secretPath "$EVIDENCE_MANIFEST_PREFIX/secrets.json" \
-  --arg secretSha256 "$SECRET_SCAN_SHA256" \
-  --arg buildMetadataPath "$EVIDENCE_MANIFEST_PREFIX/build-metadata.json" \
-  --arg buildMetadataSha256 "$BUILD_METADATA_SHA256" \
-  --arg configValidationPath "$EVIDENCE_MANIFEST_PREFIX/config-validation.json" \
-  --arg configValidationSha256 "$CONFIG_VALIDATION_SHA256" \
-  --arg pluginsPath "$EVIDENCE_MANIFEST_PREFIX/plugins.json" \
-  --arg pluginsSha256 "$PLUGINS_SHA256" \
-  --arg gatewayLogPath "$EVIDENCE_MANIFEST_PREFIX/gateway.log" \
-  --arg gatewayLogSha256 "$GATEWAY_LOG_SHA256" \
-  --arg browserHelpLogPath "$EVIDENCE_MANIFEST_PREFIX/browser-help.log" \
-  --arg browserHelpLogSha256 "$BROWSER_HELP_LOG_SHA256" \
-  --arg actualImageContractPath "$EVIDENCE_MANIFEST_PREFIX/actual-image-contract.json" \
-  --arg actualImageContractSha256 "$ACTUAL_IMAGE_CONTRACT_SHA256" \
-  --arg registryProvenancePath "$EVIDENCE_MANIFEST_PREFIX/registry-provenance.json" \
-  --arg registryProvenanceSha256 "$REGISTRY_PROVENANCE_SHA256" \
-  --arg registrySbomPath "$EVIDENCE_MANIFEST_PREFIX/registry-sbom.spdx.json" \
-  --arg registrySbomSha256 "$REGISTRY_SBOM_SHA256" \
-  --argjson pushed "$PUSH" \
+  --arg evidencePrefix "$EVIDENCE_MANIFEST_PREFIX" \
+  --arg evidenceIndexSha256 "$EVIDENCE_INDEX_SHA256" \
+  --arg runtimeInventorySha256 "$RUNTIME_INVENTORY_SHA256" \
+  --slurpfile runtimeInventory "$EVIDENCE_DIR/runtime-inventory.json" \
+  --slurpfile materials "$EVIDENCE_DIR/materials.json" \
+  --slurpfile equivalence "$EVIDENCE_DIR/sbom-equivalence.json" \
+  --slurpfile sbom "$EVIDENCE_DIR/sbom.cdx.json" \
+  --slurpfile evidenceIndex "$EVIDENCE_DIR/evidence-index.json" \
+  --slurpfile actualImage "$EVIDENCE_DIR/actual-image-contract.json" \
+  --slurpfile operationSmoke "$EVIDENCE_DIR/plugin-operation-smoke.json" \
+  --slurpfile liveVulnerabilityBaseline "$EVIDENCE_DIR/live-vulnerability-baseline.json" \
   '{
-    schemaVersion:3,
+    schemaVersion:4,
     createdAt:$createdAt,
+    deploymentCredential:false,
     image:{
-      requested:$image,runtimeRef:$runtimeRef,indexDigest:$indexDigest,
-      manifestDigest:$arm64Digest,imageId:$imageId,configDigest:$configDigest,
-      rootfs:{diffIds:$rootfsDiffIds,sha256:$rootfsSha256}
+      requestedLocalTag:$image,
+      platform:"linux/arm64",
+      manifestDigest:$arm64Digest,
+      imageId:$imageId,
+      configDigest:$configDigest,
+      rootfs:{
+        diffIds:$rootfsDiffIds,
+        diffIdsSha256:$rootfsDiffIdsSha256,
+        mergedExportTarSha256:$rootfsTarSha256,
+        inventorySha256:$rootfsInventorySha256,
+        entryCount:$rootfsEntryCount
+      }
     },
     source:{
-      uri:$sourceUri,commit:$sourceCommit,branch:$sourceBranch,archiveSha256:$sourceArchiveSha256,
-      artifactVersion:$sourceArtifactVersion,dockerfileSha256:$dockerfileSha256,
-      pluginsLockSha256:$pluginsLockSha256
+      uri:$sourceUri,
+      commit:$sourceCommit,
+      branch:$sourceBranch,
+      archiveSha256:$sourceArchiveSha256,
+      artifactVersion:$sourceArtifactVersion,
+      trustMode:$sourceTrustMode,
+      buildIdentity:$buildIdentity,
+      dockerfileSha256:$dockerfileSha256,
+      pluginsLockSha256:$pluginsLockSha256,
+      transportMetadataTrusted:false,
+      promotionReverificationRequired:true,
+      evidence:{path:($evidencePrefix + "/source-binding.json")}
+    },
+    promotion:{
+      status:"LOCAL_GATES_PASSED",
+      registryPublished:false,
+      quarantinePublished:false,
+      canonicalTagPublished:false,
+      canonicalTagImmutable:null,
+      registryReferrersPublished:false,
+      signedProvenancePublished:false,
+      signedSbomPublished:false,
+      imageSignaturePublished:false,
+      sharedPromoterRequired:true
+    },
+    materials:{
+      expectedCount:$materials[0].expectedCount,
+      actualCount:$materials[0].actualCount,
+      exactSetMatch:$materials[0].exactSetMatch,
+      extraExecutableOrRemoteMaterialDetected:
+        $materials[0].extraExecutableOrRemoteMaterialDetected,
+      extra:$materials[0].extra,
+      missing:$materials[0].missing,
+      evidence:{path:($evidencePrefix + "/materials.json")}
     },
     runtime:{
-      platform:"linux/arm64",openclawVersion:$openclawVersion,node:$runtimeNode,
-      uid:$runtimeUid,gid:$runtimeGid,packageCount:$runtimePackageCount,
-      packageInstanceCount:$runtimePackageInstanceCount,
-      forbiddenPackageOrPluginArtifacts:0,danglingSymlinks:0,
-      developmentPayloadArtifacts:0,browserReachabilityValidated:true,
+      platform:"linux/arm64",
+      openclawVersion:$openclawVersion,
+      node:$runtimeInventory[0].runtime.node,
+      uid:$runtimeInventory[0].runtime.uid,
+      gid:$runtimeInventory[0].runtime.gid,
+      packageCount:($runtimeInventory[0].runtime.packages | length),
+      packageInstanceCount:
+        ($runtimeInventory[0].runtime.packageInstances | length),
+      forbiddenPackageOrPluginArtifacts:0,
+      danglingSymlinks:0,
+      developmentPayloadArtifacts:0,
+      dependencyClosureComputedBeforeMetadataRewrite:
+        $runtimeInventory[0].runtime.pruneReport.packages.closureComputedBeforeMetadataRewrite,
+      pluginOperationClosureExact:
+        $runtimeInventory[0].runtime.pruneReport.pluginOperations.postPruneClosureExactMatch,
+      representativePluginOperationSmokePassed:$operationSmoke[0].passed,
+      browser:{
+        reachableNamedSharedPayloadRetained:
+          ($runtimeInventory[0].runtime.pruneReport.browser.reachableBrowserNamedPayloadCount > 0),
+        zeroReachablePayloadClaim:false,
+        implementationModules:
+          $runtimeInventory[0].runtime.pruneReport.browser.reachableBrowserImplementationModules,
+        cliRegistered:
+          $runtimeInventory[0].runtime.pruneReport.browser.browserCliCommandRegistered,
+        executableOrPlaywrightPresent:
+          $runtimeInventory[0].runtime.pruneReport.browser.browserExecutableOrPlaywrightPresent,
+        usableControlPath:
+          $runtimeInventory[0].runtime.pruneReport.browser.usableBrowserControlPath,
+        failClosedFacadeRetained:true
+      },
       controlUiImportClosureValidated:true,
-      controlUiHttpAssetClosureValidated:true,
-      actualImageContractPassed:true,privilegedPathInventory:true,
-      localDockerReadOnlySmoke:true,localDockerCapDropAllSmoke:true,
+      controlUiFullAssetClosureValidated:true,
+      controlUiServedAssetCount:
+        $runtimeInventory[0].runtime.pruneReport.browser.controlUiServedAssetCount,
+      actualImageContractPassed:
+        ([ $actualImage[0].checks[] | select(. != true) ] | length) == 0,
+      privilegedPathInventory:true,
+      localDockerReadOnlySmoke:true,
+      localDockerCapDropAllSmoke:true,
       localDockerNoNewPrivilegesSmoke:true,
       fargateNoNewPrivilegesEnforced:false,
-      fargateWritablePaths:["/tmp"],offlineGatewaySmoke:true,
-      readyzSmoke:true,sigtermExitPropagationSmoke:true
+      fargateNoNewPrivilegesResidualRisk:
+        "ECS/Fargate task definitions cannot enforce Docker no-new-privileges",
+      fargateWritablePaths:["/tmp"],
+      offlineGatewaySmoke:true,
+      readyzSmoke:true,
+      sigtermExitPropagationSmoke:true
     },
-    buildAttestations:{
-      registryPublished:($pushed == 1),
-      provenance:($pushed == 1),sbom:($pushed == 1),
-      subjectValidated:($pushed == 1),
-      sourceValidated:($pushed == 1),
-      builderValidated:($pushed == 1),
-      builderId:(if $pushed == 1 then $attestationBuilderId else null end),
-      manifestDigest:(if $pushed == 1 then $attestationDigest else null end),
-      sbomGenerator:(if $pushed == 1 then $sbomAttestationGenerator else null end),
-      signature:false,
+    localBuildProvenance:{
+      signed:false,
+      registrySubject:false,
       buildxVersion:$buildxVersion,
-      localBuildMetadataSourceValidated:true,
-      provenanceEvidence:(if $pushed == 1 then
-        {path:$registryProvenancePath,sha256:$registryProvenanceSha256}
-      else null end),
-      sbomEvidence:(if $pushed == 1 then
-        {path:$registrySbomPath,sha256:$registrySbomSha256}
-      else null end)
+      sourceAndExactMaterialsValidated:true,
+      evidence:{path:($evidencePrefix + "/build-metadata.json")}
     },
     sbom:{
-      format:$sbomFormat,generator:{name:"trivy",version:$trivyVersion},
-      subjectImageId:$imageId,subjectConfigDigest:$configDigest,
+      format:($sbom[0].bomFormat + " " + $sbom[0].specVersion),
+      generator:{name:"trivy",version:$trivyVersion},
+      subjectImageId:$imageId,
+      subjectConfigDigest:$configDigest,
       subjectManifestDigest:$arm64Digest,
-      componentCount:$sbomComponentCount,
-      npmPackageInstanceCount:$sbomNpmInstanceCount,
-      physicalNpmMultisetExactMatch:true,bomRefIntegrity:true,
-      path:$sbomPath,sha256:$sbomSha256,
-      npmInventoryEvidence:{
-        path:$sbomNpmInventoryPath,sha256:$sbomNpmInventorySha256
+      componentCount:($sbom[0].components | length),
+      filesystemComponentCount:
+        $equivalence[0].sbom.filesystemComponentCount,
+      rootfsEntryCount:$equivalence[0].inventory.entryCount,
+      wholeFilesystemExactMatch:$equivalence[0].wholeFilesystemExactMatch,
+      pathTypeModeOwnerSizeLinkContentMultisetExact:
+        $equivalence[0].pathTypeModeOwnerSizeLinkContentMultisetExact,
+      physicalNpmMultisetExactMatch:true,
+      bomRefIntegrity:
+        ($equivalence[0].sbom.bomRefsUnique and
+         ($equivalence[0].sbom.danglingDependencyRefs == 0)),
+      evidence:{
+        sbom:{path:($evidencePrefix + "/sbom.cdx.json")},
+        inventory:{path:($evidencePrefix + "/rootfs-inventory.json")},
+        equivalence:{path:($evidencePrefix + "/sbom-equivalence.json")},
+        npmMultiset:{path:($evidencePrefix + "/sbom-npm-inventory.json")}
       }
     },
     scan:{
-      trivyVersion:$trivyVersion,subjectImageId:$imageId,subjectConfigDigest:$configDigest,
-      subjectManifestDigest:$arm64Digest,critical:0,high:0,secrets:0,
-      vulnerabilityEvidence:{path:$vulnerabilityPath,sha256:$vulnerabilitySha256},
-      secretEvidence:{path:$secretPath,sha256:$secretSha256}
+      trivyVersion:$trivyVersion,
+      subjectImageId:$imageId,
+      subjectConfigDigest:$configDigest,
+      subjectManifestDigest:$arm64Digest,
+      critical:0,
+      high:0,
+      secrets:0,
+      exactSingleLinuxArm64Subject:
+        ($liveVulnerabilityBaseline[0].subject.platform == "linux/arm64" and
+         $liveVulnerabilityBaseline[0].subject.manifestCount == 1),
+      latestLiveObservedBaseline:
+        $liveVulnerabilityBaseline[0].latestLiveObservedBaseline,
+      knownLiveFindingIdsAbsent:
+        $liveVulnerabilityBaseline[0].candidate.knownLiveFindingIdsAbsent,
+      allKnownLiveFindingsAbsent:
+        $liveVulnerabilityBaseline[0].candidate.allKnownLiveFindingsAbsent,
+      vulnerabilityEvidence:{path:($evidencePrefix + "/vulnerabilities.json")},
+      secretEvidence:{path:($evidencePrefix + "/secrets.json")},
+      liveBaselineEvidence:{
+        path:($evidencePrefix + "/live-vulnerability-baseline.json")
+      }
     },
     evidence:{
-      runtimeInventory:{path:$inventoryPath,sha256:$inventorySha256},
-      buildMetadata:{path:$buildMetadataPath,sha256:$buildMetadataSha256},
-      configValidation:{path:$configValidationPath,sha256:$configValidationSha256},
-      plugins:{path:$pluginsPath,sha256:$pluginsSha256},
-      gatewayLog:{path:$gatewayLogPath,sha256:$gatewayLogSha256},
-      browserHelp:{path:$browserHelpLogPath,sha256:$browserHelpLogSha256},
-      actualImageContract:{
-        path:$actualImageContractPath,sha256:$actualImageContractSha256
-      }
+      allRegularEvidenceFilesBound:$evidenceIndex[0].allRegularEvidenceFilesBound,
+      entryCount:$evidenceIndex[0].entryCount,
+      index:{
+        path:($evidencePrefix + "/evidence-index.json"),
+        sha256:$evidenceIndexSha256
+      },
+      runtimeInventory:{
+        path:($evidencePrefix + "/runtime-inventory.json"),
+        sha256:$runtimeInventorySha256
+      },
+      promoterMustSignIndexAndBindExactSubject:true
     }
-  }' \
-  >"$MANIFEST_PATH"
+  }' >"$MANIFEST_PATH"
+
+jq -e \
+  --arg imageId "$IMAGE_ID" \
+  --arg manifestDigest "$ARM64_DIGEST" \
+  --arg evidenceIndexSha256 "$EVIDENCE_INDEX_SHA256" '
+  .schemaVersion == 4 and
+  .deploymentCredential == false and
+  .image.imageId == $imageId and
+  .image.manifestDigest == $manifestDigest and
+  .promotion == {
+    status:"LOCAL_GATES_PASSED",
+    registryPublished:false,
+    quarantinePublished:false,
+    canonicalTagPublished:false,
+    canonicalTagImmutable:null,
+    registryReferrersPublished:false,
+    signedProvenancePublished:false,
+    signedSbomPublished:false,
+    imageSignaturePublished:false,
+    sharedPromoterRequired:true
+  } and
+  .materials.exactSetMatch == true and
+  .materials.extraExecutableOrRemoteMaterialDetected == false and
+  .materials.extra == [] and .materials.missing == [] and
+  .runtime.dependencyClosureComputedBeforeMetadataRewrite == true and
+  .runtime.pluginOperationClosureExact == true and
+  .runtime.representativePluginOperationSmokePassed == true and
+  .runtime.browser.zeroReachablePayloadClaim == false and
+  .runtime.browser.implementationModules == 0 and
+  .runtime.browser.cliRegistered == false and
+  .runtime.browser.executableOrPlaywrightPresent == false and
+  .runtime.browser.usableControlPath == false and
+  .runtime.controlUiServedAssetCount > 0 and
+  .sbom.wholeFilesystemExactMatch == true and
+  .sbom.pathTypeModeOwnerSizeLinkContentMultisetExact == true and
+  .scan.critical == 0 and .scan.high == 0 and .scan.secrets == 0 and
+  .scan.exactSingleLinuxArm64Subject == true and
+  .scan.allKnownLiveFindingsAbsent == true and
+  (.scan.knownLiveFindingIdsAbsent | length) == 8 and
+  .evidence.allRegularEvidenceFilesBound == true and
+  .evidence.index.sha256 == $evidenceIndexSha256
+' "$MANIFEST_PATH" >/dev/null || fail "local release manifest contract failed"
 
 MANIFEST_SHA256=$(sha256sum "$MANIFEST_PATH" | cut -d' ' -f1)
 printf '%s  %s\n' "$MANIFEST_SHA256" "$(basename -- "$MANIFEST_PATH")" \
   >"$MANIFEST_PATH.sha256"
-echo "[openclaw-build] PASS image=$RUNTIME_REF manifest=$MANIFEST_PATH manifest_sha256=$MANIFEST_SHA256"
+echo "[openclaw-build] PASS local_image=$RUNTIME_REF local_gates=passed registry_published=false manifest=$MANIFEST_PATH manifest_sha256=$MANIFEST_SHA256"

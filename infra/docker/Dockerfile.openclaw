@@ -15,7 +15,6 @@ USER root
 
 COPY infra/openclaw/openclaw.config.json5 /opt/teamagent/openclaw.source.json5
 COPY infra/openclaw/SOUL.md infra/openclaw/HEARTBEAT.md /opt/teamagent/workspace-seed/
-COPY infra/openclaw/prune-runtime.mjs /tmp/prune-runtime.mjs
 
 # Convert the reviewed JSON5 source into immutable canonical JSON. Runtime
 # mutations happen only on a fresh copy under /tmp.
@@ -54,6 +53,7 @@ RUN set -eux; \
 # unreachable from the real entry points, and physically remove source
 # compilers, tests, fixtures, type sources, source maps, and package CLIs.
 # A machine-readable reachability/pruning report is retained in the image.
+COPY infra/openclaw/prune-runtime.mjs /tmp/prune-runtime.mjs
 RUN node /tmp/prune-runtime.mjs && rm -f /tmp/prune-runtime.mjs
 
 # Rebuild the persisted plugin registry after pruning so its source hashes and
@@ -95,6 +95,8 @@ COPY --from=upstream --chown=65532:65532 /app/skills /app/skills
 COPY --from=upstream --chown=65532:65532 /opt/teamagent /opt/teamagent
 COPY --chown=65532:65532 --chmod=0555 infra/docker/openclaw-entrypoint.mjs /opt/teamagent/entrypoint.mjs
 COPY --chown=65532:65532 --chmod=0555 infra/openclaw/gateway-runtime.mjs /opt/teamagent/gateway-runtime.mjs
+COPY --chown=65532:65532 --chmod=0555 infra/openclaw/rollout-task-canary.mjs /opt/teamagent/rollout-task-canary.mjs
+COPY --chown=65532:65532 --chmod=0444 infra/openclaw/effective-tool-scope.json /opt/teamagent/effective-tool-scope.json
 
 ENV NODE_ENV=production \
     PATH=/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

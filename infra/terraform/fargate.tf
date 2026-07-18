@@ -681,7 +681,12 @@ resource "aws_ecs_service" "openclaw" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.openclaw[0].arn
   desired_count   = 1
-  launch_type     = "FARGATE"
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+  launch_type = "FARGATE"
 
   network_configuration {
     subnets          = data.aws_subnets.default.ids

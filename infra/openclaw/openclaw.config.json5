@@ -119,6 +119,8 @@
     mode: "local",
     port: 18789, // healthCheck(fargate.tf)が叩く 18789 に明示一致させる
     bind: "loopback", // 0.0.0.0 へは絶対に出さない。管理は SSH/Tailscale。
+    // Operator terminal はgateway process環境を含むshell能力なので明示的に無効化。
+    terminal: { enabled: false },
     // 共有 gateway secret は full operator scope 相当＝root 級。値は注入し、loopback+ファイル perm で守る。
     auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" },
   },

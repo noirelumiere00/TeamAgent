@@ -31,7 +31,8 @@ TEAMAGENT_MCP_BEARER=... TEAMAGENT_SHARED_COMPANY_DOMAINS=vectorinc.co.jp \
 ```
 期待: healthz=200 / bearer無=401 / search 200。`tools/list` は
 `infra/openclaw/effective-tool-scope.json` のうち現在の Terraform gate が有効な集合と一致し、
-余分・不足がないこと（「会社ナレッジ4のみ」という旧前提は廃止）。
+余分・不足がないこと（「会社ナレッジ4のみ」という旧前提は廃止）。OpenClaw rollout の
+one-off canary も同じ exact tools/list を検査するが、本ハーネスの RLS 攻撃検証を代替しない。
 
 ## 手順3: 敵対ハーネス（詐称→無効化）
 ```sh

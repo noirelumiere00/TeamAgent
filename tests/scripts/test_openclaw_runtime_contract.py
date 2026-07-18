@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
 import hashlib
+import io
 import json
 import re
 import subprocess
+import tarfile
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +28,16 @@ FARGATE = ROOT / "infra/terraform/fargate.tf"
 TASK_FILTER = ROOT / "infra/openclaw/harden-task-definition.jq"
 DEPLOY_HELPER = ROOT / "infra/terraform/apply_openclaw.sh"
 ACTUAL_IMAGE_TEST = ROOT / "tests/scripts/test_openclaw_runtime_image.py"
+TRUST_CONTRACT = ROOT / "infra/openclaw/trusted-release-contract.json"
+FILESYSTEM_SBOM = ROOT / "infra/openclaw/generate-filesystem-sbom.py"
+EVIDENCE_INDEXER = ROOT / "infra/openclaw/index-evidence.py"
+PLUGIN_OPERATION_SMOKE = ROOT / "infra/openclaw/plugin-operation-smoke.mjs"
+ROLLOUT_TASK_CANARY = ROOT / "infra/openclaw/rollout-task-canary.mjs"
+ROLLOUT_GATE = ROOT / "infra/openclaw/run-live-rollout-gates.mjs"
+CLOUDWATCH_FARGATE = ROOT / "infra/terraform/cloudwatch_fargate.tf"
+TASK_FIXTURE = ROOT / "tests/fixtures/openclaw/current-task-definition.json"
+ROLLOUT_FIXTURE = ROOT / "tests/fixtures/openclaw/rollout-gates-pass.json"
+STARTUP_LOG_FIXTURE = ROOT / "tests/fixtures/openclaw/startup-log-events.jsonl"
 
 
 def _strip_json5_comments(source: str) -> str:
@@ -124,8 +137,8 @@ def test_release_runtime_and_plugin_pins_are_aligned() -> None:
     )
     assert {plugin["id"] for plugin in lock["plugins"]} == {"slack", "amazon-bedrock"}
     assert {plugin["version"] for plugin in lock["plugins"]} == {lock["openclaw"]["version"]}
-    assert {plugin["gitHead"] for plugin in lock["plugins"]} == {lock["openclaw"]["releaseCommit"]}
     for plugin in lock["plugins"]:
+        assert "gitHead" not in plugin
         assert re.fullmatch(r"[0-9a-f]{64}", plugin["sha256"])
         assert re.fullmatch(r"[0-9a-f]{64}", plugin["shrinkwrapSha256"])
         assert plugin["tarball"].endswith(f"/{plugin['archive']}")
@@ -216,13 +229,32 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
         assert path_component in pruner
     assert "delete metadata.devDependencies" in pruner
     assert "delete metadata.scripts" in pruner
-    assert "markProductionPackage" in pruner
+    assert "computeProductionPackageClosure" in pruner
+    assert "closureComputedBeforeMetadataRewrite" in pruner
+    assert "excludedForbiddenDeclarations" in pruner
+    assert "computePluginOperationModuleClosure" in pruner
+    assert "postPruneClosureExactMatch" in pruner
+    assert "unresolvedComputedImports" in pruner
     assert "collectModuleGraph" in pruner
     assert "controlUiModuleRoots" in pruner
     assert "Vite's preload dependency map" in pruner
-    assert "controlUiReachableAssets" in pruner
+    assert "collectControlUiFullAssetClosure" in pruner
+    assert "controlUiReachableModuleAssets" in pruner
+    assert "controlUiServedAssets" in pruner
+    assert "controlUiDynamicAssetRegistrationsCoveredByWholeTree" in pruner
+    assert "controlUiBootstrapConfigRuntimeContractRequired" in pruner
     assert "controlUiMissingLocalImports" in pruner
     assert "preservedControlUiBrowserChunks" in pruner
+    assert "retainedFailClosedFacade" in pruner
+    assert "disableJitiExtensionSourceTransformLoader" in pruner
+    assert "disableTypeScriptCodeModeCompiler" in pruner
+    assert "jitiExtensionSourceTransformFacade" in pruner
+    assert "typeScriptCodeModeCompilerFacade" in pruner
+    assert "servedSha256" in pruner
+    assert "servedSize" in pruner
+    assert 'data-openclaw-terminal-enabled="false"' in pruner
+    assert "reachableBrowserPayloadZero: false" in pruner
+    assert "usableBrowserControlPath: false" in pruner
     assert "browserImplementationSignals" in pruner
     assert 'const SKILLS_ROOT = path.join(APP_ROOT, "skills")' in pruner
     assert pruner.count("SKILLS_ROOT,") == 2
@@ -231,6 +263,14 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     assert "registerBrowserPlugin" in pruner
     assert "browserHelpSourceSignature" in pruner
     assert "runtime-prune-report.json" in pruner
+    assert (
+        "infra/openclaw/rollout-task-canary.mjs "
+        "/opt/teamagent/rollout-task-canary.mjs"
+    ) in dockerfile
+    assert (
+        "infra/openclaw/effective-tool-scope.json "
+        "/opt/teamagent/effective-tool-scope.json"
+    ) in dockerfile
     assert "fs.writeFileSync(1,JSON.stringify({" in HELPER.read_text()
     assert "plugins registry --refresh" in dockerfile
     assert "npm install" not in dockerfile
@@ -259,6 +299,7 @@ def test_config_loads_only_reviewed_external_plugins_and_not_browser() -> None:
     assert config["channels"]["slack"]["appToken"] == "${SLACK_APP_TOKEN}"
     assert config["gateway"]["auth"]["token"] == "${OPENCLAW_GATEWAY_TOKEN}"
     assert config["gateway"]["bind"] == "loopback"
+    assert config["gateway"]["terminal"] == {"enabled": False}
     assert config["tools"]["exec"]["mode"] == "deny"
     assert config["tools"]["fs"]["workspaceOnly"] is True
     assert "browser" not in config["plugins"]["entries"]
@@ -333,31 +374,34 @@ def test_dedicated_builder_is_fail_closed_and_scans_child() -> None:
     helper = HELPER.read_text()
     for required in (
         "refusing to build a dirty or untracked source tree",
+        "shared trusted-release source verifier is absent",
+        "repository integration contract differs from the shared trusted contract",
         "SOURCE_ARCHIVE_SHA256",
         "SOURCE_ARTIFACT_VERSION",
         "SOURCE_URI",
-        "ATTESTATION_BUILDER_ID",
+        "BUILD_IDENTITY",
         "BUILDX_VERSION",
         "--platform linux/arm64",
-        "type=provenance,mode=max,builder-id=",
-        "type=sbom,generator=",
-        "expected exactly one arm64 attestation manifest",
-        "pushed SBOM/provenance attestations are missing",
-        "--format '{{ json .Provenance }}'",
-        "--format '{{ json .SBOM }}'",
-        "registry provenance source/builder/material validation failed",
-        "registry SPDX attestation payload validation failed",
+        "--provenance=false --load",
         "build metadata source/material validation failed",
-        "expected exactly one linux/arm64 child",
+        "EXPECTED_MATERIALS",
+        "exactSetMatch",
+        "extraExecutableOrRemoteMaterialDetected",
         '"containerimage.digest"',
+        "docker export",
         "--format cyclonedx",
-        'generator:{name:"trivy",version:$trivyVersion}',
+        "generate-filesystem-sbom.py",
+        "pathTypeModeOwnerSizeLinkContentMultisetExact",
+        "wholeFilesystemExactMatch",
         "physicalNpmMultisetExactMatch:true",
         "SBOM npm path/name/version multiset",
         "aquasecurity:trivy:FilePath",
-        "bomRefIntegrity:true",
+        "bomRefIntegrity",
         "--scanners vuln",
         "--scanners secret",
+        "CVE-2026-34182",
+        "CVE-2026-55200",
+        "candidate does not eliminate the observed live C8/H22 findings",
         "TRIVY_CACHE_DIR",
         'TRIVY_VERSION" == "$EXPECTED_TRIVY_VERSION',
         "--read-only",
@@ -384,26 +428,44 @@ def test_dedicated_builder_is_fail_closed_and_scans_child() -> None:
         "runtime-inventory.json",
         "actual-image-contract.json",
         "test_openclaw_runtime_image.py",
+        "plugin-operation-smoke.mjs",
+        "plugin-operation-smoke.json",
         "sbom.cdx.json",
         "sbom-npm-inventory.json",
+        "rootfs-inventory.json",
+        "sbom-equivalence.json",
+        "index-evidence.py",
+        "evidence-index.json",
         "forbiddenPackageOrPluginArtifacts:0",
         "developmentPayloadArtifacts:0",
-        "browserReachabilityValidated:true",
         "controlUiImportClosureValidated:true",
-        "controlUiHttpAssetClosureValidated:true",
+        "controlUiFullAssetClosureValidated:true",
         "controlUiMissingLocalImports",
-        "controlUiReachableAssets",
+        "controlUiServedAssets",
         "preservedControlUiBrowserChunks",
         "fargateNoNewPrivilegesEnforced:false",
-        "schemaVersion:3",
+        "schemaVersion:4",
+        "deploymentCredential:false",
+        'status:"LOCAL_GATES_PASSED"',
+        "registryPublished:false",
+        "canonicalTagPublished:false",
+        "sharedPromoterRequired:true",
         "MANIFEST_SHA256",
         "evidence directory must be a sibling of the release manifest",
         "EVIDENCE_MANIFEST_PREFIX",
     ):
         assert required in helper
-    assert "--sbom=false" not in helper
-    assert "sbomGenerator:$sbomAttestationGenerator" not in helper
-    assert 'format:"CycloneDX 1.6"' not in helper
+    for forbidden in (
+        "docker push",
+        "docker buildx imagetools create",
+        "--push",
+        "REGISTRY_PROVENANCE",
+        "REGISTRY_SBOM",
+        "ATTESTATION_DIGEST",
+        "SOURCE_COMMIT=${SOURCE_COMMIT",
+        "SOURCE_BRANCH=${SOURCE_BRANCH",
+    ):
+        assert forbidden not in helper
     assert helper.count("sort_by(.path, .name, .version)") >= 3
     gateway_args = re.search(
         r"gateway_args=\((?P<body>.*?)gateway_launcher=",
@@ -470,154 +532,86 @@ def test_codebuild_uses_pinned_trivy_and_dedicated_helper() -> None:
     assert "infra/openclaw/build-image.sh" in buildspec
     assert "SOURCE_ARCHIVE_SHA256" in buildspec
     assert "CODEBUILD_SOURCE_VERSION" in buildspec
-    assert 'Metadata["git-commit"]' in buildspec
-    assert 'Metadata["source-sha256"]' in buildspec
     assert "SOURCE_ARTIFACT_VERSION" in buildspec
     assert "git-${SOURCE_COMMIT:0:12}" in buildspec
-    assert "ATTESTATION_BUILDER_ID" in buildspec
+    assert "/opt/teamagent/trusted-release/bin/trusted-release" in buildspec
+    assert (
+        "/opt/teamagent/trusted-release/contracts/"
+        "teamagent-openclaw-production-v1.json"
+    ) in buildspec
+    assert "verify-source" in buildspec
+    assert "--source-statement" in buildspec
+    assert "--source-root" in buildspec
+    assert "--transport-version" in buildspec
+    assert "sourceRootReverified" in buildspec
+    assert "exactMaterialSetVerified" in buildspec
+    assert "wholeFilesystemSbomExact" in buildspec
+    assert "allEvidenceFilesBound" in buildspec
+    assert ".scan.critical == 0" in buildspec
+    assert ".scan.high == 0" in buildspec
+    assert ".scan.secrets == 0" in buildspec
+    assert ".scan.exactSingleLinuxArm64Subject == true" in buildspec
+    assert ".scan.allKnownLiveFindingsAbsent == true" in buildspec
     assert "CODEBUILD_BUILD_ID" in buildspec
-    assert ".buildAttestations.subjectValidated == true" in buildspec
-    assert ".buildAttestations.sourceValidated == true" in buildspec
-    assert ".buildAttestations.builderValidated == true" in buildspec
+    assert buildspec.index("build-image.sh") < buildspec.index("promote-openclaw")
     assert "openclaw-build-evidence" in buildspec
     assert 'resource "aws_codebuild_project" "openclaw_image"' in terraform
-    assert 'buildspec = "infra/codebuild/buildspec.openclaw.yml"' in terraform
+    assert (
+        'buildspec = file("${path.module}/../codebuild/buildspec.openclaw.yml")'
+        in terraform
+    )
+    assert 'resource "aws_iam_role" "codebuild_openclaw"' in terraform
+    assert "service_role = aws_iam_role.codebuild_openclaw.arn" in terraform
+    openclaw_policy = terraform.split(
+        'data "aws_iam_policy_document" "codebuild_openclaw"',
+        1,
+    )[1].split('resource "aws_iam_role_policy" "codebuild_openclaw"', 1)[0]
+    for forbidden_permission in (
+        "ecr:GetAuthorizationToken",
+        "ecr:PutImage",
+        "ecr:InitiateLayerUpload",
+        "sts:AssumeRole",
+    ):
+        assert forbidden_permission not in openclaw_policy
+    assert "aws_ecr_repository.openclaw.arn" not in terraform
     assert '"codebuild/openclaw-evidence"' in terraform
     legacy_project = terraform.split('resource "aws_codebuild_project" "openclaw_image"', 1)[0]
     assert "buildspec.openclaw.yml" not in legacy_project
     assert "openclaw-release/openclaw-build-evidence" in buildspec
+    for forbidden in ("docker push", "docker login", "aws ecr", "Metadata["):
+        assert forbidden not in buildspec
 
 
-def _deployable_manifest() -> dict[str, Any]:
-    repository = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw"
-    digest = "sha256:" + "a" * 64
-    return {
-        "schemaVersion": 3,
-        "image": {
-            "requested": f"{repository}:git-0123456789ab",
-            "runtimeRef": f"{repository}@{digest}",
-            "manifestDigest": digest,
-        },
-        "runtime": {
-            "platform": "linux/arm64",
-            "uid": 65532,
-            "gid": 65532,
-            "actualImageContractPassed": True,
-            "forbiddenPackageOrPluginArtifacts": 0,
-            "developmentPayloadArtifacts": 0,
-            "browserReachabilityValidated": True,
-            "controlUiImportClosureValidated": True,
-            "controlUiHttpAssetClosureValidated": True,
-        },
-        "scan": {"critical": 0, "high": 0, "secrets": 0},
-        "sbom": {
-            "format": "CycloneDX 1.7",
-            "physicalNpmMultisetExactMatch": True,
-        },
-        "buildAttestations": {
-            "registryPublished": True,
-            "subjectValidated": True,
-            "sourceValidated": True,
-            "builderValidated": True,
-            "builderId": (
-                "https://codebuild.ap-northeast-1.amazonaws.com/"
-                "builds/teamagent-dev-openclaw-image-builder:build-id"
-            ),
-        },
-    }
-
-
-def _write_manifest_with_checksum(path: Path, manifest: dict[str, Any]) -> None:
-    payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-    path.write_text(payload)
-    digest = hashlib.sha256(payload.encode()).hexdigest()
-    Path(f"{path}.sha256").write_text(f"{digest}  {path}\n")
+def _render_task(task: dict[str, Any], image: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["jq", "--arg", "image", image, "-f", str(TASK_FILTER)],
+        input=json.dumps(task),
+        check=False,
+        text=True,
+        capture_output=True,
+    )
 
 
 def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
     tmp_path: Path,
 ) -> None:
-    current_task = {
-        "family": "teamagent-dev-openclaw",
-        "taskRoleArn": "arn:aws:iam::123456789012:role/openclaw-task",
-        "executionRoleArn": "arn:aws:iam::123456789012:role/openclaw-exec",
-        "networkMode": "awsvpc",
-        "requiresCompatibilities": ["FARGATE"],
-        "cpu": "512",
-        "memory": "1024",
-        "runtimePlatform": {
-            "cpuArchitecture": "ARM64",
-            "operatingSystemFamily": "LINUX",
-        },
-        "volumes": [{"name": "preserved-volume"}],
-        "containerDefinitions": [
-            {
-                "name": "openclaw",
-                "image": "old:mutable",
-                "essential": True,
-                "user": "0",
-                "readonlyRootFilesystem": False,
-                "privileged": True,
-                "entryPoint": ["node"],
-                "command": ["dist/index.js", "gateway"],
-                "dockerSecurityOptions": ["no-new-privileges"],
-                "linuxParameters": {
-                    "tmpfs": [{"containerPath": "/tmp"}],
-                    "capabilities": {"add": ["SYS_ADMIN"]},
-                },
-                "mountPoints": [],
-                "environment": [
-                    {"name": "AWS_REGION", "value": "ap-northeast-1"},
-                    {
-                        "name": "OPENCLAW_CONFIG_PATH",
-                        "value": "/opt/teamagent/openclaw.json",
-                    },
-                    {"name": "SLACK_DM_ALLOWLIST", "value": "U123"},
-                ],
-                "secrets": [
-                    {"name": "TEAMAGENT_MCP_BEARER", "valueFrom": "secret-a"},
-                    {"name": "SLACK_BOT_TOKEN", "valueFrom": "secret-b"},
-                    {"name": "SLACK_APP_TOKEN", "valueFrom": "secret-c"},
-                    {"name": "OPENCLAW_GATEWAY_TOKEN", "valueFrom": "secret-d"},
-                ],
-                "logConfiguration": {
-                    "logDriver": "awslogs",
-                    "options": {"awslogs-group": "/teamagent/dev/openclaw"},
-                },
-            }
-        ],
-    }
-    task_path = tmp_path / "task.json"
-    task_path.write_text(json.dumps(current_task))
-    manifest_path = tmp_path / "manifest.json"
-    _write_manifest_with_checksum(manifest_path, _deployable_manifest())
-
-    rendered_process = subprocess.run(
-        [
-            "bash",
-            str(DEPLOY_HELPER),
-            "--render-only",
-            str(task_path),
-            str(manifest_path),
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
+    current_task = json.loads(TASK_FIXTURE.read_text())
+    image = (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+        f"teamagent-openclaw@sha256:{'b' * 64}"
     )
+    rendered_process = _render_task(current_task, image)
+    assert rendered_process.returncode == 0, rendered_process.stderr
     rendered = json.loads(rendered_process.stdout)
     assert rendered["runtimePlatform"] == {
         "cpuArchitecture": "ARM64",
         "operatingSystemFamily": "LINUX",
     }
     assert rendered["requiresCompatibilities"] == ["FARGATE"]
-    assert {volume["name"] for volume in rendered["volumes"]} == {
-        "preserved-volume",
-        "openclaw-tmp",
-    }
-    container = next(
-        item for item in rendered["containerDefinitions"] if item["name"] == "openclaw"
-    )
-    assert container["image"] == _deployable_manifest()["image"]["runtimeRef"]
+    assert rendered["volumes"] == [{"name": "openclaw-tmp"}]
+    assert len(rendered["containerDefinitions"]) == 1
+    container = rendered["containerDefinitions"][0]
+    assert container["image"] == image
     assert container["readonlyRootFilesystem"] is True
     assert container["user"] == "65532:65532"
     assert container["privileged"] is False
@@ -644,41 +638,104 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
         "SLACK_DM_ALLOWLIST",
     }
 
-    rejected_manifest = _deployable_manifest()
-    rejected_manifest["buildAttestations"]["builderValidated"] = False
-    _write_manifest_with_checksum(manifest_path, rejected_manifest)
-    rejected = subprocess.run(
-        [
-            "bash",
-            str(DEPLOY_HELPER),
-            "--render-only",
-            str(task_path),
-            str(manifest_path),
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
-    assert rejected.returncode != 0
-    assert "release manifest is not deployable" in rejected.stderr
+    adversarial: list[tuple[str, dict[str, Any]]] = []
 
-    rejected_manifest = _deployable_manifest()
-    rejected_manifest["runtime"]["controlUiHttpAssetClosureValidated"] = False
-    _write_manifest_with_checksum(manifest_path, rejected_manifest)
-    rejected = subprocess.run(
-        [
-            "bash",
-            str(DEPLOY_HELPER),
-            "--render-only",
-            str(task_path),
-            str(manifest_path),
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
+    mutated = copy.deepcopy(current_task)
+    mutated["containerDefinitions"].append(
+        copy.deepcopy(mutated["containerDefinitions"][0])
     )
-    assert rejected.returncode != 0
-    assert "release manifest is not deployable" in rejected.stderr
+    mutated["containerDefinitions"][1]["name"] = "sidecar"
+    adversarial.append(("sidecar", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["volumes"].append({"name": "data"})
+    adversarial.append(("extra volume", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["volumes"] = [{"name": "openclaw-tmp", "host": {"sourcePath": "/tmp"}}]
+    adversarial.append(("host volume", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["containerDefinitions"][0]["mountPoints"].append(
+        {"sourceVolume": "openclaw-tmp", "containerPath": "/data", "readOnly": False}
+    )
+    adversarial.append(("writable data mount", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["containerDefinitions"][0]["mountPoints"].append(
+        {"sourceVolume": "openclaw-tmp", "containerPath": "/readonly", "readOnly": True}
+    )
+    adversarial.append(("unapproved read-only mount", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["containerDefinitions"][0]["environment"][0]["value"] = "us-east-1"
+    adversarial.append(("region retarget", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["containerDefinitions"][0]["environment"].append(
+        {"name": "ECS_SERVICE", "value": "retargeted"}
+    )
+    adversarial.append(("environment retarget", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["containerDefinitions"][0]["secrets"].append(
+        copy.deepcopy(mutated["containerDefinitions"][0]["secrets"][0])
+    )
+    adversarial.append(("duplicate secret", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["containerDefinitions"][0]["portMappings"] = [{"containerPort": 18789}]
+    adversarial.append(("unexpected container field", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["ephemeralStorage"] = {"sizeInGiB": 200}
+    adversarial.append(("unexpected task field", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["family"] = "attacker-family"
+    adversarial.append(("family retarget", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["taskDefinitionArn"] = (
+        "arn:aws:ecs:ap-northeast-1:718959508629:"
+        "task-definition/attacker-family:53"
+    )
+    adversarial.append(("task ARN retarget", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["taskRoleArn"] = "arn:aws:iam::718959508629:role/admin"
+    adversarial.append(("task role retarget", mutated))
+
+    for label, candidate in adversarial:
+        rejected = _render_task(candidate, image)
+        assert rejected.returncode != 0, label
+        assert "OpenClaw task definition:" in rejected.stderr, label
+
+    wrong_image = _render_task(
+        current_task,
+        f"attacker.invalid/openclaw@sha256:{'c' * 64}",
+    )
+    assert wrong_image.returncode != 0
+    assert "fixed OpenClaw repository" in wrong_image.stderr
+
+    shared_cli = Path("/opt/teamagent/trusted-release/bin/trusted-release")
+    if not shared_cli.exists():
+        receipt_path = tmp_path / "untrusted-manifest.json"
+        receipt_path.write_text("{}\n")
+        fail_closed = subprocess.run(
+            [
+                "bash",
+                str(DEPLOY_HELPER),
+                "--render-only",
+                str(TASK_FIXTURE),
+                str(receipt_path),
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert fail_closed.returncode != 0
+        assert "shared trusted-release verifier is absent" in fail_closed.stderr
 
 
 def test_terraform_bootstrap_task_matches_cli_hardening_contract() -> None:
@@ -707,6 +764,11 @@ def test_terraform_bootstrap_task_matches_cli_hardening_contract() -> None:
     assert not re.search(r"^\s*dockerSecurityOptions\s*=", block, flags=re.MULTILINE)
     assert "linuxParameters.tmpfs" in block
     assert "サポートしない" in block
+    service_start = source.index('resource "aws_ecs_service" "openclaw"')
+    service_block = source[service_start:]
+    assert "deployment_circuit_breaker" in service_block
+    assert "enable   = true" in service_block
+    assert "rollback = true" in service_block
 
 
 def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
@@ -780,12 +842,21 @@ def test_actual_image_test_is_executable_and_checks_kernel_and_payload() -> None
         "CONTROL_UI_HTTP_PROBE",
         "controlUiAssetClosureServed",
         "controlUiRuntimeSecretLeakAbsent",
-        "servedModuleInventorySha256",
+        "servedAssetInventorySha256",
+        "controlUiServedAssets",
+        "manifest.webmanifest",
+        "ProviderIcon-bedrock.svg",
         "browser",
         "--help",
+        "genericOpenClawCliRetained",
+        "browserNamedSharedPayloadHonestlyReported",
         "browserBridgeFacadeFailClosed",
         "startBrowserBridgeServer",
+        "genericChildProcessPrimitives",
         "no bundled plugin manifest found for browser",
+        "pluginOperationModulesLoadWithStubbedProviders",
+        "conversations.history",
+        "ListFoundationModelsCommand",
         "actual-image-contract.json",
     ):
         assert required in source
@@ -794,14 +865,330 @@ def test_actual_image_test_is_executable_and_checks_kernel_and_payload() -> None
 def test_task_hardening_filter_and_deploy_helper_do_not_claim_fargate_nnp() -> None:
     task_filter = TASK_FILTER.read_text()
     deploy = DEPLOY_HELPER.read_text()
+    contract = json.loads(TRUST_CONTRACT.read_text())
     assert "readonlyRootFilesystem" in task_filter
     assert 'drop: ["ALL"]' in task_filter
     assert 'containerPath: "/tmp"' in task_filter
     assert "dockerSecurityOptions" in task_filter
     assert "del(.entryPoint, .command, .dockerSecurityOptions)" in task_filter
-    assert "release manifest is not deployable" in deploy
-    assert ".runtime.controlUiImportClosureValidated == true" in deploy
-    assert ".runtime.controlUiHttpAssetClosureValidated == true" in deploy
+    assert "expected exactly one container named openclaw; sidecars are forbidden" in task_filter
+    assert "only the task-scoped empty openclaw-tmp volume is allowed" in task_filter
+    assert "environment contains an unapproved name or value" in task_filter
+    assert "This script never decides deployability from a release manifest" in deploy
+    assert "shared trusted-release verifier is absent; render/deploy is blocked" in deploy
+    assert "inspect-deployment-receipt" in deploy
+    assert "verify-deployment-plan" in deploy
+    assert "consume-deployment-receipt" in deploy
+    assert "record-deployment-result" in deploy
+    assert ".verification.kmsSignatureVerified == true" in deploy
+    assert ".verification.fresh == true" in deploy
+    assert ".verification.oneTime == true" in deploy
+    assert ".verification.unconsumed == true" in deploy
+    assert ".release.exactMaterialsVerified == true" in deploy
+    assert ".release.wholeFilesystemSbomExact == true" in deploy
+    assert ".release.allEvidenceFilesBound == true" in deploy
+    assert ".release.canonicalPromotionVerified == true" in deploy
+    assert ".release.platformManifestCount == 1" in deploy
+    assert "CVE-2026-34182" in deploy
+    assert "CVE-2026-55200" in deploy
+    assert ".deployment.previousTaskDefinitionArn == $currentArn" in deploy
     assert "--render-only" in deploy
     assert "register-task-definition" in deploy
+    assert "deploymentCircuitBreaker={enable=true,rollback=true}" in deploy
+    assert "alarm_and_restore" in deploy
+    assert "run-live-rollout-gates.mjs" in deploy
+    assert "OpenClawRolloutGateFailure" in deploy
     assert "terraform apply" not in deploy
+    assert "OC_REPO" not in deploy
+    assert "ECS_SERVICE=${" not in deploy
+    assert "ECS_FAMILY=${" not in deploy
+    assert "no-new-privileges" not in task_filter
+    assert contract["source"]["allowArbitraryS3Zip"] is False
+    assert contract["source"]["allowBuilderProducedVerificationBooleans"] is False
+    assert contract["promotion"]["builderRoleMayAuthenticateOrWriteRegistry"] is False
+    assert contract["promotion"]["requiredPlatformManifestCount"] == 1
+    assert contract["deploymentReceipt"]["oneTime"] is True
+    assert contract["deploymentReceipt"]["requireAtomicConsume"] is True
+    assert (
+        len(
+            contract["deploymentReceipt"]["requiredScanStatus"][
+                "knownLiveFindingIdsAbsent"
+            ]
+        )
+        == 8
+    )
+
+
+def test_openclaw_startup_alarm_matches_both_exact_log_fixtures() -> None:
+    terraform = CLOUDWATCH_FARGATE.read_text()
+    events = [
+        json.loads(line)
+        for line in STARTUP_LOG_FIXTURE.read_text().splitlines()
+        if line.strip()
+    ]
+    assert [event["event"] for event in events] == [
+        "openclaw_entrypoint_error",
+        "openclaw_config_invariant_violation",
+        "openclaw_runtime_ready",
+    ]
+    matched = [
+        event
+        for event in events
+        if event["event"]
+        in {
+            "openclaw_entrypoint_error",
+            "openclaw_config_invariant_violation",
+        }
+    ]
+    assert len(matched) == 2
+    assert (
+        'pattern        = "{ $.event = \\"openclaw_config_invariant_violation\\" '
+        '|| $.event = \\"openclaw_entrypoint_error\\" }"'
+    ) in terraform
+    assert 'name          = "OpenClawStartupFailure"' in terraform
+    assert 'metric_name         = "OpenClawStartupFailure"' in terraform
+    assert 'metric_name         = "OpenClawRolloutGateFailure"' in terraform
+    assert '"openclaw_entrypoint_error"' in ENTRYPOINT.read_text()
+
+
+def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
+    tmp_path: Path,
+) -> None:
+    fixture = json.loads(ROLLOUT_FIXTURE.read_text())
+    passed = subprocess.run(
+        ["node", str(ROLLOUT_GATE), "--validate-fixture", str(ROLLOUT_FIXTURE)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert passed.returncode == 0, passed.stderr
+    assert json.loads(passed.stdout)["passed"] is True
+
+    mutations: list[tuple[str, dict[str, Any]]] = []
+    changed = copy.deepcopy(fixture)
+    changed["consumption"]["atomic"] = False
+    mutations.append(("replay/consume", changed))
+    changed = copy.deepcopy(fixture)
+    changed["service"]["services"][0]["deploymentConfiguration"][
+        "deploymentCircuitBreaker"
+    ]["rollback"] = False
+    mutations.append(("circuit breaker", changed))
+    changed = copy.deepcopy(fixture)
+    changed["task"]["tasks"][0]["taskDefinitionArn"] = fixture["expected"][
+        "previousTaskDefinition"
+    ]
+    mutations.append(("wrong task", changed))
+    changed = copy.deepcopy(fixture)
+    changed["taskEvent"]["mcp"]["toolNamesSha256"] = "0" * 64
+    mutations.append(("tool scope", changed))
+    changed = copy.deepcopy(fixture)
+    changed["taskEvent"]["bedrock"]["credentialSource"] = "AWS_ACCESS_KEY_ID"
+    mutations.append(("static credentials", changed))
+
+    for index, (label, candidate) in enumerate(mutations):
+        candidate_path = tmp_path / f"rollout-{index}.json"
+        candidate_path.write_text(json.dumps(candidate))
+        rejected = subprocess.run(
+            ["node", str(ROLLOUT_GATE), "--validate-fixture", str(candidate_path)],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert rejected.returncode != 0, label
+
+    task_canary = ROLLOUT_TASK_CANARY.read_text()
+    rollout = ROLLOUT_GATE.read_text()
+    for required in (
+        "ConverseCommand",
+        "ECS task-role credential endpoint is unavailable",
+        'method: "tools/list"',
+        "expectedToolNames",
+        "toolNamesSha256",
+        "static AWS credential variables reached the rollout task",
+    ):
+        assert required in task_canary
+    for required in (
+        "teamagent-dev-openclaw",
+        "deploymentCircuitBreaker",
+        "run-task",
+        "tasks-stopped",
+        "openclaw_rollout_task_canary",
+        "teamagent/dev/openclaw/rollout-canary",
+        "chat.postMessage",
+        "conversations.replies",
+        "mentionReplyExact",
+    ):
+        assert required in rollout
+    assert "process.env.ECS_SERVICE" not in rollout
+    assert "process.env.ECS_CLUSTER" not in rollout
+    assert "process.env.CANARY_SECRET" not in rollout
+
+
+def _minimal_trivy_sbom(image_id: str) -> dict[str, Any]:
+    return {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "serialNumber": "urn:uuid:00000000-0000-4000-8000-000000000001",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "container",
+                "name": "fixture",
+                "bom-ref": "urn:fixture:image",
+                "properties": [
+                    {"name": "aquasecurity:trivy:ImageID", "value": image_id}
+                ],
+            },
+            "tools": {
+                "components": [
+                    {
+                        "type": "application",
+                        "group": "aquasecurity",
+                        "name": "trivy",
+                        "version": "0.72.0",
+                    }
+                ]
+            },
+        },
+        "components": [],
+        "dependencies": [{"ref": "urn:fixture:image", "dependsOn": []}],
+    }
+
+
+def test_whole_filesystem_sbom_and_evidence_index_are_exact(tmp_path: Path) -> None:
+    rootfs_tar = tmp_path / "rootfs.tar"
+    with tarfile.open(rootfs_tar, "w") as archive:
+        directory = tarfile.TarInfo("app")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        directory.uid = 65532
+        directory.gid = 65532
+        archive.addfile(directory)
+
+        payload = b"runtime\n"
+        regular = tarfile.TarInfo("app/index.js")
+        regular.size = len(payload)
+        regular.mode = 0o444
+        regular.uid = 65532
+        regular.gid = 65532
+        archive.addfile(regular, io.BytesIO(payload))
+
+        symlink = tarfile.TarInfo("app/current.js")
+        symlink.type = tarfile.SYMTYPE
+        symlink.linkname = "index.js"
+        symlink.mode = 0o777
+        symlink.uid = 65532
+        symlink.gid = 65532
+        archive.addfile(symlink)
+
+    image_id = f"sha256:{'a' * 64}"
+    manifest_digest = f"sha256:{'b' * 64}"
+    config_digest = f"sha256:{'c' * 64}"
+    trivy_path = tmp_path / "trivy.cdx.json"
+    trivy_path.write_text(json.dumps(_minimal_trivy_sbom(image_id)))
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    inventory = evidence_dir / "rootfs-inventory.json"
+    sbom = evidence_dir / "sbom.cdx.json"
+    equivalence = evidence_dir / "sbom-equivalence.json"
+    generated = subprocess.run(
+        [
+            "python3",
+            str(FILESYSTEM_SBOM),
+            "--rootfs-tar",
+            str(rootfs_tar),
+            "--trivy-sbom",
+            str(trivy_path),
+            "--inventory-output",
+            str(inventory),
+            "--sbom-output",
+            str(sbom),
+            "--equivalence-output",
+            str(equivalence),
+            "--image-id",
+            image_id,
+            "--manifest-digest",
+            manifest_digest,
+            "--config-digest",
+            config_digest,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert generated.returncode == 0, generated.stderr
+    inventory_json = json.loads(inventory.read_text())
+    equivalence_json = json.loads(equivalence.read_text())
+    assert inventory_json["entryCount"] == 3
+    assert {
+        (entry["path"], entry["type"]) for entry in inventory_json["entries"]
+    } == {
+        ("app", "directory"),
+        ("app/current.js", "symlink"),
+        ("app/index.js", "file"),
+    }
+    file_entry = next(
+        entry for entry in inventory_json["entries"] if entry["path"] == "app/index.js"
+    )
+    assert file_entry["contentSha256"] == hashlib.sha256(b"runtime\n").hexdigest()
+    assert equivalence_json["wholeFilesystemExactMatch"] is True
+    assert (
+        equivalence_json["pathTypeModeOwnerSizeLinkContentMultisetExact"] is True
+    )
+
+    index_path = evidence_dir / "evidence-index.json"
+    indexed = subprocess.run(
+        [
+            "python3",
+            str(EVIDENCE_INDEXER),
+            "--evidence-dir",
+            str(evidence_dir),
+            "--output",
+            str(index_path),
+            "--image-id",
+            image_id,
+            "--manifest-digest",
+            manifest_digest,
+            "--config-digest",
+            config_digest,
+            "--rootfs-inventory-sha256",
+            hashlib.sha256(inventory.read_bytes()).hexdigest(),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert indexed.returncode == 0, indexed.stderr
+    index = json.loads(index_path.read_text())
+    assert index["allRegularEvidenceFilesBound"] is True
+    assert index["entryCount"] == len(index["entries"])
+    assert {entry["path"] for entry in index["entries"]} == {
+        "rootfs-inventory.json",
+        "sbom-equivalence.json",
+        "sbom.cdx.json",
+    }
+
+    (evidence_dir / "forbidden-link").symlink_to(sbom)
+    rejected_index = subprocess.run(
+        [
+            "python3",
+            str(EVIDENCE_INDEXER),
+            "--evidence-dir",
+            str(evidence_dir),
+            "--output",
+            str(evidence_dir / "second-index.json"),
+            "--image-id",
+            image_id,
+            "--manifest-digest",
+            manifest_digest,
+            "--config-digest",
+            config_digest,
+            "--rootfs-inventory-sha256",
+            hashlib.sha256(inventory.read_bytes()).hexdigest(),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert rejected_index.returncode != 0
+    assert "evidence symlink is forbidden" in rejected_index.stderr

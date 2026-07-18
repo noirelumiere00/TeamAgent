@@ -1,68 +1,86 @@
 # OpenClaw production go-live checklist
 
-The detailed authority is [deploy_runbook.md](deploy_runbook.md). This
-checklist must not be used to reintroduce the retired Terraform/Compose/ad-hoc
-Buildx deployment paths.
+The authority is `docs/openclaw/deploy_runbook.md`. A local manifest, adjacent
+checksum, arbitrary S3 ZIP/metadata, direct ECR tag, or direct ECS update is
+never a substitute for the trusted path.
 
-## Release evidence
+## Shared trust and source
 
-- [ ] Source commit is clean, reviewed, and represented by the exact versioned
-      S3 source object metadata and SHA-256.
-- [ ] Local ARM64 helper run passes with a schema-3 manifest. It correctly says
-      `buildAttestations.registryPublished=false` and is not used to deploy.
-- [ ] Dedicated `teamagent-<env>-openclaw-image-builder` CodeBuild run succeeds.
-- [ ] Downloaded production manifest checksum passes.
-- [ ] Registry attestation checks are all true: subject, source, and builder.
-- [ ] Runtime contract, browser reachability, Control UI import/HTTP asset
-      closure, `jiti`/dev/test absence, Slack/Bedrock plugin inventory,
-      Critical/High/Secrets zero, CycloneDX format, npm path/name/version
-      multiset, and `bom-ref` integrity all pass.
-- [ ] The exact ECR linux/arm64 child digest in `.image.runtimeRef` is the
-      deployment subject.
+- [ ] The out-of-source trusted-release executable and contract are present,
+      non-symlinks, independently reviewed, and byte-identical to the
+      repository integration contract.
+- [ ] A trusted publisher KMS-signs the exact Git commit archive/build context;
+      `.git` absence and S3 metadata cannot bypass commit proof.
+- [ ] The OpenClaw CodeBuild role has no ECR auth/write or promoter-assume
+      permission, and the buildspec is Terraform-embedded.
+- [ ] No operator-controlled environment override selects commit, repository,
+      account, family, service, or promotion target.
 
-## Infrastructure and task revision
+## Local and registry evidence
 
-- [ ] Normal Terraform configuration keeps `openclaw_image=""`; no OpenClaw
-      task/service Terraform target is planned or applied.
-- [ ] `apply_openclaw.sh --render-only` output was reviewed.
-- [ ] Rendered OpenClaw container uses UID/GID 65532, read-only rootfs,
-      `privileged=false`, capability drop `ALL`, writable `/tmp` empty volume,
-      canonical image ENTRYPOINT/CMD, gateway PID 1, clean SIGTERM exit 0,
-      `/readyz`, and `stopTimeout=30`.
-- [ ] IAM roles, four Secrets Manager bindings, CloudWatch logs,
-      `AWS_REGION`, and `SLACK_DM_ALLOWLIST` are preserved.
-- [ ] No plaintext secret exists in image env or task `environment`.
+- [ ] The clean final commit passes the schema-4 local ARM64 build.
+- [ ] The local manifest says `deploymentCredential=false`,
+      `LOCAL_GATES_PASSED`, and no registry/canonical publication.
+- [ ] Exact material set passes; missing and extra executable/remote materials
+      are rejected.
+- [ ] The merged-rootfs inventory and CycloneDX SBOM are exactly equivalent
+      for path/type/mode/UID/GID/size/link/content, and npm package multisets
+      and `bom-ref`s are exact.
+- [ ] Every evidence file is indexed, hashed, signed, and bound to the exact
+      deploy subject.
+- [ ] Runtime contract proves UID 65532, read-only rootfs, `/tmp` write only,
+      cap-drop, secret fail-closed, exit-code propagation, PID 1, `/readyz`,
+      and SIGTERM exit 0.
+- [ ] Slack/Bedrock representative operations load and execute with provider
+      calls stubbed and network disabled.
+- [ ] Browser/Playwright executables and usable browser control are absent;
+      retained browser-named/shared child-process payload is honestly recorded
+      and its public facade fails closed.
+- [ ] `jiti`, TypeScript/tsx compiler, Vite/Vitest, dev/test/type/source-map
+      payload, and non-root package CLIs are absent.
+- [ ] All 142 Control UI files pass on-disk and HTTP hash checks; transformed
+      root HTML and authenticated/unauthenticated bootstrap config pass.
+- [ ] Candidate is one exact `linux/arm64` manifest with C0/H0/S0 and none of
+      the eight live findings:
+      `12087`, `13221`, `33845`, `34182`, `42010`, `55200`, `57433`, `6100`.
+- [ ] Canonical `git-$SHA` is created only after all gates, from the exact
+      quarantined subject plus exact signed referrers; retry is immutable and
+      idempotent.
+
+## Deployment receipt and task
+
+- [ ] A fresh KMS-signed one-time receipt binds exact image/source/builder,
+      SBOM/provenance/signatures/referrers/evidence/scan, app S3 VersionId and
+      all four app provenance anchors, current/previous task state, rendered
+      payload, and deployment/canary intent.
+- [ ] `--render-only` rejects an absent shared verifier and any stale,
+      replayed, retargeted, or self-certified receipt.
+- [ ] Rendered task has one OpenClaw container, one `/tmp` volume/mount, no
+      sidecar, no `/data` or extra mount/volume, fixed roles/logs/secrets/env,
+      ARM64 Fargate, read-only rootfs, UID 65532, nonprivileged, and cap-drop
+      `ALL`.
 - [ ] Review explicitly accepts that Fargate cannot enforce
-      `no-new-privileges`; no task definition or evidence claims otherwise.
-- [ ] `bash infra/terraform/apply_openclaw.sh <production-manifest>` completes
-      and ECS reaches `services-stable`.
+      `no-new-privileges`; no production evidence claims otherwise.
+- [ ] ECS circuit breaker and rollback are enabled.
+- [ ] Receipt consumption is atomic immediately before service update and
+      durably records the previous task ARN.
 
-## Live smoke
+## Automatic live rollout gates
 
-- [ ] ECS `/readyz` is healthy; the Control UI root and its recorded module
-      closure are served without a 404/hash mismatch; MCP `/healthz` is
-      separately healthy.
-- [ ] CloudWatch shows gateway loopback listener without config repair,
-      browser activation, or secret values.
-- [ ] Slack Socket Mode is connected and a real mention receives a response.
-- [ ] A real Bedrock request succeeds through the task role; no static AWS key
-      is present.
-- [ ] Slack and Amazon Bedrock plugins are loaded; browser is absent.
-- [ ] MCP `tools/list` exactly equals the enabled intersection described by
-      `infra/openclaw/effective-tool-scope.json`.
-- [ ] Operators acknowledge the default set is not read-only: Gmail draft
-      creation and Slack file delivery are enabled; all optional write/job
-      gates match the approved release.
-- [ ] Two-user thread isolation and the adversarial RLS harness pass with no
-      outsider data leakage.
+- [ ] ECS reaches `services-stable` on the exact new task revision.
+- [ ] One-off canary task exits 0 on the exact revision and service network.
+- [ ] Bedrock `Converse` succeeds using ECS task-role credentials; no static
+      AWS key is present.
+- [ ] MCP `tools/list` exactly equals the 12 default-enabled tools and remains
+      within the reviewed 28-entry scope.
+- [ ] Slack Socket Mode is connected and the exact canary mention receives the
+      expected reply.
+- [ ] The shared framework signs and durably records the rollout result.
+- [ ] Startup alarm covers both `openclaw_config_invariant_violation` and
+      `openclaw_entrypoint_error`; rollout gate failure alarm is active.
+- [ ] A forced canary failure test has demonstrated automatic restoration of
+      the durable previous task ARN.
+- [ ] The separate adversarial RLS harness passes without outsider leakage.
 
-## Rollback readiness
-
-- [ ] Previous known-good task definition ARN is recorded.
-- [ ] Operator has the rollback command from the Runbook and can wait for
-      `services-stable`.
-- [ ] Emergency `desired-count 0` is understood to stop only the OpenClaw
-      service.
-
-Any unchecked release-evidence, task-isolation, Slack/Bedrock, tool-scope, or
-RLS item is a production NO-GO.
+Any unchecked item is production NO-GO. Merge also remains NO-GO until another
+independent review approves the exact final commit and its evidence.

@@ -1,134 +1,178 @@
-# OpenClaw release runtime
+# OpenClaw release boundary
 
-This directory is the release boundary for the TeamAgent OpenClaw gateway.
-The supported image is OpenClaw `2026.7.1` on linux/arm64, rebuilt onto the
-digest-pinned distroless Node 24 base and run as UID/GID `65532`.
+This directory defines the reviewed TeamAgent OpenClaw runtime and its
+fail-closed integration with the shared trusted-release framework. The only
+supported runtime is OpenClaw `2026.7.1` on a single `linux/arm64` manifest,
+rebuilt onto the digest-pinned distroless Node 24 base and run as
+UID/GID `65532`.
 
-## Runtime and Fargate contract
+## Runtime contract
 
-The final image contains no shell, package manager, browser executable,
-Playwright, Codex CLI, `jiti`, TypeScript/tsx, Vite/Vitest, build compiler, or
-test/fixture/type/source-map payload. `prune-runtime.mjs` resolves the actual
-production dependency closure and performs a static ESM reachability analysis
-from `dist/entry.js`, `dist/index.js`, and the module scripts referenced by
-`dist/control-ui/index.html`. Vite preload-map chunks are included in the
-Control UI closure. Unreachable browser registration and CLI chunks are
-deleted independent of their generated hash names.
+The final image has no shell, package manager, browser executable, Playwright,
+Codex CLI, `jiti`, TypeScript/tsx compiler, Vite/Vitest, build compiler, or
+test/fixture/type/source-map payload. `prune-runtime.mjs` computes the package
+and module closures before deleting packages or rewriting package metadata.
+It then proves the same Slack and Bedrock operation closure still exists and
+the representative operations execute with provider calls stubbed under
+`--network none`.
 
-Some browser-named SDK/doctor helper chunks remain because non-browser core
-code statically imports them. Browser-named Control UI chunks may also remain
-when the UI closure requires them; these are browser-side navigation or
-terminal support, not the OpenClaw browser automation extension. The retained
-`/opt/teamagent/runtime-prune-report.json` records those reachable shared
-chunks, their SHA-256 values and implementation-signal classifications, and
-proves that:
+The upstream bundles contain two optional compiler paths even when production
+configuration does not use them. The pruner verifies the exact reviewed
+upstream functions and replaces only these branches with deterministic
+fail-closed facades:
 
-- the browser plugin registration, CLI registration, executable browser
-  extension, and fast-path browser help payload are absent;
-- no unreachable browser implementation candidate remains;
-- every local import in the executable Control UI closure resolves, and the
-  actual gateway serves every recorded module with the recorded SHA-256;
-- the only `dist/extensions/browser/runtime-api.js` text is data in the
-  updater's reviewed sidecar-path inventory, not an import or registration.
+- the `jiti/static` extension source-transform loader;
+- the TypeScript Code Mode compiler loader, with advertised Code Mode
+  languages reduced to JavaScript.
 
-Production ECS revisions are rendered by
-`infra/openclaw/harden-task-definition.jq`. They enforce:
+The generic OpenClaw CLI remains because configuration and plugin inspection
+are operationally required. Browser-named shared chunks also remain when core
+or Control UI modules import them. In particular,
+`browser-bridges-*.js` retains generic `child_process.spawn` primitives. This
+is not reported as zero reachable browser-named payload. The runtime contract
+instead proves that:
+
+- browser plugin and CLI registrations, browser implementation chunks,
+  Playwright, Chrome MCP, CDP control code, and browser executables are absent;
+- the retained browser bridge public facade cannot find or load a browser
+  plugin and fails closed;
+- `openclaw browser --help` is unavailable while generic CLI help still works.
+
+The retained `/opt/teamagent/runtime-prune-report.json` contains hashes and
+closure edges for independent inspection.
+
+## Control UI closure
+
+Every regular file under `dist/control-ui` is included, not only the 81 ESM
+modules. The current closure contains 142 files, including root HTML,
+`sw.js`, CSS, webmanifest, provider SVGs, icons, and images. For each file the
+report records the on-disk hash/size and the expected HTTP hash/size.
+
+The gateway deterministically adds
+`data-openclaw-terminal-enabled="false"` to the served root HTML. Both the
+source and transformed representations are hashed. The actual-image test
+fetches all 142 paths, re-hashes all 142 on-disk files, checks static
+references, and authenticates `/control-ui-config.json`; an unauthenticated
+bootstrap request must return 401. Operator terminal support is explicitly
+disabled in `openclaw.config.json5`.
+
+## Fargate contract
+
+`harden-task-definition.jq` accepts only the fixed production family, roles,
+service provenance, one `openclaw` container, and one task-scoped
+`openclaw-tmp` volume mounted writable at `/tmp`. It rejects sidecars,
+additional volumes or mounts, writable `/data` or other paths, task/container
+field additions, environment retargeting, role changes, and image repository
+changes. The rendered definition enforces:
 
 - `readonlyRootFilesystem=true`;
-- `user=65532:65532`, `privileged=false`, and Linux capability drop `ALL`;
-- one writable task-scoped empty volume mounted only at `/tmp`;
-- the image's canonical ENTRYPOINT/CMD and `/readyz` health check.
+- `user=65532:65532`, `privileged=false`, capability drop `ALL`;
+- canonical image ENTRYPOINT/CMD and `/readyz` health check;
+- only the four fixed Secrets Manager bindings and reviewed environment keys.
 
-The canonical CMD enters `gateway-runtime.mjs`, disables the optional packaged
-Node compile-cache respawn, and then `execve`s the official OpenClaw launcher.
-This keeps the gateway as PID 1. It avoids the upstream respawn supervisor's
-one-second signal escalation turning a clean but slightly slower SIGTERM
-shutdown into exit 1; the build gate also rejects a gateway PID 1 that still
-has a supervised child process.
+The canonical CMD uses `execve`, so the gateway is PID 1. Actual-image tests
+verify child exit-code propagation and clean SIGTERM exit 0.
 
-AWS Fargate does not accept Docker `no-new-privileges` security options or
-`linuxParameters.tmpfs`. Therefore production does **not** claim to enforce
-`no-new-privileges`; local Docker contract tests use it as an additional
-defense only. The residual risk is recorded in the release manifest. The
-writable `/tmp` volume is ephemeral and is lost with the task.
+Fargate cannot enforce Docker `no-new-privileges` or `linuxParameters.tmpfs`.
+Production therefore makes no such claim. Local Docker tests use
+`no-new-privileges`; production compensates with nonroot UID, capability drop,
+read-only rootfs, fixed IAM/network policy, and a task-scoped ephemeral `/tmp`
+volume. This remains a documented risk.
 
-## Build, evidence, and publication
+## Local build and evidence
 
-`infra/openclaw/build-image.sh` is the only build/verification implementation.
-It refuses a dirty Git tree, binds the image labels and BuildKit provenance to
-the exact commit/source archive, builds linux/arm64, and runs the real image
-under the isolation contract.
-
-Local verification does not publish:
+`build-image.sh` builds and verifies locally; it never pushes. It requires a
+clean attached Git commit and the Buildx/Trivy versions pinned in
+`plugins-lock.json`.
 
 ```sh
 COMMIT=$(git rev-parse HEAD)
+SHORT=${COMMIT:0:12}
 bash infra/openclaw/build-image.sh \
-  --image "teamagent-openclaw:git-${COMMIT:0:12}" \
-  --manifest "/tmp/openclaw-${COMMIT:0:12}-manifest.json" \
-  --evidence-dir "/tmp/openclaw-${COMMIT:0:12}-evidence"
+  --image "teamagent-openclaw:git-$SHORT" \
+  --manifest "/tmp/openclaw-$SHORT-manifest.json" \
+  --evidence-dir "/tmp/openclaw-$SHORT-evidence"
 ```
 
-The helper requires the Docker Buildx and Trivy versions pinned in
-`plugins-lock.json`, plus `jq`, Python 3, and `sha256sum`. Its schema-3 manifest
-covers:
+The schema-4 output is explicitly `deploymentCredential=false` and
+`promotion.status=LOCAL_GATES_PASSED`. It binds:
 
-- actual ARM64 image config, nonroot UID/GID, read-only writes, writable
-  `/tmp`, capability bounds, secret fail-closed behavior, child exit code,
-  `/readyz`, Control UI module delivery, SIGTERM, Slack and Bedrock plugin
-  loading, and browser CLI absence;
-- the static browser reachability report and physical absence of `jiti`,
-  forbidden tooling, tests, fixtures, source types/maps, and non-root package
-  bin declarations;
+- the exact single ARM64 image/config/rootfs subject;
+- exact BuildKit material set, with extra or missing material rejected;
+- runtime inventory and actual-image contract;
+- all Control UI source/HTTP assets and dynamic bootstrap result;
+- exact Slack/Bedrock operation closures and offline operation smoke;
 - Trivy Critical=0, High=0, Secrets=0;
-- CycloneDX format derived from the actual document, unique/dangling
-  `bom-ref` checks, and exact path/name/version **multiset** equality between
-  every physical npm package instance and every npm SBOM component.
+- the absence of all eight findings observed in the latest live C8/H22 image:
+  `CVE-2026-12087`, `CVE-2026-13221`, `CVE-2026-33845`,
+  `CVE-2026-34182`, `CVE-2026-42010`, `CVE-2026-55200`,
+  `CVE-2026-57433`, and `CVE-2026-6100`;
+- a CycloneDX SBOM augmented with every merged-rootfs filesystem object and an
+  exact path/type/mode/UID/GID/size/link/content equivalence check;
+- the exact physical npm package instance path/name/version multiset and `bom-ref`
+  integrity;
+- a hash index of every evidence file.
 
-The manifest and evidence directory must be siblings. Evidence paths include
-the evidence-directory basename and are relative to the manifest's parent, so
-the CodeBuild ZIP remains self-contained and every recorded SHA-256 can be
-rechecked after extraction.
+The local manifest and adjacent checksum are evidence only. Neither is a
+signature, release receipt, or deployment credential.
 
-Production publication is only through the dedicated
-`aws_codebuild_project.openclaw_image`, which uses
-`infra/codebuild/buildspec.openclaw.yml`. Its BuildKit attestations are accepted
-only after all of these are parsed back from the registry and validated:
+## Trusted source and promotion integration
 
-- the attestation manifest refers to the exact linux/arm64 child digest;
-- source repository, commit, branch, source-archive SHA-256, artifact version,
-  Dockerfile frontend, base/upstream/plugin material digests all match;
-- the SLSA builder ID equals the current CodeBuild build URI;
-- the registry SPDX payload is present and non-empty.
+The S3 ZIP and its metadata are untrusted transport. The dedicated OpenClaw
+CodeBuild role has no ECR authentication/write permission and cannot assume a
+promotion role. Its Terraform-embedded buildspec requires the out-of-source
+shared executable and byte-identical contract at:
 
-BuildKit attestations are not a cryptographic image signature. ECR IAM,
-versioned S3 source/evidence, immutable digest selection, and parsed attestation
-validation are the current trust boundary; signature verification remains a
-documented residual supply-chain risk.
+```text
+/opt/teamagent/trusted-release/bin/trusted-release
+/opt/teamagent/trusted-release/contracts/teamagent-openclaw-production-v1.json
+```
 
-## Deployment and tool scope
+Before any repository script executes, that framework must verify a
+KMS-signed trusted publisher statement bound to the exact commit archive and
+build context. After all local tests and scans pass, only the separate trusted
+promoter may publish a quarantine subject and atomically promote that exact
+subject plus the exact signed referrer set to immutable `git-$SHA`.
+Canonical tags must not exist before gates pass; approved retry is idempotent
+and must not delete an existing release.
 
-`infra/terraform/apply_openclaw.sh <release-manifest.json>` is the only
-supported deployment path for the existing service. It rejects local/unpushed
-manifests and re-renders the current ECS task definition through the hardening
-filter before registering a revision. OpenClaw remains CLI-managed; keep
-Terraform `openclaw_image` empty during normal operation.
+The shared worker is owned outside this OpenClaw change. Until it provides the
+required executable and matching contract, CodeBuild, render, and deploy all
+fail closed. That is intentional.
 
-`docker-compose.yml` is decommissioned and contains no services.
+## Deployment and rollout
 
-The effective MCP scope is not “four read-only tools.” Its reviewed,
-machine-checkable inventory is `effective-tool-scope.json`. A tool is callable
-only if it is both in OpenClaw's include list and registered by the deployed
-MCP task. The default Terraform task enables twelve entries, including Gmail
-draft writes and Slack file delivery; optional gates can expose calendar
-writes, external scrape/analysis, job submission, and report/S3 writes.
+`apply_openclaw.sh` accepts only a fresh KMS-signed one-time deployment
+receipt. It does not accept a build manifest, adjacent checksum, builder
+booleans, or environment overrides for account/repository/family/service.
+The receipt binds the exact image, source archive, builder, signatures,
+referrers, whole-filesystem SBOM, evidence index, C0/H0/S0 scan status, eight
+live-CVE absences, Connect Web S3 VersionId and four app provenance anchors,
+current/previous task ARN and hash, rendered registration payload, and rollout
+intent.
 
-All four runtime secrets are required and injected through ECS:
+Immediately before `update-service`, the helper rechecks the service task ARN
+and asks the shared framework to atomically consume the receipt while
+durably recording the previous task ARN. ECS deployment circuit breaker and
+rollback are enabled. After `services-stable`, an isolated one-off task and
+Slack canary must prove:
 
-- `SLACK_BOT_TOKEN`
-- `SLACK_APP_TOKEN`
-- `OPENCLAW_GATEWAY_TOKEN`
-- `TEAMAGENT_MCP_BEARER`
+- task-role Bedrock `Converse`;
+- exact MCP `tools/list` and reviewed tool scope;
+- Slack connection and exact mention/reply behavior.
 
-Bedrock uses only the ECS task role and `AWS_REGION`; static AWS access keys
-must never be injected.
+Any update, stability, canary, or durable-result failure emits the rollout
+failure metric and restores the recorded previous task definition.
+
+The effective MCP authority is `effective-tool-scope.json`. The default
+Terraform task currently exposes 12 tools; the reviewed OpenClaw include list
+contains 28. This scope is not read-only: Gmail draft and Slack file-delivery
+operations are among the default tools.
+
+The four required runtime secrets are `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
+`OPENCLAW_GATEWAY_TOKEN`, and `TEAMAGENT_MCP_BEARER`. Bedrock uses only the ECS
+task role; static AWS credentials are forbidden.
+
+See `docs/openclaw/deploy_runbook.md`. Production remains NO-GO until the
+shared trusted framework is present, an independent review approves the final
+commit, and real CodeBuild/ECR/Fargate/Slack/Bedrock/tools-list gates pass.
