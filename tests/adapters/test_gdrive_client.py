@@ -25,6 +25,8 @@ from teamagent.adapters.gdrive_client import (
     GDriveClient,
     GDriveDownloadContentError,
     GDrivePermissionsPaginationError,
+    GDriveTraversalIncompleteError,
+    IncompleteDriveTraversal,
     extract_acl_emails,
 )
 
@@ -44,7 +46,10 @@ class _FakeRequest:
 
 class _FakeFiles:
     def __init__(self, list_response: Any) -> None:
-        self._list_response = list_response
+        self._list_response = {
+            "incompleteSearch": False,
+            **list_response,
+        }
         self.last_list_kwargs: dict[str, Any] = {}
         self.last_get_media_kwargs: dict[str, Any] = {}
 
@@ -126,6 +131,38 @@ class FakeDriveService:
         return self._changes
 
 
+class _PagedListResource:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self._responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    def list(self, **kwargs: Any) -> _FakeRequest:
+        index = len(self.calls)
+        self.calls.append(kwargs)
+        if index >= len(self._responses):
+            raise AssertionError("unexpected pagination request")
+        return _FakeRequest(self._responses[index])
+
+
+class _TraversalService:
+    def __init__(
+        self,
+        *,
+        file_pages: list[dict[str, Any]] | None = None,
+        drive_pages: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self._file_pages = _PagedListResource(
+            [{"incompleteSearch": False, **page} for page in (file_pages or [{"files": []}])]
+        )
+        self._drive_pages = _PagedListResource(drive_pages or [{"drives": []}])
+
+    def files(self) -> _PagedListResource:
+        return self._file_pages
+
+    def drives(self) -> _PagedListResource:
+        return self._drive_pages
+
+
 # -----------------------------------------------------------
 # list_files
 # -----------------------------------------------------------
@@ -139,6 +176,7 @@ def test_list_files_returns_drive_file_objects() -> None:
                     "mimeType": "application/pdf",
                     "modifiedTime": "2026-05-20T01:23:45.000Z",
                     "size": "12345",
+                    "md5Checksum": "ABCDEF0123456789ABCDEF0123456789",
                     "parents": ["0XYZ"],
                     "webViewLink": "https://drive.google.com/file/d/1ABC/view",
                     "owners": [{"emailAddress": "taro@vectorinc.co.jp"}],
@@ -155,10 +193,12 @@ def test_list_files_returns_drive_file_objects() -> None:
     assert f.id == "1ABC"
     assert f.name == "proposal.pdf"
     assert f.size == 12345
+    assert f.md5_checksum == "abcdef0123456789abcdef0123456789"
     assert f.parents == ("0XYZ",)
     assert f.web_view_link == "https://drive.google.com/file/d/1ABC/view"
     assert f.owners_email == ("taro@vectorinc.co.jp",)
     assert next_token == "PAGE2"
+    assert "md5Checksum" in fake.files().last_list_kwargs["fields"]
 
 
 def test_list_files_builds_query_with_folder_and_mime() -> None:
@@ -195,9 +235,123 @@ def test_list_files_handles_missing_optional_fields() -> None:
     client = GDriveClient(service=fake)
     files, _ = client.list_files(folder_id="F", request_id="r")
     assert files[0].size is None
+    assert files[0].md5_checksum is None
     assert files[0].parents == ()
     assert files[0].owners_email == ()
     assert files[0].web_view_link is None
+
+
+def test_list_files_raises_on_incomplete_search_true() -> None:
+    client = GDriveClient(
+        service=FakeDriveService(
+            files_list={
+                "files": [],
+                "incompleteSearch": True,
+            }
+        )
+    )
+
+    with pytest.raises(IncompleteDriveTraversal, match="incompleteSearch=true"):
+        client.list_files(folder_id="F", request_id="r")
+
+
+def test_list_files_raises_on_missing_incomplete_search_signal() -> None:
+    service = FakeDriveService()
+    service.files()._list_response.pop("incompleteSearch")
+
+    with pytest.raises(IncompleteDriveTraversal, match="missing or invalid"):
+        GDriveClient(service=service).list_files(folder_id="F", request_id="r")
+
+
+# -----------------------------------------------------------
+# complete traversal contracts
+# -----------------------------------------------------------
+def test_walk_raises_when_twenty_page_cap_leaves_token() -> None:
+    pages = [{"files": [], "nextPageToken": f"PAGE-{index + 1}"} for index in range(20)]
+    client = GDriveClient(service=_TraversalService(file_pages=pages))
+
+    with pytest.raises(
+        GDriveTraversalIncompleteError,
+        match="page limit reached with remaining token",
+    ) as exc_info:
+        client.walk_files_recursive(root_id="ROOT", request_id="r")
+
+    assert exc_info.value.reason == "page limit reached with remaining token"
+    assert exc_info.value.diagnostics["max_pages"] == 20
+
+
+def test_walk_raises_on_pagination_token_cycle() -> None:
+    client = GDriveClient(
+        service=_TraversalService(
+            file_pages=[
+                {"files": [], "nextPageToken": "LOOP"},
+                {"files": [], "nextPageToken": "LOOP"},
+            ]
+        )
+    )
+
+    with pytest.raises(GDriveTraversalIncompleteError, match="pagination token cycle"):
+        client.walk_files_recursive(root_id="ROOT", request_id="r")
+
+
+def test_walk_raises_when_max_depth_has_child_folders() -> None:
+    client = GDriveClient(
+        service=_TraversalService(
+            file_pages=[
+                {
+                    "files": [
+                        {
+                            "id": "CHILD",
+                            "name": "child",
+                            "mimeType": "application/vnd.google-apps.folder",
+                        }
+                    ]
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(GDriveTraversalIncompleteError, match="max depth reached"):
+        client.walk_files_recursive(root_id="ROOT", request_id="r", max_depth=0)
+
+
+def test_shared_drive_walk_raises_on_incomplete_search_true() -> None:
+    client = GDriveClient(
+        service=_TraversalService(
+            file_pages=[
+                {
+                    "files": [],
+                    "incompleteSearch": True,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(IncompleteDriveTraversal, match="incompleteSearch=true"):
+        client.walk_files_recursive(
+            root_id="DRIVE",
+            drive_id="DRIVE",
+            request_id="r",
+        )
+
+
+def test_list_shared_drives_raises_when_page_cap_leaves_token() -> None:
+    client = GDriveClient(
+        service=_TraversalService(
+            drive_pages=[
+                {
+                    "drives": [{"id": "D1", "name": "Drive 1"}],
+                    "nextPageToken": "PAGE-2",
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(
+        GDriveTraversalIncompleteError,
+        match="page limit reached with remaining token",
+    ):
+        client.list_shared_drives(request_id="r", max_pages=1)
 
 
 # -----------------------------------------------------------
@@ -349,6 +503,34 @@ def test_download_file_bytes_classifies_html_response(
         "supportsAllDrives": True,
         "acknowledgeAbuse": True,
     }
+
+
+def test_download_file_bytes_enforces_hard_cap_before_buffer_growth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeDownloader:
+        def __init__(self, stream: Any, request: Any, *, chunksize: int) -> None:
+            self._stream = stream
+
+        def next_chunk(self, *, num_retries: int) -> tuple[None, bool]:
+            self._stream.write(b"123456")
+            return None, True
+
+    monkeypatch.setattr("googleapiclient.http.MediaIoBaseDownload", _FakeDownloader)
+    client = GDriveClient(service=FakeDriveService())
+
+    with pytest.raises(GDriveDownloadContentError) as raised:
+        client.download_file_bytes(file_id="F1", request_id="r", max_bytes=5)
+
+    assert raised.value.category == "download_too_large"
+    assert raised.value.actual_bytes == 6
+
+
+def test_download_file_bytes_rejects_nonpositive_hard_cap() -> None:
+    with pytest.raises(ValueError, match="max_bytes"):
+        GDriveClient(service=FakeDriveService()).download_file_bytes(
+            file_id="F1", request_id="r", max_bytes=0
+        )
 
 
 # -----------------------------------------------------------

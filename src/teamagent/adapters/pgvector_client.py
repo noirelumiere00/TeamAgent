@@ -166,6 +166,7 @@ class PgVectorClient:
         user_email: str | None = None,
         user_groups: list[str] | None = None,
         user_role: str | None = None,
+        application_name: str | None = None,
     ) -> Iterator[psycopg.Connection[dict[str, Any]]]:
         """コンテキストマネージャで接続を取得する。
 
@@ -177,6 +178,8 @@ class PgVectorClient:
           migration 0002 を流していなくても動く）
         - `user_email` / `user_groups` / `user_role` を渡すと、対応する
           `app.user_*` GUC を SET LOCAL で注入し、RLS policy 評価に使われる
+        - `application_name` は transaction-local に固定し、共有poolへ値を漏らさず
+          `pg_stat_activity` で実行中writerを識別できるようにする
         - これらは transaction 単位で適用、commit 後は破棄
 
         終了時に必ず close（プール時は RESET ROLE で reset し返却）する。例外時もロールバック。
@@ -191,7 +194,14 @@ class PgVectorClient:
             # --- プール経路: 借用→設定→commit/rollback→返却（RESET ROLE は pool 側） ---
             with self._pool.connection() as conn:
                 try:
-                    self._apply_session(conn, app_role, user_email, user_groups, user_role)
+                    self._apply_session(
+                        conn,
+                        app_role,
+                        user_email,
+                        user_groups,
+                        user_role,
+                        application_name,
+                    )
                     yield conn
                     conn.commit()
                 except Exception:
@@ -203,7 +213,14 @@ class PgVectorClient:
         # _connect_pg でタイムアウト/keepalive と pgvector 型登録を適用する（プール経路と同条件）。
         conn = _connect_pg(self.dsn)
         try:
-            self._apply_session(conn, app_role, user_email, user_groups, user_role)
+            self._apply_session(
+                conn,
+                app_role,
+                user_email,
+                user_groups,
+                user_role,
+                application_name,
+            )
             yield conn
             conn.commit()
         except Exception:
@@ -219,6 +236,7 @@ class PgVectorClient:
         user_email: str | None,
         user_groups: list[str] | None,
         user_role: str | None,
+        application_name: str | None = None,
     ) -> None:
         """RLS 用のロール/GUC を接続に設定する（プール経路・直結経路で共通）。
 
@@ -234,6 +252,15 @@ class PgVectorClient:
         """
         ef_search = _env_int("SEARCH_HNSW_EF_SEARCH", 0)
         with conn.cursor() as cur:
+            if application_name:
+                if "\x00" in application_name or len(application_name.encode("utf-8")) > 63:
+                    raise ValueError(
+                        "application_name must be non-empty, NUL-free, and at most 63 bytes"
+                    )
+                cur.execute(
+                    "SELECT set_config('application_name', %s, true)",
+                    (application_name,),
+                )
             if app_role:
                 if not app_role.replace("_", "").isalnum():
                     raise ValueError(f"invalid app_role: {app_role!r}")

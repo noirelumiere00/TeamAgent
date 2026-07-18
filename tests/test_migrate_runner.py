@@ -12,6 +12,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MIGRATE_PY = PROJECT_ROOT / "scripts" / "migrate.py"
 
@@ -75,3 +77,163 @@ def test_run_returns_exit_code_2_when_dsn_missing(monkeypatch) -> None:  # type:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     rc = mod.run(dsn=None, dry_run=True)
     assert rc == 2
+
+
+def test_apply_one_rejects_autocommit_before_executing_sql(tmp_path: Path) -> None:
+    mod = _load_migrate_module()
+    migration = tmp_path / "9998_autocommit.sql"
+    migration.write_text("SELECT 1;\n", encoding="utf-8")
+
+    class _AutocommitConnection:
+        autocommit = True
+
+        def cursor(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("autocommit validation must happen before cursor use")
+
+    with pytest.raises(RuntimeError, match="autocommit=False"):
+        mod._apply_one(_AutocommitConnection(), "9998", migration)
+
+
+@pytest.mark.parametrize(
+    "transaction_statement",
+    (
+        "BEGIN;",
+        "BEGIN WORK;",
+        "BEGIN TRANSACTION;",
+        "START TRANSACTION;",
+        "COMMIT;",
+        "COMMIT WORK;",
+        "ROLLBACK;",
+        "ROLLBACK WORK;",
+    ),
+)
+def test_apply_one_rejects_embedded_transaction_control(
+    tmp_path: Path,
+    transaction_statement: str,
+) -> None:
+    mod = _load_migrate_module()
+    migration = tmp_path / "9999_embedded_commit.sql"
+    migration.write_text(f"SELECT 1;\n{transaction_statement}\n", encoding="utf-8")
+
+    class _TransactionalConnection:
+        autocommit = False
+
+        def cursor(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("transaction-control validation must happen before cursor use")
+
+    with pytest.raises(RuntimeError, match="owns the transaction"):
+        mod._apply_one(_TransactionalConnection(), "9999", migration)
+
+
+def test_repository_migrations_do_not_embed_transaction_control() -> None:
+    mod = _load_migrate_module()
+
+    offenders = [
+        path.name
+        for _, path in mod._list_migrations()
+        if mod._TRANSACTION_CONTROL_RE.search(path.read_text(encoding="utf-8"))
+    ]
+
+    assert offenders == []
+
+
+def test_dry_run_rolls_back_bootstrap_and_never_executes_migration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mod = _load_migrate_module()
+    migration = tmp_path / "9997_dry_run.sql"
+    migration.write_text("SELECT 'migration-body';\n", encoding="utf-8")
+
+    class _Cursor:
+        def __init__(self, conn):  # type: ignore[no-untyped-def]
+            self._conn = conn
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args):  # type: ignore[no-untyped-def]
+            return False
+
+        def execute(self, statement, params=None):  # type: ignore[no-untyped-def]
+            self._conn.statements.append(str(statement))
+
+        def fetchall(self):  # type: ignore[no-untyped-def]
+            return []
+
+    class _Connection:
+        autocommit = False
+
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+            self.commits = 0
+            self.rollbacks = 0
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args):  # type: ignore[no-untyped-def]
+            return False
+
+        def cursor(self):  # type: ignore[no-untyped-def]
+            return _Cursor(self)
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    conn = _Connection()
+    monkeypatch.setattr(mod, "_list_migrations", lambda: [("9997", migration)])
+    monkeypatch.setattr(mod.psycopg, "connect", lambda *args, **kwargs: conn)
+
+    assert mod.run(dry_run=True, dsn="postgresql://unused") == 0
+    assert conn.commits == 0
+    assert conn.rollbacks == 1
+    assert all("migration-body" not in statement for statement in conn.statements)
+
+
+def test_checksum_drift_is_a_hard_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mod = _load_migrate_module()
+    migration = tmp_path / "9996_changed.sql"
+    migration.write_text("SELECT 1;\n", encoding="utf-8")
+
+    class _Cursor:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args):  # type: ignore[no-untyped-def]
+            return False
+
+        def execute(self, statement, params=None):  # type: ignore[no-untyped-def]
+            return None
+
+    class _Connection:
+        autocommit = False
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args):  # type: ignore[no-untyped-def]
+            return False
+
+        def cursor(self):  # type: ignore[no-untyped-def]
+            return _Cursor()
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+    monkeypatch.setattr(mod, "_list_migrations", lambda: [("9996", migration)])
+    monkeypatch.setattr(mod, "_applied_versions", lambda conn: {"9996": "0" * 64})
+    monkeypatch.setattr(mod.psycopg, "connect", lambda *args, **kwargs: _Connection())
+
+    assert mod.run(dry_run=True, dsn="postgresql://unused") == 1
+    assert "[ERROR]" in capsys.readouterr().err
