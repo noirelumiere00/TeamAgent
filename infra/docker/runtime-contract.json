@@ -126,8 +126,9 @@
         "namespace_sandbox_required": true,
         "seccomp_profile": "infra/docker/playwright-seccomp-1.60.0.json",
         "seccomp_profile_source": "https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json",
-        "seccomp_profile_sha256": "cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849",
+        "seccomp_profile_sha256": "77c6753ee88a0db58e43c9235cdd05ab9545bf1f5446a51528e0f328ed872257",
         "additional_allowed_syscalls": [
+          "chroot",
           "clone",
           "setns",
           "unshare"

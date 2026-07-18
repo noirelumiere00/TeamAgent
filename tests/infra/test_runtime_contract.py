@@ -158,7 +158,7 @@ def test_media_sandbox_uses_exact_playwright_profile_and_fargate_is_fail_closed(
     assert sandbox["no_sandbox_flag_forbidden"] is True
     assert sandbox["setuid_sandbox_disabled"] is True
     assert sandbox["namespace_sandbox_required"] is True
-    assert sandbox["additional_allowed_syscalls"] == ["clone", "setns", "unshare"]
+    assert sandbox["additional_allowed_syscalls"] == ["chroot", "clone", "setns", "unshare"]
     assert sandbox["required_capability"] is None
     assert sandbox["seccomp_profile_source"] == (
         "https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json"
@@ -171,8 +171,8 @@ def test_media_sandbox_uses_exact_playwright_profile_and_fargate_is_fail_closed(
     assert hashlib.sha256(profile.read_bytes()).hexdigest() == sandbox["seccomp_profile_sha256"]
     value = json.loads(profile.read_text(encoding="utf-8"))
     assert value["defaultAction"] == "SCMP_ACT_ERRNO"
-    assert value["syscalls"][0]["names"] == ["clone", "setns", "unshare"]
-    assert value["syscalls"][0]["comment"] == "Allow create user namespaces"
+    assert value["syscalls"][0]["names"] == ["chroot", "clone", "setns", "unshare"]
+    assert value["syscalls"][0]["comment"] == "Allow Chromium user namespace sandbox setup"
 
 
 def test_compose_smokes_enforce_runtime_controls_and_urllib_health() -> None:

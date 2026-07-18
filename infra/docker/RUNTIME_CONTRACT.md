@@ -131,11 +131,14 @@ Media Chromiumはsetuid sandboxを`--disable-setuid-sandbox`で使わず、user 
 有効にしたまま実行する。`--no-sandbox`は禁止する。これによりMediaもcapabilityを保持・追加
 しない。正準リストは`runtime-contract.json`とする。
 
-Playwright `v1.60.0`の公式seccomp profileをlocal Docker smoke専用にupstream byte SHA-256
-`cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849`
-でvendorする。sourceは
+Playwright `v1.60.0`の公式seccomp profileをbaseにlocal Docker smoke専用としてvendorし、
+vendor byte SHA-256
+`77c6753ee88a0db58e43c9235cdd05ab9545bf1f5446a51528e0f328ed872257`
+を固定する。sourceは
 `https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json`。
-default allowlistへuser namespace用の `clone`, `setns`, `unshare` だけを追加する。
+default allowlistへuser namespace作成用の `clone`, `setns`, `unshare` と、そのnamespace内で
+Chromiumがroot filesystemを隔離する `chroot` を追加する。container側はcapabilityを
+`ALL` dropしたままなので、namespace外のprocessへ`CAP_SYS_CHROOT`を付与しない。
 Fargateはcustom seccomp profileを受け付けないため、このprofileをIaC capabilityとして
 主張しない。Fargate上でnamespace sandboxが実際に成立することはdeploy前の別gateで必須とし、
 未確認中はfail closedとする。`--no-sandbox` とseccomp unconfinedは禁止する。
