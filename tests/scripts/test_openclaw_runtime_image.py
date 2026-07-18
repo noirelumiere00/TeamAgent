@@ -433,18 +433,10 @@ def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
         )
         control_ui = json.loads(control_ui_result.stdout)
         assert control_ui["rootStatus"] == 200
-        assert (
-            control_ui["reachableModuleAssetCount"]
-            == control_ui["reachableModuleCount"]
-        )
-        assert (
-            control_ui["servedAssetCount"]
-            == control_ui["expectedServedAssetCount"]
-        )
+        assert control_ui["reachableModuleAssetCount"] == control_ui["reachableModuleCount"]
+        assert control_ui["servedAssetCount"] == control_ui["expectedServedAssetCount"]
         assert len(control_ui["dynamicRegistrations"]) == 1
-        assert control_ui["dynamicRegistrations"][0]["path"] == (
-            "/control-ui-config.json"
-        )
+        assert control_ui["dynamicRegistrations"][0]["path"] == ("/control-ui-config.json")
         assert control_ui["dynamicRegistrations"][0]["unauthenticatedStatus"] == 401
         assert control_ui["dynamicRegistrations"][0]["authenticatedStatus"] == 200
         assert control_ui["dynamicRegistrations"][0]["terminalEnabled"] is False
@@ -644,19 +636,12 @@ console.log(JSON.stringify(result));
     assert process_contract["prune"]["schemaVersion"] == 2
     assert process_contract["prune"]["browser"]["reachableRegistrationChunks"] == 0
     assert process_contract["prune"]["browser"]["residualUnreachableBrowserCandidates"] == 0
-    assert (
-        process_contract["prune"]["browser"]["reachableBrowserNamedPayloadCount"] > 0
-    )
+    assert process_contract["prune"]["browser"]["reachableBrowserNamedPayloadCount"] > 0
     assert process_contract["prune"]["browser"]["reachableBrowserPayloadZero"] is False
-    assert (
-        process_contract["prune"]["browser"]["reachableBrowserImplementationModules"] == 0
-    )
+    assert process_contract["prune"]["browser"]["reachableBrowserImplementationModules"] == 0
     assert process_contract["prune"]["browser"]["browserCliCommandRegistered"] is False
     assert process_contract["prune"]["browser"]["genericOpenClawCliRetained"] is True
-    assert (
-        process_contract["prune"]["browser"]["browserExecutableOrPlaywrightPresent"]
-        is False
-    )
+    assert process_contract["prune"]["browser"]["browserExecutableOrPlaywrightPresent"] is False
     assert process_contract["prune"]["browser"]["usableBrowserControlPath"] is False
     assert len(process_contract["prune"]["browser"]["retainedFailClosedFacade"]) == 1
     assert process_contract["prune"]["browser"]["controlUiMissingLocalImports"] == 0
@@ -666,8 +651,9 @@ console.log(JSON.stringify(result));
     assert process_contract["prune"]["browser"]["controlUiServedAssetCount"] == len(
         process_contract["prune"]["browser"]["controlUiServedAssets"]
     )
-    assert process_contract["prune"]["browser"]["controlUiServedAssetCount"] > (
-        process_contract["prune"]["browser"]["controlUiReachableModuleCount"]
+    assert (
+        process_contract["prune"]["browser"]["controlUiServedAssetCount"]
+        > (process_contract["prune"]["browser"]["controlUiReachableModuleCount"])
     )
     root_assets = [
         asset
@@ -681,14 +667,11 @@ console.log(JSON.stringify(result));
     assert root_assets[0]["servedSize"] > root_assets[0]["size"]
     assert root_assets[0]["servedSha256"] != root_assets[0]["sha256"]
     assert all(
-        len(asset["sha256"]) == 64
-        and len(asset["servedSha256"]) == 64
-        and asset["servedSize"] >= 0
+        len(asset["sha256"]) == 64 and len(asset["servedSha256"]) == 64 and asset["servedSize"] >= 0
         for asset in process_contract["prune"]["browser"]["controlUiServedAssets"]
     )
     control_ui_http_paths = {
-        asset["httpPath"]
-        for asset in process_contract["prune"]["browser"]["controlUiServedAssets"]
+        asset["httpPath"] for asset in process_contract["prune"]["browser"]["controlUiServedAssets"]
     }
     assert control_ui_http_paths >= {
         "/",
@@ -700,8 +683,13 @@ console.log(JSON.stringify(result));
         "/apple-touch-icon.png",
         "/provider-icons/ProviderIcon-bedrock.svg",
     }
-    assert any(path.startswith("/assets/") and path.endswith(".css") for path in control_ui_http_paths)
-    assert any(path.startswith("/provider-icons/") and path.endswith(".svg") for path in control_ui_http_paths)
+    assert any(
+        path.startswith("/assets/") and path.endswith(".css") for path in control_ui_http_paths
+    )
+    assert any(
+        path.startswith("/provider-icons/") and path.endswith(".svg")
+        for path in control_ui_http_paths
+    )
     preserved_control_ui_browser_chunks = process_contract["prune"]["browser"][
         "preservedControlUiBrowserChunks"
     ]
@@ -712,17 +700,12 @@ console.log(JSON.stringify(result));
         for candidate in preserved_control_ui_browser_chunks
     )
     assert process_contract["prune"]["packages"]["residualForbidden"] == 0
-    assert (
-        process_contract["prune"]["packages"][
-            "closureComputedBeforeMetadataRewrite"
-        ]
-        is True
-    )
+    assert process_contract["prune"]["packages"]["closureComputedBeforeMetadataRewrite"] is True
     assert process_contract["prune"]["packages"]["prePruneProductionClosure"]
     assert (
-        process_contract["prune"]["packages"][
-            "jitiExtensionSourceTransformFacade"
-        ]["sourceTransformLoaderFailClosed"]
+        process_contract["prune"]["packages"]["jitiExtensionSourceTransformFacade"][
+            "sourceTransformLoaderFailClosed"
+        ]
         is True
     )
     assert (
@@ -731,24 +714,16 @@ console.log(JSON.stringify(result));
         ]
         is True
     )
-    assert process_contract["prune"]["packages"][
-        "typeScriptCodeModeCompilerFacade"
-    ]["advertisedLanguages"] == ["javascript"]
+    assert process_contract["prune"]["packages"]["typeScriptCodeModeCompilerFacade"][
+        "advertisedLanguages"
+    ] == ["javascript"]
     assert (
-        process_contract["prune"]["pluginOperations"][
-            "closureComputedBeforeMetadataRewrite"
-        ]
+        process_contract["prune"]["pluginOperations"]["closureComputedBeforeMetadataRewrite"]
         is True
     )
-    assert (
-        process_contract["prune"]["pluginOperations"]["postPruneClosureExactMatch"]
-        is True
-    )
+    assert process_contract["prune"]["pluginOperations"]["postPruneClosureExactMatch"] is True
     assert process_contract["prune"]["pluginOperations"]["unresolvedImports"] == []
-    assert (
-        process_contract["prune"]["pluginOperations"]["unresolvedComputedImports"]
-        == []
-    )
+    assert process_contract["prune"]["pluginOperations"]["unresolvedComputedImports"] == []
     assert process_contract["prune"]["developmentPayload"]["residualPathCount"] == 0
 
     missing_secrets = _run(
@@ -930,9 +905,7 @@ fs.writeFileSync(1, JSON.stringify({
                 gateway_lifecycle["controlUi"]["missingOrMismatchedAssets"] == 0
             ),
             "controlUiDynamicRegistrationAuthenticatedAndHashed": (
-                gateway_lifecycle["controlUi"]["dynamicRegistrations"][0][
-                    "authenticatedStatus"
-                ]
+                gateway_lifecycle["controlUi"]["dynamicRegistrations"][0]["authenticatedStatus"]
                 == 200
             ),
             "controlUiRuntimeSecretLeakAbsent": (
