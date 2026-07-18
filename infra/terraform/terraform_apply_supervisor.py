@@ -31,8 +31,10 @@ def _process_group_exists(process_group_id: int) -> bool:
         return False
     except PermissionError:
         # Darwin reports EPERM for a group whose same-UID members have all
-        # exited but have not yet disappeared from the process table.
-        return False
+        # exited but have not yet disappeared from the process table. Treat
+        # that group as present until the kernel reports ESRCH so lock release
+        # cannot race any unsignalable descendant either.
+        return True
     return True
 
 
@@ -47,7 +49,7 @@ def _terminate_and_wait(
     if _process_group_exists(process_group_id):
         try:
             os.killpg(process_group_id, signal.SIGTERM)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
 
     deadline = time.monotonic() + grace_seconds
@@ -58,7 +60,7 @@ def _terminate_and_wait(
     if _process_group_exists(process_group_id):
         try:
             os.killpg(process_group_id, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
 
     process.wait()
@@ -100,9 +102,17 @@ def run_supervised(
     try:
         while True:
             try:
-                return process.wait(timeout=heartbeat_interval_seconds)
+                terraform_status = process.wait(
+                    timeout=heartbeat_interval_seconds,
+                )
             except subprocess.TimeoutExpired:
                 pass
+            else:
+                _terminate_and_wait(
+                    process,
+                    grace_seconds=termination_grace_seconds,
+                )
+                return terraform_status
             try:
                 heartbeat = subprocess.run(
                     list(heartbeat_command),

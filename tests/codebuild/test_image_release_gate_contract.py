@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import re
 import subprocess
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT / "infra" / "terraform" / "image_release_gate.tf"
@@ -15,6 +20,164 @@ GATE_RUNNER = ROOT / "infra" / "deploy" / "run_image_deployment_gate.sh"
 PLAN_LAUNCHER = ROOT / "infra" / "terraform" / "plan_image_release.sh"
 APPLY_LAUNCHER = ROOT / "infra" / "terraform" / "apply_image_release_plan.sh"
 BOOTSTRAP_TARGETS = ROOT / "infra" / "terraform" / "codebuild_provenance_bootstrap_targets.txt"
+
+
+def _run_promoter_build_command(
+    tmp_path: Path,
+    *,
+    subject_name: str,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    image_digest = f"sha256:{'a' * 64}"
+    sbom_digest = f"sha256:{'b' * 64}"
+    provenance_digest = f"sha256:{'c' * 64}"
+    image_signature_digest = f"sha256:{'d' * 64}"
+    sbom_signature_digest = f"sha256:{'e' * 64}"
+    provenance_signature_digest = f"sha256:{'f' * 64}"
+    sbom_payload_sha256 = "1" * 64
+    provenance_payload_sha256 = "2" * 64
+    subject = {
+        "name": subject_name,
+        "quarantine_repository": "teamagent-dev-tiktok-acquire-quarantine",
+        "candidate_repository": "teamagent-dev-tiktok-acquire-verified-candidates",
+        "release_repository": "teamagent-dev-tiktok-acquire",
+        "release_tag": f"active-{'0' * 40}",
+        "digest": image_digest,
+        "sbom": {
+            "digest": sbom_digest,
+            "payload_sha256": sbom_payload_sha256,
+            "signature": {"referrer_digest": sbom_signature_digest},
+        },
+        "provenance": {
+            "digest": provenance_digest,
+            "payload_sha256": provenance_payload_sha256,
+            "signature": {"referrer_digest": provenance_signature_digest},
+        },
+        "image_signature": {"referrer_digest": image_signature_digest},
+    }
+    receipt_bytes = json.dumps({"subjects": [subject]}).encode()
+
+    referrers = {
+        "nextToken": None,
+        "referrers": [
+            {
+                "digest": sbom_digest,
+                "artifactType": "application/spdx+json",
+                "artifactStatus": "ACTIVE",
+                "annotations": {
+                    "io.teamagent.build.payload-sha256": sbom_payload_sha256,
+                },
+            },
+            {
+                "digest": provenance_digest,
+                "artifactType": "application/vnd.in-toto+json",
+                "artifactStatus": "ACTIVE",
+                "annotations": {
+                    "io.teamagent.build.payload-sha256": provenance_payload_sha256,
+                },
+            },
+            {
+                "digest": image_signature_digest,
+                "artifactType": "application/vnd.dsse.envelope.v1+json",
+                "artifactStatus": "ACTIVE",
+            },
+            {
+                "digest": sbom_signature_digest,
+                "artifactType": "application/vnd.dsse.envelope.v1+json",
+                "artifactStatus": "ACTIVE",
+            },
+            {
+                "digest": provenance_signature_digest,
+                "artifactType": "application/vnd.dsse.envelope.v1+json",
+                "artifactStatus": "ACTIVE",
+            },
+        ],
+    }
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    aws_call_log = tmp_path / "aws-calls.log"
+    aws = bin_dir / "aws"
+    aws.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import os",
+                "import sys",
+                "with open(os.environ['AWS_CALL_LOG'], 'a', encoding='utf-8') as log:",
+                "    log.write(' '.join(sys.argv[1:]) + '\\n')",
+                "if sys.argv[1:3] == ['ecr', 'describe-images']:",
+                "    print(os.environ['PROMOTER_IMAGE_DIGEST'])",
+                "elif sys.argv[1:3] == ['ecr', 'list-image-referrers']:",
+                "    print(os.environ['PROMOTER_REFERRERS_JSON'])",
+                "else:",
+                "    raise SystemExit(f'unexpected aws call: {sys.argv[1:]}')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    oras_called = tmp_path / "oras-called"
+    oras = bin_dir / "oras"
+    oras.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import os",
+                "from pathlib import Path",
+                "Path(os.environ['ORAS_CALLED']).touch()",
+                "raise SystemExit('oras cp must not run for an exact resumable promotion')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    oras.chmod(0o755)
+
+    buildspec = yaml.safe_load(PROMOTER.read_text(encoding="utf-8"))
+    build_command = buildspec["phases"]["build"]["commands"][0]
+    assert isinstance(build_command, str)
+    environment = {
+        **os.environ,
+        "AWS_CALL_LOG": str(aws_call_log),
+        "CODEBUILD_BUILD_SUCCEEDING": "1",
+        "ORAS_CALLED": str(oras_called),
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "PIPELINE": "tiktok",
+        "PROMOTER_IMAGE_DIGEST": image_digest,
+        "PROMOTER_REFERRERS_JSON": json.dumps(referrers),
+        "PROMOTION_CHANNEL": "active",
+    }
+    contract_paths = [
+        Path("/tmp/release-receipt.json"),
+        Path("/tmp/destination-tiktok-tiktok.err"),
+        Path("/tmp/promoted-subject-referrers.json"),
+        Path("/tmp/promoted-artifact-signatures.json"),
+    ]
+    lock_path = Path("/tmp/teamagent-promoter-buildspec-test.lock")
+    with lock_path.open("w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        previous_contents = {
+            path: path.read_bytes() if path.exists() else None for path in contract_paths
+        }
+        contract_paths[0].write_bytes(receipt_bytes)
+        try:
+            completed = subprocess.run(
+                ["bash", "-c", build_command],
+                cwd=tmp_path,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        finally:
+            for path, previous_content in previous_contents.items():
+                if previous_content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(previous_content)
+    return completed, aws_call_log, oras_called
 
 
 def _hcl_block(body: str, opening_brace: int) -> str:
@@ -280,6 +443,38 @@ def test_promoter_is_receipt_only_and_never_executes_repository_source() -> None
     assert "ImageNotFoundException" in body[destination_lookup:copy]
     assert "Resuming verified existing promotion" in body[destination_lookup:copy]
     assert "destination tag lookup failed closed" in body[destination_lookup:copy]
+
+
+def test_promoter_yaml_shell_resumes_only_after_the_exact_existing_digest(
+    tmp_path: Path,
+) -> None:
+    completed, aws_call_log, oras_called = _run_promoter_build_command(
+        tmp_path,
+        subject_name="tiktok",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (
+        "Resuming verified existing promotion for teamagent-dev-tiktok-acquire:active-" + "0" * 40
+    ) in completed.stdout
+    calls = aws_call_log.read_text(encoding="utf-8").splitlines()
+    assert sum("ecr describe-images" in call for call in calls) == 1
+    assert sum("ecr list-image-referrers" in call for call in calls) == 3
+    assert not oras_called.exists()
+
+
+def test_promoter_yaml_shell_rejects_subject_name_before_any_aws_use(
+    tmp_path: Path,
+) -> None:
+    completed, aws_call_log, oras_called = _run_promoter_build_command(
+        tmp_path,
+        subject_name="../tiktok",
+    )
+
+    assert completed.returncode != 0
+    assert "FATAL: receipt subject name is not allowlisted" in completed.stdout
+    assert not aws_call_log.exists()
+    assert not oras_called.exists()
 
 
 def test_active_or_rollback_attestation_rechecks_candidate_signatures() -> None:

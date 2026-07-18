@@ -157,6 +157,11 @@ phases:
         export AWS_DEFAULT_REGION="ap-northeast-1" AWS_REGION="ap-northeast-1"
         REGISTRY="718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
         while IFS= read -r SUBJECT; do
+          NAME="$(jq -er '.name' <<<"$SUBJECT")"
+          case "$PIPELINE:$NAME" in
+            mcp:core|mcp:media|tiktok:tiktok|openclaw:core|openclaw:media) ;;
+            *) echo "FATAL: receipt subject name is not allowlisted"; exit 1 ;;
+          esac
           QUARANTINE_REPOSITORY="$(jq -er '.quarantine_repository' <<<"$SUBJECT")"
           CANDIDATE_REPOSITORY="$(jq -er '.candidate_repository' <<<"$SUBJECT")"
           RELEASE_REPOSITORY="$(jq -er '.release_repository' <<<"$SUBJECT")"
