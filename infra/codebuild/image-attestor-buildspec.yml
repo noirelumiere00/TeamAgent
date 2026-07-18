@@ -98,6 +98,7 @@ phases:
         printf '%s' '__RELEASE_EVIDENCE_BASE64__' | base64 --decode > /tmp/release_evidence.py
         printf '%s' '__ACTUAL_IMAGE_EVIDENCE_BASE64__' | base64 --decode > /tmp/actual_image_evidence.py
         printf '%s' '__SOURCE_PROVENANCE_BASE64__' | base64 --decode > /tmp/source_provenance.py
+        printf '%s' '__TEAMAGENT_BUNDLE_PROVENANCE_BASE64__' | base64 --decode > /tmp/teamagent_bundle_provenance.py
         printf '%s' '__OPENCLAW_PROVENANCE_BASE64__' | base64 --decode > /tmp/openclaw_provenance.py
         printf '%s' '__TIKTOK_SOURCE_PROVENANCE_BASE64__' | base64 --decode > /tmp/tiktok_source_provenance.py
         printf '%s' '__VERIFY_ACTUAL_IMAGE_BASE64__' | base64 --decode > /tmp/verify_actual_image.sh
@@ -110,7 +111,7 @@ phases:
             SOURCE_SIGNING_KEY_ARN="__SOURCE_PUBLISHER_SIGNING_KEY_ARN__"
             SOURCE_ENCRYPTION_KEY_ARN="__RELEASE_EVIDENCE_KMS_KEY_ARN__"
             SOURCE_SIGNATURE_ALGORITHM="RSASSA_PSS_SHA_256"
-            CONTRACT="/tmp/teamagent_runtime_contract.json"
+            CONTRACT="/tmp/teamagent_core_media_release_contract.json"
             printf '%s' '__MCP_CONTRACT_BASE64__' | base64 --decode >"$CONTRACT"
             ;;
           tiktok)
@@ -403,8 +404,8 @@ phases:
         case "$PIPELINE" in
           mcp)
             EXPECTED_BUILD_PROJECT="teamagent-dev-image-builder"
-            CONTRACT="/tmp/teamagent_runtime_contract.json"
-            CONTRACT_PATH="infra/codebuild/teamagent_runtime_contract.json"
+            CONTRACT="/tmp/teamagent_core_media_release_contract.json"
+            CONTRACT_PATH="infra/codebuild/teamagent_core_media_release_contract.json"
             ;;
           tiktok)
             EXPECTED_BUILD_PROJECT="teamagent-dev-tiktok-image-builder"

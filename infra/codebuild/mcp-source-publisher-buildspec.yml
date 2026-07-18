@@ -26,22 +26,18 @@ phases:
         SOURCE_BUCKET="teamagent-dev-raw-files"
         SOURCE_KEY="codebuild/source.zip"
         APP_KEY="codebuild/connect-web-app.html"
-        APP_HTML_VERSION_ID="FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
-        APP_HTML_SHA256="03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
-        VAULT_MANIFEST_SHA256="aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
-        BUILD_INPUTS_SHA256="6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
         EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
         SIGNING_KEY_ARN="__SOURCE_PUBLISHER_SIGNING_KEY_ARN__"
         EVIDENCE_KMS_KEY_ARN="__RELEASE_EVIDENCE_KMS_KEY_ARN__"
         export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
         readonly EXPECTED_ACCOUNT_ID EXPECTED_REGION EXPECTED_REPOSITORY
-        readonly SOURCE_BUCKET SOURCE_KEY APP_KEY APP_HTML_VERSION_ID APP_HTML_SHA256
-        readonly VAULT_MANIFEST_SHA256 BUILD_INPUTS_SHA256 EVIDENCE_BUCKET
+        readonly SOURCE_BUCKET SOURCE_KEY APP_KEY EVIDENCE_BUCKET
         readonly SIGNING_KEY_ARN EVIDENCE_KMS_KEY_ARN
         [ "$(aws sts get-caller-identity --query Account --output text)" = "$EXPECTED_ACCOUNT_ID" ] || { echo "FATAL: wrong AWS account"; exit 1; }
         [ "$CODEBUILD_SOURCE_REPO_URL" = "$EXPECTED_REPOSITORY" ] || { echo "FATAL: wrong source repository"; exit 1; }
         : "${EXPECTED_COMMIT:?EXPECTED_COMMIT is required}"
-        : "${RUNTIME_CONTRACT_SHA256:?RUNTIME_CONTRACT_SHA256 is required}"
+        : "${SOURCE_MANIFEST_CONTRACT_SHA256:?SOURCE_MANIFEST_CONTRACT_SHA256 is required}"
+        : "${RELEASE_CONTRACT_SHA256:?RELEASE_CONTRACT_SHA256 is required}"
         [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: expected commit must be a full SHA"; exit 1; }
         [[ "$CODEBUILD_SOURCE_VERSION" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: source-version must be a full SHA"; exit 1; }
         [ "$CODEBUILD_SOURCE_VERSION" = "$EXPECTED_COMMIT" ] || { echo "FATAL: source-version differs from expected commit"; exit 1; }
@@ -58,14 +54,39 @@ phases:
           --query Status \
           --output text)" = "Enabled" ] \
           || { echo "FATAL: source bucket versioning is not enabled"; exit 1; }
-        [[ "$RUNTIME_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid contract SHA-256"; exit 1; }
+        [[ "$SOURCE_MANIFEST_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid source manifest contract SHA-256"; exit 1; }
+        [[ "$RELEASE_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid release contract SHA-256"; exit 1; }
         printf '%s' '__SOURCE_PROVENANCE_BASE64__' | base64 --decode > /tmp/source_provenance.py
         printf '%s' '__RELEASE_EVIDENCE_BASE64__' | base64 --decode > /tmp/release_evidence.py
-        printf '%s' '__MCP_CONTRACT_BASE64__' | base64 --decode > /tmp/teamagent_runtime_contract.json
-        [ "$(sha256sum /tmp/teamagent_runtime_contract.json | awk '{print $1}')" = "$RUNTIME_CONTRACT_SHA256" ] || { echo "FATAL: embedded contract hash mismatch"; exit 1; }
-        [ "$(git show "$EXPECTED_COMMIT:infra/codebuild/teamagent_runtime_contract.json" | sha256sum | awk '{print $1}')" = "$RUNTIME_CONTRACT_SHA256" ] || { echo "FATAL: source commit contract differs from trusted contract"; exit 1; }
-        python3 /tmp/source_provenance.py assert-release-ready \
-          --contract /tmp/teamagent_runtime_contract.json
+        printf '%s' '__TEAMAGENT_BUNDLE_PROVENANCE_BASE64__' | base64 --decode > /tmp/teamagent_bundle_provenance.py
+        printf '%s' '__SOURCE_MANIFEST_CONTRACT_BASE64__' | base64 --decode > /tmp/teamagent_runtime_contract.json
+        printf '%s' '__MCP_RELEASE_CONTRACT_BASE64__' | base64 --decode > /tmp/teamagent_core_media_release_contract.json
+        [ "$(sha256sum /tmp/teamagent_runtime_contract.json | awk '{print $1}')" = "$SOURCE_MANIFEST_CONTRACT_SHA256" ] || { echo "FATAL: embedded source manifest contract hash mismatch"; exit 1; }
+        [ "$(sha256sum /tmp/teamagent_core_media_release_contract.json | awk '{print $1}')" = "$RELEASE_CONTRACT_SHA256" ] || { echo "FATAL: embedded release contract hash mismatch"; exit 1; }
+        [ "$(git show "$EXPECTED_COMMIT:infra/codebuild/teamagent_runtime_contract.json" | sha256sum | awk '{print $1}')" = "$SOURCE_MANIFEST_CONTRACT_SHA256" ] || { echo "FATAL: source commit manifest contract differs from trusted contract"; exit 1; }
+        [ "$(git show "$EXPECTED_COMMIT:infra/codebuild/teamagent_core_media_release_contract.json" | sha256sum | awk '{print $1}')" = "$RELEASE_CONTRACT_SHA256" ] || { echo "FATAL: source commit release contract differs from trusted contract"; exit 1; }
+        [ "$(git show "$EXPECTED_COMMIT:infra/codebuild/teamagent_bundle_provenance.py" | sha256sum | awk '{print $1}')" = "$(sha256sum /tmp/teamagent_bundle_provenance.py | awk '{print $1}')" ] || { echo "FATAL: source commit bundle verifier differs from trusted bytes"; exit 1; }
+        python3 /tmp/teamagent_bundle_provenance.py assert-release-ready \
+          --contract /tmp/teamagent_core_media_release_contract.json
+        mapfile -t PRODUCTION_APP_RECORD < <(
+          python3 /tmp/teamagent_bundle_provenance.py production-record \
+            --deploy-log "$CODEBUILD_SRC_DIR/infra/deploy_log.md" \
+            --format lines
+        )
+        [ "${#PRODUCTION_APP_RECORD[@]}" -eq 4 ] || { echo "FATAL: latest production app record is incomplete"; exit 1; }
+        APP_HTML_VERSION_ID="${PRODUCTION_APP_RECORD[0]}"
+        APP_HTML_SHA256="${PRODUCTION_APP_RECORD[1]}"
+        VAULT_MANIFEST_SHA256="${PRODUCTION_APP_RECORD[2]}"
+        BUILD_INPUTS_SHA256="${PRODUCTION_APP_RECORD[3]}"
+        BAKED_APP_HTML_VERSION_ID="$(jq -er '.app_html.baked_fallback.s3_version_id' /tmp/teamagent_core_media_release_contract.json)"
+        BAKED_APP_HTML_SHA256="$(jq -er '.app_html.baked_fallback.sha256' /tmp/teamagent_core_media_release_contract.json)"
+        APP_PROVENANCE_SHA256="$(
+          python3 /tmp/teamagent_bundle_provenance.py app-provenance-sha256 \
+            --contract /tmp/teamagent_core_media_release_contract.json \
+            --deploy-log "$CODEBUILD_SRC_DIR/infra/deploy_log.md"
+        )"
+        readonly APP_HTML_VERSION_ID APP_HTML_SHA256 VAULT_MANIFEST_SHA256 BUILD_INPUTS_SHA256
+        readonly BAKED_APP_HTML_VERSION_ID BAKED_APP_HTML_SHA256 APP_PROVENANCE_SHA256
   build:
     commands:
       - |
@@ -82,7 +103,8 @@ phases:
         trap 'rm -rf -- "$TMP_DIR"' EXIT
         MANIFEST="$TMP_DIR/.teamagent-source-manifest.json"
         SOURCE_ZIP="$TMP_DIR/source.zip"
-        APP_HTML="$TMP_DIR/connect-web-app.html"
+        PRODUCTION_APP_HTML="$TMP_DIR/production-connect-web-app.html"
+        BAKED_APP_HTML="$TMP_DIR/baked-connect-web-app.html"
         DOWNLOADED_APP_VERSION="$(
           aws s3api get-object \
             --region ap-northeast-1 \
@@ -92,10 +114,24 @@ phases:
             --expected-bucket-owner 718959508629 \
             --query VersionId \
             --output text \
-            "$APP_HTML"
+            "$PRODUCTION_APP_HTML"
         )"
         [ "$DOWNLOADED_APP_VERSION" = "$APP_HTML_VERSION_ID" ] || { echo "FATAL: app HTML VersionId mismatch"; exit 1; }
-        [ "$(sha256sum "$APP_HTML" | awk '{print $1}')" = "$APP_HTML_SHA256" ] || { echo "FATAL: app HTML hash mismatch"; exit 1; }
+        [ "$(sha256sum "$PRODUCTION_APP_HTML" | awk '{print $1}')" = "$APP_HTML_SHA256" ] || { echo "FATAL: app HTML hash mismatch"; exit 1; }
+        DOWNLOADED_FALLBACK_VERSION="$(
+          aws s3api get-object \
+            --region ap-northeast-1 \
+            --bucket teamagent-dev-raw-files \
+            --key codebuild/connect-web-app.html \
+            --version-id "$BAKED_APP_HTML_VERSION_ID" \
+            --expected-bucket-owner 718959508629 \
+            --query VersionId \
+            --output text \
+            "$BAKED_APP_HTML"
+        )"
+        [ "$DOWNLOADED_FALLBACK_VERSION" = "$BAKED_APP_HTML_VERSION_ID" ] || { echo "FATAL: baked fallback VersionId mismatch"; exit 1; }
+        [ "$(sha256sum "$BAKED_APP_HTML" | awk '{print $1}')" = "$BAKED_APP_HTML_SHA256" ] || { echo "FATAL: baked fallback hash mismatch"; exit 1; }
+        [ "$APP_HTML_SHA256" != "$BAKED_APP_HTML_SHA256" ] || { echo "FATAL: live app cannot replace the baked fallback"; exit 1; }
         python3 /tmp/source_provenance.py create-manifest \
           --repo-root "$CODEBUILD_SRC_DIR" \
           --commit "$EXPECTED_COMMIT" \
@@ -108,8 +144,23 @@ phases:
         git -C "$CODEBUILD_SRC_DIR" archive \
           --format=zip \
           --output="$SOURCE_ZIP" \
-          --add-file="$MANIFEST" \
           "$EXPECTED_COMMIT"
+        python3 - "$SOURCE_ZIP" "$MANIFEST" <<'PY'
+        import sys
+        import zipfile
+
+        archive, manifest = sys.argv[1:]
+        additions = {
+            ".teamagent-source-manifest.json": manifest,
+        }
+        with zipfile.ZipFile(archive, "a", compression=zipfile.ZIP_DEFLATED) as output:
+            existing = set(output.namelist())
+            conflicts = sorted(existing & additions.keys())
+            if conflicts:
+                raise SystemExit(f"FATAL: source archive path collision: {conflicts}")
+            for name, path in additions.items():
+                output.write(path, arcname=name)
+        PY
         SOURCE_SHA256="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
         EXTRACTED="$TMP_DIR/extracted"
         mkdir -p "$EXTRACTED"
@@ -122,7 +173,12 @@ phases:
           --expected-with-scrape-tools true \
           --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
           --expected-app-html-sha256 "$APP_HTML_SHA256" \
-          --expected-runtime-contract-sha256 "$RUNTIME_CONTRACT_SHA256"
+          --expected-runtime-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256"
+        python3 /tmp/teamagent_bundle_provenance.py verify-source-interface \
+          --repo-root "$EXTRACTED" \
+          --contract "$EXTRACTED/infra/codebuild/teamagent_core_media_release_contract.json" \
+          --deploy-log "$EXTRACTED/infra/deploy_log.md" \
+          --baked-fallback "$BAKED_APP_HTML"
         [ "$(git rev-parse --verify HEAD^{commit})" = "$EXPECTED_COMMIT" ] || { echo "FATAL: checkout changed during archive creation"; exit 1; }
         [ -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] || { echo "FATAL: checkout changed during archive creation"; exit 1; }
         PUBLISHED_SOURCE_VERSION_ID="$(
@@ -150,7 +206,7 @@ phases:
           --app-sha256 "$APP_HTML_SHA256" \
           --vault-manifest-sha256 "$VAULT_MANIFEST_SHA256" \
           --build-inputs-sha256 "$BUILD_INPUTS_SHA256" \
-          --contract-sha256 "$RUNTIME_CONTRACT_SHA256" \
+          --contract-sha256 "$RELEASE_CONTRACT_SHA256" \
           --output "$TMP_DIR/source-declaration.json"
         SOURCE_DECLARATION_SHA256="$(sha256sum "$TMP_DIR/source-declaration.json" | awk '{print $1}')"
         SOURCE_DECLARATION_KEY="source-declarations/mcp/$EXPECTED_COMMIT/$SOURCE_SHA256/$PUBLISHED_SOURCE_VERSION_ID.json"

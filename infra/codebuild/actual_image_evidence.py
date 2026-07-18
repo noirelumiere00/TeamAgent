@@ -15,8 +15,6 @@ from typing import Any
 
 from release_evidence import (
     ACCOUNT_ID,
-    APP_HTML_SHA256,
-    APP_HTML_VERSION_ID,
     PIPELINES,
     REFERRER_ARTIFACT_TYPES,
     REGION,
@@ -26,15 +24,18 @@ from release_evidence import (
     canonical_bytes,
     validate_release_receipt,
 )
-from source_provenance import verify_oci_revision
+from teamagent_bundle_provenance import (
+    ProvenanceError as BundleProvenanceError,
+)
+from teamagent_bundle_provenance import (
+    verify_oci_config as verify_teamagent_oci_config,
+)
 
 _SHA1_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _PATH_RE = re.compile(r"/[A-Za-z0-9][A-Za-z0-9_./+-]{0,511}")
-_KEY_ARN_RE = re.compile(
-    rf"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/[0-9a-f-]{{36}}"
-)
+_KEY_ARN_RE = re.compile(rf"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/[0-9a-f-]{{36}}")
 _COSIGN_SIGNATURE_ARTIFACT_TYPES = {
     "application/vnd.dev.cosign.simplesigning.v1+json",
     "application/vnd.dsse.envelope.v1+json",
@@ -135,11 +136,7 @@ def _binary_probes(path: Path) -> list[dict[str, str]]:
         if len(fields) != 2:
             raise EvidenceError("binary probe must be PATH<TAB>SHA256")
         binary_path, digest = fields
-        if (
-            not _PATH_RE.fullmatch(binary_path)
-            or ".." in binary_path
-            or binary_path in seen
-        ):
+        if not _PATH_RE.fullmatch(binary_path) or ".." in binary_path or binary_path in seen:
             raise EvidenceError("binary probe path is unsafe or duplicate")
         seen.add(binary_path)
         probes.append({"path": binary_path, "sha256": _sha256(digest, label="binary hash")})
@@ -180,10 +177,7 @@ def _referrer(
                 referrer.get("annotations"),
                 label=f"{label} annotations",
             )
-            if (
-                annotations.get("io.teamagent.build.payload-sha256")
-                != expected_payload_sha256
-            ):
+            if annotations.get("io.teamagent.build.payload-sha256") != expected_payload_sha256:
                 raise EvidenceError(f"{label} referrer does not bind the payload hash")
             matches.append(_digest(referrer.get("digest"), label=f"{label} digest"))
     if len(matches) != 1:
@@ -207,9 +201,7 @@ def _signature_referrer(response: Any, *, label: str) -> str:
         and _DIGEST_RE.fullmatch(str(item.get("digest", "")))
     ]
     if len(signatures) != 1:
-        raise EvidenceError(
-            f"{label} must have exactly one unambiguous OCI signature referrer"
-        )
+        raise EvidenceError(f"{label} must have exactly one unambiguous OCI signature referrer")
     return _digest(signatures[0]["digest"], label=f"{label} signature referrer digest")
 
 
@@ -276,9 +268,7 @@ def _verify_artifact_signature(
 def create_subject(args: argparse.Namespace) -> dict[str, Any]:
     if args.pipeline not in PIPELINES:
         raise EvidenceError("pipeline is not allowlisted")
-    expected_subjects: Mapping[str, tuple[str, str, str]] = PIPELINES[args.pipeline][
-        "subjects"
-    ]
+    expected_subjects: Mapping[str, tuple[str, str, str]] = PIPELINES[args.pipeline]["subjects"]
     if args.name not in expected_subjects:
         raise EvidenceError("subject is not allowlisted for the pipeline")
     (
@@ -308,9 +298,7 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         config_digest.removeprefix("sha256:")
     ):
         # ECR config blobs need not use canonical JSON; verify the exact bytes too.
-        if _sha256_file(args.config, label="OCI config") != config_digest.removeprefix(
-            "sha256:"
-        ):
+        if _sha256_file(args.config, label="OCI config") != config_digest.removeprefix("sha256:"):
             raise EvidenceError("OCI config bytes do not match the manifest config digest")
     if config.get("os") != "linux" or config.get("architecture") != "arm64":
         raise EvidenceError("actual image config is not linux/arm64")
@@ -328,18 +316,15 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         raise EvidenceError("OCI contract label does not match the signed contract")
     if args.pipeline == "mcp":
         try:
-            verify_oci_revision(
+            verify_teamagent_oci_config(
                 args.config,
-                config_digest,
-                args.commit,
-                "true",
-                APP_HTML_VERSION_ID,
-                APP_HTML_SHA256,
-                args.contract,
-                contract_sha256,
+                subject_name=args.name,
+                commit=args.commit,
+                contract_path=args.contract,
+                expected_contract_sha256=contract_sha256,
             )
-        except ValueError as exc:
-            raise EvidenceError(f"MCP OCI runtime allowlist mismatch: {exc}") from exc
+        except BundleProvenanceError as exc:
+            raise EvidenceError(f"MCP OCI core/media interface mismatch: {exc}") from exc
 
     expected_image = f"{REGISTRY}/{quarantine_repository}@{digest}"
     critical, high, secrets = _trivy_counts(
@@ -441,9 +426,7 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_repository": candidate_repository,
         "release_repository": release_repository,
         "candidate_tag": (
-            args.commit
-            if args.pipeline == "tiktok"
-            else f"candidate-{args.commit}{suffix}"
+            args.commit if args.pipeline == "tiktok" else f"candidate-{args.commit}{suffix}"
         ),
         "release_tag": f"{release_prefix}-{args.commit}{suffix}",
         "digest": digest,

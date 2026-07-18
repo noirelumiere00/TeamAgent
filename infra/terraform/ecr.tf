@@ -115,6 +115,44 @@ resource "aws_ecr_repository" "mcp_verified_candidates" {
   }
 }
 
+# The media worker is an independently attested subject in the same MCP
+# release receipt. It is never substituted for the core image.
+resource "aws_ecr_repository" "mcp_media" {
+  name                 = "${var.project_name}-media-worker"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
+resource "aws_ecr_repository" "mcp_media_quarantine" {
+  name                 = "${var.project_name}-media-worker-quarantine"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
+resource "aws_ecr_repository" "mcp_media_verified_candidates" {
+  name                 = "${var.project_name}-media-worker-verified-candidates"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
 # TikTok release ECR remains declared with its task stack, but candidate
 # storage and both lifecycle policies stay in this ECR-only file.
 resource "aws_ecr_repository" "tiktok_acquire_quarantine" {
@@ -144,23 +182,10 @@ resource "aws_ecr_repository" "tiktok_acquire_verified_candidates" {
 }
 
 locals {
-  # Existing production release repositories receive only active-/rollback-
-  # tags. Verified candidates live in physically separate repositories so a
-  # lifecycle rule can never expire a digest that also carries a protected
-  # production tag.
-  ecr_release_lifecycle_policy = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "expire only untagged release artifacts after 365 days"
-      selection = {
-        tagStatus   = "untagged"
-        countType   = "sinceImagePushed"
-        countUnit   = "days"
-        countNumber = 365
-      }
-      action = { type = "expire" }
-    }]
-  })
+  # Production release repositories intentionally have no lifecycle policy.
+  # OCI referrers and their signatures are normally untagged; even a long
+  # untagged-expiry rule could silently sever an active/rollback evidence
+  # graph. Candidate cleanup stays isolated in physically separate repos.
   ecr_verified_candidate_lifecycle_policy = jsonencode({
     rules = [{
       rulePriority = 1
@@ -189,11 +214,6 @@ locals {
   })
 }
 
-resource "aws_ecr_lifecycle_policy" "openclaw" {
-  repository = aws_ecr_repository.openclaw.name
-  policy     = local.ecr_release_lifecycle_policy
-}
-
 resource "aws_ecr_lifecycle_policy" "openclaw_quarantine" {
   repository = aws_ecr_repository.openclaw_quarantine.name
   policy     = local.ecr_quarantine_lifecycle_policy
@@ -202,11 +222,6 @@ resource "aws_ecr_lifecycle_policy" "openclaw_quarantine" {
 resource "aws_ecr_lifecycle_policy" "openclaw_verified_candidates" {
   repository = aws_ecr_repository.openclaw_verified_candidates.name
   policy     = local.ecr_verified_candidate_lifecycle_policy
-}
-
-resource "aws_ecr_lifecycle_policy" "openclaw_media" {
-  repository = aws_ecr_repository.openclaw_media.name
-  policy     = local.ecr_release_lifecycle_policy
 }
 
 resource "aws_ecr_lifecycle_policy" "openclaw_media_quarantine" {
@@ -219,11 +234,6 @@ resource "aws_ecr_lifecycle_policy" "openclaw_media_verified_candidates" {
   policy     = local.ecr_verified_candidate_lifecycle_policy
 }
 
-resource "aws_ecr_lifecycle_policy" "mcp" {
-  repository = aws_ecr_repository.mcp.name
-  policy     = local.ecr_release_lifecycle_policy
-}
-
 resource "aws_ecr_lifecycle_policy" "mcp_quarantine" {
   repository = aws_ecr_repository.mcp_quarantine.name
   policy     = local.ecr_quarantine_lifecycle_policy
@@ -234,10 +244,14 @@ resource "aws_ecr_lifecycle_policy" "mcp_verified_candidates" {
   policy     = local.ecr_verified_candidate_lifecycle_policy
 }
 
-resource "aws_ecr_lifecycle_policy" "tiktok_acquire" {
-  count      = local.tk_enabled
-  repository = aws_ecr_repository.tiktok_acquire[0].name
-  policy     = local.ecr_release_lifecycle_policy
+resource "aws_ecr_lifecycle_policy" "mcp_media_quarantine" {
+  repository = aws_ecr_repository.mcp_media_quarantine.name
+  policy     = local.ecr_quarantine_lifecycle_policy
+}
+
+resource "aws_ecr_lifecycle_policy" "mcp_media_verified_candidates" {
+  repository = aws_ecr_repository.mcp_media_verified_candidates.name
+  policy     = local.ecr_verified_candidate_lifecycle_policy
 }
 
 resource "aws_ecr_lifecycle_policy" "tiktok_acquire_quarantine" {
@@ -267,6 +281,8 @@ data "aws_iam_policy_document" "deny_quarantine_runtime_pull" {
     resources = [
       aws_ecr_repository.mcp_quarantine.arn,
       aws_ecr_repository.mcp_verified_candidates.arn,
+      aws_ecr_repository.mcp_media_quarantine.arn,
+      aws_ecr_repository.mcp_media_verified_candidates.arn,
       aws_ecr_repository.openclaw_quarantine.arn,
       aws_ecr_repository.openclaw_verified_candidates.arn,
       aws_ecr_repository.openclaw_media_quarantine.arn,
@@ -371,6 +387,21 @@ output "ecr_mcp_quarantine_url" {
 output "ecr_mcp_verified_candidates_url" {
   description = "TeamAgent MCP verified candidates; never reference from a task definition"
   value       = aws_ecr_repository.mcp_verified_candidates.repository_url
+}
+
+output "ecr_mcp_media_url" {
+  description = "TeamAgent media-worker release repository"
+  value       = aws_ecr_repository.mcp_media.repository_url
+}
+
+output "ecr_mcp_media_quarantine_url" {
+  description = "TeamAgent media-worker build/scan quarantine; never reference from a task definition"
+  value       = aws_ecr_repository.mcp_media_quarantine.repository_url
+}
+
+output "ecr_mcp_media_verified_candidates_url" {
+  description = "TeamAgent media-worker verified candidates; never reference from a task definition"
+  value       = aws_ecr_repository.mcp_media_verified_candidates.repository_url
 }
 
 output "ecr_tiktok_acquire_quarantine_url" {

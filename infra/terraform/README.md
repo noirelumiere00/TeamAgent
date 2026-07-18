@@ -23,11 +23,11 @@ aws configure  # or export AWS_PROFILE=...
 cp terraform.tfvars.example terraform.tfvars
 vi terraform.tfvars
 
-# 3. 初期化と確認
+# 3. 初期化と確認（production image を含まない変更のみ）
 terraform init
 terraform plan
 
-# 4. 適用
+# 4. 適用（production image deploy は後述の guarded saved-plan flow のみ）
 terraform apply
 ```
 
@@ -87,8 +87,10 @@ production canonical source.
 3. Run the full contract and actual-image tests. Only after the actual
    Chainguard/Wolfi candidate is CRITICAL=0/HIGH=0 and all binary/app/model/
    commit evidence matches may a reviewed follow-up set `release.ready=true`.
-4. Keep Aristotle-owned task definitions unchanged until a fresh active or
-   rollback receipt exists for the exact release digest.
+4. Merge the direct release-gate dependency on every ECS task definition while
+   preserving the current production image/application anchors. Do not change
+   a production image until a fresh active or rollback receipt exists for its
+   exact release digest.
 
 This ordering is fail closed: the publisher, builders, attestor, release
 launcher, and Terraform hard precondition all reject `release.ready=false`.
@@ -107,9 +109,12 @@ signed Trivy actual-image C/H/secret=0 evidence enforced here.
 These are future, separately authorized AWS steps. They were not run as part
 of this remediation.
 
-1. Rotate/delete root keys first. Any AWS root access keys are an
-   external account-level blocker because IAM cannot constrain the root principal. Keep
-   only the normal break-glass root login.
+1. Do not rotate, delete, or reduce the current root/admin/access-key or
+   long-lived administrator permissions as part of this release work. The
+   management-terminal/MFA control is the accepted administrative boundary.
+   Administrators can technically bypass this automation, so the guarded
+   release path is an audited operating control, not an IAM claim that root or
+   administrators are unable to perform direct AWS changes.
 2. Start from a clean reviewed `origin/dev`, back up state, and inspect existing
    ownership before import:
 
@@ -121,6 +126,10 @@ of this remediation.
    ```
 
    Do not print or commit state. Import only addresses absent from state.
+   Imports belong to the separately reviewed Terraform migration worker, which
+   must checkpoint each successful address and support resume after partial
+   success. The image-release planner below rejects every plan containing an
+   import and is not an import-resume mechanism.
    Existing release repositories and the existing main builder must be adopted,
    never recreated:
 
@@ -139,13 +148,12 @@ of this remediation.
 3. A normal full plan is expected to fail while live image variables are set
    and `release.ready=false`. Do not bypass the gate by clearing live image
    variables or by changing `release.ready`. For the one-time infrastructure
-   bootstrap only, build a saved targeted plan from the audited address file.
-   Exclude lifecycle policies on the first pass:
+   bootstrap only, build a saved targeted plan from the audited address file:
 
    ```bash
    target_args=()
    while IFS= read -r address; do target_args+=("-target=$address"); done \
-     < <(sed '/^#/d;/^$/d;/^aws_ecr_lifecycle_policy\\./d' codebuild_provenance_bootstrap_targets.txt)
+     < <(sed '/^#/d;/^$/d' codebuild_provenance_bootstrap_targets.txt)
    terraform plan "${target_args[@]}" -out=provenance-bootstrap.tfplan
    terraform show provenance-bootstrap.tfplan
    terraform apply provenance-bootstrap.tfplan
@@ -163,35 +171,20 @@ of this remediation.
    `teamagent-dev-tiktok-codebuild`, then verify both are `AVAILABLE`.
    The MCP publisher reuses the TeamAgent/OpenClaw connection. Do not start a
    build before this manual handshake.
-5. Preview lifecycle deletion before applying lifecycle resources. Obtain all
-   current `active-*` and `rollback-*` release digests without logging image
-   contents, run ECR lifecycle preview for each release repository, then run:
-
-   ```bash
-   python3 ../codebuild/release_evidence.py verify-lifecycle-preview \
-     --preview /secure/local/path/release-lifecycle-preview.json \
-     --protected-digest sha256:<active-or-rollback-digest>
-   ```
-
-   The verifier rejects truncated previews and any protected digest selected
-   for expiry. Then create and review a second saved plan containing only the
-   `aws_ecr_lifecycle_policy.*` addresses from the target file. Quarantine
-   expires after 2 days, verified candidates after 30 days, and release
-   repositories expire only untagged artifacts after 365 days; active/rollback
-   tags live only in release repositories:
-
-   ```bash
-   lifecycle_args=()
-   while IFS= read -r address; do lifecycle_args+=("-target=$address"); done \
-     < <(sed -n '/^aws_ecr_lifecycle_policy\\./p' codebuild_provenance_bootstrap_targets.txt)
-   terraform plan "${lifecycle_args[@]}" -out=provenance-lifecycle.tfplan
-   terraform show provenance-lifecycle.tfplan
-   terraform apply provenance-lifecycle.tfplan
-   ```
+5. Quarantine repositories expire all candidates after 2 days and physically
+   separate verified-candidate repositories expire after 30 days. Production
+   release repositories intentionally have no ECR lifecycle policy. This
+   protects each active/rollback subject plus its complete recursive referrer
+   graph—including unlisted future referrer types—from lifecycle expiry.
+   Adding any release-repository lifecycle policy is a release-safety change
+   and requires a fail-closed preview against every digest returned by the
+   recursive signed-release graph validator.
 
 ### Build, release authorization, and signed-digest deploy
 
-After contracts are ready and both connections are available:
+After contracts are ready, both connections are available, and the Terraform
+worker has provisioned the trusted
+`teamagent-dev-terraform-automation/teamagent-terraform-worker` session:
 
 1. Run exactly one build-only launcher from clean remote HEAD:
    `build_teamagent_image.sh`, `build_openclaw_image.sh`, or
@@ -204,27 +197,92 @@ After contracts are ready and both connections are available:
    promoter. It does not run Terraform.
 3. Set the applicable production image variable to the fixed release
    repository `@sha256:<digest>` and set `image_release_evidence` to the exact
-   receipt/signature keys and VersionIds. A full `terraform plan` invokes the
-   hard precondition, re-downloads those exact COMPLIANCE-locked versions,
-   verifies the KMS signature, freshness, contract hash, channel, repository,
-   digest, single-manifest release presence, and exact SBOM/provenance/signature
-   referrers for every receipt subject. It fails on any tag/string, partial
-   bundle promotion, pagination token, or mismatch.
-4. Review the full plan and apply that saved plan as a separate deployment
-   authorization. None of the build/release launchers updates ECS,
-   EventBridge, task definitions, services, or schedules.
+   receipt/signature keys and VersionIds. Do not set
+   `image_deployment_intent_id`; the planner creates it.
+4. Store the plan outside the worktree and create it only with the guarded
+   planner:
 
-Do not use `-target` for a task definition, service, schedule, or other runtime
-resource. Terraform resource targeting can omit the standalone
-`terraform_data.production_image_release_gate` from the selected graph. Until
-the Aristotle-owned production task definitions directly depend on that gate,
-or an enforced Terraform policy rejects every runtime-targeted plan, any such
-targeted plan/apply is a deployment NO-GO. The one-time target list above is
-limited to provenance infrastructure and is not authorization to target a
-runtime resource.
+   ```bash
+   bash infra/terraform/plan_image_release.sh \
+     /secure/local/path/image-release.tfplan
+   terraform show /secure/local/path/image-release.tfplan
+   ```
 
-CodeBuild log groups, including the legacy `aiia-image-builder` group, use
-30-day retention. The legacy resource is retention-only and does not recreate
+   The planner rejects every inherited `TF_*` variable (including
+   `TF_CLI_ARGS*`, `TF_WORKSPACE`, and `TF_DATA_DIR`), `-target`, disabled
+   locking/refresh, destroy/refresh-only/import plans, caller-supplied intent
+   IDs, a dirty/non-`dev` worktree, and anything other than exact fresh
+   `origin/dev`. It requires `complete=true`, `errored=false`, and
+   `applyable=true`, then binds the exact S3 backend key, default workspace,
+   state lineage/serial, state-address ownership hash, plan-address ownership
+   hash, opaque plan hash, images, contracts, immutable receipt/signature
+   VersionIds, and per-receipt one-use claim IDs into the `PREPARED` intent.
+   When the separately owned HMAC generation ledger is integrated, pass only
+   its non-secret `{table_arn, generation, high_water_t0, stage}` snapshot in
+   `image_release_shared_generation_ledger`. The exact snapshot hash is bound
+   into the gate result, saved plan, `PREPARED` intent, `APPLYING` transition,
+   and `CONSUMED` transition. Any changed generation, T0, stage, or table
+   identity requires a fresh plan and intent.
+5. After review, apply exactly that saved plan:
+
+   ```bash
+   bash infra/terraform/apply_image_release_plan.sh \
+     /secure/local/path/image-release.tfplan
+   ```
+
+   The apply launcher atomically acquires the shared, leased DynamoDB
+   automation lock and changes the exact intent from `PREPARED` to `APPLYING`
+   with a unique apply-attempt ID. This transition burns the intent for every
+   other attempt. While holding the lock, it recaptures and compares the exact backend,
+   workspace, state lineage/serial, and address ownership, then keeps the lease
+   alive through Terraform's own backend-locked apply. Immediately before any
+   image-bearing ECS task definition, Terraform
+   re-downloads the exact COMPLIANCE-locked evidence versions, rechecks
+   retention and receipt expiry, verifies KMS signatures, release presence,
+   single-manifest type, and the complete recursive subject/SBOM/provenance/
+   signature/referrer graph. A second DynamoDB transaction then changes the
+   exact same-attempt intent from `APPLYING` to `CONSUMED` and conditionally creates every exact
+   receipt claim. The same plan, intent, or receipt cannot authorize another
+   deployment. Every discovered ECS task definition has a direct dependency
+   on this apply-time action; the guarded automation path cannot omit it with
+   `-target`.
+
+The authorization expires after one hour even if the signed receipt expires
+sooner; both deadlines are rechecked when `APPLYING` starts and immediately
+before `CONSUMED`. Never retry a plan after the apply attempt starts, including
+after a preflight failure or nonzero Terraform exit. Reconcile
+Terraform and runtime state first; the ledger records `RECONCILE_REQUIRED`.
+Only confirming the same already-started attempt after an ambiguous DynamoDB
+response, or repeating its outcome-recording call, is narrowly idempotent.
+A retry, roll-forward, or rollback requires a fresh active/rollback
+receipt, a new intent, and a new full saved plan. The ledger uses point-in-time
+recovery, deletion protection, a customer-managed key, and 90-day audit TTL;
+TTL is cleanup, never authorization. None of the build/release launchers
+updates ECS, EventBridge, task definitions, services, or schedules.
+
+The shared lock is cooperative with the trusted Terraform worker. It closes the
+verify-to-apply race among conforming automation flows, but it does not prevent
+an administrator from bypassing the scripts or changing AWS directly. Existing
+administrator IAM, root/admin keys, and long-lived management permissions are
+intentionally unchanged.
+
+The HMAC worker stack owns its durable generation/high-water/stage table and
+the live task/time preflight. This provenance stack neither creates that table
+nor reads secrets from it; it only binds the non-secret snapshot supplied to
+the guarded Terraform plan. Until the later HMAC rebase supplies and live-checks
+that snapshot, an empty optional binding is not evidence that the HMAC
+preflight ran. The release gate must not be described as enforcing the
+separately owned live preflight on its own.
+
+The one-time provenance bootstrap target list above remains limited to
+non-runtime infrastructure and is not authorization to target a runtime
+resource.
+
+CodeBuild log groups, including the legacy `aiia-image-builder` group, are
+normal operational logs and use 30-day retention. AI input/output logs use the
+separately owned 60-day policy; this CodeBuild provenance change does not alter
+that storage or the audit branch's S3 deletion lifecycle. The legacy resource
+is retention-only and does not recreate
 its retired project. Shell tracing stays disabled; ECR tokens go only to
 fixed-registry `--password-stdin` logins, and temporary AWS credentials,
 signature bytes, and secret values are never printed.

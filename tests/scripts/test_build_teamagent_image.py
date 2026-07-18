@@ -50,7 +50,7 @@ def test_launcher_requires_clean_local_dev_equal_to_exact_remote_head() -> None:
     dirty = body.index("status --porcelain=v1 --untracked-files=all")
     branch = body.index('BRANCH="$(git')
     origin = body.index("config --get remote.origin.url")
-    fetch = body.index("git -C \"$REPO_ROOT\" fetch")
+    fetch = body.index('git -C "$REPO_ROOT" fetch')
     equal = body.index("local dev HEAD must exactly equal remote origin/dev")
     first_aws = body.index("aws sts get-caller-identity")
     assert dirty < branch < origin < fetch < equal < first_aws
@@ -64,7 +64,10 @@ def test_launcher_assumes_exact_role_once_and_pins_temporary_session() -> None:
 
     assert body.count("aws sts assume-role") == 1
     assert 'EXPECTED_CALLER_ARN="arn:aws:iam::718959508629:user/AIIAdev"' in body
-    assert 'LAUNCHER_ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-codebuild-launcher"' in body
+    assert (
+        'LAUNCHER_ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-codebuild-launcher"'
+        in body
+    )
     assert (
         'EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/'
         'teamagent-dev-codebuild-launcher/teamagent-build-launcher"'
@@ -88,8 +91,8 @@ def test_launcher_ignores_endpoint_overrides_and_uses_only_fixed_resources() -> 
         'IMAGE_PROJECT="teamagent-dev-image-builder"',
         'ATTESTOR_PROJECT="teamagent-dev-image-attestor"',
         'PROMOTER_PROJECT="teamagent-dev-image-promoter"',
-        'QUARANTINE_REPOSITORY="teamagent-mcp-quarantine"',
         'VERIFIED_CANDIDATE_REPOSITORY="teamagent-mcp-verified-candidates"',
+        ('MEDIA_VERIFIED_CANDIDATE_REPOSITORY="teamagent-media-worker-verified-candidates"'),
     ):
         assert fixed in body
     assert 'RELEASE_REPOSITORY="teamagent-mcp"' not in body
@@ -98,14 +101,22 @@ def test_launcher_ignores_endpoint_overrides_and_uses_only_fixed_resources() -> 
 def test_launcher_binds_current_canonical_app_and_signed_source_versions() -> None:
     body = LAUNCHER.read_text(encoding="utf-8")
 
-    for value in (
-        "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
-        "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
-        "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
-        "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf",
+    for marker in (
+        "teamagent_core_media_release_contract.json",
+        "teamagent_bundle_provenance.py",
+        "production-record",
+        "app-provenance-sha256",
+        "APP_VERSION_ID",
+        "APP_SHA256",
+        "VAULT_MANIFEST_SHA256",
+        "BUILD_INPUTS_SHA256",
+        "BAKED_APP_HTML_VERSION_ID",
+        "BAKED_APP_HTML_SHA256",
+        "APP_PROVENANCE_SHA256",
     ):
-        assert value in body
+        assert marker in body
     assert '--version-id "$APP_VERSION_ID"' in body
+    assert '--version-id "$BAKED_APP_HTML_VERSION_ID"' in body
     assert '--expected-bucket-owner "$ACCOUNT_ID"' in body
     for name in (
         "SOURCE_ARCHIVE_VERSION_ID",
@@ -123,14 +134,16 @@ def test_launcher_orders_publisher_builder_attestor_then_candidate_promoter() ->
 
     publisher = body.index('start_build "$SOURCE_PUBLISHER_PROJECT"')
     image = body.index('start_build "$IMAGE_PROJECT"')
-    quarantine = body.index('repository-name "$QUARANTINE_REPOSITORY"')
+    core_digest = body.index("MCP_CORE_ARM64_DIGEST")
+    media_digest = body.index("MCP_MEDIA_ARM64_DIGEST")
     attestor = body.index('start_build "$ATTESTOR_PROJECT"')
     promoter = body.index('start_build "$PROMOTER_PROJECT"')
-    candidate = body.index('repository-name "$VERIFIED_CANDIDATE_REPOSITORY"')
-    assert publisher < image < quarantine < attestor < promoter < candidate
+    candidate = body.index('repository-name "$candidate_repository"')
+    assert publisher < image < core_digest < media_digest < attestor < promoter < candidate
     assert '"PROMOTION_CHANNEL=verified-candidate"' in body
-    assert '"candidate_repository": "teamagent-mcp-verified-candidates"' not in body
     assert 'candidate_repository: "teamagent-mcp-verified-candidates"' in body
+    assert 'candidate_repository: "teamagent-media-worker-verified-candidates"' in body
+    assert body.count("for subject in core media") == 1
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "not-a-number"])

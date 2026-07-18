@@ -22,21 +22,44 @@ STALE_ROLLBACK = {
     "build_inputs_sha256": ("1ca6f0213155d8d4dbef4220f641dbb38310fe79473f6c013ef4e54dfa6a87e2"),
 }
 ALL_EVIDENCE_KEYS = frozenset(CURRENT_PRODUCTION) - {"schema_version"}
-CANONICAL_CONSUMERS = {
-    ROOT / "infra" / "codebuild" / "buildspec.yml": ALL_EVIDENCE_KEYS,
-    ROOT / "infra" / "codebuild" / "mcp-source-publisher-buildspec.yml": ALL_EVIDENCE_KEYS,
-    ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml": ALL_EVIDENCE_KEYS,
+PINNED_CONSUMERS = {
+    (
+        ROOT / "infra" / "codebuild" / "teamagent_core_media_release_contract.json"
+    ): ALL_EVIDENCE_KEYS,
     ROOT / "infra" / "codebuild" / "release_evidence.py": ALL_EVIDENCE_KEYS,
-    ROOT / "infra" / "deploy" / "build_teamagent_image.sh": ALL_EVIDENCE_KEYS,
-    ROOT / "infra" / "terraform" / "codebuild.tf": ALL_EVIDENCE_KEYS,
+    ROOT / "infra" / "terraform" / "connect_web.tf": ALL_EVIDENCE_KEYS,
     ROOT / "infra" / "terraform" / "README.md": ALL_EVIDENCE_KEYS,
-    ROOT / "infra" / "codebuild" / "verify_actual_image.sh": frozenset({"app_html_sha256"}),
-    ROOT / "tests" / "codebuild" / "test_buildspec_contract.py": ALL_EVIDENCE_KEYS,
-    ROOT / "tests" / "codebuild" / "test_release_evidence.py": ALL_EVIDENCE_KEYS,
-    ROOT / "tests" / "scripts" / "test_build_teamagent_image.py": ALL_EVIDENCE_KEYS,
-    ROOT / "tests" / "codebuild" / "test_actual_image_evidence.py": frozenset({"app_html_sha256"}),
-    ROOT / "tests" / "codebuild" / "test_launcher_iam_contract.py": frozenset(
-        {"app_html_s3_version_id", "app_html_sha256"}
+}
+DERIVED_CONSUMERS = {
+    ROOT / "infra" / "codebuild" / "buildspec.yml": (
+        "teamagent_core_media_release_contract.json",
+        "production-record",
+        "APP_HTML_VERSION_ID",
+        "APP_HTML_SHA256",
+        "VAULT_MANIFEST_SHA256",
+        "BUILD_INPUTS_SHA256",
+    ),
+    ROOT / "infra" / "codebuild" / "mcp-source-publisher-buildspec.yml": (
+        "teamagent_core_media_release_contract.json",
+        "production-record",
+        "APP_HTML_VERSION_ID",
+        "APP_HTML_SHA256",
+        "VAULT_MANIFEST_SHA256",
+        "BUILD_INPUTS_SHA256",
+    ),
+    ROOT / "infra" / "deploy" / "build_teamagent_image.sh": (
+        "teamagent_core_media_release_contract.json",
+        "production-record",
+        "APP_HTML_VERSION_ID",
+        "APP_HTML_SHA256",
+        "VAULT_MANIFEST_SHA256",
+        "BUILD_INPUTS_SHA256",
+    ),
+    ROOT / "infra" / "terraform" / "codebuild.tf": (
+        "mcp_release_contract.app_html.production.app_html_s3_version_id",
+        "mcp_release_contract.app_html.production.app_html_sha256",
+        "mcp_release_contract.app_html.production.vault_manifest_sha256",
+        "mcp_release_contract.app_html.production.build_inputs_sha256",
     ),
 }
 PROVENANCE_RECORD_RE = re.compile(r"^<!-- PRODUCTION_APP_PROVENANCE=(\{.+\}) -->$", re.MULTILINE)
@@ -97,13 +120,24 @@ def test_newer_non_app_deploy_does_not_shadow_current_app_provenance() -> None:
     assert record == CURRENT_PRODUCTION
 
 
-def test_all_canonical_consumers_follow_latest_production_record() -> None:
+def test_pinned_consumers_follow_latest_production_record() -> None:
     record, _ = _latest_production_app_record()
 
-    for path, evidence_keys in CANONICAL_CONSUMERS.items():
+    for path, evidence_keys in PINNED_CONSUMERS.items():
         body = path.read_text(encoding="utf-8")
         for key in evidence_keys:
             assert record[key] in body, f"{path.relative_to(ROOT)} does not pin {key}"
+        for key, stale_value in STALE_ROLLBACK.items():
+            assert stale_value not in body, (
+                f"{path.relative_to(ROOT)} still treats stale {key} as canonical"
+            )
+
+
+def test_executable_consumers_derive_all_four_anchors_from_the_trusted_record() -> None:
+    for path, required in DERIVED_CONSUMERS.items():
+        body = path.read_text(encoding="utf-8")
+        for marker in required:
+            assert marker in body, f"{path.relative_to(ROOT)} does not derive {marker}"
         for key, stale_value in STALE_ROLLBACK.items():
             assert stale_value not in body, (
                 f"{path.relative_to(ROOT)} still treats stale {key} as canonical"

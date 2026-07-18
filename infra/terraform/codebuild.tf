@@ -14,6 +14,9 @@ locals {
   codebuild_log_retention_days  = 30
   main_codebuild_project_name   = "${var.project_name}-${var.environment}-image-builder"
   runtime_contract_sha256       = filesha256("${path.module}/../codebuild/teamagent_runtime_contract.json")
+  mcp_release_contract_path     = "${path.module}/../codebuild/teamagent_core_media_release_contract.json"
+  mcp_release_contract          = jsondecode(file(local.mcp_release_contract_path))
+  mcp_release_contract_sha256   = filesha256(local.mcp_release_contract_path)
   tiktok_codebuild_project_name = "${var.project_name}-${var.environment}-tiktok-image-builder"
   openclaw_codebuild_project_name = (
     "${var.project_name}-${var.environment}-openclaw-provenance-builder"
@@ -28,30 +31,61 @@ locals {
   release_evidence_bucket     = "${var.project_name}-${var.environment}-image-release-evidence"
   tiktok_launcher_role_name   = "${var.project_name}-${var.environment}-tiktok-build-launcher"
   release_launcher_role_name  = "${var.project_name}-${var.environment}-release-launcher"
+  image_deployment_gate_role_name = (
+    "${var.project_name}-${var.environment}-image-deployment-gate"
+  )
+  image_deployment_intent_table = (
+    "${var.project_name}-${var.environment}-image-deployment-intents"
+  )
+  terraform_automation_role_arn = (
+    "arn:aws:iam::718959508629:role/teamagent-dev-terraform-automation"
+  )
   openclaw_contract_sha256 = filesha256(
     "${path.module}/../codebuild/openclaw_bundle_contract.json"
   )
-  launcher_role_name            = "teamagent-dev-codebuild-launcher"
-  launcher_project_arn          = "arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-image-builder"
-  canonical_app_html_version_id = "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
-  canonical_app_html_sha256 = (
-    "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
+  launcher_role_name              = "teamagent-dev-codebuild-launcher"
+  launcher_project_arn            = "arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-image-builder"
+  canonical_app_html_version_id   = local.mcp_release_contract.app_html.production.app_html_s3_version_id
+  canonical_app_html_sha256       = local.mcp_release_contract.app_html.production.app_html_sha256
+  canonical_vault_manifest_sha256 = local.mcp_release_contract.app_html.production.vault_manifest_sha256
+  canonical_build_inputs_sha256   = local.mcp_release_contract.app_html.production.build_inputs_sha256
+  canonical_baked_app_html_version_id = coalesce(
+    local.mcp_release_contract.app_html.baked_fallback.s3_version_id,
+    "__RELEASE_BLOCKED_MISSING_VERSION_ID__",
   )
-  canonical_vault_manifest_sha256 = (
-    "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
-  )
-  canonical_build_inputs_sha256 = (
-    "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+  canonical_baked_app_html_sha256 = local.mcp_release_contract.app_html.baked_fallback.sha256
+  canonical_app_provenance = {
+    schema_version = 1
+    app_html = {
+      bucket     = local.mcp_release_contract.app_html.bucket
+      key        = local.mcp_release_contract.app_html.key
+      version_id = local.canonical_app_html_version_id
+      sha256     = local.canonical_app_html_sha256
+    }
+    application_provenance = {
+      vault_manifest_sha256 = local.canonical_vault_manifest_sha256
+      build_inputs_sha256   = local.canonical_build_inputs_sha256
+    }
+    baked_fallback = {
+      version_id = local.mcp_release_contract.app_html.baked_fallback.s3_version_id
+      sha256     = local.canonical_baked_app_html_sha256
+    }
+  }
+  canonical_app_provenance_sha256 = sha256(
+    "${jsonencode(local.canonical_app_provenance)}\n"
   )
   launcher_environment_names = [
     "GIT_COMMIT",
     "GIT_BRANCH",
-    "WITH_SCRAPE_TOOLS",
     "APP_HTML_VERSION_ID",
     "APP_HTML_SHA256",
     "VAULT_MANIFEST_SHA256",
     "BUILD_INPUTS_SHA256",
-    "RUNTIME_CONTRACT_SHA256",
+    "BAKED_APP_HTML_VERSION_ID",
+    "BAKED_APP_HTML_SHA256",
+    "APP_PROVENANCE_SHA256",
+    "SOURCE_MANIFEST_CONTRACT_SHA256",
+    "RELEASE_CONTRACT_SHA256",
     "SOURCE_ARCHIVE_VERSION_ID",
     "SOURCE_DECLARATION_KEY",
     "SOURCE_DECLARATION_VERSION_ID",
@@ -61,7 +95,8 @@ locals {
   ]
   source_publisher_environment_names = [
     "EXPECTED_COMMIT",
-    "RUNTIME_CONTRACT_SHA256",
+    "SOURCE_MANIFEST_CONTRACT_SHA256",
+    "RELEASE_CONTRACT_SHA256",
   ]
   attestor_environment_names = [
     "PIPELINE",
@@ -110,13 +145,16 @@ locals {
     "arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-image-promoter",
   ]
   launcher_fixed_environment_values = {
-    GIT_BRANCH              = "dev"
-    WITH_SCRAPE_TOOLS       = "true"
-    APP_HTML_VERSION_ID     = local.canonical_app_html_version_id
-    APP_HTML_SHA256         = local.canonical_app_html_sha256
-    VAULT_MANIFEST_SHA256   = local.canonical_vault_manifest_sha256
-    BUILD_INPUTS_SHA256     = local.canonical_build_inputs_sha256
-    RUNTIME_CONTRACT_SHA256 = local.runtime_contract_sha256
+    GIT_BRANCH                      = "dev"
+    APP_HTML_VERSION_ID             = local.canonical_app_html_version_id
+    APP_HTML_SHA256                 = local.canonical_app_html_sha256
+    VAULT_MANIFEST_SHA256           = local.canonical_vault_manifest_sha256
+    BUILD_INPUTS_SHA256             = local.canonical_build_inputs_sha256
+    BAKED_APP_HTML_VERSION_ID       = local.canonical_baked_app_html_version_id
+    BAKED_APP_HTML_SHA256           = local.canonical_baked_app_html_sha256
+    APP_PROVENANCE_SHA256           = local.canonical_app_provenance_sha256
+    SOURCE_MANIFEST_CONTRACT_SHA256 = local.runtime_contract_sha256
+    RELEASE_CONTRACT_SHA256         = local.mcp_release_contract_sha256
   }
   # Official CodeBuild request condition keys. Each key receives its own Null
   # deny statement so the presence of any one dangerous override is rejected.
@@ -258,7 +296,10 @@ data "aws_iam_policy_document" "codebuild" {
       "ecr:GetDownloadUrlForLayer",
       "ecr:DescribeImageScanFindings",
     ]
-    resources = [aws_ecr_repository.mcp_quarantine.arn]
+    resources = [
+      aws_ecr_repository.mcp_quarantine.arn,
+      aws_ecr_repository.mcp_media_quarantine.arn,
+    ]
   }
   statement {
     sid    = "DenyMcpCandidateAndReleaseWrite"
@@ -274,6 +315,8 @@ data "aws_iam_policy_document" "codebuild" {
     resources = [
       aws_ecr_repository.mcp_verified_candidates.arn,
       aws_ecr_repository.mcp.arn,
+      aws_ecr_repository.mcp_media_verified_candidates.arn,
+      aws_ecr_repository.mcp_media.arn,
     ]
   }
   statement {
@@ -326,6 +369,54 @@ resource "aws_iam_role_policy" "codebuild" {
   policy = data.aws_iam_policy_document.codebuild.json
 }
 
+locals {
+  image_builder_buildspec_1 = replace(
+    file("${path.module}/../codebuild/buildspec.yml"),
+    "__SOURCE_PROVENANCE_SHA256__",
+    filesha256("${path.module}/../codebuild/source_provenance.py"),
+  )
+  image_builder_buildspec_2 = replace(
+    local.image_builder_buildspec_1,
+    "__RELEASE_EVIDENCE_SHA256__",
+    filesha256("${path.module}/../codebuild/release_evidence.py"),
+  )
+  image_builder_buildspec_3 = replace(
+    local.image_builder_buildspec_2,
+    "__TEAMAGENT_BUNDLE_PROVENANCE_SHA256__",
+    filesha256("${path.module}/../codebuild/teamagent_bundle_provenance.py"),
+  )
+  image_builder_buildspec_4 = replace(
+    local.image_builder_buildspec_3,
+    "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
+    aws_kms_key.mcp_source_publisher_signing.arn,
+  )
+  image_builder_buildspec_5 = replace(
+    local.image_builder_buildspec_4,
+    "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
+    aws_kms_key.image_release_evidence.arn,
+  )
+  image_builder_buildspec_6 = replace(
+    local.image_builder_buildspec_5,
+    "__ECR_IMAGE_RESOLVER_SHA256__",
+    filesha256("${path.module}/../codebuild/resolve_ecr_image.py"),
+  )
+  image_builder_buildspec_7 = replace(
+    local.image_builder_buildspec_6,
+    "__ECR_SCAN_GATE_SHA256__",
+    filesha256("${path.module}/../codebuild/verify_ecr_scan.py"),
+  )
+  image_builder_buildspec_8 = replace(
+    local.image_builder_buildspec_7,
+    "__MCP_RELEASE_CONTRACT_SHA256__",
+    local.mcp_release_contract_sha256,
+  )
+  image_builder_buildspec = replace(
+    local.image_builder_buildspec_8,
+    "__SOURCE_MANIFEST_CONTRACT_SHA256__",
+    local.runtime_contract_sha256,
+  )
+}
+
 # --- CodeBuild プロジェクト（arm64・docker・versioned S3 source） ---
 resource "aws_codebuild_project" "image" {
   name         = local.main_codebuild_project_name
@@ -340,40 +431,16 @@ resource "aws_codebuild_project" "image" {
     type            = "ARM_CONTAINER"
     privileged_mode = true # docker ビルドに必須
 
-    # IMAGE_TAG / WITH_SCRAPE_TOOLS / GIT_COMMIT / GIT_BRANCH /
-    # APP_HTML_VERSION_ID / APP_HTML_SHA256 / runtime contract values have no
-    # project defaults.
+    # Commit, branch, both application contracts, and both provenance hashes
+    # have no project defaults. In particular, no OCI provenance label can
+    # silently resolve to a placeholder.
     # build_teamagent_image.sh binds all provenance inputs per build.
   }
 
   source {
-    type     = "S3"
-    location = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"
-    buildspec = replace(
-      replace(
-        replace(
-          replace(
-            replace(
-              replace(
-                file("${path.module}/../codebuild/buildspec.yml"),
-                "__SOURCE_PROVENANCE_SHA256__",
-                filesha256("${path.module}/../codebuild/source_provenance.py"),
-              ),
-              "__RELEASE_EVIDENCE_SHA256__",
-              filesha256("${path.module}/../codebuild/release_evidence.py"),
-            ),
-            "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
-            aws_kms_key.mcp_source_publisher_signing.arn,
-          ),
-          "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
-          aws_kms_key.image_release_evidence.arn,
-        ),
-        "__ECR_IMAGE_RESOLVER_SHA256__",
-        filesha256("${path.module}/../codebuild/resolve_ecr_image.py"),
-      ),
-      "__ECR_SCAN_GATE_SHA256__",
-      filesha256("${path.module}/../codebuild/verify_ecr_scan.py"),
-    )
+    type      = "S3"
+    location  = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"
+    buildspec = local.image_builder_buildspec
   }
 
   logs_config {
@@ -478,8 +545,13 @@ data "aws_iam_policy_document" "codebuild_launcher" {
     }
     condition {
       test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables/RUNTIME_CONTRACT_SHA256.value"
+      variable = "codebuild:environment.environmentVariables/SOURCE_MANIFEST_CONTRACT_SHA256.value"
       values   = [local.runtime_contract_sha256]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables/RELEASE_CONTRACT_SHA256.value"
+      values   = [local.mcp_release_contract_sha256]
     }
   }
   statement {
@@ -533,21 +605,12 @@ data "aws_iam_policy_document" "codebuild_launcher" {
     }
   }
   statement {
-    sid = "ReadQuarantinedMcpDigest"
-    actions = [
-      "ecr:BatchGetImage",
-      "ecr:DescribeImages",
+    sid     = "ReadVerifiedMcpBundleDigests"
+    actions = ["ecr:DescribeImages"]
+    resources = [
+      "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-mcp-verified-candidates",
+      "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-media-worker-verified-candidates",
     ]
-    resources = ["arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-mcp-quarantine"]
-  }
-  statement {
-    sid = "ReadVerifiedMcpDigestAndConfig"
-    actions = [
-      "ecr:BatchGetImage",
-      "ecr:DescribeImages",
-      "ecr:GetDownloadUrlForLayer",
-    ]
-    resources = ["arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-mcp-verified-candidates"]
   }
   dynamic "statement" {
     for_each = local.launcher_denied_override_condition_keys
@@ -726,12 +789,13 @@ data "aws_iam_policy_document" "release_launcher" {
       "ecr:BatchGetImage",
       "ecr:DescribeImages",
       "ecr:GetDownloadUrlForLayer",
-      "ecr:ListImageReferrers",
     ]
     resources = concat(
       [
         aws_ecr_repository.mcp_verified_candidates.arn,
         aws_ecr_repository.mcp.arn,
+        aws_ecr_repository.mcp_media_verified_candidates.arn,
+        aws_ecr_repository.mcp_media.arn,
         aws_ecr_repository.openclaw_verified_candidates.arn,
         aws_ecr_repository.openclaw.arn,
         aws_ecr_repository.openclaw_media_verified_candidates.arn,
@@ -1569,6 +1633,199 @@ resource "aws_s3_bucket_policy" "image_release_evidence" {
   policy = data.aws_iam_policy_document.image_release_evidence_bucket.json
 }
 
+# Durable one-use deployment authorization ledger. One transaction acquires the
+# shared lock and burns PREPARED as APPLYING for one exact attempt; another
+# changes that attempt to CONSUMED while conditionally creating every exact
+# receipt claim. TTL is audit cleanup only; receipt freshness is revalidated at
+# both transitions and cannot be extended by this table.
+resource "aws_dynamodb_table" "image_deployment_intents" {
+  name         = local.image_deployment_intent_table
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "record_id"
+
+  attribute {
+    name = "record_id"
+    type = "S"
+  }
+
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.image_release_evidence.arn
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  ttl {
+    attribute_name = "audit_expires_at"
+    enabled        = true
+  }
+
+  deletion_protection_enabled = true
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+data "aws_iam_policy_document" "image_deployment_gate_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = [local.terraform_automation_role_arn]
+    }
+  }
+}
+
+resource "aws_iam_role" "image_deployment_gate" {
+  name                 = local.image_deployment_gate_role_name
+  assume_role_policy   = data.aws_iam_policy_document.image_deployment_gate_assume.json
+  max_session_duration = 3600
+}
+
+data "aws_iam_policy_document" "image_deployment_gate" {
+  statement {
+    sid = "ReadExactImmutableReleaseReceipts"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectRetention",
+      "s3:GetObjectVersion",
+    ]
+    resources = [
+      "${aws_s3_bucket.image_release_evidence.arn}/release-receipts/*",
+    ]
+  }
+  statement {
+    sid       = "DecryptReleaseReceipts"
+    actions   = ["kms:Decrypt", "kms:DescribeKey"]
+    resources = [aws_kms_key.image_release_evidence.arn]
+  }
+  statement {
+    sid       = "VerifyAttestorReceiptSignature"
+    actions   = ["kms:DescribeKey", "kms:GetPublicKey", "kms:Verify"]
+    resources = [aws_kms_key.image_attestor_signing.arn]
+  }
+  statement {
+    sid = "ReadReleaseSubjectAndReferrerGraph"
+    actions = [
+      "ecr:BatchGetImage",
+      "ecr:GetLifecyclePolicy",
+    ]
+    resources = concat(
+      [
+        aws_ecr_repository.mcp.arn,
+        aws_ecr_repository.mcp_media.arn,
+        aws_ecr_repository.openclaw.arn,
+        aws_ecr_repository.openclaw_media.arn,
+      ],
+      local.tk_enabled == 1 ? [aws_ecr_repository.tiktok_acquire[0].arn] : [],
+    )
+  }
+  statement {
+    sid       = "ReadDeploymentLedger"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values = [
+        "intent#*",
+        "receipt#*",
+        "lock#teamagent/terraform.tfstate",
+      ]
+    }
+  }
+  statement {
+    sid       = "PrepareUniqueDeploymentIntent"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["intent#*"]
+    }
+  }
+  statement {
+    sid       = "TransitionDeploymentIntentOrHeartbeatLock"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values = [
+        "intent#*",
+        "lock#teamagent/terraform.tfstate",
+      ]
+    }
+  }
+  statement {
+    sid       = "AtomicallyStartAndConsumeDeployment"
+    actions   = ["dynamodb:TransactWriteItems"]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values = [
+        "intent#*",
+        "receipt#*",
+        "lock#teamagent/terraform.tfstate",
+      ]
+    }
+  }
+  statement {
+    sid       = "ReleaseOnlySharedDeploymentLock"
+    actions   = ["dynamodb:DeleteItem"]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["lock#teamagent/terraform.tfstate"]
+    }
+  }
+  statement {
+    sid    = "DenyRuntimeEvidenceAndImageMutation"
+    effect = "Deny"
+    actions = [
+      "codebuild:StartBuild",
+      "codebuild:StartBuildBatch",
+      "ecr:BatchDeleteImage",
+      "ecr:CompleteLayerUpload",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart",
+      "ecs:*",
+      "events:*",
+      "kms:Sign",
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+      "s3:PutObject",
+      "s3:PutObjectRetention",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "image_deployment_gate" {
+  name   = local.image_deployment_gate_role_name
+  role   = aws_iam_role.image_deployment_gate.id
+  policy = data.aws_iam_policy_document.image_deployment_gate.json
+}
+
+output "image_deployment_gate_role_arn" {
+  value = aws_iam_role.image_deployment_gate.arn
+}
+
+output "image_deployment_intent_table" {
+  value = aws_dynamodb_table.image_deployment_intents.name
+}
+
 data "aws_iam_policy_document" "mcp_source_publisher_assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -1729,13 +1986,13 @@ data "aws_iam_policy_document" "image_attestor" {
       "ecr:DescribeImages",
       "ecr:GetDownloadUrlForLayer",
       "ecr:InitiateLayerUpload",
-      "ecr:ListImageReferrers",
       "ecr:PutImage",
       "ecr:UploadLayerPart",
     ]
     resources = concat(
       [
         aws_ecr_repository.mcp_quarantine.arn,
+        aws_ecr_repository.mcp_media_quarantine.arn,
         aws_ecr_repository.openclaw_quarantine.arn,
         aws_ecr_repository.openclaw_media_quarantine.arn,
       ],
@@ -1750,6 +2007,7 @@ data "aws_iam_policy_document" "image_attestor" {
     resources = concat(
       [
         aws_ecr_repository.mcp_quarantine.arn,
+        aws_ecr_repository.mcp_media_quarantine.arn,
         aws_ecr_repository.openclaw_quarantine.arn,
         aws_ecr_repository.openclaw_media_quarantine.arn,
       ],
@@ -1762,11 +2020,11 @@ data "aws_iam_policy_document" "image_attestor" {
       "ecr:BatchGetImage",
       "ecr:DescribeImages",
       "ecr:GetDownloadUrlForLayer",
-      "ecr:ListImageReferrers",
     ]
     resources = concat(
       [
         aws_ecr_repository.mcp_verified_candidates.arn,
+        aws_ecr_repository.mcp_media_verified_candidates.arn,
         aws_ecr_repository.openclaw_verified_candidates.arn,
         aws_ecr_repository.openclaw_media_verified_candidates.arn,
       ],
@@ -1788,6 +2046,8 @@ data "aws_iam_policy_document" "image_attestor" {
       [
         aws_ecr_repository.mcp.arn,
         aws_ecr_repository.mcp_verified_candidates.arn,
+        aws_ecr_repository.mcp_media.arn,
+        aws_ecr_repository.mcp_media_verified_candidates.arn,
         aws_ecr_repository.openclaw.arn,
         aws_ecr_repository.openclaw_verified_candidates.arn,
         aws_ecr_repository.openclaw_media.arn,
@@ -1938,12 +2198,13 @@ data "aws_iam_policy_document" "image_promoter" {
       "ecr:BatchGetImage",
       "ecr:DescribeImages",
       "ecr:GetDownloadUrlForLayer",
-      "ecr:ListImageReferrers",
     ]
     resources = concat(
       [
         aws_ecr_repository.mcp_quarantine.arn,
         aws_ecr_repository.mcp_verified_candidates.arn,
+        aws_ecr_repository.mcp_media_quarantine.arn,
+        aws_ecr_repository.mcp_media_verified_candidates.arn,
         aws_ecr_repository.openclaw_quarantine.arn,
         aws_ecr_repository.openclaw_verified_candidates.arn,
         aws_ecr_repository.openclaw_media_quarantine.arn,
@@ -1964,7 +2225,6 @@ data "aws_iam_policy_document" "image_promoter" {
       "ecr:DescribeImages",
       "ecr:GetDownloadUrlForLayer",
       "ecr:InitiateLayerUpload",
-      "ecr:ListImageReferrers",
       "ecr:PutImage",
       "ecr:UploadLayerPart",
     ]
@@ -1972,6 +2232,8 @@ data "aws_iam_policy_document" "image_promoter" {
       [
         aws_ecr_repository.mcp_verified_candidates.arn,
         aws_ecr_repository.mcp.arn,
+        aws_ecr_repository.mcp_media_verified_candidates.arn,
+        aws_ecr_repository.mcp_media.arn,
         aws_ecr_repository.openclaw_verified_candidates.arn,
         aws_ecr_repository.openclaw.arn,
         aws_ecr_repository.openclaw_media_verified_candidates.arn,
@@ -2044,16 +2306,26 @@ locals {
   )
   mcp_source_publisher_buildspec_3 = replace(
     local.mcp_source_publisher_buildspec_2,
-    "__MCP_CONTRACT_BASE64__",
-    filebase64("${path.module}/../codebuild/teamagent_runtime_contract.json"),
+    "__TEAMAGENT_BUNDLE_PROVENANCE_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_bundle_provenance.py"),
   )
   mcp_source_publisher_buildspec_4 = replace(
     local.mcp_source_publisher_buildspec_3,
+    "__SOURCE_MANIFEST_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_runtime_contract.json"),
+  )
+  mcp_source_publisher_buildspec_5 = replace(
+    local.mcp_source_publisher_buildspec_4,
+    "__MCP_RELEASE_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_core_media_release_contract.json"),
+  )
+  mcp_source_publisher_buildspec_6 = replace(
+    local.mcp_source_publisher_buildspec_5,
     "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
     aws_kms_key.mcp_source_publisher_signing.arn,
   )
   mcp_source_publisher_buildspec = replace(
-    local.mcp_source_publisher_buildspec_4,
+    local.mcp_source_publisher_buildspec_6,
     "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.image_release_evidence.arn,
   )
@@ -2069,9 +2341,13 @@ locals {
     filebase64("${path.module}/../codebuild/actual_image_evidence.py"),
   )
   image_attestor_buildspec_3 = replace(
-    local.image_attestor_buildspec_2,
-    "__SOURCE_PROVENANCE_BASE64__",
-    filebase64("${path.module}/../codebuild/source_provenance.py"),
+    replace(
+      local.image_attestor_buildspec_2,
+      "__SOURCE_PROVENANCE_BASE64__",
+      filebase64("${path.module}/../codebuild/source_provenance.py"),
+    ),
+    "__TEAMAGENT_BUNDLE_PROVENANCE_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_bundle_provenance.py"),
   )
   image_attestor_buildspec_4 = replace(
     local.image_attestor_buildspec_3,
@@ -2091,7 +2367,7 @@ locals {
   image_attestor_buildspec_7 = replace(
     local.image_attestor_buildspec_6,
     "__MCP_CONTRACT_BASE64__",
-    filebase64("${path.module}/../codebuild/teamagent_runtime_contract.json"),
+    filebase64("${path.module}/../codebuild/teamagent_core_media_release_contract.json"),
   )
   image_attestor_buildspec_8 = replace(
     local.image_attestor_buildspec_7,
@@ -2578,6 +2854,9 @@ data "aws_iam_policy_document" "openclaw_codebuild" {
       aws_ecr_repository.mcp.arn,
       aws_ecr_repository.mcp_quarantine.arn,
       aws_ecr_repository.mcp_verified_candidates.arn,
+      aws_ecr_repository.mcp_media.arn,
+      aws_ecr_repository.mcp_media_quarantine.arn,
+      aws_ecr_repository.mcp_media_verified_candidates.arn,
     ]
   }
   statement {

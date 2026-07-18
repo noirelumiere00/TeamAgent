@@ -54,7 +54,8 @@ for required in \
 done
 case "$PROMOTION_CHANNEL" in verified-candidate|active|rollback) ;; *) die "invalid promotion channel" ;; esac
 case "$PIPELINE:$SUBJECT_NAME:$QUARANTINE_REPOSITORY:$CANDIDATE_REPOSITORY:$RELEASE_REPOSITORY" in
-  mcp:mcp:teamagent-mcp-quarantine:teamagent-mcp-verified-candidates:teamagent-mcp) ;;
+  mcp:core:teamagent-mcp-quarantine:teamagent-mcp-verified-candidates:teamagent-mcp) ;;
+  mcp:media:teamagent-media-worker-quarantine:teamagent-media-worker-verified-candidates:teamagent-media-worker) ;;
   tiktok:tiktok:teamagent-dev-tiktok-acquire-quarantine:teamagent-dev-tiktok-acquire-verified-candidates:teamagent-dev-tiktok-acquire) ;;
   openclaw:core:teamagent-openclaw-quarantine:teamagent-openclaw-verified-candidates:teamagent-openclaw) ;;
   openclaw:media:teamagent-openclaw-media-quarantine:teamagent-openclaw-media-verified-candidates:teamagent-openclaw-media) ;;
@@ -98,8 +99,10 @@ aws ecr get-login-password --region "$REGION" \
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 EVIDENCE_HELPER="$SCRIPT_DIR/actual_image_evidence.py"
 PROVENANCE_HELPER="$SCRIPT_DIR/source_provenance.py"
+BUNDLE_PROVENANCE_HELPER="$SCRIPT_DIR/teamagent_bundle_provenance.py"
 [ -f "$EVIDENCE_HELPER" ] || die "actual-image evidence helper is missing"
 [ -f "$PROVENANCE_HELPER" ] || die "source provenance helper is missing"
+[ -f "$BUNDLE_PROVENANCE_HELPER" ] || die "core/media provenance helper is missing"
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/teamagent-actual-image.XXXXXXXX")"
 CONTAINER_NAME="teamagent-evidence-${PIPELINE}-${SUBJECT_NAME}-$$"
@@ -160,12 +163,9 @@ unset CONFIG_URL
 
 case "$PIPELINE" in
   mcp)
-    python3 "$PROVENANCE_HELPER" runtime-binary-probes \
-      --contract "$CONTRACT" >"$BINARY_EXPECTED"
-    printf '%s\t%s\n' \
-      "/app/src/teamagent/connect_web/static/app.html" \
-      "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c" \
-      >>"$BINARY_EXPECTED"
+    python3 "$BUNDLE_PROVENANCE_HELPER" binary-probes \
+      --contract "$CONTRACT" \
+      --subject "$SUBJECT_NAME" >"$BINARY_EXPECTED"
     ;;
   tiktok)
     jq -er '

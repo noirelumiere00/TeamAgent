@@ -37,10 +37,7 @@ DIGEST = "sha256:" + "2" * 64
 SBOM_DIGEST = "sha256:" + "4" * 64
 PROVENANCE_DIGEST = "sha256:" + "5" * 64
 CONTRACT_SHA256 = "6" * 64
-KEY_ARN = (
-    "arn:aws:kms:ap-northeast-1:718959508629:"
-    "key/12345678-1234-1234-1234-123456789abc"
-)
+KEY_ARN = "arn:aws:kms:ap-northeast-1:718959508629:key/12345678-1234-1234-1234-123456789abc"
 REGISTRY = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
 QUARANTINE = "teamagent-dev-tiktok-acquire-quarantine"
 
@@ -85,8 +82,7 @@ def _fixture(
     binary_probes.write_text(f"/usr/bin/tiktok-worker\t{'7' * 64}\n", encoding="utf-8")
 
     vulnerabilities = [
-        {"Severity": "CRITICAL", "VulnerabilityID": f"CVE-{index}"}
-        for index in range(critical)
+        {"Severity": "CRITICAL", "VulnerabilityID": f"CVE-{index}"} for index in range(critical)
     ]
     trivy = tmp_path / "trivy.json"
     _write_json(
@@ -253,16 +249,11 @@ def test_actual_image_subject_binds_digest_platform_labels_binaries_and_signed_r
     assert subject["scan"]["critical"] == 0
     assert subject["scan"]["high"] == 0
     assert subject["scan"]["secrets"] == 0
-    assert subject["binaries"] == [
-        {"path": "/usr/bin/tiktok-worker", "sha256": "7" * 64}
-    ]
+    assert subject["binaries"] == [{"path": "/usr/bin/tiktok-worker", "sha256": "7" * 64}]
     assert subject["sbom"]["signature"]["subject_digest"] == SBOM_DIGEST
     assert subject["sbom"]["signature"]["referrer_digest"] == "sha256:" + "a" * 64
     assert subject["provenance"]["signature"]["subject_digest"] == PROVENANCE_DIGEST
-    assert (
-        subject["provenance"]["signature"]["referrer_digest"]
-        == "sha256:" + "b" * 64
-    )
+    assert subject["provenance"]["signature"]["referrer_digest"] == "sha256:" + "b" * 64
     assert subject["image_signature"]["subject_digest"] == DIGEST
     assert subject["image_signature"]["referrer_digest"] == "sha256:" + "9" * 64
 
@@ -309,17 +300,18 @@ def test_actual_image_verifier_scans_before_signing_and_never_accepts_indexes() 
     assert '"$IMAGE"' in body
     assert "application/vnd.oci.image.index.v1+json" not in body
     assert body.count("aws ecr list-image-referrers") == body.count("--max-results 50")
-    assert "/app/src/teamagent/connect_web/static/app.html" in body
+    assert '"$BUNDLE_PROVENANCE_HELPER" binary-probes' in body
+    assert '--subject "$SUBJECT_NAME"' in body
     assert (
-        "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
-        in body
-    )
+        "mcp:core:teamagent-mcp-quarantine:teamagent-mcp-verified-candidates:teamagent-mcp"
+    ) in body
+    assert (
+        "mcp:media:teamagent-media-worker-quarantine:"
+        "teamagent-media-worker-verified-candidates:teamagent-media-worker"
+    ) in body
     assert 'KMS_URI="awskms:///$SIGNING_KEY_ARN"' in body
     assert body.count("cosign verify --experimental-oci11") == 3
     assert "application/spdx+json" in body
     assert "application/vnd.in-toto+json" in body
-    assert 'unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY' in body
-    assert (
-        'TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"'
-        in body
-    )
+    assert "unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY" in body
+    assert 'TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"' in body

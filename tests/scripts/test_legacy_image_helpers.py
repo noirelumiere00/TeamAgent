@@ -14,7 +14,19 @@ TIKTOK_HELPER = ROOT / "build_tiktok_image.sh"
 HELPERS = (MCP_HELPER, OPENCLAW_HELPER, TIKTOK_HELPER)
 RETIRED_DEPLOYERS = (
     ROOT / "infra" / "deploy" / "deploy_connectweb_unified.sh",
+    ROOT / "infra" / "deploy" / "register_ingest_td.sh",
+    ROOT / "infra" / "terraform" / "apply_openclaw.sh",
+    ROOT / "infra" / "terraform" / "apply_resilience.sh",
     ROOT / "deploy_digest_test.sh",
+    ROOT / "reingest.sh",
+)
+ACTIVE_IMAGE_RUNBOOKS = (
+    ROOT / "CLAUDE.md",
+    ROOT / "docs" / "aila_loop" / "RULES.md",
+    ROOT / "docs" / "openclaw" / "deploy_runbook.md",
+    ROOT / "docs" / "openclaw" / "golive_checklist.md",
+    ROOT / "docs" / "runbooks" / "connect_web_monthly.md",
+    ROOT / "infra" / "openclaw" / "README.md",
 )
 
 
@@ -92,7 +104,6 @@ def test_unsafe_combined_deployers_are_fail_loud_stubs(path: Path) -> None:
 
     assert completed.returncode == 64
     assert "permanently disabled" in completed.stderr
-    assert "build_teamagent_image.sh" in completed.stderr
     assert "terraform/README.md" in completed.stderr
     for forbidden in (
         "aws ",
@@ -101,6 +112,8 @@ def test_unsafe_combined_deployers_are_fail_loud_stubs(path: Path) -> None:
         "register-task-definition",
         "update-service",
         "put-targets",
+        "terraform apply",
+        "-target",
     ):
         assert forbidden not in body.lower()
 
@@ -124,6 +137,46 @@ def test_all_shell_start_build_and_source_zip_paths_are_allowlisted() -> None:
             assert path in safe_launchers, f"unapproved StartBuild path: {path}"
         if "source.zip" in body:
             pytest.fail(f"shell launchers must not create source.zip: {path}")
+
+
+def test_no_shell_can_bypass_terraform_for_image_task_definition_changes() -> None:
+    guarded_terraform_launchers = {
+        ROOT / "infra" / "terraform" / "plan_image_release.sh",
+        ROOT / "infra" / "terraform" / "apply_image_release_plan.sh",
+    }
+    shell_files = sorted(
+        path
+        for path in ROOT.rglob("*.sh")
+        if ".git" not in path.parts and ".venv" not in path.parts
+    )
+    for path in shell_files:
+        body = path.read_text(encoding="utf-8").lower()
+        assert "register-task-definition" not in body, path
+        assert not ("update-service" in body and "--task-definition" in body), path
+        if path not in guarded_terraform_launchers and (
+            "terraform apply" in body or "terraform plan" in body
+        ):
+            assert "-target" not in body and "--target" not in body, path
+
+
+def test_active_image_runbooks_do_not_route_to_retired_or_targeted_deployers() -> None:
+    retired_names = {path.name for path in RETIRED_DEPLOYERS}
+    for path in ACTIVE_IMAGE_RUNBOOKS:
+        body = path.read_text(encoding="utf-8")
+        for retired in retired_names:
+            assert not any(
+                invocation in body
+                for invocation in (
+                    f"bash {retired}",
+                    f"bash ./{retired}",
+                    f"./{retired}",
+                )
+            ), f"{path} still invokes {retired}"
+        assert "terraform apply -target" not in body, path
+        assert "terraform plan -target" not in body, path
+        assert "infra/terraform/README.md" in body or (
+            "plan_image_release.sh" in body and "apply_image_release_plan.sh" in body
+        ), path
 
 
 def test_openclaw_safe_launcher_is_not_reachable_through_legacy_helper() -> None:

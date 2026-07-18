@@ -174,6 +174,7 @@ resource "aws_ecs_task_definition" "ingest" {
   memory                   = var.fargate_ingest_memory
   execution_role_arn       = aws_iam_role.ecs_execution_ingest[0].arn
   task_role_arn            = aws_iam_role.ingest_task[0].arn
+  depends_on               = [terraform_data.production_image_release_gate]
 
   runtime_platform {
     operating_system_family = "LINUX"

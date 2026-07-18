@@ -171,6 +171,7 @@ phases:
           IMAGE_SIGNATURE_DIGEST="$(jq -er '.image_signature.referrer_digest' <<<"$SUBJECT")"
           case "$PIPELINE:$QUARANTINE_REPOSITORY:$CANDIDATE_REPOSITORY:$RELEASE_REPOSITORY" in
             mcp:teamagent-mcp-quarantine:teamagent-mcp-verified-candidates:teamagent-mcp) ;;
+            mcp:teamagent-media-worker-quarantine:teamagent-media-worker-verified-candidates:teamagent-media-worker) ;;
             tiktok:teamagent-dev-tiktok-acquire-quarantine:teamagent-dev-tiktok-acquire-verified-candidates:teamagent-dev-tiktok-acquire) ;;
             openclaw:teamagent-openclaw-quarantine:teamagent-openclaw-verified-candidates:teamagent-openclaw) ;;
             openclaw:teamagent-openclaw-media-quarantine:teamagent-openclaw-media-verified-candidates:teamagent-openclaw-media) ;;

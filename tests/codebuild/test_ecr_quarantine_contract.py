@@ -33,18 +33,16 @@ def test_release_quarantine_and_verified_candidate_repositories_have_full_contro
         "mcp",
         "mcp_quarantine",
         "mcp_verified_candidates",
+        "mcp_media",
+        "mcp_media_quarantine",
+        "mcp_media_verified_candidates",
     ):
         _assert_repository_controls(body, repository)
-    for repository in ("openclaw", "openclaw_media"):
-        lifecycle = _resource(body, "aws_ecr_lifecycle_policy", repository)
-        assert "local.ecr_release_lifecycle_policy" in lifecycle
-    assert "countNumber = 365" in body
-    lifecycle = _resource(body, "aws_ecr_lifecycle_policy", "mcp")
-    assert "local.ecr_release_lifecycle_policy" in lifecycle
     for repository in (
         "openclaw_quarantine",
         "openclaw_media_quarantine",
         "mcp_quarantine",
+        "mcp_media_quarantine",
     ):
         lifecycle = _resource(body, "aws_ecr_lifecycle_policy", repository)
         assert "local.ecr_quarantine_lifecycle_policy" in lifecycle
@@ -52,14 +50,17 @@ def test_release_quarantine_and_verified_candidate_repositories_have_full_contro
         "openclaw_verified_candidates",
         "openclaw_media_verified_candidates",
         "mcp_verified_candidates",
+        "mcp_media_verified_candidates",
     ):
         lifecycle = _resource(body, "aws_ecr_lifecycle_policy", repository)
         assert "local.ecr_verified_candidate_lifecycle_policy" in lifecycle
     assert 'description  = "expire all quarantined candidates after 2 days"' in body
     assert 'description  = "expire verified candidates after 30 days"' in body
-    assert 'description  = "expire only untagged release artifacts after 365 days"' in body
     assert 'tagStatus   = "any"' in body
     assert "countNumber = 2" in body
+    assert "ecr_release_lifecycle_policy" not in body
+    for repository in ("openclaw", "openclaw_media", "mcp", "mcp_media"):
+        assert f'resource "aws_ecr_lifecycle_policy" "{repository}"' not in body
 
 
 def test_tiktok_release_and_quarantine_repositories_have_full_controls() -> None:
@@ -70,26 +71,22 @@ def test_tiktok_release_and_quarantine_repositories_have_full_controls() -> None
     _assert_repository_controls(ecr_body, "tiktok_acquire_quarantine")
     _assert_repository_controls(ecr_body, "tiktok_acquire_verified_candidates")
     assert 'name                 = "${local.tk_name}-quarantine"' in ecr_body
-    assert 'resource "aws_ecr_lifecycle_policy" "tiktok_acquire"' in ecr_body
+    assert 'resource "aws_ecr_lifecycle_policy" "tiktok_acquire"' not in ecr_body
     assert 'resource "aws_ecr_lifecycle_policy" "tiktok_acquire_quarantine"' in ecr_body
     assert 'resource "aws_ecr_lifecycle_policy" "tiktok_acquire_verified_candidates"' in ecr_body
 
 
-def test_candidate_cleanup_can_never_match_active_or_rollback_release_digest() -> None:
+def test_candidate_cleanup_is_physically_separate_from_retained_release_graphs() -> None:
     body = ECR.read_text(encoding="utf-8")
 
-    assert "Verified candidates live in physically separate repositories" in body
-    release_policy = body.split(
-        "ecr_release_lifecycle_policy = jsonencode(", maxsplit=1
-    )[1].split("ecr_verified_candidate_lifecycle_policy", maxsplit=1)[0]
+    assert "Candidate cleanup stays isolated in physically separate repos" in body
     candidate_policy = body.split(
         "ecr_verified_candidate_lifecycle_policy = jsonencode(", maxsplit=1
     )[1].split("ecr_quarantine_lifecycle_policy", maxsplit=1)[0]
-    assert 'tagStatus   = "untagged"' in release_policy
-    assert 'tagStatus   = "any"' not in release_policy
     assert 'tagStatus   = "any"' in candidate_policy
     assert "active-" not in candidate_policy
     assert "rollback-" not in candidate_policy
+    assert "ecr_release_lifecycle_policy" not in body
 
 
 def test_production_execution_roles_cannot_pull_any_quarantine_image() -> None:

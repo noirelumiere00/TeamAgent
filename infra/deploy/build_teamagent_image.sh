@@ -13,17 +13,13 @@ EXPECTED_BRANCH="dev"
 EXPECTED_ORIGIN_URL="git@github.com:noirelumiere00/TeamAgent.git"
 APP_BUCKET="teamagent-dev-raw-files"
 APP_KEY="codebuild/connect-web-app.html"
-APP_VERSION_ID="FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
-APP_SHA256="03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
-VAULT_MANIFEST_SHA256="aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
-BUILD_INPUTS_SHA256="6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
 EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
 SOURCE_PUBLISHER_PROJECT="teamagent-dev-mcp-source-publisher"
 IMAGE_PROJECT="teamagent-dev-image-builder"
 ATTESTOR_PROJECT="teamagent-dev-image-attestor"
 PROMOTER_PROJECT="teamagent-dev-image-promoter"
-QUARANTINE_REPOSITORY="teamagent-mcp-quarantine"
 VERIFIED_CANDIDATE_REPOSITORY="teamagent-mcp-verified-candidates"
+MEDIA_VERIFIED_CANDIDATE_REPOSITORY="teamagent-media-worker-verified-candidates"
 POLL_SECONDS=15
 TIMEOUT_SECONDS=7200
 
@@ -59,7 +55,7 @@ done
 [[ "$POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "poll interval must be positive"
 [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "timeout must be positive"
 [ "$TIMEOUT_SECONDS" -ge "$POLL_SECONDS" ] || die "timeout is shorter than polling"
-for tool in aws curl git jq python3 sha256sum; do
+for tool in aws git jq python3 sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
 
@@ -73,10 +69,12 @@ unset AWS_ENDPOINT_VARIABLE
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" \
   || die "launcher is not inside a Git worktree"
-CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_runtime_contract.json"
+SOURCE_MANIFEST_CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_runtime_contract.json"
+RELEASE_CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_core_media_release_contract.json"
 PROVENANCE="$REPO_ROOT/infra/codebuild/source_provenance.py"
-IMAGE_RESOLVER="$REPO_ROOT/infra/codebuild/resolve_ecr_image.py"
-[ -f "$CONTRACT" ] && [ -f "$PROVENANCE" ] && [ -f "$IMAGE_RESOLVER" ] \
+BUNDLE_PROVENANCE="$REPO_ROOT/infra/codebuild/teamagent_bundle_provenance.py"
+[ -f "$SOURCE_MANIFEST_CONTRACT" ] && [ -f "$RELEASE_CONTRACT" ] \
+  && [ -f "$PROVENANCE" ] && [ -f "$BUNDLE_PROVENANCE" ] \
   || die "trusted local contract helpers are missing"
 [ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] \
   || die "Git worktree is dirty"
@@ -92,9 +90,35 @@ COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})"
 REMOTE_COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify refs/remotes/origin/dev^{commit})"
 [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "HEAD is not a full SHA"
 [ "$COMMIT" = "$REMOTE_COMMIT" ] || die "local dev HEAD must exactly equal remote origin/dev"
-CONTRACT_SHA256="$(python3 "$PROVENANCE" contract-sha256 --contract "$CONTRACT")"
-python3 "$PROVENANCE" assert-release-ready --contract "$CONTRACT" \
-  || die "TeamAgent runtime contract is not approved for release"
+SOURCE_MANIFEST_CONTRACT_SHA256="$(
+  python3 "$PROVENANCE" contract-sha256 --contract "$SOURCE_MANIFEST_CONTRACT"
+)"
+RELEASE_CONTRACT_SHA256="$(
+  python3 "$BUNDLE_PROVENANCE" contract-sha256 --contract "$RELEASE_CONTRACT"
+)"
+python3 "$BUNDLE_PROVENANCE" assert-release-ready --contract "$RELEASE_CONTRACT" \
+  || die "TeamAgent core/media release contract is not approved for release"
+mapfile -t PRODUCTION_APP_RECORD < <(
+  python3 "$BUNDLE_PROVENANCE" production-record \
+    --deploy-log "$REPO_ROOT/infra/deploy_log.md" \
+    --format lines
+)
+[ "${#PRODUCTION_APP_RECORD[@]}" -eq 4 ] || die "production app record is incomplete"
+APP_VERSION_ID="${PRODUCTION_APP_RECORD[0]}"
+APP_SHA256="${PRODUCTION_APP_RECORD[1]}"
+VAULT_MANIFEST_SHA256="${PRODUCTION_APP_RECORD[2]}"
+BUILD_INPUTS_SHA256="${PRODUCTION_APP_RECORD[3]}"
+BAKED_APP_HTML_VERSION_ID="$(
+  jq -er '.app_html.baked_fallback.s3_version_id' "$RELEASE_CONTRACT"
+)" || die "release contract lacks an exact baked fallback S3 VersionId"
+BAKED_APP_HTML_SHA256="$(
+  jq -er '.app_html.baked_fallback.sha256' "$RELEASE_CONTRACT"
+)"
+APP_PROVENANCE_SHA256="$(
+  python3 "$BUNDLE_PROVENANCE" app-provenance-sha256 \
+    --contract "$RELEASE_CONTRACT" \
+    --deploy-log "$REPO_ROOT/infra/deploy_log.md"
+)"
 
 identity() {
   AWS_PAGER="" aws sts get-caller-identity --query '[Account,Arn]' --output text
@@ -156,6 +180,23 @@ DOWNLOADED_APP_VERSION="$(
 [ "$DOWNLOADED_APP_VERSION" = "$APP_VERSION_ID" ] || die "app HTML VersionId mismatch"
 [ "$(sha256sum "$TMP_DIR/app.html" | awk '{print $1}')" = "$APP_SHA256" ] \
   || die "app HTML does not match the production canonical hash"
+DOWNLOADED_FALLBACK_VERSION="$(
+  AWS_PAGER="" aws s3api get-object \
+    --region "$REGION" \
+    --bucket "$APP_BUCKET" \
+    --key "$APP_KEY" \
+    --version-id "$BAKED_APP_HTML_VERSION_ID" \
+    --expected-bucket-owner "$ACCOUNT_ID" \
+    --query VersionId \
+    --output text \
+    "$TMP_DIR/baked-app.html"
+)"
+[ "$DOWNLOADED_FALLBACK_VERSION" = "$BAKED_APP_HTML_VERSION_ID" ] \
+  || die "baked fallback VersionId mismatch"
+[ "$(sha256sum "$TMP_DIR/baked-app.html" | awk '{print $1}')" = "$BAKED_APP_HTML_SHA256" ] \
+  || die "baked fallback does not match its approved hash"
+[ "$APP_SHA256" != "$BAKED_APP_HTML_SHA256" ] \
+  || die "production app cannot be substituted for the distinct baked fallback"
 
 environment_json() {
   local output="$1"
@@ -241,7 +282,8 @@ exported_build_value() {
 PUBLISHER_ENV="$TMP_DIR/publisher-env.json"
 environment_json "$PUBLISHER_ENV" \
   "EXPECTED_COMMIT=$COMMIT" \
-  "RUNTIME_CONTRACT_SHA256=$CONTRACT_SHA256"
+  "SOURCE_MANIFEST_CONTRACT_SHA256=$SOURCE_MANIFEST_CONTRACT_SHA256" \
+  "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256"
 PUBLISHER_BUILD_ID="$(start_build "$SOURCE_PUBLISHER_PROJECT" "$PUBLISHER_ENV" "$COMMIT")"
 [[ "$PUBLISHER_BUILD_ID" == "$SOURCE_PUBLISHER_PROJECT:"* ]] || die "invalid publisher build ID"
 wait_build "$PUBLISHER_BUILD_ID" "$COMMIT"
@@ -261,12 +303,15 @@ IMAGE_ENV="$TMP_DIR/image-env.json"
 environment_json "$IMAGE_ENV" \
   "GIT_COMMIT=$COMMIT" \
   "GIT_BRANCH=dev" \
-  "WITH_SCRAPE_TOOLS=true" \
   "APP_HTML_VERSION_ID=$APP_VERSION_ID" \
   "APP_HTML_SHA256=$APP_SHA256" \
   "VAULT_MANIFEST_SHA256=$VAULT_MANIFEST_SHA256" \
   "BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
-  "RUNTIME_CONTRACT_SHA256=$CONTRACT_SHA256" \
+  "BAKED_APP_HTML_VERSION_ID=$BAKED_APP_HTML_VERSION_ID" \
+  "BAKED_APP_HTML_SHA256=$BAKED_APP_HTML_SHA256" \
+  "APP_PROVENANCE_SHA256=$APP_PROVENANCE_SHA256" \
+  "SOURCE_MANIFEST_CONTRACT_SHA256=$SOURCE_MANIFEST_CONTRACT_SHA256" \
+  "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
   "SOURCE_ARCHIVE_VERSION_ID=$SOURCE_VERSION_ID" \
   "SOURCE_DECLARATION_KEY=$DECLARATION_KEY" \
   "SOURCE_DECLARATION_VERSION_ID=$DECLARATION_VERSION" \
@@ -277,46 +322,32 @@ IMAGE_BUILD_ID="$(start_build "$IMAGE_PROJECT" "$IMAGE_ENV" "$SOURCE_VERSION_ID"
 [[ "$IMAGE_BUILD_ID" == "$IMAGE_PROJECT:"* ]] || die "invalid image build ID"
 wait_build "$IMAGE_BUILD_ID" "$SOURCE_VERSION_ID"
 
-CANDIDATE_TAG="candidate-$COMMIT"
-TAG_DIGEST="$(
-  AWS_PAGER="" aws ecr describe-images \
-    --region "$REGION" \
-    --registry-id "$ACCOUNT_ID" \
-    --repository-name "$QUARANTINE_REPOSITORY" \
-    --image-ids "imageTag=$CANDIDATE_TAG" \
-    --query 'imageDetails[0].imageDigest' \
-    --output text
-)"
-[[ "$TAG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid quarantine digest"
-AWS_PAGER="" aws ecr batch-get-image \
-  --region "$REGION" \
-  --registry-id "$ACCOUNT_ID" \
-  --repository-name "$QUARANTINE_REPOSITORY" \
-  --image-ids "imageDigest=$TAG_DIGEST" \
-  --accepted-media-types \
-    application/vnd.docker.distribution.manifest.list.v2+json \
-    application/vnd.oci.image.index.v1+json \
-    application/vnd.docker.distribution.manifest.v2+json \
-    application/vnd.oci.image.manifest.v1+json \
-  --output json >"$TMP_DIR/quarantine-manifest.json"
-VERIFIED_DIGEST="$(
-  python3 "$IMAGE_RESOLVER" resolve-platform \
-    --batch-response "$TMP_DIR/quarantine-manifest.json" \
-    --expected-image-digest "$TAG_DIGEST" \
-    --os linux \
-    --architecture arm64
-)"
-[[ "$VERIFIED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid verified arm64 digest"
+CORE_TAG_DIGEST="$(exported_build_value "$IMAGE_BUILD_ID" MCP_CORE_TAG_DIGEST)"
+CORE_VERIFIED_DIGEST="$(exported_build_value "$IMAGE_BUILD_ID" MCP_CORE_ARM64_DIGEST)"
+MEDIA_TAG_DIGEST="$(exported_build_value "$IMAGE_BUILD_ID" MCP_MEDIA_TAG_DIGEST)"
+MEDIA_VERIFIED_DIGEST="$(exported_build_value "$IMAGE_BUILD_ID" MCP_MEDIA_ARM64_DIGEST)"
+for digest in \
+  "$CORE_TAG_DIGEST" "$CORE_VERIFIED_DIGEST" \
+  "$MEDIA_TAG_DIGEST" "$MEDIA_VERIFIED_DIGEST"; do
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "builder exported an invalid digest"
+done
 
 SUBJECTS_JSON="$(
   jq -cn \
-    --arg digest "$VERIFIED_DIGEST" \
+    --arg core_digest "$CORE_VERIFIED_DIGEST" \
+    --arg media_digest "$MEDIA_VERIFIED_DIGEST" \
     '[{
-      name: "mcp",
+      name: "core",
       quarantine_repository: "teamagent-mcp-quarantine",
       candidate_repository: "teamagent-mcp-verified-candidates",
       release_repository: "teamagent-mcp",
-      digest: $digest
+      digest: $core_digest
+    },{
+      name: "media",
+      quarantine_repository: "teamagent-media-worker-quarantine",
+      candidate_repository: "teamagent-media-worker-verified-candidates",
+      release_repository: "teamagent-media-worker",
+      digest: $media_digest
     }]'
 )"
 ATTESTOR_ENV="$TMP_DIR/attestor-env.json"
@@ -324,7 +355,7 @@ environment_json "$ATTESTOR_ENV" \
   "PIPELINE=mcp" \
   "PROMOTION_CHANNEL=verified-candidate" \
   "SOURCE_COMMIT=$COMMIT" \
-  "CONTRACT_SHA256=$CONTRACT_SHA256" \
+  "CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
   "SOURCE_EVIDENCE_BUCKET=$EVIDENCE_BUCKET" \
   "SOURCE_EVIDENCE_KEY=$DECLARATION_KEY" \
   "SOURCE_EVIDENCE_VERSION_ID=$DECLARATION_VERSION" \
@@ -350,7 +381,7 @@ environment_json "$PROMOTER_ENV" \
   "PIPELINE=mcp" \
   "PROMOTION_CHANNEL=verified-candidate" \
   "SOURCE_COMMIT=$COMMIT" \
-  "CONTRACT_SHA256=$CONTRACT_SHA256" \
+  "CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
   "RECEIPT_KEY=$RECEIPT_KEY" \
   "RECEIPT_VERSION_ID=$RECEIPT_VERSION" \
   "RECEIPT_SIGNATURE_KEY=$RECEIPT_SIGNATURE_KEY" \
@@ -359,24 +390,37 @@ PROMOTER_BUILD_ID="$(start_build "$PROMOTER_PROJECT" "$PROMOTER_ENV")"
 [[ "$PROMOTER_BUILD_ID" == "$PROMOTER_PROJECT:"* ]] || die "invalid promoter build ID"
 wait_build "$PROMOTER_BUILD_ID"
 
-VERIFIED_TAG="verified-$COMMIT"
-VERIFIED_CANDIDATE_DIGEST="$(
-  AWS_PAGER="" aws ecr describe-images \
-    --region "$REGION" \
-    --registry-id "$ACCOUNT_ID" \
-    --repository-name "$VERIFIED_CANDIDATE_REPOSITORY" \
-    --image-ids "imageTag=$VERIFIED_TAG" \
-    --query 'imageDetails[0].imageDigest' \
-    --output text
-)"
-[ "$VERIFIED_CANDIDATE_DIGEST" = "$VERIFIED_DIGEST" ] \
-  || die "verified-candidate digest differs from the signed quarantine digest"
+for subject in core media; do
+  case "$subject" in
+    core)
+      candidate_repository="$VERIFIED_CANDIDATE_REPOSITORY"
+      expected_digest="$CORE_VERIFIED_DIGEST"
+      ;;
+    media)
+      candidate_repository="$MEDIA_VERIFIED_CANDIDATE_REPOSITORY"
+      expected_digest="$MEDIA_VERIFIED_DIGEST"
+      ;;
+  esac
+  verified_candidate_digest="$(
+    AWS_PAGER="" aws ecr describe-images \
+      --region "$REGION" \
+      --registry-id "$ACCOUNT_ID" \
+      --repository-name "$candidate_repository" \
+      --image-ids "imageTag=verified-$COMMIT-$subject" \
+      --query 'imageDetails[0].imageDigest' \
+      --output text
+  )"
+  [ "$verified_candidate_digest" = "$expected_digest" ] \
+    || die "$subject verified-candidate digest differs from signed quarantine"
+done
 
 echo "Build-only signed candidate publication complete:"
 echo "  pipeline=mcp"
 echo "  commit=$COMMIT"
-echo "  quarantine_digest=$VERIFIED_DIGEST"
-echo "  verified_candidate_digest=$VERIFIED_CANDIDATE_DIGEST"
+echo "  core_quarantine_digest=$CORE_VERIFIED_DIGEST"
+echo "  core_verified_candidate_digest=$CORE_VERIFIED_DIGEST"
+echo "  media_quarantine_digest=$MEDIA_VERIFIED_DIGEST"
+echo "  media_verified_candidate_digest=$MEDIA_VERIFIED_DIGEST"
 echo "  receipt_key=$RECEIPT_KEY"
 echo "  receipt_version_id=$RECEIPT_VERSION"
 echo "  receipt_signature_key=$RECEIPT_SIGNATURE_KEY"
