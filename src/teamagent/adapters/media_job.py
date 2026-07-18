@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -31,7 +32,9 @@ from teamagent.media.contracts import (
     TikTokAcquireOperation,
     TikTokClientConfig,
     make_job_request,
+    parse_job_request,
 )
+from teamagent.media.deadline import DeadlineBudget, MediaDeadlineExceededError
 
 logger = structlog.get_logger(__name__)
 
@@ -54,6 +57,7 @@ class MediaJobClient:
         session: Any | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
         queue_url: str | None = None,
         table: str | None = None,
         bucket: str | None = None,
@@ -68,6 +72,7 @@ class MediaJobClient:
         )
         self._sleeper = sleeper
         self._monotonic = monotonic
+        self._clock = clock
         self._session_override = session
 
     @classmethod
@@ -122,6 +127,12 @@ class MediaJobClient:
         if not self._queue_url or not self._table or not self._bucket:
             raise MediaJobError("MEDIA_JOB_NOT_CONFIGURED")
 
+    def _remaining(self, deadline_epoch_s: float, *, cap_s: float | None = None) -> float:
+        try:
+            return DeadlineBudget(deadline_epoch_s, clock=self._clock).remaining(cap_s=cap_s)
+        except MediaDeadlineExceededError as exc:
+            raise MediaJobError("MEDIA_JOB_DEADLINE_EXCEEDED") from exc
+
     def _sse_args(self) -> dict[str, str]:
         if self._kms_key_id:
             return {
@@ -129,6 +140,36 @@ class MediaJobClient:
                 "SSEKMSKeyId": self._kms_key_id,
             }
         return {"ServerSideEncryption": "AES256"}
+
+    @staticmethod
+    def _persisted_request(
+        item: dict[str, Any],
+        submitted: MediaJobRequest,
+    ) -> MediaJobRequest:
+        """Recover the original timestamp envelope for a semantic retry."""
+
+        if item.get("idempotency_key", {}).get("S") != submitted.idempotency_key:
+            raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT")
+        raw = item.get("request_json", {}).get("S", "")
+        if not raw:
+            if item.get("payload_sha256", {}).get("S") == submitted.payload_sha256:
+                return submitted
+            raise MediaJobError("MEDIA_JOB_ENVELOPE_MISSING")
+        try:
+            persisted = parse_job_request(raw)
+        except MediaJobError:
+            raise
+        except Exception as exc:
+            raise MediaJobError("MEDIA_JOB_ENVELOPE_INVALID") from exc
+        if (
+            persisted.job_id != submitted.job_id
+            or persisted.idempotency_key != submitted.idempotency_key
+            or persisted.output_bucket != submitted.output_bucket
+            or persisted.output_prefix != submitted.output_prefix
+            or item.get("payload_sha256", {}).get("S") != persisted.payload_sha256
+        ):
+            raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT")
+        return persisted
 
     @staticmethod
     def _job_id(request_fingerprint: str) -> str:
@@ -159,7 +200,7 @@ class MediaJobClient:
         _sqs, _ddb, s3 = self._clients()
         digest = hashlib.sha256(body).hexdigest()
         key = f"media-jobs/{job_id}/input/{name}"
-        expires = datetime.fromtimestamp(int(time.time()) + resolved_ttl_s, tz=UTC)
+        expires = datetime.fromtimestamp(int(self._clock()) + resolved_ttl_s, tz=UTC)
         s3.put_object(
             Bucket=self._bucket,
             Key=key,
@@ -179,21 +220,25 @@ class MediaJobClient:
         )
 
     def submit(self, request: MediaJobRequest) -> str:
-        """Create/reuse a fenced row and enqueue its canonical envelope."""
+        """Create/reuse a semantic row and enqueue its original timestamp envelope."""
 
         self._assert_configured()
+        self._remaining(request.deadline_epoch_s)
         if request.output_bucket != self._bucket:
             raise MediaJobError("MEDIA_JOB_BUCKET_MISMATCH")
         sqs, ddb, _s3 = self._clients()
-        body = request.to_json_bytes().decode("utf-8")
+        queued_request = request
+        body = queued_request.to_json_bytes().decode("utf-8")
         queued = MediaJobResult(job_id=request.job_id, status="queued")
         try:
+            self._remaining(request.deadline_epoch_s)
             ddb.put_item(
                 TableName=self._table,
                 Item={
                     "job_id": {"S": request.job_id},
                     "idempotency_key": {"S": request.idempotency_key},
                     "payload_sha256": {"S": request.payload_sha256},
+                    "request_json": {"S": body},
                     "status": {"S": "queued"},
                     "version": {"N": "0"},
                     "active_consumers": {"N": "0"},
@@ -220,6 +265,8 @@ class MediaJobClient:
                 },
                 ConditionExpression="attribute_not_exists(job_id)",
             )
+        except MediaJobError:
+            raise
         except Exception as exc:
             if not _is_conditional_conflict(exc):
                 raise MediaJobError("MEDIA_JOB_STATE_CREATE_FAILED") from exc
@@ -228,20 +275,23 @@ class MediaJobClient:
                 Key={"job_id": {"S": request.job_id}},
                 ConsistentRead=True,
             ).get("Item", {})
-            if (
-                existing.get("idempotency_key", {}).get("S") != request.idempotency_key
-                or existing.get("payload_sha256", {}).get("S") != request.payload_sha256
-            ):
+            if existing.get("idempotency_key", {}).get("S") != request.idempotency_key:
                 raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT") from exc
+            queued_request = self._persisted_request(existing, request)
+            body = queued_request.to_json_bytes().decode("utf-8")
             if existing.get("message_sent_at", {}).get("N"):
                 return request.job_id
             if existing.get("status", {}).get("S") in {"running", "done", "failed"}:
                 return request.job_id
 
         submit_owner = f"submit-{uuid.uuid4().hex}"
-        claim_deadline = self._monotonic() + 35.0
+        claim_deadline = self._monotonic() + min(
+            35.0,
+            self._remaining(queued_request.deadline_epoch_s),
+        )
         while True:
-            now = int(time.time())
+            self._remaining(queued_request.deadline_epoch_s)
+            now = int(self._clock())
             try:
                 ddb.update_item(
                     TableName=self._table,
@@ -255,8 +305,8 @@ class MediaJobClient:
                     ExpressionAttributeNames={"#status": "status"},
                     ExpressionAttributeValues={
                         ":queued": {"S": "queued"},
-                        ":idempotency": {"S": request.idempotency_key},
-                        ":payload": {"S": request.payload_sha256},
+                        ":idempotency": {"S": queued_request.idempotency_key},
+                        ":payload": {"S": queued_request.payload_sha256},
                         ":owner": {"S": submit_owner},
                         ":now": {"N": str(now)},
                         ":lease": {"N": str(now + 30)},
@@ -271,21 +321,26 @@ class MediaJobClient:
                     Key={"job_id": {"S": request.job_id}},
                     ConsistentRead=True,
                 ).get("Item", {})
-                if (
-                    existing.get("idempotency_key", {}).get("S") != request.idempotency_key
-                    or existing.get("payload_sha256", {}).get("S") != request.payload_sha256
-                ):
+                if existing.get("idempotency_key", {}).get("S") != queued_request.idempotency_key:
                     raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT") from exc
                 if existing.get("message_sent_at", {}).get("N") or existing.get("status", {}).get(
                     "S"
                 ) in {"running", "done", "failed"}:
                     return request.job_id
+                queued_request = self._persisted_request(existing, queued_request)
+                body = queued_request.to_json_bytes().decode("utf-8")
                 if self._monotonic() >= claim_deadline:
                     raise MediaJobError("MEDIA_JOB_ENQUEUE_CLAIM_TIMEOUT") from exc
                 lease_expires_at = int(
                     existing.get("submit_lease_expires_at", {}).get("N", str(now + 1))
                 )
-                self._sleeper(min(1.0, max(0.1, lease_expires_at - now)))
+                self._sleeper(
+                    min(
+                        1.0,
+                        max(0.1, lease_expires_at - now),
+                        self._remaining(queued_request.deadline_epoch_s),
+                    )
+                )
 
         arguments: dict[str, Any] = {
             "QueueUrl": self._queue_url,
@@ -294,15 +349,28 @@ class MediaJobClient:
                 "schema_version": {"DataType": "String", "StringValue": "1"},
                 "payload_sha256": {
                     "DataType": "String",
-                    "StringValue": request.payload_sha256,
+                    "StringValue": queued_request.payload_sha256,
                 },
             },
         }
         if self._queue_url.endswith(".fifo"):
-            arguments["MessageDeduplicationId"] = request.idempotency_key
+            arguments["MessageDeduplicationId"] = queued_request.idempotency_key
             arguments["MessageGroupId"] = "teamagent-media"
         try:
+            self._remaining(queued_request.deadline_epoch_s)
             sqs.send_message(**arguments)
+        except MediaJobError:
+            try:
+                ddb.update_item(
+                    TableName=self._table,
+                    Key={"job_id": {"S": request.job_id}},
+                    UpdateExpression="REMOVE submit_owner, submit_lease_expires_at",
+                    ConditionExpression="submit_owner = :owner",
+                    ExpressionAttributeValues={":owner": {"S": submit_owner}},
+                )
+            except Exception:
+                logger.exception("failed to release expired media submit lease")
+            raise
         except Exception as exc:
             try:
                 ddb.update_item(
@@ -325,11 +393,14 @@ class MediaJobClient:
                 ConditionExpression="submit_owner = :owner",
                 ExpressionAttributeValues={
                     ":owner": {"S": submit_owner},
-                    ":now": {"N": str(int(time.time()))},
+                    ":now": {"N": str(int(self._clock()))},
                 },
             )
+        except MediaJobError:
+            raise
         except Exception as exc:
             raise MediaJobError("MEDIA_JOB_ENQUEUE_CONFIRM_FAILED") from exc
+        self._remaining(queued_request.deadline_epoch_s)
         return request.job_id
 
     def get_result(self, job_id: str) -> MediaJobResult | None:
@@ -359,18 +430,31 @@ class MediaJobClient:
         *,
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
         poll_interval_s: float = 1.0,
+        deadline_epoch_s: int | None = None,
     ) -> MediaJobResult:
         if timeout_s < 1 or timeout_s > _SYNC_TIMEOUT_MAX_S:
             raise MediaJobError("MEDIA_JOB_TIMEOUT_INVALID")
-        deadline = self._monotonic() + timeout_s
-        while self._monotonic() <= deadline:
+        monotonic_deadline = self._monotonic() + timeout_s
+        absolute_deadline = min(
+            self._clock() + timeout_s,
+            float(deadline_epoch_s) if deadline_epoch_s is not None else self._clock() + timeout_s,
+        )
+        while self._monotonic() <= monotonic_deadline:
+            remaining_absolute = self._remaining(absolute_deadline)
             result = self.get_result(job_id)
             if result is not None and result.status in ("done", "failed"):
                 return result
-            remaining = deadline - self._monotonic()
+            remaining = monotonic_deadline - self._monotonic()
             if remaining <= 0:
                 break
-            self._sleeper(min(max(poll_interval_s, 0.1), remaining, 5.0))
+            self._sleeper(
+                min(
+                    max(poll_interval_s, 0.1),
+                    remaining,
+                    remaining_absolute,
+                    5.0,
+                )
+            )
         raise MediaJobError("MEDIA_JOB_TIMEOUT")
 
     def download(self, ref: S3ObjectRef) -> bytes:
@@ -403,7 +487,7 @@ class MediaJobClient:
 
         if not _JOB_ID_RE.fullmatch(job_id):
             raise MediaJobError("MEDIA_JOB_CLEANUP_SCOPE_INVALID")
-        now = int(time.time())
+        now = int(self._clock())
         result = MediaJobResult(
             job_id=job_id,
             status="failed",
@@ -439,17 +523,17 @@ class MediaJobClient:
 
     def _acquire_consumer(self, request: MediaJobRequest, *, timeout_s: int) -> None:
         _sqs, ddb, _s3 = self._clients()
-        now = int(time.time())
+        now = int(self._clock())
         try:
             ddb.update_item(
                 TableName=self._table,
                 Key={"job_id": {"S": request.job_id}},
                 UpdateExpression=("SET consumer_guard_until = :guard ADD active_consumers :one"),
                 ConditionExpression=(
-                    "payload_sha256 = :payload AND attribute_not_exists(cleanup_owner)"
+                    "idempotency_key = :idempotency AND attribute_not_exists(cleanup_owner)"
                 ),
                 ExpressionAttributeValues={
-                    ":payload": {"S": request.payload_sha256},
+                    ":idempotency": {"S": request.idempotency_key},
                     ":guard": {"N": str(now + timeout_s + 60)},
                     ":one": {"N": "1"},
                 },
@@ -506,15 +590,24 @@ class MediaJobClient:
     ) -> tuple[Mapping[str, bytes], Mapping[str, Any]]:
         """submit→consumer lease→bounded poll→integrity-checked download."""
 
+        remaining = self._remaining(request.deadline_epoch_s, cap_s=float(timeout_s))
         self.submit(request)
-        self._acquire_consumer(request, timeout_s=timeout_s)
+        remaining = self._remaining(request.deadline_epoch_s, cap_s=remaining)
+        bounded_timeout = max(1, math.ceil(remaining))
+        self._acquire_consumer(request, timeout_s=bounded_timeout)
         try:
-            result = self.wait(request.job_id, timeout_s=timeout_s)
+            result = self.wait(
+                request.job_id,
+                timeout_s=bounded_timeout,
+                deadline_epoch_s=request.deadline_epoch_s,
+            )
             if result.status != "done":
                 raise MediaJobError(result.error_code or "MEDIA_JOB_FAILED")
-            artifacts = {
-                artifact.name: self.download(artifact.object) for artifact in result.artifacts
-            }
+            artifacts: dict[str, bytes] = {}
+            for artifact in result.artifacts:
+                self._remaining(request.deadline_epoch_s)
+                artifacts[artifact.name] = self.download(artifact.object)
+                self._remaining(request.deadline_epoch_s)
             return artifacts, result.metadata
         finally:
             self._release_consumer(request)
@@ -829,6 +922,7 @@ class MediaJobClient:
             operation=operation,
             output_bucket=self._bucket,
             request_fingerprint=request_fingerprint,
+            now_epoch_s=int(self._clock()),
             timeout_s=timeout_s,
             artifact_ttl_s=self.artifact_ttl_seconds(),
             job_id=job_id,

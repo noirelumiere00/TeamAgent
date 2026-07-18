@@ -9,6 +9,7 @@ import os
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ from teamagent.media.contracts import (
     TikTokAcquireOperation,
     parse_job_request,
 )
+from teamagent.media.deadline import DeadlineBudget, MediaDeadlineExceededError
 from teamagent.media.operations import MediaOperationError, ProducedArtifact, execute_operation
 
 logger = logging.getLogger(__name__)
@@ -124,6 +126,28 @@ class AwsWorkerBackend:
                 "SSEKMSKeyId": self._kms_key_id,
             }
         return {"ServerSideEncryption": "AES256"}
+
+    def load_request(self, job_id: str, payload_sha256: str) -> MediaJobRequest:
+        """Load the exact canonical envelope behind a bounded ECS override."""
+
+        response = self._ddb.get_item(
+            TableName=self._table,
+            Key={"job_id": {"S": job_id}},
+            ConsistentRead=True,
+        )
+        item = response.get("Item", {})
+        raw = item.get("request_json", {}).get("S", "")
+        if not raw:
+            raise ValueError("media job request pointer is missing")
+        request = parse_job_request(raw)
+        if (
+            request.job_id != job_id
+            or request.payload_sha256 != payload_sha256
+            or item.get("payload_sha256", {}).get("S") != payload_sha256
+            or item.get("idempotency_key", {}).get("S") != request.idempotency_key
+        ):
+            raise ValueError("media job request pointer does not match persisted envelope")
+        return request
 
     def assert_request_scope(self, request: MediaJobRequest) -> None:
         if request.output_bucket != self._bucket:
@@ -384,6 +408,7 @@ def run_job(
     temp_root: Path | None = None,
     now_epoch_s: int | None = None,
     owner: str | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> MediaJobResult:
     """Execute one owner/version-fenced attempt in a bounded request directory."""
 
@@ -411,29 +436,41 @@ def run_job(
             metadata={"duplicate_delivery": True},
         )
     lease = claim.lease
-    if now > request.deadline_epoch_s:
+    resolved_clock = clock or (time.time if now_epoch_s is None else lambda: float(now))
+    budget = DeadlineBudget(request.deadline_epoch_s, clock=resolved_clock)
+    if now >= request.deadline_epoch_s:
         result = _failed_result(request, "MEDIA_JOB_DEADLINE_EXCEEDED")
         backend.store_result(request, lease, result)
         return result
     try:
+        budget.checkpoint()
         with tempfile.TemporaryDirectory(prefix=f"{request.job_id}-", dir=root) as raw_workdir:
             workdir = Path(raw_workdir)
 
             def load(ref: S3ObjectRef, destination: Path) -> Path:
-                return backend.load_object(request, lease, ref, destination)
+                budget.checkpoint()
+                loaded = backend.load_object(request, lease, ref, destination)
+                budget.checkpoint()
+                return loaded
 
             output = execute_operation(
                 request.operation,
                 workdir=workdir,
                 load_object=load,
+                budget=budget,
             )
-            artifacts = tuple(
-                MediaArtifact(
-                    name=artifact.name,
-                    object=backend.upload_artifact(request, lease, artifact),
+            artifacts_list: list[MediaArtifact] = []
+            for artifact in output.artifacts:
+                budget.checkpoint()
+                uploaded = backend.upload_artifact(request, lease, artifact)
+                budget.checkpoint()
+                artifacts_list.append(
+                    MediaArtifact(
+                        name=artifact.name,
+                        object=uploaded,
+                    )
                 )
-                for artifact in output.artifacts
-            )
+            artifacts = tuple(artifacts_list)
             metadata = dict(output.metadata)
             if isinstance(request.operation, TikTokAcquireOperation):
                 metadata["s3_prefix"] = f"{request.output_prefix}attempts/{lease.version}/"
@@ -443,12 +480,27 @@ def run_job(
                 artifacts=artifacts,
                 metadata=metadata,
             )
+            budget.checkpoint()
             backend.store_result(request, lease, result)
             return result
+    except MediaDeadlineExceededError:
+        logger.warning("media job deadline exhausted: job_id=%s", request.job_id)
+        result = _failed_result(request, "MEDIA_JOB_DEADLINE_EXCEEDED")
+        try:
+            backend.cleanup_attempt(request, lease)
+        except Exception:
+            logger.exception("deadline cleanup deferred to janitor: job_id=%s", request.job_id)
+        backend.store_result(request, lease, result)
+        return result
     except MediaOperationError as exc:
         logger.warning("media job failed: job_id=%s code=%s", request.job_id, exc.code)
         result = _failed_result(request, exc.code)
-        backend.cleanup_attempt(request, lease)
+        try:
+            backend.cleanup_attempt(request, lease)
+        except Exception:
+            if exc.code != "MEDIA_JOB_DEADLINE_EXCEEDED":
+                raise
+            logger.exception("deadline cleanup deferred to janitor: job_id=%s", request.job_id)
         backend.store_result(request, lease, result)
         return result
     except Exception:
@@ -465,15 +517,17 @@ def main() -> int:
     runtime_root = Path("/tmp/teamagent")  # nosec B108
     for name in _RUNTIME_DIRECTORIES:
         (runtime_root / name).mkdir(mode=0o700, parents=True, exist_ok=True)
-    body = os.environ.get("MEDIA_JOB_JSON") or os.environ.get("TIKTOK_JOB_JSON", "")
-    if not body:
-        logger.error("MEDIA_JOB_JSON is required")
+    job_id = os.environ.get("MEDIA_JOB_ID", "")
+    payload_sha256 = os.environ.get("MEDIA_JOB_PAYLOAD_SHA256", "")
+    if not job_id or not payload_sha256:
+        logger.error("MEDIA_JOB_ID and MEDIA_JOB_PAYLOAD_SHA256 are required")
         return 2
     try:
-        request = parse_job_request(body)
+        backend = AwsWorkerBackend()
+        request = backend.load_request(job_id, payload_sha256)
         result = run_job(
             request,
-            AwsWorkerBackend(),
+            backend,
             owner=os.environ.get("ECS_TASK_ARN") or f"task-{uuid.uuid4().hex}",
         )
     except Exception:

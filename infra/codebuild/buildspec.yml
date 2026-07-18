@@ -1,35 +1,80 @@
-# CodeBuild buildspec（teamagent-mcp イメージ）。
-# codebuild.tf のインライン buildspec を git 管理下に出したもの＋機密 app.html の S3 注入。
-# 使い方: aws codebuild start-build --buildspec-override infra/codebuild/buildspec.yml
-#
-# 【なぜ S3 注入か】connect-web の /app 用 app.html は機密（BANT/営業FB/カルテ埋め込み）で
-#   git 管理外（.gitignore）。git 由来のどのビルドでも /app が実 UI を出せるよう、ビルド時に
-#   private S3(codebuild/ プレフィックス=既存 CodeBuild ロールの s3:GetObject 範囲・新規IAM不要)
-#   から取得してビルドコンテキストへ置く。→ どのイメージにも /app が焼き込まれる。
-#
-# 【堅牢性(H3)】S3 優先で取得。S3 に無ければ source.zip 同梱の app.html を使う（統合デプロイ
-#   スクリプトは zip に手元 html を含める belt-and-suspenders）。S3 にも zip にも無い時だけ
-#   fail-loud（exit 1）。無言で「準備中」プレースホルダに劣化させない。
+# Canonical ARM64 candidate build from an extracted exact git archive.
 version: 0.2
 phases:
   pre_build:
     commands:
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+      - |
+        set -eu
+        case "$GIT_COMMIT" in *[!0-9a-f]*|"") exit 1;; esac
+        case "$GIT_TREE" in *[!0-9a-f]*|"") exit 1;; esac
+        case "$SOURCE_ARCHIVE_SHA256" in *[!0-9a-f]*|"") exit 1;; esac
+        test "${#GIT_COMMIT}" -eq 40
+        test "${#GIT_TREE}" -eq 40
+        test "${#SOURCE_ARCHIVE_SHA256}" -eq 64
+        test -n "$GIT_BRANCH"
+        test -n "$EXPECTED_SOURCE_VERSION_ID"
+        test "$CODEBUILD_RESOLVED_SOURCE_VERSION" = "$EXPECTED_SOURCE_VERSION_ID"
+        case "$GIT_BRANCH" in *[!A-Za-z0-9._/-]*) exit 1;; esac
+        python3 infra/deploy/verify_source_tree.py \
+          --root "$CODEBUILD_SRC_DIR" \
+          --expected-tree "$GIT_TREE"
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
   build:
     commands:
-      - mkdir -p src/teamagent/connect_web/static
       - |
-        if aws s3 cp s3://teamagent-dev-raw-files/codebuild/connect-web-app.html src/teamagent/connect_web/static/app.html; then
-          echo "app.html <- S3 ($(du -h src/teamagent/connect_web/static/app.html | cut -f1))"
-        elif [ -s src/teamagent/connect_web/static/app.html ]; then
-          echo "S3 miss -> source.zip 同梱の app.html を使用 ($(du -h src/teamagent/connect_web/static/app.html | cut -f1))"
-        else
-          echo "FATAL: app.html が S3 にも source にも無い（S3へ配置するか統合スクリプトでzip同梱せよ）"; exit 1
-        fi
-      - echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m)"
-      - docker build -f infra/docker/Dockerfile.teamagent-mcp --build-arg WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS --build-arg GIT_COMMIT="$GIT_COMMIT" --build-arg GIT_BRANCH="$GIT_BRANCH" -t $MCP_REPO:$IMAGE_TAG .
+        set -eu
+        install -D -m 0644 \
+          infra/docker/app-html-runtime-fixture.html \
+          src/teamagent/connect_web/static/app.html
+        BAKED_APP_HTML_SHA256=$(sha256sum src/teamagent/connect_web/static/app.html | cut -d' ' -f1)
+        test "$BAKED_APP_HTML_SHA256" = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
+        docker buildx build \
+          --platform linux/arm64 \
+          --file infra/docker/Dockerfile.teamagent-mcp \
+          --build-arg "WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS" \
+          --build-arg "GIT_COMMIT=$GIT_COMMIT" \
+          --build-arg "GIT_BRANCH=$GIT_BRANCH" \
+          --build-arg "BAKED_APP_HTML_SHA256=$BAKED_APP_HTML_SHA256" \
+          --build-arg "APP_HTML_SOURCE=s3" \
+          --build-arg "APP_HTML_SHA256=03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c" \
+          --build-arg "APP_HTML_VERSION_ID=FTXbcN70D0DCN90TI_hRK1IdQK_HhLee" \
+          --build-arg "APP_HTML_MANIFEST_SHA256=aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e" \
+          --build-arg "APP_HTML_BUILD_INPUTS_SHA256=6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf" \
+          --label "io.teamagent.source.git-tree=$GIT_TREE" \
+          --label "io.teamagent.source.archive-sha256=$SOURCE_ARCHIVE_SHA256" \
+          --label "io.teamagent.source.s3-version=$EXPECTED_SOURCE_VERSION_ID" \
+          --provenance=mode=max \
+          --sbom=true \
+          --metadata-file /tmp/teamagent-build-metadata.json \
+          --tag "$MCP_REPO:$IMAGE_TAG" \
+          --push \
+          .
+        IMAGE="$MCP_REPO:$IMAGE_TAG"
+        BUILD_DIGEST=$(python3 -c \
+          'import json; print(json.load(open("/tmp/teamagent-build-metadata.json"))["containerimage.digest"])')
+        python3 -c \
+          'import re,sys; assert re.fullmatch(r"sha256:[0-9a-f]{64}", sys.argv[1])' \
+          "$BUILD_DIGEST"
+        docker pull "$IMAGE"
+        test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" = "$GIT_COMMIT"
+        test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.ref.name"}}' "$IMAGE")" = "$GIT_BRANCH"
+        test "$(docker image inspect --format '{{index .Config.Labels "io.teamagent.source.git-tree"}}' "$IMAGE")" = "$GIT_TREE"
+        test "$(docker image inspect --format '{{index .Config.Labels "io.teamagent.source.archive-sha256"}}' "$IMAGE")" = "$SOURCE_ARCHIVE_SHA256"
+        test "$(docker image inspect --format '{{index .Config.Labels "io.teamagent.source.s3-version"}}' "$IMAGE")" = "$EXPECTED_SOURCE_VERSION_ID"
+        test "$(docker image inspect --format '{{.Architecture}}' "$IMAGE")" = arm64
+        test "$(docker image inspect --format '{{.Config.User}}' "$IMAGE")" = 10001:10001
   post_build:
     commands:
-      - docker push $MCP_REPO:$IMAGE_TAG
-      - aws ecr describe-images --repository-name teamagent-mcp --image-ids imageTag=$IMAGE_TAG --query 'imageDetails[0].imageDigest' --output text | tee /tmp/digest.txt
-      - echo "MCP_DIGEST=$(cat /tmp/digest.txt)"
+      - |
+        BUILD_DIGEST=$(python3 -c \
+          'import json; print(json.load(open("/tmp/teamagent-build-metadata.json"))["containerimage.digest"])')
+        DIGEST=$(aws ecr describe-images \
+          --repository-name teamagent-mcp \
+          --image-ids "imageTag=$IMAGE_TAG" \
+          --query 'imageDetails[0].imageDigest' \
+          --output text)
+        python3 -c \
+          'import re,sys; assert re.fullmatch(r"sha256:[0-9a-f]{64}", sys.argv[1])' \
+          "$DIGEST"
+        test "$DIGEST" = "$BUILD_DIGEST"
+        printf 'MCP_IMAGE_URI=%s@%s\n' "$MCP_REPO" "$DIGEST"

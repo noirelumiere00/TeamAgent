@@ -8,6 +8,12 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
+from teamagent.adapters.url_guard import allowed_domains_from_env
+from teamagent.media.security import ALLOWED_ACQUIRE_HOST_SUFFIXES
+from teamagent.media.url_policy import ACQUIRE_HOST_SUFFIXES
+
 ROOT = Path(__file__).resolve().parents[2]
 DOCKER = ROOT / "infra/docker"
 CONTRACT_PATH = DOCKER / "runtime-contract.json"
@@ -25,7 +31,7 @@ def test_contract_has_independent_arm64_runtime_tasks() -> None:
     for task in CONTRACT["tasks"].values():
         assert task["uid"] == task["gid"] == 10001
         assert task["read_only_root_filesystem"] is True
-        assert task["memory_limit_mib"] == 4096
+        assert task["memory_contract"] == "per-consumer:infra/docker/runtime-consumers.json"
         assert task["writable_mounts"] == [
             {"path": "/tmp", "kind": "fresh-named-volume", "mode": "1777"}
         ]
@@ -49,6 +55,7 @@ def test_media_worker_role_explicitly_excludes_core_authority_and_secrets() -> N
         "s3:PutObject",
         "s3:DeleteObject",
         "s3:ListBucket",
+        "dynamodb:GetItem",
         "dynamodb:UpdateItem",
     }
     assert {"bedrock:*", "rds:*", "rds-db:*", "secretsmanager:*", "ssm:*"} <= set(
@@ -152,6 +159,43 @@ def test_media_cleanup_window_is_machine_readable_and_fenced() -> None:
     assert jobs["synchronous_consumer_deletes_shared_state"] is False
 
 
+def test_acquire_url_allowlist_is_identical_in_core_dispatcher_python_and_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = (
+        "youtube.com",
+        "youtu.be",
+        "tiktok.com",
+        "instagram.com",
+        "instagr.am",
+    )
+    monkeypatch.delenv("SCRAPE_ALLOWED_DOMAINS", raising=False)
+    assert ACQUIRE_HOST_SUFFIXES == expected
+    assert ALLOWED_ACQUIRE_HOST_SUFFIXES == expected
+    assert allowed_domains_from_env() == frozenset(expected)
+
+    dispatcher_path = ROOT / "infra/terraform/lambda/tiktok_dispatch/handler.py"
+    dispatcher_tree = ast.parse(dispatcher_path.read_text(encoding="utf-8"))
+    dispatcher_value: tuple[str, ...] | None = None
+    for node in ast.walk(dispatcher_tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "_ACQUIRE_HOST_SUFFIXES"
+            for target in node.targets
+        ):
+            dispatcher_value = ast.literal_eval(node.value)
+            break
+    assert dispatcher_value == expected
+
+    node_text = (ROOT / "tools/tiktok_scraper/search.mjs").read_text(encoding="utf-8")
+    match = re.search(
+        r"const ACQUIRE_HOST_SUFFIXES = Object\.freeze\((\[[^;]+\])\);",
+        node_text,
+        re.DOTALL,
+    )
+    assert match is not None
+    assert tuple(re.findall(r'"([^"]+)"', match.group(1))) == expected
+
+
 def test_media_sandbox_uses_exact_playwright_profile_and_fargate_is_fail_closed() -> None:
     sandbox = CONTRACT["tasks"]["teamagent-media-worker"]["chromium_sandbox"]
     assert sandbox["required"] is True
@@ -179,7 +223,10 @@ def test_compose_smokes_enforce_runtime_controls_and_urllib_health() -> None:
     assert COMPOSE.count("read_only: true") == 1  # shared anchor for every service
     assert "platform: linux/arm64" in COMPOSE
     assert 'user: "10001:10001"' in COMPOSE
-    assert "mem_limit: 4096m" in COMPOSE
+    assert COMPOSE.count("mem_limit: 4096m") == 5
+    assert COMPOSE.count("mem_limit: 2048m") == 1
+    assert COMPOSE.count("mem_limit: 1024m") == 2
+    assert COMPOSE.count("mem_limit: 512m") == 1
     assert COMPOSE.count("cap_drop:\n      - ALL") == 9
     assert """test "$cap_drop" = '["ALL"]'""" in RUN_SMOKES
     assert "CAP_ALL" not in RUN_SMOKES
@@ -214,6 +261,7 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert "aws " not in BUILD
     assert "status --porcelain" in BUILD
     assert "GIT_COMMIT=$HEAD" in BUILD
+    assert "GIT_BRANCH=$BRANCH" in BUILD
     assert "org.opencontainers.image.revision" in BUILD
     assert "--platform linux/arm64" in BUILD
     assert "--provenance=mode=max" in BUILD
@@ -225,6 +273,10 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert "--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL" in BUILD
     assert "--severity CRITICAL,HIGH" not in BUILD
     assert 'git -C "$REPO_ROOT" archive --format=tar "$HEAD"' in BUILD
+    assert 'tar -c -f "$EVIDENCE_DIR/build-context.tar"' in BUILD
+    assert '--file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-mcp"' in BUILD
+    assert '--file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-media-worker"' in BUILD
+    assert BUILD.count('"$BUILD_CONTEXT_DIR"') >= 4
     assert "source-tracked-trivy-secret.json" in BUILD
     assert 'if test -e "$EVIDENCE_DIR"' in BUILD
     assert "image_id=$(docker image inspect --format '{{.Id}}' \"$image\")" in BUILD
@@ -238,7 +290,30 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert "generate_runtime_receipt.py" in BUILD
     assert "--first-parent" in BUILD
     assert 'test -s "$EVIDENCE_DIR/git-files.txt"' in BUILD
+    assert "TEAMAGENT_REVIEW_BASE_REF" in BUILD
+    assert "git-base-head-files.txt" in BUILD
+    assert '"$REVIEW_BASE_OID...$HEAD"' in BUILD
+    assert "--review-base-oid" in BUILD
+    assert "--merge-base-oid" in BUILD
+    assert "--expected-branch" in BUILD
+    assert "FINAL_VERIFICATION.json" in BUILD
+    assert "verification.json" not in BUILD
+    assert BUILD.index("done >SHA256SUMS") < BUILD.index('>"$FINAL_VERIFY_FILE"')
     assert "run_runtime_smokes.sh" in BUILD
+
+
+def test_all_core_and_media_terraform_image_inputs_are_digest_only() -> None:
+    variables = (ROOT / "infra/terraform/variables_fargate.tf").read_text(encoding="utf-8")
+    media = (ROOT / "infra/terraform/tiktok_acquire.tf").read_text(encoding="utf-8")
+    digest_pattern = "@sha256:[0-9a-f]{64}"
+    assert 'variable "mcp_image"' in variables
+    assert digest_pattern in variables
+    for variable in ("tiktok_acquire_image", "media_worker_image"):
+        block_start = media.index(f'variable "{variable}"')
+        block = media[block_start : block_start + 900]
+        assert digest_pattern in block
+        assert "validation {" in block
+    assert "strcontains(local.media_worker_image" not in media
 
 
 def test_smoke_runner_checks_actual_read_only_memory_user_and_arm64() -> None:
@@ -252,7 +327,9 @@ def test_smoke_runner_checks_actual_read_only_memory_user_and_arm64() -> None:
     assert "seccomp=*unconfined" in RUN_SMOKES
     assert "{{json .Config.Volumes}}" in BUILD
     assert 'test "$volumes" = \'{"/tmp":{}}\'' in BUILD
-    assert "true 4294967296 10001:10001" in RUN_SMOKES
+    assert "expected_memory_bytes=$((expected_memory_mib * 1024 * 1024))" in RUN_SMOKES
+    assert 'test "$memory_bytes" = "$expected_memory_bytes"' in RUN_SMOKES
+    assert "memory=%sMiB" in RUN_SMOKES
     assert "down --volumes" in RUN_SMOKES
     assert "{{.Path}} {{json .Args}}" in RUN_SMOKES
     for consumer in (
@@ -260,6 +337,7 @@ def test_smoke_runner_checks_actual_read_only_memory_user_and_arm64() -> None:
         *CONSUMERS["media_image_consumers"].values(),
     ):
         assert consumer["dynamic_service"] in RUN_SMOKES
+        assert f" {consumer['memory_mib']} " in RUN_SMOKES
 
 
 def test_python_smoke_and_scan_helpers_parse() -> None:
@@ -326,6 +404,56 @@ def _all_declared_task_consumers(image_expression: str) -> set[str]:
             if re.search(image_expression, block):
                 discovered.add(f"{path.relative_to(ROOT)}:{match.group(1)}")
     return discovered
+
+
+def _terraform_memory_mib(block: str) -> int:
+    match = re.search(
+        r'^\s*memory\s*=\s*("?\d+"?|var\.[A-Za-z0-9_]+)',
+        block,
+        re.MULTILINE,
+    )
+    assert match is not None
+    expression = match.group(1)
+    if not expression.startswith("var."):
+        return int(expression.strip('"'))
+    variable_name = expression.removeprefix("var.")
+    for path in (ROOT / "infra/terraform").glob("*.tf"):
+        variable = re.search(
+            rf'variable\s+"{re.escape(variable_name)}"\s*\{{(?P<body>.*?)^\}}',
+            path.read_text(encoding="utf-8"),
+            re.MULTILINE | re.DOTALL,
+        )
+        if variable is None:
+            continue
+        default = re.search(r'^\s*default\s*=\s*"?(\d+)"?\s*$', variable["body"], re.MULTILINE)
+        assert default is not None
+        return int(default.group(1))
+    raise AssertionError(f"missing Terraform variable {variable_name}")
+
+
+def _compose_service_block(service: str) -> str:
+    match = re.search(
+        rf"^  {re.escape(service)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|^networks:)",
+        COMPOSE,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None
+    return match["body"]
+
+
+def test_each_consumer_memory_contract_matches_terraform_and_its_smoke() -> None:
+    consumers = {
+        **CONSUMERS["core_image_consumers"],
+        **CONSUMERS["media_image_consumers"],
+    }
+    assert {value["memory_mib"] for value in consumers.values()} == {512, 1024, 2048, 4096}
+    for name, value in consumers.items():
+        raw_path, raw_resource = value["terraform_resource"].split(":", 1)
+        resource_name = raw_resource.rsplit(".", 1)[1]
+        block = _resource_block(ROOT / raw_path, resource_name)
+        assert _terraform_memory_mib(block) == value["memory_mib"], name
+        compose_block = _compose_service_block(value["dynamic_service"])
+        assert f"mem_limit: {value['memory_mib']}m" in compose_block, name
 
 
 def test_static_completeness_discovers_every_core_and_media_image_consumer() -> None:

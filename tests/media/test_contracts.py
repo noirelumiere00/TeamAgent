@@ -14,6 +14,7 @@ from teamagent.media.contracts import (
     SlidesOperation,
     make_job_request,
     parse_job_request,
+    semantic_request_sha256,
 )
 from teamagent.media.operations import _ffmpeg_input
 from teamagent.media.security import (
@@ -64,6 +65,36 @@ def test_job_payload_is_strict_hashed_bounded_and_idempotent() -> None:
     tampered["operation"]["width"] = 640
     with pytest.raises(ValidationError, match="payload_sha256 mismatch"):
         parse_job_request(json.dumps(tampered))
+
+
+def test_semantic_request_hash_is_stable_across_delayed_timestamp_envelopes() -> None:
+    operation = FrameOperation(
+        kind="frame",
+        source=_ref(),
+        timecodes=(0.0, 1.5),
+        width=320,
+    )
+    first = make_job_request(
+        operation=operation,
+        output_bucket="teamagent-media-test",
+        request_fingerprint="req-1:delayed",
+        now_epoch_s=100,
+        timeout_s=300,
+    )
+    delayed = make_job_request(
+        operation=operation,
+        output_bucket="teamagent-media-test",
+        request_fingerprint="req-1:delayed",
+        now_epoch_s=220,
+        timeout_s=300,
+    )
+
+    assert first.idempotency_key == delayed.idempotency_key
+    assert first.idempotency_key == semantic_request_sha256(operation, "req-1:delayed")
+    assert first.job_id == delayed.job_id
+    assert first.created_at_epoch_s != delayed.created_at_epoch_s
+    assert first.deadline_epoch_s != delayed.deadline_epoch_s
+    assert first.payload_sha256 != delayed.payload_sha256
 
 
 def test_job_contract_rejects_extra_fields_traversal_and_unbounded_deadline() -> None:
@@ -127,6 +158,13 @@ def test_acquire_ssrf_guard_allows_only_public_youtube_tiktok_instagram() -> Non
             resolver=globally_routable,
         )
         == "https://www.instagram.com/reel/abc/"
+    )
+    assert (
+        validate_acquire_url(
+            "https://instagr.am/p/abc/",
+            resolver=globally_routable,
+        )
+        == "https://instagr.am/p/abc/"
     )
 
     with pytest.raises(MediaSsrfError, match="DOMAIN_BLOCKED"):

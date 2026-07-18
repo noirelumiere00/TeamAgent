@@ -20,6 +20,19 @@ import puppeteer from "puppeteer-core";
 import dns from "node:dns/promises";
 import ipaddr from "ipaddr.js";
 
+const ACQUIRE_HOST_SUFFIXES = Object.freeze([
+  "youtube.com",
+  "youtu.be",
+  "tiktok.com",
+  "instagram.com",
+  "instagr.am",
+]);
+const TIKTOK_HOST_SUFFIXES = ACQUIRE_HOST_SUFFIXES.filter((host) => host === "tiktok.com");
+
+function hostMatches(host, suffixes) {
+  return suffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+}
+
 // ---- 引数パース ----
 function parseArgs(argv) {
   const a = {
@@ -84,8 +97,7 @@ async function assertPublicHttps(rawUrl, { tiktokOnly = false } = {}) {
   const host = parsed.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
   if (
     tiktokOnly &&
-    host !== "tiktok.com" &&
-    !host.endsWith(".tiktok.com")
+    !hostMatches(host, TIKTOK_HOST_SUFFIXES)
   ) throw new Error("TikTok URL is outside the allowlist");
   // Resolve at every intercepted browser request. Chromium performs its own
   // connection, so retaining a prior answer would widen the DNS-rebinding
@@ -122,7 +134,12 @@ function runNetworkGuardSelfTest() {
   if (!allowed.every(isPublicIp) || blocked.some(isPublicIp)) {
     throw new Error("network guard self-test failed");
   }
-  process.stdout.write(JSON.stringify({ ok: true, allowed, blocked }));
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    allowed,
+    blocked,
+    acquireHostSuffixes: ACQUIRE_HOST_SUFFIXES,
+  }));
 }
 
 function isCanonicalTikTokUrl(rawUrl) {
@@ -134,7 +151,7 @@ function isCanonicalTikTokUrl(rawUrl) {
       !parsed.username &&
       !parsed.password &&
       (!parsed.port || parsed.port === "443") &&
-      (host === "tiktok.com" || host.endsWith(".tiktok.com"))
+      hostMatches(host, TIKTOK_HOST_SUFFIXES)
     );
   } catch {
     return false;

@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import subprocess
+import tarfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -37,7 +40,13 @@ def _report(kind: str) -> dict[str, Any]:
         "Target": "exact image (alpine 3.24)",
         "Class": "os-pkgs",
         "Type": "alpine",
-        "Packages": [{"Name": "musl", "Version": "1.2.5"}],
+        "Packages": [
+            {
+                "Name": "musl",
+                "Version": "1.2.5",
+                "Identifier": {"PURL": "pkg:apk/musl@1.2.5"},
+            }
+        ],
     }
     if kind == "vulnerability":
         result["Vulnerabilities"] = []
@@ -110,6 +119,14 @@ def test_trivy_pair_rejects_named_live_critical_cve() -> None:
         _verify_pair(vulnerability=vulnerability)
 
 
+def test_retained_scan_summary_rejects_mutated_counts_or_subject() -> None:
+    recomputed = _verify_pair()
+    retained = dict(recomputed)
+    retained["critical"] = 1
+    with pytest.raises(EvidenceError, match="differs from recomputed"):
+        VERIFIER.verify_retained_scan_summary(retained, recomputed, name="core")
+
+
 def _scanner(*, next_update: datetime) -> dict[str, Any]:
     return {
         "Version": "0.72.0",
@@ -157,7 +174,14 @@ def _sbom() -> dict[str, Any]:
     ]
     return {
         "bomFormat": "CycloneDX",
-        "components": [{"type": "library", "name": "musl"}],
+        "components": [
+            {
+                "type": "library",
+                "name": "musl",
+                "version": "1.2.5",
+                "purl": "pkg:apk/musl@1.2.5",
+            }
+        ],
         "metadata": {
             "timestamp": NOW.isoformat(),
             "tools": {
@@ -175,8 +199,12 @@ def _sbom() -> dict[str, Any]:
 
 def test_sbom_binds_exact_image_and_filesystem_layers() -> None:
     assert VERIFIER.verify_sbom(
-        _sbom(), _inspect(), expected_image_id=IMAGE_ID, scanner_version="0.72.0"
-    ) == {"components": 1, "layers": 2}
+        _sbom(),
+        _inspect(),
+        _report("vulnerability"),
+        expected_image_id=IMAGE_ID,
+        scanner_version="0.72.0",
+    ) == {"components": 1, "layers": 2, "packages_reconciled": 1}
 
 
 def test_sbom_rejects_swapped_image_or_filesystem() -> None:
@@ -186,6 +214,28 @@ def test_sbom_rejects_swapped_image_or_filesystem() -> None:
         VERIFIER.verify_sbom(
             sbom,
             _inspect(),
+            _report("vulnerability"),
+            expected_image_id=IMAGE_ID,
+            scanner_version="0.72.0",
+        )
+
+
+@pytest.mark.parametrize("mutation", ("version", "purl", "extra", "duplicate"))
+def test_sbom_rejects_mutated_package_inventory(mutation: str) -> None:
+    sbom = _sbom()
+    if mutation == "version":
+        sbom["components"][0]["version"] = "9.9.9"
+    elif mutation == "purl":
+        sbom["components"][0]["purl"] = "pkg:apk/musl@9.9.9"
+    elif mutation == "extra":
+        sbom["components"].append({"type": "library", "name": "injected", "version": "1.0"})
+    else:
+        sbom["components"].append(dict(sbom["components"][0]))
+    with pytest.raises(EvidenceError, match=r"package inventory|package purl"):
+        VERIFIER.verify_sbom(
+            sbom,
+            _inspect(),
+            _report("vulnerability"),
             expected_image_id=IMAGE_ID,
             scanner_version="0.72.0",
         )
@@ -201,10 +251,100 @@ def test_checksum_manifest_rejects_post_scan_swap(tmp_path: Path) -> None:
         f"{digest}  ./core-trivy-vulnerability.json\n",
         encoding="utf-8",
     )
-    VERIFIER._verify_checksums(evidence)
+    assert (
+        VERIFIER._verify_checksums(evidence)
+        == hashlib.sha256((evidence / "SHA256SUMS").read_bytes()).hexdigest()
+    )
     payload.write_text("swapped", encoding="utf-8")
     with pytest.raises(EvidenceError, match="mismatch"):
         VERIFIER._verify_checksums(evidence)
+
+
+def test_checksum_manifest_ignores_only_retained_final_verification(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    payload = evidence / "receipt.json"
+    payload.write_text("{}", encoding="utf-8")
+    digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+    (evidence / "SHA256SUMS").write_text(
+        f"{digest}  ./receipt.json\n",
+        encoding="utf-8",
+    )
+    (evidence / "FINAL_VERIFICATION.json").write_text(
+        json.dumps({"ok": True, "sha256sums_sha256": "a" * 64}),
+        encoding="utf-8",
+    )
+
+    assert (
+        VERIFIER._verify_checksums(evidence)
+        == hashlib.sha256((evidence / "SHA256SUMS").read_bytes()).hexdigest()
+    )
+    (evidence / "unexpected.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(EvidenceError, match="file set"):
+        VERIFIER._verify_checksums(evidence)
+
+
+def test_context_tree_digest_reconciles_retained_archive_and_detects_mutation(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    context.mkdir()
+    regular = context / "regular.txt"
+    regular.write_text("exact source\n", encoding="utf-8")
+    executable = context / "run.sh"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    os.symlink("regular.txt", context / "link")
+    archive = tmp_path / "context.tar"
+    with tarfile.open(archive, "w:") as bundle:
+        bundle.add(context, arcname=".")
+
+    filesystem_digest, filesystem_files = VERIFIER._tree_digest(context)
+    archive_digest, inventory, _members = VERIFIER._archive_inventory(archive)
+    assert archive_digest == filesystem_digest
+    assert filesystem_files == len(inventory) == 3
+
+    regular.write_text("mutated source\n", encoding="utf-8")
+    mutated_digest, _ = VERIFIER._tree_digest(context)
+    assert mutated_digest != archive_digest
+
+
+def test_retained_source_archive_git_tree_oid_detects_mutation(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "Test"],
+        check=True,
+    )
+    (repository / "source.txt").write_text("exact\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-qm", "fixture"], check=True)
+    expected_tree = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    archive = tmp_path / "source.tar"
+    with archive.open("wb") as output:
+        subprocess.run(
+            ["git", "-C", str(repository), "archive", "--format=tar", "HEAD"],
+            check=True,
+            stdout=output,
+        )
+    assert VERIFIER._archive_git_tree_oid(archive) == expected_tree
+
+    mutated = tmp_path / "mutated.tar"
+    with tarfile.open(mutated, "w:") as bundle:
+        payload = tmp_path / "source.txt"
+        payload.write_text("mutated\n", encoding="utf-8")
+        bundle.add(payload, arcname="source.txt")
+    assert VERIFIER._archive_git_tree_oid(mutated) != expected_tree
 
 
 def test_full_verifier_rejects_stale_head_before_using_artifacts(tmp_path: Path) -> None:

@@ -6,15 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from verify_runtime_evidence import (
+    EvidenceError,
+    _archive_git_tree_oid,
+    _archive_inventory,
     _load_json,
     _sha256,
     _timestamp,
+    _tree_digest,
     verify_scanner_snapshot,
     verify_trivy_pair,
 )
@@ -66,6 +69,10 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--head", required=True)
     parser.add_argument("--branch", required=True)
+    parser.add_argument("--review-base-ref", required=True)
+    parser.add_argument("--review-base-oid", required=True)
+    parser.add_argument("--merge-base-oid", required=True)
+    parser.add_argument("--build-context", type=Path, required=True)
     parser.add_argument("--source-scan-artifact-name", required=True)
     parser.add_argument("--started-at", required=True)
     parser.add_argument("--finished-at", required=True)
@@ -79,20 +86,43 @@ def main() -> int:
         scan_started_at=started,
         scan_finished_at=finished,
     )
-    with tarfile.open(evidence_dir / "source-tracked.tar", "r:") as archive:
-        tracked_members = len(archive.getmembers())
+    source_tree_sha256, source_inventory, tracked_members = _archive_inventory(
+        evidence_dir / "source-tracked.tar"
+    )
+    context_tree_sha256, context_inventory, context_members = _archive_inventory(
+        evidence_dir / "build-context.tar"
+    )
+    actual_context_sha256, actual_context_files = _tree_digest(args.build_context.resolve())
+    if actual_context_sha256 != context_tree_sha256 or actual_context_files != len(
+        context_inventory
+    ):
+        raise EvidenceError("retained build context does not match the context used for build")
+    fixture_path = "infra/docker/app-html-runtime-fixture.html"
+    baked_path = "src/teamagent/connect_web/static/app.html"
+    fixture = source_inventory.get(fixture_path)
+    if fixture is None:
+        raise EvidenceError("tracked app HTML fixture is missing")
+    expected_context = dict(source_inventory)
+    expected_context[baked_path] = fixture
+    if context_inventory != expected_context:
+        raise EvidenceError("build context materialization is not exact")
     git_tree = subprocess.run(
         ["git", "-C", str(repo_root), "rev-parse", f"{args.head}^{{tree}}"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
+    if _archive_git_tree_oid(evidence_dir / "source-tracked.tar") != git_tree:
+        raise EvidenceError("retained source archive does not match the expected Git tree")
     receipt = {
-        "schema_version": "1",
+        "schema_version": "2",
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "git": {
             "head": args.head,
             "branch": args.branch,
+            "review_base_ref": args.review_base_ref,
+            "review_base_oid": args.review_base_oid,
+            "merge_base_oid": args.merge_base_oid,
         },
         "scan_window": {
             "started_at": args.started_at,
@@ -102,8 +132,19 @@ def main() -> int:
         "source": {
             "git_tree": git_tree,
             "archive_sha256": _sha256(evidence_dir / "source-tracked.tar"),
+            "source_tree_sha256": source_tree_sha256,
             "tracked_members": tracked_members,
             "scan_artifact_name": args.source_scan_artifact_name,
+            "build_context": {
+                "archive_sha256": _sha256(evidence_dir / "build-context.tar"),
+                "tree_sha256": context_tree_sha256,
+                "members": context_members,
+                "materialized_baked_app_html": {
+                    "source": fixture_path,
+                    "destination": baked_path,
+                    "sha256": fixture[2],
+                },
+            },
         },
         "images": {
             name: _image_receipt(

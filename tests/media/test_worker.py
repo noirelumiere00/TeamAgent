@@ -17,7 +17,7 @@ from teamagent.media.operations import (
     OperationOutput,
     ProducedArtifact,
 )
-from teamagent.media.worker import WorkerClaim, WorkerLease, run_job
+from teamagent.media.worker import AwsWorkerBackend, WorkerClaim, WorkerLease, run_job
 
 
 def _request() -> MediaJobRequest:
@@ -150,6 +150,50 @@ def _successful_operation(*_args: object, **kwargs: object) -> OperationOutput:
         (ProducedArtifact("thumbnail", output, "image/jpeg"),),
         {"network_requests_allowed": 0},
     )
+
+
+class _PointerDynamo:
+    def __init__(self, request: MediaJobRequest) -> None:
+        self.item: dict[str, object] = {
+            "job_id": {"S": request.job_id},
+            "idempotency_key": {"S": request.idempotency_key},
+            "payload_sha256": {"S": request.payload_sha256},
+            "request_json": {"S": request.to_json_bytes().decode()},
+        }
+
+    def get_item(self, **_kwargs: object) -> dict[str, object]:
+        return {"Item": self.item}
+
+
+def _pointer_backend(request: MediaJobRequest) -> tuple[AwsWorkerBackend, _PointerDynamo]:
+    ddb = _PointerDynamo(request)
+    backend = object.__new__(AwsWorkerBackend)
+    backend._table = "jobs"
+    backend._ddb = ddb
+    return backend, ddb
+
+
+def test_worker_loads_exact_envelope_from_bounded_job_pointer() -> None:
+    request = _request()
+    backend, _ddb = _pointer_backend(request)
+
+    assert backend.load_request(request.job_id, request.payload_sha256) == request
+
+
+@pytest.mark.parametrize("mutation", ["payload", "body", "idempotency"])
+def test_worker_rejects_mutated_job_pointer(mutation: str) -> None:
+    request = _request()
+    backend, ddb = _pointer_backend(request)
+    if mutation == "payload":
+        ddb.item["payload_sha256"] = {"S": "f" * 64}
+    elif mutation == "idempotency":
+        ddb.item["idempotency_key"] = {"S": "f" * 64}
+    else:
+        mutated = request.to_json_bytes().decode().replace('"width":480', '"width":481')
+        ddb.item["request_json"] = {"S": mutated}
+
+    with pytest.raises(Exception, match=r"payload_sha256 mismatch|pointer does not match"):
+        backend.load_request(request.job_id, request.payload_sha256)
 
 
 def test_worker_repeated_attempts_leave_request_temp_root_empty(
@@ -341,3 +385,31 @@ def test_worker_cleanup_error_is_not_suppressed_or_recorded_as_success(
     assert backend.stores == 0
     assert backend.cleanups == 1
     assert list(tmp_path.iterdir()) == []
+
+
+def test_worker_fails_terminally_when_budget_expires_after_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _Backend()
+    clock = [101.0]
+
+    def finish_after_deadline(*args: object, **kwargs: object) -> OperationOutput:
+        output = _successful_operation(*args, **kwargs)
+        clock[0] = 401.0
+        return output
+
+    monkeypatch.setattr("teamagent.media.worker.execute_operation", finish_after_deadline)
+    result = run_job(
+        _request(),
+        backend,
+        temp_root=tmp_path,
+        now_epoch_s=101,
+        owner="worker-a",
+        clock=lambda: clock[0],
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "MEDIA_JOB_DEADLINE_EXCEEDED"
+    assert backend.uploads == 0
+    assert backend.cleanups == 1
+    assert backend.stores == 1

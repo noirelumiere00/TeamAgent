@@ -187,7 +187,7 @@ def test_media_sources_and_js_lock_are_content_addressed() -> None:
     expected = {
         PACKAGE: "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
         PACKAGE_LOCK: "f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2",
-        SCRAPER: "c2e9dd93ced889addc83b09bd581ad58c406d9ef296518d2c2dc226c5d81bf16",
+        SCRAPER: "ce200324445ed67f4510c7917543a5332121d4fef2d4be4c156b4c377b6d4730",
     }
     for path, digest in expected.items():
         assert _sha256(path) == digest

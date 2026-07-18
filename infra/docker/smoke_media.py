@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from teamagent.media.contracts import (
     SlidesOperation,
     ThumbnailOperation,
 )
+from teamagent.media.deadline import DeadlineBudget
 from teamagent.media.operations import execute_operation
 from teamagent.media.security import validate_acquire_url
 
@@ -55,6 +57,10 @@ EXPECTED_REMOVED_EXTRACTOR_SET_SHA256 = (
 )
 JOB_ID = "mj_000000000000000000000001"
 BUCKET = "teamagent-smoke-artifacts"
+
+
+def _budget() -> DeadlineBudget:
+    return DeadlineBudget(deadline_epoch_s=time.time() + 300)
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -254,6 +260,7 @@ def _assert_ytdlp_sanitized_and_allowed(work_root: Path) -> None:
                 load_object=lambda _ref, _destination: (_ for _ in ()).throw(
                     AssertionError("acquire must not load S3 input")
                 ),
+                budget=_budget(),
             )
             assert output.metadata["extractor"] == "youtube"
             assert output.artifacts[0].path.read_bytes() == b"offline yt-dlp smoke"
@@ -422,6 +429,7 @@ def _assert_transforms(work_root: Path) -> dict[str, int]:
             ),
             workdir=Path(raw),
             load_object=load,
+            budget=_budget(),
         )
         assert proxy.metadata["transcoded"] is True
         assert proxy.artifacts[0].path.stat().st_size > 1000
@@ -431,6 +439,7 @@ def _assert_transforms(work_root: Path) -> dict[str, int]:
             FrameOperation(kind="frame", source=video_ref, timecodes=(0.1, 1.0), width=320),
             workdir=Path(raw),
             load_object=load,
+            budget=_budget(),
         )
         assert frames.metadata["count"] == 2
         assert len(frames.artifacts) == 3
@@ -440,6 +449,7 @@ def _assert_transforms(work_root: Path) -> dict[str, int]:
             ThumbnailOperation(kind="thumbnail", source=video_ref, width=320),
             workdir=Path(raw),
             load_object=load,
+            budget=_budget(),
         )
         assert len(thumbnail.metadata["swatches"]) >= 1
         assert thumbnail.artifacts[0].path.stat().st_size > 1000
@@ -456,6 +466,7 @@ def _assert_transforms(work_root: Path) -> dict[str, int]:
             ),
             workdir=Path(raw),
             load_object=load,
+            budget=_budget(),
         )
         assert slides.metadata == {"slides": 2, "network_requests_allowed": 0}
         deck = Presentation(str(slides.artifacts[0].path))

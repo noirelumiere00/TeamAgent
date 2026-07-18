@@ -1,9 +1,9 @@
 """Dispatch one strict generic media envelope to one Fargate task.
 
-The Lambda never interprets operation fields and passes the canonical envelope
-unchanged as ``MEDIA_JOB_JSON``.  A short DynamoDB dispatch lease prevents
-duplicate SQS deliveries from silently launching unbounded tasks; worker-side
-lease fencing remains authoritative for the actual job transition.
+The Lambda validates the canonical SQS envelope but passes only its bounded
+DynamoDB pointer to ECS.  A short DynamoDB dispatch lease prevents duplicate
+SQS deliveries from silently launching unbounded tasks; worker-side lease
+fencing remains authoritative for the actual job transition.
 """
 
 from __future__ import annotations
@@ -22,12 +22,19 @@ ecs = boto3.client("ecs")
 ddb = boto3.client("dynamodb")
 
 _MAX_BODY_BYTES = 128 * 1024
+_MAX_ECS_OVERRIDE_CHARACTERS = 8192
 _JOB_ID = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _S3_BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _S3_KEY = re.compile(r"^[A-Za-z0-9!_.*'()/+=:@-]+$")
 _SIMPLE_SELECTOR = re.compile(r"[.#][A-Za-z][A-Za-z0-9_-]{0,78}")
-_ACQUIRE_HOST_SUFFIXES = ("youtube.com", "youtu.be", "tiktok.com", "instagram.com")
+_ACQUIRE_HOST_SUFFIXES = (
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "instagram.com",
+    "instagr.am",
+)
 _MAX_INPUT_BYTES = 128 * 1024 * 1024
 _MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 _OPERATIONS = {
@@ -477,6 +484,26 @@ def _release_dispatch(table: str, job_id: str, owner: str) -> None:
     )
 
 
+def _task_overrides(container: str, spec: dict[str, Any]) -> dict[str, Any]:
+    overrides = {
+        "containerOverrides": [
+            {
+                "name": container,
+                "environment": [
+                    {"name": "MEDIA_JOB_ID", "value": spec["job_id"]},
+                    {
+                        "name": "MEDIA_JOB_PAYLOAD_SHA256",
+                        "value": spec["payload_sha256"],
+                    },
+                ],
+            }
+        ]
+    }
+    if len(_canonical(overrides).decode("utf-8")) > _MAX_ECS_OVERRIDE_CHARACTERS:
+        raise ValueError("ECS task override exceeds the 8192-character service limit")
+    return overrides
+
+
 def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
     cluster = os.environ["CLUSTER_ARN"]
     taskdef = os.environ["TASKDEF_ARN"]
@@ -523,6 +550,14 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
         if not _claim_dispatch(table, spec, owner, now):
             continue
         try:
+            if int(time.time()) >= spec["deadline_epoch_s"]:
+                _mark_failed(
+                    table,
+                    spec["job_id"],
+                    "MEDIA_JOB_DEADLINE_EXCEEDED",
+                    int(time.time()),
+                )
+                raise TimeoutError("media envelope deadline exceeded before task launch")
             response = ecs.run_task(
                 cluster=cluster,
                 taskDefinition=taskdef,
@@ -536,14 +571,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
                         "assignPublicIp": "ENABLED",
                     }
                 },
-                overrides={
-                    "containerOverrides": [
-                        {
-                            "name": container,
-                            "environment": [{"name": "MEDIA_JOB_JSON", "value": body}],
-                        }
-                    ]
-                },
+                overrides=_task_overrides(container, spec),
             )
             failures = response.get("failures", [])
             tasks = response.get("tasks", [])

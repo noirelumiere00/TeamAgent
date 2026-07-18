@@ -28,13 +28,15 @@ assert_container_security() {
   service=$2
   kind=$3
   expected_network=$4
+  expected_memory_mib=$5
 
-  runtime_security=$(
-    docker inspect \
-      --format '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Memory}} {{.Config.User}}' \
-      "$container_id"
-  )
-  test "$runtime_security" = "true 4294967296 10001:10001"
+  readonly=$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container_id")
+  memory_bytes=$(docker inspect --format '{{.HostConfig.Memory}}' "$container_id")
+  runtime_user=$(docker inspect --format '{{.Config.User}}' "$container_id")
+  expected_memory_bytes=$((expected_memory_mib * 1024 * 1024))
+  test "$readonly" = true
+  test "$memory_bytes" = "$expected_memory_bytes"
+  test "$runtime_user" = "10001:10001"
   writable_mounts=$(
     docker inspect \
       --format '{{range .Mounts}}{{if .RW}}{{println .Destination}}{{end}}{{end}}' \
@@ -75,19 +77,20 @@ assert_container_security() {
     esac
   fi
   printf \
-    'runtime_security service=%s readonly=true memory=4096MiB user=10001:10001 network=%s writable=/tmp cap_drop=%s\n' \
-    "$service" "$network" "$cap_drop"
+    'runtime_security service=%s readonly=true memory=%sMiB user=10001:10001 network=%s writable=/tmp cap_drop=%s\n' \
+    "$service" "$expected_memory_mib" "$network" "$cap_drop"
 }
 
 run_one_shot() {
   profile=$1
   service=$2
   kind=$3
-  expected_status=$4
-  expected_path=$5
-  expected_args=$6
+  expected_memory_mib=$4
+  expected_status=$5
+  expected_path=$6
+  expected_args=$7
   container_id=$(compose --profile "$profile" run --detach --no-deps "$service")
-  assert_container_security "$container_id" "$service" "$kind" none
+  assert_container_security "$container_id" "$service" "$kind" none "$expected_memory_mib"
   actual_process=$(
     docker inspect --format '{{.Path}} {{json .Args}}' "$container_id"
   )
@@ -104,13 +107,14 @@ run_one_shot() {
 run_health_service() {
   profile=$1
   service=$2
-  expected_path=$3
-  expected_args=$4
+  expected_memory_mib=$3
+  expected_path=$4
+  expected_args=$5
 
   compose --profile "$profile" up --detach "$service"
   container_id=$(compose --profile "$profile" ps --quiet "$service")
   test -n "$container_id"
-  assert_container_security "$container_id" "$service" core internal
+  assert_container_security "$container_id" "$service" core internal "$expected_memory_mib"
   actual_process=$(
     docker inspect --format '{{.Path}} {{json .Args}}' "$container_id"
   )
@@ -147,39 +151,39 @@ assert_arm64 "$TEAMAGENT_CORE_IMAGE"
 assert_arm64 "$TEAMAGENT_MEDIA_IMAGE"
 
 run_health_service \
-  core-health core-health \
+  core-health core-health 4096 \
   /app/.venv/bin/python \
   '["/app/scripts/run_mcp_vertex_entrypoint.py"]'
 run_health_service \
-  connect-health connect-health \
+  connect-health connect-health 1024 \
   /app/.venv/bin/python \
   '["-m","teamagent.connect_web"]'
 
 run_one_shot \
-  core core-smoke core 0 \
+  core core-smoke core 4096 0 \
   /app/.venv/bin/python \
   '["/smoke/smoke_core.py"]'
 run_one_shot \
-  core-composition canary-composition core 1 \
+  core-composition canary-composition core 512 1 \
   /app/.venv/bin/python \
   '["/app/scripts/run_canary_health.py"]'
 run_one_shot \
-  core-composition ingest-composition core 2 \
+  core-composition ingest-composition core 4096 2 \
   /app/.venv/bin/python \
   '["/app/scripts/run_ingest_fargate.py"]'
 run_one_shot \
-  core-composition morning-digest-composition core 0 \
+  core-composition morning-digest-composition core 2048 0 \
   /app/.venv/bin/python \
   '["/app/scripts/run_morning_digest_fargate.py"]'
 run_one_shot \
-  core-composition x-buzz-composition core 1 \
+  core-composition x-buzz-composition core 1024 1 \
   /app/.venv/bin/python \
   '["-m","teamagent.workers.x_buzz_job"]'
 run_one_shot \
-  media-composition media-composition media 2 \
+  media-composition media-composition media 4096 2 \
   /app/.venv/bin/python \
   '["-m","teamagent.media.worker"]'
 run_one_shot \
-  media media-smoke media 0 \
+  media media-smoke media 4096 0 \
   /app/.venv/bin/python \
   '["/smoke/smoke_media.py"]'

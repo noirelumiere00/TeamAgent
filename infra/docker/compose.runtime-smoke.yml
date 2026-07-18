@@ -4,7 +4,6 @@ x-runtime-security: &runtime-security
   platform: linux/arm64
   user: "10001:10001"
   read_only: true
-  mem_limit: 4096m
   pids_limit: 512
   init: true
 
@@ -23,6 +22,7 @@ x-core-environment: &core-environment
 services:
   core-health:
     <<: *runtime-security
+    mem_limit: 4096m
     profiles:
       - core-health
     image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
@@ -52,6 +52,7 @@ services:
 
   connect-health:
     <<: *runtime-security
+    mem_limit: 1024m
     profiles:
       - connect-health
     image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
@@ -90,6 +91,7 @@ services:
 
   core-smoke:
     <<: *runtime-security
+    mem_limit: 4096m
     profiles:
       - core
     image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
@@ -109,6 +111,7 @@ services:
 
   canary-composition:
     <<: *runtime-security
+    mem_limit: 512m
     profiles:
       - core-composition
     image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
@@ -127,6 +130,7 @@ services:
 
   ingest-composition:
     <<: *runtime-security
+    mem_limit: 4096m
     profiles:
       - core-composition
     image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
@@ -150,6 +154,7 @@ services:
 
   morning-digest-composition:
     <<: *runtime-security
+    mem_limit: 2048m
     profiles:
       - core-composition
     image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
@@ -171,6 +176,7 @@ services:
 
   x-buzz-composition:
     <<: *runtime-security
+    mem_limit: 1024m
     profiles:
       - core-composition
     image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
@@ -190,6 +196,7 @@ services:
 
   media-smoke:
     <<: *runtime-security
+    mem_limit: 4096m
     profiles:
       - media
     image: ${TEAMAGENT_MEDIA_IMAGE:?set TEAMAGENT_MEDIA_IMAGE}
@@ -214,6 +221,7 @@ services:
 
   media-composition:
     <<: *runtime-security
+    mem_limit: 4096m
     profiles:
       - media-composition
     image: ${TEAMAGENT_MEDIA_IMAGE:?set TEAMAGENT_MEDIA_IMAGE}

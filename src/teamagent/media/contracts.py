@@ -24,6 +24,8 @@ from pydantic import (
     model_validator,
 )
 
+from teamagent.media.url_policy import acquire_host_allowed
+
 MAX_JOB_BODY_BYTES = 128 * 1024
 MAX_INPUT_BYTES = 128 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
@@ -42,12 +44,6 @@ S3Bucket = Annotated[
 S3Key = Annotated[str, StringConstraints(min_length=1, max_length=1024)]
 
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9!_.*'()/+=:@-]+$")
-_ACQUIRE_HOST_SUFFIXES = (
-    "youtube.com",
-    "youtu.be",
-    "tiktok.com",
-    "instagram.com",
-)
 
 
 class _StrictModel(BaseModel):
@@ -91,9 +87,7 @@ class AcquireOperation(_StrictModel):
             or parsed.port not in (None, 443)
         ):
             raise ValueError("acquire URL must be canonical HTTPS")
-        if not any(
-            host == suffix or host.endswith(f".{suffix}") for suffix in _ACQUIRE_HOST_SUFFIXES
-        ):
+        if not acquire_host_allowed(host):
             raise ValueError("acquire URL host is not allowlisted")
         if parsed.fragment:
             raise ValueError("acquire URL fragments are not allowed")
@@ -233,6 +227,23 @@ def _canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def semantic_request_sha256(
+    operation: MediaOperation,
+    request_fingerprint: str,
+) -> str:
+    """Hash retry-stable intent, excluding timestamps and the delivery envelope."""
+
+    return hashlib.sha256(
+        _canonical_json(
+            {
+                "schema_version": "1",
+                "operation": operation.model_dump(mode="json"),
+                "request_fingerprint": request_fingerprint,
+            }
+        )
+    ).hexdigest()
+
+
 class MediaJobRequest(_StrictModel):
     """SQS に載せる media job request。"""
 
@@ -337,15 +348,7 @@ def make_job_request(
     if timeout_s < 1 or timeout_s > MAX_DEADLINE_SECONDS:
         raise ValueError("timeout_s is out of range")
     now = int(time.time()) if now_epoch_s is None else now_epoch_s
-    idempotency = hashlib.sha256(
-        _canonical_json(
-            {
-                "schema_version": "1",
-                "operation": operation.model_dump(mode="json"),
-                "request_fingerprint": request_fingerprint,
-            }
-        )
-    ).hexdigest()
+    idempotency = semantic_request_sha256(operation, request_fingerprint)
     resolved_job_id = job_id or f"mj_{idempotency[:24]}"
     resolved_prefix = output_prefix or f"media-jobs/{resolved_job_id}/"
     payload_without_hash: dict[str, Any] = {
@@ -399,4 +402,5 @@ __all__ = [
     "TikTokClientConfig",
     "make_job_request",
     "parse_job_request",
+    "semantic_request_sha256",
 ]

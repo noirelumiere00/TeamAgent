@@ -74,12 +74,12 @@ def test_publish_contract_strings() -> None:
 
 
 def test_unified_deploy_contract_strings() -> None:
-    """unified bake が td へ宣言的に固定する env と image tag 表示の契約。
+    """unified promotion pins source, digest, release evidence, and runtime env.
 
     - CONNECT_APP_HTML_S3_URI: publish_app_html.sh ホットスワップの受け口
       （これが無いと publish が preflight で恒久 exit 1）
     - USE_QUERY_PLANNER / USE_COHERE_RERANK: T1 No-AI 化の恒久化（bake での巻き戻り防止）
-    - image tag 表示: register_ingest_td.sh --image-tag へ渡すタグの唯一の出所
+    - build/deploy are split so ECR/Fargate gates cannot be bypassed
     """
     body = UNIFIED.read_text(encoding="utf-8")
     for needle in (
@@ -87,10 +87,18 @@ def test_unified_deploy_contract_strings() -> None:
         "USE_QUERY_PLANNER",
         "USE_COHERE_RERANK",
         "codebuild/connect-web-app.html",  # publish_app_html.sh の配置先と同一定数
-        "image tag: ${TAG}",
-        "register_ingest_td.sh --image-tag ${TAG}",
+        "build-candidate",
+        "deploy-digest",
+        "--expected-commit",
+        "--expected-tree",
+        "--expected-branch",
+        "--image-uri",
+        "--release-gate-sha256",
+        'python3 "$VERIFY_GATE"',
     ):
         assert needle in body, f"契約文字列が欠落: {needle}"
+    assert "register_ingest_td.sh --image-tag" not in body
+    assert "zip -rq" not in body
 
 
 def test_bootstrap_contract_strings() -> None:
@@ -101,7 +109,7 @@ def test_bootstrap_contract_strings() -> None:
 
 
 def test_help_exits_zero_without_aws() -> None:
-    for script in (RUN_INGEST, PUBLISH, REGISTER):
+    for script in (RUN_INGEST, PUBLISH, REGISTER, UNIFIED):
         r = _run(str(script), "--help")
         assert r.returncode == 0, f"{script.name} --help が exit {r.returncode}: {r.stderr}"
         assert "usage" in r.stdout.lower()
@@ -111,10 +119,10 @@ def test_unknown_arg_exits_nonzero() -> None:
     for script in (RUN_INGEST, PUBLISH, REGISTER):
         r = _run(str(script), "--no-such-flag")
         assert r.returncode == 1, f"{script.name} が不明引数で exit {r.returncode}"
-        assert "不明な引数" in r.stdout + r.stderr
+        assert "不明な引数" in r.stdout + r.stderr or "unknown argument" in r.stdout + r.stderr
 
 
-def test_register_requires_image_tag() -> None:
+def test_register_requires_digest_uri() -> None:
     r = _run(str(REGISTER))
     assert r.returncode == 1
-    assert "--image-tag" in r.stdout + r.stderr
+    assert "--image-uri" in r.stdout + r.stderr

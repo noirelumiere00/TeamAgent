@@ -38,6 +38,12 @@ Productionのconnect-webは `CONNECT_APP_HTML_S3_URI` による `source=s3` が�
 fallbackとQA済みproduction artifactを同一digestとして扱わない。最終core OCI contractは次を
 固定する。
 
+baked fallbackの正準byteはtracked
+`infra/docker/app-html-runtime-fixture.html`である。buildはexact git archiveを展開した後、
+この1ファイルだけを`src/teamagent/connect_web/static/app.html`へmaterializeし、source treeと
+materialized build contextを別々のSHA-256で記録する。ignoredなlive worktree上の`app.html`を
+build inputにしてはならない。
+
 - production artifact SHA-256
   `03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c`
 - S3 VersionId `FTXbcN70D0DCN90TI_hRK1IdQK_HhLee`
@@ -80,9 +86,20 @@ Coreは汎用media adapterを介して次を同期的に submit / poll / downloa
 - `proxy` / `frame` / `thumbnail`
 - `slides` / `proposal_pptx` / `pdf`
 
-SQS body相当のenvelopeはPydantic strict/frozen/extra-forbid、最大128 KiBである。入力は
+SQS body相当のenvelopeはPydantic strict/frozen/extra-forbid、最大128 KiBである。ECS
+`RunTask` overrideにはenvelopeを複製せず、`MEDIA_JOB_ID`と
+`MEDIA_JOB_PAYLOAD_SHA256`だけを渡す。workerはDynamoDBのconsistent readでcanonical
+`request_json`を取得・再検証する。overrideはAWS API上限の8192文字以下をコードとテストで
+強制する。入力は
 S3 referenceだけを許し、bucket/key/content type/size/SHA-256を必須とする。deadlineは最大15分、
-outputは最大128 MiB、idempotency keyとcanonical payload SHA-256を必須とする。URL取得は
+outputは最大128 MiBとする。idempotency keyはoperationとcaller fingerprintから作るretry-stable
+semantic SHA-256であり、timestamp/deadlineを含むcanonical envelope SHA-256とは分離する。
+遅延retryでは同じsemantic job rowと、そのrowに保存済みのexact envelopeを再利用する。
+deadlineは1つのabsolute epochとしてdispatcher、adapter poll、worker、各loop、network call、
+Playwright、subprocessへremaining budgetを渡し、枯渇時は
+`MEDIA_JOB_DEADLINE_EXCEEDED`でterminal failする。各段階で新しい15分を付け直してはならない。
+URL取得はcore/dispatcher/Python/Node共通の
+`youtube.com`, `youtu.be`, `tiktok.com`, `instagram.com`, `instagr.am`
 HTTPS allowlistとpublic-DNS/redirect SSRF guardを通す。
 
 S3 input/outputはSSE-S3またはSSE-KMS、artifact TTLは5分以上6時間以下とする。S3 `Expires`
@@ -116,8 +133,22 @@ VSEO report/slides/PPTXはrequest単位directoryに置き、upload/response後�
 - read-only root filesystem
 - fresh named `/tmp` volume、mode `1777`
 - `HOME`, `TMPDIR`, `XDG_*` はすべて `/tmp/teamagent/**`
-- memory hard limit `4096 MiB`
 - writable mountは `/tmp` だけ
+
+memoryはimage単位の架空の共通値ではなく、actual ECS consumer単位で固定・smokeする。
+
+| consumer | memory MiB |
+|---|---:|
+| MCP | 4096 |
+| connect-web | 1024 |
+| canary | 512 |
+| ingest | 4096 |
+| morning digest | 2048 |
+| x-buzz worker | 1024 |
+| media worker | 4096 |
+
+正準値は`runtime-consumers.json`であり、local smokeは各containerの
+`HostConfig.Memory`をそのconsumer値とbyte単位で比較する。
 
 Core healthcheckはimage、Compose、ECS task definition、deploy rendererのすべてで
 `/app/.venv/bin/python` + `urllib.request` をexec形式で用いる。shell、curl、wgetを追加しない。
@@ -158,13 +189,23 @@ infra/docker/build_local_runtime_evidence.sh /private/tmp/teamagent-runtime-evid
 ```
 
 このscriptは既存または空でない出力directoryを拒否し、pushを行わず、full 40-character
-`HEAD`を`org.opencontainers.image.revision`に設定する。Buildx metadata、image
+`HEAD`とbranchをOCI label/build provenanceへ設定・再検証する。Dockerfileとbuild contextは
+live worktreeではなく、exact `git archive`から展開したtreeを使う。raw source archiveと
+materialized build contextのtar、archive SHA-256、canonical tree SHA-256を保持し、両者の差が
+tracked fallback HTMLのmaterialization 1件だけであることをverifierが再計算する。Buildx metadata、image
 inspect/history、CycloneDX SBOM、Trivy vulnerability/secret JSON、clean HEADの
 tracked-files-only source secret scan、scanner/DB metadata、smoke log、subject receipt、
 全証跡SHA-256を同じfresh directoryへ出す。tagではなくimmutable local image IDをscanし、
 label revision、architecture、runtime user、scan subject、SBOM filesystem、provenance
-descriptorが一致しない場合は停止する。merge commitでもfirst-parent差分を使い、
-`git-files.txt`が空になる証跡を拒否する。
+descriptorが一致しない場合は停止する。reviewed base ref/base OIDと実際のmerge-base OIDをreceiptへ
+固定し、`base_oid...HEAD`のfull name-status/rename-aware change listを
+`git-base-head-files.txt`へ保持・再計算する。single-commitの`git-files.txt`も補助証跡として残す。
+
+verifierはretained `*-trivy-summary.json`をraw scanから再計算したsummaryとexact compareする。
+CycloneDXのpackage name/version inventoryをTrivy package inventoryと双方向reconcileし、両方に
+PURLがあるpackageはPURLも一致させる。最後に全artifactの`SHA256SUMS`を作成してからfull verifierを
+実行し、その成功JSONを`FINAL_VERIFICATION.json`として保持する。この最終JSONは検証済み
+`SHA256SUMS`自体のSHA-256を含む。pre-checksum verificationを最終証跡として扱わない。
 
 採用gateはactual final ARM64 imageごとに以下すべてである。
 
@@ -194,6 +235,20 @@ Registryへpushする権限を持つ別担当は、同じexact HEAD・同じbuil
 unsupported・非0ならdeployをfail closedにする。ローカル担当はpush/ECR scan/deployを行わない。
 したがってlocal receiptではECR/Fargate gateを`NOT_RUN`と明記し、registry/ECR receiptは別担当が
 exact pushed digestへ追加する。
+
+canonical promotionは`infra/deploy/deploy_connectweb_unified.sh`の2 modeに分離する。
+`build-candidate`は指定されたcommit/tree/branchとclean HEADを照合し、`git archive`だけを
+versioning有効なS3へ送り、そのVersionIdをCodeBuild source versionとして固定する。CodeBuildも
+S3 VersionIdと展開tree OIDをbuild前に再検証する。Buildxは`GIT_COMMIT`/`GIT_BRANCH`を渡して
+`--push`でprovenance/SBOM attestationをregistryへ保持し、candidateをpullしてrevision/branchを
+含むruntime labels、user、architectureを検査したうえで、Buildx output digestとECR digestを
+一致させる。
+このmodeはECSを更新しない。`deploy-digest`はtagを受け付けず、
+`repository@sha256:<64hex>`だけを受け付ける。最初のAWS callより前に、out-of-bandでreviewされた
+release-gate fileのSHA-256、source/image subject、decision `ACCEPTED`、少なくとも
+`local_runtime_evidence`、`ecr_basic_scan`、`fargate_runtime_smoke`の全statusを検証する。
+追加のprovenance gateは`required_gates`へ足せ、列挙されたgateはすべてACCEPTEDでなければならない。
+Terraformのcore/media image inputとingest promotion scriptもdigest-onlyである。
 
 ### Fargate Chromium sandbox gate
 

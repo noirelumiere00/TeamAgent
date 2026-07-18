@@ -120,7 +120,7 @@ def _configure(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(name, value)
 
 
-def test_dispatcher_passes_canonical_generic_envelope_unchanged(
+def test_dispatcher_passes_only_bounded_persisted_envelope_pointer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ddb = _Dynamo()
@@ -145,15 +145,89 @@ def test_dispatcher_passes_canonical_generic_envelope_unchanged(
     assert override == [
         {
             "name": "media-worker",
-            "environment": [{"name": "MEDIA_JOB_JSON", "value": body}],
+            "environment": [
+                {
+                    "name": "MEDIA_JOB_ID",
+                    "value": json.loads(body)["job_id"],
+                },
+                {
+                    "name": "MEDIA_JOB_PAYLOAD_SHA256",
+                    "value": json.loads(body)["payload_sha256"],
+                },
+            ],
         }
     ]
-    parsed = json.loads(override[0]["environment"][0]["value"])
-    assert parsed["operation"]["kind"] == "acquire"
-    assert "keywords" not in parsed
+    assert len(module._canonical(call["overrides"]).decode()) <= 8192
     assert any(
         value["UpdateExpression"].startswith("SET dispatched_task_arn") for value in ddb.calls
     )
+
+
+def _large_body() -> str:
+    job_id = "mj_0123456789abcdef01234567"
+
+    def large_ref(index: int) -> S3ObjectRef:
+        return S3ObjectRef(
+            bucket="teamagent-media",
+            key=f"media-jobs/{job_id}/input/{index:02d}-{'a' * 900}",
+            sha256=f"{index:064x}",
+            size=1,
+            content_type="application/octet-stream",
+        )
+
+    request = make_job_request(
+        operation=ProposalPptxOperation(
+            kind="proposal_pptx",
+            template=large_ref(30),
+            composer_json=large_ref(31),
+            evidence=tuple(
+                ProposalEvidence(
+                    placeholder_id=index + 1,
+                    rank=index + 1,
+                    source=large_ref(index),
+                )
+                for index in range(20)
+            ),
+        ),
+        output_bucket="teamagent-media",
+        request_fingerprint="large-dispatch-envelope",
+        job_id=job_id,
+        now_epoch_s=1_000,
+        timeout_s=300,
+    )
+    return request.to_json_bytes().decode()
+
+
+def test_large_valid_envelope_still_uses_override_below_ecs_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    ecs = _Ecs()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+    body = _large_body()
+    assert 8192 < len(body) < 128 * 1024
+
+    result = module.handler(
+        {"Records": [{"messageId": "large-envelope", "body": body}]},
+        types.SimpleNamespace(aws_request_id="request-1"),
+    )
+
+    assert result == {"started": ["arn:aws:ecs:region:account:task/media/1"]}
+    overrides = ecs.calls[0]["overrides"]
+    assert len(module._canonical(overrides).decode()) <= 8192
+    assert "MEDIA_JOB_JSON" not in module._canonical(overrides).decode()
+
+
+def test_task_override_enforces_ecs_8192_character_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    spec = json.loads(_body())
+
+    with pytest.raises(ValueError, match="8192-character"):
+        module._task_overrides("x" * 8192, spec)
 
 
 def test_operation_schema_error_fails_row_without_starting_or_orphaning_task(
@@ -308,6 +382,30 @@ def test_terminal_duplicate_does_not_launch_or_mutate_result(
     assert result == {"started": []}
     assert ecs.calls == []
     assert len(ddb.calls) == 1
+
+
+def test_deadline_exhaustion_after_dispatch_claim_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    ecs = _Ecs()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
+    _configure(monkeypatch)
+    readings = iter((1_001, 1_300, 1_300))
+    monkeypatch.setattr(module.time, "time", lambda: next(readings))
+
+    with pytest.raises(TimeoutError, match="before task launch"):
+        module.handler(
+            {"Records": [{"messageId": "deadline", "body": _body()}]},
+            types.SimpleNamespace(aws_request_id="request-1"),
+        )
+
+    assert ecs.calls == []
+    assert any(
+        call.get("ExpressionAttributeValues", {}).get(":failed") == {"S": "failed"}
+        for call in ddb.calls
+    )
+    assert any(call["UpdateExpression"].startswith("REMOVE dispatch_owner") for call in ddb.calls)
 
 
 def test_legacy_top_level_payload_is_rejected_and_queued_row_is_failed(

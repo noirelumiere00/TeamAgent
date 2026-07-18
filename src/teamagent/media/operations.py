@@ -27,6 +27,7 @@ from teamagent.media.contracts import (
     ThumbnailOperation,
     TikTokAcquireOperation,
 )
+from teamagent.media.deadline import DeadlineBudget, MediaDeadlineExceededError
 from teamagent.media.security import (
     ALLOWED_YTDLP_EXTRACTORS,
     PublicHttpsRedirectHandler,
@@ -56,6 +57,16 @@ class MediaOperationError(RuntimeError):
         self.code = code
 
 
+def _remaining(budget: DeadlineBudget, cap_s: float | None = None) -> float:
+    try:
+        return budget.remaining(cap_s=cap_s)
+    except MediaDeadlineExceededError as exc:
+        raise MediaOperationError(
+            "MEDIA_JOB_DEADLINE_EXCEEDED",
+            "media job deadline exceeded",
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class ProducedArtifact:
     name: str
@@ -70,15 +81,22 @@ class OperationOutput:
     metadata: dict[str, Any]
 
 
-def _run(command: list[str], *, timeout_s: int = _FFMPEG_TIMEOUT_S) -> None:
+def _run(
+    command: list[str],
+    *,
+    budget: DeadlineBudget,
+    timeout_s: int = _FFMPEG_TIMEOUT_S,
+) -> None:
+    timeout = _remaining(budget, float(timeout_s))
     try:
         completed = subprocess.run(
             command,
             check=False,
             capture_output=True,
-            timeout=timeout_s,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
+        _remaining(budget)
         raise MediaOperationError("MEDIA_PROCESS_TIMEOUT", "media subprocess timed out") from exc
     if completed.returncode != 0:
         logger.warning(
@@ -87,6 +105,7 @@ def _run(command: list[str], *, timeout_s: int = _FFMPEG_TIMEOUT_S) -> None:
             completed.stderr.decode("utf-8", "replace")[-300:],
         )
         raise MediaOperationError("MEDIA_PROCESS_FAILED", "media subprocess failed")
+    _remaining(budget)
 
 
 def _ffmpeg_input(source: Path) -> list[str]:
@@ -111,7 +130,12 @@ def _safe_file(path: Path, root: Path) -> Path:
     return resolved
 
 
-def _acquire(operation: AcquireOperation, workdir: Path) -> OperationOutput:
+def _acquire(
+    operation: AcquireOperation,
+    workdir: Path,
+    budget: DeadlineBudget,
+) -> OperationOutput:
+    _remaining(budget)
     validate_acquire_url(operation.url)
     try:
         import yt_dlp
@@ -145,7 +169,8 @@ def _acquire(operation: AcquireOperation, workdir: Path) -> OperationOutput:
         "postprocessors": [],
         "quiet": True,
         "retries": 2,
-        "socket_timeout": 20,
+        "socket_timeout": max(1.0, _remaining(budget, 20.0)),
+        "progress_hooks": [lambda _status: _remaining(budget)],
         "verbose": False,
         "writeinfojson": False,
         "writethumbnail": False,
@@ -153,8 +178,12 @@ def _acquire(operation: AcquireOperation, workdir: Path) -> OperationOutput:
     try:
         with public_dns_only(), yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(operation.url, download=True)
+    except MediaOperationError:
+        raise
     except Exception as exc:
+        _remaining(budget)
         raise MediaOperationError("MEDIA_ACQUIRE_FAILED", "allowed media acquire failed") from exc
+    _remaining(budget)
     if not isinstance(info, dict):
         raise MediaOperationError("MEDIA_ACQUIRE_EMPTY", "yt-dlp returned no media metadata")
     extractor = str(info.get("extractor_key") or info.get("extractor") or "").lower()
@@ -186,7 +215,13 @@ def _acquire(operation: AcquireOperation, workdir: Path) -> OperationOutput:
     )
 
 
-def _node_json(command: list[str], *, workdir: Path, timeout_s: int) -> dict[str, Any]:
+def _node_json(
+    command: list[str],
+    *,
+    workdir: Path,
+    budget: DeadlineBudget,
+    timeout_s: int,
+) -> dict[str, Any]:
     environment = {
         **os.environ,
         "HOME": str(workdir / "home"),
@@ -205,9 +240,10 @@ def _node_json(command: list[str], *, workdir: Path, timeout_s: int) -> dict[str
             env=environment,
             check=False,
             capture_output=True,
-            timeout=timeout_s,
+            timeout=_remaining(budget, float(timeout_s)),
         )
     except subprocess.TimeoutExpired as exc:
+        _remaining(budget)
         raise MediaOperationError("MEDIA_TIKTOK_TIMEOUT", "TikTok browser timed out") from exc
     try:
         result = json.loads(completed.stdout.decode("utf-8"))
@@ -218,6 +254,7 @@ def _node_json(command: list[str], *, workdir: Path, timeout_s: int) -> dict[str
         ) from exc
     if completed.returncode != 0 or not isinstance(result, dict) or not result.get("ok"):
         raise MediaOperationError("MEDIA_TIKTOK_FAILED", "TikTok browser job failed")
+    _remaining(budget)
     return result
 
 
@@ -253,7 +290,13 @@ def _post_row(video: dict[str, Any], keyword: str, rank: int, pid: str) -> dict[
     }
 
 
-def _fetch_public_image(url: str, destination: Path, *, width: int = 480) -> bool:
+def _fetch_public_image(
+    url: str,
+    destination: Path,
+    *,
+    budget: DeadlineBudget,
+    width: int = 480,
+) -> bool:
     if not url:
         return False
     try:
@@ -267,7 +310,13 @@ def _fetch_public_image(url: str, destination: Path, *, width: int = 480) -> boo
             },
         )
         opener = urllib.request.build_opener(PublicHttpsRedirectHandler())
-        with public_dns_only(), opener.open(request, timeout=20) as response:
+        with (
+            public_dns_only(),
+            opener.open(
+                request,
+                timeout=_remaining(budget, 20.0),
+            ) as response,
+        ):
             length = int(response.headers.get("Content-Length") or 0)
             if length > 8 * 1024 * 1024:
                 return False
@@ -290,17 +339,22 @@ def _fetch_public_image(url: str, destination: Path, *, width: int = 480) -> boo
                 "5",
                 str(destination),
             ],
+            budget=budget,
             timeout_s=30,
         )
         raw.unlink(missing_ok=True)
         return destination.exists() and destination.stat().st_size > 0
+    except MediaOperationError:
+        raise
     except Exception:
+        _remaining(budget)
         return False
 
 
 def _tiktok_acquire(
     operation: TikTokAcquireOperation,
     workdir: Path,
+    budget: DeadlineBudget,
 ) -> OperationOutput:
     node = os.environ.get("TIKTOK_NODE_BIN", "/usr/bin/node")
     scraper = os.environ.get(
@@ -312,6 +366,7 @@ def _tiktok_acquire(
 
     posts: list[dict[str, Any]] = []
     for keyword_index, keyword in enumerate(operation.keywords):
+        _remaining(budget)
         result = _node_json(
             [
                 node,
@@ -324,6 +379,7 @@ def _tiktok_acquire(
                 str(operation.n_per_kw),
             ],
             workdir=workdir,
+            budget=budget,
             timeout_s=120,
         )
         videos = result.get("videos")
@@ -349,6 +405,7 @@ def _tiktok_acquire(
     }
     selected: set[str] = set()
     for keyword in operation.keywords:
+        _remaining(budget)
         candidates = list(posts_by_keyword[keyword])
         if operation.sort == "save_rate":
             candidates.sort(key=lambda post: (-float(post["save_rate"]), int(post["rank_display"])))
@@ -357,10 +414,15 @@ def _tiktok_acquire(
         selected.update(str(post["pid"]) for post in candidates[: operation.videos_per_kw])
 
     for post in posts:
+        _remaining(budget)
         pid = str(post["pid"])
         thumbnail_relative = f"thumbs/{pid}.jpg"
         thumbnail = workdir / f"{pid}.jpg"
-        if _fetch_public_image(str(post["cover_url"]), thumbnail):
+        if _fetch_public_image(
+            str(post["cover_url"]),
+            thumbnail,
+            budget=budget,
+        ):
             artifacts.append(
                 ProducedArtifact(
                     f"thumb-{pid}",
@@ -388,13 +450,16 @@ def _tiktok_acquire(
                         str(operation.max_video_bytes),
                     ],
                     workdir=workdir,
+                    budget=budget,
                     timeout_s=120,
                 )
                 downloaded = (
                     video_path.exists()
                     and 0 < video_path.stat().st_size <= operation.max_video_bytes
                 )
-            except MediaOperationError:
+            except MediaOperationError as exc:
+                if exc.code == "MEDIA_JOB_DEADLINE_EXCEEDED":
+                    raise
                 downloaded = False
         if downloaded:
             artifacts.append(
@@ -473,7 +538,13 @@ def _tiktok_acquire(
     )
 
 
-def _proxy(operation: ProxyOperation, workdir: Path, load: ObjectLoader) -> OperationOutput:
+def _proxy(
+    operation: ProxyOperation,
+    workdir: Path,
+    load: ObjectLoader,
+    budget: DeadlineBudget,
+) -> OperationOutput:
+    _remaining(budget)
     source = load(operation.source, workdir / "source.bin")
     if source.stat().st_size <= operation.limit_bytes and not operation.preview:
         destination = workdir / "proxy.bin"
@@ -516,7 +587,8 @@ def _proxy(operation: ProxyOperation, workdir: Path, load: ObjectLoader) -> Oper
                 "-movflags",
                 "+faststart",
                 str(destination),
-            ]
+            ],
+            budget=budget,
         )
         if destination.stat().st_size <= operation.limit_bytes:
             break
@@ -528,11 +600,17 @@ def _proxy(operation: ProxyOperation, workdir: Path, load: ObjectLoader) -> Oper
     )
 
 
-def _frames(operation: FrameOperation, workdir: Path, load: ObjectLoader) -> OperationOutput:
+def _frames(
+    operation: FrameOperation,
+    workdir: Path,
+    load: ObjectLoader,
+    budget: DeadlineBudget,
+) -> OperationOutput:
     source = load(operation.source, workdir / "source.bin")
     artifacts: list[ProducedArtifact] = []
     frame_rows: list[dict[str, Any]] = []
     for index, second in enumerate(operation.timecodes):
+        _remaining(budget)
         destination = workdir / f"frame-{index:02d}.jpg"
         _run(
             [
@@ -550,6 +628,7 @@ def _frames(operation: FrameOperation, workdir: Path, load: ObjectLoader) -> Ope
                 "6",
                 str(destination),
             ],
+            budget=budget,
             timeout_s=60,
         )
         if not destination.exists() or destination.stat().st_size == 0:
@@ -586,7 +665,12 @@ def _palette(rgb: bytes) -> tuple[list[str], float, float]:
     return colors, round(brightness / 255.0, 3), round(max(-1.0, min(1.0, warmth / 255)), 3)
 
 
-def _thumbnail(operation: ThumbnailOperation, workdir: Path, load: ObjectLoader) -> OperationOutput:
+def _thumbnail(
+    operation: ThumbnailOperation,
+    workdir: Path,
+    load: ObjectLoader,
+    budget: DeadlineBudget,
+) -> OperationOutput:
     if operation.source is not None:
         source = load(operation.source, workdir / "source.bin")
     else:
@@ -594,6 +678,7 @@ def _thumbnail(operation: ThumbnailOperation, workdir: Path, load: ObjectLoader)
         if operation.url is None or not _fetch_public_image(
             operation.url,
             source,
+            budget=budget,
             width=operation.width,
         ):
             raise MediaOperationError(
@@ -616,6 +701,7 @@ def _thumbnail(operation: ThumbnailOperation, workdir: Path, load: ObjectLoader)
             "5",
             str(image),
         ],
+        budget=budget,
         timeout_s=60,
     )
     _run(
@@ -634,6 +720,7 @@ def _thumbnail(operation: ThumbnailOperation, workdir: Path, load: ObjectLoader)
             "rgb24",
             str(rgb),
         ],
+        budget=budget,
         timeout_s=60,
     )
     colors, brightness, warmth = _palette(rgb.read_bytes())
@@ -657,7 +744,11 @@ def _thumbnail(operation: ThumbnailOperation, workdir: Path, load: ObjectLoader)
     )
 
 
-def _build_image_pptx(images: list[bytes], destination: Path) -> None:
+def _build_image_pptx(
+    images: list[bytes],
+    destination: Path,
+    budget: DeadlineBudget,
+) -> None:
     from pptx import Presentation
     from pptx.util import Emu, Inches
 
@@ -666,6 +757,7 @@ def _build_image_pptx(images: list[bytes], destination: Path) -> None:
     presentation.slide_height = Inches(7.5)
     blank = presentation.slide_layouts[6]
     for image in images:
+        _remaining(budget)
         slide = presentation.slides.add_slide(blank)
         slide.shapes.add_picture(
             io.BytesIO(image),
@@ -675,9 +767,15 @@ def _build_image_pptx(images: list[bytes], destination: Path) -> None:
             height=presentation.slide_height,
         )
     presentation.save(str(destination))
+    _remaining(budget)
 
 
-def _slides(operation: SlidesOperation, workdir: Path, load: ObjectLoader) -> OperationOutput:
+def _slides(
+    operation: SlidesOperation,
+    workdir: Path,
+    load: ObjectLoader,
+    budget: DeadlineBudget,
+) -> OperationOutput:
     html_path = load(operation.html, workdir / "slides.html")
     if html_path.stat().st_size > 2 * 1024 * 1024:
         raise MediaOperationError("MEDIA_HTML_SIZE_EXCEEDED", "slides HTML exceeds limit")
@@ -703,14 +801,21 @@ def _slides(operation: SlidesOperation, workdir: Path, load: ObjectLoader) -> Op
                 "--disable-setuid-sandbox",
             ],
             chromium_sandbox=True,
+            timeout=_remaining(budget, 30.0) * 1000,
         )
         try:
             page = browser.new_page(
                 viewport={"width": operation.width, "height": operation.height},
                 device_scale_factor=operation.device_scale_factor,
             )
+            page.set_default_timeout(_remaining(budget) * 1000)
+            page.set_default_navigation_timeout(_remaining(budget) * 1000)
             page.route("**/*", lambda route: route.abort())
-            page.set_content(html, wait_until="domcontentloaded")
+            page.set_content(
+                html,
+                wait_until="domcontentloaded",
+                timeout=_remaining(budget) * 1000,
+            )
             slides = page.locator(operation.selector)
             count = slides.count()
             if count < 1 or count > 20:
@@ -718,11 +823,16 @@ def _slides(operation: SlidesOperation, workdir: Path, load: ObjectLoader) -> Op
                     "MEDIA_SLIDE_COUNT_INVALID", "slide count is out of range"
                 )
             for index in range(count):
-                images.append(slides.nth(index).screenshot(type="png"))
+                images.append(
+                    slides.nth(index).screenshot(
+                        type="png",
+                        timeout=_remaining(budget) * 1000,
+                    )
+                )
         finally:
             browser.close()
     destination = workdir / "slides.pptx"
-    _build_image_pptx(images, destination)
+    _build_image_pptx(images, destination, budget)
     return OperationOutput(
         (
             ProducedArtifact(
@@ -789,6 +899,7 @@ def _inject_proposal_evidence(
     operation: ProposalPptxOperation,
     workdir: Path,
     load: ObjectLoader,
+    budget: DeadlineBudget,
 ) -> int:
     from pptx.util import Emu
 
@@ -797,6 +908,7 @@ def _inject_proposal_evidence(
     for index, evidence in enumerate(
         sorted(operation.evidence, key=lambda item: (item.placeholder_id, item.rank))
     ):
+        _remaining(budget)
         image = load(evidence.source, workdir / f"evidence-{index:02d}.bin")
         try:
             slide, shape = next(slots)
@@ -822,6 +934,7 @@ def _proposal_pptx(
     operation: ProposalPptxOperation,
     workdir: Path,
     load: ObjectLoader,
+    budget: DeadlineBudget,
 ) -> OperationOutput:
     template = load(operation.template, workdir / "template.pptx")
     composer_path = load(operation.composer_json, workdir / "composer.json")
@@ -841,16 +954,19 @@ def _proposal_pptx(
 
     presentation = Presentation(str(template))
     for text_frame in _iter_text_frames(presentation):
+        _remaining(budget)
         _replace_placeholders(text_frame, placeholders)
     remaining: list[int] = []
     for text_frame in _iter_text_frames(presentation):
+        _remaining(budget)
         combined = "".join(paragraph.text for paragraph in text_frame.paragraphs)
         remaining.extend(int(match.group(1)) for match in _PLACEHOLDER.finditer(combined))
     if remaining and operation.fail_if_missing:
         raise MediaOperationError("MEDIA_PPTX_UNFILLED", "unfilled placeholders remain")
-    injected = _inject_proposal_evidence(presentation, operation, workdir, load)
+    injected = _inject_proposal_evidence(presentation, operation, workdir, load, budget)
     destination = workdir / "proposal.pptx"
     presentation.save(str(destination))
+    _remaining(budget)
     return OperationOutput(
         (
             ProducedArtifact(
@@ -868,7 +984,12 @@ def _proposal_pptx(
     )
 
 
-def _pdf(operation: PdfOperation, workdir: Path, load: ObjectLoader) -> OperationOutput:
+def _pdf(
+    operation: PdfOperation,
+    workdir: Path,
+    load: ObjectLoader,
+    budget: DeadlineBudget,
+) -> OperationOutput:
     html_path = load(operation.html, workdir / "document.html")
     if html_path.stat().st_size > 2 * 1024 * 1024:
         raise MediaOperationError("MEDIA_HTML_SIZE_EXCEEDED", "PDF HTML exceeds limit")
@@ -890,7 +1011,9 @@ def _pdf(operation: PdfOperation, workdir: Path, load: ObjectLoader) -> Operatio
         )
 
     destination = workdir / "document.pdf"
+    _remaining(budget)
     HTML(string=html, url_fetcher=block_url_fetcher).write_pdf(str(destination))
+    _remaining(budget)
     if not destination.exists() or destination.stat().st_size < 5:
         raise MediaOperationError("MEDIA_PDF_EMPTY", "weasyprint produced an empty PDF")
     return OperationOutput(
@@ -904,26 +1027,31 @@ def execute_operation(
     *,
     workdir: Path,
     load_object: ObjectLoader,
+    budget: DeadlineBudget,
 ) -> OperationOutput:
     """strict operationを1つだけ実行する。"""
 
+    _remaining(budget)
     if isinstance(operation, AcquireOperation):
-        return _acquire(operation, workdir)
-    if isinstance(operation, TikTokAcquireOperation):
-        return _tiktok_acquire(operation, workdir)
-    if isinstance(operation, ProxyOperation):
-        return _proxy(operation, workdir, load_object)
-    if isinstance(operation, FrameOperation):
-        return _frames(operation, workdir, load_object)
-    if isinstance(operation, ThumbnailOperation):
-        return _thumbnail(operation, workdir, load_object)
-    if isinstance(operation, SlidesOperation):
-        return _slides(operation, workdir, load_object)
-    if isinstance(operation, ProposalPptxOperation):
-        return _proposal_pptx(operation, workdir, load_object)
-    if isinstance(operation, PdfOperation):
-        return _pdf(operation, workdir, load_object)
-    raise MediaOperationError("MEDIA_OPERATION_UNSUPPORTED", "unsupported media operation")
+        output = _acquire(operation, workdir, budget)
+    elif isinstance(operation, TikTokAcquireOperation):
+        output = _tiktok_acquire(operation, workdir, budget)
+    elif isinstance(operation, ProxyOperation):
+        output = _proxy(operation, workdir, load_object, budget)
+    elif isinstance(operation, FrameOperation):
+        output = _frames(operation, workdir, load_object, budget)
+    elif isinstance(operation, ThumbnailOperation):
+        output = _thumbnail(operation, workdir, load_object, budget)
+    elif isinstance(operation, SlidesOperation):
+        output = _slides(operation, workdir, load_object, budget)
+    elif isinstance(operation, ProposalPptxOperation):
+        output = _proposal_pptx(operation, workdir, load_object, budget)
+    elif isinstance(operation, PdfOperation):
+        output = _pdf(operation, workdir, load_object, budget)
+    else:
+        raise MediaOperationError("MEDIA_OPERATION_UNSUPPORTED", "unsupported media operation")
+    _remaining(budget)
+    return output
 
 
 __all__ = [

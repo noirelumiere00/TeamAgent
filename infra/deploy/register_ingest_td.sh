@@ -1,57 +1,107 @@
 #!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════════════════
-# ingest タスクへコード変更を届ける唯一の経路（deploy_connectweb_unified.sh は
-# connect-web 専用で ingest td を更新しない、という既知の穴を塞ぐ）。
-#   ECR teamagent-mcp の --image-tag を digest 解決し（immutable tag 前提・digest 運用）、
-#   現行 teamagent-dev-ingest td の image とcore runtime contractを原子的に差し替えて
-#   新 revision を登録する。env / secrets / cpu / memory / role は既存維持。
-#   scripts/aws/run_ingest_task.sh は family 名指定＝最新 revision を拾うので、
-#   登録後の次回実行から新コードが使われる。
-#   ⚠️ EventBridge 週次ルール（現在 DISABLED）のターゲットは特定 revision 固定。
-#      週次を再開する場合はターゲットの task_definition_arn 更新も必要（terraform 側）。
-# 使い方: bash infra/deploy/register_ingest_td.sh --image-tag <ECRタグ>
-# ═══════════════════════════════════════════════════════════════════════════
+# Promote one already-gated immutable core digest to the ingest task definition.
 set -euo pipefail
+
 R=ap-northeast-1
 TD_FAMILY=teamagent-dev-ingest
-ECR_REPO=teamagent-mcp
-ECR="718959508629.dkr.ecr.$R.amazonaws.com/$ECR_REPO"
-TAG=""
+ECR="718959508629.dkr.ecr.$R.amazonaws.com/teamagent-mcp"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+VERIFY_GATE="$REPO_ROOT/infra/deploy/verify_release_gate.py"
+IMAGE_URI=""
+EXPECTED_COMMIT=""
+EXPECTED_TREE=""
+EXPECTED_BRANCH=""
+RELEASE_GATE=""
+RELEASE_GATE_SHA256=""
+TMP_ROOT=""
 
 usage() {
   cat <<'EOF'
-usage: register_ingest_td.sh --image-tag <ECRタグ>
-  --image-tag  ECR teamagent-mcp のイメージタグ（必須。digest に解決して登録する）
+usage: register_ingest_td.sh \
+  --image-uri <ECR-repository@sha256:64hex> \
+  --expected-commit <40hex> --expected-tree <40hex> --expected-branch <branch> \
+  --release-gate <accepted-release-gate.json> \
+  --release-gate-sha256 <64hex>
+
+Tags are intentionally unsupported.
 EOF
 }
 
-while [ $# -gt 0 ]; do
+cleanup() {
+  if [[ -n "$TMP_ROOT" ]]; then
+    rm -rf "$TMP_ROOT"
+  fi
+}
+trap cleanup EXIT INT TERM
+
+while [[ $# -gt 0 ]]; do
   case "$1" in
-    --image-tag) TAG="${2:?--image-tag に値が必要}"; shift 2 ;;
+    --image-uri) IMAGE_URI=${2:?--image-uri requires a value}; shift 2 ;;
+    --expected-commit) EXPECTED_COMMIT=${2:?--expected-commit requires a value}; shift 2 ;;
+    --expected-tree) EXPECTED_TREE=${2:?--expected-tree requires a value}; shift 2 ;;
+    --expected-branch) EXPECTED_BRANCH=${2:?--expected-branch requires a value}; shift 2 ;;
+    --release-gate) RELEASE_GATE=${2:?--release-gate requires a value}; shift 2 ;;
+    --release-gate-sha256)
+      RELEASE_GATE_SHA256=${2:?--release-gate-sha256 requires a value}
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "★不明な引数: $1"; usage; exit 1 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
-[ -n "$TAG" ] || { echo "★--image-tag は必須"; usage; exit 1; }
 
-command -v jq >/dev/null || { echo "★jq が必要"; exit 1; }
-command -v aws >/dev/null || { echo "★aws CLI が必要"; exit 1; }
+[[ "$IMAGE_URI" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[a-z0-9]+([._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$ ]] || {
+  echo "--image-uri must be an immutable ECR digest URI" >&2
+  exit 1
+}
+[[ "$IMAGE_URI" == "$ECR@sha256:"* ]] || {
+  echo "--image-uri must target the canonical teamagent-mcp repository" >&2
+  exit 1
+}
+[[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "--expected-commit must be full lowercase 40-hex" >&2
+  exit 1
+}
+[[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "--expected-tree must be full lowercase 40-hex" >&2
+  exit 1
+}
+[[ "$EXPECTED_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || {
+  echo "--expected-branch is invalid" >&2
+  exit 1
+}
+[[ -f "$RELEASE_GATE" ]] || { echo "--release-gate file is required" >&2; exit 1; }
+[[ "$RELEASE_GATE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "--release-gate-sha256 must be 64 lowercase hex" >&2
+  exit 1
+}
+[[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" == "$EXPECTED_COMMIT" ]]
+[[ "$(git -C "$REPO_ROOT" rev-parse "$EXPECTED_COMMIT^{tree}")" == "$EXPECTED_TREE" ]]
+[[ "$(git -C "$REPO_ROOT" branch --show-current)" == "$EXPECTED_BRANCH" ]]
+[[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]]
 
-echo "== 1) digest 解決（tag の中身は保証されないため digest で固定）=="
-DIGEST=$(aws ecr describe-images --region "$R" --repository-name "$ECR_REPO" \
-  --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)
-[ -n "$DIGEST" ] && [ "$DIGEST" != "None" ] || { echo "★ECR($ECR_REPO) に tag=$TAG が無い"; exit 1; }
-IMG="$ECR@$DIGEST"
-echo "  $IMG"
+command -v python3 >/dev/null
+python3 "$VERIFY_GATE" \
+  "$RELEASE_GATE" \
+  --expected-sha256 "$RELEASE_GATE_SHA256" \
+  --expected-commit "$EXPECTED_COMMIT" \
+  --expected-tree "$EXPECTED_TREE" \
+  --expected-branch "$EXPECTED_BRANCH" \
+  --expected-image-uri "$IMAGE_URI"
 
-echo "== 2) 現行 td 取得（ロールバック revision 控え）=="
-aws ecs describe-task-definition --region "$R" --task-definition "$TD_FAMILY" \
-  --query 'taskDefinition' > /tmp/ingest_td_cur.json
-CUR_ARN=$(jq -r '.taskDefinitionArn' /tmp/ingest_td_cur.json)
-echo "  現行: $CUR_ARN"
-
-echo "== 3) image + runtime contract差替 → register-task-definition（env/secrets は既存維持）=="
-jq --arg img "$IMG" '
+# The SHA-pinned gate is checked before the first AWS read/write.
+command -v jq >/dev/null
+command -v aws >/dev/null
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/teamagent-ingest-promotion.XXXXXX")
+CURRENT_TD="$TMP_ROOT/current-task-definition.json"
+NEW_TD="$TMP_ROOT/new-task-definition.json"
+aws ecs describe-task-definition \
+  --region "$R" \
+  --task-definition "$TD_FAMILY" \
+  --query taskDefinition \
+  >"$CURRENT_TD"
+CURRENT_ARN=$(jq -r '.taskDefinitionArn' "$CURRENT_TD")
+jq --arg img "$IMAGE_URI" '
   .containerDefinitions[0].image = $img
   | .containerDefinitions[0].entryPoint = []
   | .containerDefinitions[0].command = ["/app/.venv/bin/python","/app/scripts/run_ingest_fargate.py"]
@@ -65,12 +115,13 @@ jq --arg img "$IMG" '
   | .volumes = ([((.volumes)//[])[]|select(.name!="runtime-tmp")]+[{"name":"runtime-tmp"}])
   | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities,
         .registeredAt, .registeredBy, .deregisteredAt)
-' /tmp/ingest_td_cur.json > /tmp/ingest_td_new.json
-NEW_ARN=$(aws ecs register-task-definition --region "$R" \
-  --cli-input-json file:///tmp/ingest_td_new.json \
-  --query 'taskDefinition.taskDefinitionArn' --output text)
-echo ""
-echo "✅ 新 revision: $NEW_ARN"
-echo "   scripts/aws/run_ingest_task.sh は family 名指定なので次回実行から新 image が使われる"
-echo "⏪ 戻す場合: 旧 revision($CUR_ARN) を run-task の --task-definition で明示指定するか、"
-echo "   新 revision を aws ecs deregister-task-definition --task-definition $NEW_ARN で無効化"
+' "$CURRENT_TD" >"$NEW_TD"
+NEW_ARN=$(
+  aws ecs register-task-definition \
+    --region "$R" \
+    --cli-input-json "file://$NEW_TD" \
+    --query 'taskDefinition.taskDefinitionArn' \
+    --output text
+)
+printf 'IMAGE_URI=%s\nNEW_TASK_DEFINITION=%s\nPREVIOUS_TASK_DEFINITION=%s\n' \
+  "$IMAGE_URI" "$NEW_ARN" "$CURRENT_ARN"

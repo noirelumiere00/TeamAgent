@@ -4,6 +4,7 @@
     "mcp": {
       "terraform_resource": "infra/terraform/fargate.tf:aws_ecs_task_definition.mcp",
       "container_name": "teamagent-mcp",
+      "memory_mib": 4096,
       "entry_point": [],
       "command": [
         "/app/.venv/bin/python",
@@ -21,6 +22,7 @@
     "connect-web": {
       "terraform_resource": "infra/terraform/connect_web.tf:aws_ecs_task_definition.connect_web",
       "container_name": "connect-web",
+      "memory_mib": 1024,
       "entry_point": [],
       "command": [
         "/app/.venv/bin/python",
@@ -39,6 +41,7 @@
     "canary": {
       "terraform_resource": "infra/terraform/canary_schedule.tf:aws_ecs_task_definition.canary",
       "container_name": "canary",
+      "memory_mib": 512,
       "entry_point": [],
       "command": [
         "/app/.venv/bin/python",
@@ -51,6 +54,7 @@
     "ingest": {
       "terraform_resource": "infra/terraform/ingest_schedule.tf:aws_ecs_task_definition.ingest",
       "container_name": "ingest",
+      "memory_mib": 4096,
       "entry_point": [],
       "command": [
         "/app/.venv/bin/python",
@@ -63,6 +67,7 @@
     "morning-digest": {
       "terraform_resource": "infra/terraform/morning_digest_schedule.tf:aws_ecs_task_definition.morning_digest",
       "container_name": "morning-digest",
+      "memory_mib": 2048,
       "entry_point": [],
       "command": [
         "/app/.venv/bin/python",
@@ -75,6 +80,7 @@
     "x-buzz-worker": {
       "terraform_resource": "infra/terraform/x_research.tf:aws_ecs_task_definition.x_buzz_worker",
       "container_name": "worker",
+      "memory_mib": 1024,
       "entry_point": [],
       "command": [
         "/app/.venv/bin/python",
@@ -90,6 +96,7 @@
     "media-worker": {
       "terraform_resource": "infra/terraform/tiktok_acquire.tf:aws_ecs_task_definition.media_worker",
       "container_name": "media-worker",
+      "memory_mib": 4096,
       "entry_point": [
         "/app/.venv/bin/python",
         "-m",

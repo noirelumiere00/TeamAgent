@@ -2,7 +2,8 @@
 # generic media jobs — one-shot isolated media worker (A′ topology)
 # ============================================================
 # Core→SQS (SendMessage only)→Lambda dispatcher (RunTask/PassRole)
-#   →one-shot Fargate media image→dedicated S3/DynamoDB.
+#   →one-shot Fargate media image→dedicated S3/DynamoDB. ECS overrideには
+#   envelope本体を載せず、DynamoDB上のjob ID/payload digest pointerだけを渡す。
 # Legacy ``enable_tiktok_acquire`` and image input remain aliases so an existing
 # deployment can migrate without silently disabling the TikTok route.
 # ------------------------------------------------------------
@@ -17,6 +18,13 @@ variable "tiktok_acquire_image" {
   description = "Deprecated compatibility alias for media_worker_image."
   type        = string
   default     = ""
+  validation {
+    condition = var.tiktok_acquire_image == "" || can(regex(
+      "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9]+([._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$",
+      var.tiktok_acquire_image,
+    ))
+    error_message = "tiktok_acquire_image must be empty or an immutable ECR image digest URI."
+  }
 }
 
 variable "enable_media_worker" {
@@ -29,6 +37,13 @@ variable "media_worker_image" {
   description = "Immutable ARM64 teamagent-media-worker image URI (digest reference required by promotion tooling)."
   type        = string
   default     = ""
+  validation {
+    condition = var.media_worker_image == "" || can(regex(
+      "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9]+([._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$",
+      var.media_worker_image,
+    ))
+    error_message = "media_worker_image must be empty or an immutable ECR image digest URI."
+  }
 }
 
 variable "media_artifact_ttl_seconds" {
@@ -383,7 +398,10 @@ resource "aws_ecs_task_definition" "media_worker" {
 
   lifecycle {
     precondition {
-      condition     = local.media_worker_image != "" && strcontains(local.media_worker_image, "@sha256:")
+      condition = local.media_worker_image != "" && can(regex(
+        "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9]+([._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$",
+        local.media_worker_image,
+      ))
       error_message = "media_worker_image must be an immutable image digest reference."
     }
   }
@@ -426,8 +444,8 @@ resource "aws_ecs_task_definition" "media_worker" {
 
 # ---------- SQS → Lambda dispatcher → ECS RunTask (★RunTask/PassRoleはここだけ) ----------
 # EventBridge Pipes のECS動的override注入は壊れやすいため、前例(lambda_iam.tf)準拠の
-# 薄いLambdaでSQSをデキューし、strict canonical envelopeを変更せず
-# ecs.run_task(containerOverrides=MEDIA_JOB_JSON)へ渡す。
+# 薄いLambdaでSQSをデキューし、strict canonical envelopeを検証してから
+# ecs.run_taskには8192文字制限内のjob ID/payload digest pointerだけを渡す。
 data "archive_file" "tiktok_dispatch" {
   count       = local.tk_enabled
   type        = "zip"

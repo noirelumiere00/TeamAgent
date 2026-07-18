@@ -23,12 +23,12 @@ from urllib.parse import urlparse
 
 import structlog
 
+from teamagent.media.url_policy import ACQUIRE_HOST_SUFFIXES
+
 logger = structlog.get_logger(__name__)
 
 # 既定は保守的（スクレイプ対象の公開プラットフォームのみ）。env SCRAPE_ALLOWED_DOMAINS で上書き。
-_DEFAULT_ALLOWED: frozenset[str] = frozenset(
-    {"youtube.com", "youtu.be", "tiktok.com", "instagram.com", "instagr.am"}
-)
+_DEFAULT_ALLOWED: frozenset[str] = frozenset(ACQUIRE_HOST_SUFFIXES)
 
 _MAX_URL_LEN = 2048
 

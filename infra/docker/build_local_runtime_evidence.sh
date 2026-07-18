@@ -5,12 +5,16 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD)
 BRANCH=$(git -C "$REPO_ROOT" branch --show-current)
+TREE=$(git -C "$REPO_ROOT" rev-parse "$HEAD^{tree}")
+EXPECTED_HEAD=${TEAMAGENT_EXPECTED_COMMIT:-$HEAD}
+EXPECTED_TREE=${TEAMAGENT_EXPECTED_TREE:-$TREE}
+REVIEW_BASE_REF=${TEAMAGENT_REVIEW_BASE_REF:-origin/dev}
+REVIEW_BASE_OID=$(git -C "$REPO_ROOT" rev-parse "$REVIEW_BASE_REF^{commit}")
+MERGE_BASE_OID=$(git -C "$REPO_ROOT" merge-base "$REVIEW_BASE_OID" "$HEAD")
 SHORT_HEAD=$(printf '%s' "$HEAD" | cut -c1-12)
 EVIDENCE_DIR=${1:-"/private/tmp/teamagent-runtime-evidence-$HEAD"}
 CORE_IMAGE="teamagent-mcp-core:$SHORT_HEAD"
 MEDIA_IMAGE="teamagent-media-worker:$SHORT_HEAD"
-APP_HTML="$REPO_ROOT/src/teamagent/connect_web/static/app.html"
-BAKED_APP_HTML_SHA256=$(sha256sum "$APP_HTML" | cut -d' ' -f1)
 EXPECTED_BAKED_APP_HTML_SHA256=716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb
 APP_HTML_SOURCE=s3
 APP_HTML_SHA256=03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c
@@ -26,7 +30,9 @@ case "$HEAD" in
     ;;
 esac
 test "${#HEAD}" -eq 40
-test "$BAKED_APP_HTML_SHA256" = "$EXPECTED_BAKED_APP_HTML_SHA256"
+test "$HEAD" = "$EXPECTED_HEAD"
+test "$TREE" = "$EXPECTED_TREE"
+test -n "$BRANCH"
 if test -n "$(git -C "$REPO_ROOT" status --porcelain)"; then
   echo "refusing to build evidence from a dirty worktree" >&2
   exit 1
@@ -43,18 +49,47 @@ fi
 umask 077
 mkdir "$EVIDENCE_DIR"
 TRACKED_SOURCE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/teamagent-tracked-source.XXXXXX")
+BUILD_CONTEXT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/teamagent-build-context.XXXXXX")
 # Trivy normalizes redundant path separators in ArtifactName. Canonicalize the
 # receipt subject too (macOS TMPDIR commonly ends in "/") so the binding is exact.
 TRACKED_SOURCE_DIR=$(CDPATH= cd -- "$TRACKED_SOURCE_DIR" && pwd -P)
+BUILD_CONTEXT_DIR=$(CDPATH= cd -- "$BUILD_CONTEXT_DIR" && pwd -P)
 cleanup_tracked_source() {
   if test -n "${TRACKED_SOURCE_DIR:-}"; then
     rm -rf "$TRACKED_SOURCE_DIR"
+  fi
+  if test -n "${BUILD_CONTEXT_DIR:-}"; then
+    rm -rf "$BUILD_CONTEXT_DIR"
+  fi
+  if test -n "${PREVERIFY_FILE:-}"; then
+    rm -f "$PREVERIFY_FILE"
+  fi
+  if test -n "${FINAL_VERIFY_FILE:-}"; then
+    rm -f "$FINAL_VERIFY_FILE"
   fi
 }
 trap cleanup_tracked_source EXIT INT TERM
 git -C "$REPO_ROOT" archive --format=tar "$HEAD" \
   >"$EVIDENCE_DIR/source-tracked.tar"
 tar -x -f "$EVIDENCE_DIR/source-tracked.tar" -C "$TRACKED_SOURCE_DIR"
+tar -x -f "$EVIDENCE_DIR/source-tracked.tar" -C "$BUILD_CONTEXT_DIR"
+"$TRACKED_SOURCE_DIR/infra/deploy/verify_source_tree.py" \
+  --root "$TRACKED_SOURCE_DIR" \
+  --expected-tree "$TREE"
+"$BUILD_CONTEXT_DIR/infra/deploy/verify_source_tree.py" \
+  --root "$BUILD_CONTEXT_DIR" \
+  --expected-tree "$TREE"
+mkdir -p "$BUILD_CONTEXT_DIR/src/teamagent/connect_web/static"
+cp \
+  "$BUILD_CONTEXT_DIR/infra/docker/app-html-runtime-fixture.html" \
+  "$BUILD_CONTEXT_DIR/src/teamagent/connect_web/static/app.html"
+chmod 0644 "$BUILD_CONTEXT_DIR/src/teamagent/connect_web/static/app.html"
+BAKED_APP_HTML_SHA256=$(
+  sha256sum "$BUILD_CONTEXT_DIR/src/teamagent/connect_web/static/app.html" | cut -d' ' -f1
+)
+test "$BAKED_APP_HTML_SHA256" = "$EXPECTED_BAKED_APP_HTML_SHA256"
+tar -c -f "$EVIDENCE_DIR/build-context.tar" -C "$BUILD_CONTEXT_DIR" .
+SOURCE_DOCKER_DIR="$BUILD_CONTEXT_DIR/infra/docker"
 set --
 if test -n "$CA_FILE"; then
   test -f "$CA_FILE"
@@ -64,7 +99,7 @@ fi
 docker buildx build \
   "$@" \
   --platform linux/arm64 \
-  --file "$SCRIPT_DIR/Dockerfile.teamagent-mcp" \
+  --file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-mcp" \
   --build-arg "GIT_COMMIT=$HEAD" \
   --build-arg "GIT_BRANCH=$BRANCH" \
   --build-arg "BAKED_APP_HTML_SHA256=$BAKED_APP_HTML_SHA256" \
@@ -78,12 +113,12 @@ docker buildx build \
   --metadata-file "$EVIDENCE_DIR/core-build-metadata.json" \
   --tag "$CORE_IMAGE" \
   --load \
-  "$REPO_ROOT"
+  "$BUILD_CONTEXT_DIR"
 
 docker buildx build \
   "$@" \
   --platform linux/arm64 \
-  --file "$SCRIPT_DIR/Dockerfile.teamagent-media-worker" \
+  --file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-media-worker" \
   --build-arg "GIT_COMMIT=$HEAD" \
   --build-arg "GIT_BRANCH=$BRANCH" \
   --provenance=mode=max \
@@ -91,7 +126,7 @@ docker buildx build \
   --metadata-file "$EVIDENCE_DIR/media-build-metadata.json" \
   --tag "$MEDIA_IMAGE" \
   --load \
-  "$REPO_ROOT"
+  "$BUILD_CONTEXT_DIR"
 
 SCAN_STARTED_AT=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
 trivy fs \
@@ -186,7 +221,7 @@ for pair in "core:$CORE_IMAGE" "media:$MEDIA_IMAGE"; do
     --format json \
     --output "$EVIDENCE_DIR/$name-trivy-secret.json" \
     "$image_id"
-  "$SCRIPT_DIR/verify_trivy_zero.py" \
+  "$SOURCE_DOCKER_DIR/verify_trivy_zero.py" \
     "$EVIDENCE_DIR/$name-trivy-vulnerability.json" \
     "$EVIDENCE_DIR/$name-trivy-secret.json" \
     --image-id "$image_id" \
@@ -208,7 +243,7 @@ CORE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$CORE_IMAGE")
 MEDIA_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$MEDIA_IMAGE")
 TEAMAGENT_CORE_IMAGE="$CORE_IMAGE_ID" \
 TEAMAGENT_MEDIA_IMAGE="$MEDIA_IMAGE_ID" \
-  "$SCRIPT_DIR/run_runtime_smokes.sh" \
+  "$SOURCE_DOCKER_DIR/run_runtime_smokes.sh" \
   >"$EVIDENCE_DIR/runtime-smokes.log"
 
 git -C "$REPO_ROOT" show --no-patch --format=fuller "$HEAD" \
@@ -217,31 +252,51 @@ git -C "$REPO_ROOT" diff-tree \
   --root --no-commit-id --name-status -r --first-parent "$HEAD" \
   >"$EVIDENCE_DIR/git-files.txt"
 test -s "$EVIDENCE_DIR/git-files.txt"
-"$SCRIPT_DIR/generate_runtime_receipt.py" \
+git -C "$REPO_ROOT" diff \
+  --name-status --find-renames "$REVIEW_BASE_OID...$HEAD" \
+  >"$EVIDENCE_DIR/git-base-head-files.txt"
+printf 'review_base_ref=%s\nreview_base_oid=%s\nmerge_base_oid=%s\n' \
+  "$REVIEW_BASE_REF" "$REVIEW_BASE_OID" "$MERGE_BASE_OID" \
+  >"$EVIDENCE_DIR/git-review-base.txt"
+"$SOURCE_DOCKER_DIR/generate_runtime_receipt.py" \
   "$EVIDENCE_DIR" \
   --repo-root "$REPO_ROOT" \
   --head "$HEAD" \
   --branch "$BRANCH" \
+  --review-base-ref "$REVIEW_BASE_REF" \
+  --review-base-oid "$REVIEW_BASE_OID" \
+  --merge-base-oid "$MERGE_BASE_OID" \
+  --build-context "$BUILD_CONTEXT_DIR" \
   --source-scan-artifact-name "$TRACKED_SOURCE_DIR" \
   --started-at "$SCAN_STARTED_AT" \
   --finished-at "$SCAN_FINISHED_AT"
-"$SCRIPT_DIR/verify_runtime_evidence.py" \
+PREVERIFY_FILE=$(mktemp "${TMPDIR:-/tmp}/teamagent-preverify.XXXXXX")
+"$SOURCE_DOCKER_DIR/verify_runtime_evidence.py" \
   "$EVIDENCE_DIR" \
   --expected-head "$HEAD" \
+  --expected-branch "$BRANCH" \
   --repo-root "$REPO_ROOT" \
   --skip-checksums \
-  >"$EVIDENCE_DIR/verification.json"
+  >"$PREVERIFY_FILE"
+rm -f "$PREVERIFY_FILE"
+PREVERIFY_FILE=
 (
   cd "$EVIDENCE_DIR"
   for file in ./*; do
     test "$file" = ./SHA256SUMS && continue
+    test "$file" = ./FINAL_VERIFICATION.json && continue
     sha256sum "$file"
   done >SHA256SUMS
 )
-"$SCRIPT_DIR/verify_runtime_evidence.py" \
+FINAL_VERIFY_FILE=$(mktemp "${TMPDIR:-/tmp}/teamagent-final-verify.XXXXXX")
+"$SOURCE_DOCKER_DIR/verify_runtime_evidence.py" \
   "$EVIDENCE_DIR" \
   --expected-head "$HEAD" \
-  --repo-root "$REPO_ROOT"
+  --expected-branch "$BRANCH" \
+  --repo-root "$REPO_ROOT" \
+  >"$FINAL_VERIFY_FILE"
+mv "$FINAL_VERIFY_FILE" "$EVIDENCE_DIR/FINAL_VERIFICATION.json"
+FINAL_VERIFY_FILE=
 
 printf 'HEAD=%s\n' "$HEAD"
 printf 'CORE_IMAGE=%s\n' "$CORE_IMAGE_ID"

@@ -31,11 +31,45 @@
       "high_vulnerabilities": 0,
       "required_after_authorized_push": true,
       "fail_closed_until_complete": true
+    },
+    "release_promotion": {
+      "image_reference": "ecr-digest-only",
+      "release_gate_decision": "ACCEPTED",
+      "release_gate_sha256_required": true,
+      "required_gates": [
+        "local_runtime_evidence",
+        "ecr_basic_scan",
+        "fargate_runtime_smoke"
+      ],
+      "additional_required_gates_allowed": true
+    },
+    "local_evidence": {
+      "source": "exact-git-archive",
+      "build_context": "retained-exact-materialized-context",
+      "source_tree_sha256_required": true,
+      "context_tree_sha256_required": true,
+      "review_base_oid_required": true,
+      "merge_base_oid_required": true,
+      "base_head_change_list_required": true,
+      "retained_final_verification": "FINAL_VERIFICATION.json",
+      "final_verification_checks_completed_sha256sums": true
     }
   },
   "media_jobs": {
     "schema_version": "1",
     "maximum_envelope_bytes": 131072,
+    "maximum_ecs_override_characters": 8192,
+    "ecs_payload_transport": "dynamodb-job-id-and-payload-sha256-pointer",
+    "idempotency_identity": "semantic-request-sha256-excluding-envelope-timestamps",
+    "deadline_budget": "single-absolute-epoch-propagated-with-remaining-time",
+    "maximum_deadline_seconds": 900,
+    "acquire_host_suffixes": [
+      "youtube.com",
+      "youtu.be",
+      "tiktok.com",
+      "instagram.com",
+      "instagr.am"
+    ],
     "minimum_artifact_ttl_seconds": 300,
     "maximum_artifact_ttl_seconds": 21600,
     "authoritative_cleanup": "owner-version-fenced-scheduled-janitor",
@@ -50,7 +84,7 @@
       "uid": 10001,
       "gid": 10001,
       "read_only_root_filesystem": true,
-      "memory_limit_mib": 4096,
+      "memory_contract": "per-consumer:infra/docker/runtime-consumers.json",
       "capabilities_drop": [
         "ALL"
       ],
@@ -112,7 +146,7 @@
       "uid": 10001,
       "gid": 10001,
       "read_only_root_filesystem": true,
-      "memory_limit_mib": 4096,
+      "memory_contract": "per-consumer:infra/docker/runtime-consumers.json",
       "capabilities_drop": [
         "ALL"
       ],
@@ -207,7 +241,8 @@
           "s3:PutObject",
           "s3:DeleteObject",
           "s3:ListBucket",
-          "dynamodb:UpdateItem"
+          "dynamodb:UpdateItem",
+          "dynamodb:GetItem"
         ],
         "conditional_kms_actions": [
           "kms:Decrypt",

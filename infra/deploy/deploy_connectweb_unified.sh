@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════════════════
-# connect-web 統合デプロイ = 唯一の正規経路（git管理）。
-#   3機能を1イメージ・1タスク定義に「宣言的に」載せる:
-#     (1) /app Obsidian風UI（機密app.htmlはgit非搭載でCodeBuild時にS3から注入）
-#     (2) 全社ログイン CONNECT_SEARCH_ALLOWED_HD=vectorinc.co.jp（会社ドメイン開放）
-#     (3) Slack個人連携(#156) SLACK_OAUTH_REDIRECT_URI + Slack secrets 3本
-#   terraform 非経由（ECS直・ドリフト回避）。env/secrets は毎回 select除去→再付与のフルセット
-#   （base td 継承の"たまたま残る/重複する"を排除。過去の Duplicate secret 事故を根絶）。
-#   ⚠️ 旧スクリプト(redeploy_app.sh / teamagent-launch の redeploy_connectweb.sh 等)は使わない。
-# ═══════════════════════════════════════════════════════════════════════════
+# Canonical connect-web promotion path.
+#
+# build-candidate creates an exact git archive and asks CodeBuild to publish a
+# candidate.  It never updates ECS.  deploy-digest accepts only an immutable ECR
+# digest and verifies a SHA-pinned, ACCEPTED release-gate document before the
+# first AWS call.  ECR/Fargate evidence is therefore produced between the two
+# modes, not bypassed by one build-and-deploy command.
 set -euo pipefail
+
 R=ap-northeast-1
 CLUSTER=teamagent-dev
 SVC=teamagent-dev-connect-web
@@ -17,61 +15,240 @@ TD_FAMILY=teamagent-dev-connect-web
 ECR="718959508629.dkr.ecr.$R.amazonaws.com/teamagent-mcp"
 BUCKET=teamagent-dev-raw-files
 CB_PROJECT=teamagent-dev-image-builder
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # infra/deploy/ から2つ上
-SRC_HTML="${SRC_HTML:-$HOME/Documents/Claude/Artifacts/connect-web-obsidian-preview.html}"
-DST_HTML="$REPO_ROOT/src/teamagent/connect_web/static/app.html"
 HD=vectorinc.co.jp
-SLACK_REDIRECT="https://connect.newstv.co.jp/slack/oauth/callback"   # サービスhost=newstv.co.jp（loginのhd=vectorinc.co.jpとは別物・両方正しい）
+SLACK_REDIRECT="https://connect.newstv.co.jp/slack/oauth/callback"
 CID_ARN="arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_client_id-aTZTb2"
 CSEC_ARN="arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_secret-fOlJIt"
 CSTATE_ARN="arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/slack_oauth_state_secret-yGYkUF"
-TAG="connect-unified-$(date +%Y%m%d-%H%M%S)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+VERIFY_GATE="$REPO_ROOT/infra/deploy/verify_release_gate.py"
 
-command -v jq >/dev/null || { echo "jq が必要"; exit 1; }
+MODE=""
+EXPECTED_COMMIT=""
+EXPECTED_TREE=""
+EXPECTED_BRANCH=""
+IMAGE_TAG=""
+IMAGE_URI=""
+RELEASE_GATE=""
+RELEASE_GATE_SHA256=""
+TMP_ROOT=""
 
-echo "== 0) preflight: exec-role の Slack secret 読取policyを確認（無いと統合td起動がGetSecretValue AccessDeniedで自動ロールバック） =="
-aws iam get-role-policy --role-name teamagent-dev-ecs-exec-connect-web --policy-name slack-oauth-secrets >/dev/null 2>&1 \
-  || { echo "★ exec-role(teamagent-dev-ecs-exec-connect-web) に slack-oauth-secrets policy が無い。先に infra/deploy/bootstrap_slack_iam.sh を1回実行せよ"; exit 1; }
-echo "  OK（付与済）"
+usage() {
+  cat <<'EOF'
+usage:
+  deploy_connectweb_unified.sh build-candidate \
+    --expected-commit <40hex> --expected-tree <40hex> --expected-branch <branch> \
+    [--image-tag <immutable-candidate-tag>]
 
-echo "== 1) 最新の機密HTMLを S3(codebuild/) へ配置 + repo static へ（S3=真の格納先 / zip同梱=belt&suspenders） =="
-test -f "$SRC_HTML" || { echo "★生成HTMLが無い: ${SRC_HTML}（生成器 connect-web-obsidian_build.py で作れ）"; exit 1; }
-mkdir -p "$(dirname "$DST_HTML")"; cp "$SRC_HTML" "$DST_HTML"
-aws s3 cp "$DST_HTML" "s3://$BUCKET/codebuild/connect-web-app.html" --region "$R"
-echo "  $(du -h "$DST_HTML" | cut -f1) -> s3://$BUCKET/codebuild/connect-web-app.html + static/app.html"
+  deploy_connectweb_unified.sh deploy-digest \
+    --expected-commit <40hex> --expected-tree <40hex> --expected-branch <branch> \
+    --image-uri <ECR-repository@sha256:64hex> \
+    --release-gate <accepted-release-gate.json> \
+    --release-gate-sha256 <64hex>
 
-echo "== 2) source.zip -> S3（.env/secrets/pem 除外・app.html は同梱） =="
-cd "$REPO_ROOT"
-ZIP=/tmp/connectweb_$TAG.zip; rm -f "$ZIP"
-zip -rq "$ZIP" . -x '.git/*' -x '*/__pycache__/*' -x '*.pyc' -x 'infra/terraform/.terraform/*' \
-  -x 'infra/terraform/*.tfstate*' -x 'infra/terraform/*.tfplan' -x '*/node_modules/*' -x '.venv/*' -x '.pytest_cache/*' \
-  -x '.env' -x '*/.env' -x 'secrets/*' -x '*/secrets/*' -x '*.pem'
-aws s3 cp "$ZIP" "s3://$BUCKET/codebuild/source.zip" --region "$R"
+build-candidate uploads/builds only. deploy-digest performs no build and refuses
+tags or incomplete/unreviewed local, ECR scan, and Fargate evidence.
+EOF
+}
 
-echo "== 3) CodeBuild（git管理 infra/codebuild/buildspec.yml でS3からhtml注入）→ 完了待ち（torch入りで10-20分） =="
-BID=$(aws codebuild start-build --region "$R" --project-name "$CB_PROJECT" \
-  --buildspec-override infra/codebuild/buildspec.yml \
-  --environment-variables-override "name=IMAGE_TAG,value=$TAG,type=PLAINTEXT" --query 'build.id' --output text)
-echo "  build id: $BID"
-while :; do ST=$(aws codebuild batch-get-builds --region "$R" --ids "$BID" --query 'builds[0].buildStatus' --output text)
-  echo "  build: $ST"; case "$ST" in SUCCEEDED) break;; FAILED|FAULT|STOPPED|TIMED_OUT) echo "★ビルド失敗($ST)。CloudWatch /aws/codebuild/$CB_PROJECT を確認"; exit 1;; *) sleep 20;; esac; done
+cleanup() {
+  if [[ -n "$TMP_ROOT" ]]; then
+    rm -rf "$TMP_ROOT"
+  fi
+}
+trap cleanup EXIT INT TERM
 
-echo "== 4) digest取得 =="
-DIGEST=$(aws ecr describe-images --region "$R" --repository-name teamagent-mcp --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
-IMG="$ECR@$DIGEST"; echo "  $IMG"
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    build-candidate|deploy-digest) MODE=$1; shift ;;
+    -h|--help) usage; exit 0 ;;
+  esac
+fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --expected-commit) EXPECTED_COMMIT=${2:?--expected-commit requires a value}; shift 2 ;;
+    --expected-tree) EXPECTED_TREE=${2:?--expected-tree requires a value}; shift 2 ;;
+    --expected-branch) EXPECTED_BRANCH=${2:?--expected-branch requires a value}; shift 2 ;;
+    --image-tag) IMAGE_TAG=${2:?--image-tag requires a value}; shift 2 ;;
+    --image-uri) IMAGE_URI=${2:?--image-uri requires a value}; shift 2 ;;
+    --release-gate) RELEASE_GATE=${2:?--release-gate requires a value}; shift 2 ;;
+    --release-gate-sha256)
+      RELEASE_GATE_SHA256=${2:?--release-gate-sha256 requires a value}
+      shift 2
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
 
-echo "== 5) 現行td取得（ロールバックARN控え） =="
-aws ecs describe-task-definition --region "$R" --task-definition "$TD_FAMILY" --query 'taskDefinition' > /tmp/cwu_td.json
-CUR_ARN=$(jq -r '.taskDefinitionArn' /tmp/cwu_td.json); echo "  ロールバック先: $CUR_ARN"
+[[ -n "$MODE" ]] || { echo "mode is required" >&2; usage >&2; exit 1; }
+[[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "--expected-commit must be full lowercase 40-hex" >&2
+  exit 1
+}
+[[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "--expected-tree must be full lowercase 40-hex" >&2
+  exit 1
+}
+[[ "$EXPECTED_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || {
+  echo "--expected-branch is invalid" >&2
+  exit 1
+}
 
-echo "== 6) 新td生成（image + runtime contract + app/env/secrets を原子的に固定） =="
-# CONNECT_APP_HTML_S3_URI: /app ホットスワップ（publish_app_html.sh）の受け口。
-#   publish script の配置先（s3://$BUCKET/codebuild/connect-web-app.html）と同一定数。
-# USE_QUERY_PLANNER/USE_COHERE_RERANK=false: T1 No-AI 化の恒久化
-#   （runtime td 手術で反映済みの変更が bake で巻き戻らないよう宣言的に固定）。
+ACTUAL_COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD)
+ACTUAL_TREE=$(git -C "$REPO_ROOT" rev-parse "$EXPECTED_COMMIT^{tree}")
+ACTUAL_BRANCH=$(git -C "$REPO_ROOT" branch --show-current)
+[[ "$ACTUAL_COMMIT" == "$EXPECTED_COMMIT" ]] || {
+  echo "repository HEAD differs from --expected-commit" >&2
+  exit 1
+}
+[[ "$ACTUAL_TREE" == "$EXPECTED_TREE" ]] || {
+  echo "commit tree differs from --expected-tree" >&2
+  exit 1
+}
+[[ "$ACTUAL_BRANCH" == "$EXPECTED_BRANCH" ]] || {
+  echo "current branch differs from --expected-branch" >&2
+  exit 1
+}
+[[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]] || {
+  echo "repository must be clean" >&2
+  exit 1
+}
+
+if [[ "$MODE" == "build-candidate" ]]; then
+  [[ -z "$IMAGE_URI$RELEASE_GATE$RELEASE_GATE_SHA256" ]] || {
+    echo "deploy-only options are not accepted by build-candidate" >&2
+    exit 1
+  }
+  IMAGE_TAG=${IMAGE_TAG:-"runtime-${EXPECTED_COMMIT:0:12}"}
+  [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
+    echo "--image-tag is invalid" >&2
+    exit 1
+  }
+  command -v aws >/dev/null
+  command -v git >/dev/null
+  command -v sha256sum >/dev/null
+  TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/teamagent-canonical-build.XXXXXX")
+  SOURCE_ARCHIVE="$TMP_ROOT/source.zip"
+  git -C "$REPO_ROOT" archive --format=zip "$EXPECTED_COMMIT" >"$SOURCE_ARCHIVE"
+  SOURCE_ARCHIVE_SHA256=$(sha256sum "$SOURCE_ARCHIVE" | cut -d' ' -f1)
+
+  SOURCE_VERSION_ID=$(
+    aws s3api put-object \
+      --region "$R" \
+      --bucket "$BUCKET" \
+      --key codebuild/source.zip \
+      --body "$SOURCE_ARCHIVE" \
+      --query VersionId \
+      --output text
+  )
+  [[ -n "$SOURCE_VERSION_ID" && "$SOURCE_VERSION_ID" != "None" ]] || {
+    echo "versioned S3 source upload did not return VersionId" >&2
+    exit 1
+  }
+  BUILD_ID=$(
+    aws codebuild start-build \
+      --region "$R" \
+      --project-name "$CB_PROJECT" \
+      --buildspec-override infra/codebuild/buildspec.yml \
+      --source-version "$SOURCE_VERSION_ID" \
+      --environment-variables-override \
+        "name=IMAGE_TAG,value=$IMAGE_TAG,type=PLAINTEXT" \
+        "name=GIT_COMMIT,value=$EXPECTED_COMMIT,type=PLAINTEXT" \
+        "name=GIT_TREE,value=$EXPECTED_TREE,type=PLAINTEXT" \
+        "name=GIT_BRANCH,value=$EXPECTED_BRANCH,type=PLAINTEXT" \
+        "name=SOURCE_ARCHIVE_SHA256,value=$SOURCE_ARCHIVE_SHA256,type=PLAINTEXT" \
+        "name=EXPECTED_SOURCE_VERSION_ID,value=$SOURCE_VERSION_ID,type=PLAINTEXT" \
+      --query 'build.id' \
+      --output text
+  )
+  while :; do
+    STATUS=$(
+      aws codebuild batch-get-builds \
+        --region "$R" \
+        --ids "$BUILD_ID" \
+        --query 'builds[0].buildStatus' \
+        --output text
+    )
+    case "$STATUS" in
+      SUCCEEDED) break ;;
+      FAILED|FAULT|STOPPED|TIMED_OUT)
+        echo "CodeBuild failed: $STATUS ($BUILD_ID)" >&2
+        exit 1
+        ;;
+      *) sleep 20 ;;
+    esac
+  done
+  DIGEST=$(
+    aws ecr describe-images \
+      --region "$R" \
+      --repository-name teamagent-mcp \
+      --image-ids "imageTag=$IMAGE_TAG" \
+      --query 'imageDetails[0].imageDigest' \
+      --output text
+  )
+  [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    echo "CodeBuild did not publish an immutable digest" >&2
+    exit 1
+  }
+  printf 'CANDIDATE_IMAGE_URI=%s@%s\n' "$ECR" "$DIGEST"
+  printf 'GIT_COMMIT=%s\nGIT_TREE=%s\nGIT_BRANCH=%s\n' \
+    "$EXPECTED_COMMIT" "$EXPECTED_TREE" "$EXPECTED_BRANCH"
+  printf 'SOURCE_ARCHIVE_SHA256=%s\n' "$SOURCE_ARCHIVE_SHA256"
+  printf 'SOURCE_VERSION_ID=%s\n' "$SOURCE_VERSION_ID"
+  printf '%s\n' 'NO_DEPLOY: obtain accepted ECR/Fargate release evidence first.'
+  exit 0
+fi
+
+[[ -z "$IMAGE_TAG" ]] || { echo "--image-tag is forbidden for deploy-digest" >&2; exit 1; }
+[[ "$IMAGE_URI" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[a-z0-9]+([._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$ ]] || {
+  echo "--image-uri must be an immutable ECR digest URI" >&2
+  exit 1
+}
+[[ "$IMAGE_URI" == "$ECR@sha256:"* ]] || {
+  echo "--image-uri must target the canonical teamagent-mcp repository" >&2
+  exit 1
+}
+[[ -f "$RELEASE_GATE" ]] || { echo "--release-gate file is required" >&2; exit 1; }
+[[ "$RELEASE_GATE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "--release-gate-sha256 must be 64 lowercase hex" >&2
+  exit 1
+}
+command -v python3 >/dev/null
+python3 "$VERIFY_GATE" \
+  "$RELEASE_GATE" \
+  --expected-sha256 "$RELEASE_GATE_SHA256" \
+  --expected-commit "$EXPECTED_COMMIT" \
+  --expected-tree "$EXPECTED_TREE" \
+  --expected-branch "$EXPECTED_BRANCH" \
+  --expected-image-uri "$IMAGE_URI"
+
+# No AWS read or write occurs before the local SHA-pinned release gate above.
+command -v aws >/dev/null
+command -v jq >/dev/null
+aws iam get-role-policy \
+  --role-name teamagent-dev-ecs-exec-connect-web \
+  --policy-name slack-oauth-secrets \
+  >/dev/null
+
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/teamagent-canonical-deploy.XXXXXX")
+CURRENT_TD="$TMP_ROOT/current-task-definition.json"
+NEW_TD="$TMP_ROOT/new-task-definition.json"
+aws ecs describe-task-definition \
+  --region "$R" \
+  --task-definition "$TD_FAMILY" \
+  --query taskDefinition \
+  >"$CURRENT_TD"
+CURRENT_ARN=$(jq -r '.taskDefinitionArn' "$CURRENT_TD")
 APP_HTML_URI="s3://$BUCKET/codebuild/connect-web-app.html"
-jq --arg img "$IMG" --arg hd "$HD" --arg rd "$SLACK_REDIRECT" --arg apphtml "$APP_HTML_URI" \
-   --arg cid "$CID_ARN" --arg csec "$CSEC_ARN" --arg cst "$CSTATE_ARN" '
+jq \
+  --arg img "$IMAGE_URI" \
+  --arg hd "$HD" \
+  --arg rd "$SLACK_REDIRECT" \
+  --arg apphtml "$APP_HTML_URI" \
+  --arg cid "$CID_ARN" \
+  --arg csec "$CSEC_ARN" \
+  --arg cst "$CSTATE_ARN" '
   .containerDefinitions[0].image=$img
   | .containerDefinitions[0].entryPoint=[]
   | .containerDefinitions[0].command=["/app/.venv/bin/python","-m","teamagent.connect_web"]
@@ -87,7 +264,7 @@ jq --arg img "$IMG" --arg hd "$HD" --arg rd "$SLACK_REDIRECT" --arg apphtml "$AP
       "interval":30,"timeout":5,"retries":5,"startPeriod":40}
   | .volumes=([((.volumes)//[])[]|select(.name!="runtime-tmp")]+[{"name":"runtime-tmp"}])
   | .containerDefinitions[0].environment=(
-      [.containerDefinitions[0].environment[]|select(.name!="CONNECT_SEARCH_ALLOWED_HD" and .name!="SLACK_OAUTH_REDIRECT_URI"
+      [((.containerDefinitions[0].environment)//[])[]|select(.name!="CONNECT_SEARCH_ALLOWED_HD" and .name!="SLACK_OAUTH_REDIRECT_URI"
         and .name!="CONNECT_APP_HTML_S3_URI" and .name!="USE_QUERY_PLANNER" and .name!="USE_COHERE_RERANK")]
       + [{"name":"CONNECT_SEARCH_ALLOWED_HD","value":$hd},{"name":"SLACK_OAUTH_REDIRECT_URI","value":$rd},
          {"name":"CONNECT_APP_HTML_S3_URI","value":$apphtml},
@@ -96,16 +273,23 @@ jq --arg img "$IMG" --arg hd "$HD" --arg rd "$SLACK_REDIRECT" --arg apphtml "$AP
       [((.containerDefinitions[0].secrets)//[])[]|select(.name!="CONNECT_SLACK_CLIENT_ID" and .name!="CONNECT_SLACK_CLIENT_SECRET" and .name!="SLACK_OAUTH_STATE_SECRET")]
       + [{"name":"CONNECT_SLACK_CLIENT_ID","valueFrom":$cid},{"name":"CONNECT_SLACK_CLIENT_SECRET","valueFrom":$csec},{"name":"SLACK_OAUTH_STATE_SECRET","valueFrom":$cst}])
   | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy,.deregisteredAt)
-' /tmp/cwu_td.json > /tmp/cwu_new.json
-NEW_ARN=$(aws ecs register-task-definition --region "$R" --cli-input-json file:///tmp/cwu_new.json --query 'taskDefinition.taskDefinitionArn' --output text)
-echo "  新リビジョン: $NEW_ARN"
-
-echo "== 7) update-service → 安定待ち =="
-aws ecs update-service --region "$R" --cluster "$CLUSTER" --service "$SVC" --task-definition "$NEW_ARN" >/dev/null
+' "$CURRENT_TD" >"$NEW_TD"
+NEW_ARN=$(
+  aws ecs register-task-definition \
+    --region "$R" \
+    --cli-input-json "file://$NEW_TD" \
+    --query 'taskDefinition.taskDefinitionArn' \
+    --output text
+)
+aws ecs update-service \
+  --region "$R" \
+  --cluster "$CLUSTER" \
+  --service "$SVC" \
+  --task-definition "$NEW_ARN" \
+  >/dev/null
 aws ecs wait services-stable --region "$R" --cluster "$CLUSTER" --services "$SVC"
-echo ""
-echo "✅ 統合デプロイ完了。3機能同居:"
-echo "   /app（Obsidian UI・実HTML）/ /search（303）/ /slack/oauth/callback（Slack個人連携）"
-echo "   image tag: ${TAG}（ingest td 配布: bash infra/deploy/register_ingest_td.sh --image-tag ${TAG}）"
-echo "   検証: https://connect.newstv.co.jp/app を @vectorinc.co.jp でログイン（/appが\"準備中\"でなく実UIか確認）"
-echo "⏪ ロールバック: aws ecs update-service --region $R --cluster $CLUSTER --service $SVC --task-definition $CUR_ARN"
+
+printf 'DEPLOYED_IMAGE_URI=%s\n' "$IMAGE_URI"
+printf 'TASK_DEFINITION=%s\nROLLBACK_TASK_DEFINITION=%s\n' "$NEW_ARN" "$CURRENT_ARN"
+printf 'ingest promotion: %s\n' \
+  "infra/deploy/register_ingest_td.sh --image-uri $IMAGE_URI --expected-commit $EXPECTED_COMMIT --expected-tree $EXPECTED_TREE --expected-branch $EXPECTED_BRANCH --release-gate $RELEASE_GATE --release-gate-sha256 $RELEASE_GATE_SHA256"

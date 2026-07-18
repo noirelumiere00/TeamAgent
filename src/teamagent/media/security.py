@@ -10,12 +10,9 @@ from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request
 
-ALLOWED_ACQUIRE_HOST_SUFFIXES = (
-    "youtube.com",
-    "youtu.be",
-    "tiktok.com",
-    "instagram.com",
-)
+from teamagent.media.url_policy import ACQUIRE_HOST_SUFFIXES, acquire_host_allowed
+
+ALLOWED_ACQUIRE_HOST_SUFFIXES = ACQUIRE_HOST_SUFFIXES
 ALLOWED_YTDLP_EXTRACTORS = (
     "youtube",
     "youtube:tab",
@@ -62,9 +59,7 @@ def _is_public_address(raw: str) -> bool:
 
 
 def _allowed_host(host: str) -> bool:
-    return any(
-        host == suffix or host.endswith(f".{suffix}") for suffix in ALLOWED_ACQUIRE_HOST_SUFFIXES
-    )
+    return acquire_host_allowed(host)
 
 
 def validate_public_https_url(url: str, *, resolver: Resolver = socket.getaddrinfo) -> str:

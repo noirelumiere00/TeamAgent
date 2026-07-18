@@ -113,27 +113,24 @@ resource "aws_codebuild_project" "image" {
       name  = "GIT_BRANCH"
       value = "unknown"
     }
+    environment_variable {
+      name  = "GIT_TREE"
+      value = "unknown"
+    }
+    environment_variable {
+      name  = "SOURCE_ARCHIVE_SHA256"
+      value = "unknown"
+    }
+    environment_variable {
+      name  = "EXPECTED_SOURCE_VERSION_ID"
+      value = "unknown"
+    }
   }
 
   source {
     type      = "S3"
     location  = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"
-    buildspec = <<-EOT
-      version: 0.2
-      phases:
-        pre_build:
-          commands:
-            - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
-        build:
-          commands:
-            - echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m)"
-            - docker build -f infra/docker/Dockerfile.teamagent-mcp --build-arg WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS --build-arg GIT_COMMIT="$GIT_COMMIT" --build-arg GIT_BRANCH="$GIT_BRANCH" -t $MCP_REPO:$IMAGE_TAG .
-        post_build:
-          commands:
-            - docker push $MCP_REPO:$IMAGE_TAG
-            - aws ecr describe-images --repository-name ${var.project_name}-mcp --image-ids imageTag=$IMAGE_TAG --query 'imageDetails[0].imageDigest' --output text | tee /tmp/digest.txt
-            - echo "MCP_DIGEST=$(cat /tmp/digest.txt)"
-    EOT
+    buildspec = "infra/codebuild/buildspec.yml"
   }
 
   logs_config {

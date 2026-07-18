@@ -10,9 +10,16 @@ variable "openclaw_image" {
 }
 
 variable "mcp_image" {
-  description = "TeamAgent-MCP バックエンドイメージ（ECR・digest pin推奨）"
+  description = "TeamAgent-MCP バックエンドイメージ（immutable ECR digest URIのみ）"
   type        = string
   default     = ""
+  validation {
+    condition = var.mcp_image == "" || can(regex(
+      "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9]+([._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$",
+      var.mcp_image,
+    ))
+    error_message = "mcp_image must be empty or an immutable ECR image digest URI."
+  }
 }
 
 variable "fargate_mcp_cpu" {

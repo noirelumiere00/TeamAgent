@@ -52,7 +52,12 @@ def _request() -> MediaJobRequest:
 
 class _LifecycleClient(MediaJobClient):
     def __init__(self, result: MediaJobResult) -> None:
-        super().__init__(queue_url="queue", table="jobs", bucket=_BUCKET)
+        super().__init__(
+            queue_url="queue",
+            table="jobs",
+            bucket=_BUCKET,
+            clock=lambda: 101.0,
+        )
         self.result = result
         self.submitted = 0
         self.consumers = 0
@@ -68,8 +73,9 @@ class _LifecycleClient(MediaJobClient):
         *,
         timeout_s: int = 180,
         poll_interval_s: float = 1.0,
+        deadline_epoch_s: int | None = None,
     ) -> MediaJobResult:
-        del job_id, timeout_s, poll_interval_s
+        del job_id, timeout_s, poll_interval_s, deadline_epoch_s
         return self.result
 
     def download(self, ref: S3ObjectRef) -> bytes:
@@ -128,6 +134,7 @@ class _SubmitDynamo:
             "job_id": {"S": request.job_id},
             "idempotency_key": {"S": request.idempotency_key},
             "payload_sha256": {"S": request.payload_sha256},
+            "request_json": {"S": request.to_json_bytes().decode()},
             "status": {"S": "queued"},
             "submit_owner": {"S": "other-caller"},
             "submit_lease_expires_at": {"N": "130"},
@@ -163,6 +170,7 @@ class _SubmitClient(MediaJobClient):
             bucket=_BUCKET,
             sleeper=sleeper,
             monotonic=monotonic,
+            clock=lambda: 101.0,
         )
         self.queue = queue
         self.ddb = ddb
@@ -191,6 +199,77 @@ def test_concurrent_identical_submit_waits_for_owner_confirmation_without_duplic
     assert client.submit(request) == request.job_id
     assert ddb.claim_calls == 2
     assert queue.messages == []
+
+
+class _RecoverableDynamo:
+    def __init__(self, request: MediaJobRequest) -> None:
+        self.item: dict[str, Any] = {
+            "job_id": {"S": request.job_id},
+            "idempotency_key": {"S": request.idempotency_key},
+            "payload_sha256": {"S": request.payload_sha256},
+            "request_json": {"S": request.to_json_bytes().decode()},
+            "status": {"S": "queued"},
+        }
+        self.claimed = False
+
+    def put_item(self, **_kwargs: Any) -> None:
+        raise _ConditionalFailureError
+
+    def get_item(self, **_kwargs: Any) -> dict[str, Any]:
+        return {"Item": self.item}
+
+    def update_item(self, **kwargs: Any) -> None:
+        expression = kwargs["UpdateExpression"]
+        if expression.startswith("SET submit_owner"):
+            self.claimed = True
+            return
+        if expression.startswith("SET message_sent_at"):
+            assert self.claimed
+            self.item["message_sent_at"] = {"N": "161"}
+            return
+        raise AssertionError(f"unexpected update: {expression}")
+
+
+def test_delayed_semantic_retry_enqueues_original_timestamp_envelope() -> None:
+    operation = AcquireOperation(
+        kind="acquire",
+        url="https://www.youtube.com/watch?v=BaW_jenozKc",
+    )
+    original = make_job_request(
+        operation=operation,
+        output_bucket=_BUCKET,
+        request_fingerprint="delayed-retry",
+        now_epoch_s=100,
+        timeout_s=300,
+    )
+    delayed = make_job_request(
+        operation=operation,
+        output_bucket=_BUCKET,
+        request_fingerprint="delayed-retry",
+        now_epoch_s=160,
+        timeout_s=300,
+    )
+    assert original.idempotency_key == delayed.idempotency_key
+    assert original.payload_sha256 != delayed.payload_sha256
+
+    queue = _Queue()
+    ddb = _RecoverableDynamo(original)
+    client = MediaJobClient(
+        queue_url="https://sqs.example.invalid/media.fifo",
+        table="jobs",
+        bucket=_BUCKET,
+        sleeper=lambda _seconds: None,
+        monotonic=lambda: 0.0,
+        clock=lambda: 161.0,
+    )
+    client._clients = lambda: (queue, ddb, object())  # type: ignore[method-assign]
+
+    assert client.submit(delayed) == original.job_id
+    assert len(queue.messages) == 1
+    sent = queue.messages[0]
+    assert sent["MessageBody"] == original.to_json_bytes().decode()
+    assert sent["MessageDeduplicationId"] == original.idempotency_key
+    assert sent["MessageAttributes"]["payload_sha256"]["StringValue"] == (original.payload_sha256)
 
 
 class _GuardClient(MediaJobClient):
