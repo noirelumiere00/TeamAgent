@@ -1,7 +1,8 @@
 # OpenClaw 前面 P1 パイロット — デプロイ Runbook（§I / M2-M5）
 
 OpenClaw 外殻 ＋ TeamAgent-MCP 境界（会社共有モデル §G）を **ECS Fargate** に出し、専用Slackチャネル・
-少数(2-3名)・**読取のみ**で実稼働させるまでの本人手順。`terraform apply` は **plain 禁止＝targeted/plan確認**。
+少数(2-3名)・**読取のみ**で実稼働させるまでの本人手順。production image は
+**署名済み release digest＋one-time full saved plan** 以外では変更しない。
 全コードは authoring 済（dev/PR#118）。本書は **apply＝本人操作**の手順だけを示す。
 
 > 関連: プラン `~/.claude/plans/mossy-snacking-locket.md` §A/§C/§D/§G/§H/§I。IaC=`infra/terraform/{fargate,ecr,vpc_endpoints,cloudwatch_fargate,outputs_fargate}.tf`、
@@ -27,44 +28,45 @@ aws secretsmanager create-secret --region $R --name teamagent/dev/openclaw/gatew
 - `teamagent/dev/mcp/bearer` と `gateway-token` は新規ランダム。`database-url` は既存 RDS（password は `teamagent/dev/*` の DB secret 参照可）。
 - ⚠️ `fargate.tf` は **secret 実在を前提**（`data.aws_secretsmanager_secret`）＝この手順を terraform plan より先に。
 
-## 2. イメージ build & ECR push（2つ）
+## 2. イメージ build・検証・release authorization（2つ）
 ```sh
-# ECR repo だけ先に作る（targeted）
-cd infra/terraform && terraform plan -target=aws_ecr_repository.mcp -target=aws_ecr_repository.openclaw
-terraform apply -target=aws_ecr_repository.mcp -target=aws_ecr_repository.openclaw   # 本人確認のうえ
-MCP_URL=$(terraform output -raw ecr_mcp_url); OC_URL=$(terraform output -raw ecr_openclaw_url); cd ../..
-aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin "${MCP_URL%/*}"
+# clean な remote dev HEAD から quarantine build→actual-image gate→candidate receipt
+bash infra/deploy/build_teamagent_image.sh
+bash infra/deploy/build_openclaw_image.sh
 
-# arm64 でビルド（Fargate=ARM）。BuildKit 前提。
-docker buildx build --platform linux/arm64 -f infra/docker/Dockerfile.teamagent-mcp -t "$MCP_URL:p1" --push .
-docker buildx build --platform linux/arm64 -f infra/docker/Dockerfile.openclaw       -t "$OC_URL:p1"  --push .
-# digest を控える（IMMUTABLE pin 推奨）
-MCP_DIGEST=$(aws ecr describe-images --repository-name teamagent-mcp     --image-ids imageTag=p1 --query 'imageDetails[0].imageDigest' --output text)
-OC_DIGEST=$(aws ecr describe-images  --repository-name teamagent-openclaw --image-ids imageTag=p1 --query 'imageDetails[0].imageDigest' --output text)
+# 各 launcher が返した candidate receipt の exact key/VersionId を使い、
+# pipeline=mcp と pipeline=openclaw をそれぞれ active（rollback 時は rollback）承認
+bash infra/deploy/authorize_image_release.sh --help
 ```
 
-## 3. Terraform apply（targeted・順序厳守）
+ECR/provenance 基盤をまだ導入していない場合だけ、
+`infra/terraform/README.md` の one-time provenance bootstrap を先に完了する。
+ローカル `docker build/push`、mutable tag、candidate/quarantine digest はデプロイ証拠にならない。
+
+## 3. Terraform apply（one-time full saved plan）
 `infra/terraform/terraform.tfvars`（git管理外）に:
 ```hcl
-mcp_image              = "<MCP_URL>@<MCP_DIGEST>"
-openclaw_image         = "<OC_URL>@<OC_DIGEST>"
+mcp_image              = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:<MCP_RELEASE_DIGEST>"
+openclaw_image         = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:<OPENCLAW_RELEASE_DIGEST>"
+image_release_evidence = {
+  mcp      = { # authorize_image_release.sh が返した exact key/VersionIds }
+  openclaw = { # authorize_image_release.sh が返した exact key/VersionIds }
+}
 shared_company_domains = "vectorinc.co.jp"        # §G 会社共有ドメイン
 openclaw_model_id      = "jp.anthropic.claude-haiku-4-5"   # 手順0で確定した値
 enable_vpc_endpoints   = true
 alarm_email_endpoints  = ["you@vectorinc.co.jp"]
 ```
-段階 apply（plan を毎回確認）:
+`image_deployment_intent_id` は設定しない。worktree 外の saved plan を作成・レビューし、
+その同じ plan を一度だけ apply:
 ```sh
-cd infra/terraform
-terraform plan   # 全差分レビュー（特に IAM Deny / SG / secrets data source 解決）
-# 役割→ネットワーク→クラスタ/ログ→Cloud Map→task def→service の順
-terraform apply -target=aws_iam_role.ecs_execution -target=aws_iam_role.mcp_task -target=aws_iam_role.openclaw_task
-terraform apply -target=aws_security_group.openclaw -target=aws_security_group.mcp -target=aws_security_group_rule.db_from_mcp
-terraform apply -target=aws_ecs_cluster.main -target=aws_cloudwatch_log_group.mcp -target=aws_cloudwatch_log_group.openclaw -target=aws_service_discovery_service.mcp
-terraform apply -target=aws_ecs_service.mcp           # MCP 先（OpenClaw が依存）
-terraform apply -target=aws_ecs_service.openclaw
-terraform apply -target=aws_cloudwatch_dashboard.fargate   # 観測（任意で alarms も）
+bash infra/terraform/plan_image_release.sh /secure/local/path/openclaw-release.tfplan
+terraform show /secure/local/path/openclaw-release.tfplan
+bash infra/terraform/apply_image_release_plan.sh /secure/local/path/openclaw-release.tfplan
 ```
+- plan は全差分をレビュー（特に IAM Deny / SG / secrets data source 解決）。
+- `-target`、direct ECS task-definition registration、失敗後の同 plan 再実行は禁止。
+- apply 失敗時は状態を reconcile し、fresh receipt＋new intent＋new plan で roll-forward/rollback。
 - 検証: **OpenClaw タスクロールで `secretsmanager:GetSecretValue` が拒否**されることを IAM Policy Simulator で確認。
 
 ## 4. 新 Slack アプリ（OpenClaw 専用・Socket Mode）
@@ -125,12 +127,15 @@ P1 の4ナレッジツールに加え、**TikTok検索・動画分析・VSEOア�
 R=ap-northeast-1
 # (a) Gemini 認証 secret（variables_fargate.tf:gemini_secret_name と一致。Vertex 利用なら task role + GOOGLE_CLOUD_PROJECT）
 aws secretsmanager create-secret --region $R --name teamagent/dev/gemini-api-key --secret-string "AI..."
-# (b) node/chromium/ffmpeg 入りの“拡張版”イメージを再ビルド/push
-docker buildx build --platform linux/arm64 --build-arg WITH_SCRAPE_TOOLS=true \
-  -f infra/docker/Dockerfile.teamagent-mcp -t "$MCP_URL:p1-scrape" --push .
-# (c) terraform.tfvars に enable_scrape_tools=true（＋必要なら mcp_image を新digestへ）→ targeted apply
-#     これで Gemini secret 注入 / S3(vseo-reports/*)最小権限 / VSEO_REPORT_BUCKET / USE_VIDEO_TOOLS=1 / USE_TIKTOK_TOOLS=1 が連動
-terraform apply -target=aws_iam_role_policy.mcp_task -target=aws_ecs_task_definition.mcp -target=aws_ecs_service.mcp
+# (b) WITH_SCRAPE_TOOLS は production contract の固定入力。guarded MCP launcher で
+#     quarantine build→attest→candidate→active receipt を作る
+bash infra/deploy/build_teamagent_image.sh
+bash infra/deploy/authorize_image_release.sh --help
+# (c) terraform.tfvars に enable_scrape_tools=true、新 release @sha256、exact receipt
+#     VersionIds を設定し、§3 と同じ new full saved-plan flow を一度だけ実行
+bash infra/terraform/plan_image_release.sh /secure/local/path/mcp-scrape-release.tfplan
+terraform show /secure/local/path/mcp-scrape-release.tfplan
+bash infra/terraform/apply_image_release_plan.sh /secure/local/path/mcp-scrape-release.tfplan
 # (d) 任意: 許可ドメインを絞る（未設定なら url_guard の保守的既定 youtube/youtu.be/tiktok/instagram）
 #     task env SCRAPE_ALLOWED_DOMAINS="youtube.com,youtu.be,tiktok.com,instagram.com"
 ```

@@ -3,7 +3,8 @@
 TeamAgent を OpenClaw＋Claude(Bedrock) の自律型エージェントへ移行するための、
 **自律外殻(OpenClaw)を安全に隔離して動かす**ためのテンプレ一式。すべて雛形であり、
 実デプロイ（EC2 配置・IAM 適用・トンネル）はゲート①（Node 本番持込）承認＋本人操作で別途行う。
-`terraform apply` は使わず targeted/手動。
+ECS production image は `infra/terraform/README.md` の署名済み release digest＋
+one-time full saved-plan flow だけを使う。targeted apply や direct task-definition 登録は禁止。
 
 > 関連プラン: `~/.claude/plans/mossy-snacking-locket.md`（§A 一次ソース確認結果・§C 本雛形）。
 

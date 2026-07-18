@@ -426,7 +426,10 @@ resource "aws_ecs_task_definition" "mcp" {
   task_role_arn      = aws_iam_role.mcp_task.arn
   skip_destroy       = true
 
-  depends_on = [terraform_data.runtime_guard]
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.production_image_release_gate,
+  ]
 
   volume {
     name = "tmp"
@@ -663,7 +666,8 @@ resource "aws_ecs_task_definition" "mcp" {
 
 resource "aws_ecs_task_definition" "openclaw" {
   # legacy image-only CLIは退役済み。OpenClawも他runtimeと同じexact migration、
-  # image/EFS実task preflight、保存plan検証を通した場合だけ登録する。
+  # image/EFS実task preflight、one-time production release gate、保存plan検証を
+  # すべて通した場合だけ登録する。direct CLI task-definition登録は退役済み。
   count                    = var.openclaw_image == "" ? 0 : 1
   family                   = "${var.project_name}-${var.environment}-openclaw"
   requires_compatibilities = ["FARGATE"]
@@ -682,6 +686,7 @@ resource "aws_ecs_task_definition" "openclaw" {
     aws_efs_mount_target.openclaw_state,
     aws_iam_role_policy.openclaw_efs,
     terraform_data.runtime_guard,
+    terraform_data.production_image_release_gate,
   ]
 
   volume {

@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+BUILDSPEC = ROOT / "infra" / "codebuild" / "buildspec.yml"
+TERRAFORM = ROOT / "infra" / "terraform" / "codebuild.tf"
+PROVENANCE_PATH = ROOT / "infra" / "codebuild" / "source_provenance.py"
+ACTIVE_CONTRACT = ROOT / "infra" / "codebuild" / "teamagent_runtime_contract.json"
+RELEASE_CONTRACT = ROOT / "infra" / "codebuild" / "teamagent_core_media_release_contract.json"
+
+
+def _load_provenance() -> object:
+    spec = importlib.util.spec_from_file_location("buildspec_contract_provenance", PROVENANCE_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+PROVENANCE = _load_provenance()
+
+
+def test_source_and_core_media_contract_gates_run_before_both_final_builds() -> None:
+    body = BUILDSPEC.read_text(encoding="utf-8")
+
+    hash_position = body.index("__SOURCE_PROVENANCE_SHA256__")
+    ready_position = body.index('"$BUNDLE_PROVENANCE" assert-release-ready')
+    verify_declaration_position = body.index("release_evidence.py verify-source-declaration")
+    verify_source_position = body.index("source_provenance.py verify-source")
+    interface_position = body.index('"$BUNDLE_PROVENANCE" verify-source-interface')
+    first_build_position = body.index("docker buildx build")
+    second_build_position = body.index(
+        "docker buildx build",
+        first_build_position + 1,
+    )
+    assert (
+        hash_position
+        < ready_position
+        < verify_declaration_position
+        < verify_source_position
+        < interface_position
+        < first_build_position
+        < second_build_position
+    )
+    for required in (
+        '--expected-commit "$GIT_COMMIT"',
+        '--expected-branch "$GIT_BRANCH"',
+        "--expected-with-scrape-tools true",
+        '--expected-app-html-version-id "$APP_HTML_VERSION_ID"',
+        '--expected-app-html-sha256 "$APP_HTML_SHA256"',
+        '--expected-runtime-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256"',
+        ".teamagent-source-manifest.json",
+    ):
+        assert required in body
+
+
+def test_core_and_media_builds_pass_every_required_provenance_binding() -> None:
+    body = BUILDSPEC.read_text(encoding="utf-8")
+    contract = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
+
+    assert body.count("docker buildx build") == 2
+    assert "--file infra/docker/Dockerfile.teamagent-mcp" in body
+    assert "--file infra/docker/Dockerfile.teamagent-media-worker" in body
+    assert body.count("--target final") == 2
+    assert body.count("--platform linux/arm64") == 2
+    assert body.count("--provenance=mode=max") == 2
+    assert body.count("--sbom=true") == 2
+    assert body.count("--push") == 2
+    for subject in contract["subjects"]:
+        for argument in subject["required_build_args"]:
+            assert f'--build-arg "{argument}=' in body
+    assert '--tag "$CORE_QUARANTINE_REPOSITORY:$CORE_TAG"' in body
+    assert '--tag "$MEDIA_QUARANTINE_REPOSITORY:$MEDIA_TAG"' in body
+
+
+def test_active_debian_candidate_is_explicitly_blocked_without_mutable_placeholders() -> None:
+    contract = json.loads(ACTIVE_CONTRACT.read_text(encoding="utf-8"))
+
+    assert contract["release"]["ready"] is False
+    assert "CRITICAL=4/HIGH=49" in contract["release"]["blocked_reason"]
+    assert "Boyle" in contract["release"]["blocked_reason"]
+    serialized = json.dumps(contract)
+    assert "latest-dev" not in serialized
+    assert "playwright" not in serialized.lower()
+    assert "archive_sha256" not in serialized
+    with pytest.raises(PROVENANCE.ProvenanceError, match="release is blocked"):
+        PROVENANCE.require_release_ready(PROVENANCE.load_runtime_contract(ACTIVE_CONTRACT))
+
+
+def test_provenance_inputs_have_no_unknown_or_implicit_defaults() -> None:
+    body = BUILDSPEC.read_text(encoding="utf-8")
+
+    for name in (
+        "GIT_COMMIT",
+        "GIT_BRANCH",
+        "APP_HTML_VERSION_ID",
+        "APP_HTML_SHA256",
+        "VAULT_MANIFEST_SHA256",
+        "BUILD_INPUTS_SHA256",
+        "BAKED_APP_HTML_VERSION_ID",
+        "BAKED_APP_HTML_SHA256",
+        "APP_PROVENANCE_SHA256",
+        "SOURCE_MANIFEST_CONTRACT_SHA256",
+        "RELEASE_CONTRACT_SHA256",
+    ):
+        assert f"${{{name}:?{name} must be explicitly provided}}" in body
+        assert f"${{{name}:-" not in body
+    assert "unknown" not in body.lower()
+
+
+def test_app_html_uses_only_pinned_version_and_verified_bytes() -> None:
+    body = BUILDSPEC.read_text(encoding="utf-8")
+
+    assert "--bucket teamagent-dev-raw-files" in body
+    assert "--key codebuild/connect-web-app.html" in body
+    assert '--version-id "$APP_HTML_VERSION_ID"' in body
+    assert '--version-id "$BAKED_APP_HTML_VERSION_ID"' in body
+    assert '--expected-bucket-owner "$EXPECTED_ACCOUNT_ID"' in body
+    assert (
+        "[ \"$(sha256sum /tmp/production-connect-web-app.html | awk '{print $1}')\" "
+        '= "$APP_HTML_SHA256" ]'
+    ) in body
+    assert (
+        '[ "$(sha256sum src/teamagent/connect_web/static/app.html | awk '
+        '\'{print $1}\')" = "$BAKED_APP_HTML_SHA256" ]'
+    ) in body
+    assert (
+        "install -m 0644 /tmp/baked-connect-web-app.html "
+        "\\\n          src/teamagent/connect_web/static/app.html"
+    ) in body
+    assert '[ "$APP_HTML_SHA256" != "$BAKED_APP_HTML_SHA256" ]' in body
+    assert '--build-arg "APP_HTML_SHA256=$APP_HTML_SHA256"' in body
+    assert '--build-arg "APP_HTML_VERSION_ID=$APP_HTML_VERSION_ID"' in body
+    assert '--build-arg "APP_HTML_MANIFEST_SHA256=$VAULT_MANIFEST_SHA256"' in body
+    assert '--build-arg "APP_HTML_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256"' in body
+    assert '--build-arg "APP_PROVENANCE_SHA256=$APP_PROVENANCE_SHA256"' in body
+    assert '--build-arg "BAKED_APP_HTML_VERSION_ID=$BAKED_APP_HTML_VERSION_ID"' in body
+    assert "aws s3 cp" not in body
+    assert "aws s3api put-object" not in body
+
+
+def test_both_builds_stop_at_quarantine_and_source_free_projects_own_promotion() -> None:
+    body = BUILDSPEC.read_text(encoding="utf-8")
+    attestor = (ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml").read_text()
+    promoter = (ROOT / "infra" / "codebuild" / "image-promoter-buildspec.yml").read_text()
+
+    first_guard = body.index("CODEBUILD_BUILD_SUCCEEDING")
+    core_push = body.index('--tag "$CORE_QUARANTINE_REPOSITORY:$CORE_TAG"')
+    media_push = body.index('--tag "$MEDIA_QUARANTINE_REPOSITORY:$MEDIA_TAG"')
+    resolve = body.index("resolve_ecr_image.py resolve-platform")
+    provenance = body.index("teamagent_bundle_provenance.py verify-oci-config")
+    wait = body.index("aws ecr wait image-scan-complete")
+    scan = body.index("python3 infra/codebuild/verify_ecr_scan.py")
+    second_guard = body.index("CODEBUILD_BUILD_SUCCEEDING", first_guard + 1)
+    assert core_push < media_push < first_guard < resolve < provenance < wait < scan < second_guard
+    assert "--deny-all" in body
+    assert '--expected-config-digest "$config_digest"' in body
+    assert "ecr_scan_exceptions.json" not in body
+    assert "BatchDeleteImage" not in body
+    assert "teamagent-mcp-verified-candidates" not in body
+    assert "teamagent-media-worker-verified-candidates" not in body
+    assert "verify_actual_image.sh" in attestor
+    assert 'PROMOTION_CHANNEL" = "verified-candidate"' in promoter
+    assert 'SOURCE_REPOSITORY="$QUARANTINE_REPOSITORY"' in promoter
+    assert 'DESTINATION_REPOSITORY="$CANDIDATE_REPOSITORY"' in promoter
+    assert 'SOURCE_REPOSITORY="$CANDIDATE_REPOSITORY"' in promoter
+    assert 'DESTINATION_REPOSITORY="$RELEASE_REPOSITORY"' in promoter
+    assert "oras cp --recursive" in promoter
+
+
+def test_registry_and_s3_destinations_ignore_hostile_overrides() -> None:
+    body = BUILDSPEC.read_text(encoding="utf-8")
+
+    assert body.count("export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true") == 1
+    assert body.count('EXPECTED_ACCOUNT_ID="718959508629"') == 1
+    assert body.count('EXPECTED_REGION="ap-northeast-1"') == 1
+    assert 'CORE_QUARANTINE_REPOSITORY="$ECR_REGISTRY/teamagent-mcp-quarantine"' in body
+    assert 'MEDIA_QUARANTINE_REPOSITORY="$ECR_REGISTRY/teamagent-media-worker-quarantine"' in body
+    assert "unset ECR_REGISTRY CORE_QUARANTINE_REPOSITORY" in body
+    assert body.count("unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY") == 1
+    assert 'TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"' in body
+    assert body.count('--registry-id "$EXPECTED_ACCOUNT_ID"') >= 5
+    assert '$ECR_REGISTRY/teamagent-mcp"' not in body
+    assert "attacker" not in body
+
+
+def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app() -> None:
+    body = (ROOT / "infra" / "codebuild" / "mcp-source-publisher-buildspec.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "git fetch --no-tags --force origin refs/heads/dev:refs/remotes/origin/dev" in body
+    assert 'refs/remotes/origin/dev^{commit})" = "$EXPECTED_COMMIT"' in body
+    assert "get-bucket-versioning" in body
+    assert "--expected-bucket-owner 718959508629" in body
+    assert 'git -C "$CODEBUILD_SRC_DIR" archive' in body
+    assert (
+        'SOURCE_DECLARATION_KEY="source-declarations/mcp/$EXPECTED_COMMIT/$SOURCE_SHA256/$PUBLISHED_SOURCE_VERSION_ID.json"'
+        in body
+    )
+    assert "--object-lock-mode COMPLIANCE" in body
+    assert "aws kms sign" in body
+    assert "teamagent_bundle_provenance.py production-record" in body
+    assert '--version-id "$APP_HTML_VERSION_ID"' in body
+    assert '--version-id "$BAKED_APP_HTML_VERSION_ID"' in body
+    assert '--baked-fallback "$BAKED_APP_HTML"' in body
+    assert '"src/teamagent/connect_web/static/app.html"' not in body
+    assert "archive, manifest = sys.argv[1:]" in body
+    assert '".teamagent-source-manifest.json": manifest' in body
+    assert "aws s3 cp" not in body
+    assert "aws s3api copy-object" not in body
+    for get_object in body.split("aws s3api get-object")[1:]:
+        assert "--version-id" in get_object.split(")", maxsplit=1)[0]
+
+    contract = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
+    assert contract["app_html"]["production"] == {
+        "app_html_s3_version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
+        "app_html_sha256": ("03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"),
+        "vault_manifest_sha256": (
+            "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
+        ),
+        "build_inputs_sha256": ("6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"),
+    }
+
+
+def test_terraform_embeds_all_verifier_and_contract_hashes() -> None:
+    body = TERRAFORM.read_text(encoding="utf-8")
+
+    for path, placeholder in (
+        ("source_provenance.py", "__SOURCE_PROVENANCE_SHA256__"),
+        (
+            "teamagent_bundle_provenance.py",
+            "__TEAMAGENT_BUNDLE_PROVENANCE_SHA256__",
+        ),
+        ("resolve_ecr_image.py", "__ECR_IMAGE_RESOLVER_SHA256__"),
+        ("verify_ecr_scan.py", "__ECR_SCAN_GATE_SHA256__"),
+    ):
+        assert path in body
+        assert placeholder in body
+    assert "mcp_release_contract_sha256" in body
+    assert "teamagent_runtime_contract.json" in body
+    assert "teamagent_core_media_release_contract.json" in body

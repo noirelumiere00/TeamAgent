@@ -1,8 +1,22 @@
 #!/usr/bin/env bash
-# RETIRED: imageだけを差し替えるとUID/readonly/EFS/health/deployment/IAMの
-# 一体契約を迂回するため、OpenClawの直接ECS更新経路は恒久的に拒否する。
+# Retired: direct task-definition registration bypassed runtime and release evidence.
 set -euo pipefail
 
-echo "ERROR: apply_openclaw.sh は退役しました。" >&2
-echo "OpenClaw更新は terraform_runtime_guard.sh のexact migration/preflightを使用してください。" >&2
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  cat <<'EOF'
+usage: apply_openclaw.sh
+
+This legacy deployer is permanently disabled. Use the single guarded saved-plan
+workflow documented in infra/terraform/README.md.
+EOF
+  exit 0
+fi
+
+cat >&2 <<'EOF'
+FATAL: apply_openclaw.sh is permanently disabled.
+
+OpenClaw image changes require exact runtime migration/preflight evidence,
+fresh signed release evidence, a unique full saved plan, one-use intent, and
+application under the shared lock. Follow infra/terraform/README.md.
+EOF
 exit 64

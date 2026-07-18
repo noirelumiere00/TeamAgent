@@ -189,7 +189,10 @@ resource "aws_ecs_task_definition" "canary" {
   task_role_arn            = aws_iam_role.canary_task[0].arn
   skip_destroy             = true
 
-  depends_on = [terraform_data.runtime_guard]
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.production_image_release_gate,
+  ]
 
   volume {
     name = "tmp"
