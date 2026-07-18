@@ -1146,7 +1146,7 @@ jq -n \
       controlUiServedAssetCount:
         $runtimeInventory[0].runtime.pruneReport.browser.controlUiServedAssetCount,
       actualImageContractPassed:
-        ([ $actualImage[0].checks[] | select(. != true) ] | length) == 0,
+        (([ $actualImage[0].checks[] | select(. != true) ] | length) == 0),
       privilegedPathInventory:true,
       localDockerReadOnlySmoke:true,
       localDockerCapDropAllSmoke:true,
