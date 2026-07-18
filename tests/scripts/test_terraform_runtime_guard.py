@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -2043,6 +2044,58 @@ def test_workspace_state_list_and_import_ownership_collisions_fail_closed(
     assert result.returncode == 1
     assert "state lineage/serial/address/import ownership" in (result.stdout + result.stderr)
     assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+
+def test_state_address_reconstruction_accepts_module_and_string_index(
+    tmp_path: Path,
+) -> None:
+    env, var_file, _ = _harness(tmp_path)
+    state = tmp_path / "module-state.json"
+    address = 'module.example.aws_s3_bucket.logs["blue"]'
+    state.write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "terraform_version": "1.12.2",
+                "serial": 43,
+                "lineage": "01234567-89ab-cdef-0123-456789abcdef",
+                "outputs": {},
+                "resources": [
+                    {
+                        "module": "module.example",
+                        "mode": "managed",
+                        "type": "aws_s3_bucket",
+                        "name": "logs",
+                        "provider": ('provider["registry.terraform.io/hashicorp/aws"]'),
+                        "instances": [
+                            {
+                                "index_key": "blue",
+                                "schema_version": 0,
+                                "attributes": {
+                                    "id": "teamagent-test-module-logs",
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state.chmod(0o600)
+    env["TF_FAKE_STATE"] = str(state)
+
+    plan = tmp_path / "module-state.tfplan"
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads(Path(f"{plan}.runtime-guard.json").read_text(encoding="utf-8"))
+    state_contract = receipt["state_contract"]["state"]
+    assert state_contract["serial"] == 43
+    assert state_contract["address_count"] == 1
+    assert (
+        state_contract["address_set_sha256"] == hashlib.sha256(f"{address}\n".encode()).hexdigest()
+    )
 
 
 def test_ad_hoc_rollout_is_rejected_and_migration_requires_preflight(

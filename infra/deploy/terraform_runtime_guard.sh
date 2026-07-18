@@ -348,11 +348,11 @@ capture_state_contract() {
     die "terraform state listに重複addressがあります"
   jq -r '
     .resources[] |
-    (.module // "") as $module |
+    (.module // "") as $module_path |
     . as $resource |
     ($resource.instances // [])[] |
     (
-      (if $module == "" then "" else ($module + ".") end) +
+      (if $module_path == "" then "" else ($module_path + ".") end) +
       $resource.type + "." + $resource.name +
       (
         if has("index_key") then
