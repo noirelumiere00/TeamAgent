@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,14 @@ import psycopg
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = PROJECT_ROOT / "infra" / "migrations"
+_TRANSACTION_CONTROL_RE = re.compile(
+    r"(?im)^\s*(?:"
+    r"BEGIN(?:\s+(?:WORK|TRANSACTION))?|"
+    r"START\s+TRANSACTION|"
+    r"COMMIT(?:\s+WORK)?|"
+    r"ROLLBACK(?:\s+WORK)?"
+    r")\s*;"
+)
 
 
 SCHEMA_MIGRATIONS_DDL = """
@@ -78,8 +87,14 @@ def _apply_one(
     *,
     rerun: bool = False,
 ) -> None:
-    """1 つの migration を適用。失敗時は呼び出し側が rollback する。"""
+    """1 つの migration をrunner所有transactionで適用する。"""
     sql = path.read_text(encoding="utf-8")
+    if conn.autocommit:
+        raise RuntimeError("migration connection must use autocommit=False")
+    if _TRANSACTION_CONTROL_RE.search(sql):
+        raise RuntimeError(
+            f"{path.name} contains transaction control; scripts/migrate.py owns the transaction"
+        )
     checksum = _sha256(sql)
     with conn.cursor() as cur:
         if rerun:
@@ -117,9 +132,13 @@ def run(
         # bootstrapping: schema_migrations テーブル自体を idempotent に作成
         with conn.cursor() as cur:
             cur.execute(SCHEMA_MIGRATIONS_DDL)
-        conn.commit()
 
         applied = _applied_versions(conn)
+        if dry_run:
+            # Dry-run may bootstrap schema_migrations for inspection, but must leave no DB writes.
+            conn.rollback()
+        else:
+            conn.commit()
 
         for version, path in migrations:
             if version == rerun_version:
@@ -141,13 +160,13 @@ def run(
                 current_sha = _sha256(path.read_text(encoding="utf-8"))
                 if current_sha != applied[version]:
                     print(
-                        f"[WARN] {path.name} は適用済だが内容が変わっています "
+                        f"[ERROR] {path.name} は適用済だが内容が変わっています "
                         f"(stored={applied[version][:8]}…, current={current_sha[:8]}…). "
-                        f"`--rerun {version}` で再適用するか、新 version で追加してください。",
+                        "適用済 migration は変更せず、新 version で forward fix してください。",
                         file=sys.stderr,
                     )
-                else:
-                    print(f"[SKIP] {path.name} (already applied)")
+                    return 1
+                print(f"[SKIP] {path.name} (already applied, checksum={current_sha})")
                 continue
 
             print(f"[APPLY] {path.name}")

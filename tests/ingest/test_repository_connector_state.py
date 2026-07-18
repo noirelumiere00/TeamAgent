@@ -100,6 +100,25 @@ def test_load_connector_state_maps_row() -> None:
     )
 
 
+def test_load_connector_state_maps_validator_metadata() -> None:
+    row = {
+        "source_kind": "gdrive",
+        "source_id": "F1",
+        "cursor": "TOK",
+        "oldest": None,
+        "revision": None,
+        "attempt_count": 0,
+        "last_error": None,
+        "metadata": {"office_validator_schema_version": "ooxml-safe-v3"},
+    }
+    repo, _pg = _repo(fetch_result=row)
+
+    state = repo.load_connector_state("gdrive", "F1")
+
+    assert state is not None
+    assert state.metadata == {"office_validator_schema_version": "ooxml-safe-v3"}
+
+
 def test_save_connector_state_success_resets_attempt() -> None:
     repo, pg = _repo()
     repo.save_connector_state("gdrive", "F1", cursor="NEW", success=True)
