@@ -251,8 +251,8 @@ class MediaJobRequest(_StrictModel):
     @field_validator("output_prefix")
     @classmethod
     def _prefix_shape(cls, value: str) -> str:
-        if not value.startswith(("media-jobs/", "tiktok-acquire/")) or not value.endswith("/"):
-            raise ValueError("output_prefix must use an approved media namespace and end with /")
+        if not value.startswith("media-jobs/") or not value.endswith("/"):
+            raise ValueError("output_prefix must use the media-jobs namespace and end with /")
         if not _SAFE_KEY.fullmatch(value):
             raise ValueError("unsafe output_prefix")
         return value
@@ -347,11 +347,7 @@ def make_job_request(
         )
     ).hexdigest()
     resolved_job_id = job_id or f"mj_{idempotency[:24]}"
-    resolved_prefix = output_prefix or (
-        f"tiktok-acquire/{resolved_job_id}/"
-        if resolved_job_id.startswith("tk_")
-        else f"media-jobs/{resolved_job_id}/"
-    )
+    resolved_prefix = output_prefix or f"media-jobs/{resolved_job_id}/"
     payload_without_hash: dict[str, Any] = {
         "schema_version": "1",
         "job_id": resolved_job_id,

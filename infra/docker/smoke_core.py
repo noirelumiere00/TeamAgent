@@ -57,6 +57,8 @@ def _assert_runtime_directories() -> None:
 
 def _assert_content_boundary() -> None:
     forbidden_binaries = (
+        "sh",
+        "curl",
         "node",
         "npm",
         "npx",

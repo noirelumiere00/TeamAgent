@@ -24,6 +24,13 @@ from teamagent.skills.proposal_deck.schema import ProposalDeckInput
 from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
 
 
+@pytest.fixture(autouse=True)
+def _explicit_local_media_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These renderer unit tests intentionally exercise the media extra."""
+
+    monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
+
+
 def _full_composer_json() -> str:
     placeholders: dict[int, str] = {}
     for pid in sorted(VALID_IDS):
@@ -146,7 +153,7 @@ def test_emit_pdf_generates_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert out.pdf_url is None  # publish 未有効
 
 
-def test_emit_pdf_failure_is_graceful(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_emit_pdf_failure_is_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(html_str: str, out_path: Path) -> None:
         raise RuntimeError("weasyprint missing")
 
@@ -155,11 +162,8 @@ def test_emit_pdf_failure_is_graceful(tmp_path: Path, monkeypatch: pytest.Monkey
     bedrock = MagicMock()
     bedrock.converse.return_value = _resp(_full_composer_json())
     skill = ProposalDeckSkill(bedrock=bedrock)
-    out = skill.run(_input(template, tmp_path / "out", emit_pdf=True), ctx=SkillContext())
-    # PDF 失敗でも skill は成功（PPTX が正本）
-    assert out.pdf_path is None
-    assert out.coverage_ratio == 1.0
-    assert Path(out.pptx_path).exists()
+    with pytest.raises(RuntimeError, match="weasyprint missing"):
+        skill.run(_input(template, tmp_path / "out", emit_pdf=True), ctx=SkillContext())
 
 
 def test_emit_pdf_publishes_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

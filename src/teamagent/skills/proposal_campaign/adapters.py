@@ -6,10 +6,7 @@ skills → adapters(top-level) / 他 skill は一方向 import のみ（runtime 
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-import tempfile
+import hashlib
 from collections.abc import Callable
 
 from teamagent.adapters.tiktok_scraper import TikTokVideo, search_tiktok
@@ -30,44 +27,36 @@ def default_searcher(query: str, max_videos: int, request_id: str) -> list[TikTo
 
 
 def default_fetcher(cover_url: str | None, request_id: str) -> bytes | None:
-    """fetch_cover の薄 wrapper（生 JPEG バイト | None・graceful）。"""
+    """Fetch a cover through media; configured service failures stay explicit."""
     from teamagent.adapters.media_job import MediaJobClient
 
-    if cover_url and MediaJobClient.is_configured():
-        try:
-            body, _metadata = MediaJobClient().make_thumbnail_from_url(
-                cover_url,
-                request_fingerprint=f"{request_id}:proposal-cover",
-                width=480,
-            )
-            return body
-        except Exception:
-            return None
-    return fetch_cover(cover_url, request_id=request_id)
+    if not cover_url:
+        return None
+    if MediaJobClient.is_configured():
+        body, _metadata = MediaJobClient().make_thumbnail_from_url(
+            cover_url,
+            request_fingerprint=f"{request_id}:proposal-cover",
+            width=480,
+        )
+        return body
+    if MediaJobClient.local_runtime_enabled():
+        return fetch_cover(cover_url, request_id=request_id)
+    MediaJobClient.require_configured()
+    return None
 
 
 def default_normalizer(data: bytes) -> bytes:
-    """画像バイトを JPEG に正規化（webp/png でも安全・幅480px）。ffmpeg 不在なら素通し。
-
-    demo_thumb_to_fmt_mvp.py / thumbnails.py と同じ subprocess(ffmpeg) パターン。
-    """
-    if not data or not shutil.which("ffmpeg"):
+    """JPEGは保持し、その他の画像変換はmedia workerへ委譲する。"""
+    if not data or data.startswith(b"\xff\xd8\xff"):
         return data
-    with tempfile.TemporaryDirectory() as tmp:
-        src = os.path.join(tmp, "src")
-        dst = os.path.join(tmp, "out.jpg")
-        with open(src, "wb") as f:
-            f.write(data)
-        try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", src, "-vframes", "1", "-vf", "scale=480:-1", dst],
-                capture_output=True,
-                timeout=30,
-                check=False,
-            )
-            if os.path.exists(dst) and os.path.getsize(dst) > 0:
-                with open(dst, "rb") as f:
-                    return f.read()
-        except (OSError, subprocess.SubprocessError):
-            return data
-    return data
+    from teamagent.adapters.media_job import MediaJobClient
+
+    MediaJobClient.require_configured()
+    content_type = "image/png" if data.startswith(b"\x89PNG\r\n\x1a\n") else "image/webp"
+    body, _metadata = MediaJobClient().make_thumbnail(
+        data,
+        content_type,
+        request_fingerprint=f"proposal-normalize:{hashlib.sha256(data).hexdigest()}",
+        width=480,
+    )
+    return body

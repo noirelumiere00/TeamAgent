@@ -64,7 +64,7 @@ echo "== 5) 現行td取得（ロールバックARN控え） =="
 aws ecs describe-task-definition --region "$R" --task-definition "$TD_FAMILY" --query 'taskDefinition' > /tmp/cwu_td.json
 CUR_ARN=$(jq -r '.taskDefinitionArn' /tmp/cwu_td.json); echo "  ロールバック先: $CUR_ARN"
 
-echo "== 6) 新td生成（宣言的フルセット: image + ALLOWED_HD + app.html S3 URI + No-AI フラグ + Slack env/secrets を毎回 除去→再付与） =="
+echo "== 6) 新td生成（image + runtime contract + app/env/secrets を原子的に固定） =="
 # CONNECT_APP_HTML_S3_URI: /app ホットスワップ（publish_app_html.sh）の受け口。
 #   publish script の配置先（s3://$BUCKET/codebuild/connect-web-app.html）と同一定数。
 # USE_QUERY_PLANNER/USE_COHERE_RERANK=false: T1 No-AI 化の恒久化
@@ -73,6 +73,19 @@ APP_HTML_URI="s3://$BUCKET/codebuild/connect-web-app.html"
 jq --arg img "$IMG" --arg hd "$HD" --arg rd "$SLACK_REDIRECT" --arg apphtml "$APP_HTML_URI" \
    --arg cid "$CID_ARN" --arg csec "$CSEC_ARN" --arg cst "$CSTATE_ARN" '
   .containerDefinitions[0].image=$img
+  | .containerDefinitions[0].entryPoint=[]
+  | .containerDefinitions[0].command=["/app/.venv/bin/python","-m","teamagent.connect_web"]
+  | .containerDefinitions[0].user="10001:10001"
+  | .containerDefinitions[0].readonlyRootFilesystem=true
+  | .containerDefinitions[0].privileged=false
+  | .containerDefinitions[0].linuxParameters=((.containerDefinitions[0].linuxParameters // {}) + {"capabilities":{"drop":["ALL"]}})
+  | .containerDefinitions[0].mountPoints=(
+      [((.containerDefinitions[0].mountPoints)//[])[]|select(.containerPath!="/tmp")]
+      + [{"sourceVolume":"runtime-tmp","containerPath":"/tmp","readOnly":false}])
+  | .containerDefinitions[0].healthCheck={
+      "command":["CMD","/app/.venv/bin/python","-c","import urllib.request; urllib.request.urlopen('\''http://127.0.0.1:8788/healthz'\'', timeout=4).close()"],
+      "interval":30,"timeout":5,"retries":5,"startPeriod":40}
+  | .volumes=([((.volumes)//[])[]|select(.name!="runtime-tmp")]+[{"name":"runtime-tmp"}])
   | .containerDefinitions[0].environment=(
       [.containerDefinitions[0].environment[]|select(.name!="CONNECT_SEARCH_ALLOWED_HD" and .name!="SLACK_OAUTH_REDIRECT_URI"
         and .name!="CONNECT_APP_HTML_S3_URI" and .name!="USE_QUERY_PLANNER" and .name!="USE_COHERE_RERANK")]

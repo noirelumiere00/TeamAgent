@@ -16,8 +16,9 @@ ARG NPM_VERSION=11.16.0
 ARG NPM_BINARY_SHA256=8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7
 ARG PLAYWRIGHT_VERSION=1.60.0
 ARG PUPPETEER_VERSION=25.3.0
-ARG TIKTOK_PACKAGE_JSON_SHA256=ac94f38cd5fe53ccd5af27ced2d887cf8ddfe3fdff19f73a3320f61fedc94cca
-ARG TIKTOK_PACKAGE_LOCK_SHA256=b01b09c4da500d95d636c60da6ebd59f7da7322bdc7aa0c4900acf49df7c2b43
+ARG IPADDR_JS_VERSION=2.2.0
+ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
+ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
 
 RUN set -eu; \
     test "$(node --version)" = "v${NODE_BUILDER_VERSION}"; \
@@ -39,6 +40,7 @@ RUN --mount=type=cache,id=teamagent-media-npm-arm64,target=/root/.npm,sharing=lo
     npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
     test "$(node -p "require('playwright-core/package.json').version")" = "$PLAYWRIGHT_VERSION"; \
     test "$(node -p "require('puppeteer-core/package.json').version")" = "$PUPPETEER_VERSION"; \
+    test "$(node -p "require('ipaddr.js/package.json').version")" = "$IPADDR_JS_VERSION"; \
     rm -f /tmp/teamagent-build-ca.pem
 
 FROM ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST} AS uv
@@ -237,6 +239,7 @@ ARG PYTHON_PACKAGE_VERSION=3.14.5-r2
 ARG PYTHON_VERSION=3.14.5
 ARG PYTHON_BINARY_SHA256=95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4
 ARG PLAYWRIGHT_VERSION=1.60.0
+ARG IPADDR_JS_VERSION=2.2.0
 ARG PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256=43e66564125ee31b07a58cefb21e256d62d67d8d1713e6858df7a3019d8ed353
 ARG PLAYWRIGHT_CORE_NPM_INTEGRITY=sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==
 ARG YTDLP_VERSION=2026.6.9
@@ -246,9 +249,9 @@ ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3
 ARG YTDLP_SANITIZED_TREE_SHA256=638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b
 ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db
 ARG MEDIA_APK_LOCK_SHA256=d3a888e3bfa7e75d2c4c7b6b6dca2a7e0812c1231fdb342e96bb79af9166cca8
-ARG TIKTOK_PACKAGE_JSON_SHA256=ac94f38cd5fe53ccd5af27ced2d887cf8ddfe3fdff19f73a3320f61fedc94cca
-ARG TIKTOK_PACKAGE_LOCK_SHA256=b01b09c4da500d95d636c60da6ebd59f7da7322bdc7aa0c4900acf49df7c2b43
-ARG TIKTOK_SCRAPER_SHA256=98f0bfb220b59ed4932de8346f9a55a0cd4a96adfff18d35780a7e3cfd73d70d
+ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
+ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
+ARG TIKTOK_SCRAPER_SHA256=c2e9dd93ced889addc83b09bd581ad58c406d9ef296518d2c2dc226c5d81bf16
 
 COPY infra/docker/media-apk.lock /tmp/media-apk.lock
 RUN set -eu; \
@@ -312,6 +315,8 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       org.opencontainers.image.ref.name="$GIT_BRANCH" \
       io.teamagent.runtime.kind="media-worker" \
       io.teamagent.contract.chromium-base-arm64-digest="$CHROMIUM_BASE_ARM64_DIGEST" \
+      io.teamagent.contract.node-builder-arm64-digest="$NODE_BUILDER_ARM64_DIGEST" \
+      io.teamagent.contract.uv-arm64-digest="$UV_ARM64_DIGEST" \
       io.teamagent.contract.chromium-package-version="$CHROMIUM_PACKAGE_VERSION" \
       io.teamagent.contract.chromium-version="$CHROMIUM_VERSION" \
       io.teamagent.contract.chromium-binary-sha256="$CHROMIUM_BINARY_SHA256" \
@@ -326,6 +331,7 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       io.teamagent.contract.python-binary-sha256="$PYTHON_BINARY_SHA256" \
       io.teamagent.contract.playwright-python-version="$PLAYWRIGHT_VERSION" \
       io.teamagent.contract.playwright-js-version="$PLAYWRIGHT_VERSION" \
+      io.teamagent.contract.ipaddr-js-version="$IPADDR_JS_VERSION" \
       io.teamagent.contract.playwright-python-wheel-sha256="$PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256" \
       io.teamagent.contract.playwright-core-npm-integrity="$PLAYWRIGHT_CORE_NPM_INTEGRITY" \
       io.teamagent.contract.yt-dlp-version="$YTDLP_VERSION" \

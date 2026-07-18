@@ -180,11 +180,15 @@ resource "aws_ecs_task_definition" "ingest" {
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
+  volume {
+    name = "runtime-tmp"
+  }
+
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
     name      = "ingest"
     image     = var.mcp_image
     essential = true
-    command   = ["python", "scripts/run_ingest_fargate.py"]
+    command   = [local.teamagent_python, "/app/scripts/run_ingest_fargate.py"]
     environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
       { name = "INGEST_SOURCES", value = var.ingest_sources },
@@ -237,7 +241,7 @@ resource "aws_ecs_task_definition" "ingest" {
       }
     }
     # Scheduled Task なので long-running ではない・healthCheck 不要（exit code が成否を語る）
-  }])
+  })])
 }
 
 # --- EventBridge → ECS RunTask の IAM role ---

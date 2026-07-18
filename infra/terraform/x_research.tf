@@ -201,12 +201,16 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
     operating_system_family = "LINUX"
   }
 
+  volume {
+    name = "runtime-tmp"
+  }
+
   container_definitions = jsonencode([
-    {
+    merge(local.teamagent_runtime_container, {
       name      = "worker"
       image     = var.mcp_image
       essential = true
-      command   = ["python", "-m", "teamagent.workers.x_buzz_job"]
+      command   = [local.teamagent_python, "-m", "teamagent.workers.x_buzz_job"]
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
         { name = "X_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
@@ -225,7 +229,7 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
           "awslogs-stream-prefix" = "worker"
         }
       }
-    }
+    })
   ])
 }
 

@@ -68,7 +68,7 @@ def _fake_src() -> TikTokS3Source:
         ).encode(),
         f"{_PREFIX}videos/p0001.mp4": b"FAKE_MP4_BYTES" * 100,
     }
-    src = TikTokS3Source(_PREFIX)
+    src = TikTokS3Source(_PREFIX, bucket="teamagent-media-test")
     src._s3 = lambda: _FakeS3(objs)  # type: ignore[method-assign]
     return src
 

@@ -18,7 +18,7 @@
 
 import puppeteer from "puppeteer-core";
 import dns from "node:dns/promises";
-import net from "node:net";
+import ipaddr from "ipaddr.js";
 
 // ---- 引数パース ----
 function parseArgs(argv) {
@@ -32,6 +32,7 @@ function parseArgs(argv) {
     maxBytes: 30 * 1024 * 1024,
     out: null,
     headful: false,
+    networkGuardSelfTest: false,
     sessions: 1, // 独立セッション数 (>1 で複数回検索→出現頻度ランク=単発失敗に強くする)
   };
   for (let i = 2; i < argv.length; i++) {
@@ -46,6 +47,7 @@ function parseArgs(argv) {
     else if (k === "--out") a.out = argv[++i];
     else if (k === "--sessions") a.sessions = Math.max(1, parseInt(argv[++i], 10) || 1);
     else if (k === "--headful") a.headful = true;
+    else if (k === "--network-guard-self-test") a.networkGuardSelfTest = true;
   }
   return a;
 }
@@ -56,34 +58,16 @@ const log = (...m) => console.error("[tiktok]", ...m); // stderr
 // ---- Chrome 実行パス自動検出 (Mac/Linux 両対応) ----
 import fs from "fs";
 
-const dnsCache = new Map();
-
 function isPublicIp(address) {
-  const version = net.isIP(address);
-  if (version === 4) {
-    const p = address.split(".").map(Number);
-    if (
-      p[0] === 0 || p[0] === 10 || p[0] === 127 || p[0] >= 224 ||
-      (p[0] === 100 && p[1] >= 64 && p[1] <= 127) ||
-      (p[0] === 169 && p[1] === 254) ||
-      (p[0] === 172 && p[1] >= 16 && p[1] <= 31) ||
-      (p[0] === 192 && (p[1] === 0 || p[1] === 168)) ||
-      (p[0] === 198 && (p[1] === 18 || p[1] === 19 || p[1] === 51)) ||
-      (p[0] === 203 && p[1] === 0 && p[2] === 113)
-    ) return false;
-    return true;
+  try {
+    let parsed = ipaddr.parse(address.toLowerCase().split("%", 1)[0]);
+    if (parsed.kind() === "ipv6" && parsed.isIPv4MappedAddress()) {
+      parsed = parsed.toIPv4Address();
+    }
+    return parsed.range() === "unicast";
+  } catch {
+    return false;
   }
-  if (version === 6) {
-    const value = address.toLowerCase().split("%", 1)[0];
-    if (
-      value === "::" || value === "::1" ||
-      /^f[cd]/.test(value) || /^fe[89ab]/.test(value) || /^ff/.test(value) ||
-      /^2001:db8(?::|$)/.test(value)
-    ) return false;
-    const mapped = value.match(/(?:^|:)ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    return mapped ? isPublicIp(mapped[1]) : true;
-  }
-  return false;
 }
 
 async function assertPublicHttps(rawUrl, { tiktokOnly = false } = {}) {
@@ -103,19 +87,42 @@ async function assertPublicHttps(rawUrl, { tiktokOnly = false } = {}) {
     host !== "tiktok.com" &&
     !host.endsWith(".tiktok.com")
   ) throw new Error("TikTok URL is outside the allowlist");
-  let addresses = dnsCache.get(host);
-  if (!addresses) {
-    if (net.isIP(host)) {
-      addresses = [host];
-    } else {
-      addresses = (await dns.lookup(host, { all: true, verbatim: true })).map((item) => item.address);
-    }
-    if (!addresses.length || addresses.some((address) => !isPublicIp(address))) {
-      throw new Error("private or reserved network address blocked");
-    }
-    dnsCache.set(host, addresses);
+  // Resolve at every intercepted browser request. Chromium performs its own
+  // connection, so retaining a prior answer would widen the DNS-rebinding
+  // window. All answers from this boundary resolution must be global unicast.
+  const addresses = ipaddr.isValid(host)
+    ? [host]
+    : (await dns.lookup(host, { all: true, verbatim: true })).map((item) => item.address);
+  if (!addresses.length || addresses.some((address) => !isPublicIp(address))) {
+    throw new Error("private or reserved network address blocked");
   }
   return parsed.toString();
+}
+
+function runNetworkGuardSelfTest() {
+  const allowed = ["8.8.8.8", "2606:4700:4700::1111"];
+  const blocked = [
+    "0.0.0.0",
+    "10.0.0.1",
+    "100.64.0.1",
+    "127.0.0.1",
+    "169.254.169.254",
+    "192.0.2.1",
+    "198.18.0.1",
+    "224.0.0.1",
+    "255.255.255.255",
+    "::",
+    "::1",
+    "::ffff:127.0.0.1",
+    "2001:db8::1",
+    "fc00::1",
+    "fe80::1",
+    "ff02::1",
+  ];
+  if (!allowed.every(isPublicIp) || blocked.some(isPublicIp)) {
+    throw new Error("network guard self-test failed");
+  }
+  process.stdout.write(JSON.stringify({ ok: true, allowed, blocked }));
 }
 
 function isCanonicalTikTokUrl(rawUrl) {
@@ -643,6 +650,7 @@ async function downloadVideoFromUrl(browser, videoUrl, outPath, maxBytes) {
 function buildChromeArgs() {
   const chromeArgs = [
     "--disable-dev-shm-usage", "--disable-gpu",
+    "--disable-setuid-sandbox",
     "--window-size=1280,900", "--lang=ja-JP",
   ];
   if (process.env.PROXY_SERVER) {
@@ -732,6 +740,10 @@ async function mainDownload() {
 
 // ---- main ----
 async function main() {
+  if (args.networkGuardSelfTest) {
+    runNetworkGuardSelfTest();
+    return;
+  }
   if (args.mode === "comments") {
     await mainComments();
     return;

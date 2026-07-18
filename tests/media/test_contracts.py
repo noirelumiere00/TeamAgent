@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -14,7 +15,12 @@ from teamagent.media.contracts import (
     make_job_request,
     parse_job_request,
 )
-from teamagent.media.security import MediaSsrfError, validate_acquire_url
+from teamagent.media.operations import _ffmpeg_input
+from teamagent.media.security import (
+    MediaSsrfError,
+    public_dns_only,
+    validate_acquire_url,
+)
 
 
 def _ref() -> S3ObjectRef:
@@ -134,3 +140,79 @@ def test_acquire_ssrf_guard_allows_only_public_youtube_tiktok_instagram() -> Non
             "https://www.youtube.com/watch?v=abc",
             resolver=private_resolver,
         )
+
+
+@pytest.mark.parametrize(
+    "address",
+    (
+        "0.0.0.0",
+        "10.0.0.1",
+        "100.64.0.1",
+        "127.0.0.1",
+        "169.254.169.254",
+        "192.0.2.1",
+        "198.18.0.1",
+        "224.0.0.1",
+        "255.255.255.255",
+        "::",
+        "::1",
+        "::ffff:127.0.0.1",
+        "2001:db8::1",
+        "fc00::1",
+        "fe80::1",
+        "ff02::1",
+    ),
+)
+def test_ssrf_guard_rejects_every_non_global_address(address: str) -> None:
+    def resolver(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, 6, "", (address, 443))]
+
+    with pytest.raises(MediaSsrfError, match="PRIVATE_ADDRESS"):
+        validate_acquire_url(
+            "https://www.youtube.com/watch?v=abc",
+            resolver=resolver,
+        )
+
+
+def test_ssrf_guard_rejects_mixed_public_and_private_dns_answers() -> None:
+    def resolver(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("100.64.0.1", 443)),
+        ]
+
+    with pytest.raises(MediaSsrfError, match="PRIVATE_ADDRESS"):
+        validate_acquire_url(
+            "https://www.youtube.com/watch?v=abc",
+            resolver=resolver,
+        )
+
+
+def test_connect_boundary_dns_guard_revalidates_every_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def rebound(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        nonlocal calls
+        calls += 1
+        address = "8.8.8.8" if calls == 1 else "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", rebound)
+    with public_dns_only():
+        assert socket.getaddrinfo("www.youtube.com", 443)
+        with pytest.raises(MediaSsrfError, match="DNS_PRIVATE_ADDRESS"):
+            socket.getaddrinfo("www.youtube.com", 443)
+
+
+def test_ffmpeg_staged_input_protocol_contract_blocks_network_protocols() -> None:
+    assert _ffmpeg_input(Path("/tmp/staged.m3u8")) == [
+        "-protocol_whitelist",
+        "file,pipe",
+        "-protocol_blacklist",
+        "http,https,tcp,tls,udp,rtp,ftp,gopher,sftp,ssh",
+        "-i",
+        "/tmp/staged.m3u8",
+    ]

@@ -133,11 +133,15 @@ resource "aws_ecs_task_definition" "canary" {
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
+  volume {
+    name = "runtime-tmp"
+  }
+
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
     name      = "canary"
     image     = var.mcp_image
     essential = true
-    command   = ["python", "scripts/run_canary_health.py"]
+    command   = [local.teamagent_python, "/app/scripts/run_canary_health.py"]
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
@@ -156,7 +160,7 @@ resource "aws_ecs_task_definition" "canary" {
       }
     }
     # Scheduled Task なので healthCheck 不要（exit code が成否を語る）
-  }])
+  })])
 }
 
 # EventBridge → ECS RunTask の IAM role ---

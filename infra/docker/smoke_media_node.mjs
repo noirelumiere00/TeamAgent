@@ -17,7 +17,7 @@ const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium-browser",
   headless: true,
   chromiumSandbox: true,
-  args: ["--disable-gpu", "--disable-dev-shm-usage"],
+  args: ["--disable-gpu", "--disable-dev-shm-usage", "--disable-setuid-sandbox"],
 });
 try {
   const page = await browser.newPage({ viewport: { width: 640, height: 360 } });

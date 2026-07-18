@@ -3,8 +3,8 @@
 # ingest タスクへコード変更を届ける唯一の経路（deploy_connectweb_unified.sh は
 # connect-web 専用で ingest td を更新しない、という既知の穴を塞ぐ）。
 #   ECR teamagent-mcp の --image-tag を digest 解決し（immutable tag 前提・digest 運用）、
-#   現行 teamagent-dev-ingest td の image だけを差し替えて新 revision を登録する。
-#   env / secrets / cpu / memory / role は既存維持（宣言的差分は image のみ）。
+#   現行 teamagent-dev-ingest td の image とcore runtime contractを原子的に差し替えて
+#   新 revision を登録する。env / secrets / cpu / memory / role は既存維持。
 #   scripts/aws/run_ingest_task.sh は family 名指定＝最新 revision を拾うので、
 #   登録後の次回実行から新コードが使われる。
 #   ⚠️ EventBridge 週次ルール（現在 DISABLED）のターゲットは特定 revision 固定。
@@ -50,9 +50,19 @@ aws ecs describe-task-definition --region "$R" --task-definition "$TD_FAMILY" \
 CUR_ARN=$(jq -r '.taskDefinitionArn' /tmp/ingest_td_cur.json)
 echo "  現行: $CUR_ARN"
 
-echo "== 3) image のみ差替 → register-task-definition（env/secrets は既存維持）=="
+echo "== 3) image + runtime contract差替 → register-task-definition（env/secrets は既存維持）=="
 jq --arg img "$IMG" '
   .containerDefinitions[0].image = $img
+  | .containerDefinitions[0].entryPoint = []
+  | .containerDefinitions[0].command = ["/app/.venv/bin/python","/app/scripts/run_ingest_fargate.py"]
+  | .containerDefinitions[0].user = "10001:10001"
+  | .containerDefinitions[0].readonlyRootFilesystem = true
+  | .containerDefinitions[0].privileged = false
+  | .containerDefinitions[0].linuxParameters = ((.containerDefinitions[0].linuxParameters // {}) + {"capabilities":{"drop":["ALL"]}})
+  | .containerDefinitions[0].mountPoints = (
+      [((.containerDefinitions[0].mountPoints)//[])[]|select(.containerPath!="/tmp")]
+      + [{"sourceVolume":"runtime-tmp","containerPath":"/tmp","readOnly":false}])
+  | .volumes = ([((.volumes)//[])[]|select(.name!="runtime-tmp")]+[{"name":"runtime-tmp"}])
   | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities,
         .registeredAt, .registeredBy, .deregisteredAt)
 ' /tmp/ingest_td_cur.json > /tmp/ingest_td_new.json

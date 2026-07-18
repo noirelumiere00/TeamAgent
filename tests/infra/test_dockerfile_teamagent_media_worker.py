@@ -36,6 +36,8 @@ def test_media_external_images_are_exact_arm64_children() -> None:
     assert "node:24-alpine@${NODE_BUILDER_ARM64_DIGEST}" in TEXT
     assert "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}" in TEXT
     assert 'org.opencontainers.image.revision="$GIT_COMMIT"' in TEXT
+    assert 'io.teamagent.contract.node-builder-arm64-digest="$NODE_BUILDER_ARM64_DIGEST"' in TEXT
+    assert 'io.teamagent.contract.uv-arm64-digest="$UV_ARM64_DIGEST"' in TEXT
 
 
 def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
@@ -163,6 +165,8 @@ def test_media_runtime_is_uid_10001_read_only_ready_and_sandboxed() -> None:
 
 def test_tiktok_network_guard_is_attached_to_the_correct_browser_paths() -> None:
     scraper = SCRAPER.read_text(encoding="utf-8")
+    assert "dnsCache" not in scraper
+    assert "await dns.lookup(host, { all: true, verbatim: true })" in scraper
     search = scraper.split("async function searchOnce", 1)[1].split(
         "async function scrapeComments", 1
     )[0]
@@ -181,9 +185,9 @@ def test_tiktok_network_guard_is_attached_to_the_correct_browser_paths() -> None
 
 def test_media_sources_and_js_lock_are_content_addressed() -> None:
     expected = {
-        PACKAGE: "ac94f38cd5fe53ccd5af27ced2d887cf8ddfe3fdff19f73a3320f61fedc94cca",
-        PACKAGE_LOCK: "b01b09c4da500d95d636c60da6ebd59f7da7322bdc7aa0c4900acf49df7c2b43",
-        SCRAPER: "98f0bfb220b59ed4932de8346f9a55a0cd4a96adfff18d35780a7e3cfd73d70d",
+        PACKAGE: "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
+        PACKAGE_LOCK: "f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2",
+        SCRAPER: "c2e9dd93ced889addc83b09bd581ad58c406d9ef296518d2c2dc226c5d81bf16",
     }
     for path, digest in expected.items():
         assert _sha256(path) == digest

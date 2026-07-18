@@ -21,6 +21,12 @@ from teamagent.media.contracts import (
 _BUCKET = "teamagent-media-test"
 
 
+class _ConditionalFailureError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("conditional failure")
+        self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
 def _ref(job_id: str, body: bytes = b"artifact") -> S3ObjectRef:
     return S3ObjectRef(
         bucket=_BUCKET,
@@ -49,7 +55,8 @@ class _LifecycleClient(MediaJobClient):
         super().__init__(queue_url="queue", table="jobs", bucket=_BUCKET)
         self.result = result
         self.submitted = 0
-        self.cleaned = 0
+        self.consumers = 0
+        self.max_consumers = 0
 
     def submit(self, request: MediaJobRequest) -> str:
         self.submitted += 1
@@ -69,12 +76,17 @@ class _LifecycleClient(MediaJobClient):
         del ref
         return b"artifact"
 
-    def cleanup(self, request: MediaJobRequest) -> None:
+    def _acquire_consumer(self, request: MediaJobRequest, *, timeout_s: int) -> None:
+        del request, timeout_s
+        self.consumers += 1
+        self.max_consumers = max(self.max_consumers, self.consumers)
+
+    def _release_consumer(self, request: MediaJobRequest) -> None:
         del request
-        self.cleaned += 1
+        self.consumers -= 1
 
 
-def test_run_sync_cleans_after_success_and_failure() -> None:
+def test_run_sync_fences_consumers_without_deleting_shared_state() -> None:
     request = _request()
     done = MediaJobResult(
         job_id=request.job_id,
@@ -85,7 +97,8 @@ def test_run_sync_cleans_after_success_and_failure() -> None:
     artifacts, _metadata = success.run_sync(request)
     assert artifacts == {"media": b"artifact"}
     assert success.submitted == 1
-    assert success.cleaned == 1
+    assert success.consumers == 0
+    assert success.max_consumers == 1
 
     failed = _LifecycleClient(
         MediaJobResult(
@@ -96,7 +109,88 @@ def test_run_sync_cleans_after_success_and_failure() -> None:
     )
     with pytest.raises(MediaJobError, match="MEDIA_TEST_FAILED"):
         failed.run_sync(request)
-    assert failed.cleaned == 1
+    assert failed.consumers == 0
+    assert failed.max_consumers == 1
+
+
+class _Queue:
+    def __init__(self) -> None:
+        self.messages: list[dict[str, Any]] = []
+
+    def send_message(self, **kwargs: Any) -> None:
+        self.messages.append(kwargs)
+
+
+class _SubmitDynamo:
+    def __init__(self, request: MediaJobRequest) -> None:
+        self.request = request
+        self.item: dict[str, Any] = {
+            "job_id": {"S": request.job_id},
+            "idempotency_key": {"S": request.idempotency_key},
+            "payload_sha256": {"S": request.payload_sha256},
+            "status": {"S": "queued"},
+            "submit_owner": {"S": "other-caller"},
+            "submit_lease_expires_at": {"N": "130"},
+        }
+        self.claim_calls = 0
+
+    def put_item(self, **_kwargs: Any) -> None:
+        raise _ConditionalFailureError
+
+    def get_item(self, **_kwargs: Any) -> dict[str, Any]:
+        return {"Item": self.item}
+
+    def update_item(self, **kwargs: Any) -> None:
+        expression = kwargs["UpdateExpression"]
+        if expression.startswith("SET submit_owner"):
+            self.claim_calls += 1
+            raise _ConditionalFailureError
+        raise AssertionError(f"unexpected update: {expression}")
+
+
+class _SubmitClient(MediaJobClient):
+    def __init__(
+        self,
+        *,
+        queue: _Queue,
+        ddb: _SubmitDynamo,
+        sleeper: Any,
+        monotonic: Any,
+    ) -> None:
+        super().__init__(
+            queue_url="queue",
+            table="jobs",
+            bucket=_BUCKET,
+            sleeper=sleeper,
+            monotonic=monotonic,
+        )
+        self.queue = queue
+        self.ddb = ddb
+
+    def _clients(self) -> tuple[Any, Any, Any]:
+        return self.queue, self.ddb, object()
+
+
+def test_concurrent_identical_submit_waits_for_owner_confirmation_without_duplicate_send() -> None:
+    request = _request()
+    queue = _Queue()
+    ddb = _SubmitDynamo(request)
+    clock = [0.0]
+
+    def finish_other_submit(delay: float) -> None:
+        clock[0] += delay
+        ddb.item["message_sent_at"] = {"N": "101"}
+
+    client = _SubmitClient(
+        queue=queue,
+        ddb=ddb,
+        sleeper=finish_other_submit,
+        monotonic=lambda: clock[0],
+    )
+
+    assert client.submit(request) == request.job_id
+    assert ddb.claim_calls == 2
+    assert queue.messages == []
 
 
 class _GuardClient(MediaJobClient):
@@ -227,3 +321,13 @@ def test_stage_rejects_scope_content_type_and_ttl_before_aws_write() -> None:
             content_type="video/mp4",
             ttl_s=299,
         )
+
+
+def test_artifact_ttl_contract_is_bounded_and_environment_driven(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MEDIA_ARTIFACT_TTL_SECONDS", "600")
+    assert MediaJobClient.artifact_ttl_seconds() == 600
+    monkeypatch.setenv("MEDIA_ARTIFACT_TTL_SECONDS", "21601")
+    with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_TTL_INVALID"):
+        MediaJobClient.artifact_ttl_seconds()

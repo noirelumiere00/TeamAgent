@@ -14,6 +14,7 @@ bytes を Gemini に inline で渡す。
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from typing import Any
@@ -56,6 +57,21 @@ def download_video(
     Raises:
         VideoDownloadError: URL 非許可(SSRF) / 取得不可 / 上限超過 / フォーマット無し等。
     """
+    from teamagent.adapters.media_job import MediaJobClient
+
+    if MediaJobClient.is_configured():
+        fingerprint = hashlib.sha256(f"{url}\0{max_filesize_mb}".encode()).hexdigest()
+        try:
+            return MediaJobClient().acquire_video(
+                url,
+                request_fingerprint=f"{request_id or 'no-request'}:download:{fingerprint}",
+                max_bytes=max_filesize_mb * 1024 * 1024,
+            )
+        except Exception as exc:
+            raise VideoDownloadError(f"VIDEO_MEDIA_JOB_FAILED: {type(exc).__name__}") from exc
+    if not MediaJobClient.local_runtime_enabled():
+        raise VideoDownloadError("VIDEO_MEDIA_JOB_NOT_CONFIGURED")
+
     # §N: SSRF 必須関門。全 DL 経路（video_analysis/video_algorithm）が必ず通る backstop。
     if not _skip_url_guard:
         from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
@@ -149,6 +165,21 @@ def download_video_chained(
     Raises:
         VideoDownloadError: URL 非許可(SSRF) / 全取得経路が失敗。
     """
+    from teamagent.adapters.media_job import MediaJobClient
+
+    if MediaJobClient.is_configured():
+        fingerprint = hashlib.sha256(f"{url}\0{max_filesize_mb}".encode()).hexdigest()
+        try:
+            return MediaJobClient().acquire_video(
+                url,
+                request_fingerprint=f"{request_id or 'no-request'}:download:{fingerprint}",
+                max_bytes=max_filesize_mb * 1024 * 1024,
+            )
+        except Exception as exc:
+            raise VideoDownloadError(f"VIDEO_MEDIA_JOB_FAILED: {type(exc).__name__}") from exc
+    if not MediaJobClient.local_runtime_enabled():
+        raise VideoDownloadError("VIDEO_MEDIA_JOB_NOT_CONFIGURED")
+
     from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
 
     try:

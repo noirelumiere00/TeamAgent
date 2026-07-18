@@ -1,8 +1,9 @@
 # TeamAgent core / media runtime contract
 
-この文書は Terraform・IAM・task definition・CodeBuild を変更せず、それらの担当者へ渡す
-deploy contract を定義する。正準な機械可読値は
-[`runtime-contract.json`](./runtime-contract.json) と各 Dockerfile の OCI label である。
+この文書はDocker runtime、media service composition、Terraform/IAM/task definition、
+および別担当のCodeBuild/release flow間のdeploy contractを定義する。正準な機械可読値は
+[`runtime-contract.json`](./runtime-contract.json)、
+[`runtime-consumers.json`](./runtime-consumers.json)、各DockerfileのOCI labelである。
 
 ## Artifact boundary
 
@@ -84,9 +85,22 @@ S3 referenceだけを許し、bucket/key/content type/size/SHA-256を必須と�
 outputは最大128 MiB、idempotency keyとcanonical payload SHA-256を必須とする。URL取得は
 HTTPS allowlistとpublic-DNS/redirect SSRF guardを通す。
 
-S3 input/outputはSSE-S3またはSSE-KMS、artifact TTLは5分以上6時間以下とする。workerは成功時に
-inputを、失敗時にjob prefix全体を削除する。coreは結果download後に同一job prefixを削除する。
-DynamoDB resultにも同じ短期TTLを設定する。
+S3 input/outputはSSE-S3またはSSE-KMS、artifact TTLは5分以上6時間以下とする。S3 `Expires`
+metadataやDynamoDB TTLは削除の保証ではないため、削除主体にはしない。
+
+- workerはowner/version-fenced leaseを取得し、artifactを
+  `media-jobs/<job-id>/attempts/<version>/`へ書く。失敗時に削除できるのは自分のattemptだけで、
+  cleanup失敗を成功として記録しない。
+- 同じSQS envelopeの重複、lease中の別worker、およびterminal rowはidempotentに扱う。
+  terminal rowをfailedへ戻したり、別attemptのartifactを削除したりしない。
+- coreの同期callerはconsumer guardを取得してpoll/downloadし、finallyでguardを解放する。
+  deterministic job IDを共有する別callerがいるため、coreはrowや共有prefixを直接削除しない。
+- scheduled janitorは期限到来rowをcleanup owner/versionで条件付きclaimし、正確なjob prefixを
+  全削除できた後だけ同じowner/version条件でrowを削除する。通常cleanupはactive consumerと
+  consumer guardを尊重し、宣言済みhard cleanup deadlineでは滞留jobを回収する。S3または
+  DynamoDBの削除失敗はinvocation失敗としてretryさせる。
+- bucket lifecycle 1日は障害時のbackstopだけであり、janitorによる宣言window内削除の代替では
+  ない。DynamoDB TTLも同じくbackstopである。
 
 VSEO report/slides/PPTXはrequest単位directoryに置き、upload/response後に
 `cleanup_output()` を必ず呼ぶ。既定rootは `/tmp/teamagent/vseo_reports`。
@@ -105,25 +119,26 @@ VSEO report/slides/PPTXはrequest単位directoryに置き、upload/response後�
 - memory hard limit `4096 MiB`
 - writable mountは `/tmp` だけ
 
-Core healthcheckはimageとComposeの双方で
-`/app/.venv/bin/python` + `urllib.request` を用いる。curl/wgetを追加しない。
+Core healthcheckはimage、Compose、ECS task definition、deploy rendererのすべてで
+`/app/.venv/bin/python` + `urllib.request` をexec形式で用いる。shell、curl、wgetを追加しない。
+core imageは空のentryPointとconsumerごとの絶対Python commandを組み合わせる。MCP、
+connect-web、canary、ingest、morning digest、x-buzz worker、およびdispatcherのmedia override
+の正確な組合せは`runtime-consumers.json`で列挙し、未列挙consumerを許可しない。
 
-CoreはLinux capabilitiesを`ALL` dropし、`no-new-privileges`を適用する。MediaはChromium
-sandboxを有効にしたまま動かすためsetuid sandbox helperを必要とし、
-`no-new-privileges`を指定しない。actual ARM64 smokeでは、Docker/ECSの既定capabilitiesのうち
-`SYS_CHROOT`だけを保持すればsandboxが成功し、`SYS_CHROOT`もdropするとChromiumが
-`sys_chroot`でfail closedすることを確認した。したがってMediaのIaCはcapabilityを追加せず、
-`AUDIT_WRITE`, `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `MKNOD`,
-`NET_BIND_SERVICE`, `NET_RAW`, `SETFCAP`, `SETGID`, `SETPCAP`, `SETUID`を明示dropし、
-`SYS_CHROOT`だけを保持する。正準リストは`runtime-contract.json`とする。
+Core/MediaともLinux capabilitiesを`ALL` dropする。Coreのlocal Compose smokeでは
+`no-new-privileges`も検査するが、Fargate task contractとしては未対応の同設定を主張しない。
+Media Chromiumはsetuid sandboxを`--disable-setuid-sandbox`で使わず、user namespace sandboxを
+有効にしたまま実行する。`--no-sandbox`は禁止する。これによりMediaもcapabilityを保持・追加
+しない。正準リストは`runtime-contract.json`とする。
 
-Playwright
-`v1.60.0`の公式seccomp profileをupstream byte SHA-256
+Playwright `v1.60.0`の公式seccomp profileをlocal Docker smoke専用にupstream byte SHA-256
 `cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849`
 でvendorする。sourceは
 `https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json`。
 default allowlistへuser namespace用の `clone`, `setns`, `unshare` だけを追加する。
-`--no-sandbox` とseccomp unconfinedは本番・最終smokeの双方で禁止する。
+Fargateはcustom seccomp profileを受け付けないため、このprofileをIaC capabilityとして
+主張しない。Fargate上でnamespace sandboxが実際に成立することはdeploy前の別gateで必須とし、
+未確認中はfail closedとする。`--no-sandbox` とseccomp unconfinedは禁止する。
 
 Media task roleが直接使用するAWS clientはS3とDynamoDBだけである。必要actionとconditional KMS
 actionは `runtime-contract.json` に列挙した。`bedrock:*`, `rds:*`, `rds-db:*`,
@@ -139,17 +154,25 @@ dispatcher側roleに置き、worker roleへ混ぜない。
 infra/docker/build_local_runtime_evidence.sh /private/tmp/teamagent-runtime-evidence
 ```
 
-このscriptはpushを行わず、full 40-character `HEAD` を
-`org.opencontainers.image.revision` に設定する。Buildx metadata、image inspect/history、
-CycloneDX SBOM、Trivy vulnerability/secret JSON、clean HEADのtracked-files-only source secret
-scan、smoke logと全証跡SHA-256を同じdirectoryへ出す。
-label revision、architecture、runtime userが一致しない場合は停止する。
+このscriptは既存または空でない出力directoryを拒否し、pushを行わず、full 40-character
+`HEAD`を`org.opencontainers.image.revision`に設定する。Buildx metadata、image
+inspect/history、CycloneDX SBOM、Trivy vulnerability/secret JSON、clean HEADの
+tracked-files-only source secret scan、scanner/DB metadata、smoke log、subject receipt、
+全証跡SHA-256を同じfresh directoryへ出す。tagではなくimmutable local image IDをscanし、
+label revision、architecture、runtime user、scan subject、SBOM filesystem、provenance
+descriptorが一致しない場合は停止する。merge commitでもfirst-parent差分を使い、
+`git-files.txt`が空になる証跡を拒否する。
 
 採用gateはactual final ARM64 imageごとに以下すべてである。
 
 - Trivy CRITICAL `0`
 - Trivy HIGH `0`
 - Trivy secret `0`
+- Trivy scanner version、scan timestamp、vulnerability DB version/updated/downloaded/next-updateと
+  secret check bundle digestをreceiptへ固定し、scan時点でDBが期限内である
+- live Debianで検出された `CVE-2026-5450`、`CVE-2026-13221`、
+  `CVE-2026-12087`、`CVE-2026-57433` がseverity filterなしの各final image resultに
+  存在しない
 - suppression、`.trivyignore`、VEX、`--ignore-unfixed` を使わない
 - package DBを削除しない
 - read-only/non-root/fresh `/tmp` smoke成功
@@ -158,10 +181,16 @@ label revision、architecture、runtime userが一致しない場合は停止す
 使えない。Debian live image、Wolfi Chromium 149候補、Alpine direct-install実験候補も、各時点の
 actual scanがgateを満たさなかったため採用根拠にしない。
 
+push禁止のローカルbuildで得るsubjectはimmutable local image ID/OCI digestであり、
+未push imageにregistry digestを捏造しない。外部parentはexact arm64 registry child digestを
+receipt/provenanceへ固定する。
+
 Registryへpushする権限を持つ別担当は、同じexact HEAD・同じbuild inputsでBuildKit
 `provenance=mode=max` とSBOM attestationを付け、attestation subject digestとdeploy digestを
 一致させる。ECR basic scan完了後にCRITICAL/HIGHがともに0であることも必須とし、scan未完了・
 unsupported・非0ならdeployをfail closedにする。ローカル担当はpush/ECR scan/deployを行わない。
+したがってlocal receiptではECR/Fargate gateを`NOT_RUN`と明記し、registry/ECR receiptは別担当が
+exact pushed digestへ追加する。
 
 ### Fargate Chromium sandbox gate
 
@@ -176,7 +205,10 @@ fail closedにする。失敗時は機能をOFFにせず、custom seccompを指�
 ## Deterministic smoke
 
 [`compose.runtime-smoke.yml`](./compose.runtime-smoke.yml) は各serviceに別のfresh named `/tmp`
-volumeを割り当てる。Coreはoffline E5 1024次元encode、media binary不在、MCP healthを検証する。
+volumeを割り当てる。Coreはoffline E5 1024次元encode、media binaryとshell/curl不在、MCPと
+connect-webのexec-form healthを検証する。さらに`runtime-consumers.json`にあるcanary、ingest、
+morning digest、x-buzz、media dispatcher commandをactual image上で組み立て、期待した
+domain-level exitまで実行する。
 Mediaはcontainer networkを`none`にして、Python/Node Playwright route interception、
 Chromium screenshot、ffmpeg proxy/frame/thumbnail、slides→PPTX、sanitized yt-dlp allowlistと
 deterministic acquire pathを検証する。S3/DynamoDBその他の外部書込は行わない。

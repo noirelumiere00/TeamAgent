@@ -64,8 +64,7 @@ assert_container_security() {
       *) return 1 ;;
     esac
   else
-    test "$cap_drop" = \
-      '["CAP_AUDIT_WRITE","CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_KILL","CAP_MKNOD","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETFCAP","CAP_SETGID","CAP_SETPCAP","CAP_SETUID"]'
+    test "$cap_drop" = '["ALL"]'
     case "$security_opt" in
       *seccomp=*unconfined*) return 1 ;;
       *seccomp=*) ;;
@@ -84,12 +83,62 @@ run_one_shot() {
   profile=$1
   service=$2
   kind=$3
+  expected_status=$4
+  expected_path=$5
+  expected_args=$6
   container_id=$(compose --profile "$profile" run --detach --no-deps "$service")
   assert_container_security "$container_id" "$service" "$kind" none
+  actual_process=$(
+    docker inspect --format '{{.Path}} {{json .Args}}' "$container_id"
+  )
+  test "$actual_process" = "$expected_path $expected_args"
   status=$(docker wait "$container_id")
   docker logs "$container_id"
   docker rm --force "$container_id" >/dev/null
-  test "$status" = 0
+  test "$status" = "$expected_status"
+  printf \
+    'runtime_composition service=%s path=%s args=%s exit=%s\n' \
+    "$service" "$expected_path" "$expected_args" "$status"
+}
+
+run_health_service() {
+  profile=$1
+  service=$2
+  expected_path=$3
+  expected_args=$4
+
+  compose --profile "$profile" up --detach "$service"
+  container_id=$(compose --profile "$profile" ps --quiet "$service")
+  test -n "$container_id"
+  assert_container_security "$container_id" "$service" core internal
+  actual_process=$(
+    docker inspect --format '{{.Path}} {{json .Args}}' "$container_id"
+  )
+  test "$actual_process" = "$expected_path $expected_args"
+
+  attempt=0
+  health=starting
+  while test "$attempt" -lt 90; do
+    health=$(docker inspect --format '{{.State.Health.Status}}' "$container_id")
+    if test "$health" = "healthy"; then
+      break
+    fi
+    if test "$health" = "unhealthy"; then
+      compose logs "$service"
+      exit 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+  if test "$health" != "healthy"; then
+    compose logs "$service"
+    exit 1
+  fi
+  compose stop "$service" >/dev/null
+  compose rm --force "$service" >/dev/null
+  printf \
+    'runtime_composition service=%s path=%s args=%s health=healthy\n' \
+    "$service" "$expected_path" "$expected_args"
 }
 
 trap cleanup EXIT INT TERM
@@ -97,31 +146,40 @@ cleanup
 assert_arm64 "$TEAMAGENT_CORE_IMAGE"
 assert_arm64 "$TEAMAGENT_MEDIA_IMAGE"
 
-compose --profile core-health up --detach core-health
-core_health_id=$(compose --profile core-health ps --quiet core-health)
-test -n "$core_health_id"
-assert_container_security "$core_health_id" core-health core internal
+run_health_service \
+  core-health core-health \
+  /app/.venv/bin/python \
+  '["/app/scripts/run_mcp_vertex_entrypoint.py"]'
+run_health_service \
+  connect-health connect-health \
+  /app/.venv/bin/python \
+  '["-m","teamagent.connect_web"]'
 
-attempt=0
-health=starting
-while test "$attempt" -lt 90; do
-  health=$(docker inspect --format '{{.State.Health.Status}}' "$core_health_id")
-  if test "$health" = "healthy"; then
-    break
-  fi
-  if test "$health" = "unhealthy"; then
-    compose logs core-health
-    exit 1
-  fi
-  attempt=$((attempt + 1))
-  sleep 2
-done
-if test "$health" != "healthy"; then
-  compose logs core-health
-  exit 1
-fi
-compose stop core-health >/dev/null
-compose rm --force core-health >/dev/null
-
-run_one_shot core core-smoke core
-run_one_shot media media-smoke media
+run_one_shot \
+  core core-smoke core 0 \
+  /app/.venv/bin/python \
+  '["/smoke/smoke_core.py"]'
+run_one_shot \
+  core-composition canary-composition core 1 \
+  /app/.venv/bin/python \
+  '["/app/scripts/run_canary_health.py"]'
+run_one_shot \
+  core-composition ingest-composition core 2 \
+  /app/.venv/bin/python \
+  '["/app/scripts/run_ingest_fargate.py"]'
+run_one_shot \
+  core-composition morning-digest-composition core 0 \
+  /app/.venv/bin/python \
+  '["/app/scripts/run_morning_digest_fargate.py"]'
+run_one_shot \
+  core-composition x-buzz-composition core 1 \
+  /app/.venv/bin/python \
+  '["-m","teamagent.workers.x_buzz_job"]'
+run_one_shot \
+  media-composition media-composition media 2 \
+  /app/.venv/bin/python \
+  '["-m","teamagent.media.worker"]'
+run_one_shot \
+  media media-smoke media 0 \
+  /app/.venv/bin/python \
+  '["/smoke/smoke_media.py"]'

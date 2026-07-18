@@ -1,13 +1,30 @@
 {
   "schema_version": "1",
   "architecture": "linux/arm64",
+  "runtime_consumers": "infra/docker/runtime-consumers.json",
   "security_gates": {
     "trivy": {
       "critical_vulnerabilities": 0,
       "high_vulnerabilities": 0,
       "secrets": 0,
       "allow_suppressions": false,
-      "ignore_unfixed": false
+      "ignore_unfixed": false,
+      "required_absent_live_cves": [
+        "CVE-2026-5450",
+        "CVE-2026-13221",
+        "CVE-2026-12087",
+        "CVE-2026-57433"
+      ],
+      "scanner_receipt_fields": [
+        "scan_started_at",
+        "scan_finished_at",
+        "trivy_version",
+        "vulnerability_db_version",
+        "vulnerability_db_updated_at",
+        "vulnerability_db_downloaded_at",
+        "vulnerability_db_next_update",
+        "secret_check_bundle_digest"
+      ]
     },
     "ecr_basic_scan": {
       "critical_vulnerabilities": 0,
@@ -15,6 +32,16 @@
       "required_after_authorized_push": true,
       "fail_closed_until_complete": true
     }
+  },
+  "media_jobs": {
+    "schema_version": "1",
+    "maximum_envelope_bytes": 131072,
+    "minimum_artifact_ttl_seconds": 300,
+    "maximum_artifact_ttl_seconds": 21600,
+    "authoritative_cleanup": "owner-version-fenced-scheduled-janitor",
+    "lifecycle_backstop_days": 1,
+    "worker_failure_cleanup_scope": "owned-attempt-only",
+    "synchronous_consumer_deletes_shared_state": false
   },
   "tasks": {
     "teamagent-mcp-core": {
@@ -27,7 +54,8 @@
       "capabilities_drop": [
         "ALL"
       ],
-      "no_new_privileges": true,
+      "local_compose_no_new_privileges": true,
+      "fargate_no_new_privileges_claimed": false,
       "writable_mounts": [
         {
           "path": "/tmp",
@@ -58,6 +86,8 @@
         "connect-web-app-html"
       ],
       "forbidden_binaries": [
+        "sh",
+        "curl",
         "node",
         "npm",
         "npx",
@@ -84,28 +114,16 @@
       "read_only_root_filesystem": true,
       "memory_limit_mib": 4096,
       "capabilities_drop": [
-        "AUDIT_WRITE",
-        "CHOWN",
-        "DAC_OVERRIDE",
-        "FOWNER",
-        "FSETID",
-        "KILL",
-        "MKNOD",
-        "NET_BIND_SERVICE",
-        "NET_RAW",
-        "SETFCAP",
-        "SETGID",
-        "SETPCAP",
-        "SETUID"
-      ],
-      "capabilities_retain": [
-        "SYS_CHROOT"
+        "ALL"
       ],
       "capabilities_add": [],
-      "no_new_privileges": false,
+      "local_compose_no_new_privileges": false,
+      "fargate_no_new_privileges_claimed": false,
       "chromium_sandbox": {
         "required": true,
         "no_sandbox_flag_forbidden": true,
+        "setuid_sandbox_disabled": true,
+        "namespace_sandbox_required": true,
         "seccomp_profile": "infra/docker/playwright-seccomp-1.60.0.json",
         "seccomp_profile_source": "https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json",
         "seccomp_profile_sha256": "cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849",
@@ -114,8 +132,9 @@
           "setns",
           "unshare"
         ],
-        "required_capability": "SYS_CHROOT",
-        "requires_setuid_sandbox": true,
+        "required_capability": null,
+        "requires_setuid_sandbox": false,
+        "custom_seccomp_is_local_smoke_only": true,
         "fargate_actual_smoke_required": true,
         "fargate_fail_closed_until_verified": true
       },

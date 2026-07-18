@@ -23,8 +23,6 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-_DEFAULT_BUCKET = "teamagent-dev-raw-files"
-
 
 class TikTokS3Source:
     """1つの取得ジョブの S3 prefix を、posts(メタ) と videos(本体) として読む。"""
@@ -33,7 +31,11 @@ class TikTokS3Source:
         self, prefix: str, *, bucket: str | None = None, region: str | None = None
     ) -> None:
         self._prefix = prefix if prefix.endswith("/") else prefix + "/"
-        self._bucket = bucket or os.environ.get("TIKTOK_S3_BUCKET") or _DEFAULT_BUCKET
+        self._bucket = (
+            bucket or os.environ.get("MEDIA_JOB_BUCKET") or os.environ.get("TIKTOK_S3_BUCKET") or ""
+        )
+        if not self._bucket:
+            raise RuntimeError("MEDIA_JOB_BUCKET is required for delegated TikTok artifacts")
         self._region = region or os.environ.get("AWS_REGION") or "ap-northeast-1"
         self._posts: list[dict[str, Any]] | None = None
         self._url_to_pid: dict[str, str] | None = None

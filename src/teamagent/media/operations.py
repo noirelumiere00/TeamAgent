@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 ObjectLoader = Callable[[S3ObjectRef, Path], Path]
 _FFMPEG_TIMEOUT_S = 180
+_FFMPEG_PROTOCOL_WHITELIST = "file,pipe"
+_FFMPEG_PROTOCOL_BLACKLIST = "http,https,tcp,tls,udp,rtp,ftp,gopher,sftp,ssh"
 _MEDIA_FILENAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 _EXTERNAL_HTML_REF = re.compile(
     r"""(?is)(?:src|href)\s*=\s*["']\s*(?:https?:)?//|url\(\s*["']?\s*(?:https?:)?//"""
@@ -87,6 +89,19 @@ def _run(command: list[str], *, timeout_s: int = _FFMPEG_TIMEOUT_S) -> None:
         raise MediaOperationError("MEDIA_PROCESS_FAILED", "media subprocess failed")
 
 
+def _ffmpeg_input(source: Path) -> list[str]:
+    """Return fail-closed input flags for already-staged local media only."""
+
+    return [
+        "-protocol_whitelist",
+        _FFMPEG_PROTOCOL_WHITELIST,
+        "-protocol_blacklist",
+        _FFMPEG_PROTOCOL_BLACKLIST,
+        "-i",
+        str(source),
+    ]
+
+
 def _safe_file(path: Path, root: Path) -> Path:
     if path.is_symlink():
         raise MediaOperationError("MEDIA_OUTPUT_PATH_INVALID", "output is a symlink")
@@ -114,6 +129,12 @@ def _acquire(operation: AcquireOperation, workdir: Path) -> OperationOutput:
             f"best[filesize_approx<={operation.max_bytes}][vcodec!=none][acodec!=none]/worst"
         ),
         "fragment_retries": 2,
+        # The worker's native ffmpeg is local-file-only. Prevent yt-dlp from
+        # discovering or spawning it for remote manifests/merges; formats that
+        # require an external downloader or postprocessor fail closed instead.
+        "external_downloader": None,
+        "ffmpeg_location": "/nonexistent/teamagent-ffmpeg-disabled",
+        "fixup": "never",
         "hls_prefer_native": True,
         "max_filesize": operation.max_bytes,
         "noplaylist": True,
@@ -121,6 +142,7 @@ def _acquire(operation: AcquireOperation, workdir: Path) -> OperationOutput:
         "outtmpl": str(download_dir / "media.%(ext)s"),
         "overwrites": False,
         "paths": {"home": str(download_dir), "temp": str(download_dir)},
+        "postprocessors": [],
         "quiet": True,
         "retries": 2,
         "socket_timeout": 20,
@@ -259,8 +281,7 @@ def _fetch_public_image(url: str, destination: Path, *, width: int = 480) -> boo
                 "ffmpeg",
                 "-nostdin",
                 "-y",
-                "-i",
-                str(raw),
+                *_ffmpeg_input(raw),
                 "-frames:v",
                 "1",
                 "-vf",
@@ -476,8 +497,7 @@ def _proxy(operation: ProxyOperation, workdir: Path, load: ObjectLoader) -> Oper
                 "ffmpeg",
                 "-nostdin",
                 "-y",
-                "-i",
-                str(source),
+                *_ffmpeg_input(source),
                 "-vf",
                 (
                     f"scale=w={edge}:h={edge}:"
@@ -521,8 +541,7 @@ def _frames(operation: FrameOperation, workdir: Path, load: ObjectLoader) -> Ope
                 "-y",
                 "-ss",
                 f"{second:.3f}",
-                "-i",
-                str(source),
+                *_ffmpeg_input(source),
                 "-frames:v",
                 "1",
                 "-vf",
@@ -588,8 +607,7 @@ def _thumbnail(operation: ThumbnailOperation, workdir: Path, load: ObjectLoader)
             "ffmpeg",
             "-nostdin",
             "-y",
-            "-i",
-            str(source),
+            *_ffmpeg_input(source),
             "-frames:v",
             "1",
             "-vf",
@@ -605,8 +623,7 @@ def _thumbnail(operation: ThumbnailOperation, workdir: Path, load: ObjectLoader)
             "ffmpeg",
             "-nostdin",
             "-y",
-            "-i",
-            str(source),
+            *_ffmpeg_input(source),
             "-frames:v",
             "1",
             "-vf",
@@ -680,7 +697,11 @@ def _slides(operation: SlidesOperation, workdir: Path, load: ObjectLoader) -> Op
         browser = playwright.chromium.launch(
             executable_path=chromium,
             headless=True,
-            args=["--disable-gpu", "--disable-dev-shm-usage"],
+            args=[
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--disable-setuid-sandbox",
+            ],
             chromium_sandbox=True,
         )
         try:

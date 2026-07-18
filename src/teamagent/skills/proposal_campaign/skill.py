@@ -10,7 +10,10 @@ evidence_images を一次成果物として返す。PPTX 描画は caller 提供
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import tempfile
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -41,9 +44,9 @@ from teamagent.skills.proposal_campaign.schema import (
     ProposalCampaignOutput,
 )
 from teamagent.skills.proposal_deck.contract import ComposerOutput
-from teamagent.skills.proposal_deck.renderer import render_deck
 
 logger = structlog.get_logger(__name__)
+_SAFE_REQUEST = re.compile(r"[^\w-]+", re.UNICODE)
 
 
 @register
@@ -69,6 +72,8 @@ class ProposalCampaignSkill(BaseSkill[ProposalCampaignInput, ProposalCampaignOut
         self._fetcher: Fetcher = fetcher or default_fetcher
         self._normalizer: Normalizer = normalizer or default_normalizer
         self._max_workers = max_workers
+        self._temporary_output_dirs: dict[str, Path] = {}
+        self._temporary_output_lock = threading.Lock()
 
     def run(self, input: ProposalCampaignInput, ctx: SkillContext) -> ProposalCampaignOutput:
         log = ctx.bind_logger(self.name)
@@ -83,79 +88,131 @@ class ProposalCampaignSkill(BaseSkill[ProposalCampaignInput, ProposalCampaignOut
             log.warning("proposal_campaign_no_keywords")
             return ProposalCampaignOutput(version_id=version_id)
 
-        pids = assign_placeholder_ids(keywords)
-        fallback_bytes = self._load_fallback(input.fallback_image_path)
-        cache_dir = (
-            Path(input.image_cache_dir)
-            if input.image_cache_dir
-            else Path(tempfile.mkdtemp(prefix=f"campaign_{ctx.request_id}_"))
+        temporary_root: Path | None = None
+        needs_temporary_cache = input.image_cache_dir is None
+        needs_temporary_pptx = (
+            input.enable_pptx_render
+            and input.composer_output_json_path is not None
+            and input.out_dir is None
         )
-        log.info(
-            "proposal_campaign_start",
-            n_keywords=len(keywords),
-            has_fallback=fallback_bytes is not None,
-            enable_pptx=input.enable_pptx_render,
-        )
+        if needs_temporary_cache or needs_temporary_pptx:
+            safe_request = _SAFE_REQUEST.sub("_", ctx.request_id).strip("_")[:64] or "request"
+            temporary_root = Path(tempfile.mkdtemp(prefix=f"teamagent-campaign-{safe_request}-"))
+            with self._temporary_output_lock:
+                self._temporary_output_dirs[version_id] = temporary_root
 
-        pairs = list(zip(keywords, pids, strict=True))
-
-        def _do(pair: tuple[str, int]) -> tuple[KWThumbnailResult, EvidenceImage | None]:
-            keyword, placeholder_id = pair
-            return fetch_one(
-                keyword=keyword,
-                placeholder_id=placeholder_id,
-                searcher=self._searcher,
-                fetcher=self._fetcher,
-                normalizer=self._normalizer,
-                fallback_bytes=fallback_bytes,
-                cache_dir=cache_dir,
-                request_id=ctx.request_id,
+        try:
+            pids = assign_placeholder_ids(keywords)
+            fallback_bytes = self._load_fallback(input.fallback_image_path)
+            cache_dir = (
+                Path(input.image_cache_dir)
+                if input.image_cache_dir
+                else self._temporary_child(temporary_root, "images")
+            )
+            render_out_dir = (
+                input.out_dir
+                if input.out_dir
+                else (
+                    str(self._temporary_child(temporary_root, "artifacts"))
+                    if needs_temporary_pptx
+                    else None
+                )
+            )
+            log.info(
+                "proposal_campaign_start",
+                n_keywords=len(keywords),
+                has_fallback=fallback_bytes is not None,
+                enable_pptx=input.enable_pptx_render,
             )
 
-        workers = max(1, min(self._max_workers, len(pairs)))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            rows = list(ex.map(_do, pairs))
+            pairs = list(zip(keywords, pids, strict=True))
 
-        results = [row[0] for row in rows]
-        evidences = [row[1] for row in rows if row[1] is not None]
-        evidence_images = build_evidence_images(evidences)
+            def _do(pair: tuple[str, int]) -> tuple[KWThumbnailResult, EvidenceImage | None]:
+                keyword, placeholder_id = pair
+                return fetch_one(
+                    keyword=keyword,
+                    placeholder_id=placeholder_id,
+                    searcher=self._searcher,
+                    fetcher=self._fetcher,
+                    normalizer=self._normalizer,
+                    fallback_bytes=fallback_bytes,
+                    cache_dir=cache_dir,
+                    request_id=ctx.request_id,
+                )
 
-        success = sum(1 for r in results if r.source == "tiktok_1st")
-        fallback = sum(1 for r in results if r.source == "fallback")
-        errors = sum(1 for r in results if r.source == "error")
-        total = len(results)
+            workers = max(1, min(self._max_workers, len(pairs)))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                rows = list(ex.map(_do, pairs))
 
-        pptx_path: str | None = None
-        composer_json = input.composer_output_json_path
-        if input.enable_pptx_render and composer_json:
-            pptx_path = self._render(
-                composer_json_path=composer_json,
-                template_path=input.template_path,
-                out_dir=input.out_dir,
+            results = [row[0] for row in rows]
+            evidences = [row[1] for row in rows if row[1] is not None]
+            evidence_images = build_evidence_images(evidences)
+
+            success = sum(1 for r in results if r.source == "tiktok_1st")
+            fallback = sum(1 for r in results if r.source == "fallback")
+            errors = sum(1 for r in results if r.source == "error")
+            total = len(results)
+
+            pptx_path: str | None = None
+            composer_json = input.composer_output_json_path
+            if input.enable_pptx_render and composer_json:
+                pptx_path = self._render(
+                    composer_json_path=composer_json,
+                    template_path=input.template_path,
+                    out_dir=render_out_dir,
+                    evidence_images=evidence_images,
+                    ctx=ctx,
+                )
+
+            log.info(
+                "proposal_campaign_done",
+                total=total,
+                success=success,
+                fallback=fallback,
+                errors=errors,
+                placed=len(evidences),
+                pptx=bool(pptx_path),
+            )
+            return ProposalCampaignOutput(
                 evidence_images=evidence_images,
-                ctx=ctx,
+                results=results,
+                pptx_path=pptx_path,
+                version_id=version_id,
+                total_keywords=total,
+                success_count=success,
+                fallback_count=fallback,
+                error_count=errors,
+                coverage_ratio=(success + fallback) / total if total else 0.0,
             )
+        except Exception:
+            if temporary_root is not None:
+                self._remove_temporary_output_dir(version_id)
+            raise
 
-        log.info(
-            "proposal_campaign_done",
-            total=total,
-            success=success,
-            fallback=fallback,
-            errors=errors,
-            placed=len(evidences),
-            pptx=bool(pptx_path),
-        )
-        return ProposalCampaignOutput(
-            evidence_images=evidence_images,
-            results=results,
-            pptx_path=pptx_path,
-            version_id=version_id,
-            total_keywords=total,
-            success_count=success,
-            fallback_count=fallback,
-            error_count=errors,
-            coverage_ratio=(success + fallback) / total if total else 0.0,
-        )
+    @staticmethod
+    def _temporary_child(root: Path | None, name: str) -> Path:
+        if root is None:
+            raise RuntimeError("request-scoped temporary root was not created")
+        child = root / name
+        child.mkdir(parents=True, exist_ok=True)
+        return child
+
+    def _remove_temporary_output_dir(self, version_id: str) -> None:
+        with self._temporary_output_lock:
+            path = self._temporary_output_dirs.get(version_id)
+        if path is None:
+            return
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+        with self._temporary_output_lock:
+            self._temporary_output_dirs.pop(version_id, None)
+
+    def cleanup_output(self, output: ProposalCampaignOutput) -> None:
+        """Remove request-scoped thumbnails/PPTX after output delivery."""
+
+        self._remove_temporary_output_dir(output.version_id)
 
     @staticmethod
     def _load_fallback(path: str | None) -> bytes | None:
@@ -215,8 +272,13 @@ class ProposalCampaignSkill(BaseSkill[ProposalCampaignInput, ProposalCampaignOut
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(pptx)
             rendered = out_path
-        else:
+        elif MediaJobClient.local_runtime_enabled():
+            from teamagent.skills.proposal_deck.renderer import render_deck
+
             rendered = render_deck(
                 composer, Path(raw_tpl), out_path, fail_if_missing=False, enable_images=True
             )
+        else:
+            MediaJobClient.require_configured()
+            raise AssertionError("unreachable")
         return str(rendered)

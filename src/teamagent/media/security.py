@@ -48,13 +48,16 @@ class PublicHttpsRedirectHandler(HTTPRedirectHandler):
 
 def _is_public_address(raw: str) -> bool:
     address = ipaddress.ip_address(raw)
-    return not (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return bool(
+        address.is_global
+        and not address.is_private
+        and not address.is_loopback
+        and not address.is_link_local
+        and not address.is_multicast
+        and not address.is_reserved
+        and not address.is_unspecified
     )
 
 

@@ -93,20 +93,19 @@ services:
     image: "${TEAMAGENT_MCP_IMAGE:?set to a pinned teamagent backend image}"
     restart: unless-stopped
     init: true
+    user: "10001:10001"
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 2g
+    mem_limit: 4096m
     pids_limit: 512
-    tmpfs:
-      - /tmp:size=128m
+    volumes:
+      - teamagent-mcp-tmp:/tmp
     command:
-      - "uv"
-      - "run"
-      - "python"
-      - "scripts/run_mcp_http_server.py"
+      - "/app/.venv/bin/python"
+      - "/app/scripts/run_mcp_vertex_entrypoint.py"
     environment:
       # コンテナ内では私設網 IF に bind（mcpnet 以外からは到達不可・bearer 必須）。
       TEAMAGENT_MCP_HOST: "0.0.0.0"
@@ -122,8 +121,10 @@ services:
     logging: *default-logging
     healthcheck:
       test:
-        - "CMD-SHELL"
-        - "curl -fsS http://127.0.0.1:8787/healthz || exit 1"
+        - "CMD"
+        - "/app/.venv/bin/python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"
       interval: 30s
       timeout: 5s
       retries: 5
@@ -139,3 +140,4 @@ volumes:
   openclaw-config: {}
   openclaw-workspace: {}
   openclaw-auth: {}
+  teamagent-mcp-tmp: {}

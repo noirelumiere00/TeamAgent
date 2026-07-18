@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -76,6 +77,32 @@ class MediaJobClient:
             for name in ("MEDIA_TASK_QUEUE", "MEDIA_JOBS_TABLE", "MEDIA_JOB_BUCKET")
         )
 
+    @classmethod
+    def local_runtime_enabled(cls) -> bool:
+        """Allow heavyweight in-process media only after an explicit local opt-in."""
+
+        return os.environ.get("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
+    @classmethod
+    def require_configured(cls) -> None:
+        if not cls.is_configured():
+            raise MediaJobError("MEDIA_JOB_NOT_CONFIGURED")
+
+    @classmethod
+    def artifact_ttl_seconds(cls) -> int:
+        raw = os.environ.get("MEDIA_ARTIFACT_TTL_SECONDS", str(_ARTIFACT_TTL_DEFAULT_S))
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise MediaJobError("MEDIA_ARTIFACT_TTL_INVALID") from exc
+        if value < 300 or value > 6 * 60 * 60:
+            raise MediaJobError("MEDIA_ARTIFACT_TTL_INVALID")
+        return value
+
     def _session(self) -> Any:
         if self._session_override is not None:
             return self._session_override
@@ -115,7 +142,7 @@ class MediaJobClient:
         name: str,
         body: bytes,
         content_type: str,
-        ttl_s: int = _ARTIFACT_TTL_DEFAULT_S,
+        ttl_s: int | None = None,
     ) -> S3ObjectRef:
         self._assert_configured()
         if not _JOB_ID_RE.fullmatch(job_id):
@@ -126,12 +153,13 @@ class MediaJobClient:
             raise MediaJobError("MEDIA_INPUT_NAME_INVALID")
         if not 1 <= len(content_type) <= 128 or "\r" in content_type or "\n" in content_type:
             raise MediaJobError("MEDIA_INPUT_CONTENT_TYPE_INVALID")
-        if ttl_s < 300 or ttl_s > _ARTIFACT_TTL_DEFAULT_S:
+        resolved_ttl_s = self.artifact_ttl_seconds() if ttl_s is None else ttl_s
+        if resolved_ttl_s < 300 or resolved_ttl_s > self.artifact_ttl_seconds():
             raise MediaJobError("MEDIA_INPUT_TTL_INVALID")
         _sqs, _ddb, s3 = self._clients()
         digest = hashlib.sha256(body).hexdigest()
         key = f"media-jobs/{job_id}/input/{name}"
-        expires = datetime.fromtimestamp(int(time.time()) + ttl_s, tz=UTC)
+        expires = datetime.fromtimestamp(int(time.time()) + resolved_ttl_s, tz=UTC)
         s3.put_object(
             Bucket=self._bucket,
             Key=key,
@@ -151,7 +179,7 @@ class MediaJobClient:
         )
 
     def submit(self, request: MediaJobRequest) -> str:
-        """Dynamo queuedを条件付き作成後、bounded canonical JSONをSQSへ送る。"""
+        """Create/reuse a fenced row and enqueue its canonical envelope."""
 
         self._assert_configured()
         if request.output_bucket != self._bucket:
@@ -167,8 +195,17 @@ class MediaJobClient:
                     "idempotency_key": {"S": request.idempotency_key},
                     "payload_sha256": {"S": request.payload_sha256},
                     "status": {"S": "queued"},
+                    "version": {"N": "0"},
+                    "active_consumers": {"N": "0"},
                     "created_at": {"N": str(request.created_at_epoch_s)},
-                    "ttl": {"N": str(request.created_at_epoch_s + request.artifact_ttl_s)},
+                    "deadline": {"N": str(request.deadline_epoch_s)},
+                    "output_prefix": {"S": request.output_prefix},
+                    "cleanup_at": {"N": str(request.created_at_epoch_s + request.artifact_ttl_s)},
+                    "hard_cleanup_at": {
+                        "N": str(request.created_at_epoch_s + min(request.artifact_ttl_s, 21600))
+                    },
+                    "cleanup_status": {"S": "pending"},
+                    "ttl": {"N": str(request.created_at_epoch_s + 86400)},
                     "detail": {
                         "S": json.dumps(
                             queued.model_dump(mode="json"),
@@ -191,9 +228,64 @@ class MediaJobClient:
                 Key={"job_id": {"S": request.job_id}},
                 ConsistentRead=True,
             ).get("Item", {})
-            if existing.get("idempotency_key", {}).get("S") != request.idempotency_key:
+            if (
+                existing.get("idempotency_key", {}).get("S") != request.idempotency_key
+                or existing.get("payload_sha256", {}).get("S") != request.payload_sha256
+            ):
                 raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT") from exc
-            return request.job_id
+            if existing.get("message_sent_at", {}).get("N"):
+                return request.job_id
+            if existing.get("status", {}).get("S") in {"running", "done", "failed"}:
+                return request.job_id
+
+        submit_owner = f"submit-{uuid.uuid4().hex}"
+        claim_deadline = self._monotonic() + 35.0
+        while True:
+            now = int(time.time())
+            try:
+                ddb.update_item(
+                    TableName=self._table,
+                    Key={"job_id": {"S": request.job_id}},
+                    UpdateExpression="SET submit_owner = :owner, submit_lease_expires_at = :lease",
+                    ConditionExpression=(
+                        "#status = :queued AND idempotency_key = :idempotency AND "
+                        "payload_sha256 = :payload AND attribute_not_exists(message_sent_at) AND "
+                        "(attribute_not_exists(submit_owner) OR submit_lease_expires_at < :now)"
+                    ),
+                    ExpressionAttributeNames={"#status": "status"},
+                    ExpressionAttributeValues={
+                        ":queued": {"S": "queued"},
+                        ":idempotency": {"S": request.idempotency_key},
+                        ":payload": {"S": request.payload_sha256},
+                        ":owner": {"S": submit_owner},
+                        ":now": {"N": str(now)},
+                        ":lease": {"N": str(now + 30)},
+                    },
+                )
+                break
+            except Exception as exc:
+                if not _is_conditional_conflict(exc):
+                    raise MediaJobError("MEDIA_JOB_ENQUEUE_CLAIM_FAILED") from exc
+                existing = ddb.get_item(
+                    TableName=self._table,
+                    Key={"job_id": {"S": request.job_id}},
+                    ConsistentRead=True,
+                ).get("Item", {})
+                if (
+                    existing.get("idempotency_key", {}).get("S") != request.idempotency_key
+                    or existing.get("payload_sha256", {}).get("S") != request.payload_sha256
+                ):
+                    raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT") from exc
+                if existing.get("message_sent_at", {}).get("N") or existing.get("status", {}).get(
+                    "S"
+                ) in {"running", "done", "failed"}:
+                    return request.job_id
+                if self._monotonic() >= claim_deadline:
+                    raise MediaJobError("MEDIA_JOB_ENQUEUE_CLAIM_TIMEOUT") from exc
+                lease_expires_at = int(
+                    existing.get("submit_lease_expires_at", {}).get("N", str(now + 1))
+                )
+                self._sleeper(min(1.0, max(0.1, lease_expires_at - now)))
 
         arguments: dict[str, Any] = {
             "QueueUrl": self._queue_url,
@@ -212,11 +304,32 @@ class MediaJobClient:
         try:
             sqs.send_message(**arguments)
         except Exception as exc:
-            ddb.delete_item(
+            try:
+                ddb.update_item(
+                    TableName=self._table,
+                    Key={"job_id": {"S": request.job_id}},
+                    UpdateExpression="REMOVE submit_owner, submit_lease_expires_at",
+                    ConditionExpression="submit_owner = :owner",
+                    ExpressionAttributeValues={":owner": {"S": submit_owner}},
+                )
+            except Exception as release_exc:
+                raise MediaJobError("MEDIA_JOB_SUBMIT_AND_RELEASE_FAILED") from release_exc
+            raise MediaJobError("MEDIA_JOB_SUBMIT_FAILED") from exc
+        try:
+            ddb.update_item(
                 TableName=self._table,
                 Key={"job_id": {"S": request.job_id}},
+                UpdateExpression=(
+                    "SET message_sent_at = :now REMOVE submit_owner, submit_lease_expires_at"
+                ),
+                ConditionExpression="submit_owner = :owner",
+                ExpressionAttributeValues={
+                    ":owner": {"S": submit_owner},
+                    ":now": {"N": str(int(time.time()))},
+                },
             )
-            raise MediaJobError("MEDIA_JOB_SUBMIT_FAILED") from exc
+        except Exception as exc:
+            raise MediaJobError("MEDIA_JOB_ENQUEUE_CONFIRM_FAILED") from exc
         return request.job_id
 
     def get_result(self, job_id: str) -> MediaJobResult | None:
@@ -274,59 +387,91 @@ class MediaJobClient:
         return body
 
     def cleanup(self, request: MediaJobRequest) -> None:
-        """job prefixとstatus rowをbest-effortで完全削除する。"""
+        """Keep shared terminal state until the fenced janitor window.
 
-        self._cleanup_scope(request.job_id, request.output_prefix)
+        Synchronous callers must never delete a deterministic idempotency key
+        that another caller may be polling or downloading.  This method now
+        validates scope only; deletion is owned by the scheduled janitor.
+        """
+
+        approved = f"media-jobs/{request.job_id}/"
+        if request.output_prefix != approved:
+            raise MediaJobError("MEDIA_JOB_CLEANUP_SCOPE_INVALID")
 
     def cleanup_job(self, job_id: str) -> None:
-        """request構築前の失敗も含め、job prefixとstatus rowをbest-effort削除する。"""
-
-        prefix = (
-            f"tiktok-acquire/{job_id}/" if job_id.startswith("tk_") else f"media-jobs/{job_id}/"
-        )
-        self._cleanup_scope(job_id, prefix)
-
-    def _cleanup_scope(self, job_id: str, prefix: str) -> None:
-        """検証済みjob固有prefixだけを削除する。"""
+        """Register pre-submit staged bytes for deterministic janitor cleanup."""
 
         if not _JOB_ID_RE.fullmatch(job_id):
-            logger.warning("media_job_cleanup_scope_rejected", job_id=job_id)
-            return
-        approved = {f"media-jobs/{job_id}/", f"tiktok-acquire/{job_id}/"}
-        if prefix not in approved:
-            logger.warning("media_job_cleanup_scope_rejected", job_id=job_id)
-            return
+            raise MediaJobError("MEDIA_JOB_CLEANUP_SCOPE_INVALID")
+        now = int(time.time())
+        result = MediaJobResult(
+            job_id=job_id,
+            status="failed",
+            error_code="MEDIA_REQUEST_BUILD_FAILED",
+        )
         try:
-            _sqs, ddb, s3 = self._clients()
-            continuation: str | None = None
-            while True:
-                arguments: dict[str, Any] = {
-                    "Bucket": self._bucket,
-                    "Prefix": prefix,
-                    "MaxKeys": 1000,
-                }
-                if continuation:
-                    arguments["ContinuationToken"] = continuation
-                response = s3.list_objects_v2(**arguments)
-                keys = [{"Key": item["Key"]} for item in response.get("Contents", [])]
-                if keys:
-                    s3.delete_objects(
-                        Bucket=self._bucket,
-                        Delete={"Objects": keys, "Quiet": True},
-                    )
-                if not response.get("IsTruncated"):
-                    break
-                continuation = str(response["NextContinuationToken"])
-            ddb.delete_item(
+            _sqs, ddb, _s3 = self._clients()
+            ddb.put_item(
                 TableName=self._table,
-                Key={"job_id": {"S": job_id}},
+                Item={
+                    "job_id": {"S": job_id},
+                    "status": {"S": "failed"},
+                    "version": {"N": "0"},
+                    "active_consumers": {"N": "0"},
+                    "output_prefix": {"S": f"media-jobs/{job_id}/"},
+                    "cleanup_at": {"N": str(now)},
+                    "hard_cleanup_at": {"N": str(now)},
+                    "cleanup_status": {"S": "pending"},
+                    "ttl": {"N": str(now + 86400)},
+                    "detail": {
+                        "S": json.dumps(
+                            result.model_dump(mode="json"),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    },
+                },
+                ConditionExpression="attribute_not_exists(job_id)",
             )
         except Exception as exc:
-            logger.warning(
-                "media_job_cleanup_failed",
-                job_id=job_id,
-                error=type(exc).__name__,
+            if not _is_conditional_conflict(exc):
+                raise MediaJobError("MEDIA_JOB_CLEANUP_REGISTRATION_FAILED") from exc
+
+    def _acquire_consumer(self, request: MediaJobRequest, *, timeout_s: int) -> None:
+        _sqs, ddb, _s3 = self._clients()
+        now = int(time.time())
+        try:
+            ddb.update_item(
+                TableName=self._table,
+                Key={"job_id": {"S": request.job_id}},
+                UpdateExpression=("SET consumer_guard_until = :guard ADD active_consumers :one"),
+                ConditionExpression=(
+                    "payload_sha256 = :payload AND attribute_not_exists(cleanup_owner)"
+                ),
+                ExpressionAttributeValues={
+                    ":payload": {"S": request.payload_sha256},
+                    ":guard": {"N": str(now + timeout_s + 60)},
+                    ":one": {"N": "1"},
+                },
             )
+        except Exception as exc:
+            raise MediaJobError("MEDIA_JOB_CONSUMER_ACQUIRE_FAILED") from exc
+
+    def _release_consumer(self, request: MediaJobRequest) -> None:
+        _sqs, ddb, _s3 = self._clients()
+        try:
+            ddb.update_item(
+                TableName=self._table,
+                Key={"job_id": {"S": request.job_id}},
+                UpdateExpression="ADD active_consumers :minus_one",
+                ConditionExpression="active_consumers >= :one",
+                ExpressionAttributeValues={
+                    ":minus_one": {"N": "-1"},
+                    ":one": {"N": "1"},
+                },
+            )
+        except Exception as exc:
+            raise MediaJobError("MEDIA_JOB_CONSUMER_RELEASE_FAILED") from exc
 
     def _run_staged(
         self,
@@ -359,10 +504,11 @@ class MediaJobClient:
         *,
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
     ) -> tuple[Mapping[str, bytes], Mapping[str, Any]]:
-        """submit→bounded poll→hash付きdownload→finally cleanup。"""
+        """submit→consumer lease→bounded poll→integrity-checked download."""
 
+        self.submit(request)
+        self._acquire_consumer(request, timeout_s=timeout_s)
         try:
-            self.submit(request)
             result = self.wait(request.job_id, timeout_s=timeout_s)
             if result.status != "done":
                 raise MediaJobError(result.error_code or "MEDIA_JOB_FAILED")
@@ -371,7 +517,7 @@ class MediaJobClient:
             }
             return artifacts, result.metadata
         finally:
-            self.cleanup(request)
+            self._release_consumer(request)
 
     def acquire_video(
         self,
@@ -684,7 +830,7 @@ class MediaJobClient:
             output_bucket=self._bucket,
             request_fingerprint=request_fingerprint,
             timeout_s=timeout_s,
-            artifact_ttl_s=_ARTIFACT_TTL_DEFAULT_S,
+            artifact_ttl_s=self.artifact_ttl_seconds(),
             job_id=job_id,
         )
 

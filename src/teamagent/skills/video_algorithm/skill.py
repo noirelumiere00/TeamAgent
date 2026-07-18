@@ -363,11 +363,14 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                             rank=meta.rank,
                             error=type(exc).__name__,
                         )
-                        shots = []
-                else:
+                        raise RuntimeError("MEDIA_FRAME_JOB_FAILED") from exc
+                elif MediaJobClient.local_runtime_enabled():
                     shots = extract_frames(
                         data, mime, [s for s, _ in tcs], width=320, request_id=request_id
                     )
+                else:
+                    MediaJobClient.require_configured()
+                    raise AssertionError("unreachable")
                 frames = [
                     FrameShot(sec=s, caption=cap_by_sec.get(round(s, 1), f"{s:.0f}s"), data_uri=uri)
                     for s, uri in shots
@@ -399,10 +402,14 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                         rank=meta.rank,
                         error=type(exc).__name__,
                     )
-            else:
+                    raise RuntimeError("MEDIA_PREVIEW_JOB_FAILED") from exc
+            elif MediaJobClient.local_runtime_enabled():
                 from teamagent.adapters.video_proxy import make_web_preview
 
                 video_uri = make_web_preview(data, mime, request_id=request_id)
+            else:
+                MediaJobClient.require_configured()
+                raise AssertionError("unreachable")
         return AnalyzedVideo(
             meta=meta,
             analysis=analysis,
@@ -426,6 +433,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         """
         from teamagent.adapters.media_job import MediaJobClient
 
+        cover: bytes | None
         if MediaJobClient.is_configured() and meta.cover_url:
             try:
                 cover, _metadata = MediaJobClient().make_thumbnail_from_url(
@@ -433,12 +441,15 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     request_fingerprint=f"{request_id}:cover-analysis:{meta.rank}",
                     width=1280,
                 )
-            except Exception:
-                cover = None
-        else:
+            except Exception as exc:
+                raise RuntimeError("MEDIA_COVER_JOB_FAILED") from exc
+        elif MediaJobClient.local_runtime_enabled():
             from teamagent.skills.video_algorithm.thumbnails import fetch_cover
 
             cover = fetch_cover(meta.cover_url, request_id=request_id)
+        else:
+            MediaJobClient.require_configured()
+            raise AssertionError("unreachable")
         if not cover:
             return AnalyzedVideo(meta=meta, error=f"取得失敗: {cause}")
         user_prompt = (
@@ -519,12 +530,15 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     "video_algorithm_thumbnail_failed",
                     error=type(exc).__name__,
                 )
-                return "", None
+                raise RuntimeError("MEDIA_THUMBNAIL_JOB_FAILED") from exc
             return (
                 "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii"),
                 ThumbColor.model_validate(metadata),
             )
 
+        if not MediaJobClient.local_runtime_enabled():
+            MediaJobClient.require_configured()
+            raise AssertionError("unreachable")
         res = build_thumb(cover_url, request_id=request_id)
         if res is None and frames:
             head = frames[0].data_uri
@@ -638,34 +652,41 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             kw_set=list(input.kw_set or []),
         )
         report_dir = self._report_dir or _request_report_dir(ctx.request_id)
-        out.report_html_path = self._write_report(out, ctx.request_id, report_dir)
-        if out.report_html_path:
-            # §M: 金庫外の OpenClaw 等が読めるよう、非公開S3へ発行して署名URLを出力に載せる。
-            out.report_url = self._publish(out.report_html_path, ctx.request_id, input.query)
-        # §Q-HTML→PPTX: 提案資料組み込み用の追加成果物（要求時のみ・graceful＝本体分析は壊さない）。
-        if "slides" in input.outputs or "pptx" in input.outputs:
-            self._build_proposal_outputs(out, input, ctx.request_id, report_dir)
-        out.slack_summary = self._slack_summary(out, backfilled)
-        if (
-            out.report_html_path is None
-            and self._report_dir is None
-            and not os.environ.get("TEAMAGENT_VSEO_REPORT_DIR", "").strip()
-        ):
-            # report生成失敗後にslides/PPTXだけが残っても、配送済みならここで回収する。
-            shutil.rmtree(report_dir, ignore_errors=True)
-        log.info(
-            "video_algorithm_done",
-            requested=input.max_videos,
-            board_size=input.board_size,
-            scraped=len(pool),
-            attempted=attempted,
-            analyzed=sum(1 for v in analyzed if v.analysis),
-            backfilled=backfilled,
-            failed=len(results) - len(ok),
-            cost_usd=total_cost,
-            report=out.report_html_path,
-        )
-        return out
+        # TEAMAGENT_VSEO_REPORT_DIR is a base directory, not a persistence opt-out:
+        # _request_report_dir() still created a uniquely owned child beneath it.
+        owns_request_dir = self._report_dir is None
+        handed_off = False
+        try:
+            out.report_html_path = self._write_report(out, ctx.request_id, report_dir)
+            if out.report_html_path:
+                # §M: 金庫外の OpenClaw 等が読めるよう、非公開S3へ発行して署名URLを出力に載せる。
+                out.report_url = self._publish(out.report_html_path, ctx.request_id, input.query)
+            if "slides" in input.outputs or "pptx" in input.outputs:
+                self._build_proposal_outputs(out, input, ctx.request_id, report_dir)
+            out.slack_summary = self._slack_summary(out, backfilled)
+            if out.report_html_path is None and owns_request_dir and os.path.exists(report_dir):
+                # report生成失敗後にslidesだけが残っても、配送済みならここで回収する。
+                shutil.rmtree(report_dir)
+            log.info(
+                "video_algorithm_done",
+                requested=input.max_videos,
+                board_size=input.board_size,
+                scraped=len(pool),
+                attempted=attempted,
+                analyzed=sum(1 for v in analyzed if v.analysis),
+                backfilled=backfilled,
+                failed=len(results) - len(ok),
+                cost_usd=total_cost,
+                report=out.report_html_path,
+            )
+            handed_off = True
+            return out
+        finally:
+            # Successful output is retained only until the runtime serializes or
+            # uploads it and invokes cleanup_output().  Any exception before
+            # handoff removes the complete request directory here.
+            if owns_request_dir and not handed_off and os.path.exists(report_dir):
+                shutil.rmtree(report_dir)
 
     def _publish(self, path: str, request_id: str, query: str) -> str | None:
         """ローカル HTML レポートを非公開S3へ発行し署名URL(7日)を返す（失敗は None＝graceful）。
@@ -726,6 +747,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     )
             except Exception:
                 logger.warning("vseo_proposal_outputs_failed", request_id=request_id)
+                if "pptx" in input.outputs:
+                    raise
 
     def _build_pptx(
         self, out: VideoAlgorithmOutput, report_dir: str, safe: str, request_id: str
@@ -743,15 +766,17 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 )
                 with open(ppath, "wb") as file:
                     file.write(pptx)
-            else:
+            elif MediaJobClient.local_runtime_enabled():
                 from teamagent.skills.video_algorithm.pptx_export import render_pptx
 
                 if render_pptx(out, ppath) is None:
                     return None
+            else:
+                MediaJobClient.require_configured()
             return self._publish_artifact(ppath, request_id, out.query, kind="pptx")
         except Exception:
             logger.warning("vseo_pptx_build_failed", request_id=request_id)
-            return None
+            raise
 
     def _publish_artifact(self, path: str, request_id: str, query: str, *, kind: str) -> str | None:
         """slides/pptx を非公開S3へ発行（publisher 注入優先・bucket未設定なら None）。"""
@@ -789,7 +814,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
     def cleanup_output(self, out: VideoAlgorithmOutput) -> None:
         """配送/JSON化後にreport・slides・PPTXを含むrequest dirを削除する。"""
 
-        if self._report_dir is not None or os.environ.get("TEAMAGENT_VSEO_REPORT_DIR", "").strip():
+        if self._report_dir is not None:
             return
         if not out.report_html_path:
             return
@@ -798,7 +823,10 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         if request_dir == root or not os.path.commonpath((root, request_dir)) == root:
             logger.warning("video_algorithm_cleanup_scope_rejected", path=request_dir)
             return
-        shutil.rmtree(request_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(request_dir)
+        except FileNotFoundError:
+            return
 
     @staticmethod
     def _kw_context(input: VideoAlgorithmInput) -> str:

@@ -333,11 +333,15 @@ resource "aws_ecs_task_definition" "connect_web" {
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
+  volume {
+    name = "runtime-tmp"
+  }
+
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
     name      = "connect-web"
     image     = var.mcp_image
     essential = true
-    command   = ["python", "-m", "teamagent.connect_web"]
+    command   = [local.teamagent_python, "-m", "teamagent.connect_web"]
     portMappings = [
       { containerPort = 8788, protocol = "tcp" },
     ]
@@ -434,13 +438,13 @@ resource "aws_ecs_task_definition" "connect_web" {
       }
     }
     healthCheck = {
-      command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:8788/healthz || exit 1"]
+      command     = ["CMD", local.teamagent_python, "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()"]
       interval    = 30
       timeout     = 5
       retries     = 5
       startPeriod = 30
     }
-  }])
+  })])
 }
 
 # --- ECS Service ---

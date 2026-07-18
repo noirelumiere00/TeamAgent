@@ -82,7 +82,13 @@ RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing
     rm -f /tmp/teamagent-build-ca.pem
 
 COPY src/ ./src/
-COPY scripts/ ./scripts/
+COPY scripts/run_mcp_http_server.py \
+     scripts/run_mcp_vertex_entrypoint.py \
+     scripts/run_canary_health.py \
+     scripts/run_ingest_fargate.py \
+     scripts/ingest_sources.py \
+     scripts/run_morning_digest_fargate.py \
+     ./scripts/
 COPY infra/migrations/ ./infra/migrations/
 COPY data/ ./data/
 RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing=locked \
@@ -251,5 +257,5 @@ EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 --start-period=40s \
   CMD ["/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"]
 
-ENTRYPOINT ["/app/.venv/bin/python"]
-CMD ["scripts/run_mcp_http_server.py"]
+ENTRYPOINT []
+CMD ["/app/.venv/bin/python", "/app/scripts/run_mcp_http_server.py"]

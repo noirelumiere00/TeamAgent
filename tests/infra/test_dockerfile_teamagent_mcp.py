@@ -109,8 +109,8 @@ def test_core_runtime_is_uid_10001_read_only_ready_and_python_health_checked() -
     assert "XDG_CACHE_HOME=/tmp/teamagent/cache" in final
     assert "VIDEO_APPROVAL_STATE_PATH=/tmp/teamagent/state/video_approval_processed.json" in final
     assert "TEAMAGENT_RUNTIME_KIND=core" in final
-    assert 'ENTRYPOINT ["/app/.venv/bin/python"]' in final
-    assert 'CMD ["scripts/run_mcp_http_server.py"]' in final
+    assert "ENTRYPOINT []" in final
+    assert 'CMD ["/app/.venv/bin/python", "/app/scripts/run_mcp_http_server.py"]' in final
     assert "urllib.request.urlopen('http://127.0.0.1:8787/healthz'" in final
     assert "curl" not in final
 
@@ -128,8 +128,19 @@ def test_core_build_ca_is_secret_mounted_and_package_provenance_is_retained() ->
 def test_core_dockerignore_is_deny_by_default_and_excludes_sensitive_state() -> None:
     text = DOCKERIGNORE.read_text(encoding="utf-8")
     assert text.startswith("**\n")
-    for allowed in ("!pyproject.toml", "!uv.lock", "!src/**", "!scripts/**"):
+    for allowed in (
+        "!pyproject.toml",
+        "!uv.lock",
+        "!src/**",
+        "!scripts/run_mcp_http_server.py",
+        "!scripts/run_mcp_vertex_entrypoint.py",
+        "!scripts/run_canary_health.py",
+        "!scripts/run_ingest_fargate.py",
+        "!scripts/ingest_sources.py",
+        "!scripts/run_morning_digest_fargate.py",
+    ):
         assert allowed in text
+    assert "!scripts/**" not in text
     for blocked in (
         "**/.env",
         "**/*.pem",

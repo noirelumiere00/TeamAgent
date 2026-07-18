@@ -221,11 +221,15 @@ resource "aws_ecs_task_definition" "morning_digest" {
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
+  volume {
+    name = "runtime-tmp"
+  }
+
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
     name      = "morning-digest"
     image     = var.mcp_image
     essential = true
-    command   = ["python", "scripts/run_morning_digest_fargate.py"]
+    command   = [local.teamagent_python, "/app/scripts/run_morning_digest_fargate.py"]
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
@@ -286,7 +290,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       }
     }
     # Scheduled Task なので healthCheck 不要（exit code が成否を語る）
-  }])
+  })])
 }
 
 # --- EventBridge → ECS RunTask の IAM role ---

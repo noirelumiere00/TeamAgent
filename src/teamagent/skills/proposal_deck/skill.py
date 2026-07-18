@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, ClassVar
@@ -26,7 +28,6 @@ from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.proposal_deck.contract import ComposerOutput
-from teamagent.skills.proposal_deck.renderer import render_deck
 from teamagent.skills.proposal_deck.schema import ProposalDeckInput, ProposalDeckOutput
 
 logger = structlog.get_logger(__name__)
@@ -72,6 +73,8 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         self._bedrock = bedrock or BedrockClient.from_env()
         self._prompt_version = prompt_version
         self._max_tokens = max_tokens
+        self._temporary_output_dirs: set[Path] = set()
+        self._temporary_output_lock = threading.Lock()
 
     def run(self, input: ProposalDeckInput, ctx: SkillContext) -> ProposalDeckOutput:
         log = ctx.bind_logger(self.name)
@@ -89,53 +92,77 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         template = self._resolve_template(input)
         # 出力先: 明示指定 > env > OS の一時ディレクトリ（Linux コンテナでは /tmp）。
         # tempfile.gettempdir() で TMPDIR を尊重しハードコード /tmp（bandit B108）を避ける。
-        out_dir = Path(
-            input.out_dir or os.environ.get("TEAMAGENT_DECK_OUT_DIR") or tempfile.gettempdir()
-        )
         safe = _SAFE_NAME.sub("_", input.product_name).strip("_") or "deck"
-        out_path = out_dir / f"{ctx.request_id}_{safe}.pptx"
-        rendered = self._render_pptx(
-            composer_out,
-            template,
-            out_path,
-            request_id=ctx.request_id,
-        )
+        configured_out_dir = input.out_dir or os.environ.get("TEAMAGENT_DECK_OUT_DIR")
+        if configured_out_dir:
+            out_dir = Path(configured_out_dir)
+            temporary_output = False
+        else:
+            safe_request = _SAFE_NAME.sub("_", ctx.request_id).strip("_")[:64] or "request"
+            out_dir = Path(tempfile.mkdtemp(prefix=f"teamagent-deck-{safe_request}-"))
+            temporary_output = True
+            with self._temporary_output_lock:
+                self._temporary_output_dirs.add(out_dir)
+        try:
+            out_path = out_dir / f"{ctx.request_id}_{safe}.pptx"
+            rendered = self._render_pptx(
+                composer_out,
+                template,
+                out_path,
+                request_id=ctx.request_id,
+            )
 
-        # Wave3-⑨: 既定 OFF。USE_PROPOSAL_DECK_PUBLISH=1 のとき VSEO と同じ非公開 S3
-        # presigned URL (7d) で publish して Slack から開ける状態にする。
-        pptx_url = self._publish_if_enabled(
-            str(rendered), input.product_name, ctx.request_id, kind="pptx"
-        )
+            pptx_url = self._publish_if_enabled(
+                str(rendered), input.product_name, ctx.request_id, kind="pptx"
+            )
+            pdf_path, pdf_url = self._emit_pdf_if_enabled(
+                composer_out, input, ctx, version_id=version_id, out_dir=out_dir, safe=safe
+            )
 
-        # PDF コンパニオン（提案#10,#17）: emit_pdf or USE_PROPOSAL_DECK_PDF=1 のとき生成。
-        # weasyprint 失敗は握って pdf_path/url=None（PPTX は正本なので skill は成功扱い）。
-        pdf_path, pdf_url = self._emit_pdf_if_enabled(
-            composer_out, input, ctx, version_id=version_id, out_dir=out_dir, safe=safe
-        )
+            skipped_ids = sorted(s.id for s in composer_out.skipped_placeholders)
+            log.info(
+                "proposal_deck_done",
+                pptx=str(rendered),
+                version_id=version_id,
+                filled=len(composer_out.placeholders),
+                skipped=len(skipped_ids),
+                cost_usd=cost_usd,
+                published=bool(pptx_url),
+                pdf=bool(pdf_path),
+            )
+            return ProposalDeckOutput(
+                pptx_path=str(rendered),
+                pptx_url=pptx_url,
+                version_id=version_id,
+                pdf_path=pdf_path,
+                pdf_url=pdf_url,
+                filled_count=len(composer_out.placeholders),
+                skipped_count=len(skipped_ids),
+                coverage_ratio=composer_out.coverage_ratio,
+                skipped_ids=skipped_ids,
+                total_cost_usd=cost_usd,
+            )
+        except Exception:
+            if temporary_output:
+                self._remove_temporary_output_dir(out_dir)
+            raise
 
-        skipped_ids = sorted(s.id for s in composer_out.skipped_placeholders)
-        log.info(
-            "proposal_deck_done",
-            pptx=str(rendered),
-            version_id=version_id,
-            filled=len(composer_out.placeholders),
-            skipped=len(skipped_ids),
-            cost_usd=cost_usd,
-            published=bool(pptx_url),
-            pdf=bool(pdf_path),
-        )
-        return ProposalDeckOutput(
-            pptx_path=str(rendered),
-            pptx_url=pptx_url,
-            version_id=version_id,
-            pdf_path=pdf_path,
-            pdf_url=pdf_url,
-            filled_count=len(composer_out.placeholders),
-            skipped_count=len(skipped_ids),
-            coverage_ratio=composer_out.coverage_ratio,
-            skipped_ids=skipped_ids,
-            total_cost_usd=cost_usd,
-        )
+    def _remove_temporary_output_dir(self, path: Path) -> None:
+        with self._temporary_output_lock:
+            owned = path in self._temporary_output_dirs
+        if not owned:
+            return
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+        with self._temporary_output_lock:
+            self._temporary_output_dirs.discard(path)
+
+    def cleanup_output(self, output: ProposalDeckOutput) -> None:
+        """Remove request-scoped PPTX/PDF after the runtime serializes them."""
+
+        self._remove_temporary_output_dir(Path(output.pptx_path).parent)
 
     @staticmethod
     def _render_pptx(
@@ -148,8 +175,11 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         """media job設定時はworkerへ委譲し、ローカル開発だけ従来rendererを使う。"""
         from teamagent.adapters.media_job import MediaJobClient
 
-        if not MediaJobClient.is_configured():
+        if not MediaJobClient.is_configured() and MediaJobClient.local_runtime_enabled():
+            from teamagent.skills.proposal_deck.renderer import render_deck
+
             return render_deck(composer_out, template, out_path)
+        MediaJobClient.require_configured()
         pptx = MediaJobClient().render_proposal_pptx(
             template.read_bytes(),
             composer_out.model_dump_json().encode("utf-8"),
@@ -169,13 +199,13 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         out_dir: Path,
         safe: str,
     ) -> tuple[str | None, str | None]:
-        """emit_pdf 有効時に PDF を生成（+ publish 有効なら S3 URL）。失敗は (None, None)。"""
+        """emit_pdf 有効時に PDF を生成し、失敗は明示的に呼び出し元へ返す。"""
         if not (input.emit_pdf or _envflag("USE_PROPOSAL_DECK_PDF")):
             return None, None
+        from teamagent.adapters.media_job import MediaJobClient, MediaJobError
+
         try:
             pdf_out = out_dir / f"{ctx.request_id}_{safe}.pdf"
-            from teamagent.adapters.media_job import MediaJobClient
-
             if MediaJobClient.is_configured():
                 from teamagent.skills.proposal_deck.pdf_export import build_proposal_html
 
@@ -190,7 +220,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 pdf_out.parent.mkdir(parents=True, exist_ok=True)
                 pdf_out.write_bytes(rendered)
                 rendered_pdf = pdf_out
-            else:
+            elif MediaJobClient.local_runtime_enabled():
                 from teamagent.skills.proposal_deck.pdf_export import render_proposal_pdf
 
                 rendered_pdf = render_proposal_pdf(
@@ -199,9 +229,14 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                     version_id=version_id,
                     out_path=pdf_out,
                 )
+            else:
+                raise MediaJobError("MEDIA_JOB_NOT_CONFIGURED")
+        except MediaJobError:
+            logger.exception("proposal_deck_pdf_failed", product=input.product_name)
+            raise
         except Exception:
             logger.exception("proposal_deck_pdf_failed", product=input.product_name)
-            return None, None
+            raise
         pdf_url = self._publish_if_enabled(
             str(rendered_pdf), input.product_name, ctx.request_id, kind="pdf"
         )

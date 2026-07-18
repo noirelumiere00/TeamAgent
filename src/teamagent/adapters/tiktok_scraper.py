@@ -230,6 +230,8 @@ def search_tiktok(
             search_type=search_type,
             videos=videos,
         )
+    if not MediaJobClient.local_runtime_enabled():
+        raise TikTokScrapeError("TIKTOK_MEDIA_JOB_NOT_CONFIGURED")
     if not _SCRAPER_SCRIPT.exists():
         raise TikTokScrapeError(
             f"TIKTOK_SCRAPER_MISSING: {_SCRAPER_SCRIPT} がありません。"
@@ -357,6 +359,13 @@ def get_tiktok_comments(
         video_url = validate_scrape_url(video_url, request_id=request_id)
     except UrlGuardError as e:
         raise TikTokScrapeError(f"TIKTOK_INVALID_URL: {e}") from e
+    from teamagent.adapters.media_job import MediaJobClient
+
+    if not MediaJobClient.local_runtime_enabled():
+        # The production comment-mining skill catches this explicit boundary
+        # and uses its existing bounded Apify route.  Never fall through to a
+        # Node/Chromium binary that is intentionally absent from core.
+        raise TikTokScrapeError("TIKTOK_COMMENTS_LOCAL_RUNTIME_DISABLED")
     if not _SCRAPER_SCRIPT.exists():
         raise TikTokScrapeError(f"TIKTOK_SCRAPER_MISSING: {_SCRAPER_SCRIPT} がありません")
 
@@ -463,6 +472,8 @@ def download_tiktok_video(
             )
         except Exception as exc:
             raise TikTokScrapeError(f"TIKTOK_MEDIA_JOB_FAILED: {type(exc).__name__}") from exc
+    if not MediaJobClient.local_runtime_enabled():
+        raise TikTokScrapeError("TIKTOK_MEDIA_JOB_NOT_CONFIGURED")
     if not _skip_url_guard:
         from teamagent.adapters.url_guard import UrlGuardError, validate_scrape_url
 

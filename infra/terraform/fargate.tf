@@ -11,7 +11,23 @@
 #   ⚠️ apply は本人/targeted。secret は本人が Secrets Manager に作成（値はここに無い）。image は ECR push 後に tfvars 指定。
 
 locals {
-  account_id = data.aws_caller_identity.current.account_id
+  account_id       = data.aws_caller_identity.current.account_id
+  teamagent_python = "/app/.venv/bin/python"
+  teamagent_runtime_container = {
+    user                   = "10001:10001"
+    readonlyRootFilesystem = true
+    privileged             = false
+    linuxParameters = {
+      capabilities = {
+        drop = ["ALL"]
+      }
+    }
+    mountPoints = [{
+      sourceVolume  = "runtime-tmp"
+      containerPath = "/tmp"
+      readOnly      = false
+    }]
+  }
 
   bedrock_resources = [
     "arn:aws:bedrock:*::foundation-model/*",
@@ -37,7 +53,7 @@ data "aws_secretsmanager_secret" "gateway_token" {
   name = var.openclaw_gateway_token_secret_name
 }
 # §M改(VSEO有効化): Gemini 認証は本番EC2と同方式の Vertex SA（teamagent/dev/vertex_sa）。
-# entrypoint ラッパが SA JSON をファイル化して ADC に渡す（scripts/run_mcp_vertex_entrypoint.sh）。
+# Python ラッパが SA JSON を task-scoped /tmp にファイル化して ADC に渡す。
 data "aws_secretsmanager_secret" "vertex_sa" {
   count = var.enable_scrape_tools ? 1 : 0
   name  = var.vertex_sa_secret_name
@@ -362,7 +378,18 @@ resource "aws_ecs_task_definition" "mcp" {
   execution_role_arn = aws_iam_role.ecs_execution_mcp.arn
   task_role_arn      = aws_iam_role.mcp_task.arn
 
-  container_definitions = jsonencode([merge({
+  volume {
+    name = "runtime-tmp"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = !var.enable_scrape_tools || local.media_enabled == 1
+      error_message = "enable_scrape_tools requires the generic media worker; hardened core contains no browser/ffmpeg/yt-dlp fallback."
+    }
+  }
+
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
     name         = "teamagent-mcp"
     image        = var.mcp_image
     essential    = true
@@ -473,12 +500,16 @@ resource "aws_ecs_task_definition" "mcp" {
       # ナレッジ回答の末尾に「資料リンク」を付与（@AiLa=openclaw が markdown を装飾リンクへ
       # 変換する mcp のみ ON。connect-web(/app) は未設定＝生テキスト化しないため付けない）。
       { name = "SEARCH_ANSWER_SOURCE_LINKS", value = "1" },
-      ], var.enable_tiktok_acquire ? [
-      # live パリティ: tiktok_acquire 連携のジョブ投入側。mcp が DynamoDB(状態)/SQS(キュー)/S3 を参照。
-      # これらが無いと @AiLa の tiktok_acquire がジョブを投入できず取得パイプラインが停止する。
+      ], local.media_enabled == 1 ? [
+      # Generic media delegation.  Legacy TIKTOK_* aliases point at the same
+      # queue/table/bucket so the existing skill schema remains compatible.
       { name = "USE_TIKTOK_ACQUIRE", value = "1" },
+      { name = "MEDIA_JOBS_TABLE", value = aws_dynamodb_table.tiktok_jobs[0].name },
+      { name = "MEDIA_JOB_BUCKET", value = aws_s3_bucket.media_jobs[0].bucket },
+      { name = "MEDIA_TASK_QUEUE", value = aws_sqs_queue.tiktok_jobs[0].url },
+      { name = "MEDIA_ARTIFACT_TTL_SECONDS", value = tostring(var.media_artifact_ttl_seconds) },
       { name = "TIKTOK_JOBS_TABLE", value = aws_dynamodb_table.tiktok_jobs[0].name },
-      { name = "TIKTOK_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
+      { name = "TIKTOK_S3_BUCKET", value = aws_s3_bucket.media_jobs[0].bucket },
       { name = "TIKTOK_TASK_QUEUE", value = aws_sqs_queue.tiktok_jobs[0].url },
       ] : [], var.enable_x_research ? [
       # カタログ①〜⑤: X(Twitter)リサーチ/検索面チェック/コメントマイニング（2026-07 組み込み）。
@@ -561,16 +592,14 @@ resource "aws_ecs_task_definition" "mcp" {
       }
     }
     healthCheck = {
-      command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:8787/healthz || exit 1"]
+      command     = ["CMD", local.teamagent_python, "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"]
       interval    = 30
       timeout     = 5
       retries     = 5
       startPeriod = 40
     }
-    }, var.enable_scrape_tools ? {
-    # §M改: 拡張版のみ SA JSON ファイル化ラッパで起動（既定はイメージの CMD のまま＝挙動不変）。
-    command = ["sh", "scripts/run_mcp_vertex_entrypoint.sh"]
-  } : {})])
+    command = [local.teamagent_python, "/app/scripts/run_mcp_vertex_entrypoint.py"]
+  })])
 }
 
 resource "aws_ecs_task_definition" "openclaw" {

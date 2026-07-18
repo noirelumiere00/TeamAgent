@@ -25,9 +25,7 @@ from teamagent.media.contracts import (
 
 logger = structlog.get_logger(__name__)
 
-_DEFAULT_BUCKET = "teamagent-dev-raw-files"
 _PRESIGN_S = 300
-_ARTIFACT_TTL_S = 3600
 _DEADLINE_S = 15 * 60
 
 
@@ -40,11 +38,7 @@ class TikTokTaskStore:
             "TIKTOK_TASK_QUEUE", ""
         )
         self._table = os.environ.get("MEDIA_JOBS_TABLE") or os.environ.get("TIKTOK_JOBS_TABLE", "")
-        self._bucket = (
-            os.environ.get("MEDIA_JOB_BUCKET")
-            or os.environ.get("TIKTOK_S3_BUCKET")
-            or _DEFAULT_BUCKET
-        )
+        self._bucket = os.environ.get("MEDIA_JOB_BUCKET") or os.environ.get("TIKTOK_S3_BUCKET", "")
         self._kms_key_id = os.environ.get("MEDIA_JOB_KMS_KEY_ID", "")
 
     def _session(self) -> Any:
@@ -64,11 +58,12 @@ class TikTokTaskStore:
     def submit(self, spec: dict[str, Any]) -> bool:
         """Validate and submit one bounded, content-hashed media request."""
 
-        if not self._queue_url or not self._table:
+        if not self._queue_url or not self._table or not self._bucket:
             logger.warning(
                 "tiktok_submit_misconfigured",
                 has_queue=bool(self._queue_url),
                 has_table=bool(self._table),
+                has_bucket=bool(self._bucket),
             )
             return False
         try:
@@ -96,9 +91,9 @@ class TikTokTaskStore:
                 output_bucket=self._bucket,
                 request_fingerprint=request_fingerprint,
                 timeout_s=_DEADLINE_S,
-                artifact_ttl_s=_ARTIFACT_TTL_S,
+                artifact_ttl_s=MediaJobClient.artifact_ttl_seconds(),
                 job_id=job_id,
-                output_prefix=f"tiktok-acquire/{job_id}/",
+                output_prefix=f"media-jobs/{job_id}/",
                 audit_principal_hash=spec.get("audit_principal_hash"),
             )
             self._client(self._session()).submit(request)
@@ -160,7 +155,7 @@ class TikTokTaskStore:
 
         s3 = session.client("s3", region_name=self._region)
         artifacts = {artifact.name: artifact.object for artifact in result.artifacts}
-        prefix = str(result.metadata.get("s3_prefix") or f"tiktok-acquire/{result.job_id}/")
+        prefix = str(result.metadata.get("s3_prefix") or f"media-jobs/{result.job_id}/")
         prefix = prefix if prefix.endswith("/") else f"{prefix}/"
 
         def presign(key: str) -> str | None:

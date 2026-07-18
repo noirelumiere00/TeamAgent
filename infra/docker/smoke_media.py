@@ -9,10 +9,12 @@ import importlib.util
 import json
 import os
 import pwd
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +231,11 @@ def _assert_ytdlp_sanitized_and_allowed(work_root: Path) -> None:
         assert url == samples["youtube"]
         assert download is True
         params = self.params
+        assert params["hls_prefer_native"] is True
+        assert params["external_downloader"] is None
+        assert params["ffmpeg_location"] == "/nonexistent/teamagent-ffmpeg-disabled"
+        assert params["fixup"] == "never"
+        assert params["postprocessors"] == []
         template = params["outtmpl"]
         if isinstance(template, dict):
             template = template["default"]
@@ -265,7 +272,11 @@ def _assert_python_playwright(work_root: Path) -> int:
             executable_path=os.environ["CHROMIUM_PATH"],
             headless=True,
             chromium_sandbox=True,
-            args=["--disable-gpu", "--disable-dev-shm-usage"],
+            args=[
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--disable-setuid-sandbox",
+            ],
         )
         try:
             page = browser.new_page(viewport={"width": 640, "height": 360})
@@ -305,6 +316,77 @@ def _assert_node_playwright(work_root: Path) -> int:
     assert detail["nodePlaywright"] == "1.60.0"
     assert destination.stat().st_size > 1000
     return int(detail["blockedRequests"])
+
+
+def _assert_node_network_guard() -> None:
+    completed = subprocess.run(
+        [
+            "node",
+            "/app/tools/tiktok_scraper/search.mjs",
+            "--network-guard-self-test",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    detail = json.loads(completed.stdout)
+    assert detail["ok"] is True
+    assert "100.64.0.1" in detail["blocked"]
+    assert "::ffff:127.0.0.1" in detail["blocked"]
+
+
+def _assert_ffmpeg_protocol_guard(work_root: Path) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(2)
+    accepted: list[bool] = []
+
+    def intercept() -> None:
+        try:
+            connection, _address = listener.accept()
+        except TimeoutError:
+            return
+        accepted.append(True)
+        connection.close()
+
+    thread = threading.Thread(target=intercept, daemon=True)
+    thread.start()
+    port = listener.getsockname()[1]
+    playlist = work_root / "crafted.m3u8"
+    playlist.write_text(
+        (
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n"
+            f"#EXTINF:10,\nhttp://127.0.0.1:{port}/private.ts\n"
+            "#EXT-X-ENDLIST\n"
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-protocol_blacklist",
+            "http,https,tcp,tls,udp,rtp,ftp,gopher,sftp,ssh",
+            "-i",
+            str(playlist),
+            "-f",
+            "null",
+            "-",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=10,
+    )
+    thread.join(timeout=3)
+    listener.close()
+    assert completed.returncode != 0
+    assert accepted == []
 
 
 def _assert_transforms(work_root: Path) -> dict[str, int]:
@@ -397,6 +479,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="media-suite-", dir=jobs) as raw:
         work_root = Path(raw)
         _assert_ytdlp_sanitized_and_allowed(work_root)
+        _assert_node_network_guard()
+        _assert_ffmpeg_protocol_guard(work_root)
         python_blocked = _assert_python_playwright(work_root)
         node_blocked = _assert_node_playwright(work_root)
         transformed = _assert_transforms(work_root)
@@ -412,6 +496,8 @@ def main() -> None:
                 "container_network": "none",
                 "python_playwright_blocked_requests": python_blocked,
                 "node_playwright_blocked_requests": node_blocked,
+                "node_ssrf_non_global_blocked": True,
+                "ffmpeg_network_protocols_blocked": True,
                 "yt_dlp_allowed_sites": ["youtube", "TikTok", "Instagram"],
                 **transformed,
             },

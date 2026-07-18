@@ -24,8 +24,16 @@ from teamagent.skills.video_algorithm.schema import (
 from teamagent.skills.video_algorithm.skill import (
     VideoAlgorithmSkill,
     _default_report_dir,
+    _request_report_dir,
     parse_analysis,
 )
+
+
+@pytest.fixture(autouse=True)
+def _explicit_local_media_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These dependency-injected tests intentionally exercise local media fallbacks."""
+
+    monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
 
 
 def _json_block(*, kw_telop: bool, cta: bool, brand: bool, dur: float) -> str:
@@ -269,6 +277,23 @@ def test_default_request_reports_are_empty_after_repeated_cleanup(
     for index in range(3):
         out = VideoAlgorithmOutput(query=f"q-{index}")
         out.report_html_path = skill._write_report(out, f"req-{index}")
+        assert out.report_html_path is not None
+        skill.cleanup_output(out)
+        assert not root.exists() or list(root.iterdir()) == []
+
+
+def test_configured_base_request_reports_are_empty_after_repeated_cleanup(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = os.path.join(str(tmp_path), "custom-vseo")
+    monkeypatch.setenv("TEAMAGENT_VSEO_REPORT_DIR", configured)
+    skill = VideoAlgorithmSkill()
+    root = Path(configured)
+
+    for index in range(3):
+        request_dir = _request_report_dir(f"env-{index}")
+        out = VideoAlgorithmOutput(query=f"q-{index}")
+        out.report_html_path = skill._write_report(out, f"env-{index}", request_dir)
         assert out.report_html_path is not None
         skill.cleanup_output(out)
         assert not root.exists() or list(root.iterdir()) == []

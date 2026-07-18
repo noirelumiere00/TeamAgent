@@ -35,7 +35,13 @@ fi
 command -v docker >/dev/null
 command -v trivy >/dev/null
 command -v sha256sum >/dev/null
-mkdir -p "$EVIDENCE_DIR"
+command -v date >/dev/null
+if test -e "$EVIDENCE_DIR"; then
+  echo "refusing to reuse an existing evidence path: $EVIDENCE_DIR" >&2
+  exit 1
+fi
+umask 077
+mkdir "$EVIDENCE_DIR"
 TRACKED_SOURCE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/teamagent-tracked-source.XXXXXX")
 cleanup_tracked_source() {
   if test -n "${TRACKED_SOURCE_DIR:-}"; then
@@ -43,15 +49,9 @@ cleanup_tracked_source() {
   fi
 }
 trap cleanup_tracked_source EXIT INT TERM
-git -C "$REPO_ROOT" archive "$HEAD" | tar -x -C "$TRACKED_SOURCE_DIR"
-trivy fs \
-  --scanners secret \
-  --exit-code 1 \
-  --format json \
-  --output "$EVIDENCE_DIR/source-tracked-trivy-secret.json" \
-  "$TRACKED_SOURCE_DIR"
-cleanup_tracked_source
-TRACKED_SOURCE_DIR=
+git -C "$REPO_ROOT" archive --format=tar "$HEAD" \
+  >"$EVIDENCE_DIR/source-tracked.tar"
+tar -x -f "$EVIDENCE_DIR/source-tracked.tar" -C "$TRACKED_SOURCE_DIR"
 set --
 if test -n "$CA_FILE"; then
   test -f "$CA_FILE"
@@ -90,17 +90,37 @@ docker buildx build \
   --load \
   "$REPO_ROOT"
 
+SCAN_STARTED_AT=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+trivy fs \
+  --skip-db-update \
+  --scanners secret \
+  --exit-code 1 \
+  --format json \
+  --output "$EVIDENCE_DIR/source-tracked-trivy-secret.json" \
+  "$TRACKED_SOURCE_DIR"
+trivy image --download-db-only
+trivy version --format json >"$EVIDENCE_DIR/trivy-version.json"
+
 for pair in "core:$CORE_IMAGE" "media:$MEDIA_IMAGE"; do
   name=${pair%%:*}
   image=${pair#*:}
+  image_id=$(docker image inspect --format '{{.Id}}' "$image")
+  case "$image_id" in
+    sha256:[0-9a-f][0-9a-f]*) ;;
+    *)
+      echo "$name image has no immutable image ID" >&2
+      exit 1
+      ;;
+  esac
+  test "${#image_id}" -eq 71
   revision=$(
     docker image inspect \
       --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-      "$image"
+      "$image_id"
   )
-  architecture=$(docker image inspect --format '{{.Architecture}}' "$image")
-  user=$(docker image inspect --format '{{.Config.User}}' "$image")
-  volumes=$(docker image inspect --format '{{json .Config.Volumes}}' "$image")
+  architecture=$(docker image inspect --format '{{.Architecture}}' "$image_id")
+  user=$(docker image inspect --format '{{.Config.User}}' "$image_id")
+  volumes=$(docker image inspect --format '{{json .Config.Volumes}}' "$image_id")
   test "$revision" = "$HEAD"
   test "$architecture" = "arm64"
   test "$user" = "10001:10001"
@@ -109,32 +129,32 @@ for pair in "core:$CORE_IMAGE" "media:$MEDIA_IMAGE"; do
     baked_label=$(
       docker image inspect \
         --format '{{index .Config.Labels "io.teamagent.contract.baked-app-html-sha256"}}' \
-        "$image"
+        "$image_id"
     )
     source_label=$(
       docker image inspect \
         --format '{{index .Config.Labels "io.teamagent.contract.app-html-source"}}' \
-        "$image"
+        "$image_id"
     )
     sha_label=$(
       docker image inspect \
         --format '{{index .Config.Labels "io.teamagent.contract.app-html-sha256"}}' \
-        "$image"
+        "$image_id"
     )
     version_label=$(
       docker image inspect \
         --format '{{index .Config.Labels "io.teamagent.contract.app-html-version-id"}}' \
-        "$image"
+        "$image_id"
     )
     manifest_label=$(
       docker image inspect \
         --format '{{index .Config.Labels "io.teamagent.contract.app-html-manifest-sha256"}}' \
-        "$image"
+        "$image_id"
     )
     build_inputs_label=$(
       docker image inspect \
         --format '{{index .Config.Labels "io.teamagent.contract.app-html-build-inputs-sha256"}}' \
-        "$image"
+        "$image_id"
     )
     test "$baked_label" = "$BAKED_APP_HTML_SHA256"
     test "$source_label" = "$APP_HTML_SOURCE"
@@ -144,38 +164,70 @@ for pair in "core:$CORE_IMAGE" "media:$MEDIA_IMAGE"; do
     test "$build_inputs_label" = "$APP_HTML_BUILD_INPUTS_SHA256"
   fi
 
-  docker image inspect "$image" >"$EVIDENCE_DIR/$name-image-inspect.json"
-  docker history --no-trunc "$image" >"$EVIDENCE_DIR/$name-image-history.txt"
+  docker image inspect "$image_id" >"$EVIDENCE_DIR/$name-image-inspect.json"
+  docker history --no-trunc "$image_id" >"$EVIDENCE_DIR/$name-image-history.txt"
   trivy image \
+    --skip-db-update \
+    --skip-check-update \
     --scanners vuln \
-    --severity CRITICAL,HIGH \
+    --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+    --exit-code 0 \
     --format json \
     --output "$EVIDENCE_DIR/$name-trivy-vulnerability.json" \
-    "$image"
+    "$image_id"
   trivy image \
+    --skip-db-update \
+    --skip-check-update \
     --scanners secret \
+    --exit-code 1 \
     --format json \
     --output "$EVIDENCE_DIR/$name-trivy-secret.json" \
-    "$image"
+    "$image_id"
   "$SCRIPT_DIR/verify_trivy_zero.py" \
     "$EVIDENCE_DIR/$name-trivy-vulnerability.json" \
     "$EVIDENCE_DIR/$name-trivy-secret.json" \
+    --image-id "$image_id" \
+    --artifact-name "$image_id" \
     >"$EVIDENCE_DIR/$name-trivy-summary.json"
   trivy image \
+    --skip-db-update \
+    --skip-check-update \
     --format cyclonedx \
     --output "$EVIDENCE_DIR/$name-sbom.cdx.json" \
-    "$image"
+    "$image_id"
 done
+SCAN_FINISHED_AT=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+trivy version --format json >"$EVIDENCE_DIR/trivy-version-after.json"
+cmp "$EVIDENCE_DIR/trivy-version.json" "$EVIDENCE_DIR/trivy-version-after.json"
+rm "$EVIDENCE_DIR/trivy-version-after.json"
 
-TEAMAGENT_CORE_IMAGE="$CORE_IMAGE" \
-TEAMAGENT_MEDIA_IMAGE="$MEDIA_IMAGE" \
+CORE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$CORE_IMAGE")
+MEDIA_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$MEDIA_IMAGE")
+TEAMAGENT_CORE_IMAGE="$CORE_IMAGE_ID" \
+TEAMAGENT_MEDIA_IMAGE="$MEDIA_IMAGE_ID" \
   "$SCRIPT_DIR/run_runtime_smokes.sh" \
   >"$EVIDENCE_DIR/runtime-smokes.log"
 
 git -C "$REPO_ROOT" show --no-patch --format=fuller "$HEAD" \
   >"$EVIDENCE_DIR/git-commit.txt"
-git -C "$REPO_ROOT" diff-tree --no-commit-id --name-status -r "$HEAD" \
+git -C "$REPO_ROOT" diff-tree \
+  --root --no-commit-id --name-status -r --first-parent "$HEAD" \
   >"$EVIDENCE_DIR/git-files.txt"
+test -s "$EVIDENCE_DIR/git-files.txt"
+"$SCRIPT_DIR/generate_runtime_receipt.py" \
+  "$EVIDENCE_DIR" \
+  --repo-root "$REPO_ROOT" \
+  --head "$HEAD" \
+  --branch "$BRANCH" \
+  --source-scan-artifact-name "$TRACKED_SOURCE_DIR" \
+  --started-at "$SCAN_STARTED_AT" \
+  --finished-at "$SCAN_FINISHED_AT"
+"$SCRIPT_DIR/verify_runtime_evidence.py" \
+  "$EVIDENCE_DIR" \
+  --expected-head "$HEAD" \
+  --repo-root "$REPO_ROOT" \
+  --skip-checksums \
+  >"$EVIDENCE_DIR/verification.json"
 (
   cd "$EVIDENCE_DIR"
   for file in ./*; do
@@ -183,8 +235,12 @@ git -C "$REPO_ROOT" diff-tree --no-commit-id --name-status -r "$HEAD" \
     sha256sum "$file"
   done >SHA256SUMS
 )
+"$SCRIPT_DIR/verify_runtime_evidence.py" \
+  "$EVIDENCE_DIR" \
+  --expected-head "$HEAD" \
+  --repo-root "$REPO_ROOT"
 
 printf 'HEAD=%s\n' "$HEAD"
-printf 'CORE_IMAGE=%s\n' "$CORE_IMAGE"
-printf 'MEDIA_IMAGE=%s\n' "$MEDIA_IMAGE"
+printf 'CORE_IMAGE=%s\n' "$CORE_IMAGE_ID"
+printf 'MEDIA_IMAGE=%s\n' "$MEDIA_IMAGE_ID"
 printf 'EVIDENCE_DIR=%s\n' "$EVIDENCE_DIR"
