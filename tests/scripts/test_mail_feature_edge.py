@@ -738,6 +738,7 @@ def test_E40_draft_button_only_for_to_self(monkeypatch):
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "mail-edge-test-primary-" + "m" * 32)
     monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", raising=False)
     monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", raising=False)
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY", raising=False)
     monkeypatch.delenv("MAIL_ACTION_TTL_S", raising=False)
     monkeypatch.delenv("REPORT_LINK_HMAC_SECRET", raising=False)
     to_self = _to_me(thread="tT", subj="To自分")  # To=ME
@@ -761,6 +762,7 @@ def test_E40b_invalid_mail_hmac_suppresses_action_tokens(monkeypatch):
     monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", legacy_db)
     monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", raising=False)
     monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", raising=False)
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY", raising=False)
     monkeypatch.delenv("MAIL_ACTION_TTL_S", raising=False)
     out = _run(_skill(_Gmail([_to_me(thread="tT", subj="To自分")])), max_drafts=0)
     assert out.mail_digest[0].draft_token == ""

@@ -6,15 +6,21 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
 from teamagent.adapters.gcalendar_client import DuplicateEventError, InsertedEvent
+from teamagent.hmac_keyring import HMAC_MAX_ROLLOUT_OVERLAP_S
 from teamagent.skills.base import SkillContext
 from teamagent.skills.calendar_event.schema import CalendarEventInput
 from teamagent.skills.calendar_event.skill import CalendarEventSkill
+from teamagent.skills.morning_digest.draft_token import _owner_hash
 from teamagent.skills.morning_digest.event_token import (
     decode_event_token,
     encode_event_token,
@@ -25,7 +31,11 @@ ME = "me@vectorinc.co.jp"
 _CAL_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 _MAIL_SECRET = "calendar-action-test-secret-" + "m" * 32
 _MAIL_NEXT_SECRET = "calendar-action-next-secret-" + "n" * 32
+_LEGACY_DATABASE_URL = (
+    "postgresql://teamagent:legacy-db-password@db.internal:5432/teamagent?sslmode=require"
+)
 _ROTATION_NOW = 2_000_000_000
+_MAIL_TTL_S = 60 * 60 * 24
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +43,9 @@ def _hmac_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
         "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+        "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY",
+        "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
+        "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
         "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
         "MAIL_ACTION_TTL_S",
         "REPORT_LINK_HMAC_SECRET",
@@ -54,6 +67,27 @@ def _token(**kw: Any) -> str:
     )
     assert token is not None
     return token
+
+
+def _legacy_event_token(*, expires: int) -> str:
+    payload = {
+        "s": "2026-07-15T14:00:00+09:00",
+        "n": "2026-07-15T15:00:00+09:00",
+        "l": "legacy meeting",
+        "o": _owner_hash(ME),
+        "e": expires,
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    signature = hmac.new(
+        _LEGACY_DATABASE_URL.encode(),
+        raw,
+        hashlib.sha256,
+    ).digest()[:16]
+
+    def encode(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
+    return f"{encode(raw)}.{encode(signature)}"
 
 
 # ── event_token 単体 ────────────────────────────────────────────────────────
@@ -141,6 +175,22 @@ def test_event_token_accepts_previous_only_during_rotation(
     monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET")
     monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT")
     assert decode_event_token(new, ME, now=_ROTATION_NOW) is None
+
+
+def test_legacy_database_event_token_survives_only_the_bounded_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cutover = _ROTATION_NOW + HMAC_MAX_ROLLOUT_OVERLAP_S
+    expires = cutover - 1 + _MAIL_TTL_S
+    legacy = _legacy_event_token(expires=expires)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY", "1")
+
+    payload = decode_event_token(legacy, ME, now=expires - 1)
+    assert payload is not None
+    assert payload.title == "legacy meeting"
+    assert decode_event_token(legacy, ME, now=expires) is None
 
 
 def test_stable_event_id_is_base32hex_and_deterministic() -> None:

@@ -6,6 +6,8 @@ draft_token.py と同じ方式（鍵・署名・base64url・fail-closed）で、
 置かれる前提）。発行TTLは draft_token と共有し、未設定時24h・設定時は1..24hに限定する。
 
 Fargate（digest 描画）が encode、calendar_event skill（押下処理）が decode する。
+新規tokenは draft と別のHMAC目的を持つversion 2で、旧形式は明示されたbounded legacy
+previousだけが検証する。
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import json
 from dataclasses import dataclass
 
 from teamagent.hmac_keyring import (
+    HMAC_PURPOSE_CALENDAR_EVENT,
     add_token_ttl,
     coerce_epoch_seconds,
     load_mail_action_hmac_keyring,
@@ -27,6 +30,10 @@ from teamagent.skills.morning_digest.draft_token import (
     _b64e,
     _owner_hash,
 )
+
+_TOKEN_VERSION = 2
+_TOKEN_TYPE = "event"
+_LEGACY_FIELDS = frozenset({"s", "n", "l", "o", "e"})
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,8 @@ def encode_event_token(
         if expires is None or keyring is None:
             return None
         payload = {
+            "v": _TOKEN_VERSION,
+            "typ": _TOKEN_TYPE,
             "s": str(start_iso),
             "n": str(end_iso),
             "l": str(title)[:60],
@@ -65,7 +74,7 @@ def encode_event_token(
             "e": expires,
         }
         raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        sig = keyring.sign(raw, digest_bytes=_SIG_LEN)
+        sig = keyring.sign(raw, purpose=HMAC_PURPOSE_CALENDAR_EVENT, digest_bytes=_SIG_LEN)
         return _b64e(raw) + "." + _b64e(sig)
     except Exception:
         return None
@@ -84,10 +93,22 @@ def decode_event_token(
     try:
         body_b64, sig_b64 = (token or "").split(".", 1)
         raw = _b64d(body_b64)
-        if not keyring.verify(raw, _b64d(sig_b64), digest_bytes=_SIG_LEN):
-            return None
+        signature = _b64d(sig_b64)
         payload = json.loads(raw)
         if not isinstance(payload, dict):
+            return None
+        if payload.get("v") == _TOKEN_VERSION and payload.get("typ") == _TOKEN_TYPE:
+            if not keyring.verify(
+                raw,
+                signature,
+                purpose=HMAC_PURPOSE_CALENDAR_EVENT,
+                digest_bytes=_SIG_LEN,
+            ):
+                return None
+        elif "v" not in payload and "typ" not in payload and set(payload) == _LEGACY_FIELDS:
+            if not keyring.verify_legacy_previous(raw, signature, digest_bytes=_SIG_LEN):
+                return None
+        else:
             return None
         expires = validate_epoch_seconds(payload.get("e"))
     except Exception:

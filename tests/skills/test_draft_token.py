@@ -9,12 +9,20 @@ import json
 
 import pytest
 
-from teamagent.hmac_keyring import HMAC_MAX_ROLLOUT_OVERLAP_S
+from teamagent.hmac_keyring import (
+    HMAC_MAX_ROLLOUT_OVERLAP_S,
+    HMAC_PURPOSE_MAIL_DRAFT,
+    HmacKeyring,
+)
 from teamagent.skills.morning_digest.draft_token import (
     _owner_hash,
     decode_draft_token,
     encode_draft_token,
     has_secret,
+)
+from teamagent.skills.morning_digest.event_token import (
+    decode_event_token,
+    encode_event_token,
 )
 
 ME = "s-komata@vectorinc.co.jp"
@@ -30,11 +38,17 @@ _HMAC_ENVS = (
     "MAIL_ACTION_HMAC_SECRET",
     "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
     "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+    "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY",
+    "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
+    "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
     "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
     "MAIL_ACTION_TTL_S",
     "REPORT_LINK_HMAC_SECRET",
     "REPORT_LINK_HMAC_PREVIOUS_SECRET",
     "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+    "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY",
+    "REPORT_LINK_HMAC_PRIMARY_GENERATION",
+    "REPORT_LINK_HMAC_PREVIOUS_GENERATION",
     "REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
     "REPORT_LINK_TTL_S",
     "DATABASE_URL",
@@ -84,6 +98,26 @@ def _payload(token: str) -> dict[str, object]:
 def test_roundtrip_returns_thread_id() -> None:
     token = _require_token(encode_draft_token("thread-123", ME, now=1000))
     assert decode_draft_token(token, ME, now=1000) == "thread-123"
+
+
+def test_draft_and_event_tokens_cannot_cross_verify() -> None:
+    draft = _require_token(encode_draft_token("thread-123", ME, now=1000))
+    event = _require_token(
+        encode_event_token(
+            start_iso="2026-07-15T14:00:00+09:00",
+            end_iso="2026-07-15T15:00:00+09:00",
+            title="meeting",
+            owner_email=ME,
+            now=1000,
+        )
+    )
+
+    assert decode_event_token(draft, ME, now=1000) is None
+    assert decode_draft_token(event, ME, now=1000) is None
+    assert _payload(draft)["typ"] == "draft"
+    assert _payload(event)["typ"] == "event"
+    assert _payload(draft)["v"] == 2
+    assert _payload(event)["v"] == 2
 
 
 def test_token_expiry_is_exclusive_at_exact_boundary() -> None:
@@ -192,11 +226,17 @@ def test_legacy_database_key_is_bounded_previous_verification_only(
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
     assert decode_draft_token(legacy, ME, now=_ROTATION_NOW) is None
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    assert decode_draft_token(legacy, ME, now=_ROTATION_NOW) is None
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY", "1")
     assert decode_draft_token(legacy, ME, now=_ROTATION_NOW) == "legacy-thread"
 
     issued = _require_token(encode_draft_token("new-thread", ME, now=_ROTATION_NOW))
     raw, signature = _signature(issued)
-    primary_sig = hmac.new(_MAIL_PRIMARY.encode(), raw, hashlib.sha256).digest()[:16]
+    primary_sig = HmacKeyring(_MAIL_PRIMARY.encode(), (_MAIL_PRIMARY.encode(),)).sign(
+        raw,
+        purpose=HMAC_PURPOSE_MAIL_DRAFT,
+        digest_bytes=16,
+    )
     previous_sig = hmac.new(_LEGACY_DATABASE_URL.encode(), raw, hashlib.sha256).digest()[:16]
     assert hmac.compare_digest(signature, primary_sig)
     assert not hmac.compare_digest(signature, previous_sig)
@@ -215,6 +255,7 @@ def test_verifier_first_rollout_covers_last_old_issuer_token(
     )
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY", "1")
 
     assert decode_draft_token(legacy, ME, now=last_old_issue) == "last-old-issuer-token"
     assert decode_draft_token(legacy, ME, now=expires - 1) == "last-old-issuer-token"
@@ -230,6 +271,7 @@ def test_previous_key_deadline_is_exclusive(monkeypatch: pytest.MonkeyPatch) -> 
     )
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
     monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY", "1")
     assert decode_draft_token(legacy, ME, now=deadline - 1) == "deadline-probe"
     assert decode_draft_token(legacy, ME, now=deadline) is None
 

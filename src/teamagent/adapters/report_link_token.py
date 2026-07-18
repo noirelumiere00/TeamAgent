@@ -9,7 +9,8 @@ openclaw(@AiLa) の LLM が長い presigned URL のクエリ（``?X-Amz-Signatur
 信頼境界は現行 presigned URL（＝リンクを知る人が時限で閲覧）と同一。発行側（mcp/skill）と
 復号側（connect-web）はレポート専用主鍵 ``REPORT_LINK_HMAC_SECRET`` を共有する。新規発行は
 必ず主鍵だけを使い、移行前 token は ``REPORT_LINK_HMAC_PREVIOUS_SECRET`` と固定した
-``..._PREVIOUS_ROTATION_STARTED_AT`` を設定した verifier-first 移行期間だけ検証する。
+``..._PREVIOUS_ROTATION_STARTED_AT`` に加えて ``..._PREVIOUS_IS_LEGACY=1`` を設定した
+verifier-first 移行期間だけ検証する。新規tokenはレポート専用HMAC目的のversion 2である。
 ``REPORT_LINK_TTL_S`` は未設定時7日、設定時は ASCII 10進数の1..7日のみ。設定不正や明示TTLの
 範囲外では発行せず None を返し、呼出元は presigned へ落とす。``MAIL_ACTION_HMAC_SECRET`` /
 ``DATABASE_URL`` / ``SLACK_BOT_TOKEN`` への fallback は一切しない。鍵が無い・空・短すぎる・
@@ -28,6 +29,7 @@ import json
 import os
 
 from teamagent.hmac_keyring import (
+    HMAC_PURPOSE_REPORT_LINK,
     add_token_ttl,
     coerce_epoch_seconds,
     load_report_link_hmac_keyring,
@@ -36,6 +38,8 @@ from teamagent.hmac_keyring import (
 )
 
 _TOKEN_TYPE = "r"  # 用途タグ（同一鍵の draft/event 等とドメイン分離＝クロス転用を封じる）
+_TOKEN_VERSION = 2
+_LEGACY_FIELDS = frozenset({"typ", "b", "k", "r", "e"})
 _DEFAULT_BUCKET = "teamagent-dev-raw-files"  # report_publish._DEFAULT_BUCKET と一致
 _ALLOWED_KEY_PREFIXES = ("vseo-reports/", "vseo-proposals/")  # 発行しうる prefix のみ許可
 # 既定 7日（旧 presigned と同等の露出窓）。トークンはアクセスログに残りうる capability なので
@@ -106,6 +110,7 @@ def encode_report_token(
         if expires is None or keyring is None:
             return None
         payload = {
+            "v": _TOKEN_VERSION,
             "typ": _TOKEN_TYPE,
             "b": str(bucket),
             "k": str(key),
@@ -113,7 +118,7 @@ def encode_report_token(
             "e": expires,
         }
         raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        sig = keyring.sign(raw, digest_bytes=_SIG_LEN)
+        sig = keyring.sign(raw, purpose=HMAC_PURPOSE_REPORT_LINK, digest_bytes=_SIG_LEN)
         return _b64e(raw) + "." + _b64e(sig)
     except Exception:
         return None
@@ -134,10 +139,22 @@ def decode_report_token(token: str, *, now: int | None = None) -> tuple[str, str
     try:
         body_b64, sig_b64 = (token or "").split(".", 1)
         raw = _b64d(body_b64)
-        if not keyring.verify(raw, _b64d(sig_b64), digest_bytes=_SIG_LEN):
-            return None
+        signature = _b64d(sig_b64)
         payload = json.loads(raw)
         if not isinstance(payload, dict):
+            return None
+        if payload.get("v") == _TOKEN_VERSION and payload.get("typ") == _TOKEN_TYPE:
+            if not keyring.verify(
+                raw,
+                signature,
+                purpose=HMAC_PURPOSE_REPORT_LINK,
+                digest_bytes=_SIG_LEN,
+            ):
+                return None
+        elif "v" not in payload and set(payload) == _LEGACY_FIELDS:
+            if not keyring.verify_legacy_previous(raw, signature, digest_bytes=_SIG_LEN):
+                return None
+        else:
             return None
         expires = validate_epoch_seconds(payload.get("e"))
     except Exception:

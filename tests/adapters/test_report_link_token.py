@@ -16,7 +16,11 @@ from teamagent.adapters.report_link_token import (
     has_secret,
     is_allowed_key,
 )
-from teamagent.hmac_keyring import HMAC_MAX_ROLLOUT_OVERLAP_S
+from teamagent.hmac_keyring import (
+    HMAC_MAX_ROLLOUT_OVERLAP_S,
+    HMAC_PURPOSE_REPORT_LINK,
+    HmacKeyring,
+)
 
 _BUCKET = "teamagent-dev-raw-files"
 _KEY = "vseo-reports/abc123.html"
@@ -32,11 +36,17 @@ _HMAC_ENVS = (
     "REPORT_LINK_HMAC_SECRET",
     "REPORT_LINK_HMAC_PREVIOUS_SECRET",
     "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+    "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY",
+    "REPORT_LINK_HMAC_PRIMARY_GENERATION",
+    "REPORT_LINK_HMAC_PREVIOUS_GENERATION",
     "REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
     "REPORT_LINK_TTL_S",
     "MAIL_ACTION_HMAC_SECRET",
     "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
     "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+    "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY",
+    "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
+    "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
     "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
     "MAIL_ACTION_TTL_S",
     "DATABASE_URL",
@@ -184,11 +194,17 @@ def test_legacy_database_key_is_bounded_previous_verification_only(
     monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
     assert decode_report_token(legacy, now=_ROTATION_NOW) is None
     monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    assert decode_report_token(legacy, now=_ROTATION_NOW) is None
+    monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY", "1")
     assert decode_report_token(legacy, now=_ROTATION_NOW) == (_BUCKET, _KEY, "")
 
     issued = _require_token(encode_report_token(_BUCKET, _KEY, now=_ROTATION_NOW))
     raw, signature = _signature(issued)
-    primary_sig = hmac.new(_REPORT_PRIMARY.encode(), raw, hashlib.sha256).digest()[:16]
+    primary_sig = HmacKeyring(_REPORT_PRIMARY.encode(), (_REPORT_PRIMARY.encode(),)).sign(
+        raw,
+        purpose=HMAC_PURPOSE_REPORT_LINK,
+        digest_bytes=16,
+    )
     previous_sig = hmac.new(_LEGACY_DATABASE_URL.encode(), raw, hashlib.sha256).digest()[:16]
     assert hmac.compare_digest(signature, primary_sig)
     assert not hmac.compare_digest(signature, previous_sig)
@@ -206,6 +222,7 @@ def test_verifier_first_rollout_covers_last_old_issuer_token(
     )
     monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
     monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY", "1")
 
     assert decode_report_token(legacy, now=last_old_issue) == (_BUCKET, _KEY, "")
     assert decode_report_token(legacy, now=expires - 1) == (_BUCKET, _KEY, "")
@@ -217,6 +234,7 @@ def test_previous_key_deadline_is_exclusive(monkeypatch: pytest.MonkeyPatch) -> 
     legacy = _legacy_report_token(_LEGACY_DATABASE_URL, expires=deadline + 60)
     monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
     monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    monkeypatch.setenv("REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY", "1")
     assert decode_report_token(legacy, now=deadline - 1) == (_BUCKET, _KEY, "")
     assert decode_report_token(legacy, now=deadline) is None
 

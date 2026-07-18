@@ -31,6 +31,9 @@ _FAKE_PRESIGNED = (
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_SECRET", raising=False)
     monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT", raising=False)
+    monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY", raising=False)
+    monkeypatch.delenv("REPORT_LINK_HMAC_PRIMARY_GENERATION", raising=False)
+    monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_GENERATION", raising=False)
     monkeypatch.delenv("REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL", raising=False)
     monkeypatch.delenv("REPORT_LINK_TTL_S", raising=False)
     monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)

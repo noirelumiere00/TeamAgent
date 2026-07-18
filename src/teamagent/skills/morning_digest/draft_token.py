@@ -6,7 +6,8 @@ Fargate（digest 描画）が encode、worker（押下処理）が decode する
 
 新規署名は専用主鍵 ``MAIL_ACTION_HMAC_SECRET`` だけを使う。移行前 token は
 ``MAIL_ACTION_HMAC_PREVIOUS_SECRET`` と固定した ``..._PREVIOUS_ROTATION_STARTED_AT`` を設定した
-verifier-first 移行期間だけ検証する。``MAIL_ACTION_TTL_S`` は未設定時24h、設定時は ASCII
+上で ``MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY=1`` とした verifier-first 移行期間だけ検証する。
+新規tokenは目的分離したversion 2である。``MAIL_ACTION_TTL_S`` は未設定時24h、設定時は ASCII
 10進数の1..24hのみ。TTL設定不正や明示TTLの範囲外では encode は None を返し、呼出元はボタンを
 発行しない。鍵設定不正・token形式不正なら decode は常に None。``SLACK_BOT_TOKEN`` /
 ``DATABASE_URL`` への fallback は一切しない。
@@ -19,6 +20,7 @@ import hashlib
 import json
 
 from teamagent.hmac_keyring import (
+    HMAC_PURPOSE_MAIL_DRAFT,
     add_token_ttl,
     coerce_epoch_seconds,
     load_mail_action_hmac_keyring,
@@ -27,6 +29,9 @@ from teamagent.hmac_keyring import (
 )
 
 _SIG_LEN = 16  # HMAC-SHA256 の先頭 16 バイトで十分（トークンを短く保つ）
+_TOKEN_VERSION = 2
+_TOKEN_TYPE = "draft"
+_LEGACY_FIELDS = frozenset({"t", "o", "e"})
 
 
 def _owner_hash(owner_email: str) -> str:
@@ -76,9 +81,15 @@ def encode_draft_token(
         keyring = load_mail_action_hmac_keyring(now=issued)
         if expires is None or keyring is None:
             return None
-        payload = {"t": str(thread_id), "o": _owner_hash(owner_email), "e": expires}
+        payload = {
+            "v": _TOKEN_VERSION,
+            "typ": _TOKEN_TYPE,
+            "t": str(thread_id),
+            "o": _owner_hash(owner_email),
+            "e": expires,
+        }
         raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        sig = keyring.sign(raw, digest_bytes=_SIG_LEN)
+        sig = keyring.sign(raw, purpose=HMAC_PURPOSE_MAIL_DRAFT, digest_bytes=_SIG_LEN)
         return _b64e(raw) + "." + _b64e(sig)
     except Exception:
         return None
@@ -98,10 +109,22 @@ def decode_draft_token(token: str, owner_email: str, *, now: int | None = None) 
     try:
         body_b64, sig_b64 = (token or "").split(".", 1)
         raw = _b64d(body_b64)
-        if not keyring.verify(raw, _b64d(sig_b64), digest_bytes=_SIG_LEN):
-            return None
+        signature = _b64d(sig_b64)
         payload = json.loads(raw)
         if not isinstance(payload, dict):
+            return None
+        if payload.get("v") == _TOKEN_VERSION and payload.get("typ") == _TOKEN_TYPE:
+            if not keyring.verify(
+                raw,
+                signature,
+                purpose=HMAC_PURPOSE_MAIL_DRAFT,
+                digest_bytes=_SIG_LEN,
+            ):
+                return None
+        elif "v" not in payload and "typ" not in payload and set(payload) == _LEGACY_FIELDS:
+            if not keyring.verify_legacy_previous(raw, signature, digest_bytes=_SIG_LEN):
+                return None
+        else:
             return None
         expires = validate_epoch_seconds(payload.get("e"))
     except Exception:
