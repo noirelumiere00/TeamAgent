@@ -1452,6 +1452,16 @@ def _parse_terraform_gate_query(
     )
 
 
+def _canonical_receipt_claim_ids(claim_ids: Sequence[Any]) -> list[str]:
+    normalized = [_sha256(claim_id, label="release receipt claim ID") for claim_id in claim_ids]
+    canonical = sorted(set(normalized))
+    if not canonical:
+        raise EvidenceError("deployment receipt claims are empty")
+    if len(canonical) != len(normalized):
+        raise EvidenceError("deployment receipt claims contain a duplicate")
+    return canonical
+
+
 def _deployment_binding(
     *,
     images: Mapping[str, Any],
@@ -1508,6 +1518,7 @@ def _deployment_binding(
         # one-use claim is the signed receipt bytes. Re-uploading identical
         # receipt/signature bytes as new S3 versions must not mint a new use.
         claim_ids.append(receipt_key_match.group(1))
+    claim_ids = _canonical_receipt_claim_ids(claim_ids)
     context = {
         "schema_version": DEPLOYMENT_INTENT_SCHEMA,
         "intent_id": intent_id,
@@ -2754,11 +2765,7 @@ def _consume_applying_deployment_intent(
     attempt_id = _uuid4(apply_attempt_id, label="apply attempt ID")
     if attempt_id == metadata["intent_id"]:
         raise EvidenceError("apply attempt ID must differ from deployment intent ID")
-    normalized_claims = sorted(
-        {_sha256(claim, label="release receipt claim ID") for claim in receipt_claim_ids}
-    )
-    if not normalized_claims or len(normalized_claims) != len(receipt_claim_ids):
-        raise EvidenceError("deployment receipt claims are empty or duplicate")
+    normalized_claims = _canonical_receipt_claim_ids(receipt_claim_ids)
     claims_sha256 = hashlib.sha256(canonical_bytes(normalized_claims)).hexdigest()
     current = _utc_now(now)
     record_id = f"intent#{metadata['intent_id']}"

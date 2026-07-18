@@ -598,30 +598,49 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
         if proof not in effective_dockerfile:
             raise ProvenanceError(f"Dockerfile is missing runtime receipt proof: {proof}")
 
-    stage_names = set(
-        re.findall(
-            r"^FROM\s+\S+(?:\s+AS\s+([A-Za-z0-9_.-]+))$",
-            effective_dockerfile,
-            re.MULTILINE,
-        )
-    )
-    external_references = re.findall(r"^FROM\s+(\S+)", effective_dockerfile, re.MULTILINE)
-    external_references.extend(
-        re.findall(r"^COPY\s+--from=(\S+)", effective_dockerfile, re.MULTILINE)
-    )
-    for reference in external_references:
-        if reference == "scratch" or reference in stage_names:
-            continue
-        if not any(marker in reference for marker in ("/", ":", ".")):
-            # Dynamic selectors such as runtime-${WITH_SCRAPE_TOOLS} name local stages.
-            continue
-        literal_digest = re.search(r"@sha256:[0-9a-f]{64}(?:$|\s)", reference)
-        argument_digest = re.search(r"@\$\{([A-Z][A-Z0-9_]*)\}$", reference)
-        if literal_digest:
-            continue
-        if argument_digest and argument_digest.group(1) in digest_arguments:
-            continue
-        raise ProvenanceError(f"Dockerfile external image is not digest pinned: {reference}")
+    declared_stages: set[str] = set()
+    for instruction in instructions:
+        reference: str | None = None
+        stage_alias: str | None = None
+        allow_scratch = False
+        if instruction.upper().startswith("FROM "):
+            from_match = re.fullmatch(
+                r"FROM\s+(?:--platform=\S+\s+)?(\S+)"
+                r"(?:\s+AS\s+([A-Za-z0-9_.-]+))?",
+                instruction,
+                re.IGNORECASE,
+            )
+            if from_match is None:
+                raise ProvenanceError("Dockerfile contains an unsupported FROM instruction")
+            reference, stage_alias = from_match.groups()
+            allow_scratch = True
+        elif instruction.upper().startswith("COPY "):
+            copy_match = re.search(
+                r"(?:^|\s)--from=(\S+)(?:\s|$)",
+                instruction,
+                re.IGNORECASE,
+            )
+            if copy_match is not None:
+                reference = copy_match.group(1)
+
+        if reference is not None:
+            local_stage = reference in declared_stages
+            literal_digest = re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", reference)
+            argument_digest = re.fullmatch(
+                r"\S+@\$\{([A-Z][A-Z0-9_]*)\}",
+                reference,
+            )
+            if not (
+                local_stage
+                or (allow_scratch and reference == "scratch")
+                or literal_digest is not None
+                or (argument_digest is not None and argument_digest.group(1) in digest_arguments)
+            ):
+                raise ProvenanceError(
+                    f"Dockerfile external image is not digest pinned: {reference}"
+                )
+        if stage_alias is not None:
+            declared_stages.add(stage_alias)
 
 
 def _decode_ls_tree(raw: bytes) -> tuple[int, list[str]]:

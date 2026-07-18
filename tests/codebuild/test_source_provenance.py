@@ -232,6 +232,42 @@ def test_synthetic_future_dockerfile_implements_every_contract_arg_label_and_use
     provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
 
 
+@pytest.mark.parametrize("external_image", ["ubuntu", "alpine"])
+def test_dockerfile_contract_treats_bare_from_names_as_external_images(
+    tmp_path: Path,
+    external_image: str,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        f"FROM {external_image} AS untrusted\n" + _synthetic_dockerfile(_ready_contract()),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        provenance.ProvenanceError,
+        match=rf"external image is not digest pinned: {external_image}",
+    ):
+        provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
+
+
+def test_dockerfile_contract_rejects_forward_stage_alias_as_unpinned_external(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        "FROM future AS premature\n"
+        + _synthetic_dockerfile(_ready_contract())
+        + "\nFROM cgr.dev/chainguard/python@${NODE_IMAGE_DIGEST} AS future\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        provenance.ProvenanceError,
+        match="external image is not digest pinned: future",
+    ):
+        provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
+
+
 def test_checked_in_dockerfile_must_implement_active_contract_before_activation() -> None:
     """Turn the cross-branch schema into a hard merge gate once it is activated."""
 

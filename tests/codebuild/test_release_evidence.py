@@ -1039,6 +1039,129 @@ def test_receipt_claim_identity_survives_reuploaded_s3_versions() -> None:
     assert first_claims_sha256 == second_claims_sha256
 
 
+def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_consume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim_by_pipeline = {
+        "mcp": "f" * 64,
+        "tiktok": "0" * 64,
+    }
+    canonical_claims = sorted(claim_by_pipeline.values())
+
+    def reference(pipeline: str) -> dict[str, str]:
+        key = f"release-receipts/{pipeline}/{COMMIT}/{claim_by_pipeline[pipeline]}.json"
+        return {
+            "bucket": EVIDENCE.EVIDENCE_BUCKET,
+            "key": key,
+            "version_id": f"{pipeline}-receipt-version",
+            "signature_key": f"{key}.sig",
+            "signature_version_id": f"{pipeline}-signature-version",
+        }
+
+    images = {
+        "mcp": (f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@{CORE_DIGEST}"),
+        "tiktok": (
+            "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+            f"teamagent-dev-tiktok-acquire@{_digest('tiktok-image')}"
+        ),
+    }
+    evidence = {pipeline: reference(pipeline) for pipeline in claim_by_pipeline}
+    contracts = {
+        "mcp": CONTRACT_SHA256,
+        "tiktok": "7" * 64,
+    }
+    application = {"mcp": APPLICATION}
+    context_sha256, _, _ = EVIDENCE._deployment_binding(
+        images=images,
+        evidence=evidence,
+        contracts=contracts,
+        application=application,
+        shared_generation_ledger={},
+        intent_id=INTENT_ID,
+    )
+    claims_sha256 = hashlib.sha256(EVIDENCE.canonical_bytes(canonical_claims)).hexdigest()
+    metadata = {
+        "intent_id": INTENT_ID,
+        "plan_sha256": "d" * 64,
+        "deployment_context_sha256": context_sha256,
+        "receipt_claims_sha256": claims_sha256,
+        "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+    }
+    query = {
+        "images_json": json.dumps(images),
+        "evidence_json": json.dumps(evidence),
+        "contracts_json": json.dumps(contracts),
+        "contract_ready_json": json.dumps({"mcp": True, "tiktok": True}),
+        "application_json": json.dumps(application),
+        "shared_generation_ledger_json": json.dumps({}),
+        "signing_key_arn": KEY_ARN,
+        "encryption_key_arn": KEY_ARN,
+        "deployment_intent_id": INTENT_ID,
+    }
+    store: dict[str, dict[str, str | int]] = {
+        f"intent#{INTENT_ID}": _applying_intent(
+            intent_id=INTENT_ID,
+            plan_sha256=metadata["plan_sha256"],
+            context_sha256=context_sha256,
+            claims_sha256=claims_sha256,
+            apply_attempt_id=ATTEMPT_ID,
+        ),
+        EVIDENCE.DEPLOYMENT_LOCK_RECORD_ID: _apply_lock(
+            metadata,
+            apply_attempt_id=ATTEMPT_ID,
+        ),
+    }
+    consumed_claims: list[str] = []
+
+    def fake_get(record_id: str) -> dict[str, str | int] | None:
+        item = store.get(record_id)
+        return copy.deepcopy(item) if item is not None else None
+
+    def fake_transact(
+        *,
+        applying: dict[str, str | int],
+        metadata: dict[str, str],
+        receipt_claim_ids: list[str],
+        apply_attempt_id: str,
+        now: dt.datetime,
+    ) -> None:
+        consumed_claims.extend(receipt_claim_ids)
+        intent = store[str(applying["record_id"])]
+        intent.update(
+            {
+                "state": "CONSUMED",
+                "apply_attempt_id": apply_attempt_id,
+                "consumed_at": now.isoformat().replace("+00:00", "Z"),
+            }
+        )
+
+    monkeypatch.setattr(
+        EVIDENCE,
+        "deployment_plan_metadata",
+        lambda *args, **kwargs: metadata,
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_terraform_gate",
+        lambda gate_query: {
+            "deployment_context_sha256": context_sha256,
+            "receipt_claims_sha256": claims_sha256,
+        },
+    )
+    monkeypatch.setattr(EVIDENCE, "_dynamodb_get", fake_get)
+    monkeypatch.setattr(EVIDENCE, "_dynamodb_transact_consume", fake_transact)
+
+    consumed = EVIDENCE.consume_deployment_intent(
+        Path("unused.tfplan"),
+        query=query,
+        apply_attempt_id=ATTEMPT_ID,
+        now=NOW,
+    )
+
+    assert consumed["state"] == "CONSUMED"
+    assert consumed_claims == canonical_claims
+
+
 def _prepared_intent(
     *,
     intent_id: str,

@@ -61,6 +61,28 @@ def _load(path: Path, *, label: str) -> Any:
         raise EvidenceError(f"invalid {label}: {exc}") from exc
 
 
+def _load_digest_bound_json(
+    path: Path,
+    *,
+    expected_digest: str,
+    label: str,
+) -> Any:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise EvidenceError(f"cannot read {label}") from exc
+    actual_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if actual_digest != expected_digest:
+        raise EvidenceError(f"{label} bytes do not match the manifest config digest")
+    try:
+        return json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvidenceError(f"invalid {label}: {exc}") from exc
+
+
 def _sha256_file(path: Path, *, label: str) -> str:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -293,13 +315,14 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
     }:
         raise EvidenceError("subject is an index or unsupported manifest type")
 
-    config = _mapping(_load(args.config, label="OCI config"), label="OCI config")
-    if hashlib.sha256(canonical_bytes(config).rstrip(b"\n")).hexdigest() != (
-        config_digest.removeprefix("sha256:")
-    ):
-        # ECR config blobs need not use canonical JSON; verify the exact bytes too.
-        if _sha256_file(args.config, label="OCI config") != config_digest.removeprefix("sha256:"):
-            raise EvidenceError("OCI config bytes do not match the manifest config digest")
+    config = _mapping(
+        _load_digest_bound_json(
+            args.config,
+            expected_digest=config_digest,
+            label="OCI config",
+        ),
+        label="OCI config",
+    )
     if config.get("os") != "linux" or config.get("architecture") != "arm64":
         raise EvidenceError("actual image config is not linux/arm64")
     config_section = _mapping(config.get("config"), label="OCI config.config")
@@ -320,6 +343,7 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
                 args.config,
                 subject_name=args.name,
                 commit=args.commit,
+                expected_config_digest=config_digest,
                 contract_path=args.contract,
                 expected_contract_sha256=contract_sha256,
             )

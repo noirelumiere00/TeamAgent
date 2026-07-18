@@ -238,6 +238,29 @@ def _fixture(
     )
 
 
+def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
+    args = _fixture(tmp_path)
+    (
+        args.quarantine_repository,
+        args.candidate_repository,
+        args.release_repository,
+    ) = EVIDENCE.PIPELINES["mcp"]["subjects"][subject_name]
+    args.pipeline = "mcp"
+    args.name = subject_name
+
+    config = json.loads(args.config.read_text(encoding="utf-8"))
+    labels = config["config"]["Labels"]
+    labels.pop("io.teamagent.build.contract-sha256")
+    labels["io.teamagent.build.release-contract-sha256"] = CONTRACT_SHA256
+    _write_json(args.config, config)
+    args.config_digest = "sha256:" + hashlib.sha256(args.config.read_bytes()).hexdigest()
+
+    trivy = json.loads(args.trivy_report.read_text(encoding="utf-8"))
+    trivy["ArtifactName"] = f"{REGISTRY}/{args.quarantine_repository}@{args.digest}"
+    _write_json(args.trivy_report, trivy)
+    return args
+
+
 def test_actual_image_subject_binds_digest_platform_labels_binaries_and_signed_referrers(
     tmp_path: Path,
 ) -> None:
@@ -256,6 +279,67 @@ def test_actual_image_subject_binds_digest_platform_labels_binaries_and_signed_r
     assert subject["provenance"]["signature"]["referrer_digest"] == "sha256:" + "b" * 64
     assert subject["image_signature"]["subject_digest"] == DIGEST
     assert subject["image_signature"]["referrer_digest"] == "sha256:" + "9" * 64
+
+
+@pytest.mark.parametrize("subject_name", ["core", "media"])
+def test_mcp_subject_verification_binds_exact_manifest_config_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subject_name: str,
+) -> None:
+    args = _mcp_fixture(tmp_path, subject_name=subject_name)
+    calls: list[dict[str, Any]] = []
+
+    def verify_mcp_config(
+        config_path: Path,
+        *,
+        subject_name: str,
+        commit: str,
+        expected_config_digest: str,
+        contract_path: Path,
+        expected_contract_sha256: str,
+    ) -> dict[str, str]:
+        calls.append(
+            {
+                "config_path": config_path,
+                "subject_name": subject_name,
+                "commit": commit,
+                "expected_config_digest": expected_config_digest,
+                "contract_path": contract_path,
+                "expected_contract_sha256": expected_contract_sha256,
+            }
+        )
+        return {}
+
+    monkeypatch.setattr(EVIDENCE, "verify_teamagent_oci_config", verify_mcp_config)
+
+    subject = EVIDENCE.create_subject(args)
+
+    assert subject["name"] == subject_name
+    assert calls == [
+        {
+            "config_path": args.config,
+            "subject_name": subject_name,
+            "commit": COMMIT,
+            "expected_config_digest": args.config_digest,
+            "contract_path": args.contract,
+            "expected_contract_sha256": CONTRACT_SHA256,
+        }
+    ]
+
+
+def test_actual_image_subject_rejects_semantically_equal_config_with_different_bytes(
+    tmp_path: Path,
+) -> None:
+    args = _fixture(tmp_path)
+    config = json.loads(args.config.read_text(encoding="utf-8"))
+    args.config.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        EVIDENCE.EvidenceError,
+        match="OCI config bytes do not match the manifest config digest",
+    ):
+        EVIDENCE.create_subject(args)
 
 
 @pytest.mark.parametrize(
