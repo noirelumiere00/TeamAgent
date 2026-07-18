@@ -8,6 +8,7 @@ AWS を呼ばない範囲で検証する:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -60,37 +61,44 @@ def test_run_ingest_task_contract_strings() -> None:
 
 
 def test_publish_contract_strings() -> None:
-    """healthz 検証（C1）と S3 配置先の契約。"""
+    """Immutable VersionId staging/rollback and guarded deployment contract."""
     body = PUBLISH.read_text(encoding="utf-8")
     for needle in (
-        "app_html_sha256",
-        "app_html_source",
-        "CONNECT_APP_HTML_S3_URI",
         "codebuild/connect-web-app.html",
-        "force-new-deployment",
-        "apphtml-s3-read",
+        "s3api put-object",
+        "s3api get-object",
+        "--version-id",
+        "PRODUCTION_APP_PROVENANCE",
+        "connect_app_html_s3_version_id",
+        "connect_app_html_sha256",
+        "fresh active/rollback receipt",
+        "core+media",
     ):
         assert needle in body, f"契約文字列が欠落: {needle}"
+    for forbidden in (
+        "force-new-deployment",
+        "update-service",
+        "register-task-definition",
+        "s3api copy-object",
+        "aws s3 cp",
+        "/healthz",
+    ):
+        assert forbidden not in body
 
 
 def test_unified_deploy_contract_strings() -> None:
-    """unified bake が td へ宣言的に固定する env と image tag 表示の契約。
-
-    - CONNECT_APP_HTML_S3_URI: publish_app_html.sh ホットスワップの受け口
-      （これが無いと publish が preflight で恒久 exit 1）
-    - USE_QUERY_PLANNER / USE_COHERE_RERANK: T1 No-AI 化の恒久化（bake での巻き戻り防止）
-    - image tag 表示: register_ingest_td.sh --image-tag へ渡すタグの唯一の出所
-    """
+    """旧 build+deploy 混在経路は fail-loud stub のまま固定する。"""
     body = UNIFIED.read_text(encoding="utf-8")
     for needle in (
-        "CONNECT_APP_HTML_S3_URI",
-        "USE_QUERY_PLANNER",
-        "USE_COHERE_RERANK",
-        "codebuild/connect-web-app.html",  # publish_app_html.sh の配置先と同一定数
-        "image tag: ${TAG}",
-        "register_ingest_td.sh --image-tag ${TAG}",
+        "permanently disabled",
+        "build_teamagent_image.sh",
+        "../terraform/README.md",
+        "never uploads source",
+        "never uploads source, starts CodeBuild, or changes",
     ):
         assert needle in body, f"契約文字列が欠落: {needle}"
+    r = _run(str(UNIFIED))
+    assert r.returncode == 64
 
 
 def test_bootstrap_contract_strings() -> None:
@@ -108,13 +116,85 @@ def test_help_exits_zero_without_aws() -> None:
 
 
 def test_unknown_arg_exits_nonzero() -> None:
-    for script in (RUN_INGEST, PUBLISH, REGISTER):
+    for script in (RUN_INGEST, PUBLISH):
         r = _run(str(script), "--no-such-flag")
         assert r.returncode == 1, f"{script.name} が不明引数で exit {r.returncode}"
-        assert "不明な引数" in r.stdout + r.stderr
+        message = r.stdout + r.stderr
+        assert "不明な引数" in message or "unknown mode" in message
 
 
-def test_register_requires_image_tag() -> None:
+def test_publish_stage_captures_and_reloads_one_exact_version_without_ecs(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    store = tmp_path / "immutable-object"
+    calls = tmp_path / "aws-calls"
+    fake_aws = fake_bin / "aws"
+    fake_aws.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"$FAKE_AWS_CALLS"
+if [ "$1:$2" = "s3api:put-object" ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--body" ]; then cp "$2" "$FAKE_S3_STORE"; break; fi
+    shift
+  done
+  printf '{"VersionId":"candidate-version-123"}\\n'
+elif [ "$1:$2" = "s3api:get-object" ]; then
+  destination="${!#}"
+  cp "$FAKE_S3_STORE" "$destination"
+  printf 'candidate-version-123\\n'
+else
+  exit 97
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_aws.chmod(0o755)
+    html = tmp_path / "candidate.html"
+    html.write_text("<html>new immutable candidate</html>\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_S3_STORE": str(store),
+        "FAKE_AWS_CALLS": str(calls),
+    }
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(PUBLISH),
+            "stage",
+            "--src",
+            str(html),
+            "--manifest-sha256",
+            "a" * 64,
+            "--build-inputs-sha256",
+            "b" * 64,
+        ],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "version_id=candidate-version-123" in completed.stdout
+    assert "The upload is NOT deployed" in completed.stdout
+    assert store.read_bytes() == html.read_bytes()
+    call_log = calls.read_text(encoding="utf-8")
+    assert "s3api put-object" in call_log
+    assert "s3api get-object" in call_log and "--version-id candidate-version-123" in call_log
+    assert "ecs " not in call_log
+
+
+def test_direct_ingest_task_definition_registration_is_retired() -> None:
     r = _run(str(REGISTER))
-    assert r.returncode == 1
-    assert "--image-tag" in r.stdout + r.stderr
+    assert r.returncode == 64
+    assert "permanently disabled" in r.stderr
+    assert "plan_image_release.sh" in r.stderr
+    body = REGISTER.read_text(encoding="utf-8").lower()
+    assert "register-task-definition" not in body
+    assert "update-service" not in body

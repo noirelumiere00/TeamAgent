@@ -1,35 +1,458 @@
-# CodeBuild buildspec（teamagent-mcp イメージ）。
-# codebuild.tf のインライン buildspec を git 管理下に出したもの＋機密 app.html の S3 注入。
-# 使い方: aws codebuild start-build --buildspec-override infra/codebuild/buildspec.yml
-#
-# 【なぜ S3 注入か】connect-web の /app 用 app.html は機密（BANT/営業FB/カルテ埋め込み）で
-#   git 管理外（.gitignore）。git 由来のどのビルドでも /app が実 UI を出せるよう、ビルド時に
-#   private S3(codebuild/ プレフィックス=既存 CodeBuild ロールの s3:GetObject 範囲・新規IAM不要)
-#   から取得してビルドコンテキストへ置く。→ どのイメージにも /app が焼き込まれる。
-#
-# 【堅牢性(H3)】S3 優先で取得。S3 に無ければ source.zip 同梱の app.html を使う（統合デプロイ
-#   スクリプトは zip に手元 html を含める belt-and-suspenders）。S3 にも zip にも無い時だけ
-#   fail-loud（exit 1）。無言で「準備中」プレースホルダに劣化させない。
+# Build the final TeamAgent core and media subjects from one exact signed source.
+# The builder fetches the exact approved live and baked-fallback S3 VersionIds
+# only after it has verified that the source archive is the exact Git commit.
 version: 0.2
+env:
+  exported-variables:
+    - MCP_CORE_TAG_DIGEST
+    - MCP_CORE_ARM64_DIGEST
+    - MCP_MEDIA_TAG_DIGEST
+    - MCP_MEDIA_ARM64_DIGEST
 phases:
   pre_build:
     commands:
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+      - |
+        set -euo pipefail
+        umask 077
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR
+        while IFS= read -r endpoint_variable; do
+          unset "$endpoint_variable"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset endpoint_variable
+        unset ECR_REGISTRY CORE_QUARANTINE_REPOSITORY MEDIA_QUARANTINE_REPOSITORY
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
+        SOURCE_SIGNING_KEY_ARN="__SOURCE_PUBLISHER_SIGNING_KEY_ARN__"
+        EVIDENCE_KMS_KEY_ARN="__RELEASE_EVIDENCE_KMS_KEY_ARN__"
+        EXPECTED_RELEASE_CONTRACT_SHA256="__MCP_RELEASE_CONTRACT_SHA256__"
+        EXPECTED_SOURCE_MANIFEST_CONTRACT_SHA256="__SOURCE_MANIFEST_CONTRACT_SHA256__"
+        RELEASE_CONTRACT="infra/codebuild/teamagent_core_media_release_contract.json"
+        BUNDLE_PROVENANCE="infra/codebuild/teamagent_bundle_provenance.py"
+        DEPLOY_LOG="infra/deploy_log.md"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
+        CORE_QUARANTINE_REPOSITORY="$ECR_REGISTRY/teamagent-mcp-quarantine"
+        MEDIA_QUARANTINE_REPOSITORY="$ECR_REGISTRY/teamagent-media-worker-quarantine"
+        readonly EXPECTED_ACCOUNT_ID EXPECTED_REGION EVIDENCE_BUCKET
+        readonly SOURCE_SIGNING_KEY_ARN EVIDENCE_KMS_KEY_ARN ECR_REGISTRY
+        readonly CORE_QUARANTINE_REPOSITORY MEDIA_QUARANTINE_REPOSITORY
+
+        [ "$(aws sts get-caller-identity --query Account --output text)" = "$EXPECTED_ACCOUNT_ID" ] \
+          || { echo "FATAL: unexpected AWS account"; exit 1; }
+        [ "$AWS_DEFAULT_REGION" = "$EXPECTED_REGION" ] \
+          || { echo "FATAL: unexpected AWS region"; exit 1; }
+        printf '%s  %s\n' '__SOURCE_PROVENANCE_SHA256__' infra/codebuild/source_provenance.py | sha256sum -c -
+        printf '%s  %s\n' '__RELEASE_EVIDENCE_SHA256__' infra/codebuild/release_evidence.py | sha256sum -c -
+        printf '%s  %s\n' '__TEAMAGENT_BUNDLE_PROVENANCE_SHA256__' "$BUNDLE_PROVENANCE" | sha256sum -c -
+        printf '%s  %s\n' '__ECR_IMAGE_RESOLVER_SHA256__' infra/codebuild/resolve_ecr_image.py | sha256sum -c -
+        printf '%s  %s\n' '__ECR_SCAN_GATE_SHA256__' infra/codebuild/verify_ecr_scan.py | sha256sum -c -
+
+        : "${GIT_COMMIT:?GIT_COMMIT must be explicitly provided}"
+        : "${GIT_BRANCH:?GIT_BRANCH must be explicitly provided}"
+        : "${APP_HTML_VERSION_ID:?APP_HTML_VERSION_ID must be explicitly provided}"
+        : "${APP_HTML_SHA256:?APP_HTML_SHA256 must be explicitly provided}"
+        : "${VAULT_MANIFEST_SHA256:?VAULT_MANIFEST_SHA256 must be explicitly provided}"
+        : "${BUILD_INPUTS_SHA256:?BUILD_INPUTS_SHA256 must be explicitly provided}"
+        : "${BAKED_APP_HTML_VERSION_ID:?BAKED_APP_HTML_VERSION_ID must be explicitly provided}"
+        : "${BAKED_APP_HTML_SHA256:?BAKED_APP_HTML_SHA256 must be explicitly provided}"
+        : "${APP_PROVENANCE_SHA256:?APP_PROVENANCE_SHA256 must be explicitly provided}"
+        : "${SOURCE_MANIFEST_CONTRACT_SHA256:?SOURCE_MANIFEST_CONTRACT_SHA256 must be explicitly provided}"
+        : "${RELEASE_CONTRACT_SHA256:?RELEASE_CONTRACT_SHA256 must be explicitly provided}"
+        : "${SOURCE_DECLARATION_KEY:?SOURCE_DECLARATION_KEY must be explicitly provided}"
+        : "${SOURCE_DECLARATION_VERSION_ID:?SOURCE_DECLARATION_VERSION_ID must be explicitly provided}"
+        : "${SOURCE_DECLARATION_SHA256:?SOURCE_DECLARATION_SHA256 must be explicitly provided}"
+        : "${SOURCE_DECLARATION_SIGNATURE_KEY:?SOURCE_DECLARATION_SIGNATURE_KEY must be explicitly provided}"
+        : "${SOURCE_DECLARATION_SIGNATURE_VERSION_ID:?SOURCE_DECLARATION_SIGNATURE_VERSION_ID must be explicitly provided}"
+        : "${SOURCE_ARCHIVE_VERSION_ID:?SOURCE_ARCHIVE_VERSION_ID must be explicitly provided}"
+        [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: invalid GIT_COMMIT"; exit 1; }
+        [ "$GIT_BRANCH" = "dev" ] || { echo "FATAL: GIT_BRANCH must be dev"; exit 1; }
+        for digest in \
+          "$APP_HTML_SHA256" "$VAULT_MANIFEST_SHA256" "$BUILD_INPUTS_SHA256" \
+          "$BAKED_APP_HTML_SHA256" "$APP_PROVENANCE_SHA256" \
+          "$SOURCE_MANIFEST_CONTRACT_SHA256" "$RELEASE_CONTRACT_SHA256" \
+          "$SOURCE_DECLARATION_SHA256"; do
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid SHA-256 input"; exit 1; }
+        done
+        case "$APP_HTML_VERSION_ID:$BAKED_APP_HTML_VERSION_ID" in
+          ""|None*|null*|*:|*[!A-Za-z0-9._~+/=:-]*)
+            echo "FATAL: invalid application S3 VersionId"
+            exit 1
+            ;;
+        esac
+        [ "$RELEASE_CONTRACT_SHA256" = "$EXPECTED_RELEASE_CONTRACT_SHA256" ] \
+          || { echo "FATAL: release contract hash differs from the embedded project"; exit 1; }
+        [ "$SOURCE_MANIFEST_CONTRACT_SHA256" = "$EXPECTED_SOURCE_MANIFEST_CONTRACT_SHA256" ] \
+          || { echo "FATAL: source manifest contract hash differs from the embedded project"; exit 1; }
+        [ "$(python3 "$BUNDLE_PROVENANCE" contract-sha256 --contract "$RELEASE_CONTRACT")" = "$RELEASE_CONTRACT_SHA256" ] \
+          || { echo "FATAL: source release contract bytes mismatch"; exit 1; }
+        [ "$(jq -er '.app_html.baked_fallback.s3_version_id' "$RELEASE_CONTRACT")" = "$BAKED_APP_HTML_VERSION_ID" ] \
+          || { echo "FATAL: baked fallback VersionId differs from the release contract"; exit 1; }
+        [ "$(jq -er '.app_html.baked_fallback.sha256' "$RELEASE_CONTRACT")" = "$BAKED_APP_HTML_SHA256" ] \
+          || { echo "FATAL: baked fallback SHA-256 differs from the release contract"; exit 1; }
+        python3 "$BUNDLE_PROVENANCE" assert-release-ready --contract "$RELEASE_CONTRACT"
+
+        mapfile -t production_record < <(
+          python3 "$BUNDLE_PROVENANCE" production-record \
+            --deploy-log "$DEPLOY_LOG" \
+            --format lines
+        )
+        [ "${#production_record[@]}" -eq 4 ] || { echo "FATAL: production app record is incomplete"; exit 1; }
+        [ "${production_record[0]}" = "$APP_HTML_VERSION_ID" ] \
+          && [ "${production_record[1]}" = "$APP_HTML_SHA256" ] \
+          && [ "${production_record[2]}" = "$VAULT_MANIFEST_SHA256" ] \
+          && [ "${production_record[3]}" = "$BUILD_INPUTS_SHA256" ] \
+          || { echo "FATAL: build inputs differ from the latest production app record"; exit 1; }
+        [ "$(python3 "$BUNDLE_PROVENANCE" app-provenance-sha256 \
+          --contract "$RELEASE_CONTRACT" --deploy-log "$DEPLOY_LOG")" = "$APP_PROVENANCE_SHA256" ] \
+          || { echo "FATAL: application provenance binding mismatch"; exit 1; }
+        unset production_record
+
+        EXPECTED_DECLARATION_PREFIX="source-declarations/mcp/$GIT_COMMIT/"
+        [[ "$SOURCE_DECLARATION_KEY" == "$EXPECTED_DECLARATION_PREFIX"*".json" ]] \
+          || { echo "FATAL: source declaration key is outside the fixed prefix"; exit 1; }
+        [ "$SOURCE_DECLARATION_SIGNATURE_KEY" = "$SOURCE_DECLARATION_KEY.sig" ] \
+          || { echo "FATAL: source declaration signature key mismatch"; exit 1; }
+        [ "$CODEBUILD_SOURCE_VERSION" = "$SOURCE_ARCHIVE_VERSION_ID" ] \
+          || { echo "FATAL: CodeBuild did not use the signed source VersionId"; exit 1; }
+        for source_object in declaration signature; do
+          case "$source_object" in
+            declaration)
+              object_key="$SOURCE_DECLARATION_KEY"
+              object_version="$SOURCE_DECLARATION_VERSION_ID"
+              destination="/tmp/source-declaration.json"
+              ;;
+            signature)
+              object_key="$SOURCE_DECLARATION_SIGNATURE_KEY"
+              object_version="$SOURCE_DECLARATION_SIGNATURE_VERSION_ID"
+              destination="/tmp/source-declaration.sig"
+              ;;
+          esac
+          aws s3api head-object \
+            --region "$EXPECTED_REGION" \
+            --bucket "$EVIDENCE_BUCKET" \
+            --key "$object_key" \
+            --version-id "$object_version" \
+            --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+            --output json >"/tmp/source-$source_object-head.json"
+          jq -e --arg version "$object_version" --arg kms "$EVIDENCE_KMS_KEY_ARN" '
+            .VersionId == $version and
+            .ObjectLockMode == "COMPLIANCE" and
+            .ServerSideEncryption == "aws:kms" and
+            .SSEKMSKeyId == $kms
+          ' "/tmp/source-$source_object-head.json" >/dev/null \
+            || { echo "FATAL: signed source object is not exact immutable evidence"; exit 1; }
+          python3 - "/tmp/source-$source_object-head.json" <<'PY'
+        import datetime
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            retained = json.load(handle).get("ObjectLockRetainUntilDate", "")
+        try:
+            timestamp = datetime.datetime.fromisoformat(retained.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise SystemExit("FATAL: invalid source evidence retention") from exc
+        if timestamp <= datetime.datetime.now(datetime.UTC):
+            raise SystemExit("FATAL: source evidence retention has expired")
+        PY
+          downloaded_version="$(
+            aws s3api get-object \
+              --region "$EXPECTED_REGION" \
+              --bucket "$EVIDENCE_BUCKET" \
+              --key "$object_key" \
+              --version-id "$object_version" \
+              --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+              --query VersionId \
+              --output text \
+              "$destination"
+          )"
+          [ "$downloaded_version" = "$object_version" ] \
+            || { echo "FATAL: signed source VersionId mismatch"; exit 1; }
+        done
+        [ "$(sha256sum /tmp/source-declaration.json | awk '{print $1}')" = "$SOURCE_DECLARATION_SHA256" ] \
+          || { echo "FATAL: source declaration SHA-256 mismatch"; exit 1; }
+        python3 - /tmp/source-declaration.json /tmp/source-declaration.sha256 <<'PY'
+        import hashlib
+        import sys
+
+        with open(sys.argv[1], "rb") as source:
+            digest = hashlib.sha256(source.read()).digest()
+        with open(sys.argv[2], "wb") as output:
+            output.write(digest)
+        PY
+        aws kms verify \
+          --region "$EXPECTED_REGION" \
+          --key-id "$SOURCE_SIGNING_KEY_ARN" \
+          --message-type DIGEST \
+          --message fileb:///tmp/source-declaration.sha256 \
+          --signature fileb:///tmp/source-declaration.sig \
+          --signing-algorithm RSASSA_PSS_SHA_256 \
+          --output json >/tmp/source-declaration-kms-verify.json
+        [ "$(jq -er '.SignatureValid' /tmp/source-declaration-kms-verify.json)" = "true" ] \
+          || { echo "FATAL: independent source publisher signature is invalid"; exit 1; }
+        python3 infra/codebuild/release_evidence.py verify-source-declaration \
+          --declaration /tmp/source-declaration.json \
+          --expected-commit "$GIT_COMMIT" \
+          --expected-source-version "$SOURCE_ARCHIVE_VERSION_ID" \
+          --expected-app-version "$APP_HTML_VERSION_ID" \
+          --expected-app-sha256 "$APP_HTML_SHA256" \
+          --expected-vault-manifest-sha256 "$VAULT_MANIFEST_SHA256" \
+          --expected-build-inputs-sha256 "$BUILD_INPUTS_SHA256" \
+          --expected-contract-sha256 "$RELEASE_CONTRACT_SHA256"
+        python3 infra/codebuild/source_provenance.py verify-source \
+          --source-root "$CODEBUILD_SRC_DIR" \
+          --manifest "$CODEBUILD_SRC_DIR/.teamagent-source-manifest.json" \
+          --expected-commit "$GIT_COMMIT" \
+          --expected-branch "$GIT_BRANCH" \
+          --expected-with-scrape-tools true \
+          --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
+          --expected-app-html-sha256 "$APP_HTML_SHA256" \
+          --expected-runtime-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256"
+        downloaded_app_version="$(
+          aws s3api get-object \
+            --region "$EXPECTED_REGION" \
+            --bucket teamagent-dev-raw-files \
+            --key codebuild/connect-web-app.html \
+            --version-id "$APP_HTML_VERSION_ID" \
+            --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+            --query VersionId \
+            --output text \
+            /tmp/production-connect-web-app.html
+        )"
+        [ "$downloaded_app_version" = "$APP_HTML_VERSION_ID" ] \
+          || { echo "FATAL: production app VersionId mismatch"; exit 1; }
+        [ "$(sha256sum /tmp/production-connect-web-app.html | awk '{print $1}')" = "$APP_HTML_SHA256" ] \
+          || { echo "FATAL: production app SHA-256 mismatch"; exit 1; }
+        downloaded_fallback_version="$(
+          aws s3api get-object \
+            --region "$EXPECTED_REGION" \
+            --bucket teamagent-dev-raw-files \
+            --key codebuild/connect-web-app.html \
+            --version-id "$BAKED_APP_HTML_VERSION_ID" \
+            --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+            --query VersionId \
+            --output text \
+            /tmp/baked-connect-web-app.html
+        )"
+        [ "$downloaded_fallback_version" = "$BAKED_APP_HTML_VERSION_ID" ] \
+          || { echo "FATAL: baked fallback VersionId mismatch"; exit 1; }
+        [ "$(sha256sum /tmp/baked-connect-web-app.html | awk '{print $1}')" = "$BAKED_APP_HTML_SHA256" ] \
+          || { echo "FATAL: baked fallback SHA-256 mismatch"; exit 1; }
+        mkdir -p src/teamagent/connect_web/static
+        install -m 0644 /tmp/baked-connect-web-app.html \
+          src/teamagent/connect_web/static/app.html
+        [ "$(sha256sum src/teamagent/connect_web/static/app.html | awk '{print $1}')" = "$BAKED_APP_HTML_SHA256" ] \
+          || { echo "FATAL: baked fallback SHA-256 mismatch"; exit 1; }
+        [ "$APP_HTML_SHA256" != "$BAKED_APP_HTML_SHA256" ] \
+          || { echo "FATAL: live app was substituted for the distinct baked fallback"; exit 1; }
+        python3 "$BUNDLE_PROVENANCE" verify-source-interface \
+          --repo-root "$CODEBUILD_SRC_DIR" \
+          --contract "$RELEASE_CONTRACT" \
+          --deploy-log "$DEPLOY_LOG"
+        python3 infra/codebuild/source_provenance.py assert-release-ready \
+          --contract infra/codebuild/teamagent_runtime_contract.json
+        python3 infra/codebuild/source_provenance.py verify-dockerfile-contract \
+          --contract infra/codebuild/teamagent_runtime_contract.json \
+          --dockerfile infra/docker/Dockerfile.teamagent-mcp
+
+        aws ecr get-login-password --region "$EXPECTED_REGION" \
+          | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+        docker buildx version
+        docker buildx inspect --bootstrap >/dev/null
   build:
     commands:
-      - mkdir -p src/teamagent/connect_web/static
       - |
-        if aws s3 cp s3://teamagent-dev-raw-files/codebuild/connect-web-app.html src/teamagent/connect_web/static/app.html; then
-          echo "app.html <- S3 ($(du -h src/teamagent/connect_web/static/app.html | cut -f1))"
-        elif [ -s src/teamagent/connect_web/static/app.html ]; then
-          echo "S3 miss -> source.zip 同梱の app.html を使用 ($(du -h src/teamagent/connect_web/static/app.html | cut -f1))"
-        else
-          echo "FATAL: app.html が S3 にも source にも無い（S3へ配置するか統合スクリプトでzip同梱せよ）"; exit 1
-        fi
-      - echo "Building teamagent-mcp ($IMAGE_TAG) on $(uname -m)"
-      - docker build -f infra/docker/Dockerfile.teamagent-mcp --build-arg WITH_SCRAPE_TOOLS=$WITH_SCRAPE_TOOLS --build-arg GIT_COMMIT="$GIT_COMMIT" --build-arg GIT_BRANCH="$GIT_BRANCH" -t $MCP_REPO:$IMAGE_TAG .
+        set -euo pipefail
+        CORE_TAG="candidate-$GIT_COMMIT-core"
+        MEDIA_TAG="candidate-$GIT_COMMIT-media"
+        python3 infra/codebuild/source_provenance.py docker-build-arguments \
+          --contract infra/codebuild/teamagent_runtime_contract.json \
+          --expected-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256" \
+          >/tmp/teamagent-runtime-build-arguments
+        mapfile -t RUNTIME_BUILD_ARGUMENTS \
+          </tmp/teamagent-runtime-build-arguments
+        [ "${#RUNTIME_BUILD_ARGUMENTS[@]}" -gt 3 ] \
+          || { echo "FATAL: runtime build arguments are incomplete"; exit 1; }
+        DOCKER_RUNTIME_BUILD_ARGS=()
+        for runtime_argument in "${RUNTIME_BUILD_ARGUMENTS[@]}"; do
+          [[ "$runtime_argument" =~ ^[A-Z][A-Z0-9_]+=.+$ ]] \
+            || { echo "FATAL: invalid runtime build argument"; exit 1; }
+          DOCKER_RUNTIME_BUILD_ARGS+=(--build-arg "$runtime_argument")
+        done
+        docker buildx build \
+          --platform linux/arm64 \
+          --file infra/docker/Dockerfile.teamagent-mcp \
+          --target final \
+          --build-arg "GIT_COMMIT=$GIT_COMMIT" \
+          --build-arg "GIT_BRANCH=$GIT_BRANCH" \
+          --build-arg "WITH_SCRAPE_TOOLS=true" \
+          --build-arg "BAKED_APP_HTML_SHA256=$BAKED_APP_HTML_SHA256" \
+          --build-arg "BAKED_APP_HTML_VERSION_ID=$BAKED_APP_HTML_VERSION_ID" \
+          --build-arg "APP_HTML_SOURCE=s3" \
+          --build-arg "APP_HTML_SHA256=$APP_HTML_SHA256" \
+          --build-arg "APP_HTML_VERSION_ID=$APP_HTML_VERSION_ID" \
+          --build-arg "APP_HTML_MANIFEST_SHA256=$VAULT_MANIFEST_SHA256" \
+          --build-arg "APP_HTML_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
+          --build-arg "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
+          --build-arg "APP_PROVENANCE_SHA256=$APP_PROVENANCE_SHA256" \
+          "${DOCKER_RUNTIME_BUILD_ARGS[@]}" \
+          --provenance=mode=max \
+          --sbom=true \
+          --metadata-file /tmp/core-build-metadata.json \
+          --tag "$CORE_QUARANTINE_REPOSITORY:$CORE_TAG" \
+          --push \
+          .
+        docker buildx build \
+          --platform linux/arm64 \
+          --file infra/docker/Dockerfile.teamagent-media-worker \
+          --target final \
+          --build-arg "GIT_COMMIT=$GIT_COMMIT" \
+          --build-arg "GIT_BRANCH=$GIT_BRANCH" \
+          --build-arg "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
+          --build-arg "APP_PROVENANCE_SHA256=$APP_PROVENANCE_SHA256" \
+          --provenance=mode=max \
+          --sbom=true \
+          --metadata-file /tmp/media-build-metadata.json \
+          --tag "$MEDIA_QUARANTINE_REPOSITORY:$MEDIA_TAG" \
+          --push \
+          .
   post_build:
     commands:
-      - docker push $MCP_REPO:$IMAGE_TAG
-      - aws ecr describe-images --repository-name teamagent-mcp --image-ids imageTag=$IMAGE_TAG --query 'imageDetails[0].imageDigest' --output text | tee /tmp/digest.txt
-      - echo "MCP_DIGEST=$(cat /tmp/digest.txt)"
+      - |
+        set -euo pipefail
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] \
+          || { echo "FATAL: core/media build failed before the quarantine gate"; exit 1; }
+        for subject in core media; do
+          case "$subject" in
+            core)
+              repository="teamagent-mcp-quarantine"
+              tag="candidate-$GIT_COMMIT-core"
+              ;;
+            media)
+              repository="teamagent-media-worker-quarantine"
+              tag="candidate-$GIT_COMMIT-media"
+              ;;
+          esac
+          tag_digest="$(
+            aws ecr describe-images \
+              --region "$EXPECTED_REGION" \
+              --registry-id "$EXPECTED_ACCOUNT_ID" \
+              --repository-name "$repository" \
+              --image-ids "imageTag=$tag" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text
+          )"
+          [[ "$tag_digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "FATAL: invalid $subject tag digest"; exit 1; }
+          aws ecr batch-get-image \
+            --region "$EXPECTED_REGION" \
+            --registry-id "$EXPECTED_ACCOUNT_ID" \
+            --repository-name "$repository" \
+            --image-ids "imageDigest=$tag_digest" \
+            --accepted-media-types \
+              application/vnd.docker.distribution.manifest.list.v2+json \
+              application/vnd.oci.image.index.v1+json \
+              application/vnd.docker.distribution.manifest.v2+json \
+              application/vnd.oci.image.manifest.v1+json \
+            --output json >"/tmp/$subject-ecr-parent.json"
+          arm64_digest="$(
+            python3 infra/codebuild/resolve_ecr_image.py resolve-platform \
+              --batch-response "/tmp/$subject-ecr-parent.json" \
+              --expected-image-digest "$tag_digest" \
+              --os linux \
+              --architecture arm64
+          )"
+          [[ "$arm64_digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "FATAL: invalid $subject arm64 digest"; exit 1; }
+          aws ecr batch-get-image \
+            --region "$EXPECTED_REGION" \
+            --registry-id "$EXPECTED_ACCOUNT_ID" \
+            --repository-name "$repository" \
+            --image-ids "imageDigest=$arm64_digest" \
+            --accepted-media-types \
+              application/vnd.docker.distribution.manifest.v2+json \
+              application/vnd.oci.image.manifest.v1+json \
+            --output json >"/tmp/$subject-ecr-child.json"
+          config_digest="$(
+            python3 infra/codebuild/source_provenance.py ecr-config-digest \
+              --batch-response "/tmp/$subject-ecr-child.json" \
+              --expected-image-digest "$arm64_digest"
+          )"
+          [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "FATAL: invalid $subject OCI config digest"; exit 1; }
+          config_url="$(
+            aws ecr get-download-url-for-layer \
+              --region "$EXPECTED_REGION" \
+              --registry-id "$EXPECTED_ACCOUNT_ID" \
+              --repository-name "$repository" \
+              --layer-digest "$config_digest" \
+              --query downloadUrl \
+              --output text
+          )"
+          [[ "$config_url" == https://* ]] \
+            || { echo "FATAL: invalid $subject OCI config URL"; exit 1; }
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+            --output "/tmp/$subject-oci-config.json" "$config_url"
+          unset config_url
+          python3 infra/codebuild/teamagent_bundle_provenance.py verify-oci-config \
+            --config "/tmp/$subject-oci-config.json" \
+            --subject "$subject" \
+            --commit "$GIT_COMMIT" \
+            --expected-config-digest "$config_digest" \
+            --contract "$RELEASE_CONTRACT" \
+            --expected-contract-sha256 "$RELEASE_CONTRACT_SHA256" \
+            --runtime-contract infra/codebuild/teamagent_runtime_contract.json
+          if [ "$subject" = "core" ]; then
+            python3 infra/codebuild/source_provenance.py verify-oci-revision \
+              --config "/tmp/$subject-oci-config.json" \
+              --expected-config-digest "$config_digest" \
+              --expected-commit "$GIT_COMMIT" \
+              --expected-with-scrape-tools true \
+              --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
+              --expected-app-html-sha256 "$APP_HTML_SHA256" \
+              --contract infra/codebuild/teamagent_runtime_contract.json \
+              --expected-runtime-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256"
+          fi
+          aws ecr wait image-scan-complete \
+            --region "$EXPECTED_REGION" \
+            --registry-id "$EXPECTED_ACCOUNT_ID" \
+            --repository-name "$repository" \
+            --image-id "imageDigest=$arm64_digest"
+          aws ecr describe-image-scan-findings \
+            --region "$EXPECTED_REGION" \
+            --registry-id "$EXPECTED_ACCOUNT_ID" \
+            --repository-name "$repository" \
+            --image-id "imageDigest=$arm64_digest" \
+            --output json >"/tmp/$subject-ecr-scan.json"
+          python3 infra/codebuild/verify_ecr_scan.py \
+            --scan "/tmp/$subject-ecr-scan.json" \
+            --deny-all \
+            --expected-image-digest "$arm64_digest" \
+            --expected-repository "$repository"
+          case "$subject" in
+            core)
+              MCP_CORE_TAG_DIGEST="$tag_digest"
+              MCP_CORE_ARM64_DIGEST="$arm64_digest"
+              export MCP_CORE_TAG_DIGEST MCP_CORE_ARM64_DIGEST
+              ;;
+            media)
+              MCP_MEDIA_TAG_DIGEST="$tag_digest"
+              MCP_MEDIA_ARM64_DIGEST="$arm64_digest"
+              export MCP_MEDIA_TAG_DIGEST MCP_MEDIA_ARM64_DIGEST
+              ;;
+          esac
+        done
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] \
+          || { echo "FATAL: core/media quarantine verification failed"; exit 1; }
+        echo "MCP_CORE_TAG_DIGEST=$MCP_CORE_TAG_DIGEST"
+        echo "MCP_CORE_ARM64_DIGEST=$MCP_CORE_ARM64_DIGEST"
+        echo "MCP_MEDIA_TAG_DIGEST=$MCP_MEDIA_TAG_DIGEST"
+        echo "MCP_MEDIA_ARM64_DIGEST=$MCP_MEDIA_ARM64_DIGEST"
+        echo "MCP_CORE_MEDIA_QUARANTINE_VERIFIED=true"

@@ -74,6 +74,7 @@ resource "aws_ecr_repository" "tiktok_acquire" {
   name                 = local.tk_name
   image_tag_mutability = "IMMUTABLE"
   image_scanning_configuration { scan_on_push = true }
+  encryption_configuration { encryption_type = "AES256" }
 }
 
 # ---------- ECS Cluster ----------
@@ -231,6 +232,7 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
   memory                   = var.tiktok_task_memory
   execution_role_arn       = aws_iam_role.tiktok_exec[0].arn
   task_role_arn            = aws_iam_role.tiktok_task[0].arn
+  depends_on               = [terraform_data.production_image_release_gate]
 
   runtime_platform {
     cpu_architecture        = "ARM64"

@@ -1,0 +1,284 @@
+# Dedicated buildspec for the separate tiktok-data-service repository.
+# Terraform embeds verify_ecr_scan.py at the placeholder below. The project has
+# no usable default source version; callers must pin a full main-branch commit.
+version: 0.2
+phases:
+  install:
+    commands:
+      - |
+        set -euo pipefail
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        TRIVY_VERSION="0.70.0"
+        TRIVY_ARCHIVE="trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz"
+        TRIVY_SHA256="2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d"
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+          --output "/tmp/$TRIVY_ARCHIVE" \
+          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${TRIVY_ARCHIVE}"
+        printf '%s  %s\n' "$TRIVY_SHA256" "/tmp/$TRIVY_ARCHIVE" | sha256sum -c -
+        tar -xzf "/tmp/$TRIVY_ARCHIVE" -C /tmp trivy
+        install -m 0755 /tmp/trivy /usr/local/bin/trivy
+        trivy --version | grep -F "Version: $TRIVY_VERSION"
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_ECR AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_KMS
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset ECR_REGISTRY TIKTOK_REPO TIKTOK_QUARANTINE_REPO TIKTOK_RELEASE_REPO
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
+        EVIDENCE_KMS_KEY_ARN="__RELEASE_EVIDENCE_KMS_KEY_ARN__"
+        SOURCE_SIGNING_KEY_ARN="__TIKTOK_SOURCE_SIGNING_KEY_ARN__"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
+        TIKTOK_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-dev-tiktok-acquire-quarantine"
+        [ "$ECR_REGISTRY" = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com" ] || { echo "FATAL: unexpected ECR registry"; exit 1; }
+        [ "$TIKTOK_QUARANTINE_REPO" = "$ECR_REGISTRY/teamagent-dev-tiktok-acquire-quarantine" ] || { echo "FATAL: unexpected TikTok quarantine repository"; exit 1; }
+        ACTUAL_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+        [ "$ACTUAL_ACCOUNT_ID" = "$EXPECTED_ACCOUNT_ID" ] || { echo "FATAL: unexpected AWS account"; exit 1; }
+        : "${GIT_COMMIT:?GIT_COMMIT must be explicitly provided}"
+        : "${GIT_BRANCH:?GIT_BRANCH must be explicitly provided}"
+        : "${TIKTOK_CONTRACT_SHA256:?TIKTOK_CONTRACT_SHA256 must be explicitly provided}"
+        : "${SOURCE_MANIFEST_KEY:?SOURCE_MANIFEST_KEY must be explicitly provided}"
+        : "${SOURCE_MANIFEST_VERSION_ID:?SOURCE_MANIFEST_VERSION_ID must be explicitly provided}"
+        : "${SOURCE_MANIFEST_SHA256:?SOURCE_MANIFEST_SHA256 must be explicitly provided}"
+        : "${SOURCE_MANIFEST_SIGNATURE_KEY:?SOURCE_MANIFEST_SIGNATURE_KEY must be explicitly provided}"
+        : "${SOURCE_MANIFEST_SIGNATURE_VERSION_ID:?SOURCE_MANIFEST_SIGNATURE_VERSION_ID must be explicitly provided}"
+        : "${CODEBUILD_RESOLVED_SOURCE_VERSION:?resolved source version is missing}"
+        [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: invalid GIT_COMMIT"; exit 1; }
+        [ "$GIT_BRANCH" = "main" ] || { echo "FATAL: TikTok production builds must come from main"; exit 1; }
+        [[ "$TIKTOK_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid TikTok contract SHA-256"; exit 1; }
+        [[ "$SOURCE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid TikTok source manifest SHA-256"; exit 1; }
+        [[ "$SOURCE_MANIFEST_KEY" == "source-manifests/tiktok/$GIT_COMMIT/"*".json" ]] || { echo "FATAL: TikTok source manifest key is not commit/content addressed"; exit 1; }
+        [ "$SOURCE_MANIFEST_SIGNATURE_KEY" = "$SOURCE_MANIFEST_KEY.sig" ] || { echo "FATAL: TikTok source signature key mismatch"; exit 1; }
+        [ "$CODEBUILD_RESOLVED_SOURCE_VERSION" = "$GIT_COMMIT" ] || { echo "FATAL: resolved source version mismatch"; exit 1; }
+        [ "$(git rev-parse --verify HEAD^{commit})" = "$GIT_COMMIT" ] || { echo "FATAL: Git HEAD mismatch"; exit 1; }
+        [ "$(git remote get-url origin)" = "https://github.com/noirelumiere00/tiktok-data-service.git" ] || { echo "FATAL: unexpected TikTok source origin"; exit 1; }
+        git fetch --no-tags --force origin refs/heads/main:refs/remotes/origin/main
+        [ "$(git rev-parse --verify refs/remotes/origin/main^{commit})" = "$GIT_COMMIT" ] || { echo "FATAL: pinned commit is not the independently fetched main head"; exit 1; }
+        [ -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] || { echo "FATAL: CodeBuild source is dirty"; exit 1; }
+        printf '%s' '__TIKTOK_SOURCE_PROVENANCE_BASE64__' | base64 --decode > /tmp/tiktok-source-provenance.py
+        printf '%s' '__TIKTOK_CONTRACT_BASE64__' | base64 --decode > /tmp/tiktok-release-contract.json
+        [ "$(sha256sum /tmp/tiktok-release-contract.json | awk '{print $1}')" = "$TIKTOK_CONTRACT_SHA256" ] || { echo "FATAL: embedded TikTok contract hash mismatch"; exit 1; }
+        for SOURCE_OBJECT in manifest signature; do
+          case "$SOURCE_OBJECT" in
+            manifest)
+              SOURCE_KEY="$SOURCE_MANIFEST_KEY"
+              SOURCE_VERSION="$SOURCE_MANIFEST_VERSION_ID"
+              SOURCE_DESTINATION="/tmp/tiktok-signed-source-manifest.json"
+              ;;
+            signature)
+              SOURCE_KEY="$SOURCE_MANIFEST_SIGNATURE_KEY"
+              SOURCE_VERSION="$SOURCE_MANIFEST_SIGNATURE_VERSION_ID"
+              SOURCE_DESTINATION="/tmp/tiktok-signed-source-manifest.sig"
+              ;;
+          esac
+          aws s3api head-object \
+            --region "$EXPECTED_REGION" \
+            --bucket "$EVIDENCE_BUCKET" \
+            --key "$SOURCE_KEY" \
+            --version-id "$SOURCE_VERSION" \
+            --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+            --output json >"/tmp/tiktok-source-$SOURCE_OBJECT-head.json"
+          jq -e --arg version "$SOURCE_VERSION" --arg kms "$EVIDENCE_KMS_KEY_ARN" '
+            .VersionId == $version and
+            .ObjectLockMode == "COMPLIANCE" and
+            .ServerSideEncryption == "aws:kms" and
+            .SSEKMSKeyId == $kms
+          ' "/tmp/tiktok-source-$SOURCE_OBJECT-head.json" >/dev/null \
+            || { echo "FATAL: TikTok source $SOURCE_OBJECT is not exact immutable evidence"; exit 1; }
+          python3 - "/tmp/tiktok-source-$SOURCE_OBJECT-head.json" <<'PY'
+        import datetime
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            retained = json.load(handle).get("ObjectLockRetainUntilDate", "")
+        try:
+            timestamp = datetime.datetime.fromisoformat(retained.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise SystemExit("FATAL: TikTok source retention timestamp is invalid") from exc
+        if timestamp <= datetime.datetime.now(datetime.UTC):
+            raise SystemExit("FATAL: TikTok source immutable retention has expired")
+        PY
+          DOWNLOADED_VERSION="$(
+            aws s3api get-object \
+              --region "$EXPECTED_REGION" \
+              --bucket "$EVIDENCE_BUCKET" \
+              --key "$SOURCE_KEY" \
+              --version-id "$SOURCE_VERSION" \
+              --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+              --query VersionId \
+              --output text \
+              "$SOURCE_DESTINATION"
+          )"
+          [ "$DOWNLOADED_VERSION" = "$SOURCE_VERSION" ] || { echo "FATAL: TikTok source $SOURCE_OBJECT VersionId mismatch"; exit 1; }
+        done
+        [ "$(sha256sum /tmp/tiktok-signed-source-manifest.json | awk '{print $1}')" = "$SOURCE_MANIFEST_SHA256" ] || { echo "FATAL: TikTok source manifest hash mismatch"; exit 1; }
+        python3 - /tmp/tiktok-signed-source-manifest.json /tmp/tiktok-source-manifest.sha256 <<'PY'
+        import hashlib
+        import sys
+        with open(sys.argv[1], "rb") as source:
+            digest = hashlib.sha256(source.read()).digest()
+        with open(sys.argv[2], "wb") as output:
+            output.write(digest)
+        PY
+        aws kms verify \
+          --region "$EXPECTED_REGION" \
+          --key-id "$SOURCE_SIGNING_KEY_ARN" \
+          --message-type DIGEST \
+          --message fileb:///tmp/tiktok-source-manifest.sha256 \
+          --signature fileb:///tmp/tiktok-signed-source-manifest.sig \
+          --signing-algorithm RSASSA_PSS_SHA_256 \
+          --output json > /tmp/tiktok-source-signature-verify.json
+        [ "$(jq -er '.SignatureValid' /tmp/tiktok-source-signature-verify.json)" = "true" ] || { echo "FATAL: TikTok source publisher signature is invalid"; exit 1; }
+        python3 /tmp/tiktok-source-provenance.py verify-checkout \
+          --repo-root "$CODEBUILD_SRC_DIR" \
+          --manifest /tmp/tiktok-signed-source-manifest.json \
+          --contract /tmp/tiktok-release-contract.json \
+          --expected-commit "$GIT_COMMIT" \
+          --expected-manifest-sha256 "$SOURCE_MANIFEST_SHA256"
+        [ -x scripts/build_acquire_image.sh ] || { echo "FATAL: safe TikTok builder is missing"; exit 1; }
+        aws ecr get-login-password --region ap-northeast-1 \
+          | docker login --username AWS --password-stdin "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_ECR
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset ECR_REGISTRY TIKTOK_REPO TIKTOK_QUARANTINE_REPO TIKTOK_RELEASE_REPO
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
+        TIKTOK_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-dev-tiktok-acquire-quarantine"
+        EXPECTED_SOURCE_REVISION="$GIT_COMMIT" \
+          scripts/build_acquire_image.sh \
+            --push \
+            --repository "$TIKTOK_QUARANTINE_REPO"
+  post_build:
+    commands:
+      - |
+        set -euo pipefail
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: TikTok build failed before scan gate"; exit 1; }
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_ECR
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset ECR_REGISTRY TIKTOK_REPO TIKTOK_QUARANTINE_REPO TIKTOK_RELEASE_REPO
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        ECR_REGISTRY="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${EXPECTED_REGION}.amazonaws.com"
+        TIKTOK_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-dev-tiktok-acquire-quarantine"
+        QUARANTINE_REPOSITORY="${TIKTOK_QUARANTINE_REPO##*/}"
+        aws ecr wait image-exists \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
+          --image-ids "imageTag=$GIT_COMMIT"
+        TAG_DIGEST="$(aws ecr describe-images \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
+          --image-ids "imageTag=$GIT_COMMIT" \
+          --query 'imageDetails[0].imageDigest' \
+          --output text)"
+        [[ "$TAG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid TikTok tag digest"; exit 1; }
+        printf '%s' '__ECR_IMAGE_RESOLVER_BASE64__' | base64 --decode > /tmp/resolve-ecr-image.py
+        aws ecr batch-get-image \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
+          --image-ids "imageDigest=$TAG_DIGEST" \
+          --accepted-media-types \
+            application/vnd.docker.distribution.manifest.list.v2+json \
+            application/vnd.oci.image.index.v1+json \
+            application/vnd.docker.distribution.manifest.v2+json \
+            application/vnd.oci.image.manifest.v1+json \
+          --output json > /tmp/tiktok-ecr-parent.json
+        ARM64_DIGEST="$(python3 /tmp/resolve-ecr-image.py resolve-platform \
+          --batch-response /tmp/tiktok-ecr-parent.json \
+          --expected-image-digest "$TAG_DIGEST" \
+          --os linux \
+          --architecture arm64)"
+        [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid TikTok arm64 child digest"; exit 1; }
+        aws ecr batch-get-image \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
+          --image-ids "imageDigest=$ARM64_DIGEST" \
+          --accepted-media-types \
+            application/vnd.docker.distribution.manifest.v2+json \
+            application/vnd.oci.image.manifest.v1+json \
+          --output json > /tmp/tiktok-ecr-child.json
+        CONFIG_DIGEST="$(python3 /tmp/resolve-ecr-image.py config-digest \
+          --batch-response /tmp/tiktok-ecr-child.json \
+          --expected-image-digest "$ARM64_DIGEST")"
+        [[ "$CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FATAL: invalid TikTok OCI config digest"; exit 1; }
+        CONFIG_URL="$(aws ecr get-download-url-for-layer \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
+          --layer-digest "$CONFIG_DIGEST" \
+          --query downloadUrl \
+          --output text)"
+        [[ "$CONFIG_URL" == https://* ]] || { echo "FATAL: invalid TikTok OCI config URL"; exit 1; }
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+          --output /tmp/tiktok-oci-config.json "$CONFIG_URL"
+        unset CONFIG_URL
+        python3 /tmp/resolve-ecr-image.py verify-config-platform \
+          --config /tmp/tiktok-oci-config.json \
+          --expected-config-digest "$CONFIG_DIGEST" \
+          --os linux \
+          --architecture arm64 \
+          --expected-revision "$GIT_COMMIT"
+        aws ecr wait image-scan-complete \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
+          --image-id "imageDigest=$ARM64_DIGEST"
+        aws ecr describe-image-scan-findings \
+          --region "$EXPECTED_REGION" \
+          --registry-id "$EXPECTED_ACCOUNT_ID" \
+          --repository-name "$QUARANTINE_REPOSITORY" \
+          --image-id "imageDigest=$ARM64_DIGEST" \
+          --output json > /tmp/tiktok-ecr-scan.json
+        printf '%s' '__ECR_SCAN_GATE_BASE64__' | base64 --decode > /tmp/verify-ecr-scan.py
+        python3 /tmp/verify-ecr-scan.py \
+          --scan /tmp/tiktok-ecr-scan.json \
+          --deny-all \
+          --expected-image-digest "$ARM64_DIGEST" \
+          --expected-repository "$QUARANTINE_REPOSITORY"
+        VERIFIED_QUARANTINE_DIGEST="$ARM64_DIGEST"
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: TikTok quarantine verification failed"; exit 1; }
+        echo "TIKTOK_TAG_DIGEST=$TAG_DIGEST"
+        echo "TIKTOK_ARM64_DIGEST=$ARM64_DIGEST"
+        echo "TIKTOK_QUARANTINE_VERIFIED=true"

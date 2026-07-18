@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "kind": "teamagent.core-media-release-contract",
+  "release": {
+    "ready": false,
+    "blocked_reason": "NO-GO until the core branch adds the final media Dockerfile, removes unknown provenance defaults, implements both runtime and RELEASE_CONTRACT_SHA256/APP_PROVENANCE_SHA256 ARG/label interfaces, supplies C0/H0 runtime evidence, and records the immutable S3 VersionId whose bytes hash to the approved 716ac25a... baked fallback."
+  },
+  "source_runtime_contract": {
+    "path": "infra/codebuild/teamagent_runtime_contract.json",
+    "sha256": "08627a063419d1a07578c5dc36b91db2dce98b48d78f14c20e6754f30acde946"
+  },
+  "app_html": {
+    "bucket": "teamagent-dev-raw-files",
+    "key": "codebuild/connect-web-app.html",
+    "production": {
+      "app_html_s3_version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
+      "app_html_sha256": "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
+      "vault_manifest_sha256": "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
+      "build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+    },
+    "baked_fallback": {
+      "s3_version_id": null,
+      "sha256": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
+    }
+  },
+  "subjects": [
+    {
+      "name": "core",
+      "dockerfile": "infra/docker/Dockerfile.teamagent-mcp",
+      "runtime_kind": "core",
+      "repositories": {
+        "quarantine": "teamagent-mcp-quarantine",
+        "verified_candidate": "teamagent-mcp-verified-candidates",
+        "release": "teamagent-mcp"
+      },
+      "required_build_args": [
+        "APP_HTML_BUILD_INPUTS_SHA256",
+        "APP_HTML_MANIFEST_SHA256",
+        "APP_HTML_SHA256",
+        "APP_HTML_SOURCE",
+        "APP_HTML_VERSION_ID",
+        "APP_PROVENANCE_SHA256",
+        "BAKED_APP_HTML_SHA256",
+        "BAKED_APP_HTML_VERSION_ID",
+        "GIT_BRANCH",
+        "GIT_COMMIT",
+        "RELEASE_CONTRACT_SHA256"
+      ],
+      "required_label_bindings": {
+        "io.teamagent.build.app-provenance-sha256": "APP_PROVENANCE_SHA256",
+        "io.teamagent.build.release-contract-sha256": "RELEASE_CONTRACT_SHA256",
+        "io.teamagent.contract.app-html-build-inputs-sha256": "APP_HTML_BUILD_INPUTS_SHA256",
+        "io.teamagent.contract.app-html-manifest-sha256": "APP_HTML_MANIFEST_SHA256",
+        "io.teamagent.contract.app-html-sha256": "APP_HTML_SHA256",
+        "io.teamagent.contract.app-html-source": "APP_HTML_SOURCE",
+        "io.teamagent.contract.app-html-version-id": "APP_HTML_VERSION_ID",
+        "io.teamagent.contract.baked-app-html-sha256": "BAKED_APP_HTML_SHA256",
+        "io.teamagent.contract.baked-app-html-version-id": "BAKED_APP_HTML_VERSION_ID",
+        "io.teamagent.runtime.kind": "core",
+        "org.opencontainers.image.ref.name": "GIT_BRANCH",
+        "org.opencontainers.image.revision": "GIT_COMMIT"
+      },
+      "binary_probes": [
+        {
+          "path": "/app/src/teamagent/connect_web/static/app.html",
+          "sha256": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
+        },
+        {
+          "path": "/usr/bin/python3.14",
+          "sha256": "0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8"
+        }
+      ]
+    },
+    {
+      "name": "media",
+      "dockerfile": "infra/docker/Dockerfile.teamagent-media-worker",
+      "runtime_kind": "media-worker",
+      "repositories": {
+        "quarantine": "teamagent-media-worker-quarantine",
+        "verified_candidate": "teamagent-media-worker-verified-candidates",
+        "release": "teamagent-media-worker"
+      },
+      "required_build_args": [
+        "APP_PROVENANCE_SHA256",
+        "GIT_BRANCH",
+        "GIT_COMMIT",
+        "RELEASE_CONTRACT_SHA256"
+      ],
+      "required_label_bindings": {
+        "io.teamagent.build.app-provenance-sha256": "APP_PROVENANCE_SHA256",
+        "io.teamagent.build.release-contract-sha256": "RELEASE_CONTRACT_SHA256",
+        "io.teamagent.runtime.kind": "media-worker",
+        "org.opencontainers.image.ref.name": "GIT_BRANCH",
+        "org.opencontainers.image.revision": "GIT_COMMIT"
+      },
+      "binary_probes": [
+        {
+          "path": "/usr/bin/ffmpeg",
+          "sha256": "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba"
+        },
+        {
+          "path": "/usr/bin/node",
+          "sha256": "b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1"
+        },
+        {
+          "path": "/usr/bin/python3",
+          "sha256": "95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4"
+        },
+        {
+          "path": "/usr/lib/chromium/chromium",
+          "sha256": "13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79"
+        }
+      ]
+    }
+  ]
+}

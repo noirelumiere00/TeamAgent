@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "release": {
+    "ready": false,
+    "blocked_reason": "Boyle-owned OpenClaw core/media image implementation has not yet emitted and signed the complete bundle receipt; keep this project unable to publish release images until that cross-branch contract lands."
+  },
+  "source": {
+    "repository": "https://github.com/noirelumiere00/TeamAgent.git",
+    "branch": "dev"
+  },
+  "evidence": {
+    "bucket": "teamagent-dev-openclaw-build-evidence",
+    "source_manifest_prefix": "source-manifests",
+    "release_evidence_prefix": "release-evidence",
+    "signing_kms_key_alias": "alias/teamagent-dev-openclaw-build-publisher",
+    "encryption_kms_key_alias": "alias/teamagent-dev-openclaw-build-evidence",
+    "object_lock_mode": "COMPLIANCE",
+    "retention_days": 3650
+  },
+  "bundle": {
+    "schema_version": 1,
+    "interfaces": {
+      "build": "infra/openclaw/build-image.sh",
+      "attest": "infra/codebuild/verify_actual_image.sh",
+      "promote": "infra/codebuild/image-promoter-buildspec.yml"
+    },
+    "contract_oci_label": "io.teamagent.build.contract-sha256",
+    "arm64_subject_media_type": "application/vnd.oci.image.manifest.v1+json",
+    "subjects": [
+      {
+        "name": "core",
+        "quarantine_repository": "teamagent-openclaw-quarantine",
+        "candidate_repository": "teamagent-openclaw-verified-candidates",
+        "release_repository": "teamagent-openclaw",
+        "binary_probes": []
+      },
+      {
+        "name": "media",
+        "quarantine_repository": "teamagent-openclaw-media-quarantine",
+        "candidate_repository": "teamagent-openclaw-media-verified-candidates",
+        "release_repository": "teamagent-openclaw-media",
+        "binary_probes": []
+      }
+    ],
+    "required_referrers": [
+      {
+        "name": "provenance",
+        "artifact_type": "application/vnd.in-toto+json",
+        "minimum": 1,
+        "signature_required": true
+      },
+      {
+        "name": "sbom",
+        "artifact_type": "application/spdx+json",
+        "minimum": 1,
+        "signature_required": true
+      }
+    ],
+    "signature_artifact_type": "application/vnd.dev.cosign.simplesigning.v1+json",
+    "scan_gate": {
+      "critical": 0,
+      "high": 0
+    }
+  },
+  "tooling": {
+    "trivy_db_repository": "public.ecr.aws/aquasecurity/trivy-db:2",
+    "trivy_java_db_repository": "public.ecr.aws/aquasecurity/trivy-java-db:1"
+  }
+}
