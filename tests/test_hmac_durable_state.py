@@ -111,6 +111,8 @@ def _ddb_item(snapshot: HmacDurableSnapshot) -> dict[str, dict[str, object]]:
         item["retired_generations"] = {"SS": sorted(snapshot.retired_generations)}
     if snapshot.retired_provenances:
         item["retired_provenances"] = {"SS": sorted(snapshot.retired_provenances)}
+    if snapshot.cleanup_stage is not None:
+        item["cleanup_stage"] = {"S": snapshot.cleanup_stage}
     return item
 
 
@@ -225,6 +227,47 @@ def test_trusted_high_water_survives_restart_and_clock_rollback() -> None:
     fake.now = _DEADLINE - 10_000
     after_restart = restarted.evaluate(_expectation())
     assert after_restart is not None and not after_restart.previous_eligible
+
+
+def test_cleanup_overlap_accepts_old_and_primary_only_metadata_but_never_expired_key() -> None:
+    new_provenance = "c" * 64
+    snapshot = replace(
+        _snapshot(now=_DEADLINE, previous_retired=True),
+        stage="complete",
+        issuer_provenances=frozenset({_PROVENANCE, new_provenance}),
+        cleanup_stage="authorized",
+    )
+    old = decision_from_snapshot(snapshot, _expectation())
+    primary_only = HmacRuntimeExpectation(
+        domain="mail_action",
+        primary_generation=_PRIMARY,
+        previous_generation=None,
+        rotation_started_at=None,
+        deadline=None,
+        rotation_epoch="rotation-2026-07-18",
+        provenance=new_provenance,
+    )
+    replacement = decision_from_snapshot(snapshot, primary_only)
+
+    assert old is not None and old.issuance_allowed and not old.previous_eligible
+    assert replacement is not None and replacement.issuance_allowed
+    unauthorized = decision_from_snapshot(
+        snapshot,
+        replace(primary_only, provenance="d" * 64),
+    )
+    assert unauthorized is not None and not unauthorized.issuance_allowed
+
+    finalized = replace(
+        snapshot,
+        previous_generation=None,
+        rotation_started_at=None,
+        deadline=None,
+        cleanup_stage=None,
+        issuer_provenances=frozenset({new_provenance}),
+        retired_provenances=frozenset({_PROVENANCE}),
+    )
+    assert decision_from_snapshot(finalized, _expectation()) is None
+    assert decision_from_snapshot(finalized, primary_only) is not None
 
 
 def test_deadline_interleaving_cannot_reenable_previous() -> None:

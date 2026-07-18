@@ -95,6 +95,7 @@ class HmacDurableSnapshot:
     trusted_now: int
     legacy_worker_generation: str | None = None
     legacy_worker_deadline: int | None = None
+    cleanup_stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -289,14 +290,27 @@ def _item_string_set(item: dict[str, Any], name: str) -> frozenset[str]:
 
 
 def _matches(snapshot: HmacDurableSnapshot, expected: HmacRuntimeExpectation) -> bool:
-    return (
-        snapshot.domain == expected.domain
-        and snapshot.primary_generation == expected.primary_generation
-        and snapshot.previous_generation == expected.previous_generation
+    exact_config = (
+        snapshot.previous_generation == expected.previous_generation
         and snapshot.rotation_started_at == expected.rotation_started_at
         and snapshot.deadline == expected.deadline
         and snapshot.legacy_worker_generation == expected.legacy_worker_generation
         and snapshot.legacy_worker_deadline == expected.legacy_worker_deadline
+    )
+    cleanup_primary_only = (
+        snapshot.cleanup_stage == "authorized"
+        and snapshot.previous_retired
+        and snapshot.previous_generation is not None
+        and expected.previous_generation is None
+        and expected.rotation_started_at is None
+        and expected.deadline is None
+        and expected.legacy_worker_generation is None
+        and expected.legacy_worker_deadline is None
+    )
+    return (
+        snapshot.domain == expected.domain
+        and snapshot.primary_generation == expected.primary_generation
+        and (exact_config or cleanup_primary_only)
         and snapshot.rotation_epoch == expected.rotation_epoch
         and snapshot.stage in _RUNTIME_STAGES
         and expected.primary_generation not in snapshot.retired_generations
@@ -429,6 +443,7 @@ class DynamoDbHmacStateStore:
                 "legacy_worker_deadline",
                 optional=True,
             )
+            cleanup_stage = _item_string(item, "cleanup_stage", optional=True)
             if (
                 record_domain != domain
                 or primary is None
@@ -451,6 +466,14 @@ class DynamoDbHmacStateStore:
                         or legacy_worker_deadline != deadline
                     )
                 )
+                or (
+                    cleanup_stage is not None
+                    and (
+                        cleanup_stage != "authorized"
+                        or previous is None
+                        or not _item_bool(item, "previous_retired")
+                    )
+                )
             ):
                 return None
             return HmacDurableSnapshot(
@@ -470,6 +493,7 @@ class DynamoDbHmacStateStore:
                 trusted_now=trusted_now,
                 legacy_worker_generation=legacy_worker,
                 legacy_worker_deadline=legacy_worker_deadline,
+                cleanup_stage=cleanup_stage,
             )
         except (HmacDurableStateError, KeyError):
             return None

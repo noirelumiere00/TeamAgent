@@ -161,6 +161,17 @@ def test_hmac_secrets_are_dedicated_version_pinned_and_never_stored_in_state() -
     assert 'resource "terraform_data" "hmac_live_task_gate"' in hmac_tf
     assert "timestamp()" in hmac_tf
     assert "terraform_hmac_gate.py" in hmac_tf
+    assert 'variable "hmac_gate_mode"' in hmac_tf
+    assert "HMAC_GATE_MODE" in hmac_tf
+    for field in (
+        "mail_primary",
+        "mail_previous",
+        "mail_t0",
+        "report_primary",
+        "report_previous",
+        "report_t0",
+    ):
+        assert field in hmac_tf
 
     database_primary = re.compile(
         r'name\s*=\s*"(?:MAIL_ACTION|REPORT_LINK)_HMAC_SECRET"'
@@ -238,6 +249,7 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     promote = (ROOT / "infra" / "deploy" / "promote_hmac_task.sh").read_text(encoding="utf-8")
     preflight = (ROOT / "scripts" / "preflight_hmac_rotation.py").read_text(encoding="utf-8")
     live_gate = (ROOT / "scripts" / "hmac_rollout_gate.py").read_text(encoding="utf-8")
+    terraform_gate = (ROOT / "scripts" / "terraform_hmac_gate.py").read_text(encoding="utf-8")
     assert (ROOT / "scripts" / "preflight_hmac_rotation.py").stat().st_mode & 0o111
 
     assert "source /opt/teamagent/hmac.env; source scripts/load_secrets.sh" in worker
@@ -313,9 +325,25 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert "legacy_task_definition" in live_gate
     assert "def retire_previous(" in live_gate
     assert '"post-update"' in live_gate
-    assert live_gate.count("_service_stable_and_drained(") >= 7
+    assert "def _full_task_inventory(" in live_gate
+    assert 'desired_status="RUNNING"' in live_gate
+    assert 'desired_status="STOPPED"' in live_gate
+    assert "task_inventory_count_drift" in live_gate
+    assert "def prepare_cleanup(" in live_gate
+    assert "def complete_cleanup(" in live_gate
+    assert "cleanup_mode_required" in live_gate
+    assert "time.monotonic()" in live_gate
+    assert "gate_client_error" in live_gate
+    assert '{"code":"gate_client_error","ok":false}' in terraform_gate
     assert "gate.terraform_pre_register(" in live_gate
     assert "config_digest" in live_gate
+    assert worker_deploy.index("--action post-restart") > worker_deploy.index(
+        'RESTART_CID="$(aws ssm send-command'
+    )
+    assert "systemctl is-active --quiet teamagent-bot" in worker_deploy
+    assert "systemctl is-active --quiet teamagent-connect" in worker_deploy
+    assert "/:8788$/" in worker_deploy
+    assert "fresh_attestation=true" in worker_deploy
     assert promote.index("--action pre-update") < promote.index("aws ecs update-service")
     assert promote.index("aws ecs wait services-stable") < promote.index(
         "--action mcp-stable-and-old-drained"
@@ -344,9 +372,11 @@ def test_live_connect_and_canary_anchors_remain_documented_and_canary_unmodified
     )
     assert "every old MCP task is drained" in runbook
     assert "Do not infer it from the secret's current `AWSCURRENT`" in runbook
-    assert "run `hmac_rollout_gate.py --action" in runbook
-    assert "retire-previous --domain mail_action`" in runbook
-    assert "repeat the CAS first for `report_link`" in runbook
+    assert "scripts/hmac_rollout_gate.py" in runbook
+    assert "--action prepare-cleanup" in runbook
+    assert "--action complete-cleanup" in runbook
+    assert "`cleanup_staging_required`" in runbook
+    assert "repeat `prepare-cleanup`" in runbook
     assert "HMAC_WORKER_MODE=rollback" in runbook
     assert "exact approved rollback artifact" in runbook
     assert "canary `:14`" in runbook

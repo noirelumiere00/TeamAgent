@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 import scripts.hmac_rollout_gate as rollout_gate_module
+import scripts.terraform_hmac_gate as terraform_gate_module
 from scripts.hmac_rollout_gate import (
     LiveRolloutGate,
     RolloutGateError,
@@ -39,21 +40,35 @@ _SLACK_GENERATION = f"{_SLACK_ARN}@{_SLACK_VERSION}"
 _EPOCH = "hmac-2026-07-18"
 _TABLE = "teamagent-dev-hmac-state"
 _SCOPE = "teamagent/dev"
+_CLUSTER = "arn:aws:ecs:ap-northeast-1:123456789012:cluster/teamagent-dev"
 _PROVENANCE = {
     "mcp": "",
+    "mcp_rollback": "",
     "connect_web": "",
+    "connect_web_rollback": "",
     "morning_digest": "",
+    "morning_digest_rollback": "",
     "worker": "",
     "worker_rollback": "",
 }
 _TASK_ARNS = {
     "mcp_old": "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-mcp:55",
     "mcp_new": "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-mcp:56",
+    "mcp_rollback": (
+        "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-mcp:57"
+    ),
+    "mcp_cleanup": ("arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-mcp:58"),
     "connect_old": (
         "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-connect-web:53"
     ),
     "connect_new": (
         "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-connect-web:54"
+    ),
+    "connect_rollback": (
+        "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-connect-web:55"
+    ),
+    "connect_cleanup": (
+        "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-connect-web:56"
     ),
     "morning_old": (
         "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-morning-digest:44"
@@ -61,11 +76,18 @@ _TASK_ARNS = {
     "morning_new": (
         "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-morning-digest:45"
     ),
+    "morning_rollback": (
+        "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-morning-digest:46"
+    ),
+    "morning_cleanup": (
+        "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-morning-digest:47"
+    ),
     "canary": (
         "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-connect-canary:14"
     ),
 }
 _IMAGE = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent@sha256:" + "1" * 64
+_ROLLBACK_IMAGE = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent@sha256:" + "9" * 64
 
 
 def _provenance(**values: str) -> str:
@@ -80,21 +102,58 @@ _PROVENANCE.update(
             workload="mcp",
             image=_IMAGE,
             rotation_epoch=_EPOCH,
-            mail=_MAIL_GENERATION,
-            report=_REPORT_GENERATION,
+            mail_primary=_MAIL_GENERATION,
+            mail_previous=_DB_GENERATION,
+            mail_t0=str(_NOW),
+            report_primary=_REPORT_GENERATION,
+            report_previous=_DB_GENERATION,
+            report_t0=str(_NOW),
             legacy_worker=_SLACK_GENERATION,
         ),
         "connect_web": _provenance(
             workload="connect_web",
             image=_IMAGE,
             rotation_epoch=_EPOCH,
-            report=_REPORT_GENERATION,
+            report_primary=_REPORT_GENERATION,
+            report_previous=_DB_GENERATION,
+            report_t0=str(_NOW),
         ),
         "morning_digest": _provenance(
             workload="morning_digest",
             image=_IMAGE,
             rotation_epoch=_EPOCH,
-            mail=_MAIL_GENERATION,
+            mail_primary=_MAIL_GENERATION,
+            mail_previous=_DB_GENERATION,
+            mail_t0=str(_NOW),
+            legacy_worker=_SLACK_GENERATION,
+        ),
+        "mcp_rollback": _provenance(
+            workload="mcp",
+            image=_ROLLBACK_IMAGE,
+            rotation_epoch=_EPOCH,
+            mail_primary=_MAIL_GENERATION,
+            mail_previous=_DB_GENERATION,
+            mail_t0=str(_NOW),
+            report_primary=_REPORT_GENERATION,
+            report_previous=_DB_GENERATION,
+            report_t0=str(_NOW),
+            legacy_worker=_SLACK_GENERATION,
+        ),
+        "connect_web_rollback": _provenance(
+            workload="connect_web",
+            image=_ROLLBACK_IMAGE,
+            rotation_epoch=_EPOCH,
+            report_primary=_REPORT_GENERATION,
+            report_previous=_DB_GENERATION,
+            report_t0=str(_NOW),
+        ),
+        "morning_digest_rollback": _provenance(
+            workload="morning_digest",
+            image=_ROLLBACK_IMAGE,
+            rotation_epoch=_EPOCH,
+            mail_primary=_MAIL_GENERATION,
+            mail_previous=_DB_GENERATION,
+            mail_t0=str(_NOW),
             legacy_worker=_SLACK_GENERATION,
         ),
     }
@@ -218,6 +277,23 @@ def _new_definition(task: str) -> dict[str, object]:
     }
 
 
+def _rollback_definition(task: str) -> dict[str, object]:
+    definition = copy.deepcopy(_new_definition(task))
+    definition["taskDefinitionArn"] = _TASK_ARNS[
+        {
+            "mcp": "mcp_rollback",
+            "connect_web": "connect_rollback",
+            "morning_digest": "morning_rollback",
+        }[task]
+    ]
+    container = definition["containerDefinitions"][0]  # type: ignore[index]
+    container["image"] = _ROLLBACK_IMAGE
+    for entry in container["environment"]:
+        if entry["name"] == "TEAMAGENT_HMAC_PROVENANCE":
+            entry["value"] = _PROVENANCE[f"{task}_rollback"]
+    return definition
+
+
 def _config(domain: str, *, deployed: bool) -> dict[str, object]:
     if deployed:
         return {
@@ -267,16 +343,24 @@ def _control(rollback_hash: str, artifact_hash: str = "2" * 64) -> dict[str, obj
         workload="worker",
         artifact=artifact_hash,
         rotation_epoch=_EPOCH,
-        mail=_MAIL_GENERATION,
-        report=_REPORT_GENERATION,
+        mail_primary=_MAIL_GENERATION,
+        mail_previous=_DB_GENERATION,
+        mail_t0=str(_NOW),
+        report_primary=_REPORT_GENERATION,
+        report_previous=_DB_GENERATION,
+        report_t0=str(_NOW),
         legacy_worker=_SLACK_GENERATION,
     )
     worker_rollback_provenance = _provenance(
         workload="worker",
         artifact=rollback_hash,
         rotation_epoch=_EPOCH,
-        mail=_MAIL_GENERATION,
-        report=_REPORT_GENERATION,
+        mail_primary=_MAIL_GENERATION,
+        mail_previous=_DB_GENERATION,
+        mail_t0=str(_NOW),
+        report_primary=_REPORT_GENERATION,
+        report_previous=_DB_GENERATION,
+        report_t0=str(_NOW),
         legacy_worker=_SLACK_GENERATION,
     )
     return {
@@ -291,28 +375,29 @@ def _control(rollback_hash: str, artifact_hash: str = "2" * 64) -> dict[str, obj
                 "service": "teamagent-dev-mcp",
                 "legacy_task_definition": _TASK_ARNS["mcp_old"],
                 "provenance": _PROVENANCE["mcp"],
-                "rollback_provenance": _PROVENANCE["mcp"],
-                "rollback_task_definition": _TASK_ARNS["mcp_new"],
-                "rollback_image": _IMAGE,
+                "rollback_provenance": _PROVENANCE["mcp_rollback"],
+                "rollback_task_definition": _TASK_ARNS["mcp_rollback"],
+                "rollback_image": _ROLLBACK_IMAGE,
             },
             "connect_web": {
                 "cluster": "teamagent-dev",
                 "service": "teamagent-dev-connect-web",
                 "legacy_task_definition": _TASK_ARNS["connect_old"],
                 "provenance": _PROVENANCE["connect_web"],
-                "rollback_provenance": _PROVENANCE["connect_web"],
-                "rollback_task_definition": _TASK_ARNS["connect_new"],
-                "rollback_image": _IMAGE,
+                "rollback_provenance": _PROVENANCE["connect_web_rollback"],
+                "rollback_task_definition": _TASK_ARNS["connect_rollback"],
+                "rollback_image": _ROLLBACK_IMAGE,
             },
         },
         "morning_digest": {
+            "cluster": _CLUSTER,
             "rule": "teamagent-dev-morning-digest",
             "target_id": "morning",
             "legacy_task_definition": _TASK_ARNS["morning_old"],
             "provenance": _PROVENANCE["morning_digest"],
-            "rollback_provenance": _PROVENANCE["morning_digest"],
-            "rollback_task_definition": _TASK_ARNS["morning_new"],
-            "rollback_image": _IMAGE,
+            "rollback_provenance": _PROVENANCE["morning_digest_rollback"],
+            "rollback_task_definition": _TASK_ARNS["morning_rollback"],
+            "rollback_image": _ROLLBACK_IMAGE,
         },
         "worker": {
             "instance_id": "i-0123456789abcdef0",
@@ -346,20 +431,35 @@ class _FakeEcs:
             _TASK_ARNS["mcp_new"]: _new_definition("mcp"),
             _TASK_ARNS["connect_new"]: _new_definition("connect_web"),
             _TASK_ARNS["morning_new"]: _new_definition("morning_digest"),
+            _TASK_ARNS["mcp_rollback"]: _rollback_definition("mcp"),
+            _TASK_ARNS["connect_rollback"]: _rollback_definition("connect_web"),
+            _TASK_ARNS["morning_rollback"]: _rollback_definition("morning_digest"),
         }
         self.service_overrides: dict[str, dict[str, object]] = {}
         self.running_task_definition: dict[str, str] = {}
         self.list_tasks_next_token: str | None = None
+        self.draining_service: str | None = None
+        self.scheduled_running: list[str] = []
+        self.scheduled_draining: list[str] = []
 
     def describe_services(self, **kwargs: object) -> dict[str, object]:
         service_name = kwargs["services"][0]  # type: ignore[index]
         task_definition = self.current[str(service_name)]
         service = {
+            "status": "ACTIVE",
             "taskDefinition": task_definition,
             "desiredCount": 1,
             "runningCount": 1,
             "pendingCount": 0,
-            "deployments": [{"rolloutState": "COMPLETED"}],
+            "deployments": [
+                {
+                    "taskDefinition": task_definition,
+                    "desiredCount": 1,
+                    "runningCount": 1,
+                    "pendingCount": 0,
+                    "rolloutState": "COMPLETED",
+                }
+            ],
         }
         service.update(self.service_overrides.get(str(service_name), {}))
         return _response(services=[service], failures=[])
@@ -370,9 +470,33 @@ class _FakeEcs:
         )
 
     def list_tasks(self, **kwargs: object) -> dict[str, object]:
-        service = str(kwargs["serviceName"])
+        desired_status = str(kwargs["desiredStatus"])
+        service_name = kwargs.get("serviceName")
+        if service_name is not None:
+            service = str(service_name)
+            if desired_status == "RUNNING":
+                task_arns = [f"arn:aws:ecs:region:account:task/{service}/running"]
+            else:
+                task_arns = [f"arn:aws:ecs:region:account:task/{service}/stopped"]
+                if self.draining_service == service:
+                    task_arns.append(f"arn:aws:ecs:region:account:task/{service}/draining")
+        elif desired_status == "RUNNING":
+            task_arns = [
+                f"arn:aws:ecs:region:account:task/morning/{index}"
+                for index, _task_definition in enumerate(self.scheduled_running)
+            ]
+        else:
+            task_arns = [
+                "arn:aws:ecs:region:account:task/morning/stopped",
+                *[
+                    f"arn:aws:ecs:region:account:task/morning/draining/{index}"
+                    for index, _task_definition in enumerate(self.scheduled_draining)
+                ],
+            ]
+        if kwargs.get("nextToken") is not None:
+            return _response(taskArns=[], nextToken=self.list_tasks_next_token)
         return _response(
-            taskArns=[f"arn:aws:ecs:region:account:task/{service}/one"],
+            taskArns=task_arns,
             **(
                 {"nextToken": self.list_tasks_next_token}
                 if self.list_tasks_next_token is not None
@@ -381,10 +505,52 @@ class _FakeEcs:
         )
 
     def describe_tasks(self, **kwargs: object) -> dict[str, object]:
-        task_arn = str(kwargs["tasks"][0])  # type: ignore[index]
-        service = "teamagent-dev-connect-web" if "connect-web" in task_arn else "teamagent-dev-mcp"
-        task_definition = self.running_task_definition.get(service, self.current[service])
-        return _response(tasks=[{"taskDefinitionArn": task_definition, "lastStatus": "RUNNING"}])
+        tasks: list[dict[str, str]] = []
+        for raw_task_arn in kwargs["tasks"]:  # type: ignore[union-attr]
+            task_arn = str(raw_task_arn)
+            if "/morning/" in task_arn:
+                if task_arn.endswith("/stopped"):
+                    task_definition = _TASK_ARNS["morning_old"]
+                    desired_status = "STOPPED"
+                    last_status = "STOPPED"
+                elif "/draining/" in task_arn:
+                    index = int(task_arn.rsplit("/", maxsplit=1)[-1])
+                    task_definition = self.scheduled_draining[index]
+                    desired_status = "STOPPED"
+                    last_status = "RUNNING"
+                else:
+                    index = int(task_arn.rsplit("/", maxsplit=1)[-1])
+                    task_definition = self.scheduled_running[index]
+                    desired_status = "RUNNING"
+                    last_status = "RUNNING"
+            else:
+                service = (
+                    "teamagent-dev-connect-web"
+                    if "connect-web" in task_arn
+                    else "teamagent-dev-mcp"
+                )
+                task_definition = self.running_task_definition.get(
+                    service,
+                    self.current[service],
+                )
+                if task_arn.endswith("/running"):
+                    desired_status = "RUNNING"
+                    last_status = "RUNNING"
+                elif task_arn.endswith("/draining"):
+                    desired_status = "STOPPED"
+                    last_status = "RUNNING"
+                else:
+                    desired_status = "STOPPED"
+                    last_status = "STOPPED"
+            tasks.append(
+                {
+                    "taskArn": task_arn,
+                    "taskDefinitionArn": task_definition,
+                    "desiredStatus": desired_status,
+                    "lastStatus": last_status,
+                }
+            )
+        return _response(tasks=tasks, failures=[])
 
 
 class _FakeEvents:
@@ -406,6 +572,7 @@ class _FakeEvents:
             Targets=[
                 {
                     "Id": "morning",
+                    "Arn": _CLUSTER,
                     "EcsParameters": {"TaskDefinitionArn": self.morning},
                 }
             ]
@@ -471,12 +638,15 @@ class _FakeDdb:
                             raise RuntimeError("conditional")
                     elif "revision = :revision" in condition:
                         values = put["ExpressionAttributeValues"]
-                        if (
-                            existing is None
-                            or existing.get("revision") != values[":revision"]
-                            or existing.get("rotation_epoch") != values[":old_epoch"]
-                            or existing.get("stage") != values[":complete"]
-                        ):
+                        invalid = (
+                            existing is None or existing.get("revision") != values[":revision"]
+                        )
+                        if ":old_epoch" in values:
+                            invalid = invalid or (
+                                existing.get("rotation_epoch") != values[":old_epoch"]
+                                or existing.get("stage") != values[":complete"]
+                            )
+                        if invalid:
                             raise RuntimeError("conditional")
                     next_items[key] = item
                 elif "Update" in operation:
@@ -484,19 +654,61 @@ class _FakeDdb:
                     key = (update["Key"]["scope"]["S"], update["Key"]["record"]["S"])
                     item = next_items[key]
                     values = update["ExpressionAttributeValues"]
+                    expression = str(update["UpdateExpression"])
                     if key[1].startswith("LEDGER#"):
                         item["stage"] = copy.deepcopy(values[":next"])
                         item["updated_at"] = copy.deepcopy(values[":now"])
-                    elif ":retired" in values:
-                        if (
-                            item["revision"] != values[":revision"]
-                            or item["rotation_epoch"] != values[":epoch"]
-                            or item["high_water"] != values[":high_water"]
-                            or item["previous_generation"] != values[":previous"]
-                            or item["deadline"] != values[":deadline"]
-                            or item["stage"] != values[":complete"]
+                    elif "cleanup_stage = :authorized" in expression:
+                        item["issuer_provenances"] = copy.deepcopy(values[":temporary"])
+                        item["previous_retired"] = {"BOOL": True}
+                        item["high_water"] = copy.deepcopy(values[":now"])
+                        item["cleanup_stage"] = {"S": "authorized"}
+                        existing_retired = set(item.get("retired_generations", {}).get("SS", []))
+                        item["retired_generations"] = {
+                            "SS": sorted(existing_retired | set(values[":retired"]["SS"]))
+                        }
+                    elif key[1].startswith("RESTART#"):
+                        item["stage"] = {"S": "complete"}
+                        item["completed_at"] = copy.deepcopy(values[":checked"])
+                    elif key[1].startswith("CLEANUP#"):
+                        item["stage"] = {"S": "complete"}
+                        item["completed_at"] = copy.deepcopy(values[":now"])
+                    elif "REMOVE previous_generation" in expression:
+                        item["issuer_provenances"] = copy.deepcopy(values[":new"])
+                        item["previous_retired"] = {"BOOL": True}
+                        item["high_water"] = copy.deepcopy(values[":now"])
+                        for name in (
+                            "previous_generation",
+                            "rotation_started_at",
+                            "deadline",
+                            "legacy_worker_generation",
+                            "legacy_worker_deadline",
+                            "cleanup_stage",
                         ):
-                            raise RuntimeError("conditional")
+                            item.pop(name, None)
+                        if ":retired_provenances" in values:
+                            existing_retired = set(
+                                item.get("retired_provenances", {}).get("SS", [])
+                            )
+                            item["retired_provenances"] = {
+                                "SS": sorted(
+                                    existing_retired | set(values[":retired_provenances"]["SS"])
+                                )
+                            }
+                    elif ":temporary" in values:
+                        item["issuer_provenances"] = copy.deepcopy(values[":temporary"])
+                    elif ":new" in values:
+                        item["issuer_provenances"] = copy.deepcopy(values[":new"])
+                        if ":retired_provenances" in values:
+                            existing_retired = set(
+                                item.get("retired_provenances", {}).get("SS", [])
+                            )
+                            item["retired_provenances"] = {
+                                "SS": sorted(
+                                    existing_retired | set(values[":retired_provenances"]["SS"])
+                                )
+                            }
+                    elif ":retired" in values:
                         item["previous_retired"] = {"BOOL": True}
                         item["high_water"] = copy.deepcopy(values[":now"])
                         for name in (
@@ -599,6 +811,43 @@ def test_initialize_rejects_untrusted_stale_manifest_time() -> None:
     assert not factory.ddb.transactions
 
 
+def test_trusted_time_compares_server_offsets_across_long_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moments = iter((1_000.0, 1_000.0, 1_120.0, 1_120.0))
+    monkeypatch.setattr(rollout_gate_module.time, "monotonic", lambda: next(moments))
+    gate = LiveRolloutGate(
+        control=load_control(_control("0" * 64)),
+        manifest=_manifest(),
+        clients=_Factory(),
+    )
+    gate._observe({"ResponseMetadata": {"HTTPHeaders": {"date": formatdate(_NOW, usegmt=True)}}})
+    gate._observe(
+        {"ResponseMetadata": {"HTTPHeaders": {"date": formatdate(_NOW + 120, usegmt=True)}}}
+    )
+
+    assert gate._now() == _NOW + 120
+
+
+def test_trusted_time_rejects_inconsistent_server_offsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moments = iter((1_000.0, 1_000.0, 1_120.0, 1_120.0))
+    monkeypatch.setattr(rollout_gate_module.time, "monotonic", lambda: next(moments))
+    gate = LiveRolloutGate(
+        control=load_control(_control("0" * 64)),
+        manifest=_manifest(),
+        clients=_Factory(),
+    )
+    for epoch in (_NOW, _NOW + 100):
+        gate._observe(
+            {"ResponseMetadata": {"HTTPHeaders": {"date": formatdate(epoch, usegmt=True)}}}
+        )
+
+    with pytest.raises(RolloutGateError, match="trusted_clock_disagreement"):
+        gate._now()
+
+
 def test_candidate_requires_exact_runtime_metadata() -> None:
     factory = _Factory()
     gate = _gate(factory, "0" * 64)
@@ -613,6 +862,11 @@ def test_candidate_requires_exact_runtime_metadata() -> None:
             item["value"] = "9" * 64
     with pytest.raises(RolloutGateError, match="runtime_metadata_drift"):
         gate.validate_candidate(task="mcp", definition=drifted)
+
+    identity_alias = copy.deepcopy(candidate)
+    identity_alias["taskDefinitionArn"] = gate.control.mcp.rollback_task_definition
+    with pytest.raises(RolloutGateError, match="provenance_binding_drift"):
+        gate.validate_candidate(task="mcp", definition=identity_alias)
 
 
 def test_registration_rechecks_pinned_candidate_version_metadata() -> None:
@@ -850,64 +1104,109 @@ def test_complete_requires_connect_service_stable_and_fully_drained() -> None:
     assert factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]["stage"] == {"S": "complete"}
 
 
-def test_service_drain_proof_fails_closed_when_running_task_inventory_is_paginated() -> None:
+def test_service_drain_proof_fails_closed_on_repeated_inventory_page_token() -> None:
     factory = _Factory()
     gate = _gate(factory, "0" * 64)
     factory.ecs.list_tasks_next_token = "another-page"
 
-    with pytest.raises(RolloutGateError, match="old_tasks_not_drained"):
+    with pytest.raises(RolloutGateError, match="task_inventory_incomplete"):
         gate.initialize()
     assert not factory.ddb.transactions
+
+
+def test_service_inventory_reconciles_describe_and_list_counts() -> None:
+    factory = _Factory()
+    factory.ecs.service_overrides["teamagent-dev-mcp"] = {
+        "desiredCount": 2,
+        "runningCount": 2,
+        "pendingCount": 0,
+        "deployments": [
+            {
+                "taskDefinition": _TASK_ARNS["mcp_old"],
+                "desiredCount": 2,
+                "runningCount": 2,
+                "pendingCount": 0,
+                "rolloutState": "COMPLETED",
+            }
+        ],
+    }
+    gate = _gate(factory, "0" * 64)
+
+    with pytest.raises(RolloutGateError, match="task_inventory_count_drift"):
+        gate.initialize()
+    assert not factory.ddb.transactions
+
+
+def test_service_inventory_rejects_zero_capacity_and_describe_failures() -> None:
+    factory = _Factory()
+    factory.ecs.service_overrides["teamagent-dev-mcp"] = {
+        "desiredCount": 0,
+        "runningCount": 0,
+        "pendingCount": 0,
+        "deployments": [
+            {
+                "taskDefinition": _TASK_ARNS["mcp_old"],
+                "desiredCount": 0,
+                "runningCount": 0,
+                "pendingCount": 0,
+                "rolloutState": "COMPLETED",
+            }
+        ],
+    }
+    gate = _gate(factory, "0" * 64)
+    with pytest.raises(RolloutGateError, match="service_not_stable"):
+        gate._service_stable_and_drained(
+            gate.control.mcp,
+            _TASK_ARNS["mcp_old"],
+        )
+
+    def failed_describe(**_kwargs: object) -> dict[str, object]:
+        return _response(
+            services=[
+                {
+                    "status": "ACTIVE",
+                    "taskDefinition": _TASK_ARNS["mcp_old"],
+                    "desiredCount": 1,
+                    "runningCount": 1,
+                    "pendingCount": 0,
+                    "deployments": [],
+                }
+            ],
+            failures=[{"reason": "MISSING"}],
+        )
+
+    factory.ecs.describe_services = failed_describe  # type: ignore[method-assign]
+    with pytest.raises(RolloutGateError, match="service_not_stable"):
+        gate._service_stable_and_drained(
+            gate.control.mcp,
+            _TASK_ARNS["mcp_old"],
+        )
+
+
+def test_inventory_rejects_service_and_scheduled_tasks_still_draining() -> None:
+    factory = _Factory()
+    factory.ecs.draining_service = "teamagent-dev-mcp"
+    gate = _gate(factory, "0" * 64)
+    with pytest.raises(RolloutGateError, match="old_tasks_not_drained"):
+        gate.initialize()
+
+    factory = _Factory()
+    factory.ecs.scheduled_draining = [_TASK_ARNS["morning_old"]]
+    gate = _gate(factory, "0" * 64)
+    with pytest.raises(RolloutGateError, match="old_tasks_not_drained"):
+        gate.initialize()
 
 
 def _install_distinct_rollbacks(
     factory: _Factory,
     control: dict[str, object],
 ) -> dict[str, str]:
-    rollback_image = (
-        "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent@sha256:" + "9" * 64
-    )
-    rollback_arns = {
-        "mcp": ("arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-mcp:57"),
-        "connect_web": (
-            "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-connect-web:55"
-        ),
-        "morning_digest": (
-            "arn:aws:ecs:ap-northeast-1:123456789012:"
-            "task-definition/teamagent-dev-morning-digest:46"
-        ),
+    del factory, control
+    return {
+        "mcp": _TASK_ARNS["mcp_rollback"],
+        "connect_web": _TASK_ARNS["connect_rollback"],
+        "morning_digest": _TASK_ARNS["morning_rollback"],
     }
-    services = control["services"]  # type: ignore[assignment]
-    controls = {
-        "mcp": services["mcp"],  # type: ignore[index]
-        "connect_web": services["connect_web"],  # type: ignore[index]
-        "morning_digest": control["morning_digest"],
-    }
-    for task, arn in rollback_arns.items():
-        provenance_values = {
-            "workload": task,
-            "image": rollback_image,
-            "rotation_epoch": _EPOCH,
-        }
-        if task in {"mcp", "morning_digest"}:
-            provenance_values["mail"] = _MAIL_GENERATION
-            provenance_values["legacy_worker"] = _SLACK_GENERATION
-        if task in {"mcp", "connect_web"}:
-            provenance_values["report"] = _REPORT_GENERATION
-        provenance = _provenance(**provenance_values)
-        definition = copy.deepcopy(_new_definition(task))
-        definition["taskDefinitionArn"] = arn
-        container = definition["containerDefinitions"][0]  # type: ignore[index]
-        container["image"] = rollback_image
-        for entry in container["environment"]:
-            if entry["name"] == "TEAMAGENT_HMAC_PROVENANCE":
-                entry["value"] = provenance
-        factory.ecs.definitions[arn] = definition
-        task_control = controls[task]
-        task_control["rollback_task_definition"] = arn  # type: ignore[index]
-        task_control["rollback_image"] = rollback_image  # type: ignore[index]
-        task_control["rollback_provenance"] = provenance  # type: ignore[index]
-    return rollback_arns
 
 
 def test_distinct_exact_rollback_passes_after_cutover_and_rejects_wrong_artifact(
@@ -1008,25 +1307,35 @@ def test_worker_rollback_mode_uses_exact_approved_artifact_and_provenance(
         "expires_at": {"N": str(after_cutover + 300)},
     }
     gate.pre_restart(rollback_artifact=rollback, mode="rollback")
+    with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
+        gate.post_restart(mode="rollback")
+    stored = factory.ddb.items[(_SCOPE, f"WORKER#{rollback_provenance}")]
+    stored["checked_at"] = {"N": str(after_cutover + 1)}
+    stored["expires_at"] = {"N": str(after_cutover + 301)}
+    gate.post_restart(mode="rollback")
 
 
-def _retirement_manifest(now: int) -> dict[str, object]:
+def _retirement_manifest(now: int, *, domain: str = "mail_action") -> dict[str, object]:
     manifest = _manifest()
     manifest["now"] = now
-    manifest["legacy_worker_generation"] = None
     configs: dict[str, dict[str, object]] = {}
-    for domain in ("mail_action", "report_link"):
-        active = _config(domain, deployed=False)
-        primary_only = {
-            "primary_generation": active["primary_generation"],
-            "previous_generation": None,
-            "rotation_started_at": None,
-        }
-        manifest["domains"][domain] = {  # type: ignore[index]
+    for item_domain in ("mail_action", "report_link"):
+        active = _config(item_domain, deployed=False)
+        proposed = (
+            {
+                "primary_generation": active["primary_generation"],
+                "previous_generation": None,
+                "rotation_started_at": None,
+            }
+            if item_domain == domain
+            else copy.deepcopy(active)
+        )
+        manifest["domains"][item_domain] = {  # type: ignore[index]
             "deployed": active,
-            "proposed": primary_only,
+            "proposed": proposed,
         }
-        configs[domain] = primary_only
+        configs[item_domain] = proposed
+    manifest["legacy_worker_generation"] = None if domain == "mail_action" else _SLACK_GENERATION
     manifest["tasks"] = {
         "mcp": {
             "mail_action": configs["mail_action"],
@@ -1043,10 +1352,28 @@ def _retirement_manifest(now: int) -> dict[str, object]:
 
 
 def _steady_manifest(now: int) -> dict[str, object]:
-    manifest = _retirement_manifest(now)
+    manifest = _retirement_manifest(now, domain="mail_action")
     for domain in ("mail_action", "report_link"):
-        proposed = copy.deepcopy(manifest["domains"][domain]["proposed"])  # type: ignore[index]
+        proposed = {
+            "primary_generation": (
+                _MAIL_GENERATION if domain == "mail_action" else _REPORT_GENERATION
+            ),
+            "previous_generation": None,
+            "rotation_started_at": None,
+        }
+        manifest["domains"][domain]["proposed"] = copy.deepcopy(proposed)  # type: ignore[index]
         manifest["domains"][domain]["deployed"] = proposed  # type: ignore[index]
+    manifest["legacy_worker_generation"] = None
+    configs = {
+        domain: copy.deepcopy(manifest["domains"][domain]["proposed"])  # type: ignore[index]
+        for domain in ("mail_action", "report_link")
+    }
+    manifest["tasks"] = {
+        "mcp": configs,
+        "morning_digest": {"mail_action": configs["mail_action"]},
+        "connect_web": {"report_link": configs["report_link"]},
+        "worker": configs,
+    }
     return manifest
 
 
@@ -1121,7 +1448,267 @@ def _remove_domain_previous(
     ]
 
 
+def _artifact_provenance(
+    task: str,
+    *,
+    manifest: dict[str, object],
+    image: str | None = None,
+    artifact: str | None = None,
+) -> str:
+    domains = manifest["domains"]  # type: ignore[assignment]
+    mail = domains["mail_action"]["proposed"]  # type: ignore[index]
+    report = domains["report_link"]["proposed"]  # type: ignore[index]
+    values = {
+        "workload": task,
+        "rotation_epoch": _EPOCH,
+    }
+    if image is not None:
+        values["image"] = image
+    if artifact is not None:
+        values["artifact"] = artifact
+    if task in {"mcp", "morning_digest", "worker"}:
+        values.update(
+            {
+                "mail_primary": str(mail["primary_generation"]),
+                "mail_previous": str(mail["previous_generation"] or ""),
+                "mail_t0": (
+                    str(mail["rotation_started_at"])
+                    if mail["rotation_started_at"] is not None
+                    else ""
+                ),
+                "legacy_worker": str(manifest["legacy_worker_generation"] or ""),
+            }
+        )
+    if task in {"mcp", "connect_web", "worker"}:
+        values.update(
+            {
+                "report_primary": str(report["primary_generation"]),
+                "report_previous": str(report["previous_generation"] or ""),
+                "report_t0": (
+                    str(report["rotation_started_at"])
+                    if report["rotation_started_at"] is not None
+                    else ""
+                ),
+            }
+        )
+    return _provenance(**values)
+
+
+def _cleanup_definition(
+    task: str,
+    *,
+    manifest: dict[str, object],
+    image: str,
+    provenance: str,
+    rollback: bool,
+) -> dict[str, object]:
+    definition = copy.deepcopy(_new_definition(task))
+    definition["taskDefinitionArn"] = _TASK_ARNS[
+        (
+            {
+                "mcp": "mcp_rollback",
+                "connect_web": "connect_rollback",
+                "morning_digest": "morning_rollback",
+            }
+            if rollback
+            else {
+                "mcp": "mcp_cleanup",
+                "connect_web": "connect_cleanup",
+                "morning_digest": "morning_cleanup",
+            }
+        )[task]
+    ]
+    for domain in ("mail_action", "report_link"):
+        if (
+            domain in {"mail_action", "report_link"}
+            and domain
+            in {
+                "mcp": {"mail_action", "report_link"},
+                "connect_web": {"report_link"},
+                "morning_digest": {"mail_action"},
+            }[task]
+            and manifest["domains"][domain]["proposed"]["previous_generation"] is None  # type: ignore[index]
+        ):
+            _remove_domain_previous(definition, domain=domain)
+    container = definition["containerDefinitions"][0]  # type: ignore[index]
+    container["image"] = image
+    for entry in container["environment"]:
+        if entry["name"] == "TEAMAGENT_HMAC_PROVENANCE":
+            entry["value"] = provenance
+    return definition
+
+
+def _worker_env_text(
+    *,
+    manifest: dict[str, object],
+    provenance: str,
+    artifact_sha256: str,
+) -> str:
+    values = {
+        "TEAMAGENT_HMAC_STATE_REQUIRED": "1",
+        "TEAMAGENT_HMAC_STATE_TABLE": _TABLE,
+        "TEAMAGENT_HMAC_STATE_SCOPE": _SCOPE,
+        "TEAMAGENT_HMAC_ROTATION_EPOCH": _EPOCH,
+        "TEAMAGENT_HMAC_PROVENANCE": provenance,
+        "TEAMAGENT_HMAC_ARTIFACT_SHA256": artifact_sha256,
+        "TEAMAGENT_HMAC_WORKER_ID": "i-0123456789abcdef0",
+        "MAIL_ACTION_HMAC_SECRET_NAME": "teamagent/dev/hmac/mail-action",
+        "MAIL_ACTION_HMAC_PRIMARY_VERSION_ID": _MAIL_VERSION,
+        "MAIL_ACTION_HMAC_PRIMARY_GENERATION": _MAIL_GENERATION,
+        "MAIL_ACTION_TTL_S": "86400",
+        "REPORT_LINK_HMAC_SECRET_NAME": "teamagent/dev/hmac/report-link",
+        "REPORT_LINK_HMAC_PRIMARY_VERSION_ID": _REPORT_VERSION,
+        "REPORT_LINK_HMAC_PRIMARY_GENERATION": _REPORT_GENERATION,
+        "REPORT_LINK_TTL_S": "604800",
+    }
+    for domain, prefix in (
+        ("mail_action", "MAIL_ACTION"),
+        ("report_link", "REPORT_LINK"),
+    ):
+        proposed = manifest["domains"][domain]["proposed"]  # type: ignore[index]
+        previous = proposed["previous_generation"]
+        if previous is None:
+            values.update(
+                {
+                    f"{prefix}_HMAC_PREVIOUS_SECRET_NAME": "",
+                    f"{prefix}_HMAC_PREVIOUS_VERSION_ID": "",
+                    f"{prefix}_HMAC_PREVIOUS_GENERATION": "",
+                    f"{prefix}_HMAC_PREVIOUS_ROTATION_STARTED_AT": "",
+                    f"{prefix}_HMAC_PREVIOUS_IS_LEGACY": "",
+                }
+            )
+        else:
+            values.update(
+                {
+                    f"{prefix}_HMAC_PREVIOUS_SECRET_NAME": "teamagent/dev/database-url",
+                    f"{prefix}_HMAC_PREVIOUS_VERSION_ID": _DB_VERSION,
+                    f"{prefix}_HMAC_PREVIOUS_GENERATION": str(previous),
+                    f"{prefix}_HMAC_PREVIOUS_ROTATION_STARTED_AT": str(
+                        proposed["rotation_started_at"]
+                    ),
+                    f"{prefix}_HMAC_PREVIOUS_IS_LEGACY": "1",
+                }
+            )
+    legacy = manifest["legacy_worker_generation"]
+    values.update(
+        {
+            "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET_NAME": (
+                "teamagent/dev/slack/bot-token" if legacy is not None else ""
+            ),
+            "MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID": (
+                _SLACK_VERSION if legacy is not None else ""
+            ),
+            "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION": str(legacy or ""),
+        }
+    )
+    return "\n".join(f"export {name}='{value}'" for name, value in values.items()) + "\n"
+
+
+def _cleanup_bundle(
+    tmp_path: Path,
+    *,
+    factory: _Factory,
+    manifest: dict[str, object],
+) -> tuple[
+    LiveRolloutGate,
+    dict[str, dict[str, object]],
+    Path,
+    Path,
+    Path,
+    Path,
+]:
+    candidate_artifact = tmp_path / "worker-cleanup.tar.gz"
+    rollback_artifact = tmp_path / "worker-cleanup-rollback.tar.gz"
+    candidate_artifact.write_bytes(b"primary-only-candidate-worker")
+    rollback_artifact.write_bytes(b"primary-only-rollback-worker")
+    candidate_hash = hashlib.sha256(candidate_artifact.read_bytes()).hexdigest()
+    rollback_hash = hashlib.sha256(rollback_artifact.read_bytes()).hexdigest()
+    control = _control(rollback_hash, candidate_hash)
+    services = control["services"]  # type: ignore[assignment]
+    candidate_definitions: dict[str, dict[str, object]] = {}
+    for task in ("mcp", "connect_web", "morning_digest"):
+        candidate_provenance = _artifact_provenance(
+            task,
+            manifest=manifest,
+            image=_IMAGE,
+        )
+        rollback_provenance = _artifact_provenance(
+            task,
+            manifest=manifest,
+            image=_ROLLBACK_IMAGE,
+        )
+        candidate = _cleanup_definition(
+            task,
+            manifest=manifest,
+            image=_IMAGE,
+            provenance=candidate_provenance,
+            rollback=False,
+        )
+        rollback = _cleanup_definition(
+            task,
+            manifest=manifest,
+            image=_ROLLBACK_IMAGE,
+            provenance=rollback_provenance,
+            rollback=True,
+        )
+        candidate_definitions[task] = candidate
+        candidate_arn = str(candidate["taskDefinitionArn"])
+        rollback_arn = str(rollback["taskDefinitionArn"])
+        factory.ecs.definitions[candidate_arn] = candidate
+        factory.ecs.definitions[rollback_arn] = rollback
+        task_control = (
+            control["morning_digest"] if task == "morning_digest" else services[task]  # type: ignore[index]
+        )
+        task_control["provenance"] = candidate_provenance  # type: ignore[index]
+        task_control["rollback_provenance"] = rollback_provenance  # type: ignore[index]
+        task_control["rollback_task_definition"] = rollback_arn  # type: ignore[index]
+        task_control["rollback_image"] = _ROLLBACK_IMAGE  # type: ignore[index]
+    worker_provenance = _artifact_provenance(
+        "worker",
+        manifest=manifest,
+        artifact=candidate_hash,
+    )
+    worker_rollback_provenance = _artifact_provenance(
+        "worker",
+        manifest=manifest,
+        artifact=rollback_hash,
+    )
+    control["worker"]["provenance"] = worker_provenance  # type: ignore[index]
+    control["worker"]["rollback_provenance"] = worker_rollback_provenance  # type: ignore[index]
+    candidate_env = tmp_path / "worker-cleanup.env"
+    rollback_env = tmp_path / "worker-cleanup-rollback.env"
+    candidate_env.write_text(
+        _worker_env_text(
+            manifest=manifest,
+            provenance=worker_provenance,
+            artifact_sha256=candidate_hash,
+        ),
+        encoding="utf-8",
+    )
+    rollback_env.write_text(
+        _worker_env_text(
+            manifest=manifest,
+            provenance=worker_rollback_provenance,
+            artifact_sha256=rollback_hash,
+        ),
+        encoding="utf-8",
+    )
+    return (
+        LiveRolloutGate(
+            control=load_control(control),
+            manifest=manifest,
+            clients=factory,
+        ),
+        candidate_definitions,
+        candidate_env,
+        rollback_env,
+        candidate_artifact,
+        rollback_artifact,
+    )
+
+
 def test_retirement_cleanup_is_cas_durable_and_preserves_history(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     factory = _Factory()
@@ -1132,51 +1719,150 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
     factory.events.morning = _TASK_ARNS["morning_new"]
     ledger = factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]
     ledger["stage"] = {"S": "complete"}
+    initial_issuers = initial._issuer_provenances(initial.control)
     for domain in ("mail_action", "report_link"):
-        factory.ddb.items[(_SCOPE, f"DOMAIN#{domain}")]["stage"] = {"S": "complete"}
+        item = factory.ddb.items[(_SCOPE, f"DOMAIN#{domain}")]
+        item["stage"] = {"S": "complete"}
+        item["issuer_provenances"] = {"SS": sorted(initial_issuers[domain])}
 
-    retirement_now = _NOW + 900 + 604_800
+    retirement_now = _NOW + 900 + 86_400
     monkeypatch.setattr(
         rollout_gate_module,
         "_trusted_epoch",
         lambda _response: retirement_now,
     )
-    gate = LiveRolloutGate(
-        control=initial.control,
-        manifest=_retirement_manifest(retirement_now),
-        clients=factory,
+    manifest = _retirement_manifest(retirement_now, domain="mail_action")
+    (
+        gate,
+        candidates,
+        worker_env,
+        worker_rollback_env,
+        worker_artifact,
+        worker_rollback_artifact,
+    ) = _cleanup_bundle(
+        tmp_path,
+        factory=factory,
+        manifest=manifest,
     )
 
-    gate.retire_previous(domain="mail_action")
-    for arn in (
-        _TASK_ARNS["mcp_new"],
-        _TASK_ARNS["morning_new"],
-    ):
-        definition = copy.deepcopy(factory.ecs.definitions[arn])
-        _remove_domain_previous(definition, domain="mail_action")
-        factory.ecs.definitions[arn] = definition
-    report_manifest = _retirement_manifest(retirement_now)
-    report_manifest["domains"]["mail_action"]["deployed"] = copy.deepcopy(  # type: ignore[index]
-        report_manifest["domains"]["mail_action"]["proposed"]  # type: ignore[index]
+    with pytest.raises(RolloutGateError, match="cleanup_staging_required"):
+        gate.retire_previous(domain="mail_action")
+    aliased_candidates = copy.deepcopy(candidates)
+    aliased_candidates["connect_web"]["taskDefinitionArn"] = aliased_candidates["mcp"][
+        "taskDefinitionArn"
+    ]
+    with pytest.raises(RolloutGateError, match="cleanup_artifacts_not_distinct"):
+        gate.prepare_cleanup(
+            domain="mail_action",
+            candidate_definitions=aliased_candidates,
+            worker_env=worker_env,
+            worker_rollback_env=worker_rollback_env,
+            worker_artifact=worker_artifact,
+            worker_rollback_artifact=worker_rollback_artifact,
+        )
+    gate.prepare_cleanup(
+        domain="mail_action",
+        candidate_definitions=candidates,
+        worker_env=worker_env,
+        worker_rollback_env=worker_rollback_env,
+        worker_artifact=worker_artifact,
+        worker_rollback_artifact=worker_rollback_artifact,
     )
-    gate = LiveRolloutGate(
-        control=initial.control,
-        manifest=report_manifest,
-        clients=factory,
-    )
-    gate.retire_previous(domain="report_link")
-
-    for domain in ("mail_action", "report_link"):
-        item = factory.ddb.items[(_SCOPE, f"DOMAIN#{domain}")]
-        assert "previous_generation" not in item
-        assert "rotation_started_at" not in item
-        assert "deadline" not in item
-        assert item["previous_retired"] == {"BOOL": True}
-        assert _DB_GENERATION in item["retired_generations"]["SS"]
-        assert (_SCOPE, f"RETIREMENT#{domain}#{_EPOCH}") in factory.ddb.items
     mail = factory.ddb.items[(_SCOPE, "DOMAIN#mail_action")]
+    assert mail["cleanup_stage"] == {"S": "authorized"}
+    assert mail["previous_generation"] == {"S": _DB_GENERATION}
+    assert mail["previous_retired"] == {"BOOL": True}
+    assert set(mail["issuer_provenances"]["SS"]) > initial_issuers["mail_action"]
+
+    drifted_candidate = copy.deepcopy(candidates["mcp"])
+    drifted_candidate["containerDefinitions"][0]["environment"].append(  # type: ignore[index]
+        {"name": "UNREVIEWED_RUNTIME_FLAG", "value": "1"}
+    )
+    with pytest.raises(RolloutGateError, match="cleanup_artifact_drift"):
+        gate.terraform_pre_register(
+            task="mcp",
+            definition=drifted_candidate,
+            mode="cleanup",
+        )
+    gate.terraform_pre_register(
+        task="mcp",
+        definition=candidates["mcp"],
+        mode="cleanup",
+    )
+    with pytest.raises(RolloutGateError, match="cleanup_mode_required"):
+        gate.pre_update(
+            task="mcp",
+            task_definition=_TASK_ARNS["mcp_cleanup"],
+            mode="candidate",
+        )
+    gate.pre_update(
+        task="mcp",
+        task_definition=_TASK_ARNS["mcp_cleanup"],
+        mode="cleanup",
+    )
+    factory.ecs.current["teamagent-dev-mcp"] = _TASK_ARNS["mcp_cleanup"]
+    factory.events.morning = _TASK_ARNS["morning_cleanup"]
+    factory.ecs.running_task_definition["teamagent-dev-mcp"] = _TASK_ARNS["mcp_cleanup"]
+
+    gate.pre_worker_upload(
+        artifact=worker_artifact,
+        rollback_artifact=worker_rollback_artifact,
+        mode="cleanup",
+    )
+    worker_provenance = gate.control.worker.provenance
+    cleanup = gate._cleanup_ledger("mail_action")
+    attestation = {
+        "scope": {"S": _SCOPE},
+        "record": {"S": f"WORKER#{worker_provenance}"},
+        "provenance": {"S": worker_provenance},
+        "worker_id": {"S": "i-0123456789abcdef0"},
+        "rotation_epoch": {"S": _EPOCH},
+        "config_digest": {
+            "S": gate._worker_config_digest(
+                provenance=worker_provenance,
+                configs=gate._cleanup_proposed_from_live(cleanup),
+            )
+        },
+        "loaded_domains": {"SS": ["mail_action", "report_link"]},
+        "checked_at": {"N": str(retirement_now)},
+        "expires_at": {"N": str(retirement_now + 300)},
+    }
+    factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")] = attestation
+    gate.pre_restart(
+        rollback_artifact=worker_rollback_artifact,
+        mode="cleanup",
+    )
+    stored_attestation = factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")]
+    stored_attestation["checked_at"] = {"N": str(retirement_now + 1)}
+    stored_attestation["expires_at"] = {"N": str(retirement_now + 301)}
+    gate.post_restart(mode="cleanup")
+
+    current_attestation = factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")]
+    current_attestation["checked_at"] = {"N": str(retirement_now)}
+    with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
+        gate.complete_cleanup(domain="mail_action")
+    current_attestation["checked_at"] = {"N": str(retirement_now + 1)}
+
+    factory.ecs.scheduled_running = [_TASK_ARNS["morning_new"]]
+    with pytest.raises(RolloutGateError, match="old_tasks_not_drained"):
+        gate.complete_cleanup(domain="mail_action")
+    factory.ecs.scheduled_running = [_TASK_ARNS["morning_cleanup"]]
+    gate.complete_cleanup(domain="mail_action")
+
+    mail = factory.ddb.items[(_SCOPE, "DOMAIN#mail_action")]
+    assert "previous_generation" not in mail
+    assert "rotation_started_at" not in mail
+    assert "deadline" not in mail
     assert "legacy_worker_generation" not in mail
+    assert "cleanup_stage" not in mail
+    assert mail["previous_retired"] == {"BOOL": True}
     assert _SLACK_GENERATION in mail["retired_generations"]["SS"]
+    assert _DB_GENERATION in mail["retired_generations"]["SS"]
+    assert (_SCOPE, f"RETIREMENT#mail_action#{_EPOCH}") in factory.ddb.items
+    assert initial_issuers["mail_action"] <= set(mail["retired_provenances"]["SS"])
+    expected_issuers = gate._issuer_provenances(gate.control)
+    assert set(mail["issuer_provenances"]["SS"]) == expected_issuers["mail_action"]
+    assert gate.control.mcp.rollback_provenance in mail["issuer_provenances"]["SS"]
     assert gate._assert_manifest_matches_durable() == {
         "mail_action": {
             "primary_generation": _MAIL_GENERATION,
@@ -1185,13 +1871,15 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
         },
         "report_link": {
             "primary_generation": _REPORT_GENERATION,
-            "previous_generation": None,
-            "rotation_started_at": None,
+            "previous_generation": _DB_GENERATION,
+            "rotation_started_at": _NOW,
         },
     }
-
-    with pytest.raises(RolloutGateError, match="manifest_durable_drift"):
-        gate.retire_previous(domain="mail_action")
+    gate.pre_update(
+        task="mcp",
+        task_definition=_TASK_ARNS["mcp_rollback"],
+        mode="rollback",
+    )
 
 
 def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
@@ -1323,114 +2011,75 @@ def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
     }
 
 
-def test_registration_and_worker_upload_succeed_at_complete_after_cleanup(
-    tmp_path: Path,
-) -> None:
-    artifact = tmp_path / "steady-worker.tar.gz"
-    artifact.write_bytes(b"steady-primary-only-worker")
-    artifact_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()
-    factory = _Factory()
-    control = _control(artifact_hash, artifact_hash)
-    steady_provenance = {
-        "mcp": _provenance(
-            workload="mcp",
-            image=_IMAGE,
-            rotation_epoch=_EPOCH,
-            mail=_MAIL_GENERATION,
-            report=_REPORT_GENERATION,
-            legacy_worker="",
-        ),
-        "connect_web": _provenance(
-            workload="connect_web",
-            image=_IMAGE,
-            rotation_epoch=_EPOCH,
-            report=_REPORT_GENERATION,
-        ),
-        "morning_digest": _provenance(
-            workload="morning_digest",
-            image=_IMAGE,
-            rotation_epoch=_EPOCH,
-            mail=_MAIL_GENERATION,
-            legacy_worker="",
-        ),
-    }
-    services = control["services"]  # type: ignore[assignment]
-    for task, arn in (
-        ("mcp", _TASK_ARNS["mcp_new"]),
-        ("connect_web", _TASK_ARNS["connect_new"]),
-        ("morning_digest", _TASK_ARNS["morning_new"]),
-    ):
-        definition = _primary_only_definition(
-            task,
-            epoch=_EPOCH,
-            provenance=steady_provenance[task],
-        )
-        factory.ecs.definitions[arn] = definition
-        target = (
-            control["morning_digest"] if task == "morning_digest" else services[task]  # type: ignore[index]
-        )
-        target["provenance"] = steady_provenance[task]  # type: ignore[index]
-        target["rollback_provenance"] = steady_provenance[task]  # type: ignore[index]
-    worker_provenance = _provenance(
-        workload="worker",
-        artifact=artifact_hash,
-        rotation_epoch=_EPOCH,
-        mail=_MAIL_GENERATION,
-        report=_REPORT_GENERATION,
-        legacy_worker="",
+def test_control_rejects_candidate_rollback_aliases() -> None:
+    same_worker_digest = _control("2" * 64, "2" * 64)
+    with pytest.raises(RolloutGateError, match="invalid_control"):
+        load_control(same_worker_digest)
+
+    same_ecs_provenance = _control("0" * 64)
+    same_ecs_provenance["services"]["mcp"]["rollback_provenance"] = (  # type: ignore[index]
+        same_ecs_provenance["services"]["mcp"]["provenance"]  # type: ignore[index]
     )
-    control["worker"]["provenance"] = worker_provenance  # type: ignore[index]
-    control["worker"]["rollback_provenance"] = worker_provenance  # type: ignore[index]
-    for domain, primary in (
-        ("mail_action", _MAIL_GENERATION),
-        ("report_link", _REPORT_GENERATION),
-    ):
-        factory.ddb.items[(_SCOPE, f"DOMAIN#{domain}")] = {
-            "scope": {"S": _SCOPE},
-            "record": {"S": f"DOMAIN#{domain}"},
-            "domain": {"S": domain},
-            "revision": {"N": "10"},
-            "primary_generation": {"S": primary},
-            "rotation_epoch": {"S": _EPOCH},
-            "high_water": {"N": str(_NOW)},
-            "previous_retired": {"BOOL": True},
-            "stage": {"S": "complete"},
-            "issuer_provenances": {"SS": [worker_provenance]},
-            "retired_generations": {"SS": [_DB_GENERATION]},
-        }
-    factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")] = {
-        "scope": {"S": _SCOPE},
-        "record": {"S": f"LEDGER#{_EPOCH}"},
-        "rotation_epoch": {"S": _EPOCH},
-        "stage": {"S": "complete"},
-        "revision": {"N": "6"},
-        "updated_at": {"N": str(_NOW)},
-    }
-    gate = LiveRolloutGate(
-        control=load_control(control),
-        manifest=_steady_manifest(_NOW),
+    with pytest.raises(RolloutGateError, match="invalid_control"):
+        load_control(same_ecs_provenance)
+
+    duplicate_rollback_identity = _control("0" * 64)
+    duplicate_rollback_identity["services"]["connect_web"]["rollback_task_definition"] = (  # type: ignore[index]
+        duplicate_rollback_identity["services"]["mcp"]["rollback_task_definition"]  # type: ignore[index]
+    )
+    with pytest.raises(RolloutGateError, match="invalid_control"):
+        load_control(duplicate_rollback_identity)
+
+
+def test_cli_redacts_ordinary_client_exceptions(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    control_path = tmp_path / "control.json"
+    manifest_path.write_text(json.dumps(_manifest()), encoding="utf-8")
+    control_path.write_text(json.dumps(_control("0" * 64)), encoding="utf-8")
+    factory = _Factory()
+
+    def explode(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("sensitive-client-detail")
+
+    factory.ecs.describe_services = explode  # type: ignore[method-assign]
+    result = rollout_gate_module.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--control",
+            str(control_path),
+            "--action",
+            "inspect",
+        ],
         clients=factory,
     )
 
-    gate.terraform_pre_register(
-        task="mcp",
-        definition=factory.ecs.definitions[_TASK_ARNS["mcp_new"]],
-    )
-    gate.pre_worker_upload(
-        artifact=artifact,
-        rollback_artifact=artifact,
-        mode="candidate",
-    )
-    factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")] = {
-        "scope": {"S": _SCOPE},
-        "record": {"S": f"WORKER#{worker_provenance}"},
-        "provenance": {"S": worker_provenance},
-        "worker_id": {"S": "i-0123456789abcdef0"},
-        "rotation_epoch": {"S": _EPOCH},
-        "config_digest": {"S": gate._worker_config_digest()},
-        "loaded_domains": {"SS": ["mail_action", "report_link"]},
-        "checked_at": {"N": str(_NOW)},
-        "expires_at": {"N": str(_NOW + 300)},
-    }
-    gate.worker_verified(rollback_artifact=artifact)
-    assert factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]["stage"] == {"S": "complete"}
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == '{"code":"gate_client_error","ok":false}\n'
+    assert captured.err == ""
+    assert "sensitive-client-detail" not in captured.out
+
+
+def test_terraform_bridge_redacts_ordinary_client_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("HMAC_GATE_ENABLED", "true")
+    monkeypatch.setenv("HMAC_PREFLIGHT_MANIFEST", "/protected/manifest.json")
+    monkeypatch.setenv("HMAC_ROLLOUT_CONTROL", "/protected/control.json")
+    monkeypatch.setenv("HMAC_GATE_TASK", "mcp")
+    monkeypatch.setenv("HMAC_GATE_CANDIDATE_JSON", "{}")
+
+    def explode(_path: str) -> dict[str, object]:
+        raise RuntimeError("sensitive-client-detail")
+
+    monkeypatch.setattr(terraform_gate_module, "_load_mapping", explode)
+    assert terraform_gate_module.main() == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == '{"code":"gate_client_error","ok":false}\n'
+    assert captured.err == ""

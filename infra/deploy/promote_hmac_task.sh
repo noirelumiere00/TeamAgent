@@ -21,8 +21,8 @@ HMAC_PROMOTION_MODE="${HMAC_PROMOTION_MODE:-candidate}"
   echo "ERROR: exact registered task definition ARN is required" >&2
   exit 2
 }
-[[ "$HMAC_PROMOTION_MODE" == "candidate" || "$HMAC_PROMOTION_MODE" == "rollback" ]] || {
-  echo "ERROR: HMAC_PROMOTION_MODE must be candidate or rollback" >&2
+[[ "$HMAC_PROMOTION_MODE" == "candidate" || "$HMAC_PROMOTION_MODE" == "rollback" || "$HMAC_PROMOTION_MODE" == "cleanup" ]] || {
+  echo "ERROR: HMAC_PROMOTION_MODE must be candidate, rollback, or cleanup" >&2
   exit 2
 }
 
@@ -53,7 +53,7 @@ case "$HMAC_PROMOTION_TASK" in
         --refresh-manifest-now \
         --control "$HMAC_ROLLOUT_CONTROL" \
         --action post-update \
-        --mode rollback \
+        --mode "$HMAC_PROMOTION_MODE" \
         --task mcp \
         --task-definition-arn "$HMAC_REGISTERED_TASK_ARN"
     fi

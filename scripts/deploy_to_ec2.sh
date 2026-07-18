@@ -65,6 +65,17 @@ case "$HMAC_WORKER_MODE" in
     }
     SELECTED_WORKER_ENV="$HMAC_WORKER_ENV"
     ;;
+  cleanup)
+    [[ -n "$HMAC_WORKER_ENV" && -f "$HMAC_WORKER_ENV" ]] || {
+      echo "ERROR: cleanup mode requires the exact primary-only HMAC_WORKER_ENV" >&2
+      exit 2
+    }
+    [[ "$HMAC_WORKER_ADVANCE_STAGE" == "0" ]] || {
+      echo "ERROR: cleanup mode may not advance the issuer-cutover ledger" >&2
+      exit 2
+    }
+    SELECTED_WORKER_ENV="$HMAC_WORKER_ENV"
+    ;;
   rollback)
     [[ -n "$HMAC_WORKER_ROLLBACK_ENV" && -f "$HMAC_WORKER_ROLLBACK_ENV" ]] || {
       echo "ERROR: rollback mode requires the exact prebuilt HMAC_WORKER_ROLLBACK_ENV" >&2
@@ -77,7 +88,7 @@ case "$HMAC_WORKER_MODE" in
     SELECTED_WORKER_ENV="$HMAC_WORKER_ROLLBACK_ENV"
     ;;
   *)
-    echo "ERROR: HMAC_WORKER_MODE must be candidate or rollback" >&2
+    echo "ERROR: HMAC_WORKER_MODE must be candidate, rollback, or cleanup" >&2
     exit 2
     ;;
 esac
@@ -287,7 +298,38 @@ fi
   --mode "$HMAC_WORKER_MODE" \
   --worker-rollback-artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT"
 
-RESTART_REMOTE='set -euo pipefail; systemctl stop teamagent-connect 2>/dev/null || true; ( command -v fuser >/dev/null && fuser -k 8788/tcp ) 2>/dev/null || pkill -f teamagent.connect_web 2>/dev/null || true; sleep 2; systemctl restart teamagent-bot teamagent-connect'
+RESTART_REMOTE=$(cat <<'RSH'
+set -euo pipefail
+systemctl stop teamagent-connect 2>/dev/null || true
+( command -v fuser >/dev/null && fuser -k 8788/tcp ) 2>/dev/null \
+  || pkill -f teamagent.connect_web 2>/dev/null || true
+sleep 2
+systemctl restart teamagent-bot teamagent-connect
+READY=0
+for _attempt in $(seq 1 60); do
+  if systemctl is-active --quiet teamagent-bot \
+    && systemctl is-active --quiet teamagent-connect \
+    && ss -H -ltn | awk '$4 ~ /:8788$/ { found=1 } END { exit !found }'; then
+    READY=1
+    break
+  fi
+  sleep 2
+done
+[[ "$READY" == "1" ]] || exit 1
+cd /opt/teamagent/app
+(
+  set -a
+  source /opt/teamagent/teamagent.env.base
+  source /opt/teamagent/hmac.env
+  source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK
+  ./.venv/bin/python scripts/check_hmac_runtime_state.py \
+    --domains MAIL_ACTION,REPORT_LINK --worker-attestation
+)
+systemctl is-active --quiet teamagent-bot
+systemctl is-active --quiet teamagent-connect
+ss -H -ltn | awk '$4 ~ /:8788$/ { found=1 } END { exit !found }'
+RSH
+)
 RESTART_B64="$(printf '%s' "$RESTART_REMOTE" | base64 | tr -d '\n')"
 RESTART_CID="$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE_ID" \
   --document-name AWS-RunShellScript --comment "TeamAgent HMAC-gated restart" \
@@ -309,5 +351,11 @@ done
   echo "ERROR: worker restart failed (status=$RESTART_STATUS); remote output is not echoed" >&2
   exit 1
 }
-echo "   worker_restart=true output_redacted=true"
+"$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
+  --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+  --refresh-manifest-now \
+  --control "$HMAC_ROLLOUT_CONTROL" \
+  --action post-restart \
+  --mode "$HMAC_WORKER_MODE"
+echo "   worker_restart=true services_active=true port_8788_listening=true fresh_attestation=true output_redacted=true"
 echo "== 完了 == Slack で『@TeamAgent VSEO分析 新宿 ランチ』を確認。問題あれば runbook のロールバックへ。"

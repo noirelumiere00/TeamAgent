@@ -126,6 +126,17 @@ variable "hmac_gate_python" {
   default     = "../../.venv/bin/python"
 }
 
+variable "hmac_gate_mode" {
+  description = "Apply-time HMAC registration gate mode: candidate during issuer cutover, cleanup only after prepare-cleanup CAS."
+  type        = string
+  default     = "candidate"
+
+  validation {
+    condition     = contains(["candidate", "cleanup"], var.hmac_gate_mode)
+    error_message = "hmac_gate_mode must be candidate or cleanup."
+  }
+}
+
 variable "worker_hmac_artifact_sha256" {
   description = "Reviewed SHA-256 of the exact worker archive bound into worker HMAC provenance."
   type        = string
@@ -754,33 +765,45 @@ locals {
     },
   ]
   mcp_hmac_provenance = sha256(jsonencode({
-    workload       = "mcp"
-    image          = var.mcp_image
-    rotation_epoch = var.hmac_rotation_epoch
-    mail           = local.mail_action_hmac_primary_generation
-    report         = local.report_link_hmac_primary_generation
-    legacy_worker  = var.mail_action_hmac_rollout_phase == "legacy_migration" ? local.hmac_legacy_worker_generation : ""
+    workload        = "mcp"
+    image           = var.mcp_image
+    rotation_epoch  = var.hmac_rotation_epoch
+    mail_primary    = local.mail_action_hmac_primary_generation
+    mail_previous   = local.mail_action_hmac_previous_generation
+    mail_t0         = local.mail_action_hmac_rotation_active ? var.mail_action_hmac_rotation_started_at : ""
+    report_primary  = local.report_link_hmac_primary_generation
+    report_previous = local.report_link_hmac_previous_generation
+    report_t0       = local.report_link_hmac_rotation_active ? var.report_link_hmac_rotation_started_at : ""
+    legacy_worker   = var.mail_action_hmac_rollout_phase == "legacy_migration" ? local.hmac_legacy_worker_generation : ""
   }))
   connect_web_hmac_provenance = sha256(jsonencode({
-    workload       = "connect_web"
-    image          = var.mcp_image
-    rotation_epoch = var.hmac_rotation_epoch
-    report         = local.report_link_hmac_primary_generation
+    workload        = "connect_web"
+    image           = var.mcp_image
+    rotation_epoch  = var.hmac_rotation_epoch
+    report_primary  = local.report_link_hmac_primary_generation
+    report_previous = local.report_link_hmac_previous_generation
+    report_t0       = local.report_link_hmac_rotation_active ? var.report_link_hmac_rotation_started_at : ""
   }))
   morning_digest_hmac_provenance = sha256(jsonencode({
     workload       = "morning_digest"
     image          = var.mcp_image
     rotation_epoch = var.hmac_rotation_epoch
-    mail           = local.mail_action_hmac_primary_generation
+    mail_primary   = local.mail_action_hmac_primary_generation
+    mail_previous  = local.mail_action_hmac_previous_generation
+    mail_t0        = local.mail_action_hmac_rotation_active ? var.mail_action_hmac_rotation_started_at : ""
     legacy_worker  = var.mail_action_hmac_rollout_phase == "legacy_migration" ? local.hmac_legacy_worker_generation : ""
   }))
   worker_hmac_provenance = sha256(jsonencode({
-    workload       = "worker"
-    artifact       = var.worker_hmac_artifact_sha256
-    rotation_epoch = var.hmac_rotation_epoch
-    mail           = local.mail_action_hmac_primary_generation
-    report         = local.report_link_hmac_primary_generation
-    legacy_worker  = var.mail_action_hmac_rollout_phase == "legacy_migration" ? local.hmac_legacy_worker_generation : ""
+    workload        = "worker"
+    artifact        = var.worker_hmac_artifact_sha256
+    rotation_epoch  = var.hmac_rotation_epoch
+    mail_primary    = local.mail_action_hmac_primary_generation
+    mail_previous   = local.mail_action_hmac_previous_generation
+    mail_t0         = local.mail_action_hmac_rotation_active ? var.mail_action_hmac_rotation_started_at : ""
+    report_primary  = local.report_link_hmac_primary_generation
+    report_previous = local.report_link_hmac_previous_generation
+    report_t0       = local.report_link_hmac_rotation_active ? var.report_link_hmac_rotation_started_at : ""
+    legacy_worker   = var.mail_action_hmac_rollout_phase == "legacy_migration" ? local.hmac_legacy_worker_generation : ""
   }))
   mcp_hmac_runtime_environment = concat(local.hmac_runtime_base_environment, [
     {
@@ -954,6 +977,7 @@ resource "terraform_data" "hmac_live_task_gate" {
       HMAC_GATE_PYTHON         = var.hmac_gate_python
       HMAC_GATE_SCRIPT         = abspath("${path.module}/../../scripts/terraform_hmac_gate.py")
       HMAC_GATE_TASK           = each.key
+      HMAC_GATE_MODE           = var.hmac_gate_mode
       HMAC_GATE_CANDIDATE_JSON = each.value
       HMAC_PREFLIGHT_MANIFEST  = var.hmac_live_manifest_path
       HMAC_ROLLOUT_CONTROL     = var.hmac_rollout_control_path

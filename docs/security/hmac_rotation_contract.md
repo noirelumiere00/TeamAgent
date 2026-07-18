@@ -67,15 +67,39 @@ fail closed when the task's generation is stale or retired. Deployment state mus
 
 1. Prove each live ECS service is on an approved legacy task definition whose secret references
    are pinned to exact VersionIds and fully drain every older task before durable initialization.
+   Inventory both `RUNNING` and `STOPPED` task lists, describe exactly every listed ARN, reject
+   count/failure mismatches and still-draining tasks, and reconcile service desired/running/pending
+   counts. Apply the same family/cluster inventory to in-flight scheduled morning-digest tasks.
    Never infer an already-running task's loaded VersionId from `AWSCURRENT`.
 2. Persist `T0` once when the verifier-first rotation begins.
 3. Never recompute, reset, or update `T0` while that previous key remains configured.
-4. At or after the exclusive deadline, CAS the active snapshot to primary-only and preserve
-   retired generations plus trusted-time high-water in immutable retirement history.
-5. Immediately deploy a primary-only revision that removes `..._HMAC_PREVIOUS_SECRET`,
+4. Treat expiry cleanup as an explicit steady-state mode, distinct from the initial 900-second
+   issuer cutover. Before its first CAS, prevalidate the exact primary-only candidate task bundle,
+   distinct primary-only rollback task identities/images, and distinct candidate/rollback worker
+   archives and secret-free environments. Candidate and rollback provenances must be distinct and
+   bind the full applicable primary/previous/T0 configuration, immutable image or archive digest,
+   workload, epoch, and legacy-worker generation.
+5. At or after the exclusive deadline, CAS-authorize a cleanup overlap while the durable snapshot
+   still carries previous/T0 for old-process metadata compatibility. Mark the previous generation
+   retired immediately, preserve trusted-time high-water, and temporarily authorize exactly the
+   old plus prepared new candidate/rollback provenances. The retired previous is never eligible
+   during this overlap.
+6. Deploy only the prepared primary-only candidate or rollback artifacts. Before finalization,
+   prove exact active task identities/artifact digests, complete service and scheduled-task drain,
+   and a worker startup attestation strictly newer than its durable restart request. The worker
+   deploy must also prove its bot and connect services active and port 8788 listening.
+7. CAS-finalize by removing `..._HMAC_PREVIOUS_SECRET`,
    `..._HMAC_PREVIOUS_GENERATION`, `..._HMAC_PREVIOUS_ROTATION_STARTED_AT`, and every
-   legacy-worker secret/generation or `..._HMAC_PREVIOUS_IS_LEGACY` marker atomically. Initialize
-   the next epoch only after the prior ledger is complete.
+   legacy-worker secret/generation or `..._HMAC_PREVIOUS_IS_LEGACY` marker atomically. Preserve
+   retirement history and high-water, retire old provenances, and retain the prepared new rollback
+   provenances. The former direct one-shot retirement path is invalid.
+8. Initialize the next epoch only after the prior ledger is complete, no cleanup remains
+   authorized, and both domain snapshots are primary-only. Carry retired generation/provenance
+   sets and high-water into the next epoch.
+
+AWS response time is compared as a server-time offset at each local monotonic receipt. Offset
+agreement, not raw elapsed command duration, is bounded; a normal long-running command therefore
+does not fail solely because it ran for longer than the response-date spread limit.
 
 ## Machine-readable IaC preflight
 

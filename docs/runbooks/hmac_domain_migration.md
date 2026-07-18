@@ -64,10 +64,14 @@ Do not read secret values. With an approved read-only production session:
    worker. For mail legacy migration, include the exact Slack-fallback generation in
    `legacy_worker_generation`; use `null` for every other domain/phase. Also create the exact
    live-control file described by
-   `scripts/hmac_rollout_gate.py`: service/rule names, rotation epoch, expected workload
-   provenances, pre-registered rollback task ARNs/image digests, worker instance/artifact digest,
-   forbidden signing revisions (including connect-web `:53`), and the unchanged canary `:14`
-   target. Run the offline shape check:
+   `scripts/hmac_rollout_gate.py`: service/rule names, the morning-digest ECS cluster ARN, rotation
+   epoch, expected candidate and rollback workload provenances, pre-registered rollback task
+   ARNs/image digests, worker instance plus distinct candidate/rollback archive digests, forbidden
+   signing revisions (including connect-web `:53`), and the unchanged canary `:14` target.
+   Candidate and rollback task identities must not alias; every ECS/worker provenance in the
+   control file must be distinct. Provenance binds the immutable image/archive, rotation epoch,
+   every applicable primary/previous generation and T0, and the legacy-worker generation. Run the
+   offline shape check:
 
    ```bash
    .venv/bin/python scripts/preflight_hmac_rotation.py \
@@ -81,10 +85,13 @@ time from AWS response headers. It compares the manifest assertions with those o
 accepts at most 60 seconds of manifest clock difference. It never calls `GetSecretValue`.
 Long-running deploy scripts pass `--refresh-manifest-now` immediately before each gate; this
 changes only the non-secret local-clock assertion. AWS response time remains authoritative and a
-local clock more than 60 seconds away still fails closed.
+local clock more than 60 seconds away still fails closed. Each AWS response date is converted to a
+server-minus-local-monotonic offset at receipt. The gate compares those offsets and projects them
+to the current monotonic time, so ordinary command duration does not look like clock disagreement.
 
 Direct cutover, wrong previous generation, mid-window generation/T0 replacement, missing task,
-task drift, stale operator time, or an AWS clock spread over 10 seconds is a hard stop.
+task drift, stale operator time, or AWS response offsets that disagree by over 10 seconds is a
+hard stop. Any ordinary AWS client failure emits only fixed redacted JSON and no traceback.
 
 ## Stage 1 — create dedicated generations
 
@@ -128,7 +135,10 @@ task drift, stale operator time, or an AWS clock spread over 10 seconds is a har
    ```
 
    Initialization re-fetches each approved task definition, service deployment/task set, scheduled
-   target, and candidate secret VersionId metadata. The resulting ledger stage must be
+   target, and candidate secret VersionId metadata. It paginates and describes both `RUNNING` and
+   `STOPPED` ECS inventories, rejects any `desiredStatus=STOPPED` task that is still draining,
+   reconciles list/describe counts with service desired/running/pending counts, and inventories
+   in-flight morning-digest tasks by cluster and task family. The resulting ledger stage must be
    `initialized`. A retry against an active record fails; never delete/reset the record to get a
    new T0.
 
@@ -169,7 +179,9 @@ rollout path.
    The script runs `pre-connect-preload`, `pre-register`, and then a fresh `pre-update` immediately
    before `update-service`. After stability it CAS-advances the ledger to
    `connect_web_preloaded`, but only after proving `pendingCount=0`, one completed deployment, and
-   every running task on the exact approved task definition.
+   every running task on the exact approved task definition. The same proof also rejects
+   draining/stopped-old service tasks and in-flight old morning-digest tasks; an empty service is
+   not a successful drain proof.
 5. Verify connect-web health, current app S3 anchor/source, security headers, and recent logs.
 6. Exercise the saved old `/r` token; it must still redirect correctly.
 7. MCP and the worker also carry MAIL_ACTION, so they cannot be deployed with report-only HMAC
@@ -277,26 +289,70 @@ unchanged throughout.
 ## Stage 4 — bounded previous removal
 
 Runtime verification rejects the legacy previous at the exclusive deadline even if stale
-environment entries remain. Operational removal must still happen promptly:
+environment entries remain. Operational removal is a separate steady-state cleanup, never another
+issuer cutover and never the old one-shot retirement action:
 
-1. Before each deadline, render and offline-preflight the exact primary-only candidate and rollback
-   artifacts. Keep the live manifest `deployed` section bound to the still-active previous/T0 and
-   set only `proposed`/task entries to primary-only.
-2. At or after `T0_mail + 87,300`, prove the active MCP/connect-web services are stable and fully
-   drained, then run `hmac_rollout_gate.py --action retire-previous --domain mail_action`.
-   Its CAS removes the active previous/T0/deadline, retires the database and Slack generations,
-   preserves trusted-time high-water, and writes immutable retirement history. Stale revisions
-   fail closed from this point.
-3. Immediately register and promote the reviewed primary-only MCP/morning-digest/worker artifacts
-   through the normal complete-stage gates. The previous secret, legacy Slack worker secret, both
-   generations, and T0 disappear together; registration and worker readiness now bind to the
-   primary-only durable snapshot.
-4. At or after `T0_report + 605,700`, repeat the CAS first for `report_link`, then immediately
-   promote primary-only MCP/connect-web/worker artifacts. Do not update runtime tasks before the
-   retirement CAS, because their metadata would no longer equal the active durable snapshot.
-5. Re-run saved legacy-token probes with intentionally unexpired payload claims; verification must
-   fail because the previous key is gone. New tokens must continue to work.
-6. Verify rendered tasks no longer reference database-url or Slack as any HMAC secret. Do not
+1. Before each deadline, create a cleanup manifest whose `deployed` sections exactly describe the
+   still-live previous/T0 pairs and whose `proposed` section removes only the selected domain's
+   previous generation and T0. Render and offline-preflight the exact primary-only candidate task
+   JSON for MCP, connect-web, and morning-digest, even when one workload does not consume the
+   selected domain. Pre-register and record distinct primary-only rollback task ARNs/images.
+   Prepare distinct reviewed candidate and rollback worker archives and their exact secret-free
+   environments. Candidate/rollback task identities, images within a workload, provenances, and
+   worker archive digests must not alias.
+2. At or after `T0_mail + 87,300`, run the staged authorization CAS:
+
+   ```bash
+   .venv/bin/python scripts/hmac_rollout_gate.py \
+     --manifest /protected/path/hmac-cleanup-mail.json \
+     --control /protected/path/hmac-cleanup-mail-control.json \
+     --action prepare-cleanup \
+     --domain mail_action \
+     --cleanup-task-definition-json mcp=/protected/path/mcp-primary-only.json \
+     --cleanup-task-definition-json connect_web=/protected/path/connect-primary-only.json \
+     --cleanup-task-definition-json morning_digest=/protected/path/morning-primary-only.json \
+     --worker-env /protected/path/worker-primary-only.env \
+     --worker-rollback-env /protected/path/worker-primary-only-rollback.env \
+     --worker-artifact /protected/path/worker-primary-only.tar.gz \
+     --worker-rollback-artifact /protected/path/worker-primary-only-rollback.tar.gz
+   ```
+
+   This transaction first proves the complete ledger, exact live/durable configuration, full ECS
+   and scheduled-task inventory, expired deadline, all candidate/rollback artifacts, and worker
+   archive bindings. It leaves the durable previous/T0 pair present for old-process metadata
+   compatibility, marks the previous generation retired so it cannot verify, and temporarily
+   authorizes the old and new provenances. A retry or artifact drift fails closed.
+3. Promote the selected domain's affected primary-only ECS artifacts with explicit cleanup mode:
+   set Terraform `hmac_gate_mode=cleanup`; use `HMAC_PROMOTION_MODE=cleanup` for MCP and
+   morning-digest and `HMAC_CONNECT_MODE=cleanup` for connect-web. Deploy the worker with
+   `HMAC_WORKER_MODE=cleanup` and `HMAC_WORKER_ADVANCE_STAGE=0`. Every path re-fetches the
+   registered artifact and checks its prepared digest. The worker path proves both
+   `teamagent-bot` and `teamagent-connect` active, port 8788 listening, and a durable startup
+   attestation strictly newer than the restart request. Rollback during this interval uses only
+   the prepared primary-only rollback task/archive and remains authorized.
+4. After every affected ECS replacement is stable, list/describe counts reconcile, all old and
+   draining tasks are gone (including in-flight morning-digest work), and the fresh worker restart
+   record is complete, finalize the CAS:
+
+   ```bash
+   .venv/bin/python scripts/hmac_rollout_gate.py \
+     --manifest /protected/path/hmac-cleanup-mail.json \
+     --control /protected/path/hmac-cleanup-mail-control.json \
+     --action complete-cleanup \
+     --domain mail_action
+   ```
+
+   The transaction removes previous/T0/deadline and legacy-worker fields, writes immutable
+   retirement history, retires old provenances, and leaves only the new candidate and rollback
+   provenances authorized. `--action retire-previous` is deliberately rejected with
+   `cleanup_staging_required`; it is not an operator shortcut.
+5. At or after `T0_report + 605,700`, build a fresh report cleanup manifest/control/artifact set and
+   repeat `prepare-cleanup`, cleanup-mode replacement/drain/restart, and `complete-cleanup` for
+   `report_link`. Never reuse the prior cleanup control's identities or provenances.
+6. Re-run saved legacy-token probes with intentionally unexpired payload claims; verification must
+   fail because the previous key is gone. New tokens and a prepared rollback must continue to
+   work.
+7. Verify rendered tasks no longer reference database-url or Slack as any HMAC secret. Do not
    delete or rotate the database credential as part of this migration.
 
 A later dedicated-to-dedicated rotation may initialize a new epoch only after the prior ledger is

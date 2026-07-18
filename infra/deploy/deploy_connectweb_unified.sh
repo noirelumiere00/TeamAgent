@@ -42,7 +42,7 @@ test -n "$HMAC_ROLLOUT_CONTROL" && test -f "$HMAC_ROLLOUT_CONTROL" || {
   exit 2
 }
 case "$HMAC_CONNECT_MODE" in
-  candidate)
+  candidate|cleanup)
     test -n "$HMAC_CONNECT_TASK_TEMPLATE" && test -f "$HMAC_CONNECT_TASK_TEMPLATE" || {
       echo "★ HMAC_CONNECT_TASK_TEMPLATE（reviewed full task JSON）が必須" >&2
       exit 2
@@ -51,11 +51,13 @@ case "$HMAC_CONNECT_MODE" in
       echo "★ HMAC_CONNECT_IMAGE は事前ビルド・review済みのdigest固定URIが必須" >&2
       exit 2
     }
-    case "$HMAC_CONNECT_PHASE" in
-      preload) LIVE_GATE_ACTION=pre-connect-preload ;;
-      final) LIVE_GATE_ACTION=pre-connect-final ;;
-      *) echo "★ HMAC_CONNECT_PHASE は preload または final が必須" >&2; exit 2 ;;
-    esac
+    if [[ "$HMAC_CONNECT_MODE" == "candidate" ]]; then
+      case "$HMAC_CONNECT_PHASE" in
+        preload) LIVE_GATE_ACTION=pre-connect-preload ;;
+        final) LIVE_GATE_ACTION=pre-connect-final ;;
+        *) echo "★ HMAC_CONNECT_PHASE は preload または final が必須" >&2; exit 2 ;;
+      esac
+    fi
     ;;
   rollback)
     [[ "$HMAC_REGISTERED_TASK_ARN" =~ :task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$ ]] || {
@@ -64,7 +66,7 @@ case "$HMAC_CONNECT_MODE" in
     }
     ;;
   *)
-    echo "★ HMAC_CONNECT_MODE は candidate または rollback が必須" >&2
+    echo "★ HMAC_CONNECT_MODE は candidate、cleanup、または rollback が必須" >&2
     exit 2
     ;;
 esac
@@ -95,11 +97,13 @@ if [[ "$HMAC_CONNECT_MODE" == "rollback" ]]; then
   echo "hmac_connect_rollback=true exact_artifact=true"
   exit 0
 fi
-"$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
-  --manifest "$HMAC_PREFLIGHT_MANIFEST" \
-  --refresh-manifest-now \
-  --control "$HMAC_ROLLOUT_CONTROL" \
-  --action "$LIVE_GATE_ACTION"
+if [[ "$HMAC_CONNECT_MODE" == "candidate" ]]; then
+  "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
+    --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+    --refresh-manifest-now \
+    --control "$HMAC_ROLLOUT_CONTROL" \
+    --action "$LIVE_GATE_ACTION"
+fi
 
 echo "== 0) preflight: exec-role の Slack secret 読取policyを確認（無いと統合td起動がGetSecretValue AccessDeniedで自動ロールバック） =="
 aws iam get-role-policy --role-name teamagent-dev-ecs-exec-connect-web --policy-name slack-oauth-secrets >/dev/null 2>&1 \
@@ -146,6 +150,7 @@ jq --arg img "$IMG" --arg hd "$HD" --arg rd "$SLACK_REDIRECT" --arg apphtml "$AP
   --refresh-manifest-now \
   --control "$HMAC_ROLLOUT_CONTROL" \
   --action pre-register \
+  --mode "$HMAC_CONNECT_MODE" \
   --task connect_web \
   --task-definition-json /tmp/cwu_new.json
 NEW_ARN=$(aws ecs register-task-definition --region "$R" --cli-input-json file:///tmp/cwu_new.json --query 'taskDefinition.taskDefinitionArn' --output text)
@@ -157,11 +162,21 @@ echo "== 4) update-service → 安定待ち =="
   --refresh-manifest-now \
   --control "$HMAC_ROLLOUT_CONTROL" \
   --action pre-update \
+  --mode "$HMAC_CONNECT_MODE" \
   --task connect_web \
   --task-definition-arn "$NEW_ARN"
 aws ecs update-service --region "$R" --cluster "$CLUSTER" --service "$SVC" --task-definition "$NEW_ARN" >/dev/null
 aws ecs wait services-stable --region "$R" --cluster "$CLUSTER" --services "$SVC"
-if [[ "$HMAC_CONNECT_PHASE" == "preload" ]]; then
+if [[ "$HMAC_CONNECT_MODE" == "cleanup" ]]; then
+  "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
+    --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+    --refresh-manifest-now \
+    --control "$HMAC_ROLLOUT_CONTROL" \
+    --action post-update \
+    --mode cleanup \
+    --task connect_web \
+    --task-definition-arn "$NEW_ARN"
+elif [[ "$HMAC_CONNECT_PHASE" == "preload" ]]; then
   "$PREFLIGHT_PY" "$REPO_ROOT/scripts/hmac_rollout_gate.py" \
     --manifest "$HMAC_PREFLIGHT_MANIFEST" \
     --refresh-manifest-now \

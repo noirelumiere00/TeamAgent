@@ -26,7 +26,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from scripts.preflight_hmac_rotation import validate_rendered_tasks
+from scripts.preflight_hmac_rotation import validate_rendered_tasks, validate_worker_env
 from teamagent.hmac_durable_state import (
     HmacRuntimeExpectation,
     runtime_expectations_digest,
@@ -49,6 +49,7 @@ _TASK_DEFINITION_RE = re.compile(
     r"^arn:aws[a-z-]*:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$"
 )
 _IMAGE_DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
+_WORKER_EXPORT_RE = re.compile(r"^export ([A-Z][A-Z0-9_]*)='([^']*)'$")
 _TASK_DOMAINS = {
     "mcp": frozenset({"mail_action", "report_link"}),
     "connect_web": frozenset({"report_link"}),
@@ -88,6 +89,9 @@ _LEDGER_STAGES = (
     "mcp_stable_and_old_drained",
     "complete",
 )
+_CLEANUP_STAGES = frozenset({"authorized", "complete"})
+_TASK_INVENTORY_LIMIT = 10_000
+_DESCRIBE_TASK_BATCH = 100
 
 
 class RolloutGateError(RuntimeError):
@@ -117,6 +121,7 @@ class WorkloadControl:
 
 @dataclass(frozen=True)
 class ScheduledControl:
+    cluster: str
     rule: str
     target_id: str
     legacy_task_definition: str
@@ -162,6 +167,18 @@ class Ledger:
     revision: int
     updated_at: int
     trusted_now: int
+
+
+@dataclass(frozen=True)
+class CleanupLedger:
+    domain: str
+    stage: str
+    revision: int
+    authorized_at: int
+    old_provenances: dict[str, frozenset[str]]
+    new_provenances: dict[str, frozenset[str]]
+    candidate_digests: dict[str, str]
+    rollback_digests: dict[str, str]
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -241,6 +258,7 @@ def _scheduled_control(value: object) -> ScheduledControl:
         item,
         frozenset(
             {
+                "cluster",
                 "rule",
                 "target_id",
                 "legacy_task_definition",
@@ -252,6 +270,7 @@ def _scheduled_control(value: object) -> ScheduledControl:
         ),
     )
     return ScheduledControl(
+        cluster=_bounded_text(item["cluster"], maximum=512),
         rule=_bounded_text(item["rule"]),
         target_id=_bounded_text(item["target_id"]),
         legacy_task_definition=_task_definition(item["legacy_task_definition"]),
@@ -352,17 +371,33 @@ def load_control(value: object) -> RolloutControl:
         canary=_canary_control(item["canary"]),
         forbidden_signing_task_definitions=forbidden_set,
     )
-    rollback_tasks = {
+    rollback_tasks = (
         control.mcp.rollback_task_definition,
         control.connect_web.rollback_task_definition,
         control.morning_digest.rollback_task_definition,
-    }
+    )
     legacy_tasks = {
         control.mcp.legacy_task_definition,
         control.connect_web.legacy_task_definition,
         control.morning_digest.legacy_task_definition,
     }
-    if rollback_tasks & forbidden_set or rollback_tasks & legacy_tasks:
+    provenances = (
+        control.mcp.provenance,
+        control.mcp.rollback_provenance,
+        control.connect_web.provenance,
+        control.connect_web.rollback_provenance,
+        control.morning_digest.provenance,
+        control.morning_digest.rollback_provenance,
+        control.worker.provenance,
+        control.worker.rollback_provenance,
+    )
+    if (
+        len(set(rollback_tasks)) != len(rollback_tasks)
+        or set(rollback_tasks) & forbidden_set
+        or set(rollback_tasks) & legacy_tasks
+        or len(set(provenances)) != len(provenances)
+        or control.worker.artifact_sha256 == control.worker.rollback_artifact_sha256
+    ):
         raise RolloutGateError("invalid_control")
     return control
 
@@ -423,6 +458,58 @@ def _secret_reference(reference: str) -> tuple[str, str | None]:
     return reference, None
 
 
+def _task_family(task_definition: str) -> str:
+    family_revision = task_definition.rsplit("/", maxsplit=1)[-1]
+    family, separator, revision = family_revision.rpartition(":")
+    if not separator or not family or not revision.isascii() or not revision.isdecimal():
+        raise RolloutGateError("live_task_invalid")
+    return family
+
+
+def _task_artifact_digest(definition: dict[str, Any]) -> str:
+    """Digest the exact container payload that is preserved by ECS registration."""
+
+    container = _one_container(definition)
+    encoded = json.dumps(container, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _runtime_provenance(definition: dict[str, Any], *, task: str) -> str:
+    container = _one_container(definition)
+    environment = _named(container.get("environment", []), "value")
+    try:
+        return _provenance(environment[_RUNTIME_ENV["provenance"]])
+    except KeyError as exc:
+        raise RolloutGateError("runtime_metadata_drift", scope=task) from exc
+
+
+def _reserved_task_definitions(control: RolloutControl) -> frozenset[str]:
+    return frozenset(
+        {
+            control.mcp.legacy_task_definition,
+            control.connect_web.legacy_task_definition,
+            control.morning_digest.legacy_task_definition,
+            control.mcp.rollback_task_definition,
+            control.connect_web.rollback_task_definition,
+            control.morning_digest.rollback_task_definition,
+            *control.forbidden_signing_task_definitions,
+        }
+    )
+
+
+def _task_control(
+    control: RolloutControl,
+    task: str,
+) -> WorkloadControl | ScheduledControl:
+    if task == "mcp":
+        return control.mcp
+    if task == "connect_web":
+        return control.connect_web
+    if task == "morning_digest":
+        return control.morning_digest
+    raise RolloutGateError("unknown_task")
+
+
 class LiveRolloutGate:
     """AWS-backed control-plane gate with injectable clients for offline tests."""
 
@@ -439,19 +526,32 @@ class LiveRolloutGate:
         self.events = clients.client("events", region_name=control.region)
         self.secrets = clients.client("secretsmanager", region_name=control.region)
         self.ddb = clients.client("dynamodb", region_name=control.region)
-        self._observed_times: list[int] = []
+        self._started_monotonic = time.monotonic()
+        self._observed_times: list[tuple[int, float]] = []
 
     def _observe(self, response: object) -> None:
-        self._observed_times.append(_trusted_epoch(response))
+        self._observed_times.append((_trusted_epoch(response), time.monotonic()))
 
     def _now(self) -> int:
         if not self._observed_times:
             raise RolloutGateError("trusted_clock_unavailable")
-        if max(self._observed_times) - min(self._observed_times) > _MAX_AWS_CLOCK_SPREAD_S:
+        offsets = [server_epoch - received_at for server_epoch, received_at in self._observed_times]
+        if max(offsets) - min(offsets) > _MAX_AWS_CLOCK_SPREAD_S:
             raise RolloutGateError("trusted_clock_disagreement")
-        now = max(self._observed_times)
+        monotonic_now = time.monotonic()
+        now = int(
+            max(
+                server_epoch + (monotonic_now - received_at)
+                for server_epoch, received_at in self._observed_times
+            )
+        )
         manifest_now = self.manifest.get("now")
-        if type(manifest_now) is not int or abs(manifest_now - now) > _MAX_CLOCK_SKEW_S:
+        projected_manifest_now = (
+            manifest_now + (monotonic_now - self._started_monotonic)
+            if type(manifest_now) is int
+            else None
+        )
+        if projected_manifest_now is None or abs(projected_manifest_now - now) > _MAX_CLOCK_SKEW_S:
             raise RolloutGateError("manifest_time_stale")
         return now
 
@@ -483,7 +583,10 @@ class LiveRolloutGate:
         response = self.ecs.describe_task_definition(taskDefinition=task_definition)
         self._observe(response)
         definition = response.get("taskDefinition") if type(response) is dict else None
-        return _mapping(definition)
+        item = _mapping(definition)
+        if item.get("taskDefinitionArn") != task_definition:
+            raise RolloutGateError("live_task_invalid")
+        return item
 
     def _service_task(self, workload: WorkloadControl) -> tuple[str, dict[str, Any]]:
         response = self.ecs.describe_services(
@@ -493,7 +596,12 @@ class LiveRolloutGate:
         self._observe(response)
         services = response.get("services") if type(response) is dict else None
         failures = response.get("failures") if type(response) is dict else None
-        if type(services) is not list or len(services) != 1 or failures:
+        if (
+            type(services) is not list
+            or len(services) != 1
+            or type(failures) is not list
+            or failures
+        ):
             raise RolloutGateError("live_service_unavailable")
         service = _mapping(services[0])
         task_definition = service.get("taskDefinition")
@@ -513,11 +621,149 @@ class LiveRolloutGate:
         ]
         if len(matches) != 1:
             raise RolloutGateError("scheduled_target_unavailable", scope="morning_digest")
+        if matches[0].get("Arn") != scheduled.cluster:
+            raise RolloutGateError("scheduled_target_unavailable", scope="morning_digest")
         ecs_parameters = _mapping(matches[0].get("EcsParameters"))
         task_definition = ecs_parameters.get("TaskDefinitionArn")
         if type(task_definition) is not str:
             raise RolloutGateError("scheduled_target_unavailable", scope="morning_digest")
         return task_definition, self._describe_task(task_definition)
+
+    def _listed_task_arns(
+        self,
+        *,
+        cluster: str,
+        desired_status: str,
+        service_name: str | None = None,
+        family: str | None = None,
+    ) -> list[str]:
+        task_arns: list[str] = []
+        seen_tokens: set[str] = set()
+        next_token: str | None = None
+        while True:
+            arguments: dict[str, object] = {
+                "cluster": cluster,
+                "desiredStatus": desired_status,
+            }
+            if service_name is not None:
+                arguments["serviceName"] = service_name
+            if family is not None:
+                arguments["family"] = family
+            if next_token is not None:
+                arguments["nextToken"] = next_token
+            response = self.ecs.list_tasks(**arguments)
+            self._observe(response)
+            page = response.get("taskArns") if type(response) is dict else None
+            token = response.get("nextToken") if type(response) is dict else None
+            if (
+                type(page) is not list
+                or any(type(task_arn) is not str or not task_arn for task_arn in page)
+                or (token is not None and (type(token) is not str or not token))
+            ):
+                raise RolloutGateError("task_inventory_incomplete")
+            task_arns.extend(page)
+            if len(task_arns) > _TASK_INVENTORY_LIMIT or len(set(task_arns)) != len(task_arns):
+                raise RolloutGateError("task_inventory_incomplete")
+            if token is None:
+                return task_arns
+            if token in seen_tokens:
+                raise RolloutGateError("task_inventory_incomplete")
+            seen_tokens.add(token)
+            next_token = token
+
+    def _described_tasks(
+        self,
+        *,
+        cluster: str,
+        task_arns: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        described: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(task_arns), _DESCRIBE_TASK_BATCH):
+            batch = task_arns[offset : offset + _DESCRIBE_TASK_BATCH]
+            response = self.ecs.describe_tasks(cluster=cluster, tasks=batch)
+            self._observe(response)
+            tasks = response.get("tasks") if type(response) is dict else None
+            failures = response.get("failures") if type(response) is dict else None
+            if (
+                type(tasks) is not list
+                or type(failures) is not list
+                or failures
+                or len(tasks) != len(batch)
+            ):
+                raise RolloutGateError("task_inventory_incomplete")
+            for raw_task in tasks:
+                task = _mapping(raw_task)
+                task_arn = task.get("taskArn")
+                if type(task_arn) is not str or task_arn not in batch or task_arn in described:
+                    raise RolloutGateError("task_inventory_incomplete")
+                described[task_arn] = task
+        if set(described) != set(task_arns):
+            raise RolloutGateError("task_inventory_incomplete")
+        return described
+
+    def _task_inventory(
+        self,
+        *,
+        cluster: str,
+        service_name: str | None = None,
+        family: str | None = None,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        running_arns = self._listed_task_arns(
+            cluster=cluster,
+            desired_status="RUNNING",
+            service_name=service_name,
+            family=family,
+        )
+        stopped_arns = self._listed_task_arns(
+            cluster=cluster,
+            desired_status="STOPPED",
+            service_name=service_name,
+            family=family,
+        )
+        if set(running_arns) & set(stopped_arns):
+            raise RolloutGateError("task_inventory_incomplete")
+        running = self._described_tasks(cluster=cluster, task_arns=running_arns)
+        stopped = self._described_tasks(cluster=cluster, task_arns=stopped_arns)
+        for task in running.values():
+            if (
+                type(task.get("taskDefinitionArn")) is not str
+                or task.get("desiredStatus") != "RUNNING"
+                or type(task.get("lastStatus")) is not str
+                or task.get("lastStatus") == "STOPPED"
+            ):
+                raise RolloutGateError("task_inventory_incomplete")
+        for task in stopped.values():
+            if (
+                type(task.get("taskDefinitionArn")) is not str
+                or task.get("desiredStatus") != "STOPPED"
+                or type(task.get("lastStatus")) is not str
+            ):
+                raise RolloutGateError("task_inventory_incomplete")
+            if task.get("lastStatus") != "STOPPED":
+                raise RolloutGateError("old_tasks_not_drained")
+        return running, stopped
+
+    def _scheduled_tasks_drained(self, expected_task_definition: str) -> None:
+        scheduled = self.control.morning_digest
+        family = _task_family(expected_task_definition)
+        if any(
+            _task_family(task_definition) != family
+            for task_definition in (
+                scheduled.legacy_task_definition,
+                scheduled.rollback_task_definition,
+            )
+        ):
+            raise RolloutGateError("invalid_control")
+        running, _stopped = self._task_inventory(
+            cluster=scheduled.cluster,
+            family=family,
+        )
+        if any(
+            task.get("taskDefinitionArn") != expected_task_definition
+            or task.get("lastStatus") != "RUNNING"
+            for task in running.values()
+        ):
+            raise RolloutGateError("old_tasks_not_drained", scope="morning_digest")
 
     def _check_canary_anchor(self) -> None:
         canary = self.control.canary
@@ -763,9 +1009,10 @@ class LiveRolloutGate:
         raw = item.get(name)
         if raw is None and optional:
             return None
-        if type(raw) is not dict or type(raw.get("S")) is not str:
+        value = raw.get("S") if type(raw) is dict else None
+        if type(value) is not str:
             raise RolloutGateError("durable_state_invalid")
-        return raw["S"]
+        return value
 
     @staticmethod
     def _ddb_number(item: dict[str, Any], name: str, *, optional: bool = False) -> int | None:
@@ -824,8 +1071,12 @@ class LiveRolloutGate:
             raise RolloutGateError("pinned_legacy_revision_required")
         # Parsing every HMAC reference proves each observed legacy generation is version pinned.
         self._observed_deployed(definitions)
+        self._full_task_inventory(arns)
+
+    def _full_task_inventory(self, arns: dict[str, str]) -> None:
         self._service_stable_and_drained(self.control.mcp, arns["mcp"])
         self._service_stable_and_drained(self.control.connect_web, arns["connect_web"])
+        self._scheduled_tasks_drained(arns["morning_digest"])
 
     def initialize(self) -> None:
         """CAS-create the first epoch or advance a completed primary-only epoch."""
@@ -842,11 +1093,7 @@ class LiveRolloutGate:
         if first_epoch:
             self._legacy_bindings_drained(arns, definitions)
         else:
-            self._service_stable_and_drained(self.control.mcp, arns["mcp"])
-            self._service_stable_and_drained(
-                self.control.connect_web,
-                arns["connect_web"],
-            )
+            self._full_task_inventory(arns)
 
         deployed = self._observed_deployed(definitions)
         proposed = self._assert_transition(deployed)
@@ -1115,12 +1362,24 @@ class LiveRolloutGate:
         task: str,
         definition: dict[str, Any],
     ) -> None:
+        self._validate_legacy_worker_reference_for_generation(
+            task=task,
+            definition=definition,
+            expected=self._durable_legacy_worker_generation(),
+        )
+
+    def _validate_legacy_worker_reference_for_generation(
+        self,
+        *,
+        task: str,
+        definition: dict[str, Any],
+        expected: str | None,
+    ) -> None:
         if "mail_action" not in _TASK_DOMAINS[task]:
             return
         container = _one_container(definition)
         environment = _named(container.get("environment", []), "value")
         secrets = _named(container.get("secrets", []), "valueFrom")
-        expected = self._durable_legacy_worker_generation()
         generation = environment.get("MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION")
         reference = secrets.get("MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET")
         if expected is None:
@@ -1139,49 +1398,73 @@ class LiveRolloutGate:
         task: str,
         image: str | None = None,
         artifact_sha256: str | None = None,
+        configs: dict[str, dict[str, object]] | None = None,
+        legacy_worker_generation: str | None = None,
     ) -> str:
-        durable = self._durable_proposed()
-        legacy_worker = self._durable_legacy_worker_generation() or ""
+        durable = configs if configs is not None else self._durable_proposed()
+        legacy_worker = (
+            legacy_worker_generation
+            if configs is not None
+            else self._durable_legacy_worker_generation()
+        ) or ""
+        mail = durable["mail_action"]
+        report = durable["report_link"]
+        mail_values = {
+            "mail_primary": str(mail["primary_generation"]),
+            "mail_previous": str(mail["previous_generation"] or ""),
+            "mail_t0": (
+                str(mail["rotation_started_at"]) if mail["rotation_started_at"] is not None else ""
+            ),
+        }
+        report_values = {
+            "report_primary": str(report["primary_generation"]),
+            "report_previous": str(report["previous_generation"] or ""),
+            "report_t0": (
+                str(report["rotation_started_at"])
+                if report["rotation_started_at"] is not None
+                else ""
+            ),
+        }
         if task == "mcp":
             if image is None or _IMAGE_DIGEST_RE.fullmatch(image) is None:
                 raise RolloutGateError("image_not_digest", scope=task)
             values = {
                 "image": image,
-                "mail": str(durable["mail_action"]["primary_generation"]),
-                "report": str(durable["report_link"]["primary_generation"]),
                 "legacy_worker": legacy_worker,
                 "rotation_epoch": self.control.rotation_epoch,
                 "workload": "mcp",
+                **mail_values,
+                **report_values,
             }
         elif task == "connect_web":
             if image is None or _IMAGE_DIGEST_RE.fullmatch(image) is None:
                 raise RolloutGateError("image_not_digest", scope=task)
             values = {
                 "image": image,
-                "report": str(durable["report_link"]["primary_generation"]),
                 "rotation_epoch": self.control.rotation_epoch,
                 "workload": "connect_web",
+                **report_values,
             }
         elif task == "morning_digest":
             if image is None or _IMAGE_DIGEST_RE.fullmatch(image) is None:
                 raise RolloutGateError("image_not_digest", scope=task)
             values = {
                 "image": image,
-                "mail": str(durable["mail_action"]["primary_generation"]),
                 "legacy_worker": legacy_worker,
                 "rotation_epoch": self.control.rotation_epoch,
                 "workload": "morning_digest",
+                **mail_values,
             }
         elif task == "worker":
             if artifact_sha256 is None or _PROVENANCE_RE.fullmatch(artifact_sha256) is None:
                 raise RolloutGateError("worker_artifact_drift", scope=task)
             values = {
                 "artifact": artifact_sha256,
-                "mail": str(durable["mail_action"]["primary_generation"]),
-                "report": str(durable["report_link"]["primary_generation"]),
                 "legacy_worker": legacy_worker,
                 "rotation_epoch": self.control.rotation_epoch,
                 "workload": "worker",
+                **mail_values,
+                **report_values,
             }
         else:
             raise RolloutGateError("unknown_task")
@@ -1207,11 +1490,26 @@ class LiveRolloutGate:
             "connect_web": self.control.connect_web.provenance,
             "morning_digest": self.control.morning_digest.provenance,
         }[task]
+        task_control = _task_control(self.control, task)
         container = _one_container(definition)
         image = container.get("image")
-        if type(image) is not str or provenance != self._expected_provenance(
-            task=task,
-            image=image,
+        candidate_arn = definition.get("taskDefinitionArn")
+        if (
+            type(image) is not str
+            or image == task_control.rollback_image
+            or (
+                candidate_arn is not None
+                and (
+                    type(candidate_arn) is not str
+                    or _TASK_DEFINITION_RE.fullmatch(candidate_arn) is None
+                    or candidate_arn in _reserved_task_definitions(self.control)
+                )
+            )
+            or provenance
+            != self._expected_provenance(
+                task=task,
+                image=image,
+            )
         ):
             raise RolloutGateError("provenance_binding_drift", scope=task)
         self._validate_runtime_metadata(
@@ -1221,7 +1519,524 @@ class LiveRolloutGate:
         )
         self._validate_legacy_worker_reference(task=task, definition=definition)
 
-    def terraform_pre_register(self, *, task: str, definition: dict[str, Any]) -> None:
+    def _manifest_proposed(self) -> dict[str, dict[str, object]]:
+        domains = _mapping(self.manifest.get("domains"))
+        proposed: dict[str, dict[str, object]] = {}
+        for domain in _DOMAIN_MAX_TTL:
+            config = _mapping(_mapping(domains.get(domain)).get("proposed"))
+            if frozenset(config) != frozenset(
+                {
+                    "primary_generation",
+                    "previous_generation",
+                    "rotation_started_at",
+                }
+            ):
+                raise RolloutGateError("invalid_manifest", scope=domain)
+            proposed[domain] = config
+        return proposed
+
+    def _cleanup_transition(
+        self,
+        *,
+        domain: str,
+        deployed: dict[str, dict[str, object]],
+    ) -> dict[str, dict[str, object]]:
+        proposed = self._assert_transition(deployed)
+        for item_domain in _DOMAIN_MAX_TTL:
+            current = deployed[item_domain]
+            candidate = proposed[item_domain]
+            if item_domain == domain:
+                if current.get("previous_generation") is None or candidate != {
+                    "primary_generation": current["primary_generation"],
+                    "previous_generation": None,
+                    "rotation_started_at": None,
+                }:
+                    raise RolloutGateError("cleanup_manifest_invalid", scope=domain)
+            elif candidate != current:
+                raise RolloutGateError("cleanup_manifest_invalid", scope=item_domain)
+        return proposed
+
+    def _validate_cleanup_task(
+        self,
+        *,
+        task: str,
+        definition: dict[str, Any],
+        proposed: dict[str, dict[str, object]],
+        rollback: bool,
+    ) -> str:
+        trusted_manifest = copy.deepcopy(self.manifest)
+        trusted_manifest["now"] = self._now()
+        result = validate_rendered_tasks(trusted_manifest, {task: definition})
+        if not result["ok"]:
+            raise RolloutGateError(str(result["code"]), scope=task)
+        task_control = _task_control(self.control, task)
+        expected_provenance = (
+            task_control.rollback_provenance if rollback else task_control.provenance
+        )
+        container = _one_container(definition)
+        image = container.get("image")
+        task_definition = definition.get("taskDefinitionArn")
+        candidate_identity_invalid = (
+            not rollback
+            and task_definition is not None
+            and (
+                type(task_definition) is not str
+                or _TASK_DEFINITION_RE.fullmatch(task_definition) is None
+                or task_definition in _reserved_task_definitions(self.control)
+            )
+        )
+        if (
+            type(image) is not str
+            or _IMAGE_DIGEST_RE.fullmatch(image) is None
+            or (rollback and image != task_control.rollback_image)
+            or (not rollback and image == task_control.rollback_image)
+            or (rollback and task_definition != task_control.rollback_task_definition)
+            or candidate_identity_invalid
+            or expected_provenance
+            != self._expected_provenance(
+                task=task,
+                image=image,
+                configs=proposed,
+                legacy_worker_generation=(
+                    self.manifest.get("legacy_worker_generation")
+                    if type(self.manifest.get("legacy_worker_generation")) is str
+                    else None
+                ),
+            )
+        ):
+            raise RolloutGateError(
+                "rollback_provenance_binding_drift" if rollback else "provenance_binding_drift",
+                scope=task,
+            )
+        self._validate_runtime_metadata(
+            task=task,
+            definition=definition,
+            provenance=expected_provenance,
+        )
+        legacy_worker = self.manifest.get("legacy_worker_generation")
+        self._validate_legacy_worker_reference_for_generation(
+            task=task,
+            definition=definition,
+            expected=legacy_worker if type(legacy_worker) is str else None,
+        )
+        return _task_artifact_digest(definition)
+
+    @staticmethod
+    def _worker_env_values(text: str) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for line in text.splitlines():
+            if not line:
+                continue
+            match = _WORKER_EXPORT_RE.fullmatch(line)
+            if match is None or match.group(1) in values:
+                raise RolloutGateError("worker_env_drift", scope="worker")
+            values[match.group(1)] = match.group(2)
+        return values
+
+    def _validate_cleanup_worker(
+        self,
+        *,
+        env_path: Path,
+        artifact_path: Path,
+        proposed: dict[str, dict[str, object]],
+        rollback: bool,
+    ) -> None:
+        try:
+            env_text = env_path.read_text(encoding="utf-8")
+            artifact_digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except (OSError, UnicodeError) as exc:
+            raise RolloutGateError("worker_artifact_unreadable", scope="worker") from exc
+        trusted_manifest = copy.deepcopy(self.manifest)
+        trusted_manifest["now"] = self._now()
+        result = validate_worker_env(trusted_manifest, env_text)
+        if not result["ok"]:
+            raise RolloutGateError(str(result["code"]), scope="worker")
+        values = self._worker_env_values(env_text)
+        expected_digest = (
+            self.control.worker.rollback_artifact_sha256
+            if rollback
+            else self.control.worker.artifact_sha256
+        )
+        expected_provenance = (
+            self.control.worker.rollback_provenance if rollback else self.control.worker.provenance
+        )
+        if (
+            artifact_digest != expected_digest
+            or values.get("TEAMAGENT_HMAC_ARTIFACT_SHA256") != expected_digest
+            or values.get("TEAMAGENT_HMAC_PROVENANCE") != expected_provenance
+            or values.get("TEAMAGENT_HMAC_STATE_TABLE") != self.control.state_table
+            or values.get("TEAMAGENT_HMAC_STATE_SCOPE") != self.control.scope
+            or values.get("TEAMAGENT_HMAC_ROTATION_EPOCH") != self.control.rotation_epoch
+            or expected_provenance
+            != self._expected_provenance(
+                task="worker",
+                artifact_sha256=artifact_digest,
+                configs=proposed,
+                legacy_worker_generation=(
+                    self.manifest.get("legacy_worker_generation")
+                    if type(self.manifest.get("legacy_worker_generation")) is str
+                    else None
+                ),
+            )
+        ):
+            raise RolloutGateError(
+                "worker_rollback_artifact_drift" if rollback else "worker_artifact_drift",
+                scope="worker",
+            )
+
+    @staticmethod
+    def _issuer_provenances(control: RolloutControl) -> dict[str, frozenset[str]]:
+        shared = {
+            control.mcp.provenance,
+            control.mcp.rollback_provenance,
+            control.worker.provenance,
+            control.worker.rollback_provenance,
+        }
+        return {
+            "mail_action": frozenset(
+                shared
+                | {
+                    control.morning_digest.provenance,
+                    control.morning_digest.rollback_provenance,
+                }
+            ),
+            "report_link": frozenset(shared),
+        }
+
+    def _cleanup_record_name(self, domain: str) -> str:
+        return f"CLEANUP#{self.control.rotation_epoch}#{domain}"
+
+    def _cleanup_ledger(self, domain: str) -> CleanupLedger:
+        item = self._read_item(self._cleanup_record_name(domain))
+        try:
+            item_domain = item["domain"]["S"]
+            epoch = item["rotation_epoch"]["S"]
+            stage = item["stage"]["S"]
+            revision = int(item["revision"]["N"])
+            authorized_at = int(item["authorized_at"]["N"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RolloutGateError("cleanup_state_invalid", scope=domain) from exc
+        if (
+            item_domain != domain
+            or epoch != self.control.rotation_epoch
+            or stage not in _CLEANUP_STAGES
+            or revision < 1
+            or authorized_at < 0
+        ):
+            raise RolloutGateError("cleanup_state_invalid", scope=domain)
+        old_provenances = {
+            item_domain: self._ddb_string_set(item, f"old_{item_domain}_provenances")
+            for item_domain in _DOMAIN_MAX_TTL
+        }
+        new_provenances = {
+            item_domain: self._ddb_string_set(item, f"new_{item_domain}_provenances")
+            for item_domain in _DOMAIN_MAX_TTL
+        }
+        candidate_digests = {
+            task: str(self._ddb_string(item, f"candidate_{task}_digest"))
+            for task in (*_TASK_DOMAINS, "worker")
+        }
+        rollback_digests = {
+            task: str(self._ddb_string(item, f"rollback_{task}_digest"))
+            for task in (*_TASK_DOMAINS, "worker")
+        }
+        all_digests = tuple(candidate_digests.values()) + tuple(rollback_digests.values())
+        if (
+            any(not values for values in new_provenances.values())
+            or any(_PROVENANCE_RE.fullmatch(digest) is None for digest in all_digests)
+            or any(
+                candidate_digests[task] == rollback_digests[task]
+                for task in (*_TASK_DOMAINS, "worker")
+            )
+        ):
+            raise RolloutGateError("cleanup_state_invalid", scope=domain)
+        return CleanupLedger(
+            domain=domain,
+            stage=stage,
+            revision=revision,
+            authorized_at=authorized_at,
+            old_provenances=old_provenances,
+            new_provenances=new_provenances,
+            candidate_digests=candidate_digests,
+            rollback_digests=rollback_digests,
+        )
+
+    def _active_cleanup(self) -> CleanupLedger | None:
+        active: list[CleanupLedger] = []
+        for domain in _DOMAIN_MAX_TTL:
+            item = self._read_item_optional(self._cleanup_record_name(domain))
+            if item is None:
+                continue
+            stage = self._ddb_string(item, "stage")
+            if stage == "authorized":
+                active.append(self._cleanup_ledger(domain))
+            elif stage != "complete":
+                raise RolloutGateError("cleanup_state_invalid", scope=domain)
+        if len(active) > 1:
+            raise RolloutGateError("cleanup_state_invalid")
+        return active[0] if active else None
+
+    def _cleanup_proposed_from_live(
+        self,
+        cleanup: CleanupLedger,
+    ) -> dict[str, dict[str, object]]:
+        deployed = {
+            domain: self._domain_config_from_item(self._read_item(f"DOMAIN#{domain}"))
+            for domain in _DOMAIN_MAX_TTL
+        }
+        return self._cleanup_transition(domain=cleanup.domain, deployed=deployed)
+
+    def prepare_cleanup(
+        self,
+        *,
+        domain: str,
+        candidate_definitions: dict[str, dict[str, Any]],
+        worker_env: Path,
+        worker_rollback_env: Path,
+        worker_artifact: Path,
+        worker_rollback_artifact: Path,
+    ) -> None:
+        """Authorize a reviewed primary-only replacement without reopening the expired key."""
+
+        if domain not in _DOMAIN_MAX_TTL:
+            raise RolloutGateError("unknown_domain")
+        if frozenset(candidate_definitions) != frozenset(_TASK_DOMAINS):
+            raise RolloutGateError("cleanup_candidate_incomplete", scope=domain)
+        if self._ledger().stage != "complete" or self._active_cleanup() is not None:
+            raise RolloutGateError("stage_order_violation", scope=domain)
+        arns, definitions = self._live_tasks()
+        self._full_task_inventory(arns)
+        deployed = self._observed_deployed(definitions)
+        proposed = self._cleanup_transition(domain=domain, deployed=deployed)
+        self._assert_proposed_generations_exist(proposed)
+
+        domain_items = {
+            item_domain: self._read_item(f"DOMAIN#{item_domain}") for item_domain in _DOMAIN_MAX_TTL
+        }
+        now = self._now()
+        target = domain_items[domain]
+        previous = self._ddb_string(target, "previous_generation", optional=True)
+        t0 = self._ddb_number(target, "rotation_started_at", optional=True)
+        deadline = self._ddb_number(target, "deadline", optional=True)
+        legacy_worker = self._ddb_string(
+            target,
+            "legacy_worker_generation",
+            optional=True,
+        )
+        if (
+            previous is None
+            or t0 is None
+            or deadline is None
+            or now < deadline
+            or self._ddb_string(target, "cleanup_stage", optional=True) is not None
+        ):
+            raise RolloutGateError("previous_window_active", scope=domain)
+        for item_domain, item in domain_items.items():
+            if (
+                self._ddb_string(item, "rotation_epoch") != self.control.rotation_epoch
+                or self._ddb_string(item, "stage") != "complete"
+                or self._domain_config_from_item(item) != deployed[item_domain]
+            ):
+                raise RolloutGateError("manifest_durable_drift", scope=item_domain)
+
+        candidate_digests = {
+            task: self._validate_cleanup_task(
+                task=task,
+                definition=candidate_definitions[task],
+                proposed=proposed,
+                rollback=False,
+            )
+            for task in _TASK_DOMAINS
+        }
+        candidate_identities = [
+            definition.get("taskDefinitionArn")
+            for definition in candidate_definitions.values()
+            if definition.get("taskDefinitionArn") is not None
+        ]
+        if len(candidate_identities) != len(set(candidate_identities)):
+            raise RolloutGateError("cleanup_artifacts_not_distinct", scope=domain)
+        rollback_definitions = {
+            "mcp": self._describe_task(self.control.mcp.rollback_task_definition),
+            "connect_web": self._describe_task(self.control.connect_web.rollback_task_definition),
+            "morning_digest": self._describe_task(
+                self.control.morning_digest.rollback_task_definition
+            ),
+        }
+        rollback_digests = {
+            task: self._validate_cleanup_task(
+                task=task,
+                definition=definition,
+                proposed=proposed,
+                rollback=True,
+            )
+            for task, definition in rollback_definitions.items()
+        }
+        if any(candidate_digests[task] == rollback_digests[task] for task in _TASK_DOMAINS):
+            raise RolloutGateError("cleanup_artifacts_not_distinct", scope=domain)
+        self._validate_cleanup_worker(
+            env_path=worker_env,
+            artifact_path=worker_artifact,
+            proposed=proposed,
+            rollback=False,
+        )
+        self._validate_cleanup_worker(
+            env_path=worker_rollback_env,
+            artifact_path=worker_rollback_artifact,
+            proposed=proposed,
+            rollback=True,
+        )
+        candidate_digests["worker"] = self.control.worker.artifact_sha256
+        rollback_digests["worker"] = self.control.worker.rollback_artifact_sha256
+
+        new_provenances = self._issuer_provenances(self.control)
+        old_provenances: dict[str, frozenset[str]] = {}
+        revisions: dict[str, int] = {}
+        high_waters: dict[str, int] = {}
+        for item_domain, item in domain_items.items():
+            current = self._ddb_string_set(item, "issuer_provenances")
+            retired = self._ddb_string_set(item, "retired_provenances")
+            revision = self._ddb_number(item, "revision")
+            high_water = self._ddb_number(item, "high_water")
+            if (
+                not current
+                or revision is None
+                or high_water is None
+                or current & retired
+                or new_provenances[item_domain] & retired
+            ):
+                raise RolloutGateError("cleanup_state_invalid", scope=item_domain)
+            old_provenances[item_domain] = current - new_provenances[item_domain]
+            revisions[item_domain] = revision
+            high_waters[item_domain] = high_water
+        if not old_provenances[domain]:
+            raise RolloutGateError("cleanup_provenance_not_distinct", scope=domain)
+
+        cleanup_item: dict[str, Any] = {
+            "scope": {"S": self.control.scope},
+            "record": {"S": self._cleanup_record_name(domain)},
+            "domain": {"S": domain},
+            "rotation_epoch": {"S": self.control.rotation_epoch},
+            "stage": {"S": "authorized"},
+            "revision": {"N": "1"},
+            "authorized_at": {"N": str(now)},
+        }
+        for item_domain in _DOMAIN_MAX_TTL:
+            if old_provenances[item_domain]:
+                cleanup_item[f"old_{item_domain}_provenances"] = {
+                    "SS": sorted(old_provenances[item_domain])
+                }
+            cleanup_item[f"new_{item_domain}_provenances"] = {
+                "SS": sorted(new_provenances[item_domain])
+            }
+        for task, digest in candidate_digests.items():
+            cleanup_item[f"candidate_{task}_digest"] = {"S": digest}
+        for task, digest in rollback_digests.items():
+            cleanup_item[f"rollback_{task}_digest"] = {"S": digest}
+
+        transaction: list[dict[str, Any]] = [
+            {
+                "Put": {
+                    "TableName": self.control.state_table,
+                    "Item": cleanup_item,
+                    "ConditionExpression": "attribute_not_exists(#record)",
+                    "ExpressionAttributeNames": {"#record": "record"},
+                }
+            }
+        ]
+        for item_domain, item in domain_items.items():
+            temporary = (
+                self._ddb_string_set(item, "issuer_provenances") | new_provenances[item_domain]
+            )
+            values: dict[str, Any] = {
+                ":revision": {"N": str(revisions[item_domain])},
+                ":epoch": {"S": self.control.rotation_epoch},
+                ":complete": {"S": "complete"},
+                ":old_issuers": {"SS": sorted(self._ddb_string_set(item, "issuer_provenances"))},
+                ":temporary": {"SS": sorted(temporary)},
+                ":one": {"N": "1"},
+            }
+            expression = "SET issuer_provenances = :temporary, revision = revision + :one"
+            condition = (
+                "revision = :revision AND rotation_epoch = :epoch"
+                " AND #stage = :complete AND issuer_provenances = :old_issuers"
+            )
+            names = {"#stage": "stage"}
+            if item_domain == domain:
+                effective_now = max(now, high_waters[item_domain])
+                expression += (
+                    ", previous_retired = :true, high_water = :now,"
+                    " cleanup_stage = :authorized"
+                    " ADD retired_generations :retired"
+                )
+                condition += (
+                    " AND high_water = :high_water"
+                    " AND previous_generation = :previous AND deadline = :deadline"
+                )
+                values.update(
+                    {
+                        ":true": {"BOOL": True},
+                        ":now": {"N": str(effective_now)},
+                        ":authorized": {"S": "authorized"},
+                        ":high_water": {"N": str(high_waters[item_domain])},
+                        ":previous": {"S": previous},
+                        ":deadline": {"N": str(deadline)},
+                        ":retired": {
+                            "SS": sorted(
+                                {previous}
+                                | ({legacy_worker} if legacy_worker is not None else set())
+                            )
+                        },
+                    }
+                )
+            transaction.append(
+                {
+                    "Update": {
+                        "TableName": self.control.state_table,
+                        "Key": {
+                            "scope": {"S": self.control.scope},
+                            "record": {"S": f"DOMAIN#{item_domain}"},
+                        },
+                        "UpdateExpression": expression,
+                        "ConditionExpression": condition,
+                        "ExpressionAttributeNames": names,
+                        "ExpressionAttributeValues": values,
+                    }
+                }
+            )
+        try:
+            response = self.ddb.transact_write_items(TransactItems=transaction)
+            self._observe(response)
+        except Exception as exc:
+            raise RolloutGateError("cleanup_prepare_cas_failed", scope=domain) from exc
+
+    def _validate_prepared_cleanup_task(
+        self,
+        *,
+        cleanup: CleanupLedger,
+        task: str,
+        definition: dict[str, Any],
+        rollback: bool,
+    ) -> None:
+        if cleanup.stage != "authorized":
+            raise RolloutGateError("stage_order_violation", scope=task)
+        proposed = self._cleanup_proposed_from_live(cleanup)
+        digest = self._validate_cleanup_task(
+            task=task,
+            definition=definition,
+            proposed=proposed,
+            rollback=rollback,
+        )
+        expected = cleanup.rollback_digests[task] if rollback else cleanup.candidate_digests[task]
+        if digest != expected:
+            raise RolloutGateError("cleanup_artifact_drift", scope=task)
+
+    def terraform_pre_register(
+        self,
+        *,
+        task: str,
+        definition: dict[str, Any],
+        mode: str = "candidate",
+    ) -> None:
         """Gate Terraform task registration and make broad/targeted apply stage-aware."""
 
         expected_stages = {
@@ -1229,14 +2044,25 @@ class LiveRolloutGate:
             "mcp": frozenset({"worker_verified", "complete"}),
             "morning_digest": frozenset({"mcp_stable_and_old_drained", "complete"}),
         }
-        if task not in expected_stages:
+        if task not in expected_stages or mode not in {"candidate", "cleanup"}:
             raise RolloutGateError("unknown_task")
         ledger = self._ledger()
         if ledger.stage not in expected_stages[task]:
             raise RolloutGateError("stage_order_violation", scope=task)
-        self.validate_candidate(task=task, definition=definition)
-        self._validate_all_rollbacks()
-        self._assert_cutover_open(task)
+        if mode == "cleanup":
+            cleanup = self._active_cleanup()
+            if cleanup is None:
+                raise RolloutGateError("cleanup_state_missing", scope=task)
+            self._validate_prepared_cleanup_task(
+                cleanup=cleanup,
+                task=task,
+                definition=definition,
+                rollback=False,
+            )
+        else:
+            self.validate_candidate(task=task, definition=definition)
+            self._validate_all_rollbacks()
+            self._assert_cutover_open(task)
 
     def _validate_rollback_task(
         self,
@@ -1348,15 +2174,28 @@ class LiveRolloutGate:
             "mcp": frozenset({"worker_verified", "mcp_stable_and_old_drained", "complete"}),
             "morning_digest": frozenset({"mcp_stable_and_old_drained", "complete"}),
         }
-        if task not in candidate_stages or mode not in {"candidate", "rollback"}:
+        if task not in candidate_stages or mode not in {"candidate", "rollback", "cleanup"}:
             raise RolloutGateError("unknown_task")
-        allowed_stages = candidate_stages if mode == "candidate" else rollback_stages
+        allowed_stages = candidate_stages if mode in {"candidate", "cleanup"} else rollback_stages
         ledger = self._ledger()
         if ledger.stage not in allowed_stages[task]:
             raise RolloutGateError("stage_order_violation", scope=task)
         if task_definition in self.control.forbidden_signing_task_definitions:
             raise RolloutGateError("forbidden_signing_revision", scope=task)
-        if mode == "rollback":
+        cleanup = self._active_cleanup()
+        if cleanup is not None and mode == "candidate":
+            raise RolloutGateError("cleanup_mode_required", scope=task)
+        if mode == "cleanup":
+            if cleanup is None:
+                raise RolloutGateError("cleanup_state_missing", scope=task)
+            definition = self._describe_task(task_definition)
+            self._validate_prepared_cleanup_task(
+                cleanup=cleanup,
+                task=task,
+                definition=definition,
+                rollback=False,
+            )
+        elif mode == "rollback":
             approved = {
                 "mcp": self.control.mcp.rollback_task_definition,
                 "connect_web": self.control.connect_web.rollback_task_definition,
@@ -1364,20 +2203,30 @@ class LiveRolloutGate:
             }[task]
             if task_definition != approved:
                 raise RolloutGateError("rollback_task_not_approved", scope=task)
-            image = {
-                "mcp": self.control.mcp.rollback_image,
-                "connect_web": self.control.connect_web.rollback_image,
-                "morning_digest": self.control.morning_digest.rollback_image,
-            }[task]
-            self._validate_rollback_task(
-                task=task,
-                task_definition=task_definition,
-                image=image,
-            )
+            if cleanup is not None:
+                definition = self._describe_task(task_definition)
+                self._validate_prepared_cleanup_task(
+                    cleanup=cleanup,
+                    task=task,
+                    definition=definition,
+                    rollback=True,
+                )
+            else:
+                image = {
+                    "mcp": self.control.mcp.rollback_image,
+                    "connect_web": self.control.connect_web.rollback_image,
+                    "morning_digest": self.control.morning_digest.rollback_image,
+                }[task]
+                self._validate_rollback_task(
+                    task=task,
+                    task_definition=task_definition,
+                    image=image,
+                )
         else:
             definition = self._describe_task(task_definition)
             self.validate_candidate(task=task, definition=definition)
-        self._validate_all_rollbacks()
+        if cleanup is None:
+            self._validate_all_rollbacks()
         if mode == "candidate":
             self._assert_cutover_open(task)
         if ledger.stage in {"mcp_stable_and_old_drained", "complete"} and task_definition.endswith(
@@ -1423,12 +2272,18 @@ class LiveRolloutGate:
         *,
         after: int | None = None,
         mode: str = "candidate",
-    ) -> None:
+    ) -> int:
         worker = self.control.worker
         if mode not in {"candidate", "rollback"}:
             raise RolloutGateError("worker_mode_invalid", scope="worker")
         expected_provenance = (
             worker.provenance if mode == "candidate" else worker.rollback_provenance
+        )
+        cleanup = self._active_cleanup()
+        configs = (
+            self._cleanup_proposed_from_live(cleanup)
+            if cleanup is not None and cleanup.stage == "authorized"
+            else None
         )
         item = self._read_item(f"WORKER#{expected_provenance}")
         try:
@@ -1445,7 +2300,17 @@ class LiveRolloutGate:
             provenance != expected_provenance
             or worker_id != worker.instance_id
             or epoch != self.control.rotation_epoch
-            or config_digest != self._worker_config_digest(provenance=expected_provenance)
+            or config_digest
+            != self._worker_config_digest(
+                provenance=expected_provenance,
+                configs=configs,
+                legacy_worker_generation=(
+                    self.manifest.get("legacy_worker_generation")
+                    if configs is not None
+                    and type(self.manifest.get("legacy_worker_generation")) is str
+                    else None
+                ),
+            )
             or loaded != frozenset(_DOMAIN_MAX_TTL)
             or (after is not None and checked_at <= after)
             or self._now() - checked_at > 120
@@ -1453,11 +2318,22 @@ class LiveRolloutGate:
             or expires_at <= self._now()
         ):
             raise RolloutGateError("worker_attestation_invalid", scope="worker")
+        return checked_at
 
-    def _worker_config_digest(self, *, provenance: str | None = None) -> str:
-        durable = self._durable_proposed()
+    def _worker_config_digest(
+        self,
+        *,
+        provenance: str | None = None,
+        configs: dict[str, dict[str, object]] | None = None,
+        legacy_worker_generation: str | None = None,
+    ) -> str:
+        durable = configs if configs is not None else self._durable_proposed()
         expected_provenance = provenance or self.control.worker.provenance
-        legacy_worker = self._durable_legacy_worker_generation()
+        legacy_worker = (
+            legacy_worker_generation
+            if configs is not None
+            else self._durable_legacy_worker_generation()
+        )
         expectations: list[HmacRuntimeExpectation] = []
         for domain, maximum_ttl in _DOMAIN_MAX_TTL.items():
             config = durable[domain]
@@ -1517,6 +2393,34 @@ class LiveRolloutGate:
         ):
             raise RolloutGateError("worker_provenance_binding_drift", scope="worker")
 
+    def _verify_prepared_worker_artifact(
+        self,
+        *,
+        cleanup: CleanupLedger,
+        path: Path,
+        rollback: bool,
+    ) -> None:
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise RolloutGateError("worker_artifact_unreadable", scope="worker") from exc
+        expected = (
+            cleanup.rollback_digests["worker"] if rollback else cleanup.candidate_digests["worker"]
+        )
+        if digest != expected:
+            raise RolloutGateError(
+                "worker_rollback_artifact_drift" if rollback else "worker_artifact_drift",
+                scope="worker",
+            )
+
+    def _restart_record_name(self, mode: str) -> str:
+        provenance = (
+            self.control.worker.provenance
+            if mode in {"candidate", "cleanup"}
+            else self.control.worker.rollback_provenance
+        )
+        return f"RESTART#{self.control.rotation_epoch}#{provenance}"
+
     def pre_restart(
         self,
         *,
@@ -1525,17 +2429,186 @@ class LiveRolloutGate:
     ) -> None:
         """Revalidate worker attestation and immutable metadata immediately before restart."""
 
+        if mode not in {"candidate", "rollback", "cleanup"}:
+            raise RolloutGateError("worker_mode_invalid", scope="worker")
         if self._ledger().stage not in {
             "worker_verified",
             "mcp_stable_and_old_drained",
             "complete",
         }:
             raise RolloutGateError("stage_order_violation", scope="worker")
-        self._worker_attested(mode=mode)
-        self.verify_worker_rollback_artifact(rollback_artifact)
-        self._validate_all_rollbacks()
+        attestation_mode = "candidate" if mode == "cleanup" else mode
+        checked_at = self._worker_attested(mode=attestation_mode)
+        cleanup = self._active_cleanup()
+        if mode == "cleanup" and cleanup is None:
+            raise RolloutGateError("cleanup_state_missing", scope="worker")
+        if mode == "candidate" and cleanup is not None:
+            raise RolloutGateError("cleanup_mode_required", scope="worker")
+        if cleanup is not None:
+            self._verify_prepared_worker_artifact(
+                cleanup=cleanup,
+                path=rollback_artifact,
+                rollback=True,
+            )
+        else:
+            self.verify_worker_rollback_artifact(rollback_artifact)
+            self._validate_all_rollbacks()
         if mode == "candidate":
             self._assert_cutover_open("worker")
+        now = self._now()
+        record = self._restart_record_name(mode)
+        existing = self._read_item_optional(record)
+        revision = self._ddb_number(existing, "revision") if existing is not None else None
+        next_revision = 1 if revision is None else revision + 1
+        item = {
+            "scope": {"S": self.control.scope},
+            "record": {"S": record},
+            "rotation_epoch": {"S": self.control.rotation_epoch},
+            "provenance": {
+                "S": (
+                    self.control.worker.provenance
+                    if attestation_mode == "candidate"
+                    else self.control.worker.rollback_provenance
+                )
+            },
+            "stage": {"S": "requested"},
+            "mode": {"S": mode},
+            "revision": {"N": str(next_revision)},
+            "after_checked_at": {"N": str(checked_at)},
+            "requested_at": {"N": str(now)},
+        }
+        put: dict[str, Any] = {
+            "TableName": self.control.state_table,
+            "Item": item,
+        }
+        if revision is None:
+            put.update(
+                {
+                    "ConditionExpression": "attribute_not_exists(#record)",
+                    "ExpressionAttributeNames": {"#record": "record"},
+                }
+            )
+        else:
+            put.update(
+                {
+                    "ConditionExpression": "revision = :revision",
+                    "ExpressionAttributeValues": {":revision": {"N": str(revision)}},
+                }
+            )
+        try:
+            response = self.ddb.transact_write_items(TransactItems=[{"Put": put}])
+            self._observe(response)
+        except Exception as exc:
+            raise RolloutGateError("worker_restart_cas_failed", scope="worker") from exc
+
+    def post_restart(self, *, mode: str = "candidate") -> None:
+        """Require service-startup readiness to be newer than the durable restart request."""
+
+        if mode not in {"candidate", "rollback", "cleanup"}:
+            raise RolloutGateError("worker_mode_invalid", scope="worker")
+        record = self._restart_record_name(mode)
+        item = self._read_item(record)
+        revision = self._ddb_number(item, "revision")
+        after_checked_at = self._ddb_number(item, "after_checked_at")
+        requested_at = self._ddb_number(item, "requested_at")
+        expected_provenance = (
+            self.control.worker.provenance
+            if mode in {"candidate", "cleanup"}
+            else self.control.worker.rollback_provenance
+        )
+        if (
+            revision is None
+            or after_checked_at is None
+            or requested_at is None
+            or self._ddb_string(item, "stage") != "requested"
+            or self._ddb_string(item, "mode") != mode
+            or self._ddb_string(item, "rotation_epoch") != self.control.rotation_epoch
+            or self._ddb_string(item, "provenance") != expected_provenance
+        ):
+            raise RolloutGateError("worker_restart_state_invalid", scope="worker")
+        attestation_mode = "candidate" if mode == "cleanup" else mode
+        checked_at = self._worker_attested(
+            after=max(after_checked_at, requested_at),
+            mode=attestation_mode,
+        )
+        try:
+            response = self.ddb.transact_write_items(
+                TransactItems=[
+                    {
+                        "Update": {
+                            "TableName": self.control.state_table,
+                            "Key": {
+                                "scope": {"S": self.control.scope},
+                                "record": {"S": record},
+                            },
+                            "UpdateExpression": (
+                                "SET #stage = :complete, completed_at = :checked,"
+                                " revision = revision + :one"
+                            ),
+                            "ConditionExpression": ("#stage = :requested AND revision = :revision"),
+                            "ExpressionAttributeNames": {"#stage": "stage"},
+                            "ExpressionAttributeValues": {
+                                ":complete": {"S": "complete"},
+                                ":requested": {"S": "requested"},
+                                ":revision": {"N": str(revision)},
+                                ":checked": {"N": str(checked_at)},
+                                ":one": {"N": "1"},
+                            },
+                        }
+                    }
+                ]
+            )
+            self._observe(response)
+        except Exception as exc:
+            raise RolloutGateError("worker_restart_cas_failed", scope="worker") from exc
+
+    def _completed_restart_mode(self, *, after: int) -> str:
+        completed: list[tuple[int, str, int]] = []
+        for record_mode, attestation_mode in (
+            ("cleanup", "candidate"),
+            ("rollback", "rollback"),
+        ):
+            item = self._read_item_optional(self._restart_record_name(record_mode))
+            if item is None:
+                continue
+            stage = self._ddb_string(item, "stage")
+            completed_at = self._ddb_number(item, "completed_at", optional=True)
+            requested_at = self._ddb_number(item, "requested_at", optional=True)
+            after_checked_at = self._ddb_number(
+                item,
+                "after_checked_at",
+                optional=True,
+            )
+            expected_provenance = (
+                self.control.worker.provenance
+                if attestation_mode == "candidate"
+                else self.control.worker.rollback_provenance
+            )
+            if (
+                stage == "complete"
+                and self._ddb_string(item, "mode") == record_mode
+                and self._ddb_string(item, "rotation_epoch") == self.control.rotation_epoch
+                and self._ddb_string(item, "provenance") == expected_provenance
+                and completed_at is not None
+                and requested_at is not None
+                and after_checked_at is not None
+                and completed_at > max(after, requested_at, after_checked_at)
+            ):
+                completed.append(
+                    (
+                        completed_at,
+                        attestation_mode,
+                        max(after, requested_at, after_checked_at),
+                    )
+                )
+        if not completed:
+            raise RolloutGateError("worker_restart_state_invalid", scope="worker")
+        _completed_at, mode, attestation_after = max(
+            completed,
+            key=lambda value: value[0],
+        )
+        self._worker_attested(after=attestation_after, mode=mode)
+        return mode
 
     def pre_worker_upload(
         self,
@@ -1547,7 +2620,7 @@ class LiveRolloutGate:
         """Gate worker artifact upload before the remote readiness attestation exists."""
 
         ledger = self._ledger()
-        if mode not in {"candidate", "rollback"}:
+        if mode not in {"candidate", "rollback", "cleanup"}:
             raise RolloutGateError("worker_mode_invalid", scope="worker")
         if ledger.stage not in {
             "connect_web_preloaded",
@@ -1556,13 +2629,39 @@ class LiveRolloutGate:
             "complete",
         }:
             raise RolloutGateError("stage_order_violation", scope="worker")
-        self._assert_manifest_matches_durable()
-        if mode == "candidate":
+        cleanup = self._active_cleanup()
+        if mode == "cleanup":
+            if cleanup is None:
+                raise RolloutGateError("cleanup_state_missing", scope="worker")
+            self._verify_prepared_worker_artifact(
+                cleanup=cleanup,
+                path=artifact,
+                rollback=False,
+            )
+        elif mode == "candidate":
+            if cleanup is not None:
+                raise RolloutGateError("cleanup_mode_required", scope="worker")
+            self._assert_manifest_matches_durable()
             self.verify_worker_artifact(artifact)
         else:
-            self.verify_worker_rollback_artifact(artifact)
-        self.verify_worker_rollback_artifact(rollback_artifact)
-        self._validate_all_rollbacks()
+            if cleanup is not None:
+                self._verify_prepared_worker_artifact(
+                    cleanup=cleanup,
+                    path=artifact,
+                    rollback=True,
+                )
+            else:
+                self._assert_manifest_matches_durable()
+                self.verify_worker_rollback_artifact(artifact)
+        if cleanup is not None:
+            self._verify_prepared_worker_artifact(
+                cleanup=cleanup,
+                path=rollback_artifact,
+                rollback=True,
+            )
+        else:
+            self.verify_worker_rollback_artifact(rollback_artifact)
+            self._validate_all_rollbacks()
         if mode == "candidate":
             self._assert_cutover_open("worker")
 
@@ -1577,44 +2676,69 @@ class LiveRolloutGate:
         )
         self._observe(response)
         services = response.get("services") if type(response) is dict else None
-        if type(services) is not list or len(services) != 1:
+        failures = response.get("failures") if type(response) is dict else None
+        if (
+            type(services) is not list
+            or len(services) != 1
+            or type(failures) is not list
+            or failures
+        ):
             raise RolloutGateError("service_not_stable")
         service = _mapping(services[0])
         deployments = service.get("deployments")
+        desired_count = service.get("desiredCount")
+        running_count = service.get("runningCount")
+        pending_count = service.get("pendingCount")
+        deployment = (
+            deployments[0]
+            if type(deployments) is list and len(deployments) == 1 and type(deployments[0]) is dict
+            else {}
+        )
         stable = (
-            service.get("taskDefinition") == expected_task_definition
-            and service.get("desiredCount") == service.get("runningCount")
-            and service.get("pendingCount") == 0
-            and type(deployments) is list
-            and len(deployments) == 1
-            and _mapping(deployments[0]).get("rolloutState") == "COMPLETED"
+            service.get("status") == "ACTIVE"
+            and service.get("taskDefinition") == expected_task_definition
+            and type(desired_count) is int
+            and type(running_count) is int
+            and type(pending_count) is int
+            and desired_count >= 1
+            and running_count >= 0
+            and pending_count >= 0
+            and desired_count == running_count
+            and pending_count == 0
+            and deployment.get("rolloutState") == "COMPLETED"
+            and deployment.get("taskDefinition") == expected_task_definition
+            and type(deployment.get("desiredCount")) is int
+            and type(deployment.get("runningCount")) is int
+            and type(deployment.get("pendingCount")) is int
+            and deployment.get("desiredCount") == desired_count
+            and deployment.get("runningCount") == running_count
+            and deployment.get("pendingCount") == pending_count
         )
         if not stable:
             raise RolloutGateError("service_not_stable")
-        listed = self.ecs.list_tasks(
-            cluster=workload.cluster,
-            serviceName=workload.service,
-            desiredStatus="RUNNING",
-        )
-        self._observe(listed)
-        task_arns = listed.get("taskArns") if type(listed) is dict else None
         if (
-            type(task_arns) is not list
-            or not task_arns
-            or (type(listed) is dict and listed.get("nextToken") is not None)
+            type(desired_count) is not int
+            or type(running_count) is not int
+            or type(pending_count) is not int
         ):
-            raise RolloutGateError("old_tasks_not_drained")
-        described = self.ecs.describe_tasks(cluster=workload.cluster, tasks=task_arns)
-        self._observe(described)
-        tasks = described.get("tasks") if type(described) is dict else None
+            raise RolloutGateError("service_not_stable")
+        running, _stopped = self._task_inventory(
+            cluster=workload.cluster,
+            service_name=workload.service,
+        )
+        observed_running = sum(task.get("lastStatus") == "RUNNING" for task in running.values())
+        observed_pending = len(running) - observed_running
         if (
-            type(tasks) is not list
-            or len(tasks) != len(task_arns)
-            or any(
-                _mapping(task).get("taskDefinitionArn") != expected_task_definition
-                or _mapping(task).get("lastStatus") != "RUNNING"
-                for task in tasks
-            )
+            len(running) != running_count + pending_count
+            or observed_running != running_count
+            or observed_pending != pending_count
+            or len(running) != desired_count
+        ):
+            raise RolloutGateError("task_inventory_count_drift")
+        if any(
+            task.get("taskDefinitionArn") != expected_task_definition
+            or task.get("lastStatus") != "RUNNING"
+            for task in running.values()
         ):
             raise RolloutGateError("old_tasks_not_drained")
 
@@ -1690,14 +2814,13 @@ class LiveRolloutGate:
             raise RolloutGateError("stage_cas_failed") from exc
 
     def connect_web_preloaded(self) -> None:
-        task_definition, definition = self._service_task(self.control.connect_web)
+        arns, definitions = self._live_tasks()
+        task_definition = arns["connect_web"]
+        definition = definitions["connect_web"]
         if task_definition in self.control.forbidden_signing_task_definitions:
             raise RolloutGateError("connect_verifier_not_preloaded")
         self.validate_candidate(task="connect_web", definition=definition)
-        self._service_stable_and_drained(
-            self.control.connect_web,
-            task_definition,
-        )
+        self._full_task_inventory(arns)
         self._assert_cutover_open("connect_web")
         self._transition_ledger(
             expected_stage="initialized",
@@ -1774,8 +2897,13 @@ class LiveRolloutGate:
             definition=morning,
         )
         self._validate_all_rollbacks()
-        self._service_stable_and_drained(self.control.mcp, mcp_arn)
-        self._service_stable_and_drained(self.control.connect_web, connect_arn)
+        self._full_task_inventory(
+            {
+                "mcp": mcp_arn,
+                "connect_web": connect_arn,
+                "morning_digest": morning_arn,
+            }
+        )
         self._assert_cutover_open("mcp")
         shared = frozenset(
             {
@@ -1797,89 +2925,79 @@ class LiveRolloutGate:
             report_issuers=shared,
         )
 
-    def retire_previous(self, *, domain: str) -> None:
-        """CAS-remove one expired previous generation while preserving immutable history."""
+    def complete_cleanup(self, *, domain: str) -> None:
+        """Finalize a prepared cleanup after every replacement and restart is proven."""
 
         if domain not in _DOMAIN_MAX_TTL:
             raise RolloutGateError("unknown_domain")
         if self._ledger().stage != "complete":
             raise RolloutGateError("stage_order_violation", scope=domain)
+        cleanup = self._cleanup_ledger(domain)
+        if cleanup.stage != "authorized":
+            raise RolloutGateError("stage_order_violation", scope=domain)
+        proposed = self._cleanup_proposed_from_live(cleanup)
         arns, definitions = self._live_tasks()
-        self._service_stable_and_drained(self.control.mcp, arns["mcp"])
-        self._service_stable_and_drained(
-            self.control.connect_web,
-            arns["connect_web"],
-        )
-        deployed = self._observed_deployed(definitions)
-        proposed = self._assert_transition(deployed)
-        candidate = proposed[domain]
-        if (
-            candidate.get("primary_generation") != deployed[domain]["primary_generation"]
-            or candidate.get("previous_generation") is not None
-            or candidate.get("rotation_started_at") is not None
-        ):
-            raise RolloutGateError("retirement_manifest_invalid", scope=domain)
+        for task, definition in definitions.items():
+            task_control = _task_control(self.control, task)
+            task_definition = arns[task]
+            if (
+                task_definition in self.control.forbidden_signing_task_definitions
+                or task_definition == task_control.legacy_task_definition
+            ):
+                raise RolloutGateError("cleanup_replacement_not_complete", scope=task)
+            self._validate_prepared_cleanup_task(
+                cleanup=cleanup,
+                task=task,
+                definition=definition,
+                rollback=task_definition == task_control.rollback_task_definition,
+            )
+        self._full_task_inventory(arns)
+        self._completed_restart_mode(after=cleanup.authorized_at)
 
         domain_items = {
             item_domain: self._read_item(f"DOMAIN#{item_domain}") for item_domain in _DOMAIN_MAX_TTL
         }
-        for item_domain, domain_item in domain_items.items():
-            if self._domain_config_from_item(domain_item) != deployed[item_domain]:
-                raise RolloutGateError(
-                    "manifest_durable_drift",
-                    scope=item_domain,
-                )
-        item = domain_items[domain]
-        epoch = self._ddb_string(item, "rotation_epoch")
-        revision = self._ddb_number(item, "revision")
-        high_water = self._ddb_number(item, "high_water")
-        previous = self._ddb_string(item, "previous_generation", optional=True)
-        t0 = self._ddb_number(item, "rotation_started_at", optional=True)
-        deadline = self._ddb_number(item, "deadline", optional=True)
+        target = domain_items[domain]
+        previous = self._ddb_string(target, "previous_generation", optional=True)
+        t0 = self._ddb_number(target, "rotation_started_at", optional=True)
+        deadline = self._ddb_number(target, "deadline", optional=True)
         legacy_worker = self._ddb_string(
-            item,
+            target,
             "legacy_worker_generation",
             optional=True,
         )
-        legacy_worker_deadline = self._ddb_number(
-            item,
-            "legacy_worker_deadline",
-            optional=True,
-        )
         if (
-            epoch != self.control.rotation_epoch
-            or revision is None
-            or high_water is None
-            or previous is None
+            previous is None
             or t0 is None
             or deadline is None
-            or ((legacy_worker is None) != (legacy_worker_deadline is None))
-            or (legacy_worker_deadline is not None and legacy_worker_deadline != deadline)
+            or self._ddb_string(target, "cleanup_stage", optional=True) != "authorized"
+            or proposed[domain]
+            != {
+                "primary_generation": self._ddb_string(target, "primary_generation"),
+                "previous_generation": None,
+                "rotation_started_at": None,
+            }
         ):
-            raise RolloutGateError("retirement_state_invalid", scope=domain)
+            raise RolloutGateError("cleanup_state_invalid", scope=domain)
         now = self._now()
-        if now < deadline:
-            raise RolloutGateError("previous_window_active", scope=domain)
-        effective_now = max(now, high_water)
-
-        retired = [previous]
-        if legacy_worker is not None:
-            retired.append(legacy_worker)
+        source_revision = self._ddb_number(target, "revision")
+        if source_revision is None:
+            raise RolloutGateError("cleanup_state_invalid", scope=domain)
         history_item: dict[str, Any] = {
             "scope": {"S": self.control.scope},
-            "record": {"S": f"RETIREMENT#{domain}#{epoch}"},
+            "record": {"S": f"RETIREMENT#{domain}#{self.control.rotation_epoch}"},
             "domain": {"S": domain},
-            "rotation_epoch": {"S": epoch},
-            "primary_generation": {"S": str(deployed[domain]["primary_generation"])},
+            "rotation_epoch": {"S": self.control.rotation_epoch},
+            "primary_generation": {"S": str(proposed[domain]["primary_generation"])},
             "previous_generation": {"S": previous},
             "rotation_started_at": {"N": str(t0)},
             "deadline": {"N": str(deadline)},
-            "retired_at": {"N": str(effective_now)},
-            "source_revision": {"N": str(revision)},
+            "retired_at": {"N": str(now)},
+            "source_revision": {"N": str(source_revision)},
         }
         if legacy_worker is not None:
             history_item["legacy_worker_generation"] = {"S": legacy_worker}
-        transaction = [
+        transaction: list[dict[str, Any]] = [
             {
                 "Put": {
                     "TableName": self.control.state_table,
@@ -1887,47 +3005,117 @@ class LiveRolloutGate:
                     "ConditionExpression": "attribute_not_exists(#record)",
                     "ExpressionAttributeNames": {"#record": "record"},
                 }
-            },
+            }
+        ]
+        for item_domain, item in domain_items.items():
+            revision = self._ddb_number(item, "revision")
+            current_issuers = self._ddb_string_set(item, "issuer_provenances")
+            expected_temporary = (
+                cleanup.old_provenances[item_domain] | cleanup.new_provenances[item_domain]
+            )
+            if (
+                revision is None
+                or current_issuers != expected_temporary
+                or self._ddb_string(item, "rotation_epoch") != self.control.rotation_epoch
+            ):
+                raise RolloutGateError("cleanup_state_invalid", scope=item_domain)
+            values: dict[str, Any] = {
+                ":revision": {"N": str(revision)},
+                ":epoch": {"S": self.control.rotation_epoch},
+                ":temporary": {"SS": sorted(expected_temporary)},
+                ":new": {"SS": sorted(cleanup.new_provenances[item_domain])},
+                ":one": {"N": "1"},
+            }
+            expression = "SET issuer_provenances = :new, revision = revision + :one"
+            condition = (
+                "revision = :revision AND rotation_epoch = :epoch"
+                " AND issuer_provenances = :temporary"
+            )
+            names: dict[str, str] = {}
+            if cleanup.old_provenances[item_domain]:
+                expression += " ADD retired_provenances :retired_provenances"
+                values[":retired_provenances"] = {
+                    "SS": sorted(cleanup.old_provenances[item_domain])
+                }
+            if item_domain == domain:
+                expression = (
+                    "SET issuer_provenances = :new, previous_retired = :true,"
+                    " high_water = :now, revision = revision + :one"
+                    " REMOVE previous_generation, rotation_started_at, deadline,"
+                    " legacy_worker_generation, legacy_worker_deadline, cleanup_stage"
+                    + (
+                        " ADD retired_provenances :retired_provenances"
+                        if cleanup.old_provenances[item_domain]
+                        else ""
+                    )
+                )
+                condition += (
+                    " AND previous_generation = :previous"
+                    " AND deadline = :deadline AND cleanup_stage = :authorized"
+                    " AND #stage = :complete"
+                )
+                names["#stage"] = "stage"
+                high_water = self._ddb_number(item, "high_water")
+                if high_water is None:
+                    raise RolloutGateError("cleanup_state_invalid", scope=item_domain)
+                values.update(
+                    {
+                        ":true": {"BOOL": True},
+                        ":now": {"N": str(max(now, high_water))},
+                        ":previous": {"S": previous},
+                        ":deadline": {"N": str(deadline)},
+                        ":authorized": {"S": "authorized"},
+                        ":complete": {"S": "complete"},
+                    }
+                )
+            update: dict[str, Any] = {
+                "TableName": self.control.state_table,
+                "Key": {
+                    "scope": {"S": self.control.scope},
+                    "record": {"S": f"DOMAIN#{item_domain}"},
+                },
+                "UpdateExpression": expression,
+                "ConditionExpression": condition,
+                "ExpressionAttributeValues": values,
+            }
+            if names:
+                update["ExpressionAttributeNames"] = names
+            transaction.append({"Update": update})
+        transaction.append(
             {
                 "Update": {
                     "TableName": self.control.state_table,
                     "Key": {
                         "scope": {"S": self.control.scope},
-                        "record": {"S": f"DOMAIN#{domain}"},
+                        "record": {"S": self._cleanup_record_name(domain)},
                     },
                     "UpdateExpression": (
-                        "SET previous_retired = :true, high_water = :now,"
-                        " revision = revision + :one"
-                        " REMOVE previous_generation, rotation_started_at, deadline,"
-                        " legacy_worker_generation, legacy_worker_deadline"
-                        " ADD retired_generations :retired"
+                        "SET #stage = :complete, completed_at = :now, revision = revision + :one"
                     ),
-                    "ConditionExpression": (
-                        "revision = :revision AND rotation_epoch = :epoch"
-                        " AND high_water = :high_water AND previous_generation = :previous"
-                        " AND deadline = :deadline AND #stage = :complete"
-                    ),
+                    "ConditionExpression": ("#stage = :authorized AND revision = :revision"),
                     "ExpressionAttributeNames": {"#stage": "stage"},
                     "ExpressionAttributeValues": {
-                        ":true": {"BOOL": True},
-                        ":now": {"N": str(effective_now)},
-                        ":one": {"N": "1"},
-                        ":revision": {"N": str(revision)},
-                        ":epoch": {"S": epoch},
-                        ":high_water": {"N": str(high_water)},
-                        ":previous": {"S": previous},
-                        ":deadline": {"N": str(deadline)},
                         ":complete": {"S": "complete"},
-                        ":retired": {"SS": retired},
+                        ":authorized": {"S": "authorized"},
+                        ":revision": {"N": str(cleanup.revision)},
+                        ":now": {"N": str(now)},
+                        ":one": {"N": "1"},
                     },
                 }
-            },
-        ]
+            }
+        )
         try:
             response = self.ddb.transact_write_items(TransactItems=transaction)
             self._observe(response)
         except Exception as exc:
-            raise RolloutGateError("retirement_cas_failed", scope=domain) from exc
+            raise RolloutGateError("cleanup_complete_cas_failed", scope=domain) from exc
+
+    def retire_previous(self, *, domain: str) -> None:
+        """Reject the former one-shot cleanup path; cleanup is now an explicit staged CAS."""
+
+        if domain not in _DOMAIN_MAX_TTL:
+            raise RolloutGateError("unknown_domain")
+        raise RolloutGateError("cleanup_staging_required", scope=domain)
 
     def inspect(self) -> None:
         """Read-only parity check for current task metadata, worker attestation, and anchors."""
@@ -1992,20 +3180,35 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
             "pre-connect-final",
             "pre-worker-upload",
             "pre-restart",
+            "post-restart",
             "connect-web-preloaded",
             "worker-verified",
             "mcp-stable-and-old-drained",
             "complete",
+            "prepare-cleanup",
+            "complete-cleanup",
             "retire-previous",
         ),
     )
     parser.add_argument("--task", choices=tuple(_TASK_DOMAINS))
     parser.add_argument("--domain", choices=tuple(_DOMAIN_MAX_TTL))
-    parser.add_argument("--mode", choices=("candidate", "rollback"), default="candidate")
+    parser.add_argument(
+        "--mode",
+        choices=("candidate", "rollback", "cleanup"),
+        default="candidate",
+    )
     parser.add_argument("--task-definition-json")
+    parser.add_argument(
+        "--cleanup-task-definition-json",
+        action="append",
+        default=[],
+        metavar="TASK=PATH",
+    )
     parser.add_argument("--task-definition-arn")
     parser.add_argument("--worker-rollback-artifact")
     parser.add_argument("--worker-artifact")
+    parser.add_argument("--worker-env")
+    parser.add_argument("--worker-rollback-env")
     parser.add_argument(
         "--refresh-manifest-now",
         action="store_true",
@@ -2035,6 +3238,7 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
             gate.terraform_pre_register(
                 task=args.task,
                 definition=_load_json(args.task_definition_json),
+                mode=args.mode,
             )
         elif args.action == "pre-update":
             if args.task is None or args.task_definition_arn is None:
@@ -2071,6 +3275,8 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
                 rollback_artifact=Path(args.worker_rollback_artifact),
                 mode=args.mode,
             )
+        elif args.action == "post-restart":
+            gate.post_restart(mode=args.mode)
         elif args.action == "connect-web-preloaded":
             gate.connect_web_preloaded()
         elif args.action == "worker-verified":
@@ -2081,6 +3287,38 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
             gate.mcp_stable_and_old_drained()
         elif args.action == "complete":
             gate.complete()
+        elif args.action == "prepare-cleanup":
+            if (
+                args.domain is None
+                or args.worker_env is None
+                or args.worker_rollback_env is None
+                or args.worker_artifact is None
+                or args.worker_rollback_artifact is None
+            ):
+                raise RolloutGateError("missing_action_argument")
+            candidate_definitions: dict[str, dict[str, Any]] = {}
+            for value in args.cleanup_task_definition_json:
+                task, separator, path = value.partition("=")
+                if (
+                    not separator
+                    or task not in _TASK_DOMAINS
+                    or not path
+                    or task in candidate_definitions
+                ):
+                    raise RolloutGateError("missing_action_argument")
+                candidate_definitions[task] = _load_json(path)
+            gate.prepare_cleanup(
+                domain=args.domain,
+                candidate_definitions=candidate_definitions,
+                worker_env=Path(args.worker_env),
+                worker_rollback_env=Path(args.worker_rollback_env),
+                worker_artifact=Path(args.worker_artifact),
+                worker_rollback_artifact=Path(args.worker_rollback_artifact),
+            )
+        elif args.action == "complete-cleanup":
+            if args.domain is None:
+                raise RolloutGateError("missing_action_argument")
+            gate.complete_cleanup(domain=args.domain)
         elif args.action == "retire-previous":
             if args.domain is None:
                 raise RolloutGateError("missing_action_argument")
@@ -2099,6 +3337,8 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
     ) as exc:
         error = exc if isinstance(exc, RolloutGateError) else RolloutGateError("gate_unreadable")
         result = _result(error)
+    except Exception:
+        result = _result(RolloutGateError("gate_client_error"))
     print(json.dumps(result, separators=(",", ":"), sort_keys=True))
     return 0 if result["ok"] else 2
 
