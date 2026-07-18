@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import importlib.util
 import sys
 from pathlib import Path
@@ -247,6 +246,12 @@ def test_launchers_reject_injected_terraform_environment_and_unsafe_plan_modes()
     assert "image_release_context.py" in apply_body
     assert "acquire-deployment-lock" in apply_body
     assert "validate-deployment-preflight" in apply_body
-    assert "heartbeat-deployment-lock" in apply_body
+    assert "terraform_apply_supervisor.py" in apply_body
+    supervisor = (ROOT / "infra" / "terraform" / "terraform_apply_supervisor.py").read_text(
+        encoding="utf-8"
+    )
+    assert "heartbeat-deployment-lock" in supervisor
+    assert "start_new_session=True" in supervisor
+    assert "os.killpg" in supervisor
     assert "release-deployment-lock" in apply_body
-    assert "-lock-timeout=5m" in apply_body
+    assert '"-lock-timeout=5m",' in supervisor

@@ -32,11 +32,6 @@ EVIDENCE_BUCKET = "teamagent-dev-image-release-evidence"
 SOURCE_BUCKET = "teamagent-dev-raw-files"
 SOURCE_KEY = "codebuild/source.zip"
 APP_HTML_KEY = "codebuild/connect-web-app.html"
-APP_HTML_VERSION_ID = "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
-APP_HTML_SHA256 = "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
-VAULT_MANIFEST_SHA256 = "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
-BUILD_INPUTS_SHA256 = "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
-BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
 SOURCE_REPOSITORY = "https://github.com/noirelumiere00/TeamAgent.git"
 SOURCE_BRANCH = "dev"
 SOURCE_DECLARATION_KIND = "teamagent.source-declaration"
@@ -46,7 +41,9 @@ SOURCE_DECLARATION_SCHEMA = 2
 RELEASE_RECEIPT_SCHEMA = 2
 DEPLOYMENT_INTENT_SCHEMA = 1
 MAX_RELEASE_RECEIPT_LIFETIME_SECONDS = 3600
-MAX_CANDIDATE_RECEIPT_LIFETIME_SECONDS = 30 * 24 * 60 * 60
+# Verified candidates are durable rollback inputs, not short-lived deployment
+# authorizations. Active/rollback receipts remain limited to one hour.
+MAX_CANDIDATE_RECEIPT_LIFETIME_SECONDS = 3650 * 24 * 60 * 60
 MAX_DEPLOYMENT_INTENT_LIFETIME_SECONDS = 3600
 DEPLOYMENT_INTENT_AUDIT_TTL_SECONDS = 90 * 24 * 60 * 60
 MAX_RELEASE_GRAPH_DIGESTS = 256
@@ -396,8 +393,6 @@ def validate_source_declaration(
         raise EvidenceError("app HTML location is not allowlisted")
     app_version = _version_id(app_html["version_id"], label="app HTML VersionId")
     app_sha256 = _sha256(app_html["sha256"], label="app HTML SHA-256")
-    if app_version != APP_HTML_VERSION_ID or app_sha256 != APP_HTML_SHA256:
-        raise EvidenceError("app HTML is not the production canonical object")
 
     application_provenance = _mapping(
         declaration["application_provenance"],
@@ -416,10 +411,6 @@ def validate_source_declaration(
         application_provenance["build_inputs_sha256"],
         label="build_inputs SHA-256",
     )
-    if vault_manifest_sha256 != VAULT_MANIFEST_SHA256:
-        raise EvidenceError("Vault manifest SHA-256 is not production canonical")
-    if build_inputs_sha256 != BUILD_INPUTS_SHA256:
-        raise EvidenceError("build_inputs SHA-256 is not production canonical")
 
     contract = _mapping(declaration["contract"], label="source contract")
     _exact_keys(contract, {"path", "sha256"}, label="source contract")
@@ -798,21 +789,21 @@ def validate_release_receipt(
                     labels.get("io.teamagent.contract.baked-app-html-version-id"),
                     label=f"{label} baked app HTML VersionId",
                 )
-                expected_app_labels = {
-                    "io.teamagent.contract.app-html-source": "s3",
-                    "io.teamagent.contract.app-html-version-id": APP_HTML_VERSION_ID,
-                    "io.teamagent.contract.app-html-sha256": APP_HTML_SHA256,
-                    "io.teamagent.contract.app-html-manifest-sha256": (VAULT_MANIFEST_SHA256),
-                    "io.teamagent.contract.app-html-build-inputs-sha256": (BUILD_INPUTS_SHA256),
-                    "io.teamagent.contract.baked-app-html-sha256": (BAKED_APP_HTML_SHA256),
-                }
-                if any(
-                    labels.get(label_name) != expected_value
-                    for label_name, expected_value in expected_app_labels.items()
+                if labels.get("io.teamagent.contract.app-html-source") != "s3":
+                    raise EvidenceError(f"{label} app HTML source must be s3")
+                _version_id(
+                    labels.get("io.teamagent.contract.app-html-version-id"),
+                    label=f"{label} app HTML VersionId",
+                )
+                for label_name in (
+                    "io.teamagent.contract.app-html-sha256",
+                    "io.teamagent.contract.app-html-manifest-sha256",
+                    "io.teamagent.contract.app-html-build-inputs-sha256",
+                    "io.teamagent.contract.baked-app-html-sha256",
                 ):
-                    raise EvidenceError(
-                        f"{label} core image does not bind the production app "
-                        "and approved baked fallback"
+                    _sha256(
+                        labels.get(label_name),
+                        label=f"{label} {label_name}",
                     )
 
         binaries = subject["binaries"]
@@ -1054,14 +1045,6 @@ def _validate_mcp_deployment_application(
         application["baked_fallback_sha256"],
         label="MCP baked fallback SHA-256",
     )
-    if (
-        version_id != APP_HTML_VERSION_ID
-        or sha256 != APP_HTML_SHA256
-        or vault_manifest_sha256 != VAULT_MANIFEST_SHA256
-        or build_inputs_sha256 != BUILD_INPUTS_SHA256
-        or fallback_sha256 != BAKED_APP_HTML_SHA256
-    ):
-        raise EvidenceError("MCP deployment application differs from the production allowlist")
     payload = {
         "schema_version": 1,
         "app_html": {
@@ -1087,12 +1070,20 @@ def _validate_mcp_deployment_application(
     if subject_bindings != {binding}:
         raise EvidenceError("MCP release subjects do not bind the requested application provenance")
     core_subjects = [subject for subject in receipt["subjects"] if subject.get("name") == "core"]
-    if (
-        len(core_subjects) != 1
-        or core_subjects[0]["labels"].get("io.teamagent.contract.baked-app-html-version-id")
-        != fallback_version_id
+    expected_core_labels = {
+        "io.teamagent.contract.app-html-source": "s3",
+        "io.teamagent.contract.app-html-version-id": version_id,
+        "io.teamagent.contract.app-html-sha256": sha256,
+        "io.teamagent.contract.app-html-manifest-sha256": vault_manifest_sha256,
+        "io.teamagent.contract.app-html-build-inputs-sha256": build_inputs_sha256,
+        "io.teamagent.contract.baked-app-html-version-id": fallback_version_id,
+        "io.teamagent.contract.baked-app-html-sha256": fallback_sha256,
+    }
+    if len(core_subjects) != 1 or any(
+        core_subjects[0]["labels"].get(label_name) != expected_value
+        for label_name, expected_value in expected_core_labels.items()
     ):
-        raise EvidenceError("MCP core image does not bind the requested baked fallback VersionId")
+        raise EvidenceError("MCP core image does not bind the requested application contract")
     return binding
 
 
@@ -2132,10 +2123,15 @@ def _dynamodb_transact_begin_apply(
     metadata: Mapping[str, str],
     lock_item: Mapping[str, str | int],
     apply_attempt_id: str,
+    control_commit: str,
     now: dt.datetime,
 ) -> None:
     now_text = now.isoformat().replace("+00:00", "Z")
     now_epoch = int(now.timestamp())
+    expected_control_commit = _sha1(
+        control_commit,
+        label="apply control commit",
+    )
     transaction = [
         {
             "Put": {
@@ -2162,6 +2158,7 @@ def _dynamodb_transact_begin_apply(
                     "AND receipt_claims_sha256 = :claims "
                     "AND shared_ledger_sha256 = :shared_ledger "
                     "AND terraform_context_sha256 = :terraform_context "
+                    "AND control_commit = :control_commit "
                     "AND authorization_expires_at > :now"
                 ),
                 "ExpressionAttributeNames": {"#state": "state"},
@@ -2176,6 +2173,7 @@ def _dynamodb_transact_begin_apply(
                         ":claims": metadata["receipt_claims_sha256"],
                         ":shared_ledger": metadata["shared_ledger_sha256"],
                         ":terraform_context": prepared["terraform_context_sha256"],
+                        ":control_commit": expected_control_commit,
                         ":now": now_epoch,
                     }
                 ),
@@ -2205,6 +2203,7 @@ def acquire_deployment_lock(
     plan_path: Path,
     *,
     apply_attempt_id: str,
+    control_commit: str,
     now: dt.datetime | None = None,
     plan_json: Mapping[str, Any] | None = None,
 ) -> dict[str, str | int]:
@@ -2221,6 +2220,7 @@ def acquire_deployment_lock(
         metadata=metadata,
         claims_sha256=metadata["receipt_claims_sha256"],
         now=current,
+        expected_control_commit=control_commit,
     )
     item = _deployment_lock_item(
         metadata=metadata,
@@ -2234,6 +2234,7 @@ def acquire_deployment_lock(
             metadata=metadata,
             lock_item=item,
             apply_attempt_id=attempt_id,
+            control_commit=control_commit,
             now=current,
         )
     except EvidenceError as exc:
@@ -2247,6 +2248,7 @@ def acquire_deployment_lock(
                     claims_sha256=metadata["receipt_claims_sha256"],
                     apply_attempt_id=attempt_id,
                     now=current,
+                    expected_control_commit=control_commit,
                 )
                 _validate_deployment_lock(
                     existing,
@@ -2282,6 +2284,7 @@ def acquire_deployment_lock(
         claims_sha256=metadata["receipt_claims_sha256"],
         apply_attempt_id=attempt_id,
         now=current,
+        expected_control_commit=control_commit,
     )
     _validate_deployment_lock(
         confirmed,
@@ -2297,6 +2300,7 @@ def validate_deployment_preflight(
     *,
     terraform_context_path: Path,
     apply_attempt_id: str,
+    control_commit: str,
     now: dt.datetime | None = None,
     plan_json: Mapping[str, Any] | None = None,
 ) -> dict[str, str | int]:
@@ -2313,6 +2317,7 @@ def validate_deployment_preflight(
         claims_sha256=metadata["receipt_claims_sha256"],
         apply_attempt_id=attempt_id,
         now=current,
+        expected_control_commit=control_commit,
     )
     for key, value in context.items():
         if applying.get(key) != value:
@@ -2506,6 +2511,7 @@ def _validate_deployment_intent_binding(
     claims_sha256: str,
     now: dt.datetime,
     expected_state: str,
+    expected_control_commit: str | None = None,
 ) -> None:
     if (
         item["record_id"] != f"intent#{metadata['intent_id']}"
@@ -2538,7 +2544,15 @@ def _validate_deployment_intent_binding(
         or item["state_serial"] < 0
     ):
         raise EvidenceError("deployment Terraform state serial is invalid")
-    _sha1(item["control_commit"], label="deployment control commit")
+    control_commit = _sha1(
+        item["control_commit"],
+        label="deployment control commit",
+    )
+    if expected_control_commit is not None and control_commit != _sha1(
+        expected_control_commit,
+        label="apply control commit",
+    ):
+        raise EvidenceError("deployment intent control commit differs from the apply checkout")
     _timestamp(item["prepared_at"], label="prepared_at")
     authorization_expires_at = item["authorization_expires_at"]
     audit_expires_at = item["audit_expires_at"]
@@ -2557,6 +2571,7 @@ def _validate_prepared_intent(
     metadata: Mapping[str, str],
     claims_sha256: str,
     now: dt.datetime,
+    expected_control_commit: str | None = None,
 ) -> None:
     _exact_keys(
         item,
@@ -2569,6 +2584,7 @@ def _validate_prepared_intent(
         claims_sha256=claims_sha256,
         now=now,
         expected_state="PREPARED",
+        expected_control_commit=expected_control_commit,
     )
 
 
@@ -2579,6 +2595,7 @@ def _validate_applying_intent(
     claims_sha256: str,
     apply_attempt_id: str,
     now: dt.datetime,
+    expected_control_commit: str | None = None,
 ) -> None:
     _exact_keys(
         item,
@@ -2599,6 +2616,7 @@ def _validate_applying_intent(
         claims_sha256=claims_sha256,
         now=now,
         expected_state="APPLYING",
+        expected_control_commit=expected_control_commit,
     )
 
 
@@ -3069,11 +3087,13 @@ def _parser() -> argparse.ArgumentParser:
     acquire_lock = commands.add_parser("acquire-deployment-lock")
     acquire_lock.add_argument("--plan", type=Path, required=True)
     acquire_lock.add_argument("--apply-attempt-id", required=True)
+    acquire_lock.add_argument("--control-commit", required=True)
 
     preflight = commands.add_parser("validate-deployment-preflight")
     preflight.add_argument("--plan", type=Path, required=True)
     preflight.add_argument("--terraform-context", type=Path, required=True)
     preflight.add_argument("--apply-attempt-id", required=True)
+    preflight.add_argument("--control-commit", required=True)
 
     heartbeat = commands.add_parser("heartbeat-deployment-lock")
     heartbeat.add_argument("--plan", type=Path, required=True)
@@ -3207,6 +3227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             lock = acquire_deployment_lock(
                 args.plan,
                 apply_attempt_id=args.apply_attempt_id,
+                control_commit=args.control_commit,
             )
             print(json.dumps(lock, sort_keys=True))
         elif args.command == "validate-deployment-preflight":
@@ -3214,6 +3235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.plan,
                 terraform_context_path=args.terraform_context,
                 apply_attempt_id=args.apply_attempt_id,
+                control_commit=args.control_commit,
             )
             print(json.dumps(lock, sort_keys=True))
         elif args.command == "heartbeat-deployment-lock":

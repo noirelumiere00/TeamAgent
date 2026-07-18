@@ -227,7 +227,7 @@ phases:
           --signing-algorithm RSASSA_PSS_SHA_256 \
           --query Signature \
           --output text | base64 --decode >"$TMP_DIR/source-declaration.sig"
-        RETAIN_UNTIL="$(date -u -d '+30 days' '+%Y-%m-%dT%H:%M:%SZ')"
+        RETAIN_UNTIL="$(date -u -d '+3650 days' '+%Y-%m-%dT%H:%M:%SZ')"
         SOURCE_DECLARATION_VERSION_ID="$(
           aws s3api put-object \
             --region ap-northeast-1 \

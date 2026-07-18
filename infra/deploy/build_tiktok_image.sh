@@ -196,8 +196,8 @@ IFS=$'\t' read -r LOCK_ENABLED LOCK_MODE LOCK_DAYS EXTRA <<<"$OBJECT_LOCK"
 [ -z "${EXTRA:-}" ] \
   && [ "$LOCK_ENABLED" = "Enabled" ] \
   && [ "$LOCK_MODE" = "COMPLIANCE" ] \
-  && [ "$LOCK_DAYS" = "30" ] \
-  || die "TikTok evidence bucket must use 30-day COMPLIANCE Object Lock"
+  && [ "$LOCK_DAYS" = "3650" ] \
+  || die "TikTok evidence bucket must use durable COMPLIANCE Object Lock"
 unset OBJECT_LOCK LOCK_ENABLED LOCK_MODE LOCK_DAYS EXTRA
 SOURCE_MANIFEST="$TMP_DIR/tiktok-source-manifest.json"
 SOURCE_SIGNATURE="$TMP_DIR/tiktok-source-manifest.sig"
@@ -253,7 +253,7 @@ publish_evidence() {
   retain_until="$(python3 - <<'PY'
 import datetime
 
-value = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=30)
+value = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=3650)
 print(value.isoformat(timespec="seconds").replace("+00:00", "Z"))
 PY
 )"

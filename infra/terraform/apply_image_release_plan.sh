@@ -83,12 +83,16 @@ esac
 git -C "$control_root" fetch --quiet --no-tags origin \
   "refs/heads/dev:refs/remotes/origin/dev" \
   || die "could not refresh origin/dev"
-[ "$(git -C "$control_root" rev-parse HEAD)" = "$(git -C "$control_root" rev-parse refs/remotes/origin/dev)" ] \
+control_commit="$(git -C "$control_root" rev-parse HEAD)"
+[ "$control_commit" = "$(git -C "$control_root" rev-parse refs/remotes/origin/dev)" ] \
   || die "local dev HEAD must exactly equal origin/dev"
 
 gate_runner="$control_root/infra/deploy/run_image_deployment_gate.sh"
 context_helper="$control_root/infra/terraform/image_release_context.py"
-[ -f "$context_helper" ] || die "Terraform release context helper is missing"
+apply_supervisor="$control_root/infra/terraform/terraform_apply_supervisor.py"
+[ -f "$context_helper" ] && [ -f "$apply_supervisor" ] \
+  || die "Terraform release helpers are missing"
+terraform_bin="$(command -v terraform)"
 export TEAMAGENT_SAVED_PLAN_PATH="$plan_path"
 export TEAMAGENT_APPLY_ATTEMPT_ID
 TEAMAGENT_APPLY_ATTEMPT_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
@@ -98,12 +102,7 @@ temporary="$(mktemp -d "${TMPDIR:-/tmp}/teamagent-image-apply.XXXXXXXX")"
 lock_acquired=false
 attempt_started=false
 outcome_recorded=false
-heartbeat_pid=""
 cleanup() {
-  if [ -n "$heartbeat_pid" ]; then
-    kill "$heartbeat_pid" >/dev/null 2>&1 || true
-    wait "$heartbeat_pid" >/dev/null 2>&1 || true
-  fi
   if [ "$attempt_started" = "true" ] && [ "$outcome_recorded" != "true" ]; then
     bash "$gate_runner" mark-deployment-intent-outcome \
       --plan "$plan_path" \
@@ -122,7 +121,8 @@ trap cleanup EXIT
 attempt_started=true
 bash "$gate_runner" acquire-deployment-lock \
   --plan "$plan_path" \
-  --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" >/dev/null
+  --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" \
+  --control-commit "$control_commit" >/dev/null
 lock_acquired=true
 python3 "$context_helper" capture \
   --terraform-dir "$script_dir" \
@@ -131,30 +131,15 @@ python3 "$context_helper" capture \
 bash "$gate_runner" validate-deployment-preflight \
   --plan "$plan_path" \
   --terraform-context "$temporary/terraform-context.json" \
-  --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" >/dev/null
-
-parent_pid="$$"
-(
-  while :; do
-    sleep 30
-    if ! bash "$gate_runner" heartbeat-deployment-lock \
-      --plan "$plan_path" \
-      --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" >/dev/null; then
-      echo "FATAL: shared image/Terraform automation lock heartbeat failed" >&2
-      kill -TERM "$parent_pid" >/dev/null 2>&1 || true
-      exit 1
-    fi
-  done
-) &
-heartbeat_pid="$!"
-unset parent_pid
+  --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" \
+  --control-commit "$control_commit" >/dev/null
 
 set +e
-terraform apply \
-  -input=false \
-  -lock=true \
-  -lock-timeout=5m \
-  "$plan_path"
+python3 "$apply_supervisor" \
+  --terraform-bin "$terraform_bin" \
+  --gate-runner "$gate_runner" \
+  --plan "$plan_path" \
+  --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID"
 apply_status=$?
 set -e
 if [ "$apply_status" -eq 0 ]; then

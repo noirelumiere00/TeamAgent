@@ -55,11 +55,15 @@ def test_release_quarantine_and_verified_candidate_repositories_have_full_contro
         lifecycle = _resource(body, "aws_ecr_lifecycle_policy", repository)
         assert "local.ecr_verified_candidate_lifecycle_policy" in lifecycle
     assert 'description  = "expire all quarantined candidates after 2 days"' in body
-    assert 'description  = "expire verified candidates after 30 days"' in body
     assert 'tagStatus   = "any"' in body
     assert "countNumber = 2" in body
     assert "ecr_release_lifecycle_policy" not in body
-    for repository in ("openclaw", "openclaw_media", "mcp", "mcp_media"):
+    for repository in (
+        "openclaw",
+        "openclaw_media",
+        "mcp",
+        "mcp_media",
+    ):
         assert f'resource "aws_ecr_lifecycle_policy" "{repository}"' not in body
 
 
@@ -73,19 +77,32 @@ def test_tiktok_release_and_quarantine_repositories_have_full_controls() -> None
     assert 'name                 = "${local.tk_name}-quarantine"' in ecr_body
     assert 'resource "aws_ecr_lifecycle_policy" "tiktok_acquire"' not in ecr_body
     assert 'resource "aws_ecr_lifecycle_policy" "tiktok_acquire_quarantine"' in ecr_body
-    assert 'resource "aws_ecr_lifecycle_policy" "tiktok_acquire_verified_candidates"' in ecr_body
+    lifecycle = _resource(
+        ecr_body,
+        "aws_ecr_lifecycle_policy",
+        "tiktok_acquire_verified_candidates",
+    )
+    assert "local.ecr_verified_candidate_lifecycle_policy" in lifecycle
 
 
-def test_candidate_cleanup_is_physically_separate_from_retained_release_graphs() -> None:
+def test_only_rejected_quarantine_graphs_are_subject_to_candidate_cleanup() -> None:
     body = ECR.read_text(encoding="utf-8")
 
-    assert "Candidate cleanup stays isolated in physically separate repos" in body
+    assert "can match only an explicitly" in body
     candidate_policy = body.split(
-        "ecr_verified_candidate_lifecycle_policy = jsonencode(", maxsplit=1
-    )[1].split("ecr_quarantine_lifecycle_policy", maxsplit=1)[0]
-    assert 'tagStatus   = "any"' in candidate_policy
-    assert "active-" not in candidate_policy
-    assert "rollback-" not in candidate_policy
+        "ecr_verified_candidate_lifecycle_policy = jsonencode(",
+        maxsplit=1,
+    )[1].split("ecr_quarantine_lifecycle_policy = jsonencode(", maxsplit=1)[0]
+    quarantine_policy = body.split("ecr_quarantine_lifecycle_policy = jsonencode(", maxsplit=1)[
+        1
+    ].split('resource "aws_ecr_lifecycle_policy"', maxsplit=1)[0]
+    assert '"tagged"' in candidate_policy
+    assert 'tagPrefixList = ["rejected-"]' in candidate_policy
+    assert 'tagPrefixList = ["verified-"]' not in candidate_policy
+    assert '"any"' not in candidate_policy
+    assert "countNumber = 2" in " ".join(candidate_policy.split())
+    assert 'tagStatus   = "any"' in quarantine_policy
+    assert "countNumber = 2" in quarantine_policy
     assert "ecr_release_lifecycle_policy" not in body
 
 

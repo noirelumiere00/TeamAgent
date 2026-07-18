@@ -535,8 +535,15 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
         continued = ""
     if continued:
         raise ProvenanceError("Dockerfile ends with an incomplete continued instruction")
+
+    def instruction_parts(instruction: str) -> tuple[str, str]:
+        match = re.fullmatch(r"([A-Za-z]+)(?:[ \t]+(.*))?", instruction)
+        if match is None:
+            raise ProvenanceError("Dockerfile contains a malformed instruction")
+        return match.group(1).upper(), match.group(2) or ""
+
     label_instructions = "\n".join(
-        instruction for instruction in instructions if instruction.upper().startswith("LABEL ")
+        instruction for instruction in instructions if instruction_parts(instruction)[0] == "LABEL"
     )
 
     digest_arguments: set[str] = set()
@@ -599,32 +606,37 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
             raise ProvenanceError(f"Dockerfile is missing runtime receipt proof: {proof}")
 
     declared_stages: set[str] = set()
+    declared_stage_count = 0
     for instruction in instructions:
         reference: str | None = None
         stage_alias: str | None = None
         allow_scratch = False
-        if instruction.upper().startswith("FROM "):
+        instruction_name, instruction_arguments = instruction_parts(instruction)
+        if instruction_name == "FROM":
             from_match = re.fullmatch(
-                r"FROM\s+(?:--platform=\S+\s+)?(\S+)"
-                r"(?:\s+AS\s+([A-Za-z0-9_.-]+))?",
-                instruction,
+                r"(?:--platform=\S+[ \t]+)?(\S+)"
+                r"(?:[ \t]+AS[ \t]+([A-Za-z0-9_.-]+))?",
+                instruction_arguments,
                 re.IGNORECASE,
             )
             if from_match is None:
                 raise ProvenanceError("Dockerfile contains an unsupported FROM instruction")
             reference, stage_alias = from_match.groups()
             allow_scratch = True
-        elif instruction.upper().startswith("COPY "):
+        elif instruction_name == "COPY":
             copy_match = re.search(
                 r"(?:^|\s)--from=(\S+)(?:\s|$)",
-                instruction,
+                instruction_arguments,
                 re.IGNORECASE,
             )
             if copy_match is not None:
                 reference = copy_match.group(1)
 
         if reference is not None:
-            local_stage = reference in declared_stages
+            numeric_stage = re.fullmatch(r"0|[1-9][0-9]*", reference)
+            local_stage = reference in declared_stages or (
+                numeric_stage is not None and int(reference) < declared_stage_count
+            )
             literal_digest = re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", reference)
             argument_digest = re.fullmatch(
                 r"\S+@\$\{([A-Z][A-Z0-9_]*)\}",
@@ -639,6 +651,8 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
                 raise ProvenanceError(
                     f"Dockerfile external image is not digest pinned: {reference}"
                 )
+        if instruction_name == "FROM":
+            declared_stage_count += 1
         if stage_alias is not None:
             declared_stages.add(stage_alias)
 

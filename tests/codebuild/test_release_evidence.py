@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "infra" / "codebuild" / "release_evidence.py"
+AUTHORIZE_LAUNCHER = ROOT / "infra" / "deploy" / "authorize_image_release.sh"
 
 
 def _load_module() -> Any:
@@ -34,9 +36,25 @@ APP_HTML_SHA256 = "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb3
 VAULT_MANIFEST_SHA256 = "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
 BUILD_INPUTS_SHA256 = "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
 BAKED_APP_HTML_VERSION_ID = "approved-baked-fallback-version-1"
+BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
 INTENT_ID = "11111111-1111-4111-8111-111111111111"
 ATTEMPT_ID = "22222222-2222-4222-8222-222222222222"
 EMPTY_SHARED_LEDGER_SHA256 = hashlib.sha256(EVIDENCE.canonical_bytes({})).hexdigest()
+
+
+def test_release_authorizer_contract_mapping_matches_the_evidence_pipeline_map() -> None:
+    body = AUTHORIZE_LAUNCHER.read_text(encoding="utf-8")
+    launcher_mapping = dict(
+        re.findall(
+            r'^\s*(mcp|tiktok|openclaw)\) CONTRACT="\$CONTROL_ROOT/([^"]+)" ;;$',
+            body,
+            re.MULTILINE,
+        )
+    )
+
+    assert launcher_mapping == {
+        pipeline: definition["contract_path"] for pipeline, definition in EVIDENCE.PIPELINES.items()
+    }
 
 
 def _hex(label: str) -> str:
@@ -59,7 +77,7 @@ APPLICATION = {
     "vault_manifest_sha256": VAULT_MANIFEST_SHA256,
     "build_inputs_sha256": BUILD_INPUTS_SHA256,
     "baked_fallback_version_id": BAKED_APP_HTML_VERSION_ID,
-    "baked_fallback_sha256": EVIDENCE.BAKED_APP_HTML_SHA256,
+    "baked_fallback_sha256": BAKED_APP_HTML_SHA256,
 }
 APPLICATION_BINDING = hashlib.sha256(
     EVIDENCE.canonical_bytes(
@@ -104,7 +122,7 @@ def _subject(name: str, *, channel: str) -> dict[str, Any]:
         binaries = [
             {
                 "path": "/app/src/teamagent/connect_web/static/app.html",
-                "sha256": EVIDENCE.BAKED_APP_HTML_SHA256,
+                "sha256": BAKED_APP_HTML_SHA256,
             },
             {"path": "/usr/bin/python3.14", "sha256": _hex("core-python")},
         ]
@@ -135,7 +153,7 @@ def _subject(name: str, *, channel: str) -> dict[str, Any]:
                 "io.teamagent.contract.app-html-sha256": APP_HTML_SHA256,
                 "io.teamagent.contract.app-html-manifest-sha256": (VAULT_MANIFEST_SHA256),
                 "io.teamagent.contract.app-html-build-inputs-sha256": (BUILD_INPUTS_SHA256),
-                "io.teamagent.contract.baked-app-html-sha256": (EVIDENCE.BAKED_APP_HTML_SHA256),
+                "io.teamagent.contract.baked-app-html-sha256": BAKED_APP_HTML_SHA256,
                 "io.teamagent.contract.baked-app-html-version-id": (BAKED_APP_HTML_VERSION_ID),
             }
         )
@@ -250,17 +268,17 @@ def test_source_declaration_binds_independent_project_source_version_commit_and_
         (
             ("app_html", "sha256"),
             "f" * 64,
-            "app HTML is not the production canonical object",
+            "app HTML SHA-256 mismatch",
         ),
         (
             ("application_provenance", "vault_manifest_sha256"),
             "f" * 64,
-            "Vault manifest SHA-256 is not production canonical",
+            "Vault manifest SHA-256 mismatch",
         ),
         (
             ("application_provenance", "build_inputs_sha256"),
             "f" * 64,
-            "build_inputs SHA-256 is not production canonical",
+            "build_inputs SHA-256 mismatch",
         ),
     ):
         hostile = copy.deepcopy(declaration)
@@ -278,11 +296,28 @@ def test_source_declaration_binds_independent_project_source_version_commit_and_
             )
 
 
-def test_source_declaration_uses_current_production_application_allowlist() -> None:
-    assert EVIDENCE.APP_HTML_VERSION_ID == APP_HTML_VERSION_ID
-    assert EVIDENCE.APP_HTML_SHA256 == APP_HTML_SHA256
-    assert EVIDENCE.VAULT_MANIFEST_SHA256 == VAULT_MANIFEST_SHA256
-    assert EVIDENCE.BUILD_INPUTS_SHA256 == BUILD_INPUTS_SHA256
+def test_mcp_app_anchors_are_loaded_from_the_embedded_release_contract() -> None:
+    helper = MODULE_PATH.read_text(encoding="utf-8")
+    attestor = (ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml").read_text(
+        encoding="utf-8"
+    )
+
+    for duplicated_literal in (
+        APP_HTML_VERSION_ID,
+        APP_HTML_SHA256,
+        VAULT_MANIFEST_SHA256,
+        BUILD_INPUTS_SHA256,
+        BAKED_APP_HTML_SHA256,
+    ):
+        assert duplicated_literal not in helper
+        assert duplicated_literal not in attestor
+    for contract_path in (
+        ".app_html.production.app_html_s3_version_id",
+        ".app_html.production.app_html_sha256",
+        ".app_html.production.vault_manifest_sha256",
+        ".app_html.production.build_inputs_sha256",
+    ):
+        assert contract_path in attestor
 
 
 def test_verified_receipt_requires_exact_actual_image_evidence() -> None:
@@ -293,6 +328,22 @@ def test_verified_receipt_requires_exact_actual_image_evidence() -> None:
         expected_contract_sha256=CONTRACT_SHA256,
         allowed_channels={"verified-candidate"},
         now=NOW,
+    )
+
+
+def test_verified_candidate_locator_remains_re_attestable_after_thirty_days() -> None:
+    locator = _receipt()
+    issued_at = NOW - dt.timedelta(minutes=5)
+    locator["issued_at"] = issued_at.isoformat().replace("+00:00", "Z")
+    locator["expires_at"] = (issued_at + dt.timedelta(days=3650)).isoformat().replace("+00:00", "Z")
+
+    EVIDENCE.validate_release_receipt(
+        locator,
+        expected_pipeline="mcp",
+        expected_commit=COMMIT,
+        expected_contract_sha256=CONTRACT_SHA256,
+        allowed_channels={"verified-candidate"},
+        now=issued_at + dt.timedelta(days=31),
     )
 
 
@@ -324,7 +375,7 @@ def test_receipt_and_application_require_exact_baked_fallback_version() -> None:
     mismatched["subjects"][0]["labels"]["io.teamagent.contract.baked-app-html-version-id"] = (
         "different-fallback-version"
     )
-    with pytest.raises(EVIDENCE.EvidenceError, match="baked fallback VersionId"):
+    with pytest.raises(EVIDENCE.EvidenceError, match="application contract"):
         EVIDENCE._validate_mcp_deployment_application(
             mismatched,
             APPLICATION,
@@ -391,9 +442,11 @@ def test_stale_receipt_is_rejected() -> None:
         )
 
 
-def test_candidate_locator_has_bounded_window_and_cannot_be_replayed_after_expiry() -> None:
+def test_durable_candidate_locator_remains_bounded_and_cannot_outlive_expiry() -> None:
     candidate = _receipt()
-    candidate["expires_at"] = "2026-08-16T05:55:00Z"
+    issued_at = dt.datetime(2026, 7, 17, 5, 55, tzinfo=dt.UTC)
+    expires_at = issued_at + dt.timedelta(days=3650)
+    candidate["expires_at"] = expires_at.isoformat().replace("+00:00", "Z")
     EVIDENCE.validate_release_receipt(
         candidate,
         expected_pipeline="mcp",
@@ -406,12 +459,14 @@ def test_candidate_locator_has_bounded_window_and_cannot_be_replayed_after_expir
         EVIDENCE.authorize_release_receipt(
             candidate,
             channel="rollback",
-            issued_at="2026-08-16T05:55:00Z",
-            expires_at="2026-08-16T06:25:00Z",
+            issued_at=expires_at.isoformat().replace("+00:00", "Z"),
+            expires_at=(expires_at + dt.timedelta(minutes=30)).isoformat().replace("+00:00", "Z"),
         )
 
     too_long = copy.deepcopy(candidate)
-    too_long["expires_at"] = "2026-08-16T05:55:01Z"
+    too_long["expires_at"] = (
+        (expires_at + dt.timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    )
     with pytest.raises(EVIDENCE.EvidenceError, match="validity window"):
         EVIDENCE.validate_release_receipt(
             too_long,
@@ -1261,6 +1316,7 @@ def test_apply_attempt_and_shared_lock_start_in_one_conditional_transaction(
         metadata=metadata,
         lock_item=lock,
         apply_attempt_id=ATTEMPT_ID,
+        control_commit=COMMIT,
         now=NOW,
     )
 
@@ -1274,6 +1330,8 @@ def test_apply_attempt_and_shared_lock_start_in_one_conditional_transaction(
     assert "#state = :prepared" in transition["ConditionExpression"]
     assert "authorization_expires_at > :now" in transition["ConditionExpression"]
     assert "terraform_context_sha256 = :terraform_context" in (transition["ConditionExpression"])
+    assert "control_commit = :control_commit" in transition["ConditionExpression"]
+    assert transition["ExpressionAttributeValues"][":control_commit"] == {"S": COMMIT}
     assert "SET #state = :applying" in transition["UpdateExpression"]
     assert "apply_attempt_id = :attempt" in transition["UpdateExpression"]
     begin_token = captured[captured.index("--client-request-token") + 1]
@@ -1285,6 +1343,50 @@ def test_apply_attempt_and_shared_lock_start_in_one_conditional_transaction(
         ATTEMPT_ID,
         phase="consume-authorization",
     )
+
+
+def test_apply_rejects_a_different_checkout_before_starting_the_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {
+        "intent_id": INTENT_ID,
+        "plan_sha256": "d" * 64,
+        "deployment_context_sha256": "a" * 64,
+        "receipt_claims_sha256": "b" * 64,
+        "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+    }
+    prepared = _prepared_intent(
+        intent_id=INTENT_ID,
+        plan_sha256=metadata["plan_sha256"],
+        context_sha256=metadata["deployment_context_sha256"],
+        claims_sha256=metadata["receipt_claims_sha256"],
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "deployment_plan_metadata",
+        lambda *args, **kwargs: metadata,
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_dynamodb_get",
+        lambda record_id: copy.deepcopy(prepared),
+    )
+
+    def must_not_start(**_: Any) -> None:
+        raise AssertionError("mismatched control commit reached the applying transition")
+
+    monkeypatch.setattr(EVIDENCE, "_dynamodb_transact_begin_apply", must_not_start)
+
+    with pytest.raises(
+        EVIDENCE.EvidenceError,
+        match="control commit differs from the apply checkout",
+    ):
+        EVIDENCE.acquire_deployment_lock(
+            Path("unused.tfplan"),
+            apply_attempt_id=ATTEMPT_ID,
+            control_commit="f" * 40,
+            now=NOW,
+        )
 
 
 def test_same_intent_and_same_receipt_cannot_authorize_two_deployments(

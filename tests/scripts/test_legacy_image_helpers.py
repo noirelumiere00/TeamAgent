@@ -143,6 +143,7 @@ def test_no_shell_can_bypass_terraform_for_image_task_definition_changes() -> No
     guarded_terraform_launchers = {
         ROOT / "infra" / "terraform" / "plan_image_release.sh",
         ROOT / "infra" / "terraform" / "apply_image_release_plan.sh",
+        ROOT / "infra" / "terraform" / "update_image_release_controls.sh",
     }
     shell_files = sorted(
         path

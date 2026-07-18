@@ -104,7 +104,7 @@ git -C "$CONTROL_ROOT" fetch --quiet --no-tags origin \
   || die "local dev HEAD must exactly equal origin/dev"
 EVIDENCE_HELPER="$CONTROL_ROOT/infra/codebuild/release_evidence.py"
 case "$PIPELINE" in
-  mcp) CONTRACT="$CONTROL_ROOT/infra/codebuild/teamagent_runtime_contract.json" ;;
+  mcp) CONTRACT="$CONTROL_ROOT/infra/codebuild/teamagent_core_media_release_contract.json" ;;
   tiktok) CONTRACT="$CONTROL_ROOT/infra/codebuild/tiktok_release_contract.json" ;;
   openclaw) CONTRACT="$CONTROL_ROOT/infra/codebuild/openclaw_bundle_contract.json" ;;
 esac

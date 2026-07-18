@@ -113,6 +113,18 @@ phases:
             SOURCE_SIGNATURE_ALGORITHM="RSASSA_PSS_SHA_256"
             CONTRACT="/tmp/teamagent_core_media_release_contract.json"
             printf '%s' '__MCP_CONTRACT_BASE64__' | base64 --decode >"$CONTRACT"
+            MCP_APP_HTML_VERSION_ID="$(
+              jq -er '.app_html.production.app_html_s3_version_id' "$CONTRACT"
+            )"
+            MCP_APP_HTML_SHA256="$(
+              jq -er '.app_html.production.app_html_sha256' "$CONTRACT"
+            )"
+            MCP_VAULT_MANIFEST_SHA256="$(
+              jq -er '.app_html.production.vault_manifest_sha256' "$CONTRACT"
+            )"
+            MCP_BUILD_INPUTS_SHA256="$(
+              jq -er '.app_html.production.build_inputs_sha256' "$CONTRACT"
+            )"
             ;;
           tiktok)
             EXPECTED_BUILD_PROJECT="teamagent-dev-tiktok-image-builder"
@@ -248,10 +260,10 @@ phases:
               --declaration /tmp/signed-source-statement.json \
               --expected-commit "$SOURCE_COMMIT" \
               --expected-source-version "$BUILD_SOURCE_VERSION" \
-              --expected-app-version "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee" \
-              --expected-app-sha256 "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c" \
-              --expected-vault-manifest-sha256 "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e" \
-              --expected-build-inputs-sha256 "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf" \
+              --expected-app-version "$MCP_APP_HTML_VERSION_ID" \
+              --expected-app-sha256 "$MCP_APP_HTML_SHA256" \
+              --expected-vault-manifest-sha256 "$MCP_VAULT_MANIFEST_SHA256" \
+              --expected-build-inputs-sha256 "$MCP_BUILD_INPUTS_SHA256" \
               --expected-contract-sha256 "$CONTRACT_SHA256"
             ;;
           openclaw)
@@ -421,7 +433,7 @@ phases:
         esac
         ISSUED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         if [ "$PROMOTION_CHANNEL" = "verified-candidate" ]; then
-          EXPIRES_AT="$(date -u -d '+30 days' '+%Y-%m-%dT%H:%M:%SZ')"
+          EXPIRES_AT="$(date -u -d '+3650 days' '+%Y-%m-%dT%H:%M:%SZ')"
           SUBJECT_FILES=()
           SUBJECT_INDEX=0
           while IFS= read -r SUBJECT; do
@@ -666,7 +678,7 @@ phases:
           --signing-algorithm RSASSA_PSS_SHA_256 \
           --query Signature \
           --output text | base64 --decode > /tmp/release-receipt.sig
-        RETAIN_UNTIL="$(date -u -d '+30 days' '+%Y-%m-%dT%H:%M:%SZ')"
+        RETAIN_UNTIL="$(date -u -d '+3650 days' '+%Y-%m-%dT%H:%M:%SZ')"
         RECEIPT_VERSION_ID="$(
           aws s3api put-object \
             --region ap-northeast-1 \

@@ -31,6 +31,9 @@ locals {
   release_evidence_bucket     = "${var.project_name}-${var.environment}-image-release-evidence"
   tiktok_launcher_role_name   = "${var.project_name}-${var.environment}-tiktok-build-launcher"
   release_launcher_role_name  = "${var.project_name}-${var.environment}-release-launcher"
+  release_control_updater_role_name = (
+    "${var.project_name}-${var.environment}-release-control-updater"
+  )
   image_deployment_gate_role_name = (
     "${var.project_name}-${var.environment}-image-deployment-gate"
   )
@@ -924,6 +927,158 @@ output "release_launcher_role_arn" {
   value = aws_iam_role.release_launcher.arn
 }
 
+# Independent control-plane boundary for installing changed embedded release
+# contracts before any candidate can exist under their new hash. Its Terraform
+# role can update only the five contract-consuming CodeBuild projects and the
+# one fixed backend state object/lock. It cannot start builds or mutate runtime,
+# image, event, scheduler, IAM, or evidence resources.
+resource "aws_iam_user" "release_control_update_caller" {
+  name = "teamagent-release-control-update-caller"
+}
+
+data "aws_iam_policy_document" "release_control_updater_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_user.release_control_update_caller.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:RoleSessionName"
+      values   = ["teamagent-contract-control-update"]
+    }
+  }
+}
+
+resource "aws_iam_role" "release_control_updater" {
+  name                 = local.release_control_updater_role_name
+  assume_role_policy   = data.aws_iam_policy_document.release_control_updater_assume.json
+  max_session_duration = 10800
+}
+
+data "aws_iam_policy_document" "release_control_update_caller" {
+  statement {
+    sid       = "AssumeOnlyReleaseControlUpdater"
+    actions   = ["sts:AssumeRole"]
+    resources = [aws_iam_role.release_control_updater.arn]
+  }
+  statement {
+    sid    = "DenyDirectControlAndRuntimeMutation"
+    effect = "Deny"
+    actions = [
+      "codebuild:*",
+      "ecr:*",
+      "ecs:*",
+      "events:*",
+      "scheduler:*",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_user_policy" "release_control_update_caller" {
+  name   = "teamagent-release-control-update-caller"
+  user   = aws_iam_user.release_control_update_caller.name
+  policy = data.aws_iam_policy_document.release_control_update_caller.json
+}
+
+data "aws_iam_policy_document" "release_control_updater" {
+  statement {
+    sid     = "ReadAndUpdateOnlyEmbeddedContractProjects"
+    actions = ["codebuild:BatchGetProjects", "codebuild:UpdateProject"]
+    resources = concat(
+      [
+        aws_codebuild_project.image.arn,
+        aws_codebuild_project.mcp_source_publisher.arn,
+        aws_codebuild_project.image_attestor.arn,
+        aws_codebuild_project.openclaw_provenance.arn,
+      ],
+      local.tk_enabled == 1 ? [aws_codebuild_project.tiktok_image[0].arn] : [],
+    )
+  }
+  statement {
+    sid       = "ReadFixedTerraformStateBucket"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::teamagent-tfstate-718959508629"]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["teamagent/terraform.tfstate"]
+    }
+  }
+  statement {
+    sid = "ReadOnlyTargetDependencies"
+    actions = [
+      "codeconnections:GetConnection",
+      "iam:GetRole",
+      "kms:DescribeKey",
+      "logs:DescribeLogGroups",
+      "logs:ListTagsForResource",
+    ]
+    resources = ["*"]
+  }
+  statement {
+    sid       = "ReadWriteOnlyFixedTerraformStateObject"
+    actions   = ["s3:GetObject", "s3:PutObject"]
+    resources = ["arn:aws:s3:::teamagent-tfstate-718959508629/teamagent/terraform.tfstate"]
+  }
+  statement {
+    sid = "UseOnlyFixedTerraformStateLock"
+    actions = [
+      "dynamodb:DeleteItem",
+      "dynamodb:DescribeTable",
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+    ]
+    resources = [
+      "arn:aws:dynamodb:ap-northeast-1:718959508629:table/teamagent-tflock",
+    ]
+  }
+  statement {
+    sid       = "ReadOwnIdentity"
+    actions   = ["sts:GetCallerIdentity"]
+    resources = ["*"]
+  }
+  statement {
+    sid    = "DenyBuildRuntimeImageAndControlExpansion"
+    effect = "Deny"
+    actions = [
+      "codebuild:CreateProject",
+      "codebuild:DeleteProject",
+      "codebuild:RetryBuild",
+      "codebuild:RetryBuildBatch",
+      "codebuild:StartBuild",
+      "codebuild:StartBuildBatch",
+      "codebuild:StartCommandExecution",
+      "codebuild:StartSandbox",
+      "codebuild:StartSandboxConnection",
+      "ecr:*",
+      "ecs:*",
+      "events:*",
+      "lambda:*",
+      "scheduler:*",
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "release_control_updater" {
+  name   = local.release_control_updater_role_name
+  role   = aws_iam_role.release_control_updater.id
+  policy = data.aws_iam_policy_document.release_control_updater.json
+}
+
+output "release_control_update_caller_arn" {
+  value = aws_iam_user.release_control_update_caller.arn
+}
+
+output "release_control_updater_role_arn" {
+  value = aws_iam_role.release_control_updater.arn
+}
+
 # ============================================================
 # TikTok worker: separate repository, project, role, and ECR boundary
 # ============================================================
@@ -1526,7 +1681,7 @@ resource "aws_s3_bucket_object_lock_configuration" "image_release_evidence" {
   rule {
     default_retention {
       mode = "COMPLIANCE"
-      days = 30
+      days = 3650
     }
   }
 }
@@ -2607,7 +2762,7 @@ resource "aws_s3_bucket_object_lock_configuration" "openclaw_build_evidence" {
   rule {
     default_retention {
       mode = "COMPLIANCE"
-      days = 30
+      days = 3650
     }
   }
 }

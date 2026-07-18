@@ -18,16 +18,16 @@ def _terraform() -> str:
 
 def _policy(name: str) -> str:
     body = _terraform()
-    return body.split(
-        f'data "aws_iam_policy_document" "{name}"', maxsplit=1
-    )[1].split('\nresource "aws_iam_role_policy"', maxsplit=1)[0]
+    return body.split(f'data "aws_iam_policy_document" "{name}"', maxsplit=1)[1].split(
+        '\nresource "aws_iam_role_policy"', maxsplit=1
+    )[0]
 
 
 def test_project_is_dedicated_fixed_full_sha_source_with_embedded_buildspec() -> None:
     body = _terraform()
-    project = body.split(
-        'resource "aws_codebuild_project" "openclaw_provenance"', maxsplit=1
-    )[1].split('data "aws_iam_policy_document" "openclaw_publisher_assume"', maxsplit=1)[0]
+    project = body.split('resource "aws_codebuild_project" "openclaw_provenance"', maxsplit=1)[
+        1
+    ].split('data "aws_iam_policy_document" "openclaw_publisher_assume"', maxsplit=1)[0]
 
     assert "service_role = aws_iam_role.openclaw_codebuild.arn" in project
     assert '"0000000000000000000000000000000000000000"' in project
@@ -130,20 +130,15 @@ def test_openclaw_registry_and_trivy_sources_ignore_hostile_overrides() -> None:
 
     assert body.count("export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true") == 3
     for variable in ("ECR_REGISTRY", "OC_REPO", "OPENCLAW_REPO", "OPENCLAW_MEDIA_REPO", "MCP_REPO"):
-        assert sum(
-            variable in line
-            for line in body.splitlines()
-            if line.strip().startswith("unset ")
-        ) == 3
+        assert (
+            sum(variable in line for line in body.splitlines() if line.strip().startswith("unset "))
+            == 3
+        )
     assert body.count("unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY") == 3
-    assert body.count(
-        'TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"'
-    ) == 3
+    assert body.count('TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"') == 3
+    assert 'REGISTRY="718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"' in body
     assert (
-        'REGISTRY="718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"' in body
-    )
-    assert (
-        'docker login --username AWS --password-stdin '
+        "docker login --username AWS --password-stdin "
         '"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"'
     ) in body
     assert "teamagent-mcp-quarantine" not in body
@@ -175,7 +170,7 @@ def test_immutable_openclaw_evidence_bucket_and_runtime_pull_denies_are_explicit
     assert 'status = "Enabled"' in terraform
     assert 'sse_algorithm     = "aws:kms"' in terraform
     assert 'mode = "COMPLIANCE"' in terraform
-    assert "days = 30" in terraform
+    assert "days = 3650" in terraform
     assert "prevent_destroy = true" in terraform
     for repository in (
         "aws_ecr_repository.openclaw_quarantine.arn",

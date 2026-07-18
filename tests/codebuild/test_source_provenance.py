@@ -268,6 +268,66 @@ def test_dockerfile_contract_rejects_forward_stage_alias_as_unpinned_external(
         provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
 
 
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "FROM\tubuntu\tAS untrusted",
+        "COPY\t--from=ubuntu\t/bin/tool /usr/local/bin/tool",
+    ],
+)
+def test_dockerfile_contract_rejects_unpinned_external_images_with_tab_whitespace(
+    tmp_path: Path,
+    instruction: str,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        f"{instruction}\n" + _synthetic_dockerfile(_ready_contract()),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        provenance.ProvenanceError,
+        match="external image is not digest pinned: ubuntu",
+    ):
+        provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
+
+
+def test_dockerfile_contract_accepts_a_declared_numeric_copy_stage(
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        _synthetic_dockerfile(_ready_contract()).replace(
+            "COPY --from=builder",
+            "COPY\t--from=0",
+        ),
+        encoding="utf-8",
+    )
+
+    provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
+
+
+@pytest.mark.parametrize("reference", ["2", "01"])
+def test_dockerfile_contract_rejects_invalid_numeric_copy_stages(
+    tmp_path: Path,
+    reference: str,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        _synthetic_dockerfile(_ready_contract()).replace(
+            "COPY --from=builder",
+            f"COPY --from={reference}",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        provenance.ProvenanceError,
+        match=rf"external image is not digest pinned: {reference}",
+    ):
+        provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
+
+
 def test_checked_in_dockerfile_must_implement_active_contract_before_activation() -> None:
     """Turn the cross-branch schema into a hard merge gate once it is activated."""
 

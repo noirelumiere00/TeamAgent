@@ -142,11 +142,19 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
     assert "image_deployment_intent_id=$intent_id" in planner
     assert "complete, locked, refresh-enabled full saved plans" in planner
     assert "saved plans must be stored outside" in planner
-    assert "terraform apply \\" in applier
-    assert "-lock=true" in applier
+    assert 'python3 "$apply_supervisor" \\' in applier
+    supervisor = (ROOT / "infra" / "terraform" / "terraform_apply_supervisor.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"apply",' in supervisor
+    assert '"-lock=true",' in supervisor
     assert "never retry this plan, intent, or receipts" in applier
     assert "mark-deployment-intent-outcome" in applier
     assert "saved plans must be stored outside" in applier
+    assert 'control_commit="$(git -C "$control_root" rev-parse HEAD)"' in applier
+    assert applier.count('--control-commit "$control_commit"') == 2
+    assert "terraform_apply_supervisor.py" in applier
+    assert "heartbeat-deployment-lock" not in applier
     assert ("assumed-role/teamagent-dev-terraform-automation/teamagent-terraform-worker") in runner
     assert "arn:aws:iam::718959508629:user/AIIAdev" not in runner
     assert ("arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate") in runner
@@ -184,6 +192,8 @@ def test_deployment_intents_use_a_durable_protected_conditional_ledger() -> None
     assert '"attribute_not_exists(record_id)"' in evidence
     assert '"dynamodb",\n        "transact-write-items"' in evidence
     assert "authorization_expires_at > :now_epoch" in evidence
+    assert "control_commit = :control_commit" in evidence
+    assert "deployment intent control commit differs from the apply checkout" in evidence
     assert '"#state = :prepared "' in evidence
     assert '":applying": "APPLYING"' in evidence
     assert '"#state = :applying "' in evidence
@@ -259,6 +269,17 @@ def test_promoter_is_receipt_only_and_never_executes_repository_source() -> None
     assert body.count("signature.referrer_digest") == 3
     assert ".digest == $image_signature" in body
     assert ".digest == $signature" in body
+    destination_lookup = body.index('DESTINATION_LOOKUP_ERROR="/tmp/destination-')
+    exact_existing = body.index(
+        "immutable promotion tag already binds a different digest",
+        destination_lookup,
+    )
+    copy = body.index("oras cp --recursive", destination_lookup)
+    graph_check = body.index("aws ecr list-image-referrers", copy)
+    assert destination_lookup < exact_existing < copy < graph_check
+    assert "ImageNotFoundException" in body[destination_lookup:copy]
+    assert "Resuming verified existing promotion" in body[destination_lookup:copy]
+    assert "destination tag lookup failed closed" in body[destination_lookup:copy]
 
 
 def test_active_or_rollback_attestation_rechecks_candidate_signatures() -> None:
@@ -273,7 +294,7 @@ def test_active_or_rollback_attestation_rechecks_candidate_signatures() -> None:
     assert ".digest == $image_signature" in body
     assert ".digest == $signature" in body
     assert "authorize-release-receipt" in body
-    assert "date -u -d '+30 days'" in body
+    assert "date -u -d '+3650 days'" in body
     assert "date -u -d '+30 minutes'" in body
     assert body.count("aws ecr list-image-referrers") == body.count("--max-results 50")
 
@@ -282,10 +303,10 @@ def test_lifecycle_never_expires_a_production_release_evidence_graph() -> None:
     body = ECR.read_text(encoding="utf-8")
     evidence = EVIDENCE.read_text(encoding="utf-8")
 
-    assert 'description  = "expire verified candidates after 30 days"' in body
     assert 'description  = "expire all quarantined candidates after 2 days"' in body
     assert 'tagStatus   = "any"' in body
     assert "Production release repositories intentionally have no lifecycle policy" in body
+    assert "can match only an explicitly" in body
     assert "ecr_release_lifecycle_policy" not in body
     for name in (
         "mcp",
@@ -295,6 +316,26 @@ def test_lifecycle_never_expires_a_production_release_evidence_graph() -> None:
         "tiktok_acquire",
     ):
         assert f'aws_ecr_lifecycle_policy" "{name}"' not in body
+    candidate_policy = body.split(
+        "ecr_verified_candidate_lifecycle_policy = jsonencode(",
+        maxsplit=1,
+    )[1].split("ecr_quarantine_lifecycle_policy = jsonencode(", maxsplit=1)[0]
+    assert '"tagged"' in candidate_policy
+    assert 'tagPrefixList = ["rejected-"]' in candidate_policy
+    assert 'tagPrefixList = ["verified-"]' not in candidate_policy
+    assert '"any"' not in candidate_policy
+    for name in (
+        "mcp_verified_candidates",
+        "mcp_media_verified_candidates",
+        "openclaw_verified_candidates",
+        "openclaw_media_verified_candidates",
+        "tiktok_acquire_verified_candidates",
+    ):
+        lifecycle = body.split(
+            f'resource "aws_ecr_lifecycle_policy" "{name}"',
+            maxsplit=1,
+        )[1].split('\nresource "', maxsplit=1)[0]
+        assert "local.ecr_verified_candidate_lifecycle_policy" in lifecycle
     assert "DenyQuarantineRuntimePull" in body
     assert "_assert_no_release_lifecycle_policy" in evidence
     assert "lifecycle-policy absence could not be verified" in evidence

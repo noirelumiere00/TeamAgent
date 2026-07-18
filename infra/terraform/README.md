@@ -171,14 +171,51 @@ of this remediation.
    `teamagent-dev-tiktok-codebuild`, then verify both are `AVAILABLE`.
    The MCP publisher reuses the TeamAgent/OpenClaw connection. Do not start a
    build before this manual handshake.
-5. Quarantine repositories expire all candidates after 2 days and physically
-   separate verified-candidate repositories expire after 30 days. Production
-   release repositories intentionally have no ECR lifecycle policy. This
-   protects each active/rollback subject plus its complete recursive referrer
-   graph—including unlisted future referrer types—from lifecycle expiry.
-   Adding any release-repository lifecycle policy is a release-safety change
-   and requires a fail-closed preview against every digest returned by the
-   recursive signed-release graph validator.
+5. Quarantine repositories expire rejected candidates after 2 days.
+   Verified-candidate lifecycle rules can match only explicit noncanonical
+   `rejected-*` tags; canonical `verified-*` subjects and their untagged
+   recursive referrers cannot match. Production release repositories have no
+   ECR lifecycle policy. A deployed immutable candidate therefore remains
+   available for fresh rollback re-attestation after 30 days.
+   Candidate/source receipts use 3650-day COMPLIANCE retention;
+   active/rollback authorization receipts remain short-lived. Broadening a
+   verified-candidate lifecycle selector or adding a release-repository policy
+   is a release-safety change and requires a fail-closed preview against every
+   digest returned by the recursive signed-release graph validator.
+
+### Independently authorized embedded-contract update stage
+
+The broad bootstrap target file above is a one-time migration mechanism and
+must not be reused for routine contract changes. After bootstrap, a new
+`release.ready` value or any other changed embedded release-contract byte is
+installed through the separate control-plane caller and role:
+
+```bash
+bash infra/terraform/update_image_release_controls.sh plan \
+  /secure/local/path/release-controls.tfplan
+terraform show /secure/local/path/release-controls.tfplan
+cat /secure/local/path/release-controls.tfplan.control-update.json
+bash infra/terraform/update_image_release_controls.sh apply \
+  /secure/local/path/release-controls.tfplan
+```
+
+The planner targets only the five contract-consuming CodeBuild projects. Its
+validator rejects create/delete/replace/import actions, runtime resources,
+unknown values, and every project-field mutation except the embedded buildspec
+and the main builder's two contract-hash environment values. It also requires
+every consumer to contain the exact current contract hash or bytes, and binds
+the saved plan, clean `origin/dev` control commit, contract hashes, changed
+contracts, and changed addresses in the companion authorization file.
+
+The dedicated caller can assume only the release-control updater role. That
+role can read/update the five fixed CodeBuild projects and read/write the one
+fixed Terraform state object under its existing lock; it is explicitly denied
+build starts and IAM, ECR, ECS, EventBridge, Scheduler, Lambda, and evidence
+mutation. This closes the contract activation cycle: trusted projects can
+receive a reviewed new contract before a candidate or release receipt under
+that contract exists, without granting a production deployment bypass. A
+partial update is fail-closed because mismatched builders/attestors reject the
+contract hash; create and review a fresh control plan to resume.
 
 ### Build, release authorization, and signed-digest deploy
 

@@ -191,7 +191,7 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
         "signing_kms_key_alias": "alias/teamagent-dev-openclaw-build-publisher",
         "encryption_kms_key_alias": "alias/teamagent-dev-openclaw-build-evidence",
         "object_lock_mode": "COMPLIANCE",
-        "retention_days": 30,
+        "retention_days": 3650,
     }
     if evidence != expected_evidence:
         raise ContractError(f"{label} immutable evidence settings are not fixed")

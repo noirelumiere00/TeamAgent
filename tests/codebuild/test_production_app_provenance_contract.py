@@ -26,7 +26,6 @@ PINNED_CONSUMERS = {
     (
         ROOT / "infra" / "codebuild" / "teamagent_core_media_release_contract.json"
     ): ALL_EVIDENCE_KEYS,
-    ROOT / "infra" / "codebuild" / "release_evidence.py": ALL_EVIDENCE_KEYS,
     ROOT / "infra" / "terraform" / "connect_web.tf": ALL_EVIDENCE_KEYS,
     ROOT / "infra" / "terraform" / "README.md": ALL_EVIDENCE_KEYS,
 }
@@ -60,6 +59,13 @@ DERIVED_CONSUMERS = {
         "mcp_release_contract.app_html.production.app_html_sha256",
         "mcp_release_contract.app_html.production.vault_manifest_sha256",
         "mcp_release_contract.app_html.production.build_inputs_sha256",
+    ),
+    ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml": (
+        "teamagent_core_media_release_contract.json",
+        ".app_html.production.app_html_s3_version_id",
+        ".app_html.production.app_html_sha256",
+        ".app_html.production.vault_manifest_sha256",
+        ".app_html.production.build_inputs_sha256",
     ),
 }
 PROVENANCE_RECORD_RE = re.compile(r"^<!-- PRODUCTION_APP_PROVENANCE=(\{.+\}) -->$", re.MULTILINE)

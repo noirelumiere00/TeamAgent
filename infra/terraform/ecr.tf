@@ -185,16 +185,19 @@ locals {
   # Production release repositories intentionally have no lifecycle policy.
   # OCI referrers and their signatures are normally untagged; even a long
   # untagged-expiry rule could silently sever an active/rollback evidence
-  # graph. Candidate cleanup stays isolated in physically separate repos.
+  # graph. The retained verified-candidate policy can match only an explicitly
+  # noncanonical rejected-* tag; canonical verified-* subjects and every
+  # untagged referrer remain available for fresh rollback re-attestation.
   ecr_verified_candidate_lifecycle_policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "expire verified candidates after 30 days"
+      description  = "expire only explicitly rejected verified-candidate imports"
       selection = {
-        tagStatus   = "any"
-        countType   = "sinceImagePushed"
-        countUnit   = "days"
-        countNumber = 30
+        tagStatus     = "tagged"
+        tagPrefixList = ["rejected-"]
+        countType     = "sinceImagePushed"
+        countUnit     = "days"
+        countNumber   = 2
       }
       action = { type = "expire" }
     }]

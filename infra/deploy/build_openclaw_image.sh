@@ -230,14 +230,14 @@ OBJECT_LOCK="$(
   || die "malformed evidence Object Lock configuration"
 IFS=$'\t' read -r LOCK_ENABLED LOCK_MODE LOCK_DAYS EXTRA_LOCK <<<"$OBJECT_LOCK"
 [ -z "${EXTRA_LOCK:-}" ] || die "malformed evidence Object Lock configuration"
-[ "$LOCK_ENABLED" = "Enabled" ] && [ "$LOCK_MODE" = "COMPLIANCE" ] && [ "$LOCK_DAYS" = "30" ] \
-  || die "evidence bucket must use 30-day COMPLIANCE Object Lock"
+[ "$LOCK_ENABLED" = "Enabled" ] && [ "$LOCK_MODE" = "COMPLIANCE" ] && [ "$LOCK_DAYS" = "3650" ] \
+  || die "evidence bucket must use durable COMPLIANCE Object Lock"
 unset OBJECT_LOCK LOCK_ENABLED LOCK_MODE LOCK_DAYS EXTRA_LOCK
 
 RETAIN_UNTIL="$(python3 - <<'PY'
 import datetime
 
-value = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=30, minutes=5)
+value = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=3650, minutes=5)
 print(value.isoformat(timespec="seconds").replace("+00:00", "Z"))
 PY
 )"
