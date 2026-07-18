@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "log_versioning_stage": {
-    "id": "2026-07-log-versioning-attest-v2",
+    "id": "2026-07-log-versioning-precutover-v3",
     "enabled": false,
     "expires_at": "2026-08-31T00:00:00Z",
     "buckets": [
@@ -14,7 +14,10 @@
     ],
     "required_status_after": "Enabled",
     "mfa_delete": "Disabled",
-    "producer_action": "active-observation-only",
+    "producer_action": "disconnected-observation-only",
+    "producer_state_required": "disconnected",
+    "timestamp_source": "aws-cloudtrail-event-history",
+    "minimum_settle_seconds": 900,
     "cutover_mode": "pre-versioned-destination-before-producer-cutover"
   },
   "migrations": {
@@ -111,7 +114,17 @@
         "alarm_delivery": {
           "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
           "canonical_topic_exists": true,
-          "confirmed_email_endpoint_sha256": [],
+          "confirmed_email_endpoint_sha256": [
+            "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
+          ],
+          "subscription_inventory_count": 1,
+          "pending_subscription_count": 0,
+          "subscription_protocols": [
+            "email"
+          ],
+          "subscription_inventory_sha256": "",
+          "confirmed_subscription_metadata_sha256": "",
+          "destination_state_sha256": "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
           "attached_chatbot_configuration_arns": [],
           "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
           "legacy_topic_exists": true,
@@ -379,7 +392,16 @@
         },
         "alarm_delivery": {
           "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
-          "minimum_confirmed_destinations": 1,
+          "confirmed_email_endpoint_sha256": [
+            "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
+          ],
+          "subscription_inventory_count": 1,
+          "pending_subscription_count": 0,
+          "subscription_protocols": [
+            "email"
+          ],
+          "destination_state_sha256": "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
+          "attached_chatbot_configuration_arns": [],
           "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
           "legacy_topic_exists": false,
           "legacy_action_reference_count": 0
@@ -412,14 +434,19 @@
       "legacy_owner": "external-teamagent-state",
       "import_legacy_into_this_state": false,
       "ordered_phases": [
-        "configure canonical email or chat destination",
+        "configure canonical approved email destination",
         "confirm delivery and verify canonical metadata",
         "retarget every legacy alarm and budget publisher",
         "retire legacy topic from its owning state",
         "run strict sync, then activation migration"
       ],
       "activation_requires": {
-        "minimum_confirmed_destinations": 1,
+        "confirmed_email_endpoint_sha256": "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6",
+        "subscription_inventory_count": 1,
+        "pending_subscription_count": 0,
+        "subscription_protocol": "email",
+        "destination_state_sha256": "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
+        "chatbot_configuration_count": 0,
         "legacy_topic_exists": false,
         "legacy_action_reference_count": 0
       }

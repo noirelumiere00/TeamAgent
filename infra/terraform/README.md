@@ -37,13 +37,16 @@ guard/receiptを「管理者にも強制できる安全境界」とは扱いま�
   です。guardはlatest objectをexact versionで再取得し、HTML bytesと埋込みprovenanceを
   照合するため、旧版や別publishへ暗黙に移行しません。
 - ingest-weeklyとcanary-hourlyは無効、morning-digestは有効のまま第1段階を行います。
-- alarm SNSには確認済み配送先がありません。email endpointまたは既存chat integrationの
-  どちらか一方を指定しない限りplanは生成されません。AWS providerはemail確認を待てない
+- alarm SNSには確認済み配送先がありません。approved exact email
+  `s-komata@vectorinc.co.jp`を指定しない限りplanは生成されません。AWS providerはemail確認を待てない
   ため、このmigrationはsubscriptionを作りません。emailは先にcanonical topic上で確認を
   完了し、正規化済み`s-komata@vectorinc.co.jp`のexact hashと一致してから指定します。
-  chat経路もcanonical topicへ接続済みのexact ARN 1件かつ`State=ENABLED`だけをplan前
-  snapshotで受け付けます。email/chatの混在、未確認email、未接続・置換・disabled chat、
-  endpoint 0件はいずれもruntime変更前に停止します。各confirmed subscriptionは
+  canonical topicの全protocolとPendingConfirmation/Deletedを含むsubscription inventoryを
+  hash化し、approved emailのconfirmed `email` protocol 1件だけを受理します。追加endpoint、
+  `email-json`、pending/deleted subscription、別email、canonical topicへ接続した
+  Amazon Q Developer in chat applications (AWS Chatbot) はruntime変更前に停止します。
+  approved destinationはtopic ARN、正規化email、confirmed/no-filter/raw-delivery-off、
+  Chatbot 0件を含む固定destination-state hashにも束縛します。confirmed subscriptionは
   `GetSubscriptionAttributes`で再取得し、`PendingConfirmation=false`、email確認済み、
   `FilterPolicy`/`FilterPolicyScope`なしを検証します。さらにunique test messageの実受信を
   人が確認した短命`teamagent-alarm-delivery-test-receipt`が無い限りmigration planを
@@ -73,21 +76,27 @@ S3公式仕様では、bucketで初めてversioningを有効にした後は伝�
 https://docs.aws.amazon.com/AmazonS3/latest/userguide/manage-versioning-examples.html
 
 現liveはCloudTrail/Bedrock producerが既に配信中です。稼働中destinationをその場で
-UnversionedからEnabledへ変更するcommandは提供しません。新しいdestinationはproducerを
-向ける前にversioningを有効化し、900秒待ってから、別のreview済みfull planでproducerを
-cutoverします。既存producerのdestroy/pauseを「待機」とみなす方式も禁止です。
+UnversionedからEnabledへ変更するcommandも、稼働後の観測を過去のpre-cutover証跡として
+扱う経路も提供しません。新しいdestinationはproducerを向ける前にversioningを有効化し、
+AWS CloudTrail event historyの各`PutBucketVersioning(Status=Enabled)`時刻から900秒待って
+から、別のreview済みfull planでproducerをcutoverします。既存producerのdestroy/pauseを
+「待機」とみなす方式も禁止です。
 
-1. 新destinationをproducer未接続の状態で作成・versioning有効化し、900秒以上待つ。
-2. reviewed cutover後、`attest-log-versioning`がexact trusted automation roleと共有lockの
-   下で固定destinationの`Status=Enabled`、CloudTrailの削除lifecycle無し、producer配信先、
-   初期化済みbackend metadata、default workspace、state lineage/serial/address ownershipを
-   読取り、Git/guard/config hashを結合した原子的attestation receiptを発行する。
-   Unversioned/Suspendedなら書き換えずfail closedする。
-3. receiptの`versioning_observed_at_epoch`からさらに900秒以上経過したCloudTrail最新
-   log+digest、Bedrock最新delivery、30日化する5 log groupのexport manifestを、0600の
-   `teamagent-log-readiness-evidence`へ具体的なkey/version/ETag/size/timestampとともに記録
-   する。readiness receiptはevidenceとretention manifestのcanonical path/inode/SHAを束縛し、
-   plan/verify/apply直前に内容とhashを再検証する。
+1. 新destinationをproducer未接続の状態で作成・versioning有効化する。CloudTrail trailは
+   exact destinationへ設定済みでも`IsLogging=false`、Bedrock invocation loggingは未設定
+   でなければならない。
+2. `attest-log-versioning`はexact trusted automation roleと共有lockの下で、両bucketの
+   `Status=Enabled`、CloudTrailの削除lifecycle無し、全writer disconnected、CloudTrail event
+   history由来の独立したversioning-enabled時刻、900秒settle完了、bucket/versioning identity、
+   初期化済みbackend/state、将来のexact producer cutoverを原子的pre-cutover receiptへ束縛する。
+   Unversioned/Suspended、writer接続済み、時刻欠落、900秒未満なら書き換えずfail closedする。
+3. reviewed cutoverはそのreceiptの`cutover.not_before_epoch`後だけに行う。guarded runtime planは
+   producerをexact no-opに固定し、receiptへ束縛されたcutoverと現producerが一致しなければ停止する。
+4. cutover後のCloudTrail最新log+digest、Bedrock最新delivery、30日化する5 log groupのexport
+   manifestを、0600の`teamagent-log-readiness-evidence`へ具体的なkey/version/ETag/size/timestamp
+   とともに記録する。各delivery/retention content hashは別々の0600 export fileのcanonical
+   path/inode/sizeへ束縛し、delivery/retention timestampはevidence observation時刻以下にする。
+   guardはplan、verify、apply直前に全export fileを再hashし、path/inode/sizeも再検証する。
 
 ```bash
 bash ../deploy/terraform_runtime_guard.sh attest-log-versioning \
@@ -102,7 +111,7 @@ CloudTrailとBedrock producer resourceは`prevent_destroy`で保護し、plan va
 exact `no-op`に固定するため、versioning伝播待ちをproducerの停止で代替できません。
 
 ```bash
-# 900秒経過後、secure evidence/export artifactを確認して作るreceiptの必須binding:
+# cutover後、secure evidence/export artifactを確認して作るreceiptの必須binding:
 # versioning_receipt_sha256 = sha256(log-versioning.json)
 ```
 

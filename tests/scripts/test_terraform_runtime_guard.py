@@ -969,14 +969,45 @@ def _fake_aws(path: Path) -> None:
         elif args[:2] == ["sns", "list-subscriptions-by-topic"]:
             subscriptions = []
             if not os.environ.get("AWS_FAKE_NO_ALARM_DELIVERY"):
+                protocol = "email-json" if os.environ.get("AWS_FAKE_EMAIL_JSON") else "email"
+                endpoint = (
+                    "other@example.com"
+                    if os.environ.get("AWS_FAKE_DIFFERENT_ALARM_EMAIL")
+                    else "s-komata@vectorinc.co.jp"
+                )
                 subscriptions.append({{
                     "SubscriptionArn": (
                         "arn:aws:sns:ap-northeast-1:718959508629:"
                         "teamagent-dev-openclaw-alarms:confirmed"
                     ),
                     "Owner": ACCOUNT,
+                    "Protocol": protocol,
+                    "Endpoint": endpoint,
+                    "TopicArn": (
+                        "arn:aws:sns:ap-northeast-1:718959508629:"
+                        "teamagent-dev-openclaw-alarms"
+                    ),
+                }})
+            if os.environ.get("AWS_FAKE_PENDING_SUBSCRIPTION"):
+                subscriptions.append({{
+                    "SubscriptionArn": "PendingConfirmation",
+                    "Owner": ACCOUNT,
                     "Protocol": "email",
-                    "Endpoint": "s-komata@vectorinc.co.jp",
+                    "Endpoint": "pending@example.com",
+                    "TopicArn": (
+                        "arn:aws:sns:ap-northeast-1:718959508629:"
+                        "teamagent-dev-openclaw-alarms"
+                    ),
+                }})
+            if os.environ.get("AWS_FAKE_EXTRA_SUBSCRIPTION"):
+                subscriptions.append({{
+                    "SubscriptionArn": (
+                        "arn:aws:sns:ap-northeast-1:718959508629:"
+                        "teamagent-dev-openclaw-alarms:extra"
+                    ),
+                    "Owner": ACCOUNT,
+                    "Protocol": "sms",
+                    "Endpoint": "+819012345678",
                     "TopicArn": (
                         "arn:aws:sns:ap-northeast-1:718959508629:"
                         "teamagent-dev-openclaw-alarms"
@@ -985,14 +1016,20 @@ def _fake_aws(path: Path) -> None:
             print(json.dumps({{"Subscriptions": subscriptions}}))
         elif args[:2] == ["sns", "get-subscription-attributes"]:
             subscription_arn = args[args.index("--subscription-arn") + 1]
+            protocol = "email-json" if os.environ.get("AWS_FAKE_EMAIL_JSON") else "email"
+            endpoint = (
+                "other@example.com"
+                if os.environ.get("AWS_FAKE_DIFFERENT_ALARM_EMAIL")
+                else "s-komata@vectorinc.co.jp"
+            )
             attributes = {{
                 "SubscriptionArn": subscription_arn,
                 "TopicArn": (
                     "arn:aws:sns:ap-northeast-1:718959508629:"
                     "teamagent-dev-openclaw-alarms"
                 ),
-                "Protocol": "email",
-                "Endpoint": "s-komata@vectorinc.co.jp",
+                "Protocol": protocol,
+                "Endpoint": endpoint,
                 "PendingConfirmation": "false",
                 "ConfirmationWasAuthenticated": "true",
                 "RawMessageDelivery": "false",
@@ -1001,7 +1038,20 @@ def _fake_aws(path: Path) -> None:
                 attributes["FilterPolicy"] = '{{"severity":["critical"]}}'
             print(json.dumps({{"Attributes": attributes}}))
         elif args[:2] == ["chatbot", "describe-slack-channel-configurations"]:
-            print(json.dumps({{"SlackChannelConfigurations": []}}))
+            configurations = []
+            if os.environ.get("AWS_FAKE_CHATBOT"):
+                configurations.append({{
+                    "ChatConfigurationArn": (
+                        "arn:aws:chatbot::718959508629:chat-configuration/"
+                        "slack-channel/teamagent-dev-alerts"
+                    ),
+                    "SnsTopicArns": [(
+                        "arn:aws:sns:ap-northeast-1:718959508629:"
+                        "teamagent-dev-openclaw-alarms"
+                    )],
+                    "State": "ENABLED",
+                }})
+            print(json.dumps({{"SlackChannelConfigurations": configurations}}))
         elif args[:2] == ["chatbot", "list-microsoft-teams-channel-configurations"]:
             print(json.dumps({{"TeamChannelConfigurations": []}}))
         elif args[:2] == ["cloudwatch", "describe-alarms"]:
@@ -1973,6 +2023,11 @@ def test_divergent_live_core_images_require_exact_migration_without_rollback(
         "AWS_FAKE_LEGACY_ALARM_ACTION",
         "AWS_FAKE_LEGACY_BUDGET_ACTION",
         "AWS_FAKE_LEGACY_ANOMALY_ACTION",
+        "AWS_FAKE_PENDING_SUBSCRIPTION",
+        "AWS_FAKE_EXTRA_SUBSCRIPTION",
+        "AWS_FAKE_DIFFERENT_ALARM_EMAIL",
+        "AWS_FAKE_EMAIL_JSON",
+        "AWS_FAKE_CHATBOT",
     ],
 )
 def test_alarm_delivery_and_legacy_topic_contract_fail_before_plan(

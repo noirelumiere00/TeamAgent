@@ -36,9 +36,10 @@ resource "aws_sns_topic" "alarms" {
 # promote services while it is still PendingConfirmation. Delivery endpoints
 # are intentionally external to this state: the guard accepts an email only
 # after the live SNS API reports its confirmed ARN, hashes the normalized
-# endpoint, and matches that hash to alarm_email_endpoints. Existing Chatbot
-# integrations are checked by exact configuration ARN in the same pre-plan
-# snapshot. No pending subscription is ever created by this rollout.
+# endpoint, and matches that hash to the one approved alarm_email_endpoints
+# value. The full protocol/pending inventory must contain only that confirmed
+# email subscription; any canonical-topic Chatbot attachment is rejected.
+# No pending subscription is ever created by this rollout.
 
 # ---------- メトリクスフィルタ ----------
 # 1) コスト：各 Bedrock 呼び出しの cost_usd を集計

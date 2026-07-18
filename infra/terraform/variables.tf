@@ -112,7 +112,7 @@ variable "lambda_timeout" {
 
 # ---------- 観測・アラーム閾値（Sprint 2 / 2.6）----------
 variable "alarm_email_endpoints" {
-  description = "canonical SNS topicの確認済み通知先メール。state移行を決定的にするため、この環境では0または1件。"
+  description = "canonical SNS topicの確認済み通知先メール。この環境では空またはapproved exact email s-komata@vectorinc.co.jp 1件だけ。"
   type        = list(string)
   default     = []
   sensitive   = true
@@ -126,39 +126,26 @@ variable "alarm_email_endpoints" {
       ])) == length(var.alarm_email_endpoints) &&
       alltrue([
         for endpoint in var.alarm_email_endpoints :
-        can(regex(
-          "^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$",
-          trimspace(endpoint),
-        ))
+        lower(trimspace(endpoint)) == "s-komata@vectorinc.co.jp"
       ])
     )
-    error_message = "alarm_email_endpointsは重複のない有効なメールアドレスを最大1件指定してください。"
+    error_message = "alarm_email_endpointsは空またはapproved exact email s-komata@vectorinc.co.jp 1件だけを指定してください。"
   }
 }
 
 variable "alarm_chatbot_configuration_arns" {
-  description = "canonical SNS topicへ接続済みのAmazon Q Developer in chat applications (AWS Chatbot) configuration ARN。別state所有のexact ARNのみ。"
+  description = "canonical SNS topicのChatbot modeは禁止。互換入力として空listだけを受け付ける。"
   type        = list(string)
   default     = []
 
   validation {
-    condition = (
-      length(distinct(var.alarm_chatbot_configuration_arns)) ==
-      length(var.alarm_chatbot_configuration_arns) &&
-      alltrue([
-        for arn in var.alarm_chatbot_configuration_arns :
-        can(regex(
-          "^arn:aws:chatbot::718959508629:chat-configuration/(slack-channel|microsoft-teams-channel)/[A-Za-z0-9._-]+$",
-          arn,
-        ))
-      ])
-    )
-    error_message = "alarm_chatbot_configuration_arnsはaccount 718959508629のexact Slack/Teams chat-configuration ARNである必要があります。"
+    condition     = length(var.alarm_chatbot_configuration_arns) == 0
+    error_message = "alarm_chatbot_configuration_arnsは空である必要があります。approved email以外のChatbot modeは禁止です。"
   }
 }
 
 variable "require_alarm_delivery" {
-  description = "本番runtime/schedule rolloutを、確認済みemailまたはchat integrationが無い場合にfail-closedする。guarded planは常にtrueを強制する。"
+  description = "本番runtime/schedule rolloutを、approved exact emailの確認済みexclusive subscriptionが無い場合にfail-closedする。guarded planは常にtrueを強制する。"
   type        = bool
   default     = true
 }

@@ -8,54 +8,56 @@
 variable "runtime_guard_live" {
   description = "Guard scriptがlive/preflight/migration manifestから生成する一時照合値。tfvarsへ保存しない。"
   type = object({
-    project_name                       = string
-    environment                        = string
-    aws_region                         = string
-    account_id                         = string
-    mode                               = string
-    migration_id                       = string
-    preflight_receipt_sha256           = string
-    live_openclaw_image                = string
-    desired_openclaw_image             = string
-    live_mcp_image                     = string
-    desired_mcp_image                  = string
-    live_x_image                       = string
-    desired_x_image                    = string
-    live_tiktok_image                  = string
-    desired_tiktok_image               = string
-    enable_connect_web                 = bool
-    enable_ingest_schedule             = bool
-    enable_morning_digest              = bool
-    enable_canary_health               = bool
-    enable_x_research                  = bool
-    enable_tiktok_acquire              = bool
-    enable_scrape_tools                = bool
-    enable_reminders                   = bool
-    enable_report_shorturl             = bool
-    enable_research_persist            = bool
-    enable_kaiwai_classify             = bool
-    use_calendar_event_tool            = bool
-    use_schedule_propose_tool          = bool
-    enable_progress_notify             = bool
-    use_entity_tags                    = bool
-    use_ailavault_deeplinks            = bool
-    use_payload_offload                = bool
-    video_quota_enabled                = bool
-    use_analysis_cache                 = bool
-    morning_digest_slack_unread        = bool
-    morning_digest_schedule_button     = bool
-    morning_digest_calendar_button     = bool
-    morning_digest_compact             = bool
-    morning_digest_reminders           = bool
-    shared_company_domains             = string
-    slack_team_id                      = string
-    ingest_rule_enabled                = bool
-    morning_digest_rule_enabled        = bool
-    canary_rule_enabled                = bool
-    tiktok_dispatch_static_environment = map(string)
-    x_dispatch_static_environment      = map(string)
-    tiktok_dispatch_code_sha256        = string
-    x_dispatch_code_sha256             = string
+    project_name                          = string
+    environment                           = string
+    aws_region                            = string
+    account_id                            = string
+    mode                                  = string
+    migration_id                          = string
+    preflight_receipt_sha256              = string
+    versioning_pre_cutover_receipt_sha256 = string
+    log_cutover_contract_sha256           = string
+    live_openclaw_image                   = string
+    desired_openclaw_image                = string
+    live_mcp_image                        = string
+    desired_mcp_image                     = string
+    live_x_image                          = string
+    desired_x_image                       = string
+    live_tiktok_image                     = string
+    desired_tiktok_image                  = string
+    enable_connect_web                    = bool
+    enable_ingest_schedule                = bool
+    enable_morning_digest                 = bool
+    enable_canary_health                  = bool
+    enable_x_research                     = bool
+    enable_tiktok_acquire                 = bool
+    enable_scrape_tools                   = bool
+    enable_reminders                      = bool
+    enable_report_shorturl                = bool
+    enable_research_persist               = bool
+    enable_kaiwai_classify                = bool
+    use_calendar_event_tool               = bool
+    use_schedule_propose_tool             = bool
+    enable_progress_notify                = bool
+    use_entity_tags                       = bool
+    use_ailavault_deeplinks               = bool
+    use_payload_offload                   = bool
+    video_quota_enabled                   = bool
+    use_analysis_cache                    = bool
+    morning_digest_slack_unread           = bool
+    morning_digest_schedule_button        = bool
+    morning_digest_calendar_button        = bool
+    morning_digest_compact                = bool
+    morning_digest_reminders              = bool
+    shared_company_domains                = string
+    slack_team_id                         = string
+    ingest_rule_enabled                   = bool
+    morning_digest_rule_enabled           = bool
+    canary_rule_enabled                   = bool
+    tiktok_dispatch_static_environment    = map(string)
+    x_dispatch_static_environment         = map(string)
+    tiktok_dispatch_code_sha256           = string
+    x_dispatch_code_sha256                = string
     monitoring = object({
       container_insights = string
     })
@@ -63,7 +65,12 @@ variable "runtime_guard_live" {
       canonical_topic_arn                    = string
       canonical_topic_exists                 = bool
       confirmed_email_endpoint_sha256        = list(string)
+      subscription_inventory_count           = number
+      pending_subscription_count             = number
+      subscription_protocols                 = list(string)
+      subscription_inventory_sha256          = string
       confirmed_subscription_metadata_sha256 = string
+      destination_state_sha256               = string
       attached_chatbot_configuration_arns    = list(string)
       legacy_topic_arn                       = string
       legacy_topic_exists                    = bool
@@ -308,6 +315,11 @@ locals {
   )
   canonical_alarm_topic_arn = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms"
   legacy_alarm_topic_arn    = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms"
+  approved_alarm_email      = "s-komata@vectorinc.co.jp"
+  approved_alarm_email_sha256 = sha256(
+    local.approved_alarm_email
+  )
+  approved_alarm_destination_state_sha256 = "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9"
   configured_alarm_email_sha256 = sort([
     for endpoint in var.alarm_email_endpoints :
     sha256(lower(trimspace(endpoint)))
@@ -315,21 +327,29 @@ locals {
   configured_alarm_chatbot_arns = sort(var.alarm_chatbot_configuration_arns)
   alarm_delivery_configuration_valid = (
     var.require_alarm_delivery &&
-    (
-      (
-        length(local.configured_alarm_email_sha256) == 1 &&
-        length(local.configured_alarm_chatbot_arns) == 0
-      ) ||
-      (
-        length(local.configured_alarm_email_sha256) == 0 &&
-        length(local.configured_alarm_chatbot_arns) > 0
-      )
-    )
+    local.configured_alarm_email_sha256 == [
+      local.approved_alarm_email_sha256
+    ] &&
+    length(local.configured_alarm_chatbot_arns) == 0
   )
   runtime_is_initial_alarm_delivery_migration = (
     var.runtime_guard_live != null &&
     var.runtime_guard_live.mode == "migration" &&
     try(local.runtime_selected_migration.kind, "") == "runtime"
+  )
+  log_producer_cutover_guard_valid = var.runtime_guard_live == null ? false : (
+    var.runtime_guard_live.mode == "sync" ||
+    (
+      var.runtime_guard_live.mode == "migration" &&
+      can(regex(
+        "^[0-9a-f]{64}$",
+        var.runtime_guard_live.versioning_pre_cutover_receipt_sha256,
+      )) &&
+      can(regex(
+        "^[0-9a-f]{64}$",
+        var.runtime_guard_live.log_cutover_contract_sha256,
+      ))
+    )
   )
   runtime_alarm_delivery_contract_valid = var.runtime_guard_live == null ? false : (
     var.runtime_guard_live.alarm_delivery.canonical_topic_arn ==
@@ -337,14 +357,23 @@ locals {
     var.runtime_guard_live.alarm_delivery.canonical_topic_exists &&
     var.runtime_guard_live.alarm_delivery.legacy_topic_arn ==
     local.legacy_alarm_topic_arn &&
-    sort(var.runtime_guard_live.alarm_delivery.confirmed_email_endpoint_sha256) ==
-    local.configured_alarm_email_sha256 &&
-    sort(var.runtime_guard_live.alarm_delivery.attached_chatbot_configuration_arns) ==
-    local.configured_alarm_chatbot_arns &&
-    (
-      length(var.runtime_guard_live.alarm_delivery.confirmed_email_endpoint_sha256) +
-      length(var.runtime_guard_live.alarm_delivery.attached_chatbot_configuration_arns)
-    ) > 0 &&
+    var.runtime_guard_live.alarm_delivery.confirmed_email_endpoint_sha256 == [
+      local.approved_alarm_email_sha256
+    ] &&
+    var.runtime_guard_live.alarm_delivery.subscription_inventory_count == 1 &&
+    var.runtime_guard_live.alarm_delivery.pending_subscription_count == 0 &&
+    var.runtime_guard_live.alarm_delivery.subscription_protocols == ["email"] &&
+    can(regex(
+      "^[0-9a-f]{64}$",
+      var.runtime_guard_live.alarm_delivery.subscription_inventory_sha256,
+    )) &&
+    can(regex(
+      "^[0-9a-f]{64}$",
+      var.runtime_guard_live.alarm_delivery.confirmed_subscription_metadata_sha256,
+    )) &&
+    var.runtime_guard_live.alarm_delivery.destination_state_sha256 ==
+    local.approved_alarm_destination_state_sha256 &&
+    var.runtime_guard_live.alarm_delivery.attached_chatbot_configuration_arns == [] &&
     (
       local.runtime_is_initial_alarm_delivery_migration ?
       (
@@ -357,7 +386,37 @@ locals {
         sort(try(
           local.runtime_selected_migration.from.alarm_delivery.attached_chatbot_configuration_arns,
           [],
-        ))
+        )) &&
+        var.runtime_guard_live.alarm_delivery.subscription_inventory_count ==
+        try(
+          local.runtime_selected_migration.from.alarm_delivery.subscription_inventory_count,
+          -1,
+        ) &&
+        var.runtime_guard_live.alarm_delivery.pending_subscription_count ==
+        try(
+          local.runtime_selected_migration.from.alarm_delivery.pending_subscription_count,
+          -1,
+        ) &&
+        var.runtime_guard_live.alarm_delivery.subscription_protocols ==
+        try(
+          local.runtime_selected_migration.from.alarm_delivery.subscription_protocols,
+          [],
+        ) &&
+        var.runtime_guard_live.alarm_delivery.subscription_inventory_sha256 ==
+        try(
+          local.runtime_selected_migration.from.alarm_delivery.subscription_inventory_sha256,
+          "",
+        ) &&
+        var.runtime_guard_live.alarm_delivery.confirmed_subscription_metadata_sha256 ==
+        try(
+          local.runtime_selected_migration.from.alarm_delivery.confirmed_subscription_metadata_sha256,
+          "",
+        ) &&
+        var.runtime_guard_live.alarm_delivery.destination_state_sha256 ==
+        try(
+          local.runtime_selected_migration.from.alarm_delivery.destination_state_sha256,
+          "",
+        )
       ) :
       (
         !var.runtime_guard_live.alarm_delivery.legacy_topic_exists &&
@@ -376,6 +435,8 @@ locals {
       (
         var.runtime_guard_live.migration_id == "" &&
         var.runtime_guard_live.preflight_receipt_sha256 == "" &&
+        var.runtime_guard_live.versioning_pre_cutover_receipt_sha256 == "" &&
+        var.runtime_guard_live.log_cutover_contract_sha256 == "" &&
         var.runtime_guard_live.desired_openclaw_image == var.runtime_guard_live.live_openclaw_image &&
         var.runtime_guard_live.desired_mcp_image == var.runtime_guard_live.live_mcp_image &&
         var.runtime_guard_live.desired_x_image == var.runtime_guard_live.live_x_image &&
@@ -385,6 +446,14 @@ locals {
         local.runtime_migration_manifest.schema_version == 1 &&
         try(local.runtime_selected_migration.enabled, false) &&
         can(regex("^[0-9a-f]{64}$", var.runtime_guard_live.preflight_receipt_sha256)) &&
+        can(regex(
+          "^[0-9a-f]{64}$",
+          var.runtime_guard_live.versioning_pre_cutover_receipt_sha256,
+        )) &&
+        can(regex(
+          "^[0-9a-f]{64}$",
+          var.runtime_guard_live.log_cutover_contract_sha256,
+        )) &&
         var.runtime_guard_live.ingest_rule_enabled ==
         (try(local.runtime_selected_migration.to.rule_states.ingest, "") == "ENABLED") &&
         var.runtime_guard_live.morning_digest_rule_enabled ==

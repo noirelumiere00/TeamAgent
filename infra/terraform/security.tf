@@ -188,6 +188,11 @@ resource "aws_cloudtrail" "main" {
   ]
 
   lifecycle {
+    precondition {
+      condition     = local.log_producer_cutover_guard_valid
+      error_message = "CloudTrail writer requires sync parity or a guard-verified producer-off pre-cutover receipt bound to the exact cutover."
+    }
+
     # The bootstrap flag must never be used as a pseudo-pause after adoption.
     # Pausing or retiring audit delivery requires a separate approved change.
     prevent_destroy = true
@@ -356,6 +361,11 @@ resource "aws_bedrock_model_invocation_logging_configuration" "main" {
   ]
 
   lifecycle {
+    precondition {
+      condition     = local.log_producer_cutover_guard_valid
+      error_message = "Bedrock log writer requires sync parity or a guard-verified producer-off pre-cutover receipt bound to the exact cutover."
+    }
+
     # The bootstrap flag must never destroy a live account-level logging
     # configuration. Retirement needs an explicit, separately reviewed path.
     prevent_destroy = true

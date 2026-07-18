@@ -845,10 +845,18 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     assert "sha256(lower(trimspace(endpoint)))" in runtime
     assert "depends_on = [aws_sns_topic.alarms]" in runtime
     assert "aws_sns_topic_subscription.alarms_email" not in runtime
-    assert "length(local.configured_alarm_email_sha256) == 1 &&" in runtime
-    assert "length(local.configured_alarm_chatbot_arns) > 0" in runtime
+    assert "local.configured_alarm_email_sha256 == [" in runtime
+    assert "length(local.configured_alarm_chatbot_arns) == 0" in runtime
+    assert 'lower(trimspace(endpoint)) == "s-komata@vectorinc.co.jp"' in variables
+    assert "length(var.alarm_chatbot_configuration_arns) == 0" in variables
     assert "list-subscriptions-by-topic" in guard
     assert "get-subscription-attributes" in guard
+    assert "subscription-inventory.jsonl" in guard
+    assert "subscription_inventory_sha256" in guard
+    assert "destination_state_sha256" in guard
+    assert "subscription_inventory_count == 1" in guard
+    assert "pending_subscription_count == 0" in guard
+    assert 'subscription_protocols == ["email"]' in guard
     assert 'has("FilterPolicy") | not' in guard
     assert 'has("FilterPolicyScope") | not' in guard
     assert "verify_alarm_delivery_test_receipt" in guard
@@ -860,12 +868,24 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     assert 'select(.type == "aws_sns_topic_subscription")' in guard
     assert "configured_email_hash" in guard
     assert "strict syncは確認済みalarm delivery" in guard
-    assert "PendingConfirmation|Deleted" in guard
+    assert 'PendingConfirmation) subscription_state="pending"' in guard
+    assert 'Deleted) subscription_state="deleted"' in guard
     assert handoff["canonical_owner"] == "aws_sns_topic.alarms"
     assert handoff["legacy_owner"] == "external-teamagent-state"
     assert handoff["import_legacy_into_this_state"] is False
     assert handoff["activation_requires"] == {
-        "minimum_confirmed_destinations": 1,
+        "confirmed_email_endpoint_sha256": (
+            "88c6452f9db04017250aa5728b4815bcc"
+            "b55b5ecc0b35b50a5234170dc08d1e6"
+        ),
+        "subscription_inventory_count": 1,
+        "pending_subscription_count": 0,
+        "subscription_protocol": "email",
+        "destination_state_sha256": (
+            "c942dbb7b97da1f4d9debb1ba241ee89"
+            "bf8c1d951d8d75bdea3056850838ddc9"
+        ),
+        "chatbot_configuration_count": 0,
         "legacy_topic_exists": False,
         "legacy_action_reference_count": 0,
     }
@@ -888,8 +908,12 @@ def _run_alarm_delivery_validator(
 ) -> subprocess.CompletedProcess[str]:
     canonical = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms"
     legacy = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms"
-    email = " Alerts@Example.COM "
-    email_hash = hashlib.sha256(b"alerts@example.com").hexdigest()
+    email = " S-KOMATA@VECTORINC.CO.JP "
+    email_hash = hashlib.sha256(b"s-komata@vectorinc.co.jp").hexdigest()
+    destination_hash = (
+        "c942dbb7b97da1f4d9debb1ba241ee89"
+        "bf8c1d951d8d75bdea3056850838ddc9"
+    )
     chat_arn = "arn:aws:chatbot::718959508629:chat-configuration/slack-channel/teamagent-dev-alerts"
     if mode == "email":
         emails = [email]
@@ -906,15 +930,32 @@ def _run_alarm_delivery_validator(
 
     alarm_actions = [canonical]
     extra_resources: list[dict[str, object]] = []
+    inventory_count = 1
+    pending_count = 0
+    protocols = ["email"]
+    inventory_sha = "a" * 64
     if mutation == "zero":
         emails = []
         chat = []
         live_email_hashes = []
         live_chat_arns = []
     elif mutation == "pending":
-        live_email_hashes = []
+        pending_count = 1
     elif mutation == "mismatch":
         live_email_hashes = [hashlib.sha256(b"other@example.com").hexdigest()]
+    elif mutation == "different_configured":
+        emails = ["other@example.com"]
+    elif mutation == "extra":
+        inventory_count = 2
+        protocols = ["email", "sms"]
+    elif mutation == "protocol":
+        protocols = ["email-json"]
+    elif mutation == "inventory_hash":
+        inventory_sha = "not-a-hash"
+    elif mutation == "destination":
+        destination_hash = "9" * 64
+    elif mutation == "chatbot":
+        live_chat_arns = [chat_arn]
     elif mutation == "subscription":
         extra_resources.append(
             {
@@ -945,6 +986,12 @@ def _run_alarm_delivery_validator(
                 "value": {
                     "alarm_delivery": {
                         "confirmed_email_endpoint_sha256": live_email_hashes,
+                        "subscription_inventory_count": inventory_count,
+                        "pending_subscription_count": pending_count,
+                        "subscription_protocols": protocols,
+                        "subscription_inventory_sha256": inventory_sha,
+                        "confirmed_subscription_metadata_sha256": "b" * 64,
+                        "destination_state_sha256": destination_hash,
                         "attached_chatbot_configuration_arns": live_chat_arns,
                     }
                 }
@@ -999,6 +1046,17 @@ def _run_alarm_delivery_validator(
                 "    shasum -a 256 | awk '{print $1}'",
                 "  fi",
                 "}",
+                'EXPECTED_ALARM_EMAIL="s-komata@vectorinc.co.jp"',
+                (
+                    'EXPECTED_ALARM_EMAIL_SHA256="'
+                    '88c6452f9db04017250aa5728b4815bcc'
+                    'b55b5ecc0b35b50a5234170dc08d1e6"'
+                ),
+                (
+                    'EXPECTED_ALARM_DESTINATION_STATE_SHA256="'
+                    'c942dbb7b97da1f4d9debb1ba241ee89'
+                    'bf8c1d951d8d75bdea3056850838ddc9"'
+                ),
                 'die() { printf "%s\\n" "$*" >&2; exit 1; }',
                 function,
                 f'validate_alarm_delivery_plan "{plan_path}"',
@@ -1014,24 +1072,40 @@ def _run_alarm_delivery_validator(
     )
 
 
-@pytest.mark.parametrize("mode", ["email", "chat"])
 def test_alarm_delivery_validator_accepts_only_live_confirmed_destination(
     tmp_path: Path,
-    mode: str,
 ) -> None:
-    result = _run_alarm_delivery_validator(tmp_path, mode=mode)
+    result = _run_alarm_delivery_validator(tmp_path)
     assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
     "mutation",
-    ["zero", "pending", "mismatch", "subscription", "legacy_alarm"],
+    [
+        "zero",
+        "pending",
+        "mismatch",
+        "different_configured",
+        "extra",
+        "protocol",
+        "inventory_hash",
+        "destination",
+        "chatbot",
+        "subscription",
+        "legacy_alarm",
+    ],
 )
 def test_alarm_delivery_validator_rejects_unconfirmed_or_legacy_delivery(
     tmp_path: Path,
     mutation: str,
 ) -> None:
     result = _run_alarm_delivery_validator(tmp_path, mutation=mutation)
+    assert result.returncode == 1
+    assert "alarm delivery plan" in result.stderr
+
+
+def test_alarm_delivery_validator_rejects_chatbot_only_mode(tmp_path: Path) -> None:
+    result = _run_alarm_delivery_validator(tmp_path, mode="chat")
     assert result.returncode == 1
     assert "alarm delivery plan" in result.stderr
 
