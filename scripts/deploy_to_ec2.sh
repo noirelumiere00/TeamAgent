@@ -29,6 +29,8 @@ fi
 REGION="${AWS_REGION:-ap-northeast-1}"
 INSTANCE_ID="${WORKER_INSTANCE_ID:-i-0feaa3c103ab6ef91}"
 BUCKET="${DEPLOY_BUCKET:-teamagent-dev-raw-files}"
+HMAC_PREFLIGHT_MANIFEST="${HMAC_PREFLIGHT_MANIFEST:-}"
+HMAC_WORKER_ENV="${HMAC_WORKER_ENV:-}"
 GO=0
 [[ "${1:-}" == "--go" ]] && GO=1
 
@@ -36,6 +38,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+PREFLIGHT_PY="${PREFLIGHT_PY:-$ROOT/.venv/bin/python}"
+
+[[ -n "$HMAC_PREFLIGHT_MANIFEST" && -f "$HMAC_PREFLIGHT_MANIFEST" ]] || {
+  echo "ERROR: HMAC_PREFLIGHT_MANIFEST（secret-free reviewed JSON）が必須" >&2
+  exit 2
+}
+[[ -n "$HMAC_WORKER_ENV" && -f "$HMAC_WORKER_ENV" ]] || {
+  echo "ERROR: HMAC_WORKER_ENV（secret-free rendered hmac.env）が必須" >&2
+  exit 2
+}
+[[ -x "$PREFLIGHT_PY" ]] || { echo "ERROR: preflight Python が実行できない" >&2; exit 2; }
+"$PREFLIGHT_PY" scripts/preflight_hmac_rotation.py \
+  --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+  --worker-env "$HMAC_WORKER_ENV"
+cp "$HMAC_WORKER_ENV" "$WORK/hmac.env"
 
 echo "== 1. コード tarball（git archive HEAD = 追跡ファイルのみ→秘密/.env/node_modules は非同梱）=="
 git archive --format=tar.gz -o "$WORK/teamagent-bot.tar.gz" HEAD
@@ -51,7 +68,8 @@ echo "== 2. teamagent.env.base 生成（.env.production + infra/deploy/ec2.overr
 } >"$WORK/teamagent.env.base"
 
 echo "== 3. 秘密混入チェック（env.base は *_SECRET_NAME のみ・実値ゼロ）=="
-if grep -Eiq 'xoxb-|xapp-|AKIA[0-9A-Z]{15}|-----BEGIN|PRIVATE KEY' "$WORK/teamagent.env.base"; then
+if grep -Eiq 'xoxb-|xapp-|AKIA[0-9A-Z]{15}|-----BEGIN|PRIVATE KEY' \
+  "$WORK/teamagent.env.base" "$WORK/hmac.env"; then
   echo "ERROR: env.base に秘密らしき実値を検出。中止（Secrets Manager 経由にすること）。"
   exit 1
 fi
@@ -82,6 +100,7 @@ fi
 echo "== 4. S3 アップロード =="
 aws s3 cp "$WORK/teamagent-bot.tar.gz" "s3://$BUCKET/deploy/teamagent-bot.tar.gz" --region "$REGION"
 aws s3 cp "$WORK/teamagent.env.base" "s3://$BUCKET/deploy/teamagent.env.base" --region "$REGION"
+aws s3 cp "$WORK/hmac.env" "s3://$BUCKET/deploy/teamagent.hmac.env" --region "$REGION"
 
 echo "== 5. SSM でリモート展開（venv/pip + scraper npm ci + Chrome 解決 + systemd 起動）=="
 REMOTE=$(cat <<'RSH'
@@ -90,6 +109,8 @@ BUCKET="__BUCKET__"
 cd /opt/teamagent
 aws s3 cp "s3://$BUCKET/deploy/teamagent-bot.tar.gz" /tmp/app.tar.gz
 aws s3 cp "s3://$BUCKET/deploy/teamagent.env.base" /opt/teamagent/teamagent.env.base
+aws s3 cp "s3://$BUCKET/deploy/teamagent.hmac.env" /opt/teamagent/hmac.env
+chmod 0644 /opt/teamagent/hmac.env
 rm -rf app && mkdir -p app && tar xzf /tmp/app.tar.gz -C app
 cd app
 # /tmp は tmpfs(2GB) で torch 等の展開が溢れる → TMPDIR をディスクへ
@@ -117,6 +138,24 @@ if ! swapon --show | grep -q /swapfile; then
   chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile
   grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
+# bot と connect_web の両方へ同じ reviewed HMAC keyring metadata を注入する。
+# 既存インスタンスは user_data を再実行しないため、デプロイ毎に unit を冪等に設置する。
+cat > /etc/systemd/system/teamagent-bot.service <<'BOTSVC'
+[Unit]
+Description=TeamAgent Slack Bot (Socket Mode)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=/opt/teamagent/app
+ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh || exit $?; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS=MAIL_ACTION,REPORT_LINK
+[Install]
+WantedBy=multi-user.target
+BOTSVC
 # connect_web(OAuth コールバック /oauth2/callback) を常駐させる unit を冪等に設置。
 # 既存インスタンスは user_data を再実行しないため、デプロイ毎にここで ensure する。
 # これが無いと ALB ターゲットが永久 UNHEALTHY＝連携リンクは出ても完了しない。
@@ -130,10 +169,11 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=/opt/teamagent/app
-ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source scripts/load_secrets.sh; set +a; exec ./.venv/bin/python -m teamagent.connect_web'
+ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh || exit $?; set +a; exec ./.venv/bin/python -m teamagent.connect_web'
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS=REPORT_LINK
 [Install]
 WantedBy=multi-user.target
 CONNSVC

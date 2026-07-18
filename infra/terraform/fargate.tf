@@ -155,6 +155,8 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
     resources = concat([
       data.aws_secretsmanager_secret.bearer.arn,
       data.aws_secretsmanager_secret.database_url.arn,
+      aws_secretsmanager_secret.mail_action_hmac.arn,
+      aws_secretsmanager_secret.report_link_hmac.arn,
       # §U ハイブリッド identity: mcp task が SLACK_BOT_TOKEN を注入できるよう取得権限を付与。
       data.aws_secretsmanager_secret.slack_bot.arn,
       # §U: 本人 token リフレッシュ用 Web クライアント client_secret の注入権限。
@@ -362,6 +364,16 @@ resource "aws_ecs_task_definition" "mcp" {
   execution_role_arn = aws_iam_role.ecs_execution_mcp.arn
   task_role_arn      = aws_iam_role.mcp_task.arn
 
+  lifecycle {
+    precondition {
+      condition = (
+        local.mail_action_hmac_transition_valid
+        && local.report_link_hmac_transition_valid
+      )
+      error_message = "HMAC rollout preflight failed for MCP; direct/targeted task-definition apply is blocked."
+    }
+  }
+
   container_definitions = jsonencode([merge({
     name         = "teamagent-mcp"
     image        = var.mcp_image
@@ -473,7 +485,7 @@ resource "aws_ecs_task_definition" "mcp" {
       # ナレッジ回答の末尾に「資料リンク」を付与（@AiLa=openclaw が markdown を装飾リンクへ
       # 変換する mcp のみ ON。connect-web(/app) は未設定＝生テキスト化しないため付けない）。
       { name = "SEARCH_ANSWER_SOURCE_LINKS", value = "1" },
-      ], var.enable_tiktok_acquire ? [
+      ], local.mail_action_hmac_environment, local.report_link_hmac_environment, var.enable_tiktok_acquire ? [
       # live パリティ: tiktok_acquire 連携のジョブ投入側。mcp が DynamoDB(状態)/SQS(キュー)/S3 を参照。
       # これらが無いと @AiLa の tiktok_acquire がジョブを投入できず取得パイプラインが停止する。
       { name = "USE_TIKTOK_ACQUIRE", value = "1" },
@@ -523,13 +535,6 @@ resource "aws_ecs_task_definition" "mcp" {
     secrets = concat([
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-      # レポート短縮リンク(/r)の署名鍵。connect-web(connect_web.tf) と同一値=database_url を共用し
-      # 発行(mcp/x_research skill)↔復号(connect-web /r)で鍵一致させる。新規 secret 不要
-      # (database_url の GetSecretValue は mcp exec role に付与済み)。
-      # ※短縮URLの実発行は env USE_REPORT_SHORTURL(既定OFF)で段階ゲート。connect-web に /r ルート
-      #   ＋vseo-s3-read(bootstrap_vseo_s3_iam.sh)が揃い実機で /r→302 を確認した後に ON にする。
-      #   本鍵/フラグ未設定でも skill は従来 presigned を返すため既存挙動は壊れない。
-      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       # §U ハイブリッド identity: mcp が slack_user_id → 会社メールを server-side 解決して
       # per-user OAuth(mail_*/morning_digest) の token を引くために必要（users:read.email scope）。
       # openclaw と同じ secret を共用。会社共有グループ(search)はこれ無しでも動く（graceful degrade）。
@@ -546,7 +551,7 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "GOOGLE_CLIENT_ID", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:client_id::" },
       { name = "GOOGLE_CLIENT_SECRET", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:client_secret::" },
       { name = "GOOGLE_OAUTH_REFRESH_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:refresh_token::" },
-      ], var.enable_scrape_tools ? [
+      ], local.mail_action_hmac_secrets, local.report_link_hmac_secrets, var.enable_scrape_tools ? [
       { name = "VERTEX_SA_JSON", valueFrom = data.aws_secretsmanager_secret.vertex_sa[0].arn },
       ] : [], (var.enable_x_research && var.tiktok_apify_secret_arn != "") ? [
       # カタログ①〜⑤: Apify トークン（tiktok/apify-token を共用＝新設しない・計画裁定）。

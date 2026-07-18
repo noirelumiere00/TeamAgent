@@ -4,6 +4,17 @@
 #          bash apply_resilience.sh plan      # plan のみ（read-only）
 set -euo pipefail
 cd "$(dirname "$0")"
+REPO_ROOT="$(cd ../.. && pwd)"
+HMAC_PREFLIGHT_MANIFEST="${HMAC_PREFLIGHT_MANIFEST:-}"
+PREFLIGHT_PY="${PREFLIGHT_PY:-$REPO_ROOT/.venv/bin/python}"
+
+test -n "$HMAC_PREFLIGHT_MANIFEST" || {
+  echo "ERROR: HMAC_PREFLIGHT_MANIFEST（secret-free reviewed JSON）が必須" >&2
+  exit 2
+}
+test -f "$HMAC_PREFLIGHT_MANIFEST" || { echo "ERROR: HMAC preflight manifest が読めない" >&2; exit 2; }
+"$PREFLIGHT_PY" "$REPO_ROOT/scripts/preflight_hmac_rotation.py" \
+  --manifest "$HMAC_PREFLIGHT_MANIFEST"
 
 TARGETS=(
   # --- 新イメージ（柱1 entrypoint検証・柱2 emit・柱3 canaryスクリプト・柱4 commit label）---

@@ -49,12 +49,149 @@ _get_secret() {
         --output text 2>/dev/null
 }
 
+_get_secret_version() {
+    local name="$1"
+    local version_id="$2"
+    aws secretsmanager get-secret-value \
+        --secret-id "$name" \
+        --version-id "$version_id" \
+        --region "${AWS_REGION:-ap-northeast-1}" \
+        --query SecretString \
+        --output text 2>/dev/null
+}
+
 _require_env() {
     local var="$1"
     if [[ -z "${!var:-}" ]]; then
         _log "ERROR: 環境変数 $var が未設定です（.env.production を source してください）"
         return 1
     fi
+}
+
+_load_hmac_keyring() {
+    local prefix="$1"
+    local primary_name_var="${prefix}_HMAC_SECRET_NAME"
+    local primary_version_var="${prefix}_HMAC_PRIMARY_VERSION_ID"
+    local primary_generation_var="${prefix}_HMAC_PRIMARY_GENERATION"
+    local previous_name_var="${prefix}_HMAC_PREVIOUS_SECRET_NAME"
+    local previous_version_var="${prefix}_HMAC_PREVIOUS_VERSION_ID"
+    local previous_generation_var="${prefix}_HMAC_PREVIOUS_GENERATION"
+    local previous_t0_var="${prefix}_HMAC_PREVIOUS_ROTATION_STARTED_AT"
+    local previous_legacy_var="${prefix}_HMAC_PREVIOUS_IS_LEGACY"
+
+    _require_env "$primary_name_var" || return 1
+    _require_env "$primary_version_var" || return 1
+    _require_env "$primary_generation_var" || return 1
+
+    local primary_name="${!primary_name_var:-}"
+    local primary_version="${!primary_version_var:-}"
+    local primary_generation="${!primary_generation_var:-}"
+    if [[ ! "$primary_version" =~ ^[A-Za-z0-9_-]{32,64}$ ]]; then
+        _log "ERROR: $prefix primary VersionId is invalid"
+        return 1
+    fi
+    if [[ "$primary_generation" =~ [[:space:]] || "$primary_generation" != *"@$primary_version" ]]; then
+        _log "ERROR: $prefix primary generation metadata is invalid"
+        return 1
+    fi
+    if [[ "$primary_name" == "${DB_PASSWORD_SECRET_NAME:-}" || "$primary_name" == */database-url ]]; then
+        _log "ERROR: $prefix primary cannot be a database credential secret"
+        return 1
+    fi
+
+    local primary_value
+    primary_value="$(_get_secret_version "$primary_name" "$primary_version")"
+    if [[ -z "$primary_value" || "$primary_value" == "None" ]]; then
+        _log "ERROR: $prefix dedicated primary version could not be loaded"
+        return 1
+    fi
+    local primary_target="${prefix}_HMAC_SECRET"
+    printf -v "$primary_target" '%s' "$primary_value"
+    export "$primary_target"
+    unset primary_value
+
+    local previous_name="${!previous_name_var:-}"
+    local previous_version="${!previous_version_var:-}"
+    local previous_generation="${!previous_generation_var:-}"
+    local previous_t0="${!previous_t0_var:-}"
+    local previous_legacy="${!previous_legacy_var:-}"
+    if [[ -n "$previous_name$previous_version$previous_generation$previous_t0$previous_legacy" ]]; then
+        if [[ -z "$previous_name" || -z "$previous_version" || -z "$previous_generation" || -z "$previous_t0" ]]; then
+            _log "ERROR: $prefix previous generation and T0 must be configured atomically"
+            return 1
+        fi
+        if [[ -n "$previous_legacy" && "$previous_legacy" != "1" ]]; then
+            _log "ERROR: $prefix legacy marker is invalid"
+            return 1
+        fi
+        if [[ ! "$previous_version" =~ ^[A-Za-z0-9_-]{32,64}$ ]]; then
+            _log "ERROR: $prefix previous VersionId is invalid"
+            return 1
+        fi
+        if [[ "$previous_generation" =~ [[:space:]] || "$previous_generation" != *"@$previous_version" ]]; then
+            _log "ERROR: $prefix previous generation metadata is invalid"
+            return 1
+        fi
+        if [[ ! "$previous_t0" =~ ^[0-9]{1,10}$ || "$previous_generation" == "$primary_generation" ]]; then
+            _log "ERROR: $prefix previous generation or fixed T0 is invalid"
+            return 1
+        fi
+        if [[ "$previous_legacy" == "1" && "$previous_name" != */database-url ]]; then
+            _log "ERROR: $prefix legacy previous must be the pinned database-url secret"
+            return 1
+        fi
+        if [[ -z "$previous_legacy" && "$previous_name" == */database-url ]]; then
+            _log "ERROR: $prefix database credential previous requires the bounded legacy marker"
+            return 1
+        fi
+
+        local previous_value
+        previous_value="$(_get_secret_version "$previous_name" "$previous_version")"
+        if [[ -z "$previous_value" || "$previous_value" == "None" ]]; then
+            _log "ERROR: $prefix previous version could not be loaded"
+            return 1
+        fi
+        local previous_target="${prefix}_HMAC_PREVIOUS_SECRET"
+        printf -v "$previous_target" '%s' "$previous_value"
+        export "$previous_target"
+        if [[ "$previous_legacy" == "1" ]]; then
+            printf -v "$previous_legacy_var" '%s' "1"
+            export "$previous_legacy_var"
+        else
+            unset "$previous_legacy_var"
+        fi
+        unset previous_value
+        _log "OK: $prefix HMAC keyring loaded (bounded previous enabled)"
+    else
+        unset "${prefix}_HMAC_PREVIOUS_SECRET"
+        unset "$previous_generation_var"
+        unset "$previous_t0_var"
+        unset "$previous_legacy_var"
+        _log "OK: $prefix HMAC keyring loaded (primary only)"
+    fi
+}
+
+_load_required_hmac_keyrings() {
+    case "${TEAMAGENT_HMAC_REQUIRED_DOMAINS:-}" in
+        "")
+            # Shared helpers such as run_ingest.sh do not issue or verify capability tokens.
+            # They must not gain HMAC access merely because they source this common loader.
+            return 0
+            ;;
+        MAIL_ACTION)
+            _load_hmac_keyring MAIL_ACTION
+            ;;
+        REPORT_LINK)
+            _load_hmac_keyring REPORT_LINK
+            ;;
+        MAIL_ACTION,REPORT_LINK)
+            _load_hmac_keyring MAIL_ACTION && _load_hmac_keyring REPORT_LINK
+            ;;
+        *)
+            _log "ERROR: TEAMAGENT_HMAC_REQUIRED_DOMAINS is invalid"
+            return 1
+            ;;
+    esac
 }
 
 _load() {
@@ -96,6 +233,11 @@ _load() {
         return 1
     fi
     _log "OK: Slack tokens loaded (bot=${SLACK_BOT_TOKEN:0:8}…, app=${SLACK_APP_TOKEN:0:8}…)"
+
+    # Purpose-separated token keyrings. VersionIds and T0 are non-secret deployment metadata;
+    # payloads are fetched by exact version and are never printed. The database credential is
+    # permitted only as a bounded previous generation during migration, never as a primary.
+    _load_required_hmac_keyrings || return 1
 
     # Sentry DSN（任意 — 未投入なら skip）
     if [[ -n "${SENTRY_DSN_SECRET_NAME:-}" ]]; then

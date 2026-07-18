@@ -26,8 +26,18 @@ CID_ARN="arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev
 CSEC_ARN="arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/connect_slack_secret-fOlJIt"
 CSTATE_ARN="arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/slack_oauth_state_secret-yGYkUF"
 TAG="connect-unified-$(date +%Y%m%d-%H%M%S)"
+HMAC_PREFLIGHT_MANIFEST="${HMAC_PREFLIGHT_MANIFEST:-}"
+PREFLIGHT_PY="${PREFLIGHT_PY:-$REPO_ROOT/.venv/bin/python}"
 
 command -v jq >/dev/null || { echo "jq が必要"; exit 1; }
+test -n "$HMAC_PREFLIGHT_MANIFEST" || {
+  echo "★ HMAC_PREFLIGHT_MANIFEST（secret-free reviewed JSON）が必須。旧DB-primary taskの複製を拒否。" >&2
+  exit 2
+}
+test -f "$HMAC_PREFLIGHT_MANIFEST" || { echo "★ HMAC preflight manifest が読めない" >&2; exit 2; }
+test -x "$PREFLIGHT_PY" || { echo "★ preflight Python が実行できない: $PREFLIGHT_PY" >&2; exit 2; }
+"$PREFLIGHT_PY" "$REPO_ROOT/scripts/preflight_hmac_rotation.py" \
+  --manifest "$HMAC_PREFLIGHT_MANIFEST"
 
 echo "== 0) preflight: exec-role の Slack secret 読取policyを確認（無いと統合td起動がGetSecretValue AccessDeniedで自動ロールバック） =="
 aws iam get-role-policy --role-name teamagent-dev-ecs-exec-connect-web --policy-name slack-oauth-secrets >/dev/null 2>&1 \
@@ -84,6 +94,9 @@ jq --arg img "$IMG" --arg hd "$HD" --arg rd "$SLACK_REDIRECT" --arg apphtml "$AP
       + [{"name":"CONNECT_SLACK_CLIENT_ID","valueFrom":$cid},{"name":"CONNECT_SLACK_CLIENT_SECRET","valueFrom":$csec},{"name":"SLACK_OAUTH_STATE_SECRET","valueFrom":$cst}])
   | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy,.deregisteredAt)
 ' /tmp/cwu_td.json > /tmp/cwu_new.json
+"$PREFLIGHT_PY" "$REPO_ROOT/scripts/preflight_hmac_rotation.py" \
+  --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+  --task-definition-json connect_web=/tmp/cwu_new.json
 NEW_ARN=$(aws ecs register-task-definition --region "$R" --cli-input-json file:///tmp/cwu_new.json --query 'taskDefinition.taskDefinitionArn' --output text)
 echo "  新リビジョン: $NEW_ARN"
 

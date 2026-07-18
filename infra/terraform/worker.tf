@@ -49,12 +49,24 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
 }
 
 data "aws_iam_policy_document" "worker_app" {
-  # dev 配下の Secrets（Google OAuth / Slack / DB 等）を読む
+  # load_secrets.sh が参照する既知 secret だけを許可する。project/environment 配下 wildcard は
+  # HMAC 分離後の worker に不要な資格情報まで読ませるため禁止する。
   statement {
-    sid     = "ReadDevSecrets"
-    actions = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    sid     = "ReadWorkerSecrets"
+    actions = ["secretsmanager:GetSecretValue"]
     resources = [
-      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.project_name}/${var.environment}/*",
+      aws_secretsmanager_secret.db_password.arn,
+      data.aws_secretsmanager_secret.database_url.arn,
+      data.aws_secretsmanager_secret.slack_bot.arn,
+      data.aws_secretsmanager_secret.slack_app.arn,
+      aws_secretsmanager_secret.mail_action_hmac.arn,
+      aws_secretsmanager_secret.report_link_hmac.arn,
+      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.project_name}/${var.environment}/sentry_dsn-*",
+      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.project_name}/prod/ops-slack-webhook-*",
+      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.connect_oauth_state_secret_name}-*",
+      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.connect_google_client_secret_name}-*",
+      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.ingest_google_oauth_secret_name}-*",
+      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.vertex_sa_secret_name}-*",
     ]
   }
   # レポート/生ファイル用 S3（report_publish.py の署名付きURL発行先）
@@ -179,6 +191,29 @@ resource "aws_instance" "worker" {
     systemctl restart teamagent-bot || true
     DEP
     chmod +x /opt/teamagent/deploy.sh
+    # HMAC deployment metadata only (secret names/version IDs/generations/T0; no secret payloads).
+    # Source this after teamagent.env.base so a stale base file cannot reset T0 or swap generations.
+    cat > /opt/teamagent/hmac.env <<'HMAC'
+    export MAIL_ACTION_HMAC_SECRET_NAME='${aws_secretsmanager_secret.mail_action_hmac.name}'
+    export MAIL_ACTION_HMAC_PRIMARY_VERSION_ID='${var.mail_action_hmac_primary_version_id}'
+    export MAIL_ACTION_HMAC_PRIMARY_GENERATION='${local.mail_action_hmac_primary_generation}'
+    export MAIL_ACTION_HMAC_PREVIOUS_SECRET_NAME='${local.mail_action_hmac_previous_secret_name}'
+    export MAIL_ACTION_HMAC_PREVIOUS_VERSION_ID='${local.mail_action_hmac_previous_version_id}'
+    export MAIL_ACTION_HMAC_PREVIOUS_GENERATION='${local.mail_action_hmac_previous_generation}'
+    export MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT='${var.mail_action_hmac_rotation_started_at}'
+    export MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY='${var.mail_action_hmac_rollout_phase == "legacy_migration" ? "1" : ""}'
+    export MAIL_ACTION_TTL_S='${var.mail_action_hmac_ttl_s}'
+    export REPORT_LINK_HMAC_SECRET_NAME='${aws_secretsmanager_secret.report_link_hmac.name}'
+    export REPORT_LINK_HMAC_PRIMARY_VERSION_ID='${var.report_link_hmac_primary_version_id}'
+    export REPORT_LINK_HMAC_PRIMARY_GENERATION='${local.report_link_hmac_primary_generation}'
+    export REPORT_LINK_HMAC_PREVIOUS_SECRET_NAME='${local.report_link_hmac_previous_secret_name}'
+    export REPORT_LINK_HMAC_PREVIOUS_VERSION_ID='${local.report_link_hmac_previous_version_id}'
+    export REPORT_LINK_HMAC_PREVIOUS_GENERATION='${local.report_link_hmac_previous_generation}'
+    export REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT='${var.report_link_hmac_rotation_started_at}'
+    export REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY='${var.report_link_hmac_rollout_phase == "legacy_migration" ? "1" : ""}'
+    export REPORT_LINK_TTL_S='${var.report_link_hmac_ttl_s}'
+    HMAC
+    chmod 0644 /opt/teamagent/hmac.env
     # systemd ユニット（コード投入後に enable/start）
     cat > /etc/systemd/system/teamagent-bot.service <<'SVC'
     [Unit]
@@ -188,10 +223,11 @@ resource "aws_instance" "worker" {
     [Service]
     Type=simple
     WorkingDirectory=/opt/teamagent/app
-    ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source scripts/load_secrets.sh; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
+    ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh || exit $?; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
     Restart=always
     RestartSec=5
     Environment=PYTHONUNBUFFERED=1
+    Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS=MAIL_ACTION,REPORT_LINK
     [Install]
     WantedBy=multi-user.target
     SVC
@@ -213,6 +249,14 @@ resource "aws_instance" "worker" {
   # AMI ドリフトを無視し、更新は意図的な taint＋再デプロイで行う。
   lifecycle {
     ignore_changes = [ami]
+
+    precondition {
+      condition = (
+        local.mail_action_hmac_transition_valid
+        && local.report_link_hmac_transition_valid
+      )
+      error_message = "HMAC rollout preflight failed for the legacy worker; targeted apply is blocked."
+    }
   }
 }
 

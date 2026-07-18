@@ -131,6 +131,7 @@ data "aws_iam_policy_document" "ecs_execution_morning_digest_secrets" {
       data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn,
       # per-user token refresh 用の connect(web 型)クライアント secret（CONNECT_GOOGLE_CLIENT_SECRET）。
       data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
+      aws_secretsmanager_secret.mail_action_hmac.arn,
     ]
   }
 }
@@ -216,6 +217,13 @@ resource "aws_ecs_task_definition" "morning_digest" {
   execution_role_arn       = aws_iam_role.ecs_execution_morning_digest[0].arn
   task_role_arn            = aws_iam_role.morning_digest_task[0].arn
 
+  lifecycle {
+    precondition {
+      condition     = local.mail_action_hmac_transition_valid
+      error_message = "HMAC rollout preflight failed for morning-digest; direct/targeted task-definition apply is blocked."
+    }
+  }
+
   runtime_platform {
     operating_system_family = "LINUX"
     cpu_architecture        = "ARM64"
@@ -226,7 +234,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
     image     = var.mcp_image
     essential = true
     command   = ["python", "scripts/run_morning_digest_fargate.py"]
-    environment = [
+    environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
       { name = "MORNING_DIGEST_USERS", value = var.morning_digest_users },
@@ -261,8 +269,8 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "REMINDER_SCHEDULER_GROUP", value = var.enable_reminders ? aws_scheduler_schedule_group.reminders[0].name : "" },
       { name = "REMINDER_QUEUE_ARN", value = var.enable_reminders ? aws_sqs_queue.reminders[0].arn : "" },
       { name = "REMINDER_SCHEDULER_ROLE_ARN", value = var.enable_reminders ? aws_iam_role.reminder_scheduler[0].arn : "" },
-    ]
-    secrets = [
+    ], local.mail_action_hmac_environment)
+    secrets = concat([
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
       { name = "GOOGLE_OAUTH_JSON", valueFrom = data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn },
@@ -272,11 +280,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # connect-web / fargate と同じ connect_google_client_secret を使う。欠落すると mail/calendar
       # 収集が build_user_credentials で失敗し全 0 件になる（2026-06-25 回帰）。
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
-      # live パリティ（2026-07-11 監査）: ✏️/📅 等メールアクションリンクの HMAC 署名鍵。connect-web 側の
-      # 検証鍵と同一 secret（live は database-url の文字列を鍵として共用・rev32 実機と同値）。
-      # 剥がれると生成する全アクション URL が検証不能になり、ボタン機能有効化時に沈黙する地雷になる。
-      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-    ]
+    ], local.mail_action_hmac_secrets)
     logConfiguration = {
       logDriver = "awslogs"
       options = {
