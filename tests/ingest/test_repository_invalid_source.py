@@ -47,6 +47,8 @@ class _Cursor:
             )
         if "SELECT EXISTS" in self._last_sql:
             return {"has_content": self._conn.has_content}
+        if "FROM ingest_source_retries" in self._last_sql and "FOR UPDATE" in self._last_sql:
+            return {"id": "00000000-0000-0000-0000-000000000001"}
         if "RETURNING id" in self._last_sql:
             return {"id": "document-uuid"}
         return None
@@ -254,6 +256,7 @@ def test_claim_due_retries_uses_skip_locked_and_maps_dict_rows() -> None:
                 "attempt_count": 2,
                 "reason": "office_download_failed",
                 "lease_owner": "req-2",
+                "lease_token": "opaque-claim-token",
             }
         ]
     )
@@ -269,8 +272,10 @@ def test_claim_due_retries_uses_skip_locked_and_maps_dict_rows() -> None:
     assert retries[0].external_id == "FILE1"
     assert retries[0].attempt_count == 2
     assert retries[0].lease_owner == "req-2"
+    assert retries[0].lease_token == "opaque-claim-token"
     sql, params, row_factory = conn.executed[0]
     assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "lease_token = gen_random_uuid()::text" in sql
     assert "lease_expires_at" in sql
     assert params[:4] == ("gdrive", "FOLDER1", 1000, "req-2")
     assert row_factory is not None
@@ -322,8 +327,10 @@ def test_record_retry_is_request_idempotent_and_has_exponential_backoff() -> Non
     assert "IS NOT DISTINCT FROM EXCLUDED.md5_checksum" in sql
     assert "power(" in sql
     assert "lease_owner = NULL" in sql
+    assert "lease_token = NULL" in sql
     assert "ingest_source_retries.lease_owner IS NULL" in sql
-    assert "ingest_source_retries.lease_expires_at <= now()" in sql
+    assert "ingest_source_retries.lease_token IS NULL" in sql
+    assert "ingest_source_retries.lease_expires_at IS NULL" in sql
     assert params[:10] == (
         "gdrive",
         "FOLDER1",
@@ -355,16 +362,20 @@ def test_record_retry_from_claim_requires_exact_active_lease_owner() -> None:
         reason="office_download_failed",
         request_id="worker-a",
         expected_lease_owner="claim-a",
+        expected_lease_token="token-a",
     )
 
     sql, params, _ = conn.executed[0]
     assert "claimed.lease_owner = %s" in sql
-    assert "claimed.lease_expires_at > now()" in sql
+    assert "claimed.lease_token = %s" in sql
+    assert "claimed.lease_expires_at > clock_timestamp()" in sql
     assert "ingest_source_retries.status = 'pending'" in sql
     assert "ingest_source_retries.lease_owner = %s" in sql
-    assert "ingest_source_retries.lease_expires_at > now()" in sql
+    assert "ingest_source_retries.lease_token = %s" in sql
+    assert "ingest_source_retries.lease_expires_at > clock_timestamp()" in sql
     assert params[11] == "claim-a"
-    assert params[-3:] == ("claim-a", "claim-a", "claim-a")
+    assert params[12] == "token-a"
+    assert params[-4:] == ("claim-a", "token-a", "claim-a", "token-a")
 
 
 def test_record_retry_rejects_implicit_or_conflicting_unclaimed_path() -> None:
@@ -387,6 +398,15 @@ def test_record_retry_rejects_implicit_or_conflicting_unclaimed_path() -> None:
     assert not repo.record_source_retry(
         **kwargs,
         expected_lease_owner="claim-a",
+    )
+    assert not repo.record_source_retry(
+        **kwargs,
+        expected_lease_token="token-a",
+    )
+    assert not repo.record_source_retry(
+        **kwargs,
+        expected_lease_owner="claim-a",
+        expected_lease_token="token-a",
         allow_unclaimed=True,
     )
     assert conn.executed == []
@@ -408,6 +428,7 @@ def test_record_retry_returns_false_when_fence_rejects_write() -> None:
         reason="office_download_failed",
         request_id="worker-a",
         expected_lease_owner="claim-a",
+        expected_lease_token="token-a",
     )
 
 
@@ -420,7 +441,9 @@ def test_retry_lease_renewal_requires_current_owner_and_pending_status() -> None
         source_id="FOLDER1",
         source_type="gdrive",
         external_id="FILE1",
-        request_id="lease-owner",
+        request_id="trace-request",
+        expected_lease_owner="lease-owner",
+        expected_lease_token="lease-token",
         lease_seconds=321,
     )
 
@@ -428,8 +451,17 @@ def test_retry_lease_renewal_requires_current_owner_and_pending_status() -> None
     assert "lease_expires_at = now()" in sql
     assert "status = 'pending'" in sql
     assert "lease_owner = %s" in sql
-    assert "lease_expires_at > now()" in sql
-    assert params == (321, "gdrive", "FOLDER1", "gdrive", "FILE1", "lease-owner")
+    assert "lease_token = %s" in sql
+    assert "lease_expires_at > clock_timestamp()" in sql
+    assert params == (
+        321,
+        "gdrive",
+        "FOLDER1",
+        "gdrive",
+        "FILE1",
+        "lease-owner",
+        "lease-token",
+    )
 
 
 def test_resolve_claimed_retry_requires_exact_active_owner_without_delete() -> None:
@@ -448,14 +480,21 @@ def test_resolve_claimed_retry_requires_exact_active_owner_without_delete() -> N
         validator_schema_version="ooxml-safe-v2",
         request_id="req",
         expected_lease_owner="claim-owner",
+        expected_lease_token="claim-token",
     )
     sql, params, _ = conn.executed[0]
     assert "UPDATE ingest_source_retries" in sql
     assert "status = 'resolved'" in sql
     assert "%s::text IS NOT NULL" in sql
     assert "lease_owner = %s" in sql
-    assert "lease_expires_at > now()" in sql
-    assert params[5:8] == ("claim-owner", "claim-owner", "claim-owner")
+    assert "lease_token = %s" in sql
+    assert "lease_expires_at > clock_timestamp()" in sql
+    assert params[5:9] == (
+        "claim-owner",
+        "claim-token",
+        "claim-owner",
+        "claim-token",
+    )
     assert "DELETE" not in sql
 
 
@@ -479,9 +518,10 @@ def test_resolve_unclaimed_retry_requires_empty_lease_and_exact_fingerprint() ->
     sql, params, _ = conn.executed[0]
     assert "%s::text IS NULL" in sql
     assert "lease_owner IS NULL" in sql
+    assert "lease_token IS NULL" in sql
     assert "lease_expires_at IS NULL" in sql
     assert "md5_checksum IS NOT DISTINCT FROM %s" in sql
-    assert params[5:8] == (None, None, None)
+    assert params[5:11] == (None, None, None, None, None, None)
 
 
 def test_resolve_retry_rejects_implicit_or_conflicting_unclaimed_path() -> None:
@@ -503,6 +543,15 @@ def test_resolve_retry_rejects_implicit_or_conflicting_unclaimed_path() -> None:
     assert not repo.resolve_source_retry(
         **kwargs,
         expected_lease_owner="claim-a",
+    )
+    assert not repo.resolve_source_retry(
+        **kwargs,
+        expected_lease_token="token-a",
+    )
+    assert not repo.resolve_source_retry(
+        **kwargs,
+        expected_lease_owner="claim-a",
+        expected_lease_token="token-a",
         allow_unclaimed=True,
     )
     assert conn.executed == []
@@ -624,14 +673,71 @@ def test_normal_content_upsert_takes_same_source_lock_before_replace() -> None:
     assert "INSERT INTO documents" in statements[1]
 
 
-def test_original_0019_is_fully_restored_and_upgrade_stays_in_0020() -> None:
+def test_claimed_retry_upsert_locks_exact_token_and_resolves_in_same_connection() -> None:
+    conn = _Connection(rowcount=1)
+    repo, pgvector = _repo(conn)
+    chunk = ChunkUpsert(chunk_idx=0, content="body", embedding=[0.1] * 4)
+
+    assert (
+        repo.upsert_document_with_chunks_and_resolve_retry(
+            _doc(),
+            [chunk],
+            "trace-request",
+            source_kind="gdrive",
+            source_id="FOLDER1",
+            expected_lease_owner="worker-a",
+            expected_lease_token="opaque-token-a",
+        )
+        == "document-uuid"
+    )
+
+    statements = [sql for sql, _, _ in conn.executed]
+    retry_lock_idx = next(
+        i
+        for i, sql in enumerate(statements)
+        if "FROM ingest_source_retries" in sql and "FOR UPDATE" in sql
+    )
+    document_lock_idx = next(
+        i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql
+    )
+    upsert_idx = next(i for i, sql in enumerate(statements) if "INSERT INTO documents" in sql)
+    resolve_idx = next(
+        i
+        for i, sql in enumerate(statements)
+        if "UPDATE ingest_source_retries" in sql and "status = 'resolved'" in sql
+    )
+    assert retry_lock_idx < document_lock_idx < upsert_idx < resolve_idx
+    lock_params = conn.executed[retry_lock_idx][1]
+    assert lock_params[-2:] == ("worker-a", "opaque-token-a")
+    assert "lease_expires_at > clock_timestamp()" in statements[retry_lock_idx]
+    assert "lease_token = %s" in statements[resolve_idx]
+    assert pgvector.connection_calls == [
+        {
+            "app_role": "teamagent_app",
+            "user_email": "bot@example.jp",
+            "user_role": "admin",
+            "application_name": "teamagent-ingest",
+        }
+    ]
+
+
+def test_migration_checksums_and_lease_token_upgrade_are_pinned() -> None:
     root = Path(__file__).resolve().parents[2]
     sql_0019 = (root / "infra/migrations/0019_ingest_source_health.sql").read_text(encoding="utf-8")
     sql_0020 = (root / "infra/migrations/0020_ingest_source_retry_upgrade.sql").read_text(
         encoding="utf-8"
     )
+    sql_0021 = (root / "infra/migrations/0021_ingest_source_retry_lease_token.sql").read_text(
+        encoding="utf-8"
+    )
     assert hashlib.sha256(sql_0019.encode()).hexdigest() == (
         "fcbd206703afe955f17c8c7b951e3bb0fc0be698e4a179e19e065c7a144a2afd"
+    )
+    assert hashlib.sha256(sql_0020.encode()).hexdigest() == (
+        "c186984a554147b62c8caf4b519dbd7cfcd5d0e90d8dd75ca9d766e29c98e623"
+    )
+    assert hashlib.sha256(sql_0021.encode()).hexdigest() == (
+        "6f28d1eedbb6e3f4c6e3cd229fbc736b57da9f9d06f600dc52336d00d2c8acba"
     )
     assert "CREATE TABLE IF NOT EXISTS ingest_source_health" in sql_0019
     assert "CREATE TABLE IF NOT EXISTS ingest_connector_runs" in sql_0019
@@ -644,6 +750,9 @@ def test_original_0019_is_fully_restored_and_upgrade_stays_in_0020() -> None:
     assert sql_0020.count("'audit-20260717-unindexed-pdf-") == 3
     assert sql_0020.count("'audit-20260717-source-original-missing-") == 9
     assert len(re.findall(r"'[0-9a-f]{64}'", sql_0020)) == 19
+    assert "ADD COLUMN IF NOT EXISTS lease_token TEXT" in sql_0021
+    assert "ingest_source_retries_lease_fields_consistent" in sql_0021
+    assert "status = 'pending'" in sql_0021
 
 
 def test_upgrade_migration_preserves_legacy_rows_and_forces_revalidation() -> None:

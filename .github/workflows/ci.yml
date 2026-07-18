@@ -81,6 +81,12 @@ jobs:
                   $$;
                   """
               )
+              conn.execute(
+                  """
+                  ALTER ROLE teamagent_app
+                      NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOLOGIN INHERIT
+                  """
+              )
               conn.execute("GRANT teamagent_app TO postgres")
           PY
 

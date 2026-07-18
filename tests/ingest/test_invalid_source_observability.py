@@ -73,6 +73,9 @@ class _Repository:
         self.retry_lease_success = True
         self.retry_resolve_success = True
         self.retry_resolve_error: Exception | None = None
+        self.retry_atomic_success = True
+        self.retry_atomic_error: Exception | None = None
+        self.retry_atomic_attempts: list[dict[str, Any]] = []
         self.retry_lease_renewals: list[dict[str, Any]] = []
         self.ingest_jobs: list[dict[str, Any]] = []
         self.connector_state: ConnectorState | None = None
@@ -131,6 +134,35 @@ class _Repository:
         self.upserts.append((doc, list(chunks)))
         return "doc-id"
 
+    def upsert_document_with_chunks_and_resolve_retry(
+        self,
+        doc: Any,
+        chunks: list[Any],
+        request_id: str,
+        **kwargs: Any,
+    ) -> str | bool:
+        attempt = {"doc": doc, "chunks": list(chunks), "request_id": request_id, **kwargs}
+        self.retry_atomic_attempts.append(attempt)
+        if self.retry_atomic_error is not None:
+            raise self.retry_atomic_error
+        if not self.retry_atomic_success:
+            return False
+        self.upserts.append((doc, list(chunks)))
+        self.retry_resolutions.append(
+            {
+                "source_kind": kwargs["source_kind"],
+                "source_id": kwargs["source_id"],
+                "external_id": doc.external_id,
+                "request_id": request_id,
+                "expected_lease_owner": kwargs["expected_lease_owner"],
+                "expected_lease_token": kwargs["expected_lease_token"],
+                "allow_unclaimed": False,
+                "atomic": True,
+            }
+        )
+        self.retry_claims.clear()
+        return "doc-id"
+
     def load_connector_state(self, source_kind: str, source_id: str) -> ConnectorState | None:
         return self.connector_state
 
@@ -152,7 +184,15 @@ class _Repository:
         return True
 
     def claim_due_source_retries(self, **kwargs: Any) -> list[SourceRetry]:
-        claimed = list(self.retry_claims)
+        claimed = [
+            replace(
+                retry,
+                lease_owner=retry.lease_owner or str(kwargs["request_id"]),
+                lease_token=retry.lease_token
+                or f"opaque-{kwargs['request_id']}-{retry.external_id}",
+            )
+            for retry in self.retry_claims
+        ]
         self.retry_claims.clear()
         return claimed
 
@@ -522,6 +562,7 @@ def test_incremental_transient_failure_is_retried_next_run_after_cursor_advance(
     assert repo.retry_records[0]["reason"] == "office_download_failed"
     assert repo.retry_resolutions[-1]["external_id"] == drive_file.id
     assert repo.retry_resolutions[-1]["expected_lease_owner"] == "run-2"
+    assert repo.retry_resolutions[-1]["expected_lease_token"].startswith("opaque-run-2-")
     assert client.download_file_bytes.call_count == 2
     assert len(repo.upserts) == 1
     # quick retryはclaim直後とupsert直前だけ。progress callbackは120秒throttleでDBを叩かない。
@@ -1000,13 +1041,15 @@ def test_pdf_download_failure_is_warning_and_durable_retry() -> None:
         warning_collector=collector,
         warning_source_id="FOLDER",
         durable_retry=True,
-        retry_lease_owner="claim-token",
+        retry_lease_owner="worker-a",
+        retry_lease_token="opaque-token-a",
     )
 
     assert result == (0, 0)
     assert collector.snapshot("gdrive", "FOLDER").reasons == {"pdf_download_failed": 1}
     assert repo.retry_records[0]["reason"] == "pdf_download_failed"
-    assert repo.retry_records[0]["expected_lease_owner"] == "claim-token"
+    assert repo.retry_records[0]["expected_lease_owner"] == "worker-a"
+    assert repo.retry_records[0]["expected_lease_token"] == "opaque-token-a"
     assert repo.upserts == []
 
 
@@ -1039,6 +1082,7 @@ def test_claimed_file_failure_threads_lease_owner_to_retry_write(
             attempt_count=1,
             reason="pdf_download_failed",
             lease_owner="worker-a",
+            lease_token="opaque-token-a",
         )
     ]
 
@@ -1053,12 +1097,57 @@ def test_claimed_file_failure_threads_lease_owner_to_retry_write(
     )
 
     assert repo.retry_records[-1]["expected_lease_owner"] == "worker-a"
+    assert repo.retry_records[-1]["expected_lease_token"] == "opaque-token-a"
 
 
-@pytest.mark.parametrize("resolver_mode", ["false", "exception", "unavailable"])
-def test_claimed_success_resolution_failure_blocks_cursor_cleanup_and_success_reporting(
+def test_claim_without_token_is_rejected_without_request_id_fallback(
     monkeypatch: pytest.MonkeyPatch,
-    resolver_mode: str,
+) -> None:
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
+    drive_file = _file("MALFORMED-CLAIM", _pptx_bytes())
+    client = MagicMock()
+    client.get_start_page_token.return_value = "MUST-NOT-SAVE"
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: client),
+    )
+
+    class _MalformedClaimRepository(_Repository):
+        def claim_due_source_retries(self, **kwargs: Any) -> list[SourceRetry]:
+            return [
+                SourceRetry(
+                    external_id=drive_file.id,
+                    md5_checksum=drive_file.md5_checksum,
+                    size_bytes=drive_file.size,
+                    mime_type=drive_file.mime_type,
+                    validator_schema_version=OFFICE_VALIDATOR_SCHEMA_VERSION,
+                    attempt_count=1,
+                    reason="office_download_failed",
+                    lease_owner=str(kwargs["request_id"]),
+                    lease_token=None,
+                )
+            ]
+
+    repo = _MalformedClaimRepository()
+    with pytest.raises(IngestDurabilityError, match="owner/token fence"):
+        _ingest_gdrive_folder(
+            _folder_spec(),
+            embedder=_Embedder(),
+            repository=repo,  # type: ignore[arg-type]
+            owner_email="bot@example.jp",
+            dry_run=False,
+            request_id="must-not-be-a-token",
+            warning_collector=_IngestWarningCollector(),
+        )
+
+    assert repo.upserts == []
+    assert repo.saved_states == []
+
+
+@pytest.mark.parametrize("atomic_mode", ["false", "exception", "unavailable"])
+def test_claimed_atomic_commit_failure_blocks_cursor_cleanup_and_success_reporting(
+    monkeypatch: pytest.MonkeyPatch,
+    atomic_mode: str,
 ) -> None:
     monkeypatch.setenv("USE_INCREMENTAL_SYNC", "1")
     monkeypatch.setenv("INGEST_MARK_STALE", "true")
@@ -1104,14 +1193,15 @@ def test_claimed_success_resolution_failure_blocks_cursor_cleanup_and_success_re
             attempt_count=1,
             reason="office_download_failed",
             lease_owner="claim-token",
+            lease_token="opaque-resolve-token",
         )
     ]
-    if resolver_mode == "false":
-        repo.retry_resolve_success = False
-    elif resolver_mode == "exception":
-        repo.retry_resolve_error = RuntimeError("temporary resolver failure")
+    if atomic_mode == "false":
+        repo.retry_atomic_success = False
+    elif atomic_mode == "exception":
+        repo.retry_atomic_error = RuntimeError("temporary atomic transaction failure")
     else:
-        repo.resolve_source_retry = None  # type: ignore[method-assign]
+        repo.upsert_document_with_chunks_and_resolve_retry = None  # type: ignore[method-assign]
 
     sources = IngestSources(
         version=1,
@@ -1131,17 +1221,23 @@ def test_claimed_success_resolution_failure_blocks_cursor_cleanup_and_success_re
     assert stats.sources_skipped == 1
     assert stats.documents_upserted == 0
     assert any("IngestDurabilityError" in error for error in stats.errors)
-    assert len(repo.upserts) == 1  # document transaction committed before resolve was rejected
+    assert repo.upserts == []  # fence/resolve failure cannot commit document or chunks
     assert not any(state.get("success") is True for state in repo.saved_states)
     assert not any(state.get("cursor") for state in repo.saved_states)
     assert not any(job.get("state") == "COMMITTED" for job in repo.ingest_jobs)
     assert repo.ingest_jobs[-1]["state"] == "FAILED_TRANSIENT"
     assert repo.retry_records == []
     assert repo.stale_cleanup_calls == []
-    assert {renewal["request_id"] for renewal in repo.retry_lease_renewals} == {"claim-token"}
-    if resolver_mode != "unavailable":
-        assert repo.retry_resolutions[-1]["expected_lease_owner"] == "claim-token"
-        assert repo.retry_resolutions[-1]["allow_unclaimed"] is False
+    assert {renewal["expected_lease_owner"] for renewal in repo.retry_lease_renewals} == {
+        "claim-token"
+    }
+    assert {renewal["expected_lease_token"] for renewal in repo.retry_lease_renewals} == {
+        "opaque-resolve-token"
+    }
+    assert repo.retry_resolutions == []
+    if atomic_mode != "unavailable":
+        assert repo.retry_atomic_attempts[-1]["expected_lease_owner"] == "claim-token"
+        assert repo.retry_atomic_attempts[-1]["expected_lease_token"] == "opaque-resolve-token"
     folder_run = next(run for run in repo.connector_runs if run["source_id"] == "FOLDER")
     assert folder_run["outcome"] == "failed"
     assert folder_run["documents_upserted"] == 0

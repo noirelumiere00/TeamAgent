@@ -103,6 +103,7 @@ class _RetryLeaseHeartbeat:
     external_id: str
     trace_request_id: str
     lease_owner: str
+    lease_token: str
     durability_tracker: _DurabilityTracker
     last_renewed_monotonic: float = 0.0
 
@@ -124,7 +125,9 @@ class _RetryLeaseHeartbeat:
                         source_id=self.source_id,
                         source_type="gdrive",
                         external_id=self.external_id,
-                        request_id=self.lease_owner,
+                        request_id=self.trace_request_id,
+                        expected_lease_owner=self.lease_owner,
+                        expected_lease_token=self.lease_token,
                         lease_seconds=_SOURCE_RETRY_LEASE_SECONDS,
                     )
                 )
@@ -629,10 +632,23 @@ def _record_source_retry(
     enabled: bool,
     durability_tracker: _DurabilityTracker | None = None,
     expected_lease_owner: str | None = None,
+    expected_lease_token: str | None = None,
 ) -> bool:
     """incremental transient失敗をcursorと独立したdurable queueへ残す。"""
     if dry_run or not enabled:
         return True
+    claimed = expected_lease_owner is not None or expected_lease_token is not None
+    if claimed and (not expected_lease_owner or not expected_lease_token):
+        if durability_tracker is not None:
+            durability_tracker.add("retry_claim_fence_invalid")
+        logger.error(
+            "ingest_source_retry_claim_fence_invalid",
+            request_id=request_id,
+            source_kind=source_kind,
+            source_id_ref=_external_id_ref(source_id),
+            file_ref=_external_id_ref(f.id),
+        )
+        return False
     recorder = getattr(repository, "record_source_retry", None)
     if not callable(recorder):
         if durability_tracker is not None:
@@ -653,7 +669,8 @@ def _record_source_retry(
                 request_id=request_id,
                 metadata={"retry_class": "transient"},
                 expected_lease_owner=expected_lease_owner,
-                allow_unclaimed=expected_lease_owner is None,
+                expected_lease_token=expected_lease_token,
+                allow_unclaimed=not claimed,
             )
         )
     except Exception as exc:
@@ -689,12 +706,17 @@ def _resolve_source_retry(
     request_id: str,
     dry_run: bool,
     expected_lease_owner: str | None = None,
+    expected_lease_token: str | None = None,
     durability_tracker: _DurabilityTracker | None = None,
 ) -> bool:
     """成功/永久invalidでretryを解消し、claim済みなら失敗をdurability errorにする。"""
     if dry_run:
         return True
-    resolution_required = expected_lease_owner is not None
+    resolution_required = expected_lease_owner is not None or expected_lease_token is not None
+    if resolution_required and (not expected_lease_owner or not expected_lease_token):
+        if durability_tracker is not None:
+            durability_tracker.add("retry_claim_fence_invalid")
+        raise _RetryResolutionDurabilityError("claimed retry fence is incomplete")
     resolver = getattr(repository, "resolve_source_retry", None)
     if not callable(resolver):
         if resolution_required:
@@ -715,7 +737,8 @@ def _resolve_source_retry(
                 validator_schema_version=_validator_schema_for_drive_file(f),
                 request_id=request_id,
                 expected_lease_owner=expected_lease_owner,
-                allow_unclaimed=expected_lease_owner is None,
+                expected_lease_token=expected_lease_token,
+                allow_unclaimed=not resolution_required,
             )
         )
     except Exception as exc:
@@ -1035,6 +1058,102 @@ def _guarded_upsert(
                 return False
             return True
     repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+    if not title_only:
+        registry.add(key)
+    return True
+
+
+def _guarded_claimed_retry_upsert(
+    repository: IngestRepository,
+    doc: DocumentUpsert,
+    chunks: list[ChunkUpsert],
+    *,
+    f: Any,
+    source_kind: str,
+    source_id: str,
+    request_id: str,
+    lease_owner: str,
+    lease_token: str,
+    durability_tracker: _DurabilityTracker | None,
+    content_registry: set[tuple[str, str]] | None = None,
+) -> bool:
+    """claimed retryをfence検証・document更新・resolveの単一transactionで処理する。"""
+    registry = content_registry if content_registry is not None else set()
+    key = (doc.source_type, doc.external_id)
+    title_only = _is_title_only(chunks)
+
+    # process内ですでに本文を書いたtitle-only退行ガードはDB write自体が不要。retry resolve
+    # だけをexact fenceで行い、resolver failureはclaimed durability failureとして扱う。
+    if title_only and key in registry:
+        logger.info(
+            "ingest_skip_title_only_over_content",
+            source_type=doc.source_type,
+            external_id_ref=_external_id_ref(doc.external_id),
+            request_id=request_id,
+            guard="process_registry",
+        )
+        _resolve_source_retry(
+            repository=repository,
+            f=f,
+            source_kind=source_kind,
+            source_id=source_id,
+            request_id=request_id,
+            dry_run=False,
+            expected_lease_owner=lease_owner,
+            expected_lease_token=lease_token,
+            durability_tracker=durability_tracker,
+        )
+        return False
+
+    atomic_upsert = getattr(
+        repository,
+        "upsert_document_with_chunks_and_resolve_retry",
+        None,
+    )
+    if not callable(atomic_upsert):
+        if durability_tracker is not None:
+            durability_tracker.add("retry_atomic_upsert_unavailable")
+        raise _RetryResolutionDurabilityError("claimed retry atomic upsert is unavailable")
+
+    try:
+        document_id = atomic_upsert(
+            doc,
+            chunks,
+            request_id=request_id,
+            source_kind=source_kind,
+            source_id=source_id,
+            expected_lease_owner=lease_owner,
+            expected_lease_token=lease_token,
+            protect_existing_content=title_only,
+        )
+    except Exception as exc:
+        if durability_tracker is not None:
+            durability_tracker.add("retry_atomic_upsert_failed")
+        logger.warning(
+            "ingest_claimed_retry_atomic_upsert_failed",
+            request_id=request_id,
+            source_kind=source_kind,
+            source_id_ref=_external_id_ref(source_id),
+            file_ref=_external_id_ref(doc.external_id),
+            error_type=type(exc).__name__,
+        )
+        raise _RetryResolutionDurabilityError(
+            "claimed retry document transaction was rejected"
+        ) from exc
+
+    if document_id is False:
+        if durability_tracker is not None:
+            durability_tracker.add("retry_atomic_upsert_rejected")
+        raise _RetryResolutionDurabilityError("claimed retry atomic upsert was rejected")
+    if document_id is None:
+        logger.info(
+            "ingest_skip_title_only_over_content",
+            source_type=doc.source_type,
+            external_id_ref=_external_id_ref(doc.external_id),
+            request_id=request_id,
+            guard="database",
+        )
+        return False
     if not title_only:
         registry.add(key)
     return True
@@ -1678,6 +1797,7 @@ def _ingest_gdrive_folder(
     retry_claims: list[Any] = []
     retry_ids: set[str] = set()
     retry_lease_owners: dict[str, str] = {}
+    retry_lease_tokens: dict[str, str] = {}
     if incremental:
         prior_cursor: str | None = None
         state: Any | None = None
@@ -1733,13 +1853,27 @@ def _ingest_gdrive_folder(
                             request_id=request_id,
                         )
                     )
-                    retry_ids = {str(retry.external_id) for retry in retry_claims}
-                    retry_lease_owners = {
-                        str(retry.external_id): str(
-                            getattr(retry, "lease_owner", None) or request_id
-                        )
-                        for retry in retry_claims
-                    }
+                    for retry in retry_claims:
+                        external_id = str(retry.external_id)
+                        lease_owner = str(getattr(retry, "lease_owner", "") or "")
+                        lease_token = str(getattr(retry, "lease_token", "") or "")
+                        if not lease_owner or not lease_token:
+                            durability_tracker.add("retry_claim_fence_invalid")
+                            logger.error(
+                                "ingest_source_retry_claim_fence_invalid",
+                                request_id=request_id,
+                                source_kind="gdrive",
+                                source_id_ref=_external_id_ref(spec.folder_id),
+                                file_ref=_external_id_ref(external_id),
+                            )
+                            raise IngestDurabilityError(
+                                "claimed retry did not include an owner/token fence"
+                            )
+                        retry_ids.add(external_id)
+                        retry_lease_owners[external_id] = lease_owner
+                        retry_lease_tokens[external_id] = lease_token
+                except IngestDurabilityError:
+                    raise
                 except Exception as exc:
                     durability_tracker.add("retry_claim_failed")
                     logger.warning(
@@ -1823,6 +1957,7 @@ def _ingest_gdrive_folder(
                             request_id=request_id,
                             metadata={"retry_class": "source_not_listed"},
                             expected_lease_owner=retry_lease_owners[retry.external_id],
+                            expected_lease_token=retry_lease_tokens[retry.external_id],
                         )
                     )
                 except Exception as exc:
@@ -1854,6 +1989,7 @@ def _ingest_gdrive_folder(
                 external_id=f.id,
                 trace_request_id=request_id,
                 lease_owner=retry_lease_owners[f.id],
+                lease_token=retry_lease_tokens[f.id],
                 durability_tracker=durability_tracker,
             )
         try:
@@ -1877,6 +2013,7 @@ def _ingest_gdrive_folder(
                 durability_tracker=durability_tracker,
                 lease_heartbeat=lease_heartbeat,
                 retry_lease_owner=retry_lease_owners.get(f.id),
+                retry_lease_token=retry_lease_tokens.get(f.id),
             )
             docs_n += docs_added
             chunks_n += chunks_added
@@ -1935,6 +2072,7 @@ def _ingest_gdrive_folder(
                     enabled=True,
                     durability_tracker=durability_tracker,
                     expected_lease_owner=retry_lease_owners.get(f.id),
+                    expected_lease_token=retry_lease_tokens.get(f.id),
                 )
                 _safe_record_job(
                     repository,
@@ -2046,6 +2184,7 @@ def _process_one_gdrive_file(
     durability_tracker: _DurabilityTracker | None = None,
     lease_heartbeat: Callable[[bool], None] | None = None,
     retry_lease_owner: str | None = None,
+    retry_lease_token: str | None = None,
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
@@ -2114,6 +2253,7 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
                 durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
@@ -2154,6 +2294,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2191,6 +2332,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2216,6 +2358,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2240,6 +2383,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2272,6 +2416,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2301,6 +2446,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2348,6 +2494,7 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
                 durability_tracker=durability_tracker,
             )
             skipped.append(f.id)
@@ -2377,6 +2524,7 @@ def _process_one_gdrive_file(
                     request_id=request_id,
                     dry_run=dry_run,
                     expected_lease_owner=retry_lease_owner,
+                    expected_lease_token=retry_lease_token,
                     durability_tracker=durability_tracker,
                 )
             else:
@@ -2391,6 +2539,7 @@ def _process_one_gdrive_file(
                     enabled=durable_retry,
                     durability_tracker=durability_tracker,
                     expected_lease_owner=retry_lease_owner,
+                    expected_lease_token=retry_lease_token,
                 )
             skipped.append(f.id)
             return 0, 0
@@ -2420,6 +2569,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2448,6 +2598,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2491,6 +2642,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2516,6 +2668,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2540,6 +2693,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2573,6 +2727,7 @@ def _process_one_gdrive_file(
                     enabled=durable_retry,
                     durability_tracker=durability_tracker,
                     expected_lease_owner=retry_lease_owner,
+                    expected_lease_token=retry_lease_token,
                 )
                 skipped.append(f.id)
                 return 0, 0
@@ -2598,6 +2753,7 @@ def _process_one_gdrive_file(
                     enabled=durable_retry,
                     durability_tracker=durability_tracker,
                     expected_lease_owner=retry_lease_owner,
+                    expected_lease_token=retry_lease_token,
                 )
                 skipped.append(f.id)
                 return 0, 0
@@ -2631,6 +2787,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2656,6 +2813,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2738,6 +2896,7 @@ def _process_one_gdrive_file(
                 enabled=durable_retry,
                 durability_tracker=durability_tracker,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
             )
             skipped.append(f.id)
             return 0, 0
@@ -2767,10 +2926,33 @@ def _process_one_gdrive_file(
         if lease_heartbeat is not None:
             lease_heartbeat(True)
         # §2 ガード: 本文版を title_only 版で上書きしない（folder→crawl 順の退行を塞ぐ）。
-        wrote = _guarded_upsert(
-            repository, doc, chunks, request_id=request_id, content_registry=content_registry
-        )
-        if not wrote:
+        claimed_retry = retry_lease_owner is not None or retry_lease_token is not None
+        if claimed_retry:
+            if not retry_lease_owner or not retry_lease_token:
+                if durability_tracker is not None:
+                    durability_tracker.add("retry_claim_fence_invalid")
+                raise _RetryResolutionDurabilityError("claimed retry fence is incomplete")
+            wrote = _guarded_claimed_retry_upsert(
+                repository,
+                doc,
+                chunks,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                request_id=request_id,
+                lease_owner=retry_lease_owner,
+                lease_token=retry_lease_token,
+                durability_tracker=durability_tracker,
+                content_registry=content_registry,
+            )
+        else:
+            wrote = _guarded_upsert(
+                repository,
+                doc,
+                chunks,
+                request_id=request_id,
+                content_registry=content_registry,
+            )
             _resolve_source_retry(
                 repository=repository,
                 f=f,
@@ -2779,8 +2961,10 @@ def _process_one_gdrive_file(
                 request_id=request_id,
                 dry_run=dry_run,
                 expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
                 durability_tracker=durability_tracker,
             )
+        if not wrote:
             _resolve_reconciliation_gap(
                 repository=repository,
                 f=f,
@@ -2788,16 +2972,6 @@ def _process_one_gdrive_file(
                 dry_run=dry_run,
             )
             return 0, 0
-        _resolve_source_retry(
-            repository=repository,
-            f=f,
-            source_kind=warning_source_kind,
-            source_id=warning_source_id,
-            request_id=request_id,
-            dry_run=dry_run,
-            expected_lease_owner=retry_lease_owner,
-            durability_tracker=durability_tracker,
-        )
         if any(chunk.content.strip() and not chunk.metadata.get("title_only") for chunk in chunks):
             _resolve_reconciliation_gap(
                 repository=repository,

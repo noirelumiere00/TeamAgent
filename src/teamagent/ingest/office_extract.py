@@ -222,7 +222,7 @@ def _parse_bounded_xml(
 ) -> ElementTree.Element:
     """secure pre-parse済みの上限内XMLだけをElementTree化する。"""
     _validate_bounded_xml_syntax(data, progress_callback=progress_callback)
-    return ElementTree.fromstring(data)
+    return ElementTree.fromstring(data)  # nosec B314  # bounded preparse blocks DTD/entity/external
 
 
 def _validate_office_payload(

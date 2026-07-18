@@ -27,6 +27,7 @@ logger = structlog.get_logger(__name__)
 _SCHEMA_REPROBE_SECONDS = 60.0
 _SOURCE_RETRY_LEASE_SECONDS = 600
 _SOURCE_RETRY_LIMIT = 1000
+_INGEST_APPLICATION_NAME = "teamagent-ingest"
 
 
 def _external_id_ref(external_id: str) -> str:
@@ -131,6 +132,7 @@ class SourceRetry:
     attempt_count: int
     reason: str
     lease_owner: str | None = None
+    lease_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,10 @@ class GDriveAclOptimisticLockError(RuntimeError):
 
 class SourceRetryUnavailableError(RuntimeError):
     """durable retry queueを確認できず、空queueと区別できない。"""
+
+
+class SourceRetryLeaseLostError(RuntimeError):
+    """claimed retry の owner/token/期限 fence を満たさず、書込みを中止した。"""
 
 
 # -----------------------------------------------------------
@@ -236,11 +242,7 @@ class IngestRepository:
         """
         # admin role で実行（ingest は ACL を書き込む側 = admin 相当）
         # user_email=owner_email を渡しておくと WITH CHECK で許可される
-        with self._pgvector.connection(
-            app_role=self._app_role,
-            user_email=self._owner_email or doc.owner_email,
-            user_role="admin",
-        ) as conn:
+        with self._document_connection(doc) as conn:
             self._lock_source(conn, doc.source_type, doc.external_id)
             document_id = self._upsert_document(conn, doc)
             if replace_existing_chunks:
@@ -272,27 +274,9 @@ class IngestRepository:
         if not chunks or not all(chunk.metadata.get("title_only") for chunk in chunks):
             raise ValueError("upsert_title_only_if_no_content requires title-only chunks")
 
-        with self._pgvector.connection(
-            app_role=self._app_role,
-            user_email=self._owner_email or doc.owner_email,
-            user_role="admin",
-        ) as conn:
+        with self._document_connection(doc) as conn:
             self._lock_source(conn, doc.source_type, doc.external_id)
-            sql = """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM documents AS d
-                    JOIN chunks AS c ON c.document_id = d.id
-                    WHERE d.source_type = %s::document_source_type
-                      AND d.external_id = %s
-                      AND COALESCE(c.metadata->>'title_only', 'false') <> 'true'
-                      AND btrim(c.content) <> ''
-                ) AS has_content
-            """
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(sql, (doc.source_type, _strip_nul(doc.external_id)))
-                row = cur.fetchone()
-            if row is not None and bool(row["has_content"]):
+            if self._has_non_title_content(conn, doc):
                 logger.info(
                     "ingest_repository_title_only_suppressed",
                     request_id=request_id,
@@ -314,6 +298,130 @@ class IngestRepository:
         )
         return document_id
 
+    def upsert_document_with_chunks_and_resolve_retry(
+        self,
+        doc: DocumentUpsert,
+        chunks: list[ChunkUpsert],
+        request_id: str,
+        *,
+        source_kind: str,
+        source_id: str,
+        expected_lease_owner: str,
+        expected_lease_token: str,
+        replace_existing_chunks: bool = True,
+        protect_existing_content: bool = False,
+    ) -> str | None:
+        """claimed retry の検証・document/chunk upsert・resolveを1 transactionで行う。
+
+        retry row を exact ``(owner, token, pending, unexpired)`` で ``FOR UPDATE`` してから
+        document advisory lock を取る。resolve直前にも wall-clock 期限を再確認し、失効して
+        いれば例外で transaction 全体を rollback する。したがって takeover 済みの stale
+        worker は document/chunk を一切変更できない。
+
+        ``protect_existing_content`` は title-only fallback 専用。既存本文がある場合は
+        document/chunk を触らず、同じ transaction 内でretryだけ解消して ``None`` を返す。
+        """
+        normalized_owner = _strip_nul(expected_lease_owner)
+        normalized_token = _strip_nul(expected_lease_token)
+        if not normalized_owner or not normalized_token:
+            raise ValueError("claimed retry requires non-empty lease owner and token")
+        if protect_existing_content and (
+            not chunks or not all(chunk.metadata.get("title_only") for chunk in chunks)
+        ):
+            raise ValueError("protect_existing_content requires title-only chunks")
+
+        retry_id: str
+        document_id: str | None = None
+        with self._document_connection(doc) as conn:
+            lock_sql = """
+                SELECT id::text AS id
+                FROM ingest_source_retries
+                WHERE source_kind = %s
+                  AND source_id = %s
+                  AND source_type = %s
+                  AND external_id = %s
+                  AND status = 'pending'
+                  AND lease_owner = %s
+                  AND lease_token = %s
+                  AND lease_expires_at > clock_timestamp()
+                FOR UPDATE
+            """
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    lock_sql,
+                    (
+                        source_kind,
+                        _strip_nul(source_id),
+                        doc.source_type,
+                        _strip_nul(doc.external_id),
+                        normalized_owner,
+                        normalized_token,
+                    ),
+                )
+                retry_row = cur.fetchone()
+            if retry_row is None:
+                raise SourceRetryLeaseLostError("claimed retry fence rejected document upsert")
+            retry_id = str(retry_row["id"])
+
+            self._lock_source(conn, doc.source_type, doc.external_id)
+            if not protect_existing_content or not self._has_non_title_content(conn, doc):
+                document_id = self._upsert_document(conn, doc)
+                if replace_existing_chunks:
+                    self._delete_chunks(conn, document_id)
+                self._insert_chunks(conn, document_id, chunks)
+
+            resolve_sql = """
+                UPDATE ingest_source_retries
+                SET status = 'resolved',
+                    resolved_at = clock_timestamp(),
+                    last_request_id = %s,
+                    lease_owner = NULL,
+                    lease_token = NULL,
+                    lease_expires_at = NULL
+                WHERE id = %s::uuid
+                  AND status = 'pending'
+                  AND lease_owner = %s
+                  AND lease_token = %s
+                  AND lease_expires_at > clock_timestamp()
+            """
+            with conn.cursor() as cur:
+                cur.execute(
+                    resolve_sql,
+                    (
+                        _strip_nul(request_id),
+                        retry_id,
+                        normalized_owner,
+                        normalized_token,
+                    ),
+                )
+                if int(cur.rowcount or 0) != 1:
+                    raise SourceRetryLeaseLostError(
+                        "claimed retry expired before document transaction resolved"
+                    )
+
+        self._schema_probe_succeeded("source_retries")
+        logger.info(
+            "ingest_repository_claimed_retry_committed",
+            request_id=request_id,
+            source_kind=source_kind,
+            source_id_ref=_external_id_ref(source_id),
+            source_type=doc.source_type,
+            external_id_ref=_external_id_ref(doc.external_id),
+            document_id=document_id,
+            chunk_count=len(chunks) if document_id is not None else 0,
+            document_suppressed=document_id is None,
+        )
+        return document_id
+
+    def _document_connection(self, doc: DocumentUpsert) -> Any:
+        """document/retry transactionを固定application_nameで開く。"""
+        return self._pgvector.connection(
+            app_role=self._app_role,
+            user_email=self._owner_email or doc.owner_email,
+            user_role="admin",
+            application_name=_INGEST_APPLICATION_NAME,
+        )
+
     # -------------------------------------------------------
     # 増分同期: connector_state（migration 0012）
     # -------------------------------------------------------
@@ -328,6 +436,7 @@ class IngestRepository:
             app_role=self._app_role,
             user_email=self._owner_email,
             user_role="admin",
+            application_name=_INGEST_APPLICATION_NAME,
         )
 
     def find_invalid_source_reason(
@@ -567,6 +676,7 @@ class IngestRepository:
             )
             UPDATE ingest_source_retries AS retry
             SET lease_owner = %s,
+                lease_token = gen_random_uuid()::text,
                 lease_expires_at = now() + (%s * interval '1 second')
             FROM due
             WHERE retry.id = due.id
@@ -577,7 +687,8 @@ class IngestRepository:
                       retry.validator_schema_version,
                       retry.attempt_count,
                       retry.reason,
-                      retry.lease_owner
+                      retry.lease_owner,
+                      retry.lease_token
         """
         try:
             with self._ops_connection() as conn:
@@ -608,6 +719,9 @@ class IngestRepository:
                     lease_owner=(
                         str(row["lease_owner"]) if row.get("lease_owner") is not None else None
                     ),
+                    lease_token=(
+                        str(row["lease_token"]) if row.get("lease_token") is not None else None
+                    ),
                 )
                 for row in rows
             ]
@@ -630,15 +744,21 @@ class IngestRepository:
         source_type: str,
         external_id: str,
         request_id: str,
+        expected_lease_owner: str,
+        expected_lease_token: str,
         lease_seconds: int = _SOURCE_RETRY_LEASE_SECONDS,
     ) -> bool:
         """現在のownerだけが処理中retryのleaseを延長する。
 
-        lease期限後に別workerがclaim済みなら``lease_owner``が変わるため更新しない。
+        lease期限後に同じowner名のworkerが再claimしても``lease_token``が変わるため更新しない。
         長い抽出・embedding中のheartbeatから呼び、二重処理を防ぐ。
         """
         if lease_seconds < 1:
             raise ValueError("retry lease_seconds must be positive")
+        normalized_owner = _strip_nul(expected_lease_owner)
+        normalized_token = _strip_nul(expected_lease_token)
+        if not normalized_owner or not normalized_token:
+            return False
         if not self._schema_probe_allowed("source_retries"):
             return False
         sql = """
@@ -650,7 +770,8 @@ class IngestRepository:
               AND external_id = %s
               AND status = 'pending'
               AND lease_owner = %s
-              AND lease_expires_at > now()
+              AND lease_token = %s
+              AND lease_expires_at > clock_timestamp()
         """
         try:
             with self._ops_connection() as conn:
@@ -663,7 +784,8 @@ class IngestRepository:
                             _strip_nul(source_id),
                             source_type,
                             _strip_nul(external_id),
-                            _strip_nul(request_id),
+                            normalized_owner,
+                            normalized_token,
                         ),
                     )
                     renewed = int(cur.rowcount or 0) > 0
@@ -696,6 +818,7 @@ class IngestRepository:
         request_id: str,
         metadata: dict[str, Any] | None = None,
         expected_lease_owner: str | None = None,
+        expected_lease_token: str | None = None,
         allow_unclaimed: bool = False,
     ) -> bool:
         """transient失敗をfingerprint付きでupsertし、指数backoffを設定する。
@@ -703,12 +826,12 @@ class IngestRepository:
         同一request_id・同一fingerprintの再記録はattemptを増やさず冪等。payloadが変われば
         attemptを1へ戻す。leaseは失敗確定時に解放し、次runの期限到来まで再claimしない。
 
-        ``expected_lease_owner`` がある claimed-worker 経路は、同じ owner の未期限切れ
-        pending lease が現在も存在するときだけ更新する。これにより lease takeover 後の
-        stale worker は successor lease を解放できず、resolved row も復活できない。
+        claimed-worker 経路は、同じ不透明 ``(owner, token)`` の未期限切れ pending lease
+        が現在も存在するときだけ更新する。owner名を再利用したABA takeover後でも stale
+        worker は successor lease を解放できず、resolved rowも復活できない。
         初回または未claimの scheduling 経路は ``allow_unclaimed=True`` を明示した場合
-        だけ許可し、active lease とは競合しない。owner と unclaimed opt-in の併用、および
-        owner なしの暗黙経路は拒否する。
+        だけ許可し、lease 3列がすべてNULLのrowに限定する。owner/token と unclaimed
+        opt-in の併用、不完全なfence、暗黙経路は拒否する。
         """
         import json
 
@@ -724,10 +847,17 @@ class IngestRepository:
         normalized_expected_lease_owner = (
             _strip_nul(expected_lease_owner) if expected_lease_owner is not None else None
         )
-        if normalized_expected_lease_owner is None:
+        normalized_expected_lease_token = (
+            _strip_nul(expected_lease_token) if expected_lease_token is not None else None
+        )
+        if normalized_expected_lease_owner is None and normalized_expected_lease_token is None:
             if not allow_unclaimed:
                 return False
-        elif not normalized_expected_lease_owner or allow_unclaimed:
+        elif (
+            not normalized_expected_lease_owner
+            or not normalized_expected_lease_token
+            or allow_unclaimed
+        ):
             return False
         sql = """
             INSERT INTO ingest_source_retries
@@ -739,7 +869,7 @@ class IngestRepository:
                 %s, %s, %s, %s, %s, %s, %s, %s,
                 'pending', %s, 1, now() + interval '60 seconds',
                 now(), now(), %s, %s::jsonb
-            WHERE %s::text IS NULL
+            WHERE (%s::text IS NULL AND %s::text IS NULL)
                OR EXISTS (
                     SELECT 1
                     FROM ingest_source_retries AS claimed
@@ -749,7 +879,8 @@ class IngestRepository:
                       AND claimed.external_id = %s
                       AND claimed.status = 'pending'
                       AND claimed.lease_owner = %s
-                      AND claimed.lease_expires_at > now()
+                      AND claimed.lease_token = %s
+                      AND claimed.lease_expires_at > clock_timestamp()
                )
             ON CONFLICT (source_kind, source_id, source_type, external_id)
             DO UPDATE SET
@@ -828,26 +959,34 @@ class IngestRepository:
                 resolved_at = NULL,
                 last_request_id = EXCLUDED.last_request_id,
                 lease_owner = NULL,
+                lease_token = NULL,
                 lease_expires_at = NULL,
                 metadata = ingest_source_retries.metadata || EXCLUDED.metadata
             WHERE (
                 %s::text IS NULL
+                AND %s::text IS NULL
                 AND (
-                    ingest_source_retries.status = 'resolved'
+                    (
+                        ingest_source_retries.status = 'resolved'
+                        AND ingest_source_retries.lease_owner IS NULL
+                        AND ingest_source_retries.lease_token IS NULL
+                        AND ingest_source_retries.lease_expires_at IS NULL
+                    )
                     OR (
                         ingest_source_retries.status = 'pending'
-                        AND (
-                            ingest_source_retries.lease_owner IS NULL
-                            OR ingest_source_retries.lease_expires_at <= now()
-                        )
+                        AND ingest_source_retries.lease_owner IS NULL
+                        AND ingest_source_retries.lease_token IS NULL
+                        AND ingest_source_retries.lease_expires_at IS NULL
                     )
                 )
             )
             OR (
                 %s::text IS NOT NULL
+                AND %s::text IS NOT NULL
                 AND ingest_source_retries.status = 'pending'
                 AND ingest_source_retries.lease_owner = %s
-                AND ingest_source_retries.lease_expires_at > now()
+                AND ingest_source_retries.lease_token = %s
+                AND ingest_source_retries.lease_expires_at > clock_timestamp()
             )
         """
         try:
@@ -868,14 +1007,19 @@ class IngestRepository:
                             _strip_nul(request_id),
                             json.dumps(_sanitize_metadata(metadata or {}), ensure_ascii=False),
                             normalized_expected_lease_owner,
+                            normalized_expected_lease_token,
                             source_kind,
                             _strip_nul(source_id),
                             source_type,
                             _strip_nul(external_id),
                             normalized_expected_lease_owner,
+                            normalized_expected_lease_token,
                             normalized_expected_lease_owner,
+                            normalized_expected_lease_token,
                             normalized_expected_lease_owner,
+                            normalized_expected_lease_token,
                             normalized_expected_lease_owner,
+                            normalized_expected_lease_token,
                         ),
                     )
                     recorded = int(cur.rowcount or 0) > 0
@@ -906,15 +1050,15 @@ class IngestRepository:
         validator_schema_version: str,
         request_id: str,
         expected_lease_owner: str | None = None,
+        expected_lease_token: str | None = None,
         allow_unclaimed: bool = False,
     ) -> bool:
         """成功/永久invalidでpending retryを解消する。DELETE権限は不要。
 
-        claimed worker は ``expected_lease_owner`` と一致する未期限切れ lease のみ解消
-        できる。fingerprint は owner/期限を迂回しない。unclaimed 経路は
+        claimed worker は exact ``(owner, token)`` と一致する未期限切れ lease のみ解消
+        できる。fingerprint はowner/token/期限を迂回しない。unclaimed 経路は
         ``allow_unclaimed=True`` を明示した場合だけ選べ、lease 情報が完全に空かつ
-        fingerprint が一致する pending row に限定する。owner と unclaimed opt-in の
-        併用、および owner なしの暗黙経路は拒否する。
+        fingerprint が一致する pending row に限定する。不完全なfenceと暗黙経路は拒否する。
         """
         if not self._schema_probe_allowed("source_retries"):
             return False
@@ -922,10 +1066,17 @@ class IngestRepository:
         normalized_expected_lease_owner = (
             _strip_nul(expected_lease_owner) if expected_lease_owner is not None else None
         )
-        if normalized_expected_lease_owner is None:
+        normalized_expected_lease_token = (
+            _strip_nul(expected_lease_token) if expected_lease_token is not None else None
+        )
+        if normalized_expected_lease_owner is None and normalized_expected_lease_token is None:
             if not allow_unclaimed:
                 return False
-        elif not normalized_expected_lease_owner or allow_unclaimed:
+        elif (
+            not normalized_expected_lease_owner
+            or not normalized_expected_lease_token
+            or allow_unclaimed
+        ):
             return False
         sql = """
             UPDATE ingest_source_retries
@@ -933,6 +1084,7 @@ class IngestRepository:
                 resolved_at = now(),
                 last_request_id = %s,
                 lease_owner = NULL,
+                lease_token = NULL,
                 lease_expires_at = NULL
             WHERE source_kind = %s
               AND source_id = %s
@@ -942,12 +1094,16 @@ class IngestRepository:
               AND (
                   (
                       %s::text IS NOT NULL
+                      AND %s::text IS NOT NULL
                       AND lease_owner = %s
-                      AND lease_expires_at > now()
+                      AND lease_token = %s
+                      AND lease_expires_at > clock_timestamp()
                   )
                   OR (
                       %s::text IS NULL
+                      AND %s::text IS NULL
                       AND lease_owner IS NULL
+                      AND lease_token IS NULL
                       AND lease_expires_at IS NULL
                       AND md5_checksum IS NOT DISTINCT FROM %s
                       AND size_bytes IS NOT DISTINCT FROM %s
@@ -968,8 +1124,11 @@ class IngestRepository:
                             source_type,
                             _strip_nul(external_id),
                             normalized_expected_lease_owner,
+                            normalized_expected_lease_token,
                             normalized_expected_lease_owner,
+                            normalized_expected_lease_token,
                             normalized_expected_lease_owner,
+                            normalized_expected_lease_token,
                             normalized_md5,
                             size_bytes,
                             _strip_nul(mime_type),
@@ -1387,9 +1546,35 @@ class IngestRepository:
         """同一 document key の置換を transaction 内で直列化する。"""
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                (f"{source_type}\x00{external_id}",),
+                """
+                SELECT pg_advisory_xact_lock(
+                    hashtextextended(%s, hashtextextended(%s, 0))
+                )
+                """,
+                (_strip_nul(external_id), source_type),
             )
+
+    @staticmethod
+    def _has_non_title_content(
+        conn: psycopg.Connection[dict[str, Any]],
+        doc: DocumentUpsert,
+    ) -> bool:
+        """既存documentに空でない本文chunkがあるかをtransaction内で確認する。"""
+        sql = """
+            SELECT EXISTS (
+                SELECT 1
+                FROM documents AS d
+                JOIN chunks AS c ON c.document_id = d.id
+                WHERE d.source_type = %s::document_source_type
+                  AND d.external_id = %s
+                  AND COALESCE(c.metadata->>'title_only', 'false') <> 'true'
+                  AND btrim(c.content) <> ''
+            ) AS has_content
+        """
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (doc.source_type, _strip_nul(doc.external_id)))
+            row = cur.fetchone()
+        return row is not None and bool(row["has_content"])
 
     @staticmethod
     def _upsert_document(
