@@ -195,6 +195,7 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
   memory                   = "1024"
   execution_role_arn       = aws_iam_role.x_buzz_exec[0].arn
   task_role_arn            = aws_iam_role.x_buzz_task[0].arn
+  depends_on               = [terraform_data.production_image_release_gate]
 
   runtime_platform {
     cpu_architecture        = "ARM64"

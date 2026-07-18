@@ -127,6 +127,7 @@ resource "aws_ecs_task_definition" "canary" {
   memory                   = 512
   execution_role_arn       = aws_iam_role.ecs_execution_canary[0].arn
   task_role_arn            = aws_iam_role.canary_task[0].arn
+  depends_on               = [terraform_data.production_image_release_gate]
 
   runtime_platform {
     operating_system_family = "LINUX"

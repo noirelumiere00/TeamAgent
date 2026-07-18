@@ -226,7 +226,10 @@ resource "aws_ecs_task_definition" "morning_digest" {
   memory                   = var.fargate_morning_digest_memory
   execution_role_arn       = aws_iam_role.ecs_execution_morning_digest[0].arn
   task_role_arn            = aws_iam_role.morning_digest_task[0].arn
-  depends_on               = [terraform_data.hmac_live_task_gate["morning_digest"]]
+  depends_on = [
+    terraform_data.production_image_release_gate,
+    terraform_data.hmac_live_task_gate["morning_digest"],
+  ]
 
   lifecycle {
     precondition {

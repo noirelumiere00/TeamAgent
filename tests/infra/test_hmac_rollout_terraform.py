@@ -271,28 +271,22 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY" in worker
     assert '"worker": frozenset({"mail_action", "report_link"})' in preflight
 
-    assert "HMAC_CONNECT_IMAGE" in connect_deploy
-    assert "sha256:[a-f0-9]{64}" in connect_deploy
+    assert "permanently disabled" in connect_deploy
+    assert "build_teamagent_image.sh" in connect_deploy
+    assert "authorize_image_release.sh" in connect_deploy
+    assert "terraform/README.md" in connect_deploy
     assert "aws codebuild start-build" not in connect_deploy
     assert "aws s3 cp" not in connect_deploy
     assert "force-new-deployment" not in connect_deploy
-    assert "--refresh-manifest-now" in connect_deploy
-    assert "--task-definition-json connect_web=/tmp/cwu_new.json" in connect_deploy
-    assert connect_deploy.index("--task-definition-json") < connect_deploy.index(
-        "aws ecs register-task-definition"
-    )
-    assert connect_deploy.index("--action pre-register") < connect_deploy.index(
-        "aws ecs register-task-definition"
-    )
-    assert connect_deploy.index("--action pre-update") < connect_deploy.index(
-        "aws ecs update-service"
-    )
-    assert "--action post-update" in connect_deploy
-    assert "--mode rollback" in connect_deploy
-    assert "HMAC_REGISTERED_TASK_ARN" in connect_deploy
+    assert "aws ecs register-task-definition" not in connect_deploy
+    assert "aws ecs update-service" not in connect_deploy
+    assert "exit 64" in connect_deploy
     assert "aws_ecs_task_definition.mcp" not in resilience
     assert "aws_ecs_task_definition.canary" not in resilience
-    assert "canary:14" in resilience
+    assert "targeted plans/applies could bypass the production image gate" in resilience
+    assert "plan_image_release.sh" in resilience
+    assert "apply_image_release_plan.sh" in resilience
+    assert "exit 64" in resilience
     assert worker_deploy.index("HMAC_PREFLIGHT_MANIFEST") < worker_deploy.index("aws s3 cp")
     assert worker_deploy.index("--worker-env") < worker_deploy.index("aws s3 cp")
     assert worker_deploy.count("source /opt/teamagent/hmac.env") >= 2

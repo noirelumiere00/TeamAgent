@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "stale_exception_policy": "fail",
+  "exceptions": []
+}

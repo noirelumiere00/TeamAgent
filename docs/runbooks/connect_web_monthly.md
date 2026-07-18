@@ -12,15 +12,16 @@ No-AI 静的 HTML（/app）として 16 名へ配信する月次サイクルの�
 
 | 主体 | やること | 理由 |
 |---|---|---|
-| ユーザー | AWS 書込を伴うコマンド（run-task / s3 cp / update-service） | Claude の hook が本番 AWS 書込をブロックするため |
+| ユーザー | AWS 書込を伴う ingest と guarded release 操作 | 管理端末/MFA 下でレビュー済み automation 経路を実行するため |
 | Claude Code | ローカル工程（export_vault → サイドカーレビュー → build → QA diff） | 分類・品質整備はサブスク内で安く回す方針 |
 
 定数: region=`ap-northeast-1` / cluster=`teamagent-dev` / bucket=`teamagent-dev-raw-files` /
 service=`teamagent-dev-connect-web` / ingest td family=`teamagent-dev-ingest`。
 
 設計原則（v2 で確定・変更不可）:
-- 配信時 No-AI 維持。/app のコンテンツ更新は「S3 cp + force-new-deployment（約3分）」。
-  CodeBuild bake（10-20分）は**コード変更時専用**（`infra/deploy/deploy_connectweb_unified.sh`）
+- 配信時 No-AI 維持。`/app` は S3 の mutable latest ではなく、task definition に固定した
+  exact VersionId と full SHA-256 を読む。コンテンツ変更でも core+media の app subject
+  binding、C0/H0、署名 SBOM/provenance/referrer、fresh receipt、full saved plan が必須
 - ingest の yaml は S3 オーバーライド（`INGEST_SOURCES_S3_URI`）。取得失敗・sha256 不一致は
   即 exit 1（同梱 yaml への silent fallback 禁止）
 - stale は soft-delete（`metadata.stale`）＋量的ブレーキ。物理 DELETE はしない
@@ -109,15 +110,27 @@ Claude Code セッションで依頼する内容（そのまま貼れる指示�
    `<out>.stats.json` の前回比を確認。新規取込がフッタ数字に反映されているか、
    意図しない激減が無いかを確認して報告
 
-### ③ ユーザー: publish（AWS 書込・約3分）
+### ③ ユーザー: immutable candidate を stage
 
 ```bash
-bash infra/deploy/publish_app_html.sh
+bash infra/deploy/publish_app_html.sh stage \
+  --src /secure/local/path/connect-web-app.html \
+  --manifest-sha256 <export manifest SHA-256> \
+  --build-inputs-sha256 <build_inputs SHA-256>
 ```
 
-- S3 配置 → force-new-deployment → services-stable → `/healthz` の
-  `app_html_sha256`（ローカル sha 先頭12hexと一致）と `app_html_source=="s3"` を自動検証
-- 成功表示のあと、ブラウザで https://connect.newstv.co.jp/app のフッタ更新日を目視確認して完了
+- script は 1 オブジェクトを upload し、返された VersionId を指定して再 download し、
+  full SHA-256 を検証する。ECS/Terraform は変更しない
+- 出力された machine record と exact 4 anchors をレビューし、trusted release contract /
+  deploy record へ反映する。baked fallback の bytes/VersionId は変更しない
+- exact `origin/dev` から final core+media を build/attest し、両 subject が同じ app
+  provenance digest を持つこと、ECR C0/H0、署名済み SBOM/provenance と recursive
+  referrer graph を確認する
+- fresh active receipt を発行し、script が表示した 4 変数を含む新しい full saved plan を
+  `plan_image_release.sh` で作る。レビュー後 `apply_image_release_plan.sh` で一度だけ apply
+- apply 後に `/healthz` の `app_html_contract_ok=true`、`app_html_source=s3`、
+  full `app_html_sha256`、`app_html_s3_version_id`、manifest、build_inputs が plan と一致する
+  ことを確認し、ブラウザで `/app` のフッタ更新日を目視する
 
 ---
 
@@ -127,20 +140,33 @@ bash infra/deploy/publish_app_html.sh
 
 1. 入れ込み v2 の PR を dev へ merge
 2. `bash infra/deploy/bootstrap_apphtml_s3_iam.sh`（冪等・task role 2本へ S3 読取付与）
-3. 新コードの image を bake: `bash infra/deploy/deploy_connectweb_unified.sh`
-   （**最後の bake**。以後コンテンツ更新は publish script）
-4. ingest td にも新 image を配布: `bash infra/deploy/register_ingest_td.sh --image-tag <手順3のタグ>`
-   （タグは手順3の完了表示 `image tag:` 行に出る。そのままコピーする）
-5. connect-web の td に `CONNECT_APP_HTML_S3_URI=s3://teamagent-dev-raw-files/codebuild/connect-web-app.html`
-   の env が入っていることを確認（unified script が宣言的に注入する。手順3を実行済みなら入っている。
-   あわせて No-AI フラグ `USE_QUERY_PLANNER=false` / `USE_COHERE_RERANK=false` も同 script が固定する）:
+3. 新コードの MCP image を guarded pipeline で build/attest:
+   `bash infra/deploy/build_teamagent_image.sh`
+4. launcher が返した candidate receipt を
+   `bash infra/deploy/authorize_image_release.sh --help` の exact
+   key/VersionIds で active 承認する。release repository の `@sha256` と
+   receipt/signature VersionIds を tfvars の `mcp_image` /
+   `image_release_evidence.mcp` に設定し、worktree 外の full saved plan を一度だけ apply:
+   ```bash
+   bash infra/terraform/plan_image_release.sh /secure/local/path/connect-ingest-release.tfplan
+   terraform show /secure/local/path/connect-ingest-release.tfplan
+   bash infra/terraform/apply_image_release_plan.sh /secure/local/path/connect-ingest-release.tfplan
+   ```
+   同じ `mcp_image` を使う connect-web と ingest task definition はどちらも
+   production release gate に直接依存する。tag、direct ECS registration、
+   `-target`、失敗後の同 plan 再実行は禁止。
+5. connect-web の td に URI に加えて exact
+   `CONNECT_APP_HTML_S3_VERSION_ID` / `CONNECT_APP_HTML_SHA256` /
+   manifest / build_inputs が入っていることを確認（Terraform が宣言的に注入する。
+   あわせて No-AI フラグ `USE_QUERY_PLANNER=false` / `USE_COHERE_RERANK=false` も Terraform が固定する）:
    ```bash
    aws ecs describe-task-definition --region ap-northeast-1 \
      --task-definition teamagent-dev-connect-web \
-     --query "taskDefinition.containerDefinitions[0].environment[?name=='CONNECT_APP_HTML_S3_URI']"
+     --query "taskDefinition.containerDefinitions[0].environment[?starts_with(name, 'CONNECT_APP_HTML_')]"
    ```
-6. 確認: `curl -s https://connect.newstv.co.jp/healthz` に `app_html_sha256` / `app_html_source`
-   が出ること（この時点では source は s3 か baked のどちらでも良い。フィールドの存在が確認点）
+6. 確認: `/healthz` の `app_html_contract_ok=true`、source=`s3`、exact VersionId と
+   full SHA-256 が plan と一致すること。configured S3 の取得失敗で baked fallback に
+   なった場合は health が失敗するため、成功扱いにしない
 
 ### 当日（Drive 再編 → 取り込み → 配信）
 
@@ -152,7 +178,8 @@ bash infra/deploy/publish_app_html.sh
 3. crawl 抜きで取り込み: `bash scripts/aws/run_ingest_task.sh --sources gdrive`
    （初回は `--mark-stale` を付けない。移行直後の大量差分でブレーキを踏まないため）
 4. 上の「月次サイクル②」を実行（export → build → QA）
-5. `bash infra/deploy/publish_app_html.sh` で配信。/app のフッタと件数を確認
+5. 上の③で immutable candidate を作成し、署名済み core+media + fresh receipt +
+   one-use full saved plan で配信。`/app` のフッタと件数を確認
 
 ### 週+1（後始末・恒久運用への切替判断）
 
@@ -170,9 +197,8 @@ bash infra/deploy/publish_app_html.sh
 
 | 対象 | 手順 |
 |---|---|
-| /app コンテンツ | S3 の旧バージョンへ戻す（publish script 末尾に表示されるコマンド）→ `update-service --force-new-deployment`。versioning 無効なら手元の前回 HTML を `--src` で再 publish |
-| connect-web コード | `aws ecs update-service --cluster teamagent-dev --service teamagent-dev-connect-web --task-definition <旧 revision ARN>`（unified script が控えを表示している） |
-| ingest コード | 旧 revision を `run-task --task-definition` で明示指定（register script が控えを表示） |
+| /app コンテンツ | 直前の trusted production record にある exact VersionId/SHA/manifest/build_inputs を `publish_app_html.sh rollback` で再検証する。旧版を latest へ copy しない。その 4 anchors と一致する署名済み core+media subject の fresh `rollback` receipt、新しい intent、full saved plan で戻す |
+| connect-web / ingest コード | 旧 digest の fresh `rollback` receipt を発行し、新しい intent＋full saved plan で両 Terraform-owned task definitions を戻す。同 receipt/plan の再利用や direct ECS revision 指定は禁止 |
 | yaml | git revert → `run_ingest_task.sh` 再実行（S3 上の yaml は毎回上書き配置される） |
 | stale 誤付与 | 対象を戻して ingest 再実行（観測された documents は stale が自動解除される） |
 
@@ -180,9 +206,9 @@ bash infra/deploy/publish_app_html.sh
 
 | 症状 | 意味 / 対処 |
 |---|---|
-| healthz `app_html_source=baked` | タスクが S3 取得に失敗しイメージ同梱版を配信中（**古いコンテンツの可能性**）。bootstrap_apphtml_s3_iam.sh 済みか・S3 オブジェクト有無・td の URI を確認 → 再 publish |
+| healthz `app_html_source=baked-fallback` | exact VersionId の取得/検証に失敗し、hash 検証済み同梱版を配信中。`app_html_contract_ok=false` の障害状態なので、IAM `GetObjectVersion`、VersionId、full SHA、td の 4 anchors を確認。mutable latest の再 publish では直らない |
 | healthz `app_html_source=missing` | S3 も baked も無い異常。直近のコードデプロイ（bake）を確認 |
-| healthz に `app_html_*` フィールドが無い | 旧コードの td が動いている。移行前日の手順 3-4 をやり直す |
+| healthz に `app_html_*` フィールドが無い | 旧コードの td が動いている。fresh receipt＋new full saved plan で移行前日の手順 3-4 をやり直す |
 | ingest が即 exit 1（yaml） | S3 取得失敗 or sha256 不一致（fallback 禁止仕様）。run_ingest_task.sh を使ったか・IAM を確認 |
 | ingest exit 1（stale ブレーキ） | stale 候補が既存 gdrive documents の 50% 超。ログの件数を確認し、意図どおり（大規模再編直後など）なら `--allow-mass-stale` |
 | ingest exit 1（ルート検査） | ナレッジ/ 直下に yaml 未登載の NN_ フォルダがある（ログに不足一覧）。yaml に追記するか、暫定なら `run_ingest_task.sh --root-check-warn-only` で降格（env のローカル export はタスクへ届かないので不可） |
@@ -193,11 +219,11 @@ bash infra/deploy/publish_app_html.sh
 ## 注意（既知の地雷）
 
 - EventBridge 週次スケジュールは現在 DISABLED（手動 run_ingest_task.sh が正）。再開する場合、
-  ターゲットは特定 td revision 固定なので register_ingest_td.sh 後にターゲット更新が必要
+  Terraform-owned target と ingest task definition を同じ reviewed full plan で更新する
 - app.html は機密（BANT/営業FB 埋込）につき **git コミット禁止**。S3 と手元にのみ置く
-- terraform apply は -var-file 必須。本 Runbook の経路はすべて ECS 直更新で tf を触らない
-- **/healthz の sha 露出（意図的トレードオフ）**: /healthz は無認証でインターネットから
-  到達可能であり、`app_html_sha256`（先頭12hex・内容復元不可）と `app_html_source` を
+- production image apply は exact tfvars＋guarded full saved-plan launcher 必須
+- **/healthz の provenance 露出（意図的トレードオフ）**: /healthz は無認証でインターネットから
+  到達可能であり、full `app_html_sha256`、VersionId、manifest/build_inputs と source を
   publish 検証のため意図的に露出している。第三者は更新タイミングの観測・流出コピーとの
   ハッシュ照合・劣化状態（baked/missing）の観測が可能だが、内容漏洩はないため許容する。
   加えて S3（codebuild/connect-web-app.html）への書込権限者は配信 HTML を差し替え可能

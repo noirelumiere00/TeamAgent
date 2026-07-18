@@ -373,7 +373,10 @@ resource "aws_ecs_task_definition" "mcp" {
   }
   execution_role_arn = aws_iam_role.ecs_execution_mcp.arn
   task_role_arn      = aws_iam_role.mcp_task.arn
-  depends_on         = [terraform_data.hmac_live_task_gate["mcp"]]
+  depends_on = [
+    terraform_data.production_image_release_gate,
+    terraform_data.hmac_live_task_gate["mcp"],
+  ]
 
   lifecycle {
     precondition {
@@ -590,9 +593,9 @@ resource "aws_ecs_task_definition" "mcp" {
 }
 
 resource "aws_ecs_task_definition" "openclaw" {
-  # openclaw は CLI 管理（apply_openclaw.sh・2026-06-26 事故の恒久対策）で tfvars に openclaw_image を
-  # 書かない運用のため、taskdef も service と同条件で gate する（2026-07-11 plan 実測: gate 無しだと
-  # image="" の taskdef を register しようとして apply が ECS の validation で途中失敗する）。
+  # Empty keeps an intentionally unmanaged legacy deployment out of this
+  # module. Any Terraform-managed image revision uses the one-time production
+  # release gate below; direct CLI task-definition registration is retired.
   count                    = var.openclaw_image == "" ? 0 : 1
   family                   = "${var.project_name}-${var.environment}-openclaw"
   requires_compatibilities = ["FARGATE"]
@@ -605,6 +608,7 @@ resource "aws_ecs_task_definition" "openclaw" {
   }
   execution_role_arn = aws_iam_role.ecs_execution_openclaw.arn
   task_role_arn      = aws_iam_role.openclaw_task.arn
+  depends_on         = [terraform_data.production_image_release_gate]
 
   # §R(go-live): Fargate の空ボリュームは root 所有で、公式OpenClawイメージは非root(node uid1000)。
   # readonly rootfs＋root所有volume だと node が /home/node/.openclaw に書けず crash（実測）。
