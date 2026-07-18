@@ -29,6 +29,11 @@ from slack_bolt.async_app import AsyncApp
 
 from teamagent.adapters.pgvector_client import PgVectorClient
 from teamagent.adapters.slack_client import SlackClient
+from teamagent.hmac_durable_state import require_runtime_startup
+from teamagent.hmac_keyring import (
+    MAIL_ACTION_MAX_TOKEN_TTL_S,
+    REPORT_LINK_MAX_TOKEN_TTL_S,
+)
 from teamagent.identity import build_rls_metadata, no_access_metadata
 from teamagent.observability.sentry import (
     capture_event_exception,
@@ -2789,6 +2794,13 @@ def main() -> None:
     from teamagent.observability.logging_config import configure_logging
 
     configure_logging()
+    require_runtime_startup(
+        (
+            ("mail_action", MAIL_ACTION_MAX_TOKEN_TTL_S),
+            ("report_link", REPORT_LINK_MAX_TOKEN_TTL_S),
+        ),
+        worker_attestation=True,
+    )
     asyncio.run(_run())
 
 

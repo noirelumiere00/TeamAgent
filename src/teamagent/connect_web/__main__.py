@@ -13,11 +13,14 @@ import os
 import uvicorn
 
 from teamagent.connect_web.app import build_uvicorn_log_config, create_app
+from teamagent.hmac_durable_state import require_runtime_startup
+from teamagent.hmac_keyring import REPORT_LINK_MAX_TOKEN_TTL_S
 
 app = create_app()
 
 
 def main() -> None:
+    require_runtime_startup((("report_link", REPORT_LINK_MAX_TOKEN_TTL_S),))
     host = os.environ.get("CONNECT_WEB_HOST", "127.0.0.1")
     port = int(os.environ.get("CONNECT_WEB_PORT", "8788"))
     # アクセスログの /r/<token> を伏せて配布（トークンの CloudWatch 流出を防ぐ）。

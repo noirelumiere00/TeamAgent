@@ -52,8 +52,16 @@ import hmac
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, SupportsIndex, TypedDict
+
+from teamagent.hmac_durable_state import (
+    HmacRuntimeExpectation,
+    durable_issuance_guard,
+    durable_state_required,
+    evaluate_runtime_state,
+)
 
 MAIL_ACTION_HMAC_SECRET = "MAIL_ACTION_HMAC_SECRET"
 MAIL_ACTION_HMAC_PREVIOUS_SECRET = "MAIL_ACTION_HMAC_PREVIOUS_SECRET"
@@ -196,14 +204,22 @@ class HmacKeyConfigurationError(RuntimeError):
 class _HmacKeyringSecretSlots:
     """Non-dataclass storage keeps key material out of dataclass serializers."""
 
-    __slots__ = ("_legacy_verification_keys", "_primary", "_verification_keys")
+    __slots__ = (
+        "_issuance_guard",
+        "_legacy_verification_keys",
+        "_primary",
+        "_verification_keys",
+    )
 
+    _issuance_guard: Callable[[], bool] | None
     _legacy_verification_keys: tuple[bytes, ...]
     _primary: bytes
     _verification_keys: tuple[bytes, ...]
 
     def sign(self, payload: bytes, *, purpose: str, digest_bytes: int) -> bytes:
         """Sign a purpose-framed payload with the primary key only."""
+        if self._issuance_guard is not None and not self._issuance_guard():
+            raise HmacKeyConfigurationError("HMAC issuance state is invalid")
         message = _domain_separated_message(purpose, payload)
         return hmac.new(self._primary, message, hashlib.sha256).digest()[:digest_bytes]
 
@@ -261,10 +277,12 @@ class HmacKeyring(_HmacKeyringSecretSlots):
         _primary: bytes,
         _verification_keys: tuple[bytes, ...],
         _legacy_verification_keys: tuple[bytes, ...] = (),
+        _issuance_guard: Callable[[], bool] | None = None,
     ) -> None:
         object.__setattr__(self, "_primary", _primary)
         object.__setattr__(self, "_verification_keys", _verification_keys)
         object.__setattr__(self, "_legacy_verification_keys", _legacy_verification_keys)
+        object.__setattr__(self, "_issuance_guard", _issuance_guard)
 
     def __repr__(self) -> str:
         return "HmacKeyring(<redacted>)"
@@ -760,6 +778,7 @@ def _previous_key_runtime_eligible(
 
 def _load_keyring(
     *,
+    domain: str,
     primary_env: str,
     previous_env: str,
     rotation_started_at_env: str,
@@ -769,10 +788,21 @@ def _load_keyring(
     max_token_ttl_s: int,
     now: int | None,
 ) -> HmacKeyring | None:
-    current = coerce_epoch_seconds(now)
-    if current is None:
-        return None
-    current = _advance_rotation_high_water(purpose=primary_env, current=current)
+    required = durable_state_required()
+    runtime_decision = (
+        evaluate_runtime_state(domain=domain, max_token_ttl_s=max_token_ttl_s) if required else None
+    )
+    if required:
+        if runtime_decision is None:
+            return None
+        current = runtime_decision.effective_now
+        expectation: HmacRuntimeExpectation | None = runtime_decision.expectation
+    else:
+        measured_current = coerce_epoch_seconds(now)
+        if measured_current is None:
+            return None
+        current = _advance_rotation_high_water(purpose=primary_env, current=measured_current)
+        expectation = None
 
     primary_raw = os.environ.get(primary_env)
     primary = _secret_bytes(primary_raw)
@@ -792,7 +822,13 @@ def _load_keyring(
     if previous_raw is None and started_at_raw is None:
         if previous_is_legacy_raw is not None:
             return None
-        return HmacKeyring(primary, (primary,))
+        return HmacKeyring(
+            primary,
+            (primary,),
+            _issuance_guard=(
+                (lambda: durable_issuance_guard(expectation)) if expectation is not None else None
+            ),
+        )
     if previous_raw is None or started_at_raw is None:
         return None
     if previous_is_legacy_raw not in (None, "1"):
@@ -831,15 +867,24 @@ def _load_keyring(
     previous_deadline = hmac_previous_key_deadline(started_at, max_token_ttl_s)
     if previous_deadline is None:
         return None
-    previous_eligible = _previous_key_runtime_eligible(
-        purpose=primary_env,
-        previous=previous,
-        started_at=started_at,
-        deadline=previous_deadline,
-        current=current,
-    )
-    if previous_eligible is None:
-        return None
+    if runtime_decision is not None:
+        if (
+            runtime_decision.expectation.rotation_started_at != started_at
+            or runtime_decision.expectation.deadline != previous_deadline
+        ):
+            return None
+        previous_eligible = runtime_decision.previous_eligible
+    else:
+        local_previous_eligible = _previous_key_runtime_eligible(
+            purpose=primary_env,
+            previous=previous,
+            started_at=started_at,
+            deadline=previous_deadline,
+            current=current,
+        )
+        if local_previous_eligible is None:
+            return None
+        previous_eligible = local_previous_eligible
     # The database credential is admitted only for exact unframed v1 migration payloads. It must
     # never become a general v2 verification key: otherwise anyone holding that credential could
     # mint a purpose-framed token during the migration window.
@@ -849,13 +894,19 @@ def _load_keyring(
     legacy_verification_keys = (
         (previous,) if previous_eligible and previous_is_legacy_raw == "1" else ()
     )
-    return HmacKeyring(primary, verification_keys, legacy_verification_keys)
+    return HmacKeyring(
+        primary,
+        verification_keys,
+        legacy_verification_keys,
+        (lambda: durable_issuance_guard(expectation)) if expectation is not None else None,
+    )
 
 
 def load_mail_action_hmac_keyring(*, now: int | None = None) -> HmacKeyring | None:
     """Load the mail-action keyring; return ``None`` for every malformed configuration."""
     try:
         return _load_keyring(
+            domain="mail_action",
             primary_env=MAIL_ACTION_HMAC_SECRET,
             previous_env=MAIL_ACTION_HMAC_PREVIOUS_SECRET,
             rotation_started_at_env=MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT,
@@ -880,6 +931,7 @@ def load_report_link_hmac_keyring(*, now: int | None = None) -> HmacKeyring | No
     """Load the report-link keyring; return ``None`` for every malformed configuration."""
     try:
         return _load_keyring(
+            domain="report_link",
             primary_env=REPORT_LINK_HMAC_SECRET,
             previous_env=REPORT_LINK_HMAC_PREVIOUS_SECRET,
             rotation_started_at_env=REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT,
