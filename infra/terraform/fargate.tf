@@ -218,6 +218,16 @@ resource "aws_iam_role_policy" "openclaw_task" {
 # --- MCP タスクロール: 対象Secret / KMS decrypt / Bedrock / rds connect ---
 data "aws_iam_policy_document" "mcp_task" {
   statement {
+    sid       = "HmacStateRuntime"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
+  }
+  statement {
     sid     = "ReadTargetSecrets"
     actions = ["secretsmanager:GetSecretValue"]
     # §J: wildcard をやめ MCP が runtime に必要な secret に限定（Slack tokens 等は対象外）。
@@ -363,6 +373,7 @@ resource "aws_ecs_task_definition" "mcp" {
   }
   execution_role_arn = aws_iam_role.ecs_execution_mcp.arn
   task_role_arn      = aws_iam_role.mcp_task.arn
+  depends_on         = [terraform_data.hmac_live_task_gate["mcp"]]
 
   lifecycle {
     precondition {
@@ -485,7 +496,7 @@ resource "aws_ecs_task_definition" "mcp" {
       # ナレッジ回答の末尾に「資料リンク」を付与（@AiLa=openclaw が markdown を装飾リンクへ
       # 変換する mcp のみ ON。connect-web(/app) は未設定＝生テキスト化しないため付けない）。
       { name = "SEARCH_ANSWER_SOURCE_LINKS", value = "1" },
-      ], local.mail_action_hmac_environment, local.report_link_hmac_environment, var.enable_tiktok_acquire ? [
+      ], local.mail_action_hmac_environment, local.report_link_hmac_environment, local.mcp_hmac_runtime_environment, var.enable_tiktok_acquire ? [
       # live パリティ: tiktok_acquire 連携のジョブ投入側。mcp が DynamoDB(状態)/SQS(キュー)/S3 を参照。
       # これらが無いと @AiLa の tiktok_acquire がジョブを投入できず取得パイプラインが停止する。
       { name = "USE_TIKTOK_ACQUIRE", value = "1" },
@@ -654,6 +665,12 @@ resource "aws_ecs_service" "mcp" {
   task_definition = aws_ecs_task_definition.mcp.arn
   desired_count   = 1
   launch_type     = "FARGATE"
+
+  lifecycle {
+    # HMAC service promotion requires a second trusted-time/live-state gate immediately before
+    # update-service. Terraform may register the gated task, but promotion is script-controlled.
+    ignore_changes = [task_definition]
+  }
 
   network_configuration {
     subnets          = data.aws_subnets.default.ids

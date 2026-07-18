@@ -74,12 +74,12 @@ def test_publish_contract_strings() -> None:
 
 
 def test_unified_deploy_contract_strings() -> None:
-    """unified bake が td へ宣言的に固定する env と image tag 表示の契約。
+    """HMAC-gated promotion が td へ固定する env と immutable image の契約。
 
     - CONNECT_APP_HTML_S3_URI: publish_app_html.sh ホットスワップの受け口
       （これが無いと publish が preflight で恒久 exit 1）
     - USE_QUERY_PLANNER / USE_COHERE_RERANK: T1 No-AI 化の恒久化（bake での巻き戻り防止）
-    - image tag 表示: register_ingest_td.sh --image-tag へ渡すタグの唯一の出所
+    - HMAC_CONNECT_IMAGE: 別工程でreview済みのdigest固定イメージだけを昇格
     """
     body = UNIFIED.read_text(encoding="utf-8")
     for needle in (
@@ -87,10 +87,13 @@ def test_unified_deploy_contract_strings() -> None:
         "USE_QUERY_PLANNER",
         "USE_COHERE_RERANK",
         "codebuild/connect-web-app.html",  # publish_app_html.sh の配置先と同一定数
-        "image tag: ${TAG}",
-        "register_ingest_td.sh --image-tag ${TAG}",
+        "HMAC_CONNECT_IMAGE",
+        "image_digest_pinned=true",
     ):
         assert needle in body, f"契約文字列が欠落: {needle}"
+    assert "aws codebuild start-build" not in body
+    assert "aws s3 cp" not in body
+    assert "force-new-deployment" not in body
 
 
 def test_bootstrap_contract_strings() -> None:

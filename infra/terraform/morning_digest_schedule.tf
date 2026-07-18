@@ -149,6 +149,16 @@ resource "aws_iam_role_policy" "ecs_execution_morning_digest_secrets" {
 data "aws_iam_policy_document" "morning_digest_task" {
   count = var.enable_morning_digest ? 1 : 0
   statement {
+    sid       = "HmacStateRuntime"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
+  }
+  statement {
     sid       = "KmsDecryptForOauthTokens"
     actions   = ["kms:Decrypt"]
     resources = ["arn:aws:kms:${var.aws_region}:${local.account_id}:key/*"]
@@ -216,6 +226,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
   memory                   = var.fargate_morning_digest_memory
   execution_role_arn       = aws_iam_role.ecs_execution_morning_digest[0].arn
   task_role_arn            = aws_iam_role.morning_digest_task[0].arn
+  depends_on               = [terraform_data.hmac_live_task_gate["morning_digest"]]
 
   lifecycle {
     precondition {
@@ -269,7 +280,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "REMINDER_SCHEDULER_GROUP", value = var.enable_reminders ? aws_scheduler_schedule_group.reminders[0].name : "" },
       { name = "REMINDER_QUEUE_ARN", value = var.enable_reminders ? aws_sqs_queue.reminders[0].arn : "" },
       { name = "REMINDER_SCHEDULER_ROLE_ARN", value = var.enable_reminders ? aws_iam_role.reminder_scheduler[0].arn : "" },
-    ], local.mail_action_hmac_environment)
+    ], local.mail_action_hmac_environment, local.morning_digest_hmac_runtime_environment)
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
@@ -368,6 +379,12 @@ resource "aws_cloudwatch_event_target" "morning_digest_run_task" {
   rule     = aws_cloudwatch_event_rule.morning_digest_weekday[0].name
   arn      = aws_ecs_cluster.main.arn
   role_arn = aws_iam_role.events_morning_digest_invoke[0].arn
+
+  lifecycle {
+    # Promotion is performed only after the live pre-update gate and retains the disabled rule
+    # until the final stage ledger transition.
+    ignore_changes = [ecs_target[0].task_definition_arn]
+  }
 
   ecs_target {
     task_definition_arn = aws_ecs_task_definition.morning_digest[0].arn

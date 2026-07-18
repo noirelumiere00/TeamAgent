@@ -30,7 +30,9 @@ REGION="${AWS_REGION:-ap-northeast-1}"
 INSTANCE_ID="${WORKER_INSTANCE_ID:-i-0feaa3c103ab6ef91}"
 BUCKET="${DEPLOY_BUCKET:-teamagent-dev-raw-files}"
 HMAC_PREFLIGHT_MANIFEST="${HMAC_PREFLIGHT_MANIFEST:-}"
+HMAC_ROLLOUT_CONTROL="${HMAC_ROLLOUT_CONTROL:-}"
 HMAC_WORKER_ENV="${HMAC_WORKER_ENV:-}"
+HMAC_WORKER_ROLLBACK_ARTIFACT="${HMAC_WORKER_ROLLBACK_ARTIFACT:-}"
 GO=0
 [[ "${1:-}" == "--go" ]] && GO=1
 
@@ -48,9 +50,18 @@ PREFLIGHT_PY="${PREFLIGHT_PY:-$ROOT/.venv/bin/python}"
   echo "ERROR: HMAC_WORKER_ENV（secret-free rendered hmac.env）が必須" >&2
   exit 2
 }
+[[ -n "$HMAC_ROLLOUT_CONTROL" && -f "$HMAC_ROLLOUT_CONTROL" ]] || {
+  echo "ERROR: HMAC_ROLLOUT_CONTROL（secret-free live control JSON）が必須" >&2
+  exit 2
+}
+[[ -n "$HMAC_WORKER_ROLLBACK_ARTIFACT" && -f "$HMAC_WORKER_ROLLBACK_ARTIFACT" ]] || {
+  echo "ERROR: HMAC_WORKER_ROLLBACK_ARTIFACT（prebuilt rollback）が必須" >&2
+  exit 2
+}
 [[ -x "$PREFLIGHT_PY" ]] || { echo "ERROR: preflight Python が実行できない" >&2; exit 2; }
 "$PREFLIGHT_PY" scripts/preflight_hmac_rotation.py \
   --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+  --refresh-manifest-now \
   --worker-env "$HMAC_WORKER_ENV"
 cp "$HMAC_WORKER_ENV" "$WORK/hmac.env"
 
@@ -71,6 +82,12 @@ echo "== 3. 秘密混入チェック（env.base は *_SECRET_NAME のみ・実�
 if grep -Eiq 'xoxb-|xapp-|AKIA[0-9A-Z]{15}|-----BEGIN|PRIVATE KEY' \
   "$WORK/teamagent.env.base" "$WORK/hmac.env"; then
   echo "ERROR: env.base に秘密らしき実値を検出。中止（Secrets Manager 経由にすること）。"
+  exit 1
+fi
+if grep -Eq \
+  '^[[:space:]]*(export[[:space:]]+)?(TEAMAGENT_HMAC_REQUIRED_DOMAINS|MAIL_ACTION_HMAC_(PREVIOUS_)?SECRET|REPORT_LINK_HMAC_(PREVIOUS_)?SECRET)=' \
+  "$WORK/teamagent.env.base"; then
+  echo "ERROR: env.base に禁止された HMAC runtime 値/required domains を検出。中止。" >&2
   exit 1
 fi
 echo "   OK（実値なし）"
@@ -97,6 +114,15 @@ if [[ "$GO" -ne 1 ]]; then
   exit 0
 fi
 
+echo "== 3c. live HMAC gate（upload直前）=="
+"$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
+  --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+  --refresh-manifest-now \
+  --control "$HMAC_ROLLOUT_CONTROL" \
+  --action pre-worker-upload \
+  --worker-artifact "$WORK/teamagent-bot.tar.gz" \
+  --worker-rollback-artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT"
+
 echo "== 4. S3 アップロード =="
 aws s3 cp "$WORK/teamagent-bot.tar.gz" "s3://$BUCKET/deploy/teamagent-bot.tar.gz" --region "$REGION"
 aws s3 cp "$WORK/teamagent.env.base" "s3://$BUCKET/deploy/teamagent.env.base" --region "$REGION"
@@ -111,6 +137,8 @@ aws s3 cp "s3://$BUCKET/deploy/teamagent-bot.tar.gz" /tmp/app.tar.gz
 aws s3 cp "s3://$BUCKET/deploy/teamagent.env.base" /opt/teamagent/teamagent.env.base
 aws s3 cp "s3://$BUCKET/deploy/teamagent.hmac.env" /opt/teamagent/hmac.env
 chmod 0644 /opt/teamagent/hmac.env
+source /opt/teamagent/hmac.env
+[[ "$(sha256sum /tmp/app.tar.gz | awk '{print $1}')" == "$TEAMAGENT_HMAC_ARTIFACT_SHA256" ]] || exit 1
 rm -rf app && mkdir -p app && tar xzf /tmp/app.tar.gz -C app
 cd app
 # /tmp は tmpfs(2GB) で torch 等の展開が溢れる → TMPDIR をディスクへ
@@ -148,11 +176,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/teamagent/app
-ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh || exit $?; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
+ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK || exit $?; ./.venv/bin/python scripts/check_hmac_runtime_state.py --domains MAIL_ACTION,REPORT_LINK --worker-attestation || exit $?; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
-Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS=MAIL_ACTION,REPORT_LINK
 [Install]
 WantedBy=multi-user.target
 BOTSVC
@@ -169,25 +196,24 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=/opt/teamagent/app
-ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh || exit $?; set +a; exec ./.venv/bin/python -m teamagent.connect_web'
+ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh REPORT_LINK || exit $?; ./.venv/bin/python scripts/check_hmac_runtime_state.py --domains REPORT_LINK || exit $?; set +a; exec ./.venv/bin/python -m teamagent.connect_web'
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
-Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS=REPORT_LINK
 [Install]
 WantedBy=multi-user.target
 CONNSVC
-# 旧 connect_web(systemd管理外の手動起動)が 8788 を掴んでいると unit が bind 失敗するため先に止める。
-systemctl stop teamagent-connect 2>/dev/null || true
-( command -v fuser >/dev/null && fuser -k 8788/tcp ) 2>/dev/null || pkill -f 'teamagent.connect_web' 2>/dev/null || true
-sleep 2
 systemctl daemon-reload
 systemctl enable teamagent-bot teamagent-connect
-systemctl restart teamagent-bot teamagent-connect
-sleep 6
-echo "----- teamagent-bot -----"; systemctl status teamagent-bot --no-pager | tail -15
-echo "----- teamagent-connect -----"; systemctl status teamagent-connect --no-pager | tail -15
-ss -ltnp 2>/dev/null | grep -q ':8788' && echo "OK: connect_web listening on 8788" || echo "WARN: connect_web が 8788 を listen していない（連携不可）"
+(
+  set -a
+  source /opt/teamagent/teamagent.env.base
+  source /opt/teamagent/hmac.env
+  source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK
+  ./.venv/bin/python scripts/check_hmac_runtime_state.py \
+    --domains MAIL_ACTION,REPORT_LINK --worker-attestation
+)
+echo "worker_readiness=true"
 RSH
 )
 REMOTE="${REMOTE/__BUCKET__/$BUCKET}"
@@ -207,8 +233,46 @@ for i in $(seq 1 60); do
   echo "   [$((i * 10))s] $ST"
   [[ "$ST" == "Success" || "$ST" == "Failed" || "$ST" == "TimedOut" ]] && break
 done
-echo "----- STDOUT -----"
-aws ssm get-command-invocation --region "$REGION" --command-id "$CID" --instance-id "$INSTANCE_ID" --query StandardOutputContent --output text
-echo "----- STDERR(tail) -----"
-aws ssm get-command-invocation --region "$REGION" --command-id "$CID" --instance-id "$INSTANCE_ID" --query StandardErrorContent --output text | tail -8
+[[ "${ST:-}" == "Success" ]] || {
+  echo "ERROR: worker prepare/readiness failed (status=${ST:-unknown}); remote output is not echoed" >&2
+  exit 1
+}
+echo "   worker_prepare=true readiness=true output_redacted=true"
+
+"$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
+  --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+  --refresh-manifest-now \
+  --control "$HMAC_ROLLOUT_CONTROL" \
+  --action worker-verified \
+  --worker-rollback-artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT"
+"$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
+  --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+  --refresh-manifest-now \
+  --control "$HMAC_ROLLOUT_CONTROL" \
+  --action pre-restart \
+  --worker-rollback-artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT"
+
+RESTART_REMOTE='set -euo pipefail; systemctl stop teamagent-connect 2>/dev/null || true; ( command -v fuser >/dev/null && fuser -k 8788/tcp ) 2>/dev/null || pkill -f teamagent.connect_web 2>/dev/null || true; sleep 2; systemctl restart teamagent-bot teamagent-connect'
+RESTART_B64="$(printf '%s' "$RESTART_REMOTE" | base64 | tr -d '\n')"
+RESTART_CID="$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript --comment "TeamAgent HMAC-gated restart" \
+  --parameters commands="echo $RESTART_B64 | base64 -d | bash" \
+  --query Command.CommandId --output text 2>/dev/null || true)"
+[[ -n "${RESTART_CID:-}" && "$RESTART_CID" != "None" ]] || {
+  echo "ERROR: gated restart command was not accepted" >&2
+  exit 1
+}
+RESTART_STATUS=Pending
+for i in $(seq 1 30); do
+  sleep 10
+  RESTART_STATUS=$(aws ssm get-command-invocation --region "$REGION" \
+    --command-id "$RESTART_CID" --instance-id "$INSTANCE_ID" \
+    --query Status --output text 2>/dev/null || echo Pending)
+  [[ "$RESTART_STATUS" == "Success" || "$RESTART_STATUS" == "Failed" || "$RESTART_STATUS" == "TimedOut" ]] && break
+done
+[[ "$RESTART_STATUS" == "Success" ]] || {
+  echo "ERROR: worker restart failed (status=$RESTART_STATUS); remote output is not echoed" >&2
+  exit 1
+}
+echo "   worker_restart=true output_redacted=true"
 echo "== 完了 == Slack で『@TeamAgent VSEO分析 新宿 ランチ』を確認。問題あれば runbook のロールバックへ。"

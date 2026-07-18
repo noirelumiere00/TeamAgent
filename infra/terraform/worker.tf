@@ -69,6 +69,20 @@ data "aws_iam_policy_document" "worker_app" {
       "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.vertex_sa_secret_name}-*",
     ]
   }
+  statement {
+    sid = "HmacStateRuntimeAndReadiness"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:TransactWriteItems",
+    ]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
+  }
   # レポート/生ファイル用 S3（report_publish.py の署名付きURL発行先）
   statement {
     sid       = "RawFilesBucket"
@@ -181,6 +195,7 @@ resource "aws_instance" "worker" {
     cd /opt/teamagent
     aws s3 cp "s3://$BUCKET/deploy/teamagent-bot.tar.gz" /tmp/app.tar.gz
     aws s3 cp "s3://$BUCKET/deploy/teamagent.env.base" /opt/teamagent/teamagent.env.base
+    [[ "$(sha256sum /tmp/app.tar.gz | awk '{print $1}')" == '${var.worker_hmac_artifact_sha256}' ]] || exit 1
     rm -rf /opt/teamagent/app && mkdir -p /opt/teamagent/app
     tar xzf /tmp/app.tar.gz -C /opt/teamagent/app
     cd /opt/teamagent/app
@@ -194,6 +209,12 @@ resource "aws_instance" "worker" {
     # HMAC deployment metadata only (secret names/version IDs/generations/T0; no secret payloads).
     # Source this after teamagent.env.base so a stale base file cannot reset T0 or swap generations.
     cat > /opt/teamagent/hmac.env <<'HMAC'
+    export TEAMAGENT_HMAC_STATE_REQUIRED='1'
+    export TEAMAGENT_HMAC_STATE_TABLE='${aws_dynamodb_table.hmac_state.name}'
+    export TEAMAGENT_HMAC_STATE_SCOPE='${local.hmac_state_scope}'
+    export TEAMAGENT_HMAC_ROTATION_EPOCH='${var.hmac_rotation_epoch}'
+    export TEAMAGENT_HMAC_PROVENANCE='${local.worker_hmac_provenance}'
+    export TEAMAGENT_HMAC_ARTIFACT_SHA256='${var.worker_hmac_artifact_sha256}'
     export MAIL_ACTION_HMAC_SECRET_NAME='${aws_secretsmanager_secret.mail_action_hmac.name}'
     export MAIL_ACTION_HMAC_PRIMARY_VERSION_ID='${var.mail_action_hmac_primary_version_id}'
     export MAIL_ACTION_HMAC_PRIMARY_GENERATION='${local.mail_action_hmac_primary_generation}'
@@ -213,6 +234,12 @@ resource "aws_instance" "worker" {
     export REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY='${var.report_link_hmac_rollout_phase == "legacy_migration" ? "1" : ""}'
     export REPORT_LINK_TTL_S='${var.report_link_hmac_ttl_s}'
     HMAC
+    IMDS_TOKEN="$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+      http://169.254.169.254/latest/api/token)"
+    WORKER_ID="$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+      http://169.254.169.254/latest/meta-data/instance-id)"
+    [[ "$WORKER_ID" =~ ^i-[a-f0-9]{8,32}$ ]] || exit 1
+    printf "export TEAMAGENT_HMAC_WORKER_ID='%s'\n" "$WORKER_ID" >> /opt/teamagent/hmac.env
     chmod 0644 /opt/teamagent/hmac.env
     # systemd ユニット（コード投入後に enable/start）
     cat > /etc/systemd/system/teamagent-bot.service <<'SVC'
@@ -223,11 +250,10 @@ resource "aws_instance" "worker" {
     [Service]
     Type=simple
     WorkingDirectory=/opt/teamagent/app
-    ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh || exit $?; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
+    ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK || exit $?; ./.venv/bin/python scripts/check_hmac_runtime_state.py --domains MAIL_ACTION,REPORT_LINK --worker-attestation || exit $?; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
     Restart=always
     RestartSec=5
     Environment=PYTHONUNBUFFERED=1
-    Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS=MAIL_ACTION,REPORT_LINK
     [Install]
     WantedBy=multi-user.target
     SVC

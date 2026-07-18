@@ -82,17 +82,20 @@ def test_only_required_ecs_tasks_receive_each_hmac_domain() -> None:
             "local.mail_action_hmac_secrets",
             "local.report_link_hmac_environment",
             "local.report_link_hmac_secrets",
+            "local.mcp_hmac_runtime_environment",
             "local.mail_action_hmac_transition_valid",
             "local.report_link_hmac_transition_valid",
         },
         ("morning_digest_schedule.tf", "morning_digest"): {
             "local.mail_action_hmac_environment",
             "local.mail_action_hmac_secrets",
+            "local.morning_digest_hmac_runtime_environment",
             "local.mail_action_hmac_transition_valid",
         },
         ("connect_web.tf", "connect_web"): {
             "local.report_link_hmac_environment",
             "local.report_link_hmac_secrets",
+            "local.connect_web_hmac_runtime_environment",
             "local.report_link_hmac_transition_valid",
         },
     }
@@ -147,6 +150,13 @@ def test_hmac_secrets_are_dedicated_version_pinned_and_never_stored_in_state() -
     ) in hmac_tf
     assert "local.hmac_max_epoch_s - 900 - 86400" in hmac_tf
     assert "local.hmac_max_epoch_s - 900 - 604800" in hmac_tf
+    assert 'resource "aws_dynamodb_table" "hmac_state"' in hmac_tf
+    assert "point_in_time_recovery" in hmac_tf
+    assert 'attribute_name = "expires_at"' in hmac_tf
+    assert "deletion_protection_enabled = true" in hmac_tf
+    assert 'resource "terraform_data" "hmac_live_task_gate"' in hmac_tf
+    assert "timestamp()" in hmac_tf
+    assert "terraform_hmac_gate.py" in hmac_tf
 
     database_primary = re.compile(
         r'name\s*=\s*"(?:MAIL_ACTION|REPORT_LINK)_HMAC_SECRET"'
@@ -176,6 +186,24 @@ def test_execution_roles_have_only_the_hmac_domains_their_tasks_need() -> None:
         'data "aws_iam_policy_document"',
         "worker_app",
     )
+    runtime_policies = (
+        _terraform_block(
+            TF_ROOT / "fargate.tf",
+            'data "aws_iam_policy_document"',
+            "mcp_task",
+        ),
+        _terraform_block(
+            TF_ROOT / "connect_web.tf",
+            'data "aws_iam_policy_document"',
+            "connect_web_task",
+        ),
+        _terraform_block(
+            TF_ROOT / "morning_digest_schedule.tf",
+            'data "aws_iam_policy_document"',
+            "morning_digest_task",
+        ),
+        worker_policy,
+    )
 
     assert "aws_secretsmanager_secret.mail_action_hmac.arn" in mcp_policy
     assert "aws_secretsmanager_secret.report_link_hmac.arn" in mcp_policy
@@ -187,6 +215,11 @@ def test_execution_roles_have_only_the_hmac_domains_their_tasks_need() -> None:
     assert "aws_secretsmanager_secret.report_link_hmac.arn" in worker_policy
     assert "data.aws_secretsmanager_secret.database_url.arn" in worker_policy
     assert "${var.project_name}/${var.environment}/*" not in worker_policy
+    for policy in runtime_policies:
+        assert "aws_dynamodb_table.hmac_state.arn" in policy
+        assert "dynamodb:GetItem" in policy
+        assert "dynamodb:UpdateItem" in policy
+    assert "dynamodb:TransactWriteItems" in worker_policy
 
 
 def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None:
@@ -197,7 +230,9 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     )
     resilience = (TF_ROOT / "apply_resilience.sh").read_text(encoding="utf-8")
     worker_deploy = (ROOT / "scripts" / "deploy_to_ec2.sh").read_text(encoding="utf-8")
+    promote = (ROOT / "infra" / "deploy" / "promote_hmac_task.sh").read_text(encoding="utf-8")
     preflight = (ROOT / "scripts" / "preflight_hmac_rotation.py").read_text(encoding="utf-8")
+    live_gate = (ROOT / "scripts" / "hmac_rollout_gate.py").read_text(encoding="utf-8")
     assert (ROOT / "scripts" / "preflight_hmac_rotation.py").stat().st_mode & 0o111
 
     assert "source /opt/teamagent/hmac.env; source scripts/load_secrets.sh" in worker
@@ -215,21 +250,48 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY" in worker
     assert '"worker": frozenset({"mail_action", "report_link"})' in preflight
 
-    assert connect_deploy.index("HMAC_PREFLIGHT_MANIFEST") < connect_deploy.index(
-        "aws codebuild start-build"
-    )
+    assert "HMAC_CONNECT_IMAGE" in connect_deploy
+    assert "sha256:[a-f0-9]{64}" in connect_deploy
+    assert "aws codebuild start-build" not in connect_deploy
+    assert "aws s3 cp" not in connect_deploy
+    assert "force-new-deployment" not in connect_deploy
+    assert "--refresh-manifest-now" in connect_deploy
     assert "--task-definition-json connect_web=/tmp/cwu_new.json" in connect_deploy
     assert connect_deploy.index("--task-definition-json") < connect_deploy.index(
         "aws ecs register-task-definition"
     )
-    assert resilience.index("HMAC_PREFLIGHT_MANIFEST") < resilience.index("terraform plan")
+    assert connect_deploy.index("--action pre-register") < connect_deploy.index(
+        "aws ecs register-task-definition"
+    )
+    assert connect_deploy.index("--action pre-update") < connect_deploy.index(
+        "aws ecs update-service"
+    )
+    assert "aws_ecs_task_definition.mcp" not in resilience
+    assert "aws_ecs_task_definition.canary" not in resilience
+    assert "canary:14" in resilience
     assert worker_deploy.index("HMAC_PREFLIGHT_MANIFEST") < worker_deploy.index("aws s3 cp")
     assert worker_deploy.index("--worker-env") < worker_deploy.index("aws s3 cp")
     assert worker_deploy.count("source /opt/teamagent/hmac.env") >= 2
-    assert worker_deploy.count("source scripts/load_secrets.sh || exit $?") >= 2
-    assert "source scripts/load_secrets.sh || exit $?" in worker
-    assert "TEAMAGENT_HMAC_REQUIRED_DOMAINS=MAIL_ACTION,REPORT_LINK" in worker
-    assert "TEAMAGENT_HMAC_REQUIRED_DOMAINS=REPORT_LINK" in worker_deploy
+    assert "source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK" in worker
+    assert "source scripts/load_secrets.sh REPORT_LINK" in worker_deploy
+    assert "Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS" not in worker
+    assert "Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS" not in worker_deploy
+    assert worker_deploy.index("--action pre-worker-upload") < worker_deploy.index("aws s3 cp")
+    assert worker_deploy.index("--action pre-restart") < worker_deploy.index(
+        'RESTART_CID="$(aws ssm send-command'
+    )
+    assert "StandardOutputContent" not in worker_deploy
+    assert "StandardErrorContent" not in worker_deploy
+    assert "list_secret_version_ids" in live_gate
+    assert "get_secret_value" not in live_gate.casefold()
+    assert "transact_write_items" in live_gate
+    assert "gate.terraform_pre_register(" in live_gate
+    assert "config_digest" in live_gate
+    assert promote.index("--action pre-update") < promote.index("aws ecs update-service")
+    assert promote.index("aws ecs wait services-stable") < promote.index(
+        "--action mcp-stable-and-old-drained"
+    )
+    assert "force-new-deployment" not in promote
 
 
 def test_live_connect_and_canary_anchors_remain_documented_and_canary_unmodified() -> None:
@@ -247,6 +309,7 @@ def test_live_connect_and_canary_anchors_remain_documented_and_canary_unmodified
     assert "HMAC" not in canary
     assert "Use a short issuance/action maintenance window" in runbook
     assert runbook.index("Deploy the live legacy worker first") < runbook.index(
-        "Deploy one MCP revision containing both complete keyrings"
+        "Register one MCP revision containing both complete keyrings"
     )
     assert "every old MCP task is drained" in runbook
+    assert "canary `:14`" in runbook

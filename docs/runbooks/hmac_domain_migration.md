@@ -53,17 +53,30 @@ Do not read secret values. With an approved read-only production session:
    - one old calendar-event token,
    - one old report-link token.
    Keep tokens out of command lines and logs. Use a test user/object and a mode-0600 local file.
-5. Save a secret-free preflight manifest containing deployed/proposed
+5. Save a secret-free preflight manifest containing asserted deployed/proposed
    `secret ARN@VersionId`, T0, and the task/domain map for MCP, morning-digest, connect-web, and the
-   worker. Run:
+   worker. Also create the exact live-control file described by
+   `scripts/hmac_rollout_gate.py`: service/rule names, rotation epoch, expected workload
+   provenances, pre-registered rollback task ARNs/image digests, worker instance/artifact digest,
+   forbidden signing revisions (including connect-web `:53`), and the unchanged canary `:14`
+   target. Run the offline shape check:
 
    ```bash
    .venv/bin/python scripts/preflight_hmac_rotation.py \
      --manifest /protected/path/hmac-preflight.json
    ```
 
-The only passing output is `{"code":"ok","ok":true}`. Direct cutover, wrong previous generation,
-mid-window generation/T0 replacement, missing task, or task drift is a hard stop.
+The only passing output is `{"code":"ok","ok":true}`. This offline command is not authorization to
+deploy. `scripts/hmac_rollout_gate.py` independently reads current ECS/EventBridge metadata,
+resolves only Secrets Manager VersionId metadata, reads worker readiness from DynamoDB, and obtains
+time from AWS response headers. It compares the manifest assertions with those observations and
+accepts at most 60 seconds of manifest clock difference. It never calls `GetSecretValue`.
+Long-running deploy scripts pass `--refresh-manifest-now` immediately before each gate; this
+changes only the non-secret local-clock assertion. AWS response time remains authoritative and a
+local clock more than 60 seconds away still fails closed.
+
+Direct cutover, wrong previous generation, mid-window generation/T0 replacement, missing task,
+task drift, stale operator time, or an AWS clock spread over 10 seconds is a hard stop.
 
 ## Stage 1 — create dedicated generations
 
@@ -86,13 +99,38 @@ mid-window generation/T0 replacement, missing task, or task drift is a hard stop
    - execution roles can read only the domain secrets needed by their tasks;
    - no secret value appears in plan JSON, state, output, or logs.
 
+5. Create the encrypted, PITR-enabled `${project}-${environment}-hmac-state` DynamoDB table and
+   attach the checked-in least-privilege runtime/gate IAM policies. The table stores only
+   generation IDs, fixed T0/deadline, rotation epoch, trusted-time high-water, retired state,
+   workload provenance, short-lived worker readiness, and the rollout ledger.
+6. With current live task metadata still unchanged and traffic quiescence planned, refresh
+   `manifest.now` from the operator clock and CAS-initialize the state from live observations:
+
+   ```bash
+   .venv/bin/python scripts/hmac_rollout_gate.py \
+     --manifest /protected/path/hmac-preflight.json \
+     --control /protected/path/hmac-control.json \
+     --action initialize
+   ```
+
+   The resulting ledger stage must be `initialized`. A retry against an existing record fails;
+   never delete/reset the record to get a new T0.
+
 Do not apply a task with an unpinned secret ARN, `AWSCURRENT`, an empty VersionId, or a generation
 identifier assembled from proposed rather than observed deployed state.
+
+Terraform may register task definitions only through its always-replaced `terraform_data` live
+gate. ECS service task-definition fields and the morning EventBridge target are intentionally
+ignored by Terraform: promotion requires the separate trusted-time check immediately before each
+AWS mutation. `apply_resilience.sh` excludes every HMAC workload and canary `:14`; it is not a
+rollout path.
 
 ## Stage 2 — report-link verifier first
 
 1. Set `T0_report` once immediately before registering the first connect-web verifier revision.
-2. Deploy connect-web with:
+2. Pre-register both the primary candidate and an HMAC-compatible rollback task/image with the
+   same generations, VersionIds, T0, rotation epoch, and runtime-state contract. Deploy connect-web
+   verifier preload with:
    - dedicated REPORT_LINK primary,
    - pinned database-url previous,
    - matching primary/previous generation IDs,
@@ -107,9 +145,17 @@ identifier assembled from proposed rather than observed deployed state.
      --task-definition-json connect_web=/protected/path/rendered-connect-web.json
    ```
 
-4. Verify connect-web health, current app S3 anchor/source, security headers, and recent logs.
-5. Exercise the saved old `/r` token; it must still redirect correctly.
-6. MCP and the worker also carry MAIL_ACTION, so they cannot be deployed with report-only HMAC
+4. Prebuild the connect-web image separately and record its immutable digest; the HMAC promotion
+   path performs no Vault export, S3 publish, CodeBuild, or force deployment. Use
+   `infra/deploy/deploy_connectweb_unified.sh` with `HMAC_CONNECT_PHASE=preload`,
+   `HMAC_CONNECT_IMAGE=<repository>@sha256:<digest>`, a full reviewed task template, and both
+   manifest/control files.
+   The script runs `pre-connect-preload`, `pre-register`, and then a fresh `pre-update` immediately
+   before `update-service`. After stability it CAS-advances the ledger to
+   `connect_web_preloaded`.
+5. Verify connect-web health, current app S3 anchor/source, security headers, and recent logs.
+6. Exercise the saved old `/r` token; it must still redirect correctly.
+7. MCP and the worker also carry MAIL_ACTION, so they cannot be deployed with report-only HMAC
    changes: doing so would retain the database credential as a mail signing primary. Proceed
    immediately to Stage 3 and deploy their two domains together before `T0_report + 900`.
 
@@ -133,16 +179,32 @@ old-key verifier. Use a short issuance/action maintenance window; do not rely on
    morning-digest issuer resumes. Keep traffic quiesced because the worker can also execute issuer
    skills. The EC2 path requires both `HMAC_PREFLIGHT_MANIFEST` and the exact secret-free
    `HMAC_WORKER_ENV`; `scripts/deploy_to_ec2.sh` validates and installs that file before restarting
-   either bot or its local connect-web process.
-4. Deploy one MCP revision containing both complete keyrings: the reviewed REPORT_LINK transition
+   either bot or its local connect-web process. `teamagent.env.base` must contain neither
+   `TEAMAGENT_HMAC_REQUIRED_DOMAINS` nor any runtime HMAC key value. The loader clears and rejects
+   inherited values, then sets fixed domains from its command argument, fetches only exact
+   VersionIds, and attests both loaded domains plus rotation epoch/provenance/instance ID.
+   `deploy_to_ec2.sh` performs preparation without restarting, CAS-advances
+   `connect_web_preloaded -> worker_verified`, rechecks trusted time/live metadata and the
+   prebuilt rollback artifact immediately before issuing the separate restart command. The
+   systemd startup check writes a second generation/T0 digest attestation. MCP cutover rejects the
+   pre-restart attestation and requires this strictly newer post-restart record.
+4. Register one MCP revision containing both complete keyrings through Terraform's apply-time
+   live gate. Promote only with `infra/deploy/promote_hmac_task.sh`
+   (`HMAC_PROMOTION_TASK=mcp`). It revalidates the registered task and rollback tasks immediately
+   before `update-service`, waits for stability, proves every running MCP task uses the new task
+   definition, and CAS-advances `worker_verified -> mcp_stable_and_old_drained`. The revision
+   contains the reviewed REPORT_LINK transition
    from Stage 2 and the dedicated MAIL_ACTION primary, pinned database-url previous, fixed T0,
    matching generation IDs, and `MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY=1`. Wait until the service is
    stable and every old MCP task is drained. This is the report and mail issuer cutover. The first
    mixed-role process that could mint a dedicated-key token is the irreversible point; if
    quiescence cannot be proved, the rollout is NO-GO.
-5. Deploy morning-digest with the identical MAIL_ACTION keyring, then restore its schedule. Finish
-   worker and MCP before both applicable `T0 + 900` cutover deadlines and morning-digest before
-   `T0_mail + 900`.
+5. While the schedule remains disabled, promote morning-digest with the identical MAIL_ACTION
+   keyring using `HMAC_PROMOTION_TASK=morning_digest` and an exact full EventBridge target JSON.
+   Then deploy connect-web's final reviewed task with `HMAC_CONNECT_PHASE=final`. The final gate
+   verifies both tasks and CAS-advances
+   `mcp_stable_and_old_drained -> complete`; only then restore the digest schedule. Finish every
+   issuer update while trusted AWS time is strictly less than its applicable `T0 + 900`.
 6. Resume user traffic only after old MCP/worker processes are absent. Exercise the saved old draft
    and event tokens through their real action handlers; both must remain valid.
 7. Issue new draft and event tokens from every live issuer. Confirm version `2`, the correct `typ`,
@@ -174,8 +236,11 @@ cannot be proved—**never** roll an issuer back to a task or image that signs w
 separation. Treat a dedicated-primary token as potentially issued and roll forward instead:
 
 1. Keep the same dedicated primary VersionId, previous VersionId, and original T0.
-2. Use a prebuilt/validated HMAC-compatible rollback image containing this contract.
-3. Render and preflight the replacement task JSON before service update.
+2. Use only the pre-registered HMAC-compatible rollback task/image recorded in the control file.
+   The live gate fetches that task JSON and proves the same generation IDs, fixed T0, exact
+   VersionIds, rotation epoch, provenance contract, and image digest.
+3. Render and preflight the replacement task JSON before service update, then run the same
+   `pre-update` gate. Never use a control file edited to bless a legacy task.
 4. If an unrelated feature is faulty, disable that feature while preserving the keyring.
 5. Do not swap the primary/previous generation or reset T0 mid-window. A bad generation discovered
    after issuer cutover is an incident requiring a roll-forward repair, not a credential fallback.
@@ -215,6 +280,10 @@ recorded:
 - cross-purpose and wrong-owner probes fail;
 - issuer cutovers finish within 900 seconds of each fixed T0;
 - HMAC-compatible rollback revisions are ready and tested;
+- the durable ledger recorded, in order, `connect_web_preloaded`, `worker_verified`,
+  `mcp_stable_and_old_drained`, and `complete`;
+- startup and issuance tests prove stale/restarted/multiprocess tasks cannot use retired
+  generations or provenances;
 - rollout and rollback drills preserve primary/previous/T0;
 - logs are inspected for errors and secret/token leakage;
 - previous removal is scheduled and later proved fail-closed at both deadlines.

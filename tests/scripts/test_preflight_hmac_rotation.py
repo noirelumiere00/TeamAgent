@@ -143,7 +143,15 @@ def _worker_env(manifest: dict[str, object]) -> str:
         "report_link": "teamagent/dev/hmac/report-link",
     }
     ttls = {"mail_action": "86400", "report_link": "604800"}
-    lines: list[str] = []
+    lines: list[str] = [
+        "export TEAMAGENT_HMAC_STATE_REQUIRED='1'",
+        "export TEAMAGENT_HMAC_STATE_TABLE='teamagent-dev-hmac-state'",
+        "export TEAMAGENT_HMAC_STATE_SCOPE='teamagent/dev'",
+        "export TEAMAGENT_HMAC_ROTATION_EPOCH='hmac-2026-07-18'",
+        f"export TEAMAGENT_HMAC_PROVENANCE='{'e' * 64}'",
+        f"export TEAMAGENT_HMAC_ARTIFACT_SHA256='{'1' * 64}'",
+        "export TEAMAGENT_HMAC_WORKER_ID='i-0123456789abcdef0'",
+    ]
     for domain in ("mail_action", "report_link"):
         prefix = prefixes[domain]
         config = worker[domain]  # type: ignore[index]

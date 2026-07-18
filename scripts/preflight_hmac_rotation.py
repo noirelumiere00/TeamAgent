@@ -13,6 +13,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,22 @@ _DOMAIN_ENV_NAMES = {
 _WORKER_EXPORT_RE = re.compile(r"^export ([A-Z][A-Z0-9_]*)='([^']*)'$")
 _HMAC_NAME_PREFIXES = ("MAIL_ACTION_HMAC_", "REPORT_LINK_HMAC_")
 _HMAC_TTL_NAMES = frozenset({"MAIL_ACTION_TTL_S", "REPORT_LINK_TTL_S"})
+_WORKER_RUNTIME_NAMES = frozenset(
+    {
+        "TEAMAGENT_HMAC_STATE_REQUIRED",
+        "TEAMAGENT_HMAC_STATE_TABLE",
+        "TEAMAGENT_HMAC_STATE_SCOPE",
+        "TEAMAGENT_HMAC_ROTATION_EPOCH",
+        "TEAMAGENT_HMAC_PROVENANCE",
+        "TEAMAGENT_HMAC_ARTIFACT_SHA256",
+        "TEAMAGENT_HMAC_WORKER_ID",
+    }
+)
+_WORKER_TABLE_RE = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
+_WORKER_SCOPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+_WORKER_EPOCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_WORKER_PROVENANCE_RE = re.compile(r"^[a-f0-9]{64}$")
+_WORKER_ID_RE = re.compile(r"^i-[a-f0-9]{8,32}$")
 
 
 def _result(ok: bool, code: str, *, scope: str | None = None) -> dict[str, object]:
@@ -394,7 +411,7 @@ def _parse_worker_env(text: object) -> dict[str, str] | None:
         return None
     expected_names = {
         name for domain in _DOMAIN_MAX_TTLS for name in _worker_env_names(domain).values()
-    }
+    } | set(_WORKER_RUNTIME_NAMES)
     values: dict[str, str] = {}
     for line in text.splitlines():
         match = _WORKER_EXPORT_RE.fullmatch(line)
@@ -435,6 +452,16 @@ def validate_worker_env(manifest: object, worker_env_text: object) -> dict[str, 
     root = _mapping(manifest)
     values = _parse_worker_env(worker_env_text)
     if root is None or values is None:
+        return _result(False, "worker_env_drift", scope="worker")
+    if (
+        values["TEAMAGENT_HMAC_STATE_REQUIRED"] != "1"
+        or _WORKER_TABLE_RE.fullmatch(values["TEAMAGENT_HMAC_STATE_TABLE"]) is None
+        or _WORKER_SCOPE_RE.fullmatch(values["TEAMAGENT_HMAC_STATE_SCOPE"]) is None
+        or _WORKER_EPOCH_RE.fullmatch(values["TEAMAGENT_HMAC_ROTATION_EPOCH"]) is None
+        or _WORKER_PROVENANCE_RE.fullmatch(values["TEAMAGENT_HMAC_PROVENANCE"]) is None
+        or _WORKER_PROVENANCE_RE.fullmatch(values["TEAMAGENT_HMAC_ARTIFACT_SHA256"]) is None
+        or _WORKER_ID_RE.fullmatch(values["TEAMAGENT_HMAC_WORKER_ID"]) is None
+    ):
         return _result(False, "worker_env_drift", scope="worker")
     tasks = _mapping(root["tasks"])
     if tasks is None:
@@ -535,9 +562,19 @@ def main(argv: list[str] | None = None) -> int:
         "--worker-env",
         help="Also validate the exact secret-free EC2 hmac.env file.",
     )
+    parser.add_argument(
+        "--refresh-manifest-now",
+        action="store_true",
+        help="Replace only manifest.now with the local clock for an immediate live-gate assertion.",
+    )
     args = parser.parse_args(argv)
     try:
         manifest = _load_manifest(args.manifest)
+        if args.refresh_manifest_now:
+            root = _mapping(manifest)
+            if root is None:
+                raise ValueError("manifest must be an object")
+            root["now"] = int(time.time())
         rendered_tasks: dict[str, object] = {}
         for item in args.task_definition_json:
             task, separator, path = item.partition("=")

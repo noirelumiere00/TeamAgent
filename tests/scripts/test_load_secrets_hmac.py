@@ -15,6 +15,10 @@ _LEGACY_DATABASE_URL = (
 )
 _PRIMARY_VERSION = "b" * 32
 _PREVIOUS_VERSION = "a" * 32
+_SLACK_BOT = "xoxb-sensitive-bot-fragment-123456789"
+_SLACK_APP = "xapp-sensitive-app-fragment-123456789"
+_GOOGLE_CLIENT = "sensitive-client-id.apps.googleusercontent.com"
+_GOOGLE_REFRESH = "1//0SensitiveRefreshFragment123456789"
 
 
 def _fake_aws(tmp_path: Path) -> tuple[Path, Path]:
@@ -37,8 +41,9 @@ done
 printf '%s|%s\\n' "$secret_id" "$version_id" >>"$FAKE_AWS_LOG"
 case "$secret_id" in
   teamagent/dev/db_password) printf '%s\\n' 'fake-db-password' ;;
-  teamagent/dev/slack/bot_token) printf '%s\\n' 'fake-bot-token' ;;
-  teamagent/dev/slack/app_token) printf '%s\\n' 'fake-app-token' ;;
+  teamagent/dev/slack/bot_token) printf '%s\\n' "$FAKE_SLACK_BOT" ;;
+  teamagent/dev/slack/app_token) printf '%s\\n' "$FAKE_SLACK_APP" ;;
+  teamagent/dev/google_oauth) printf '%s\\n' "$FAKE_GOOGLE_JSON" ;;
   teamagent/dev/hmac/mail-action) printf '%s\\n' "$FAKE_MAIL_PRIMARY" ;;
   teamagent/dev/database-url) printf '%s\\n' "$FAKE_LEGACY_DATABASE_URL" ;;
   *) exit 9 ;;
@@ -73,6 +78,16 @@ def _base_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
             "FAKE_AWS_LOG": str(log_path),
             "FAKE_MAIL_PRIMARY": _MAIL_PRIMARY,
             "FAKE_LEGACY_DATABASE_URL": _LEGACY_DATABASE_URL,
+            "FAKE_SLACK_BOT": _SLACK_BOT,
+            "FAKE_SLACK_APP": _SLACK_APP,
+            "FAKE_GOOGLE_JSON": (
+                '{"client_id":"'
+                + _GOOGLE_CLIENT
+                + '","client_secret":"sensitive-client-secret",'
+                + '"refresh_token":"'
+                + _GOOGLE_REFRESH
+                + '"}'
+            ),
             "DB_PASSWORD_SECRET_NAME": "teamagent/dev/db_password",
             "SLACK_BOT_TOKEN_SECRET_NAME": "teamagent/dev/slack/bot_token",
             "SLACK_APP_TOKEN_SECRET_NAME": "teamagent/dev/slack/app_token",
@@ -86,7 +101,6 @@ def _mail_migration_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
     env, log_path = _base_environment(tmp_path)
     env.update(
         {
-            "TEAMAGENT_HMAC_REQUIRED_DOMAINS": "MAIL_ACTION",
             "MAIL_ACTION_HMAC_SECRET_NAME": "teamagent/dev/hmac/mail-action",
             "MAIL_ACTION_HMAC_PRIMARY_VERSION_ID": _PRIMARY_VERSION,
             "MAIL_ACTION_HMAC_PRIMARY_GENERATION": (
@@ -106,12 +120,17 @@ def _mail_migration_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
     return env, log_path
 
 
-def _run_loader(env: dict[str, str], assertion: str = ":") -> subprocess.CompletedProcess[str]:
+def _run_loader(
+    env: dict[str, str],
+    assertion: str = ":",
+    *,
+    domains: str = "",
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             "bash",
             "-c",
-            f"source scripts/load_secrets.sh || exit $?; {assertion}",
+            f"source scripts/load_secrets.sh {domains} || exit $?; {assertion}",
         ],
         cwd=ROOT,
         env=env,
@@ -131,6 +150,7 @@ def test_loader_fetches_exact_versions_and_never_logs_hmac_values(tmp_path: Path
             '[[ "$MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY" == "1" ]] && '
             '[[ -z "${REPORT_LINK_HMAC_SECRET+x}" ]]'
         ),
+        domains="MAIL_ACTION",
     )
 
     assert result.returncode == 0, result.stderr
@@ -139,6 +159,8 @@ def test_loader_fetches_exact_versions_and_never_logs_hmac_values(tmp_path: Path
     assert f"teamagent/dev/database-url|{_PREVIOUS_VERSION}" in calls
     assert _MAIL_PRIMARY not in result.stdout + result.stderr
     assert _LEGACY_DATABASE_URL not in result.stdout + result.stderr
+    assert _SLACK_BOT not in result.stdout + result.stderr
+    assert _SLACK_APP not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
@@ -161,7 +183,7 @@ def test_loader_fails_closed_on_marker_generation_or_domain_drift(
 ) -> None:
     env, _log_path = _mail_migration_environment(tmp_path)
     env[name] = value
-    result = _run_loader(env)
+    result = _run_loader(env, domains="MAIL_ACTION")
     assert result.returncode != 0
 
 
@@ -173,3 +195,59 @@ def test_shared_loader_skips_hmac_for_non_token_ingest_process(tmp_path: Path) -
     calls = log_path.read_text(encoding="utf-8")
     assert "hmac/" not in calls
     assert "database-url" not in calls
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "TEAMAGENT_HMAC_REQUIRED_DOMAINS",
+        "MAIL_ACTION_HMAC_SECRET",
+        "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+        "REPORT_LINK_HMAC_SECRET",
+        "REPORT_LINK_HMAC_PREVIOUS_SECRET",
+    ],
+)
+def test_loader_rejects_and_unsets_inherited_hmac_runtime_values(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    env, _log_path = _mail_migration_environment(tmp_path)
+    env[name] = "inherited-runtime-value"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "source scripts/load_secrets.sh MAIL_ACTION; rc=$?; "
+                f'[[ "$rc" -ne 0 && -z "${{{name}+x}}" ]]'
+            ),
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "inherited-runtime-value" not in result.stdout + result.stderr
+
+
+def test_loader_logs_only_boolean_slack_and_google_status(tmp_path: Path) -> None:
+    env, _log_path = _base_environment(tmp_path)
+    env["GOOGLE_OAUTH_SECRET_NAME"] = "teamagent/dev/google_oauth"
+    result = _run_loader(env)
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "bot=true" in combined
+    assert "configured=true" in combined
+    for secret_fragment in (
+        _SLACK_BOT,
+        _SLACK_APP,
+        _SLACK_BOT[:8],
+        _SLACK_APP[:8],
+        _GOOGLE_CLIENT[:20],
+        _GOOGLE_REFRESH,
+        _GOOGLE_REFRESH[:8],
+    ):
+        assert secret_fragment not in combined

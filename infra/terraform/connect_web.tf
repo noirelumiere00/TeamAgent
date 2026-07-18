@@ -180,6 +180,16 @@ resource "aws_iam_role_policy" "ecs_execution_connect_web_secrets" {
 data "aws_iam_policy_document" "connect_web_task" {
   count = var.enable_connect_web ? 1 : 0
   statement {
+    sid       = "HmacStateRuntime"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
+  }
+  statement {
     sid     = "KmsEncryptDecryptOauthTokens"
     actions = ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey"]
     resources = [
@@ -328,6 +338,7 @@ resource "aws_ecs_task_definition" "connect_web" {
   memory                   = var.fargate_connect_memory
   execution_role_arn       = aws_iam_role.ecs_execution_connect_web[0].arn
   task_role_arn            = aws_iam_role.connect_web_task[0].arn
+  depends_on               = [terraform_data.hmac_live_task_gate["connect_web"]]
 
   lifecycle {
     precondition {
@@ -420,7 +431,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "USE_QUERY_PLANNER", value = "false" },
       # ナレッジフィルタ UI（種別/期間などの絞り込み）。
       { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
-    ], local.report_link_hmac_environment)
+    ], local.report_link_hmac_environment, local.connect_web_hmac_runtime_environment)
     secrets = concat([
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
@@ -455,6 +466,10 @@ resource "aws_ecs_service" "connect_web" {
   task_definition = aws_ecs_task_definition.connect_web[0].arn
   desired_count   = 1
   launch_type     = "FARGATE"
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 
   network_configuration {
     subnets          = data.aws_subnets.default.ids

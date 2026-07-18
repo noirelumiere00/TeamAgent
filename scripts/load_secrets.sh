@@ -28,6 +28,44 @@ set -u
 
 _log() { echo "[load_secrets] $*" >&2; }
 
+_prepare_hmac_loader() {
+    # Required domains are a fixed caller contract. A base env or parent process may not choose
+    # them and may never preload runtime HMAC values. Clear all payload slots before deciding
+    # whether to fail so a rejected source cannot leave attacker-controlled key material behind.
+    local fixed_domains="${1:-}"
+    local poisoned=0
+    local runtime_var
+    if declare -p TEAMAGENT_HMAC_REQUIRED_DOMAINS >/dev/null 2>&1; then
+        poisoned=1
+    fi
+    for runtime_var in \
+        MAIL_ACTION_HMAC_SECRET \
+        MAIL_ACTION_HMAC_PREVIOUS_SECRET \
+        REPORT_LINK_HMAC_SECRET \
+        REPORT_LINK_HMAC_PREVIOUS_SECRET; do
+        if declare -p "$runtime_var" >/dev/null 2>&1; then
+            poisoned=1
+        fi
+        unset "$runtime_var"
+    done
+    unset TEAMAGENT_HMAC_REQUIRED_DOMAINS
+    if [[ "$poisoned" -ne 0 ]]; then
+        _log "ERROR: inherited HMAC runtime configuration is forbidden"
+        return 1
+    fi
+    case "$fixed_domains" in
+        "")
+            ;;
+        MAIL_ACTION|REPORT_LINK|MAIL_ACTION,REPORT_LINK)
+            export TEAMAGENT_HMAC_REQUIRED_DOMAINS="$fixed_domains"
+            ;;
+        *)
+            _log "ERROR: fixed HMAC domain contract is invalid"
+            return 1
+            ;;
+    esac
+}
+
 # プレースホルダ検知（テンプレ値が残っているか）
 _check_placeholder() {
     local var="$1"
@@ -232,7 +270,7 @@ _load() {
         _log "ERROR: Slack トークン取得失敗"
         return 1
     fi
-    _log "OK: Slack tokens loaded (bot=${SLACK_BOT_TOKEN:0:8}…, app=${SLACK_APP_TOKEN:0:8}…)"
+    _log "OK: Slack credentials loaded (bot=true, app=true)"
 
     # Purpose-separated token keyrings. VersionIds and T0 are non-secret deployment metadata;
     # payloads are fetched by exact version and are never printed. The database credential is
@@ -306,7 +344,7 @@ print(f\"export GOOGLE_OAUTH_REFRESH_TOKEN='{d['refresh_token']}'\")
 " <<<"$gjson" 2>/dev/null || true)"
             if [[ -n "$gvals" ]]; then
                 eval "$gvals"
-                _log "OK: Google OAuth loaded (client_id=${GOOGLE_CLIENT_ID:0:20}…, refresh_token=${GOOGLE_OAUTH_REFRESH_TOKEN:0:8}…)"
+                _log "OK: Google OAuth credentials loaded (configured=true)"
             else
                 _log "WARN: Google OAuth secret は取得できたが JSON parse 失敗"
             fi
@@ -332,4 +370,7 @@ print(f\"export GOOGLE_OAUTH_REFRESH_TOKEN='{d['refresh_token']}'\")
     fi
 }
 
+if ! _prepare_hmac_loader "${1:-}"; then
+    return 1 2>/dev/null || exit 1
+fi
 _load
