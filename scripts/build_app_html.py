@@ -222,8 +222,12 @@ def _norm_sender(raw):
     同一人物へ寄せる決定論ルール。取れなければ空文字。
     """
     s = FB_SENDER_TRUNCATED_FIELD_RE.sub("", raw.rstrip())
+    # フォームが氏名の直後へ電話番号を連結することがある。番号そのものは保持せず、
+    # 末尾だけを決定論で取り除く（名前中の数字や短い文字列には触れない）。
+    s = re.sub(r"[0-9][0-9\-‐−–]{5,}$", "", s)
     s = re.split(r"[（(_]", s, maxsplit=1)[0]
-    return s.replace(" ", "").replace("　", "").strip()[:20]
+    s = s.replace(" ", "").replace("　", "").strip()[:20]
+    return TAG_ALIAS.get("tans", {}).get(s, s)
 
 
 def _quote_text(sec):
@@ -652,7 +656,7 @@ TITLE_OVERRIDE: dict[str, str] = {}  # weird_rename_high.json（portable stem ke
 # === 表示名寄せ（任意適用・可逆）: tag_alias.json / client_alias.json（main() で読み込み） ===
 # 必須サイドカー(_read_sidecar)と扱いを分ける: 欠落/空/破損は空 dict＝素通り（fail-loud にしない）。
 # サイドカー削除で元挙動へ戻る可逆設計のため、名寄せは「載っている値だけ正本へ寄せる」。
-TAG_ALIAS: dict = {}       # {"industry":{variant:canonical,...},"solution":{...}}
+TAG_ALIAS: dict = {}       # {"industry":{variant:canonical,...},"solution":{...},"tans":{...}}
 CLIENT_ALIAS: dict = {}    # client_alias.json の "client": {variant:canonical,...}
 CLIENT_INDUSTRY_BY_IDENTITY: dict = {}  # client_industry.json の監査済み企業業種
 
@@ -1013,6 +1017,7 @@ svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;st
 .tbv tbody td:first-child{color:var(--text);font-weight:700}
 .tbv .num{text-align:right;font-variant-numeric:tabular-nums}
 .tbv .bp{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;color:var(--text)}
+.phasebadge{display:inline-block;min-width:14px;margin-right:4px;border-radius:7px;background:var(--b12);color:var(--muted);font-size:10px;line-height:14px;text-align:center}
 .tbv .dotc{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}
 /* P5: テーブル最終接点=経過日数バッジ（相対＋重症度色ドット/淡背景・生日付は title に温存） */
 .tbv .age{display:inline-flex;align-items:center;gap:6px;padding:1px 8px;border-radius:9px;font-variant-numeric:tabular-nums}
@@ -1176,9 +1181,9 @@ function docTags(d){const t=[];if(d.doc_type)t.push("資料種別/"+d.doc_type);
  (d.category||[]).forEach(v=>t.push("カテゴリ/"+v));(d.client_tier||[]).forEach(v=>t.push("クライアント種別/"+v));(d.product||[]).forEach(v=>t.push("提案プロダクト/"+v));(d.method||[]).forEach(v=>t.push("施策手法/"+v));if(d.agency)t.push("代理店/あり");return t;}
 const IDX=[];
 DATA.clients.forEach(c=>IDX.push({kind:"client",stem:c.stem,name:c.name,folder:"clients",tags:clientTags(c),
- props:{"業界":c.industry,"フェーズ":c.phase,"BANT":c.bant,"最終接点":c.last||"—"},hay:(c.name+" "+c.industry+" "+c.phase+" "+c.bant+" "+(c.md||"")).toLowerCase(),ex:c.industry?("業種: "+c.industry):"",obj:c}));
+ props:{"業界":c.industry,"業種":c.industry,"フェーズ":c.phase,"BANT":c.bant,"担当":(c.tans||[]).join("・"),"最終接点":c.last||"—"},hay:(c.name+" "+c.industry+" "+(c.raw_industry||"")+" "+c.phase+" "+c.bant+" "+(c.tans||[]).join(" ")+" "+(c.md||"")).toLowerCase(),ex:c.industry?("業種: "+c.industry):"",obj:c}));
 DATA.docs.forEach(d=>IDX.push({kind:"doc",stem:d.stem,name:d.title,folder:"docs",tags:docTags(d),
- props:{"種別":d.doc_type,"取引先":d.client,"業界":d.industry,"施策":d.solution,"更新":d.modified||"—","情報源":d.src||"—"},hay:(d.title+" "+d.client+" "+d.industry+" "+d.solution+" "+d.doc_type+" "+d.src+" "+d.ex+" "+(d.ents||[]).join(" ")).toLowerCase(),ex:d.ex,obj:d}));
+ props:{"種別":d.doc_type,"資料種別":d.doc_type,"取引先":d.client,"業界":d.industry,"業種":d.industry,"施策":d.solution,"更新":d.modified||"—","情報源":d.src||"—"},hay:(d.title+" "+d.client+" "+d.industry+" "+(d.raw_industry||"")+" "+d.solution+" "+(d.raw_solution||"")+" "+d.doc_type+" "+d.src+" "+d.ex+" "+(d.ents||[]).join(" ")).toLowerCase(),ex:d.ex,obj:d}));
 DATA.reports.forEach(r=>IDX.push({kind:"report",stem:r.stem,name:r.name,folder:"_reports",tags:[],props:{},hay:(r.name+" "+r.md).toLowerCase(),ex:"AI洗い出しレポート",obj:r}));
 // タグ集計(親も加算)
 const tagCount={};
@@ -1190,14 +1195,14 @@ Object.keys(tagCount).forEach(t=>{const p=t.split("/");if(p.length===1){tagTree[
 /* ===== タグUX基盤: 系統色辞書(CATMETA) + 統一チップ部品(chipHtml) + runQuery 集約 ===== */
 /* 色は既存パレット（PHASECOLOR/DTCOLOR/INDUSTRY_COLORS の hex）流用・中間明度。
    意味は常にラベルが担い、色は7pxドットのみ（色非依存原則・両テーマ共通） */
-const CATMETA={"宿題":"#e0685f","温度感":"#e07a5f","担当":"#d0a24c","フェーズ":"#4f9df5","BANT":"#c98bdb","業種":"#54b981","最終接点":"#5fc9c9","資料種別":"#8a7cf5","カテゴリ":"#8a7cf5","クライアント種別":"#c98bdb","提案プロダクト":"#e05f8f","施策":"#e05f8f","施策手法":"#b5c94a","代理店":"#c98b6a","関係先":"#c98b6a","媒体":"#7f9cf5","動画形式":"#b5c94a","形式":"#d0a24c","横断":"#e0b34c","更新":"#d0912f","情報源":"#8a8a8a"};
+const CATMETA={"宿題":"#e0685f","温度感":"#e07a5f","担当":"#d0a24c","フェーズ":"#4f9df5","BANT":"#c98bdb","業種":"#54b981","最終接点":"#5fc9c9","資料種別":"#8a7cf5","カテゴリ":"#9b7bd4","クライアント種別":"#bf6f9c","提案プロダクト":"#d65b85","施策":"#e05f8f","施策手法":"#a6b83f","代理店":"#b58a5e","関係先":"#c98b6a","媒体":"#7f9cf5","動画形式":"#5aa96c","形式":"#bc8b53","横断":"#e0b34c","更新":"#d0912f","情報源":"#8a8a8a"};
 /* タグペイン/ホームの意味順: 先頭7=取引先のタグ（行動を促す軸を先頭に）・残り=資料のタグ */
 const TAGORDER=["宿題","温度感","担当","フェーズ","BANT","業種","最終接点","資料種別","カテゴリ","クライアント種別","提案プロダクト","施策","施策手法","代理店","関係先","媒体","動画形式","形式","横断","更新","情報源"];
 function catColor(t){return CATMETA[(t||"").split("/")[0]]||"var(--accent)";}
 /* 空白入りタグ値は tag:"値" で発行（parseQuery の引用符対応を利用。空白なしは従来と同一文字列） */
 function tagQ(t){return /\s/.test(t)?'tag:"'+t+'"':"tag:"+t;}
-function chipHtml(tag,mode){const p=tag.split("/"),cat=p[0],val=p.slice(1).join("/");
- return '<span class="tagchip" tabindex="0" role="button" data-tag="'+esc(tag)+'" style="--cc2:'+catColor(tag)+'" title="'+(mode==="and"?"#"+esc(tag)+" — クリックで絞り込みに追加":"#"+esc(tag)+" で検索")+'"><span class="tcdot" style="background:'+catColor(tag)+'"></span>'
+function chipHtml(tag,mode){const p=tag.split("/"),cat=p[0],val=p.slice(1).join("/"),desc=cat==="フェーズ"?(PHASEDESC[val]||val):"";
+ return '<span class="tagchip" tabindex="0" role="button" data-tag="'+esc(tag)+'" style="--cc2:'+catColor(tag)+'" title="'+(desc?esc(desc):(mode==="and"?"#"+esc(tag)+" — クリックで絞り込みに追加":"#"+esc(tag)+" で検索"))+'"><span class="tcdot" style="background:'+catColor(tag)+'"></span>'
   +(val?'<span class="tck">'+esc(cat)+'</span><span class="tcv">'+esc(val)+'</span>':'<span class="tcv">'+esc(cat)+'</span>')+'</span>';}
 /* タグ/クエリ発行の単一路（従来4重複コードと同一手順: 検索ペインへ→input反映→__lastQ→再実行） */
 function runQuery(q){setPane("search");setTimeout(()=>{const i=$("#searchInput");i.value=q;window.__lastQ=q;runSearchPane(q,$("#searchOut"));},30);}
@@ -1253,6 +1258,7 @@ function treeRow(opts){// {chevron,icon,label,count,indent,active,onclick,onchev
  d.innerHTML=(opts.chevron?'<span class="tw">'+ic("chev")+'</span>':'<span class="tw"></span>')
   +(opts.icon?(opts.iconColor?'<span style="color:'+opts.iconColor+';opacity:.85;display:flex">'+ic(opts.icon)+'</span>':ic(opts.icon,opts.iconCls||"")):"")   /* iconColor 指定時は色クラスを外し系統色を効かせる */
   +(opts.dot?'<span class="tcdot" style="background:'+opts.dot+'"></span>':"")
+  +(opts.badge?'<span class="phasebadge">'+esc(opts.badge)+'</span>':"")
   +'<span class="lbl"'+(opts.bold?' style="color:var(--text)"':"")+' title="'+esc(opts.label)+'">'+esc(opts.label)+'</span>'
   +(opts.count!=null?'<span class="cnt">'+opts.count+'</span>':"");
  if(opts.key){d.dataset.key=opts.key;d.classList.add("filerow");}
@@ -1309,7 +1315,7 @@ function matchItem(it,P){
  return true;
 }
 function renderSearchPane(b){
- const f=document.createElement("div");f.className="sfield";f.innerHTML=ic("search")+'<input id="searchInput" placeholder="検索  tag: path: [業界:IT]">';b.appendChild(f);
+ const f=document.createElement("div");f.className="sfield";f.innerHTML=ic("search")+'<input id="searchInput" placeholder="検索  tag: path: [業種:IT]">';b.appendChild(f);
  const out=document.createElement("div");out.id="searchOut";b.appendChild(out);
  const inp=f.querySelector("input");inp.value=window.__lastQ||"";
  let dt=null;   /* 120ms debounce（1525件再フィルタの体感改善）。__lastQ は即時更新=状態保持は不変 */
@@ -1361,7 +1367,7 @@ function qhelpHtml(){
   if(n>0&&n<tagCount[top[i]]){ex.push({q:q,n:n});break outer2;}}
  const chips=ex.map(e=>'<span class="tagchip qxc" data-q="'+esc(e.q)+'"><span class="tcv">'+esc(e.q)+'</span><span class="qfn">'+e.n+'</span></span>').join(" ");
  return '<div class="qhelp qex">'+(chips?'<b style="color:var(--muted)">例（クリックで実行）</b><br>'+chips+'<br><br>':'')
-  +'演算子が使えます：<br><code>tag:業種/食品</code> タグ(子も一致)<br><code>-tag:横断</code> タグ除外<br><code>path:clients</code> フォルダ<br><code>file:提案</code> ファイル名<br><code>[業界:IT]</code> プロパティ<br><code>-除外語</code> / <code>"完全一致"</code> / <code>/正規表現/</code></div>';}
+  +'演算子が使えます：<br><code>tag:業種/食品</code> タグ(子も一致)<br><code>-tag:横断</code> タグ除外<br><code>path:clients</code> フォルダ<br><code>file:提案</code> ファイル名<br><code>[業種:IT]</code> プロパティ<br><code>path:clients [フェーズ:null]</code> フェーズ未記録の取引先<br><code>-除外語</code> / <code>"完全一致"</code> / <code>/正規表現/</code></div>';}
 function hl(text,terms){let s=esc(text);terms.forEach(t=>{if(t&&t.length>1){s=s.replace(new RegExp("("+t.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","ig"),"<mark>$1</mark>");}});return s;}
 function runSearchPane(q,out){
  q=q.trim();
@@ -1417,16 +1423,19 @@ function renderTags(b){
    present.forEach(top=>{
     const node=tagTree[top],col=CATMETA[top]||"var(--accent)";
     const kids=Object.keys(node.children);
-    kids.sort(tagSortAlpha?(x,y)=>x.localeCompare(y,"ja"):(x,y)=>node.children[y]-node.children[x]||x.localeCompare(y,"ja"));
+    if(top==="フェーズ")kids.sort((x,y)=>phaseOrder(x.slice(5))-phaseOrder(y.slice(5))||x.localeCompare(y,"ja"));
+    else kids.sort(tagSortAlpha?(x,y)=>x.localeCompare(y,"ja"):(x,y)=>node.children[y]-node.children[x]||x.localeCompare(y,"ja"));
     let vk=kids;
     if(q&&!top.toLowerCase().includes(q)){vk=kids.filter(k=>k.toLowerCase().includes(q));if(!vk.length)return;}   /* ヒット枝のみ+自動展開 */
     shown++;
     let open=q?true:openSet.has(top);
     const fr=treeRow({chevron:kids.length>0,icon:"hash",iconCls:"tag-ico",iconColor:col,label:top,count:node.count,closed:!open,active:isAct(top)});
+    if(top==="フェーズ")fr.title="商談ジャーニー順（五十音・件数順切替の対象外）";
     const ch=document.createElement("div");ch.className="tchildren"+(open?"":" hidden");
     const fold=!q&&vk.length>12&&!moreSet.has(top);   /* 葉12超は畳む（progressive disclosure） */
     (fold?vk.slice(0,12):vk).forEach(full=>{const leaf=full.split("/").slice(1).join("/");
-     ch.appendChild(treeRow({dot:col,label:leaf,count:node.children[full],indent:1,active:isAct(full),onclick:()=>runQuery(tagQ(full))}));});
+     const row=treeRow({dot:col,badge:top==="フェーズ"?PHASEBADGE[leaf]:"",label:leaf,count:node.children[full],indent:1,active:isAct(full),onclick:()=>runQuery(tagQ(full))});
+     if(top==="フェーズ")row.title=PHASEDESC[leaf]||leaf;ch.appendChild(row);});
     if(fold){const mr=treeRow({label:"他 "+(vk.length-12)+" 件を表示",indent:1});mr.classList.add("tmore");
      mr.onclick=()=>{moreSet.add(top);openSet.add(top);build();};ch.appendChild(mr);}
     fr.onclick=()=>{if(!kids.length){runQuery(tagQ(top));return;}open=!open;open?openSet.add(top):openSet.delete(top);fr.classList.toggle("closed",!open);ch.classList.toggle("hidden",!open);};
@@ -1483,17 +1492,16 @@ function welcome(){
  const rep=DATA.reports.map(r=>`<div class="wcard" data-k="r" data-s="${esc(r.stem)}">`+ic("report")+`<div><div class="wt">${esc(r.name)}</div><div class="wx">AI洗い出しレポート</div></div></div>`).join("");
  const qf=QF.filter(([l,t])=>tagCount[t]>0).slice(0,8).map(([l,t])=>{const tb=l==="宿題あり";   /* 宿題triageだけ作業面=テーブル着地（次アクション/最終接点列でさばく）。他は従来どおり検索着地 */
   return '<span class="tagchip '+(tb?"qft":"qfc")+'" tabindex="0" role="button" data-q="'+esc(tagQ(t))+'" style="--cc2:'+catColor(t)+'" title="'+(tb?"宿題ありのみで取引先テーブルを開く":"#"+esc(t)+" で検索")+'"><span class="tcdot" style="background:'+catColor(t)+'"></span><span class="tcv">'+esc(l)+'</span><span class="qfn">'+tagCount[t]+'</span></span>';}).join("");
- /* パイプライン節: PHASESTEPS 順の分布チップ（クリック=テーブルにフェーズ絞り込み着地）。
-    集計は都度 reduce（860件で無視できる）。0社フェーズは非クリック（テーブル select に無い値を選択状態にしない）。
-    「未設定」は c.phase==="" でテーブルの phase フィルタが表現できないため muted 非クリック */
+ /* パイプライン節: PHASESTEPS 順の分布チップ（クリック=テーブルにフェーズ絞り込み着地）。 */
  const pcnt={};DATA.clients.forEach(c=>{if(c.phase)pcnt[c.phase]=(pcnt[c.phase]||0)+1;});
  const unset=DATA.clients.filter(c=>!c.phase).length;
  const plChip=p=>{const n=pcnt[p]||0,col=PHASECOLOR[p]||"#8a8a8a";
-  return n?'<span class="tagchip plc" tabindex="0" role="button" data-p="'+esc(p)+'" style="--cc2:'+col+'" title="'+esc(p)+' の取引先をテーブルで開く"><span class="tcdot" style="background:'+col+'"></span><span class="tcv">'+esc(phShort(p))+'</span><span class="qfn">'+n+'</span></span>'
-   :'<span class="tagchip pld" title="'+esc(p)+'・該当なし"><span class="tcdot" style="background:'+col+'"></span><span class="tcv">'+esc(phShort(p))+'</span><span class="qfn">0</span></span>';};
+  return n?'<span class="tagchip plc" tabindex="0" role="button" data-p="'+esc(p)+'" style="--cc2:'+col+'" title="'+esc(PHASEDESC[p]||p)+' の取引先をテーブルで開く"><span class="tcdot" style="background:'+col+'"></span><span class="tcv">'+esc(phShort(p))+'</span><span class="qfn">'+n+'</span></span>'
+   :'<span class="tagchip pld" title="'+esc(PHASEDESC[p]||p)+'・該当なし"><span class="tcdot" style="background:'+col+'"></span><span class="tcv">'+esc(phShort(p))+'</span><span class="qfn">0</span></span>';};
  const pl=PHASESTEPS.map(plChip).join('<span class="plarr">→</span>')
-  +(pcnt["失注"]?'<span class="plarr">・</span>'+plChip("失注"):"")
-  +'<span class="plun">未設定 '+unset+'</span>';
+  +'<span class="plarr">・</span>'+plChip("失注")
+  +'<span class="plarr">・</span>'+plChip("その他")
+  +'<span class="tagchip plc" tabindex="0" role="button" data-p="__none__" title="フェーズ未記録の取引先をテーブルで開く"><span class="tcv">フェーズ未記録</span><span class="qfn">'+unset+'</span></span>';
  const tz=TAGORDER.filter(c=>tagTree[c]).map(c=>'<span class="tagchip tzc" tabindex="0" role="button" data-c="'+esc(c)+'" style="--cc2:'+(CATMETA[c]||"var(--accent)")+'" title="タグペインで「'+esc(c)+'」を開く"><span class="tcdot" style="background:'+(CATMETA[c]||"var(--accent)")+'"></span><span class="tcv">'+esc(c)+'</span><span class="qfn">'+(tagCount[c]||0)+'</span></span>').join("");
  $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} AiLaVault</h1>
   <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。取引先カルテには資料と商談FBを時系列で一望できる<b>施策タイムライン</b>付き。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
@@ -1573,7 +1581,7 @@ function tlCardInner(x){
  }
  const f=x.e;
  const head='<div class="tlhd"><span class="tlbadge tlfb">商談FB'+(f.src?"・"+esc(f.src):"")+'</span>'
-  +(f.ph?'<span class="tlchip">'+esc(f.ph)+'</span>':"")
+  +(f.ph?'<span class="tlchip" title="'+esc(PHASEDESC[f.ph]||f.ph)+'">'+esc(f.ph)+'</span>':"")
   +(f.bant?'<span class="tlchip">'+esc(f.bant)+'</span>':"")
   +(f.by?'<span class="tlchip tlby" title="FB送信者">'+esc(f.by)+'</span>':"")
   +'<span class="tltog" aria-hidden="true">＋</span></div>';
@@ -1734,7 +1742,7 @@ function tagJump(t){runQuery(tagQ(t));}
 function lastOf(c){return c.last||c.lastfb||"";}
 let tblSort={key:"act",dir:-1},tblFilter={q:"",ind:"",phase:"",temp:"",hw:false};   /* モジュール変数=テーブル⇄カルテ往復で選択状態維持 */
 /* 列順: 実務列（フェーズ/最終接点/担当/次アクション）を初期表示域へ。各エントリ定義は不変・順序のみ */
-const TCOLS=[["name","取引先",c=>c.name,0],["phase","フェーズ",c=>c.phase,0],["last","最終接点",c=>lastOf(c),0],["tans","担当",c=>(c.tans||[]).join("・"),0],["nx","次アクション",c=>c.nx||"",0],["industry","業界",c=>c.industry,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1]];
+const TCOLS=[["name","取引先",c=>c.name,0],["phase","フェーズ",c=>c.phase,0],["last","最終接点",c=>lastOf(c),0],["tans","担当",c=>(c.tans||[]).join("・"),0],["nx","次アクション",c=>c.nx||"",0],["industry","業種",c=>c.industry,0],["bant","BANT",c=>c.bant,0],["fb","FB",c=>c.fb,1],["doc","資料",c=>c.doc,1],["act","活動",c=>c.fb+c.doc,1]];
 /* 実Vaultの deal_phase/FB ph 実語彙（ケイパ/ヒアリング/1回目提案/2回目以降提案/最終交渉/成約/失注）。
    「その他」等の未知値は辞書に載せず fallback グレー（テーブル #8a8a8a / グラフ #9a9a9a） */
 const PHASECOLOR={"ケイパ":"#e0b34c","ヒアリング":"#c98bdb","1回目提案":"#4f9df5","2回目以降提案":"#8a7cf5","最終交渉":"#d0912f","成約（口頭内示以上）":"#54b981","失注":"#e0685f"};
@@ -1742,21 +1750,24 @@ const PHASECOLOR={"ケイパ":"#e0b34c","ヒアリング":"#c98bdb","1回目提�
    実データの時系列遷移はケイパ→ヒアリング方向（ユーザー確認済み）のためケイパが先頭。失注は順序外の終端差し替え */
 const PHASESTEPS=["ケイパ","ヒアリング","1回目提案","2回目以降提案","最終交渉","成約（口頭内示以上）"];
 const PHASESHORT={"1回目提案":"提案①","2回目以降提案":"提案②","成約（口頭内示以上）":"成約"};   /* 短縮表示（title に正式名） */
+const PHASEDESC={"ケイパ":"1. ケイパ紹介 — 初回接触・会社/実績紹介","ヒアリング":"2. ヒアリング — 課題把握","1回目提案":"3. 1回目提案","2回目以降提案":"4. 2回目以降提案","最終交渉":"5. 最終交渉","成約（口頭内示以上）":"6. 成約（口頭内示以上）","失注":"失注（終端）","その他":"フェーズ: その他（フォームで『その他』を選択）"};
+const PHASEBADGE={"ケイパ":"1","ヒアリング":"2","1回目提案":"3","2回目以降提案":"4","最終交渉":"5","成約（口頭内示以上）":"6"};
+function phaseOrder(p){const i=PHASESTEPS.indexOf(p);return i>=0?i:p==="失注"?100:p==="その他"?101:102;}
 function phShort(p){return PHASESHORT[p]||p;}
 function tableView(){showDoc();$("#docPane").scrollTop=0;pushHist("table","");lastNote={key:"table",title:"取引先テーブル",icon:"table",folder:""};ribbonActive("table");   /* 履歴に積む=カルテから「戻る」でテーブル復帰（朝のtriageループ） */
  renderTableShell();renderTabs();renderVhead();
- $("#rightBody").innerHTML='<div class="qhelp">Obsidian <b>Bases</b> 風テーブル。列見出しでソート、上部で業界/フェーズ絞り込み、行クリックでカルテ。</div>';}
+ $("#rightBody").innerHTML='<div class="qhelp">Obsidian <b>Bases</b> 風テーブル。列見出しでソート、上部で業種/フェーズ絞り込み、行クリックでカルテ。</div>';}
 function tblRows(){let rows=DATA.clients.slice();
  if(tblFilter.q){const q=tblFilter.q.toLowerCase();rows=rows.filter(c=>(c.name+c.industry+c.phase+c.bant).toLowerCase().includes(q));}
  if(tblFilter.ind)rows=rows.filter(c=>c.industry===tblFilter.ind);
- if(tblFilter.phase)rows=rows.filter(c=>c.phase===tblFilter.phase);
+ if(tblFilter.phase)rows=rows.filter(c=>tblFilter.phase==="__none__"?c.phase==="":c.phase===tblFilter.phase);
  if(tblFilter.temp)rows=rows.filter(c=>c.temp===tblFilter.temp);
  if(tblFilter.hw)rows=rows.filter(c=>c.hw);
  const col=TCOLS.find(c=>c[0]===tblSort.key)||TCOLS[6];
  rows.sort((a,b)=>{let x=col[2](a),y=col[2](b);return col[3]?(x-y)*tblSort.dir:(""+x).localeCompare(""+y,"ja")*tblSort.dir;});return rows;}
 function tblBody(shown){return shown.map(c=>{const pc=PHASECOLOR[c.phase]||"#8a8a8a";
  return '<tr data-s="'+esc(c.stem)+'"><td>'+esc(c.name)+'</td>'
-  +'<td>'+(c.phase?'<span class="bp" style="background:'+pc+'22">'+esc(c.phase)+'</span>':'<span style="color:var(--faint)">—</span>')+'</td>'
+  +'<td>'+(c.phase?'<span class="bp" title="'+esc(PHASEDESC[c.phase]||c.phase)+'" style="background:'+pc+'22">'+esc(c.phase)+'</span>':'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+ageCell(lastOf(c))+'</td>'
   +'<td>'+((c.tans&&c.tans.length)?esc(c.tans.join("・")):'<span style="color:var(--faint)">—</span>')+'</td>'
   +'<td>'+(c.nx?esc(c.nx):'<span style="color:var(--faint)">—</span>')+'</td>'
@@ -1772,15 +1783,16 @@ function updateTable(){const rows=tblRows();const tb=$("#inner").querySelector("
  tb.querySelectorAll("tr[data-s]").forEach(tr=>tr.onclick=()=>openClient(tr.dataset.s));}
 function renderTableShell(){
  const inds=[...new Set(DATA.clients.map(c=>c.industry).filter(Boolean))].sort();
- const phases=[...new Set(DATA.clients.map(c=>c.phase).filter(Boolean))].sort();
- const optI='<option value="">業界（すべて）</option>'+inds.map(i=>'<option'+(tblFilter.ind===i?" selected":"")+'>'+esc(i)+'</option>').join("");
- const optP='<option value="">フェーズ（すべて）</option>'+phases.map(p=>'<option'+(tblFilter.phase===p?" selected":"")+'>'+esc(p)+'</option>').join("");
+ const phaseSet=new Set(DATA.clients.map(c=>c.phase).filter(Boolean));
+ const phases=[...PHASESTEPS,"失注","その他"].filter(p=>phaseSet.has(p)).concat([...phaseSet].filter(p=>!PHASESTEPS.includes(p)&&p!=="失注"&&p!=="その他").sort());
+ const optI='<option value="">業種（すべて）</option>'+inds.map(i=>'<option'+(tblFilter.ind===i?" selected":"")+'>'+esc(i)+'</option>').join("");
+ const optP='<option value="">フェーズ（すべて）</option>'+phases.map(p=>'<option value="'+esc(p)+'"'+(tblFilter.phase===p?" selected":"")+'>'+esc(p)+'</option>').join("")+'<option value="__none__"'+(tblFilter.phase==="__none__"?" selected":"")+'>（フェーズ未記録）</option>';
  /* 温度感は実値集合から生成（ラベルはタグペインと同一文字列）。宿題はチェック1つの最小構成 */
  const temps=["高","ポジ優勢","拮抗","ネガ優勢"].filter(t=>DATA.clients.some(c=>c.temp===t));
  const optT='<option value="">温度感（すべて）</option>'+temps.map(t=>'<option'+(tblFilter.temp===t?" selected":"")+'>'+esc(t)+'</option>').join("");
  const head=TCOLS.map(c=>'<th tabindex="0" role="button" data-k="'+c[0]+'"'+(c[3]?' class="num"':'')+'>'+c[1]+'</th>').join("");
  $("#inner").innerHTML='<div class="tbv"><div class="th1">'+ic("table")+'取引先テーブル</div>'
-  +'<p class="sub">'+DATA.stats.clients+' 取引先を業界・フェーズ・BANT・FB数で分類。列見出しでソート、行クリックでカルテを開く（Bases風）。</p>'
+  +'<p class="sub">'+DATA.stats.clients+' 取引先を業種・フェーズ・BANT・FB数で分類。列見出しでソート、行クリックでカルテを開く（Bases風）。</p>'
   +'<div class="bar"><input id="tblq" placeholder="絞り込み…" value="'+esc(tblFilter.q)+'"><select id="tblind">'+optI+'</select><select id="tblph">'+optP+'</select><select id="tbltemp">'+optT+'</select><label class="hwck"><input type="checkbox" id="tblhw"'+(tblFilter.hw?" checked":"")+'> 宿題ありのみ</label><span class="tfl" id="tblact"></span><span class="n"></span></div>'
   +'<div class="tblwrap"><table><thead><tr>'+head+'</tr></thead><tbody></tbody></table></div></div>';
  $("#tblq").addEventListener("input",e=>{tblFilter.q=e.target.value;updateTable();});
@@ -1815,7 +1827,7 @@ function initGraph(){
  let clOther=new Set();                                  // 「その他」島へ寄せる値の集合（buildCenters で確定）
  function grpVal(n,ax){   // 軸ごとの所属グループ。対象type以外/空はnull=グループ中心に引かず既存リンクばねに委ねる（空値は未設定/記録なし島へ）
   // last/doc_type/solution はノードに埋め込まず、既存の索引 cByStem/dByStem（DATA.clients/docs）から stem で引く（ペイロード増ゼロ）。phase はノードの既存フィールド。
-  if(ax==="phase")   return n.type==="client"?(n.phase||"未設定"):null;
+  if(ax==="phase")   return n.type==="client"?(n.phase||"フェーズ未記録"):null;
   if(ax==="last")    return n.type==="client"?(ageBucket((cByStem[n.id.slice(2)]||{}).last)||"記録なし"):null;
   if(ax==="doc_type")return n.type==="doc"?((dByStem[n.id.slice(2)]||{}).doc_type||"未設定"):null;
   if(ax==="solution")return n.type==="doc"?((dByStem[n.id.slice(2)]||{}).solution||"未設定"):null;
@@ -1829,7 +1841,7 @@ function initGraph(){
   const cnt=Object.create(null),seen=[];clOther=new Set();   // 軸ごとに「その他」集約をリセット
   for(let i=0;i<N.length;i++){const g=grpVal(N[i],ax);if(g===null)continue;if(cnt[g]==null){cnt[g]=0;seen.push(g);}cnt[g]++;}
   let vals;
-  if(ax==="phase"){vals=Object.keys(PHASECOLOR).filter(p=>cnt[p]!=null);seen.forEach(g=>{if(g!=="未設定"&&vals.indexOf(g)<0)vals.push(g);});}
+  if(ax==="phase"){const steps=typeof PHASESTEPS==="undefined"?Object.keys(PHASECOLOR).filter(p=>p!=="失注"):PHASESTEPS;vals=[...steps,"失注","その他"].filter(p=>cnt[p]!=null);seen.forEach(g=>{if(g!=="フェーズ未記録"&&vals.indexOf(g)<0)vals.push(g);});if(cnt["フェーズ未記録"]!=null)vals.push("フェーズ未記録");}
   else if(ax==="last"){vals=AGEBK.filter(p=>cnt[p]!=null);}
   else{  /* 自由記述軸(資料種類/施策)は件数降順の上位 CLMAX-1 種＋あふれを「その他」島へ集約。
             単純に slice で切ると、切られた値のノードは cCenters に無く grp()→gc=null で原点
@@ -1852,7 +1864,7 @@ function initGraph(){
   for(let i=0;i<N.length;i++){if(!vis(i))continue;const g=grpBin(N[i]);if(g!==null&&cCenters[g])cCenters[g].n++;}}
  function clusterCap(){   // cluster有効時のみ: 軸名＋未設定件数を明示。doc基準は体験変化（取引先が資料に引かれ周辺配置）を併記
   if(!opt.cluster)return"";
-  const LB={phase:"フェーズ",last:"最終接点",doc_type:"資料の種類",solution:"施策"},uk=opt.cluster==="last"?"記録なし":"未設定";
+  const LB={phase:"フェーズ",last:"最終接点",doc_type:"資料の種類",solution:"施策"},uk=opt.cluster==="phase"?"フェーズ未記録":opt.cluster==="last"?"記録なし":"未設定";
   const un=cCenters[uk]?cCenters[uk].n:0;
   let tot=0;for(const v in cCenters)tot+=cCenters[v].n;
   if(!tot)return esc(LB[opt.cluster])+"でまとめています（表示中の対象がありません）";   /* 全島が空（対象typeを非表示にした等）で「まとめています」だけ出すと嘘になる */
@@ -2150,6 +2162,16 @@ def _load_alias_sidecar(name: str, subkey: str | None = None) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
+    if name == "tag_alias.json":
+        if set(data) - {"_note", "industry", "solution", "tans"}:
+            return {}
+        for family in ("industry", "solution", "tans"):
+            values = data.get(family, {})
+            if not isinstance(values, dict) or not all(
+                isinstance(key, str) and key.strip() and isinstance(value, str) and value.strip()
+                for key, value in values.items()
+            ):
+                return {}
     if subkey is not None:
         sub = data.get(subkey, {})
         return sub if isinstance(sub, dict) else {}
@@ -2454,7 +2476,7 @@ def main(argv: list[str] | None = None) -> int:
         _generated_client = fm.get("generated_by") == _EXPORT_VAULT_GENERATOR
         clients.append({
             "stem": f.stem, "name": _cname, "cnorm": norm(_cname),
-            "industry": _canon_industry(fm.get("industry", "")), "phase": fm.get("deal_phase", ""),
+            "industry": _canon_industry(fm.get("industry", "")), "raw_industry": fm.get("industry", ""), "phase": fm.get("deal_phase", ""),
             "bant": fm.get("bant_score", ""), "bantg": bant_short(fm.get("bant_score", "")),
             "fb": to_int(fm.get("fb_count", "0")), "doc": to_int(fm.get("doc_count", "0")),
             "md": client_md(t), "tl": _sort_fb_events(dedup_fb_events(list(_tl_raw))),
@@ -2602,7 +2624,8 @@ def main(argv: list[str] | None = None) -> int:
             # HTMLへは出さず、client noteの明示linkとの積集合を作るためだけに使う。
             "_primary_owner_key": client_identity_key(_dprimary),
             "_project_owner_key": client_identity_key(_dproject),
-            "industry": _canon_industry(fm.get("industry", "")), "solution": _canon_solution(_dsol),
+            "industry": _canon_industry(fm.get("industry", "")), "raw_industry": fm.get("industry", ""),
+            "solution": _canon_solution(_dsol), "raw_solution": _dsol,
             "doc_type": fm.get("doc_type", ""), "modified": fm.get("modified_at", ""),
             "src": _src,
             # タグ第1弾（資料側）: 媒体=title+excerpt / 動画形式=+solution / 形式=stem 末尾拡張子。
@@ -2706,12 +2729,18 @@ def main(argv: list[str] | None = None) -> int:
         # exporterが同じ規則で確定したfrontmatter値を保持する。
         if not _primary_industries and not _project_industries:
             _primary_industries = _client.get("_industry_fallbacks", [])
-        _client["industry"] = resolve_client_industry(
+        _resolved_industry = resolve_client_industry(
             _client["name"],
             _primary_industries,
             _project_industries,
             CLIENT_INDUSTRY_BY_IDENTITY,
         )
+        # master/consensus 由来値もサイドカーの正準化を必ず通す。生値は全文検索用に
+        # 別保持し、表示・タグ・プロパティは一貫して正準値だけを使う。
+        _client["raw_industry"] = " ".join(
+            dict.fromkeys(v for v in (_client.get("raw_industry", ""), _resolved_industry) if v)
+        )
+        _client["industry"] = _canon_industry(_resolved_industry)
 
     # 最終接点 = max(最終FB日, 安全な活動資料の最新更新日)。タグ/JS共通の確定値。
     for _c in clients:

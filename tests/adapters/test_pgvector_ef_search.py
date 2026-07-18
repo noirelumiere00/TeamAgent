@@ -49,6 +49,24 @@ def _ef_search_calls(conn: _FakeConn) -> list[tuple[str, tuple[object, ...] | No
     return [c for c in conn.cur.calls if "hnsw.ef_search" in c[0]]
 
 
+def test_application_name_is_transaction_local_and_parameterized() -> None:
+    conn = _FakeConn()
+
+    PgVectorClient._apply_session(
+        conn,  # type: ignore[arg-type]
+        None,
+        None,
+        None,
+        None,
+        "teamagent-ingest",
+    )
+
+    assert (
+        "SELECT set_config('application_name', %s, true)",
+        ("teamagent-ingest",),
+    ) in conn.cur.calls
+
+
 def test_ef_search_not_emitted_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     """env 未設定なら hnsw.ef_search は発行しない（DB 既定 40＝後方互換）。"""
     monkeypatch.delenv("SEARCH_HNSW_EF_SEARCH", raising=False)

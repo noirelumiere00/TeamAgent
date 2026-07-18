@@ -2087,12 +2087,14 @@ def test_journey_bar_wiring_and_guard(sidecars: Path, vault: Path, tmp_path: Pat
 
 def test_journey_pipeline_section_on_welcome(ux_html: str) -> None:
     """b案: ホームのクイックフィルタ直下にパイプライン節。クリックは tblFilter を全リセット+
-    フェーズのみ設定してテーブル着地（select 復元と件数一致）。未設定 N は muted 非クリック。"""
+    フェーズのみ設定してテーブル着地（select 復元と件数一致）。"""
     html = ux_html
     assert '<div class="wsec">パイプライン</div>' in html
     assert '<span class="plarr">→</span>' in html  # PHASESTEPS 順の→区切り
     assert 'tblFilter={q:"",ind:"",phase:el.dataset.p,temp:"",hw:false};tableView();' in html
-    assert "未設定 '+unset+'" in html  # 空フェーズはテーブル filter で表現できないため非クリック
+    assert 'data-p="__none__"' in html
+    assert 'フェーズ未記録</span><span class="qfn">\'+unset+' in html
+    assert 'plChip("その他")' in html
     assert (
         'class="tagchip pld"' in html
     )  # 0社フェーズは非クリック（select に無い値を選択状態にしない）
@@ -2109,6 +2111,54 @@ def test_journey_flow_repairs_homework_and_back(ux_html: str) -> None:
     assert 'k==="table"?tableView():' in html
     # グラフ等他ビューの履歴挙動は変えない（openGraph は pushHist しない）
     assert 'pushHist("graph"' not in html
+
+
+# ---------------- タグ再設計の受け入れ基準 ----------------
+
+
+def test_phase_journey_display_order_and_none_filter_contract(ux_html: str) -> None:
+    """フェーズの値は不変のまま、表示順・説明・未記録 sentinel を持つ。"""
+    assert "const PHASEDESC={" in ux_html
+    assert '"ケイパ":"1. ケイパ紹介 — 初回接触・会社/実績紹介"' in ux_html
+    assert '"その他":"フェーズ: その他（フォームで『その他』を選択）"' in ux_html
+    assert "const PHASEBADGE={" in ux_html
+    assert 'if(top==="フェーズ")kids.sort((x,y)=>phaseOrder' in ux_html
+    assert 'tblFilter.phase==="__none__"?c.phase==="":c.phase===tblFilter.phase' in ux_html
+    assert "（フェーズ未記録）</option>" in ux_html
+    assert 'n.phase||"フェーズ未記録"' in ux_html
+    assert 'uk=opt.cluster==="phase"?"フェーズ未記録"' in ux_html
+
+
+def test_sender_phone_strip_and_tans_alias_chokepoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """架空の番号末尾だけを除き、担当aliasは by/tans の共通入口で適用する。"""
+    monkeypatch.setattr(_mod, "TAG_ALIAS", {"tans": {"架空姓": "架空姓名"}})
+    assert _mod._norm_sender("架空姓123-456-7890") == "架空姓名"
+    assert _mod.tans_of([{"by": _mod._norm_sender("架空姓")}]) == ["架空姓名"]
+
+
+def test_repository_tag_aliases_have_no_chain_and_unique_category_colors(ux_html: str) -> None:
+    """aliasは常に1段で終わり、タグ系統色は重複しない。"""
+    aliases = json.loads(
+        (_ROOT / "data" / "connect_web_filters" / "tag_alias.json").read_text(encoding="utf-8")
+    )
+    for family in ("industry", "solution", "tans"):
+        values = aliases[family]
+        assert not (set(values) & set(values.values())), family
+    meta = re.search(r"const CATMETA=\{([^}]*)\}", ux_html)
+    assert meta is not None
+    colors = re.findall(r'"[^"]+":"(#[0-9a-f]{6})"', meta.group(1))
+    assert len(colors) == len(set(colors))
+
+
+def test_search_synonyms_and_raw_alias_hay_wiring(ux_html: str) -> None:
+    """表示は正準値、検索は旧語彙と新語彙の双方を受け付ける。"""
+    assert '"業界":c.industry,"業種":c.industry' in ux_html
+    assert '"種別":d.doc_type,"資料種別":d.doc_type' in ux_html
+    assert '"担当":(c.tans||[]).join("・")' in ux_html
+    assert '(c.raw_industry||"")' in ux_html
+    assert '(d.raw_industry||"")' in ux_html and '(d.raw_solution||"")' in ux_html
+    assert 'placeholder="検索  tag: path: [業種:IT]"' in ux_html
+    assert "<code>path:clients [フェーズ:null]</code>" in ux_html
 
 
 # ---------------- 表示名寄せ（tag_alias / client_alias・任意適用・可逆） ----------------
@@ -2161,8 +2211,9 @@ def test_tag_alias_industry_applied_to_doc_and_client(
     # doc 側・client 側とも industry が canonical（=props/テーブル/タグ/検索hay へ一貫適用される元）
     assert _doc_field(html, "番組資料", "industry") == "メディア"
     assert re.search(r'"name": "テレ朝", "cnorm": "テレ朝", "industry": "メディア"', html)
-    # variant 文字列は payload のどこにも残らない
+    # 表示値は canonical。生値は全文検索用 raw_industry にだけ保持する。
     assert '"industry": "メディア・エンタメ"' not in html
+    assert '"raw_industry": "メディア・エンタメ' in html
 
 
 def test_tag_alias_solution_applied_to_doc(sidecars: Path, vault: Path, tmp_path: Path) -> None:
@@ -2178,6 +2229,7 @@ def test_tag_alias_solution_applied_to_doc(sidecars: Path, vault: Path, tmp_path
     html = out.read_text(encoding="utf-8")
     assert _doc_field(html, "制作案", "solution") == "動画広告"
     assert '"solution": "動画制作"' not in html
+    assert '"raw_solution": "動画制作"' in html
 
 
 def test_solution_alias_field_canonical_but_vfmt_uses_raw(
@@ -2338,7 +2390,7 @@ def test_port_activity_uses_explicit_link_and_db_primary_or_project_identity(
     assert port["ds"] == ["port-row44", "port-drive-proposal"]
     assert port["doc"] == 2
     assert port["last"] == "2025-10-02"
-    assert port["industry"] == "人材"  # 監査済み企業masterは資料側tag aliasを通さない
+    assert port["industry"] == "人材派遣"  # master出力もtag aliasで正準化する
     assert _doc_field(html, "port-drive-proposal", "client") == "ポート株式会社"
     assert _doc_field(html, "report-title-only", "client") == ""
     # title-only関連資料は本文/graph linkには残るが、活動資料へは入らない。
@@ -2852,7 +2904,9 @@ def test_grp_client_and_doc_basis_branches_in_js(
     out = tmp_path / "o.html"
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
-    assert 'return n.type==="client"?(n.phase||"未設定"):null;' in html  # phase はノード既存
+    assert (
+        'return n.type==="client"?(n.phase||"フェーズ未記録"):null;' in html
+    )  # phase はノード既存
     assert (
         'ageBucket((cByStem[n.id.slice(2)]||{}).last)||"記録なし"' in html
     )  # last は DATA.clients 参照
@@ -2868,9 +2922,11 @@ def test_build_centers_ring_placement_js(sidecars: Path, vault: Path, tmp_path: 
     assert "function buildCenters(ax)" in html
     assert "i/tot*Math.PI*2" in html  # 角度 = index/総数 * 2π
     assert "CLBASE*Math.sqrt(N.length)" in html  # 半径 = base*√(全ノード数)＝絞り込みで島が動かない
-    assert "Object.keys(PHASECOLOR).filter" in html  # フェーズは PHASECOLOR キー順
+    assert 'typeof PHASESTEPS==="undefined"' in html
+    assert 'vals=[...steps,"失注","その他"]' in html  # フェーズはジャーニー順
     assert 'ax==="last"' in html and "AGEBK.filter" in html  # 最終接点は新→旧順
-    assert '["未設定","記録なし"].forEach' in html  # 未設定/記録なし島は必ず末尾
+    assert 'cnt["フェーズ未記録"]!=null)vals.push("フェーズ未記録")' in html
+    assert '["未設定","記録なし"].forEach' in html  # 他軸の未設定/記録なしは必ず末尾
 
 
 def test_cluster_counts_use_visible_set_only(sidecars: Path, vault: Path, tmp_path: Path) -> None:

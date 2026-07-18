@@ -20,7 +20,7 @@ Usage:
 Exit code:
     0: 成功
     1: ingest 中に 1 件以上のエラー
-    2: 設定エラー（DATABASE_URL 未設定 / yaml 構文エラー / 必須 env 不在）
+    2: warning を含む完了、または実行前の設定エラー
 """
 
 from __future__ import annotations
@@ -38,6 +38,15 @@ import structlog  # noqa: E402
 logger = structlog.get_logger(__name__)
 
 DEFAULT_YAML = PROJECT_ROOT / "data" / "ingest_sources.yaml"
+
+
+def _result_exit_code(result: object) -> int:
+    """schedulerがwarning完了をclean successと誤認しない終了コード契約。"""
+    total_errors = int(result.total_errors())  # type: ignore[attr-defined]
+    if total_errors:
+        return 1
+    total_warnings = int(result.total_warnings())  # type: ignore[attr-defined]
+    return 2 if total_warnings else 0
 
 
 def main() -> int:
@@ -128,15 +137,24 @@ def main() -> int:
             f"chunks={stats.chunks_inserted} "
             f"sources_processed={stats.sources_processed} "
             f"sources_skipped={stats.sources_skipped} "
-            f"errors={len(stats.errors)}"
+            f"errors={len(stats.errors)} "
+            f"warnings={stats.warning_count} "
+            f"outcome={stats.outcome}"
         )
         for err in stats.errors[:5]:
             print(f"    error: {err[:200]}")
-    print(f"  TOTAL documents={result.total_documents()} errors={result.total_errors()}")
+        if stats.warning_reasons:
+            print(f"    warning_reasons={dict(sorted(stats.warning_reasons.items()))}")
+    print(
+        f"  TOTAL documents={result.total_documents()} "
+        f"errors={result.total_errors()} "
+        f"warnings={result.total_warnings()} "
+        f"outcome={result.outcome}"
+    )
     if not args.commit:
         print("  [DRY-RUN] No DB writes. Use --commit to persist.")
 
-    return 1 if result.total_errors() > 0 else 0
+    return _result_exit_code(result)
 
 
 if __name__ == "__main__":

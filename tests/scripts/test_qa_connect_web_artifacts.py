@@ -987,6 +987,32 @@ def test_client_industry_master_is_enforced_in_public_payload(
     assert cast_dict(result["violations"])["html_client_industry_override_mismatch"] == 1
 
 
+def test_client_industry_master_alias_matches_canonicalized_public_payload(
+    artifacts: tuple[Path, Path, Path, str],
+) -> None:
+    vault, html, sidecars, _ = artifacts
+    (sidecars / "client_industry.json").write_text(
+        json.dumps(
+            {"_note": "audited", "industry": {"顧客会社株式会社": "電子機器"}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (sidecars / "tag_alias.json").write_text(
+        json.dumps(
+            {"_note": "aliases", "industry": {"電子機器": "電子・精密機器"}, "solution": {}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    assert build.main(["--vault", str(vault), "--out", str(html)]) == 0
+
+    result = qa.run_qa(qa.QAConfig(vault=vault, html=html, sidecar_dir=sidecars))
+
+    assert result["ok"] is True
+    assert cast_dict(result["violations"]) == {}
+
+
 def test_non_master_client_industry_is_recomputed_from_owned_documents(
     artifacts: tuple[Path, Path, Path, str],
 ) -> None:

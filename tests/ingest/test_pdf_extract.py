@@ -10,7 +10,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from teamagent.ingest.pdf_extract import chunk_pages, extract_pdf_pages
+from teamagent.ingest.pdf_extract import (
+    ChunkLimitExceededError,
+    chunk_pages,
+    extract_pdf_pages,
+)
 
 
 # -----------------------------------------------------------
@@ -60,6 +64,16 @@ def test_chunk_pages_rejects_invalid_args() -> None:
 def test_chunk_pages_empty_input() -> None:
     """空入力なら空出力。"""
     assert chunk_pages([], size=500, overlap=100) == []
+
+
+def test_chunk_pages_enforces_limit_while_building_output() -> None:
+    with pytest.raises(ChunkLimitExceededError, match="exceeded 2"):
+        chunk_pages(
+            [(1, "a" * 10_000)],
+            size=500,
+            overlap=100,
+            max_chunks=2,
+        )
 
 
 # -----------------------------------------------------------

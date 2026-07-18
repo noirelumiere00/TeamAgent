@@ -23,6 +23,10 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 
+class ChunkLimitExceededError(ValueError):
+    """ファイル単位のchunk hard capを超えた。"""
+
+
 def extract_pdf_pages(data: bytes, *, min_chars: int = 0) -> list[tuple[int, str]]:
     """PDF バイナリをページごとのテキストに分解する。
 
@@ -99,6 +103,8 @@ def chunk_pages(
     pages: list[tuple[int, str]],
     size: int = 500,
     overlap: int = 100,
+    *,
+    max_chunks: int | None = None,
 ) -> list[tuple[int, str]]:
     """ページ単位のテキストを文字数ベースのチャンクに分割する。
 
@@ -111,19 +117,27 @@ def chunk_pages(
         raise ValueError("size must be positive")
     if overlap < 0 or overlap >= size:
         raise ValueError("overlap must be in [0, size)")
+    if max_chunks is not None and max_chunks < 1:
+        raise ValueError("max_chunks must be positive")
 
     out: list[tuple[int, str]] = []
+
+    def _append(page_num: int, chunk: str) -> None:
+        if max_chunks is not None and len(out) >= max_chunks:
+            raise ChunkLimitExceededError(f"chunk count exceeded {max_chunks}")
+        out.append((page_num, chunk))
+
     step = size - overlap
     for page_num, text in pages:
         if len(text) <= size:
-            out.append((page_num, text))
+            _append(page_num, text)
             continue
         start = 0
         while start < len(text):
             end = min(start + size, len(text))
             chunk = text[start:end].strip()
             if chunk:
-                out.append((page_num, chunk))
+                _append(page_num, chunk)
             if end == len(text):
                 break
             start += step
