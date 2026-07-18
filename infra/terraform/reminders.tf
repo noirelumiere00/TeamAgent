@@ -134,6 +134,9 @@ data "archive_file" "reminder_notify" {
   type        = "zip"
   source_dir  = "${path.module}/lambda/reminder_notify"
   output_path = "${path.module}/build/reminder_notify.zip"
+  # __pycache__ を除外（ローカルで handler.py を実行した worktree だと .pyc が混入し、
+  # zip が 1950B→5291B に膨らんで source_code_hash が恒常ドリフトする・#194 planでも混入した）。
+  excludes = ["__pycache__", "**/__pycache__/**"]
 }
 
 resource "aws_iam_role" "reminder_notify" {
