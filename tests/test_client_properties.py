@@ -49,8 +49,10 @@ def test_repository_industry_master_keeps_audited_properties() -> None:
     )
     values = json.loads(path.read_text(encoding="utf-8"))["industry"]
 
-    assert len(values) == 28
+    assert len(values) == 30
     assert values["ポート株式会社"] == "人材"
     assert values["アイホン"] == "電子機器"
     assert values["東京ドーム"] == "エンターテインメント"
     assert values["SBI生命保険"] == values["SBI証券"] == "金融"
+    assert values["ネオジャパン"] == "IT"
+    assert values["UCC上島珈琲"] == "食品"
