@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+# Evidence helpers are executed from the extracted build context. Importing one
+# helper from another must not mutate that exact context with __pycache__ files
+# after build-context.tar has been retained.
+PYTHONDONTWRITEBYTECODE=1
+export PYTHONDONTWRITEBYTECODE
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD)

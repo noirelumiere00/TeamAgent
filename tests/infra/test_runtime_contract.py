@@ -259,6 +259,8 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert "--load" in BUILD
     assert "--push" not in BUILD
     assert "aws " not in BUILD
+    assert "PYTHONDONTWRITEBYTECODE=1" in BUILD
+    assert "export PYTHONDONTWRITEBYTECODE" in BUILD
     assert "status --porcelain" in BUILD
     assert "GIT_COMMIT=$HEAD" in BUILD
     assert "GIT_BRANCH=$BRANCH" in BUILD
