@@ -2093,7 +2093,7 @@ def test_journey_pipeline_section_on_welcome(ux_html: str) -> None:
     assert '<span class="plarr">→</span>' in html  # PHASESTEPS 順の→区切り
     assert 'tblFilter={q:"",ind:"",phase:el.dataset.p,temp:"",hw:false};tableView();' in html
     assert 'data-p="__none__"' in html
-    assert "フェーズ未記録</span><span class=\"qfn\">'+unset+" in html
+    assert 'フェーズ未記録</span><span class="qfn">\'+unset+' in html
     assert 'plChip("その他")' in html
     assert (
         'class="tagchip pld"' in html
@@ -2118,13 +2118,13 @@ def test_journey_flow_repairs_homework_and_back(ux_html: str) -> None:
 
 def test_phase_journey_display_order_and_none_filter_contract(ux_html: str) -> None:
     """フェーズの値は不変のまま、表示順・説明・未記録 sentinel を持つ。"""
-    assert 'const PHASEDESC={' in ux_html
+    assert "const PHASEDESC={" in ux_html
     assert '"ケイパ":"1. ケイパ紹介 — 初回接触・会社/実績紹介"' in ux_html
     assert '"その他":"フェーズ: その他（フォームで『その他』を選択）"' in ux_html
-    assert 'const PHASEBADGE={' in ux_html
+    assert "const PHASEBADGE={" in ux_html
     assert 'if(top==="フェーズ")kids.sort((x,y)=>phaseOrder' in ux_html
     assert 'tblFilter.phase==="__none__"?c.phase==="":c.phase===tblFilter.phase' in ux_html
-    assert '（フェーズ未記録）</option>' in ux_html
+    assert "（フェーズ未記録）</option>" in ux_html
     assert 'n.phase||"フェーズ未記録"' in ux_html
     assert 'uk=opt.cluster==="phase"?"フェーズ未記録"' in ux_html
 
@@ -2158,7 +2158,7 @@ def test_search_synonyms_and_raw_alias_hay_wiring(ux_html: str) -> None:
     assert '(c.raw_industry||"")' in ux_html
     assert '(d.raw_industry||"")' in ux_html and '(d.raw_solution||"")' in ux_html
     assert 'placeholder="検索  tag: path: [業種:IT]"' in ux_html
-    assert '<code>path:clients [フェーズ:null]</code>' in ux_html
+    assert "<code>path:clients [フェーズ:null]</code>" in ux_html
 
 
 # ---------------- 表示名寄せ（tag_alias / client_alias・任意適用・可逆） ----------------
@@ -2904,7 +2904,9 @@ def test_grp_client_and_doc_basis_branches_in_js(
     out = tmp_path / "o.html"
     assert _run(vault, out) == 0
     html = out.read_text(encoding="utf-8")
-    assert 'return n.type==="client"?(n.phase||"フェーズ未記録"):null;' in html  # phase はノード既存
+    assert (
+        'return n.type==="client"?(n.phase||"フェーズ未記録"):null;' in html
+    )  # phase はノード既存
     assert (
         'ageBucket((cByStem[n.id.slice(2)]||{}).last)||"記録なし"' in html
     )  # last は DATA.clients 参照
