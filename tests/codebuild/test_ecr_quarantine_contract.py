@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -159,7 +160,10 @@ def test_production_task_definitions_keep_release_inputs_and_never_use_quarantin
             section for section in body.split('resource "aws_ecs_task_definition"')[1:]
         )
         assert "quarantine" not in task_sections.lower(), name
-    assert "image     = var.mcp_image" in bodies["connect_web.tf"]
-    assert "image        = var.mcp_image" in bodies["fargate.tf"]
-    assert "image     = var.tiktok_acquire_image" in bodies["tiktok_acquire.tf"]
-    assert "image     = var.openclaw_image" in bodies["fargate.tf"]
+    assert re.search(r"\bimage\s*=\s*var\.mcp_image\b", bodies["connect_web.tf"])
+    assert re.search(r"\bimage\s*=\s*var\.mcp_image\b", bodies["fargate.tf"])
+    assert re.search(
+        r"\bimage\s*=\s*var\.tiktok_acquire_image\b",
+        bodies["tiktok_acquire.tf"],
+    )
+    assert re.search(r"\bimage\s*=\s*var\.openclaw_image\b", bodies["fargate.tf"])
