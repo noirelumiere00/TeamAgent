@@ -94,7 +94,10 @@ BAKED_APP_HTML_SHA256=$(
   sha256sum "$BUILD_CONTEXT_DIR/src/teamagent/connect_web/static/app.html" | cut -d' ' -f1
 )
 test "$BAKED_APP_HTML_SHA256" = "$EXPECTED_BAKED_APP_HTML_SHA256"
-tar -c -f "$EVIDENCE_DIR/build-context.tar" -C "$BUILD_CONTEXT_DIR" .
+# macOS bsdtar otherwise serializes extended attributes as hidden AppleDouble
+# members. Those are not part of the context BuildKit reads and must not enter
+# the retained, verifier-bound context archive.
+COPYFILE_DISABLE=1 tar -c -f "$EVIDENCE_DIR/build-context.tar" -C "$BUILD_CONTEXT_DIR" .
 SOURCE_DOCKER_DIR="$BUILD_CONTEXT_DIR/infra/docker"
 set --
 if test -n "$CA_FILE"; then

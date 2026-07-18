@@ -275,7 +275,7 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert "--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL" in BUILD
     assert "--severity CRITICAL,HIGH" not in BUILD
     assert 'git -C "$REPO_ROOT" archive --format=tar "$HEAD"' in BUILD
-    assert 'tar -c -f "$EVIDENCE_DIR/build-context.tar"' in BUILD
+    assert 'COPYFILE_DISABLE=1 tar -c -f "$EVIDENCE_DIR/build-context.tar"' in BUILD
     assert '--file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-mcp"' in BUILD
     assert '--file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-media-worker"' in BUILD
     assert BUILD.count('"$BUILD_CONTEXT_DIR"') >= 4
