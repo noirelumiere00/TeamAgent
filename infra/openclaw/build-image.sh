@@ -540,7 +540,7 @@ const pruneReportValid=
     /^[0-9a-f]{64}$/u.test(candidate.sha256)&&
     Number.isSafeInteger(candidate.servedSize)&&candidate.servedSize>=0&&
     /^[0-9a-f]{64}$/u.test(candidate.servedSha256)&&
-    ["identity",'insert data-openclaw-terminal-enabled="false" after <html']
+    ["identity","insert data-openclaw-terminal-enabled=\"false\" after <html"]
       .includes(candidate.httpTransform)
   )&&
   pruneReport.browser.controlUiDynamicAssetRegistrationsCoveredByWholeTree===true&&
