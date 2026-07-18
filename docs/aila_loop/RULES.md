@@ -48,7 +48,9 @@
 - **Q9 対応**: worktree の `.env*` は Skill 起動時に削除・作成禁止。本番 RDS 接続情報 (`teamagent/dev/database-url`) を Maker が解けないようにする。
 
 ### 1.4 IaC / デプロイ系
-- `terraform apply` の plain 実行は禁止。必ず `terraform plan -target=...` → 人間レビュー → `terraform apply -target=...` の targeted only。
+- loop から `terraform apply` は発行しない。production image の人間操作は
+  `infra/terraform/README.md` の guarded full saved-plan flow のみとし、`-target`、
+  intent 手入力、direct ECS task-definition 登録を禁止する。
 - `terraform destroy`, `terraform state rm`, `terraform state push` を loop から発行しない。
 - 本番 ECS への `aws ecs update-service` / CodeBuild トリガー (`aws codebuild start-build`) は **soft_guardrail**（§2）。loop 内で自動起動しない。
 - ECR への本番タグ（`prod`, `latest`, `release-*`）への `docker push` 禁止。
@@ -116,7 +118,7 @@
 
 ### 2.1 本番デプロイ
 - CodeBuild → ECS 本番デプロイ（runbook: `docs/openclaw/deploy_runbook.md`）。
-- `terraform apply -target=...` 本番反映。
+- guarded full saved plan の本番反映（人間が one-time apply launcher を実行）。
 - RDS migration 本番適用（Alembic upgrade head）。
 - MCP 金庫の bearer rotation 反映。
 - `mcp:5` worker / orchestrator イメージ差し替え。

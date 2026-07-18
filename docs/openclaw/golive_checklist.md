@@ -1,7 +1,8 @@
 # go-live 伴走チェックリスト（P1パイロット開店まで）
 
 **使い方（3行）**：①各ステップの「実行」をあなたがコピペで実行 → ②出力を Claude セッションに貼る → ③Claude が「期待」と突合して GO/NO-GO を判定し、次へ進む。
-詳細手順・背景は [deploy_runbook.md](deploy_runbook.md)（§番号で対応）。**`terraform apply` は必ず plan 確認→targeted**。
+詳細手順・背景は [deploy_runbook.md](deploy_runbook.md)（§番号で対応）。production image は
+**署名済み release digest＋one-time full saved plan** でのみ apply する。
 `<<要入力>>` = あなたしか知らない値。値は **絶対にチャット/Gitに貼らない**（出力を貼るときはトークンをマスク）。
 
 > 事前に一度: `bash scripts/preflight_golive.sh` （read-only・FAIL が無くなってから開始）
@@ -15,16 +16,16 @@
 | 1 | ☐ ゲート①承認 | OpenClaw(Node)本番持込の組織承認を取得 | 承認OK | 承認が出るまで以降に進まない |
 | 2 | ☐ モデルID確認 | `aws bedrock list-inference-profiles --region ap-northeast-1 \| grep -i haiku-4-5` | **`jp.anthropic.claude-haiku-4-5-20251001-v1:0`**（2026-06-11 実測で config/variables に**反映済み**＝出ることの再確認だけ） | 出ない/IDが変わった→Claudeへ（config 2箇所＋variables_fargate.tf を追従） |
 | 3 | ☐ Secret 5本作成 | runbook §1 のコマンド5行（`database-url` の `<<要入力: DBパスワード>>` を埋めて） | 5本とも ARN が返る | `ResourceExistsException`→既存使用でOK。**§1を terraform plan より先に**（data source が前提） |
-| 4 | ☐ ECR repo作成 | `cd infra/terraform && terraform apply -target=aws_ecr_repository.mcp -target=aws_ecr_repository.openclaw` | plan に **add 2件のみ**（repo: `teamagent-mcp` / `teamagent-openclaw`）→ apply 完了 | add 以外（change/destroy）が出たら**中断して plan を Claude に貼る** |
-| 5 | ☐ イメージ build/push | runbook §2（`docker login` → `buildx --platform linux/arm64` ×2 → digest 控え） | 2 digest（`sha256:...`）が取得できる | buildx 無し→preflight 参照。push 拒否→ECR ログイン再実行 |
+| 4 | ☐ provenance 基盤 | 未導入時のみ `infra/terraform/README.md` の one-time bootstrap | release/candidate/quarantine repos、署名鍵、ledger、専用 role が review 済み | runtime resource が plan に出たら中断 |
+| 5 | ☐ build/attest/release | runbook §2 の guarded launcher 2本→各 candidate receipt を `authorize_image_release.sh` で active 承認 | release repo の exact 2 digest と immutable receipt/signature VersionIds | local build/push、tag、unsigned/candidate digest は使用禁止 |
 
 ## Phase 2｜インフラ apply（runbook §3）
 
 | # | ステップ | 実行 | 期待 | NGなら |
 |---|---|---|---|---|
 | 6 | ☐ tfvars 作成 | `infra/terraform/terraform.tfvars`（git管理外）に: `mcp_image`/`openclaw_image`（=URL@digest）・`shared_company_domains="vectorinc.co.jp"`・`enable_vpc_endpoints=true`・`alarm_email_endpoints=["<<要入力: 通知先>>"]`（`openclaw_model_id` は実測値が default 済＝省略可） | — | 値の形式が不明なら runbook §3 の例 |
-| 7 | ☐ 全体 plan | `terraform plan` | エラー0。**IAM Deny（openclaw_task の rds/secrets Deny）と SG（mcp 8787 ingress=openclaw SGのみ）** が plan に見える | エラー/不審差分→**plan 全文を Claude へ** |
-| 8 | ☐ 段階 apply | runbook §3 の順（roles→SG→cluster/logs/CloudMap→**mcp service**→openclaw service→dashboard） | 各 apply がエラー0 | 失敗した target 名＋エラーを Claude へ。**やり直しは同 target の再 apply（冪等）** |
+| 7 | ☐ full saved plan | `plan_image_release.sh /secure/local/path/openclaw-release.tfplan` → `terraform show` | エラー0。全差分、IAM Deny、SG、exact release digest、gate replacement が見える | エラー/不審差分→中断。`-target` や intent 手入力は禁止 |
+| 8 | ☐ one-time apply | `apply_image_release_plan.sh /secure/local/path/openclaw-release.tfplan` | apply 0、ledger state `APPLIED` | 失敗後は同 plan を再実行しない。reconcile 後に fresh receipt＋new plan |
 | 9 | ☐ 隔離の実証 | IAM Policy Simulator: openclaw-task ロールで `secretsmanager:GetSecretValue` | **Denied** | Allowed なら**即中断**（fargate.tf の Deny 構造を確認＝設計違反） |
 
 ## Phase 3｜Slack・DB（runbook §4-§5）

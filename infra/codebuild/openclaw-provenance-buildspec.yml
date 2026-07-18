@@ -1,0 +1,247 @@
+# Fixed, dedicated OpenClaw core/media buildspec. Terraform embeds these bytes;
+# StartBuild buildspec and environment overrides are denied by IAM.
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        umask 077
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR AWS_ENDPOINT_URL_KMS
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset ECR_REGISTRY OC_REPO OPENCLAW_REPO OPENCLAW_MEDIA_REPO MCP_REPO
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY PYTHONOPTIMIZE
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        EXPECTED_SOURCE_REPOSITORY="https://github.com/noirelumiere00/TeamAgent.git"
+        EVIDENCE_BUCKET="teamagent-dev-openclaw-build-evidence"
+        SIGNING_KMS_KEY_ARN="__OPENCLAW_SIGNING_KMS_KEY_ARN__"
+        EVIDENCE_KMS_KEY_ARN="__OPENCLAW_EVIDENCE_KMS_KEY_ARN__"
+        BUNDLE_CONTRACT="infra/codebuild/openclaw_bundle_contract.json"
+        PROVENANCE="infra/codebuild/openclaw_provenance.py"
+        SCAN_GATE="infra/codebuild/verify_ecr_scan.py"
+        export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly EXPECTED_ACCOUNT_ID EXPECTED_REGION EXPECTED_SOURCE_REPOSITORY
+        readonly EVIDENCE_BUCKET SIGNING_KMS_KEY_ARN EVIDENCE_KMS_KEY_ARN
+        readonly BUNDLE_CONTRACT PROVENANCE SCAN_GATE
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        [ "$(uname -m)" = "aarch64" ] || { echo "FATAL: OpenClaw build must be native arm64"; exit 1; }
+        [ "$(aws sts get-caller-identity --query Account --output text)" = "$EXPECTED_ACCOUNT_ID" ] || { echo "FATAL: wrong AWS account"; exit 1; }
+        [ "$CODEBUILD_SOURCE_REPO_URL" = "$EXPECTED_SOURCE_REPOSITORY" ] || { echo "FATAL: wrong source repository"; exit 1; }
+        [[ "$CODEBUILD_SOURCE_VERSION" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: source-version must be a full Git SHA"; exit 1; }
+        [ "$CODEBUILD_RESOLVED_SOURCE_VERSION" = "$CODEBUILD_SOURCE_VERSION" ] || { echo "FATAL: resolved source commit mismatch"; exit 1; }
+        SOURCE_COMMIT="$CODEBUILD_RESOLVED_SOURCE_VERSION"
+        [ "$(git rev-parse --verify HEAD^{commit})" = "$SOURCE_COMMIT" ] || { echo "FATAL: checkout HEAD mismatch"; exit 1; }
+        [ "$(git remote get-url origin)" = "$EXPECTED_SOURCE_REPOSITORY" ] || { echo "FATAL: unexpected origin URL"; exit 1; }
+        git fetch --no-tags --force origin refs/heads/dev:refs/remotes/origin/dev
+        [ "$(git rev-parse --verify refs/remotes/origin/dev^{commit})" = "$SOURCE_COMMIT" ] || { echo "FATAL: source commit is not the independently fetched origin/dev head"; exit 1; }
+        [ -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] || { echo "FATAL: CodeBuild checkout is dirty"; exit 1; }
+        printf '%s  %s\n' '__OPENCLAW_PROVENANCE_SHA256__' "$PROVENANCE" | sha256sum -c -
+        printf '%s  %s\n' '__OPENCLAW_BUNDLE_CONTRACT_SHA256__' "$BUNDLE_CONTRACT" | sha256sum -c -
+        printf '%s  %s\n' '__OPENCLAW_SCAN_GATE_SHA256__' "$SCAN_GATE" | sha256sum -c -
+        BUNDLE_CONTRACT_SHA256="$(python3 "$PROVENANCE" contract-sha256 --contract "$BUNDLE_CONTRACT")"
+        [ "$BUNDLE_CONTRACT_SHA256" = "__OPENCLAW_BUNDLE_CONTRACT_SHA256__" ] || { echo "FATAL: bundle contract hash mismatch"; exit 1; }
+        python3 "$PROVENANCE" assert-release-ready --contract "$BUNDLE_CONTRACT"
+        [ -x infra/openclaw/build-image.sh ] || { echo "FATAL: OpenClaw bundle builder interface is missing"; exit 1; }
+        python3 "$PROVENANCE" create-source-manifest \
+          --repo-root "$CODEBUILD_SRC_DIR" \
+          --commit "$SOURCE_COMMIT" \
+          --contract "$BUNDLE_CONTRACT" \
+          --output /tmp/openclaw-expected-source-manifest.json
+        SOURCE_MANIFEST_SHA256="$(sha256sum /tmp/openclaw-expected-source-manifest.json | awk '{print $1}')"
+        SOURCE_MANIFEST_KEY="source-manifests/$SOURCE_COMMIT/$SOURCE_MANIFEST_SHA256.json"
+        SOURCE_SIGNATURE_KEY="$SOURCE_MANIFEST_KEY.sig"
+        aws s3api head-object \
+          --region "$EXPECTED_REGION" \
+          --bucket "$EVIDENCE_BUCKET" \
+          --key "$SOURCE_MANIFEST_KEY" \
+          --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+          --output json > /tmp/openclaw-source-manifest-head.json
+        aws s3api head-object \
+          --region "$EXPECTED_REGION" \
+          --bucket "$EVIDENCE_BUCKET" \
+          --key "$SOURCE_SIGNATURE_KEY" \
+          --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+          --output json > /tmp/openclaw-source-signature-head.json
+        python3 - "$EVIDENCE_KMS_KEY_ARN" /tmp/openclaw-source-manifest-head.json /tmp/openclaw-source-signature-head.json <<'PY'
+        import datetime
+        import json
+        import sys
+
+        expected_kms_key = sys.argv[1]
+        now = datetime.datetime.now(datetime.UTC)
+        for path in sys.argv[2:]:
+            with open(path, encoding="utf-8") as handle:
+                value = json.load(handle)
+            if value.get("ObjectLockMode") != "COMPLIANCE":
+                raise SystemExit(f"FATAL: {path} is not COMPLIANCE locked")
+            if value.get("ServerSideEncryption") != "aws:kms":
+                raise SystemExit(f"FATAL: {path} is not SSE-KMS encrypted")
+            if value.get("SSEKMSKeyId") != expected_kms_key:
+                raise SystemExit(f"FATAL: {path} uses the wrong evidence KMS key")
+            if value.get("VersionId") in {None, "", "null", "None"}:
+                raise SystemExit(f"FATAL: {path} has no usable VersionId")
+            retained = datetime.datetime.fromisoformat(
+                value["ObjectLockRetainUntilDate"].replace("Z", "+00:00")
+            )
+            if retained <= now:
+                raise SystemExit(f"FATAL: {path} Object Lock retention has expired")
+        PY
+        SOURCE_MANIFEST_VERSION="$(jq -er '.VersionId' /tmp/openclaw-source-manifest-head.json)"
+        SOURCE_SIGNATURE_VERSION="$(jq -er '.VersionId' /tmp/openclaw-source-signature-head.json)"
+        aws s3api get-object \
+          --region "$EXPECTED_REGION" \
+          --bucket "$EVIDENCE_BUCKET" \
+          --key "$SOURCE_MANIFEST_KEY" \
+          --version-id "$SOURCE_MANIFEST_VERSION" \
+          --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+          /tmp/openclaw-signed-source-manifest.json > /tmp/openclaw-source-manifest-get.json
+        aws s3api get-object \
+          --region "$EXPECTED_REGION" \
+          --bucket "$EVIDENCE_BUCKET" \
+          --key "$SOURCE_SIGNATURE_KEY" \
+          --version-id "$SOURCE_SIGNATURE_VERSION" \
+          --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+          /tmp/openclaw-source-manifest.sig > /tmp/openclaw-source-signature-get.json
+        [ "$(jq -er '.VersionId' /tmp/openclaw-source-manifest-get.json)" = "$SOURCE_MANIFEST_VERSION" ] || { echo "FATAL: manifest VersionId mismatch"; exit 1; }
+        [ "$(jq -er '.VersionId' /tmp/openclaw-source-signature-get.json)" = "$SOURCE_SIGNATURE_VERSION" ] || { echo "FATAL: signature VersionId mismatch"; exit 1; }
+        python3 - /tmp/openclaw-signed-source-manifest.json /tmp/openclaw-source-manifest.sha256 <<'PY'
+        import hashlib
+        import sys
+
+        with open(sys.argv[1], "rb") as source:
+            digest = hashlib.sha256(source.read()).digest()
+        with open(sys.argv[2], "wb") as output:
+            output.write(digest)
+        PY
+        aws kms verify \
+          --region "$EXPECTED_REGION" \
+          --key-id "$SIGNING_KMS_KEY_ARN" \
+          --message-type DIGEST \
+          --message fileb:///tmp/openclaw-source-manifest.sha256 \
+          --signature fileb:///tmp/openclaw-source-manifest.sig \
+          --signing-algorithm RSASSA_PKCS1_V1_5_SHA_256 \
+          --output json > /tmp/openclaw-source-kms-verify.json
+        [ "$(jq -er '.SignatureValid' /tmp/openclaw-source-kms-verify.json)" = "true" ] || { echo "FATAL: source publisher signature invalid"; exit 1; }
+        python3 "$PROVENANCE" verify-source-manifest \
+          --repo-root "$CODEBUILD_SRC_DIR" \
+          --manifest /tmp/openclaw-signed-source-manifest.json \
+          --contract "$BUNDLE_CONTRACT" \
+          --expected-commit "$SOURCE_COMMIT" \
+          --expected-manifest-sha256 "$SOURCE_MANIFEST_SHA256"
+        aws ecr get-login-password --region ap-northeast-1 \
+          | docker login --username AWS --password-stdin "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_ECR ECR_REGISTRY OC_REPO OPENCLAW_REPO OPENCLAW_MEDIA_REPO MCP_REPO
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        export AWS_DEFAULT_REGION="ap-northeast-1" AWS_REGION="ap-northeast-1"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        SOURCE_COMMIT="${CODEBUILD_RESOLVED_SOURCE_VERSION:?resolved source commit is missing}"
+        BUNDLE_CONTRACT_SHA256="$(python3 infra/codebuild/openclaw_provenance.py contract-sha256 --contract infra/codebuild/openclaw_bundle_contract.json)"
+        REGISTRY="718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
+        bash infra/openclaw/build-image.sh \
+          --bundle-contract infra/codebuild/openclaw_bundle_contract.json \
+          --core-image "$REGISTRY/teamagent-openclaw-quarantine:candidate-${SOURCE_COMMIT}-core" \
+          --media-image "$REGISTRY/teamagent-openclaw-media-quarantine:candidate-${SOURCE_COMMIT}-media" \
+          --push \
+          --manifest /tmp/openclaw-core-media-bundle.json
+        python3 infra/codebuild/openclaw_provenance.py verify-bundle-receipt \
+          --receipt /tmp/openclaw-core-media-bundle.json \
+          --contract infra/codebuild/openclaw_bundle_contract.json \
+          --expected-commit "$SOURCE_COMMIT" \
+          --expected-contract-sha256 "$BUNDLE_CONTRACT_SHA256" \
+          > /tmp/openclaw-verified-subjects.tsv
+  post_build:
+    commands:
+      - |
+        set -euo pipefail
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: OpenClaw build failed before quarantine gates"; exit 1; }
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_ECR ECR_REGISTRY OC_REPO OPENCLAW_REPO OPENCLAW_MEDIA_REPO MCP_REPO
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        export AWS_DEFAULT_REGION="ap-northeast-1" AWS_REGION="ap-northeast-1"
+        export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
+        export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
+        readonly TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
+        EXPECTED_ACCOUNT_ID="718959508629"
+        EXPECTED_REGION="ap-northeast-1"
+        SOURCE_COMMIT="${CODEBUILD_RESOLVED_SOURCE_VERSION:?resolved source commit is missing}"
+        while IFS=$'\t' read -r NAME QUARANTINE_REPOSITORY RELEASE_REPOSITORY TAG INDEX_DIGEST ARM64_DIGEST; do
+          [[ "$NAME" =~ ^(core|media)$ ]] || { echo "FATAL: invalid bundle subject"; exit 1; }
+          QUARANTINE_TAG_DIGEST="$(aws ecr describe-images \
+            --region "$EXPECTED_REGION" \
+            --registry-id "$EXPECTED_ACCOUNT_ID" \
+            --repository-name "$QUARANTINE_REPOSITORY" \
+            --image-ids "imageTag=$TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)"
+          [ "$QUARANTINE_TAG_DIGEST" = "$ARM64_DIGEST" ] || { echo "FATAL: $NAME quarantine tag does not select the receipt arm64 child"; exit 1; }
+          aws ecr batch-get-image \
+            --region "$EXPECTED_REGION" \
+            --registry-id "$EXPECTED_ACCOUNT_ID" \
+            --repository-name "$QUARANTINE_REPOSITORY" \
+            --image-ids "imageDigest=$ARM64_DIGEST" \
+            --accepted-media-types application/vnd.oci.image.manifest.v1+json \
+            --output json > "/tmp/openclaw-$NAME-arm64-manifest.json"
+          CONFIG_DIGEST="$(python3 infra/codebuild/openclaw_provenance.py arm64-config-digest \
+            --response "/tmp/openclaw-$NAME-arm64-manifest.json" \
+            --contract infra/codebuild/openclaw_bundle_contract.json \
+            --expected-image-digest "$ARM64_DIGEST" \
+            --expected-repository "$QUARANTINE_REPOSITORY" \
+            --expected-registry-id "$EXPECTED_ACCOUNT_ID")"
+          CONFIG_URL="$(aws ecr get-download-url-for-layer \
+            --region "$EXPECTED_REGION" \
+            --registry-id "$EXPECTED_ACCOUNT_ID" \
+            --repository-name "$QUARANTINE_REPOSITORY" \
+            --layer-digest "$CONFIG_DIGEST" \
+            --query downloadUrl \
+            --output text)"
+          [[ "$CONFIG_URL" == https://* ]] || { echo "FATAL: invalid $NAME OCI config URL"; exit 1; }
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+            --output "/tmp/openclaw-$NAME-arm64-config.json" "$CONFIG_URL"
+          unset CONFIG_URL
+          python3 infra/codebuild/openclaw_provenance.py verify-arm64-config \
+            --config "/tmp/openclaw-$NAME-arm64-config.json" \
+            --expected-config-digest "$CONFIG_DIGEST" \
+            --expected-commit "$SOURCE_COMMIT"
+          printf '%s\n' "$CONFIG_DIGEST" > "/tmp/openclaw-$NAME-verified-config-digest"
+          aws ecr wait image-scan-complete \
+            --region "$EXPECTED_REGION" \
+            --registry-id "$EXPECTED_ACCOUNT_ID" \
+            --repository-name "$QUARANTINE_REPOSITORY" \
+            --image-id "imageDigest=$ARM64_DIGEST"
+          aws ecr describe-image-scan-findings \
+            --region "$EXPECTED_REGION" \
+            --registry-id "$EXPECTED_ACCOUNT_ID" \
+            --repository-name "$QUARANTINE_REPOSITORY" \
+            --image-id "imageDigest=$ARM64_DIGEST" \
+            --output json > "/tmp/openclaw-$NAME-scan.json"
+          python3 infra/codebuild/verify_ecr_scan.py \
+            --scan "/tmp/openclaw-$NAME-scan.json" \
+            --deny-all \
+            --expected-image-digest "$ARM64_DIGEST" \
+            --expected-repository "$QUARANTINE_REPOSITORY"
+        done < /tmp/openclaw-verified-subjects.tsv
+        [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: OpenClaw quarantine verification failed"; exit 1; }
+        echo "OpenClaw core/media single-arm64 quarantine gates passed; release remains promoter-only"

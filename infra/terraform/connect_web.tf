@@ -65,6 +65,54 @@ variable "connect_base_url" {
   default     = "https://connect.newstv.co.jp"
 }
 
+variable "connect_app_html_s3_version_id" {
+  description = "Exact immutable S3 VersionId served at /app; update only with matching signed image evidence."
+  type        = string
+  default     = "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
+
+  validation {
+    condition = (
+      length(var.connect_app_html_s3_version_id) >= 1 &&
+      length(var.connect_app_html_s3_version_id) <= 1024 &&
+      can(regex("^[A-Za-z0-9._~+/=-]+$", var.connect_app_html_s3_version_id))
+    )
+    error_message = "connect_app_html_s3_version_id must be an exact non-null S3 VersionId."
+  }
+}
+
+variable "connect_app_html_sha256" {
+  description = "Full SHA-256 of the exact /app S3 object VersionId."
+  type        = string
+  default     = "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.connect_app_html_sha256))
+    error_message = "connect_app_html_sha256 must be a lowercase SHA-256."
+  }
+}
+
+variable "connect_app_html_manifest_sha256" {
+  description = "Vault manifest SHA-256 that produced the pinned /app object."
+  type        = string
+  default     = "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.connect_app_html_manifest_sha256))
+    error_message = "connect_app_html_manifest_sha256 must be a lowercase SHA-256."
+  }
+}
+
+variable "connect_app_html_build_inputs_sha256" {
+  description = "build_inputs SHA-256 that produced the pinned /app object."
+  type        = string
+  default     = "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.connect_app_html_build_inputs_sha256))
+    error_message = "connect_app_html_build_inputs_sha256 must be a lowercase SHA-256."
+  }
+}
+
 # ---------- Slack 個人OAuth(xoxp) 用（2026-07-07 追加） ----------
 variable "connect_slack_client_id_secret_name" {
   description = "CONNECT_SLACK_CLIENT_ID の Secrets Manager 名（Slack app OAuth client_id）"
@@ -215,6 +263,11 @@ data "aws_iam_policy_document" "connect_web_task" {
       "${aws_s3_bucket.raw_files.arn}/vseo-proposals/*",
     ]
   }
+  statement {
+    sid       = "ReadExactVersionedConnectApp"
+    actions   = ["s3:GetObjectVersion"]
+    resources = ["${aws_s3_bucket.raw_files.arn}/codebuild/connect-web-app.html"]
+  }
 }
 
 resource "aws_iam_role" "connect_web_task" {
@@ -327,6 +380,7 @@ resource "aws_ecs_task_definition" "connect_web" {
   memory                   = var.fargate_connect_memory
   execution_role_arn       = aws_iam_role.ecs_execution_connect_web[0].arn
   task_role_arn            = aws_iam_role.connect_web_task[0].arn
+  depends_on               = [terraform_data.production_image_release_gate]
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -356,13 +410,17 @@ resource "aws_ecs_task_definition" "connect_web" {
       # /app・/search を @vectorinc.co.jp の社員全員に開放（email_verified + 会社ドメイン hd 許可）。
       # 未設定だと既定 allowlist（s-komata 1名）のみ。2026-07-07 ユーザー承認（全社ナレッジ共有）。
       { name = "CONNECT_SEARCH_ALLOWED_HD", value = "vectorinc.co.jp" },
-      # /app（Obsidian UI）HTML ホットスワップの受け口（07-12 ECS 直運用で追加）。app.py が
-      # この URI の HTML を配信し、未設定だと「準備中」プレースホルダへ回帰する。tf に無かった
-      # ため apply のたびに剥がれ /app 断となった（2026-07-13 td:42→43 応急復旧→44/45 で再発）。
-      # 値は infra/deploy/publish_app_html.sh・deploy_connectweb_unified.sh の配置先と同一定数。
-      # S3 読取は task role の inline policy `apphtml-s3-read`（bootstrap_apphtml_s3_iam.sh 付与・
-      # 名前が別なので terraform apply では剥がれない）。tf 取込時は connect_web_task policy へ。
+      # /app is an immutable object contract, not a mutable-key hot swap. The
+      # task asks S3 for this exact VersionId, verifies the returned VersionId
+      # and full hash, and reports all four production anchors in /healthz.
+      # Updating or rolling back these values creates a task-definition change
+      # and therefore requires a fresh signed core+media release receipt.
       { name = "CONNECT_APP_HTML_S3_URI", value = "s3://${aws_s3_bucket.raw_files.bucket}/codebuild/connect-web-app.html" },
+      { name = "CONNECT_APP_HTML_S3_VERSION_ID", value = var.connect_app_html_s3_version_id },
+      { name = "CONNECT_APP_HTML_SHA256", value = var.connect_app_html_sha256 },
+      { name = "CONNECT_APP_HTML_MANIFEST_SHA256", value = var.connect_app_html_manifest_sha256 },
+      { name = "CONNECT_APP_HTML_BUILD_INPUTS_SHA256", value = var.connect_app_html_build_inputs_sha256 },
+      { name = "CONNECT_APP_HTML_BAKED_SHA256", value = local.canonical_baked_app_html_sha256 },
       { name = "OAUTH_KMS_KEY_ID", value = var.connect_oauth_kms_key_id != "" ? var.connect_oauth_kms_key_id : data.aws_kms_alias.connect_oauth[0].target_key_arn },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
       { name = "STRUCTLOG_FORMAT", value = "json" },
