@@ -52,16 +52,14 @@ resource "aws_kms_key" "logs" {
         Principal = {
           Service = "bedrock.amazonaws.com"
         }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey",
-        ]
+        Action   = "kms:GenerateDataKey"
         Resource = "*"
         Condition = {
           StringEquals = {
             "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*"
           }
         }
       },
@@ -188,6 +186,12 @@ resource "aws_cloudtrail" "main" {
     aws_s3_bucket_policy.cloudtrail,
     aws_s3_bucket_versioning.cloudtrail,
   ]
+
+  lifecycle {
+    # The bootstrap flag must never be used as a pseudo-pause after adoption.
+    # Pausing or retiring audit delivery requires a separate approved change.
+    prevent_destroy = true
+  }
 }
 
 # ---------- IAM Access Analyzer ----------
@@ -208,8 +212,8 @@ resource "aws_s3_bucket" "bedrock_logs" {
 
   lifecycle {
     precondition {
-      condition     = var.bedrock_logs_retention_mode == "INDEFINITE"
-      error_message = "Bedrock invocation logsは明示承認なしに自動削除できません。"
+      condition     = var.bedrock_logs_retention_days == 60
+      error_message = "Bedrock AI入出力ログの保持期間は承認済みの60日である必要があります。"
     }
   }
 }
@@ -243,6 +247,48 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "bedrock_logs" {
   }
 }
 
+# Bedrock invocation payloads are retained only below bedrock/. Current
+# versions expire after 60 days; versioning-created noncurrent versions are
+# also fully deleted after 60 days. A second rule removes expired delete
+# markers that no longer protect any object version. No lifecycle is attached
+# to the CloudTrail bucket: audit logs remain without automatic deletion.
+resource "aws_s3_bucket_lifecycle_configuration" "bedrock_logs" {
+  count  = var.enable_bedrock_invocation_logging ? 1 : 0
+  bucket = aws_s3_bucket.bedrock_logs[0].id
+
+  rule {
+    id     = "bedrock-current-and-noncurrent-60-days"
+    status = "Enabled"
+
+    filter {
+      prefix = "bedrock/"
+    }
+
+    expiration {
+      days = var.bedrock_logs_retention_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.bedrock_logs_retention_days
+    }
+  }
+
+  rule {
+    id     = "bedrock-expired-delete-markers"
+    status = "Enabled"
+
+    filter {
+      prefix = "bedrock/"
+    }
+
+    expiration {
+      expired_object_delete_marker = true
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.bedrock_logs]
+}
+
 # Bedrock が S3 に書き込むためのバケットポリシー
 resource "aws_s3_bucket_policy" "bedrock_logs" {
   count  = var.enable_bedrock_invocation_logging ? 1 : 0
@@ -255,11 +301,13 @@ resource "aws_s3_bucket_policy" "bedrock_logs" {
         Effect    = "Allow"
         Principal = { Service = "bedrock.amazonaws.com" }
         Action    = "s3:PutObject"
-        Resource  = "${aws_s3_bucket.bedrock_logs[0].arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+        Resource  = "${aws_s3_bucket.bedrock_logs[0].arn}/bedrock/AWSLogs/${data.aws_caller_identity.current.account_id}/BedrockModelInvocationLogs/*"
         Condition = {
           StringEquals = {
-            "s3:x-amz-acl"      = "bucket-owner-full-control"
             "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*"
           }
         }
       },
@@ -300,9 +348,16 @@ resource "aws_bedrock_model_invocation_logging_configuration" "main" {
   }
 
   depends_on = [
+    aws_s3_bucket_lifecycle_configuration.bedrock_logs,
     aws_s3_bucket_policy.bedrock_logs,
     aws_s3_bucket_versioning.bedrock_logs,
   ]
+
+  lifecycle {
+    # The bootstrap flag must never destroy a live account-level logging
+    # configuration. Retirement needs an explicit, separately reviewed path.
+    prevent_destroy = true
+  }
 }
 
 # ---------- Secrets Manager rotation ポリシードキュメント参照 ----------

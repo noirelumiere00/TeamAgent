@@ -46,6 +46,12 @@ LOG_GROUPS = {
         "/aws/lambda/${local.tk_name}-dispatch",
         "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch",
     ),
+    "aws_cloudwatch_log_group.x_dispatch": (
+        "x_research.tf",
+        "x_dispatch",
+        "/aws/lambda/${local.xr_name}-dispatch",
+        "/aws/lambda/teamagent-dev-x-buzz-dispatch",
+    ),
 }
 
 
@@ -124,15 +130,13 @@ def test_lambda_creation_waits_for_adopted_log_groups() -> None:
 
 
 def test_migration_allowlist_guard_and_runbook_cover_exact_adoption_addresses() -> None:
-    migration = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"][
-        "2026-07-wolfi-runtime-v1"
-    ]
-    allowed = migration["allowed_changes"]
+    migrations = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"]
+    runtime_allowed = migrations["2026-07-wolfi-runtime-v1"]["allowed_changes"]
     guard = GUARD.read_text(encoding="utf-8")
     readme = (TF_ROOT / "README.md").read_text(encoding="utf-8")
 
     for address, (_, _, _, import_id) in LOG_GROUPS.items():
-        assert allowed.count(address) == 1
+        assert runtime_allowed.count(address) == 1
         assert address in guard
         assert address in readme
         assert import_id in guard
@@ -150,7 +154,8 @@ def _validator_filter() -> str:
     body = GUARD.read_text(encoding="utf-8")
     match = re.search(
         r"validate_auto_created_log_retention_plan\(\) \{.*?"
-        r"\n  jq -e '(?P<filter>.*?)'\s+\"\$plan_json\" >/dev/null \|\|"
+        r'\n  jq -e --slurpfile ownership "\$state_contract" '
+        r"'(?P<filter>.*?)'\s+\"\$plan_json\" >/dev/null \|\|"
         r".*?\n\}",
         body,
         flags=re.DOTALL,
@@ -173,7 +178,7 @@ def _exact_plan() -> dict[str, object]:
         }
         after = copy.deepcopy(before)
         after["retention_in_days"] = 30
-        after["tags"] = copy.deepcopy(MANAGED_TAGS)
+        after["tags"] = None
         after["tags_all"] = copy.deepcopy(MANAGED_TAGS)
         changes.append(
             {
@@ -196,14 +201,36 @@ def _exact_plan() -> dict[str, object]:
 def _run_validator(
     tmp_path: Path,
     plan: dict[str, object],
+    *,
+    present: set[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     jq = shutil.which("jq")
     if jq is None:
         pytest.skip("jq is unavailable")
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    present = present or set()
+    ownership = {
+        "imports": {
+            address: {
+                "expected_id": spec[3],
+                "present": address in present,
+            }
+            for address, spec in LOG_GROUPS.items()
+        }
+    }
+    ownership_path = tmp_path / "ownership.json"
+    ownership_path.write_text(json.dumps(ownership), encoding="utf-8")
     return subprocess.run(
-        [jq, "-e", _validator_filter(), str(plan_path)],
+        [
+            jq,
+            "-e",
+            "--slurpfile",
+            "ownership",
+            str(ownership_path),
+            _validator_filter(),
+            str(plan_path),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -212,6 +239,33 @@ def _run_validator(
 
 def test_exact_in_place_retention_plan_is_accepted(tmp_path: Path) -> None:
     result = _run_validator(tmp_path, _exact_plan())
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("state_present", "current_retention"), [(False, 30), (True, 0), (True, 30)]
+)
+def test_partial_import_migration_resumes_idempotently(
+    tmp_path: Path,
+    state_present: bool,
+    current_retention: int,
+) -> None:
+    plan = _exact_plan()
+    address = next(iter(LOG_GROUPS))
+    change = plan["resource_changes"][0]["change"]  # type: ignore[index]
+    change["before"]["retention_in_days"] = current_retention  # type: ignore[index]
+    if current_retention == 30:
+        change["after"] = copy.deepcopy(change["before"])  # type: ignore[index]
+        change["after"]["tags"] = None  # type: ignore[index]
+        change["after"]["tags_all"] = copy.deepcopy(MANAGED_TAGS)  # type: ignore[index]
+        change["actions"] = ["no-op"]  # type: ignore[index]
+    if state_present:
+        change.pop("importing", None)  # type: ignore[union-attr]
+    result = _run_validator(
+        tmp_path,
+        plan,
+        present={address} if state_present else set(),
+    )
     assert result.returncode == 0, result.stderr
 
 

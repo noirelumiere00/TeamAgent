@@ -200,8 +200,20 @@ def test_divergent_live_allowlist_and_signed_core_gate_are_fail_closed() -> None
     )
     # Prefix-only observations must never be promoted into an invented full digest.
     assert migration["from"]["images"]["ingest"] == ""
+    assert set(migration["from"]["dispatcher_code_sha256"]) == {
+        "tiktok",
+        "x_buzz",
+    }
+    assert all(
+        re.fullmatch(r"[A-Za-z0-9+/]{43}=", value)
+        for value in migration["from"]["dispatcher_code_sha256"].values()
+    )
+    assert migration["to"]["dispatcher_code_sha256"] == {
+        "tiktok": "",
+        "x_buzz": "",
+    }
     assert migration["to"]["main_signature"] == {
-        "minimum_source_commit": "e20411ccf39d5266127f19bc5e2295ebcd4a678f",
+        "minimum_source_commit": "0ff2ca8c7ca9b556cf590f531896055f962780fd",
         "required_hmac_contract_commit": ("2de3b15632bb2d671a4836d5cf3f252dd9b25727"),
         "kms_key_arn": "",
         "annotation_name": "org.opencontainers.image.revision",
@@ -820,7 +832,15 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
         flags=re.DOTALL,
     )
     assert 'variable "alarm_chatbot_configuration_arns"' in variables
+    alarm_email = re.search(
+        r'variable "alarm_email_endpoints"\s*\{(?P<body>.*?)\n\}',
+        variables,
+        flags=re.DOTALL,
+    )
+    assert alarm_email is not None
+    assert "sensitive   = true" in alarm_email.group("body")
     assert "confirmed_email_endpoint_sha256" in runtime
+    assert "confirmed_subscription_metadata_sha256" in runtime
     assert "legacy_action_reference_count == 0" in runtime
     assert "sha256(lower(trimspace(endpoint)))" in runtime
     assert "depends_on = [aws_sns_topic.alarms]" in runtime
@@ -828,6 +848,11 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     assert "length(local.configured_alarm_email_sha256) == 1 &&" in runtime
     assert "length(local.configured_alarm_chatbot_arns) > 0" in runtime
     assert "list-subscriptions-by-topic" in guard
+    assert "get-subscription-attributes" in guard
+    assert 'has("FilterPolicy") | not' in guard
+    assert 'has("FilterPolicyScope") | not' in guard
+    assert "verify_alarm_delivery_test_receipt" in guard
+    assert 'result == "delivered"' in guard
     assert "describe-slack-channel-configurations" in guard
     assert "describe-budgets" in guard
     assert "describe-subscribers-for-notification" in guard
@@ -835,7 +860,7 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     assert 'select(.type == "aws_sns_topic_subscription")' in guard
     assert "configured_email_hash" in guard
     assert "strict syncは確認済みalarm delivery" in guard
-    assert 'SubscriptionArn != "PendingConfirmation"' in guard
+    assert "PendingConfirmation|Deleted" in guard
     assert handoff["canonical_owner"] == "aws_sns_topic.alarms"
     assert handoff["legacy_owner"] == "external-teamagent-state"
     assert handoff["import_legacy_into_this_state"] is False
@@ -957,7 +982,7 @@ def _run_alarm_delivery_validator(
     guard = GUARD.read_text(encoding="utf-8")
     start = guard.index("validate_alarm_delivery_plan() {")
     end = guard.index(
-        "\nvalidate_retired_builder_and_deployment_boundary_plan() {",
+        "\nvalidate_log_bucket_hardening_plan() {",
         start,
     )
     function = guard[start:end]
@@ -1028,33 +1053,53 @@ def test_ci_contract_forbids_direct_terraform_mutation_scripts() -> None:
     assert offenders == []
 
     guard = GUARD.read_text(encoding="utf-8")
-    assert "apply)" not in guard
-    assert 'elif args[0] == "apply"' not in guard
+    assert "apply)" in guard
+    assert "assert_trusted_automation_identity" in guard
+    assert "acquire_deployment_lock" in guard
+    assert 'verify_receipt "$PLAN" "$RECEIPT"' in guard
+    assert '"$TMP_ROOT/verify/plan.tfplan"' in guard
+    assert "terraform-runtime-apply-receipt" in guard
+    assert 'ln "$APPLY_STAGE" "$APPLY_RECEIPT"' in guard
+    assert "-auto-approve" not in guard
     for retired in ("apply_openclaw.sh", "apply_resilience.sh"):
         body = (TF_ROOT / retired).read_text(encoding="utf-8")
         assert "exit 64" in body
 
     boundary = (TF_ROOT / "deployment_boundary.tf").read_text(encoding="utf-8")
     for expected in (
-        'user_name = "AIIAdev"',
-        '"ecs:UpdateService"',
-        '"events:PutTargets"',
-        '"lambda:UpdateFunctionCode"',
-        '"lambda:CreateEventSourceMapping"',
-        '"lambda:UpdateEventSourceMapping"',
-        '"codebuild:StartBuild"',
-        '"apigateway:PATCH"',
-        '"ecs:DeleteTaskDefinitions"',
-        '"iam:PutRolePolicy"',
-        '"sqs:SetQueueAttributes"',
-        '"cloudwatch:PutMetricAlarm"',
-        '"sns:Unsubscribe"',
-        '"iam:DetachUserPolicy"',
-        "${var.project_name}-${var.environment}-morning-digest-weekday",
-        "aws_codebuild_project.image",
-        "prevent_destroy = true",
+        "accepted risk",
+        "retain their current permissions",
+        "RegisterTaskDefinition",
+        "RunTask",
+        "PassRole",
+        "not an authorization or security boundary",
+        "administrator permission",
     ):
         assert expected in boundary
+    assert 'resource "aws_iam_policy"' not in boundary
+    assert 'resource "aws_iam_user_policy_attachment"' not in boundary
+    assert "teamagent-dev-deny-direct-runtime-mutation" not in boundary
+    migration = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"][
+        "2026-07-wolfi-runtime-v1"
+    ]
+    assert "aws_iam_policy.runtime_direct_mutation_deny" not in migration["allowed_changes"]
+    assert (
+        "aws_iam_user_policy_attachment.runtime_direct_mutation_deny"
+        not in migration["allowed_changes"]
+    )
+
+    for expected in (
+        "validate_dispatcher_migration_plan",
+        ".to.dispatcher_code_sha256[$component]",
+        "$change.change.after.source_code_hash == $expected_code",
+        '$after_lambda.handler == "handler.handler"',
+        '$after_lambda.runtime == "python3.12"',
+        "$after_lambda.timeout == 30",
+        '$after_lambda.kms_key_arn == ""',
+        "$after_lambda.vpc_config == null",
+        '$filename_references == [($archive_address + ".output_path")]',
+    ):
+        assert expected in guard
 
 
 def test_provider_lock_is_git_receipted_and_has_official_cross_platform_hashes() -> None:
@@ -1117,4 +1162,4 @@ def test_legacy_mutable_codebuild_is_non_publishing_and_protected() -> None:
     for denied in ('"ecr:*"', '"ecs:*"', '"iam:PassRole"', '"s3:*"'):
         assert denied in body
     guard = GUARD.read_text(encoding="utf-8")
-    assert "validate_retired_builder_and_deployment_boundary_plan" in guard
+    assert "validate_retired_builder_and_admin_noninterference_plan" in guard

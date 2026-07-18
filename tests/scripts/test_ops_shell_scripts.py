@@ -134,8 +134,8 @@ def test_register_requires_image_tag() -> None:
     assert "--image-tag" in r.stdout + r.stderr
 
 
-def test_terraform_guard_requires_saved_targeted_plan() -> None:
-    """AWS CLI を呼ぶ前にplain plan/applyを拒否する。"""
+def test_terraform_guard_requires_saved_complete_plan() -> None:
+    """AWS CLI を呼ぶ前にplain/targeted planとunbound applyを拒否する。"""
     r = _run(str(TERRAFORM_GUARD), "plan")
     assert r.returncode == 1
     assert "--var-file" in r.stdout + r.stderr
@@ -153,7 +153,7 @@ def test_terraform_guard_requires_saved_targeted_plan() -> None:
 
     r = _run(str(TERRAFORM_GUARD), "apply")
     assert r.returncode == 1
-    assert "不明な command" in r.stdout + r.stderr
+    assert "--plan" in r.stdout + r.stderr
 
 
 def test_terraform_guard_contract_strings() -> None:
@@ -165,6 +165,8 @@ def test_terraform_guard_contract_strings() -> None:
         "plan_sha256",
         "--runtime-sync",
         "--runtime-migration",
+        "enable-log-versioning",
+        "--versioning-receipt",
         "--preflight-receipt",
         "preflight_receipt_sha256",
         "hmac_transition_sha256",
@@ -175,6 +177,16 @@ def test_terraform_guard_contract_strings() -> None:
         "env/secretsがliveと完全一致",
         "plan 作成中に live runtime が変化",
         "read-only検証完了",
+        "assert_clean_terraform_environment",
+        ".complete == true",
+        "capture_state_contract",
+        "workspace show",
+        "state pull",
+        "state list",
+        "acquire_deployment_lock",
+        "verify_versioning_enable_receipt",
+        "verify_log_readiness_receipt",
+        "verify_alarm_delivery_test_receipt",
         "umask 077",
         "assert_git_tracked_clean",
         "ls-files --error-unmatch",
@@ -186,9 +198,11 @@ def test_terraform_guard_contract_strings() -> None:
     ):
         assert needle in body, f"Terraform guard契約が欠落: {needle}"
     assert "-auto-approve" not in body
-    assert 'terraform -chdir="$TF_DIR" apply' not in body
+    assert 'terraform -chdir="$TF_DIR" apply' in body
+    assert '"$TMP_ROOT/verify/plan.tfplan"' in body
     assert "--confirm-plan-sha" not in body
     assert "--target)" not in body
+    assert "-target=" not in body
     assert "--allow-runtime" not in body
 
 

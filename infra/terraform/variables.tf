@@ -115,6 +115,7 @@ variable "alarm_email_endpoints" {
   description = "canonical SNS topicの確認済み通知先メール。state移行を決定的にするため、この環境では0または1件。"
   type        = list(string)
   default     = []
+  sensitive   = true
 
   validation {
     condition = (
@@ -211,13 +212,13 @@ variable "enable_bedrock_invocation_log_delivery" {
   default     = true
 }
 
-variable "bedrock_logs_retention_mode" {
-  description = "Bedrock invocation logsの保持契約。削除retentionは明示承認と別変更が必要なため、現在はINDEFINITEのみ許可する"
-  type        = string
-  default     = "INDEFINITE"
+variable "bedrock_logs_retention_days" {
+  description = "Bedrock AI入出力ログのbedrock/ prefixに適用する保持日数。現行版と非現行版を60日後に完全削除する固定契約"
+  type        = number
+  default     = 60
 
   validation {
-    condition     = var.bedrock_logs_retention_mode == "INDEFINITE"
-    error_message = "Bedrock logsの自動削除は未承認です。bedrock_logs_retention_modeはINDEFINITEのみ指定できます。"
+    condition     = var.bedrock_logs_retention_days == 60
+    error_message = "Bedrock AI入出力ログの保持期間は承認済みの60日だけを指定できます。"
   }
 }

@@ -24,7 +24,7 @@ locals {
 
 resource "aws_cloudwatch_log_group" "connect_http_api_access" {
   name              = "/aws/apigateway/${var.project_name}-${var.environment}-connect-web"
-  retention_in_days = 90
+  retention_in_days = 30
 
   depends_on = [terraform_data.runtime_guard]
 

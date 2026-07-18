@@ -60,13 +60,14 @@ variable "runtime_guard_live" {
       container_insights = string
     })
     alarm_delivery = object({
-      canonical_topic_arn                 = string
-      canonical_topic_exists              = bool
-      confirmed_email_endpoint_sha256     = list(string)
-      attached_chatbot_configuration_arns = list(string)
-      legacy_topic_arn                    = string
-      legacy_topic_exists                 = bool
-      legacy_action_reference_count       = number
+      canonical_topic_arn                    = string
+      canonical_topic_exists                 = bool
+      confirmed_email_endpoint_sha256        = list(string)
+      confirmed_subscription_metadata_sha256 = string
+      attached_chatbot_configuration_arns    = list(string)
+      legacy_topic_arn                       = string
+      legacy_topic_exists                    = bool
+      legacy_action_reference_count          = number
     })
     api_gateway = object({
       api_id                       = string
@@ -122,7 +123,6 @@ locals {
     local.runtime_migration_manifest.migrations[var.runtime_guard_live.migration_id],
     null,
   )
-
   runtime_image_contracts_valid = (
     can(regex(
       "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-openclaw@sha256:[0-9a-f]{64}$",
@@ -365,7 +365,6 @@ locals {
       )
     )
   )
-
   runtime_guard_verified = var.runtime_guard_live == null ? false : (
     var.project_name == var.runtime_guard_live.project_name &&
     var.environment == var.runtime_guard_live.environment &&
@@ -466,21 +465,35 @@ locals {
     local.runtime_connect_app_html_contract_valid &&
     local.hmac_transition_contract_valid &&
     (
-      var.runtime_guard_live.mode == "migration" || !var.enable_tiktok_acquire ||
+      !var.enable_tiktok_acquire ||
       (
         try(local.tk_dispatch_static_environment, {}) ==
         var.runtime_guard_live.tiktok_dispatch_static_environment &&
-        try(data.archive_file.tiktok_dispatch[0].output_base64sha256, "") ==
-        var.runtime_guard_live.tiktok_dispatch_code_sha256
+        (
+          var.runtime_guard_live.mode == "migration" ?
+          can(regex(
+            "^[A-Za-z0-9+/]{43}=$",
+            try(data.archive_file.tiktok_dispatch[0].output_base64sha256, ""),
+          )) :
+          try(data.archive_file.tiktok_dispatch[0].output_base64sha256, "") ==
+          var.runtime_guard_live.tiktok_dispatch_code_sha256
+        )
       )
     ) &&
     (
-      var.runtime_guard_live.mode == "migration" || !var.enable_x_research ||
+      !var.enable_x_research ||
       (
         try(local.xr_dispatch_static_environment, {}) ==
         var.runtime_guard_live.x_dispatch_static_environment &&
-        try(data.archive_file.x_dispatch[0].output_base64sha256, "") ==
-        var.runtime_guard_live.x_dispatch_code_sha256
+        (
+          var.runtime_guard_live.mode == "migration" ?
+          can(regex(
+            "^[A-Za-z0-9+/]{43}=$",
+            try(data.archive_file.x_dispatch[0].output_base64sha256, ""),
+          )) :
+          try(data.archive_file.x_dispatch[0].output_base64sha256, "") ==
+          var.runtime_guard_live.x_dispatch_code_sha256
+        )
       )
     )
   )

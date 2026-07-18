@@ -1,5 +1,22 @@
 {
   "schema_version": 1,
+  "log_versioning_stage": {
+    "id": "2026-07-log-versioning-enable-v1",
+    "enabled": false,
+    "expires_at": "2026-08-31T00:00:00Z",
+    "buckets": [
+      "teamagent-dev-cloudtrail-718959508629",
+      "teamagent-dev-bedrock-logs-718959508629"
+    ],
+    "allowed_write": "s3:PutBucketVersioning",
+    "required_status_before": [
+      "Unversioned",
+      "Enabled"
+    ],
+    "required_status_after": "Enabled",
+    "mfa_delete": "Disabled",
+    "producer_action": "no-op"
+  },
   "migrations": {
     "2026-07-wolfi-runtime-v1": {
       "kind": "runtime",
@@ -106,9 +123,13 @@
         "mcp_image": "",
         "x_buzz_image": "",
         "tiktok_image": "",
+        "dispatcher_code_sha256": {
+          "tiktok": "",
+          "x_buzz": ""
+        },
         "main_source_commit": "",
         "main_signature": {
-          "minimum_source_commit": "e20411ccf39d5266127f19bc5e2295ebcd4a678f",
+          "minimum_source_commit": "0ff2ca8c7ca9b556cf590f531896055f962780fd",
           "required_hmac_contract_commit": "2de3b15632bb2d671a4836d5cf3f252dd9b25727",
           "kms_key_arn": "",
           "annotation_name": "org.opencontainers.image.revision",
@@ -213,15 +234,15 @@
         "aws_iam_role_policy.connect_web_task[0]",
         "aws_iam_role_policy.ingest_task[0]",
         "aws_iam_role_policy.morning_digest_task[0]",
-        "aws_iam_policy.runtime_direct_mutation_deny",
-        "aws_iam_user_policy_attachment.runtime_direct_mutation_deny",
         "aws_ecs_cluster.main",
-        "aws_apigatewayv2_api.connect_web",
-        "aws_apigatewayv2_stage.connect_web_default",
+        "aws_kms_key.logs",
         "aws_s3_bucket_versioning.cloudtrail[0]",
         "aws_s3_bucket_versioning.bedrock_logs[0]",
         "aws_s3_bucket_policy.cloudtrail[0]",
         "aws_s3_bucket_policy.bedrock_logs[0]",
+        "aws_s3_bucket_lifecycle_configuration.bedrock_logs[0]",
+        "aws_apigatewayv2_api.connect_web",
+        "aws_apigatewayv2_stage.connect_web_default",
         "aws_cloudwatch_log_group.codebuild_aiia_image_builder",
         "aws_cloudwatch_log_group.codebuild_image_builder",
         "aws_cloudwatch_log_group.connect_http_api_access",

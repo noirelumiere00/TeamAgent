@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import stat
 import subprocess
 import textwrap
@@ -72,7 +73,7 @@ DISPATCHERS = {
         "cluster": f"arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/teamagent-dev-tiktok",
         "security_group": "sg-tiktok",
         "queue_arn": f"arn:aws:sqs:{REGION}:{ACCOUNT}:teamagent-dev-tiktok-acquire-jobs",
-        "code_sha256": "dGlrdG9rLWRpc3BhdGNoLWNvZGUtaGFzaA==",
+        "code_sha256": "ERERERERERERERERERERERERERERERERERERERERERE=",
     },
     "x_buzz": {
         "component": "x_buzz",
@@ -81,7 +82,7 @@ DISPATCHERS = {
         "cluster": f"arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/teamagent-dev",
         "security_group": "sg-x-buzz",
         "queue_arn": f"arn:aws:sqs:{REGION}:{ACCOUNT}:teamagent-dev-x-buzz-jobs",
-        "code_sha256": "eC1idXp6LWRpc3BhdGNoLWNvZGUtaGFzaA==",
+        "code_sha256": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
     },
 }
 RULES = {
@@ -571,7 +572,15 @@ def _safe_plan() -> dict[str, Any]:
             {
                 "address": f"aws_lambda_function.{function_name}",
                 "expressions": {
-                    "environment": [{"variables": {"references": [f"{task_address}.arn"]}}]
+                    "environment": [{"variables": {"references": [f"{task_address}.arn"]}}],
+                    "filename": {
+                        "references": [f"data.archive_file.{function_name}[0].output_path"]
+                    },
+                    "source_code_hash": {
+                        "references": [
+                            (f"data.archive_file.{function_name}[0].output_base64sha256")
+                        ]
+                    },
                 },
             }
         )
@@ -637,7 +646,7 @@ def _safe_plan() -> dict[str, Any]:
         "terraform_version": "1.12.2",
         "timestamp": "2026-07-16T00:00:00Z",
         "applyable": True,
-        "complete": False,
+        "complete": True,
         "errored": False,
         "variables": {},
         "planned_values": {},
@@ -663,6 +672,11 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
     rule = _find(plan, RULES["ingest"][0])
     dispatcher = _find(plan, "aws_lambda_function.tiktok_dispatch[0]")
     mapping = _find(plan, "aws_lambda_event_source_mapping.tiktok_dispatch[0]")
+    dispatcher_config = next(
+        item
+        for item in plan["configuration"]["root_module"]["resources"]
+        if item["address"] == "aws_lambda_function.tiktok_dispatch"
+    )
 
     if scenario == "env_add":
         container["environment"].append({"name": "NEW", "value": "1"})
@@ -762,6 +776,26 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
         dispatcher["change"]["after"]["role"] = "arn:aws:iam::000:role/wrong"
     elif scenario == "lambda_code":
         dispatcher["change"]["after"]["source_code_hash"] = "changed"
+    elif scenario == "lambda_handler":
+        dispatcher["change"]["after"]["handler"] = "handler.unsafe"
+    elif scenario == "lambda_runtime":
+        dispatcher["change"]["after"]["runtime"] = "python3.13"
+    elif scenario == "lambda_timeout":
+        dispatcher["change"]["after"]["timeout"] = 900
+    elif scenario == "lambda_kms":
+        dispatcher["change"]["after"]["kms_key_arn"] = "arn:aws:kms:wrong"
+    elif scenario == "lambda_vpc":
+        dispatcher["change"]["after"]["vpc_config"] = [
+            {"security_group_ids": ["sg-wrong"], "subnet_ids": ["subnet-wrong"]}
+        ]
+    elif scenario == "lambda_source_reference":
+        dispatcher_config["expressions"]["source_code_hash"]["references"] = [
+            "data.archive_file.unsafe.output_base64sha256"
+        ]
+    elif scenario == "lambda_filename_reference":
+        dispatcher_config["expressions"]["filename"]["references"] = [
+            "data.archive_file.unsafe.output_path"
+        ]
     elif scenario == "lambda_publish":
         dispatcher["change"]["before"]["publish"] = True
         dispatcher["change"]["after"]["publish"] = True
@@ -788,6 +822,8 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
         plan["resource_changes"].remove(rule)
     elif scenario == "schema":
         plan.pop("format_version")
+    elif scenario == "incomplete":
+        plan["complete"] = False
     elif scenario == "deferred":
         plan["deferred_changes"] = [{"reason": "unknown"}]
     elif scenario == "invocation":
@@ -862,7 +898,58 @@ def _fake_aws(path: Path) -> None:
 
         if args[:2] == ["sts", "get-caller-identity"]:
             account = os.environ.get("AWS_FAKE_ACCOUNT", ACCOUNT)
-            print(json.dumps({{"Account": account}}))
+            identity = {{"Account": account}}
+            if os.environ.get("AWS_FAKE_TRUSTED_AUTOMATION"):
+                identity["Arn"] = (
+                    "arn:aws:sts::718959508629:assumed-role/"
+                    "teamagent-dev-terraform-runtime-automation/test"
+                )
+            print(json.dumps(identity))
+        elif args[:2] in (
+            ["dynamodb", "put-item"],
+            ["dynamodb", "delete-item"],
+        ):
+            print(json.dumps({{}}))
+        elif args[:2] == ["cloudtrail", "get-trail"]:
+            print(json.dumps({{
+                "Trail": {{
+                    "Name": "teamagent-dev-trail",
+                    "S3BucketName": (
+                        "teamagent-dev-cloudtrail-718959508629"
+                    ),
+                    "IsMultiRegionTrail": True,
+                    "IncludeGlobalServiceEvents": True,
+                    "LogFileValidationEnabled": True,
+                    "KmsKeyId": (
+                        "arn:aws:kms:ap-northeast-1:718959508629:key/"
+                        "11111111-2222-3333-4444-555555555555"
+                    ),
+                }}
+            }}))
+        elif args[:2] == ["cloudtrail", "get-trail-status"]:
+            print(json.dumps({{
+                "IsLogging": True,
+                "LatestDeliveryTime": "2026-07-18T00:00:00+00:00",
+                "LatestDigestDeliveryTime": "2026-07-18T00:00:00+00:00",
+            }}))
+        elif args[:2] == [
+            "bedrock",
+            "get-model-invocation-logging-configuration",
+        ]:
+            print(json.dumps({{
+                "loggingConfig": {{
+                    "textDataDeliveryEnabled": True,
+                    "embeddingDataDeliveryEnabled": True,
+                    "imageDataDeliveryEnabled": False,
+                    "videoDataDeliveryEnabled": False,
+                    "s3Config": {{
+                        "bucketName": (
+                            "teamagent-dev-bedrock-logs-718959508629"
+                        ),
+                        "keyPrefix": "bedrock/",
+                    }},
+                }}
+            }}))
         elif args[:2] == ["sns", "list-topics"]:
             topics = [{{
                 "TopicArn": (
@@ -895,6 +982,23 @@ def _fake_aws(path: Path) -> None:
                     ),
                 }})
             print(json.dumps({{"Subscriptions": subscriptions}}))
+        elif args[:2] == ["sns", "get-subscription-attributes"]:
+            subscription_arn = args[args.index("--subscription-arn") + 1]
+            attributes = {{
+                "SubscriptionArn": subscription_arn,
+                "TopicArn": (
+                    "arn:aws:sns:ap-northeast-1:718959508629:"
+                    "teamagent-dev-openclaw-alarms"
+                ),
+                "Protocol": "email",
+                "Endpoint": "alerts@example.com",
+                "PendingConfirmation": "false",
+                "ConfirmationWasAuthenticated": "true",
+                "RawMessageDelivery": "false",
+            }}
+            if os.environ.get("AWS_FAKE_SUBSCRIPTION_FILTER"):
+                attributes["FilterPolicy"] = '{{"severity":["critical"]}}'
+            print(json.dumps({{"Attributes": attributes}}))
         elif args[:2] == ["chatbot", "describe-slack-channel-configurations"]:
             print(json.dumps({{"SlackChannelConfigurations": []}}))
         elif args[:2] == ["chatbot", "list-microsoft-teams-channel-configurations"]:
@@ -965,6 +1069,31 @@ def _fake_aws(path: Path) -> None:
                     }}],
                 }}],
             }}))
+        elif args[:2] == ["s3api", "get-bucket-versioning"]:
+            bucket = args[args.index("--bucket") + 1]
+            state_path = os.environ.get("AWS_FAKE_VERSIONING_STATE")
+            state = {{}}
+            if state_path and pathlib.Path(state_path).exists():
+                state = json.loads(
+                    pathlib.Path(state_path).read_text(encoding="utf-8")
+                )
+            status = state.get(bucket)
+            print(json.dumps({{"Status": status}} if status else {{}}))
+        elif args[:2] == ["s3api", "put-bucket-versioning"]:
+            bucket = args[args.index("--bucket") + 1]
+            assert (
+                args[args.index("--versioning-configuration") + 1]
+                == "Status=Enabled"
+            )
+            state_path = pathlib.Path(
+                os.environ["AWS_FAKE_VERSIONING_STATE"]
+            )
+            state = {{}}
+            if state_path.exists():
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            state[bucket] = "Enabled"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            print(json.dumps({{}}))
         elif args[:2] == ["s3api", "head-object"]:
             app_html = (
                 b"fake current app html\\n"
@@ -1249,7 +1378,54 @@ def _fake_terraform(path: Path) -> None:
         with open(os.environ["TF_FAKE_LOG"], "a", encoding="utf-8") as fh:
             fh.write(" ".join(args) + "\\n")
 
-        if args[0] == "plan":
+        def state_data():
+            state_path = os.environ.get("TF_FAKE_STATE")
+            if state_path:
+                return json.loads(pathlib.Path(state_path).read_text(encoding="utf-8"))
+            return {
+                "version": 4,
+                "terraform_version": "1.12.2",
+                "serial": 42,
+                "lineage": "01234567-89ab-cdef-0123-456789abcdef",
+                "outputs": {},
+                "resources": [],
+            }
+
+        def state_addresses(state):
+            addresses = []
+            for resource in state.get("resources", []):
+                prefix = resource.get("module", "")
+                if prefix:
+                    prefix += "."
+                base = prefix + resource["type"] + "." + resource["name"]
+                for instance in resource.get("instances", []):
+                    if "index_key" not in instance:
+                        addresses.append(base)
+                    elif isinstance(instance["index_key"], int):
+                        addresses.append(f"{base}[{instance['index_key']}]")
+                    else:
+                        addresses.append(
+                            base
+                            + "["
+                            + json.dumps(instance["index_key"], separators=(",", ":"))
+                            + "]"
+                        )
+            return sorted(addresses)
+
+        if args[:2] == ["workspace", "show"]:
+            print(os.environ.get("TF_FAKE_WORKSPACE", "default"))
+        elif args[:2] == ["state", "pull"]:
+            print(json.dumps(state_data(), sort_keys=True))
+        elif args[:2] == ["state", "list"]:
+            state_list_path = os.environ.get("TF_FAKE_STATE_LIST")
+            if state_list_path:
+                sys.stdout.write(
+                    pathlib.Path(state_list_path).read_text(encoding="utf-8")
+                )
+            else:
+                for address in state_addresses(state_data()):
+                    print(address)
+        elif args[0] == "plan":
             out = next(arg.split("=", 1)[1] for arg in args if arg.startswith("-out="))
             core_arg = next(arg for arg in args if arg.startswith("-var=runtime_guard_live="))
             core = json.loads(core_arg.split("=", 2)[2])
@@ -1266,6 +1442,7 @@ def _fake_terraform(path: Path) -> None:
                 },
                 "canary_rule_enabled": {"value": core["canary_rule_enabled"]},
                 "require_alarm_delivery": {"value": True},
+                "bedrock_logs_retention_days": {"value": 60},
                 "mail_action_hmac_secret_arn": {
                     "value": "arn:aws:secretsmanager:ap-northeast-1:718959508629:"
                     "secret:teamagent/dev/hmac/mail-action-AbC123"
@@ -1374,6 +1551,125 @@ def _run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess
     )
 
 
+def _normalize_lambda_tf(value: dict[str, Any]) -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            "jq",
+            "-L",
+            str(GUARD.parent),
+            "-c",
+            'include "terraform_runtime_guard"; guard_lambda_from_tf',
+        ],
+        input=json.dumps(value),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _run_dispatcher_migration_validator(
+    tmp_path: Path,
+    scenario: str = "safe",
+) -> subprocess.CompletedProcess[str]:
+    plan = _safe_plan()
+    _mutate_plan(plan, scenario)
+    snapshot = {
+        "dispatchers": {
+            component: {"critical": _normalize_lambda_tf(_lambda_tf(component))}
+            for component in ("tiktok", "x_buzz")
+        },
+        "taskdefs": {
+            component: {"arn": _task_arn(component)} for component in ("tiktok", "x_buzz")
+        },
+    }
+    core = {
+        "tiktok_dispatch_static_environment": {
+            key: value
+            for key, value in _dispatcher_environment("tiktok").items()
+            if key != "TASKDEF_ARN"
+        },
+        "x_dispatch_static_environment": {
+            key: value
+            for key, value in _dispatcher_environment("x_buzz").items()
+            if key != "TASKDEF_ARN"
+        },
+    }
+    migration = {
+        "to": {
+            "dispatcher_code_sha256": {
+                component: DISPATCHERS[component]["code_sha256"]
+                for component in ("tiktok", "x_buzz")
+            }
+        }
+    }
+    paths: list[Path] = []
+    for name, value in (
+        ("plan", plan),
+        ("snapshot", snapshot),
+        ("core", core),
+        ("migration", migration),
+    ):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        paths.append(path)
+
+    guard = GUARD.read_text(encoding="utf-8")
+    function = re.search(
+        r"validate_dispatcher_migration_plan\(\) \{.*?"
+        r"(?=\nvalidate_runtime_rule_staging\(\))",
+        guard,
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            f"GUARD_JQ_DIR={str(GUARD.parent)!r}",
+            'die() { echo "★ $*" >&2; return 1; }',
+            function.group(0),
+            'validate_dispatcher_migration_plan "$1" "$2" "$3" "$4"',
+        )
+    )
+    return subprocess.run(
+        ["bash", "-c", script, "validator", *(str(path) for path in paths)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_dispatcher_migration_validator_accepts_exact_archive_and_taskdef_only(
+    tmp_path: Path,
+) -> None:
+    result = _run_dispatcher_migration_validator(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "lambda_static_env",
+        "lambda_role",
+        "lambda_code",
+        "lambda_handler",
+        "lambda_runtime",
+        "lambda_timeout",
+        "lambda_kms",
+        "lambda_vpc",
+        "lambda_source_reference",
+        "lambda_filename_reference",
+    ],
+)
+def test_dispatcher_migration_validator_rejects_non_allowlisted_changes(
+    tmp_path: Path,
+    scenario: str,
+) -> None:
+    result = _run_dispatcher_migration_validator(tmp_path, scenario)
+    assert result.returncode == 1
+    assert "destination code hash/taskdef参照以外" in result.stderr
+
+
 def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> None:
     env, var_file, tf_log = _harness(tmp_path)
     plan = tmp_path / "runtime.tfplan"
@@ -1402,16 +1698,64 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
     assert data["mode"] == "sync"
     assert data["migration_id"] == ""
     assert data["preflight_receipt_sha256"] == ""
+    assert data["versioning_receipt_path"] == ""
+    assert data["versioning_receipt_sha256"] == ""
     assert len(data["guard_script_sha256"]) == 64
     assert len(data["guard_jq_sha256"]) == 64
     assert len(data["config_manifest_sha256"]) == 64
     assert len(data["hmac_transition_sha256"]) == 64
+    assert data["state_contract"]["backend"] == {
+        "bucket": "teamagent-tfstate-718959508629",
+        "key": "teamagent/terraform.tfstate",
+        "region": REGION,
+        "workspace": "default",
+    }
+    assert data["state_contract"]["state"] == {
+        "address_count": 0,
+        "address_set_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "lineage": "01234567-89ab-cdef-0123-456789abcdef",
+        "serial": 42,
+    }
+    assert set(data["state_contract"]["imports"]) == {
+        "aws_cloudwatch_log_group.codebuild_aiia_image_builder",
+        "aws_cloudwatch_log_group.codebuild_image_builder",
+        "aws_cloudwatch_log_group.reminder_notify",
+        "aws_cloudwatch_log_group.tiktok_dispatch",
+        "aws_cloudwatch_log_group.x_dispatch",
+    }
+    assert all(item["present"] is False for item in data["state_contract"]["imports"].values())
     assert "apply" not in tf_log.read_text(encoding="utf-8")
 
     verify = _run(["bash", str(GUARD), "verify", "--plan", str(plan)], env)
     assert verify.returncode == 0, verify.stdout + verify.stderr
     assert "read-only検証完了" in verify.stdout
     assert "apply" not in tf_log.read_text(encoding="utf-8")
+
+
+def test_versioning_stage_is_fail_closed_while_review_manifest_is_disabled(
+    tmp_path: Path,
+) -> None:
+    env, _, tf_log = _harness(tmp_path)
+    env["AWS_FAKE_TRUSTED_AUTOMATION"] = "1"
+    versioning_state = tmp_path / "versioning-state.json"
+    env["AWS_FAKE_VERSIONING_STATE"] = str(versioning_state)
+
+    receipt = tmp_path / "log-versioning.json"
+    result = _run(
+        [
+            "bash",
+            str(GUARD),
+            "enable-log-versioning",
+            "--out",
+            str(receipt),
+        ],
+        env,
+    )
+    assert result.returncode == 1
+    assert "review済みmanifest" in result.stdout + result.stderr
+    assert not receipt.exists()
+    assert not versioning_state.exists()
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -1460,6 +1804,13 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "lambda_taskdef",
         "lambda_role",
         "lambda_code",
+        "lambda_handler",
+        "lambda_runtime",
+        "lambda_timeout",
+        "lambda_kms",
+        "lambda_vpc",
+        "lambda_source_reference",
+        "lambda_filename_reference",
         "lambda_publish",
         "lambda_skip_destroy",
         "mapping_disabled",
@@ -1483,6 +1834,7 @@ def test_runtime_attribute_regressions_fail_closed(tmp_path: Path, scenario: str
         "arbitrary_create",
         "missing",
         "schema",
+        "incomplete",
         "deferred",
         "invocation",
         "checks",
@@ -1585,6 +1937,17 @@ def test_alarm_delivery_and_legacy_topic_contract_fail_before_plan(
     assert "plan " not in tf_log.read_text(encoding="utf-8")
 
 
+def test_alarm_subscription_filter_policy_fails_before_plan(tmp_path: Path) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    env["AWS_FAKE_SUBSCRIPTION_FILTER"] = "1"
+
+    result = _run(_plan_command(var_file, tmp_path / "filtered.tfplan"), env)
+
+    assert result.returncode == 1
+    assert "no-filter exact" in result.stdout + result.stderr
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+
 def test_invalid_bool_value_is_not_echoed(tmp_path: Path) -> None:
     env, var_file, _ = _harness(tmp_path)
     secret_value = "DO_NOT_LOG_THIS_VALUE"
@@ -1592,6 +1955,94 @@ def test_invalid_bool_value_is_not_echoed(tmp_path: Path) -> None:
     result = _run(_plan_command(var_file, tmp_path / "bool.tfplan"), env)
     assert result.returncode == 1
     assert secret_value not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "variable_name",
+    [
+        "TF_CLI_ARGS",
+        "TF_CLI_ARGS_plan",
+        "TF_WORKSPACE",
+        "TF_DATA_DIR",
+        "TF_VAR_MAIL_ACTION_HMAC_SECRET",
+        "TF_CLI_CONFIG_FILE",
+        "TF_REATTACH_PROVIDERS",
+        "TF_LOG_PATH",
+    ],
+)
+def test_terraform_environment_injection_is_removed_and_rejected_without_value_leak(
+    tmp_path: Path,
+    variable_name: str,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    secret_value = "DO_NOT_LOG_TERRAFORM_ENV_VALUE"
+    env[variable_name] = secret_value
+
+    result = _run(_plan_command(var_file, tmp_path / "env-injected.tfplan"), env)
+
+    assert result.returncode == 1
+    assert variable_name in result.stdout + result.stderr
+    assert secret_value not in result.stdout + result.stderr
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+
+def test_workspace_state_list_and_import_ownership_collisions_fail_closed(
+    tmp_path: Path,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    env["TF_FAKE_WORKSPACE"] = "production"
+    result = _run(_plan_command(var_file, tmp_path / "workspace.tfplan"), env)
+    assert result.returncode == 1
+    assert "workspace" in result.stdout + result.stderr
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+    env.pop("TF_FAKE_WORKSPACE")
+    state_list = tmp_path / "state-list.txt"
+    state_list.write_text("aws_cloudwatch_log_group.untracked\n", encoding="utf-8")
+    state_list.chmod(0o600)
+    env["TF_FAKE_STATE_LIST"] = str(state_list)
+    result = _run(_plan_command(var_file, tmp_path / "state-list.tfplan"), env)
+    assert result.returncode == 1
+    assert "state pull/list" in result.stdout + result.stderr
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+    env.pop("TF_FAKE_STATE_LIST")
+    state = tmp_path / "collision-state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "terraform_version": "1.12.2",
+                "serial": 42,
+                "lineage": "01234567-89ab-cdef-0123-456789abcdef",
+                "outputs": {},
+                "resources": [
+                    {
+                        "mode": "managed",
+                        "type": "aws_cloudwatch_log_group",
+                        "name": "unrelated_owner",
+                        "provider": ('provider["registry.terraform.io/hashicorp/aws"]'),
+                        "instances": [
+                            {
+                                "schema_version": 0,
+                                "attributes": {
+                                    "id": ("/aws/lambda/teamagent-dev-reminders-notify"),
+                                    "name": ("/aws/lambda/teamagent-dev-reminders-notify"),
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state.chmod(0o600)
+    env["TF_FAKE_STATE"] = str(state)
+    result = _run(_plan_command(var_file, tmp_path / "collision.tfplan"), env)
+    assert result.returncode == 1
+    assert "state lineage/serial/address/import ownership" in (result.stdout + result.stderr)
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
 
 
 def test_ad_hoc_rollout_is_rejected_and_migration_requires_preflight(
@@ -1681,7 +2132,18 @@ def test_plan_tamper_pair_swap_live_drift_and_apply_are_rejected(tmp_path: Path)
     live = _run(["bash", str(GUARD), "verify", "--plan", str(second)], env)
     assert live.returncode == 1
 
-    apply = _run(["bash", str(GUARD), "apply", "--plan", str(second)], env)
+    apply = _run(
+        [
+            "bash",
+            str(GUARD),
+            "apply",
+            "--plan",
+            str(second),
+            "--out",
+            str(tmp_path / "apply-receipt.json"),
+        ],
+        env,
+    )
     assert apply.returncode == 1
-    assert "不明な command" in apply.stdout + apply.stderr
+    assert "exact trusted automation role" in apply.stdout + apply.stderr
     assert "apply" not in tf_log.read_text(encoding="utf-8")

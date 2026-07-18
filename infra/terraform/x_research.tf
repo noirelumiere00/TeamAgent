@@ -126,6 +126,9 @@ resource "aws_cloudwatch_log_group" "x_dispatch" {
 
   lifecycle {
     prevent_destroy = true
+    # The live auto-created group is currently unencrypted. Adopting it must
+    # only set retention/tags and must never recreate it to change KMS.
+    ignore_changes = [kms_key_id]
   }
 }
 
