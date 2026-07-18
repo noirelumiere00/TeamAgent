@@ -88,10 +88,7 @@ def test_every_terraform_ecr_iam_action_is_explicitly_audited() -> None:
             locations.setdefault(action, set()).add(path.name)
 
     unknown = actions - AUDITED_ECR_ACTIONS
-    assert not unknown, {
-        action: sorted(locations[action])
-        for action in sorted(unknown)
-    }
+    assert not unknown, {action: sorted(locations[action]) for action in sorted(unknown)}
     assert "ecr:ListImageReferrers" not in actions
 
 

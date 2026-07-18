@@ -116,9 +116,7 @@ def test_active_contract_is_fail_closed_and_names_all_three_repository_stages() 
     for subject in contract["bundle"]["subjects"]:
         assert subject["quarantine_repository"].endswith("-quarantine")
         assert subject["candidate_repository"].endswith("-verified-candidates")
-        assert not subject["release_repository"].endswith(
-            ("-quarantine", "-verified-candidates")
-        )
+        assert not subject["release_repository"].endswith(("-quarantine", "-verified-candidates"))
 
 
 def test_ready_contract_requires_binary_hashes_and_signed_sbom_provenance() -> None:
@@ -187,13 +185,16 @@ def test_arm64_config_gate_rejects_index_and_release_repository(tmp_path: Path) 
     path = tmp_path / "batch.json"
     path.write_text(json.dumps(response), encoding="utf-8")
 
-    assert provenance.arm64_config_digest(
-        path,
-        contract,
-        digest,
-        "teamagent-openclaw-quarantine",
-        "718959508629",
-    ) == "sha256:" + "a" * 64
+    assert (
+        provenance.arm64_config_digest(
+            path,
+            contract,
+            digest,
+            "teamagent-openclaw-quarantine",
+            "718959508629",
+        )
+        == "sha256:" + "a" * 64
+    )
     with pytest.raises(provenance.ContractError, match="repository is invalid"):
         provenance.arm64_config_digest(
             path,
@@ -202,9 +203,7 @@ def test_arm64_config_gate_rejects_index_and_release_repository(tmp_path: Path) 
             "teamagent-openclaw",
             "718959508629",
         )
-    response["images"][0]["imageManifestMediaType"] = (
-        "application/vnd.oci.image.index.v1+json"
-    )
+    response["images"][0]["imageManifestMediaType"] = "application/vnd.oci.image.index.v1+json"
     path.write_text(json.dumps(response), encoding="utf-8")
     with pytest.raises(provenance.ContractError, match="single OCI image manifest"):
         provenance.arm64_config_digest(

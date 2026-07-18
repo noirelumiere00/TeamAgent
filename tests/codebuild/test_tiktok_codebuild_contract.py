@@ -15,9 +15,9 @@ def _body() -> str:
 
 def _policy(name: str) -> str:
     body = _body()
-    return body.split(
-        f'data "aws_iam_policy_document" "{name}"', maxsplit=1
-    )[1].split('\nresource "aws_iam_role_policy"', maxsplit=1)[0]
+    return body.split(f'data "aws_iam_policy_document" "{name}"', maxsplit=1)[1].split(
+        '\nresource "aws_iam_role_policy"', maxsplit=1
+    )[0]
 
 
 def test_tiktok_has_dedicated_caller_launcher_and_no_aiiadev_dependency() -> None:
@@ -57,12 +57,15 @@ def test_tiktok_builder_can_write_only_quarantine_not_candidate_or_release() -> 
 
 def test_tiktok_project_has_fixed_git_source_and_no_latest_default() -> None:
     body = _body()
-    project = body.split(
-        'resource "aws_codebuild_project" "tiktok_image"', maxsplit=1
-    )[1].split('output "tiktok_codebuild_project"', maxsplit=1)[0]
+    project = body.split('resource "aws_codebuild_project" "tiktok_image"', maxsplit=1)[1].split(
+        'output "tiktok_codebuild_project"', maxsplit=1
+    )[0]
 
     assert '"0000000000000000000000000000000000000000"' in project
-    assert 'location            = "https://github.com/noirelumiere00/tiktok-data-service.git"' in project
+    assert (
+        'location            = "https://github.com/noirelumiere00/tiktok-data-service.git"'
+        in project
+    )
     assert 'type                = "GITHUB"' in project
     assert 'type     = "CODECONNECTIONS"' in project
     assert "git_clone_depth     = 0" in project
@@ -103,7 +106,7 @@ def test_tiktok_buildspec_stops_at_quarantine_after_single_arm64_scan() -> None:
     assert "--deny-all" in body
     assert '--expected-image-digest "$ARM64_DIGEST"' in body
     assert "teamagent-dev-tiktok-acquire-verified-candidates" not in body
-    assert "$ECR_REGISTRY/teamagent-dev-tiktok-acquire\"" not in body
+    assert '$ECR_REGISTRY/teamagent-dev-tiktok-acquire"' not in body
     assert "BatchDeleteImage" not in body
 
 
@@ -113,18 +116,16 @@ def test_tiktok_registry_and_trivy_endpoints_ignore_hostile_overrides() -> None:
     assert body.count("export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true") == 3
     assert body.count('EXPECTED_ACCOUNT_ID="718959508629"') == 3
     assert body.count('EXPECTED_REGION="ap-northeast-1"') == 3
-    assert body.count(
-        "unset ECR_REGISTRY TIKTOK_REPO TIKTOK_QUARANTINE_REPO TIKTOK_RELEASE_REPO"
-    ) == 3
+    assert (
+        body.count("unset ECR_REGISTRY TIKTOK_REPO TIKTOK_QUARANTINE_REPO TIKTOK_RELEASE_REPO") == 3
+    )
     assert 'TIKTOK_QUARANTINE_REPO="$ECR_REGISTRY/teamagent-dev-tiktok-acquire-quarantine"' in body
     assert (
         "docker login --username AWS --password-stdin "
         '"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"'
     ) in body
     assert body.count("unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY") >= 3
-    assert body.count(
-        'export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"'
-    ) >= 3
+    assert body.count('export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"') >= 3
 
 
 def test_tiktok_launcher_signs_source_assumes_once_and_never_deploys() -> None:
