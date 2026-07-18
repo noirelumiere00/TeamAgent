@@ -14,6 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFIER_PATH = ROOT / "infra/docker/verify_runtime_evidence.py"
+BUILD_SCRIPT = ROOT / "infra/docker/build_local_runtime_evidence.sh"
 
 
 def _load_verifier() -> ModuleType:
@@ -220,3 +221,12 @@ def test_full_verifier_rejects_stale_head_before_using_artifacts(tmp_path: Path)
             repo_root=ROOT,
             verify_checksums=False,
         )
+
+
+def test_evidence_builder_canonicalizes_source_scan_subject() -> None:
+    script = BUILD_SCRIPT.read_text(encoding="utf-8")
+    created = 'TRACKED_SOURCE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/'
+    canonical = 'TRACKED_SOURCE_DIR=$(CDPATH= cd -- "$TRACKED_SOURCE_DIR" && pwd -P)'
+    assert created in script
+    assert canonical in script
+    assert script.index(created) < script.index(canonical)

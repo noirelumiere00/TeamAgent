@@ -43,6 +43,9 @@ fi
 umask 077
 mkdir "$EVIDENCE_DIR"
 TRACKED_SOURCE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/teamagent-tracked-source.XXXXXX")
+# Trivy normalizes redundant path separators in ArtifactName. Canonicalize the
+# receipt subject too (macOS TMPDIR commonly ends in "/") so the binding is exact.
+TRACKED_SOURCE_DIR=$(CDPATH= cd -- "$TRACKED_SOURCE_DIR" && pwd -P)
 cleanup_tracked_source() {
   if test -n "${TRACKED_SOURCE_DIR:-}"; then
     rm -rf "$TRACKED_SOURCE_DIR"
