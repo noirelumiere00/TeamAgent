@@ -1611,6 +1611,12 @@ def _analyze_html(
             )
             client_owner_key = client_identity_key(client.get("name"))
             expected_industry = sidecars.client_industry_by_identity.get(client_owner_key)
+            if expected_industry is not None:
+                # builder は master の生値も tag_alias の一段写像で表示用に正準化する。
+                # 資料由来の consensus は _collect_content_state() で同じ写像を通過済み。
+                expected_industry = sidecars.tag_alias.get("industry", {}).get(
+                    expected_industry, expected_industry
+                )
             if expected_industry is None:
                 primary_industries: list[str] = []
                 project_industries: list[str] = []
