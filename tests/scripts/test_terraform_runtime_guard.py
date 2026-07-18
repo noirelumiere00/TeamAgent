@@ -976,7 +976,7 @@ def _fake_aws(path: Path) -> None:
                     ),
                     "Owner": ACCOUNT,
                     "Protocol": "email",
-                    "Endpoint": "alerts@example.com",
+                    "Endpoint": "s-komata@vectorinc.co.jp",
                     "TopicArn": (
                         "arn:aws:sns:ap-northeast-1:718959508629:"
                         "teamagent-dev-openclaw-alarms"
@@ -992,7 +992,7 @@ def _fake_aws(path: Path) -> None:
                     "teamagent-dev-openclaw-alarms"
                 ),
                 "Protocol": "email",
-                "Endpoint": "alerts@example.com",
+                "Endpoint": "s-komata@vectorinc.co.jp",
                 "PendingConfirmation": "false",
                 "ConfirmationWasAuthenticated": "true",
                 "RawMessageDelivery": "false",
@@ -1080,21 +1080,17 @@ def _fake_aws(path: Path) -> None:
                 )
             status = state.get(bucket)
             print(json.dumps({{"Status": status}} if status else {{}}))
-        elif args[:2] == ["s3api", "put-bucket-versioning"]:
-            bucket = args[args.index("--bucket") + 1]
-            assert (
-                args[args.index("--versioning-configuration") + 1]
-                == "Status=Enabled"
-            )
-            state_path = pathlib.Path(
-                os.environ["AWS_FAKE_VERSIONING_STATE"]
-            )
-            state = {{}}
-            if state_path.exists():
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-            state[bucket] = "Enabled"
-            state_path.write_text(json.dumps(state), encoding="utf-8")
-            print(json.dumps({{}}))
+        elif args[:2] == ["s3api", "get-bucket-lifecycle-configuration"]:
+            lifecycle = os.environ.get("AWS_FAKE_CLOUDTRAIL_LIFECYCLE")
+            if lifecycle:
+                print(lifecycle)
+            else:
+                print(
+                    "An error occurred (NoSuchLifecycleConfiguration) "
+                    "when calling GetBucketLifecycleConfiguration",
+                    file=sys.stderr,
+                )
+                raise SystemExit(254)
         elif args[:2] == ["s3api", "head-object"]:
             app_html = (
                 b"fake current app html\\n"
@@ -1398,7 +1394,20 @@ def _fake_terraform(path: Path) -> None:
                 prefix = resource.get("module", "")
                 if prefix:
                     prefix += "."
-                base = prefix + resource["type"] + "." + resource["name"]
+                mode = resource.get("mode")
+                if mode == "managed":
+                    mode_prefix = ""
+                elif mode == "data":
+                    mode_prefix = "data."
+                else:
+                    raise ValueError("unsupported state resource mode")
+                base = (
+                    prefix
+                    + mode_prefix
+                    + resource["type"]
+                    + "."
+                    + resource["name"]
+                )
                 for instance in resource.get("instances", []):
                     if "index_key" not in instance:
                         addresses.append(base)
@@ -1511,7 +1520,7 @@ def _harness(tmp_path: Path, scenario: str = "safe") -> tuple[dict[str, str], Pa
     template.chmod(0o600)
     var_file = tmp_path / "terraform.tfvars"
     var_file.write_text(
-        'alarm_email_endpoints = ["alerts@example.com"]\n',
+        'alarm_email_endpoints = ["s-komata@vectorinc.co.jp"]\n',
         encoding="utf-8",
     )
     var_file.chmod(0o600)
@@ -1707,10 +1716,15 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
     assert len(data["hmac_transition_sha256"]) == 64
     assert data["state_contract"]["backend"] == {
         "bucket": "teamagent-tfstate-718959508629",
+        "dynamodb_table": "teamagent-tflock",
+        "encrypt": True,
+        "identity_sha256": data["state_contract"]["backend"]["identity_sha256"],
         "key": "teamagent/terraform.tfstate",
         "region": REGION,
+        "type": "s3",
         "workspace": "default",
     }
+    assert len(data["state_contract"]["backend"]["identity_sha256"]) == 64
     assert data["state_contract"]["state"] == {
         "address_count": 0,
         "address_set_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
@@ -1746,7 +1760,7 @@ def test_versioning_stage_is_fail_closed_while_review_manifest_is_disabled(
         [
             "bash",
             str(GUARD),
-            "enable-log-versioning",
+            "attest-log-versioning",
             "--out",
             str(receipt),
         ],
@@ -1756,6 +1770,43 @@ def test_versioning_stage_is_fail_closed_while_review_manifest_is_disabled(
     assert "review済みmanifest" in result.stdout + result.stderr
     assert not receipt.exists()
     assert not versioning_state.exists()
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "deletion",
+    [
+        {"Expiration": {"Days": 365}},
+        {"NoncurrentVersionExpiration": {"NoncurrentDays": 365}},
+    ],
+)
+def test_cloudtrail_live_lifecycle_deletion_is_rejected_before_plan(
+    tmp_path: Path,
+    deletion: dict[str, object],
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    env["AWS_FAKE_CLOUDTRAIL_LIFECYCLE"] = json.dumps(
+        {
+            "Rules": [
+                {
+                    "ID": "delete-audit-logs",
+                    "Status": "Enabled",
+                    "Filter": {"Prefix": ""},
+                    **deletion,
+                }
+            ]
+        }
+    )
+
+    result = _run(
+        _plan_command(var_file, tmp_path / "cloudtrail-lifecycle.tfplan"),
+        env,
+    )
+
+    assert result.returncode == 1
+    assert "CloudTrail監査bucketにexpiration/noncurrent deletion" in (
+        result.stdout + result.stderr
+    )
     assert "plan " not in tf_log.read_text(encoding="utf-8")
 
 
@@ -2046,12 +2097,17 @@ def test_workspace_state_list_and_import_ownership_collisions_fail_closed(
     assert "plan " not in tf_log.read_text(encoding="utf-8")
 
 
-def test_state_address_reconstruction_accepts_module_and_string_index(
+def test_state_address_reconstruction_binds_mixed_exact_address_set(
     tmp_path: Path,
 ) -> None:
     env, var_file, _ = _harness(tmp_path)
     state = tmp_path / "module-state.json"
-    address = 'module.example.aws_s3_bucket.logs["blue"]'
+    addresses = [
+        "aws_cloudwatch_log_group.audit",
+        "data.aws_caller_identity.current",
+        'module.example.aws_s3_bucket.logs["blue"]',
+        "module.example.data.aws_subnets.private[0]",
+    ]
     state.write_text(
         json.dumps(
             {
@@ -2061,6 +2117,30 @@ def test_state_address_reconstruction_accepts_module_and_string_index(
                 "lineage": "01234567-89ab-cdef-0123-456789abcdef",
                 "outputs": {},
                 "resources": [
+                    {
+                        "mode": "managed",
+                        "type": "aws_cloudwatch_log_group",
+                        "name": "audit",
+                        "provider": ('provider["registry.terraform.io/hashicorp/aws"]'),
+                        "instances": [
+                            {
+                                "schema_version": 0,
+                                "attributes": {"id": "/teamagent/dev/audit"},
+                            }
+                        ],
+                    },
+                    {
+                        "mode": "data",
+                        "type": "aws_caller_identity",
+                        "name": "current",
+                        "provider": ('provider["registry.terraform.io/hashicorp/aws"]'),
+                        "instances": [
+                            {
+                                "schema_version": 0,
+                                "attributes": {"id": "718959508629"},
+                            }
+                        ],
+                    },
                     {
                         "module": "module.example",
                         "mode": "managed",
@@ -2076,7 +2156,21 @@ def test_state_address_reconstruction_accepts_module_and_string_index(
                                 },
                             }
                         ],
-                    }
+                    },
+                    {
+                        "module": "module.example",
+                        "mode": "data",
+                        "type": "aws_subnets",
+                        "name": "private",
+                        "provider": ('provider["registry.terraform.io/hashicorp/aws"]'),
+                        "instances": [
+                            {
+                                "index_key": 0,
+                                "schema_version": 0,
+                                "attributes": {"id": "ap-northeast-1"},
+                            }
+                        ],
+                    },
                 ],
             }
         ),
@@ -2092,10 +2186,134 @@ def test_state_address_reconstruction_accepts_module_and_string_index(
     receipt = json.loads(Path(f"{plan}.runtime-guard.json").read_text(encoding="utf-8"))
     state_contract = receipt["state_contract"]["state"]
     assert state_contract["serial"] == 43
-    assert state_contract["address_count"] == 1
+    assert state_contract["address_count"] == len(addresses)
     assert (
-        state_contract["address_set_sha256"] == hashlib.sha256(f"{address}\n".encode()).hexdigest()
+        state_contract["address_set_sha256"]
+        == hashlib.sha256(
+            "".join(f"{address}\n" for address in sorted(addresses)).encode()
+        ).hexdigest()
     )
+
+
+def test_state_address_reconstruction_rejects_unknown_resource_mode(
+    tmp_path: Path,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    state = tmp_path / "unknown-mode-state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "terraform_version": "1.12.2",
+                "serial": 44,
+                "lineage": "01234567-89ab-cdef-0123-456789abcdef",
+                "outputs": {},
+                "resources": [
+                    {
+                        "mode": "ephemeral",
+                        "type": "terraform_data",
+                        "name": "bad",
+                        "instances": [{"schema_version": 0, "attributes": {"id": "bad"}}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_list = tmp_path / "unknown-mode-list.txt"
+    state_list.write_text("terraform_data.bad\n", encoding="utf-8")
+    state.chmod(0o600)
+    state_list.chmod(0o600)
+    env["TF_FAKE_STATE"] = str(state)
+    env["TF_FAKE_STATE_LIST"] = str(state_list)
+
+    result = _run(_plan_command(var_file, tmp_path / "unknown-mode.tfplan"), env)
+
+    assert result.returncode == 1
+    assert "state pullからaddress ownershipを再構成できません" in (
+        result.stdout + result.stderr
+    )
+    assert "plan " not in tf_log.read_text(encoding="utf-8")
+
+
+def test_backend_identity_is_observed_from_normalized_initialized_metadata(
+    tmp_path: Path,
+) -> None:
+    body = GUARD.read_text(encoding="utf-8")
+    function = re.search(
+        r"capture_backend_identity\(\) \{.*?(?=\ncapture_state_contract\(\))",
+        body,
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    tmp_path.chmod(0o700)
+    metadata = tmp_path / "backend.tfstate"
+    output = tmp_path / "backend.json"
+    config = {
+        "bucket": "teamagent-tfstate-718959508629",
+        "key": "teamagent/terraform.tfstate",
+        "region": REGION,
+        "dynamodb_table": "teamagent-tflock",
+        "encrypt": True,
+        "access_key": None,
+        "secret_key": None,
+        "token": None,
+        "endpoint": None,
+        "workspace_key_prefix": None,
+    }
+    metadata.write_text(
+        json.dumps({"backend": {"type": "s3", "config": config}}),
+        encoding="utf-8",
+    )
+    metadata.chmod(0o600)
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            'EXPECTED_BACKEND_BUCKET="teamagent-tfstate-718959508629"',
+            'EXPECTED_BACKEND_KEY="teamagent/terraform.tfstate"',
+            'EXPECTED_BACKEND_DYNAMODB_TABLE="teamagent-tflock"',
+            f'REGION="{REGION}"',
+            'die() { echo "★ $*" >&2; return 1; }',
+            "assert_owned() { :; }",
+            "assert_not_shared_writable() { :; }",
+            'assert_regular_nonwritable() { [ ! -L "$1" ] && [ -f "$1" ]; }',
+            "sha256_file() { openssl dgst -sha256 \"$1\" | awk '{print $NF}'; }",
+            function.group(0),
+            'capture_backend_identity "$1" "$2"',
+        )
+    )
+
+    valid = subprocess.run(
+        ["bash", "-c", script, "validator", str(output), str(metadata)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert valid.returncode == 0, valid.stderr
+    identity = json.loads(output.read_text(encoding="utf-8"))
+    assert identity == {
+        "bucket": "teamagent-tfstate-718959508629",
+        "dynamodb_table": "teamagent-tflock",
+        "encrypt": True,
+        "identity_sha256": identity["identity_sha256"],
+        "key": "teamagent/terraform.tfstate",
+        "region": REGION,
+        "type": "s3",
+    }
+    assert re.fullmatch(r"[0-9a-f]{64}", identity["identity_sha256"])
+
+    config["endpoint"] = "https://attacker.invalid"
+    metadata.write_text(
+        json.dumps({"backend": {"type": "s3", "config": config}}),
+        encoding="utf-8",
+    )
+    rejected = subprocess.run(
+        ["bash", "-c", script, "validator", str(output), str(metadata)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rejected.returncode != 0
 
 
 def test_ad_hoc_rollout_is_rejected_and_migration_requires_preflight(

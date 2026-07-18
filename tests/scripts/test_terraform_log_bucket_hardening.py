@@ -154,11 +154,20 @@ def test_bedrock_retention_is_exactly_60_days_only_under_bedrock_prefix() -> Non
         "bedrock_logs",
     )
     assert lifecycle.count('prefix = "bedrock/"') == 2
-    assert "days = var.bedrock_logs_retention_days" in lifecycle
-    assert "noncurrent_days = var.bedrock_logs_retention_days" in lifecycle
+    assert "days = var.bedrock_logs_retention_days - 1" in lifecycle
+    assert "noncurrent_days = 1" in lifecycle
+    assert "bedrock-current-59-noncurrent-1-total-60-days" in lifecycle
     assert "expired_object_delete_marker = true" in lifecycle
     assert "cloudtrail" not in lifecycle
     assert 'resource "aws_s3_bucket_lifecycle_configuration" "cloudtrail"' not in security
+
+
+def test_bedrock_versioned_payload_timeline_ends_at_day_60() -> None:
+    current_days = 59
+    noncurrent_days = 1
+    assert current_days + noncurrent_days == 60
+    assert current_days != 60
+    assert noncurrent_days != 60
 
 
 def test_first_enablement_wait_and_exact_guard_allowlist_are_documented() -> None:
@@ -173,18 +182,19 @@ def test_first_enablement_wait_and_exact_guard_allowlist_are_documented() -> Non
     manifest = json.loads(MIGRATIONS.read_text(encoding="utf-8"))
     migration = manifest["migrations"]["2026-07-wolfi-runtime-v1"]
     assert manifest["log_versioning_stage"] == {
-        "id": "2026-07-log-versioning-enable-v1",
+        "id": "2026-07-log-versioning-attest-v2",
         "enabled": False,
         "expires_at": "2026-08-31T00:00:00Z",
         "buckets": [
             "teamagent-dev-cloudtrail-718959508629",
             "teamagent-dev-bedrock-logs-718959508629",
         ],
-        "allowed_write": "s3:PutBucketVersioning",
-        "required_status_before": ["Unversioned", "Enabled"],
+        "allowed_write": "none",
+        "required_status_before": ["Enabled"],
         "required_status_after": "Enabled",
         "mfa_delete": "Disabled",
-        "producer_action": "no-op",
+        "producer_action": "active-observation-only",
+        "cutover_mode": "pre-versioned-destination-before-producer-cutover",
     }
     for address in (
         "aws_s3_bucket_versioning.cloudtrail[0]",
@@ -199,19 +209,19 @@ def test_first_enablement_wait_and_exact_guard_allowlist_are_documented() -> Non
 
     guard = GUARD.read_text(encoding="utf-8")
     assert "validate_log_bucket_hardening_plan" in guard
-    assert "enable-log-versioning" in guard
-    assert "teamagent-log-versioning-enable-receipt" in guard
+    assert "attest-log-versioning" in guard
+    assert "teamagent-log-versioning-attestation-receipt" in guard
     assert "validate_log_versioning_stage_manifest" in guard
-    assert "verify_versioning_enable_receipt" in guard
-    assert "put-bucket-versioning" in guard
+    assert "verify_versioning_attestation_receipt" in guard
+    assert "put-bucket-versioning" not in guard
     assert "--versioning-receipt" in guard
     assert "-target=" not in guard
     assert ".complete == true" in guard
-    assert "producer no-op契約" in guard
+    assert "pre-versioned destination" in guard
     assert "verify_log_readiness_receipt" in guard
     assert ">= 900" in guard
     assert "versioning_receipt_sha256" in guard
-    assert "enable-log-versioning" in readme
+    assert "attest-log-versioning" in readme
     assert "--versioning-receipt" in readme
     assert "非targeted" in readme
 
@@ -292,6 +302,14 @@ def _run_log_readiness_validator(
                     "cloudtrail": {
                         "versioning_status": "Enabled",
                         "mfa_delete": "Disabled",
+                        "lifecycle": {
+                            "configuration_present": False,
+                            "rule_count": 0,
+                            "deletion_rule_count": 0,
+                            "canonical_sha256": hashlib.sha256(
+                                b'{"Rules":[]}\n'
+                            ).hexdigest(),
+                        },
                     },
                     "bedrock": {
                         "versioning_status": "Enabled",
@@ -302,6 +320,8 @@ def _run_log_readiness_validator(
         ),
         encoding="utf-8",
     )
+    for path in (readiness_path, versioning_path, snapshot_path):
+        path.chmod(0o600)
     script = "\n".join(
         (
             "set -euo pipefail",
@@ -310,6 +330,17 @@ def _run_log_readiness_validator(
             'PROJECT="teamagent"',
             'ENVIRONMENT="dev"',
             "sha256_file() { openssl dgst -sha256 \"$1\" | awk '{print $NF}'; }",
+            (
+                "stat_identity() { stat -f '%d:%i' \"$1\" 2>/dev/null || "
+                "stat -c '%d:%i' \"$1\"; }"
+            ),
+            (
+                "secure_existing_file() { "
+                "[ ! -L \"$1\" ] && [ -f \"$1\" ] || return 1; "
+                "[ \"$(stat -f '%Lp' \"$1\" 2>/dev/null || "
+                "stat -c '%a' \"$1\")\" = \"${2:-600}\" ] || return 1; "
+                "realpath \"$1\"; }"
+            ),
             'die() { echo "★ $*" >&2; return 1; }',
             function.group(0),
             'verify_log_readiness_receipt "$1" "$2" "$3"',
@@ -334,36 +365,94 @@ def _run_log_readiness_validator(
 def test_log_readiness_receipt_binds_versioning_sha_and_900_second_wait(
     tmp_path: Path,
 ) -> None:
+    tmp_path.chmod(0o700)
     now = int(time.time())
-    enabled_at = now - 901
-    versioning: dict[str, object] = {"enabled_observed_at_epoch": enabled_at}
-    versioning_bytes = json.dumps(versioning).encode()
-    versioning_sha = hashlib.sha256(versioning_bytes).hexdigest()
-    evidence = "a" * 64
+    versioning_observed_at = now - 901
+    versioning: dict[str, object] = {
+        "versioning_observed_at_epoch": versioning_observed_at
+    }
+    versioning_sha = hashlib.sha256(json.dumps(versioning).encode()).hexdigest()
+
+    log_groups = [
+        "/aws/codebuild/teamagent-dev-aiia-image-builder",
+        "/aws/codebuild/teamagent-dev-image-builder",
+        "/aws/lambda/teamagent-dev-reminders-notify",
+        "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch",
+        "/aws/lambda/teamagent-dev-x-buzz-dispatch",
+    ]
+    retention_path = tmp_path / "retention-export.json"
+    retention = {
+        "kind": "teamagent-log-retention-export-manifest",
+        "schema_version": 1,
+        "account_id": "718959508629",
+        "region": "ap-northeast-1",
+        "created_at_epoch": now - 1,
+        "log_groups": [
+            {
+                "log_group": group,
+                "exported_through_epoch": now - 2,
+                "event_count": 1,
+                "content_sha256": hashlib.sha256(group.encode()).hexdigest(),
+            }
+            for group in log_groups
+        ],
+    }
+    retention_path.write_text(json.dumps(retention), encoding="utf-8")
+    retention_path.chmod(0o600)
+    retention_sha = hashlib.sha256(retention_path.read_bytes()).hexdigest()
+
+    evidence_path = tmp_path / "log-readiness-evidence.json"
+    delivery = {
+        "version_id": "version-1",
+        "etag": "0123456789abcdef0123456789abcdef",
+        "last_modified_epoch": now - 1,
+        "size_bytes": 1,
+    }
+    evidence_artifact = {
+        "kind": "teamagent-log-readiness-evidence",
+        "schema_version": 1,
+        "account_id": "718959508629",
+        "region": "ap-northeast-1",
+        "versioning_observed_at_epoch": versioning_observed_at,
+        "observed_at_epoch": now,
+        "retention_export_manifest_path": str(retention_path),
+        "retention_export_manifest_sha256": retention_sha,
+        "cloudtrail": {
+            "bucket": "teamagent-dev-cloudtrail-718959508629",
+            "latest_log": {
+                **delivery,
+                "key": "AWSLogs/718959508629/CloudTrail/log.json.gz",
+            },
+            "latest_digest": {
+                **delivery,
+                "key": "AWSLogs/718959508629/CloudTrail-Digest/digest.json.gz",
+            },
+        },
+        "bedrock": {
+            "bucket": "teamagent-dev-bedrock-logs-718959508629",
+            "latest_delivery": {
+                **delivery,
+                "key": (
+                    "bedrock/AWSLogs/718959508629/"
+                    "BedrockModelInvocationLogs/event.json.gz"
+                ),
+            },
+        },
+    }
+    evidence_path.write_text(json.dumps(evidence_artifact), encoding="utf-8")
+    evidence_path.chmod(0o600)
+    evidence_sha = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+
     readiness: dict[str, object] = {
         "kind": "teamagent-log-rollout-readiness-receipt",
-        "schema_version": 1,
+        "schema_version": 2,
         "account_id": "718959508629",
         "region": "ap-northeast-1",
         "versioning_receipt_sha256": versioning_sha,
         "created_at_epoch": now,
         "expires_at_epoch": now + 3600,
-        "retention_export_evidence_sha256": evidence,
-        "cloudtrail": {
-            "bucket": "teamagent-dev-cloudtrail-718959508629",
-            "versioning_status": "Enabled",
-            "versioning_enabled_at_epoch": enabled_at,
-            "verified_at_epoch": now,
-            "latest_log_evidence_sha256": evidence,
-            "latest_digest_evidence_sha256": evidence,
-        },
-        "bedrock": {
-            "bucket": "teamagent-dev-bedrock-logs-718959508629",
-            "versioning_status": "Enabled",
-            "versioning_enabled_at_epoch": enabled_at,
-            "verified_at_epoch": now,
-            "latest_delivery_evidence_sha256": evidence,
-        },
+        "evidence_artifact_path": str(evidence_path),
+        "evidence_artifact_sha256": evidence_sha,
     }
     result = _run_log_readiness_validator(tmp_path, readiness, versioning)
     assert result.returncode == 0, result.stderr
@@ -372,17 +461,213 @@ def test_log_readiness_receipt_binds_versioning_sha_and_900_second_wait(
     wrong_sha["versioning_receipt_sha256"] = "b" * 64
     assert _run_log_readiness_validator(tmp_path, wrong_sha, versioning).returncode != 0
 
-    too_soon_versioning = {"enabled_observed_at_epoch": now - 899}
+    dummy_hashes = {
+        "kind": "teamagent-log-rollout-readiness-receipt",
+        "schema_version": 1,
+        "account_id": "718959508629",
+        "region": "ap-northeast-1",
+        "versioning_receipt_sha256": versioning_sha,
+        "created_at_epoch": now,
+        "expires_at_epoch": now + 3600,
+        "retention_export_evidence_sha256": "a" * 64,
+    }
+    assert (
+        _run_log_readiness_validator(tmp_path, dummy_hashes, versioning).returncode
+        != 0
+    )
+
+    too_soon_versioning = {"versioning_observed_at_epoch": now - 899}
     too_soon = copy.deepcopy(readiness)
-    too_soon_sha = hashlib.sha256(json.dumps(too_soon_versioning).encode()).hexdigest()
-    too_soon["versioning_receipt_sha256"] = too_soon_sha
-    too_soon["cloudtrail"]["versioning_enabled_at_epoch"] = now - 899
-    too_soon["bedrock"]["versioning_enabled_at_epoch"] = now - 899
+    too_soon["versioning_receipt_sha256"] = hashlib.sha256(
+        json.dumps(too_soon_versioning).encode()
+    ).hexdigest()
     assert (
         _run_log_readiness_validator(
             tmp_path,
             too_soon,
             too_soon_versioning,
+        ).returncode
+        != 0
+    )
+
+    evidence_path.write_text(
+        json.dumps({**evidence_artifact, "observed_at_epoch": now - 1}),
+        encoding="utf-8",
+    )
+    assert _run_log_readiness_validator(tmp_path, readiness, versioning).returncode != 0
+
+
+def _run_alarm_delivery_receipt_validator(
+    tmp_path: Path,
+    receipt: dict[str, object],
+    snapshot: dict[str, object],
+) -> subprocess.CompletedProcess[str]:
+    body = GUARD.read_text(encoding="utf-8")
+    function = re.search(
+        r"verify_alarm_delivery_test_receipt\(\) \{.*?"
+        r"(?=\ncapture_log_delivery_contract\(\))",
+        body,
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    receipt_path = tmp_path / "alarm-delivery-receipt.json"
+    snapshot_path = tmp_path / "alarm-delivery-snapshot.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            'EXPECTED_ACCOUNT_ID="718959508629"',
+            'REGION="ap-northeast-1"',
+            'PROJECT="teamagent"',
+            'ENVIRONMENT="dev"',
+            (
+                'EXPECTED_ALARM_EMAIL_SHA256="'
+                '88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"'
+            ),
+            'die() { echo "★ $*" >&2; return 1; }',
+            function.group(0),
+            'verify_alarm_delivery_test_receipt "$1" "$2"',
+        )
+    )
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "validator",
+            str(receipt_path),
+            str(snapshot_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_alarm_delivery_receipt_binds_exclusive_exact_live_channel(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    email_hash = "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
+    subscription_hash = "1" * 64
+    topic = (
+        "arn:aws:sns:ap-northeast-1:718959508629:"
+        "teamagent-dev-openclaw-alarms"
+    )
+    chat_arn = (
+        "arn:aws:chatbot::718959508629:chat-configuration/"
+        "slack-channel/teamagent-dev-alerts"
+    )
+    common_receipt: dict[str, object] = {
+        "kind": "teamagent-alarm-delivery-test-receipt",
+        "schema_version": 1,
+        "account_id": "718959508629",
+        "region": "ap-northeast-1",
+        "topic_arn": topic,
+        "subscription_metadata_sha256": subscription_hash,
+        "result": "delivered",
+        "observer_identity_sha256": "2" * 64,
+        "test_message_id_sha256": "3" * 64,
+        "delivery_evidence_sha256": "4" * 64,
+        "tested_at_epoch": now,
+        "expires_at_epoch": now + 3600,
+    }
+    email_receipt = {
+        **common_receipt,
+        "delivery_channel": "email",
+        "email_endpoint_sha256": email_hash,
+        "chatbot_configuration_arn": "",
+        "chatbot_state": "",
+    }
+    email_snapshot = {
+        "alarm_delivery": {
+            "confirmed_subscription_metadata_sha256": subscription_hash,
+            "confirmed_email_endpoint_sha256": [email_hash],
+            "attached_chatbot_configuration_arns": [],
+        },
+        "alarm_delivery_observation": {
+            "attached_chatbot_configurations": [],
+        },
+    }
+    valid_email = _run_alarm_delivery_receipt_validator(
+        tmp_path,
+        email_receipt,
+        email_snapshot,
+    )
+    assert valid_email.returncode == 0, valid_email.stderr
+
+    mixed = copy.deepcopy(email_snapshot)
+    mixed["alarm_delivery"]["attached_chatbot_configuration_arns"] = [chat_arn]
+    mixed["alarm_delivery_observation"]["attached_chatbot_configurations"] = [
+        {"arn": chat_arn, "state": "ENABLED"}
+    ]
+    assert (
+        _run_alarm_delivery_receipt_validator(
+            tmp_path,
+            email_receipt,
+            mixed,
+        ).returncode
+        != 0
+    )
+    replaced_email = copy.deepcopy(email_snapshot)
+    replaced_email["alarm_delivery"]["confirmed_email_endpoint_sha256"] = ["9" * 64]
+    assert (
+        _run_alarm_delivery_receipt_validator(
+            tmp_path,
+            email_receipt,
+            replaced_email,
+        ).returncode
+        != 0
+    )
+
+    chat_receipt = {
+        **common_receipt,
+        "delivery_channel": "chat",
+        "email_endpoint_sha256": "",
+        "chatbot_configuration_arn": chat_arn,
+        "chatbot_state": "ENABLED",
+    }
+    chat_snapshot = {
+        "alarm_delivery": {
+            "confirmed_subscription_metadata_sha256": subscription_hash,
+            "confirmed_email_endpoint_sha256": [],
+            "attached_chatbot_configuration_arns": [chat_arn],
+        },
+        "alarm_delivery_observation": {
+            "attached_chatbot_configurations": [
+                {"arn": chat_arn, "state": "ENABLED"}
+            ],
+        },
+    }
+    valid_chat = _run_alarm_delivery_receipt_validator(
+        tmp_path,
+        chat_receipt,
+        chat_snapshot,
+    )
+    assert valid_chat.returncode == 0, valid_chat.stderr
+
+    disabled_chat = copy.deepcopy(chat_snapshot)
+    disabled_chat["alarm_delivery_observation"]["attached_chatbot_configurations"][0][
+        "state"
+    ] = "DISABLED"
+    assert (
+        _run_alarm_delivery_receipt_validator(
+            tmp_path,
+            chat_receipt,
+            disabled_chat,
+        ).returncode
+        != 0
+    )
+    replaced_chat = copy.deepcopy(chat_snapshot)
+    replaced_chat["alarm_delivery"]["attached_chatbot_configuration_arns"] = [
+        chat_arn + "-replacement"
+    ]
+    assert (
+        _run_alarm_delivery_receipt_validator(
+            tmp_path,
+            chat_receipt,
+            replaced_chat,
         ).returncode
         != 0
     )
@@ -538,18 +823,18 @@ def _log_bucket_plan() -> dict[str, object]:
                     "bucket": f"teamagent-dev-bedrock-logs-{account}",
                     "rule": [
                         {
-                            "id": "bedrock-current-and-noncurrent-60-days",
+                            "id": "bedrock-current-59-noncurrent-1-total-60-days",
                             "status": "Enabled",
                             "filter": [{"prefix": "bedrock/"}],
                             "expiration": [
                                 {
-                                    "days": 60,
+                                    "days": 59,
                                     "expired_object_delete_marker": False,
                                 }
                             ],
                             "noncurrent_version_expiration": [
                                 {
-                                    "noncurrent_days": 60,
+                                    "noncurrent_days": 1,
                                     "newer_noncurrent_versions": None,
                                 }
                             ],
@@ -699,6 +984,7 @@ def test_log_bucket_plan_guard_accepts_only_exact_tls_and_delivery_policy() -> N
         "policy_destroy",
         "service_statement_broadened",
         "lifecycle_wrong_prefix",
+        "lifecycle_60_plus_60",
         "kms_broadened",
         "producer_update",
     ],
@@ -726,6 +1012,12 @@ def test_log_bucket_plan_guard_rejects_stale_or_broad_policy_changes(
     elif mutation == "lifecycle_wrong_prefix":
         lifecycle = changes[4]["change"]  # type: ignore[index]
         lifecycle["after"]["rule"][0]["filter"][0]["prefix"] = ""  # type: ignore[index]
+    elif mutation == "lifecycle_60_plus_60":
+        lifecycle = changes[4]["change"]  # type: ignore[index]
+        lifecycle["after"]["rule"][0]["expiration"][0]["days"] = 60  # type: ignore[index]
+        lifecycle["after"]["rule"][0]["noncurrent_version_expiration"][0][  # type: ignore[index]
+            "noncurrent_days"
+        ] = 60
     elif mutation == "kms_broadened":
         kms = changes[5]["change"]  # type: ignore[index]
         document = json.loads(kms["after"]["policy"])  # type: ignore[index]

@@ -1,21 +1,21 @@
 {
   "schema_version": 1,
   "log_versioning_stage": {
-    "id": "2026-07-log-versioning-enable-v1",
+    "id": "2026-07-log-versioning-attest-v2",
     "enabled": false,
     "expires_at": "2026-08-31T00:00:00Z",
     "buckets": [
       "teamagent-dev-cloudtrail-718959508629",
       "teamagent-dev-bedrock-logs-718959508629"
     ],
-    "allowed_write": "s3:PutBucketVersioning",
+    "allowed_write": "none",
     "required_status_before": [
-      "Unversioned",
       "Enabled"
     ],
     "required_status_after": "Enabled",
     "mfa_delete": "Disabled",
-    "producer_action": "no-op"
+    "producer_action": "active-observation-only",
+    "cutover_mode": "pre-versioned-destination-before-producer-cutover"
   },
   "migrations": {
     "2026-07-wolfi-runtime-v1": {

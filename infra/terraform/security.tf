@@ -247,17 +247,19 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "bedrock_logs" {
   }
 }
 
-# Bedrock invocation payloads are retained only below bedrock/. Current
-# versions expire after 60 days; versioning-created noncurrent versions are
-# also fully deleted after 60 days. A second rule removes expired delete
-# markers that no longer protect any object version. No lifecycle is attached
-# to the CloudTrail bucket: audit logs remain without automatic deletion.
+# Bedrock invocation payloads are retained only below bedrock/. Bedrock writes
+# unique append-only object keys: the current version becomes recoverable
+# noncurrent data after day 59 and is permanently deleted one day later, so
+# current + noncurrent recoverability ends at the approved day-60 boundary.
+# A second rule removes expired delete markers that no longer protect any
+# object version. No lifecycle is attached to the CloudTrail bucket: audit
+# logs remain without automatic deletion.
 resource "aws_s3_bucket_lifecycle_configuration" "bedrock_logs" {
   count  = var.enable_bedrock_invocation_logging ? 1 : 0
   bucket = aws_s3_bucket.bedrock_logs[0].id
 
   rule {
-    id     = "bedrock-current-and-noncurrent-60-days"
+    id     = "bedrock-current-59-noncurrent-1-total-60-days"
     status = "Enabled"
 
     filter {
@@ -265,11 +267,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "bedrock_logs" {
     }
 
     expiration {
-      days = var.bedrock_logs_retention_days
+      days = var.bedrock_logs_retention_days - 1
     }
 
     noncurrent_version_expiration {
-      noncurrent_days = var.bedrock_logs_retention_days
+      noncurrent_days = 1
     }
   }
 

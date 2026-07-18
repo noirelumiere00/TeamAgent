@@ -40,8 +40,9 @@ guard/receiptを「管理者にも強制できる安全境界」とは扱いま�
 - alarm SNSには確認済み配送先がありません。email endpointまたは既存chat integrationの
   どちらか一方を指定しない限りplanは生成されません。AWS providerはemail確認を待てない
   ため、このmigrationはsubscriptionを作りません。emailは先にcanonical topic上で確認を
-  完了し、そのlive endpoint hashをmanifestへ記録してから指定します。chat経路もcanonical
-  topicへ接続済みのexact ARNだけをplan前snapshotで受け付けます。未確認email、未接続chat、
+  完了し、正規化済み`s-komata@vectorinc.co.jp`のexact hashと一致してから指定します。
+  chat経路もcanonical topicへ接続済みのexact ARN 1件かつ`State=ENABLED`だけをplan前
+  snapshotで受け付けます。email/chatの混在、未確認email、未接続・置換・disabled chat、
   endpoint 0件はいずれもruntime変更前に停止します。各confirmed subscriptionは
   `GetSubscriptionAttributes`で再取得し、`PendingConfirmation=false`、email確認済み、
   `FilterPolicy`/`FilterPolicyScope`なしを検証します。さらにunique test messageの実受信を
@@ -55,9 +56,11 @@ TLS未使用通信の明示Denyを追加します。Object LockとMFA Deleteは�
 CloudTrail監査ログにはlifecycleを設定せず、自動削除しません。
 
 Bedrock AI入出力ログは承認済みの `bedrock_logs_retention_days = 60` に固定します。
-lifecycleの対象は`bedrock/` prefixだけです。現行objectは60日後にexpireし、versioningで
-生じた非現行versionも60日後に完全削除し、参照versionが無いexpired delete markerも削除
-します。他prefixやCloudTrail objectはこのlifecycleの対象外です。
+lifecycleの対象は`bedrock/` prefixだけです。Bedrockが生成するappend-onlyの一意object
+keyは59日後にdelete markerで非現行化し、非現行versionを1日後、すなわち生成から合計
+60日の境界で完全削除します。現行60日＋非現行60日という120日保持にはしません。
+参照versionが無いexpired delete markerも削除します。他prefixやCloudTrail objectは
+このlifecycleの対象外で、CloudTrail監査ログには自動削除を設定しません。
 
 Bedrockの実配信先は
 `bedrock/AWSLogs/<account>/BedrockModelInvocationLogs/*`へ固定し、
@@ -69,42 +72,46 @@ S3公式仕様では、bucketで初めてversioningを有効にした後は伝�
 その間のobject PUT/DELETEを避けます。
 https://docs.aws.amazon.com/AmazonS3/latest/userguide/manage-versioning-examples.html
 
-現liveはCloudTrail/Bedrock producerが既に配信中なので、producerをpause/destroyして
-Terraformの部分planを適用する方式は使いません。初回versioning rolloutは次の2段階を
-混在させません。
+現liveはCloudTrail/Bedrock producerが既に配信中です。稼働中destinationをその場で
+UnversionedからEnabledへ変更するcommandは提供しません。新しいdestinationはproducerを
+向ける前にversioningを有効化し、900秒待ってから、別のreview済みfull planでproducerを
+cutoverします。既存producerのdestroy/pauseを「待機」とみなす方式も禁止です。
 
-1. `enable-log-versioning`がexact trusted automation roleと共有lockを要求し、固定された
-   CloudTrail/Bedrockの2 bucketだけへ`Status=Enabled`を書き込む。実行直前と直後にlive、
-   producer、backend key、default workspace、state lineage/serial/address ownershipを
-   再確認し、Git/guard/config hashを結合した原子的receiptを発行する。既にEnabledなら
-   writeは行わず、同じ検査から安全に再開する。
-2. receiptの`enabled_observed_at_epoch`から900秒以上待ち、CloudTrailの最新log+digest、
-   Bedrockの最新delivery、30日化するlog groupのexport/checksum evidenceを確認する。
-   `teamagent-log-rollout-readiness-receipt`へ第1段階receiptのSHA256を記録してから、
-   completeな非targeted runtime migrationへ進む。
+1. 新destinationをproducer未接続の状態で作成・versioning有効化し、900秒以上待つ。
+2. reviewed cutover後、`attest-log-versioning`がexact trusted automation roleと共有lockの
+   下で固定destinationの`Status=Enabled`、CloudTrailの削除lifecycle無し、producer配信先、
+   初期化済みbackend metadata、default workspace、state lineage/serial/address ownershipを
+   読取り、Git/guard/config hashを結合した原子的attestation receiptを発行する。
+   Unversioned/Suspendedなら書き換えずfail closedする。
+3. receiptの`versioning_observed_at_epoch`からさらに900秒以上経過したCloudTrail最新
+   log+digest、Bedrock最新delivery、30日化する5 log groupのexport manifestを、0600の
+   `teamagent-log-readiness-evidence`へ具体的なkey/version/ETag/size/timestampとともに記録
+   する。readiness receiptはevidenceとretention manifestのcanonical path/inode/SHAを束縛し、
+   plan/verify/apply直前に内容とhashを再検証する。
 
 ```bash
-bash ../deploy/terraform_runtime_guard.sh enable-log-versioning \
+bash ../deploy/terraform_runtime_guard.sh attest-log-versioning \
   --out "$ARTIFACT_DIR/log-versioning.json"
 ```
 
-この専用command以外でversioningを先行変更しません。`terraform plan -target`や部分applyは
-禁止です。runtime migrationのfull-root planでTLS deny、Bedrock exact delivery policy/KMS、
+このattestation commandはAWS bucket設定を書きません。`terraform plan -target`や部分applyは
+禁止です。pre-versioned destinationへの非targeted runtime migrationのfull-root planでTLS deny、
+Bedrock exact delivery policy/KMS、
 `bedrock/` 60日lifecycle、5 log groupのimport/30日retentionを収束させます。
 CloudTrailとBedrock producer resourceは`prevent_destroy`で保護し、plan validatorも両者を
 exact `no-op`に固定するため、versioning伝播待ちをproducerの停止で代替できません。
 
 ```bash
-# 900秒経過後、配信時刻とexport/checksumを確認して作る非機微receiptの必須binding:
+# 900秒経過後、secure evidence/export artifactを確認して作るreceiptの必須binding:
 # versioning_receipt_sha256 = sha256(log-versioning.json)
 ```
 
 `enable_cloudtrail_log_delivery=false`と
 `enable_bedrock_invocation_log_delivery=false`は未採用の新規bootstrap前だけの入力です。
 採用済みproducerを擬似的にpauseする用途には使いません。適用は別途承認後だけです。
-現在はlog versioning stageとruntime manifestがともに`enabled=false`で、runtime
-destination digest等も空です。versioning command、migration plan、applyはいずれも
-fail closedし、全writeはNO-GOです。
+現在はlog versioning attestation stageとruntime manifestがともに`enabled=false`で、
+pre-versioned cutover destinationも未承認です。attestation、migration plan、applyは
+いずれもfail closedし、全writeはNO-GOです。
 
 ## Auto-created CodeBuild / Lambda log retention
 
@@ -124,8 +131,11 @@ fail closedし、全writeはNO-GOです。
 
 各resourceは`prevent_destroy`で保護し、`kms_key_id`をignoreするため、既存のKMS関連付けを
 追加・解除しません。migration guardはimport ID、現在のNever Expire、30日への更新、
-KMS不変、その他属性不変をexactに検証します。guardは固定backend key、default workspace、
-state lineage/serial/address-set hashと5 addressのremote ID所有権をreceiptへ結合します。
+KMS不変、その他属性不変をexactに検証します。guardは`.terraform/terraform.tfstate`の
+初期化済みbackend metadataを毎回再読取りし、credential/endpoint/workspace prefix等の
+注入が無いexact S3 bucket/key/region/DynamoDB lock/encrypt設定を正規化hashで束縛します。
+さらにdefault workspace、state lineage/serial、`data.` prefixとmodule/string/numeric
+indexを含む全address-set hash、5 addressのremote ID所有権をreceiptへ結合します。
 runtime migrationでは未importの既存group→exact import+30日update、import済みNever
 Expire→30日update、既に30日→no-opを正規状態として扱うため、部分成功後も安全に再開できます。
 provider planの`tags=null`とprovider defaultを含む`tags_all`だけを受理します。
@@ -258,7 +268,8 @@ rolloutは次の順序を固定し、後段を先行させません。
    用途別secret/T0/table/address/import/lock契約を満たす。
 3. `/app`のexact VersionId/SHA/Vault manifest/build inputs provenanceを固定する。
 4. ingestの実行中taskが0であることと、morning/canaryを含むruntime interfaceを確定する。
-5. exact versioning commandを実行し、900秒待機・配信・export evidenceを作る。
+5. pre-versioned destinationへreview済みcutover後、exact attestationを実行し、追加900秒
+   待機後の配信・secure export evidenceを作る。
 6. 署名済みWolfi/core、OpenClaw、TikTok、x-buzzをFargate preflightし、runtime migrationを
    行う。
 7. service health、SNS実配送、ACL quarantine、canary成功後にactivationだけを行う。

@@ -213,7 +213,7 @@ variable "enable_bedrock_invocation_log_delivery" {
 }
 
 variable "bedrock_logs_retention_days" {
-  description = "Bedrock AI入出力ログのbedrock/ prefixに適用する保持日数。現行版と非現行版を60日後に完全削除する固定契約"
+  description = "Bedrock AI入出力ログのbedrock/ prefixに適用する合計保持日数。append-only objectを59日で非現行化し、1日後（合計60日）に完全削除する固定契約"
   type        = number
   default     = 60
 
