@@ -1,6 +1,6 @@
 """§N: SSRF 中央バリデータ url_guard の単体テスト（非ネットワーク＝resolve 注入）。
 
-これが SSRF 不変条件の第一保証: 部分文字列bypass・接尾辞偽装・IMDS/内部IP・非http(s)・
+これが SSRF 不変条件の第一保証: 部分文字列bypass・接尾辞偽装・IMDS/非global IP・非HTTPS・
 userinfo偽装 を弾き、許可ドメイン（公開IP）は通す。
 """
 
@@ -39,6 +39,8 @@ def _priv(_host: str) -> list[str]:
         "http://10.0.0.5/",  # private
         "file:///etc/passwd",  # 非http(s)スキーム
         "https://tiktok.com@attacker.com/",  # userinfo偽装 → host=attacker.com
+        "https://user@tiktok.com/video/1",  # allowlisted hostでもuserinfoは禁止
+        "https://tiktok.com:444/video/1",  # 非canonical port
         "https://evil.example/video/1",  # 非許可ドメイン
         "ftp://tiktok.com/x",  # 非http(s)
         "",  # 空
@@ -67,6 +69,30 @@ def test_allowlisted_domain_resolving_to_internal_ip_is_blocked() -> None:
     # 許可ドメインでも解決先が内部IPなら拒否（DNS経由SSRF / rebinding一次防御）。
     with pytest.raises(UrlGuardError):
         validate_scrape_url("https://tiktok.com/x", resolve=_priv)
+
+
+@pytest.mark.parametrize(
+    "address",
+    (
+        "100.64.0.1",
+        "127.0.0.1",
+        "169.254.169.254",
+        "192.0.2.1",
+        "198.18.0.1",
+        "224.0.0.1",
+        "255.255.255.255",
+        "::",
+        "::1",
+        "::ffff:127.0.0.1",
+        "2001:db8::1",
+        "fc00::1",
+        "fe80::1",
+        "ff02::1",
+    ),
+)
+def test_allowlisted_domain_rejects_every_non_global_address(address: str) -> None:
+    with pytest.raises(UrlGuardError):
+        validate_scrape_url("https://tiktok.com/x", resolve=lambda _host: [address])
 
 
 def test_host_matches_suffix_only() -> None:

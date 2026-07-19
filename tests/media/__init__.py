@@ -1,0 +1,1 @@
+"""media job contract tests."""

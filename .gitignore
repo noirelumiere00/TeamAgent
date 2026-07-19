@@ -108,6 +108,8 @@ Thumbs.db
 # --- Terraform ---
 .terraform/
 .terraform.lock.hcl
+!infra/terraform/.terraform.lock.hcl
+infra/terraform/provider-mirror/
 *.tfstate
 *.tfstate.*
 *.tfvars

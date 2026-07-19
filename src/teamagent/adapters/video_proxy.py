@@ -11,6 +11,7 @@ CRF を段階的に上げて目標サイズ以下に収める。
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import shutil
 import subprocess
@@ -46,6 +47,19 @@ def ensure_under_limit(
     limit = limit_mb * 1024 * 1024
     if len(data) <= limit:
         return data, mime
+
+    from teamagent.adapters.media_job import MediaJobClient
+
+    if MediaJobClient.is_configured():
+        fingerprint = hashlib.sha256(data).hexdigest()
+        return MediaJobClient().proxy_video(
+            data,
+            mime,
+            request_fingerprint=f"{request_id}:proxy:{fingerprint}",
+            limit_bytes=limit,
+        )
+    if not MediaJobClient.local_runtime_enabled():
+        raise VideoProxyError("VIDEO_MEDIA_JOB_NOT_CONFIGURED")
 
     if not shutil.which("ffmpeg"):
         mb = len(data) / 1024 / 1024
@@ -87,7 +101,23 @@ def make_web_preview(
     `+faststart` 付きなのでブラウザでシーク可能。失敗 / ffmpeg無し / サイズ超過は空文字を返し、
     呼び出し側は静止フレーム表示にフォールバックする。
     """
-    if not data or not shutil.which("ffmpeg"):
+    if not data:
+        return ""
+    from teamagent.adapters.media_job import MediaJobClient
+
+    if MediaJobClient.is_configured():
+        fingerprint = hashlib.sha256(data).hexdigest()
+        preview, _mime = MediaJobClient().proxy_video(
+            data,
+            mime,
+            request_fingerprint=f"{request_id}:preview:{fingerprint}",
+            limit_bytes=max_mb * 1024 * 1024,
+            preview=True,
+        )
+        return "data:video/mp4;base64," + base64.b64encode(preview).decode("ascii")
+    if not MediaJobClient.local_runtime_enabled():
+        raise VideoProxyError("VIDEO_MEDIA_JOB_NOT_CONFIGURED")
+    if not shutil.which("ffmpeg"):
         return ""
     limit = max_mb * 1024 * 1024
     for crf, long_edge in ((30, 480), (33, 360)):

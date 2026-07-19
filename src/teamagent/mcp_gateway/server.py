@@ -357,9 +357,10 @@ async def dispatch_tool(
 
     _progress = await send_progress(name, raw, request_id=ctx.request_id)
     _started = time.perf_counter()
+    skill = spec.instantiate()
     try:
         # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
-        output = await asyncio.to_thread(spec.instantiate().run, skill_input, ctx)
+        output = await asyncio.to_thread(skill.run, skill_input, ctx)
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
     except Exception as e:
         logger.warning(
@@ -369,7 +370,10 @@ async def dispatch_tool(
     finally:
         await clear_progress(_progress, request_id=ctx.request_id)
 
-    data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
+    try:
+        data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
+    finally:
+        skill.cleanup_output(output)
     # ── ミドルウェア(0): usage 計測（v0.3 Task10・常時ON・PII 無し）────────────────
     # 本番主経路（AiLa→MCP）の tool 使用量がどこにも記録されていなかった穴（監査指摘）を
     # まず構造化ログで塞ぐ（CloudWatch Insights で user 単位/tool 単位に集計可能）。
@@ -414,7 +418,7 @@ async def dispatch_run_agent(
 
     身元解決は dispatch_tool と同じ境界（_resolve_metadata）を通す。L1 tool（specs）を
     そのまま SDK に渡す（run_agent 自身は specs に含まれないので再帰しない）。
-    Bedrock/Node CLI を要するライブ実行。例外は構造化エラーで返す（外殻ループを落とさない）。
+    Bedrock を要するライブ実行。例外は構造化エラーで返す（外殻ループを落とさない）。
     """
     raw = arguments.get(USER_CONTEXT_KEY) or {}
     metadata, fail = await _resolve_metadata(
@@ -435,9 +439,8 @@ async def dispatch_run_agent(
     user_email = metadata.get("user_email")
     request_id = f"run-agent-{uuid.uuid4().hex[:12]}"
     try:
-        # 遅延 import: claude_agent_sdk(Node CLI) は重く本番ライブ専用。MCP モジュール import を
-        # 軽く保つため呼び出し時に import する。SDK 未導入環境の ImportError も握って構造化エラー化
-        # する（dispatch の「例外で外殻ループを落とさない」契約を import 失敗でも守る）。
+        # 遅延 import: Bedrock orchestration は本番ライブ専用。MCP モジュール import を
+        # 軽く保ち、依存初期化エラーも構造化して外殻ループを落とさない。
         from teamagent.orchestrator.agent_config import (
             build_orchestrator_system_prompt,
             orchestrator_model_from_env,

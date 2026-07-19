@@ -2,7 +2,7 @@
 # Retired: direct ingest task-definition registration bypassed release evidence.
 set -euo pipefail
 
-if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 usage: register_ingest_td.sh
 

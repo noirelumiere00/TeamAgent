@@ -241,7 +241,8 @@ def test_terraform_uses_a_hard_precondition_not_a_warning_only_check() -> None:
     assert "local.deployment_references_are_digest_only" in body
     assert "local.deployment_contracts_are_ready" in body
     assert "local.deployment_evidence_is_complete" in body
-    assert "tiktok   = var.enable_tiktok_acquire" in body
+    assert 'tiktok = ""' in body
+    assert "tiktok   = false" in body
     assert "!local.deployment_pipeline_enabled[pipeline]" in body
     assert "signed_image_release_gate[0].result.verified" in body
 
@@ -290,7 +291,7 @@ def test_every_discovered_ecs_task_definition_depends_on_release_gate() -> None:
         "fargate.tf:aws_ecs_task_definition.openclaw",
         "ingest_schedule.tf:aws_ecs_task_definition.ingest",
         "morning_digest_schedule.tf:aws_ecs_task_definition.morning_digest",
-        "tiktok_acquire.tf:aws_ecs_task_definition.tiktok_acquire",
+        "tiktok_acquire.tf:aws_ecs_task_definition.media_worker",
         "x_research.tf:aws_ecs_task_definition.x_buzz_worker",
     }
 

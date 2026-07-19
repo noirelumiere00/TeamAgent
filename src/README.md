@@ -6,7 +6,7 @@ TeamAgent v3.0 の Python 実装コードを配置するルート。
 
 ```
 src/
-├── agent/         # Claude Agent SDK の Orchestrator ループ
+├── agent/         # Python Anthropic Bedrock の Orchestrator ループ
 ├── connectors/    # Gmail / Drive / Slack 連携モジュール
 ├── pgvector/      # データ層（DB セッション / Embedding / 検索）
 ├── skills/        # Skill Registry と各 Skill 実装

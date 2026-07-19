@@ -155,6 +155,7 @@ def fetch_one(
             video_url=video_url,
             cover_url=cover_url,
             image_path=str(path),
+            error=error,
         )
         return result, _evidence(placeholder_id, keyword, str(path), cover_url, video_url)
     return (

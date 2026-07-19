@@ -1,0 +1,133 @@
+{
+  "schema_version": "1",
+  "core_image_consumers": {
+    "mcp": {
+      "terraform_resource": "infra/terraform/fargate.tf:aws_ecs_task_definition.mcp",
+      "container_name": "teamagent-mcp",
+      "memory_mib": 4096,
+      "entry_point": [],
+      "command": [
+        "/app/.venv/bin/python",
+        "/app/scripts/run_mcp_vertex_entrypoint.py"
+      ],
+      "health_check": [
+        "CMD",
+        "/app/.venv/bin/python",
+        "-c",
+        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"
+      ],
+      "dynamic_service": "core-health",
+      "expected_exit": null
+    },
+    "connect-web": {
+      "terraform_resource": "infra/terraform/connect_web.tf:aws_ecs_task_definition.connect_web",
+      "container_name": "connect-web",
+      "memory_mib": 1024,
+      "entry_point": [],
+      "command": [
+        "/app/.venv/bin/python",
+        "-m",
+        "teamagent.connect_web"
+      ],
+      "health_check": [
+        "CMD",
+        "/app/.venv/bin/python",
+        "-c",
+        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()"
+      ],
+      "dynamic_service": "connect-health",
+      "expected_exit": null
+    },
+    "canary": {
+      "terraform_resource": "infra/terraform/canary_schedule.tf:aws_ecs_task_definition.canary",
+      "container_name": "canary",
+      "memory_mib": 512,
+      "entry_point": [],
+      "command": [
+        "/app/.venv/bin/python",
+        "/app/scripts/run_canary_health.py"
+      ],
+      "health_check": null,
+      "dynamic_service": "canary-composition",
+      "expected_exit": 1
+    },
+    "ingest": {
+      "terraform_resource": "infra/terraform/ingest_schedule.tf:aws_ecs_task_definition.ingest",
+      "container_name": "ingest",
+      "memory_mib": 4096,
+      "entry_point": [],
+      "command": [
+        "/app/.venv/bin/python",
+        "/app/scripts/run_ingest_fargate.py"
+      ],
+      "health_check": null,
+      "dynamic_service": "ingest-composition",
+      "expected_exit": 2
+    },
+    "morning-digest": {
+      "terraform_resource": "infra/terraform/morning_digest_schedule.tf:aws_ecs_task_definition.morning_digest",
+      "container_name": "morning-digest",
+      "memory_mib": 2048,
+      "entry_point": [],
+      "command": [
+        "/app/.venv/bin/python",
+        "/app/scripts/run_morning_digest_fargate.py"
+      ],
+      "health_check": null,
+      "dynamic_service": "morning-digest-composition",
+      "expected_exit": 0
+    },
+    "x-buzz-worker": {
+      "terraform_resource": "infra/terraform/x_research.tf:aws_ecs_task_definition.x_buzz_worker",
+      "container_name": "worker",
+      "memory_mib": 1024,
+      "entry_point": [],
+      "command": [
+        "/app/.venv/bin/python",
+        "-m",
+        "teamagent.workers.x_buzz_job"
+      ],
+      "health_check": null,
+      "dynamic_service": "x-buzz-composition",
+      "expected_exit": 1
+    }
+  },
+  "media_image_consumers": {
+    "media-worker": {
+      "terraform_resource": "infra/terraform/tiktok_acquire.tf:aws_ecs_task_definition.tiktok_acquire",
+      "container_name": "acquire",
+      "memory_mib": 4096,
+      "entry_point": [
+        "/app/.venv/bin/python",
+        "-m",
+        "teamagent.media.worker"
+      ],
+      "command": [],
+      "health_check": null,
+      "dynamic_service": "media-composition",
+      "expected_exit": 2
+    }
+  },
+  "renderers_and_overrides": {
+    "infra/deploy/deploy_connectweb_unified.sh": {
+      "consumer": "connect-web",
+      "may_override_entry_point_or_command": false
+    },
+    "infra/deploy/register_ingest_td.sh": {
+      "consumer": "ingest",
+      "may_override_entry_point_or_command": false
+    },
+    "scripts/aws/run_ingest_task.sh": {
+      "consumer": "ingest",
+      "may_override_entry_point_or_command": false
+    },
+    "infra/terraform/lambda/x_dispatch/handler.py": {
+      "consumer": "x-buzz-worker",
+      "may_override_entry_point_or_command": false
+    },
+    "infra/terraform/lambda/tiktok_dispatch/handler.py": {
+      "consumer": "media-worker",
+      "may_override_entry_point_or_command": false
+    }
+  }
+}

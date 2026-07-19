@@ -17,6 +17,23 @@
 // ブラウザのログは stderr に出す (stdout は JSON のみ = Python が parse しやすい)。
 
 import puppeteer from "puppeteer-core";
+import {
+  isPublicIp,
+  startDnsPinnedProxy,
+} from "./dns_pinned_proxy.mjs";
+
+const ACQUIRE_HOST_SUFFIXES = Object.freeze([
+  "youtube.com",
+  "youtu.be",
+  "tiktok.com",
+  "instagram.com",
+  "instagr.am",
+]);
+const TIKTOK_HOST_SUFFIXES = ACQUIRE_HOST_SUFFIXES.filter((host) => host === "tiktok.com");
+
+function hostMatches(host, suffixes) {
+  return suffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+}
 
 // ---- 引数パース ----
 function parseArgs(argv) {
@@ -27,8 +44,10 @@ function parseArgs(argv) {
     max: 10,
     url: "", // comments モードの対象動画 URL
     maxComments: 50,
+    maxBytes: 30 * 1024 * 1024,
     out: null,
     headful: false,
+    networkGuardSelfTest: false,
     sessions: 1, // 独立セッション数 (>1 で複数回検索→出現頻度ランク=単発失敗に強くする)
   };
   for (let i = 2; i < argv.length; i++) {
@@ -39,9 +58,11 @@ function parseArgs(argv) {
     else if (k === "--max") a.max = parseInt(argv[++i], 10) || 10;
     else if (k === "--url") a.url = argv[++i];
     else if (k === "--max-comments") a.maxComments = parseInt(argv[++i], 10) || 50;
+    else if (k === "--max-bytes") a.maxBytes = parseInt(argv[++i], 10) || a.maxBytes;
     else if (k === "--out") a.out = argv[++i];
     else if (k === "--sessions") a.sessions = Math.max(1, parseInt(argv[++i], 10) || 1);
     else if (k === "--headful") a.headful = true;
+    else if (k === "--network-guard-self-test") a.networkGuardSelfTest = true;
   }
   return a;
 }
@@ -51,6 +72,102 @@ const log = (...m) => console.error("[tiktok]", ...m); // stderr
 
 // ---- Chrome 実行パス自動検出 (Mac/Linux 両対応) ----
 import fs from "fs";
+
+async function assertPublicHttps(rawUrl, { tiktokOnly = false } = {}) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("invalid network URL");
+  }
+  if (
+    parsed.protocol !== "https:" || parsed.username || parsed.password ||
+    (parsed.port && parsed.port !== "443")
+  ) throw new Error("only canonical HTTPS network URLs are allowed");
+  const host = parsed.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+  if (
+    tiktokOnly &&
+    !hostMatches(host, TIKTOK_HOST_SUFFIXES)
+  ) throw new Error("TikTok URL is outside the allowlist");
+  // DNS resolution and the matching TCP connection are performed atomically
+  // by the mandatory local CONNECT proxy. Chromium never resolves this host.
+  return parsed.toString();
+}
+
+function runNetworkGuardSelfTest() {
+  const allowed = ["8.8.8.8", "2606:4700:4700::1111"];
+  const blocked = [
+    "0.0.0.0",
+    "10.0.0.1",
+    "100.64.0.1",
+    "127.0.0.1",
+    "169.254.169.254",
+    "192.0.2.1",
+    "198.18.0.1",
+    "224.0.0.1",
+    "255.255.255.255",
+    "::",
+    "::1",
+    "::ffff:127.0.0.1",
+    "2001:db8::1",
+    "fc00::1",
+    "fe80::1",
+    "ff02::1",
+  ];
+  if (!allowed.every(isPublicIp) || blocked.some(isPublicIp)) {
+    throw new Error("network guard self-test failed");
+  }
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    allowed,
+    blocked,
+    acquireHostSuffixes: ACQUIRE_HOST_SUFFIXES,
+  }));
+}
+
+function isCanonicalTikTokUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.replace(/\.$/, "").toLowerCase();
+    return (
+      parsed.protocol === "https:" &&
+      !parsed.username &&
+      !parsed.password &&
+      (!parsed.port || parsed.port === "443") &&
+      hostMatches(host, TIKTOK_HOST_SUFFIXES)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function installPageNetworkGuard(page, { blockHeavy = false } = {}) {
+  await page.setRequestInterception(true);
+  page.on("request", async (req) => {
+    try {
+      const url = req.url();
+      if (url.startsWith("data:") || url.startsWith("blob:")) {
+        await req.continue();
+        return;
+      }
+      await assertPublicHttps(url);
+      const resourceType = req.resourceType();
+      if (
+        (blockHeavy && (resourceType === "media" || resourceType === "font")) ||
+        url.includes("google-analytics.com") ||
+        url.includes("googletagmanager.com") ||
+        url.includes("doubleclick.net")
+      ) {
+        await req.abort();
+        return;
+      }
+      await req.continue();
+    } catch {
+      await req.abort().catch(() => {});
+    }
+  });
+}
+
 function findChrome() {
   if (process.env.CHROMIUM_PATH && fs.existsSync(process.env.CHROMIUM_PATH)) {
     return process.env.CHROMIUM_PATH;
@@ -174,16 +291,8 @@ async function searchOnce(browser, query, type, maxVideos) {
       });
     }
 
-    // 不要リソース遮断 (media/font) — 画像は残す (DOM高さ→IntersectionObserver発火に必要)
-    await page.setRequestInterception(true);
-    page.on("request", (req) => {
-      const rt = req.resourceType();
-      const u = req.url();
-      if (rt === "media" || rt === "font") return req.abort();
-      if (u.includes("google-analytics.com") || u.includes("googletagmanager.com") || u.includes("doubleclick.net"))
-        return req.abort();
-      return req.continue();
-    });
+    // 全 browser request を HTTPS + public DNS に制限する。画像は DOM 高さ維持のため許可。
+    await installPageNetworkGuard(page, { blockHeavy: true });
 
     // ネットワーク傍受: 検索 API / challenge API
     page.on("response", async (resp) => {
@@ -304,6 +413,8 @@ async function scrapeComments(browser, videoUrl, maxComments) {
   const seen = new Set();
 
   try {
+    await assertPublicHttps(videoUrl, { tiktokOnly: true });
+    await installPageNetworkGuard(page);
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent(USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]);
     await page.setExtraHTTPHeaders({ "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.7" });
@@ -383,12 +494,14 @@ function collectPlayAddrs(v, arr) {
 // 検索と同一 Chrome session（ブラウザが署名/Cookie/UA/proxy を自前管理）で playAddr を確定し、
 //  (第一) playAddr へ page.goto → response.buffer()  … ナビゲーション＝CORS非該当・最堅牢
 //  (第二) goto 全滅時のみ動画ページに戻って fetch → arrayBuffer  … opaque リスク有の最後の手段
-async function downloadVideoFromUrl(browser, videoUrl, outPath) {
+async function downloadVideoFromUrl(browser, videoUrl, outPath, maxBytes) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
   const playAddrs = [];
   let lastErr = null;
   try {
+    await assertPublicHttps(videoUrl, { tiktokOnly: true });
+    await installPageNetworkGuard(page);
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent(USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]);
     await page.setExtraHTTPHeaders({ "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.7" });
@@ -447,15 +560,35 @@ async function downloadVideoFromUrl(browser, videoUrl, outPath) {
     // TikTok web プレイヤー自身が同じ署名URLを fetch するため、同origin文脈が最も自然に通る。
     // ※媒体URLへ page.goto すると 'load' を待ち続けてハングするため、ナビゲーションは使わない。
     for (const addr of playAddrs) {
-      const got = await page.evaluate(async (u) => {
+      const got = await page.evaluate(async ({ u, byteLimit }) => {
         try {
           const ctrl = new AbortController();
           const t = setTimeout(() => ctrl.abort(), 25000);
           const r = await fetch(u, { credentials: "include", signal: ctrl.signal });
           clearTimeout(t);
           if (!r.ok) return { ok: false, status: r.status };
-          const ab = await r.arrayBuffer();
-          const bytes = new Uint8Array(ab);
+          const declared = Number(r.headers.get("content-length") || 0);
+          if (declared > byteLimit) return { ok: false, error: "size limit exceeded" };
+          if (!r.body) return { ok: false, error: "response body missing" };
+          const reader = r.body.getReader();
+          const chunks = [];
+          let total = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > byteLimit) {
+              await reader.cancel();
+              return { ok: false, error: "size limit exceeded" };
+            }
+            chunks.push(value);
+          }
+          const bytes = new Uint8Array(total);
+          let offset = 0;
+          for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
           let s = "";
           const chunk = 0x8000;
           for (let i = 0; i < bytes.length; i += chunk) {
@@ -465,7 +598,7 @@ async function downloadVideoFromUrl(browser, videoUrl, outPath) {
         } catch (e) {
           return { ok: false, error: String((e && e.message) || e) };
         }
-      }, addr);
+      }, { u: addr, byteLimit: maxBytes });
       if (got && got.ok && got.b64) {
         const cand = Buffer.from(got.b64, "base64");
         if (cand.length > 0) {
@@ -486,9 +619,10 @@ async function downloadVideoFromUrl(browser, videoUrl, outPath) {
       for (const addr of playAddrs) {
         try {
           const resp = await page.goto(addr, { waitUntil: "commit", timeout: 25000 });
-          if (resp && resp.ok()) {
+          const declared = Number(resp?.headers()["content-length"] || 0);
+          if (resp && resp.ok() && declared > 0 && declared <= maxBytes) {
             const b = await resp.buffer();
-            if (b && b.length > 0) {
+            if (b && b.length > 0 && b.length <= maxBytes) {
               buf = b;
               mime = resp.headers()["content-type"] || mime;
               log(`downloaded via page.goto/commit (${b.length} bytes)`);
@@ -513,34 +647,49 @@ async function downloadVideoFromUrl(browser, videoUrl, outPath) {
   }
 }
 
-function buildChromeArgs() {
-  const chromeArgs = [
-    "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-    "--disable-gpu", "--window-size=1280,900", "--lang=ja-JP",
-  ];
-  if (process.env.PROXY_SERVER) {
-    chromeArgs.push(`--proxy-server=${process.env.PROXY_SERVER}`);
-    if (process.env.PROXY_KYC_VERIFIED !== "true") chromeArgs.push("--ignore-certificate-errors");
+function buildChromeArgs(pinnedProxyUrl) {
+  if (!pinnedProxyUrl.startsWith("http://127.0.0.1:")) {
+    throw new Error("DNS-pinned proxy is required");
   }
+  if (
+    process.env.PROXY_SERVER ||
+    process.env.PROXY_USERNAME ||
+    process.env.PROXY_PASSWORD
+  ) {
+    throw new Error("external browser proxy is incompatible with DNS pinning");
+  }
+  const chromeArgs = [
+    "--disable-dev-shm-usage", "--disable-gpu",
+    "--disable-features=AsyncDns",
+    "--disable-quic",
+    "--disable-setuid-sandbox",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--host-resolver-rules=MAP * ~NOTFOUND",
+    "--proxy-bypass-list=<-loopback>",
+    `--proxy-server=${pinnedProxyUrl}`,
+    "--window-size=1280,900", "--lang=ja-JP",
+  ];
   return chromeArgs;
 }
 
 // ---- main: comments モード ----
 async function mainComments() {
   const result = { ok: false, mode: "comments", url: args.url, count: 0, comments: [], error: null };
-  if (!args.url || !args.url.includes("tiktok.com")) {
+  if (!isCanonicalTikTokUrl(args.url)) {
     result.error = "有効な TikTok 動画 URL が必要です (--url)";
     process.stdout.write(JSON.stringify(result));
     process.exit(2);
   }
   let browser;
+  let pinnedProxy;
   try {
     const chrome = findChrome();
     log(`launch chrome: ${chrome} (headless=${!args.headful})`);
+    pinnedProxy = await startDnsPinnedProxy();
     browser = await puppeteer.launch({
       executablePath: chrome,
       headless: !args.headful,
-      args: buildChromeArgs(),
+      args: buildChromeArgs(pinnedProxy.url),
     });
     const comments = await scrapeComments(browser, args.url, args.maxComments);
     result.ok = comments.length > 0;
@@ -554,6 +703,7 @@ async function mainComments() {
     log("ERROR:", result.error);
   } finally {
     if (browser) await browser.close().catch(() => {});
+    if (pinnedProxy) await pinnedProxy.close().catch(() => {});
   }
   const out = JSON.stringify(result);
   if (args.out) fs.writeFileSync(args.out, out);
@@ -569,7 +719,7 @@ async function mainDownload() {
     ok: false, mode: "download", url: args.url,
     savedTo: null, mime: null, bytes: 0, error: null,
   };
-  if (!args.url || !args.url.includes("tiktok.com")) {
+  if (!isCanonicalTikTokUrl(args.url)) {
     result.error = "有効な TikTok 動画 URL が必要です (--url)";
     process.stdout.write(JSON.stringify(result));
     process.exit(2);
@@ -580,15 +730,17 @@ async function mainDownload() {
     process.exit(2);
   }
   let browser;
+  let pinnedProxy;
   try {
     const chrome = findChrome();
     log(`launch chrome: ${chrome} (headless=${!args.headful})`);
+    pinnedProxy = await startDnsPinnedProxy();
     browser = await puppeteer.launch({
       executablePath: chrome,
       headless: !args.headful,
-      args: buildChromeArgs(),
+      args: buildChromeArgs(pinnedProxy.url),
     });
-    const dl = await downloadVideoFromUrl(browser, args.url, args.out);
+    const dl = await downloadVideoFromUrl(browser, args.url, args.out, args.maxBytes);
     result.ok = dl.bytes > 0;
     result.savedTo = dl.savedTo;
     result.mime = dl.mime;
@@ -599,6 +751,7 @@ async function mainDownload() {
     log("ERROR:", result.error);
   } finally {
     if (browser) await browser.close().catch(() => {});
+    if (pinnedProxy) await pinnedProxy.close().catch(() => {});
   }
   process.stdout.write(JSON.stringify(result));
   process.exit(result.ok ? 0 : 2);
@@ -606,6 +759,10 @@ async function mainDownload() {
 
 // ---- main ----
 async function main() {
+  if (args.networkGuardSelfTest) {
+    runNetworkGuardSelfTest();
+    return;
+  }
   if (args.mode === "comments") {
     await mainComments();
     return;
@@ -619,14 +776,16 @@ async function main() {
     process.exit(1);
   }
   let browser;
+  let pinnedProxy;
   const result = { ok: false, query: args.query, type: args.type, count: 0, videos: [], error: null, errorCode: null, diag: null };
   try {
     const chrome = findChrome();
     log(`launch chrome: ${chrome} (headless=${!args.headful}) sessions=${args.sessions}`);
+    pinnedProxy = await startDnsPinnedProxy();
     browser = await puppeteer.launch({
       executablePath: chrome,
       headless: !args.headful,
-      args: buildChromeArgs(),
+      args: buildChromeArgs(pinnedProxy.url),
     });
 
     let videos = [];
@@ -691,6 +850,7 @@ async function main() {
     log("ERROR:", result.error);
   } finally {
     if (browser) await browser.close().catch(() => {});
+    if (pinnedProxy) await pinnedProxy.close().catch(() => {});
   }
   const out = JSON.stringify(result);
   if (args.out) fs.writeFileSync(args.out, out);

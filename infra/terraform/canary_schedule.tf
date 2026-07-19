@@ -195,7 +195,7 @@ resource "aws_ecs_task_definition" "canary" {
   ]
 
   volume {
-    name = "tmp"
+    name = "runtime-tmp"
   }
 
   runtime_platform {
@@ -203,19 +203,11 @@ resource "aws_ecs_task_definition" "canary" {
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
-    name                   = "canary"
-    image                  = var.mcp_image
-    essential              = true
-    user                   = "10001:10001"
-    readonlyRootFilesystem = true
-    linuxParameters = {
-      initProcessEnabled = true
-      capabilities = {
-        drop = ["ALL"]
-      }
-    }
-    command = ["python", "scripts/run_canary_health.py"]
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
+    name      = "canary"
+    image     = var.mcp_image
+    essential = true
+    command   = [local.teamagent_python, "/app/scripts/run_canary_health.py"]
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "HOME", value = "/tmp/home" },
@@ -229,9 +221,6 @@ resource "aws_ecs_task_definition" "canary" {
     secrets = [
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
     ]
-    mountPoints = [
-      { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
-    ]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -241,7 +230,7 @@ resource "aws_ecs_task_definition" "canary" {
       }
     }
     # Scheduled Task なので healthCheck 不要（exit code が成否を語る）
-  }])
+  })])
 
   lifecycle {
     create_before_destroy = true

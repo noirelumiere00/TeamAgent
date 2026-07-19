@@ -1,91 +1,262 @@
 # syntax=docker/dockerfile:1
-# go-live: base は ECR Public ミラー（Docker Hub の匿名 pull rate limit 429 を回避・CodeBuild共有IP対策）。
-# ============================================================
-# TeamAgent-MCP バックエンド（streamable-http・会社共有RLS境界） — ECS Fargate(arm64)
-# ============================================================
-# 役割: OpenClaw外殻から MCP(streamable-http/bearer) でしか触れない「信頼境界の内側」。
-#   creds(Secrets/RDS/Bedrock) を持つのはこのコンテナだけ。scripts/run_mcp_http_server.py を起動。
-# 会社共有モデル(§G): TEAMAGENT_SHARED_COMPANY_DOMAINS 設定で会社メンバーidentity・本人識別不要。
-# 秘密値は焼かない（ECS task の secrets valueFrom で注入）。
-#
-# build:  docker build -f infra/docker/Dockerfile.teamagent-mcp -t teamagent-mcp:local .
-#         （※ DOCKER_BUILDKIT=1 前提。Fargate は linux/arm64 推奨 → --platform linux/arm64）
-# §L: スクレイプ系(tiktok/動画)ツールを使う“拡張版”は --build-arg WITH_SCRAPE_TOOLS=true で
-#     node/chromium/ffmpeg を載せる（既定 false＝P1薄殻イメージは軽量のまま）。
-# ============================================================
+# TeamAgent core runtime. This image intentionally has no media/browser toolchain.
 
-FROM public.ecr.aws/docker/library/python:3.11-slim AS base
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+ARG PYTHON_BUILDER_ARM64_DIGEST=sha256:2eac0b3ef42685b2d45d57633364aaa87ec54bf29960dcf7ecd0eed20e14d124
+ARG PYTHON_RUNTIME_ARM64_DIGEST=sha256:b7fda4f2d99284fe078f751034a0c858676f3456c4d75f1e935527c1951b5ba9
+ARG UV_ARM64_DIGEST=sha256:9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4
+ARG UV_VERSION=0.11.29
+ARG UV_BINARY_SHA256=f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e
+ARG PYTHON_VERSION=3.14.6
+ARG PYTHON_BINARY_SHA256=0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8
+ARG E5_MODEL_REVISION=3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3
+ARG TORCH_VERSION=2.13.0+cpu
+ARG TORCH_ARM64_WHEEL_URL=https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl
+ARG TORCH_ARM64_WHEEL_SHA256=ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c
+ARG BAKED_APP_HTML_SHA256=716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb
+ARG APP_HTML_SOURCE=s3
+ARG APP_HTML_SHA256=03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c
+ARG APP_HTML_VERSION_ID=FTXbcN70D0DCN90TI_hRK1IdQK_HhLee
+ARG APP_HTML_MANIFEST_SHA256=aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e
+ARG APP_HTML_BUILD_INPUTS_SHA256=6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf
+
+FROM ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST} AS uv
+
+FROM cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST} AS builder
+USER 0
 WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
-# 柱4(2026-06-22): ビルド出所追跡（image↔commit）。build時 --build-arg GIT_COMMIT/GIT_BRANCH で注入。
+
+ARG PYTHON_BUILDER_ARM64_DIGEST
+ARG PYTHON_RUNTIME_ARM64_DIGEST
+ARG UV_ARM64_DIGEST
+ARG UV_VERSION
+ARG UV_BINARY_SHA256
+ARG PYTHON_VERSION
+ARG PYTHON_BINARY_SHA256
+ARG E5_MODEL_REVISION
+ARG TORCH_VERSION
+ARG TORCH_ARM64_WHEEL_URL
+ARG TORCH_ARM64_WHEEL_SHA256
+ARG BAKED_APP_HTML_SHA256
+ARG APP_HTML_SOURCE
+ARG APP_HTML_SHA256
+ARG APP_HTML_VERSION_ID
+ARG APP_HTML_MANIFEST_SHA256
+ARG APP_HTML_BUILD_INPUTS_SHA256
+
+COPY --from=uv /uv /usr/bin/uv
+RUN set -eu; \
+    test "$(uv --version)" = "uv ${UV_VERSION} (aarch64-unknown-linux-musl)"; \
+    printf '%s  %s\n' "$UV_BINARY_SHA256" /usr/bin/uv | sha256sum -c -; \
+    test "$(python --version)" = "Python ${PYTHON_VERSION}"; \
+    printf '%s  %s\n' "$PYTHON_BINARY_SHA256" /usr/bin/python3.14 | sha256sum -c -
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_SYSTEM_CERTS=true \
+    HF_HOME=/app/.hf-cache
+
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing=locked \
+    --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    if [ -f /run/secrets/teamagent_ca ]; then \
+      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/teamagent_ca \
+        > /tmp/teamagent-build-ca.pem; \
+      export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
+      export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
+    fi; \
+    torch_lock="url = \"$TORCH_ARM64_WHEEL_URL\", hash = \"sha256:$TORCH_ARM64_WHEEL_SHA256\""; \
+    test "$(grep -F -c "$torch_lock" uv.lock)" -eq 1; \
+    uv sync --frozen --no-dev --no-editable --no-install-project \
+      --extra mcp --extra embeddings; \
+    test "$(/app/.venv/bin/python -c 'import torch; print(torch.__version__)')" = "$TORCH_VERSION"; \
+    rm -f /tmp/teamagent-build-ca.pem
+
+COPY src/ ./src/
+COPY scripts/run_mcp_http_server.py \
+     scripts/run_mcp_vertex_entrypoint.py \
+     scripts/run_canary_health.py \
+     scripts/run_ingest_fargate.py \
+     scripts/ingest_sources.py \
+     scripts/run_morning_digest_fargate.py \
+     ./scripts/
+COPY infra/migrations/ ./infra/migrations/
+COPY data/ ./data/
+RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing=locked \
+    --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    if [ -f /run/secrets/teamagent_ca ]; then \
+      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/teamagent_ca \
+        > /tmp/teamagent-build-ca.pem; \
+      export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
+      export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
+    fi; \
+    torch_lock="url = \"$TORCH_ARM64_WHEEL_URL\", hash = \"sha256:$TORCH_ARM64_WHEEL_SHA256\""; \
+    test "$(grep -F -c "$torch_lock" uv.lock)" -eq 1; \
+    uv sync --frozen --no-dev --no-editable --extra mcp --extra embeddings; \
+    test "$(/app/.venv/bin/python -c 'import torch; print(torch.__version__)')" = "$TORCH_VERSION"; \
+    rm -f /tmp/teamagent-build-ca.pem
+
+# E5 is content-addressed by its upstream 40-hex commit. Both explicit and
+# revision-less offline loads are checked before the runtime layer is produced.
+RUN --mount=type=cache,id=teamagent-huggingface-arm64,target=/root/.cache/huggingface,sharing=locked \
+    --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    case "$E5_MODEL_REVISION" in *[!0-9a-f]*) exit 1 ;; esac; \
+    test "${#E5_MODEL_REVISION}" -eq 40; \
+    if [ -f /run/secrets/teamagent_ca ]; then \
+      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/teamagent_ca \
+        > /tmp/teamagent-build-ca.pem; \
+      export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
+      export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
+    fi; \
+    TEAMAGENT_E5_MODEL_REVISION="$E5_MODEL_REVISION" \
+      /app/.venv/bin/python -c "import os; from huggingface_hub import snapshot_download; snapshot_download(repo_id='intfloat/multilingual-e5-large', revision=os.environ['TEAMAGENT_E5_MODEL_REVISION'], allow_patterns=['1_Pooling/config.json', 'config.json', 'model.safetensors', 'modules.json', 'sentence_bert_config.json', 'sentencepiece.bpe.model', 'special_tokens_map.json', 'tokenizer.json', 'tokenizer_config.json'])"; \
+    model_cache=/app/.hf-cache/hub/models--intfloat--multilingual-e5-large; \
+    snapshot="$model_cache/snapshots/$E5_MODEL_REVISION"; \
+    test -s "$snapshot/model.safetensors"; \
+    mkdir -p "$model_cache/refs"; \
+    printf '%s' "$E5_MODEL_REVISION" > "$model_cache/refs/main"; \
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+      /app/.venv/bin/python -c "import os; from sentence_transformers import SentenceTransformer; revision=os.environ['E5_MODEL_REVISION']; SentenceTransformer('intfloat/multilingual-e5-large', revision=revision, local_files_only=True); SentenceTransformer('intfloat/multilingual-e5-large', local_files_only=True)"; \
+    rm -f /tmp/teamagent-build-ca.pem
+
+# Keep only the shared wire contract on core; operation and worker
+# implementations are copied solely into the media image.
+RUN set -eu; \
+    rm -f /app/src/teamagent/media/operations.py /app/src/teamagent/media/worker.py; \
+    site=/app/.venv/lib/python3.14/site-packages/teamagent/media; \
+    rm -f "$site/operations.py" "$site/worker.py"; \
+    rm -rf "$site/__pycache__"; \
+    /app/.venv/bin/python -c "import importlib.util as i; blocked=('claude_agent_sdk','playwright','yt_dlp','weasyprint','pptx'); assert all(i.find_spec(name) is None for name in blocked); import anthropic, boto3, psycopg, sentence_transformers, teamagent.media.contracts"; \
+    test ! -e /app/tools; \
+    test ! -e /app/.venv/lib/python3.14/site-packages/claude_agent_sdk/_bundled/claude; \
+    test -z "$(find /app -type f \( -name node -o -name bun -o -name npm -o -name npx -o -name chromium -o -name ffmpeg -o -name yt-dlp \) -print -quit)"; \
+    case "$BAKED_APP_HTML_SHA256" in ""|*[!0-9a-f]*) exit 1 ;; esac; \
+    test "${#BAKED_APP_HTML_SHA256}" -eq 64; \
+    printf '%s  %s\n' "$BAKED_APP_HTML_SHA256" /app/src/teamagent/connect_web/static/app.html \
+      | sha256sum -c -; \
+    test "$APP_HTML_SOURCE" = s3; \
+    for digest in "$APP_HTML_SHA256" "$APP_HTML_MANIFEST_SHA256" \
+      "$APP_HTML_BUILD_INPUTS_SHA256"; do \
+      case "$digest" in ""|*[!0-9a-f]*) exit 1 ;; esac; \
+      test "${#digest}" -eq 64; \
+    done; \
+    case "$APP_HTML_VERSION_ID" in ""|*[!A-Za-z0-9._~+/=-]*) exit 1 ;; esac; \
+    install -d -m 0755 /app/provenance; \
+    uv pip freeze --python /app/.venv/bin/python > /app/provenance/python-packages.txt; \
+    printf '%s\n' "$PYTHON_BUILDER_ARM64_DIGEST" > /app/provenance/python-builder-arm64.digest; \
+    printf '%s\n' "$PYTHON_RUNTIME_ARM64_DIGEST" > /app/provenance/python-runtime-arm64.digest; \
+    printf '%s\n' "$UV_ARM64_DIGEST" > /app/provenance/uv-arm64.digest; \
+    printf '%s\n' "$BAKED_APP_HTML_SHA256" > /app/provenance/baked-app-html.sha256; \
+    printf '%s\n' "$APP_HTML_SOURCE" > /app/provenance/prod-app-html.source; \
+    printf '%s\n' "$APP_HTML_SHA256" > /app/provenance/prod-app-html.sha256; \
+    printf '%s\n' "$APP_HTML_VERSION_ID" > /app/provenance/prod-app-html.version-id; \
+    printf '%s\n' "$APP_HTML_MANIFEST_SHA256" > /app/provenance/prod-app-html-manifest.sha256; \
+    printf '%s\n' "$APP_HTML_BUILD_INPUTS_SHA256" \
+      > /app/provenance/prod-app-html-build-inputs.sha256; \
+    install -d -m 0700 -o 10001 -g 10001 \
+      /runtime-tmp/teamagent/home /runtime-tmp/teamagent/tmp \
+      /runtime-tmp/teamagent/cache /runtime-tmp/teamagent/config \
+      /runtime-tmp/teamagent/data /runtime-tmp/teamagent/state \
+      /runtime-tmp/teamagent/jobs; \
+    install -d -m 0755 /runtime-etc; \
+    awk -F: '$1 != "teamagent" && $3 != 10001' /etc/passwd > /runtime-etc/passwd; \
+    printf '%s\n' 'teamagent:x:10001:10001:TeamAgent:/tmp/teamagent/home:/sbin/nologin' \
+      >> /runtime-etc/passwd; \
+    awk -F: '$1 != "teamagent" && $3 != 10001' /etc/group > /runtime-etc/group; \
+    printf '%s\n' 'teamagent:x:10001:' >> /runtime-etc/group
+
+FROM cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST} AS final
+WORKDIR /app
+
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
-ENV TEAMAGENT_BUILD_COMMIT=$GIT_COMMIT TEAMAGENT_BUILD_BRANCH=$GIT_BRANCH
-LABEL org.opencontainers.image.revision=$GIT_COMMIT
+ARG BUILD_CONTEXT_SHA256
+ARG BAKED_APP_HTML_SHA256
+ARG BAKED_APP_HTML_VERSION_ID
+ARG APP_HTML_SOURCE
+ARG APP_HTML_SHA256
+ARG APP_HTML_VERSION_ID
+ARG APP_HTML_MANIFEST_SHA256
+ARG APP_HTML_BUILD_INPUTS_SHA256
+ARG RELEASE_CONTRACT_SHA256
+ARG APP_PROVENANCE_SHA256
+ARG PYTHON_BUILDER_ARM64_DIGEST
+ARG PYTHON_RUNTIME_ARM64_DIGEST
+ARG UV_ARM64_DIGEST
+ARG UV_VERSION
+ARG UV_BINARY_SHA256
+ARG PYTHON_VERSION
+ARG PYTHON_BINARY_SHA256
+ARG E5_MODEL_REVISION
+ARG TORCH_VERSION
+ARG TORCH_ARM64_WHEEL_SHA256
 
-# システム依存: psycopg(libpq)・healthcheck(curl)・一部wheelのビルド
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl libpq5 build-essential \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /runtime-etc/passwd /etc/passwd
+COPY --from=builder /runtime-etc/group /etc/group
+COPY --from=builder --chown=10001:10001 /app/ /app/
+COPY --from=builder --chown=10001:10001 /runtime-tmp/teamagent/ /tmp/teamagent/
 
-# §L: スクレイプ系の実行ランタイム（tiktok_search=Puppeteer/Node・video_*=yt-dlp+ffmpeg）。
-# 既定 false。USE_VIDEO_TOOLS/USE_TIKTOK_TOOLS を ON にする“拡張版”ビルド時のみ載せる。
-ARG WITH_SCRAPE_TOOLS=false
-# fonts-noto-cjk: §Q-HTML→PPTX で playwright が要点スライドを画像化する際の日本語フォント
-# （無いと PNG/PPTX で日本語が豆腐□になる）。chromium は提案PPTXのレンダリングにも使う。
-RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends \
-        nodejs npm chromium ffmpeg fonts-noto-cjk \
-      && rm -rf /var/lib/apt/lists/* ; \
-    fi
-
-# 1) 依存だけ先に解決（lock 駆動・layer cache）。MCP は extra。dev(ruff/mypy/pytest)は除外。
-COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project --extra mcp --extra embeddings
-
-# 2) アプリ本体（src/scripts/migrations のみ。.env や secrets は含めない）
-# README.md は hatchling のプロジェクトbuild（editable install）が必須要求（pyproject:8 readme）。
-COPY README.md ./
-COPY src/ ./src/
-COPY scripts/ ./scripts/
-COPY infra/migrations/ ./infra/migrations/
-# ingest が読む data/ingest_sources.yaml（＋eval gold set）。これが無いと Fargate ingest が
-# "ingest sources yaml not found" で exit 2（従来 data/ は COPY されておらず Scheduled ingest は不発だった）。
-COPY data/ ./data/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra mcp --extra embeddings
-
-
-# §L: tiktok_search の Node スクレイパ（tools/tiktok_scraper）を拡張版のみ同梱＋npm install。
-COPY tools/ ./tools/
-RUN if [ "$WITH_SCRAPE_TOOLS" = "true" ] && [ -f tools/tiktok_scraper/package.json ]; then \
-      npm --prefix tools/tiktok_scraper install --omit=dev ; \
-    fi
-
-# 非root（chown -R /app は巨大レイヤ複製になるため書込み先のみ所有権付与）
-RUN useradd -m -u 10001 mcp && mkdir -p /app/.local_out /app/.hf-cache \
-    && chown mcp:mcp /app/.local_out /app/.hf-cache
-USER mcp
-
-# E5埋め込みモデル(multilingual-e5-large ~2.2GB)を**イメージに焼き込み**（mcpユーザーで取得）。
-# Fargate volume は ephemeral＝毎起動DLだと healthcheck 猶予(~190s)を超え crash-loop するため、
-# build時に取得して起動を決定的にする（go-live実測の教訓）。キャッシュ先=HF_HOME（runtimeも同値）。
-ENV HF_HOME=/app/.hf-cache
-RUN /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-large')"
-
-ENV PATH="/app/.venv/bin:${PATH}" \
+ENV USER=teamagent \
+    LOGNAME=teamagent \
+    HOME=/tmp/teamagent/home \
+    TMPDIR=/tmp/teamagent/tmp \
+    XDG_CACHE_HOME=/tmp/teamagent/cache \
+    XDG_CONFIG_HOME=/tmp/teamagent/config \
+    XDG_DATA_HOME=/tmp/teamagent/data \
+    XDG_STATE_HOME=/tmp/teamagent/state \
+    VIDEO_APPROVAL_STATE_PATH=/tmp/teamagent/state/video_approval_processed.json \
+    MEDIA_JOB_TMP_ROOT=/tmp/teamagent/jobs \
+    PATH=/app/.venv/bin:/usr/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/app/.hf-cache \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    TOKENIZERS_PARALLELISM=false \
+    TEAMAGENT_E5_MODEL_REVISION=$E5_MODEL_REVISION \
+    TEAMAGENT_RUNTIME_KIND=core \
     TEAMAGENT_MCP_HOST=0.0.0.0 \
     TEAMAGENT_MCP_PORT=8787 \
     TEAMAGENT_MCP_PATH=/mcp \
-    AWS_REGION=ap-northeast-1 \
-    TIKTOK_NODE_BIN=node \
-    CHROMIUM_PATH=/usr/bin/chromium
+    AWS_REGION=ap-northeast-1
+
+LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
+      org.opencontainers.image.ref.name="$GIT_BRANCH" \
+      io.teamagent.build.context-sha256="$BUILD_CONTEXT_SHA256" \
+      io.teamagent.build.release-contract-sha256="$RELEASE_CONTRACT_SHA256" \
+      io.teamagent.build.app-provenance-sha256="$APP_PROVENANCE_SHA256" \
+      io.teamagent.runtime.kind="core" \
+      io.teamagent.runtime.uid="10001" \
+      io.teamagent.runtime.gid="10001" \
+      io.teamagent.runtime.volume="/tmp" \
+      io.teamagent.runtime.contract="fargate-readonly-v1" \
+      io.teamagent.contract.python-version="$PYTHON_VERSION" \
+      io.teamagent.contract.python-binary-sha256="$PYTHON_BINARY_SHA256" \
+      io.teamagent.contract.python-builder-arm64-digest="$PYTHON_BUILDER_ARM64_DIGEST" \
+      io.teamagent.contract.python-runtime-arm64-digest="$PYTHON_RUNTIME_ARM64_DIGEST" \
+      io.teamagent.contract.uv-arm64-digest="$UV_ARM64_DIGEST" \
+      io.teamagent.contract.uv-version="$UV_VERSION" \
+      io.teamagent.contract.uv-binary-sha256="$UV_BINARY_SHA256" \
+      io.teamagent.contract.e5-model-revision="$E5_MODEL_REVISION" \
+      io.teamagent.contract.torch-version="$TORCH_VERSION" \
+      io.teamagent.contract.torch-arm64-wheel-sha256="$TORCH_ARM64_WHEEL_SHA256" \
+      io.teamagent.contract.baked-app-html-sha256="$BAKED_APP_HTML_SHA256" \
+      io.teamagent.contract.baked-app-html-version-id="$BAKED_APP_HTML_VERSION_ID" \
+      io.teamagent.contract.app-html-source="$APP_HTML_SOURCE" \
+      io.teamagent.contract.app-html-sha256="$APP_HTML_SHA256" \
+      io.teamagent.contract.app-html-version-id="$APP_HTML_VERSION_ID" \
+      io.teamagent.contract.app-html-manifest-sha256="$APP_HTML_MANIFEST_SHA256" \
+      io.teamagent.contract.app-html-build-inputs-sha256="$APP_HTML_BUILD_INPUTS_SHA256"
+
+USER 10001:10001
+VOLUME ["/tmp"]
 EXPOSE 8787
 
-# /healthz は bearer 不要（run_mcp_http_server.py）。TEAMAGENT_MCP_BEARER 未注入なら起動拒否(exit 2)。
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 --start-period=40s \
-  CMD curl -fsS "http://127.0.0.1:8787/healthz" || exit 1
+  CMD ["/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"]
 
-CMD ["python", "scripts/run_mcp_http_server.py"]
+ENTRYPOINT []
+CMD ["/app/.venv/bin/python", "/app/scripts/run_mcp_http_server.py"]

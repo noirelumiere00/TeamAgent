@@ -182,7 +182,7 @@ resource "aws_ecs_task_definition" "ingest" {
   ]
 
   volume {
-    name = "tmp"
+    name = "runtime-tmp"
   }
 
   runtime_platform {
@@ -190,19 +190,11 @@ resource "aws_ecs_task_definition" "ingest" {
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
-    name                   = "ingest"
-    image                  = var.mcp_image
-    essential              = true
-    user                   = "10001:10001"
-    readonlyRootFilesystem = true
-    linuxParameters = {
-      initProcessEnabled = true
-      capabilities = {
-        drop = ["ALL"]
-      }
-    }
-    command = ["python", "scripts/run_ingest_fargate.py"]
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
+    name      = "ingest"
+    image     = var.mcp_image
+    essential = true
+    command   = [local.teamagent_python, "/app/scripts/run_ingest_fargate.py"]
     environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
       { name = "HOME", value = "/tmp/home" },
@@ -243,9 +235,6 @@ resource "aws_ecs_task_definition" "ingest" {
       { name = "GEMINI_VERTEX_PROJECT", value = var.gemini_vertex_project },
       { name = "GEMINI_VERTEX_LOCATION", value = var.gemini_vertex_location },
     ] : [])
-    mountPoints = [
-      { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
-    ]
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
@@ -262,7 +251,7 @@ resource "aws_ecs_task_definition" "ingest" {
       }
     }
     # Scheduled Task なので long-running ではない・healthCheck 不要（exit code が成否を語る）
-  }])
+  })])
 
   lifecycle {
     create_before_destroy = true

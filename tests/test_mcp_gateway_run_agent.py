@@ -1,6 +1,6 @@
 """Batch C2: L2 オーケストレーター(run_agent) MCP tool の gating / dispatch を検証する。
 
-実 SDK(Bedrock + Node CLI)は呼ばず、run_sdk_agent を monkeypatch して
+実Bedrockは呼ばず、run_sdk_agent を monkeypatch して
 gating(USE_AGENT_ORCHESTRATOR)・RLS fail-closed・入力検証・正常系の payload を固定する。
 """
 

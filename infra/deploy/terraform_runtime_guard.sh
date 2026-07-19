@@ -2191,7 +2191,7 @@ migration_to_file() {
         (.migrations[$id].to.x_buzz_image |
           test("^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/teamagent-mcp@sha256:[0-9a-f]{64}$")) and
         (.migrations[$id].to.tiktok_image |
-          test("^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$")) and
+          test("^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/teamagent-media-worker@sha256:[0-9a-f]{64}$")) and
         (.migrations[$id].from.dispatcher_code_sha256 | keys | sort) ==
           ["tiktok", "x_buzz"] and
         (.migrations[$id].from.dispatcher_code_sha256 |
@@ -3818,9 +3818,11 @@ snapshot_live() {
     die "x-buzz live imageは同一account/regionのteamagent-mcp digestである必要があります"
   [[ "${x_image#*@}" =~ ^sha256:[0-9a-f]{64}$ ]] ||
     die "x-buzz live imageが完全digest pinではありません"
-  local tiktok_repo="${account_id}.dkr.ecr.${REGION}.amazonaws.com/${PROJECT}-${ENVIRONMENT}-tiktok-acquire"
-  [[ "$tiktok_image" == "$tiktok_repo@sha256:"* ]] ||
-    die "TikTok live imageは同一account/regionの専用ECR digestである必要があります"
+  local tiktok_legacy_repo="${account_id}.dkr.ecr.${REGION}.amazonaws.com/${PROJECT}-${ENVIRONMENT}-tiktok-acquire"
+  local media_worker_repo="${account_id}.dkr.ecr.${REGION}.amazonaws.com/teamagent-media-worker"
+  [[ "$tiktok_image" == "$tiktok_legacy_repo@sha256:"* ||
+     "$tiktok_image" == "$media_worker_repo@sha256:"* ]] ||
+    die "media live imageは承認済みlegacyまたはteamagent-media-worker digestである必要があります"
   [[ "${tiktok_image#*@}" =~ ^sha256:[0-9a-f]{64}$ ]] ||
     die "TikTok live imageが完全digest pinではありません"
   local openclaw_image="${account_id}.dkr.ecr.${REGION}.amazonaws.com/teamagent-openclaw"
@@ -4324,16 +4326,16 @@ validate_runtime_task_contracts() {
 
   jq -e \
     --arg mcp_health \
-      "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).read()\"" \
+      "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()" \
     --arg connect_health \
-      "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).read()\"" \
+      "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()" \
     --arg openclaw_health \
       "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
     --slurpfile core "$core" '
     def envmap:
       (.environment // []) | map({key: .name, value: .value}) | from_entries;
     def plain_tmp_volume:
-      .name == "tmp" and
+      (.name == "tmp" or .name == "runtime-tmp") and
       ((.docker_volume_configuration // []) | length) == 0 and
       ((.efs_volume_configuration // []) | length) == 0 and
       ((.fsx_windows_file_server_volume_configuration // []) | length) == 0;
@@ -4346,7 +4348,9 @@ validate_runtime_task_contracts() {
       (($container.linuxParameters.capabilities.add // []) | length) == 0;
     def tmp_mount($container):
       [($container.mountPoints // [])[] |
-        select(.sourceVolume == "tmp" and .containerPath == "/tmp" and
+        select(
+          (.sourceVolume == "tmp" or .sourceVolume == "runtime-tmp") and
+          .containerPath == "/tmp" and
                .readOnly == false)] | length == 1;
     def exact_command($container; $command):
       (($container.entryPoint // []) | length) == 0 and
@@ -4404,7 +4408,7 @@ validate_runtime_task_contracts() {
       {
         address: "aws_ecs_task_definition.tiktok_acquire[0]",
         name: "acquire", image: $core[0].desired_tiktok_image,
-        user: "10001:10001", profile: "tiktok"
+        user: "10001:10001", profile: "media"
       },
       {
         address: "aws_ecs_task_definition.x_buzz_worker[0]",
@@ -4427,7 +4431,7 @@ validate_runtime_task_contracts() {
       (
         if $spec.profile == "openclaw" then
           ($task.volume | length) == 2 and
-          ([$task.volume[] | select(plain_tmp_volume)] | length) == 1 and
+          ([$task.volume[] | select(plain_tmp_volume and .name == "tmp")] | length) == 1 and
           ([$task.volume[] | select(
             .name == "state" and
             (.efs_volume_configuration | length) == 1 and
@@ -4449,29 +4453,30 @@ validate_runtime_task_contracts() {
             40
           ) and
           ($env | has("OPENCLAW_CONFIG_PATH") | not)
-        elif $spec.profile == "tiktok" then
+        elif $spec.profile == "media" then
           ($task.volume | length) == 1 and
-          ($task.volume[0] | plain_tmp_volume) and
-          exact_command($container; ["npx", "tsx", "src/job.ts"]) and
+          ($task.volume[0] | (plain_tmp_volume and .name == "runtime-tmp")) and
+          exact_command($container; []) and
           no_health($container) and
+          $container.stopTimeout == 30 and
           $env.HOME == "/tmp/home" and
           $env.XDG_CACHE_HOME == "/tmp/.cache" and
-          $env.npm_config_cache == "/tmp/.npm" and
-          $env.PUPPETEER_CACHE_DIR == "/tmp/.cache/puppeteer" and
-          $env.PLAYWRIGHT_BROWSERS_PATH == "/opt/pw"
+          $env.PYTHONPYCACHEPREFIX == "/tmp/.pycache" and
+          $env.MEDIA_JOB_BUCKET == "teamagent-dev-media-jobs-718959508629" and
+          $env.MEDIA_JOBS_TABLE == "teamagent-dev-tiktok-acquire-jobs" and
+          $env.MEDIA_ARTIFACT_TTL_SECONDS == "3600" and
+          ($env.MEDIA_BLOCKED_VPC_CIDRS | type) == "string" and
+          ($env.MEDIA_BLOCKED_VPC_CIDRS | length) > 0
         elif $spec.name == "teamagent-mcp" then
           ($task.volume | length) == 1 and
-          ($task.volume[0] | plain_tmp_volume) and
+          ($task.volume[0] | (plain_tmp_volume and .name == "runtime-tmp")) and
           exact_command(
             $container;
-            if $core[0].enable_scrape_tools
-            then ["sh", "scripts/run_mcp_vertex_entrypoint.sh"]
-            else []
-            end
+            ["/app/.venv/bin/python", "/app/scripts/run_mcp_vertex_entrypoint.py"]
           ) and
           exact_health(
             $container;
-            ["CMD-SHELL", $mcp_health];
+            ["CMD", "/app/.venv/bin/python", "-c", $mcp_health];
             40
           ) and
           $env.HOME == "/tmp/home" and
@@ -4479,14 +4484,14 @@ validate_runtime_task_contracts() {
           $env.PYTHONPYCACHEPREFIX == "/tmp/.pycache"
         elif $spec.name == "connect-web" then
           ($task.volume | length) == 1 and
-          ($task.volume[0] | plain_tmp_volume) and
+          ($task.volume[0] | (plain_tmp_volume and .name == "runtime-tmp")) and
           exact_command(
             $container;
-            ["python", "-m", "teamagent.connect_web"]
+            ["/app/.venv/bin/python", "-m", "teamagent.connect_web"]
           ) and
           exact_health(
             $container;
-            ["CMD-SHELL", $connect_health];
+            ["CMD", "/app/.venv/bin/python", "-c", $connect_health];
             30
           ) and
           $env.HOME == "/tmp/home" and
@@ -4494,17 +4499,17 @@ validate_runtime_task_contracts() {
           $env.PYTHONPYCACHEPREFIX == "/tmp/.pycache"
         else
           ($task.volume | length) == 1 and
-          ($task.volume[0] | plain_tmp_volume) and
+          ($task.volume[0] | (plain_tmp_volume and .name == "runtime-tmp")) and
           exact_command(
             $container;
             if $spec.name == "ingest" then
-              ["python", "scripts/run_ingest_fargate.py"]
+              ["/app/.venv/bin/python", "/app/scripts/run_ingest_fargate.py"]
             elif $spec.name == "morning-digest" then
-              ["python", "scripts/run_morning_digest_fargate.py"]
+              ["/app/.venv/bin/python", "/app/scripts/run_morning_digest_fargate.py"]
             elif $spec.name == "canary" then
-              ["python", "scripts/run_canary_health.py"]
+              ["/app/.venv/bin/python", "/app/scripts/run_canary_health.py"]
             elif $spec.name == "worker" then
-              ["python", "-m", "teamagent.workers.x_buzz_job"]
+              ["/app/.venv/bin/python", "-m", "teamagent.workers.x_buzz_job"]
             else error("unknown runtime command contract")
             end
           ) and
@@ -4526,7 +4531,7 @@ validate_runtime_task_contracts() {
     'aws_ecs_task_definition.ingest[0]|ingest|ingest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]' \
     'aws_ecs_task_definition.morning_digest[0]|morning|morning-digest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT"]|["MAIL_ACTION_HMAC_SECRET","MAIL_ACTION_HMAC_PREVIOUS_SECRET"]' \
     'aws_ecs_task_definition.canary[0]|canary|canary|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]' \
-    'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|["HOME","TMPDIR","XDG_CACHE_HOME","npm_config_cache","PUPPETEER_CACHE_DIR","PLAYWRIGHT_BROWSERS_PATH","CHROMIUM_PATH"]|[]' \
+    'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|["AWS_REGION","HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","TIKTOK_S3_BUCKET","TIKTOK_JOBS_TABLE","npm_config_cache","PUPPETEER_CACHE_DIR","PLAYWRIGHT_BROWSERS_PATH","CHROMIUM_PATH","MEDIA_JOB_BUCKET","MEDIA_JOBS_TABLE","MEDIA_ARTIFACT_TTL_SECONDS","MEDIA_BLOCKED_VPC_CIDRS"]|[]' \
     'aws_ecs_task_definition.x_buzz_worker[0]|x_buzz|worker|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]'; do
     IFS='|' read -r address component expected_name allowed_env allowed_secrets <<< "$spec"
     jq -L "$GUARD_JQ_DIR" -e \
@@ -5468,12 +5473,12 @@ validate_log_bucket_hardening_plan() {
     die "CloudTrail/Bedrock log bucketがversioning/TLS/current・noncurrent各60日/KMSとproducer契約を満たしません"
 }
 
-validate_retired_builder_and_admin_noninterference_plan() {
+validate_quarantine_builder_and_admin_noninterference_plan() {
   local plan_json="$1"
   jq -e '
     def resource($address):
       [.resource_changes[] | select(.address == $address)] |
-      if length == 1 then .[0] else error("required retired builder resource missing") end;
+      if length == 1 then .[0] else error("required quarantine builder resource missing") end;
     def converges($change):
       ($change.actions == ["create"] or
        $change.actions == ["update"] or
@@ -5482,36 +5487,97 @@ validate_retired_builder_and_admin_noninterference_plan() {
     def array:
       if type == "array" then . else [.] end;
     resource("aws_codebuild_project.image") as $project |
-    resource("aws_iam_role_policy.codebuild") as $legacy_policy |
-    ($legacy_policy.change.after.policy | fromjson) as $legacy_document |
+    resource("aws_iam_role_policy.codebuild") as $builder_policy |
+    ($builder_policy.change.after.policy | fromjson) as $builder_document |
+    def statement($sid):
+      [$builder_document.Statement[] | select(.Sid == $sid)] |
+      if length == 1 then .[0] else error("required builder policy statement missing") end;
+    def exact_actions($sid; $actions):
+      (statement($sid).Action | array | sort) == ($actions | sort);
+    def exact_resources($sid; $resources):
+      (statement($sid).Resource | array | sort) == ($resources | sort);
     converges($project.change) and
     $project.change.after.name == "teamagent-dev-image-builder" and
     $project.change.after.description ==
-      "RETIRED - mutable source.zip release publishing is denied" and
+      "Build and vulnerability-gate TeamAgent MCP candidate images inside AWS" and
     ($project.change.after.artifacts | length) == 1 and
     $project.change.after.artifacts[0].type == "NO_ARTIFACTS" and
     ($project.change.after.environment | length) == 1 and
-    $project.change.after.environment[0].privileged_mode == false and
+    $project.change.after.environment[0].type == "ARM_CONTAINER" and
+    $project.change.after.environment[0].image ==
+      "aws/codebuild/amazonlinux-aarch64-standard:3.0" and
+    $project.change.after.environment[0].privileged_mode == true and
     ($project.change.after.environment[0].environment_variable // []) == [] and
     ($project.change.after.source | length) == 1 and
-    $project.change.after.source[0].type == "NO_SOURCE" and
-    ($project.change.after.source[0].location // "") == "" and
+    $project.change.after.source[0].type == "S3" and
+    $project.change.after.source[0].location ==
+      "teamagent-dev-raw-files/codebuild/source.zip" and
     ($project.change.after.source[0].buildspec |
-      contains("RETIRED: mutable source.zip image publishing is disabled") and
-      contains("exit 64")) and
-    $project.change.after.logs_config[0].cloudwatch_logs[0].status == "DISABLED" and
-    $project.change.after.logs_config[0].s3_logs[0].status == "DISABLED" and
-    converges($legacy_policy.change) and
-    $legacy_policy.change.after.name == "teamagent-dev-codebuild-image" and
-    ($legacy_document.Statement | length) == 1 and
-    $legacy_document.Statement[0].Sid == "DenyLegacyBuildAwsAccess" and
-    $legacy_document.Statement[0].Effect == "Deny" and
-    ($legacy_document.Statement[0].Resource | array) == ["*"] and
-    ($legacy_document.Statement[0].Action | array | sort) == ([
-      "codebuild:*", "ecr:*", "ecs:*", "iam:PassRole", "lambda:*",
-      "s3:*", "secretsmanager:*", "ssm:*", "ssmmessages:*",
-      "sts:AssumeRole"
-    ] | sort) and
+      contains("release_evidence.py verify-source-declaration") and
+      contains("source_provenance.py verify-source") and
+      contains("teamagent-mcp-quarantine") and
+      contains("teamagent-media-worker-quarantine") and
+      contains("docker buildx build")) and
+    converges($builder_policy.change) and
+    $builder_policy.change.after.name == "teamagent-dev-codebuild-image" and
+    statement("EcrMcpQuarantineWrite").Effect == "Allow" and
+    exact_resources("EcrMcpQuarantineWrite"; [
+      "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-mcp-quarantine",
+      "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-media-worker-quarantine"
+    ]) and
+    exact_actions("EcrMcpQuarantineWrite"; [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+      "ecr:DescribeImages",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:DescribeImageScanFindings"
+    ]) and
+    statement("DenyMcpCandidateAndReleaseWrite").Effect == "Deny" and
+    exact_resources("DenyMcpCandidateAndReleaseWrite"; [
+      "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-mcp-verified-candidates",
+      "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-mcp",
+      "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-media-worker-verified-candidates",
+      "arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-media-worker"
+    ]) and
+    exact_actions("DenyMcpCandidateAndReleaseWrite"; [
+      "ecr:BatchDeleteImage",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:CompleteLayerUpload",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart"
+    ]) and
+    statement("DenyDynamicEnvironmentAndDebugChannels").Effect == "Deny" and
+    exact_resources("DenyDynamicEnvironmentAndDebugChannels"; ["*"]) and
+    exact_actions("DenyDynamicEnvironmentAndDebugChannels"; [
+      "secretsmanager:GetSecretValue",
+      "ssm:GetParameter",
+      "ssm:GetParameters",
+      "ssmmessages:*"
+    ]) and
+    statement("DenySourceEvidenceWritesAndSigning").Effect == "Deny" and
+    exact_resources("DenySourceEvidenceWritesAndSigning"; ["*"]) and
+    exact_actions("DenySourceEvidenceWritesAndSigning"; [
+      "kms:Sign",
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+      "s3:PutObject",
+      "s3:PutObjectRetention"
+    ]) and
+    ([ $builder_document.Statement[] |
+      select(.Effect == "Allow") |
+      (.Action | array)[] |
+      select(
+        startswith("ecs:") or
+        . == "iam:PassRole" or
+        . == "kms:Sign" or
+        startswith("lambda:")
+      )
+    ] | length) == 0 and
     ([.configuration.root_module.resources[]? |
       select(
         .type == "aws_iam_user_policy" or
@@ -5527,7 +5593,7 @@ validate_retired_builder_and_admin_noninterference_plan() {
         )
       )] | length) == 0
   ' "$plan_json" >/dev/null ||
-    die "retired CodeBuild契約またはadministrator IAM非干渉契約を満たしません"
+    die "quarantine-only CodeBuild契約またはadministrator IAM非干渉契約を満たしません"
 }
 
 validate_exact_runtime_iam_plan() {
@@ -5698,7 +5764,7 @@ validate_runtime_migration_plan() {
   validate_alarm_delivery_plan "$plan_json"
   validate_log_bucket_hardening_plan "$plan_json"
   validate_runtime_monitoring_plan "$plan_json"
-  validate_retired_builder_and_admin_noninterference_plan "$plan_json"
+  validate_quarantine_builder_and_admin_noninterference_plan "$plan_json"
   validate_exact_runtime_iam_plan "$plan_json"
 
   jq -e '
@@ -6277,23 +6343,24 @@ run_registered_preflight_task() {
         test "$(id -g)" = 10001
         test "$(awk "/^CapEff:/{print \\$2}" /proc/self/status)" = 0000000000000000
         test "$(stat -c %a /tmp)" = 1777
-        for path in /tmp/home /tmp/.cache /tmp/.npm /tmp/.cache/puppeteer
+        for path in /tmp/home /tmp/.cache /tmp/.pycache
         do
           mkdir -p "$path"
           printf writable > "$path/.teamagent-write-probe"
         done
         printf ok > /tmp/teamagent-preflight
-        command -v npx
+        /app/.venv/bin/python -c "import sys; assert sys.version_info[:2] == (3, 14)"
+        /app/.venv/bin/python -c "import playwright, teamagent.media.worker, yt_dlp"
+        command -v node
         command -v yt-dlp
-        command -v chromium
-        npx --version >/dev/null
-        npx --no-install tsx --version >/dev/null
+        command -v chromium-browser
+        command -v ffmpeg
+        node --version >/dev/null
         yt-dlp --version >/dev/null
         test -x "$CHROMIUM_PATH"
-        test -d "$PLAYWRIGHT_BROWSERS_PATH"
-        find "$PLAYWRIGHT_BROWSERS_PATH" -type f -perm -100 -print -quit \
-          | grep -q .
-        chromium --headless --no-sandbox --disable-gpu \
+        test -f "$TIKTOK_SCRAPER_PATH"
+        node -e "require(\"/app/tools/tiktok_scraper/node_modules/playwright-core\")"
+        chromium-browser --headless --disable-gpu \
           --dump-dom "data:text/html,<title>teamagent-preflight</title>" \
           | grep -q teamagent-preflight
         if touch /teamagent-preflight-root-write 2>/dev/null; then exit 42; fi
@@ -6303,10 +6370,7 @@ run_registered_preflight_task() {
         {"name":"HOME","value":"/tmp/home"},
         {"name":"TMPDIR","value":"/tmp"},
         {"name":"XDG_CACHE_HOME","value":"/tmp/.cache"},
-        {"name":"npm_config_cache","value":"/tmp/.npm"},
-        {"name":"PUPPETEER_CACHE_DIR","value":"/tmp/.cache/puppeteer"},
-        {"name":"PLAYWRIGHT_BROWSERS_PATH","value":"/opt/pw"},
-        {"name":"CHROMIUM_PATH","value":"/usr/bin/chromium"}
+        {"name":"PYTHONPYCACHEPREFIX","value":"/tmp/.pycache"}
       ]'
       ;;
     x_buzz)

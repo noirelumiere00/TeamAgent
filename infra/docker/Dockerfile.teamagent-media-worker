@@ -1,0 +1,365 @@
+# syntax=docker/dockerfile:1
+# TeamAgent one-shot media worker. The final image intentionally contains no
+# core application, E5 model, database client, Slack/OAuth code, or MCP bearer.
+
+ARG CHROMIUM_BASE_ARM64_DIGEST=sha256:ee09ed198c66003a3f15024ca4f8f8613b9a97fdfd0dce8600969fc8a69ecc04
+ARG NODE_BUILDER_ARM64_DIGEST=sha256:eef73a25205e27bd016ce672af71560ad6b681142ddf00ff63c7b3098eafcd4d
+ARG UV_ARM64_DIGEST=sha256:9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4
+
+FROM public.ecr.aws/docker/library/node:24-alpine@${NODE_BUILDER_ARM64_DIGEST} AS js-deps
+USER 0
+WORKDIR /deps
+
+ARG NODE_BUILDER_VERSION=24.18.0
+ARG NODE_BUILDER_BINARY_SHA256=5571248503e947b1cbda6ed55f0b3bb5cb0a5f509c941410e5609f1a9a01f34c
+ARG NPM_VERSION=11.16.0
+ARG NPM_BINARY_SHA256=8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7
+ARG PLAYWRIGHT_VERSION=1.60.0
+ARG PUPPETEER_VERSION=25.3.0
+ARG IPADDR_JS_VERSION=2.2.0
+ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
+ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
+
+RUN set -eu; \
+    test "$(node --version)" = "v${NODE_BUILDER_VERSION}"; \
+    test "$(npm --version)" = "${NPM_VERSION}"; \
+    printf '%s  %s\n' "$NODE_BUILDER_BINARY_SHA256" /usr/local/bin/node | sha256sum -c -; \
+    printf '%s  %s\n' "$NPM_BINARY_SHA256" /usr/local/bin/npm | sha256sum -c -
+
+COPY tools/tiktok_scraper/package.json tools/tiktok_scraper/package-lock.json ./
+RUN --mount=type=cache,id=teamagent-media-npm-arm64,target=/root/.npm,sharing=locked \
+    --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    printf '%s  %s\n' "$TIKTOK_PACKAGE_JSON_SHA256" /deps/package.json | sha256sum -c -; \
+    printf '%s  %s\n' "$TIKTOK_PACKAGE_LOCK_SHA256" /deps/package-lock.json | sha256sum -c -; \
+    if [ -f /run/secrets/teamagent_ca ]; then \
+      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/teamagent_ca \
+        > /tmp/teamagent-build-ca.pem; \
+      export NODE_EXTRA_CA_CERTS=/tmp/teamagent-build-ca.pem; \
+    fi; \
+    npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
+    test "$(node -p "require('playwright-core/package.json').version")" = "$PLAYWRIGHT_VERSION"; \
+    test "$(node -p "require('puppeteer-core/package.json').version")" = "$PUPPETEER_VERSION"; \
+    test "$(node -p "require('ipaddr.js/package.json').version")" = "$IPADDR_JS_VERSION"; \
+    rm -f /tmp/teamagent-build-ca.pem
+
+FROM ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST} AS uv
+
+# Chromium is an official Alpine package in this pinned arm64 child. The
+# upstream child carries SLSA provenance and the full apk database. We retain
+# that database and generate our own final package inventory/SBOM.
+FROM akorn/chromium-headless:150-alpine@${CHROMIUM_BASE_ARM64_DIGEST} AS runtime-packages
+USER 0
+
+ARG ALPINE_EDGE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/edge
+ARG ALPINE_STABLE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/v3.24
+ARG CHROMIUM_PACKAGE_VERSION=150.0.7871.114-r0
+ARG CHROMIUM_VERSION=150.0.7871.114
+ARG CHROMIUM_BINARY_SHA256=13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79
+ARG FFMPEG_PACKAGE_VERSION=8.1.2-r0
+ARG FFMPEG_VERSION=8.1.2
+ARG FFMPEG_BINARY_SHA256=43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba
+ARG NODE_PACKAGE_VERSION=24.18.0-r0
+ARG NODE_VERSION=24.18.0
+ARG NODE_BINARY_SHA256=b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1
+ARG PYTHON_PACKAGE_VERSION=3.14.5-r2
+ARG PYTHON_VERSION=3.14.5
+ARG PYTHON_BINARY_SHA256=95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4
+ARG CA_CERTIFICATES_PACKAGE_VERSION=20260611-r0
+ARG FONT_LIBERATION_PACKAGE_VERSION=2.1.5-r2
+ARG FONT_NOTO_PACKAGE_VERSION=2026.07.01-r0
+ARG FONT_NOTO_CJK_PACKAGE_VERSION=0_git20220127-r1
+ARG FONT_NOTO_EMOJI_PACKAGE_VERSION=2.051-r0
+ARG LIBFLAC_PACKAGE_VERSION=1.4.3-r2
+
+RUN --mount=type=cache,id=teamagent-media-apk-arm64,target=/var/cache/apk,sharing=locked \
+    --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    cat /etc/ssl/certs/ca-certificates.crt > /tmp/teamagent-build-ca.pem; \
+    if [ -f /run/secrets/teamagent_ca ]; then \
+      cat /run/secrets/teamagent_ca >> /tmp/teamagent-build-ca.pem; \
+    fi; \
+    printf '%s/main\n%s/community\n%s/main\n%s/community\n' \
+      "$ALPINE_EDGE_REPOSITORY" "$ALPINE_EDGE_REPOSITORY" \
+      "$ALPINE_STABLE_REPOSITORY" "$ALPINE_STABLE_REPOSITORY" \
+      > /tmp/teamagent-apk-repositories; \
+    SSL_CERT_FILE=/tmp/teamagent-build-ca.pem apk \
+      --cache-dir /var/cache/apk \
+      --cache-max-age 1440 \
+      --repositories-file /tmp/teamagent-apk-repositories \
+      add \
+      "ca-certificates=$CA_CERTIFICATES_PACKAGE_VERSION" \
+      "ffmpeg=$FFMPEG_PACKAGE_VERSION" \
+      "font-liberation=$FONT_LIBERATION_PACKAGE_VERSION" \
+      "font-noto=$FONT_NOTO_PACKAGE_VERSION" \
+      "font-noto-cjk=$FONT_NOTO_CJK_PACKAGE_VERSION" \
+      "font-noto-emoji=$FONT_NOTO_EMOJI_PACKAGE_VERSION" \
+      "libflac=$LIBFLAC_PACKAGE_VERSION" \
+      "nodejs=$NODE_PACKAGE_VERSION" \
+      "python3=$PYTHON_PACKAGE_VERSION"; \
+    test "$(python3 --version)" = "Python $PYTHON_VERSION"; \
+    test "$(node --version)" = "v$NODE_VERSION"; \
+    ffmpeg -version | head -1 | grep -F "ffmpeg version $FFMPEG_VERSION"; \
+    chromium-browser --version | grep -F "Chromium $CHROMIUM_VERSION "; \
+    printf '%s  %s\n' "$PYTHON_BINARY_SHA256" /usr/bin/python3 | sha256sum -c -; \
+    printf '%s  %s\n' "$NODE_BINARY_SHA256" /usr/bin/node | sha256sum -c -; \
+    printf '%s  %s\n' "$FFMPEG_BINARY_SHA256" /usr/bin/ffmpeg | sha256sum -c -; \
+    printf '%s  %s\n' "$CHROMIUM_BINARY_SHA256" /usr/lib/chromium/chromium | sha256sum -c -; \
+    test -s /lib/apk/db/installed; \
+    install -d -m 0755 /usr/share/teamagent/provenance; \
+    cp /tmp/teamagent-apk-repositories \
+      /usr/share/teamagent/provenance/apk-repositories.txt; \
+    apk list --installed | awk '{print $1}' | LC_ALL=C sort \
+      > /usr/share/teamagent/provenance/apk-installed.lock; \
+    sha256sum /usr/bin/python3 /usr/bin/node /usr/bin/ffmpeg \
+      /usr/lib/chromium/chromium \
+      > /usr/share/teamagent/provenance/runtime-binaries.sha256; \
+    rm -f /tmp/teamagent-build-ca.pem /tmp/teamagent-apk-repositories; \
+    addgroup -g 10001 teamagent; \
+    adduser -D -H -h /tmp/teamagent/home -u 10001 -G teamagent teamagent; \
+    chmod 1777 /tmp
+
+FROM runtime-packages AS python-deps
+USER 0
+WORKDIR /app
+
+ARG UV_VERSION=0.11.29
+ARG UV_BINARY_SHA256=f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e
+ARG PLAYWRIGHT_VERSION=1.60.0
+ARG PLAYWRIGHT_PYTHON_ARM64_WHEEL_URL=https://files.pythonhosted.org/packages/84/c2/1528d267d4442bd2c6b8eaeab819dd52c2030bf80e89293f0ba1f687473b/playwright-1.60.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+ARG PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256=43e66564125ee31b07a58cefb21e256d62d67d8d1713e6858df7a3019d8ed353
+ARG YTDLP_VERSION=2026.6.9
+ARG YTDLP_SHAHID_SOURCE_SHA256=f82c1f065f6aa3dd5ce8ee3491d4c49f245d1e7ba921b8cc0cc9c8658a634fbd
+ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b
+ARG YTDLP_SANITIZED_TREE_SHA256=638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b
+ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db
+
+COPY --from=uv /uv /usr/bin/uv
+RUN set -eu; \
+    test "$(uv --version)" = "uv ${UV_VERSION} (aarch64-unknown-linux-musl)"; \
+    printf '%s  %s\n' "$UV_BINARY_SHA256" /usr/bin/uv | sha256sum -c -
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_SYSTEM_CERTS=true
+
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,id=teamagent-media-uv-arm64,target=/root/.cache/uv,sharing=locked \
+    --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    cat /etc/ssl/certs/ca-certificates.crt > /tmp/teamagent-build-ca.pem; \
+    if [ -f /run/secrets/teamagent_ca ]; then \
+      cat /run/secrets/teamagent_ca >> /tmp/teamagent-build-ca.pem; \
+    fi; \
+    export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
+    export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
+    uv sync --frozen --only-group media-runtime --no-install-project \
+      --no-install-package playwright; \
+    rm -f /tmp/teamagent-build-ca.pem
+
+# Playwright publishes a manylinux-tagged arm64 wheel whose Python code is
+# portable but whose bundled Node is glibc-linked. Verify the original wheel,
+# extract it unchanged, then replace only that Node binary with pinned Node 24.
+RUN --mount=type=cache,id=teamagent-media-wheel-arm64,target=/var/cache/teamagent,sharing=locked \
+    --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    wheel=/var/cache/teamagent/playwright-${PLAYWRIGHT_VERSION}-arm64.whl; \
+    cat /etc/ssl/certs/ca-certificates.crt > /tmp/teamagent-build-ca.pem; \
+    if [ -f /run/secrets/teamagent_ca ]; then \
+      cat /run/secrets/teamagent_ca >> /tmp/teamagent-build-ca.pem; \
+    fi; \
+    if [ ! -s "$wheel" ] || ! printf '%s  %s\n' \
+      "$PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; then \
+      rm -f "$wheel"; \
+      SSL_CERT_FILE=/tmp/teamagent-build-ca.pem \
+        PLAYWRIGHT_WHEEL_URL="$PLAYWRIGHT_PYTHON_ARM64_WHEEL_URL" \
+        PLAYWRIGHT_WHEEL="$wheel" \
+        python3 -c "import os, urllib.request; urllib.request.urlretrieve(os.environ['PLAYWRIGHT_WHEEL_URL'], os.environ['PLAYWRIGHT_WHEEL'])"; \
+    fi; \
+    printf '%s  %s\n' "$PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; \
+    rm -rf /tmp/playwright-wheel; \
+    mkdir /tmp/playwright-wheel; \
+    python3 -m zipfile -e "$wheel" /tmp/playwright-wheel; \
+    site=/app/.venv/lib/python3.14/site-packages; \
+    cp -a /tmp/playwright-wheel/playwright "$site/"; \
+    cp -a /tmp/playwright-wheel/playwright-${PLAYWRIGHT_VERSION}.dist-info "$site/"; \
+    driver_node="$site/playwright/driver/node"; \
+    test -f "$driver_node"; \
+    rm "$driver_node"; \
+    ln -s /usr/bin/node "$driver_node"; \
+    test "$(readlink "$driver_node")" = /usr/bin/node; \
+    rm -rf /tmp/playwright-wheel /tmp/teamagent-build-ca.pem; \
+    /app/.venv/bin/python -m compileall -q "$site/playwright"; \
+    test "$(/app/.venv/bin/python -c "import importlib.metadata as m; print(m.version('playwright'))")" = "$PLAYWRIGHT_VERSION"
+
+COPY infra/docker/sanitize_ytdlp.py /tmp/sanitize_ytdlp.py
+RUN set -eu; \
+    printf '%s  %s\n' "$YTDLP_SANITIZER_SHA256" /tmp/sanitize_ytdlp.py | sha256sum -c -; \
+    package_root=/app/.venv/lib/python3.14/site-packages/yt_dlp; \
+    test "$(/app/.venv/bin/python -c "import importlib.metadata as m; print(m.version('yt-dlp'))")" = "$YTDLP_VERSION"; \
+    python3 /tmp/sanitize_ytdlp.py \
+      --package-root "$package_root" \
+      --expected-shahid-sha256 "$YTDLP_SHAHID_SOURCE_SHA256" \
+      --manifest /usr/share/teamagent/provenance/yt-dlp-sanitization.json; \
+    test "$(python3 -c "import json; print(json.load(open('/usr/share/teamagent/provenance/yt-dlp-sanitization.json'))['removed_extractor_set_sha256'])")" = "$YTDLP_REMOVED_EXTRACTOR_SET_SHA256"; \
+    test "$(python3 -c "import json; print(json.load(open('/usr/share/teamagent/provenance/yt-dlp-sanitization.json'))['sanitized_source_tree_sha256'])")" = "$YTDLP_SANITIZED_TREE_SHA256"; \
+    for name in adultswim aenetworks blackboardcollaborate cloudflarestream \
+      espn go nbc shahid tbs vice; do \
+      test ! -e "$package_root/extractor/$name.py"; \
+      test -z "$(find "$package_root" -type f -iname "$name*.pyc" -print -quit)"; \
+    done; \
+    /app/.venv/bin/python -c "from yt_dlp.extractor import list_extractor_classes; names={cls.IE_NAME for cls in list_extractor_classes()}; assert not any('shahid' in name.lower() for name in names); assert {'youtube','TikTok','Instagram'} <= names"; \
+    uv pip freeze --python /app/.venv/bin/python \
+      > /usr/share/teamagent/provenance/python-packages.txt; \
+    rm /tmp/sanitize_ytdlp.py /usr/bin/uv
+
+# Start from scratch so runtime filesystem bytes are retained while inherited
+# image configuration (notably the upstream writable VOLUME /data) is not.
+FROM scratch AS final
+COPY --from=runtime-packages / /
+USER 0
+WORKDIR /app
+
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ARG BUILD_CONTEXT_SHA256
+ARG RELEASE_CONTRACT_SHA256
+ARG APP_PROVENANCE_SHA256
+ARG CHROMIUM_BASE_ARM64_DIGEST
+ARG NODE_BUILDER_ARM64_DIGEST
+ARG UV_ARM64_DIGEST
+ARG CHROMIUM_PACKAGE_VERSION=150.0.7871.114-r0
+ARG CHROMIUM_VERSION=150.0.7871.114
+ARG CHROMIUM_BINARY_SHA256=13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79
+ARG FFMPEG_PACKAGE_VERSION=8.1.2-r0
+ARG FFMPEG_VERSION=8.1.2
+ARG FFMPEG_BINARY_SHA256=43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba
+ARG NODE_PACKAGE_VERSION=24.18.0-r0
+ARG NODE_VERSION=24.18.0
+ARG NODE_BINARY_SHA256=b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1
+ARG PYTHON_PACKAGE_VERSION=3.14.5-r2
+ARG PYTHON_VERSION=3.14.5
+ARG PYTHON_BINARY_SHA256=95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4
+ARG PLAYWRIGHT_VERSION=1.60.0
+ARG IPADDR_JS_VERSION=2.2.0
+ARG PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256=43e66564125ee31b07a58cefb21e256d62d67d8d1713e6858df7a3019d8ed353
+ARG PLAYWRIGHT_CORE_NPM_INTEGRITY=sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==
+ARG YTDLP_VERSION=2026.6.9
+ARG YTDLP_WHEEL_SHA256=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
+ARG YTDLP_SDIST_SHA256=d50fcb95f48d61bedde33e408c1881d4c279e51c31354a599ce09e96ba0f4b86
+ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b
+ARG YTDLP_SANITIZED_TREE_SHA256=638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b
+ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db
+ARG MEDIA_APK_LOCK_SHA256=d3a888e3bfa7e75d2c4c7b6b6dca2a7e0812c1231fdb342e96bb79af9166cca8
+ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
+ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
+ARG TIKTOK_SCRAPER_SHA256=fc18fa1e815bf5879f3ed18c98784ceaec1fed9030724e31d9c742229b2b92d7
+ARG TIKTOK_DNS_PINNED_PROXY_SHA256=d4e8e528f5004fc51b35227a41a4c2721247a50ac907bb12df6faa813e930d9a
+
+COPY infra/docker/media-apk.lock /tmp/media-apk.lock
+RUN set -eu; \
+    printf '%s  %s\n' "$MEDIA_APK_LOCK_SHA256" /tmp/media-apk.lock | sha256sum -c -; \
+    apk list --installed | awk '{print $1}' | LC_ALL=C sort > /tmp/actual-apk.lock; \
+    cmp /tmp/media-apk.lock /tmp/actual-apk.lock; \
+    cp /tmp/media-apk.lock /usr/share/teamagent/provenance/apk-installed.lock; \
+    rm /tmp/media-apk.lock /tmp/actual-apk.lock
+
+COPY --from=python-deps --chown=10001:10001 /app/.venv/ /app/.venv/
+COPY --from=python-deps /usr/share/teamagent/provenance/python-packages.txt \
+  /usr/share/teamagent/provenance/python-packages.txt
+COPY --from=python-deps /usr/share/teamagent/provenance/yt-dlp-sanitization.json \
+  /usr/share/teamagent/provenance/yt-dlp-sanitization.json
+COPY --from=js-deps --chown=10001:10001 /deps/node_modules/ \
+  /app/tools/tiktok_scraper/node_modules/
+COPY --chown=10001:10001 tools/tiktok_scraper/search.mjs \
+  /app/tools/tiktok_scraper/search.mjs
+COPY --chown=10001:10001 tools/tiktok_scraper/dns_pinned_proxy.mjs \
+  /app/tools/tiktok_scraper/dns_pinned_proxy.mjs
+COPY --chown=10001:10001 src/teamagent/media/ /app/src/teamagent/media/
+
+RUN set -eu; \
+    printf '%s  %s\n' "$TIKTOK_SCRAPER_SHA256" /app/tools/tiktok_scraper/search.mjs | sha256sum -c -; \
+    printf '%s  %s\n' "$TIKTOK_DNS_PINNED_PROXY_SHA256" /app/tools/tiktok_scraper/dns_pinned_proxy.mjs | sha256sum -c -; \
+    test "$(python3 -c "import json; print(json.load(open('/usr/share/teamagent/provenance/yt-dlp-sanitization.json'))['removed_extractor_set_sha256'])")" = "$YTDLP_REMOVED_EXTRACTOR_SET_SHA256"; \
+    install -d -m 0755 -o 10001 -g 10001 /app/src/teamagent; \
+    printf '%s\n' "$CHROMIUM_BASE_ARM64_DIGEST" \
+      > /usr/share/teamagent/provenance/chromium-base-arm64.digest; \
+    printf '%s\n' "$NODE_BUILDER_ARM64_DIGEST" \
+      > /usr/share/teamagent/provenance/node-builder-arm64.digest; \
+    printf '%s\n' "$UV_ARM64_DIGEST" \
+      > /usr/share/teamagent/provenance/uv-arm64.digest; \
+    printf '%s\n' "https://github.com/akornatskyy/chromium-headless@04c509a36888b548fa1e88ff30258135ba5a7882" \
+      > /usr/share/teamagent/provenance/chromium-base-source.txt; \
+    PYTHONPATH=/app/src /app/.venv/bin/python -c "import importlib.metadata as m, importlib.util as u; assert m.version('playwright') == '$PLAYWRIGHT_VERSION'; assert m.version('yt-dlp') == '$YTDLP_VERSION'; blocked=('psycopg','sqlalchemy','slack_sdk','google_auth_oauthlib','mcp','sentence_transformers'); assert all(u.find_spec(name) is None for name in blocked); import boto3, teamagent.media.contracts, teamagent.media.operations"; \
+    test "$(node -p "require('/app/tools/tiktok_scraper/node_modules/playwright-core/package.json').version")" = "$PLAYWRIGHT_VERSION"; \
+    test ! -e /app/src/teamagent/mcp_gateway; \
+    test ! -e /app/.hf-cache; \
+    test ! -e /app/src/teamagent/runtime/slack_bot.py; \
+    test -s /lib/apk/db/installed; \
+    chown -R 10001:10001 /app /usr/share/teamagent/provenance
+
+ENV USER=teamagent \
+    LOGNAME=teamagent \
+    HOME=/tmp/teamagent/home \
+    TMPDIR=/tmp/teamagent/tmp \
+    XDG_CACHE_HOME=/tmp/teamagent/cache \
+    XDG_CONFIG_HOME=/tmp/teamagent/config \
+    XDG_DATA_HOME=/tmp/teamagent/data \
+    XDG_STATE_HOME=/tmp/teamagent/state \
+    MEDIA_JOB_TMP_ROOT=/tmp/teamagent/jobs \
+    TEAMAGENT_RUNTIME_KIND=media-worker \
+    PYTHONPATH=/app/src \
+    PATH=/app/.venv/bin:/usr/bin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    CHROMIUM_PATH=/usr/bin/chromium-browser \
+    TIKTOK_NODE_BIN=/usr/bin/node \
+    TIKTOK_SCRAPER_PATH=/app/tools/tiktok_scraper/search.mjs \
+    AWS_REGION=ap-northeast-1
+
+LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
+      org.opencontainers.image.ref.name="$GIT_BRANCH" \
+      io.teamagent.build.context-sha256="$BUILD_CONTEXT_SHA256" \
+      io.teamagent.build.release-contract-sha256="$RELEASE_CONTRACT_SHA256" \
+      io.teamagent.build.app-provenance-sha256="$APP_PROVENANCE_SHA256" \
+      io.teamagent.runtime.kind="media-worker" \
+      io.teamagent.runtime.uid="10001" \
+      io.teamagent.runtime.gid="10001" \
+      io.teamagent.runtime.volume="/tmp" \
+      io.teamagent.runtime.contract="fargate-readonly-v1" \
+      io.teamagent.contract.chromium-base-arm64-digest="$CHROMIUM_BASE_ARM64_DIGEST" \
+      io.teamagent.contract.node-builder-arm64-digest="$NODE_BUILDER_ARM64_DIGEST" \
+      io.teamagent.contract.uv-arm64-digest="$UV_ARM64_DIGEST" \
+      io.teamagent.contract.chromium-package-version="$CHROMIUM_PACKAGE_VERSION" \
+      io.teamagent.contract.chromium-version="$CHROMIUM_VERSION" \
+      io.teamagent.contract.chromium-binary-sha256="$CHROMIUM_BINARY_SHA256" \
+      io.teamagent.contract.ffmpeg-package-version="$FFMPEG_PACKAGE_VERSION" \
+      io.teamagent.contract.ffmpeg-version="$FFMPEG_VERSION" \
+      io.teamagent.contract.ffmpeg-binary-sha256="$FFMPEG_BINARY_SHA256" \
+      io.teamagent.contract.node-package-version="$NODE_PACKAGE_VERSION" \
+      io.teamagent.contract.node-version="$NODE_VERSION" \
+      io.teamagent.contract.node-binary-sha256="$NODE_BINARY_SHA256" \
+      io.teamagent.contract.python-package-version="$PYTHON_PACKAGE_VERSION" \
+      io.teamagent.contract.python-version="$PYTHON_VERSION" \
+      io.teamagent.contract.python-binary-sha256="$PYTHON_BINARY_SHA256" \
+      io.teamagent.contract.playwright-python-version="$PLAYWRIGHT_VERSION" \
+      io.teamagent.contract.playwright-js-version="$PLAYWRIGHT_VERSION" \
+      io.teamagent.contract.ipaddr-js-version="$IPADDR_JS_VERSION" \
+      io.teamagent.contract.playwright-python-wheel-sha256="$PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256" \
+      io.teamagent.contract.playwright-core-npm-integrity="$PLAYWRIGHT_CORE_NPM_INTEGRITY" \
+      io.teamagent.contract.yt-dlp-version="$YTDLP_VERSION" \
+      io.teamagent.contract.yt-dlp-wheel-sha256="$YTDLP_WHEEL_SHA256" \
+      io.teamagent.contract.yt-dlp-sdist-sha256="$YTDLP_SDIST_SHA256" \
+      io.teamagent.contract.yt-dlp-sanitizer-sha256="$YTDLP_SANITIZER_SHA256" \
+      io.teamagent.contract.yt-dlp-removed-extractor-set-sha256="$YTDLP_REMOVED_EXTRACTOR_SET_SHA256" \
+      io.teamagent.contract.yt-dlp-sanitized-tree-sha256="$YTDLP_SANITIZED_TREE_SHA256" \
+      io.teamagent.contract.apk-lock-sha256="$MEDIA_APK_LOCK_SHA256" \
+      io.teamagent.contract.tiktok-package-json-sha256="$TIKTOK_PACKAGE_JSON_SHA256" \
+      io.teamagent.contract.tiktok-package-lock-sha256="$TIKTOK_PACKAGE_LOCK_SHA256" \
+      io.teamagent.contract.tiktok-scraper-sha256="$TIKTOK_SCRAPER_SHA256" \
+      io.teamagent.contract.dns-pinned-proxy-sha256="$TIKTOK_DNS_PINNED_PROXY_SHA256"
+
+USER 10001:10001
+VOLUME ["/tmp"]
+ENTRYPOINT ["/app/.venv/bin/python", "-m", "teamagent.media.worker"]

@@ -29,6 +29,7 @@ def _load_module() -> Any:
 EVIDENCE = _load_module()
 COMMIT = "1" * 40
 CONTRACT_SHA256 = "6" * 64
+BUILD_CONTEXT_SHA256 = "7" * 64
 KEY_ARN = "arn:aws:kms:ap-northeast-1:718959508629:key/12345678-1234-1234-1234-123456789abc"
 NOW = dt.datetime(2026, 7, 17, 6, 0, tzinfo=dt.UTC)
 APP_HTML_VERSION_ID = "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
@@ -144,6 +145,7 @@ def _subject(name: str, *, channel: str) -> dict[str, Any]:
         "io.teamagent.runtime.kind": runtime_kind,
         "io.teamagent.build.release-contract-sha256": CONTRACT_SHA256,
         "io.teamagent.build.app-provenance-sha256": APPLICATION_BINDING,
+        "io.teamagent.build.context-sha256": BUILD_CONTEXT_SHA256,
     }
     if name == "core":
         labels.update(
@@ -177,6 +179,9 @@ def _subject(name: str, *, channel: str) -> dict[str, Any]:
             "actual_image": (
                 f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/{quarantine}@{digest}"
             ),
+            "unknown": 0,
+            "low": 0,
+            "medium": 0,
             "critical": 0,
             "high": 0,
             "secrets": 0,
@@ -234,16 +239,25 @@ def _receipt(*, channel: str = "verified-candidate") -> dict[str, Any]:
 
 
 def test_source_declaration_binds_independent_project_source_version_commit_and_app() -> None:
+    publisher_build_id = "teamagent-dev-mcp-source-publisher:1234"
+    context_key = f"source-contexts/mcp/{COMMIT}/{'4' * 64}/{publisher_build_id}.tar"
     declaration = EVIDENCE.source_declaration(
         project_arn=(
             "arn:aws:codebuild:ap-northeast-1:718959508629:"
             "project/teamagent-dev-mcp-source-publisher"
         ),
-        build_id="teamagent-dev-mcp-source-publisher:1234",
+        build_id=publisher_build_id,
         commit=COMMIT,
         source_version="source-version-1",
         source_sha256="2" * 64,
         manifest_sha256="3" * 64,
+        build_context_key=context_key,
+        build_context_version="context-version-1",
+        build_context_sha256="4" * 64,
+        source_tree_oid="5" * 40,
+        remote_head_oid=COMMIT,
+        remote_base_oid="6" * 40,
+        merge_base_oid="6" * 40,
         app_version=APP_HTML_VERSION_ID,
         app_sha256=APP_HTML_SHA256,
         vault_manifest_sha256=VAULT_MANIFEST_SHA256,
@@ -260,10 +274,13 @@ def test_source_declaration_binds_independent_project_source_version_commit_and_
         expected_vault_manifest_sha256=VAULT_MANIFEST_SHA256,
         expected_build_inputs_sha256=BUILD_INPUTS_SHA256,
         expected_contract_sha256=CONTRACT_SHA256,
+        expected_build_context_sha256="4" * 64,
+        expected_build_context_version="context-version-1",
+        expected_remote_base_oid="6" * 40,
     )
 
     for path, replacement, message in (
-        (("publisher", "commit"), "f" * 40, "source commit mismatch"),
+        (("publisher", "commit"), "f" * 40, "remote head does not bind"),
         (("source", "version_id"), "other-version", "source archive VersionId mismatch"),
         (
             ("app_html", "sha256"),
@@ -280,6 +297,21 @@ def test_source_declaration_binds_independent_project_source_version_commit_and_
             "f" * 64,
             "build_inputs SHA-256 mismatch",
         ),
+        (
+            ("build_context", "canonical_tar_sha256"),
+            "f" * 64,
+            "canonical build context key does not bind",
+        ),
+        (
+            ("build_context", "version_id"),
+            "other-version",
+            "canonical build context VersionId mismatch",
+        ),
+        (
+            ("remote", "base_oid"),
+            "f" * 40,
+            "protected base is not the reviewed merge-base",
+        ),
     ):
         hostile = copy.deepcopy(declaration)
         hostile[path[0]][path[1]] = replacement
@@ -293,6 +325,9 @@ def test_source_declaration_binds_independent_project_source_version_commit_and_
                 expected_vault_manifest_sha256=VAULT_MANIFEST_SHA256,
                 expected_build_inputs_sha256=BUILD_INPUTS_SHA256,
                 expected_contract_sha256=CONTRACT_SHA256,
+                expected_build_context_sha256="4" * 64,
+                expected_build_context_version="context-version-1",
+                expected_remote_base_oid="6" * 40,
             )
 
 
@@ -693,6 +728,10 @@ def _terraform_query(
     return EVIDENCE._terraform_gate(
         {
             "images_json": json.dumps({"mcp": selected_image, "openclaw": "", "tiktok": ""}),
+            "mcp_media_image": (
+                "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+                f"teamagent-media-worker@{MEDIA_DIGEST}"
+            ),
             "evidence_json": json.dumps(
                 {
                     "mcp": {
@@ -935,6 +974,10 @@ def _plan_json(
                                     "openclaw": "",
                                     "tiktok": "",
                                 },
+                                "requested_media_image": (
+                                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+                                    f"teamagent-media-worker@{MEDIA_DIGEST}"
+                                ),
                                 "application_provenance": {
                                     "mcp": APPLICATION,
                                 },
@@ -1021,6 +1064,7 @@ def test_shared_generation_ledger_metadata_is_exact_non_secret_and_context_bound
         contracts={"mcp": CONTRACT_SHA256},
         application={"mcp": APPLICATION},
         shared_generation_ledger=binding,
+        mcp_media_image="",
         intent_id=INTENT_ID,
     )
     second, _, _ = EVIDENCE._deployment_binding(
@@ -1029,6 +1073,7 @@ def test_shared_generation_ledger_metadata_is_exact_non_secret_and_context_bound
         contracts={"mcp": CONTRACT_SHA256},
         application={"mcp": APPLICATION},
         shared_generation_ledger=dict(binding, generation=43),
+        mcp_media_image="",
         intent_id=INTENT_ID,
     )
     assert first != second
@@ -1077,6 +1122,7 @@ def test_receipt_claim_identity_survives_reuploaded_s3_versions() -> None:
         "contracts": {"mcp": CONTRACT_SHA256},
         "application": {"mcp": APPLICATION},
         "shared_generation_ledger": {},
+        "mcp_media_image": "",
         "intent_id": INTENT_ID,
     }
 
@@ -1132,6 +1178,10 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
         contracts=contracts,
         application=application,
         shared_generation_ledger={},
+        mcp_media_image=(
+            "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+            f"teamagent-media-worker@{MEDIA_DIGEST}"
+        ),
         intent_id=INTENT_ID,
     )
     claims_sha256 = hashlib.sha256(EVIDENCE.canonical_bytes(canonical_claims)).hexdigest()
@@ -1144,6 +1194,10 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
     }
     query = {
         "images_json": json.dumps(images),
+        "mcp_media_image": (
+            "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+            f"teamagent-media-worker@{MEDIA_DIGEST}"
+        ),
         "evidence_json": json.dumps(evidence),
         "contracts_json": json.dumps(contracts),
         "contract_ready_json": json.dumps({"mcp": True, "tiktok": True}),

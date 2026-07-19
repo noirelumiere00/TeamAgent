@@ -162,5 +162,5 @@ def test_production_task_definitions_keep_release_inputs_and_never_use_quarantin
         assert "quarantine" not in task_sections.lower(), name
     assert re.search(r"image\s+=\s+var\.mcp_image", bodies["connect_web.tf"])
     assert re.search(r"image\s+=\s+var\.mcp_image", bodies["fargate.tf"])
-    assert re.search(r"image\s+=\s+var\.tiktok_acquire_image", bodies["tiktok_acquire.tf"])
+    assert re.search(r"image\s+=\s+local\.media_worker_image", bodies["tiktok_acquire.tf"])
     assert re.search(r"image\s+=\s+var\.openclaw_image", bodies["fargate.tf"])

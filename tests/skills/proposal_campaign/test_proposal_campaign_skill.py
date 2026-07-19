@@ -6,6 +6,8 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from teamagent.adapters.tiktok_scraper import TikTokScrapeError, TikTokVideo
 from teamagent.skills.base import SkillContext
 from teamagent.skills.proposal_campaign.schema import ProposalCampaignInput
@@ -14,6 +16,13 @@ from teamagent.skills.proposal_campaign.skill import ProposalCampaignSkill
 
 def _ctx(rid: str) -> SkillContext:
     return SkillContext(request_id=rid)
+
+
+@pytest.fixture(autouse=True)
+def _explicit_local_media_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These renderer integration tests intentionally exercise local media deps."""
+
+    monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
 
 
 def test_direct_keywords(
@@ -89,6 +98,64 @@ def test_no_keywords_returns_empty(tmp_path: Path) -> None:
     )
     out = skill.run(ProposalCampaignInput(keywords=[]), _ctx("t5"))
     assert out.total_keywords == 0 and out.evidence_images == {}
+
+
+def test_default_request_directory_is_removed_by_cleanup(
+    mock_searcher: Callable[..., list[TikTokVideo]],
+    mock_fetcher: Callable[..., bytes | None],
+) -> None:
+    skill = ProposalCampaignSkill(
+        searcher=mock_searcher, fetcher=mock_fetcher, normalizer=lambda b: b
+    )
+
+    out = skill.run(ProposalCampaignInput(keywords=["集中"]), _ctx("cleanup-request"))
+
+    image_path = Path(out.evidence_images[58][0].image_path or "")
+    request_dir = image_path.parents[1]
+    assert image_path.is_file()
+    assert request_dir.name.startswith("teamagent-campaign-cleanup-request-")
+
+    skill.cleanup_output(out)
+
+    assert not request_dir.exists()
+    assert skill._temporary_output_dirs == {}
+
+
+def test_request_directory_is_removed_when_render_fails(
+    mock_searcher: Callable[..., list[TikTokVideo]],
+    mock_fetcher: Callable[..., bytes | None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    request_dir = tmp_path / "request-temp"
+
+    def fake_mkdtemp(*, prefix: str) -> str:
+        assert prefix.startswith("teamagent-campaign-")
+        request_dir.mkdir()
+        return str(request_dir)
+
+    monkeypatch.setattr("teamagent.skills.proposal_campaign.skill.tempfile.mkdtemp", fake_mkdtemp)
+    skill = ProposalCampaignSkill(
+        searcher=mock_searcher, fetcher=mock_fetcher, normalizer=lambda b: b
+    )
+    monkeypatch.setattr(
+        skill,
+        "_render",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("render failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        skill.run(
+            ProposalCampaignInput(
+                keywords=["集中"],
+                composer_output_json_path="unused.json",
+                enable_pptx_render=True,
+            ),
+            _ctx("failed-request"),
+        )
+
+    assert not request_dir.exists()
+    assert skill._temporary_output_dirs == {}
 
 
 def test_pptx_render_integration(

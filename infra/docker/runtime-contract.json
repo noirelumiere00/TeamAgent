@@ -1,0 +1,278 @@
+{
+  "schema_version": "1",
+  "architecture": "linux/arm64",
+  "runtime_consumers": "infra/docker/runtime-consumers.json",
+  "security_gates": {
+    "trivy": {
+      "critical_vulnerabilities": 0,
+      "high_vulnerabilities": 0,
+      "secrets": 0,
+      "allow_suppressions": false,
+      "ignore_unfixed": false,
+      "required_absent_live_cves": [
+        "CVE-2026-5450",
+        "CVE-2026-13221",
+        "CVE-2026-12087",
+        "CVE-2026-57433"
+      ],
+      "scanner_receipt_fields": [
+        "scan_started_at",
+        "scan_finished_at",
+        "trivy_version",
+        "vulnerability_db_version",
+        "vulnerability_db_updated_at",
+        "vulnerability_db_downloaded_at",
+        "vulnerability_db_next_update",
+        "secret_check_bundle_digest"
+      ]
+    },
+    "ecr_basic_scan": {
+      "critical_vulnerabilities": 0,
+      "high_vulnerabilities": 0,
+      "required_after_authorized_push": true,
+      "fail_closed_until_complete": true
+    },
+    "release_promotion": {
+      "image_reference": "ecr-digest-only",
+      "release_gate_decision": "ACCEPTED",
+      "release_gate_sha256_required": true,
+      "required_gates": [
+        "local_runtime_evidence",
+        "ecr_basic_scan",
+        "fargate_runtime_smoke"
+      ],
+      "additional_required_gates_allowed": true
+    },
+    "local_evidence": {
+      "credential_scope": "local-source-validation-only-not-release-credential",
+      "source": "exact-git-archive",
+      "build_context": "retained-exact-materialized-context",
+      "source_tree_sha256_required": true,
+      "context_tree_sha256_required": true,
+      "review_base_oid_required": true,
+      "merge_base_oid_required": true,
+      "base_head_change_list_required": true,
+      "supplemental_grype": {
+        "version": "0.112.0",
+        "immutable_image_subject_required": true,
+        "database_status_required": true,
+        "suppressed_findings": 0,
+        "promotion_credential": false
+      },
+      "retained_final_verification": "FINAL_VERIFICATION.json",
+      "final_verification_checks_completed_sha256sums": true
+    }
+  },
+  "media_jobs": {
+    "schema_version": "1",
+    "maximum_envelope_bytes": 131072,
+    "maximum_ecs_override_characters": 8192,
+    "ecs_payload_transport": "dynamodb-job-id-and-payload-sha256-pointer",
+    "idempotency_identity": "semantic-request-sha256-excluding-envelope-timestamps",
+    "deadline_budget": "single-absolute-epoch-propagated-with-remaining-time",
+    "maximum_deadline_seconds": 900,
+    "acquire_host_suffixes": [
+      "youtube.com",
+      "youtu.be",
+      "tiktok.com",
+      "instagram.com",
+      "instagr.am"
+    ],
+    "minimum_artifact_ttl_seconds": 300,
+    "maximum_artifact_ttl_seconds": 21600,
+    "authoritative_cleanup": "owner-version-fenced-scheduled-janitor",
+    "lifecycle_backstop_days": 1,
+    "worker_failure_cleanup_scope": "owned-attempt-only",
+    "synchronous_consumer_deletes_shared_state": false
+  },
+  "tasks": {
+    "teamagent-mcp-core": {
+      "runtime_kind": "core",
+      "image_dockerfile": "infra/docker/Dockerfile.teamagent-mcp",
+      "uid": 10001,
+      "gid": 10001,
+      "read_only_root_filesystem": true,
+      "memory_contract": "per-consumer:infra/docker/runtime-consumers.json",
+      "capabilities_drop": [
+        "ALL"
+      ],
+      "local_compose_no_new_privileges": true,
+      "fargate_no_new_privileges_claimed": false,
+      "writable_mounts": [
+        {
+          "path": "/tmp",
+          "kind": "fresh-named-volume",
+          "mode": "1777"
+        }
+      ],
+      "healthcheck": {
+        "executable": "/app/.venv/bin/python",
+        "implementation": "urllib.request",
+        "url": "http://127.0.0.1:8787/healthz"
+      },
+      "app_html_contract": {
+        "production_source": "s3",
+        "production_sha256": "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
+        "production_s3_version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
+        "production_manifest_sha256": "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
+        "production_build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf",
+        "baked_fallback_sha256": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
+      },
+      "required_content": [
+        "python",
+        "teamagent-core",
+        "multilingual-e5-large",
+        "mcp",
+        "database-clients",
+        "aws-clients",
+        "connect-web-app-html"
+      ],
+      "forbidden_binaries": [
+        "sh",
+        "curl",
+        "node",
+        "npm",
+        "npx",
+        "bun",
+        "chromium",
+        "chromium-browser",
+        "ffmpeg",
+        "ffprobe",
+        "yt-dlp"
+      ],
+      "forbidden_python_modules": [
+        "claude_agent_sdk",
+        "playwright",
+        "yt_dlp",
+        "weasyprint",
+        "pptx"
+      ]
+    },
+    "teamagent-media-worker": {
+      "runtime_kind": "media-worker",
+      "image_dockerfile": "infra/docker/Dockerfile.teamagent-media-worker",
+      "uid": 10001,
+      "gid": 10001,
+      "read_only_root_filesystem": true,
+      "memory_contract": "per-consumer:infra/docker/runtime-consumers.json",
+      "capabilities_drop": [
+        "ALL"
+      ],
+      "capabilities_add": [],
+      "local_compose_no_new_privileges": false,
+      "fargate_no_new_privileges_claimed": false,
+      "chromium_sandbox": {
+        "required": true,
+        "no_sandbox_flag_forbidden": true,
+        "setuid_sandbox_disabled": true,
+        "namespace_sandbox_required": true,
+        "seccomp_profile": "infra/docker/playwright-seccomp-1.60.0.json",
+        "seccomp_profile_source": "https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json",
+        "seccomp_profile_sha256": "77c6753ee88a0db58e43c9235cdd05ab9545bf1f5446a51528e0f328ed872257",
+        "additional_allowed_syscalls": [
+          "chroot",
+          "clone",
+          "setns",
+          "unshare"
+        ],
+        "required_capability": null,
+        "requires_setuid_sandbox": false,
+        "custom_seccomp_is_local_smoke_only": true,
+        "fargate_actual_smoke_required": true,
+        "fargate_fail_closed_until_verified": true
+      },
+      "writable_mounts": [
+        {
+          "path": "/tmp",
+          "kind": "fresh-named-volume",
+          "mode": "1777"
+        }
+      ],
+      "required_content": [
+        "python",
+        "node",
+        "python-playwright",
+        "javascript-playwright",
+        "chromium",
+        "ffmpeg",
+        "sanitized-yt-dlp",
+        "fonts",
+        "teamagent-media-only"
+      ],
+      "yt_dlp_sanitization": {
+        "version": "2026.6.9",
+        "allowlisted_sites": [
+          "youtube",
+          "tiktok",
+          "instagram"
+        ],
+        "removed_secret_bearing_extractors": [
+          "adultswim",
+          "aenetworks",
+          "blackboardcollaborate",
+          "cloudflarestream",
+          "espn",
+          "go",
+          "nbc",
+          "shahid",
+          "tbs",
+          "vice"
+        ],
+        "removed_extractor_set_sha256": "ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b",
+        "sanitizer_sha256": "4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db",
+        "sanitized_source_tree_sha256": "638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b"
+      },
+      "forbidden_python_modules": [
+        "psycopg",
+        "sqlalchemy",
+        "slack_sdk",
+        "google_auth_oauthlib",
+        "mcp",
+        "sentence_transformers"
+      ],
+      "forbidden_environment": [
+        "DATABASE_URL",
+        "SLACK_BOT_TOKEN",
+        "TEAMAGENT_MCP_BEARER",
+        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "VERTEX_CREDENTIALS",
+        "ANTHROPIC_API_KEY"
+      ],
+      "worker_role": {
+        "aws_clients": [
+          "s3",
+          "dynamodb"
+        ],
+        "required_actions": [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+          "dynamodb:UpdateItem",
+          "dynamodb:GetItem"
+        ],
+        "conditional_kms_actions": [
+          "kms:Decrypt",
+          "kms:Encrypt",
+          "kms:GenerateDataKey"
+        ],
+        "forbidden_actions": [
+          "bedrock:*",
+          "rds:*",
+          "rds-db:*",
+          "secretsmanager:*",
+          "ssm:*"
+        ],
+        "forbidden_secret_domains": [
+          "database",
+          "slack",
+          "oauth",
+          "mcp-bearer",
+          "vertex",
+          "e5"
+        ]
+      }
+    }
+  }
+}

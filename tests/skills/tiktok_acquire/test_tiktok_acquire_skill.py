@@ -5,6 +5,7 @@ AWS(SQS/DynamoDB/S3)に触れず、submit投函と status整形の配線を検�
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from teamagent.skills.base import SkillContext
@@ -63,8 +64,9 @@ def test_acquire_submits_and_returns_job_id() -> None:
     assert spec["n_per_kw"] == 30
     assert spec["videos_per_kw"] == 6
     assert spec["sort"] == "save_rate"
-    assert spec["s3_prefix"] == f"tiktok-acquire/{out.job_id}/"
-    assert spec["requested_by"] == "a@vectorinc.co.jp"  # 監査=本人email
+    assert spec["audit_principal_hash"] == hashlib.sha256(b"a@vectorinc.co.jp").hexdigest()
+    assert "requested_by" not in spec
+    assert len(spec["request_fingerprint"]) == 64
     assert spec["client"]["client"] == "セブンイレブン"
     assert spec["client"]["competitors"] == ["ローソン", "ファミマ"]
     assert spec["client"]["industry"] == "コンビニ"

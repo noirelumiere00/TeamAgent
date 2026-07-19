@@ -82,12 +82,15 @@ locals {
   deployment_images = {
     mcp      = var.mcp_image
     openclaw = var.openclaw_image
-    tiktok   = var.enable_tiktok_acquire ? var.tiktok_acquire_image : ""
+    # The generic media worker is a second subject of the signed MCP
+    # core+media receipt. The legacy standalone TikTok release pipeline no
+    # longer authorizes any production task definition.
+    tiktok = ""
   }
   deployment_pipeline_enabled = {
-    mcp      = var.mcp_image != ""
+    mcp      = var.mcp_image != "" || local.media_worker_enabled
     openclaw = var.openclaw_image != ""
-    tiktok   = var.enable_tiktok_acquire
+    tiktok   = false
   }
   deployment_contract_sha256 = {
     mcp      = filesha256("${path.module}/../codebuild/teamagent_core_media_release_contract.json")
@@ -110,6 +113,19 @@ locals {
     openclaw = "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-openclaw@sha256:[0-9a-f]{64}$"
     tiktok   = "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
   }
+  deployment_mcp_media_image = (
+    local.media_worker_enabled ? local.media_worker_image : ""
+  )
+  deployment_mcp_media_reference_is_safe = (
+    !local.media_worker_enabled ||
+    (
+      var.mcp_image != "" &&
+      can(regex(
+        "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-media-worker@sha256:[0-9a-f]{64}$",
+        local.deployment_mcp_media_image,
+      ))
+    )
+  )
   deployment_requested = anytrue(values(local.deployment_pipeline_enabled))
   deployment_intent_is_valid = (
     !local.deployment_requested ||
@@ -154,10 +170,12 @@ locals {
     local.deployment_references_are_digest_only &&
     local.deployment_contracts_are_ready &&
     local.deployment_evidence_is_complete &&
+    local.deployment_mcp_media_reference_is_safe &&
     local.deployment_intent_is_valid
   )
   deployment_gate_query = {
     images_json         = jsonencode(local.deployment_images)
+    mcp_media_image     = local.deployment_mcp_media_image
     evidence_json       = jsonencode(var.image_release_evidence)
     contracts_json      = jsonencode(local.deployment_contract_sha256)
     contract_ready_json = jsonencode(local.deployment_contract_ready)
@@ -194,6 +212,7 @@ resource "terraform_data" "production_image_release_gate" {
     deployment_context_sha256 = try(data.external.signed_image_release_gate[0].result.deployment_context_sha256, "")
     receipt_claims_sha256     = try(data.external.signed_image_release_gate[0].result.receipt_claims_sha256, "")
     requested_images          = local.deployment_images
+    requested_media_image     = local.deployment_mcp_media_image
     application_provenance    = local.deployment_application_provenance
     shared_generation_ledger  = local.deployment_shared_generation_ledger
   }

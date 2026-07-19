@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1
+ARG WOLFI_DIGEST=sha256:5cfa49866436cde0d861a6fb680b712fddb53333ac0abb78b8cffcddaa9b2b77
+FROM chainguard/wolfi-base@${WOLFI_DIGEST}
+
+USER 0
+RUN --mount=type=secret,id=teamagent_ca,required=false \
+    --mount=type=cache,id=teamagent-wolfi-apk-arm64,target=/var/cache/apk,sharing=locked \
+    set -eu; \
+    cp /etc/ssl/certs/ca-certificates.crt /tmp/build-ca.pem; \
+    if [ -f /run/secrets/teamagent_ca ]; then cat /run/secrets/teamagent_ca >> /tmp/build-ca.pem; fi; \
+    printf '%s\n' https://packages.wolfi.dev/os > /tmp/repositories; \
+    SSL_CERT_FILE=/tmp/build-ca.pem apk \
+      --cache-dir /var/cache/apk \
+      --cache-max-age 1440 \
+      --repositories-file /tmp/repositories \
+      add \
+      chromium=149.0.7827.53-r0 \
+      ffmpeg-8.1=8.1.2-r2 \
+      font-liberation=2.1.5-r5 \
+      font-noto-cjk=0.0_git20220127-r2 \
+      font-noto-emoji=2.051-r1 \
+      libgomp=16.1.0-r4 \
+      nodejs-24=24.18.0-r2 \
+      python-3.14=3.14.6-r3; \
+    rm -f /tmp/build-ca.pem /tmp/repositories; \
+    addgroup -g 10001 mcp; \
+    adduser -D -H -h /home/mcp -u 10001 -G mcp mcp; \
+    mkdir -p /app /home/mcp /tmp; \
+    chown -R 10001:10001 /app /home/mcp; \
+    chmod 1777 /tmp; \
+    rm -f /usr/bin/curl /usr/bin/curl-config /usr/bin/systemctl /usr/bin/systemd* \
+      /usr/bin/npm /usr/bin/npx /usr/bin/corepack /usr/bin/pip /usr/bin/pip3 \
+      /usr/bin/pip3.13 /usr/bin/pip3.14 /sbin/apk
+
+ENV HOME=/home/mcp \
+    PATH=/app/.venv/bin:/usr/bin:/bin \
+    CHROMIUM_PATH=/usr/lib/chromium/chromium \
+    TIKTOK_NODE_BIN=/usr/bin/node
+WORKDIR /app
+USER 10001:10001
+ENTRYPOINT ["/usr/bin/python3.14"]

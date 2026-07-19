@@ -307,23 +307,15 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
   }
 
   volume {
-    name = "tmp"
+    name = "runtime-tmp"
   }
 
   container_definitions = jsonencode([
-    {
-      name                   = "worker"
-      image                  = var.x_buzz_image
-      essential              = true
-      user                   = "10001:10001"
-      readonlyRootFilesystem = true
-      linuxParameters = {
-        initProcessEnabled = true
-        capabilities = {
-          drop = ["ALL"]
-        }
-      }
-      command = ["python", "-m", "teamagent.workers.x_buzz_job"]
+    merge(local.teamagent_runtime_container, {
+      name      = "worker"
+      image     = var.x_buzz_image
+      essential = true
+      command   = [local.teamagent_python, "-m", "teamagent.workers.x_buzz_job"]
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
         { name = "X_S3_BUCKET", value = aws_s3_bucket.raw_files.bucket },
@@ -338,9 +330,6 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
       secrets = var.tiktok_apify_secret_arn != "" ? [
         { name = "APIFY_API_TOKEN", valueFrom = var.tiktok_apify_secret_arn }
       ] : []
-      mountPoints = [
-        { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
-      ]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -349,7 +338,7 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
           "awslogs-stream-prefix" = "worker"
         }
       }
-    }
+    })
   ])
 
   lifecycle {

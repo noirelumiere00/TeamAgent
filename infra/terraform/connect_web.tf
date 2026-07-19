@@ -386,7 +386,7 @@ resource "aws_ecs_task_definition" "connect_web" {
   ]
 
   volume {
-    name = "tmp"
+    name = "runtime-tmp"
   }
 
   runtime_platform {
@@ -394,19 +394,11 @@ resource "aws_ecs_task_definition" "connect_web" {
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
-    name                   = "connect-web"
-    image                  = var.mcp_image
-    essential              = true
-    user                   = "10001:10001"
-    readonlyRootFilesystem = true
-    linuxParameters = {
-      initProcessEnabled = true
-      capabilities = {
-        drop = ["ALL"]
-      }
-    }
-    command = ["python", "-m", "teamagent.connect_web"]
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
+    name      = "connect-web"
+    image     = var.mcp_image
+    essential = true
+    command   = [local.teamagent_python, "-m", "teamagent.connect_web"]
     portMappings = [
       { containerPort = 8788, protocol = "tcp" },
     ]
@@ -498,9 +490,6 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "SLACK_OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
     ], local.hmac_connect_secrets)
-    mountPoints = [
-      { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
-    ]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -510,13 +499,13 @@ resource "aws_ecs_task_definition" "connect_web" {
       }
     }
     healthCheck = {
-      command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).read()\""]
+      command     = ["CMD", local.teamagent_python, "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()"]
       interval    = 30
       timeout     = 5
       retries     = 5
       startPeriod = 30
     }
-  }])
+  })])
 
   lifecycle {
     create_before_destroy = true

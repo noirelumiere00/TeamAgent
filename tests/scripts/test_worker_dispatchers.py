@@ -54,11 +54,6 @@ def _load_dispatcher(relative: str, ecs: FakeEcs, ddb: FakeDdb) -> Any:
 
 CASES = [
     (
-        "infra/terraform/lambda/tiktok_dispatch/handler.py",
-        {"job_id": "tk_1", "keywords": ["test"]},
-        "TIKTOK_JOB_JSON",
-    ),
-    (
         "infra/terraform/lambda/x_dispatch/handler.py",
         {"job_id": "x_1", "keyword": "test"},
         "X_JOB_JSON",

@@ -42,12 +42,14 @@
         "APP_PROVENANCE_SHA256",
         "BAKED_APP_HTML_SHA256",
         "BAKED_APP_HTML_VERSION_ID",
+        "BUILD_CONTEXT_SHA256",
         "GIT_BRANCH",
         "GIT_COMMIT",
         "RELEASE_CONTRACT_SHA256"
       ],
       "required_label_bindings": {
         "io.teamagent.build.app-provenance-sha256": "APP_PROVENANCE_SHA256",
+        "io.teamagent.build.context-sha256": "BUILD_CONTEXT_SHA256",
         "io.teamagent.build.release-contract-sha256": "RELEASE_CONTRACT_SHA256",
         "io.teamagent.contract.app-html-build-inputs-sha256": "APP_HTML_BUILD_INPUTS_SHA256",
         "io.teamagent.contract.app-html-manifest-sha256": "APP_HTML_MANIFEST_SHA256",
@@ -82,12 +84,14 @@
       },
       "required_build_args": [
         "APP_PROVENANCE_SHA256",
+        "BUILD_CONTEXT_SHA256",
         "GIT_BRANCH",
         "GIT_COMMIT",
         "RELEASE_CONTRACT_SHA256"
       ],
       "required_label_bindings": {
         "io.teamagent.build.app-provenance-sha256": "APP_PROVENANCE_SHA256",
+        "io.teamagent.build.context-sha256": "BUILD_CONTEXT_SHA256",
         "io.teamagent.build.release-contract-sha256": "RELEASE_CONTRACT_SHA256",
         "io.teamagent.runtime.kind": "media-worker",
         "org.opencontainers.image.ref.name": "GIT_BRANCH",

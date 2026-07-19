@@ -3,8 +3,9 @@
 ingest パイプライン用の純粋関数群。pdf_extract.py と同じ I/F を提供する
 （pipeline 側が ``chunk_pages`` を再利用できるように ``[(page_num, text), ...]`` で返す）。
 
-依存（python-docx / python-pptx / openpyxl）は遅延 import — CI で未インストールでも
-モジュール import は通る。pyproject に依存記載済み（>=1.1.0 / >=1.0.0 / >=3.1.0）。
+DOCX/XLSXの依存（python-docx / openpyxl）は遅延importする。PPTXはcoreから
+python-pptxを除外できるよう、size/relationship/DTD/entity制限付きのbounded
+OOXML parserで必要なtext partだけを読む。描画用python-pptxはmedia extraだけに置く。
 
 Usage:
     from teamagent.ingest.office_extract import extract_office_pages, OFFICE_BINARY_MIMES
@@ -18,10 +19,12 @@ Usage:
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import re
 import zipfile
 from collections.abc import Callable
 from io import BytesIO
+from pathlib import PurePosixPath
 from xml.etree import ElementTree
 from xml.parsers import expat
 
@@ -507,9 +510,17 @@ def _validate_office_payload(
 # xlsx 抽出時に拾うセル数の上限ガード（極端に大きい sheet で OOM 防止）。
 _XLSX_MAX_CELLS_PER_SHEET = 10000
 
-# python-pptx の GROUP shape type 値（MSO_SHAPE_TYPE.GROUP == 6）。
-# 列挙体を import せずに数値で比較する（renderer.py:27-28 と同じ流儀）。
-_GROUP_SHAPE_TYPE = 6
+_PRESENTATION_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+_DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_NS = {
+    "a": _DRAWING_NS,
+    "p": _PRESENTATION_NS,
+    "r": _REL_NS,
+    "pr": _PACKAGE_REL_NS,
+}
+_NOTES_NON_BODY_PLACEHOLDERS = {"dt", "ftr", "hdr", "sldImg", "sldNum"}
 
 
 class _OfficeTextLimitExceededError(ValueError):
@@ -584,50 +595,183 @@ def extract_docx_text(
     return _normalize_text("\n".join(parts))
 
 
-def _collect_shape_text(
-    shapes: object,
+def _xml_root(
+    package: zipfile.ZipFile,
+    member: str,
+    *,
+    progress_callback: Callable[[], None] | None = None,
+) -> ElementTree.Element:
+    """Read and parse one package-local XML part within the validated hard cap."""
+    try:
+        info = package.getinfo(member)
+    except KeyError as exc:
+        raise zipfile.BadZipFile(f"missing OOXML part: {member}") from exc
+    if info.file_size > MAX_OFFICE_XML_MEMBER_BYTES:
+        raise zipfile.BadZipFile(f"OOXML XML part exceeds size limit: {member}")
+    try:
+        raw = _read_zip_member_bounded(
+            package,
+            info,
+            capture_limit=MAX_OFFICE_XML_MEMBER_BYTES,
+            progress_callback=progress_callback,
+        )
+        if raw is None:
+            raise zipfile.BadZipFile(f"OOXML XML part could not be read: {member}")
+        return _parse_bounded_xml(raw, progress_callback=progress_callback)
+    except _OfficeProgressCallbackError:
+        raise
+    except (ElementTree.ParseError, OSError, RuntimeError, ValueError) as exc:
+        raise zipfile.BadZipFile(f"invalid OOXML part: {member}") from exc
+
+
+def _safe_ooxml_target(source: str, target: str) -> str:
+    if (
+        not target
+        or target.startswith("//")
+        or "\\" in target
+        or "\x00" in target
+        or any(marker in target for marker in ("?", "#", "%"))
+        or ":" in target.split("/", 1)[0]
+    ):
+        raise zipfile.BadZipFile("invalid OOXML relationship target")
+    normalized = posixpath.normpath(posixpath.join(posixpath.dirname(source), target))
+    if target.startswith("/"):
+        normalized = posixpath.normpath(target.lstrip("/"))
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or normalized in {"", "."} or ".." in path.parts:
+        raise zipfile.BadZipFile("OOXML relationship escaped package")
+    return path.as_posix()
+
+
+def _relationships(
+    package: zipfile.ZipFile,
+    source: str,
+    *,
+    progress_callback: Callable[[], None] | None = None,
+) -> dict[str, tuple[str, str]]:
+    source_path = PurePosixPath(source)
+    rels = (source_path.parent / "_rels" / f"{source_path.name}.rels").as_posix()
+    if rels not in package.namelist():
+        return {}
+    root = _xml_root(package, rels, progress_callback=progress_callback)
+    output: dict[str, tuple[str, str]] = {}
+    for relation in root.findall("pr:Relationship", _NS):
+        _report_progress(progress_callback)
+        relation_id = relation.get("Id", "")
+        target = relation.get("Target", "")
+        relation_type = relation.get("Type", "")
+        target_mode = relation.get("TargetMode", "")
+        if not relation_id or not target or target_mode.lower() == "external":
+            continue
+        if relation_id in output:
+            raise zipfile.BadZipFile("duplicate OOXML relationship id")
+        output[relation_id] = (_safe_ooxml_target(source, target), relation_type)
+    return output
+
+
+def _append_text_nodes(
+    element: ElementTree.Element,
+    parts: list[str],
+    *,
+    budget: _TextBudget,
+) -> None:
+    for node in element.findall(".//a:t", _NS):
+        if node.text:
+            budget.append(parts, node.text)
+
+
+def _collect_pptx_shapes(
+    parent: ElementTree.Element,
     parts: list[str],
     *,
     include_tables: bool,
     recurse_groups: bool,
     budget: _TextBudget,
 ) -> None:
-    """shape 群を走査して本文テキストを ``parts`` へ追記.
-
-    ``include_tables=True`` のとき ``shape.has_table`` のセル文字列も拾う。
-    ``recurse_groups=True`` のとき group shape（``shape_type ==
-    _GROUP_SHAPE_TYPE``）の子 shape を再帰する。両 flag False のときは
-    従来の非再帰・本文 run のみの挙動と完全一致する。
-    renderer.py:56-73 の walk 実装を参考にした。
-    """
-    for shape in shapes:  # type: ignore[attr-defined]
+    """Append selected top-level/group/table text from one OOXML shape tree."""
+    shape_tag = f"{{{_PRESENTATION_NS}}}sp"
+    group_tag = f"{{{_PRESENTATION_NS}}}grpSp"
+    graphic_tag = f"{{{_PRESENTATION_NS}}}graphicFrame"
+    for child in list(parent):
         _report_progress(budget.progress_callback)
-        # group shape は（要求時のみ）子 shape を再帰
-        if recurse_groups and getattr(shape, "shape_type", None) == _GROUP_SHAPE_TYPE:
-            _collect_shape_text(
-                shape.shapes,
+        if child.tag == shape_tag:
+            _append_text_nodes(child, parts, budget=budget)
+        elif child.tag == group_tag and recurse_groups:
+            _collect_pptx_shapes(
+                child,
                 parts,
                 include_tables=include_tables,
-                recurse_groups=recurse_groups,
+                recurse_groups=True,
                 budget=budget,
             )
+        elif child.tag == graphic_tag and include_tables:
+            table = child.find(".//a:tbl", _NS)
+            if table is not None:
+                _append_text_nodes(table, parts, budget=budget)
+
+
+def _ordered_slide_parts(
+    package: zipfile.ZipFile,
+    *,
+    progress_callback: Callable[[], None] | None = None,
+) -> list[str]:
+    presentation = _xml_root(
+        package,
+        "ppt/presentation.xml",
+        progress_callback=progress_callback,
+    )
+    relationships = _relationships(
+        package,
+        "ppt/presentation.xml",
+        progress_callback=progress_callback,
+    )
+    paths: list[str] = []
+    for slide_id in presentation.findall("./p:sldIdLst/p:sldId", _NS):
+        _report_progress(progress_callback)
+        relation_id = slide_id.get(f"{{{_REL_NS}}}id", "")
+        target = relationships.get(relation_id)
+        if target is None or not target[1].endswith("/slide"):
+            raise zipfile.BadZipFile("presentation slide relationship is missing")
+        if target[0] in paths:
+            raise zipfile.BadZipFile("presentation contains a duplicate slide relationship")
+        paths.append(target[0])
+    return paths
+
+
+def _append_notes_text(
+    package: zipfile.ZipFile,
+    slide_path: str,
+    parts: list[str],
+    *,
+    budget: _TextBudget,
+) -> None:
+    relationships = _relationships(
+        package,
+        slide_path,
+        progress_callback=budget.progress_callback,
+    )
+    notes_path = next(
+        (
+            target
+            for target, relation_type in relationships.values()
+            if relation_type.endswith("/notesSlide")
+        ),
+        None,
+    )
+    if notes_path is None:
+        return
+    root = _xml_root(
+        package,
+        notes_path,
+        progress_callback=budget.progress_callback,
+    )
+    for shape in root.findall("./p:cSld/p:spTree/p:sp", _NS):
+        _report_progress(budget.progress_callback)
+        placeholder = shape.find("./p:nvSpPr/p:nvPr/p:ph", _NS)
+        placeholder_type = placeholder.get("type", "") if placeholder is not None else ""
+        if placeholder_type in _NOTES_NON_BODY_PLACEHOLDERS:
             continue
-        # 表セル（include_tables のときだけ）
-        if include_tables and getattr(shape, "has_table", False):
-            for row in shape.table.rows:
-                _report_progress(budget.progress_callback)
-                for cell in row.cells:
-                    _report_progress(budget.progress_callback)
-                    if cell.text:
-                        budget.append(parts, cell.text)
-            continue
-        if getattr(shape, "has_text_frame", False):
-            for para in shape.text_frame.paragraphs:
-                for run in para.runs:
-                    if run.text:
-                        budget.append(parts, run.text)
-        elif hasattr(shape, "text") and getattr(shape, "text", None):
-            budget.append(parts, shape.text)
+        _append_text_nodes(shape, parts, budget=budget)
 
 
 def extract_pptx_pages(
@@ -646,33 +790,48 @@ def extract_pptx_pages(
     いずれかの flag が True のときだけ group shape を再帰し、子 shape の
     テキスト/表も拾う（従来は group 配下を取りこぼしていた）。
     """
-    from pptx import Presentation  # python-pptx（lazy import）
-
-    # 拡張要求があるときだけ group を再帰（既定は従来の非再帰挙動を維持）
     recurse_groups = include_notes or include_tables
-
-    _report_progress(progress_callback)
-    prs = Presentation(BytesIO(data))
     _report_progress(progress_callback)
     budget = _TextBudget(max_chars, progress_callback)
     out: list[tuple[int, str]] = []
-    for i, slide in enumerate(prs.slides, start=1):
-        parts: list[str] = []
-        _collect_shape_text(
-            slide.shapes,
-            parts,
-            include_tables=include_tables,
-            recurse_groups=recurse_groups,
-            budget=budget,
-        )
-        if include_notes and slide.has_notes_slide:
-            notes = slide.notes_slide
-            notes_tf = getattr(notes, "notes_text_frame", None)
-            if notes_tf is not None and notes_tf.text:
-                budget.append(parts, notes_tf.text)
-        text = _normalize_text("\n".join(parts))
-        if text:
-            out.append((i, text))
+    try:
+        with zipfile.ZipFile(BytesIO(data)) as package:
+            for index, slide_path in enumerate(
+                _ordered_slide_parts(package, progress_callback=progress_callback),
+                start=1,
+            ):
+                _report_progress(progress_callback)
+                slide = _xml_root(
+                    package,
+                    slide_path,
+                    progress_callback=progress_callback,
+                )
+                shape_tree = slide.find("./p:cSld/p:spTree", _NS)
+                parts: list[str] = []
+                if shape_tree is not None:
+                    _collect_pptx_shapes(
+                        shape_tree,
+                        parts,
+                        include_tables=include_tables,
+                        recurse_groups=recurse_groups,
+                        budget=budget,
+                    )
+                if include_notes:
+                    _append_notes_text(
+                        package,
+                        slide_path,
+                        parts,
+                        budget=budget,
+                    )
+                text = _normalize_text("\n".join(parts))
+                if text:
+                    out.append((index, text))
+    except _OfficeProgressCallbackError:
+        raise
+    except (ElementTree.ParseError, OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, _OfficeTextLimitExceededError):
+            raise
+        raise zipfile.BadZipFile("invalid PPTX OOXML package") from exc
     return out
 
 

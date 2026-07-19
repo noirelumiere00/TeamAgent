@@ -12,6 +12,13 @@ from teamagent.adapters import video_download
 from teamagent.adapters.video_download import VideoDownloadError, download_video_chained
 
 
+@pytest.fixture(autouse=True)
+def _enable_explicit_local_media_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These legacy-chain tests intentionally exercise the local developer runtime."""
+
+    monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
+
+
 def _pass_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """chained 冒頭の SSRF を通す（実 DNS に依存させない）。"""
     import teamagent.adapters.url_guard as url_guard

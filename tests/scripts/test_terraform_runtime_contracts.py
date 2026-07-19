@@ -32,44 +32,52 @@ def _block(path: Path, kind: str, name: str) -> str:
     raise AssertionError(f"unterminated Terraform block: {path}:{kind}.{name}")
 
 
-TASKS = [
-    ("fargate.tf", "mcp", "10001:10001"),
-    ("fargate.tf", "openclaw", "65532:65532"),
-    ("connect_web.tf", "connect_web", "10001:10001"),
-    ("ingest_schedule.tf", "ingest", "10001:10001"),
-    ("morning_digest_schedule.tf", "morning_digest", "10001:10001"),
-    ("canary_schedule.tf", "canary", "10001:10001"),
-    ("tiktok_acquire.tf", "tiktok_acquire", "10001:10001"),
-    ("x_research.tf", "x_buzz_worker", "10001:10001"),
+TEAMAGENT_TASKS = [
+    ("fargate.tf", "mcp"),
+    ("connect_web.tf", "connect_web"),
+    ("ingest_schedule.tf", "ingest"),
+    ("morning_digest_schedule.tf", "morning_digest"),
+    ("canary_schedule.tf", "canary"),
+    ("tiktok_acquire.tf", "tiktok_acquire"),
+    ("x_research.tf", "x_buzz_worker"),
 ]
 
 
-@pytest.mark.parametrize(("filename", "name", "user"), TASKS)
+@pytest.mark.parametrize(("filename", "name"), TEAMAGENT_TASKS)
 def test_exact_task_definitions_keep_runtime_security_contract(
     filename: str,
     name: str,
-    user: str,
 ) -> None:
     block = _block(TF_ROOT / filename, "aws_ecs_task_definition", name)
     for expected in (
         "skip_destroy",
-        "true",
         "terraform_data.runtime_guard",
         'cpu_architecture        = "ARM64"',
-        f'user                   = "{user}"',
-        "readonlyRootFilesystem = true",
-        "initProcessEnabled = true",
-        'drop = ["ALL"]',
-        'name = "tmp"',
-        'sourceVolume = "tmp"',
-        'containerPath = "/tmp"',
-        "readOnly = false",
+        "merge(local.teamagent_runtime_container",
+        'name = "runtime-tmp"',
         "create_before_destroy = true",
     ):
         assert expected in block, f"{name} is missing {expected}"
 
 
-def test_main_tiktok_and_x_writable_cache_contracts_are_exact() -> None:
+def test_shared_teamagent_runtime_container_contract_is_exact() -> None:
+    body = (TF_ROOT / "fargate.tf").read_text(encoding="utf-8")
+    start = body.index("teamagent_runtime_container = {")
+    shared = body[start : start + 900]
+    for expected in (
+        'user                   = "10001:10001"',
+        "readonlyRootFilesystem = true",
+        "privileged             = false",
+        "initProcessEnabled = true",
+        'drop = ["ALL"]',
+        'sourceVolume  = "runtime-tmp"',
+        'containerPath = "/tmp"',
+        "readOnly      = false",
+    ):
+        assert expected in shared
+
+
+def test_main_media_and_x_writable_cache_contracts_are_exact() -> None:
     mcp = _block(TF_ROOT / "fargate.tf", "aws_ecs_task_definition", "mcp")
     for value in (
         'HOME", value = "/tmp/home"',
@@ -80,26 +88,26 @@ def test_main_tiktok_and_x_writable_cache_contracts_are_exact() -> None:
     ):
         assert value in mcp
 
-    tiktok = _block(
+    media = _block(
         TF_ROOT / "tiktok_acquire.tf",
         "aws_ecs_task_definition",
         "tiktok_acquire",
     )
     for value in (
-        'command = ["npx", "tsx", "src/job.ts"]',
-        'npm_config_cache", value = "/tmp/.npm"',
-        'PUPPETEER_CACHE_DIR", value = "/tmp/.cache/puppeteer"',
-        'PLAYWRIGHT_BROWSERS_PATH", value = "/opt/pw"',
-        'CHROMIUM_PATH", value = "/usr/bin/chromium"',
+        "image       = local.media_worker_image",
+        'name = "MEDIA_JOB_BUCKET"',
+        'name = "MEDIA_JOBS_TABLE"',
+        "stopTimeout = 30",
     ):
-        assert value in tiktok
+        assert value in media
+    assert re.search(r"(?m)^\s*command\s*=", media) is None
 
     x_buzz = _block(
         TF_ROOT / "x_research.tf",
         "aws_ecs_task_definition",
         "x_buzz_worker",
     )
-    assert "image                  = var.x_buzz_image" in x_buzz
+    assert re.search(r"(?m)^\s*image\s*=\s*var\.x_buzz_image$", x_buzz)
     assert 'PYTHONPYCACHEPREFIX", value = "/tmp/.pycache"' in x_buzz
 
 
@@ -1210,12 +1218,11 @@ def test_provider_lock_is_git_receipted_and_has_official_cross_platform_hashes()
     lock = lock_path.read_text(encoding="utf-8")
     guard = GUARD.read_text(encoding="utf-8")
 
+    for version in ("5.100.0", "2.8.0", "3.9.0"):
+        assert re.search(rf'(?m)^\s*version\s*=\s*"{re.escape(version)}"$', lock)
     for expected in (
-        'version     = "5.100.0"',
-        'version     = "2.8.0"',
-        'version = "3.9.0"',
-        # Official archive checksums for linux_amd64 deployment,
-        # darwin_arm64 validation, and linux_arm64 tooling.
+        # Official archive checksums for linux_amd64 deployment, darwin_arm64
+        # validation, and linux_arm64 tooling.
         "zh:1589a2266af699cbd5d80737a0fe02e54ec9cf2ca54e7e00ac51c7359056f274",
         "zh:bb64e8aff37becab373a1a0cc1080990785304141af42ed6aa3dd4913b000421",
         "zh:6330766f1d85f01ae6ea90d1b214b8b74cc8c1badc4696b165b36ddd4cc15f7b",
@@ -1238,29 +1245,46 @@ def test_provider_lock_is_git_receipted_and_has_official_cross_platform_hashes()
     assert tracked.returncode == 0, tracked.stderr
 
 
-def test_legacy_mutable_codebuild_is_non_publishing_and_protected() -> None:
+def test_quarantine_codebuild_is_active_but_cannot_publish_a_release() -> None:
     path = TF_ROOT / "codebuild.tf"
     body = path.read_text(encoding="utf-8")
     project = _block(path, "aws_codebuild_project", "image")
-    policy = _block(path, "aws_iam_role_policy", "codebuild")
+    policy_resource = _block(path, "aws_iam_role_policy", "codebuild")
+    policy_document = body.split(
+        'data "aws_iam_policy_document" "codebuild" {',
+        maxsplit=1,
+    )[1].split(
+        'resource "aws_iam_role_policy" "codebuild" {',
+        maxsplit=1,
+    )[0]
     for expected in (
-        'type      = "NO_SOURCE"',
-        "privileged_mode = false",
-        'status = "DISABLED"',
+        'description  = "Build and vulnerability-gate TeamAgent MCP candidate images inside AWS"',
+        'type            = "ARM_CONTAINER"',
+        "privileged_mode = true",
+        'type      = "S3"',
+        'location  = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"',
+        "buildspec = local.image_builder_buildspec",
         "terraform_data.runtime_guard",
         "prevent_destroy = true",
     ):
         assert expected in project
-    assert "exit 64" in body
     source_block = re.search(
         r"(?ms)^\s*source\s*\{(?P<body>.*?)^\s*\}",
         project,
     )
     assert source_block is not None
-    assert "/codebuild/source.zip" not in source_block.group("body")
+    assert "/codebuild/source.zip" in source_block.group("body")
     assert "ECR_REGISTRY" not in project
-    assert "prevent_destroy = true" in policy
-    for denied in ('"ecr:*"', '"ecs:*"', '"iam:PassRole"', '"s3:*"'):
-        assert denied in body
+    assert "prevent_destroy = true" in policy_resource
+    for expected in (
+        "aws_ecr_repository.mcp_quarantine.arn",
+        "aws_ecr_repository.mcp_media_quarantine.arn",
+        "DenyMcpCandidateAndReleaseWrite",
+        "DenyDynamicEnvironmentAndDebugChannels",
+        "DenySourceEvidenceWritesAndSigning",
+    ):
+        assert expected in policy_document
+    assert '"ecs:' not in policy_document
+    assert '"iam:PassRole"' not in policy_document
     guard = GUARD.read_text(encoding="utf-8")
-    assert "validate_retired_builder_and_admin_noninterference_plan" in guard
+    assert "validate_quarantine_builder_and_admin_noninterference_plan" in guard

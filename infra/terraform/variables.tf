@@ -118,7 +118,10 @@ variable "alarm_email_endpoints" {
   sensitive   = true
 
   validation {
-    condition     = var.alarm_email_endpoints == ["s-komata@vectorinc.co.jp"]
+    condition = (
+      length(var.alarm_email_endpoints) == 1 &&
+      var.alarm_email_endpoints[0] == "s-komata@vectorinc.co.jp"
+    )
     error_message = "alarm_email_endpointsはraw byte exact s-komata@vectorinc.co.jp 1件だけを指定してください（trim/lower不可）。"
   }
 }

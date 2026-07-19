@@ -50,12 +50,14 @@ def test_launcher_requires_clean_local_dev_equal_to_exact_remote_head() -> None:
     dirty = body.index("status --porcelain=v1 --untracked-files=all")
     branch = body.index('BRANCH="$(git')
     origin = body.index("config --get remote.origin.url")
-    fetch = body.index('git -C "$REPO_ROOT" fetch')
-    equal = body.index("local dev HEAD must exactly equal remote origin/dev")
+    remote = body.index("git ls-remote --exit-code --heads")
+    equal = body.index("local dev HEAD must exactly equal the fresh protected remote head")
+    detached = body.index("worktree add --quiet --detach")
     first_aws = body.index("aws sts get-caller-identity")
-    assert dirty < branch < origin < fetch < equal < first_aws
+    assert dirty < branch < origin < remote < equal < detached < first_aws
     assert 'EXPECTED_BRANCH="dev"' in body
     assert 'EXPECTED_ORIGIN_URL="git@github.com:noirelumiere00/TeamAgent.git"' in body
+    assert 'EXPECTED_BASE_REF="refs/heads/main"' in body
     assert "assert-release-ready" in body
 
 

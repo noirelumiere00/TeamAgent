@@ -221,7 +221,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
   ]
 
   volume {
-    name = "tmp"
+    name = "runtime-tmp"
   }
 
   runtime_platform {
@@ -229,19 +229,11 @@ resource "aws_ecs_task_definition" "morning_digest" {
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
-    name                   = "morning-digest"
-    image                  = var.mcp_image
-    essential              = true
-    user                   = "10001:10001"
-    readonlyRootFilesystem = true
-    linuxParameters = {
-      initProcessEnabled = true
-      capabilities = {
-        drop = ["ALL"]
-      }
-    }
-    command = ["python", "scripts/run_morning_digest_fargate.py"]
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
+    name      = "morning-digest"
+    image     = var.mcp_image
+    essential = true
+    command   = [local.teamagent_python, "/app/scripts/run_morning_digest_fargate.py"]
     environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
       { name = "HOME", value = "/tmp/home" },
@@ -293,9 +285,6 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # 収集が build_user_credentials で失敗し全 0 件になる（2026-06-25 回帰）。
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
     ], local.hmac_morning_secrets)
-    mountPoints = [
-      { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
-    ]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -305,7 +294,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       }
     }
     # Scheduled Task なので healthCheck 不要（exit code が成否を語る）
-  }])
+  })])
 
   lifecycle {
     create_before_destroy = true

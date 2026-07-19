@@ -1,0 +1,255 @@
+name: teamagent-runtime-smoke
+
+x-runtime-security: &runtime-security
+  platform: linux/arm64
+  user: "10001:10001"
+  read_only: true
+  pids_limit: 512
+  init: true
+
+x-core-environment: &core-environment
+  USER: teamagent
+  LOGNAME: teamagent
+  TEAMAGENT_MCP_BEARER: runtime-smoke-only
+  TEAMAGENT_SHARED_COMPANY_DOMAINS: example.com
+  DATABASE_URL: postgresql://smoke:smoke@127.0.0.1:1/smoke
+  PGVECTOR_POOL_MAX: "0"
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_REGION: ap-northeast-1
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+
+services:
+  core-health:
+    <<: *runtime-security
+    mem_limit: 4096m
+    profiles:
+      - core-health
+    image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
+    environment: *core-environment
+    entrypoint: []
+    command:
+      - /app/.venv/bin/python
+      - /app/scripts/run_mcp_vertex_entrypoint.py
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - core_health_tmp:/tmp
+    networks:
+      - runtime_internal
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()"
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  connect-health:
+    <<: *runtime-security
+    mem_limit: 1024m
+    profiles:
+      - connect-health
+    image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
+    environment:
+      <<: *core-environment
+      CONNECT_WEB_HOST: 0.0.0.0
+      CONNECT_WEB_PORT: "8788"
+      OAUTH_REDIRECT_URI: https://connect.example.invalid/oauth2/callback
+      GOOGLE_CLIENT_ID: runtime-smoke.invalid
+      GOOGLE_CLIENT_SECRET: runtime-smoke-only
+      OAUTH_STATE_SECRET: runtime-smoke-only
+      CONNECT_APP_HTML_S3_URI: ""
+    entrypoint: []
+    command:
+      - /app/.venv/bin/python
+      - -m
+      - teamagent.connect_web
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - connect_health_tmp:/tmp
+    networks:
+      - runtime_internal
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()"
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  core-smoke:
+    <<: *runtime-security
+    mem_limit: 4096m
+    profiles:
+      - core
+    image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
+    environment: *core-environment
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    entrypoint:
+      - /app/.venv/bin/python
+    command:
+      - /smoke/smoke_core.py
+    volumes:
+      - core_smoke_tmp:/tmp
+      - ./smoke_core.py:/smoke/smoke_core.py:ro
+
+  canary-composition:
+    <<: *runtime-security
+    mem_limit: 512m
+    profiles:
+      - core-composition
+    image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
+    environment: *core-environment
+    entrypoint: []
+    command:
+      - /app/.venv/bin/python
+      - /app/scripts/run_canary_health.py
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    volumes:
+      - canary_tmp:/tmp
+
+  ingest-composition:
+    <<: *runtime-security
+    mem_limit: 4096m
+    profiles:
+      - core-composition
+    image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
+    environment:
+      <<: *core-environment
+      DATABASE_URL: ""
+      INGEST_DRY_RUN: "1"
+      INGEST_SOURCES_S3_URI: ""
+      VERTEX_SA_JSON: "{}"
+    entrypoint: []
+    command:
+      - /app/.venv/bin/python
+      - /app/scripts/run_ingest_fargate.py
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    volumes:
+      - ingest_tmp:/tmp
+
+  morning-digest-composition:
+    <<: *runtime-security
+    mem_limit: 2048m
+    profiles:
+      - core-composition
+    image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
+    environment:
+      <<: *core-environment
+      DATABASE_URL: ""
+      MORNING_DIGEST_USERS: ""
+    entrypoint: []
+    command:
+      - /app/.venv/bin/python
+      - /app/scripts/run_morning_digest_fargate.py
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    volumes:
+      - morning_digest_tmp:/tmp
+
+  x-buzz-composition:
+    <<: *runtime-security
+    mem_limit: 1024m
+    profiles:
+      - core-composition
+    image: ${TEAMAGENT_CORE_IMAGE:?set TEAMAGENT_CORE_IMAGE}
+    environment: *core-environment
+    entrypoint: []
+    command:
+      - /app/.venv/bin/python
+      - -m
+      - teamagent.workers.x_buzz_job
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    volumes:
+      - x_buzz_tmp:/tmp
+
+  media-smoke:
+    <<: *runtime-security
+    mem_limit: 4096m
+    profiles:
+      - media
+    image: ${TEAMAGENT_MEDIA_IMAGE:?set TEAMAGENT_MEDIA_IMAGE}
+    cap_drop:
+      - ALL
+    security_opt:
+      - seccomp=./playwright-seccomp-1.60.0.json
+    environment:
+      USER: teamagent
+      LOGNAME: teamagent
+      TEAMAGENT_RUNTIME_KIND: media-worker
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REGION: ap-northeast-1
+    network_mode: none
+    entrypoint:
+      - /app/.venv/bin/python
+      - /smoke/smoke_media.py
+    volumes:
+      - media_smoke_tmp:/tmp
+      - ./smoke_media.py:/smoke/smoke_media.py:ro
+      - ./smoke_media_node.mjs:/smoke/smoke_media_node.mjs:ro
+
+  media-composition:
+    <<: *runtime-security
+    mem_limit: 4096m
+    profiles:
+      - media-composition
+    image: ${TEAMAGENT_MEDIA_IMAGE:?set TEAMAGENT_MEDIA_IMAGE}
+    cap_drop:
+      - ALL
+    security_opt:
+      - seccomp=./playwright-seccomp-1.60.0.json
+    environment:
+      USER: teamagent
+      LOGNAME: teamagent
+      TEAMAGENT_RUNTIME_KIND: media-worker
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REGION: ap-northeast-1
+    network_mode: none
+    volumes:
+      - media_composition_tmp:/tmp
+
+networks:
+  runtime_internal:
+    internal: true
+
+volumes:
+  core_health_tmp:
+  connect_health_tmp:
+  core_smoke_tmp:
+  canary_tmp:
+  ingest_tmp:
+  morning_digest_tmp:
+  x_buzz_tmp:
+  media_smoke_tmp:
+  media_composition_tmp:
