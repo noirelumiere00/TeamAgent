@@ -71,7 +71,11 @@ class _S3:
         keys: list[str] | None = None,
     ) -> None:
         self.fail_delete = fail_delete
-        self.keys = keys or ["media-jobs/mj_0123456789abcdef01234567/attempts/1/output/media"]
+        self.keys = (
+            keys
+            if keys is not None
+            else ["media-jobs/mj_0123456789abcdef01234567/attempts/1/output/media"]
+        )
         self.lists: list[dict[str, Any]] = []
         self.deletes: list[dict[str, Any]] = []
         self.metadata_overrides: dict[str, dict[str, str]] = {}
@@ -262,8 +266,41 @@ def test_expired_lease_reclaims_only_unfinalized_attempt_uuid(
     }
     assert len(s3.deletes) == 1
     assert s3.deletes[0]["Delete"]["Objects"] == [{"Key": f"{prefix}/{orphan}/output/media"}]
-    assert ddb.claims[0]["UpdateExpression"].startswith("SET orphan_cleanup_owner")
-    assert ddb.claims[1]["UpdateExpression"].startswith("REMOVE orphan_cleanup_owner")
+    assert "MEDIA_JOB_STALE_TERMINALIZED" in ddb.claims[0]["ExpressionAttributeValues"][
+        ":detail"
+    ]["S"]
+    assert ddb.claims[1]["UpdateExpression"].startswith("SET orphan_cleanup_owner")
+    assert ddb.claims[2]["UpdateExpression"].startswith("REMOVE orphan_cleanup_owner")
+
+
+def test_stale_queued_job_is_durably_terminalized_without_waiting_for_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _item(
+        status="queued",
+        cleanup_at=2_000,
+        hard_cleanup_at=4_000,
+        consumer_guard_until=2_000,
+    )
+    ddb = _Dynamo([item])
+    s3 = _S3(keys=[])
+    module = _load_handler(monkeypatch, ddb=ddb, s3=s3)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_000)
+
+    result = module.handler({}, types.SimpleNamespace(aws_request_id="janitor-1"))
+
+    assert result == {
+        "cleaned_jobs": 0,
+        "deleted_objects": 0,
+        "reclaimed_attempt_objects": 0,
+    }
+    terminal = ddb.claims[0]
+    assert terminal["ConditionExpression"] == (
+        "#version = :version AND #status = :status AND deadline = :deadline"
+    )
+    assert terminal["ExpressionAttributeValues"][":status"] == {"S": "queued"}
+    assert "MEDIA_JOB_STALE_TERMINALIZED" in terminal["ExpressionAttributeValues"][":detail"]["S"]
 
 
 @pytest.mark.parametrize("mutation", ["metadata", "tag"])

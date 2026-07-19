@@ -206,15 +206,39 @@ resource "aws_sqs_queue" "tiktok_jobs_dlq" {
 }
 
 resource "aws_sqs_queue" "tiktok_jobs" {
-  count                      = local.tk_enabled
-  name                       = "${local.tk_name}-jobs"
-  visibility_timeout_seconds = 900 # canonical job-wide budget
+  count = local.tk_enabled
+  name  = "${local.tk_name}-jobs"
+  # Lambda retries must occur before the immutable 900-second job deadline.
+  # 180 seconds is also the AWS-required 6x multiple of the 30-second handler timeout.
+  visibility_timeout_seconds = 180
   message_retention_seconds  = 1209600
   sqs_managed_sse_enabled    = true
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.tiktok_jobs_dlq[0].arn
-    maxReceiveCount     = 24
+    maxReceiveCount     = 5
   })
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_sqs_queue" "media_stopped_delivery_dlq" {
+  count                     = local.tk_enabled
+  name                      = "${local.media_name}-stopped-delivery-dlq"
+  message_retention_seconds = 1209600
+  sqs_managed_sse_enabled   = true
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_sqs_queue" "media_stopped_invocation_dlq" {
+  count                     = local.tk_enabled
+  name                      = "${local.media_name}-stopped-invocation-dlq"
+  message_retention_seconds = 1209600
+  sqs_managed_sse_enabled   = true
 
   lifecycle {
     prevent_destroy = true
@@ -257,6 +281,15 @@ resource "aws_s3_bucket" "media_jobs" {
   }
 }
 
+resource "aws_s3_bucket_versioning" "media_jobs" {
+  count  = local.tk_enabled
+  bucket = aws_s3_bucket.media_jobs[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "media_jobs" {
   count                   = local.tk_enabled
   bucket                  = aws_s3_bucket.media_jobs[0].id
@@ -289,12 +322,18 @@ resource "aws_s3_bucket_lifecycle_configuration" "media_jobs" {
     expiration {
       days = 30
     }
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
     abort_incomplete_multipart_upload {
       days_after_initiation = 1
     }
   }
 
-  depends_on = [aws_s3_bucket_server_side_encryption_configuration.media_jobs]
+  depends_on = [
+    aws_s3_bucket_server_side_encryption_configuration.media_jobs,
+    aws_s3_bucket_versioning.media_jobs,
+  ]
 }
 
 data "aws_iam_policy_document" "media_jobs_bucket" {
@@ -401,13 +440,24 @@ resource "aws_iam_role" "tiktok_task" {
 data "aws_iam_policy_document" "tiktok_task_app" {
   count = local.tk_enabled
   statement {
-    sid = "S3ObjectsWithinMediaJobs"
+    sid = "S3ReadJobInputs"
     actions = [
       "s3:GetObject",
-      "s3:PutObject",
-      "s3:DeleteObject",
+      "s3:GetObjectVersion",
     ]
-    resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*"]
+    resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/input/*"]
+  }
+  statement {
+    sid = "S3ManageOwnedAttempts"
+    actions = [
+      "s3:PutObject",
+      "s3:PutObjectTagging",
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+    ]
+    resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/attempts/*"]
   }
   statement {
     sid       = "S3ListOnlyMediaJobs"
@@ -582,6 +632,11 @@ data "aws_iam_policy_document" "tiktok_dispatch_policy" {
     resources = [aws_dynamodb_table.tiktok_jobs[0].arn]
   }
   statement {
+    sid       = "WriteAsyncFailureDestination"
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.media_stopped_invocation_dlq[0].arn]
+  }
+  statement {
     sid       = "Logs"
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["${aws_cloudwatch_log_group.tiktok_dispatch.arn}:*"]
@@ -626,6 +681,21 @@ resource "aws_lambda_function" "tiktok_dispatch" {
       error_message = local.runtime_guard_error
     }
   }
+}
+
+resource "aws_lambda_function_event_invoke_config" "tiktok_dispatch" {
+  count                        = local.tk_enabled
+  function_name                = aws_lambda_function.tiktok_dispatch[0].function_name
+  maximum_event_age_in_seconds = 21600
+  maximum_retry_attempts       = 2
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.media_stopped_invocation_dlq[0].arn
+    }
+  }
+
+  depends_on = [aws_iam_role_policy.tiktok_dispatch_policy]
 }
 
 resource "aws_lambda_event_source_mapping" "tiktok_dispatch" {
@@ -676,16 +746,50 @@ resource "aws_cloudwatch_event_rule" "media_task_stopped" {
   }
 }
 
+data "aws_iam_policy_document" "media_stopped_delivery_dlq" {
+  count = local.tk_enabled
+
+  statement {
+    sid     = "AllowEventBridgeStoppedDelivery"
+    effect  = "Allow"
+    actions = ["sqs:SendMessage"]
+    resources = [
+      aws_sqs_queue.media_stopped_delivery_dlq[0].arn,
+    ]
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_cloudwatch_event_rule.media_task_stopped[0].arn]
+    }
+  }
+}
+
+resource "aws_sqs_queue_policy" "media_stopped_delivery_dlq" {
+  count     = local.tk_enabled
+  queue_url = aws_sqs_queue.media_stopped_delivery_dlq[0].url
+  policy    = data.aws_iam_policy_document.media_stopped_delivery_dlq[0].json
+}
+
 resource "aws_cloudwatch_event_target" "media_task_stopped" {
   count     = local.tk_enabled
   rule      = aws_cloudwatch_event_rule.media_task_stopped[0].name
   target_id = "media-task-stopped-reconciler"
   arn       = aws_lambda_function.tiktok_dispatch[0].arn
 
+  dead_letter_config {
+    arn = aws_sqs_queue.media_stopped_delivery_dlq[0].arn
+  }
+
   retry_policy {
     maximum_event_age_in_seconds = 86400
     maximum_retry_attempts       = 185
   }
+
+  depends_on = [aws_sqs_queue_policy.media_stopped_delivery_dlq]
 }
 
 resource "aws_lambda_permission" "media_task_stopped" {
@@ -718,6 +822,54 @@ resource "aws_cloudwatch_metric_alarm" "tiktok_jobs_dlq_depth" {
   }
 
   depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "media_stopped_delivery_dlq_depth" {
+  count               = local.tk_enabled
+  alarm_name          = "${local.media_name}-stopped-delivery-dlq-depth"
+  alarm_description   = "ECS STOPPED EventBridge delivery exhausted retries"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+
+  dimensions = {
+    QueueName = aws_sqs_queue.media_stopped_delivery_dlq[0].name
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "media_stopped_invocation_dlq_depth" {
+  count               = local.tk_enabled
+  alarm_name          = "${local.media_name}-stopped-invocation-dlq-depth"
+  alarm_description   = "ECS STOPPED reconciler exhausted Lambda async retries"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+
+  dimensions = {
+    QueueName = aws_sqs_queue.media_stopped_invocation_dlq[0].name
+  }
 
   lifecycle {
     prevent_destroy = true
@@ -855,9 +1007,20 @@ data "aws_iam_policy_document" "tiktok_mcp_policy" {
     resources = [aws_dynamodb_table.tiktok_jobs[0].arn]
   }
   statement {
-    sid       = "S3JobObjects"
-    actions   = ["s3:GetObject", "s3:PutObject"]
+    sid = "S3JobArtifactsRead"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+    ]
     resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*"]
+  }
+  statement {
+    sid = "S3JobInputsWrite"
+    actions = [
+      "s3:PutObject",
+      "s3:PutObjectTagging",
+    ]
+    resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/input/*"]
   }
 }
 

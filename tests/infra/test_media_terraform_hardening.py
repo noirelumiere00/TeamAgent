@@ -50,13 +50,64 @@ def test_job_budget_dispatch_concurrency_and_retention_share_one_contract() -> N
         "media_jobs",
     )
 
-    assert "visibility_timeout_seconds = 900" in queue
+    assert "visibility_timeout_seconds = 180" in queue
+    assert "maxReceiveCount     = 5" in queue
     assert "reserved_concurrent_executions = 2" in dispatcher
     assert "batch_size              = 1" in mapping
     assert 'function_response_types = ["ReportBatchItemFailures"]' in mapping
     assert "maximum_concurrency = 2" in mapping
     assert "default     = 2592000" in MEDIA_TF
     assert "days = 30" in lifecycle
+    assert "noncurrent_days = 30" in lifecycle
+
+
+def test_artifacts_are_version_bound_and_core_writes_only_job_inputs() -> None:
+    versioning = _block('resource "aws_s3_bucket_versioning"', "media_jobs")
+    core_policy = _block(
+        'data "aws_iam_policy_document"',
+        "tiktok_mcp_policy",
+    )
+    worker_policy = _block(
+        'data "aws_iam_policy_document"',
+        "tiktok_task_app",
+    )
+
+    assert 'status = "Enabled"' in versioning
+    assert 'sid = "S3JobInputsWrite"' in core_policy
+    assert "media-jobs/*/input/*" in core_policy
+    assert 'sid = "S3JobArtifactsRead"' in core_policy
+    assert '"s3:GetObjectVersion"' in core_policy
+    assert 'sid = "S3ReadJobInputs"' in worker_policy
+    assert 'sid = "S3ManageOwnedAttempts"' in worker_policy
+    assert "media-jobs/*/attempts/*" in worker_policy
+
+
+def test_stopped_recovery_has_delivery_and_invocation_failure_sinks() -> None:
+    target = _block('resource "aws_cloudwatch_event_target"', "media_task_stopped")
+    invoke = _block(
+        'resource "aws_lambda_function_event_invoke_config"',
+        "tiktok_dispatch",
+    )
+    delivery_policy = _block(
+        'data "aws_iam_policy_document"',
+        "media_stopped_delivery_dlq",
+    )
+    dispatch_policy = _block(
+        'data "aws_iam_policy_document"',
+        "tiktok_dispatch_policy",
+    )
+
+    assert "dead_letter_config" in target
+    assert "media_stopped_delivery_dlq" in target
+    assert "aws_sqs_queue_policy.media_stopped_delivery_dlq" in target
+    assert "maximum_retry_attempts" in invoke
+    assert "media_stopped_invocation_dlq" in invoke
+    assert 'identifiers = ["events.amazonaws.com"]' in delivery_policy
+    assert "aws:SourceArn" in delivery_policy
+    assert 'sid       = "WriteAsyncFailureDestination"' in dispatch_policy
+    assert 'actions   = ["sqs:SendMessage"]' in dispatch_policy
+    assert 'resource "aws_cloudwatch_metric_alarm" "media_stopped_delivery_dlq_depth"' in MEDIA_TF
+    assert 'resource "aws_cloudwatch_metric_alarm" "media_stopped_invocation_dlq_depth"' in MEDIA_TF
 
 
 def test_runtime_guard_keeps_generic_and_compatibility_enable_aliases_active() -> None:

@@ -70,6 +70,83 @@ def _orphan_sweep_eligible(item: dict[str, Any], now: int) -> bool:
     return False
 
 
+def _stale_nonterminal(item: dict[str, Any], now: int) -> bool:
+    return (
+        item.get("status", {}).get("S", "") in {"queued", "running"}
+        and 0 < _number(item, "deadline") < now
+    )
+
+
+def _terminalize_stale(
+    table: str,
+    item: dict[str, Any],
+    now: int,
+) -> int | None:
+    """Fence an expired queued/running row into a durable failed result."""
+
+    job_id = item.get("job_id", {}).get("S", "")
+    status = item.get("status", {}).get("S", "")
+    version = _number(item, "version")
+    deadline = _number(item, "deadline")
+    detail = json.dumps(
+        {
+            "schema_version": "1",
+            "job_id": job_id,
+            "status": "failed",
+            "artifacts": [],
+            "metadata": {"reconciler": "stale-job"},
+            "error_code": "MEDIA_JOB_STALE_TERMINALIZED",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    try:
+        response = ddb.update_item(
+            TableName=table,
+            Key={"job_id": {"S": job_id}},
+            UpdateExpression=(
+                "SET #status = :failed, detail = :detail, updated_at = :now "
+                "REMOVE dispatch_owner, dispatch_lease_expires_at, "
+                "lease_owner, lease_expires_at, attempt_id "
+                "ADD #version :one"
+            ),
+            ConditionExpression=(
+                "#version = :version AND #status = :status AND deadline = :deadline"
+            ),
+            ExpressionAttributeNames={"#status": "status", "#version": "version"},
+            ExpressionAttributeValues={
+                ":failed": {"S": "failed"},
+                ":detail": {"S": detail},
+                ":now": {"N": str(now)},
+                ":one": {"N": "1"},
+                ":version": {"N": str(version)},
+                ":status": {"S": status},
+                ":deadline": {"N": str(deadline)},
+            },
+            ReturnValues="ALL_NEW",
+        )
+    except Exception as exc:
+        response = getattr(exc, "response", {})
+        code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+        if code == "ConditionalCheckFailedException":
+            return None
+        raise
+    new_version = _number(response.get("Attributes", {}), "version", version + 1)
+    item["status"] = {"S": "failed"}
+    item["version"] = {"N": str(new_version)}
+    print(
+        json.dumps(
+            {
+                "event": "media_job_stale_terminalized",
+                "job_id": job_id,
+                "previous_status": status,
+            },
+            sort_keys=True,
+        )
+    )
+    return new_version
+
+
 def _claim(table: str, item: dict[str, Any], owner: str, now: int) -> int | None:
     job_id = item.get("job_id", {}).get("S", "")
     version = _number(item, "version")
@@ -307,8 +384,13 @@ def handler(_event: dict[str, Any], context: Any) -> dict[str, int]:
             prefix = item.get("output_prefix", {}).get("S", "")
             if not _JOB_ID.fullmatch(job_id) or prefix != f"media-jobs/{job_id}/":
                 raise RuntimeError("media janitor row scope is invalid")
+            stale_terminalized = False
+            if _stale_nonterminal(item, now):
+                if _terminalize_stale(table, item, now) is None:
+                    continue
+                stale_terminalized = True
             if not _eligible(item, now):
-                if _orphan_sweep_eligible(item, now):
+                if stale_terminalized or _orphan_sweep_eligible(item, now):
                     owner = f"{invocation}:{job_id}:orphans"
                     claimed_version = _claim_orphan_sweep(table, item, owner, now)
                     if claimed_version is not None:

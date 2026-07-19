@@ -105,7 +105,10 @@ def test_iac_injects_complete_media_service_contract_atomically() -> None:
     assert "role   = aws_iam_role.mcp_task.name" in media
     assert 'actions   = ["sqs:SendMessage"]' in media
     assert 'actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]' in media
-    assert 'actions   = ["s3:GetObject", "s3:PutObject"]' in media
+    assert 'sid = "S3JobArtifactsRead"' in media
+    assert '"s3:GetObjectVersion"' in media
+    assert 'sid = "S3JobInputsWrite"' in media
+    assert "media-jobs/*/input/*" in media
     assert "MEDIA_ARTIFACT_TTL_SECONDS = tostring(var.media_artifact_ttl_seconds)" in media
     assert "!var.enable_scrape_tools || local.media_enabled == 1" in fargate
     assert "hardened core contains no browser/ffmpeg/yt-dlp fallback" in fargate
