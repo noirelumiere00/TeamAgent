@@ -908,6 +908,47 @@ def _fake_aws(path: Path) -> None:
         if args == ["--version"]:
             print("aws-cli/2.27.0 Python/3.13.5 Darwin/24.5.0")
             raise SystemExit(0)
+        if args[:2] == ["sts", "get-caller-identity"]:
+            if "--query" not in args or args[-2:] != ["--output", "text"]:
+                raise SystemExit("malformed deployment gate identity query")
+            if os.environ.get("AWS_ACCESS_KEY_ID") == "ASIAGATESESSION":
+                arn = (
+                    "arn:aws:sts::718959508629:assumed-role/"
+                    "teamagent-dev-image-deployment-gate/"
+                    "teamagent-image-deployment-gate"
+                )
+            else:
+                arn = (
+                    "arn:aws:sts::718959508629:assumed-role/"
+                    "teamagent-dev-terraform-runtime-automation/"
+                    "teamagent-terraform-worker"
+                )
+            print(f"{{ACCOUNT}}\\t{{arn}}")
+            raise SystemExit(0)
+        if args[:2] == ["sts", "assume-role"]:
+            if (
+                "--region" not in args
+                or args[args.index("--region") + 1] != REGION
+                or "--role-arn" not in args
+                or args[args.index("--role-arn") + 1]
+                != (
+                    "arn:aws:iam::718959508629:role/"
+                    "teamagent-dev-image-deployment-gate"
+                )
+                or args[-2:] != ["--output", "text"]
+            ):
+                raise SystemExit("malformed deployment gate assume-role")
+            print("ASIAGATESESSION\\tsecret\\ttoken")
+            raise SystemExit(0)
+        if args[:2] == ["dynamodb", "put-item"]:
+            if (
+                "--region" not in args
+                or args[args.index("--region") + 1] != REGION
+                or os.environ.get("AWS_ACCESS_KEY_ID") != "ASIAGATESESSION"
+            ):
+                raise SystemExit("malformed deployment intent write")
+            print(json.dumps({{}}))
+            raise SystemExit(0)
         if (
             len(args) >= 2
             and args[0] == "--region"
@@ -1542,8 +1583,10 @@ def _fake_terraform(path: Path) -> None:
         import sys
 
         args = [arg for arg in sys.argv[1:] if not arg.startswith("-chdir=")]
-        with open(os.environ["TF_FAKE_LOG"], "a", encoding="utf-8") as fh:
-            fh.write(" ".join(args) + "\\n")
+        log_path = os.environ.get("TF_FAKE_LOG")
+        if log_path:
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(" ".join(args) + "\\n")
 
         def state_data():
             state_path = os.environ.get("TF_FAKE_STATE")
@@ -1671,6 +1714,29 @@ def _fake_terraform(path: Path) -> None:
                 "report_link_hmac_previous_secret_arn": {"value": ""},
                 "report_link_hmac_previous_rotation_started_at": {"value": None},
                 "runtime_guard_live": {"value": core},
+            }
+            plan["planned_values"] = {
+                "root_module": {
+                    "resources": [
+                        {
+                            "address": (
+                                "terraform_data.production_image_release_gate"
+                            ),
+                            "values": {
+                                "input": {
+                                    "deployment_intent_id": (
+                                        image_deployment_intent_id
+                                    ),
+                                    "deployment_context_sha256": "1" * 64,
+                                    "receipt_claims_sha256": "2" * 64,
+                                    "requested_images": {"mcp": desired},
+                                    "application_provenance": {"mcp": {}},
+                                    "shared_generation_ledger": {},
+                                }
+                            },
+                        }
+                    ]
+                }
             }
             for change in plan["resource_changes"]:
                 if change["type"] == "aws_ecs_task_definition":
@@ -1930,9 +1996,20 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "workspace": "default",
     }
     assert len(data["state_contract"]["backend"]["identity_sha256"]) == 64
+    template = json.loads(
+        Path(env["TF_FAKE_TEMPLATE"]).read_text(encoding="utf-8")
+    )
+    managed_addresses = sorted(
+        change["address"]
+        for change in template["resource_changes"]
+        if change.get("mode", "managed") == "managed"
+    )
+    address_set_sha256 = hashlib.sha256(
+        "".join(f"{address}\n" for address in managed_addresses).encode()
+    ).hexdigest()
     assert data["state_contract"]["state"] == {
-        "address_count": 0,
-        "address_set_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "address_count": len(managed_addresses),
+        "address_set_sha256": address_set_sha256,
         "lineage": "01234567-89ab-cdef-0123-456789abcdef",
         "serial": 42,
     }
@@ -1946,12 +2023,18 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "aws_cloudwatch_log_group.x_dispatch",
     }
     assert all(item["present"] is False for item in data["state_contract"]["imports"].values())
-    assert "apply" not in tf_log.read_text(encoding="utf-8")
+    assert not any(
+        command == "apply" or command.startswith("apply ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
 
     verify = _run(["bash", str(GUARD), "verify", "--plan", str(plan)], env)
     assert verify.returncode == 0, verify.stdout + verify.stderr
     assert "read-only検証完了" in verify.stdout
-    assert "apply" not in tf_log.read_text(encoding="utf-8")
+    assert not any(
+        command == "apply" or command.startswith("apply ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
 
 
 def test_versioning_stage_is_fail_closed_while_review_manifest_is_disabled(
