@@ -375,7 +375,12 @@ def test_deployment_intents_use_a_durable_protected_conditional_ledger() -> None
     assert "release receipt has already authorized a deployment" in evidence
     assert "saved Terraform plan will not run the apply-time gate" in evidence
     assert "saved Terraform plan is incomplete" in evidence
-    assert "image release saved plans cannot contain imports" in evidence
+    assert "ALLOWED_EXISTING_LOG_IMPORTS" in evidence
+    assert "/aws/ecs/containerinsights/teamagent-dev/performance" in evidence
+    assert "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance" in evidence
+    assert 'not in (["no-op"], ["update"])' in evidence
+    assert "image release saved plan import is outside the exact " in evidence
+    assert "existing-log allowlist" in evidence
     assert "DEPLOYMENT_LOCK_RECORD_ID" in evidence
     assert "lease_expires_at > :now_epoch" in evidence
 
