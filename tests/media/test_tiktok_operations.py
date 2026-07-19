@@ -155,6 +155,10 @@ def test_hashtag_acquire_preserves_semantics_metadata_and_per_keyword_shortfall(
         "teamagent.media.operations._fetch_public_image",
         lambda *_args, **_kwargs: False,
     )
+    monkeypatch.setattr(
+        "teamagent.media.operations.validate_acquire_url",
+        lambda url: url,
+    )
     operation = TikTokAcquireOperation(
         kind="tiktok_acquire",
         search_type="hashtag",
