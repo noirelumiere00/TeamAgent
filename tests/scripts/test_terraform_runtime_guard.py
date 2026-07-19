@@ -642,6 +642,37 @@ def _safe_plan() -> dict[str, Any]:
             )
         )
 
+    runtime_guard = {"input": {"receipt_sha256": "a" * 64}}
+    changes.append(
+        _change(
+            "terraform_data.runtime_guard",
+            "terraform_data",
+            ["no-op"],
+            copy.deepcopy(runtime_guard),
+            runtime_guard,
+        )
+    )
+    changes.append(
+        _change(
+            "terraform_data.production_image_release_gate",
+            "terraform_data",
+            ["create", "delete"],
+            {"input": {"deployment_intent_id": "prior"}},
+            {"input": {"deployment_intent_id": "current"}},
+        )
+    )
+
+    configured_addresses = {item["address"] for item in configurations}
+    for change in changes:
+        if change["mode"] != "managed":
+            continue
+        configuration_address = change["address"].removesuffix("[0]")
+        if configuration_address not in configured_addresses:
+            configurations.append(
+                {"address": configuration_address, "expressions": {}}
+            )
+            configured_addresses.add(configuration_address)
+
     return {
         "format_version": "1.2",
         "terraform_version": "1.12.2",
@@ -1518,13 +1549,39 @@ def _fake_terraform(path: Path) -> None:
             state_path = os.environ.get("TF_FAKE_STATE")
             if state_path:
                 return json.loads(pathlib.Path(state_path).read_text(encoding="utf-8"))
+            template = json.loads(
+                pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            resources = []
+            for change in template["resource_changes"]:
+                if change.get("mode", "managed") != "managed":
+                    continue
+                address = change["address"]
+                index_key = None
+                if address.endswith("[0]"):
+                    address = address[:-3]
+                    index_key = 0
+                resource_type, name = address.split(".", 1)
+                instance = {"schema_version": 0, "attributes": {}}
+                if index_key is not None:
+                    instance["index_key"] = index_key
+                resources.append(
+                    {
+                        "mode": "managed",
+                        "type": resource_type,
+                        "name": name,
+                        "instances": [instance],
+                    }
+                )
             return {
                 "version": 4,
                 "terraform_version": "1.12.2",
                 "serial": 42,
                 "lineage": "01234567-89ab-cdef-0123-456789abcdef",
                 "outputs": {},
-                "resources": [],
+                "resources": resources,
             }
 
         def state_addresses(state):
@@ -1578,6 +1635,12 @@ def _fake_terraform(path: Path) -> None:
             out = next(arg.split("=", 1)[1] for arg in args if arg.startswith("-out="))
             core_arg = next(arg for arg in args if arg.startswith("-var=runtime_guard_live="))
             core = json.loads(core_arg.split("=", 2)[2])
+            intent_arg = next(
+                arg
+                for arg in args
+                if arg.startswith("-var=image_deployment_intent_id=")
+            )
+            image_deployment_intent_id = intent_arg.split("=", 2)[2]
             desired = core["desired_mcp_image"]
             plan = json.loads(pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text())
             plan["variables"] = {
@@ -1592,6 +1655,9 @@ def _fake_terraform(path: Path) -> None:
                 "canary_rule_enabled": {"value": core["canary_rule_enabled"]},
                 "require_alarm_delivery": {"value": True},
                 "bedrock_logs_retention_days": {"value": 60},
+                "image_deployment_intent_id": {
+                    "value": image_deployment_intent_id
+                },
                 "mail_action_hmac_secret_arn": {
                     "value": "arn:aws:secretsmanager:ap-northeast-1:718959508629:"
                     "secret:teamagent/dev/hmac/mail-action-AbC123"

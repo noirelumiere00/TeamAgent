@@ -533,7 +533,7 @@ capture_state_contract() {
     .resources[] |
     (.module // "") as $module_path |
     . as $resource |
-    select(
+    (
       if $resource.mode == "managed" then ""
       elif $resource.mode == "data" then "data."
       else error("unsupported state resource mode")
