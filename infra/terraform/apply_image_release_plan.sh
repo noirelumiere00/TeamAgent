@@ -63,13 +63,13 @@ esac
   || die "saved plan path is invalid"
 plan_parent="$(cd -- "$plan_parent" && pwd -P)" \
   || die "saved plan parent directory does not exist"
-plan_path="$plan_parent/$plan_name"
-[ -f "$plan_path" ] || die "saved plan does not exist"
+plan_source="$plan_parent/$plan_name"
+[ -f "$plan_source" ] && [ ! -L "$plan_source" ] || die "saved plan does not exist"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 control_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null)" \
   || die "apply launcher is not inside the TeamAgent worktree"
-case "$plan_path" in
+case "$plan_source" in
   "$control_root"/*)
     die "saved plans must be stored outside the TeamAgent worktree"
     ;;
@@ -90,19 +90,50 @@ control_commit="$(git -C "$control_root" rev-parse HEAD)"
 gate_runner="$control_root/infra/deploy/run_image_deployment_gate.sh"
 context_helper="$control_root/infra/terraform/image_release_context.py"
 apply_supervisor="$control_root/infra/terraform/terraform_apply_supervisor.py"
+plan_stager="$control_root/infra/terraform/stage_saved_plan.py"
+event_saga="$control_root/infra/terraform/eventbridge_apply_saga.py"
 [ -f "$context_helper" ] && [ -f "$apply_supervisor" ] \
+  && [ -f "$plan_stager" ] && [ -f "$event_saga" ] \
   || die "Terraform release helpers are missing"
 terraform_bin="$(command -v terraform)"
-export TEAMAGENT_SAVED_PLAN_PATH="$plan_path"
 export TEAMAGENT_APPLY_ATTEMPT_ID
 TEAMAGENT_APPLY_ATTEMPT_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 
 cd "$script_dir"
 temporary="$(mktemp -d "${TMPDIR:-/tmp}/teamagent-image-apply.XXXXXXXX")"
+chmod 0700 "$temporary"
+trap 'rm -rf -- "$temporary"' EXIT
+stage_result="$(python3 "$plan_stager" \
+  --source "$plan_source" \
+  --destination "$temporary/saved.tfplan")" \
+  || die "saved plan could not be staged immutably"
+export TEAMAGENT_SAVED_PLAN_SHA256
+TEAMAGENT_SAVED_PLAN_SHA256="$(printf '%s' "$stage_result" | python3 -c \
+  'import json,sys; value=json.load(sys.stdin); assert value["ok"] is True; print(value["sha256"])')"
+[[ "$TEAMAGENT_SAVED_PLAN_SHA256" =~ ^[a-f0-9]{64}$ ]] \
+  || die "staged saved plan digest is invalid"
+exec {PLAN_FD}<"$temporary/saved.tfplan"
+plan_device_inode="$(stat -Lc '%d:%i' "/proc/$$/fd/$PLAN_FD")" \
+  || die "staged plan descriptor is unavailable"
+rm -f -- "$temporary/saved.tfplan"
+plan_path="/proc/$$/fd/$PLAN_FD"
+export TEAMAGENT_SAVED_PLAN_PATH="$plan_path"
+export TEAMAGENT_SAVED_PLAN_IDENTITY="$plan_device_inode"
 lock_acquired=false
 attempt_started=false
 outcome_recorded=false
+saga_started=false
+saga_finished=false
 cleanup() {
+  local original_status="$?" saga_restore_failed=false
+  trap - EXIT
+  if [ "$saga_started" = "true" ] && [ "$saga_finished" != "true" ]; then
+    python3 "$event_saga" finish \
+      --plan "$plan_path" \
+      --plan-sha256 "$TEAMAGENT_SAVED_PLAN_SHA256" \
+      --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" \
+      --outcome failed >/dev/null 2>&1 || saga_restore_failed=true
+  fi
   if [ "$attempt_started" = "true" ] && [ "$outcome_recorded" != "true" ]; then
     bash "$gate_runner" mark-deployment-intent-outcome \
       --plan "$plan_path" \
@@ -115,6 +146,11 @@ cleanup() {
       --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" >/dev/null 2>&1 || true
   fi
   rm -rf -- "$temporary"
+  if [ "$saga_restore_failed" = "true" ]; then
+    echo "FATAL: EventBridge apply baseline needs reconciliation" >&2
+    exit 70
+  fi
+  exit "$original_status"
 }
 trap cleanup EXIT
 
@@ -133,16 +169,31 @@ bash "$gate_runner" validate-deployment-preflight \
   --terraform-context "$temporary/terraform-context.json" \
   --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" \
   --control-commit "$control_commit" >/dev/null
+python3 "$event_saga" begin \
+  --plan "$plan_path" \
+  --plan-sha256 "$TEAMAGENT_SAVED_PLAN_SHA256" \
+  --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" >/dev/null
+saga_started=true
 
 set +e
 python3 "$apply_supervisor" \
   --terraform-bin "$terraform_bin" \
   --gate-runner "$gate_runner" \
   --plan "$plan_path" \
+  --plan-sha256 "$TEAMAGENT_SAVED_PLAN_SHA256" \
+  --plan-identity "$TEAMAGENT_SAVED_PLAN_IDENTITY" \
   --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID"
 apply_status=$?
 set -e
 if [ "$apply_status" -eq 0 ]; then
+  if ! python3 "$event_saga" finish \
+    --plan "$plan_path" \
+    --plan-sha256 "$TEAMAGENT_SAVED_PLAN_SHA256" \
+    --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" \
+    --outcome applied >/dev/null; then
+    die "apply completed but EventBridge saga completion needs reconciliation"
+  fi
+  saga_finished=true
   if ! bash "$gate_runner" mark-deployment-intent-outcome \
     --plan "$plan_path" \
     --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" \
@@ -158,6 +209,15 @@ if [ "$apply_status" -eq 0 ]; then
   exit 0
 fi
 
+if ! python3 "$event_saga" finish \
+  --plan "$plan_path" \
+  --plan-sha256 "$TEAMAGENT_SAVED_PLAN_SHA256" \
+  --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" \
+  --outcome failed >/dev/null; then
+  echo "FATAL: apply failed and exact EventBridge baseline restoration needs reconciliation." >&2
+  exit 70
+fi
+saga_finished=true
 if bash "$gate_runner" mark-deployment-intent-outcome \
   --plan "$plan_path" \
   --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID" \

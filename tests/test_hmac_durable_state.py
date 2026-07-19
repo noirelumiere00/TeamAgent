@@ -17,6 +17,7 @@ from teamagent.hmac_durable_state import (
     DynamoDbHmacStateStore,
     HmacDurableSnapshot,
     HmacRuntimeExpectation,
+    ServiceProcessIdentity,
     _service_process_identity,
     _set_state_store_for_testing,
     decision_from_snapshot,
@@ -135,6 +136,7 @@ class _FakeDynamoDb:
         self.first_read_captured = threading.Event()
         self.allow_first_read = threading.Event()
         self.read_count = 0
+        self.update_count = 0
         self.extra_items: dict[str, dict[str, dict[str, object]]] = {}
         self.transactions: list[list[dict[str, object]]] = []
 
@@ -162,6 +164,7 @@ class _FakeDynamoDb:
         }
 
     def update_item(self, **kwargs: object) -> dict[str, object]:
+        self.update_count += 1
         values = kwargs["ExpressionAttributeValues"]
         assert isinstance(values, dict)
         condition = str(kwargs["ConditionExpression"])
@@ -223,6 +226,7 @@ def _clear_store(monkeypatch: pytest.MonkeyPatch) -> None:
         "TEAMAGENT_HMAC_STATE_SCOPE",
         "TEAMAGENT_HMAC_ROTATION_EPOCH",
         "TEAMAGENT_HMAC_PROVENANCE",
+        "TEAMAGENT_HMAC_RESTART_REQUIRE_COMPLETE",
         "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
         "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
         "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
@@ -375,7 +379,7 @@ def test_deadline_interleaving_cannot_reenable_previous() -> None:
     assert fake.item["previous_retired"] == {"BOOL": True}
 
 
-def test_hot_runtime_decisions_use_clock_revision_without_config_cas_starvation() -> None:
+def test_hot_runtime_decisions_do_not_serialize_on_domain_writes() -> None:
     fake = _FakeDynamoDb(_snapshot(now=_T0 + 100))
     store = DynamoDbHmacStateStore(
         table_name="teamagent-dev-hmac-state",
@@ -383,7 +387,8 @@ def test_hot_runtime_decisions_use_clock_revision_without_config_cas_starvation(
         region="ap-northeast-1",
         client=fake,
     )
-    barrier = threading.Barrier(8)
+    workers = 64
+    barrier = threading.Barrier(workers)
     decisions: list[bool] = []
     decision_lock = threading.Lock()
 
@@ -393,43 +398,57 @@ def test_hot_runtime_decisions_use_clock_revision_without_config_cas_starvation(
         with decision_lock:
             decisions.append(bool(decision and decision.issuance_allowed))
 
-    threads = [threading.Thread(target=evaluate) for _index in range(8)]
+    threads = [threading.Thread(target=evaluate) for _index in range(workers)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=5)
 
     assert all(not thread.is_alive() for thread in threads)
-    assert decisions == [True] * 8
+    assert decisions == [True] * workers
     assert fake.item["revision"] == {"N": "7"}
-    assert fake.item["clock_revision"] == {"N": "11"}
+    assert fake.item["clock_revision"] == {"N": "3"}
+    assert fake.update_count == 0
 
 
 def test_service_process_identity_binds_main_pid_start_and_executable(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeProcPath:
-        def __init__(self, value: str) -> None:
-            self.value = value
-
-        def read_text(self, *, encoding: str) -> str:
-            assert encoding == "utf-8"
-            if self.value == "/proc/321/stat":
-                return "321 (python) " + " ".join(["S", *(["0"] * 18), "5000"])
-            if self.value == "/proc/stat":
-                return f"cpu 1 2 3\nbtime {_T0}\n"
-            raise OSError
-
-        def read_bytes(self) -> bytes:
-            if self.value == "/proc/321/cmdline":
-                return b"python\0-m\0teamagent.connect_web\0"
-            raise OSError
-
+    release_root = tmp_path / "release"
+    app = release_root / "app"
+    executable = app / ".venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"runtime")
+    executable.chmod(0o555)
     monkeypatch.setenv("TEAMAGENT_HMAC_MAIN_PID", "321")
-    monkeypatch.setattr(durable_state_module, "Path", FakeProcPath)
-    monkeypatch.setattr(durable_state_module.os, "sysconf", lambda _name: 100)
+    monkeypatch.setenv("TEAMAGENT_HMAC_RELEASE_ROOT", str(release_root))
+    monkeypatch.setenv("TEAMAGENT_HMAC_RELEASE_TREE_SHA256", "1" * 64)
+    monkeypatch.setenv("TEAMAGENT_HMAC_RUNTIME_EXECUTABLE_SHA256", "2" * 64)
+    monkeypatch.setattr(
+        durable_state_module,
+        "_process_observation",
+        lambda _pid: (
+            5000,
+            _T0 + 50,
+            b"python -m teamagent.connect_web",
+            app,
+            executable,
+        ),
+    )
+    monkeypatch.setattr(durable_state_module, "file_sha256", lambda _path: "2" * 64)
+    monkeypatch.setattr(durable_state_module, "verify_release", lambda *_args, **_kwargs: True)
 
-    assert _service_process_identity("connect") == (321, 5000, _T0 + 50)
+    assert _service_process_identity("connect") == ServiceProcessIdentity(
+        pid=321,
+        started_ticks=5000,
+        started_at=_T0 + 50,
+        cwd=str(app),
+        executable=str(executable),
+        executable_sha256="2" * 64,
+        release_root=str(release_root),
+        release_tree_sha256="1" * 64,
+    )
     assert _service_process_identity("bot") is None
 
 
@@ -442,6 +461,9 @@ def test_restart_attestation_requires_exact_nonce_and_post_request_process(
     assert config_digest is not None
     nonce = "f" * 64
     artifact = "c" * 64
+    release_root = "/opt/teamagent/releases/candidate"
+    release_tree = "d" * 64
+    runtime_executable = "e" * 64
     fake.extra_items[f"RESTART#{expectation.rotation_epoch}#{expectation.provenance}"] = {
         "scope": {"S": "teamagent/dev"},
         "record": {"S": f"RESTART#{expectation.rotation_epoch}#{expectation.provenance}"},
@@ -450,6 +472,9 @@ def test_restart_attestation_requires_exact_nonce_and_post_request_process(
         "provenance": {"S": expectation.provenance},
         "artifact_sha256": {"S": artifact},
         "config_digest": {"S": config_digest},
+        "release_root": {"S": release_root},
+        "release_tree_sha256": {"S": release_tree},
+        "runtime_executable_sha256": {"S": runtime_executable},
         "requested_at": {"N": str(_T0 + 90)},
     }
     monkeypatch.setenv("TEAMAGENT_HMAC_WORKER_ID", "i-0123456789abcdef0")
@@ -460,12 +485,21 @@ def test_restart_attestation_requires_exact_nonce_and_post_request_process(
     monkeypatch.setattr(
         durable_state_module,
         "_service_process_identity",
-        lambda _service: (321, 5000, _T0 + 91),
+        lambda _service: ServiceProcessIdentity(
+            pid=321,
+            started_ticks=5000,
+            started_at=_T0 + 91,
+            cwd=f"{release_root}/app",
+            executable=f"{release_root}/app/.venv/bin/python",
+            executable_sha256=runtime_executable,
+            release_root=release_root,
+            release_tree_sha256=release_tree,
+        ),
     )
     monkeypatch.setattr(
         durable_state_module,
         "_service_health_verified",
-        lambda service, pid: service == "connect" and pid == 321,
+        lambda service, pid, ticks: service == "connect" and pid == 321 and ticks == 5000,
     )
     store = DynamoDbHmacStateStore(
         table_name="teamagent-dev-hmac-state",
@@ -484,16 +518,27 @@ def test_restart_attestation_requires_exact_nonce_and_post_request_process(
     assert service_record["port_owner_pid"] == {"N": "321"}
     assert service_record["health_endpoint"] == {"S": "http://127.0.0.1:8788/healthz"}
 
+    restart_item = fake.extra_items[
+        f"RESTART#{expectation.rotation_epoch}#{expectation.provenance}"
+    ]
+    restart_item["stage"] = {"S": "complete"}
+    monkeypatch.setenv("TEAMAGENT_HMAC_RESTART_REQUIRE_COMPLETE", "1")
+    assert store.attest_worker((expectation,))
+    assert fake.transactions[-1][-1]["Put"]["Item"]["main_pid"] == {"N": "321"}  # type: ignore[index]
+    restart_item["stage"] = {"S": "requested"}
+    assert not store.attest_worker((expectation,))
+    monkeypatch.delenv("TEAMAGENT_HMAC_RESTART_REQUIRE_COMPLETE")
+
     monkeypatch.setattr(
         durable_state_module,
         "_service_health_verified",
-        lambda _service, _pid: False,
+        lambda _service, _pid, _ticks: False,
     )
     assert not store.attest_worker((expectation,))
     monkeypatch.setattr(
         durable_state_module,
         "_service_health_verified",
-        lambda service, pid: service == "connect" and pid == 321,
+        lambda service, pid, ticks: service == "connect" and pid == 321 and ticks == 5000,
     )
     monkeypatch.setenv("TEAMAGENT_HMAC_RESTART_NONCE", "e" * 64)
     assert not store.attest_worker((expectation,))
@@ -501,7 +546,16 @@ def test_restart_attestation_requires_exact_nonce_and_post_request_process(
     monkeypatch.setattr(
         durable_state_module,
         "_service_process_identity",
-        lambda _service: (321, 5000, _T0 + 89),
+        lambda _service: ServiceProcessIdentity(
+            pid=321,
+            started_ticks=5000,
+            started_at=_T0 + 89,
+            cwd=f"{release_root}/app",
+            executable=f"{release_root}/app/.venv/bin/python",
+            executable_sha256=runtime_executable,
+            release_root=release_root,
+            release_tree_sha256=release_tree,
+        ),
     )
     assert not store.attest_worker((expectation,))
 

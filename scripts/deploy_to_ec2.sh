@@ -151,7 +151,9 @@ esac
 if [[ "$GO" == "1" ]]; then
 "$PREFLIGHT_PY" scripts/terraform_hmac_payload.py verify-worker-bindings
 EXPECTED_WORKER_BINDING_KEYS='[
+  "atomic_switch",
   "base_environment",
+  "base_env_renderer",
   "candidate_artifact",
   "candidate_env",
   "candidate_receipt",
@@ -159,7 +161,10 @@ EXPECTED_WORKER_BINDING_KEYS='[
   "deploy_overrides",
   "deploy_script",
   "provenance_verifier",
+  "promotion_attester",
+  "release_measurer",
   "reviewed_manifest",
+  "runtime_lock",
   "rollback_artifact",
   "rollback_env",
   "rollback_receipt",
@@ -181,7 +186,9 @@ verify_bound_worker_file() {
   actual="$(sha256sum "$path" | awk '{print $1}')"
   [[ "$actual" == "$expected" ]]
 }
-verify_bound_worker_file base_environment "$ROOT/.env.production" \
+verify_bound_worker_file atomic_switch "$ROOT/scripts/worker_atomic_release_switch.sh" \
+  && verify_bound_worker_file base_environment "$ROOT/.env.production" \
+  && verify_bound_worker_file base_env_renderer "$ROOT/scripts/render_ec2_base_env.py" \
   && verify_bound_worker_file candidate_artifact "$HMAC_WORKER_ARTIFACT" \
   && verify_bound_worker_file candidate_env "$HMAC_WORKER_ENV" \
   && verify_bound_worker_file candidate_receipt "$HMAC_WORKER_PROVENANCE_RECEIPT" \
@@ -190,7 +197,12 @@ verify_bound_worker_file base_environment "$ROOT/.env.production" \
   && verify_bound_worker_file deploy_script "$ROOT/scripts/deploy_to_ec2.sh" \
   && verify_bound_worker_file provenance_verifier \
     "$ROOT/scripts/verify_worker_bundle_provenance.py" \
+  && verify_bound_worker_file promotion_attester \
+    "$ROOT/scripts/worker_promotion_attest.sh" \
+  && verify_bound_worker_file release_measurer \
+    "$ROOT/scripts/measure_worker_release.py" \
   && verify_bound_worker_file reviewed_manifest "$HMAC_PREFLIGHT_MANIFEST" \
+  && verify_bound_worker_file runtime_lock "$ROOT/requirements-worker.lock" \
   && verify_bound_worker_file rollback_artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT" \
   && verify_bound_worker_file rollback_env "$HMAC_WORKER_ROLLBACK_ENV" \
   && verify_bound_worker_file rollback_receipt \
@@ -207,6 +219,7 @@ fi
   --refresh-manifest-now \
   --worker-env "$SELECTED_WORKER_ENV"
 cp "$SELECTED_WORKER_ENV" "$WORK/hmac.env"
+chmod 0600 "$WORK/hmac.env"
 
 echo "== 1. コード tarball（review済みartifactのみ）=="
 cp "$SELECTED_WORKER_ARTIFACT" "$WORK/teamagent-bot.tar.gz"
@@ -222,17 +235,20 @@ cp "$SELECTED_WORKER_ARTIFACT" "$WORK/teamagent-bot.tar.gz"
   --key-arn "$HMAC_WORKER_PROVENANCE_KEY_ARN"
 echo "   size: $(du -h "$WORK/teamagent-bot.tar.gz" | cut -f1)"
 
-echo "== 2. teamagent.env.base 生成（.env.production + infra/deploy/ec2.overrides.env）=="
+echo "== 2. allowlist済み teamagent.env.base 生成 =="
 [[ -f .env.production ]] || { echo "ERROR: .env.production が見つからない"; exit 1; }
-{
-  cat .env.production
-  echo ""
-  echo "# ===== EC2 overrides (infra/deploy/ec2.overrides.env) ====="
-  cat infra/deploy/ec2.overrides.env
-} >"$WORK/teamagent.env.base"
+"$PREFLIGHT_PY" scripts/render_ec2_base_env.py \
+  --base .env.production \
+  --override infra/deploy/ec2.overrides.env \
+  --output "$WORK/teamagent.env.base"
+[[ "$(stat -c '%a' "$WORK/teamagent.env.base" 2>/dev/null \
+  || stat -f '%Lp' "$WORK/teamagent.env.base")" == "600" ]] || {
+  echo "ERROR: env.base must be private" >&2
+  exit 1
+}
 
 echo "== 3. 秘密混入チェック（env.base は *_SECRET_NAME のみ・実値ゼロ）=="
-if grep -Eiq 'xoxb-|xapp-|AKIA[0-9A-Z]{15}|-----BEGIN|PRIVATE KEY' \
+if grep -Eiq 'xoxb-|xapp-|AKIA[0-9A-Z]{16}|-----BEGIN|PRIVATE KEY' \
   "$WORK/teamagent.env.base" "$WORK/hmac.env"; then
   echo "ERROR: env.base に秘密らしき実値を検出。中止（Secrets Manager 経由にすること）。"
   exit 1
@@ -319,10 +335,8 @@ ARTIFACT_DIGEST="__ARTIFACT_DIGEST__"
 BASE_ENV_DIGEST="__BASE_ENV_DIGEST__"
 HMAC_ENV_DIGEST="__HMAC_ENV_DIGEST__"
 RELEASE_ROOT=/opt/teamagent/releases
-FINAL_RELEASE="$RELEASE_ROOT/$RELEASE_DIGEST"
 STAGING_RELEASE="$RELEASE_ROOT/.staging-$RELEASE_DIGEST-$$"
-mkdir -p "$RELEASE_ROOT"
-[[ ! -e "$FINAL_RELEASE" ]] || exit 1
+install -d -m 0755 "$RELEASE_ROOT"
 mkdir -p "$STAGING_RELEASE/app"
 trap 'rm -rf -- "$STAGING_RELEASE"' EXIT
 aws s3api get-object --bucket "$BUCKET" --key "$ARTIFACT_KEY" \
@@ -334,42 +348,59 @@ aws s3api get-object --bucket "$BUCKET" --key "$HMAC_ENV_KEY" \
 [[ "$(sha256sum "$STAGING_RELEASE/app.tar.gz" | awk '{print $1}')" == "$ARTIFACT_DIGEST" ]]
 [[ "$(sha256sum "$STAGING_RELEASE/teamagent.env.base" | awk '{print $1}')" == "$BASE_ENV_DIGEST" ]]
 [[ "$(sha256sum "$STAGING_RELEASE/hmac.env" | awk '{print $1}')" == "$HMAC_ENV_DIGEST" ]]
-chmod 0644 "$STAGING_RELEASE/hmac.env" "$STAGING_RELEASE/teamagent.env.base"
+chmod 0600 "$STAGING_RELEASE/hmac.env" "$STAGING_RELEASE/teamagent.env.base"
 source "$STAGING_RELEASE/hmac.env"
 [[ "$TEAMAGENT_HMAC_ARTIFACT_SHA256" == "$ARTIFACT_DIGEST" ]] || exit 1
-tar xzf "$STAGING_RELEASE/app.tar.gz" -C "$STAGING_RELEASE/app"
-[[ -f "$STAGING_RELEASE/app/scripts/worker_atomic_release_switch.sh" ]]
-chmod 0755 "$STAGING_RELEASE/app/scripts/worker_atomic_release_switch.sh"
+tar tzf "$STAGING_RELEASE/app.tar.gz" \
+  | awk 'BEGIN { ok=1 } /(^|\\/)\\.\\.($|\\/)|^\\// { ok=0 } END { exit !ok }'
+tar xzf "$STAGING_RELEASE/app.tar.gz" --no-same-owner --no-same-permissions \
+  -C "$STAGING_RELEASE/app"
+for required in \
+  requirements-worker.lock \
+  scripts/measure_worker_release.py \
+  scripts/render_ec2_base_env.py \
+  scripts/worker_atomic_release_switch.sh \
+  scripts/worker_promotion_attest.sh; do
+  [[ -f "$STAGING_RELEASE/app/$required" ]]
+done
+chmod 0755 \
+  "$STAGING_RELEASE/app/scripts/measure_worker_release.py" \
+  "$STAGING_RELEASE/app/scripts/render_ec2_base_env.py" \
+  "$STAGING_RELEASE/app/scripts/worker_atomic_release_switch.sh" \
+  "$STAGING_RELEASE/app/scripts/worker_promotion_attest.sh"
 cd "$STAGING_RELEASE/app"
-# /tmp は tmpfs(2GB) で torch 等の展開が溢れる → TMPDIR をディスクへ
-mkdir -p /opt/teamagent/piptmp
-export TMPDIR=/opt/teamagent/piptmp
-python3.11 -m venv .venv
-./.venv/bin/pip install -q -U pip
-./.venv/bin/pip install -q -e .
-# search の e5 embedder(torch含む・重い)。pyproject 外なので明示導入
-./.venv/bin/pip install -q --no-cache-dir sentence-transformers
-# TikTok スクレイパの node 依存（node_modules は tarball 非同梱）
-( cd tools/tiktok_scraper && npm ci --no-audit --no-fund )
-# Chrome: Chrome-for-Testing に arm64 Linux 版が無い(t4g=arm64)→ Playwright chromium(arm64) を使う
-export PLAYWRIGHT_BROWSERS_PATH=/opt/teamagent/pw
-./.venv/bin/python -m playwright install chromium >/tmp/pw_install.log 2>&1 || true
-PW_CHROME="$(find /opt/teamagent/pw -type f -name chrome 2>/dev/null | head -1)"
-if [[ -n "$PW_CHROME" ]]; then
-  sed -i '/^CHROMIUM_PATH=/d' "$STAGING_RELEASE/teamagent.env.base"
-  echo "CHROMIUM_PATH=$PW_CHROME" >> "$STAGING_RELEASE/teamagent.env.base"
-fi
-rm -rf /opt/teamagent/piptmp
-# OOM 安全網: swap 4GB（e5 ロード時のメモリ逼迫対策・永続）
-if ! swapon --show | grep -q /swapfile; then
-  fallocate -l 4G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=4096 status=none
-  chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile
-  grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-fi
+TMPDIR="$STAGING_RELEASE/pip-tmp"
+mkdir -m 0700 "$TMPDIR"
+export TMPDIR
+python3.11 -m venv --copies .venv
+./.venv/bin/python -m pip install --disable-pip-version-check --no-input \
+  --require-hashes --only-binary=:all: -r requirements-worker.lock >/dev/null
+( cd tools/tiktok_scraper \
+  && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error )
+export PLAYWRIGHT_BROWSERS_PATH="$STAGING_RELEASE/playwright"
+./.venv/bin/python -m playwright install chromium >/dev/null
+PW_CHROME="$(
+  ./.venv/bin/python - <<'PY'
+from playwright.sync_api import sync_playwright
+with sync_playwright() as playwright:
+    print(playwright.chromium.executable_path)
+PY
+)"
+[[ -x "$PW_CHROME" && "$PW_CHROME" == "$STAGING_RELEASE/"* ]]
+PW_CHROME_RELATIVE="${PW_CHROME#"$STAGING_RELEASE/"}"
+printf 'CHROMIUM_PATH=/opt/teamagent/current/%s\n' "$PW_CHROME_RELATIVE" \
+  >"$STAGING_RELEASE/chromium.env"
+rm -f "$STAGING_RELEASE/teamagent.env.rendered"
+"$STAGING_RELEASE/app/.venv/bin/python" \
+  "$STAGING_RELEASE/app/scripts/render_ec2_base_env.py" \
+  --base "$STAGING_RELEASE/teamagent.env.base" \
+  --override "$STAGING_RELEASE/chromium.env" \
+  --output "$STAGING_RELEASE/teamagent.env.rendered"
+mv -f "$STAGING_RELEASE/teamagent.env.rendered" "$STAGING_RELEASE/teamagent.env.base"
+rm -f "$STAGING_RELEASE/chromium.env"
+rm -rf "$TMPDIR"
 printf '%s\n' "$ARTIFACT_DIGEST" > "$STAGING_RELEASE/.artifact-sha256"
-printf '%s\n' "$RELEASE_DIGEST" > "$STAGING_RELEASE/.release-sha256"
-# bot と connect_web の両方へ同じ reviewed HMAC keyring metadata を注入する。
-# 既存インスタンスは user_data を再実行しないため、デプロイ毎に unit を冪等に設置する。
+printf '%s\n' "$RELEASE_DIGEST" > "$STAGING_RELEASE/.release-input-sha256"
 cat > "$STAGING_RELEASE/teamagent-bot.service" <<'BOTSVC'
 [Unit]
 Description=TeamAgent Slack Bot (Socket Mode)
@@ -378,18 +409,16 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/teamagent/current/app
-EnvironmentFile=-/opt/teamagent/restart.env
-ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/current/teamagent.env.base; source /opt/teamagent/current/hmac.env; source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK || exit $?; ./.venv/bin/python scripts/check_hmac_runtime_state.py --domains MAIL_ACTION,REPORT_LINK || exit $?; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
-ExecStartPost=/bin/bash -lc 'set -a; source /opt/teamagent/current/teamagent.env.base; source /opt/teamagent/current/hmac.env; source /opt/teamagent/restart.env; source /opt/teamagent/current/app/scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK || exit $?; export TEAMAGENT_HMAC_SERVICE=bot TEAMAGENT_HMAC_SERVICE_HEALTH=1 TEAMAGENT_HMAC_MAIN_PID=$MAINPID; kill -0 "$MAINPID"; /opt/teamagent/current/app/.venv/bin/python /opt/teamagent/current/app/scripts/check_hmac_runtime_state.py --domains MAIL_ACTION,REPORT_LINK --worker-attestation'
+ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/current/teamagent.env.base; source /opt/teamagent/current/hmac.env; source /opt/teamagent/current/runtime.env; source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK || exit $?; export PYTHONPATH=/opt/teamagent/current/app/src TEAMAGENT_BOT_HEARTBEAT_PATH=/run/teamagent/bot-heartbeat.json; ./.venv/bin/python scripts/check_hmac_runtime_state.py --domains MAIL_ACTION,REPORT_LINK || exit $?; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
+ExecStartPost=/opt/teamagent/current/app/scripts/worker_promotion_attest.sh bot $MAINPID
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+RuntimeDirectory=teamagent
+RuntimeDirectoryMode=0700
 [Install]
 WantedBy=multi-user.target
 BOTSVC
-# connect_web(OAuth コールバック /oauth2/callback) を常駐させる unit を冪等に設置。
-# 既存インスタンスは user_data を再実行しないため、デプロイ毎にここで ensure する。
-# これが無いと ALB ターゲットが永久 UNHEALTHY＝連携リンクは出ても完了しない。
 cat > "$STAGING_RELEASE/teamagent-connect.service" <<'CONNSVC'
 [Unit]
 Description=TeamAgent connect_web (OAuth callback receiver)
@@ -400,9 +429,8 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=/opt/teamagent/current/app
-EnvironmentFile=-/opt/teamagent/restart.env
-ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/current/teamagent.env.base; source /opt/teamagent/current/hmac.env; source scripts/load_secrets.sh REPORT_LINK || exit $?; ./.venv/bin/python scripts/check_hmac_runtime_state.py --domains REPORT_LINK || exit $?; set +a; exec ./.venv/bin/python -m teamagent.connect_web'
-ExecStartPost=/bin/bash -lc 'for _attempt in $(seq 1 60); do curl -fsS http://127.0.0.1:8788/healthz >/dev/null && ss -H -ltnp "sport = :8788" | grep -F "pid=$MAINPID," >/dev/null && break; sleep 1; done; set -a; source /opt/teamagent/current/teamagent.env.base; source /opt/teamagent/current/hmac.env; source /opt/teamagent/restart.env; source /opt/teamagent/current/app/scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK || exit $?; export TEAMAGENT_HMAC_SERVICE=connect TEAMAGENT_HMAC_SERVICE_HEALTH=1 TEAMAGENT_HMAC_MAIN_PID=$MAINPID; curl -fsS http://127.0.0.1:8788/healthz >/dev/null; ss -H -ltnp "sport = :8788" | grep -F "pid=$MAINPID," >/dev/null; /opt/teamagent/current/app/.venv/bin/python /opt/teamagent/current/app/scripts/check_hmac_runtime_state.py --domains MAIL_ACTION,REPORT_LINK --worker-attestation'
+ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/current/teamagent.env.base; source /opt/teamagent/current/hmac.env; source /opt/teamagent/current/runtime.env; source scripts/load_secrets.sh REPORT_LINK || exit $?; export PYTHONPATH=/opt/teamagent/current/app/src; ./.venv/bin/python scripts/check_hmac_runtime_state.py --domains REPORT_LINK || exit $?; set +a; exec ./.venv/bin/python -m teamagent.connect_web'
+ExecStartPost=/opt/teamagent/current/app/scripts/worker_promotion_attest.sh connect $MAINPID
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
@@ -411,17 +439,43 @@ WantedBy=multi-user.target
 CONNSVC
 chmod 0644 "$STAGING_RELEASE/teamagent-bot.service" \
   "$STAGING_RELEASE/teamagent-connect.service"
+RUNTIME_EXECUTABLE="$(readlink -f "$STAGING_RELEASE/app/.venv/bin/python")"
+[[ "$RUNTIME_EXECUTABLE" == "$STAGING_RELEASE/"* && -x "$RUNTIME_EXECUTABLE" ]]
+SEAL_RESULT="$(
+  "$STAGING_RELEASE/app/.venv/bin/python" \
+    "$STAGING_RELEASE/app/scripts/measure_worker_release.py" seal \
+    --root "$STAGING_RELEASE" \
+    --final-root "$RELEASE_ROOT" \
+    --executable "$RUNTIME_EXECUTABLE"
+)"
+RELEASE_TREE_DIGEST="$(
+  printf '%s' "$SEAL_RESULT" \
+    | "$STAGING_RELEASE/app/.venv/bin/python" -c \
+      'import json,sys; print(json.load(sys.stdin)["release_tree_sha256"])'
+)"
+RUNTIME_EXECUTABLE_DIGEST="$(
+  printf '%s' "$SEAL_RESULT" \
+    | "$STAGING_RELEASE/app/.venv/bin/python" -c \
+      'import json,sys; print(json.load(sys.stdin)["executable_sha256"])'
+)"
+FINAL_RELEASE="$RELEASE_ROOT/$RELEASE_TREE_DIGEST"
+[[ "$RELEASE_TREE_DIGEST" =~ ^[a-f0-9]{64}$ \
+  && "$RUNTIME_EXECUTABLE_DIGEST" =~ ^[a-f0-9]{64}$ \
+  && ! -e "$FINAL_RELEASE" ]]
 mv -- "$STAGING_RELEASE" "$FINAL_RELEASE"
 trap - EXIT
 (
   set -a
   source "$FINAL_RELEASE/teamagent.env.base"
   source "$FINAL_RELEASE/hmac.env"
+  source "$FINAL_RELEASE/runtime.env"
   source "$FINAL_RELEASE/app/scripts/load_secrets.sh" MAIL_ACTION,REPORT_LINK
+  export PYTHONPATH="$FINAL_RELEASE/app/src"
   "$FINAL_RELEASE/app/.venv/bin/python" "$FINAL_RELEASE/app/scripts/check_hmac_runtime_state.py" \
     --domains MAIL_ACTION,REPORT_LINK --worker-attestation
 )
-echo "worker_readiness=true"
+printf 'TEAMAGENT_RELEASE_METADATA={"release_tree_sha256":"%s","runtime_executable_sha256":"%s"}\n' \
+  "$RELEASE_TREE_DIGEST" "$RUNTIME_EXECUTABLE_DIGEST"
 RSH
 )
 REMOTE="${REMOTE/__BUCKET__/$BUCKET}"
@@ -445,16 +499,40 @@ if [[ -z "${CID:-}" || "${CID}" == "None" ]]; then
   exit 1
 fi
 echo "   CommandId=${CID}（完了待ち・最大10分）"
+ST=Pending
 for i in $(seq 1 60); do
   sleep 10
   ST=$(aws ssm get-command-invocation --region "$REGION" --command-id "$CID" --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)
   echo "   [$((i * 10))s] $ST"
-  [[ "$ST" == "Success" || "$ST" == "Failed" || "$ST" == "TimedOut" ]] && break
+  [[ "$ST" == "Success" || "$ST" == "Failed" || "$ST" == "TimedOut" \
+    || "$ST" == "Cancelled" ]] && break
 done
 [[ "${ST:-}" == "Success" ]] || {
+  aws ssm cancel-command --region "$REGION" --command-id "$CID" >/dev/null 2>&1 || true
   echo "ERROR: worker prepare/readiness failed (status=${ST:-unknown}); remote output is not echoed" >&2
   exit 1
 }
+PREPARE_OUTPUT="$(aws ssm get-command-invocation --region "$REGION" \
+  --command-id "$CID" --instance-id "$INSTANCE_ID" \
+  --query StandardOutputContent --output text 2>/dev/null)"
+RELEASE_METADATA_LINE="$(
+  printf '%s\n' "$PREPARE_OUTPUT" | grep '^TEAMAGENT_RELEASE_METADATA='
+)"
+[[ "$(printf '%s\n' "$RELEASE_METADATA_LINE" | wc -l)" == "1" ]] || {
+  echo "ERROR: worker release measurement is unavailable" >&2
+  exit 1
+}
+RELEASE_METADATA="${RELEASE_METADATA_LINE#TEAMAGENT_RELEASE_METADATA=}"
+RELEASE_TREE_DIGEST="$(printf '%s' "$RELEASE_METADATA" | "$PREFLIGHT_PY" -c \
+  'import json,sys; v=json.load(sys.stdin); assert set(v)=={"release_tree_sha256","runtime_executable_sha256"}; print(v["release_tree_sha256"])')"
+RUNTIME_EXECUTABLE_DIGEST="$(printf '%s' "$RELEASE_METADATA" | "$PREFLIGHT_PY" -c \
+  'import json,sys; v=json.load(sys.stdin); assert set(v)=={"release_tree_sha256","runtime_executable_sha256"}; print(v["runtime_executable_sha256"])')"
+[[ "$RELEASE_TREE_DIGEST" =~ ^[a-f0-9]{64}$ \
+  && "$RUNTIME_EXECUTABLE_DIGEST" =~ ^[a-f0-9]{64}$ ]] || {
+  echo "ERROR: worker release measurement is malformed" >&2
+  exit 1
+}
+unset PREPARE_OUTPUT RELEASE_METADATA RELEASE_METADATA_LINE
 echo "   worker_prepare=true readiness=true output_redacted=true"
 
 if [[ "$HMAC_WORKER_ADVANCE_STAGE" == "1" ]]; then
@@ -471,6 +549,9 @@ PRE_RESTART_RESULT="$("$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
   --control "$HMAC_ROLLOUT_CONTROL" \
   --action pre-restart \
   --mode "$HMAC_WORKER_MODE" \
+  --release-root "/opt/teamagent/releases/$RELEASE_TREE_DIGEST" \
+  --release-tree-sha256 "$RELEASE_TREE_DIGEST" \
+  --runtime-executable-sha256 "$RUNTIME_EXECUTABLE_DIGEST" \
   --worker-rollback-artifact "$HMAC_WORKER_ROLLBACK_ARTIFACT")"
 RESTART_NONCE="$(printf '%s' "$PRE_RESTART_RESULT" | "$PREFLIGHT_PY" -c \
   'import json,sys; print(json.load(sys.stdin)["restart_nonce"])')"
@@ -481,61 +562,125 @@ RESTART_NONCE="$(printf '%s' "$PRE_RESTART_RESULT" | "$PREFLIGHT_PY" -c \
 
 RESTART_REMOTE=$(cat <<'RSH'
 set -euo pipefail
-RELEASE_DIGEST="__RELEASE_DIGEST__"
+INPUT_RELEASE_DIGEST="__INPUT_RELEASE_DIGEST__"
+RELEASE_TREE_DIGEST="__RELEASE_TREE_DIGEST__"
 RESTART_NONCE="__RESTART_NONCE__"
 TRANSACTION_ID="__TRANSACTION_ID__"
-FINAL_RELEASE="/opt/teamagent/releases/$RELEASE_DIGEST"
+FINAL_RELEASE="/opt/teamagent/releases/$RELEASE_TREE_DIGEST"
 [[ -d "$FINAL_RELEASE/app" ]]
-[[ "$(cat "$FINAL_RELEASE/.release-sha256")" == "$RELEASE_DIGEST" ]]
+[[ "$(cat "$FINAL_RELEASE/.release-tree-sha256")" == "$RELEASE_TREE_DIGEST" ]]
+[[ "$(cat "$FINAL_RELEASE/.release-input-sha256")" == "$INPUT_RELEASE_DIGEST" ]]
+"$FINAL_RELEASE/app/.venv/bin/python" \
+  "$FINAL_RELEASE/app/scripts/measure_worker_release.py" verify \
+  --root "$FINAL_RELEASE" --expected-sha256 "$RELEASE_TREE_DIGEST" >/dev/null
 bash "$FINAL_RELEASE/app/scripts/worker_atomic_release_switch.sh" \
-  switch "$TRANSACTION_ID" "$FINAL_RELEASE" "$RELEASE_DIGEST" "$RESTART_NONCE"
+  switch "$TRANSACTION_ID" "$FINAL_RELEASE" "$RELEASE_TREE_DIGEST" \
+  "$INPUT_RELEASE_DIGEST" "$RESTART_NONCE"
 RSH
 )
-RESTART_REMOTE="${RESTART_REMOTE/__RELEASE_DIGEST__/$RELEASE_DIGEST}"
+RESTART_REMOTE="${RESTART_REMOTE/__INPUT_RELEASE_DIGEST__/$RELEASE_DIGEST}"
+RESTART_REMOTE="${RESTART_REMOTE/__RELEASE_TREE_DIGEST__/$RELEASE_TREE_DIGEST}"
 RESTART_REMOTE="${RESTART_REMOTE/__RESTART_NONCE__/$RESTART_NONCE}"
 RESTART_REMOTE="${RESTART_REMOTE/__TRANSACTION_ID__/$TEAMAGENT_APPLY_ATTEMPT_ID}"
 RESTART_B64="$(printf '%s' "$RESTART_REMOTE" | base64 | tr -d '\n')"
+
+RELEASE_TRANSACTION_STATUS_JSON=""
+run_release_transaction_action() {
+  local action="$1" extra="${2:-}" action_remote action_b64 action_cid action_status
+  local action_output status_line i command_try
+  action_remote="bash /opt/teamagent/releases/$RELEASE_TREE_DIGEST/app/scripts/worker_atomic_release_switch.sh $action $TEAMAGENT_APPLY_ATTEMPT_ID${extra:+ $extra}"
+  for command_try in 1 2; do
+    action_b64="$(printf '%s' "$action_remote" | base64 | tr -d '\n')"
+    action_cid="$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE_ID" \
+      --document-name AWS-RunShellScript --comment "TeamAgent worker release $action" \
+      --parameters commands="echo $action_b64 | base64 -d | bash" \
+      --query Command.CommandId --output text 2>/dev/null || true)"
+    [[ -n "$action_cid" && "$action_cid" != "None" ]] || continue
+    action_status=Pending
+    for i in $(seq 1 30); do
+      sleep 10
+      action_status="$(aws ssm get-command-invocation --region "$REGION" \
+        --command-id "$action_cid" --instance-id "$INSTANCE_ID" \
+        --query Status --output text 2>/dev/null || echo Pending)"
+      [[ "$action_status" == "Success" || "$action_status" == "Failed" \
+        || "$action_status" == "TimedOut" || "$action_status" == "Cancelled" ]] && break
+    done
+    if [[ "$action_status" == "Success" ]]; then
+      if [[ "$action" == "status" ]]; then
+        action_output="$(aws ssm get-command-invocation --region "$REGION" \
+          --command-id "$action_cid" --instance-id "$INSTANCE_ID" \
+          --query StandardOutputContent --output text 2>/dev/null || true)"
+        status_line="$(printf '%s\n' "$action_output" \
+          | grep -E '^\{"current":"(new|previous|unknown)","status":"[a-z_]+","transaction_id":"[0-9a-f-]+"\}$' \
+          || true)"
+        [[ "$(printf '%s\n' "$status_line" | grep -c .)" == "1" ]] || continue
+        RELEASE_TRANSACTION_STATUS_JSON="$status_line"
+      fi
+      return 0
+    fi
+    aws ssm cancel-command --region "$REGION" --command-id "$action_cid" \
+      >/dev/null 2>&1 || true
+  done
+  return 1
+}
+
+reconcile_restart_rollback() {
+  run_release_transaction_action reconcile rollback \
+    && "$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
+      --manifest "$HMAC_PREFLIGHT_MANIFEST" \
+      --refresh-manifest-now \
+      --control "$HMAC_ROLLOUT_CONTROL" \
+      --action reconcile-restart \
+      --mode "$HMAC_WORKER_MODE" \
+      --restart-outcome rolled-back
+}
+
 RESTART_CID="$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE_ID" \
   --document-name AWS-RunShellScript --comment "TeamAgent HMAC-gated restart" \
   --parameters commands="echo $RESTART_B64 | base64 -d | bash" \
   --query Command.CommandId --output text 2>/dev/null || true)"
-[[ -n "${RESTART_CID:-}" && "$RESTART_CID" != "None" ]] || {
-  echo "ERROR: gated restart command was not accepted" >&2
-  exit 1
-}
+if [[ -z "${RESTART_CID:-}" || "$RESTART_CID" == "None" ]]; then
+  if reconcile_restart_rollback; then
+    echo "ERROR: gated restart command was not accepted; prior release reconciled" >&2
+    exit 1
+  fi
+  echo "ERROR: gated restart rejection needs remote reconciliation" >&2
+  exit 70
+fi
 RESTART_STATUS=Pending
 for i in $(seq 1 30); do
   sleep 10
   RESTART_STATUS=$(aws ssm get-command-invocation --region "$REGION" \
     --command-id "$RESTART_CID" --instance-id "$INSTANCE_ID" \
     --query Status --output text 2>/dev/null || echo Pending)
-  [[ "$RESTART_STATUS" == "Success" || "$RESTART_STATUS" == "Failed" || "$RESTART_STATUS" == "TimedOut" ]] && break
+  [[ "$RESTART_STATUS" == "Success" || "$RESTART_STATUS" == "Failed" \
+    || "$RESTART_STATUS" == "TimedOut" || "$RESTART_STATUS" == "Cancelled" ]] && break
 done
-[[ "$RESTART_STATUS" == "Success" ]] || {
-  echo "ERROR: worker restart failed (status=$RESTART_STATUS); remote output is not echoed" >&2
-  exit 1
-}
 
-run_release_transaction_action() {
-  local action="$1" action_remote action_b64 action_cid action_status i
-  action_remote="bash /opt/teamagent/releases/$RELEASE_DIGEST/app/scripts/worker_atomic_release_switch.sh $action $TEAMAGENT_APPLY_ATTEMPT_ID"
-  action_b64="$(printf '%s' "$action_remote" | base64 | tr -d '\n')"
-  action_cid="$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE_ID" \
-    --document-name AWS-RunShellScript --comment "TeamAgent worker release $action" \
-    --parameters commands="echo $action_b64 | base64 -d | bash" \
-    --query Command.CommandId --output text 2>/dev/null || true)"
-  [[ -n "$action_cid" && "$action_cid" != "None" ]] || return 1
-  action_status=Pending
-  for i in $(seq 1 30); do
-    sleep 10
-    action_status="$(aws ssm get-command-invocation --region "$REGION" \
-      --command-id "$action_cid" --instance-id "$INSTANCE_ID" \
-      --query Status --output text 2>/dev/null || echo Pending)"
-    [[ "$action_status" == "Success" || "$action_status" == "Failed" \
-      || "$action_status" == "TimedOut" ]] && break
-  done
-  [[ "$action_status" == "Success" ]]
-}
+if [[ "$RESTART_STATUS" != "Success" ]]; then
+  aws ssm cancel-command --region "$REGION" --command-id "$RESTART_CID" \
+    >/dev/null 2>&1 || true
+  if ! reconcile_restart_rollback; then
+    echo "ERROR: worker restart outcome is ambiguous and rollback needs reconciliation" >&2
+    exit 70
+  fi
+  echo "ERROR: worker restart failed (status=$RESTART_STATUS); prior release reconciled" >&2
+  exit 1
+fi
+if ! run_release_transaction_action status \
+  || ! printf '%s' "$RELEASE_TRANSACTION_STATUS_JSON" | "$PREFLIGHT_PY" -c \
+    'import json,os,sys
+value=json.load(sys.stdin)
+expected={"current":"new","status":"ready","transaction_id":os.environ["TEAMAGENT_APPLY_ATTEMPT_ID"]}
+raise SystemExit(0 if value == expected else 1)'; then
+  if ! reconcile_restart_rollback; then
+    echo "ERROR: successful restart has ambiguous remote state and needs reconciliation" >&2
+    exit 70
+  fi
+  echo "ERROR: successful restart did not prove ready/new; prior release reconciled" >&2
+  exit 1
+fi
+unset RELEASE_TRANSACTION_STATUS_JSON
 
 if ! "$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
   --manifest "$HMAC_PREFLIGHT_MANIFEST" \
@@ -543,7 +688,7 @@ if ! "$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
   --control "$HMAC_ROLLOUT_CONTROL" \
   --action post-restart \
   --mode "$HMAC_WORKER_MODE"; then
-  if ! run_release_transaction_action rollback; then
+  if ! reconcile_restart_rollback; then
     echo "ERROR: post-restart failed and automatic rollback needs reconciliation" >&2
     exit 70
   fi
@@ -551,7 +696,7 @@ if ! "$PREFLIGHT_PY" scripts/hmac_rollout_gate.py \
   exit 1
 fi
 if ! run_release_transaction_action commit; then
-  if ! run_release_transaction_action rollback; then
+  if ! reconcile_restart_rollback; then
     echo "ERROR: release commit and automatic rollback need reconciliation" >&2
     exit 70
   fi

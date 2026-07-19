@@ -22,18 +22,32 @@ import json
 import os
 import re
 import secrets
+import sys
 import time
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from scripts.preflight_hmac_rotation import validate_rendered_tasks, validate_worker_env
-from teamagent.hmac_durable_state import (
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPOSITORY_ROOT))
+sys.path.insert(0, str(_REPOSITORY_ROOT / "src"))
+
+from scripts.preflight_hmac_rotation import (  # noqa: E402
+    validate_rendered_tasks,
+    validate_worker_env,
+)
+from scripts.verify_worker_bundle_provenance import (  # noqa: E402
+    ProvenanceBinding,
+)
+from scripts.verify_worker_bundle_provenance import (  # noqa: E402
+    verify as verify_worker_provenance,
+)
+from teamagent.hmac_durable_state import (  # noqa: E402
     HmacRuntimeExpectation,
     runtime_expectations_digest,
 )
-from teamagent.hmac_keyring import (
+from teamagent.hmac_keyring import (  # noqa: E402
     MAIL_ACTION_MAX_TOKEN_TTL_S,
     REPORT_LINK_MAX_TOKEN_TTL_S,
     validate_hmac_rotation_transition,
@@ -52,6 +66,7 @@ _TASK_DEFINITION_RE = re.compile(
 )
 _IMAGE_DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
 _RESTART_NONCE_RE = re.compile(r"^[a-f0-9]{64}$")
+_RELEASE_ROOT_RE = re.compile(r"^/opt/teamagent/releases/[a-f0-9]{64}$")
 _APPLY_ATTEMPT_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
@@ -61,6 +76,29 @@ _TASK_DOMAINS = {
     "connect_web": frozenset({"report_link"}),
     "morning_digest": frozenset({"mail_action"}),
 }
+_WORKER_BINDING_NAMES = frozenset(
+    {
+        "atomic_switch",
+        "base_environment",
+        "base_env_renderer",
+        "candidate_artifact",
+        "candidate_env",
+        "candidate_receipt",
+        "candidate_signature",
+        "deploy_overrides",
+        "deploy_script",
+        "promotion_attester",
+        "provenance_verifier",
+        "release_measurer",
+        "reviewed_manifest",
+        "rollback_artifact",
+        "rollback_env",
+        "rollback_receipt",
+        "rollback_signature",
+        "rollout_control",
+        "runtime_lock",
+    }
+)
 _DOMAIN_MAX_TTL = {
     "mail_action": MAIL_ACTION_MAX_TOKEN_TTL_S,
     "report_link": REPORT_LINK_MAX_TOKEN_TTL_S,
@@ -95,7 +133,8 @@ _LEDGER_STAGES = (
     "mcp_stable_and_old_drained",
     "complete",
 )
-_CLEANUP_STAGES = frozenset({"authorized", "complete"})
+_CLEANUP_STAGES = frozenset({"aborted", "authorized", "complete"})
+_DEPLOYMENT_INTENT_TABLE = "teamagent-dev-image-deployment-intents"
 _TASK_INVENTORY_LIMIT = 10_000
 _DESCRIBE_TASK_BATCH = 100
 _TASK_REGISTERABLE_KEYS = frozenset(
@@ -185,7 +224,7 @@ class ScheduledControl:
     rollback_image: str
     legacy_target_digest: str
     rollback_target_digest: str
-    expected_rule_state: str
+    expected_rule: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -243,6 +282,13 @@ class CleanupLedger:
     rollback_worker_env_digest: str
     candidate_arns: dict[str, str | None]
     prepared_plan_sha256: str
+    prepared_intent_id: str
+    baseline_arns: dict[str, str]
+    baseline_digests: dict[str, str]
+    baseline_provenances: dict[str, frozenset[str]]
+    candidate_worker_provenance: ProvenanceBinding
+    rollback_worker_provenance: ProvenanceBinding
+    worker_bindings: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -338,12 +384,12 @@ def _scheduled_control(value: object) -> ScheduledControl:
                 "rollback_image",
                 "legacy_target_digest",
                 "rollback_target_digest",
-                "expected_rule_state",
+                "expected_rule",
             }
         ),
     )
-    expected_rule_state = _bounded_text(item["expected_rule_state"], maximum=16)
-    if expected_rule_state != "DISABLED":
+    expected_rule = _canonical_event_rule(item["expected_rule"])
+    if expected_rule["Name"] != item["rule"] or expected_rule["State"] != "DISABLED":
         raise RolloutGateError("invalid_control")
     return ScheduledControl(
         cluster=_bounded_text(item["cluster"], maximum=512),
@@ -356,7 +402,7 @@ def _scheduled_control(value: object) -> ScheduledControl:
         rollback_image=_image(item["rollback_image"]),
         legacy_target_digest=_provenance(item["legacy_target_digest"]),
         rollback_target_digest=_provenance(item["rollback_target_digest"]),
-        expected_rule_state=expected_rule_state,
+        expected_rule=expected_rule,
     )
 
 
@@ -661,6 +707,82 @@ def _task_artifact_digest(definition: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+_EVENT_RULE_FIELDS = frozenset(
+    {
+        "Arn",
+        "CreatedBy",
+        "Description",
+        "EventBusName",
+        "EventPattern",
+        "ManagedBy",
+        "Name",
+        "RoleArn",
+        "ScheduleExpression",
+        "State",
+    }
+)
+
+
+def _canonical_event_rule(value: object) -> dict[str, object]:
+    """Normalize every DescribeRule field; omitted optional fields become explicit nulls."""
+
+    raw = _mapping(value)
+    unknown = frozenset(raw) - (_EVENT_RULE_FIELDS | {"ResponseMetadata"})
+    if unknown:
+        raise RolloutGateError("scheduled_rule_invalid", scope="morning_digest")
+    normalized: dict[str, object] = {}
+    for name in _EVENT_RULE_FIELDS:
+        item = raw.get(name)
+        if item is not None and (
+            type(item) is not str
+            or not item
+            or len(item) > 4096
+            or item != item.strip()
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in item)
+        ):
+            raise RolloutGateError("scheduled_rule_invalid", scope="morning_digest")
+        normalized[name] = item
+    if (
+        type(normalized["Name"]) is not str
+        or type(normalized["Arn"]) is not str
+        or normalized["State"]
+        not in {
+            "DISABLED",
+            "ENABLED",
+            "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
+        }
+        or type(normalized["EventBusName"]) is not str
+        or (normalized["ScheduleExpression"] is None) == (normalized["EventPattern"] is None)
+    ):
+        raise RolloutGateError("scheduled_rule_invalid", scope="morning_digest")
+    event_pattern = normalized["EventPattern"]
+    if event_pattern is not None:
+        try:
+            parsed_pattern = json.loads(str(event_pattern))
+        except json.JSONDecodeError as exc:
+            raise RolloutGateError(
+                "scheduled_rule_invalid",
+                scope="morning_digest",
+            ) from exc
+        if type(parsed_pattern) is not dict:
+            raise RolloutGateError("scheduled_rule_invalid", scope="morning_digest")
+        normalized["EventPattern"] = json.dumps(
+            _canonical_json_value(parsed_pattern),
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    return {name: normalized[name] for name in sorted(normalized)}
+
+
+def _canonical_event_rule_digest(value: object) -> str:
+    encoded = json.dumps(
+        _canonical_event_rule(value),
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _canonical_target_digest(target: object) -> str:
     item = _mapping(target)
     required = frozenset(
@@ -776,6 +898,7 @@ class LiveRolloutGate:
         self.events = clients.client("events", region_name=control.region)
         self.secrets = clients.client("secretsmanager", region_name=control.region)
         self.ddb = clients.client("dynamodb", region_name=control.region)
+        self._clients = clients
         self.deployment_intent = deployment_intent
         self._started_monotonic = time.monotonic()
         self._observed_times: list[tuple[int, float]] = []
@@ -904,12 +1027,9 @@ class LiveRolloutGate:
         scheduled = self.control.morning_digest
         response = self.events.describe_rule(Name=scheduled.rule)
         self._observe(response)
-        if (
-            type(response) is not dict
-            or response.get("Name") != scheduled.rule
-            or response.get("State") != scheduled.expected_rule_state
-        ):
-            raise RolloutGateError("scheduled_rule_state_drift", scope="morning_digest")
+        observed = _canonical_event_rule(response)
+        if observed != scheduled.expected_rule:
+            raise RolloutGateError("scheduled_rule_drift", scope="morning_digest")
 
     def _morning_target(self) -> dict[str, Any]:
         scheduled = self.control.morning_digest
@@ -2257,6 +2377,7 @@ class LiveRolloutGate:
             revision = int(item["revision"]["N"])
             authorized_at = int(item["authorized_at"]["N"])
             prepared_plan_sha256 = item["prepared_plan_sha256"]["S"]
+            prepared_intent_id = item["prepared_intent_id"]["S"]
         except (KeyError, TypeError, ValueError) as exc:
             raise RolloutGateError("cleanup_state_invalid", scope=domain) from exc
         if (
@@ -2266,6 +2387,7 @@ class LiveRolloutGate:
             or revision < 1
             or authorized_at < 0
             or _PROVENANCE_RE.fullmatch(prepared_plan_sha256) is None
+            or _APPLY_ATTEMPT_RE.fullmatch(prepared_intent_id) is None
         ):
             raise RolloutGateError("cleanup_state_invalid", scope=domain)
         old_provenances = {
@@ -2275,6 +2397,19 @@ class LiveRolloutGate:
         new_provenances = {
             item_domain: self._ddb_string_set(item, f"new_{item_domain}_provenances")
             for item_domain in _DOMAIN_MAX_TTL
+        }
+        baseline_provenances = {
+            item_domain: self._ddb_string_set(
+                item,
+                f"baseline_{item_domain}_provenances",
+            )
+            for item_domain in _DOMAIN_MAX_TTL
+        }
+        baseline_arns = {
+            task: str(self._ddb_string(item, f"baseline_{task}_arn")) for task in _TASK_DOMAINS
+        }
+        baseline_digests = {
+            task: str(self._ddb_string(item, f"baseline_{task}_digest")) for task in _TASK_DOMAINS
         }
         candidate_digests = {
             task: str(self._ddb_string(item, f"candidate_{task}_digest"))
@@ -2366,12 +2501,56 @@ class LiveRolloutGate:
         all_digests = tuple(candidate_digests.values()) + tuple(rollback_digests.values())
         if (
             any(not values for values in new_provenances.values())
+            or any(not values for values in baseline_provenances.values())
+            or any(_TASK_DEFINITION_RE.fullmatch(arn) is None for arn in baseline_arns.values())
+            or any(_PROVENANCE_RE.fullmatch(digest) is None for digest in baseline_digests.values())
             or any(_PROVENANCE_RE.fullmatch(digest) is None for digest in all_digests)
             or any(
                 candidate_digests[task] == rollback_digests[task]
                 for task in (*_TASK_DOMAINS, "worker")
             )
         ):
+            raise RolloutGateError("cleanup_state_invalid", scope=domain)
+        worker_provenance: dict[str, ProvenanceBinding] = {}
+        for kind in ("candidate", "rollback"):
+            try:
+                worker_provenance[kind] = ProvenanceBinding(
+                    artifact_sha256=str(self._ddb_string(item, f"{kind}_worker_artifact_sha256")),
+                    canonical_receipt_sha256=str(
+                        self._ddb_string(item, f"{kind}_worker_canonical_receipt_sha256")
+                    ),
+                    key_arn=str(self._ddb_string(item, f"{kind}_worker_key_arn")),
+                    receipt_sha256=str(self._ddb_string(item, f"{kind}_worker_receipt_sha256")),
+                    signature_sha256=str(self._ddb_string(item, f"{kind}_worker_signature_sha256")),
+                    source_branch=str(self._ddb_string(item, f"{kind}_worker_source_branch")),
+                    source_commit=str(self._ddb_string(item, f"{kind}_worker_source_commit")),
+                    source_origin=str(self._ddb_string(item, f"{kind}_worker_source_origin")),
+                    source_tree=str(self._ddb_string(item, f"{kind}_worker_source_tree")),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RolloutGateError("cleanup_state_invalid", scope=domain) from exc
+            binding = worker_provenance[kind]
+            expected_worker_digest = (
+                candidate_digests["worker"] if kind == "candidate" else rollback_digests["worker"]
+            )
+            if (
+                _PROVENANCE_RE.fullmatch(binding.artifact_sha256) is None
+                or _PROVENANCE_RE.fullmatch(binding.canonical_receipt_sha256) is None
+                or _PROVENANCE_RE.fullmatch(binding.receipt_sha256) is None
+                or _PROVENANCE_RE.fullmatch(binding.signature_sha256) is None
+                or not binding.key_arn.startswith(f"arn:aws:kms:{self.control.region}:")
+                or binding.source_origin != "git@github.com:noirelumiere00/TeamAgent.git"
+                or binding.source_branch != "dev"
+                or re.fullmatch(r"[a-f0-9]{40}", binding.source_commit) is None
+                or re.fullmatch(r"[a-f0-9]{40}", binding.source_tree) is None
+                or binding.artifact_sha256 != expected_worker_digest
+            ):
+                raise RolloutGateError("cleanup_state_invalid", scope=domain)
+        worker_bindings = {
+            name: str(self._ddb_string(item, f"worker_binding_{name}"))
+            for name in _WORKER_BINDING_NAMES
+        }
+        if any(_PROVENANCE_RE.fullmatch(value) is None for value in worker_bindings.values()):
             raise RolloutGateError("cleanup_state_invalid", scope=domain)
         return CleanupLedger(
             domain=domain,
@@ -2389,6 +2568,13 @@ class LiveRolloutGate:
             rollback_worker_env_digest=rollback_worker_env_digest,
             candidate_arns=candidate_arns,
             prepared_plan_sha256=prepared_plan_sha256,
+            prepared_intent_id=prepared_intent_id,
+            baseline_arns=baseline_arns,
+            baseline_digests=baseline_digests,
+            baseline_provenances=baseline_provenances,
+            candidate_worker_provenance=worker_provenance["candidate"],
+            rollback_worker_provenance=worker_provenance["rollback"],
+            worker_bindings=worker_bindings,
         )
 
     def _active_cleanup(self) -> CleanupLedger | None:
@@ -2400,11 +2586,538 @@ class LiveRolloutGate:
             stage = self._ddb_string(item, "stage")
             if stage == "authorized":
                 active.append(self._cleanup_ledger(domain))
-            elif stage != "complete":
+            elif stage not in {"aborted", "complete"}:
                 raise RolloutGateError("cleanup_state_invalid", scope=domain)
         if len(active) > 1:
             raise RolloutGateError("cleanup_state_invalid")
         return active[0] if active else None
+
+    def _deployment_intent_item(self, intent_id: str) -> dict[str, Any]:
+        response = self.ddb.get_item(
+            TableName=_DEPLOYMENT_INTENT_TABLE,
+            Key={"record_id": {"S": f"intent#{intent_id}"}},
+            ConsistentRead=True,
+        )
+        self._observe(response)
+        item = response.get("Item") if type(response) is dict else None
+        if type(item) is not dict:
+            raise RolloutGateError("cleanup_reconciliation_intent_invalid")
+        return item
+
+    def _cleanup_live_state(
+        self,
+        cleanup: CleanupLedger,
+    ) -> tuple[dict[str, dict[str, str]], str]:
+        arns, definitions = self._live_tasks()
+        self._full_task_inventory(arns)
+        state: dict[str, dict[str, str]] = {}
+        rollback_arns = {
+            "mcp": self.control.mcp.rollback_task_definition,
+            "connect_web": self.control.connect_web.rollback_task_definition,
+            "morning_digest": self.control.morning_digest.rollback_task_definition,
+        }
+        for task, definition in definitions.items():
+            digest = _task_artifact_digest(definition)
+            arn = arns[task]
+            if arn == cleanup.baseline_arns[task] and digest == cleanup.baseline_digests[task]:
+                classification = "baseline"
+            elif digest == cleanup.candidate_digests[task] and (
+                cleanup.candidate_arns[task] is None or arn == cleanup.candidate_arns[task]
+            ):
+                classification = "candidate"
+            elif arn == rollback_arns[task] and digest == cleanup.rollback_digests[task]:
+                classification = "rollback"
+            else:
+                raise RolloutGateError("cleanup_live_state_unproved", scope=task)
+            state[task] = {
+                "arn": arn,
+                "classification": classification,
+                "digest": digest,
+            }
+        state["worker"] = self._cleanup_worker_live_state(cleanup)
+        encoded = json.dumps(
+            {
+                "domain": cleanup.domain,
+                "rotation_epoch": self.control.rotation_epoch,
+                "resources": state,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        return state, hashlib.sha256(encoded).hexdigest()
+
+    def _cleanup_worker_live_state(
+        self,
+        cleanup: CleanupLedger,
+    ) -> dict[str, str]:
+        """Classify the active worker from the request-before-switch audit record."""
+
+        cleanup_item = self._read_item(self._cleanup_record_name(cleanup.domain))
+        bound_plan = self._ddb_string(
+            cleanup_item,
+            "candidate_worker_plan_sha256",
+            optional=True,
+        )
+        bound_attempt = self._ddb_string(
+            cleanup_item,
+            "candidate_worker_apply_attempt_id",
+            optional=True,
+        )
+        if (bound_plan is None) != (bound_attempt is None) or (
+            bound_plan is not None
+            and (
+                _PROVENANCE_RE.fullmatch(bound_plan) is None
+                or _APPLY_ATTEMPT_RE.fullmatch(str(bound_attempt)) is None
+                or bound_plan != cleanup.prepared_plan_sha256
+            )
+        ):
+            raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+
+        record_name = self._restart_record_name("cleanup")
+        restart = self._read_item_optional(record_name)
+        missing_digest = hashlib.sha256(b"missing-worker-restart-record").hexdigest()
+        if restart is None:
+            prior_digest = self._ddb_string(
+                cleanup_item,
+                "reconciliation_worker_restart_record_sha256",
+                optional=True,
+            )
+            if prior_digest is not None and prior_digest != missing_digest:
+                raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+            return {
+                "apply_attempt_id": str(bound_attempt or ""),
+                "classification": "baseline",
+                "evidence": "no-restart-request",
+                "plan_sha256": str(bound_plan or ""),
+                "restart_record_present": "false",
+                "restart_record_revision": "",
+                "restart_record_sha256": missing_digest,
+                "restart_record_stage": "missing",
+            }
+
+        revision = self._ddb_number(restart, "revision")
+        stage = self._ddb_string(restart, "stage")
+        mode = self._ddb_string(restart, "mode")
+        request_plan = self._ddb_string(restart, "plan_sha256", optional=True)
+        request_attempt = self._ddb_string(
+            restart,
+            "apply_attempt_id",
+            optional=True,
+        )
+        restart_digest = hashlib.sha256(
+            json.dumps(restart, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
+        if (
+            revision is None
+            or type(stage) is not str
+            or type(mode) is not str
+            or self._ddb_string(restart, "rotation_epoch") != self.control.rotation_epoch
+        ):
+            raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+
+        directly_bound = (
+            bound_plan is not None
+            and request_plan == bound_plan
+            and request_attempt == bound_attempt
+            and mode == "cleanup"
+        )
+        prior_digest = self._ddb_string(
+            cleanup_item,
+            "reconciliation_worker_restart_record_sha256",
+            optional=True,
+        )
+        prior_classification = self._ddb_string(
+            cleanup_item,
+            "reconciliation_worker_classification",
+            optional=True,
+        )
+        if directly_bound:
+            if (
+                self._ddb_string(restart, "provenance") != self.control.worker.provenance
+                or self._ddb_string(restart, "artifact_sha256")
+                != cleanup.candidate_digests["worker"]
+            ):
+                raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+            if stage == "complete":
+                release_root = self._ddb_string(restart, "release_root", optional=True)
+                release_tree = self._ddb_string(
+                    restart,
+                    "release_tree_sha256",
+                    optional=True,
+                )
+                executable = self._ddb_string(
+                    restart,
+                    "runtime_executable_sha256",
+                    optional=True,
+                )
+                completed_at = self._ddb_number(
+                    restart,
+                    "completed_at",
+                    optional=True,
+                )
+                if (
+                    type(release_root) is not str
+                    or type(release_tree) is not str
+                    or type(executable) is not str
+                    or completed_at is None
+                    or _RELEASE_ROOT_RE.fullmatch(release_root) is None
+                    or _PROVENANCE_RE.fullmatch(release_tree) is None
+                    or release_root.rsplit("/", maxsplit=1)[-1] != release_tree
+                    or _PROVENANCE_RE.fullmatch(executable) is None
+                ):
+                    raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+                classification = "candidate"
+                evidence = "completed-restart"
+            elif stage == "reconciled":
+                if (
+                    self._ddb_string(
+                        restart,
+                        "reconciliation_outcome",
+                        optional=True,
+                    )
+                    != "rolled-back"
+                    or self._ddb_string(
+                        restart,
+                        "reconciliation_plan_sha256",
+                        optional=True,
+                    )
+                    != request_plan
+                    or self._ddb_string(
+                        restart,
+                        "reconciliation_apply_attempt_id",
+                        optional=True,
+                    )
+                    != request_attempt
+                ):
+                    raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+                classification = "baseline"
+                evidence = "audited-rollback"
+            else:
+                raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+        elif prior_digest == restart_digest and prior_classification in {"baseline", "candidate"}:
+            classification = str(prior_classification)
+            evidence = "prior-reconciliation"
+        elif (
+            mode != "cleanup"
+            and stage == "complete"
+            and self._ddb_string(restart, "provenance") == self.control.worker.provenance
+            and self._ddb_string(restart, "artifact_sha256") == cleanup.candidate_digests["worker"]
+            and self._ddb_number(restart, "completed_at", optional=True) is not None
+        ):
+            classification = "baseline"
+            evidence = "pre-cleanup-restart"
+        else:
+            raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+
+        return {
+            "apply_attempt_id": str(request_attempt or ""),
+            "classification": classification,
+            "evidence": evidence,
+            "plan_sha256": str(request_plan or ""),
+            "restart_record_present": "true",
+            "restart_record_revision": str(revision),
+            "restart_record_sha256": restart_digest,
+            "restart_record_stage": stage,
+        }
+
+    def _cleanup_worker_condition(
+        self,
+        worker_state: dict[str, str],
+    ) -> dict[str, Any]:
+        key = {
+            "scope": {"S": self.control.scope},
+            "record": {"S": self._restart_record_name("cleanup")},
+        }
+        if worker_state.get("restart_record_present") == "false":
+            return {
+                "ConditionCheck": {
+                    "TableName": self.control.state_table,
+                    "Key": key,
+                    "ConditionExpression": "attribute_not_exists(#record)",
+                    "ExpressionAttributeNames": {"#record": "record"},
+                }
+            }
+        revision = worker_state.get("restart_record_revision")
+        stage = worker_state.get("restart_record_stage")
+        if (
+            type(revision) is not str
+            or not revision.isdecimal()
+            or type(stage) is not str
+            or not stage
+        ):
+            raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+        return {
+            "ConditionCheck": {
+                "TableName": self.control.state_table,
+                "Key": key,
+                "ConditionExpression": ("revision = :revision AND #stage = :stage"),
+                "ExpressionAttributeNames": {"#stage": "stage"},
+                "ExpressionAttributeValues": {
+                    ":revision": {"N": revision},
+                    ":stage": {"S": stage},
+                },
+            }
+        }
+
+    def reconcile_cleanup(
+        self,
+        *,
+        domain: str,
+        decision: str,
+        fresh_plan_sha256: str | None = None,
+        fresh_intent_id: str | None = None,
+        fresh_candidate_definitions: dict[str, dict[str, Any]] | None = None,
+        fresh_worker_bindings: dict[str, str] | None = None,
+    ) -> None:
+        """CAS-rebind a fresh one-use plan or abort only from a proved exact live state."""
+
+        cleanup = self._cleanup_ledger(domain)
+        if cleanup.stage != "authorized" or decision not in {"abort", "rebind"}:
+            raise RolloutGateError("cleanup_reconciliation_invalid", scope=domain)
+        live_state, live_state_digest = self._cleanup_live_state(cleanup)
+        worker_state = live_state.get("worker")
+        if type(worker_state) is not dict:
+            raise RolloutGateError("cleanup_live_state_unproved", scope="worker")
+        worker_condition = self._cleanup_worker_condition(worker_state)
+        old_intent = self._deployment_intent_item(cleanup.prepared_intent_id)
+        old_state = self._ddb_string(old_intent, "state")
+        if (
+            self._ddb_string(old_intent, "intent_id") != cleanup.prepared_intent_id
+            or self._ddb_string(old_intent, "plan_sha256") != cleanup.prepared_plan_sha256
+            or old_state not in {"PREPARED", "RECONCILE_REQUIRED"}
+        ):
+            raise RolloutGateError("cleanup_reconciliation_intent_invalid", scope=domain)
+        now = self._now()
+        cleanup_key = {
+            "scope": {"S": self.control.scope},
+            "record": {"S": self._cleanup_record_name(domain)},
+        }
+
+        if decision == "abort":
+            if any(item["classification"] != "baseline" for item in live_state.values()):
+                raise RolloutGateError("cleanup_abort_live_mutation", scope=domain)
+            domain_items = {
+                item_domain: self._read_item(f"DOMAIN#{item_domain}")
+                for item_domain in _DOMAIN_MAX_TTL
+            }
+            transaction: list[dict[str, Any]] = [
+                {
+                    "Update": {
+                        "TableName": _DEPLOYMENT_INTENT_TABLE,
+                        "Key": {"record_id": {"S": f"intent#{cleanup.prepared_intent_id}"}},
+                        "UpdateExpression": (
+                            "SET #state = :aborted, cleanup_aborted_at = :now,"
+                            " cleanup_live_state_sha256 = :live"
+                        ),
+                        "ConditionExpression": (
+                            "plan_sha256 = :plan AND (#state = :prepared OR #state = :reconcile)"
+                        ),
+                        "ExpressionAttributeNames": {"#state": "state"},
+                        "ExpressionAttributeValues": {
+                            ":plan": {"S": cleanup.prepared_plan_sha256},
+                            ":prepared": {"S": "PREPARED"},
+                            ":reconcile": {"S": "RECONCILE_REQUIRED"},
+                            ":aborted": {"S": "ABORTED"},
+                            ":now": {"N": str(now)},
+                            ":live": {"S": live_state_digest},
+                        },
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": self.control.state_table,
+                        "Key": cleanup_key,
+                        "UpdateExpression": (
+                            "SET #stage = :aborted, aborted_at = :now,"
+                            " reconciliation_live_state_sha256 = :live,"
+                            " reconciliation_worker_classification = :worker_class,"
+                            " reconciliation_worker_restart_record_sha256 = :worker_record,"
+                            " reconciliation_prior_plan_sha256 = :plan,"
+                            " revision = revision + :one"
+                        ),
+                        "ConditionExpression": (
+                            "#stage = :authorized AND revision = :revision"
+                            " AND prepared_plan_sha256 = :plan"
+                        ),
+                        "ExpressionAttributeNames": {"#stage": "stage"},
+                        "ExpressionAttributeValues": {
+                            ":aborted": {"S": "aborted"},
+                            ":authorized": {"S": "authorized"},
+                            ":now": {"N": str(now)},
+                            ":live": {"S": live_state_digest},
+                            ":worker_class": {
+                                "S": worker_state["classification"],
+                            },
+                            ":worker_record": {
+                                "S": worker_state["restart_record_sha256"],
+                            },
+                            ":plan": {"S": cleanup.prepared_plan_sha256},
+                            ":revision": {"N": str(cleanup.revision)},
+                            ":one": {"N": "1"},
+                        },
+                    }
+                },
+            ]
+            for item_domain, item in domain_items.items():
+                revision = self._ddb_number(item, "revision")
+                current = self._ddb_string_set(item, "issuer_provenances")
+                expected = (
+                    cleanup.baseline_provenances[item_domain] | cleanup.new_provenances[item_domain]
+                )
+                if revision is None or current != expected:
+                    raise RolloutGateError("cleanup_abort_state_drift", scope=item_domain)
+                update_expression = "SET issuer_provenances = :baseline, revision = revision + :one"
+                if item_domain == domain:
+                    update_expression += " REMOVE cleanup_stage"
+                transaction.append(
+                    {
+                        "Update": {
+                            "TableName": self.control.state_table,
+                            "Key": {
+                                "scope": {"S": self.control.scope},
+                                "record": {"S": f"DOMAIN#{item_domain}"},
+                            },
+                            "UpdateExpression": update_expression,
+                            "ConditionExpression": (
+                                "revision = :revision AND issuer_provenances = :current"
+                            ),
+                            "ExpressionAttributeValues": {
+                                ":revision": {"N": str(revision)},
+                                ":current": {"SS": sorted(current)},
+                                ":baseline": {
+                                    "SS": sorted(cleanup.baseline_provenances[item_domain])
+                                },
+                                ":one": {"N": "1"},
+                            },
+                        }
+                    }
+                )
+            transaction.append(worker_condition)
+        else:
+            if (
+                old_state != "RECONCILE_REQUIRED"
+                or type(fresh_plan_sha256) is not str
+                or _PROVENANCE_RE.fullmatch(fresh_plan_sha256) is None
+                or fresh_plan_sha256 == cleanup.prepared_plan_sha256
+                or type(fresh_intent_id) is not str
+                or _APPLY_ATTEMPT_RE.fullmatch(fresh_intent_id) is None
+                or fresh_intent_id == cleanup.prepared_intent_id
+                or fresh_candidate_definitions is None
+                or fresh_worker_bindings is None
+            ):
+                raise RolloutGateError("cleanup_reconciliation_invalid", scope=domain)
+            if frozenset(fresh_candidate_definitions) != frozenset(_TASK_DOMAINS):
+                raise RolloutGateError("cleanup_reconciliation_invalid", scope=domain)
+            for task, definition in fresh_candidate_definitions.items():
+                if _task_artifact_digest(definition) != cleanup.candidate_digests[task]:
+                    raise RolloutGateError("cleanup_reconciliation_artifact_drift", scope=task)
+            if fresh_worker_bindings != cleanup.worker_bindings:
+                raise RolloutGateError("cleanup_reconciliation_artifact_drift", scope="worker")
+            fresh_intent = self._deployment_intent_item(fresh_intent_id)
+            expires_at = self._ddb_number(fresh_intent, "authorization_expires_at")
+            if (
+                self._ddb_string(fresh_intent, "state") != "PREPARED"
+                or self._ddb_string(fresh_intent, "intent_id") != fresh_intent_id
+                or self._ddb_string(fresh_intent, "plan_sha256") != fresh_plan_sha256
+                or expires_at is None
+                or expires_at <= now
+            ):
+                raise RolloutGateError("cleanup_reconciliation_intent_invalid", scope=domain)
+            remove_names: dict[str, str] = {}
+            for kind in ("candidate", "rollback"):
+                for task in (*_TASK_DOMAINS, "worker"):
+                    remove_names[f"#{kind}_{task}_plan"] = f"{kind}_{task}_plan_sha256"
+                    remove_names[f"#{kind}_{task}_attempt"] = f"{kind}_{task}_apply_attempt_id"
+            remove_expression = ", ".join(remove_names)
+            transaction = [
+                {
+                    "Update": {
+                        "TableName": _DEPLOYMENT_INTENT_TABLE,
+                        "Key": {"record_id": {"S": f"intent#{cleanup.prepared_intent_id}"}},
+                        "UpdateExpression": (
+                            "SET #state = :superseded,"
+                            " superseded_by_intent_id = :new_intent,"
+                            " superseded_by_plan_sha256 = :new_plan,"
+                            " superseded_at = :now"
+                        ),
+                        "ConditionExpression": ("#state = :reconcile AND plan_sha256 = :old_plan"),
+                        "ExpressionAttributeNames": {"#state": "state"},
+                        "ExpressionAttributeValues": {
+                            ":reconcile": {"S": "RECONCILE_REQUIRED"},
+                            ":superseded": {"S": "SUPERSEDED"},
+                            ":old_plan": {"S": cleanup.prepared_plan_sha256},
+                            ":new_plan": {"S": fresh_plan_sha256},
+                            ":new_intent": {"S": fresh_intent_id},
+                            ":now": {"N": str(now)},
+                        },
+                    }
+                },
+                {
+                    "ConditionCheck": {
+                        "TableName": _DEPLOYMENT_INTENT_TABLE,
+                        "Key": {"record_id": {"S": f"intent#{fresh_intent_id}"}},
+                        "ConditionExpression": (
+                            "#state = :prepared AND plan_sha256 = :new_plan"
+                            " AND authorization_expires_at > :now"
+                        ),
+                        "ExpressionAttributeNames": {"#state": "state"},
+                        "ExpressionAttributeValues": {
+                            ":prepared": {"S": "PREPARED"},
+                            ":new_plan": {"S": fresh_plan_sha256},
+                            ":now": {"N": str(now)},
+                        },
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": self.control.state_table,
+                        "Key": cleanup_key,
+                        "UpdateExpression": (
+                            "SET prepared_plan_sha256 = :new_plan,"
+                            " prepared_intent_id = :new_intent,"
+                            " reconciliation_prior_plan_sha256 = :old_plan,"
+                            " reconciliation_prior_intent_id = :old_intent,"
+                            " reconciliation_live_state_sha256 = :live,"
+                            " reconciliation_worker_classification = :worker_class,"
+                            " reconciliation_worker_restart_record_sha256 = :worker_record,"
+                            " reconciled_at = :now, revision = revision + :one"
+                            f" REMOVE {remove_expression}"
+                        ),
+                        "ConditionExpression": (
+                            "#stage = :authorized AND revision = :revision"
+                            " AND prepared_plan_sha256 = :old_plan"
+                            " AND prepared_intent_id = :old_intent"
+                        ),
+                        "ExpressionAttributeNames": {
+                            "#stage": "stage",
+                            **remove_names,
+                        },
+                        "ExpressionAttributeValues": {
+                            ":authorized": {"S": "authorized"},
+                            ":revision": {"N": str(cleanup.revision)},
+                            ":new_plan": {"S": fresh_plan_sha256},
+                            ":new_intent": {"S": fresh_intent_id},
+                            ":old_plan": {"S": cleanup.prepared_plan_sha256},
+                            ":old_intent": {"S": cleanup.prepared_intent_id},
+                            ":live": {"S": live_state_digest},
+                            ":worker_class": {
+                                "S": worker_state["classification"],
+                            },
+                            ":worker_record": {
+                                "S": worker_state["restart_record_sha256"],
+                            },
+                            ":now": {"N": str(now)},
+                            ":one": {"N": "1"},
+                        },
+                    }
+                },
+                worker_condition,
+            ]
+        try:
+            response = self.ddb.transact_write_items(TransactItems=transaction)
+            self._observe(response)
+        except Exception as exc:
+            raise RolloutGateError("cleanup_reconciliation_cas_failed", scope=domain) from exc
 
     def _cleanup_proposed_from_ledger(
         self,
@@ -2432,10 +3145,16 @@ class LiveRolloutGate:
         candidate_digests: dict[str, str],
         rollback_digests: dict[str, str],
         prepared_plan_sha256: str,
+        prepared_intent_id: str,
+        baseline_arns: dict[str, str],
+        baseline_digests: dict[str, str],
         legacy_database_generation: str,
         legacy_worker_generation: str | None,
         candidate_worker_env_digest: str,
         rollback_worker_env_digest: str,
+        candidate_worker_provenance: ProvenanceBinding,
+        rollback_worker_provenance: ProvenanceBinding,
+        worker_bindings: dict[str, str],
     ) -> None:
         """Retry only clock/high-water races while keeping the reviewed proposal immutable."""
 
@@ -2498,6 +3217,7 @@ class LiveRolloutGate:
                 "revision": {"N": "1"},
                 "authorized_at": {"N": str(now)},
                 "prepared_plan_sha256": {"S": prepared_plan_sha256},
+                "prepared_intent_id": {"S": prepared_intent_id},
                 "proposed_legacy_database_generation": {"S": legacy_database_generation},
                 "candidate_worker_env_digest": {"S": candidate_worker_env_digest},
                 "rollback_worker_env_digest": {"S": rollback_worker_env_digest},
@@ -2523,10 +3243,40 @@ class LiveRolloutGate:
                 cleanup_item[f"new_{item_domain}_provenances"] = {
                     "SS": sorted(new_provenances[item_domain])
                 }
+                cleanup_item[f"baseline_{item_domain}_provenances"] = {
+                    "SS": sorted(
+                        self._ddb_string_set(domain_items[item_domain], "issuer_provenances")
+                    )
+                }
+            for task in _TASK_DOMAINS:
+                cleanup_item[f"baseline_{task}_arn"] = {"S": baseline_arns[task]}
+                cleanup_item[f"baseline_{task}_digest"] = {"S": baseline_digests[task]}
             for task, digest in candidate_digests.items():
                 cleanup_item[f"candidate_{task}_digest"] = {"S": digest}
             for task, digest in rollback_digests.items():
                 cleanup_item[f"rollback_{task}_digest"] = {"S": digest}
+            for kind, binding in (
+                ("candidate", candidate_worker_provenance),
+                ("rollback", rollback_worker_provenance),
+            ):
+                for name, value in {
+                    "artifact_sha256": binding.artifact_sha256,
+                    "canonical_receipt_sha256": binding.canonical_receipt_sha256,
+                    "key_arn": binding.key_arn,
+                    "receipt_sha256": binding.receipt_sha256,
+                    "signature_sha256": binding.signature_sha256,
+                    "source_branch": binding.source_branch,
+                    "source_commit": binding.source_commit,
+                    "source_origin": binding.source_origin,
+                    "source_tree": binding.source_tree,
+                }.items():
+                    cleanup_item[f"{kind}_worker_{name}"] = {"S": value}
+            if frozenset(worker_bindings) != _WORKER_BINDING_NAMES:
+                raise RolloutGateError("terraform_plan_worker_invalid", scope="worker")
+            for name, digest in worker_bindings.items():
+                if _PROVENANCE_RE.fullmatch(digest) is None:
+                    raise RolloutGateError("terraform_plan_worker_invalid", scope="worker")
+                cleanup_item[f"worker_binding_{name}"] = {"S": digest}
 
             transaction: list[dict[str, Any]] = [
                 {
@@ -2617,6 +3367,13 @@ class LiveRolloutGate:
         worker_rollback_env: Path,
         worker_artifact: Path,
         worker_rollback_artifact: Path,
+        worker_provenance_receipt: Path,
+        worker_provenance_signature: Path,
+        worker_rollback_provenance_receipt: Path,
+        worker_rollback_provenance_signature: Path,
+        worker_provenance_key_arn: str,
+        worker_bindings: dict[str, str],
+        prepared_intent_id: str,
         prepared_plan_sha256: str,
     ) -> None:
         """Authorize a reviewed primary-only replacement without reopening the expired key."""
@@ -2625,6 +3382,8 @@ class LiveRolloutGate:
             raise RolloutGateError("unknown_domain")
         if _PROVENANCE_RE.fullmatch(prepared_plan_sha256) is None:
             raise RolloutGateError("terraform_plan_unreadable", scope=domain)
+        if _APPLY_ATTEMPT_RE.fullmatch(prepared_intent_id) is None:
+            raise RolloutGateError("deployment_intent_missing", scope=domain)
         if frozenset(candidate_definitions) != frozenset(_TASK_DOMAINS):
             raise RolloutGateError("cleanup_candidate_incomplete", scope=domain)
         if self._ledger().stage != "complete" or self._active_cleanup() is not None:
@@ -2642,6 +3401,41 @@ class LiveRolloutGate:
         legacy_worker_generation = (
             manifest_legacy_worker if type(manifest_legacy_worker) is str else None
         )
+        # Cryptographic provenance is authority, not a post-authorization diagnostic. Verify both
+        # sides before any cleanup/domain CAS can authorize the fresh issuer provenances.
+        kms = self._clients.client("kms", region_name=self.control.region)
+        try:
+            candidate_worker_provenance = verify_worker_provenance(
+                artifact=worker_artifact,
+                receipt_path=worker_provenance_receipt,
+                signature_path=worker_provenance_signature,
+                expected_key_arn=worker_provenance_key_arn,
+                kms=kms,
+            )
+            rollback_worker_provenance = verify_worker_provenance(
+                artifact=worker_rollback_artifact,
+                receipt_path=worker_rollback_provenance_receipt,
+                signature_path=worker_rollback_provenance_signature,
+                expected_key_arn=worker_provenance_key_arn,
+                kms=kms,
+            )
+        except Exception as exc:
+            raise RolloutGateError("worker_provenance_invalid", scope="worker") from exc
+        if (
+            candidate_worker_provenance.artifact_sha256 != self.control.worker.artifact_sha256
+            or rollback_worker_provenance.artifact_sha256
+            != self.control.worker.rollback_artifact_sha256
+            or frozenset(worker_bindings) != _WORKER_BINDING_NAMES
+            or any(_PROVENANCE_RE.fullmatch(digest) is None for digest in worker_bindings.values())
+            or worker_bindings["candidate_artifact"] != candidate_worker_provenance.artifact_sha256
+            or worker_bindings["candidate_receipt"] != candidate_worker_provenance.receipt_sha256
+            or worker_bindings["candidate_signature"]
+            != candidate_worker_provenance.signature_sha256
+            or worker_bindings["rollback_artifact"] != rollback_worker_provenance.artifact_sha256
+            or worker_bindings["rollback_receipt"] != rollback_worker_provenance.receipt_sha256
+            or worker_bindings["rollback_signature"] != rollback_worker_provenance.signature_sha256
+        ):
+            raise RolloutGateError("worker_provenance_invalid", scope="worker")
 
         candidate_identities = [
             definition.get("taskDefinitionArn")
@@ -2709,10 +3503,18 @@ class LiveRolloutGate:
             candidate_digests=candidate_digests,
             rollback_digests=rollback_digests,
             prepared_plan_sha256=prepared_plan_sha256,
+            prepared_intent_id=prepared_intent_id,
+            baseline_arns=arns,
+            baseline_digests={
+                task: _task_artifact_digest(definition) for task, definition in definitions.items()
+            },
             legacy_database_generation=legacy_database_generation,
             legacy_worker_generation=legacy_worker_generation,
             candidate_worker_env_digest=candidate_worker_env_digest,
             rollback_worker_env_digest=rollback_worker_env_digest,
+            candidate_worker_provenance=candidate_worker_provenance,
+            rollback_worker_provenance=rollback_worker_provenance,
+            worker_bindings=worker_bindings,
         )
 
     def _validate_prepared_cleanup_task(
@@ -2989,26 +3791,23 @@ class LiveRolloutGate:
             f"candidate_{task}_target_digest",
             optional=True,
         )
-        existing_rule_state = self._ddb_string(
+        existing_rule_digest = self._ddb_string(
             item,
-            f"candidate_{task}_rule_state",
+            f"candidate_{task}_rule_sha256",
             optional=True,
+        )
+        expected_rule_digest = _canonical_event_rule_digest(
+            self.control.morning_digest.expected_rule
         )
         if (
             revision is None
             or candidate_arn is None
-            or (existing is None) != (existing_rule_state is None)
+            or (existing is None) != (existing_rule_digest is None)
             or (existing is not None and existing != digest)
-            or (
-                existing_rule_state is not None
-                and existing_rule_state != self.control.morning_digest.expected_rule_state
-            )
+            or (existing_rule_digest is not None and existing_rule_digest != expected_rule_digest)
         ):
             raise RolloutGateError("scheduled_target_drift", scope=task)
-        if (
-            existing == digest
-            and existing_rule_state == self.control.morning_digest.expected_rule_state
-        ):
+        if existing == digest and existing_rule_digest == expected_rule_digest:
             return
         try:
             response = self.ddb.transact_write_items(
@@ -3021,25 +3820,23 @@ class LiveRolloutGate:
                                 "record": {"S": record},
                             },
                             "UpdateExpression": (
-                                "SET #target = :target, #rule_state = :rule_state,"
+                                "SET #target = :target, #rule_digest = :rule_digest,"
                                 " revision = revision + :one"
                             ),
                             "ConditionExpression": (
                                 "revision = :revision AND #arn = :arn"
                                 " AND attribute_not_exists(#target)"
-                                " AND attribute_not_exists(#rule_state)"
+                                " AND attribute_not_exists(#rule_digest)"
                             ),
                             "ExpressionAttributeNames": {
                                 "#arn": f"candidate_{task}_arn",
                                 "#target": f"candidate_{task}_target_digest",
-                                "#rule_state": f"candidate_{task}_rule_state",
+                                "#rule_digest": f"candidate_{task}_rule_sha256",
                             },
                             "ExpressionAttributeValues": {
                                 ":arn": {"S": candidate_arn},
                                 ":target": {"S": digest},
-                                ":rule_state": {
-                                    "S": self.control.morning_digest.expected_rule_state
-                                },
+                                ":rule_digest": {"S": expected_rule_digest},
                                 ":revision": {"N": str(revision)},
                                 ":one": {"N": "1"},
                             },
@@ -3485,6 +4282,9 @@ class LiveRolloutGate:
         after: int | None = None,
         mode: str = "candidate",
         restart_nonce: str | None = None,
+        release_root: str | None = None,
+        release_tree_sha256: str | None = None,
+        runtime_executable_sha256: str | None = None,
     ) -> int:
         worker = self.control.worker
         if mode not in {"candidate", "rollback"}:
@@ -3534,7 +4334,16 @@ class LiveRolloutGate:
         ):
             raise RolloutGateError("worker_attestation_invalid", scope="worker")
         if restart_nonce is not None:
-            if _RESTART_NONCE_RE.fullmatch(restart_nonce) is None:
+            if (
+                _RESTART_NONCE_RE.fullmatch(restart_nonce) is None
+                or type(release_root) is not str
+                or _RELEASE_ROOT_RE.fullmatch(release_root) is None
+                or type(release_tree_sha256) is not str
+                or _PROVENANCE_RE.fullmatch(release_tree_sha256) is None
+                or release_root.rsplit("/", maxsplit=1)[-1] != release_tree_sha256
+                or type(runtime_executable_sha256) is not str
+                or _PROVENANCE_RE.fullmatch(runtime_executable_sha256) is None
+            ):
                 raise RolloutGateError("worker_attestation_invalid", scope="worker")
             expected_artifact = (
                 worker.artifact_sha256 if mode == "candidate" else worker.rollback_artifact_sha256
@@ -3573,6 +4382,15 @@ class LiveRolloutGate:
                     )
                     != "http://127.0.0.1:8788/healthz"
                 )
+                expected_health_kind = (
+                    "slack_socket_auth_heartbeat" if service == "bot" else "connect_http_port_owner"
+                )
+                process_cwd = self._ddb_string(service_item, "process_cwd", optional=True)
+                process_executable = self._ddb_string(
+                    service_item,
+                    "process_executable",
+                    optional=True,
+                )
                 if (
                     service_checked_at is None
                     or service_expires_at is None
@@ -3590,6 +4408,24 @@ class LiveRolloutGate:
                     or self._ddb_string(service_item, "restart_nonce") != restart_nonce
                     or self._ddb_string(service_item, "artifact_sha256") != expected_artifact
                     or self._ddb_string(service_item, "config_digest") != config_digest
+                    or self._ddb_string(service_item, "release_root", optional=True) != release_root
+                    or self._ddb_string(
+                        service_item,
+                        "release_tree_sha256",
+                        optional=True,
+                    )
+                    != release_tree_sha256
+                    or self._ddb_string(
+                        service_item,
+                        "runtime_executable_sha256",
+                        optional=True,
+                    )
+                    != runtime_executable_sha256
+                    or process_cwd != f"{release_root}/app"
+                    or type(process_executable) is not str
+                    or not process_executable.startswith(f"{release_root}/app/.venv/bin/")
+                    or self._ddb_string(service_item, "health_kind", optional=True)
+                    != expected_health_kind
                     or not self._ddb_bool(service_item, "health_verified")
                     or (after is not None and service_checked_at <= after)
                     or self._now() - service_checked_at > 120
@@ -3726,11 +4562,20 @@ class LiveRolloutGate:
         self,
         *,
         rollback_artifact: Path,
+        release_root: str,
+        release_tree_sha256: str,
+        runtime_executable_sha256: str,
         mode: str = "candidate",
     ) -> str:
         """Revalidate worker attestation and immutable metadata immediately before restart."""
 
-        if mode not in {"candidate", "rollback", "cleanup"}:
+        if (
+            mode not in {"candidate", "rollback", "cleanup"}
+            or _RELEASE_ROOT_RE.fullmatch(release_root) is None
+            or _PROVENANCE_RE.fullmatch(release_tree_sha256) is None
+            or release_root.rsplit("/", maxsplit=1)[-1] != release_tree_sha256
+            or _PROVENANCE_RE.fullmatch(runtime_executable_sha256) is None
+        ):
             raise RolloutGateError("worker_mode_invalid", scope="worker")
         if self._ledger().stage not in {
             "worker_verified",
@@ -3759,13 +4604,17 @@ class LiveRolloutGate:
             cleanup=cleanup,
             kind="rollback" if mode == "rollback" else "candidate",
         )
+        intent = self._deployment_intent()
         if mode == "candidate":
             self._assert_cutover_open("worker")
         now = self._now()
         record = self._restart_record_name(mode)
         existing = self._read_item_optional(record)
         revision = self._ddb_number(existing, "revision") if existing is not None else None
-        if existing is not None and self._ddb_string(existing, "stage") != "complete":
+        if existing is not None and self._ddb_string(existing, "stage") not in {
+            "complete",
+            "reconciled",
+        }:
             raise RolloutGateError("worker_restart_state_invalid", scope="worker")
         next_revision = 1 if revision is None else revision + 1
         restart_nonce = secrets.token_hex(32)
@@ -3795,6 +4644,11 @@ class LiveRolloutGate:
                     ),
                 )
             },
+            "release_root": {"S": release_root},
+            "release_tree_sha256": {"S": release_tree_sha256},
+            "runtime_executable_sha256": {"S": runtime_executable_sha256},
+            "plan_sha256": {"S": intent.plan_sha256},
+            "apply_attempt_id": {"S": intent.apply_attempt_id},
             "restart_nonce": {"S": restart_nonce},
             "stage": {"S": "requested"},
             "mode": {"S": mode},
@@ -3816,11 +4670,14 @@ class LiveRolloutGate:
         else:
             put.update(
                 {
-                    "ConditionExpression": "revision = :revision AND #stage = :complete",
+                    "ConditionExpression": (
+                        "revision = :revision AND (#stage = :complete OR #stage = :reconciled)"
+                    ),
                     "ExpressionAttributeNames": {"#stage": "stage"},
                     "ExpressionAttributeValues": {
                         ":revision": {"N": str(revision)},
                         ":complete": {"S": "complete"},
+                        ":reconciled": {"S": "reconciled"},
                     },
                 }
             )
@@ -3830,6 +4687,84 @@ class LiveRolloutGate:
         except Exception as exc:
             raise RolloutGateError("worker_restart_cas_failed", scope="worker") from exc
         return restart_nonce
+
+    def reconcile_restart(self, *, mode: str, outcome: str) -> None:
+        """Audit an idempotent remote rollback after an interrupted/ambiguous SSM restart."""
+
+        if mode not in {"candidate", "rollback", "cleanup"} or outcome != "rolled-back":
+            raise RolloutGateError("worker_restart_reconciliation_invalid", scope="worker")
+        if self.deployment_intent is None:
+            raise RolloutGateError("deployment_intent_missing", scope="worker")
+        record = self._restart_record_name(mode)
+        item = self._read_item(record)
+        revision = self._ddb_number(item, "revision")
+        stage = self._ddb_string(item, "stage")
+        if (
+            revision is None
+            or self._ddb_string(item, "mode") != mode
+            or self._ddb_string(item, "rotation_epoch") != self.control.rotation_epoch
+            or self._ddb_string(item, "plan_sha256") != self.deployment_intent.plan_sha256
+            or self._ddb_string(item, "apply_attempt_id") != self.deployment_intent.apply_attempt_id
+        ):
+            raise RolloutGateError("worker_restart_state_invalid", scope="worker")
+        if stage == "reconciled":
+            if (
+                self._ddb_string(item, "reconciliation_outcome", optional=True) == outcome
+                and self._ddb_string(item, "reconciliation_plan_sha256", optional=True)
+                == self.deployment_intent.plan_sha256
+                and self._ddb_string(item, "reconciliation_apply_attempt_id", optional=True)
+                == self.deployment_intent.apply_attempt_id
+            ):
+                return
+            raise RolloutGateError("worker_restart_state_invalid", scope="worker")
+        if stage not in {"requested", "complete"}:
+            raise RolloutGateError("worker_restart_state_invalid", scope="worker")
+        now = self._now()
+        try:
+            response = self.ddb.transact_write_items(
+                TransactItems=[
+                    {
+                        "Update": {
+                            "TableName": self.control.state_table,
+                            "Key": {
+                                "scope": {"S": self.control.scope},
+                                "record": {"S": record},
+                            },
+                            "UpdateExpression": (
+                                "SET #stage = :reconciled,"
+                                " reconciliation_outcome = :outcome,"
+                                " reconciliation_plan_sha256 = :plan,"
+                                " reconciliation_apply_attempt_id = :attempt,"
+                                " reconciled_at = :now, revision = revision + :one"
+                            ),
+                            "ConditionExpression": (
+                                "revision = :revision"
+                                " AND (#stage = :requested OR #stage = :complete)"
+                                " AND mode = :mode"
+                            ),
+                            "ExpressionAttributeNames": {"#stage": "stage"},
+                            "ExpressionAttributeValues": {
+                                ":reconciled": {"S": "reconciled"},
+                                ":requested": {"S": "requested"},
+                                ":complete": {"S": "complete"},
+                                ":outcome": {"S": outcome},
+                                ":plan": {"S": self.deployment_intent.plan_sha256},
+                                ":attempt": {"S": self.deployment_intent.apply_attempt_id},
+                                ":now": {"N": str(now)},
+                                ":one": {"N": "1"},
+                                ":revision": {"N": str(revision)},
+                                ":mode": {"S": mode},
+                            },
+                        }
+                    }
+                ]
+            )
+            self._observe(response)
+        except Exception as exc:
+            raise RolloutGateError(
+                "worker_restart_reconciliation_failed",
+                scope="worker",
+            ) from exc
 
     def post_restart(self, *, mode: str = "candidate") -> None:
         """Require service-startup readiness to be newer than the durable restart request."""
@@ -3846,12 +4781,24 @@ class LiveRolloutGate:
             cleanup=cleanup,
             kind="rollback" if mode == "rollback" else "candidate",
         )
+        intent = self._deployment_intent()
         record = self._restart_record_name(mode)
         item = self._read_item(record)
         revision = self._ddb_number(item, "revision")
         after_checked_at = self._ddb_number(item, "after_checked_at")
         requested_at = self._ddb_number(item, "requested_at")
         restart_nonce = self._ddb_string(item, "restart_nonce", optional=True)
+        release_root = self._ddb_string(item, "release_root", optional=True)
+        release_tree_sha256 = self._ddb_string(
+            item,
+            "release_tree_sha256",
+            optional=True,
+        )
+        runtime_executable_sha256 = self._ddb_string(
+            item,
+            "runtime_executable_sha256",
+            optional=True,
+        )
         expected_provenance = (
             self.control.worker.provenance
             if mode in {"candidate", "cleanup"}
@@ -3862,10 +4809,15 @@ class LiveRolloutGate:
             or after_checked_at is None
             or requested_at is None
             or restart_nonce is None
+            or release_root is None
+            or release_tree_sha256 is None
+            or runtime_executable_sha256 is None
             or self._ddb_string(item, "stage") != "requested"
             or self._ddb_string(item, "mode") != mode
             or self._ddb_string(item, "rotation_epoch") != self.control.rotation_epoch
             or self._ddb_string(item, "provenance") != expected_provenance
+            or self._ddb_string(item, "plan_sha256") != intent.plan_sha256
+            or self._ddb_string(item, "apply_attempt_id") != intent.apply_attempt_id
         ):
             raise RolloutGateError("worker_restart_state_invalid", scope="worker")
         attestation_mode = "candidate" if mode == "cleanup" else mode
@@ -3873,6 +4825,9 @@ class LiveRolloutGate:
             after=max(after_checked_at, requested_at),
             mode=attestation_mode,
             restart_nonce=restart_nonce,
+            release_root=release_root,
+            release_tree_sha256=release_tree_sha256,
+            runtime_executable_sha256=runtime_executable_sha256,
         )
         try:
             response = self.ddb.transact_write_items(
@@ -3906,7 +4861,8 @@ class LiveRolloutGate:
             raise RolloutGateError("worker_restart_cas_failed", scope="worker") from exc
 
     def _completed_restart_mode(self, *, after: int) -> str:
-        completed: list[tuple[int, str, int, str]] = []
+        completed: list[tuple[int, str, int, str, str, str, str]] = []
+        intent = self._deployment_intent()
         for record_mode, attestation_mode in (
             ("candidate", "candidate"),
             ("cleanup", "candidate"),
@@ -3924,6 +4880,17 @@ class LiveRolloutGate:
                 optional=True,
             )
             restart_nonce = self._ddb_string(item, "restart_nonce", optional=True)
+            release_root = self._ddb_string(item, "release_root", optional=True)
+            release_tree_sha256 = self._ddb_string(
+                item,
+                "release_tree_sha256",
+                optional=True,
+            )
+            runtime_executable_sha256 = self._ddb_string(
+                item,
+                "runtime_executable_sha256",
+                optional=True,
+            )
             expected_provenance = (
                 self.control.worker.provenance
                 if attestation_mode == "candidate"
@@ -3934,10 +4901,15 @@ class LiveRolloutGate:
                 and self._ddb_string(item, "mode") == record_mode
                 and self._ddb_string(item, "rotation_epoch") == self.control.rotation_epoch
                 and self._ddb_string(item, "provenance") == expected_provenance
+                and self._ddb_string(item, "plan_sha256") == intent.plan_sha256
+                and self._ddb_string(item, "apply_attempt_id") == intent.apply_attempt_id
                 and completed_at is not None
                 and requested_at is not None
                 and after_checked_at is not None
                 and restart_nonce is not None
+                and release_root is not None
+                and release_tree_sha256 is not None
+                and runtime_executable_sha256 is not None
                 and completed_at > max(after, requested_at, after_checked_at)
             ):
                 completed.append(
@@ -3946,11 +4918,22 @@ class LiveRolloutGate:
                         attestation_mode,
                         max(after, requested_at, after_checked_at),
                         restart_nonce,
+                        release_root,
+                        release_tree_sha256,
+                        runtime_executable_sha256,
                     )
                 )
         if not completed:
             raise RolloutGateError("worker_restart_state_invalid", scope="worker")
-        _completed_at, mode, attestation_after, restart_nonce = max(
+        (
+            _completed_at,
+            mode,
+            attestation_after,
+            restart_nonce,
+            release_root,
+            release_tree_sha256,
+            runtime_executable_sha256,
+        ) = max(
             completed,
             key=lambda value: value[0],
         )
@@ -3958,6 +4941,9 @@ class LiveRolloutGate:
             after=attestation_after,
             mode=mode,
             restart_nonce=restart_nonce,
+            release_root=release_root,
+            release_tree_sha256=release_tree_sha256,
+            runtime_executable_sha256=runtime_executable_sha256,
         )
         return mode
 
@@ -4602,11 +5588,13 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
             "pre-worker-upload",
             "pre-restart",
             "post-restart",
+            "reconcile-restart",
             "connect-web-preloaded",
             "worker-verified",
             "mcp-stable-and-old-drained",
             "complete",
             "prepare-cleanup",
+            "reconcile-cleanup",
             "complete-cleanup",
             "retire-previous",
         ),
@@ -4626,6 +5614,15 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
     parser.add_argument("--worker-artifact")
     parser.add_argument("--worker-env")
     parser.add_argument("--worker-rollback-env")
+    parser.add_argument("--worker-provenance-receipt")
+    parser.add_argument("--worker-provenance-signature")
+    parser.add_argument("--worker-rollback-provenance-receipt")
+    parser.add_argument("--worker-rollback-provenance-signature")
+    parser.add_argument("--release-root")
+    parser.add_argument("--release-tree-sha256")
+    parser.add_argument("--runtime-executable-sha256")
+    parser.add_argument("--restart-outcome", choices=("rolled-back",))
+    parser.add_argument("--reconcile-decision", choices=("abort", "rebind"))
     parser.add_argument(
         "--refresh-manifest-now",
         action="store_true",
@@ -4715,14 +5712,26 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
                 mode=args.mode,
             )
         elif args.action == "pre-restart":
-            if args.worker_rollback_artifact is None:
+            if (
+                args.worker_rollback_artifact is None
+                or args.release_root is None
+                or args.release_tree_sha256 is None
+                or args.runtime_executable_sha256 is None
+            ):
                 raise RolloutGateError("missing_action_argument")
             success_details["restart_nonce"] = gate.pre_restart(
                 rollback_artifact=Path(args.worker_rollback_artifact),
+                release_root=args.release_root,
+                release_tree_sha256=args.release_tree_sha256,
+                runtime_executable_sha256=args.runtime_executable_sha256,
                 mode=args.mode,
             )
         elif args.action == "post-restart":
             gate.post_restart(mode=args.mode)
+        elif args.action == "reconcile-restart":
+            if args.restart_outcome is None:
+                raise RolloutGateError("missing_action_argument")
+            gate.reconcile_restart(mode=args.mode, outcome=args.restart_outcome)
         elif args.action == "connect-web-preloaded":
             gate.connect_web_preloaded()
         elif args.action == "worker-verified":
@@ -4741,11 +5750,17 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
                 or args.worker_rollback_env is None
                 or args.worker_artifact is None
                 or args.worker_rollback_artifact is None
+                or args.worker_provenance_receipt is None
+                or args.worker_provenance_signature is None
+                or args.worker_rollback_provenance_receipt is None
+                or args.worker_rollback_provenance_signature is None
             ):
                 raise RolloutGateError("missing_action_argument")
             from scripts.terraform_hmac_payload import (
                 candidates_from_plan,
                 cleanup_worker_bindings_from_plan,
+                deployment_intent_id_from_plan,
+                hmac_release_bindings_from_plan,
                 saved_plan_sha256,
                 show_saved_plan,
             )
@@ -4757,12 +5772,32 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
                 saved_plan_value,
                 domain=args.domain,
             )
+            release_bindings = hmac_release_bindings_from_plan(saved_plan_value)
+            provenance_key_arn = release_bindings.get("worker_provenance_key_arn")
+            if type(provenance_key_arn) is not str or not provenance_key_arn:
+                raise RolloutGateError("terraform_plan_worker_invalid", scope="worker")
+            repository_root = Path(__file__).resolve().parents[1]
             bound_paths = {
+                "atomic_switch": repository_root / "scripts" / "worker_atomic_release_switch.sh",
+                "base_environment": repository_root / ".env.production",
+                "base_env_renderer": repository_root / "scripts" / "render_ec2_base_env.py",
                 "candidate_artifact": Path(args.worker_artifact),
                 "rollback_artifact": Path(args.worker_rollback_artifact),
                 "candidate_env": Path(args.worker_env),
+                "candidate_receipt": Path(args.worker_provenance_receipt),
+                "candidate_signature": Path(args.worker_provenance_signature),
+                "deploy_overrides": repository_root / "infra" / "deploy" / "ec2.overrides.env",
+                "deploy_script": repository_root / "scripts" / "deploy_to_ec2.sh",
+                "provenance_verifier": repository_root
+                / "scripts"
+                / "verify_worker_bundle_provenance.py",
+                "promotion_attester": repository_root / "scripts" / "worker_promotion_attest.sh",
+                "release_measurer": repository_root / "scripts" / "measure_worker_release.py",
                 "rollback_env": Path(args.worker_rollback_env),
+                "rollback_receipt": Path(args.worker_rollback_provenance_receipt),
+                "rollback_signature": Path(args.worker_rollback_provenance_signature),
                 "reviewed_manifest": Path(args.manifest),
+                "runtime_lock": repository_root / "requirements-worker.lock",
                 "rollout_control": Path(args.control),
             }
             if any(
@@ -4777,8 +5812,52 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
                 worker_rollback_env=Path(args.worker_rollback_env),
                 worker_artifact=Path(args.worker_artifact),
                 worker_rollback_artifact=Path(args.worker_rollback_artifact),
+                worker_provenance_receipt=Path(args.worker_provenance_receipt),
+                worker_provenance_signature=Path(args.worker_provenance_signature),
+                worker_rollback_provenance_receipt=Path(args.worker_rollback_provenance_receipt),
+                worker_rollback_provenance_signature=Path(
+                    args.worker_rollback_provenance_signature
+                ),
+                worker_provenance_key_arn=provenance_key_arn,
+                worker_bindings=worker_bindings,
+                prepared_intent_id=deployment_intent_id_from_plan(saved_plan_value),
                 prepared_plan_sha256=saved_plan_sha256(saved_plan),
             )
+        elif args.action == "reconcile-cleanup":
+            if args.domain is None or args.reconcile_decision is None:
+                raise RolloutGateError("missing_action_argument")
+            if args.reconcile_decision == "abort":
+                gate.reconcile_cleanup(domain=args.domain, decision="abort")
+            else:
+                if args.saved_plan is None:
+                    raise RolloutGateError("missing_action_argument")
+                from scripts.terraform_hmac_payload import (
+                    candidates_from_plan,
+                    cleanup_worker_bindings_from_plan,
+                    deployment_intent_id_from_plan,
+                    saved_plan_sha256,
+                    show_saved_plan,
+                    validate_saved_plan_runtime_mutations,
+                )
+
+                fresh_path = Path(args.saved_plan)
+                fresh_plan = show_saved_plan(fresh_path)
+                validate_saved_plan_runtime_mutations(fresh_plan)
+                gate.reconcile_cleanup(
+                    domain=args.domain,
+                    decision="rebind",
+                    fresh_plan_sha256=saved_plan_sha256(fresh_path),
+                    fresh_intent_id=deployment_intent_id_from_plan(fresh_plan),
+                    fresh_candidate_definitions=candidates_from_plan(
+                        fresh_plan,
+                        allow_noop=True,
+                    ),
+                    fresh_worker_bindings=cleanup_worker_bindings_from_plan(
+                        fresh_plan,
+                        domain=args.domain,
+                        allow_noop=True,
+                    ),
+                )
         elif args.action == "complete-cleanup":
             if args.domain is None:
                 raise RolloutGateError("missing_action_argument")

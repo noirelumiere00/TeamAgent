@@ -145,7 +145,7 @@ resource "terraform_data" "hmac_morning_digest_target_transaction" {
 
   input = {
     mode                   = var.hmac_gate_mode
-    expected_rule_state    = "DISABLED"
+    expected_rule          = local.hmac_rollout_control.morning_digest.expected_rule
     target                 = local.hmac_morning_digest_target
     task_definition_arn    = local.hmac_promoted_task_definition_arns.morning_digest
     manifest_sha256        = filesha256(var.hmac_live_manifest_path)

@@ -83,6 +83,7 @@ variable "hmac_worker_rollback_provenance_signature_path" {
 
 locals {
   hmac_worker_deploy_files = {
+    atomic_switch       = abspath("${path.module}/../../scripts/worker_atomic_release_switch.sh")
     rollback_artifact   = var.hmac_worker_rollback_artifact_path
     rollback_env        = var.hmac_worker_rollback_env_path
     rollback_receipt    = var.hmac_worker_rollback_provenance_receipt_path
@@ -94,9 +95,13 @@ locals {
     reviewed_manifest   = var.hmac_live_manifest_path
     rollout_control     = var.hmac_rollout_control_path
     base_environment    = abspath("${path.root}/../../.env.production")
+    base_env_renderer   = abspath("${path.module}/../../scripts/render_ec2_base_env.py")
     deploy_overrides    = abspath("${path.module}/../deploy/ec2.overrides.env")
     deploy_script       = abspath("${path.module}/../../scripts/deploy_to_ec2.sh")
     provenance_verifier = abspath("${path.module}/../../scripts/verify_worker_bundle_provenance.py")
+    promotion_attester  = abspath("${path.module}/../../scripts/worker_promotion_attest.sh")
+    release_measurer    = abspath("${path.module}/../../scripts/measure_worker_release.py")
+    runtime_lock        = abspath("${path.root}/../../requirements-worker.lock")
   }
   hmac_worker_deploy_files_ready = alltrue([
     for path in values(local.hmac_worker_deploy_files) :

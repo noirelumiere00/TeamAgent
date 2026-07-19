@@ -7,11 +7,20 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
-from scripts.hmac_rollout_gate import RolloutGateError
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPOSITORY_ROOT))
+sys.path.insert(0, str(_REPOSITORY_ROOT / "src"))
+
+from scripts.hmac_rollout_gate import (  # noqa: E402
+    RolloutGateError,
+    _canonical_event_rule,
+)
 
 TASK_ADDRESSES = {
     "mcp": "aws_ecs_task_definition.mcp",
@@ -37,7 +46,9 @@ SERVICE_PROMOTION_ADDRESSES = {
 }
 WORKER_ARTIFACT_BINDING_KEYS = frozenset(
     {
+        "atomic_switch",
         "base_environment",
+        "base_env_renderer",
         "candidate_artifact",
         "candidate_env",
         "candidate_receipt",
@@ -45,7 +56,10 @@ WORKER_ARTIFACT_BINDING_KEYS = frozenset(
         "deploy_overrides",
         "deploy_script",
         "provenance_verifier",
+        "promotion_attester",
+        "release_measurer",
         "reviewed_manifest",
+        "runtime_lock",
         "rollback_artifact",
         "rollback_env",
         "rollback_receipt",
@@ -116,7 +130,11 @@ def saved_plan_sha256(path: Path) -> str:
                 digest.update(chunk)
     except OSError as exc:
         raise RolloutGateError("terraform_plan_unreadable") from exc
-    return digest.hexdigest()
+    measured = digest.hexdigest()
+    expected = os.environ.get("TEAMAGENT_SAVED_PLAN_SHA256")
+    if expected is not None and measured != expected:
+        raise RolloutGateError("terraform_plan_unreadable")
+    return measured
 
 
 def _camel(name: str) -> str:
@@ -298,6 +316,7 @@ def task_from_change(after: dict[str, Any], *, task: str) -> dict[str, object]:
 def show_saved_plan(plan_path: Path) -> dict[str, object]:
     if not plan_path.is_file():
         raise RolloutGateError("terraform_plan_unreadable")
+    before = saved_plan_sha256(plan_path)
     try:
         completed = subprocess.run(
             ["terraform", "show", "-json", str(plan_path)],
@@ -310,6 +329,8 @@ def show_saved_plan(plan_path: Path) -> dict[str, object]:
         raise RolloutGateError("terraform_plan_unreadable") from exc
     if type(plan) is not dict:
         raise RolloutGateError("terraform_plan_unreadable")
+    if saved_plan_sha256(plan_path) != before:
+        raise RolloutGateError("terraform_plan_unreadable")
     return plan
 
 
@@ -317,6 +338,7 @@ def candidates_from_plan(
     plan: dict[str, object],
     *,
     tasks: frozenset[str] = frozenset(TASK_ADDRESSES),
+    allow_noop: bool = False,
 ) -> dict[str, dict[str, object]]:
     changes = plan.get("resource_changes")
     if type(changes) is not list:
@@ -324,7 +346,7 @@ def candidates_from_plan(
     candidates: dict[str, dict[str, object]] = {}
     for task in tasks:
         after, actions = _task_change(changes, task=task)
-        if actions not in _REGISTER_ACTIONS:
+        if actions not in _REGISTER_ACTIONS and not (allow_noop and actions == ("no-op",)):
             raise RolloutGateError("terraform_plan_task_invalid", scope=task)
         candidates[task] = task_from_change(after, task=task)
     return candidates
@@ -365,6 +387,7 @@ def _resource_change(
     address: str,
     scope: str,
     code: str = "terraform_plan_worker_invalid",
+    allow_noop: bool = False,
 ) -> dict[str, Any]:
     matching = [
         change for change in changes if type(change) is dict and change.get("address") == address
@@ -379,7 +402,10 @@ def _resource_change(
         or type(actions) is not list
         or not actions
         or any(type(action) is not str for action in actions)
-        or tuple(actions) not in _REGISTER_ACTIONS
+        or (
+            tuple(actions) not in _REGISTER_ACTIONS
+            and not (allow_noop and tuple(actions) == ("no-op",))
+        )
     ):
         raise RolloutGateError(code, scope=scope)
     return after
@@ -449,6 +475,34 @@ def hmac_release_bindings_from_plan(plan: dict[str, object]) -> dict[str, object
     return dict(release)
 
 
+def deployment_intent_id_from_plan(plan: dict[str, object]) -> str:
+    """Return the UUIDv4 one-use intent bound to the production gate."""
+
+    changes = plan.get("resource_changes")
+    if type(changes) is not list:
+        raise RolloutGateError("terraform_plan_unreadable")
+    production_after = _resource_change(
+        changes,
+        address=PRODUCTION_GATE_ADDRESS,
+        scope="hmac",
+        code="terraform_plan_hmac_invalid",
+    )
+    production_input = production_after.get("input")
+    intent_id = (
+        production_input.get("deployment_intent_id") if type(production_input) is dict else None
+    )
+    if (
+        type(intent_id) is not str
+        or re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            intent_id,
+        )
+        is None
+    ):
+        raise RolloutGateError("terraform_plan_hmac_invalid", scope="hmac")
+    return intent_id
+
+
 def validate_saved_plan_hmac_files(
     plan: dict[str, object],
     *,
@@ -475,6 +529,7 @@ def cleanup_worker_bindings_from_plan(
     plan: dict[str, object],
     *,
     domain: str,
+    allow_noop: bool = False,
 ) -> dict[str, str]:
     """Extract the exact worker files bound into the same one-use cleanup plan."""
 
@@ -483,6 +538,7 @@ def cleanup_worker_bindings_from_plan(
         mode="cleanup",
         cleanup_domain=domain,
         advance_stage=False,
+        allow_noop=allow_noop,
     )
 
 
@@ -492,6 +548,7 @@ def worker_bindings_from_plan(
     mode: str,
     cleanup_domain: str,
     advance_stage: bool,
+    allow_noop: bool = False,
 ) -> dict[str, str]:
     """Extract exact worker files from the production-gated saved-plan resource."""
 
@@ -510,6 +567,7 @@ def worker_bindings_from_plan(
         changes,
         address=WORKER_DEPLOY_ADDRESS,
         scope="worker",
+        allow_noop=allow_noop,
     )
     worker_input = worker_after.get("input")
     release = hmac_release_bindings_from_plan(plan)
@@ -588,7 +646,7 @@ def validate_saved_plan_event_target(
     if type(transaction) is not dict or frozenset(transaction) != frozenset(
         {
             "mode",
-            "expected_rule_state",
+            "expected_rule",
             "target",
             "task_definition_arn",
             "manifest_sha256",
@@ -606,9 +664,20 @@ def validate_saved_plan_event_target(
         raise RolloutGateError("terraform_plan_event_invalid", scope="morning_digest")
     planned_task = planned_ecs.get("TaskDefinitionArn")
     planned_input_task = transaction.get("task_definition_arn")
+    try:
+        control_value = json.loads(control_path.read_text(encoding="utf-8"))
+        control_rule = control_value["morning_digest"]["expected_rule"]
+        planned_rule = _canonical_event_rule(transaction.get("expected_rule"))
+        expected_rule = _canonical_event_rule(control_rule)
+    except (OSError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise RolloutGateError(
+            "terraform_plan_event_invalid",
+            scope="morning_digest",
+        ) from exc
     if (
         transaction.get("mode") != mode
-        or transaction.get("expected_rule_state") != "DISABLED"
+        or planned_rule != expected_rule
+        or expected_rule["State"] != "DISABLED"
         or transaction.get("manifest_sha256") != saved_plan_sha256(manifest_path)
         or transaction.get("rollout_control_sha256") != saved_plan_sha256(control_path)
         or (

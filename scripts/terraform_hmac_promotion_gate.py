@@ -5,17 +5,22 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
-from scripts.hmac_rollout_gate import (
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPOSITORY_ROOT))
+sys.path.insert(0, str(_REPOSITORY_ROOT / "src"))
+
+from scripts.hmac_rollout_gate import (  # noqa: E402
     DeploymentIntent,
     LiveRolloutGate,
     RolloutGateError,
     _Boto3Factory,
     load_control,
 )
-from scripts.terraform_hmac_payload import (
+from scripts.terraform_hmac_payload import (  # noqa: E402
     saved_plan_sha256,
     show_saved_plan,
     validate_saved_plan_event_target,

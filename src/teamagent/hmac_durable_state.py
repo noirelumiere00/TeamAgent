@@ -28,6 +28,9 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from teamagent.runtime.worker_health import DEFAULT_BOT_HEARTBEAT, bot_heartbeat_healthy
+from teamagent.worker_release import file_sha256, verify_release
+
 HMAC_STATE_REQUIRED_ENV = "TEAMAGENT_HMAC_STATE_REQUIRED"
 HMAC_STATE_TABLE_ENV = "TEAMAGENT_HMAC_STATE_TABLE"
 HMAC_STATE_SCOPE_ENV = "TEAMAGENT_HMAC_STATE_SCOPE"
@@ -39,9 +42,15 @@ HMAC_RESTART_NONCE_ENV = "TEAMAGENT_HMAC_RESTART_NONCE"
 HMAC_SERVICE_ENV = "TEAMAGENT_HMAC_SERVICE"
 HMAC_MAIN_PID_ENV = "TEAMAGENT_HMAC_MAIN_PID"
 HMAC_SERVICE_HEALTH_ENV = "TEAMAGENT_HMAC_SERVICE_HEALTH"
+HMAC_RESTART_REQUIRE_COMPLETE_ENV = "TEAMAGENT_HMAC_RESTART_REQUIRE_COMPLETE"
+HMAC_RELEASE_ROOT_ENV = "TEAMAGENT_HMAC_RELEASE_ROOT"
+HMAC_RELEASE_TREE_SHA256_ENV = "TEAMAGENT_HMAC_RELEASE_TREE_SHA256"
+HMAC_RUNTIME_EXECUTABLE_SHA256_ENV = "TEAMAGENT_HMAC_RUNTIME_EXECUTABLE_SHA256"
+HMAC_BOT_HEARTBEAT_ENV = "TEAMAGENT_BOT_HEARTBEAT_PATH"
 
 _MAX_EPOCH = 9_999_999_999
 _ROLLOUT_OVERLAP_S = 900
+_CLOCK_CHECKPOINT_S = 30
 _GENERATION_RE = re.compile(r"^[!-~]{1,2048}$")
 _ROTATION_EPOCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _PROVENANCE_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -117,6 +126,20 @@ class HmacRuntimeDecision:
     previous_eligible: bool
     issuance_allowed: bool
     expectation: HmacRuntimeExpectation
+
+
+@dataclass(frozen=True)
+class ServiceProcessIdentity:
+    """Measured identity of the exact service process started for a promotion."""
+
+    pid: int
+    started_ticks: int
+    started_at: int
+    cwd: str
+    executable: str
+    executable_sha256: str
+    release_root: str
+    release_tree_sha256: str
 
 
 class HmacStateStore(Protocol):
@@ -382,19 +405,12 @@ def runtime_expectations_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _service_process_identity(service: str) -> tuple[int, int, int] | None:
-    raw_pid = os.environ.get(HMAC_MAIN_PID_ENV)
-    if raw_pid is None:
-        pid = os.getppid()
-    elif raw_pid.isascii() and raw_pid.isdecimal():
-        pid = int(raw_pid)
-    else:
-        return None
-    if pid <= 1:
-        return None
+def _process_observation(pid: int) -> tuple[int, int, bytes, Path, Path] | None:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
+        cwd = Path(os.readlink(f"/proc/{pid}/cwd")).resolve(strict=True)
+        executable = Path(os.readlink(f"/proc/{pid}/exe")).resolve(strict=True)
         proc_stat = Path("/proc/stat").read_text(encoding="utf-8")
         close = stat.rfind(")")
         fields = stat[close + 2 :].split()
@@ -408,10 +424,55 @@ def _service_process_identity(service: str) -> tuple[int, int, int] | None:
         process_started_at = boot_epoch + (started_ticks // int(clock_ticks))
     except (OSError, UnicodeError, TypeError, ValueError, IndexError):
         return None
-    marker = b"teamagent.runtime.slack_bot" if service == "bot" else b"teamagent.connect_web"
-    if started_ticks <= 0 or clock_ticks <= 0 or process_started_at < 0 or marker not in command:
+    return started_ticks, process_started_at, command, cwd, executable
+
+
+def _service_process_identity(service: str) -> ServiceProcessIdentity | None:
+    raw_pid = os.environ.get(HMAC_MAIN_PID_ENV)
+    if raw_pid is None:
+        pid = os.getppid()
+    elif raw_pid.isascii() and raw_pid.isdecimal():
+        pid = int(raw_pid)
+    else:
         return None
-    return pid, started_ticks, process_started_at
+    if pid <= 1:
+        return None
+    observation = _process_observation(pid)
+    if observation is None:
+        return None
+    started_ticks, process_started_at, command, cwd, executable = observation
+    try:
+        release_root_raw = os.environ.get(HMAC_RELEASE_ROOT_ENV, "")
+        release_tree_sha256 = os.environ.get(HMAC_RELEASE_TREE_SHA256_ENV, "")
+        executable_sha256 = os.environ.get(HMAC_RUNTIME_EXECUTABLE_SHA256_ENV, "")
+        release_root = Path(release_root_raw).resolve(strict=True)
+        cwd.relative_to(release_root)
+        executable.relative_to(release_root)
+    except (OSError, UnicodeError, TypeError, ValueError, IndexError):
+        return None
+    marker = b"teamagent.runtime.slack_bot" if service == "bot" else b"teamagent.connect_web"
+    if (
+        started_ticks <= 0
+        or process_started_at < 0
+        or marker not in command
+        or cwd != release_root / "app"
+        or not executable.is_file()
+        or _PROVENANCE_RE.fullmatch(release_tree_sha256) is None
+        or _PROVENANCE_RE.fullmatch(executable_sha256) is None
+        or file_sha256(executable) != executable_sha256
+        or not verify_release(release_root, expected_sha256=release_tree_sha256)
+    ):
+        return None
+    return ServiceProcessIdentity(
+        pid=pid,
+        started_ticks=started_ticks,
+        started_at=process_started_at,
+        cwd=str(cwd),
+        executable=str(executable),
+        executable_sha256=executable_sha256,
+        release_root=str(release_root),
+        release_tree_sha256=release_tree_sha256,
+    )
 
 
 def _connect_port_owned_by(pid: int, *, port: int = 8788) -> bool:
@@ -446,7 +507,11 @@ def _connect_port_owned_by(pid: int, *, port: int = 8788) -> bool:
     return False
 
 
-def _service_health_verified(service: str, pid: int) -> bool:
+def _service_health_verified(
+    service: str,
+    pid: int,
+    process_start_ticks: int | None = None,
+) -> bool:
     """Verify liveness locally; connect must own 8788 and serve its health endpoint."""
 
     try:
@@ -454,7 +519,15 @@ def _service_health_verified(service: str, pid: int) -> bool:
     except OSError:
         return False
     if service == "bot":
-        return True
+        if process_start_ticks is None:
+            return False
+        heartbeat_raw = os.environ.get(HMAC_BOT_HEARTBEAT_ENV)
+        heartbeat = Path(heartbeat_raw) if heartbeat_raw else DEFAULT_BOT_HEARTBEAT
+        return bot_heartbeat_healthy(
+            pid=pid,
+            process_start_ticks=process_start_ticks,
+            path=heartbeat,
+        )
     if service != "connect" or not _connect_port_owned_by(pid):
         return False
     connection = http.client.HTTPConnection("127.0.0.1", 8788, timeout=2)
@@ -619,12 +692,13 @@ class DynamoDbHmacStateStore:
         should_retire = (
             expected.previous_generation is not None
             and expected.deadline is not None
+            and not snapshot.previous_retired
             and high_water >= expected.deadline
         )
         retired = snapshot.previous_retired or should_retire
 
-        # Every decision advances a separate clock revision. This linearizes a read taken just
-        # before the deadline against concurrent retirement without starving config-revision CAS.
+        # Checkpoints and the exact retirement edge advance a separate clock revision. Ordinary
+        # issuance linearizes on strong reads and never contends on this conditional write.
         expression = (
             "SET high_water = :next, previous_retired = :retired,"
             " clock_revision = if_not_exists(clock_revision, :zero) + :one"
@@ -691,14 +765,44 @@ class DynamoDbHmacStateStore:
         )
 
     def evaluate(self, expectation: HmacRuntimeExpectation) -> HmacRuntimeDecision | None:
-        for attempt in range(16):
+        # Consistent reads linearize ordinary issuance. A conditional write is needed only for a
+        # bounded high-water checkpoint or the exact retirement edge, avoiding a hot serial write
+        # for every signature while preserving durable clock rollback protection.
+        for attempt in range(8):
             snapshot = self._read(expectation.domain)
             if snapshot is None or not _matches(snapshot, expectation):
                 return None
+            effective_now = max(snapshot.high_water, snapshot.trusted_now)
+            retirement_due = (
+                expectation.previous_generation is not None
+                and expectation.deadline is not None
+                and not snapshot.previous_retired
+                and effective_now >= expectation.deadline
+            )
+            checkpoint_due = effective_now >= snapshot.high_water + _CLOCK_CHECKPOINT_S
+            if not retirement_due and not checkpoint_due:
+                # A second strongly consistent read is the issuance linearization point. This
+                # avoids returning a read captured before a concurrent retirement while keeping
+                # the high-contention domain record off the ordinary signature write path.
+                current = self._read(expectation.domain)
+                if current is None or not _matches(current, expectation):
+                    return None
+                current_now = max(current.high_water, current.trusted_now)
+                if (
+                    expectation.previous_generation is not None
+                    and expectation.deadline is not None
+                    and not current.previous_retired
+                    and current_now >= expectation.deadline
+                ) or current_now >= current.high_water + _CLOCK_CHECKPOINT_S:
+                    continue
+                return decision_from_snapshot(
+                    replace(current, high_water=current_now),
+                    expectation,
+                )
             advanced = self._advance_once(snapshot, expectation)
             if advanced is None:
-                if attempt >= 3:
-                    time.sleep(min(0.001 * (2 ** min(attempt - 3, 5)), 0.02))
+                if attempt >= 2:
+                    time.sleep(min(0.001 * (2 ** min(attempt - 2, 4)), 0.01))
                 continue
             return decision_from_snapshot(advanced, expectation)
         return None
@@ -730,8 +834,9 @@ class DynamoDbHmacStateStore:
         restart_nonce = os.environ.get(HMAC_RESTART_NONCE_ENV)
         service = os.environ.get(HMAC_SERVICE_ENV)
         artifact_sha256 = os.environ.get(HMAC_ARTIFACT_SHA256_ENV)
-        service_identity: tuple[int, int, int] | None = None
+        service_identity: ServiceProcessIdentity | None = None
         restart_item: dict[str, Any] | None = None
+        restart_stage: str | None = None
         if restart_nonce is not None or service is not None:
             if (
                 type(restart_nonce) is not str
@@ -746,7 +851,8 @@ class DynamoDbHmacStateStore:
             service_identity = _service_process_identity(service)
             if service_identity is None or not _service_health_verified(
                 service,
-                service_identity[0],
+                service_identity.pid,
+                service_identity.started_ticks,
             ):
                 return False
             restart_response = self._client().get_item(
@@ -759,16 +865,28 @@ class DynamoDbHmacStateStore:
             )
             restart_item = restart_response.get("Item") if type(restart_response) is dict else None
             restart_now = _trusted_epoch(restart_response)
+            restart_stage = (
+                _item_string(restart_item, "stage") if type(restart_item) is dict else None
+            )
             if (
                 type(restart_item) is not dict
                 or restart_now is None
-                or _item_string(restart_item, "stage") != "requested"
+                or restart_stage not in {"requested", "complete"}
+                or (
+                    os.environ.get(HMAC_RESTART_REQUIRE_COMPLETE_ENV) == "1"
+                    and restart_stage != "complete"
+                )
                 or _item_string(restart_item, "restart_nonce") != restart_nonce
                 or _item_string(restart_item, "provenance") != provenance
                 or _item_string(restart_item, "artifact_sha256") != artifact_sha256
                 or _item_string(restart_item, "config_digest") != config_digest
+                or _item_string(restart_item, "release_root") != service_identity.release_root
+                or _item_string(restart_item, "release_tree_sha256")
+                != service_identity.release_tree_sha256
+                or _item_string(restart_item, "runtime_executable_sha256")
+                != service_identity.executable_sha256
                 or ((requested_at := _item_number(restart_item, "requested_at")) is None)
-                or service_identity[2] < requested_at
+                or service_identity.started_at < requested_at
             ):
                 return False
             checked_at = max(checked_at, restart_now)
@@ -826,9 +944,14 @@ class DynamoDbHmacStateStore:
                 "restart_nonce": {"S": restart_nonce},
                 "artifact_sha256": {"S": artifact_sha256},
                 "config_digest": {"S": config_digest},
-                "main_pid": {"N": str(service_identity[0])},
-                "process_start_ticks": {"N": str(service_identity[1])},
-                "process_started_at": {"N": str(service_identity[2])},
+                "main_pid": {"N": str(service_identity.pid)},
+                "process_start_ticks": {"N": str(service_identity.started_ticks)},
+                "process_started_at": {"N": str(service_identity.started_at)},
+                "process_cwd": {"S": service_identity.cwd},
+                "process_executable": {"S": service_identity.executable},
+                "runtime_executable_sha256": {"S": service_identity.executable_sha256},
+                "release_root": {"S": service_identity.release_root},
+                "release_tree_sha256": {"S": service_identity.release_tree_sha256},
                 "health_verified": {"BOOL": True},
                 "checked_at": {"N": str(checked_at)},
                 "expires_at": {"N": str(checked_at + 300)},
@@ -837,10 +960,14 @@ class DynamoDbHmacStateStore:
                 service_item.update(
                     {
                         "active_port": {"N": "8788"},
-                        "port_owner_pid": {"N": str(service_identity[0])},
+                        "port_owner_pid": {"N": str(service_identity.pid)},
                         "health_endpoint": {"S": "http://127.0.0.1:8788/healthz"},
+                        "health_kind": {"S": "connect_http_port_owner"},
                     }
                 )
+            else:
+                service_item["health_kind"] = {"S": "slack_socket_auth_heartbeat"}
+            assert restart_stage in {"requested", "complete"}
             transaction.append(
                 {
                     "ConditionCheck": {
@@ -850,18 +977,24 @@ class DynamoDbHmacStateStore:
                             "record": {"S": restart_record},
                         },
                         "ConditionExpression": (
-                            "#stage = :requested AND restart_nonce = :nonce"
+                            "#stage = :restart_stage AND restart_nonce = :nonce"
                             " AND provenance = :provenance"
                             " AND artifact_sha256 = :artifact"
                             " AND config_digest = :config"
+                            " AND release_root = :release_root"
+                            " AND release_tree_sha256 = :release_tree"
+                            " AND runtime_executable_sha256 = :executable"
                         ),
                         "ExpressionAttributeNames": {"#stage": "stage"},
                         "ExpressionAttributeValues": {
-                            ":requested": {"S": "requested"},
+                            ":restart_stage": {"S": restart_stage},
                             ":nonce": {"S": restart_nonce},
                             ":provenance": {"S": provenance},
                             ":artifact": {"S": artifact_sha256},
                             ":config": {"S": config_digest},
+                            ":release_root": {"S": service_identity.release_root},
+                            ":release_tree": {"S": service_identity.release_tree_sha256},
+                            ":executable": {"S": service_identity.executable_sha256},
                         },
                     }
                 }
@@ -970,10 +1103,15 @@ def require_runtime_startup(
 
 __all__ = [
     "HMAC_ARTIFACT_SHA256_ENV",
+    "HMAC_BOT_HEARTBEAT_ENV",
     "HMAC_MAIN_PID_ENV",
     "HMAC_PROVENANCE_ENV",
+    "HMAC_RELEASE_ROOT_ENV",
+    "HMAC_RELEASE_TREE_SHA256_ENV",
     "HMAC_RESTART_NONCE_ENV",
+    "HMAC_RESTART_REQUIRE_COMPLETE_ENV",
     "HMAC_ROTATION_EPOCH_ENV",
+    "HMAC_RUNTIME_EXECUTABLE_SHA256_ENV",
     "HMAC_SERVICE_ENV",
     "HMAC_SERVICE_HEALTH_ENV",
     "HMAC_STATE_REQUIRED_ENV",
@@ -985,6 +1123,7 @@ __all__ = [
     "HmacDurableStateError",
     "HmacRuntimeDecision",
     "HmacRuntimeExpectation",
+    "ServiceProcessIdentity",
     "decision_from_snapshot",
     "durable_issuance_guard",
     "durable_state_required",

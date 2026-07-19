@@ -328,7 +328,9 @@ data "aws_iam_policy_document" "hmac_rollout_gate" {
       "events:DescribeRule",
       "events:DisableRule",
       "events:ListTargetsByRule",
+      "events:PutRule",
       "events:PutTargets",
+      "events:RemoveTargets",
     ]
     resources = ["arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/${var.project_name}-${var.environment}-*"]
   }
@@ -348,7 +350,9 @@ data "aws_iam_policy_document" "hmac_rollout_gate" {
     sid = "CasHmacControlMetadata"
     actions = [
       "dynamodb:GetItem",
+      "dynamodb:PutItem",
       "dynamodb:TransactWriteItems",
+      "dynamodb:UpdateItem",
     ]
     resources = [aws_dynamodb_table.hmac_state.arn]
     condition {
@@ -356,6 +360,32 @@ data "aws_iam_policy_document" "hmac_rollout_gate" {
       variable = "dynamodb:LeadingKeys"
       values   = [local.hmac_state_scope]
     }
+  }
+
+  statement {
+    sid = "ReconcileCleanupAcrossExactLedgers"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:TransactWriteItems",
+    ]
+    resources = [
+      aws_dynamodb_table.hmac_state.arn,
+      aws_dynamodb_table.image_deployment_intents.arn,
+    ]
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values = [
+        local.hmac_state_scope,
+        "intent#*",
+      ]
+    }
+  }
+
+  statement {
+    sid       = "VerifyExactWorkerProvenanceKey"
+    actions   = ["kms:Verify"]
+    resources = [aws_kms_key.mcp_source_publisher_signing.arn]
   }
 }
 

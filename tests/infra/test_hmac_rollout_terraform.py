@@ -285,6 +285,32 @@ def test_full_saved_plan_owns_candidate_rollback_worker_and_event_mutations() ->
     assert "terraform_data.hmac_live_task_gate" in worker
 
 
+def test_rollout_gate_policy_covers_exact_reconciliation_dependencies() -> None:
+    policy = _terraform_block(
+        TF_ROOT / "hmac_keyrings.tf",
+        'data "aws_iam_policy_document"',
+        "hmac_rollout_gate",
+    )
+
+    for action in (
+        "events:DescribeRule",
+        "events:ListTargetsByRule",
+        "events:PutRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:TransactWriteItems",
+        "dynamodb:UpdateItem",
+        "kms:Verify",
+    ):
+        assert action in policy
+    assert "aws_dynamodb_table.hmac_state.arn" in policy
+    assert "aws_dynamodb_table.image_deployment_intents.arn" in policy
+    assert "aws_kms_key.mcp_source_publisher_signing.arn" in policy
+    assert '"intent#*"' in policy
+
+
 def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None:
     worker = (TF_ROOT / "worker.tf").read_text(encoding="utf-8")
     loader = (ROOT / "scripts" / "load_secrets.sh").read_text(encoding="utf-8")
@@ -300,12 +326,13 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     preflight = (ROOT / "scripts" / "preflight_hmac_rotation.py").read_text(encoding="utf-8")
     live_gate = (ROOT / "scripts" / "hmac_rollout_gate.py").read_text(encoding="utf-8")
     terraform_gate = (ROOT / "scripts" / "terraform_hmac_gate.py").read_text(encoding="utf-8")
+    hmac_tf = (TF_ROOT / "hmac_keyrings.tf").read_text(encoding="utf-8")
     assert (ROOT / "scripts" / "preflight_hmac_rotation.py").stat().st_mode & 0o111
 
-    assert "source /opt/teamagent/hmac.env; source scripts/load_secrets.sh" in worker
-    assert worker.index("source /opt/teamagent/teamagent.env.base") < worker.index(
-        "source /opt/teamagent/hmac.env"
-    )
+    assert "only by the signed, saved-plan-bound atomic release flow" in worker
+    assert "pip install" not in worker
+    assert "npm install" not in worker
+    assert "npx " not in worker
     assert "local.mail_action_hmac_transition_valid" in worker
     assert "local.report_link_hmac_transition_valid" in worker
     assert "_get_secret_version" in loader
@@ -314,11 +341,11 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert "primary cannot be a database credential secret" in loader
     assert "legacy previous must be the pinned database-url secret" in loader
     assert "legacy worker key must be the pinned Slack bot secret" in loader
-    assert "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY" in worker
-    assert "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET_NAME" in worker
-    assert "MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID" in worker
-    assert "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION" in worker
-    assert "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY" in worker
+    assert "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY" in hmac_tf
+    assert "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET_NAME" in preflight
+    assert "MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID" in preflight
+    assert "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION" in hmac_tf
+    assert "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY" in hmac_tf
     assert '"worker": frozenset({"mail_action", "report_link"})' in preflight
 
     assert "permanently disabled" in connect_deploy
@@ -342,7 +369,7 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     )
     assert worker_deploy.index("--worker-env") < worker_deploy.index("aws s3api put-object")
     assert worker_deploy.count("source /opt/teamagent/current/hmac.env") >= 2
-    assert "source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK" in worker
+    assert "source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK" in worker_deploy
     assert "source scripts/load_secrets.sh REPORT_LINK" in worker_deploy
     assert "Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS" not in worker
     assert "Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS" not in worker_deploy
@@ -361,9 +388,16 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert 'cp "$SELECTED_WORKER_ARTIFACT"' in worker_deploy
     assert "git archive" not in worker_deploy
     assert "verify_worker_bundle_provenance.py" in worker_deploy
+    assert "render_ec2_base_env.py" in worker_deploy
+    assert "measure_worker_release.py" in worker_deploy
+    assert "worker_promotion_attest.sh" in worker_deploy
+    assert "--require-hashes --only-binary=:all:" in worker_deploy
+    assert "npm ci --ignore-scripts" in worker_deploy
+    assert "npx " not in worker_deploy
     assert "aws s3api put-object" in worker_deploy
     assert "--version-id" in worker_deploy
-    assert "releases/$RELEASE_DIGEST" in worker_deploy
+    assert "RELEASE_ROOT=/opt/teamagent/releases" in worker_deploy
+    assert 'FINAL_RELEASE="$RELEASE_ROOT/$RELEASE_TREE_DIGEST"' in worker_deploy
     assert "worker_atomic_release_switch.sh" in worker_deploy
     assert 'mv -Tf "$INSTALL_ROOT/.current-new-$$" "$CURRENT_LINK"' in atomic_switch
     assert 'mv -Tf "$INSTALL_ROOT/.current-rollback-$$" "$CURRENT_LINK"' in atomic_switch
@@ -371,7 +405,7 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert "release-transactions" in atomic_switch
     assert "snapshot_units" in atomic_switch
     assert "restore_units" in atomic_switch
-    assert "StandardOutputContent" not in worker_deploy
+    assert "--query StandardOutputContent" in worker_deploy
     assert "StandardErrorContent" not in worker_deploy
     assert "list_secret_version_ids" in live_gate
     assert "get_secret_value" not in live_gate.casefold()
@@ -395,6 +429,14 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert worker_deploy.index("--action post-restart") > worker_deploy.index(
         'RESTART_CID="$(aws ssm send-command'
     )
+    assert 'if [[ -z "${RESTART_CID:-}" || "$RESTART_CID" == "None" ]]' in worker_deploy
+    assert 'if [[ "$RESTART_STATUS" != "Success" ]]' in worker_deploy
+    assert '"TimedOut"' in worker_deploy
+    assert '"Cancelled"' in worker_deploy
+    assert "reconcile_restart_rollback" in worker_deploy
+    assert "--action reconcile-restart" in worker_deploy
+    assert "RELEASE_TRANSACTION_STATUS_JSON" in worker_deploy
+    assert '"current":"new","status":"ready"' in worker_deploy
     assert "systemctl is-active --quiet teamagent-bot" in atomic_switch
     assert "systemctl is-active --quiet teamagent-connect" in atomic_switch
     assert 'grep -F "pid=$CONNECT_MAIN_PID,"' in atomic_switch
@@ -432,7 +474,9 @@ def test_live_connect_and_canary_anchors_remain_documented_and_canary_unmodified
     assert "--action prepare-cleanup" in runbook
     assert "--action complete-cleanup" in runbook
     assert "`cleanup_staging_required`" in runbook
-    assert "repeat `prepare-cleanup`" in runbook
+    assert "--action reconcile-cleanup" in runbook
+    assert "--reconcile-decision rebind" in runbook
+    assert "--reconcile-decision abort" in runbook
     assert "HMAC_WORKER_MODE=rollback" in runbook
     assert "exact approved rollback artifact" in runbook
     assert "canary `:14`" in runbook

@@ -232,6 +232,12 @@ def test_cleanup_plan_requires_replacement_for_every_exact_task_candidate() -> N
         )
     with pytest.raises(RolloutGateError, match="terraform_plan_task_invalid"):
         candidates_from_plan({"resource_changes": changes})
+    assert set(
+        candidates_from_plan(
+            {"resource_changes": changes},
+            allow_noop=True,
+        )
+    ) == set(TASK_ADDRESSES)
 
 
 def _worker_saved_plan(
@@ -300,6 +306,19 @@ def test_cleanup_worker_files_and_release_gate_share_one_exact_saved_plan() -> N
     ]["candidate_env"] = "f" * 64
     with pytest.raises(RolloutGateError, match="terraform_plan_worker_invalid"):
         cleanup_worker_bindings_from_plan(drifted, domain="mail_action")
+
+    reconciled = copy.deepcopy(plan)
+    reconciled["resource_changes"][0]["change"]["actions"] = ["no-op"]  # type: ignore[index]
+    with pytest.raises(RolloutGateError, match="terraform_plan_worker_invalid"):
+        cleanup_worker_bindings_from_plan(reconciled, domain="mail_action")
+    assert (
+        cleanup_worker_bindings_from_plan(
+            reconciled,
+            domain="mail_action",
+            allow_noop=True,
+        )
+        == artifacts
+    )
 
 
 def test_saved_plan_snapshot_hashes_and_worker_cli_fail_closed_on_drift(
@@ -373,7 +392,22 @@ def test_eventbridge_full_target_is_bound_to_same_saved_plan(
     manifest = tmp_path / "manifest.json"
     control = tmp_path / "control.json"
     manifest.write_text("{}\n", encoding="utf-8")
-    control.write_text("{}\n", encoding="utf-8")
+    expected_rule: dict[str, object] = {
+        "Arn": ("arn:aws:events:ap-northeast-1:123456789012:rule/teamagent-dev-morning-digest"),
+        "CreatedBy": "123456789012",
+        "Description": "Reviewed morning digest schedule",
+        "EventBusName": "default",
+        "EventPattern": None,
+        "ManagedBy": None,
+        "Name": "teamagent-dev-morning-digest",
+        "RoleArn": None,
+        "ScheduleExpression": "cron(0 22 * * ? *)",
+        "State": "DISABLED",
+    }
+    control.write_text(
+        json.dumps({"morning_digest": {"expected_rule": expected_rule}}) + "\n",
+        encoding="utf-8",
+    )
     manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
     control_digest = hashlib.sha256(control.read_bytes()).hexdigest()
     task_definition = (
@@ -431,7 +465,7 @@ def test_eventbridge_full_target_is_bound_to_same_saved_plan(
                     "after": {
                         "input": {
                             "mode": "candidate",
-                            "expected_rule_state": "DISABLED",
+                            "expected_rule": expected_rule,
                             "target": planned_target,
                             "task_definition_arn": None,
                             "manifest_sha256": manifest_digest,

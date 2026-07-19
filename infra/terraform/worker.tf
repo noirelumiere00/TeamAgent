@@ -170,98 +170,18 @@ resource "aws_instance" "worker" {
     http_endpoint = "enabled"
   }
 
-  # 依存の事前インストール（コード/Chrome本体/secrets はデプロイ段階で投入）
+  # Runtime packages, browser binaries, application code, environment, and units are installed
+  # only by the signed, saved-plan-bound atomic release flow. User data deliberately cannot
+  # recreate the former mutable latest-object/unpinned-install bypass.
   user_data = <<-EOF
     #!/bin/bash
-    set -x
-    exec > /var/log/teamagent-bootstrap.log 2>&1
-    # システム依存
-    dnf install -y python3.11 python3.11-pip git tar gzip xz gcc nodejs npm \
-      nss nspr atk at-spi2-atk cups-libs libdrm mesa-libgbm libxkbcommon \
-      libXcomposite libXdamage libXrandr libXScrnSaver libXtst pango cairo \
-      alsa-lib gtk3 liberation-fonts || true
-    # ffmpeg（AL2023 標準repoに無いので arm64 static）
-    cd /tmp
-    curl -fsSL -o ff.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz || true
-    tar xf ff.tar.xz || true
-    cp ffmpeg-*-static/ffmpeg ffmpeg-*-static/ffprobe /usr/local/bin/ 2>/dev/null || true
-    # アプリ配置先
-    mkdir -p /opt/teamagent/app
-    # デプロイスクリプト（Phase2 で S3 から tarball を取得して起動）
-    cat > /opt/teamagent/deploy.sh <<'DEP'
-    #!/bin/bash
     set -euo pipefail
-    BUCKET="${aws_s3_bucket.raw_files.id}"
-    cd /opt/teamagent
-    aws s3 cp "s3://$BUCKET/deploy/teamagent-bot.tar.gz" /tmp/app.tar.gz
-    aws s3 cp "s3://$BUCKET/deploy/teamagent.env.base" /opt/teamagent/teamagent.env.base
-    [[ "$(sha256sum /tmp/app.tar.gz | awk '{print $1}')" == '${var.worker_hmac_artifact_sha256}' ]] || exit 1
-    rm -rf /opt/teamagent/app && mkdir -p /opt/teamagent/app
-    tar xzf /tmp/app.tar.gz -C /opt/teamagent/app
-    cd /opt/teamagent/app
-    python3.11 -m venv .venv
-    ./.venv/bin/pip install -U pip
-    ./.venv/bin/pip install -e . || ./.venv/bin/pip install -r requirements.txt || true
-    npx --yes @puppeteer/browsers install chrome@stable --path /opt/teamagent/chrome || true
-    systemctl restart teamagent-bot || true
-    DEP
-    chmod +x /opt/teamagent/deploy.sh
-    # HMAC deployment metadata only (secret names/version IDs/generations/T0; no secret payloads).
-    # Source this after teamagent.env.base so a stale base file cannot reset T0 or swap generations.
-    cat > /opt/teamagent/hmac.env <<'HMAC'
-    export TEAMAGENT_HMAC_STATE_REQUIRED='1'
-    export TEAMAGENT_HMAC_STATE_TABLE='${aws_dynamodb_table.hmac_state.name}'
-    export TEAMAGENT_HMAC_STATE_SCOPE='${local.hmac_state_scope}'
-    export TEAMAGENT_HMAC_ROTATION_EPOCH='${var.hmac_rotation_epoch}'
-    export TEAMAGENT_HMAC_PROVENANCE='${local.worker_hmac_provenance}'
-    export TEAMAGENT_HMAC_ARTIFACT_SHA256='${var.worker_hmac_artifact_sha256}'
-    export MAIL_ACTION_HMAC_SECRET_NAME='${aws_secretsmanager_secret.mail_action_hmac.name}'
-    export MAIL_ACTION_HMAC_PRIMARY_VERSION_ID='${var.mail_action_hmac_primary_version_id}'
-    export MAIL_ACTION_HMAC_PRIMARY_GENERATION='${local.mail_action_hmac_primary_generation}'
-    export MAIL_ACTION_HMAC_PREVIOUS_SECRET_NAME='${local.mail_action_hmac_previous_secret_name}'
-    export MAIL_ACTION_HMAC_PREVIOUS_VERSION_ID='${local.mail_action_hmac_previous_version_id}'
-    export MAIL_ACTION_HMAC_PREVIOUS_GENERATION='${local.mail_action_hmac_previous_generation}'
-    export MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT='${var.mail_action_hmac_rotation_started_at}'
-    export MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY='${var.mail_action_hmac_rollout_phase == "legacy_migration" ? "1" : ""}'
-    export MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET_NAME='${var.mail_action_hmac_rollout_phase == "legacy_migration" ? data.aws_secretsmanager_secret.slack_bot.name : ""}'
-    export MAIL_ACTION_HMAC_LEGACY_WORKER_VERSION_ID='${var.mail_action_hmac_rollout_phase == "legacy_migration" ? var.hmac_legacy_slack_bot_version_id : ""}'
-    export MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION='${var.mail_action_hmac_rollout_phase == "legacy_migration" ? local.hmac_legacy_worker_generation : ""}'
-    export MAIL_ACTION_TTL_S='${var.mail_action_hmac_ttl_s}'
-    export REPORT_LINK_HMAC_SECRET_NAME='${aws_secretsmanager_secret.report_link_hmac.name}'
-    export REPORT_LINK_HMAC_PRIMARY_VERSION_ID='${var.report_link_hmac_primary_version_id}'
-    export REPORT_LINK_HMAC_PRIMARY_GENERATION='${local.report_link_hmac_primary_generation}'
-    export REPORT_LINK_HMAC_PREVIOUS_SECRET_NAME='${local.report_link_hmac_previous_secret_name}'
-    export REPORT_LINK_HMAC_PREVIOUS_VERSION_ID='${local.report_link_hmac_previous_version_id}'
-    export REPORT_LINK_HMAC_PREVIOUS_GENERATION='${local.report_link_hmac_previous_generation}'
-    export REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT='${var.report_link_hmac_rotation_started_at}'
-    export REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY='${var.report_link_hmac_rollout_phase == "legacy_migration" ? "1" : ""}'
-    export REPORT_LINK_TTL_S='${var.report_link_hmac_ttl_s}'
-    HMAC
-    IMDS_TOKEN="$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
-      http://169.254.169.254/latest/api/token)"
-    WORKER_ID="$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
-      http://169.254.169.254/latest/meta-data/instance-id)"
-    [[ "$WORKER_ID" =~ ^i-[a-f0-9]{8,32}$ ]] || exit 1
-    printf "export TEAMAGENT_HMAC_WORKER_ID='%s'\n" "$WORKER_ID" >> /opt/teamagent/hmac.env
-    chmod 0644 /opt/teamagent/hmac.env
-    # systemd ユニット（コード投入後に enable/start）
-    cat > /etc/systemd/system/teamagent-bot.service <<'SVC'
-    [Unit]
-    Description=TeamAgent Slack Bot (Socket Mode)
-    After=network-online.target
-    Wants=network-online.target
-    [Service]
-    Type=simple
-    WorkingDirectory=/opt/teamagent/app
-    ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source /opt/teamagent/hmac.env; source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK || exit $?; ./.venv/bin/python scripts/check_hmac_runtime_state.py --domains MAIL_ACTION,REPORT_LINK --worker-attestation || exit $?; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
-    Restart=always
-    RestartSec=5
-    Environment=PYTHONUNBUFFERED=1
-    [Install]
-    WantedBy=multi-user.target
-    SVC
-    systemctl daemon-reload
-    echo "bootstrap-done"
+    umask 077
+    exec > /var/log/teamagent-bootstrap.log 2>&1
+    install -d -m 0755 /opt/teamagent /opt/teamagent/releases
+    install -d -m 0700 /opt/teamagent/release-transactions
+    rm -f /opt/teamagent/deploy.sh
+    echo "immutable-release-bootstrap-ready"
   EOF
 
   user_data_replace_on_change = false

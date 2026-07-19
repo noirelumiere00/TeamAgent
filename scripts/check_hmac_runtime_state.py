@@ -9,9 +9,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from pathlib import Path
 
-from teamagent.hmac_durable_state import HmacDurableStateError, require_runtime_startup
-from teamagent.hmac_keyring import (
+_APPLICATION_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_APPLICATION_ROOT / "src"))
+
+from teamagent.hmac_durable_state import (  # noqa: E402
+    HmacDurableStateError,
+    require_runtime_startup,
+)
+from teamagent.hmac_keyring import (  # noqa: E402
     MAIL_ACTION_MAX_TOKEN_TTL_S,
     REPORT_LINK_MAX_TOKEN_TTL_S,
 )

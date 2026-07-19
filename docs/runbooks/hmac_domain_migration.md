@@ -337,6 +337,14 @@ issuer cutover and never the old one-shot retirement action:
    `teamagent-bot` and `teamagent-connect` active, port 8788 listening, and a durable startup
    attestation strictly newer than the restart request. Rollback during this interval uses only
    the prepared primary-only rollback task/archive and remains authorized.
+   If the one-use apply fails or is interrupted, do not retry the burned plan or run
+   `prepare-cleanup` again. First prove the complete live ECS/EventBridge/worker state and use
+   `--action reconcile-cleanup --reconcile-decision abort` only when every live task is the exact
+   recorded baseline. Otherwise mark the old intent `RECONCILE_REQUIRED`, create a fresh one-use
+   plan with identical reviewed task/worker bindings, and use
+   `--action reconcile-cleanup --reconcile-decision rebind` with its fresh plan and intent. The
+   cross-table CAS pins both intent records, the proved live-state digest, and the replacement plan
+   before any later apply can consume the authorization.
 4. After every affected ECS replacement is stable, list/describe counts reconcile, all old and
    draining tasks are gone (including in-flight morning-digest work), and the fresh worker restart
    record is complete, finalize the CAS:
@@ -354,8 +362,8 @@ issuer cutover and never the old one-shot retirement action:
    provenances authorized. `--action retire-previous` is deliberately rejected with
    `cleanup_staging_required`; it is not an operator shortcut.
 5. At or after `T0_report + 605,700`, build a fresh report cleanup manifest/control/artifact set and
-   repeat `prepare-cleanup`, cleanup-mode replacement/drain/restart, and `complete-cleanup` for
-   `report_link`. Never reuse the prior cleanup control's identities or provenances.
+   perform a new `prepare-cleanup`, cleanup-mode replacement/drain/restart, and `complete-cleanup`
+   for `report_link`. Never reuse the prior cleanup control's identities or provenances.
 6. Re-run saved legacy-token probes with intentionally unexpired payload claims; verification must
    fail because the previous key is gone. New tokens and a prepared rollback must continue to
    work.

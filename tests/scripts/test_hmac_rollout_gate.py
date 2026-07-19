@@ -15,11 +15,14 @@ import scripts.hmac_rollout_gate as rollout_gate_module
 import scripts.terraform_hmac_gate as terraform_gate_module
 import scripts.terraform_hmac_promotion_gate as promotion_gate_module
 from scripts.hmac_rollout_gate import (
+    CleanupLedger,
     DeploymentIntent,
     LiveRolloutGate,
     RolloutGateError,
     load_control,
 )
+from scripts.terraform_hmac_payload import WORKER_ARTIFACT_BINDING_KEYS
+from scripts.verify_worker_bundle_provenance import ProvenanceBinding
 
 _TEST_INTENT = DeploymentIntent(
     plan_sha256="e" * 64,
@@ -97,6 +100,12 @@ _TASK_ARNS = {
 _IMAGE = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent@sha256:" + "1" * 64
 _ROLLBACK_IMAGE = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent@sha256:" + "9" * 64
 _EVENT_ROLE = "arn:aws:iam::123456789012:role/teamagent-dev-events-morning-digest"
+_WORKER_PROVENANCE_KEY = (
+    "arn:aws:kms:ap-northeast-1:718959508629:key/12345678-1234-4123-8123-123456789abc"
+)
+_RELEASE_TREE_SHA256 = "a" * 64
+_RELEASE_ROOT = f"/opt/teamagent/releases/{_RELEASE_TREE_SHA256}"
+_RUNTIME_EXECUTABLE_SHA256 = "b" * 64
 
 
 def _provenance(**values: str) -> str:
@@ -404,6 +413,21 @@ def _target_digest(target: object) -> str:
     ).hexdigest()
 
 
+def _morning_rule() -> dict[str, object]:
+    return {
+        "Arn": ("arn:aws:events:ap-northeast-1:123456789012:rule/teamagent-dev-morning-digest"),
+        "CreatedBy": "123456789012",
+        "Description": "Reviewed morning digest schedule",
+        "EventBusName": "default",
+        "EventPattern": None,
+        "ManagedBy": None,
+        "Name": "teamagent-dev-morning-digest",
+        "RoleArn": None,
+        "ScheduleExpression": "cron(0 22 * * ? *)",
+        "State": "DISABLED",
+    }
+
+
 def test_event_target_digest_canonicalizes_unordered_network_sets() -> None:
     target = _morning_target(_TASK_ARNS["morning_new"])
     reordered = copy.deepcopy(target)
@@ -481,7 +505,7 @@ def _control(rollback_hash: str, artifact_hash: str = "2" * 64) -> dict[str, obj
             "rollback_target_digest": _target_digest(
                 _morning_target(_TASK_ARNS["morning_rollback"])
             ),
-            "expected_rule_state": "DISABLED",
+            "expected_rule": _morning_rule(),
         },
         "worker": {
             "instance_id": "i-0123456789abcdef0",
@@ -658,7 +682,10 @@ class _FakeEvents:
         self._morning_target = _morning_target(task_definition)
 
     def describe_rule(self, **kwargs: object) -> dict[str, object]:
-        return _response(Name=kwargs["Name"], State=self.rule_state)
+        rule = _morning_rule()
+        rule["Name"] = kwargs["Name"]
+        rule["State"] = self.rule_state
+        return _response(**rule)
 
     def list_targets_by_rule(self, **kwargs: object) -> dict[str, object]:
         if kwargs["Rule"] == "teamagent-dev-connect-canary":
@@ -730,6 +757,21 @@ class _FakeSecrets:
 class _ConditionalDdbError(Exception):
     def __init__(self) -> None:
         self.response = {"Error": {"Code": "TransactionCanceledException"}}
+
+
+class _FakeKms:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.valid = True
+        self.valid_results: list[bool] = []
+
+    def verify(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(copy.deepcopy(kwargs))
+        return {
+            "SignatureValid": (self.valid_results.pop(0) if self.valid_results else self.valid),
+            "KeyId": kwargs["KeyId"],
+            "SigningAlgorithm": kwargs["SigningAlgorithm"],
+        }
 
 
 class _FakeDdb:
@@ -855,9 +897,9 @@ class _FakeDdb:
                             item[str(names["#arn"])] = copy.deepcopy(values[":arn"])
                         elif expression.startswith("SET #target"):
                             item[str(names["#target"])] = copy.deepcopy(values[":target"])
-                            if "#rule_state" in names:
-                                item[str(names["#rule_state"])] = copy.deepcopy(
-                                    values[":rule_state"]
+                            if "#rule_digest" in names:
+                                item[str(names["#rule_digest"])] = copy.deepcopy(
+                                    values[":rule_digest"]
                                 )
                         elif expression.startswith("SET #plan"):
                             item[str(names["#plan"])] = copy.deepcopy(values[":plan"])
@@ -881,9 +923,9 @@ class _FakeDdb:
                             item[str(names["#arn"])] = copy.deepcopy(values[":arn"])
                         elif expression.startswith("SET #target"):
                             item[str(names["#target"])] = copy.deepcopy(values[":target"])
-                            if "#rule_state" in names:
-                                item[str(names["#rule_state"])] = copy.deepcopy(
-                                    values[":rule_state"]
+                            if "#rule_digest" in names:
+                                item[str(names["#rule_digest"])] = copy.deepcopy(
+                                    values[":rule_digest"]
                                 )
                         elif expression.startswith("SET #plan"):
                             item[str(names["#plan"])] = copy.deepcopy(values[":plan"])
@@ -989,6 +1031,7 @@ class _Factory:
         self.events = _FakeEvents()
         self.secrets = _FakeSecrets()
         self.ddb = _FakeDdb()
+        self.kms = _FakeKms()
 
     def client(self, service_name: str, *, region_name: str) -> object:
         assert region_name == "ap-northeast-1"
@@ -997,6 +1040,7 @@ class _Factory:
             "events": self.events,
             "secretsmanager": self.secrets,
             "dynamodb": self.ddb,
+            "kms": self.kms,
         }[service_name]
 
 
@@ -1043,7 +1087,9 @@ def _bind_candidate_state(
     ledger["candidate_morning_digest_target_digest"] = {
         "S": _target_digest(_morning_target(str(selected["morning_digest"]["taskDefinitionArn"])))
     }
-    ledger["candidate_morning_digest_rule_state"] = {"S": "DISABLED"}
+    ledger["candidate_morning_digest_rule_sha256"] = {
+        "S": rollout_gate_module._canonical_event_rule_digest(_morning_rule())
+    }
 
 
 def test_initialize_uses_live_generations_and_creates_atomic_durable_state() -> None:
@@ -1325,6 +1371,11 @@ def test_mcp_cutover_requires_post_worker_verified_attestation(tmp_path: Path) -
         "after_checked_at": {"N": str(_NOW - 1)},
         "requested_at": {"N": str(_NOW)},
         "completed_at": {"N": str(_NOW + 1)},
+        "release_root": {"S": _RELEASE_ROOT},
+        "release_tree_sha256": {"S": _RELEASE_TREE_SHA256},
+        "runtime_executable_sha256": {"S": _RUNTIME_EXECUTABLE_SHA256},
+        "plan_sha256": {"S": _TEST_INTENT.plan_sha256},
+        "apply_attempt_id": {"S": _TEST_INTENT.apply_attempt_id},
     }
     with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
         gate.mcp_stable_and_old_drained()
@@ -1345,6 +1396,16 @@ def test_mcp_cutover_requires_post_worker_verified_attestation(tmp_path: Path) -
             "main_pid": {"N": str(main_pid)},
             "process_start_ticks": {"N": str(main_pid * 100)},
             "process_started_at": {"N": str(_NOW)},
+            "process_cwd": {"S": f"{_RELEASE_ROOT}/app"},
+            "process_executable": {"S": f"{_RELEASE_ROOT}/app/.venv/bin/python"},
+            "release_root": {"S": _RELEASE_ROOT},
+            "release_tree_sha256": {"S": _RELEASE_TREE_SHA256},
+            "runtime_executable_sha256": {"S": _RUNTIME_EXECUTABLE_SHA256},
+            "health_kind": {
+                "S": (
+                    "slack_socket_auth_heartbeat" if service == "bot" else "connect_http_port_owner"
+                )
+            },
             "health_verified": {"BOOL": True},
             "checked_at": {"N": str(_NOW + 1)},
             "expires_at": {"N": str(_NOW + 300)},
@@ -1685,7 +1746,7 @@ def _ready_for_scheduled_promotion(
     return gate
 
 
-def test_eventbridge_transaction_binds_full_target_and_rule_state() -> None:
+def test_eventbridge_transaction_binds_full_target_and_rule() -> None:
     factory = _Factory()
     gate = _ready_for_scheduled_promotion(factory)
     target = _morning_target(_TASK_ARNS["morning_new"])
@@ -1700,7 +1761,9 @@ def test_eventbridge_transaction_binds_full_target_and_rule_state() -> None:
     assert factory.events.put_history == [target]
     ledger = factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]
     assert ledger["candidate_morning_digest_target_digest"] == {"S": _target_digest(target)}
-    assert ledger["candidate_morning_digest_rule_state"] == {"S": "DISABLED"}
+    assert ledger["candidate_morning_digest_rule_sha256"] == {
+        "S": rollout_gate_module._canonical_event_rule_digest(_morning_rule())
+    }
     assert ledger["candidate_morning_digest_plan_sha256"] == {"S": _TEST_INTENT.plan_sha256}
     assert ledger["candidate_morning_digest_apply_attempt_id"] == {
         "S": _TEST_INTENT.apply_attempt_id
@@ -1760,7 +1823,7 @@ def test_eventbridge_wrong_baseline_fails_before_mutation(drift: str) -> None:
         expected = "scheduled_target_unavailable"
     else:
         factory.events.rule_state = "ENABLED"
-        expected = "scheduled_rule_state_drift"
+        expected = "scheduled_rule_drift"
 
     with pytest.raises(RolloutGateError, match=expected):
         gate.event_target_transaction(
@@ -1861,7 +1924,13 @@ def test_worker_rollback_mode_uses_exact_approved_artifact_and_provenance(
         "checked_at": {"N": str(after_cutover)},
         "expires_at": {"N": str(after_cutover + 300)},
     }
-    restart_nonce = gate.pre_restart(rollback_artifact=rollback, mode="rollback")
+    restart_nonce = gate.pre_restart(
+        rollback_artifact=rollback,
+        release_root=_RELEASE_ROOT,
+        release_tree_sha256=_RELEASE_TREE_SHA256,
+        runtime_executable_sha256=_RUNTIME_EXECUTABLE_SHA256,
+        mode="rollback",
+    )
     with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
         gate.post_restart(mode="rollback")
     stored = factory.ddb.items[(_SCOPE, f"WORKER#{rollback_provenance}")]
@@ -1882,6 +1951,16 @@ def test_worker_rollback_mode_uses_exact_approved_artifact_and_provenance(
             "main_pid": {"N": str(main_pid)},
             "process_start_ticks": {"N": str(main_pid * 100)},
             "process_started_at": {"N": str(after_cutover)},
+            "process_cwd": {"S": f"{_RELEASE_ROOT}/app"},
+            "process_executable": {"S": f"{_RELEASE_ROOT}/app/.venv/bin/python"},
+            "release_root": {"S": _RELEASE_ROOT},
+            "release_tree_sha256": {"S": _RELEASE_TREE_SHA256},
+            "runtime_executable_sha256": {"S": _RUNTIME_EXECUTABLE_SHA256},
+            "health_kind": {
+                "S": (
+                    "slack_socket_auth_heartbeat" if service == "bot" else "connect_http_port_owner"
+                )
+            },
             "health_verified": {"BOOL": True},
             "checked_at": {"N": str(after_cutover + 1)},
             "expires_at": {"N": str(after_cutover + 301)},
@@ -2208,6 +2287,79 @@ def _worker_env_text(
     return "\n".join(f"export {name}='{value}'" for name, value in values.items()) + "\n"
 
 
+def _worker_provenance_files(
+    tmp_path: Path,
+    *,
+    candidate_artifact: Path,
+    rollback_artifact: Path,
+) -> dict[str, object]:
+    paths: dict[str, Path] = {}
+    for kind, artifact, marker in (
+        ("candidate", candidate_artifact, "1"),
+        ("rollback", rollback_artifact, "2"),
+    ):
+        receipt = tmp_path / f"{kind}-worker-provenance.json"
+        signature = tmp_path / f"{kind}-worker-provenance.sig"
+        receipt.write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "kind": "teamagent.worker-bundle-provenance",
+                    "source": {
+                        "origin": "git@github.com:noirelumiere00/TeamAgent.git",
+                        "branch": "dev",
+                        "commit": marker * 40,
+                        "tree": ("3" if kind == "candidate" else "4") * 40,
+                        "clean": True,
+                    },
+                    "artifact": {
+                        "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                        "format": "tar.gz",
+                    },
+                    "signing": {
+                        "key_arn": _WORKER_PROVENANCE_KEY,
+                        "algorithm": "RSASSA_PSS_SHA_256",
+                    },
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        signature.write_bytes(f"{kind}-signature".encode())
+        paths[f"{kind}_receipt"] = receipt
+        paths[f"{kind}_signature"] = signature
+    bindings = {
+        name: hashlib.sha256(name.encode()).hexdigest() for name in WORKER_ARTIFACT_BINDING_KEYS
+    }
+    bindings.update(
+        {
+            "candidate_artifact": hashlib.sha256(candidate_artifact.read_bytes()).hexdigest(),
+            "candidate_receipt": hashlib.sha256(
+                paths["candidate_receipt"].read_bytes()
+            ).hexdigest(),
+            "candidate_signature": hashlib.sha256(
+                paths["candidate_signature"].read_bytes()
+            ).hexdigest(),
+            "rollback_artifact": hashlib.sha256(rollback_artifact.read_bytes()).hexdigest(),
+            "rollback_receipt": hashlib.sha256(paths["rollback_receipt"].read_bytes()).hexdigest(),
+            "rollback_signature": hashlib.sha256(
+                paths["rollback_signature"].read_bytes()
+            ).hexdigest(),
+        }
+    )
+    return {
+        "worker_provenance_receipt": paths["candidate_receipt"],
+        "worker_provenance_signature": paths["candidate_signature"],
+        "worker_rollback_provenance_receipt": paths["rollback_receipt"],
+        "worker_rollback_provenance_signature": paths["rollback_signature"],
+        "worker_provenance_key_arn": _WORKER_PROVENANCE_KEY,
+        "worker_bindings": bindings,
+        "prepared_intent_id": _TEST_INTENT.apply_attempt_id,
+    }
+
+
 def _cleanup_bundle(
     tmp_path: Path,
     *,
@@ -2312,6 +2464,438 @@ def _cleanup_bundle(
     )
 
 
+def _authorize_cleanup_test_state(
+    factory: _Factory,
+) -> LiveRolloutGate:
+    initial = _gate(factory, "0" * 64)
+    initial.initialize()
+    _bind_candidate_state(initial, factory)
+    factory.ecs.current["teamagent-dev-mcp"] = _TASK_ARNS["mcp_new"]
+    factory.ecs.current["teamagent-dev-connect-web"] = _TASK_ARNS["connect_new"]
+    factory.events.morning = _TASK_ARNS["morning_new"]
+    factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]["stage"] = {"S": "complete"}
+    issuers = initial._issuer_provenances(initial.control)
+    for item_domain in ("mail_action", "report_link"):
+        item = factory.ddb.items[(_SCOPE, f"DOMAIN#{item_domain}")]
+        item["stage"] = {"S": "complete"}
+        item["issuer_provenances"] = {"SS": sorted(issuers[item_domain])}
+    return initial
+
+
+def test_cleanup_verifies_both_worker_signatures_before_authorization_cas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _Factory()
+    _authorize_cleanup_test_state(factory)
+    retirement_now = _NOW + 900 + 86_400
+    monkeypatch.setattr(
+        rollout_gate_module,
+        "_trusted_epoch",
+        lambda _response: retirement_now,
+    )
+    manifest = _retirement_manifest(retirement_now, domain="mail_action")
+    (
+        gate,
+        candidates,
+        worker_env,
+        worker_rollback_env,
+        worker_artifact,
+        worker_rollback_artifact,
+    ) = _cleanup_bundle(tmp_path, factory=factory, manifest=manifest)
+    authority = _worker_provenance_files(
+        tmp_path,
+        candidate_artifact=worker_artifact,
+        rollback_artifact=worker_rollback_artifact,
+    )
+    factory.kms.valid_results = [True, False]
+    transactions_before = len(factory.ddb.transactions)
+
+    with pytest.raises(RolloutGateError, match="worker_provenance_invalid"):
+        gate.prepare_cleanup(
+            domain="mail_action",
+            candidate_definitions=candidates,
+            worker_env=worker_env,
+            worker_rollback_env=worker_rollback_env,
+            worker_artifact=worker_artifact,
+            worker_rollback_artifact=worker_rollback_artifact,
+            prepared_plan_sha256=_TEST_INTENT.plan_sha256,
+            **authority,
+        )
+
+    assert len(factory.kms.calls) == 2
+    assert len(factory.ddb.transactions) == transactions_before
+    assert (_SCOPE, f"CLEANUP#mail_action#{_EPOCH}") not in factory.ddb.items
+    assert "cleanup_stage" not in factory.ddb.items[(_SCOPE, "DOMAIN#mail_action")]
+
+
+def _reconciliation_cleanup(
+    gate: LiveRolloutGate,
+    factory: _Factory,
+) -> tuple[CleanupLedger, dict[str, dict[str, object]]]:
+    candidate_definitions = {
+        task: copy.deepcopy(
+            factory.ecs.definitions[
+                _TASK_ARNS[
+                    {
+                        "mcp": "mcp_new",
+                        "connect_web": "connect_new",
+                        "morning_digest": "morning_new",
+                    }[task]
+                ]
+            ]
+        )
+        for task in ("mcp", "connect_web", "morning_digest")
+    }
+    baseline_definitions = {
+        task: factory.ecs.definitions[
+            _TASK_ARNS[
+                {
+                    "mcp": "mcp_old",
+                    "connect_web": "connect_old",
+                    "morning_digest": "morning_old",
+                }[task]
+            ]
+        ]
+        for task in ("mcp", "connect_web", "morning_digest")
+    }
+    binding = ProvenanceBinding(
+        artifact_sha256="1" * 64,
+        canonical_receipt_sha256="2" * 64,
+        key_arn=_WORKER_PROVENANCE_KEY,
+        receipt_sha256="3" * 64,
+        signature_sha256="4" * 64,
+        source_branch="dev",
+        source_commit="5" * 40,
+        source_origin="git@github.com:noirelumiere00/TeamAgent.git",
+        source_tree="6" * 40,
+    )
+    worker_bindings = {
+        name: hashlib.sha256(name.encode()).hexdigest() for name in WORKER_ARTIFACT_BINDING_KEYS
+    }
+    baseline_provenances = gate._issuer_provenances(gate.control)
+    cleanup = CleanupLedger(
+        domain="mail_action",
+        stage="authorized",
+        revision=7,
+        authorized_at=_NOW,
+        old_provenances={
+            "mail_action": frozenset({"7" * 64}),
+            "report_link": frozenset({"8" * 64}),
+        },
+        new_provenances=baseline_provenances,
+        candidate_digests={
+            **{
+                task: rollout_gate_module._task_artifact_digest(definition)
+                for task, definition in candidate_definitions.items()
+            },
+            "worker": "1" * 64,
+        },
+        rollback_digests={
+            "mcp": "9" * 64,
+            "connect_web": "a" * 64,
+            "morning_digest": "b" * 64,
+            "worker": "c" * 64,
+        },
+        proposed={
+            "mail_action": {
+                "primary_generation": _MAIL_GENERATION,
+                "previous_generation": None,
+                "rotation_started_at": None,
+            },
+            "report_link": _config("report_link", deployed=False),
+        },
+        legacy_database_generation=_DB_GENERATION,
+        legacy_worker_generation=None,
+        candidate_worker_env_digest="d" * 64,
+        rollback_worker_env_digest="e" * 64,
+        candidate_arns={
+            task: str(definition["taskDefinitionArn"])
+            for task, definition in candidate_definitions.items()
+        },
+        prepared_plan_sha256=_TEST_INTENT.plan_sha256,
+        prepared_intent_id=_TEST_INTENT.apply_attempt_id,
+        baseline_arns={
+            task: str(definition["taskDefinitionArn"])
+            for task, definition in baseline_definitions.items()
+        },
+        baseline_digests={
+            task: rollout_gate_module._task_artifact_digest(definition)
+            for task, definition in baseline_definitions.items()
+        },
+        baseline_provenances=baseline_provenances,
+        candidate_worker_provenance=binding,
+        rollback_worker_provenance=copy.deepcopy(binding),
+        worker_bindings=worker_bindings,
+    )
+    return cleanup, candidate_definitions
+
+
+def _reconciliation_worker_state(
+    *,
+    classification: str,
+    present: bool,
+) -> dict[str, str]:
+    return {
+        "apply_attempt_id": (_TEST_INTENT.apply_attempt_id if present else ""),
+        "classification": classification,
+        "evidence": "completed-restart" if present else "no-restart-request",
+        "plan_sha256": _TEST_INTENT.plan_sha256 if present else "",
+        "restart_record_present": "true" if present else "false",
+        "restart_record_revision": "2" if present else "",
+        "restart_record_sha256": hashlib.sha256(
+            b"present-worker-restart-record" if present else b"missing-worker-restart-record"
+        ).hexdigest(),
+        "restart_record_stage": "complete" if present else "missing",
+    }
+
+
+def test_cleanup_worker_live_state_requires_exact_restart_audit() -> None:
+    factory = _Factory()
+    gate = _gate(factory, "0" * 64)
+    cleanup, _definitions = _reconciliation_cleanup(gate, factory)
+    cleanup_key = (_SCOPE, gate._cleanup_record_name("mail_action"))
+    factory.ddb.items[cleanup_key] = {
+        "scope": {"S": _SCOPE},
+        "record": {"S": cleanup_key[1]},
+        "candidate_worker_plan_sha256": {"S": cleanup.prepared_plan_sha256},
+        "candidate_worker_apply_attempt_id": {"S": cleanup.prepared_intent_id},
+    }
+    restart_key = (_SCOPE, gate._restart_record_name("cleanup"))
+    restart = {
+        "scope": {"S": _SCOPE},
+        "record": {"S": restart_key[1]},
+        "rotation_epoch": {"S": _EPOCH},
+        "provenance": {"S": gate.control.worker.provenance},
+        "artifact_sha256": {"S": cleanup.candidate_digests["worker"]},
+        "plan_sha256": {"S": cleanup.prepared_plan_sha256},
+        "apply_attempt_id": {"S": cleanup.prepared_intent_id},
+        "stage": {"S": "complete"},
+        "mode": {"S": "cleanup"},
+        "revision": {"N": "2"},
+        "completed_at": {"N": str(_NOW + 1)},
+        "release_root": {"S": _RELEASE_ROOT},
+        "release_tree_sha256": {"S": _RELEASE_TREE_SHA256},
+        "runtime_executable_sha256": {"S": _RUNTIME_EXECUTABLE_SHA256},
+    }
+    factory.ddb.items[restart_key] = restart
+
+    candidate = gate._cleanup_worker_live_state(cleanup)
+
+    assert candidate["classification"] == "candidate"
+    assert candidate["evidence"] == "completed-restart"
+
+    restart["stage"] = {"S": "requested"}
+    restart["revision"] = {"N": "3"}
+    with pytest.raises(RolloutGateError, match="cleanup_live_state_unproved"):
+        gate._cleanup_worker_live_state(cleanup)
+
+    restart["stage"] = {"S": "reconciled"}
+    restart["revision"] = {"N": "4"}
+    restart["reconciliation_outcome"] = {"S": "rolled-back"}
+    restart["reconciliation_plan_sha256"] = {"S": cleanup.prepared_plan_sha256}
+    restart["reconciliation_apply_attempt_id"] = {"S": cleanup.prepared_intent_id}
+    rolled_back = gate._cleanup_worker_live_state(cleanup)
+
+    assert rolled_back["classification"] == "baseline"
+    assert rolled_back["evidence"] == "audited-rollback"
+
+
+def test_cleanup_worker_live_state_preserves_prior_rebind_evidence() -> None:
+    factory = _Factory()
+    gate = _gate(factory, "0" * 64)
+    cleanup, _definitions = _reconciliation_cleanup(gate, factory)
+    cleanup_key = (_SCOPE, gate._cleanup_record_name("mail_action"))
+    restart_key = (_SCOPE, gate._restart_record_name("cleanup"))
+    restart = {
+        "scope": {"S": _SCOPE},
+        "record": {"S": restart_key[1]},
+        "rotation_epoch": {"S": _EPOCH},
+        "provenance": {"S": gate.control.worker.provenance},
+        "artifact_sha256": {"S": cleanup.candidate_digests["worker"]},
+        "plan_sha256": {"S": "a" * 64},
+        "apply_attempt_id": {"S": "87654321-4321-4123-8123-123456789abc"},
+        "stage": {"S": "complete"},
+        "mode": {"S": "cleanup"},
+        "revision": {"N": "4"},
+        "completed_at": {"N": str(_NOW + 1)},
+        "release_root": {"S": _RELEASE_ROOT},
+        "release_tree_sha256": {"S": _RELEASE_TREE_SHA256},
+        "runtime_executable_sha256": {"S": _RUNTIME_EXECUTABLE_SHA256},
+    }
+    factory.ddb.items[restart_key] = restart
+    restart_digest = hashlib.sha256(
+        json.dumps(restart, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    factory.ddb.items[cleanup_key] = {
+        "scope": {"S": _SCOPE},
+        "record": {"S": cleanup_key[1]},
+        "reconciliation_worker_classification": {"S": "candidate"},
+        "reconciliation_worker_restart_record_sha256": {"S": restart_digest},
+    }
+
+    state = gate._cleanup_worker_live_state(cleanup)
+
+    assert state["classification"] == "candidate"
+    assert state["evidence"] == "prior-reconciliation"
+
+
+def test_cleanup_abort_atomically_disables_unused_intent_and_restores_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _Factory()
+    gate = _gate(factory, "0" * 64)
+    cleanup, _definitions = _reconciliation_cleanup(gate, factory)
+    transactions: list[list[dict[str, Any]]] = []
+    monkeypatch.setattr(gate, "_cleanup_ledger", lambda _domain: cleanup)
+    monkeypatch.setattr(
+        gate,
+        "_cleanup_live_state",
+        lambda _cleanup: (
+            {
+                **{
+                    task: {
+                        "arn": cleanup.baseline_arns[task],
+                        "classification": "baseline",
+                        "digest": cleanup.baseline_digests[task],
+                    }
+                    for task in ("mcp", "connect_web", "morning_digest")
+                },
+                "worker": _reconciliation_worker_state(
+                    classification="baseline",
+                    present=False,
+                ),
+            },
+            "f" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_deployment_intent_item",
+        lambda _intent: {
+            "intent_id": {"S": cleanup.prepared_intent_id},
+            "plan_sha256": {"S": cleanup.prepared_plan_sha256},
+            "state": {"S": "PREPARED"},
+        },
+    )
+    domain_items = {
+        domain: {
+            "revision": {"N": "11"},
+            "issuer_provenances": {
+                "SS": sorted(cleanup.baseline_provenances[domain] | cleanup.new_provenances[domain])
+            },
+        }
+        for domain in ("mail_action", "report_link")
+    }
+    monkeypatch.setattr(
+        gate,
+        "_read_item",
+        lambda record: domain_items[record.removeprefix("DOMAIN#")],
+    )
+    monkeypatch.setattr(gate, "_now", lambda: _NOW + 1)
+
+    def capture(**kwargs: object) -> dict[str, object]:
+        transactions.append(copy.deepcopy(kwargs["TransactItems"]))  # type: ignore[arg-type]
+        return _response()
+
+    monkeypatch.setattr(factory.ddb, "transact_write_items", capture)
+
+    gate.reconcile_cleanup(domain="mail_action", decision="abort")
+
+    transaction = transactions[0]
+    intent_update = transaction[0]["Update"]
+    assert intent_update["TableName"] == "teamagent-dev-image-deployment-intents"
+    assert intent_update["ExpressionAttributeValues"][":aborted"] == {"S": "ABORTED"}
+    cleanup_update = transaction[1]["Update"]
+    assert cleanup_update["ExpressionAttributeValues"][":live"] == {"S": "f" * 64}
+    assert len(transaction) == 5
+    assert transaction[-1]["ConditionCheck"]["ConditionExpression"] == (
+        "attribute_not_exists(#record)"
+    )
+
+
+def test_cleanup_rebind_supersedes_burned_intent_and_pins_fresh_identical_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _Factory()
+    gate = _gate(factory, "0" * 64)
+    cleanup, definitions = _reconciliation_cleanup(gate, factory)
+    fresh_plan = "f" * 64
+    fresh_intent = "87654321-4321-4123-8123-123456789abc"
+    transactions: list[list[dict[str, Any]]] = []
+    monkeypatch.setattr(gate, "_cleanup_ledger", lambda _domain: cleanup)
+    monkeypatch.setattr(
+        gate,
+        "_cleanup_live_state",
+        lambda _cleanup: (
+            {
+                "mcp": {
+                    "arn": cleanup.candidate_arns["mcp"],
+                    "classification": "candidate",
+                    "digest": cleanup.candidate_digests["mcp"],
+                },
+                "connect_web": {
+                    "arn": cleanup.baseline_arns["connect_web"],
+                    "classification": "baseline",
+                    "digest": cleanup.baseline_digests["connect_web"],
+                },
+                "morning_digest": {
+                    "arn": cleanup.baseline_arns["morning_digest"],
+                    "classification": "rollback",
+                    "digest": cleanup.rollback_digests["morning_digest"],
+                },
+                "worker": _reconciliation_worker_state(
+                    classification="candidate",
+                    present=True,
+                ),
+            },
+            "0" * 64,
+        ),
+    )
+
+    def intent(intent_id: str) -> dict[str, Any]:
+        if intent_id == cleanup.prepared_intent_id:
+            return {
+                "intent_id": {"S": intent_id},
+                "plan_sha256": {"S": cleanup.prepared_plan_sha256},
+                "state": {"S": "RECONCILE_REQUIRED"},
+            }
+        return {
+            "intent_id": {"S": fresh_intent},
+            "plan_sha256": {"S": fresh_plan},
+            "state": {"S": "PREPARED"},
+            "authorization_expires_at": {"N": str(_NOW + 300)},
+        }
+
+    monkeypatch.setattr(gate, "_deployment_intent_item", intent)
+    monkeypatch.setattr(gate, "_now", lambda: _NOW + 1)
+
+    def capture(**kwargs: object) -> dict[str, object]:
+        transactions.append(copy.deepcopy(kwargs["TransactItems"]))  # type: ignore[arg-type]
+        return _response()
+
+    monkeypatch.setattr(factory.ddb, "transact_write_items", capture)
+
+    gate.reconcile_cleanup(
+        domain="mail_action",
+        decision="rebind",
+        fresh_plan_sha256=fresh_plan,
+        fresh_intent_id=fresh_intent,
+        fresh_candidate_definitions=definitions,
+        fresh_worker_bindings=cleanup.worker_bindings,
+    )
+
+    transaction = transactions[0]
+    supersede = transaction[0]["Update"]
+    assert supersede["ExpressionAttributeValues"][":superseded"] == {"S": "SUPERSEDED"}
+    assert supersede["ExpressionAttributeValues"][":new_intent"] == {"S": fresh_intent}
+    cleanup_update = transaction[2]["Update"]
+    assert cleanup_update["ExpressionAttributeValues"][":new_plan"] == {"S": fresh_plan}
+    assert cleanup_update["ExpressionAttributeValues"][":live"] == {"S": "0" * 64}
+    assert "candidate_worker_plan_sha256" in cleanup_update["ExpressionAttributeNames"].values()
+    assert transaction[-1]["ConditionCheck"]["ExpressionAttributeValues"][":revision"] == {"N": "2"}
+
+
 def test_retirement_cleanup_is_cas_durable_and_preserves_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2350,6 +2934,11 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
         factory=factory,
         manifest=manifest,
     )
+    cleanup_authority = _worker_provenance_files(
+        tmp_path,
+        candidate_artifact=worker_artifact,
+        rollback_artifact=worker_rollback_artifact,
+    )
 
     with pytest.raises(RolloutGateError, match="cleanup_staging_required"):
         gate.retire_previous(domain="mail_action")
@@ -2366,6 +2955,7 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
             worker_artifact=worker_artifact,
             worker_rollback_artifact=worker_rollback_artifact,
             prepared_plan_sha256="e" * 64,
+            **cleanup_authority,
         )
     gate.prepare_cleanup(
         domain="mail_action",
@@ -2375,9 +2965,16 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
         worker_artifact=worker_artifact,
         worker_rollback_artifact=worker_rollback_artifact,
         prepared_plan_sha256="e" * 64,
+        **cleanup_authority,
     )
     cleanup = gate._cleanup_ledger("mail_action")
     assert cleanup.candidate_worker_env_digest != cleanup.rollback_worker_env_digest
+    assert cleanup.candidate_worker_provenance.source_commit == "1" * 40
+    assert cleanup.candidate_worker_provenance.source_tree == "3" * 40
+    assert cleanup.rollback_worker_provenance.source_commit == "2" * 40
+    assert cleanup.rollback_worker_provenance.source_tree == "4" * 40
+    assert cleanup.candidate_worker_provenance.key_arn == _WORKER_PROVENANCE_KEY
+    assert len(factory.kms.calls) == 4
     exact_worker_env = worker_env.read_bytes()
     worker_env.write_bytes(exact_worker_env + b"# drift\n")
     with pytest.raises(RolloutGateError, match="worker_env_drift"):
@@ -2464,6 +3061,9 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
     factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")] = attestation
     restart_nonce = gate.pre_restart(
         rollback_artifact=worker_rollback_artifact,
+        release_root=_RELEASE_ROOT,
+        release_tree_sha256=_RELEASE_TREE_SHA256,
+        runtime_executable_sha256=_RUNTIME_EXECUTABLE_SHA256,
         mode="cleanup",
     )
     stored_attestation = factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")]
@@ -2484,6 +3084,16 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
             "main_pid": {"N": str(main_pid)},
             "process_start_ticks": {"N": str(main_pid * 100)},
             "process_started_at": {"N": str(retirement_now)},
+            "process_cwd": {"S": f"{_RELEASE_ROOT}/app"},
+            "process_executable": {"S": f"{_RELEASE_ROOT}/app/.venv/bin/python"},
+            "release_root": {"S": _RELEASE_ROOT},
+            "release_tree_sha256": {"S": _RELEASE_TREE_SHA256},
+            "runtime_executable_sha256": {"S": _RUNTIME_EXECUTABLE_SHA256},
+            "health_kind": {
+                "S": (
+                    "slack_socket_auth_heartbeat" if service == "bot" else "connect_http_port_owner"
+                )
+            },
             "health_verified": {"BOOL": True},
             "checked_at": {"N": str(retirement_now + 1)},
             "expires_at": {"N": str(retirement_now + 301)},
@@ -2597,6 +3207,11 @@ def test_cleanup_deadline_boundary_is_exact_and_retries_hot_clock_cas(
         factory=factory,
         manifest=manifest,
     )
+    cleanup_authority = _worker_provenance_files(
+        tmp_path,
+        candidate_artifact=worker_artifact,
+        rollback_artifact=worker_rollback_artifact,
+    )
 
     hot_high_water = deadline + 5
 
@@ -2617,6 +3232,7 @@ def test_cleanup_deadline_boundary_is_exact_and_retries_hot_clock_cas(
         worker_artifact=worker_artifact,
         worker_rollback_artifact=worker_rollback_artifact,
         prepared_plan_sha256=_TEST_INTENT.plan_sha256,
+        **cleanup_authority,
     )
 
     cleanup = gate._cleanup_ledger(domain)

@@ -8,7 +8,10 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import re
+import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +26,35 @@ class ProvenanceError(ValueError):
     """Worker provenance is malformed, untrusted, or does not bind the archive."""
 
 
+@dataclass(frozen=True)
+class ProvenanceBinding:
+    """Exact KMS-verified receipt, source, signature, key, and artifact binding."""
+
+    artifact_sha256: str
+    canonical_receipt_sha256: str
+    key_arn: str
+    receipt_sha256: str
+    signature_sha256: str
+    source_branch: str
+    source_commit: str
+    source_origin: str
+    source_tree: str
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -32,10 +64,69 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def _load(path: Path) -> dict[str, Any]:
+def _stable_bytes(path: Path, *, maximum: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_pairs)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ProvenanceError("unreadable provenance input") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size < 1 or before.st_size > maximum:
+            raise ProvenanceError("invalid provenance input")
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise ProvenanceError("unreadable provenance input") from exc
+    finally:
+        os.close(descriptor)
+    if (
+        _stat_identity(before) != _stat_identity(after)
+        or len(raw) != before.st_size
+        or len(raw) > maximum
+    ):
+        raise ProvenanceError("provenance input changed while reading")
+    return raw
+
+
+def _stable_sha256(path: Path) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ProvenanceError("unreadable artifact") from exc
+    hasher = hashlib.sha256()
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size < 1:
+            raise ProvenanceError("invalid artifact")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise ProvenanceError("unreadable artifact") from exc
+    finally:
+        os.close(descriptor)
+    if _stat_identity(before) != _stat_identity(after):
+        raise ProvenanceError("artifact changed while reading")
+    return hasher.hexdigest()
+
+
+def _load(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise ProvenanceError("unreadable provenance") from exc
     if type(value) is not dict:
         raise ProvenanceError("invalid provenance")
@@ -48,11 +139,7 @@ def _canonical(value: object) -> bytes:
     ).encode()
 
 
-def _signature(path: Path) -> bytes:
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise ProvenanceError("unreadable signature") from exc
+def _signature(raw: bytes) -> bytes:
     try:
         decoded = base64.b64decode(raw, validate=True)
     except binascii.Error:
@@ -69,8 +156,10 @@ def verify(
     signature_path: Path,
     expected_key_arn: str,
     kms: Any,
-) -> None:
-    receipt = _load(receipt_path)
+) -> ProvenanceBinding:
+    receipt_bytes = _stable_bytes(receipt_path, maximum=1_048_576)
+    signature_bytes = _stable_bytes(signature_path, maximum=8192)
+    receipt = _load(receipt_bytes)
     if set(receipt) != {"schema", "kind", "source", "artifact", "signing"}:
         raise ProvenanceError("invalid provenance schema")
     source = receipt["source"]
@@ -102,17 +191,14 @@ def verify(
         or signing["algorithm"] != "RSASSA_PSS_SHA_256"
     ):
         raise ProvenanceError("invalid provenance")
-    try:
-        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise ProvenanceError("unreadable artifact") from exc
+    digest = _stable_sha256(artifact)
     if digest != artifact_claim["sha256"]:
         raise ProvenanceError("artifact binding mismatch")
     response = kms.verify(
         KeyId=signing["key_arn"],
         Message=_canonical(receipt),
         MessageType="RAW",
-        Signature=_signature(signature_path),
+        Signature=_signature(signature_bytes),
         SigningAlgorithm=signing["algorithm"],
     )
     if (
@@ -122,6 +208,17 @@ def verify(
         or response.get("SigningAlgorithm") != signing["algorithm"]
     ):
         raise ProvenanceError("signature verification failed")
+    return ProvenanceBinding(
+        artifact_sha256=digest,
+        canonical_receipt_sha256=hashlib.sha256(_canonical(receipt)).hexdigest(),
+        key_arn=signing["key_arn"],
+        receipt_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
+        signature_sha256=hashlib.sha256(signature_bytes).hexdigest(),
+        source_branch=source["branch"],
+        source_commit=source["commit"],
+        source_origin=source["origin"],
+        source_tree=source["tree"],
+    )
 
 
 def main(argv: list[str] | None = None, *, kms: Any | None = None) -> int:

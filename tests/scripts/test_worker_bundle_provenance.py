@@ -101,6 +101,53 @@ def test_worker_archive_requires_exact_clean_origin_receipt_and_signing_key(
         )
 
 
+def test_worker_provenance_binding_uses_one_stable_read_per_input(
+    tmp_path: Path,
+) -> None:
+    artifact, receipt, signature = _files(tmp_path)
+    original = {
+        "artifact": artifact.read_bytes(),
+        "receipt": receipt.read_bytes(),
+        "signature": signature.read_bytes(),
+    }
+
+    class ReplacingKms(_Kms):
+        def verify(self, **kwargs: Any) -> dict[str, object]:
+            artifact.write_bytes(b"replacement-artifact")
+            receipt.write_bytes(b'{"replacement":true}\n')
+            signature.write_bytes(b"replacement-signature")
+            return super().verify(**kwargs)
+
+    binding = verify(
+        artifact=artifact,
+        receipt_path=receipt,
+        signature_path=signature,
+        expected_key_arn=KEY_ARN,
+        kms=ReplacingKms(),
+    )
+
+    assert binding.artifact_sha256 == hashlib.sha256(original["artifact"]).hexdigest()
+    assert binding.receipt_sha256 == hashlib.sha256(original["receipt"]).hexdigest()
+    assert binding.signature_sha256 == hashlib.sha256(original["signature"]).hexdigest()
+    assert binding.source_commit == "a" * 40
+    assert binding.source_tree == "b" * 40
+
+
+def test_worker_provenance_rejects_symlink_inputs(tmp_path: Path) -> None:
+    artifact, receipt, signature = _files(tmp_path)
+    linked_receipt = tmp_path / "linked-receipt.json"
+    linked_receipt.symlink_to(receipt)
+
+    with pytest.raises(ProvenanceError, match="unreadable provenance input"):
+        verify(
+            artifact=artifact,
+            receipt_path=linked_receipt,
+            signature_path=signature,
+            expected_key_arn=KEY_ARN,
+            kms=_Kms(),
+        )
+
+
 def test_worker_provenance_cli_redacts_client_exception(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

@@ -2785,7 +2785,19 @@ async def _run() -> None:
     handler = AsyncSocketModeHandler(app, app_token)
     _maybe_start_video_approval_poller(app, loop)  # Phase2 poller（既定 OFF）
     logger.info("slack_bot_start", mode="socket", sentry_enabled=sentry_enabled)
-    await handler.start_async()  # type: ignore[no-untyped-call]
+    from teamagent.runtime.worker_health import run_bot_heartbeat
+
+    heartbeat = asyncio.create_task(
+        run_bot_heartbeat(socket_client=handler.client, web_client=app.client)
+    )
+    try:
+        await handler.start_async()  # type: ignore[no-untyped-call]
+    finally:
+        heartbeat.cancel()
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            pass
 
 
 def main() -> None:
@@ -2799,7 +2811,6 @@ def main() -> None:
             ("mail_action", MAIL_ACTION_MAX_TOKEN_TTL_S),
             ("report_link", REPORT_LINK_MAX_TOKEN_TTL_S),
         ),
-        worker_attestation=True,
     )
     asyncio.run(_run())
 
