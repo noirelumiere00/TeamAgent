@@ -23,9 +23,9 @@
 
 | # | ステップ | 実行 | 期待 | NGなら |
 |---|---|---|---|---|
-| 6 | ☐ tfvars 作成 | `infra/terraform/terraform.tfvars`（git管理外）に: `mcp_image`/`openclaw_image`（=URL@digest）・`shared_company_domains="vectorinc.co.jp"`・`enable_vpc_endpoints=true`・`alarm_email_endpoints=["<<要入力: 通知先>>"]`（`openclaw_model_id` は実測値が default 済＝省略可） | — | 値の形式が不明なら runbook §3 の例 |
-| 7 | ☐ full saved plan | `plan_image_release.sh /secure/local/path/openclaw-release.tfplan` → `terraform show` | エラー0。全差分、IAM Deny、SG、exact release digest、gate replacement が見える | エラー/不審差分→中断。`-target` や intent 手入力は禁止 |
-| 8 | ☐ one-time apply | `apply_image_release_plan.sh /secure/local/path/openclaw-release.tfplan` | apply 0、ledger state `APPLIED` | 失敗後は同 plan を再実行しない。reconcile 後に fresh receipt＋new plan |
+| 6 | ☐ tfvars 作成 | git管理外tfvarsに `mcp_image`/`openclaw_image`（URL@digest）、`shared_company_domains="vectorinc.co.jp"`、`enable_vpc_endpoints=true`、`alarm_email_endpoints=["s-komata@vectorinc.co.jp"]` | — | raw emailのtrim/case変更は禁止 |
+| 7 | ☐ full saved plan | Container Insights 2 groupを含む7 groupのexact retention export receiptとreview済みmigrationを`terraform_runtime_guard.sh plan`へ渡す → `terraform show` | 既存groupのimport/adopt＋1日/Never Expire→30日のin-place更新、全差分、exact release digest、両gate replacementが見える | receipt欠落/別version/差替え/時刻逆転/replaceなら中断。`-target`やdirect retention変更は禁止 |
+| 8 | ☐ one-time apply | `terraform_runtime_guard.sh apply --plan /secure/local/path/openclaw-release.tfplan --out /secure/local/path/openclaw-release.apply.json` | apply 0、ledger state `APPLIED`、post-state receipt | 失敗後は同 plan を再実行しない。reconcile 後に fresh receipt＋new plan |
 | 9 | ☐ 隔離の実証 | IAM Policy Simulator: openclaw-task ロールで `secretsmanager:GetSecretValue` | **Denied** | Allowed なら**即中断**（fargate.tf の Deny 構造を確認＝設計違反） |
 
 ## Phase 3｜Slack・DB（runbook §4-§5）

@@ -275,11 +275,12 @@ def test_every_discovered_ecs_task_definition_depends_on_release_gate() -> None:
             address = f"{relative}:aws_ecs_task_definition.{match.group(1)}"
             block = _hcl_block(body, match.start(2))
             assert "container_definitions" in block, address
-            assert re.search(
-                r"depends_on\s*=\s*\[\s*"
-                r"terraform_data\.production_image_release_gate\s*\]",
-                block,
-            ), f"{address} can bypass the production image release gate"
+            assert "terraform_data.production_image_release_gate" in block, (
+                f"{address} can bypass the production image release gate"
+            )
+            assert "terraform_data.runtime_guard" in block, (
+                f"{address} can bypass the runtime guard"
+            )
             discovered[address] = block
 
     assert set(discovered) == {
@@ -298,27 +299,36 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
     planner = PLAN_LAUNCHER.read_text(encoding="utf-8")
     applier = APPLY_LAUNCHER.read_text(encoding="utf-8")
     runner = GATE_RUNNER.read_text(encoding="utf-8")
+    guard = (
+        ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
+    ).read_text(encoding="utf-8")
 
-    assert "terraform plan \\" in planner
-    assert '-out="$plan_path"' in planner
-    assert "prepare-deployment-intent" in planner
-    assert "image_deployment_intent_id=$intent_id" in planner
-    assert "complete, locked, refresh-enabled full saved plans" in planner
-    assert "saved plans must be stored outside" in planner
-    assert 'python3 "$apply_supervisor" \\' in applier
+    for retired in (planner, applier):
+        assert "Retired:" in retired
+        assert "terraform_runtime_guard.sh" in retired
+        assert "exit 64" in retired
+        assert "terraform plan" not in retired
+        assert "terraform apply" not in retired
+    assert 'TF_ARGS=(' in guard
+    assert 'terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"' in guard
+    assert "-refresh=true" in guard
+    assert "-lock-timeout=5m" in guard
+    assert "-out=$STAGE_PLAN" in guard
+    assert "prepare_image_deployment_intent" in guard
+    assert "image_deployment_intent_id=$IMAGE_DEPLOYMENT_INTENT_ID" in guard
+    assert 'python3 "$APPLY_SUPERVISOR" \\' in guard
     supervisor = (ROOT / "infra" / "terraform" / "terraform_apply_supervisor.py").read_text(
         encoding="utf-8"
     )
     assert '"apply",' in supervisor
     assert '"-lock=true",' in supervisor
-    assert "never retry this plan, intent, or receipts" in applier
-    assert "mark-deployment-intent-outcome" in applier
-    assert "saved plans must be stored outside" in applier
-    assert 'control_commit="$(git -C "$control_root" rev-parse HEAD)"' in applier
-    assert applier.count('--control-commit "$control_commit"') == 2
-    assert "terraform_apply_supervisor.py" in applier
-    assert "heartbeat-deployment-lock" not in applier
-    assert ("assumed-role/teamagent-dev-terraform-automation/teamagent-terraform-worker") in runner
+    assert "mark-deployment-intent-outcome" in guard
+    assert "terraform_apply_supervisor.py" in guard
+    assert "heartbeat-deployment-lock" in guard
+    assert (
+        "assumed-role/teamagent-dev-terraform-runtime-automation/"
+        "teamagent-terraform-worker"
+    ) in runner
     assert "arn:aws:iam::718959508629:user/AIIAdev" not in runner
     assert ("arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate") in runner
     assert "acquire-deployment-lock" in runner
@@ -332,8 +342,8 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
             text=True,
             timeout=10,
         )
-        assert completed.returncode == 0, completed.stderr
-        assert "usage:" in completed.stdout
+        assert completed.returncode == 64
+        assert "retired launcher" in completed.stderr
 
 
 def test_deployment_intents_use_a_durable_protected_conditional_ledger() -> None:
@@ -537,40 +547,8 @@ def test_lifecycle_never_expires_a_production_release_evidence_graph() -> None:
     assert "must not have an ECR lifecycle policy" in evidence
 
 
-def test_ready_false_bootstrap_scope_cannot_target_runtime_or_the_deploy_gate() -> None:
-    targets = {
-        line
-        for line in BOOTSTRAP_TARGETS.read_text(encoding="utf-8").splitlines()
-        if line and not line.startswith("#")
-    }
-
-    assert "aws_codebuild_project.image_attestor" in targets
-    assert "aws_codebuild_project.image_promoter" in targets
-    assert "aws_ecr_repository.mcp_quarantine" in targets
-    assert "aws_ecr_repository.mcp_verified_candidates" in targets
-    assert "aws_iam_policy.deny_quarantine_runtime_pull" in targets
-    assert "terraform_data.production_image_release_gate" not in targets
-    assert not any(
-        token in target
-        for target in targets
-        for token in (
-            "aws_ecs_",
-            "aws_cloudwatch_event_",
-            "aws_scheduler_",
-            "task_definition",
-        )
-    )
-    declared = set()
-    for path in (
-        ROOT / "infra" / "terraform" / "codebuild.tf",
-        ROOT / "infra" / "terraform" / "ecr.tf",
-    ):
-        declared.update(
-            f"{resource_type}.{name}"
-            for resource_type, name in re.findall(
-                r'^resource "([^"]+)" "([^"]+)"',
-                path.read_text(encoding="utf-8"),
-                re.MULTILINE,
-            )
-        )
-    assert targets == declared
+def test_ready_false_bootstrap_has_no_target_bypass() -> None:
+    assert not BOOTSTRAP_TARGETS.exists()
+    readme = (ROOT / "infra" / "terraform" / "README.md").read_text(encoding="utf-8")
+    assert "codebuild_provenance_bootstrap_targets.txt" not in readme
+    assert 'target_args+=("-target=$address")' not in readme

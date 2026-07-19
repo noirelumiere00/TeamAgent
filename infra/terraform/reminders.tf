@@ -33,6 +33,27 @@ locals {
   rem_name    = "${var.project_name}-${var.environment}-reminders"
 }
 
+# Lambda creates this group implicitly when it is absent. Keep it always
+# present so count=0 cannot remove retention or recreate an unbounded group.
+resource "aws_cloudwatch_log_group" "reminder_notify" {
+  name              = "/aws/lambda/${local.rem_name}-notify"
+  retention_in_days = 30
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+    # Retention adoption must not associate or disassociate a pre-existing KMS
+    # key. Encryption changes require a separately reviewed key-policy rollout.
+    ignore_changes = [kms_key_id]
+  }
+}
+
+import {
+  to = aws_cloudwatch_log_group.reminder_notify
+  id = "/aws/lambda/teamagent-dev-reminders-notify"
+}
+
 # ---------- SQS FIFO（本体 + DLQ） ----------
 # FIFO + content dedup: Scheduler のリトライ再送を 5 分窓で収斂（二重通知の主経路を封じる）。
 resource "aws_sqs_queue" "reminders_dlq" {
@@ -130,10 +151,11 @@ resource "aws_iam_role_policy" "morning_digest_reminders" {
 
 # ---------- Lambda consumer（SQS → Slack DM） ----------
 data "archive_file" "reminder_notify" {
-  count       = local.rem_enabled
-  type        = "zip"
-  source_dir  = "${path.module}/lambda/reminder_notify"
-  output_path = "${path.module}/build/reminder_notify.zip"
+  count            = local.rem_enabled
+  type             = "zip"
+  source_file      = "${path.module}/lambda/reminder_notify/handler.py"
+  output_path      = "${path.module}/build/reminder_notify.zip"
+  output_file_mode = "0644"
 }
 
 resource "aws_iam_role" "reminder_notify" {
@@ -156,8 +178,8 @@ data "aws_iam_policy_document" "reminder_notify_policy" {
   }
   statement {
     sid       = "Logs"
-    actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*"]
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.reminder_notify.arn}:*"]
   }
 }
 
@@ -177,9 +199,24 @@ resource "aws_lambda_function" "reminder_notify" {
   timeout          = 30
   filename         = data.archive_file.reminder_notify[0].output_path
   source_code_hash = data.archive_file.reminder_notify[0].output_base64sha256
+
+  depends_on = [
+    aws_cloudwatch_log_group.reminder_notify,
+    terraform_data.runtime_guard,
+  ]
+
   environment {
     variables = {
       SLACK_BOT_TOKEN_SECRET_NAME = var.slack_bot_token_secret_name
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
     }
   }
 }
@@ -210,4 +247,10 @@ resource "aws_cloudwatch_metric_alarm" "reminders_dlq" {
   treat_missing_data = "notBreaching"
   alarm_actions      = [aws_sns_topic.alarms.arn]
   ok_actions         = [aws_sns_topic.alarms.arn]
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }

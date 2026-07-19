@@ -1,10 +1,10 @@
 # ============================================================
 # CodeBuild: TeamAgent MCP candidateを **AWS内（社内proxy外）でbuild・scan gate**
 # ============================================================
-# go-live 実測: 社内proxy が PyTorch CDN(download.pytorch.org) の大容量DLを遮断し、
-# ローカル docker build で torch(CPU) が取得できない。CodeBuild は AWS 内で走るため
-# proxy を経由せず CDN に直結＝slim な CPU イメージを確実にビルドできる（再利用可能なCI基盤）。
-# arm64 ネイティブ（ARM_CONTAINER）でビルドし qemu 不要。source は raw_files S3 の zip。
+# The existing project is adopted in place as a quarantine-only builder. It
+# cannot write release repositories; independent source publication, attestation,
+# promotion, release authorization, and the composed Terraform guard remain
+# separate authorization boundaries.
 
 data "aws_caller_identity" "cb" {}
 
@@ -41,7 +41,7 @@ locals {
     "${var.project_name}-${var.environment}-image-deployment-intents"
   )
   terraform_automation_role_arn = (
-    "arn:aws:iam::718959508629:role/teamagent-dev-terraform-automation"
+    "arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation"
   )
   openclaw_contract_sha256 = filesha256(
     "${path.module}/../codebuild/openclaw_bundle_contract.json"
@@ -212,6 +212,37 @@ check "fixed_codebuild_account_and_region" {
 resource "aws_cloudwatch_log_group" "codebuild_image" {
   name              = "/aws/codebuild/${local.main_codebuild_project_name}"
   retention_in_days = local.codebuild_log_retention_days
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [kms_key_id]
+  }
+}
+
+import {
+  to = aws_cloudwatch_log_group.codebuild_image
+  id = "/aws/codebuild/teamagent-dev-image-builder"
+}
+
+# Historical production log group with a distinct name. Manage retention only;
+# do not recreate or destroy the existing evidence-bearing group.
+resource "aws_cloudwatch_log_group" "codebuild_aiia_image_builder" {
+  name              = "/aws/codebuild/${var.project_name}-${var.environment}-aiia-image-builder"
+  retention_in_days = local.codebuild_log_retention_days
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [kms_key_id]
+  }
+}
+
+import {
+  to = aws_cloudwatch_log_group.codebuild_aiia_image_builder
+  id = "/aws/codebuild/teamagent-dev-aiia-image-builder"
 }
 
 resource "aws_cloudwatch_log_group" "codebuild_tiktok_image" {
@@ -271,96 +302,27 @@ data "aws_iam_policy_document" "main_codebuild_assume" {
 resource "aws_iam_role" "codebuild" {
   name               = "${var.project_name}-${var.environment}-codebuild-image"
   assume_role_policy = data.aws_iam_policy_document.main_codebuild_assume.json
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 data "aws_iam_policy_document" "codebuild" {
   statement {
-    sid     = "Logs"
-    actions = ["logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = [
-      "${aws_cloudwatch_log_group.codebuild_image.arn}:*",
-    ]
-  }
-  statement {
-    sid       = "EcrAuth"
-    actions   = ["ecr:GetAuthorizationToken"]
-    resources = ["*"] # GetAuthorizationToken はリソース指定不可（AWS仕様）
-  }
-  statement {
-    sid = "EcrMcpQuarantineWrite"
-    actions = [
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:InitiateLayerUpload",
-      "ecr:UploadLayerPart",
-      "ecr:CompleteLayerUpload",
-      "ecr:PutImage",
-      "ecr:DescribeImages",
-      "ecr:BatchGetImage",
-      "ecr:GetDownloadUrlForLayer",
-      "ecr:DescribeImageScanFindings",
-    ]
-    resources = [
-      aws_ecr_repository.mcp_quarantine.arn,
-      aws_ecr_repository.mcp_media_quarantine.arn,
-    ]
-  }
-  statement {
-    sid    = "DenyMcpCandidateAndReleaseWrite"
+    sid    = "DenyLegacyBuildAwsAccess"
     effect = "Deny"
     actions = [
-      "ecr:BatchDeleteImage",
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:CompleteLayerUpload",
-      "ecr:InitiateLayerUpload",
-      "ecr:PutImage",
-      "ecr:UploadLayerPart",
-    ]
-    resources = [
-      aws_ecr_repository.mcp_verified_candidates.arn,
-      aws_ecr_repository.mcp.arn,
-      aws_ecr_repository.mcp_media_verified_candidates.arn,
-      aws_ecr_repository.mcp_media.arn,
-    ]
-  }
-  statement {
-    sid    = "DenyDynamicEnvironmentAndDebugChannels"
-    effect = "Deny"
-    actions = [
-      "secretsmanager:GetSecretValue",
-      "ssm:GetParameter",
-      "ssm:GetParameters",
+      "codebuild:*",
+      "ecr:*",
+      "ecs:*",
+      "iam:PassRole",
+      "lambda:*",
+      "s3:*",
+      "secretsmanager:*",
+      "ssm:*",
       "ssmmessages:*",
-    ]
-    resources = ["*"]
-  }
-  statement {
-    sid     = "S3Source"
-    actions = ["s3:GetObject", "s3:GetObjectRetention", "s3:GetObjectVersion"]
-    resources = [
-      "${aws_s3_bucket.raw_files.arn}/codebuild/source.zip",
-      "${aws_s3_bucket.raw_files.arn}/codebuild/connect-web-app.html",
-      "${aws_s3_bucket.image_release_evidence.arn}/source-declarations/mcp/*",
-    ]
-  }
-  statement {
-    sid       = "DecryptAndVerifySignedMcpSource"
-    actions   = ["kms:Decrypt", "kms:DescribeKey"]
-    resources = [aws_kms_key.image_release_evidence.arn]
-  }
-  statement {
-    sid       = "VerifyIndependentMcpSourcePublisher"
-    actions   = ["kms:DescribeKey", "kms:GetPublicKey", "kms:Verify"]
-    resources = [aws_kms_key.mcp_source_publisher_signing.arn]
-  }
-  statement {
-    sid    = "DenySourceEvidenceWritesAndSigning"
-    effect = "Deny"
-    actions = [
-      "kms:Sign",
-      "s3:DeleteObject",
-      "s3:DeleteObjectVersion",
-      "s3:PutObject",
-      "s3:PutObjectRetention",
+      "sts:AssumeRole",
     ]
     resources = ["*"]
   }
@@ -370,91 +332,64 @@ resource "aws_iam_role_policy" "codebuild" {
   name   = "${var.project_name}-${var.environment}-codebuild-image"
   role   = aws_iam_role.codebuild.id
   policy = data.aws_iam_policy_document.codebuild.json
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
-locals {
-  image_builder_buildspec_1 = replace(
-    file("${path.module}/../codebuild/buildspec.yml"),
-    "__SOURCE_PROVENANCE_SHA256__",
-    filesha256("${path.module}/../codebuild/source_provenance.py"),
-  )
-  image_builder_buildspec_2 = replace(
-    local.image_builder_buildspec_1,
-    "__RELEASE_EVIDENCE_SHA256__",
-    filesha256("${path.module}/../codebuild/release_evidence.py"),
-  )
-  image_builder_buildspec_3 = replace(
-    local.image_builder_buildspec_2,
-    "__TEAMAGENT_BUNDLE_PROVENANCE_SHA256__",
-    filesha256("${path.module}/../codebuild/teamagent_bundle_provenance.py"),
-  )
-  image_builder_buildspec_4 = replace(
-    local.image_builder_buildspec_3,
-    "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
-    aws_kms_key.mcp_source_publisher_signing.arn,
-  )
-  image_builder_buildspec_5 = replace(
-    local.image_builder_buildspec_4,
-    "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
-    aws_kms_key.image_release_evidence.arn,
-  )
-  image_builder_buildspec_6 = replace(
-    local.image_builder_buildspec_5,
-    "__ECR_IMAGE_RESOLVER_SHA256__",
-    filesha256("${path.module}/../codebuild/resolve_ecr_image.py"),
-  )
-  image_builder_buildspec_7 = replace(
-    local.image_builder_buildspec_6,
-    "__ECR_SCAN_GATE_SHA256__",
-    filesha256("${path.module}/../codebuild/verify_ecr_scan.py"),
-  )
-  image_builder_buildspec_8 = replace(
-    local.image_builder_buildspec_7,
-    "__MCP_RELEASE_CONTRACT_SHA256__",
-    local.mcp_release_contract_sha256,
-  )
-  image_builder_buildspec = replace(
-    local.image_builder_buildspec_8,
-    "__SOURCE_MANIFEST_CONTRACT_SHA256__",
-    local.runtime_contract_sha256,
-  )
-}
-
-# --- CodeBuild プロジェクト（arm64・docker・versioned S3 source） ---
+# Historical mutable source.zip builder. Keep the resource to converge the
+# existing project into a permanently non-runnable, non-networked tombstone.
 resource "aws_codebuild_project" "image" {
   name         = local.main_codebuild_project_name
-  description  = "Build and vulnerability-gate TeamAgent MCP candidate images inside AWS"
+  description  = "RETIRED - mutable source.zip release publishing is denied"
   service_role = aws_iam_role.codebuild.arn
 
-  artifacts { type = "NO_ARTIFACTS" }
+  artifacts {
+    type = "NO_ARTIFACTS"
+  }
 
   environment {
-    compute_type    = "BUILD_GENERAL1_LARGE"                           # torch/sentence-transformers ビルドに余裕
-    image           = "aws/codebuild/amazonlinux-aarch64-standard:3.0" # arm64 ネイティブ
+    compute_type    = "BUILD_GENERAL1_SMALL"
+    image           = "aws/codebuild/amazonlinux-aarch64-standard:3.0"
     type            = "ARM_CONTAINER"
-    privileged_mode = true # docker ビルドに必須
-
-    # Commit, branch, both application contracts, and both provenance hashes
-    # have no project defaults. In particular, no OCI provenance label can
-    # silently resolve to a placeholder.
-    # build_teamagent_image.sh binds all provenance inputs per build.
+    privileged_mode = false
   }
 
   source {
-    type      = "S3"
-    location  = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"
-    buildspec = local.image_builder_buildspec
+    type      = "NO_SOURCE"
+    buildspec = <<-YAML
+      version: 0.2
+      phases:
+        build:
+          commands:
+            - echo "RETIRED: mutable source.zip image publishing is disabled" >&2
+            - exit 64
+    YAML
   }
 
   logs_config {
     cloudwatch_logs {
-      group_name = aws_cloudwatch_log_group.codebuild_image.name
+      status = "DISABLED"
     }
+    s3_logs {
+      status = "DISABLED"
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy.codebuild,
+    terraform_data.runtime_guard,
+  ]
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 
 output "codebuild_project" {
-  value = aws_codebuild_project.image.name
+  description = "Retired mutable MCP builder project name."
+  value       = aws_codebuild_project.image.name
 }
 
 # ============================================================

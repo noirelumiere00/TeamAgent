@@ -55,19 +55,31 @@ image_release_evidence = {
 shared_company_domains = "vectorinc.co.jp"        # §G 会社共有ドメイン
 openclaw_model_id      = "jp.anthropic.claude-haiku-4-5"   # 手順0で確定した値
 enable_vpc_endpoints   = true
-alarm_email_endpoints  = ["you@vectorinc.co.jp"]
+alarm_email_endpoints  = ["s-komata@vectorinc.co.jp"]
 ```
 `image_deployment_intent_id` は設定しない。worktree 外の saved plan を作成・レビューし、
 その同じ plan を一度だけ apply:
 ```sh
-bash infra/terraform/plan_image_release.sh /secure/local/path/openclaw-release.tfplan
+bash infra/deploy/terraform_runtime_guard.sh plan --help
 terraform show /secure/local/path/openclaw-release.tfplan
-bash infra/terraform/apply_image_release_plan.sh /secure/local/path/openclaw-release.tfplan
+bash infra/deploy/terraform_runtime_guard.sh apply --plan /secure/local/path/openclaw-release.tfplan --out /secure/local/path/openclaw-release.apply.json
 ```
 - plan は全差分をレビュー（特に IAM Deny / SG / secrets data source 解決）。
 - `-target`、direct ECS task-definition registration、失敗後の同 plan 再実行は禁止。
 - apply 失敗時は状態を reconcile し、fresh receipt＋new intent＋new plan で roll-forward/rollback。
 - 検証: **OpenClaw タスクロールで `secretsmanager:GetSecretValue` が拒否**されることを IAM Policy Simulator で確認。
+
+### 3.1 通常運用logの30日adoption
+
+runtime migrationには、既存のContainer Insights
+`/aws/ecs/containerinsights/teamagent-dev/performance` と
+`/aws/ecs/containerinsights/teamagent-dev-tiktok/performance`（live初期値はいずれも1日）を
+含む7 log groupのin-place import/adoptionが必要です。各groupの既存eventをexact
+S3 bucket/key/versionからfresh fileへ取得したretention export receiptを作り、
+`terraform_runtime_guard.sh plan`へ渡します。receiptはcanonical path/device/inode/
+nlink=1/size/timestamps/hash、AWS metadata、delivery時刻を拘束し、saved plan時とapply直前に
+guardが再取得・再hashします。7 groupの1件でも欠落、別version、差替え、時刻逆転なら中断し、
+log groupを削除・再作成したりdirect retention変更で迂回しません。
 
 ## 4. 新 Slack アプリ（OpenClaw 専用・Socket Mode）
 - Slack で **新規アプリ**を作成（既存 Bot とは別＝Socket Mode 二重接続回避）。**専用チャネル**を1つ用意。
@@ -133,9 +145,9 @@ bash infra/deploy/build_teamagent_image.sh
 bash infra/deploy/authorize_image_release.sh --help
 # (c) terraform.tfvars に enable_scrape_tools=true、新 release @sha256、exact receipt
 #     VersionIds を設定し、§3 と同じ new full saved-plan flow を一度だけ実行
-bash infra/terraform/plan_image_release.sh /secure/local/path/mcp-scrape-release.tfplan
+bash infra/deploy/terraform_runtime_guard.sh plan --help
 terraform show /secure/local/path/mcp-scrape-release.tfplan
-bash infra/terraform/apply_image_release_plan.sh /secure/local/path/mcp-scrape-release.tfplan
+bash infra/deploy/terraform_runtime_guard.sh apply --plan /secure/local/path/mcp-scrape-release.tfplan --out /secure/local/path/mcp-scrape-release.apply.json
 # (d) 任意: 許可ドメインを絞る（未設定なら url_guard の保守的既定 youtube/youtu.be/tiktok/instagram）
 #     task env SCRAPE_ALLOWED_DOMAINS="youtube.com,youtu.be,tiktok.com,instagram.com"
 ```

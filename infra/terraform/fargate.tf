@@ -8,15 +8,56 @@
 #   - OpenClaw は Slack(Socket Mode wss) と Bedrock へ egress するため public subnet+egress（worker と同型）。
 #     真の private 化は VPC endpoint（vpc_endpoints.tf・任意）で Secrets/Bedrock/ECR を内部化。
 #   - 2タスク間通信は Cloud Map(private DNS) で teamagent-mcp を解決（openclaw.json の url と一致させる）。
-#   ⚠️ apply は本人/targeted。secret は本人が Secrets Manager に作成（値はここに無い）。image は ECR push 後に tfvars 指定。
+#   ⚠️ 変更は runtime guard の保存planだけを使う。secret値はTerraformに置かず、
+#      imageは監査済みの完全digestだけをmigration manifest経由で指定する。
 
 locals {
   account_id = data.aws_caller_identity.current.account_id
 
-  bedrock_resources = [
-    "arn:aws:bedrock:*::foundation-model/*",
-    "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/*",
+  haiku_inference_profile_arn = (
+    "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/${var.mcp_model_id}"
+  )
+  sonnet_inference_profile_arn = (
+    "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/${var.x_analysis_model_id}"
+  )
+  haiku_backing_model_arns = [
+    for region in ["ap-northeast-1", "ap-northeast-3"] :
+    "arn:aws:bedrock:${region}::foundation-model/${trimprefix(var.mcp_model_id, "jp.")}"
   ]
+  sonnet_backing_model_arns = [
+    for region in ["ap-northeast-1", "ap-northeast-3"] :
+    "arn:aws:bedrock:${region}::foundation-model/${trimprefix(var.x_analysis_model_id, "jp.")}"
+  ]
+
+  openclaw_bedrock_profile_arn = (
+    "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/${var.openclaw_model_id}"
+  )
+  openclaw_bedrock_backing_model_arns = [
+    "arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+    "arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+  ]
+  # Every MCP-family consumer receives only the two model profiles injected
+  # into its environment and their fixed JP backing models. Repository-wide or
+  # model-wide wildcards would let a compromised task silently select a
+  # different model.
+  bedrock_resources = concat(
+    [
+      local.haiku_inference_profile_arn,
+      local.sonnet_inference_profile_arn,
+    ],
+    local.haiku_backing_model_arns,
+    local.sonnet_backing_model_arns,
+  )
+
+  lambda_bedrock_resources = concat(
+    [
+      "arn:aws:bedrock:${var.aws_region}:${local.account_id}:inference-profile/${var.bedrock_model_id}",
+    ],
+    [
+      for region in ["ap-northeast-1", "ap-northeast-3"] :
+      "arn:aws:bedrock:${region}::foundation-model/${trimprefix(var.bedrock_model_id, "jp.")}"
+    ],
+  )
 }
 
 # secret は本人が事前に Secrets Manager へ作成（値は tf に無い）。名前から full ARN(suffix込)を解決して
@@ -43,15 +84,27 @@ data "aws_secretsmanager_secret" "vertex_sa" {
   name  = var.vertex_sa_secret_name
 }
 
+# OAuth token ciphertext is protected by this single pre-existing key. Task
+# roles may decrypt with the resolved key ARN only; account-wide key/* access
+# would make any future KMS key reachable.
+data "aws_kms_alias" "oauth_tokens" {
+  name = "alias/teamagent-oauth-tokens"
+}
+
 # ---------- クラスタ ----------
 resource "aws_ecs_cluster" "main" {
   name = "${var.project_name}-${var.environment}"
 
   setting {
     name = "containerInsights"
-    # コスト最適化(2026-06-29): Container Insights を無効化（テレメトリのみ・アプリログは別途維持。約-$11/月）。
-    # 既にCLIで無効化済み。詳細監視を戻す場合は "enabled"。
-    value = "disabled"
+    # RunningTaskCount missing-data alarms require service telemetry.
+    value = "enabled"
+  }
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 
@@ -166,7 +219,8 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
       data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn,
       # §知識ベース: knowledge_deliver が共有 Drive(個人OAuth)で実ファイルを DL する token。
       data.aws_secretsmanager_secret.google_oauth[0].arn,
-      ], var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [],
+      ], local.hmac_secret_iam_arns,
+      var.enable_scrape_tools ? [data.aws_secretsmanager_secret.vertex_sa[0].arn] : [],
       # カタログ①〜⑤: Apify トークン注入権限（tiktok/apify-token 共用）。
       (var.enable_x_research && var.tiktok_apify_secret_arn != "") ? [var.tiktok_apify_secret_arn] : []
     )
@@ -182,9 +236,20 @@ resource "aws_iam_role_policy" "ecs_execution_mcp_secrets" {
 # --- OpenClaw タスクロール: Bedrock InvokeModel のみ ＋ Secrets/KMS/RDS 明示 Deny ---
 data "aws_iam_policy_document" "openclaw_task" {
   statement {
-    sid       = "BedrockInvokeOnly"
+    sid       = "BedrockInferenceProfileOnly"
     actions   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-    resources = local.bedrock_resources
+    resources = [local.openclaw_bedrock_profile_arn]
+  }
+  statement {
+    sid       = "BedrockBackingModelsViaProfileOnly"
+    actions   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+    resources = local.openclaw_bedrock_backing_model_arns
+
+    condition {
+      test     = "ArnEquals"
+      variable = "bedrock:InferenceProfileArn"
+      values   = [local.openclaw_bedrock_profile_arn]
+    }
   }
   statement {
     sid    = "DenySalesDataReach"
@@ -228,7 +293,7 @@ data "aws_iam_policy_document" "mcp_task" {
   statement {
     sid       = "KmsDecrypt"
     actions   = ["kms:Decrypt"]
-    resources = ["arn:aws:kms:${var.aws_region}:${local.account_id}:key/*"]
+    resources = [data.aws_kms_alias.oauth_tokens.target_key_arn]
   }
   # §M: VSEO レポートの非公開S3発行（vseo-reports/ prefix に限定・presigned 用）。拡張版のみ。
   dynamic "statement" {
@@ -272,8 +337,6 @@ data "aws_iam_policy_document" "mcp_task" {
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
-      "bedrock:Converse",
-      "bedrock:ConverseStream",
     ]
     resources = local.bedrock_resources
   }
@@ -361,15 +424,37 @@ resource "aws_ecs_task_definition" "mcp" {
   }
   execution_role_arn = aws_iam_role.ecs_execution_mcp.arn
   task_role_arn      = aws_iam_role.mcp_task.arn
-  depends_on         = [terraform_data.production_image_release_gate]
+  skip_destroy       = true
+
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.production_image_release_gate,
+  ]
+
+  volume {
+    name = "tmp"
+  }
 
   container_definitions = jsonencode([merge({
-    name         = "teamagent-mcp"
-    image        = var.mcp_image
-    essential    = true
+    name                   = "teamagent-mcp"
+    image                  = var.mcp_image
+    essential              = true
+    user                   = "10001:10001"
+    readonlyRootFilesystem = true
+    linuxParameters = {
+      initProcessEnabled = true
+      capabilities = {
+        drop = ["ALL"]
+      }
+    }
     portMappings = [{ containerPort = 8787, protocol = "tcp" }]
     environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
+      { name = "HOME", value = "/tmp/home" },
+      { name = "TMPDIR", value = "/tmp" },
+      { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
+      { name = "PYTHONPYCACHEPREFIX", value = "/tmp/.pycache" },
+      { name = "UV_CACHE_DIR", value = "/tmp/.uv-cache" },
       { name = "TEAMAGENT_MCP_HOST", value = "0.0.0.0" },
       { name = "TEAMAGENT_MCP_PORT", value = "8787" },
       { name = "TEAMAGENT_MCP_PATH", value = "/mcp" },
@@ -474,7 +559,7 @@ resource "aws_ecs_task_definition" "mcp" {
       # ナレッジ回答の末尾に「資料リンク」を付与（@AiLa=openclaw が markdown を装飾リンクへ
       # 変換する mcp のみ ON。connect-web(/app) は未設定＝生テキスト化しないため付けない）。
       { name = "SEARCH_ANSWER_SOURCE_LINKS", value = "1" },
-      ], var.enable_tiktok_acquire ? [
+      ], local.hmac_mcp_environment, var.enable_tiktok_acquire ? [
       # live パリティ: tiktok_acquire 連携のジョブ投入側。mcp が DynamoDB(状態)/SQS(キュー)/S3 を参照。
       # これらが無いと @AiLa の tiktok_acquire がジョブを投入できず取得パイプラインが停止する。
       { name = "USE_TIKTOK_ACQUIRE", value = "1" },
@@ -524,13 +609,6 @@ resource "aws_ecs_task_definition" "mcp" {
     secrets = concat([
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-      # レポート短縮リンク(/r)の署名鍵。connect-web(connect_web.tf) と同一値=database_url を共用し
-      # 発行(mcp/x_research skill)↔復号(connect-web /r)で鍵一致させる。新規 secret 不要
-      # (database_url の GetSecretValue は mcp exec role に付与済み)。
-      # ※短縮URLの実発行は env USE_REPORT_SHORTURL(既定OFF)で段階ゲート。connect-web に /r ルート
-      #   ＋vseo-s3-read(bootstrap_vseo_s3_iam.sh)が揃い実機で /r→302 を確認した後に ON にする。
-      #   本鍵/フラグ未設定でも skill は従来 presigned を返すため既存挙動は壊れない。
-      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       # §U ハイブリッド identity: mcp が slack_user_id → 会社メールを server-side 解決して
       # per-user OAuth(mail_*/morning_digest) の token を引くために必要（users:read.email scope）。
       # openclaw と同じ secret を共用。会社共有グループ(search)はこれ無しでも動く（graceful degrade）。
@@ -547,12 +625,15 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "GOOGLE_CLIENT_ID", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:client_id::" },
       { name = "GOOGLE_CLIENT_SECRET", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:client_secret::" },
       { name = "GOOGLE_OAUTH_REFRESH_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:refresh_token::" },
-      ], var.enable_scrape_tools ? [
+      ], local.hmac_mcp_secrets, var.enable_scrape_tools ? [
       { name = "VERTEX_SA_JSON", valueFrom = data.aws_secretsmanager_secret.vertex_sa[0].arn },
       ] : [], (var.enable_x_research && var.tiktok_apify_secret_arn != "") ? [
       # カタログ①〜⑤: Apify トークン（tiktok/apify-token を共用＝新設しない・計画裁定）。
       { name = "APIFY_API_TOKEN", valueFrom = var.tiktok_apify_secret_arn },
     ] : [])
+    mountPoints = [
+      { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
+    ]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -562,7 +643,7 @@ resource "aws_ecs_task_definition" "mcp" {
       }
     }
     healthCheck = {
-      command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:8787/healthz || exit 1"]
+      command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).read()\""]
       interval    = 30
       timeout     = 5
       retries     = 5
@@ -572,12 +653,21 @@ resource "aws_ecs_task_definition" "mcp" {
     # §M改: 拡張版のみ SA JSON ファイル化ラッパで起動（既定はイメージの CMD のまま＝挙動不変）。
     command = ["sh", "scripts/run_mcp_vertex_entrypoint.sh"]
   } : {})])
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 resource "aws_ecs_task_definition" "openclaw" {
-  # Empty keeps an intentionally unmanaged legacy deployment out of this
-  # module. Any Terraform-managed image revision uses the one-time production
-  # release gate below; direct CLI task-definition registration is retired.
+  # legacy image-only CLIは退役済み。OpenClawも他runtimeと同じexact migration、
+  # image/EFS実task preflight、one-time production release gate、保存plan検証を
+  # すべて通した場合だけ登録する。direct CLI task-definition登録は退役済み。
   count                    = var.openclaw_image == "" ? 0 : 1
   family                   = "${var.project_name}-${var.environment}-openclaw"
   requires_compatibilities = ["FARGATE"]
@@ -590,23 +680,52 @@ resource "aws_ecs_task_definition" "openclaw" {
   }
   execution_role_arn = aws_iam_role.ecs_execution_openclaw.arn
   task_role_arn      = aws_iam_role.openclaw_task.arn
-  depends_on         = [terraform_data.production_image_release_gate]
+  skip_destroy       = true
 
-  # §R(go-live): Fargate の空ボリュームは root 所有で、公式OpenClawイメージは非root(node uid1000)。
-  # readonly rootfs＋root所有volume だと node が /home/node/.openclaw に書けず crash（実測）。
-  # P1 は readonly rootfs と volume を外し、node が自分の HOME(書込み可ephemeral層)に state を持つ。
-  # ＝会話メモリはタスク再起動で揮発（既知のP1制限どおり）。readonly rootfs と state永続化は
-  # P2 で EFS access point(uid/gid 1000) で両立する（要 EFS 作成）。
+  depends_on = [
+    aws_efs_mount_target.openclaw_state,
+    aws_iam_role_policy.openclaw_efs,
+    terraform_data.runtime_guard,
+    terraform_data.production_image_release_gate,
+  ]
+
+  volume {
+    name = "tmp"
+  }
+
+  volume {
+    name = "state"
+
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.openclaw_state.id
+      root_directory     = "/"
+      transit_encryption = "ENABLED"
+
+      authorization_config {
+        access_point_id = aws_efs_access_point.openclaw_state.id
+        iam             = "ENABLED"
+      }
+    }
+  }
+
   container_definitions = jsonencode([{
-    name      = "openclaw"
-    image     = var.openclaw_image
-    essential = true
-    # §S診断: Slack@mention無反応の切り分け用に debug ログを有効化（ソケット接続/イベント受信を可視化）。
-    # CMD(Dockerfile)に --log-level debug を前置（グローバルフラグはsubcommand前）。安定後は外す。
-    command = ["node", "dist/index.js", "--log-level", "debug", "gateway", "--bind", "loopback", "--port", "18789"]
+    name                   = "openclaw"
+    image                  = var.openclaw_image
+    essential              = true
+    user                   = "65532:65532"
+    readonlyRootFilesystem = true
+    stopTimeout            = 120
+    linuxParameters = {
+      initProcessEnabled = true
+      capabilities = {
+        drop = ["ALL"]
+      }
+    }
+    # Entrypoint/CMD and the authoritative config path are image contracts.
+    # Terraform must not override either.
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
-      { name = "OPENCLAW_CONFIG_PATH", value = "/opt/teamagent/openclaw.json" },
+      { name = "TMPDIR", value = "/tmp" },
       # §U: DM 許可リスト（カンマ区切り Slack user_id）。entrypoint が起動時に allowFrom へ注入。
       # メンバー追加は本 var を編集 + apply（task 再デプロイ）だけ＝image rebuild 不要・15名まで可動。
       { name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist },
@@ -617,13 +736,22 @@ resource "aws_ecs_task_definition" "openclaw" {
       { name = "SLACK_APP_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_app.arn },
       { name = "OPENCLAW_GATEWAY_TOKEN", valueFrom = data.aws_secretsmanager_secret.gateway_token.arn },
     ]
-    # §O: gateway healthz（loopback:18789）。docker-compose.yml:77-86 と同形（curl 非同梱のため node fetch）。
+    mountPoints = [
+      { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },
+      {
+        sourceVolume  = "state"
+        containerPath = "/tmp/teamagent-openclaw/state"
+        readOnly      = false
+      },
+    ]
+    # `/readyz` includes the gateway readiness contract; `/healthz` alone can
+    # report healthy before the Slack/MCP-facing runtime is ready.
     healthCheck = {
       command = [
         "CMD",
-        "node",
+        "/nodejs/bin/node",
         "-e",
-        "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
       ]
       interval    = 30
       timeout     = 5
@@ -639,6 +767,15 @@ resource "aws_ecs_task_definition" "openclaw" {
       }
     }
   }])
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 # ============================================================
@@ -652,6 +789,15 @@ resource "aws_ecs_service" "mcp" {
   desired_count   = 1
   launch_type     = "FARGATE"
 
+  availability_zone_rebalancing = "ENABLED"
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  depends_on = [terraform_data.runtime_guard]
+
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.mcp.id]
@@ -659,6 +805,15 @@ resource "aws_ecs_service" "mcp" {
   }
   service_registries {
     registry_arn = aws_service_discovery_service.mcp.arn
+  }
+
+  lifecycle {
+    prevent_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
   }
 }
 
@@ -670,12 +825,34 @@ resource "aws_ecs_service" "openclaw" {
   desired_count   = 1
   launch_type     = "FARGATE"
 
+  deployment_maximum_percent         = 100
+  deployment_minimum_healthy_percent = 0
+  availability_zone_rebalancing      = "ENABLED"
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  depends_on = [
+    aws_efs_mount_target.openclaw_state,
+    terraform_data.runtime_guard,
+  ]
+
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.openclaw.id]
     assign_public_ip = true # Slack(Socket Mode wss)/Bedrock への egress 用。inbound は無し。
   }
-  # §J: depends_on は撤去（OpenClaw は MCP へ起動後に再接続。count-gated service への depends_on を回避）。
+
+  lifecycle {
+    prevent_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
 output "mcp_service_dns" {

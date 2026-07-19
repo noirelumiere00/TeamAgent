@@ -8,7 +8,7 @@
 resource "aws_security_group" "vpce" {
   count       = var.enable_vpc_endpoints ? 1 : 0
   name        = "${var.project_name}-${var.environment}-vpce-sg"
-  description = "Interface endpoints: 443 from OpenClaw/MCP tasks only"
+  description = "Interface endpoints: 443 from approved Fargate task security groups"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -29,6 +29,12 @@ resource "aws_security_group" "vpce" {
       # §U-Part3-Step C: morning_digest Scheduled Task も VPC endpoint 経由（PR #131）。
       # 追加忘れると private_dns_enabled=true のため 443 が落ち provisioning ループになる必須配線。
       var.enable_morning_digest ? [aws_security_group.morning_digest[0].id] : [],
+      var.enable_canary_health ? [aws_security_group.canary[0].id] : [],
+      # Worker tasks also need the shared private-DNS endpoints (ECR API/DKR,
+      # Secrets Manager and Logs). Conditional expressions prevent an index
+      # lookup when the corresponding count-gated stack is disabled.
+      var.enable_tiktok_acquire ? [aws_security_group.tiktok_tasks[0].id] : [],
+      var.enable_x_research ? [aws_security_group.x_buzz_tasks[0].id] : [],
     )
   }
   egress {
@@ -38,6 +44,12 @@ resource "aws_security_group" "vpce" {
     cidr_blocks = ["0.0.0.0/0"]
   }
   tags = { Name = "${var.project_name}-${var.environment}-vpce-sg" }
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 locals {

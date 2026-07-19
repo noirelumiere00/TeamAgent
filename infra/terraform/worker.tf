@@ -49,13 +49,28 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
 }
 
 data "aws_iam_policy_document" "worker_app" {
-  # dev 配下の Secrets（Google OAuth / Slack / DB 等）を読む
+  # worker が実際に読む secret だけを full ARN で列挙する。
   statement {
     sid     = "ReadDevSecrets"
     actions = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [
-      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.project_name}/${var.environment}/*",
-    ]
+    resources = distinct(concat(
+      [
+        aws_secretsmanager_secret.db_password.arn,
+        data.aws_secretsmanager_secret.slack_bot.arn,
+        data.aws_secretsmanager_secret.slack_app.arn,
+      ],
+      var.enable_connect_web ? [
+        data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
+        data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
+      ] : [],
+      var.enable_ingest_schedule ? [
+        data.aws_secretsmanager_secret.google_oauth[0].arn,
+      ] : [],
+      var.enable_scrape_tools ? [
+        data.aws_secretsmanager_secret.vertex_sa[0].arn,
+      ] : [],
+      local.hmac_secret_iam_arns,
+    ))
   }
   # レポート/生ファイル用 S3（report_publish.py の署名付きURL発行先）
   statement {
@@ -69,13 +84,8 @@ data "aws_iam_policy_document" "worker_app" {
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
-      "bedrock:Converse",
-      "bedrock:ConverseStream",
     ]
-    resources = [
-      "arn:aws:bedrock:*::foundation-model/*",
-      "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/*",
-    ]
+    resources = local.bedrock_resources
   }
   # アプリログ（任意・CloudWatch agent 用）
   statement {

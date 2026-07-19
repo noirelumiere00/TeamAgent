@@ -23,8 +23,9 @@ variable "cost_anomaly_impact_usd" {
 # Cost Explorer / Budgets / Cost Anomaly は us-east-1 バックエンドのグローバルサービス。
 # 既定 provider(ap-northeast-1) とは別に us-east-1 alias を用意して CE リソースに使う。
 provider "aws" {
-  alias  = "us_east_1"
-  region = "us-east-1"
+  alias               = "us_east_1"
+  region              = "us-east-1"
+  allowed_account_ids = ["718959508629"]
 }
 
 # ---------- SNS トピックポリシー（Budgets/Cost Anomaly の発行を許可） ----------

@@ -235,13 +235,13 @@ def test_control_update_stage_has_an_independent_fail_closed_iam_boundary() -> N
     launcher = LAUNCHER.read_text(encoding="utf-8")
     terraform = TERRAFORM.read_text(encoding="utf-8")
 
-    assert "teamagent-release-control-update-caller" in launcher
-    assert "teamagent-dev-release-control-updater" in launcher
-    assert "image_release_control_update.py" in launcher
-    assert launcher.count("-target=aws_codebuild_project.") == 5
-    assert "aws_ecs_" not in launcher
-    assert "terraform_data.production_image_release_gate" not in launcher
-    assert "SAVED_PLAN.control-update.json" in launcher
+    assert "Retired:" in launcher
+    assert "targeted control updates cannot bypass" in launcher
+    assert "terraform_runtime_guard.sh plan/apply" in launcher
+    assert "exit 64" in launcher
+    assert "-target=" not in launcher
+    assert "terraform plan" not in launcher
+    assert "terraform apply" not in launcher
 
     policy = terraform.split(
         'data "aws_iam_policy_document" "release_control_updater"',
