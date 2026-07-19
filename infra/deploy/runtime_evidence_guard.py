@@ -92,6 +92,14 @@ WRITER_FAMILIES = (
     "teamagent-dev-tiktok-acquire",
     "teamagent-dev-x-buzz-worker",
 )
+WRITER_FAMILY_CLUSTERS = {
+    family: (
+        "teamagent-dev-tiktok"
+        if family == "teamagent-dev-tiktok-acquire"
+        else "teamagent-dev"
+    )
+    for family in WRITER_FAMILIES
+}
 WRITER_SERVICES = (
     "teamagent-dev-openclaw",
     "teamagent-dev-mcp",
@@ -1633,12 +1641,16 @@ def _object_versions_hash(aws: AwsCli, bucket: str) -> tuple[str, int]:
 def _list_family_tasks(
     aws: AwsCli, family: str, desired_status: str
 ) -> tuple[list[str], int]:
+    try:
+        cluster = WRITER_FAMILY_CLUSTERS[family]
+    except KeyError as exc:
+        raise ContractError("ECS writer family is outside the exact cluster map") from exc
     pages = aws.pages(
         "ecs",
         "list-tasks",
         (
             "--cluster",
-            "teamagent-dev",
+            cluster,
             "--family",
             family,
             "--desired-status",
@@ -1891,7 +1903,7 @@ def capture_quiescence(
 ) -> dict[str, Any]:
     inventory = collect_inventory(aws)
     assert_writer_inventory_disabled(inventory)
-    family_counts: dict[str, dict[str, int]] = {}
+    family_counts: dict[str, dict[str, int | str]] = {}
     source_times = [
         source["aws_date_epoch"] for source in inventory["source_pages"]
     ]
@@ -1903,7 +1915,11 @@ def capture_quiescence(
             raise ContractError(
                 f"ECS family {family} still has RUNNING/PENDING tasks"
             )
-        family_counts[family] = {"running": 0, "pending": 0}
+        family_counts[family] = {
+            "cluster": WRITER_FAMILY_CLUSTERS[family],
+            "running": 0,
+            "pending": 0,
+        }
     service_states, services_at = _describe_writer_services(aws)
     if any(
         state["desired"] != 0
@@ -2112,6 +2128,7 @@ def disconnect_all_writers(
         record("ecs.UpdateService", service_name, response, http)
 
     for family in WRITER_FAMILIES:
+        cluster = WRITER_FAMILY_CLUSTERS[family]
         task_arns = sorted(
             set(
                 _list_family_tasks(aws, family, "RUNNING")[0]
@@ -2124,7 +2141,7 @@ def disconnect_all_writers(
                 "stop-task",
                 (
                     "--cluster",
-                    "teamagent-dev",
+                    cluster,
                     "--task",
                     task_arn,
                     "--reason",
@@ -3049,13 +3066,17 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
     ):
         raise ContractError("producer writer-control inventory is incomplete")
     family_states = quiescence.get("ecs_families")
+    expected_family_states = {
+        family: {
+            "cluster": WRITER_FAMILY_CLUSTERS[family],
+            "running": 0,
+            "pending": 0,
+        }
+        for family in WRITER_FAMILIES
+    }
     if (
         not isinstance(family_states, Mapping)
-        or set(family_states) != set(WRITER_FAMILIES)
-        or any(
-            state != {"running": 0, "pending": 0}
-            for state in family_states.values()
-        )
+        or family_states != expected_family_states
     ):
         raise ContractError("producer ECS family quiescence is incomplete")
     service_states = quiescence.get("ecs_services")

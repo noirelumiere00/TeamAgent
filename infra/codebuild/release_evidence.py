@@ -50,6 +50,29 @@ MAX_RELEASE_GRAPH_DIGESTS = 256
 DEPLOYMENT_INTENT_TABLE = "teamagent-dev-image-deployment-intents"
 DEPLOYMENT_LOCK_RECORD_ID = "lock#teamagent/terraform.tfstate"
 DEPLOYMENT_LOCK_LEASE_SECONDS = 300
+ALLOWED_EXISTING_LOG_IMPORTS = {
+    "aws_cloudwatch_log_group.codebuild_aiia_image_builder": (
+        "/aws/codebuild/teamagent-dev-aiia-image-builder"
+    ),
+    "aws_cloudwatch_log_group.codebuild_image": (
+        "/aws/codebuild/teamagent-dev-image-builder"
+    ),
+    "aws_cloudwatch_log_group.ecs_containerinsights_teamagent": (
+        "/aws/ecs/containerinsights/teamagent-dev/performance"
+    ),
+    "aws_cloudwatch_log_group.ecs_containerinsights_tiktok": (
+        "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance"
+    ),
+    "aws_cloudwatch_log_group.reminder_notify": (
+        "/aws/lambda/teamagent-dev-reminders-notify"
+    ),
+    "aws_cloudwatch_log_group.tiktok_dispatch": (
+        "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch"
+    ),
+    "aws_cloudwatch_log_group.x_dispatch": (
+        "/aws/lambda/teamagent-dev-x-buzz-dispatch"
+    ),
+}
 SINGLE_ARM64_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.v2+json",
     "application/vnd.oci.image.manifest.v1+json",
@@ -1780,13 +1803,31 @@ def deployment_plan_metadata(
             raw_change,
             label="saved Terraform resource change",
         )
+        address = _string(
+            change_for_import.get("address"),
+            label="saved Terraform resource change address",
+        )
         details_for_import = _mapping(
             change_for_import.get("change"),
-            label="saved Terraform resource change details",
+            label=f"saved Terraform resource change {address}",
         )
         importing = details_for_import.get("importing")
         if importing is not None and importing is not False:
-            raise EvidenceError("image release saved plans cannot contain imports")
+            import_contract = _mapping(
+                importing,
+                label=f"saved Terraform import operation {address}",
+            )
+            if (
+                set(import_contract) != {"id"}
+                or import_contract.get("id")
+                != ALLOWED_EXISTING_LOG_IMPORTS.get(address)
+                or details_for_import.get("actions")
+                not in (["no-op"], ["update"])
+            ):
+                raise EvidenceError(
+                    "image release saved plan import is outside the exact "
+                    "existing-log allowlist"
+                )
     planned_values = _mapping(
         plan.get("planned_values"),
         label="saved Terraform planned values",

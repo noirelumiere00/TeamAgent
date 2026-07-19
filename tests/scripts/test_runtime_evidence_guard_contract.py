@@ -58,7 +58,11 @@ def _quiescence(observed_at: int) -> dict[str, Any]:
             "lambda_mappings": ["12345678-1234-1234-1234-123456789abc"],
         },
         "ecs_families": {
-            family: {"running": 0, "pending": 0}
+            family: {
+                "cluster": evidence.WRITER_FAMILY_CLUSTERS[family],
+                "running": 0,
+                "pending": 0,
+            }
             for family in evidence.WRITER_FAMILIES
         },
         "ecs_services": {
@@ -143,6 +147,69 @@ def test_cloudtrail_identity_requires_exact_trail_configuration() -> None:
         mutated["Trail"][field] = value
         with pytest.raises(evidence.ContractError):
             evidence._cloudtrail_identity_contract(mutated)
+
+
+@pytest.mark.parametrize(
+    ("family", "expected_cluster"),
+    [
+        ("teamagent-dev-ingest", "teamagent-dev"),
+        ("teamagent-dev-tiktok-acquire", "teamagent-dev-tiktok"),
+        ("teamagent-dev-x-buzz-worker", "teamagent-dev"),
+    ],
+)
+def test_writer_family_task_inventory_uses_exact_cluster_and_all_pages(
+    family: str,
+    expected_cluster: str,
+) -> None:
+    calls: list[tuple[str, str, tuple[str, ...], dict[str, str]]] = []
+
+    class FakeAws:
+        def pages(
+            self,
+            service: str,
+            operation: str,
+            arguments: tuple[str, ...],
+            **pagination: str,
+        ) -> list[tuple[dict[str, Any], Any]]:
+            calls.append((service, operation, arguments, pagination))
+            return [
+                (
+                    {"taskArns": []},
+                    evidence.HttpEvidence(_aws_date(100), 100, "request-id"),
+                )
+            ]
+
+    tasks, observed_at = evidence._list_family_tasks(
+        FakeAws(),
+        family,
+        "RUNNING",
+    )
+
+    assert tasks == []
+    assert observed_at == 100
+    assert calls == [
+        (
+            "ecs",
+            "list-tasks",
+            (
+                "--cluster",
+                expected_cluster,
+                "--family",
+                family,
+                "--desired-status",
+                "RUNNING",
+            ),
+            {
+                "token_field": "nextToken",
+                "token_argument": "--next-token",
+            },
+        )
+    ]
+
+
+def test_unknown_writer_family_has_no_cluster_fallback() -> None:
+    with pytest.raises(evidence.ContractError):
+        evidence._list_family_tasks(object(), "teamagent-dev-unknown", "RUNNING")
 
 
 def _versioning_workflow() -> dict[str, Any]:
