@@ -931,7 +931,7 @@ def _persist_or_verify_private_json(path: Path, value: Any) -> str:
             if canonical.read_bytes() != expected:
                 raise BootstrapError(
                     f"durable artifact conflicts with reviewed claims: {path}"
-                )
+                ) from None
     finally:
         temporary.unlink(missing_ok=True)
         _fsync_directory(path.parent)

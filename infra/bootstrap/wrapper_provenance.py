@@ -11,8 +11,8 @@ import re
 import stat
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 EXPECTED_ORIGIN = "git@github.com:noirelumiere00/TeamAgent.git"
 EXPECTED_REMOTE = "https://github.com/noirelumiere00/TeamAgent.git"
@@ -121,8 +121,7 @@ def _run(
         cwd=cwd,
         env=env,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if check and completed.returncode != 0:
