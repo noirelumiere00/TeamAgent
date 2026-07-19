@@ -23,6 +23,7 @@ from botocore.config import Config
 _MAX_BODY_BYTES = 128 * 1024
 _MAX_ECS_OVERRIDE_CHARACTERS = 8192
 _MAX_JOB_BUDGET_SECONDS = 15 * 60
+_MAX_CLOCK_SKEW_SECONDS = 30
 _TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS = _MAX_JOB_BUDGET_SECONDS - 30
 _TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
 _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
@@ -470,6 +471,8 @@ def _validate_envelope(
         or type(deadline) is not int
         or type(ttl) is not int
         or not 1 <= deadline - created <= _MAX_JOB_BUDGET_SECONDS
+        or created > now + _MAX_CLOCK_SKEW_SECONDS
+        or deadline - now > _MAX_JOB_BUDGET_SECONDS
         or not 300 <= ttl <= max_artifact_ttl_s <= _MAX_ARTIFACT_RETENTION_SECONDS
     ):
         raise ValueError("media envelope timing is invalid")

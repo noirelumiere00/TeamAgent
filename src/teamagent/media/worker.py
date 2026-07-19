@@ -960,8 +960,12 @@ def run_job(
     """Execute one owner/version-fenced attempt in a bounded request directory."""
 
     now = int(time.time()) if now_epoch_s is None else now_epoch_s
-    if now >= request.deadline_epoch_s:
-        raise MediaDeadlineExceededError("media job deadline exceeded before claim")
+    try:
+        request.assert_dispatchable(now_epoch_s=now)
+    except ValueError as exc:
+        if now >= request.deadline_epoch_s:
+            raise MediaDeadlineExceededError("media job deadline exceeded before claim") from exc
+        raise
     root = temp_root or Path(
         os.environ.get(
             "MEDIA_JOB_TMP_ROOT",

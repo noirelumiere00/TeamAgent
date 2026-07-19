@@ -455,6 +455,29 @@ def test_dispatcher_schema_accepts_every_worker_operation(
     assert validated["operation"]["kind"] == operation.kind
 
 
+def test_dispatcher_rejects_future_created_envelope_before_task_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    request = make_job_request(
+        operation=AcquireOperation(
+            kind="acquire",
+            url="https://www.youtube.com/watch?v=BaW_jenozKc",
+        ),
+        output_bucket="teamagent-media",
+        request_fingerprint="dispatcher-future-created",
+        now_epoch_s=1_100,
+        timeout_s=300,
+    )
+
+    with pytest.raises(ValueError, match="timing"):
+        module._validate_envelope(
+            request.to_json_bytes().decode(),
+            expected_bucket="teamagent-media",
+            now=1_000,
+        )
+
+
 def test_dispatcher_rejects_staged_object_outside_exact_job_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

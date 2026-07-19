@@ -336,6 +336,32 @@ def test_worker_never_calls_backend_after_absolute_deadline(
     assert backend.cleanups == 0
 
 
+def test_worker_rejects_future_created_request_before_claim(tmp_path: Path) -> None:
+    baseline = _request()
+    request = make_job_request(
+        operation=baseline.operation,
+        output_bucket=baseline.output_bucket,
+        request_fingerprint="worker-future-created",
+        now_epoch_s=200,
+        timeout_s=300,
+        job_id=baseline.job_id,
+    )
+    backend = _Backend()
+
+    with pytest.raises(ValueError, match="clock skew"):
+        run_job(
+            request,
+            backend,
+            temp_root=tmp_path,
+            now_epoch_s=100,
+            owner="worker-a",
+        )
+
+    assert backend.claims == 0
+    assert backend.stores == 0
+    assert backend.cleanups == 0
+
+
 def test_expired_worker_lease_is_taken_over_with_new_attempt_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

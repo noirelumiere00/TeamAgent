@@ -63,6 +63,23 @@ def test_tiktok_operation_admission_is_bounded_by_immutable_deadline() -> None:
         )
 
 
+def test_request_dispatch_window_rejects_future_clock_skew() -> None:
+    request = make_job_request(
+        operation=FrameOperation(
+            kind="frame",
+            source=_ref(),
+            timecodes=(0.0,),
+        ),
+        output_bucket="teamagent-media-test",
+        request_fingerprint="future-clock-skew",
+        now_epoch_s=200,
+        timeout_s=300,
+    )
+
+    with pytest.raises(ValueError, match="clock skew"):
+        request.assert_dispatchable(now_epoch_s=100)
+
+
 def test_job_payload_is_strict_hashed_bounded_and_idempotent() -> None:
     operation = FrameOperation(
         kind="frame",

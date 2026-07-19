@@ -31,6 +31,7 @@ MAX_INPUT_BYTES = 128 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_JOB_BUDGET_SECONDS = 15 * 60
 MAX_DEADLINE_SECONDS = MAX_JOB_BUDGET_SECONDS
+MAX_CLOCK_SKEW_SECONDS = 30
 ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 MAX_PRESIGNED_URL_SECONDS = 7 * 24 * 60 * 60
 DDB_RETENTION_GRACE_SECONDS = 24 * 60 * 60
@@ -347,6 +348,15 @@ class MediaJobRequest(_StrictModel):
         if now >= self.deadline_epoch_s:
             raise ValueError("job deadline exceeded")
 
+    def assert_dispatchable(self, *, now_epoch_s: int | None = None) -> None:
+        now = int(time.time()) if now_epoch_s is None else now_epoch_s
+        if self.created_at_epoch_s > now + MAX_CLOCK_SKEW_SECONDS:
+            raise ValueError("job creation time exceeds bounded clock skew")
+        if self.deadline_epoch_s <= now:
+            raise ValueError("job deadline exceeded")
+        if self.deadline_epoch_s - now > MAX_JOB_BUDGET_SECONDS:
+            raise ValueError("job deadline exceeds bounded execution window")
+
 
 class MediaArtifact(_StrictModel):
     name: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_.-]*$")
@@ -463,6 +473,7 @@ def parse_job_request(body: bytes | str) -> MediaJobRequest:
 __all__ = [
     "ARTIFACT_RETENTION_SECONDS",
     "DDB_RETENTION_GRACE_SECONDS",
+    "MAX_CLOCK_SKEW_SECONDS",
     "MAX_DEADLINE_SECONDS",
     "MAX_INPUT_BYTES",
     "MAX_JOB_BODY_BYTES",
