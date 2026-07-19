@@ -92,6 +92,14 @@ WRITER_FAMILIES = (
     "teamagent-dev-tiktok-acquire",
     "teamagent-dev-x-buzz-worker",
 )
+WRITER_FAMILY_CLUSTERS = {
+    family: (
+        "teamagent-dev-tiktok"
+        if family == "teamagent-dev-tiktok-acquire"
+        else "teamagent-dev"
+    )
+    for family in WRITER_FAMILIES
+}
 WRITER_SERVICES = (
     "teamagent-dev-openclaw",
     "teamagent-dev-mcp",
@@ -872,6 +880,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                 ),
             )
             _items(subscriber_pages, "Subscribers", "Budget subscribers")
+    coverage.add("budgets.subscriber")
 
     anomaly_pages = collect(
         "cost-anomaly.subscriber",
@@ -938,6 +947,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                 _items(target_pages, "Targets", "EventBridge targets")
             )
         event_rules.extend(bus_rules)
+    coverage.add("eventbridge.target")
 
     schedule_group_pages = collect(
         "scheduler.schedule-group",
@@ -991,6 +1001,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
             collect("scheduler.target", f"{group}/{name}", [(detail, http)])
             schedule_details.append(detail)
         schedules.extend(group_schedules)
+    coverage.add("scheduler.target")
 
     function_pages = collect(
         "lambda.function",
@@ -1047,7 +1058,13 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
             raw_documents.append(
                 ("lambda.on-failure", name, dict(on_failure))
             )
-        coverage.update({"lambda.on-success", "lambda.on-failure"})
+    coverage.update(
+        {
+            "lambda.dead-letter",
+            "lambda.on-success",
+            "lambda.on-failure",
+        }
+    )
 
     mapping_pages = collect(
         "lambda.event-source-mapping",
@@ -1086,6 +1103,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         )
         collect("s3.topic-notification", name, [(notification, http)])
         notifications.append(notification)
+    coverage.add("s3.topic-notification")
 
     autoscaling_pages = collect(
         "autoscaling.notification",
@@ -1116,6 +1134,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
             ("--arn", rule_arn),
         )
         collect("codestar-notifications.target", rule_arn, [(detail, http)])
+    coverage.add("codestar-notifications.target")
 
     rds_pages = collect(
         "rds.event-subscription",
@@ -1225,6 +1244,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         raise ContractError(
             f"known SNS publisher coverage is incomplete: {sorted(missing_coverage)}"
         )
+    publisher_coverage = sorted(set(KNOWN_SNS_PUBLISHER_TYPES) & coverage)
     inventory_contract = {
         "references": references,
         "publisher_references": publisher_references,
@@ -1237,7 +1257,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
             if topic_arn in {CANONICAL_TOPIC, LEGACY_TOPIC}
         ),
         "alarm_subscription_count": len(all_subscriptions),
-        "publisher_coverage": sorted(coverage),
+        "publisher_coverage": publisher_coverage,
         "source_pages": raw_sources,
     }
     validate_inventory_contract(inventory_contract)
@@ -1271,7 +1291,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         "alarm_subscription_count": len(all_subscriptions),
         "source_pages": raw_sources,
         "source_pages_sha256": canonical_sha256(raw_sources),
-        "publisher_coverage": sorted(coverage),
+        "publisher_coverage": publisher_coverage,
         "eventbridge_rules": event_rules,
         "scheduler_schedules": schedule_details,
         "lambda_event_source_mappings": mappings,
@@ -1622,12 +1642,16 @@ def _object_versions_hash(aws: AwsCli, bucket: str) -> tuple[str, int]:
 def _list_family_tasks(
     aws: AwsCli, family: str, desired_status: str
 ) -> tuple[list[str], int]:
+    try:
+        cluster = WRITER_FAMILY_CLUSTERS[family]
+    except KeyError as exc:
+        raise ContractError("ECS writer family is outside the exact cluster map") from exc
     pages = aws.pages(
         "ecs",
         "list-tasks",
         (
             "--cluster",
-            "teamagent-dev",
+            cluster,
             "--family",
             family,
             "--desired-status",
@@ -1880,7 +1904,7 @@ def capture_quiescence(
 ) -> dict[str, Any]:
     inventory = collect_inventory(aws)
     assert_writer_inventory_disabled(inventory)
-    family_counts: dict[str, dict[str, int]] = {}
+    family_counts: dict[str, dict[str, int | str]] = {}
     source_times = [
         source["aws_date_epoch"] for source in inventory["source_pages"]
     ]
@@ -1892,7 +1916,11 @@ def capture_quiescence(
             raise ContractError(
                 f"ECS family {family} still has RUNNING/PENDING tasks"
             )
-        family_counts[family] = {"running": 0, "pending": 0}
+        family_counts[family] = {
+            "cluster": WRITER_FAMILY_CLUSTERS[family],
+            "running": 0,
+            "pending": 0,
+        }
     service_states, services_at = _describe_writer_services(aws)
     if any(
         state["desired"] != 0
@@ -2101,6 +2129,7 @@ def disconnect_all_writers(
         record("ecs.UpdateService", service_name, response, http)
 
     for family in WRITER_FAMILIES:
+        cluster = WRITER_FAMILY_CLUSTERS[family]
         task_arns = sorted(
             set(
                 _list_family_tasks(aws, family, "RUNNING")[0]
@@ -2113,7 +2142,7 @@ def disconnect_all_writers(
                 "stop-task",
                 (
                     "--cluster",
-                    "teamagent-dev",
+                    cluster,
                     "--task",
                     task_arn,
                     "--reason",
@@ -3038,13 +3067,17 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
     ):
         raise ContractError("producer writer-control inventory is incomplete")
     family_states = quiescence.get("ecs_families")
+    expected_family_states = {
+        family: {
+            "cluster": WRITER_FAMILY_CLUSTERS[family],
+            "running": 0,
+            "pending": 0,
+        }
+        for family in WRITER_FAMILIES
+    }
     if (
         not isinstance(family_states, Mapping)
-        or set(family_states) != set(WRITER_FAMILIES)
-        or any(
-            state != {"running": 0, "pending": 0}
-            for state in family_states.values()
-        )
+        or family_states != expected_family_states
     ):
         raise ContractError("producer ECS family quiescence is incomplete")
     service_states = quiescence.get("ecs_services")

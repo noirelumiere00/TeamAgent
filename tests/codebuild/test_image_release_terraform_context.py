@@ -118,6 +118,84 @@ def test_context_binds_exact_backend_workspace_state_and_plan_ownership() -> Non
     assert len(CONTEXT.context_sha256(value)) == 64
 
 
+def test_context_allows_only_exact_unowned_existing_log_import() -> None:
+    plan = _plan()
+    address = "aws_cloudwatch_log_group.ecs_containerinsights_teamagent"
+    import_id = "/aws/ecs/containerinsights/teamagent-dev/performance"
+    plan["configuration"]["root_module"]["resources"].append(
+        {"address": address}
+    )
+    plan["resource_changes"].append(
+        {
+            "address": address,
+            "mode": "managed",
+            "change": {
+                "actions": ["update"],
+                "importing": {"id": import_id},
+            },
+        }
+    )
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=_state(),
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+
+    assert value["plan"]["managed_change_count"] == 3
+    assert len(value["plan"]["address_ownership_sha256"]) == 64
+
+    wrong_id = _plan()
+    wrong_id["configuration"]["root_module"]["resources"].append(
+        {"address": address}
+    )
+    wrong_id["resource_changes"].append(
+        {
+            "address": address,
+            "mode": "managed",
+            "change": {
+                "actions": ["update"],
+                "importing": {"id": f"{import_id}-wrong"},
+            },
+        }
+    )
+    with pytest.raises(CONTEXT.ContextError, match="exact existing-log"):
+        CONTEXT.build_context(
+            plan=wrong_id,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+    destructive = plan.copy()
+    destructive["configuration"] = {
+        "root_module": {
+            "resources": list(
+                plan["configuration"]["root_module"]["resources"]
+            )
+        }
+    }
+    destructive["resource_changes"] = [
+        {
+            **change,
+            "change": dict(change["change"]),
+        }
+        for change in plan["resource_changes"]
+    ]
+    destructive["resource_changes"][-1]["change"]["actions"] = [
+        "delete",
+        "create",
+    ]
+    with pytest.raises(CONTEXT.ContextError, match="destructive"):
+        CONTEXT.build_context(
+            plan=destructive,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -127,7 +205,7 @@ def test_context_binds_exact_backend_workspace_state_and_plan_ownership() -> Non
             lambda plan, state, backend: plan["resource_changes"][1]["change"].update(
                 importing={"id": "hostile-import"}
             ),
-            "cannot contain import",
+            "exact existing-log",
         ),
         (
             lambda plan, state, backend: state.update(serial=-1),

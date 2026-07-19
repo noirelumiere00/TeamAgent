@@ -1019,6 +1019,37 @@ def test_saved_plan_metadata_binds_intent_context_claims_and_plan_hash(
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
     }
 
+    allowed_import = _plan_json()
+    allowed_import["resource_changes"].append(
+        {
+            "address": (
+                "aws_cloudwatch_log_group.ecs_containerinsights_teamagent"
+            ),
+            "change": {
+                "actions": ["update"],
+                "importing": {
+                    "id": (
+                        "/aws/ecs/containerinsights/"
+                        "teamagent-dev/performance"
+                    )
+                },
+            },
+        }
+    )
+    assert EVIDENCE.deployment_plan_metadata(
+        plan,
+        plan_json=allowed_import,
+    ) == metadata
+    allowed_import["resource_changes"][-1]["change"]["actions"] = [
+        "delete",
+        "create",
+    ]
+    with pytest.raises(EVIDENCE.EvidenceError, match="exact existing-log"):
+        EVIDENCE.deployment_plan_metadata(
+            plan,
+            plan_json=allowed_import,
+        )
+
     with pytest.raises(EVIDENCE.EvidenceError, match="will not run"):
         EVIDENCE.deployment_plan_metadata(
             plan,
@@ -1030,7 +1061,7 @@ def test_saved_plan_metadata_binds_intent_context_claims_and_plan_hash(
         EVIDENCE.deployment_plan_metadata(plan, plan_json=incomplete)
     imported = _plan_json()
     imported["resource_changes"][0]["change"]["importing"] = {"id": "hostile"}
-    with pytest.raises(EVIDENCE.EvidenceError, match="cannot contain imports"):
+    with pytest.raises(EVIDENCE.EvidenceError, match="exact existing-log"):
         EVIDENCE.deployment_plan_metadata(plan, plan_json=imported)
 
 

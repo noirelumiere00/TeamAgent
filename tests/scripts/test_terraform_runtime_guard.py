@@ -940,26 +940,87 @@ def _fake_aws(path: Path) -> None:
         mappings = {json.dumps({key: _mapping_aws(key) for key in DISPATCHERS})!r}
         mappings = json.loads(mappings)
         args = sys.argv[1:]
-        debug = False
         if args == ["--version"]:
-            print("aws-cli/2.31.0 Python/3.13 Darwin/24 source/x86_64")
+            print("aws-cli/2.27.0 Python/3.13.5 Darwin/24.5.0")
             raise SystemExit(0)
-        while args:
-            if (
-                len(args) >= 2
-                and args[0] == "--region"
-                and args[1] in (REGION, "us-east-1")
-            ):
-                args = args[2:]
-            elif len(args) >= 2 and args[0] == "--endpoint-url":
-                args = args[2:]
-            elif args[0] == "--no-cli-pager":
-                args = args[1:]
-            elif args[0] == "--debug":
-                debug = True
-                args = args[1:]
+        if args[:2] == ["sts", "get-caller-identity"]:
+            if "--query" not in args or args[-2:] != ["--output", "text"]:
+                raise SystemExit("malformed deployment gate identity query")
+            if os.environ.get("AWS_ACCESS_KEY_ID") == "ASIAGATESESSION":
+                arn = (
+                    "arn:aws:sts::718959508629:assumed-role/"
+                    "teamagent-dev-image-deployment-gate/"
+                    "teamagent-image-deployment-gate"
+                )
             else:
-                break
+                arn = (
+                    "arn:aws:sts::718959508629:assumed-role/"
+                    "teamagent-dev-terraform-runtime-automation/"
+                    "teamagent-terraform-worker"
+                )
+            print(f"{{ACCOUNT}}\\t{{arn}}")
+            raise SystemExit(0)
+        if args[:2] == ["sts", "assume-role"]:
+            if (
+                "--region" not in args
+                or args[args.index("--region") + 1] != REGION
+                or "--role-arn" not in args
+                or args[args.index("--role-arn") + 1]
+                != (
+                    "arn:aws:iam::718959508629:role/"
+                    "teamagent-dev-image-deployment-gate"
+                )
+                or args[-2:] != ["--output", "text"]
+            ):
+                raise SystemExit("malformed deployment gate assume-role")
+            print("ASIAGATESESSION\\tsecret\\ttoken")
+            raise SystemExit(0)
+        if args[:2] == ["dynamodb", "put-item"]:
+            if (
+                "--region" not in args
+                or args[args.index("--region") + 1] != REGION
+                or os.environ.get("AWS_ACCESS_KEY_ID") != "ASIAGATESESSION"
+            ):
+                raise SystemExit("malformed deployment intent write")
+            print(json.dumps({{}}))
+            raise SystemExit(0)
+        if (
+            len(args) >= 2
+            and args[0] == "--region"
+            and args[1] in (REGION, "us-east-1")
+        ):
+            command_region = args[1]
+            args = args[2:]
+        else:
+            raise SystemExit("missing exact fake AWS region")
+        if len(args) < 4 or args[0] != "--endpoint-url":
+            raise SystemExit("missing exact fake AWS endpoint")
+        endpoint = args[1]
+        if args[2] != "--no-cli-pager":
+            raise SystemExit("fake AWS pager was not disabled")
+        command_index = 3
+        debug = False
+        if args[command_index] == "--debug":
+            debug = True
+            command_index += 1
+        service = args[command_index]
+        expected_endpoint = {{
+            "apigatewayv2": f"https://apigateway.{{REGION}}.amazonaws.com",
+            "ecr": f"https://api.ecr.{{REGION}}.amazonaws.com",
+            "efs": f"https://elasticfilesystem.{{REGION}}.amazonaws.com",
+            "iam": "https://iam.amazonaws.com",
+            "s3api": f"https://s3.{{REGION}}.amazonaws.com",
+            "cloudwatch": f"https://monitoring.{{REGION}}.amazonaws.com",
+            "budgets": "https://budgets.amazonaws.com",
+            "ce": "https://ce.us-east-1.amazonaws.com",
+        }}.get(service, f"https://{{service}}.{{REGION}}.amazonaws.com")
+        if endpoint != expected_endpoint:
+            raise SystemExit("fake AWS endpoint differs")
+        if service in ("budgets", "ce") and command_region != "us-east-1":
+            raise SystemExit("fake AWS billing region differs")
+        if service not in ("budgets", "ce") and command_region != REGION:
+            raise SystemExit("fake AWS regional service region differs")
+        args = args[command_index:]
         if debug:
             import email.utils
 
@@ -1094,10 +1155,10 @@ def _fake_aws(path: Path) -> None:
                     else "s-komata@vectorinc.co.jp"
                 )
                 subscriptions.append({{
-                        "SubscriptionArn": (
-                            "arn:aws:sns:ap-northeast-1:718959508629:"
-                            "teamagent-dev-openclaw-alarms:"
-                            "11111111-2222-3333-4444-555555555555"
+                    "SubscriptionArn": (
+                        "arn:aws:sns:ap-northeast-1:718959508629:"
+                        "teamagent-dev-openclaw-alarms:"
+                        "11111111-2222-4333-8444-555555555555"
                     ),
                     "Owner": ACCOUNT,
                     "Protocol": protocol,
@@ -1122,7 +1183,8 @@ def _fake_aws(path: Path) -> None:
                 subscriptions.append({{
                     "SubscriptionArn": (
                         "arn:aws:sns:ap-northeast-1:718959508629:"
-                        "teamagent-dev-openclaw-alarms:extra"
+                        "teamagent-dev-openclaw-alarms:"
+                        "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
                     ),
                     "Owner": ACCOUNT,
                     "Protocol": "sms",
@@ -1143,6 +1205,7 @@ def _fake_aws(path: Path) -> None:
             )
             attributes = {{
                 "SubscriptionArn": subscription_arn,
+                "Owner": ACCOUNT,
                 "TopicArn": (
                     "arn:aws:sns:ap-northeast-1:718959508629:"
                     "teamagent-dev-openclaw-alarms"
@@ -1185,7 +1248,7 @@ def _fake_aws(path: Path) -> None:
                 ]
             print(json.dumps({{
                 "MetricAlarms": [{{
-                    "AlarmName": "teamagent-dev-openclaw-errors",
+                    "AlarmName": "teamagent-dev-errors",
                     "AlarmActions": actions,
                 }}],
                 "CompositeAlarms": [],
@@ -1247,6 +1310,42 @@ def _fake_aws(path: Path) -> None:
                     }}],
                 }}],
             }}))
+        elif args[:2] == ["events", "list-event-buses"]:
+            print(json.dumps({{
+                "EventBuses": [{{"Name": "default"}}],
+            }}))
+        elif args[:2] == ["events", "list-rules"]:
+            print(json.dumps({{"Rules": []}}))
+        elif args[:2] == ["scheduler", "list-schedule-groups"]:
+            print(json.dumps({{
+                "ScheduleGroups": [{{"Name": "default"}}],
+            }}))
+        elif args[:2] == ["scheduler", "list-schedules"]:
+            print(json.dumps({{"Schedules": []}}))
+        elif args[:2] == ["lambda", "list-functions"]:
+            print(json.dumps({{"Functions": []}}))
+        elif args[:2] == ["s3api", "list-buckets"]:
+            print(json.dumps({{
+                "Owner": {{"ID": "canonical-owner-id"}},
+                "Buckets": [],
+            }}))
+        elif args[:2] == [
+            "autoscaling",
+            "describe-notification-configurations",
+        ]:
+            print(json.dumps({{"NotificationConfigurations": []}}))
+        elif args[:2] == [
+            "codestar-notifications",
+            "list-notification-rules",
+        ]:
+            print(json.dumps({{"NotificationRules": []}}))
+        elif args[:2] == ["rds", "describe-event-subscriptions"]:
+            print(json.dumps({{"EventSubscriptionsList": []}}))
+        elif args[:2] == [
+            "chatbot",
+            "describe-chime-webhook-configurations",
+        ]:
+            print(json.dumps({{"WebhookConfigurations": []}}))
         elif args[:2] == ["s3api", "get-bucket-versioning"]:
             bucket = args[args.index("--bucket") + 1]
             state_path = os.environ.get("AWS_FAKE_VERSIONING_STATE")
@@ -1578,10 +1677,10 @@ def _fake_aws(path: Path) -> None:
                     key for key, value in dispatchers.items()
                     if value["function_name"] == name
                 )
-                response_mappings = [mappings[component]]
+                observed_mappings = [mappings[component]]
             else:
-                response_mappings = []
-            print(json.dumps({{"EventSourceMappings": response_mappings}}))
+                observed_mappings = []
+            print(json.dumps({{"EventSourceMappings": observed_mappings}}))
         elif args[:2] == ["secretsmanager", "describe-secret"]:
             secret_id = args[args.index("--secret-id") + 1]
             print(json.dumps({{
@@ -2051,15 +2150,18 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "workspace": "default",
     }
     assert len(data["state_contract"]["backend"]["identity_sha256"]) == 64
-    expected_addresses = sorted(
+    template = json.loads(Path(env["TF_FAKE_TEMPLATE"]).read_text(encoding="utf-8"))
+    managed_addresses = sorted(
         change["address"]
-        for change in _safe_plan()["resource_changes"]
-        if change["mode"] == "managed"
+        for change in template["resource_changes"]
+        if change.get("mode", "managed") == "managed"
     )
-    expected_address_bytes = "".join(f"{address}\n" for address in expected_addresses).encode()
+    address_set_sha256 = hashlib.sha256(
+        "".join(f"{address}\n" for address in managed_addresses).encode()
+    ).hexdigest()
     assert data["state_contract"]["state"] == {
-        "address_count": len(expected_addresses),
-        "address_set_sha256": hashlib.sha256(expected_address_bytes).hexdigest(),
+        "address_count": len(managed_addresses),
+        "address_set_sha256": address_set_sha256,
         "lineage": "01234567-89ab-cdef-0123-456789abcdef",
         "serial": 42,
     }
@@ -2074,16 +2176,16 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
     }
     assert all(item["present"] is False for item in data["state_contract"]["imports"].values())
     assert not any(
-        line == "apply" or line.startswith("apply ")
-        for line in tf_log.read_text(encoding="utf-8").splitlines()
+        command == "apply" or command.startswith("apply ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
     )
 
     verify = _run(["bash", str(GUARD), "verify", "--plan", str(plan)], env)
     assert verify.returncode == 0, verify.stdout + verify.stderr
     assert "read-only検証完了" in verify.stdout
     assert not any(
-        line == "apply" or line.startswith("apply ")
-        for line in tf_log.read_text(encoding="utf-8").splitlines()
+        command == "apply" or command.startswith("apply ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
     )
 
 
@@ -2519,6 +2621,31 @@ def test_state_address_reconstruction_binds_mixed_exact_address_set(
         ),
         encoding="utf-8",
     )
+    state_payload = json.loads(state.read_text(encoding="utf-8"))
+    template = json.loads(Path(env["TF_FAKE_TEMPLATE"]).read_text(encoding="utf-8"))
+    for change in template["resource_changes"]:
+        if change.get("mode", "managed") != "managed":
+            continue
+        address = change["address"]
+        base_address = address
+        index_key = None
+        if base_address.endswith("[0]"):
+            base_address = base_address[:-3]
+            index_key = 0
+        resource_type, name = base_address.split(".", 1)
+        instance: dict[str, Any] = {"schema_version": 0, "attributes": {}}
+        if index_key is not None:
+            instance["index_key"] = index_key
+        state_payload["resources"].append(
+            {
+                "mode": "managed",
+                "type": resource_type,
+                "name": name,
+                "instances": [instance],
+            }
+        )
+        addresses.append(address)
+    state.write_text(json.dumps(state_payload), encoding="utf-8")
     state.chmod(0o600)
     env["TF_FAKE_STATE"] = str(state)
 
@@ -2757,5 +2884,8 @@ def test_plan_tamper_pair_swap_live_drift_and_apply_are_rejected(tmp_path: Path)
         env,
     )
     assert apply.returncode == 1
-    assert "exact trusted automation role" in apply.stdout + apply.stderr
-    assert "apply" not in tf_log.read_text(encoding="utf-8")
+    assert "exact trusted automation session" in apply.stdout + apply.stderr
+    assert not any(
+        command == "apply" or command.startswith("apply ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )

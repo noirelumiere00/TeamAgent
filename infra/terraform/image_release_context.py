@@ -25,6 +25,29 @@ EXPECTED_BACKEND = {
     "encrypt": True,
 }
 EXPECTED_WORKSPACE = "default"
+ALLOWED_EXISTING_LOG_IMPORTS = {
+    "aws_cloudwatch_log_group.codebuild_aiia_image_builder": (
+        "/aws/codebuild/teamagent-dev-aiia-image-builder"
+    ),
+    "aws_cloudwatch_log_group.codebuild_image": (
+        "/aws/codebuild/teamagent-dev-image-builder"
+    ),
+    "aws_cloudwatch_log_group.ecs_containerinsights_teamagent": (
+        "/aws/ecs/containerinsights/teamagent-dev/performance"
+    ),
+    "aws_cloudwatch_log_group.ecs_containerinsights_tiktok": (
+        "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance"
+    ),
+    "aws_cloudwatch_log_group.reminder_notify": (
+        "/aws/lambda/teamagent-dev-reminders-notify"
+    ),
+    "aws_cloudwatch_log_group.tiktok_dispatch": (
+        "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch"
+    ),
+    "aws_cloudwatch_log_group.x_dispatch": (
+        "/aws/lambda/teamagent-dev-x-buzz-dispatch"
+    ),
+}
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 INSTANCE_SELECTOR_RE = re.compile(r'\[(?:[0-9]+|"(?:[^"\\]|\\.)*")\]')
 
@@ -244,8 +267,21 @@ def build_context(
             label=f"Terraform resource change {address}",
         )
         importing = details.get("importing")
+        import_id = ""
         if importing is not None and importing is not False:
-            raise ContextError("image release plans cannot contain import operations")
+            import_contract = _mapping(
+                importing,
+                label=f"Terraform import operation {address}",
+            )
+            expected_import_id = ALLOWED_EXISTING_LOG_IMPORTS.get(address)
+            if (
+                set(import_contract) != {"id"}
+                or import_contract.get("id") != expected_import_id
+            ):
+                raise ContextError(
+                    "Terraform import is outside the exact existing-log allowlist"
+                )
+            import_id = str(expected_import_id)
         actions = details.get("actions")
         if (
             not isinstance(actions, list)
@@ -256,18 +292,26 @@ def build_context(
             )
         ):
             raise ContextError(f"Terraform actions are invalid for {address}")
+        if import_id and actions not in (["no-op"], ["update"]):
+            raise ContextError(
+                f"Terraform existing-log import action is destructive: {address}"
+            )
         in_state = address in state_addresses
         in_configuration = (
             address in configuration_addresses
             or _configuration_address(address) in configuration_addresses
         )
-        if not in_state and "create" not in actions:
+        if import_id and in_state:
+            raise ContextError(
+                f"Terraform import address is already owned by the bound state: {address}"
+            )
+        if not in_state and "create" not in actions and not import_id:
             raise ContextError(
                 f"Terraform change is not owned by the bound state: {address}"
             )
-        if "create" in actions and not in_configuration:
+        if ("create" in actions or import_id) and not in_configuration:
             raise ContextError(
-                f"Terraform create is not owned by the reviewed configuration: {address}"
+                f"Terraform create/import is not owned by the reviewed configuration: {address}"
             )
         ownership.append(
             {
@@ -275,6 +319,7 @@ def build_context(
                 "actions": actions,
                 "state_owned": in_state,
                 "configuration_owned": in_configuration,
+                "import_id": import_id,
             }
         )
     ownership.sort(key=lambda item: item["address"])

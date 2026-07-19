@@ -352,19 +352,19 @@ sha256_text() {
 
 aws_endpoint() {
   case "$1" in
-    s3api) printf 'https://s3.%s.amazonaws.com\n' "$REGION" ;;
-    cloudwatch) printf 'https://monitoring.%s.amazonaws.com\n' "$REGION" ;;
     apigatewayv2) printf 'https://apigateway.%s.amazonaws.com\n' "$REGION" ;;
     ecr) printf 'https://api.ecr.%s.amazonaws.com\n' "$REGION" ;;
     efs) printf 'https://elasticfilesystem.%s.amazonaws.com\n' "$REGION" ;;
     iam) printf 'https://iam.amazonaws.com\n' ;;
+    s3api) printf 'https://s3.%s.amazonaws.com\n' "$REGION" ;;
+    cloudwatch) printf 'https://monitoring.%s.amazonaws.com\n' "$REGION" ;;
     budgets) printf 'https://budgets.amazonaws.com\n' ;;
     ce) printf 'https://ce.us-east-1.amazonaws.com\n' ;;
     *)
       case "$1" in
-        sts|cloudtrail|bedrock|dynamodb|ecs|events|scheduler|lambda|\
+        sts|cloudtrail|bedrock|dynamodb|ec2|ecs|events|scheduler|lambda|\
         logs|chatbot|sns|sqs|kms|autoscaling|codestar-notifications|rds|\
-        ec2|secretsmanager)
+        secretsmanager)
           printf 'https://%s.%s.amazonaws.com\n' "$1" "$REGION"
           ;;
         *) die "AWS service endpointがallowlist外です: $1" ;;
@@ -1673,7 +1673,7 @@ capture_complete_runtime_inventory() {
   jq -e -S \
     --arg email_sha "$EXPECTED_ALARM_EMAIL_SHA256" \
     --arg destination_sha "$EXPECTED_ALARM_DESTINATION_STATE_SHA256" '
-    select(
+    if (
       .kind == "teamagent-runtime-inventory" and
       .schema_version == 1 and
       .raw_endpoint_utf8_sha256 == $email_sha and
@@ -1687,20 +1687,21 @@ capture_complete_runtime_inventory() {
       (.publisher_reference_set_sha256 | test("^[0-9a-f]{64}$")) and
       (.publishers_sha256 | test("^[0-9a-f]{64}$")) and
       (.inventory_sha256 | test("^[0-9a-f]{64}$"))
-    ) |
-    {
-      inventory_sha256,
-      destination_state_sha256,
-      subscription_metadata_sha256,
-      raw_endpoint_utf8_sha256,
-      raw_reference_set_sha256,
-      publisher_reference_set_sha256,
-      publishers_sha256,
-      publisher_coverage,
-      topic_inventory,
-      alarm_subscription_count
-    }
-    | del(.inventory_sha256)
+    ) then
+      {
+        destination_state_sha256: .destination_state_sha256,
+        subscription_metadata_sha256: .subscription_metadata_sha256,
+        raw_endpoint_utf8_sha256: .raw_endpoint_utf8_sha256,
+        raw_reference_set_sha256: .raw_reference_set_sha256,
+        publisher_reference_set_sha256: .publisher_reference_set_sha256,
+        publishers_sha256: .publishers_sha256,
+        publisher_coverage: .publisher_coverage,
+        topic_inventory: .topic_inventory,
+        alarm_subscription_count: .alarm_subscription_count
+      }
+    else
+      error("runtime inventory contract mismatch")
+    end
   ' "$raw" > "$stable" ||
     die "all-page runtime/SNS publisher inventoryがexact contractを満たしません"
   local stable_sha
@@ -3051,7 +3052,7 @@ snapshot_live() {
     raw_endpoint="$subscription_endpoint"
     [ "$subscription_protocol" != "email" ] ||
       [ "$raw_endpoint" = "$EXPECTED_ALARM_EMAIL" ] ||
-      die "SNS email endpointはapproved raw byte列とexact一致が必要です"
+      die "alarm delivery SNS email endpointはapproved raw byte列とexact一致が必要です"
     endpoint_sha="$(printf '%s' "$raw_endpoint" | sha256_text)"
     subscription_arn_sha="$(
       printf '%s' "$subscription_arn" | sha256_text
