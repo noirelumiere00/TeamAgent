@@ -89,6 +89,7 @@ def test_launcher_ignores_endpoint_overrides_and_uses_only_fixed_resources() -> 
         'ACCOUNT_ID="718959508629"',
         'APP_BUCKET="teamagent-dev-raw-files"',
         'APP_KEY="codebuild/connect-web-app.html"',
+        'BAKED_APP_KEY="codebuild/baked-fallback/connect-web-app.html"',
         'SOURCE_PUBLISHER_PROJECT="teamagent-dev-mcp-source-publisher"',
         'IMAGE_PROJECT="teamagent-dev-image-builder"',
         'ATTESTOR_PROJECT="teamagent-dev-image-attestor"',
@@ -119,6 +120,7 @@ def test_launcher_binds_current_canonical_app_and_signed_source_versions() -> No
         assert marker in body
     assert '--version-id "$APP_VERSION_ID"' in body
     assert '--version-id "$BAKED_APP_HTML_VERSION_ID"' in body
+    assert '--key "$BAKED_APP_KEY"' in body
     assert '--expected-bucket-owner "$ACCOUNT_ID"' in body
     for name in (
         "SOURCE_ARCHIVE_VERSION_ID",

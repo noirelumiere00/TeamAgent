@@ -3,7 +3,7 @@
   "kind": "teamagent.core-media-release-contract",
   "release": {
     "ready": false,
-    "blocked_reason": "NO-GO: verify-source-interface still rejects ARG GIT_COMMIT=unknown and ARG GIT_BRANCH=unknown in both checked-in Dockerfiles; app_html.baked_fallback.s3_version_id is unrecorded for the approved SHA-256 716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb; and signed C0/H0 runtime evidence has not been supplied. Keep release.ready=false until those exact automated gates pass."
+    "blocked_reason": "NO-GO: signed final-HEAD C0/H0 runtime evidence has not been supplied. Keep release.ready=false until the exact automated build, scan, signature, rollout, and forced-rollback gates pass."
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
@@ -19,7 +19,8 @@
       "build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
     },
     "baked_fallback": {
-      "s3_version_id": null,
+      "key": "codebuild/baked-fallback/connect-web-app.html",
+      "s3_version_id": "SK9M.FDQAqiuh6gw2BmqSXQ4ARlPI4ur",
       "sha256": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
     }
   },

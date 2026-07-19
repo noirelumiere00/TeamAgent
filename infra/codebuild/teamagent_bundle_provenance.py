@@ -243,7 +243,15 @@ def load_contract(path: Path) -> dict[str, Any]:
     for key in PRODUCTION_KEYS - {"app_html_s3_version_id"}:
         _sha256(production[key], label=f"contract {key}")
     fallback = _mapping(app_html["baked_fallback"], label="contract baked fallback")
-    _exact_keys(fallback, {"s3_version_id", "sha256"}, label="contract baked fallback")
+    _exact_keys(
+        fallback,
+        {"key", "s3_version_id", "sha256"},
+        label="contract baked fallback",
+    )
+    if fallback["key"] != "codebuild/baked-fallback/connect-web-app.html":
+        raise ProvenanceError("baked fallback S3 key is not fixed")
+    if fallback["key"] == app_html["key"]:
+        raise ProvenanceError("baked fallback must not share the live application key")
     _sha256(fallback["sha256"], label="baked fallback SHA-256")
     if fallback["s3_version_id"] is not None:
         _version_id(fallback["s3_version_id"], label="baked fallback VersionId")

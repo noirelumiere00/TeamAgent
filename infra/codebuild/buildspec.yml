@@ -98,6 +98,10 @@ phases:
           || { echo "FATAL: baked fallback VersionId differs from the release contract"; exit 1; }
         [ "$(jq -er '.app_html.baked_fallback.sha256' "$RELEASE_CONTRACT")" = "$BAKED_APP_HTML_SHA256" ] \
           || { echo "FATAL: baked fallback SHA-256 differs from the release contract"; exit 1; }
+        BAKED_APP_HTML_KEY="$(jq -er '.app_html.baked_fallback.key' "$RELEASE_CONTRACT")"
+        [ "$BAKED_APP_HTML_KEY" = "codebuild/baked-fallback/connect-web-app.html" ] \
+          || { echo "FATAL: baked fallback key differs from the fixed release location"; exit 1; }
+        readonly BAKED_APP_HTML_KEY
         python3 "$BUNDLE_PROVENANCE" assert-release-ready --contract "$RELEASE_CONTRACT"
 
         mapfile -t production_record < <(
@@ -236,7 +240,7 @@ phases:
           aws s3api get-object \
             --region "$EXPECTED_REGION" \
             --bucket teamagent-dev-raw-files \
-            --key codebuild/connect-web-app.html \
+            --key "$BAKED_APP_HTML_KEY" \
             --version-id "$BAKED_APP_HTML_VERSION_ID" \
             --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
             --query VersionId \

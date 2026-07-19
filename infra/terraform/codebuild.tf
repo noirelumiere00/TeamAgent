@@ -375,6 +375,7 @@ data "aws_iam_policy_document" "codebuild" {
     resources = [
       "${aws_s3_bucket.raw_files.arn}/codebuild/source.zip",
       "${aws_s3_bucket.raw_files.arn}/codebuild/connect-web-app.html",
+      "${aws_s3_bucket.raw_files.arn}/codebuild/baked-fallback/connect-web-app.html",
       "${aws_s3_bucket.image_release_evidence.arn}/source-declarations/mcp/*",
       "${aws_s3_bucket.image_release_evidence.arn}/source-contexts/mcp/*",
     ]
@@ -569,9 +570,12 @@ data "aws_iam_policy_document" "codebuild_launcher" {
     resources = ["*"]
   }
   statement {
-    sid       = "ReadVersionedBuildInputs"
-    actions   = ["s3:GetObject", "s3:GetObjectVersion"]
-    resources = ["arn:aws:s3:::teamagent-dev-raw-files/codebuild/connect-web-app.html"]
+    sid     = "ReadVersionedBuildInputs"
+    actions = ["s3:GetObject", "s3:GetObjectVersion"]
+    resources = [
+      "arn:aws:s3:::teamagent-dev-raw-files/codebuild/connect-web-app.html",
+      "arn:aws:s3:::teamagent-dev-raw-files/codebuild/baked-fallback/connect-web-app.html",
+    ]
   }
   statement {
     sid       = "CheckBuildInputVersioning"
@@ -2182,14 +2186,20 @@ data "aws_iam_policy_document" "mcp_source_publisher" {
     resources = [aws_codestarconnections_connection.openclaw_codebuild.arn]
   }
   statement {
-    sid = "ReadPinnedAppAndPublishExactSource"
+    sid = "ReadPinnedAppInputs"
     actions = [
       "s3:GetObject",
       "s3:GetObjectVersion",
-      "s3:PutObject",
     ]
     resources = [
       "${aws_s3_bucket.raw_files.arn}/codebuild/connect-web-app.html",
+      "${aws_s3_bucket.raw_files.arn}/codebuild/baked-fallback/connect-web-app.html",
+    ]
+  }
+  statement {
+    sid     = "PublishExactSource"
+    actions = ["s3:PutObject"]
+    resources = [
       "${aws_s3_bucket.raw_files.arn}/codebuild/source.zip",
     ]
   }

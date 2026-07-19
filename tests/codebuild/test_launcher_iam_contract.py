@@ -121,6 +121,26 @@ def test_start_build_environment_is_allowlisted_and_fixed_values_are_pinned() ->
     assert ("APP_PROVENANCE_SHA256           = local.canonical_app_provenance_sha256") in body
 
 
+def test_source_publisher_can_read_both_app_inputs_but_only_write_source_zip() -> None:
+    policy = _document("mcp_source_publisher")
+
+    read = policy.split('sid = "ReadPinnedAppInputs"', maxsplit=1)[1].split(
+        "\n  statement {", maxsplit=1
+    )[0]
+    assert '"s3:GetObject"' in read
+    assert '"s3:GetObjectVersion"' in read
+    assert '"s3:PutObject"' not in read
+    assert "/codebuild/connect-web-app.html" in read
+    assert "/codebuild/baked-fallback/connect-web-app.html" in read
+
+    publish = policy.split('sid     = "PublishExactSource"', maxsplit=1)[1].split(
+        "\n  statement {", maxsplit=1
+    )[0]
+    assert 'actions = ["s3:PutObject"]' in publish
+    assert "/codebuild/source.zip" in publish
+    assert "connect-web-app.html" not in publish
+
+
 def test_official_dangerous_override_condition_keys_are_explicit_denies() -> None:
     body = _body()
     policy = _document("codebuild_launcher")

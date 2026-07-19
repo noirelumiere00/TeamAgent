@@ -71,15 +71,21 @@ def test_current_release_blockers_are_exactly_observable_in_checked_in_inputs() 
     contract = PROVENANCE.load_contract(CONTRACT_PATH)
 
     assert contract["release"]["ready"] is False
-    assert contract["app_html"]["baked_fallback"]["s3_version_id"] is None
+    assert contract["app_html"]["baked_fallback"] == {
+        "key": "codebuild/baked-fallback/connect-web-app.html",
+        "s3_version_id": "SK9M.FDQAqiuh6gw2BmqSXQ4ARlPI4ur",
+        "sha256": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb",
+    }
     assert (
-        "signed C0/H0 runtime evidence has not been supplied"
+        "signed final-HEAD C0/H0 runtime evidence has not been supplied"
         in (contract["release"]["blocked_reason"])
     )
     for subject in contract["subjects"]:
         dockerfile = (ROOT / subject["dockerfile"]).read_text(encoding="utf-8")
-        assert "ARG GIT_COMMIT=unknown" in dockerfile
-        assert "ARG GIT_BRANCH=unknown" in dockerfile
+        assert "ARG GIT_COMMIT\n" in dockerfile
+        assert "ARG GIT_BRANCH\n" in dockerfile
+        assert "ARG GIT_COMMIT=" not in dockerfile
+        assert "ARG GIT_BRANCH=" not in dockerfile
 
 
 def test_release_contract_is_satisfiable_when_all_declared_gates_are_proven(

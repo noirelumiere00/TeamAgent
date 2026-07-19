@@ -16,6 +16,7 @@ EXPECTED_HEAD_REF="refs/heads/dev"
 EXPECTED_BASE_REF="refs/heads/main"
 APP_BUCKET="teamagent-dev-raw-files"
 APP_KEY="codebuild/connect-web-app.html"
+BAKED_APP_KEY="codebuild/baked-fallback/connect-web-app.html"
 EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
 SOURCE_PUBLISHER_PROJECT="teamagent-dev-mcp-source-publisher"
 IMAGE_PROJECT="teamagent-dev-image-builder"
@@ -162,6 +163,8 @@ BAKED_APP_HTML_VERSION_ID="$(
 BAKED_APP_HTML_SHA256="$(
   jq -er '.app_html.baked_fallback.sha256' "$RELEASE_CONTRACT"
 )"
+[ "$(jq -er '.app_html.baked_fallback.key' "$RELEASE_CONTRACT")" = "$BAKED_APP_KEY" ] \
+  || die "release contract baked fallback key differs from the fixed location"
 APP_PROVENANCE_SHA256="$(
   python3 "$BUNDLE_PROVENANCE" app-provenance-sha256 \
     --contract "$RELEASE_CONTRACT" \
@@ -282,7 +285,7 @@ DOWNLOADED_FALLBACK_VERSION="$(
   AWS_PAGER="" aws s3api get-object \
     --region "$REGION" \
     --bucket "$APP_BUCKET" \
-    --key "$APP_KEY" \
+    --key "$BAKED_APP_KEY" \
     --version-id "$BAKED_APP_HTML_VERSION_ID" \
     --expected-bucket-owner "$ACCOUNT_ID" \
     --query VersionId \
