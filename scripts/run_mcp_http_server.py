@@ -41,6 +41,11 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
+from teamagent.hmac_durable_state import require_runtime_startup
+from teamagent.hmac_keyring import (
+    MAIL_ACTION_MAX_TOKEN_TTL_S,
+    REPORT_LINK_MAX_TOKEN_TTL_S,
+)
 from teamagent.mcp_gateway.server import build_production_server
 
 logger = structlog.get_logger(__name__)
@@ -106,6 +111,12 @@ def main() -> None:
     from teamagent.observability.logging_config import configure_logging
 
     configure_logging()
+    require_runtime_startup(
+        (
+            ("mail_action", MAIL_ACTION_MAX_TOKEN_TTL_S),
+            ("report_link", REPORT_LINK_MAX_TOKEN_TTL_S),
+        )
+    )
 
     bearer = os.environ.get("TEAMAGENT_MCP_BEARER")
     if not bearer:

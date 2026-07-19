@@ -148,6 +148,16 @@ resource "aws_iam_role_policy" "ecs_execution_morning_digest_secrets" {
 data "aws_iam_policy_document" "morning_digest_task" {
   count = var.enable_morning_digest ? 1 : 0
   statement {
+    sid       = "HmacStateRuntime"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
+  }
+  statement {
     sid       = "KmsDecryptForOauthTokens"
     actions   = ["kms:Decrypt"]
     resources = [data.aws_kms_alias.oauth_tokens.target_key_arn]
@@ -218,6 +228,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
   depends_on = [
     terraform_data.runtime_guard,
     terraform_data.production_image_release_gate,
+    terraform_data.hmac_live_task_gate["morning_digest"],
   ]
 
   volume {
@@ -273,7 +284,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "REMINDER_SCHEDULER_GROUP", value = var.enable_reminders ? aws_scheduler_schedule_group.reminders[0].name : "" },
       { name = "REMINDER_QUEUE_ARN", value = var.enable_reminders ? aws_sqs_queue.reminders[0].arn : "" },
       { name = "REMINDER_SCHEDULER_ROLE_ARN", value = var.enable_reminders ? aws_iam_role.reminder_scheduler[0].arn : "" },
-    ], local.hmac_morning_environment)
+    ], local.mail_action_hmac_environment, local.morning_digest_hmac_runtime_environment)
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
@@ -284,7 +295,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # connect-web / fargate と同じ connect_google_client_secret を使う。欠落すると mail/calendar
       # 収集が build_user_credentials で失敗し全 0 件になる（2026-06-25 回帰）。
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
-    ], local.hmac_morning_secrets)
+    ], local.mail_action_hmac_secrets)
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -298,6 +309,14 @@ resource "aws_ecs_task_definition" "morning_digest" {
 
   lifecycle {
     create_before_destroy = true
+
+    precondition {
+      condition = (
+        (var.hmac_gate_mode == "rollback" && local.hmac_live_gate_enabled.morning_digest)
+        || local.mail_action_hmac_transition_valid
+      )
+      error_message = "HMAC rollout preflight failed for morning-digest; direct/targeted task-definition apply is blocked."
+    }
   }
 }
 
@@ -416,7 +435,7 @@ resource "aws_cloudwatch_event_target" "morning_digest_run_task" {
 # ---------- Outputs ----------
 output "morning_digest_task_definition_arn" {
   description = "morning_digest Scheduled Task の TaskDefinition ARN（手動 run-task 検証用）"
-  value       = var.enable_morning_digest && var.mcp_image != "" ? aws_ecs_task_definition.morning_digest[0].arn : ""
+  value       = var.enable_morning_digest && var.mcp_image != "" ? local.hmac_promoted_task_definition_arns.morning_digest : ""
 }
 
 output "morning_digest_log_group" {

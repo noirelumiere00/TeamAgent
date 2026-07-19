@@ -298,6 +298,16 @@ resource "aws_iam_role_policy" "openclaw_task" {
 # --- MCP タスクロール: 対象Secret / KMS decrypt / Bedrock / rds connect ---
 data "aws_iam_policy_document" "mcp_task" {
   statement {
+    sid       = "HmacStateRuntime"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
+  }
+  statement {
     sid     = "ReadTargetSecrets"
     actions = ["secretsmanager:GetSecretValue"]
     # §J: wildcard をやめ MCP が runtime に必要な secret に限定（Slack tokens 等は対象外）。
@@ -446,6 +456,7 @@ resource "aws_ecs_task_definition" "mcp" {
   depends_on = [
     terraform_data.runtime_guard,
     terraform_data.production_image_release_gate,
+    terraform_data.hmac_live_task_gate["mcp"],
   ]
 
   volume {
@@ -568,7 +579,7 @@ resource "aws_ecs_task_definition" "mcp" {
       # ナレッジ回答の末尾に「資料リンク」を付与（@AiLa=openclaw が markdown を装飾リンクへ
       # 変換する mcp のみ ON。connect-web(/app) は未設定＝生テキスト化しないため付けない）。
       { name = "SEARCH_ANSWER_SOURCE_LINKS", value = "1" },
-      ], local.hmac_mcp_environment, local.media_enabled == 1 ? [
+      ], local.mail_action_hmac_environment, local.report_link_hmac_environment, local.mcp_hmac_runtime_environment, local.media_enabled == 1 ? [
       # Generic media delegation.  Legacy TIKTOK_* aliases point at the same
       # queue/table/bucket so the existing skill schema remains compatible.
       { name = "USE_TIKTOK_ACQUIRE", value = "1" },
@@ -638,7 +649,7 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "GOOGLE_CLIENT_ID", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:client_id::" },
       { name = "GOOGLE_CLIENT_SECRET", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:client_secret::" },
       { name = "GOOGLE_OAUTH_REFRESH_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.google_oauth[0].arn}:refresh_token::" },
-      ], local.hmac_mcp_secrets, var.enable_scrape_tools ? [
+      ], local.mail_action_hmac_secrets, local.report_link_hmac_secrets, var.enable_scrape_tools ? [
       { name = "VERTEX_SA_JSON", valueFrom = data.aws_secretsmanager_secret.vertex_sa[0].arn },
       ] : [], (var.enable_x_research && var.tiktok_apify_secret_arn != "") ? [
       # カタログ①〜⑤: Apify トークン（tiktok/apify-token を共用＝新設しない・計画裁定）。
@@ -673,6 +684,17 @@ resource "aws_ecs_task_definition" "mcp" {
     precondition {
       condition     = local.runtime_guard_verified
       error_message = local.runtime_guard_error
+    }
+
+    precondition {
+      condition = (
+        (var.hmac_gate_mode == "rollback" && local.hmac_live_gate_enabled.mcp)
+        || (
+          local.mail_action_hmac_transition_valid
+          && local.report_link_hmac_transition_valid
+        )
+      )
+      error_message = "HMAC rollout preflight failed for MCP; direct/targeted task-definition apply is blocked."
     }
   }
 }
@@ -798,7 +820,7 @@ resource "aws_ecs_service" "mcp" {
   count           = var.mcp_image == "" ? 0 : 1
   name            = "${var.project_name}-${var.environment}-mcp"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.mcp.arn
+  task_definition = local.hmac_promoted_task_definition_arns.mcp
   desired_count   = 1
   launch_type     = "FARGATE"
 
@@ -809,8 +831,10 @@ resource "aws_ecs_service" "mcp" {
     rollback = true
   }
 
-  depends_on = [terraform_data.runtime_guard]
-
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.hmac_mcp_pre_update,
+  ]
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.mcp.id]
@@ -826,6 +850,14 @@ resource "aws_ecs_service" "mcp" {
     precondition {
       condition     = local.runtime_guard_verified
       error_message = local.runtime_guard_error
+    }
+
+    precondition {
+      condition = (
+        var.hmac_gate_mode != "rollback"
+        || local.hmac_live_gate_enabled.mcp
+      )
+      error_message = "Exact rollback control, manifest, and live promotion gate are required before changing the MCP service."
     }
   }
 }

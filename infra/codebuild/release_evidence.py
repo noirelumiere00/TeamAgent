@@ -1952,6 +1952,9 @@ def deployment_plan_metadata(
         plan_sha256 = hashlib.sha256(plan_path.read_bytes()).hexdigest()
     except OSError as exc:
         raise EvidenceError("saved Terraform plan cannot be read") from exc
+    expected_plan_sha256 = os.environ.get("TEAMAGENT_SAVED_PLAN_SHA256")
+    if expected_plan_sha256 is not None and plan_sha256 != expected_plan_sha256:
+        raise EvidenceError("saved Terraform plan differs from its staged digest")
     plan = plan_json or _terraform_show_plan(plan_path)
     if plan.get("complete") is not True:
         raise EvidenceError("saved Terraform plan is incomplete")

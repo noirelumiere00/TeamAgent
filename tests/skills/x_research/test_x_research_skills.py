@@ -848,7 +848,7 @@ def test_publish_html_short_url_and_fallback(monkeypatch) -> None:
         lambda path, **kw: PublishedObject(url=presigned, bucket=bucket, key=key),
     )
     monkeypatch.setenv("VSEO_REPORT_BUCKET", bucket)
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "sekret-xyz")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", "report-x-research-secret-" + "r" * 32)
     monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.newstv.co.jp/")
     skill = XVoiceSearchSkill(publisher=None)
 
@@ -868,11 +868,11 @@ def test_publish_html_short_url_and_fallback(monkeypatch) -> None:
 
     # フラグ ON でも 署名鍵欠如 → presigned（鍵不一致による全件404を回避）
     monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
-    monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET", raising=False)
+    monkeypatch.delenv("REPORT_LINK_HMAC_SECRET", raising=False)
     assert run() == presigned
 
     # フラグ ON・鍵あり でも CONNECT_BASE_URL 未設定 → presigned
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "sekret-xyz")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", "report-x-research-secret-" + "r" * 32)
     monkeypatch.delenv("CONNECT_BASE_URL", raising=False)
     assert run() == presigned
 

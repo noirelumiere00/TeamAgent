@@ -276,10 +276,12 @@ def test_every_discovered_ecs_task_definition_depends_on_release_gate() -> None:
             address = f"{relative}:aws_ecs_task_definition.{match.group(1)}"
             block = _hcl_block(body, match.start(2))
             assert "container_definitions" in block, address
-            assert "terraform_data.production_image_release_gate" in block, (
+            dependencies = re.search(r"depends_on\s*=\s*\[(.*?)\]", block, re.DOTALL)
+            assert dependencies, f"{address} has no explicit release-gate dependency"
+            assert "terraform_data.production_image_release_gate" in dependencies.group(1), (
                 f"{address} can bypass the production image release gate"
             )
-            assert "terraform_data.runtime_guard" in block, (
+            assert "terraform_data.runtime_guard" in dependencies.group(1), (
                 f"{address} can bypass the runtime guard"
             )
             discovered[address] = block

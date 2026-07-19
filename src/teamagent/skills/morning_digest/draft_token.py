@@ -4,27 +4,36 @@
 `thread_id + 所有者ハッシュ + 失効時刻` を HMAC 署名し base64url 化する。
 Fargate（digest 描画）が encode、worker（押下処理）が decode する。両者で同じ鍵を使う。
 
-鍵は env `MAIL_ACTION_HMAC_SECRET`、無ければ `SLACK_BOT_TOKEN` を流用する
-（Fargate / worker のどちらも SLACK_BOT_TOKEN を保持しているため追加インフラ不要）。
-鍵が一切無い環境では fail-closed（decode が常に None ＝ ボタンは機能しない）。
+新規署名は専用主鍵 ``MAIL_ACTION_HMAC_SECRET`` だけを使う。移行前 token は
+``MAIL_ACTION_HMAC_PREVIOUS_SECRET`` と固定した ``..._PREVIOUS_ROTATION_STARTED_AT`` を設定した
+上で ``MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY=1`` とした verifier-first 移行期間だけ検証する。
+旧workerのSlack fallback署名は、同じ固定期限内の
+``MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET`` でversion 1検証だけを行う。
+新規tokenは目的分離したversion 2である。``MAIL_ACTION_TTL_S`` は未設定時24h、設定時は ASCII
+10進数の1..24hのみ。TTL設定不正や明示TTLの範囲外では encode は None を返し、呼出元はボタンを
+発行しない。鍵設定不正・token形式不正なら decode は常に None。``SLACK_BOT_TOKEN`` /
+``DATABASE_URL`` への fallback は一切しない。
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import json
-import os
-import time
 
-_DEFAULT_TTL_S = 60 * 60 * 24  # 24h（朝の DM をその日のうちに押せれば十分）
+from teamagent.hmac_keyring import (
+    HMAC_PURPOSE_MAIL_DRAFT,
+    add_token_ttl,
+    coerce_epoch_seconds,
+    load_mail_action_hmac_keyring,
+    load_mail_action_token_ttl_s,
+    validate_epoch_seconds,
+)
+
 _SIG_LEN = 16  # HMAC-SHA256 の先頭 16 バイトで十分（トークンを短く保つ）
-
-
-def _secret() -> bytes:
-    s = os.environ.get("MAIL_ACTION_HMAC_SECRET") or os.environ.get("SLACK_BOT_TOKEN") or ""
-    return s.encode("utf-8")
+_TOKEN_VERSION = 2
+_TOKEN_TYPE = "draft"
+_LEGACY_FIELDS = frozenset({"t", "o", "e"})
 
 
 def _owner_hash(owner_email: str) -> str:
@@ -41,19 +50,51 @@ def _b64d(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
+def mail_action_hmac_configured() -> bool:
+    """新規メール action token を発行できる有効な keyring とTTLがあるか。"""
+    try:
+        return (
+            load_mail_action_hmac_keyring() is not None
+            and load_mail_action_token_ttl_s() is not None
+        )
+    except Exception:
+        return False
+
+
+def has_secret() -> bool:
+    """後方互換名。判定対象は専用 MAIL_ACTION keyring のみ。"""
+    return mail_action_hmac_configured()
+
+
 def encode_draft_token(
     thread_id: str,
     owner_email: str,
     *,
     now: int | None = None,
-    ttl_s: int = _DEFAULT_TTL_S,
-) -> str:
+    ttl_s: int | None = None,
+) -> str | None:
     """thread_id を所有者・失効付きで HMAC 署名し、Slack button value 用文字列にする。"""
-    issued = int(now if now is not None else time.time())
-    payload = {"t": str(thread_id), "o": _owner_hash(owner_email), "e": issued + int(ttl_s)}
-    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    sig = hmac.new(_secret(), raw, hashlib.sha256).digest()[:_SIG_LEN]
-    return _b64e(raw) + "." + _b64e(sig)
+    try:
+        issued = coerce_epoch_seconds(now)
+        ttl = load_mail_action_token_ttl_s(explicit_ttl_s=ttl_s)
+        if issued is None or ttl is None:
+            return None
+        expires = add_token_ttl(issued, ttl)
+        keyring = load_mail_action_hmac_keyring(now=issued)
+        if expires is None or keyring is None:
+            return None
+        payload = {
+            "v": _TOKEN_VERSION,
+            "typ": _TOKEN_TYPE,
+            "t": str(thread_id),
+            "o": _owner_hash(owner_email),
+            "e": expires,
+        }
+        raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        sig = keyring.sign(raw, purpose=HMAC_PURPOSE_MAIL_DRAFT, digest_bytes=_SIG_LEN)
+        return _b64e(raw) + "." + _b64e(sig)
+    except Exception:
+        return None
 
 
 def decode_draft_token(token: str, owner_email: str, *, now: int | None = None) -> str | None:
@@ -61,22 +102,41 @@ def decode_draft_token(token: str, owner_email: str, *, now: int | None = None) 
 
     鍵未設定や形式不正も None。owner_email は押下した Slack ユーザーから解決した本人 email。
     """
-    secret = _secret()
-    if not secret:
-        return None  # 鍵が無ければ何も信用しない
+    cur = coerce_epoch_seconds(now)
+    if cur is None:
+        return None
+    keyring = load_mail_action_hmac_keyring(now=cur)
+    if keyring is None:
+        return None  # 鍵が無い/設定不正なら何も信用しない
     try:
         body_b64, sig_b64 = (token or "").split(".", 1)
         raw = _b64d(body_b64)
-        expected = hmac.new(secret, raw, hashlib.sha256).digest()[:_SIG_LEN]
-        if not hmac.compare_digest(expected, _b64d(sig_b64)):
-            return None
+        signature = _b64d(sig_b64)
         payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("v") == _TOKEN_VERSION and payload.get("typ") == _TOKEN_TYPE:
+            if not keyring.verify(
+                raw,
+                signature,
+                purpose=HMAC_PURPOSE_MAIL_DRAFT,
+                digest_bytes=_SIG_LEN,
+            ):
+                return None
+        elif "v" not in payload and "typ" not in payload and set(payload) == _LEGACY_FIELDS:
+            if not keyring.verify_legacy_previous(raw, signature, digest_bytes=_SIG_LEN):
+                return None
+        else:
+            return None
+        expires = validate_epoch_seconds(payload.get("e"))
     except Exception:
         return None
-    cur = int(now if now is not None else time.time())
-    if int(payload.get("e", 0)) < cur:
+    if expires is None or expires <= cur:
         return None  # 失効
-    if payload.get("o") != _owner_hash(owner_email):
-        return None  # 押下者と所有者が不一致
-    tid = str(payload.get("t", ""))
-    return tid or None
+    try:
+        if payload.get("o") != _owner_hash(owner_email):
+            return None  # 押下者と所有者が不一致
+        tid = str(payload.get("t", ""))
+        return tid or None
+    except Exception:
+        return None

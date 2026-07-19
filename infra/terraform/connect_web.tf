@@ -209,7 +209,7 @@ data "aws_iam_policy_document" "ecs_execution_connect_web_secrets" {
       data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn,
       data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn,
       data.aws_secretsmanager_secret.database_url.arn,
-    ], local.hmac_secret_iam_arns)
+    ], local.hmac_report_secret_iam_arns)
   }
 }
 
@@ -226,6 +226,16 @@ resource "aws_iam_role_policy" "ecs_execution_connect_web_secrets" {
 # プロセス内で実行するため Bedrock 権限を追加する（旧コメントの「Bedrock は不要」は P4 で失効）。
 data "aws_iam_policy_document" "connect_web_task" {
   count = var.enable_connect_web ? 1 : 0
+  statement {
+    sid       = "HmacStateRuntime"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
+  }
   statement {
     sid     = "KmsEncryptDecryptOauthTokens"
     actions = ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey"]
@@ -383,6 +393,7 @@ resource "aws_ecs_task_definition" "connect_web" {
   depends_on = [
     terraform_data.runtime_guard,
     terraform_data.production_image_release_gate,
+    terraform_data.hmac_live_task_gate["connect_web"],
   ]
 
   volume {
@@ -481,7 +492,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "USE_QUERY_PLANNER", value = "false" },
       # ナレッジフィルタ UI（種別/期間などの絞り込み）。
       { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
-    ], local.hmac_connect_environment)
+    ], local.report_link_hmac_environment, local.connect_web_hmac_runtime_environment)
     secrets = concat([
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
@@ -489,7 +500,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "CONNECT_SLACK_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn },
       { name = "SLACK_OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-    ], local.hmac_connect_secrets)
+    ], local.report_link_hmac_secrets)
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -514,6 +525,14 @@ resource "aws_ecs_task_definition" "connect_web" {
       condition     = local.runtime_guard_verified
       error_message = local.runtime_guard_error
     }
+
+    precondition {
+      condition = (
+        (var.hmac_gate_mode == "rollback" && local.hmac_live_gate_enabled.connect_web)
+        || local.report_link_hmac_transition_valid
+      )
+      error_message = "HMAC rollout preflight failed for connect-web; direct/targeted task-definition apply is blocked."
+    }
   }
 }
 
@@ -522,7 +541,7 @@ resource "aws_ecs_service" "connect_web" {
   count           = var.enable_connect_web && var.mcp_image != "" ? 1 : 0
   name            = "${var.project_name}-${var.environment}-connect-web"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.connect_web[0].arn
+  task_definition = local.hmac_promoted_task_definition_arns.connect_web
   desired_count   = 1
   launch_type     = "FARGATE"
 
@@ -556,6 +575,7 @@ resource "aws_ecs_service" "connect_web" {
   depends_on = [
     aws_lb_target_group.connect_web_fargate,
     terraform_data.runtime_guard,
+    terraform_data.hmac_connect_web_pre_update,
   ]
 
   lifecycle {
@@ -564,6 +584,14 @@ resource "aws_ecs_service" "connect_web" {
     precondition {
       condition     = local.runtime_guard_verified
       error_message = local.runtime_guard_error
+    }
+
+    precondition {
+      condition = (
+        var.hmac_gate_mode != "rollback"
+        || local.hmac_live_gate_enabled.connect_web
+      )
+      error_message = "Exact rollback control, manifest, and live promotion gate are required before changing the connect-web service."
     }
   }
 }

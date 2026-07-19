@@ -22,11 +22,24 @@ _OBJ = PublishedObject(
     key="vseo-reports/x.html",
     region="ap-northeast-1",
 )
+_REPORT_SECRET = "report-delivery-secret-" + "r" * 32
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for k in ("USE_REPORT_SHORTURL", "MAIL_ACTION_HMAC_SECRET", "CONNECT_BASE_URL"):
+    for k in (
+        "USE_REPORT_SHORTURL",
+        "REPORT_LINK_HMAC_SECRET",
+        "REPORT_LINK_HMAC_PREVIOUS_SECRET",
+        "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+        "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY",
+        "REPORT_LINK_HMAC_PRIMARY_GENERATION",
+        "REPORT_LINK_HMAC_PREVIOUS_GENERATION",
+        "REPORT_LINK_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
+        "REPORT_LINK_TTL_S",
+        "MAIL_ACTION_HMAC_SECRET",
+        "CONNECT_BASE_URL",
+    ):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -43,7 +56,7 @@ def test_flag_off_returns_presigned_silently() -> None:
 
 
 def test_flag_on_without_secret_warns_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    """本命: フラグONでも鍵(MAIL_ACTION_HMAC_SECRET)が無ければ presigned へ。
+    """本命: フラグONでも専用鍵(REPORT_LINK_HMAC_SECRET)が無ければ presigned へ。
 
     ただし**黙って落ちない**＝欠けた前提を名指しで warning する。これが無いと terraform apply
     忘れ（＝鍵未注入）に気づけず「ONにしたのに直らない」が延々続く。
@@ -55,13 +68,27 @@ def test_flag_on_without_secret_warns_and_falls_back(monkeypatch: pytest.MonkeyP
     warns = _prereq_warnings(logs)
     assert len(warns) == 1
     assert warns[0]["log_level"] == "warning"
-    assert "MAIL_ACTION_HMAC_SECRET" in warns[0]["missing"]  # 何が足りないかを名指し
+    assert "REPORT_LINK_HMAC_CONFIG" in warns[0]["missing"]  # 何が足りないかを名指し
+
+
+def test_invalid_secret_value_is_never_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy_db = "postgresql://teamagent:do-not-log@db.internal:5432/teamagent"
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", legacy_db)
+    monkeypatch.setenv("DATABASE_URL", legacy_db)
+    with capture_logs() as logs:
+        assert delivery_url(_OBJ, request_id="r-secret") == _OBJ.url
+    rendered = repr(logs)
+    assert legacy_db not in rendered
+    assert "do-not-log" not in rendered
+    assert "REPORT_LINK_HMAC_CONFIG" in _prereq_warnings(logs)[0]["missing"]
 
 
 def test_flag_on_without_base_url_warns(monkeypatch: pytest.MonkeyPatch) -> None:
     """CONNECT_BASE_URL 未設定も同様に名指しで警告して presigned へ。"""
     monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "s3cret")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
     with capture_logs() as logs:
         assert delivery_url(_OBJ, request_id="r1") == _OBJ.url
     assert "CONNECT_BASE_URL" in _prereq_warnings(logs)[0]["missing"]
@@ -70,7 +97,7 @@ def test_flag_on_without_base_url_warns(monkeypatch: pytest.MonkeyPatch) -> None
 def test_flag_on_disallowed_key_warns(monkeypatch: pytest.MonkeyPatch) -> None:
     """allowlist 外 prefix はトークンを出すと 404 になるので発行せず警告して presigned へ。"""
     monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "s3cret")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
     monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
     bad = PublishedObject(url=_OBJ.url, bucket="b", key="secrets/x.html", region="ap-northeast-1")
     with capture_logs() as logs:
@@ -84,13 +111,13 @@ def test_missing_prereqs_are_all_listed(monkeypatch: pytest.MonkeyPatch) -> None
     with capture_logs() as logs:
         delivery_url(_OBJ, request_id="r1")
     missing = _prereq_warnings(logs)[0]["missing"]
-    assert "CONNECT_BASE_URL" in missing and "MAIL_ACTION_HMAC_SECRET" in missing
+    assert "CONNECT_BASE_URL" in missing and "REPORT_LINK_HMAC_CONFIG" in missing
 
 
 def test_all_prereqs_met_returns_short_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """全条件充足＝クエリ無しの /r/<token>。これが openclaw に壊されない形。"""
     monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "s3cret")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
     monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
     url = delivery_url(_OBJ, request_id="r1")
     assert url.startswith("https://connect.example/r/")
@@ -157,7 +184,7 @@ def test_report_skills_emit_short_url_when_prereqs_met(
     ここは文字列 grep ではなく実経路を走らせて固定する。
     """
     monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "s3cret")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
     monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
     fn = dict(_report_skills())[name]
     url = fn("<html></html>", request_id="r1", query="q")
@@ -172,7 +199,7 @@ def test_encode_failure_falls_back_to_presigned(monkeypatch: pytest.MonkeyPatch)
         raise RuntimeError("boom")
 
     monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "s3cret")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
     monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
     monkeypatch.setattr("teamagent.adapters.report_link_token.encode_report_token", _boom)
     with capture_logs() as logs:
@@ -180,10 +207,34 @@ def test_encode_failure_falls_back_to_presigned(monkeypatch: pytest.MonkeyPatch)
     assert any(e["event"] == "report_short_url_encode_failed" for e in logs)
 
 
+def test_encode_none_falls_back_to_presigned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A contained issuance failure returns None and must never produce a literal /r/None URL."""
+
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
+    monkeypatch.setattr(
+        "teamagent.adapters.report_link_token.encode_report_token", lambda *a, **k: None
+    )
+    with capture_logs() as logs:
+        assert delivery_url(_OBJ, request_id="r1") == _OBJ.url
+    assert any(e["event"] == "report_short_url_encode_failed" for e in logs)
+
+
+def test_invalid_present_ttl_warns_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
+    monkeypatch.setenv("REPORT_LINK_TTL_S", " 3600")
+    monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
+    with capture_logs() as logs:
+        assert delivery_url(_OBJ, request_id="r1") == _OBJ.url
+    assert "REPORT_LINK_HMAC_CONFIG" in _prereq_warnings(logs)[0]["missing"]
+
+
 def test_empty_key_is_rejected_not_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     """空 key は allowlist を素通りさせない（素通りさせると decode 不能な /r を発行し 404）。"""
     monkeypatch.setenv("USE_REPORT_SHORTURL", "1")
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "s3cret")
+    monkeypatch.setenv("REPORT_LINK_HMAC_SECRET", _REPORT_SECRET)
     monkeypatch.setenv("CONNECT_BASE_URL", "https://connect.example")
     empty = PublishedObject(url=_OBJ.url, bucket="b", key="", region="ap-northeast-1")
     with capture_logs() as logs:

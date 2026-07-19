@@ -26,6 +26,9 @@ from typing import Any
 
 import structlog
 
+from teamagent.hmac_durable_state import require_runtime_startup
+from teamagent.hmac_keyring import MAIL_ACTION_MAX_TOKEN_TTL_S
+
 logger = structlog.get_logger(__name__)
 
 
@@ -859,6 +862,7 @@ def _process_user(skill: Any, skill_input: Any, email: str) -> str:
 
 
 def main() -> int:
+    require_runtime_startup((("mail_action", MAIL_ACTION_MAX_TOKEN_TTL_S),))
     users = _resolve_target_users()
     if not users:
         print("[run_morning_digest_fargate] no target users (env+RDS empty)", flush=True)

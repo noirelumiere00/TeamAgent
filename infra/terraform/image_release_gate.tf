@@ -215,6 +215,7 @@ resource "terraform_data" "production_image_release_gate" {
     requested_media_image     = local.deployment_mcp_media_image
     application_provenance    = local.deployment_application_provenance
     shared_generation_ledger  = local.deployment_shared_generation_ledger
+    hmac_release_bindings     = local.hmac_release_intent_bindings
   }
 
   # Every plan gets a new apply-time gate action. This prevents an old gate

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Retired: targeted plans/applies bypass runtime and production image gates.
+# Retired: targeted plans/applies could bypass the production image gate and
+# the composed runtime guard.
 set -euo pipefail
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then

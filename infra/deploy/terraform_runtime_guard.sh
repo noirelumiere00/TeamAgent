@@ -13,7 +13,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="16"
+GUARD_VERSION="17"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -47,6 +47,8 @@ IMAGE_GATE_RUNNER="$GUARD_JQ_DIR/run_image_deployment_gate.sh"
 RELEASE_EVIDENCE_HELPER="$REPO_ROOT/infra/codebuild/release_evidence.py"
 IMAGE_CONTEXT_HELPER="$TF_DIR/image_release_context.py"
 APPLY_SUPERVISOR="$TF_DIR/terraform_apply_supervisor.py"
+PLAN_STAGER="$TF_DIR/stage_saved_plan.py"
+EVENTBRIDGE_APPLY_SAGA="$TF_DIR/eventbridge_apply_saga.py"
 TMP_ROOT=""
 AWS_BIN=""
 AWS_BIN_SHA256=""
@@ -221,6 +223,8 @@ assert_guard_sources() {
   assert_regular_nonwritable "$RELEASE_EVIDENCE_HELPER"
   assert_regular_nonwritable "$IMAGE_CONTEXT_HELPER"
   assert_regular_nonwritable "$APPLY_SUPERVISOR"
+  assert_regular_nonwritable "$PLAN_STAGER"
+  assert_regular_nonwritable "$EVENTBRIDGE_APPLY_SAGA"
   assert_git_tracked_clean "$SCRIPT_PATH"
   assert_git_tracked_clean "$GUARD_JQ"
   assert_git_tracked_clean "$MIGRATION_FILE"
@@ -229,6 +233,8 @@ assert_guard_sources() {
   assert_git_tracked_clean "$RELEASE_EVIDENCE_HELPER"
   assert_git_tracked_clean "$IMAGE_CONTEXT_HELPER"
   assert_git_tracked_clean "$APPLY_SUPERVISOR"
+  assert_git_tracked_clean "$PLAN_STAGER"
+  assert_git_tracked_clean "$EVENTBRIDGE_APPLY_SAGA"
 
   local path
   while IFS= read -r path; do
@@ -7043,6 +7049,7 @@ verify_required_migration_apply_receipt() {
 verify_receipt() {
   local plan="$1"
   local receipt="$2"
+  local receipt_plan_path="${3:-$plan}"
   ensure_tmp
 
   local stage="$TMP_ROOT/verify"
@@ -7249,7 +7256,8 @@ verify_receipt() {
   bound_plan="$(jq -er '.plan_path' "$stage/receipt.json")"
   bound_receipt="$(jq -er '.receipt_path' "$stage/receipt.json")"
   var_file="$(jq -er '.var_file' "$stage/receipt.json")"
-  [ "$bound_plan" = "$plan" ] || die "receiptが別plan pathに束縛されています"
+  [ "$bound_plan" = "$receipt_plan_path" ] ||
+    die "receiptが別plan pathに束縛されています"
   [ "$bound_receipt" = "$receipt" ] || die "receipt path束縛が一致しません"
   var_file="$(secure_existing_file "$var_file")"
   [ "$var_file" = "$(jq -er '.var_file' "$stage/receipt.json")" ] || die "var-file path束縛が一致しません"
@@ -7326,7 +7334,14 @@ verify_receipt() {
   var_sha_before="$(sha256_file "$var_file")"
   [ "$plan_sha_before" = "$(jq -er '.plan_sha256' "$stage/receipt.json")" ] || die "plan SHA256がreceiptと不一致です"
   [ "$var_sha_before" = "$(jq -er '.var_file_sha256' "$stage/receipt.json")" ] || die "var-file SHA256がreceiptと不一致です"
-  cp "$plan" "$stage/plan.tfplan"
+  if [ "$plan" = "$receipt_plan_path" ]; then
+    cp "$plan" "$stage/plan.tfplan"
+  else
+    # apply pathはO_NOFOLLOWで作ったprivate staged inodeをhard-linkし、
+    # show/context/heartbeat/supervisor/provisionerが同じplanを使う。
+    ln "$plan" "$stage/plan.tfplan" ||
+      die "private staged plan inodeをverify pathへ固定できません"
+  fi
   cp "$var_file" "$stage/terraform.tfvars"
   chmod 600 "$stage/plan.tfplan" "$stage/terraform.tfvars"
   [ "$(sha256_file "$stage/plan.tfplan")" = "$plan_sha_before" ] || die "private plan copyが不一致です"
@@ -8640,6 +8655,21 @@ case "$COMMAND" in
       die "apply receiptもplanと同じprivate directoryに置いてください"
     ensure_tmp
     assert_trusted_automation_identity
+    ORIGINAL_PLAN="$PLAN"
+    STAGED_PLAN="$TMP_ROOT/staged-plan.tfplan"
+    STAGE_RESULT="$(
+      python3 "$PLAN_STAGER" \
+        --source "$ORIGINAL_PLAN" \
+        --destination "$STAGED_PLAN"
+    )" || die "saved planをprivate inodeへ固定できません"
+    STAGED_PLAN_SHA256="$(
+      jq -er 'select(.ok == true) | .sha256 | select(test("^[a-f0-9]{64}$"))' \
+        <<<"$STAGE_RESULT"
+    )" || die "staged saved planのdigestが不正です"
+    [ "$STAGED_PLAN_SHA256" = "$(sha256_file "$STAGED_PLAN")" ] ||
+      die "staged saved planのdigestが一致しません"
+    STAGED_PLAN_IDENTITY="$(stat_identity "$STAGED_PLAN")"
+    PLAN="$STAGED_PLAN"
     APPLY_ATTEMPT_ID="$(new_uuid_v4)"
     GATE_PLAN="$PLAN"
     GATE_LOCK_RECEIPT="$TMP_ROOT/provenance-shared-lock.json"
@@ -8649,6 +8679,8 @@ case "$COMMAND" in
     GATE_OUTCOME_RECORDED="false"
     GATE_HEARTBEAT_PID=""
     APPLY_RECEIPT_PUBLISHED="false"
+    EVENTBRIDGE_SAGA_STARTED="false"
+    EVENTBRIDGE_SAGA_FINISHED="false"
     start_gate_heartbeat() {
       local parent_pid="$$"
       bash "$IMAGE_GATE_RUNNER" heartbeat-deployment-lock \
@@ -8676,8 +8708,21 @@ case "$COMMAND" in
     }
     cleanup_apply_command() {
       local status=$?
+      local saga_restore_failed="false"
       set +e
       stop_gate_heartbeat
+      if [ "$EVENTBRIDGE_SAGA_STARTED" = "true" ] &&
+        [ "$EVENTBRIDGE_SAGA_FINISHED" != "true" ]; then
+        if python3 "$EVENTBRIDGE_APPLY_SAGA" finish \
+          --plan "$GATE_PLAN" \
+          --plan-sha256 "$STAGED_PLAN_SHA256" \
+          --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+          --outcome failed >/dev/null; then
+          EVENTBRIDGE_SAGA_FINISHED="true"
+        else
+          saga_restore_failed="true"
+        fi
+      fi
       if [ "$GATE_LOCK_ACQUIRED" = "true" ]; then
         if [ "$GATE_OUTCOME_RECORDED" != "true" ]; then
           bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome \
@@ -8695,6 +8740,10 @@ case "$COMMAND" in
         rm -f "$APPLY_RECEIPT"
       fi
       rm -rf "$TMP_ROOT"
+      if [ "$saga_restore_failed" = "true" ]; then
+        echo "FATAL: EventBridge baseline restoration requires reconciliation" >&2
+        exit 70
+      fi
       exit "$status"
     }
     trap 'cleanup_apply_command' EXIT
@@ -8725,8 +8774,12 @@ case "$COMMAND" in
 
     # The two locks remain held across final live/state/evidence rechecks and
     # the exact private saved-plan apply.
-    verify_receipt "$PLAN" "$RECEIPT"
+    verify_receipt "$GATE_PLAN" "$RECEIPT" "$ORIGINAL_PLAN"
     GATE_PLAN="$TMP_ROOT/verify/plan.tfplan"
+    [ "$(sha256_file "$GATE_PLAN")" = "$STAGED_PLAN_SHA256" ] ||
+      die "verify pathのsaved plan digestがstaged planと一致しません"
+    [ "$(stat_identity "$GATE_PLAN")" = "$STAGED_PLAN_IDENTITY" ] ||
+      die "verify pathがstaged planと同一inodeではありません"
     bash "$IMAGE_GATE_RUNNER" validate-deployment-preflight \
       --plan "$GATE_PLAN" \
       --terraform-context "$TMP_ROOT/verify/image-release-context.json" \
@@ -8748,8 +8801,17 @@ case "$COMMAND" in
     ' "$GATE_PREFLIGHT_RECEIPT" >/dev/null ||
       die "provenance apply preflightがsaved plan contextと不一致です"
 
+    python3 "$EVENTBRIDGE_APPLY_SAGA" begin \
+      --plan "$GATE_PLAN" \
+      --plan-sha256 "$STAGED_PLAN_SHA256" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID" >/dev/null ||
+      die "EventBridge apply baselineをdurableに固定できません"
+    EVENTBRIDGE_SAGA_STARTED="true"
+
     stop_gate_heartbeat
     export TEAMAGENT_SAVED_PLAN_PATH="$GATE_PLAN"
+    export TEAMAGENT_SAVED_PLAN_SHA256="$STAGED_PLAN_SHA256"
+    export TEAMAGENT_SAVED_PLAN_IDENTITY="$STAGED_PLAN_IDENTITY"
     export TEAMAGENT_APPLY_ATTEMPT_ID="$APPLY_ATTEMPT_ID"
     if ! (
       cd "$TF_DIR"
@@ -8757,11 +8819,14 @@ case "$COMMAND" in
         --terraform-bin "$(realpath "$(command -v terraform)")" \
         --gate-runner "$IMAGE_GATE_RUNNER" \
         --plan "$GATE_PLAN" \
+        --plan-sha256 "$STAGED_PLAN_SHA256" \
+        --plan-identity "$STAGED_PLAN_IDENTITY" \
         --apply-attempt-id "$APPLY_ATTEMPT_ID"
     ); then
       die "supervised saved-plan apply failed; provenance reconciliation is required"
     fi
-    unset TEAMAGENT_SAVED_PLAN_PATH TEAMAGENT_APPLY_ATTEMPT_ID
+    unset TEAMAGENT_SAVED_PLAN_PATH TEAMAGENT_SAVED_PLAN_SHA256
+    unset TEAMAGENT_SAVED_PLAN_IDENTITY TEAMAGENT_APPLY_ATTEMPT_ID
     start_gate_heartbeat
 
     capture_state_contract "$TMP_ROOT/applied-state.json"
@@ -8828,6 +8893,14 @@ case "$COMMAND" in
     else
       jq -n 'null' > "$TMP_ROOT/applied-bedrock-retention.json"
     fi
+
+    python3 "$EVENTBRIDGE_APPLY_SAGA" finish \
+      --plan "$GATE_PLAN" \
+      --plan-sha256 "$STAGED_PLAN_SHA256" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+      --outcome applied >/dev/null ||
+      die "EventBridge apply completionをdurableに確認できません"
+    EVENTBRIDGE_SAGA_FINISHED="true"
 
     bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome \
       --plan "$GATE_PLAN" \
