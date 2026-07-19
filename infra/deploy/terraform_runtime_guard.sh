@@ -1672,7 +1672,7 @@ capture_complete_runtime_inventory() {
   jq -e -S \
     --arg email_sha "$EXPECTED_ALARM_EMAIL_SHA256" \
     --arg destination_sha "$EXPECTED_ALARM_DESTINATION_STATE_SHA256" '
-    (
+    if (
       .kind == "teamagent-runtime-inventory" and
       .schema_version == 1 and
       .raw_endpoint_utf8_sha256 == $email_sha and
@@ -1686,19 +1686,22 @@ capture_complete_runtime_inventory() {
       (.publisher_reference_set_sha256 | test("^[0-9a-f]{64}$")) and
       (.publishers_sha256 | test("^[0-9a-f]{64}$")) and
       (.inventory_sha256 | test("^[0-9a-f]{64}$"))
-    ) |
-    {
-      inventory_sha256,
-      destination_state_sha256,
-      subscription_metadata_sha256,
-      raw_endpoint_utf8_sha256,
-      raw_reference_set_sha256,
-      publisher_reference_set_sha256,
-      publishers_sha256,
-      publisher_coverage,
-      topic_inventory,
-      alarm_subscription_count
-    }
+    ) then
+      {
+        inventory_sha256: .inventory_sha256,
+        destination_state_sha256: .destination_state_sha256,
+        subscription_metadata_sha256: .subscription_metadata_sha256,
+        raw_endpoint_utf8_sha256: .raw_endpoint_utf8_sha256,
+        raw_reference_set_sha256: .raw_reference_set_sha256,
+        publisher_reference_set_sha256: .publisher_reference_set_sha256,
+        publishers_sha256: .publishers_sha256,
+        publisher_coverage: .publisher_coverage,
+        topic_inventory: .topic_inventory,
+        alarm_subscription_count: .alarm_subscription_count
+      }
+    else
+      error("runtime inventory contract mismatch")
+    end
   ' "$raw" > "$output" ||
     die "all-page runtime/SNS publisher inventoryがexact contractを満たしません"
 }
