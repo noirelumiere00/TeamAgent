@@ -354,12 +354,17 @@ aws_endpoint() {
   case "$1" in
     s3api) printf 'https://s3.%s.amazonaws.com\n' "$REGION" ;;
     cloudwatch) printf 'https://monitoring.%s.amazonaws.com\n' "$REGION" ;;
+    apigatewayv2) printf 'https://apigateway.%s.amazonaws.com\n' "$REGION" ;;
+    ecr) printf 'https://api.ecr.%s.amazonaws.com\n' "$REGION" ;;
+    efs) printf 'https://elasticfilesystem.%s.amazonaws.com\n' "$REGION" ;;
+    iam) printf 'https://iam.amazonaws.com\n' ;;
     budgets) printf 'https://budgets.amazonaws.com\n' ;;
     ce) printf 'https://ce.us-east-1.amazonaws.com\n' ;;
     *)
       case "$1" in
         sts|cloudtrail|bedrock|dynamodb|ecs|events|scheduler|lambda|\
-        logs|chatbot|sns|sqs|kms|autoscaling|codestar-notifications|rds)
+        logs|chatbot|sns|sqs|kms|autoscaling|codestar-notifications|rds|\
+        ec2|secretsmanager)
           printf 'https://%s.%s.amazonaws.com\n' "$1" "$REGION"
           ;;
         *) die "AWS service endpointがallowlist外です: $1" ;;

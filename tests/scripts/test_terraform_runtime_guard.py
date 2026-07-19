@@ -46,6 +46,48 @@ REPORT_HMAC_SECRET = (
     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:teamagent/dev/hmac/report-link-XyZ789"
 )
 
+
+@pytest.fixture(scope="module", autouse=True)
+def _canonical_backend_metadata_for_guard_tests() -> None:
+    """Guard subprocesses must not depend on a developer's prior terraform init."""
+    metadata = PROJECT_ROOT / "infra" / "terraform" / ".terraform" / "terraform.tfstate"
+    previous = metadata.read_bytes() if metadata.exists() else None
+    previous_mode = stat.S_IMODE(metadata.stat().st_mode) if metadata.exists() else None
+    metadata.parent.mkdir(parents=True, exist_ok=True)
+    metadata.write_text(
+        json.dumps(
+            {
+                "backend": {
+                    "type": "s3",
+                    "config": {
+                        "bucket": "teamagent-tfstate-718959508629",
+                        "key": "teamagent/terraform.tfstate",
+                        "region": REGION,
+                        "dynamodb_table": "teamagent-tflock",
+                        "encrypt": True,
+                        "access_key": None,
+                        "secret_key": None,
+                        "token": None,
+                    },
+                }
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    metadata.chmod(0o600)
+    try:
+        yield
+    finally:
+        if previous is None:
+            metadata.unlink(missing_ok=True)
+        else:
+            metadata.write_bytes(previous)
+            assert previous_mode is not None
+            metadata.chmod(previous_mode)
+
+
 COMPONENTS = {
     "openclaw": ("openclaw", "teamagent-dev-openclaw", 25),
     "mcp": ("teamagent-mcp", "teamagent-dev-mcp", 55),
@@ -874,12 +916,22 @@ def _fake_aws(path: Path) -> None:
         mappings = {json.dumps({key: _mapping_aws(key) for key in DISPATCHERS})!r}
         mappings = json.loads(mappings)
         args = sys.argv[1:]
-        if (
-            len(args) >= 2
-            and args[0] == "--region"
-            and args[1] in (REGION, "us-east-1")
-        ):
-            args = args[2:]
+        if args == ["--version"]:
+            print("aws-cli/2.31.0 Python/3.13 Darwin/24 source/x86_64")
+            raise SystemExit(0)
+        while args:
+            if (
+                len(args) >= 2
+                and args[0] == "--region"
+                and args[1] in (REGION, "us-east-1")
+            ):
+                args = args[2:]
+            elif len(args) >= 2 and args[0] == "--endpoint-url":
+                args = args[2:]
+            elif args[0] == "--no-cli-pager":
+                args = args[1:]
+            else:
+                break
 
         def task_arn(component):
             _, family, revision = components[component]
@@ -1856,9 +1908,7 @@ def test_cloudtrail_live_lifecycle_deletion_is_rejected_before_plan(
     )
 
     assert result.returncode == 1
-    assert "CloudTrail監査bucketにexpiration/noncurrent deletion" in (
-        result.stdout + result.stderr
-    )
+    assert "CloudTrail監査bucketにexpiration/noncurrent deletion" in (result.stdout + result.stderr)
     assert "plan " not in tf_log.read_text(encoding="utf-8")
 
 
@@ -2287,9 +2337,7 @@ def test_state_address_reconstruction_rejects_unknown_resource_mode(
     result = _run(_plan_command(var_file, tmp_path / "unknown-mode.tfplan"), env)
 
     assert result.returncode == 1
-    assert "state pullからaddress ownershipを再構成できません" in (
-        result.stdout + result.stderr
-    )
+    assert "state pullからaddress ownershipを再構成できません" in (result.stdout + result.stderr)
     assert "plan " not in tf_log.read_text(encoding="utf-8")
 
 

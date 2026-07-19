@@ -149,11 +149,12 @@ def test_fargate_preflight_executes_every_distinct_image_contract() -> None:
         'test "$(stat -c %a /tmp)" = 1777',
         'printf writable > "$path/.teamagent-write-probe"',
         'python -c "import sys; assert sys.version_info[:2] == (3, 14)"',
-        "command -v npx",
-        "npx --no-install tsx --version",
+        '/app/.venv/bin/python -c "import playwright, teamagent.media.worker, yt_dlp"',
+        "command -v node",
         "command -v yt-dlp",
-        "command -v chromium",
-        'test -d "$PLAYWRIGHT_BROWSERS_PATH"',
+        "command -v chromium-browser",
+        "command -v ffmpeg",
+        'test -f "$TIKTOK_SCRAPER_PATH"',
         "/tmp/teamagent-openclaw/state/preflight",
         "(state.mode & 0o777) !== 0o700",
         "entry_point_json='[\"/nodejs/bin/node\"]'",
@@ -163,10 +164,10 @@ def test_fargate_preflight_executes_every_distinct_image_contract() -> None:
         "Key=Purpose,Value=TeamAgentRuntimePreflight",
         "def exact_command",
         "def exact_health",
-        '["python", "scripts/run_ingest_fargate.py"]',
-        '["python", "scripts/run_morning_digest_fargate.py"]',
-        '["python", "scripts/run_canary_health.py"]',
-        '["python", "-m", "teamagent.workers.x_buzz_job"]',
+        '["/app/.venv/bin/python", "/app/scripts/run_ingest_fargate.py"]',
+        '["/app/.venv/bin/python", "/app/scripts/run_morning_digest_fargate.py"]',
+        '["/app/.venv/bin/python", "/app/scripts/run_canary_health.py"]',
+        '["/app/.venv/bin/python", "-m", "teamagent.workers.x_buzz_job"]',
         '[ "sha256:$(sha256_file "$manifest_file")" = "$ECR_DIGEST" ]',
         '[ "sha256:$(sha256_file "$output")" = "$config_digest" ]',
     ):
@@ -828,9 +829,7 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     variables = (TF_ROOT / "variables.tf").read_text(encoding="utf-8")
     runtime = (TF_ROOT / "runtime_guard.tf").read_text(encoding="utf-8")
     guard = GUARD.read_text(encoding="utf-8")
-    evidence = (
-        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
-    ).read_text(encoding="utf-8")
+    evidence = (PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py").read_text(encoding="utf-8")
     manifest = json.loads(MIGRATIONS.read_text(encoding="utf-8"))
     handoff = manifest["external_state_handoffs"]["2026-07-alarm-topic-consolidation-v1"]
 
@@ -863,10 +862,8 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     assert "aws_sns_topic_subscription.alarms_email" not in runtime
     assert "local.configured_alarm_email_sha256 == [" in runtime
     assert "length(local.configured_alarm_chatbot_arns) == 0" in runtime
-    assert (
-        'var.alarm_email_endpoints == ["s-komata@vectorinc.co.jp"]'
-        in variables
-    )
+    assert "length(var.alarm_email_endpoints) == 1" in variables
+    assert 'var.alarm_email_endpoints[0] == "s-komata@vectorinc.co.jp"' in variables
     assert "trim/lower不可" in variables
     assert "length(var.alarm_chatbot_configuration_arns) == 0" in variables
     assert "list-subscriptions-by-topic" in guard
@@ -901,15 +898,13 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     assert handoff["import_legacy_into_this_state"] is False
     assert handoff["activation_requires"] == {
         "confirmed_email_endpoint_sha256": (
-            "88c6452f9db04017250aa5728b4815bcc"
-            "b55b5ecc0b35b50a5234170dc08d1e6"
+            "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
         ),
         "subscription_inventory_count": 1,
         "pending_subscription_count": 0,
         "subscription_protocol": "email",
         "destination_state_sha256": (
-            "c942dbb7b97da1f4d9debb1ba241ee89"
-            "bf8c1d951d8d75bdea3056850838ddc9"
+            "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9"
         ),
         "chatbot_configuration_count": 0,
         "legacy_topic_exists": False,
@@ -931,6 +926,43 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
             assert match.group(1).strip() == "aws_sns_topic.alarms.arn"
 
 
+def test_runtime_guard_has_exact_endpoints_for_every_invoked_aws_service() -> None:
+    guard = GUARD.read_text(encoding="utf-8")
+    invoked = set(re.findall(r"\baws_cli ([a-z0-9-]+)\b", guard))
+    mapped = {
+        "apigatewayv2",
+        "bedrock",
+        "budgets",
+        "ce",
+        "chatbot",
+        "cloudtrail",
+        "cloudwatch",
+        "codestar-notifications",
+        "dynamodb",
+        "ec2",
+        "ecr",
+        "ecs",
+        "efs",
+        "events",
+        "iam",
+        "kms",
+        "lambda",
+        "logs",
+        "rds",
+        "s3api",
+        "scheduler",
+        "secretsmanager",
+        "sns",
+        "sqs",
+        "sts",
+    }
+    assert invoked <= mapped, sorted(invoked - mapped)
+    assert "apigatewayv2) printf 'https://apigateway.%s.amazonaws.com" in guard
+    assert "ecr) printf 'https://api.ecr.%s.amazonaws.com" in guard
+    assert "efs) printf 'https://elasticfilesystem.%s.amazonaws.com" in guard
+    assert "iam) printf 'https://iam.amazonaws.com" in guard
+
+
 def _run_alarm_delivery_validator(
     tmp_path: Path,
     *,
@@ -941,10 +973,7 @@ def _run_alarm_delivery_validator(
     legacy = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms"
     email = "s-komata@vectorinc.co.jp"
     email_hash = hashlib.sha256(b"s-komata@vectorinc.co.jp").hexdigest()
-    destination_hash = (
-        "c942dbb7b97da1f4d9debb1ba241ee89"
-        "bf8c1d951d8d75bdea3056850838ddc9"
-    )
+    destination_hash = "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9"
     chat_arn = "arn:aws:chatbot::718959508629:chat-configuration/slack-channel/teamagent-dev-alerts"
     if mode == "email":
         emails = [email]
@@ -1084,12 +1113,12 @@ def _run_alarm_delivery_validator(
                 'EXPECTED_ALARM_EMAIL="s-komata@vectorinc.co.jp"',
                 (
                     'EXPECTED_ALARM_EMAIL_SHA256="'
-                    '88c6452f9db04017250aa5728b4815bcc'
+                    "88c6452f9db04017250aa5728b4815bcc"
                     'b55b5ecc0b35b50a5234170dc08d1e6"'
                 ),
                 (
                     'EXPECTED_ALARM_DESTINATION_STATE_SHA256="'
-                    'c942dbb7b97da1f4d9debb1ba241ee89'
+                    "c942dbb7b97da1f4d9debb1ba241ee89"
                     'bf8c1d951d8d75bdea3056850838ddc9"'
                 ),
                 'die() { printf "%s\\n" "$*" >&2; exit 1; }',
