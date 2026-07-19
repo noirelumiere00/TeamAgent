@@ -1133,40 +1133,20 @@ def _fake_aws(path: Path) -> None:
         if args[:2] == ["sts", "get-caller-identity"]:
             if "--query" not in args or args[-2:] != ["--output", "text"]:
                 raise SystemExit("malformed deployment gate identity query")
-            if os.environ.get("AWS_ACCESS_KEY_ID") == "ASIAGATESESSION":
-                arn = (
-                    "arn:aws:sts::718959508629:assumed-role/"
-                    "teamagent-dev-image-deployment-gate/"
-                    "teamagent-image-deployment-gate"
-                )
-            else:
-                arn = (
-                    "arn:aws:sts::718959508629:assumed-role/"
-                    "teamagent-dev-terraform-runtime-automation/"
-                    "teamagent-terraform-worker"
-                )
+            arn = (
+                "arn:aws:sts::718959508629:assumed-role/"
+                "teamagent-dev-terraform-runtime-automation/"
+                "teamagent-terraform-worker"
+            )
             print(f"{{ACCOUNT}}\\t{{arn}}")
             raise SystemExit(0)
         if args[:2] == ["sts", "assume-role"]:
-            if (
-                "--region" not in args
-                or args[args.index("--region") + 1] != REGION
-                or "--role-arn" not in args
-                or args[args.index("--role-arn") + 1]
-                != (
-                    "arn:aws:iam::718959508629:role/"
-                    "teamagent-dev-image-deployment-gate"
-                )
-                or args[-2:] != ["--output", "text"]
-            ):
-                raise SystemExit("malformed deployment gate assume-role")
-            print("ASIAGATESESSION\\tsecret\\ttoken")
-            raise SystemExit(0)
+            raise SystemExit("deployment gate must not chain into another role")
         if args[:2] == ["dynamodb", "put-item"]:
             if (
                 "--region" not in args
                 or args[args.index("--region") + 1] != REGION
-                or os.environ.get("AWS_ACCESS_KEY_ID") != "ASIAGATESESSION"
+                or os.environ.get("AWS_FAKE_TRUSTED_AUTOMATION") != "1"
             ):
                 raise SystemExit("malformed deployment intent write")
             print(json.dumps({{}}))
