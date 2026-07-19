@@ -17,6 +17,7 @@ import html
 import json
 import logging
 import os
+import re
 import threading
 from collections import Counter
 from collections.abc import Callable
@@ -192,10 +193,10 @@ def _static_app_html() -> str:
     ``COPY src/ ./src/``（Dockerfile.teamagent-mcp）でイメージに同梱される
     ``static/app.html`` を返す。cwd 非依存・全リクエスト共有。
 
-    ``app.html`` は機密ナレッジ埋め込みのため git 管理外（``.gitignore``）で、
-    再デプロイ（``redeploy_app.sh``）でイメージに焼き込む運用。git 由来の
-    launch/CI イメージには同梱されないため、その場合は 404/500 ではなく
-    「準備中」プレースホルダを返して壊さない（``/app`` ルートは main 常在可）。
+    ``app.html`` は機密ナレッジ埋め込みのため git 管理外（``.gitignore``）。
+    署名済み source publisher が承認済みの exact S3 VersionId を検証して
+    release image に同梱する。未同梱の開発 image では 404/500 ではなく
+    「準備中」プレースホルダを返す（``/app`` ルートは main 常在可）。
     """
     p = Path(__file__).resolve().parent / "static" / "app.html"
     try:
@@ -205,19 +206,47 @@ def _static_app_html() -> str:
         return _APP_HTML_MISSING
 
 
-# --- /app 配信 HTML の S3 ホットスワップ ---------------------------------------
-# env CONNECT_APP_HTML_S3_URI（例 s3://teamagent-dev-raw-files/codebuild/connect-web-app.html）
-# が設定されていれば S3 版を優先配信する。「S3 cp + force-new-deployment（約3分）」で
-# コンテンツ更新でき、CodeBuild bake（イメージ焼き込み）はコード変更時専用に退役できる。
-# プロセス内キャッシュは無期限（反映は force-new-deployment＝プロセス再起動で行う前提）。
-_app_html_state: dict[str, Any] = {"html": None, "source": None, "sha12": None}
+# --- /app immutable S3 object contract -----------------------------------------
+# A configured production task must provide an exact VersionId and all three
+# content hashes. The mutable latest object is never read. The process cache is
+# intentionally permanent; changing the contract creates a new task definition.
+_APP_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_APP_VERSION_ID_RE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1024}")
+_APP_HTML_BUCKET = "teamagent-dev-raw-files"
+_APP_HTML_KEY = "codebuild/connect-web-app.html"
+_APP_HTML_EXPECTED_OWNER = "718959508629"
+_app_html_state: dict[str, Any] = {
+    "html": None,
+    "source": None,
+    "sha256": None,
+    "sha12": None,
+    "version_id": None,
+    "expected_version_id": None,
+    "manifest_sha256": None,
+    "build_inputs_sha256": None,
+    "contract_ok": None,
+    "error": None,
+}
 _app_html_lock = threading.Lock()
 
 
 def _reset_app_html_cache() -> None:
     """テスト用: /app 配信 HTML のプロセス内キャッシュを破棄する（本番では呼ばない）。"""
     with _app_html_lock:
-        _app_html_state.update({"html": None, "source": None, "sha12": None})
+        _app_html_state.update(
+            {
+                "html": None,
+                "source": None,
+                "sha256": None,
+                "sha12": None,
+                "version_id": None,
+                "expected_version_id": None,
+                "manifest_sha256": None,
+                "build_inputs_sha256": None,
+                "contract_ok": None,
+                "error": None,
+            }
+        )
 
 
 def _parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -227,34 +256,64 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     bucket, _, key = uri[len("s3://") :].partition("/")
     if not bucket or not key:
         raise ValueError(f"bucket/key を解決できません: {uri}")
+    if bucket != _APP_HTML_BUCKET or key != _APP_HTML_KEY:
+        raise ValueError("application S3 location is outside the fixed contract")
     return bucket, key
 
 
-def _fetch_app_html_from_s3(uri: str) -> str:
-    """S3 から app.html を取得する。
+def _app_html_contract() -> dict[str, str]:
+    """Load and validate the complete immutable application contract."""
+
+    names = {
+        "version_id": "CONNECT_APP_HTML_S3_VERSION_ID",
+        "sha256": "CONNECT_APP_HTML_SHA256",
+        "manifest_sha256": "CONNECT_APP_HTML_MANIFEST_SHA256",
+        "build_inputs_sha256": "CONNECT_APP_HTML_BUILD_INPUTS_SHA256",
+        "baked_sha256": "CONNECT_APP_HTML_BAKED_SHA256",
+    }
+    values = {key: os.environ.get(name, "").strip() for key, name in names.items()}
+    missing = sorted(names[key] for key, value in values.items() if not value)
+    if missing:
+        raise ValueError(f"immutable app contract is incomplete: {missing}")
+    if not _APP_VERSION_ID_RE.fullmatch(values["version_id"]):
+        raise ValueError("CONNECT_APP_HTML_S3_VERSION_ID is invalid")
+    for key in ("sha256", "manifest_sha256", "build_inputs_sha256", "baked_sha256"):
+        if not _APP_SHA256_RE.fullmatch(values[key]):
+            raise ValueError(f"{names[key]} is not a lowercase SHA-256")
+    if values["sha256"] == values["baked_sha256"]:
+        raise ValueError("live app and baked fallback must be distinct artifacts")
+    return values
+
+
+def _fetch_app_html_from_s3(uri: str, version_id: str) -> tuple[str, str]:
+    """Fetch one exact S3 app.html VersionId and return its decoded bytes/version.
 
     boto3 は遅延 import（モジュール先頭で import しない）＝ boto3 の無いテスト環境でも
-    既存テストが壊れない。失敗は例外を上げ、呼び出し側（_resolve_app_html）が
-    フォールバックを判断する。
+    既存テストが壊れない。VersionId の省略や latest へのフォールバックは禁止。
     """
     import boto3
 
     bucket, key = _parse_s3_uri(uri)
-    obj = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+    obj = boto3.client("s3").get_object(
+        Bucket=bucket,
+        Key=key,
+        VersionId=version_id,
+        ExpectedBucketOwner=_APP_HTML_EXPECTED_OWNER,
+    )
+    returned_version_id = obj.get("VersionId")
+    if returned_version_id != version_id:
+        raise ValueError("S3 returned a different app.html VersionId")
     body: bytes = obj["Body"].read()
-    return body.decode("utf-8")
+    return body.decode("utf-8"), returned_version_id
 
 
 def _resolve_app_html() -> dict[str, Any]:
     """/app で配信する HTML を初回アクセス時に1回だけ解決しキャッシュする（スレッドセーフ）。
 
-    優先順位:
-      1. env ``CONNECT_APP_HTML_S3_URI`` 設定時は S3 から取得（source="s3"）。
-         取得失敗（S3 障害・IAM 不備・URI 不正）は ERROR ログの上 2. へフォールバック。
-         **サービスは落とさない**（可用性優先。劣化の検知は /healthz の
-         ``app_html_source`` と publish script 側の検証が担う＝黙って劣化しない）
-      2. イメージ同梱 ``static/app.html``（source="baked"・従来挙動）
-      3. どちらも無ければ「準備中」プレースホルダ（source="missing"・従来挙動）
+    Configured production mode reads one exact S3 VersionId and verifies its
+    full hash. A fetch failure may serve only the independently hash-checked
+    baked fallback, while /healthz becomes unhealthy. Without the S3 URI the
+    legacy baked/missing behavior remains available for local tests.
 
     複数 worker スレッドの同時初回アクセスは _get_search_skill と同じ
     double-checked locking で S3 取得を1回に保つ。
@@ -266,26 +325,87 @@ def _resolve_app_html() -> dict[str, Any]:
             return _app_html_state
         html_text: str | None = None
         source = ""
+        sha256 = ""
+        version_id: str | None = None
+        expected_version_id: str | None = None
+        manifest_sha256: str | None = None
+        build_inputs_sha256: str | None = None
+        contract_ok = True
+        resolution_error: str | None = None
         uri = os.environ.get("CONNECT_APP_HTML_S3_URI", "").strip()
         if uri:
             try:
-                html_text = _fetch_app_html_from_s3(uri)
+                contract = _app_html_contract()
+                expected_version_id = contract["version_id"]
+                manifest_sha256 = contract["manifest_sha256"]
+                build_inputs_sha256 = contract["build_inputs_sha256"]
+                fetched_html, fetched_version_id = _fetch_app_html_from_s3(
+                    uri,
+                    contract["version_id"],
+                )
+                fetched_sha256 = hashlib.sha256(fetched_html.encode("utf-8")).hexdigest()
+                if fetched_sha256 != contract["sha256"]:
+                    raise ValueError("S3 app.html bytes do not match the expected SHA-256")
+                html_text = fetched_html
+                version_id = fetched_version_id
+                sha256 = fetched_sha256
                 source = "s3"
             except Exception as exc:
+                contract_ok = False
+                resolution_error = type(exc).__name__
                 logger.error(
                     "app_html_s3_fetch_failed",
                     uri=uri,
+                    expected_version_id=expected_version_id,
                     error=type(exc).__name__,
                     detail=str(exc)[:200],
                 )
         if html_text is None:
             html_text = _static_app_html()
             source = "missing" if html_text == _APP_HTML_MISSING else "baked"
+            if uri and source == "baked":
+                baked_sha256 = hashlib.sha256(html_text.encode("utf-8")).hexdigest()
+                expected_baked_sha256 = os.environ.get(
+                    "CONNECT_APP_HTML_BAKED_SHA256",
+                    "",
+                ).strip()
+                if baked_sha256 != expected_baked_sha256:
+                    logger.error(
+                        "app_html_baked_fallback_hash_mismatch",
+                        actual_sha256=baked_sha256,
+                        expected_sha256=expected_baked_sha256,
+                    )
+                    html_text = _APP_HTML_MISSING
+                    source = "missing"
+                    resolution_error = "BakedFallbackMismatch"
+                else:
+                    source = "baked-fallback"
         data = html_text.encode("utf-8")
-        sha12 = hashlib.sha256(data).hexdigest()[:12]
+        sha256 = hashlib.sha256(data).hexdigest()
+        sha12 = sha256[:12]
         # "html" を最後に書く（ロック外の先読みが half-populated な状態を見ないための番兵）。
-        _app_html_state.update({"source": source, "sha12": sha12, "html": html_text})
-        logger.info("app_html_resolved", source=source, sha256_12=sha12, bytes=len(data))
+        _app_html_state.update(
+            {
+                "source": source,
+                "sha256": sha256,
+                "sha12": sha12,
+                "version_id": version_id,
+                "expected_version_id": expected_version_id,
+                "manifest_sha256": manifest_sha256,
+                "build_inputs_sha256": build_inputs_sha256,
+                "contract_ok": contract_ok,
+                "error": resolution_error,
+                "html": html_text,
+            }
+        )
+        logger.info(
+            "app_html_resolved",
+            source=source,
+            sha256=sha256,
+            version_id=version_id,
+            contract_ok=contract_ok,
+            bytes=len(data),
+        )
         return _app_html_state
 
 
@@ -3173,21 +3293,21 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
-        # 既存フィールド ok は維持しつつ /app 配信 HTML の鮮度を露出する
-        # （publish script がデプロイ後に「sha 一致 && source=='s3'」を検証する）。
-        # セキュリティ上のトレードオフ（意図的・許容済み）: /healthz は無認証で
-        # インターネットから到達可能であり、sha12（先頭12hex・内容復元不可）と
-        # source（s3/baked/missing）を publish 検証のため意図的に露出する。
-        # 第三者は更新タイミングの観測・流出コピーとのハッシュ照合・劣化状態の
-        # 観測が可能だが、内容漏洩はないため許容する。加えて S3 書込権限者は
-        # 配信 HTML を差し替え可能（既存の CodeBuild 注入経路と同等の信頼境界）。
-        # 詳細: docs/runbooks/connect_web_monthly.md の注意（既知の地雷）。
+        # Expose the exact immutable object contract so rollout verification can
+        # compare VersionId and all content anchors, not a short observational hash.
         state = _resolve_app_html()
         return JSONResponse(
             {
-                "ok": True,
-                "app_html_sha256": state["sha12"],
+                "ok": state["contract_ok"],
+                "app_html_contract_ok": state["contract_ok"],
+                "app_html_sha256": state["sha256"],
+                "app_html_sha256_12": state["sha12"],
                 "app_html_source": state["source"],
+                "app_html_s3_version_id": state["version_id"],
+                "app_html_expected_s3_version_id": state["expected_version_id"],
+                "app_html_manifest_sha256": state["manifest_sha256"],
+                "app_html_build_inputs_sha256": state["build_inputs_sha256"],
+                "app_html_error": state["error"],
             }
         )
 

@@ -90,7 +90,10 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 - **B6 `dmPolicy:"open"` でも `allowFrom:["*"]` が無いと全 DM を reject**（管理者限定 allowlist 扱い）。2026-06-22 の無音 DM drop 事故の真因。CI `scripts/check_openclaw_config.py` が不変条件として検出（§6）。
 - **B7 morning_digest は Google OAuth env 両方が必須**：per-user token refresh に **`CONNECT_GOOGLE_CLIENT_ID` と `CONNECT_GOOGLE_CLIENT_SECRET`（web 型）両方**を env 注入。欠けると `build_user_credentials()` が ValueError → **mail=0 / calendar=0 / errors=2 で全件ゼロ**（2026-06-25 回帰）。
 - **B8 `DRAFT_ON_DEMAND_ONLY="false"`（朝の作り置き）が現行の正**（2026-07-10 裁定・#151 で方針変更を反映）：朝ダイジェスト時に**高重要×To本人のみ・最大 `MORNING_DIGEST_MAX_DRAFTS`（tf 実値 5・コード上限 10）件**を自動で作り置きし、未作成分だけボタンでオンデマンド生成する。件数キャップがあるため旧記述の「全ユーザー分生成で爆発」は起きない。地雷は2つ: (a) **`MORNING_DIGEST_MAX_DRAFTS` を安易に上げるとユーザー数×件数で Bedrock コストが線形増**（上げるときは #154 の Budgets 閾値と突き合わせる）。(b) `true` に戻すと作り置きが止まりボタンオンデマンドのみになる（旧方針・UI は壊れないが朝の下書きが消える挙動変化）。※本項の旧記述（true 必須）は 3505c06 時点の方針で、#151 以降の実態と逆だった。
-- **B9 `reingest.sh` の `NEW_IMAGE` digest は手動更新**：新 MCP image を push したら実行前に最新 digest へ。古いと image not found。
+- **B9 `reingest.sh` / direct task-definition 登録は禁止**：MCP image は guarded
+  build→active/rollback receipt→new full saved plan で Terraform-owned ingest family
+  へ反映してから、`scripts/aws/run_ingest_task.sh` で実行する。手順は
+  `infra/terraform/README.md`。同 receipt/plan の再利用不可。
 - **B10 Slack は 1 App で Socket Mode + HTTP interactivity を併用できない**（アーキ制約）。
 
 ---
