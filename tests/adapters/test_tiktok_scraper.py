@@ -74,6 +74,10 @@ def _explicit_local_media_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("MEDIA_TASK_QUEUE", "MEDIA_JOBS_TABLE", "MEDIA_JOB_BUCKET"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
+    monkeypatch.setattr(
+        "teamagent.adapters.url_guard._default_resolve",
+        lambda _host: ["8.8.8.8"],
+    )
 
 
 def _mock_proc(stdout: str, returncode: int = 0, stderr: str = "") -> MagicMock:
