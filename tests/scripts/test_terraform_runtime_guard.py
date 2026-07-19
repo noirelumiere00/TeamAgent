@@ -874,12 +874,41 @@ def _fake_aws(path: Path) -> None:
         mappings = {json.dumps({key: _mapping_aws(key) for key in DISPATCHERS})!r}
         mappings = json.loads(mappings)
         args = sys.argv[1:]
+        if args == ["--version"]:
+            print("aws-cli/2.27.0 Python/3.13.5 Darwin/24.5.0")
+            raise SystemExit(0)
         if (
             len(args) >= 2
             and args[0] == "--region"
             and args[1] in (REGION, "us-east-1")
         ):
+            command_region = args[1]
             args = args[2:]
+        else:
+            raise SystemExit("missing exact fake AWS region")
+        if len(args) < 4 or args[0] != "--endpoint-url":
+            raise SystemExit("missing exact fake AWS endpoint")
+        endpoint = args[1]
+        if args[2] != "--no-cli-pager":
+            raise SystemExit("fake AWS pager was not disabled")
+        service = args[3]
+        expected_endpoint = {{
+            "apigatewayv2": f"https://apigateway.{{REGION}}.amazonaws.com",
+            "ecr": f"https://api.ecr.{{REGION}}.amazonaws.com",
+            "efs": f"https://elasticfilesystem.{{REGION}}.amazonaws.com",
+            "iam": "https://iam.amazonaws.com",
+            "s3api": f"https://s3.{{REGION}}.amazonaws.com",
+            "cloudwatch": f"https://monitoring.{{REGION}}.amazonaws.com",
+            "budgets": "https://budgets.amazonaws.com",
+            "ce": "https://ce.us-east-1.amazonaws.com",
+        }}.get(service, f"https://{{service}}.{{REGION}}.amazonaws.com")
+        if endpoint != expected_endpoint:
+            raise SystemExit("fake AWS endpoint differs")
+        if service in ("budgets", "ce") and command_region != "us-east-1":
+            raise SystemExit("fake AWS billing region differs")
+        if service not in ("budgets", "ce") and command_region != REGION:
+            raise SystemExit("fake AWS regional service region differs")
+        args = args[3:]
 
         def task_arn(component):
             _, family, revision = components[component]
