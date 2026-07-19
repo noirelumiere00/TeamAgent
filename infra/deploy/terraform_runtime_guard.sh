@@ -533,7 +533,7 @@ capture_state_contract() {
     .resources[] |
     (.module // "") as $module_path |
     . as $resource |
-    (
+    select(
       if $resource.mode == "managed" then ""
       elif $resource.mode == "data" then "data."
       else error("unsupported state resource mode")
@@ -1672,19 +1672,21 @@ capture_complete_runtime_inventory() {
   jq -e -S \
     --arg email_sha "$EXPECTED_ALARM_EMAIL_SHA256" \
     --arg destination_sha "$EXPECTED_ALARM_DESTINATION_STATE_SHA256" '
-    .kind == "teamagent-runtime-inventory" and
-    .schema_version == 1 and
-    .raw_endpoint_utf8_sha256 == $email_sha and
-    .destination_state_sha256 == $destination_sha and
-    (.subscription_metadata_sha256 | test("^[0-9a-f]{64}$")) and
-    .alarm_subscription_count == 1 and
-    .chatbot_configuration_count >= 0 and
-    (.publisher_coverage | type) == "array" and
-    (.source_pages_sha256 | test("^[0-9a-f]{64}$")) and
-    (.raw_reference_set_sha256 | test("^[0-9a-f]{64}$")) and
-    (.publisher_reference_set_sha256 | test("^[0-9a-f]{64}$")) and
-    (.publishers_sha256 | test("^[0-9a-f]{64}$")) and
-    (.inventory_sha256 | test("^[0-9a-f]{64}$")) |
+    (
+      .kind == "teamagent-runtime-inventory" and
+      .schema_version == 1 and
+      .raw_endpoint_utf8_sha256 == $email_sha and
+      .destination_state_sha256 == $destination_sha and
+      (.subscription_metadata_sha256 | test("^[0-9a-f]{64}$")) and
+      .alarm_subscription_count == 1 and
+      .chatbot_configuration_count >= 0 and
+      (.publisher_coverage | type) == "array" and
+      (.source_pages_sha256 | test("^[0-9a-f]{64}$")) and
+      (.raw_reference_set_sha256 | test("^[0-9a-f]{64}$")) and
+      (.publisher_reference_set_sha256 | test("^[0-9a-f]{64}$")) and
+      (.publishers_sha256 | test("^[0-9a-f]{64}$")) and
+      (.inventory_sha256 | test("^[0-9a-f]{64}$"))
+    ) |
     {
       inventory_sha256,
       destination_state_sha256,
