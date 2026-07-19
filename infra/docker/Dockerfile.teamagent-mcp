@@ -74,7 +74,7 @@ RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing
       "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; then \
       rm -f "$wheel"; \
       TORCH_WHEEL_URL="$TORCH_ARM64_WHEEL_URL" TORCH_WHEEL="$wheel" \
-        python -c "import os, urllib.request; urllib.request.urlretrieve(os.environ['TORCH_WHEEL_URL'], os.environ['TORCH_WHEEL'])"; \
+        python -c "import os, urllib.request; opener=urllib.request.build_opener(); opener.addheaders=[('User-Agent','teamagent-reproducible-build/1')]; urllib.request.install_opener(opener); urllib.request.urlretrieve(os.environ['TORCH_WHEEL_URL'], os.environ['TORCH_WHEEL'])"; \
     fi; \
     printf '%s  %s\n' "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; \
     uv pip install --python /app/.venv/bin/python --no-deps "$wheel"; \
@@ -108,7 +108,7 @@ RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing
       "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; then \
       rm -f "$wheel"; \
       TORCH_WHEEL_URL="$TORCH_ARM64_WHEEL_URL" TORCH_WHEEL="$wheel" \
-        python -c "import os, urllib.request; urllib.request.urlretrieve(os.environ['TORCH_WHEEL_URL'], os.environ['TORCH_WHEEL'])"; \
+        python -c "import os, urllib.request; opener=urllib.request.build_opener(); opener.addheaders=[('User-Agent','teamagent-reproducible-build/1')]; urllib.request.install_opener(opener); urllib.request.urlretrieve(os.environ['TORCH_WHEEL_URL'], os.environ['TORCH_WHEEL'])"; \
     fi; \
     printf '%s  %s\n' "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; \
     uv pip install --python /app/.venv/bin/python --no-deps "$wheel"; \

@@ -53,6 +53,7 @@ def test_core_uses_exact_arm64_child_digests_and_binary_hashes() -> None:
     # contains the wheel. Both dependency passes must repair and re-hash it.
     assert TEXT.count('if [ ! -s "$wheel" ]') == 2
     assert TEXT.count('TORCH_WHEEL_URL="$TORCH_ARM64_WHEEL_URL"') == 2
+    assert TEXT.count("teamagent-reproducible-build/1") == 2
 
 
 def test_core_contains_e5_mcp_db_aws_but_no_media_or_js_runtime() -> None:
