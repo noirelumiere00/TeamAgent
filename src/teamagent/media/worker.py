@@ -862,9 +862,7 @@ class AwsWorkerBackend:
         ):
             return _TerminalWriteState.OWNED_RUNNING
         if status == "running" and (
-            version > lease.version
-            or attempt_id != lease.attempt_id
-            or lease_owner != lease.owner
+            version > lease.version or attempt_id != lease.attempt_id or lease_owner != lease.owner
         ):
             return _TerminalWriteState.SUPERSEDED
         return _TerminalWriteState.UNKNOWN

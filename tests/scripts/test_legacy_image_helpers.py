@@ -139,7 +139,7 @@ def test_all_shell_start_build_and_source_zip_paths_are_allowlisted() -> None:
         if "source.zip" in body:
             assert path == composed_guard
             assert "retired - mutable source.zip release publishing is denied" in body
-            assert "type == \"no_source\"" in body
+            assert 'type == "no_source"' in body
 
 
 def test_no_shell_can_bypass_terraform_for_image_task_definition_changes() -> None:

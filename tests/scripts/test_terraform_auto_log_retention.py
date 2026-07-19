@@ -333,8 +333,7 @@ def test_retention_validator_rejects_non_exact_or_destructive_plan(
         target = next(
             item
             for item in changes
-            if item["address"]
-            == "aws_cloudwatch_log_group.ecs_containerinsights_teamagent"
+            if item["address"] == "aws_cloudwatch_log_group.ecs_containerinsights_teamagent"
         )
         target["change"]["before"]["retention_in_days"] = 0
     elif mutation == "wrong_after_retention":

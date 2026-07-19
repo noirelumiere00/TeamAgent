@@ -274,12 +274,12 @@ def test_full_saved_plan_owns_candidate_rollback_worker_and_event_mutations() ->
     assert "terraform_data.runtime_guard" in morning
     assert "prevent_destroy = true" in morning
     assert "morning_digest_rule_enabled" in morning
-    runtime_guard = (
-        ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
-    ).read_text(encoding="utf-8")
+    runtime_guard = (ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh").read_text(
+        encoding="utf-8"
+    )
     assert "EVENTBRIDGE_APPLY_SAGA" in runtime_guard
-    assert '--outcome failed' in runtime_guard
-    assert '--outcome applied' in runtime_guard
+    assert "--outcome failed" in runtime_guard
+    assert "--outcome applied" in runtime_guard
 
     assert "TEAMAGENT_HMAC_DEPLOY_FROM_TERRAFORM" in worker
     assert "HMAC_WORKER_EXPECTED_HASHES" in worker

@@ -23,13 +23,8 @@ sys.modules[SPEC.name] = evidence
 SPEC.loader.exec_module(evidence)
 
 HEX = "a" * 64
-KEY_ARN = (
-    "arn:aws:kms:ap-northeast-1:718959508629:key/"
-    "12345678-1234-1234-1234-123456789abc"
-)
-SUBSCRIPTION_ARN = (
-    f"{evidence.CANONICAL_TOPIC}:12345678-1234-1234-1234-123456789abc"
-)
+KEY_ARN = "arn:aws:kms:ap-northeast-1:718959508629:key/12345678-1234-1234-1234-123456789abc"
+SUBSCRIPTION_ARN = f"{evidence.CANONICAL_TOPIC}:12345678-1234-1234-1234-123456789abc"
 
 
 def _rehash_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
@@ -75,10 +70,7 @@ def _quiescence(observed_at: int) -> dict[str, Any]:
             for service in evidence.WRITER_SERVICES
         },
         "queues": {
-            (
-                "arn:aws:sqs:ap-northeast-1:718959508629:"
-                "teamagent-dev-tiktok-acquire-jobs"
-            ): {
+            ("arn:aws:sqs:ap-northeast-1:718959508629:teamagent-dev-tiktok-acquire-jobs"): {
                 "ApproximateNumberOfMessages": 0,
                 "ApproximateNumberOfMessagesNotVisible": 0,
                 "ApproximateNumberOfMessagesDelayed": 0,
@@ -91,8 +83,7 @@ def _quiescence(observed_at: int) -> dict[str, Any]:
                 "identity": {
                     "trail_name": "teamagent-dev-trail",
                     "trail_arn": (
-                        "arn:aws:cloudtrail:ap-northeast-1:718959508629:"
-                        "trail/teamagent-dev-trail"
+                        "arn:aws:cloudtrail:ap-northeast-1:718959508629:trail/teamagent-dev-trail"
                     ),
                     "home_region": evidence.REGION,
                     "bucket": "teamagent-dev-cloudtrail-718959508629",
@@ -121,8 +112,7 @@ def test_cloudtrail_identity_requires_exact_trail_configuration() -> None:
             "Name": "teamagent-dev-trail",
             "S3BucketName": "teamagent-dev-cloudtrail-718959508629",
             "TrailARN": (
-                "arn:aws:cloudtrail:ap-northeast-1:718959508629:"
-                "trail/teamagent-dev-trail"
+                "arn:aws:cloudtrail:ap-northeast-1:718959508629:trail/teamagent-dev-trail"
             ),
             "HomeRegion": evidence.REGION,
             "IsMultiRegionTrail": True,
@@ -238,8 +228,7 @@ def _versioning_workflow() -> dict[str, Any]:
         for kind, resource_id in action_pairs
     ]
     requirements = [
-        {"kind": action["kind"], "resource_id": action["resource_id"]}
-        for action in actions
+        {"kind": action["kind"], "resource_id": action["resource_id"]} for action in actions
     ]
     baseline = {"cloudtrail": "1" * 64, "bedrock": "2" * 64}
     enabled = {"status": "Enabled", "mfa_delete": "Disabled"}
@@ -385,15 +374,11 @@ def _versioning_workflow() -> dict[str, Any]:
                 "request_id_sha256": "a" * 64,
                 "response_date_epoch": 1046,
                 "configuration": bedrock_configuration,
-                "configuration_sha256": evidence.canonical_sha256(
-                    bedrock_configuration
-                ),
+                "configuration_sha256": evidence.canonical_sha256(bedrock_configuration),
             },
         },
     }
-    workflow["caller_identity_sha256"] = evidence.canonical_sha256(
-        workflow["caller_identity"]
-    )
+    workflow["caller_identity_sha256"] = evidence.canonical_sha256(workflow["caller_identity"])
     workflow_claims = copy.deepcopy(workflow)
     recorded_at = 1048
     ledger_item = evidence._versioning_ledger_item(
@@ -402,8 +387,7 @@ def _versioning_workflow() -> dict[str, Any]:
     )
     workflow["durable_ledger"] = {
         "record_id": (
-            f"{evidence.VERSIONING_LEDGER_RECORD_PREFIX}"
-            f"{workflow['shared_lock']['workflow_id']}"
+            f"{evidence.VERSIONING_LEDGER_RECORD_PREFIX}{workflow['shared_lock']['workflow_id']}"
         ),
         "record_type": "teamagent.first-time-versioning-cutover",
         "workflow_claims_sha256": evidence.canonical_sha256(workflow_claims),
@@ -456,37 +440,27 @@ def test_versioning_workflow_rejects_mutation_and_time_inversion(
         workflow["producer_disconnect"]["action_set_sha256"] = evidence.canonical_sha256(
             workflow["producer_disconnect"]["actions"]
         )
-        workflow["producer_disconnect"][
-            "action_requirements_sha256"
-        ] = evidence.canonical_sha256(
+        workflow["producer_disconnect"]["action_requirements_sha256"] = evidence.canonical_sha256(
             workflow["producer_disconnect"]["action_requirements"]
         )
     elif mutation == "active_task":
         family = evidence.WRITER_FAMILIES[0]
-        workflow["producer_disconnect"]["quiescence"]["ecs_families"][family][
-            "running"
-        ] = 1
-        workflow["producer_disconnect"][
-            "quiescence_sha256"
-        ] = evidence.canonical_sha256(
+        workflow["producer_disconnect"]["quiescence"]["ecs_families"][family]["running"] = 1
+        workflow["producer_disconnect"]["quiescence_sha256"] = evidence.canonical_sha256(
             workflow["producer_disconnect"]["quiescence"]
         )
     elif mutation == "cloudtrail_on":
-        workflow["producer_disconnect"]["quiescence"]["log_producers"][
-            "cloudtrail"
-        ]["is_logging"] = True
-        workflow["producer_disconnect"][
-            "quiescence_sha256"
-        ] = evidence.canonical_sha256(
+        workflow["producer_disconnect"]["quiescence"]["log_producers"]["cloudtrail"][
+            "is_logging"
+        ] = True
+        workflow["producer_disconnect"]["quiescence_sha256"] = evidence.canonical_sha256(
             workflow["producer_disconnect"]["quiescence"]
         )
     elif mutation == "short_settle":
         workflow["not_before_epoch"] -= 1
     elif mutation == "equal_observations":
         second = workflow["post_settle_observations"][1]
-        second["observed_at_epoch"] = workflow["post_settle_observations"][0][
-            "observed_at_epoch"
-        ]
+        second["observed_at_epoch"] = workflow["post_settle_observations"][0]["observed_at_epoch"]
     elif mutation == "final_write":
         workflow["final_recheck"]["object_versions_sha256"] = {
             **workflow["final_recheck"]["object_versions_sha256"],
@@ -495,12 +469,8 @@ def test_versioning_workflow_rejects_mutation_and_time_inversion(
     elif mutation == "early_cutover":
         workflow["cutover"]["cloudtrail"]["response_date_epoch"] = 1044
     elif mutation == "wrong_bedrock":
-        workflow["cutover"]["bedrock"]["configuration"]["s3Config"][
-            "keyPrefix"
-        ] = "other/"
-        workflow["cutover"]["bedrock"][
-            "configuration_sha256"
-        ] = evidence.canonical_sha256(
+        workflow["cutover"]["bedrock"]["configuration"]["s3Config"]["keyPrefix"] = "other/"
+        workflow["cutover"]["bedrock"]["configuration_sha256"] = evidence.canonical_sha256(
             workflow["cutover"]["bedrock"]["configuration"]
         )
     elif mutation == "missing_ledger":
@@ -519,9 +489,7 @@ def test_versioning_workflow_accepts_fresh_inventory_evidence_hashes() -> None:
     for index, inventory_hash in enumerate(("1" * 64, "2" * 64), 1):
         observation = workflow["post_settle_observations"][index - 1]
         observation["quiescence"]["inventory_sha256"] = inventory_hash
-        observation["quiescence_sha256"] = evidence.canonical_sha256(
-            observation["quiescence"]
-        )
+        observation["quiescence_sha256"] = evidence.canonical_sha256(observation["quiescence"])
     workflow["final_recheck"]["quiescence"]["inventory_sha256"] = "3" * 64
     workflow["final_recheck"]["quiescence_sha256"] = evidence.canonical_sha256(
         workflow["final_recheck"]["quiescence"]
@@ -530,8 +498,8 @@ def test_versioning_workflow_accepts_fresh_inventory_evidence_hashes() -> None:
     del workflow_claims["durable_ledger"]
     del workflow_claims["workflow_sha256"]
     recorded_at = workflow["durable_ledger"]["recorded_at_epoch"]
-    workflow["durable_ledger"]["workflow_claims_sha256"] = (
-        evidence.canonical_sha256(workflow_claims)
+    workflow["durable_ledger"]["workflow_claims_sha256"] = evidence.canonical_sha256(
+        workflow_claims
     )
     workflow["durable_ledger"]["item_sha256"] = evidence.canonical_sha256(
         evidence._versioning_ledger_item(
@@ -695,9 +663,7 @@ def test_exact_s3_export_binds_version_metadata_file_and_time(tmp_path: Path) ->
         )
 
     mutated_pre_download_identity = copy.deepcopy(binding)
-    mutated_pre_download_identity["file"]["acquisition_identity_before"][
-        "inode"
-    ] += 1
+    mutated_pre_download_identity["file"]["acquisition_identity_before"]["inode"] += 1
     with pytest.raises(evidence.ContractError):
         evidence.verify_exact_s3_export(
             _ExportAws(),
@@ -788,9 +754,7 @@ def _challenge() -> dict[str, Any]:
         "ledger_record_id": "sns-challenge#12345678-1234-4abc-8abc-123456789abc",
         "topic_arn": evidence.CANONICAL_TOPIC,
         "message_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        "message_id_sha256": hashlib.sha256(
-            b"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        ).hexdigest(),
+        "message_id_sha256": hashlib.sha256(b"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").hexdigest(),
         "challenge_nonce": "3" * 64,
         "challenge_nonce_sha256": hashlib.sha256(("3" * 64).encode()).hexdigest(),
         "published_at_epoch": 200,
@@ -819,23 +783,17 @@ def _challenge() -> dict[str, Any]:
         "caller_identity_observed_at_epoch": 198,
         "inventory_contract": inventory,
         "inventory_sha256": evidence.canonical_sha256(inventory),
-        "destination_state_sha256": evidence.canonical_sha256(
-            inventory["destination"]
-        ),
+        "destination_state_sha256": evidence.canonical_sha256(inventory["destination"]),
         "subscription_metadata_sha256": evidence.canonical_sha256(
             inventory["subscription_metadata"]
         ),
-        "raw_reference_set_sha256": evidence.canonical_sha256(
-            inventory["references"]
-        ),
+        "raw_reference_set_sha256": evidence.canonical_sha256(inventory["references"]),
         "ack_kms_key_arn": KEY_ARN,
         "ack_kms_key_metadata": metadata,
         "ack_kms_key_metadata_sha256": evidence.canonical_sha256(metadata),
         "ack_kms_key_request_id_sha256": "8" * 64,
     }
-    challenge["caller_identity_sha256"] = evidence.canonical_sha256(
-        challenge["caller_identity"]
-    )
+    challenge["caller_identity_sha256"] = evidence.canonical_sha256(challenge["caller_identity"])
     challenge["challenge_sha256"] = evidence.canonical_sha256(challenge)
     return challenge
 
@@ -857,24 +815,20 @@ def test_sns_challenge_rejects_arbitrary_hash_destination_and_time() -> None:
         evidence.validate_sns_challenge(arbitrary)
 
     normalized = _challenge()
-    normalized["inventory_contract"]["destination"]["subscription"][
-        "endpoint"
-    ] = f" {evidence.APPROVED_EMAIL} "
+    normalized["inventory_contract"]["destination"]["subscription"]["endpoint"] = (
+        f" {evidence.APPROVED_EMAIL} "
+    )
     normalized["destination_state_sha256"] = evidence.canonical_sha256(
         normalized["inventory_contract"]["destination"]
     )
-    normalized["inventory_sha256"] = evidence.canonical_sha256(
-        normalized["inventory_contract"]
-    )
+    normalized["inventory_sha256"] = evidence.canonical_sha256(normalized["inventory_contract"])
     _rehash_challenge(normalized)
     with pytest.raises(evidence.ContractError):
         evidence.validate_sns_challenge(normalized)
 
     inverted = _challenge()
     inverted["inventory_contract"]["source_pages"][0]["aws_date_epoch"] = 201
-    inverted["inventory_sha256"] = evidence.canonical_sha256(
-        inverted["inventory_contract"]
-    )
+    inverted["inventory_sha256"] = evidence.canonical_sha256(inverted["inventory_contract"])
     _rehash_challenge(inverted)
     with pytest.raises(evidence.ContractError):
         evidence.validate_sns_challenge(inverted)
@@ -893,9 +847,7 @@ def test_recipient_ack_rejects_other_message_and_expiry_before_kms() -> None:
         "recipient_email": evidence.APPROVED_EMAIL,
         "received_at_epoch": 205,
         "expires_at_epoch": 300,
-        "signer_principal_arn": (
-            evidence.ACK_SIGNER_ARN_PREFIX + "recipient-session"
-        ),
+        "signer_principal_arn": (evidence.ACK_SIGNER_ARN_PREFIX + "recipient-session"),
     }
     ack = {
         "kind": "teamagent-sns-recipient-signed-ack",
@@ -947,11 +899,7 @@ def _checkpoint(
     dual: bool,
     created_at: int,
 ) -> dict[str, Any]:
-    publisher_id = (
-        "cloudwatch.metric-alarm:alarm-a"
-        if phase == "publisher_checkpoint"
-        else ""
-    )
+    publisher_id = "cloudwatch.metric-alarm:alarm-a" if phase == "publisher_checkpoint" else ""
     state = _publisher_state(dual=dual)
     ids = sorted(state)
     legacy_ids = ids if dual else []
@@ -992,9 +940,7 @@ def _checkpoint(
             "mode": "restore-exact-publisher-checkpoint",
             "automatic": True,
             "publisher_topic_state": {
-                publisher_id: previous["postcondition"]["publisher_topic_state"][
-                    publisher_id
-                ]
+                publisher_id: previous["postcondition"]["publisher_topic_state"][publisher_id]
             },
         }
     elif phase in {"canonical_delivery_confirmed", "legacy_reference_zero"}:
@@ -1093,9 +1039,7 @@ def test_alarm_migration_rejects_skip_rollback_hash_and_time_mutation() -> None:
         )
 
     arbitrary_delivery = copy.deepcopy(chain[2])
-    arbitrary_delivery["postcondition"]["delivery_verification"] = {
-        "verified": True
-    }
+    arbitrary_delivery["postcondition"]["delivery_verification"] = {"verified": True}
     arbitrary_delivery["postcondition_receipt_sha256"] = evidence.canonical_sha256(
         arbitrary_delivery["postcondition"]
     )
@@ -1105,12 +1049,8 @@ def test_alarm_migration_rejects_skip_rollback_hash_and_time_mutation() -> None:
             "phase": arbitrary_delivery["phase"],
             "publisher_id": arbitrary_delivery["publisher_id"],
             "inventory_sha256": arbitrary_delivery["inventory_sha256"],
-            "postcondition_sha256": arbitrary_delivery[
-                "postcondition_receipt_sha256"
-            ],
-            "delivery_receipt_sha256": arbitrary_delivery[
-                "delivery_receipt_sha256"
-            ],
+            "postcondition_sha256": arbitrary_delivery["postcondition_receipt_sha256"],
+            "delivery_receipt_sha256": arbitrary_delivery["delivery_receipt_sha256"],
         }
     )
     with pytest.raises(evidence.ContractError):
@@ -1138,9 +1078,7 @@ def test_alarm_migration_rejects_skip_rollback_hash_and_time_mutation() -> None:
 
 def test_runtime_evidence_authority_is_main_owned_after_one_time_bootstrap() -> None:
     terraform = (PROJECT_ROOT / "infra/terraform/runtime_evidence.tf").read_text()
-    manifest = (
-        PROJECT_ROOT / "infra/deploy/terraform_runtime_migrations.json"
-    ).read_text()
+    manifest = (PROJECT_ROOT / "infra/deploy/terraform_runtime_migrations.json").read_text()
     assert 'resource "aws_kms_key" "alarm_recipient_ack"' in terraform
     assert 'resource "aws_iam_role" "alarm_recipient_ack_signer"' in terraform
     assert 'resource "aws_iam_role" "runtime_automation"' in terraform

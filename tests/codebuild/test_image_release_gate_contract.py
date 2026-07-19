@@ -271,9 +271,7 @@ def test_saved_gate_query_is_consumed_before_terraform_apply_can_start() -> None
         "_consume_applying_deployment_intent(",
         evidence.index("def validate_deployment_preflight"),
     )
-    assert guard.index("validate-deployment-preflight") < guard.index(
-        'python3 "$APPLY_SUPERVISOR"'
-    )
+    assert guard.index("validate-deployment-preflight") < guard.index('python3 "$APPLY_SUPERVISOR"')
 
 
 def test_every_discovered_ecs_task_definition_depends_on_release_gate() -> None:
@@ -316,9 +314,7 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
     planner = PLAN_LAUNCHER.read_text(encoding="utf-8")
     applier = APPLY_LAUNCHER.read_text(encoding="utf-8")
     runner = GATE_RUNNER.read_text(encoding="utf-8")
-    guard = (
-        ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
-    ).read_text(encoding="utf-8")
+    guard = (ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh").read_text(encoding="utf-8")
 
     for retired in (planner, applier):
         assert "Retired:" in retired
@@ -326,7 +322,7 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
         assert "exit 64" in retired
         assert "terraform plan" not in retired
         assert "terraform apply" not in retired
-    assert 'TF_ARGS=(' in guard
+    assert "TF_ARGS=(" in guard
     assert 'terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"' in guard
     assert "-refresh=true" in guard
     assert "-lock-timeout=5m" in guard
@@ -343,8 +339,7 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
     assert "terraform_apply_supervisor.py" in guard
     assert "heartbeat-deployment-lock" in guard
     assert (
-        "assumed-role/teamagent-dev-terraform-runtime-automation/"
-        "teamagent-terraform-worker"
+        "assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
     ) in runner
     assert "arn:aws:iam::718959508629:user/AIIAdev" not in runner
     assert ("arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate") in runner

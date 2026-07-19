@@ -326,8 +326,10 @@ def test_worker_runtime_and_iam_hardening_contracts() -> None:
     x_buzz = (tf_dir / "x_research.tf").read_text(encoding="utf-8")
     shared = (tf_dir / "fargate.tf").read_text(encoding="utf-8")
     shared = shared[
-        shared.index("teamagent_runtime_container = {") :
-        shared.index("teamagent_runtime_container = {") + 900
+        shared.index("teamagent_runtime_container = {") : shared.index(
+            "teamagent_runtime_container = {"
+        )
+        + 900
     ]
 
     for body in (tiktok, x_buzz):

@@ -948,10 +948,7 @@ def test_terraform_gate_rejects_unsigned_wrong_commit_tag_and_old_receipt(
 
 def _saved_gate_query(*, intent_id: str = INTENT_ID) -> dict[str, str]:
     images = {
-        "mcp": (
-            "718959508629.dkr.ecr.ap-northeast-1."
-            f"amazonaws.com/teamagent-mcp@{DIGEST}"
-        ),
+        "mcp": (f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@{DIGEST}"),
         "openclaw": "",
         "tiktok": "",
     }
@@ -977,17 +974,13 @@ def _saved_gate_query(*, intent_id: str = INTENT_ID) -> dict[str, str]:
 
 
 DEFAULT_GATE_QUERY = _saved_gate_query()
-DEFAULT_GATE_QUERY_SHA256 = hashlib.sha256(
-    EVIDENCE.canonical_bytes(DEFAULT_GATE_QUERY)
-).hexdigest()
+DEFAULT_GATE_QUERY_SHA256 = hashlib.sha256(EVIDENCE.canonical_bytes(DEFAULT_GATE_QUERY)).hexdigest()
 DEFAULT_GATE_QUERY_JSON = json.dumps(
     DEFAULT_GATE_QUERY,
     sort_keys=True,
     separators=(",", ":"),
 )
-RECEIPT_AUTHORIZATION_EXPIRES_AT = str(
-    int((NOW + dt.timedelta(minutes=25)).timestamp())
-)
+RECEIPT_AUTHORIZATION_EXPIRES_AT = str(int((NOW + dt.timedelta(minutes=25)).timestamp()))
 
 
 def _gate_metadata_fields(
@@ -995,17 +988,13 @@ def _gate_metadata_fields(
 ) -> dict[str, str]:
     selected = query or DEFAULT_GATE_QUERY
     return {
-        "gate_query_sha256": hashlib.sha256(
-            EVIDENCE.canonical_bytes(selected)
-        ).hexdigest(),
+        "gate_query_sha256": hashlib.sha256(EVIDENCE.canonical_bytes(selected)).hexdigest(),
         "gate_query_json": json.dumps(
             selected,
             sort_keys=True,
             separators=(",", ":"),
         ),
-        "receipt_authorization_expires_at": (
-            RECEIPT_AUTHORIZATION_EXPIRES_AT
-        ),
+        "receipt_authorization_expires_at": (RECEIPT_AUTHORIZATION_EXPIRES_AT),
     }
 
 
@@ -1051,9 +1040,7 @@ def _plan_json(
                                 },
                                 "shared_generation_ledger": {},
                                 "hmac_release_bindings": {},
-                                "deployment_gate_query": _saved_gate_query(
-                                    intent_id=intent_id
-                                ),
+                                "deployment_gate_query": _saved_gate_query(intent_id=intent_id),
                                 "receipt_authorization_expires_at": (
                                     RECEIPT_AUTHORIZATION_EXPIRES_AT
                                 ),
@@ -1095,32 +1082,26 @@ def test_saved_plan_metadata_binds_intent_context_claims_and_plan_hash(
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
         "gate_query_sha256": DEFAULT_GATE_QUERY_SHA256,
         "gate_query_json": DEFAULT_GATE_QUERY_JSON,
-        "receipt_authorization_expires_at": (
-            RECEIPT_AUTHORIZATION_EXPIRES_AT
-        ),
+        "receipt_authorization_expires_at": (RECEIPT_AUTHORIZATION_EXPIRES_AT),
     }
 
     allowed_import = _plan_json()
     allowed_import["resource_changes"].append(
         {
-            "address": (
-                "aws_cloudwatch_log_group.ecs_containerinsights_teamagent"
-            ),
+            "address": ("aws_cloudwatch_log_group.ecs_containerinsights_teamagent"),
             "change": {
                 "actions": ["update"],
-                "importing": {
-                    "id": (
-                        "/aws/ecs/containerinsights/"
-                        "teamagent-dev/performance"
-                    )
-                },
+                "importing": {"id": ("/aws/ecs/containerinsights/teamagent-dev/performance")},
             },
         }
     )
-    assert EVIDENCE.deployment_plan_metadata(
-        plan,
-        plan_json=allowed_import,
-    ) == metadata
+    assert (
+        EVIDENCE.deployment_plan_metadata(
+            plan,
+            plan_json=allowed_import,
+        )
+        == metadata
+    )
     allowed_import["resource_changes"][-1]["change"]["actions"] = [
         "delete",
         "create",
@@ -1228,9 +1209,9 @@ def test_saved_plan_binds_generic_media_task_replacement_to_mcp_media_receipt(
     plan = tmp_path / "release.tfplan"
     plan.write_bytes(b"opaque saved terraform plan")
     media_rollforward = _plan_json()
-    gate_input = media_rollforward["planned_values"]["root_module"]["resources"][0][
-        "values"
-    ]["input"]
+    gate_input = media_rollforward["planned_values"]["root_module"]["resources"][0]["values"][
+        "input"
+    ]
     media_rollforward["resource_changes"].append(
         {
             "address": "aws_ecs_task_definition.tiktok_acquire[0]",
@@ -1258,9 +1239,9 @@ def test_saved_plan_binds_generic_media_task_replacement_to_mcp_media_receipt(
 
     assert metadata["plan_transition_sha256"] != EMPTY_TRANSITION_SHA256
 
-    media_rollforward["resource_changes"][-1]["change"]["after"][
-        "container_definitions"
-    ] = json.dumps([{"name": "acquire", "image": "legacy-image"}])
+    media_rollforward["resource_changes"][-1]["change"]["after"]["container_definitions"] = (
+        json.dumps([{"name": "acquire", "image": "legacy-image"}])
+    )
     with pytest.raises(EVIDENCE.EvidenceError, match="fresh rollback receipt"):
         EVIDENCE.deployment_plan_metadata(
             plan,
@@ -1548,14 +1529,10 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
                 "receipt_claim_id": claim_id,
                 "intent_id": metadata["intent_id"],
                 "plan_sha256": metadata["plan_sha256"],
-                "deployment_context_sha256": metadata[
-                    "deployment_context_sha256"
-                ],
+                "deployment_context_sha256": metadata["deployment_context_sha256"],
                 "receipt_claims_sha256": metadata["receipt_claims_sha256"],
                 "gate_query_sha256": metadata["gate_query_sha256"],
-                "terraform_context_sha256": applying[
-                    "terraform_context_sha256"
-                ],
+                "terraform_context_sha256": applying["terraform_context_sha256"],
                 "apply_attempt_id": apply_attempt_id,
                 "consumed_at": consumed_at,
                 "audit_expires_at": applying["audit_expires_at"],
@@ -1572,9 +1549,7 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
         lambda gate_query, *, now: {
             "deployment_context_sha256": context_sha256,
             "receipt_claims_sha256": claims_sha256,
-            "receipt_authorization_expires_at": (
-                RECEIPT_AUTHORIZATION_EXPIRES_AT
-            ),
+            "receipt_authorization_expires_at": (RECEIPT_AUTHORIZATION_EXPIRES_AT),
             "release_channels_json": json.dumps({"mcp": "active", "tiktok": "active"}),
         },
     )
@@ -1682,9 +1657,7 @@ def test_preflight_revalidates_and_consumes_before_returning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     claim_id = "c" * 64
-    claims_sha256 = hashlib.sha256(
-        EVIDENCE.canonical_bytes([claim_id])
-    ).hexdigest()
+    claims_sha256 = hashlib.sha256(EVIDENCE.canonical_bytes([claim_id])).hexdigest()
     metadata = {
         "intent_id": INTENT_ID,
         "plan_sha256": "d" * 64,
@@ -2027,14 +2000,10 @@ def test_same_intent_and_same_receipt_cannot_authorize_two_deployments(
                 "receipt_claim_id": claim,
                 "intent_id": metadata["intent_id"],
                 "plan_sha256": metadata["plan_sha256"],
-                "deployment_context_sha256": metadata[
-                    "deployment_context_sha256"
-                ],
+                "deployment_context_sha256": metadata["deployment_context_sha256"],
                 "receipt_claims_sha256": metadata["receipt_claims_sha256"],
                 "gate_query_sha256": metadata["gate_query_sha256"],
-                "terraform_context_sha256": applying[
-                    "terraform_context_sha256"
-                ],
+                "terraform_context_sha256": applying["terraform_context_sha256"],
                 "apply_attempt_id": apply_attempt_id,
                 "consumed_at": consumed_at,
                 "audit_expires_at": applying["audit_expires_at"],
@@ -2208,16 +2177,13 @@ def test_receipt_consumption_uses_one_conditional_dynamodb_transaction(
     assert "#state = :applying" in transaction[1]["Update"]["ConditionExpression"]
     assert "apply_attempt_id = :attempt" in transaction[1]["Update"]["ConditionExpression"]
     assert (
-        "authorization_expires_at > :now_epoch"
-        in transaction[1]["Update"]["ConditionExpression"]
+        "authorization_expires_at > :now_epoch" in transaction[1]["Update"]["ConditionExpression"]
     )
     assert transaction[2]["Put"]["ConditionExpression"] == "attribute_not_exists(record_id)"
     claim_item = transaction[2]["Put"]["Item"]
     assert claim_item["deployment_context_sha256"] == {"S": "e" * 64}
     assert claim_item["receipt_claims_sha256"] == {"S": claims_sha256}
-    assert claim_item["gate_query_sha256"] == {
-        "S": DEFAULT_GATE_QUERY_SHA256
-    }
+    assert claim_item["gate_query_sha256"] == {"S": DEFAULT_GATE_QUERY_SHA256}
     assert claim_item["terraform_context_sha256"] == {"S": "c" * 64}
     assert claim_item["apply_attempt_id"] == {"S": ATTEMPT_ID}
     consume_token = captured[captured.index("--client-request-token") + 1]

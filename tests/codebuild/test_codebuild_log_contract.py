@@ -77,7 +77,7 @@ def test_all_codebuild_log_groups_have_explicit_thirty_day_retention() -> None:
         assert f"group_name = {log_group}" in project_body
     retired = _resource(body, "aws_codebuild_project", "image")
     assert "cloudwatch_logs {" in retired
-    assert "status = \"DISABLED\"" in retired
+    assert 'status = "DISABLED"' in retired
     assert "group_name" not in retired
     assert "stream_name" not in retired
     assert '"logs:CreateLogGroup"' not in body

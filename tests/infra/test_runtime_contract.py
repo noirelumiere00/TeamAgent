@@ -502,9 +502,7 @@ def test_static_completeness_discovers_every_core_and_media_image_consumer() -> 
         for value in CONSUMERS["media_image_consumers"].values()
     }
     assert (
-        _all_declared_task_consumers(
-            r"image\s*=\s*(?:var\.mcp_image|var\.x_buzz_image)"
-        )
+        _all_declared_task_consumers(r"image\s*=\s*(?:var\.mcp_image|var\.x_buzz_image)")
         == expected_core
     )
     assert _all_declared_task_consumers(r"image\s*=\s*local\.media_worker_image") == expected_media

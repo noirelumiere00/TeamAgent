@@ -219,9 +219,7 @@ def test_first_enablement_wait_and_exact_guard_allowlist_are_documented() -> Non
     assert "teamagent-log-versioning-cutover-receipt" in guard
     assert "validate_log_versioning_stage_manifest" in guard
     assert "verify_versioning_attestation_receipt" in guard
-    evidence = (
-        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
-    ).read_text(encoding="utf-8")
+    evidence = (PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py").read_text(encoding="utf-8")
     assert "disconnect_all_writers" in evidence
     assert "first_time_versioning_cutover" in evidence
     assert '"s3api",\n            "put-bucket-versioning"' in evidence
@@ -305,11 +303,7 @@ def _versioning_event(
         event_epoch,
         tz=UTC,
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    outer_event_time = (
-        event_time.removesuffix("Z") + "+00:00"
-        if outer_utc_offset
-        else event_time
-    )
+    outer_event_time = event_time.removesuffix("Z") + "+00:00" if outer_utc_offset else event_time
     event_id = hashlib.sha256(f"{bucket}:{event_time}:{status}".encode()).hexdigest()
     inner = {
         "eventVersion": "1.09",
@@ -368,8 +362,7 @@ def _run_precutover_capture(
             "IncludeGlobalServiceEvents": True,
             "LogFileValidationEnabled": True,
             "KmsKeyId": (
-                "arn:aws:kms:ap-northeast-1:718959508629:key/"
-                "11111111-2222-3333-4444-555555555555"
+                "arn:aws:kms:ap-northeast-1:718959508629:key/11111111-2222-3333-4444-555555555555"
             ),
         }
     }
@@ -387,9 +380,7 @@ def _run_precutover_capture(
     fixtures = {
         "trail.json": trail,
         "trail-status.json": {"IsLogging": cloudtrail_logging},
-        "bedrock.json": (
-            {"loggingConfig": bedrock_config} if bedrock_present else {}
-        ),
+        "bedrock.json": ({"loggingConfig": bedrock_config} if bedrock_present else {}),
     }
     for filename, value in fixtures.items():
         (fixture_dir / filename).write_text(json.dumps(value), encoding="utf-8")
@@ -418,53 +409,29 @@ def _run_precutover_capture(
             "LOG_VERSIONING_SETTLE_SECONDS=900",
             f"TMP_ROOT={str(fixture_dir)!r}",
             f"OBSERVED_AT={observed_at}",
-            (
-                "sha256_text() { "
-                "openssl dgst -sha256 | awk '{print $NF}'; }"
-            ),
-            (
-                "sha256_file() { "
-                "openssl dgst -sha256 \"$1\" | awk '{print $NF}'; }"
-            ),
+            ("sha256_text() { openssl dgst -sha256 | awk '{print $NF}'; }"),
+            ("sha256_file() { openssl dgst -sha256 \"$1\" | awk '{print $NF}'; }"),
             'die() { echo "★ $*" >&2; return 1; }',
             "aws_cli() {",
             '  case "$1:$2" in',
-            (
-                "    cloudtrail:get-trail) "
-                f"cat {str(fixture_dir / 'trail.json')!r} ;;"
-            ),
-            (
-                "    cloudtrail:get-trail-status) "
-                f"cat {str(fixture_dir / 'trail-status.json')!r} ;;"
-            ),
+            (f"    cloudtrail:get-trail) cat {str(fixture_dir / 'trail.json')!r} ;;"),
+            (f"    cloudtrail:get-trail-status) cat {str(fixture_dir / 'trail-status.json')!r} ;;"),
             (
                 "    bedrock:get-model-invocation-logging-configuration) "
                 f"cat {str(fixture_dir / 'bedrock.json')!r} ;;"
             ),
             "    cloudtrail:lookup-events)",
             '      case "$*" in',
-            (
-                "        *bedrock-logs*) "
-                f"cat {str(fixture_dir / 'bedrock-events.json')!r} ;;"
-            ),
-            (
-                "        *) "
-                f"cat {str(fixture_dir / 'cloudtrail-events.json')!r} ;;"
-            ),
+            (f"        *bedrock-logs*) cat {str(fixture_dir / 'bedrock-events.json')!r} ;;"),
+            (f"        *) cat {str(fixture_dir / 'cloudtrail-events.json')!r} ;;"),
             "      esac ;;",
             '    *) echo "unexpected aws fixture call: $*" >&2; return 64 ;;',
             "  esac",
             "}",
             functions.group(0),
             'capture_log_producer_off_contract "$TMP_ROOT/producer-off.json"',
-            (
-                'write_log_cutover_contract "$TMP_ROOT/producer-off.json" '
-                '"$TMP_ROOT/cutover.json"'
-            ),
-            (
-                'capture_versioning_enablement_contract '
-                '"$TMP_ROOT/enablement.json"'
-            ),
+            ('write_log_cutover_contract "$TMP_ROOT/producer-off.json" "$TMP_ROOT/cutover.json"'),
+            ('capture_versioning_enablement_contract "$TMP_ROOT/enablement.json"'),
             (
                 'verify_versioning_settle_window "$TMP_ROOT/enablement.json" '
                 '"$OBSERVED_AT" >/dev/null'
@@ -483,9 +450,7 @@ def test_precutover_capture_requires_both_producers_off_and_settled_events(
     tmp_path: Path,
 ) -> None:
     guard = GUARD.read_text(encoding="utf-8")
-    evidence = (
-        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
-    ).read_text(encoding="utf-8")
+    evidence = (PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py").read_text(encoding="utf-8")
     assert "lookup-events" not in guard
     assert "lookup-events" not in evidence
     assert "later observation alone is forbidden" in evidence
@@ -505,18 +470,27 @@ def test_precutover_capture_requires_both_producers_off_and_settled_events(
     )
     assert equivalent_offset.returncode == 0, equivalent_offset.stderr
 
-    assert _run_precutover_capture(
-        tmp_path,
-        cloudtrail_logging=True,
-    ).returncode != 0
-    assert _run_precutover_capture(
-        tmp_path,
-        bedrock_present=True,
-    ).returncode != 0
-    assert _run_precutover_capture(
-        tmp_path,
-        event_status="Suspended",
-    ).returncode != 0
+    assert (
+        _run_precutover_capture(
+            tmp_path,
+            cloudtrail_logging=True,
+        ).returncode
+        != 0
+    )
+    assert (
+        _run_precutover_capture(
+            tmp_path,
+            bedrock_present=True,
+        ).returncode
+        != 0
+    )
+    assert (
+        _run_precutover_capture(
+            tmp_path,
+            event_status="Suspended",
+        ).returncode
+        != 0
+    )
     too_soon = _run_precutover_capture(
         tmp_path,
         event_age_seconds=899,
@@ -555,9 +529,7 @@ def _run_log_readiness_validator(
                             "configuration_present": False,
                             "rule_count": 0,
                             "deletion_rule_count": 0,
-                            "canonical_sha256": hashlib.sha256(
-                                b'{"Rules":[]}\n'
-                            ).hexdigest(),
+                            "canonical_sha256": hashlib.sha256(b'{"Rules":[]}\n').hexdigest(),
                         },
                     },
                     "bedrock": {
@@ -582,24 +554,15 @@ def _run_log_readiness_validator(
             'mkdir -p "$TMP_ROOT"',
             'chmod 700 "$TMP_ROOT"',
             "sha256_file() { openssl dgst -sha256 \"$1\" | awk '{print $NF}'; }",
-            (
-                "stat_identity() { stat -f '%d:%i' \"$1\" 2>/dev/null || "
-                "stat -c '%d:%i' \"$1\"; }"
-            ),
-            (
-                "stat_inode() { stat -f '%i' \"$1\" 2>/dev/null || "
-                "stat -c '%i' \"$1\"; }"
-            ),
-            (
-                "stat_size() { stat -f '%z' \"$1\" 2>/dev/null || "
-                "stat -c '%s' \"$1\"; }"
-            ),
+            ("stat_identity() { stat -f '%d:%i' \"$1\" 2>/dev/null || stat -c '%d:%i' \"$1\"; }"),
+            ("stat_inode() { stat -f '%i' \"$1\" 2>/dev/null || stat -c '%i' \"$1\"; }"),
+            ("stat_size() { stat -f '%z' \"$1\" 2>/dev/null || stat -c '%s' \"$1\"; }"),
             (
                 "secure_existing_file() { "
-                "[ ! -L \"$1\" ] && [ -f \"$1\" ] || return 1; "
-                "[ \"$(stat -f '%Lp' \"$1\" 2>/dev/null || "
-                "stat -c '%a' \"$1\")\" = \"${2:-600}\" ] || return 1; "
-                "realpath \"$1\"; }"
+                '[ ! -L "$1" ] && [ -f "$1" ] || return 1; '
+                '[ "$(stat -f \'%Lp\' "$1" 2>/dev/null || '
+                'stat -c \'%a\' "$1")" = "${2:-600}" ] || return 1; '
+                'realpath "$1"; }'
             ),
             'die() { echo "★ $*" >&2; return 1; }',
             functions.group(0),
@@ -635,9 +598,7 @@ def test_log_readiness_receipt_rehashes_exports_and_rejects_time_inversion(
     tmp_path: Path,
 ) -> None:
     guard = GUARD.read_text(encoding="utf-8")
-    evidence = (
-        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
-    ).read_text(encoding="utf-8")
+    evidence = (PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py").read_text(encoding="utf-8")
     for required in (
         "head-object",
         "get-object",
@@ -660,9 +621,7 @@ def test_log_readiness_receipt_rehashes_exports_and_rejects_time_inversion(
     tmp_path.chmod(0o700)
     now = int(time.time())
     versioning_observed_at = now - 1200
-    versioning: dict[str, object] = {
-        "pre_cutover_observed_at_epoch": versioning_observed_at
-    }
+    versioning: dict[str, object] = {"pre_cutover_observed_at_epoch": versioning_observed_at}
     versioning_sha = hashlib.sha256(json.dumps(versioning).encode()).hexdigest()
 
     log_groups = [
@@ -742,10 +701,7 @@ def test_log_readiness_receipt_rehashes_exports_and_rejects_time_inversion(
             "bucket": "teamagent-dev-bedrock-logs-718959508629",
             "latest_delivery": delivery(
                 delivery_files["bedrock-delivery"],
-                (
-                    "bedrock/AWSLogs/718959508629/"
-                    "BedrockModelInvocationLogs/event.json.gz"
-                ),
+                ("bedrock/AWSLogs/718959508629/BedrockModelInvocationLogs/event.json.gz"),
             ),
         },
     }
@@ -770,12 +726,8 @@ def test_log_readiness_receipt_rehashes_exports_and_rejects_time_inversion(
         artifact["retention_export_manifest_sha256"] = hashlib.sha256(
             retention_path.read_bytes()
         ).hexdigest()
-        artifact["retention_export_manifest_inode"] = str(
-            retention_path.stat().st_ino
-        )
-        artifact["retention_export_manifest_size_bytes"] = (
-            retention_path.stat().st_size
-        )
+        artifact["retention_export_manifest_inode"] = str(retention_path.stat().st_ino)
+        artifact["retention_export_manifest_size_bytes"] = retention_path.stat().st_size
 
     def bind_evidence(
         artifact: dict[str, object],
@@ -787,9 +739,7 @@ def test_log_readiness_receipt_rehashes_exports_and_rejects_time_inversion(
         )
         evidence_path.chmod(0o600)
         bound = copy.deepcopy(receipt or readiness_base)
-        bound["evidence_artifact_sha256"] = hashlib.sha256(
-            evidence_path.read_bytes()
-        ).hexdigest()
+        bound["evidence_artifact_sha256"] = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
         bound["evidence_artifact_inode"] = str(evidence_path.stat().st_ino)
         bound["evidence_artifact_size_bytes"] = evidence_path.stat().st_size
         return bound
@@ -813,31 +763,18 @@ def test_log_readiness_receipt_rehashes_exports_and_rejects_time_inversion(
         "expires_at_epoch": now + 3600,
         "retention_export_evidence_sha256": "a" * 64,
     }
-    assert (
-        _run_log_readiness_validator(tmp_path, dummy_hashes, versioning).returncode
-        != 0
-    )
+    assert _run_log_readiness_validator(tmp_path, dummy_hashes, versioning).returncode != 0
 
     original_delivery = delivery_files["cloudtrail-log"].read_bytes()
-    delivery_files["cloudtrail-log"].write_bytes(
-        b"X" + original_delivery[1:]
-    )
-    assert (
-        _run_log_readiness_validator(tmp_path, readiness, versioning).returncode
-        != 0
-    )
+    delivery_files["cloudtrail-log"].write_bytes(b"X" + original_delivery[1:])
+    assert _run_log_readiness_validator(tmp_path, readiness, versioning).returncode != 0
     delivery_files["cloudtrail-log"].write_bytes(original_delivery)
-    assert _run_log_readiness_validator(
-        tmp_path, readiness, versioning
-    ).returncode == 0
+    assert _run_log_readiness_validator(tmp_path, readiness, versioning).returncode == 0
 
     retention_export = retention_files[log_groups[0]]
     original_retention_export = retention_export.read_bytes()
     retention_export.write_bytes(b"X" + original_retention_export[1:])
-    assert (
-        _run_log_readiness_validator(tmp_path, readiness, versioning).returncode
-        != 0
-    )
+    assert _run_log_readiness_validator(tmp_path, readiness, versioning).returncode != 0
     retention_export.write_bytes(original_retention_export)
 
     wrong_inode_evidence = copy.deepcopy(evidence_artifact)
@@ -943,9 +880,7 @@ def test_alarm_delivery_receipt_binds_exclusive_exact_live_channel(
     tmp_path: Path,
 ) -> None:
     guard = GUARD.read_text(encoding="utf-8")
-    evidence = (
-        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
-    ).read_text(encoding="utf-8")
+    evidence = (PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py").read_text(encoding="utf-8")
     for required in (
         "issue-sns-challenge",
         "sign-sns-ack",
@@ -968,18 +903,10 @@ def test_alarm_delivery_receipt_binds_exclusive_exact_live_channel(
 
     now = int(time.time())
     email_hash = "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
-    destination_hash = (
-        "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9"
-    )
+    destination_hash = "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9"
     subscription_hash = "1" * 64
-    topic = (
-        "arn:aws:sns:ap-northeast-1:718959508629:"
-        "teamagent-dev-openclaw-alarms"
-    )
-    chat_arn = (
-        "arn:aws:chatbot::718959508629:chat-configuration/"
-        "slack-channel/teamagent-dev-alerts"
-    )
+    topic = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms"
+    chat_arn = "arn:aws:chatbot::718959508629:chat-configuration/slack-channel/teamagent-dev-alerts"
     common_receipt: dict[str, object] = {
         "kind": "teamagent-alarm-delivery-test-receipt",
         "schema_version": 2,
@@ -1091,9 +1018,7 @@ def test_alarm_delivery_receipt_binds_exclusive_exact_live_channel(
         != 0
     )
     chatbot_snapshot = copy.deepcopy(email_snapshot)
-    chatbot_snapshot["alarm_delivery"]["attached_chatbot_configuration_arns"] = [
-        chat_arn
-    ]
+    chatbot_snapshot["alarm_delivery"]["attached_chatbot_configuration_arns"] = [chat_arn]
     chatbot_snapshot["alarm_delivery_observation"]["attached_chatbot_configurations"] = [
         {"arn": chat_arn, "state": "ENABLED"}
     ]
@@ -1186,9 +1111,7 @@ def _log_bucket_plan() -> dict[str, object]:
                 "Action": "s3:PutObject",
                 "Resource": f"{bedrock_bucket}/bedrock/*",
                 "Condition": {
-                    "StringNotEquals": {
-                        "aws:PrincipalServiceName": "bedrock.amazonaws.com"
-                    }
+                    "StringNotEquals": {"aws:PrincipalServiceName": "bedrock.amazonaws.com"}
                 },
             },
         ],

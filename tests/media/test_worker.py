@@ -595,11 +595,7 @@ class _FinalizeS3:
         self.list_calls += 1
         prefix = str(kwargs["Prefix"])
         return {
-            "Contents": [
-                {"Key": key}
-                for key in sorted(self.objects)
-                if key.startswith(prefix)
-            ]
+            "Contents": [{"Key": key} for key in sorted(self.objects) if key.startswith(prefix)]
         }
 
     def head_object(self, **kwargs: object) -> dict[str, object]:
@@ -621,8 +617,7 @@ def _terminal_timeout_backend(
     artifact = S3ObjectRef(
         bucket=request.output_bucket,
         key=(
-            f"{request.output_prefix}attempts/{lease.version}/"
-            f"{lease.attempt_id}/output/thumbnail"
+            f"{request.output_prefix}attempts/{lease.version}/{lease.attempt_id}/output/thumbnail"
         ),
         sha256=hashlib.sha256(b"jpeg").hexdigest(),
         size=4,

@@ -346,15 +346,13 @@ def test_config_loads_only_reviewed_plugins_and_not_browser() -> None:
 
 def test_internal_caller_identity_plugin_uses_installed_openclaw_schema() -> None:
     package = json.loads((ROOT / "infra/openclaw/caller-identity-plugin/package.json").read_text())
-    plugin = (
-        ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js"
-    ).read_text()
+    plugin = (ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js").read_text()
     assert package["openclaw"]["extensions"] == ["./dist/index.js"]
     assert "runtimeExtensions" not in package["openclaw"]
     assert package["openclaw"]["compat"]["pluginApi"] == ">=2026.7.1"
     assert "registerInteractiveHandler" in plugin
     assert "namespace: MAIL_DRAFT_ACTION_ID" in plugin
-    assert 'ctx?.auth?.isAuthorizedSender !== true' in plugin
+    assert "ctx?.auth?.isAuthorizedSender !== true" in plugin
     assert 'ctx?.trigger === "heartbeat"' in plugin
     assert "parseMailDraftSystemEvent" in plugin
     assert "interactionId !== expectedInteractionId" in plugin
@@ -1025,9 +1023,7 @@ def test_mcp_caller_claim_replay_contract_is_cluster_wide_and_least_privilege() 
     assert 'sid       = "ConsumeCallerClaimNonce"' in policy
     assert 'actions   = ["dynamodb:PutItem"]' in policy
     assert "aws_dynamodb_table.mcp_caller_claim_nonces.arn" in policy
-    nonce_statement = policy[
-        policy.index('sid       = "ConsumeCallerClaimNonce"') :
-    ]
+    nonce_statement = policy[policy.index('sid       = "ConsumeCallerClaimNonce"') :]
     next_statement = nonce_statement.find("\n  statement {", 1)
     if next_statement >= 0:
         nonce_statement = nonce_statement[:next_statement]
@@ -1088,8 +1084,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     assert "external-job-submit-s3-write" in effects
     fargate = FARGATE.read_text()
     terraform = "\n".join(
-        path.read_text()
-        for path in sorted((ROOT / "infra/terraform").glob("*.tf"))
+        path.read_text() for path in sorted((ROOT / "infra/terraform").glob("*.tf"))
     )
     for gate in (
         "USE_MAIL_SUMMARY_TOOL",

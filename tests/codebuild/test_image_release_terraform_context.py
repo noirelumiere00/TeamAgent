@@ -144,9 +144,7 @@ def test_context_allows_only_exact_unowned_existing_log_import() -> None:
     plan = _plan()
     address = "aws_cloudwatch_log_group.ecs_containerinsights_teamagent"
     import_id = "/aws/ecs/containerinsights/teamagent-dev/performance"
-    plan["configuration"]["root_module"]["resources"].append(
-        {"address": address}
-    )
+    plan["configuration"]["root_module"]["resources"].append({"address": address})
     plan["resource_changes"].append(
         {
             "address": address,
@@ -169,9 +167,7 @@ def test_context_allows_only_exact_unowned_existing_log_import() -> None:
     assert len(value["plan"]["address_ownership_sha256"]) == 64
 
     wrong_id = _plan()
-    wrong_id["configuration"]["root_module"]["resources"].append(
-        {"address": address}
-    )
+    wrong_id["configuration"]["root_module"]["resources"].append({"address": address})
     wrong_id["resource_changes"].append(
         {
             "address": address,
@@ -192,11 +188,7 @@ def test_context_allows_only_exact_unowned_existing_log_import() -> None:
 
     destructive = plan.copy()
     destructive["configuration"] = {
-        "root_module": {
-            "resources": list(
-                plan["configuration"]["root_module"]["resources"]
-            )
-        }
+        "root_module": {"resources": list(plan["configuration"]["root_module"]["resources"])}
     }
     destructive["resource_changes"] = [
         {
