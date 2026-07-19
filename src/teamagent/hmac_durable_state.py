@@ -28,7 +28,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from teamagent.runtime.worker_health import DEFAULT_BOT_HEARTBEAT, bot_heartbeat_healthy
+from teamagent.worker_health import DEFAULT_BOT_HEARTBEAT, bot_heartbeat_healthy
 from teamagent.worker_release import file_sha256, verify_release
 
 HMAC_STATE_REQUIRED_ENV = "TEAMAGENT_HMAC_STATE_REQUIRED"

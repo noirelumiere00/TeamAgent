@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-import teamagent.runtime.worker_health as health
+import teamagent.worker_health as health
 
 
 class _Socket:
