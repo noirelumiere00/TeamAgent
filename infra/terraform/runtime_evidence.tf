@@ -516,7 +516,7 @@ data "aws_iam_policy_document" "runtime_automation_control_plane" {
   }
 
   statement {
-    sid    = "DenyImageAndSigningMutation"
+    sid    = "DenyImageAndKeyMutation"
     effect = "Deny"
     actions = [
       "ecr:BatchDeleteImage",
@@ -526,9 +526,21 @@ data "aws_iam_policy_document" "runtime_automation_control_plane" {
       "ecr:UploadLayerPart",
       "kms:GenerateMac",
       "kms:ScheduleKeyDeletion",
-      "kms:Sign",
     ]
     resources = ["*"]
+  }
+
+  statement {
+    sid       = "DenyNonRolloutSigning"
+    effect    = "Deny"
+    actions   = ["kms:Sign"]
+    resources = ["*"]
+
+    condition {
+      test     = "ForAllValues:StringNotEquals"
+      variable = "kms:ResourceAliases"
+      values   = [local.openclaw_rollout_signing_alias]
+    }
   }
 
   statement {

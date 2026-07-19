@@ -8,8 +8,8 @@ digest-pinned distroless Node 24 base and run as UID/GID `65532`.
 
 The production bundle contract remains `release.ready=false`. The separate
 media subject, exact two-subject receipt emitter, signed final-HEAD registry
-evidence, and guarded post-apply functional rollback integration are not
-complete. A local PASS is therefore not production authorization.
+evidence, independent review, and real post-apply rollout/rollback evidence
+are not complete. A local PASS is therefore not production authorization.
 
 ## Runtime contract
 
@@ -172,13 +172,16 @@ release graph, one-time intent, and receipt claims. A started plan is never
 retried; an ambiguous failure requires reconciliation and fresh authorization.
 See `infra/terraform/README.md`.
 
-After apply, production GO additionally requires automated checks for exact
-ECS revision stability, an isolated one-off task, task-role Bedrock
-`Converse`, exact MCP tool inventory, Slack connection/mention/reply, signed
-durable result, and automatic rollback to the durable previous task.
-`run-live-rollout-gates.mjs` contains the validation logic but is not yet
-wired to the one-time Terraform flow. The release contract stays closed until
-that integration is independently reviewed.
+The canonical Terraform runtime guard now runs
+`run-live-rollout-gates.mjs` under the same deployment locks and before it
+records `APPLIED`. For a distinct OpenClaw task revision, it checks service
+stability, enumerates every running task before and after the Slack canary,
+runs an isolated task-role Bedrock/MCP canary, correlates the exact Slack reply
+to a candidate task log stream, and verifies a fixed-VersionId,
+COMPLIANCE-locked, SSE-KMS result signed by the fixed asymmetric KMS key. A
+one-use rollback authorization binds the apply attempt and old/new revisions;
+any post-apply gate failure restores and verifies the durable previous
+revision before either lock is released.
 
 The effective MCP authority is `effective-tool-scope.json`. The default
 Terraform task currently exposes 12 tools; the reviewed OpenClaw include list
@@ -195,6 +198,6 @@ secret that equals the MCP bearer. Bedrock uses only the ECS task role; static
 AWS credentials are forbidden.
 
 See `docs/openclaw/deploy_runbook.md`. Production remains NO-GO until the
-media/bundle and post-apply rollback integrations are complete, an independent
-review approves the final commit, and real signed
+media/bundle integration is complete, an independent review approves the
+final commit, and real signed rollout and forced-rollback
 CodeBuild/ECR/Fargate/Slack/Bedrock/tools-list evidence passes.

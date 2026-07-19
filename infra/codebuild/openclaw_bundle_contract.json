@@ -2,7 +2,7 @@
   "schema_version": 1,
   "release": {
     "ready": false,
-    "blocked_reason": "The hardened OpenClaw core runtime is locally testable, but the separate media subject, exact two-subject bundle emitter, signed final-HEAD registry evidence, and guarded post-apply functional rollback gate are not integrated. Keep every build, promotion, and Terraform image gate closed."
+    "blocked_reason": "The guarded post-apply rollout and rollback implementation is present, but the separate media subject, exact two-subject bundle emitter, independent review, signed final-HEAD registry evidence, and real immutable rollout/forced-rollback evidence are incomplete. Keep every build, promotion, and Terraform image gate closed."
   },
   "source": {
     "repository": "https://github.com/noirelumiere00/TeamAgent.git",

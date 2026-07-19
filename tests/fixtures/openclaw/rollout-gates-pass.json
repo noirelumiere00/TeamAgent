@@ -1,7 +1,11 @@
 {
   "expected": {
+    "applyAttemptId": "22222222-2222-4222-8222-222222222222",
+    "planSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "newTaskDefinition": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
     "previousTaskDefinition": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:53",
+    "encryptionKmsKeyArn": "arn:aws:kms:ap-northeast-1:718959508629:key/11111111-1111-4111-8111-111111111111",
+    "signingKmsKeyArn": "arn:aws:kms:ap-northeast-1:718959508629:key/22222222-2222-4222-8222-222222222222",
     "toolNames": [
       "clientkarte",
       "knowledge_deliver",
@@ -17,19 +21,23 @@
       "search"
     ]
   },
+  "caller": {
+    "Account": "718959508629",
+    "Arn": "arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker",
+    "UserId": "AROAFIXTURE123456789:teamagent-terraform-worker"
+  },
   "consumption": {
-    "schemaVersion": 1,
-    "receiptId": "openclaw-release-0123456789abcdef",
-    "verified": true,
-    "consumed": true,
-    "atomic": true,
-    "previousTaskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:53",
-    "newTaskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
-    "durableReceipt": {
-      "uri": "s3://teamagent-dev-raw-files/trusted-release/openclaw/deployment-receipts/openclaw-release-0123456789abcdef.json",
-      "versionId": "fixture-version-1",
-      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    }
+    "record_id": "intent#11111111-1111-4111-8111-111111111111",
+    "record_type": "teamagent.image-deployment-intent",
+    "schema_version": 1,
+    "intent_id": "11111111-1111-4111-8111-111111111111",
+    "state": "CONSUMED",
+    "plan_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "deployment_context_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "receipt_claims_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "gate_query_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "apply_attempt_id": "22222222-2222-4222-8222-222222222222",
+    "consumed_at": "2026-07-19T00:00:00Z"
   },
   "service": {
     "failures": [],
@@ -68,11 +76,34 @@
       }
     ]
   },
+  "runningBefore": {
+    "complete": true,
+    "taskArns": [
+      "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef"
+    ],
+    "tasks": [
+      {
+        "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+        "clusterArn": "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev",
+        "group": "service:teamagent-dev-openclaw",
+        "taskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+        "desiredStatus": "RUNNING",
+        "lastStatus": "RUNNING",
+        "containers": [
+          {
+            "name": "openclaw",
+            "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+            "lastStatus": "RUNNING"
+          }
+        ]
+      }
+    ]
+  },
   "task": {
     "failures": [],
     "tasks": [
       {
-        "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+        "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/99999999999999999999999999999999",
         "clusterArn": "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev",
         "taskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
         "lastStatus": "STOPPED",
@@ -89,7 +120,7 @@
   "taskEvent": {
     "event": "openclaw_rollout_task_canary",
     "schemaVersion": 1,
-    "receiptId": "openclaw-release-0123456789abcdef",
+    "receiptId": "11111111-1111-4111-8111-111111111111",
     "platform": "linux/arm64",
     "mcp": {
       "protocolVersion": "2025-03-26",
@@ -103,5 +134,145 @@
       "passed": true
     },
     "passed": true
+  },
+  "slack": {
+    "connected": true,
+    "mentionReplyExact": true,
+    "responseTokenAbsentFromPrompt": true,
+    "postedTs": "1784420000.100000",
+    "replyTs": "1784420001.200000",
+    "tokenSha256": "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19",
+    "candidateLogCorrelation": {
+      "matched": true,
+      "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+      "logStreamName": "openclaw/openclaw/0123456789abcdef0123456789abcdef",
+      "eventId": "fixture-event-1",
+      "eventTimestamp": 1784420001200,
+      "tokenSha256": "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19"
+    }
+  },
+  "runningAfter": {
+    "complete": true,
+    "taskArns": [
+      "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef"
+    ],
+    "tasks": [
+      {
+        "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+        "clusterArn": "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev",
+        "group": "service:teamagent-dev-openclaw",
+        "taskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+        "desiredStatus": "RUNNING",
+        "lastStatus": "RUNNING",
+        "containers": [
+          {
+            "name": "openclaw",
+            "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+            "lastStatus": "RUNNING"
+          }
+        ]
+      }
+    ]
+  },
+  "rollbackAuthorization": {
+    "record_id": "openclaw-rollback#22222222-2222-4222-8222-222222222222",
+    "record_type": "teamagent.openclaw-post-apply-rollback-authorization",
+    "schema_version": 1,
+    "intent_id": "11111111-1111-4111-8111-111111111111",
+    "plan_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "apply_attempt_id": "22222222-2222-4222-8222-222222222222",
+    "previous_task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:53",
+    "new_task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+    "one_use": true,
+    "state": "AUTHORIZED",
+    "authorized_at_epoch": 1784420000,
+    "expires_at_epoch": 4102444800
+  },
+  "persistedResult": {
+    "schemaVersion": 2,
+    "producedAtEpoch": 1784420000,
+    "passed": true,
+    "account": "718959508629",
+    "region": "ap-northeast-1",
+    "cluster": "teamagent-dev",
+    "service": "teamagent-dev-openclaw",
+    "taskFamily": "teamagent-dev-openclaw",
+    "automationRoleArn": "arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker",
+    "intentId": "11111111-1111-4111-8111-111111111111",
+    "applyAttemptId": "22222222-2222-4222-8222-222222222222",
+    "planSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "previousTaskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:53",
+    "newTaskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+    "distinctTaskRevisions": true,
+    "ecsServiceStable": true,
+    "circuitBreakerRollbackEnabled": true,
+    "runningTasksBeforeSlack": {
+      "complete": true,
+      "taskArns": [
+        "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef"
+      ],
+      "tasks": [
+        {
+          "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+          "taskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+          "logStreamName": "openclaw/openclaw/0123456789abcdef0123456789abcdef"
+        }
+      ],
+      "exactCandidateRevision": true
+    },
+    "slack": {
+      "mentionReplyExact": true,
+      "responseTokenAbsentFromPrompt": true,
+      "candidateLogCorrelation": {
+        "matched": true,
+        "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+        "logStreamName": "openclaw/openclaw/0123456789abcdef0123456789abcdef"
+      }
+    },
+    "runningTasksAfterSlack": {
+      "complete": true,
+      "taskArns": [
+        "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef"
+      ],
+      "tasks": [
+        {
+          "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+          "taskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+          "logStreamName": "openclaw/openclaw/0123456789abcdef0123456789abcdef"
+        }
+      ],
+      "exactCandidateRevision": true
+    },
+    "rollbackAuthorization": {
+      "recordId": "openclaw-rollback#22222222-2222-4222-8222-222222222222",
+      "state": "AUTHORIZED",
+      "oneUse": true,
+      "intentId": "11111111-1111-4111-8111-111111111111",
+      "applyAttemptId": "22222222-2222-4222-8222-222222222222",
+      "planSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "previousTaskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:53",
+      "newTaskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54"
+    }
+  },
+  "immutableEvidence": {
+    "verified": true,
+    "bucket": "teamagent-dev-openclaw-rollout-evidence",
+    "resultKey": "rollout-results/22222222-2222-4222-8222-222222222222/passed/result.json",
+    "resultVersionId": "fixture-result-version-1",
+    "resultSha256": "f92779bb59a207ac490b58ecbfe33bfa7f8addeda42c83c75d28dd85732a0f6b",
+    "resultObjectLockMode": "COMPLIANCE",
+    "resultObjectLockRetainUntil": "2036-07-19T00:00:00Z",
+    "signatureKey": "rollout-results/22222222-2222-4222-8222-222222222222/passed/result.sig.json",
+    "signatureVersionId": "fixture-signature-version-1",
+    "signatureSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "signatureObjectLockMode": "COMPLIANCE",
+    "signatureObjectLockRetainUntil": "2036-07-19T00:00:00Z",
+    "encryptionKmsAlias": "alias/teamagent-dev-openclaw-rollout-evidence",
+    "encryptionKmsKeyArn": "arn:aws:kms:ap-northeast-1:718959508629:key/11111111-1111-4111-8111-111111111111",
+    "signingKmsAlias": "alias/teamagent-dev-openclaw-rollout-signing",
+    "signingKmsKeyArn": "arn:aws:kms:ap-northeast-1:718959508629:key/22222222-2222-4222-8222-222222222222",
+    "signingAlgorithm": "RSASSA_PSS_SHA_256",
+    "signatureValid": true,
+    "exactVersionDownloadsVerified": true
   }
 }

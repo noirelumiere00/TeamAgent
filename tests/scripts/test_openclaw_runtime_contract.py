@@ -37,6 +37,9 @@ EVIDENCE_INDEXER = ROOT / "infra/openclaw/index-evidence.py"
 PLUGIN_OPERATION_SMOKE = ROOT / "infra/openclaw/plugin-operation-smoke.mjs"
 ROLLOUT_TASK_CANARY = ROOT / "infra/openclaw/rollout-task-canary.mjs"
 ROLLOUT_GATE = ROOT / "infra/openclaw/run-live-rollout-gates.mjs"
+RUNTIME_GUARD = ROOT / "infra/deploy/terraform_runtime_guard.sh"
+ROLLOUT_EVIDENCE_TF = ROOT / "infra/terraform/openclaw_rollout_evidence.tf"
+RUNTIME_EVIDENCE_TF = ROOT / "infra/terraform/runtime_evidence.tf"
 CLOUDWATCH_FARGATE = ROOT / "infra/terraform/cloudwatch_fargate.tf"
 TASK_FIXTURE = ROOT / "tests/fixtures/openclaw/current-task-definition.json"
 ROLLOUT_FIXTURE = ROOT / "tests/fixtures/openclaw/rollout-gates-pass.json"
@@ -1286,13 +1289,31 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
 
     mutations: list[tuple[str, dict[str, Any]]] = []
     changed = copy.deepcopy(fixture)
-    changed["consumption"]["atomic"] = False
-    mutations.append(("replay/consume", changed))
+    changed["consumption"]["state"] = "APPLYING"
+    mutations.append(("unconsumed intent", changed))
+    changed = copy.deepcopy(fixture)
+    changed["expected"]["previousTaskDefinition"] = fixture["expected"][
+        "newTaskDefinition"
+    ]
+    mutations.append(("same old/new revision", changed))
+    changed = copy.deepcopy(fixture)
+    changed["caller"]["Arn"] = (
+        "arn:aws:sts::718959508629:assumed-role/"
+        "teamagent-dev-terraform-runtime-automation/other-session"
+    )
+    mutations.append(("wrong automation role session", changed))
+    changed = copy.deepcopy(fixture)
+    changed["caller"]["UserId"] = "AROAFIXTURE123456789:other-session"
+    mutations.append(("wrong automation role user id", changed))
     changed = copy.deepcopy(fixture)
     changed["service"]["services"][0]["deploymentConfiguration"]["deploymentCircuitBreaker"][
         "rollback"
     ] = False
     mutations.append(("circuit breaker", changed))
+    changed = copy.deepcopy(fixture)
+    changed["service"]["services"][0]["desiredCount"] = 2
+    changed["service"]["services"][0]["runningCount"] = 2
+    mutations.append(("unexpected multi-writer service", changed))
     changed = copy.deepcopy(fixture)
     changed["task"]["tasks"][0]["taskDefinitionArn"] = fixture["expected"]["previousTaskDefinition"]
     mutations.append(("wrong task", changed))
@@ -1302,6 +1323,84 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     changed = copy.deepcopy(fixture)
     changed["taskEvent"]["bedrock"]["credentialSource"] = "AWS_ACCESS_KEY_ID"
     mutations.append(("static credentials", changed))
+    changed = copy.deepcopy(fixture)
+    changed["runningBefore"]["taskArns"].pop()
+    mutations.append(("incomplete pre-Slack task enumeration", changed))
+    changed = copy.deepcopy(fixture)
+    changed["runningBefore"]["tasks"][0]["taskDefinitionArn"] = fixture["expected"][
+        "previousTaskDefinition"
+    ]
+    mutations.append(("mixed pre-Slack running revision", changed))
+    changed = copy.deepcopy(fixture)
+    changed["runningAfter"]["tasks"][0]["taskDefinitionArn"] = fixture["expected"][
+        "previousTaskDefinition"
+    ]
+    mutations.append(("mixed post-Slack running revision", changed))
+    changed = copy.deepcopy(fixture)
+    changed["slack"]["candidateLogCorrelation"]["taskArn"] = (
+        "arn:aws:ecs:ap-northeast-1:718959508629:"
+        "task/teamagent-dev/ffffffffffffffffffffffffffffffff"
+    )
+    mutations.append(("Slack response from unlisted task", changed))
+    changed = copy.deepcopy(fixture)
+    changed["slack"]["responseTokenAbsentFromPrompt"] = False
+    mutations.append(("Slack prompt can satisfy log correlation", changed))
+    changed = copy.deepcopy(fixture)
+    changed["rollbackAuthorization"]["one_use"] = False
+    mutations.append(("reusable rollback authorization", changed))
+    changed = copy.deepcopy(fixture)
+    changed["rollbackAuthorization"]["previous_task_definition_arn"] = (
+        fixture["expected"]["newTaskDefinition"]
+    )
+    mutations.append(("rollback authorization revision swap", changed))
+    changed = copy.deepcopy(fixture)
+    changed["rollbackAuthorization"]["state"] = "CONSUMED"
+    changed["rollbackAuthorization"]["consumed_at_epoch"] = 1784420001
+    mutations.append(("replayed rollback authorization", changed))
+    changed = copy.deepcopy(fixture)
+    changed["persistedResult"]["automationRoleArn"] = (
+        "arn:aws:sts::718959508629:assumed-role/"
+        "teamagent-dev-terraform-runtime-automation/other-session"
+    )
+    mutations.append(("persisted result role substitution", changed))
+    changed = copy.deepcopy(fixture)
+    changed["persistedResult"]["runningTasksAfterSlack"]["tasks"][0][
+        "taskDefinitionArn"
+    ] = fixture["expected"]["previousTaskDefinition"]
+    mutations.append(("signed post-Slack task revision substitution", changed))
+    changed = copy.deepcopy(fixture)
+    changed["persistedResult"]["slack"]["candidateLogCorrelation"][
+        "logStreamName"
+    ] = "openclaw/openclaw/ffffffffffffffffffffffffffffffff"
+    mutations.append(("signed Slack log substitution", changed))
+    changed = copy.deepcopy(fixture)
+    changed["immutableEvidence"]["resultVersionId"] = ""
+    mutations.append(("missing exact result VersionId", changed))
+    changed = copy.deepcopy(fixture)
+    changed["immutableEvidence"]["resultVersionId"] = "null"
+    mutations.append(("unversioned S3 result", changed))
+    changed = copy.deepcopy(fixture)
+    changed["immutableEvidence"]["resultObjectLockMode"] = "GOVERNANCE"
+    mutations.append(("weaker Object Lock mode", changed))
+    changed = copy.deepcopy(fixture)
+    changed["immutableEvidence"]["signatureObjectLockRetainUntil"] = (
+        "2026-07-19T00:00:01Z"
+    )
+    mutations.append(("short signature retention", changed))
+    changed = copy.deepcopy(fixture)
+    changed["immutableEvidence"]["encryptionKmsAlias"] = "alias/untrusted"
+    mutations.append(("wrong encryption KMS key", changed))
+    changed = copy.deepcopy(fixture)
+    changed["expected"]["signingKmsKeyArn"] = (
+        fixture["expected"]["encryptionKmsKeyArn"]
+    )
+    mutations.append(("Terraform-state KMS key substitution", changed))
+    changed = copy.deepcopy(fixture)
+    changed["immutableEvidence"]["resultSha256"] = "0" * 64
+    mutations.append(("result hash substitution", changed))
+    changed = copy.deepcopy(fixture)
+    changed["immutableEvidence"]["signatureValid"] = False
+    mutations.append(("invalid KMS signature", changed))
 
     for index, (label, candidate) in enumerate(mutations):
         candidate_path = tmp_path / f"rollout-{index}.json"
@@ -1335,11 +1434,95 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         "chat.postMessage",
         "conversations.replies",
         "mentionReplyExact",
+        "responseTokenAbsentFromPrompt",
+        "list-tasks",
+        "describe-tasks",
+        "filter-log-events",
+        "candidateLogCorrelation",
+        "openclaw-rollback#",
+        "transact-write-items",
+        "update-service",
+        "services-stable",
+        "--version-id",
+        "--evidence-encryption-kms-key-arn",
+        "--evidence-signing-kms-key-arn",
+        "ObjectLockMode",
+        "get-bucket-versioning",
+        "get-object-lock-configuration",
+        "get-bucket-encryption",
+        "--if-none-match",
+        "--expected-bucket-owner",
+        "kms\", \"sign",
+        "kms\", \"verify",
+        "teamagent-dev-openclaw-rollout-evidence",
+        "alias/teamagent-dev-openclaw-rollout-evidence",
+        "alias/teamagent-dev-openclaw-rollout-signing",
     ):
         assert required in rollout
     assert "process.env.ECS_SERVICE" not in rollout
     assert "process.env.ECS_CLUSTER" not in rollout
     assert "process.env.CANARY_SECRET" not in rollout
+
+    guard = RUNTIME_GUARD.read_text()
+    apply_case = guard[guard.index('  apply)') :]
+    revision_gate = apply_case.index(
+        'if [ "$OPENCLAW_ROLLOUT_REQUIRED" = "false" ]; then'
+    )
+    rollout_call = apply_case.index(
+        'if ! node "$OPENCLAW_ROLLOUT_GATE"',
+        revision_gate,
+    )
+    eventbridge_applied = apply_case.index(
+        'python3 "$EVENTBRIDGE_APPLY_SAGA" finish',
+        rollout_call,
+    )
+    intent_applied = apply_case.index(
+        'bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome',
+        eventbridge_applied,
+    )
+    lock_release = apply_case.index(
+        'bash "$IMAGE_GATE_RUNNER" release-deployment-lock',
+        intent_applied,
+    )
+    assert rollout_call < eventbridge_applied < intent_applied < lock_release
+    assert apply_case.index("--restore-and-verify") < revision_gate < rollout_call
+    assert apply_case.index('OPENCLAW_POST_APPLY_STARTED="true"') < rollout_call
+    assert 'OPENCLAW_ROLLOUT_REQUIRED="$(' in apply_case
+    assert '"aws_ecs_task_definition.openclaw[0]"' in apply_case
+    assert "planned OpenClaw candidateがdistinct live revision" in apply_case
+    assert "openclaw_rollout_evidence_key_arn" in apply_case
+    assert "openclaw_rollout_signing_key_arn" in apply_case
+    heartbeat_restart = apply_case.rfind("start_gate_heartbeat", 0, rollout_call)
+    assert apply_case.index('"$APPLY_SUPERVISOR"') < heartbeat_restart < rollout_call
+    assert "stop_gate_heartbeat" not in apply_case[heartbeat_restart:rollout_call]
+    assert "release-deployment-lock" not in apply_case[heartbeat_restart:rollout_call]
+    assert ".schema_version == 3" in apply_case
+    assert "openclaw_rollout_result_sha256" in apply_case
+
+    evidence_tf = ROLLOUT_EVIDENCE_TF.read_text()
+    runtime_evidence_tf = RUNTIME_EVIDENCE_TF.read_text()
+    for required in (
+        'object_lock_enabled = true',
+        'mode = "COMPLIANCE"',
+        "days = 3650",
+        'key_usage                = "SIGN_VERIFY"',
+        'customer_master_key_spec = "RSA_3072"',
+        '"s3:DeleteObjectVersion"',
+        '"s3:GetBucketObjectLockConfiguration"',
+        '"s3:PutObjectRetention"',
+        '"kms:Sign"',
+        '"kms:Verify"',
+        '"kms:ResourceAliases"',
+        '"dynamodb:TransactWriteItems"',
+    ):
+        assert required in evidence_tf
+    assert evidence_tf.count('test     = "ForAnyValue:StringEquals"') == 2
+    assert evidence_tf.count(
+        '"arn:aws:kms:ap-northeast-1:718959508629:key/*"'
+    ) == 2
+    assert "exact_rollout_kms_alias_scope" in guard
+    assert 'test     = "ForAllValues:StringNotEquals"' in runtime_evidence_tf
+    assert "local.openclaw_rollout_signing_alias" in runtime_evidence_tf
 
 
 def _minimal_trivy_sbom(image_id: str) -> dict[str, Any]:

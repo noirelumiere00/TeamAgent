@@ -16,7 +16,7 @@ direct ECS task-definition registration/update、`terraform -target`、
 - OpenClaw media subject: 未統合
 - exact core/media bundle receipt: 未実装
 - signed final-HEAD registry evidence: 未取得
-- guarded post-apply functional rollback gate: 未統合
+- guarded post-apply functional rollback gate: 実装済み、独立レビュー・実環境証跡待ち
 - production: **NO-GO**
 
 上記の不足が解消され、独立レビュー後に contract を別変更で
@@ -236,19 +236,33 @@ Fargate は Docker `no-new-privileges` を強制できません。これは隠�
 
 ## 7. Post-apply functional gates
 
-本番 GO には、exact new task revision に対して以下を自動実行し、失敗時に
-durable previous task revision へ復旧する統合が必要です。
+canonical `terraform_runtime_guard.sh apply` は、同じ shared deployment lock と
+backend workflow lock を保持したまま、intent を `APPLIED` にする前に
+`run-live-rollout-gates.mjs` を実行します。old/new revision は異なる必要があり、
+OpenClaw revision が変わらない apply では gate を明示的に skip した結果を
+apply receipt に束縛します。revision が変わる場合は次をすべて自動実行します。
 
 - ECS `services-stable`
+- Slack canary の前後で running service task を全件列挙し、全taskが exact
+  candidate revision であることを再確認
 - 同一network/task revisionの one-off canary exit 0
 - ECS task-role credential による Bedrock `Converse`
 - MCP `tools/list` が既定12件かつ reviewed 28件の範囲内
-- Slack Socket Mode 接続と exact mention/reply
-- rollout結果の署名・耐久記録
+- Slack Socket Mode の exact mention/reply と candidate task log stream の相関
+- apply attempt、old/new revision、exact automation role、one-use rollback
+  authorization を束縛した rollout result
+- fixed KMS asymmetric signature と fixed S3 VersionId、SSE-KMS、
+  COMPLIANCE Object Lock、downloaded hash/signature の再検証
 
-`run-live-rollout-gates.mjs` は検証ロジックのローカル実装ですが、現在の
-one-time Terraform apply と rollback ledger には未統合です。そのため
-contract は closed のままです。手動実行を production evidence として代用しません。
+post-apply のどの確認が失敗しても、intent を `APPLIED` にする前に one-use
+rollback authorization を消費し、durable previous task definition を検証して
+service と全 running task の復旧を確認します。guard cleanup も同じ lock 内で
+idempotent に復旧を再試行します。
+
+この実装だけでは production evidence ではありません。Terraform resource の
+実環境適用、独立レビュー、実際の signed S3 result と forced-failure rollback
+receipt が揃うまで contract は closed のままです。手動実行を production evidence
+として代用しません。
 
 ## 8. Alarms and operational checks
 

@@ -13,7 +13,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="17"
+GUARD_VERSION="18"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -50,6 +50,7 @@ APPLY_SUPERVISOR="$TF_DIR/terraform_apply_supervisor.py"
 PLAN_STAGER="$TF_DIR/stage_saved_plan.py"
 EVENTBRIDGE_APPLY_SAGA="$TF_DIR/eventbridge_apply_saga.py"
 HMAC_PLAN_HELPER="$REPO_ROOT/scripts/terraform_hmac_payload.py"
+OPENCLAW_ROLLOUT_GATE="$REPO_ROOT/infra/openclaw/run-live-rollout-gates.mjs"
 TMP_ROOT=""
 AWS_BIN=""
 AWS_BIN_SHA256=""
@@ -227,6 +228,7 @@ assert_guard_sources() {
   assert_regular_nonwritable "$PLAN_STAGER"
   assert_regular_nonwritable "$EVENTBRIDGE_APPLY_SAGA"
   assert_regular_nonwritable "$HMAC_PLAN_HELPER"
+  assert_regular_nonwritable "$OPENCLAW_ROLLOUT_GATE"
   assert_git_tracked_clean "$SCRIPT_PATH"
   assert_git_tracked_clean "$GUARD_JQ"
   assert_git_tracked_clean "$MIGRATION_FILE"
@@ -238,6 +240,7 @@ assert_guard_sources() {
   assert_git_tracked_clean "$PLAN_STAGER"
   assert_git_tracked_clean "$EVENTBRIDGE_APPLY_SAGA"
   assert_git_tracked_clean "$HMAC_PLAN_HELPER"
+  assert_git_tracked_clean "$OPENCLAW_ROLLOUT_GATE"
 
   local path
   while IFS= read -r path; do
@@ -5783,10 +5786,32 @@ validate_exact_runtime_iam_plan() {
         "hmac/mail-action|" +
         "hmac/report-link)-[A-Za-z0-9]{6}$"
       );
+    def exact_openclaw_rollout_secret_arn:
+      . == (
+        "arn:aws:secretsmanager:" + $region + ":" + $account +
+        ":secret:teamagent/dev/openclaw/rollout-canary-*"
+      );
     def exact_kms_key_arn:
       test(
         "^arn:aws:kms:" + $region + ":" + $account +
         ":key/(mrk-)?[0-9a-f-]{32,64}$"
+      );
+    def exact_rollout_kms_alias_scope:
+      (resources == [
+        "arn:aws:kms:" + $region + ":" + $account + ":key/*"
+      ]) and
+      (
+        (
+          (.Condition["ForAnyValue:StringEquals"]["kms:ResourceAliases"] //
+            []) | array
+        ) as $aliases |
+        ($aliases | length) == 1 and
+        (
+          $aliases[0] ==
+            "alias/teamagent-dev-openclaw-rollout-evidence" or
+          $aliases[0] ==
+            "alias/teamagent-dev-openclaw-rollout-signing"
+        )
       );
     def approved_bedrock_arns:
       [
@@ -5839,16 +5864,26 @@ validate_exact_runtime_iam_plan() {
          .change.after != null
        ) |
        (.change.after.policy | fromjson) |
-       .Statement[]] |
+      .Statement[]] |
       all(
         ((allows_action_prefix("secretsmanager:") | not) or
-          (resources | length > 0 and all(exact_secret_arn))) and
+          (
+            resources | length > 0 and
+            all(
+              . as $arn |
+              ($arn | exact_secret_arn) or
+              ($arn | exact_openclaw_rollout_secret_arn)
+            )
+          )) and
         ((allows_action_prefix("bedrock:") | not) or
           (approved_bedrock_arns as $approved |
            resources | length > 0 and all(. as $arn |
              ($approved | index($arn)) != null))) and
         ((allows_action_prefix("kms:") | not) or
-          (resources | length > 0 and all(exact_kms_key_arn))) and
+          (
+            (resources | length > 0 and all(exact_kms_key_arn)) or
+            exact_rollout_kms_alias_scope
+          )) and
         ((allows_action_prefix("iam:PassRole") | not) or
           exact_pass_service)
       )
@@ -7061,18 +7096,32 @@ verify_required_migration_apply_receipt() {
   local embedded_retention="$TMP_ROOT/prior-bedrock-embedded-$RANDOM.json"
   local embedded_lock="$TMP_ROOT/prior-shared-lock-embedded-$RANDOM.json"
   local embedded_outcome="$TMP_ROOT/prior-outcome-embedded-$RANDOM.json"
+  local embedded_rollout="$TMP_ROOT/prior-openclaw-rollout-embedded-$RANDOM.json"
+  local embedded_persisted="$TMP_ROOT/prior-openclaw-persisted-$RANDOM.json"
   run_evidence_helper verify-bedrock-retention --output "$retention_live"
   capture_complete_runtime_inventory "$runtime_inventory"
   jq -S -c '.bedrock_retention_live' "$receipt" > "$embedded_retention"
   jq -S -c '.shared_deployment_lock_receipt' "$receipt" > "$embedded_lock"
   jq -S -c '.provenance_outcome_receipt' "$receipt" > "$embedded_outcome"
+  jq -S -c '.openclaw_rollout_result' "$receipt" > "$embedded_rollout"
   [ "$(sha256_file "$embedded_retention")" = \
     "$(jq -er '.bedrock_retention_live_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_lock")" = \
       "$(jq -er '.shared_deployment_lock_receipt_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_outcome")" = \
-      "$(jq -er '.provenance_outcome_receipt_sha256' "$receipt")" ] ||
+      "$(jq -er '.provenance_outcome_receipt_sha256' "$receipt")" ] &&
+    [ "$(sha256_file "$embedded_rollout")" = \
+      "$(jq -er '.openclaw_rollout_result_sha256' "$receipt")" ] ||
     die "prior apply receiptのembedded evidence hash bindingが不正です"
+  if [ "$(jq -er '.openclaw_rollout_result.required' "$receipt")" = "true" ]; then
+    jq -S -c '.openclaw_rollout_result.persistedResult' "$receipt" \
+      > "$embedded_persisted"
+    [ "$(sha256_file "$embedded_persisted")" = "$(
+      jq -er '.openclaw_rollout_result.immutableEvidence.resultSha256' \
+        "$receipt"
+    )" ] ||
+      die "prior OpenClaw immutable result hash bindingが不正です"
+  fi
   jq -e \
     --arg version "$GUARD_VERSION" \
     --arg account "$EXPECTED_ACCOUNT_ID" \
@@ -7102,6 +7151,8 @@ verify_required_migration_apply_receipt() {
       "log_readiness_receipt_sha256",
       "migration_id",
       "migration_kind",
+      "openclaw_rollout_result",
+      "openclaw_rollout_result_sha256",
       "plan_sha256",
       "post_live_contract",
       "post_live_fingerprint_sha256",
@@ -7123,7 +7174,7 @@ verify_required_migration_apply_receipt() {
       "versioning_receipt_sha256"
     ] | sort) and
     .kind == "terraform-runtime-apply-receipt" and
-    .schema_version == 2 and
+    .schema_version == 3 and
     .guard_version == $version and
     .account_id == $account and .region == $region and
     .git_commit == $git_commit and
@@ -7142,6 +7193,96 @@ verify_required_migration_apply_receipt() {
     (.log_readiness_receipt_sha256 | test("^[0-9a-f]{64}$")) and
     (.alarm_delivery_receipt_sha256 | test("^[0-9a-f]{64}$")) and
     (.alarm_migration_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    (.openclaw_rollout_result_sha256 | test("^[0-9a-f]{64}$")) and
+    .openclaw_rollout_result.schemaVersion == 2 and
+    .openclaw_rollout_result.passed == true and
+    .openclaw_rollout_result.applyAttemptId == .apply_attempt_id and
+    .openclaw_rollout_result.newTaskDefinitionArn ==
+      $live[0].taskdefs.openclaw.arn and
+    (
+      (
+        .openclaw_rollout_result.required == false and
+        .openclaw_rollout_result.reason == "task-definition-unchanged" and
+        .openclaw_rollout_result.previousTaskDefinitionArn ==
+          .openclaw_rollout_result.newTaskDefinitionArn
+      ) or
+      (
+        .openclaw_rollout_result.required == true and
+        .openclaw_rollout_result.previousTaskDefinitionArn !=
+          .openclaw_rollout_result.newTaskDefinitionArn and
+        .openclaw_rollout_result.persistedResult.automationRoleArn ==
+          "arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker" and
+        .openclaw_rollout_result.persistedResult.rollbackAuthorization.state ==
+          "AUTHORIZED" and
+        .openclaw_rollout_result.persistedResult.rollbackAuthorization.oneUse ==
+          true and
+        .openclaw_rollout_result.persistedResult.runningTasksBeforeSlack.complete ==
+          true and
+        .openclaw_rollout_result.persistedResult.runningTasksBeforeSlack.exactCandidateRevision ==
+          true and
+        (.openclaw_rollout_result.persistedResult.runningTasksBeforeSlack |
+          (.tasks | length) == (.taskArns | length) and
+          ([.tasks[].taskArn] | sort) == (.taskArns | sort) and
+          all(.tasks[];
+            .taskDefinitionArn ==
+              $live[0].taskdefs.openclaw.arn)
+        ) and
+        .openclaw_rollout_result.persistedResult.runningTasksAfterSlack.complete ==
+          true and
+        .openclaw_rollout_result.persistedResult.runningTasksAfterSlack.exactCandidateRevision ==
+          true and
+        (.openclaw_rollout_result.persistedResult.runningTasksAfterSlack |
+          (.tasks | length) == (.taskArns | length) and
+          ([.tasks[].taskArn] | sort) == (.taskArns | sort) and
+          all(.tasks[];
+            .taskDefinitionArn ==
+              $live[0].taskdefs.openclaw.arn)
+        ) and
+        .openclaw_rollout_result.persistedResult.slack.candidateLogCorrelation.matched ==
+          true and
+        (.openclaw_rollout_result.persistedResult.slack.candidateLogCorrelation
+          as $correlation |
+          any(
+            .openclaw_rollout_result.persistedResult.runningTasksBeforeSlack.tasks[];
+            .taskArn == $correlation.taskArn and
+            .logStreamName == $correlation.logStreamName
+          )
+        ) and
+        .openclaw_rollout_result.immutableEvidence.verified == true and
+        .openclaw_rollout_result.immutableEvidence.bucket ==
+          "teamagent-dev-openclaw-rollout-evidence" and
+        .openclaw_rollout_result.immutableEvidence.resultKey ==
+          ("rollout-results/" + .apply_attempt_id + "/passed/result.json") and
+        .openclaw_rollout_result.immutableEvidence.signatureKey ==
+          ("rollout-results/" + .apply_attempt_id +
+            "/passed/result.sig.json") and
+        (.openclaw_rollout_result.immutableEvidence.resultVersionId |
+          test("^[A-Za-z0-9._~+/=-]{1,1024}$") and
+          . != "null" and . != "None") and
+        (.openclaw_rollout_result.immutableEvidence.signatureVersionId |
+          test("^[A-Za-z0-9._~+/=-]{1,1024}$") and
+          . != "null" and . != "None") and
+        .openclaw_rollout_result.immutableEvidence.resultObjectLockMode ==
+          "COMPLIANCE" and
+        .openclaw_rollout_result.immutableEvidence.signatureObjectLockMode ==
+          "COMPLIANCE" and
+        .openclaw_rollout_result.immutableEvidence.signatureValid == true and
+        .openclaw_rollout_result.immutableEvidence.encryptionKmsAlias ==
+          "alias/teamagent-dev-openclaw-rollout-evidence" and
+        .openclaw_rollout_result.immutableEvidence.signingKmsAlias ==
+          "alias/teamagent-dev-openclaw-rollout-signing" and
+        (.openclaw_rollout_result.immutableEvidence.encryptionKmsKeyArn |
+          test("^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$")) and
+        (.openclaw_rollout_result.immutableEvidence.signingKmsKeyArn |
+          test("^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$")) and
+        (.openclaw_rollout_result.immutableEvidence.resultSha256 |
+          test("^[0-9a-f]{64}$")) and
+        (.openclaw_rollout_result.immutableEvidence.signatureSha256 |
+          test("^[0-9a-f]{64}$")) and
+        .openclaw_rollout_result.immutableEvidence.exactVersionDownloadsVerified ==
+          true
+      )
+    ) and
     (.bedrock_retention_live_sha256 | test("^[0-9a-f]{64}$")) and
     .bedrock_retention_live.kind ==
       "teamagent-bedrock-retention-live-evidence" and
@@ -8805,6 +8946,7 @@ case "$COMMAND" in
     [ -n "$APPLY_RECEIPT" ] || die "applyには --out APPLY_RECEIPT が必須です"
     need_cmd aws
     need_cmd jq
+    need_cmd node
     need_cmd terraform
     PLAN="$(secure_existing_file "$PLAN" 600)"
     secure_private_dir "$(dirname "$PLAN")" >/dev/null
@@ -8843,6 +8985,14 @@ case "$COMMAND" in
     APPLY_RECEIPT_PUBLISHED="false"
     EVENTBRIDGE_SAGA_STARTED="false"
     EVENTBRIDGE_SAGA_FINISHED="false"
+    OPENCLAW_POST_APPLY_STARTED="false"
+    OPENCLAW_ROLLOUT_REQUIRED="false"
+    OPENCLAW_PREVIOUS_TASK_DEFINITION=""
+    OPENCLAW_NEW_TASK_DEFINITION="AUTO"
+    OPENCLAW_ROLLOUT_RESULT="$TMP_ROOT/openclaw-rollout-result.json"
+    OPENCLAW_ROLLBACK_RESULT="$TMP_ROOT/openclaw-rollback-result.json"
+    OPENCLAW_EVIDENCE_KMS_KEY_ARN=""
+    OPENCLAW_SIGNING_KMS_KEY_ARN=""
     start_gate_heartbeat() {
       local parent_pid="$$"
       bash "$IMAGE_GATE_RUNNER" heartbeat-deployment-lock \
@@ -8871,7 +9021,25 @@ case "$COMMAND" in
     cleanup_apply_command() {
       local status=$?
       local saga_restore_failed="false"
+      local openclaw_restore_failed="false"
       set +e
+      if [ "$OPENCLAW_POST_APPLY_STARTED" = "true" ] &&
+        [ "$GATE_OUTCOME_RECORDED" != "true" ] &&
+        [ "$GATE_LOCK_ACQUIRED" = "true" ] &&
+        [ -n "$OPENCLAW_PREVIOUS_TASK_DEFINITION" ]; then
+        if [ -z "$GATE_HEARTBEAT_PID" ]; then
+          start_gate_heartbeat >/dev/null 2>&1
+        fi
+        if ! node "$OPENCLAW_ROLLOUT_GATE" --restore-and-verify \
+          --new-task-definition "$OPENCLAW_NEW_TASK_DEFINITION" \
+          --previous-task-definition "$OPENCLAW_PREVIOUS_TASK_DEFINITION" \
+          --receipt-consumption "$GATE_PREFLIGHT_RECEIPT" \
+          --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+          --plan-sha256 "$STAGED_PLAN_SHA256" \
+          --output "$OPENCLAW_ROLLBACK_RESULT"; then
+          openclaw_restore_failed="true"
+        fi
+      fi
       stop_gate_heartbeat
       if [ "$EVENTBRIDGE_SAGA_STARTED" = "true" ] &&
         [ "$EVENTBRIDGE_SAGA_FINISHED" != "true" ]; then
@@ -8905,6 +9073,10 @@ case "$COMMAND" in
       if [ "$saga_restore_failed" = "true" ]; then
         echo "FATAL: EventBridge baseline restoration requires reconciliation" >&2
         exit 70
+      fi
+      if [ "$openclaw_restore_failed" = "true" ]; then
+        echo "FATAL: durable previous OpenClaw revision restoration requires reconciliation" >&2
+        exit 71
       fi
       exit "$status"
     }
@@ -8953,15 +9125,39 @@ case "$COMMAND" in
     chmod 600 "$GATE_PREFLIGHT_RECEIPT"
     jq -e \
       --arg attempt "$APPLY_ATTEMPT_ID" \
+      --arg intent "$(
+        jq -er '.image_deployment_intent_id' "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg plan "$STAGED_PLAN_SHA256" \
       --arg context_sha "$(
         sha256_file "$TMP_ROOT/verify/image-release-context.json"
       )" '
-      .record_id == "lock#teamagent/terraform.tfstate" and
-      .state == "LOCKED" and
+      .record_id == ("intent#" + $intent) and
+      .record_type == "teamagent.image-deployment-intent" and
+      .schema_version == 1 and
+      .intent_id == $intent and
+      .state == "CONSUMED" and
       .apply_attempt_id == $attempt and
+      .plan_sha256 == $plan and
       .terraform_context_sha256 == $context_sha
     ' "$GATE_PREFLIGHT_RECEIPT" >/dev/null ||
       die "provenance apply preflightがsaved plan contextと不一致です"
+    OPENCLAW_PREVIOUS_TASK_DEFINITION="$(
+      jq -er '.taskdefs.openclaw.arn' "$TMP_ROOT/verify/live-after.json"
+    )"
+    [[ "$OPENCLAW_PREVIOUS_TASK_DEFINITION" =~ ^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:[1-9][0-9]*$ ]] ||
+      die "apply前のdurable OpenClaw task revisionが不正です"
+    OPENCLAW_ROLLOUT_REQUIRED="$(
+      jq -er '
+        any(
+          .resource_changes[]?;
+          .address == "aws_ecs_task_definition.openclaw[0]" and
+          .change.actions != ["no-op"] and
+          .change.actions != ["read"]
+        )
+      ' "$TMP_ROOT/verify/plan.json"
+    )" ||
+      die "saved planからOpenClaw rollout要否を一意に確定できません"
 
     python3 "$EVENTBRIDGE_APPLY_SAGA" begin \
       --plan "$GATE_PLAN" \
@@ -8970,6 +9166,7 @@ case "$COMMAND" in
       die "EventBridge apply baselineをdurableに固定できません"
     EVENTBRIDGE_SAGA_STARTED="true"
 
+    OPENCLAW_POST_APPLY_STARTED="true"
     stop_gate_heartbeat
     export TEAMAGENT_SAVED_PLAN_PATH="$GATE_PLAN"
     export TEAMAGENT_SAVED_PLAN_SHA256="$STAGED_PLAN_SHA256"
@@ -9056,6 +9253,161 @@ case "$COMMAND" in
       jq -n 'null' > "$TMP_ROOT/applied-bedrock-retention.json"
     fi
 
+    OPENCLAW_NEW_TASK_DEFINITION="$(
+      jq -er '.taskdefs.openclaw.arn' "$TMP_ROOT/applied-live.json"
+    )"
+    [[ "$OPENCLAW_NEW_TASK_DEFINITION" =~ ^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:[1-9][0-9]*$ ]] ||
+      die "apply後のOpenClaw task revisionが不正です"
+    if [ "$OPENCLAW_ROLLOUT_REQUIRED" = "false" ]; then
+      [ "$OPENCLAW_PREVIOUS_TASK_DEFINITION" = \
+        "$OPENCLAW_NEW_TASK_DEFINITION" ] ||
+        die "saved plan外のOpenClaw task revision変更を検出しました"
+      jq -n -S -c \
+        --argjson schemaVersion 2 \
+        --argjson required false \
+        --argjson passed true \
+        --arg applyAttemptId "$APPLY_ATTEMPT_ID" \
+        --arg previousTaskDefinitionArn \
+          "$OPENCLAW_PREVIOUS_TASK_DEFINITION" \
+        --arg newTaskDefinitionArn "$OPENCLAW_NEW_TASK_DEFINITION" \
+        --arg reason "task-definition-unchanged" '{
+          schemaVersion:$schemaVersion,
+          required:$required,
+          passed:$passed,
+          applyAttemptId:$applyAttemptId,
+          previousTaskDefinitionArn:$previousTaskDefinitionArn,
+          newTaskDefinitionArn:$newTaskDefinitionArn,
+          reason:$reason
+        }' > "$OPENCLAW_ROLLOUT_RESULT"
+    else
+      [ "$OPENCLAW_PREVIOUS_TASK_DEFINITION" != \
+        "$OPENCLAW_NEW_TASK_DEFINITION" ] ||
+        die "planned OpenClaw candidateがdistinct live revisionになっていません"
+      OPENCLAW_EVIDENCE_KMS_KEY_ARN="$(
+        terraform -chdir="$TF_DIR" output -raw \
+          openclaw_rollout_evidence_key_arn
+      )" ||
+        die "OpenClaw rollout evidence KMS keyをstateから固定できません"
+      OPENCLAW_SIGNING_KMS_KEY_ARN="$(
+        terraform -chdir="$TF_DIR" output -raw \
+          openclaw_rollout_signing_key_arn
+      )" ||
+        die "OpenClaw rollout signing KMS keyをstateから固定できません"
+      [[ "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] &&
+        [[ "$OPENCLAW_SIGNING_KMS_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] &&
+        [ "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" !=
+          "$OPENCLAW_SIGNING_KMS_KEY_ARN" ] ||
+        die "OpenClaw rollout KMS key state bindingが不正です"
+      if ! node "$OPENCLAW_ROLLOUT_GATE" \
+        --new-task-definition "$OPENCLAW_NEW_TASK_DEFINITION" \
+        --previous-task-definition "$OPENCLAW_PREVIOUS_TASK_DEFINITION" \
+        --receipt-consumption "$GATE_PREFLIGHT_RECEIPT" \
+        --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+        --plan-sha256 "$STAGED_PLAN_SHA256" \
+        --evidence-encryption-kms-key-arn \
+          "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" \
+        --evidence-signing-kms-key-arn \
+          "$OPENCLAW_SIGNING_KMS_KEY_ARN" \
+        --output "$OPENCLAW_ROLLOUT_RESULT"; then
+        die "OpenClaw post-apply gate failed; cleanup must verify the previous revision"
+      fi
+      jq -e \
+        --arg attempt "$APPLY_ATTEMPT_ID" \
+        --arg previous "$OPENCLAW_PREVIOUS_TASK_DEFINITION" \
+        --arg candidate "$OPENCLAW_NEW_TASK_DEFINITION" \
+        --arg automation "$TRUSTED_AUTOMATION_ARN" \
+        --arg result_key \
+          "rollout-results/$APPLY_ATTEMPT_ID/passed/result.json" \
+        --arg signature_key \
+          "rollout-results/$APPLY_ATTEMPT_ID/passed/result.sig.json" \
+        --arg encryption_kms "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" \
+        --arg signing_kms "$OPENCLAW_SIGNING_KMS_KEY_ARN" '
+        .schemaVersion == 2 and
+        .required == true and .passed == true and
+        .applyAttemptId == $attempt and
+        .previousTaskDefinitionArn == $previous and
+        .newTaskDefinitionArn == $candidate and
+        $previous != $candidate and
+        .persistedResult.passed == true and
+        .persistedResult.automationRoleArn == $automation and
+        .persistedResult.applyAttemptId == $attempt and
+        .persistedResult.previousTaskDefinitionArn == $previous and
+        .persistedResult.newTaskDefinitionArn == $candidate and
+        .persistedResult.distinctTaskRevisions == true and
+        .persistedResult.runningTasksBeforeSlack.complete == true and
+        .persistedResult.runningTasksBeforeSlack.exactCandidateRevision == true and
+        (.persistedResult.runningTasksBeforeSlack |
+          (.tasks | length) == (.taskArns | length) and
+          ([.tasks[].taskArn] | sort) == (.taskArns | sort) and
+          all(.tasks[];
+            .taskDefinitionArn == $candidate and
+            (.taskArn |
+              test("^arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/[0-9a-f]{32}$")) and
+            ((.taskArn | split("/") | last) as $task_id |
+              .logStreamName == ("openclaw/openclaw/" + $task_id))
+          )
+        ) and
+        .persistedResult.slack.mentionReplyExact == true and
+        .persistedResult.slack.candidateLogCorrelation.matched == true and
+        (.persistedResult.slack.candidateLogCorrelation as $correlation |
+          any(.persistedResult.runningTasksBeforeSlack.tasks[];
+            .taskArn == $correlation.taskArn and
+            .logStreamName == $correlation.logStreamName
+          )
+        ) and
+        .persistedResult.runningTasksAfterSlack.complete == true and
+        .persistedResult.runningTasksAfterSlack.exactCandidateRevision == true and
+        (.persistedResult.runningTasksAfterSlack |
+          (.tasks | length) == (.taskArns | length) and
+          ([.tasks[].taskArn] | sort) == (.taskArns | sort) and
+          all(.tasks[];
+            .taskDefinitionArn == $candidate and
+            (.taskArn |
+              test("^arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/[0-9a-f]{32}$")) and
+            ((.taskArn | split("/") | last) as $task_id |
+              .logStreamName == ("openclaw/openclaw/" + $task_id))
+          )
+        ) and
+        .persistedResult.rollbackAuthorization.state == "AUTHORIZED" and
+        .persistedResult.rollbackAuthorization.oneUse == true and
+        .immutableEvidence.verified == true and
+        .immutableEvidence.bucket ==
+          "teamagent-dev-openclaw-rollout-evidence" and
+        .immutableEvidence.resultKey == $result_key and
+        .immutableEvidence.signatureKey == $signature_key and
+        (.immutableEvidence.resultVersionId |
+          test("^[A-Za-z0-9._~+/=-]{1,1024}$") and
+          . != "null" and . != "None") and
+        (.immutableEvidence.signatureVersionId |
+          test("^[A-Za-z0-9._~+/=-]{1,1024}$") and
+          . != "null" and . != "None") and
+        .immutableEvidence.resultObjectLockMode == "COMPLIANCE" and
+        .immutableEvidence.signatureObjectLockMode == "COMPLIANCE" and
+        .immutableEvidence.encryptionKmsAlias ==
+          "alias/teamagent-dev-openclaw-rollout-evidence" and
+        .immutableEvidence.encryptionKmsKeyArn == $encryption_kms and
+        .immutableEvidence.signingKmsAlias ==
+          "alias/teamagent-dev-openclaw-rollout-signing" and
+        .immutableEvidence.signingKmsKeyArn == $signing_kms and
+        .immutableEvidence.signingAlgorithm == "RSASSA_PSS_SHA_256" and
+        .immutableEvidence.signatureValid == true and
+        .immutableEvidence.exactVersionDownloadsVerified == true and
+        (.immutableEvidence.resultSha256 | test("^[0-9a-f]{64}$")) and
+        (.immutableEvidence.signatureSha256 | test("^[0-9a-f]{64}$"))
+      ' "$OPENCLAW_ROLLOUT_RESULT" >/dev/null ||
+        die "OpenClaw signed immutable rollout result bindingが不正です"
+      jq -S -c '.persistedResult' "$OPENCLAW_ROLLOUT_RESULT" \
+        > "$TMP_ROOT/openclaw-persisted-result.json"
+      [ "$(sha256_file "$TMP_ROOT/openclaw-persisted-result.json")" = "$(
+        jq -er '.immutableEvidence.resultSha256' "$OPENCLAW_ROLLOUT_RESULT"
+      )" ] ||
+        die "OpenClaw immutable result hashがpersisted bytesと不一致です"
+    fi
+    jq -S -c . "$OPENCLAW_ROLLOUT_RESULT" \
+      > "$OPENCLAW_ROLLOUT_RESULT.canonical"
+    mv "$OPENCLAW_ROLLOUT_RESULT.canonical" "$OPENCLAW_ROLLOUT_RESULT"
+    chmod 600 "$OPENCLAW_ROLLOUT_RESULT"
+
     python3 "$EVENTBRIDGE_APPLY_SAGA" finish \
       --plan "$GATE_PLAN" \
       --plan-sha256 "$STAGED_PLAN_SHA256" \
@@ -9086,7 +9438,7 @@ case "$COMMAND" in
     APPLY_STAGE="$TMP_ROOT/apply-receipt.json"
     jq -n -S \
       --arg kind "terraform-runtime-apply-receipt" \
-      --argjson schema_version 2 \
+      --argjson schema_version 3 \
       --arg guard_version "$GUARD_VERSION" \
       --arg account_id "$EXPECTED_ACCOUNT_ID" \
       --arg region "$REGION" \
@@ -9115,6 +9467,9 @@ case "$COMMAND" in
       --arg apply_attempt_id "$APPLY_ATTEMPT_ID" \
       --arg source_receipt_sha256 "$(sha256_file "$RECEIPT")" \
       --arg plan_sha256 "$(sha256_file "$PLAN")" \
+      --arg openclaw_rollout_result_sha256 "$(
+        sha256_file "$OPENCLAW_ROLLOUT_RESULT"
+      )" \
       --arg versioning_receipt_sha256 "$(
         jq -r '.versioning_receipt_sha256' "$TMP_ROOT/verify/receipt.json"
       )" \
@@ -9158,7 +9513,8 @@ case "$COMMAND" in
       --slurpfile bedrock_retention \
         "$TMP_ROOT/applied-bedrock-retention.json" \
       --slurpfile shared_lock "$GATE_LOCK_RECEIPT" \
-      --slurpfile provenance_outcome "$GATE_OUTCOME_RECEIPT" '{
+      --slurpfile provenance_outcome "$GATE_OUTCOME_RECEIPT" \
+      --slurpfile openclaw_rollout "$OPENCLAW_ROLLOUT_RESULT" '{
         kind:$kind,
         schema_version:$schema_version,
         guard_version:$guard_version,
@@ -9174,6 +9530,9 @@ case "$COMMAND" in
         apply_attempt_id:$apply_attempt_id,
         source_receipt_sha256:$source_receipt_sha256,
         plan_sha256:$plan_sha256,
+        openclaw_rollout_result_sha256:
+          $openclaw_rollout_result_sha256,
+        openclaw_rollout_result:$openclaw_rollout[0],
         versioning_receipt_sha256:$versioning_receipt_sha256,
         log_readiness_receipt_sha256:$log_readiness_receipt_sha256,
         alarm_delivery_receipt_sha256:$alarm_delivery_receipt_sha256,
@@ -9211,9 +9570,12 @@ case "$COMMAND" in
     chmod 600 "$APPLY_STAGE"
     jq -e '
       .kind == "terraform-runtime-apply-receipt" and
-      .schema_version == 2 and
+      .schema_version == 3 and
       .status == "applied" and
       .provenance_outcome == "applied" and
+      .openclaw_rollout_result.passed == true and
+      .openclaw_rollout_result.applyAttemptId == .apply_attempt_id and
+      (.openclaw_rollout_result_sha256 | test("^[0-9a-f]{64}$")) and
       .shared_deployment_lock_record_id ==
         "lock#teamagent/terraform.tfstate"
     ' "$APPLY_STAGE" >/dev/null ||
