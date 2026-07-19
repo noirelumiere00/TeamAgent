@@ -699,6 +699,15 @@ def _safe_plan() -> dict[str, Any]:
             )
         )
 
+    configured_addresses = {item["address"] for item in configurations}
+    for change in changes:
+        if change["mode"] != "managed":
+            continue
+        address = change["address"].split("[", 1)[0]
+        if address not in configured_addresses:
+            configurations.append({"address": address, "expressions": {}})
+            configured_addresses.add(address)
+
     return {
         "format_version": "1.2",
         "terraform_version": "1.12.2",
@@ -983,13 +992,38 @@ def _fake_aws(path: Path) -> None:
 
         if args[:2] == ["sts", "get-caller-identity"]:
             account = os.environ.get("AWS_FAKE_ACCOUNT", ACCOUNT)
-            identity = {{"Account": account}}
-            if os.environ.get("AWS_FAKE_TRUSTED_AUTOMATION"):
-                identity["Arn"] = (
+            gate_session = os.environ.get("AWS_ACCESS_KEY_ID") == "ASIAFAKEGATE"
+            arn = (
+                "arn:aws:sts::718959508629:assumed-role/"
+                "teamagent-dev-image-deployment-gate/"
+                "teamagent-image-deployment-gate"
+                if gate_session
+                else (
                     "arn:aws:sts::718959508629:assumed-role/"
-                    "teamagent-dev-terraform-runtime-automation/test"
+                    "teamagent-dev-terraform-runtime-automation/"
+                    "teamagent-terraform-worker"
                 )
-            print(json.dumps(identity))
+            )
+            identity = {{
+                "UserId": "AROATEST:teamagent-terraform-worker",
+                "Account": account,
+                "Arn": arn,
+            }}
+            if "--output" in args and args[args.index("--output") + 1] == "text":
+                print(f"{{account}}\\t{{arn}}")
+            else:
+                print(json.dumps(identity))
+        elif args[:2] == ["sts", "assume-role"]:
+            if "--output" in args and args[args.index("--output") + 1] == "text":
+                print("ASIAFAKEGATE\\tfake-secret\\tfake-session-token")
+            else:
+                print(json.dumps({{
+                    "Credentials": {{
+                        "AccessKeyId": "ASIAFAKEGATE",
+                        "SecretAccessKey": "fake-secret",
+                        "SessionToken": "fake-session-token",
+                    }}
+                }}))
         elif args[:2] in (
             ["dynamodb", "put-item"],
             ["dynamodb", "delete-item"],
@@ -1585,20 +1619,52 @@ def _fake_terraform(path: Path) -> None:
         import sys
 
         args = [arg for arg in sys.argv[1:] if not arg.startswith("-chdir=")]
-        with open(os.environ["TF_FAKE_LOG"], "a", encoding="utf-8") as fh:
-            fh.write(" ".join(args) + "\\n")
+        if log_path := os.environ.get("TF_FAKE_LOG"):
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(" ".join(args) + "\\n")
 
         def state_data():
             state_path = os.environ.get("TF_FAKE_STATE")
             if state_path:
                 return json.loads(pathlib.Path(state_path).read_text(encoding="utf-8"))
+            plan = json.loads(
+                pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            resources_by_address = {}
+            for change in plan["resource_changes"]:
+                if change.get("mode") != "managed":
+                    continue
+                address = change["address"]
+                base, separator, raw_index = address.partition("[")
+                resource_type, name = base.split(".", 1)
+                resource = resources_by_address.setdefault(
+                    base,
+                    {
+                        "mode": "managed",
+                        "type": resource_type,
+                        "name": name,
+                        "provider": "provider[\\\"registry.terraform.io/hashicorp/test\\\"]",
+                        "instances": [],
+                    },
+                )
+                instance = {"schema_version": 0, "attributes": {}}
+                if separator:
+                    encoded_index = raw_index.removesuffix("]")
+                    instance["index_key"] = (
+                        json.loads(encoded_index)
+                        if encoded_index.startswith('"')
+                        else int(encoded_index)
+                    )
+                resource["instances"].append(instance)
             return {
                 "version": 4,
                 "terraform_version": "1.12.2",
                 "serial": 42,
                 "lineage": "01234567-89ab-cdef-0123-456789abcdef",
                 "outputs": {},
-                "resources": [],
+                "resources": list(resources_by_address.values()),
             }
 
         def state_addresses(state):
@@ -1704,6 +1770,44 @@ def _fake_terraform(path: Path) -> None:
                     }
                     containers[0]["image"] = image_by_address.get(change["address"], desired)
                     change["change"]["after"]["container_definitions"] = json.dumps(containers)
+            gate_input = {
+                "deployment_intent_id": image_deployment_intent_id,
+                "deployment_context_sha256": "1" * 64,
+                "receipt_claims_sha256": "2" * 64,
+                "requested_images": {
+                    "mcp": desired,
+                    "openclaw": core["desired_openclaw_image"],
+                    "x_buzz": core["desired_x_image"],
+                },
+                "requested_media_image": core["desired_tiktok_image"],
+                "application_provenance": {
+                    "mcp": {"source_commit": "a" * 40},
+                },
+                "shared_generation_ledger": {},
+            }
+            gate_change = next(
+                change
+                for change in plan["resource_changes"]
+                if change["address"]
+                == "terraform_data.production_image_release_gate"
+            )
+            gate_change["change"]["after"] = {"input": gate_input}
+            plan["planned_values"] = {
+                "root_module": {
+                    "resources": [
+                        {
+                            "address": change["address"],
+                            "mode": change["mode"],
+                            "type": change["type"],
+                            "name": change["name"],
+                            "values": change["change"]["after"],
+                        }
+                        for change in plan["resource_changes"]
+                        if change["change"]["after"] is not None
+                    ],
+                    "child_modules": [],
+                }
+            }
             pathlib.Path(out).write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
         elif args[0] == "show":
             plan_path = pathlib.Path(args[-1])
@@ -1754,6 +1858,7 @@ def _harness(tmp_path: Path, scenario: str = "safe") -> tuple[dict[str, str], Pa
             "PATH": f"{fake_bin}:{env['PATH']}",
             "TF_FAKE_LOG": str(tf_log),
             "TF_FAKE_TEMPLATE": str(template),
+            "AWS_FAKE_TRUSTED_AUTOMATION": "1",
         }
     )
     return env, var_file, tf_log
@@ -1946,9 +2051,15 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "workspace": "default",
     }
     assert len(data["state_contract"]["backend"]["identity_sha256"]) == 64
+    expected_addresses = sorted(
+        change["address"]
+        for change in _safe_plan()["resource_changes"]
+        if change["mode"] == "managed"
+    )
+    expected_address_bytes = "".join(f"{address}\n" for address in expected_addresses).encode()
     assert data["state_contract"]["state"] == {
-        "address_count": 0,
-        "address_set_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "address_count": len(expected_addresses),
+        "address_set_sha256": hashlib.sha256(expected_address_bytes).hexdigest(),
         "lineage": "01234567-89ab-cdef-0123-456789abcdef",
         "serial": 42,
     }
@@ -1962,12 +2073,18 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "aws_cloudwatch_log_group.x_dispatch",
     }
     assert all(item["present"] is False for item in data["state_contract"]["imports"].values())
-    assert "apply" not in tf_log.read_text(encoding="utf-8")
+    assert not any(
+        line == "apply" or line.startswith("apply ")
+        for line in tf_log.read_text(encoding="utf-8").splitlines()
+    )
 
     verify = _run(["bash", str(GUARD), "verify", "--plan", str(plan)], env)
     assert verify.returncode == 0, verify.stdout + verify.stderr
     assert "read-only検証完了" in verify.stdout
-    assert "apply" not in tf_log.read_text(encoding="utf-8")
+    assert not any(
+        line == "apply" or line.startswith("apply ")
+        for line in tf_log.read_text(encoding="utf-8").splitlines()
+    )
 
 
 def test_versioning_stage_is_fail_closed_while_review_manifest_is_disabled(
