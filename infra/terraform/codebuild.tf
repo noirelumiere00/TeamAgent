@@ -520,6 +520,37 @@ data "aws_iam_policy_document" "codebuild_launcher_assume" {
       identifiers = [data.aws_iam_user.aiia_dev.arn]
     }
   }
+
+  statement {
+    actions = [
+      "sts:AssumeRole",
+      "sts:SetSourceIdentity",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:MultiFactorAuthPresent"
+      values   = ["true"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:RoleSessionName"
+      values   = ["teamagent-build-launcher"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:SourceIdentity"
+      values   = ["teamagent-production-build"]
+    }
+  }
 }
 
 resource "aws_iam_role" "codebuild_launcher" {
@@ -529,6 +560,14 @@ resource "aws_iam_role" "codebuild_launcher" {
 }
 
 data "aws_iam_policy_document" "codebuild_launcher" {
+  statement {
+    sid = "RequireAvailableTeamAgentCodeConnection"
+    actions = [
+      "codeconnections:GetConnection",
+      "codeconnections:ListConnections",
+    ]
+    resources = ["*"]
+  }
   statement {
     sid       = "ReadVersionedBuildInputs"
     actions   = ["s3:GetObject", "s3:GetObjectVersion"]
@@ -773,6 +812,37 @@ data "aws_iam_policy_document" "release_launcher_assume" {
     principals {
       type        = "AWS"
       identifiers = [aws_iam_user.release_caller.arn]
+    }
+  }
+
+  statement {
+    actions = [
+      "sts:AssumeRole",
+      "sts:SetSourceIdentity",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:MultiFactorAuthPresent"
+      values   = ["true"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:RoleSessionName"
+      values   = ["teamagent-release-authorization"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:SourceIdentity"
+      values   = ["teamagent-production-release"]
     }
   }
 }
@@ -1377,6 +1447,37 @@ data "aws_iam_policy_document" "tiktok_build_launcher_assume" {
       identifiers = [aws_iam_user.tiktok_build_caller[0].arn]
     }
   }
+
+  statement {
+    actions = [
+      "sts:AssumeRole",
+      "sts:SetSourceIdentity",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:MultiFactorAuthPresent"
+      values   = ["true"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:RoleSessionName"
+      values   = ["teamagent-tiktok-build"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:SourceIdentity"
+      values   = ["teamagent-production-tiktok-build"]
+    }
+  }
 }
 
 resource "aws_iam_role" "tiktok_build_launcher" {
@@ -1418,6 +1519,15 @@ resource "aws_iam_user_policy" "tiktok_build_caller" {
 
 data "aws_iam_policy_document" "tiktok_build_launcher" {
   count = local.tk_enabled
+
+  statement {
+    sid = "RequireAvailableTikTokCodeConnection"
+    actions = [
+      "codeconnections:GetConnection",
+      "codeconnections:ListConnections",
+    ]
+    resources = ["*"]
+  }
 
   statement {
     sid = "CheckImmutableTikTokEvidenceBucket"
@@ -3149,6 +3259,37 @@ data "aws_iam_policy_document" "openclaw_publisher_assume" {
       identifiers = [data.aws_iam_user.aiia_dev.arn]
     }
   }
+
+  statement {
+    actions = [
+      "sts:AssumeRole",
+      "sts:SetSourceIdentity",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:MultiFactorAuthPresent"
+      values   = ["true"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:RoleSessionName"
+      values   = ["openclaw-build-publisher"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:SourceIdentity"
+      values   = ["teamagent-production-openclaw-build"]
+    }
+  }
 }
 
 resource "aws_iam_role" "openclaw_publisher" {
@@ -3158,6 +3299,14 @@ resource "aws_iam_role" "openclaw_publisher" {
 }
 
 data "aws_iam_policy_document" "openclaw_publisher" {
+  statement {
+    sid = "RequireAvailableOpenClawCodeConnection"
+    actions = [
+      "codeconnections:GetConnection",
+      "codeconnections:ListConnections",
+    ]
+    resources = ["*"]
+  }
   statement {
     sid = "PublishAndReadImmutableEvidence"
     actions = [

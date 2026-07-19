@@ -124,26 +124,42 @@ identity() {
 }
 INITIAL="$(identity)"
 IFS=$'\t' read -r INITIAL_ACCOUNT INITIAL_ARN EXTRA <<<"$INITIAL"
-[ -z "${EXTRA:-}" ] && [ "$INITIAL_ACCOUNT" = "$ACCOUNT_ID" ] \
-  && [ "$INITIAL_ARN" = "$EXPECTED_CALLER_ARN" ] \
-  || die "release launcher must start as the exact dedicated caller"
+[ -z "${EXTRA:-}" ] && [ "$INITIAL_ACCOUNT" = "$ACCOUNT_ID" ] ||
+  die "release launcher must start in the fixed account"
+PREASSUMED_LAUNCHER="false"
+if [ "$INITIAL_ARN" = "$EXPECTED_SESSION_ARN" ]; then
+  PREASSUMED_LAUNCHER="true"
+elif [ "$INITIAL_ARN" != "$EXPECTED_CALLER_ARN" ]; then
+  die "release launcher must start as the dedicated caller or exact pinned STS launcher"
+fi
 unset INITIAL INITIAL_ACCOUNT INITIAL_ARN EXTRA
-SESSION="$(
-  AWS_PAGER="" aws sts assume-role \
-    --region "$REGION" \
-    --role-arn "$LAUNCHER_ROLE_ARN" \
-    --role-session-name "$SESSION_NAME" \
-    --duration-seconds 10800 \
-    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
-    --output text
-)" || die "could not assume the release launcher role"
-IFS=$'\t' read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN EXPIRATION EXTRA \
-  <<<"$SESSION"
-[ -z "${EXTRA:-}" ] || die "malformed release launcher credentials"
-export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
-export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
-unset AWS_PROFILE AWS_DEFAULT_PROFILE SESSION EXPIRATION EXTRA
+if [ "$PREASSUMED_LAUNCHER" = "false" ]; then
+  SESSION="$(
+    AWS_PAGER="" aws sts assume-role \
+      --region "$REGION" \
+      --role-arn "$LAUNCHER_ROLE_ARN" \
+      --role-session-name "$SESSION_NAME" \
+      --duration-seconds 10800 \
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
+      --output text
+  )" || die "could not assume the release launcher role"
+  IFS=$'\t' read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN EXPIRATION EXTRA \
+    <<<"$SESSION"
+  [ -z "${EXTRA:-}" ] || die "malformed release launcher credentials"
+  for credential in \
+    "$AWS_ACCESS_KEY_ID" \
+    "$AWS_SECRET_ACCESS_KEY" \
+    "$AWS_SESSION_TOKEN" \
+    "$EXPIRATION"; do
+    [ -n "$credential" ] && [ "$credential" != "None" ] ||
+      die "incomplete release launcher credentials"
+  done
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
+  export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
+  unset AWS_PROFILE AWS_DEFAULT_PROFILE SESSION EXPIRATION EXTRA credential
+fi
+unset PREASSUMED_LAUNCHER
 PINNED="$(identity)"
 IFS=$'\t' read -r PINNED_ACCOUNT PINNED_ARN EXTRA <<<"$PINNED"
 [ -z "${EXTRA:-}" ] && [ "$PINNED_ACCOUNT" = "$ACCOUNT_ID" ] \

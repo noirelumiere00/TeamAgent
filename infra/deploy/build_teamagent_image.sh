@@ -23,6 +23,7 @@ ATTESTOR_PROJECT="teamagent-dev-image-attestor"
 PROMOTER_PROJECT="teamagent-dev-image-promoter"
 VERIFIED_CANDIDATE_REPOSITORY="teamagent-mcp-verified-candidates"
 MEDIA_VERIFIED_CANDIDATE_REPOSITORY="teamagent-media-worker-verified-candidates"
+SOURCE_CONNECTION_NAME="teamagent-dev-openclaw-codebuild"
 POLL_SECONDS=15
 TIMEOUT_SECONDS=7200
 
@@ -174,38 +175,94 @@ INITIAL_IDENTITY="$(identity)"
 [[ "$INITIAL_IDENTITY" != *$'\n'* && "$INITIAL_IDENTITY" != *$'\r'* ]] \
   || die "malformed initial AWS identity"
 IFS=$'\t' read -r INITIAL_ACCOUNT INITIAL_ARN EXTRA <<<"$INITIAL_IDENTITY"
-[ -z "${EXTRA:-}" ] && [ "$INITIAL_ACCOUNT" = "$ACCOUNT_ID" ] \
-  && [ "$INITIAL_ARN" = "$EXPECTED_CALLER_ARN" ] \
-  || die "launcher must start as the exact dedicated caller in account $ACCOUNT_ID"
+[ -z "${EXTRA:-}" ] && [ "$INITIAL_ACCOUNT" = "$ACCOUNT_ID" ] ||
+  die "launcher must start in account $ACCOUNT_ID"
+PREASSUMED_LAUNCHER="false"
+if [ "$INITIAL_ARN" = "$EXPECTED_SESSION_ARN" ]; then
+  PREASSUMED_LAUNCHER="true"
+elif [ "$INITIAL_ARN" != "$EXPECTED_CALLER_ARN" ]; then
+  die "launcher must start as the dedicated caller or exact pinned STS launcher session"
+fi
 unset INITIAL_IDENTITY INITIAL_ACCOUNT INITIAL_ARN EXTRA
 
-SESSION_CREDENTIALS="$(
-  AWS_PAGER="" aws sts assume-role \
-    --region "$REGION" \
-    --role-arn "$LAUNCHER_ROLE_ARN" \
-    --role-session-name "$LAUNCHER_SESSION_NAME" \
-    --duration-seconds 10800 \
-    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
-    --output text
-)" || die "could not assume the dedicated launcher role"
-[[ "$SESSION_CREDENTIALS" != *$'\n'* && "$SESSION_CREDENTIALS" != *$'\r'* ]] \
-  || die "malformed launcher credentials"
-IFS=$'\t' read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN EXPIRATION EXTRA \
-  <<<"$SESSION_CREDENTIALS"
-[ -z "${EXTRA:-}" ] || die "malformed launcher credentials"
-for credential in "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" "$EXPIRATION"; do
-  [ -n "$credential" ] && [ "$credential" != "None" ] || die "incomplete launcher credentials"
-done
-export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
-export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
-unset AWS_PROFILE AWS_DEFAULT_PROFILE SESSION_CREDENTIALS EXPIRATION EXTRA credential
+if [ "$PREASSUMED_LAUNCHER" = "false" ]; then
+  SESSION_CREDENTIALS="$(
+    AWS_PAGER="" aws sts assume-role \
+      --region "$REGION" \
+      --role-arn "$LAUNCHER_ROLE_ARN" \
+      --role-session-name "$LAUNCHER_SESSION_NAME" \
+      --duration-seconds 10800 \
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
+      --output text
+  )" || die "could not assume the dedicated launcher role"
+  [[ "$SESSION_CREDENTIALS" != *$'\n'* && "$SESSION_CREDENTIALS" != *$'\r'* ]] \
+    || die "malformed launcher credentials"
+  IFS=$'\t' read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN EXPIRATION EXTRA \
+    <<<"$SESSION_CREDENTIALS"
+  [ -z "${EXTRA:-}" ] || die "malformed launcher credentials"
+  for credential in "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" "$EXPIRATION"; do
+    [ -n "$credential" ] && [ "$credential" != "None" ] ||
+      die "incomplete launcher credentials"
+  done
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
+  export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
+  unset AWS_PROFILE AWS_DEFAULT_PROFILE SESSION_CREDENTIALS EXPIRATION EXTRA credential
+fi
+unset PREASSUMED_LAUNCHER
 SESSION_IDENTITY="$(identity)"
 IFS=$'\t' read -r SESSION_ACCOUNT SESSION_ARN EXTRA <<<"$SESSION_IDENTITY"
 [ -z "${EXTRA:-}" ] && [ "$SESSION_ACCOUNT" = "$ACCOUNT_ID" ] \
   && [ "$SESSION_ARN" = "$EXPECTED_SESSION_ARN" ] \
   || die "unexpected pinned launcher session"
 unset SESSION_IDENTITY SESSION_ACCOUNT SESSION_ARN EXTRA
+
+assert_source_connection_available() {
+  local inventory="$TMP_DIR/codeconnections.json"
+  local exact="$TMP_DIR/codeconnection.json"
+  local connection_arn
+  AWS_PAGER="" aws codeconnections list-connections \
+    --region "$REGION" \
+    --max-results 100 \
+    --output json >"$inventory"
+  jq -e \
+    --arg name "$SOURCE_CONNECTION_NAME" \
+    --arg account "$ACCOUNT_ID" '
+    (.NextToken // "") == "" and
+    ([.Connections[]? |
+      select(.ConnectionName == $name)] | length) == 1 and
+    ([.Connections[]? | select(.ConnectionName == $name)][0] |
+      .ProviderType == "GitHub" and
+      .OwnerAccountId == $account)
+  ' "$inventory" >/dev/null ||
+    die "the exact TeamAgent GitHub CodeConnection is missing or ambiguous"
+  connection_arn="$(
+    jq -er --arg name "$SOURCE_CONNECTION_NAME" '
+      .Connections[] | select(.ConnectionName == $name) | .ConnectionArn
+    ' "$inventory"
+  )"
+  [[ "$connection_arn" =~ ^arn:aws:(codeconnections|codestar-connections):ap-northeast-1:718959508629:connection/[0-9a-f-]+$ ]] \
+    || die "the TeamAgent CodeConnection ARN is outside the fixed account"
+  AWS_PAGER="" aws codeconnections get-connection \
+    --region "$REGION" \
+    --connection-arn "$connection_arn" \
+    --output json >"$exact"
+  jq -e \
+    --arg name "$SOURCE_CONNECTION_NAME" \
+    --arg arn "$connection_arn" \
+    --arg account "$ACCOUNT_ID" '
+    .Connection == {
+      ConnectionName:$name,
+      ConnectionArn:$arn,
+      ProviderType:"GitHub",
+      OwnerAccountId:$account,
+      ConnectionStatus:"AVAILABLE"
+    }
+  ' "$exact" >/dev/null ||
+    die "the TeamAgent GitHub CodeConnection is not AVAILABLE"
+}
+
+assert_source_connection_available
 
 DOWNLOADED_APP_VERSION="$(
   AWS_PAGER="" aws s3api get-object \

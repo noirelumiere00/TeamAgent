@@ -1136,16 +1136,17 @@ def test_alarm_migration_rejects_skip_rollback_hash_and_time_mutation() -> None:
         )
 
 
-def test_runtime_evidence_authority_is_an_external_fail_closed_prerequisite() -> None:
+def test_runtime_evidence_authority_is_main_owned_after_one_time_bootstrap() -> None:
     terraform = (PROJECT_ROOT / "infra/terraform/runtime_evidence.tf").read_text()
     manifest = (
         PROJECT_ROOT / "infra/deploy/terraform_runtime_migrations.json"
     ).read_text()
-    assert 'resource "aws_kms_key" "alarm_recipient_ack"' not in terraform
-    assert 'resource "aws_iam_role" "alarm_recipient_ack_signer"' not in terraform
-    assert 'resource "aws_iam_role_policy" "runtime_evidence_automation"' not in terraform
-    assert 'data "aws_kms_alias" "alarm_recipient_ack"' in terraform
-    assert 'data "aws_iam_role" "alarm_recipient_ack_signer"' in terraform
+    assert 'resource "aws_kms_key" "alarm_recipient_ack"' in terraform
+    assert 'resource "aws_iam_role" "alarm_recipient_ack_signer"' in terraform
+    assert 'resource "aws_iam_role" "runtime_automation"' in terraform
+    assert 'resource "aws_iam_role_policy" "runtime_evidence_automation"' in terraform
+    assert 'data "aws_kms_alias" "alarm_recipient_ack"' not in terraform
+    assert 'data "aws_iam_role" "alarm_recipient_ack_signer"' not in terraform
     assert "runtime_evidence_automation_policy_contract" in terraform
     for address in (
         "aws_kms_key.alarm_recipient_ack",

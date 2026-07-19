@@ -25,6 +25,7 @@ CORE_RELEASE_REPOSITORY="teamagent-openclaw"
 MEDIA_QUARANTINE_REPOSITORY="teamagent-openclaw-media-quarantine"
 MEDIA_VERIFIED_CANDIDATE_REPOSITORY="teamagent-openclaw-media-verified-candidates"
 MEDIA_RELEASE_REPOSITORY="teamagent-openclaw-media"
+SOURCE_CONNECTION_NAME="teamagent-dev-openclaw-codebuild"
 POLL_SECONDS=15
 TIMEOUT_SECONDS=7200
 
@@ -138,40 +139,47 @@ INITIAL_IDENTITY="$(
 IFS=$'\t' read -r ACTUAL_ACCOUNT_ID ACTUAL_CALLER_ARN EXTRA_IDENTITY <<<"$INITIAL_IDENTITY"
 [ -z "${EXTRA_IDENTITY:-}" ] || die "AWS returned a malformed initial identity"
 [ "$ACTUAL_ACCOUNT_ID" = "$EXPECTED_ACCOUNT_ID" ] || die "refusing the wrong AWS account"
-[ "$ACTUAL_CALLER_ARN" = "$EXPECTED_CALLER_ARN" ] \
-  || die "publisher must start as $EXPECTED_CALLER_ARN"
+PREASSUMED_PUBLISHER="false"
+if [ "$ACTUAL_CALLER_ARN" = "$EXPECTED_SESSION_ARN" ]; then
+  PREASSUMED_PUBLISHER="true"
+elif [ "$ACTUAL_CALLER_ARN" != "$EXPECTED_CALLER_ARN" ]; then
+  die "publisher must start as the dedicated caller or exact pinned STS publisher session"
+fi
 unset INITIAL_IDENTITY ACTUAL_ACCOUNT_ID ACTUAL_CALLER_ARN EXTRA_IDENTITY
 
-SESSION_CREDENTIALS="$(
-  AWS_PAGER="" aws sts assume-role \
-    --region "$REGION" \
-    --role-arn "$PUBLISHER_ROLE_ARN" \
-    --role-session-name "$PUBLISHER_SESSION_NAME" \
-    --duration-seconds 10800 \
-    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
-    --output text
-)" || die "could not assume the dedicated OpenClaw publisher role"
-[[ "$SESSION_CREDENTIALS" != *$'\n'* && "$SESSION_CREDENTIALS" != *$'\r'* ]] \
-  || die "STS returned malformed publisher credentials"
-IFS=$'\t' read -r \
-  AWS_ACCESS_KEY_ID \
-  AWS_SECRET_ACCESS_KEY \
-  AWS_SESSION_TOKEN \
-  AWS_CREDENTIAL_EXPIRATION \
-  EXTRA_CREDENTIAL <<<"$SESSION_CREDENTIALS"
-[ -z "${EXTRA_CREDENTIAL:-}" ] || die "STS returned malformed publisher credentials"
-for credential in \
-  "$AWS_ACCESS_KEY_ID" \
-  "$AWS_SECRET_ACCESS_KEY" \
-  "$AWS_SESSION_TOKEN" \
-  "$AWS_CREDENTIAL_EXPIRATION"; do
-  [ -n "$credential" ] && [ "$credential" != "None" ] \
-    || die "STS returned incomplete publisher credentials"
-done
-export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
-export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
-unset AWS_PROFILE AWS_DEFAULT_PROFILE SESSION_CREDENTIALS EXTRA_CREDENTIAL credential
+if [ "$PREASSUMED_PUBLISHER" = "false" ]; then
+  SESSION_CREDENTIALS="$(
+    AWS_PAGER="" aws sts assume-role \
+      --region "$REGION" \
+      --role-arn "$PUBLISHER_ROLE_ARN" \
+      --role-session-name "$PUBLISHER_SESSION_NAME" \
+      --duration-seconds 10800 \
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
+      --output text
+  )" || die "could not assume the dedicated OpenClaw publisher role"
+  [[ "$SESSION_CREDENTIALS" != *$'\n'* && "$SESSION_CREDENTIALS" != *$'\r'* ]] \
+    || die "STS returned malformed publisher credentials"
+  IFS=$'\t' read -r \
+    AWS_ACCESS_KEY_ID \
+    AWS_SECRET_ACCESS_KEY \
+    AWS_SESSION_TOKEN \
+    AWS_CREDENTIAL_EXPIRATION \
+    EXTRA_CREDENTIAL <<<"$SESSION_CREDENTIALS"
+  [ -z "${EXTRA_CREDENTIAL:-}" ] || die "STS returned malformed publisher credentials"
+  for credential in \
+    "$AWS_ACCESS_KEY_ID" \
+    "$AWS_SECRET_ACCESS_KEY" \
+    "$AWS_SESSION_TOKEN" \
+    "$AWS_CREDENTIAL_EXPIRATION"; do
+    [ -n "$credential" ] && [ "$credential" != "None" ] \
+      || die "STS returned incomplete publisher credentials"
+  done
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
+  export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
+  unset AWS_PROFILE AWS_DEFAULT_PROFILE SESSION_CREDENTIALS EXTRA_CREDENTIAL credential
+fi
+unset PREASSUMED_PUBLISHER
 
 SESSION_IDENTITY="$(
   AWS_PAGER="" aws sts get-caller-identity --query '[Account,Arn]' --output text
@@ -189,6 +197,53 @@ cleanup() {
   rm -rf -- "$TMP_DIR"
 }
 trap cleanup EXIT
+
+assert_source_connection_available() {
+  local inventory="$TMP_DIR/codeconnections.json"
+  local exact="$TMP_DIR/codeconnection.json"
+  local connection_arn
+  AWS_PAGER="" aws codeconnections list-connections \
+    --region "$REGION" \
+    --max-results 100 \
+    --output json >"$inventory"
+  jq -e \
+    --arg name "$SOURCE_CONNECTION_NAME" \
+    --arg account "$EXPECTED_ACCOUNT_ID" '
+    (.NextToken // "") == "" and
+    ([.Connections[]? |
+      select(.ConnectionName == $name)] | length) == 1 and
+    ([.Connections[]? | select(.ConnectionName == $name)][0] |
+      .ProviderType == "GitHub" and
+      .OwnerAccountId == $account)
+  ' "$inventory" >/dev/null ||
+    die "the exact OpenClaw GitHub CodeConnection is missing or ambiguous"
+  connection_arn="$(
+    jq -er --arg name "$SOURCE_CONNECTION_NAME" '
+      .Connections[] | select(.ConnectionName == $name) | .ConnectionArn
+    ' "$inventory"
+  )"
+  [[ "$connection_arn" =~ ^arn:aws:(codeconnections|codestar-connections):ap-northeast-1:718959508629:connection/[0-9a-f-]+$ ]] \
+    || die "the OpenClaw CodeConnection ARN is outside the fixed account"
+  AWS_PAGER="" aws codeconnections get-connection \
+    --region "$REGION" \
+    --connection-arn "$connection_arn" \
+    --output json >"$exact"
+  jq -e \
+    --arg name "$SOURCE_CONNECTION_NAME" \
+    --arg arn "$connection_arn" \
+    --arg account "$EXPECTED_ACCOUNT_ID" '
+    .Connection == {
+      ConnectionName:$name,
+      ConnectionArn:$arn,
+      ProviderType:"GitHub",
+      OwnerAccountId:$account,
+      ConnectionStatus:"AVAILABLE"
+    }
+  ' "$exact" >/dev/null ||
+    die "the OpenClaw GitHub CodeConnection is not AVAILABLE"
+}
+
+assert_source_connection_available
 
 SIGNING_KMS_KEY_ARN="$(
   AWS_PAGER="" aws kms describe-key \

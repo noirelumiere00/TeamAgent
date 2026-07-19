@@ -7,6 +7,15 @@ runtimeを含む plain Terraform、targeted apply、旧image-only script、可�
 共有deployment lockを取得し、そのlockを直前再検証から保存planの適用完了まで保持して、
 原子的apply receiptを発行します。
 
+唯一のfirst-install例外は
+`infra/deploy/bootstrap_provenance_iam.sh`です。通常guardが前提とするprovenance/IAM/
+deployment-intent control planeだけを、rootが作成する一時CloudFormation seedから
+1時間のSTS sessionへ移り、固定target・create/no-op限定の保存planでmain backendへ
+直接作成します。update/delete/replace/import/move/drift/runtime resourceは拒否し、
+main stateのlineage/serial/address引継ぎ検証後にsessionをrevokeしてseed stack/roleを
+削除します。bootstrap Terraform stateは存在しないため、AWS objectの二重state ownershipは
+ありません。詳細は`docs/runbooks/provenance_iam_bootstrap.md`を参照してください。
+
 このguardは、手順に従うoperator向けのworkflow controlであり、AWSのauthorization boundary
 ではありません。root、admin、既存IAM user/access keyの権限は維持し、このstateから
 permissions boundaryやdeny policyを付けません。管理者はRegisterTaskDefinition、RunTask、
@@ -51,20 +60,25 @@ guard/receiptを「管理者にも強制できる安全境界」とは扱いま�
   再計算します。
 - `issue-alarm-challenge`はfresh 256-bit nonceをcanonical topicへ実publishし、SNS
   `MessageId`、AWS response Date/request-id、exact subscription metadata、全publisher
-  inventoryをone-use ledgerへ束縛します。受信者は組織管理の
-  `teamagent-dev-alarm-recipient-ack-signer` SSO/MFA roleから、challengeのexact
+  inventoryをone-use ledgerへ束縛します。受信者は
+  `teamagent-dev-alarm-recipient-ack-signer`の1時間STS roleから、challengeのexact
   MessageId/nonce/raw email/topicに加え、challenge全体とinventoryのcanonical hashをKMS
   `SIGN_VERIFY` keyで署名します。automation側はKMS署名、key metadata、期限、
   MessageId/nonce/challenge hash/inventory hash、未使用ledger row、再取得した全inventoryを
   検証してから短命receiptを発行します。未ack、再利用、期限切れ、別message、
   任意64-hex文字列は証跡になりません。
 
-`runtime_evidence.tf`が参照するrecipient KMS alias、SSO/MFA signer role、runtime automation
-roleとそのexact evidence policyは、このstateの外で独立にbootstrapする必須前提です。
-versioning/SNS evidenceがfull planより先に必要なため、同じplanでこれらの権限を自己作成する
-循環経路はありません。data sourceとpolicy-contract outputはidentityをpinするだけです。
-前提が無い、KMS keyが`SIGN_VERIFY`/`ECC_NIST_P256`/customer-managed/AWS_KMS originでない、
-またはautomation permissionが不足する場合はsource workflowがAWS API失敗で停止します。
+`runtime_evidence.tf`のrecipient KMS alias、MFA signer role、runtime automation roleと
+exact evidence policyはmain state所有です。通常full planより先に必要なため、上記の
+one-time bootstrapだけがcreate可能です。KMS keyは`SIGN_VERIFY`/`ECC_NIST_P256`/
+customer-managed/AWS_KMS originへ固定し、runtime automationはrootのMFA付き短期STS、
+exact session name/source identityだけを信頼します。access key/login profileは作りません。
+signerは従来のexact organization recipient roleを維持しつつ、root-only初期環境では
+`bootstrap_runtime_session.sh sign-alarm-ack`がMFA・exact session name/source identityを
+要求する別STS sessionへ移ります。このwrapper/guard経路では、rootやruntime
+automationが直接KMS Signする経路はありません。
+automation role自身にはCodeBuild start、ECR image write、KMS Sign、release evidence object
+write、debug session、長期human credentialの明示Denyがあります。
 
 legacy alarm topicは一括切替しません。`advance-alarm-migration`は同じshared lockとDynamoDB
 ledgerの下で、次のdurable chainだけを受理します。
@@ -158,9 +172,9 @@ current/noncurrent各60日lifecycle、7 log groupのimport/30日retentionを収�
 # versioning_receipt_sha256 = sha256(log-versioning.json)
 ```
 
-現在はlog versioning attestation stageとruntime manifestがともに`enabled=false`で、
-external KMS/SSO signer/automation permission prerequisitesも未確認です。attestation、
-migration plan、applyはいずれもfail closedし、production writeはNO-GOです。
+現在はlog versioning attestation stageとruntime manifestがともに`enabled=false`です。
+main-state bootstrap receipt、KMS/SSO signer/automation role、live permissionのいずれかが
+未確認ならattestation、migration plan、applyはfail closedし、production writeはNO-GOです。
 
 ## Existing operational log retention
 
@@ -355,16 +369,20 @@ of this remediation.
    resumable imports belong to the same composed migration entrypoint; raw
    Terraform import, plan, target, or apply commands are not an approved
    operator path.
-3. `release.ready=false` remains fail closed. There is no targeted bootstrap
-   exception. Provenance infrastructure, runtime migration, and activation are
-   admitted only by the full saved-plan workflow with one-use intent and the
-   shared lock.
+3. `release.ready=false` remains fail closed for build, authorization, runtime
+   migration, and activation. The sole control-plane bootstrap exception is the
+   fixed `bootstrap_provenance_iam.sh` target set. It accepts create/no-op only,
+   writes directly to the main backend, burns a separate one-use ledger row,
+   and retires its seed. It cannot update runtime or start a build/release.
 
-4. The two GitHub CodeConnections are created in `PENDING`. Complete the GitHub
+4. The GitHub CodeConnections may be created in `PENDING` by the one-time
+   bootstrap. Complete the GitHub
    App handshake for `teamagent-dev-openclaw-codebuild` and
    `teamagent-dev-tiktok-codebuild`, then verify both are `AVAILABLE`.
-   The MCP publisher reuses the TeamAgent/OpenClaw connection. Do not start a
-   build before this manual handshake.
+   The TikTok connection is absent (safely) when media/TikTok is disabled.
+   The MCP publisher reuses the TeamAgent/OpenClaw connection. Every launcher
+   rejects missing/ambiguous/paginated/PENDING connections before evidence
+   writes or CodeBuild start.
 5. Quarantine repositories expire rejected candidates after 2 days.
    Verified-candidate lifecycle rules can match only explicit noncanonical
    `rejected-*` tags; canonical `verified-*` subjects and their untagged
@@ -388,14 +406,18 @@ intent, and holds the shared deployment lock through supervised apply.
 
 ### Build, release authorization, and signed-digest deploy
 
-After contracts are ready, both connections are available, and the Terraform
-worker has provisioned the trusted
+After contracts are ready, required connections are available, and the
+one-time bootstrap has provisioned the trusted
 `teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker` session:
 
-1. Run exactly one build-only launcher from clean remote HEAD:
+1. From a root-only management terminal, use
+   `bootstrap_provenance_session.sh` to assume the exact MFA/source-identity
+   pinned launcher role, then run exactly one build-only launcher from clean
+   remote HEAD:
    `build_teamagent_image.sh`, `build_openclaw_image.sh`, or
-   `build_tiktok_image.sh`. Each assumes its dedicated role once, pins that
-   session, and ends at a verified-candidate digest plus immutable receipt.
+   `build_tiktok_image.sh`. Root is accepted only by STS role trust and is
+   rejected as the direct build/release caller. Existing dedicated IAM callers
+   remain compatible; no access key is created.
 2. Use `authorize_image_release.sh` with the exact candidate receipt key and
    both S3 VersionIds before the signed 30-day candidate window expires. It
    rechecks the candidate manifest/referrers and all cosign signatures, issues

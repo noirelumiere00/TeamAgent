@@ -1,0 +1,455 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  One-time TeamAgent provenance/IAM bootstrap seed. This stack owns only the
+  temporary executor role and its explicit-deny managed policy, and both must
+  be deleted after the create-only main-state handoff. It cannot start builds,
+  publish evidence, write images, or mutate runtime services.
+
+Parameters:
+  BootstrapExternalId:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{64}$"
+    NoEcho: true
+  BootstrapCommit:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{40}$"
+
+Resources:
+  BootstrapDenyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: teamagent-production-provenance-bootstrap-deny-v1
+      Description: Explicit deny boundary for the one-time bootstrap executor
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DLC
+            Effect: Deny
+            Action:
+              - iam:CreateAccessKey
+              - iam:CreateLoginProfile
+              - iam:CreateServiceSpecificCredential
+              - iam:ResetServiceSpecificCredential
+              - iam:UpdateAccessKey
+              - iam:UpdateLoginProfile
+              - iam:UploadSSHPublicKey
+              - iam:UploadSigningCertificate
+            Resource: "*"
+          - Sid: DBD
+            Effect: Deny
+            Action:
+              - codebuild:RetryBuild
+              - codebuild:RetryBuildBatch
+              - codebuild:StartBuild
+              - codebuild:StartBuildBatch
+              - codebuild:StartCommandExecution
+              - codebuild:StartSandbox
+              - codebuild:StartSandboxConnection
+              - ssm:StartSession
+              - ssmmessages:*
+            Resource: "*"
+          - Sid: DIS
+            Effect: Deny
+            Action:
+              - ecr:BatchDeleteImage
+              - ecr:BatchGetImage
+              - ecr:CompleteLayerUpload
+              - ecr:GetAuthorizationToken
+              - ecr:GetDownloadUrlForLayer
+              - ecr:InitiateLayerUpload
+              - ecr:PutImage
+              - ecr:UploadLayerPart
+              - kms:GenerateMac
+              - kms:ScheduleKeyDeletion
+              - kms:Sign
+            Resource: "*"
+          - Sid: DKB
+            Effect: Deny
+            Action:
+              - kms:CreateKey
+              - kms:PutKeyPolicy
+            Resource: "*"
+            Condition:
+              Bool:
+                kms:BypassPolicyLockoutSafetyCheck: "true"
+          - Sid: DRM
+            Effect: Deny
+            Action:
+              - ecs:CreateService
+              - ecs:DeleteService
+              - ecs:RegisterTaskDefinition
+              - ecs:RunTask
+              - ecs:StopTask
+              - ecs:UpdateService
+              - events:DeleteRule
+              - events:DisableRule
+              - events:EnableRule
+              - events:PutRule
+              - events:PutTargets
+              - lambda:CreateFunction
+              - lambda:DeleteFunction
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - scheduler:CreateSchedule
+              - scheduler:DeleteSchedule
+              - scheduler:UpdateSchedule
+            Resource: "*"
+          - Sid: DEW
+            Effect: Deny
+            Action:
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:PutObject
+              - s3:PutObjectRetention
+            NotResource:
+              - arn:aws:s3:::teamagent-tfstate-718959508629/teamagent/terraform.tfstate
+          - Sid: DSR
+            Effect: Deny
+            Action:
+              - secretsmanager:BatchGetSecretValue
+              - secretsmanager:GetSecretValue
+              - ssm:GetParameter
+              - ssm:GetParameterHistory
+              - ssm:GetParameters
+              - ssm:GetParametersByPath
+            Resource: "*"
+          - Sid: DOR
+            Effect: Deny
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            NotResource: arn:aws:s3:::teamagent-tfstate-718959508629/teamagent/terraform.tfstate
+          - Sid: DDR
+            Effect: Deny
+            Action:
+              - dynamodb:BatchGetItem
+              - dynamodb:GetItem
+              - dynamodb:PartiQLSelect
+              - dynamodb:Query
+              - dynamodb:Scan
+            NotResource: arn:aws:dynamodb:ap-northeast-1:718959508629:table/teamagent-tflock
+          - Sid: DCT
+            Effect: Deny
+            Action: codeconnections:GetConnectionToken
+            Resource: "*"
+          - Sid: DDD
+            Effect: Deny
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                kms:ViaService: "true"
+          # The executor never needs role chaining. Deny every AssumeRole
+          # path so an inline policy/trust created for the reviewed main plan
+          # cannot become an escape hatch during the bootstrap session.
+          - Sid: DenyAllRoleChaining
+            Effect: Deny
+            Action: sts:AssumeRole
+            Resource: "*"
+
+  BootstrapExecutorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: teamagent-production-provenance-bootstrap-v1
+      Description: One-time create-only provenance control-plane bootstrap executor
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ExactRootMfaBootstrapSession
+            Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::718959508629:root
+            Action:
+              - sts:AssumeRole
+              - sts:SetSourceIdentity
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: arn:aws:iam::718959508629:root
+              Bool:
+                aws:MultiFactorAuthPresent: "true"
+              StringEquals:
+                sts:ExternalId: !Ref BootstrapExternalId
+                sts:RoleSessionName: teamagent-provenance-bootstrap
+                sts:SourceIdentity: teamagent-production-provenance-bootstrap
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - !Ref BootstrapDenyPolicy
+      Policies:
+        - PolicyName: teamagent-production-provenance-bootstrap-boundary
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: arn:aws:s3:::teamagent-tfstate-718959508629/teamagent/terraform.tfstate
+              - Sid: BL
+                Effect: Allow
+                Action:
+                  - dynamodb:DeleteItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: arn:aws:dynamodb:ap-northeast-1:718959508629:table/teamagent-tflock
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - teamagent-tfstate-718959508629/teamagent/terraform.tfstate
+                      - teamagent-tfstate-718959508629/teamagent/terraform.tfstate-md5
+              - Sid: BSL
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: arn:aws:dynamodb:ap-northeast-1:718959508629:table/teamagent-tflock
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - bootstrap#teamagent-production-provenance-iam-v1
+              - Sid: IT
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:TagResource
+                  - dynamodb:UpdateContinuousBackups
+                  - dynamodb:UpdateTimeToLive
+                Resource: arn:aws:dynamodb:ap-northeast-1:718959508629:table/teamagent-dev-image-deployment-intents
+              - Sid: LG
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:TagResource
+                Resource:
+                  - arn:aws:logs:ap-northeast-1:718959508629:log-group:/aws/codebuild/teamagent-dev-tiktok-image-builder
+                  - arn:aws:logs:ap-northeast-1:718959508629:log-group:/aws/codebuild/teamagent-dev-openclaw-provenance-builder
+                  - arn:aws:logs:ap-northeast-1:718959508629:log-group:/aws/codebuild/teamagent-dev-mcp-source-publisher
+                  - arn:aws:logs:ap-northeast-1:718959508629:log-group:/aws/codebuild/teamagent-dev-image-attestor
+                  - arn:aws:logs:ap-northeast-1:718959508629:log-group:/aws/codebuild/teamagent-dev-image-promoter
+              # CreateConnection has no resource-level ARN in the
+              # CodeConnections authorization model. Keep it in its own
+              # statement and constrain the request to the only provider and
+              # Terraform default tags accepted by this bootstrap.
+              - Sid: CreateOnlyTaggedGitHubCodeConnections
+                Effect: Allow
+                Action: codeconnections:CreateConnection
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    codeconnections:ProviderType: GitHub
+                    aws:RequestTag/Project: TeamAgent
+                    aws:RequestTag/Environment: dev
+                    aws:RequestTag/ManagedBy: Terraform
+                    aws:RequestTag/Version: v3.0
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Environment
+                      - ManagedBy
+                      - Project
+                      - Version
+              - Sid: ReadConnectionInventory
+                Effect: Allow
+                Action:
+                  - codeconnections:GetConnection
+                  - codeconnections:ListConnections
+                Resource: "*"
+              - Sid: CT
+                Effect: Allow
+                Action: codeconnections:TagResource
+                Resource:
+                  - arn:aws:codeconnections:ap-northeast-1:718959508629:connection/*
+                  - arn:aws:codestar-connections:ap-northeast-1:718959508629:connection/*
+              - Sid: CB
+                Effect: Allow
+                Action: codebuild:CreateProject
+                Resource:
+                  - arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-tiktok-image-builder
+                  - arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-mcp-source-publisher
+                  - arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-image-attestor
+                  - arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-image-promoter
+                  - arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-openclaw-provenance-builder
+              - Sid: KK
+                Effect: Allow
+                Action: kms:CreateKey
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: TeamAgent
+                    aws:RequestTag/Environment: dev
+                    aws:RequestTag/ManagedBy: Terraform
+                    aws:RequestTag/Version: v3.0
+                    kms:KeyOrigin: AWS_KMS
+                    kms:KeySpec:
+                      - ECC_NIST_P256
+                      - RSA_3072
+                      - SYMMETRIC_DEFAULT
+                    kms:KeyUsage:
+                      - ENCRYPT_DECRYPT
+                      - SIGN_VERIFY
+                  Bool:
+                    kms:MultiRegion: "false"
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Environment
+                      - ManagedBy
+                      - Project
+                      - Version
+              - Sid: KT
+                Effect: Allow
+                Action: kms:TagResource
+                Resource: arn:aws:kms:ap-northeast-1:718959508629:key/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: TeamAgent
+                    aws:RequestTag/Environment: dev
+                    aws:RequestTag/ManagedBy: Terraform
+                    aws:RequestTag/Version: v3.0
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Environment
+                      - ManagedBy
+                      - Project
+                      - Version
+              - Sid: KC
+                Effect: Allow
+                Action: kms:EnableKeyRotation
+                Resource: arn:aws:kms:ap-northeast-1:718959508629:key/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: TeamAgent
+                    aws:ResourceTag/Environment: dev
+                    aws:ResourceTag/ManagedBy: Terraform
+              - Sid: KA
+                Effect: Allow
+                Action: kms:CreateAlias
+                Resource:
+                  - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-image-release-evidence
+                  - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-mcp-source-publisher
+                  - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-tiktok-source-publisher
+                  - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-image-attestor
+                  - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-openclaw-build-evidence
+                  - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-openclaw-build-publisher
+                  - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-alarm-recipient-ack
+              - Sid: KAT
+                Effect: Allow
+                Action: kms:CreateAlias
+                Resource: arn:aws:kms:ap-northeast-1:718959508629:key/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: TeamAgent
+                    aws:ResourceTag/Environment: dev
+                    aws:ResourceTag/ManagedBy: Terraform
+              - Sid: DK
+                Effect: Allow
+                Action:
+                  - kms:CreateGrant
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:GenerateDataKeyWithoutPlaintext
+                  - kms:ReEncryptFrom
+                  - kms:ReEncryptTo
+                Resource: arn:aws:kms:ap-northeast-1:718959508629:key/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: TeamAgent
+                    aws:ResourceTag/Environment: dev
+                    aws:ResourceTag/ManagedBy: Terraform
+                    kms:CallerAccount: "718959508629"
+                    kms:ViaService: dynamodb.ap-northeast-1.amazonaws.com
+              - Sid: EB
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:PutLifecycleConfiguration
+                  - s3:PutBucketObjectLockConfiguration
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketTagging
+                  - s3:PutBucketVersioning
+                  - s3:PutEncryptionConfiguration
+                Resource:
+                  - arn:aws:s3:::teamagent-dev-image-release-evidence
+                  - arn:aws:s3:::teamagent-dev-openclaw-build-evidence
+              - Sid: ER
+                Effect: Allow
+                Action:
+                  - ecr:CreateRepository
+                  - ecr:PutLifecyclePolicy
+                  - ecr:TagResource
+                Resource: arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-*
+              - Sid: RPA
+                Effect: Allow
+                Action: iam:AttachRolePolicy
+                Resource: arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation
+                Condition:
+                  ArnEquals:
+                    iam:PolicyARN: arn:aws:iam::aws:policy/PowerUserAccess
+              - Sid: BI
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:CreateUser
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DeleteUser
+                  - iam:DeleteUserPolicy
+                  - iam:PutRolePolicy
+                  - iam:PutUserPolicy
+                  - iam:TagRole
+                  - iam:TagUser
+                  - iam:UntagRole
+                  - iam:UntagUser
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                Resource:
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-launcher
+                  - arn:aws:iam::718959508629:role/teamagent-dev-release-launcher
+                  - arn:aws:iam::718959508629:role/teamagent-dev-release-control-updater
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-tiktok-image
+                  - arn:aws:iam::718959508629:role/teamagent-dev-tiktok-build-launcher
+                  - arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-mcp-source-publisher
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-image-attestor
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-image-promoter
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-openclaw
+                  - arn:aws:iam::718959508629:role/teamagent-dev-openclaw-build-publisher
+                  - arn:aws:iam::718959508629:role/teamagent-dev-alarm-recipient-ack-signer
+                  - arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation
+                  - arn:aws:iam::718959508629:user/teamagent-release-caller
+                  - arn:aws:iam::718959508629:user/teamagent-release-control-update-caller
+                  - arn:aws:iam::718959508629:user/teamagent-tiktok-build-caller
+              - Sid: PassOnlyReviewedRolesToCodeBuild
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-tiktok-image
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-mcp-source-publisher
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-image-attestor
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-image-promoter
+                  - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-openclaw
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: codebuild.amazonaws.com
+              - Sid: AD
+                Effect: Allow
+                Action:
+                  - iam:DeleteUserPolicy
+                  - iam:PutUserPolicy
+                Resource: arn:aws:iam::718959508629:user/AIIAdev
+      Tags:
+        - Key: Project
+          Value: TeamAgent
+        - Key: Purpose
+          Value: OneTimeProvenanceIamBootstrap
+        - Key: BootstrapCommit
+          Value: !Ref BootstrapCommit
+        - Key: ManagedBy
+          Value: CloudFormationTemporarySeed
+
+Outputs:
+  BootstrapExecutorRoleArn:
+    Value: !GetAtt BootstrapExecutorRole.Arn
