@@ -20,7 +20,14 @@ from teamagent.media.operations import (
     OperationOutput,
     ProducedArtifact,
 )
-from teamagent.media.worker import AwsWorkerBackend, WorkerClaim, WorkerLease, run_job
+from teamagent.media.worker import (
+    AwsWorkerBackend,
+    WorkerClaim,
+    WorkerLease,
+    _TerminalResultWriteError,
+    _TerminalWriteState,
+    run_job,
+)
 
 
 def _request() -> MediaJobRequest:
@@ -521,6 +528,213 @@ def test_done_write_persists_independent_manifest_and_thirty_day_retention() -> 
     assert s3.puts[0]["ChecksumSHA256"] == base64.b64encode(
         hashlib.sha256(s3.puts[0]["Body"]).digest()
     ).decode("ascii")
+
+
+class _TerminalTimeoutDynamo:
+    def __init__(
+        self,
+        request: MediaJobRequest,
+        lease: WorkerLease,
+        *,
+        commit_before_timeout: bool,
+    ) -> None:
+        self.commit_before_timeout = commit_before_timeout
+        self.reads: list[bool] = []
+        self.item: dict[str, object] = {
+            "job_id": {"S": request.job_id},
+            "idempotency_key": {"S": request.idempotency_key},
+            "payload_sha256": {"S": request.payload_sha256},
+            "status": {"S": "running"},
+            "version": {"N": str(lease.version)},
+            "lease_owner": {"S": lease.owner},
+            "lease_expires_at": {"N": "460"},
+            "attempt_id": {"S": lease.attempt_id},
+        }
+
+    def update_item(self, **kwargs: object) -> dict[str, object]:
+        expression = str(kwargs["UpdateExpression"])
+        if expression.startswith("SET fence_checked_at"):
+            return {}
+        values = kwargs["ExpressionAttributeValues"]
+        assert isinstance(values, dict)
+        if self.commit_before_timeout:
+            self.item.update(
+                {
+                    "status": values[":status"],
+                    "detail": values[":detail"],
+                    "updated_at": values[":now"],
+                    "cleanup_at": values[":cleanup"],
+                    "cleanup_status": values[":pending"],
+                    "ttl": values[":ttl"],
+                    "finalized_attempt_id": values[":attempt"],
+                    "version": {"N": str(int(self.item["version"]["N"]) + 1)},
+                }
+            )
+            self.item.pop("lease_expires_at", None)
+        raise TimeoutError("response timed out after UpdateItem")
+
+    def get_item(self, **kwargs: object) -> dict[str, object]:
+        self.reads.append(kwargs.get("ConsistentRead") is True)
+        return {"Item": self.item}
+
+
+class _FinalizeS3:
+    def __init__(self) -> None:
+        self.objects: dict[str, dict[str, object]] = {}
+        self.deleted: list[str] = []
+        self.list_calls = 0
+
+    def put_object(self, **kwargs: object) -> dict[str, object]:
+        self.objects[str(kwargs["Key"])] = {
+            "Body": kwargs["Body"],
+            "Metadata": kwargs["Metadata"],
+        }
+        return {}
+
+    def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
+        self.list_calls += 1
+        prefix = str(kwargs["Prefix"])
+        return {
+            "Contents": [
+                {"Key": key}
+                for key in sorted(self.objects)
+                if key.startswith(prefix)
+            ]
+        }
+
+    def head_object(self, **kwargs: object) -> dict[str, object]:
+        return {"Metadata": self.objects[str(kwargs["Key"])]["Metadata"]}
+
+    def delete_object(self, **kwargs: object) -> dict[str, object]:
+        key = str(kwargs["Key"])
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+        return {}
+
+
+def _terminal_timeout_backend(
+    request: MediaJobRequest,
+    lease: WorkerLease,
+    *,
+    commit_before_timeout: bool,
+) -> tuple[AwsWorkerBackend, _TerminalTimeoutDynamo, _FinalizeS3, MediaJobResult]:
+    artifact = S3ObjectRef(
+        bucket=request.output_bucket,
+        key=(
+            f"{request.output_prefix}attempts/{lease.version}/"
+            f"{lease.attempt_id}/output/thumbnail"
+        ),
+        sha256=hashlib.sha256(b"jpeg").hexdigest(),
+        size=4,
+        content_type="image/jpeg",
+    )
+    result = MediaJobResult(
+        job_id=request.job_id,
+        status="done",
+        artifacts=({"name": "thumbnail", "object": artifact},),
+    )
+    ddb = _TerminalTimeoutDynamo(
+        request,
+        lease,
+        commit_before_timeout=commit_before_timeout,
+    )
+    s3 = _FinalizeS3()
+    s3.objects[artifact.key] = {
+        "Body": b"jpeg",
+        "Metadata": {
+            "job-id": request.job_id,
+            "attempt-id": lease.attempt_id,
+            "lease-version": str(lease.version),
+            "finalized": "false",
+        },
+    }
+    backend = object.__new__(AwsWorkerBackend)
+    backend._bucket = request.output_bucket
+    backend._table = "jobs"
+    backend._kms_key_id = ""
+    backend._clock = lambda: 101.0
+    backend._deadline_epoch_s = request.deadline_epoch_s
+    backend._ddb = ddb
+    backend._s3 = s3
+    return backend, ddb, s3, result
+
+
+def test_done_update_timeout_reconciles_committed_row_without_deleting_artifacts() -> None:
+    request = _request()
+    lease = WorkerLease(owner="worker-a", version=7, attempt_id="attempt-exact")
+    backend, ddb, s3, result = _terminal_timeout_backend(
+        request,
+        lease,
+        commit_before_timeout=True,
+    )
+
+    backend.store_result(request, lease, result)
+
+    assert ddb.reads == [True]
+    assert ddb.item["status"] == {"S": "done"}
+    assert ddb.item["finalized_attempt_id"] == {"S": lease.attempt_id}
+    assert s3.list_calls == 0
+    assert s3.deleted == []
+    assert set(s3.objects) == {
+        result.artifacts[0].object.key,
+        f"{request.output_prefix}attempts/{lease.version}/{lease.attempt_id}/_FINALIZED.json",
+    }
+
+
+def test_done_update_timeout_preserves_artifacts_while_commit_is_unconfirmed() -> None:
+    request = _request()
+    lease = WorkerLease(owner="worker-a", version=7, attempt_id="attempt-exact")
+    backend, ddb, s3, result = _terminal_timeout_backend(
+        request,
+        lease,
+        commit_before_timeout=False,
+    )
+
+    with pytest.raises(_TerminalResultWriteError) as caught:
+        backend.store_result(request, lease, result)
+
+    assert caught.value.state is _TerminalWriteState.OWNED_RUNNING
+    assert ddb.reads == [True]
+    assert ddb.item["status"] == {"S": "running"}
+    assert s3.list_calls == 0
+    assert s3.deleted == []
+    assert len(s3.objects) == 2
+
+
+class _UnconfirmedDoneBackend(_Backend):
+    def store_result(
+        self,
+        request: MediaJobRequest,
+        lease: WorkerLease,
+        result: MediaJobResult,
+    ) -> None:
+        del request, result
+        self._assert_lease(lease)
+        self.stores += 1
+        self.events.append("store")
+        raise _TerminalResultWriteError(_TerminalWriteState.OWNED_RUNNING)
+
+
+def test_unconfirmed_done_write_is_not_downgraded_to_failed_or_cleaned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _UnconfirmedDoneBackend()
+    monkeypatch.setattr("teamagent.media.worker.execute_operation", _successful_operation)
+
+    with pytest.raises(_TerminalResultWriteError):
+        run_job(
+            _request(),
+            backend,
+            temp_root=tmp_path,
+            now_epoch_s=101,
+            owner="worker-a",
+        )
+
+    assert backend.status == "running"
+    assert backend.stores == 1
+    assert backend.cleanups == 0
+    assert backend.events == ["store"]
 
 
 def test_worker_cleanup_error_preserves_terminal_failure_for_janitor_retry(

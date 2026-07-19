@@ -16,9 +16,11 @@ from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+import teamagent.media.operations as media_operations
 from teamagent.media.contracts import (
     ARTIFACT_RETENTION_SECONDS,
     DDB_RETENTION_GRACE_SECONDS,
@@ -38,7 +40,6 @@ from teamagent.media.operations import (
     MediaOperationError,
     ProducedArtifact,
     execute_operation,
-    terminate_active_process_groups,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ _RUNTIME_DIRECTORIES = (
     "jobs",
 )
 _TERMINAL_RESERVE_SECONDS = 15.0
+_PROCESS_TERMINATION_GRACE_SECONDS = 0.5
+_PROCESS_REAP_POLL_SECONDS = 0.01
+_PROCESS_TRACKER_LOCK_TIMEOUT_SECONDS = 0.05
 
 
 def _checksum_sha256_b64(hex_digest: str) -> str:
@@ -114,20 +118,133 @@ class _WorkerTerminatedError(RuntimeError):
     pass
 
 
+class _TerminalWriteState(Enum):
+    COMMITTED = "committed"
+    OWNED_RUNNING = "owned_running"
+    SUPERSEDED = "superseded"
+    UNKNOWN = "unknown"
+
+
+class _TerminalResultWriteError(RuntimeError):
+    """A done transition that must not be downgraded or destructively cleaned."""
+
+    def __init__(self, state: _TerminalWriteState) -> None:
+        super().__init__(f"terminal result write was not committed: {state.value}")
+        self.state = state
+
+
+def _tracked_process_groups() -> tuple[int, ...]:
+    """Snapshot operation-owned process groups without deadlocking a signal handler."""
+
+    lock = media_operations._ACTIVE_PROCESS_GROUPS_LOCK
+    acquired = lock.acquire(timeout=_PROCESS_TRACKER_LOCK_TIMEOUT_SECONDS)
+    try:
+        return tuple(media_operations._ACTIVE_PROCESS_GROUPS)
+    finally:
+        if acquired:
+            lock.release()
+
+
+def _discard_tracked_process_groups(process_groups: tuple[int, ...]) -> None:
+    lock = media_operations._ACTIVE_PROCESS_GROUPS_LOCK
+    acquired = lock.acquire(timeout=_PROCESS_TRACKER_LOCK_TIMEOUT_SECONDS)
+    try:
+        media_operations._ACTIVE_PROCESS_GROUPS.difference_update(process_groups)
+    finally:
+        if acquired:
+            lock.release()
+
+
+def _reap_process_group_leader(process_group: int, *, block: bool) -> bool:
+    options = 0 if block else os.WNOHANG
+    while True:
+        try:
+            waited, _status = os.waitpid(process_group, options)
+        except InterruptedError:
+            continue
+        except ChildProcessError:
+            return True
+        return waited == process_group
+
+
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_and_reap_active_process_groups(
+    *,
+    grace_s: float = _PROCESS_TERMINATION_GRACE_SECONDS,
+) -> None:
+    """TERM, then KILL and reap every process group active at signal delivery."""
+
+    process_groups = _tracked_process_groups()
+    if not process_groups:
+        return
+    for process_group in process_groups:
+        try:
+            os.killpg(process_group, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    reaped: set[int] = set()
+    grace_deadline = time.monotonic() + grace_s
+    live_groups = set(process_groups)
+    while live_groups:
+        for process_group in tuple(live_groups):
+            if process_group not in reaped and _reap_process_group_leader(
+                process_group,
+                block=False,
+            ):
+                reaped.add(process_group)
+            if not _process_group_exists(process_group):
+                live_groups.discard(process_group)
+        remaining = grace_deadline - time.monotonic()
+        if not live_groups or remaining <= 0:
+            break
+        time.sleep(min(_PROCESS_REAP_POLL_SECONDS, remaining))
+
+    for process_group in live_groups:
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    for process_group in process_groups:
+        if process_group not in reaped:
+            _reap_process_group_leader(process_group, block=True)
+    _discard_tracked_process_groups(process_groups)
+
+
 @contextmanager
 def _worker_signal_scope(deadline_epoch_s: float) -> Any:
     """Install one absolute execution watchdog and process-group-aware SIGTERM handler."""
 
     previous_alarm = signal.getsignal(signal.SIGALRM)
     previous_term = signal.getsignal(signal.SIGTERM)
+    terminating = False
+
+    def terminate_for_signal(error: BaseException) -> None:
+        nonlocal terminating
+        if terminating:
+            return
+        terminating = True
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        try:
+            _terminate_and_reap_active_process_groups()
+        except Exception:
+            logger.exception("failed to terminate all active media process groups")
+        raise error
 
     def deadline_handler(_signum: int, _frame: Any) -> None:
-        terminate_active_process_groups()
-        raise MediaDeadlineExceededError("media job deadline exceeded")
+        terminate_for_signal(MediaDeadlineExceededError("media job deadline exceeded"))
 
     def term_handler(_signum: int, _frame: Any) -> None:
-        terminate_active_process_groups()
-        raise _WorkerTerminatedError("media worker termination requested")
+        terminate_for_signal(_WorkerTerminatedError("media worker termination requested"))
 
     remaining = deadline_epoch_s - time.time()
     if remaining <= 0:
@@ -661,10 +778,96 @@ class AwsWorkerBackend:
                     **manifest_values,
                 },
             )
-        except Exception:
+        except Exception as exc:
+            state = _TerminalWriteState.UNKNOWN
+            try:
+                state = self._terminal_write_state(request, lease, result)
+            except Exception:
+                logger.exception(
+                    "terminal result reconciliation read failed: job_id=%s",
+                    request.job_id,
+                )
+            if state is _TerminalWriteState.COMMITTED:
+                logger.warning(
+                    "terminal result reconciled after ambiguous write: job_id=%s",
+                    request.job_id,
+                )
+                return
+            if marker_key is not None and state is _TerminalWriteState.SUPERSEDED:
+                try:
+                    self._delete_attempt_without_fence(request, lease)
+                except Exception:
+                    logger.exception(
+                        "superseded done-attempt cleanup deferred to janitor: job_id=%s",
+                        request.job_id,
+                    )
             if marker_key is not None:
-                self._delete_attempt_without_fence(request, lease)
+                if state is not _TerminalWriteState.SUPERSEDED:
+                    logger.error(
+                        "preserving unconfirmed done artifacts: job_id=%s state=%s",
+                        request.job_id,
+                        state.value,
+                    )
+                raise _TerminalResultWriteError(state) from exc
             raise
+
+    def _terminal_write_state(
+        self,
+        request: MediaJobRequest,
+        lease: WorkerLease,
+        result: MediaJobResult,
+    ) -> _TerminalWriteState:
+        """Strongly read the row and classify an ambiguous terminal UpdateItem."""
+
+        item = self._call(
+            "dynamodb",
+            "get_item",
+            TableName=self._table,
+            Key={"job_id": {"S": request.job_id}},
+            ConsistentRead=True,
+        ).get("Item", {})
+        if (
+            item.get("idempotency_key", {}).get("S") != request.idempotency_key
+            or item.get("payload_sha256", {}).get("S") != request.payload_sha256
+        ):
+            return _TerminalWriteState.UNKNOWN
+        try:
+            version = int(item.get("version", {}).get("N", "0"))
+        except (TypeError, ValueError):
+            return _TerminalWriteState.UNKNOWN
+        status = item.get("status", {}).get("S", "")
+        attempt_id = item.get("attempt_id", {}).get("S", "")
+        lease_owner = item.get("lease_owner", {}).get("S", "")
+
+        if status in {"done", "failed"}:
+            persisted = self._result_from_item(item)
+            finalized_attempt = item.get("finalized_attempt_id", {}).get("S", "")
+            finalized_matches = result.status != "done" or finalized_attempt == lease.attempt_id
+            if (
+                status == result.status
+                and persisted == result
+                and attempt_id == lease.attempt_id
+                and lease_owner == lease.owner
+                and version >= lease.version + 1
+                and finalized_matches
+            ):
+                return _TerminalWriteState.COMMITTED
+            return _TerminalWriteState.SUPERSEDED
+
+        if (
+            status == "running"
+            and version == lease.version
+            and attempt_id == lease.attempt_id
+            and lease_owner == lease.owner
+        ):
+            return _TerminalWriteState.OWNED_RUNNING
+        if status == "running" and (
+            version > lease.version
+            or attempt_id != lease.attempt_id
+            or lease_owner != lease.owner
+        ):
+            return _TerminalWriteState.SUPERSEDED
+        return _TerminalWriteState.UNKNOWN
 
     def cleanup_attempt(self, request: MediaJobRequest, lease: WorkerLease) -> None:
         self._delete_attempt_without_fence(request, lease)
@@ -853,6 +1056,12 @@ def run_job(
         hard_budget.checkpoint()
         backend.store_result(request, lease, result)
         return result
+    except _TerminalResultWriteError:
+        logger.exception(
+            "done result write was not safely committed: job_id=%s",
+            request.job_id,
+        )
+        raise
     except MediaDeadlineExceededError:
         logger.warning("media job deadline exhausted: job_id=%s", request.job_id)
         hard_budget.checkpoint()

@@ -178,7 +178,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TF_IN_AUTOMATION: "1"
-      TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/terraform-plugin-cache
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
@@ -187,28 +186,42 @@ jobs:
         with:
           terraform_version: 1.14.4
 
-      - name: Restore provider cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ${{ runner.temp }}/terraform-plugin-cache
-            infra/terraform/provider-mirror
-          key: terraform-${{ runner.os }}-${{ hashFiles('infra/terraform/.terraform.lock.hcl') }}
-
-      - name: Populate exact readonly providers
+      - name: Verify authoritative multi-platform provider lock
         working-directory: infra/terraform
+        env:
+          TF_CLI_CONFIG_FILE: /dev/null
         run: |
-          mkdir -p "$TF_PLUGIN_CACHE_DIR"
-          terraform init -backend=false -input=false -lockfile=readonly
-          terraform providers mirror provider-mirror
+          unset TF_PLUGIN_CACHE_DIR
+          terraform providers lock \
+            -platform=darwin_arm64 \
+            -platform=linux_amd64 \
+            -platform=linux_arm64
+          git diff --exit-code -- .terraform.lock.hcl
+
+      - name: Build exact provider mirror without plugin cache
+        working-directory: infra/terraform
+        env:
+          TF_CLI_CONFIG_FILE: /dev/null
+        run: |
+          unset TF_PLUGIN_CACHE_DIR
+          rm -rf .terraform provider-mirror
+          terraform providers mirror \
+            -platform=linux_amd64 \
+            -platform=linux_arm64 \
+            provider-mirror
 
       - name: Reinitialize from offline mirror and validate
         working-directory: infra/terraform
         env:
-          TF_CLI_CONFIG_FILE: ci.terraformrc
+          TF_CLI_CONFIG_FILE: ${{ github.workspace }}/infra/terraform/ci.terraformrc
         run: |
-          rm -rf .terraform/providers
+          unset TF_PLUGIN_CACHE_DIR
+          rm -rf .terraform
           terraform init -backend=false -input=false -lockfile=readonly
+          required_providers="$(terraform providers | grep -Eo 'registry\.terraform\.io/hashicorp/[a-z0-9_-]+' | sort -u | wc -l)"
+          test "$required_providers" -gt 0
+          test "$(find provider-mirror -type f -name '*_linux_amd64.zip' | wc -l)" -eq "$required_providers"
+          test "$(find provider-mirror -type f -name '*_linux_arm64.zip' | wc -l)" -eq "$required_providers"
           terraform validate
 
   # 本番デプロイ前提のテスト（main マージ後のみ）
