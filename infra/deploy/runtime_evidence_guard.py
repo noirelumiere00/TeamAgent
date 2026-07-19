@@ -1235,6 +1235,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         raise ContractError(
             f"known SNS publisher coverage is incomplete: {sorted(missing_coverage)}"
         )
+    publisher_coverage = sorted(set(KNOWN_SNS_PUBLISHER_TYPES) & coverage)
     inventory_contract = {
         "references": references,
         "publisher_references": publisher_references,
@@ -1247,7 +1248,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
             if topic_arn in {CANONICAL_TOPIC, LEGACY_TOPIC}
         ),
         "alarm_subscription_count": len(all_subscriptions),
-        "publisher_coverage": sorted(coverage),
+        "publisher_coverage": publisher_coverage,
         "source_pages": raw_sources,
     }
     validate_inventory_contract(inventory_contract)
@@ -1281,7 +1282,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         "alarm_subscription_count": len(all_subscriptions),
         "source_pages": raw_sources,
         "source_pages_sha256": canonical_sha256(raw_sources),
-        "publisher_coverage": sorted(coverage),
+        "publisher_coverage": publisher_coverage,
         "eventbridge_rules": event_rules,
         "scheduler_schedules": schedule_details,
         "lambda_event_source_mappings": mappings,
