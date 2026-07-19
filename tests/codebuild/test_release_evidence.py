@@ -907,6 +907,65 @@ def test_terraform_gate_rejects_unsigned_wrong_commit_tag_and_old_receipt(
         )
 
 
+def _saved_gate_query(*, intent_id: str = INTENT_ID) -> dict[str, str]:
+    images = {
+        "mcp": (
+            "718959508629.dkr.ecr.ap-northeast-1."
+            f"amazonaws.com/teamagent-mcp@{DIGEST}"
+        ),
+        "openclaw": "",
+        "tiktok": "",
+    }
+    return {
+        "images_json": json.dumps(images, sort_keys=True, separators=(",", ":")),
+        "evidence_json": "{}",
+        "contracts_json": "{}",
+        "contract_ready_json": "{}",
+        "application_json": json.dumps(
+            {"mcp": APPLICATION},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "shared_generation_ledger_json": "{}",
+        "signing_key_arn": KEY_ARN,
+        "encryption_key_arn": KEY_ARN,
+        "deployment_intent_id": intent_id,
+    }
+
+
+DEFAULT_GATE_QUERY = _saved_gate_query()
+DEFAULT_GATE_QUERY_SHA256 = hashlib.sha256(
+    EVIDENCE.canonical_bytes(DEFAULT_GATE_QUERY)
+).hexdigest()
+DEFAULT_GATE_QUERY_JSON = json.dumps(
+    DEFAULT_GATE_QUERY,
+    sort_keys=True,
+    separators=(",", ":"),
+)
+RECEIPT_AUTHORIZATION_EXPIRES_AT = str(
+    int((NOW + dt.timedelta(minutes=25)).timestamp())
+)
+
+
+def _gate_metadata_fields(
+    query: dict[str, str] | None = None,
+) -> dict[str, str]:
+    selected = query or DEFAULT_GATE_QUERY
+    return {
+        "gate_query_sha256": hashlib.sha256(
+            EVIDENCE.canonical_bytes(selected)
+        ).hexdigest(),
+        "gate_query_json": json.dumps(
+            selected,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "receipt_authorization_expires_at": (
+            RECEIPT_AUTHORIZATION_EXPIRES_AT
+        ),
+    }
+
+
 def _plan_json(
     *,
     intent_id: str = INTENT_ID,
@@ -944,6 +1003,12 @@ def _plan_json(
                                     "mcp": APPLICATION,
                                 },
                                 "shared_generation_ledger": {},
+                                "deployment_gate_query": _saved_gate_query(
+                                    intent_id=intent_id
+                                ),
+                                "receipt_authorization_expires_at": (
+                                    RECEIPT_AUTHORIZATION_EXPIRES_AT
+                                ),
                             }
                         },
                     }
@@ -980,6 +1045,11 @@ def test_saved_plan_metadata_binds_intent_context_claims_and_plan_hash(
         "receipt_claims_sha256": "b" * 64,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        "gate_query_sha256": DEFAULT_GATE_QUERY_SHA256,
+        "gate_query_json": DEFAULT_GATE_QUERY_JSON,
+        "receipt_authorization_expires_at": (
+            RECEIPT_AUTHORIZATION_EXPIRES_AT
+        ),
     }
 
     with pytest.raises(EVIDENCE.EvidenceError, match="will not run"):
@@ -1095,6 +1165,11 @@ def test_saved_plan_rejects_image_empty_or_unscoped_destructive_state(
             "change": {"actions": ["delete"]},
         }
     )
+    gate_input["deployment_gate_query"]["images_json"] = json.dumps(
+        gate_input["requested_images"],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     with pytest.raises(EVIDENCE.EvidenceError, match="image-empty"):
         EVIDENCE.deployment_plan_metadata(plan, plan_json=image_empty)
 
@@ -1173,6 +1248,13 @@ def test_shared_generation_ledger_metadata_is_exact_non_secret_and_context_bound
     plan_json["planned_values"]["root_module"]["resources"][0]["values"]["input"][
         "shared_generation_ledger"
     ] = binding
+    plan_json["planned_values"]["root_module"]["resources"][0]["values"]["input"][
+        "deployment_gate_query"
+    ]["shared_generation_ledger_json"] = json.dumps(
+        binding,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     metadata = EVIDENCE.deployment_plan_metadata(plan, plan_json=plan_json)
     assert (
         metadata["shared_ledger_sha256"]
@@ -1268,6 +1350,7 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
     }
     query = {
         "images_json": json.dumps(images),
@@ -1280,6 +1363,7 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
         "encryption_key_arn": KEY_ARN,
         "deployment_intent_id": INTENT_ID,
     }
+    metadata.update(_gate_metadata_fields(query))
     store: dict[str, dict[str, str | int]] = {
         f"intent#{INTENT_ID}": _applying_intent(
             intent_id=INTENT_ID,
@@ -1287,6 +1371,7 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
             context_sha256=context_sha256,
             claims_sha256=claims_sha256,
             apply_attempt_id=ATTEMPT_ID,
+            gate_query_sha256=metadata["gate_query_sha256"],
         ),
         EVIDENCE.DEPLOYMENT_LOCK_RECORD_ID: _apply_lock(
             metadata,
@@ -1309,13 +1394,34 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
     ) -> None:
         consumed_claims.extend(receipt_claim_ids)
         intent = store[str(applying["record_id"])]
+        consumed_at = now.isoformat().replace("+00:00", "Z")
         intent.update(
             {
                 "state": "CONSUMED",
                 "apply_attempt_id": apply_attempt_id,
-                "consumed_at": now.isoformat().replace("+00:00", "Z"),
+                "consumed_at": consumed_at,
             }
         )
+        for claim_id in receipt_claim_ids:
+            store[f"receipt#{claim_id}"] = {
+                "record_id": f"receipt#{claim_id}",
+                "record_type": "teamagent.release-receipt-claim",
+                "schema_version": EVIDENCE.DEPLOYMENT_INTENT_SCHEMA,
+                "receipt_claim_id": claim_id,
+                "intent_id": metadata["intent_id"],
+                "plan_sha256": metadata["plan_sha256"],
+                "deployment_context_sha256": metadata[
+                    "deployment_context_sha256"
+                ],
+                "receipt_claims_sha256": metadata["receipt_claims_sha256"],
+                "gate_query_sha256": metadata["gate_query_sha256"],
+                "terraform_context_sha256": applying[
+                    "terraform_context_sha256"
+                ],
+                "apply_attempt_id": apply_attempt_id,
+                "consumed_at": consumed_at,
+                "audit_expires_at": applying["audit_expires_at"],
+            }
 
     monkeypatch.setattr(
         EVIDENCE,
@@ -1325,9 +1431,12 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
     monkeypatch.setattr(
         EVIDENCE,
         "_terraform_gate",
-        lambda gate_query: {
+        lambda gate_query, *, now: {
             "deployment_context_sha256": context_sha256,
             "receipt_claims_sha256": claims_sha256,
+            "receipt_authorization_expires_at": (
+                RECEIPT_AUTHORIZATION_EXPIRES_AT
+            ),
             "release_channels_json": json.dumps({"mcp": "active", "tiktok": "active"}),
         },
     )
@@ -1351,6 +1460,7 @@ def _prepared_intent(
     plan_sha256: str,
     context_sha256: str,
     claims_sha256: str,
+    gate_query_sha256: str = DEFAULT_GATE_QUERY_SHA256,
 ) -> dict[str, str | int]:
     return {
         "record_id": f"intent#{intent_id}",
@@ -1362,6 +1472,7 @@ def _prepared_intent(
         "deployment_context_sha256": context_sha256,
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "gate_query_sha256": gate_query_sha256,
         "terraform_context_sha256": "c" * 64,
         "backend_workspace_sha256": "d" * 64,
         "state_lineage": "11111111-1111-4111-8111-111111111111",
@@ -1372,7 +1483,7 @@ def _prepared_intent(
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
         "control_commit": COMMIT,
         "prepared_at": "2026-07-17T06:00:00Z",
-        "authorization_expires_at": int((NOW + dt.timedelta(minutes=30)).timestamp()),
+        "authorization_expires_at": int(RECEIPT_AUTHORIZATION_EXPIRES_AT),
         "audit_expires_at": int((NOW + dt.timedelta(days=90)).timestamp()),
     }
 
@@ -1397,12 +1508,14 @@ def _applying_intent(
     context_sha256: str,
     claims_sha256: str,
     apply_attempt_id: str,
+    gate_query_sha256: str = DEFAULT_GATE_QUERY_SHA256,
 ) -> dict[str, str | int]:
     intent = _prepared_intent(
         intent_id=intent_id,
         plan_sha256=plan_sha256,
         context_sha256=context_sha256,
         claims_sha256=claims_sha256,
+        gate_query_sha256=gate_query_sha256,
     )
     intent.update(
         {
@@ -1412,6 +1525,189 @@ def _applying_intent(
         }
     )
     return intent
+
+
+def _terraform_context() -> dict[str, str | int]:
+    return {
+        "terraform_context_sha256": "c" * 64,
+        "backend_workspace_sha256": "d" * 64,
+        "state_lineage": "11111111-1111-4111-8111-111111111111",
+        "state_serial": 1234,
+        "state_addresses_sha256": "e" * 64,
+        "plan_addresses_sha256": "f" * 64,
+        "runtime_images_sha256": "9" * 64,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+    }
+
+
+def test_preflight_revalidates_and_consumes_before_returning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim_id = "c" * 64
+    claims_sha256 = hashlib.sha256(
+        EVIDENCE.canonical_bytes([claim_id])
+    ).hexdigest()
+    metadata = {
+        "intent_id": INTENT_ID,
+        "plan_sha256": "d" * 64,
+        "deployment_context_sha256": "e" * 64,
+        "receipt_claims_sha256": claims_sha256,
+        "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
+    }
+    applying = _applying_intent(
+        intent_id=INTENT_ID,
+        plan_sha256=metadata["plan_sha256"],
+        context_sha256=metadata["deployment_context_sha256"],
+        claims_sha256=claims_sha256,
+        apply_attempt_id=ATTEMPT_ID,
+    )
+    lock = _apply_lock(metadata, apply_attempt_id=ATTEMPT_ID)
+    store = {
+        f"intent#{INTENT_ID}": applying,
+        EVIDENCE.DEPLOYMENT_LOCK_RECORD_ID: lock,
+    }
+    order: list[str] = []
+
+    monkeypatch.setattr(
+        EVIDENCE,
+        "deployment_plan_metadata",
+        lambda *args, **kwargs: metadata,
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "terraform_context_metadata",
+        lambda *args, **kwargs: _terraform_context(),
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_dynamodb_get",
+        lambda record_id: copy.deepcopy(store.get(record_id)),
+    )
+
+    def verify(
+        *,
+        metadata: dict[str, str],
+        query: dict[str, str],
+        now: dt.datetime,
+    ) -> list[str]:
+        order.append("fresh-receipt-verification")
+        assert metadata["plan_sha256"] == "d" * 64
+        assert query == DEFAULT_GATE_QUERY
+        assert now == NOW
+        return [claim_id]
+
+    def consume(
+        *,
+        metadata: dict[str, str],
+        receipt_claim_ids: list[str],
+        apply_attempt_id: str,
+        now: dt.datetime,
+        expected_control_commit: str | None = None,
+        expected_terraform_context_sha256: str | None = None,
+    ) -> dict[str, str | int]:
+        order.append("atomic-one-use-consume")
+        assert receipt_claim_ids == [claim_id]
+        assert apply_attempt_id == ATTEMPT_ID
+        assert now == NOW
+        assert expected_control_commit == COMMIT
+        assert expected_terraform_context_sha256 == "c" * 64
+        return {**applying, "state": "CONSUMED"}
+
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_verified_receipt_claims_for_saved_plan",
+        verify,
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_consume_applying_deployment_intent",
+        consume,
+    )
+
+    consumed = EVIDENCE.validate_deployment_preflight(
+        Path("unused.tfplan"),
+        terraform_context_path=Path("unused-context.json"),
+        apply_attempt_id=ATTEMPT_ID,
+        control_commit=COMMIT,
+        now=NOW,
+    )
+
+    assert consumed["state"] == "CONSUMED"
+    assert order == [
+        "fresh-receipt-verification",
+        "atomic-one-use-consume",
+    ]
+
+
+def test_preflight_stale_receipt_fails_before_atomic_consume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {
+        "intent_id": INTENT_ID,
+        "plan_sha256": "d" * 64,
+        "deployment_context_sha256": "e" * 64,
+        "receipt_claims_sha256": "b" * 64,
+        "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
+    }
+    applying = _applying_intent(
+        intent_id=INTENT_ID,
+        plan_sha256=metadata["plan_sha256"],
+        context_sha256=metadata["deployment_context_sha256"],
+        claims_sha256=metadata["receipt_claims_sha256"],
+        apply_attempt_id=ATTEMPT_ID,
+    )
+    store = {
+        f"intent#{INTENT_ID}": applying,
+        EVIDENCE.DEPLOYMENT_LOCK_RECORD_ID: _apply_lock(
+            metadata,
+            apply_attempt_id=ATTEMPT_ID,
+        ),
+    }
+    monkeypatch.setattr(
+        EVIDENCE,
+        "deployment_plan_metadata",
+        lambda *args, **kwargs: metadata,
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "terraform_context_metadata",
+        lambda *args, **kwargs: _terraform_context(),
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_dynamodb_get",
+        lambda record_id: copy.deepcopy(store.get(record_id)),
+    )
+
+    def stale(**_: Any) -> list[str]:
+        raise EVIDENCE.EvidenceError("release receipt is stale")
+
+    def must_not_consume(**_: Any) -> dict[str, str | int]:
+        raise AssertionError("stale receipt reached the atomic consume")
+
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_verified_receipt_claims_for_saved_plan",
+        stale,
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_consume_applying_deployment_intent",
+        must_not_consume,
+    )
+
+    with pytest.raises(EVIDENCE.EvidenceError, match="receipt is stale"):
+        EVIDENCE.validate_deployment_preflight(
+            Path("unused.tfplan"),
+            terraform_context_path=Path("unused-context.json"),
+            apply_attempt_id=ATTEMPT_ID,
+            control_commit=COMMIT,
+            now=NOW,
+        )
 
 
 def test_apply_attempt_and_shared_lock_start_in_one_conditional_transaction(
@@ -1425,6 +1721,7 @@ def test_apply_attempt_and_shared_lock_start_in_one_conditional_transaction(
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
     }
     prepared = _prepared_intent(
         intent_id=INTENT_ID,
@@ -1486,6 +1783,7 @@ def test_apply_rejects_a_different_checkout_before_starting_the_intent(
         "receipt_claims_sha256": "b" * 64,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
     }
     prepared = _prepared_intent(
         intent_id=INTENT_ID,
@@ -1533,6 +1831,7 @@ def test_same_intent_and_same_receipt_cannot_authorize_two_deployments(
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
     }
     second_intent_id = "33333333-3333-4333-8333-333333333333"
     second_metadata = dict(metadata, intent_id=second_intent_id, plan_sha256="f" * 64)
@@ -1574,17 +1873,33 @@ def test_same_intent_and_same_receipt_cannot_authorize_two_deployments(
             raise EVIDENCE.EvidenceError("conditional intent transition failed")
         if any(f"receipt#{claim}" in store for claim in receipt_claim_ids):
             raise EVIDENCE.EvidenceError("conditional receipt claim failed")
+        consumed_at = now.isoformat().replace("+00:00", "Z")
         intent.update(
             {
                 "state": "CONSUMED",
                 "apply_attempt_id": apply_attempt_id,
-                "consumed_at": now.isoformat().replace("+00:00", "Z"),
+                "consumed_at": consumed_at,
             }
         )
         for claim in receipt_claim_ids:
             store[f"receipt#{claim}"] = {
                 "record_id": f"receipt#{claim}",
-                "state": "CONSUMED",
+                "record_type": "teamagent.release-receipt-claim",
+                "schema_version": EVIDENCE.DEPLOYMENT_INTENT_SCHEMA,
+                "receipt_claim_id": claim,
+                "intent_id": metadata["intent_id"],
+                "plan_sha256": metadata["plan_sha256"],
+                "deployment_context_sha256": metadata[
+                    "deployment_context_sha256"
+                ],
+                "receipt_claims_sha256": metadata["receipt_claims_sha256"],
+                "gate_query_sha256": metadata["gate_query_sha256"],
+                "terraform_context_sha256": applying[
+                    "terraform_context_sha256"
+                ],
+                "apply_attempt_id": apply_attempt_id,
+                "consumed_at": consumed_at,
+                "audit_expires_at": applying["audit_expires_at"],
             }
 
     monkeypatch.setattr(EVIDENCE, "_dynamodb_get", fake_get)
@@ -1632,6 +1947,7 @@ def test_expired_prepared_intent_cannot_reach_the_atomic_consume(
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
     }
     expired = _applying_intent(
         intent_id=INTENT_ID,
@@ -1672,10 +1988,16 @@ def test_apply_time_revalidates_receipt_before_consuming_intent(
             "receipt_claims_sha256": "f" * 64,
             "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
             "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+            **_gate_metadata_fields(),
         },
     )
 
-    def stale_receipt(_: Any) -> dict[str, str]:
+    def stale_receipt(
+        _: Any,
+        *,
+        now: dt.datetime | None = None,
+    ) -> dict[str, str]:
+        assert now is not None
         raise EVIDENCE.EvidenceError("release receipt is stale")
 
     monkeypatch.setattr(EVIDENCE, "_terraform_gate", stale_receipt)
@@ -1708,6 +2030,7 @@ def test_receipt_consumption_uses_one_conditional_dynamodb_transaction(
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
     }
     applying = _applying_intent(
         intent_id=INTENT_ID,
@@ -1739,9 +2062,26 @@ def test_receipt_consumption_uses_one_conditional_dynamodb_transaction(
     assert (
         "lease_expires_at > :now_epoch" in transaction[0]["ConditionCheck"]["ConditionExpression"]
     )
+    lock_condition = transaction[0]["ConditionCheck"]["ConditionExpression"]
+    assert "deployment_context_sha256 = :context" in lock_condition
+    assert "receipt_claims_sha256 = :claims" in lock_condition
+    assert "gate_query_sha256 = :gate_query" in lock_condition
+    assert "terraform_context_sha256 = :terraform_context" in lock_condition
     assert "#state = :applying" in transaction[1]["Update"]["ConditionExpression"]
     assert "apply_attempt_id = :attempt" in transaction[1]["Update"]["ConditionExpression"]
+    assert (
+        "authorization_expires_at > :now_epoch"
+        in transaction[1]["Update"]["ConditionExpression"]
+    )
     assert transaction[2]["Put"]["ConditionExpression"] == "attribute_not_exists(record_id)"
+    claim_item = transaction[2]["Put"]["Item"]
+    assert claim_item["deployment_context_sha256"] == {"S": "e" * 64}
+    assert claim_item["receipt_claims_sha256"] == {"S": claims_sha256}
+    assert claim_item["gate_query_sha256"] == {
+        "S": DEFAULT_GATE_QUERY_SHA256
+    }
+    assert claim_item["terraform_context_sha256"] == {"S": "c" * 64}
+    assert claim_item["apply_attempt_id"] == {"S": ATTEMPT_ID}
     consume_token = captured[captured.index("--client-request-token") + 1]
     assert consume_token == EVIDENCE._dynamodb_transaction_token(
         ATTEMPT_ID,

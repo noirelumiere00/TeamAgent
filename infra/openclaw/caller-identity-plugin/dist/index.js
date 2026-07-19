@@ -10,14 +10,21 @@ const AUDIENCE = "teamagent-mcp";
 const CLAIM_VERSION = 2;
 const CLAIM_TTL_SECONDS = 60;
 const INBOUND_CONTEXT_TTL_MS = 10 * 60 * 1000;
+const ACTION_CONTEXT_TTL_MS = 5 * 60 * 1000;
 const MAX_TRACKED_CONTEXTS = 1000;
 const TEAMAGENT_TOOL_PREFIX = "teamagent__";
 const USER_CONTEXT_KEY = "_user_context";
 const CLAIM_FIELD = "caller_claim";
+const MAIL_DRAFT_ACTION_ID = "mail_draft";
+const MAIL_DRAFT_TOOL = "mail_draft";
+const SLACK_INTERACTION_EVENT_PREFIX = "Slack interaction: ";
+const SLACK_INTERACTION_VALUE_MAX_LENGTH = 160;
 
 const SLACK_USER_RE = /^U[A-Z0-9]{8,}$/u;
 const SLACK_TEAM_RE = /^T[A-Z0-9]{8,}$/u;
 const SLACK_CHANNEL_RE = /^[CDG][A-Z0-9]{8,}$/u;
+const SLACK_TS_RE = /^[0-9]{10,}\.[0-9]{6}$/u;
+const DRAFT_TOKEN_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{22}$/u;
 const TOOL_RE = /^[a-z][a-z0-9_]{0,127}$/u;
 const INVOCATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
 const NATIVE_CALLER_BYPASS_TOOLS = new Set([
@@ -175,17 +182,135 @@ function block(reason) {
 
 function sameIngress(left, right) {
   return (
+    left.ingressKind === right.ingressKind &&
     left.sessionKey === right.sessionKey &&
     left.senderId === right.senderId &&
     left.teamId === right.teamId &&
     left.channelId === right.channelId &&
     left.threadTs === right.threadTs &&
-    left.messageId === right.messageId
+    left.messageId === right.messageId &&
+    left.actionFingerprint === right.actionFingerprint
   );
 }
 
 function invocationKey(runId, toolCallId) {
   return JSON.stringify([runId, toolCallId]);
+}
+
+function canonicalSlackTimestamp(value) {
+  if (typeof value !== "string" || value !== value.trim()) return null;
+  return SLACK_TS_RE.test(value) ? value : null;
+}
+
+function optionalSlackTimestamp(value) {
+  if (value === undefined || value === null || value === "") {
+    return {valid: true, value: null};
+  }
+  const normalized = canonicalSlackTimestamp(value);
+  return {valid: normalized !== null, value: normalized};
+}
+
+function canonicalDraftToken(value) {
+  if (
+    typeof value !== "string" ||
+    value !== value.trim() ||
+    value.length > SLACK_INTERACTION_VALUE_MAX_LENGTH ||
+    !DRAFT_TOKEN_RE.test(value)
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function actionFingerprint({
+  senderId,
+  teamId,
+  channelId,
+  messageTs,
+  threadTs,
+  actionId,
+  actionValue,
+}) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        senderId,
+        teamId,
+        channelId,
+        messageTs,
+        threadTs,
+        actionId,
+        actionValue,
+      ]),
+      "utf8",
+    )
+    .digest("hex");
+}
+
+function parseMailDraftSystemEvent(prompt) {
+  if (typeof prompt !== "string" || prompt.length > 100_000) return null;
+  const matches = [];
+  for (const line of prompt.split(/\r?\n/u)) {
+    const markerIndex = line.indexOf(SLACK_INTERACTION_EVENT_PREFIX);
+    if (markerIndex < 0) continue;
+    if (
+      line.indexOf(
+        SLACK_INTERACTION_EVENT_PREFIX,
+        markerIndex + SLACK_INTERACTION_EVENT_PREFIX.length,
+      ) >= 0
+    ) {
+      return null;
+    }
+    const leader = line.slice(0, markerIndex);
+    if (
+      leader !== "" &&
+      !/^System: \[[^\]\r\n]{1,160}\] $/u.test(leader)
+    ) {
+      return null;
+    }
+    try {
+      matches.push(
+        assertPlainObject(
+          JSON.parse(
+            line.slice(markerIndex + SLACK_INTERACTION_EVENT_PREFIX.length),
+          ),
+          "Slack interaction system event",
+        ),
+      );
+    } catch {
+      return null;
+    }
+  }
+  if (matches.length !== 1) return null;
+  const payload = matches[0];
+  const senderId = normalizeSlackId(payload.userId, SLACK_USER_RE);
+  const teamId = normalizeSlackId(payload.teamId, SLACK_TEAM_RE);
+  const channelId = normalizeSlackId(payload.channelId, SLACK_CHANNEL_RE);
+  const messageTs = canonicalSlackTimestamp(payload.messageTs);
+  const thread = optionalSlackTimestamp(payload.threadTs);
+  const actionValue = canonicalDraftToken(payload.value);
+  if (
+    payload.interactionType !== "block_action" ||
+    payload.actionId !== MAIL_DRAFT_ACTION_ID ||
+    payload.actionType !== "button" ||
+    !senderId ||
+    !teamId ||
+    !channelId ||
+    !messageTs ||
+    !thread.valid ||
+    !actionValue
+  ) {
+    return null;
+  }
+  return {
+    senderId,
+    teamId,
+    channelId,
+    messageTs,
+    threadTs: thread.value,
+    actionId: MAIL_DRAFT_ACTION_ID,
+    actionValue,
+  };
 }
 
 export function createCallerIdentityPlugin({
@@ -204,6 +329,8 @@ export function createCallerIdentityPlugin({
   }
 
   const pendingByMessage = new Map();
+  const pendingActions = new Map();
+  const seenActions = new Map();
   const ingressByRun = new Map();
   const rejectedRuns = new Map();
   const consumedInvocations = new Map();
@@ -214,8 +341,22 @@ export function createCallerIdentityPlugin({
         pendingByMessage.delete(key);
       }
     }
+    for (const [fingerprint, ingress] of pendingActions) {
+      if (nowMs - ingress.receivedAtMs > ACTION_CONTEXT_TTL_MS) {
+        pendingActions.delete(fingerprint);
+      }
+    }
+    for (const [fingerprint, seenAtMs] of seenActions) {
+      if (nowMs - seenAtMs > INBOUND_CONTEXT_TTL_MS) {
+        seenActions.delete(fingerprint);
+      }
+    }
     for (const [runId, ingress] of ingressByRun) {
-      if (nowMs - ingress.receivedAtMs > INBOUND_CONTEXT_TTL_MS) {
+      const ttl =
+        ingress.ingressKind === "action"
+          ? ACTION_CONTEXT_TTL_MS
+          : INBOUND_CONTEXT_TTL_MS;
+      if (nowMs - ingress.receivedAtMs > ttl) {
         ingressByRun.delete(runId);
       }
     }
@@ -231,6 +372,8 @@ export function createCallerIdentityPlugin({
     }
     if (
       pendingByMessage.size +
+        pendingActions.size +
+        seenActions.size +
         ingressByRun.size +
         rejectedRuns.size +
         consumedInvocations.size >=
@@ -240,10 +383,18 @@ export function createCallerIdentityPlugin({
     }
   }
 
+  function removePending(ingress) {
+    if (ingress.ingressKind === "action") {
+      pendingActions.delete(ingress.pendingKey);
+    } else {
+      pendingByMessage.delete(ingress.pendingKey);
+    }
+  }
+
   function rejectRun(runId, rejectedAtMs, ingress = null) {
     const existing = ingressByRun.get(runId);
-    if (existing) pendingByMessage.delete(existing.pendingKey);
-    if (ingress) pendingByMessage.delete(ingress.pendingKey);
+    if (existing) removePending(existing);
+    if (ingress) removePending(ingress);
     ingressByRun.delete(runId);
     rejectedRuns.set(runId, rejectedAtMs);
   }
@@ -253,7 +404,7 @@ export function createCallerIdentityPlugin({
     const existing = ingressByRun.get(runId);
     if (existing) {
       const matches = sameIngress(existing, ingress);
-      if (matches) pendingByMessage.delete(ingress.pendingKey);
+      if (matches) removePending(ingress);
       else rejectRun(runId, now(), ingress);
       return matches;
     }
@@ -261,7 +412,7 @@ export function createCallerIdentityPlugin({
       if (sameIngress(bound, ingress)) return false;
     }
     ingressByRun.set(runId, ingress);
-    pendingByMessage.delete(ingress.pendingKey);
+    removePending(ingress);
     return true;
   }
 
@@ -316,6 +467,7 @@ export function createCallerIdentityPlugin({
     pruneState(nowMs);
     const pendingKey = JSON.stringify([sessionKey, messageId]);
     const ingress = {
+      ingressKind: "message",
       pendingKey,
       sessionKey,
       senderId,
@@ -323,6 +475,9 @@ export function createCallerIdentityPlugin({
       channelId,
       threadTs,
       messageId,
+      actionFingerprint: null,
+      actionValue: null,
+      actionToolCallId: null,
       sessionSha256: createHash("sha256").update(sessionKey, "utf8").digest("hex"),
       receivedAtMs: nowMs,
     };
@@ -339,8 +494,182 @@ export function createCallerIdentityPlugin({
     }
   }
 
+  async function rememberMailDraftAction(ctx, logger) {
+    try {
+      const interaction = assertPlainObject(
+        ctx?.interaction,
+        "Slack interactive payload",
+      );
+      const senderId = normalizeSlackId(ctx?.senderId, SLACK_USER_RE);
+      const channelId = normalizeSlackId(
+        ctx?.conversationId,
+        SLACK_CHANNEL_RE,
+      );
+      const messageTs = canonicalSlackTimestamp(interaction.messageTs);
+      const contextThread = optionalSlackTimestamp(ctx?.threadId);
+      const interactionThread = optionalSlackTimestamp(interaction.threadTs);
+      const actionValue = canonicalDraftToken(interaction.value);
+      const triggerId = nonBlank(interaction.triggerId, 512);
+      const interactionId = nonBlank(ctx?.interactionId, 2048);
+      const expectedInteractionId =
+        senderId &&
+        channelId &&
+        messageTs &&
+        triggerId &&
+        actionValue
+          ? [
+              senderId,
+              channelId,
+              messageTs,
+              triggerId,
+              MAIL_DRAFT_ACTION_ID,
+              actionValue,
+            ].join(":")
+          : null;
+      if (
+        ctx?.channel !== "slack" ||
+        ctx?.auth?.isAuthorizedSender !== true ||
+        interaction.kind !== "button" ||
+        interaction.actionId !== MAIL_DRAFT_ACTION_ID ||
+        interaction.namespace !== MAIL_DRAFT_ACTION_ID ||
+        !actionValue ||
+        interaction.payload !== actionValue ||
+        interaction.data !== `${MAIL_DRAFT_ACTION_ID}:${actionValue}` ||
+        !senderId ||
+        !channelId ||
+        !messageTs ||
+        !contextThread.valid ||
+        !interactionThread.valid ||
+        (contextThread.value !== null &&
+          interactionThread.value !== null &&
+          contextThread.value !== interactionThread.value) ||
+        !expectedInteractionId ||
+        interactionId !== expectedInteractionId
+      ) {
+        logger?.warn?.(
+          `${PLUGIN_ID}: rejected incomplete or unauthorized Slack mail action`,
+        );
+        return {handled: true};
+      }
+      const nowMs = now();
+      pruneState(nowMs);
+      const threadTs = interactionThread.value ?? contextThread.value;
+      const fingerprint = actionFingerprint({
+        senderId,
+        teamId: expectedTeamId,
+        channelId,
+        messageTs,
+        threadTs,
+        actionId: MAIL_DRAFT_ACTION_ID,
+        actionValue,
+      });
+      if (seenActions.has(fingerprint) || pendingActions.has(fingerprint)) {
+        logger?.warn?.(`${PLUGIN_ID}: rejected replayed Slack mail action`);
+        return {handled: true};
+      }
+      const ingress = {
+        ingressKind: "action",
+        pendingKey: fingerprint,
+        sessionKey: null,
+        senderId,
+        teamId: expectedTeamId,
+        channelId,
+        threadTs,
+        messageId: messageTs,
+        actionFingerprint: fingerprint,
+        actionValue,
+        actionToolCallId: null,
+        sessionSha256: null,
+        receivedAtMs: nowMs,
+      };
+      seenActions.set(fingerprint, nowMs);
+      pendingActions.set(fingerprint, ingress);
+      // handled:false deliberately preserves OpenClaw's fixed-runtime
+      // system-event + immediate-heartbeat path after authoritative capture.
+      return {handled: false};
+    } catch {
+      logger?.warn?.(`${PLUGIN_ID}: rejected malformed Slack mail action`);
+      return {handled: true};
+    }
+  }
+
+  function bindMailDraftActionRun(event, ctx, logger) {
+    const runId = canonicalInvocationId(ctx?.runId);
+    const sessionKey = nonBlank(ctx?.sessionKey, 2048);
+    const channelId = consistentSlackChannel([
+      ctx?.channelId,
+      ctx?.chatId,
+      ctx?.channel,
+    ]);
+    if (!runId || !sessionKey || !channelId) {
+      if (runId) rejectRun(runId, now());
+      logger?.warn?.(
+        `${PLUGIN_ID}: rejected incomplete Slack action heartbeat run`,
+      );
+      return;
+    }
+    const nowMs = now();
+    pruneState(nowMs);
+    const actionEvent = parseMailDraftSystemEvent(event?.prompt);
+    if (
+      !actionEvent ||
+      actionEvent.teamId !== expectedTeamId ||
+      actionEvent.channelId !== channelId
+    ) {
+      rejectRun(runId, nowMs);
+      logger?.warn?.(
+        `${PLUGIN_ID}: heartbeat has no exact authoritative Slack mail action`,
+      );
+      return;
+    }
+    const fingerprint = actionFingerprint(actionEvent);
+    const existing = ingressByRun.get(runId);
+    if (existing) {
+      if (
+        existing.ingressKind !== "action" ||
+        existing.actionFingerprint !== fingerprint ||
+        existing.sessionKey !== sessionKey ||
+        existing.channelId !== channelId
+      ) {
+        rejectRun(runId, nowMs);
+        logger?.warn?.(
+          `${PLUGIN_ID}: rejected mismatched repeated Slack action run`,
+        );
+      }
+      return;
+    }
+    const pending = pendingActions.get(fingerprint);
+    if (
+      !pending ||
+      nowMs - pending.receivedAtMs > ACTION_CONTEXT_TTL_MS
+    ) {
+      rejectRun(runId, nowMs);
+      logger?.warn?.(
+        `${PLUGIN_ID}: Slack mail action is missing, replayed, or stale`,
+      );
+      return;
+    }
+    const ingress = {
+      ...pending,
+      sessionKey,
+      sessionSha256: createHash("sha256")
+        .update(sessionKey, "utf8")
+        .digest("hex"),
+    };
+    if (!bindRun(runId, ingress)) {
+      rejectRun(runId, nowMs, ingress);
+      logger?.warn?.(
+        `${PLUGIN_ID}: Slack mail action could not bind one unique run`,
+      );
+    }
+  }
+
   function bindAgentRun(_event, ctx, logger) {
     if (String(ctx?.messageProvider ?? "").toLowerCase() !== "slack") return;
+    if (ctx?.trigger === "heartbeat") {
+      bindMailDraftActionRun(_event, ctx, logger);
+      return;
+    }
     const runId = canonicalInvocationId(ctx?.runId);
     const sessionKey = nonBlank(ctx?.sessionKey, 2048);
     const senderId = normalizeSlackId(ctx?.senderId, SLACK_USER_RE);
@@ -439,7 +768,11 @@ export function createCallerIdentityPlugin({
     const nowMs = now();
     pruneState(nowMs);
     const trusted = ingressByRun.get(eventRunId);
-    if (!trusted || nowMs - trusted.receivedAtMs > INBOUND_CONTEXT_TTL_MS) {
+    const trustedTtl =
+      trusted?.ingressKind === "action"
+        ? ACTION_CONTEXT_TTL_MS
+        : INBOUND_CONTEXT_TTL_MS;
+    if (!trusted || nowMs - trusted.receivedAtMs > trustedTtl) {
       return block("trusted Slack run identity is missing or stale");
     }
     if (
@@ -452,10 +785,27 @@ export function createCallerIdentityPlugin({
     if (consumedInvocations.has(exactInvocationKey)) {
       return block("tool invocation replay rejected");
     }
+    if (trusted.ingressKind === "action") {
+      if (tool !== MAIL_DRAFT_TOOL) {
+        return block("Slack mail action cannot authorize another tool");
+      }
+      if (trusted.actionToolCallId !== null) {
+        return block("Slack mail action was already consumed");
+      }
+    } else if (tool === MAIL_DRAFT_TOOL) {
+      return block("mail_draft requires an authoritative Slack button action");
+    }
     let params;
     let declaredContext;
     try {
-      params = assertPlainObject(event.params, "tool params");
+      const suppliedParams = assertPlainObject(event.params, "tool params");
+      params =
+        trusted.ingressKind === "action"
+          ? {
+              ...suppliedParams,
+              draft_token: trusted.actionValue,
+            }
+          : suppliedParams;
       declaredContext = assertPlainObject(
         params[USER_CONTEXT_KEY],
         USER_CONTEXT_KEY,
@@ -483,7 +833,16 @@ export function createCallerIdentityPlugin({
       return block(error instanceof Error ? error.message : "request binding failed");
     }
     const issuedAt = Math.floor(nowMs / 1000);
-    const nonceBytes = randomBytesFn(16);
+    const nonceBytes =
+      trusted.ingressKind === "action"
+        ? createHmac("sha256", secret)
+            .update(
+              `teamagent-slack-action-v1:${trusted.actionFingerprint}`,
+              "ascii",
+            )
+            .digest()
+            .subarray(0, 16)
+        : randomBytesFn(16);
     if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length !== 16) {
       return block("secure nonce generation failed");
     }
@@ -513,6 +872,9 @@ export function createCallerIdentityPlugin({
       runId: eventRunId,
       consumedAtMs: nowMs,
     });
+    if (trusted.ingressKind === "action") {
+      trusted.actionToolCallId = eventToolCallId;
+    }
     return {
       params: {
         ...adjustedParams,
@@ -541,6 +903,14 @@ export function createCallerIdentityPlugin({
     name: "TeamAgent Caller Identity",
     description: "Signs exact Slack run and tool-invocation caller identity",
     register(api) {
+      if (typeof api?.registerInteractiveHandler !== "function") {
+        fail("fixed OpenClaw interactive handler API is unavailable");
+      }
+      api.registerInteractiveHandler({
+        channel: "slack",
+        namespace: MAIL_DRAFT_ACTION_ID,
+        handler: ctx => rememberMailDraftAction(ctx, api.logger),
+      });
       api.on("inbound_claim", (event, ctx) => {
         rememberInbound(event, ctx, api.logger);
       });

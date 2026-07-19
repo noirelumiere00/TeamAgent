@@ -250,19 +250,28 @@ def test_terraform_uses_a_hard_precondition_not_a_warning_only_check() -> None:
     assert "release_channels" in body
 
 
-def test_gate_is_replaced_and_consumed_before_any_task_definition_apply() -> None:
+def test_saved_gate_query_is_consumed_before_terraform_apply_can_start() -> None:
     body = GATE.read_text(encoding="utf-8")
+    evidence = EVIDENCE.read_text(encoding="utf-8")
+    applier = APPLY_LAUNCHER.read_text(encoding="utf-8")
 
     assert "triggers_replace" in body
     assert "plantimestamp()" in body
-    assert 'provisioner "local-exec"' in body
-    assert "consume-deployment-intent" in body
-    assert "TEAMAGENT_SAVED_PLAN_PATH" in body
-    assert "TEAMAGENT_APPLY_ATTEMPT_ID" in body
-    assert "TEAMAGENT_DEPLOYMENT_GATE_QUERY" in body
+    assert 'provisioner "local-exec"' not in body
+    assert "deployment_gate_query    = local.deployment_gate_query" in body
+    assert "receipt_authorization_expires_at" in body
     assert "deployment_context_sha256" in body
     assert "receipt_claims_sha256" in body
     assert "deployment_intent_id" in body
+    assert "_verified_receipt_claims_for_saved_plan" in evidence
+    assert "_consume_applying_deployment_intent" in evidence
+    assert evidence.index("_verified_receipt_claims_for_saved_plan(") < evidence.index(
+        "_consume_applying_deployment_intent(",
+        evidence.index("def validate_deployment_preflight"),
+    )
+    assert applier.index("validate-deployment-preflight") < applier.index(
+        'python3 "$apply_supervisor"'
+    )
 
 
 def test_every_discovered_ecs_task_definition_depends_on_release_gate() -> None:

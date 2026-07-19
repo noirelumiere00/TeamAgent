@@ -346,9 +346,19 @@ def test_config_loads_only_reviewed_plugins_and_not_browser() -> None:
 
 def test_internal_caller_identity_plugin_uses_installed_openclaw_schema() -> None:
     package = json.loads((ROOT / "infra/openclaw/caller-identity-plugin/package.json").read_text())
+    plugin = (
+        ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js"
+    ).read_text()
     assert package["openclaw"]["extensions"] == ["./dist/index.js"]
     assert "runtimeExtensions" not in package["openclaw"]
     assert package["openclaw"]["compat"]["pluginApi"] == ">=2026.7.1"
+    assert "registerInteractiveHandler" in plugin
+    assert "namespace: MAIL_DRAFT_ACTION_ID" in plugin
+    assert 'ctx?.auth?.isAuthorizedSender !== true' in plugin
+    assert 'ctx?.trigger === "heartbeat"' in plugin
+    assert "parseMailDraftSystemEvent" in plugin
+    assert "interactionId !== expectedInteractionId" in plugin
+    assert "mail_draft requires an authoritative Slack button action" in plugin
 
 
 def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> None:

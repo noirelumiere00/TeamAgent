@@ -460,8 +460,9 @@ resource "aws_ecs_task_definition" "mcp" {
       # 自動draft作成を常にfail-closedにし、明示ボタン経由のmail_draftだけを許可する。
       { name = "USE_MORNING_DIGEST_TOOL", value = "true" },
       { name = "DRAFT_ON_DEMAND_ONLY", value = "true" },
-      # 朝ダイジェストの「✏️下書きを作成」ボタン押下処理ツール（OpenClaw が interaction を system
-      # event で渡し、SOUL 指示で本ツールを呼ぶ→当該スレッドへ Reply-All 下書き作成・送信しない）。
+      # 朝ダイジェストの「✏️下書きを作成」ボタン押下処理ツール。固定 OpenClaw runtime の
+      # Slack interactive handler が署名済み押下 identity/token/message を先に捕捉し、同じ
+      # system-event heartbeat run の一回限りの mail_draft call へ束縛する（送信しない）。
       { name = "USE_MAIL_DRAFT_TOOL", value = "true" },
       # v0.3 Task3: 📅カレンダー登録（既定 false・tfvars で ON。ボタン描画フラグより先に ON にする）。
       { name = "USE_CALENDAR_EVENT_TOOL", value = var.use_calendar_event_tool ? "true" : "false" },
@@ -667,7 +668,8 @@ resource "aws_ecs_task_definition" "openclaw" {
     # command/entryPoint は上書きせず、検証済み image の canonical CMD/ENTRYPOINT を使う。
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
-      # trusted caller pluginとMCP resolverのexact workspace契約。空はvariable validationで拒否。
+      # trusted caller plugin の通常 message と署名済み Slack action ingress、および MCP
+      # resolver の exact workspace 契約。空は variable validation で拒否。
       { name = "SLACK_TEAM_ID", value = var.slack_team_id },
       # 本番必須のDM契約。"*"はdmPolicy=open + allowFrom=["*"]、個別U ID群は
       # dmPolicy=allowlist + exact allowFromへentrypointが同時変換する。空文字、空白、

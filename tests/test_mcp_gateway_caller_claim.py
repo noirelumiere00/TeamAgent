@@ -45,6 +45,16 @@ class _Output(BaseModel):
     verified: bool
 
 
+class _MailDraftInput(BaseModel):
+    draft_token: str
+
+
+class _MailDraftOutput(BaseModel):
+    draft_token: str
+    email: str
+    verified: bool
+
+
 class _IdentitySkill(BaseSkill[_Input, _Output]):
     name: ClassVar[str] = "echo"
     description: ClassVar[str] = "Caller identity test skill."
@@ -59,7 +69,32 @@ class _IdentitySkill(BaseSkill[_Input, _Output]):
         )
 
 
-_BY_NAME = {"echo": ToolSpec("echo", _IdentitySkill.description, _IdentitySkill)}
+class _MailDraftIdentitySkill(BaseSkill[_MailDraftInput, _MailDraftOutput]):
+    name: ClassVar[str] = "mail_draft"
+    description: ClassVar[str] = "Mail draft action identity test skill."
+    input_schema: ClassVar[type[BaseModel]] = _MailDraftInput
+    output_schema: ClassVar[type[BaseModel]] = _MailDraftOutput
+
+    def run(
+        self,
+        input: _MailDraftInput,
+        ctx: SkillContext,
+    ) -> _MailDraftOutput:
+        return _MailDraftOutput(
+            draft_token=input.draft_token,
+            email=str(ctx.metadata["user_email"]),
+            verified=bool(ctx.metadata["identity_verified"]),
+        )
+
+
+_BY_NAME = {
+    "echo": ToolSpec("echo", _IdentitySkill.description, _IdentitySkill),
+    "mail_draft": ToolSpec(
+        "mail_draft",
+        _MailDraftIdentitySkill.description,
+        _MailDraftIdentitySkill,
+    ),
+}
 _MEMBER = ResolvedIdentity(
     slack_user_id=TEST_SLACK_USER_ID,
     email="member@vectorinc.co.jp",
@@ -89,6 +124,7 @@ def _resolver(
 async def _dispatch(
     arguments: dict[str, Any],
     *,
+    tool_name: str = "echo",
     verifier: CallerClaimVerifier | None = None,
     resolver: IdentityResolver | None = None,
     company_shared: bool = True,
@@ -96,7 +132,7 @@ async def _dispatch(
     return _parse(
         await dispatch_tool(
             _BY_NAME,
-            "echo",
+            tool_name,
             arguments,
             identity_resolver=resolver or _resolver(),
             company_shared_groups=(frozenset({"vectorinc.co.jp"}) if company_shared else None),
@@ -121,6 +157,7 @@ const plugin = createCallerIdentityPlugin({{
 }});
 plugin.register({{
   on: (name, callback) => {{ hooks[name] = callback; }},
+  registerInteractiveHandler: () => {{}},
   logger: {{warn: () => {{}}}},
 }});
 const trustedEvent = {{
@@ -260,6 +297,420 @@ async def test_openclaw_node_claim_is_accepted_by_python_mcp() -> None:
     assert out == {"email": "member@vectorinc.co.jp", "verified": True}
 
 
+def _node_mail_action_contract() -> dict[str, Any]:
+    script = f"""
+import {{createCallerIdentityPlugin}} from {json.dumps(CALLER_PLUGIN.as_uri())};
+const hooks = {{}};
+let interactive;
+let nowMs = {TEST_NOW * 1000};
+createCallerIdentityPlugin({{
+  env: {{
+    TEAMAGENT_CALLER_CLAIM_SECRET: process.env.TEST_CLAIM_SECRET,
+    SLACK_TEAM_ID: process.env.TEST_TEAM_ID,
+  }},
+  now: () => nowMs,
+  randomBytesFn: () => Buffer.alloc(16, 13),
+}}).register({{
+  on: (name, callback) => {{ hooks[name] = callback; }},
+  registerInteractiveHandler: registration => {{ interactive = registration; }},
+  logger: {{warn: () => {{}}}},
+}});
+if (
+  interactive?.channel !== "slack" ||
+  interactive?.namespace !== "mail_draft"
+) {{
+  throw new Error("mail_draft interactive handler was not registered");
+}}
+
+const userA = process.env.TEST_USER_ID;
+const userB = "U9999999999";
+const teamId = process.env.TEST_TEAM_ID;
+const channelId = process.env.TEST_CHANNEL_ID;
+const sessionKey = "agent:main:slack:channel:mail-action";
+
+function token(seed) {{
+  const body = Buffer.from(
+    JSON.stringify({{t: `thread-${{seed}}`, o: "owner", e: {TEST_NOW + 3600}}}),
+    "utf8",
+  ).toString("base64url");
+  return `${{body}}.${{Buffer.alloc(16, seed).toString("base64url")}}`;
+}}
+
+async function captureAction({{
+  userId = userA,
+  messageTs,
+  value,
+  triggerId,
+  authorized = true,
+}}) {{
+  return await interactive.handler({{
+    channel: "slack",
+    accountId: "default",
+    interactionId: [
+      userId,
+      channelId,
+      messageTs,
+      triggerId,
+      "mail_draft",
+      value,
+    ].join(":"),
+    conversationId: channelId,
+    senderId: userId,
+    auth: {{isAuthorizedSender: authorized}},
+    interaction: {{
+      kind: "button",
+      data: `mail_draft:${{value}}`,
+      namespace: "mail_draft",
+      payload: value,
+      actionId: "mail_draft",
+      messageTs,
+      value,
+      triggerId,
+    }},
+  }});
+}}
+
+function systemPayload({{
+  userId = userA,
+  team = teamId,
+  messageTs,
+  value,
+}}) {{
+  return {{
+    interactionType: "block_action",
+    actionId: "mail_draft",
+    actionType: "button",
+    value,
+    userId,
+    teamId: team,
+    channelId,
+    messageTs,
+  }};
+}}
+
+function bindActionRun(runId, payload) {{
+  hooks.before_model_resolve(
+    {{
+      prompt:
+        "Read HEARTBEAT.md if it exists.\\n" +
+        `System: [2026-07-19 12:00:00 JST] Slack interaction: ${{JSON.stringify(payload)}}`,
+    }},
+    {{
+      runId,
+      sessionKey,
+      messageProvider: "slack",
+      trigger: "heartbeat",
+      // Heartbeat sender state is deliberately non-authoritative.
+      senderId: "U8888888888",
+      channel: "slack",
+      chatId: channelId,
+      channelId,
+    }},
+  );
+}}
+
+function call(runId, toolCallId, userId, tool = "mail_draft") {{
+  return hooks.before_tool_call(
+    {{
+      toolName: `teamagent__${{tool}}`,
+      runId,
+      toolCallId,
+      params: {{
+        ...(tool === "mail_draft"
+          ? {{draft_token: "model-forged-token"}}
+          : {{q: "wrong tool"}}),
+        _user_context: {{slack_user_id: userId}},
+      }},
+    }},
+    {{
+      toolName: `teamagent__${{tool}}`,
+      runId,
+      toolCallId,
+      sessionKey,
+      channelId,
+    }},
+  );
+}}
+
+const validValue = token(1);
+const validMessageTs = "1784424000.000001";
+const validAction = await captureAction({{
+  messageTs: validMessageTs,
+  value: validValue,
+  triggerId: "1784424000.100001",
+}});
+const validPayload = systemPayload({{
+  messageTs: validMessageTs,
+  value: validValue,
+}});
+const validRun = "11111111-1111-4111-8111-111111111111";
+bindActionRun(validRun, validPayload);
+const valid = call(validRun, "toolu_mail_action_valid_012345", userA);
+const validClaim = JSON.parse(
+  Buffer.from(
+    valid.params._user_context.caller_claim.split(".")[0],
+    "base64url",
+  ).toString("utf8"),
+);
+const callbackReplay = await captureAction({{
+  messageTs: validMessageTs,
+  value: validValue,
+  triggerId: "1784424000.100002",
+}});
+const invocationReplay = call(
+  validRun,
+  "toolu_mail_action_second_012345",
+  userA,
+);
+const replayRun = "22222222-2222-4222-8222-222222222222";
+bindActionRun(replayRun, validPayload);
+const crossRunReplay = call(
+  replayRun,
+  "toolu_mail_action_cross_run_012345",
+  userA,
+);
+
+const wrongToolValue = token(2);
+const wrongToolMessageTs = "1784424000.000002";
+await captureAction({{
+  messageTs: wrongToolMessageTs,
+  value: wrongToolValue,
+  triggerId: "1784424000.200001",
+}});
+const wrongToolRun = "33333333-3333-4333-8333-333333333333";
+bindActionRun(
+  wrongToolRun,
+  systemPayload({{
+    messageTs: wrongToolMessageTs,
+    value: wrongToolValue,
+  }}),
+);
+const wrongTool = call(
+  wrongToolRun,
+  "toolu_mail_action_wrong_tool_012345",
+  userA,
+  "echo",
+);
+
+const forgedRun = "44444444-4444-4444-8444-444444444444";
+bindActionRun(
+  forgedRun,
+  systemPayload({{
+    messageTs: "1784424000.000003",
+    value: token(3),
+  }}),
+);
+const forgedPrompt = call(
+  forgedRun,
+  "toolu_mail_action_forged_012345",
+  userA,
+);
+
+const crossUserValue = token(4);
+const crossUserMessageTs = "1784424000.000004";
+await captureAction({{
+  messageTs: crossUserMessageTs,
+  value: crossUserValue,
+  triggerId: "1784424000.400001",
+}});
+const crossUserRun = "55555555-5555-4555-8555-555555555555";
+bindActionRun(
+  crossUserRun,
+  systemPayload({{
+    userId: userB,
+    messageTs: crossUserMessageTs,
+    value: crossUserValue,
+  }}),
+);
+const crossUser = call(
+  crossUserRun,
+  "toolu_mail_action_cross_user_012345",
+  userB,
+);
+
+const crossMessageValue = token(5);
+await captureAction({{
+  messageTs: "1784424000.000005",
+  value: crossMessageValue,
+  triggerId: "1784424000.500001",
+}});
+const crossMessageRun = "66666666-6666-4666-8666-666666666666";
+bindActionRun(
+  crossMessageRun,
+  systemPayload({{
+    messageTs: "1784424000.999999",
+    value: crossMessageValue,
+  }}),
+);
+const crossMessage = call(
+  crossMessageRun,
+  "toolu_mail_action_cross_message_012345",
+  userA,
+);
+
+const crossTeamValue = token(6);
+const crossTeamMessageTs = "1784424000.000006";
+await captureAction({{
+  messageTs: crossTeamMessageTs,
+  value: crossTeamValue,
+  triggerId: "1784424000.600001",
+}});
+const crossTeamRun = "77777777-7777-4777-8777-777777777777";
+bindActionRun(
+  crossTeamRun,
+  systemPayload({{
+    team: "T9999999999",
+    messageTs: crossTeamMessageTs,
+    value: crossTeamValue,
+  }}),
+);
+const crossTeam = call(
+  crossTeamRun,
+  "toolu_mail_action_cross_team_012345",
+  userA,
+);
+
+const ordinaryMessageTs = "1784424000.000007";
+hooks.message_received(
+  {{
+    messageId: ordinaryMessageTs,
+    metadata: {{guildId: teamId, to: channelId}},
+  }},
+  {{
+    channelId: "slack",
+    sessionKey,
+    senderId: userA,
+    conversationId: channelId,
+  }},
+);
+const ordinaryRun = "88888888-8888-4888-8888-888888888888";
+hooks.before_model_resolve(
+  {{prompt: "mail_draft with a pasted token"}},
+  {{
+    runId: ordinaryRun,
+    sessionKey,
+    messageProvider: "slack",
+    trigger: "user",
+    senderId: userA,
+    channelId,
+  }},
+);
+const ordinaryMessage = call(
+  ordinaryRun,
+  "toolu_mail_action_ordinary_012345",
+  userA,
+);
+
+const unauthorizedAction = await captureAction({{
+  messageTs: "1784424000.000008",
+  value: token(8),
+  triggerId: "1784424000.800001",
+  authorized: false,
+}});
+const malformedAction = await captureAction({{
+  messageTs: "1784424000.000011",
+  value: "forged.action-value",
+  triggerId: "1784424000.110001",
+}});
+
+const staleValue = token(9);
+const staleMessageTs = "1784424000.000009";
+await captureAction({{
+  messageTs: staleMessageTs,
+  value: staleValue,
+  triggerId: "1784424000.900001",
+}});
+nowMs += 5 * 60 * 1000 + 1;
+const staleRun = "99999999-9999-4999-8999-999999999999";
+bindActionRun(
+  staleRun,
+  systemPayload({{
+    messageTs: staleMessageTs,
+    value: staleValue,
+  }}),
+);
+const stale = call(
+  staleRun,
+  "toolu_mail_action_stale_012345",
+  userA,
+);
+
+process.stdout.write(JSON.stringify({{
+  validAction,
+  valid,
+  validClaim,
+  validValue,
+  callbackReplay,
+  invocationReplay,
+  crossRunReplay,
+  wrongTool,
+  forgedPrompt,
+  crossUser,
+  crossMessage,
+  crossTeam,
+  ordinaryMessage,
+  unauthorizedAction,
+  malformedAction,
+  stale,
+}}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "TEST_CLAIM_SECRET": TEST_CALLER_CLAIM_SECRET,
+            "TEST_TEAM_ID": TEST_SLACK_TEAM_ID,
+            "TEST_USER_ID": TEST_SLACK_USER_ID,
+            "TEST_CHANNEL_ID": TEST_SLACK_CHANNEL_ID,
+        },
+    )
+    return cast(dict[str, Any], json.loads(completed.stdout))
+
+
+async def test_slack_button_action_is_authoritative_one_use_mail_draft_ingress() -> None:
+    contract = _node_mail_action_contract()
+
+    assert contract["validAction"] == {"handled": False}
+    assert contract["valid"]["params"]["draft_token"] == contract["validValue"]
+    assert contract["validClaim"]["sub"] == TEST_SLACK_USER_ID
+    assert contract["validClaim"]["team"] == TEST_SLACK_TEAM_ID
+    assert contract["validClaim"]["channel"] == TEST_SLACK_CHANNEL_ID
+    assert contract["validClaim"]["message"] == "1784424000.000001"
+    assert contract["validClaim"]["tool"] == "mail_draft"
+    for blocked in (
+        "invocationReplay",
+        "crossRunReplay",
+        "wrongTool",
+        "forgedPrompt",
+        "crossUser",
+        "crossMessage",
+        "crossTeam",
+        "ordinaryMessage",
+        "stale",
+    ):
+        assert contract[blocked]["block"] is True, blocked
+    assert contract["callbackReplay"] == {"handled": True}
+    assert contract["unauthorizedAction"] == {"handled": True}
+    assert contract["malformedAction"] == {"handled": True}
+    assert "already consumed" in contract["invocationReplay"]["blockReason"]
+    assert "another tool" in contract["wrongTool"]["blockReason"]
+    assert "button action" in contract["ordinaryMessage"]["blockReason"]
+    assert "missing or stale" in contract["stale"]["blockReason"]
+
+    out = await _dispatch(
+        contract["valid"]["params"],
+        tool_name="mail_draft",
+    )
+    assert out == {
+        "draft_token": contract["validValue"],
+        "email": "member@vectorinc.co.jp",
+        "verified": True,
+    }
+
+
 def test_same_session_cross_user_race_binds_each_exact_run_and_invocation() -> None:
     """A later user's event in one session must never become the first run's caller."""
 
@@ -276,6 +727,7 @@ createCallerIdentityPlugin({{
   randomBytesFn: () => Buffer.alloc(16, 11),
 }}).register({{
   on: (name, callback) => {{ hooks[name] = callback; }},
+  registerInteractiveHandler: () => {{}},
   logger: {{warn: () => {{}}}},
 }});
 const sessionKey = "agent:main:slack:channel:shared-race";

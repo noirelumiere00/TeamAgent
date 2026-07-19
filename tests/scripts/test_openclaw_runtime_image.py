@@ -91,6 +91,15 @@ if (!installedSlackSources.some(source =>
 )) {
   throw new Error("installed Slack ingress does not bind event identity/session");
 }
+if (!installedSlackSources.some(source =>
+  source.includes("dispatchSlackPluginInteractiveHandler") &&
+  source.includes("isAuthorizedSender") &&
+  source.includes("interactionId") &&
+  source.includes("messageTs") &&
+  source.includes("threadTs")
+)) {
+  throw new Error("installed Slack interactive ingress contract changed");
+}
 const installedCoreSources = javascriptSources("/app/dist");
 if (!installedCoreSources.some(source =>
   source.includes("function deriveInboundMessageHookContext") &&
@@ -121,14 +130,24 @@ if (!installedCoreSources.some(source =>
 }
 
 const hooks = {};
+let interactiveRegistration;
 const nowSeconds = 1784424000;
 createCallerIdentityPlugin({
   now: () => nowSeconds * 1000,
   randomBytesFn: () => Buffer.alloc(16, 9)
 }).register({
   on: (name, callback) => { hooks[name] = callback; },
+  registerInteractiveHandler: registration => {
+    interactiveRegistration = registration;
+  },
   logger: {warn: () => {}}
 });
+if (
+  interactiveRegistration?.channel !== "slack" ||
+  interactiveRegistration?.namespace !== "mail_draft"
+) {
+  throw new Error("mail_draft authoritative interactive handler is missing");
+}
 const trustedContext = {
   channelId: "slack",
   sessionKey: "agent:main:slack:channel:actual-image",
@@ -248,9 +267,88 @@ const nativeMessage = hooks.before_tool_call({
 if (!mismatch?.block || !foreign?.block || !replay?.block || !nativeMessage?.block) {
   throw new Error("adversarial caller was not blocked");
 }
+const actionValue =
+  `${Buffer.from('{"e":1784427600,"o":"owner","t":"thread"}').toString("base64url")}.` +
+  Buffer.alloc(16, 4).toString("base64url");
+const actionMessageTs = "1784424000.000010";
+const actionTriggerId = "1784424000.100010";
+const interactionResult = await interactiveRegistration.handler({
+  channel: "slack",
+  accountId: "default",
+  interactionId: [
+    "U0123456789",
+    "C0123456789",
+    actionMessageTs,
+    actionTriggerId,
+    "mail_draft",
+    actionValue
+  ].join(":"),
+  conversationId: "C0123456789",
+  senderId: "U0123456789",
+  auth: {isAuthorizedSender: true},
+  interaction: {
+    kind: "button",
+    data: `mail_draft:${actionValue}`,
+    namespace: "mail_draft",
+    payload: actionValue,
+    actionId: "mail_draft",
+    messageTs: actionMessageTs,
+    value: actionValue,
+    triggerId: actionTriggerId
+  }
+});
+if (interactionResult?.handled !== false) {
+  throw new Error("authoritative mail action did not preserve heartbeat routing");
+}
+const actionRunContext = {
+  runId: "33333333-3333-4333-8333-333333333333",
+  sessionKey: "agent:main:slack:channel:mail-action",
+  messageProvider: "slack",
+  trigger: "heartbeat",
+  senderId: "U9999999999",
+  channel: "slack",
+  chatId: "C0123456789",
+  channelId: "C0123456789"
+};
+hooks.before_model_resolve({
+  prompt:
+    "System: [2026-07-19 12:00:00 JST] Slack interaction: " +
+    JSON.stringify({
+      interactionType: "block_action",
+      actionId: "mail_draft",
+      actionType: "button",
+      value: actionValue,
+      userId: "U0123456789",
+      teamId: process.env.SLACK_TEAM_ID,
+      channelId: "C0123456789",
+      messageTs: actionMessageTs
+    })
+}, actionRunContext);
+const actionToolCallId = "toolu_mail_action_actual_image_012345";
+const signedAction = hooks.before_tool_call({
+  toolName: "teamagent__mail_draft",
+  runId: actionRunContext.runId,
+  toolCallId: actionToolCallId,
+  params: {
+    draft_token: "model-forged",
+    _user_context: {slack_user_id: "U0123456789"}
+  }
+}, {
+  ...actionRunContext,
+  toolName: "teamagent__mail_draft",
+  toolCallId: actionToolCallId
+});
+if (
+  signedAction?.block ||
+  signedAction?.params?.draft_token !== actionValue ||
+  !signedAction?.params?._user_context?.caller_claim
+) {
+  throw new Error("Slack mail action was not bound to the exact tool call");
+}
 process.stdout.write(JSON.stringify({
   actualImagePluginLoaded: true,
   installedSlackTeamBindingVerified: true,
+  installedInteractiveIngressVerified: true,
   installedHookSchemaVerified: true,
   installedBeforeToolFailClosedVerified: true,
   trustedSlackEventSigned: true,
@@ -260,6 +358,7 @@ process.stdout.write(JSON.stringify({
   foreignTeamBlocked: true,
   replayBlocked: true,
   nativeMessageBlocked: true,
+  signedMailActionBound: true,
   tokenDisclosedInEvidence: false
 }));
 """
@@ -908,12 +1007,17 @@ def _caller_identity_plugin_contract(image: str) -> dict[str, Any]:
     assert contract == {
         "actualImagePluginLoaded": True,
         "installedSlackTeamBindingVerified": True,
+        "installedInteractiveIngressVerified": True,
         "installedHookSchemaVerified": True,
         "installedBeforeToolFailClosedVerified": True,
         "trustedSlackEventSigned": True,
         "exactRequestBinding": True,
+        "exactRunAndInvocationBinding": True,
         "callerMismatchBlocked": True,
         "foreignTeamBlocked": True,
+        "replayBlocked": True,
+        "nativeMessageBlocked": True,
+        "signedMailActionBound": True,
         "tokenDisclosedInEvidence": False,
     }
     return contract
