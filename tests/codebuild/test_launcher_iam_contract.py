@@ -281,9 +281,7 @@ def test_only_source_free_promoter_can_write_release_repositories() -> None:
         "ecr:PutImage",
         "ecr:UploadLayerPart",
     }
-    assert _actions(_statement(main_builder, "EcrMcpQuarantineWrite")) == (
-        quarantine_write_actions
-    )
+    assert _actions(_statement(main_builder, "EcrMcpQuarantineWrite")) == (quarantine_write_actions)
     for policy, sid in (
         (main_builder, "DenyMcpCandidateAndReleaseWrite"),
         (tiktok_builder, "DenyTiktokCandidateAndReleaseWrite"),
@@ -294,9 +292,7 @@ def test_only_source_free_promoter_can_write_release_repositories() -> None:
         assert _effect(denial) == "Deny"
         assert _actions(denial) == release_write_denies
 
-    promoter_write = _statement(
-        promoter, "WriteOnlyAllowlistedCandidateAndReleaseRepositories"
-    )
+    promoter_write = _statement(promoter, "WriteOnlyAllowlistedCandidateAndReleaseRepositories")
     assert _effect(promoter_write) == "Allow"
     assert _actions(promoter_write) == {
         "ecr:BatchCheckLayerAvailability",
@@ -381,15 +377,11 @@ def test_image_deployment_gate_role_is_read_verify_and_ledger_only() -> None:
         "aws_ecr_repository.tiktok_acquire[0].arn",
     ):
         assert repository in policy
-    assert _actions(_statement(policy, "ReadDeploymentLedger")) == {
-        "dynamodb:GetItem"
+    assert _actions(_statement(policy, "ReadDeploymentLedger")) == {"dynamodb:GetItem"}
+    assert _actions(_statement(policy, "PrepareUniqueDeploymentIntent")) == {"dynamodb:PutItem"}
+    assert _actions(_statement(policy, "TransitionDeploymentIntentOrHeartbeatLock")) == {
+        "dynamodb:UpdateItem"
     }
-    assert _actions(_statement(policy, "PrepareUniqueDeploymentIntent")) == {
-        "dynamodb:PutItem"
-    }
-    assert _actions(
-        _statement(policy, "TransitionDeploymentIntentOrHeartbeatLock")
-    ) == {"dynamodb:UpdateItem"}
     assert _actions(_statement(policy, "AtomicallyStartAndConsumeDeployment")) == {
         "dynamodb:TransactWriteItems"
     }
@@ -408,9 +400,7 @@ def test_image_deployment_gate_role_is_read_verify_and_ledger_only() -> None:
     assert '"lock#teamagent/terraform.tfstate"' in delete_statement
     assert '"intent#*"' not in delete_statement
     assert '"receipt#*"' not in delete_statement
-    runtime_mutation_deny = _statement(
-        policy, "DenyRuntimeEvidenceAndImageMutation"
-    )
+    runtime_mutation_deny = _statement(policy, "DenyRuntimeEvidenceAndImageMutation")
     assert _effect(runtime_mutation_deny) == "Deny"
     assert _actions(runtime_mutation_deny) == {
         "codebuild:StartBuild",

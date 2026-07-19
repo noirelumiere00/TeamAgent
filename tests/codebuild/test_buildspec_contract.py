@@ -121,7 +121,7 @@ def test_app_html_uses_only_pinned_version_and_verified_bytes() -> None:
 
     assert "--bucket teamagent-dev-raw-files" in body
     assert "--key codebuild/connect-web-app.html" in body
-    assert 'BAKED_APP_HTML_KEY="$(jq -er \'.app_html.baked_fallback.key\'' in body
+    assert "BAKED_APP_HTML_KEY=\"$(jq -er '.app_html.baked_fallback.key'" in body
     assert '--key "$BAKED_APP_HTML_KEY"' in body
     assert '--version-id "$APP_HTML_VERSION_ID"' in body
     assert '--version-id "$BAKED_APP_HTML_VERSION_ID"' in body

@@ -1292,9 +1292,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     changed["consumption"]["state"] = "APPLYING"
     mutations.append(("unconsumed intent", changed))
     changed = copy.deepcopy(fixture)
-    changed["expected"]["previousTaskDefinition"] = fixture["expected"][
-        "newTaskDefinition"
-    ]
+    changed["expected"]["previousTaskDefinition"] = fixture["expected"]["newTaskDefinition"]
     mutations.append(("same old/new revision", changed))
     changed = copy.deepcopy(fixture)
     changed["caller"]["Arn"] = (
@@ -1349,9 +1347,9 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     changed["rollbackAuthorization"]["one_use"] = False
     mutations.append(("reusable rollback authorization", changed))
     changed = copy.deepcopy(fixture)
-    changed["rollbackAuthorization"]["previous_task_definition_arn"] = (
-        fixture["expected"]["newTaskDefinition"]
-    )
+    changed["rollbackAuthorization"]["previous_task_definition_arn"] = fixture["expected"][
+        "newTaskDefinition"
+    ]
     mutations.append(("rollback authorization revision swap", changed))
     changed = copy.deepcopy(fixture)
     changed["rollbackAuthorization"]["state"] = "CONSUMED"
@@ -1364,14 +1362,14 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     )
     mutations.append(("persisted result role substitution", changed))
     changed = copy.deepcopy(fixture)
-    changed["persistedResult"]["runningTasksAfterSlack"]["tasks"][0][
-        "taskDefinitionArn"
-    ] = fixture["expected"]["previousTaskDefinition"]
+    changed["persistedResult"]["runningTasksAfterSlack"]["tasks"][0]["taskDefinitionArn"] = fixture[
+        "expected"
+    ]["previousTaskDefinition"]
     mutations.append(("signed post-Slack task revision substitution", changed))
     changed = copy.deepcopy(fixture)
-    changed["persistedResult"]["slack"]["candidateLogCorrelation"][
-        "logStreamName"
-    ] = "openclaw/openclaw/ffffffffffffffffffffffffffffffff"
+    changed["persistedResult"]["slack"]["candidateLogCorrelation"]["logStreamName"] = (
+        "openclaw/openclaw/ffffffffffffffffffffffffffffffff"
+    )
     mutations.append(("signed Slack log substitution", changed))
     changed = copy.deepcopy(fixture)
     changed["immutableEvidence"]["resultVersionId"] = ""
@@ -1383,17 +1381,13 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     changed["immutableEvidence"]["resultObjectLockMode"] = "GOVERNANCE"
     mutations.append(("weaker Object Lock mode", changed))
     changed = copy.deepcopy(fixture)
-    changed["immutableEvidence"]["signatureObjectLockRetainUntil"] = (
-        "2026-07-19T00:00:01Z"
-    )
+    changed["immutableEvidence"]["signatureObjectLockRetainUntil"] = "2026-07-19T00:00:01Z"
     mutations.append(("short signature retention", changed))
     changed = copy.deepcopy(fixture)
     changed["immutableEvidence"]["encryptionKmsAlias"] = "alias/untrusted"
     mutations.append(("wrong encryption KMS key", changed))
     changed = copy.deepcopy(fixture)
-    changed["expected"]["signingKmsKeyArn"] = (
-        fixture["expected"]["encryptionKmsKeyArn"]
-    )
+    changed["expected"]["signingKmsKeyArn"] = fixture["expected"]["encryptionKmsKeyArn"]
     mutations.append(("Terraform-state KMS key substitution", changed))
     changed = copy.deepcopy(fixture)
     changed["immutableEvidence"]["resultSha256"] = "0" * 64
@@ -1452,8 +1446,8 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         "get-bucket-encryption",
         "--if-none-match",
         "--expected-bucket-owner",
-        "kms\", \"sign",
-        "kms\", \"verify",
+        'kms", "sign',
+        'kms", "verify',
         "teamagent-dev-openclaw-rollout-evidence",
         "alias/teamagent-dev-openclaw-rollout-evidence",
         "alias/teamagent-dev-openclaw-rollout-signing",
@@ -1464,10 +1458,8 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert "process.env.CANARY_SECRET" not in rollout
 
     guard = RUNTIME_GUARD.read_text()
-    apply_case = guard[guard.index('  apply)') :]
-    revision_gate = apply_case.index(
-        'if [ "$OPENCLAW_ROLLOUT_REQUIRED" = "false" ]; then'
-    )
+    apply_case = guard[guard.index("  apply)") :]
+    revision_gate = apply_case.index('if [ "$OPENCLAW_ROLLOUT_REQUIRED" = "false" ]; then')
     rollout_call = apply_case.index(
         'if ! node "$OPENCLAW_ROLLOUT_GATE"',
         revision_gate,
@@ -1502,7 +1494,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     evidence_tf = ROLLOUT_EVIDENCE_TF.read_text()
     runtime_evidence_tf = RUNTIME_EVIDENCE_TF.read_text()
     for required in (
-        'object_lock_enabled = true',
+        "object_lock_enabled = true",
         'mode = "COMPLIANCE"',
         "days = 3650",
         'key_usage                = "SIGN_VERIFY"',
@@ -1517,9 +1509,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     ):
         assert required in evidence_tf
     assert evidence_tf.count('test     = "ForAnyValue:StringEquals"') == 2
-    assert evidence_tf.count(
-        '"arn:aws:kms:ap-northeast-1:718959508629:key/*"'
-    ) == 2
+    assert evidence_tf.count('"arn:aws:kms:ap-northeast-1:718959508629:key/*"') == 2
     assert "exact_rollout_kms_alias_scope" in guard
     assert 'test     = "ForAllValues:StringNotEquals"' in runtime_evidence_tf
     assert "local.openclaw_rollout_signing_alias" in runtime_evidence_tf

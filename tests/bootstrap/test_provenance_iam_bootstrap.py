@@ -690,9 +690,7 @@ class _RetirementRunner:
                     {
                         "LogicalResourceId": "BootstrapExecutorRole",
                         "ResourceType": "AWS::IAM::Role",
-                        "PhysicalResourceId": (
-                            "teamagent-production-provenance-bootstrap-v1"
-                        ),
+                        "PhysicalResourceId": ("teamagent-production-provenance-bootstrap-v1"),
                     },
                 ]
             }
@@ -748,9 +746,7 @@ class _RetirementRunner:
             payload = {
                 "AttachedPolicies": [
                     {
-                        "PolicyName": (
-                            "teamagent-production-provenance-bootstrap-deny-v1"
-                        ),
+                        "PolicyName": ("teamagent-production-provenance-bootstrap-deny-v1"),
                         "PolicyArn": (
                             "arn:aws:iam::718959508629:policy/"
                             "teamagent-production-provenance-bootstrap-deny-v1"
@@ -961,8 +957,7 @@ def test_every_create_allowlisted_upsert_has_an_exact_aws_owner_probe() -> None:
     upserts = {
         BOOTSTRAP.normalize_address(address)
         for address in contract.create_allowed
-        if BOOTSTRAP.normalize_address(address).split(".", 1)[0]
-        in BOOTSTRAP.UPSERT_RESOURCE_TYPES
+        if BOOTSTRAP.normalize_address(address).split(".", 1)[0] in BOOTSTRAP.UPSERT_RESOURCE_TYPES
     }
     assert upserts
     assert upserts == mapped
@@ -1007,9 +1002,7 @@ def test_handoff_artifacts_are_full_fsynced_and_conflict_safe(tmp_path: Path) ->
     )
     assert claims["owned_main_state_addresses"] == sorted(created)
     assert ownership["addresses_after"] == sorted(created)
-    assert ownership["required_main_state_addresses"] == sorted(
-        contract.required_main_state
-    )
+    assert ownership["required_main_state_addresses"] == sorted(contract.required_main_state)
     durable = BOOTSTRAP.load_json(
         artifact_dir / "bootstrap-handoff-durable.json",
         label="durable handoff",
@@ -1629,7 +1622,7 @@ def test_entrypoints_never_dispatch_build_or_release_from_bootstrap_session() ->
     assert "authorize_image_release.sh" not in bootstrap
     assert 'git -C "$SCRIPT_DIR" rev-parse' not in bootstrap
     assert 'python3 -I "$PROVENANCE_HELPER"' in bootstrap
-    assert '--profile bootstrap-iam' in bootstrap
+    assert "--profile bootstrap-iam" in bootstrap
     assert "build_teamagent_image.sh" not in runtime
     assert "authorize_image_release.sh" not in runtime
     assert 'EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/' in runtime

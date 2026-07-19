@@ -266,9 +266,9 @@ def test_expired_lease_reclaims_only_unfinalized_attempt_uuid(
     }
     assert len(s3.deletes) == 1
     assert s3.deletes[0]["Delete"]["Objects"] == [{"Key": f"{prefix}/{orphan}/output/media"}]
-    assert "MEDIA_JOB_STALE_TERMINALIZED" in ddb.claims[0]["ExpressionAttributeValues"][
-        ":detail"
-    ]["S"]
+    assert (
+        "MEDIA_JOB_STALE_TERMINALIZED" in ddb.claims[0]["ExpressionAttributeValues"][":detail"]["S"]
+    )
     assert ddb.claims[1]["UpdateExpression"].startswith("SET orphan_cleanup_owner")
     assert ddb.claims[2]["UpdateExpression"].startswith("REMOVE orphan_cleanup_owner")
 
