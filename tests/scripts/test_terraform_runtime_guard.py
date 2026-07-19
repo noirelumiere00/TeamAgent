@@ -1884,6 +1884,39 @@ def _fake_terraform(path: Path) -> None:
                     "mcp": {"source_commit": "a" * 40},
                 },
                 "shared_generation_ledger": {},
+                "release_channels": {
+                    "mcp": "active",
+                    "openclaw": "active",
+                    "x_buzz": "active",
+                },
+                "hmac_release_bindings": {},
+                "receipt_authorization_expires_at": 2_000_000_000,
+            }
+            gate_input["deployment_gate_query"] = {
+                "images_json": json.dumps(
+                    gate_input["requested_images"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "mcp_media_image": gate_input["requested_media_image"],
+                "evidence_json": "{}",
+                "contracts_json": "{}",
+                "contract_ready_json": "{}",
+                "application_json": json.dumps(
+                    gate_input["application_provenance"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "shared_generation_ledger_json": "{}",
+                "signing_key_arn": (
+                    "arn:aws:kms:ap-northeast-1:718959508629:"
+                    "key/11111111-1111-4111-8111-111111111111"
+                ),
+                "encryption_key_arn": (
+                    "arn:aws:kms:ap-northeast-1:718959508629:"
+                    "key/22222222-2222-4222-8222-222222222222"
+                ),
+                "deployment_intent_id": image_deployment_intent_id,
             }
             gate_change = next(
                 change
