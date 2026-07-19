@@ -18,11 +18,14 @@ cannot restore a previous key or authorize an old issuer.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, replace
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 HMAC_STATE_REQUIRED_ENV = "TEAMAGENT_HMAC_STATE_REQUIRED"
@@ -31,6 +34,11 @@ HMAC_STATE_SCOPE_ENV = "TEAMAGENT_HMAC_STATE_SCOPE"
 HMAC_ROTATION_EPOCH_ENV = "TEAMAGENT_HMAC_ROTATION_EPOCH"
 HMAC_PROVENANCE_ENV = "TEAMAGENT_HMAC_PROVENANCE"
 HMAC_WORKER_ID_ENV = "TEAMAGENT_HMAC_WORKER_ID"
+HMAC_ARTIFACT_SHA256_ENV = "TEAMAGENT_HMAC_ARTIFACT_SHA256"
+HMAC_RESTART_NONCE_ENV = "TEAMAGENT_HMAC_RESTART_NONCE"
+HMAC_SERVICE_ENV = "TEAMAGENT_HMAC_SERVICE"
+HMAC_MAIN_PID_ENV = "TEAMAGENT_HMAC_MAIN_PID"
+HMAC_SERVICE_HEALTH_ENV = "TEAMAGENT_HMAC_SERVICE_HEALTH"
 
 _MAX_EPOCH = 9_999_999_999
 _ROLLOUT_OVERLAP_S = 900
@@ -40,6 +48,8 @@ _PROVENANCE_RE = re.compile(r"^[a-f0-9]{64}$")
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
 _WORKER_ID_RE = re.compile(r"^i-[a-f0-9]{8,32}$")
+_RESTART_NONCE_RE = re.compile(r"^[a-f0-9]{64}$")
+_SERVICE_RE = re.compile(r"^(bot|connect)$")
 _DOMAIN_ENV = {
     "mail_action": {
         "primary": "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
@@ -81,6 +91,7 @@ class HmacDurableSnapshot:
 
     domain: str
     revision: int
+    clock_revision: int
     primary_generation: str
     previous_generation: str | None
     rotation_started_at: int | None
@@ -371,6 +382,93 @@ def runtime_expectations_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _service_process_identity(service: str) -> tuple[int, int, int] | None:
+    raw_pid = os.environ.get(HMAC_MAIN_PID_ENV)
+    if raw_pid is None:
+        pid = os.getppid()
+    elif raw_pid.isascii() and raw_pid.isdecimal():
+        pid = int(raw_pid)
+    else:
+        return None
+    if pid <= 1:
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
+        proc_stat = Path("/proc/stat").read_text(encoding="utf-8")
+        close = stat.rfind(")")
+        fields = stat[close + 2 :].split()
+        # /proc/<pid>/stat field 22 is index 19 after the pid/comm prefix.
+        started_ticks = int(fields[19])
+        clock_ticks = os.sysconf("SC_CLK_TCK")
+        boot_lines = [line for line in proc_stat.splitlines() if line.startswith("btime ")]
+        if len(boot_lines) != 1:
+            return None
+        boot_epoch = int(boot_lines[0].split()[1])
+        process_started_at = boot_epoch + (started_ticks // int(clock_ticks))
+    except (OSError, UnicodeError, TypeError, ValueError, IndexError):
+        return None
+    marker = b"teamagent.runtime.slack_bot" if service == "bot" else b"teamagent.connect_web"
+    if started_ticks <= 0 or clock_ticks <= 0 or process_started_at < 0 or marker not in command:
+        return None
+    return pid, started_ticks, process_started_at
+
+
+def _connect_port_owned_by(pid: int, *, port: int = 8788) -> bool:
+    """Prove the listening socket inode belongs to the exact connect MainPID."""
+
+    try:
+        socket_inodes: set[str] = set()
+        for descriptor in Path(f"/proc/{pid}/fd").iterdir():
+            try:
+                target = os.readlink(descriptor)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target.endswith("]"):
+                socket_inodes.add(target[8:-1])
+        if not socket_inodes:
+            return False
+        for table_name in ("/proc/net/tcp", "/proc/net/tcp6"):
+            for line in Path(table_name).read_text(encoding="ascii").splitlines()[1:]:
+                fields = line.split()
+                if len(fields) < 10:
+                    return False
+                _address, separator, raw_port = fields[1].rpartition(":")
+                if (
+                    separator
+                    and int(raw_port, 16) == port
+                    and fields[3] == "0A"
+                    and fields[9] in socket_inodes
+                ):
+                    return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return False
+
+
+def _service_health_verified(service: str, pid: int) -> bool:
+    """Verify liveness locally; connect must own 8788 and serve its health endpoint."""
+
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    if service == "bot":
+        return True
+    if service != "connect" or not _connect_port_owned_by(pid):
+        return False
+    connection = http.client.HTTPConnection("127.0.0.1", 8788, timeout=2)
+    try:
+        connection.request("GET", "/healthz", headers={"Host": "127.0.0.1"})
+        response = connection.getresponse()
+        response.read(1024)
+        return response.status == 200
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
 class DynamoDbHmacStateStore:
     """Strongly consistent DynamoDB implementation with conditional high-water updates."""
 
@@ -427,6 +525,7 @@ class DynamoDbHmacStateStore:
             rotation_epoch = _item_string(item, "rotation_epoch")
             stage = _item_string(item, "stage")
             revision = _item_number(item, "revision")
+            clock_revision = _item_number(item, "clock_revision", optional=True)
             high_water = _item_number(item, "high_water")
             t0 = _item_number(item, "rotation_started_at", optional=True)
             deadline = _item_number(item, "deadline", optional=True)
@@ -452,6 +551,7 @@ class DynamoDbHmacStateStore:
                 or _ROTATION_EPOCH_RE.fullmatch(rotation_epoch) is None
                 or stage not in _RUNTIME_STAGES
                 or revision is None
+                or (clock_revision is not None and clock_revision < 0)
                 or high_water is None
                 or ((previous is None) != (t0 is None))
                 or ((previous is None) != (deadline is None))
@@ -479,6 +579,7 @@ class DynamoDbHmacStateStore:
             return HmacDurableSnapshot(
                 domain=domain,
                 revision=revision,
+                clock_revision=clock_revision if clock_revision is not None else 0,
                 primary_generation=primary,
                 previous_generation=previous,
                 rotation_started_at=t0,
@@ -522,19 +623,41 @@ class DynamoDbHmacStateStore:
         )
         retired = snapshot.previous_retired or should_retire
 
-        # Every decision performs a revision CAS, even when neither the trusted clock nor the
-        # retired bit changes. Otherwise a thread that read just before the deadline could return
-        # an eligible previous key after another thread had already persisted retirement.
+        # Every decision advances a separate clock revision. This linearizes a read taken just
+        # before the deadline against concurrent retirement without starving config-revision CAS.
         expression = (
-            "SET high_water = :next, previous_retired = :retired, revision = revision + :one"
+            "SET high_water = :next, previous_retired = :retired,"
+            " clock_revision = if_not_exists(clock_revision, :zero) + :one"
         )
         values: dict[str, Any] = {
-            ":revision": {"N": str(snapshot.revision)},
+            ":config_revision": {"N": str(snapshot.revision)},
+            ":clock_revision": {"N": str(snapshot.clock_revision)},
             ":old_high_water": {"N": str(snapshot.high_water)},
+            ":old_retired": {"BOOL": snapshot.previous_retired},
+            ":primary": {"S": snapshot.primary_generation},
+            ":epoch": {"S": snapshot.rotation_epoch},
             ":next": {"N": str(high_water)},
             ":retired": {"BOOL": retired},
+            ":zero": {"N": "0"},
             ":one": {"N": "1"},
         }
+        condition = (
+            "revision = :config_revision"
+            " AND (attribute_not_exists(clock_revision)"
+            " OR clock_revision = :clock_revision)"
+            " AND high_water = :old_high_water"
+            " AND previous_retired = :old_retired"
+            " AND primary_generation = :primary"
+            " AND rotation_epoch = :epoch"
+        )
+        # The durable previous pair intentionally remains present during authorized cleanup so
+        # old metadata can fail closed against its retired bit while primary-only replacements
+        # start. The CAS must bind that durable snapshot, not the replacement's absent pair.
+        if snapshot.previous_generation is None:
+            condition += " AND attribute_not_exists(previous_generation)"
+        else:
+            condition += " AND previous_generation = :previous"
+            values[":previous"] = {"S": snapshot.previous_generation}
         if should_retire and expected.previous_generation is not None:
             expression += " ADD retired_generations :retired_generation"
             retired_now = [expected.previous_generation]
@@ -546,7 +669,7 @@ class DynamoDbHmacStateStore:
                 TableName=self._table_name,
                 Key=self._key(expected.domain),
                 UpdateExpression=expression,
-                ConditionExpression="revision = :revision AND high_water = :old_high_water",
+                ConditionExpression=condition,
                 ExpressionAttributeValues=values,
             )
         except Exception as exc:
@@ -561,19 +684,21 @@ class DynamoDbHmacStateStore:
             retired_generations = retired_generations | newly_retired
         return replace(
             snapshot,
-            revision=snapshot.revision + 1,
+            clock_revision=snapshot.clock_revision + 1,
             high_water=high_water,
             previous_retired=retired,
             retired_generations=frozenset(retired_generations),
         )
 
     def evaluate(self, expectation: HmacRuntimeExpectation) -> HmacRuntimeDecision | None:
-        for _attempt in range(8):
+        for attempt in range(16):
             snapshot = self._read(expectation.domain)
             if snapshot is None or not _matches(snapshot, expectation):
                 return None
             advanced = self._advance_once(snapshot, expectation)
             if advanced is None:
+                if attempt >= 3:
+                    time.sleep(min(0.001 * (2 ** min(attempt - 3, 5)), 0.02))
                 continue
             return decision_from_snapshot(advanced, expectation)
         return None
@@ -596,10 +721,57 @@ class DynamoDbHmacStateStore:
         config_digest = runtime_expectations_digest(expectations)
         if len(rotation_epochs) != 1 or len(provenances) != 1 or config_digest is None:
             return False
+        rotation_epoch = next(iter(rotation_epochs))
         provenance = next(iter(provenances))
+        restart_record = f"RESTART#{rotation_epoch}#{provenance}"
         worker_id = os.environ.get(HMAC_WORKER_ID_ENV)
         if type(worker_id) is not str or _WORKER_ID_RE.fullmatch(worker_id) is None:
             return False
+        restart_nonce = os.environ.get(HMAC_RESTART_NONCE_ENV)
+        service = os.environ.get(HMAC_SERVICE_ENV)
+        artifact_sha256 = os.environ.get(HMAC_ARTIFACT_SHA256_ENV)
+        service_identity: tuple[int, int, int] | None = None
+        restart_item: dict[str, Any] | None = None
+        if restart_nonce is not None or service is not None:
+            if (
+                type(restart_nonce) is not str
+                or _RESTART_NONCE_RE.fullmatch(restart_nonce) is None
+                or type(service) is not str
+                or _SERVICE_RE.fullmatch(service) is None
+                or type(artifact_sha256) is not str
+                or _PROVENANCE_RE.fullmatch(artifact_sha256) is None
+                or os.environ.get(HMAC_SERVICE_HEALTH_ENV) != "1"
+            ):
+                return False
+            service_identity = _service_process_identity(service)
+            if service_identity is None or not _service_health_verified(
+                service,
+                service_identity[0],
+            ):
+                return False
+            restart_response = self._client().get_item(
+                TableName=self._table_name,
+                Key={
+                    "scope": {"S": self._scope},
+                    "record": {"S": restart_record},
+                },
+                ConsistentRead=True,
+            )
+            restart_item = restart_response.get("Item") if type(restart_response) is dict else None
+            restart_now = _trusted_epoch(restart_response)
+            if (
+                type(restart_item) is not dict
+                or restart_now is None
+                or _item_string(restart_item, "stage") != "requested"
+                or _item_string(restart_item, "restart_nonce") != restart_nonce
+                or _item_string(restart_item, "provenance") != provenance
+                or _item_string(restart_item, "artifact_sha256") != artifact_sha256
+                or _item_string(restart_item, "config_digest") != config_digest
+                or ((requested_at := _item_number(restart_item, "requested_at")) is None)
+                or service_identity[2] < requested_at
+            ):
+                return False
+            checked_at = max(checked_at, restart_now)
         transaction: list[dict[str, Any]] = []
         for snapshot in snapshots:
             transaction.append(
@@ -626,7 +798,7 @@ class DynamoDbHmacStateStore:
                         "record": {"S": f"WORKER#{provenance}"},
                         "provenance": {"S": provenance},
                         "worker_id": {"S": worker_id},
-                        "rotation_epoch": {"S": next(iter(rotation_epochs))},
+                        "rotation_epoch": {"S": rotation_epoch},
                         "config_digest": {"S": config_digest},
                         "loaded_domains": {
                             "SS": sorted(expectation.domain for expectation in expectations)
@@ -637,6 +809,71 @@ class DynamoDbHmacStateStore:
                 }
             }
         )
+        if (
+            restart_nonce is not None
+            and service is not None
+            and artifact_sha256 is not None
+            and service_identity is not None
+            and restart_item is not None
+        ):
+            service_item: dict[str, Any] = {
+                "scope": {"S": self._scope},
+                "record": {"S": f"WORKER_SERVICE#{provenance}#{service}"},
+                "service": {"S": service},
+                "provenance": {"S": provenance},
+                "worker_id": {"S": worker_id},
+                "rotation_epoch": {"S": rotation_epoch},
+                "restart_nonce": {"S": restart_nonce},
+                "artifact_sha256": {"S": artifact_sha256},
+                "config_digest": {"S": config_digest},
+                "main_pid": {"N": str(service_identity[0])},
+                "process_start_ticks": {"N": str(service_identity[1])},
+                "process_started_at": {"N": str(service_identity[2])},
+                "health_verified": {"BOOL": True},
+                "checked_at": {"N": str(checked_at)},
+                "expires_at": {"N": str(checked_at + 300)},
+            }
+            if service == "connect":
+                service_item.update(
+                    {
+                        "active_port": {"N": "8788"},
+                        "port_owner_pid": {"N": str(service_identity[0])},
+                        "health_endpoint": {"S": "http://127.0.0.1:8788/healthz"},
+                    }
+                )
+            transaction.append(
+                {
+                    "ConditionCheck": {
+                        "TableName": self._table_name,
+                        "Key": {
+                            "scope": {"S": self._scope},
+                            "record": {"S": restart_record},
+                        },
+                        "ConditionExpression": (
+                            "#stage = :requested AND restart_nonce = :nonce"
+                            " AND provenance = :provenance"
+                            " AND artifact_sha256 = :artifact"
+                            " AND config_digest = :config"
+                        ),
+                        "ExpressionAttributeNames": {"#stage": "stage"},
+                        "ExpressionAttributeValues": {
+                            ":requested": {"S": "requested"},
+                            ":nonce": {"S": restart_nonce},
+                            ":provenance": {"S": provenance},
+                            ":artifact": {"S": artifact_sha256},
+                            ":config": {"S": config_digest},
+                        },
+                    }
+                }
+            )
+            transaction.append(
+                {
+                    "Put": {
+                        "TableName": self._table_name,
+                        "Item": service_item,
+                    }
+                }
+            )
         try:
             self._client().transact_write_items(TransactItems=transaction)
         except Exception as exc:
@@ -732,8 +969,13 @@ def require_runtime_startup(
 
 
 __all__ = [
+    "HMAC_ARTIFACT_SHA256_ENV",
+    "HMAC_MAIN_PID_ENV",
     "HMAC_PROVENANCE_ENV",
+    "HMAC_RESTART_NONCE_ENV",
     "HMAC_ROTATION_EPOCH_ENV",
+    "HMAC_SERVICE_ENV",
+    "HMAC_SERVICE_HEALTH_ENV",
     "HMAC_STATE_REQUIRED_ENV",
     "HMAC_STATE_SCOPE_ENV",
     "HMAC_STATE_TABLE_ENV",

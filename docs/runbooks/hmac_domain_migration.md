@@ -145,11 +145,12 @@ hard stop. Any ordinary AWS client failure emits only fixed redacted JSON and no
 Do not apply a task with an unpinned secret ARN, `AWSCURRENT`, an empty VersionId, or a generation
 identifier assembled from proposed rather than observed deployed state.
 
-Terraform may register task definitions only through its always-replaced `terraform_data` live
-gate. ECS service task-definition fields and the morning EventBridge target are intentionally
-ignored by Terraform: promotion requires the separate trusted-time check immediately before each
-AWS mutation. `apply_resilience.sh` excludes every HMAC workload and canary `:14`; it is not a
-rollout path.
+Terraform may register task definitions and mutate ECS service/EventBridge runtime targets only
+inside one complete saved plan. The always-replaced production release gate and HMAC live gate
+consume the same one-use intent under the shared apply lock; apply-time pre/post gates re-fetch the
+registered candidates and live inventories around each mutation. Direct promotion scripts are
+permanently disabled. `apply_resilience.sh` excludes every HMAC workload and canary `:14`; it is
+not a rollout path.
 
 ## Stage 2 — report-link verifier first
 
@@ -171,15 +172,18 @@ rollout path.
      --task-definition-json connect_web=/protected/path/rendered-connect-web.json
    ```
 
-4. Prebuild the connect-web image separately and record its immutable digest; the HMAC promotion
-   path performs no Vault export, S3 publish, CodeBuild, or force deployment. Use
-   `infra/deploy/deploy_connectweb_unified.sh` with `HMAC_CONNECT_PHASE=preload`,
-   `HMAC_CONNECT_IMAGE=<repository>@sha256:<digest>`, a full reviewed task template, and both
-   manifest/control files.
-   The script runs `pre-connect-preload`, `pre-register`, and then a fresh `pre-update` immediately
-   before `update-service`. After stability it CAS-advances the ledger to
-   `connect_web_preloaded`, but only after proving `pendingCount=0`, one completed deployment, and
-   every running task on the exact approved task definition. The same proof also rejects
+4. Prebuild and authorize the connect-web image separately and record its immutable digest; the
+   HMAC promotion path performs no Vault export, source upload, CodeBuild, or force deployment.
+   Create the complete plan with `plan_image_release.sh`, review the full task/service change and
+   HMAC manifest/control hashes, and set `hmac_runtime_promotion_tasks=["connect_web"]`; the saved
+   plan validator rejects a service task-definition change unless both its pre- and post-gate
+   resources are present. Apply that exact plan once with
+   `apply_image_release_plan.sh`. The apply runs full-payload `pre-register` and a fresh
+   `pre-update` immediately before the Terraform-owned service mutation. After the apply succeeds,
+   explicitly CAS-advance with `hmac_rollout_gate.py --action connect-web-preloaded` using the same
+   manifest/control. That action reaches `connect_web_preloaded` only after proving
+   `pendingCount=0`, one completed deployment, and every running task on the exact approved task
+   definition. The same proof also rejects
    draining/stopped-old service tasks and in-flight old morning-digest tasks; an empty service is
    not a successful drain proof.
 5. Verify connect-web health, current app S3 anchor/source, security headers, and recent logs.
@@ -221,24 +225,27 @@ old-key verifier. Use a short issuance/action maintenance window; do not rely on
    prebuilt rollback artifact immediately before issuing the separate restart command. The
    systemd startup check writes a second generation/T0 digest attestation. MCP cutover rejects the
    pre-restart attestation and requires this strictly newer post-restart record.
-4. Register one MCP revision containing both complete keyrings through Terraform's apply-time
-   live gate. Promote only with `infra/deploy/promote_hmac_task.sh`
-   (`HMAC_PROMOTION_TASK=mcp`). It revalidates the registered task and rollback tasks immediately
-   before `update-service`, waits for stability, proves every running MCP task uses the new task
-   definition, and CAS-advances `worker_verified -> mcp_stable_and_old_drained`. The revision
+4. Register and promote one MCP revision containing both complete keyrings through the same
+   one-use saved Terraform plan with `hmac_runtime_promotion_tasks=["mcp"]`. Its apply-time gates
+   revalidate the registered task and rollback tasks immediately before the service mutation, wait
+   for stability, and prove every running MCP task uses the new task definition. Then run
+   `hmac_rollout_gate.py --action mcp-stable-and-old-drained` to CAS-advance
+   `worker_verified -> mcp_stable_and_old_drained`. The revision
    contains the reviewed REPORT_LINK transition
    from Stage 2 and the dedicated MAIL_ACTION primary, pinned database-url previous, fixed T0,
    matching generation IDs, and `MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY=1`. Wait until the service is
    stable and every old MCP task is drained. This is the report and mail issuer cutover. The first
    mixed-role process that could mint a dedicated-key token is the irreversible point; if
    quiescence cannot be proved, the rollout is NO-GO.
-5. While the schedule remains disabled, promote morning-digest with the identical MAIL_ACTION
-   keyring using `HMAC_PROMOTION_TASK=morning_digest` and an exact full EventBridge target JSON.
-   Then deploy connect-web's final reviewed task with `HMAC_CONNECT_PHASE=final`. The final gate
-   verifies both tasks and CAS-advances
-   `mcp_stable_and_old_drained -> complete` only after both services are stable and fully drained;
-   only then restore the digest schedule. Finish every issuer update while trusted AWS time is
-   strictly less than its applicable `T0 + 900`.
+5. While the schedule remains measurably disabled, let the same saved plan transaction replace the
+   exact full morning-digest EventBridge target with the identical MAIL_ACTION keyring. The gate
+   binds RoleArn, Input, network settings, TaskCount, target ID, retry policy, rule state, and task
+   ARN, and restores the prior target on any partial failure. Select `morning_digest` and
+   `connect_web` in `hmac_runtime_promotion_tasks` and include connect-web's final reviewed task in
+   the plan. After apply, run `hmac_rollout_gate.py --action complete`; it verifies both tasks and
+   CAS-advances `mcp_stable_and_old_drained -> complete` only after both services are stable and
+   fully drained. Only then restore the digest schedule. Finish every issuer update while trusted
+   AWS time is strictly less than its applicable `T0 + 900`.
 6. Resume user traffic only after old MCP/worker processes are absent. Exercise the saved old draft
    and event tokens through their real action handlers; both must remain valid.
 7. Issue new draft and event tokens from every live issuer. Confirm version `2`, the correct `typ`,
@@ -292,11 +299,13 @@ Runtime verification rejects the legacy previous at the exclusive deadline even 
 environment entries remain. Operational removal is a separate steady-state cleanup, never another
 issuer cutover and never the old one-shot retirement action:
 
-1. Before each deadline, create a cleanup manifest whose `deployed` sections exactly describe the
+1. Create a cleanup manifest whose `deployed` sections exactly describe the
    still-live previous/T0 pairs and whose `proposed` section removes only the selected domain's
-   previous generation and T0. Render and offline-preflight the exact primary-only candidate task
-   JSON for MCP, connect-web, and morning-digest, even when one workload does not consume the
-   selected domain. Pre-register and record distinct primary-only rollback task ARNs/images.
+   previous generation and T0. Create the complete one-use Terraform saved plan with
+   `hmac_gate_mode=cleanup` and the exact `hmac_cleanup_domain`; the gate extracts the full
+   registerable MCP, connect-web, and morning-digest payloads directly from that plan, even when one
+   workload does not consume the selected domain. Pre-register and record distinct primary-only
+   rollback task ARNs/images.
    Prepare distinct reviewed candidate and rollback worker archives and their exact secret-free
    environments. Candidate/rollback task identities, images within a workload, provenances, and
    worker archive digests must not alias.
@@ -308,9 +317,7 @@ issuer cutover and never the old one-shot retirement action:
      --control /protected/path/hmac-cleanup-mail-control.json \
      --action prepare-cleanup \
      --domain mail_action \
-     --cleanup-task-definition-json mcp=/protected/path/mcp-primary-only.json \
-     --cleanup-task-definition-json connect_web=/protected/path/connect-primary-only.json \
-     --cleanup-task-definition-json morning_digest=/protected/path/morning-primary-only.json \
+     --saved-plan /protected/path/hmac-cleanup-mail.tfplan \
      --worker-env /protected/path/worker-primary-only.env \
      --worker-rollback-env /protected/path/worker-primary-only-rollback.env \
      --worker-artifact /protected/path/worker-primary-only.tar.gz \
@@ -319,13 +326,13 @@ issuer cutover and never the old one-shot retirement action:
 
    This transaction first proves the complete ledger, exact live/durable configuration, full ECS
    and scheduled-task inventory, expired deadline, all candidate/rollback artifacts, and worker
-   archive bindings. It leaves the durable previous/T0 pair present for old-process metadata
+   archive bindings and persists both the exact proposal and complete saved-plan SHA-256. It leaves
+   the durable previous/T0 pair present for old-process metadata
    compatibility, marks the previous generation retired so it cannot verify, and temporarily
    authorizes the old and new provenances. A retry or artifact drift fails closed.
-3. Promote the selected domain's affected primary-only ECS artifacts with explicit cleanup mode:
-   set Terraform `hmac_gate_mode=cleanup`; use `HMAC_PROMOTION_MODE=cleanup` for MCP and
-   morning-digest and `HMAC_CONNECT_MODE=cleanup` for connect-web. Deploy the worker with
-   `HMAC_WORKER_MODE=cleanup` and `HMAC_WORKER_ADVANCE_STAGE=0`. Every path re-fetches the
+3. Apply that same saved plan once through `apply_image_release_plan.sh`; a different plan cannot
+   consume the cleanup authorization. Set the Terraform ECS and worker modes to `cleanup`, with
+   `hmac_worker_advance_stage=false`. Every path re-fetches the
    registered artifact and checks its prepared digest. The worker path proves both
    `teamagent-bot` and `teamagent-connect` active, port 8788 listening, and a durable startup
    attestation strictly newer than the restart request. Rollback during this interval uses only

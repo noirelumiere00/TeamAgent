@@ -233,7 +233,10 @@ resource "aws_ecs_task_definition" "morning_digest" {
 
   lifecycle {
     precondition {
-      condition     = local.mail_action_hmac_transition_valid
+      condition = (
+        (var.hmac_gate_mode == "rollback" && local.hmac_live_gate_enabled.morning_digest)
+        || local.mail_action_hmac_transition_valid
+      )
       error_message = "HMAC rollout preflight failed for morning-digest; direct/targeted task-definition apply is blocked."
     }
   }
@@ -364,7 +367,7 @@ variable "morning_digest_compact" {
 }
 
 variable "morning_digest_rule_enabled" {
-  description = "朝ダイジェストの EventBridge ルールを ENABLED にするか。live は手動 DISABLED 運用のため既定 false（2026-07-11 監査: state 未指定だと provider 既定 ENABLED になり、apply のたびに手動 DISABLE が勝手に巻き戻る）。ロールアウト時はこの変数を true にして apply で点灯する（CLI enable-rule は次回 apply で戻るため使わない）。"
+  description = "朝ダイジェストの EventBridge ルール状態。HMAC promotion は実測 DISABLED を必須とするため、この source path では true を拒否する。再有効化には別途レビュー済みの rule/target transaction が必要。"
   type        = bool
   default     = false
 }
@@ -375,43 +378,27 @@ resource "aws_cloudwatch_event_rule" "morning_digest_weekday" {
   description         = "平日朝 9:30 JST の morning_digest Fargate 起動トリガ"
   schedule_expression = var.morning_digest_schedule_expression
   state               = var.morning_digest_rule_enabled ? "ENABLED" : "DISABLED"
-}
-
-resource "aws_cloudwatch_event_target" "morning_digest_run_task" {
-  count    = var.enable_morning_digest && var.mcp_image != "" ? 1 : 0
-  rule     = aws_cloudwatch_event_rule.morning_digest_weekday[0].name
-  arn      = aws_ecs_cluster.main.arn
-  role_arn = aws_iam_role.events_morning_digest_invoke[0].arn
 
   lifecycle {
-    # Promotion is performed only after the live pre-update gate and retains the disabled rule
-    # until the final stage ledger transition.
-    ignore_changes = [ecs_target[0].task_definition_arn]
-  }
-
-  ecs_target {
-    task_definition_arn = aws_ecs_task_definition.morning_digest[0].arn
-    task_count          = 1
-    launch_type         = "FARGATE"
-    platform_version    = "LATEST"
-
-    network_configuration {
-      subnets          = data.aws_subnets.default.ids
-      security_groups  = [aws_security_group.morning_digest[0].id]
-      assign_public_ip = true
+    precondition {
+      condition     = !var.morning_digest_rule_enabled
+      error_message = "The HMAC EventBridge promotion transaction requires the morning-digest rule to remain measurably DISABLED."
     }
   }
+}
 
-  retry_policy {
-    maximum_event_age_in_seconds = 3600
-    maximum_retry_attempts       = 1
+removed {
+  from = aws_cloudwatch_event_target.morning_digest_run_task
+
+  lifecycle {
+    destroy = false
   }
 }
 
 # ---------- Outputs ----------
 output "morning_digest_task_definition_arn" {
   description = "morning_digest Scheduled Task の TaskDefinition ARN（手動 run-task 検証用）"
-  value       = var.enable_morning_digest && var.mcp_image != "" ? aws_ecs_task_definition.morning_digest[0].arn : ""
+  value       = var.enable_morning_digest && var.mcp_image != "" ? local.hmac_promoted_task_definition_arns.morning_digest : ""
 }
 
 output "morning_digest_log_group" {

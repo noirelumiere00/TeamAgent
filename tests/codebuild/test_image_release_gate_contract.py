@@ -277,9 +277,9 @@ def test_every_discovered_ecs_task_definition_depends_on_release_gate() -> None:
             assert "container_definitions" in block, address
             dependencies = re.search(r"depends_on\s*=\s*\[(.*?)\]", block, re.DOTALL)
             assert dependencies, f"{address} has no explicit release-gate dependency"
-            assert (
-                "terraform_data.production_image_release_gate" in dependencies.group(1)
-            ), f"{address} can bypass the production image release gate"
+            assert "terraform_data.production_image_release_gate" in dependencies.group(1), (
+                f"{address} can bypass the production image release gate"
+            )
             discovered[address] = block
 
     assert set(discovered) == {

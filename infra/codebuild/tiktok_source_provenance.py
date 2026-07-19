@@ -134,9 +134,7 @@ def create_manifest(repo_root: Path, commit: str, contract_path: Path) -> dict[s
     if _git(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip() != commit:
         raise ProvenanceError("TikTok checkout HEAD does not match the requested commit")
     if (
-        _git(repo, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}")
-        .decode()
-        .strip()
+        _git(repo, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}").decode().strip()
         != commit
     ):
         raise ProvenanceError("TikTok commit is not the fetched origin/main head")

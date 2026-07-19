@@ -127,13 +127,44 @@ variable "hmac_gate_python" {
 }
 
 variable "hmac_gate_mode" {
-  description = "Apply-time HMAC registration gate mode: candidate during issuer cutover, cleanup only after prepare-cleanup CAS."
+  description = "Apply-time HMAC gate mode: candidate during issuer cutover, cleanup after prepare-cleanup CAS, or exact approved rollback."
   type        = string
   default     = "candidate"
 
   validation {
-    condition     = contains(["candidate", "cleanup"], var.hmac_gate_mode)
-    error_message = "hmac_gate_mode must be candidate or cleanup."
+    condition     = contains(["candidate", "cleanup", "rollback"], var.hmac_gate_mode)
+    error_message = "hmac_gate_mode must be candidate, cleanup, or rollback."
+  }
+}
+
+variable "hmac_cleanup_domain" {
+  description = "Exact domain being removed in cleanup mode; blank outside cleanup. The other expired domain may remain unchanged only after the live gate proves durable retirement."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = (
+      (contains(["candidate", "rollback"], var.hmac_gate_mode) && var.hmac_cleanup_domain == "")
+      || (
+        var.hmac_gate_mode == "cleanup"
+        && contains(["mail_action", "report_link"], var.hmac_cleanup_domain)
+      )
+    )
+    error_message = "hmac_cleanup_domain must be blank outside cleanup and exactly mail_action or report_link in cleanup mode."
+  }
+}
+
+variable "hmac_runtime_promotion_tasks" {
+  description = "Exact ECS/EventBridge workloads this saved plan may mutate. Staged rollouts select only the task valid at the current durable stage."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for task in var.hmac_runtime_promotion_tasks :
+      contains(["mcp", "connect_web", "morning_digest"], task)
+    ])
+    error_message = "hmac_runtime_promotion_tasks accepts only mcp, connect_web, and morning_digest."
   }
 }
 
@@ -292,8 +323,13 @@ data "aws_iam_policy_document" "hmac_rollout_gate" {
   }
 
   statement {
-    sid       = "ReadScheduledTaskMetadata"
-    actions   = ["events:ListTargetsByRule"]
+    sid = "InspectAndTransactionallyRestoreScheduledTarget"
+    actions = [
+      "events:DescribeRule",
+      "events:DisableRule",
+      "events:ListTargetsByRule",
+      "events:PutTargets",
+    ]
     resources = ["arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/${var.project_name}-${var.environment}-*"]
   }
 
@@ -674,6 +710,20 @@ locals {
         < local.mail_action_hmac_deployed_t0 + 900 + 86400
       )
       || (
+        var.hmac_gate_mode == "cleanup"
+        && var.hmac_cleanup_domain == "report_link"
+        && local.mail_action_hmac_deployed_active
+        && local.mail_action_hmac_rotation_active
+        && local.mail_action_hmac_primary_generation
+        == var.mail_action_hmac_deployed_primary_generation
+        && local.mail_action_hmac_previous_generation
+        == var.mail_action_hmac_deployed_previous_generation
+        && var.mail_action_hmac_rotation_started_at
+        == var.mail_action_hmac_deployed_rotation_started_at
+        && local.hmac_preflight_epoch
+        >= local.mail_action_hmac_deployed_t0 + 900 + 86400
+      )
+      || (
         local.mail_action_hmac_deployed_active
         && !local.mail_action_hmac_rotation_active
         && local.mail_action_hmac_primary_generation
@@ -728,6 +778,20 @@ locals {
         <= local.hmac_preflight_epoch + 300
         && local.hmac_preflight_epoch
         < local.report_link_hmac_deployed_t0 + 900 + 604800
+      )
+      || (
+        var.hmac_gate_mode == "cleanup"
+        && var.hmac_cleanup_domain == "mail_action"
+        && local.report_link_hmac_deployed_active
+        && local.report_link_hmac_rotation_active
+        && local.report_link_hmac_primary_generation
+        == var.report_link_hmac_deployed_primary_generation
+        && local.report_link_hmac_previous_generation
+        == var.report_link_hmac_deployed_previous_generation
+        && var.report_link_hmac_rotation_started_at
+        == var.report_link_hmac_deployed_rotation_started_at
+        && local.hmac_preflight_epoch
+        >= local.report_link_hmac_deployed_t0 + 900 + 604800
       )
       || (
         local.report_link_hmac_deployed_active
@@ -919,68 +983,122 @@ locals {
     ] : [],
   )
 
-  hmac_live_gate_candidates = {
-    mcp = jsonencode({
-      containerDefinitions = [{
-        image = var.mcp_image
-        environment = concat(
-          local.mail_action_hmac_environment,
-          local.report_link_hmac_environment,
-          local.mcp_hmac_runtime_environment,
-        )
-        secrets = concat(
-          local.mail_action_hmac_secrets,
-          local.report_link_hmac_secrets,
-        )
-      }]
-    })
-    connect_web = jsonencode({
-      containerDefinitions = [{
-        image = var.mcp_image
-        environment = concat(
-          local.report_link_hmac_environment,
-          local.connect_web_hmac_runtime_environment,
-        )
-        secrets = local.report_link_hmac_secrets
-      }]
-    })
-    morning_digest = jsonencode({
-      containerDefinitions = [{
-        image       = var.mcp_image
-        environment = concat(local.mail_action_hmac_environment, local.morning_digest_hmac_runtime_environment)
-        secrets     = local.mail_action_hmac_secrets
-      }]
-    })
+  hmac_live_gate_task_addresses = {
+    mcp            = "aws_ecs_task_definition.mcp"
+    connect_web    = "aws_ecs_task_definition.connect_web[0]"
+    morning_digest = "aws_ecs_task_definition.morning_digest[0]"
   }
+  hmac_rollout_control = (
+    var.hmac_rollout_control_path != ""
+    && fileexists(var.hmac_rollout_control_path)
+    ? jsondecode(file(var.hmac_rollout_control_path))
+    : {}
+  )
+  hmac_rollback_task_definition_arns = {
+    mcp = try(
+      local.hmac_rollout_control.services.mcp.rollback_task_definition,
+      "",
+    )
+    connect_web = try(
+      local.hmac_rollout_control.services.connect_web.rollback_task_definition,
+      "",
+    )
+    morning_digest = try(
+      local.hmac_rollout_control.morning_digest.rollback_task_definition,
+      "",
+    )
+  }
+  hmac_rollback_control_ready = alltrue([
+    for arn in values(local.hmac_rollback_task_definition_arns) :
+    can(regex(
+      "^arn:aws:ecs:${var.aws_region}:${local.account_id}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$",
+      arn,
+    ))
+  ])
+  hmac_rollback_gate_ready = (
+    var.hmac_gate_mode == "rollback"
+    && local.hmac_rollback_control_ready
+    && var.hmac_rotation_epoch != ""
+    && local.hmac_rotation_epoch_valid
+    && var.hmac_live_manifest_path != ""
+    && fileexists(var.hmac_live_manifest_path)
+    && var.hmac_rollout_control_path != ""
+    && fileexists(var.hmac_rollout_control_path)
+  )
   hmac_live_gate_enabled = {
-    mcp            = local.mail_action_hmac_config_ready && local.report_link_hmac_config_ready
-    connect_web    = local.report_link_hmac_config_ready
-    morning_digest = local.mail_action_hmac_config_ready
+    mcp = (
+      var.hmac_gate_mode == "rollback"
+      ? local.hmac_rollback_gate_ready
+      : local.mail_action_hmac_config_ready && local.report_link_hmac_config_ready
+    )
+    connect_web = (
+      var.hmac_gate_mode == "rollback"
+      ? local.hmac_rollback_gate_ready
+      : local.report_link_hmac_config_ready
+    )
+    morning_digest = (
+      var.hmac_gate_mode == "rollback"
+      ? local.hmac_rollback_gate_ready
+      : local.mail_action_hmac_config_ready
+    )
+  }
+  hmac_release_intent_bindings = {
+    rotation_epoch         = var.hmac_rotation_epoch
+    gate_mode              = var.hmac_gate_mode
+    cleanup_domain         = var.hmac_cleanup_domain
+    manifest_sha256        = var.hmac_live_manifest_path != "" ? filesha256(var.hmac_live_manifest_path) : ""
+    rollout_control_sha256 = var.hmac_rollout_control_path != "" ? filesha256(var.hmac_rollout_control_path) : ""
+    worker_enabled         = var.enable_hmac_worker_deploy
+    worker_mode            = var.hmac_worker_deploy_mode
+    worker_artifacts = (
+      var.enable_hmac_worker_deploy
+      ? local.hmac_worker_deploy_hashes
+      : {}
+    )
+    worker_provenance_key_arn = (
+      var.enable_hmac_worker_deploy
+      ? aws_kms_key.mcp_source_publisher_signing.arn
+      : ""
+    )
   }
 }
 
 resource "terraform_data" "hmac_live_task_gate" {
-  for_each = local.hmac_live_gate_candidates
+  for_each = local.hmac_live_gate_task_addresses
+
+  input = {
+    task_address           = each.value
+    rotation_epoch         = var.hmac_rotation_epoch
+    cleanup_domain         = var.hmac_cleanup_domain
+    manifest_sha256        = var.hmac_live_manifest_path != "" ? filesha256(var.hmac_live_manifest_path) : ""
+    rollout_control_sha256 = var.hmac_rollout_control_path != "" ? filesha256(var.hmac_rollout_control_path) : ""
+  }
 
   triggers_replace = [
     local.hmac_live_gate_enabled[each.key] ? timestamp() : "disabled",
-    sha256(each.value),
+    each.value,
     var.hmac_rotation_epoch,
+    var.hmac_cleanup_domain,
+    var.hmac_live_manifest_path != "" ? filesha256(var.hmac_live_manifest_path) : "",
+    var.hmac_rollout_control_path != "" ? filesha256(var.hmac_rollout_control_path) : "",
   ]
+
+  depends_on = [terraform_data.production_image_release_gate]
 
   provisioner "local-exec" {
     command     = "\"$HMAC_GATE_PYTHON\" \"$HMAC_GATE_SCRIPT\""
     interpreter = ["/usr/bin/env", "bash", "-c"]
     working_dir = path.root
     environment = {
-      HMAC_GATE_ENABLED        = local.hmac_live_gate_enabled[each.key] ? "true" : "false"
-      HMAC_GATE_PYTHON         = var.hmac_gate_python
-      HMAC_GATE_SCRIPT         = abspath("${path.module}/../../scripts/terraform_hmac_gate.py")
-      HMAC_GATE_TASK           = each.key
-      HMAC_GATE_MODE           = var.hmac_gate_mode
-      HMAC_GATE_CANDIDATE_JSON = each.value
-      HMAC_PREFLIGHT_MANIFEST  = var.hmac_live_manifest_path
-      HMAC_ROLLOUT_CONTROL     = var.hmac_rollout_control_path
+      HMAC_GATE_ENABLED       = local.hmac_live_gate_enabled[each.key] ? "true" : "false"
+      HMAC_GATE_PYTHON        = var.hmac_gate_python
+      HMAC_GATE_SCRIPT        = abspath("${path.module}/../../scripts/terraform_hmac_gate.py")
+      HMAC_GATE_TASK          = each.key
+      HMAC_GATE_MODE          = var.hmac_gate_mode
+      HMAC_CLEANUP_DOMAIN     = var.hmac_cleanup_domain
+      HMAC_GATE_TASK_ADDRESS  = each.value
+      HMAC_PREFLIGHT_MANIFEST = var.hmac_live_manifest_path
+      HMAC_ROLLOUT_CONTROL    = var.hmac_rollout_control_path
     }
   }
 }

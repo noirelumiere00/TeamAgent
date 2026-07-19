@@ -12,14 +12,17 @@ from typing import Any
 
 import pytest
 
+import teamagent.hmac_durable_state as durable_state_module
 from teamagent.hmac_durable_state import (
     DynamoDbHmacStateStore,
     HmacDurableSnapshot,
     HmacRuntimeExpectation,
+    _service_process_identity,
     _set_state_store_for_testing,
     decision_from_snapshot,
     durable_issuance_guard,
     evaluate_runtime_state,
+    runtime_expectations_digest,
 )
 from teamagent.hmac_keyring import (
     HMAC_PURPOSE_MAIL_DRAFT,
@@ -67,6 +70,7 @@ def _snapshot(
     return HmacDurableSnapshot(
         domain="mail_action",
         revision=7,
+        clock_revision=3,
         primary_generation=_PRIMARY,
         previous_generation=_PREVIOUS,
         rotation_started_at=_T0,
@@ -90,6 +94,7 @@ def _ddb_item(snapshot: HmacDurableSnapshot) -> dict[str, dict[str, object]]:
         "record": {"S": "DOMAIN#mail_action"},
         "domain": {"S": snapshot.domain},
         "revision": {"N": str(snapshot.revision)},
+        "clock_revision": {"N": str(snapshot.clock_revision)},
         "primary_generation": {"S": snapshot.primary_generation},
         "rotation_epoch": {"S": snapshot.rotation_epoch},
         "high_water": {"N": str(snapshot.high_water)},
@@ -130,34 +135,72 @@ class _FakeDynamoDb:
         self.first_read_captured = threading.Event()
         self.allow_first_read = threading.Event()
         self.read_count = 0
+        self.extra_items: dict[str, dict[str, dict[str, object]]] = {}
+        self.transactions: list[list[dict[str, object]]] = []
 
     def get_item(self, **kwargs: object) -> dict[str, object]:
         assert kwargs["ConsistentRead"] is True
+        key = kwargs["Key"]
+        assert isinstance(key, dict)
+        record = str(key["record"]["S"])
         with self.lock:
             self.read_count += 1
             read_number = self.read_count
-            item = {key: dict(value) for key, value in self.item.items()}
+            source = self.item if record == "DOMAIN#mail_action" else self.extra_items.get(record)
+            item = (
+                {name: dict(value) for name, value in source.items()}
+                if source is not None
+                else None
+            )
             trusted_now = self.now
         if self.pause_first_read and read_number == 1:
             self.first_read_captured.set()
             assert self.allow_first_read.wait(timeout=5)
         return {
-            "Item": item,
+            **({"Item": item} if item is not None else {}),
             "ResponseMetadata": {"HTTPHeaders": {"date": formatdate(trusted_now, usegmt=True)}},
         }
 
     def update_item(self, **kwargs: object) -> dict[str, object]:
         values = kwargs["ExpressionAttributeValues"]
         assert isinstance(values, dict)
+        condition = str(kwargs["ConditionExpression"])
+        expected_condition = (
+            "revision = :config_revision"
+            " AND (attribute_not_exists(clock_revision)"
+            " OR clock_revision = :clock_revision)"
+            " AND high_water = :old_high_water"
+            " AND previous_retired = :old_retired"
+            " AND primary_generation = :primary"
+            " AND rotation_epoch = :epoch"
+        )
+        expected_condition += (
+            " AND previous_generation = :previous"
+            if "previous_generation" in self.item
+            else " AND attribute_not_exists(previous_generation)"
+        )
+        assert condition == expected_condition
         with self.lock:
             revision = int(str(self.item["revision"]["N"]))
+            clock_revision = int(str(self.item.get("clock_revision", {"N": "0"})["N"]))
             high_water = int(str(self.item["high_water"]["N"]))
-            if revision != int(str(values[":revision"]["N"])) or high_water != int(
-                str(values[":old_high_water"]["N"])
-            ):
+            condition_matches = (
+                revision == int(str(values[":config_revision"]["N"]))
+                and clock_revision == int(str(values[":clock_revision"]["N"]))
+                and high_water == int(str(values[":old_high_water"]["N"]))
+                and self.item["previous_retired"] == values[":old_retired"]
+                and self.item["primary_generation"] == values[":primary"]
+                and self.item["rotation_epoch"] == values[":epoch"]
+                and (
+                    self.item.get("previous_generation") == values[":previous"]
+                    if ":previous" in values
+                    else "previous_generation" not in self.item
+                )
+            )
+            if not condition_matches:
                 raise _ConditionalFailureError()
             self.item["high_water"] = {"N": str(values[":next"]["N"])}
-            self.item["revision"] = {"N": str(revision + 1)}
+            self.item["clock_revision"] = {"N": str(clock_revision + 1)}
             retired = bool(values[":retired"]["BOOL"])
             self.item["previous_retired"] = {"BOOL": retired}
             if ":retired_generation" in values:
@@ -165,7 +208,9 @@ class _FakeDynamoDb:
         return {"ResponseMetadata": {"HTTPHeaders": {"date": formatdate(self.now, usegmt=True)}}}
 
     def transact_write_items(self, **kwargs: object) -> dict[str, object]:
-        assert kwargs["TransactItems"]
+        items = kwargs["TransactItems"]
+        assert isinstance(items, list) and items
+        self.transactions.append(items)
         return {"ResponseMetadata": {"HTTPHeaders": {"date": formatdate(self.now, usegmt=True)}}}
 
 
@@ -270,6 +315,36 @@ def test_cleanup_overlap_accepts_old_and_primary_only_metadata_but_never_expired
     assert decision_from_snapshot(finalized, primary_only) is not None
 
 
+def test_cleanup_primary_only_runtime_cas_binds_durable_previous_pair() -> None:
+    new_provenance = "c" * 64
+    snapshot = replace(
+        _snapshot(now=_DEADLINE, previous_retired=True),
+        stage="complete",
+        issuer_provenances=frozenset({_PROVENANCE, new_provenance}),
+        cleanup_stage="authorized",
+    )
+    primary_only = replace(
+        _expectation(provenance=new_provenance),
+        previous_generation=None,
+        rotation_started_at=None,
+        deadline=None,
+    )
+    fake = _FakeDynamoDb(snapshot)
+    store = DynamoDbHmacStateStore(
+        table_name="teamagent-dev-hmac-state",
+        scope="teamagent/dev",
+        region="ap-northeast-1",
+        client=fake,
+    )
+
+    decision = store.evaluate(primary_only)
+
+    assert decision is not None and decision.issuance_allowed
+    assert not decision.previous_eligible
+    assert fake.item["previous_generation"] == {"S": _PREVIOUS}
+    assert fake.item["previous_retired"] == {"BOOL": True}
+
+
 def test_deadline_interleaving_cannot_reenable_previous() -> None:
     fake = _FakeDynamoDb(_snapshot(now=_DEADLINE - 1))
     fake.pause_first_read = True
@@ -300,6 +375,137 @@ def test_deadline_interleaving_cannot_reenable_previous() -> None:
     assert fake.item["previous_retired"] == {"BOOL": True}
 
 
+def test_hot_runtime_decisions_use_clock_revision_without_config_cas_starvation() -> None:
+    fake = _FakeDynamoDb(_snapshot(now=_T0 + 100))
+    store = DynamoDbHmacStateStore(
+        table_name="teamagent-dev-hmac-state",
+        scope="teamagent/dev",
+        region="ap-northeast-1",
+        client=fake,
+    )
+    barrier = threading.Barrier(8)
+    decisions: list[bool] = []
+    decision_lock = threading.Lock()
+
+    def evaluate() -> None:
+        barrier.wait(timeout=5)
+        decision = store.evaluate(_expectation())
+        with decision_lock:
+            decisions.append(bool(decision and decision.issuance_allowed))
+
+    threads = [threading.Thread(target=evaluate) for _index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert decisions == [True] * 8
+    assert fake.item["revision"] == {"N": "7"}
+    assert fake.item["clock_revision"] == {"N": "11"}
+
+
+def test_service_process_identity_binds_main_pid_start_and_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcPath:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def read_text(self, *, encoding: str) -> str:
+            assert encoding == "utf-8"
+            if self.value == "/proc/321/stat":
+                return "321 (python) " + " ".join(["S", *(["0"] * 18), "5000"])
+            if self.value == "/proc/stat":
+                return f"cpu 1 2 3\nbtime {_T0}\n"
+            raise OSError
+
+        def read_bytes(self) -> bytes:
+            if self.value == "/proc/321/cmdline":
+                return b"python\0-m\0teamagent.connect_web\0"
+            raise OSError
+
+    monkeypatch.setenv("TEAMAGENT_HMAC_MAIN_PID", "321")
+    monkeypatch.setattr(durable_state_module, "Path", FakeProcPath)
+    monkeypatch.setattr(durable_state_module.os, "sysconf", lambda _name: 100)
+
+    assert _service_process_identity("connect") == (321, 5000, _T0 + 50)
+    assert _service_process_identity("bot") is None
+
+
+def test_restart_attestation_requires_exact_nonce_and_post_request_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expectation = _expectation()
+    fake = _FakeDynamoDb(_snapshot(now=_T0 + 100))
+    config_digest = runtime_expectations_digest((expectation,))
+    assert config_digest is not None
+    nonce = "f" * 64
+    artifact = "c" * 64
+    fake.extra_items[f"RESTART#{expectation.rotation_epoch}#{expectation.provenance}"] = {
+        "scope": {"S": "teamagent/dev"},
+        "record": {"S": f"RESTART#{expectation.rotation_epoch}#{expectation.provenance}"},
+        "stage": {"S": "requested"},
+        "restart_nonce": {"S": nonce},
+        "provenance": {"S": expectation.provenance},
+        "artifact_sha256": {"S": artifact},
+        "config_digest": {"S": config_digest},
+        "requested_at": {"N": str(_T0 + 90)},
+    }
+    monkeypatch.setenv("TEAMAGENT_HMAC_WORKER_ID", "i-0123456789abcdef0")
+    monkeypatch.setenv("TEAMAGENT_HMAC_RESTART_NONCE", nonce)
+    monkeypatch.setenv("TEAMAGENT_HMAC_SERVICE", "connect")
+    monkeypatch.setenv("TEAMAGENT_HMAC_ARTIFACT_SHA256", artifact)
+    monkeypatch.setenv("TEAMAGENT_HMAC_SERVICE_HEALTH", "1")
+    monkeypatch.setattr(
+        durable_state_module,
+        "_service_process_identity",
+        lambda _service: (321, 5000, _T0 + 91),
+    )
+    monkeypatch.setattr(
+        durable_state_module,
+        "_service_health_verified",
+        lambda service, pid: service == "connect" and pid == 321,
+    )
+    store = DynamoDbHmacStateStore(
+        table_name="teamagent-dev-hmac-state",
+        scope="teamagent/dev",
+        region="ap-northeast-1",
+        client=fake,
+    )
+
+    assert store.attest_worker((expectation,))
+    service_record = fake.transactions[-1][-1]["Put"]["Item"]  # type: ignore[index]
+    assert service_record["restart_nonce"] == {"S": nonce}
+    assert service_record["main_pid"] == {"N": "321"}
+    assert service_record["process_started_at"] == {"N": str(_T0 + 91)}
+    assert service_record["health_verified"] == {"BOOL": True}
+    assert service_record["active_port"] == {"N": "8788"}
+    assert service_record["port_owner_pid"] == {"N": "321"}
+    assert service_record["health_endpoint"] == {"S": "http://127.0.0.1:8788/healthz"}
+
+    monkeypatch.setattr(
+        durable_state_module,
+        "_service_health_verified",
+        lambda _service, _pid: False,
+    )
+    assert not store.attest_worker((expectation,))
+    monkeypatch.setattr(
+        durable_state_module,
+        "_service_health_verified",
+        lambda service, pid: service == "connect" and pid == 321,
+    )
+    monkeypatch.setenv("TEAMAGENT_HMAC_RESTART_NONCE", "e" * 64)
+    assert not store.attest_worker((expectation,))
+    monkeypatch.setenv("TEAMAGENT_HMAC_RESTART_NONCE", nonce)
+    monkeypatch.setattr(
+        durable_state_module,
+        "_service_process_identity",
+        lambda _service: (321, 5000, _T0 + 89),
+    )
+    assert not store.attest_worker((expectation,))
+
+
 def test_stale_generation_and_provenance_replay_fail_closed() -> None:
     current = _snapshot(now=_T0 + 100)
     stale_generation = replace(_expectation(), primary_generation=f"{_PRIMARY}-stale")
@@ -323,11 +529,19 @@ def test_primary_only_runtime_succeeds_after_durable_retirement_cleanup() -> Non
         retired_generations=frozenset({_PREVIOUS}),
     )
 
-    decision = decision_from_snapshot(snapshot, expectation)
+    fake = _FakeDynamoDb(snapshot)
+    store = DynamoDbHmacStateStore(
+        table_name="teamagent-dev-hmac-state",
+        scope="teamagent/dev",
+        region="ap-northeast-1",
+        client=fake,
+    )
+    decision = store.evaluate(expectation)
 
     assert decision is not None
     assert not decision.previous_eligible
     assert decision.issuance_allowed
+    assert "previous_generation" not in fake.item
 
 
 def test_legacy_worker_generation_is_durable_and_retires_with_previous() -> None:

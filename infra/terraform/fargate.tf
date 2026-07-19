@@ -381,8 +381,11 @@ resource "aws_ecs_task_definition" "mcp" {
   lifecycle {
     precondition {
       condition = (
-        local.mail_action_hmac_transition_valid
-        && local.report_link_hmac_transition_valid
+        (var.hmac_gate_mode == "rollback" && local.hmac_live_gate_enabled.mcp)
+        || (
+          local.mail_action_hmac_transition_valid
+          && local.report_link_hmac_transition_valid
+        )
       )
       error_message = "HMAC rollout preflight failed for MCP; direct/targeted task-definition apply is blocked."
     }
@@ -666,14 +669,20 @@ resource "aws_ecs_service" "mcp" {
   count           = var.mcp_image == "" ? 0 : 1
   name            = "${var.project_name}-${var.environment}-mcp"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.mcp.arn
+  task_definition = local.hmac_promoted_task_definition_arns.mcp
   desired_count   = 1
   launch_type     = "FARGATE"
 
+  depends_on = [terraform_data.hmac_mcp_pre_update]
+
   lifecycle {
-    # HMAC service promotion requires a second trusted-time/live-state gate immediately before
-    # update-service. Terraform may register the gated task, but promotion is script-controlled.
-    ignore_changes = [task_definition]
+    precondition {
+      condition = (
+        var.hmac_gate_mode != "rollback"
+        || local.hmac_live_gate_enabled.mcp
+      )
+      error_message = "Exact rollback control, manifest, and live promotion gate are required before changing the MCP service."
+    }
   }
 
   network_configuration {

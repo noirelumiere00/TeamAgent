@@ -238,6 +238,53 @@ def test_execution_roles_have_only_the_hmac_domains_their_tasks_need() -> None:
     assert "dynamodb:TransactWriteItems" in worker_policy
 
 
+def test_full_saved_plan_owns_candidate_rollback_worker_and_event_mutations() -> None:
+    hmac_tf = (TF_ROOT / "hmac_keyrings.tf").read_text(encoding="utf-8")
+    promotion = (TF_ROOT / "hmac_runtime_promotion.tf").read_text(encoding="utf-8")
+    worker = (TF_ROOT / "hmac_worker_deploy.tf").read_text(encoding="utf-8")
+    image_gate = (TF_ROOT / "image_release_gate.tf").read_text(encoding="utf-8")
+    fargate = (TF_ROOT / "fargate.tf").read_text(encoding="utf-8")
+    connect = (TF_ROOT / "connect_web.tf").read_text(encoding="utf-8")
+    morning = (TF_ROOT / "morning_digest_schedule.tf").read_text(encoding="utf-8")
+
+    assert 'contains(["candidate", "cleanup", "rollback"], var.hmac_gate_mode)' in hmac_tf
+    assert "hmac_rollback_gate_ready" in hmac_tf
+    assert "hmac_rollback_task_definition_arns" in hmac_tf
+    assert "hmac_release_intent_bindings" in hmac_tf
+    assert "hmac_runtime_promotion_tasks" in hmac_tf
+    assert "worker_provenance_key_arn" in hmac_tf
+    assert "hmac_release_bindings" in image_gate
+    assert "local.hmac_promoted_task_definition_arns.mcp" in fargate
+    assert "local.hmac_promoted_task_definition_arns.connect_web" in connect
+
+    assert "TEAMAGENT_HMAC_PROMOTION_FROM_TERRAFORM" in promotion
+    assert 'HMAC_GATE_ACTION         = "event-transaction"' in promotion
+    assert "Input   = jsonencode({})" in promotion
+    assert "RetryPolicy" in promotion
+    assert "NetworkConfiguration" in promotion
+    assert "terraform_data.production_image_release_gate" in promotion
+    assert "aws_cloudwatch_event_rule.morning_digest_weekday" in promotion
+    assert 'contains(var.hmac_runtime_promotion_tasks, "mcp")' in promotion
+    assert 'contains(var.hmac_runtime_promotion_tasks, "connect_web")' in promotion
+    assert 'contains(var.hmac_runtime_promotion_tasks, "morning_digest")' in promotion
+
+    assert "removed {\n  from = aws_cloudwatch_event_target.morning_digest_run_task" in morning
+    assert "destroy = false" in morning
+    assert 'resource "aws_cloudwatch_event_target" "morning_digest_run_task"' not in morning
+    assert "morning_digest_rule_enabled" in morning
+    assert "condition     = !var.morning_digest_rule_enabled" in morning
+
+    assert "TEAMAGENT_HMAC_DEPLOY_FROM_TERRAFORM" in worker
+    assert "HMAC_WORKER_EXPECTED_HASHES" in worker
+    assert "HMAC_CLEANUP_DOMAIN" in worker
+    assert "var.hmac_worker_deploy_mode == var.hmac_gate_mode" in worker
+    assert "candidate_artifact" in worker
+    assert "rollback_artifact" in worker
+    assert "aws_kms_key.mcp_source_publisher_signing.arn" in worker
+    assert "terraform_data.production_image_release_gate" in worker
+    assert "terraform_data.hmac_live_task_gate" in worker
+
+
 def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None:
     worker = (TF_ROOT / "worker.tf").read_text(encoding="utf-8")
     loader = (ROOT / "scripts" / "load_secrets.sh").read_text(encoding="utf-8")
@@ -246,6 +293,9 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     )
     resilience = (TF_ROOT / "apply_resilience.sh").read_text(encoding="utf-8")
     worker_deploy = (ROOT / "scripts" / "deploy_to_ec2.sh").read_text(encoding="utf-8")
+    atomic_switch = (ROOT / "scripts" / "worker_atomic_release_switch.sh").read_text(
+        encoding="utf-8"
+    )
     promote = (ROOT / "infra" / "deploy" / "promote_hmac_task.sh").read_text(encoding="utf-8")
     preflight = (ROOT / "scripts" / "preflight_hmac_rotation.py").read_text(encoding="utf-8")
     live_gate = (ROOT / "scripts" / "hmac_rollout_gate.py").read_text(encoding="utf-8")
@@ -287,29 +337,40 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert "plan_image_release.sh" in resilience
     assert "apply_image_release_plan.sh" in resilience
     assert "exit 64" in resilience
-    assert worker_deploy.index("HMAC_PREFLIGHT_MANIFEST") < worker_deploy.index("aws s3 cp")
-    assert worker_deploy.index("--worker-env") < worker_deploy.index("aws s3 cp")
-    assert worker_deploy.count("source /opt/teamagent/hmac.env") >= 2
+    assert worker_deploy.index("HMAC_PREFLIGHT_MANIFEST") < worker_deploy.index(
+        "aws s3api put-object"
+    )
+    assert worker_deploy.index("--worker-env") < worker_deploy.index("aws s3api put-object")
+    assert worker_deploy.count("source /opt/teamagent/current/hmac.env") >= 2
     assert "source scripts/load_secrets.sh MAIL_ACTION,REPORT_LINK" in worker
     assert "source scripts/load_secrets.sh REPORT_LINK" in worker_deploy
     assert "Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS" not in worker
     assert "Environment=TEAMAGENT_HMAC_REQUIRED_DOMAINS" not in worker_deploy
-    assert worker_deploy.index("--action pre-worker-upload") < worker_deploy.index("aws s3 cp")
+    assert worker_deploy.index("--action pre-worker-upload") < worker_deploy.index(
+        "aws s3api put-object"
+    )
+    assert worker_deploy.index("verify-worker-bindings") < worker_deploy.index(
+        "aws s3api put-object"
+    )
     assert worker_deploy.index("--action pre-restart") < worker_deploy.index(
         'RESTART_CID="$(aws ssm send-command'
     )
     assert "HMAC_WORKER_MODE" in worker_deploy
     assert "HMAC_WORKER_ROLLBACK_ENV" in worker_deploy
-    rollback_branch = worker_deploy[
-        worker_deploy.index('if [[ "$HMAC_WORKER_MODE" == "rollback" ]]') : worker_deploy.index(
-            'echo "   size:'
-        )
-    ]
-    assert 'cp "$HMAC_WORKER_ROLLBACK_ARTIFACT"' in rollback_branch
-    assert "git archive" in rollback_branch
-    assert rollback_branch.index('cp "$HMAC_WORKER_ROLLBACK_ARTIFACT"') < rollback_branch.index(
-        "git archive"
-    )
+    assert 'SELECTED_WORKER_ARTIFACT="$HMAC_WORKER_ROLLBACK_ARTIFACT"' in worker_deploy
+    assert 'cp "$SELECTED_WORKER_ARTIFACT"' in worker_deploy
+    assert "git archive" not in worker_deploy
+    assert "verify_worker_bundle_provenance.py" in worker_deploy
+    assert "aws s3api put-object" in worker_deploy
+    assert "--version-id" in worker_deploy
+    assert "releases/$RELEASE_DIGEST" in worker_deploy
+    assert "worker_atomic_release_switch.sh" in worker_deploy
+    assert 'mv -Tf "$INSTALL_ROOT/.current-new-$$" "$CURRENT_LINK"' in atomic_switch
+    assert 'mv -Tf "$INSTALL_ROOT/.current-rollback-$$" "$CURRENT_LINK"' in atomic_switch
+    assert "restore_transaction" in atomic_switch
+    assert "release-transactions" in atomic_switch
+    assert "snapshot_units" in atomic_switch
+    assert "restore_units" in atomic_switch
     assert "StandardOutputContent" not in worker_deploy
     assert "StandardErrorContent" not in worker_deploy
     assert "list_secret_version_ids" in live_gate
@@ -334,17 +395,18 @@ def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None
     assert worker_deploy.index("--action post-restart") > worker_deploy.index(
         'RESTART_CID="$(aws ssm send-command'
     )
-    assert "systemctl is-active --quiet teamagent-bot" in worker_deploy
-    assert "systemctl is-active --quiet teamagent-connect" in worker_deploy
-    assert "/:8788$/" in worker_deploy
+    assert "systemctl is-active --quiet teamagent-bot" in atomic_switch
+    assert "systemctl is-active --quiet teamagent-connect" in atomic_switch
+    assert 'grep -F "pid=$CONNECT_MAIN_PID,"' in atomic_switch
+    assert "curl -fsS http://127.0.0.1:8788/healthz" in atomic_switch
     assert "fresh_attestation=true" in worker_deploy
-    assert promote.index("--action pre-update") < promote.index("aws ecs update-service")
-    assert promote.index("aws ecs wait services-stable") < promote.index(
-        "--action mcp-stable-and-old-drained"
-    )
+    assert "permanently disabled" in promote
+    assert "plan_image_release.sh" in promote
+    assert "apply_image_release_plan.sh" in promote
+    assert "aws ecs update-service" not in promote
+    assert "aws events put-targets" not in promote
     assert "force-new-deployment" not in promote
-    assert '--mode "$HMAC_PROMOTION_MODE"' in promote
-    assert "--action post-update" in promote
+    assert "exit 64" in promote
 
 
 def test_live_connect_and_canary_anchors_remain_documented_and_canary_unmodified() -> None:
@@ -362,7 +424,7 @@ def test_live_connect_and_canary_anchors_remain_documented_and_canary_unmodified
     assert "HMAC" not in canary
     assert "Use a short issuance/action maintenance window" in runbook
     assert runbook.index("Deploy the live legacy worker first") < runbook.index(
-        "Register one MCP revision containing both complete keyrings"
+        "Register and promote one MCP revision containing both complete keyrings"
     )
     assert "every old MCP task is drained" in runbook
     assert "Do not infer it from the secret's current `AWSCURRENT`" in runbook

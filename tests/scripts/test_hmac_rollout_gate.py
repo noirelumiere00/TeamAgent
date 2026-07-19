@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import threading
 from email.utils import formatdate
 from pathlib import Path
@@ -12,10 +13,17 @@ import pytest
 
 import scripts.hmac_rollout_gate as rollout_gate_module
 import scripts.terraform_hmac_gate as terraform_gate_module
+import scripts.terraform_hmac_promotion_gate as promotion_gate_module
 from scripts.hmac_rollout_gate import (
+    DeploymentIntent,
     LiveRolloutGate,
     RolloutGateError,
     load_control,
+)
+
+_TEST_INTENT = DeploymentIntent(
+    plan_sha256="e" * 64,
+    apply_attempt_id="12345678-1234-4123-8123-123456789abc",
 )
 
 _NOW = 2_000_000_000
@@ -88,6 +96,7 @@ _TASK_ARNS = {
 }
 _IMAGE = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent@sha256:" + "1" * 64
 _ROLLBACK_IMAGE = "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent@sha256:" + "9" * 64
+_EVENT_ROLE = "arn:aws:iam::123456789012:role/teamagent-dev-events-morning-digest"
 
 
 def _provenance(**values: str) -> str:
@@ -182,10 +191,23 @@ def _old_definition(task: str) -> dict[str, object]:
                 "valueFrom": f"{_DB_ARN}:::{_DB_VERSION}",
             }
         ]
+    task_definition = _TASK_ARNS[
+        {"mcp": "mcp_old", "connect_web": "connect_old", "morning_digest": "morning_old"}[task]
+    ]
     return {
-        "taskDefinitionArn": _TASK_ARNS[
-            {"mcp": "mcp_old", "connect_web": "connect_old", "morning_digest": "morning_old"}[task]
-        ],
+        "taskDefinitionArn": task_definition,
+        "family": task_definition.rsplit("/", maxsplit=1)[-1].rsplit(":", maxsplit=1)[0],
+        "taskRoleArn": f"arn:aws:iam::123456789012:role/{task}-task",
+        "executionRoleArn": f"arn:aws:iam::123456789012:role/{task}-execution",
+        "networkMode": "awsvpc",
+        "requiresCompatibilities": ["FARGATE"],
+        "cpu": "1024",
+        "memory": "2048",
+        "runtimePlatform": {
+            "cpuArchitecture": "ARM64",
+            "operatingSystemFamily": "LINUX",
+        },
+        "volumes": [],
         "containerDefinitions": [
             {
                 "name": task,
@@ -266,6 +288,18 @@ def _new_definition(task: str) -> dict[str, object]:
     ]
     return {
         "taskDefinitionArn": arn,
+        "family": arn.rsplit("/", maxsplit=1)[-1].rsplit(":", maxsplit=1)[0],
+        "taskRoleArn": f"arn:aws:iam::123456789012:role/{task}-task",
+        "executionRoleArn": f"arn:aws:iam::123456789012:role/{task}-execution",
+        "networkMode": "awsvpc",
+        "requiresCompatibilities": ["FARGATE"],
+        "cpu": "1024",
+        "memory": "2048",
+        "runtimePlatform": {
+            "cpuArchitecture": "ARM64",
+            "operatingSystemFamily": "LINUX",
+        },
+        "volumes": [],
         "containerDefinitions": [
             {
                 "name": task,
@@ -338,6 +372,51 @@ def _manifest() -> dict[str, object]:
     }
 
 
+def _morning_target(task_definition: str) -> dict[str, object]:
+    return {
+        "Id": "morning",
+        "Arn": _CLUSTER,
+        "RoleArn": _EVENT_ROLE,
+        "Input": "{}",
+        "EcsParameters": {
+            "TaskDefinitionArn": task_definition,
+            "TaskCount": 1,
+            "LaunchType": "FARGATE",
+            "PlatformVersion": "LATEST",
+            "NetworkConfiguration": {
+                "awsvpcConfiguration": {
+                    "Subnets": ["subnet-a", "subnet-b"],
+                    "SecurityGroups": ["sg-morning"],
+                    "AssignPublicIp": "ENABLED",
+                }
+            },
+        },
+        "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 3600,
+            "MaximumRetryAttempts": 1,
+        },
+    }
+
+
+def _target_digest(target: object) -> str:
+    return hashlib.sha256(
+        json.dumps(target, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+
+
+def test_event_target_digest_canonicalizes_unordered_network_sets() -> None:
+    target = _morning_target(_TASK_ARNS["morning_new"])
+    reordered = copy.deepcopy(target)
+    awsvpc = reordered["EcsParameters"]["NetworkConfiguration"][  # type: ignore[index]
+        "awsvpcConfiguration"
+    ]
+    awsvpc["Subnets"] = list(reversed(awsvpc["Subnets"]))  # type: ignore[index]
+
+    assert rollout_gate_module._canonical_target_digest(
+        target
+    ) == rollout_gate_module._canonical_target_digest(reordered)
+
+
 def _control(rollback_hash: str, artifact_hash: str = "2" * 64) -> dict[str, object]:
     worker_provenance = _provenance(
         workload="worker",
@@ -398,6 +477,11 @@ def _control(rollback_hash: str, artifact_hash: str = "2" * 64) -> dict[str, obj
             "rollback_provenance": _PROVENANCE["morning_digest_rollback"],
             "rollback_task_definition": _TASK_ARNS["morning_rollback"],
             "rollback_image": _ROLLBACK_IMAGE,
+            "legacy_target_digest": _target_digest(_morning_target(_TASK_ARNS["morning_old"])),
+            "rollback_target_digest": _target_digest(
+                _morning_target(_TASK_ARNS["morning_rollback"])
+            ),
+            "expected_rule_state": "DISABLED",
         },
         "worker": {
             "instance_id": "i-0123456789abcdef0",
@@ -555,8 +639,26 @@ class _FakeEcs:
 
 class _FakeEvents:
     def __init__(self) -> None:
-        self.morning = _TASK_ARNS["morning_old"]
+        self._morning_target = _morning_target(_TASK_ARNS["morning_old"])
         self.canary = _TASK_ARNS["canary"]
+        self.rule_state = "DISABLED"
+        self.additional_targets: list[dict[str, object]] = []
+        self.put_failure: str | None = None
+        self.put_history: list[dict[str, object]] = []
+        self.disable_count = 0
+
+    @property
+    def morning(self) -> str:
+        ecs_parameters = self._morning_target["EcsParameters"]
+        assert isinstance(ecs_parameters, dict)
+        return str(ecs_parameters["TaskDefinitionArn"])
+
+    @morning.setter
+    def morning(self, task_definition: str) -> None:
+        self._morning_target = _morning_target(task_definition)
+
+    def describe_rule(self, **kwargs: object) -> dict[str, object]:
+        return _response(Name=kwargs["Name"], State=self.rule_state)
 
     def list_targets_by_rule(self, **kwargs: object) -> dict[str, object]:
         if kwargs["Rule"] == "teamagent-dev-connect-canary":
@@ -569,14 +671,31 @@ class _FakeEvents:
                 ]
             )
         return _response(
-            Targets=[
-                {
-                    "Id": "morning",
-                    "Arn": _CLUSTER,
-                    "EcsParameters": {"TaskDefinitionArn": self.morning},
-                }
-            ]
+            Targets=[copy.deepcopy(self._morning_target), *copy.deepcopy(self.additional_targets)]
         )
+
+    def put_targets(self, **kwargs: object) -> dict[str, object]:
+        assert kwargs["Rule"] == "teamagent-dev-morning-digest"
+        targets = kwargs["Targets"]
+        assert isinstance(targets, list) and len(targets) == 1
+        target = copy.deepcopy(targets[0])
+        assert isinstance(target, dict)
+        self.put_history.append(target)
+        self._morning_target = target
+        if self.put_failure is not None:
+            code = self.put_failure
+            self.put_failure = None
+            return _response(
+                FailedEntryCount=1,
+                FailedEntries=[{"ErrorCode": code, "ErrorMessage": "redacted"}],
+            )
+        return _response(FailedEntryCount=0, FailedEntries=[])
+
+    def disable_rule(self, **kwargs: object) -> dict[str, object]:
+        assert kwargs["Name"] == "teamagent-dev-morning-digest"
+        self.disable_count += 1
+        self.rule_state = "DISABLED"
+        return _response()
 
 
 class _FakeSecrets:
@@ -608,56 +727,141 @@ class _FakeSecrets:
         )
 
 
+class _ConditionalDdbError(Exception):
+    def __init__(self) -> None:
+        self.response = {"Error": {"Code": "TransactionCanceledException"}}
+
+
 class _FakeDdb:
     def __init__(self) -> None:
         self.items: dict[tuple[str, str], dict[str, Any]] = {}
         self.lock = threading.Lock()
         self.transactions: list[list[dict[str, Any]]] = []
+        self.conditional_failures_remaining = 0
+        self.conditional_failure_hook: Any | None = None
+        self.before_transaction_hook: Any | None = None
+
+    @staticmethod
+    def _condition_matches(
+        item: dict[str, Any] | None,
+        operation: dict[str, Any],
+    ) -> bool:
+        expression = str(operation.get("ConditionExpression", "")).strip()
+        if not expression:
+            return True
+        names = operation.get("ExpressionAttributeNames", {})
+        values = operation.get("ExpressionAttributeValues", {})
+        assert isinstance(names, dict) and isinstance(values, dict)
+        tokens = re.findall(
+            r"attribute_(?:not_)?exists|AND|OR|[()]|=|#[A-Za-z0-9_]+|"
+            r":[A-Za-z0-9_]+|[A-Za-z_][A-Za-z0-9_]*",
+            expression,
+        )
+        position = 0
+
+        def attribute(token: str) -> str:
+            return str(names.get(token, token))
+
+        def factor() -> bool:
+            nonlocal position
+            token = tokens[position]
+            if token == "(":
+                position += 1
+                result = disjunction()
+                assert tokens[position] == ")"
+                position += 1
+                return result
+            if token in {"attribute_not_exists", "attribute_exists"}:
+                position += 1
+                assert tokens[position] == "("
+                name = attribute(tokens[position + 1])
+                assert tokens[position + 2] == ")"
+                position += 3
+                exists = item is not None and name in item
+                return not exists if token == "attribute_not_exists" else exists
+            name = attribute(token)
+            assert tokens[position + 1] == "="
+            placeholder = tokens[position + 2]
+            position += 3
+            return item is not None and item.get(name) == values[placeholder]
+
+        def conjunction() -> bool:
+            nonlocal position
+            result = factor()
+            while position < len(tokens) and tokens[position] == "AND":
+                position += 1
+                result = factor() and result
+            return result
+
+        def disjunction() -> bool:
+            nonlocal position
+            result = conjunction()
+            while position < len(tokens) and tokens[position] == "OR":
+                position += 1
+                result = conjunction() or result
+            return result
+
+        matched = disjunction()
+        assert position == len(tokens), (expression, tokens[position:])
+        return matched
 
     def transact_write_items(self, **kwargs: object) -> dict[str, object]:
         transaction = kwargs["TransactItems"]
         assert isinstance(transaction, list)
         with self.lock:
             self.transactions.append(copy.deepcopy(transaction))
+            if self.before_transaction_hook is not None:
+                hook = self.before_transaction_hook
+                self.before_transaction_hook = None
+                hook(self.items)
+            if self.conditional_failures_remaining:
+                self.conditional_failures_remaining -= 1
+                if self.conditional_failure_hook is not None:
+                    self.conditional_failure_hook(self.items)
+                raise _ConditionalDdbError()
             next_items = copy.deepcopy(self.items)
             for operation in transaction:
                 if "ConditionCheck" in operation:
                     check = operation["ConditionCheck"]
                     key = (check["Key"]["scope"]["S"], check["Key"]["record"]["S"])
                     item = next_items.get(key)
-                    if item is None or item.get("stage") != {"S": "complete"}:
-                        raise RuntimeError("conditional")
+                    if not self._condition_matches(item, check):
+                        raise _ConditionalDdbError()
                 elif "Put" in operation:
                     put = operation["Put"]
                     item = copy.deepcopy(operation["Put"]["Item"])
                     key = (item["scope"]["S"], item["record"]["S"])
-                    condition = str(put.get("ConditionExpression", ""))
                     existing = next_items.get(key)
-                    if "attribute_not_exists" in condition:
-                        if existing is not None:
-                            raise RuntimeError("conditional")
-                    elif "revision = :revision" in condition:
-                        values = put["ExpressionAttributeValues"]
-                        invalid = (
-                            existing is None or existing.get("revision") != values[":revision"]
-                        )
-                        if ":old_epoch" in values:
-                            invalid = invalid or (
-                                existing.get("rotation_epoch") != values[":old_epoch"]
-                                or existing.get("stage") != values[":complete"]
-                            )
-                        if invalid:
-                            raise RuntimeError("conditional")
+                    if not self._condition_matches(existing, put):
+                        raise _ConditionalDdbError()
                     next_items[key] = item
                 elif "Update" in operation:
                     update = operation["Update"]
                     key = (update["Key"]["scope"]["S"], update["Key"]["record"]["S"])
-                    item = next_items[key]
+                    item = next_items.get(key)
+                    if item is None or not self._condition_matches(item, update):
+                        raise _ConditionalDdbError()
                     values = update["ExpressionAttributeValues"]
                     expression = str(update["UpdateExpression"])
+                    names = update.get("ExpressionAttributeNames", {})
+                    assert isinstance(names, dict)
                     if key[1].startswith("LEDGER#"):
-                        item["stage"] = copy.deepcopy(values[":next"])
-                        item["updated_at"] = copy.deepcopy(values[":now"])
+                        if ":next" in values:
+                            item["stage"] = copy.deepcopy(values[":next"])
+                            item["updated_at"] = copy.deepcopy(values[":now"])
+                        elif expression.startswith("SET #digest"):
+                            item[str(names["#digest"])] = copy.deepcopy(values[":digest"])
+                        elif expression.startswith("SET #arn"):
+                            item[str(names["#arn"])] = copy.deepcopy(values[":arn"])
+                        elif expression.startswith("SET #target"):
+                            item[str(names["#target"])] = copy.deepcopy(values[":target"])
+                            if "#rule_state" in names:
+                                item[str(names["#rule_state"])] = copy.deepcopy(
+                                    values[":rule_state"]
+                                )
+                        elif expression.startswith("SET #plan"):
+                            item[str(names["#plan"])] = copy.deepcopy(values[":plan"])
+                            item[str(names["#attempt"])] = copy.deepcopy(values[":attempt"])
                     elif "cleanup_stage = :authorized" in expression:
                         item["issuer_provenances"] = copy.deepcopy(values[":temporary"])
                         item["previous_retired"] = {"BOOL": True}
@@ -671,12 +875,52 @@ class _FakeDdb:
                         item["stage"] = {"S": "complete"}
                         item["completed_at"] = copy.deepcopy(values[":checked"])
                     elif key[1].startswith("CLEANUP#"):
-                        item["stage"] = {"S": "complete"}
-                        item["completed_at"] = copy.deepcopy(values[":now"])
+                        if expression.startswith("SET #digest"):
+                            item[str(names["#digest"])] = copy.deepcopy(values[":digest"])
+                        elif expression.startswith("SET #arn"):
+                            item[str(names["#arn"])] = copy.deepcopy(values[":arn"])
+                        elif expression.startswith("SET #target"):
+                            item[str(names["#target"])] = copy.deepcopy(values[":target"])
+                            if "#rule_state" in names:
+                                item[str(names["#rule_state"])] = copy.deepcopy(
+                                    values[":rule_state"]
+                                )
+                        elif expression.startswith("SET #plan"):
+                            item[str(names["#plan"])] = copy.deepcopy(values[":plan"])
+                            item[str(names["#attempt"])] = copy.deepcopy(values[":attempt"])
+                        else:
+                            item["stage"] = {"S": "complete"}
+                            item["completed_at"] = copy.deepcopy(values[":now"])
+                    elif ":new_epoch" in values:
+                        item.setdefault("clock_revision", {"N": "0"})
+                        item["primary_generation"] = copy.deepcopy(values[":primary"])
+                        item["rotation_epoch"] = copy.deepcopy(values[":new_epoch"])
+                        item["previous_retired"] = copy.deepcopy(values[":false"])
+                        item["stage"] = copy.deepcopy(values[":preload"])
+                        for name in ("issuer_provenances", "cleanup_stage"):
+                            item.pop(name, None)
+                        if ":previous" in values:
+                            item["previous_generation"] = copy.deepcopy(values[":previous"])
+                            item["rotation_started_at"] = copy.deepcopy(values[":t0"])
+                            item["deadline"] = copy.deepcopy(values[":deadline"])
+                        else:
+                            for name in (
+                                "previous_generation",
+                                "rotation_started_at",
+                                "deadline",
+                            ):
+                                item.pop(name, None)
+                        if ":legacy_worker" in values:
+                            item["legacy_worker_generation"] = copy.deepcopy(
+                                values[":legacy_worker"]
+                            )
+                            item["legacy_worker_deadline"] = copy.deepcopy(values[":deadline"])
+                        else:
+                            item.pop("legacy_worker_generation", None)
+                            item.pop("legacy_worker_deadline", None)
                     elif "REMOVE previous_generation" in expression:
                         item["issuer_provenances"] = copy.deepcopy(values[":new"])
                         item["previous_retired"] = {"BOOL": True}
-                        item["high_water"] = copy.deepcopy(values[":now"])
                         for name in (
                             "previous_generation",
                             "rotation_started_at",
@@ -766,7 +1010,40 @@ def _gate(
         control=load_control(_control(rollback_hash, artifact_hash)),
         manifest=_manifest(),
         clients=factory,
+        deployment_intent=_TEST_INTENT,
     )
+
+
+def _bind_candidate_state(
+    gate: LiveRolloutGate,
+    factory: _Factory,
+    *,
+    definitions: dict[str, dict[str, object]] | None = None,
+) -> None:
+    selected = definitions or {
+        task: factory.ecs.definitions[
+            _TASK_ARNS[
+                {
+                    "mcp": "mcp_new",
+                    "connect_web": "connect_new",
+                    "morning_digest": "morning_new",
+                }[task]
+            ]
+        ]
+        for task in ("mcp", "connect_web", "morning_digest")
+    }
+    ledger = factory.ddb.items[(_SCOPE, f"LEDGER#{gate.control.rotation_epoch}")]
+    for task, definition in selected.items():
+        ledger[f"candidate_{task}_digest"] = {
+            "S": rollout_gate_module._task_artifact_digest(definition)
+        }
+        ledger[f"candidate_{task}_arn"] = {"S": str(definition["taskDefinitionArn"])}
+        ledger[f"candidate_{task}_plan_sha256"] = {"S": _TEST_INTENT.plan_sha256}
+        ledger[f"candidate_{task}_apply_attempt_id"] = {"S": _TEST_INTENT.apply_attempt_id}
+    ledger["candidate_morning_digest_target_digest"] = {
+        "S": _target_digest(_morning_target(str(selected["morning_digest"]["taskDefinitionArn"])))
+    }
+    ledger["candidate_morning_digest_rule_state"] = {"S": "DISABLED"}
 
 
 def test_initialize_uses_live_generations_and_creates_atomic_durable_state() -> None:
@@ -791,6 +1068,7 @@ def test_initialize_rejects_manifest_deployed_generation_drift() -> None:
         control=load_control(_control("0" * 64)),
         manifest=manifest,
         clients=factory,
+        deployment_intent=_TEST_INTENT,
     )
     with pytest.raises(RolloutGateError, match="manifest_live_drift"):
         gate.initialize()
@@ -805,6 +1083,7 @@ def test_initialize_rejects_untrusted_stale_manifest_time() -> None:
         control=load_control(_control("0" * 64)),
         manifest=manifest,
         clients=factory,
+        deployment_intent=_TEST_INTENT,
     )
     with pytest.raises(RolloutGateError, match="manifest_time_stale"):
         gate.initialize()
@@ -820,6 +1099,7 @@ def test_trusted_time_compares_server_offsets_across_long_commands(
         control=load_control(_control("0" * 64)),
         manifest=_manifest(),
         clients=_Factory(),
+        deployment_intent=_TEST_INTENT,
     )
     gate._observe({"ResponseMetadata": {"HTTPHeaders": {"date": formatdate(_NOW, usegmt=True)}}})
     gate._observe(
@@ -838,6 +1118,7 @@ def test_trusted_time_rejects_inconsistent_server_offsets(
         control=load_control(_control("0" * 64)),
         manifest=_manifest(),
         clients=_Factory(),
+        deployment_intent=_TEST_INTENT,
     )
     for epoch in (_NOW, _NOW + 100):
         gate._observe(
@@ -883,6 +1164,56 @@ def test_registration_rechecks_pinned_candidate_version_metadata() -> None:
         )
 
 
+def test_candidate_arn_is_fixed_once_even_for_same_full_artifact() -> None:
+    factory = _Factory()
+    gate = _gate(factory, "0" * 64)
+    gate.initialize()
+    candidate = copy.deepcopy(factory.ecs.definitions[_TASK_ARNS["connect_new"]])
+    gate.terraform_pre_register(task="connect_web", definition=candidate)
+    gate.pre_update(
+        task="connect_web",
+        task_definition=_TASK_ARNS["connect_new"],
+        mode="candidate",
+    )
+
+    alternate_arn = (
+        "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-connect-web:99"
+    )
+    alternate = copy.deepcopy(candidate)
+    alternate["taskDefinitionArn"] = alternate_arn
+    factory.ecs.definitions[alternate_arn] = alternate
+    assert rollout_gate_module._task_artifact_digest(
+        alternate
+    ) == rollout_gate_module._task_artifact_digest(candidate)
+
+    with pytest.raises(RolloutGateError, match="candidate_identity_drift"):
+        gate.pre_update(
+            task="connect_web",
+            task_definition=alternate_arn,
+            mode="candidate",
+        )
+
+
+def test_candidate_gate_rejects_replayed_saved_plan_attempt() -> None:
+    factory = _Factory()
+    gate = _gate(factory, "0" * 64)
+    gate.initialize()
+    candidate = copy.deepcopy(factory.ecs.definitions[_TASK_ARNS["connect_new"]])
+    gate.terraform_pre_register(task="connect_web", definition=candidate)
+
+    replay = LiveRolloutGate(
+        control=gate.control,
+        manifest=_manifest(),
+        clients=factory,
+        deployment_intent=DeploymentIntent(
+            plan_sha256=_TEST_INTENT.plan_sha256,
+            apply_attempt_id="87654321-4321-4321-8321-cba987654321",
+        ),
+    )
+    with pytest.raises(RolloutGateError, match="deployment_intent_drift"):
+        replay.terraform_pre_register(task="connect_web", definition=candidate)
+
+
 def test_registration_and_update_reject_stage_bypass() -> None:
     factory = _Factory()
     gate = _gate(factory, "0" * 64)
@@ -903,6 +1234,7 @@ def test_worker_stage_transition_requires_attestation_and_artifact(
     factory = _Factory()
     gate = _gate(factory, artifact_hash)
     gate.initialize()
+    _bind_candidate_state(gate, factory)
     ledger = factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]
     ledger["stage"] = {"S": "connect_web_preloaded"}
     worker_provenance = gate.control.worker.provenance
@@ -918,6 +1250,10 @@ def test_worker_stage_transition_requires_attestation_and_artifact(
         "expires_at": {"N": str(_NOW + 3600)},
     }
 
+    factory.ecs.scheduled_draining = [_TASK_ARNS["morning_old"]]
+    with pytest.raises(RolloutGateError, match="old_tasks_not_drained"):
+        gate.worker_verified(rollback_artifact=artifact)
+    factory.ecs.scheduled_draining = []
     gate.worker_verified(rollback_artifact=artifact)
     assert factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]["stage"] == {"S": "worker_verified"}
 
@@ -972,10 +1308,56 @@ def test_mcp_cutover_requires_post_worker_verified_attestation(tmp_path: Path) -
     }
     factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")] = attestation
 
+    with pytest.raises(RolloutGateError, match="worker_restart_state_invalid"):
+        gate.mcp_stable_and_old_drained()
+    restart_nonce = "f" * 64
+    factory.ddb.items[(_SCOPE, f"RESTART#{_EPOCH}#{worker_provenance}")] = {
+        "scope": {"S": _SCOPE},
+        "record": {"S": f"RESTART#{_EPOCH}#{worker_provenance}"},
+        "rotation_epoch": {"S": _EPOCH},
+        "provenance": {"S": worker_provenance},
+        "artifact_sha256": {"S": gate.control.worker.artifact_sha256},
+        "config_digest": {"S": gate._worker_config_digest()},
+        "restart_nonce": {"S": restart_nonce},
+        "stage": {"S": "complete"},
+        "mode": {"S": "candidate"},
+        "revision": {"N": "2"},
+        "after_checked_at": {"N": str(_NOW - 1)},
+        "requested_at": {"N": str(_NOW)},
+        "completed_at": {"N": str(_NOW + 1)},
+    }
     with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
         gate.mcp_stable_and_old_drained()
 
     attestation["checked_at"] = {"N": str(_NOW + 1)}
+    config_digest = gate._worker_config_digest()
+    for service, main_pid in (("bot", 111), ("connect", 222)):
+        factory.ddb.items[(_SCOPE, f"WORKER_SERVICE#{worker_provenance}#{service}")] = {
+            "scope": {"S": _SCOPE},
+            "record": {"S": f"WORKER_SERVICE#{worker_provenance}#{service}"},
+            "service": {"S": service},
+            "provenance": {"S": worker_provenance},
+            "worker_id": {"S": "i-0123456789abcdef0"},
+            "rotation_epoch": {"S": _EPOCH},
+            "restart_nonce": {"S": restart_nonce},
+            "artifact_sha256": {"S": gate.control.worker.artifact_sha256},
+            "config_digest": {"S": config_digest},
+            "main_pid": {"N": str(main_pid)},
+            "process_start_ticks": {"N": str(main_pid * 100)},
+            "process_started_at": {"N": str(_NOW)},
+            "health_verified": {"BOOL": True},
+            "checked_at": {"N": str(_NOW + 1)},
+            "expires_at": {"N": str(_NOW + 300)},
+            **(
+                {
+                    "active_port": {"N": "8788"},
+                    "port_owner_pid": {"N": str(main_pid)},
+                    "health_endpoint": {"S": "http://127.0.0.1:8788/healthz"},
+                }
+                if service == "connect"
+                else {}
+            ),
+        }
     gate.mcp_stable_and_old_drained()
     assert factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]["stage"] == {
         "S": "mcp_stable_and_old_drained"
@@ -995,11 +1377,40 @@ def test_worker_upload_binds_current_and_rollback_artifacts(tmp_path: Path) -> N
     )
     gate.initialize()
     factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]["stage"] = {"S": "connect_web_preloaded"}
+    worker_env = tmp_path / "worker.env"
+    rollback_env = tmp_path / "worker-rollback.env"
+    manifest = _manifest()
+    worker_env.write_text(
+        _worker_env_text(
+            manifest=manifest,
+            provenance=gate.control.worker.provenance,
+            artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        ),
+        encoding="utf-8",
+    )
+    rollback_env.write_text(
+        _worker_env_text(
+            manifest=manifest,
+            provenance=gate.control.worker.rollback_provenance,
+            artifact_sha256=hashlib.sha256(rollback.read_bytes()).hexdigest(),
+        ),
+        encoding="utf-8",
+    )
 
-    gate.pre_worker_upload(artifact=artifact, rollback_artifact=rollback)
+    gate.pre_worker_upload(
+        artifact=artifact,
+        rollback_artifact=rollback,
+        worker_env=worker_env,
+        rollback_env=rollback_env,
+    )
     artifact.write_bytes(b"stale-worker")
     with pytest.raises(RolloutGateError, match="worker_artifact_drift"):
-        gate.pre_worker_upload(artifact=artifact, rollback_artifact=rollback)
+        gate.pre_worker_upload(
+            artifact=artifact,
+            rollback_artifact=rollback,
+            worker_env=worker_env,
+            rollback_env=rollback_env,
+        )
 
 
 def test_canary14_and_td53_contracts_fail_closed() -> None:
@@ -1082,6 +1493,7 @@ def test_complete_requires_connect_service_stable_and_fully_drained() -> None:
     factory = _Factory()
     gate = _gate(factory, "0" * 64)
     gate.initialize()
+    _bind_candidate_state(gate, factory)
     ledger = factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]
     ledger["stage"] = {"S": "mcp_stable_and_old_drained"}
     factory.ecs.current["teamagent-dev-mcp"] = _TASK_ARNS["mcp_new"]
@@ -1219,6 +1631,7 @@ def test_distinct_exact_rollback_passes_after_cutover_and_rejects_wrong_artifact
         control=load_control(control),
         manifest=_manifest(),
         clients=factory,
+        deployment_intent=_TEST_INTENT,
     )
     gate.initialize()
     factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]["stage"] = {"S": "complete"}
@@ -1230,6 +1643,7 @@ def test_distinct_exact_rollback_passes_after_cutover_and_rejects_wrong_artifact
         control=load_control(control),
         manifest=manifest,
         clients=factory,
+        deployment_intent=_TEST_INTENT,
     )
 
     gate.pre_update(
@@ -1258,6 +1672,133 @@ def test_distinct_exact_rollback_passes_after_cutover_and_rejects_wrong_artifact
     )
 
 
+def _ready_for_scheduled_promotion(
+    factory: _Factory,
+) -> LiveRolloutGate:
+    gate = _gate(factory, "0" * 64)
+    gate.initialize()
+    factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]["stage"] = {"S": "complete"}
+    gate.terraform_pre_register(
+        task="morning_digest",
+        definition=factory.ecs.definitions[_TASK_ARNS["morning_new"]],
+    )
+    return gate
+
+
+def test_eventbridge_transaction_binds_full_target_and_rule_state() -> None:
+    factory = _Factory()
+    gate = _ready_for_scheduled_promotion(factory)
+    target = _morning_target(_TASK_ARNS["morning_new"])
+
+    gate.event_target_transaction(
+        task_definition=_TASK_ARNS["morning_new"],
+        target=target,
+        mode="candidate",
+    )
+
+    assert factory.events.morning == _TASK_ARNS["morning_new"]
+    assert factory.events.put_history == [target]
+    ledger = factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]
+    assert ledger["candidate_morning_digest_target_digest"] == {"S": _target_digest(target)}
+    assert ledger["candidate_morning_digest_rule_state"] == {"S": "DISABLED"}
+    assert ledger["candidate_morning_digest_plan_sha256"] == {"S": _TEST_INTENT.plan_sha256}
+    assert ledger["candidate_morning_digest_apply_attempt_id"] == {
+        "S": _TEST_INTENT.apply_attempt_id
+    }
+
+    changed_input = copy.deepcopy(target)
+    changed_input["Input"] = '{"unexpected":true}'
+    with pytest.raises(RolloutGateError, match="scheduled_target_drift"):
+        gate.event_target_transaction(
+            task_definition=_TASK_ARNS["morning_new"],
+            target=changed_input,
+            mode="candidate",
+        )
+    assert factory.events.put_history == [target]
+
+
+def test_eventbridge_partial_failure_restores_exact_target_and_disabled_rule() -> None:
+    factory = _Factory()
+    gate = _ready_for_scheduled_promotion(factory)
+    baseline = _morning_target(_TASK_ARNS["morning_old"])
+    candidate = _morning_target(_TASK_ARNS["morning_new"])
+    factory.events.put_failure = "InternalException"
+
+    with pytest.raises(RolloutGateError, match="scheduled_target_partial_failure"):
+        gate.event_target_transaction(
+            task_definition=_TASK_ARNS["morning_new"],
+            target=candidate,
+            mode="candidate",
+        )
+
+    assert factory.events.put_history == [candidate, baseline]
+    assert factory.events._morning_target == baseline
+    assert factory.events.rule_state == "DISABLED"
+    assert factory.events.disable_count == 1
+
+
+@pytest.mark.parametrize("drift", ["additional-target", "enabled-rule"])
+def test_eventbridge_wrong_baseline_fails_before_mutation(drift: str) -> None:
+    factory = _Factory()
+    gate = _ready_for_scheduled_promotion(factory)
+    if drift == "additional-target":
+        factory.events.additional_targets.append(
+            {
+                "Id": "unexpected",
+                "Arn": _CLUSTER,
+                "RoleArn": _EVENT_ROLE,
+                "Input": "{}",
+                "EcsParameters": copy.deepcopy(
+                    _morning_target(_TASK_ARNS["morning_old"])["EcsParameters"]
+                ),
+                "RetryPolicy": {
+                    "MaximumEventAgeInSeconds": 3600,
+                    "MaximumRetryAttempts": 1,
+                },
+            }
+        )
+        expected = "scheduled_target_unavailable"
+    else:
+        factory.events.rule_state = "ENABLED"
+        expected = "scheduled_rule_state_drift"
+
+    with pytest.raises(RolloutGateError, match=expected):
+        gate.event_target_transaction(
+            task_definition=_TASK_ARNS["morning_new"],
+            target=_morning_target(_TASK_ARNS["morning_new"]),
+            mode="candidate",
+        )
+    assert factory.events.put_history == []
+
+
+def test_eventbridge_rollback_uses_distinct_full_approved_target() -> None:
+    factory = _Factory()
+    gate = _ready_for_scheduled_promotion(factory)
+    candidate = _morning_target(_TASK_ARNS["morning_new"])
+    gate.event_target_transaction(
+        task_definition=_TASK_ARNS["morning_new"],
+        target=candidate,
+        mode="candidate",
+    )
+    rollback = _morning_target(_TASK_ARNS["morning_rollback"])
+
+    gate.event_target_transaction(
+        task_definition=_TASK_ARNS["morning_rollback"],
+        target=rollback,
+        mode="rollback",
+    )
+
+    assert candidate != rollback
+    assert _target_digest(candidate) != _target_digest(rollback)
+    assert factory.events.put_history == [candidate, rollback]
+    assert factory.events.morning == _TASK_ARNS["morning_rollback"]
+    ledger = factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]
+    assert ledger["rollback_morning_digest_plan_sha256"] == {"S": _TEST_INTENT.plan_sha256}
+    assert ledger["rollback_morning_digest_apply_attempt_id"] == {
+        "S": _TEST_INTENT.apply_attempt_id
+    }
+
+
 def test_worker_rollback_mode_uses_exact_approved_artifact_and_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1280,17 +1821,31 @@ def test_worker_rollback_mode_uses_exact_approved_artifact_and_provenance(
         control=gate.control,
         manifest=manifest,
         clients=factory,
+        deployment_intent=_TEST_INTENT,
+    )
+    rollback_env = tmp_path / "rollback.env"
+    rollback_env.write_text(
+        _worker_env_text(
+            manifest=manifest,
+            provenance=gate.control.worker.rollback_provenance,
+            artifact_sha256=rollback_hash,
+        ),
+        encoding="utf-8",
     )
 
     gate.pre_worker_upload(
         artifact=rollback,
         rollback_artifact=rollback,
+        worker_env=rollback_env,
+        rollback_env=rollback_env,
         mode="rollback",
     )
     with pytest.raises(RolloutGateError, match="worker_rollback_artifact_drift"):
         gate.pre_worker_upload(
             artifact=current,
             rollback_artifact=rollback,
+            worker_env=rollback_env,
+            rollback_env=rollback_env,
             mode="rollback",
         )
 
@@ -1306,12 +1861,61 @@ def test_worker_rollback_mode_uses_exact_approved_artifact_and_provenance(
         "checked_at": {"N": str(after_cutover)},
         "expires_at": {"N": str(after_cutover + 300)},
     }
-    gate.pre_restart(rollback_artifact=rollback, mode="rollback")
+    restart_nonce = gate.pre_restart(rollback_artifact=rollback, mode="rollback")
     with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
         gate.post_restart(mode="rollback")
     stored = factory.ddb.items[(_SCOPE, f"WORKER#{rollback_provenance}")]
     stored["checked_at"] = {"N": str(after_cutover + 1)}
     stored["expires_at"] = {"N": str(after_cutover + 301)}
+    config_digest = gate._worker_config_digest(provenance=rollback_provenance)
+    for service, main_pid in (("bot", 101), ("connect", 202)):
+        factory.ddb.items[(_SCOPE, f"WORKER_SERVICE#{rollback_provenance}#{service}")] = {
+            "scope": {"S": _SCOPE},
+            "record": {"S": f"WORKER_SERVICE#{rollback_provenance}#{service}"},
+            "service": {"S": service},
+            "provenance": {"S": rollback_provenance},
+            "worker_id": {"S": "i-0123456789abcdef0"},
+            "rotation_epoch": {"S": _EPOCH},
+            "restart_nonce": {"S": restart_nonce},
+            "artifact_sha256": {"S": rollback_hash},
+            "config_digest": {"S": config_digest},
+            "main_pid": {"N": str(main_pid)},
+            "process_start_ticks": {"N": str(main_pid * 100)},
+            "process_started_at": {"N": str(after_cutover)},
+            "health_verified": {"BOOL": True},
+            "checked_at": {"N": str(after_cutover + 1)},
+            "expires_at": {"N": str(after_cutover + 301)},
+            **(
+                {
+                    "active_port": {"N": "8788"},
+                    "port_owner_pid": {"N": str(main_pid)},
+                    "health_endpoint": {"S": "http://127.0.0.1:8788/healthz"},
+                }
+                if service == "connect"
+                else {}
+            ),
+        }
+    bot_record = factory.ddb.items[(_SCOPE, f"WORKER_SERVICE#{rollback_provenance}#bot")]
+    connect_record = factory.ddb.items[(_SCOPE, f"WORKER_SERVICE#{rollback_provenance}#connect")]
+    bot_record["health_verified"] = {"BOOL": False}
+    with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
+        gate.post_restart(mode="rollback")
+    bot_record["health_verified"] = {"BOOL": True}
+    connect_pid = connect_record["main_pid"]
+    connect_record["main_pid"] = copy.deepcopy(bot_record["main_pid"])
+    with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
+        gate.post_restart(mode="rollback")
+    connect_record["main_pid"] = connect_pid
+    connect_port_owner = connect_record["port_owner_pid"]
+    connect_record["port_owner_pid"] = copy.deepcopy(bot_record["main_pid"])
+    with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
+        gate.post_restart(mode="rollback")
+    connect_record["port_owner_pid"] = connect_port_owner
+    connect_started_at = connect_record["process_started_at"]
+    connect_record["process_started_at"] = {"N": str(after_cutover - 1)}
+    with pytest.raises(RolloutGateError, match="worker_attestation_invalid"):
+        gate.post_restart(mode="rollback")
+    connect_record["process_started_at"] = connect_started_at
     gate.post_restart(mode="rollback")
 
 
@@ -1698,6 +2302,7 @@ def _cleanup_bundle(
             control=load_control(control),
             manifest=manifest,
             clients=factory,
+            deployment_intent=_TEST_INTENT,
         ),
         candidate_definitions,
         candidate_env,
@@ -1714,6 +2319,7 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
     factory = _Factory()
     initial = _gate(factory, "0" * 64)
     initial.initialize()
+    _bind_candidate_state(initial, factory)
     factory.ecs.current["teamagent-dev-mcp"] = _TASK_ARNS["mcp_new"]
     factory.ecs.current["teamagent-dev-connect-web"] = _TASK_ARNS["connect_new"]
     factory.events.morning = _TASK_ARNS["morning_new"]
@@ -1759,6 +2365,7 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
             worker_rollback_env=worker_rollback_env,
             worker_artifact=worker_artifact,
             worker_rollback_artifact=worker_rollback_artifact,
+            prepared_plan_sha256="e" * 64,
         )
     gate.prepare_cleanup(
         domain="mail_action",
@@ -1767,7 +2374,19 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
         worker_rollback_env=worker_rollback_env,
         worker_artifact=worker_artifact,
         worker_rollback_artifact=worker_rollback_artifact,
+        prepared_plan_sha256="e" * 64,
     )
+    cleanup = gate._cleanup_ledger("mail_action")
+    assert cleanup.candidate_worker_env_digest != cleanup.rollback_worker_env_digest
+    exact_worker_env = worker_env.read_bytes()
+    worker_env.write_bytes(exact_worker_env + b"# drift\n")
+    with pytest.raises(RolloutGateError, match="worker_env_drift"):
+        gate._verify_prepared_worker_env(
+            cleanup=cleanup,
+            path=worker_env,
+            rollback=False,
+        )
+    worker_env.write_bytes(exact_worker_env)
     mail = factory.ddb.items[(_SCOPE, "DOMAIN#mail_action")]
     assert mail["cleanup_stage"] == {"S": "authorized"}
     assert mail["previous_generation"] == {"S": _DB_GENERATION}
@@ -1784,11 +2403,12 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
             definition=drifted_candidate,
             mode="cleanup",
         )
-    gate.terraform_pre_register(
-        task="mcp",
-        definition=candidates["mcp"],
-        mode="cleanup",
-    )
+    for task in ("connect_web", "mcp", "morning_digest"):
+        gate.terraform_pre_register(
+            task=task,
+            definition=candidates[task],
+            mode="cleanup",
+        )
     with pytest.raises(RolloutGateError, match="cleanup_mode_required"):
         gate.pre_update(
             task="mcp",
@@ -1796,17 +2416,31 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
             mode="candidate",
         )
     gate.pre_update(
+        task="connect_web",
+        task_definition=_TASK_ARNS["connect_cleanup"],
+        mode="cleanup",
+    )
+    gate.pre_update(
         task="mcp",
         task_definition=_TASK_ARNS["mcp_cleanup"],
         mode="cleanup",
     )
+    gate.pre_event_update(
+        task_definition=_TASK_ARNS["morning_cleanup"],
+        target=_morning_target(_TASK_ARNS["morning_cleanup"]),
+        mode="cleanup",
+    )
     factory.ecs.current["teamagent-dev-mcp"] = _TASK_ARNS["mcp_cleanup"]
+    factory.ecs.current["teamagent-dev-connect-web"] = _TASK_ARNS["connect_cleanup"]
     factory.events.morning = _TASK_ARNS["morning_cleanup"]
     factory.ecs.running_task_definition["teamagent-dev-mcp"] = _TASK_ARNS["mcp_cleanup"]
+    factory.ecs.running_task_definition["teamagent-dev-connect-web"] = _TASK_ARNS["connect_cleanup"]
 
     gate.pre_worker_upload(
         artifact=worker_artifact,
         rollback_artifact=worker_rollback_artifact,
+        worker_env=worker_env,
+        rollback_env=worker_rollback_env,
         mode="cleanup",
     )
     worker_provenance = gate.control.worker.provenance
@@ -1820,7 +2454,7 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
         "config_digest": {
             "S": gate._worker_config_digest(
                 provenance=worker_provenance,
-                configs=gate._cleanup_proposed_from_live(cleanup),
+                configs=gate._cleanup_proposed_from_ledger(cleanup),
             )
         },
         "loaded_domains": {"SS": ["mail_action", "report_link"]},
@@ -1828,13 +2462,41 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
         "expires_at": {"N": str(retirement_now + 300)},
     }
     factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")] = attestation
-    gate.pre_restart(
+    restart_nonce = gate.pre_restart(
         rollback_artifact=worker_rollback_artifact,
         mode="cleanup",
     )
     stored_attestation = factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")]
     stored_attestation["checked_at"] = {"N": str(retirement_now + 1)}
     stored_attestation["expires_at"] = {"N": str(retirement_now + 301)}
+    config_digest = str(stored_attestation["config_digest"]["S"])
+    for service, main_pid in (("bot", 303), ("connect", 404)):
+        factory.ddb.items[(_SCOPE, f"WORKER_SERVICE#{worker_provenance}#{service}")] = {
+            "scope": {"S": _SCOPE},
+            "record": {"S": f"WORKER_SERVICE#{worker_provenance}#{service}"},
+            "service": {"S": service},
+            "provenance": {"S": worker_provenance},
+            "worker_id": {"S": "i-0123456789abcdef0"},
+            "rotation_epoch": {"S": _EPOCH},
+            "restart_nonce": {"S": restart_nonce},
+            "artifact_sha256": {"S": gate.control.worker.artifact_sha256},
+            "config_digest": {"S": config_digest},
+            "main_pid": {"N": str(main_pid)},
+            "process_start_ticks": {"N": str(main_pid * 100)},
+            "process_started_at": {"N": str(retirement_now)},
+            "health_verified": {"BOOL": True},
+            "checked_at": {"N": str(retirement_now + 1)},
+            "expires_at": {"N": str(retirement_now + 301)},
+            **(
+                {
+                    "active_port": {"N": "8788"},
+                    "port_owner_pid": {"N": str(main_pid)},
+                    "health_endpoint": {"S": "http://127.0.0.1:8788/healthz"},
+                }
+                if service == "connect"
+                else {}
+            ),
+        }
     gate.post_restart(mode="cleanup")
 
     current_attestation = factory.ddb.items[(_SCOPE, f"WORKER#{worker_provenance}")]
@@ -1882,6 +2544,110 @@ def test_retirement_cleanup_is_cas_durable_and_preserves_history(
     )
 
 
+@pytest.mark.parametrize(
+    ("domain", "deadline"),
+    [
+        ("mail_action", _NOW + 900 + 86_400),
+        ("report_link", _NOW + 900 + 604_800),
+    ],
+)
+def test_cleanup_deadline_boundary_is_exact_and_retries_hot_clock_cas(
+    domain: str,
+    deadline: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _Factory()
+    initial = _gate(factory, "0" * 64)
+    initial.initialize()
+    _bind_candidate_state(initial, factory)
+    factory.ecs.current["teamagent-dev-mcp"] = _TASK_ARNS["mcp_new"]
+    factory.ecs.current["teamagent-dev-connect-web"] = _TASK_ARNS["connect_new"]
+    factory.events.morning = _TASK_ARNS["morning_new"]
+    ledger = factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")]
+    ledger["stage"] = {"S": "complete"}
+    issuers = initial._issuer_provenances(initial.control)
+    for item_domain in ("mail_action", "report_link"):
+        item = factory.ddb.items[(_SCOPE, f"DOMAIN#{item_domain}")]
+        item["stage"] = {"S": "complete"}
+        item["issuer_provenances"] = {"SS": sorted(issuers[item_domain])}
+    if domain == "report_link":
+        # The shorter-lived domain is already expired. Its independent runtime clock has
+        # durably retired the key, so it must not make report-link cleanup unrecoverable.
+        mail = factory.ddb.items[(_SCOPE, "DOMAIN#mail_action")]
+        mail["previous_retired"] = {"BOOL": True}
+        mail["high_water"] = {"N": str(_NOW + 900 + 86_400)}
+        mail["retired_generations"] = {"SS": sorted({_DB_GENERATION, _SLACK_GENERATION})}
+
+    monkeypatch.setattr(
+        rollout_gate_module,
+        "_trusted_epoch",
+        lambda _response: deadline,
+    )
+    manifest = _retirement_manifest(deadline, domain=domain)
+    (
+        gate,
+        candidates,
+        worker_env,
+        worker_rollback_env,
+        worker_artifact,
+        worker_rollback_artifact,
+    ) = _cleanup_bundle(
+        tmp_path,
+        factory=factory,
+        manifest=manifest,
+    )
+
+    hot_high_water = deadline + 5
+
+    def advance_runtime_clock(
+        items: dict[tuple[str, str], dict[str, Any]],
+    ) -> None:
+        item = items[(_SCOPE, f"DOMAIN#{domain}")]
+        item["clock_revision"] = {"N": str(int(item.get("clock_revision", {"N": "0"})["N"]) + 1)}
+        item["high_water"] = {"N": str(hot_high_water)}
+
+    factory.ddb.conditional_failures_remaining = 1
+    factory.ddb.conditional_failure_hook = advance_runtime_clock
+    gate.prepare_cleanup(
+        domain=domain,
+        candidate_definitions=candidates,
+        worker_env=worker_env,
+        worker_rollback_env=worker_rollback_env,
+        worker_artifact=worker_artifact,
+        worker_rollback_artifact=worker_rollback_artifact,
+        prepared_plan_sha256=_TEST_INTENT.plan_sha256,
+    )
+
+    cleanup = gate._cleanup_ledger(domain)
+    saved_proposal = gate._cleanup_proposed_from_ledger(cleanup)
+    expected = {
+        item_domain: copy.deepcopy(manifest["domains"][item_domain]["proposed"])  # type: ignore[index]
+        for item_domain in ("mail_action", "report_link")
+    }
+    assert saved_proposal == expected
+    assert factory.ddb.items[(_SCOPE, f"DOMAIN#{domain}")]["high_water"] == {
+        "N": str(hot_high_water)
+    }
+    assert len(factory.ddb.transactions) >= 3
+
+    monkeypatch.setattr(
+        rollout_gate_module,
+        "_trusted_epoch",
+        lambda _response: deadline + 700_000,
+    )
+    manifest["domains"][domain]["proposed"]["primary_generation"] = "drifted"  # type: ignore[index]
+    for task, definition in candidates.items():
+        gate._validate_prepared_cleanup_task(
+            cleanup=cleanup,
+            task=task,
+            definition=definition,
+            rollback=False,
+        )
+
+    assert gate._cleanup_proposed_from_ledger(gate._cleanup_ledger(domain)) == expected
+
+
 def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1897,6 +2663,7 @@ def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
             "record": {"S": f"DOMAIN#{domain}"},
             "domain": {"S": domain},
             "revision": {"N": "9"},
+            "clock_revision": {"N": "4"},
             "primary_generation": {"S": primary},
             "rotation_epoch": {"S": _EPOCH},
             "high_water": {"N": str(prior_high_water)},
@@ -1981,12 +2748,32 @@ def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
     }
     control = _control("0" * 64)
     control["rotation_epoch"] = next_epoch
+    control["services"]["mcp"]["legacy_task_definition"] = _TASK_ARNS["mcp_new"]  # type: ignore[index]
+    control["services"]["connect_web"]["legacy_task_definition"] = _TASK_ARNS[  # type: ignore[index]
+        "connect_new"
+    ]
+    control["morning_digest"]["legacy_task_definition"] = _TASK_ARNS["morning_new"]  # type: ignore[index]
+    control["morning_digest"]["legacy_target_digest"] = _target_digest(  # type: ignore[index]
+        _morning_target(_TASK_ARNS["morning_new"])
+    )
     gate = LiveRolloutGate(
         control=load_control(control),
         manifest=manifest,
         clients=factory,
+        deployment_intent=_TEST_INTENT,
     )
     monkeypatch.setattr(rollout_gate_module, "_trusted_epoch", lambda _response: _NOW)
+    concurrent_high_water = prior_high_water + 30
+
+    def advance_runtime_high_water(
+        items: dict[tuple[str, str], dict[str, Any]],
+    ) -> None:
+        for domain in ("mail_action", "report_link"):
+            item = items[(_SCOPE, f"DOMAIN#{domain}")]
+            item["clock_revision"] = {"N": "5"}
+            item["high_water"] = {"N": str(concurrent_high_water)}
+
+    factory.ddb.before_transaction_hook = advance_runtime_high_water
 
     gate.initialize()
 
@@ -1998,7 +2785,8 @@ def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
         assert item["rotation_epoch"] == {"S": next_epoch}
         assert item["primary_generation"] == {"S": expected_primary}
         assert item["previous_generation"] == {"S": expected_previous}
-        assert item["high_water"] == {"N": str(prior_high_water)}
+        assert item["high_water"] == {"N": str(concurrent_high_water)}
+        assert item["clock_revision"] == {"N": "5"}
         assert set(item["retired_generations"]["SS"]) == retired_generations
         history = factory.ddb.items[(_SCOPE, f"EPOCH_HISTORY#{domain}#{_EPOCH}")]
         assert history["high_water"] == {"N": str(prior_high_water)}
@@ -2067,12 +2855,36 @@ def test_cli_redacts_ordinary_client_exceptions(
 def test_terraform_bridge_redacts_ordinary_client_exceptions(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("HMAC_GATE_ENABLED", "true")
     monkeypatch.setenv("HMAC_PREFLIGHT_MANIFEST", "/protected/manifest.json")
     monkeypatch.setenv("HMAC_ROLLOUT_CONTROL", "/protected/control.json")
     monkeypatch.setenv("HMAC_GATE_TASK", "mcp")
-    monkeypatch.setenv("HMAC_GATE_CANDIDATE_JSON", "{}")
+    plan = tmp_path / "saved.tfplan"
+    plan.write_bytes(b"opaque-plan")
+    monkeypatch.setenv("TEAMAGENT_SAVED_PLAN_PATH", str(plan))
+    monkeypatch.setenv("TEAMAGENT_APPLY_ATTEMPT_ID", "attempt")
+    monkeypatch.setattr(
+        terraform_gate_module,
+        "show_saved_plan",
+        lambda _path: {},
+    )
+    monkeypatch.setattr(
+        terraform_gate_module,
+        "validate_saved_plan_hmac_files",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        terraform_gate_module,
+        "validate_saved_plan_runtime_mutations",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        terraform_gate_module,
+        "candidate_change_from_plan",
+        lambda _plan, **_kwargs: ({}, ("create",)),
+    )
 
     def explode(_path: str) -> dict[str, object]:
         raise RuntimeError("sensitive-client-detail")
@@ -2083,3 +2895,50 @@ def test_terraform_bridge_redacts_ordinary_client_exceptions(
     captured = capsys.readouterr()
     assert captured.out == '{"code":"gate_client_error","ok":false}\n'
     assert captured.err == ""
+    assert "sensitive-client-detail" not in captured.out
+
+
+def test_promotion_bridge_redacts_ordinary_client_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    plan = tmp_path / "saved.tfplan"
+    plan.write_bytes(b"opaque-plan")
+    monkeypatch.setenv("HMAC_GATE_ENABLED", "true")
+    monkeypatch.setenv("TEAMAGENT_HMAC_PROMOTION_FROM_TERRAFORM", "1")
+    monkeypatch.setenv("TEAMAGENT_SAVED_PLAN_PATH", str(plan))
+    monkeypatch.setenv("TEAMAGENT_APPLY_ATTEMPT_ID", _TEST_INTENT.apply_attempt_id)
+    monkeypatch.setenv("HMAC_GATE_TASK", "mcp")
+    monkeypatch.setenv("HMAC_GATE_ACTION", "pre-update")
+    monkeypatch.setenv("HMAC_GATE_MODE", "candidate")
+    monkeypatch.setenv("HMAC_REGISTERED_TASK_ARN", _TASK_ARNS["mcp_new"])
+    monkeypatch.setenv("HMAC_PREFLIGHT_MANIFEST", "/protected/manifest.json")
+    monkeypatch.setenv("HMAC_ROLLOUT_CONTROL", "/protected/control.json")
+    monkeypatch.setattr(promotion_gate_module, "show_saved_plan", lambda _path: {})
+    monkeypatch.setattr(
+        promotion_gate_module,
+        "validate_saved_plan_hmac_files",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        promotion_gate_module,
+        "validate_saved_plan_runtime_mutations",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        promotion_gate_module,
+        "validate_saved_plan_event_target",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def explode(_path: str) -> dict[str, object]:
+        raise RuntimeError("sensitive-client-detail")
+
+    monkeypatch.setattr(promotion_gate_module, "_mapping_file", explode)
+    assert promotion_gate_module.main() == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == '{"code":"gate_client_error","ok":false}\n'
+    assert captured.err == ""
+    assert "sensitive-client-detail" not in captured.out

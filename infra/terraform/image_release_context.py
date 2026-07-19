@@ -64,8 +64,7 @@ def _mapping(value: Any, *, label: str) -> Mapping[str, Any]:
 
 def _canonical_bytes(value: Any) -> bytes:
     return (
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        + "\n"
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
     ).encode()
 
 
@@ -144,9 +143,7 @@ def _raw_state_addresses(state: Mapping[str, Any]) -> list[str]:
                 address = base
             elif isinstance(index_key, str):
                 address = (
-                    f"{base}["
-                    f"{json.dumps(index_key, ensure_ascii=False, separators=(',', ':'))}"
-                    "]"
+                    f"{base}[{json.dumps(index_key, ensure_ascii=False, separators=(',', ':'))}]"
                 )
             elif isinstance(index_key, int) and not isinstance(index_key, bool):
                 if index_key < 0:
@@ -177,9 +174,7 @@ def _state_binding(state: Mapping[str, Any]) -> dict[str, Any]:
         "lineage": lineage,
         "serial": serial,
         "managed_address_count": len(addresses),
-        "managed_addresses_sha256": hashlib.sha256(
-            _canonical_bytes(addresses)
-        ).hexdigest(),
+        "managed_addresses_sha256": hashlib.sha256(_canonical_bytes(addresses)).hexdigest(),
         "_addresses": addresses,
     }
 
@@ -251,8 +246,7 @@ def build_context(
             not isinstance(actions, list)
             or not actions
             or any(
-                action not in {"no-op", "create", "read", "update", "delete"}
-                for action in actions
+                action not in {"no-op", "create", "read", "update", "delete"} for action in actions
             )
         ):
             raise ContextError(f"Terraform actions are invalid for {address}")
@@ -262,9 +256,7 @@ def build_context(
             or _configuration_address(address) in configuration_addresses
         )
         if not in_state and "create" not in actions:
-            raise ContextError(
-                f"Terraform change is not owned by the bound state: {address}"
-            )
+            raise ContextError(f"Terraform change is not owned by the bound state: {address}")
         if "create" in actions and not in_configuration:
             raise ContextError(
                 f"Terraform create is not owned by the reviewed configuration: {address}"
@@ -301,9 +293,7 @@ def build_context(
             "applyable": True,
             "errored": False,
             "managed_change_count": len(ownership),
-            "address_ownership_sha256": hashlib.sha256(
-                _canonical_bytes(ownership)
-            ).hexdigest(),
+            "address_ownership_sha256": hashlib.sha256(_canonical_bytes(ownership)).hexdigest(),
         },
     }
 

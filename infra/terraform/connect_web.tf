@@ -398,7 +398,10 @@ resource "aws_ecs_task_definition" "connect_web" {
 
   lifecycle {
     precondition {
-      condition     = local.report_link_hmac_transition_valid
+      condition = (
+        (var.hmac_gate_mode == "rollback" && local.hmac_live_gate_enabled.connect_web)
+        || local.report_link_hmac_transition_valid
+      )
       error_message = "HMAC rollout preflight failed for connect-web; direct/targeted task-definition apply is blocked."
     }
   }
@@ -523,12 +526,18 @@ resource "aws_ecs_service" "connect_web" {
   count           = var.enable_connect_web && var.mcp_image != "" ? 1 : 0
   name            = "${var.project_name}-${var.environment}-connect-web"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.connect_web[0].arn
+  task_definition = local.hmac_promoted_task_definition_arns.connect_web
   desired_count   = 1
   launch_type     = "FARGATE"
 
   lifecycle {
-    ignore_changes = [task_definition]
+    precondition {
+      condition = (
+        var.hmac_gate_mode != "rollback"
+        || local.hmac_live_gate_enabled.connect_web
+      )
+      error_message = "Exact rollback control, manifest, and live promotion gate are required before changing the connect-web service."
+    }
   }
 
   network_configuration {
@@ -553,6 +562,7 @@ resource "aws_ecs_service" "connect_web" {
 
   depends_on = [
     aws_lb_target_group.connect_web_fargate,
+    terraform_data.hmac_connect_web_pre_update,
   ]
 }
 
