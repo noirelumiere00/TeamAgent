@@ -34,6 +34,10 @@ MAX_DEADLINE_SECONDS = MAX_JOB_BUDGET_SECONDS
 ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 MAX_PRESIGNED_URL_SECONDS = 7 * 24 * 60 * 60
 DDB_RETENTION_GRACE_SECONDS = 24 * 60 * 60
+TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS = MAX_JOB_BUDGET_SECONDS - 30
+_TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
+_TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
+_TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 JobId = Annotated[str, StringConstraints(pattern=r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")]
@@ -105,6 +109,22 @@ class TikTokClientConfig(_StrictModel):
     industry: str | None = Field(default=None, max_length=200)
 
 
+def estimate_tiktok_operation_seconds(
+    *,
+    keyword_count: int,
+    n_per_kw: int,
+    videos_per_kw: int,
+    artifact_mode: Literal["metadata_only", "full"],
+) -> int:
+    search_seconds = keyword_count * _TIKTOK_SEARCH_WORST_CASE_SECONDS
+    if artifact_mode == "metadata_only":
+        return search_seconds
+    return search_seconds + keyword_count * (
+        n_per_kw * _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS
+        + videos_per_kw * _TIKTOK_VIDEO_WORST_CASE_SECONDS
+    )
+
+
 class TikTokAcquireOperation(_StrictModel):
     kind: Literal["tiktok_acquire"]
     search_type: Literal["keyword", "hashtag"] = "keyword"
@@ -112,9 +132,10 @@ class TikTokAcquireOperation(_StrictModel):
         Annotated[str, StringConstraints(min_length=1, max_length=100)],
         ...,
     ] = Field(min_length=1, max_length=10)
-    n_per_kw: int = Field(default=30, ge=1, le=30)
-    videos_per_kw: int = Field(default=6, ge=0, le=10)
+    n_per_kw: int = Field(default=10, ge=1, le=30)
+    videos_per_kw: int = Field(default=2, ge=0, le=10)
     sort: Literal["display", "save_rate", "recent"] = "display"
+    artifact_mode: Literal["metadata_only", "full"] = "full"
     max_video_bytes: int = Field(default=30 * 1024 * 1024, ge=1, le=MAX_OUTPUT_BYTES)
     client: TikTokClientConfig = Field(default_factory=TikTokClientConfig)
 
@@ -125,6 +146,23 @@ class TikTokAcquireOperation(_StrictModel):
         if any(not keyword for keyword in normalized) or len(set(normalized)) != len(normalized):
             raise ValueError("keywords must be non-empty and unique")
         return normalized
+
+    @model_validator(mode="after")
+    def _fits_immutable_job_deadline(self) -> TikTokAcquireOperation:
+        if self.artifact_mode == "metadata_only" and self.videos_per_kw != 0:
+            raise ValueError("metadata-only TikTok operation cannot download videos")
+        estimated_seconds = estimate_tiktok_operation_seconds(
+            keyword_count=len(self.keywords),
+            n_per_kw=self.n_per_kw,
+            videos_per_kw=self.videos_per_kw,
+            artifact_mode=self.artifact_mode,
+        )
+        if estimated_seconds > TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS:
+            raise ValueError(
+                "TikTok operation exceeds immutable job deadline; reduce keywords, "
+                "n_per_kw, or videos_per_kw"
+            )
+        return self
 
 
 class ProxyOperation(_StrictModel):

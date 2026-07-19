@@ -757,6 +757,43 @@ def _tiktok_acquire(
     posts_by_keyword = {
         keyword: [post for post in posts if post["kw"] == keyword] for keyword in operation.keywords
     }
+    if operation.artifact_mode == "metadata_only":
+        posts_path = workdir / "posts.normalized.json"
+        posts_path.write_text(
+            json.dumps(
+                {
+                    "posts": posts,
+                    "shortfalls": shortfalls,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        return OperationOutput(
+            (
+                ProducedArtifact(
+                    "posts.json",
+                    posts_path,
+                    "application/json",
+                    relative_key="posts.normalized.json",
+                ),
+            ),
+            {
+                "counts": {
+                    "kw": len(operation.keywords),
+                    "posts": len(posts),
+                    "videos": 0,
+                    "per_kw": {
+                        keyword: len(posts_by_keyword[keyword]) for keyword in operation.keywords
+                    },
+                },
+                "search_types": actual_search_types,
+                "shortfalls": shortfalls,
+                "warnings": warnings,
+                "s3_prefix": "",
+            },
+        )
     selected: set[str] = set()
     for keyword in operation.keywords:
         _remaining(budget)

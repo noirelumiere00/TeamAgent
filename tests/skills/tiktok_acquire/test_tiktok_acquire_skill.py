@@ -51,9 +51,9 @@ def test_acquire_submits_and_returns_job_id() -> None:
     skill = TikTokAcquireSkill(store=store)  # type: ignore[arg-type]
     out = skill.run(
         TikTokAcquireInput(
-            keywords=["コンビニスイーツ", "セブンスイーツ"],
-            n_per_kw=30,
-            videos_per_kw=6,
+            keywords=["コンビニスイーツ"],
+            n_per_kw=10,
+            videos_per_kw=2,
             sort="save_rate",
             client_name="セブンイレブン",
             competitors=["ローソン", "ファミマ"],
@@ -67,9 +67,9 @@ def test_acquire_submits_and_returns_job_id() -> None:
     # 投函specの中身
     spec = store.last_spec
     assert spec is not None
-    assert spec["keywords"] == ["コンビニスイーツ", "セブンスイーツ"]
-    assert spec["n_per_kw"] == 30
-    assert spec["videos_per_kw"] == 6
+    assert spec["keywords"] == ["コンビニスイーツ"]
+    assert spec["n_per_kw"] == 10
+    assert spec["videos_per_kw"] == 2
     assert spec["sort"] == "save_rate"
     assert spec["audit_principal_hash"] == hashlib.sha256(b"a@vectorinc.co.jp").hexdigest()
     assert "requested_by" not in spec
@@ -90,6 +90,12 @@ def test_acquire_clamps_via_schema() -> None:
         TikTokAcquireInput(keywords=["x"], videos_per_kw=11)
     with pytest.raises(ValidationError):
         TikTokAcquireInput(keywords=[])  # 1件以上必須
+    with pytest.raises(ValidationError, match="安全な実行時間"):
+        TikTokAcquireInput(
+            keywords=["x", "y"],
+            n_per_kw=30,
+            videos_per_kw=6,
+        )
 
 
 def test_acquire_submit_failure_returns_failed() -> None:

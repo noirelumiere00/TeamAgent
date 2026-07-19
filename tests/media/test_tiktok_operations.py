@@ -349,6 +349,54 @@ def test_compatibility_adapter_exposes_provider_id_not_artifact_pid() -> None:
     assert video.id == "987654321"
 
 
+def test_metadata_only_search_skips_thumbnail_and_video_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node = tmp_path / "node"
+    scraper = tmp_path / "search.mjs"
+    node.touch()
+    scraper.touch()
+    monkeypatch.setenv("TIKTOK_NODE_BIN", str(node))
+    monkeypatch.setenv("TIKTOK_SCRAPER_PATH", str(scraper))
+    monkeypatch.setattr(
+        "teamagent.media.operations._node_json",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "type": "keyword",
+            "videos": [
+                {
+                    "id": "123",
+                    "url": "https://www.tiktok.com/@creator/video/123",
+                    "coverUrl": "https://p16.example.invalid/cover.jpg",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr("teamagent.media.operations.validate_acquire_url", lambda url: url)
+    monkeypatch.setattr(
+        "teamagent.media.operations._fetch_public_image",
+        lambda *_args, **_kwargs: pytest.fail("metadata-only mode fetched a thumbnail"),
+    )
+
+    output = _tiktok_acquire(
+        TikTokAcquireOperation(
+            kind="tiktok_acquire",
+            keywords=("coffee",),
+            n_per_kw=1,
+            videos_per_kw=0,
+            artifact_mode="metadata_only",
+        ),
+        tmp_path,
+        DeadlineBudget(200, clock=lambda: 100),
+    )
+
+    assert [artifact.name for artifact in output.artifacts] == ["posts.json"]
+    assert output.metadata["counts"]["videos"] == 0
+    assert not (tmp_path / "manifest.json").exists()
+    assert not (tmp_path / "config.json").exists()
+
+
 def test_malformed_optional_cover_is_warning_not_job_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

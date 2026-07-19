@@ -852,6 +852,7 @@ class MediaJobClient:
             n_per_kw=max_videos,
             videos_per_kw=0,
             sort="display",
+            artifact_mode="metadata_only",
             client=TikTokClientConfig(),
         )
         deadline_epoch_s = self._absolute_deadline(timeout_s)

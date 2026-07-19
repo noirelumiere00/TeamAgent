@@ -23,6 +23,10 @@ from botocore.config import Config
 _MAX_BODY_BYTES = 128 * 1024
 _MAX_ECS_OVERRIDE_CHARACTERS = 8192
 _MAX_JOB_BUDGET_SECONDS = 15 * 60
+_TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS = _MAX_JOB_BUDGET_SECONDS - 30
+_TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
+_TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
+_TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
 _MAX_ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _TASK_START_MINIMUM_BUDGET_SECONDS = 30.0
 _TERMINAL_WRITE_RESERVE_SECONDS = 15.0
@@ -178,6 +182,7 @@ def _validate_operation(value: Any) -> None:
                 "n_per_kw",
                 "videos_per_kw",
                 "sort",
+                "artifact_mode",
                 "max_video_bytes",
                 "client",
             },
@@ -204,6 +209,19 @@ def _validate_operation(value: Any) -> None:
         )
         if operation["sort"] not in {"display", "save_rate", "recent"}:
             raise ValueError("TikTok sort is invalid")
+        artifact_mode = operation["artifact_mode"]
+        if artifact_mode not in {"metadata_only", "full"}:
+            raise ValueError("TikTok artifact mode is invalid")
+        if artifact_mode == "metadata_only" and operation["videos_per_kw"] != 0:
+            raise ValueError("metadata-only TikTok operation cannot download videos")
+        estimated_seconds = len(keywords) * _TIKTOK_SEARCH_WORST_CASE_SECONDS
+        if artifact_mode == "full":
+            estimated_seconds += len(keywords) * (
+                operation["n_per_kw"] * _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS
+                + operation["videos_per_kw"] * _TIKTOK_VIDEO_WORST_CASE_SECONDS
+            )
+        if estimated_seconds > _TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS:
+            raise ValueError("TikTok operation exceeds immutable job deadline")
         _bounded_int(
             operation["max_video_bytes"],
             minimum=1,

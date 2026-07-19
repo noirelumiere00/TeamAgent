@@ -532,6 +532,7 @@ def test_sync_tiktok_search_uses_generic_bounded_operation() -> None:
     assert operation.keywords == ("coffee",)
     assert operation.n_per_kw == 3
     assert operation.videos_per_kw == 0
+    assert operation.artifact_mode == "metadata_only"
 
 
 def test_stage_rejects_scope_content_type_and_ttl_before_aws_write() -> None:

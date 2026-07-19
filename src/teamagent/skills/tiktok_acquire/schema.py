@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from teamagent.media.contracts import (
+    TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS,
+    estimate_tiktok_operation_seconds,
+)
 
 
 class TikTokAcquireInput(BaseModel):
@@ -20,9 +25,9 @@ class TikTokAcquireInput(BaseModel):
         default="keyword",
         description="keyword検索、またはhashtag検索（空振り時はkeywordへフォールバック）",
     )
-    n_per_kw: int = Field(default=30, ge=1, le=30, description="各KWの取得本数(最大30)")
+    n_per_kw: int = Field(default=10, ge=1, le=30, description="各KWの取得本数(最大30)")
     videos_per_kw: int = Field(
-        default=6, ge=0, le=10, description="各KWで動画本体(mp4)を保存する上位本数"
+        default=2, ge=0, le=10, description="各KWで動画本体(mp4)を保存する上位本数"
     )
     sort: Literal["display", "save_rate", "recent"] = Field(
         default="display",
@@ -33,6 +38,21 @@ class TikTokAcquireInput(BaseModel):
     )
     industry: str | None = Field(default=None, description="業種(任意)")
     competitors: list[str] = Field(default_factory=list, description="競合名(任意・SoV分析用)")
+
+    @model_validator(mode="after")
+    def _fits_worker_deadline(self) -> TikTokAcquireInput:
+        estimated_seconds = estimate_tiktok_operation_seconds(
+            keyword_count=len(self.keywords),
+            n_per_kw=self.n_per_kw,
+            videos_per_kw=self.videos_per_kw,
+            artifact_mode="full",
+        )
+        if estimated_seconds > TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS:
+            raise ValueError(
+                "1ジョブの安全な実行時間を超えます。キーワード数・各KW取得本数・"
+                "動画保存本数を減らしてください"
+            )
+        return self
 
 
 class TikTokAcquireOutput(BaseModel):

@@ -12,6 +12,7 @@ from teamagent.media.contracts import (
     FrameOperation,
     S3ObjectRef,
     SlidesOperation,
+    TikTokAcquireOperation,
     make_job_request,
     parse_job_request,
     semantic_request_sha256,
@@ -32,6 +33,34 @@ def _ref() -> S3ObjectRef:
         size=4,
         content_type="video/mp4",
     )
+
+
+def test_tiktok_operation_admission_is_bounded_by_immutable_deadline() -> None:
+    metadata_only = TikTokAcquireOperation(
+        kind="tiktok_acquire",
+        keywords=("a", "b", "c", "d", "e", "f", "g"),
+        n_per_kw=30,
+        videos_per_kw=0,
+        artifact_mode="metadata_only",
+    )
+    assert metadata_only.artifact_mode == "metadata_only"
+
+    with pytest.raises(ValidationError, match="immutable job deadline"):
+        TikTokAcquireOperation(
+            kind="tiktok_acquire",
+            keywords=("a", "b"),
+            n_per_kw=30,
+            videos_per_kw=6,
+            artifact_mode="full",
+        )
+    with pytest.raises(ValidationError, match="cannot download videos"):
+        TikTokAcquireOperation(
+            kind="tiktok_acquire",
+            keywords=("a",),
+            n_per_kw=1,
+            videos_per_kw=1,
+            artifact_mode="metadata_only",
+        )
 
 
 def test_job_payload_is_strict_hashed_bounded_and_idempotent() -> None:

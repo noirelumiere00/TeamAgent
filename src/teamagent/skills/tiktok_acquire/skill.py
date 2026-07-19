@@ -46,13 +46,13 @@ def _build_client_config(input: TikTokAcquireInput) -> dict[str, object]:
 
 @register
 class TikTokAcquireSkill(BaseSkill[TikTokAcquireInput, TikTokAcquireOutput]):
-    """KW群のTikTok取得ジョブを投函する(30本/KW・上位N本は動画本体DL)。非同期。"""
+    """期限内に完了できるTikTok取得ジョブを投函する。非同期。"""
 
     name: ClassVar[str] = "tiktok_acquire"
     description: ClassVar[str] = (
         "商材名/KW群のTikTok上位動画を、動画本体(mp4)込みで一括取得し、提案・"
-        "マルチモーダル分析の素材としてストックする。各KW最大30本の指標+サムネを集め、"
-        "上位N本(既定6)はmp4本体もS3に保存する。トリガー=「TikTok取得して/動画も保存して/"
+        "マルチモーダル分析の素材としてストックする。安全な実行時間内で指標+サムネを集め、"
+        "上位N本(既定2)はmp4本体もS3に保存する。トリガー=「TikTok取得して/動画も保存して/"
         "保存率上位の動画も/素材集めて/ストックして/提案用に集めて」。分析や要約はせず素材を"
         "貯めるだけ（構造分析レポートは video_algorithm、その場で見る軽い検索・横断分析は"
         " tiktok_search）。非同期で即job_idを返し、結果は tiktok_acquire_status で受け取る。"
