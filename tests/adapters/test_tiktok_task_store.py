@@ -40,8 +40,15 @@ class _FakeMediaClient:
         self.submitted = request
         return request.job_id
 
-    def get_result(self, job_id: str, *, deadline_epoch_s: int) -> MediaJobResult | None:
+    def get_result(
+        self,
+        job_id: str,
+        *,
+        deadline_epoch_s: int,
+        expected_audit_principal_hash: str | None = None,
+    ) -> MediaJobResult | None:
         assert job_id == _JOB_ID
+        assert expected_audit_principal_hash == "a" * 64
         self.get_deadlines.append(deadline_epoch_s)
         return self.result
 
@@ -57,7 +64,7 @@ class _FakeMediaClient:
         deadline_epoch_s: int,
         expires_s: int,
     ) -> str:
-        assert expires_s == 300
+        assert expires_s == 604800
         self.presign_deadlines.append(deadline_epoch_s)
         return f"https://s3.example.invalid/{ref.key}"
 
@@ -114,7 +121,7 @@ def test_done_status_reuses_one_deadline_for_read_download_and_presign(
     client = _FakeMediaClient(result)
     store = _store(monkeypatch, client)
 
-    status = store.get_status(_JOB_ID)
+    status = store.get_status(_JOB_ID, audit_principal_hash="a" * 64)
 
     assert status is not None
     assert status["status"] == "done"

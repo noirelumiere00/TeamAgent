@@ -16,6 +16,10 @@ class TikTokAcquireInput(BaseModel):
     """取得リクエスト（AIが商材からKWを立案して発行）。"""
 
     keywords: list[str] = Field(min_length=1, max_length=10, description="検索キーワード群(1〜10)")
+    search_type: Literal["keyword", "hashtag"] = Field(
+        default="keyword",
+        description="keyword検索、またはhashtag検索（空振り時はkeywordへフォールバック）",
+    )
     n_per_kw: int = Field(default=30, ge=1, le=30, description="各KWの取得本数(最大30)")
     videos_per_kw: int = Field(
         default=6, ge=0, le=10, description="各KWで動画本体(mp4)を保存する上位本数"
@@ -58,4 +62,6 @@ class TikTokAcquireStatusOutput(BaseModel):
         description="各動画 {pid,kw,downloaded,s3_key(機械用),url(人向け),thumb_url,tiktok_url}",
     )
     error_code: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    shortfalls: list[dict[str, Any]] = Field(default_factory=list)
     message: str = ""

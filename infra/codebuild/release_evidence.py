@@ -2316,11 +2316,20 @@ def deployment_plan_metadata(
         destructive_deletes,
         planned_replacements,
     ) = _saved_plan_transition_classification(changes_for_import_check)
+    transition_images = dict(requested_images)
+    transition_channels = dict(release_channels)
+    if requested_media_image:
+        if not requested_images.get("mcp"):
+            raise EvidenceError(
+                "saved Terraform media image requires the signed MCP release channel"
+            )
+        transition_images["tiktok"] = requested_media_image
+        transition_channels["tiktok"] = release_channels.get("mcp")
     _require_destructive_rollback_channels(
         deletes=destructive_deletes,
         replacements=planned_replacements,
-        requested_images=requested_images,
-        release_channels=release_channels,
+        requested_images=transition_images,
+        release_channels=transition_channels,
     )
     changes = changes_for_import_check
     gate_changes = [

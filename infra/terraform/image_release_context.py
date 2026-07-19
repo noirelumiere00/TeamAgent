@@ -60,9 +60,13 @@ RUNTIME_IMAGE_PATTERNS = {
         r"^718959508629\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/"
         r"teamagent-openclaw@sha256:[0-9a-f]{64}$"
     ),
+    "media_worker_image": re.compile(
+        r"^718959508629\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/"
+        r"teamagent-media-worker@sha256:[0-9a-f]{64}$"
+    ),
     "tiktok_acquire_image": re.compile(
         r"^718959508629\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/"
-        r"teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
+        r"teamagent-media-worker@sha256:[0-9a-f]{64}$"
     ),
 }
 
@@ -162,22 +166,32 @@ def _runtime_image_binding(plan: Mapping[str, Any]) -> dict[str, str]:
                 f"Terraform saved plan requires a nonempty release digest: {variable_name}"
             )
         images[variable_name] = value
-    enable_tiktok = _plan_variable(plan, "enable_tiktok_acquire")
-    if not isinstance(enable_tiktok, bool):
-        raise ContextError("Terraform plan variable enable_tiktok_acquire is invalid")
-    if enable_tiktok:
-        tiktok_image = _plan_variable(plan, "tiktok_acquire_image")
-        if (
-            not isinstance(tiktok_image, str)
-            or not RUNTIME_IMAGE_PATTERNS["tiktok_acquire_image"].fullmatch(
-                tiktok_image
-            )
+    enable_media = _plan_variable(plan, "enable_media_worker")
+    enable_tiktok_alias = _plan_variable(plan, "enable_tiktok_acquire")
+    if not isinstance(enable_media, bool) or not isinstance(enable_tiktok_alias, bool):
+        raise ContextError("Terraform plan media enable variables are invalid")
+    if enable_media or enable_tiktok_alias:
+        media_image = _plan_variable(plan, "media_worker_image")
+        tiktok_alias_image = _plan_variable(plan, "tiktok_acquire_image")
+        if not isinstance(media_image, str) or not isinstance(tiktok_alias_image, str):
+            raise ContextError("Terraform plan media image variables are invalid")
+        for variable_name, value in (
+            ("media_worker_image", media_image),
+            ("tiktok_acquire_image", tiktok_alias_image),
         ):
+            if value and not RUNTIME_IMAGE_PATTERNS[variable_name].fullmatch(value):
+                raise ContextError(
+                    "Terraform saved plan requires the generic media release digest: "
+                    f"{variable_name}"
+                )
+        if media_image and tiktok_alias_image and media_image != tiktok_alias_image:
+            raise ContextError("Terraform saved plan media image aliases disagree")
+        effective_media_image = media_image or tiktok_alias_image
+        if not effective_media_image:
             raise ContextError(
-                "Terraform saved plan requires a nonempty release digest: "
-                "tiktok_acquire_image"
+                "Terraform saved plan requires a nonempty release digest: media_worker_image"
             )
-        images["tiktok_acquire_image"] = tiktok_image
+        images["media_worker_image"] = effective_media_image
     return images
 
 

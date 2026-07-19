@@ -26,6 +26,11 @@ from teamagent.skills.tiktok_acquire.schema import (
 logger = structlog.get_logger(__name__)
 
 
+def _audit_principal_hash(ctx: SkillContext) -> str:
+    requested_by = ctx.metadata.get("user_email") or ctx.user_id or "unknown"
+    return hashlib.sha256(str(requested_by).encode("utf-8")).hexdigest()
+
+
 def _build_client_config(input: TikTokAcquireInput) -> dict[str, object]:
     """config.json に流すクライアント設定を組む(下流FMT用・任意項目)。"""
     cfg: dict[str, object] = {}
@@ -60,7 +65,6 @@ class TikTokAcquireSkill(BaseSkill[TikTokAcquireInput, TikTokAcquireOutput]):
 
     def run(self, input: TikTokAcquireInput, ctx: SkillContext) -> TikTokAcquireOutput:
         log = ctx.bind_logger(self.name)
-        requested_by = ctx.metadata.get("user_email") or ctx.user_id or "unknown"
         request_fingerprint = hashlib.sha256(
             json.dumps(
                 {
@@ -76,12 +80,13 @@ class TikTokAcquireSkill(BaseSkill[TikTokAcquireInput, TikTokAcquireOutput]):
         spec = {
             "job_id": job_id,
             "keywords": input.keywords,
+            "search_type": input.search_type,
             "n_per_kw": input.n_per_kw,
             "videos_per_kw": input.videos_per_kw,
             "sort": input.sort,
             "max_video_bytes": 30 * 1024 * 1024,
             "client": _build_client_config(input),
-            "audit_principal_hash": hashlib.sha256(str(requested_by).encode("utf-8")).hexdigest(),
+            "audit_principal_hash": _audit_principal_hash(ctx),
             "request_fingerprint": request_fingerprint,
         }
         ok = self._store.submit(spec)
@@ -119,7 +124,10 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
 
     def run(self, input: TikTokAcquireStatusInput, ctx: SkillContext) -> TikTokAcquireStatusOutput:
         log = ctx.bind_logger(self.name)
-        st = self._store.get_status(input.job_id)
+        st = self._store.get_status(
+            input.job_id,
+            audit_principal_hash=_audit_principal_hash(ctx),
+        )
         if st is None:
             return TikTokAcquireStatusOutput(
                 job_id=input.job_id, status="unknown", message="そのjob_idは見つかりません。"
@@ -146,5 +154,7 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
             manifest_url=st.get("manifest_url"),
             videos=st.get("videos", []),
             error_code=st.get("error_code"),
+            warnings=st.get("warnings", []),
+            shortfalls=st.get("shortfalls", []),
             message=msg,
         )

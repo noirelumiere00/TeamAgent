@@ -39,11 +39,16 @@ class _Dynamo:
         self.calls: list[dict[str, Any]] = []
         self.item: dict[str, Any] = {}
         self.reject_claim = False
+        self.reject_stopped = False
 
     def update_item(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         expression = kwargs["UpdateExpression"]
         if expression.startswith("SET dispatch_owner") and self.reject_claim:
+            raise _ConditionalFailureError
+        if "dispatched_task_arn = :task" in kwargs.get("ConditionExpression", "") and (
+            self.reject_stopped
+        ):
             raise _ConditionalFailureError
         return {}
 
@@ -83,7 +88,7 @@ def _load_handler(
     return module
 
 
-def _body(now: int = 1_000) -> str:
+def _body(now: int = 1_000, *, audit_principal_hash: str | None = None) -> str:
     request = make_job_request(
         operation=AcquireOperation(
             kind="acquire",
@@ -93,6 +98,7 @@ def _body(now: int = 1_000) -> str:
         request_fingerprint="dispatch-test",
         now_epoch_s=now,
         timeout_s=300,
+        audit_principal_hash=audit_principal_hash,
     )
     return request.to_json_bytes().decode()
 
@@ -113,13 +119,98 @@ def _configure(monkeypatch: pytest.MonkeyPatch) -> None:
         "TASKDEF_ARN": "taskdef",
         "JOBS_TABLE": "jobs",
         "JOB_BUCKET": "teamagent-media",
-        "MEDIA_ARTIFACT_TTL_SECONDS": "3600",
+        "MEDIA_ARTIFACT_TTL_SECONDS": "2592000",
         "SUBNETS": "subnet-a,subnet-b",
         "SG_ID": "sg-media",
         "CONTAINER": "media-worker",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
+
+
+def _stopped_event(
+    body: str,
+    *,
+    audit_principal_hash: str | None = None,
+    include_tags: bool = False,
+) -> dict[str, Any]:
+    request = json.loads(body)
+    tags = [
+        {"key": "teamagent-job-id", "value": request["job_id"]},
+        {
+            "key": "teamagent-payload-sha256",
+            "value": request["payload_sha256"],
+        },
+    ]
+    if audit_principal_hash is not None:
+        tags.append(
+            {
+                "key": "teamagent-audit-principal-hash",
+                "value": audit_principal_hash,
+            }
+        )
+    environment = [
+        {"name": "MEDIA_JOB_ID", "value": request["job_id"]},
+        {
+            "name": "MEDIA_JOB_PAYLOAD_SHA256",
+            "value": request["payload_sha256"],
+        },
+    ]
+    if audit_principal_hash is not None:
+        environment.append(
+            {
+                "name": "MEDIA_JOB_AUDIT_PRINCIPAL_HASH",
+                "value": audit_principal_hash,
+            }
+        )
+    detail = {
+        "clusterArn": "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev-tiktok",
+        "taskDefinitionArn": (
+            "arn:aws:ecs:ap-northeast-1:718959508629:"
+            "task-definition/teamagent-dev-tiktok-acquire:42"
+        ),
+        "taskArn": (
+            "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev-tiktok/0123456789abcdef"
+        ),
+        "startedBy": request["job_id"],
+        "lastStatus": "STOPPED",
+        "stopCode": "EssentialContainerExited",
+        "stoppedReason": "Essential container in task exited",
+        "containers": [
+            {
+                "name": "media-worker",
+                "exitCode": 137,
+                "reason": "OutOfMemoryError",
+            }
+        ],
+        "overrides": {
+            "containerOverrides": [
+                {
+                    "name": "media-worker",
+                    "environment": environment,
+                }
+            ]
+        },
+    }
+    if include_tags:
+        detail["tags"] = tags
+    return {
+        "source": "aws.ecs",
+        "detail-type": "ECS Task State Change",
+        "detail": detail,
+    }
+
+
+def _configure_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch)
+    monkeypatch.setenv(
+        "CLUSTER_ARN",
+        "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev-tiktok",
+    )
+    monkeypatch.setenv(
+        "TASKDEF_ARN",
+        ("arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:43"),
+    )
 
 
 def test_dispatcher_passes_only_bounded_persisted_envelope_pointer(
@@ -137,12 +228,23 @@ def test_dispatcher_passes_only_bounded_persisted_envelope_pointer(
         types.SimpleNamespace(aws_request_id="request-1"),
     )
 
-    assert result == {"started": ["arn:aws:ecs:region:account:task/media/1"]}
+    assert result == {
+        "started": ["arn:aws:ecs:region:account:task/media/1"],
+        "batchItemFailures": [],
+    }
     assert len(ecs.calls) == 1
     call = ecs.calls[0]
     assert call["count"] == 1
     assert call["taskDefinition"] == "taskdef"
     assert call["clientToken"] == json.loads(body)["idempotency_key"]
+    assert call["startedBy"] == json.loads(body)["job_id"]
+    assert call["tags"] == [
+        {"key": "teamagent-job-id", "value": json.loads(body)["job_id"]},
+        {
+            "key": "teamagent-payload-sha256",
+            "value": json.loads(body)["payload_sha256"],
+        },
+    ]
     override = call["overrides"]["containerOverrides"]
     assert override == [
         {
@@ -220,10 +322,47 @@ def test_large_valid_envelope_still_uses_override_below_ecs_limit(
         types.SimpleNamespace(aws_request_id="request-1"),
     )
 
-    assert result == {"started": ["arn:aws:ecs:region:account:task/media/1"]}
+    assert result == {
+        "started": ["arn:aws:ecs:region:account:task/media/1"],
+        "batchItemFailures": [],
+    }
     overrides = ecs.calls[0]["overrides"]
     assert len(module._canonical(overrides).decode()) <= 8192
     assert "MEDIA_JOB_JSON" not in module._canonical(overrides).decode()
+
+
+def test_dispatcher_carries_audit_owner_in_task_tag_and_stopped_event_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    ecs = _Ecs()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+    audit_hash = "a" * 64
+
+    module.handler(
+        {
+            "Records": [
+                {
+                    "messageId": "message-audit",
+                    "body": _body(audit_principal_hash=audit_hash),
+                }
+            ]
+        },
+        types.SimpleNamespace(aws_request_id="request-1"),
+    )
+
+    call = ecs.calls[0]
+    assert {
+        "key": "teamagent-audit-principal-hash",
+        "value": audit_hash,
+    } in call["tags"]
+    environment = call["overrides"]["containerOverrides"][0]["environment"]
+    assert {
+        "name": "MEDIA_JOB_AUDIT_PRINCIPAL_HASH",
+        "value": audit_hash,
+    } in environment
 
 
 def test_task_override_enforces_ecs_8192_character_limit(
@@ -374,18 +513,23 @@ def test_terminal_duplicate_does_not_launch_or_mutate_result(
 ) -> None:
     ddb = _Dynamo()
     ddb.reject_claim = True
-    ddb.item = {"status": {"S": "done"}}
+    body = _body()
+    payload = json.loads(body)["payload_sha256"]
+    ddb.item = {
+        "status": {"S": "done"},
+        "payload_sha256": {"S": payload},
+    }
     ecs = _Ecs()
     module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
     _configure(monkeypatch)
     monkeypatch.setattr(module.time, "time", lambda: 1_001)
 
     result = module.handler(
-        {"Records": [{"messageId": "duplicate", "body": _body()}]},
+        {"Records": [{"messageId": "duplicate", "body": body}]},
         types.SimpleNamespace(aws_request_id="request-1"),
     )
 
-    assert result == {"started": []}
+    assert result == {"started": [], "batchItemFailures": []}
     assert ecs.calls == []
     assert len(ddb.calls) == 1
 
@@ -486,3 +630,88 @@ def test_dispatcher_rejects_non_exact_task_count_and_releases_lease(
         )
 
     assert any(value["UpdateExpression"].startswith("REMOVE dispatch_owner") for value in ddb.calls)
+
+
+def test_ecs_stopped_reconciler_terminalizes_owned_queued_or_running_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=_Ecs())
+    _configure_stopped(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_500)
+    audit_hash = "a" * 64
+    request = make_job_request(
+        operation=AcquireOperation(
+            kind="acquire",
+            url="https://www.youtube.com/watch?v=BaW_jenozKc",
+        ),
+        output_bucket="teamagent-media",
+        request_fingerprint="stopped-reconcile",
+        now_epoch_s=1_000,
+        timeout_s=900,
+        audit_principal_hash=audit_hash,
+    )
+
+    result = module.handler(
+        _stopped_event(
+            request.to_json_bytes().decode(),
+            audit_principal_hash=audit_hash,
+        ),
+        types.SimpleNamespace(),
+    )
+
+    assert result == {
+        "reconciled": True,
+        "job_id": request.job_id,
+        "status": "failed",
+    }
+    update = ddb.calls[0]
+    assert "dispatched_task_arn = :task" in update["ConditionExpression"]
+    assert "audit_principal_hash = :audit" in update["ConditionExpression"]
+    assert "cleanup_at = if_not_exists(hard_cleanup_at, :cleanup)" in update["UpdateExpression"]
+    assert update["ExpressionAttributeValues"][":cleanup"] == {"N": str(1_500 + 30 * 24 * 60 * 60)}
+    detail = json.loads(update["ExpressionAttributeValues"][":detail"]["S"])
+    assert detail["error_code"] == "MEDIA_ECS_TASK_STOPPED"
+    assert detail["metadata"]["ecs"]["containers"][0]["exit_code"] == 137
+
+
+def test_ecs_stopped_reconciler_rejects_optional_task_tag_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = _body()
+    event = _stopped_event(body, include_tags=True)
+    event["detail"]["tags"][0]["value"] = "mj_ffffffffffffffffffffffff"
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    _configure_stopped(monkeypatch)
+
+    with pytest.raises(ValueError, match="disagrees with task tags"):
+        module.handler(event, types.SimpleNamespace())
+
+
+def test_ecs_stopped_reconciler_never_overwrites_terminal_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = _body()
+    request = json.loads(body)
+    ddb = _Dynamo()
+    ddb.reject_stopped = True
+    ddb.item = {
+        "status": {"S": "done"},
+        "dispatched_task_arn": {
+            "S": (
+                "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev-tiktok/0123456789abcdef"
+            )
+        },
+        "payload_sha256": {"S": request["payload_sha256"]},
+    }
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=_Ecs())
+    _configure_stopped(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_100)
+
+    result = module.handler(_stopped_event(body), types.SimpleNamespace())
+
+    assert result == {
+        "reconciled": False,
+        "job_id": request["job_id"],
+        "status": "done",
+    }

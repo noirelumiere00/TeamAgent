@@ -3862,6 +3862,77 @@ snapshot_live() {
   ' "$output" >/dev/null || die "worker dispatcher/taskdef/event mappingのlive契約が不整合です"
 }
 
+# A legacy-envelope task and a generic-envelope task intentionally retain the
+# same physical queue/table/family.  The in-place image cutover is therefore
+# safe only after producers are disabled, both queues are drained, and the
+# shared family has no active legacy task.
+validate_media_envelope_cutover_gate() {
+  local snapshot="$1" desired_image="$2"
+  local live_image legacy_prefix generic_prefix
+  live_image="$(jq -er '.taskdefs.tiktok.image' "$snapshot")"
+  legacy_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${PROJECT}-${ENVIRONMENT}-tiktok-acquire@sha256:"
+  generic_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/teamagent-media-worker@sha256:"
+  [[ "$live_image" == "$legacy_prefix"* && "$desired_image" == "$generic_prefix"* ]] ||
+    return 0
+
+  jq -e '
+    def explicitly_disabled:
+      type == "string" and
+      ((ascii_downcase) as $value |
+        $value == "0" or $value == "false" or $value == "no" or
+        $value == "off");
+    (.taskdefs.mcp.env | has("USE_VIDEO_TOOLS")) and
+    (.taskdefs.mcp.env | has("USE_TIKTOK_TOOLS")) and
+    (.taskdefs.mcp.env.USE_VIDEO_TOOLS | explicitly_disabled) and
+    (.taskdefs.mcp.env.USE_TIKTOK_TOOLS | explicitly_disabled)
+  ' "$snapshot" >/dev/null ||
+    die "legacy→generic media切替前にUSE_VIDEO_TOOLS/USE_TIKTOK_TOOLSを明示停止してください"
+
+  local queue_name queue_url queue_output
+  for queue_name in \
+    "${PROJECT}-${ENVIRONMENT}-tiktok-acquire-jobs" \
+    "${PROJECT}-${ENVIRONMENT}-tiktok-acquire-dlq"; do
+    queue_output="$TMP_ROOT/media-cutover-queue-${RANDOM}.json"
+    aws_cli sqs get-queue-url \
+      --queue-name "$queue_name" \
+      --queue-owner-aws-account-id "$EXPECTED_ACCOUNT_ID" \
+      --output json > "$queue_output"
+    queue_url="$(jq -er '.QueueUrl | select(type == "string" and length > 0)' \
+      "$queue_output")" || die "media切替queue URLを取得できません: $queue_name"
+    aws_cli sqs get-queue-attributes \
+      --queue-url "$queue_url" \
+      --attribute-names \
+        ApproximateNumberOfMessages \
+        ApproximateNumberOfMessagesNotVisible \
+        ApproximateNumberOfMessagesDelayed \
+      --output json > "$queue_output"
+    jq -e '
+      .Attributes == {
+        ApproximateNumberOfMessages: "0",
+        ApproximateNumberOfMessagesDelayed: "0",
+        ApproximateNumberOfMessagesNotVisible: "0"
+      }
+    ' "$queue_output" >/dev/null ||
+      die "legacy→generic media切替にはqueue/DLQのvisible/in-flight/delayed完全空が必要です: $queue_name"
+  done
+
+  local desired_status tasks_output
+  for desired_status in RUNNING PENDING; do
+    tasks_output="$TMP_ROOT/media-cutover-tasks-${desired_status}-${RANDOM}.json"
+    aws_cli ecs list-tasks \
+      --cluster "${PROJECT}-${ENVIRONMENT}-tiktok" \
+      --family "${PROJECT}-${ENVIRONMENT}-tiktok-acquire" \
+      --desired-status "$desired_status" \
+      --output json > "$tasks_output"
+    jq -e '
+      (.taskArns | type) == "array" and
+      (.taskArns | length) == 0 and
+      ((.nextToken // "") == "")
+    ' "$tasks_output" >/dev/null ||
+      die "legacy→generic media切替には旧familyのRUNNING/PENDING task zeroが必要です"
+  done
+}
+
 # Terraform precondition へ渡す、live 由来の non-secret object。
 core_from_snapshot() {
   local snapshot="$1"
@@ -3887,16 +3958,21 @@ core_from_snapshot() {
     desired_canary_rule="$(jq -r '.rules.canary.critical.state == "ENABLED"' "$snapshot")"
   fi
   if [ "$mode" = "sync" ]; then
-    jq -e '
-      [
+    local media_worker_prefix
+    media_worker_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/teamagent-media-worker@sha256:"
+    jq -e --arg media_worker_prefix "$media_worker_prefix" '
+      ([
         .taskdefs.mcp.image,
         .taskdefs.connect_web.image,
         .taskdefs.ingest.image,
         .taskdefs.morning.image,
         .taskdefs.canary.image
-      ] | unique | length == 1
+      ] | unique | length == 1) and
+      (.taskdefs.tiktok.image | startswith($media_worker_prefix)) and
+      (.taskdefs.tiktok.image | split("@")[1] |
+        test("^sha256:[0-9a-f]{64}$"))
     ' "$snapshot" >/dev/null ||
-      die "strict syncは主要5 runtimeのdigest完全一致が必要です。divergent liveはexact one-time migrationでのみ収束できます"
+      die "strict syncは主要5 runtimeのdigest完全一致とgeneric teamagent-media-worker TikTok経路が必要です。divergent live/legacyはexact one-time migrationでのみ収束できます"
   fi
   jq -S -c \
     --arg mode "$mode" \
@@ -4032,12 +4108,14 @@ print_hcl_snapshot() {
       line("openclaw_image"; .live_openclaw_image),
       line("mcp_image"; .live_mcp_image),
       line("x_buzz_image"; .live_x_image),
-      line("tiktok_acquire_image"; .live_tiktok_image),
+      line("media_worker_image"; .live_tiktok_image),
+      line("tiktok_acquire_image"; ""),
       line("enable_connect_web"; .enable_connect_web),
       line("enable_ingest_schedule"; .enable_ingest_schedule),
       line("enable_morning_digest"; .enable_morning_digest),
       line("enable_canary_health"; .enable_canary_health),
       line("enable_x_research"; .enable_x_research),
+      line("enable_media_worker"; .enable_tiktok_acquire),
       line("enable_tiktok_acquire"; .enable_tiktok_acquire),
       line("enable_scrape_tools"; .enable_scrape_tools),
       line("enable_reminders"; .enable_reminders),
@@ -4281,7 +4359,10 @@ validate_common_plan_schema() {
     .variables.openclaw_image.value == $expected_core[0].desired_openclaw_image and
     .variables.mcp_image.value == $expected_core[0].desired_mcp_image and
     .variables.x_buzz_image.value == $expected_core[0].desired_x_image and
-    .variables.tiktok_acquire_image.value == $expected_core[0].desired_tiktok_image and
+    .variables.media_worker_image.value == $expected_core[0].desired_tiktok_image and
+    .variables.tiktok_acquire_image.value == "" and
+    .variables.enable_media_worker.value == true and
+    .variables.enable_tiktok_acquire.value == true and
     .variables.ingest_rule_enabled.value == $expected_core[0].ingest_rule_enabled and
     .variables.morning_digest_rule_enabled.value ==
       $expected_core[0].morning_digest_rule_enabled and
@@ -4312,7 +4393,17 @@ validate_manifest_change_allowlist() {
   local plan_json="$1" migration="$2"
   local unexpected destructive
   unexpected="$(jq -r --slurpfile migration "$migration" '
-    ($migration[0].allowed_changes // []) as $allowed |
+    (
+      ($migration[0].allowed_changes // []) +
+      (if $migration[0].kind == "runtime" then [
+        "aws_s3_bucket_lifecycle_configuration.media_jobs[0]",
+        "aws_cloudwatch_event_rule.media_task_stopped[0]",
+        "aws_cloudwatch_event_target.media_task_stopped[0]",
+        "aws_lambda_permission.media_task_stopped[0]",
+        "aws_iam_role_policy.tiktok_exec_secrets[0]"
+      ] else [] end)
+      | unique
+    ) as $allowed |
     .resource_changes[]? |
     select(.mode == "managed" and .change.actions != ["no-op"]) |
     .address as $address |
@@ -4322,18 +4413,34 @@ validate_manifest_change_allowlist() {
   [ -z "$unexpected" ] ||
     die "migration exact allowlist外の変更を検出しました:\n$unexpected"
 
-  destructive="$(jq -r '
+  destructive="$(jq -r --slurpfile migration "$migration" '
     .resource_changes[]? |
     select(.mode == "managed") |
+    .address as $address |
     (.change.actions // []) as $actions |
     select($actions == ["delete"] or $actions == ["delete", "create"]) |
+    select(
+      ($migration[0].kind != "runtime") or
+      ($address != "aws_iam_role_policy.tiktok_exec_secrets[0]") or
+      ($actions != ["delete"])
+    ) |
     "\($actions | join("/")) \(.address)"
   ' "$plan_json")"
   [ -z "$destructive" ] ||
     die "delete-first/pure destroyはmigrationでも禁止です:\n$destructive"
 
   unexpected="$(jq -r --slurpfile migration "$migration" '
-    ($migration[0].allowed_changes // []) as $allowed |
+    (
+      ($migration[0].allowed_changes // []) +
+      (if $migration[0].kind == "runtime" then [
+        "aws_s3_bucket_lifecycle_configuration.media_jobs[0]",
+        "aws_cloudwatch_event_rule.media_task_stopped[0]",
+        "aws_cloudwatch_event_target.media_task_stopped[0]",
+        "aws_lambda_permission.media_task_stopped[0]",
+        "aws_iam_role_policy.tiktok_exec_secrets[0]"
+      ] else [] end)
+      | unique
+    ) as $allowed |
     .resource_drift[]? |
     .address as $address |
     select(($allowed | index($address)) == null) |
@@ -4486,7 +4593,7 @@ validate_runtime_task_contracts() {
           $env.PYTHONPYCACHEPREFIX == "/tmp/.pycache" and
           $env.MEDIA_JOB_BUCKET == "teamagent-dev-media-jobs-718959508629" and
           $env.MEDIA_JOBS_TABLE == "teamagent-dev-tiktok-acquire-jobs" and
-          $env.MEDIA_ARTIFACT_TTL_SECONDS == "3600" and
+          $env.MEDIA_ARTIFACT_TTL_SECONDS == "2592000" and
           ($env.MEDIA_BLOCKED_VPC_CIDRS | type) == "string" and
           ($env.MEDIA_BLOCKED_VPC_CIDRS | length) > 0
         elif $spec.name == "teamagent-mcp" then
@@ -4553,7 +4660,7 @@ validate_runtime_task_contracts() {
     'aws_ecs_task_definition.ingest[0]|ingest|ingest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]' \
     'aws_ecs_task_definition.morning_digest[0]|morning|morning-digest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT"]|["MAIL_ACTION_HMAC_SECRET","MAIL_ACTION_HMAC_PREVIOUS_SECRET"]' \
     'aws_ecs_task_definition.canary[0]|canary|canary|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]' \
-    'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|["AWS_REGION","HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","TIKTOK_S3_BUCKET","TIKTOK_JOBS_TABLE","npm_config_cache","PUPPETEER_CACHE_DIR","PLAYWRIGHT_BROWSERS_PATH","CHROMIUM_PATH","MEDIA_JOB_BUCKET","MEDIA_JOBS_TABLE","MEDIA_ARTIFACT_TTL_SECONDS","MEDIA_BLOCKED_VPC_CIDRS"]|[]' \
+    'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|["AWS_REGION","HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MEDIA_JOB_BUCKET","MEDIA_JOBS_TABLE","MEDIA_ARTIFACT_TTL_SECONDS","MEDIA_BLOCKED_VPC_CIDRS"]|[]' \
     'aws_ecs_task_definition.x_buzz_worker[0]|x_buzz|worker|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]'; do
     IFS='|' read -r address component expected_name allowed_env allowed_secrets <<< "$spec"
     jq -L "$GUARD_JQ_DIR" -e \
@@ -4774,8 +4881,18 @@ validate_dispatcher_migration_plan() {
       $source_hash_references ==
         [($archive_address + ".output_base64sha256")] and
       $filename_references == [($archive_address + ".output_path")] and
-      (($change.change.before | strip_provider_computed) ==
-       ($change.change.after | strip_provider_computed)) and
+      (
+        if $component == "tiktok" then
+          (($change.change.before | strip_provider_computed |
+            del(.reserved_concurrent_executions)) ==
+           ($change.change.after | strip_provider_computed |
+            del(.reserved_concurrent_executions))) and
+          $change.change.after.reserved_concurrent_executions == 2
+        else
+          (($change.change.before | strip_provider_computed) ==
+           ($change.change.after | strip_provider_computed))
+        end
+      ) and
       $change.change.after.source_code_hash == $expected_code and
       ($expected_code | test("^[A-Za-z0-9+/]{43}=$")) and
       $after_lambda.function_name == $expected_function and
@@ -4799,7 +4916,11 @@ validate_dispatcher_migration_plan() {
       $after_lambda == (
         $live_lambda |
         .code_sha256 = $expected_code |
-        .environment = $after_environment
+        .environment = $after_environment |
+        if $component == "tiktok" then
+          .reserved_concurrent_executions = 2
+        else .
+        end
       ) and
       ($unknown | all(. as $path |
         ($path == ["environment", 0, "variables", "TASKDEF_ARN"]) or
@@ -5649,7 +5770,7 @@ validate_exact_runtime_iam_plan() {
         "openclaw/gateway-token|oauth_state_secret|connect_google_secret|" +
         "connect_slack_client_id|connect_slack_secret|" +
         "slack_oauth_state_secret|google_oauth|vertex_sa|" +
-        "tiktok/proxy|tiktok/apify-token|hmac/mail-action|" +
+        "hmac/mail-action|" +
         "hmac/report-link)-[A-Za-z0-9]{6}$"
       );
     def exact_kms_key_arn:
@@ -5794,12 +5915,15 @@ validate_runtime_migration_plan() {
       [.resource_changes[] | select(.address == $address)][0].change.after;
     changed("aws_sqs_queue.tiktok_jobs[0]") as $tiktok |
     changed("aws_sqs_queue.x_jobs[0]") as $x |
+    changed("aws_lambda_event_source_mapping.tiktok_dispatch[0]") as $tiktok_mapping |
+    $tiktok.visibility_timeout_seconds == 900 and
     $tiktok.message_retention_seconds == 1209600 and
     ($tiktok.redrive_policy | fromjson | .maxReceiveCount) == 24 and
     $x.message_retention_seconds == 1209600 and
     ($x.redrive_policy | fromjson | .maxReceiveCount) == 24 and
-    changed("aws_lambda_event_source_mapping.tiktok_dispatch[0]").function_response_types ==
-      ["ReportBatchItemFailures"] and
+    $tiktok_mapping.batch_size == 1 and
+    $tiktok_mapping.function_response_types == ["ReportBatchItemFailures"] and
+    $tiktok_mapping.scaling_config == [{maximum_concurrency: 2}] and
     changed("aws_lambda_event_source_mapping.x_dispatch[0]").function_response_types ==
       ["ReportBatchItemFailures"]
   ' "$plan_json" >/dev/null ||
@@ -5874,7 +5998,10 @@ validate_plan() {
       .status == "pass" and ((.instances // []) | all(.status == "pass"))
     )) and
     .variables.mcp_image.value == $desired_image and
-    .variables.tiktok_acquire_image.value == $expected_core[0].desired_tiktok_image and
+    .variables.media_worker_image.value == $expected_core[0].desired_tiktok_image and
+    .variables.tiktok_acquire_image.value == "" and
+    .variables.enable_media_worker.value == true and
+    .variables.enable_tiktok_acquire.value == true and
     .variables.require_alarm_delivery.value == true and
     .variables.bedrock_logs_retention_days.value == 60 and
     (.variables.image_deployment_intent_id.value |
@@ -8308,6 +8435,9 @@ case "$COMMAND" in
       fi
     fi
 
+    validate_media_envelope_cutover_gate \
+      "$TMP_ROOT/live-before.json" "$DESIRED_TIKTOK_IMAGE"
+
     core_from_snapshot \
       "$TMP_ROOT/live-before.json" "$TMP_ROOT/core.json" "$MODE" "$MIGRATION_ID" \
       "$DESIRED_OPENCLAW_IMAGE" "$DESIRED_MCP_IMAGE" "$DESIRED_X_IMAGE" \
@@ -8328,7 +8458,10 @@ case "$COMMAND" in
       "-var=openclaw_image=$DESIRED_OPENCLAW_IMAGE"
       "-var=mcp_image=$DESIRED_MCP_IMAGE"
       "-var=x_buzz_image=$DESIRED_X_IMAGE"
-      "-var=tiktok_acquire_image=$DESIRED_TIKTOK_IMAGE"
+      "-var=media_worker_image=$DESIRED_TIKTOK_IMAGE"
+      "-var=tiktok_acquire_image="
+      "-var=enable_media_worker=true"
+      "-var=enable_tiktok_acquire=true"
       "-var=ingest_rule_enabled=$DESIRED_INGEST_RULE"
       "-var=morning_digest_rule_enabled=$DESIRED_MORNING_RULE"
       "-var=canary_rule_enabled=$DESIRED_CANARY_RULE"
@@ -8353,6 +8486,8 @@ case "$COMMAND" in
 
     # plan 中に別デプロイが走った場合も fail-closed（TOCTOU 防止）。
     snapshot_live "$TMP_ROOT/live-after.json"
+    validate_media_envelope_cutover_gate \
+      "$TMP_ROOT/live-after.json" "$DESIRED_TIKTOK_IMAGE"
     capture_state_contract "$TMP_ROOT/state-after.json"
     capture_complete_runtime_inventory "$TMP_ROOT/inventory-after.json"
     BEFORE_SHA="$(sha256_file "$TMP_ROOT/live-before.json")"

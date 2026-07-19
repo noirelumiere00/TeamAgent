@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -11,13 +13,16 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, cast
 
 import structlog
 
 from teamagent.media.contracts import (
+    ARTIFACT_RETENTION_SECONDS,
+    DDB_RETENTION_GRACE_SECONDS,
     MAX_DEADLINE_SECONDS,
     MAX_INPUT_BYTES,
+    MAX_PRESIGNED_URL_SECONDS,
     AcquireOperation,
     FrameOperation,
     MediaJobRequest,
@@ -32,6 +37,7 @@ from teamagent.media.contracts import (
     ThumbnailOperation,
     TikTokAcquireOperation,
     TikTokClientConfig,
+    artifact_manifest_sha256,
     make_job_request,
     parse_job_request,
 )
@@ -45,9 +51,13 @@ logger = structlog.get_logger(__name__)
 
 _SYNC_TIMEOUT_DEFAULT_S = 180
 _SYNC_TIMEOUT_MAX_S = 15 * 60
-_ARTIFACT_TTL_DEFAULT_S = 3600
+_ARTIFACT_TTL_DEFAULT_S = ARTIFACT_RETENTION_SECONDS
 _CONSUMER_RELEASE_RESERVE_SECONDS = 15
 _JOB_ID_RE = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
+
+
+def _checksum_sha256_b64(hex_digest: str) -> str:
+    return base64.b64encode(bytes.fromhex(hex_digest)).decode("ascii")
 
 
 class MediaJobError(RuntimeError):
@@ -110,7 +120,7 @@ class MediaJobClient:
             value = int(raw)
         except ValueError as exc:
             raise MediaJobError("MEDIA_ARTIFACT_TTL_INVALID") from exc
-        if value < 300 or value > 6 * 60 * 60:
+        if value < 300 or value > ARTIFACT_RETENTION_SECONDS:
             raise MediaJobError("MEDIA_ARTIFACT_TTL_INVALID")
         return value
 
@@ -193,6 +203,15 @@ class MediaJobClient:
         return persisted
 
     @staticmethod
+    def _assert_audit_owner(
+        item: dict[str, Any],
+        expected_audit_principal_hash: str | None,
+    ) -> None:
+        persisted = item.get("audit_principal_hash", {}).get("S", "")
+        if not hmac.compare_digest(persisted, expected_audit_principal_hash or ""):
+            raise MediaJobError("MEDIA_JOB_AUDIT_PRINCIPAL_MISMATCH")
+
+    @staticmethod
     def _job_id(request_fingerprint: str) -> str:
         digest = hashlib.sha256(request_fingerprint.encode("utf-8")).hexdigest()
         return f"mj_{digest[:24]}"
@@ -231,6 +250,7 @@ class MediaJobClient:
             Key=key,
             Body=body,
             ContentType=content_type,
+            ChecksumSHA256=_checksum_sha256_b64(digest),
             Expires=expires,
             Metadata={"sha256": digest, "job-id": job_id, "schema-version": "1"},
             Tagging=f"teamagent-ttl-epoch={int(expires.timestamp())}",
@@ -274,10 +294,16 @@ class MediaJobClient:
                     "output_prefix": {"S": request.output_prefix},
                     "cleanup_at": {"N": str(request.created_at_epoch_s + request.artifact_ttl_s)},
                     "hard_cleanup_at": {
-                        "N": str(request.created_at_epoch_s + min(request.artifact_ttl_s, 21600))
+                        "N": str(request.created_at_epoch_s + request.artifact_ttl_s)
                     },
                     "cleanup_status": {"S": "pending"},
-                    "ttl": {"N": str(request.created_at_epoch_s + 86400)},
+                    "ttl": {
+                        "N": str(
+                            request.created_at_epoch_s
+                            + request.artifact_ttl_s
+                            + DDB_RETENTION_GRACE_SECONDS
+                        )
+                    },
                     "detail": {
                         "S": json.dumps(
                             queued.model_dump(mode="json"),
@@ -307,6 +333,7 @@ class MediaJobClient:
             ).get("Item", {})
             if existing.get("idempotency_key", {}).get("S") != request.idempotency_key:
                 raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT") from exc
+            self._assert_audit_owner(existing, request.audit_principal_hash)
             queued_request = self._persisted_request(existing, request)
             body = queued_request.to_json_bytes().decode("utf-8")
             if existing.get("message_sent_at", {}).get("N"):
@@ -359,6 +386,7 @@ class MediaJobClient:
                 ).get("Item", {})
                 if existing.get("idempotency_key", {}).get("S") != queued_request.idempotency_key:
                     raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT") from exc
+                self._assert_audit_owner(existing, queued_request.audit_principal_hash)
                 if existing.get("message_sent_at", {}).get("N") or existing.get("status", {}).get(
                     "S"
                 ) in {"running", "done", "failed"}:
@@ -453,7 +481,13 @@ class MediaJobClient:
         self._remaining(queued_request.deadline_epoch_s)
         return request.job_id
 
-    def get_result(self, job_id: str, *, deadline_epoch_s: int) -> MediaJobResult | None:
+    def get_result(
+        self,
+        job_id: str,
+        *,
+        deadline_epoch_s: int,
+        expected_audit_principal_hash: str | None = None,
+    ) -> MediaJobResult | None:
         self._assert_configured()
         response = self._call(
             "dynamodb",
@@ -466,13 +500,33 @@ class MediaJobClient:
         item = response.get("Item")
         if not item:
             return None
+        self._assert_audit_owner(item, expected_audit_principal_hash)
         detail = item.get("detail", {}).get("S", "")
         try:
             result = MediaJobResult.model_validate_json(detail)
+            if result.job_id != job_id:
+                raise MediaJobError("MEDIA_JOB_RESULT_SCOPE_INVALID")
             persisted_status = item.get("status", {}).get("S")
             if persisted_status in ("queued", "running") and result.status != persisted_status:
                 result = result.model_copy(update={"status": persisted_status})
+            if result.status == "done":
+                expected_prefix = f"media-jobs/{job_id}/attempts/"
+                if any(
+                    artifact.object.bucket != self._bucket
+                    or not artifact.object.key.startswith(expected_prefix)
+                    or artifact.object.size <= 0
+                    for artifact in result.artifacts
+                ):
+                    raise MediaJobError("MEDIA_ARTIFACT_MANIFEST_SCOPE_INVALID")
+                persisted_manifest = item.get("artifact_manifest_sha256", {}).get("S", "")
+                if not persisted_manifest or not hmac.compare_digest(
+                    persisted_manifest,
+                    artifact_manifest_sha256(result.artifacts),
+                ):
+                    raise MediaJobError("MEDIA_ARTIFACT_MANIFEST_INTEGRITY_FAILED")
             return result
+        except MediaJobError:
+            raise
         except Exception as exc:
             raise MediaJobError("MEDIA_JOB_RESULT_INVALID") from exc
 
@@ -483,6 +537,7 @@ class MediaJobClient:
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
         poll_interval_s: float = 1.0,
         deadline_epoch_s: int | None = None,
+        expected_audit_principal_hash: str | None = None,
     ) -> MediaJobResult:
         if timeout_s < 1 or timeout_s > _SYNC_TIMEOUT_MAX_S:
             raise MediaJobError("MEDIA_JOB_TIMEOUT_INVALID")
@@ -494,7 +549,11 @@ class MediaJobClient:
         )
         while self._monotonic() <= monotonic_deadline:
             remaining_absolute = self._remaining(absolute_deadline)
-            result = self.get_result(job_id, deadline_epoch_s=int(absolute_deadline))
+            result = self.get_result(
+                job_id,
+                deadline_epoch_s=int(absolute_deadline),
+                expected_audit_principal_hash=expected_audit_principal_hash,
+            )
             if result is not None and result.status in ("done", "failed"):
                 return result
             remaining = monotonic_deadline - self._monotonic()
@@ -528,6 +587,35 @@ class MediaJobClient:
             raise MediaJobError("MEDIA_ARTIFACT_INTEGRITY_FAILED")
         return body
 
+    def _verify_artifact_ref(self, ref: S3ObjectRef, *, deadline_epoch_s: int) -> None:
+        if ref.bucket != self._bucket:
+            raise MediaJobError("MEDIA_ARTIFACT_BUCKET_MISMATCH")
+        try:
+            response = self._call(
+                "s3",
+                deadline_epoch_s,
+                "head_object",
+                Bucket=ref.bucket,
+                Key=ref.key,
+                ChecksumMode="ENABLED",
+            )
+        except MediaJobError:
+            raise
+        except Exception as exc:
+            raise MediaJobError("MEDIA_ARTIFACT_HEAD_FAILED") from exc
+        metadata = response.get("Metadata")
+        if (
+            response.get("ServerSideEncryption") not in ("AES256", "aws:kms")
+            or response.get("ContentLength") != ref.size
+            or not hmac.compare_digest(
+                str(response.get("ChecksumSHA256") or ""),
+                _checksum_sha256_b64(ref.sha256),
+            )
+            or not isinstance(metadata, dict)
+            or not hmac.compare_digest(str(metadata.get("sha256") or ""), ref.sha256)
+        ):
+            raise MediaJobError("MEDIA_ARTIFACT_INTEGRITY_FAILED")
+
     def presign_get(
         self,
         ref: S3ObjectRef,
@@ -535,13 +623,14 @@ class MediaJobClient:
         deadline_epoch_s: int,
         expires_s: int,
     ) -> str:
-        """Create a short-lived URL without escaping the caller's absolute budget."""
+        """Create a verified URL compatible with the seven-day SigV4 ceiling."""
 
         self._assert_configured()
         if ref.bucket != self._bucket:
             raise MediaJobError("MEDIA_ARTIFACT_BUCKET_MISMATCH")
-        if expires_s < 1 or expires_s > 300:
+        if expires_s < 1 or expires_s > MAX_PRESIGNED_URL_SECONDS:
             raise MediaJobError("MEDIA_ARTIFACT_PRESIGN_EXPIRY_INVALID")
+        self._verify_artifact_ref(ref, deadline_epoch_s=deadline_epoch_s)
         self._remaining(deadline_epoch_s)
         try:
             url = self._client("s3", deadline_epoch_s).generate_presigned_url(
@@ -596,7 +685,7 @@ class MediaJobClient:
                     "cleanup_at": {"N": str(now)},
                     "hard_cleanup_at": {"N": str(now)},
                     "cleanup_status": {"S": "pending"},
-                    "ttl": {"N": str(now + 86400)},
+                    "ttl": {"N": str(now + DDB_RETENTION_GRACE_SECONDS)},
                     "detail": {
                         "S": json.dumps(
                             result.model_dump(mode="json"),
@@ -701,6 +790,7 @@ class MediaJobClient:
                 request.job_id,
                 timeout_s=bounded_timeout,
                 deadline_epoch_s=execution_deadline_epoch_s,
+                expected_audit_principal_hash=request.audit_principal_hash,
             )
             if result.status != "done":
                 raise MediaJobError(result.error_code or "MEDIA_JOB_FAILED")
@@ -749,6 +839,7 @@ class MediaJobClient:
         query: str,
         *,
         request_fingerprint: str,
+        search_type: str = "keyword",
         max_videos: int = 10,
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
     ) -> list[dict[str, Any]]:
@@ -756,6 +847,7 @@ class MediaJobClient:
 
         operation = TikTokAcquireOperation(
             kind="tiktok_acquire",
+            search_type=cast(Literal["keyword", "hashtag"], search_type),
             keywords=(query,),
             n_per_kw=max_videos,
             videos_per_kw=0,

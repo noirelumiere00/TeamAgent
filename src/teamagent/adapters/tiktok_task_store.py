@@ -27,7 +27,7 @@ from teamagent.media.contracts import (
 
 logger = structlog.get_logger(__name__)
 
-_PRESIGN_S = 300
+_PRESIGN_S = 7 * 24 * 60 * 60
 _DEADLINE_S = 15 * 60
 _STATUS_DEADLINE_S = 30
 
@@ -76,6 +76,7 @@ class TikTokTaskStore:
                 raise ValueError("client config must be an object")
             operation = TikTokAcquireOperation(
                 kind="tiktok_acquire",
+                search_type=spec.get("search_type", "keyword"),
                 keywords=tuple(spec["keywords"]),
                 n_per_kw=spec["n_per_kw"],
                 videos_per_kw=spec["videos_per_kw"],
@@ -120,7 +121,12 @@ class TikTokTaskStore:
             )
             return False
 
-    def get_status(self, job_id: str) -> dict[str, Any] | None:
+    def get_status(
+        self,
+        job_id: str,
+        *,
+        audit_principal_hash: str,
+    ) -> dict[str, Any] | None:
         """Read generic status and map done artifacts to the legacy schema."""
 
         if not self._table:
@@ -129,7 +135,11 @@ class TikTokTaskStore:
         try:
             session = self._session()
             client = self._client(session)
-            result = client.get_result(job_id, deadline_epoch_s=deadline_epoch_s)
+            result = client.get_result(
+                job_id,
+                deadline_epoch_s=deadline_epoch_s,
+                expected_audit_principal_hash=audit_principal_hash,
+            )
             if result is None:
                 return None
             output: dict[str, Any] = {
@@ -140,6 +150,7 @@ class TikTokTaskStore:
                 "error_code": result.error_code,
                 "stop_reason": result.metadata.get("stop_reason"),
                 "warnings": result.metadata.get("warnings") or [],
+                "shortfalls": result.metadata.get("shortfalls") or [],
             }
             if result.status == "done":
                 output.update(
@@ -165,7 +176,7 @@ class TikTokTaskStore:
         *,
         deadline_epoch_s: int,
     ) -> dict[str, Any]:
-        """Presign verified, worker-produced artifacts for five minutes."""
+        """Presign verified, worker-produced artifacts for seven days."""
 
         artifacts = {artifact.name: artifact.object for artifact in result.artifacts}
         prefix = str(result.metadata.get("s3_prefix") or f"media-jobs/{result.job_id}/")

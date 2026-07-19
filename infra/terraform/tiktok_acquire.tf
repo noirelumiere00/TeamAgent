@@ -47,12 +47,12 @@ variable "media_worker_image" {
 }
 
 variable "media_artifact_ttl_seconds" {
-  description = "Maximum normal retention before the deterministic janitor deletes a terminal job prefix."
+  description = "Thirty-day media artifact retention before deterministic janitor cleanup."
   type        = number
-  default     = 3600
+  default     = 2592000
   validation {
-    condition     = var.media_artifact_ttl_seconds >= 300 && var.media_artifact_ttl_seconds <= 21600
-    error_message = "media_artifact_ttl_seconds must be between 300 and 21600."
+    condition     = var.media_artifact_ttl_seconds == 2592000
+    error_message = "media_artifact_ttl_seconds must remain exactly 2592000 (30 days)."
   }
 }
 
@@ -98,16 +98,13 @@ variable "tiktok_proxy_secret_arn" {
 }
 
 variable "tiktok_apify_secret_arn" {
-  description = "Apifyトークンの Secrets Manager ARN(任意・会社管理キー)。"
+  description = "Deprecated unused Apify token. Must remain empty for the generic media worker."
   type        = string
   default     = ""
 
   validation {
-    condition = var.tiktok_apify_secret_arn == "" || can(regex(
-      "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/tiktok/apify-token-[A-Za-z0-9]{6}$",
-      var.tiktok_apify_secret_arn,
-    ))
-    error_message = "tiktok_apify_secret_arnは東京region・TeamAgent dev accountのteamagent/dev/tiktok/apify-token exact ARNに限定します。"
+    condition     = var.tiktok_apify_secret_arn == ""
+    error_message = "tiktok_apify_secret_arn is unused and must remain empty."
   }
 }
 
@@ -141,10 +138,6 @@ locals {
     SG_ID                      = aws_security_group.tiktok_tasks[0].id
     CONTAINER                  = "acquire"
   }
-  # コンテナに渡す secrets(ARNが与えられた時だけ)
-  tk_secrets = var.tiktok_apify_secret_arn != "" ? [
-    { name = "APIFY_API_TOKEN", valueFrom = var.tiktok_apify_secret_arn }
-  ] : []
 }
 
 # ---------- ECR ----------
@@ -215,7 +208,7 @@ resource "aws_sqs_queue" "tiktok_jobs_dlq" {
 resource "aws_sqs_queue" "tiktok_jobs" {
   count                      = local.tk_enabled
   name                       = "${local.tk_name}-jobs"
-  visibility_timeout_seconds = 1800 # ジョブ最長(分単位)に合わせる
+  visibility_timeout_seconds = 900 # canonical job-wide budget
   message_retention_seconds  = 1209600
   sqs_managed_sse_enabled    = true
   redrive_policy = jsonencode({
@@ -253,7 +246,7 @@ resource "aws_dynamodb_table" "tiktok_jobs" {
 
 # ---------- Dedicated S3 artifact bucket ----------
 # ``Expires`` metadata and DynamoDB TTL are not deletion mechanisms.  The
-# scheduled janitor below is authoritative; this one-day rule is only a
+# scheduled janitor below is authoritative; this 30-day rule is only a
 # provider-side backstop for objects staged before a row can be created.
 resource "aws_s3_bucket" "media_jobs" {
   count  = local.tk_enabled
@@ -294,7 +287,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "media_jobs" {
       prefix = "media-jobs/"
     }
     expiration {
-      days = 1
+      days = 30
     }
     abort_incomplete_multipart_upload {
       days_after_initiation = 1
@@ -386,21 +379,6 @@ resource "aws_iam_role_policy_attachment" "tiktok_exec_managed" {
   count      = local.tk_enabled
   role       = aws_iam_role.tiktok_exec[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
-# 実行ロールが Secrets を注入できるように(tiktok配下のみ)
-data "aws_iam_policy_document" "tiktok_exec_secrets" {
-  statement {
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = ["arn:aws:secretsmanager:${var.aws_region}:${local.tk_acct}:secret:${var.project_name}/${var.environment}/tiktok/*"]
-  }
-}
-
-resource "aws_iam_role_policy" "tiktok_exec_secrets" {
-  count  = local.tk_enabled
-  name   = "${local.tk_name}-exec-secrets"
-  role   = aws_iam_role.tiktok_exec[0].id
-  policy = data.aws_iam_policy_document.tiktok_exec_secrets.json
 }
 
 # ---------- IAM: タスクロール(S3 prefix / Dynamo更新) ----------
@@ -520,7 +498,7 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
         { name = "MEDIA_ARTIFACT_TTL_SECONDS", value = tostring(var.media_artifact_ttl_seconds) },
         { name = "MEDIA_BLOCKED_VPC_CIDRS", value = data.aws_vpc.default.cidr_block },
       ]
-      secrets = local.tk_secrets
+      secrets = []
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -538,10 +516,11 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
 # 薄いLambdaでSQSをデキューし、strict canonical envelopeを検証してから
 # ecs.run_taskには8192文字制限内のjob ID/payload digest pointerだけを渡す。
 data "archive_file" "tiktok_dispatch" {
-  count       = local.tk_enabled
-  type        = "zip"
-  source_dir  = "${path.module}/lambda/tiktok_dispatch"
-  output_path = "${path.module}/build/tiktok_dispatch.zip"
+  count            = local.tk_enabled
+  type             = "zip"
+  source_file      = "${path.module}/lambda/tiktok_dispatch/handler.py"
+  output_path      = "${path.module}/build/tiktok_dispatch.zip"
+  output_file_mode = "0644"
 }
 
 data "aws_iam_policy_document" "tiktok_dispatch_assume" {
@@ -570,11 +549,21 @@ data "aws_iam_policy_document" "tiktok_dispatch_policy" {
   statement {
     sid       = "RunTask"
     actions   = ["ecs:RunTask"]
-    resources = ["arn:aws:ecs:${var.aws_region}:${local.tk_acct}:task-definition/${local.media_name}-worker:*"]
+    resources = ["arn:aws:ecs:${var.aws_region}:${local.tk_acct}:task-definition/${local.media_name}:*"]
     condition {
       test     = "ArnEquals"
       variable = "ecs:cluster"
       values   = [aws_ecs_cluster.tiktok[0].arn]
+    }
+  }
+  statement {
+    sid       = "TagStartedTask"
+    actions   = ["ecs:TagResource"]
+    resources = ["arn:aws:ecs:${var.aws_region}:${local.tk_acct}:task/${aws_ecs_cluster.tiktok[0].name}/*"]
+    condition {
+      test     = "StringEquals"
+      variable = "ecs:CreateAction"
+      values   = ["RunTask"]
     }
   }
   statement {
@@ -607,15 +596,16 @@ resource "aws_iam_role_policy" "tiktok_dispatch_policy" {
 }
 
 resource "aws_lambda_function" "tiktok_dispatch" {
-  count            = local.tk_enabled
-  function_name    = "${local.tk_name}-dispatch"
-  role             = aws_iam_role.tiktok_dispatch[0].arn
-  runtime          = "python3.12"
-  architectures    = ["arm64"]
-  handler          = "handler.handler"
-  filename         = data.archive_file.tiktok_dispatch[0].output_path
-  source_code_hash = data.archive_file.tiktok_dispatch[0].output_base64sha256
-  timeout          = 30
+  count                          = local.tk_enabled
+  function_name                  = "${local.tk_name}-dispatch"
+  role                           = aws_iam_role.tiktok_dispatch[0].arn
+  runtime                        = "python3.12"
+  architectures                  = ["arm64"]
+  handler                        = "handler.handler"
+  filename                       = data.archive_file.tiktok_dispatch[0].output_path
+  source_code_hash               = data.archive_file.tiktok_dispatch[0].output_base64sha256
+  timeout                        = 30
+  reserved_concurrent_executions = 2
 
   depends_on = [
     aws_cloudwatch_log_group.tiktok_dispatch,
@@ -639,10 +629,15 @@ resource "aws_lambda_function" "tiktok_dispatch" {
 }
 
 resource "aws_lambda_event_source_mapping" "tiktok_dispatch" {
-  count            = local.tk_enabled
-  event_source_arn = aws_sqs_queue.tiktok_jobs[0].arn
-  function_name    = aws_lambda_function.tiktok_dispatch[0].arn
-  batch_size       = 1
+  count                   = local.tk_enabled
+  event_source_arn        = aws_sqs_queue.tiktok_jobs[0].arn
+  function_name           = aws_lambda_function.tiktok_dispatch[0].arn
+  batch_size              = 1
+  function_response_types = ["ReportBatchItemFailures"]
+
+  scaling_config {
+    maximum_concurrency = 2
+  }
 
   depends_on = [terraform_data.runtime_guard]
 
@@ -654,6 +649,52 @@ resource "aws_lambda_event_source_mapping" "tiktok_dispatch" {
       error_message = local.runtime_guard_error
     }
   }
+}
+
+# ECS can stop before the worker reaches its fenced terminal write (for
+# example, image pull failure, Fargate placement failure, OOM, or SIGKILL).
+# Reuse the dispatcher Lambda as a task-family-scoped terminal reconciler.
+resource "aws_cloudwatch_event_rule" "media_task_stopped" {
+  count = local.tk_enabled
+  name  = "${local.media_name}-stopped"
+  event_pattern = jsonencode({
+    source      = ["aws.ecs"]
+    detail-type = ["ECS Task State Change"]
+    detail = {
+      clusterArn = [aws_ecs_cluster.tiktok[0].arn]
+      lastStatus = ["STOPPED"]
+      taskDefinitionArn = [{
+        prefix = "arn:aws:ecs:${var.aws_region}:${local.tk_acct}:task-definition/${local.media_name}:"
+      }]
+    }
+  })
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_cloudwatch_event_target" "media_task_stopped" {
+  count     = local.tk_enabled
+  rule      = aws_cloudwatch_event_rule.media_task_stopped[0].name
+  target_id = "media-task-stopped-reconciler"
+  arn       = aws_lambda_function.tiktok_dispatch[0].arn
+
+  retry_policy {
+    maximum_event_age_in_seconds = 86400
+    maximum_retry_attempts       = 185
+  }
+}
+
+resource "aws_lambda_permission" "media_task_stopped" {
+  count         = local.tk_enabled
+  statement_id  = "AllowEventBridgeMediaTaskStopped"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.tiktok_dispatch[0].function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.media_task_stopped[0].arn
 }
 
 # ---------- CloudWatch: dispatcher DLQ depth ----------
@@ -846,7 +887,11 @@ output "tiktok_jobs_table_name" {
 }
 output "tiktok_acquire_ecr_url" {
   value       = local.tk_enabled == 1 ? aws_ecr_repository.tiktok_acquire[0].repository_url : null
-  description = "Deprecated alias for the generic media-worker ECR URL."
+  description = "DEPRECATED legacy teamagent-dev-tiktok-acquire repository. It is not a runtime image or release push target; use media_worker_ecr_url."
+}
+output "media_worker_ecr_url" {
+  value       = aws_ecr_repository.mcp_media.repository_url
+  description = "Canonical signed teamagent-media-worker release repository used by the unified media runtime."
 }
 output "media_jobs_bucket_name" {
   value       = local.tk_enabled == 1 ? aws_s3_bucket.media_jobs[0].bucket : null

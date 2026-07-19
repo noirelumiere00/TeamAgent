@@ -1222,6 +1222,52 @@ def test_saved_plan_classifies_replacements_and_allows_only_digest_preserving_ro
     )
 
 
+def test_saved_plan_binds_generic_media_task_replacement_to_mcp_media_receipt(
+    tmp_path: Path,
+) -> None:
+    plan = tmp_path / "release.tfplan"
+    plan.write_bytes(b"opaque saved terraform plan")
+    media_rollforward = _plan_json()
+    gate_input = media_rollforward["planned_values"]["root_module"]["resources"][0][
+        "values"
+    ]["input"]
+    media_rollforward["resource_changes"].append(
+        {
+            "address": "aws_ecs_task_definition.tiktok_acquire[0]",
+            "mode": "managed",
+            "change": {
+                "actions": ["create", "delete"],
+                "after": {
+                    "container_definitions": json.dumps(
+                        [
+                            {
+                                "name": "acquire",
+                                "image": gate_input["requested_media_image"],
+                            }
+                        ]
+                    )
+                },
+            },
+        }
+    )
+
+    metadata = EVIDENCE.deployment_plan_metadata(
+        plan,
+        plan_json=media_rollforward,
+    )
+
+    assert metadata["plan_transition_sha256"] != EMPTY_TRANSITION_SHA256
+
+    media_rollforward["resource_changes"][-1]["change"]["after"][
+        "container_definitions"
+    ] = json.dumps([{"name": "acquire", "image": "legacy-image"}])
+    with pytest.raises(EVIDENCE.EvidenceError, match="fresh rollback receipt"):
+        EVIDENCE.deployment_plan_metadata(
+            plan,
+            plan_json=media_rollforward,
+        )
+
+
 def test_saved_plan_rejects_image_empty_or_unscoped_destructive_state(
     tmp_path: Path,
 ) -> None:
@@ -1236,6 +1282,7 @@ def test_saved_plan_rejects_image_empty_or_unscoped_destructive_state(
         ),
         "tiktok": "",
     }
+    gate_input["requested_media_image"] = ""
     gate_input["release_channels"] = {"openclaw": "rollback"}
     image_empty["resource_changes"].append(
         {
@@ -1249,6 +1296,7 @@ def test_saved_plan_rejects_image_empty_or_unscoped_destructive_state(
         sort_keys=True,
         separators=(",", ":"),
     )
+    gate_input["deployment_gate_query"]["mcp_media_image"] = ""
     with pytest.raises(EVIDENCE.EvidenceError, match="image-empty"):
         EVIDENCE.deployment_plan_metadata(plan, plan_json=image_empty)
 

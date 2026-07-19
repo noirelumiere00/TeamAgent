@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from teamagent.media.contracts import (
     MediaJobRequest,
     MediaJobResult,
     S3ObjectRef,
+    artifact_manifest_sha256,
     make_job_request,
 )
 
@@ -76,8 +78,9 @@ class _LifecycleClient(MediaJobClient):
         timeout_s: int = 180,
         poll_interval_s: float = 1.0,
         deadline_epoch_s: int | None = None,
+        expected_audit_principal_hash: str | None = None,
     ) -> MediaJobResult:
-        del job_id, timeout_s, poll_interval_s
+        del job_id, timeout_s, poll_interval_s, expected_audit_principal_hash
         self.wait_deadline = deadline_epoch_s
         return self.result
 
@@ -189,6 +192,148 @@ class _Session:
 
     def client(self, service: str, **_kwargs: Any) -> Any:
         return self.clients[service]
+
+
+class _ResultDynamo:
+    def __init__(self, item: dict[str, Any]) -> None:
+        self.item = item
+
+    def get_item(self, **_kwargs: Any) -> dict[str, Any]:
+        return {"Item": self.item}
+
+
+def _done_item(
+    job_id: str,
+    *,
+    audit_principal_hash: str,
+    artifact_key: str | None = None,
+) -> tuple[dict[str, Any], MediaJobResult]:
+    ref = S3ObjectRef(
+        bucket=_BUCKET,
+        key=(artifact_key or f"media-jobs/{job_id}/attempts/1/attempt-1/output/artifact"),
+        sha256=hashlib.sha256(b"artifact").hexdigest(),
+        size=len(b"artifact"),
+        content_type="application/octet-stream",
+    )
+    result = MediaJobResult(
+        job_id=job_id,
+        status="done",
+        artifacts=(MediaArtifact(name="artifact", object=ref),),
+    )
+    return (
+        {
+            "status": {"S": "done"},
+            "audit_principal_hash": {"S": audit_principal_hash},
+            "detail": {
+                "S": json.dumps(
+                    result.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            },
+            "artifact_manifest_sha256": {"S": artifact_manifest_sha256(result.artifacts)},
+        },
+        result,
+    )
+
+
+def test_done_result_requires_exact_audit_owner_and_independent_artifact_manifest() -> None:
+    job_id = "mj_0123456789abcdef01234567"
+    owner = "a" * 64
+    item, expected = _done_item(job_id, audit_principal_hash=owner)
+    ddb = _ResultDynamo(item)
+    client = MediaJobClient(
+        session=_Session(queue=object(), ddb=ddb, s3=object()),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: 100.0,
+    )
+
+    assert (
+        client.get_result(
+            job_id,
+            deadline_epoch_s=130,
+            expected_audit_principal_hash=owner,
+        )
+        == expected
+    )
+    with pytest.raises(MediaJobError, match="MEDIA_JOB_AUDIT_PRINCIPAL_MISMATCH"):
+        client.get_result(
+            job_id,
+            deadline_epoch_s=130,
+            expected_audit_principal_hash="b" * 64,
+        )
+    with pytest.raises(MediaJobError, match="MEDIA_JOB_AUDIT_PRINCIPAL_MISMATCH"):
+        client.get_result(job_id, deadline_epoch_s=130)
+
+    item["artifact_manifest_sha256"] = {"S": "f" * 64}
+    with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_MANIFEST_INTEGRITY_FAILED"):
+        client.get_result(
+            job_id,
+            deadline_epoch_s=130,
+            expected_audit_principal_hash=owner,
+        )
+
+
+def test_done_result_job_id_must_match_the_requested_row_key() -> None:
+    job_id = "mj_0123456789abcdef01234567"
+    owner = "a" * 64
+    item, result = _done_item(job_id, audit_principal_hash=owner)
+    mismatched = result.model_copy(update={"job_id": "mj_aaaaaaaaaaaaaaaaaaaaaaaa"})
+    item["detail"] = {
+        "S": json.dumps(
+            mismatched.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    }
+    client = MediaJobClient(
+        session=_Session(
+            queue=object(),
+            ddb=_ResultDynamo(item),
+            s3=object(),
+        ),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: 100.0,
+    )
+
+    with pytest.raises(MediaJobError, match="MEDIA_JOB_RESULT_SCOPE_INVALID"):
+        client.get_result(
+            job_id,
+            deadline_epoch_s=130,
+            expected_audit_principal_hash=owner,
+        )
+
+
+def test_done_result_rejects_content_addressed_artifact_outside_job_attempt_prefix() -> None:
+    job_id = "mj_0123456789abcdef01234567"
+    owner = "a" * 64
+    item, _result = _done_item(
+        job_id,
+        audit_principal_hash=owner,
+        artifact_key="media-jobs/another-job/attempts/1/attempt-1/output/artifact",
+    )
+    client = MediaJobClient(
+        session=_Session(
+            queue=object(),
+            ddb=_ResultDynamo(item),
+            s3=object(),
+        ),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: 100.0,
+    )
+
+    with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_MANIFEST_SCOPE_INVALID"):
+        client.get_result(
+            job_id,
+            deadline_epoch_s=130,
+            expected_audit_principal_hash=owner,
+        )
 
 
 def test_concurrent_identical_submit_waits_for_owner_confirmation_without_duplicate_send() -> None:
@@ -426,7 +571,20 @@ def test_stage_rejects_scope_content_type_and_ttl_before_aws_write() -> None:
 class _PresignS3:
     def __init__(self, url: str = "https://s3.example.invalid/signed") -> None:
         self.url = url
+        self.checksum = base64.b64encode(hashlib.sha256(b"artifact").digest()).decode("ascii")
         self.calls: list[tuple[str, dict[str, Any], int]] = []
+        self.head_calls: list[dict[str, Any]] = []
+
+    def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.head_calls.append(kwargs)
+        return {
+            "ContentLength": 8,
+            "ChecksumSHA256": self.checksum,
+            "ServerSideEncryption": "AES256",
+            "Metadata": {
+                "sha256": hashlib.sha256(b"artifact").hexdigest(),
+            },
+        }
 
     def generate_presigned_url(
         self,
@@ -437,7 +595,7 @@ class _PresignS3:
         return self.url
 
 
-def test_presign_get_is_bucket_scoped_short_lived_and_deadline_bounded() -> None:
+def test_presign_get_is_integrity_checked_seven_day_compatible_and_deadline_bounded() -> None:
     s3 = _PresignS3()
     client = MediaJobClient(
         session=_Session(queue=object(), ddb=object(), s3=s3),
@@ -459,9 +617,14 @@ def test_presign_get_is_bucket_scoped_short_lived_and_deadline_bounded() -> None
             300,
         )
     ]
+    assert s3.head_calls == [{"Bucket": _BUCKET, "Key": ref.key, "ChecksumMode": "ENABLED"}]
 
     with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_PRESIGN_EXPIRY_INVALID"):
-        client.presign_get(ref, deadline_epoch_s=130, expires_s=301)
+        client.presign_get(ref, deadline_epoch_s=130, expires_s=604801)
+
+    s3.checksum = base64.b64encode(hashlib.sha256(b"tampered").digest()).decode("ascii")
+    with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_INTEGRITY_FAILED"):
+        client.presign_get(ref, deadline_epoch_s=130, expires_s=604800)
 
     expired = MediaJobClient(
         session=_Session(queue=object(), ddb=object(), s3=s3),
@@ -480,6 +643,6 @@ def test_artifact_ttl_contract_is_bounded_and_environment_driven(
 ) -> None:
     monkeypatch.setenv("MEDIA_ARTIFACT_TTL_SECONDS", "600")
     assert MediaJobClient.artifact_ttl_seconds() == 600
-    monkeypatch.setenv("MEDIA_ARTIFACT_TTL_SECONDS", "21601")
+    monkeypatch.setenv("MEDIA_ARTIFACT_TTL_SECONDS", "2592001")
     with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_TTL_INVALID"):
         MediaJobClient.artifact_ttl_seconds()

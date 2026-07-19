@@ -21,9 +21,13 @@ ACCOUNT = "718959508629"
 REGION = "ap-northeast-1"
 REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-mcp"
 LIVE_IMAGE = f"{REPOSITORY}@sha256:{'f' * 64}"
-X_IMAGE = f"{REPOSITORY}@sha256:{'d' * 64}"
-TIKTOK_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-dev-tiktok-acquire"
-TIKTOK_IMAGE = f"{TIKTOK_REPOSITORY}@sha256:{'e' * 64}"
+# x_buzz is deployed from the same signed MCP release subject in this
+# combined saved-plan fixture.
+X_IMAGE = LIVE_IMAGE
+LEGACY_TIKTOK_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-dev-tiktok-acquire"
+LEGACY_TIKTOK_IMAGE = f"{LEGACY_TIKTOK_REPOSITORY}@sha256:{'e' * 64}"
+MEDIA_WORKER_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-media-worker"
+MEDIA_WORKER_IMAGE = f"{MEDIA_WORKER_REPOSITORY}@sha256:{'9' * 64}"
 OPENCLAW_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-openclaw"
 OPENCLAW_IMAGE = f"{OPENCLAW_REPOSITORY}@sha256:{'c' * 64}"
 APP_VAULT_MANIFEST_SHA256 = "a" * 64
@@ -173,7 +177,7 @@ def _container(component: str, image: str = LIVE_IMAGE) -> dict[str, Any]:
     if component == "openclaw":
         image = OPENCLAW_IMAGE
     elif component == "tiktok":
-        image = TIKTOK_IMAGE
+        image = MEDIA_WORKER_IMAGE
     elif component == "x_buzz":
         image = X_IMAGE
     container: dict[str, Any] = {
@@ -355,7 +359,7 @@ def _lambda_tf(component: str) -> dict[str, Any]:
         "memory_size": 128,
         "package_type": "Zip",
         "environment": [{"variables": _dispatcher_environment(component)}],
-        "reserved_concurrent_executions": -1,
+        "reserved_concurrent_executions": 2 if component == "tiktok" else -1,
         "tags": {},
         "tags_all": {},
     }
@@ -1669,7 +1673,16 @@ def _fake_aws(path: Path) -> None:
         elif args[:2] == ["lambda", "list-tags"]:
             print(json.dumps({{"Tags": {{}}}}))
         elif args[:2] == ["lambda", "get-function-concurrency"]:
-            print(json.dumps({{}}))
+            name = args[args.index("--function-name") + 1]
+            component = next(
+                key for key, value in dispatchers.items()
+                if value["function_name"] == name
+            )
+            print(json.dumps(
+                {{"ReservedConcurrentExecutions": 2}}
+                if component == "tiktok"
+                else {{}}
+            ))
         elif args[:2] == ["lambda", "list-event-source-mappings"]:
             if "--function-name" in args:
                 name = args[args.index("--function-name") + 1]
@@ -1828,7 +1841,9 @@ def _fake_terraform(path: Path) -> None:
                 "openclaw_image": {"value": core["desired_openclaw_image"]},
                 "mcp_image": {"value": desired},
                 "x_buzz_image": {"value": core["desired_x_image"]},
-                "tiktok_acquire_image": {"value": core["desired_tiktok_image"]},
+                "media_worker_image": {"value": core["desired_tiktok_image"]},
+                "tiktok_acquire_image": {"value": ""},
+                "enable_media_worker": {"value": True},
                 "enable_tiktok_acquire": {"value": True},
                 "ingest_rule_enabled": {"value": core["ingest_rule_enabled"]},
                 "morning_digest_rule_enabled": {
@@ -1890,7 +1905,7 @@ def _fake_terraform(path: Path) -> None:
                     "x_buzz": "active",
                 },
                 "hmac_release_bindings": {},
-                "receipt_authorization_expires_at": 2_000_000_000,
+                "receipt_authorization_expires_at": "2000000000",
             }
             gate_input["deployment_gate_query"] = {
                 "images_json": json.dumps(
@@ -2108,6 +2123,123 @@ def _run_dispatcher_migration_validator(
     )
 
 
+def _run_media_cutover_gate(
+    tmp_path: Path,
+    scenario: str = "safe",
+) -> subprocess.CompletedProcess[str]:
+    snapshot = {
+        "taskdefs": {
+            "tiktok": {"image": LEGACY_TIKTOK_IMAGE},
+            "mcp": {
+                "env": {
+                    "USE_VIDEO_TOOLS": "0",
+                    "USE_TIKTOK_TOOLS": "false",
+                }
+            },
+        }
+    }
+    if scenario == "submission-enabled":
+        snapshot["taskdefs"]["mcp"]["env"]["USE_TIKTOK_TOOLS"] = "1"
+    snapshot_path = tmp_path / "cutover-snapshot.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    tmp_root = tmp_path / "guard-tmp"
+    tmp_root.mkdir()
+
+    guard = GUARD.read_text(encoding="utf-8")
+    function = re.search(
+        r"validate_media_envelope_cutover_gate\(\) \{.*?"
+        r"(?=\n# Terraform precondition)",
+        guard,
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            f"TMP_ROOT={str(tmp_root)!r}",
+            f"EXPECTED_ACCOUNT_ID={ACCOUNT!r}",
+            f"REGION={REGION!r}",
+            "PROJECT=teamagent",
+            "ENVIRONMENT=dev",
+            'die() { echo "★ $*" >&2; return 1; }',
+            """
+aws_cli() {
+  local service="$1" operation="$2"
+  shift 2
+  case "$service:$operation" in
+    sqs:get-queue-url)
+      local name=""
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--queue-name" ]; then name="$2"; break; fi
+        shift
+      done
+      printf '{"QueueUrl":"https://sqs.ap-northeast-1.amazonaws.com/718959508629/%s"}\\n' "$name"
+      ;;
+    sqs:get-queue-attributes)
+      if [ "${CUTOVER_SCENARIO:-safe}" = "nonempty-queue" ]; then
+        printf '%s\\n' '{"Attributes":{"ApproximateNumberOfMessages":"1","ApproximateNumberOfMessagesDelayed":"0","ApproximateNumberOfMessagesNotVisible":"0"}}'
+      else
+        printf '%s\\n' '{"Attributes":{"ApproximateNumberOfMessages":"0","ApproximateNumberOfMessagesDelayed":"0","ApproximateNumberOfMessagesNotVisible":"0"}}'
+      fi
+      ;;
+    ecs:list-tasks)
+      if [ "${CUTOVER_SCENARIO:-safe}" = "active-task" ]; then
+        printf '%s\\n' '{"taskArns":["arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev-tiktok/active"]}'
+      else
+        printf '%s\\n' '{"taskArns":[]}'
+      fi
+      ;;
+    *) return 99 ;;
+  esac
+}
+""",
+            function.group(0),
+            'validate_media_envelope_cutover_gate "$1" "$2"',
+        )
+    )
+    environment = os.environ.copy()
+    environment["CUTOVER_SCENARIO"] = scenario
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "validator",
+            str(snapshot_path),
+            MEDIA_WORKER_IMAGE,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=environment,
+    )
+
+
+def test_media_cutover_gate_requires_stopped_submission_empty_queues_and_zero_tasks(
+    tmp_path: Path,
+) -> None:
+    result = _run_media_cutover_gate(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("scenario", "message"),
+    [
+        ("submission-enabled", "明示停止"),
+        ("nonempty-queue", "完全空"),
+        ("active-task", "task zero"),
+    ],
+)
+def test_media_cutover_gate_fails_closed(
+    tmp_path: Path,
+    scenario: str,
+    message: str,
+) -> None:
+    result = _run_media_cutover_gate(tmp_path, scenario)
+    assert result.returncode == 1
+    assert message in result.stderr
+
+
 def test_dispatcher_migration_validator_accepts_exact_archive_and_taskdef_only(
     tmp_path: Path,
 ) -> None:
@@ -2157,7 +2289,7 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "openclaw": OPENCLAW_IMAGE,
         "mcp": LIVE_IMAGE,
         "x_buzz": X_IMAGE,
-        "tiktok": TIKTOK_IMAGE,
+        "tiktok": MEDIA_WORKER_IMAGE,
     }
     assert data["rule_states"]["desired"] == {
         "ingest": False,

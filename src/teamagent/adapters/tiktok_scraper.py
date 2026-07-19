@@ -163,7 +163,7 @@ def _parse_media_post(post: dict[str, Any]) -> TikTokVideo:
         url=str(post.get("url") or ""),
         desc=str(post.get("title") or ""),
         create_time=int(post.get("create_time") or 0),
-        duration=0,
+        duration=max(0, int(post.get("duration") or 0)),
         cover_url=str(post.get("cover_url") or ""),
         author=TikTokAuthor(
             unique_id=str(post.get("account_id") or ""),
@@ -175,8 +175,10 @@ def _parse_media_post(post: dict[str, Any]) -> TikTokVideo:
         comment_count=int(post.get("comments") or 0),
         share_count=int(post.get("shares") or 0),
         collect_count=int(post.get("saves") or 0),
-        hashtags=(),
-        music_title="",
+        hashtags=tuple(
+            str(value) for value in (post.get("hashtags") or ()) if isinstance(value, str)
+        ),
+        music_title=str(post.get("music_title") or ""),
     )
 
 
@@ -217,6 +219,7 @@ def search_tiktok(
             posts = MediaJobClient().search_tiktok(
                 normalized_query,
                 request_fingerprint=f"tiktok-search:{fingerprint}",
+                search_type=search_type,
                 max_videos=max_videos,
                 timeout_s=min(timeout_s, 15 * 60),
             )
@@ -227,7 +230,7 @@ def search_tiktok(
             raise TikTokScrapeError("TIKTOK_EMPTY_RESULT: media worker returned no posts")
         return TikTokSearchResult(
             query=normalized_query,
-            search_type=search_type,
+            search_type=str(posts[0].get("search_type") or search_type),
             videos=videos,
         )
     if not MediaJobClient.local_runtime_enabled():

@@ -24,12 +24,19 @@ class _FakeStore:
         self._submit_ok = submit_ok
         self._status = status
         self.last_spec: dict[str, Any] | None = None
+        self.status_audit_hash: str | None = None
 
     def submit(self, spec: dict[str, Any]) -> bool:
         self.last_spec = spec
         return self._submit_ok
 
-    def get_status(self, job_id: str) -> dict[str, Any] | None:
+    def get_status(
+        self,
+        job_id: str,
+        *,
+        audit_principal_hash: str,
+    ) -> dict[str, Any] | None:
+        self.status_audit_hash = audit_principal_hash
         return self._status
 
 
@@ -99,6 +106,7 @@ def test_status_running() -> None:
     out = skill.run(TikTokAcquireStatusInput(job_id="tk_abc"), _ctx())
     assert out.status == "running"
     assert out.progress == {"kw_done": 1, "kw_total": 2}
+    assert store.status_audit_hash == hashlib.sha256(b"a@vectorinc.co.jp").hexdigest()
 
 
 def test_status_done_maps_videos_and_urls() -> None:

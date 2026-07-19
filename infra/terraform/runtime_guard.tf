@@ -145,9 +145,9 @@ locals {
       "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-mcp@sha256:[0-9a-f]{64}$",
       var.x_buzz_image,
     ))) &&
-    (!var.enable_tiktok_acquire || can(regex(
-      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$",
-      var.tiktok_acquire_image,
+    (!local.media_worker_enabled || can(regex(
+      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-media-worker@sha256:[0-9a-f]{64}$",
+      local.media_worker_image,
     )))
   )
 
@@ -494,13 +494,13 @@ locals {
     var.openclaw_image == var.runtime_guard_live.desired_openclaw_image &&
     var.mcp_image == var.runtime_guard_live.desired_mcp_image &&
     var.x_buzz_image == var.runtime_guard_live.desired_x_image &&
-    var.tiktok_acquire_image == var.runtime_guard_live.desired_tiktok_image &&
+    local.media_worker_image == var.runtime_guard_live.desired_tiktok_image &&
     var.enable_connect_web == var.runtime_guard_live.enable_connect_web &&
     var.enable_ingest_schedule == var.runtime_guard_live.enable_ingest_schedule &&
     var.enable_morning_digest == var.runtime_guard_live.enable_morning_digest &&
     var.enable_canary_health == var.runtime_guard_live.enable_canary_health &&
     var.enable_x_research == var.runtime_guard_live.enable_x_research &&
-    var.enable_tiktok_acquire == var.runtime_guard_live.enable_tiktok_acquire &&
+    local.media_worker_enabled == var.runtime_guard_live.enable_tiktok_acquire &&
     var.enable_scrape_tools == var.runtime_guard_live.enable_scrape_tools &&
     var.enable_reminders == var.runtime_guard_live.enable_reminders &&
     var.enable_report_shorturl == var.runtime_guard_live.enable_report_shorturl &&
@@ -547,7 +547,7 @@ locals {
     local.runtime_connect_app_html_contract_valid &&
     local.hmac_transition_contract_valid &&
     (
-      !var.enable_tiktok_acquire ||
+      !local.media_worker_enabled ||
       (
         try(local.tk_dispatch_static_environment, {}) ==
         var.runtime_guard_live.tiktok_dispatch_static_environment &&

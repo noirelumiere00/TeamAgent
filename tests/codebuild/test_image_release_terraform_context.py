@@ -85,6 +85,9 @@ def _plan() -> dict[str, Any]:
                     f"teamagent-openclaw@sha256:{'b' * 64}"
                 )
             },
+            "media_worker_image": {"value": ""},
+            "tiktok_acquire_image": {"value": ""},
+            "enable_media_worker": {"value": False},
             "enable_tiktok_acquire": {"value": False},
         },
         "configuration": {
@@ -249,6 +252,38 @@ def test_context_rejects_empty_managed_runtime_images(variable_name: str) -> Non
     plan["variables"][variable_name]["value"] = ""
 
     with pytest.raises(CONTEXT.ContextError, match="nonempty release digest"):
+        CONTEXT.build_context(
+            plan=plan,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+def test_context_binds_only_the_generic_effective_media_worker_digest() -> None:
+    plan = _plan()
+    media_image = (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+        f"teamagent-media-worker@sha256:{'c' * 64}"
+    )
+    plan["variables"]["enable_media_worker"]["value"] = True
+    plan["variables"]["enable_tiktok_acquire"]["value"] = True
+    plan["variables"]["media_worker_image"]["value"] = media_image
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=_state(),
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+
+    assert len(value["plan"]["runtime_images_sha256"]) == 64
+
+    plan["variables"]["media_worker_image"]["value"] = (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+        f"teamagent-dev-tiktok-acquire@sha256:{'c' * 64}"
+    )
+    with pytest.raises(CONTEXT.ContextError, match="generic media release digest"):
         CONTEXT.build_context(
             plan=plan,
             state=_state(),

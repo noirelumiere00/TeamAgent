@@ -3,7 +3,7 @@
   "kind": "teamagent.core-media-release-contract",
   "release": {
     "ready": false,
-    "blocked_reason": "NO-GO until the core branch adds the final media Dockerfile, removes unknown provenance defaults, implements both runtime and RELEASE_CONTRACT_SHA256/APP_PROVENANCE_SHA256 ARG/label interfaces, supplies C0/H0 runtime evidence, and records the immutable S3 VersionId whose bytes hash to the approved 716ac25a... baked fallback."
+    "blocked_reason": "NO-GO: verify-source-interface still rejects ARG GIT_COMMIT=unknown and ARG GIT_BRANCH=unknown in both checked-in Dockerfiles; app_html.baked_fallback.s3_version_id is unrecorded for the approved SHA-256 716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb; and signed C0/H0 runtime evidence has not been supplied. Keep release.ready=false until those exact automated gates pass."
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",

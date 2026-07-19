@@ -9,6 +9,7 @@ fencing remains authoritative for the actual job transition.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -21,6 +22,8 @@ from botocore.config import Config
 
 _MAX_BODY_BYTES = 128 * 1024
 _MAX_ECS_OVERRIDE_CHARACTERS = 8192
+_MAX_JOB_BUDGET_SECONDS = 15 * 60
+_MAX_ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _TASK_START_MINIMUM_BUDGET_SECONDS = 30.0
 _TERMINAL_WRITE_RESERVE_SECONDS = 15.0
 _JOB_ID = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
@@ -170,6 +173,7 @@ def _validate_operation(value: Any) -> None:
             value,
             {
                 "kind",
+                "search_type",
                 "keywords",
                 "n_per_kw",
                 "videos_per_kw",
@@ -180,6 +184,8 @@ def _validate_operation(value: Any) -> None:
             "TikTok operation",
         )
         keywords = operation["keywords"]
+        if operation["search_type"] not in {"keyword", "hashtag"}:
+            raise ValueError("TikTok search type is invalid")
         if not isinstance(keywords, list) or not 1 <= len(keywords) <= 10:
             raise ValueError("TikTok keywords are invalid")
         normalized: list[str] = []
@@ -408,8 +414,8 @@ def _failure_target(body: str, now: int) -> tuple[str, int] | None:
         or not _JOB_ID.fullmatch(job_id)
         or type(created) is not int
         or type(deadline) is not int
-        or not 1 <= deadline - created <= 900
-        or not now < deadline <= now + 900
+        or not 1 <= deadline - created <= _MAX_JOB_BUDGET_SECONDS
+        or not now < deadline <= now + _MAX_JOB_BUDGET_SECONDS
     ):
         return None
     return job_id, deadline
@@ -420,7 +426,7 @@ def _validate_envelope(
     *,
     expected_bucket: str,
     now: int,
-    max_artifact_ttl_s: int = 21600,
+    max_artifact_ttl_s: int = _MAX_ARTIFACT_RETENTION_SECONDS,
 ) -> dict[str, Any]:
     encoded = body.encode("utf-8")
     if not encoded or len(encoded) > _MAX_BODY_BYTES:
@@ -445,8 +451,8 @@ def _validate_envelope(
         type(created) is not int
         or type(deadline) is not int
         or type(ttl) is not int
-        or not 1 <= deadline - created <= 900
-        or not 300 <= ttl <= max_artifact_ttl_s <= 21600
+        or not 1 <= deadline - created <= _MAX_JOB_BUDGET_SECONDS
+        or not 300 <= ttl <= max_artifact_ttl_s <= _MAX_ARTIFACT_RETENTION_SECONDS
     ):
         raise ValueError("media envelope timing is invalid")
     if deadline <= now:
@@ -501,7 +507,8 @@ def _mark_failed(
             Key={"job_id": {"S": job_id}},
             UpdateExpression=(
                 "SET #status = :failed, detail = :detail, updated_at = :now, "
-                "cleanup_at = :now ADD #version :one"
+                "cleanup_at = if_not_exists(hard_cleanup_at, :cleanup) "
+                "ADD #version :one"
             ),
             ConditionExpression="#status = :queued",
             ExpressionAttributeNames={"#status": "status", "#version": "version"},
@@ -510,6 +517,7 @@ def _mark_failed(
                 ":failed": {"S": "failed"},
                 ":detail": {"S": detail},
                 ":now": {"N": str(now)},
+                ":cleanup": {"N": str(now + _MAX_ARTIFACT_RETENTION_SECONDS)},
                 ":one": {"N": "1"},
             },
         )
@@ -520,6 +528,21 @@ def _mark_failed(
 
 def _claim_dispatch(table: str, spec: dict[str, Any], owner: str, now: int) -> bool:
     deadline_epoch_s = int(spec["deadline_epoch_s"])
+    audit_hash = spec["audit_principal_hash"]
+    audit_condition = (
+        "audit_principal_hash = :audit"
+        if audit_hash is not None
+        else "attribute_not_exists(audit_principal_hash)"
+    )
+    values: dict[str, Any] = {
+        ":queued": {"S": "queued"},
+        ":payload": {"S": spec["payload_sha256"]},
+        ":owner": {"S": owner},
+        ":now": {"N": str(now)},
+        ":lease": {"N": str(now + 120)},
+    }
+    if audit_hash is not None:
+        values[":audit"] = {"S": audit_hash}
     try:
         _call(
             "dynamodb",
@@ -532,18 +555,12 @@ def _claim_dispatch(table: str, spec: dict[str, Any], owner: str, now: int) -> b
                 "dispatch_started_at = :now"
             ),
             ConditionExpression=(
-                "#status = :queued AND payload_sha256 = :payload AND "
+                f"#status = :queued AND payload_sha256 = :payload AND {audit_condition} AND "
                 "(attribute_not_exists(dispatched_task_arn)) AND "
                 "(attribute_not_exists(dispatch_owner) OR dispatch_lease_expires_at < :now)"
             ),
             ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={
-                ":queued": {"S": "queued"},
-                ":payload": {"S": spec["payload_sha256"]},
-                ":owner": {"S": owner},
-                ":now": {"N": str(now)},
-                ":lease": {"N": str(now + 120)},
-            },
+            ExpressionAttributeValues=values,
         )
         return True
     except Exception as exc:
@@ -557,6 +574,13 @@ def _claim_dispatch(table: str, spec: dict[str, Any], owner: str, now: int) -> b
             Key={"job_id": {"S": spec["job_id"]}},
             ConsistentRead=True,
         ).get("Item", {})
+        if item.get("payload_sha256", {}).get("S", "") != spec[
+            "payload_sha256"
+        ] or not hmac.compare_digest(
+            item.get("audit_principal_hash", {}).get("S", ""),
+            str(audit_hash or ""),
+        ):
+            raise RuntimeError("media dispatch row ownership mismatch") from exc
         if item.get("dispatched_task_arn", {}).get("S"):
             return False
         status = item.get("status", {}).get("S")
@@ -584,21 +608,29 @@ def _release_dispatch(
 
 
 def _task_overrides(container: str, spec: dict[str, Any]) -> dict[str, Any]:
+    environment = [
+        {"name": "MEDIA_JOB_ID", "value": spec["job_id"]},
+        {
+            "name": "MEDIA_JOB_PAYLOAD_SHA256",
+            "value": spec["payload_sha256"],
+        },
+        {
+            "name": "MEDIA_JOB_DEADLINE_EPOCH_S",
+            "value": str(spec["deadline_epoch_s"]),
+        },
+    ]
+    if spec["audit_principal_hash"] is not None:
+        environment.append(
+            {
+                "name": "MEDIA_JOB_AUDIT_PRINCIPAL_HASH",
+                "value": spec["audit_principal_hash"],
+            }
+        )
     overrides = {
         "containerOverrides": [
             {
                 "name": container,
-                "environment": [
-                    {"name": "MEDIA_JOB_ID", "value": spec["job_id"]},
-                    {
-                        "name": "MEDIA_JOB_PAYLOAD_SHA256",
-                        "value": spec["payload_sha256"],
-                    },
-                    {
-                        "name": "MEDIA_JOB_DEADLINE_EPOCH_S",
-                        "value": str(spec["deadline_epoch_s"]),
-                    },
-                ],
+                "environment": environment,
             }
         ]
     }
@@ -607,7 +639,260 @@ def _task_overrides(container: str, spec: dict[str, Any]) -> dict[str, Any]:
     return overrides
 
 
-def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
+def _task_definition_family_arn(value: Any) -> str:
+    task_definition = _bounded_string(
+        value,
+        minimum=20,
+        maximum=512,
+        name="ECS task definition ARN",
+    )
+    family, separator, revision = task_definition.rpartition(":")
+    if (
+        not separator
+        or not revision.isdigit()
+        or ":task-definition/" not in family
+        or not family.startswith("arn:")
+    ):
+        raise ValueError("ECS task definition ARN is invalid")
+    return family
+
+
+def _event_deadline(context: Any) -> int:
+    remaining_ms = getattr(context, "get_remaining_time_in_millis", lambda: 30_000)()
+    if type(remaining_ms) is not int or remaining_ms < 2_000:
+        raise TimeoutError("ECS STOPPED reconciler has no write budget")
+    return int(time.time()) + max(1, min(25, (remaining_ms - 1_000) // 1_000))
+
+
+def _tag_values(detail: dict[str, Any]) -> dict[str, str]:
+    tags = detail.get("tags")
+    # Task state-change events preserve RunTask overrides, while tags are not
+    # part of the documented event shape. If present, use tags as an extra
+    # identity cross-check only.
+    if tags is None:
+        return {}
+    if not isinstance(tags, list) or len(tags) > 50:
+        raise ValueError("ECS STOPPED task tags are invalid")
+    values: dict[str, str] = {}
+    for raw in tags:
+        if not isinstance(raw, dict):
+            raise ValueError("ECS STOPPED task tags are invalid")
+        key = raw.get("key")
+        value = raw.get("value")
+        if not isinstance(key, str) or not isinstance(value, str) or key in values:
+            raise ValueError("ECS STOPPED task tags are invalid")
+        values[key] = value
+    return values
+
+
+def _override_values(detail: dict[str, Any], expected_container: str) -> dict[str, str]:
+    overrides = detail.get("overrides")
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, dict):
+        raise ValueError("ECS STOPPED overrides are invalid")
+    containers = overrides.get("containerOverrides")
+    if not isinstance(containers, list):
+        raise ValueError("ECS STOPPED overrides are invalid")
+    matches = [
+        value
+        for value in containers
+        if isinstance(value, dict) and value.get("name") == expected_container
+    ]
+    if len(matches) != 1:
+        raise ValueError("ECS STOPPED container override is invalid")
+    environment = matches[0].get("environment")
+    if not isinstance(environment, list):
+        raise ValueError("ECS STOPPED container environment is invalid")
+    values: dict[str, str] = {}
+    for raw in environment:
+        if not isinstance(raw, dict):
+            raise ValueError("ECS STOPPED container environment is invalid")
+        name = raw.get("name")
+        value = raw.get("value")
+        if not isinstance(name, str) or not isinstance(value, str) or name in values:
+            raise ValueError("ECS STOPPED container environment is invalid")
+        values[name] = value
+    return values
+
+
+def _stopped_identity(
+    detail: dict[str, Any],
+    *,
+    expected_container: str,
+) -> tuple[str, str, str | None]:
+    tags = _tag_values(detail)
+    overrides = _override_values(detail, expected_container)
+    tagged_job_id = tags.get("teamagent-job-id")
+    tagged_payload = tags.get("teamagent-payload-sha256")
+    overridden_job_id = overrides.get("MEDIA_JOB_ID")
+    overridden_payload = overrides.get("MEDIA_JOB_PAYLOAD_SHA256")
+    overridden_audit = overrides.get("MEDIA_JOB_AUDIT_PRINCIPAL_HASH")
+    if tagged_job_id is not None and overridden_job_id != tagged_job_id:
+        raise ValueError("ECS STOPPED job identity disagrees with task tags")
+    if tagged_payload is not None and overridden_payload != tagged_payload:
+        raise ValueError("ECS STOPPED payload identity disagrees with task tags")
+    if (
+        overridden_job_id is None
+        or not _JOB_ID.fullmatch(overridden_job_id)
+        or overridden_payload is None
+        or not _SHA256.fullmatch(overridden_payload)
+        or detail.get("startedBy") != overridden_job_id
+    ):
+        raise ValueError("ECS STOPPED task identity is invalid")
+    tagged_audit = tags.get("teamagent-audit-principal-hash")
+    if tagged_audit is not None and tagged_audit != overridden_audit:
+        raise ValueError("ECS STOPPED audit identity disagrees with task tags")
+    if overridden_audit is not None and not _SHA256.fullmatch(overridden_audit):
+        raise ValueError("ECS STOPPED audit identity is invalid")
+    return overridden_job_id, overridden_payload, overridden_audit
+
+
+def _stopped_diagnostics(detail: dict[str, Any]) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
+    for source, target, maximum in (
+        ("stopCode", "stop_code", 100),
+        ("stoppedReason", "stopped_reason", 512),
+    ):
+        value = detail.get(source)
+        if isinstance(value, str):
+            diagnostics[target] = value[:maximum]
+    containers: list[dict[str, Any]] = []
+    raw_containers = detail.get("containers")
+    if isinstance(raw_containers, list):
+        for raw in raw_containers[:20]:
+            if not isinstance(raw, dict):
+                continue
+            item: dict[str, Any] = {}
+            if isinstance(raw.get("name"), str):
+                item["name"] = raw["name"][:100]
+            if type(raw.get("exitCode")) is int:
+                item["exit_code"] = raw["exitCode"]
+            if isinstance(raw.get("reason"), str):
+                item["reason"] = raw["reason"][:512]
+            if item:
+                containers.append(item)
+    if containers:
+        diagnostics["containers"] = containers
+    return diagnostics
+
+
+def _reconcile_stopped(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    if event.get("source") != "aws.ecs" or event.get("detail-type") != "ECS Task State Change":
+        raise ValueError("ECS STOPPED event identity is invalid")
+    detail = event.get("detail")
+    if not isinstance(detail, dict) or detail.get("lastStatus") != "STOPPED":
+        raise ValueError("ECS STOPPED event status is invalid")
+    cluster = os.environ["CLUSTER_ARN"]
+    taskdef = os.environ["TASKDEF_ARN"]
+    table = os.environ["JOBS_TABLE"]
+    container = os.environ.get("CONTAINER", "media-worker")
+    if detail.get("clusterArn") != cluster:
+        raise ValueError("ECS STOPPED cluster is outside reconciler scope")
+    if _task_definition_family_arn(detail.get("taskDefinitionArn")) != (
+        _task_definition_family_arn(taskdef)
+    ):
+        raise ValueError("ECS STOPPED task family is outside reconciler scope")
+    task_arn = _bounded_string(
+        detail.get("taskArn"),
+        minimum=20,
+        maximum=512,
+        name="ECS task ARN",
+    )
+    if not task_arn.startswith("arn:") or ":task/" not in task_arn:
+        raise ValueError("ECS task ARN is invalid")
+    job_id, payload_hash, audit_hash = _stopped_identity(
+        detail,
+        expected_container=container,
+    )
+    now = int(time.time())
+    deadline = _event_deadline(context)
+    audit_condition = (
+        "audit_principal_hash = :audit"
+        if audit_hash is not None
+        else "attribute_not_exists(audit_principal_hash)"
+    )
+    diagnostics = _stopped_diagnostics(detail)
+    result_detail = _canonical(
+        {
+            "schema_version": "1",
+            "job_id": job_id,
+            "status": "failed",
+            "artifacts": [],
+            "metadata": {
+                "reconciler": "ecs-stopped",
+                "ecs": diagnostics,
+            },
+            "error_code": "MEDIA_ECS_TASK_STOPPED",
+        }
+    ).decode("utf-8")
+    values: dict[str, Any] = {
+        ":queued": {"S": "queued"},
+        ":running": {"S": "running"},
+        ":failed": {"S": "failed"},
+        ":task": {"S": task_arn},
+        ":payload": {"S": payload_hash},
+        ":detail": {"S": result_detail},
+        ":now": {"N": str(now)},
+        ":cleanup": {"N": str(now + _MAX_ARTIFACT_RETENTION_SECONDS)},
+        ":one": {"N": "1"},
+    }
+    if audit_hash is not None:
+        values[":audit"] = {"S": audit_hash}
+    try:
+        _call(
+            "dynamodb",
+            "update_item",
+            deadline,
+            TableName=table,
+            Key={"job_id": {"S": job_id}},
+            UpdateExpression=(
+                "SET #status = :failed, detail = :detail, updated_at = :now, "
+                "cleanup_at = if_not_exists(hard_cleanup_at, :cleanup) "
+                "REMOVE dispatch_owner, dispatch_lease_expires_at "
+                "ADD #version :one"
+            ),
+            ConditionExpression=(
+                "(#status = :queued OR #status = :running) AND "
+                "dispatched_task_arn = :task AND payload_sha256 = :payload AND "
+                f"{audit_condition}"
+            ),
+            ExpressionAttributeNames={"#status": "status", "#version": "version"},
+            ExpressionAttributeValues=values,
+        )
+    except Exception as exc:
+        if not _conditional_failure(exc):
+            raise
+        item = _call(
+            "dynamodb",
+            "get_item",
+            deadline,
+            TableName=table,
+            Key={"job_id": {"S": job_id}},
+            ConsistentRead=True,
+        ).get("Item", {})
+        status = item.get("status", {}).get("S")
+        if status in {"done", "failed"}:
+            return {"reconciled": False, "job_id": job_id, "status": status}
+        if (
+            item.get("dispatched_task_arn", {}).get("S") != task_arn
+            or item.get("payload_sha256", {}).get("S") != payload_hash
+            or not hmac.compare_digest(
+                item.get("audit_principal_hash", {}).get("S", ""),
+                audit_hash or "",
+            )
+        ):
+            raise RuntimeError("ECS STOPPED row ownership mismatch") from exc
+        # The dispatch confirmation may race the STOPPED event. Raising keeps
+        # the EventBridge delivery retryable until that write is observable.
+        raise RuntimeError("ECS STOPPED transition raced job state") from exc
+    return {"reconciled": True, "job_id": job_id, "status": "failed"}
+
+
+def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    if event.get("source") == "aws.ecs":
+        return _reconcile_stopped(event, context)
+
     cluster = os.environ["CLUSTER_ARN"]
     taskdef = os.environ["TASKDEF_ARN"]
     table = os.environ["JOBS_TABLE"]
@@ -619,7 +904,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
         max_artifact_ttl_s = int(os.environ["MEDIA_ARTIFACT_TTL_SECONDS"])
     except (KeyError, ValueError) as exc:
         raise RuntimeError("MEDIA_ARTIFACT_TTL_SECONDS is invalid") from exc
-    if not 300 <= max_artifact_ttl_s <= 21600:
+    if not 300 <= max_artifact_ttl_s <= _MAX_ARTIFACT_RETENTION_SECONDS:
         raise RuntimeError("MEDIA_ARTIFACT_TTL_SECONDS is invalid")
 
     started: list[str | None] = []
@@ -682,7 +967,25 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
                 taskDefinition=taskdef,
                 launchType="FARGATE",
                 clientToken=spec["idempotency_key"],
+                startedBy=spec["job_id"],
                 count=1,
+                tags=[
+                    {"key": "teamagent-job-id", "value": spec["job_id"]},
+                    {
+                        "key": "teamagent-payload-sha256",
+                        "value": spec["payload_sha256"],
+                    },
+                    *(
+                        [
+                            {
+                                "key": "teamagent-audit-principal-hash",
+                                "value": spec["audit_principal_hash"],
+                            }
+                        ]
+                        if spec["audit_principal_hash"] is not None
+                        else []
+                    ),
+                ],
                 networkConfiguration={
                     "awsvpcConfiguration": {
                         "subnets": subnets,
@@ -697,6 +1000,17 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
             if failures or len(tasks) != 1:
                 raise RuntimeError(f"run_task did not start exactly one task: {failures}")
             task_arn = tasks[0]["taskArn"]
+            confirmation_values: dict[str, Any] = {
+                ":task": {"S": task_arn},
+                ":now": {"N": str(now)},
+                ":owner": {"S": owner},
+                ":payload": {"S": spec["payload_sha256"]},
+            }
+            if spec["audit_principal_hash"] is not None:
+                confirmation_values[":audit"] = {"S": spec["audit_principal_hash"]}
+                confirmation_audit_condition = "audit_principal_hash = :audit"
+            else:
+                confirmation_audit_condition = "attribute_not_exists(audit_principal_hash)"
             _call(
                 "dynamodb",
                 "update_item",
@@ -707,12 +1021,11 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
                     "SET dispatched_task_arn = :task, dispatched_at = :now "
                     "REMOVE dispatch_owner, dispatch_lease_expires_at"
                 ),
-                ConditionExpression="dispatch_owner = :owner",
-                ExpressionAttributeValues={
-                    ":task": {"S": task_arn},
-                    ":now": {"N": str(now)},
-                    ":owner": {"S": owner},
-                },
+                ConditionExpression=(
+                    "dispatch_owner = :owner AND payload_sha256 = :payload AND "
+                    f"{confirmation_audit_condition}"
+                ),
+                ExpressionAttributeValues=confirmation_values,
             )
             started.append(task_arn)
         except Exception:
@@ -722,4 +1035,4 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
                 # No network call is permitted after the immutable deadline.
                 pass
             raise
-    return {"started": started}
+    return {"started": started, "batchItemFailures": []}

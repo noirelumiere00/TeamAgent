@@ -52,14 +52,64 @@ _EXTERNAL_HTML_REF = re.compile(
 _PLACEHOLDER = re.compile(r"[｛{]\s*(\d+)\s*[:：]?[^｝}]*[｝}]")
 _ACTIVE_PROCESS_GROUPS: set[int] = set()
 _ACTIVE_PROCESS_GROUPS_LOCK = threading.Lock()
+_CHILD_ENV_ALLOWLIST = frozenset(
+    {
+        "CHROMIUM_PATH",
+        "LANG",
+        "LC_ALL",
+        "MEDIA_BLOCKED_VPC_CIDRS",
+        "PATH",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TZ",
+    }
+)
 
 
 class MediaOperationError(RuntimeError):
     """workerが安全なerror_codeへ変換できる操作失敗。"""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.diagnostics = diagnostics or {}
+
+
+def _child_environment(**overrides: str) -> dict[str, str]:
+    """Build a subprocess environment without task credentials or secrets."""
+
+    environment = {
+        name: value for name in _CHILD_ENV_ALLOWLIST if (value := os.environ.get(name)) is not None
+    }
+    environment.update(overrides)
+    return environment
+
+
+def _isolated_child_environment(
+    workdir: Path,
+    *,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    directories = {
+        "HOME": workdir / "home",
+        "TMPDIR": workdir / "tmp",
+        "XDG_CACHE_HOME": workdir / "cache",
+        "XDG_CONFIG_HOME": workdir / "config",
+        "XDG_DATA_HOME": workdir / "data",
+        "XDG_STATE_HOME": workdir / "state",
+    }
+    for directory in directories.values():
+        directory.mkdir(mode=0o700, exist_ok=True)
+    return _child_environment(
+        **{name: str(directory) for name, directory in directories.items()},
+        **(extra or {}),
+    )
 
 
 def _remaining(budget: DeadlineBudget, cap_s: float | None = None) -> float:
@@ -135,7 +185,7 @@ def _run_process(
     process = subprocess.Popen(
         command,
         cwd=cwd,
-        env=env,
+        env=_child_environment() if env is None else env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -296,17 +346,7 @@ def _node_json(
     budget: DeadlineBudget,
     timeout_s: int,
 ) -> dict[str, Any]:
-    environment = {
-        **os.environ,
-        "HOME": str(workdir / "home"),
-        "TMPDIR": str(workdir / "tmp"),
-        "XDG_CACHE_HOME": str(workdir / "cache"),
-        "XDG_CONFIG_HOME": str(workdir / "config"),
-        "XDG_DATA_HOME": str(workdir / "data"),
-        "XDG_STATE_HOME": str(workdir / "state"),
-    }
-    for directory in ("home", "tmp", "cache", "config", "data", "state"):
-        (workdir / directory).mkdir(mode=0o700, exist_ok=True)
+    environment = _isolated_child_environment(workdir)
     completed = _run_process(
         command,
         cwd=workdir,
@@ -323,8 +363,34 @@ def _node_json(
             "MEDIA_TIKTOK_OUTPUT_INVALID",
             "TikTok output is invalid",
         ) from exc
-    if completed.returncode != 0 or not isinstance(result, dict) or not result.get("ok"):
-        raise MediaOperationError("MEDIA_TIKTOK_FAILED", "TikTok browser job failed")
+    if completed.returncode != 0 or not isinstance(result, dict) or result.get("ok") is not True:
+        raw_error_code = result.get("errorCode") if isinstance(result, dict) else None
+        error_code = raw_error_code if isinstance(raw_error_code, str) else ""
+        safe_code = {
+            "TIKTOK_BOT_WALL": "MEDIA_TIKTOK_BOT_WALL",
+            "TIKTOK_TRULY_EMPTY": "MEDIA_TIKTOK_TRULY_EMPTY",
+            "TIKTOK_EXCEPTION": "MEDIA_TIKTOK_PROVIDER_EXCEPTION",
+        }.get(error_code, "MEDIA_TIKTOK_FAILED")
+        raw_diag = result.get("diag") if isinstance(result, dict) else None
+        diagnostics: dict[str, Any] = {}
+        if isinstance(raw_diag, dict):
+            for name in (
+                "pagesFetched",
+                "captchaDetected",
+                "gridFound",
+                "ssrCount",
+                "sessionsRun",
+            ):
+                value = raw_diag.get(name)
+                if isinstance(value, bool) or (
+                    isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10000
+                ):
+                    diagnostics[name] = value
+        raise MediaOperationError(
+            safe_code,
+            "TikTok browser job failed",
+            diagnostics=diagnostics,
+        )
     _remaining(budget)
     return result
 
@@ -354,7 +420,10 @@ def _renderer_json(
             manifest_path.name,
         ],
         cwd=workdir,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env=_isolated_child_environment(
+            workdir,
+            extra={"PYTHONUNBUFFERED": "1"},
+        ),
         budget=budget,
         timeout_s=_remaining(budget),
         timeout_code="MEDIA_RENDER_TIMEOUT",
@@ -382,7 +451,13 @@ def _renderer_json(
     return metadata
 
 
-def _post_row(video: dict[str, Any], keyword: str, rank: int, pid: str) -> dict[str, Any]:
+def _post_row(
+    video: dict[str, Any],
+    keyword: str,
+    rank: int,
+    pid: str,
+    search_type: str,
+) -> dict[str, Any]:
     stats_value = video.get("stats")
     author_value = video.get("author")
     stats: dict[str, Any] = stats_value if isinstance(stats_value, dict) else {}
@@ -393,9 +468,18 @@ def _post_row(video: dict[str, Any], keyword: str, rank: int, pid: str) -> dict[
     shares = int(stats.get("shareCount") or 0)
     saves = int(stats.get("collectCount") or 0)
     followers = int(author.get("followerCount") or 0)
+    raw_hashtags = video.get("hashtags")
+    hashtags = (
+        [str(value)[:100] for value in raw_hashtags[:50] if isinstance(value, str)]
+        if isinstance(raw_hashtags, list)
+        else []
+    )
+    raw_music = video.get("music")
+    music_title = str(raw_music.get("title") or "")[:200] if isinstance(raw_music, dict) else ""
     return {
         "pid": pid,
         "kw": keyword,
+        "search_type": search_type,
         "rank_display": rank,
         "url": str(video.get("url") or ""),
         "title": str(video.get("desc") or ""),
@@ -410,6 +494,9 @@ def _post_row(video: dict[str, Any], keyword: str, rank: int, pid: str) -> dict[
         "eg_rate": round((likes + comments + shares + saves) / max(plays, 1) * 100, 6),
         "save_rate": round(saves / max(plays, 1) * 100, 6),
         "create_time": int(video.get("createTime") or 0),
+        "duration": max(0, int(video.get("duration") or 0)),
+        "hashtags": hashtags,
+        "music_title": music_title,
         "cover_url": str(video.get("coverUrl") or ""),
     }
 
@@ -489,31 +576,61 @@ def _tiktok_acquire(
         raise MediaOperationError("MEDIA_TIKTOK_RUNTIME_MISSING", "TikTok runtime is missing")
 
     posts: list[dict[str, Any]] = []
+    shortfalls: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    actual_search_types: dict[str, str] = {}
     for keyword_index, keyword in enumerate(operation.keywords):
         _remaining(budget)
-        result = _node_json(
-            [
-                node,
-                scraper,
-                "--query",
-                keyword,
-                "--type",
-                "keyword",
-                "--max",
-                str(operation.n_per_kw),
-            ],
-            workdir=workdir,
-            budget=budget,
-            timeout_s=120,
-        )
+        try:
+            result = _node_json(
+                [
+                    node,
+                    scraper,
+                    "--query",
+                    keyword,
+                    "--type",
+                    operation.search_type,
+                    "--max",
+                    str(operation.n_per_kw),
+                ],
+                workdir=workdir,
+                budget=budget,
+                timeout_s=120,
+            )
+        except MediaOperationError as exc:
+            if exc.code not in {
+                "MEDIA_TIKTOK_BOT_WALL",
+                "MEDIA_TIKTOK_TRULY_EMPTY",
+                "MEDIA_TIKTOK_PROVIDER_EXCEPTION",
+            }:
+                raise
+            shortfall = {
+                "kw": keyword,
+                "requested": operation.n_per_kw,
+                "actual": 0,
+                "reason": exc.code,
+            }
+            if exc.diagnostics:
+                shortfall["diagnostics"] = exc.diagnostics
+            shortfalls.append(shortfall)
+            warnings.append(f"{keyword}:{exc.code}")
+            continue
         videos = result.get("videos")
         if not isinstance(videos, list):
             raise MediaOperationError("MEDIA_TIKTOK_OUTPUT_INVALID", "TikTok videos are invalid")
+        actual_search_type = result.get("type")
+        if actual_search_type not in {"keyword", "hashtag", "keyword(fallback)"}:
+            raise MediaOperationError(
+                "MEDIA_TIKTOK_OUTPUT_INVALID",
+                "TikTok search type is invalid",
+            )
+        actual_search_types[keyword] = actual_search_type
+        accepted = 0
         for rank, raw_video in enumerate(videos[: operation.n_per_kw], 1):
             if not isinstance(raw_video, dict):
                 continue
             pid = f"p{keyword_index + 1:02d}{rank:03d}"
-            row = _post_row(raw_video, keyword, rank, pid)
+            row = _post_row(raw_video, keyword, rank, pid, actual_search_type)
             if not row["url"]:
                 continue
             try:
@@ -521,6 +638,16 @@ def _tiktok_acquire(
             except ValueError:
                 continue
             posts.append(row)
+            accepted += 1
+        if accepted < operation.n_per_kw:
+            shortfalls.append(
+                {
+                    "kw": keyword,
+                    "requested": operation.n_per_kw,
+                    "actual": accepted,
+                    "reason": "MEDIA_TIKTOK_RESULT_SHORTFALL",
+                }
+            )
 
     artifacts: list[ProducedArtifact] = []
     manifest_items: list[dict[str, Any]] = []
@@ -609,13 +736,23 @@ def _tiktok_acquire(
 
     posts_path = workdir / "posts.normalized.json"
     posts_path.write_text(
-        json.dumps({"posts": posts}, ensure_ascii=False, separators=(",", ":")),
+        json.dumps(
+            {
+                "posts": posts,
+                "shortfalls": shortfalls,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
         encoding="utf-8",
     )
     config_path = workdir / "config.json"
     config_path.write_text(
         json.dumps(
-            operation.client.model_dump(mode="json", exclude_none=True),
+            {
+                **operation.client.model_dump(mode="json", exclude_none=True),
+                "kws": list(operation.keywords),
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         ),
@@ -623,7 +760,14 @@ def _tiktok_acquire(
     )
     manifest_path = workdir / "manifest.json"
     manifest_path.write_text(
-        json.dumps({"items": manifest_items}, ensure_ascii=False, separators=(",", ":")),
+        json.dumps(
+            {
+                "items": manifest_items,
+                "shortfalls": shortfalls,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
         encoding="utf-8",
     )
     artifacts.extend(
@@ -656,7 +800,13 @@ def _tiktok_acquire(
                 "kw": len(operation.keywords),
                 "posts": len(posts),
                 "videos": downloaded_count,
+                "per_kw": {
+                    keyword: len(posts_by_keyword[keyword]) for keyword in operation.keywords
+                },
             },
+            "search_types": actual_search_types,
+            "shortfalls": shortfalls,
+            "warnings": warnings,
             "s3_prefix": "",
         },
     )

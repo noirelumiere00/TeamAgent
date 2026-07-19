@@ -29,7 +29,11 @@ from teamagent.media.url_policy import acquire_host_allowed
 MAX_JOB_BODY_BYTES = 128 * 1024
 MAX_INPUT_BYTES = 128 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
-MAX_DEADLINE_SECONDS = 15 * 60
+MAX_JOB_BUDGET_SECONDS = 15 * 60
+MAX_DEADLINE_SECONDS = MAX_JOB_BUDGET_SECONDS
+ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+MAX_PRESIGNED_URL_SECONDS = 7 * 24 * 60 * 60
+DDB_RETENTION_GRACE_SECONDS = 24 * 60 * 60
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 JobId = Annotated[str, StringConstraints(pattern=r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")]
@@ -103,6 +107,7 @@ class TikTokClientConfig(_StrictModel):
 
 class TikTokAcquireOperation(_StrictModel):
     kind: Literal["tiktok_acquire"]
+    search_type: Literal["keyword", "hashtag"] = "keyword"
     keywords: tuple[
         Annotated[str, StringConstraints(min_length=1, max_length=100)],
         ...,
@@ -252,7 +257,11 @@ class MediaJobRequest(_StrictModel):
     idempotency_key: Sha256
     created_at_epoch_s: int = Field(ge=1)
     deadline_epoch_s: int = Field(ge=1)
-    artifact_ttl_s: int = Field(default=3600, ge=300, le=6 * 60 * 60)
+    artifact_ttl_s: int = Field(
+        default=ARTIFACT_RETENTION_SECONDS,
+        ge=300,
+        le=ARTIFACT_RETENTION_SECONDS,
+    )
     audit_principal_hash: Sha256 | None = None
     output_bucket: S3Bucket
     output_prefix: S3Key
@@ -322,6 +331,10 @@ class MediaJobResult(_StrictModel):
     def _status_shape(self) -> MediaJobResult:
         if self.status == "done" and not self.artifacts:
             raise ValueError("done result requires artifacts")
+        names = [artifact.name for artifact in self.artifacts]
+        keys = [(artifact.object.bucket, artifact.object.key) for artifact in self.artifacts]
+        if len(names) != len(set(names)) or len(keys) != len(set(keys)):
+            raise ValueError("artifact names and object keys must be unique")
         if self.status == "failed" and not self.error_code:
             raise ValueError("failed result requires error_code")
         if self.status != "failed" and self.error_code is not None:
@@ -329,6 +342,31 @@ class MediaJobResult(_StrictModel):
         if len(_canonical_json(self.metadata)) > 32 * 1024:
             raise ValueError("result metadata exceeds limit")
         return self
+
+
+def artifact_manifest_sha256(artifacts: tuple[MediaArtifact, ...]) -> str:
+    """Digest the complete content-addressed artifact manifest.
+
+    The independent DynamoDB field produced from this representation prevents a
+    partially updated ``detail`` document from silently changing an artifact
+    key, size, or digest.
+    """
+
+    rows = sorted(
+        (
+            {
+                "name": artifact.name,
+                "bucket": artifact.object.bucket,
+                "key": artifact.object.key,
+                "sha256": artifact.object.sha256,
+                "size": artifact.object.size,
+                "content_type": artifact.object.content_type,
+            }
+            for artifact in artifacts
+        ),
+        key=lambda row: (row["name"], row["key"]),
+    )
+    return hashlib.sha256(_canonical_json(rows)).hexdigest()
 
 
 def make_job_request(
@@ -339,7 +377,7 @@ def make_job_request(
     now_epoch_s: int | None = None,
     timeout_s: int = MAX_DEADLINE_SECONDS,
     deadline_epoch_s: int | None = None,
-    artifact_ttl_s: int = 3600,
+    artifact_ttl_s: int = ARTIFACT_RETENTION_SECONDS,
     job_id: str | None = None,
     audit_principal_hash: str | None = None,
     output_prefix: str | None = None,
@@ -385,10 +423,14 @@ def parse_job_request(body: bytes | str) -> MediaJobRequest:
 
 
 __all__ = [
+    "ARTIFACT_RETENTION_SECONDS",
+    "DDB_RETENTION_GRACE_SECONDS",
     "MAX_DEADLINE_SECONDS",
     "MAX_INPUT_BYTES",
     "MAX_JOB_BODY_BYTES",
+    "MAX_JOB_BUDGET_SECONDS",
     "MAX_OUTPUT_BYTES",
+    "MAX_PRESIGNED_URL_SECONDS",
     "AcquireOperation",
     "FrameOperation",
     "MediaArtifact",
@@ -404,6 +446,7 @@ __all__ = [
     "ThumbnailOperation",
     "TikTokAcquireOperation",
     "TikTokClientConfig",
+    "artifact_manifest_sha256",
     "make_job_request",
     "parse_job_request",
     "semantic_request_sha256",

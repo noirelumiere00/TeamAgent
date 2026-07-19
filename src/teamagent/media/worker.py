@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -18,13 +20,17 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from teamagent.media.contracts import (
+    ARTIFACT_RETENTION_SECONDS,
+    DDB_RETENTION_GRACE_SECONDS,
     MAX_INPUT_BYTES,
+    MAX_JOB_BUDGET_SECONDS,
     MAX_OUTPUT_BYTES,
     MediaArtifact,
     MediaJobRequest,
     MediaJobResult,
     S3ObjectRef,
     TikTokAcquireOperation,
+    artifact_manifest_sha256,
     parse_job_request,
 )
 from teamagent.media.deadline import DeadlineBudget, MediaDeadlineExceededError, botocore_config
@@ -47,6 +53,10 @@ _RUNTIME_DIRECTORIES = (
     "jobs",
 )
 _TERMINAL_RESERVE_SECONDS = 15.0
+
+
+def _checksum_sha256_b64(hex_digest: str) -> str:
+    return base64.b64encode(bytes.fromhex(hex_digest)).decode("ascii")
 
 
 class WorkerBackend(Protocol):
@@ -156,13 +166,21 @@ class AwsWorkerBackend:
         if not self._bucket or not self._table:
             raise RuntimeError("MEDIA_JOB_BUCKET and MEDIA_JOBS_TABLE are required")
         try:
-            self._artifact_ttl_cap_s = int(os.environ.get("MEDIA_ARTIFACT_TTL_SECONDS", "21600"))
+            self._artifact_ttl_cap_s = int(
+                os.environ.get(
+                    "MEDIA_ARTIFACT_TTL_SECONDS",
+                    str(ARTIFACT_RETENTION_SECONDS),
+                )
+            )
         except ValueError as exc:
             raise RuntimeError("MEDIA_ARTIFACT_TTL_SECONDS is invalid") from exc
-        if not 300 <= self._artifact_ttl_cap_s <= 21600:
+        if not 300 <= self._artifact_ttl_cap_s <= ARTIFACT_RETENTION_SECONDS:
             raise RuntimeError("MEDIA_ARTIFACT_TTL_SECONDS is invalid")
         now_epoch_s = int(clock())
-        if deadline_epoch_s <= now_epoch_s or deadline_epoch_s - now_epoch_s > 900:
+        if (
+            deadline_epoch_s <= now_epoch_s
+            or deadline_epoch_s - now_epoch_s > MAX_JOB_BUDGET_SECONDS
+        ):
             raise RuntimeError("MEDIA_JOB_DEADLINE_EPOCH_S is invalid")
         if session is None:
             import boto3
@@ -210,12 +228,15 @@ class AwsWorkerBackend:
         if not raw:
             raise ValueError("media job request pointer is missing")
         request = parse_job_request(raw)
+        persisted_audit_hash = item.get("audit_principal_hash", {}).get("S", "")
+        request_audit_hash = request.audit_principal_hash or ""
         if (
             request.job_id != job_id
             or request.payload_sha256 != payload_sha256
             or item.get("payload_sha256", {}).get("S") != payload_sha256
             or item.get("idempotency_key", {}).get("S") != request.idempotency_key
             or request.deadline_epoch_s != self._deadline_epoch_s
+            or not hmac.compare_digest(persisted_audit_hash, request_audit_hash)
         ):
             raise ValueError("media job request pointer does not match persisted envelope")
         return request
@@ -247,6 +268,24 @@ class AwsWorkerBackend:
     ) -> WorkerClaim:
         lease_expires = max(request.deadline_epoch_s + 60, now_epoch_s + 60)
         attempt_id = str(uuid.uuid4())
+        audit_condition = (
+            "audit_principal_hash = :audit"
+            if request.audit_principal_hash
+            else "attribute_not_exists(audit_principal_hash)"
+        )
+        values: dict[str, Any] = {
+            ":queued": {"S": "queued"},
+            ":running": {"S": "running"},
+            ":owner": {"S": owner},
+            ":attempt": {"S": attempt_id},
+            ":lease": {"N": str(lease_expires)},
+            ":now": {"N": str(now_epoch_s)},
+            ":one": {"N": "1"},
+            ":idempotency": {"S": request.idempotency_key},
+            ":payload": {"S": request.payload_sha256},
+        }
+        if request.audit_principal_hash:
+            values[":audit"] = {"S": request.audit_principal_hash}
         try:
             response = self._call(
                 "dynamodb",
@@ -260,24 +299,14 @@ class AwsWorkerBackend:
                 ),
                 ConditionExpression=(
                     "attribute_exists(job_id) AND idempotency_key = :idempotency AND "
-                    "payload_sha256 = :payload AND "
+                    f"payload_sha256 = :payload AND {audit_condition} AND "
                     "(attribute_not_exists(orphan_cleanup_owner) OR "
                     "orphan_cleanup_lease_expires_at < :now) AND "
                     "(#status = :queued OR "
                     "(#status = :running AND lease_expires_at < :now))"
                 ),
                 ExpressionAttributeNames={"#status": "status", "#version": "version"},
-                ExpressionAttributeValues={
-                    ":queued": {"S": "queued"},
-                    ":running": {"S": "running"},
-                    ":owner": {"S": owner},
-                    ":attempt": {"S": attempt_id},
-                    ":lease": {"N": str(lease_expires)},
-                    ":now": {"N": str(now_epoch_s)},
-                    ":one": {"N": "1"},
-                    ":idempotency": {"S": request.idempotency_key},
-                    ":payload": {"S": request.payload_sha256},
-                },
+                ExpressionAttributeValues=values,
                 ReturnValues="ALL_NEW",
             )
         except Exception as exc:
@@ -293,6 +322,10 @@ class AwsWorkerBackend:
             if (
                 item.get("idempotency_key", {}).get("S") != request.idempotency_key
                 or item.get("payload_sha256", {}).get("S") != request.payload_sha256
+                or not hmac.compare_digest(
+                    item.get("audit_principal_hash", {}).get("S", ""),
+                    request.audit_principal_hash or "",
+                )
             ):
                 raise ValueError("job row does not match request envelope") from exc
             status = item.get("status", {}).get("S")
@@ -433,10 +466,14 @@ class AwsWorkerBackend:
                 "job_id": request.job_id,
                 "attempt_id": lease.attempt_id,
                 "lease_version": lease.version,
+                "artifact_manifest_sha256": artifact_manifest_sha256(result.artifacts),
                 "artifacts": [
                     {
+                        "name": artifact.name,
                         "key": artifact.object.key,
                         "sha256": artifact.object.sha256,
+                        "size": artifact.object.size,
+                        "content_type": artifact.object.content_type,
                     }
                     for artifact in result.artifacts
                 ],
@@ -445,6 +482,7 @@ class AwsWorkerBackend:
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
+        marker_digest = hashlib.sha256(marker).hexdigest()
         for artifact in result.artifacts:
             if not artifact.object.key.startswith(prefix):
                 raise ValueError("result artifact is outside exact attempt prefix")
@@ -459,9 +497,10 @@ class AwsWorkerBackend:
             Key=marker_key,
             Body=marker,
             ContentType="application/json",
+            ChecksumSHA256=_checksum_sha256_b64(marker_digest),
             Expires=expires_at,
             Metadata={
-                "sha256": hashlib.sha256(marker).hexdigest(),
+                "sha256": marker_digest,
                 "schema-version": request.schema_version,
                 "job-id": request.job_id,
                 "attempt-id": lease.attempt_id,
@@ -530,6 +569,7 @@ class AwsWorkerBackend:
             Key=key,
             Body=body,
             ContentType=artifact.content_type,
+            ChecksumSHA256=_checksum_sha256_b64(digest),
             Expires=expires_at,
             Metadata={
                 "sha256": digest,
@@ -567,8 +607,14 @@ class AwsWorkerBackend:
     ) -> None:
         now = int(self._clock())
         marker_key: str | None = None
+        manifest_expression = ""
+        manifest_values: dict[str, Any] = {}
         if result.status == "done":
             marker_key = self._put_finalize_marker(request, lease, result)
+            manifest_expression = ", artifact_manifest_sha256 = :artifact_manifest"
+            manifest_values[":artifact_manifest"] = {
+                "S": artifact_manifest_sha256(result.artifacts)
+            }
         finalized_expression = ", finalized_attempt_id = :attempt" if marker_key is not None else ""
         try:
             self._call(
@@ -579,7 +625,7 @@ class AwsWorkerBackend:
                 UpdateExpression=(
                     "SET #status = :status, detail = :detail, updated_at = :now, "
                     "cleanup_at = :cleanup, cleanup_status = :pending, ttl = :ttl"
-                    f"{finalized_expression} "
+                    f"{finalized_expression}{manifest_expression} "
                     "REMOVE lease_expires_at ADD #version :one"
                 ),
                 ConditionExpression=(
@@ -603,16 +649,16 @@ class AwsWorkerBackend:
                     ":version": {"N": str(lease.version)},
                     ":one": {"N": "1"},
                     ":now": {"N": str(now)},
-                    ":cleanup": {
+                    ":cleanup": {"N": str(request.created_at_epoch_s + request.artifact_ttl_s)},
+                    ":pending": {"S": "pending"},
+                    ":ttl": {
                         "N": str(
-                            min(
-                                now + request.artifact_ttl_s,
-                                request.created_at_epoch_s + 21600,
-                            )
+                            request.created_at_epoch_s
+                            + request.artifact_ttl_s
+                            + DDB_RETENTION_GRACE_SECONDS
                         )
                     },
-                    ":pending": {"S": "pending"},
-                    ":ttl": {"N": str(request.created_at_epoch_s + 86400)},
+                    **manifest_values,
                 },
             )
         except Exception:

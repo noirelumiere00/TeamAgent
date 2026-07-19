@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 from pathlib import Path
 
 import pytest
 
 from teamagent.media.contracts import (
+    MediaArtifact,
     MediaJobRequest,
     MediaJobResult,
     S3ObjectRef,
     ThumbnailOperation,
+    artifact_manifest_sha256,
     make_job_request,
 )
 from teamagent.media.operations import (
@@ -176,6 +179,8 @@ class _PointerDynamo:
             "payload_sha256": {"S": request.payload_sha256},
             "request_json": {"S": request.to_json_bytes().decode()},
         }
+        if request.audit_principal_hash is not None:
+            self.item["audit_principal_hash"] = {"S": request.audit_principal_hash}
 
     def get_item(self, **_kwargs: object) -> dict[str, object]:
         return {"Item": self.item}
@@ -210,6 +215,24 @@ def test_worker_rejects_mutated_job_pointer(mutation: str) -> None:
         ddb.item["request_json"] = {"S": mutated}
 
     with pytest.raises(Exception, match=r"payload_sha256 mismatch|pointer does not match"):
+        backend.load_request(request.job_id, request.payload_sha256)
+
+
+def test_worker_rejects_pointer_owned_by_a_different_audit_principal() -> None:
+    base = _request()
+    request = make_job_request(
+        operation=base.operation,
+        output_bucket=base.output_bucket,
+        request_fingerprint="worker-audit-owner",
+        now_epoch_s=100,
+        timeout_s=300,
+        job_id=base.job_id,
+        audit_principal_hash="a" * 64,
+    )
+    backend, ddb = _pointer_backend(request)
+    ddb.item["audit_principal_hash"] = {"S": "b" * 64}
+
+    with pytest.raises(ValueError, match="pointer does not match"):
         backend.load_request(request.job_id, request.payload_sha256)
 
 
@@ -401,8 +424,10 @@ class _LeaseLossDynamo:
 class _AttemptS3:
     def __init__(self) -> None:
         self.objects: dict[str, dict[str, object]] = {}
+        self.puts: list[dict[str, object]] = []
 
     def put_object(self, **kwargs: object) -> dict[str, object]:
+        self.puts.append(kwargs)
         key = str(kwargs["Key"])
         self.objects[key] = {
             "Body": kwargs["Body"],
@@ -442,6 +467,60 @@ def test_lease_loss_after_s3_put_removes_only_exact_attempt_orphan(
         )
 
     assert backend._s3.objects == {}
+    assert backend._s3.puts[0]["ChecksumSHA256"] == base64.b64encode(
+        hashlib.sha256(b"jpeg").digest()
+    ).decode("ascii")
+
+
+class _StoreDynamo:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def update_item(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(kwargs)
+        return {}
+
+
+def test_done_write_persists_independent_manifest_and_thirty_day_retention() -> None:
+    request = _request()
+    lease = WorkerLease(owner="worker-a", version=7, attempt_id="attempt-exact")
+    ref = S3ObjectRef(
+        bucket=request.output_bucket,
+        key=(
+            f"{request.output_prefix}attempts/{lease.version}/{lease.attempt_id}/output/thumbnail"
+        ),
+        sha256=hashlib.sha256(b"jpeg").hexdigest(),
+        size=4,
+        content_type="image/jpeg",
+    )
+    result = MediaJobResult(
+        job_id=request.job_id,
+        status="done",
+        artifacts=(MediaArtifact(name="thumbnail", object=ref),),
+    )
+    ddb = _StoreDynamo()
+    s3 = _AttemptS3()
+    backend = object.__new__(AwsWorkerBackend)
+    backend._bucket = request.output_bucket
+    backend._table = "jobs"
+    backend._kms_key_id = ""
+    backend._clock = lambda: 101.0
+    backend._deadline_epoch_s = request.deadline_epoch_s
+    backend._ddb = ddb
+    backend._s3 = s3
+
+    backend.store_result(request, lease, result)
+
+    terminal = ddb.calls[-1]["ExpressionAttributeValues"]
+    assert isinstance(terminal, dict)
+    assert terminal[":artifact_manifest"] == {"S": artifact_manifest_sha256(result.artifacts)}
+    assert terminal[":cleanup"] == {"N": str(request.created_at_epoch_s + request.artifact_ttl_s)}
+    assert terminal[":ttl"] == {
+        "N": str(request.created_at_epoch_s + request.artifact_ttl_s + 86400)
+    }
+    assert s3.puts[0]["ChecksumSHA256"] == base64.b64encode(
+        hashlib.sha256(s3.puts[0]["Body"]).digest()
+    ).decode("ascii")
 
 
 def test_worker_cleanup_error_preserves_terminal_failure_for_janitor_retry(
