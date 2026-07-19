@@ -38,6 +38,7 @@ _SLACK_USER_RE = re.compile(r"^U[A-Z0-9]{8,}$")
 _SLACK_TEAM_RE = re.compile(r"^T[A-Z0-9]{8,}$")
 _SLACK_CHANNEL_RE = re.compile(r"^[CDG][A-Z0-9]{8,}$")
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")
+_OPAQUE_INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _CLAIM_FIELDS = frozenset(
     {
         "v",
@@ -49,6 +50,8 @@ _CLAIM_FIELDS = frozenset(
         "thread",
         "message",
         "session_sha256",
+        "run_id",
+        "tool_call_id",
         "tool",
         "arguments_sha256",
         "nonce",
@@ -175,6 +178,8 @@ class VerifiedCallerClaim:
     thread_ts: str | None
     message_id: str
     session_sha256: str
+    run_id: str
+    tool_call_id: str
     nonce: str
     issued_at: int
     expires_at: int
@@ -366,7 +371,7 @@ class CallerClaimVerifier:
             raise CallerClaimError("caller claim payload is invalid JSON") from error
         if not isinstance(payload, dict) or frozenset(payload) != _CLAIM_FIELDS:
             raise CallerClaimError("caller claim fields are not the exact contract")
-        if payload.get("v") != 1:
+        if payload.get("v") != 2:
             raise CallerClaimError("caller claim version is invalid")
         if payload.get("iss") != CALLER_CLAIM_ISSUER:
             raise CallerClaimError("caller claim issuer is invalid")
@@ -380,6 +385,18 @@ class CallerClaimVerifier:
         channel_id = _required_string(payload, "channel", pattern=_SLACK_CHANNEL_RE)
         message_id = _required_string(payload, "message")
         session_sha256 = _required_string(payload, "session_sha256", pattern=_SHA256_RE)
+        run_id = _required_string(
+            payload,
+            "run_id",
+            pattern=_OPAQUE_INVOCATION_ID_RE,
+            max_length=256,
+        )
+        tool_call_id = _required_string(
+            payload,
+            "tool_call_id",
+            pattern=_OPAQUE_INVOCATION_ID_RE,
+            max_length=256,
+        )
         claim_tool = _required_string(
             payload,
             "tool",
@@ -441,6 +458,8 @@ class CallerClaimVerifier:
             thread_ts=thread,
             message_id=message_id,
             session_sha256=session_sha256,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
             nonce=nonce,
             issued_at=issued_at,
             expires_at=expires_at,

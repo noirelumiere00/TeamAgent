@@ -4,15 +4,29 @@
 # 値は terraform.tfvars / 環境で上書き。秘密「値」はここに書かない（secret 名のみ）。
 
 variable "openclaw_image" {
-  description = "Guarded saved-plan flowでのみ変更できるOpenClaw release repositoryのdigest URI。空ならTerraformはserviceを管理しない"
+  description = "Guarded saved-plan flowでのみ変更できるOpenClaw release repositoryのdigest URI。空値によるmanaged service/task削除は禁止"
   type        = string
-  default     = ""
+
+  validation {
+    condition = can(regex(
+      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-openclaw@sha256:[0-9a-f]{64}$",
+      var.openclaw_image,
+    ))
+    error_message = "openclaw_image must be a nonempty fixed release-repository digest; decommissioning requires a separately reviewed destructive workflow."
+  }
 }
 
 variable "mcp_image" {
-  description = "TeamAgent-MCP バックエンドイメージ（ECR・digest pin推奨）"
+  description = "TeamAgent-MCP release repositoryの必須digest URI。空値によるmanaged service/task削除は禁止"
   type        = string
-  default     = ""
+
+  validation {
+    condition = can(regex(
+      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-mcp@sha256:[0-9a-f]{64}$",
+      var.mcp_image,
+    ))
+    error_message = "mcp_image must be a nonempty fixed release-repository digest; decommissioning requires a separately reviewed destructive workflow."
+  }
 }
 
 variable "fargate_mcp_cpu" {

@@ -26,7 +26,8 @@ PR × ショート動画案件の検索・クライアントカルテ・メー�
 **全 tool call の arguments には必ず `_user_context.slack_user_id` を含めること。**
 
 この値は**申告値にすぎず、認可identityではない**。OpenClaw内部のreview済みpluginがtool実行直前に、
-改ざん不能なSlack event由来の user/team/channel/message とtool/全引数をone-use署名claimへ束縛する。
+改ざん不能なSlack event由来の user/team/channel/message をexact run/tool invocationへ結び、
+tool/全引数とともにone-use署名claimへ束縛する。
 MCPは申告IDとの一致、署名、期限、audience、request binding、task横断のone-use replay、
 Slack member resolverを全て検証する。`caller_claim` / `slack_team_id` は内部pluginだけが
 注入するため、あなたが作成・転記・推測してはいけない。

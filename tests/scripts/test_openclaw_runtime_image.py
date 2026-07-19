@@ -133,22 +133,42 @@ const trustedContext = {
   channelId: "slack",
   sessionKey: "agent:main:slack:channel:actual-image",
   senderId: "U0123456789",
-  conversationId: "C0123456789"
+  conversationId: "C0123456789",
+  messageId: "1784424000.000001"
 };
 hooks.message_received({
   messageId: "1784424000.000001",
+  senderId: "U0123456789",
   metadata: {
     guildId: process.env.SLACK_TEAM_ID,
-    to: "C0123456789"
+    to: "C0123456789",
+    messageId: "1784424000.000001",
+    senderId: "U0123456789"
   }
 }, trustedContext);
+const runContext = {
+  runId: "11111111-1111-4111-8111-111111111111",
+  sessionKey: trustedContext.sessionKey,
+  messageProvider: "slack",
+  senderId: "U0123456789",
+  channel: "C0123456789",
+  channelId: "C0123456789"
+};
+hooks.before_model_resolve({prompt: "actual image contract"}, runContext);
+const toolContext = {
+  ...runContext,
+  toolName: "teamagent__search",
+  toolCallId: "toolu_actual_image_0123456789"
+};
 const valid = hooks.before_tool_call({
   toolName: "teamagent__search",
+  runId: runContext.runId,
+  toolCallId: toolContext.toolCallId,
   params: {
     query: "actual image contract",
     _user_context: {slack_user_id: "U0123456789"}
   }
-}, trustedContext);
+}, toolContext);
 if (valid?.block || !valid?.params?._user_context?.caller_claim) {
   throw new Error("trusted Slack event was not signed");
 }
@@ -164,6 +184,9 @@ if (
   payload.sub !== "U0123456789" ||
   payload.team !== process.env.SLACK_TEAM_ID ||
   payload.channel !== "C0123456789" ||
+  payload.run_id !== runContext.runId ||
+  payload.tool_call_id !== toolContext.toolCallId ||
+  payload.v !== 2 ||
   payload.tool !== "search" ||
   payload.aud !== "teamagent-mcp" ||
   payload.iat !== nowSeconds ||
@@ -174,27 +197,55 @@ if (
 }
 const mismatch = hooks.before_tool_call({
   toolName: "teamagent__search",
+  runId: runContext.runId,
+  toolCallId: "toolu_mismatch_0123456789",
   params: {
     query: "mismatch",
     _user_context: {slack_user_id: "U9999999999"}
   }
-}, trustedContext);
+}, {...toolContext, toolCallId: "toolu_mismatch_0123456789"});
 const foreignContext = {
   ...trustedContext,
   sessionKey: "agent:main:slack:channel:foreign"
 };
 hooks.message_received({
   messageId: "1784424000.000002",
+  senderId: "U0123456789",
   metadata: {guildId: "T9999999999", to: "C0123456789"}
 }, foreignContext);
+const foreignRunContext = {
+  ...runContext,
+  runId: "22222222-2222-4222-8222-222222222222",
+  sessionKey: foreignContext.sessionKey
+};
+hooks.before_model_resolve({prompt: "foreign"}, foreignRunContext);
 const foreign = hooks.before_tool_call({
   toolName: "teamagent__search",
+  runId: foreignRunContext.runId,
+  toolCallId: "toolu_foreign_0123456789",
   params: {
     query: "foreign",
     _user_context: {slack_user_id: "U0123456789"}
   }
-}, foreignContext);
-if (!mismatch?.block || !foreign?.block) {
+}, {
+  ...foreignRunContext,
+  toolName: "teamagent__search",
+  toolCallId: "toolu_foreign_0123456789"
+});
+const replay = hooks.before_tool_call({
+  toolName: "teamagent__search",
+  runId: runContext.runId,
+  toolCallId: toolContext.toolCallId,
+  params: {
+    query: "actual image contract",
+    _user_context: {slack_user_id: "U0123456789"}
+  }
+}, toolContext);
+const nativeMessage = hooks.before_tool_call({
+  toolName: "message",
+  params: {action: "send", target: "C9999999999", message: "bypass"}
+}, {toolName: "message"});
+if (!mismatch?.block || !foreign?.block || !replay?.block || !nativeMessage?.block) {
   throw new Error("adversarial caller was not blocked");
 }
 process.stdout.write(JSON.stringify({
@@ -204,8 +255,11 @@ process.stdout.write(JSON.stringify({
   installedBeforeToolFailClosedVerified: true,
   trustedSlackEventSigned: true,
   exactRequestBinding: true,
+  exactRunAndInvocationBinding: true,
   callerMismatchBlocked: true,
   foreignTeamBlocked: true,
+  replayBlocked: true,
+  nativeMessageBlocked: true,
   tokenDisclosedInEvidence: false
 }));
 """

@@ -210,11 +210,21 @@ async function run() {
   const configuredToolNames =
     config.mcp?.servers?.teamagent?.toolFilter?.include?.toSorted();
   const reviewedToolNames = scope.tools.map((tool) => tool.name).sort();
+  const configuredNativeDeny = config.tools?.deny?.toSorted();
+  const reviewedNativeDeny = scope.nativeTools?.deny?.toSorted();
   if (
     scope.schemaVersion !== 1 ||
     expectedToolNames.length === 0 ||
     expectedToolNames.length !== new Set(expectedToolNames).size ||
     JSON.stringify(configuredToolNames) !== JSON.stringify(reviewedToolNames) ||
+    scope.nativeTools?.profile !== "minimal" ||
+    config.tools?.profile !== scope.nativeTools.profile ||
+    JSON.stringify(config.tools?.alsoAllow) !==
+      JSON.stringify(scope.nativeTools?.alsoAllow) ||
+    JSON.stringify(configuredNativeDeny) !== JSON.stringify(reviewedNativeDeny) ||
+    !reviewedNativeDeny?.includes("message") ||
+    !reviewedNativeDeny?.includes("sessions_send") ||
+    !reviewedNativeDeny?.includes("read") ||
     config.mcp?.servers?.teamagent?.url !== MCP_URL
   ) {
     throw new Error("image config and reviewed MCP tool scope differ");

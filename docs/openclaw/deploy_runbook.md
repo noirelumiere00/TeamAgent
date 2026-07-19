@@ -195,12 +195,17 @@ new intent、new plan で roll-forward または rollback します。
 - sidecar、追加 volume/mount、環境 retarget、role retarget を禁止
 - ECS deployment circuit breaker と rollback を有効化
 
-OpenClaw 2026.7.1の実runtime hook契約では、`message_received`のSlack event
-`user/team/channel/message/session/thread`を内部pluginが保持し、
-`before_tool_call`でexact tool・全引数hash・nonce・iat/exp・audienceへ署名します。
+OpenClaw 2026.7.1の実runtime hook契約では、`inbound_claim`/`message_received`のSlack event
+`user/team/channel/message/session/thread/runId`を内部pluginがexact bindingとして保持し、
+authoritative agent contextでも同じrunを照合します。runIdの無い互換hookは一意なfresh
+eventだけをrunへ束縛します。`before_tool_call`ではhost側の`runId`/`toolCallId`一致と
+一回性を検証し、exact tool・全引数hash・nonce・iat/exp・audienceへ署名します。
+同一sessionへ別userのeventが並行到着してもlatest値は使いません。
 MCPは申告`slack_user_id`との一致、署名、request binding、一回性を検証してから
 `users.info` resolverを呼びます。company-sharedもresolver成功、exact team、
 非guest/非strangerが必須で、欠落・未知・障害はfail closedです。
+OpenClaw nativeの`message`、filesystem read/write/edit、全session toolは明示denyし、
+署名resolver+nonceを通る`bundle-mcp`だけを追加許可します。
 
 Fargate は Docker `no-new-privileges` を強制できません。これは隠さず残余リスク
 として扱い、nonroot、read-only rootfs、capability drop、固定IAM/SGで補償します。

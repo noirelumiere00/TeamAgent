@@ -6,6 +6,37 @@
     "deploymentGates": "infra/terraform/fargate.tf:aws_ecs_task_definition.mcp",
     "effectiveRule": "A tool is callable only when it is in the OpenClaw include list and the MCP backend registered it for the deployed task."
   },
+  "nativeTools": {
+    "profile": "minimal",
+    "alsoAllow": [
+      "bundle-mcp"
+    ],
+    "deny": [
+      "message",
+      "read",
+      "write",
+      "edit",
+      "apply_patch",
+      "send",
+      "delete",
+      "upload",
+      "sessions_list",
+      "sessions_history",
+      "sessions_send",
+      "sessions_spawn",
+      "sessions_yield",
+      "subagents",
+      "session_status"
+    ],
+    "authorizedPath": "bundle-mcp -> teamagent__* -> exact Slack message/runId/toolCallId signature -> MCP resolver and one-use nonce",
+    "nativeMessageActionsDenied": [
+      "send",
+      "read",
+      "edit",
+      "delete",
+      "upload"
+    ]
+  },
   "tools": [
     {
       "name": "search",
@@ -106,7 +137,7 @@
     {
       "name": "morning_digest",
       "effect": "gmail-calendar-slack-read-analysis",
-      "terraformGate": "USE_MORNING_DIGEST_TOOL=true",
+      "terraformGate": "USE_MORNING_DIGEST_TOOL=true; DRAFT_ON_DEMAND_ONLY=true on the mention-capable MCP runtime",
       "defaultEnabledByTerraform": true
     },
     {

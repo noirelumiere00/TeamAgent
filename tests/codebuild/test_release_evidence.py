@@ -40,6 +40,9 @@ BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee
 INTENT_ID = "11111111-1111-4111-8111-111111111111"
 ATTEMPT_ID = "22222222-2222-4222-8222-222222222222"
 EMPTY_SHARED_LEDGER_SHA256 = hashlib.sha256(EVIDENCE.canonical_bytes({})).hexdigest()
+EMPTY_TRANSITION_SHA256 = hashlib.sha256(
+    EVIDENCE.canonical_bytes({"delete": [], "replace": []})
+).hexdigest()
 
 
 def test_release_authorizer_contract_mapping_matches_the_evidence_pipeline_map() -> None:
@@ -747,6 +750,7 @@ def test_terraform_gate_verifies_exact_immutable_signed_active_digest(
 
     assert result["verified"] == "true"
     assert result["verified_pipelines"] == "mcp"
+    assert json.loads(result["release_channels_json"]) == {"mcp": "active"}
     assert len(result["deployment_context_sha256"]) == 64
     assert len(result["receipt_claims_sha256"]) == 64
 
@@ -935,6 +939,7 @@ def _plan_json(
                                     "openclaw": "",
                                     "tiktok": "",
                                 },
+                                "release_channels": {"mcp": "active"},
                                 "application_provenance": {
                                     "mcp": APPLICATION,
                                 },
@@ -974,6 +979,7 @@ def test_saved_plan_metadata_binds_intent_context_claims_and_plan_hash(
         "deployment_context_sha256": "a" * 64,
         "receipt_claims_sha256": "b" * 64,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
     }
 
     with pytest.raises(EVIDENCE.EvidenceError, match="will not run"):
@@ -989,6 +995,122 @@ def test_saved_plan_metadata_binds_intent_context_claims_and_plan_hash(
     imported["resource_changes"][0]["change"]["importing"] = {"id": "hostile"}
     with pytest.raises(EVIDENCE.EvidenceError, match="cannot contain imports"):
         EVIDENCE.deployment_plan_metadata(plan, plan_json=imported)
+
+
+def test_saved_plan_destructive_delete_requires_matching_rollback_receipt(
+    tmp_path: Path,
+) -> None:
+    plan = tmp_path / "release.tfplan"
+    plan.write_bytes(b"opaque saved terraform plan")
+    active = _plan_json()
+    active["resource_changes"].append(
+        {
+            "address": "aws_ecs_service.mcp[0]",
+            "mode": "managed",
+            "change": {"actions": ["delete"]},
+        }
+    )
+
+    with pytest.raises(EVIDENCE.EvidenceError, match="fresh rollback receipt"):
+        EVIDENCE.deployment_plan_metadata(plan, plan_json=active)
+
+    rollback = copy.deepcopy(active)
+    rollback["planned_values"]["root_module"]["resources"][0]["values"]["input"][
+        "release_channels"
+    ] = {"mcp": "rollback"}
+    metadata = EVIDENCE.deployment_plan_metadata(plan, plan_json=rollback)
+    assert (
+        metadata["plan_transition_sha256"]
+        != hashlib.sha256(EVIDENCE.canonical_bytes({"delete": [], "replace": []})).hexdigest()
+    )
+
+
+def test_saved_plan_classifies_replacements_and_allows_only_digest_preserving_rollforward(
+    tmp_path: Path,
+) -> None:
+    plan = tmp_path / "release.tfplan"
+    plan.write_bytes(b"opaque saved terraform plan")
+    selected_image = f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@{DIGEST}"
+    safe_rollforward = _plan_json()
+    safe_rollforward["resource_changes"].append(
+        {
+            "address": "aws_ecs_task_definition.mcp",
+            "mode": "managed",
+            "change": {
+                "actions": ["create", "delete"],
+                "after": {
+                    "container_definitions": json.dumps([{"name": "mcp", "image": selected_image}])
+                },
+            },
+        }
+    )
+    metadata = EVIDENCE.deployment_plan_metadata(
+        plan,
+        plan_json=safe_rollforward,
+    )
+    assert metadata["plan_transition_sha256"] != EMPTY_TRANSITION_SHA256
+
+    destructive_replacement = _plan_json()
+    destructive_replacement["resource_changes"].append(
+        {
+            "address": "aws_ecs_service.mcp[0]",
+            "mode": "managed",
+            "change": {"actions": ["delete", "create"], "after": {}},
+        }
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="fresh rollback receipt"):
+        EVIDENCE.deployment_plan_metadata(
+            plan,
+            plan_json=destructive_replacement,
+        )
+
+    destructive_replacement["planned_values"]["root_module"]["resources"][0]["values"]["input"][
+        "release_channels"
+    ] = {"mcp": "rollback"}
+    EVIDENCE.deployment_plan_metadata(
+        plan,
+        plan_json=destructive_replacement,
+    )
+
+
+def test_saved_plan_rejects_image_empty_or_unscoped_destructive_state(
+    tmp_path: Path,
+) -> None:
+    plan = tmp_path / "release.tfplan"
+    plan.write_bytes(b"opaque saved terraform plan")
+    image_empty = _plan_json()
+    gate_input = image_empty["planned_values"]["root_module"]["resources"][0]["values"]["input"]
+    gate_input["requested_images"] = {
+        "mcp": "",
+        "openclaw": (
+            f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@{DIGEST}"
+        ),
+        "tiktok": "",
+    }
+    gate_input["release_channels"] = {"openclaw": "rollback"}
+    image_empty["resource_changes"].append(
+        {
+            "address": "aws_ecs_service.mcp[0]",
+            "mode": "managed",
+            "change": {"actions": ["delete"]},
+        }
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="image-empty"):
+        EVIDENCE.deployment_plan_metadata(plan, plan_json=image_empty)
+
+    unscoped = _plan_json()
+    unscoped["planned_values"]["root_module"]["resources"][0]["values"]["input"][
+        "release_channels"
+    ] = {"mcp": "rollback"}
+    unscoped["resource_changes"].append(
+        {
+            "address": "aws_s3_bucket.unreviewed",
+            "mode": "managed",
+            "change": {"actions": ["delete"]},
+        }
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="unscoped destructive"):
+        EVIDENCE.deployment_plan_metadata(plan, plan_json=unscoped)
 
 
 def test_shared_generation_ledger_metadata_is_exact_non_secret_and_context_bound(
@@ -1021,6 +1143,7 @@ def test_shared_generation_ledger_metadata_is_exact_non_secret_and_context_bound
         contracts={"mcp": CONTRACT_SHA256},
         application={"mcp": APPLICATION},
         shared_generation_ledger=binding,
+        release_channels={"mcp": "active"},
         intent_id=INTENT_ID,
     )
     second, _, _ = EVIDENCE._deployment_binding(
@@ -1029,6 +1152,7 @@ def test_shared_generation_ledger_metadata_is_exact_non_secret_and_context_bound
         contracts={"mcp": CONTRACT_SHA256},
         application={"mcp": APPLICATION},
         shared_generation_ledger=dict(binding, generation=43),
+        release_channels={"mcp": "active"},
         intent_id=INTENT_ID,
     )
     assert first != second
@@ -1077,6 +1201,7 @@ def test_receipt_claim_identity_survives_reuploaded_s3_versions() -> None:
         "contracts": {"mcp": CONTRACT_SHA256},
         "application": {"mcp": APPLICATION},
         "shared_generation_ledger": {},
+        "release_channels": {"mcp": "active"},
         "intent_id": INTENT_ID,
     }
 
@@ -1132,6 +1257,7 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
         contracts=contracts,
         application=application,
         shared_generation_ledger={},
+        release_channels={"mcp": "active", "tiktok": "active"},
         intent_id=INTENT_ID,
     )
     claims_sha256 = hashlib.sha256(EVIDENCE.canonical_bytes(canonical_claims)).hexdigest()
@@ -1141,6 +1267,7 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
         "deployment_context_sha256": context_sha256,
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
     }
     query = {
         "images_json": json.dumps(images),
@@ -1201,6 +1328,7 @@ def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_co
         lambda gate_query: {
             "deployment_context_sha256": context_sha256,
             "receipt_claims_sha256": claims_sha256,
+            "release_channels_json": json.dumps({"mcp": "active", "tiktok": "active"}),
         },
     )
     monkeypatch.setattr(EVIDENCE, "_dynamodb_get", fake_get)
@@ -1240,6 +1368,8 @@ def _prepared_intent(
         "state_serial": 1234,
         "state_addresses_sha256": "e" * 64,
         "plan_addresses_sha256": "f" * 64,
+        "runtime_images_sha256": "9" * 64,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
         "control_commit": COMMIT,
         "prepared_at": "2026-07-17T06:00:00Z",
         "authorization_expires_at": int((NOW + dt.timedelta(minutes=30)).timestamp()),
@@ -1294,6 +1424,7 @@ def test_apply_attempt_and_shared_lock_start_in_one_conditional_transaction(
         "deployment_context_sha256": "a" * 64,
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
     }
     prepared = _prepared_intent(
         intent_id=INTENT_ID,
@@ -1354,6 +1485,7 @@ def test_apply_rejects_a_different_checkout_before_starting_the_intent(
         "deployment_context_sha256": "a" * 64,
         "receipt_claims_sha256": "b" * 64,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
     }
     prepared = _prepared_intent(
         intent_id=INTENT_ID,
@@ -1400,6 +1532,7 @@ def test_same_intent_and_same_receipt_cannot_authorize_two_deployments(
         "deployment_context_sha256": "e" * 64,
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
     }
     second_intent_id = "33333333-3333-4333-8333-333333333333"
     second_metadata = dict(metadata, intent_id=second_intent_id, plan_sha256="f" * 64)
@@ -1498,6 +1631,7 @@ def test_expired_prepared_intent_cannot_reach_the_atomic_consume(
         "deployment_context_sha256": "e" * 64,
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
     }
     expired = _applying_intent(
         intent_id=INTENT_ID,
@@ -1537,6 +1671,7 @@ def test_apply_time_revalidates_receipt_before_consuming_intent(
             "deployment_context_sha256": "e" * 64,
             "receipt_claims_sha256": "f" * 64,
             "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+            "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
         },
     )
 
@@ -1572,6 +1707,7 @@ def test_receipt_consumption_uses_one_conditional_dynamodb_transaction(
         "deployment_context_sha256": "e" * 64,
         "receipt_claims_sha256": claims_sha256,
         "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
     }
     applying = _applying_intent(
         intent_id=INTENT_ID,

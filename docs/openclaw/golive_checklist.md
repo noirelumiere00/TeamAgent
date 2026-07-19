@@ -18,7 +18,7 @@
 
 ## Local runtime evidence
 
-- [ ] final HEAD の `build-image.sh` が schema-4 manifest を生成
+- [ ] final HEAD の `build-image.sh` が schema-5 manifest を生成
 - [ ] manifest の commit/tree/archive/contract hash が final HEAD と一致
 - [ ] `deploymentCredential=false`、registry/promotion fields はすべて false
 - [ ] exact material set と evidence index が一致

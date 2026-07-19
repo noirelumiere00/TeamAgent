@@ -307,7 +307,10 @@ def test_config_loads_only_reviewed_plugins_and_not_browser() -> None:
     assert config["plugins"]["entries"] == {
         "slack": {"enabled": True},
         "amazon-bedrock": {"enabled": True},
-        "teamagent-caller-identity": {"enabled": True},
+        "teamagent-caller-identity": {
+            "enabled": True,
+            "hooks": {"allowConversationAccess": True},
+        },
     }
     assert config["channels"]["slack"]["botToken"] == "${SLACK_BOT_TOKEN}"
     assert config["channels"]["slack"]["appToken"] == "${SLACK_APP_TOKEN}"
@@ -316,6 +319,25 @@ def test_config_loads_only_reviewed_plugins_and_not_browser() -> None:
     assert config["gateway"]["auth"]["token"] == "${OPENCLAW_GATEWAY_TOKEN}"
     assert config["gateway"]["bind"] == "loopback"
     assert config["gateway"]["terminal"] == {"enabled": False}
+    assert config["tools"]["profile"] == "minimal"
+    assert config["tools"]["alsoAllow"] == ["bundle-mcp"]
+    assert set(config["tools"]["deny"]) == {
+        "message",
+        "read",
+        "write",
+        "edit",
+        "apply_patch",
+        "send",
+        "delete",
+        "upload",
+        "sessions_list",
+        "sessions_history",
+        "sessions_send",
+        "sessions_spawn",
+        "sessions_yield",
+        "subagents",
+        "session_status",
+    }
     assert config["tools"]["exec"]["mode"] == "deny"
     assert config["tools"]["fs"]["workspaceOnly"] is True
     assert "browser" not in config["plugins"]["entries"]
@@ -1017,6 +1039,17 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     assert scope["schemaVersion"] == 1
     assert len(inventory_names) == len(set(inventory_names)) == 28
     assert set(inventory_names) == set(included)
+    assert scope["nativeTools"]["profile"] == config["tools"]["profile"]
+    assert scope["nativeTools"]["alsoAllow"] == config["tools"]["alsoAllow"]
+    assert set(scope["nativeTools"]["deny"]) == set(config["tools"]["deny"])
+    assert scope["nativeTools"]["nativeMessageActionsDenied"] == [
+        "send",
+        "read",
+        "edit",
+        "delete",
+        "upload",
+    ]
+    assert "runId/toolCallId" in scope["nativeTools"]["authorizedPath"]
     default_enabled = {tool["name"] for tool in scope["tools"] if tool["defaultEnabledByTerraform"]}
     assert default_enabled == {
         "search",
@@ -1051,12 +1084,30 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "enable_x_research",
     ):
         assert gate in fargate
+    mcp_start = fargate.index('resource "aws_ecs_task_definition" "mcp"')
+    openclaw_start = fargate.index('resource "aws_ecs_task_definition" "openclaw"')
+    mcp_block = fargate[mcp_start:openclaw_start]
+    assert '{ name = "DRAFT_ON_DEMAND_ONLY", value = "true" }' in mcp_block
     for unwired_gate in (
         "USE_VIDEO_APPROVAL",
         "USE_OPERATION_LOG_TOOLS",
         "USE_KNOWLEDGE_SEARCH_URL_TOOL",
     ):
         assert unwired_gate not in fargate
+
+
+def test_openclaw_manifest_documentation_matches_schema_five() -> None:
+    build_image = (ROOT / "infra/openclaw/build-image.sh").read_text()
+    documentation = "\n".join(
+        [
+            (ROOT / "infra/openclaw/README.md").read_text(),
+            (ROOT / "docs/openclaw/golive_checklist.md").read_text(),
+        ]
+    )
+
+    assert "schemaVersion:5" in build_image
+    assert "schema-4" not in documentation
+    assert documentation.count("schema-5") >= 2
 
 
 def test_actual_image_test_is_executable_and_checks_kernel_and_payload() -> None:

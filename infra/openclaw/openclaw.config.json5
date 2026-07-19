@@ -15,7 +15,7 @@
       // P1 はプロアクティブ無効（heartbeat 0m）。プロアクティブは P2/WS-D で HEARTBEAT.md と共に解禁。
       heartbeat: { every: "0m" },
       // §O: Fargate に docker socket は無い（backend:"docker" は local daemon 必須＝公式）ため off。
-      // 多層防御は tools.profile:messaging / exec deny / fs workspaceOnly / browser off /
+      // 多層防御は tools.profile:minimal / native deny / exec deny / fs workspaceOnly / browser off /
       // toolFilter / readonly rootfs / IAM Deny / SG で維持（sandbox は元々「万一の追加層」）。
       sandbox: { mode: "off" },
       // §O: cacheRetention の明示パラメータは Bedrock 公式 doc に記載なし(unverified)のため
@@ -51,7 +51,12 @@
     entries: {
       slack: { enabled: true },
       "amazon-bedrock": { enabled: true },
-      "teamagent-caller-identity": { enabled: true },
+      "teamagent-caller-identity": {
+        enabled: true,
+        // Pre-model context cross-checks direct inbound runId bindings and
+        // fail-closed legacy correlation. The reviewed plugin ignores prompts.
+        hooks: { allowConversationAccess: true },
+      },
     },
   },
 
@@ -100,7 +105,16 @@
 
   // ── tool ポリシー（最小権限＝攻撃面の縮小） ───────────────────────────────
   tools: {
-    profile: "messaging", // 既定を最小級に（full/coding は使わない）
+    // minimal alone contains session_status and hides MCP. Add only bundle-mcp,
+    // then explicitly deny every native message/filesystem/session bypass.
+    profile: "minimal",
+    alsoAllow: ["bundle-mcp"],
+    deny: [
+      "message",
+      "read", "write", "edit", "apply_patch", "send", "delete", "upload",
+      "sessions_list", "sessions_history", "sessions_send",
+      "sessions_spawn", "sessions_yield", "subagents", "session_status",
+    ],
     exec: { mode: "deny", applyPatch: { workspaceOnly: true } }, // host コマンド実行を禁止
     fs: { workspaceOnly: true },
     // 危険な外部安全バイパスは一切使わない（既定 false のまま）。
@@ -166,8 +180,9 @@
             "calendar_event",
             // v0.3 Task4: 🗓日程候補提案ボタン（候補入り下書き＋透明仮予定・送信/招待なし・既定OFF）
             "schedule_propose",
-            // morning_digest は EventBridge Scheduled Task で起動・mention 経由で呼ばれないが、
-            // ローカル検証・将来の手動 trigger 用に include しておく。USE_MORNING_DIGEST_TOOL=1 が必要。
+            // morning_digest は EventBridge Scheduled Taskに加えてmention-capable MCPにもincludeされる。
+            // MCP taskはDRAFT_ON_DEMAND_ONLY=trueを必須化し、mentionからの自動Gmail draftを拒否する。
+            // USE_MORNING_DIGEST_TOOL=1 が必要。
             "morning_digest",
             // §U: oauth_connect — @AiLa「連携」で本人専用の Google 認可 URL を返す。
             // OpenClaw に connect 経路が無い問題への対応。URL生成のみ（token保存は connect-web）。

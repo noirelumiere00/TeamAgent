@@ -134,25 +134,43 @@ const trustedContext = {{
   conversationId: process.env.TEST_CHANNEL_ID,
 }};
 hooks.message_received(trustedEvent, trustedContext);
+const runContext = {{
+  runId: "11111111-1111-4111-8111-111111111111",
+  sessionKey: trustedContext.sessionKey,
+  messageProvider: "slack",
+  senderId: process.env.TEST_USER_ID,
+  channel: process.env.TEST_CHANNEL_ID,
+  channelId: process.env.TEST_CHANNEL_ID,
+}};
+hooks.before_model_resolve({{prompt: "cross-language"}}, runContext);
+const toolContext = {{
+  ...runContext,
+  toolName: "teamagent__echo",
+  toolCallId: "toolu_valid_0123456789",
+}};
 const valid = hooks.before_tool_call(
   {{
     toolName: "teamagent__echo",
+    runId: runContext.runId,
+    toolCallId: toolContext.toolCallId,
     params: {{
       q: "cross-language",
       _user_context: {{slack_user_id: process.env.TEST_USER_ID}},
     }},
   }},
-  trustedContext,
+  toolContext,
 );
 const mismatch = hooks.before_tool_call(
   {{
     toolName: "teamagent__echo",
+    runId: runContext.runId,
+    toolCallId: "toolu_mismatch_0123456789",
     params: {{
       q: "mismatch",
       _user_context: {{slack_user_id: "U9999999999"}},
     }},
   }},
-  trustedContext,
+  {{...toolContext, toolCallId: "toolu_mismatch_0123456789"}},
 );
 const foreignContext = {{
   ...trustedContext,
@@ -165,17 +183,51 @@ hooks.message_received(
   }},
   foreignContext,
 );
+const foreignRunContext = {{
+  ...runContext,
+  runId: "22222222-2222-4222-8222-222222222222",
+  sessionKey: foreignContext.sessionKey,
+}};
+hooks.before_model_resolve({{prompt: "foreign"}}, foreignRunContext);
 const foreignTeam = hooks.before_tool_call(
   {{
     toolName: "teamagent__echo",
+    runId: foreignRunContext.runId,
+    toolCallId: "toolu_foreign_0123456789",
     params: {{
       q: "foreign",
       _user_context: {{slack_user_id: process.env.TEST_USER_ID}},
     }},
   }},
-  foreignContext,
+  {{
+    ...foreignRunContext,
+    toolName: "teamagent__echo",
+    toolCallId: "toolu_foreign_0123456789",
+  }},
 );
-process.stdout.write(JSON.stringify({{valid, mismatch, foreignTeam}}));
+const replay = hooks.before_tool_call(
+  {{
+    toolName: "teamagent__echo",
+    runId: runContext.runId,
+    toolCallId: toolContext.toolCallId,
+    params: {{
+      q: "cross-language",
+      _user_context: {{slack_user_id: process.env.TEST_USER_ID}},
+    }},
+  }},
+  toolContext,
+);
+const nativeMessage = hooks.before_tool_call(
+  {{toolName: "message", params: {{action: "send"}}}},
+  {{toolName: "message"}},
+);
+process.stdout.write(JSON.stringify({{
+  valid,
+  mismatch,
+  foreignTeam,
+  replay,
+  nativeMessage,
+}}));
 """
     env = {
         **os.environ,
@@ -200,13 +252,208 @@ async def test_openclaw_node_claim_is_accepted_by_python_mcp() -> None:
     assert "does not match" in contract["mismatch"]["blockReason"]
     assert contract["foreignTeam"]["block"] is True
     assert "missing or stale" in contract["foreignTeam"]["blockReason"]
+    assert contract["replay"]["block"] is True
+    assert "replay" in contract["replay"]["blockReason"]
+    assert contract["nativeMessage"]["block"] is True
+    assert "native" in contract["nativeMessage"]["blockReason"]
     out = await _dispatch(contract["valid"]["params"])
     assert out == {"email": "member@vectorinc.co.jp", "verified": True}
 
 
+def test_same_session_cross_user_race_binds_each_exact_run_and_invocation() -> None:
+    """A later user's event in one session must never become the first run's caller."""
+
+    script = f"""
+import {{createCallerIdentityPlugin}} from {json.dumps(CALLER_PLUGIN.as_uri())};
+const hooks = {{}};
+let nowMs = {TEST_NOW * 1000};
+createCallerIdentityPlugin({{
+  env: {{
+    TEAMAGENT_CALLER_CLAIM_SECRET: process.env.TEST_CLAIM_SECRET,
+    SLACK_TEAM_ID: process.env.TEST_TEAM_ID,
+  }},
+  now: () => nowMs,
+  randomBytesFn: () => Buffer.alloc(16, 11),
+}}).register({{
+  on: (name, callback) => {{ hooks[name] = callback; }},
+  logger: {{warn: () => {{}}}},
+}});
+const sessionKey = "agent:main:slack:channel:shared-race";
+const channelId = process.env.TEST_CHANNEL_ID;
+function ingress(userId, messageId, runId) {{
+  const event = {{
+    channel: "slack",
+    content: `message-${{messageId}}`,
+    isGroup: true,
+    messageId,
+    runId,
+    senderId: userId,
+    metadata: {{
+      guildId: process.env.TEST_TEAM_ID,
+      to: channelId,
+      senderId: userId,
+      messageId,
+    }},
+  }};
+  const context = {{
+    channelId: "slack",
+    sessionKey,
+    runId,
+    senderId: userId,
+    conversationId: channelId,
+    messageId,
+  }};
+  hooks.inbound_claim(event, context);
+  hooks.message_received(event, context);
+}}
+function bind(runId, userId) {{
+  hooks.before_model_resolve({{prompt: `prompt-${{userId}}`}}, {{
+    runId,
+    sessionKey,
+    messageProvider: "slack",
+    senderId: userId,
+    channel: channelId,
+    channelId,
+  }});
+}}
+function call(runId, userId, toolCallId) {{
+  return hooks.before_tool_call(
+    {{
+      toolName: "teamagent__echo",
+      runId,
+      toolCallId,
+      params: {{
+        q: userId,
+        _user_context: {{slack_user_id: userId}},
+      }},
+    }},
+    {{
+      toolName: "teamagent__echo",
+      runId,
+      toolCallId,
+      sessionKey,
+      channelId,
+    }},
+  );
+}}
+const userA = "U0123456789";
+const userB = "U9999999999";
+const runA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const runB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+ingress(userA, "1784424000.000001", runA);
+ingress(userB, "1784424000.000002", runB);
+bind(runA, userA);
+bind(runB, userB);
+const conflictingRun = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+ingress(userA, "1784424000.000003", conflictingRun);
+ingress(userB, "1784424000.000004", conflictingRun);
+bind(conflictingRun, userB);
+const signedA = call(runA, userA, "toolu_race_a_0123456789");
+const signedB = call(runB, userB, "toolu_race_b_0123456789");
+const conflictingIngress = call(
+  conflictingRun,
+  userB,
+  "toolu_conflicting_ingress_0123456789",
+);
+function payload(result) {{
+  const token = result.params._user_context.caller_claim;
+  return JSON.parse(Buffer.from(token.split(".")[0], "base64url").toString("utf8"));
+}}
+const replay = call(runA, userA, "toolu_race_a_0123456789");
+const mismatchedRun = hooks.before_tool_call(
+  {{
+    toolName: "teamagent__echo",
+    runId: runA,
+    toolCallId: "toolu_wrong_run_0123456789",
+    params: {{q: "wrong", _user_context: {{slack_user_id: userA}}}},
+  }},
+  {{
+    toolName: "teamagent__echo",
+    runId: runB,
+    toolCallId: "toolu_wrong_run_0123456789",
+    sessionKey,
+    channelId,
+  }},
+);
+const mismatchedToolCall = hooks.before_tool_call(
+  {{
+    toolName: "teamagent__echo",
+    runId: runA,
+    toolCallId: "toolu_event_0123456789",
+    params: {{q: "wrong", _user_context: {{slack_user_id: userA}}}},
+  }},
+  {{
+    toolName: "teamagent__echo",
+    runId: runA,
+    toolCallId: "toolu_context_0123456789",
+    sessionKey,
+    channelId,
+  }},
+);
+const unbound = call(
+  "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  userA,
+  "toolu_unbound_0123456789",
+);
+nowMs += 10 * 60 * 1000 + 1;
+const stale = call(runB, userB, "toolu_stale_0123456789");
+process.stdout.write(JSON.stringify({{
+  payloadA: payload(signedA),
+  payloadB: payload(signedB),
+  conflictingIngress,
+  replay,
+  mismatchedRun,
+  mismatchedToolCall,
+  unbound,
+  stale,
+}}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "TEST_CLAIM_SECRET": TEST_CALLER_CLAIM_SECRET,
+            "TEST_TEAM_ID": TEST_SLACK_TEAM_ID,
+            "TEST_CHANNEL_ID": TEST_SLACK_CHANNEL_ID,
+        },
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["payloadA"]["sub"] == "U0123456789"
+    assert result["payloadA"]["message"] == "1784424000.000001"
+    assert result["payloadA"]["run_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    assert result["payloadA"]["tool_call_id"] == "toolu_race_a_0123456789"
+    assert result["payloadB"]["sub"] == "U9999999999"
+    assert result["payloadB"]["message"] == "1784424000.000002"
+    assert result["payloadB"]["run_id"] == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    assert result["payloadB"]["tool_call_id"] == "toolu_race_b_0123456789"
+    assert result["conflictingIngress"]["block"] is True
+    assert "missing or stale" in result["conflictingIngress"]["blockReason"]
+    assert result["replay"]["block"] is True
+    assert "replay" in result["replay"]["blockReason"]
+    assert result["mismatchedRun"]["block"] is True
+    assert "run binding" in result["mismatchedRun"]["blockReason"]
+    assert result["mismatchedToolCall"]["block"] is True
+    assert "tool invocation binding" in result["mismatchedToolCall"]["blockReason"]
+    assert result["unbound"]["block"] is True
+    assert "missing or stale" in result["unbound"]["blockReason"]
+    assert result["stale"]["block"] is True
+    assert "stale" in result["stale"]["blockReason"]
+
+
 @pytest.mark.parametrize(
     "case",
-    ["caller_mismatch", "expired", "wrong_audience", "tamper", "wrong_team"],
+    [
+        "caller_mismatch",
+        "expired",
+        "wrong_audience",
+        "tamper",
+        "wrong_team",
+        "old_version",
+    ],
 )
 async def test_claim_adversarial_cases_fail_closed(case: str) -> None:
     if case == "expired":
@@ -227,6 +474,12 @@ async def test_claim_adversarial_cases_fail_closed(case: str) -> None:
             "echo",
             {"q": "wrong-team"},
             team_id="T9999999999",
+        )
+    elif case == "old_version":
+        arguments = sign_arguments(
+            "echo",
+            {"q": "old-version"},
+            payload_overrides={"v": 1},
         )
     else:
         arguments = sign_arguments("echo", {"q": case})

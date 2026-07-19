@@ -194,8 +194,12 @@ resource "terraform_data" "production_image_release_gate" {
     deployment_context_sha256 = try(data.external.signed_image_release_gate[0].result.deployment_context_sha256, "")
     receipt_claims_sha256     = try(data.external.signed_image_release_gate[0].result.receipt_claims_sha256, "")
     requested_images          = local.deployment_images
-    application_provenance    = local.deployment_application_provenance
-    shared_generation_ledger  = local.deployment_shared_generation_ledger
+    release_channels = try(
+      jsondecode(data.external.signed_image_release_gate[0].result.release_channels_json),
+      {},
+    )
+    application_provenance   = local.deployment_application_provenance
+    shared_generation_ledger = local.deployment_shared_generation_ledger
   }
 
   # Every plan gets a new apply-time gate action. This prevents an old gate

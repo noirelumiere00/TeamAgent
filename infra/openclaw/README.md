@@ -110,7 +110,7 @@ bash infra/openclaw/build-image.sh \
   --evidence-dir "/tmp/openclaw-$SHORT-evidence"
 ```
 
-The schema-4 output is explicitly `deploymentCredential=false` and
+The schema-5 output is explicitly `deploymentCredential=false` and
 `promotion.status=LOCAL_GATES_PASSED`. It binds:
 
 - the exact Git commit, tree, deterministic archive hash, and active blocked

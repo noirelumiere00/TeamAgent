@@ -110,6 +110,20 @@ PIPELINES: dict[str, dict[str, Any]] = {
         },
     },
 }
+RELEASE_GATE_ADDRESS = "terraform_data.production_image_release_gate"
+IMAGE_MANAGED_ECS_PIPELINES = {
+    "aws_ecs_task_definition.mcp": "mcp",
+    "aws_ecs_task_definition.canary": "mcp",
+    "aws_ecs_task_definition.connect_web": "mcp",
+    "aws_ecs_task_definition.ingest": "mcp",
+    "aws_ecs_task_definition.morning_digest": "mcp",
+    "aws_ecs_task_definition.x_buzz_worker": "mcp",
+    "aws_ecs_service.mcp": "mcp",
+    "aws_ecs_service.connect_web": "mcp",
+    "aws_ecs_task_definition.openclaw": "openclaw",
+    "aws_ecs_service.openclaw": "openclaw",
+    "aws_ecs_task_definition.tiktok_acquire": "tiktok",
+}
 
 _SHA1_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -118,6 +132,7 @@ _S3_VERSION_RE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1024}")
 _BUILD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:/._-]{0,511}")
 _PATH_RE = re.compile(r"/[A-Za-z0-9][A-Za-z0-9_./+-]{0,511}")
 _LABEL_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,254}")
+_INSTANCE_SELECTOR_RE = re.compile(r'\[(?:[0-9]+|"(?:[^"\\]|\\.)*")\]')
 _KEY_ARN_RE = re.compile(rf"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/[0-9a-f-]{{36}}")
 _DYNAMODB_TABLE_ARN_RE = re.compile(
     rf"arn:aws:dynamodb:{REGION}:{ACCOUNT_ID}:table/"
@@ -1460,9 +1475,21 @@ def _deployment_binding(
     contracts: Mapping[str, Any],
     application: Mapping[str, Any],
     shared_generation_ledger: Mapping[str, Any],
+    release_channels: Mapping[str, Any],
     intent_id: str,
 ) -> tuple[str, list[str], str]:
     selected = {name: image for name, image in images.items() if image}
+    normalized_channels: dict[str, str] = {}
+    if set(release_channels) != set(selected):
+        raise EvidenceError("deployment release channels do not match selected images")
+    for pipeline in sorted(selected):
+        channel = _string(
+            release_channels.get(pipeline),
+            label=f"{pipeline} deployment release channel",
+        )
+        if channel not in {"active", "rollback"}:
+            raise EvidenceError("deployment release channel is not allowlisted")
+        normalized_channels[pipeline] = channel
     references: dict[str, Mapping[str, Any]] = {}
     claim_ids: list[str] = []
     for pipeline in sorted(selected):
@@ -1516,6 +1543,7 @@ def _deployment_binding(
         "images": {name: selected[name] for name in sorted(selected)},
         "evidence": {name: dict(references[name]) for name in sorted(references)},
         "contracts": {name: contracts[name] for name in sorted(selected)},
+        "release_channels": normalized_channels,
         "application": {
             name: application[name] for name in sorted(selected) if name in application
         },
@@ -1550,6 +1578,7 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
         raise EvidenceError("Terraform omitted the MCP application binding")
 
     verified: list[str] = []
+    release_channels: dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="teamagent-release-gate.") as temporary:
         root = Path(temporary)
         for pipeline, image in sorted(selected.items()):
@@ -1695,6 +1724,10 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
                 image=_string(image, label=f"{pipeline} image"),
                 contract_sha256=contract_sha256,
             )
+            release_channels[pipeline] = _string(
+                validated_receipt.get("channel"),
+                label=f"{pipeline} verified release channel",
+            )
             if pipeline == "mcp":
                 _validate_mcp_deployment_application(
                     validated_receipt,
@@ -1708,6 +1741,7 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
         contracts=contracts,
         application=application,
         shared_generation_ledger=shared_generation_ledger,
+        release_channels=release_channels,
         intent_id=intent_id,
     )
     return {
@@ -1715,6 +1749,11 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
         "verified_pipelines": ",".join(verified),
         "deployment_context_sha256": context_sha256,
         "receipt_claims_sha256": claims_sha256,
+        "release_channels_json": json.dumps(
+            release_channels,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     }
 
 
@@ -1754,6 +1793,147 @@ def _planned_resources(module: Mapping[str, Any]) -> list[Mapping[str, Any]]:
             )
         )
     return result
+
+
+def _saved_plan_transition_classification(
+    changes: Sequence[Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    deletes: list[dict[str, Any]] = []
+    replacements: list[dict[str, Any]] = []
+    replacement_details: list[dict[str, Any]] = []
+    seen_addresses: set[str] = set()
+    for index, raw_change in enumerate(changes):
+        resource = _mapping(
+            raw_change,
+            label=f"saved Terraform resource change[{index}]",
+        )
+        if resource.get("mode", "managed") != "managed":
+            continue
+        address = _string(
+            resource.get("address"),
+            label="saved Terraform managed resource address",
+        )
+        if address in seen_addresses:
+            raise EvidenceError("saved Terraform plan has duplicate managed addresses")
+        seen_addresses.add(address)
+        details = _mapping(
+            resource.get("change"),
+            label=f"saved Terraform resource change {address}",
+        )
+        actions = details.get("actions")
+        if (
+            not isinstance(actions, list)
+            or not actions
+            or any(
+                action not in {"no-op", "create", "read", "update", "delete"}
+                for action in actions
+            )
+        ):
+            raise EvidenceError(f"saved Terraform actions are invalid for {address}")
+        if address == RELEASE_GATE_ADDRESS:
+            continue
+        transition = {
+            "address": address,
+            "actions": actions,
+        }
+        if "delete" in actions and "create" not in actions:
+            deletes.append(transition)
+        elif "delete" in actions and "create" in actions:
+            replacements.append(transition)
+            replacement_details.append(
+                {
+                    "address": address,
+                    "after": details.get("after"),
+                }
+            )
+    deletes.sort(key=lambda item: item["address"])
+    replacements.sort(key=lambda item: item["address"])
+    value = {
+        "delete": deletes,
+        "replace": replacements,
+    }
+    return (
+        {
+            "delete_change_count": len(deletes),
+            "replace_change_count": len(replacements),
+            "transition_sha256": hashlib.sha256(canonical_bytes(value)).hexdigest(),
+        },
+        deletes,
+        replacement_details,
+    )
+
+
+def _is_digest_preserving_task_replacement(
+    transition: Mapping[str, Any],
+    *,
+    requested_images: Mapping[str, Any],
+) -> bool:
+    address = _string(
+        transition.get("address"),
+        label="replacement Terraform address",
+    )
+    base_address = _INSTANCE_SELECTOR_RE.sub("", address)
+    if not base_address.startswith("aws_ecs_task_definition."):
+        return False
+    pipeline = IMAGE_MANAGED_ECS_PIPELINES.get(base_address)
+    image = requested_images.get(pipeline) if pipeline else None
+    after = transition.get("after")
+    if not isinstance(image, str) or not image or not isinstance(after, dict):
+        return False
+    container_definitions = after.get("container_definitions")
+    if not isinstance(container_definitions, str):
+        return False
+    try:
+        containers = json.loads(
+            container_definitions,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (EvidenceError, json.JSONDecodeError):
+        return False
+    if not isinstance(containers, list) or not containers:
+        return False
+    return any(
+        isinstance(container, dict) and container.get("image") == image
+        for container in containers
+    )
+
+
+def _require_destructive_rollback_channels(
+    *,
+    deletes: Sequence[Mapping[str, Any]],
+    replacements: Sequence[Mapping[str, Any]],
+    requested_images: Mapping[str, Any],
+    release_channels: Mapping[str, Any],
+) -> None:
+    destructive = list(deletes)
+    destructive.extend(
+        transition
+        for transition in replacements
+        if not _is_digest_preserving_task_replacement(
+            transition,
+            requested_images=requested_images,
+        )
+    )
+    for transition in destructive:
+        address = _string(
+            transition.get("address"),
+            label="destructive Terraform address",
+        )
+        base_address = _INSTANCE_SELECTOR_RE.sub("", address)
+        pipeline = IMAGE_MANAGED_ECS_PIPELINES.get(base_address)
+        if pipeline is None:
+            raise EvidenceError(
+                "saved image release plan contains an unscoped destructive transition"
+            )
+        image = requested_images.get(pipeline)
+        if not isinstance(image, str) or not image:
+            raise EvidenceError(
+                f"{pipeline} image-empty destructive state is forbidden"
+            )
+        if release_channels.get(pipeline) != "rollback":
+            raise EvidenceError(
+                f"{pipeline} destructive transition requires a fresh rollback receipt"
+            )
 
 
 def deployment_plan_metadata(
@@ -1798,7 +1978,7 @@ def deployment_plan_metadata(
     gate_resources = [
         resource
         for resource in _planned_resources(root_module)
-        if resource.get("address") == "terraform_data.production_image_release_gate"
+        if resource.get("address") == RELEASE_GATE_ADDRESS
     ]
     if len(gate_resources) != 1:
         raise EvidenceError("saved Terraform plan lacks one production release gate")
@@ -1817,6 +1997,7 @@ def deployment_plan_metadata(
             "deployment_context_sha256",
             "receipt_claims_sha256",
             "requested_images",
+            "release_channels",
             "application_provenance",
             "shared_generation_ledger",
         },
@@ -1828,6 +2009,22 @@ def deployment_plan_metadata(
     )
     if not any(isinstance(image, str) and image for image in requested_images.values()):
         raise EvidenceError("saved Terraform plan has no requested production image")
+    selected_images = {
+        pipeline: image
+        for pipeline, image in requested_images.items()
+        if isinstance(image, str) and image
+    }
+    release_channels = _mapping(
+        gate_input["release_channels"],
+        label="saved Terraform release channels",
+    )
+    if set(release_channels) != set(selected_images) or any(
+        channel not in {"active", "rollback"}
+        for channel in release_channels.values()
+    ):
+        raise EvidenceError(
+            "saved Terraform release channels do not match requested images"
+        )
     application_provenance = _mapping(
         gate_input["application_provenance"],
         label="saved Terraform application provenance",
@@ -1838,12 +2035,23 @@ def deployment_plan_metadata(
         gate_input["shared_generation_ledger"]
     )
 
+    (
+        transitions,
+        destructive_deletes,
+        planned_replacements,
+    ) = _saved_plan_transition_classification(changes_for_import_check)
+    _require_destructive_rollback_channels(
+        deletes=destructive_deletes,
+        replacements=planned_replacements,
+        requested_images=requested_images,
+        release_channels=release_channels,
+    )
     changes = changes_for_import_check
     gate_changes = [
         _mapping(change, label="saved Terraform resource change")
         for change in changes
         if isinstance(change, dict)
-        and change.get("address") == "terraform_data.production_image_release_gate"
+        and change.get("address") == RELEASE_GATE_ADDRESS
     ]
     if len(gate_changes) != 1:
         raise EvidenceError("saved Terraform plan does not replace one release gate")
@@ -1885,6 +2093,7 @@ def deployment_plan_metadata(
         "shared_ledger_sha256": hashlib.sha256(
             canonical_bytes(shared_generation_ledger)
         ).hexdigest(),
+        "plan_transition_sha256": transitions["transition_sha256"],
     }
 
 
@@ -1949,6 +2158,14 @@ def terraform_context_metadata(context_path: Path) -> dict[str, str | int]:
         "plan_addresses_sha256": _sha256(
             plan["address_ownership_sha256"],
             label="Terraform plan address ownership SHA-256",
+        ),
+        "runtime_images_sha256": _sha256(
+            plan["runtime_images_sha256"],
+            label="Terraform runtime images SHA-256",
+        ),
+        "plan_transition_sha256": _sha256(
+            plan["transition_sha256"],
+            label="Terraform plan transition SHA-256",
         ),
     }
 
@@ -2457,6 +2674,13 @@ def prepare_deployment_intent(
 ) -> dict[str, str | int]:
     metadata = deployment_plan_metadata(plan_path, plan_json=plan_json)
     terraform_context = terraform_context_metadata(terraform_context_path)
+    if (
+        metadata["plan_transition_sha256"]
+        != terraform_context["plan_transition_sha256"]
+    ):
+        raise EvidenceError(
+            "Terraform runtime context transition classification differs from the saved plan"
+        )
     current = _utc_now(now)
     expires = current + dt.timedelta(seconds=MAX_DEPLOYMENT_INTENT_LIFETIME_SECONDS)
     audit_expires = current + dt.timedelta(seconds=DEPLOYMENT_INTENT_AUDIT_TTL_SECONDS)
@@ -2497,6 +2721,8 @@ def _deployment_intent_base_keys() -> set[str]:
         "state_serial",
         "state_addresses_sha256",
         "plan_addresses_sha256",
+        "runtime_images_sha256",
+        "plan_transition_sha256",
         "control_commit",
         "prepared_at",
         "authorization_expires_at",
@@ -2528,6 +2754,8 @@ def _validate_deployment_intent_binding(
         or item["receipt_claims_sha256"] != claims_sha256
         or claims_sha256 != metadata["receipt_claims_sha256"]
         or item["shared_ledger_sha256"] != metadata["shared_ledger_sha256"]
+        or item["plan_transition_sha256"]
+        != metadata["plan_transition_sha256"]
     ):
         raise EvidenceError("deployment intent does not bind this saved plan")
     for context_hash_name in (
@@ -2535,6 +2763,8 @@ def _validate_deployment_intent_binding(
         "backend_workspace_sha256",
         "state_addresses_sha256",
         "plan_addresses_sha256",
+        "runtime_images_sha256",
+        "plan_transition_sha256",
     ):
         _sha256(item[context_hash_name], label=f"deployment {context_hash_name}")
     _string(item["state_lineage"], label="deployment Terraform state lineage")
@@ -2871,6 +3101,7 @@ def consume_deployment_intent(
         contracts=contracts,
         application=application,
         shared_generation_ledger=shared_generation_ledger,
+        release_channels=json.loads(verified["release_channels_json"]),
         intent_id=intent_id,
     )
     if (

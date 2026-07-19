@@ -23,6 +23,8 @@ TEST_CALLER_CLAIM_SECRET = "test-caller-claim-secret-is-at-least-32-bytes"
 TEST_SLACK_TEAM_ID = "T0123456789"
 TEST_SLACK_USER_ID = "U0123456789"
 TEST_SLACK_CHANNEL_ID = "C0123456789"
+TEST_RUN_ID = "11111111-1111-4111-8111-111111111111"
+TEST_TOOL_CALL_ID = "toolu_0123456789abcdef"
 TEST_NOW = 1_784_424_000
 
 _NONCE_COUNTER = itertools.count()
@@ -59,6 +61,8 @@ def sign_arguments(
     expires_at: int | None = None,
     secret: str = TEST_CALLER_CLAIM_SECRET,
     audience: str = CALLER_CLAIM_AUDIENCE,
+    run_id: str = TEST_RUN_ID,
+    tool_call_id: str = TEST_TOOL_CALL_ID,
     declared_context: Mapping[str, Any] | None = None,
     payload_overrides: Mapping[str, Any] | None = None,
     nonce_seed: str | None = None,
@@ -80,7 +84,7 @@ def sign_arguments(
         nonce_seed = f"{tool}:{next(_NONCE_COUNTER)}"
     nonce = _base64url(hashlib.sha256(nonce_seed.encode()).digest()[:16])
     payload: dict[str, Any] = {
-        "v": 1,
+        "v": 2,
         "iss": CALLER_CLAIM_ISSUER,
         "aud": audience,
         "sub": user_id,
@@ -89,6 +93,8 @@ def sign_arguments(
         "thread": thread_ts,
         "message": "1784424000.000001",
         "session_sha256": hashlib.sha256(b"trusted-slack-session").hexdigest(),
+        "run_id": run_id,
+        "tool_call_id": tool_call_id,
         "tool": tool,
         "arguments_sha256": canonical_request_sha256(arguments),
         "nonce": nonce,

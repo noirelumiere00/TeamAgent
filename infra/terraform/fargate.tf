@@ -456,8 +456,10 @@ resource "aws_ecs_task_definition" "mcp" {
       # G4' で send/delete は denylist 物理封鎖（mail_reply/skill.py）。
       { name = "USE_MAIL_REPLY_TOOL", value = "true" },
       # 朝ダイジェスト Skill。EventBridge Scheduled Task（平日 9:30 JST）が
-      # scripts/run_morning_digest_fargate.py 経由で呼ぶ。mention 経由でも露出（ローカル検証用）。
+      # scripts/run_morning_digest_fargate.py 経由で呼ぶ。mention-capable MCP runtimeでは
+      # 自動draft作成を常にfail-closedにし、明示ボタン経由のmail_draftだけを許可する。
       { name = "USE_MORNING_DIGEST_TOOL", value = "true" },
+      { name = "DRAFT_ON_DEMAND_ONLY", value = "true" },
       # 朝ダイジェストの「✏️下書きを作成」ボタン押下処理ツール（OpenClaw が interaction を system
       # event で渡し、SOUL 指示で本ツールを呼ぶ→当該スレッドへ Reply-All 下書き作成・送信しない）。
       { name = "USE_MAIL_DRAFT_TOOL", value = "true" },
@@ -618,9 +620,9 @@ resource "aws_ecs_task_definition" "mcp" {
 }
 
 resource "aws_ecs_task_definition" "openclaw" {
-  # Empty keeps an intentionally unmanaged legacy deployment out of this
-  # module. Any Terraform-managed image revision uses the one-time production
-  # release gate below; direct CLI task-definition registration is retired.
+  # The image variable is mandatory and digest-only. Keeping the historical
+  # count address avoids a state move while empty-image decommissioning is
+  # rejected before planning.
   count                    = var.openclaw_image == "" ? 0 : 1
   family                   = "${var.project_name}-${var.environment}-openclaw"
   requires_compatibilities = ["FARGATE"]
