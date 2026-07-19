@@ -64,18 +64,18 @@ disabled in `openclaw.config.json5`.
 ## Fargate contract
 
 The Terraform task definition is authoritative. `harden-task-definition.jq`
-is its adversarially tested offline mirror: it accepts only the fixed
-production family, roles, service provenance, one `openclaw` container, and
-one task-scoped
-`openclaw-tmp` volume mounted writable at `/tmp`. It rejects sidecars,
-additional volumes or mounts, writable `/data` or other paths, task/container
-field additions, environment retargeting, role changes, and image repository
-changes. The rendered definition enforces:
+is its adversarially tested offline parity mirror: it accepts only the fixed
+production family, roles, service provenance, one `openclaw` container, one
+task-scoped `tmp` volume mounted at `/tmp`, and the exact encrypted EFS access
+point mounted at `/tmp/teamagent-openclaw/state`. It rejects sidecars,
+additional volumes or mounts, writable paths outside those two exact mounts,
+task/container field additions, environment retargeting, role changes, and
+image repository changes. The rendered definition enforces:
 
 - `readonlyRootFilesystem=true`;
-- `user=65532:65532`, `privileged=false`, capability drop `ALL`;
-- canonical image ENTRYPOINT/CMD and `/readyz` health check;
-- only the four fixed Secrets Manager bindings and reviewed environment keys.
+- `user=65532:65532`, `privileged=false`, init process, capability drop `ALL`;
+- 120-second graceful stop, canonical image ENTRYPOINT/CMD and `/readyz` health check;
+- only the five fixed Secrets Manager bindings and reviewed environment keys.
 
 The canonical CMD uses `execve`, so the gateway is PID 1. Actual-image tests
 verify child exit-code propagation and clean SIGTERM exit 0.

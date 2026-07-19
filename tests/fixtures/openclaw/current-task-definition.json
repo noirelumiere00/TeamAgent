@@ -16,7 +16,19 @@
   "placementConstraints": [],
   "volumes": [
     {
-      "name": "openclaw-tmp"
+      "name": "tmp"
+    },
+    {
+      "name": "state",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-0123456789abcdef0",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "fsap-0123456789abcdef0",
+          "iam": "ENABLED"
+        }
+      }
     }
   ],
   "containerDefinitions": [
@@ -48,6 +60,10 @@
         {
           "name": "AWS_REGION",
           "value": "ap-northeast-1"
+        },
+        {
+          "name": "TMPDIR",
+          "value": "/tmp"
         },
         {
           "name": "SLACK_DM_ALLOWLIST",
@@ -90,8 +106,13 @@
       },
       "mountPoints": [
         {
-          "sourceVolume": "openclaw-tmp",
+          "sourceVolume": "tmp",
           "containerPath": "/tmp",
+          "readOnly": false
+        },
+        {
+          "sourceVolume": "state",
+          "containerPath": "/tmp/teamagent-openclaw/state",
           "readOnly": false
         }
       ],

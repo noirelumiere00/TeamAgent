@@ -781,44 +781,67 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
         "operatingSystemFamily": "LINUX",
     }
     assert rendered["requiresCompatibilities"] == ["FARGATE"]
-    assert rendered["volumes"] == [{"name": "openclaw-tmp"}]
+    assert rendered["volumes"] == current_task["volumes"]
+    assert {volume["name"] for volume in rendered["volumes"]} == {"tmp", "state"}
+    assert rendered["volumes"][1]["efsVolumeConfiguration"]["transitEncryption"] == "ENABLED"
+    assert (
+        rendered["volumes"][1]["efsVolumeConfiguration"]["authorizationConfig"]["iam"] == "ENABLED"
+    )
     assert len(rendered["containerDefinitions"]) == 1
     container = rendered["containerDefinitions"][0]
     assert container["image"] == image
     assert container["readonlyRootFilesystem"] is True
     assert container["user"] == "65532:65532"
     assert container["privileged"] is False
-    assert container["linuxParameters"]["capabilities"] == {"drop": ["ALL"]}
+    assert container["linuxParameters"] == {
+        "initProcessEnabled": True,
+        "capabilities": {"drop": ["ALL"]},
+    }
     assert "tmpfs" not in container["linuxParameters"]
     assert "dockerSecurityOptions" not in container
     assert "entryPoint" not in container
     assert "command" not in container
     assert container["mountPoints"] == [
         {
-            "sourceVolume": "openclaw-tmp",
+            "sourceVolume": "tmp",
             "containerPath": "/tmp",
             "readOnly": False,
-        }
+        },
+        {
+            "sourceVolume": "state",
+            "containerPath": "/tmp/teamagent-openclaw/state",
+            "readOnly": False,
+        },
     ]
+    assert container["healthCheck"]["command"][1] == "/nodejs/bin/node"
     assert "/readyz" in container["healthCheck"]["command"][3]
-    assert container["stopTimeout"] == 30
+    assert container["stopTimeout"] == 120
     assert container["secrets"] == current_task["containerDefinitions"][0]["secrets"]
     assert (
         container["logConfiguration"] == current_task["containerDefinitions"][0]["logConfiguration"]
     )
     assert {entry["name"] for entry in container["environment"]} == {
         "AWS_REGION",
+        "TMPDIR",
         "SLACK_DM_ALLOWLIST",
         "SLACK_TEAM_ID",
     }
 
     wildcard = copy.deepcopy(current_task)
-    wildcard["containerDefinitions"][0]["environment"][1]["value"] = "*"
+    next(
+        entry
+        for entry in wildcard["containerDefinitions"][0]["environment"]
+        if entry["name"] == "SLACK_DM_ALLOWLIST"
+    )["value"] = "*"
     wildcard_rendered = _render_task(wildcard, image)
     assert wildcard_rendered.returncode == 0, wildcard_rendered.stderr
 
     exact_users = copy.deepcopy(current_task)
-    exact_users["containerDefinitions"][0]["environment"][1]["value"] = "U09CX1CCBLN,U0123456789"
+    next(
+        entry
+        for entry in exact_users["containerDefinitions"][0]["environment"]
+        if entry["name"] == "SLACK_DM_ALLOWLIST"
+    )["value"] = "U09CX1CCBLN,U0123456789"
     users_rendered = _render_task(exact_users, image)
     assert users_rendered.returncode == 0, users_rendered.stderr
 
@@ -891,7 +914,11 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
         ("non-U Slack DM allowlist", "W0123456789"),
     ):
         mutated = copy.deepcopy(current_task)
-        mutated["containerDefinitions"][0]["environment"][1]["value"] = value
+        next(
+            entry
+            for entry in mutated["containerDefinitions"][0]["environment"]
+            if entry["name"] == "SLACK_DM_ALLOWLIST"
+        )["value"] = value
         adversarial.append((label, mutated))
 
     mutated = copy.deepcopy(current_task)
@@ -1182,11 +1209,13 @@ def test_task_hardening_filter_and_release_boundary_do_not_claim_fargate_nnp() -
     contract = json.loads(TRUST_CONTRACT.read_text())
     assert "readonlyRootFilesystem" in task_filter
     assert 'drop: ["ALL"]' in task_filter
+    assert "initProcessEnabled: true" in task_filter
     assert 'containerPath: "/tmp"' in task_filter
+    assert 'containerPath: "/tmp/teamagent-openclaw/state"' in task_filter
     assert "dockerSecurityOptions" in task_filter
     assert "del(.entryPoint, .command, .dockerSecurityOptions)" in task_filter
     assert "expected exactly one container named openclaw; sidecars are forbidden" in task_filter
-    assert "only the task-scoped empty openclaw-tmp volume is allowed" in task_filter
+    assert "exact tmp and encrypted EFS state volumes are required" in task_filter
     assert "Slack team/DM environment contract is invalid" in task_filter
     assert "valid_slack_dm_allowlist" in task_filter
     assert r"^U[A-Z0-9]{8,}(,U[A-Z0-9]{8,}){0,99}$" in task_filter
@@ -1195,6 +1224,8 @@ def test_task_hardening_filter_and_release_boundary_do_not_claim_fargate_nnp() -
     assert "register-task-definition" not in deploy
     assert "update-service" not in deploy
     assert "terraform apply" not in deploy
+    assert ".stopTimeout = 120" in task_filter
+    assert '"/nodejs/bin/node"' in task_filter
     assert contract["release"]["ready"] is False
     assert contract["bundle"]["interfaces"]["build"] == "infra/openclaw/build-bundle.sh"
     assert [subject["name"] for subject in contract["bundle"]["subjects"]] == [
