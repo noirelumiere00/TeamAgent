@@ -656,7 +656,8 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         _record_pages(raw_sources, source_type, source_id, pages)
         for page_index, (page, _) in enumerate(pages):
             raw_documents.append((source_type, f"{source_id}:page:{page_index}", page))
-        coverage.add(source_type)
+        if source_type in KNOWN_SNS_PUBLISHER_TYPES:
+            coverage.add(source_type)
         return pages
 
     topic_pages = collect(

@@ -916,6 +916,7 @@ def _fake_aws(path: Path) -> None:
         mappings = {json.dumps({key: _mapping_aws(key) for key in DISPATCHERS})!r}
         mappings = json.loads(mappings)
         args = sys.argv[1:]
+        debug = False
         if args == ["--version"]:
             print("aws-cli/2.31.0 Python/3.13 Darwin/24 source/x86_64")
             raise SystemExit(0)
@@ -930,8 +931,24 @@ def _fake_aws(path: Path) -> None:
                 args = args[2:]
             elif args[0] == "--no-cli-pager":
                 args = args[1:]
+            elif args[0] == "--debug":
+                debug = True
+                args = args[1:]
             else:
                 break
+        if debug:
+            import email.utils
+
+            print(
+                "TEAMAGENT_HTTP_METADATA:"
+                + json.dumps(
+                    {{
+                        "date": email.utils.formatdate(usegmt=True),
+                        "x-amzn-requestid": f"fake-{{os.getpid()}}-request",
+                    }}
+                ),
+                file=sys.stderr,
+            )
 
         def task_arn(component):
             _, family, revision = components[component]
@@ -1028,9 +1045,10 @@ def _fake_aws(path: Path) -> None:
                     else "s-komata@vectorinc.co.jp"
                 )
                 subscriptions.append({{
-                    "SubscriptionArn": (
-                        "arn:aws:sns:ap-northeast-1:718959508629:"
-                        "teamagent-dev-openclaw-alarms:confirmed"
+                        "SubscriptionArn": (
+                            "arn:aws:sns:ap-northeast-1:718959508629:"
+                            "teamagent-dev-openclaw-alarms:"
+                            "11111111-2222-3333-4444-555555555555"
                     ),
                     "Owner": ACCOUNT,
                     "Protocol": protocol,
@@ -1082,6 +1100,7 @@ def _fake_aws(path: Path) -> None:
                 ),
                 "Protocol": protocol,
                 "Endpoint": endpoint,
+                "Owner": ACCOUNT,
                 "PendingConfirmation": "false",
                 "ConfirmationWasAuthenticated": "true",
                 "RawMessageDelivery": "false",
@@ -1106,6 +1125,8 @@ def _fake_aws(path: Path) -> None:
             print(json.dumps({{"SlackChannelConfigurations": configurations}}))
         elif args[:2] == ["chatbot", "list-microsoft-teams-channel-configurations"]:
             print(json.dumps({{"TeamChannelConfigurations": []}}))
+        elif args[:2] == ["chatbot", "describe-chime-webhook-configurations"]:
+            print(json.dumps({{"WebhookConfigurations": []}}))
         elif args[:2] == ["cloudwatch", "describe-alarms"]:
             actions = []
             if os.environ.get("AWS_FAKE_LEGACY_ALARM_ACTION"):
@@ -1114,9 +1135,14 @@ def _fake_aws(path: Path) -> None:
                     "teamagent-dev-alarms"
                 ]
             print(json.dumps({{
-                "MetricAlarms": [{{"AlarmActions": actions}}],
+                "MetricAlarms": [{{
+                    "AlarmName": "teamagent-dev-openclaw-errors",
+                    "AlarmActions": actions,
+                }}],
                 "CompositeAlarms": [],
             }}))
+        elif args[:2] == ["logs", "describe-metric-filters"]:
+            print(json.dumps({{"metricFilters": []}}))
         elif args[:2] == ["budgets", "describe-budgets"]:
             print(json.dumps({{
                 "Budgets": [{{"BudgetName": "teamagent-dev-monthly-cost"}}],
@@ -1252,6 +1278,72 @@ def _fake_aws(path: Path) -> None:
                     "ApiMappingKey": "",
                 }}]
             }}))
+        elif args[:2] == ["events", "list-event-buses"]:
+            print(json.dumps({{
+                "EventBuses": [{{
+                    "Name": "default",
+                    "Arn": f"arn:aws:events:{{REGION}}:{{ACCOUNT}}:event-bus/default",
+                }}]
+            }}))
+        elif args[:2] == ["events", "list-rules"]:
+            print(json.dumps({{
+                "Rules": [{{
+                    "Name": "teamagent-dev-ingest-weekly",
+                    "EventBusName": "default",
+                    "State": "DISABLED",
+                }}]
+            }}))
+        elif args[:2] == ["scheduler", "list-schedule-groups"]:
+            print(json.dumps({{"ScheduleGroups": [{{"Name": "default"}}]}}))
+        elif args[:2] == ["scheduler", "list-schedules"]:
+            print(json.dumps({{
+                "Schedules": [{{
+                    "Name": "teamagent-dev-benign-schedule",
+                    "GroupName": "default",
+                }}]
+            }}))
+        elif args[:2] == ["scheduler", "get-schedule"]:
+            print(json.dumps({{
+                "Name": "teamagent-dev-benign-schedule",
+                "GroupName": "default",
+                "Target": {{
+                    "Arn": f"arn:aws:sqs:{{REGION}}:{{ACCOUNT}}:benign",
+                    "RoleArn": f"arn:aws:iam::{{ACCOUNT}}:role/benign-scheduler",
+                }},
+            }}))
+        elif args[:2] == ["lambda", "list-functions"]:
+            print(json.dumps({{
+                "Functions": [{{
+                    "FunctionName": "teamagent-dev-tiktok-acquire-dispatch",
+                }}]
+            }}))
+        elif args[:2] == ["lambda", "list-function-event-invoke-configs"]:
+            print(json.dumps({{"FunctionEventInvokeConfigs": []}}))
+        elif args[:2] == ["s3api", "list-buckets"]:
+            print(json.dumps({{"Buckets": [{{"Name": "teamagent-dev-raw-files"}}]}}))
+        elif args[:2] == ["s3api", "get-bucket-notification-configuration"]:
+            print(json.dumps({{}}))
+        elif args[:2] == ["autoscaling", "describe-notification-configurations"]:
+            print(json.dumps({{"NotificationConfigurations": []}}))
+        elif args[:2] == ["codestar-notifications", "list-notification-rules"]:
+            print(json.dumps({{
+                "NotificationRules": [{{
+                    "Arn": (
+                        f"arn:aws:codestar-notifications:{{REGION}}:{{ACCOUNT}}:"
+                        "notificationrule/benign"
+                    )
+                }}]
+            }}))
+        elif args[:2] == ["codestar-notifications", "describe-notification-rule"]:
+            print(json.dumps({{
+                "Arn": (
+                    f"arn:aws:codestar-notifications:{{REGION}}:{{ACCOUNT}}:"
+                    "notificationrule/benign"
+                ),
+                "Targets": [],
+            }}))
+        elif args[:2] == ["rds", "describe-event-subscriptions"]:
+            print(json.dumps({{"EventSubscriptionsList": []}}))
         elif args[:2] == ["ecs", "describe-services"]:
             state = os.environ.get("AWS_FAKE_SERVICE_STATE", "stable")
             services = []
@@ -1431,12 +1523,16 @@ def _fake_aws(path: Path) -> None:
         elif args[:2] == ["lambda", "get-function-concurrency"]:
             print(json.dumps({{}}))
         elif args[:2] == ["lambda", "list-event-source-mappings"]:
-            name = args[args.index("--function-name") + 1]
-            component = next(
-                key for key, value in dispatchers.items()
-                if value["function_name"] == name
-            )
-            print(json.dumps({{"EventSourceMappings": [mappings[component]]}}))
+            if "--function-name" in args:
+                name = args[args.index("--function-name") + 1]
+                component = next(
+                    key for key, value in dispatchers.items()
+                    if value["function_name"] == name
+                )
+                response_mappings = [mappings[component]]
+            else:
+                response_mappings = []
+            print(json.dumps({{"EventSourceMappings": response_mappings}}))
         elif args[:2] == ["secretsmanager", "describe-secret"]:
             secret_id = args[args.index("--secret-id") + 1]
             print(json.dumps({{
