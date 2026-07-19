@@ -112,7 +112,7 @@ RELEASE_CONTRACT_SHA256=$(
     | cut -d' ' -f1
 )
 APP_PROVENANCE_SHA256=$(
-  "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_bundle_provenance.py" \
+  python3 "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_bundle_provenance.py" \
     app-provenance-sha256 \
     --contract \
       "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \

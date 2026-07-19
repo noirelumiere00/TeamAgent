@@ -276,6 +276,7 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert "--severity CRITICAL,HIGH" not in BUILD
     assert 'git -C "$REPO_ROOT" archive --format=tar "$HEAD"' in BUILD
     assert "canonical_build_context.py" in BUILD
+    assert 'python3 "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_bundle_provenance.py"' in BUILD
     assert "--file infra/docker/Dockerfile.teamagent-mcp" in BUILD
     assert "--file infra/docker/Dockerfile.teamagent-media-worker" in BUILD
     assert BUILD.count('- <"$EVIDENCE_DIR/build-context.tar"') == 2
