@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from teamagent.media.contracts import (
     AcquireOperation,
@@ -254,13 +255,12 @@ def _safe_file(path: Path, root: Path) -> Path:
     return resolved
 
 
-def _acquire(
+def _acquire_ytdlp(
     operation: AcquireOperation,
     workdir: Path,
     budget: DeadlineBudget,
 ) -> OperationOutput:
     _remaining(budget)
-    validate_acquire_url(operation.url)
     try:
         import yt_dlp
     except ImportError as exc:
@@ -336,6 +336,86 @@ def _acquire(
     return OperationOutput(
         artifacts=(ProducedArtifact("media", destination, mime),),
         metadata={"extractor": extractor, "size": size},
+    )
+
+
+def _worker_acquire_order() -> tuple[str, ...]:
+    raw = os.environ.get("VIDEO_DL_ORDER", "browser,ytdlp")
+    order = tuple(
+        step for step in (value.strip() for value in raw.split(",")) if step in {"browser", "ytdlp"}
+    )
+    return order or ("browser", "ytdlp")
+
+
+def _browser_acquire(
+    operation: AcquireOperation,
+    workdir: Path,
+    budget: DeadlineBudget,
+) -> OperationOutput:
+    node = os.environ.get("TIKTOK_NODE_BIN", "/usr/bin/node")
+    scraper = os.environ.get(
+        "TIKTOK_SCRAPER_PATH",
+        "/app/tools/tiktok_scraper/search.mjs",
+    )
+    if not Path(node).exists() or not Path(scraper).exists():
+        raise MediaOperationError("MEDIA_TIKTOK_RUNTIME_MISSING", "TikTok runtime is missing")
+    destination = workdir / "browser-acquired.mp4"
+    _node_json(
+        [
+            node,
+            scraper,
+            "--mode",
+            "download",
+            "--url",
+            operation.url,
+            "--out",
+            str(destination),
+            "--max-bytes",
+            str(operation.max_bytes),
+        ],
+        workdir=workdir,
+        budget=budget,
+        timeout_s=120,
+    )
+    source = _safe_file(destination, workdir)
+    size = source.stat().st_size
+    if size < 1 or size > operation.max_bytes:
+        raise MediaOperationError("MEDIA_ACQUIRE_SIZE_EXCEEDED", "acquired media exceeded limit")
+    return OperationOutput(
+        artifacts=(ProducedArtifact("media", source, "video/mp4"),),
+        metadata={"extractor": "tiktok-browser", "size": size},
+    )
+
+
+def _acquire(
+    operation: AcquireOperation,
+    workdir: Path,
+    budget: DeadlineBudget,
+) -> OperationOutput:
+    _remaining(budget)
+    validate_acquire_url(operation.url)
+    host = (urlsplit(operation.url).hostname or "").rstrip(".").lower()
+    is_tiktok = host == "tiktok.com" or host.endswith(".tiktok.com")
+    attempted: list[str] = []
+    for step in _worker_acquire_order():
+        if step == "browser" and not is_tiktok:
+            continue
+        attempted.append(step)
+        try:
+            if step == "browser":
+                return _browser_acquire(operation, workdir, budget)
+            return _acquire_ytdlp(operation, workdir, budget)
+        except MediaOperationError as exc:
+            if exc.code == "MEDIA_JOB_DEADLINE_EXCEEDED":
+                raise
+            logger.info(
+                "media acquire chain step failed: step=%s code=%s",
+                step,
+                exc.code,
+            )
+    raise MediaOperationError(
+        "MEDIA_ACQUIRE_FAILED",
+        f"allowed media acquire failed after {len(attempted)} bounded attempts",
     )
 
 
@@ -476,12 +556,18 @@ def _post_row(
     )
     raw_music = video.get("music")
     music_title = str(raw_music.get("title") or "")[:200] if isinstance(raw_music, dict) else ""
+    url = str(video.get("url") or "")
+    provider_id = str(video.get("id") or "")[:100]
+    if not provider_id:
+        match = re.search(r"/video/([0-9]{1,40})(?:[/?#]|$)", url)
+        provider_id = match.group(1) if match else ""
     return {
         "pid": pid,
+        "provider_id": provider_id,
         "kw": keyword,
         "search_type": search_type,
         "rank_display": rank,
-        "url": str(video.get("url") or ""),
+        "url": url,
         "title": str(video.get("desc") or ""),
         "account_id": str(author.get("uniqueId") or ""),
         "account_name": str(author.get("nickname") or ""),
@@ -555,9 +641,26 @@ def _fetch_public_image(
         )
         raw.unlink(missing_ok=True)
         return destination.exists() and destination.stat().st_size > 0
-    except MediaOperationError:
-        raise
+    except MediaOperationError as exc:
+        raw = destination.with_suffix(".raw")
+        raw.unlink(missing_ok=True)
+        destination.unlink(missing_ok=True)
+        if exc.code == "MEDIA_JOB_DEADLINE_EXCEEDED":
+            raise
+        logger.warning(
+            "optional TikTok thumbnail skipped: code=%s",
+            exc.code,
+        )
+        return False
+    except FileNotFoundError as exc:
+        raise MediaOperationError(
+            "MEDIA_TIKTOK_RUNTIME_MISSING",
+            "thumbnail decoder is unavailable",
+        ) from exc
     except Exception:
+        raw = destination.with_suffix(".raw")
+        raw.unlink(missing_ok=True)
+        destination.unlink(missing_ok=True)
         _remaining(budget)
         return False
 
@@ -669,11 +772,12 @@ def _tiktok_acquire(
         pid = str(post["pid"])
         thumbnail_relative = f"thumbs/{pid}.jpg"
         thumbnail = workdir / f"{pid}.jpg"
-        if _fetch_public_image(
+        thumbnail_written = _fetch_public_image(
             str(post["cover_url"]),
             thumbnail,
             budget=budget,
-        ):
+        )
+        if thumbnail_written:
             artifacts.append(
                 ProducedArtifact(
                     f"thumb-{pid}",
@@ -682,6 +786,8 @@ def _tiktok_acquire(
                     relative_key=thumbnail_relative,
                 )
             )
+        elif post["cover_url"]:
+            warnings.append(f"{pid}:MEDIA_TIKTOK_THUMBNAIL_SKIPPED")
         downloaded = False
         video_relative = f"videos/{pid}.mp4"
         video_path = workdir / f"{pid}.mp4"
@@ -726,6 +832,7 @@ def _tiktok_acquire(
         manifest_items.append(
             {
                 "pid": pid,
+                "provider_id": post["provider_id"],
                 "kw": post["kw"],
                 "downloaded": downloaded,
                 "video_path": video_relative,

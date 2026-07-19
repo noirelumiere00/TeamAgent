@@ -159,7 +159,7 @@ def _parse_media_post(post: dict[str, Any]) -> TikTokVideo:
     """generic media workerの正規化postを既存public schemaへ写像する。"""
 
     return TikTokVideo(
-        id=str(post.get("pid") or ""),
+        id=str(post.get("provider_id") or post.get("pid") or ""),
         url=str(post.get("url") or ""),
         desc=str(post.get("title") or ""),
         create_time=int(post.get("create_time") or 0),

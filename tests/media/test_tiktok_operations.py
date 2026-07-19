@@ -7,11 +7,20 @@ from typing import Any
 
 import pytest
 
-from teamagent.media.contracts import TikTokAcquireOperation, TikTokClientConfig
+from teamagent.adapters.tiktok_scraper import _parse_media_post
+from teamagent.media.contracts import (
+    AcquireOperation,
+    TikTokAcquireOperation,
+    TikTokClientConfig,
+)
 from teamagent.media.deadline import DeadlineBudget
 from teamagent.media.operations import (
     MediaOperationError,
+    OperationOutput,
+    ProducedArtifact,
+    _acquire,
     _child_environment,
+    _fetch_public_image,
     _node_json,
     _tiktok_acquire,
 )
@@ -101,6 +110,89 @@ def test_node_failure_exposes_only_bounded_waf_diagnostics(
     assert "secret provider message" not in str(caught.value)
 
 
+def test_worker_acquire_preserves_browser_then_ytdlp_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_DL_ORDER", "browser,ytdlp")
+    calls: list[str] = []
+
+    def fail_browser(*_args: Any, **_kwargs: Any) -> OperationOutput:
+        calls.append("browser")
+        raise MediaOperationError("MEDIA_TIKTOK_FAILED", "blocked")
+
+    def succeed_ytdlp(*_args: Any, **_kwargs: Any) -> OperationOutput:
+        calls.append("ytdlp")
+        path = tmp_path / "fallback.mp4"
+        path.write_bytes(b"video")
+        return OperationOutput(
+            (ProducedArtifact("media", path, "video/mp4"),),
+            {"extractor": "tiktok"},
+        )
+
+    monkeypatch.setattr("teamagent.media.operations.validate_acquire_url", lambda url: url)
+    monkeypatch.setattr("teamagent.media.operations._browser_acquire", fail_browser)
+    monkeypatch.setattr("teamagent.media.operations._acquire_ytdlp", succeed_ytdlp)
+
+    output = _acquire(
+        AcquireOperation(
+            kind="acquire",
+            url="https://www.tiktok.com/@creator/video/123",
+        ),
+        tmp_path,
+        DeadlineBudget(200, clock=lambda: 100),
+    )
+
+    assert calls == ["browser", "ytdlp"]
+    assert output.metadata["extractor"] == "tiktok"
+
+
+def test_optional_cover_decode_failure_is_fail_soft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Response:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b"not-an-image"
+
+    class _Opener:
+        def open(self, *_args: object, **_kwargs: object) -> _Response:
+            return _Response()
+
+    monkeypatch.setattr(
+        "teamagent.media.operations.validate_public_https_url",
+        lambda url: url,
+    )
+    monkeypatch.setattr(
+        "teamagent.media.operations.urllib.request.build_opener",
+        lambda *_args: _Opener(),
+    )
+    monkeypatch.setattr(
+        "teamagent.media.operations._run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            MediaOperationError("MEDIA_PROCESS_FAILED", "bad image")
+        ),
+    )
+    destination = tmp_path / "cover.jpg"
+
+    assert not _fetch_public_image(
+        "https://p16.example.invalid/cover.jpg",
+        destination,
+        budget=DeadlineBudget(200, clock=lambda: 100),
+    )
+    assert not destination.exists()
+    assert not destination.with_suffix(".raw").exists()
+
+
 def test_hashtag_acquire_preserves_semantics_metadata_and_per_keyword_shortfall(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -127,6 +219,7 @@ def test_hashtag_acquire_preserves_semantics_metadata_and_per_keyword_shortfall(
             "type": "hashtag",
             "videos": [
                 {
+                    "id": "123456789",
                     "url": "https://www.tiktok.com/@creator/video/123456789",
                     "desc": "launch",
                     "createTime": 123,
@@ -177,6 +270,7 @@ def test_hashtag_acquire_preserves_semantics_metadata_and_per_keyword_shortfall(
     assert all(command[command.index("--type") + 1] == "hashtag" for command in commands)
     posts = json.loads((tmp_path / "posts.normalized.json").read_text())["posts"]
     assert posts[0]["search_type"] == "hashtag"
+    assert posts[0]["provider_id"] == "123456789"
     assert posts[0]["duration"] == 42
     assert posts[0]["hashtags"] == ["launch", "製品"]
     assert posts[0]["music_title"] == "Theme"
@@ -198,3 +292,102 @@ def test_hashtag_acquire_preserves_semantics_metadata_and_per_keyword_shortfall(
             "diagnostics": {"captchaDetected": True, "pagesFetched": 0},
         },
     ]
+
+
+def test_provider_video_id_falls_back_to_canonical_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node = tmp_path / "node"
+    scraper = tmp_path / "search.mjs"
+    node.touch()
+    scraper.touch()
+    monkeypatch.setenv("TIKTOK_NODE_BIN", str(node))
+    monkeypatch.setenv("TIKTOK_SCRAPER_PATH", str(scraper))
+    monkeypatch.setattr(
+        "teamagent.media.operations._node_json",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "type": "keyword",
+            "videos": [
+                {
+                    "url": "https://www.tiktok.com/@creator/video/987654321?lang=ja",
+                    "coverUrl": "",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr("teamagent.media.operations.validate_acquire_url", lambda url: url)
+
+    output = _tiktok_acquire(
+        TikTokAcquireOperation(
+            kind="tiktok_acquire",
+            keywords=("coffee",),
+            n_per_kw=1,
+            videos_per_kw=0,
+        ),
+        tmp_path,
+        DeadlineBudget(200, clock=lambda: 100),
+    )
+
+    posts = json.loads((tmp_path / "posts.normalized.json").read_text())["posts"]
+    manifest = json.loads((tmp_path / "manifest.json").read_text())["items"]
+    assert posts[0]["provider_id"] == "987654321"
+    assert manifest[0]["provider_id"] == "987654321"
+    assert output.metadata["counts"]["posts"] == 1
+
+
+def test_compatibility_adapter_exposes_provider_id_not_artifact_pid() -> None:
+    video = _parse_media_post(
+        {
+            "pid": "p01001",
+            "provider_id": "987654321",
+            "url": "https://www.tiktok.com/@creator/video/987654321",
+        }
+    )
+
+    assert video.id == "987654321"
+
+
+def test_malformed_optional_cover_is_warning_not_job_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node = tmp_path / "node"
+    scraper = tmp_path / "search.mjs"
+    node.touch()
+    scraper.touch()
+    monkeypatch.setenv("TIKTOK_NODE_BIN", str(node))
+    monkeypatch.setenv("TIKTOK_SCRAPER_PATH", str(scraper))
+    monkeypatch.setattr(
+        "teamagent.media.operations._node_json",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "type": "keyword",
+            "videos": [
+                {
+                    "id": "123",
+                    "url": "https://www.tiktok.com/@creator/video/123",
+                    "coverUrl": "https://p16.example.invalid/malformed.jpg",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr("teamagent.media.operations.validate_acquire_url", lambda url: url)
+    monkeypatch.setattr(
+        "teamagent.media.operations._fetch_public_image",
+        lambda *_args, **_kwargs: False,
+    )
+
+    output = _tiktok_acquire(
+        TikTokAcquireOperation(
+            kind="tiktok_acquire",
+            keywords=("coffee",),
+            n_per_kw=1,
+            videos_per_kw=0,
+        ),
+        tmp_path,
+        DeadlineBudget(200, clock=lambda: 100),
+    )
+
+    assert output.metadata["warnings"] == ["p01001:MEDIA_TIKTOK_THUMBNAIL_SKIPPED"]
