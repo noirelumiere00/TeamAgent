@@ -164,7 +164,8 @@ def test_hmac_secrets_are_dedicated_version_pinned_and_never_stored_in_state() -
     assert 'attribute_name = "expires_at"' in hmac_tf
     assert "deletion_protection_enabled = true" in hmac_tf
     assert 'resource "terraform_data" "hmac_live_task_gate"' in hmac_tf
-    assert "timestamp()" in hmac_tf
+    assert "timestamp()" not in hmac_tf
+    assert "deployment_intent_id" in hmac_tf
     assert "terraform_hmac_gate.py" in hmac_tf
     assert 'variable "hmac_gate_mode"' in hmac_tf
     assert "HMAC_GATE_MODE" in hmac_tf
@@ -260,7 +261,9 @@ def test_full_saved_plan_owns_candidate_rollback_worker_and_event_mutations() ->
     assert "local.hmac_promoted_task_definition_arns.connect_web" in connect
 
     assert "TEAMAGENT_HMAC_PROMOTION_FROM_TERRAFORM" in promotion
-    assert 'HMAC_GATE_ACTION         = "event-transaction"' in promotion
+    assert '"hmac_morning_digest_target_transaction"' not in promotion
+    assert 'resource "terraform_data" "hmac_morning_digest_pre_update"' in promotion
+    assert 'resource "terraform_data" "hmac_morning_digest_post_update"' in promotion
     assert "Input   = jsonencode({})" in promotion
     assert "RetryPolicy" in promotion
     assert "NetworkConfiguration" in promotion
@@ -271,6 +274,9 @@ def test_full_saved_plan_owns_candidate_rollback_worker_and_event_mutations() ->
     assert 'contains(var.hmac_runtime_promotion_tasks, "morning_digest")' in promotion
 
     assert 'resource "aws_cloudwatch_event_target" "morning_digest_run_task"' in morning
+    assert 'target_id = "morning"' in morning
+    assert "terraform_data.hmac_morning_digest_pre_update" in morning
+    assert "aws_cloudwatch_event_target.morning_digest_run_task" in promotion
     assert "terraform_data.runtime_guard" in morning
     assert "prevent_destroy = true" in morning
     assert "morning_digest_rule_enabled" in morning

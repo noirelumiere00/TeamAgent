@@ -134,6 +134,19 @@ PIPELINES: dict[str, dict[str, Any]] = {
     },
 }
 RELEASE_GATE_ADDRESS = "terraform_data.production_image_release_gate"
+HMAC_RUNTIME_GATE_ADDRESSES = frozenset(
+    {
+        'terraform_data.hmac_live_task_gate["mcp"]',
+        'terraform_data.hmac_live_task_gate["connect_web"]',
+        'terraform_data.hmac_live_task_gate["morning_digest"]',
+        "terraform_data.hmac_mcp_pre_update[0]",
+        "terraform_data.hmac_mcp_post_update[0]",
+        "terraform_data.hmac_connect_web_pre_update[0]",
+        "terraform_data.hmac_connect_web_post_update[0]",
+        "terraform_data.hmac_morning_digest_pre_update[0]",
+        "terraform_data.hmac_morning_digest_post_update[0]",
+    }
+)
 IMAGE_MANAGED_ECS_PIPELINES = {
     "aws_ecs_task_definition.mcp": "mcp",
     "aws_ecs_task_definition.canary": "mcp",
@@ -2108,6 +2121,11 @@ def _is_digest_preserving_task_replacement(
     )
 
 
+def _is_exact_hmac_gate_replacement(transition: Mapping[str, Any]) -> bool:
+    address = transition.get("address")
+    return isinstance(address, str) and address in HMAC_RUNTIME_GATE_ADDRESSES
+
+
 def _require_destructive_rollback_channels(
     *,
     deletes: Sequence[Mapping[str, Any]],
@@ -2123,6 +2141,7 @@ def _require_destructive_rollback_channels(
             transition,
             requested_images=requested_images,
         )
+        and not _is_exact_hmac_gate_replacement(transition)
     )
     for transition in destructive:
         address = _string(

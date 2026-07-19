@@ -50,6 +50,19 @@ MAIL_HMAC_SECRET = (
 REPORT_HMAC_SECRET = (
     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:teamagent/dev/hmac/report-link-XyZ789"
 )
+HMAC_MANIFEST_SHA256 = "3" * 64
+HMAC_CONTROL_SHA256 = "4" * 64
+HMAC_RELEASE = {
+    "rotation_epoch": "hmac-2026-07",
+    "gate_mode": "candidate",
+    "cleanup_domain": "",
+    "manifest_sha256": HMAC_MANIFEST_SHA256,
+    "rollout_control_sha256": HMAC_CONTROL_SHA256,
+    "worker_enabled": False,
+    "worker_mode": "candidate",
+    "worker_artifacts": {},
+    "worker_provenance_key_arn": "",
+}
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -113,6 +126,32 @@ TASK_ADDRESSES = {
     "tiktok": "aws_ecs_task_definition.tiktok_acquire[0]",
     "x_buzz": "aws_ecs_task_definition.x_buzz_worker[0]",
 }
+HMAC_TASK_ADDRESSES = {
+    workload: TASK_ADDRESSES[workload] for workload in ("mcp", "connect_web", "morning")
+}
+HMAC_WORKLOADS = {
+    "mcp": "mcp",
+    "connect_web": "connect_web",
+    "morning": "morning_digest",
+}
+HMAC_LIVE_GATE_ADDRESSES = {
+    workload: f'terraform_data.hmac_live_task_gate["{name}"]'
+    for workload, name in HMAC_WORKLOADS.items()
+}
+HMAC_SERVICE_GATE_ADDRESSES = {
+    "mcp": (
+        "terraform_data.hmac_mcp_pre_update[0]",
+        "terraform_data.hmac_mcp_post_update[0]",
+    ),
+    "connect_web": (
+        "terraform_data.hmac_connect_web_pre_update[0]",
+        "terraform_data.hmac_connect_web_post_update[0]",
+    ),
+}
+HMAC_MORNING_GATE_ADDRESSES = (
+    "terraform_data.hmac_morning_digest_pre_update[0]",
+    "terraform_data.hmac_morning_digest_post_update[0]",
+)
 DISPATCHERS = {
     "tiktok": {
         "component": "tiktok",
@@ -459,10 +498,10 @@ def _service_tf(component: str) -> dict[str, Any]:
 def _target_tf(component: str) -> dict[str, Any]:
     _, rule_name, _, _ = RULES[component]
     return {
-        "target_id": f"target-{component}",
+        "target_id": "morning" if component == "morning" else f"target-{component}",
         "arn": f"arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/teamagent-dev",
         "role_arn": f"arn:aws:iam::{ACCOUNT}:role/events-{component}",
-        "input": "",
+        "input": "{}" if component == "morning" else "",
         "input_path": "",
         "input_transformer": [],
         "retry_policy": [{"maximum_event_age_in_seconds": 3600, "maximum_retry_attempts": 1}],
@@ -492,6 +531,49 @@ def _target_tf(component: str) -> dict[str, Any]:
                 ],
             }
         ],
+    }
+
+
+def _hmac_common_gate_input(action: str, workload: str) -> dict[str, Any]:
+    return {
+        "action": action,
+        "workload": workload,
+        "mode": HMAC_RELEASE["gate_mode"],
+        "rotation_epoch": HMAC_RELEASE["rotation_epoch"],
+        "cleanup_domain": HMAC_RELEASE["cleanup_domain"],
+        "manifest_sha256": HMAC_MANIFEST_SHA256,
+        "rollout_control_sha256": HMAC_CONTROL_SHA256,
+    }
+
+
+def _hmac_target_from_tf(value: dict[str, Any]) -> dict[str, Any]:
+    ecs = value["ecs_target"][0]
+    network = ecs["network_configuration"][0]
+    retry = value["retry_policy"][0]
+    return {
+        "Id": value["target_id"],
+        "Arn": value["arn"],
+        "RoleArn": value["role_arn"],
+        "Input": value["input"],
+        "EcsParameters": {
+            "TaskDefinitionArn": ecs["task_definition_arn"],
+            "TaskCount": ecs["task_count"],
+            "LaunchType": ecs["launch_type"],
+            "PlatformVersion": ecs["platform_version"],
+            "NetworkConfiguration": {
+                "awsvpcConfiguration": {
+                    "Subnets": sorted(network["subnets"]),
+                    "SecurityGroups": sorted(network["security_groups"]),
+                    "AssignPublicIp": (
+                        "ENABLED" if network["assign_public_ip"] is True else "DISABLED"
+                    ),
+                }
+            },
+        },
+        "RetryPolicy": {
+            "MaximumEventAgeInSeconds": retry["maximum_event_age_in_seconds"],
+            "MaximumRetryAttempts": retry["maximum_retry_attempts"],
+        },
     }
 
 
@@ -592,9 +674,12 @@ def _safe_plan() -> dict[str, Any]:
         )
         before = _target_tf(component)
         after = copy.deepcopy(before)
-        after["ecs_target"][0]["task_definition_arn"] = None
-        change = _change(address, "aws_cloudwatch_event_target", ["update"], before, after)
-        change["change"]["after_unknown"] = {"ecs_target": [{"task_definition_arn": True}]}
+        actions = ["no-op"] if component == "morning" else ["update"]
+        if component != "morning":
+            after["ecs_target"][0]["task_definition_arn"] = None
+        change = _change(address, "aws_cloudwatch_event_target", actions, before, after)
+        if component != "morning":
+            change["change"]["after_unknown"] = {"ecs_target": [{"task_definition_arn": True}]}
         changes.append(change)
         config_address = address.removesuffix("[0]")
         task_address = TASK_ADDRESSES[component]
@@ -734,6 +819,103 @@ def _safe_plan() -> dict[str, Any]:
 
 def _find(plan: dict[str, Any], address: str) -> dict[str, Any]:
     return next(item for item in plan["resource_changes"] if item["address"] == address)
+
+
+def _activate_hmac_plan(plan: dict[str, Any]) -> None:
+    plan["variables"]["hmac_runtime_promotion_tasks"] = {
+        "value": ["connect_web", "mcp", "morning_digest"]
+    }
+    production_gate = _find(plan, "terraform_data.production_image_release_gate")
+    production_gate["change"]["after"]["input"]["hmac_release_bindings"] = copy.deepcopy(
+        HMAC_RELEASE
+    )
+
+    morning_target = _find(
+        plan,
+        "aws_cloudwatch_event_target.morning_digest_run_task[0]",
+    )
+    morning_target["change"]["actions"] = ["update"]
+    morning_target["change"]["after"]["ecs_target"][0]["task_definition_arn"] = None
+    morning_target["change"]["after_unknown"] = {"ecs_target": [{"task_definition_arn": True}]}
+
+    gate_changes: list[dict[str, Any]] = []
+    for component, workload in HMAC_WORKLOADS.items():
+        live_input = {
+            **_hmac_common_gate_input("pre-register", workload),
+            "task_address": HMAC_TASK_ADDRESSES[component],
+        }
+        gate_changes.append(
+            _change(
+                HMAC_LIVE_GATE_ADDRESSES[component],
+                "terraform_data",
+                ["create", "delete"],
+                None,
+                {"input": live_input},
+            )
+        )
+
+    for component, addresses in HMAC_SERVICE_GATE_ADDRESSES.items():
+        for action, address in zip(
+            ("pre-update", "post-update"),
+            addresses,
+            strict=True,
+        ):
+            gate_changes.append(
+                _change(
+                    address,
+                    "terraform_data",
+                    ["create", "delete"],
+                    None,
+                    {
+                        "input": {
+                            **_hmac_common_gate_input(action, component),
+                            "task_definition_arn": None,
+                        }
+                    },
+                )
+            )
+
+    morning_after = morning_target["change"]["after"]
+    _, rule_name, _, schedule = RULES["morning"]
+    expected_rule = {
+        "Name": rule_name,
+        "Arn": f"arn:aws:events:{REGION}:{ACCOUNT}:rule/{rule_name}",
+        "State": "DISABLED",
+        "ScheduleExpression": schedule,
+        "Description": "morning schedule",
+        "EventBusName": "default",
+    }
+    target = _hmac_target_from_tf(morning_after)
+    for action, address in zip(
+        ("pre-update", "post-update"),
+        HMAC_MORNING_GATE_ADDRESSES,
+        strict=True,
+    ):
+        gate_changes.append(
+            _change(
+                address,
+                "terraform_data",
+                ["create", "delete"],
+                None,
+                {
+                    "input": {
+                        **_hmac_common_gate_input(action, "morning_digest"),
+                        "expected_rule": expected_rule,
+                        "target": target,
+                        "task_definition_arn": None,
+                    }
+                },
+            )
+        )
+
+    plan["resource_changes"].extend(gate_changes)
+    configurations = plan["configuration"]["root_module"]["resources"]
+    configured_addresses = {item["address"] for item in configurations}
+    for change in gate_changes:
+        address = change["address"].split("[", 1)[0]
+        if address not in configured_addresses:
+            configurations.append({"address": address, "expressions": {}})
+            configured_addresses.add(address)
 
 
 def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
@@ -1618,9 +1800,10 @@ def _fake_aws(path: Path) -> None:
             name = args[args.index("--rule") + 1]
             component = next(key for key, value in rules.items() if value[1] == name)
             print(json.dumps({{"Targets": [{{
-                "Id": f"target-{{component}}",
+                "Id": "morning" if component == "morning" else f"target-{{component}}",
                 "Arn": f"arn:aws:ecs:{{REGION}}:{{ACCOUNT}}:cluster/teamagent-dev",
                 "RoleArn": f"arn:aws:iam::{{ACCOUNT}}:role/events-{{component}}",
+                **({{"Input": "{{}}"}} if component == "morning" else {{}}),
                 "EcsParameters": {{
                     "TaskDefinitionArn": task_arn(component),
                     "TaskCount": 1,
@@ -1838,6 +2021,7 @@ def _fake_terraform(path: Path) -> None:
             image_deployment_intent_id = intent_arg.split("=", 2)[2]
             desired = core["desired_mcp_image"]
             plan = json.loads(pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text())
+            hmac_active = os.environ.get("TF_FAKE_HMAC_ACTIVE") == "1"
             plan["variables"] = {
                 "openclaw_image": {"value": core["desired_openclaw_image"]},
                 "mcp_image": {"value": desired},
@@ -1868,6 +2052,13 @@ def _fake_terraform(path: Path) -> None:
                 },
                 "report_link_hmac_previous_secret_arn": {"value": ""},
                 "report_link_hmac_previous_rotation_started_at": {"value": None},
+                "hmac_runtime_promotion_tasks": {
+                    "value": (
+                        ["connect_web", "mcp", "morning_digest"]
+                        if hmac_active
+                        else []
+                    )
+                },
                 "runtime_guard_live": {"value": core},
             }
             for change in plan["resource_changes"]:
@@ -1905,7 +2096,21 @@ def _fake_terraform(path: Path) -> None:
                     "openclaw": "active",
                     "x_buzz": "active",
                 },
-                "hmac_release_bindings": {},
+                "hmac_release_bindings": (
+                    {
+                        "rotation_epoch": "hmac-2026-07",
+                        "gate_mode": "candidate",
+                        "cleanup_domain": "",
+                        "manifest_sha256": "3" * 64,
+                        "rollout_control_sha256": "4" * 64,
+                        "worker_enabled": False,
+                        "worker_mode": "candidate",
+                        "worker_artifacts": {},
+                        "worker_provenance_key_arn": "",
+                    }
+                    if hmac_active
+                    else {}
+                ),
                 "receipt_authorization_expires_at": "2000000000",
             }
             gate_input["deployment_gate_query"] = {
@@ -1980,7 +2185,12 @@ def _fake_terraform(path: Path) -> None:
     )
 
 
-def _harness(tmp_path: Path, scenario: str = "safe") -> tuple[dict[str, str], Path, Path]:
+def _harness(
+    tmp_path: Path,
+    scenario: str = "safe",
+    *,
+    hmac_active: bool = False,
+) -> tuple[dict[str, str], Path, Path]:
     tmp_path.chmod(0o700)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(mode=0o700)
@@ -1988,6 +2198,8 @@ def _harness(tmp_path: Path, scenario: str = "safe") -> tuple[dict[str, str], Pa
     _fake_terraform(fake_bin / "terraform")
 
     plan_data = _safe_plan()
+    if hmac_active:
+        _activate_hmac_plan(plan_data)
     _mutate_plan(plan_data, scenario)
     template = tmp_path / "template.json"
     template.write_text(json.dumps(plan_data), encoding="utf-8")
@@ -2010,6 +2222,8 @@ def _harness(tmp_path: Path, scenario: str = "safe") -> tuple[dict[str, str], Pa
             "AWS_FAKE_TRUSTED_AUTOMATION": "1",
         }
     )
+    if hmac_active:
+        env["TF_FAKE_HMAC_ACTIVE"] = "1"
     return env, var_file, tf_log
 
 
@@ -2354,6 +2568,60 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         command == "apply" or command.startswith("apply ")
         for command in tf_log.read_text(encoding="utf-8").splitlines()
     )
+
+
+def test_exact_hmac_runtime_gate_set_is_accepted_by_sync_guard(tmp_path: Path) -> None:
+    env, var_file, tf_log = _harness(tmp_path, hmac_active=True)
+    plan = tmp_path / "hmac-runtime.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert plan.is_file()
+    assert Path(f"{plan}.runtime-guard.json").is_file()
+    assert not any(
+        command == "apply" or command.startswith("apply ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_runtime_migration_exactly_allowlists_hmac_gate_addresses() -> None:
+    migrations = json.loads(
+        (PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_migrations.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    allowed = set(migrations["migrations"]["2026-07-wolfi-runtime-v1"]["allowed_changes"])
+    expected = {
+        *HMAC_LIVE_GATE_ADDRESSES.values(),
+        *(address for addresses in HMAC_SERVICE_GATE_ADDRESSES.values() for address in addresses),
+        *HMAC_MORNING_GATE_ADDRESSES,
+    }
+
+    assert expected <= allowed
+    assert not any(
+        address.startswith("terraform_data.hmac_")
+        and address not in expected
+        and "worker" not in address
+        for address in allowed
+    )
+
+
+def test_hmac_runtime_sync_rejects_missing_morning_post_gate(tmp_path: Path) -> None:
+    env, var_file, _ = _harness(tmp_path, hmac_active=True)
+    template_path = Path(env["TF_FAKE_TEMPLATE"])
+    template = json.loads(template_path.read_text(encoding="utf-8"))
+    post = _find(template, HMAC_MORNING_GATE_ADDRESSES[1])
+    template["resource_changes"].remove(post)
+    template_path.write_text(json.dumps(template), encoding="utf-8")
+    plan = tmp_path / "hmac-bypass.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 1
+    assert "promotion gate" in result.stdout + result.stderr
+    assert not plan.exists()
+    assert not Path(f"{plan}.runtime-guard.json").exists()
 
 
 def test_versioning_stage_is_fail_closed_while_review_manifest_is_disabled(

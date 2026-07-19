@@ -68,6 +68,14 @@ def _target(target_id: str, revision: int) -> dict[str, object]:
             ),
             "TaskCount": 1,
             "LaunchType": "FARGATE",
+            "PlatformVersion": "LATEST",
+            "NetworkConfiguration": {
+                "awsvpcConfiguration": {
+                    "Subnets": ["subnet-b", "subnet-a"],
+                    "SecurityGroups": ["sg-morning"],
+                    "AssignPublicIp": "ENABLED",
+                }
+            },
         },
         "RetryPolicy": {
             "MaximumEventAgeInSeconds": 3600,
@@ -191,7 +199,11 @@ def _saga(
     *,
     attempt: str = ATTEMPT,
     plan_sha256: str = PLAN_SHA256,
+    target_mutates: bool = False,
+    gate_mode: str | None = None,
 ) -> Any:
+    if target_mutates and gate_mode is None:
+        gate_mode = "candidate"
     parsed = SimpleNamespace(
         region="ap-northeast-1",
         scope="teamagent/dev",
@@ -200,6 +212,9 @@ def _saga(
         morning_digest=SimpleNamespace(
             expected_rule=SAGA._canonical_event_rule(_rule()),
             rule="teamagent-dev-morning-digest",
+            target_id="morning",
+            cluster="arn:aws:ecs:ap-northeast-1:123456789012:cluster/teamagent-dev",
+            rollback_target_digest="f" * 64,
         ),
     )
     monkeypatch.setattr(SAGA, "load_control", lambda _value: parsed)
@@ -208,6 +223,8 @@ def _saga(
         plan_sha256=plan_sha256,
         apply_attempt_id=attempt,
         clients=clients,
+        gate_mode=gate_mode,
+        target_mutates=target_mutates,
     )
 
 
@@ -299,3 +316,61 @@ def test_partial_restore_remains_reconcilable_until_exact_verification(
         key=lambda item: str(item["Id"]),
     )
     assert clients.ddb.item["stage"] == {"S": "restored"}
+
+
+def test_applied_saga_rejects_target_drift_when_plan_did_not_mutate_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients = _Clients()
+    saga = _saga(monkeypatch, clients)
+    saga.begin()
+    clients.events.targets[1] = _target("audit", 99)
+
+    with pytest.raises(SAGA.SagaError, match="outside the reviewed plan"):
+        saga.finish(outcome="applied")
+
+    assert clients.ddb.item is not None
+    assert clients.ddb.item["stage"] == {"S": "applying"}
+
+
+def test_applied_saga_accepts_only_exact_promoted_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients = _Clients()
+    clients.events.targets = [_target("morning", 44)]
+    saga = _saga(monkeypatch, clients, target_mutates=True)
+    saga.begin()
+    promoted = _target("morning", 45)
+    clients.ddb.items["LEDGER#hmac-2026-07"] = {
+        "candidate_morning_digest_target_digest": {"S": SAGA._canonical_target_digest(promoted)}
+    }
+    clients.events.targets = [promoted]
+
+    saga.finish(outcome="applied")
+
+    assert clients.ddb.item is not None
+    assert clients.ddb.item["stage"] == {"S": "complete"}
+
+
+@pytest.mark.parametrize("scenario", ["extra-target", "wrong-target"])
+def test_applied_saga_rejects_nonexact_promoted_target_set(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+) -> None:
+    clients = _Clients()
+    clients.events.targets = [_target("morning", 44)]
+    saga = _saga(monkeypatch, clients, target_mutates=True)
+    saga.begin()
+    promoted = _target("morning", 45)
+    clients.ddb.items["LEDGER#hmac-2026-07"] = {
+        "candidate_morning_digest_target_digest": {"S": SAGA._canonical_target_digest(promoted)}
+    }
+    clients.events.targets = (
+        [promoted, _target("audit", 45)] if scenario == "extra-target" else [_target("morning", 46)]
+    )
+
+    with pytest.raises(SAGA.SagaError, match="final target"):
+        saga.finish(outcome="applied")
+
+    assert clients.ddb.item is not None
+    assert clients.ddb.item["stage"] == {"S": "applying"}

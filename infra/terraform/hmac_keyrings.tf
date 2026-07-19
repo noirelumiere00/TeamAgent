@@ -1075,21 +1075,38 @@ resource "terraform_data" "hmac_live_task_gate" {
   for_each = local.hmac_live_gate_task_addresses
 
   input = {
+    action                 = "pre-register"
+    workload               = each.key
     task_address           = each.value
+    mode                   = var.hmac_gate_mode
     rotation_epoch         = var.hmac_rotation_epoch
     cleanup_domain         = var.hmac_cleanup_domain
     manifest_sha256        = var.hmac_live_manifest_path != "" ? filesha256(var.hmac_live_manifest_path) : ""
     rollout_control_sha256 = var.hmac_rollout_control_path != "" ? filesha256(var.hmac_rollout_control_path) : ""
   }
 
-  triggers_replace = [
-    local.hmac_live_gate_enabled[each.key] ? timestamp() : "disabled",
-    each.value,
-    var.hmac_rotation_epoch,
-    var.hmac_cleanup_domain,
-    var.hmac_live_manifest_path != "" ? filesha256(var.hmac_live_manifest_path) : "",
-    var.hmac_rollout_control_path != "" ? filesha256(var.hmac_rollout_control_path) : "",
-  ]
+  # A selected workload gets one deterministic replacement per reviewed release
+  # intent. Unselected gates remain stable instead of churning on wall-clock time.
+  triggers_replace = (
+    local.hmac_live_gate_enabled[each.key]
+    && contains(var.hmac_runtime_promotion_tasks, each.key)
+    ? [sha256(jsonencode({
+      action                 = "pre-register"
+      workload               = each.key
+      task_address           = each.value
+      mode                   = var.hmac_gate_mode
+      rotation_epoch         = var.hmac_rotation_epoch
+      cleanup_domain         = var.hmac_cleanup_domain
+      manifest_sha256        = filesha256(var.hmac_live_manifest_path)
+      rollout_control_sha256 = filesha256(var.hmac_rollout_control_path)
+      deployment_intent_id   = var.image_deployment_intent_id
+    }))]
+    : ["inactive"]
+  )
+
+  lifecycle {
+    create_before_destroy = true
+  }
 
   depends_on = [terraform_data.production_image_release_gate]
 
@@ -1098,7 +1115,7 @@ resource "terraform_data" "hmac_live_task_gate" {
     interpreter = ["/usr/bin/env", "bash", "-c"]
     working_dir = path.root
     environment = {
-      HMAC_GATE_ENABLED       = local.hmac_live_gate_enabled[each.key] ? "true" : "false"
+      HMAC_GATE_ENABLED       = local.hmac_live_gate_enabled[each.key] && contains(var.hmac_runtime_promotion_tasks, each.key) ? "true" : "false"
       HMAC_GATE_PYTHON        = var.hmac_gate_python
       HMAC_GATE_SCRIPT        = abspath("${path.module}/../../scripts/terraform_hmac_gate.py")
       HMAC_GATE_TASK          = each.key

@@ -1203,6 +1203,40 @@ def test_saved_plan_classifies_replacements_and_allows_only_digest_preserving_ro
     )
 
 
+def test_saved_plan_allows_only_exact_hmac_gate_replacements(
+    tmp_path: Path,
+) -> None:
+    plan = tmp_path / "release.tfplan"
+    plan.write_bytes(b"opaque saved terraform plan")
+    hmac_plan = _plan_json()
+    hmac_plan["resource_changes"].extend(
+        {
+            "address": address,
+            "mode": "managed",
+            "change": {
+                "actions": ["create", "delete"],
+                "after": {"input": {"workload": "exactly-validated-by-runtime-guard"}},
+            },
+        }
+        for address in sorted(EVIDENCE.HMAC_RUNTIME_GATE_ADDRESSES)
+    )
+
+    metadata = EVIDENCE.deployment_plan_metadata(plan, plan_json=hmac_plan)
+
+    assert metadata["plan_transition_sha256"] != EMPTY_TRANSITION_SHA256
+
+    near_match = _plan_json()
+    near_match["resource_changes"].append(
+        {
+            "address": 'terraform_data.hmac_live_task_gate["mcp"]-unreviewed',
+            "mode": "managed",
+            "change": {"actions": ["create", "delete"], "after": {}},
+        }
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="unscoped destructive"):
+        EVIDENCE.deployment_plan_metadata(plan, plan_json=near_match)
+
+
 def test_saved_plan_binds_generic_media_task_replacement_to_mcp_media_receipt(
     tmp_path: Path,
 ) -> None:

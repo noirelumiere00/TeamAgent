@@ -402,21 +402,30 @@ resource "aws_cloudwatch_event_rule" "morning_digest_weekday" {
 }
 
 resource "aws_cloudwatch_event_target" "morning_digest_run_task" {
-  count    = var.enable_morning_digest && var.mcp_image != "" ? 1 : 0
-  rule     = aws_cloudwatch_event_rule.morning_digest_weekday[0].name
-  arn      = aws_ecs_cluster.main.arn
-  role_arn = aws_iam_role.events_morning_digest_invoke[0].arn
+  count     = var.enable_morning_digest && var.mcp_image != "" ? 1 : 0
+  rule      = aws_cloudwatch_event_rule.morning_digest_weekday[0].name
+  target_id = "morning"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.events_morning_digest_invoke[0].arn
+  input     = jsonencode({})
 
-  depends_on = [terraform_data.runtime_guard]
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.hmac_morning_digest_pre_update,
+  ]
 
   ecs_target {
-    task_definition_arn = aws_ecs_task_definition.morning_digest[0].arn
-    task_count          = 1
-    launch_type         = "FARGATE"
-    platform_version    = "LATEST"
+    task_definition_arn = (
+      var.hmac_gate_mode == "rollback"
+      ? local.hmac_rollback_task_definition_arns.morning_digest
+      : aws_ecs_task_definition.morning_digest[0].arn
+    )
+    task_count       = 1
+    launch_type      = "FARGATE"
+    platform_version = "LATEST"
 
     network_configuration {
-      subnets          = data.aws_subnets.default.ids
+      subnets          = sort(data.aws_subnets.default.ids)
       security_groups  = [aws_security_group.morning_digest[0].id]
       assign_public_ip = true
     }

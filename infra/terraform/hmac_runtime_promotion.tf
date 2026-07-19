@@ -35,7 +35,7 @@ locals {
       PlatformVersion   = "LATEST"
       NetworkConfiguration = {
         awsvpcConfiguration = {
-          Subnets        = data.aws_subnets.default.ids
+          Subnets        = sort(data.aws_subnets.default.ids)
           SecurityGroups = try([aws_security_group.morning_digest[0].id], [])
           AssignPublicIp = "ENABLED"
         }
@@ -50,6 +50,17 @@ locals {
 
 resource "terraform_data" "hmac_connect_web_pre_update" {
   count = local.hmac_live_gate_enabled.connect_web && var.enable_connect_web && var.mcp_image != "" && contains(var.hmac_runtime_promotion_tasks, "connect_web") ? 1 : 0
+
+  input = {
+    action                 = "pre-update"
+    workload               = "connect_web"
+    mode                   = var.hmac_gate_mode
+    rotation_epoch         = var.hmac_rotation_epoch
+    cleanup_domain         = var.hmac_cleanup_domain
+    task_definition_arn    = local.hmac_promoted_task_definition_arns.connect_web
+    manifest_sha256        = filesha256(var.hmac_live_manifest_path)
+    rollout_control_sha256 = filesha256(var.hmac_rollout_control_path)
+  }
 
   triggers_replace = [
     aws_ecs_task_definition.connect_web[0].arn,
@@ -73,10 +84,25 @@ resource "terraform_data" "hmac_connect_web_pre_update" {
     terraform_data.production_image_release_gate,
     aws_ecs_task_definition.connect_web,
   ]
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "terraform_data" "hmac_connect_web_post_update" {
   count = local.hmac_live_gate_enabled.connect_web && var.enable_connect_web && var.mcp_image != "" && contains(var.hmac_runtime_promotion_tasks, "connect_web") ? 1 : 0
+
+  input = {
+    action                 = "post-update"
+    workload               = "connect_web"
+    mode                   = var.hmac_gate_mode
+    rotation_epoch         = var.hmac_rotation_epoch
+    cleanup_domain         = var.hmac_cleanup_domain
+    task_definition_arn    = local.hmac_promoted_task_definition_arns.connect_web
+    manifest_sha256        = filesha256(var.hmac_live_manifest_path)
+    rollout_control_sha256 = filesha256(var.hmac_rollout_control_path)
+  }
 
   triggers_replace = [terraform_data.hmac_connect_web_pre_update[0].id]
 
@@ -92,10 +118,25 @@ resource "terraform_data" "hmac_connect_web_post_update" {
   }
 
   depends_on = [aws_ecs_service.connect_web]
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "terraform_data" "hmac_mcp_pre_update" {
   count = local.hmac_live_gate_enabled.mcp && var.mcp_image != "" && contains(var.hmac_runtime_promotion_tasks, "mcp") ? 1 : 0
+
+  input = {
+    action                 = "pre-update"
+    workload               = "mcp"
+    mode                   = var.hmac_gate_mode
+    rotation_epoch         = var.hmac_rotation_epoch
+    cleanup_domain         = var.hmac_cleanup_domain
+    task_definition_arn    = local.hmac_promoted_task_definition_arns.mcp
+    manifest_sha256        = filesha256(var.hmac_live_manifest_path)
+    rollout_control_sha256 = filesha256(var.hmac_rollout_control_path)
+  }
 
   triggers_replace = [
     aws_ecs_task_definition.mcp.arn,
@@ -119,10 +160,25 @@ resource "terraform_data" "hmac_mcp_pre_update" {
     terraform_data.production_image_release_gate,
     aws_ecs_task_definition.mcp,
   ]
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "terraform_data" "hmac_mcp_post_update" {
   count = local.hmac_live_gate_enabled.mcp && var.mcp_image != "" && contains(var.hmac_runtime_promotion_tasks, "mcp") ? 1 : 0
+
+  input = {
+    action                 = "post-update"
+    workload               = "mcp"
+    mode                   = var.hmac_gate_mode
+    rotation_epoch         = var.hmac_rotation_epoch
+    cleanup_domain         = var.hmac_cleanup_domain
+    task_definition_arn    = local.hmac_promoted_task_definition_arns.mcp
+    manifest_sha256        = filesha256(var.hmac_live_manifest_path)
+    rollout_control_sha256 = filesha256(var.hmac_rollout_control_path)
+  }
 
   triggers_replace = [terraform_data.hmac_mcp_pre_update[0].id]
 
@@ -138,13 +194,21 @@ resource "terraform_data" "hmac_mcp_post_update" {
   }
 
   depends_on = [aws_ecs_service.mcp]
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
-resource "terraform_data" "hmac_morning_digest_target_transaction" {
+resource "terraform_data" "hmac_morning_digest_pre_update" {
   count = local.hmac_live_gate_enabled.morning_digest && var.enable_morning_digest && var.mcp_image != "" && contains(var.hmac_runtime_promotion_tasks, "morning_digest") ? 1 : 0
 
   input = {
+    action                 = "pre-update"
+    workload               = "morning_digest"
     mode                   = var.hmac_gate_mode
+    rotation_epoch         = var.hmac_rotation_epoch
+    cleanup_domain         = var.hmac_cleanup_domain
     expected_rule          = local.hmac_rollout_control.morning_digest.expected_rule
     target                 = local.hmac_morning_digest_target
     task_definition_arn    = local.hmac_promoted_task_definition_arns.morning_digest
@@ -153,7 +217,6 @@ resource "terraform_data" "hmac_morning_digest_target_transaction" {
   }
 
   triggers_replace = [
-    timestamp(),
     local.hmac_promoted_task_definition_arns.morning_digest,
     sha256(jsonencode(local.hmac_morning_digest_target)),
     var.hmac_gate_mode,
@@ -166,7 +229,7 @@ resource "terraform_data" "hmac_morning_digest_target_transaction" {
     interpreter = ["/usr/bin/env", "bash", "-c"]
     working_dir = path.root
     environment = merge(local.hmac_promotion_gate_environment, {
-      HMAC_GATE_ACTION         = "event-transaction"
+      HMAC_GATE_ACTION         = "pre-update"
       HMAC_GATE_TASK           = "morning_digest"
       HMAC_REGISTERED_TASK_ARN = local.hmac_promoted_task_definition_arns.morning_digest
       HMAC_EVENT_TARGET_JSON   = jsonencode(local.hmac_morning_digest_target)
@@ -178,4 +241,45 @@ resource "terraform_data" "hmac_morning_digest_target_transaction" {
     aws_ecs_task_definition.morning_digest,
     aws_cloudwatch_event_rule.morning_digest_weekday,
   ]
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "terraform_data" "hmac_morning_digest_post_update" {
+  count = local.hmac_live_gate_enabled.morning_digest && var.enable_morning_digest && var.mcp_image != "" && contains(var.hmac_runtime_promotion_tasks, "morning_digest") ? 1 : 0
+
+  input = {
+    action                 = "post-update"
+    workload               = "morning_digest"
+    mode                   = var.hmac_gate_mode
+    rotation_epoch         = var.hmac_rotation_epoch
+    cleanup_domain         = var.hmac_cleanup_domain
+    expected_rule          = local.hmac_rollout_control.morning_digest.expected_rule
+    target                 = local.hmac_morning_digest_target
+    task_definition_arn    = local.hmac_promoted_task_definition_arns.morning_digest
+    manifest_sha256        = filesha256(var.hmac_live_manifest_path)
+    rollout_control_sha256 = filesha256(var.hmac_rollout_control_path)
+  }
+
+  triggers_replace = [terraform_data.hmac_morning_digest_pre_update[0].id]
+
+  provisioner "local-exec" {
+    command     = "\"$HMAC_GATE_PYTHON\" \"$HMAC_GATE_SCRIPT\""
+    interpreter = ["/usr/bin/env", "bash", "-c"]
+    working_dir = path.root
+    environment = merge(local.hmac_promotion_gate_environment, {
+      HMAC_GATE_ACTION         = "post-update"
+      HMAC_GATE_TASK           = "morning_digest"
+      HMAC_REGISTERED_TASK_ARN = local.hmac_promoted_task_definition_arns.morning_digest
+      HMAC_EVENT_TARGET_JSON   = jsonencode(local.hmac_morning_digest_target)
+    })
+  }
+
+  depends_on = [aws_cloudwatch_event_target.morning_digest_run_task]
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }

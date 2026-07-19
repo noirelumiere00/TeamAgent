@@ -29,7 +29,10 @@ TASK_ADDRESSES = {
 }
 WORKER_DEPLOY_ADDRESS = "terraform_data.hmac_worker_deploy[0]"
 PRODUCTION_GATE_ADDRESS = "terraform_data.production_image_release_gate"
-MORNING_PROMOTION_ADDRESS = "terraform_data.hmac_morning_digest_target_transaction[0]"
+MORNING_TARGET_ADDRESS = "aws_cloudwatch_event_target.morning_digest_run_task[0]"
+LIVE_TASK_GATE_ADDRESSES = {
+    task: f'terraform_data.hmac_live_task_gate["{task}"]' for task in TASK_ADDRESSES
+}
 SERVICE_ADDRESSES = {
     "mcp": "aws_ecs_service.mcp[0]",
     "connect_web": "aws_ecs_service.connect_web[0]",
@@ -44,6 +47,12 @@ SERVICE_PROMOTION_ADDRESSES = {
         "terraform_data.hmac_connect_web_post_update[0]",
     ),
 }
+MORNING_PROMOTION_ADDRESSES = (
+    "terraform_data.hmac_morning_digest_pre_update[0]",
+    "terraform_data.hmac_morning_digest_post_update[0]",
+)
+# Kept as the pre-gate alias for callers that only need the planned target payload.
+MORNING_PROMOTION_ADDRESS = MORNING_PROMOTION_ADDRESSES[0]
 WORKER_ARTIFACT_BINDING_KEYS = frozenset(
     {
         "atomic_switch",
@@ -118,6 +127,7 @@ _REGISTER_ACTIONS = frozenset(
         ("create", "delete"),
     }
 )
+_GATE_MUTATION_ACTIONS = frozenset({("create",), ("create", "delete")})
 
 
 def saved_plan_sha256(path: Path) -> str:
@@ -411,9 +421,170 @@ def _resource_change(
     return after
 
 
-def hmac_release_bindings_from_plan(plan: dict[str, object]) -> dict[str, object]:
-    """Extract the HMAC snapshot/control binding from the one-use production gate."""
+def _matching_change(
+    changes: list[object],
+    *,
+    address: str,
+    scope: str,
+    required: bool = True,
+) -> dict[str, Any] | None:
+    matching = [
+        change for change in changes if type(change) is dict and change.get("address") == address
+    ]
+    if not matching and not required:
+        return None
+    if len(matching) != 1:
+        raise RolloutGateError("terraform_plan_runtime_invalid", scope=scope)
+    raw = matching[0].get("change")
+    actions = raw.get("actions") if type(raw) is dict else None
+    if (
+        type(raw) is not dict
+        or type(actions) is not list
+        or not actions
+        or any(type(action) is not str for action in actions)
+    ):
+        raise RolloutGateError("terraform_plan_runtime_invalid", scope=scope)
+    return raw
 
+
+def _change_actions(change: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(str(action) for action in change["actions"])
+
+
+def _mutates(change: dict[str, Any] | None) -> bool:
+    return change is not None and _change_actions(change) != ("no-op",)
+
+
+def _link_mutates(
+    change: dict[str, Any] | None,
+    *,
+    path: tuple[object, ...],
+    scope: str,
+) -> bool:
+    if change is None or _change_actions(change) == ("no-op",):
+        return False
+    before = change.get("before")
+    after = change.get("after")
+    unknown: object = change.get("after_unknown")
+
+    def descend(value: object) -> object:
+        current = value
+        for item in path:
+            if type(item) is int:
+                if type(current) is not list or item >= len(current):
+                    return None
+                current = current[item]
+            else:
+                if type(current) is not dict:
+                    return None
+                current = current.get(item)
+        return current
+
+    actions = _change_actions(change)
+    if actions not in _REGISTER_ACTIONS:
+        raise RolloutGateError("terraform_plan_runtime_invalid", scope=scope)
+    return (
+        before is None
+        or after is None
+        or descend(unknown) is True
+        or descend(before) != descend(after)
+    )
+
+
+def _promotion_tasks_from_plan(plan: dict[str, object]) -> frozenset[str]:
+    variables = plan.get("variables")
+    raw = variables.get("hmac_runtime_promotion_tasks") if type(variables) is dict else None
+    value = raw.get("value") if type(raw) is dict else None
+    if (
+        type(value) is not list
+        or any(type(task) is not str for task in value)
+        or len(value) != len(set(value))
+        or not set(value).issubset(TASK_ADDRESSES)
+    ):
+        raise RolloutGateError("terraform_plan_runtime_invalid", scope="hmac")
+    return frozenset(str(task) for task in value)
+
+
+def _gate_input(
+    change: dict[str, Any],
+    *,
+    scope: str,
+) -> dict[str, Any]:
+    if _change_actions(change) not in _GATE_MUTATION_ACTIONS:
+        raise RolloutGateError("terraform_plan_runtime_invalid", scope=scope)
+    after = change.get("after")
+    gate_input = after.get("input") if type(after) is dict else None
+    if type(gate_input) is not dict:
+        raise RolloutGateError("terraform_plan_runtime_invalid", scope=scope)
+    return gate_input
+
+
+def _common_gate_input(
+    *,
+    release: dict[str, object],
+    action: str,
+    workload: str,
+) -> dict[str, object]:
+    return {
+        "action": action,
+        "workload": workload,
+        "mode": release["gate_mode"],
+        "rotation_epoch": release["rotation_epoch"],
+        "cleanup_domain": release["cleanup_domain"],
+        "manifest_sha256": release["manifest_sha256"],
+        "rollout_control_sha256": release["rollout_control_sha256"],
+    }
+
+
+def _canonical_planned_event_target(after: object) -> dict[str, object]:
+    if type(after) is not dict:
+        raise RolloutGateError("terraform_plan_event_invalid", scope="morning_digest")
+    ecs = after.get("ecs_target")
+    retry = after.get("retry_policy")
+    if (
+        type(ecs) is not list
+        or len(ecs) != 1
+        or type(ecs[0]) is not dict
+        or type(retry) is not list
+        or len(retry) != 1
+        or type(retry[0]) is not dict
+    ):
+        raise RolloutGateError("terraform_plan_event_invalid", scope="morning_digest")
+    network = ecs[0].get("network_configuration")
+    if type(network) is not list or len(network) != 1 or type(network[0]) is not dict:
+        raise RolloutGateError("terraform_plan_event_invalid", scope="morning_digest")
+    subnets = network[0].get("subnets")
+    security_groups = network[0].get("security_groups")
+    if type(subnets) is not list or type(security_groups) is not list:
+        raise RolloutGateError("terraform_plan_event_invalid", scope="morning_digest")
+    return {
+        "Id": after.get("target_id"),
+        "Arn": after.get("arn"),
+        "RoleArn": after.get("role_arn"),
+        "Input": after.get("input"),
+        "EcsParameters": {
+            "TaskDefinitionArn": ecs[0].get("task_definition_arn"),
+            "TaskCount": ecs[0].get("task_count"),
+            "LaunchType": ecs[0].get("launch_type"),
+            "PlatformVersion": ecs[0].get("platform_version"),
+            "NetworkConfiguration": {
+                "awsvpcConfiguration": {
+                    "Subnets": sorted(subnets),
+                    "SecurityGroups": sorted(security_groups),
+                    "AssignPublicIp": (
+                        "ENABLED" if network[0].get("assign_public_ip") is True else "DISABLED"
+                    ),
+                }
+            },
+        },
+        "RetryPolicy": {
+            "MaximumEventAgeInSeconds": retry[0].get("maximum_event_age_in_seconds"),
+            "MaximumRetryAttempts": retry[0].get("maximum_retry_attempts"),
+        },
+    }
+
+
+def _raw_hmac_release_bindings(plan: dict[str, object]) -> object:
     changes = plan.get("resource_changes")
     if type(changes) is not list:
         raise RolloutGateError("terraform_plan_unreadable")
@@ -424,9 +595,13 @@ def hmac_release_bindings_from_plan(plan: dict[str, object]) -> dict[str, object
         code="terraform_plan_hmac_invalid",
     )
     production_input = production_after.get("input")
-    release = (
-        production_input.get("hmac_release_bindings") if type(production_input) is dict else None
-    )
+    return production_input.get("hmac_release_bindings") if type(production_input) is dict else None
+
+
+def hmac_release_bindings_from_plan(plan: dict[str, object]) -> dict[str, object]:
+    """Extract the active HMAC snapshot/control binding from the one-use production gate."""
+
+    release = _raw_hmac_release_bindings(plan)
     if (
         type(release) is not dict
         or frozenset(release)
@@ -473,6 +648,36 @@ def hmac_release_bindings_from_plan(plan: dict[str, object]) -> dict[str, object
     ):
         raise RolloutGateError("terraform_plan_hmac_invalid", scope="hmac")
     return dict(release)
+
+
+def active_hmac_release_bindings_from_plan(
+    plan: dict[str, object],
+) -> dict[str, object] | None:
+    """Return the exact release binding, or ``None`` when HMAC rollout is inactive."""
+
+    release = _raw_hmac_release_bindings(plan)
+    if release == {} or (type(release) is dict and release.get("rotation_epoch") == ""):
+        return None
+    return hmac_release_bindings_from_plan(plan)
+
+
+def morning_target_mutates_from_plan(plan: dict[str, object]) -> bool:
+    """Return whether the authoritative morning target changes task definition."""
+
+    changes = plan.get("resource_changes")
+    if type(changes) is not list:
+        raise RolloutGateError("terraform_plan_unreadable")
+    change = _matching_change(
+        changes,
+        address=MORNING_TARGET_ADDRESS,
+        scope="morning_digest",
+        required=False,
+    )
+    return _link_mutates(
+        change,
+        path=("ecs_target", 0, "task_definition_arn"),
+        scope="morning_digest",
+    )
 
 
 def deployment_intent_id_from_plan(plan: dict[str, object]) -> str:
@@ -624,9 +829,9 @@ def validate_saved_plan_event_target(
     manifest_path: Path,
     control_path: Path,
 ) -> None:
-    """Bind every known EventBridge target field to its saved-plan transaction."""
+    """Bind every known EventBridge target field to both ordered saved-plan gates."""
 
-    validate_saved_plan_hmac_files(
+    release = validate_saved_plan_hmac_files(
         plan,
         manifest_path=manifest_path,
         control_path=control_path,
@@ -636,25 +841,41 @@ def validate_saved_plan_event_target(
     changes = plan.get("resource_changes")
     if type(changes) is not list:
         raise RolloutGateError("terraform_plan_unreadable")
-    after = _resource_change(
-        changes,
-        address=MORNING_PROMOTION_ADDRESS,
-        scope="morning_digest",
-        code="terraform_plan_event_invalid",
-    )
-    transaction = after.get("input")
-    if type(transaction) is not dict or frozenset(transaction) != frozenset(
-        {
-            "mode",
-            "expected_rule",
-            "target",
-            "task_definition_arn",
-            "manifest_sha256",
-            "rollout_control_sha256",
-        }
+    gate_inputs: list[dict[str, Any]] = []
+    for action, address in zip(
+        ("pre-update", "post-update"),
+        MORNING_PROMOTION_ADDRESSES,
+        strict=True,
     ):
+        change = _matching_change(
+            changes,
+            address=address,
+            scope="morning_digest",
+        )
+        assert change is not None
+        gate_input = _gate_input(change, scope="morning_digest")
+        expected_common = _common_gate_input(
+            release=release,
+            action=action,
+            workload="morning_digest",
+        )
+        if frozenset(gate_input) != frozenset(
+            {
+                *expected_common,
+                "expected_rule",
+                "target",
+                "task_definition_arn",
+            }
+        ) or any(gate_input.get(name) != value for name, value in expected_common.items()):
+            raise RolloutGateError("terraform_plan_event_invalid", scope="morning_digest")
+        gate_inputs.append(gate_input)
+    pre_input, post_input = gate_inputs
+    if {name: value for name, value in pre_input.items() if name != "action"} != {
+        name: value for name, value in post_input.items() if name != "action"
+    }:
         raise RolloutGateError("terraform_plan_event_invalid", scope="morning_digest")
-    planned_target = transaction.get("target")
+
+    planned_target = pre_input.get("target")
     if type(planned_target) is not dict:
         raise RolloutGateError("terraform_plan_event_invalid", scope="morning_digest")
     planned_target = json.loads(json.dumps(planned_target))
@@ -663,11 +884,11 @@ def validate_saved_plan_event_target(
     if type(planned_ecs) is not dict or type(actual_ecs) is not dict:
         raise RolloutGateError("terraform_plan_event_invalid", scope="morning_digest")
     planned_task = planned_ecs.get("TaskDefinitionArn")
-    planned_input_task = transaction.get("task_definition_arn")
+    planned_input_task = pre_input.get("task_definition_arn")
     try:
         control_value = json.loads(control_path.read_text(encoding="utf-8"))
         control_rule = control_value["morning_digest"]["expected_rule"]
-        planned_rule = _canonical_event_rule(transaction.get("expected_rule"))
+        planned_rule = _canonical_event_rule(pre_input.get("expected_rule"))
         expected_rule = _canonical_event_rule(control_rule)
     except (OSError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise RolloutGateError(
@@ -675,11 +896,8 @@ def validate_saved_plan_event_target(
             scope="morning_digest",
         ) from exc
     if (
-        transaction.get("mode") != mode
-        or planned_rule != expected_rule
+        planned_rule != expected_rule
         or expected_rule["State"] != "DISABLED"
-        or transaction.get("manifest_sha256") != saved_plan_sha256(manifest_path)
-        or transaction.get("rollout_control_sha256") != saved_plan_sha256(control_path)
         or (
             planned_task is not None
             and (type(planned_task) is not str or planned_task != task_definition)
@@ -697,49 +915,209 @@ def validate_saved_plan_event_target(
 
 
 def validate_saved_plan_runtime_mutations(plan: dict[str, object]) -> None:
-    """Reject an ECS task-definition mutation that lacks both apply-time gates."""
+    """Require exact HMAC gate inputs and complete workload mutation coverage."""
 
     changes = plan.get("resource_changes")
     if type(changes) is not list:
         raise RolloutGateError("terraform_plan_unreadable")
-    for task, service_address in SERVICE_ADDRESSES.items():
-        matches = [
-            item
-            for item in changes
-            if type(item) is dict and item.get("address") == service_address
-        ]
-        if not matches:
-            continue
-        if len(matches) != 1:
-            raise RolloutGateError("terraform_plan_runtime_invalid", scope=task)
-        raw_change = matches[0].get("change")
-        before = raw_change.get("before") if type(raw_change) is dict else None
-        after = raw_change.get("after") if type(raw_change) is dict else None
-        actions = raw_change.get("actions") if type(raw_change) is dict else None
-        after_unknown = raw_change.get("after_unknown") if type(raw_change) is dict else None
+    selected = _promotion_tasks_from_plan(plan)
+    release = active_hmac_release_bindings_from_plan(plan)
+    morning_change = _matching_change(
+        changes,
+        address=MORNING_TARGET_ADDRESS,
+        scope="morning_digest",
+        required=False,
+    )
+    morning_mutates = _link_mutates(
+        morning_change,
+        path=("ecs_target", 0, "task_definition_arn"),
+        scope="morning_digest",
+    )
+    if release is None:
+        gate_addresses = {
+            *LIVE_TASK_GATE_ADDRESSES.values(),
+            *(address for pair in SERVICE_PROMOTION_ADDRESSES.values() for address in pair),
+            *MORNING_PROMOTION_ADDRESSES,
+            "terraform_data.hmac_morning_digest_target_transaction[0]",
+        }
         if (
-            type(actions) is not list
-            or any(type(action) is not str for action in actions)
-            or tuple(actions) not in _REGISTER_ACTIONS | {("no-op",)}
+            selected
+            or morning_mutates
+            or any(
+                type(item) is dict
+                and item.get("address") in gate_addresses
+                and _mutates(item.get("change") if type(item.get("change")) is dict else None)
+                for item in changes
+            )
         ):
-            raise RolloutGateError("terraform_plan_runtime_invalid", scope=task)
-        task_definition_unknown = (
-            type(after_unknown) is dict and after_unknown.get("task_definition") is True
+            raise RolloutGateError("terraform_plan_runtime_invalid", scope="hmac")
+        return
+    required: set[str] = set()
+
+    for task, address in TASK_ADDRESSES.items():
+        task_change = _matching_change(
+            changes,
+            address=address,
+            scope=task,
+            required=False,
         )
-        before_task = before.get("task_definition") if type(before) is dict else None
-        after_task = after.get("task_definition") if type(after) is dict else None
-        mutates_task_definition = tuple(actions) != ("no-op",) and (
-            before is None or after is None or task_definition_unknown or before_task != after_task
+        if _mutates(task_change):
+            required.add(task)
+
+    for task, service_address in SERVICE_ADDRESSES.items():
+        service_change = _matching_change(
+            changes,
+            address=service_address,
+            scope=task,
+            required=False,
         )
-        if not mutates_task_definition:
+        if _link_mutates(
+            service_change,
+            path=("task_definition",),
+            scope=task,
+        ):
+            required.add(task)
+
+    if morning_mutates:
+        required.add("morning_digest")
+
+    if selected != frozenset(required):
+        raise RolloutGateError("terraform_plan_runtime_invalid", scope="hmac")
+
+    legacy_address = "terraform_data.hmac_morning_digest_target_transaction[0]"
+    for item in changes:
+        if (
+            type(item) is dict
+            and item.get("address") == legacy_address
+            and _mutates(item.get("change") if type(item.get("change")) is dict else None)
+        ):
+            raise RolloutGateError(
+                "terraform_plan_runtime_invalid",
+                scope="morning_digest",
+            )
+
+    for task in TASK_ADDRESSES:
+        live_change = _matching_change(
+            changes,
+            address=LIVE_TASK_GATE_ADDRESSES[task],
+            scope=task,
+            required=task in selected,
+        )
+        if task not in selected:
+            if _mutates(live_change):
+                raise RolloutGateError("terraform_plan_runtime_invalid", scope=task)
             continue
-        for address in SERVICE_PROMOTION_ADDRESSES[task]:
-            _resource_change(
+        assert live_change is not None
+        live_input = _gate_input(live_change, scope=task)
+        expected = {
+            **_common_gate_input(
+                release=release,
+                action="pre-register",
+                workload=task,
+            ),
+            "task_address": TASK_ADDRESSES[task],
+        }
+        if live_input != expected:
+            raise RolloutGateError("terraform_plan_runtime_invalid", scope=task)
+
+    for task, addresses in SERVICE_PROMOTION_ADDRESSES.items():
+        if task not in selected:
+            for address in addresses:
+                change = _matching_change(
+                    changes,
+                    address=address,
+                    scope=task,
+                    required=False,
+                )
+                if _mutates(change):
+                    raise RolloutGateError("terraform_plan_runtime_invalid", scope=task)
+            continue
+        inputs: list[dict[str, Any]] = []
+        for action, address in zip(("pre-update", "post-update"), addresses, strict=True):
+            change = _matching_change(
                 changes,
                 address=address,
                 scope=task,
-                code="terraform_plan_runtime_invalid",
             )
+            assert change is not None
+            gate_input = _gate_input(change, scope=task)
+            common = _common_gate_input(
+                release=release,
+                action=action,
+                workload=task,
+            )
+            if frozenset(gate_input) != frozenset({*common, "task_definition_arn"}) or any(
+                gate_input.get(name) != value for name, value in common.items()
+            ):
+                raise RolloutGateError("terraform_plan_runtime_invalid", scope=task)
+            inputs.append(gate_input)
+        if inputs[0].get("task_definition_arn") != inputs[1].get("task_definition_arn"):
+            raise RolloutGateError("terraform_plan_runtime_invalid", scope=task)
+
+    if "morning_digest" in selected:
+        inputs = []
+        for action, address in zip(
+            ("pre-update", "post-update"),
+            MORNING_PROMOTION_ADDRESSES,
+            strict=True,
+        ):
+            change = _matching_change(
+                changes,
+                address=address,
+                scope="morning_digest",
+            )
+            assert change is not None
+            gate_input = _gate_input(change, scope="morning_digest")
+            common = _common_gate_input(
+                release=release,
+                action=action,
+                workload="morning_digest",
+            )
+            if frozenset(gate_input) != frozenset(
+                {
+                    *common,
+                    "expected_rule",
+                    "target",
+                    "task_definition_arn",
+                }
+            ) or any(gate_input.get(name) != value for name, value in common.items()):
+                raise RolloutGateError(
+                    "terraform_plan_runtime_invalid",
+                    scope="morning_digest",
+                )
+            inputs.append(gate_input)
+        pre_input, post_input = inputs
+        if {name: value for name, value in pre_input.items() if name != "action"} != {
+            name: value for name, value in post_input.items() if name != "action"
+        }:
+            raise RolloutGateError(
+                "terraform_plan_runtime_invalid",
+                scope="morning_digest",
+            )
+        if morning_change is None:
+            raise RolloutGateError(
+                "terraform_plan_runtime_invalid",
+                scope="morning_digest",
+            )
+        native_after = morning_change.get("after")
+        if _canonical_planned_event_target(native_after) != pre_input.get("target"):
+            raise RolloutGateError(
+                "terraform_plan_runtime_invalid",
+                scope="morning_digest",
+            )
+    else:
+        for address in MORNING_PROMOTION_ADDRESSES:
+            change = _matching_change(
+                changes,
+                address=address,
+                scope="morning_digest",
+                required=False,
+            )
+            if _mutates(change):
+                raise RolloutGateError(
+                    "terraform_plan_runtime_invalid",
+                    scope="morning_digest",
+                )
 
 
 def _hex_digest(value: object) -> str | None:
@@ -787,9 +1165,28 @@ def all_candidates_from_saved_plan(plan_path: Path) -> dict[str, dict[str, objec
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("verify-worker-bindings",))
+    parser.add_argument(
+        "action",
+        choices=("verify-worker-bindings", "verify-runtime-mutations"),
+    )
+    parser.add_argument("--plan-json", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.action == "verify-runtime-mutations":
+            if args.plan_json is None:
+                raise RolloutGateError("terraform_plan_runtime_invalid", scope="hmac")
+            try:
+                plan = json.loads(args.plan_json.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise RolloutGateError(
+                    "terraform_plan_runtime_invalid",
+                    scope="hmac",
+                ) from exc
+            if type(plan) is not dict:
+                raise RolloutGateError("terraform_plan_runtime_invalid", scope="hmac")
+            validate_saved_plan_runtime_mutations(plan)
+            print('{"code":"ok","ok":true}')
+            return 0
         if (
             args.action != "verify-worker-bindings"
             or os.environ.get("TEAMAGENT_HMAC_DEPLOY_FROM_TERRAFORM") != "1"
@@ -811,7 +1208,12 @@ def main(argv: list[str] | None = None) -> int:
         if type(expected) is not dict or expected != actual:
             raise RolloutGateError("terraform_plan_worker_invalid", scope="worker")
     except Exception:
-        print('{"code":"terraform_plan_worker_invalid","ok":false}')
+        code = (
+            "terraform_plan_runtime_invalid"
+            if args.action == "verify-runtime-mutations"
+            else "terraform_plan_worker_invalid"
+        )
+        print(json.dumps({"code": code, "ok": False}, separators=(",", ":"), sort_keys=True))
         return 2
     print('{"code":"ok","ok":true}')
     return 0

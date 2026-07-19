@@ -49,6 +49,7 @@ IMAGE_CONTEXT_HELPER="$TF_DIR/image_release_context.py"
 APPLY_SUPERVISOR="$TF_DIR/terraform_apply_supervisor.py"
 PLAN_STAGER="$TF_DIR/stage_saved_plan.py"
 EVENTBRIDGE_APPLY_SAGA="$TF_DIR/eventbridge_apply_saga.py"
+HMAC_PLAN_HELPER="$REPO_ROOT/scripts/terraform_hmac_payload.py"
 TMP_ROOT=""
 AWS_BIN=""
 AWS_BIN_SHA256=""
@@ -225,6 +226,7 @@ assert_guard_sources() {
   assert_regular_nonwritable "$APPLY_SUPERVISOR"
   assert_regular_nonwritable "$PLAN_STAGER"
   assert_regular_nonwritable "$EVENTBRIDGE_APPLY_SAGA"
+  assert_regular_nonwritable "$HMAC_PLAN_HELPER"
   assert_git_tracked_clean "$SCRIPT_PATH"
   assert_git_tracked_clean "$GUARD_JQ"
   assert_git_tracked_clean "$MIGRATION_FILE"
@@ -235,6 +237,7 @@ assert_guard_sources() {
   assert_git_tracked_clean "$APPLY_SUPERVISOR"
   assert_git_tracked_clean "$PLAN_STAGER"
   assert_git_tracked_clean "$EVENTBRIDGE_APPLY_SAGA"
+  assert_git_tracked_clean "$HMAC_PLAN_HELPER"
 
   local path
   while IFS= read -r path; do
@@ -4334,6 +4337,13 @@ plan_has_address() {
   jq -e --arg address "$address" '.resource_changes[]? | select(.address == $address)' "$plan_json" >/dev/null
 }
 
+validate_hmac_runtime_mutation_gates() {
+  local plan_json="$1"
+  python3 "$HMAC_PLAN_HELPER" verify-runtime-mutations \
+    --plan-json "$plan_json" >/dev/null ||
+    die "HMAC task/service/EventBridge promotion gateのaction/input/workload束縛が不正です"
+}
+
 validate_common_plan_schema() {
   local plan_json="$1" core="$2"
   jq -e --slurpfile expected_core "$core" '
@@ -5940,6 +5950,7 @@ validate_plan() {
   local state_contract="${7:-}"
 
   validate_common_plan_schema "$plan_json" "$core"
+  validate_hmac_runtime_mutation_gates "$plan_json"
   if [ "$(jq -er '.mode' "$core")" = "migration" ]; then
     [ -n "$migration" ] && [ -n "$proposed_hmac" ] ||
       die "migration plan validator内部bindingが不足しています"
@@ -5986,7 +5997,14 @@ validate_plan() {
        else
          (.change.actions == ["no-op"] or
           .change.actions == ["update"] or
-          .change.actions == ["create", "delete"])
+          .change.actions == ["create", "delete"] or
+          (
+            .change.actions == ["create"] and
+            (.address |
+              test(
+                "^terraform_data\\.hmac_live_task_gate\\[\\\"(mcp|connect_web|morning_digest)\\\"\\]$|^terraform_data\\.hmac_(mcp|connect_web|morning_digest)_(pre|post)_update\\[0\\]$"
+              ))
+          ))
        end)
     )) and
     (.resource_drift | all(
@@ -6011,7 +6029,7 @@ validate_plan() {
     die "plan JSONのschema/action/check/runtime_guard束縛が不正です"
 
   local allowed_replacements
-  allowed_replacements='["terraform_data.production_image_release_gate","aws_ecs_task_definition.openclaw[0]","aws_ecs_task_definition.mcp","aws_ecs_task_definition.connect_web[0]","aws_ecs_task_definition.ingest[0]","aws_ecs_task_definition.morning_digest[0]","aws_ecs_task_definition.canary[0]","aws_ecs_task_definition.tiktok_acquire[0]","aws_ecs_task_definition.x_buzz_worker[0]"]'
+  allowed_replacements='["terraform_data.production_image_release_gate","terraform_data.hmac_live_task_gate[\"mcp\"]","terraform_data.hmac_live_task_gate[\"connect_web\"]","terraform_data.hmac_live_task_gate[\"morning_digest\"]","terraform_data.hmac_mcp_pre_update[0]","terraform_data.hmac_mcp_post_update[0]","terraform_data.hmac_connect_web_pre_update[0]","terraform_data.hmac_connect_web_post_update[0]","terraform_data.hmac_morning_digest_pre_update[0]","terraform_data.hmac_morning_digest_post_update[0]","aws_ecs_task_definition.openclaw[0]","aws_ecs_task_definition.mcp","aws_ecs_task_definition.connect_web[0]","aws_ecs_task_definition.ingest[0]","aws_ecs_task_definition.morning_digest[0]","aws_ecs_task_definition.canary[0]","aws_ecs_task_definition.tiktok_acquire[0]","aws_ecs_task_definition.x_buzz_worker[0]"]'
   local destructive
   destructive="$(jq -r --argjson allowed "$allowed_replacements" '
     .resource_changes[]? |
@@ -6026,6 +6044,15 @@ validate_plan() {
   local allowed_runtime_changes unexpected_changes
     allowed_runtime_changes='[
       "terraform_data.production_image_release_gate",
+      "terraform_data.hmac_live_task_gate[\"mcp\"]",
+      "terraform_data.hmac_live_task_gate[\"connect_web\"]",
+      "terraform_data.hmac_live_task_gate[\"morning_digest\"]",
+      "terraform_data.hmac_mcp_pre_update[0]",
+      "terraform_data.hmac_mcp_post_update[0]",
+      "terraform_data.hmac_connect_web_pre_update[0]",
+      "terraform_data.hmac_connect_web_post_update[0]",
+      "terraform_data.hmac_morning_digest_pre_update[0]",
+      "terraform_data.hmac_morning_digest_post_update[0]",
       "aws_ecs_task_definition.openclaw[0]",
       "aws_ecs_task_definition.mcp",
       "aws_ecs_task_definition.connect_web[0]",

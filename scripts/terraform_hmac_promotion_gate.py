@@ -69,7 +69,7 @@ def main() -> int:
             cleanup_domain=cleanup_domain,
         )
         target: dict[str, object] | None = None
-        if action == "event-transaction" and task == "morning_digest":
+        if task == "morning_digest" and action in {"pre-update", "post-update"}:
             raw_target = json.loads(os.environ["HMAC_EVENT_TARGET_JSON"])
             if type(raw_target) is not dict:
                 raise RolloutGateError("scheduled_target_invalid", scope=task)
@@ -100,20 +100,21 @@ def main() -> int:
                 raise RolloutGateError("cleanup_domain_drift")
             if cleanup.prepared_plan_sha256 != plan_sha256:
                 raise RolloutGateError("terraform_plan_drift")
-        if action == "event-transaction" and task == "morning_digest":
-            if target is None:
-                raise RolloutGateError("scheduled_target_invalid", scope=task)
-            gate.event_target_transaction(
-                task_definition=task_definition,
-                target=target,
-                mode=mode,
-            )
-        elif action == "pre-update":
-            gate.pre_update(
-                task=task,
-                task_definition=task_definition,
-                mode=mode,
-            )
+        if action == "pre-update":
+            if task == "morning_digest":
+                if target is None:
+                    raise RolloutGateError("scheduled_target_invalid", scope=task)
+                gate.pre_event_update(
+                    task_definition=task_definition,
+                    target=target,
+                    mode=mode,
+                )
+            else:
+                gate.pre_update(
+                    task=task,
+                    task_definition=task_definition,
+                    mode=mode,
+                )
         elif action == "post-update":
             gate.post_update(
                 task=task,

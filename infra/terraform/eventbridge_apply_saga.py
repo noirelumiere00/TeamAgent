@@ -21,11 +21,15 @@ from scripts.hmac_rollout_gate import (  # noqa: E402
     RolloutGateError,
     _canonical_event_rule,
     _canonical_json_value,
+    _canonical_target_digest,
     _trusted_epoch,
     load_control,
 )
 from scripts.terraform_hmac_payload import (  # noqa: E402
+    active_hmac_release_bindings_from_plan,
     hmac_release_bindings_from_plan,
+    morning_target_mutates_from_plan,
+    validate_saved_plan_runtime_mutations,
 )
 
 _UUID_RE = (
@@ -98,9 +102,16 @@ def _show_plan(path: Path) -> dict[str, Any]:
     return value
 
 
-def _plan_control(path: Path) -> tuple[dict[str, Any], Path]:
+def _plan_control(
+    path: Path,
+) -> tuple[dict[str, Any], Path, dict[str, object] | None, bool]:
     plan = _show_plan(path)
     release = hmac_release_bindings_from_plan(plan)
+    active_release = active_hmac_release_bindings_from_plan(plan)
+    validate_saved_plan_runtime_mutations(plan)
+    target_mutates = morning_target_mutates_from_plan(plan)
+    if target_mutates and active_release is None:
+        raise SagaError("saved plan mutates the morning target without HMAC promotion")
     variables = plan.get("variables")
     control_variable = (
         variables.get("hmac_rollout_control_path") if type(variables) is dict else None
@@ -115,7 +126,7 @@ def _plan_control(path: Path) -> tuple[dict[str, Any], Path]:
         raise SagaError("rollout control is unreadable") from exc
     if digest != release.get("rollout_control_sha256"):
         raise SagaError("rollout control differs from the saved plan")
-    return _load_json(control_path), control_path
+    return _load_json(control_path), control_path, active_release, target_mutates
 
 
 def _canonical_targets(value: object) -> list[dict[str, Any]]:
@@ -199,12 +210,19 @@ class EventBridgeApplySaga:
         plan_sha256: str,
         apply_attempt_id: str,
         clients: ClientFactory,
+        gate_mode: str | None = None,
+        cleanup_domain: str = "",
+        target_mutates: bool = False,
     ) -> None:
         import re
 
         if (
             re.fullmatch(r"[a-f0-9]{64}", plan_sha256) is None
             or re.fullmatch(_UUID_RE, apply_attempt_id) is None
+            or gate_mode not in {None, "candidate", "cleanup", "rollback"}
+            or (gate_mode == "cleanup") != bool(cleanup_domain)
+            or (cleanup_domain and cleanup_domain not in {"mail_action", "report_link"})
+            or (target_mutates and gate_mode is None)
         ):
             raise SagaError("saga identity is invalid")
         try:
@@ -214,6 +232,9 @@ class EventBridgeApplySaga:
         self.control = parsed
         self.plan_sha256 = plan_sha256
         self.apply_attempt_id = apply_attempt_id
+        self.gate_mode = gate_mode
+        self.cleanup_domain = cleanup_domain
+        self.target_mutates = target_mutates
         self.events = clients.client("events", region_name=parsed.region)
         self.ddb = clients.client("dynamodb", region_name=parsed.region)
         # One stable active record makes an interrupted prior attempt discoverable. Terminal
@@ -264,6 +285,46 @@ class EventBridgeApplySaga:
         ):
             raise SagaError("durable saga baseline digest differs")
         return baseline
+
+    def _expected_target_digest(self) -> str:
+        if self.gate_mode == "rollback":
+            return self.control.morning_digest.rollback_target_digest
+        record = (
+            f"CLEANUP#{self.control.rotation_epoch}#{self.cleanup_domain}"
+            if self.gate_mode == "cleanup"
+            else f"LEDGER#{self.control.rotation_epoch}"
+        )
+        item = self._read(record)
+        if item is None:
+            raise SagaError("durable morning target binding is unavailable")
+        digest = self._string(item, "candidate_morning_digest_target_digest")
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise SagaError("durable morning target binding is invalid")
+        return digest
+
+    def _verify_applied(self, baseline: dict[str, Any]) -> int:
+        observed, verified_at = _baseline(
+            self.events,
+            expected_rule=self.control.morning_digest.expected_rule,
+        )
+        if not self.target_mutates:
+            if observed["targets"] != _canonical_targets(baseline.get("targets")):
+                raise SagaError("EventBridge target changed outside the reviewed plan")
+            return verified_at
+        targets = observed["targets"]
+        if (
+            len(targets) != 1
+            or targets[0].get("Id") != self.control.morning_digest.target_id
+            or targets[0].get("Arn") != self.control.morning_digest.cluster
+        ):
+            raise SagaError("EventBridge final target set is not exact")
+        try:
+            digest = _canonical_target_digest(targets[0])
+        except RolloutGateError as exc:
+            raise SagaError("EventBridge final target is invalid") from exc
+        if digest != self._expected_target_digest():
+            raise SagaError("EventBridge final target differs from the promoted binding")
+        return verified_at
 
     def _transition(
         self,
@@ -508,14 +569,7 @@ class EventBridgeApplySaga:
         if outcome == "failed":
             finished_at = self._restore(baseline)
         else:
-            response = self.events.describe_rule(
-                Name=self.control.morning_digest.rule,
-            )
-            finished_at = _trusted_epoch(response)
-            if finished_at is None:
-                raise SagaError("EventBridge rule verification lacks trusted time")
-            if _canonical_event_rule(response) != self.control.morning_digest.expected_rule:
-                raise SagaError("EventBridge rule changed outside its reviewed binding")
+            finished_at = self._verify_applied(baseline)
         self._transition(item, desired=desired, finished_at=finished_at)
 
 
@@ -534,12 +588,15 @@ def main(
     try:
         if hashlib.sha256(args.plan.read_bytes()).hexdigest() != args.plan_sha256:
             raise SagaError("saved plan digest differs")
-        control, _path = _plan_control(args.plan)
+        control, _path, release, target_mutates = _plan_control(args.plan)
         saga = EventBridgeApplySaga(
             control=control,
             plan_sha256=args.plan_sha256,
             apply_attempt_id=args.apply_attempt_id,
             clients=clients or _BotoFactory(),
+            gate_mode=str(release["gate_mode"]) if release is not None else None,
+            cleanup_domain=str(release["cleanup_domain"]) if release is not None else "",
+            target_mutates=target_mutates,
         )
         if args.action == "begin":
             if args.outcome is not None:

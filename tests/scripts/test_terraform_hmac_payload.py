@@ -14,7 +14,8 @@ from scripts.hmac_rollout_gate import (
     _task_artifact_digest,
 )
 from scripts.terraform_hmac_payload import (
-    MORNING_PROMOTION_ADDRESS,
+    LIVE_TASK_GATE_ADDRESSES,
+    MORNING_PROMOTION_ADDRESSES,
     PRODUCTION_GATE_ADDRESS,
     TASK_ADDRESSES,
     WORKER_ARTIFACT_BINDING_KEYS,
@@ -458,23 +459,34 @@ def test_eventbridge_full_target_is_bound_to_same_saved_plan(
                     "after": {"input": {"hmac_release_bindings": release}},
                 },
             },
-            {
-                "address": MORNING_PROMOTION_ADDRESS,
-                "change": {
-                    "actions": ["delete", "create"],
-                    "after": {
-                        "input": {
-                            "mode": "candidate",
-                            "expected_rule": expected_rule,
-                            "target": planned_target,
-                            "task_definition_arn": None,
-                            "manifest_sha256": manifest_digest,
-                            "rollout_control_sha256": control_digest,
-                        }
+            *[
+                {
+                    "address": address,
+                    "change": {
+                        "actions": ["create", "delete"],
+                        "after": {
+                            "input": {
+                                "action": action,
+                                "workload": "morning_digest",
+                                "mode": "candidate",
+                                "rotation_epoch": "hmac-2026-07",
+                                "cleanup_domain": "",
+                                "expected_rule": expected_rule,
+                                "target": planned_target,
+                                "task_definition_arn": None,
+                                "manifest_sha256": manifest_digest,
+                                "rollout_control_sha256": control_digest,
+                            }
+                        },
                     },
-                },
-            },
-        ]
+                }
+                for action, address in zip(
+                    ("pre-update", "post-update"),
+                    MORNING_PROMOTION_ADDRESSES,
+                    strict=True,
+                )
+            ],
+        ],
     }
 
     validate_saved_plan_event_target(
@@ -512,20 +524,101 @@ def test_ecs_service_task_definition_change_requires_pre_and_post_plan_gates() -
             "after_unknown": {},
         },
     }
+    release = {
+        "rotation_epoch": "hmac-2026-07",
+        "gate_mode": "candidate",
+        "cleanup_domain": "",
+        "manifest_sha256": "a" * 64,
+        "rollout_control_sha256": "b" * 64,
+        "worker_enabled": False,
+        "worker_mode": "candidate",
+        "worker_artifacts": {},
+        "worker_provenance_key_arn": "",
+    }
+
+    def gate_input(action: str) -> dict[str, object]:
+        return {
+            "action": action,
+            "workload": "mcp",
+            "mode": "candidate",
+            "rotation_epoch": "hmac-2026-07",
+            "cleanup_domain": "",
+            "task_definition_arn": new_arn,
+            "manifest_sha256": "a" * 64,
+            "rollout_control_sha256": "b" * 64,
+        }
+
+    production = {
+        "address": PRODUCTION_GATE_ADDRESS,
+        "change": {
+            "actions": ["create", "delete"],
+            "after": {"input": {"hmac_release_bindings": release}},
+        },
+    }
+    live = {
+        "address": LIVE_TASK_GATE_ADDRESSES["mcp"],
+        "change": {
+            "actions": ["create", "delete"],
+            "after": {
+                "input": {
+                    **gate_input("pre-register"),
+                    "task_address": TASK_ADDRESSES["mcp"],
+                }
+            },
+        },
+    }
+    live["change"]["after"]["input"].pop("task_definition_arn")  # type: ignore[index]
     pre = {
         "address": "terraform_data.hmac_mcp_pre_update[0]",
-        "change": {"actions": ["delete", "create"], "after": {"input": {}}},
+        "change": {
+            "actions": ["create", "delete"],
+            "after": {"input": gate_input("pre-update")},
+        },
     }
     post = {
         "address": "terraform_data.hmac_mcp_post_update[0]",
-        "change": {"actions": ["delete", "create"], "after": {"input": {}}},
+        "change": {
+            "actions": ["create", "delete"],
+            "after": {"input": gate_input("post-update")},
+        },
     }
-    plan = {"resource_changes": [service, pre, post]}
+    plan = {
+        "variables": {"hmac_runtime_promotion_tasks": {"value": ["mcp"]}},
+        "resource_changes": [production, service, live, pre, post],
+    }
 
     validate_saved_plan_runtime_mutations(plan)
     with pytest.raises(RolloutGateError, match="terraform_plan_runtime_invalid"):
-        validate_saved_plan_runtime_mutations({"resource_changes": [service, pre]})
+        missing_post = copy.deepcopy(plan)
+        missing_post["resource_changes"].remove(  # type: ignore[union-attr]
+            next(
+                change
+                for change in missing_post["resource_changes"]  # type: ignore[index]
+                if change["address"] == "terraform_data.hmac_mcp_post_update[0]"
+            )
+        )
+        validate_saved_plan_runtime_mutations(missing_post)
 
     unrelated = copy.deepcopy(service)
     unrelated["change"]["before"]["task_definition"] = new_arn  # type: ignore[index]
-    validate_saved_plan_runtime_mutations({"resource_changes": [unrelated]})
+    no_mutation = {
+        "variables": {"hmac_runtime_promotion_tasks": {"value": []}},
+        "resource_changes": [production, unrelated],
+    }
+    validate_saved_plan_runtime_mutations(no_mutation)
+
+    for mutation in ("wrong-action", "wrong-workload", "extra-input"):
+        adversarial = copy.deepcopy(plan)
+        gate = next(
+            change
+            for change in adversarial["resource_changes"]
+            if change["address"] == "terraform_data.hmac_mcp_pre_update[0]"
+        )
+        if mutation == "wrong-action":
+            gate["change"]["after"]["input"]["action"] = "post-update"
+        elif mutation == "wrong-workload":
+            gate["change"]["after"]["input"]["workload"] = "connect_web"
+        else:
+            gate["change"]["after"]["input"]["unreviewed"] = True
+        with pytest.raises(RolloutGateError, match="terraform_plan_runtime_invalid"):
+            validate_saved_plan_runtime_mutations(adversarial)
