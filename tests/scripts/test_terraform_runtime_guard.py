@@ -1829,6 +1829,7 @@ def _fake_terraform(path: Path) -> None:
                 "mcp_image": {"value": desired},
                 "x_buzz_image": {"value": core["desired_x_image"]},
                 "tiktok_acquire_image": {"value": core["desired_tiktok_image"]},
+                "enable_tiktok_acquire": {"value": True},
                 "ingest_rule_enabled": {"value": core["ingest_rule_enabled"]},
                 "morning_digest_rule_enabled": {
                     "value": core["morning_digest_rule_enabled"]
