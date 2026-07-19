@@ -871,6 +871,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                 ),
             )
             _items(subscriber_pages, "Subscribers", "Budget subscribers")
+    coverage.add("budgets.subscriber")
 
     anomaly_pages = collect(
         "cost-anomaly.subscriber",
@@ -937,6 +938,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                 _items(target_pages, "Targets", "EventBridge targets")
             )
         event_rules.extend(bus_rules)
+    coverage.add("eventbridge.target")
 
     schedule_group_pages = collect(
         "scheduler.schedule-group",
@@ -990,6 +992,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
             collect("scheduler.target", f"{group}/{name}", [(detail, http)])
             schedule_details.append(detail)
         schedules.extend(group_schedules)
+    coverage.add("scheduler.target")
 
     function_pages = collect(
         "lambda.function",
@@ -1046,7 +1049,13 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
             raw_documents.append(
                 ("lambda.on-failure", name, dict(on_failure))
             )
-        coverage.update({"lambda.on-success", "lambda.on-failure"})
+    coverage.update(
+        {
+            "lambda.dead-letter",
+            "lambda.on-success",
+            "lambda.on-failure",
+        }
+    )
 
     mapping_pages = collect(
         "lambda.event-source-mapping",
@@ -1085,6 +1094,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         )
         collect("s3.topic-notification", name, [(notification, http)])
         notifications.append(notification)
+    coverage.add("s3.topic-notification")
 
     autoscaling_pages = collect(
         "autoscaling.notification",
@@ -1115,6 +1125,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
             ("--arn", rule_arn),
         )
         collect("codestar-notifications.target", rule_arn, [(detail, http)])
+    coverage.add("codestar-notifications.target")
 
     rds_pages = collect(
         "rds.event-subscription",

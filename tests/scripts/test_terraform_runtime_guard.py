@@ -891,7 +891,12 @@ def _fake_aws(path: Path) -> None:
         endpoint = args[1]
         if args[2] != "--no-cli-pager":
             raise SystemExit("fake AWS pager was not disabled")
-        service = args[3]
+        command_index = 3
+        debug = False
+        if args[command_index] == "--debug":
+            debug = True
+            command_index += 1
+        service = args[command_index]
         expected_endpoint = {{
             "apigatewayv2": f"https://apigateway.{{REGION}}.amazonaws.com",
             "ecr": f"https://api.ecr.{{REGION}}.amazonaws.com",
@@ -908,7 +913,14 @@ def _fake_aws(path: Path) -> None:
             raise SystemExit("fake AWS billing region differs")
         if service not in ("budgets", "ce") and command_region != REGION:
             raise SystemExit("fake AWS regional service region differs")
-        args = args[3:]
+        args = args[command_index:]
+        if debug:
+            print(
+                'TEAMAGENT_HTTP_METADATA:{{"date":'
+                '"Sun, 19 Jul 2026 00:00:00 GMT",'
+                '"x-amzn-requestid":"request-12345678"}}',
+                file=sys.stderr,
+            )
 
         def task_arn(component):
             _, family, revision = components[component]
@@ -1007,7 +1019,8 @@ def _fake_aws(path: Path) -> None:
                 subscriptions.append({{
                     "SubscriptionArn": (
                         "arn:aws:sns:ap-northeast-1:718959508629:"
-                        "teamagent-dev-openclaw-alarms:confirmed"
+                        "teamagent-dev-openclaw-alarms:"
+                        "11111111-2222-4333-8444-555555555555"
                     ),
                     "Owner": ACCOUNT,
                     "Protocol": protocol,
@@ -1032,7 +1045,8 @@ def _fake_aws(path: Path) -> None:
                 subscriptions.append({{
                     "SubscriptionArn": (
                         "arn:aws:sns:ap-northeast-1:718959508629:"
-                        "teamagent-dev-openclaw-alarms:extra"
+                        "teamagent-dev-openclaw-alarms:"
+                        "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
                     ),
                     "Owner": ACCOUNT,
                     "Protocol": "sms",
@@ -1053,6 +1067,7 @@ def _fake_aws(path: Path) -> None:
             )
             attributes = {{
                 "SubscriptionArn": subscription_arn,
+                "Owner": ACCOUNT,
                 "TopicArn": (
                     "arn:aws:sns:ap-northeast-1:718959508629:"
                     "teamagent-dev-openclaw-alarms"
@@ -1091,9 +1106,14 @@ def _fake_aws(path: Path) -> None:
                     "teamagent-dev-alarms"
                 ]
             print(json.dumps({{
-                "MetricAlarms": [{{"AlarmActions": actions}}],
+                "MetricAlarms": [{{
+                    "AlarmName": "teamagent-dev-errors",
+                    "AlarmActions": actions,
+                }}],
                 "CompositeAlarms": [],
             }}))
+        elif args[:2] == ["logs", "describe-metric-filters"]:
+            print(json.dumps({{"metricFilters": []}}))
         elif args[:2] == ["budgets", "describe-budgets"]:
             print(json.dumps({{
                 "Budgets": [{{"BudgetName": "teamagent-dev-monthly-cost"}}],
@@ -1149,6 +1169,42 @@ def _fake_aws(path: Path) -> None:
                     }}],
                 }}],
             }}))
+        elif args[:2] == ["events", "list-event-buses"]:
+            print(json.dumps({{
+                "EventBuses": [{{"Name": "default"}}],
+            }}))
+        elif args[:2] == ["events", "list-rules"]:
+            print(json.dumps({{"Rules": []}}))
+        elif args[:2] == ["scheduler", "list-schedule-groups"]:
+            print(json.dumps({{
+                "ScheduleGroups": [{{"Name": "default"}}],
+            }}))
+        elif args[:2] == ["scheduler", "list-schedules"]:
+            print(json.dumps({{"Schedules": []}}))
+        elif args[:2] == ["lambda", "list-functions"]:
+            print(json.dumps({{"Functions": []}}))
+        elif args[:2] == ["s3api", "list-buckets"]:
+            print(json.dumps({{
+                "Owner": {{"ID": "canonical-owner-id"}},
+                "Buckets": [],
+            }}))
+        elif args[:2] == [
+            "autoscaling",
+            "describe-notification-configurations",
+        ]:
+            print(json.dumps({{"NotificationConfigurations": []}}))
+        elif args[:2] == [
+            "codestar-notifications",
+            "list-notification-rules",
+        ]:
+            print(json.dumps({{"NotificationRules": []}}))
+        elif args[:2] == ["rds", "describe-event-subscriptions"]:
+            print(json.dumps({{"EventSubscriptionsList": []}}))
+        elif args[:2] == [
+            "chatbot",
+            "describe-chime-webhook-configurations",
+        ]:
+            print(json.dumps({{"WebhookConfigurations": []}}))
         elif args[:2] == ["s3api", "get-bucket-versioning"]:
             bucket = args[args.index("--bucket") + 1]
             state_path = os.environ.get("AWS_FAKE_VERSIONING_STATE")
@@ -1408,12 +1464,16 @@ def _fake_aws(path: Path) -> None:
         elif args[:2] == ["lambda", "get-function-concurrency"]:
             print(json.dumps({{}}))
         elif args[:2] == ["lambda", "list-event-source-mappings"]:
-            name = args[args.index("--function-name") + 1]
-            component = next(
-                key for key, value in dispatchers.items()
-                if value["function_name"] == name
-            )
-            print(json.dumps({{"EventSourceMappings": [mappings[component]]}}))
+            if "--function-name" in args:
+                name = args[args.index("--function-name") + 1]
+                component = next(
+                    key for key, value in dispatchers.items()
+                    if value["function_name"] == name
+                )
+                observed_mappings = [mappings[component]]
+            else:
+                observed_mappings = []
+            print(json.dumps({{"EventSourceMappings": observed_mappings}}))
         elif args[:2] == ["secretsmanager", "describe-secret"]:
             secret_id = args[args.index("--secret-id") + 1]
             print(json.dumps({{
