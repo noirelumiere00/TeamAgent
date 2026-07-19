@@ -2471,6 +2471,33 @@ def test_state_address_reconstruction_binds_mixed_exact_address_set(
         ),
         encoding="utf-8",
     )
+    state_payload = json.loads(state.read_text(encoding="utf-8"))
+    template = json.loads(
+        Path(env["TF_FAKE_TEMPLATE"]).read_text(encoding="utf-8")
+    )
+    for change in template["resource_changes"]:
+        if change.get("mode", "managed") != "managed":
+            continue
+        address = change["address"]
+        base_address = address
+        index_key = None
+        if base_address.endswith("[0]"):
+            base_address = base_address[:-3]
+            index_key = 0
+        resource_type, name = base_address.split(".", 1)
+        instance: dict[str, Any] = {"schema_version": 0, "attributes": {}}
+        if index_key is not None:
+            instance["index_key"] = index_key
+        state_payload["resources"].append(
+            {
+                "mode": "managed",
+                "type": resource_type,
+                "name": name,
+                "instances": [instance],
+            }
+        )
+        addresses.append(address)
+    state.write_text(json.dumps(state_payload), encoding="utf-8")
     state.chmod(0o600)
     env["TF_FAKE_STATE"] = str(state)
 
@@ -2711,5 +2738,8 @@ def test_plan_tamper_pair_swap_live_drift_and_apply_are_rejected(tmp_path: Path)
         env,
     )
     assert apply.returncode == 1
-    assert "exact trusted automation role" in apply.stdout + apply.stderr
-    assert "apply" not in tf_log.read_text(encoding="utf-8")
+    assert "exact trusted automation session" in apply.stdout + apply.stderr
+    assert not any(
+        command == "apply" or command.startswith("apply ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
