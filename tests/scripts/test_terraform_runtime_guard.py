@@ -525,7 +525,22 @@ def _change(
 
 
 def _safe_plan() -> dict[str, Any]:
-    changes: list[dict[str, Any]] = []
+    changes: list[dict[str, Any]] = [
+        _change(
+            "terraform_data.runtime_guard",
+            "terraform_data",
+            ["no-op"],
+            {"input": {"verified": True}},
+            {"input": {"verified": True}},
+        ),
+        _change(
+            "terraform_data.production_image_release_gate",
+            "terraform_data",
+            ["create", "delete"],
+            {"input": {"intent": "previous"}},
+            {"input": {"intent": "current"}},
+        ),
+    ]
     for component, address in TASK_ADDRESSES.items():
         after = _task_after(component)
         change = _change(
@@ -1637,6 +1652,11 @@ def _fake_terraform(path: Path) -> None:
             out = next(arg.split("=", 1)[1] for arg in args if arg.startswith("-out="))
             core_arg = next(arg for arg in args if arg.startswith("-var=runtime_guard_live="))
             core = json.loads(core_arg.split("=", 2)[2])
+            intent_arg = next(
+                arg for arg in args
+                if arg.startswith("-var=image_deployment_intent_id=")
+            )
+            image_deployment_intent_id = intent_arg.split("=", 2)[2]
             desired = core["desired_mcp_image"]
             plan = json.loads(pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text())
             plan["variables"] = {
@@ -1651,6 +1671,9 @@ def _fake_terraform(path: Path) -> None:
                 "canary_rule_enabled": {"value": core["canary_rule_enabled"]},
                 "require_alarm_delivery": {"value": True},
                 "bedrock_logs_retention_days": {"value": 60},
+                "image_deployment_intent_id": {
+                    "value": image_deployment_intent_id
+                },
                 "mail_action_hmac_secret_arn": {
                     "value": "arn:aws:secretsmanager:ap-northeast-1:718959508629:"
                     "secret:teamagent/dev/hmac/mail-action-AbC123"

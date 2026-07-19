@@ -1668,6 +1668,7 @@ prepare_image_deployment_intent() {
 capture_complete_runtime_inventory() {
   local output="$1"
   local raw="$TMP_ROOT/runtime-inventory-raw-$RANDOM.json"
+  local stable="$TMP_ROOT/runtime-inventory-stable-$RANDOM.json"
   run_evidence_helper inventory --output "$raw"
   jq -e -S \
     --arg email_sha "$EXPECTED_ALARM_EMAIL_SHA256" \
@@ -1699,8 +1700,15 @@ capture_complete_runtime_inventory() {
       topic_inventory,
       alarm_subscription_count
     }
-  ' "$raw" > "$output" ||
+    | del(.inventory_sha256)
+  ' "$raw" > "$stable" ||
     die "all-page runtime/SNS publisher inventoryがexact contractを満たしません"
+  local stable_sha
+  stable_sha="$(sha256_file "$stable")"
+  jq -e -S --arg stable_sha "$stable_sha" \
+    '. + {inventory_sha256: $stable_sha}' "$stable" > "$output" ||
+    die "stable runtime/SNS publisher inventory hash生成に失敗しました"
+  rm -f "$stable"
 }
 
 verify_alarm_delivery_test_receipt() {
