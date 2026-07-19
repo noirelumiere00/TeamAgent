@@ -17,12 +17,12 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import boto3
-
-ecs = boto3.client("ecs")
-ddb = boto3.client("dynamodb")
+from botocore.config import Config
 
 _MAX_BODY_BYTES = 128 * 1024
 _MAX_ECS_OVERRIDE_CHARACTERS = 8192
+_TASK_START_MINIMUM_BUDGET_SECONDS = 30.0
+_TERMINAL_WRITE_RESERVE_SECONDS = 15.0
 _JOB_ID = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _S3_BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
@@ -340,6 +340,81 @@ def _conditional_failure(exc: Exception) -> bool:
     return code == "ConditionalCheckFailedException"
 
 
+def _remaining(deadline_epoch_s: int) -> float:
+    remaining = deadline_epoch_s - time.time()
+    if remaining <= 0:
+        raise TimeoutError("media envelope deadline exceeded")
+    return max(0.001, remaining)
+
+
+def _client(
+    service: str,
+    deadline_epoch_s: int,
+    *,
+    reserve_seconds: float = 0.0,
+) -> Any:
+    if reserve_seconds < 0:
+        raise ValueError("deadline reserve cannot be negative")
+    remaining = _remaining(deadline_epoch_s) - reserve_seconds
+    if remaining <= 0:
+        raise TimeoutError("media envelope terminal budget reserve reached")
+    phase_timeout = max(0.001, min(10.0, remaining / 2.0))
+    return boto3.client(
+        service,
+        config=Config(
+            connect_timeout=phase_timeout,
+            read_timeout=phase_timeout,
+            retries={"mode": "standard", "total_max_attempts": 1},
+        ),
+    )
+
+
+def _call(
+    service: str,
+    operation: str,
+    deadline_epoch_s: int,
+    *,
+    reserve_seconds: float = 0.0,
+    **kwargs: Any,
+) -> Any:
+    return getattr(
+        _client(
+            service,
+            deadline_epoch_s,
+            reserve_seconds=reserve_seconds,
+        ),
+        operation,
+    )(**kwargs)
+
+
+def _failure_target(body: str, now: int) -> tuple[str, int] | None:
+    """Return only a canonical, bounded, still-live envelope identity."""
+
+    try:
+        value = json.loads(body)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != _REQUIRED_KEYS
+        or _canonical(value) != body.encode("utf-8")
+    ):
+        return None
+    job_id = value.get("job_id")
+    created = value.get("created_at_epoch_s")
+    deadline = value.get("deadline_epoch_s")
+    if (
+        not isinstance(job_id, str)
+        or not _JOB_ID.fullmatch(job_id)
+        or type(created) is not int
+        or type(deadline) is not int
+        or not 1 <= deadline - created <= 900
+        or not now < deadline <= now + 900
+    ):
+        return None
+    return job_id, deadline
+
+
 def _validate_envelope(
     body: str,
     *,
@@ -374,7 +449,7 @@ def _validate_envelope(
         or not 300 <= ttl <= max_artifact_ttl_s <= 21600
     ):
         raise ValueError("media envelope timing is invalid")
-    if deadline < now:
+    if deadline <= now:
         raise TimeoutError("media envelope deadline exceeded")
     if spec["output_bucket"] != expected_bucket:
         raise ValueError("media output bucket is outside dispatcher scope")
@@ -400,7 +475,13 @@ def _validate_envelope(
     return spec
 
 
-def _mark_failed(table: str, job_id: str, code: str, now: int) -> None:
+def _mark_failed(
+    table: str,
+    job_id: str,
+    code: str,
+    now: int,
+    deadline_epoch_s: int,
+) -> None:
     detail = _canonical(
         {
             "schema_version": "1",
@@ -412,7 +493,10 @@ def _mark_failed(table: str, job_id: str, code: str, now: int) -> None:
         }
     ).decode("utf-8")
     try:
-        ddb.update_item(
+        _call(
+            "dynamodb",
+            "update_item",
+            deadline_epoch_s,
             TableName=table,
             Key={"job_id": {"S": job_id}},
             UpdateExpression=(
@@ -435,8 +519,12 @@ def _mark_failed(table: str, job_id: str, code: str, now: int) -> None:
 
 
 def _claim_dispatch(table: str, spec: dict[str, Any], owner: str, now: int) -> bool:
+    deadline_epoch_s = int(spec["deadline_epoch_s"])
     try:
-        ddb.update_item(
+        _call(
+            "dynamodb",
+            "update_item",
+            deadline_epoch_s,
             TableName=table,
             Key={"job_id": {"S": spec["job_id"]}},
             UpdateExpression=(
@@ -461,7 +549,10 @@ def _claim_dispatch(table: str, spec: dict[str, Any], owner: str, now: int) -> b
     except Exception as exc:
         if not _conditional_failure(exc):
             raise
-        item = ddb.get_item(
+        item = _call(
+            "dynamodb",
+            "get_item",
+            deadline_epoch_s,
             TableName=table,
             Key={"job_id": {"S": spec["job_id"]}},
             ConsistentRead=True,
@@ -474,8 +565,16 @@ def _claim_dispatch(table: str, spec: dict[str, Any], owner: str, now: int) -> b
         raise RuntimeError("media dispatch lease is already held") from exc
 
 
-def _release_dispatch(table: str, job_id: str, owner: str) -> None:
-    ddb.update_item(
+def _release_dispatch(
+    table: str,
+    job_id: str,
+    owner: str,
+    deadline_epoch_s: int,
+) -> None:
+    _call(
+        "dynamodb",
+        "update_item",
+        deadline_epoch_s,
         TableName=table,
         Key={"job_id": {"S": job_id}},
         UpdateExpression="REMOVE dispatch_owner, dispatch_lease_expires_at",
@@ -494,6 +593,10 @@ def _task_overrides(container: str, spec: dict[str, Any]) -> dict[str, Any]:
                     {
                         "name": "MEDIA_JOB_PAYLOAD_SHA256",
                         "value": spec["payload_sha256"],
+                    },
+                    {
+                        "name": "MEDIA_JOB_DEADLINE_EPOCH_S",
+                        "value": str(spec["deadline_epoch_s"]),
                     },
                 ],
             }
@@ -523,13 +626,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
     for record in event.get("Records", []):
         body = record.get("body", "")
         now = int(time.time())
-        raw_job_id = ""
-        try:
-            untrusted = json.loads(body)
-            if isinstance(untrusted, dict):
-                raw_job_id = str(untrusted.get("job_id", ""))
-        except (TypeError, json.JSONDecodeError):
-            pass
+        failure_target = _failure_target(body, now)
         try:
             spec = _validate_envelope(
                 body,
@@ -538,27 +635,49 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
                 max_artifact_ttl_s=max_artifact_ttl_s,
             )
         except TimeoutError:
-            if _JOB_ID.fullmatch(raw_job_id):
-                _mark_failed(table, raw_job_id, "MEDIA_JOB_DEADLINE_EXCEEDED", now)
+            # The immutable deadline is already exhausted. No synthetic
+            # deadline and no post-deadline network call are permitted.
             raise
         except Exception:
-            if _JOB_ID.fullmatch(raw_job_id):
-                _mark_failed(table, raw_job_id, "MEDIA_DISPATCH_ENVELOPE_INVALID", now)
+            if failure_target is not None:
+                raw_job_id, raw_deadline = failure_target
+                _mark_failed(
+                    table,
+                    raw_job_id,
+                    "MEDIA_DISPATCH_ENVELOPE_INVALID",
+                    now,
+                    raw_deadline,
+                )
             raise
 
+        deadline_epoch_s = int(spec["deadline_epoch_s"])
+        if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
+            _mark_failed(
+                table,
+                spec["job_id"],
+                "MEDIA_JOB_DEADLINE_EXCEEDED",
+                int(time.time()),
+                deadline_epoch_s,
+            )
+            raise TimeoutError("media envelope deadline exceeded before dispatch claim")
         owner = str(record.get("messageId") or getattr(context, "aws_request_id", "dispatch"))
         if not _claim_dispatch(table, spec, owner, now):
             continue
         try:
-            if int(time.time()) >= spec["deadline_epoch_s"]:
+            if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
                 _mark_failed(
                     table,
                     spec["job_id"],
                     "MEDIA_JOB_DEADLINE_EXCEEDED",
                     int(time.time()),
+                    deadline_epoch_s,
                 )
                 raise TimeoutError("media envelope deadline exceeded before task launch")
-            response = ecs.run_task(
+            response = _call(
+                "ecs",
+                "run_task",
+                deadline_epoch_s,
+                reserve_seconds=_TERMINAL_WRITE_RESERVE_SECONDS,
                 cluster=cluster,
                 taskDefinition=taskdef,
                 launchType="FARGATE",
@@ -578,7 +697,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
             if failures or len(tasks) != 1:
                 raise RuntimeError(f"run_task did not start exactly one task: {failures}")
             task_arn = tasks[0]["taskArn"]
-            ddb.update_item(
+            _call(
+                "dynamodb",
+                "update_item",
+                deadline_epoch_s,
                 TableName=table,
                 Key={"job_id": {"S": spec["job_id"]}},
                 UpdateExpression=(
@@ -594,6 +716,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, list[str | None]]:
             )
             started.append(task_arn)
         except Exception:
-            _release_dispatch(table, spec["job_id"], owner)
+            try:
+                _release_dispatch(table, spec["job_id"], owner, deadline_epoch_s)
+            except TimeoutError:
+                # No network call is permitted after the immutable deadline.
+                pass
             raise
     return {"started": started}

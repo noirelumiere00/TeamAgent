@@ -18,7 +18,7 @@ PYTHON_RUNTIME_DIGEST = "b7fda4f2d99284fe078f751034a0c858676f3456c4d75f1e935527c
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 PYTHON_BINARY_SHA256 = "0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8"
 UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
-TORCH_WHEEL_SHA256 = "797c066367792c92eb97cafba7fd0caa8d7455e6078a4ee880630077378dc372"
+TORCH_WHEEL_SHA256 = "ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c"
 E5_MODEL_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
 BAKED_APP_HTML_SHA256 = "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
 APP_HTML_SHA256 = "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
@@ -74,7 +74,7 @@ def test_core_contains_e5_mcp_db_aws_but_no_media_or_js_runtime() -> None:
 def test_core_model_torch_and_app_html_are_content_addressed() -> None:
     assert f"ARG E5_MODEL_REVISION={E5_MODEL_REVISION}" in TEXT
     assert f"ARG TORCH_ARM64_WHEEL_SHA256={TORCH_WHEEL_SHA256}" in TEXT
-    assert "torch-2.12.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl" in TEXT
+    assert "torch-2.13.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl" in TEXT
     assert "revision=os.environ['TEAMAGENT_E5_MODEL_REVISION']" in TEXT
     assert TEXT.count("local_files_only=True") >= 2
     assert "HF_HUB_OFFLINE=1" in TEXT

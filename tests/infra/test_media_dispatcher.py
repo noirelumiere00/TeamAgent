@@ -71,7 +71,9 @@ def _load_handler(
     ecs: _Ecs,
 ) -> Any:
     fake_boto3 = types.ModuleType("boto3")
-    fake_boto3.client = lambda name: ecs if name == "ecs" else ddb  # type: ignore[attr-defined]
+    fake_boto3.client = (  # type: ignore[attr-defined]
+        lambda name, **_kwargs: ecs if name == "ecs" else ddb
+    )
     monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
     name = f"_teamagent_media_dispatch_{id(ddb)}_{id(ecs)}"
     spec = importlib.util.spec_from_file_location(name, _HANDLER)
@@ -153,6 +155,10 @@ def test_dispatcher_passes_only_bounded_persisted_envelope_pointer(
                 {
                     "name": "MEDIA_JOB_PAYLOAD_SHA256",
                     "value": json.loads(body)["payload_sha256"],
+                },
+                {
+                    "name": "MEDIA_JOB_DEADLINE_EPOCH_S",
+                    "value": str(json.loads(body)["deadline_epoch_s"]),
                 },
             ],
         }
@@ -391,8 +397,12 @@ def test_deadline_exhaustion_after_dispatch_claim_is_terminal(
     ecs = _Ecs()
     module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
     _configure(monkeypatch)
-    readings = iter((1_001, 1_300, 1_300))
-    monkeypatch.setattr(module.time, "time", lambda: next(readings))
+    readings = [1_001, 1_001, 1_001, 1_290]
+
+    def advancing_clock() -> int:
+        return readings.pop(0) if readings else 1_290
+
+    monkeypatch.setattr(module.time, "time", advancing_clock)
 
     with pytest.raises(TimeoutError, match="before task launch"):
         module.handler(
@@ -408,7 +418,7 @@ def test_deadline_exhaustion_after_dispatch_claim_is_terminal(
     assert any(call["UpdateExpression"].startswith("REMOVE dispatch_owner") for call in ddb.calls)
 
 
-def test_legacy_top_level_payload_is_rejected_and_queued_row_is_failed(
+def test_legacy_payload_has_no_trusted_deadline_and_causes_no_network_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ddb = _Dynamo()
@@ -430,8 +440,26 @@ def test_legacy_top_level_payload_is_rejected_and_queued_row_is_failed(
         )
 
     assert ecs.calls == []
-    assert len(ddb.calls) == 1
-    assert ":failed" in ddb.calls[0]["ExpressionAttributeValues"]
+    assert ddb.calls == []
+
+
+def test_expired_envelope_causes_no_post_deadline_network_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    ecs = _Ecs()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_300)
+
+    with pytest.raises(TimeoutError, match="deadline exceeded"):
+        module.handler(
+            {"Records": [{"messageId": "expired", "body": _body()}]},
+            types.SimpleNamespace(aws_request_id="request-1"),
+        )
+
+    assert ddb.calls == []
+    assert ecs.calls == []
 
 
 def test_dispatcher_rejects_non_exact_task_count_and_releases_lease(

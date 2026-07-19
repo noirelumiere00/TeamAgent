@@ -8,7 +8,10 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
+import threading
 import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -47,6 +50,8 @@ _EXTERNAL_HTML_REF = re.compile(
     r"""(?is)(?:src|href)\s*=\s*["']\s*(?:https?:)?//|url\(\s*["']?\s*(?:https?:)?//"""
 )
 _PLACEHOLDER = re.compile(r"[｛{]\s*(\d+)\s*[:：]?[^｝}]*[｝}]")
+_ACTIVE_PROCESS_GROUPS: set[int] = set()
+_ACTIVE_PROCESS_GROUPS_LOCK = threading.Lock()
 
 
 class MediaOperationError(RuntimeError):
@@ -81,23 +86,92 @@ class OperationOutput:
     metadata: dict[str, Any]
 
 
+def _terminate_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    grace_s: float = 2.0,
+) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.communicate(timeout=grace_s)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.communicate()
+
+
+def terminate_active_process_groups() -> None:
+    """Terminate every renderer/tool process group owned by this worker."""
+
+    with _ACTIVE_PROCESS_GROUPS_LOCK:
+        process_groups = tuple(_ACTIVE_PROCESS_GROUPS)
+    for process_group in process_groups:
+        try:
+            os.killpg(process_group, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+
+
+def _run_process(
+    command: list[str],
+    *,
+    budget: DeadlineBudget,
+    timeout_s: float,
+    timeout_code: str,
+    timeout_message: str,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    timeout = _remaining(budget, timeout_s)
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    with _ACTIVE_PROCESS_GROUPS_LOCK:
+        _ACTIVE_PROCESS_GROUPS.add(process.pid)
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_group(process)
+            try:
+                _remaining(budget)
+            except MediaOperationError:
+                raise
+            raise MediaOperationError(timeout_code, timeout_message) from exc
+    finally:
+        with _ACTIVE_PROCESS_GROUPS_LOCK:
+            _ACTIVE_PROCESS_GROUPS.discard(process.pid)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 def _run(
     command: list[str],
     *,
     budget: DeadlineBudget,
     timeout_s: int = _FFMPEG_TIMEOUT_S,
 ) -> None:
-    timeout = _remaining(budget, float(timeout_s))
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        _remaining(budget)
-        raise MediaOperationError("MEDIA_PROCESS_TIMEOUT", "media subprocess timed out") from exc
+    completed = _run_process(
+        command,
+        budget=budget,
+        timeout_s=float(timeout_s),
+        timeout_code="MEDIA_PROCESS_TIMEOUT",
+        timeout_message="media subprocess timed out",
+    )
     if completed.returncode != 0:
         logger.warning(
             "media subprocess failed: command=%s stderr=%s",
@@ -233,18 +307,15 @@ def _node_json(
     }
     for directory in ("home", "tmp", "cache", "config", "data", "state"):
         (workdir / directory).mkdir(mode=0o700, exist_ok=True)
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=workdir,
-            env=environment,
-            check=False,
-            capture_output=True,
-            timeout=_remaining(budget, float(timeout_s)),
-        )
-    except subprocess.TimeoutExpired as exc:
-        _remaining(budget)
-        raise MediaOperationError("MEDIA_TIKTOK_TIMEOUT", "TikTok browser timed out") from exc
+    completed = _run_process(
+        command,
+        cwd=workdir,
+        env=environment,
+        budget=budget,
+        timeout_s=float(timeout_s),
+        timeout_code="MEDIA_TIKTOK_TIMEOUT",
+        timeout_message="TikTok browser timed out",
+    )
     try:
         result = json.loads(completed.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -256,6 +327,59 @@ def _node_json(
         raise MediaOperationError("MEDIA_TIKTOK_FAILED", "TikTok browser job failed")
     _remaining(budget)
     return result
+
+
+def _renderer_json(
+    manifest: dict[str, Any],
+    *,
+    workdir: Path,
+    budget: DeadlineBudget,
+) -> dict[str, Any]:
+    manifest_path = workdir / "render-request.json"
+    manifest_path.write_text(
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    manifest_path.chmod(0o600)
+    completed = _run_process(
+        [
+            sys.executable,
+            "-m",
+            "teamagent.media.render_child",
+            manifest_path.name,
+        ],
+        cwd=workdir,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        budget=budget,
+        timeout_s=_remaining(budget),
+        timeout_code="MEDIA_RENDER_TIMEOUT",
+        timeout_message="media renderer timed out",
+    )
+    try:
+        result = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MediaOperationError(
+            "MEDIA_RENDER_OUTPUT_INVALID",
+            "renderer output is invalid",
+        ) from exc
+    if completed.returncode != 0 or not isinstance(result, dict) or result.get("ok") is not True:
+        code = str(result.get("code", "MEDIA_RENDER_FAILED"))
+        if not re.fullmatch(r"MEDIA_[A-Z0-9_]{1,80}", code):
+            code = "MEDIA_RENDER_FAILED"
+        raise MediaOperationError(code, "media renderer failed")
+    metadata = result.get("metadata")
+    if not isinstance(metadata, dict):
+        raise MediaOperationError(
+            "MEDIA_RENDER_OUTPUT_INVALID",
+            "renderer metadata is invalid",
+        )
+    _remaining(budget)
+    return metadata
 
 
 def _post_row(video: dict[str, Any], keyword: str, rank: int, pid: str) -> dict[str, Any]:
@@ -744,32 +868,6 @@ def _thumbnail(
     )
 
 
-def _build_image_pptx(
-    images: list[bytes],
-    destination: Path,
-    budget: DeadlineBudget,
-) -> None:
-    from pptx import Presentation
-    from pptx.util import Emu, Inches
-
-    presentation = Presentation()
-    presentation.slide_width = Inches(13.333)
-    presentation.slide_height = Inches(7.5)
-    blank = presentation.slide_layouts[6]
-    for image in images:
-        _remaining(budget)
-        slide = presentation.slides.add_slide(blank)
-        slide.shapes.add_picture(
-            io.BytesIO(image),
-            Emu(0),
-            Emu(0),
-            width=presentation.slide_width,
-            height=presentation.slide_height,
-        )
-    presentation.save(str(destination))
-    _remaining(budget)
-
-
 def _slides(
     operation: SlidesOperation,
     workdir: Path,
@@ -782,57 +880,22 @@ def _slides(
     html = html_path.read_text(encoding="utf-8")
     if _EXTERNAL_HTML_REF.search(html):
         raise MediaOperationError("MEDIA_HTML_NETWORK_REFERENCE", "slides HTML references network")
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise MediaOperationError(
-            "MEDIA_PLAYWRIGHT_UNAVAILABLE", "playwright is unavailable"
-        ) from exc
-
-    chromium = os.environ.get("CHROMIUM_PATH", "/usr/bin/chromium-browser")
-    images: list[bytes] = []
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            executable_path=chromium,
-            headless=True,
-            args=[
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--disable-setuid-sandbox",
-            ],
-            chromium_sandbox=True,
-            timeout=_remaining(budget, 30.0) * 1000,
-        )
-        try:
-            page = browser.new_page(
-                viewport={"width": operation.width, "height": operation.height},
-                device_scale_factor=operation.device_scale_factor,
-            )
-            page.set_default_timeout(_remaining(budget) * 1000)
-            page.set_default_navigation_timeout(_remaining(budget) * 1000)
-            page.route("**/*", lambda route: route.abort())
-            page.set_content(
-                html,
-                wait_until="domcontentloaded",
-                timeout=_remaining(budget) * 1000,
-            )
-            slides = page.locator(operation.selector)
-            count = slides.count()
-            if count < 1 or count > 20:
-                raise MediaOperationError(
-                    "MEDIA_SLIDE_COUNT_INVALID", "slide count is out of range"
-                )
-            for index in range(count):
-                images.append(
-                    slides.nth(index).screenshot(
-                        type="png",
-                        timeout=_remaining(budget) * 1000,
-                    )
-                )
-        finally:
-            browser.close()
     destination = workdir / "slides.pptx"
-    _build_image_pptx(images, destination, budget)
+    metadata = _renderer_json(
+        {
+            "kind": "slides",
+            "html": html_path.name,
+            "output": destination.name,
+            "selector": operation.selector,
+            "width": operation.width,
+            "height": operation.height,
+            "scale": operation.device_scale_factor,
+        },
+        workdir=workdir,
+        budget=budget,
+    )
+    if not destination.is_file() or destination.stat().st_size < 5:
+        raise MediaOperationError("MEDIA_PPTX_EMPTY", "slides renderer produced no PPTX")
     return OperationOutput(
         (
             ProducedArtifact(
@@ -841,7 +904,7 @@ def _slides(
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             ),
         ),
-        {"slides": len(images), "network_requests_allowed": 0},
+        metadata,
     )
 
 
@@ -938,35 +1001,33 @@ def _proposal_pptx(
 ) -> OperationOutput:
     template = load(operation.template, workdir / "template.pptx")
     composer_path = load(operation.composer_json, workdir / "composer.json")
-    try:
-        raw = json.loads(composer_path.read_text(encoding="utf-8"))
-        placeholders = {int(key): str(value) for key, value in raw["placeholders"].items()}
-        skipped = {int(item["id"]) for item in raw.get("skipped_placeholders", [])}
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise MediaOperationError("MEDIA_COMPOSER_INVALID", "composer JSON is invalid") from exc
-    valid_ids = set(range(1, 104)) - set(range(48, 56))
-    if set(placeholders) - valid_ids or skipped - valid_ids:
-        raise MediaOperationError("MEDIA_COMPOSER_IDS_INVALID", "composer IDs are invalid")
-    for placeholder_id in valid_ids:
-        placeholders.setdefault(placeholder_id, "要確認（データ未検出）")
-
-    from pptx import Presentation
-
-    presentation = Presentation(str(template))
-    for text_frame in _iter_text_frames(presentation):
-        _remaining(budget)
-        _replace_placeholders(text_frame, placeholders)
-    remaining: list[int] = []
-    for text_frame in _iter_text_frames(presentation):
-        _remaining(budget)
-        combined = "".join(paragraph.text for paragraph in text_frame.paragraphs)
-        remaining.extend(int(match.group(1)) for match in _PLACEHOLDER.finditer(combined))
-    if remaining and operation.fail_if_missing:
-        raise MediaOperationError("MEDIA_PPTX_UNFILLED", "unfilled placeholders remain")
-    injected = _inject_proposal_evidence(presentation, operation, workdir, load, budget)
+    evidence_manifest: list[dict[str, Any]] = []
+    for index, evidence in enumerate(
+        sorted(operation.evidence, key=lambda item: (item.placeholder_id, item.rank))
+    ):
+        image = load(evidence.source, workdir / f"evidence-{index:02d}.bin")
+        evidence_manifest.append(
+            {
+                "placeholder_id": evidence.placeholder_id,
+                "rank": evidence.rank,
+                "path": image.name,
+            }
+        )
     destination = workdir / "proposal.pptx"
-    presentation.save(str(destination))
-    _remaining(budget)
+    metadata = _renderer_json(
+        {
+            "kind": "proposal_pptx",
+            "template": template.name,
+            "composer": composer_path.name,
+            "evidence": evidence_manifest,
+            "output": destination.name,
+            "fail_if_missing": operation.fail_if_missing,
+        },
+        workdir=workdir,
+        budget=budget,
+    )
+    if not destination.is_file() or destination.stat().st_size < 5:
+        raise MediaOperationError("MEDIA_PPTX_EMPTY", "proposal renderer produced no PPTX")
     return OperationOutput(
         (
             ProducedArtifact(
@@ -975,12 +1036,7 @@ def _proposal_pptx(
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             ),
         ),
-        {
-            "filled": len(placeholders),
-            "skipped": len(skipped),
-            "evidence_images": injected,
-            "remaining_placeholders": len(remaining),
-        },
+        metadata,
     )
 
 
@@ -996,29 +1052,21 @@ def _pdf(
     html = html_path.read_text(encoding="utf-8")
     if _EXTERNAL_HTML_REF.search(html):
         raise MediaOperationError("MEDIA_HTML_NETWORK_REFERENCE", "PDF HTML references network")
-    try:
-        from weasyprint import HTML
-    except ImportError as exc:
-        raise MediaOperationError(
-            "MEDIA_WEASYPRINT_UNAVAILABLE",
-            "weasyprint is unavailable",
-        ) from exc
-
-    def block_url_fetcher(_url: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        raise MediaOperationError(
-            "MEDIA_HTML_NETWORK_REFERENCE",
-            "PDF rendering network access is blocked",
-        )
-
     destination = workdir / "document.pdf"
-    _remaining(budget)
-    HTML(string=html, url_fetcher=block_url_fetcher).write_pdf(str(destination))
-    _remaining(budget)
+    metadata = _renderer_json(
+        {
+            "kind": "pdf",
+            "html": html_path.name,
+            "output": destination.name,
+        },
+        workdir=workdir,
+        budget=budget,
+    )
     if not destination.exists() or destination.stat().st_size < 5:
         raise MediaOperationError("MEDIA_PDF_EMPTY", "weasyprint produced an empty PDF")
     return OperationOutput(
         (ProducedArtifact("document.pdf", destination, "application/pdf"),),
-        {"network_requests_allowed": 0},
+        metadata,
     )
 
 
@@ -1059,4 +1107,5 @@ __all__ = [
     "OperationOutput",
     "ProducedArtifact",
     "execute_operation",
+    "terminate_active_process_groups",
 ]

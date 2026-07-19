@@ -24,6 +24,8 @@ _LIVE_CRITICAL_CVES = (
     "CVE-2026-12087",
     "CVE-2026-57433",
 )
+_GRYPE_VERSION = "0.112.0"
+_GRYPE_SEVERITIES = ("unknown", "negligible", "low", "medium", "high", "critical")
 
 
 class EvidenceError(ValueError):
@@ -132,6 +134,40 @@ def _archive_inventory(
             ).encode()
         )
     return digest.hexdigest(), inventory, member_count
+
+
+def _verify_canonical_context_archive(archive_path: Path) -> None:
+    """Reject host metadata, xattrs, unstable order, and noncanonical modes."""
+
+    with tarfile.open(archive_path, "r:") as bundle:
+        if bundle.pax_headers:
+            raise EvidenceError(f"{archive_path.name}: global PAX metadata is forbidden")
+        members = bundle.getmembers()
+    names = [member.name for member in members]
+    if names != sorted(names, key=lambda value: value.encode("utf-8")):
+        raise EvidenceError(f"{archive_path.name}: members are not bytewise ordered")
+    if len(names) != len(set(names)):
+        raise EvidenceError(f"{archive_path.name}: duplicate canonical member")
+    for member in members:
+        if (
+            member.uid != 0
+            or member.gid != 0
+            or member.uname != "root"
+            or member.gname != "root"
+            or member.mtime != 0
+            or member.pax_headers
+        ):
+            raise EvidenceError(f"{archive_path.name}: noncanonical member metadata")
+        if member.isdir():
+            expected_mode = 0o755
+        elif member.issym():
+            expected_mode = 0o777
+        elif member.isfile():
+            expected_mode = 0o755 if member.mode & stat.S_IXUSR else 0o644
+        else:
+            raise EvidenceError(f"{archive_path.name}: unsupported canonical member")
+        if member.mode != expected_mode:
+            raise EvidenceError(f"{archive_path.name}: noncanonical member mode")
 
 
 def _git_object_id(kind: str, body: bytes) -> bytes:
@@ -268,7 +304,14 @@ def verify_trivy_pair(
     _assert_sha256(expected_image_id, field="expected_image_id")
     artifact_ids: set[str] = set()
     all_vulnerability_ids: set[str] = set()
-    counts = {"critical": 0, "high": 0, "secrets": 0}
+    counts = {
+        "unknown": 0,
+        "low": 0,
+        "medium": 0,
+        "high": 0,
+        "critical": 0,
+        "secrets": 0,
+    }
     created_at: dict[str, str] = {}
 
     for kind, report in (("vulnerability", vulnerability), ("secret", secret)):
@@ -301,10 +344,10 @@ def verify_trivy_pair(
                 if vulnerability_id:
                     all_vulnerability_ids.add(vulnerability_id)
                 severity = str(finding.get("Severity") or "").upper()
-                if severity == "CRITICAL":
-                    counts["critical"] += 1
-                elif severity == "HIGH":
-                    counts["high"] += 1
+                severity_key = severity.lower()
+                if severity_key not in {"unknown", "low", "medium", "high", "critical"}:
+                    raise EvidenceError(f"{kind}: unsupported vulnerability severity")
+                counts[severity_key] += 1
             secrets = result.get("Secrets") or []
             if not isinstance(secrets, list):
                 raise EvidenceError(f"{kind}: malformed secret findings")
@@ -312,7 +355,7 @@ def verify_trivy_pair(
 
     if len(artifact_ids) != 1:
         raise EvidenceError("vulnerability and secret reports describe different artifacts")
-    if counts != {"critical": 0, "high": 0, "secrets": 0}:
+    if any(counts.values()):
         raise EvidenceError(f"Trivy zero gate failed: {counts}")
     present_live_cves = sorted(set(_LIVE_CRITICAL_CVES) & all_vulnerability_ids)
     if present_live_cves:
@@ -373,6 +416,212 @@ def verify_scanner_snapshot(
         "vulnerability_db_next_update": next_update.isoformat().replace("+00:00", "Z"),
         "check_bundle_digest": checks["Digest"],
         "check_bundle_downloaded_at": checks["DownloadedAt"],
+    }
+
+
+def _grype_database_summary(
+    status: dict[str, Any],
+    *,
+    scan_finished_at: datetime,
+) -> dict[str, Any]:
+    schema = status.get("schemaVersion")
+    if not isinstance(schema, str) or re.fullmatch(r"v6\.\d+\.\d+", schema) is None:
+        raise EvidenceError("Grype database schema is invalid")
+    if status.get("valid") is not True:
+        raise EvidenceError("Grype database is not valid")
+    source = status.get("from")
+    path = status.get("path")
+    if not isinstance(source, str) or not source or not isinstance(path, str) or not path:
+        raise EvidenceError("Grype database source/path is missing")
+    built = _timestamp(status.get("built"), field="Grype database built")
+    if built > scan_finished_at + timedelta(seconds=5):
+        raise EvidenceError("Grype database build time is in the future")
+    if scan_finished_at - built > timedelta(days=5):
+        raise EvidenceError("Grype database is older than the accepted five-day window")
+    return {
+        "schema_version": schema,
+        "built_at": built.isoformat().replace("+00:00", "Z"),
+        "source": source,
+        "valid": True,
+    }
+
+
+def verify_grype_scanner_snapshot(
+    version_report: dict[str, Any],
+    database_status: dict[str, Any],
+    *,
+    binary_sha256: str,
+    scan_finished_at: datetime,
+) -> dict[str, Any]:
+    if (
+        version_report.get("application") != "grype"
+        or version_report.get("version") != _GRYPE_VERSION
+    ):
+        raise EvidenceError(f"Grype scanner must be exactly {_GRYPE_VERSION}")
+    platform = version_report.get("platform")
+    if not isinstance(platform, str) or re.fullmatch(r"(?:darwin|linux)/arm64", platform) is None:
+        raise EvidenceError("Grype scanner is not an ARM64 binary")
+    git_commit = version_report.get("gitCommit")
+    if not isinstance(git_commit, str) or re.fullmatch(r"[0-9a-f]{40}", git_commit) is None:
+        raise EvidenceError("Grype scanner Git commit is invalid")
+    syft_version = version_report.get("syftVersion")
+    if not isinstance(syft_version, str) or re.fullmatch(r"v\d+\.\d+\.\d+", syft_version) is None:
+        raise EvidenceError("Grype embedded Syft version is invalid")
+    if version_report.get("supportedDbSchema") != 6:
+        raise EvidenceError("Grype supported database schema is unexpected")
+    _timestamp(version_report.get("buildDate"), field="Grype build date")
+    if re.fullmatch(r"[0-9a-f]{64}", binary_sha256) is None:
+        raise EvidenceError("Grype binary SHA-256 is invalid")
+    return {
+        "version": _GRYPE_VERSION,
+        "git_commit": git_commit,
+        "platform": platform,
+        "syft_version": syft_version,
+        "supported_db_schema": 6,
+        "binary_sha256": binary_sha256,
+        "database": _grype_database_summary(
+            database_status,
+            scan_finished_at=scan_finished_at,
+        ),
+    }
+
+
+def verify_grype_report(
+    report: dict[str, Any],
+    *,
+    expected_image_id: str,
+    expected_head: str,
+    scanner: dict[str, Any],
+    scan_started_at: datetime,
+    scan_finished_at: datetime,
+) -> dict[str, Any]:
+    """Bind a complete unsuppressed Grype report to one immutable local image."""
+
+    _assert_sha256(expected_image_id, field="Grype expected image ID")
+    descriptor = report.get("descriptor")
+    if not isinstance(descriptor, dict):
+        raise EvidenceError("Grype descriptor is missing")
+    if descriptor.get("name") != "grype" or descriptor.get("version") != scanner["version"]:
+        raise EvidenceError("Grype report scanner version mismatch")
+    created = _timestamp(descriptor.get("timestamp"), field="Grype descriptor timestamp")
+    tolerance = timedelta(seconds=5)
+    if created < scan_started_at - tolerance or created > scan_finished_at + tolerance:
+        raise EvidenceError("Grype report timestamp is outside this receipt window")
+    configuration = descriptor.get("configuration")
+    if not isinstance(configuration, dict):
+        raise EvidenceError("Grype report configuration is missing")
+    database_config = configuration.get("db")
+    if (
+        configuration.get("show-suppressed") is not True
+        or not isinstance(database_config, dict)
+        or database_config.get("auto-update") is not False
+        or database_config.get("validate-by-hash-on-start") is not True
+        or database_config.get("validate-age") is not True
+    ):
+        raise EvidenceError("Grype report was not produced with the fail-closed scan config")
+    descriptor_database = descriptor.get("db")
+    descriptor_status = (
+        descriptor_database.get("status") if isinstance(descriptor_database, dict) else None
+    )
+    if not isinstance(descriptor_status, dict):
+        raise EvidenceError("Grype report database status is missing")
+    if (
+        _grype_database_summary(
+            descriptor_status,
+            scan_finished_at=scan_finished_at,
+        )
+        != scanner["database"]
+    ):
+        raise EvidenceError("Grype report database differs from the retained scanner snapshot")
+
+    source = report.get("source")
+    target = source.get("target") if isinstance(source, dict) else None
+    if not isinstance(target, dict) or source.get("type") != "image":
+        raise EvidenceError("Grype report source is not a container image")
+    if target.get("userInput") != expected_image_id:
+        raise EvidenceError("Grype report input is not the immutable image ID")
+    repo_digests = target.get("repoDigests")
+    if not isinstance(repo_digests, list) or not any(
+        isinstance(value, str) and value.endswith(f"@{expected_image_id}") for value in repo_digests
+    ):
+        raise EvidenceError("Grype report repository digest does not bind the image ID")
+    if target.get("architecture") != "arm64" or target.get("os") != "linux":
+        raise EvidenceError("Grype report target is not linux/arm64")
+    labels = target.get("labels")
+    if (
+        not isinstance(labels, dict)
+        or labels.get("org.opencontainers.image.revision") != expected_head
+    ):
+        raise EvidenceError("Grype report target revision mismatch")
+
+    ignored = report.get("ignoredMatches")
+    if ignored is not None and (not isinstance(ignored, list) or ignored):
+        raise EvidenceError("Grype report contains suppressed findings")
+    matches = report.get("matches")
+    if not isinstance(matches, list):
+        raise EvidenceError("Grype report matches are missing")
+    counts = {severity: 0 for severity in _GRYPE_SEVERITIES}
+    fixed_available = 0
+    identities: set[tuple[str, str, str]] = set()
+    for index, match in enumerate(matches):
+        if not isinstance(match, dict):
+            raise EvidenceError(f"Grype match {index} is malformed")
+        vulnerability = match.get("vulnerability")
+        artifact = match.get("artifact")
+        if not isinstance(vulnerability, dict) or not isinstance(artifact, dict):
+            raise EvidenceError(f"Grype match {index} lacks vulnerability/package data")
+        advisory = vulnerability.get("id")
+        namespace = vulnerability.get("namespace")
+        data_source = vulnerability.get("dataSource")
+        if (
+            not isinstance(advisory, str)
+            or not advisory
+            or not isinstance(namespace, str)
+            or not namespace
+            or not isinstance(data_source, str)
+            or not data_source.startswith("https://")
+        ):
+            raise EvidenceError(f"Grype match {index} lacks advisory provenance")
+        severity = str(vulnerability.get("severity") or "").lower()
+        if severity not in counts:
+            raise EvidenceError(f"Grype match {index} has unsupported severity")
+        name = artifact.get("name")
+        version = artifact.get("version")
+        purl = artifact.get("purl")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(version, str)
+            or not version
+            or not isinstance(purl, str)
+            or not purl
+        ):
+            raise EvidenceError(f"Grype match {index} lacks exact package identity")
+        _verify_purl_version(purl, version, field=f"Grype match {index}")
+        identity = (advisory, namespace, purl)
+        if identity in identities:
+            raise EvidenceError(f"Grype report contains duplicate match identity: {identity}")
+        identities.add(identity)
+        fix = vulnerability.get("fix")
+        if not isinstance(fix, dict):
+            raise EvidenceError(f"Grype match {index} lacks fix availability")
+        fix_versions = fix.get("versions")
+        fix_state = fix.get("state")
+        if not isinstance(fix_versions, list) or not all(
+            isinstance(value, str) and value for value in fix_versions
+        ):
+            raise EvidenceError(f"Grype match {index} has malformed fix versions")
+        if not isinstance(fix_state, str):
+            raise EvidenceError(f"Grype match {index} has malformed fix state")
+        if fix_versions:
+            fixed_available += 1
+        counts[severity] += 1
+    return {
+        "total": len(matches),
+        **counts,
+        "fixed_available": fixed_available,
+        "suppressed": 0,
+        "created_at": created.isoformat().replace("+00:00", "Z"),
     }
 
 
@@ -572,6 +821,7 @@ def _verify_source(
     context_archive = evidence_dir / "build-context.tar"
     if _sha256(context_archive) != context.get("archive_sha256"):
         raise EvidenceError("build context archive hash mismatch")
+    _verify_canonical_context_archive(context_archive)
     context_tree_digest, context_inventory, context_members = _archive_inventory(context_archive)
     if context_tree_digest != context.get("tree_sha256") or context_members != context.get(
         "members"
@@ -714,6 +964,7 @@ def _verify_image(
     expected_head: str,
     expected_branch: str,
     scanner_version: str,
+    grype_scanner: dict[str, Any],
     scan_started_at: datetime,
     scan_finished_at: datetime,
     runtime_contract: dict[str, Any],
@@ -743,6 +994,11 @@ def _verify_image(
         raise EvidenceError(f"{name}: OCI revision mismatch")
     if labels.get("org.opencontainers.image.ref.name") != expected_branch:
         raise EvidenceError(f"{name}: OCI branch mismatch")
+    context_sha256 = receipt.get("source", {}).get("build_context", {}).get("archive_sha256")
+    if labels.get("io.teamagent.build.context-sha256") != context_sha256:
+        raise EvidenceError(f"{name}: build context label mismatch")
+    if image_receipt.get("build_context_sha256") != context_sha256:
+        raise EvidenceError(f"{name}: build context receipt mismatch")
     expected_kind = "core" if name == "core" else "media-worker"
     if labels.get("io.teamagent.runtime.kind") != expected_kind:
         raise EvidenceError(f"{name}: runtime kind mismatch")
@@ -769,6 +1025,9 @@ def _verify_image(
     if scan["artifact_id"] != image_receipt.get("artifact_id"):
         raise EvidenceError(f"{name}: receipt ArtifactID mismatch")
     if image_receipt.get("trivy_zero") != {
+        "unknown": scan["unknown"],
+        "low": scan["low"],
+        "medium": scan["medium"],
         "critical": scan["critical"],
         "high": scan["high"],
         "secrets": scan["secrets"],
@@ -778,6 +1037,16 @@ def _verify_image(
         raise EvidenceError(f"{name}: receipt live-CVE assertion mismatch")
     retained_summary = _load_json(evidence_dir / f"{name}-trivy-summary.json")
     verify_retained_scan_summary(retained_summary, scan, name=name)
+    grype = verify_grype_report(
+        _load_json(evidence_dir / f"{name}-grype-vulnerability.json"),
+        expected_image_id=image_id,
+        expected_head=expected_head,
+        scanner=grype_scanner,
+        scan_started_at=scan_started_at,
+        scan_finished_at=scan_finished_at,
+    )
+    if image_receipt.get("grype") != grype:
+        raise EvidenceError(f"{name}: receipt Grype summary mismatch")
     sbom = verify_sbom(
         _load_json(evidence_dir / f"{name}-sbom.cdx.json"),
         inspect_record,
@@ -800,6 +1069,8 @@ def _verify_image(
         raise EvidenceError(f"{name}: provenance revision mismatch")
     if arguments.get("build-arg:GIT_BRANCH") != expected_branch:
         raise EvidenceError(f"{name}: provenance branch mismatch")
+    if arguments.get("build-arg:BUILD_CONTEXT_SHA256") != context_sha256:
+        raise EvidenceError(f"{name}: provenance context digest mismatch")
     if not isinstance(environment, dict) or environment.get("platform") != "linux/arm64":
         raise EvidenceError(f"{name}: provenance platform mismatch")
     expected_dockerfile = (
@@ -850,6 +1121,7 @@ def _verify_image(
         "image_id": image_id,
         "local_repo_digests": sorted(repo_digests),
         "trivy": scan,
+        "grype": grype,
         "sbom": sbom,
         "parent_registry_child_digests": parent_digests,
     }
@@ -867,8 +1139,10 @@ def verify_evidence(
         raise EvidenceError("expected HEAD must be full 40-hex")
     checksum_digest = _verify_checksums(evidence_dir) if verify_checksums else None
     receipt = _load_json(evidence_dir / "receipt.json")
-    if receipt.get("schema_version") != "2" or receipt.get("git", {}).get("head") != expected_head:
+    if receipt.get("schema_version") != "3" or receipt.get("git", {}).get("head") != expected_head:
         raise EvidenceError("receipt is stale for expected HEAD")
+    if receipt.get("evidence_scope") != "local-source-validation-only-not-release-credential":
+        raise EvidenceError("local evidence scope is ambiguous")
     current_head = subprocess.run(
         ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
         check=True,
@@ -906,12 +1180,25 @@ def verify_evidence(
     now = datetime.now(UTC)
     if generated > now + timedelta(minutes=5) or now - generated > timedelta(hours=24):
         raise EvidenceError("receipt is outside the accepted freshness window")
-    scanner = verify_scanner_snapshot(
+    trivy_scanner = verify_scanner_snapshot(
         _load_json(evidence_dir / "trivy-version.json"),
         scan_started_at=started,
         scan_finished_at=finished,
     )
-    if scanner != receipt.get("scanner"):
+    try:
+        grype_binary_sha256 = (
+            (evidence_dir / "grype-binary-sha256.txt").read_text(encoding="utf-8").strip()
+        )
+    except OSError as exc:
+        raise EvidenceError("Grype binary SHA-256 evidence is missing") from exc
+    grype_scanner = verify_grype_scanner_snapshot(
+        _load_json(evidence_dir / "grype-version.json"),
+        _load_json(evidence_dir / "grype-db-status.json"),
+        binary_sha256=grype_binary_sha256,
+        scan_finished_at=finished,
+    )
+    scanners = {"trivy": trivy_scanner, "grype": grype_scanner}
+    if scanners != receipt.get("scanners"):
         raise EvidenceError("receipt scanner status mismatch")
     runtime_contract = _load_json(repo_root / "infra/docker/runtime-contract.json")
     required_live_cves = (
@@ -925,6 +1212,23 @@ def verify_evidence(
     }
     if receipt.get("external_gates") != expected_external_gates:
         raise EvidenceError("receipt external gate status is ambiguous")
+    expected_materials = [
+        {
+            "uri": "file:build-context.tar",
+            "digest": {
+                "sha256": receipt.get("source", {}).get("build_context", {}).get("archive_sha256")
+            },
+        },
+        {
+            "uri": "git:source-tree",
+            "digest": {
+                "sha1": receipt.get("git", {}).get("head"),
+                "gitTree": receipt.get("source", {}).get("git_tree"),
+            },
+        },
+    ]
+    if receipt.get("materials") != expected_materials:
+        raise EvidenceError("receipt materials do not bind source and build context")
     source = _verify_source(
         evidence_dir,
         receipt,
@@ -940,7 +1244,8 @@ def verify_evidence(
             name=name,
             expected_head=expected_head,
             expected_branch=resolved_branch,
-            scanner_version=scanner["version"],
+            scanner_version=trivy_scanner["version"],
+            grype_scanner=grype_scanner,
             scan_started_at=started,
             scan_finished_at=finished,
             runtime_contract=runtime_contract,
@@ -971,7 +1276,7 @@ def verify_evidence(
     return {
         "head": expected_head,
         "branch": resolved_branch,
-        "scanner": scanner,
+        "scanners": scanners,
         "source": source,
         "images": images,
         "runtime_composition_services": sorted(required_smokes),

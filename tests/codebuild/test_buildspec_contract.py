@@ -66,8 +66,9 @@ def test_core_and_media_builds_pass_every_required_provenance_binding() -> None:
     contract = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
 
     assert body.count("docker buildx build") == 2
-    assert "--file infra/docker/Dockerfile.teamagent-mcp" in body
-    assert "--file infra/docker/Dockerfile.teamagent-media-worker" in body
+    assert '--file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-mcp"' in body
+    assert ('--file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-media-worker"') in body
+    assert body.count('- <"$BUILD_CONTEXT_TAR"') == 2
     assert body.count("--target final") == 2
     assert body.count("--platform linux/arm64") == 2
     assert body.count("--provenance=mode=max") == 2
@@ -128,13 +129,11 @@ def test_app_html_uses_only_pinned_version_and_verified_bytes() -> None:
         '= "$APP_HTML_SHA256" ]'
     ) in body
     assert (
-        '[ "$(sha256sum src/teamagent/connect_web/static/app.html | awk '
-        '\'{print $1}\')" = "$BAKED_APP_HTML_SHA256" ]'
+        'sha256sum "$CONTEXT_VERIFY_DIR/src/teamagent/connect_web/static/app.html"'
+        " | awk '{print $1}'"
     ) in body
-    assert (
-        "install -m 0644 /tmp/baked-connect-web-app.html "
-        "\\\n          src/teamagent/connect_web/static/app.html"
-    ) in body
+    assert '"$BAKED_APP_HTML_SHA256" ]' in body
+    assert "install -m 0644 /tmp/baked-connect-web-app.html" not in body
     assert '[ "$APP_HTML_SHA256" != "$BAKED_APP_HTML_SHA256" ]' in body
     assert '--build-arg "APP_HTML_SHA256=$APP_HTML_SHA256"' in body
     assert '--build-arg "APP_HTML_VERSION_ID=$APP_HTML_VERSION_ID"' in body
@@ -196,11 +195,15 @@ def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app(
         encoding="utf-8"
     )
 
-    assert "git fetch --no-tags --force origin refs/heads/dev:refs/remotes/origin/dev" in body
-    assert 'refs/remotes/origin/dev^{commit})" = "$EXPECTED_COMMIT"' in body
+    assert 'git ls-remote --exit-code --heads "$EXPECTED_REPOSITORY"' in body
+    assert '"$EXPECTED_HEAD_REF" "$EXPECTED_BASE_REF"' in body
+    assert "worktree add --quiet --detach" in body
+    assert 'merge-base "$EXPECTED_BASE_OID" "$EXPECTED_COMMIT"' in body
     assert "get-bucket-versioning" in body
     assert "--expected-bucket-owner 718959508629" in body
-    assert 'git -C "$CODEBUILD_SRC_DIR" archive' in body
+    assert 'git -C "$PUBLISHER_CHECKOUT" archive' in body
+    assert "canonical_build_context.py" in body
+    assert "--build-context-sha256" in body
     assert (
         'SOURCE_DECLARATION_KEY="source-declarations/mcp/$EXPECTED_COMMIT/$SOURCE_SHA256/$PUBLISHED_SOURCE_VERSION_ID.json"'
         in body

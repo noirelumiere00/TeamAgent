@@ -37,7 +37,7 @@ SOURCE_BRANCH = "dev"
 SOURCE_DECLARATION_KIND = "teamagent.source-declaration"
 RELEASE_RECEIPT_KIND = "teamagent.release-receipt"
 DEPLOYMENT_INTENT_KIND = "teamagent.image-deployment-intent"
-SOURCE_DECLARATION_SCHEMA = 2
+SOURCE_DECLARATION_SCHEMA = 4
 RELEASE_RECEIPT_SCHEMA = 2
 DEPLOYMENT_INTENT_SCHEMA = 1
 MAX_RELEASE_RECEIPT_LIFETIME_SECONDS = 3600
@@ -334,6 +334,9 @@ def validate_source_declaration(
     expected_vault_manifest_sha256: str | None = None,
     expected_build_inputs_sha256: str | None = None,
     expected_contract_sha256: str | None = None,
+    expected_build_context_sha256: str | None = None,
+    expected_build_context_version: str | None = None,
+    expected_remote_base_oid: str | None = None,
 ) -> dict[str, Any]:
     declaration = _mapping(value, label="source declaration")
     _exact_keys(
@@ -342,7 +345,9 @@ def validate_source_declaration(
             "schema_version",
             "kind",
             "publisher",
+            "remote",
             "source",
+            "build_context",
             "app_html",
             "application_provenance",
             "contract",
@@ -371,6 +376,33 @@ def validate_source_declaration(
         raise EvidenceError("source repository or branch is not allowlisted")
     commit = _sha1(publisher["commit"], label="source commit")
 
+    remote = _mapping(declaration["remote"], label="protected remote identity")
+    _exact_keys(
+        remote,
+        {
+            "repository",
+            "head_ref",
+            "head_oid",
+            "base_ref",
+            "base_oid",
+            "merge_base_oid",
+        },
+        label="protected remote identity",
+    )
+    if (
+        remote["repository"] != SOURCE_REPOSITORY
+        or remote["head_ref"] != "refs/heads/dev"
+        or remote["base_ref"] != "refs/heads/main"
+    ):
+        raise EvidenceError("protected remote repository or refs are not allowlisted")
+    remote_head_oid = _sha1(remote["head_oid"], label="protected remote head OID")
+    remote_base_oid = _sha1(remote["base_oid"], label="protected remote base OID")
+    merge_base_oid = _sha1(remote["merge_base_oid"], label="reviewed merge-base OID")
+    if remote_head_oid != commit:
+        raise EvidenceError("protected remote head does not bind the source commit")
+    if merge_base_oid != remote_base_oid:
+        raise EvidenceError("protected base is not the reviewed merge-base")
+
     source = _mapping(declaration["source"], label="source archive")
     _exact_keys(
         source,
@@ -382,6 +414,38 @@ def validate_source_declaration(
     source_version = _version_id(source["version_id"], label="source archive VersionId")
     _sha256(source["sha256"], label="source archive SHA-256")
     _sha256(source["manifest_sha256"], label="embedded source manifest SHA-256")
+
+    build_context = _mapping(declaration["build_context"], label="build context")
+    _exact_keys(
+        build_context,
+        {
+            "bucket",
+            "key",
+            "version_id",
+            "canonical_tar_sha256",
+            "source_tree_oid",
+            "normalization",
+        },
+        label="build context",
+    )
+    if build_context["bucket"] != EVIDENCE_BUCKET:
+        raise EvidenceError("canonical build context bucket is not allowlisted")
+    build_context_sha256 = _sha256(
+        build_context["canonical_tar_sha256"],
+        label="canonical build context SHA-256",
+    )
+    expected_context_key = (
+        f"source-contexts/mcp/{commit}/{build_context_sha256}/{publisher['build_id']}.tar"
+    )
+    if build_context["key"] != expected_context_key:
+        raise EvidenceError("canonical build context key does not bind the publisher")
+    build_context_version = _version_id(
+        build_context["version_id"],
+        label="canonical build context VersionId",
+    )
+    _sha1(build_context["source_tree_oid"], label="source tree OID")
+    if build_context["normalization"] != "teamagent-canonical-tar-v1":
+        raise EvidenceError("build context normalization contract mismatch")
 
     app_html = _mapping(declaration["app_html"], label="app HTML")
     _exact_keys(
@@ -434,6 +498,21 @@ def validate_source_declaration(
             "build_inputs SHA-256",
         ),
         (expected_contract_sha256, contract_sha256, "source contract SHA-256"),
+        (
+            expected_build_context_sha256,
+            build_context_sha256,
+            "canonical build context SHA-256",
+        ),
+        (
+            expected_build_context_version,
+            build_context_version,
+            "canonical build context VersionId",
+        ),
+        (
+            expected_remote_base_oid,
+            remote_base_oid,
+            "protected remote base OID",
+        ),
     )
     for expected, actual, label in expected_values:
         if expected is not None and expected != actual:
@@ -449,6 +528,13 @@ def source_declaration(
     source_version: str,
     source_sha256: str,
     manifest_sha256: str,
+    build_context_key: str,
+    build_context_version: str,
+    build_context_sha256: str,
+    source_tree_oid: str,
+    remote_head_oid: str,
+    remote_base_oid: str,
+    merge_base_oid: str,
     app_version: str,
     app_sha256: str,
     vault_manifest_sha256: str,
@@ -465,12 +551,28 @@ def source_declaration(
             "branch": SOURCE_BRANCH,
             "commit": commit,
         },
+        "remote": {
+            "repository": SOURCE_REPOSITORY,
+            "head_ref": "refs/heads/dev",
+            "head_oid": remote_head_oid,
+            "base_ref": "refs/heads/main",
+            "base_oid": remote_base_oid,
+            "merge_base_oid": merge_base_oid,
+        },
         "source": {
             "bucket": SOURCE_BUCKET,
             "key": SOURCE_KEY,
             "version_id": source_version,
             "sha256": source_sha256,
             "manifest_sha256": manifest_sha256,
+        },
+        "build_context": {
+            "bucket": EVIDENCE_BUCKET,
+            "key": build_context_key,
+            "version_id": build_context_version,
+            "canonical_tar_sha256": build_context_sha256,
+            "source_tree_oid": source_tree_oid,
+            "normalization": "teamagent-canonical-tar-v1",
         },
         "app_html": {
             "bucket": SOURCE_BUCKET,
@@ -694,6 +796,7 @@ def validate_release_receipt(
     normalized_subjects: list[dict[str, Any]] = []
     seen_names: set[str] = set()
     mcp_app_bindings: set[str] = set()
+    mcp_context_bindings: set[str] = set()
     for index, raw_subject in enumerate(subjects):
         label = f"release subject[{index}]"
         subject = _mapping(raw_subject, label=label)
@@ -784,6 +887,11 @@ def validate_release_receipt(
                 label=f"{label} application provenance binding",
             )
             mcp_app_bindings.add(app_binding)
+            context_binding = _sha256(
+                labels.get("io.teamagent.build.context-sha256"),
+                label=f"{label} canonical build context binding",
+            )
+            mcp_context_bindings.add(context_binding)
             if name == "core":
                 _version_id(
                     labels.get("io.teamagent.contract.baked-app-html-version-id"),
@@ -826,6 +934,9 @@ def validate_release_receipt(
             {
                 "scanner",
                 "actual_image",
+                "unknown",
+                "low",
+                "medium",
                 "critical",
                 "high",
                 "secrets",
@@ -838,6 +949,9 @@ def validate_release_receipt(
         expected_image = f"{REGISTRY}/{quarantine_repository}@{digest}"
         if scan["actual_image"] != expected_image:
             raise EvidenceError(f"{label}.scan does not bind the quarantine digest")
+        _zero(scan["unknown"], label=f"{label}.scan.unknown")
+        _zero(scan["low"], label=f"{label}.scan.low")
+        _zero(scan["medium"], label=f"{label}.scan.medium")
         _zero(scan["critical"], label=f"{label}.scan.critical")
         _zero(scan["high"], label=f"{label}.scan.high")
         _zero(scan["secrets"], label=f"{label}.scan.secrets")
@@ -865,6 +979,10 @@ def validate_release_receipt(
     if pipeline == "mcp" and len(mcp_app_bindings) != 1:
         raise EvidenceError(
             "MCP core and media subjects must bind one application provenance digest"
+        )
+    if pipeline == "mcp" and len(mcp_context_bindings) != 1:
+        raise EvidenceError(
+            "MCP core and media subjects must bind one canonical build context digest"
         )
 
     if seen_names != set(expected_subjects):
@@ -1380,11 +1498,13 @@ def _parse_terraform_gate_query(
     str,
     str,
     str,
+    str,
 ]:
     _exact_keys(
         query,
         {
             "images_json",
+            "mcp_media_image",
             "evidence_json",
             "contracts_json",
             "contract_ready_json",
@@ -1425,6 +1545,18 @@ def _parse_terraform_gate_query(
     normalized_shared_generation_ledger = _validate_shared_generation_ledger_binding(
         shared_generation_ledger
     )
+    mcp_media_image = query["mcp_media_image"]
+    if not isinstance(mcp_media_image, str):
+        raise EvidenceError("mcp_media_image must be a string")
+    if (
+        mcp_media_image
+        and re.fullmatch(
+            rf"{re.escape(REGISTRY)}/teamagent-media-worker@sha256:[0-9a-f]{{64}}",
+            mcp_media_image,
+        )
+        is None
+    ):
+        raise EvidenceError("MCP media image is not a digest-only release reference")
     signing_key_arn = _string(query["signing_key_arn"], label="signing key ARN")
     encryption_key_arn = _string(query["encryption_key_arn"], label="encryption key ARN")
     intent_id = _uuid4(query["deployment_intent_id"], label="deployment intent ID")
@@ -1437,6 +1569,7 @@ def _parse_terraform_gate_query(
         ready,
         application,
         normalized_shared_generation_ledger,
+        mcp_media_image,
         signing_key_arn,
         encryption_key_arn,
         intent_id,
@@ -1460,6 +1593,7 @@ def _deployment_binding(
     contracts: Mapping[str, Any],
     application: Mapping[str, Any],
     shared_generation_ledger: Mapping[str, Any],
+    mcp_media_image: str,
     intent_id: str,
 ) -> tuple[str, list[str], str]:
     selected = {name: image for name, image in images.items() if image}
@@ -1514,6 +1648,7 @@ def _deployment_binding(
         "schema_version": DEPLOYMENT_INTENT_SCHEMA,
         "intent_id": intent_id,
         "images": {name: selected[name] for name in sorted(selected)},
+        "mcp_media_image": mcp_media_image,
         "evidence": {name: dict(references[name]) for name in sorted(references)},
         "contracts": {name: contracts[name] for name in sorted(selected)},
         "application": {
@@ -1534,6 +1669,7 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
         ready,
         application,
         shared_generation_ledger,
+        mcp_media_image,
         signing_key_arn,
         encryption_key_arn,
         intent_id,
@@ -1548,6 +1684,8 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
         raise EvidenceError("Terraform supplied an unknown application binding")
     if "mcp" in selected and "mcp" not in application:
         raise EvidenceError("Terraform omitted the MCP application binding")
+    if mcp_media_image and "mcp" not in selected:
+        raise EvidenceError("MCP media image requires the MCP core release bundle")
 
     verified: list[str] = []
     with tempfile.TemporaryDirectory(prefix="teamagent-release-gate.") as temporary:
@@ -1696,6 +1834,31 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
                 contract_sha256=contract_sha256,
             )
             if pipeline == "mcp":
+                core_matches = [
+                    subject
+                    for subject in validated_receipt["subjects"]
+                    if (
+                        subject["name"] == "core"
+                        and image
+                        == f"{REGISTRY}/{subject['release_repository']}@{subject['digest']}"
+                    )
+                ]
+                if len(core_matches) != 1:
+                    raise EvidenceError("MCP core image does not match the core receipt subject")
+                if mcp_media_image:
+                    media_matches = [
+                        subject
+                        for subject in validated_receipt["subjects"]
+                        if (
+                            subject["name"] == "media"
+                            and mcp_media_image
+                            == (f"{REGISTRY}/{subject['release_repository']}@{subject['digest']}")
+                        )
+                    ]
+                    if len(media_matches) != 1:
+                        raise EvidenceError(
+                            "MCP media image does not match the media receipt subject"
+                        )
                 _validate_mcp_deployment_application(
                     validated_receipt,
                     application.get("mcp"),
@@ -1708,6 +1871,7 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
         contracts=contracts,
         application=application,
         shared_generation_ledger=shared_generation_ledger,
+        mcp_media_image=mcp_media_image,
         intent_id=intent_id,
     )
     return {
@@ -1817,6 +1981,7 @@ def deployment_plan_metadata(
             "deployment_context_sha256",
             "receipt_claims_sha256",
             "requested_images",
+            "requested_media_image",
             "application_provenance",
             "shared_generation_ledger",
         },
@@ -1826,7 +1991,13 @@ def deployment_plan_metadata(
         gate_input["requested_images"],
         label="saved Terraform requested images",
     )
-    if not any(isinstance(image, str) and image for image in requested_images.values()):
+    requested_media_image = gate_input["requested_media_image"]
+    if not isinstance(requested_media_image, str):
+        raise EvidenceError("saved Terraform requested media image is malformed")
+    if not (
+        any(isinstance(image, str) and image for image in requested_images.values())
+        or requested_media_image
+    ):
         raise EvidenceError("saved Terraform plan has no requested production image")
     application_provenance = _mapping(
         gate_input["application_provenance"],
@@ -2861,6 +3032,7 @@ def consume_deployment_intent(
         _,
         application,
         shared_generation_ledger,
+        mcp_media_image,
         _,
         _,
         intent_id,
@@ -2871,6 +3043,7 @@ def consume_deployment_intent(
         contracts=contracts,
         application=application,
         shared_generation_ledger=shared_generation_ledger,
+        mcp_media_image=mcp_media_image,
         intent_id=intent_id,
     )
     if (
@@ -3006,6 +3179,13 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--source-version", required=True)
     source.add_argument("--source-sha256", required=True)
     source.add_argument("--manifest-sha256", required=True)
+    source.add_argument("--build-context-key", required=True)
+    source.add_argument("--build-context-version", required=True)
+    source.add_argument("--build-context-sha256", required=True)
+    source.add_argument("--source-tree-oid", required=True)
+    source.add_argument("--remote-head-oid", required=True)
+    source.add_argument("--remote-base-oid", required=True)
+    source.add_argument("--merge-base-oid", required=True)
     source.add_argument("--app-version", required=True)
     source.add_argument("--app-sha256", required=True)
     source.add_argument("--vault-manifest-sha256", required=True)
@@ -3022,6 +3202,9 @@ def _parser() -> argparse.ArgumentParser:
     verify_source.add_argument("--expected-vault-manifest-sha256", required=True)
     verify_source.add_argument("--expected-build-inputs-sha256", required=True)
     verify_source.add_argument("--expected-contract-sha256", required=True)
+    verify_source.add_argument("--expected-build-context-sha256")
+    verify_source.add_argument("--expected-build-context-version")
+    verify_source.add_argument("--expected-remote-base-oid")
 
     receipt = commands.add_parser("verify-release-receipt")
     receipt.add_argument("--receipt", type=Path, required=True)
@@ -3131,6 +3314,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_version=args.source_version,
                 source_sha256=args.source_sha256,
                 manifest_sha256=args.manifest_sha256,
+                build_context_key=args.build_context_key,
+                build_context_version=args.build_context_version,
+                build_context_sha256=args.build_context_sha256,
+                source_tree_oid=args.source_tree_oid,
+                remote_head_oid=args.remote_head_oid,
+                remote_base_oid=args.remote_base_oid,
+                merge_base_oid=args.merge_base_oid,
                 app_version=args.app_version,
                 app_sha256=args.app_sha256,
                 vault_manifest_sha256=args.vault_manifest_sha256,
@@ -3148,6 +3338,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_vault_manifest_sha256=args.expected_vault_manifest_sha256,
                 expected_build_inputs_sha256=args.expected_build_inputs_sha256,
                 expected_contract_sha256=args.expected_contract_sha256,
+                expected_build_context_sha256=args.expected_build_context_sha256,
+                expected_build_context_version=args.expected_build_context_version,
+                expected_remote_base_oid=args.expected_remote_base_oid,
             )
         elif args.command == "verify-release-receipt":
             now = _timestamp(args.now, label="now") if args.now else None

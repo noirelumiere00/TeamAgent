@@ -52,6 +52,7 @@ class _Backend:
         self.status = status
         self.version = version
         self.lease_owner = lease_owner
+        self.attempt_id = ""
         self.lease_expires_at = lease_expires_at
         self.result = result
         self.claims = 0
@@ -60,6 +61,7 @@ class _Backend:
         self.stores = 0
         self.cleanups = 0
         self.fail_cleanup = False
+        self.events: list[str] = []
 
     def assert_request_scope(self, request: MediaJobRequest) -> None:
         assert request.output_bucket == "teamagent-media-test"
@@ -82,13 +84,21 @@ class _Backend:
         self.status = "running"
         self.version += 1
         self.lease_owner = owner
+        self.attempt_id = f"attempt-{self.version}"
         self.lease_expires_at = now_epoch_s + 60
-        return WorkerClaim(lease=WorkerLease(owner=owner, version=self.version))
+        return WorkerClaim(
+            lease=WorkerLease(
+                owner=owner,
+                version=self.version,
+                attempt_id=self.attempt_id,
+            )
+        )
 
     def _assert_lease(self, lease: WorkerLease) -> None:
         assert self.status == "running"
         assert lease.owner == self.lease_owner
         assert lease.version == self.version
+        assert lease.attempt_id == self.attempt_id
 
     def load_object(
         self,
@@ -114,7 +124,10 @@ class _Backend:
         body = artifact.path.read_bytes()
         return S3ObjectRef(
             bucket=request.output_bucket,
-            key=(f"{request.output_prefix}attempts/{lease.version}/output/{artifact.name}"),
+            key=(
+                f"{request.output_prefix}attempts/{lease.version}/"
+                f"{lease.attempt_id}/output/{artifact.name}"
+            ),
             sha256=hashlib.sha256(body).hexdigest(),
             size=len(body),
             content_type=artifact.content_type,
@@ -129,14 +142,17 @@ class _Backend:
         del request
         self._assert_lease(lease)
         self.stores += 1
+        self.events.append("store")
         self.result = result
         self.status = result.status
         self.version += 1
 
     def cleanup_attempt(self, request: MediaJobRequest, lease: WorkerLease) -> None:
         del request
-        self._assert_lease(lease)
+        assert lease.owner == self.lease_owner
+        assert lease.attempt_id == self.attempt_id
         self.cleanups += 1
+        self.events.append("cleanup")
         if self.fail_cleanup:
             raise RuntimeError("S3 cleanup unavailable")
 
@@ -170,6 +186,7 @@ def _pointer_backend(request: MediaJobRequest) -> tuple[AwsWorkerBackend, _Point
     backend = object.__new__(AwsWorkerBackend)
     backend._table = "jobs"
     backend._ddb = ddb
+    backend._deadline_epoch_s = request.deadline_epoch_s
     return backend, ddb
 
 
@@ -246,7 +263,7 @@ def test_concurrent_duplicate_does_not_execute_store_or_cleanup(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_terminal_duplicate_after_deadline_returns_exact_result_without_cleanup(
+def test_worker_never_calls_backend_after_absolute_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request = _request()
@@ -274,16 +291,17 @@ def test_terminal_duplicate_after_deadline_returns_exact_result_without_cleanup(
         raise AssertionError("terminal duplicate executed media operation")
 
     monkeypatch.setattr("teamagent.media.worker.execute_operation", must_not_execute)
-    result = run_job(
-        request,
-        backend,
-        temp_root=tmp_path,
-        now_epoch_s=request.deadline_epoch_s + 100,
-        owner="worker-b",
-    )
+    with pytest.raises(TimeoutError, match="before claim"):
+        run_job(
+            request,
+            backend,
+            temp_root=tmp_path,
+            now_epoch_s=request.deadline_epoch_s + 100,
+            owner="worker-b",
+        )
 
-    assert result == terminal
     assert backend.version == 2
+    assert backend.claims == 0
     assert backend.stores == 0
     assert backend.cleanups == 0
 
@@ -308,12 +326,12 @@ def test_expired_worker_lease_is_taken_over_with_new_attempt_prefix(
     )
 
     assert result.status == "done"
-    assert result.artifacts[0].object.key.endswith("/attempts/5/output/thumbnail")
+    assert result.artifacts[0].object.key.endswith("/attempts/5/attempt-5/output/thumbnail")
     assert backend.version == 6
     assert backend.stores == 1
 
 
-def test_newly_claimed_expired_request_is_failed_without_execution(
+def test_request_inside_terminal_reserve_is_failed_without_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request = _request()
@@ -327,14 +345,15 @@ def test_newly_claimed_expired_request_is_failed_without_execution(
         request,
         backend,
         temp_root=tmp_path,
-        now_epoch_s=request.deadline_epoch_s + 1,
+        now_epoch_s=request.deadline_epoch_s - 1,
         owner="worker-a",
     )
 
     assert result.status == "failed"
     assert result.error_code == "MEDIA_JOB_DEADLINE_EXCEEDED"
     assert backend.stores == 1
-    assert backend.cleanups == 0
+    assert backend.cleanups == 1
+    assert backend.events == ["store", "cleanup"]
 
 
 def test_worker_failure_cleans_only_owned_attempt_and_local_request_dir(
@@ -358,10 +377,74 @@ def test_worker_failure_cleans_only_owned_attempt_and_local_request_dir(
     assert result.error_code == "MEDIA_TEST_FAILED"
     assert backend.cleanups == 1
     assert backend.stores == 1
+    assert backend.events == ["store", "cleanup"]
     assert list(tmp_path.iterdir()) == []
 
 
-def test_worker_cleanup_error_is_not_suppressed_or_recorded_as_success(
+class _LeaseLostError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("lease lost")
+        self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
+class _LeaseLossDynamo:
+    def __init__(self) -> None:
+        self.updates = 0
+
+    def update_item(self, **_kwargs: object) -> dict[str, object]:
+        self.updates += 1
+        if self.updates == 2:
+            raise _LeaseLostError
+        return {}
+
+
+class _AttemptS3:
+    def __init__(self) -> None:
+        self.objects: dict[str, dict[str, object]] = {}
+
+    def put_object(self, **kwargs: object) -> dict[str, object]:
+        key = str(kwargs["Key"])
+        self.objects[key] = {
+            "Body": kwargs["Body"],
+            "Metadata": kwargs["Metadata"],
+        }
+        return {}
+
+    def head_object(self, **kwargs: object) -> dict[str, object]:
+        return {"Metadata": self.objects[str(kwargs["Key"])]["Metadata"]}
+
+    def delete_object(self, **kwargs: object) -> dict[str, object]:
+        self.objects.pop(str(kwargs["Key"]), None)
+        return {}
+
+
+def test_lease_loss_after_s3_put_removes_only_exact_attempt_orphan(
+    tmp_path: Path,
+) -> None:
+    request = _request()
+    artifact_path = tmp_path / "thumbnail.jpg"
+    artifact_path.write_bytes(b"jpeg")
+    backend = object.__new__(AwsWorkerBackend)
+    backend._bucket = request.output_bucket
+    backend._table = "jobs"
+    backend._kms_key_id = ""
+    backend._clock = lambda: 101.0
+    backend._deadline_epoch_s = request.deadline_epoch_s
+    backend._ddb = _LeaseLossDynamo()
+    backend._s3 = _AttemptS3()
+    lease = WorkerLease(owner="worker-a", version=7, attempt_id="attempt-exact")
+
+    with pytest.raises(_LeaseLostError):
+        backend.upload_artifact(
+            request,
+            lease,
+            ProducedArtifact("thumbnail", artifact_path, "image/jpeg"),
+        )
+
+    assert backend._s3.objects == {}
+
+
+def test_worker_cleanup_error_preserves_terminal_failure_for_janitor_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     backend = _Backend()
@@ -372,18 +455,20 @@ def test_worker_cleanup_error_is_not_suppressed_or_recorded_as_success(
 
     monkeypatch.setattr("teamagent.media.worker.execute_operation", fail_operation)
 
-    with pytest.raises(RuntimeError, match="S3 cleanup unavailable"):
-        run_job(
-            _request(),
-            backend,
-            temp_root=tmp_path,
-            now_epoch_s=101,
-            owner="worker-a",
-        )
+    result = run_job(
+        _request(),
+        backend,
+        temp_root=tmp_path,
+        now_epoch_s=101,
+        owner="worker-a",
+    )
 
-    assert backend.status == "running"
-    assert backend.stores == 0
+    assert result.status == "failed"
+    assert result.error_code == "MEDIA_TEST_FAILED"
+    assert backend.status == "failed"
+    assert backend.stores == 1
     assert backend.cleanups == 1
+    assert backend.events == ["store", "cleanup"]
     assert list(tmp_path.iterdir()) == []
 
 
@@ -395,7 +480,7 @@ def test_worker_fails_terminally_when_budget_expires_after_operation(
 
     def finish_after_deadline(*args: object, **kwargs: object) -> OperationOutput:
         output = _successful_operation(*args, **kwargs)
-        clock[0] = 401.0
+        clock[0] = 386.0
         return output
 
     monkeypatch.setattr("teamagent.media.worker.execute_operation", finish_after_deadline)
@@ -413,3 +498,27 @@ def test_worker_fails_terminally_when_budget_expires_after_operation(
     assert backend.uploads == 0
     assert backend.cleanups == 1
     assert backend.stores == 1
+    assert backend.events == ["store", "cleanup"]
+
+
+def test_worker_reserves_terminal_budget_before_starting_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request()
+    backend = _Backend()
+
+    def must_not_execute(*_args: object, **_kwargs: object) -> OperationOutput:
+        raise AssertionError("operation started inside terminal reserve")
+
+    monkeypatch.setattr("teamagent.media.worker.execute_operation", must_not_execute)
+    result = run_job(
+        request,
+        backend,
+        temp_root=tmp_path,
+        now_epoch_s=request.deadline_epoch_s - 14,
+        owner="worker-a",
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "MEDIA_JOB_DEADLINE_EXCEEDED"
+    assert backend.events == ["store", "cleanup"]

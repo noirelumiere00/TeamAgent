@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import uuid
 from typing import Any
 
@@ -18,6 +19,7 @@ import structlog
 from teamagent.adapters.media_job import MediaJobClient, MediaJobError
 from teamagent.media.contracts import (
     MediaJobResult,
+    S3ObjectRef,
     TikTokAcquireOperation,
     TikTokClientConfig,
     make_job_request,
@@ -27,13 +29,13 @@ logger = structlog.get_logger(__name__)
 
 _PRESIGN_S = 300
 _DEADLINE_S = 15 * 60
+_STATUS_DEADLINE_S = 30
 
 
 class TikTokTaskStore:
     """Compatibility adapter over the generic SQS/DynamoDB/S3 media boundary."""
 
     def __init__(self) -> None:
-        self._region = os.environ.get("AWS_REGION") or "ap-northeast-1"
         self._queue_url = os.environ.get("MEDIA_TASK_QUEUE") or os.environ.get(
             "TIKTOK_TASK_QUEUE", ""
         )
@@ -66,6 +68,8 @@ class TikTokTaskStore:
                 has_bucket=bool(self._bucket),
             )
             return False
+        now_epoch_s = int(time.time())
+        deadline_epoch_s = now_epoch_s + _DEADLINE_S
         try:
             raw_client = spec.get("client") or {}
             if not isinstance(raw_client, dict):
@@ -90,7 +94,9 @@ class TikTokTaskStore:
                 operation=operation,
                 output_bucket=self._bucket,
                 request_fingerprint=request_fingerprint,
+                now_epoch_s=now_epoch_s,
                 timeout_s=_DEADLINE_S,
+                deadline_epoch_s=deadline_epoch_s,
                 artifact_ttl_s=MediaJobClient.artifact_ttl_seconds(),
                 job_id=job_id,
                 output_prefix=f"media-jobs/{job_id}/",
@@ -119,10 +125,11 @@ class TikTokTaskStore:
 
         if not self._table:
             return None
+        deadline_epoch_s = int(time.time()) + _STATUS_DEADLINE_S
         try:
             session = self._session()
             client = self._client(session)
-            result = client.get_result(job_id)
+            result = client.get_result(job_id, deadline_epoch_s=deadline_epoch_s)
             if result is None:
                 return None
             output: dict[str, Any] = {
@@ -135,7 +142,13 @@ class TikTokTaskStore:
                 "warnings": result.metadata.get("warnings") or [],
             }
             if result.status == "done":
-                output.update(self._presign_outputs(session, client, result))
+                output.update(
+                    self._presign_outputs(
+                        client,
+                        result,
+                        deadline_epoch_s=deadline_epoch_s,
+                    )
+                )
             return output
         except Exception as exc:
             logger.warning("tiktok_status_failed", job_id=job_id, error=type(exc).__name__)
@@ -147,34 +160,31 @@ class TikTokTaskStore:
 
     def _presign_outputs(
         self,
-        session: Any,
         client: MediaJobClient,
         result: MediaJobResult,
+        *,
+        deadline_epoch_s: int,
     ) -> dict[str, Any]:
         """Presign verified, worker-produced artifacts for five minutes."""
 
-        s3 = session.client("s3", region_name=self._region)
         artifacts = {artifact.name: artifact.object for artifact in result.artifacts}
         prefix = str(result.metadata.get("s3_prefix") or f"media-jobs/{result.job_id}/")
         prefix = prefix if prefix.endswith("/") else f"{prefix}/"
 
-        def presign(key: str) -> str | None:
-            if not key.startswith(prefix):
+        def presign(ref: S3ObjectRef | None) -> str | None:
+            if ref is None or not ref.key.startswith(prefix):
                 return None
             try:
-                return str(
-                    s3.generate_presigned_url(
-                        "get_object",
-                        Params={"Bucket": self._bucket, "Key": key},
-                        ExpiresIn=_PRESIGN_S,
-                    )
+                return client.presign_get(
+                    ref,
+                    deadline_epoch_s=deadline_epoch_s,
+                    expires_s=_PRESIGN_S,
                 )
             except Exception:
                 return None
 
         def artifact_url(name: str) -> str | None:
-            ref = artifacts.get(name)
-            return presign(ref.key) if ref is not None else None
+            return presign(artifacts.get(name))
 
         output: dict[str, Any] = {
             "s3_bucket": self._bucket,
@@ -188,7 +198,12 @@ class TikTokTaskStore:
         if manifest_ref is None:
             return output
         try:
-            manifest = json.loads(client.download(manifest_ref).decode("utf-8"))
+            manifest = json.loads(
+                client.download(
+                    manifest_ref,
+                    deadline_epoch_s=deadline_epoch_s,
+                ).decode("utf-8")
+            )
             videos: list[dict[str, Any]] = []
             for item in manifest.get("items", []):
                 if not isinstance(item, dict):
@@ -202,8 +217,8 @@ class TikTokTaskStore:
                         "kw": item.get("kw"),
                         "downloaded": video_ref is not None,
                         "s3_key": video_ref.key if video_ref is not None else None,
-                        "url": presign(video_ref.key) if video_ref is not None else None,
-                        "thumb_url": presign(thumb_ref.key) if thumb_ref is not None else None,
+                        "url": presign(video_ref),
+                        "thumb_url": presign(thumb_ref),
                         "tiktok_url": item.get("tiktok_url"),
                     }
                 )

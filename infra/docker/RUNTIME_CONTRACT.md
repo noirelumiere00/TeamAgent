@@ -29,8 +29,8 @@ Core:
   uv `0.11.29`, binary SHA-256
   `f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e`
 - E5 revision `3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3`
-- torch `2.12.0+cpu` arm64 wheel SHA-256
-  `797c066367792c92eb97cafba7fd0caa8d7455e6078a4ee880630077378dc372`
+- torch `2.13.0+cpu` arm64 wheel SHA-256
+  `ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c`
 - baked fallback `app.html` SHA-256
   `716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb`
 
@@ -231,24 +231,19 @@ receipt/provenanceへ固定する。
 
 Registryへpushする権限を持つ別担当は、同じexact HEAD・同じbuild inputsでBuildKit
 `provenance=mode=max` とSBOM attestationを付け、attestation subject digestとdeploy digestを
-一致させる。ECR basic scan完了後にCRITICAL/HIGHがともに0であることも必須とし、scan未完了・
-unsupported・非0ならdeployをfail closedにする。ローカル担当はpush/ECR scan/deployを行わない。
+一致させる。ECR scan完了後に全severityが0（またはexact未期限例外）であることも必須とし、
+scan未完了・unsupported・非0ならdeployをfail closedにする。ローカル担当は
+push/ECR scan/deployを行わない。
 したがってlocal receiptではECR/Fargate gateを`NOT_RUN`と明記し、registry/ECR receiptは別担当が
 exact pushed digestへ追加する。
 
-canonical promotionは`infra/deploy/deploy_connectweb_unified.sh`の2 modeに分離する。
-`build-candidate`は指定されたcommit/tree/branchとclean HEADを照合し、`git archive`だけを
-versioning有効なS3へ送り、そのVersionIdをCodeBuild source versionとして固定する。CodeBuildも
-S3 VersionIdと展開tree OIDをbuild前に再検証する。Buildxは`GIT_COMMIT`/`GIT_BRANCH`を渡して
-`--push`でprovenance/SBOM attestationをregistryへ保持し、candidateをpullしてrevision/branchを
-含むruntime labels、user、architectureを検査したうえで、Buildx output digestとECR digestを
-一致させる。
-このmodeはECSを更新しない。`deploy-digest`はtagを受け付けず、
-`repository@sha256:<64hex>`だけを受け付ける。最初のAWS callより前に、out-of-bandでreviewされた
-release-gate fileのSHA-256、source/image subject、decision `ACCEPTED`、少なくとも
-`local_runtime_evidence`、`ecr_basic_scan`、`fargate_runtime_smoke`の全statusを検証する。
-追加のprovenance gateは`required_gates`へ足せ、列挙されたgateはすべてACCEPTEDでなければならない。
-Terraformのcore/media image inputとingest promotion scriptもdigest-onlyである。
+canonical promotionはKMS署名済み・S3 Object Lock COMPLIANCE保持のexact VersionId receiptと
+`release.ready`、one-use deployment intent、saved Terraform plan、共有lockだけを受理する。
+`deploy_connectweb_unified.sh`、`register_ingest_td.sh`、operator JSON/hash verifierは恒久disabled
+stubであり、task definition登録やservice updateを実行しない。core/mediaは同じsource commit、
+canonical context digest、SBOM、scan、provenanceを含むbundle receiptに依存し、Terraformの
+`production_image_release_gate`を通るdigest-only参照だけを使用する。未remote commit、tag参照、
+期限切れ/再利用receipt、saved planと異なるapply-time evidenceはfail closedとする。
 
 ### Fargate Chromium sandbox gate
 

@@ -173,6 +173,44 @@ jobs:
           trivyignores: .trivyignore.yaml
           skip-setup-trivy: true # fs スキャン step で導入済みの trivy を再利用（PATH 引き継ぎ）
 
+  terraform:
+    name: terraform lock + offline validate
+    runs-on: ubuntu-latest
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/terraform-plugin-cache
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.14.4
+
+      - name: Restore provider cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ${{ runner.temp }}/terraform-plugin-cache
+            infra/terraform/provider-mirror
+          key: terraform-${{ runner.os }}-${{ hashFiles('infra/terraform/.terraform.lock.hcl') }}
+
+      - name: Populate exact readonly providers
+        working-directory: infra/terraform
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init -backend=false -input=false -lockfile=readonly
+          terraform providers mirror provider-mirror
+
+      - name: Reinitialize from offline mirror and validate
+        working-directory: infra/terraform
+        env:
+          TF_CLI_CONFIG_FILE: ci.terraformrc
+        run: |
+          rm -rf .terraform/providers
+          terraform init -backend=false -input=false -lockfile=readonly
+          terraform validate
+
   # 本番デプロイ前提のテスト（main マージ後のみ）
   smoke-test:
     name: smoke test (post-merge)

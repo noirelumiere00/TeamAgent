@@ -10,6 +10,7 @@
 !tools/tiktok_scraper/package.json
 !tools/tiktok_scraper/package-lock.json
 !tools/tiktok_scraper/search.mjs
+!tools/tiktok_scraper/dns_pinned_proxy.mjs
 !infra/
 !infra/docker/
 !infra/docker/sanitize_ytdlp.py

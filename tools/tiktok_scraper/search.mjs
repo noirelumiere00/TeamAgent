@@ -17,8 +17,10 @@
 // ブラウザのログは stderr に出す (stdout は JSON のみ = Python が parse しやすい)。
 
 import puppeteer from "puppeteer-core";
-import dns from "node:dns/promises";
-import ipaddr from "ipaddr.js";
+import {
+  isPublicIp,
+  startDnsPinnedProxy,
+} from "./dns_pinned_proxy.mjs";
 
 const ACQUIRE_HOST_SUFFIXES = Object.freeze([
   "youtube.com",
@@ -71,18 +73,6 @@ const log = (...m) => console.error("[tiktok]", ...m); // stderr
 // ---- Chrome 実行パス自動検出 (Mac/Linux 両対応) ----
 import fs from "fs";
 
-function isPublicIp(address) {
-  try {
-    let parsed = ipaddr.parse(address.toLowerCase().split("%", 1)[0]);
-    if (parsed.kind() === "ipv6" && parsed.isIPv4MappedAddress()) {
-      parsed = parsed.toIPv4Address();
-    }
-    return parsed.range() === "unicast";
-  } catch {
-    return false;
-  }
-}
-
 async function assertPublicHttps(rawUrl, { tiktokOnly = false } = {}) {
   let parsed;
   try {
@@ -99,15 +89,8 @@ async function assertPublicHttps(rawUrl, { tiktokOnly = false } = {}) {
     tiktokOnly &&
     !hostMatches(host, TIKTOK_HOST_SUFFIXES)
   ) throw new Error("TikTok URL is outside the allowlist");
-  // Resolve at every intercepted browser request. Chromium performs its own
-  // connection, so retaining a prior answer would widen the DNS-rebinding
-  // window. All answers from this boundary resolution must be global unicast.
-  const addresses = ipaddr.isValid(host)
-    ? [host]
-    : (await dns.lookup(host, { all: true, verbatim: true })).map((item) => item.address);
-  if (!addresses.length || addresses.some((address) => !isPublicIp(address))) {
-    throw new Error("private or reserved network address blocked");
-  }
+  // DNS resolution and the matching TCP connection are performed atomically
+  // by the mandatory local CONNECT proxy. Chromium never resolves this host.
   return parsed.toString();
 }
 
@@ -664,15 +647,28 @@ async function downloadVideoFromUrl(browser, videoUrl, outPath, maxBytes) {
   }
 }
 
-function buildChromeArgs() {
+function buildChromeArgs(pinnedProxyUrl) {
+  if (!pinnedProxyUrl.startsWith("http://127.0.0.1:")) {
+    throw new Error("DNS-pinned proxy is required");
+  }
+  if (
+    process.env.PROXY_SERVER ||
+    process.env.PROXY_USERNAME ||
+    process.env.PROXY_PASSWORD
+  ) {
+    throw new Error("external browser proxy is incompatible with DNS pinning");
+  }
   const chromeArgs = [
     "--disable-dev-shm-usage", "--disable-gpu",
+    "--disable-features=AsyncDns",
+    "--disable-quic",
     "--disable-setuid-sandbox",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--host-resolver-rules=MAP * ~NOTFOUND",
+    "--proxy-bypass-list=<-loopback>",
+    `--proxy-server=${pinnedProxyUrl}`,
     "--window-size=1280,900", "--lang=ja-JP",
   ];
-  if (process.env.PROXY_SERVER) {
-    chromeArgs.push(`--proxy-server=${process.env.PROXY_SERVER}`);
-  }
   return chromeArgs;
 }
 
@@ -685,13 +681,15 @@ async function mainComments() {
     process.exit(2);
   }
   let browser;
+  let pinnedProxy;
   try {
     const chrome = findChrome();
     log(`launch chrome: ${chrome} (headless=${!args.headful})`);
+    pinnedProxy = await startDnsPinnedProxy();
     browser = await puppeteer.launch({
       executablePath: chrome,
       headless: !args.headful,
-      args: buildChromeArgs(),
+      args: buildChromeArgs(pinnedProxy.url),
     });
     const comments = await scrapeComments(browser, args.url, args.maxComments);
     result.ok = comments.length > 0;
@@ -705,6 +703,7 @@ async function mainComments() {
     log("ERROR:", result.error);
   } finally {
     if (browser) await browser.close().catch(() => {});
+    if (pinnedProxy) await pinnedProxy.close().catch(() => {});
   }
   const out = JSON.stringify(result);
   if (args.out) fs.writeFileSync(args.out, out);
@@ -731,13 +730,15 @@ async function mainDownload() {
     process.exit(2);
   }
   let browser;
+  let pinnedProxy;
   try {
     const chrome = findChrome();
     log(`launch chrome: ${chrome} (headless=${!args.headful})`);
+    pinnedProxy = await startDnsPinnedProxy();
     browser = await puppeteer.launch({
       executablePath: chrome,
       headless: !args.headful,
-      args: buildChromeArgs(),
+      args: buildChromeArgs(pinnedProxy.url),
     });
     const dl = await downloadVideoFromUrl(browser, args.url, args.out, args.maxBytes);
     result.ok = dl.bytes > 0;
@@ -750,6 +751,7 @@ async function mainDownload() {
     log("ERROR:", result.error);
   } finally {
     if (browser) await browser.close().catch(() => {});
+    if (pinnedProxy) await pinnedProxy.close().catch(() => {});
   }
   process.stdout.write(JSON.stringify(result));
   process.exit(result.ok ? 0 : 2);
@@ -774,14 +776,16 @@ async function main() {
     process.exit(1);
   }
   let browser;
+  let pinnedProxy;
   const result = { ok: false, query: args.query, type: args.type, count: 0, videos: [], error: null, errorCode: null, diag: null };
   try {
     const chrome = findChrome();
     log(`launch chrome: ${chrome} (headless=${!args.headful}) sessions=${args.sessions}`);
+    pinnedProxy = await startDnsPinnedProxy();
     browser = await puppeteer.launch({
       executablePath: chrome,
       headless: !args.headful,
-      args: buildChromeArgs(),
+      args: buildChromeArgs(pinnedProxy.url),
     });
 
     let videos = [];
@@ -846,6 +850,7 @@ async function main() {
     log("ERROR:", result.error);
   } finally {
     if (browser) await browser.close().catch(() => {});
+    if (pinnedProxy) await pinnedProxy.close().catch(() => {});
   }
   const out = JSON.stringify(result);
   if (args.out) fs.writeFileSync(args.out, out);

@@ -18,6 +18,7 @@ locals {
     readonlyRootFilesystem = true
     privileged             = false
     linuxParameters = {
+      initProcessEnabled = true
       capabilities = {
         drop = ["ALL"]
       }

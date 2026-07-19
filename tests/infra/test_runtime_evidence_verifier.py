@@ -82,7 +82,9 @@ def _verify_pair(
 
 def test_trivy_pair_accepts_only_meaningful_exact_zero_reports() -> None:
     summary = _verify_pair()
-    assert summary["critical"] == summary["high"] == summary["secrets"] == 0
+    assert all(
+        summary[key] == 0 for key in ("unknown", "low", "medium", "high", "critical", "secrets")
+    )
     assert summary["artifact_id"] == ARTIFACT_ID
     assert set(summary["explicitly_absent_live_cves"]) == {
         "CVE-2026-5450",
@@ -114,6 +116,16 @@ def test_trivy_pair_rejects_named_live_critical_cve() -> None:
     vulnerability = _report("vulnerability")
     vulnerability["Results"][0]["Vulnerabilities"] = [
         {"VulnerabilityID": "CVE-2026-5450", "Severity": "CRITICAL"}
+    ]
+    with pytest.raises(EvidenceError, match="zero gate"):
+        _verify_pair(vulnerability=vulnerability)
+
+
+@pytest.mark.parametrize("severity", ("LOW", "MEDIUM", "UNKNOWN"))
+def test_trivy_pair_rejects_nonzero_lower_or_unknown_severity(severity: str) -> None:
+    vulnerability = _report("vulnerability")
+    vulnerability["Results"][0]["Vulnerabilities"] = [
+        {"VulnerabilityID": "CVE-2099-12345", "Severity": severity}
     ]
     with pytest.raises(EvidenceError, match="zero gate"):
         _verify_pair(vulnerability=vulnerability)
@@ -159,6 +171,118 @@ def test_scanner_snapshot_rejects_stale_database() -> None:
             _scanner(next_update=NOW - timedelta(seconds=1)),
             scan_started_at=NOW,
             scan_finished_at=NOW + timedelta(minutes=5),
+        )
+
+
+def _grype_database() -> dict[str, Any]:
+    return {
+        "schemaVersion": "v6.1.9",
+        "from": "manual import",
+        "built": (NOW - timedelta(days=1)).isoformat(),
+        "path": "/private/tmp/grype/vulnerability.db",
+        "valid": True,
+    }
+
+
+def _grype_version() -> dict[str, Any]:
+    return {
+        "application": "grype",
+        "buildDate": (NOW - timedelta(days=60)).isoformat(),
+        "gitCommit": "2" * 40,
+        "platform": "darwin/arm64",
+        "supportedDbSchema": 6,
+        "syftVersion": "v1.44.0",
+        "version": "0.112.0",
+    }
+
+
+def _grype_scanner() -> dict[str, Any]:
+    return VERIFIER.verify_grype_scanner_snapshot(
+        _grype_version(),
+        _grype_database(),
+        binary_sha256="3" * 64,
+        scan_finished_at=NOW + timedelta(minutes=1),
+    )
+
+
+def _grype_report() -> dict[str, Any]:
+    return {
+        "descriptor": {
+            "name": "grype",
+            "version": "0.112.0",
+            "timestamp": NOW.isoformat(),
+            "configuration": {
+                "show-suppressed": True,
+                "db": {
+                    "auto-update": False,
+                    "validate-by-hash-on-start": True,
+                    "validate-age": True,
+                },
+            },
+            "db": {"status": _grype_database()},
+        },
+        "source": {
+            "type": "image",
+            "target": {
+                "userInput": IMAGE_ID,
+                "repoDigests": [f"teamagent@example.invalid/runtime@{IMAGE_ID}"],
+                "architecture": "arm64",
+                "os": "linux",
+                "labels": {"org.opencontainers.image.revision": "4" * 40},
+            },
+        },
+        "matches": [
+            {
+                "vulnerability": {
+                    "id": "CVE-2099-12345",
+                    "namespace": "github:language:python",
+                    "dataSource": "https://github.com/advisories/CVE-2099-12345",
+                    "severity": "Medium",
+                    "fix": {"versions": ["1.2.6"], "state": "fixed"},
+                },
+                "artifact": {
+                    "name": "fixture",
+                    "version": "1.2.5",
+                    "purl": "pkg:pypi/fixture@1.2.5",
+                },
+            }
+        ],
+        "ignoredMatches": [],
+    }
+
+
+def test_grype_report_binds_scanner_database_subject_and_fix_availability() -> None:
+    summary = VERIFIER.verify_grype_report(
+        _grype_report(),
+        expected_image_id=IMAGE_ID,
+        expected_head="4" * 40,
+        scanner=_grype_scanner(),
+        scan_started_at=NOW - timedelta(minutes=1),
+        scan_finished_at=NOW + timedelta(minutes=1),
+    )
+    assert summary["total"] == summary["medium"] == summary["fixed_available"] == 1
+    assert summary["suppressed"] == 0
+
+
+@pytest.mark.parametrize("mutation", ("subject", "suppressed", "purl", "database"))
+def test_grype_report_rejects_mutated_or_suppressed_evidence(mutation: str) -> None:
+    report = _grype_report()
+    if mutation == "subject":
+        report["source"]["target"]["userInput"] = "sha256:" + "9" * 64
+    elif mutation == "suppressed":
+        report["ignoredMatches"] = [report["matches"][0]]
+    elif mutation == "purl":
+        report["matches"][0]["artifact"]["purl"] = "pkg:pypi/fixture@9.9.9"
+    else:
+        report["descriptor"]["db"]["status"]["built"] = (NOW - timedelta(days=6)).isoformat()
+    with pytest.raises(EvidenceError):
+        VERIFIER.verify_grype_report(
+            report,
+            expected_image_id=IMAGE_ID,
+            expected_head="4" * 40,
+            scanner=_grype_scanner(),
+            scan_started_at=NOW - timedelta(minutes=1),
+            scan_finished_at=NOW + timedelta(minutes=1),
         )
 
 
@@ -370,3 +494,11 @@ def test_evidence_builder_canonicalizes_source_scan_subject() -> None:
     assert created in script
     assert canonical in script
     assert script.index(created) < script.index(canonical)
+
+
+def test_local_receipt_is_explicitly_not_a_production_release_credential() -> None:
+    generator = (ROOT / "infra/docker/generate_runtime_receipt.py").read_text(encoding="utf-8")
+    verifier = VERIFIER_PATH.read_text(encoding="utf-8")
+    scope = "local-source-validation-only-not-release-credential"
+    assert scope in generator
+    assert scope in verifier

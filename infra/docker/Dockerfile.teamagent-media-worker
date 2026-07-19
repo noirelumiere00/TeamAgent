@@ -223,6 +223,9 @@ WORKDIR /app
 
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
+ARG BUILD_CONTEXT_SHA256
+ARG RELEASE_CONTRACT_SHA256
+ARG APP_PROVENANCE_SHA256
 ARG CHROMIUM_BASE_ARM64_DIGEST
 ARG NODE_BUILDER_ARM64_DIGEST
 ARG UV_ARM64_DIGEST
@@ -251,7 +254,8 @@ ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e
 ARG MEDIA_APK_LOCK_SHA256=d3a888e3bfa7e75d2c4c7b6b6dca2a7e0812c1231fdb342e96bb79af9166cca8
 ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
 ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
-ARG TIKTOK_SCRAPER_SHA256=ce200324445ed67f4510c7917543a5332121d4fef2d4be4c156b4c377b6d4730
+ARG TIKTOK_SCRAPER_SHA256=fc18fa1e815bf5879f3ed18c98784ceaec1fed9030724e31d9c742229b2b92d7
+ARG TIKTOK_DNS_PINNED_PROXY_SHA256=d4e8e528f5004fc51b35227a41a4c2721247a50ac907bb12df6faa813e930d9a
 
 COPY infra/docker/media-apk.lock /tmp/media-apk.lock
 RUN set -eu; \
@@ -270,10 +274,13 @@ COPY --from=js-deps --chown=10001:10001 /deps/node_modules/ \
   /app/tools/tiktok_scraper/node_modules/
 COPY --chown=10001:10001 tools/tiktok_scraper/search.mjs \
   /app/tools/tiktok_scraper/search.mjs
+COPY --chown=10001:10001 tools/tiktok_scraper/dns_pinned_proxy.mjs \
+  /app/tools/tiktok_scraper/dns_pinned_proxy.mjs
 COPY --chown=10001:10001 src/teamagent/media/ /app/src/teamagent/media/
 
 RUN set -eu; \
     printf '%s  %s\n' "$TIKTOK_SCRAPER_SHA256" /app/tools/tiktok_scraper/search.mjs | sha256sum -c -; \
+    printf '%s  %s\n' "$TIKTOK_DNS_PINNED_PROXY_SHA256" /app/tools/tiktok_scraper/dns_pinned_proxy.mjs | sha256sum -c -; \
     test "$(python3 -c "import json; print(json.load(open('/usr/share/teamagent/provenance/yt-dlp-sanitization.json'))['removed_extractor_set_sha256'])")" = "$YTDLP_REMOVED_EXTRACTOR_SET_SHA256"; \
     install -d -m 0755 -o 10001 -g 10001 /app/src/teamagent; \
     printf '%s\n' "$CHROMIUM_BASE_ARM64_DIGEST" \
@@ -313,6 +320,9 @@ ENV USER=teamagent \
 
 LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       org.opencontainers.image.ref.name="$GIT_BRANCH" \
+      io.teamagent.build.context-sha256="$BUILD_CONTEXT_SHA256" \
+      io.teamagent.build.release-contract-sha256="$RELEASE_CONTRACT_SHA256" \
+      io.teamagent.build.app-provenance-sha256="$APP_PROVENANCE_SHA256" \
       io.teamagent.runtime.kind="media-worker" \
       io.teamagent.contract.chromium-base-arm64-digest="$CHROMIUM_BASE_ARM64_DIGEST" \
       io.teamagent.contract.node-builder-arm64-digest="$NODE_BUILDER_ARM64_DIGEST" \
@@ -343,7 +353,8 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       io.teamagent.contract.apk-lock-sha256="$MEDIA_APK_LOCK_SHA256" \
       io.teamagent.contract.tiktok-package-json-sha256="$TIKTOK_PACKAGE_JSON_SHA256" \
       io.teamagent.contract.tiktok-package-lock-sha256="$TIKTOK_PACKAGE_LOCK_SHA256" \
-      io.teamagent.contract.tiktok-scraper-sha256="$TIKTOK_SCRAPER_SHA256"
+      io.teamagent.contract.tiktok-scraper-sha256="$TIKTOK_SCRAPER_SHA256" \
+      io.teamagent.contract.dns-pinned-proxy-sha256="$TIKTOK_DNS_PINNED_PROXY_SHA256"
 
 USER 10001:10001
 VOLUME ["/tmp"]

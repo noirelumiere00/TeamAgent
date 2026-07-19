@@ -62,6 +62,8 @@ class _LifecycleClient(MediaJobClient):
         self.submitted = 0
         self.consumers = 0
         self.max_consumers = 0
+        self.wait_deadline: int | None = None
+        self.download_deadline: int | None = None
 
     def submit(self, request: MediaJobRequest) -> str:
         self.submitted += 1
@@ -75,11 +77,13 @@ class _LifecycleClient(MediaJobClient):
         poll_interval_s: float = 1.0,
         deadline_epoch_s: int | None = None,
     ) -> MediaJobResult:
-        del job_id, timeout_s, poll_interval_s, deadline_epoch_s
+        del job_id, timeout_s, poll_interval_s
+        self.wait_deadline = deadline_epoch_s
         return self.result
 
-    def download(self, ref: S3ObjectRef) -> bytes:
+    def download(self, ref: S3ObjectRef, *, deadline_epoch_s: int) -> bytes:
         del ref
+        self.download_deadline = deadline_epoch_s
         return b"artifact"
 
     def _acquire_consumer(self, request: MediaJobRequest, *, timeout_s: int) -> None:
@@ -105,6 +109,8 @@ def test_run_sync_fences_consumers_without_deleting_shared_state() -> None:
     assert success.submitted == 1
     assert success.consumers == 0
     assert success.max_consumers == 1
+    assert success.wait_deadline == request.deadline_epoch_s - 15
+    assert success.download_deadline == request.deadline_epoch_s - 15
 
     failed = _LifecycleClient(
         MediaJobResult(
@@ -165,6 +171,7 @@ class _SubmitClient(MediaJobClient):
         monotonic: Any,
     ) -> None:
         super().__init__(
+            session=_Session(queue=queue, ddb=ddb, s3=object()),
             queue_url="queue",
             table="jobs",
             bucket=_BUCKET,
@@ -175,8 +182,13 @@ class _SubmitClient(MediaJobClient):
         self.queue = queue
         self.ddb = ddb
 
-    def _clients(self) -> tuple[Any, Any, Any]:
-        return self.queue, self.ddb, object()
+
+class _Session:
+    def __init__(self, *, queue: Any, ddb: Any, s3: Any) -> None:
+        self.clients = {"sqs": queue, "dynamodb": ddb, "s3": s3}
+
+    def client(self, service: str, **_kwargs: Any) -> Any:
+        return self.clients[service]
 
 
 def test_concurrent_identical_submit_waits_for_owner_confirmation_without_duplicate_send() -> None:
@@ -255,6 +267,7 @@ def test_delayed_semantic_retry_enqueues_original_timestamp_envelope() -> None:
     queue = _Queue()
     ddb = _RecoverableDynamo(original)
     client = MediaJobClient(
+        session=_Session(queue=queue, ddb=ddb, s3=object()),
         queue_url="https://sqs.example.invalid/media.fifo",
         table="jobs",
         bucket=_BUCKET,
@@ -262,8 +275,6 @@ def test_delayed_semantic_retry_enqueues_original_timestamp_envelope() -> None:
         monotonic=lambda: 0.0,
         clock=lambda: 161.0,
     )
-    client._clients = lambda: (queue, ddb, object())  # type: ignore[method-assign]
-
     assert client.submit(delayed) == original.job_id
     assert len(queue.messages) == 1
     sent = queue.messages[0]
@@ -285,9 +296,10 @@ class _GuardClient(MediaJobClient):
         name: str,
         body: bytes,
         content_type: str,
+        deadline_epoch_s: int,
         ttl_s: int = 3600,
     ) -> S3ObjectRef:
-        del name, content_type, ttl_s
+        del name, content_type, deadline_epoch_s, ttl_s
         self.staged += 1
         return S3ObjectRef(
             bucket=_BUCKET,
@@ -297,7 +309,8 @@ class _GuardClient(MediaJobClient):
             content_type="application/octet-stream",
         )
 
-    def cleanup_job(self, job_id: str) -> None:
+    def cleanup_job(self, job_id: str, *, deadline_epoch_s: int) -> None:
+        del deadline_epoch_s
         self.cleaned.append(job_id)
 
 
@@ -377,13 +390,19 @@ def test_sync_tiktok_search_uses_generic_bounded_operation() -> None:
 
 
 def test_stage_rejects_scope_content_type_and_ttl_before_aws_write() -> None:
-    client = MediaJobClient(queue_url="queue", table="jobs", bucket=_BUCKET)
+    client = MediaJobClient(
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: 100.0,
+    )
     with pytest.raises(MediaJobError, match="MEDIA_JOB_ID_INVALID"):
         client.stage_bytes(
             job_id="../escape",
             name="source.bin",
             body=b"x",
             content_type="video/mp4",
+            deadline_epoch_s=400,
         )
     with pytest.raises(MediaJobError, match="MEDIA_INPUT_CONTENT_TYPE_INVALID"):
         client.stage_bytes(
@@ -391,6 +410,7 @@ def test_stage_rejects_scope_content_type_and_ttl_before_aws_write() -> None:
             name="source.bin",
             body=b"x",
             content_type="video/mp4\nX-Evil: yes",
+            deadline_epoch_s=400,
         )
     with pytest.raises(MediaJobError, match="MEDIA_INPUT_TTL_INVALID"):
         client.stage_bytes(
@@ -398,8 +418,61 @@ def test_stage_rejects_scope_content_type_and_ttl_before_aws_write() -> None:
             name="source.bin",
             body=b"x",
             content_type="video/mp4",
+            deadline_epoch_s=400,
             ttl_s=299,
         )
+
+
+class _PresignS3:
+    def __init__(self, url: str = "https://s3.example.invalid/signed") -> None:
+        self.url = url
+        self.calls: list[tuple[str, dict[str, Any], int]] = []
+
+    def generate_presigned_url(
+        self,
+        operation: str,
+        **kwargs: Any,
+    ) -> str:
+        self.calls.append((operation, kwargs["Params"], kwargs["ExpiresIn"]))
+        return self.url
+
+
+def test_presign_get_is_bucket_scoped_short_lived_and_deadline_bounded() -> None:
+    s3 = _PresignS3()
+    client = MediaJobClient(
+        session=_Session(queue=object(), ddb=object(), s3=s3),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: 100.0,
+    )
+    ref = _ref("mj_0123456789abcdef01234567")
+
+    assert (
+        client.presign_get(ref, deadline_epoch_s=130, expires_s=300)
+        == "https://s3.example.invalid/signed"
+    )
+    assert s3.calls == [
+        (
+            "get_object",
+            {"Bucket": _BUCKET, "Key": ref.key},
+            300,
+        )
+    ]
+
+    with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_PRESIGN_EXPIRY_INVALID"):
+        client.presign_get(ref, deadline_epoch_s=130, expires_s=301)
+
+    expired = MediaJobClient(
+        session=_Session(queue=object(), ddb=object(), s3=s3),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: 130.0,
+    )
+    with pytest.raises(MediaJobError, match="MEDIA_JOB_DEADLINE_EXCEEDED"):
+        expired.presign_get(ref, deadline_epoch_s=130, expires_s=300)
+    assert len(s3.calls) == 1
 
 
 def test_artifact_ttl_contract_is_bounded_and_environment_driven(

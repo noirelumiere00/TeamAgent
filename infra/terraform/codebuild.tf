@@ -98,6 +98,7 @@ locals {
   ]
   source_publisher_environment_names = [
     "EXPECTED_COMMIT",
+    "EXPECTED_BASE_OID",
     "SOURCE_MANIFEST_CONTRACT_SHA256",
     "RELEASE_CONTRACT_SHA256",
   ]
@@ -340,6 +341,7 @@ data "aws_iam_policy_document" "codebuild" {
       "${aws_s3_bucket.raw_files.arn}/codebuild/source.zip",
       "${aws_s3_bucket.raw_files.arn}/codebuild/connect-web-app.html",
       "${aws_s3_bucket.image_release_evidence.arn}/source-declarations/mcp/*",
+      "${aws_s3_bucket.image_release_evidence.arn}/source-contexts/mcp/*",
     ]
   }
   statement {
@@ -2042,7 +2044,7 @@ data "aws_iam_policy_document" "mcp_source_publisher" {
     resources = [aws_s3_bucket.raw_files.arn]
   }
   statement {
-    sid = "PublishImmutableSourceDeclarations"
+    sid = "PublishImmutableSourceAndContextEvidence"
     actions = [
       "s3:GetObject",
       "s3:GetObjectRetention",
@@ -2052,6 +2054,7 @@ data "aws_iam_policy_document" "mcp_source_publisher" {
     ]
     resources = [
       "${aws_s3_bucket.image_release_evidence.arn}/source-declarations/mcp/*",
+      "${aws_s3_bucket.image_release_evidence.arn}/source-contexts/mcp/*",
     ]
   }
   statement {

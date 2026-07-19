@@ -115,7 +115,7 @@ def _exact_keys(value: Mapping[str, Any], expected: set[str], *, label: str) -> 
         raise EvidenceError(f"{label} schema mismatch: missing={missing}, unknown={unknown}")
 
 
-def _trivy_counts(report: Any, *, expected_image: str) -> tuple[int, int, int]:
+def _trivy_counts(report: Any, *, expected_image: str) -> dict[str, int]:
     value = _mapping(report, label="Trivy report")
     if value.get("ArtifactName") != expected_image:
         raise EvidenceError("Trivy report does not bind the exact quarantine digest")
@@ -124,7 +124,14 @@ def _trivy_counts(report: Any, *, expected_image: str) -> tuple[int, int, int]:
     results = value.get("Results")
     if not isinstance(results, list) or not results:
         raise EvidenceError("Trivy report has no scan results")
-    critical = high = secrets = 0
+    counts = {
+        "unknown": 0,
+        "low": 0,
+        "medium": 0,
+        "high": 0,
+        "critical": 0,
+        "secrets": 0,
+    }
     for index, raw_result in enumerate(results):
         result = _mapping(raw_result, label=f"Trivy result[{index}]")
         vulnerabilities = result.get("Vulnerabilities") or []
@@ -132,16 +139,15 @@ def _trivy_counts(report: Any, *, expected_image: str) -> tuple[int, int, int]:
             raise EvidenceError("Trivy vulnerabilities must be an array")
         for vulnerability in vulnerabilities:
             item = _mapping(vulnerability, label="Trivy vulnerability")
-            severity = item.get("Severity")
-            if severity == "CRITICAL":
-                critical += 1
-            elif severity == "HIGH":
-                high += 1
+            severity = str(item.get("Severity") or "").lower()
+            if severity not in {"unknown", "low", "medium", "high", "critical"}:
+                raise EvidenceError("Trivy vulnerability severity is unsupported")
+            counts[severity] += 1
         discovered_secrets = result.get("Secrets") or []
         if not isinstance(discovered_secrets, list):
             raise EvidenceError("Trivy secrets must be an array")
-        secrets += len(discovered_secrets)
-    return critical, high, secrets
+        counts["secrets"] += len(discovered_secrets)
+    return counts
 
 
 def _binary_probes(path: Path) -> list[dict[str, str]]:
@@ -332,8 +338,18 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         for key, value in labels.items()
         if isinstance(key, str) and isinstance(value, str)
     }
+    requested_build_context_sha256 = getattr(args, "build_context_sha256", "")
     if normalized_labels.get("org.opencontainers.image.revision") != args.commit:
         raise EvidenceError("OCI revision does not match the full commit")
+    if args.pipeline == "mcp":
+        build_context_sha256 = _sha256(
+            requested_build_context_sha256,
+            label="canonical build context SHA-256",
+        )
+        if normalized_labels.get("io.teamagent.build.context-sha256") != build_context_sha256:
+            raise EvidenceError("OCI context label does not match signed source evidence")
+    elif requested_build_context_sha256:
+        raise EvidenceError("build context digest is only valid for the MCP pipeline")
     contract_label = PIPELINES[args.pipeline]["contract_label"]
     if normalized_labels.get(contract_label) != contract_sha256:
         raise EvidenceError("OCI contract label does not match the signed contract")
@@ -351,14 +367,12 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
             raise EvidenceError(f"MCP OCI core/media interface mismatch: {exc}") from exc
 
     expected_image = f"{REGISTRY}/{quarantine_repository}@{digest}"
-    critical, high, secrets = _trivy_counts(
+    scan_counts = _trivy_counts(
         _load(args.trivy_report, label="Trivy report"),
         expected_image=expected_image,
     )
-    if (critical, high, secrets) != (0, 0, 0):
-        raise EvidenceError(
-            f"actual-image gate failed: CRITICAL={critical}, HIGH={high}, secrets={secrets}"
-        )
+    if any(scan_counts.values()):
+        raise EvidenceError(f"actual-image gate failed: {scan_counts}")
 
     spdx = _load(args.sbom, label="actual-image SPDX SBOM")
     if not isinstance(spdx, dict) or spdx.get("spdxVersion") not in {
@@ -377,6 +391,8 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         provenance, contract_sha256
     ):
         raise EvidenceError("provenance does not bind the full commit and contract hash")
+    if args.pipeline == "mcp" and not _contains_exact(provenance, requested_build_context_sha256):
+        raise EvidenceError("provenance does not bind the canonical build context")
     provenance_subjects = provenance.get("subject")
     if not isinstance(provenance_subjects, list) or not any(
         isinstance(subject, dict)
@@ -462,9 +478,7 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         "scan": {
             "scanner": "trivy",
             "actual_image": expected_image,
-            "critical": critical,
-            "high": high,
-            "secrets": secrets,
+            **scan_counts,
             "report_sha256": _sha256_file(args.trivy_report, label="Trivy report"),
         },
         "sbom": {
@@ -575,6 +589,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-repository", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--contract-sha256", required=True)
+    parser.add_argument("--build-context-sha256", default="")
     parser.add_argument("--contract", type=Path, required=True)
     parser.add_argument("--digest", required=True)
     parser.add_argument("--media-type", required=True)

@@ -297,7 +297,7 @@ class MediaJobRequest(_StrictModel):
 
     def assert_not_expired(self, *, now_epoch_s: int | None = None) -> None:
         now = int(time.time()) if now_epoch_s is None else now_epoch_s
-        if now > self.deadline_epoch_s:
+        if now >= self.deadline_epoch_s:
             raise ValueError("job deadline exceeded")
 
 
@@ -338,6 +338,7 @@ def make_job_request(
     request_fingerprint: str,
     now_epoch_s: int | None = None,
     timeout_s: int = MAX_DEADLINE_SECONDS,
+    deadline_epoch_s: int | None = None,
     artifact_ttl_s: int = 3600,
     job_id: str | None = None,
     audit_principal_hash: str | None = None,
@@ -348,6 +349,9 @@ def make_job_request(
     if timeout_s < 1 or timeout_s > MAX_DEADLINE_SECONDS:
         raise ValueError("timeout_s is out of range")
     now = int(time.time()) if now_epoch_s is None else now_epoch_s
+    resolved_deadline = now + timeout_s if deadline_epoch_s is None else deadline_epoch_s
+    if resolved_deadline <= now or resolved_deadline - now > MAX_DEADLINE_SECONDS:
+        raise ValueError("deadline_epoch_s is outside the bounded execution window")
     idempotency = semantic_request_sha256(operation, request_fingerprint)
     resolved_job_id = job_id or f"mj_{idempotency[:24]}"
     resolved_prefix = output_prefix or f"media-jobs/{resolved_job_id}/"
@@ -356,7 +360,7 @@ def make_job_request(
         "job_id": resolved_job_id,
         "idempotency_key": idempotency,
         "created_at_epoch_s": now,
-        "deadline_epoch_s": now + timeout_s,
+        "deadline_epoch_s": resolved_deadline,
         "artifact_ttl_s": artifact_ttl_s,
         "audit_principal_hash": audit_principal_hash,
         "output_bucket": output_bucket,

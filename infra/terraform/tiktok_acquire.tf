@@ -79,9 +79,13 @@ variable "tiktok_ephemeral_gib" {
 }
 
 variable "tiktok_proxy_secret_arn" {
-  description = "プロキシ資格情報のSecrets Manager ARN(任意)。空なら直結(WAFリスク上昇)。"
+  description = "Deprecated external browser proxy. Must remain empty because Chromium is forced through the in-container DNS-pinned proxy."
   type        = string
   default     = ""
+  validation {
+    condition     = var.tiktok_proxy_secret_arn == ""
+    error_message = "tiktok_proxy_secret_arn is disabled; Chromium must use the in-container DNS-pinned proxy."
+  }
 }
 
 variable "tiktok_apify_secret_arn" {
@@ -97,7 +101,8 @@ variable "tiktok_mcp_task_role_name" {
 }
 
 locals {
-  media_enabled = (var.enable_media_worker || var.enable_tiktok_acquire) ? 1 : 0
+  media_worker_enabled = var.enable_media_worker || var.enable_tiktok_acquire
+  media_enabled        = local.media_worker_enabled ? 1 : 0
   # Keep existing physical names/state addresses while widening their contract.
   # Promotion tooling exposes MEDIA_* names; no destructive resource rename is
   # required merely to adopt the generic envelope.
@@ -109,10 +114,9 @@ locals {
   tk_acct            = data.aws_caller_identity.current.account_id
   tk_loggroup        = "/teamagent/${var.environment}/tiktok-acquire"
   # コンテナに渡す secrets(ARNが与えられた時だけ)
-  tk_secrets = concat(
-    var.tiktok_proxy_secret_arn != "" ? [{ name = "PROXY_SERVER", valueFrom = var.tiktok_proxy_secret_arn }] : [],
-    var.tiktok_apify_secret_arn != "" ? [{ name = "APIFY_API_TOKEN", valueFrom = var.tiktok_apify_secret_arn }] : [],
-  )
+  tk_secrets = var.tiktok_apify_secret_arn != "" ? [
+    { name = "APIFY_API_TOKEN", valueFrom = var.tiktok_apify_secret_arn }
+  ] : []
 }
 
 # ---------- ECR ----------
@@ -422,14 +426,16 @@ resource "aws_ecs_task_definition" "media_worker" {
 
   container_definitions = jsonencode([
     merge(local.teamagent_runtime_container, {
-      name      = "media-worker"
-      image     = local.media_worker_image
-      essential = true
+      name        = "media-worker"
+      image       = local.media_worker_image
+      essential   = true
+      stopTimeout = 30
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
         { name = "MEDIA_JOB_BUCKET", value = aws_s3_bucket.media_jobs[0].bucket },
         { name = "MEDIA_JOBS_TABLE", value = aws_dynamodb_table.tiktok_jobs[0].name },
         { name = "MEDIA_ARTIFACT_TTL_SECONDS", value = tostring(var.media_artifact_ttl_seconds) },
+        { name = "MEDIA_BLOCKED_VPC_CIDRS", value = data.aws_vpc.default.cidr_block },
       ]
       secrets = local.tk_secrets
       logConfiguration = {
@@ -576,7 +582,7 @@ data "aws_iam_policy_document" "media_janitor" {
   }
   statement {
     sid       = "S3DeleteMediaJobs"
-    actions   = ["s3:DeleteObject"]
+    actions   = ["s3:DeleteObject", "s3:GetObject", "s3:GetObjectTagging"]
     resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*"]
   }
   statement {

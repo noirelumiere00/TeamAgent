@@ -21,6 +21,13 @@ ddb = boto3.client("dynamodb")
 s3 = boto3.client("s3")
 
 _JOB_ID = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
+_ATTEMPT_KEY = re.compile(
+    r"^media-jobs/(?P<job_id>(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12}))/"
+    r"attempts/(?P<lease_version>[1-9][0-9]*)/"
+    r"(?P<attempt_id>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12})/"
+    r"(?P<relative_key>[^/].*)$"
+)
 _MAX_ROWS = 100
 
 
@@ -48,6 +55,19 @@ def _eligible(item: dict[str, Any], now: int) -> bool:
     terminal = status in {"done", "failed"}
     abandoned = status in {"queued", "running"} and deadline > 0 and deadline < now
     return (terminal or abandoned) and (hard_due or normal_due)
+
+
+def _orphan_sweep_eligible(item: dict[str, Any], now: int) -> bool:
+    status = item.get("status", {}).get("S", "")
+    if status == "queued":
+        return True
+    if status == "running":
+        return _number(item, "lease_expires_at") < now
+    if status in {"done", "failed"}:
+        active = _number(item, "active_consumers")
+        guard = _number(item, "consumer_guard_until")
+        return active == 0 and (guard == 0 or guard <= now)
+    return False
 
 
 def _claim(table: str, item: dict[str, Any], owner: str, now: int) -> int | None:
@@ -103,6 +123,140 @@ def _claim(table: str, item: dict[str, Any], owner: str, now: int) -> int | None
     return _number(response.get("Attributes", {}), "version")
 
 
+def _claim_orphan_sweep(
+    table: str,
+    item: dict[str, Any],
+    owner: str,
+    now: int,
+) -> int | None:
+    job_id = item.get("job_id", {}).get("S", "")
+    version = _number(item, "version")
+    try:
+        response = ddb.update_item(
+            TableName=table,
+            Key={"job_id": {"S": job_id}},
+            UpdateExpression=(
+                "SET orphan_cleanup_owner = :owner, "
+                "orphan_cleanup_lease_expires_at = :lease, updated_at = :now "
+                "ADD #version :one"
+            ),
+            ConditionExpression=(
+                "#version = :version AND "
+                "(attribute_not_exists(orphan_cleanup_owner) OR "
+                "orphan_cleanup_lease_expires_at < :now) AND "
+                "(#status = :queued OR #status = :done OR #status = :failed OR "
+                "(#status = :running AND lease_expires_at < :now))"
+            ),
+            ExpressionAttributeNames={"#status": "status", "#version": "version"},
+            ExpressionAttributeValues={
+                ":owner": {"S": owner},
+                ":lease": {"N": str(now + 240)},
+                ":now": {"N": str(now)},
+                ":queued": {"S": "queued"},
+                ":running": {"S": "running"},
+                ":done": {"S": "done"},
+                ":failed": {"S": "failed"},
+                ":version": {"N": str(version)},
+                ":one": {"N": "1"},
+            },
+            ReturnValues="ALL_NEW",
+        )
+    except Exception as exc:
+        response = getattr(exc, "response", {})
+        code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+        if code == "ConditionalCheckFailedException":
+            return None
+        raise
+    return _number(response.get("Attributes", {}), "version")
+
+
+def _release_orphan_sweep(
+    table: str,
+    job_id: str,
+    owner: str,
+    version: int,
+) -> None:
+    ddb.update_item(
+        TableName=table,
+        Key={"job_id": {"S": job_id}},
+        UpdateExpression=("REMOVE orphan_cleanup_owner, orphan_cleanup_lease_expires_at"),
+        ConditionExpression="orphan_cleanup_owner = :owner AND #version = :version",
+        ExpressionAttributeNames={"#version": "version"},
+        ExpressionAttributeValues={
+            ":owner": {"S": owner},
+            ":version": {"N": str(version)},
+        },
+    )
+
+
+def _delete_unfinalized_attempts(
+    bucket: str,
+    output_prefix: str,
+    finalized_attempt_id: str,
+) -> int:
+    expected_job_id = output_prefix.removeprefix("media-jobs/").removesuffix("/")
+    if not _JOB_ID.fullmatch(expected_job_id) or output_prefix != f"media-jobs/{expected_job_id}/":
+        raise RuntimeError("media janitor output prefix is invalid")
+    attempts: dict[str, list[tuple[str, re.Match[str]]]] = {}
+    continuation: str | None = None
+    while True:
+        arguments: dict[str, Any] = {
+            "Bucket": bucket,
+            "Prefix": f"{output_prefix}attempts/",
+            "MaxKeys": 1000,
+        }
+        if continuation:
+            arguments["ContinuationToken"] = continuation
+        response = s3.list_objects_v2(**arguments)
+        for value in response.get("Contents", []):
+            key = str(value["Key"])
+            match = _ATTEMPT_KEY.match(key)
+            if match is None or not key.startswith(output_prefix):
+                raise RuntimeError("media janitor attempt key is invalid")
+            if match.group("job_id") != expected_job_id:
+                raise RuntimeError("media janitor attempt job metadata is invalid")
+            attempt_id = match.group("attempt_id")
+            if attempt_id != finalized_attempt_id:
+                attempts.setdefault(attempt_id, []).append((key, match))
+        if not response.get("IsTruncated"):
+            break
+        continuation = str(response["NextContinuationToken"])
+    deleted = 0
+    for values in attempts.values():
+        keys: list[str] = []
+        for key, match in values:
+            metadata = s3.head_object(Bucket=bucket, Key=key).get("Metadata", {})
+            tags = {
+                str(tag.get("Key", "")): str(tag.get("Value", ""))
+                for tag in s3.get_object_tagging(Bucket=bucket, Key=key).get(
+                    "TagSet",
+                    [],
+                )
+            }
+            marker = match.group("relative_key") == "_FINALIZED.json"
+            expected_finalized = "true" if marker else "false"
+            if (
+                metadata.get("job-id") != expected_job_id
+                or metadata.get("attempt-id") != match.group("attempt_id")
+                or metadata.get("lease-version") != match.group("lease_version")
+                or metadata.get("finalized") != expected_finalized
+                or tags.get("teamagent-attempt-id") != match.group("attempt_id")
+                or tags.get("teamagent-finalized") != expected_finalized
+            ):
+                raise RuntimeError(
+                    "media janitor refuses object without exact attempt metadata and tags"
+                )
+            keys.append(key)
+        result = s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": key} for key in keys], "Quiet": True},
+        )
+        if result.get("Errors"):
+            raise RuntimeError("S3 reported media janitor delete errors")
+        deleted += len(keys)
+    return deleted
+
+
 def _delete_prefix(bucket: str, prefix: str) -> int:
     deleted_count = 0
     continuation: str | None = None
@@ -136,6 +290,7 @@ def handler(_event: dict[str, Any], context: Any) -> dict[str, int]:
     invocation = str(getattr(context, "aws_request_id", "") or uuid.uuid4().hex)
     cleaned = 0
     objects = 0
+    reclaimed_attempts = 0
     cursor: dict[str, Any] | None = None
 
     while cleaned < _MAX_ROWS:
@@ -148,12 +303,27 @@ def handler(_event: dict[str, Any], context: Any) -> dict[str, int]:
             arguments["ExclusiveStartKey"] = cursor
         response = ddb.scan(**arguments)
         for item in response.get("Items", []):
-            if not _eligible(item, now):
-                continue
             job_id = item.get("job_id", {}).get("S", "")
             prefix = item.get("output_prefix", {}).get("S", "")
             if not _JOB_ID.fullmatch(job_id) or prefix != f"media-jobs/{job_id}/":
                 raise RuntimeError("media janitor row scope is invalid")
+            if not _eligible(item, now):
+                if _orphan_sweep_eligible(item, now):
+                    owner = f"{invocation}:{job_id}:orphans"
+                    claimed_version = _claim_orphan_sweep(table, item, owner, now)
+                    if claimed_version is not None:
+                        reclaimed_attempts += _delete_unfinalized_attempts(
+                            bucket,
+                            prefix,
+                            item.get("finalized_attempt_id", {}).get("S", ""),
+                        )
+                        _release_orphan_sweep(
+                            table,
+                            job_id,
+                            owner,
+                            claimed_version,
+                        )
+                continue
             owner = f"{invocation}:{job_id}"
             claimed_version = _claim(table, item, owner, now)
             if claimed_version is None:
@@ -187,4 +357,8 @@ def handler(_event: dict[str, Any], context: Any) -> dict[str, int]:
         cursor = response.get("LastEvaluatedKey")
         if not cursor:
             break
-    return {"cleaned_jobs": cleaned, "deleted_objects": objects}
+    return {
+        "cleaned_jobs": cleaned,
+        "deleted_objects": objects,
+        "reclaimed_attempt_objects": reclaimed_attempts,
+    }

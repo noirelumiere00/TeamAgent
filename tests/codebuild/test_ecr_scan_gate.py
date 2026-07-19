@@ -142,6 +142,15 @@ def test_deny_all_mode_accepts_only_zero_gated_findings(tmp_path: Path) -> None:
     )
     assert gate.main(["--scan", str(high_scan), *common]) == 1
 
+    for severity in ("MEDIUM", "LOW"):
+        scan = _write_json(
+            tmp_path / f"{severity.lower()}.json",
+            _scan_payload(
+                {(f"CVE-2099-{90000 + len(severity)}", severity, "fixture-lib", "1.2.3")}
+            ),
+        )
+        assert gate.main(["--scan", str(scan), *common]) == 1
+
 
 def test_new_high_finding_fails_instead_of_being_preemptively_excepted(tmp_path: Path) -> None:
     new_finding = ("CVE-2099-99999", "HIGH", "fixture-browser", "1.2.3")

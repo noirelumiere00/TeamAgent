@@ -128,6 +128,19 @@ def test_job_contract_rejects_extra_fields_traversal_and_unbounded_deadline() ->
         )
 
 
+def test_job_is_expired_at_the_exact_absolute_deadline() -> None:
+    request = make_job_request(
+        operation=FrameOperation(kind="frame", source=_ref(), timecodes=(0.0,)),
+        output_bucket="teamagent-media-test",
+        request_fingerprint="exact-deadline",
+        now_epoch_s=100,
+        timeout_s=300,
+    )
+
+    with pytest.raises(ValueError, match="deadline exceeded"):
+        request.assert_not_expired(now_epoch_s=request.deadline_epoch_s)
+
+
 def test_acquire_ssrf_guard_allows_only_public_youtube_tiktok_instagram() -> None:
     def public_resolver(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.10", 443))]

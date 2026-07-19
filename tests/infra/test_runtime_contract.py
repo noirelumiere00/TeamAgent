@@ -275,15 +275,21 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert "--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL" in BUILD
     assert "--severity CRITICAL,HIGH" not in BUILD
     assert 'git -C "$REPO_ROOT" archive --format=tar "$HEAD"' in BUILD
-    assert 'COPYFILE_DISABLE=1 tar -c -f "$EVIDENCE_DIR/build-context.tar"' in BUILD
-    assert '--file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-mcp"' in BUILD
-    assert '--file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-media-worker"' in BUILD
-    assert BUILD.count('"$BUILD_CONTEXT_DIR"') >= 4
+    assert "canonical_build_context.py" in BUILD
+    assert "--file infra/docker/Dockerfile.teamagent-mcp" in BUILD
+    assert "--file infra/docker/Dockerfile.teamagent-media-worker" in BUILD
+    assert BUILD.count('- <"$EVIDENCE_DIR/build-context.tar"') == 2
+    assert BUILD.count("sha256sum \"$EVIDENCE_DIR/build-context.tar\" | cut -d' ' -f1") >= 2
     assert "source-tracked-trivy-secret.json" in BUILD
     assert 'if test -e "$EVIDENCE_DIR"' in BUILD
     assert "image_id=$(docker image inspect --format '{{.Id}}' \"$image\")" in BUILD
     assert '"$image_id"' in BUILD
     assert "trivy version --format json" in BUILD
+    assert "GRYPE_VERSION=0.112.0" in BUILD
+    assert "grype-version.json" in BUILD
+    assert "grype-db-status.json" in BUILD
+    assert "--show-suppressed" in BUILD
+    assert "$name-grype-vulnerability.json" in BUILD
     assert "--exit-code 1" in BUILD
     assert "--skip-dirs" not in BUILD
     assert "--format cyclonedx" in BUILD
@@ -302,6 +308,17 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert "verification.json" not in BUILD
     assert BUILD.index("done >SHA256SUMS") < BUILD.index('>"$FINAL_VERIFY_FILE"')
     assert "run_runtime_smokes.sh" in BUILD
+    local_evidence = CONTRACT["security_gates"]["local_evidence"]
+    assert (
+        local_evidence["credential_scope"] == "local-source-validation-only-not-release-credential"
+    )
+    assert local_evidence["supplemental_grype"] == {
+        "version": "0.112.0",
+        "immutable_image_subject_required": True,
+        "database_status_required": True,
+        "suppressed_findings": 0,
+        "promotion_credential": False,
+    }
 
 
 def test_all_core_and_media_terraform_image_inputs_are_digest_only() -> None:
@@ -316,6 +333,20 @@ def test_all_core_and_media_terraform_image_inputs_are_digest_only() -> None:
         assert digest_pattern in block
         assert "validation {" in block
     assert "strcontains(local.media_worker_image" not in media
+
+
+def test_media_task_forces_dns_pinned_proxy_vpc_scope_and_disables_legacy_proxy() -> None:
+    media = (ROOT / "infra/terraform/tiktok_acquire.tf").read_text(encoding="utf-8")
+    proxy_variable = media[
+        media.index('variable "tiktok_proxy_secret_arn"') : media.index(
+            'variable "tiktok_apify_secret_arn"'
+        )
+    ]
+    assert 'condition     = var.tiktok_proxy_secret_arn == ""' in proxy_variable
+    assert 'name = "PROXY_SERVER"' not in media
+    assert (
+        '{ name = "MEDIA_BLOCKED_VPC_CIDRS", value = data.aws_vpc.default.cidr_block }'
+    ) in media
 
 
 def test_smoke_runner_checks_actual_read_only_memory_user_and_arm64() -> None:
@@ -521,7 +552,7 @@ def test_shared_fargate_runtime_contract_is_complete_and_compatible() -> None:
     assert "dockerSecurityOptions" not in local_block
 
 
-def test_exact_health_checks_and_deploy_renderers_have_no_shell_or_curl() -> None:
+def test_exact_health_checks_and_legacy_direct_deployers_are_disabled() -> None:
     core = CONSUMERS["core_image_consumers"]
     for name in ("mcp", "connect-web"):
         health = core[name]["health_check"]
@@ -532,19 +563,11 @@ def test_exact_health_checks_and_deploy_renderers_have_no_shell_or_curl() -> Non
 
     connect = (ROOT / "infra/deploy/deploy_connectweb_unified.sh").read_text(encoding="utf-8")
     ingest = (ROOT / "infra/deploy/register_ingest_td.sh").read_text(encoding="utf-8")
-    assert ".containerDefinitions[0].entryPoint=[]" in connect
-    assert (
-        '.containerDefinitions[0].command=["/app/.venv/bin/python","-m","teamagent.connect_web"]'
-    ) in connect
-    assert '"command":["CMD","/app/.venv/bin/python","-c","import urllib.request;' in connect
-    assert ".containerDefinitions[0].entryPoint = []" in ingest
-    assert (
-        '.containerDefinitions[0].command = ["/app/.venv/bin/python",'
-        '"/app/scripts/run_ingest_fargate.py"]'
-    ) in ingest
-    for renderer in (connect, ingest):
-        assert "CMD-SHELL" not in renderer
-        assert '.containerDefinitions[0].command = ["sh"' not in renderer
+    for deployer in (connect, ingest):
+        assert "permanently disabled" in deployer
+        assert "register-task-definition" not in deployer
+        assert "update-service" not in deployer
+        assert "force-new-deployment" not in deployer
 
 
 def test_overrides_only_supply_environment_and_cannot_replace_runtime_command() -> None:

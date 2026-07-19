@@ -1,0 +1,6 @@
+check-for-app-update: false
+ignore: []
+db:
+  auto-update: false
+  validate-by-hash-on-start: true
+  validate-age: true

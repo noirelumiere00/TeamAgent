@@ -17,7 +17,9 @@ from verify_runtime_evidence import (
     _load_json,
     _sha256,
     _timestamp,
-    _tree_digest,
+    _verify_canonical_context_archive,
+    verify_grype_report,
+    verify_grype_scanner_snapshot,
     verify_scanner_snapshot,
     verify_trivy_pair,
 )
@@ -29,12 +31,17 @@ def _image_receipt(
     name: str,
     started_at: datetime,
     finished_at: datetime,
+    build_context_sha256: str,
+    grype_scanner: dict[str, Any],
+    expected_head: str,
 ) -> dict[str, Any]:
     inspect_record = json.loads(
         (evidence_dir / f"{name}-image-inspect.json").read_text(encoding="utf-8")
     )[0]
     image_id = str(inspect_record["Id"])
     labels = inspect_record["Config"]["Labels"]
+    if labels.get("io.teamagent.build.context-sha256") != build_context_sha256:
+        raise EvidenceError(f"{name}: image does not bind the canonical build context")
     parent_digests = {
         key: value
         for key, value in labels.items()
@@ -48,17 +55,30 @@ def _image_receipt(
         scan_started_at=started_at,
         scan_finished_at=finished_at,
     )
+    grype = verify_grype_report(
+        _load_json(evidence_dir / f"{name}-grype-vulnerability.json"),
+        expected_image_id=image_id,
+        expected_head=expected_head,
+        scanner=grype_scanner,
+        scan_started_at=started_at,
+        scan_finished_at=finished_at,
+    )
     return {
         "subject_kind": "local-oci-digest-not-registry-pushed",
         "image_id": image_id,
         "local_repo_digests": sorted(inspect_record["RepoDigests"]),
         "artifact_id": scan["artifact_id"],
+        "build_context_sha256": build_context_sha256,
         "parent_registry_child_digests": parent_digests,
         "trivy_zero": {
+            "unknown": scan["unknown"],
+            "low": scan["low"],
+            "medium": scan["medium"],
             "critical": scan["critical"],
             "high": scan["high"],
             "secrets": scan["secrets"],
         },
+        "grype": grype,
         "explicitly_absent_live_cves": scan["explicitly_absent_live_cves"],
     }
 
@@ -72,7 +92,6 @@ def main() -> int:
     parser.add_argument("--review-base-ref", required=True)
     parser.add_argument("--review-base-oid", required=True)
     parser.add_argument("--merge-base-oid", required=True)
-    parser.add_argument("--build-context", type=Path, required=True)
     parser.add_argument("--source-scan-artifact-name", required=True)
     parser.add_argument("--started-at", required=True)
     parser.add_argument("--finished-at", required=True)
@@ -81,9 +100,18 @@ def main() -> int:
     repo_root = args.repo_root.resolve()
     started = _timestamp(args.started_at, field="started_at")
     finished = _timestamp(args.finished_at, field="finished_at")
-    scanner = verify_scanner_snapshot(
+    trivy_scanner = verify_scanner_snapshot(
         _load_json(evidence_dir / "trivy-version.json"),
         scan_started_at=started,
+        scan_finished_at=finished,
+    )
+    grype_binary_sha256 = (
+        (evidence_dir / "grype-binary-sha256.txt").read_text(encoding="utf-8").strip()
+    )
+    grype_scanner = verify_grype_scanner_snapshot(
+        _load_json(evidence_dir / "grype-version.json"),
+        _load_json(evidence_dir / "grype-db-status.json"),
+        binary_sha256=grype_binary_sha256,
         scan_finished_at=finished,
     )
     source_tree_sha256, source_inventory, tracked_members = _archive_inventory(
@@ -92,11 +120,8 @@ def main() -> int:
     context_tree_sha256, context_inventory, context_members = _archive_inventory(
         evidence_dir / "build-context.tar"
     )
-    actual_context_sha256, actual_context_files = _tree_digest(args.build_context.resolve())
-    if actual_context_sha256 != context_tree_sha256 or actual_context_files != len(
-        context_inventory
-    ):
-        raise EvidenceError("retained build context does not match the context used for build")
+    _verify_canonical_context_archive(evidence_dir / "build-context.tar")
+    build_context_sha256 = _sha256(evidence_dir / "build-context.tar")
     fixture_path = "infra/docker/app-html-runtime-fixture.html"
     baked_path = "src/teamagent/connect_web/static/app.html"
     fixture = source_inventory.get(fixture_path)
@@ -115,7 +140,8 @@ def main() -> int:
     if _archive_git_tree_oid(evidence_dir / "source-tracked.tar") != git_tree:
         raise EvidenceError("retained source archive does not match the expected Git tree")
     receipt = {
-        "schema_version": "2",
+        "schema_version": "3",
+        "evidence_scope": "local-source-validation-only-not-release-credential",
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "git": {
             "head": args.head,
@@ -128,7 +154,10 @@ def main() -> int:
             "started_at": args.started_at,
             "finished_at": args.finished_at,
         },
-        "scanner": scanner,
+        "scanners": {
+            "trivy": trivy_scanner,
+            "grype": grype_scanner,
+        },
         "source": {
             "git_tree": git_tree,
             "archive_sha256": _sha256(evidence_dir / "source-tracked.tar"),
@@ -136,7 +165,7 @@ def main() -> int:
             "tracked_members": tracked_members,
             "scan_artifact_name": args.source_scan_artifact_name,
             "build_context": {
-                "archive_sha256": _sha256(evidence_dir / "build-context.tar"),
+                "archive_sha256": build_context_sha256,
                 "tree_sha256": context_tree_sha256,
                 "members": context_members,
                 "materialized_baked_app_html": {
@@ -152,9 +181,22 @@ def main() -> int:
                 name=name,
                 started_at=started,
                 finished_at=finished,
+                build_context_sha256=build_context_sha256,
+                grype_scanner=grype_scanner,
+                expected_head=args.head,
             )
             for name in ("core", "media")
         },
+        "materials": [
+            {
+                "uri": "file:build-context.tar",
+                "digest": {"sha256": build_context_sha256},
+            },
+            {
+                "uri": "git:source-tree",
+                "digest": {"sha1": args.head, "gitTree": git_tree},
+            },
+        ],
         "external_gates": {
             "ecr_basic_scan": "NOT_RUN_LOCAL_PUSH_PROHIBITED",
             "fargate_runtime_smoke": "NOT_RUN_LOCAL_AWS_ACCESS_PROHIBITED",

@@ -31,10 +31,10 @@ dependencies = [
     # --- 外部連携: Slack ---
     "slack-bolt>=1.21.0",
     "slack-sdk>=3.33.0",
-    "aiohttp>=3.10.0",  # slack-bolt socket-mode(async) が要求。extra扱いで pip install -e . に自動で入らない
+    "aiohttp>=3.14.1",  # slack-bolt socket-mode(async) が要求。extra扱いで pip install -e . に自動で入らない
 
     # --- ドキュメント解析 ---
-    "pypdf>=5.0.0",
+    "pypdf>=6.13.3",
     "python-docx>=1.1.0",
     "openpyxl>=3.1.0",
     "markdown>=3.7",
@@ -45,7 +45,7 @@ dependencies = [
 
     # --- ユーティリティ ---
     "pydantic>=2.9.0",
-    "pydantic-settings>=2.6.0",
+    "pydantic-settings>=2.14.2",
     "httpx>=0.27.0",
     "tenacity>=9.0.0",  # リトライ
     "structlog>=24.4.0",
@@ -61,6 +61,7 @@ dependencies = [
 
     # --- Web フレームワーク（Skill 管理 API 用） ---
     "fastapi>=0.115.0",
+    "python-multipart>=0.0.31",
     "uvicorn[standard]>=0.32.0",
 ]
 
@@ -83,7 +84,7 @@ embeddings = [
     # MCPバックエンドのDockerは --extra embeddings で同梱（go-live実測: 欠落で起動crash）。
     # torch を直接依存にして [tool.uv.sources] の CPU index pin を効かせる（推移的依存には効かない）。
     "sentence-transformers>=3.0.0",
-    "torch>=2.4",
+    "torch>=2.13.0",
 ]
 media = [
     # teamagent-media-worker 専用。core imageには導入しない。
@@ -93,7 +94,7 @@ media = [
     "playwright==1.60.0",
     "python-pptx==1.0.2",
     "pillow==12.2.0",
-    "weasyprint==68.1",
+    "weasyprint>=69.0",
 ]
 
 # media imageはproject本体のcore依存を解決せず、このgroupだけをlockから導入する。
@@ -108,7 +109,7 @@ media-runtime = [
     "playwright==1.60.0",
     "python-pptx==1.0.2",
     "pillow==12.2.0",
-    "weasyprint==68.1",
+    "weasyprint>=69.0",
 ]
 
 [project.scripts]

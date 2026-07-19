@@ -64,23 +64,61 @@ class _Dynamo:
 
 
 class _S3:
-    def __init__(self, *, fail_delete: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_delete: bool = False,
+        keys: list[str] | None = None,
+    ) -> None:
         self.fail_delete = fail_delete
+        self.keys = keys or ["media-jobs/mj_0123456789abcdef01234567/attempts/1/output/media"]
         self.lists: list[dict[str, Any]] = []
         self.deletes: list[dict[str, Any]] = []
+        self.metadata_overrides: dict[str, dict[str, str]] = {}
+        self.tag_overrides: dict[str, dict[str, str]] = {}
 
     def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
         self.lists.append(kwargs)
         return {
-            "Contents": [
-                {"Key": ("media-jobs/mj_0123456789abcdef01234567/attempts/1/output/media")}
-            ],
+            "Contents": [{"Key": key} for key in self.keys],
             "IsTruncated": False,
         }
 
     def delete_objects(self, **kwargs: Any) -> dict[str, Any]:
         self.deletes.append(kwargs)
         return {"Errors": [{"Code": "InternalError"}]} if self.fail_delete else {}
+
+    @staticmethod
+    def _attempt_parts(key: str) -> tuple[str, str, str, bool]:
+        parts = key.split("/")
+        return parts[1], parts[3], parts[4], parts[5] == "_FINALIZED.json"
+
+    def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        key = str(kwargs["Key"])
+        job_id, version, attempt_id, finalized = self._attempt_parts(key)
+        return {
+            "Metadata": self.metadata_overrides.get(
+                key,
+                {
+                    "job-id": job_id,
+                    "attempt-id": attempt_id,
+                    "lease-version": version,
+                    "finalized": str(finalized).lower(),
+                },
+            )
+        }
+
+    def get_object_tagging(self, **kwargs: Any) -> dict[str, Any]:
+        key = str(kwargs["Key"])
+        _job_id, _version, attempt_id, finalized = self._attempt_parts(key)
+        tags = self.tag_overrides.get(
+            key,
+            {
+                "teamagent-attempt-id": attempt_id,
+                "teamagent-finalized": str(finalized).lower(),
+            },
+        )
+        return {"TagSet": [{"Key": name, "Value": value} for name, value in tags.items()]}
 
 
 def _load_handler(
@@ -116,7 +154,11 @@ def test_janitor_owner_version_fences_atomic_eligibility_and_deletes_prefix(
 
     result = module.handler({}, types.SimpleNamespace(aws_request_id="janitor-1"))
 
-    assert result == {"cleaned_jobs": 1, "deleted_objects": 1}
+    assert result == {
+        "cleaned_jobs": 1,
+        "deleted_objects": 1,
+        "reclaimed_attempt_objects": 0,
+    }
     assert len(ddb.claims) == 1
     condition = ddb.claims[0]["ConditionExpression"]
     assert "#version = :version" in condition
@@ -139,7 +181,11 @@ def test_active_consumer_prevents_cleanup(
 
     result = module.handler({}, types.SimpleNamespace(aws_request_id="janitor-1"))
 
-    assert result == {"cleaned_jobs": 0, "deleted_objects": 0}
+    assert result == {
+        "cleaned_jobs": 0,
+        "deleted_objects": 0,
+        "reclaimed_attempt_objects": 0,
+    }
     assert ddb.claims == []
     assert s3.lists == []
 
@@ -156,7 +202,11 @@ def test_race_after_scan_fails_claim_without_deleting_shared_state(
 
     result = module.handler({}, types.SimpleNamespace(aws_request_id="janitor-1"))
 
-    assert result == {"cleaned_jobs": 0, "deleted_objects": 0}
+    assert result == {
+        "cleaned_jobs": 0,
+        "deleted_objects": 0,
+        "reclaimed_attempt_objects": 0,
+    }
     assert s3.lists == []
     assert ddb.deletes == []
 
@@ -175,3 +225,80 @@ def test_s3_cleanup_error_fails_invocation_and_preserves_row_for_retry(
 
     assert len(s3.deletes) == 1
     assert ddb.deletes == []
+
+
+def test_expired_lease_reclaims_only_unfinalized_attempt_uuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = "11111111-1111-4111-8111-111111111111"
+    orphan = "22222222-2222-4222-8222-222222222222"
+    item = _item(
+        status="running",
+        cleanup_at=2_000,
+        hard_cleanup_at=4_000,
+        consumer_guard_until=2_000,
+    )
+    item["lease_expires_at"] = {"N": "900"}
+    item["finalized_attempt_id"] = {"S": current}
+    prefix = "media-jobs/mj_0123456789abcdef01234567/attempts/3"
+    s3 = _S3(
+        keys=[
+            f"{prefix}/{current}/_FINALIZED.json",
+            f"{prefix}/{current}/output/media",
+            f"{prefix}/{orphan}/output/media",
+        ]
+    )
+    ddb = _Dynamo([item])
+    module = _load_handler(monkeypatch, ddb=ddb, s3=s3)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_000)
+
+    result = module.handler({}, types.SimpleNamespace(aws_request_id="janitor-1"))
+
+    assert result == {
+        "cleaned_jobs": 0,
+        "deleted_objects": 0,
+        "reclaimed_attempt_objects": 1,
+    }
+    assert len(s3.deletes) == 1
+    assert s3.deletes[0]["Delete"]["Objects"] == [{"Key": f"{prefix}/{orphan}/output/media"}]
+    assert ddb.claims[0]["UpdateExpression"].startswith("SET orphan_cleanup_owner")
+    assert ddb.claims[1]["UpdateExpression"].startswith("REMOVE orphan_cleanup_owner")
+
+
+@pytest.mark.parametrize("mutation", ["metadata", "tag"])
+def test_orphan_sweep_refuses_subject_mismatch_without_deleting(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    orphan = "22222222-2222-4222-8222-222222222222"
+    item = _item(
+        status="running",
+        cleanup_at=2_000,
+        hard_cleanup_at=4_000,
+        consumer_guard_until=2_000,
+    )
+    item["lease_expires_at"] = {"N": "900"}
+    key = f"media-jobs/mj_0123456789abcdef01234567/attempts/3/{orphan}/output/media"
+    s3 = _S3(keys=[key])
+    if mutation == "metadata":
+        s3.metadata_overrides[key] = {
+            "job-id": "mj_0123456789abcdef01234567",
+            "attempt-id": "33333333-3333-4333-8333-333333333333",
+            "lease-version": "3",
+            "finalized": "false",
+        }
+    else:
+        s3.tag_overrides[key] = {
+            "teamagent-attempt-id": orphan,
+            "teamagent-finalized": "true",
+        }
+    ddb = _Dynamo([item])
+    module = _load_handler(monkeypatch, ddb=ddb, s3=s3)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_000)
+
+    with pytest.raises(RuntimeError, match="exact attempt metadata and tags"):
+        module.handler({}, types.SimpleNamespace(aws_request_id="janitor-1"))
+
+    assert s3.deletes == []

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +16,7 @@ SANITIZER = ROOT / "infra/docker/sanitize_ytdlp.py"
 PACKAGE = ROOT / "tools/tiktok_scraper/package.json"
 PACKAGE_LOCK = ROOT / "tools/tiktok_scraper/package-lock.json"
 SCRAPER = ROOT / "tools/tiktok_scraper/search.mjs"
+DNS_PINNED_PROXY = ROOT / "tools/tiktok_scraper/dns_pinned_proxy.mjs"
 WORKER = ROOT / "src/teamagent/media/worker.py"
 TEXT = DOCKERFILE.read_text(encoding="utf-8")
 
@@ -142,8 +144,9 @@ def test_media_image_copies_only_worker_media_code_and_no_core_secrets_stack() -
     assert "MCP_BEARER" not in TEXT
     assert "VERTEX" not in TEXT
     worker = WORKER.read_text(encoding="utf-8")
-    assert 'session.client("s3"' in worker
-    assert 'session.client("dynamodb"' in worker
+    assert "self._session.client(" in worker
+    assert '"s3"' in worker
+    assert '"dynamodb"' in worker
     for forbidden_client in ('client("rds"', 'client("sqs"', 'client("secretsmanager"'):
         assert forbidden_client not in worker
 
@@ -158,15 +161,23 @@ def test_media_runtime_is_uid_10001_read_only_ready_and_sandboxed() -> None:
     assert "TEAMAGENT_RUNTIME_KIND=media-worker" in TEXT
     assert 'ENTRYPOINT ["/app/.venv/bin/python", "-m", "teamagent.media.worker"]' in TEXT
     assert "--no-sandbox" not in SCRAPER.read_text(encoding="utf-8")
-    assert "chromium_sandbox=True" in (ROOT / "src/teamagent/media/operations.py").read_text(
+    assert "chromium_sandbox=True" in (ROOT / "src/teamagent/media/render_child.py").read_text(
         encoding="utf-8"
     )
 
 
 def test_tiktok_network_guard_is_attached_to_the_correct_browser_paths() -> None:
     scraper = SCRAPER.read_text(encoding="utf-8")
+    proxy = DNS_PINNED_PROXY.read_text(encoding="utf-8")
     assert "dnsCache" not in scraper
-    assert "await dns.lookup(host, { all: true, verbatim: true })" in scraper
+    assert "await dns.lookup" not in scraper
+    assert "startDnsPinnedProxy()" in scraper
+    assert "--proxy-bypass-list=<-loopback>" in scraper
+    assert "--host-resolver-rules=MAP * ~NOTFOUND" in scraper
+    assert "--disable-quic" in scraper
+    assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in scraper
+    assert "await lookup(host, { all: true, verbatim: true })" in proxy
+    assert "peer !== pinned.address" in proxy
     search = scraper.split("async function searchOnce", 1)[1].split(
         "async function scrapeComments", 1
     )[0]
@@ -183,11 +194,49 @@ def test_tiktok_network_guard_is_attached_to_the_correct_browser_paths() -> None
         assert "installPageNetworkGuard(page)" in path
 
 
+def test_dns_pinned_proxy_rebinding_answers_fail_closed_without_second_lookup() -> None:
+    script = """
+import {resolvePinnedTarget} from './tools/tiktok_scraper/dns_pinned_proxy.mjs';
+let calls = 0;
+const rebinding = async () => {
+  calls += 1;
+  return calls === 1
+    ? [{address: '8.8.8.8', family: 4}]
+    : [{address: '127.0.0.1', family: 4}];
+};
+const pinned = await resolvePinnedTarget('example.com', {
+  lookup: rebinding,
+  blockedCidrs: [],
+});
+if (pinned.address !== '8.8.8.8' || calls !== 1) process.exit(2);
+const mixed = async () => [
+  {address: '2606:4700:4700::1111', family: 6},
+  {address: '169.254.169.254', family: 4},
+];
+try {
+  await resolvePinnedTarget('example.com', {lookup: mixed, blockedCidrs: []});
+  process.exit(3);
+} catch (error) {
+  if (!String(error.message).includes('blocked')) process.exit(4);
+}
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_media_sources_and_js_lock_are_content_addressed() -> None:
     expected = {
         PACKAGE: "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
         PACKAGE_LOCK: "f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2",
-        SCRAPER: "ce200324445ed67f4510c7917543a5332121d4fef2d4be4c156b4c377b6d4730",
+        SCRAPER: "fc18fa1e815bf5879f3ed18c98784ceaec1fed9030724e31d9c742229b2b92d7",
+        DNS_PINNED_PROXY: ("d4e8e528f5004fc51b35227a41a4c2721247a50ac907bb12df6faa813e930d9a"),
     }
     for path, digest in expected.items():
         assert _sha256(path) == digest

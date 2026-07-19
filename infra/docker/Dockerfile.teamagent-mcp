@@ -9,9 +9,9 @@ ARG UV_BINARY_SHA256=f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec7282
 ARG PYTHON_VERSION=3.14.6
 ARG PYTHON_BINARY_SHA256=0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8
 ARG E5_MODEL_REVISION=3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3
-ARG TORCH_VERSION=2.12.0+cpu
-ARG TORCH_ARM64_WHEEL_URL=https://pytorch.s3.amazonaws.com/whl/cpu/torch-2.12.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl
-ARG TORCH_ARM64_WHEEL_SHA256=797c066367792c92eb97cafba7fd0caa8d7455e6078a4ee880630077378dc372
+ARG TORCH_VERSION=2.13.0+cpu
+ARG TORCH_ARM64_WHEEL_URL=https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl
+ARG TORCH_ARM64_WHEEL_SHA256=ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c
 ARG BAKED_APP_HTML_SHA256=716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb
 ARG APP_HTML_SOURCE=s3
 ARG APP_HTML_SHA256=03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c
@@ -190,12 +190,16 @@ WORKDIR /app
 
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
+ARG BUILD_CONTEXT_SHA256
 ARG BAKED_APP_HTML_SHA256
+ARG BAKED_APP_HTML_VERSION_ID
 ARG APP_HTML_SOURCE
 ARG APP_HTML_SHA256
 ARG APP_HTML_VERSION_ID
 ARG APP_HTML_MANIFEST_SHA256
 ARG APP_HTML_BUILD_INPUTS_SHA256
+ARG RELEASE_CONTRACT_SHA256
+ARG APP_PROVENANCE_SHA256
 ARG PYTHON_BUILDER_ARM64_DIGEST
 ARG PYTHON_RUNTIME_ARM64_DIGEST
 ARG UV_ARM64_DIGEST
@@ -238,6 +242,9 @@ ENV USER=teamagent \
 
 LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       org.opencontainers.image.ref.name="$GIT_BRANCH" \
+      io.teamagent.build.context-sha256="$BUILD_CONTEXT_SHA256" \
+      io.teamagent.build.release-contract-sha256="$RELEASE_CONTRACT_SHA256" \
+      io.teamagent.build.app-provenance-sha256="$APP_PROVENANCE_SHA256" \
       io.teamagent.runtime.kind="core" \
       io.teamagent.contract.python-version="$PYTHON_VERSION" \
       io.teamagent.contract.python-binary-sha256="$PYTHON_BINARY_SHA256" \
@@ -250,6 +257,7 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       io.teamagent.contract.torch-version="$TORCH_VERSION" \
       io.teamagent.contract.torch-arm64-wheel-sha256="$TORCH_ARM64_WHEEL_SHA256" \
       io.teamagent.contract.baked-app-html-sha256="$BAKED_APP_HTML_SHA256" \
+      io.teamagent.contract.baked-app-html-version-id="$BAKED_APP_HTML_VERSION_ID" \
       io.teamagent.contract.app-html-source="$APP_HTML_SOURCE" \
       io.teamagent.contract.app-html-sha256="$APP_HTML_SHA256" \
       io.teamagent.contract.app-html-version-id="$APP_HTML_VERSION_ID" \

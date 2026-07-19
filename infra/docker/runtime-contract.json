@@ -44,6 +44,7 @@
       "additional_required_gates_allowed": true
     },
     "local_evidence": {
+      "credential_scope": "local-source-validation-only-not-release-credential",
       "source": "exact-git-archive",
       "build_context": "retained-exact-materialized-context",
       "source_tree_sha256_required": true,
@@ -51,6 +52,13 @@
       "review_base_oid_required": true,
       "merge_base_oid_required": true,
       "base_head_change_list_required": true,
+      "supplemental_grype": {
+        "version": "0.112.0",
+        "immutable_image_subject_required": true,
+        "database_status_required": true,
+        "suppressed_findings": 0,
+        "promotion_credential": false
+      },
       "retained_final_verification": "FINAL_VERIFICATION.json",
       "final_verification_checks_completed_sha256sums": true
     }

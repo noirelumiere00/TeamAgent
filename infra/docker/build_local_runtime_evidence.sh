@@ -22,12 +22,15 @@ EVIDENCE_DIR=${1:-"/private/tmp/teamagent-runtime-evidence-$HEAD"}
 CORE_IMAGE="teamagent-mcp-core:$SHORT_HEAD"
 MEDIA_IMAGE="teamagent-media-worker:$SHORT_HEAD"
 EXPECTED_BAKED_APP_HTML_SHA256=716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb
+BAKED_APP_HTML_VERSION_ID=LOCAL_EVIDENCE_ONLY_NOT_PRODUCTION
 APP_HTML_SOURCE=s3
 APP_HTML_SHA256=03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c
 APP_HTML_VERSION_ID=FTXbcN70D0DCN90TI_hRK1IdQK_HhLee
 APP_HTML_MANIFEST_SHA256=aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e
 APP_HTML_BUILD_INPUTS_SHA256=6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf
 CA_FILE=${TEAMAGENT_CA_FILE:-${SSL_CERT_FILE:-}}
+GRYPE_VERSION=0.112.0
+GRYPE_COMMAND=${TEAMAGENT_GRYPE:-grype}
 
 case "$HEAD" in
   *[!0-9a-f]* | "")
@@ -46,6 +49,8 @@ fi
 
 command -v docker >/dev/null
 command -v trivy >/dev/null
+GRYPE_BIN=$(command -v "$GRYPE_COMMAND")
+test -x "$GRYPE_BIN"
 command -v sha256sum >/dev/null
 command -v date >/dev/null
 if test -e "$EVIDENCE_DIR"; then
@@ -94,11 +99,25 @@ BAKED_APP_HTML_SHA256=$(
   sha256sum "$BUILD_CONTEXT_DIR/src/teamagent/connect_web/static/app.html" | cut -d' ' -f1
 )
 test "$BAKED_APP_HTML_SHA256" = "$EXPECTED_BAKED_APP_HTML_SHA256"
-# macOS bsdtar otherwise serializes extended attributes as hidden AppleDouble
-# members. Those are not part of the context BuildKit reads and must not enter
-# the retained, verifier-bound context archive.
-COPYFILE_DISABLE=1 tar -c -f "$EVIDENCE_DIR/build-context.tar" -C "$BUILD_CONTEXT_DIR" .
-SOURCE_DOCKER_DIR="$BUILD_CONTEXT_DIR/infra/docker"
+BUILD_CONTEXT_SHA256=$(
+  python3 "$TRACKED_SOURCE_DIR/infra/docker/canonical_build_context.py" \
+    "$BUILD_CONTEXT_DIR" \
+    "$EVIDENCE_DIR/build-context.tar"
+)
+test "$(sha256sum "$EVIDENCE_DIR/build-context.tar" | cut -d' ' -f1)" = \
+  "$BUILD_CONTEXT_SHA256"
+SOURCE_DOCKER_DIR="$TRACKED_SOURCE_DIR/infra/docker"
+RELEASE_CONTRACT_SHA256=$(
+  sha256sum "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
+    | cut -d' ' -f1
+)
+APP_PROVENANCE_SHA256=$(
+  "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_bundle_provenance.py" \
+    app-provenance-sha256 \
+    --contract \
+      "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
+    --deploy-log "$TRACKED_SOURCE_DIR/infra/deploy_log.md"
+)
 set --
 if test -n "$CA_FILE"; then
   test -f "$CA_FILE"
@@ -108,34 +127,44 @@ fi
 docker buildx build \
   "$@" \
   --platform linux/arm64 \
-  --file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-mcp" \
+  --file infra/docker/Dockerfile.teamagent-mcp \
   --build-arg "GIT_COMMIT=$HEAD" \
   --build-arg "GIT_BRANCH=$BRANCH" \
+  --build-arg "BUILD_CONTEXT_SHA256=$BUILD_CONTEXT_SHA256" \
   --build-arg "BAKED_APP_HTML_SHA256=$BAKED_APP_HTML_SHA256" \
+  --build-arg "BAKED_APP_HTML_VERSION_ID=$BAKED_APP_HTML_VERSION_ID" \
   --build-arg "APP_HTML_SOURCE=$APP_HTML_SOURCE" \
   --build-arg "APP_HTML_SHA256=$APP_HTML_SHA256" \
   --build-arg "APP_HTML_VERSION_ID=$APP_HTML_VERSION_ID" \
   --build-arg "APP_HTML_MANIFEST_SHA256=$APP_HTML_MANIFEST_SHA256" \
   --build-arg "APP_HTML_BUILD_INPUTS_SHA256=$APP_HTML_BUILD_INPUTS_SHA256" \
+  --build-arg "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
+  --build-arg "APP_PROVENANCE_SHA256=$APP_PROVENANCE_SHA256" \
   --provenance=mode=max \
   --sbom=true \
   --metadata-file "$EVIDENCE_DIR/core-build-metadata.json" \
   --tag "$CORE_IMAGE" \
   --load \
-  "$BUILD_CONTEXT_DIR"
+  - <"$EVIDENCE_DIR/build-context.tar"
 
 docker buildx build \
   "$@" \
   --platform linux/arm64 \
-  --file "$SOURCE_DOCKER_DIR/Dockerfile.teamagent-media-worker" \
+  --file infra/docker/Dockerfile.teamagent-media-worker \
   --build-arg "GIT_COMMIT=$HEAD" \
   --build-arg "GIT_BRANCH=$BRANCH" \
+  --build-arg "BUILD_CONTEXT_SHA256=$BUILD_CONTEXT_SHA256" \
+  --build-arg "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
+  --build-arg "APP_PROVENANCE_SHA256=$APP_PROVENANCE_SHA256" \
   --provenance=mode=max \
   --sbom=true \
   --metadata-file "$EVIDENCE_DIR/media-build-metadata.json" \
   --tag "$MEDIA_IMAGE" \
   --load \
-  "$BUILD_CONTEXT_DIR"
+  - <"$EVIDENCE_DIR/build-context.tar"
+
+test "$(sha256sum "$EVIDENCE_DIR/build-context.tar" | cut -d' ' -f1)" = \
+  "$BUILD_CONTEXT_SHA256"
 
 SCAN_STARTED_AT=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
 trivy fs \
@@ -147,6 +176,19 @@ trivy fs \
   "$TRACKED_SOURCE_DIR"
 trivy image --download-db-only
 trivy version --format json >"$EVIDENCE_DIR/trivy-version.json"
+"$GRYPE_BIN" version -o json >"$EVIDENCE_DIR/grype-version.json"
+python3 - "$EVIDENCE_DIR/grype-version.json" "$GRYPE_VERSION" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    version = json.load(handle)
+if version.get("application") != "grype" or version.get("version") != sys.argv[2]:
+    raise SystemExit("unexpected Grype binary version")
+PY
+sha256sum "$GRYPE_BIN" | cut -d' ' -f1 \
+  >"$EVIDENCE_DIR/grype-binary-sha256.txt"
+"$GRYPE_BIN" db status -o json >"$EVIDENCE_DIR/grype-db-status.json"
 
 for pair in "core:$CORE_IMAGE" "media:$MEDIA_IMAGE"; do
   name=${pair%%:*}
@@ -172,6 +214,12 @@ for pair in "core:$CORE_IMAGE" "media:$MEDIA_IMAGE"; do
   test "$architecture" = "arm64"
   test "$user" = "10001:10001"
   test "$volumes" = '{"/tmp":{}}'
+  context_label=$(
+    docker image inspect \
+      --format '{{index .Config.Labels "io.teamagent.build.context-sha256"}}' \
+      "$image_id"
+  )
+  test "$context_label" = "$BUILD_CONTEXT_SHA256"
   if test "$name" = core; then
     baked_label=$(
       docker image inspect \
@@ -242,11 +290,23 @@ for pair in "core:$CORE_IMAGE" "media:$MEDIA_IMAGE"; do
     --format cyclonedx \
     --output "$EVIDENCE_DIR/$name-sbom.cdx.json" \
     "$image_id"
+  "$GRYPE_BIN" \
+    --config "$SOURCE_DOCKER_DIR/grype-local-evidence.yaml" \
+    "$image_id" \
+    --show-suppressed \
+    --output json \
+    --file "$EVIDENCE_DIR/$name-grype-vulnerability.json"
 done
 SCAN_FINISHED_AT=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
 trivy version --format json >"$EVIDENCE_DIR/trivy-version-after.json"
 cmp "$EVIDENCE_DIR/trivy-version.json" "$EVIDENCE_DIR/trivy-version-after.json"
 rm "$EVIDENCE_DIR/trivy-version-after.json"
+"$GRYPE_BIN" version -o json >"$EVIDENCE_DIR/grype-version-after.json"
+"$GRYPE_BIN" db status -o json >"$EVIDENCE_DIR/grype-db-status-after.json"
+cmp "$EVIDENCE_DIR/grype-version.json" "$EVIDENCE_DIR/grype-version-after.json"
+cmp "$EVIDENCE_DIR/grype-db-status.json" "$EVIDENCE_DIR/grype-db-status-after.json"
+rm "$EVIDENCE_DIR/grype-version-after.json" \
+  "$EVIDENCE_DIR/grype-db-status-after.json"
 
 CORE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$CORE_IMAGE")
 MEDIA_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$MEDIA_IMAGE")
@@ -275,7 +335,6 @@ printf 'review_base_ref=%s\nreview_base_oid=%s\nmerge_base_oid=%s\n' \
   --review-base-ref "$REVIEW_BASE_REF" \
   --review-base-oid "$REVIEW_BASE_OID" \
   --merge-base-oid "$MERGE_BASE_OID" \
-  --build-context "$BUILD_CONTEXT_DIR" \
   --source-scan-artifact-name "$TRACKED_SOURCE_DIR" \
   --started-at "$SCAN_STARTED_AT" \
   --finished-at "$SCAN_FINISHED_AT"

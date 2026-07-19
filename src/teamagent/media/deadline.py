@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 
 class MediaDeadlineExceededError(TimeoutError):
@@ -32,4 +33,18 @@ class DeadlineBudget:
         self.remaining()
 
 
-__all__ = ["DeadlineBudget", "MediaDeadlineExceededError"]
+def botocore_config(budget: DeadlineBudget) -> Any:
+    """Bound one no-retry AWS call's connect+read phases by remaining time."""
+
+    from botocore.config import Config
+
+    remaining = budget.remaining()
+    phase_timeout = max(0.001, min(30.0, remaining / 2.0))
+    return Config(
+        connect_timeout=phase_timeout,
+        read_timeout=phase_timeout,
+        retries={"mode": "standard", "total_max_attempts": 1},
+    )
+
+
+__all__ = ["DeadlineBudget", "MediaDeadlineExceededError", "botocore_config"]

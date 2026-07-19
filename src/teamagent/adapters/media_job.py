@@ -16,6 +16,7 @@ from typing import Any
 import structlog
 
 from teamagent.media.contracts import (
+    MAX_DEADLINE_SECONDS,
     MAX_INPUT_BYTES,
     AcquireOperation,
     FrameOperation,
@@ -34,13 +35,18 @@ from teamagent.media.contracts import (
     make_job_request,
     parse_job_request,
 )
-from teamagent.media.deadline import DeadlineBudget, MediaDeadlineExceededError
+from teamagent.media.deadline import (
+    DeadlineBudget,
+    MediaDeadlineExceededError,
+    botocore_config,
+)
 
 logger = structlog.get_logger(__name__)
 
 _SYNC_TIMEOUT_DEFAULT_S = 180
 _SYNC_TIMEOUT_MAX_S = 15 * 60
 _ARTIFACT_TTL_DEFAULT_S = 3600
+_CONSUMER_RELEASE_RESERVE_SECONDS = 15
 _JOB_ID_RE = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
 
 
@@ -115,13 +121,23 @@ class MediaJobClient:
 
         return boto3.session.Session()
 
-    def _clients(self) -> tuple[Any, Any, Any]:
-        session = self._session()
-        return (
-            session.client("sqs", region_name=self._region),
-            session.client("dynamodb", region_name=self._region),
-            session.client("s3", region_name=self._region),
-        )
+    def _client(self, service: str, deadline_epoch_s: float) -> Any:
+        budget = DeadlineBudget(deadline_epoch_s, clock=self._clock)
+        try:
+            config = botocore_config(budget)
+        except MediaDeadlineExceededError as exc:
+            raise MediaJobError("MEDIA_JOB_DEADLINE_EXCEEDED") from exc
+        return self._session().client(service, region_name=self._region, config=config)
+
+    def _call(
+        self,
+        service: str,
+        deadline_epoch_s: float,
+        operation: str,
+        **kwargs: Any,
+    ) -> Any:
+        client = self._client(service, deadline_epoch_s)
+        return getattr(client, operation)(**kwargs)
 
     def _assert_configured(self) -> None:
         if not self._queue_url or not self._table or not self._bucket:
@@ -132,6 +148,11 @@ class MediaJobClient:
             return DeadlineBudget(deadline_epoch_s, clock=self._clock).remaining(cap_s=cap_s)
         except MediaDeadlineExceededError as exc:
             raise MediaJobError("MEDIA_JOB_DEADLINE_EXCEEDED") from exc
+
+    def _absolute_deadline(self, timeout_s: int) -> int:
+        if timeout_s < 1 or timeout_s > MAX_DEADLINE_SECONDS:
+            raise MediaJobError("MEDIA_JOB_TIMEOUT_INVALID")
+        return int(self._clock()) + timeout_s
 
     def _sse_args(self) -> dict[str, str]:
         if self._kms_key_id:
@@ -183,6 +204,7 @@ class MediaJobClient:
         name: str,
         body: bytes,
         content_type: str,
+        deadline_epoch_s: int,
         ttl_s: int | None = None,
     ) -> S3ObjectRef:
         self._assert_configured()
@@ -197,11 +219,14 @@ class MediaJobClient:
         resolved_ttl_s = self.artifact_ttl_seconds() if ttl_s is None else ttl_s
         if resolved_ttl_s < 300 or resolved_ttl_s > self.artifact_ttl_seconds():
             raise MediaJobError("MEDIA_INPUT_TTL_INVALID")
-        _sqs, _ddb, s3 = self._clients()
+        self._remaining(deadline_epoch_s)
         digest = hashlib.sha256(body).hexdigest()
         key = f"media-jobs/{job_id}/input/{name}"
         expires = datetime.fromtimestamp(int(self._clock()) + resolved_ttl_s, tz=UTC)
-        s3.put_object(
+        self._call(
+            "s3",
+            deadline_epoch_s,
+            "put_object",
             Bucket=self._bucket,
             Key=key,
             Body=body,
@@ -226,13 +251,15 @@ class MediaJobClient:
         self._remaining(request.deadline_epoch_s)
         if request.output_bucket != self._bucket:
             raise MediaJobError("MEDIA_JOB_BUCKET_MISMATCH")
-        sqs, ddb, _s3 = self._clients()
         queued_request = request
         body = queued_request.to_json_bytes().decode("utf-8")
         queued = MediaJobResult(job_id=request.job_id, status="queued")
         try:
             self._remaining(request.deadline_epoch_s)
-            ddb.put_item(
+            self._call(
+                "dynamodb",
+                request.deadline_epoch_s,
+                "put_item",
                 TableName=self._table,
                 Item={
                     "job_id": {"S": request.job_id},
@@ -270,7 +297,10 @@ class MediaJobClient:
         except Exception as exc:
             if not _is_conditional_conflict(exc):
                 raise MediaJobError("MEDIA_JOB_STATE_CREATE_FAILED") from exc
-            existing = ddb.get_item(
+            existing = self._call(
+                "dynamodb",
+                request.deadline_epoch_s,
+                "get_item",
                 TableName=self._table,
                 Key={"job_id": {"S": request.job_id}},
                 ConsistentRead=True,
@@ -293,7 +323,10 @@ class MediaJobClient:
             self._remaining(queued_request.deadline_epoch_s)
             now = int(self._clock())
             try:
-                ddb.update_item(
+                self._call(
+                    "dynamodb",
+                    queued_request.deadline_epoch_s,
+                    "update_item",
                     TableName=self._table,
                     Key={"job_id": {"S": request.job_id}},
                     UpdateExpression="SET submit_owner = :owner, submit_lease_expires_at = :lease",
@@ -316,7 +349,10 @@ class MediaJobClient:
             except Exception as exc:
                 if not _is_conditional_conflict(exc):
                     raise MediaJobError("MEDIA_JOB_ENQUEUE_CLAIM_FAILED") from exc
-                existing = ddb.get_item(
+                existing = self._call(
+                    "dynamodb",
+                    queued_request.deadline_epoch_s,
+                    "get_item",
                     TableName=self._table,
                     Key={"job_id": {"S": request.job_id}},
                     ConsistentRead=True,
@@ -358,10 +394,18 @@ class MediaJobClient:
             arguments["MessageGroupId"] = "teamagent-media"
         try:
             self._remaining(queued_request.deadline_epoch_s)
-            sqs.send_message(**arguments)
+            self._call(
+                "sqs",
+                queued_request.deadline_epoch_s,
+                "send_message",
+                **arguments,
+            )
         except MediaJobError:
             try:
-                ddb.update_item(
+                self._call(
+                    "dynamodb",
+                    queued_request.deadline_epoch_s,
+                    "update_item",
                     TableName=self._table,
                     Key={"job_id": {"S": request.job_id}},
                     UpdateExpression="REMOVE submit_owner, submit_lease_expires_at",
@@ -373,7 +417,10 @@ class MediaJobClient:
             raise
         except Exception as exc:
             try:
-                ddb.update_item(
+                self._call(
+                    "dynamodb",
+                    queued_request.deadline_epoch_s,
+                    "update_item",
                     TableName=self._table,
                     Key={"job_id": {"S": request.job_id}},
                     UpdateExpression="REMOVE submit_owner, submit_lease_expires_at",
@@ -384,7 +431,10 @@ class MediaJobClient:
                 raise MediaJobError("MEDIA_JOB_SUBMIT_AND_RELEASE_FAILED") from release_exc
             raise MediaJobError("MEDIA_JOB_SUBMIT_FAILED") from exc
         try:
-            ddb.update_item(
+            self._call(
+                "dynamodb",
+                queued_request.deadline_epoch_s,
+                "update_item",
                 TableName=self._table,
                 Key={"job_id": {"S": request.job_id}},
                 UpdateExpression=(
@@ -403,10 +453,12 @@ class MediaJobClient:
         self._remaining(queued_request.deadline_epoch_s)
         return request.job_id
 
-    def get_result(self, job_id: str) -> MediaJobResult | None:
+    def get_result(self, job_id: str, *, deadline_epoch_s: int) -> MediaJobResult | None:
         self._assert_configured()
-        _sqs, ddb, _s3 = self._clients()
-        response = ddb.get_item(
+        response = self._call(
+            "dynamodb",
+            deadline_epoch_s,
+            "get_item",
             TableName=self._table,
             Key={"job_id": {"S": job_id}},
             ConsistentRead=True,
@@ -435,13 +487,14 @@ class MediaJobClient:
         if timeout_s < 1 or timeout_s > _SYNC_TIMEOUT_MAX_S:
             raise MediaJobError("MEDIA_JOB_TIMEOUT_INVALID")
         monotonic_deadline = self._monotonic() + timeout_s
+        now = self._clock()
         absolute_deadline = min(
-            self._clock() + timeout_s,
-            float(deadline_epoch_s) if deadline_epoch_s is not None else self._clock() + timeout_s,
+            now + timeout_s,
+            float(deadline_epoch_s) if deadline_epoch_s is not None else now + timeout_s,
         )
         while self._monotonic() <= monotonic_deadline:
             remaining_absolute = self._remaining(absolute_deadline)
-            result = self.get_result(job_id)
+            result = self.get_result(job_id, deadline_epoch_s=int(absolute_deadline))
             if result is not None and result.status in ("done", "failed"):
                 return result
             remaining = monotonic_deadline - self._monotonic()
@@ -457,18 +510,53 @@ class MediaJobClient:
             )
         raise MediaJobError("MEDIA_JOB_TIMEOUT")
 
-    def download(self, ref: S3ObjectRef) -> bytes:
+    def download(self, ref: S3ObjectRef, *, deadline_epoch_s: int) -> bytes:
         self._assert_configured()
         if ref.bucket != self._bucket:
             raise MediaJobError("MEDIA_ARTIFACT_BUCKET_MISMATCH")
-        _sqs, _ddb, s3 = self._clients()
-        response = s3.get_object(Bucket=ref.bucket, Key=ref.key)
+        response = self._call(
+            "s3",
+            deadline_epoch_s,
+            "get_object",
+            Bucket=ref.bucket,
+            Key=ref.key,
+        )
         if response.get("ServerSideEncryption") not in ("AES256", "aws:kms"):
             raise MediaJobError("MEDIA_ARTIFACT_NOT_ENCRYPTED")
         body = bytes(response["Body"].read(ref.size + 1))
         if len(body) != ref.size or hashlib.sha256(body).hexdigest() != ref.sha256:
             raise MediaJobError("MEDIA_ARTIFACT_INTEGRITY_FAILED")
         return body
+
+    def presign_get(
+        self,
+        ref: S3ObjectRef,
+        *,
+        deadline_epoch_s: int,
+        expires_s: int,
+    ) -> str:
+        """Create a short-lived URL without escaping the caller's absolute budget."""
+
+        self._assert_configured()
+        if ref.bucket != self._bucket:
+            raise MediaJobError("MEDIA_ARTIFACT_BUCKET_MISMATCH")
+        if expires_s < 1 or expires_s > 300:
+            raise MediaJobError("MEDIA_ARTIFACT_PRESIGN_EXPIRY_INVALID")
+        self._remaining(deadline_epoch_s)
+        try:
+            url = self._client("s3", deadline_epoch_s).generate_presigned_url(
+                "get_object",
+                Params={"Bucket": ref.bucket, "Key": ref.key},
+                ExpiresIn=expires_s,
+            )
+        except MediaJobError:
+            raise
+        except Exception as exc:
+            raise MediaJobError("MEDIA_ARTIFACT_PRESIGN_FAILED") from exc
+        self._remaining(deadline_epoch_s)
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise MediaJobError("MEDIA_ARTIFACT_PRESIGN_FAILED")
+        return url
 
     def cleanup(self, request: MediaJobRequest) -> None:
         """Keep shared terminal state until the fenced janitor window.
@@ -482,7 +570,7 @@ class MediaJobClient:
         if request.output_prefix != approved:
             raise MediaJobError("MEDIA_JOB_CLEANUP_SCOPE_INVALID")
 
-    def cleanup_job(self, job_id: str) -> None:
+    def cleanup_job(self, job_id: str, *, deadline_epoch_s: int) -> None:
         """Register pre-submit staged bytes for deterministic janitor cleanup."""
 
         if not _JOB_ID_RE.fullmatch(job_id):
@@ -494,8 +582,10 @@ class MediaJobClient:
             error_code="MEDIA_REQUEST_BUILD_FAILED",
         )
         try:
-            _sqs, ddb, _s3 = self._clients()
-            ddb.put_item(
+            self._call(
+                "dynamodb",
+                deadline_epoch_s,
+                "put_item",
                 TableName=self._table,
                 Item={
                     "job_id": {"S": job_id},
@@ -522,10 +612,13 @@ class MediaJobClient:
                 raise MediaJobError("MEDIA_JOB_CLEANUP_REGISTRATION_FAILED") from exc
 
     def _acquire_consumer(self, request: MediaJobRequest, *, timeout_s: int) -> None:
-        _sqs, ddb, _s3 = self._clients()
         now = int(self._clock())
+        execution_deadline_epoch_s = request.deadline_epoch_s - _CONSUMER_RELEASE_RESERVE_SECONDS
         try:
-            ddb.update_item(
+            self._call(
+                "dynamodb",
+                execution_deadline_epoch_s,
+                "update_item",
                 TableName=self._table,
                 Key={"job_id": {"S": request.job_id}},
                 UpdateExpression=("SET consumer_guard_until = :guard ADD active_consumers :one"),
@@ -542,9 +635,11 @@ class MediaJobClient:
             raise MediaJobError("MEDIA_JOB_CONSUMER_ACQUIRE_FAILED") from exc
 
     def _release_consumer(self, request: MediaJobRequest) -> None:
-        _sqs, ddb, _s3 = self._clients()
         try:
-            ddb.update_item(
+            self._call(
+                "dynamodb",
+                request.deadline_epoch_s,
+                "update_item",
                 TableName=self._table,
                 Key={"job_id": {"S": request.job_id}},
                 UpdateExpression="ADD active_consumers :minus_one",
@@ -563,24 +658,26 @@ class MediaJobClient:
         job_id: str,
         request_fingerprint: str,
         timeout_s: int,
-        operation_factory: Callable[[], MediaOperation],
+        operation_factory: Callable[[int], MediaOperation],
     ) -> tuple[Mapping[str, bytes], Mapping[str, Any]]:
         """stage/operation/request途中の例外でも、作成済みinputを残さない。"""
 
         request: MediaJobRequest | None = None
+        deadline_epoch_s = self._absolute_deadline(timeout_s)
         try:
-            operation = operation_factory()
+            operation = operation_factory(deadline_epoch_s)
             request = self._request(
                 operation,
                 request_fingerprint,
                 timeout_s,
                 job_id=job_id,
+                deadline_epoch_s=deadline_epoch_s,
             )
             return self.run_sync(request, timeout_s=timeout_s)
         finally:
             # run_sync に到達した場合は同メソッドの finally が cleanup する。
             if request is None:
-                self.cleanup_job(job_id)
+                self.cleanup_job(job_id, deadline_epoch_s=deadline_epoch_s)
 
     def run_sync(
         self,
@@ -590,24 +687,31 @@ class MediaJobClient:
     ) -> tuple[Mapping[str, bytes], Mapping[str, Any]]:
         """submit→consumer lease→bounded poll→integrity-checked download."""
 
-        remaining = self._remaining(request.deadline_epoch_s, cap_s=float(timeout_s))
+        execution_deadline_epoch_s = request.deadline_epoch_s - _CONSUMER_RELEASE_RESERVE_SECONDS
+        remaining = self._remaining(
+            execution_deadline_epoch_s,
+            cap_s=float(timeout_s),
+        )
         self.submit(request)
-        remaining = self._remaining(request.deadline_epoch_s, cap_s=remaining)
+        remaining = self._remaining(execution_deadline_epoch_s, cap_s=remaining)
         bounded_timeout = max(1, math.ceil(remaining))
         self._acquire_consumer(request, timeout_s=bounded_timeout)
         try:
             result = self.wait(
                 request.job_id,
                 timeout_s=bounded_timeout,
-                deadline_epoch_s=request.deadline_epoch_s,
+                deadline_epoch_s=execution_deadline_epoch_s,
             )
             if result.status != "done":
                 raise MediaJobError(result.error_code or "MEDIA_JOB_FAILED")
             artifacts: dict[str, bytes] = {}
             for artifact in result.artifacts:
-                self._remaining(request.deadline_epoch_s)
-                artifacts[artifact.name] = self.download(artifact.object)
-                self._remaining(request.deadline_epoch_s)
+                self._remaining(execution_deadline_epoch_s)
+                artifacts[artifact.name] = self.download(
+                    artifact.object,
+                    deadline_epoch_s=execution_deadline_epoch_s,
+                )
+                self._remaining(execution_deadline_epoch_s)
             return artifacts, result.metadata
         finally:
             self._release_consumer(request)
@@ -621,7 +725,13 @@ class MediaJobClient:
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
     ) -> tuple[bytes, str]:
         operation = AcquireOperation(kind="acquire", url=url, max_bytes=max_bytes)
-        request = self._request(operation, request_fingerprint, timeout_s)
+        deadline_epoch_s = self._absolute_deadline(timeout_s)
+        request = self._request(
+            operation,
+            request_fingerprint,
+            timeout_s,
+            deadline_epoch_s=deadline_epoch_s,
+        )
         artifacts, _metadata = self.run_sync(request, timeout_s=timeout_s)
         body = artifacts.get("media")
         if body is None:
@@ -652,7 +762,13 @@ class MediaJobClient:
             sort="display",
             client=TikTokClientConfig(),
         )
-        request = self._request(operation, request_fingerprint, timeout_s)
+        deadline_epoch_s = self._absolute_deadline(timeout_s)
+        request = self._request(
+            operation,
+            request_fingerprint,
+            timeout_s,
+            deadline_epoch_s=deadline_epoch_s,
+        )
         artifacts, _metadata = self.run_sync(request, timeout_s=timeout_s)
         body = artifacts.get("posts.json")
         if body is None:
@@ -678,12 +794,13 @@ class MediaJobClient:
     ) -> tuple[bytes, str]:
         job_id = self._job_id(request_fingerprint)
 
-        def operation_factory() -> MediaOperation:
+        def operation_factory(deadline_epoch_s: int) -> MediaOperation:
             source = self.stage_bytes(
                 job_id=job_id,
                 name="source.bin",
                 body=data,
                 content_type=mime,
+                deadline_epoch_s=deadline_epoch_s,
             )
             return ProxyOperation(
                 kind="proxy",
@@ -715,12 +832,13 @@ class MediaJobClient:
     ) -> list[tuple[float, bytes]]:
         job_id = self._job_id(request_fingerprint)
 
-        def operation_factory() -> MediaOperation:
+        def operation_factory(deadline_epoch_s: int) -> MediaOperation:
             source = self.stage_bytes(
                 job_id=job_id,
                 name="source.bin",
                 body=data,
                 content_type=mime,
+                deadline_epoch_s=deadline_epoch_s,
             )
             return FrameOperation(
                 kind="frame",
@@ -753,12 +871,13 @@ class MediaJobClient:
     ) -> tuple[bytes, dict[str, Any]]:
         job_id = self._job_id(request_fingerprint)
 
-        def operation_factory() -> MediaOperation:
+        def operation_factory(deadline_epoch_s: int) -> MediaOperation:
             source = self.stage_bytes(
                 job_id=job_id,
                 name="source.bin",
                 body=data,
                 content_type=mime,
+                deadline_epoch_s=deadline_epoch_s,
             )
             return ThumbnailOperation(kind="thumbnail", source=source, width=width)
 
@@ -782,7 +901,13 @@ class MediaJobClient:
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
     ) -> tuple[bytes, dict[str, Any]]:
         operation = ThumbnailOperation(kind="thumbnail", url=url, width=width)
-        request = self._request(operation, request_fingerprint, timeout_s)
+        deadline_epoch_s = self._absolute_deadline(timeout_s)
+        request = self._request(
+            operation,
+            request_fingerprint,
+            timeout_s,
+            deadline_epoch_s=deadline_epoch_s,
+        )
         artifacts, metadata = self.run_sync(request, timeout_s=timeout_s)
         image = artifacts.get("thumbnail")
         if image is None:
@@ -798,12 +923,13 @@ class MediaJobClient:
     ) -> bytes:
         job_id = self._job_id(request_fingerprint)
 
-        def operation_factory() -> MediaOperation:
+        def operation_factory(deadline_epoch_s: int) -> MediaOperation:
             html_ref = self.stage_bytes(
                 job_id=job_id,
                 name="slides.html",
                 body=html.encode("utf-8"),
                 content_type="text/html; charset=utf-8",
+                deadline_epoch_s=deadline_epoch_s,
             )
             return SlidesOperation(kind="slides", html=html_ref)
 
@@ -827,12 +953,13 @@ class MediaJobClient:
     ) -> bytes:
         job_id = self._job_id(request_fingerprint)
 
-        def operation_factory() -> MediaOperation:
+        def operation_factory(deadline_epoch_s: int) -> MediaOperation:
             html_ref = self.stage_bytes(
                 job_id=job_id,
                 name="document.html",
                 body=html.encode("utf-8"),
                 content_type="text/html; charset=utf-8",
+                deadline_epoch_s=deadline_epoch_s,
             )
             return PdfOperation(kind="pdf", html=html_ref)
 
@@ -859,7 +986,7 @@ class MediaJobClient:
     ) -> bytes:
         job_id = self._job_id(request_fingerprint)
 
-        def operation_factory() -> MediaOperation:
+        def operation_factory(deadline_epoch_s: int) -> MediaOperation:
             template_ref = self.stage_bytes(
                 job_id=job_id,
                 name="template.pptx",
@@ -867,12 +994,14 @@ class MediaJobClient:
                 content_type=(
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 ),
+                deadline_epoch_s=deadline_epoch_s,
             )
             composer_ref = self.stage_bytes(
                 job_id=job_id,
                 name="composer.json",
                 body=composer_json,
                 content_type="application/json",
+                deadline_epoch_s=deadline_epoch_s,
             )
             evidence: list[ProposalEvidence] = []
             for index, (placeholder_id, rank, image, content_type) in enumerate(
@@ -887,6 +1016,7 @@ class MediaJobClient:
                             name=f"evidence-{index:02d}.bin",
                             body=image,
                             content_type=content_type,
+                            deadline_epoch_s=deadline_epoch_s,
                         ),
                     )
                 )
@@ -916,6 +1046,7 @@ class MediaJobClient:
         timeout_s: int,
         *,
         job_id: str | None = None,
+        deadline_epoch_s: int | None = None,
     ) -> MediaJobRequest:
         self._assert_configured()
         return make_job_request(
@@ -924,6 +1055,7 @@ class MediaJobClient:
             request_fingerprint=request_fingerprint,
             now_epoch_s=int(self._clock()),
             timeout_s=timeout_s,
+            deadline_epoch_s=deadline_epoch_s,
             artifact_ttl_s=self.artifact_ttl_seconds(),
             job_id=job_id,
         )

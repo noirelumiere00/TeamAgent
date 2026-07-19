@@ -111,11 +111,11 @@
   "renderers_and_overrides": {
     "infra/deploy/deploy_connectweb_unified.sh": {
       "consumer": "connect-web",
-      "may_override_entry_point_or_command": true
+      "may_override_entry_point_or_command": false
     },
     "infra/deploy/register_ingest_td.sh": {
       "consumer": "ingest",
-      "may_override_entry_point_or_command": true
+      "may_override_entry_point_or_command": false
     },
     "scripts/aws/run_ingest_task.sh": {
       "consumer": "ingest",
