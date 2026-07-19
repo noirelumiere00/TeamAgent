@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -920,7 +921,7 @@ def _fake_aws(path: Path) -> None:
     _write_executable(
         path,
         f"""\
-        #!/usr/bin/env python3
+        #!{sys.executable}
         import copy
         import json
         import os
