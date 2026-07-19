@@ -19,11 +19,17 @@ from pydantic import BaseModel
 from teamagent.identity import IdentityResolver, ResolvedIdentity
 from teamagent.mcp_gateway.server import (
     USER_CONTEXT_KEY,
+    build_server,
     company_shared_groups_from_env,
     dispatch_tool,
 )
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
+from tests.caller_claim_testkit import (
+    TEST_SLACK_USER_ID,
+    make_verifier,
+    sign_arguments,
+)
 
 
 class _In(BaseModel):
@@ -73,8 +79,24 @@ def _resolver(mapping: dict[str, ResolvedIdentity], *, raises: bool = False) -> 
     return resolve
 
 
-_TARO = ResolvedIdentity(slack_user_id="U12345", email="taro@vectorinc.co.jp")
-_OK = _resolver({"U12345": _TARO})
+_TARO = ResolvedIdentity(
+    slack_user_id=TEST_SLACK_USER_ID,
+    email="taro@vectorinc.co.jp",
+)
+_OK = _resolver({TEST_SLACK_USER_ID: _TARO})
+
+
+def test_protected_server_configuration_requires_resolver_and_claim_verifier() -> None:
+    with pytest.raises(RuntimeError, match="Slack identity resolver"):
+        build_server(
+            list(_BY_NAME.values()),
+            company_shared_groups=frozenset({"vectorinc.co.jp"}),
+        )
+    with pytest.raises(RuntimeError, match="signed caller claim verifier"):
+        build_server(
+            list(_BY_NAME.values()),
+            identity_resolver=_OK,
+        )
 
 
 async def test_strict_resolves_and_drops_all_oc_fields() -> None:
@@ -83,16 +105,17 @@ async def test_strict_resolves_and_drops_all_oc_fields() -> None:
         await dispatch_tool(
             _BY_NAME,
             "echo",
-            {
-                "q": "hi",
-                USER_CONTEXT_KEY: {
-                    "slack_user_id": "U12345",
+            sign_arguments(
+                "echo",
+                {"q": "hi"},
+                declared_context={
                     "user_email": "attacker@evil.com",
                     "user_groups": ["secret-group"],
                     "user_role": "admin",
                 },
-            },
+            ),
             identity_resolver=_OK,
+            caller_claim_verifier=make_verifier(),
         )
     )
     assert out["email"] == "taro@vectorinc.co.jp"
@@ -109,11 +132,11 @@ async def test_strict_downgrade_closed_without_slack_user_id() -> None:
             "echo",
             {"q": "hi", USER_CONTEXT_KEY: {"user_email": "attacker@evil.com"}},
             identity_resolver=_OK,
+            caller_claim_verifier=make_verifier(),
             require_rls=True,
         )
     )
-    assert "RLS required" in out["error"]
-    assert "slack_user_id" in out["error"]
+    assert out["code"] == "CALLER_IDENTITY_REJECTED"
 
 
 async def test_strict_resolver_none_fail_closed() -> None:
@@ -121,12 +144,13 @@ async def test_strict_resolver_none_fail_closed() -> None:
         await dispatch_tool(
             _BY_NAME,
             "echo",
-            {"q": "hi", USER_CONTEXT_KEY: {"slack_user_id": "U99999"}},  # 未知ユーザ
+            sign_arguments("echo", {"q": "hi"}, user_id="U9999999999"),
             identity_resolver=_OK,
+            caller_claim_verifier=make_verifier(),
             require_rls=True,
         )
     )
-    assert "RLS required" in out["error"]
+    assert out["code"] == "CALLER_IDENTITY_REJECTED"
 
 
 async def test_strict_resolver_exception_fail_closed() -> None:
@@ -134,27 +158,29 @@ async def test_strict_resolver_exception_fail_closed() -> None:
         await dispatch_tool(
             _BY_NAME,
             "echo",
-            {"q": "hi", USER_CONTEXT_KEY: {"slack_user_id": "U12345"}},
+            sign_arguments("echo", {"q": "hi"}),
             identity_resolver=_resolver({}, raises=True),
+            caller_claim_verifier=make_verifier(),
             require_rls=True,
         )
     )
-    assert "RLS required" in out["error"]
+    assert out["code"] == "CALLER_IDENTITY_REJECTED"
 
 
 async def test_strict_disallowed_domain_fail_closed() -> None:
-    ext = ResolvedIdentity(slack_user_id="U12345", email="x@evil.com")
+    ext = ResolvedIdentity(slack_user_id=TEST_SLACK_USER_ID, email="x@evil.com")
     out = _parse(
         await dispatch_tool(
             _BY_NAME,
             "echo",
-            {"q": "hi", USER_CONTEXT_KEY: {"slack_user_id": "U12345"}},
-            identity_resolver=_resolver({"U12345": ext}),
+            sign_arguments("echo", {"q": "hi"}),
+            identity_resolver=_resolver({TEST_SLACK_USER_ID: ext}),
             allowed_domains=frozenset({"vectorinc.co.jp"}),
+            caller_claim_verifier=make_verifier(),
             require_rls=True,
         )
     )
-    assert "RLS required" in out["error"]
+    assert out["code"] == "CALLER_IDENTITY_REJECTED"
 
 
 async def test_legacy_forces_member_role() -> None:
@@ -190,6 +216,7 @@ async def test_strict_fuzz_never_admin_and_requires_resolution() -> None:
                 "echo",
                 {"q": "x", USER_CONTEXT_KEY: uc},
                 identity_resolver=_OK,
+                caller_claim_verifier=make_verifier(),
                 require_rls=True,
             )
         )
@@ -198,47 +225,48 @@ async def test_strict_fuzz_never_admin_and_requires_resolution() -> None:
         assert out.get("role") != "admin"
 
 
-# ── §G 会社共有モード（全員が会社ナレッジを読む・本人識別は監査のみ） ──────────
+# ── §G 会社共有モード（署名済み・resolver済み会社memberだけが会社ナレッジを読む） ──
 
 
 async def test_company_shared_ignores_oc_and_uses_company_groups() -> None:
-    # OC が email/groups/role/slack_user_id を申告しても、観測は会社ドメイン共有メタのみ。
+    # 会社共有も署名済みSlack memberだけ。OC申告権限値は破棄しresolver値を使う。
     out = _parse(
         await dispatch_tool(
             _BY_NAME,
             "echo",
-            {
-                "q": "hi",
-                USER_CONTEXT_KEY: {
-                    "slack_user_id": "U12345",  # 監査のみ・認可には不使用
+            sign_arguments(
+                "echo",
+                {"q": "hi"},
+                declared_context={
                     "user_email": "attacker@evil.com",
                     "user_groups": ["secret-group"],
                     "user_role": "admin",
                 },
-            },
+            ),
             company_shared_groups=frozenset({"vectorinc.co.jp"}),
+            identity_resolver=_OK,
+            caller_claim_verifier=make_verifier(),
         )
     )
-    assert out["email"] is None  # 個人 email は使わない
-    assert out["groups"] == ["vectorinc.co.jp"]  # 会社ドメイン共有
+    assert out["email"] == "taro@vectorinc.co.jp"
+    assert out["groups"] == ["vectorinc.co.jp"]
     assert out["role"] == "member"  # admin 不可
-    assert out["verified"] is False  # OAuth系tool は別途 fail-closed
+    assert out["verified"] is True
 
 
-async def test_company_shared_serves_without_slack_user_id() -> None:
-    # 会社共有は本人識別不要＝slack_user_id 無しでも fail-closed しない（全員が会社ナレッジ）。
+async def test_company_shared_rejects_without_signed_slack_user() -> None:
     out = _parse(
         await dispatch_tool(
             _BY_NAME,
             "echo",
             {"q": "hi", USER_CONTEXT_KEY: {}},
             company_shared_groups=frozenset({"vectorinc.co.jp"}),
+            identity_resolver=_OK,
+            caller_claim_verifier=make_verifier(),
             require_rls=True,
         )
     )
-    assert out["echo"] == "hi"
-    assert out["groups"] == ["vectorinc.co.jp"]
-    assert out["role"] == "member"
+    assert out["code"] == "CALLER_IDENTITY_REJECTED"
 
 
 def test_company_shared_groups_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -257,9 +285,10 @@ async def test_company_shared_with_resolver_loads_user_email() -> None:
         await dispatch_tool(
             _BY_NAME,
             "echo",
-            {"q": "hi", USER_CONTEXT_KEY: {"slack_user_id": "U12345"}},
+            sign_arguments("echo", {"q": "hi"}),
             company_shared_groups=frozenset({"vectorinc.co.jp"}),
             identity_resolver=_OK,
+            caller_claim_verifier=make_verifier(),
         )
     )
     assert out["email"] == "taro@vectorinc.co.jp"  # mail token lookup 用に解決される
@@ -269,22 +298,23 @@ async def test_company_shared_with_resolver_loads_user_email() -> None:
 
 
 async def test_company_shared_with_resolver_oc_fields_dropped() -> None:
-    # 会社共有 + resolver でも OC 申告 email/groups/role は破棄（解決は slack_user_id のみが権威）。
+    # OC申告email/groups/roleは破棄し、署名済みevent userをresolverした値だけを採る。
     out = _parse(
         await dispatch_tool(
             _BY_NAME,
             "echo",
-            {
-                "q": "hi",
-                USER_CONTEXT_KEY: {
-                    "slack_user_id": "U12345",
+            sign_arguments(
+                "echo",
+                {"q": "hi"},
+                declared_context={
                     "user_email": "attacker@evil.com",
                     "user_groups": ["secret"],
                     "user_role": "admin",
                 },
-            },
+            ),
             company_shared_groups=frozenset({"vectorinc.co.jp"}),
             identity_resolver=_OK,
+            caller_claim_verifier=make_verifier(),
         )
     )
     assert out["email"] == "taro@vectorinc.co.jp"  # OC 申告 email は不採用・解決値のみ
@@ -292,36 +322,31 @@ async def test_company_shared_with_resolver_oc_fields_dropped() -> None:
     assert out["role"] == "member"
 
 
-async def test_company_shared_resolver_none_keeps_company_groups() -> None:
-    # 解決失敗(未知ユーザ)でも会社共有は維持＝search は動き続け（fail-closed しない）、mail は
-    # user_email=None で skill 側 fail-closed。graceful degradation の要。
+async def test_company_shared_resolver_none_fails_closed() -> None:
     out = _parse(
         await dispatch_tool(
             _BY_NAME,
             "echo",
-            {"q": "hi", USER_CONTEXT_KEY: {"slack_user_id": "U99999"}},  # 未知→解決None
+            sign_arguments("echo", {"q": "hi"}, user_id="U9999999999"),
             company_shared_groups=frozenset({"vectorinc.co.jp"}),
             identity_resolver=_OK,
+            caller_claim_verifier=make_verifier(),
             require_rls=True,
         )
     )
-    assert "error" not in out  # 会社共有は fail-closed しない（search 可用性維持）
-    assert out["email"] is None  # mail は本人未解決＝skill 側で fail-closed
-    assert out["groups"] == ["vectorinc.co.jp"]
+    assert out["code"] == "CALLER_IDENTITY_REJECTED"
 
 
-async def test_company_shared_resolver_exception_keeps_company_groups() -> None:
-    # resolver 例外でも会社共有は維持（mail だけ未解決）。
+async def test_company_shared_resolver_exception_fails_closed() -> None:
     out = _parse(
         await dispatch_tool(
             _BY_NAME,
             "echo",
-            {"q": "hi", USER_CONTEXT_KEY: {"slack_user_id": "U12345"}},
+            sign_arguments("echo", {"q": "hi"}),
             company_shared_groups=frozenset({"vectorinc.co.jp"}),
             identity_resolver=_resolver({}, raises=True),
+            caller_claim_verifier=make_verifier(),
             require_rls=True,
         )
     )
-    assert "error" not in out
-    assert out["email"] is None
-    assert out["groups"] == ["vectorinc.co.jp"]
+    assert out["code"] == "CALLER_IDENTITY_REJECTED"

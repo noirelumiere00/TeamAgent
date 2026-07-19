@@ -94,6 +94,9 @@ data "aws_secretsmanager_secret" "slack_app" {
 data "aws_secretsmanager_secret" "gateway_token" {
   name = var.openclaw_gateway_token_secret_name
 }
+data "aws_secretsmanager_secret" "caller_claim" {
+  name = var.openclaw_caller_claim_secret_name
+}
 # §M改(VSEO有効化): Gemini 認証は本番EC2と同方式の Vertex SA（teamagent/dev/vertex_sa）。
 # Python ラッパが SA JSON を task-scoped /tmp にファイル化して ADC に渡す。
 data "aws_secretsmanager_secret" "vertex_sa" {
@@ -159,6 +162,35 @@ resource "aws_service_discovery_service" "mcp" {
   }
 }
 
+# Slack event caller claims are one-use across the whole MCP ECS service, not
+# merely within one Python process. Conditional PutItem is the replay
+# linearization point during rolling deployments; TTL is cleanup only.
+resource "aws_dynamodb_table" "mcp_caller_claim_nonces" {
+  name         = "${var.project_name}-${var.environment}-mcp-caller-claim-nonces"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "nonce"
+
+  attribute {
+    name = "nonce"
+    type = "S"
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  deletion_protection_enabled = true
+}
+
 # ============================================================
 # IAM
 # ============================================================
@@ -177,7 +209,7 @@ data "aws_iam_policy_document" "ecs_tasks_assume" {
 # OpenClaw の実行ロールが database-url を読めてしまい「OpenClaw=営業データ非接触」が崩れる。
 # → OpenClaw実行ロールは database-url を持たない／MCP実行ロールだけが持つ。両者とも ECR pull/Logs は共通。
 
-# OpenClaw 実行ロール: bearer / slack-bot / slack-app / gateway-token のみ（database-url は不可）
+# OpenClaw 実行ロール: transport/caller claim/Slack/gateway secretsのみ（database-urlは不可）
 resource "aws_iam_role" "ecs_execution_openclaw" {
   name               = "${var.project_name}-${var.environment}-ecs-exec-openclaw"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
@@ -197,6 +229,7 @@ data "aws_iam_policy_document" "ecs_execution_openclaw_secrets" {
       data.aws_secretsmanager_secret.slack_bot.arn,
       data.aws_secretsmanager_secret.slack_app.arn,
       data.aws_secretsmanager_secret.gateway_token.arn,
+      data.aws_secretsmanager_secret.caller_claim.arn,
     ]
   }
 }
@@ -207,7 +240,7 @@ resource "aws_iam_role_policy" "ecs_execution_openclaw_secrets" {
   policy = data.aws_iam_policy_document.ecs_execution_openclaw_secrets.json
 }
 
-# MCP 実行ロール: bearer / database-url のみ
+# MCP 実行ロール: bearer / caller claim / database-url / resolver・feature secrets
 resource "aws_iam_role" "ecs_execution_mcp" {
   name               = "${var.project_name}-${var.environment}-ecs-exec-mcp"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
@@ -225,6 +258,7 @@ data "aws_iam_policy_document" "ecs_execution_mcp_secrets" {
     resources = concat([
       data.aws_secretsmanager_secret.bearer.arn,
       data.aws_secretsmanager_secret.database_url.arn,
+      data.aws_secretsmanager_secret.caller_claim.arn,
       # §U ハイブリッド identity: mcp task が SLACK_BOT_TOKEN を注入できるよう取得権限を付与。
       data.aws_secretsmanager_secret.slack_bot.arn,
       # §U: 本人 token リフレッシュ用 Web クライアント client_secret の注入権限。
@@ -321,6 +355,11 @@ data "aws_iam_policy_document" "mcp_task" {
     sid       = "KmsDecrypt"
     actions   = ["kms:Decrypt"]
     resources = [data.aws_kms_alias.oauth_tokens.target_key_arn]
+  }
+  statement {
+    sid       = "ConsumeCallerClaimNonce"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.mcp_caller_claim_nonces.arn]
   }
   # §M: VSEO レポートの非公開S3発行（vseo-reports/ prefix に限定・presigned 用）。拡張版のみ。
   dynamic "statement" {
@@ -479,8 +518,10 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "TEAMAGENT_MCP_PORT", value = "8787" },
       { name = "TEAMAGENT_MCP_PATH", value = "/mcp" },
       { name = "TEAMAGENT_SHARED_COMPANY_DOMAINS", value = var.shared_company_domains },
-      # §5-C4: 他ワークスペースユーザーの fail-closed 拒否（空=検証skip・WARN。多人数運用では設定必須）。
+      # Slack event署名claimとusers.info resolverが照合する本番必須workspace ID。
       { name = "SLACK_TEAM_ID", value = var.slack_team_id },
+      # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。
+      { name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", value = aws_dynamodb_table.mcp_caller_claim_nonces.name },
       # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が
       # 空 dict を返し web_url/app_url が一切載らない）。2026-07-10 の実機確認で live に
       # 無いことを確認済み＝この行が入って初めて Slack に検索 UI リンクが出る。
@@ -520,10 +561,13 @@ resource "aws_ecs_task_definition" "mcp" {
       # G4' で send/delete は denylist 物理封鎖（mail_reply/skill.py）。
       { name = "USE_MAIL_REPLY_TOOL", value = "true" },
       # 朝ダイジェスト Skill。EventBridge Scheduled Task（平日 9:30 JST）が
-      # scripts/run_morning_digest_fargate.py 経由で呼ぶ。mention 経由でも露出（ローカル検証用）。
+      # scripts/run_morning_digest_fargate.py 経由で呼ぶ。mention-capable MCP runtimeでは
+      # 自動draft作成を常にfail-closedにし、明示ボタン経由のmail_draftだけを許可する。
       { name = "USE_MORNING_DIGEST_TOOL", value = "true" },
-      # 朝ダイジェストの「✏️下書きを作成」ボタン押下処理ツール（OpenClaw が interaction を system
-      # event で渡し、SOUL 指示で本ツールを呼ぶ→当該スレッドへ Reply-All 下書き作成・送信しない）。
+      { name = "DRAFT_ON_DEMAND_ONLY", value = "true" },
+      # 朝ダイジェストの「✏️下書きを作成」ボタン押下処理ツール。固定 OpenClaw runtime の
+      # Slack interactive handler が署名済み押下 identity/token/message を先に捕捉し、同じ
+      # system-event heartbeat run の一回限りの mail_draft call へ束縛する（送信しない）。
       { name = "USE_MAIL_DRAFT_TOOL", value = "true" },
       # v0.3 Task3: 📅カレンダー登録（既定 false・tfvars で ON。ボタン描画フラグより先に ON にする）。
       { name = "USE_CALENDAR_EVENT_TOOL", value = var.use_calendar_event_tool ? "true" : "false" },
@@ -632,10 +676,12 @@ resource "aws_ecs_task_definition" "mcp" {
     ] : [])
     secrets = concat([
       { name = "TEAMAGENT_MCP_BEARER", valueFrom = data.aws_secretsmanager_secret.bearer.arn },
+      # bearerはworkload transport認証だけ。別HMAC鍵がSlack event由来callerを1 requestへ束縛する。
+      { name = "TEAMAGENT_CALLER_CLAIM_SECRET", valueFrom = data.aws_secretsmanager_secret.caller_claim.arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       # §U ハイブリッド identity: mcp が slack_user_id → 会社メールを server-side 解決して
       # per-user OAuth(mail_*/morning_digest) の token を引くために必要（users:read.email scope）。
-      # openclaw と同じ secret を共用。会社共有グループ(search)はこれ無しでも動く（graceful degrade）。
+      # openclaw と同じtokenを共用。会社共有もresolver成功が必須で、欠落/障害時はfail-closed。
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
       # §U: 本人 token リフレッシュ用 Web クライアントの client_secret（connect-web と同じ data source）。
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
@@ -724,6 +770,9 @@ resource "aws_ecs_task_definition" "openclaw" {
     terraform_data.production_image_release_gate,
   ]
 
+  # Fargate は linuxParameters.tmpfs をサポートしないため、task-scoped empty
+  # volume を /tmp に mount する。永続 state は暗号化 EFS access point に
+  # 分離し、それ以外の root filesystem は read-only のままにする。
   volume {
     name = "tmp"
   }
@@ -749,6 +798,7 @@ resource "aws_ecs_task_definition" "openclaw" {
     essential              = true
     user                   = "65532:65532"
     readonlyRootFilesystem = true
+    privileged             = false
     stopTimeout            = 120
     linuxParameters = {
       initProcessEnabled = true
@@ -761,6 +811,7 @@ resource "aws_ecs_task_definition" "openclaw" {
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "TMPDIR", value = "/tmp" },
+      { name = "SLACK_TEAM_ID", value = var.slack_team_id },
       # §U: DM 許可リスト（カンマ区切り Slack user_id）。entrypoint が起動時に allowFrom へ注入。
       # メンバー追加は本 var を編集 + apply（task 再デプロイ）だけ＝image rebuild 不要・15名まで可動。
       { name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist },
@@ -770,6 +821,7 @@ resource "aws_ecs_task_definition" "openclaw" {
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
       { name = "SLACK_APP_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_app.arn },
       { name = "OPENCLAW_GATEWAY_TOKEN", valueFrom = data.aws_secretsmanager_secret.gateway_token.arn },
+      { name = "TEAMAGENT_CALLER_CLAIM_SECRET", valueFrom = data.aws_secretsmanager_secret.caller_claim.arn },
     ]
     mountPoints = [
       { sourceVolume = "tmp", containerPath = "/tmp", readOnly = false },

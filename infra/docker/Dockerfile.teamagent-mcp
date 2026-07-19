@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
 # TeamAgent core runtime. This image intentionally has no media/browser toolchain.
+# Company-shared access is never identity-free: a 署名済みSlack event must bind
+# the exact workspace and member resolver成功 before shared groups are attached.
+# Missing, unknown, guest, cross-workspace, or resolver failure states fail closed.
 
 ARG PYTHON_BUILDER_ARM64_DIGEST=sha256:2eac0b3ef42685b2d45d57633364aaa87ec54bf29960dcf7ecd0eed20e14d124
 ARG PYTHON_RUNTIME_ARM64_DIGEST=sha256:b7fda4f2d99284fe078f751034a0c858676f3456c4d75f1e935527c1951b5ba9

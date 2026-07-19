@@ -199,7 +199,7 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
     if bundle["schema_version"] != 1:
         raise ContractError(f"{label} bundle schema must be 1")
     expected_interfaces = {
-        "build": "infra/openclaw/build-image.sh",
+        "build": "infra/openclaw/build-bundle.sh",
         "attest": "infra/codebuild/verify_actual_image.sh",
         "promote": "infra/codebuild/image-promoter-buildspec.yml",
     }

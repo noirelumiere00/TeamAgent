@@ -3,8 +3,11 @@
 //
 // 設計意図（§A 一次ソース確認に基づく）:
 //  - tool を最小化し、exec/shell/fs/browser を構造的に塞ぐ → 2026-05-28 の exec/shell 系 CVE 群を無効化。
-//  - 営業データには触れず、唯一の能力は「Slack 受け」「Bedrock 推論」「teamagent MCP の読取系 tool」だけ。
-//  - per-user 認可は OpenClaw でなく MCP 境界内で行う（OpenClaw は単一信頼オペレータモデル）。
+//  - 営業データには直接触れず、能力は「Slack受け」「Bedrock推論」「review済みteamagent MCP tool」だけ。
+//  - MCP scopeには読取だけでなく、Gmail下書き保存、本人Calendar書込、Slackファイル配信、
+//    外部job/S3 report生成も含む。メール送信・招待送信・Drive書込は含まない。
+//  - per-user 認可は OpenClaw でなく MCP 境界内で行う。trusted Slack event由来の署名caller
+//    claimを内部pluginがtool実行直前に注入し、LLM申告user_id単体は認可に使わない。
 {
   // ── エージェント／ペルソナ ───────────────────────────────────────────────
   agents: {
@@ -12,7 +15,7 @@
       // P1 はプロアクティブ無効（heartbeat 0m）。プロアクティブは P2/WS-D で HEARTBEAT.md と共に解禁。
       heartbeat: { every: "0m" },
       // §O: Fargate に docker socket は無い（backend:"docker" は local daemon 必須＝公式）ため off。
-      // 多層防御は tools.profile:messaging / exec deny / fs workspaceOnly / browser off /
+      // 多層防御は tools.profile:minimal / native deny / exec deny / fs workspaceOnly / browser off /
       // toolFilter / readonly rootfs / IAM Deny / SG で維持（sandbox は元々「万一の追加層」）。
       sandbox: { mode: "off" },
       // §O: cacheRetention の明示パラメータは Bedrock 公式 doc に記載なし(unverified)のため
@@ -33,6 +36,30 @@
     ],
   },
 
+  // ── プラグイン（公式同版2点 + repo-source-bound caller identity 1点） ───────
+  // allow を明示して、バンドル済みでも不要なプラグインはロードしない。
+  // 公式2点のtarball/shrinkwrap hashはDockerfile+plugins-lock、internal pluginはsource treeで固定。
+  plugins: {
+    allow: ["slack", "amazon-bedrock", "teamagent-caller-identity"],
+    load: {
+      paths: [
+        "/opt/teamagent/plugins/slack",
+        "/opt/teamagent/plugins/amazon-bedrock",
+        "/opt/teamagent/plugins/teamagent-caller-identity",
+      ],
+    },
+    entries: {
+      slack: { enabled: true },
+      "amazon-bedrock": { enabled: true },
+      "teamagent-caller-identity": {
+        enabled: true,
+        // Pre-model context cross-checks direct inbound runId bindings and
+        // fail-closed legacy correlation. The reviewed plugin ignores prompts.
+        hooks: { allowConversationAccess: true },
+      },
+    },
+  },
+
   // ── Slack 接続（§O: channels.slack の config 宣言が必須＝公式。env 注入だけでは立ち上がらない） ──
   // トークン値は書かない: ${VAR} は ECS secrets（fargate.tf の SLACK_BOT_TOKEN/SLACK_APP_TOKEN）で注入。
   channels: {
@@ -49,22 +76,15 @@
       replyToModeByChatType: { channel: "all", group: "all", direct: "off" },
       // §T1: 受付リアクション（処理中が見える＝「無視された？」を防ぐ実運用の詰まり潰し）。
       ackReaction: "eyes",
-      // §T2→§T2b(2026-06-22): DM を "open" に変更（社内なら誰でも @AiLa にDMで「連携して」で
-      // セルフ利用可＝口コミ運用）。当初 allowlist にした理由は「社外ゲストに会社ナレッジを触れさせない」
-      // だったが、その懸念は **サーバ側 fail-closed で別途担保済**＝slack_client.resolve_identity が
-      // 外部ワークスペース/Slack Connect stranger/guest/bot/email欠落を None 拒否し、MCP 境界(server.py)が
-      // RLS を fail-closed 強制（ダウングレード不可）。よって open でも社外/ゲストにデータは届かない。
-      // 残る露出は「外部ゲストでも Haiku 会話レイヤーには応答し得る（データは出ない・コスト/存在のみ）」
-      // の一点で、これはユーザー判断で許容（2026-06-22）。
+      // 焼込みtemplateは全社内開放のschema-validな組（open + ["*"]）。ただし本番は
+      // SLACK_DM_ALLOWLISTの明示指定が必須で、entrypointは空/未設定を焼込み値へfallbackせずexit 78にする。
+      // envが"*"ならこの組を維持し、個別のU... ID群ならdmPolicyを"allowlist"へ切り替え、
+      // allowFromを指定順のexact IDsへ同時に置換する。wildcardとIDの混在は許可しない。
       dmPolicy: "open",
-      // ⚠️§T2b 訂正(2026-06-22)：当初「allowFrom は open 下では参照されない」と書いたが**誤り**。
-      // 実コード(@openclaw/slack)は `dmPolicy==="open" && allowFrom.includes("*")` の時のみ全通過し、
-      // "*" が無ければ open でも allowFrom 列挙者だけの allowlist として gating する。
-      // よって全社内開放には **allowFrom に "*" が必須**。本番は entrypoint が env `SLACK_DM_ALLOWLIST`
-      // （tfvars slack_dm_allowlist="*"）から allowFrom=["*"] を起動時に注入＝下の焼き込みを上書きする。
-      // ここを ["*"] にしておくのは env 未設定で再ビルドした時の退行防止（[]は全拒否なので不可）。
+      // OpenClaw 2026.7.1の実schemaはopenに["*"]、allowlistに非空allowFromを要求する。
+      // 実behaviorもallowlistでは一致IDだけを許可するため、entrypointの変換と同じ契約になる。
       allowFrom: [
-        "*", // 全社内開放（社外/ゲスト/bot はサーバ側 resolve_identity で fail-closed）
+        "*",
       ],
     },
   },
@@ -85,12 +105,21 @@
 
   // ── tool ポリシー（最小権限＝攻撃面の縮小） ───────────────────────────────
   tools: {
-    profile: "messaging", // 既定を最小級に（full/coding は使わない）
+    // minimal alone contains session_status and hides MCP. Add only bundle-mcp,
+    // then explicitly deny every native message/filesystem/session bypass.
+    profile: "minimal",
+    alsoAllow: ["bundle-mcp"],
+    deny: [
+      "message",
+      "read", "write", "edit", "apply_patch", "send", "delete", "upload",
+      "sessions_list", "sessions_history", "sessions_send",
+      "sessions_spawn", "sessions_yield", "subagents", "session_status",
+    ],
     exec: { mode: "deny", applyPatch: { workspaceOnly: true } }, // host コマンド実行を禁止
     fs: { workspaceOnly: true },
     // 危険な外部安全バイパスは一切使わない（既定 false のまま）。
     sandbox: {
-      // sandbox セッションでも MCP の読取 tool だけは見せる（bundle-mcp を許可）。
+      // sandbox セッションでもreview済みMCP scopeだけは見せる（bundle-mcpを許可）。
       tools: { alsoAllow: ["bundle-mcp"] },
     },
   },
@@ -102,13 +131,10 @@
     mode: "local",
     port: 18789, // healthCheck(fargate.tf)が叩く 18789 に明示一致させる
     bind: "loopback", // 0.0.0.0 へは絶対に出さない。管理は SSH/Tailscale。
+    // Operator terminal はgateway process環境を含むshell能力なので明示的に無効化。
+    terminal: { enabled: false },
     // 共有 gateway secret は full operator scope 相当＝root 級。値は注入し、loopback+ファイル perm で守る。
     auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" },
-  },
-
-  // ── ブラウザ（SSRF 既定の厳格を維持・私設網へ出さない） ───────────────────
-  browser: {
-    // dangerouslyAllowPrivateNetwork は設定しない（=private/internal 宛は遮断のまま）。
   },
 
   // ── MCP（外部 stdio ではなく streamable-http で creds 分離） ─────────────────
@@ -124,8 +150,10 @@
         // 全ツール共通の上限（天井）＝通常の高速ツールには無影響。本数は MCP の
         // VIDEO_ALGO_MAX_VIDEOS と整合させること（10本の重い回は 300s に迫り得る＝将来は非同期化）。
         timeout: 300,
-        // §G: 会社共有の「ナレッジ系・読取」を露出。§L Phase1 で取得系(tiktok/動画)を追加。
-        // 本人OAuth依存(per-user)の mail_*/workspace_search は除外＝現行Botに残す（§G）。
+        // Effective scopeはinfra/openclaw/effective-tool-scope.jsonが副作用分類の正。
+        // 会社データ読取に加え、Gmail下書き保存(mail_reply/mail_draft/schedule_propose)、
+        // 本人Calendar書込(calendar_event・招待なし)、Slackファイル配信(knowledge_deliver)、
+        // 外部job/S3 report生成も含む。メール送信・招待送信・Drive書込は許可しない。
         // ※ tiktok_search/video_analysis/video_algorithm は MCPツール（factory: USE_VIDEO_TOOLS/
         //   USE_TIKTOK_TOOLS=1）として金庫内で実行＝OpenClaw自身は native exec/browser を使わない（§L）。
         //   これらを include する前に、MCPバックエンド側で当該 env flag を ON にすること。
@@ -152,8 +180,9 @@
             "calendar_event",
             // v0.3 Task4: 🗓日程候補提案ボタン（候補入り下書き＋透明仮予定・送信/招待なし・既定OFF）
             "schedule_propose",
-            // morning_digest は EventBridge Scheduled Task で起動・mention 経由で呼ばれないが、
-            // ローカル検証・将来の手動 trigger 用に include しておく。USE_MORNING_DIGEST_TOOL=1 が必要。
+            // morning_digest は EventBridge Scheduled Taskに加えてmention-capable MCPにもincludeされる。
+            // MCP taskはDRAFT_ON_DEMAND_ONLY=trueを必須化し、mentionからの自動Gmail draftを拒否する。
+            // USE_MORNING_DIGEST_TOOL=1 が必要。
             "morning_digest",
             // §U: oauth_connect — @AiLa「連携」で本人専用の Google 認可 URL を返す。
             // OpenClaw に connect 経路が無い問題への対応。URL生成のみ（token保存は connect-web）。
@@ -180,7 +209,7 @@
             // USE_TIKTOK_COMMENT_TOOLS=1 が必要。
             "tiktok_comment_mining",
           ],
-          // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
+          // 未レビューの重操作・確定系を明示除外（許可する副作用は上のincludeで個別列挙）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
           //   この include に **意図的に入れない**＝パイロット中は dark。OpenClaw 自身がオーケスト
           //   レーションの外殻なので二重オーケストレーションを避ける。解禁はパイロット後に別途判断（§L C2）。

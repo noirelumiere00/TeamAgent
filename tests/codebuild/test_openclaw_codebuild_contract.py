@@ -96,7 +96,7 @@ def test_buildspec_verifies_signed_exact_source_before_quarantine_build() -> Non
     exact_get = body.index('--version-id "$SOURCE_MANIFEST_VERSION"')
     kms = body.index("aws kms verify")
     verify = body.index("verify-source-manifest")
-    build = body.index("bash infra/openclaw/build-image.sh")
+    build = body.index("bash infra/openclaw/build-bundle.sh")
     assert fetch < remote < ready < manifest < head < exact_get < kms < verify < build
     assert "ObjectLockRetainUntilDate" in body
     assert '--expected-bucket-owner "$EXPECTED_ACCOUNT_ID"' in body

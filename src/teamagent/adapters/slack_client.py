@@ -24,10 +24,11 @@ from teamagent.identity import ResolvedIdentity, normalize_email
 
 logger = structlog.get_logger(__name__)
 
-# Slack user id 形式（U=通常 / W=Enterprise Grid）。偽 id は API 前に弾く。
-_SLACK_USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{2,}$")
-# 身元解決キャッシュ TTL（秒）。成功は長め・失敗(None)は短め（退職/取消の反映を早める）。
-_IDENTITY_TTL_OK = 3600.0
+# Production contract accepts canonical Slack member IDs in the U namespace.
+_SLACK_USER_ID_RE = re.compile(r"^U[A-Z0-9]{8,}$")
+_SLACK_TEAM_ID_RE = re.compile(r"^T[A-Z0-9]{8,}$")
+# 身元解決キャッシュ TTL（秒）。署名 claim の最長寿命を超えて membership を信用しない。
+_IDENTITY_TTL_OK = 60.0
 _IDENTITY_TTL_NONE = 60.0
 
 
@@ -52,8 +53,6 @@ class SlackClient:
         self._client = client or AsyncWebClient(token=bot_token)
         # user_id → (身元 or None, 失効 monotonic 時刻)。anti-spoof 解決の TTL キャッシュ。
         self._identity_cache: dict[str, tuple[ResolvedIdentity | None, float]] = {}
-        # SLACK_TEAM_ID 未設定（team 検証 skip＝fail-open）の警告を 1 プロセス 1 回に抑える。
-        self._team_check_warned = False
 
     @classmethod
     def from_env(cls) -> SlackClient:
@@ -328,10 +327,11 @@ class SlackClient:
     ) -> ResolvedIdentity | None:
         """Slack ``user_id`` をサーバ側で身元解決する（OC 申告を信用しない anti-spoof の起点）。
 
-        次のいずれかなら **None=fail-closed**: id 形式不正/``unknown``、外部ワークスペース
-        （``SLACK_TEAM_ID`` 設定時に ``team_id`` 不一致）、ゲスト（restricted/ultra_restricted）、
+        次のいずれかなら **None=fail-closed**: id 形式不正/``unknown``、``SLACK_TEAM_ID``
+        欠落、外部ワークスペース（``team_id`` 不一致）、ゲスト（restricted/ultra_restricted）、
         is_stranger（Slack Connect 外部）、is_bot、削除済、email 欠落/不正。
-        成功時のみ正規化済み email を持つ ``ResolvedIdentity`` を返す。TTL キャッシュ付き。
+        成功時のみ正規化済み email を持つ ``ResolvedIdentity`` を返す。成功結果も署名
+        claim の最長寿命（60秒）を超えて再利用せず、退職・guest化・取消を再検証する。
         """
         if not user_id or not _SLACK_USER_ID_RE.match(user_id):
             return None
@@ -366,22 +366,19 @@ class SlackClient:
             )
             return None
 
-        expected_team = os.environ.get("SLACK_TEAM_ID")
-        if expected_team and str(user.get("team_id") or "") != expected_team:
+        expected_team = os.environ.get("SLACK_TEAM_ID", "")
+        if not _SLACK_TEAM_ID_RE.fullmatch(expected_team):
+            logger.warning(
+                "slack_resolve_identity_rejected",
+                request_id=request_id,
+                reason="missing_expected_team",
+            )
+            return None
+        if str(user.get("team_id") or "") != expected_team:
             logger.info(
                 "slack_resolve_identity_rejected", request_id=request_id, reason="foreign_team"
             )
             return None
-        if not expected_team and not self._team_check_warned:
-            # team 検証は skip される（fail-open）。ゲスト/is_stranger/bot 拒否と email 検証は
-            # 効いているが、多人数運用では SLACK_TEAM_ID を必ず設定すること（CLAUDE.md §5）。
-            # 警告はプロセスごとに 1 回だけ（毎解決で吐くとログが埋まる）。
-            self._team_check_warned = True
-            logger.warning(
-                "slack_team_check_disabled",
-                request_id=request_id,
-                hint="set SLACK_TEAM_ID to reject foreign-workspace users (fail-closed)",
-            )
 
         profile: dict[str, Any] = dict(user.get("profile") or {})
         email = normalize_email(profile.get("email"))

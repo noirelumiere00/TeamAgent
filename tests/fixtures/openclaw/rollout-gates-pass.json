@@ -1,0 +1,107 @@
+{
+  "expected": {
+    "newTaskDefinition": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+    "previousTaskDefinition": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:53",
+    "toolNames": [
+      "clientkarte",
+      "knowledge_deliver",
+      "mail_draft",
+      "mail_followup",
+      "mail_reply",
+      "mail_summary",
+      "mail_to_internal_context",
+      "morning_digest",
+      "oauth_connect",
+      "proposal_draft",
+      "proposal_review",
+      "search"
+    ]
+  },
+  "consumption": {
+    "schemaVersion": 1,
+    "receiptId": "openclaw-release-0123456789abcdef",
+    "verified": true,
+    "consumed": true,
+    "atomic": true,
+    "previousTaskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:53",
+    "newTaskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+    "durableReceipt": {
+      "uri": "s3://teamagent-dev-raw-files/trusted-release/openclaw/deployment-receipts/openclaw-release-0123456789abcdef.json",
+      "versionId": "fixture-version-1",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "service": {
+    "failures": [],
+    "services": [
+      {
+        "serviceName": "teamagent-dev-openclaw",
+        "clusterArn": "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev",
+        "taskDefinition": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+        "desiredCount": 1,
+        "runningCount": 1,
+        "pendingCount": 0,
+        "deploymentConfiguration": {
+          "deploymentCircuitBreaker": {
+            "enable": true,
+            "rollback": true
+          }
+        },
+        "deployments": [
+          {
+            "status": "PRIMARY",
+            "taskDefinition": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+            "rolloutState": "COMPLETED"
+          }
+        ],
+        "networkConfiguration": {
+          "awsvpcConfiguration": {
+            "subnets": [
+              "subnet-0123456789abcdef0"
+            ],
+            "securityGroups": [
+              "sg-0123456789abcdef0"
+            ],
+            "assignPublicIp": "DISABLED"
+          }
+        }
+      }
+    ]
+  },
+  "task": {
+    "failures": [],
+    "tasks": [
+      {
+        "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
+        "clusterArn": "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev",
+        "taskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:54",
+        "lastStatus": "STOPPED",
+        "stopCode": "EssentialContainerExited",
+        "containers": [
+          {
+            "name": "openclaw",
+            "exitCode": 0
+          }
+        ]
+      }
+    ]
+  },
+  "taskEvent": {
+    "event": "openclaw_rollout_task_canary",
+    "schemaVersion": 1,
+    "receiptId": "openclaw-release-0123456789abcdef",
+    "platform": "linux/arm64",
+    "mcp": {
+      "protocolVersion": "2025-03-26",
+      "toolCount": 12,
+      "toolNamesSha256": "56a7310a8e0ffc961d010475961771affc852c27112bea91c1ed83d6935b4ae3"
+    },
+    "bedrock": {
+      "modelId": "jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "credentialSource": "ECS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+      "request": "Converse",
+      "passed": true
+    },
+    "passed": true
+  }
+}

@@ -65,16 +65,16 @@ resource "aws_cloudwatch_log_metric_filter" "mcp_citation_validity" {
   }
 }
 
-# 柱2(2026-06-22 事故対策): OpenClaw 起動時の設定矛盾を拾う。entrypoint(openclaw-entrypoint.sh)が
-# 注入後の実効configを検査し、dmPolicy:open なのに allowFrom に "*" 無し等で
-# openclaw_config_invariant_violation を JSON で出して fail-loud する。それを即通知。
+# OpenClaw 起動時の全fail-closed経路を拾う。旧config validatorの
+# openclaw_config_invariant_violation と、現行Node entrypointの
+# openclaw_entrypoint_error のどちらでも同じ起動失敗alarmへ送る。
 resource "aws_cloudwatch_log_metric_filter" "openclaw_config_violation" {
-  name           = "${var.project_name}-${var.environment}-openclaw-config-violation"
+  name           = "${var.project_name}-${var.environment}-openclaw-startup-failure"
   log_group_name = aws_cloudwatch_log_group.openclaw.name
-  pattern        = "{ $.event = \"openclaw_config_invariant_violation\" }"
+  pattern        = "{ $.event = \"openclaw_config_invariant_violation\" || $.event = \"openclaw_entrypoint_error\" }"
 
   metric_transformation {
-    name          = "OpenClawConfigViolation"
+    name          = "OpenClawStartupFailure"
     namespace     = local.metric_namespace
     value         = "1"
     default_value = "0"
@@ -117,10 +117,10 @@ resource "aws_cloudwatch_metric_alarm" "mcp_spoof_rejected" {
 
 # 設定矛盾で OpenClaw が起動時 fail-loud＝即通知（無音で動き続けるより遥かにマシ）。
 resource "aws_cloudwatch_metric_alarm" "openclaw_config_violation" {
-  alarm_name          = "${var.project_name}-${var.environment}-openclaw-config-violation"
-  alarm_description   = "OpenClaw 起動時に設定不変条件違反（dmPolicy:open なのに allowFrom に \"*\" 無し等）"
+  alarm_name          = "${var.project_name}-${var.environment}-openclaw-startup-failure"
+  alarm_description   = "OpenClaw entrypoint/config invariantの起動失敗を即時検知"
   namespace           = local.metric_namespace
-  metric_name         = "OpenClawConfigViolation"
+  metric_name         = "OpenClawStartupFailure"
   statistic           = "Sum"
   period              = 300
   evaluation_periods  = 1
@@ -227,7 +227,7 @@ resource "aws_cloudwatch_dashboard" "fargate" {
         properties = {
           title  = "MCP recent identity & errors"
           region = var.aws_region
-          query  = "SOURCE '${aws_cloudwatch_log_group.mcp.name}' | fields @timestamp, event, tool, reason, slack_user_id_audit | filter event in ['identity_company_shared','identity_spoof_rejected','mcp_tool_error'] | sort @timestamp desc | limit 50"
+          query  = "SOURCE '${aws_cloudwatch_log_group.mcp.name}' | fields @timestamp, event, tool, reason, source, domain | filter event in ['identity_resolved','caller_claim_rejected','identity_spoof_rejected','mcp_tool_error'] | sort @timestamp desc | limit 50"
         }
       },
     ]

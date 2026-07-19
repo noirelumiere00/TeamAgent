@@ -1,0 +1,3 @@
+{"event":"openclaw_entrypoint_error","level":"error","message":"required secret is missing: SLACK_BOT_TOKEN"}
+{"event":"openclaw_config_invariant_violation","level":"error","reason":"dm_policy_allowlist_mismatch"}
+{"event":"openclaw_runtime_ready","level":"info","uid":65532}

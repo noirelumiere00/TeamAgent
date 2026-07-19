@@ -133,6 +133,20 @@ PIPELINES: dict[str, dict[str, Any]] = {
         },
     },
 }
+RELEASE_GATE_ADDRESS = "terraform_data.production_image_release_gate"
+IMAGE_MANAGED_ECS_PIPELINES = {
+    "aws_ecs_task_definition.mcp": "mcp",
+    "aws_ecs_task_definition.canary": "mcp",
+    "aws_ecs_task_definition.connect_web": "mcp",
+    "aws_ecs_task_definition.ingest": "mcp",
+    "aws_ecs_task_definition.morning_digest": "mcp",
+    "aws_ecs_task_definition.x_buzz_worker": "mcp",
+    "aws_ecs_service.mcp": "mcp",
+    "aws_ecs_service.connect_web": "mcp",
+    "aws_ecs_task_definition.openclaw": "openclaw",
+    "aws_ecs_service.openclaw": "openclaw",
+    "aws_ecs_task_definition.tiktok_acquire": "tiktok",
+}
 
 _SHA1_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -141,6 +155,7 @@ _S3_VERSION_RE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1024}")
 _BUILD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:/._-]{0,511}")
 _PATH_RE = re.compile(r"/[A-Za-z0-9][A-Za-z0-9_./+-]{0,511}")
 _LABEL_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,254}")
+_INSTANCE_SELECTOR_RE = re.compile(r'\[(?:[0-9]+|"(?:[^"\\]|\\.)*")\]')
 _KEY_ARN_RE = re.compile(rf"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/[0-9a-f-]{{36}}")
 _DYNAMODB_TABLE_ARN_RE = re.compile(
     rf"arn:aws:dynamodb:{REGION}:{ACCOUNT_ID}:table/"
@@ -235,6 +250,13 @@ def _uuid4(value: Any, *, label: str) -> str:
     value = _string(value, label=label, maximum=36)
     if not _UUID4_RE.fullmatch(value):
         raise EvidenceError(f"{label} must be a lowercase UUIDv4")
+    return value
+
+
+def _epoch_seconds(value: Any, *, label: str) -> str:
+    value = _string(value, label=label, maximum=10)
+    if not re.fullmatch(r"[1-9][0-9]{9}", value):
+        raise EvidenceError(f"{label} must be canonical Unix epoch seconds")
     return value
 
 
@@ -1617,9 +1639,21 @@ def _deployment_binding(
     application: Mapping[str, Any],
     shared_generation_ledger: Mapping[str, Any],
     mcp_media_image: str,
+    release_channels: Mapping[str, Any],
     intent_id: str,
 ) -> tuple[str, list[str], str]:
     selected = {name: image for name, image in images.items() if image}
+    normalized_channels: dict[str, str] = {}
+    if set(release_channels) != set(selected):
+        raise EvidenceError("deployment release channels do not match selected images")
+    for pipeline in sorted(selected):
+        channel = _string(
+            release_channels.get(pipeline),
+            label=f"{pipeline} deployment release channel",
+        )
+        if channel not in {"active", "rollback"}:
+            raise EvidenceError("deployment release channel is not allowlisted")
+        normalized_channels[pipeline] = channel
     references: dict[str, Mapping[str, Any]] = {}
     claim_ids: list[str] = []
     for pipeline in sorted(selected):
@@ -1674,6 +1708,7 @@ def _deployment_binding(
         "mcp_media_image": mcp_media_image,
         "evidence": {name: dict(references[name]) for name in sorted(references)},
         "contracts": {name: contracts[name] for name in sorted(selected)},
+        "release_channels": normalized_channels,
         "application": {
             name: application[name] for name in sorted(selected) if name in application
         },
@@ -1684,7 +1719,11 @@ def _deployment_binding(
     return context_sha256, claim_ids, claims_sha256
 
 
-def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
+def _terraform_gate(
+    query: Mapping[str, Any],
+    *,
+    now: dt.datetime | None = None,
+) -> dict[str, str]:
     (
         images,
         evidence,
@@ -1710,7 +1749,10 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
     if mcp_media_image and "mcp" not in selected:
         raise EvidenceError("MCP media image requires the MCP core release bundle")
 
+    current = _utc_now(now)
     verified: list[str] = []
+    release_channels: dict[str, str] = {}
+    receipt_expirations: list[dt.datetime] = []
     with tempfile.TemporaryDirectory(prefix="teamagent-release-gate.") as temporary:
         root = Path(temporary)
         for pipeline, image in sorted(selected.items()):
@@ -1790,7 +1832,7 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
                     head.get("ObjectLockRetainUntilDate", ""),
                     label=f"{label} retention",
                 )
-                if retained <= dt.datetime.now(dt.UTC):
+                if retained <= current:
                     raise EvidenceError(f"{label} evidence retention has expired")
                 response = _aws(
                     "s3api",
@@ -1855,6 +1897,17 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
                 pipeline=pipeline,
                 image=_string(image, label=f"{pipeline} image"),
                 contract_sha256=contract_sha256,
+                now=current,
+            )
+            receipt_expirations.append(
+                _timestamp(
+                    validated_receipt["expires_at"],
+                    label=f"{pipeline} deployment receipt expires_at",
+                )
+            )
+            release_channels[pipeline] = _string(
+                validated_receipt.get("channel"),
+                label=f"{pipeline} verified release channel",
             )
             if pipeline == "mcp":
                 core_matches = [
@@ -1895,6 +1948,7 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
         application=application,
         shared_generation_ledger=shared_generation_ledger,
         mcp_media_image=mcp_media_image,
+        release_channels=release_channels,
         intent_id=intent_id,
     )
     return {
@@ -1902,6 +1956,14 @@ def _terraform_gate(query: Mapping[str, Any]) -> dict[str, str]:
         "verified_pipelines": ",".join(verified),
         "deployment_context_sha256": context_sha256,
         "receipt_claims_sha256": claims_sha256,
+        "receipt_authorization_expires_at": str(
+            int(min(receipt_expirations).timestamp())
+        ),
+        "release_channels_json": json.dumps(
+            release_channels,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     }
 
 
@@ -1941,6 +2003,147 @@ def _planned_resources(module: Mapping[str, Any]) -> list[Mapping[str, Any]]:
             )
         )
     return result
+
+
+def _saved_plan_transition_classification(
+    changes: Sequence[Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    deletes: list[dict[str, Any]] = []
+    replacements: list[dict[str, Any]] = []
+    replacement_details: list[dict[str, Any]] = []
+    seen_addresses: set[str] = set()
+    for index, raw_change in enumerate(changes):
+        resource = _mapping(
+            raw_change,
+            label=f"saved Terraform resource change[{index}]",
+        )
+        if resource.get("mode", "managed") != "managed":
+            continue
+        address = _string(
+            resource.get("address"),
+            label="saved Terraform managed resource address",
+        )
+        if address in seen_addresses:
+            raise EvidenceError("saved Terraform plan has duplicate managed addresses")
+        seen_addresses.add(address)
+        details = _mapping(
+            resource.get("change"),
+            label=f"saved Terraform resource change {address}",
+        )
+        actions = details.get("actions")
+        if (
+            not isinstance(actions, list)
+            or not actions
+            or any(
+                action not in {"no-op", "create", "read", "update", "delete"}
+                for action in actions
+            )
+        ):
+            raise EvidenceError(f"saved Terraform actions are invalid for {address}")
+        if address == RELEASE_GATE_ADDRESS:
+            continue
+        transition = {
+            "address": address,
+            "actions": actions,
+        }
+        if "delete" in actions and "create" not in actions:
+            deletes.append(transition)
+        elif "delete" in actions and "create" in actions:
+            replacements.append(transition)
+            replacement_details.append(
+                {
+                    "address": address,
+                    "after": details.get("after"),
+                }
+            )
+    deletes.sort(key=lambda item: item["address"])
+    replacements.sort(key=lambda item: item["address"])
+    value = {
+        "delete": deletes,
+        "replace": replacements,
+    }
+    return (
+        {
+            "delete_change_count": len(deletes),
+            "replace_change_count": len(replacements),
+            "transition_sha256": hashlib.sha256(canonical_bytes(value)).hexdigest(),
+        },
+        deletes,
+        replacement_details,
+    )
+
+
+def _is_digest_preserving_task_replacement(
+    transition: Mapping[str, Any],
+    *,
+    requested_images: Mapping[str, Any],
+) -> bool:
+    address = _string(
+        transition.get("address"),
+        label="replacement Terraform address",
+    )
+    base_address = _INSTANCE_SELECTOR_RE.sub("", address)
+    if not base_address.startswith("aws_ecs_task_definition."):
+        return False
+    pipeline = IMAGE_MANAGED_ECS_PIPELINES.get(base_address)
+    image = requested_images.get(pipeline) if pipeline else None
+    after = transition.get("after")
+    if not isinstance(image, str) or not image or not isinstance(after, dict):
+        return False
+    container_definitions = after.get("container_definitions")
+    if not isinstance(container_definitions, str):
+        return False
+    try:
+        containers = json.loads(
+            container_definitions,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (EvidenceError, json.JSONDecodeError):
+        return False
+    if not isinstance(containers, list) or not containers:
+        return False
+    return any(
+        isinstance(container, dict) and container.get("image") == image
+        for container in containers
+    )
+
+
+def _require_destructive_rollback_channels(
+    *,
+    deletes: Sequence[Mapping[str, Any]],
+    replacements: Sequence[Mapping[str, Any]],
+    requested_images: Mapping[str, Any],
+    release_channels: Mapping[str, Any],
+) -> None:
+    destructive = list(deletes)
+    destructive.extend(
+        transition
+        for transition in replacements
+        if not _is_digest_preserving_task_replacement(
+            transition,
+            requested_images=requested_images,
+        )
+    )
+    for transition in destructive:
+        address = _string(
+            transition.get("address"),
+            label="destructive Terraform address",
+        )
+        base_address = _INSTANCE_SELECTOR_RE.sub("", address)
+        pipeline = IMAGE_MANAGED_ECS_PIPELINES.get(base_address)
+        if pipeline is None:
+            raise EvidenceError(
+                "saved image release plan contains an unscoped destructive transition"
+            )
+        image = requested_images.get(pipeline)
+        if not isinstance(image, str) or not image:
+            raise EvidenceError(
+                f"{pipeline} image-empty destructive state is forbidden"
+            )
+        if release_channels.get(pipeline) != "rollback":
+            raise EvidenceError(
+                f"{pipeline} destructive transition requires a fresh rollback receipt"
+            )
 
 
 def deployment_plan_metadata(
@@ -2006,7 +2209,7 @@ def deployment_plan_metadata(
     gate_resources = [
         resource
         for resource in _planned_resources(root_module)
-        if resource.get("address") == "terraform_data.production_image_release_gate"
+        if resource.get("address") == RELEASE_GATE_ADDRESS
     ]
     if len(gate_resources) != 1:
         raise EvidenceError("saved Terraform plan lacks one production release gate")
@@ -2026,8 +2229,12 @@ def deployment_plan_metadata(
             "receipt_claims_sha256",
             "requested_images",
             "requested_media_image",
+            "release_channels",
             "application_provenance",
             "shared_generation_ledger",
+            "hmac_release_bindings",
+            "deployment_gate_query",
+            "receipt_authorization_expires_at",
         },
         label="saved Terraform release gate input",
     )
@@ -2043,6 +2250,22 @@ def deployment_plan_metadata(
         or requested_media_image
     ):
         raise EvidenceError("saved Terraform plan has no requested production image")
+    selected_images = {
+        pipeline: image
+        for pipeline, image in requested_images.items()
+        if isinstance(image, str) and image
+    }
+    release_channels = _mapping(
+        gate_input["release_channels"],
+        label="saved Terraform release channels",
+    )
+    if set(release_channels) != set(selected_images) or any(
+        channel not in {"active", "rollback"}
+        for channel in release_channels.values()
+    ):
+        raise EvidenceError(
+            "saved Terraform release channels do not match requested images"
+        )
     application_provenance = _mapping(
         gate_input["application_provenance"],
         label="saved Terraform application provenance",
@@ -2052,13 +2275,59 @@ def deployment_plan_metadata(
     shared_generation_ledger = _validate_shared_generation_ledger_binding(
         gate_input["shared_generation_ledger"]
     )
+    _mapping(
+        gate_input["hmac_release_bindings"],
+        label="saved Terraform HMAC release bindings",
+    )
+    deployment_gate_query = dict(
+        _mapping(
+            gate_input["deployment_gate_query"],
+            label="saved Terraform deployment gate query",
+        )
+    )
+    (
+        query_images,
+        _query_evidence,
+        _query_contracts,
+        _query_ready,
+        query_application,
+        query_shared_generation_ledger,
+        query_mcp_media_image,
+        _query_signing_key_arn,
+        _query_encryption_key_arn,
+        query_intent_id,
+    ) = _parse_terraform_gate_query(deployment_gate_query)
+    if (
+        query_images != dict(requested_images)
+        or query_application != dict(application_provenance)
+        or query_shared_generation_ledger != shared_generation_ledger
+        or query_mcp_media_image != requested_media_image
+    ):
+        raise EvidenceError(
+            "saved Terraform gate query does not match the planned deployment inputs"
+        )
+    receipt_authorization_expires_at = _epoch_seconds(
+        gate_input["receipt_authorization_expires_at"],
+        label="saved Terraform receipt authorization expiry",
+    )
 
+    (
+        transitions,
+        destructive_deletes,
+        planned_replacements,
+    ) = _saved_plan_transition_classification(changes_for_import_check)
+    _require_destructive_rollback_channels(
+        deletes=destructive_deletes,
+        replacements=planned_replacements,
+        requested_images=requested_images,
+        release_channels=release_channels,
+    )
     changes = changes_for_import_check
     gate_changes = [
         _mapping(change, label="saved Terraform resource change")
         for change in changes
         if isinstance(change, dict)
-        and change.get("address") == "terraform_data.production_image_release_gate"
+        and change.get("address") == RELEASE_GATE_ADDRESS
     ]
     if len(gate_changes) != 1:
         raise EvidenceError("saved Terraform plan does not replace one release gate")
@@ -2078,6 +2347,10 @@ def deployment_plan_metadata(
         gate_input["deployment_intent_id"],
         label="saved Terraform deployment intent ID",
     )
+    if query_intent_id != intent_id:
+        raise EvidenceError(
+            "saved Terraform gate query belongs to another deployment intent"
+        )
     variables = plan.get("variables", {})
     if isinstance(variables, dict) and "image_deployment_intent_id" in variables:
         variable = _mapping(
@@ -2100,6 +2373,16 @@ def deployment_plan_metadata(
         "shared_ledger_sha256": hashlib.sha256(
             canonical_bytes(shared_generation_ledger)
         ).hexdigest(),
+        "plan_transition_sha256": transitions["transition_sha256"],
+        "gate_query_sha256": hashlib.sha256(
+            canonical_bytes(deployment_gate_query)
+        ).hexdigest(),
+        "gate_query_json": json.dumps(
+            deployment_gate_query,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "receipt_authorization_expires_at": receipt_authorization_expires_at,
     }
 
 
@@ -2164,6 +2447,14 @@ def terraform_context_metadata(context_path: Path) -> dict[str, str | int]:
         "plan_addresses_sha256": _sha256(
             plan["address_ownership_sha256"],
             label="Terraform plan address ownership SHA-256",
+        ),
+        "runtime_images_sha256": _sha256(
+            plan["runtime_images_sha256"],
+            label="Terraform runtime images SHA-256",
+        ),
+        "plan_transition_sha256": _sha256(
+            plan["transition_sha256"],
+            label="Terraform plan transition SHA-256",
         ),
     }
 
@@ -2267,6 +2558,9 @@ def _deployment_lock_item(
         "state": "LOCKED",
         "intent_id": metadata["intent_id"],
         "plan_sha256": metadata["plan_sha256"],
+        "deployment_context_sha256": metadata["deployment_context_sha256"],
+        "receipt_claims_sha256": metadata["receipt_claims_sha256"],
+        "gate_query_sha256": metadata["gate_query_sha256"],
         "terraform_context_sha256": terraform_context_sha256,
         "apply_attempt_id": apply_attempt_id,
         "acquired_at": now.isoformat().replace("+00:00", "Z"),
@@ -2296,6 +2590,9 @@ def _validate_deployment_lock(
             "state",
             "intent_id",
             "plan_sha256",
+            "deployment_context_sha256",
+            "receipt_claims_sha256",
+            "gate_query_sha256",
             "terraform_context_sha256",
             "apply_attempt_id",
             "acquired_at",
@@ -2311,6 +2608,10 @@ def _validate_deployment_lock(
         or item["state"] != "LOCKED"
         or item["intent_id"] != metadata["intent_id"]
         or item["plan_sha256"] != metadata["plan_sha256"]
+        or item["deployment_context_sha256"]
+        != metadata["deployment_context_sha256"]
+        or item["receipt_claims_sha256"] != metadata["receipt_claims_sha256"]
+        or item["gate_query_sha256"] != metadata["gate_query_sha256"]
         or item["apply_attempt_id"] != apply_attempt_id
     ):
         raise EvidenceError("image release apply lock ownership mismatch")
@@ -2372,6 +2673,7 @@ def _dynamodb_transact_begin_apply(
                     "AND deployment_context_sha256 = :context "
                     "AND receipt_claims_sha256 = :claims "
                     "AND shared_ledger_sha256 = :shared_ledger "
+                    "AND gate_query_sha256 = :gate_query "
                     "AND terraform_context_sha256 = :terraform_context "
                     "AND control_commit = :control_commit "
                     "AND authorization_expires_at > :now"
@@ -2387,6 +2689,7 @@ def _dynamodb_transact_begin_apply(
                         ":context": metadata["deployment_context_sha256"],
                         ":claims": metadata["receipt_claims_sha256"],
                         ":shared_ledger": metadata["shared_ledger_sha256"],
+                        ":gate_query": metadata["gate_query_sha256"],
                         ":terraform_context": prepared["terraform_context_sha256"],
                         ":control_commit": expected_control_commit,
                         ":now": now_epoch,
@@ -2510,6 +2813,64 @@ def acquire_deployment_lock(
     return confirmed
 
 
+def _verified_receipt_claims_for_saved_plan(
+    *,
+    metadata: Mapping[str, str],
+    query: Mapping[str, Any],
+    now: dt.datetime,
+) -> list[str]:
+    verified = _terraform_gate(query, now=now)
+    (
+        images,
+        evidence,
+        contracts,
+        _,
+        application,
+        shared_generation_ledger,
+        mcp_media_image,
+        _,
+        _,
+        intent_id,
+    ) = _parse_terraform_gate_query(query)
+    release_channels = json.loads(
+        verified["release_channels_json"],
+        object_pairs_hook=_reject_duplicate_keys,
+    )
+    context_sha256, receipt_claim_ids, claims_sha256 = _deployment_binding(
+        images=images,
+        evidence=evidence,
+        contracts=contracts,
+        application=application,
+        shared_generation_ledger=shared_generation_ledger,
+        mcp_media_image=mcp_media_image,
+        release_channels=_mapping(
+            release_channels,
+            label="apply-time verified release channels",
+        ),
+        intent_id=intent_id,
+    )
+    query_sha256 = hashlib.sha256(canonical_bytes(query)).hexdigest()
+    receipt_expires_at = _epoch_seconds(
+        verified["receipt_authorization_expires_at"],
+        label="apply-time receipt authorization expiry",
+    )
+    if (
+        intent_id != metadata["intent_id"]
+        or query_sha256 != metadata["gate_query_sha256"]
+        or receipt_expires_at != metadata["receipt_authorization_expires_at"]
+        or verified["deployment_context_sha256"] != context_sha256
+        or verified["receipt_claims_sha256"] != claims_sha256
+        or context_sha256 != metadata["deployment_context_sha256"]
+        or claims_sha256 != metadata["receipt_claims_sha256"]
+        or hashlib.sha256(canonical_bytes(shared_generation_ledger)).hexdigest()
+        != metadata["shared_ledger_sha256"]
+    ):
+        raise EvidenceError(
+            "apply-time evidence does not match the saved deployment plan"
+        )
+    return receipt_claim_ids
+
+
 def validate_deployment_preflight(
     plan_path: Path,
     *,
@@ -2549,7 +2910,35 @@ def validate_deployment_preflight(
         now=current,
         terraform_context_sha256=str(context["terraform_context_sha256"]),
     )
-    return lock
+    try:
+        query_value = json.loads(
+            metadata["gate_query_json"],
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except json.JSONDecodeError as exc:
+        raise EvidenceError("saved Terraform deployment gate query is invalid") from exc
+    receipt_claim_ids = _verified_receipt_claims_for_saved_plan(
+        metadata=metadata,
+        query=_mapping(
+            query_value,
+            label="saved Terraform deployment gate query",
+        ),
+        now=current,
+    )
+    # Re-sample production time after the remote KMS/S3/ECR verification. The
+    # transaction below conditionally checks the same capped authorization,
+    # lock, plan, context, query, attempt, and every one-use receipt claim.
+    consume_time = current if now is not None else _utc_now()
+    return _consume_applying_deployment_intent(
+        metadata=metadata,
+        receipt_claim_ids=receipt_claim_ids,
+        apply_attempt_id=attempt_id,
+        now=consume_time,
+        expected_control_commit=control_commit,
+        expected_terraform_context_sha256=str(
+            context["terraform_context_sha256"]
+        ),
+    )
 
 
 def heartbeat_deployment_lock(
@@ -2672,8 +3061,28 @@ def prepare_deployment_intent(
 ) -> dict[str, str | int]:
     metadata = deployment_plan_metadata(plan_path, plan_json=plan_json)
     terraform_context = terraform_context_metadata(terraform_context_path)
+    if (
+        metadata["plan_transition_sha256"]
+        != terraform_context["plan_transition_sha256"]
+    ):
+        raise EvidenceError(
+            "Terraform runtime context transition classification differs from the saved plan"
+        )
     current = _utc_now(now)
-    expires = current + dt.timedelta(seconds=MAX_DEPLOYMENT_INTENT_LIFETIME_SECONDS)
+    receipt_expires_at = int(metadata["receipt_authorization_expires_at"])
+    if int(current.timestamp()) >= receipt_expires_at:
+        raise EvidenceError(
+            "saved Terraform plan release receipt authorization is already stale"
+        )
+    expires_at = min(
+        int(
+            (
+                current
+                + dt.timedelta(seconds=MAX_DEPLOYMENT_INTENT_LIFETIME_SECONDS)
+            ).timestamp()
+        ),
+        receipt_expires_at,
+    )
     audit_expires = current + dt.timedelta(seconds=DEPLOYMENT_INTENT_AUDIT_TTL_SECONDS)
     item: dict[str, str | int] = {
         "record_id": f"intent#{metadata['intent_id']}",
@@ -2685,10 +3094,11 @@ def prepare_deployment_intent(
         "deployment_context_sha256": metadata["deployment_context_sha256"],
         "receipt_claims_sha256": metadata["receipt_claims_sha256"],
         "shared_ledger_sha256": metadata["shared_ledger_sha256"],
+        "gate_query_sha256": metadata["gate_query_sha256"],
         **terraform_context,
         "control_commit": _sha1(control_commit, label="deployment control commit"),
         "prepared_at": current.isoformat().replace("+00:00", "Z"),
-        "authorization_expires_at": int(expires.timestamp()),
+        "authorization_expires_at": expires_at,
         "audit_expires_at": int(audit_expires.timestamp()),
     }
     _dynamodb_put_prepared_intent(item)
@@ -2706,12 +3116,15 @@ def _deployment_intent_base_keys() -> set[str]:
         "deployment_context_sha256",
         "receipt_claims_sha256",
         "shared_ledger_sha256",
+        "gate_query_sha256",
         "terraform_context_sha256",
         "backend_workspace_sha256",
         "state_lineage",
         "state_serial",
         "state_addresses_sha256",
         "plan_addresses_sha256",
+        "runtime_images_sha256",
+        "plan_transition_sha256",
         "control_commit",
         "prepared_at",
         "authorization_expires_at",
@@ -2743,6 +3156,9 @@ def _validate_deployment_intent_binding(
         or item["receipt_claims_sha256"] != claims_sha256
         or claims_sha256 != metadata["receipt_claims_sha256"]
         or item["shared_ledger_sha256"] != metadata["shared_ledger_sha256"]
+        or item["gate_query_sha256"] != metadata["gate_query_sha256"]
+        or item["plan_transition_sha256"]
+        != metadata["plan_transition_sha256"]
     ):
         raise EvidenceError("deployment intent does not bind this saved plan")
     for context_hash_name in (
@@ -2750,6 +3166,9 @@ def _validate_deployment_intent_binding(
         "backend_workspace_sha256",
         "state_addresses_sha256",
         "plan_addresses_sha256",
+        "runtime_images_sha256",
+        "plan_transition_sha256",
+        "gate_query_sha256",
     ):
         _sha256(item[context_hash_name], label=f"deployment {context_hash_name}")
     _string(item["state_lineage"], label="deployment Terraform state lineage")
@@ -2775,6 +3194,8 @@ def _validate_deployment_intent_binding(
         not isinstance(authorization_expires_at, int)
         or not isinstance(audit_expires_at, int)
         or int(now.timestamp()) >= authorization_expires_at
+        or authorization_expires_at
+        > int(metadata["receipt_authorization_expires_at"])
         or audit_expires_at <= authorization_expires_at
     ):
         raise EvidenceError("prepared deployment intent is stale")
@@ -2855,6 +3276,9 @@ def _dynamodb_transact_consume(
                     "#state = :locked "
                     "AND intent_id = :intent "
                     "AND plan_sha256 = :plan "
+                    "AND deployment_context_sha256 = :context "
+                    "AND receipt_claims_sha256 = :claims "
+                    "AND gate_query_sha256 = :gate_query "
                     "AND terraform_context_sha256 = :terraform_context "
                     "AND apply_attempt_id = :attempt "
                     "AND lease_expires_at > :now_epoch"
@@ -2865,6 +3289,9 @@ def _dynamodb_transact_consume(
                         ":locked": "LOCKED",
                         ":intent": metadata["intent_id"],
                         ":plan": metadata["plan_sha256"],
+                        ":context": metadata["deployment_context_sha256"],
+                        ":claims": metadata["receipt_claims_sha256"],
+                        ":gate_query": metadata["gate_query_sha256"],
                         ":terraform_context": applying["terraform_context_sha256"],
                         ":attempt": apply_attempt_id,
                         ":now_epoch": now_epoch,
@@ -2884,6 +3311,9 @@ def _dynamodb_transact_consume(
                     "AND deployment_context_sha256 = :context "
                     "AND receipt_claims_sha256 = :claims "
                     "AND shared_ledger_sha256 = :shared_ledger "
+                    "AND gate_query_sha256 = :gate_query "
+                    "AND terraform_context_sha256 = :terraform_context "
+                    "AND control_commit = :control_commit "
                     "AND authorization_expires_at > :now_epoch"
                 ),
                 "ExpressionAttributeNames": {"#state": "state"},
@@ -2897,6 +3327,9 @@ def _dynamodb_transact_consume(
                         ":context": metadata["deployment_context_sha256"],
                         ":claims": metadata["receipt_claims_sha256"],
                         ":shared_ledger": metadata["shared_ledger_sha256"],
+                        ":gate_query": metadata["gate_query_sha256"],
+                        ":terraform_context": applying["terraform_context_sha256"],
+                        ":control_commit": applying["control_commit"],
                         ":now_epoch": now_epoch,
                     }
                 ),
@@ -2911,6 +3344,10 @@ def _dynamodb_transact_consume(
             "receipt_claim_id": claim_id,
             "intent_id": metadata["intent_id"],
             "plan_sha256": metadata["plan_sha256"],
+            "deployment_context_sha256": metadata["deployment_context_sha256"],
+            "receipt_claims_sha256": metadata["receipt_claims_sha256"],
+            "gate_query_sha256": metadata["gate_query_sha256"],
+            "terraform_context_sha256": applying["terraform_context_sha256"],
             "apply_attempt_id": apply_attempt_id,
             "consumed_at": now_text,
             "audit_expires_at": audit_expires_at,
@@ -2959,6 +3396,7 @@ def _confirmed_consumed_authorization(
         or intent.get("deployment_context_sha256") != metadata["deployment_context_sha256"]
         or intent.get("receipt_claims_sha256") != metadata["receipt_claims_sha256"]
         or intent.get("shared_ledger_sha256") != metadata["shared_ledger_sha256"]
+        or intent.get("gate_query_sha256") != metadata["gate_query_sha256"]
     ):
         return False
     consumed_at = intent.get("consumed_at")
@@ -2979,6 +3417,10 @@ def _confirmed_consumed_authorization(
             "receipt_claim_id": claim_id,
             "intent_id": metadata["intent_id"],
             "plan_sha256": metadata["plan_sha256"],
+            "deployment_context_sha256": metadata["deployment_context_sha256"],
+            "receipt_claims_sha256": metadata["receipt_claims_sha256"],
+            "gate_query_sha256": metadata["gate_query_sha256"],
+            "terraform_context_sha256": intent.get("terraform_context_sha256"),
             "apply_attempt_id": apply_attempt_id,
             "consumed_at": consumed_at,
             "audit_expires_at": intent.get("audit_expires_at"),
@@ -2994,6 +3436,8 @@ def _consume_applying_deployment_intent(
     receipt_claim_ids: list[str],
     apply_attempt_id: str,
     now: dt.datetime | None = None,
+    expected_control_commit: str | None = None,
+    expected_terraform_context_sha256: str | None = None,
 ) -> dict[str, str | int]:
     attempt_id = _uuid4(apply_attempt_id, label="apply attempt ID")
     if attempt_id == metadata["intent_id"]:
@@ -3013,7 +3457,19 @@ def _consume_applying_deployment_intent(
         claims_sha256=claims_sha256,
         apply_attempt_id=attempt_id,
         now=current,
+        expected_control_commit=expected_control_commit,
     )
+    if (
+        expected_terraform_context_sha256 is not None
+        and applying["terraform_context_sha256"]
+        != _sha256(
+            expected_terraform_context_sha256,
+            label="live Terraform context SHA-256",
+        )
+    ):
+        raise EvidenceError(
+            "deployment apply attempt does not bind the live Terraform context"
+        )
     lock = _dynamodb_get(DEPLOYMENT_LOCK_RECORD_ID)
     if lock is None:
         raise EvidenceError("shared image release apply lock does not exist")
@@ -3022,7 +3478,10 @@ def _consume_applying_deployment_intent(
         metadata=metadata,
         apply_attempt_id=attempt_id,
         now=current,
-        terraform_context_sha256=str(applying["terraform_context_sha256"]),
+        terraform_context_sha256=(
+            expected_terraform_context_sha256
+            or str(applying["terraform_context_sha256"])
+        ),
     )
     try:
         _dynamodb_transact_consume(
@@ -3049,11 +3508,11 @@ def _consume_applying_deployment_intent(
             raise EvidenceError("release receipt has already authorized a deployment") from exc
         raise EvidenceError("atomic deployment authorization failed closed") from exc
     consumed = _dynamodb_get(record_id)
-    if (
-        consumed is None
-        or consumed.get("state") != "CONSUMED"
-        or consumed.get("apply_attempt_id") != attempt_id
-        or consumed.get("plan_sha256") != metadata["plan_sha256"]
+    if consumed is None or not _confirmed_consumed_authorization(
+        intent=consumed,
+        metadata=metadata,
+        receipt_claim_ids=normalized_claims,
+        apply_attempt_id=attempt_id,
     ):
         raise EvidenceError("consumed deployment intent could not be confirmed")
     return consumed
@@ -3068,43 +3527,17 @@ def consume_deployment_intent(
     plan_json: Mapping[str, Any] | None = None,
 ) -> dict[str, str | int]:
     metadata = deployment_plan_metadata(plan_path, plan_json=plan_json)
-    verified = _terraform_gate(query)
-    (
-        images,
-        evidence,
-        contracts,
-        _,
-        application,
-        shared_generation_ledger,
-        mcp_media_image,
-        _,
-        _,
-        intent_id,
-    ) = _parse_terraform_gate_query(query)
-    context_sha256, receipt_claim_ids, claims_sha256 = _deployment_binding(
-        images=images,
-        evidence=evidence,
-        contracts=contracts,
-        application=application,
-        shared_generation_ledger=shared_generation_ledger,
-        mcp_media_image=mcp_media_image,
-        intent_id=intent_id,
+    current = _utc_now(now)
+    receipt_claim_ids = _verified_receipt_claims_for_saved_plan(
+        metadata=metadata,
+        query=query,
+        now=current,
     )
-    if (
-        intent_id != metadata["intent_id"]
-        or verified["deployment_context_sha256"] != context_sha256
-        or verified["receipt_claims_sha256"] != claims_sha256
-        or context_sha256 != metadata["deployment_context_sha256"]
-        or claims_sha256 != metadata["receipt_claims_sha256"]
-        or hashlib.sha256(canonical_bytes(shared_generation_ledger)).hexdigest()
-        != metadata["shared_ledger_sha256"]
-    ):
-        raise EvidenceError("apply-time evidence does not match the saved deployment plan")
     return _consume_applying_deployment_intent(
         metadata=metadata,
         receipt_claim_ids=receipt_claim_ids,
         apply_attempt_id=apply_attempt_id,
-        now=now,
+        now=current,
     )
 
 
@@ -3468,13 +3901,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(lock, sort_keys=True))
         elif args.command == "validate-deployment-preflight":
-            lock = validate_deployment_preflight(
+            authorization = validate_deployment_preflight(
                 args.plan,
                 terraform_context_path=args.terraform_context,
                 apply_attempt_id=args.apply_attempt_id,
                 control_commit=args.control_commit,
             )
-            print(json.dumps(lock, sort_keys=True))
+            print(json.dumps(authorization, sort_keys=True))
         elif args.command == "heartbeat-deployment-lock":
             lock = heartbeat_deployment_lock(
                 args.plan,

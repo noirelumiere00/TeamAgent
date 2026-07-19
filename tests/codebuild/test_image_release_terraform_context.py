@@ -72,6 +72,21 @@ def _plan() -> dict[str, Any]:
         "complete": True,
         "applyable": True,
         "errored": False,
+        "variables": {
+            "mcp_image": {
+                "value": (
+                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+                    f"teamagent-mcp@sha256:{'a' * 64}"
+                )
+            },
+            "openclaw_image": {
+                "value": (
+                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+                    f"teamagent-openclaw@sha256:{'b' * 64}"
+                )
+            },
+            "enable_tiktok_acquire": {"value": False},
+        },
         "configuration": {
             "root_module": {
                 "resources": [
@@ -114,6 +129,10 @@ def test_context_binds_exact_backend_workspace_state_and_plan_ownership() -> Non
         "errored": False,
         "managed_change_count": 2,
         "address_ownership_sha256": value["plan"]["address_ownership_sha256"],
+        "runtime_images_sha256": value["plan"]["runtime_images_sha256"],
+        "delete_change_count": 0,
+        "replace_change_count": 0,
+        "transition_sha256": value["plan"]["transition_sha256"],
     }
     assert len(CONTEXT.context_sha256(value)) == 64
 
@@ -190,6 +209,48 @@ def test_context_allows_only_exact_unowned_existing_log_import() -> None:
     with pytest.raises(CONTEXT.ContextError, match="destructive"):
         CONTEXT.build_context(
             plan=destructive,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+def test_context_classifies_saved_plan_delete_and_replace_actions() -> None:
+    replacement = _plan()
+    replacement["resource_changes"][1]["change"]["actions"] = ["delete", "create"]
+    replacement_context = CONTEXT.build_context(
+        plan=replacement,
+        state=_state(),
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+    assert replacement_context["plan"]["delete_change_count"] == 0
+    assert replacement_context["plan"]["replace_change_count"] == 1
+
+    deletion = _plan()
+    deletion["resource_changes"][1]["change"]["actions"] = ["delete"]
+    deletion_context = CONTEXT.build_context(
+        plan=deletion,
+        state=_state(),
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+    assert deletion_context["plan"]["delete_change_count"] == 1
+    assert deletion_context["plan"]["replace_change_count"] == 0
+    assert (
+        deletion_context["plan"]["transition_sha256"]
+        != replacement_context["plan"]["transition_sha256"]
+    )
+
+
+@pytest.mark.parametrize("variable_name", ["mcp_image", "openclaw_image"])
+def test_context_rejects_empty_managed_runtime_images(variable_name: str) -> None:
+    plan = _plan()
+    plan["variables"][variable_name]["value"] = ""
+
+    with pytest.raises(CONTEXT.ContextError, match="nonempty release digest"):
+        CONTEXT.build_context(
+            plan=plan,
             state=_state(),
             backend_metadata=_backend(),
             workspace="default",

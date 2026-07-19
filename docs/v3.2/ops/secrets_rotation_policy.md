@@ -7,7 +7,7 @@
 
 ## 1. 対象シークレット一覧
 
-Wave2-⑦ 棚卸し（2026-06-15）で 9 secret に確定。Wave1〜2 で追加された 6 secret を本ポリシーに統合。
+Wave2-⑦ の9 secretに、2026-07-19のSlack caller claim専用HMAC鍵を追加し、現在は10 secret。
 
 | # | Secret ID | 用途 | 周期 | 最終更新 | rotate オーナー | ECS 依存 |
 |---|---|---|---|---|---|---|
@@ -19,7 +19,8 @@ Wave2-⑦ 棚卸し（2026-06-15）で 9 secret に確定。Wave1〜2 で追加�
 | 6 | `teamagent/dev/vertex_sa` | GCP Vertex AI SA JSON（Gemini 動画分析） | **年次**（key rotation） | 2026-06-02 | GCP org admin | mcp / worker EC2 |
 | 7 | `teamagent/dev/openclaw/gateway-token` | OpenClaw gateway operator token | **180 日** | 2026-06-12（go-live） | OpenClaw maintainer | openclaw |
 | 8 | `teamagent/dev/mcp/bearer` | OpenClaw ↔ MCP bearer | **180 日** | 2026-06-12（go-live） | infra team | mcp + openclaw（同期必須）|
-| 9 | `teamagent/prod/ops-slack-webhook` | ingest #ops 通知 webhook | **90 日**（webhook 再生成）| 未投入（Wave1-③ で追加・実値投入待ち）| Slack workspace admin | worker EC2 |
+| 9 | `teamagent/dev/openclaw/caller-claim-hmac` | Slack event由来callerをone-use MCP requestへ署名（MCP bearerとは別鍵） | **180 日** | 未投入（Source contractのみ・production gate closed） | security / infra team | mcp + openclaw（同期必須） |
+| 10 | `teamagent/prod/ops-slack-webhook` | ingest #ops 通知 webhook | **90 日**（webhook 再生成）| 未投入（Wave1-③ で追加・実値投入待ち）| Slack workspace admin | worker EC2 |
 
 **未投入の Secret**: `teamagent/prod/ops-slack-webhook` は Wave1-③ で `OPS_SLACK_WEBHOOK_SECRET_NAME` env として配線済（systemd unit + load_secrets.sh）。
 実値の Slack Incoming Webhook URL を AWS Secrets Manager に投入することで `ingest 失敗 → #ops 通知` が有効化される（未投入なら alerter は no-op で pipeline 続行）。
@@ -86,7 +87,8 @@ Sentry DSN は通常無期限だが、外部に露出した可能性がある場
    aws secretsmanager update-secret --secret-id teamagent/dev/sentry_dsn \
      --secret-string "https://...@o....ingest.sentry.io/..." --region ap-northeast-1
    ```
-3. ECS service を再デプロイ（taskdef revision を上げて update-service）。
+3. 影響taskはfresh signed rotation authorizationとone-use full saved planで置換する。
+   直接のECS `update-service`は使わない。
 4. 旧 DSN は **24h 待ってから削除**（in-flight イベント取りこぼし防止）。
 
 ### 2.5 Google OAuth（`teamagent/dev/google_oauth`）
@@ -125,7 +127,8 @@ OpenClaw の操作者権限相当（loopback bind の gateway を叩く）。漏
    aws secretsmanager update-secret --secret-id teamagent/dev/openclaw/gateway-token \
      --secret-string "$NEW" --region ap-northeast-1
    ```
-2. ECS service `teamagent-dev-openclaw` を `update-service --force-new-deployment` で再起動。
+2. 直接のECS操作は行わない。fresh signed rotation authorizationとone-use full saved planで、
+   OpenClaw task replacementを実行できる正準rotation flowが承認されるまでは本番rotationを停止する。
 
 ### 2.8 MCP Bearer（`teamagent/dev/mcp/bearer`）
 
@@ -136,9 +139,21 @@ OpenClaw → MCP の internal 認証。**両 ECS service を同時に再起動**
    aws secretsmanager update-secret --secret-id teamagent/dev/mcp/bearer \
      --secret-string "$NEW" --region ap-northeast-1
    ```
-2. ECS の **両 service** を順番に update-service（mcp → openclaw）。MCP が先に新 bearer を受け入れる状態にしてから OpenClaw を切り替える。
+2. MCP/OpenClawを同じfresh signed rotation authorizationとone-use full saved planで
+   task replacementする。直接の`update-service`は使わない。正準rotation flowが未実装の間は
+   本番rotationを停止し、漏洩時はproduction NO-GOとしてincident responseへ移る。
 
-### 2.9 ingest #ops Webhook（`teamagent/prod/ops-slack-webhook`）
+### 2.9 Caller claim HMAC（`teamagent/dev/openclaw/caller-claim-hmac`）
+
+OpenClaw signerとMCP verifierだけが共有する鍵。MCP bearerと同じ値を使わない。
+
+1. 32-byte以上の新しいランダム値を承認済み環境で生成し、Secrets Managerへ新versionとして投入する。
+2. MCP/OpenClawの両taskをfresh signed rotation authorizationとone-use full saved planで
+   同じrotation window内に置換する。片側だけが新鍵の間は全tool callがfail closedになる。
+3. Node signer→Python verifier E2E、replay/expiry/tamper、実Slack mention/replyを再検証する。
+4. 正準rotation flowが未実装の間は本番で実行しない。直接ECS操作や旧taskの手動再利用は禁止。
+
+### 2.10 ingest #ops Webhook（`teamagent/prod/ops-slack-webhook`）
 
 Wave1-③ で配線。**初回は Secret 自体の作成**から（rotation ではなく投入）。
 
@@ -209,8 +224,8 @@ Rotation 時は手順 2 を `update-secret` に変える。
 
 P1 パイロット（営業 2-3 名・1 週間）に入る前に、以下を完了する。
 
-- [ ] **棚卸し完了**: §1 の 9 secret の最終更新日と rotate オーナーが全て埋まっている
-- [ ] **未投入 Secret の処置**: `teamagent/prod/ops-slack-webhook` を Slack 管理者が Incoming Webhook を新規発行し、§2.9 の手順で投入
+- [ ] **棚卸し完了**: §1 の 10 secret の最終更新日と rotate オーナーが全て埋まっている
+- [ ] **未投入 Secret の処置**: caller claim HMACは§2.9の正準rotation flow完成後、ops webhookはSlack管理者が§2.10で投入
 - [ ] **長期未使用 refresh_token の事前 refresh**: `teamagent/dev/google_oauth` の refresh_token が「過去 6 ヶ月以内に使用された」ことを `journalctl -u teamagent-bot` か `usage_events where skill='ingest'` で確認
 - [ ] **dry-run rotation**: §2.1 (RDS) を本番外時間帯に 1 回練習（旧パスワードに戻すロールバックも実施）
 - [ ] **疎通テスト**: rotation 直後に `scripts/preflight_golive.sh`（既存）相当のチェック実行
@@ -232,3 +247,4 @@ P1 パイロット（営業 2-3 名・1 週間）に入る前に、以下を完�
 |---|---|---|
 | 2026-05-22 | v1.0 | 初版（Day 2 完了時点・3 secrets） |
 | 2026-06-15 | v1.1 | Wave2-⑦: 6 secrets 追記（Sentry / Google OAuth / Vertex SA / OpenClaw GW / MCP Bearer / OPS webhook）・パイロット前 gate チェックリスト追加・rotate オーナー明文化 |
+| 2026-07-19 | v1.2 | caller claim専用HMACを追加（10 secrets）。OpenClaw/MCP rotationを直接ECS操作からfresh signed authorization + one-use saved planへfail-closed化 |

@@ -6,7 +6,8 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   cat <<'EOF'
 usage: apply_openclaw.sh
 
-This legacy deployer is permanently disabled. Use the single guarded saved-plan
+This legacy deployer is permanently disabled. Use
+infra/deploy/terraform_runtime_guard.sh and the single guarded saved-plan
 workflow documented in infra/terraform/README.md.
 EOF
   exit 0
@@ -17,6 +18,7 @@ FATAL: apply_openclaw.sh is permanently disabled.
 
 OpenClaw image changes require exact runtime migration/preflight evidence,
 fresh signed release evidence, a unique full saved plan, one-use intent, and
-application under the shared lock. Follow infra/terraform/README.md.
+application under the shared lock. Use infra/deploy/terraform_runtime_guard.sh
+and follow infra/terraform/README.md.
 EOF
 exit 64

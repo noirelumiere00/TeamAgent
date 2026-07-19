@@ -1,0 +1,13 @@
+{
+  "id": "teamagent-caller-identity",
+  "name": "TeamAgent Caller Identity",
+  "description": "Signs Slack event identity and exact TeamAgent MCP request bindings.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

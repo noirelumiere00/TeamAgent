@@ -213,14 +213,25 @@ resource "terraform_data" "production_image_release_gate" {
     receipt_claims_sha256     = try(data.external.signed_image_release_gate[0].result.receipt_claims_sha256, "")
     requested_images          = local.deployment_images
     requested_media_image     = local.deployment_mcp_media_image
-    application_provenance    = local.deployment_application_provenance
-    shared_generation_ledger  = local.deployment_shared_generation_ledger
-    hmac_release_bindings     = local.hmac_release_intent_bindings
+    release_channels = try(
+      jsondecode(data.external.signed_image_release_gate[0].result.release_channels_json),
+      {},
+    )
+    application_provenance   = local.deployment_application_provenance
+    shared_generation_ledger = local.deployment_shared_generation_ledger
+    hmac_release_bindings    = local.hmac_release_intent_bindings
+    deployment_gate_query    = local.deployment_gate_query
+    receipt_authorization_expires_at = try(
+      data.external.signed_image_release_gate[0].result.receipt_authorization_expires_at,
+      "",
+    )
   }
 
-  # Every plan gets a new apply-time gate action. This prevents an old gate
-  # instance in Terraform state from making a targeted task-definition apply a
-  # no-op dependency.
+  # Every plan gets a distinct gate value. The trusted apply launcher replays
+  # this exact saved query and atomically consumes its intent and receipts in
+  # validate-deployment-preflight before terraform_apply_supervisor can start
+  # Terraform. This resource is only the plan-time dependency marker; an
+  # in-graph provisioner cannot order ahead of unrelated delete/replace actions.
   triggers_replace = local.deployment_requested ? [plantimestamp()] : []
 
   lifecycle {
@@ -234,25 +245,5 @@ resource "terraform_data" "production_image_release_gate" {
       )
       error_message = "Production images require the composed terraform_runtime_guard.sh full saved-plan workflow, a unique deployment intent, release-repository digests, release.ready=true, an exact application VersionId contract, and fresh immutable KMS-signed active/rollback receipts."
     }
-  }
-
-  provisioner "local-exec" {
-    command = <<-EOT
-      set -euo pipefail
-      if ${local.deployment_requested}; then
-        test -n "$TEAMAGENT_SAVED_PLAN_PATH"
-        test -f "$TEAMAGENT_SAVED_PLAN_PATH"
-        test -n "$TEAMAGENT_APPLY_ATTEMPT_ID"
-        bash "${path.module}/../deploy/run_image_deployment_gate.sh" \
-          consume-deployment-intent \
-          --plan "$TEAMAGENT_SAVED_PLAN_PATH" \
-          --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID"
-      fi
-    EOT
-
-    environment = {
-      TEAMAGENT_DEPLOYMENT_GATE_QUERY = jsonencode(local.deployment_gate_query)
-    }
-    interpreter = ["/bin/bash", "-c"]
   }
 }
